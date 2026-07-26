@@ -6,6 +6,8 @@ from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
+from ModelClient.config import ChatStructuredOutputMode
+
 MessageRole = Literal["system", "developer", "user", "assistant", "tool"]
 StreamEventKind = Literal[
     "content_delta",
@@ -251,21 +253,23 @@ class ProviderCapabilities:
     async_completion: bool = True
     streaming: bool = True
     tools: bool = True
-    native_structured_output: bool = False
+    structured_output_mode: ChatStructuredOutputMode = "none"
     reasoning: bool = False
 
+    def __post_init__(self) -> None:
+        if self.structured_output_mode not in {"none", "json_object", "json_schema"}:
+            raise ValueError(
+                "provider structured_output_mode must be none, json_object or json_schema"
+            )
 
-class ModelProvider(Protocol):
+
+class ChatProvider(Protocol):
     """具体供应商在此实现统一的模型边界。"""
 
     provider_name: str
     model: str
     is_remote: bool
     capabilities: ProviderCapabilities
-    max_retries: int
-    retry_base_delay_seconds: float
-    retry_max_delay_seconds: float
-
     def complete(self, request: ChatRequest) -> ModelResponse: ...
 
     async def complete_async(self, request: ChatRequest) -> ModelResponse: ...
@@ -351,7 +355,7 @@ __all__ = [
     "ModelDependencyError",
     "ModelInputTooLargeError",
     "ModelPermissionError",
-    "ModelProvider",
+    "ChatProvider",
     "ModelQuotaError",
     "ModelRateLimitError",
     "ModelResponse",

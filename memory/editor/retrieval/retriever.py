@@ -6,7 +6,9 @@ from collections.abc import Sequence
 from pathlib import PurePosixPath
 from typing import Protocol
 
-from memory.editor.reader import MemorySnapshotReader
+from infrastructure.editor.snapshot import SnapshotBatch
+from memory.document import MemoryDocument
+from memory.editor.reader import MemorySnapshotBatch, MemorySnapshotReader
 from memory.editor.retrieval.model import (
     MemoryRelatedContext,
     MemoryRetrievalConfig,
@@ -81,6 +83,7 @@ class MemoryRelatedRetriever:
             )
         )
         snapshots = self.snapshot_reader.read_many(selected)
+        search_hits, snapshots = self._exclude_completed_intentions(search_hits, snapshots)
         return MemoryRelatedContext(
             conversation_id=segment.conversation_id,
             segment_id=segment.segment_id,
@@ -89,6 +92,34 @@ class MemoryRelatedRetriever:
             search_roots=search_roots,
             search_hits=search_hits,
             snapshots=snapshots,
+        )
+
+    @staticmethod
+    def _exclude_completed_intentions(
+        search_hits: tuple[MemorySearchHit, ...],
+        snapshots: MemorySnapshotBatch,
+    ) -> tuple[tuple[MemorySearchHit, ...], MemorySnapshotBatch]:
+        """在领域边界再次排除已完成事项，防止自定义索引绕过默认规则。"""
+
+        completed: set[str] = set()
+        for hit in search_hits:
+            snapshot = snapshots.get(str(hit.uri))
+            if snapshot is None or not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
+                continue
+            if (
+                snapshot.value.kind is MemoryKind.INTENTION
+                and snapshot.value.fields.get("status") == "completed"
+            ):
+                completed.add(snapshot.identity)
+        if not completed:
+            return search_hits, snapshots
+        retained = tuple(snapshot for snapshot in snapshots.snapshots if snapshot.identity not in completed)
+        return (
+            tuple(hit for hit in search_hits if str(hit.uri) not in completed),
+            SnapshotBatch(
+                snapshots=retained,
+                total_bytes=sum(snapshot.size_bytes for snapshot in retained),
+            ),
         )
 
     def _schema_read_plan(self) -> tuple[tuple[MemoryURI, ...], tuple[MemoryURI, ...]]:

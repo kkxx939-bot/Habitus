@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 import uuid
 from pathlib import Path
@@ -15,6 +16,22 @@ from infrastructure.store.filesystem.path_safety import (
 
 class ImmutableArtifactConflictError(ValueError):
     """仅允许创建的产物身份已绑定到不同字节内容。"""
+
+
+_ATOMIC_TEMPORARY_NAME = re.compile(
+    r"^\.(?P<destination>[^/]+)\.(?P<nonce>[0-9a-f]{32})\.tmp$"
+)
+
+
+def atomic_temporary_destination(name: str) -> str | None:
+    """识别本模块可能遗留的临时文件名，并返回原目标文件名。"""
+
+    if not isinstance(name, str):
+        raise TypeError("atomic temporary name must be a string")
+    match = _ATOMIC_TEMPORARY_NAME.fullmatch(name)
+    if match is None:
+        return None
+    return match.group("destination")
 
 
 def _write_all(descriptor: int, encoded: bytes) -> None:
@@ -219,5 +236,6 @@ __all__ = [
     "ImmutableArtifactConflictError",
     "atomic_create_bytes",
     "atomic_replace_bytes",
+    "atomic_temporary_destination",
     "read_regular_bytes",
 ]

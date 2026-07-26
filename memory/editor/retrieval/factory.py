@@ -2,12 +2,6 @@
 
 from __future__ import annotations
 
-from LLMClient import (
-    EmbeddingConfig,
-    RerankConfig,
-    build_embedder,
-    build_reranker,
-)
 from memory.editor.retrieval.index import (
     MemoryTreeVectorIndex,
     MemoryVectorIndexConfig,
@@ -17,13 +11,19 @@ from memory.editor.retrieval.search import (
     MemorySemanticSearchEngine,
 )
 from memory.tree import MemoryTree
+from ModelClient import (
+    EmbeddingModelConfig,
+    ProviderFactory,
+    RerankModelConfig,
+)
 
 
 def build_memory_semantic_search(
     tree: MemoryTree,
     *,
-    embedding: EmbeddingConfig,
-    rerank: RerankConfig | None = None,
+    providers: ProviderFactory,
+    embedding: EmbeddingModelConfig,
+    rerank: RerankModelConfig | None = None,
     index_config: MemoryVectorIndexConfig | None = None,
     search_config: MemorySemanticSearchConfig | None = None,
 ) -> MemorySemanticSearchEngine:
@@ -31,12 +31,14 @@ def build_memory_semantic_search(
 
     if not isinstance(tree, MemoryTree):
         raise TypeError("tree must be a MemoryTree")
-    if not isinstance(embedding, EmbeddingConfig):
-        raise TypeError("embedding must be an EmbeddingConfig")
-    if rerank is not None and not isinstance(rerank, RerankConfig):
-        raise TypeError("rerank must be a RerankConfig")
-    embedder = build_embedder(embedding)
-    reranker = build_reranker(rerank) if rerank is not None and rerank.enabled else None
+    if not isinstance(providers, ProviderFactory):
+        raise TypeError("providers must be a ProviderFactory")
+    if not isinstance(embedding, EmbeddingModelConfig):
+        raise TypeError("embedding must be an EmbeddingModelConfig")
+    if rerank is not None and not isinstance(rerank, RerankModelConfig):
+        raise TypeError("rerank must be a RerankModelConfig")
+    embedder = providers.create_embedder(embedding)
+    reranker = providers.create_reranker(rerank) if rerank is not None else None
     index = MemoryTreeVectorIndex(tree, embedder, config=index_config)
     return MemorySemanticSearchEngine(
         embedder=embedder,

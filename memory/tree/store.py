@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import os
 import stat
-import uuid
 from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
 
+from infrastructure.store.filesystem import (
+    DurablePathIntegrityError,
+    atomic_replace_bytes,
+    atomic_temporary_destination,
+)
 from memory.document import (
     MemoryDocument,
     MemoryDocumentCodec,
@@ -51,6 +55,12 @@ class MemoryTree:
         if document_config is not None and not isinstance(document_config, MemoryDocumentConfig):
             raise TypeError("document_config must be MemoryDocumentConfig")
         self.document_config = document_config or MemoryDocumentConfig()
+
+    @property
+    def document_codec(self) -> MemoryDocumentCodec:
+        """返回记忆树实际用于规范 L2 读写的同一编解码器。"""
+
+        return self._document_codec
 
     def initialize(self) -> Path:
         """只创建静态目录；没有真实内容时不创建空的 profile.md。"""
@@ -106,6 +116,10 @@ class MemoryTree:
             raise TypeError("document must be a MemoryDocument")
         encoded = self._document_codec.encode(document).encode("utf-8")
         self.document_config.validate_body(document.markdown_body)
+        self.document_config.validate_relations(
+            links=len(document.links),
+            backlinks=len(document.backlinks),
+        )
         self.document_config.validate_encoded(encoded)
         self.initialize()
         path = self.path_for(document.address)
@@ -422,6 +436,8 @@ class MemoryTree:
                 self._require_regular_file(child)
                 continue
             if child.name.startswith("."):
+                if child.is_file() and atomic_temporary_destination(child.name) is not None:
+                    continue
                 raise MemoryTreeIntegrityError("memory directory contains an unsupported hidden entry")
             content.append(child)
         return tuple(content)
@@ -509,6 +525,10 @@ class MemoryTree:
         try:
             document = self._document_codec.decode(raw, expected_address=address)
             self.document_config.validate_body(document.markdown_body)
+            self.document_config.validate_relations(
+                links=len(document.links),
+                backlinks=len(document.backlinks),
+            )
             return document
         except (MemoryDocumentIntegrityError, MemoryDocumentLimitError) as exc:
             raise MemoryTreeIntegrityError("memory L2 document failed integrity validation") from exc
@@ -519,26 +539,10 @@ class MemoryTree:
             raise MemoryTreeIntegrityError("memory path is not a safe directory")
 
     def _atomic_write(self, path: Path, payload: bytes) -> None:
-        if path.is_symlink():
-            raise MemoryTreeIntegrityError("memory file cannot be a symbolic link")
-        if path.exists():
-            self._require_regular_file(path)
-        temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
         try:
-            with temporary.open("xb") as handle:
-                os.chmod(temporary, 0o600)
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if path.is_symlink():
-                raise MemoryTreeIntegrityError("memory file cannot be a symbolic link")
-            if path.exists():
-                self._require_regular_file(path)
-            os.replace(temporary, path)
-            os.chmod(path, 0o600)
-            self._fsync_directory(path.parent)
-        finally:
-            temporary.unlink(missing_ok=True)
+            atomic_replace_bytes(path, payload, artifact_root=self.root)
+        except DurablePathIntegrityError as exc:
+            raise MemoryTreeIntegrityError("memory file cannot be written safely") from exc
 
     def _prune_dynamic_directories(self, address: MemoryAddress, parent: Path) -> None:
         stop = {

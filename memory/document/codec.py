@@ -8,12 +8,21 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from typing import Any, NoReturn, Protocol
 
+from memory.document.link import MemoryStoredLink, parse_stored_links
 from memory.document.model import MemoryDocument, MemoryDocumentMetadata
 from memory.model import MemoryAddress, MemoryKind
 
 _MARKER = "\n<!-- M2BOS_MEMORY_FIELDS\n"
 _FOOTER = "\n-->\n"
-_METADATA_KEYS = {"memory_type", "revision", "created_at", "updated_at", "fields"}
+_METADATA_KEYS = {
+    "memory_type",
+    "revision",
+    "created_at",
+    "updated_at",
+    "fields",
+    "links",
+    "backlinks",
+}
 
 
 class MemoryDocumentIntegrityError(ValueError):
@@ -51,6 +60,8 @@ class MemoryDocumentCodec:
         payload: Mapping[str, Any],
         *,
         metadata: MemoryDocumentMetadata,
+        links: tuple[MemoryStoredLink, ...] = (),
+        backlinks: tuple[MemoryStoredLink, ...] = (),
     ) -> MemoryDocument:
         """从结构字段生成地址和可读正文，不接受调用者提供的路径或正文。"""
 
@@ -70,6 +81,8 @@ class MemoryDocumentCodec:
             metadata=metadata,
             fields=normalized,
             markdown_body=markdown_body,
+            links=links,
+            backlinks=backlinks,
         )
 
     def encode(self, document: MemoryDocument) -> str:
@@ -81,6 +94,8 @@ class MemoryDocumentCodec:
             document.kind,
             document.fields,
             metadata=document.metadata,
+            links=document.links,
+            backlinks=document.backlinks,
         )
         if canonical.address != document.address:
             raise MemoryDocumentIntegrityError("memory document address is not canonical")
@@ -95,6 +110,8 @@ class MemoryDocumentCodec:
             "created_at": self._timestamp(canonical.metadata.created_at),
             "updated_at": self._timestamp(canonical.metadata.updated_at),
             "fields": fields,
+            "links": [link.to_dict() for link in canonical.links],
+            "backlinks": [link.to_dict() for link in canonical.backlinks],
         }
         metadata_json = json.dumps(
             metadata,
@@ -137,6 +154,8 @@ class MemoryDocumentCodec:
         raw_created_at = metadata["created_at"]
         raw_updated_at = metadata["updated_at"]
         raw_fields = metadata["fields"]
+        raw_links = metadata["links"]
+        raw_backlinks = metadata["backlinks"]
         if not isinstance(raw_kind, str):
             raise MemoryDocumentIntegrityError("memory document type must be a string")
         if not isinstance(raw_fields, dict) or any(
@@ -144,6 +163,11 @@ class MemoryDocumentCodec:
         ):
             raise MemoryDocumentIntegrityError("memory document fields must be an object")
         try:
+            links = parse_stored_links(raw_links, label="memory document links")
+            backlinks = parse_stored_links(
+                raw_backlinks,
+                label="memory document backlinks",
+            )
             system_metadata = MemoryDocumentMetadata(
                 revision=raw_revision,
                 created_at=self._parse_timestamp(raw_created_at, "created_at"),
@@ -153,6 +177,8 @@ class MemoryDocumentCodec:
                 MemoryKind(raw_kind),
                 raw_fields,
                 metadata=system_metadata,
+                links=links,
+                backlinks=backlinks,
             )
         except (TypeError, ValueError) as exc:
             raise MemoryDocumentIntegrityError(

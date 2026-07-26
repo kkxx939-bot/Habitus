@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 import stat
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -16,6 +17,7 @@ from infrastructure.store.filesystem.durable_io import (
     ImmutableArtifactConflictError,
     atomic_create_bytes,
     atomic_replace_bytes,
+    atomic_temporary_destination,
     read_regular_bytes,
 )
 from memory.conversation.layout import ConversationAddress, ConversationLayout
@@ -69,6 +71,16 @@ class _HistoryReference:
     path: Path
 
 
+@dataclass(frozen=True)
+class _ConversationSealPlan:
+    """在发布前已经由 Conversation 租约保护并完整校验的封存计划。"""
+
+    segment: ConversationSegment
+    retained_messages: tuple[ConversationMessage, ...]
+    encoded_history: bytes
+    encoded_live: bytes
+
+
 class ConversationMessageJournal:
     """按 Conversation 粒度串行化 live/history 文件操作。"""
 
@@ -81,15 +93,37 @@ class ConversationMessageJournal:
         path_lock: PathLock,
         *,
         lock_ttl_seconds: int = 30,
+        lock_wait_timeout_seconds: float = 5.0,
+        lock_retry_delay_seconds: float = 0.01,
     ) -> None:
         if not isinstance(path_lock, PathLock):
             raise TypeError("path_lock must be a PathLock")
-        ttl = int(lock_ttl_seconds)
+        if isinstance(lock_ttl_seconds, bool) or not isinstance(lock_ttl_seconds, int):
+            raise ValueError("lock_ttl_seconds must be a positive integer")
+        ttl = lock_ttl_seconds
         if ttl <= 0:
             raise ValueError("lock_ttl_seconds must be positive")
+        if isinstance(lock_wait_timeout_seconds, bool) or not isinstance(
+            lock_wait_timeout_seconds,
+            int | float,
+        ):
+            raise ValueError("lock_wait_timeout_seconds must be numeric")
+        if isinstance(lock_retry_delay_seconds, bool) or not isinstance(
+            lock_retry_delay_seconds,
+            int | float,
+        ):
+            raise ValueError("lock_retry_delay_seconds must be numeric")
+        wait_timeout = float(lock_wait_timeout_seconds)
+        retry_delay = float(lock_retry_delay_seconds)
+        if not math.isfinite(wait_timeout) or wait_timeout <= 0 or wait_timeout > 60:
+            raise ValueError("lock_wait_timeout_seconds must be greater than zero and at most 60")
+        if not math.isfinite(retry_delay) or retry_delay <= 0 or retry_delay > 1:
+            raise ValueError("lock_retry_delay_seconds must be greater than zero and at most 1")
         self.layout = ConversationLayout(root)
         self.path_lock = path_lock
         self.lock_ttl_seconds = ttl
+        self.lock_wait_timeout_seconds = wait_timeout
+        self.lock_retry_delay_seconds = retry_delay
 
     def append(
         self,
@@ -102,6 +136,8 @@ class ConversationMessageJournal:
         with self.path_lock.acquire(
             self.layout.lock_key(address),
             ttl_seconds=self.lock_ttl_seconds,
+            wait_timeout_seconds=self.lock_wait_timeout_seconds,
+            retry_delay_seconds=self.lock_retry_delay_seconds,
         ) as guard:
             with guard.fenced():
                 live_messages = list(self._read_live_messages(address))
@@ -114,9 +150,14 @@ class ConversationMessageJournal:
                 known_by_sequence = {message.sequence: message for message in known}
                 known_ids = {message.message_id: message.sequence for message in known}
                 known_tool_calls = {
-                    message.tool_call_id: message.sequence
+                    message.tool_call_id: (message.sequence, message.tool_name)
                     for message in known
                     if message.role is ConversationMessageRole.TOOL_CALL
+                }
+                known_tool_results = {
+                    message.tool_call_id: message.sequence
+                    for message in known
+                    if message.role is ConversationMessageRole.TOOL_RESULT
                 }
                 unseen: list[ConversationMessage] = []
                 for message in batch.messages:
@@ -142,14 +183,34 @@ class ConversationMessageJournal:
                             "message_id is already bound to another sequence"
                         )
                     if message.role is ConversationMessageRole.TOOL_CALL:
-                        existing_call_sequence = known_tool_calls.get(message.tool_call_id)
+                        existing_call = known_tool_calls.get(message.tool_call_id)
                         if (
-                            existing_call_sequence is not None
-                            and existing_call_sequence != message.sequence
+                            existing_call is not None
+                            and existing_call[0] != message.sequence
                         ):
                             raise ConversationWriteConflictError(
                                 "tool_call_id is already bound to another sequence"
                             )
+                        known_tool_calls[message.tool_call_id] = (
+                            message.sequence,
+                            message.tool_name,
+                        )
+                    elif message.role is ConversationMessageRole.TOOL_RESULT:
+                        call = known_tool_calls.get(message.tool_call_id)
+                        if call is None:
+                            raise ConversationWriteConflictError(
+                                "tool_result does not follow a known tool_call"
+                            )
+                        if call[1] != message.tool_name:
+                            raise ConversationWriteConflictError(
+                                "tool_result tool_name differs from its tool_call"
+                            )
+                        existing_result_sequence = known_tool_results.get(message.tool_call_id)
+                        if existing_result_sequence is not None:
+                            raise ConversationWriteConflictError(
+                                "tool_call already has a terminal tool_result"
+                            )
+                        known_tool_results[message.tool_call_id] = message.sequence
                     unseen.append(message)
 
                 if not unseen:
@@ -184,6 +245,8 @@ class ConversationMessageJournal:
         with self.path_lock.acquire(
             self.layout.lock_key(address),
             ttl_seconds=self.lock_ttl_seconds,
+            wait_timeout_seconds=self.lock_wait_timeout_seconds,
+            retry_delay_seconds=self.lock_retry_delay_seconds,
         ) as guard:
             with guard.fenced():
                 live_messages = list(self._read_live_messages(address))
@@ -197,84 +260,132 @@ class ConversationMessageJournal:
         address: ConversationAddress,
         *,
         through_sequence: int,
+        before_history_publish: Callable[[ConversationSegment], None] | None = None,
     ) -> ConversationSealResult:
-        """先耐久创建 history，再从 live 原子移除相同前缀。"""
+        """先准备下游 outbox，再耐久创建 history 并移除 live 前缀。"""
 
         if isinstance(through_sequence, bool) or not isinstance(through_sequence, int):
             raise TypeError("through_sequence must be an integer")
         if through_sequence < 0:
             raise ValueError("through_sequence must be non-negative")
+        if before_history_publish is not None and not callable(before_history_publish):
+            raise TypeError("before_history_publish must be callable or None")
         with self.path_lock.acquire(
             self.layout.lock_key(address),
             ttl_seconds=self.lock_ttl_seconds,
+            wait_timeout_seconds=self.lock_wait_timeout_seconds,
+            retry_delay_seconds=self.lock_retry_delay_seconds,
         ) as guard:
             with guard.fenced():
-                live_messages = list(self._read_live_messages(address))
-                latest = self._read_latest_segment(address)
-                live_messages = self._recover_archived_prefix(address, latest, live_messages)
-                self._require_tail_continuity(latest, live_messages)
+                prepared = self._prepare_seal(address, through_sequence)
+                if isinstance(prepared, ConversationSealResult):
+                    return prepared
+                if before_history_publish is None:
+                    return self._publish_seal(address, prepared)
 
-                if not live_messages or through_sequence < live_messages[0].sequence:
-                    if latest is not None and latest.end_sequence == through_sequence:
-                        return ConversationSealResult(
-                            status=ConversationSealStatus.UNCHANGED,
-                            segment=latest,
-                            live=self._batch_or_none(address, live_messages),
+            # 保留 Conversation 租约，但退出 SQLite fencing 事务，避免下游 outbox 锁自嵌套。
+            before_history_publish(prepared.segment)
+            guard.checkpoint()
+            with guard.fenced():
+                current = self._prepare_seal(address, through_sequence)
+                if isinstance(current, ConversationSealResult):
+                    if not self._same_segment(current.segment, prepared.segment):
+                        raise ConversationWriteConflictError(
+                            "conversation seal source changed while preparing its outbox"
                         )
+                    return current
+                if not self._same_segment(current.segment, prepared.segment):
                     raise ConversationWriteConflictError(
-                        "seal boundary does not select an unarchived live prefix"
+                        "conversation seal source changed while preparing its outbox"
                     )
-                if through_sequence > live_messages[-1].sequence:
-                    raise ConversationWriteConflictError("seal boundary exceeds the live message range")
+                return self._publish_seal(address, current)
 
-                split_index = through_sequence - live_messages[0].sequence + 1
-                archived_messages = tuple(live_messages[:split_index])
-                retained_messages = tuple(live_messages[split_index:])
-                if not archived_messages or archived_messages[-1].sequence != through_sequence:
-                    raise ConversationWriteConflictError("seal boundary is not present in live messages")
-                if latest is not None and archived_messages[0].sequence != latest.end_sequence + 1:
-                    raise ConversationWriteConflictError(
-                        "sealed segment would not continue the latest history sequence"
-                    )
+    def _prepare_seal(
+        self,
+        address: ConversationAddress,
+        through_sequence: int,
+    ) -> _ConversationSealPlan | ConversationSealResult:
+        """在 fencing 区内读取完整状态并形成不含下游副作用的封存计划。"""
 
-                segment_id = self.layout.segment_id(
-                    archived_messages[0].sequence,
-                    archived_messages[-1].sequence,
-                )
-                segment = ConversationSegment(
-                    conversation_id=address.conversation_id,
-                    segment_id=segment_id,
-                    messages=archived_messages,
-                )
-                encoded_history = self._encode_messages(segment.messages)
-                self._require_write_bound(encoded_history)
-                try:
-                    created = atomic_create_bytes(
-                        self.layout.history_path(address, segment_id),
-                        encoded_history,
-                        artifact_root=self.layout.root,
-                    )
-                except ImmutableArtifactConflictError as exc:
-                    raise ConversationWriteConflictError(
-                        "history segment identity conflicts with different bytes"
-                    ) from exc
+        live_messages = list(self._read_live_messages(address))
+        latest = self._read_latest_segment(address)
+        live_messages = self._recover_archived_prefix(address, latest, live_messages)
+        self._require_tail_continuity(latest, live_messages)
 
-                encoded_live = self._encode_messages(retained_messages)
-                self._require_write_bound(encoded_live)
-                atomic_replace_bytes(
-                    self.layout.live_path(address),
-                    encoded_live,
-                    artifact_root=self.layout.root,
-                )
+        if not live_messages or through_sequence < live_messages[0].sequence:
+            if latest is not None and latest.end_sequence == through_sequence:
                 return ConversationSealResult(
-                    status=(
-                        ConversationSealStatus.CREATED
-                        if created
-                        else ConversationSealStatus.UNCHANGED
-                    ),
-                    segment=segment,
-                    live=self._batch_or_none(address, retained_messages),
+                    status=ConversationSealStatus.UNCHANGED,
+                    segment=latest,
+                    live=self._batch_or_none(address, live_messages),
                 )
+            raise ConversationWriteConflictError(
+                "seal boundary does not select an unarchived live prefix"
+            )
+        if through_sequence > live_messages[-1].sequence:
+            raise ConversationWriteConflictError("seal boundary exceeds the live message range")
+
+        split_index = through_sequence - live_messages[0].sequence + 1
+        archived_messages = tuple(live_messages[:split_index])
+        retained_messages = tuple(live_messages[split_index:])
+        if not archived_messages or archived_messages[-1].sequence != through_sequence:
+            raise ConversationWriteConflictError("seal boundary is not present in live messages")
+        if latest is not None and archived_messages[0].sequence != latest.end_sequence + 1:
+            raise ConversationWriteConflictError(
+                "sealed segment would not continue the latest history sequence"
+            )
+
+        segment_id = self.layout.segment_id(
+            archived_messages[0].sequence,
+            archived_messages[-1].sequence,
+        )
+        segment = ConversationSegment(
+            conversation_id=address.conversation_id,
+            segment_id=segment_id,
+            messages=archived_messages,
+        )
+        encoded_history = self._encode_messages(segment.messages)
+        encoded_live = self._encode_messages(retained_messages)
+        self._require_write_bound(encoded_history)
+        self._require_write_bound(encoded_live)
+        return _ConversationSealPlan(
+            segment=segment,
+            retained_messages=retained_messages,
+            encoded_history=encoded_history,
+            encoded_live=encoded_live,
+        )
+
+    def _publish_seal(
+        self,
+        address: ConversationAddress,
+        plan: _ConversationSealPlan,
+    ) -> ConversationSealResult:
+        """在第二次状态校验通过后耐久发布 history 并裁剪 live。"""
+
+        try:
+            created = atomic_create_bytes(
+                self.layout.history_path(address, plan.segment.segment_id),
+                plan.encoded_history,
+                artifact_root=self.layout.root,
+            )
+        except ImmutableArtifactConflictError as exc:
+            raise ConversationWriteConflictError(
+                "history segment identity conflicts with different bytes"
+            ) from exc
+        atomic_replace_bytes(
+            self.layout.live_path(address),
+            plan.encoded_live,
+            artifact_root=self.layout.root,
+        )
+        return ConversationSealResult(
+            status=(ConversationSealStatus.CREATED if created else ConversationSealStatus.UNCHANGED),
+            segment=plan.segment,
+            live=self._batch_or_none(address, plan.retained_messages),
+        )
+
+    @staticmethod
+    def _same_segment(left: ConversationSegment, right: ConversationSegment) -> bool:
+        return left.segment_id == right.segment_id and left.digest == right.digest
 
     def read_segment(
         self,
@@ -362,12 +473,23 @@ class ConversationMessageJournal:
         if not directory.is_dir():
             raise ConversationJournalError("history path is not a directory")
         references: list[_HistoryReference] = []
-        for child in directory.iterdir():
+        for entry_count, child in enumerate(directory.iterdir(), start=1):
+            if entry_count > self._MAX_HISTORY_FILES:
+                raise ConversationJournalError("history entry count exceeds its enumeration bound")
             if child.is_symlink():
                 raise ConversationJournalError("history cannot contain symbolic links")
             if child.name.startswith("."):
-                if child.is_file() and child.name.endswith(".tmp"):
-                    continue
+                if child.is_file():
+                    temporary_destination = atomic_temporary_destination(child.name)
+                    if temporary_destination is not None and temporary_destination.endswith(
+                        ".jsonl"
+                    ):
+                        try:
+                            self.layout.segment_range(Path(temporary_destination).stem)
+                        except ValueError:
+                            pass
+                        else:
+                            continue
                 raise ConversationJournalError("history contains an unsupported hidden entry")
             try:
                 metadata = child.stat()
@@ -380,8 +502,6 @@ class ConversationMessageJournal:
             references.append(
                 _HistoryReference(segment_id, start_sequence, end_sequence, child)
             )
-            if len(references) > self._MAX_HISTORY_FILES:
-                raise ConversationJournalError("history file count exceeds its enumeration bound")
         references.sort(key=lambda item: (item.start_sequence, item.end_sequence))
         for previous, current in zip(references, references[1:], strict=False):
             if current.start_sequence <= previous.end_sequence:

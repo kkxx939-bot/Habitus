@@ -8,13 +8,13 @@ from dataclasses import dataclass
 from typing import Protocol, cast
 from urllib.parse import quote
 
-from LLMClient import StructuredLLMClient
 from memory.semantic.config import MemorySemanticConfig
 from memory.semantic.model import (
     MemoryDirectorySnapshot,
     MemorySemanticEntry,
     MemorySemanticEntryKind,
 )
+from ModelClient import StructuredChatClient
 
 
 class MemoryOverviewGenerator(Protocol):
@@ -41,12 +41,12 @@ class LLMMemoryOverviewGenerator:
 
     def __init__(
         self,
-        client: StructuredLLMClient,
+        client: StructuredChatClient,
         *,
         config: MemorySemanticConfig | None = None,
     ) -> None:
-        if not isinstance(client, StructuredLLMClient):
-            raise TypeError("client must be a StructuredLLMClient")
+        if not isinstance(client, StructuredChatClient):
+            raise TypeError("client must be a StructuredChatClient")
         self.client = client
         self.config = config or MemorySemanticConfig()
 

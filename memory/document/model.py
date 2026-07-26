@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any
 
+from memory.document.link import MemoryStoredLink, normalize_stored_links
 from memory.model import MemoryAddress, MemoryKind
+from memory.uri import MemoryURI
 
 
 def _utc_timestamp(value: datetime, field_name: str) -> datetime:
@@ -64,6 +66,8 @@ class MemoryDocument:
     metadata: MemoryDocumentMetadata
     fields: Mapping[str, Any]
     markdown_body: str
+    links: tuple[MemoryStoredLink, ...] = ()
+    backlinks: tuple[MemoryStoredLink, ...] = ()
 
     def __post_init__(self) -> None:
         kind = MemoryKind(self.kind)
@@ -81,6 +85,18 @@ class MemoryDocument:
             raise ValueError("memory document Markdown body must be non-empty")
         if not self.markdown_body.endswith("\n"):
             raise ValueError("memory document Markdown body must end with a newline")
+        links = normalize_stored_links(self.links, label="memory document links")
+        backlinks = normalize_stored_links(
+            self.backlinks,
+            label="memory document backlinks",
+        )
+        uri = MemoryURI.from_address(self.address)
+        if any(link.from_uri != uri for link in links):
+            raise ValueError("memory document forward link has the wrong source URI")
+        if any(link.to_uri != uri for link in backlinks):
+            raise ValueError("memory document backlink has the wrong target URI")
+        object.__setattr__(self, "links", links)
+        object.__setattr__(self, "backlinks", backlinks)
 
 
 __all__ = ["MemoryDocument", "MemoryDocumentMetadata"]

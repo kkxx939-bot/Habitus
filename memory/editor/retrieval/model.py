@@ -58,9 +58,13 @@ class MemorySearchHit:
         if not math.isfinite(score):
             raise ValueError("memory search hit score must be finite")
         object.__setattr__(self, "score", score)
-        vector_score = score if self.vector_score is None else _finite_score(
-            self.vector_score,
-            "memory search vector_score",
+        vector_score = (
+            score
+            if self.vector_score is None
+            else _finite_score(
+                self.vector_score,
+                "memory search vector_score",
+            )
         )
         if not -1.0 <= vector_score <= 1.0:
             raise ValueError("memory search vector_score must be between -1 and 1")

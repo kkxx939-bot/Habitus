@@ -9,14 +9,14 @@ requires-python = ">=3.10"
 dependencies = ["PyYAML>=6.0.2,<7"]
 
 [project.optional-dependencies]
-llm = [
+model = [
+    "httpx>=0.28,<1",
     "json-repair>=0.25.0,<1",
     "jsonschema>=4,<5",
-    "litellm>=1.83.7,<1.91.2",
 ]
 
 [tool.setuptools.packages.find]
-include = ["LLMClient*", "pre*", "memory*", "infrastructure*", "foundation*"]
+include = ["ModelClient*", "pre*", "memory*", "infrastructure*", "foundation*"]
 
 [tool.setuptools.package-data]
 "memory.schema.definitions" = ["*.yaml"]
@@ -39,5 +39,5 @@ warn_redundant_casts = true
 [tool.pyright]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
-include = ["LLMClient", "pre", "memory", "infrastructure", "foundation"]
+include = ["ModelClient", "pre", "memory", "infrastructure", "foundation"]
 reportUnsupportedDunderAll = false

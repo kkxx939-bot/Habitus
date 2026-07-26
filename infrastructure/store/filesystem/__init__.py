@@ -4,6 +4,7 @@ from infrastructure.store.filesystem.durable_io import (
     ImmutableArtifactConflictError,
     atomic_create_bytes,
     atomic_replace_bytes,
+    atomic_temporary_destination,
     read_regular_bytes,
 )
 from infrastructure.store.filesystem.path_safety import (
@@ -16,6 +17,7 @@ __all__ = [
     "ImmutableArtifactConflictError",
     "atomic_create_bytes",
     "atomic_replace_bytes",
+    "atomic_temporary_destination",
     "read_regular_bytes",
     "require_safe_artifact_path",
 ]

@@ -1,9 +1,19 @@
-"""提供与供应商无关的模型调用、流式输出、工具调用和结构化输出。"""
+"""统一模型配置、Provider 工厂和供应商无关能力契约。"""
 
-from LLMClient.client import LLMClient
-from LLMClient.config import ModelConfig
-from LLMClient.contracts import (
+from ModelClient.client import ChatClient
+from ModelClient.config import (
+    CapabilityConfig,
+    ChatModelConfig,
+    ChatStructuredOutputMode,
+    EmbeddingInputMode,
+    EmbeddingModelConfig,
+    ModelCapability,
+    ProviderConfig,
+    RerankModelConfig,
+)
+from ModelClient.contracts import (
     ChatMessage,
+    ChatProvider,
     ChatRequest,
     MessageRole,
     ModelAuthenticationError,
@@ -13,7 +23,6 @@ from LLMClient.contracts import (
     ModelDependencyError,
     ModelInputTooLargeError,
     ModelPermissionError,
-    ModelProvider,
     ModelQuotaError,
     ModelRateLimitError,
     ModelResponse,
@@ -29,42 +38,43 @@ from LLMClient.contracts import (
     ToolCall,
     ToolDefinition,
 )
-from LLMClient.embedding import (
+from ModelClient.embedding import (
     Embedder,
-    EmbeddingConfig,
+    EmbeddingClient,
+    EmbeddingProvider,
     EmbeddingVector,
-    LiteLLMEmbedder,
-    build_embedder,
 )
-from LLMClient.factory import LLMClientFactory, ModelProviderBuilder, build_llm_client
-from LLMClient.json_parser import JSONParseMode, ParsedJSON, parse_json_response
-from LLMClient.rerank import LiteLLMReranker, RerankConfig, Reranker, build_reranker
-from LLMClient.schema_validation import JSONSchemaValidationError, validate_json_schema
-from LLMClient.structured import StructuredLLMClient, StructuredResponse
+from ModelClient.factory import ProviderBuildContext, ProviderBuilder, ProviderFactory
+from ModelClient.json_parser import JSONParseMode, ParsedJSON, parse_json_response
+from ModelClient.rerank import Reranker
+from ModelClient.schema_validation import JSONSchemaValidationError, validate_json_schema
+from ModelClient.structured import StructuredChatClient, StructuredResponse
 
 __all__ = [
+    "CapabilityConfig",
+    "ChatClient",
     "ChatMessage",
+    "ChatModelConfig",
+    "ChatStructuredOutputMode",
+    "ChatProvider",
     "ChatRequest",
     "Embedder",
-    "EmbeddingConfig",
+    "EmbeddingClient",
+    "EmbeddingInputMode",
+    "EmbeddingModelConfig",
+    "EmbeddingProvider",
     "EmbeddingVector",
     "JSONParseMode",
     "JSONSchemaValidationError",
-    "LLMClient",
-    "LLMClientFactory",
-    "LiteLLMEmbedder",
-    "LiteLLMReranker",
     "MessageRole",
-    "ModelConfig",
     "ModelAuthenticationError",
+    "ModelCapability",
     "ModelClientError",
     "ModelConfigurationError",
     "ModelContentSafetyError",
     "ModelDependencyError",
     "ModelInputTooLargeError",
     "ModelPermissionError",
-    "ModelProvider",
-    "ModelProviderBuilder",
     "ModelQuotaError",
     "ModelRateLimitError",
     "ModelResponse",
@@ -73,20 +83,21 @@ __all__ = [
     "ModelStructuredOutputError",
     "ModelTransportError",
     "ParsedJSON",
+    "ProviderBuildContext",
+    "ProviderBuilder",
     "ProviderCapabilities",
+    "ProviderConfig",
+    "ProviderFactory",
     "ReasoningOptions",
-    "ResponseFormat",
-    "RerankConfig",
+    "RerankModelConfig",
     "Reranker",
+    "ResponseFormat",
     "StreamEventKind",
-    "StructuredLLMClient",
+    "StructuredChatClient",
     "StructuredResponse",
     "TokenUsage",
     "ToolCall",
     "ToolDefinition",
-    "build_llm_client",
-    "build_embedder",
-    "build_reranker",
     "parse_json_response",
     "validate_json_schema",
 ]

@@ -81,6 +81,8 @@ class MemorySnapshotReader:
             "updated_at": document.metadata.updated_at,
             "fields": document.fields,
             "markdown_body": document.markdown_body,
+            "links": [link.to_dict() for link in document.links],
+            "backlinks": [link.to_dict() for link in document.backlinks],
         }
         return canonical_json(payload).encode("utf-8")
 

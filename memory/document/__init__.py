@@ -2,6 +2,7 @@
 
 from memory.document.codec import MemoryDocumentCodec, MemoryDocumentIntegrityError
 from memory.document.config import MemoryDocumentConfig, MemoryDocumentLimitError
+from memory.document.link import MemoryLinkType, MemoryStoredLink
 from memory.document.model import MemoryDocument, MemoryDocumentMetadata
 
 __all__ = [
@@ -11,4 +12,6 @@ __all__ = [
     "MemoryDocumentIntegrityError",
     "MemoryDocumentLimitError",
     "MemoryDocumentMetadata",
+    "MemoryLinkType",
+    "MemoryStoredLink",
 ]

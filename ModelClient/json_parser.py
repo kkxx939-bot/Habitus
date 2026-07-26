@@ -68,9 +68,10 @@ def parse_json_response(source: str, *, allow_repair: bool = True) -> ParsedJSON
             if parsed is not _MISSING:
                 return ParsedJSON(parsed, "trailing_comma_repair")
 
-    repaired = _repair_with_optional_dependency(text)
-    if repaired is not _MISSING:
-        return ParsedJSON(repaired, "json_repair")
+    for candidate in repair_sources:
+        repaired = _repair_with_optional_dependency(candidate)
+        if repaired is not _MISSING:
+            return ParsedJSON(repaired, "json_repair")
 
     for candidate in repair_sources:
         try:

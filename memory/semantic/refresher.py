@@ -52,10 +52,27 @@ class MemorySemanticRefresher:
         if not isinstance(address, MemoryAddress):
             raise TypeError("address must be a MemoryAddress")
         self.tree.initialize()
-        return tuple(
-            self.refresh_directory(directory)
-            for directory in MemoryDirectory.for_address(address).lineage()
+        return tuple(self.refresh_directory(directory) for directory in MemoryDirectory.for_address(address).lineage())
+
+    def refresh_for_many(
+        self,
+        addresses: tuple[MemoryAddress, ...],
+    ) -> tuple[MemorySemanticRefreshResult, ...]:
+        """合并多个 L2 的祖先目录，并按最深目录优先各刷新一次。"""
+
+        if not isinstance(addresses, tuple) or any(not isinstance(address, MemoryAddress) for address in addresses):
+            raise TypeError("addresses must contain MemoryAddress values")
+        self.tree.initialize()
+        directories = {
+            directory for address in addresses for directory in MemoryDirectory.for_address(address).lineage()
+        }
+        ordered = tuple(
+            sorted(
+                directories,
+                key=lambda directory: (-len(directory.parts), directory.parts),
+            )
         )
+        return tuple(self.refresh_directory(directory) for directory in ordered)
 
     def refresh_directory(self, directory: MemoryDirectory) -> MemorySemanticRefreshResult:
         """基于稳定快照刷新一个目录；生成期间不长期占用目录锁。"""
@@ -114,9 +131,7 @@ class MemorySemanticRefresher:
                         MemorySemanticRefreshStatus.WRITTEN,
                         snapshot.digest,
                     )
-        raise MemorySemanticRefreshError(
-            "memory directory changed repeatedly while semantic layers were generated"
-        )
+        raise MemorySemanticRefreshError("memory directory changed repeatedly while semantic layers were generated")
 
     def rebuild(
         self,
@@ -137,9 +152,7 @@ class MemorySemanticRefresher:
             current = pending.pop()
             discovered.append(current)
             if len(discovered) > self.config.max_rebuild_directories:
-                raise MemorySemanticRefreshError(
-                    "memory semantic rebuild exceeded its configured directory bound"
-                )
+                raise MemorySemanticRefreshError("memory semantic rebuild exceeded its configured directory bound")
             children = self.tree.child_directories(
                 current,
                 limit=self.config.max_direct_entries,
@@ -188,9 +201,7 @@ class MemorySemanticRefresher:
                 )
             )
         if len(entries) > self.config.max_direct_entries:
-            raise MemorySemanticRefreshError(
-                "memory directory exceeded its configured semantic entry bound"
-            )
+            raise MemorySemanticRefreshError("memory directory exceeded its configured semantic entry bound")
         return MemoryDirectorySnapshot(directory, tuple(entries))
 
     def _child_summary(self, child: MemoryDirectory) -> str | None:
@@ -201,9 +212,7 @@ class MemorySemanticRefresher:
                 max_bytes=self.config.max_abstract_chars * 4 + 4,
             )
             if len(abstract) > self.config.max_abstract_chars + 1:
-                raise MemorySemanticRefreshError(
-                    "child memory abstract exceeds its configured character bound"
-                )
+                raise MemorySemanticRefreshError("child memory abstract exceeds its configured character bound")
             return abstract
         if self.tree.layer_exists(child, MemoryLevel.OVERVIEW):
             overview = self.tree.read_layer_bounded(
@@ -212,9 +221,7 @@ class MemorySemanticRefresher:
                 max_bytes=self.config.max_overview_chars * 4 + 4,
             )
             if len(overview) > self.config.max_overview_chars + 1:
-                raise MemorySemanticRefreshError(
-                    "child memory overview exceeds its configured character bound"
-                )
+                raise MemorySemanticRefreshError("child memory overview exceeds its configured character bound")
             return self._abstract_from_overview(overview)
         return None
 
@@ -242,9 +249,7 @@ class MemorySemanticRefresher:
                     return MemorySemanticRefreshResult(
                         directory=directory,
                         status=(
-                            MemorySemanticRefreshStatus.DELETED
-                            if deleted
-                            else MemorySemanticRefreshStatus.UNCHANGED
+                            MemorySemanticRefreshStatus.DELETED if deleted else MemorySemanticRefreshStatus.UNCHANGED
                         ),
                         source_digest=snapshot.digest,
                     )
@@ -268,11 +273,7 @@ class MemorySemanticRefresher:
                 content.append(stripped)
         compact = " ".join(content)
         if not compact:
-            compact = " ".join(
-                line.strip()
-                for line in lines
-                if line.strip() and not line.lstrip().startswith("#")
-            )
+            compact = " ".join(line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#"))
         if not compact:
             raise MemorySemanticRefreshError("memory overview cannot produce a non-empty abstract")
         return self._truncate_abstract(compact) + "\n"

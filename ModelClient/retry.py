@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 from collections.abc import Callable
 
-from LLMClient.contracts import (
+from ModelClient.contracts import (
     ModelAuthenticationError,
     ModelClientError,
     ModelContentSafetyError,
@@ -66,10 +66,11 @@ def normalize_provider_error(error: Exception) -> ModelClientError:
 
     if isinstance(error, ModelClientError):
         return error
-    status = _status_code(error)
-    retry_after = _retry_after(error)
+    chain = _exception_chain(error)
+    status = _status_code(chain)
+    retry_after = _retry_after(chain)
     message = str(error).strip() or type(error).__name__
-    lowered = message.casefold()
+    lowered = "\n".join(str(item) for item in chain).casefold()
 
     if _contains(lowered, _CONTENT_SAFETY):
         return ModelContentSafetyError(message)
@@ -85,7 +86,10 @@ def normalize_provider_error(error: Exception) -> ModelClientError:
         return ModelRateLimitError(message, retry_after_seconds=retry_after)
     if status in {408, 409, 425, 500, 502, 503, 504}:
         return ModelTransportError(message, retry_after_seconds=retry_after)
-    if isinstance(error, (TimeoutError, ConnectionError, OSError)) or _contains(lowered, _TRANSIENT):
+    if any(isinstance(item, (TimeoutError, ConnectionError, OSError)) for item in chain) or _contains(
+        lowered,
+        _TRANSIENT,
+    ):
         return ModelTransportError(message, retry_after_seconds=retry_after)
     return ModelResponseError(message)
 
@@ -110,10 +114,22 @@ def _contains(text: str, patterns: tuple[str, ...]) -> bool:
     return any(pattern in text for pattern in patterns)
 
 
-def _status_code(error: Exception) -> int | None:
-    for candidate in (error, getattr(error, "__cause__", None)):
-        if candidate is None:
-            continue
+def _exception_chain(error: Exception) -> tuple[BaseException, ...]:
+    """沿显式原因或异常上下文展开有限异常链，识别传输库包装的底层错误。"""
+
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    candidate: BaseException | None = error
+    while candidate is not None and id(candidate) not in seen and len(chain) < 16:
+        seen.add(id(candidate))
+        chain.append(candidate)
+        cause = candidate.__cause__
+        candidate = cause if cause is not None else candidate.__context__
+    return tuple(chain)
+
+
+def _status_code(chain: tuple[BaseException, ...]) -> int | None:
+    for candidate in chain:
         value = getattr(candidate, "status_code", None)
         if value is None:
             value = getattr(candidate, "code", None)
@@ -128,10 +144,8 @@ def _status_code(error: Exception) -> int | None:
     return None
 
 
-def _retry_after(error: Exception) -> float | None:
-    for candidate in (error, getattr(error, "__cause__", None)):
-        if candidate is None:
-            continue
+def _retry_after(chain: tuple[BaseException, ...]) -> float | None:
+    for candidate in chain:
         direct = getattr(candidate, "retry_after", None)
         if direct is not None:
             try:

@@ -7,6 +7,8 @@ from memory.document import (
     MemoryDocumentIntegrityError,
     MemoryDocumentLimitError,
     MemoryDocumentMetadata,
+    MemoryLinkType,
+    MemoryStoredLink,
 )
 from memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
 from memory.schema import (
@@ -44,6 +46,8 @@ __all__ = [
     "MemoryDocumentIntegrityError",
     "MemoryDocumentLimitError",
     "MemoryDocumentMetadata",
+    "MemoryLinkType",
+    "MemoryStoredLink",
     "MemoryFieldRole",
     "MemoryFieldSchema",
     "MemoryFieldType",

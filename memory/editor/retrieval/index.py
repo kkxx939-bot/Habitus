@@ -10,10 +10,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from LLMClient import Embedder, EmbeddingVector
 from memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
 from memory.tree import MemoryTree
 from memory.uri import MemoryURI, MemoryURINodeType
+from ModelClient import Embedder, EmbeddingVector
 
 
 class MemoryVectorIndexError(RuntimeError):
@@ -280,9 +280,7 @@ class MemoryTreeVectorIndex:
             if self._excluded(document.address, document.fields):
                 continue
             uri = MemoryURI.from_address(address)
-            content = self._bounded(
-                f"[{address.kind.value}] {uri.decoded_path}\n{document.markdown_body.strip()}"
-            )
+            content = self._bounded(f"[{address.kind.value}] {uri.decoded_path}\n{document.markdown_body.strip()}")
             digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
             records.append(
                 _VectorRecord(

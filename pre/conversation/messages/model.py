@@ -333,6 +333,32 @@ def _validated_messages(messages: object) -> tuple[ConversationMessage, ...]:
     ]
     if len(set(tool_call_ids)) != len(tool_call_ids):
         raise ConversationMessageSchemaError("tool_call IDs must be unique within a message collection")
+    tool_result_ids = [
+        item.tool_call_id
+        for item in resolved
+        if item.role is ConversationMessageRole.TOOL_RESULT
+    ]
+    if len(set(tool_result_ids)) != len(tool_result_ids):
+        raise ConversationMessageSchemaError(
+            "tool_call can have only one terminal result within a message collection"
+        )
+    calls = {
+        item.tool_call_id: item
+        for item in resolved
+        if item.role is ConversationMessageRole.TOOL_CALL
+    }
+    for item in resolved:
+        if item.role is not ConversationMessageRole.TOOL_RESULT:
+            continue
+        call = calls.get(item.tool_call_id)
+        if call is None:
+            continue
+        if call.sequence >= item.sequence:
+            raise ConversationMessageSchemaError("tool_result must follow its tool_call")
+        if call.tool_name != item.tool_name:
+            raise ConversationMessageSchemaError(
+                "tool_result tool_name must exactly match its tool_call"
+            )
     return resolved
 
 

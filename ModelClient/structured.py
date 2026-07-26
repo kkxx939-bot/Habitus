@@ -5,20 +5,30 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from typing import Generic, TypeVar, cast
+from typing import Generic, Literal, TypeVar, cast
 
-from LLMClient.client import LLMClient
-from LLMClient.contracts import (
+from ModelClient.client import ChatClient
+from ModelClient.contracts import (
     ChatMessage,
     ChatRequest,
     ModelResponse,
     ModelStructuredOutputError,
     ResponseFormat,
 )
-from LLMClient.json_parser import JSONParseMode, parse_json_response
-from LLMClient.schema_validation import validate_json_schema
+from ModelClient.json_parser import JSONParseMode, parse_json_response
+from ModelClient.schema_validation import JSONSchemaValidationError, validate_json_schema
 
 T = TypeVar("T")
+_ValidationPhase = Literal["response", "json_parse", "json_schema", "domain"]
+
+
+class _StructuredValidationFailure(ValueError):
+    """标记模型结果在哪一层失败，避免把开发者 Schema 错误当成可重试输出错误。"""
+
+    def __init__(self, phase: _ValidationPhase, error: Exception) -> None:
+        detail = str(error).replace("\n", " ")
+        super().__init__(f"{phase}: {detail}")
+        self.phase = phase
 
 
 @dataclass(frozen=True)
@@ -29,24 +39,33 @@ class StructuredResponse(Generic[T]):
     response: ModelResponse
     raw_text: str
     parse_mode: JSONParseMode
+    validation_attempts: int
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.validation_attempts, bool)
+            or not isinstance(self.validation_attempts, int)
+            or self.validation_attempts <= 0
+        ):
+            raise ValueError("validation_attempts must be a positive integer")
 
     @property
     def repaired(self) -> bool:
         return self.parse_mode != "strict"
 
 
-class StructuredLLMClient:
+class StructuredChatClient:
     """将 Schema 提示和校验逻辑与传输供应商分离。"""
 
     def __init__(
         self,
-        client: LLMClient,
+        client: ChatClient,
         *,
         allow_json_repair: bool = True,
         validation_retries: int = 1,
     ) -> None:
-        if not isinstance(client, LLMClient):
-            raise TypeError("client must be LLMClient")
+        if not isinstance(client, ChatClient):
+            raise TypeError("client must be ChatClient")
         if not isinstance(allow_json_repair, bool):
             raise TypeError("allow_json_repair must be boolean")
         if (
@@ -68,17 +87,24 @@ class StructuredLLMClient:
         validator: Callable[[object], T] | None = None,
     ) -> StructuredResponse[T | object]:
         prepared = self._prepare(request, schema=schema, name=name)
-        last_error: Exception | None = None
+        last_error: _StructuredValidationFailure | None = None
         for attempt in range(self.validation_retries + 1):
             response = self.client.complete(prepared)
             try:
-                return self._validate_response(response, schema=schema, validator=validator)
-            except (TypeError, ValueError) as exc:
+                return self._validate_response(
+                    response,
+                    schema=schema,
+                    validator=validator,
+                    validation_attempts=attempt + 1,
+                )
+            except _StructuredValidationFailure as exc:
                 last_error = exc
                 if attempt < self.validation_retries:
                     prepared = self._correction_request(prepared, response, exc)
+        assert last_error is not None
         raise ModelStructuredOutputError(
-            f"model failed structured output validation after {self.validation_retries + 1} attempt(s)"
+            f"model failed {last_error.phase} validation after "
+            f"{self.validation_retries + 1} attempt(s)"
         ) from last_error
 
     async def complete_json_async(
@@ -90,17 +116,24 @@ class StructuredLLMClient:
         validator: Callable[[object], T] | None = None,
     ) -> StructuredResponse[T | object]:
         prepared = self._prepare(request, schema=schema, name=name)
-        last_error: Exception | None = None
+        last_error: _StructuredValidationFailure | None = None
         for attempt in range(self.validation_retries + 1):
             response = await self.client.complete_async(prepared)
             try:
-                return self._validate_response(response, schema=schema, validator=validator)
-            except (TypeError, ValueError) as exc:
+                return self._validate_response(
+                    response,
+                    schema=schema,
+                    validator=validator,
+                    validation_attempts=attempt + 1,
+                )
+            except _StructuredValidationFailure as exc:
                 last_error = exc
                 if attempt < self.validation_retries:
                     prepared = self._correction_request(prepared, response, exc)
+        assert last_error is not None
         raise ModelStructuredOutputError(
-            f"model failed structured output validation after {self.validation_retries + 1} attempt(s)"
+            f"model failed {last_error.phase} validation after "
+            f"{self.validation_retries + 1} attempt(s)"
         ) from last_error
 
     def complete_model(
@@ -173,16 +206,23 @@ class StructuredLLMClient:
     def _correction_request(
         request: ChatRequest,
         response: ModelResponse,
-        error: Exception,
+        error: _StructuredValidationFailure,
     ) -> ChatRequest:
         messages = list(request.messages)
         if response.content:
             messages.append(ChatMessage(role="assistant", content=response.content))
-        detail = str(error).replace("\n", " ")[:512]
+        detail = str(error)[:768]
         messages.append(
             ChatMessage(
                 role="user",
-                content=(f"The previous JSON response was invalid ({detail}). Return one corrected JSON value only."),
+                content=(
+                    f"The previous JSON response failed validation ({detail}). "
+                    "Return exactly one corrected JSON value only. Preserve every already-valid value unless "
+                    "the reported constraint requires changing it. Do not stringify arrays or objects, wrap "
+                    "values in arrays, substitute defaults for invalid enums, ignore unknown fields, or invent "
+                    "missing facts to bypass validation. Use only information from the original request and fix "
+                    "the reported syntax or schema problem."
+                ),
             )
         )
         return replace(request, messages=tuple(messages))
@@ -193,23 +233,43 @@ class StructuredLLMClient:
         *,
         schema: Mapping[str, object],
         validator: Callable[[object], T] | None,
+        validation_attempts: int,
     ) -> StructuredResponse[T | object]:
         if response.finish_reason == "length":
-            raise ValueError("structured model response was truncated")
+            raise _StructuredValidationFailure(
+                "response",
+                ValueError("structured model response was truncated"),
+            )
         if response.finish_reason in {"content_filter", "safety"}:
-            raise ValueError("structured model response was blocked by content safety")
+            raise _StructuredValidationFailure(
+                "response",
+                ValueError("structured model response was blocked by content safety"),
+            )
         if not response.content:
-            raise ValueError("structured model response has no text content")
-        parsed = parse_json_response(response.content, allow_repair=self.allow_json_repair)
-        validate_json_schema(parsed.value, schema)
+            raise _StructuredValidationFailure(
+                "response",
+                ValueError("structured model response has no text content"),
+            )
+        try:
+            parsed = parse_json_response(response.content, allow_repair=self.allow_json_repair)
+        except ValueError as exc:
+            raise _StructuredValidationFailure("json_parse", exc) from exc
+        try:
+            validate_json_schema(parsed.value, schema)
+        except JSONSchemaValidationError as exc:
+            raise _StructuredValidationFailure("json_schema", exc) from exc
         value: T | object = parsed.value
         if validator is not None:
-            value = validator(parsed.value)
+            try:
+                value = validator(parsed.value)
+            except (TypeError, ValueError) as exc:
+                raise _StructuredValidationFailure("domain", exc) from exc
         return StructuredResponse(
             value=value,
             response=response,
             raw_text=response.content,
             parse_mode=parsed.mode,
+            validation_attempts=validation_attempts,
         )
 
 
@@ -228,4 +288,4 @@ def _model_contract(model_class: type[T]) -> tuple[Mapping[str, object], Callabl
     return schema, validate
 
 
-__all__ = ["StructuredLLMClient", "StructuredResponse"]
+__all__ = ["StructuredChatClient", "StructuredResponse"]

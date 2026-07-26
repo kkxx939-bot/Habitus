@@ -8,11 +8,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 
-from LLMClient import Embedder, EmbeddingVector, Reranker
 from memory.editor.retrieval.index import MemoryVectorIndex, MemoryVectorMatch
 from memory.editor.retrieval.model import MemorySearchHit
 from memory.model import MemoryLevel
 from memory.uri import MemoryURI, MemoryURINodeType
+from ModelClient import Embedder, EmbeddingVector, Reranker
 
 
 class MemorySearchMode(str, Enum):
@@ -88,9 +88,7 @@ class MemorySemanticSearchEngine:
     ) -> None:
         if not callable(getattr(embedder, "embed_query", None)):
             raise TypeError("embedder must implement embed_query")
-        if not callable(getattr(index, "search", None)) or not callable(
-            getattr(index, "search_children", None)
-        ):
+        if not callable(getattr(index, "search", None)) or not callable(getattr(index, "search_children", None)):
             raise TypeError("index must implement vector search and child search")
         if reranker is not None and not callable(getattr(reranker, "rerank", None)):
             raise TypeError("reranker must implement rerank")
@@ -221,7 +219,9 @@ class MemorySemanticSearchEngine:
         )
         if not isinstance(scores, tuple) or len(scores) != len(matches):
             raise ValueError("reranker returned an unexpected hierarchy score count")
-        return tuple((match, self._score(score, "hierarchy rerank")) for match, score in zip(matches, scores, strict=True))
+        return tuple(
+            (match, self._score(score, "hierarchy rerank")) for match, score in zip(matches, scores, strict=True)
+        )
 
     async def _rerank_final(
         self,

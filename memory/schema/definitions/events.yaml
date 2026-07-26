@@ -1,7 +1,9 @@
 memory_type: event
 description: >-
   每个文件保存一个已经发生或明确确认的原子事件，例如决定、承诺、安排、状态变化或结果。
-  对话只是信息来源，不把聊天本身当作事件，也不把多个独立变化合并为宽泛主题。
+  event_date 表示事件或状态变化实际发生的日期，不是对应内容被说出的日期。对话只是信息来源，
+  不把聊天本身当作事件，也不把多个独立变化合并为宽泛主题。过去事件没有可确定日期时不生成
+  Event；未来尚未发生且仍需推进的事项进入 Intention，不把目标日期当成已发生事件日期。
 path_template: events/{event_date:%Y}/{event_date:%m}/{event_date:%d}/{event_name}.md
 operation_mode: add_only
 markdown_template: |
@@ -21,7 +23,10 @@ fields:
     required: true
     merge: immutable
     description: >-
-      事件对应的明确日历日期，使用 YYYY-MM-DD；相对时间必须先解析成具体日期。
+      事件或状态变化实际发生的明确日历日期，使用 YYYY-MM-DD，而不是 Conversation 消息日期。
+      明确日期直接使用；“昨天、上周一”等相对时间只能基于对应源消息 occurred_at 确定性换算；
+      在对话中刚作出的决定、确认或承诺使用该状态变化对应的消息日期。过去事件没有可确定日期时
+      不得用对话日期补齐，也不得生成该 Event。
   - name: event_name
     type: string
     role: address
