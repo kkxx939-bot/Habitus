@@ -30,6 +30,22 @@ class MemoryTransactionJournalError(RuntimeError):
     """提交日志无法安全创建、读取、推进或清理。"""
 
 
+@dataclass(frozen=True)
+class MemoryTransactionJournalConfig:
+    """事务恢复日志的单记录大小与目录枚举容量。"""
+
+    max_record_bytes: int = 32 * 1024 * 1024
+    max_records: int = 1_000
+
+    def __post_init__(self) -> None:
+        for name, value, maximum in (
+            ("max_record_bytes", self.max_record_bytes, 512 * 1024 * 1024),
+            ("max_records", self.max_records, 100_000),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+                raise ValueError(f"{name} must be between 1 and {maximum}")
+
+
 class MemoryTransactionJournalState(str, Enum):
     """耐久提交日志的状态。"""
 
@@ -109,17 +125,23 @@ class MemoryTransactionJournalRecord:
 class MemoryTransactionJournal:
     """在记忆树外保存可恢复的多文档提交清单。"""
 
-    _MAX_RECORD_BYTES = 32 * 1024 * 1024
-    _MAX_RECORDS = 1_000
-
-    def __init__(self, root: str | Path, codec: MemoryDocumentCodec) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        codec: MemoryDocumentCodec,
+        *,
+        config: MemoryTransactionJournalConfig | None = None,
+    ) -> None:
         requested = Path(root).expanduser().absolute()
         if requested.is_symlink():
             raise MemoryTransactionJournalError("transaction journal root cannot be a symbolic link")
         if not isinstance(codec, MemoryDocumentCodec):
             raise TypeError("codec must be a MemoryDocumentCodec")
+        if config is not None and not isinstance(config, MemoryTransactionJournalConfig):
+            raise TypeError("config must be MemoryTransactionJournalConfig")
         self.root = requested.resolve(strict=False)
         self.codec = codec
+        self.config = config or MemoryTransactionJournalConfig()
 
     def prepare(self, record: MemoryTransactionJournalRecord) -> None:
         """仅创建一次 PREPARED 日志，确保先有恢复信息再发布文档。"""
@@ -129,8 +151,6 @@ class MemoryTransactionJournal:
         if record.state is not MemoryTransactionJournalState.PREPARED:
             raise ValueError("new transaction journal must start in PREPARED state")
         encoded = self._encode(record)
-        if len(encoded) > self._MAX_RECORD_BYTES:
-            raise MemoryTransactionJournalError("transaction journal record is too large")
         try:
             atomic_create_bytes(
                 self._path(record.transaction_id),
@@ -183,7 +203,7 @@ class MemoryTransactionJournal:
             encoded = read_regular_bytes(
                 path,
                 artifact_root=self.root,
-                max_bytes=self._MAX_RECORD_BYTES,
+                max_bytes=self.config.max_record_bytes,
             )
             raw = json.loads(encoded)
             return self._parse(raw)
@@ -214,16 +234,12 @@ class MemoryTransactionJournal:
             raise MemoryTransactionJournalError("transaction journal root is not a safe directory")
         records: list[MemoryTransactionJournalRecord] = []
         for entry_count, child in enumerate(self.root.iterdir(), start=1):
-            if entry_count > self._MAX_RECORDS:
-                raise MemoryTransactionJournalError(
-                    "transaction journal entry count exceeds its bound"
-                )
+            if entry_count > self.config.max_records:
+                raise MemoryTransactionJournalError("transaction journal entry count exceeds its bound")
             if child.is_symlink() or not child.is_file():
                 raise MemoryTransactionJournalError("transaction journal contains an unsupported entry")
             temporary_destination = atomic_temporary_destination(child.name)
-            if temporary_destination is not None and re.fullmatch(
-                r"[0-9a-f]{32}\.json", temporary_destination
-            ):
+            if temporary_destination is not None and re.fullmatch(r"[0-9a-f]{32}\.json", temporary_destination):
                 continue
             if child.suffix != ".json":
                 raise MemoryTransactionJournalError("transaction journal contains an unsupported entry")
@@ -273,7 +289,10 @@ class MemoryTransactionJournal:
                 for entry in record.entries
             ],
         }
-        return canonical_json(payload).encode("utf-8")
+        encoded = canonical_json(payload).encode("utf-8")
+        if len(encoded) > self.config.max_record_bytes:
+            raise MemoryTransactionJournalError("transaction journal record exceeds its configured file bound")
+        return encoded
 
     def _parse(self, value: object) -> MemoryTransactionJournalRecord:
         if not isinstance(value, Mapping) or set(value) != {
@@ -356,6 +375,7 @@ class MemoryTransactionJournal:
 
 __all__ = [
     "MemoryTransactionJournal",
+    "MemoryTransactionJournalConfig",
     "MemoryTransactionJournalEntry",
     "MemoryTransactionJournalError",
     "MemoryTransactionJournalRecord",

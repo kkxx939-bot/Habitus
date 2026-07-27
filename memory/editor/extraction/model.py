@@ -10,7 +10,7 @@ from infrastructure.editor.snapshot import SnapshotBatch
 from memory.editor.candidate import MemoryCandidateBatch
 from memory.editor.mutation import MemoryMutationPlan
 from memory.editor.page_id import MemoryPageIdMap
-from memory.editor.reader import MemorySnapshotBatch
+from memory.snapshot import MemorySnapshotBatch
 from pre.conversation.messages.model import require_sha256
 
 _MAX_REASON_CHARS = 600
@@ -371,12 +371,8 @@ class MemoryExtractionResult:
             raise TypeError("old_memories must be a MemorySnapshotBatch")
         if self.mutations.read_set.old_memories != self.old_memories:
             raise ValueError("preliminary mutation plan does not use the extracted old-memory snapshots")
-        candidate_page_ids = {
-            candidate.page_id for candidate in self.candidates.iter_candidates()
-        }
-        mutation_page_ids = {
-            mutation.match.candidate.page_id for mutation in self.mutations.mutations
-        }
+        candidate_page_ids = {candidate.page_id for candidate in self.candidates.iter_candidates()}
+        mutation_page_ids = {mutation.match.candidate.page_id for mutation in self.mutations.mutations}
         if mutation_page_ids != candidate_page_ids:
             raise ValueError("preliminary mutation plan must cover every memory candidate exactly once")
         if not isinstance(self.page_ids, MemoryPageIdMap):

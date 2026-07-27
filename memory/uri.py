@@ -9,9 +9,9 @@ from urllib.parse import unquote
 from memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
 
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
-_UNRESERVED_ASCII = frozenset(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
-)
+_UNRESERVED_ASCII = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+
+
 class MemoryURIError(ValueError):
     """URI 不是规范的 ``memory://`` 地址，或无法映射到已确认记忆树。"""
 
@@ -240,11 +240,7 @@ class MemoryURI:
     def to_layer(self) -> tuple[MemoryDirectory, MemoryLevel]:
         """把侧车文件 URI 反解为目录与 L0/L1 层级。"""
 
-        if (
-            self._node_type is not MemoryURINodeType.LAYER
-            or self._directory is None
-            or self._level is None
-        ):
+        if self._node_type is not MemoryURINodeType.LAYER or self._directory is None or self._level is None:
             raise MemoryURIError("memory URI does not identify a semantic layer")
         return self._directory, self._level
 
@@ -347,10 +343,7 @@ def _address(segments: tuple[str, ...]) -> MemoryAddress | None:
 
 
 def _markdown_stem(filename: str) -> str:
-    if (
-        not filename.endswith(".md")
-        or MemoryLevel.from_sidecar_filename(filename) is not None
-    ):
+    if not filename.endswith(".md") or MemoryLevel.from_sidecar_filename(filename) is not None:
         raise MemoryURIError("memory L2 URI must end with a non-reserved .md filename")
     stem = filename[:-3]
     if not stem:
@@ -364,11 +357,7 @@ def _decode_segment(value: str) -> str:
         if value[index] != "%":
             index += 1
             continue
-        if (
-            index + 2 >= len(value)
-            or value[index + 1] not in _HEX_DIGITS
-            or value[index + 2] not in _HEX_DIGITS
-        ):
+        if index + 2 >= len(value) or value[index + 1] not in _HEX_DIGITS or value[index + 2] not in _HEX_DIGITS:
             raise MemoryURIError("memory URI contains malformed percent encoding")
         index += 3
     try:

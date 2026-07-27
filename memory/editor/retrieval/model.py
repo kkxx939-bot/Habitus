@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 from infrastructure.editor.snapshot import SnapshotBatch
-from memory.editor.reader import MemorySnapshotBatch
+from memory.retrieval.model import MemorySearchHit
+from memory.snapshot import MemorySnapshotBatch
 from memory.uri import MemoryURI, MemoryURINodeType
 
 
@@ -36,47 +36,6 @@ class MemoryRetrievalConfig:
         }.items():
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-
-
-@dataclass(frozen=True)
-class MemorySearchHit:
-    """语义搜索返回的一个 L2 URI，以及可审计的阶段分数。"""
-
-    uri: MemoryURI
-    score: float
-    vector_score: float | None = None
-    rerank_score: float | None = None
-
-    def __post_init__(self) -> None:
-        parsed = MemoryURI.parse(self.uri)
-        if parsed.node_type is not MemoryURINodeType.DOCUMENT:
-            raise ValueError("memory search hit must identify an L2 document")
-        object.__setattr__(self, "uri", parsed)
-        if isinstance(self.score, bool) or not isinstance(self.score, int | float):
-            raise TypeError("memory search hit score must be numeric")
-        score = float(self.score)
-        if not math.isfinite(score):
-            raise ValueError("memory search hit score must be finite")
-        object.__setattr__(self, "score", score)
-        vector_score = (
-            score
-            if self.vector_score is None
-            else _finite_score(
-                self.vector_score,
-                "memory search vector_score",
-            )
-        )
-        if not -1.0 <= vector_score <= 1.0:
-            raise ValueError("memory search vector_score must be between -1 and 1")
-        object.__setattr__(self, "vector_score", vector_score)
-        if self.rerank_score is not None:
-            rerank_score = _finite_score(
-                self.rerank_score,
-                "memory search rerank_score",
-            )
-            if score != rerank_score:
-                raise ValueError("memory search final score must equal its rerank score")
-            object.__setattr__(self, "rerank_score", rerank_score)
 
 
 @dataclass(frozen=True)
@@ -141,18 +100,8 @@ def _is_sha256(value: object) -> bool:
     )
 
 
-def _finite_score(value: object, label: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise TypeError(f"{label} must be numeric")
-    score = float(value)
-    if not math.isfinite(score):
-        raise ValueError(f"{label} must be finite")
-    return score
-
-
 __all__ = [
     "MemoryRelatedContext",
     "MemoryRetrievalConfig",
     "MemoryRetrievalError",
-    "MemorySearchHit",
 ]

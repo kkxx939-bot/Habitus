@@ -193,6 +193,27 @@ def atomic_replace_bytes(path: Path, encoded: bytes, *, artifact_root: str | Pat
         os.close(parent_descriptor)
 
 
+def durable_unlink(path: Path, *, artifact_root: str | Path) -> bool:
+    """耐久删除可信根目录内的普通文件；目标不存在时幂等返回 ``False``。"""
+
+    candidate = require_safe_artifact_path(artifact_root, path, label="durable deleted file")
+    if not candidate.parent.exists():
+        return False
+    parent_descriptor = _open_control_parent(candidate, artifact_root)
+    try:
+        try:
+            metadata = os.stat(candidate.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISREG(metadata.st_mode):
+            raise DurablePathIntegrityError("durable deleted path is not a regular file")
+        os.unlink(candidate.name, dir_fd=parent_descriptor)
+        os.fsync(parent_descriptor)
+        return True
+    finally:
+        os.close(parent_descriptor)
+
+
 def read_regular_bytes(
     path: Path,
     *,
@@ -237,5 +258,6 @@ __all__ = [
     "atomic_create_bytes",
     "atomic_replace_bytes",
     "atomic_temporary_destination",
+    "durable_unlink",
     "read_regular_bytes",
 ]

@@ -10,7 +10,23 @@ from memory.document import (
     MemoryLinkType,
     MemoryStoredLink,
 )
+from memory.indexing import (
+    MemoryVectorConsistencyReport,
+    MemoryVectorIndexConfig,
+    MemoryVectorIndexError,
+    PersistentMemoryVectorIndex,
+)
+from memory.intention import MemoryIntentionRecallScope
 from memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
+from memory.retrieval import (
+    MemoryMatchedMemory,
+    MemoryQueryPlan,
+    MemoryQueryResult,
+    MemoryRelatedMemory,
+    MemorySearchError,
+    MemorySearchResult,
+    SearchService,
+)
 from memory.schema import (
     MemoryFieldRole,
     MemoryFieldSchema,
@@ -52,11 +68,21 @@ __all__ = [
     "MemoryFieldSchema",
     "MemoryFieldType",
     "MemoryKind",
+    "MemoryIntentionRecallScope",
     "MemoryLevel",
+    "MemoryVectorConsistencyReport",
+    "MemoryVectorIndexConfig",
+    "MemoryVectorIndexError",
+    "MemoryMatchedMemory",
     "MemoryMergeStrategy",
     "MemoryOperationMode",
+    "MemoryQueryPlan",
+    "MemoryQueryResult",
+    "MemoryRelatedMemory",
     "MemorySchemaError",
     "MemorySchemaRegistry",
+    "MemorySearchError",
+    "MemorySearchResult",
     "MemoryOverviewGenerator",
     "MemorySemanticConfig",
     "MemorySemanticEntry",
@@ -71,5 +97,7 @@ __all__ = [
     "MemoryURI",
     "MemoryURIError",
     "MemoryURINodeType",
+    "PersistentMemoryVectorIndex",
+    "SearchService",
     "LLMMemoryOverviewGenerator",
 ]

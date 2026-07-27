@@ -5,6 +5,9 @@ description: >-
   假设、模型推测、偏好、历史事件或执行轨迹。每次更新完整覆盖为最新状态快照，不追加状态历史。
   completed 只用于关闭本次已经完整读取的旧 Intention，必须逐字复用旧 intent_name，禁止新建一条
   已完成事项；completed 文件继续保留，但不再生效。
+  状态只能根据当前完整 ConversationSegment、相关旧 Intention 和 Event 时间线更新；
+  经过多久不能自动完成、取消、删除或隐藏事项。系统单独维护 last_confirmed_at
+  及可配置复核提示，它们不属于业务字段，也不由模型输出。
 path_template: intentions/{intent_name}.md
 operation_mode: upsert
 omit_empty_sections: true

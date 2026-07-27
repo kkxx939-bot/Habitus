@@ -5,7 +5,7 @@ from __future__ import annotations
 from infrastructure.editor.snapshot import SnapshotBatch
 from memory.editor.candidate import MemoryCandidateBatch
 from memory.editor.mutation.model import MemoryMutationReadSet
-from memory.editor.reader import MemorySnapshotBatch, MemorySnapshotReader
+from memory.snapshot import MemorySnapshotBatch, MemorySnapshotReader
 from memory.uri import MemoryURI
 
 

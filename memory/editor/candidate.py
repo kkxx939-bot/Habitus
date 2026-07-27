@@ -18,7 +18,6 @@ from memory.editor.page_id import (
     validate_page_id,
     validate_unique_page_ids,
 )
-from memory.editor.reader import MemorySnapshotBatch
 from memory.model import MemoryAddress, MemoryKind
 from memory.schema import (
     MemoryFieldSchema,
@@ -27,6 +26,7 @@ from memory.schema import (
     MemorySchemaRegistry,
     MemoryTypeSchema,
 )
+from memory.snapshot import MemorySnapshotBatch
 from memory.uri import MemoryURI
 from pre.conversation.messages import (
     ConversationMessageRole,
@@ -103,9 +103,7 @@ class MemoryIdentityProposal:
                 MemoryIdentityProposalBasis.EXPLICIT_FORGET,
                 MemoryIdentityProposalBasis.FULLY_INVALIDATED,
             }:
-                raise MemoryCandidateError(
-                    "remove_memory proposal requires explicit_forget or fully_invalidated basis"
-                )
+                raise MemoryCandidateError("remove_memory proposal requires explicit_forget or fully_invalidated basis")
             if target_page_id is not None:
                 raise MemoryCandidateError("remove_memory proposal cannot contain a target_page_id")
 
@@ -188,6 +186,7 @@ class MemoryCandidate:
     page_id: int
     kind: MemoryKind
     fields: Mapping[str, Any]
+    confirmed: bool | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -203,6 +202,11 @@ class MemoryCandidate:
             fields = MemorySchemaRegistry.load_default().validate(kind, self.fields)
         except (TypeError, ValueError) as exc:
             raise MemoryCandidateError(f"invalid {kind.value} candidate: {exc}") from exc
+        if kind is MemoryKind.INTENTION:
+            if not isinstance(self.confirmed, bool):
+                raise MemoryCandidateError("Intention candidate requires a boolean confirmed field")
+        elif self.confirmed is not None:
+            raise MemoryCandidateError("only Intention candidate accepts the confirmed control field")
         _reject_empty_present_strings(fields, _KIND_TO_OUTPUT_FIELD[kind])
         object.__setattr__(self, "fields", immutable_snapshot(fields))
 
@@ -215,7 +219,10 @@ class MemoryCandidate:
     def to_dict(self) -> dict[str, Any]:
         """返回临时编号和严格业务字段。"""
 
-        return {"page_id": self.page_id, **canonicalize(self.fields)}
+        result = {"page_id": self.page_id, **canonicalize(self.fields)}
+        if self.kind is MemoryKind.INTENTION:
+            result["confirmed"] = self.confirmed
+        return result
 
 
 @dataclass(frozen=True)
@@ -367,13 +374,27 @@ class MemoryCandidateBatch:
                 if not isinstance(raw_item, Mapping):
                     raise MemoryCandidateError(f"{field_name} contains a non-object item")
                 page_id = _required_page_id(raw_item, field_name)
-                business_fields = {key: value for key, value in raw_item.items() if key != "page_id"}
+                confirmed: bool | None = None
+                control_fields = {"page_id"}
+                if kind is MemoryKind.INTENTION:
+                    if "confirmed" not in raw_item or not isinstance(raw_item["confirmed"], bool):
+                        raise MemoryCandidateError("intention candidate requires boolean confirmed")
+                    confirmed = raw_item["confirmed"]
+                    control_fields.add("confirmed")
+                business_fields = {key: item_value for key, item_value in raw_item.items() if key not in control_fields}
                 try:
                     fields = registry.validate(kind, business_fields)
                 except (TypeError, ValueError) as exc:
                     raise MemoryCandidateError(f"invalid {field_name} candidate: {exc}") from exc
                 _reject_empty_present_strings(fields, field_name)
-                candidates.append(MemoryCandidate(page_id=page_id, kind=kind, fields=fields))
+                candidates.append(
+                    MemoryCandidate(
+                        page_id=page_id,
+                        kind=kind,
+                        fields=fields,
+                        confirmed=confirmed,
+                    )
+                )
             parsed[field_name] = tuple(candidates)
         raw_relations = value[_RELATION_OUTPUT_FIELD]
         if not isinstance(raw_relations, list | tuple):
@@ -382,9 +403,7 @@ class MemoryCandidateBatch:
         raw_identity_proposals = value[_IDENTITY_OUTPUT_FIELD]
         if not isinstance(raw_identity_proposals, list | tuple):
             raise MemoryCandidateError("identity_proposals must be an array")
-        identity_proposals = tuple(
-            _parse_identity_proposal(raw_proposal) for raw_proposal in raw_identity_proposals
-        )
+        identity_proposals = tuple(_parse_identity_proposal(raw_proposal) for raw_proposal in raw_identity_proposals)
         return cls(
             profile=parsed["profile"],
             preferences=parsed["preferences"],
@@ -453,21 +472,14 @@ class MemoryCandidateBatch:
             if proposal.source_page_id not in page_ids.page_ids():
                 raise MemoryCandidateError("identity proposal source is not a complete old-memory page_id")
             if proposal.source_page_id in candidate_page_ids:
-                raise MemoryCandidateError(
-                    "identity proposal source cannot also appear as a memory candidate"
-                )
-            if (
-                proposal.target_page_id is not None
-                and proposal.target_page_id not in available_page_ids
-            ):
+                raise MemoryCandidateError("identity proposal source cannot also appear as a memory candidate")
+            if proposal.target_page_id is not None and proposal.target_page_id not in available_page_ids:
                 raise MemoryCandidateError("identity proposal references an unknown target_page_id")
             if (
                 proposal.proposal_type is MemoryIdentityProposalType.SAME_MEMORY
                 and proposal.target_page_id not in candidate_page_ids
             ):
-                raise MemoryCandidateError(
-                    "same_memory target must also appear as a fully planned memory candidate"
-                )
+                raise MemoryCandidateError("same_memory target must also appear as a fully planned memory candidate")
 
     def _validate_identity_relation_separation(self) -> None:
         """待退休来源不能同时参与显式关系变更。"""
@@ -475,9 +487,7 @@ class MemoryCandidateBatch:
         retired_sources = {proposal.source_page_id for proposal in self.identity_proposals}
         for relation in self.relations:
             if relation.from_page_id in retired_sources or relation.to_page_id in retired_sources:
-                raise MemoryCandidateError(
-                    "identity proposal source cannot also be referenced by a relation candidate"
-                )
+                raise MemoryCandidateError("identity proposal source cannot also be referenced by a relation candidate")
 
     def _validate_relation_removals(
         self,
@@ -551,6 +561,8 @@ class MemoryCandidateBatch:
         for candidate in self.intentions:
             if candidate.fields.get("status") != "completed":
                 continue
+            if candidate.confirmed is not True:
+                raise MemoryCandidateError("completed intention requires explicit confirmation in this conversation")
             uri = str(MemoryURI.from_address(candidate.address))
             snapshot = old_memories.get(uri)
             if snapshot is None or not snapshot.exists or snapshot.value is None:
@@ -589,12 +601,23 @@ def _candidate_item_schema(schema: MemoryTypeSchema) -> dict[str, object]:
         },
         **{field.name: _candidate_field_schema(field) for field in schema.fields},
     }
+    required = ["page_id", *(field.name for field in schema.fields if field.required)]
+    if schema.kind is MemoryKind.INTENTION:
+        properties["confirmed"] = {
+            "type": "boolean",
+            "description": (
+                "仅表示当前完整 ConversationSegment 是否明确创建、更新或重新确认了此事项。"
+                "只是为 same_memory 保留目标、但当前对话没有确认时必须为 false；"
+                "系统据此维护 last_confirmed_at，模型不得输出时间戳。"
+            ),
+        }
+        required.append("confirmed")
     item: dict[str, object] = {
         "type": "object",
         "description": schema.description,
         "additionalProperties": False,
         "properties": properties,
-        "required": ["page_id", *(field.name for field in schema.fields if field.required)],
+        "required": required,
     }
     minimum = schema.min_non_empty_content_fields
     if minimum:

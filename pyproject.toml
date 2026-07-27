@@ -6,19 +6,20 @@ build-backend = "setuptools.build_meta"
 name = "memoryos"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["PyYAML>=6.0.2,<7"]
+dependencies = ["PyYAML>=6.0.2,<7", "httpx>=0.28,<1"]
 
 [project.optional-dependencies]
 model = [
-    "httpx>=0.28,<1",
     "json-repair>=0.25.0,<1",
     "jsonschema>=4,<5",
 ]
+vikingdb = ["volcengine>=1.0.216"]
 
 [tool.setuptools.packages.find]
-include = ["ModelClient*", "pre*", "memory*", "infrastructure*", "foundation*"]
+include = ["Config*", "Runtime*", "ModelClient*", "pre*", "memory*", "infrastructure*", "foundation*"]
 
 [tool.setuptools.package-data]
+"Config" = ["*.yaml"]
 "memory.schema.definitions" = ["*.yaml"]
 
 [tool.ruff]
@@ -39,5 +40,5 @@ warn_redundant_casts = true
 [tool.pyright]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
-include = ["ModelClient", "pre", "memory", "infrastructure", "foundation"]
+include = ["Config", "Runtime", "ModelClient", "pre", "memory", "infrastructure", "foundation"]
 reportUnsupportedDunderAll = false

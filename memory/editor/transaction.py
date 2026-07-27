@@ -22,7 +22,6 @@ from memory.editor.mutation.model import (
     MemoryMutationAction,
     MemoryMutationPlan,
 )
-from memory.editor.reader import MemorySnapshotBatch, MemorySnapshotReader
 from memory.editor.transaction_log import (
     MemoryTransactionJournal,
     MemoryTransactionJournalEntry,
@@ -30,6 +29,8 @@ from memory.editor.transaction_log import (
     MemoryTransactionJournalRecord,
     MemoryTransactionJournalState,
 )
+from memory.model import MemoryKind
+from memory.snapshot import MemorySnapshotBatch, MemorySnapshotReader
 from memory.tree import MemoryTree
 from memory.uri import MemoryURI
 
@@ -210,11 +211,20 @@ class MemoryCommitWrite:
                 raise ValueError("existing commit write must advance one revision")
             if self.after.metadata.created_at != self.before.value.metadata.created_at:
                 raise ValueError("existing commit write cannot change created_at")
+            before_confirmation = self.before.value.metadata.last_confirmed_at
+            after_confirmation = self.after.metadata.last_confirmed_at
+            if after_confirmation != before_confirmation and after_confirmation != self.after.metadata.updated_at:
+                raise ValueError("existing Intention confirmation must refresh to the commit timestamp")
         else:
             if self.after.metadata.revision != 1:
                 raise ValueError("new commit write must start at revision 1")
             if self.after.metadata.created_at != self.after.metadata.updated_at:
                 raise ValueError("new commit write timestamps must start equal")
+            if (
+                self.after.kind is MemoryKind.INTENTION
+                and self.after.metadata.last_confirmed_at != self.after.metadata.created_at
+            ):
+                raise ValueError("new Intention confirmation must start at its creation timestamp")
 
     @property
     def uri(self) -> MemoryURI:
@@ -465,11 +475,17 @@ class MemoryCommitTransaction:
 
             if before.exists:
                 assert isinstance(before.value, MemoryDocument)
-                metadata = before.value.metadata.next_revision(timestamp)
+                metadata = before.value.metadata.next_revision(
+                    timestamp,
+                    refresh_confirmation=(mutation is not None and mutation.confirms_intention),
+                )
             else:
                 if mutation is None or mutation.action is not MemoryMutationAction.CREATE:
                     raise MemoryCommitError("missing write target requires a CREATE mutation")
-                metadata = MemoryDocumentMetadata.initial(timestamp)
+                metadata = MemoryDocumentMetadata.initial(
+                    timestamp,
+                    confirmed=kind is MemoryKind.INTENTION,
+                )
             after = self.tree.document_codec.build(
                 kind,
                 fields,

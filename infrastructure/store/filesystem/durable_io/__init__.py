@@ -5,6 +5,7 @@ from infrastructure.store.filesystem.durable_io.atomic_file import (
     atomic_create_bytes,
     atomic_replace_bytes,
     atomic_temporary_destination,
+    durable_unlink,
     read_regular_bytes,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "atomic_create_bytes",
     "atomic_replace_bytes",
     "atomic_temporary_destination",
+    "durable_unlink",
     "read_regular_bytes",
 ]

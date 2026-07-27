@@ -66,9 +66,7 @@ class MemoryEditor:
             raise TypeError("relationship_editor must be a MemoryRelationshipEditor")
         self.extraction_loop = extraction_loop
         self.transaction = transaction
-        self.relation_reader = relation_reader or MemoryRelationReadSetLoader(
-            extraction_loop.mutation_reader.reader
-        )
+        self.relation_reader = relation_reader or MemoryRelationReadSetLoader(extraction_loop.mutation_reader.reader)
         self.relationship_editor = relationship_editor or MemoryRelationshipEditor()
 
     async def plan(self, segment: ConversationSegment) -> MemoryEditorPlan:
@@ -115,6 +113,23 @@ class MemoryEditor:
         """先完成全部语义规划，再由唯一事务发布。"""
 
         plan = await self.plan(segment)
+        return self.commit(
+            plan,
+            transaction_id=transaction_id,
+            retain_transaction_journal=retain_transaction_journal,
+        )
+
+    def commit(
+        self,
+        plan: MemoryEditorPlan,
+        *,
+        transaction_id: str | None = None,
+        retain_transaction_journal: bool = False,
+    ) -> MemoryCommitResult:
+        """发布已经完成全部语义审查和关系规划的统一计划。"""
+
+        if not isinstance(plan, MemoryEditorPlan):
+            raise TypeError("plan must be MemoryEditorPlan")
         return self.transaction.commit(
             plan.commit,
             transaction_id=transaction_id,

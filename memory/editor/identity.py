@@ -311,12 +311,8 @@ class MemoryIdentityPlanner:
 
         base = MemoryFinalIdentityMap.from_mutation_plan(mutations, page_ids)
         entries = {entry.page_id: entry for entry in base.entries}
-        mutation_by_page = {
-            mutation.match.candidate.page_id: mutation for mutation in mutations.mutations
-        }
-        proposal_sources = {
-            proposal.source_page_id for proposal in batch.identity_proposals
-        }
+        mutation_by_page = {mutation.match.candidate.page_id: mutation for mutation in mutations.mutations}
+        proposal_sources = {proposal.source_page_id for proposal in batch.identity_proposals}
         proposal_targets = {
             proposal.target_page_id
             for proposal in batch.identity_proposals
@@ -326,9 +322,7 @@ class MemoryIdentityPlanner:
             raise MemoryIdentityPlanningError("identity proposals cannot form merge chains or cycles")
 
         relation_page_ids = {
-            page_id
-            for relation in batch.relations
-            for page_id in (relation.from_page_id, relation.to_page_id)
+            page_id for relation in batch.relations for page_id in (relation.from_page_id, relation.to_page_id)
         }
         if proposal_sources & relation_page_ids:
             raise MemoryIdentityPlanningError(
@@ -338,13 +332,9 @@ class MemoryIdentityPlanner:
         for proposal in sorted(batch.identity_proposals, key=lambda item: item.source_page_id):
             source = entries.get(proposal.source_page_id)
             if source is None or source.source_uri is None:
-                raise MemoryIdentityPlanningError(
-                    "identity proposal source must be a complete old-memory identity"
-                )
+                raise MemoryIdentityPlanningError("identity proposal source must be a complete old-memory identity")
             if proposal.source_page_id in mutation_by_page:
-                raise MemoryIdentityPlanningError(
-                    "identity proposal source cannot also receive a content mutation"
-                )
+                raise MemoryIdentityPlanningError("identity proposal source cannot also receive a content mutation")
             source_document = self._old_document(mutations, source.source_uri)
 
             if proposal.proposal_type is MemoryIdentityProposalType.REMOVE_MEMORY:
@@ -378,9 +368,7 @@ class MemoryIdentityPlanner:
             if source_document.kind is not target_kind:
                 raise MemoryIdentityPlanningError("same_memory can only merge nodes of the same memory type")
             if source_document.kind not in self._MERGE_KINDS:
-                raise MemoryIdentityPlanningError(
-                    "automatic same_memory merge is not allowed for this memory type"
-                )
+                raise MemoryIdentityPlanningError("automatic same_memory merge is not allowed for this memory type")
             if target.disposition is MemoryNodeDisposition.NOOP:
                 assert target_document is not None
                 if not self._content_fields_equal(
@@ -412,9 +400,7 @@ class MemoryIdentityPlanner:
     ) -> MemoryDocument:
         snapshot = mutations.read_set.old_memories.get(str(uri))
         if snapshot is None or not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
-            raise MemoryIdentityPlanningError(
-                "identity proposal source requires a complete extracted old snapshot"
-            )
+            raise MemoryIdentityPlanningError("identity proposal source requires a complete extracted old snapshot")
         return snapshot.value
 
     def _target_state(
@@ -424,11 +410,7 @@ class MemoryIdentityPlanner:
         target_page_id: int,
     ) -> tuple[MemoryDocument | None, Mapping[str, object], MemoryKind]:
         mutation = next(
-            (
-                item
-                for item in mutations.mutations
-                if item.match.candidate.page_id == target_page_id
-            ),
+            (item for item in mutations.mutations if item.match.candidate.page_id == target_page_id),
             None,
         )
         if mutation is None:
@@ -447,8 +429,7 @@ class MemoryIdentityPlanner:
         schema = self.registry.get(target_kind)
         names = tuple(field.name for field in schema.content_fields)
         return all(
-            (name in source.fields) == (name in target_fields)
-            and source.fields.get(name) == target_fields.get(name)
+            (name in source.fields) == (name in target_fields) and source.fields.get(name) == target_fields.get(name)
             for name in names
         )
 

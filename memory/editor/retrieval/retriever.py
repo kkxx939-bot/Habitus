@@ -4,34 +4,20 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import PurePosixPath
-from typing import Protocol
 
-from infrastructure.editor.snapshot import SnapshotBatch
-from memory.document import MemoryDocument
-from memory.editor.reader import MemorySnapshotBatch, MemorySnapshotReader
 from memory.editor.retrieval.model import (
     MemoryRelatedContext,
     MemoryRetrievalConfig,
     MemoryRetrievalError,
-    MemorySearchHit,
 )
 from memory.editor.retrieval.query import ConversationSegmentQueryBuilder
+from memory.intention import MemoryIntentionRecallScope
 from memory.model import MemoryAddress, MemoryDirectory, MemoryKind
+from memory.retrieval import MemorySearchHit, MemorySemanticSearch
 from memory.schema import MemoryOperationMode, MemorySchemaRegistry
+from memory.snapshot import MemorySnapshotReader
 from memory.uri import MemoryURI, MemoryURINodeType
 from pre.conversation import ConversationMessageRole, ConversationSegment
-
-
-class MemorySemanticSearch(Protocol):
-    """由具体索引实现的记忆领域语义搜索契约。"""
-
-    async def search(
-        self,
-        query: str,
-        *,
-        roots: tuple[MemoryURI, ...],
-        limit: int,
-    ) -> Sequence[MemorySearchHit]: ...
 
 
 class MemoryRelatedRetriever:
@@ -83,7 +69,6 @@ class MemoryRelatedRetriever:
             )
         )
         snapshots = self.snapshot_reader.read_many(selected)
-        search_hits, snapshots = self._exclude_completed_intentions(search_hits, snapshots)
         return MemoryRelatedContext(
             conversation_id=segment.conversation_id,
             segment_id=segment.segment_id,
@@ -94,39 +79,15 @@ class MemoryRelatedRetriever:
             snapshots=snapshots,
         )
 
-    @staticmethod
-    def _exclude_completed_intentions(
-        search_hits: tuple[MemorySearchHit, ...],
-        snapshots: MemorySnapshotBatch,
-    ) -> tuple[tuple[MemorySearchHit, ...], MemorySnapshotBatch]:
-        """在领域边界再次排除已完成事项，防止自定义索引绕过默认规则。"""
-
-        completed: set[str] = set()
-        for hit in search_hits:
-            snapshot = snapshots.get(str(hit.uri))
-            if snapshot is None or not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
-                continue
-            if (
-                snapshot.value.kind is MemoryKind.INTENTION
-                and snapshot.value.fields.get("status") == "completed"
-            ):
-                completed.add(snapshot.identity)
-        if not completed:
-            return search_hits, snapshots
-        retained = tuple(snapshot for snapshot in snapshots.snapshots if snapshot.identity not in completed)
-        return (
-            tuple(hit for hit in search_hits if str(hit.uri) not in completed),
-            SnapshotBatch(
-                snapshots=retained,
-                total_bytes=sum(snapshot.size_bytes for snapshot in retained),
-            ),
-        )
-
     def _schema_read_plan(self) -> tuple[tuple[MemoryURI, ...], tuple[MemoryURI, ...]]:
         fixed: set[MemoryURI] = set()
         roots: set[MemoryURI] = set()
         for schema in self.schema_registry.all():
-            if schema.operation_mode is MemoryOperationMode.ADD_ONLY:
+            # Event 虽只追加，仍是 Intention 状态判断的必要时间线。
+            if (
+                schema.operation_mode is MemoryOperationMode.ADD_ONLY
+                and schema.kind is not MemoryKind.EVENT
+            ):
                 continue
             if schema.kind is MemoryKind.PROFILE:
                 fixed.add(MemoryURI.from_address(MemoryAddress.profile()))
@@ -172,6 +133,8 @@ class MemoryRelatedRetriever:
             raw_hits = await self.semantic_search.search(
                 query,
                 roots=roots,
+                kinds=(),
+                intention_scope=MemoryIntentionRecallScope.ALL,
                 limit=self.config.search_limit,
             )
         except Exception as exc:

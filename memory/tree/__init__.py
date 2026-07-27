@@ -1,6 +1,7 @@
 """长期记忆树的地址模型与 Markdown 存储入口。"""
 
 from memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
+from memory.tree.config import MemoryTreeConfig
 from memory.tree.store import MemoryTree, MemoryTreeIntegrityError
 
 __all__ = [
@@ -9,5 +10,6 @@ __all__ = [
     "MemoryKind",
     "MemoryLevel",
     "MemoryTree",
+    "MemoryTreeConfig",
     "MemoryTreeIntegrityError",
 ]

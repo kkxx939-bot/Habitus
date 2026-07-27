@@ -21,6 +21,7 @@ from memory.document import (
     MemoryDocumentLimitError,
 )
 from memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
+from memory.tree.config import MemoryTreeConfig
 from memory.uri import MemoryURI, MemoryURINodeType
 
 
@@ -32,7 +33,6 @@ class MemoryTree:
     """安全持久化结构化 L2 文档和可重建的目录语义层。"""
 
     _STATIC_DIRECTORIES = ("preferences", "entities", "tools", "events", "intentions")
-    _MAX_CHILDREN_PER_DIRECTORY = 10_000
 
     def __init__(
         self,
@@ -40,6 +40,7 @@ class MemoryTree:
         *,
         document_codec: MemoryDocumentCodec | None = None,
         document_config: MemoryDocumentConfig | None = None,
+        tree_config: MemoryTreeConfig | None = None,
     ) -> None:
         requested = Path(root).expanduser().absolute()
         if requested.is_symlink():
@@ -54,7 +55,10 @@ class MemoryTree:
         self._document_codec = document_codec
         if document_config is not None and not isinstance(document_config, MemoryDocumentConfig):
             raise TypeError("document_config must be MemoryDocumentConfig")
+        if tree_config is not None and not isinstance(tree_config, MemoryTreeConfig):
+            raise TypeError("tree_config must be MemoryTreeConfig")
         self.document_config = document_config or MemoryDocumentConfig()
+        self.tree_config = tree_config or MemoryTreeConfig()
 
     @property
     def document_codec(self) -> MemoryDocumentCodec:
@@ -264,24 +268,16 @@ class MemoryTree:
             profile = self.root / "profile.md"
             addresses = (MemoryAddress.profile(),) if profile.exists() else ()
         elif parts == ("preferences",):
-            addresses = tuple(
-                MemoryAddress.preference(name) for name in self._markdown_names(path)
-            )
+            addresses = tuple(MemoryAddress.preference(name) for name in self._markdown_names(path))
         elif parts[0] == "entities" and len(parts) == 2:
-            addresses = tuple(
-                MemoryAddress.entity(parts[1], name) for name in self._markdown_names(path)
-            )
+            addresses = tuple(MemoryAddress.entity(parts[1], name) for name in self._markdown_names(path))
         elif parts == ("tools",):
             addresses = tuple(MemoryAddress.tool(name) for name in self._markdown_names(path))
         elif parts[0] == "events" and len(parts) == 4:
             event_date = date(int(parts[1]), int(parts[2]), int(parts[3]))
-            addresses = tuple(
-                MemoryAddress.event(event_date, name) for name in self._markdown_names(path)
-            )
+            addresses = tuple(MemoryAddress.event(event_date, name) for name in self._markdown_names(path))
         elif parts == ("intentions",):
-            addresses = tuple(
-                MemoryAddress.intention(name) for name in self._markdown_names(path)
-            )
+            addresses = tuple(MemoryAddress.intention(name) for name in self._markdown_names(path))
         else:
             if any(child.is_file() for child in self._content_children(path)):
                 raise MemoryTreeIntegrityError("memory branch directory cannot contain L2 files")
@@ -306,13 +302,9 @@ class MemoryTree:
         if not parts:
             children = tuple(MemoryDirectory((name,)) for name in self._STATIC_DIRECTORIES)
         elif parts == ("entities",):
-            children = tuple(
-                MemoryDirectory.entities(child.name) for child in self._directories(path)
-            )
+            children = tuple(MemoryDirectory.entities(child.name) for child in self._directories(path))
         elif parts and parts[0] == "events" and len(parts) < 4:
-            children = tuple(
-                MemoryDirectory((*parts, child.name)) for child in self._directories(path)
-            )
+            children = tuple(MemoryDirectory((*parts, child.name)) for child in self._directories(path))
         else:
             if any(child.is_dir() for child in self._content_children(path)):
                 raise MemoryTreeIntegrityError("memory leaf directory cannot contain subdirectories")
@@ -376,10 +368,7 @@ class MemoryTree:
                 yield MemoryAddress.profile()
             return
         if kind is MemoryKind.PREFERENCE:
-            yield from (
-                MemoryAddress.preference(name)
-                for name in self._markdown_names(self.root / "preferences")
-            )
+            yield from (MemoryAddress.preference(name) for name in self._markdown_names(self.root / "preferences"))
             return
         if kind is MemoryKind.ENTITY:
             for category_path in self._directories(self.root / "entities"):
@@ -451,7 +440,7 @@ class MemoryTree:
             if child.is_symlink():
                 raise MemoryTreeIntegrityError("memory tree cannot contain symbolic links")
             children.append(child)
-            if len(children) > self._MAX_CHILDREN_PER_DIRECTORY:
+            if len(children) > self.tree_config.max_children_per_directory:
                 raise MemoryTreeIntegrityError("memory directory exceeded its enumeration bound")
         return tuple(sorted(children, key=lambda item: item.name))
 

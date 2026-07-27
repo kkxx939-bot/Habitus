@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal, TypeAlias, cast
+from typing import Literal, TypeAlias
 from urllib.parse import urlsplit
 
 ModelCapability = Literal["chat", "embedding", "rerank"]
@@ -18,7 +17,6 @@ ChatStructuredOutputMode = Literal["none", "json_object", "json_schema"]
 _PROVIDER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$")
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_ENV_PREFIX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -98,46 +96,6 @@ class ProviderConfig:
             raise ValueError(f"model extra_body cannot override route identity: {sorted(reserved)}")
         object.__setattr__(self, "extra_body", extra_body)
 
-    @classmethod
-    def from_env(
-        cls,
-        prefix: str,
-        *,
-        environ: Mapping[str, str] | None = None,
-    ) -> ProviderConfig:
-        """从统一前缀读取路由元数据；密钥值仍留在环境中。"""
-
-        normalized_prefix = _env_prefix(prefix)
-        values = os.environ if environ is None else environ
-        return cls(
-            provider=values.get(f"{normalized_prefix}_PROVIDER", ""),
-            adapter=values.get(f"{normalized_prefix}_ADAPTER", ""),
-            model=values.get(f"{normalized_prefix}_MODEL", ""),
-            base_url=values.get(f"{normalized_prefix}_BASE_URL", ""),
-            api_key_env=values.get(f"{normalized_prefix}_API_KEY_ENV", ""),
-            timeout_seconds=_env_float(values, f"{normalized_prefix}_TIMEOUT_SECONDS", 30.0),
-            max_retries=_env_int(values, f"{normalized_prefix}_MAX_RETRIES", 2),
-            retry_base_delay_seconds=_env_float(
-                values,
-                f"{normalized_prefix}_RETRY_BASE_DELAY_SECONDS",
-                0.5,
-            ),
-            retry_max_delay_seconds=_env_float(
-                values,
-                f"{normalized_prefix}_RETRY_MAX_DELAY_SECONDS",
-                30.0,
-            ),
-            max_concurrent=_env_int(values, f"{normalized_prefix}_MAX_CONCURRENT", 16),
-            max_response_bytes=_env_int(
-                values,
-                f"{normalized_prefix}_MAX_RESPONSE_BYTES",
-                8 * 1024 * 1024,
-            ),
-            extra_headers=_env_string_mapping(values, f"{normalized_prefix}_EXTRA_HEADERS_JSON"),
-            extra_body=_env_json_mapping(values, f"{normalized_prefix}_EXTRA_BODY_JSON"),
-        )
-
-
 @dataclass(frozen=True)
 class ChatModelConfig:
     """对话生成能力配置；供应商专用字段只能放入 route.extra_body。"""
@@ -167,32 +125,6 @@ class ChatModelConfig:
     @property
     def capability(self) -> Literal["chat"]:
         return "chat"
-
-    @classmethod
-    def from_env(
-        cls,
-        prefix: str = "M2BOS_CHAT",
-        *,
-        environ: Mapping[str, str] | None = None,
-    ) -> ChatModelConfig:
-        """加载一条完整对话模型配置，默认使用 m2bOS 的 Chat 前缀。"""
-
-        normalized_prefix = _env_prefix(prefix)
-        values = os.environ if environ is None else environ
-        mode = values.get(
-            f"{normalized_prefix}_STRUCTURED_OUTPUT_MODE",
-            "none",
-        ).strip().lower()
-        return cls(
-            route=ProviderConfig.from_env(normalized_prefix, environ=values),
-            max_output_tokens=_env_optional_int(
-                values,
-                f"{normalized_prefix}_MAX_OUTPUT_TOKENS",
-            ),
-            structured_output_mode=cast(ChatStructuredOutputMode, mode),
-            reasoning=_env_bool(values, f"{normalized_prefix}_REASONING", False),
-        )
-
 
 @dataclass(frozen=True)
 class EmbeddingModelConfig:
@@ -228,35 +160,6 @@ class EmbeddingModelConfig:
     @property
     def capability(self) -> Literal["embedding"]:
         return "embedding"
-
-    @classmethod
-    def from_env(
-        cls,
-        prefix: str = "M2BOS_EMBEDDING",
-        *,
-        environ: Mapping[str, str] | None = None,
-    ) -> EmbeddingModelConfig:
-        """加载一条完整向量配置，默认使用 m2bOS 的 embedding 前缀。"""
-
-        normalized_prefix = _env_prefix(prefix)
-        values = os.environ if environ is None else environ
-        input_mode = values.get(f"{normalized_prefix}_INPUT_MODE", "text").strip().lower()
-        return cls(
-            route=ProviderConfig.from_env(normalized_prefix, environ=values),
-            dimension=_env_int(values, f"{normalized_prefix}_DIMENSION", 0),
-            input_mode=cast(EmbeddingInputMode, input_mode),
-            max_batch_size=_env_int(values, f"{normalized_prefix}_MAX_BATCH_SIZE", 32),
-            max_input_chars=_env_int(values, f"{normalized_prefix}_MAX_INPUT_CHARS", 16_000),
-            query_parameters=_env_json_mapping(
-                values,
-                f"{normalized_prefix}_QUERY_PARAMETERS_JSON",
-            ),
-            document_parameters=_env_json_mapping(
-                values,
-                f"{normalized_prefix}_DOCUMENT_PARAMETERS_JSON",
-            ),
-        )
-
 
 @dataclass(frozen=True)
 class RerankModelConfig:
@@ -349,72 +252,6 @@ def _json_mapping(value: object, label: str) -> dict[str, object]:
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{label} must contain JSON-serializable values") from exc
     return result
-
-
-def _env_prefix(value: object) -> str:
-    prefix = str(value or "").strip().upper()
-    if not prefix or not _ENV_PREFIX.fullmatch(prefix):
-        raise ValueError("model environment prefix must be a normalized environment name")
-    return prefix
-
-
-def _env_int(environ: Mapping[str, str], name: str, default: int) -> int:
-    raw = environ.get(name)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be an integer") from exc
-
-
-def _env_float(environ: Mapping[str, str], name: str, default: float) -> float:
-    raw = environ.get(name)
-    if raw is None:
-        return default
-    try:
-        return float(raw)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be numeric") from exc
-
-
-def _env_optional_int(environ: Mapping[str, str], name: str) -> int | None:
-    raw = environ.get(name)
-    if raw is None or not raw.strip():
-        return None
-    try:
-        return int(raw)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be an integer") from exc
-
-
-def _env_bool(environ: Mapping[str, str], name: str, default: bool) -> bool:
-    raw = environ.get(name)
-    if raw is None:
-        return default
-    normalized = raw.strip().casefold()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    raise ValueError(f"{name} must be a boolean")
-
-
-def _env_json_mapping(environ: Mapping[str, str], name: str) -> dict[str, object]:
-    raw = environ.get(name)
-    if raw is None or not raw.strip():
-        return {}
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"{name} must contain valid JSON") from exc
-    if not isinstance(value, Mapping):
-        raise ValueError(f"{name} must contain an object")
-    return dict(value)
-
-
-def _env_string_mapping(environ: Mapping[str, str], name: str) -> dict[str, str]:
-    return _string_mapping(_env_json_mapping(environ, name), name)
 
 
 __all__ = [

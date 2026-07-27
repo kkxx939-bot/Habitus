@@ -2,7 +2,6 @@
 
 from memory.editor.extraction.config import MemoryExtractionConfig
 from memory.editor.extraction.context import MemoryExtractionContext
-from memory.editor.extraction.factory import build_memory_extraction_loop
 from memory.editor.extraction.loop import MemoryExtractionLoop
 from memory.editor.extraction.model import (
     MemoryCandidateRejectedError,
@@ -37,5 +36,4 @@ __all__ = [
     "MemoryRetrievalStatus",
     "MemoryReviewDecision",
     "MemoryReviewIssueCode",
-    "build_memory_extraction_loop",
 ]

@@ -141,9 +141,7 @@ class MemoryExtractionLoop:
                 feedback = (self._context_issue(exc),)
                 previous_candidates = candidates
                 if attempt >= maximum_attempts:
-                    raise MemoryExtractionError(
-                        "memory candidate batch failed preliminary mutation planning"
-                    ) from exc
+                    raise MemoryExtractionError("memory candidate batch failed preliminary mutation planning") from exc
                 continue
 
             review_response = await self.client.complete_model_async(

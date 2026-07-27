@@ -9,6 +9,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from foundation.ids import require_safe_path_segment
+from pre.conversation import ConversationRangeSummaryStage
 
 _SEGMENT_ID = re.compile(r"^(?P<start>[0-9]{12})-(?P<end>[0-9]{12})$")
 _MAX_SEGMENT_SEQUENCE = 999_999_999_999
@@ -47,11 +48,15 @@ class ConversationLayout:
         self.root = requested.resolve(strict=False)
         self._root_key = hashlib.sha256(str(self.root).encode("utf-8")).hexdigest()[:24]
 
+    def messages_root(self) -> Path:
+        """返回按日期组织 Conversation 消息目录的可信根。"""
+
+        return self._inside_root(self.root / "messages")
+
     def conversation_directory(self, address: ConversationAddress) -> Path:
         resolved = self._address(address)
         path = (
-            self.root
-            / "messages"
+            self.messages_root()
             / f"{resolved.started_on.year:04d}"
             / f"{resolved.started_on.month:02d}"
             / f"{resolved.started_on.day:02d}"
@@ -62,6 +67,11 @@ class ConversationLayout:
     def live_path(self, address: ConversationAddress) -> Path:
         return self._inside_root(self.conversation_directory(address) / "live.jsonl")
 
+    def state_path(self, address: ConversationAddress) -> Path:
+        """返回不依赖 History 保留情况的 Conversation 耐久游标路径。"""
+
+        return self._inside_root(self.conversation_directory(address) / "state.json")
+
     def history_directory(self, address: ConversationAddress) -> Path:
         return self._inside_root(self.conversation_directory(address) / "history")
 
@@ -69,12 +79,48 @@ class ConversationLayout:
         self.segment_range(segment_id)
         return self._inside_root(self.history_directory(address) / f"{segment_id}.jsonl")
 
+    def summary_directory(self, address: ConversationAddress) -> Path:
+        resolved = self._address(address)
+        path = (
+            self.root
+            / "summaries"
+            / f"{resolved.started_on.year:04d}"
+            / f"{resolved.started_on.month:02d}"
+            / f"{resolved.started_on.day:02d}"
+            / resolved.conversation_id
+        )
+        return self._inside_root(path)
+
+    def summary_path(self, address: ConversationAddress, segment_id: str) -> Path:
+        """返回与不可变 history 片段一一对应的摘要路径。"""
+
+        self.segment_range(segment_id)
+        return self._inside_root(self.summary_directory(address) / f"{segment_id}.json")
+
+    def range_summary_directory(
+        self,
+        address: ConversationAddress,
+        stage: ConversationRangeSummaryStage,
+    ) -> Path:
+        """返回普通范围摘要或归档范围摘要的独立不可变目录。"""
+
+        if not isinstance(stage, ConversationRangeSummaryStage):
+            raise TypeError("range summary stage must be ConversationRangeSummaryStage")
+        name = "ranges" if stage is ConversationRangeSummaryStage.RANGE else "archive_ranges"
+        return self._inside_root(self.summary_directory(address) / name)
+
+    def range_summary_path(
+        self,
+        address: ConversationAddress,
+        stage: ConversationRangeSummaryStage,
+        range_id: str,
+    ) -> Path:
+        self.segment_range(range_id)
+        return self._inside_root(self.range_summary_directory(address, stage) / f"{range_id}.json")
+
     def lock_key(self, address: ConversationAddress) -> str:
         resolved = self._address(address)
-        return (
-            f"conversation:{self._root_key}:"
-            f"{resolved.started_on.isoformat()}:{resolved.conversation_id}"
-        )
+        return f"conversation:{self._root_key}:{resolved.started_on.isoformat()}:{resolved.conversation_id}"
 
     @staticmethod
     def segment_id(start_sequence: int, end_sequence: int) -> str:

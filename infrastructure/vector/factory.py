@@ -1,0 +1,136 @@
+"""按协议显式注册并构造向量数据库 Adapter。"""
+
+from __future__ import annotations
+
+import os
+import re
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
+
+from infrastructure.vector.config import VectorStoreConfig, VectorStoreRequirements
+from infrastructure.vector.contracts import RawVectorBackend, VectorStore
+from infrastructure.vector.model import VectorStoreError
+from infrastructure.vector.publication.store import PublishedVectorStore
+
+_ADAPTER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
+
+
+@dataclass(frozen=True)
+class VectorStoreBuildContext:
+    """向 builder 传递路由、厂商参数和已经解析的秘密凭据。"""
+
+    config: VectorStoreConfig
+    requirements: VectorStoreRequirements
+    credentials: Mapping[str, str] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.config, VectorStoreConfig):
+            raise TypeError("vector build config must be VectorStoreConfig")
+        if not isinstance(self.requirements, VectorStoreRequirements):
+            raise TypeError("vector build requirements must be VectorStoreRequirements")
+        if not isinstance(self.credentials, Mapping) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in self.credentials.items()
+        ):
+            raise TypeError("vector build credentials must be a string mapping")
+        object.__setattr__(self, "credentials", MappingProxyType(dict(self.credentials)))
+
+
+VectorBackendBuilder = Callable[[VectorStoreBuildContext], RawVectorBackend]
+
+
+class VectorStoreFactory:
+    """工厂只按 Adapter 解析协议；provider 只代表实际服务来源。"""
+
+    def __init__(self) -> None:
+        self._builders: dict[str, VectorBackendBuilder] = {}
+
+    def register_adapter(self, adapter: str, builder: VectorBackendBuilder) -> None:
+        normalized = self._adapter(adapter)
+        if normalized in self._builders:
+            raise ValueError(f"vector store adapter is already registered: {normalized}")
+        if not callable(builder):
+            raise TypeError("vector store builder must be callable")
+        self._builders[normalized] = builder
+
+    def registered_adapters(self) -> tuple[str, ...]:
+        return tuple(sorted(self._builders))
+
+    def create(
+        self,
+        config: VectorStoreConfig,
+        *,
+        requirements: VectorStoreRequirements,
+        environ: Mapping[str, str] | None = None,
+    ) -> VectorStore:
+        if not isinstance(config, VectorStoreConfig):
+            raise TypeError("config must be VectorStoreConfig")
+        if not isinstance(requirements, VectorStoreRequirements):
+            raise TypeError("requirements must be VectorStoreRequirements")
+        builder = self._builders.get(config.adapter)
+        if builder is None:
+            raise VectorStoreError(f"vector store adapter is not registered: {config.adapter}")
+        environment = os.environ if environ is None else environ
+        if not isinstance(environment, Mapping):
+            raise TypeError("vector store environ must be a string mapping")
+        backend = builder(
+            VectorStoreBuildContext(
+                config=config,
+                requirements=requirements,
+                credentials=self._credentials(config, environment),
+            )
+        )
+        for name in (
+            "initialize",
+            "read_metadata",
+            "write_metadata",
+            "ensure_schema",
+            "read",
+            "delete_all",
+            "upsert",
+            "delete",
+            "validate_records",
+            "wait_visible",
+            "search",
+            "scan",
+            "close",
+        ):
+            if not callable(getattr(backend, name, None)):
+                raise VectorStoreError(f"raw vector backend is missing method: {name}")
+        if str(getattr(backend, "adapter_name", "")) != config.adapter:
+            raise VectorStoreError("vector store adapter identity does not match its config")
+        if str(getattr(backend, "provider_name", "")) != config.provider:
+            raise VectorStoreError("vector store provider identity does not match its config")
+        if str(getattr(backend, "collection", "")) != config.collection:
+            raise VectorStoreError("vector store collection does not match its config")
+        return PublishedVectorStore(backend)
+
+    @staticmethod
+    def _credentials(
+        config: VectorStoreConfig,
+        environ: Mapping[str, str],
+    ) -> dict[str, str]:
+        resolved: dict[str, str] = {}
+        for name, env_name in config.route.credential_env.items():
+            value = environ.get(env_name)
+            if not isinstance(value, str) or not value.strip():
+                raise VectorStoreError(
+                    f"vector store credential environment variable is missing: {env_name}"
+                )
+            resolved[name] = value.strip()
+        return resolved
+
+    @staticmethod
+    def _adapter(value: object) -> str:
+        normalized = str(value or "").strip().lower()
+        if _ADAPTER_NAME.fullmatch(normalized) is None:
+            raise ValueError("vector store adapter must be a normalized name")
+        return normalized
+
+
+__all__ = [
+    "VectorBackendBuilder",
+    "VectorStoreBuildContext",
+    "VectorStoreFactory",
+]

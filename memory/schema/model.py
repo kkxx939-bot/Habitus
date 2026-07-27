@@ -128,9 +128,7 @@ class MemoryTypeSchema:
             or not isinstance(self.min_non_empty_content_fields, int)
             or self.min_non_empty_content_fields < 0
         ):
-            raise MemorySchemaError(
-                "memory min_non_empty_content_fields must be a non-negative integer"
-            )
+            raise MemorySchemaError("memory min_non_empty_content_fields must be a non-negative integer")
         if not isinstance(self.omit_empty_sections, bool):
             raise MemorySchemaError("memory omit_empty_sections must be boolean")
         if not isinstance(self.description, str) or not self.description.strip():
@@ -149,18 +147,12 @@ class MemoryTypeSchema:
             raise MemorySchemaError("memory schema must declare at least one content field")
 
         declared = frozenset(names)
-        address_fields = frozenset(
-            field.name for field in self.fields if field.role is MemoryFieldRole.ADDRESS
-        )
+        address_fields = frozenset(field.name for field in self.fields if field.role is MemoryFieldRole.ADDRESS)
         path_fields = _template_fields(self.path_template, "memory path template")
         markdown_fields = _template_fields(self.markdown_template, "memory markdown template")
-        content_fields = frozenset(
-            field.name for field in self.fields if field.role is MemoryFieldRole.CONTENT
-        )
+        content_fields = frozenset(field.name for field in self.fields if field.role is MemoryFieldRole.CONTENT)
         if self.min_non_empty_content_fields > len(content_fields):
-            raise MemorySchemaError(
-                "memory min_non_empty_content_fields exceeds the declared content fields"
-            )
+            raise MemorySchemaError("memory min_non_empty_content_fields exceeds the declared content fields")
         if path_fields != address_fields:
             raise MemorySchemaError("memory path placeholders must exactly match address fields")
         if not markdown_fields <= declared:
@@ -196,9 +188,7 @@ class MemoryTypeSchema:
                 continue
             value = self._validate_value(field, payload[field.name])
             if field.allowed_values and value not in field.allowed_values:
-                raise MemorySchemaError(
-                    f"memory field {field.name} must be one of {list(field.allowed_values)}"
-                )
+                raise MemorySchemaError(f"memory field {field.name} must be one of {list(field.allowed_values)}")
             normalized[field.name] = value
         present_content_fields = sum(
             1
@@ -206,9 +196,7 @@ class MemoryTypeSchema:
             if field.name in normalized and self._is_non_empty(normalized[field.name])
         )
         if present_content_fields < self.min_non_empty_content_fields:
-            raise MemorySchemaError(
-                "memory payload does not contain enough non-empty content fields"
-            )
+            raise MemorySchemaError("memory payload does not contain enough non-empty content fields")
         self._address_from_normalized(normalized)
         return normalized
 
@@ -221,14 +209,8 @@ class MemoryTypeSchema:
         """校验字段后按 Schema 生成 Markdown，不写入记忆树。"""
 
         normalized = self.validate_payload(payload)
-        rendered_fields = {
-            field.name: self._render_value(normalized.get(field.name)) for field in self.fields
-        }
-        template = (
-            self._without_empty_sections(normalized)
-            if self.omit_empty_sections
-            else self.markdown_template
-        )
+        rendered_fields = {field.name: self._render_value(normalized.get(field.name)) for field in self.fields}
+        template = self._without_empty_sections(normalized) if self.omit_empty_sections else self.markdown_template
         try:
             rendered = template.format_map(rendered_fields)
             if self.omit_empty_sections:

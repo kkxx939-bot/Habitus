@@ -10,8 +10,13 @@ from pre.conversation.messages import (
     ConversationToolResultStatus,
 )
 from pre.conversation.summaries import (
+    ConversationRangeSummary,
+    ConversationRangeSummaryStage,
     ConversationSegmentSummary,
+    ConversationSummaryContent,
     ConversationSummarySchemaError,
+    ConversationSummarySourceKind,
+    ConversationSummarySourceRef,
 )
 
 __all__ = [
@@ -19,9 +24,14 @@ __all__ = [
     "ConversationMessage",
     "ConversationMessageRole",
     "ConversationMessageSchemaError",
+    "ConversationRangeSummary",
+    "ConversationRangeSummaryStage",
     "ConversationSegment",
     "ConversationSegmentSummary",
+    "ConversationSummaryContent",
     "ConversationSummarySchemaError",
+    "ConversationSummarySourceKind",
+    "ConversationSummarySourceRef",
     "ConversationToolResultContentMode",
     "ConversationToolResultStatus",
 ]

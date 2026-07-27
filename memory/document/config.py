@@ -45,9 +45,7 @@ class MemoryDocumentConfig:
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"memory document {name} count must be a non-negative integer")
             if value > self.max_relations_per_document:
-                raise MemoryDocumentLimitError(
-                    f"memory document {name} exceeds its configured relation limit"
-                )
+                raise MemoryDocumentLimitError(f"memory document {name} exceeds its configured relation limit")
 
 
 __all__ = ["MemoryDocumentConfig", "MemoryDocumentLimitError"]

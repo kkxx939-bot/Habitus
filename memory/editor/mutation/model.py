@@ -11,7 +11,8 @@ from typing import Any
 from infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
 from memory.document import MemoryDocument
 from memory.editor.candidate import MemoryCandidate
-from memory.editor.reader import MemorySnapshotBatch
+from memory.model import MemoryKind
+from memory.snapshot import MemorySnapshotBatch
 from memory.uri import MemoryURI
 
 
@@ -114,6 +115,7 @@ class MemoryMutation:
     action: MemoryMutationAction
     fields: Mapping[str, Any]
     changed_fields: tuple[str, ...]
+    confirms_intention: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.match, MemoryNodeMatch):
@@ -129,6 +131,10 @@ class MemoryMutation:
             raise TypeError("mutation changed_fields must contain non-empty strings")
         if len(self.changed_fields) != len(set(self.changed_fields)):
             raise ValueError("mutation changed_fields cannot contain duplicates")
+        if not isinstance(self.confirms_intention, bool):
+            raise TypeError("confirms_intention must be boolean")
+        if self.confirms_intention and self.match.candidate.kind is not MemoryKind.INTENTION:
+            raise ValueError("only an Intention mutation can refresh confirmation time")
         if action is MemoryMutationAction.CREATE:
             if self.match.status is not MemoryNodeMatchStatus.NEW:
                 raise ValueError("create mutation requires a new-node match")
@@ -176,9 +182,13 @@ class MemoryMutationPlan:
 
     @property
     def changed_mutations(self) -> tuple[MemoryMutation, ...]:
-        """排除不需要推进 revision 的幂等节点。"""
+        """排除不需要推进 revision 或刷新确认时间的幂等节点。"""
 
-        return tuple(mutation for mutation in self.mutations if mutation.action is not MemoryMutationAction.NOOP)
+        return tuple(
+            mutation
+            for mutation in self.mutations
+            if mutation.action is not MemoryMutationAction.NOOP or mutation.confirms_intention
+        )
 
 
 __all__ = [

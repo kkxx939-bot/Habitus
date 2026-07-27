@@ -15,12 +15,12 @@ from memory.editor.extraction.model import (
     MemoryRetrievalObservation,
 )
 from memory.editor.page_id import EXISTING_PAGE_ID_MAX, MemoryPageIdMap
-from memory.editor.reader import MemorySnapshotBatch, MemorySnapshotReader
 from memory.editor.retrieval import (
     MemoryRelatedContext,
-    MemorySearchHit,
-    MemorySemanticSearch,
 )
+from memory.intention import MemoryIntentionRecallScope
+from memory.retrieval import MemorySearchHit, MemorySemanticSearch
+from memory.snapshot import MemorySnapshotBatch, MemorySnapshotReader
 from memory.uri import MemoryURI, MemoryURINodeType
 
 
@@ -144,6 +144,8 @@ class MemoryExtractionContext:
             raw_hits = await self.semantic_search.search(
                 normalized_query,
                 roots=self.initial.search_roots,
+                kinds=(),
+                intention_scope=MemoryIntentionRecallScope.ALL,
                 limit=self.config.additional_search_limit,
             )
         except Exception as exc:

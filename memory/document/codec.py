@@ -19,6 +19,7 @@ _METADATA_KEYS = {
     "revision",
     "created_at",
     "updated_at",
+    "last_confirmed_at",
     "fields",
     "links",
     "backlinks",
@@ -72,9 +73,7 @@ class MemoryDocumentCodec:
         address = self.registry.address_for(normalized_kind, normalized)
         markdown_body = self.registry.render_markdown(normalized_kind, normalized)
         if _MARKER in markdown_body:
-            raise MemoryDocumentIntegrityError(
-                "memory Markdown body contains the reserved metadata marker"
-            )
+            raise MemoryDocumentIntegrityError("memory Markdown body contains the reserved metadata marker")
         return MemoryDocument(
             kind=normalized_kind,
             address=address,
@@ -101,14 +100,17 @@ class MemoryDocumentCodec:
             raise MemoryDocumentIntegrityError("memory document address is not canonical")
         if canonical.markdown_body != document.markdown_body:
             raise MemoryDocumentIntegrityError("memory document body is not canonical")
-        fields = {
-            name: self._json_value(value) for name, value in canonical.fields.items()
-        }
+        fields = {name: self._json_value(value) for name, value in canonical.fields.items()}
         metadata = {
             "memory_type": canonical.kind.value,
             "revision": canonical.metadata.revision,
             "created_at": self._timestamp(canonical.metadata.created_at),
             "updated_at": self._timestamp(canonical.metadata.updated_at),
+            "last_confirmed_at": (
+                None
+                if canonical.metadata.last_confirmed_at is None
+                else self._timestamp(canonical.metadata.last_confirmed_at)
+            ),
             "fields": fields,
             "links": [link.to_dict() for link in canonical.links],
             "backlinks": [link.to_dict() for link in canonical.backlinks],
@@ -132,9 +134,7 @@ class MemoryDocumentCodec:
         if not isinstance(expected_address, MemoryAddress):
             raise TypeError("expected_address must be a MemoryAddress")
         if raw.count(_MARKER) != 1 or not raw.endswith(_FOOTER):
-            raise MemoryDocumentIntegrityError(
-                "memory document must contain one terminal M2BOS_MEMORY_FIELDS comment"
-            )
+            raise MemoryDocumentIntegrityError("memory document must contain one terminal M2BOS_MEMORY_FIELDS comment")
         markdown_body, _separator, metadata_with_footer = raw.partition(_MARKER)
         metadata_source = metadata_with_footer[: -len(_FOOTER)]
         try:
@@ -144,23 +144,20 @@ class MemoryDocumentCodec:
                 parse_constant=self._reject_json_constant,
             )
         except (json.JSONDecodeError, MemoryDocumentIntegrityError) as exc:
-            raise MemoryDocumentIntegrityError(
-                "memory document metadata is not strict JSON"
-            ) from exc
+            raise MemoryDocumentIntegrityError("memory document metadata is not strict JSON") from exc
         if not isinstance(metadata, dict) or set(metadata) != _METADATA_KEYS:
             raise MemoryDocumentIntegrityError("memory document metadata has an invalid shape")
         raw_kind = metadata["memory_type"]
         raw_revision = metadata["revision"]
         raw_created_at = metadata["created_at"]
         raw_updated_at = metadata["updated_at"]
+        raw_last_confirmed_at = metadata["last_confirmed_at"]
         raw_fields = metadata["fields"]
         raw_links = metadata["links"]
         raw_backlinks = metadata["backlinks"]
         if not isinstance(raw_kind, str):
             raise MemoryDocumentIntegrityError("memory document type must be a string")
-        if not isinstance(raw_fields, dict) or any(
-            not isinstance(name, str) for name in raw_fields
-        ):
+        if not isinstance(raw_fields, dict) or any(not isinstance(name, str) for name in raw_fields):
             raise MemoryDocumentIntegrityError("memory document fields must be an object")
         try:
             links = parse_stored_links(raw_links, label="memory document links")
@@ -172,6 +169,11 @@ class MemoryDocumentCodec:
                 revision=raw_revision,
                 created_at=self._parse_timestamp(raw_created_at, "created_at"),
                 updated_at=self._parse_timestamp(raw_updated_at, "updated_at"),
+                last_confirmed_at=(
+                    None
+                    if raw_last_confirmed_at is None
+                    else self._parse_timestamp(raw_last_confirmed_at, "last_confirmed_at")
+                ),
             )
             document = self.build(
                 MemoryKind(raw_kind),
@@ -181,17 +183,11 @@ class MemoryDocumentCodec:
                 backlinks=backlinks,
             )
         except (TypeError, ValueError) as exc:
-            raise MemoryDocumentIntegrityError(
-                "memory document fields do not satisfy their Schema"
-            ) from exc
+            raise MemoryDocumentIntegrityError("memory document fields do not satisfy their Schema") from exc
         if document.address != expected_address:
-            raise MemoryDocumentIntegrityError(
-                "memory document fields do not match the physical tree address"
-            )
+            raise MemoryDocumentIntegrityError("memory document fields do not match the physical tree address")
         if document.markdown_body != markdown_body:
-            raise MemoryDocumentIntegrityError(
-                "memory document body does not match its structured fields"
-            )
+            raise MemoryDocumentIntegrityError("memory document body does not match its structured fields")
         if self.encode(document) != raw:
             raise MemoryDocumentIntegrityError("memory document is not canonically serialized")
         return document
@@ -201,17 +197,13 @@ class MemoryDocumentCodec:
         result: dict[str, Any] = {}
         for key, value in pairs:
             if key in result:
-                raise MemoryDocumentIntegrityError(
-                    "memory document metadata contains a duplicate JSON key"
-                )
+                raise MemoryDocumentIntegrityError("memory document metadata contains a duplicate JSON key")
             result[key] = value
         return result
 
     @staticmethod
     def _reject_json_constant(value: str) -> NoReturn:
-        raise MemoryDocumentIntegrityError(
-            f"memory document metadata contains an invalid JSON constant: {value}"
-        )
+        raise MemoryDocumentIntegrityError(f"memory document metadata contains an invalid JSON constant: {value}")
 
     @staticmethod
     def _timestamp(value: datetime) -> str:
@@ -220,15 +212,11 @@ class MemoryDocumentCodec:
     @staticmethod
     def _parse_timestamp(value: object, field_name: str) -> datetime:
         if not isinstance(value, str):
-            raise MemoryDocumentIntegrityError(
-                f"memory document {field_name} must be a timestamp string"
-            )
+            raise MemoryDocumentIntegrityError(f"memory document {field_name} must be a timestamp string")
         try:
             return datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError as exc:
-            raise MemoryDocumentIntegrityError(
-                f"memory document {field_name} is not a valid ISO timestamp"
-            ) from exc
+            raise MemoryDocumentIntegrityError(f"memory document {field_name} is not a valid ISO timestamp") from exc
 
     @classmethod
     def _json_value(cls, value: Any) -> str | int | float | bool:
@@ -238,9 +226,7 @@ class MemoryDocumentCodec:
             return value
         if isinstance(value, float) and math.isfinite(value):
             return value
-        raise MemoryDocumentIntegrityError(
-            "memory document contains a field that cannot be serialized"
-        )
+        raise MemoryDocumentIntegrityError("memory document contains a field that cannot be serialized")
 
 
 __all__ = ["MemoryDocumentCodec", "MemoryDocumentIntegrityError"]

@@ -118,6 +118,12 @@ class MemoryExtractionPromptBuilder:
                         "是否更新已有节点、避免重复并建立有依据的关系；Conversation Summary 不参与。"
                         "只提取对未来仍有用且由原文明确支持的信息，不把临时讨论、示例、推测或工具流水"
                         "变成长记忆。严格区分 profile、preferences、entities、tools、events 和 intentions。"
+                        "Intention 状态只能根据当前完整 ConversationSegment、相关旧 Intention 与 Event"
+                        "时间线判断；经过多久、updated_at 或 last_confirmed_at 的早晚都不能自动"
+                        "完成、取消、删除或隐藏事项。每个 Intention 候选必须返回 confirmed：仅当"
+                        "当前完整对话明确创建、更新或重新确认该事项时为 true；只为"
+                        "same_memory 保留未被当前对话确认的目标时为 false。即使业务字段未变，"
+                        "明确重新确认也要输出完整旧候选并标记 true。"
                         "更新旧节点必须复用系统 page_id；新节点使用批次内唯一的 100 以上编号。"
                         "更新候选必须按字段 Schema 输出合并后的完整最终值，不得输出 SEARCH/REPLACE"
                         "或只返回局部增量；patch 可选字段省略表示保留旧值，replace 可选字段省略表示"
@@ -174,6 +180,7 @@ class MemoryExtractionPromptBuilder:
                 "action": mutation.action.value,
                 "final_fields": canonicalize(mutation.fields),
                 "changed_fields": list(mutation.changed_fields),
+                "confirms_intention": mutation.confirms_intention,
             }
             for mutation in mutations.mutations
         ]
@@ -188,7 +195,10 @@ class MemoryExtractionPromptBuilder:
                         "对已有节点的必要更新、Event 与 Intention 是否混淆、工具知识是否被一次偶然结果"
                         "过度泛化、关系 add 是否有明确依据、relation remove 是否逐字命中已读取旧关系且由"
                         "对话明确否定、冲突是否处理正确、更新候选是否包含字段 Schema"
-                        "要求的完整最终值、重要限定或仍有效的旧事实是否丢失。还必须逐项审查"
+                        "要求的完整最终值、重要限定或仍有效的旧事实是否丢失。Intention 的"
+                        "confirmed=true 是否确有当前完整对话的明确创建、更新或重新确认"
+                        "依据，以及状态判断是否结合了相关 Intention/Event 时间线；不得因时间"
+                        "经过而推断完成、取消、删除或不召回。还必须逐项审查"
                         "identity_proposals：same_memory 两端是否真是同一记忆而不只是相关，目标的"
                         "preliminary_node_plan 最终字段是否保留来源节点全部仍有效事实；remove_memory"
                         "是否确有完整对话支持，且整个节点没有任何事实仍应保留。"
@@ -235,6 +245,7 @@ class MemoryExtractionPromptBuilder:
                         "memory_type": document.kind.value,
                         "created_at": canonicalize(document.metadata.created_at),
                         "updated_at": canonicalize(document.metadata.updated_at),
+                        "last_confirmed_at": canonicalize(document.metadata.last_confirmed_at),
                         "fields": canonicalize(document.fields),
                         "markdown_body": document.markdown_body,
                         "links": [link.to_dict() for link in document.links],

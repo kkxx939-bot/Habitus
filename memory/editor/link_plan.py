@@ -12,7 +12,7 @@ from memory.editor.identity import (
     MemoryNodeDisposition,
 )
 from memory.editor.link import MemoryResolvedRelation
-from memory.editor.reader import MemorySnapshotBatch
+from memory.snapshot import MemorySnapshotBatch
 from memory.uri import MemoryURI
 
 

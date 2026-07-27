@@ -10,7 +10,7 @@ from memory.editor.identity import (
 )
 from memory.editor.link import MemoryResolvedRelation
 from memory.editor.link_plan import MemoryRelationReadSet
-from memory.editor.reader import MemorySnapshotBatch, MemorySnapshotReader
+from memory.snapshot import MemorySnapshotBatch, MemorySnapshotReader
 
 
 class MemoryRelationReadConflictError(ValueError):

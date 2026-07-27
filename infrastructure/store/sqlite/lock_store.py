@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from pathlib import Path
 
 from infrastructure.store.contracts.lock import LockLostError, LockToken
@@ -22,23 +25,64 @@ _LOCK_TABLE_LAYOUT = (
 )
 
 
+@dataclass(frozen=True)
+class SQLiteLockStoreConfig:
+    """SQLite 锁库等待数据库忙状态解除的时间边界。"""
+
+    timeout_seconds: float = 5.0
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, int | float)
+            or not isfinite(float(self.timeout_seconds))
+            or not 0.001 <= float(self.timeout_seconds) <= 60.0
+        ):
+            raise ValueError("timeout_seconds must be between 0.001 and 60")
+
+
 class SQLiteLockStore:
     def __init__(
         self,
         path: str | Path,
         owner: str = "m2bos",
         *,
-        sqlite_timeout_seconds: float = 5.0,
+        config: SQLiteLockStoreConfig | None = None,
+        initialize: bool = True,
     ) -> None:
+        if config is not None and not isinstance(config, SQLiteLockStoreConfig):
+            raise TypeError("config must be SQLiteLockStoreConfig")
         self.path = Path(path)
         self.owner = owner
-        self.sqlite_timeout_seconds = max(0.001, float(sqlite_timeout_seconds))
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.path.parent, 0o700)
-        self._init_db()
-        os.chmod(self.path, 0o600)
+        self.config = config or SQLiteLockStoreConfig()
+        self.sqlite_timeout_seconds = float(self.config.timeout_seconds)
+        if not isinstance(initialize, bool):
+            raise TypeError("initialize must be boolean")
+        self._initialized = False
+        self._initialization_guard = threading.Lock()
+        if initialize:
+            self.initialize()
+
+    @property
+    def initialized(self) -> bool:
+        return self._initialized
+
+    def initialize(self) -> None:
+        """显式建立锁库；允许组合根延迟到 Runtime.initialize()。"""
+
+        if self._initialized:
+            return
+        with self._initialization_guard:
+            if self._initialized:
+                return
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(self.path.parent, 0o700)
+            self._init_db()
+            os.chmod(self.path, 0o600)
+            self._initialized = True
 
     def acquire(self, lock_key: str, ttl_seconds: int = 30) -> LockToken:
+        self.initialize()
         now = datetime.now(timezone.utc)
         expires_at = (now + timedelta(seconds=max(1, ttl_seconds))).isoformat()
         token = uuid.uuid4().hex
@@ -84,6 +128,7 @@ class SQLiteLockStore:
         return LockToken(lock_key=lock_key, token=token, fence=fence)
 
     def renew(self, token: LockToken, ttl_seconds: int = 30) -> LockToken:
+        self.initialize()
         now = datetime.now(timezone.utc)
         expires_at = (now + timedelta(seconds=max(1, ttl_seconds))).isoformat()
         conn = self._connect()
@@ -120,6 +165,7 @@ class SQLiteLockStore:
         return token
 
     def assert_owned(self, token: LockToken) -> None:
+        self.initialize()
         now = datetime.now(timezone.utc)
         try:
             with self._connect() as conn:
@@ -141,6 +187,7 @@ class SQLiteLockStore:
 
     @contextmanager
     def fenced(self, tokens: Sequence[LockToken], ttl_seconds: int = 30) -> Iterator[None]:
+        self.initialize()
         unique = {(token.lock_key, token.token, token.fence): token for token in tokens}
         if not unique:
             yield
@@ -190,6 +237,7 @@ class SQLiteLockStore:
             conn.close()
 
     def release(self, token: LockToken) -> None:
+        self.initialize()
         conn = self._connect()
         try:
             conn.execute(

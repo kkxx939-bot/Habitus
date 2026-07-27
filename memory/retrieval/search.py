@@ -1,4 +1,4 @@
-"""组合向量召回、目录层级召回和可选重排的记忆搜索。"""
+"""组合向量召回、目录层级召回和可选重排的公共记忆搜索。"""
 
 from __future__ import annotations
 
@@ -8,9 +8,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 
-from memory.editor.retrieval.index import MemoryVectorIndex, MemoryVectorMatch
-from memory.editor.retrieval.model import MemorySearchHit
-from memory.model import MemoryLevel
+from memory.indexing import MemoryVectorIndex, MemoryVectorMatch
+from memory.intention import MemoryIntentionRecallScope
+from memory.model import MemoryKind, MemoryLevel
+from memory.retrieval.model import MemorySearchHit
 from memory.uri import MemoryURI, MemoryURINodeType
 from ModelClient import Embedder, EmbeddingVector, Reranker
 
@@ -102,12 +103,16 @@ class MemorySemanticSearchEngine:
         query: str,
         *,
         roots: tuple[MemoryURI, ...],
+        kinds: tuple[MemoryKind, ...],
+        intention_scope: MemoryIntentionRecallScope,
         limit: int,
     ) -> tuple[MemorySearchHit, ...]:
         """完成向量主召回、可选层级补召回及独立重排。"""
 
         normalized_query = self._query(query)
         normalized_roots = self._roots(roots)
+        normalized_kinds = self._kinds(kinds)
+        normalized_intention_scope = MemoryIntentionRecallScope(intention_scope)
         maximum = self._limit(limit)
 
         query_vector = await self.embedder.embed_query(normalized_query)
@@ -122,6 +127,8 @@ class MemorySemanticSearchEngine:
             query_vector,
             roots=normalized_roots,
             levels=(MemoryLevel.DETAIL,),
+            kinds=normalized_kinds,
+            intention_scope=normalized_intention_scope,
             limit=vector_limit,
         )
         candidates: dict[MemoryURI, _Candidate] = {}
@@ -132,6 +139,8 @@ class MemorySemanticSearchEngine:
                 normalized_query,
                 query_vector,
                 normalized_roots,
+                normalized_kinds,
+                normalized_intention_scope,
             )
             for candidate in hierarchical:
                 self._merge(candidates, candidate)
@@ -154,12 +163,16 @@ class MemorySemanticSearchEngine:
         query: str,
         query_vector: EmbeddingVector,
         roots: tuple[MemoryURI, ...],
+        kinds: tuple[MemoryKind, ...],
+        intention_scope: MemoryIntentionRecallScope,
     ) -> tuple[_Candidate, ...]:
         directory_matches = self._matches(
             await self.index.search(
                 query_vector,
                 roots=roots,
                 levels=(MemoryLevel.ABSTRACT, MemoryLevel.OVERVIEW),
+                kinds=(),
+                intention_scope=MemoryIntentionRecallScope.ALL,
                 limit=self.config.directory_candidates,
             )
         )
@@ -183,6 +196,8 @@ class MemorySemanticSearchEngine:
                 await self.index.search_children(
                     query_vector,
                     parent=directory_uri,
+                    kinds=kinds,
+                    intention_scope=intention_scope,
                     limit=self.config.child_candidates,
                 )
             )
@@ -328,6 +343,15 @@ class MemorySemanticSearchEngine:
             raise ValueError("memory semantic search roots must identify directories")
         if len(normalized) != len(set(normalized)):
             raise ValueError("memory semantic search roots must be unique")
+        return normalized
+
+    @staticmethod
+    def _kinds(kinds: tuple[MemoryKind, ...]) -> tuple[MemoryKind, ...]:
+        if not isinstance(kinds, tuple):
+            raise TypeError("memory semantic search kinds must be a tuple")
+        normalized = tuple(MemoryKind(kind) for kind in kinds)
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("memory semantic search kinds must be unique")
         return normalized
 
     @staticmethod
