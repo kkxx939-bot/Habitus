@@ -306,6 +306,7 @@ def test_committed_l2_job_resumes_after_vector_timeout_without_replanning(
     assert receipt.state is MemoryChangeReceiptState.COMMITTED
     assert journal.state is MemoryTransactionJournalState.COMMITTED
     assert chats[0].prompt_versions.count("memory_candidate_extraction_v2") == 1
+    assert asyncio.run(runtime.failed_memory_job()) == failed
 
     retried = asyncio.run(runtime.retry_failed_memory_job(failed))
     assert retried.reopened_job.status is MemoryJobStatus.QUEUED
@@ -317,6 +318,7 @@ def test_committed_l2_job_resumes_after_vector_timeout_without_replanning(
     assert result.change_receipt.source == source
     assert chats[0].prompt_versions.count("memory_candidate_extraction_v2") == 1
     assert runtime.components.memory.editor.transaction.journal.try_read(queued.transaction_id) is None
+    assert asyncio.run(runtime.failed_memory_job()) is None
 
 
 def test_lifecycle_releases_history_then_purges_source_but_preserves_summary_semantics(

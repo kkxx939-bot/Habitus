@@ -60,7 +60,9 @@ def parse_json_response(source: str, *, allow_repair: bool = True) -> ParsedJSON
     if not allow_repair:
         raise ValueError("model response is not valid JSON")
 
-    repair_sources = [candidate for candidate, _mode in candidates] or [text]
+    repair_sources = [candidate for candidate, _mode in candidates]
+    if not repair_sources:
+        raise ValueError("model response contains no JSON candidate to repair")
     for candidate in repair_sources:
         without_trailing_commas = _TRAILING_COMMA.sub(r"\1", candidate)
         if without_trailing_commas != candidate:
@@ -68,18 +70,20 @@ def parse_json_response(source: str, *, allow_repair: bool = True) -> ParsedJSON
             if parsed is not _MISSING:
                 return ParsedJSON(parsed, "trailing_comma_repair")
 
-    for candidate in repair_sources:
-        repaired = _repair_with_optional_dependency(candidate)
-        if repaired is not _MISSING:
-            return ParsedJSON(repaired, "json_repair")
-
+    dependency_candidates: list[str] = []
     for candidate in repair_sources:
         try:
             value = ast.literal_eval(candidate)
         except (SyntaxError, ValueError):
+            dependency_candidates.append(candidate)
             continue
-        if _is_json_value(value):
+        if _is_safe_python_repair_value(value) and _preserves_container_root(candidate, value):
             return ParsedJSON(value, "python_literal_repair")
+
+    for candidate in dependency_candidates:
+        repaired = _repair_with_optional_dependency(candidate)
+        if repaired is not _MISSING and _preserves_container_root(candidate, repaired):
+            return ParsedJSON(repaired, "json_repair")
     raise ValueError("model response could not be repaired as JSON")
 
 
@@ -156,6 +160,34 @@ def _is_json_value(value: Any) -> bool:
     if isinstance(value, dict):
         return all(isinstance(key, str) and _is_json_value(item) for key, item in value.items())
     return False
+
+
+def _is_safe_python_repair_value(value: Any) -> bool:
+    """只接受能由单引号等语法差异产生、不会改写 JSON 语义的 Python 字面量。"""
+
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, str | int | float):
+        return not isinstance(value, float) or math.isfinite(value)
+    if isinstance(value, list):
+        return all(_is_safe_python_repair_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str) and _is_safe_python_repair_value(item)
+            for key, item in value.items()
+        )
+    return False
+
+
+def _preserves_container_root(source: str, value: object) -> bool:
+    """修复前后保持显式对象或数组的根类型，拒绝 set/tuple 被改造成数组。"""
+
+    stripped = source.lstrip()
+    if stripped.startswith("{"):
+        return isinstance(value, dict)
+    if stripped.startswith("["):
+        return isinstance(value, list)
+    return True
 
 
 __all__ = ["JSONParseMode", "ParsedJSON", "parse_json_response"]

@@ -30,3 +30,6 @@ dist/
 
 # Local planning notes
 步骤.txt
+
+# Benchmark 运行产物
+benchmark/results/

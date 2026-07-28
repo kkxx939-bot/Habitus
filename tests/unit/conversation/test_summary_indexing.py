@@ -27,6 +27,7 @@ from memory.conversation.indexing.model import summary_reference
 from ModelClient import EmbeddingVector
 from pre.conversation import ConversationBatch
 from tests.helpers import closed_turn, segment, segment_summary
+from tests.unit.retrieval.test_search_service import structured
 
 
 class Embedder:
@@ -110,7 +111,7 @@ def source_chain(tmp_path: Path):
         journal,
         segment_store,
         range_store,
-        object.__new__(ConversationRangeSummaryGenerator),
+        ConversationRangeSummaryGenerator(structured([])),
     )
     return address, source, segment_store, compactor
 
@@ -161,4 +162,3 @@ def test_summary_index_rebuilds_active_frontier_and_rejects_stale_remote_hit(tmp
     segment_store.delete_by_id(address, source.segment_id)
     with pytest.raises(ConversationSummaryIndexError, match="no longer part"):
         asyncio.run(index.search("之前如何决定", limit=1))
-

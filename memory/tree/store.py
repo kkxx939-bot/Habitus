@@ -174,6 +174,8 @@ class MemoryTree:
     ) -> str:
         """在读取前校验字节上限，避免加载损坏或异常膨胀的派生层。"""
 
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+            raise ValueError("max_bytes must be a positive integer")
         return self._read_utf8(
             self.layer_path(directory, level),
             label="memory semantic layer",
@@ -322,9 +324,9 @@ class MemoryTree:
     ) -> tuple[MemoryAddress, ...]:
         """按固定类型顺序和路径字典序有界枚举记忆地址。"""
 
-        maximum = int(limit)
-        if maximum <= 0 or maximum > 10_000:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > 10_000:
             raise ValueError("memory tree list limit must be between 1 and 10000")
+        maximum = limit
         if not self.root.exists():
             return ()
         self._require_directory(self.root)
@@ -562,10 +564,9 @@ class MemoryTree:
 
     @staticmethod
     def _directory_limit(limit: int) -> int:
-        maximum = int(limit)
-        if isinstance(limit, bool) or maximum <= 0 or maximum > 10_000:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > 10_000:
             raise ValueError("memory directory limit must be between 1 and 10000")
-        return maximum
+        return limit
 
     @staticmethod
     def _fsync_directory(directory: Path) -> None:

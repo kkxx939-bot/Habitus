@@ -37,13 +37,19 @@ SCHEMA = {
         ('```json\n{"status":"ok","items":[]}\n```', "code_fence"),
         ('result: {"status":"ok","items":[]}', "extracted"),
         ('{"status":"ok","items":[],}', "trailing_comma_repair"),
-        ("{'status':'ok','items':[]}", "python_literal_repair"),
     ],
 )
 def test_json_parser_audits_each_allowed_syntax_path(source: str, mode: str) -> None:
     parsed = parse_json_response(source)
     assert parsed.value == {"status": "ok", "items": []}
     assert parsed.mode == mode
+
+
+def test_json_parser_accepts_single_quote_syntax_without_binding_optional_repair_backend() -> None:
+    parsed = parse_json_response("{'status':'ok','items':[]}")
+
+    assert parsed.value == {"status": "ok", "items": []}
+    assert parsed.mode in {"json_repair", "python_literal_repair"}
 
 
 @pytest.mark.parametrize("source", ["", "NaN", "{'items': {1, 2}}", "not-json"])
@@ -155,4 +161,3 @@ def test_structured_async_path_uses_same_validation_and_retry_semantics() -> Non
     provider = QueueProvider([_response('{"status":"ok","items":[]}')])
     result = asyncio.run(_structured(provider).complete_json_async("return data", schema=SCHEMA))
     assert result.value["status"] == "ok"
-

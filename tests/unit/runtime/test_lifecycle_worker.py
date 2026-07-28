@@ -29,6 +29,8 @@ from memory.workflow import (
 from pre.conversation import ConversationBatch
 from Runtime import LifecycleWorker, LifecycleWorkerState, LifecycleWorkerStateError
 from tests.helpers import closed_turn, codec
+from tests.unit.conversation.test_summary_indexing import Embedder, VectorStore
+from tests.unit.retrieval.test_search_service import structured
 
 
 def manager(tmp_path: Path) -> ConversationLifecycleManager:
@@ -40,10 +42,16 @@ def manager(tmp_path: Path) -> ConversationLifecycleManager:
         journal,
         segment_store,
         range_store,
-        object.__new__(ConversationRangeSummaryGenerator),
+        ConversationRangeSummaryGenerator(structured([])),
     )
-    summary_index = object.__new__(PersistentConversationSummaryVectorIndex)
-    summary_index.compactor = compactor
+    summary_index = PersistentConversationSummaryVectorIndex(
+        journal,
+        compactor,
+        Embedder(),
+        VectorStore(),
+        dimension=2,
+        embedding_fingerprint="lifecycle-worker-test-v1",
+    )
 
     async def synchronize(_address, *, checkpoint=None):
         return checkpoint

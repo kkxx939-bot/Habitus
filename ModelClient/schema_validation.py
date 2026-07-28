@@ -177,9 +177,9 @@ def _validate_number(value: int | float, schema: Mapping[str, object], *, path: 
         ("exclusiveMaximum", lambda actual, bound: actual < bound),
     )
     for key, predicate in bounds:
-        bound = schema.get(key)
-        if bound is None:
+        if key not in schema:
             continue
+        bound = schema[key]
         if isinstance(bound, bool) or not isinstance(bound, int | float):
             raise ValueError(f"JSON Schema {key} must be numeric")
         if not predicate(value, bound):
@@ -199,9 +199,9 @@ def _require_size(
         (minimum_key, lambda actual, bound: actual >= bound),
         (maximum_key, lambda actual, bound: actual <= bound),
     ):
-        bound = schema.get(key)
-        if bound is None:
+        if key not in schema:
             continue
+        bound = schema[key]
         if isinstance(bound, bool) or not isinstance(bound, int) or bound < 0:
             raise ValueError(f"JSON Schema {key} must be a non-negative integer")
         if not predicate(size, bound):

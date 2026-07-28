@@ -1,0 +1,357 @@
+[
+  {
+    "sample_id": "identity-preference-event",
+    "sessions": [
+      {
+        "session_id": "identity",
+        "started_at": "2026-01-02T09:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "我叫林航，是自由视频剪辑师，长期使用 DaVinci Resolve。我的工作室叫青岚工作室，位于深圳。"},
+          {"role": "completion", "content": "记住了：你是林航，从事自由视频剪辑，长期使用 DaVinci Resolve；青岚工作室位于深圳。"}
+        ]
+      },
+      {
+        "session_id": "preference",
+        "started_at": "2026-01-03T10:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "以后请用中文简洁回答，涉及代码时先给结论，再解释原因。"},
+          {"role": "completion", "content": "好的，后续我会使用简洁中文，并在代码问题上先给结论。"}
+        ]
+      },
+      {
+        "session_id": "correction-event",
+        "started_at": "2026-01-05T15:30:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "修正一下：以前我常交付 1080p，但从今天签下云帆品牌项目后，我的默认交付规格改为 4K，不再默认 1080p。"},
+          {"role": "completion", "content": "已更新：从 2026 年 1 月 5 日签下云帆品牌项目起，你默认交付 4K。"}
+        ]
+      }
+    ],
+    "questions": [
+      {
+        "question": "林航长期从事什么职业？",
+        "answer": "自由视频剪辑师。",
+        "question_type": "profile",
+        "evidence_texts": ["我叫林航，是自由视频剪辑师，长期使用 DaVinci Resolve。"],
+        "metadata": {"scenarios": ["profile"], "kinds": ["profile"]}
+      },
+      {
+        "question": "青岚工作室位于哪里？",
+        "answer": "深圳。",
+        "question_type": "entity",
+        "evidence_texts": ["我的工作室叫青岚工作室，位于深圳。"],
+        "metadata": {"scenarios": ["entity"], "kinds": ["entity"]}
+      },
+      {
+        "question": "回答代码问题时应采用什么表达方式？",
+        "answer": "使用简洁中文，先给结论，再解释原因。",
+        "question_type": "preference",
+        "evidence_texts": ["以后请用中文简洁回答，涉及代码时先给结论，再解释原因。"],
+        "metadata": {"scenarios": ["preference", "multilingual"], "kinds": ["preference"]}
+      },
+      {
+        "question": "当前默认视频交付规格是什么，何时发生了变化？",
+        "answer": "4K；2026 年 1 月 5 日签下云帆品牌项目时由 1080p 改为 4K。",
+        "question_type": "memory_correction",
+        "evidence_texts": ["从今天签下云帆品牌项目后，我的默认交付规格改为 4K，不再默认 1080p。"],
+        "metadata": {"scenarios": ["memory_update", "memory_correction", "event", "temporal_reasoning"], "kinds": ["preference", "event"]}
+      }
+    ]
+  },
+  {
+    "sample_id": "tool-knowledge",
+    "sessions": [
+      {
+        "session_id": "successful-call",
+        "started_at": "2026-02-01T09:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "请查询项目渲染队列状态。"},
+          {"role": "tool_call", "tool_call_id": "queue-1", "tool_name": "render_queue", "content": {"project": "云帆"}},
+          {"role": "tool_result", "tool_call_id": "queue-1", "tool_name": "render_queue", "tool_status": "completed", "content": {"status": "running", "progress": 72}},
+          {"role": "completion", "content": "云帆项目正在渲染，进度 72%。"}
+        ]
+      },
+      {
+        "session_id": "failure-recovery",
+        "started_at": "2026-02-02T11:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "把成片上传到客户空间。"},
+          {"role": "tool_call", "tool_call_id": "upload-1", "tool_name": "asset_upload", "content": {"path": "final.mov", "folder": "root"}},
+          {"role": "tool_result", "tool_call_id": "upload-1", "tool_name": "asset_upload", "tool_status": "error", "content": "folder=root is not writable"},
+          {"role": "tool_call", "tool_call_id": "upload-2", "tool_name": "asset_upload", "content": {"path": "final.mov", "folder": "deliveries"}},
+          {"role": "tool_result", "tool_call_id": "upload-2", "tool_name": "asset_upload", "tool_status": "completed", "content": {"asset_id": "asset-902", "folder": "deliveries"}},
+          {"role": "completion", "content": "根目录不可写，改用 deliveries 目录后上传成功。"}
+        ]
+      }
+    ],
+    "questions": [
+      {
+        "question": "查询渲染队列应使用哪个真实工具？",
+        "answer": "render_queue。",
+        "question_type": "tool_success",
+        "evidence_texts": ["render_queue", "云帆项目正在渲染，进度 72%。"],
+        "metadata": {"scenarios": ["tool_success"], "kinds": ["tool"]}
+      },
+      {
+        "question": "asset_upload 遇到根目录不可写时，已验证的恢复方式是什么？",
+        "answer": "把 folder 从 root 改为 deliveries 后重新调用，上传成功。",
+        "question_type": "tool_failure_recovery",
+        "evidence_texts": ["folder=root is not writable", "改用 deliveries 目录后上传成功。"],
+        "metadata": {"scenarios": ["tool_failure_recovery"], "kinds": ["tool"]}
+      }
+    ]
+  },
+  {
+    "sample_id": "intention-states",
+    "sessions": [
+      {
+        "session_id": "open",
+        "started_at": "2026-03-01T09:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "下周需要完成自动字幕脚本，目前还没开始。"},
+          {"role": "completion", "content": "记录为待推进事项：下周完成自动字幕脚本。"}
+        ]
+      },
+      {
+        "session_id": "waiting",
+        "started_at": "2026-03-02T09:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "客户片头方案已经提交，现在要等待客户确认后才能继续。"},
+          {"role": "completion", "content": "记录为等待状态：客户确认片头方案后继续。"}
+        ]
+      },
+      {
+        "session_id": "blocked",
+        "started_at": "2026-03-03T09:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "素材归档被 NAS 写权限阻塞，权限恢复前无法完成。"},
+          {"role": "completion", "content": "记录为阻塞状态：等待 NAS 写权限恢复后完成素材归档。"}
+        ]
+      },
+      {
+        "session_id": "completed",
+        "started_at": "2026-03-04T18:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "之前要发给客户的报价单今天已经发送完成。"},
+          {"role": "completion", "content": "已将发送客户报价单更新为完成。"}
+        ]
+      }
+    ],
+    "questions": [
+      {
+        "question": "当前尚未开始、需要下周推进的事项是什么？",
+        "answer": "完成自动字幕脚本。",
+        "question_type": "intention_open",
+        "evidence_texts": ["下周需要完成自动字幕脚本，目前还没开始。"],
+        "metadata": {"scenarios": ["intention_open"], "kinds": ["intention"], "intention_scope": "active"}
+      },
+      {
+        "question": "哪个事项正在等待客户触发？",
+        "answer": "等待客户确认片头方案后继续。",
+        "question_type": "intention_waiting",
+        "evidence_texts": ["等待客户确认后才能继续。"],
+        "metadata": {"scenarios": ["intention_waiting"], "kinds": ["intention"], "intention_scope": "active"}
+      },
+      {
+        "question": "哪个事项因 NAS 权限而无法继续？",
+        "answer": "素材归档。",
+        "question_type": "intention_blocked",
+        "evidence_texts": ["素材归档被 NAS 写权限阻塞，权限恢复前无法完成。"],
+        "metadata": {"scenarios": ["intention_blocked"], "kinds": ["intention"], "intention_scope": "active"}
+      },
+      {
+        "question": "历史上已经完成的客户事项是什么？",
+        "answer": "发送客户报价单。",
+        "question_type": "completed_intention_history",
+        "evidence_texts": ["之前要发给客户的报价单今天已经发送完成。"],
+        "metadata": {"scenarios": ["intention_completed", "completed_intention_history"], "kinds": ["intention"], "intention_scope": "completed"}
+      }
+    ]
+  },
+  {
+    "sample_id": "forget-invalidate-merge",
+    "sessions": [
+      {
+        "session_id": "old-facts",
+        "started_at": "2026-04-01T10:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "旧收件地址是南山路 18 号；供应商北辰负责我的硬盘采购。"},
+          {"role": "completion", "content": "已记录旧收件地址和北辰的供应商关系。"}
+        ]
+      },
+      {
+        "session_id": "forget-invalidate",
+        "started_at": "2026-04-05T10:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "请明确忘记南山路 18 号这个旧地址。北辰的供应商关系也被确认完全无效，不要再当作有效事实。"},
+          {"role": "completion", "content": "已按要求忘记旧地址，并将北辰供应商关系视为完全失效。"}
+        ]
+      },
+      {
+        "session_id": "merge",
+        "started_at": "2026-04-06T10:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "我之前提到的小蓝工作台和 BlueDesk 实际是同一个设备，正式名称统一为 BlueDesk。"},
+          {"role": "completion", "content": "已确认二者身份相同，后续统一使用 BlueDesk。"}
+        ]
+      }
+    ],
+    "questions": [
+      {
+        "question": "现在还能提供旧收件地址吗？",
+        "answer": "不能；用户已明确要求忘记南山路 18 号。",
+        "question_type": "explicit_forget",
+        "evidence_texts": ["请明确忘记南山路 18 号这个旧地址。"],
+        "metadata": {"scenarios": ["explicit_forget", "insufficient_no_answer", "adversarial"], "expect_summary_fallback": false}
+      },
+      {
+        "question": "北辰目前还是有效的硬盘供应商吗？",
+        "answer": "不是；该供应商关系已被确认完全无效。",
+        "question_type": "fully_invalidated",
+        "evidence_texts": ["北辰的供应商关系也被确认完全无效。"],
+        "metadata": {"scenarios": ["fully_invalidated", "memory_correction"]}
+      },
+      {
+        "question": "小蓝工作台和 BlueDesk 是两个设备吗？",
+        "answer": "不是，是同一个设备，正式名称为 BlueDesk。",
+        "question_type": "duplicate_merge",
+        "evidence_texts": ["小蓝工作台和 BlueDesk 实际是同一个设备，正式名称统一为 BlueDesk。"],
+        "metadata": {"scenarios": ["duplicate_merge"], "kinds": ["entity"]}
+      }
+    ]
+  },
+  {
+    "sample_id": "persistent-relations",
+    "sessions": [
+      {
+        "session_id": "add-relations",
+        "started_at": "2026-05-01T09:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "云帆品牌项目由客户周岚负责，项目使用 BlueDesk 工作台剪辑。"},
+          {"role": "completion", "content": "已记录周岚与云帆项目、BlueDesk 与云帆项目之间的关系。"}
+        ]
+      },
+      {
+        "session_id": "remove-relation",
+        "started_at": "2026-05-03T09:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "更新：周岚已不再负责云帆项目，这个负责人关系应移除；项目本身继续存在。"},
+          {"role": "completion", "content": "已移除周岚负责云帆项目的关系，不删除项目或人物。"}
+        ]
+      },
+      {
+        "session_id": "merge-migrate",
+        "started_at": "2026-05-04T09:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "此前记录的蓝桌设备就是 BlueDesk，请合并身份；它与云帆项目的剪辑设备关系仍然有效。"},
+          {"role": "completion", "content": "身份统一为 BlueDesk，并保留它与云帆项目的有效关系。"}
+        ]
+      }
+    ],
+    "questions": [
+      {
+        "question": "BlueDesk 与云帆品牌项目有什么长期关系？",
+        "answer": "BlueDesk 是云帆品牌项目使用的剪辑工作台。",
+        "question_type": "relation_add",
+        "evidence_texts": ["项目使用 BlueDesk 工作台剪辑。"],
+        "metadata": {"scenarios": ["relation_add", "relation_one_hop"], "expect_related_memory": true}
+      },
+      {
+        "question": "周岚现在仍负责云帆项目吗？",
+        "answer": "不再负责；负责人关系已被移除。",
+        "question_type": "relation_remove",
+        "evidence_texts": ["周岚已不再负责云帆项目，这个负责人关系应移除。"],
+        "metadata": {"scenarios": ["relation_remove"]}
+      },
+      {
+        "question": "蓝桌设备合并后，哪台设备仍与云帆项目有关？",
+        "answer": "BlueDesk。",
+        "question_type": "relation_merge_migration",
+        "evidence_texts": ["蓝桌设备就是 BlueDesk，请合并身份；它与云帆项目的剪辑设备关系仍然有效。"],
+        "metadata": {"scenarios": ["relation_merge_migration", "duplicate_merge"], "expect_related_memory": true}
+      }
+    ]
+  },
+  {
+    "sample_id": "cross-conversation-order",
+    "sessions": [
+      {
+        "session_id": "old-city",
+        "started_at": "2026-06-01T08:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "我目前在广州办公。"},
+          {"role": "completion", "content": "知道了，你目前在广州办公。"}
+        ]
+      },
+      {
+        "session_id": "new-city",
+        "started_at": "2026-06-10T08:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "我已经搬到深圳长期办公，广州的信息被这条新状态替代。"},
+          {"role": "completion", "content": "已更新：你现在长期在深圳办公。"}
+        ]
+      }
+    ],
+    "questions": [
+      {
+        "question": "按最新时间线，用户当前长期在哪里办公？",
+        "answer": "深圳。",
+        "question_type": "cross_conversation_order",
+        "evidence_texts": ["我已经搬到深圳长期办公，广州的信息被这条新状态替代。"],
+        "metadata": {"scenarios": ["cross_conversation_order", "memory_update", "temporal_reasoning"], "kinds": ["profile", "event"]}
+      }
+    ]
+  },
+  {
+    "sample_id": "summary-fallback-process",
+    "sessions": [
+      {
+        "session_id": "debug-process",
+        "started_at": "2026-07-01T14:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "这次临时排查只保留过程：先发现代理端口 7890 无响应，接着关闭旧代理进程，然后重启网络服务，最后确认下载恢复。不要把这些一次性步骤当成长期偏好。"},
+          {"role": "completion", "content": "本次过程依次是：发现 7890 无响应、关闭旧代理、重启网络服务、确认下载恢复；它只是本次会话过程。"}
+        ]
+      }
+    ],
+    "questions": [
+      {
+        "question": "那次临时网络排查按顺序做了哪四步？",
+        "answer": "发现 7890 无响应，关闭旧代理进程，重启网络服务，确认下载恢复。",
+        "question_type": "summary_fallback",
+        "evidence_texts": ["先发现代理端口 7890 无响应，接着关闭旧代理进程，然后重启网络服务，最后确认下载恢复。"],
+        "metadata": {"scenarios": ["summary_fallback"], "expect_summary_fallback": true}
+      }
+    ]
+  },
+  {
+    "sample_id": "hierarchy-long-context",
+    "sessions": [
+      {
+        "session_id": "many-domains",
+        "started_at": "2026-07-15T09:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "工作资料汇总：视频项目使用 DaVinci Resolve，音频交给声屿工作室，发票由财务联系人陈墨处理，素材备份到北区 NAS。旅行信息、咖啡豆清单、旧书目录和临时天气讨论都只是干扰项。对于视频交付，我坚持先校验字幕安全区，再检查响度，最后生成校验和。"},
+          {"role": "completion", "content": "已区分长期工作信息和干扰项；视频交付流程的重点是字幕安全区、响度和校验和。"}
+        ]
+      },
+      {
+        "session_id": "more-distractors",
+        "started_at": "2026-07-16T09:00:00+08:00",
+        "messages": [
+          {"role": "prompt", "content": "补充大量上下文：昨天讨论过键盘轴体、窗帘颜色、三家餐厅、两条公交线路和一场阵雨，这些都不改变工作流程。真正稳定的要求仍是视频交付前完成字幕安全区、响度与校验和三项检查。"},
+          {"role": "completion", "content": "明白，临时话题不改变稳定的视频交付检查要求。"}
+        ]
+      }
+    ],
+    "questions": [
+      {
+        "question": "忽略旅行和生活干扰项，视频交付前要完成哪三项稳定检查？",
+        "answer": "检查字幕安全区、检查响度、生成校验和。",
+        "question_type": "hierarchical_retrieval",
+        "evidence_texts": ["我坚持先校验字幕安全区，再检查响度，最后生成校验和。"],
+        "metadata": {"scenarios": ["hierarchical_retrieval", "long_context", "adversarial"], "kinds": ["preference"]}
+      }
+    ]
+  }
+]

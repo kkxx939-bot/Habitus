@@ -333,6 +333,13 @@ def _address(segments: tuple[str, ...]) -> MemoryAddress | None:
         if len(segments) == 2 and segments[0] == "tools":
             return MemoryAddress.tool(_markdown_stem(segments[1]))
         if len(segments) == 5 and segments[0] == "events":
+            if (
+                len(segments[1]) != 4
+                or len(segments[2]) != 2
+                or len(segments[3]) != 2
+                or not all(part.isdigit() for part in segments[1:4])
+            ):
+                return None
             event_date = date(int(segments[1]), int(segments[2]), int(segments[3]))
             return MemoryAddress.event(event_date, _markdown_stem(segments[4]))
         if len(segments) == 2 and segments[0] == "intentions":

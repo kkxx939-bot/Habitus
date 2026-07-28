@@ -2,13 +2,23 @@
 
 import asyncio
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
 
-from memory.conversation import ConversationAddress
+from infrastructure.store.contracts import PathLock
+from infrastructure.store.locks import ProcessLocalLockStore
+from memory.conversation import (
+    ConversationAddress,
+    ConversationMessageJournal,
+    ConversationRangeSummaryGenerator,
+    ConversationRangeSummaryStore,
+    ConversationSummaryCompactor,
+    ConversationSummaryStore,
+)
 from memory.conversation.indexing import ConversationSummaryMatch
 from memory.conversation.indexing.model import summary_reference
 from memory.intention import MemoryIntentionRecallScope
@@ -94,21 +104,41 @@ def structured(responses: list[dict[str, object]]) -> StructuredChatClient:
     return StructuredChatClient(ChatClient(ChatModelConfig(route), QueueChatProvider(responses)))
 
 
+def conversation_context_reader(
+    tmp_path: Path,
+    config: MemorySearchServiceConfig,
+) -> ConversationSearchContextReader:
+    journal = ConversationMessageJournal(
+        tmp_path / "conversation",
+        PathLock(ProcessLocalLockStore()),
+    )
+    segment_store = ConversationSummaryStore(journal.layout)
+    range_store = ConversationRangeSummaryStore(journal.layout)
+    compactor = ConversationSummaryCompactor(
+        journal,
+        segment_store,
+        range_store,
+        ConversationRangeSummaryGenerator(structured([])),
+    )
+    return ConversationSearchContextReader(journal, compactor, config=config)
+
+
 def service(
     tmp_path: Path,
     *,
     semantic: SemanticSearch,
     summaries: SummarySearch,
     responses: list[dict[str, object]] | None = None,
+    config: MemorySearchServiceConfig | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> SearchService:
-    config = MemorySearchServiceConfig()
+    config = config or MemorySearchServiceConfig()
     tree = MemoryTree(tmp_path / "memory")
     reader = MemorySnapshotReader(tree)
     client = structured([] if responses is None else responses)
     planner = MemorySearchQueryPlanner(client, config=config)
     grader = MemoryRetrievalGrader(client, config=config)
-    context_reader = object.__new__(ConversationSearchContextReader)
-    context_reader.config = config
+    context_reader = conversation_context_reader(tmp_path, config)
     return SearchService(
         tree=tree,
         snapshot_reader=reader,
@@ -119,6 +149,7 @@ def service(
         conversation_context=context_reader,
         assembler=MemoryContextAssembler(config=config),
         config=config,
+        clock=clock,
     )
 
 

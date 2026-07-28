@@ -76,7 +76,13 @@ class ChatMessage:
             raise ValueError("message name must be non-empty when provided")
         if self.tool_call_id is not None and (not isinstance(self.tool_call_id, str) or not self.tool_call_id.strip()):
             raise ValueError("tool_call_id must be non-empty when provided")
-        object.__setattr__(self, "tool_calls", tuple(self.tool_calls))
+        try:
+            tool_calls = tuple(self.tool_calls)
+        except TypeError as exc:
+            raise TypeError("message tool_calls must be an iterable of ToolCall values") from exc
+        if any(not isinstance(item, ToolCall) for item in tool_calls):
+            raise TypeError("message tool_calls must contain ToolCall values")
+        object.__setattr__(self, "tool_calls", tool_calls)
         if self.role == "tool":
             if not self.tool_call_id:
                 raise ValueError("tool result messages require tool_call_id")
@@ -138,6 +144,8 @@ class ChatRequest:
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))
         object.__setattr__(self, "tools", tuple(self.tools))
+        if not isinstance(self.metadata, Mapping):
+            raise TypeError("chat request metadata must be an object")
         object.__setattr__(self, "metadata", dict(self.metadata))
         if not self.messages or any(not isinstance(item, ChatMessage) for item in self.messages):
             raise ValueError("chat request requires normalized messages")
@@ -155,6 +163,13 @@ class ChatRequest:
                 raise ValueError("max_output_tokens must be a positive integer")
         if any(not isinstance(tool, ToolDefinition) for tool in self.tools):
             raise TypeError("tools must contain ToolDefinition values")
+        if self.tool_choice is not None:
+            if not isinstance(self.tool_choice, str | Mapping):
+                raise TypeError("tool_choice must be text, an object or null")
+            if isinstance(self.tool_choice, str) and not self.tool_choice.strip():
+                raise ValueError("tool_choice text must be non-empty")
+            if isinstance(self.tool_choice, Mapping):
+                object.__setattr__(self, "tool_choice", dict(self.tool_choice))
         if self.tool_choice is not None and not self.tools:
             raise ValueError("tool_choice requires at least one tool")
         if self.response_format is not None and not isinstance(self.response_format, ResponseFormat):
@@ -185,6 +200,8 @@ class TokenUsage:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
+        if not isinstance(self.details, Mapping):
+            raise TypeError("token usage details must be an object")
         object.__setattr__(self, "details", dict(self.details))
 
 
@@ -204,7 +221,13 @@ class ModelResponse:
     raw: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "tool_calls", tuple(self.tool_calls))
+        try:
+            tool_calls = tuple(self.tool_calls)
+        except TypeError as exc:
+            raise TypeError("model response tool_calls must be an iterable of ToolCall values") from exc
+        if any(not isinstance(item, ToolCall) for item in tool_calls):
+            raise TypeError("model response tool_calls must contain ToolCall values")
+        object.__setattr__(self, "tool_calls", tool_calls)
         if self.content is not None and not isinstance(self.content, str):
             raise TypeError("model response content must be text or null")
         if not self.content and not self.tool_calls:
@@ -220,6 +243,8 @@ class ModelResponse:
         if not isinstance(self.usage, TokenUsage):
             raise TypeError("usage must be TokenUsage")
         if self.raw is not None:
+            if not isinstance(self.raw, Mapping):
+                raise TypeError("model response raw must be an object")
             object.__setattr__(self, "raw", dict(self.raw))
 
 
@@ -243,7 +268,67 @@ class ModelStreamEvent:
         if self.kind not in allowed:
             raise ValueError(f"unsupported stream event kind: {self.kind}")
         if self.raw is not None:
+            if not isinstance(self.raw, Mapping):
+                raise TypeError("stream event raw must be an object")
             object.__setattr__(self, "raw", dict(self.raw))
+        payload_fields = {
+            "content_delta",
+            "reasoning_delta",
+            "tool_call_index",
+            "tool_call_id",
+            "tool_name",
+            "tool_arguments_delta",
+            "usage",
+            "finish_reason",
+        }
+        expected_fields = {
+            "content_delta": {"content_delta"},
+            "reasoning_delta": {"reasoning_delta"},
+            "tool_call_delta": {
+                "tool_call_index",
+                "tool_call_id",
+                "tool_name",
+                "tool_arguments_delta",
+            },
+            "usage": {"usage"},
+            "done": {"finish_reason"},
+        }[self.kind]
+        unexpected = sorted(
+            name
+            for name in payload_fields - expected_fields
+            if getattr(self, name) is not None
+        )
+        if unexpected:
+            raise ValueError(
+                f"stream event {self.kind} contains payload for another kind: {unexpected}"
+            )
+        if self.kind == "content_delta":
+            if not isinstance(self.content_delta, str) or self.content_delta == "":
+                raise ValueError("content_delta events require non-empty text")
+        elif self.kind == "reasoning_delta":
+            if not isinstance(self.reasoning_delta, str) or self.reasoning_delta == "":
+                raise ValueError("reasoning_delta events require non-empty text")
+        elif self.kind == "tool_call_delta":
+            if (
+                isinstance(self.tool_call_index, bool)
+                or not isinstance(self.tool_call_index, int)
+                or self.tool_call_index < 0
+            ):
+                raise ValueError("tool_call_delta events require a non-negative integer index")
+            for name in ("tool_call_id", "tool_name", "tool_arguments_delta"):
+                value = getattr(self, name)
+                if value is not None and (not isinstance(value, str) or value == ""):
+                    raise ValueError(f"{name} must be non-empty text when provided")
+            if all(
+                value is None
+                for value in (self.tool_call_id, self.tool_name, self.tool_arguments_delta)
+            ):
+                raise ValueError("tool_call_delta events require at least one tool field")
+        elif self.kind == "usage":
+            if not isinstance(self.usage, TokenUsage):
+                raise TypeError("usage events require TokenUsage")
+        elif not isinstance(self.finish_reason, str) or not self.finish_reason.strip():
+            raise ValueError("done events require a non-empty finish_reason")
 
 
 @dataclass(frozen=True)
@@ -257,6 +342,9 @@ class ProviderCapabilities:
     reasoning: bool = False
 
     def __post_init__(self) -> None:
+        for name in ("async_completion", "streaming", "tools", "reasoning"):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"provider capability {name} must be boolean")
         if self.structured_output_mode not in {"none", "json_object", "json_schema"}:
             raise ValueError(
                 "provider structured_output_mode must be none, json_object or json_schema"

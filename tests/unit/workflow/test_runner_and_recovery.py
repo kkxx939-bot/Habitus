@@ -12,7 +12,7 @@ import pytest
 from infrastructure.store.contracts import PathLock
 from infrastructure.store.locks import ProcessLocalLockStore
 from memory.conversation import ConversationAddress, ConversationMessageJournal
-from memory.editor import MemoryEditor, MemoryEditorPlan
+from memory.editor import MemoryEditor
 from memory.workflow import (
     MemoryJobClaim,
     MemoryJobExecutionError,
@@ -24,6 +24,7 @@ from memory.workflow.planning import MemorySegmentProductBuilder
 from memory.workflow.recovery import MemoryStagedJobRecovery
 from pre.conversation import ConversationBatch
 from tests.helpers import closed_turn, segment, segment_summary
+from tests.integration.test_change_receipt_chain import editor_plan
 
 
 def job_store(tmp_path: Path) -> MemoryJobStore:
@@ -52,7 +53,7 @@ def test_segment_products_run_both_read_only_branches_concurrently_and_wait_for_
     editor_started = asyncio.Event()
     summary_finished = False
     editor_finished = False
-    plan = object.__new__(MemoryEditorPlan)
+    plan = editor_plan()
 
     async def scenario():
         nonlocal summary_finished, editor_finished
@@ -105,7 +106,7 @@ def test_segment_product_failure_waits_for_sibling_but_never_returns_partial_pro
             nonlocal sibling_finished
             await asyncio.sleep(0.001)
             sibling_finished = True
-            return object.__new__(MemoryEditorPlan)
+            return editor_plan()
 
         summary_service.get_or_create = fail_summary
         editor.plan = finish_editor

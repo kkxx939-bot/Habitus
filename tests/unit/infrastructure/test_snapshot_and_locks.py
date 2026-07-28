@@ -132,6 +132,75 @@ def test_path_lock_never_replays_body_when_fenced_exit_fails() -> None:
     assert calls == 1
 
 
+def test_path_lock_retries_transient_acquire_renew_and_release_without_replaying_body() -> None:
+    class TransientStore(ProcessLocalLockStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.acquire_calls = 0
+            self.renew_calls = 0
+            self.release_calls = 0
+
+        def acquire(self, key, ttl_seconds=30):
+            self.acquire_calls += 1
+            if self.acquire_calls == 1:
+                raise TimeoutError("acquire busy")
+            return super().acquire(key, ttl_seconds=ttl_seconds)
+
+        def renew(self, token, ttl_seconds=30):
+            self.renew_calls += 1
+            if self.renew_calls == 1:
+                raise TimeoutError("renew busy")
+            return super().renew(token, ttl_seconds=ttl_seconds)
+
+        def release(self, token):
+            self.release_calls += 1
+            if self.release_calls == 1:
+                raise TimeoutError("release busy")
+            return super().release(token)
+
+    store = TransientStore()
+    body_calls = 0
+    with PathLock(store).acquire(
+        "memory://profile.md",
+        wait_timeout_seconds=0.1,
+        retry_delay_seconds=0.001,
+    ) as guard:
+        body_calls += 1
+        guard.checkpoint()
+
+    assert body_calls == 1
+    assert (store.acquire_calls, store.renew_calls, store.release_calls) == (2, 2, 2)
+    assert store.locks == {}
+
+
+def test_path_lock_retries_only_the_fencing_entry_not_the_critical_section() -> None:
+    class TransientFencingStore(ProcessLocalLockStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fenced_calls = 0
+
+        @contextmanager
+        def fenced(self, tokens, ttl_seconds=30):
+            self.fenced_calls += 1
+            if self.fenced_calls == 1:
+                raise TimeoutError("fencing busy")
+            with super().fenced(tokens, ttl_seconds=ttl_seconds):
+                yield
+
+    store = TransientFencingStore()
+    body_calls = 0
+    with PathLock(store).acquire(
+        "memory://profile.md",
+        wait_timeout_seconds=0.1,
+        retry_delay_seconds=0.001,
+    ) as guard:
+        with guard.fenced():
+            body_calls += 1
+
+    assert store.fenced_calls == 2
+    assert body_calls == 1
+
+
 def test_lease_guard_rejects_foreign_or_stale_token() -> None:
     store = ProcessLocalLockStore()
     token = store.acquire("a")

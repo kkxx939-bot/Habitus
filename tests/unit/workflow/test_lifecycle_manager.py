@@ -28,6 +28,8 @@ from memory.workflow import (
 )
 from pre.conversation import ConversationBatch
 from tests.helpers import BASE_TIME, closed_turn, codec
+from tests.unit.conversation.test_summary_indexing import Embedder, VectorStore
+from tests.unit.retrieval.test_search_service import structured
 
 
 def lifecycle_manager(tmp_path: Path, *, compaction_enabled: bool):
@@ -40,11 +42,20 @@ def lifecycle_manager(tmp_path: Path, *, compaction_enabled: bool):
         journal,
         segment_store,
         range_store,
-        object.__new__(ConversationRangeSummaryGenerator),
+        ConversationRangeSummaryGenerator(
+            structured([]),
+            compaction_config=compaction_config,
+        ),
         config=compaction_config,
     )
-    summary_index = object.__new__(PersistentConversationSummaryVectorIndex)
-    summary_index.compactor = compactor
+    summary_index = PersistentConversationSummaryVectorIndex(
+        journal,
+        compactor,
+        Embedder(),
+        VectorStore(),
+        dimension=2,
+        embedding_fingerprint="lifecycle-test-v1",
+    )
     calls = []
 
     async def synchronize(address, *, checkpoint=None):
@@ -103,4 +114,3 @@ def test_receipt_retention_cannot_be_shorter_than_job_retention() -> None:
             committed_job_retention_days=30,
             committed_receipt_retention_days=29,
         )
-

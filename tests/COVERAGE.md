@@ -3,6 +3,14 @@
 本目录只针对当前 `Conversation -> MemoryJob -> Memory Editor -> MemoryTree -> Semantic/Vector -> SearchService`
 主链编写测试，不恢复任何旧记忆接口或旧测试资产。每项先以领域不变量为测试依据，再覆盖正向、拒绝、幂等、边界和组合场景。
 
+## 用例有效性准入
+
+- 每条用例必须对应当前源码中可到达的公开行为、领域不变量、耐久数据损坏风险或外部依赖故障；不存在的 Agent、CLI、HTTP/API、Skill 和旧记忆兼容能力不写测试。
+- 参数化只用于有不同失效机理的等价类，例如 Python `bool` 冒充 `int`、数字字符串被宽松转换、`null` 绕过容量上限；不适用组合在参数生成时排除，不以运行时 `skip` 增加数量。
+- 测试替身只隔离模型、远程向量服务、时钟、锁竞争或故障注入。关键流程必须另有真实领域对象、真实文件存储或 Runtime 组装后的集成用例交叉验证。
+- 不绕过领域构造器伪造生产路径不可能产生的数据对象来追求分支覆盖；防御分支只有在耐久损坏或外部输入确实可到达时才测试。
+- 覆盖率用于发现未观察区域，不以行数或参数化实例数证明业务充分性。
+
 | 业务模块 | 主要风险 | 用例位置 | 场景层次 |
 | --- | --- | --- | --- |
 | `foundation` | ID、规范 JSON、摘要不稳定 | `unit/foundation/` | 正向、非法类型、规范化 |
@@ -24,7 +32,7 @@
 | Links/Backlinks | 单边关系、删除未迁移、自环、显式 REMOVE 误用 | `unit/editor/test_relationships.py` | ADD/REMOVE、双向派生、MERGE 迁移、损坏拒绝 |
 | 事务提交 | 内容与关系分批发布、旧快照覆盖新状态、日志残留 | `integration/test_memory_commit_chain.py`, `test_transaction_recovery.py` | CREATE/UPDATE/MERGE/DELETE、部分发布回滚、完整发布恢复、未知后续状态拒绝 |
 | L0/L1 与 Memory Vector | 派生层混入权威字段、索引与树不一致 | `unit/semantic/` | 刷新、重建、增量、过滤、陈旧源 |
-| Agent SearchService | Summary 抢占 Memory、kinds 截断关系、completed 占名额 | `unit/retrieval/` | 主召回、多查询失败、一跳非递归、关系损坏拒绝、充分性判断、条件后备 |
+| 记忆检索 SearchService | Summary 抢占 Memory、kinds 截断关系、completed 占名额 | `unit/retrieval/` | 主召回、多查询失败、一跳非递归、关系损坏拒绝、充分性判断、条件后备 |
 | Job/Receipt | 跨会话乱序、租约 ABA、失败跳过、回执与实写不一致 | `unit/workflow/`, `integration/test_change_receipt_chain.py`, `integration/test_memory_job_full_chain.py` | 顺序、lease、退避、STAGED/COMMITTED 恢复、实际事务回执、人工恢复、History 释放后过期 Job/Receipt 清理 |
 | Worker/Runtime | 重复启动、无心跳执行、失败 Job 无运维入口、错误组装 | `unit/runtime/`, `integration/test_runtime_assembly.py` | Job Worker、LifecycleWorker、全局 lease、耐久游标、局部失败、共享依赖、Runtime 启停/重启/关闭 |
 | 架构边界 | 旧 Evidence/Context 复活、领域反向依赖、双轨 Schema | `architecture/` | 源码静态约束 |
@@ -38,7 +46,7 @@
 3. 同一 Segment 独立生成过程 Summary 和长期记忆计划；任一失败不发布 L2。
 4. 旧记忆读取、候选审查、字段计划、身份裁决和关系计划全部完成后才提交。
 5. L2 内容与 Links/Backlinks 在一笔可恢复事务中发布，随后刷新 L0/L1 和远程索引。
-6. Memory 是 Agent 主召回；只有 Memory 不足时，Summary 才作为单独的历史细节后备。
+6. Memory 是检索主结果；只有 Memory 不足时，Summary 才作为单独的历史细节后备。
 7. Job、Receipt、History、Summary 和 Transaction Journal 按安全门槛清理，不允许时间直接改变记忆业务语义。
 
 ## 外部系统验证边界
@@ -46,4 +54,5 @@
 - VikingDB 用例覆盖 HTTP 请求、认证头、错误分类、记录编解码、过滤和分页完整性，但不在单元测试中访问真实云账号。
 - 模型 Adapter 用 MockTransport/受控 Provider 覆盖协议与结构化语义，不消耗真实 API Key。
 - 真实供应商连通性、配额、服务端索引最终一致时间属于独立 smoke/contract 环境，不伪装成离线单元测试。
-- 本轮按要求只编写和静态收集用例；`collect-only` 成功不代表测试函数已经执行通过。
+- 当前仓库没有 Agent 执行入口、CLI 或 HTTP/API 入口，因此本测试集只覆盖 Runtime 暴露的记忆检索门面和 SearchService，不能宣称覆盖“用户请求 -> Agent -> 模型/工具 -> 返回”的 Agent 主链。
+- 参数化展开数量只表示同一契约的输入等价类，不作为独立业务场景数量，也不作为测试充分性的判断标准。

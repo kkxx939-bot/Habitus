@@ -1,4 +1,4 @@
-"""查询计划、搜索命中、Agent 上下文预算和角色化 Conversation 补充测试。"""
+"""查询计划、搜索命中、下游上下文预算和角色化 Conversation 补充测试。"""
 
 import pytest
 

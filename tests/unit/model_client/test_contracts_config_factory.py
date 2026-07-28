@@ -7,12 +7,14 @@ import pytest
 
 from ModelClient import (
     ChatMessage,
+    ChatModelConfig,
     ChatRequest,
     EmbeddingClient,
     EmbeddingModelConfig,
     EmbeddingVector,
     ModelConfigurationError,
     ModelResponse,
+    ProviderBuildContext,
     ProviderCapabilities,
     ProviderConfig,
     ProviderFactory,
@@ -23,7 +25,13 @@ from ModelClient import (
     ToolCall,
     ToolDefinition,
 )
-from ModelClient.adapters import register_builtin_adapters
+from ModelClient.adapters import (
+    ArkMultimodalEmbeddingProvider,
+    OpenAICompatibleChatProvider,
+    build_ark_multimodal_embedding_provider,
+    build_openai_compatible_chat_provider,
+    register_builtin_adapters,
+)
 
 
 def route(**overrides: object) -> ProviderConfig:
@@ -179,9 +187,37 @@ def test_builtin_registry_has_chat_and_embedding_but_no_fake_reranker() -> None:
         factory.create_reranker(rerank, environ={"TEST_API_KEY": "secret"})
 
 
+def test_builtin_registry_constructs_both_real_protocol_adapters_without_network_io() -> None:
+    factory = ProviderFactory()
+    register_builtin_adapters(factory)
+    chat_config = ChatModelConfig(
+        route(adapter="openai_compatible_chat"),
+    )
+    embedding_config = EmbeddingModelConfig(
+        route(adapter="ark_multimodal"),
+        dimension=2,
+        input_mode="multimodal",
+    )
+
+    chat = factory.create_chat_provider(chat_config, environ={"TEST_API_KEY": "secret"})
+    embedder = factory.create_embedder(embedding_config, environ={"TEST_API_KEY": "secret"})
+
+    assert isinstance(chat, OpenAICompatibleChatProvider)
+    assert isinstance(embedder, EmbeddingClient)
+    assert isinstance(embedder.provider, ArkMultimodalEmbeddingProvider)
+
+
+def test_builtin_adapter_builders_reject_a_capability_config_from_the_wrong_protocol() -> None:
+    rerank = RerankModelConfig(route(adapter="future-rerank"))
+    context = ProviderBuildContext(rerank, api_key="secret")
+    with pytest.raises(ModelConfigurationError, match="EmbeddingModelConfig"):
+        build_ark_multimodal_embedding_provider(context)
+    with pytest.raises(ModelConfigurationError, match="ChatModelConfig"):
+        build_openai_compatible_chat_provider(context)
+
+
 def test_factory_can_accept_a_future_real_rerank_adapter_without_changing_retrieval_contract() -> None:
     factory = ProviderFactory()
     factory.register_adapter("rerank", "test-adapter", lambda context: FakeReranker())
     reranker = factory.create_reranker(RerankModelConfig(route()), environ={"TEST_API_KEY": "secret"})
     assert asyncio.run(reranker.rerank("query", ("a", "b"))) == (1.0, 1.0)
-

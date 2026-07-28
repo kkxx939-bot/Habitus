@@ -1,5 +1,6 @@
 """跨 Conversation 全局有序 Job、耐久租约、退避和人工恢复入口测试。"""
 
+import json
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from memory.conversation import ConversationAddress
 from memory.workflow.jobs import (
     MemoryJobBlockedError,
     MemoryJobConfig,
+    MemoryJobError,
     MemoryJobLeaseLostError,
     MemoryJobNotReadyError,
     MemoryJobStatus,
@@ -144,7 +146,23 @@ def test_non_retryable_failure_blocks_immediately_and_high_watermark_survives_cl
     assert not jobs.discard_committed(committed)
 
 
+def test_durable_failed_job_without_error_is_rejected_as_corrupt_state(tmp_path: Path) -> None:
+    clock = Clock()
+    jobs = store(tmp_path, clock)
+    address = ConversationAddress("conversation-a", date(2026, 7, 1))
+    queued = jobs.activate(jobs.stage(address, source("conversation-a", 0)))
+    failed = jobs.fail(jobs.claim(queued, "worker"), ValueError("bad data"), retryable=False)
+    assert failed.status is MemoryJobStatus.FAILED
+
+    job_path = next(path for path in jobs.jobs_root.glob("*.json") if path.name != "state.json")
+    payload = json.loads(job_path.read_text(encoding="utf-8"))
+    payload["last_error"] = None
+    job_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MemoryJobError, match="fields are invalid"):
+        jobs.oldest_uncommitted()
+
+
 def test_retry_delay_is_bounded_exponential() -> None:
     config = MemoryJobConfig(retry_base_delay_seconds=2, retry_max_delay_seconds=5)
     assert [config.retry_delay_seconds(attempt) for attempt in (1, 2, 3, 4)] == [2, 4, 5, 5]
-

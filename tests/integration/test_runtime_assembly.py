@@ -10,6 +10,9 @@ from Config import M2BOSConfig
 from infrastructure.store.contracts import PathLock
 from infrastructure.store.locks import ProcessLocalLockStore
 from infrastructure.vector import VectorStoreFactory
+from memory.model import MemoryKind
+from memory.retrieval import MemoryRetrievalSufficiency
+from memory.uri import MemoryURI
 from ModelClient import (
     EmbeddingVector,
     ModelResponse,
@@ -243,5 +246,46 @@ def test_runtime_start_stop_restart_and_close_coordinate_both_workers(tmp_path: 
         assert runtime.state is RuntimeState.CLOSED
         with pytest.raises(RuntimeStateError, match="closed runtime"):
             await runtime.start()
+
+    asyncio.run(scenario())
+
+
+def test_runtime_memory_search_facades_use_the_real_search_service_and_lifecycle_gate(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        providers, vectors = runtime_dependencies()
+        runtime = build_runtime(
+            runtime_config(tmp_path),
+            providers=providers,
+            vector_stores=vectors,
+            path_lock=PathLock(ProcessLocalLockStore()),
+            environ={},
+        )
+
+        with pytest.raises(RuntimeStateError, match="initialized runtime"):
+            await runtime.find_memory("回答偏好")
+        with pytest.raises(RuntimeStateError, match="initialized runtime"):
+            await runtime.search_memory("之前如何决定")
+
+        runtime.initialize()
+        direct = await runtime.find_memory(
+            "  回答偏好  ",
+            target_uris="memory://preferences",
+            limit=2,
+            kinds=(MemoryKind.PREFERENCE,),
+        )
+        assert direct.query == "回答偏好"
+        assert direct.target_roots == (MemoryURI.parse("memory://preferences"),)
+        assert direct.kinds == (MemoryKind.PREFERENCE,)
+        assert direct.memories == ()
+        assert direct.retrieval_assessment is None
+        assert not direct.summary_fallback_attempted
+
+        contextual = await runtime.search_memory("之前如何决定")
+        assert contextual.memories == ()
+        assert contextual.retrieval_assessment is not None
+        assert contextual.retrieval_assessment.decision is MemoryRetrievalSufficiency.INSUFFICIENT
+        assert contextual.summary_fallback_attempted
+        assert contextual.summary_fallbacks == ()
+        await runtime.close()
 
     asyncio.run(scenario())

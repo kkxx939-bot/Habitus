@@ -185,6 +185,8 @@ class MemoryJob:
                 raise ValueError("new staged memory job cannot contain retry state")
             if self.attempts > 0 and self.last_error is None:
                 raise ValueError("retried staged memory job requires its last error")
+        if status is MemoryJobStatus.FAILED and self.last_error is None:
+            raise ValueError("failed memory job requires its last error")
         if self.last_error is not None and (
             not isinstance(self.last_error, str)
             or not self.last_error
