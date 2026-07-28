@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from types import MappingProxyType
+from typing import Any
 from uuid import uuid4
 
+from foundation.integrity import canonical_digest
 from infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
 from infrastructure.store.contracts import PathLock
 from memory.document import MemoryDocument, MemoryDocumentMetadata, MemoryStoredLink
@@ -71,6 +74,98 @@ class MemoryCommitConfig:
             or not 1 <= self.lock_ttl_seconds <= 3_600
         ):
             raise ValueError("lock_ttl_seconds must be between 1 and 3600")
+
+
+def memory_logical_content_digest(
+    *,
+    uri: MemoryURI,
+    kind: MemoryKind,
+    fields: Mapping[str, Any],
+    links: tuple[MemoryStoredLink, ...],
+    backlinks: tuple[MemoryStoredLink, ...],
+    confirms_intention: bool,
+) -> str:
+    """计算不受提交时间和 revision 影响的最终节点内容摘要。"""
+
+    if not isinstance(uri, MemoryURI):
+        raise TypeError("logical content uri must be a MemoryURI")
+    uri.to_address()
+    resolved_kind = MemoryKind(kind)
+    if not isinstance(fields, Mapping) or any(not isinstance(name, str) for name in fields):
+        raise TypeError("logical content fields must be a mapping with string keys")
+    for label, values in {"links": links, "backlinks": backlinks}.items():
+        if not isinstance(values, tuple) or any(not isinstance(value, MemoryStoredLink) for value in values):
+            raise TypeError(f"logical content {label} must contain MemoryStoredLink values")
+    if not isinstance(confirms_intention, bool):
+        raise TypeError("confirms_intention must be boolean")
+    if confirms_intention and resolved_kind is not MemoryKind.INTENTION:
+        raise ValueError("only Intention logical content can refresh confirmation time")
+    return canonical_digest(
+        {
+            "uri": str(uri),
+            "memory_type": resolved_kind.value,
+            "fields": fields,
+            "links": [link.to_dict() for link in links],
+            "backlinks": [link.to_dict() for link in backlinks],
+            "confirms_intention": confirms_intention,
+        }
+    )
+
+
+@dataclass(frozen=True)
+class MemoryCommitLogicalWrite:
+    """提交前确定的最终业务内容，不包含系统生成的时间与 revision。"""
+
+    before: VersionedSnapshot[MemoryDocument]
+    uri: MemoryURI
+    kind: MemoryKind
+    fields: Mapping[str, Any]
+    links: tuple[MemoryStoredLink, ...]
+    backlinks: tuple[MemoryStoredLink, ...]
+    confirms_intention: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.before, VersionedSnapshot):
+            raise TypeError("logical write before must be a VersionedSnapshot")
+        if not isinstance(self.uri, MemoryURI):
+            raise TypeError("logical write uri must be a MemoryURI")
+        if self.before.identity != str(self.uri):
+            raise ValueError("logical write snapshot identity does not match its URI")
+        kind = MemoryKind(self.kind)
+        if not isinstance(self.fields, Mapping) or any(not isinstance(name, str) for name in self.fields):
+            raise TypeError("logical write fields must be a mapping with string keys")
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
+        for label, values in {"links": self.links, "backlinks": self.backlinks}.items():
+            if not isinstance(values, tuple) or any(not isinstance(value, MemoryStoredLink) for value in values):
+                raise TypeError(f"logical write {label} must contain MemoryStoredLink values")
+            identities = tuple(value.identity for value in values)
+            if identities != tuple(sorted(set(identities))):
+                raise ValueError(f"logical write {label} must be unique and sorted")
+        if any(link.from_uri != self.uri for link in self.links):
+            raise ValueError("logical write forward link has the wrong source URI")
+        if any(link.to_uri != self.uri for link in self.backlinks):
+            raise ValueError("logical write backlink has the wrong target URI")
+        if not isinstance(self.confirms_intention, bool):
+            raise TypeError("confirms_intention must be boolean")
+        if self.confirms_intention and kind is not MemoryKind.INTENTION:
+            raise ValueError("only an Intention logical write can refresh confirmation time")
+        if self.before.exists:
+            if not isinstance(self.before.value, MemoryDocument):
+                raise TypeError("existing logical write snapshot must contain a MemoryDocument")
+            if self.before.value.kind is not kind or MemoryURI.from_address(self.before.value.address) != self.uri:
+                raise ValueError("logical write cannot change an existing node identity or kind")
+
+    @property
+    def content_digest(self) -> str:
+        return memory_logical_content_digest(
+            uri=self.uri,
+            kind=self.kind,
+            fields=self.fields,
+            links=self.links,
+            backlinks=self.backlinks,
+            confirms_intention=self.confirms_intention,
+        )
 
 
 @dataclass(frozen=True)
@@ -136,6 +231,63 @@ class MemoryCommitPlan:
         relation_uris = {str(update.uri) for update in self.relation_plan.updates}
         retired = {str(uri) for uri in self.retired_uris}
         return tuple(MemoryURI.parse(identity) for identity in sorted(mutation_uris | relation_uris | retired))
+
+    def logical_writes(self) -> tuple[MemoryCommitLogicalWrite, ...]:
+        """从统一计划生成 Receipt 与事务共同使用的最终业务内容。"""
+
+        mutations = {str(mutation.uri): mutation for mutation in self.mutation_plan.mutations}
+        relation_updates = {str(update.uri): update for update in self.relation_plan.updates}
+        targets = {str(mutation.uri) for mutation in self.mutation_plan.changed_mutations} | set(
+            relation_updates
+        )
+        retired = {str(uri) for uri in self.retired_uris}
+        if targets & retired:
+            raise MemoryCommitError("one URI cannot be written and retired in the same commit")
+
+        writes: list[MemoryCommitLogicalWrite] = []
+        for identity in sorted(targets):
+            before = self.read_set.get(identity)
+            if before is None:
+                raise MemoryCommitError("write target is missing from the unified read set")
+            mutation = mutations.get(identity)
+            relation_update = relation_updates.get(identity)
+            if mutation is not None:
+                kind = mutation.match.candidate.kind
+                fields = mutation.fields
+            else:
+                if not before.exists or not isinstance(before.value, MemoryDocument):
+                    raise MemoryCommitError("relation-only write requires an existing memory document")
+                kind = before.value.kind
+                fields = before.value.fields
+
+            if relation_update is not None:
+                links = relation_update.links
+                backlinks = relation_update.backlinks
+            elif before.exists:
+                assert isinstance(before.value, MemoryDocument)
+                links = before.value.links
+                backlinks = before.value.backlinks
+            else:
+                links = ()
+                backlinks = ()
+
+            if not before.exists and (mutation is None or mutation.action is not MemoryMutationAction.CREATE):
+                raise MemoryCommitError("missing write target requires a CREATE mutation")
+            confirms_intention = kind is MemoryKind.INTENTION and (
+                not before.exists or (mutation is not None and mutation.confirms_intention)
+            )
+            writes.append(
+                MemoryCommitLogicalWrite(
+                    before=before,
+                    uri=MemoryURI.parse(identity),
+                    kind=kind,
+                    fields=fields,
+                    links=links,
+                    backlinks=backlinks,
+                    confirms_intention=confirms_intention,
+                )
+            )
+        return tuple(writes)
 
     def _validate_mutation_identities(self) -> None:
         expected_disposition = {
@@ -439,61 +591,27 @@ class MemoryCommitTransaction:
         *,
         timestamp: datetime,
     ) -> tuple[MemoryCommitWrite, ...]:
-        mutations = {str(mutation.uri): mutation for mutation in plan.mutation_plan.mutations}
-        relation_updates = {str(update.uri): update for update in plan.relation_plan.updates}
-        targets = {str(mutation.uri) for mutation in plan.mutation_plan.changed_mutations} | set(relation_updates)
-        retired = {str(uri) for uri in plan.retired_uris}
-        if targets & retired:
-            raise MemoryCommitError("one URI cannot be written and retired in the same commit")
-
         writes: list[MemoryCommitWrite] = []
-        for identity in sorted(targets):
-            before = plan.read_set.get(identity)
-            if before is None:
-                raise MemoryCommitError("write target is missing from the unified read set")
-            mutation = mutations.get(identity)
-            relation_update = relation_updates.get(identity)
-            if mutation is not None:
-                kind = mutation.match.candidate.kind
-                fields = mutation.fields
-            else:
-                if not before.exists or not isinstance(before.value, MemoryDocument):
-                    raise MemoryCommitError("relation-only write requires an existing memory document")
-                kind = before.value.kind
-                fields = before.value.fields
-
-            if relation_update is not None:
-                links = relation_update.links
-                backlinks = relation_update.backlinks
-            elif before.exists:
-                assert isinstance(before.value, MemoryDocument)
-                links = before.value.links
-                backlinks = before.value.backlinks
-            else:
-                links = ()
-                backlinks = ()
-
-            if before.exists:
-                assert isinstance(before.value, MemoryDocument)
-                metadata = before.value.metadata.next_revision(
+        for logical in plan.logical_writes():
+            if logical.before.exists:
+                assert isinstance(logical.before.value, MemoryDocument)
+                metadata = logical.before.value.metadata.next_revision(
                     timestamp,
-                    refresh_confirmation=(mutation is not None and mutation.confirms_intention),
+                    refresh_confirmation=logical.confirms_intention,
                 )
             else:
-                if mutation is None or mutation.action is not MemoryMutationAction.CREATE:
-                    raise MemoryCommitError("missing write target requires a CREATE mutation")
                 metadata = MemoryDocumentMetadata.initial(
                     timestamp,
-                    confirmed=kind is MemoryKind.INTENTION,
+                    confirmed=logical.kind is MemoryKind.INTENTION,
                 )
             after = self.tree.document_codec.build(
-                kind,
-                fields,
+                logical.kind,
+                logical.fields,
                 metadata=metadata,
-                links=links,
-                backlinks=backlinks,
+                links=logical.links,
+                backlinks=logical.backlinks,
             )
-            writes.append(MemoryCommitWrite(before=before, after=after))
+            writes.append(MemoryCommitWrite(before=logical.before, after=after))
         return tuple(writes)
 
     def _journal_record(
@@ -676,6 +794,7 @@ __all__ = [
     "MemoryCommitConfig",
     "MemoryCommitConflictError",
     "MemoryCommitError",
+    "MemoryCommitLogicalWrite",
     "MemoryCommitPlan",
     "MemoryCommitRecoveryError",
     "MemoryCommitResult",
@@ -683,4 +802,5 @@ __all__ = [
     "MemoryCommitStatus",
     "MemoryCommitTransaction",
     "MemoryCommitWrite",
+    "memory_logical_content_digest",
 ]

@@ -10,6 +10,7 @@ from memory.document import MemoryDocument, MemoryDocumentCodec, MemoryStoredLin
 from memory.editor.engine import MemoryEditorPlan
 from memory.editor.identity import MemoryNodeDisposition
 from memory.editor.mutation import MemoryMutationAction
+from memory.editor.transaction import memory_logical_content_digest
 from memory.editor.transaction_log import (
     MemoryTransactionJournalEntry,
     MemoryTransactionJournalRecord,
@@ -24,6 +25,7 @@ from memory.workflow.receipt.model import (
     MemoryIdentityChange,
     MemoryNodeChange,
     MemoryNodeChangeAction,
+    MemoryPreparedNodeChange,
 )
 
 
@@ -72,6 +74,36 @@ class MemoryChangeReceiptProjector:
                     basis=proposal.basis,
                 )
             )
+        prepared_node_changes = [
+            MemoryPreparedNodeChange(
+                action=(
+                    MemoryNodeChangeAction.UPDATE
+                    if logical.before.exists
+                    else MemoryNodeChangeAction.CREATE
+                ),
+                uri=logical.uri,
+                before_digest=(
+                    self._document_digest(logical.before.value)
+                    if logical.before.exists
+                    else None
+                ),
+                expected_after_digest=logical.content_digest,
+                confirms_intention=logical.confirms_intention,
+            )
+            for logical in plan.commit.logical_writes()
+        ]
+        for uri in plan.commit.retired_uris:
+            snapshot = plan.commit.read_set.get(str(uri))
+            if snapshot is None or not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
+                raise MemoryChangeReceiptError("retired memory is missing its prepared before document")
+            prepared_node_changes.append(
+                MemoryPreparedNodeChange(
+                    action=MemoryNodeChangeAction.DELETE,
+                    uri=uri,
+                    before_digest=self._document_digest(snapshot.value),
+                    expected_after_digest=None,
+                )
+            )
         return MemoryChangeReceipt(
             source=source,
             state=MemoryChangeReceiptState.PREPARED,
@@ -81,6 +113,9 @@ class MemoryChangeReceiptProjector:
             expected_updated_uris=self._sorted_uris(updated),
             expected_deleted_uris=self._sorted_uris(deleted),
             unchanged_uris=self._sorted_uris(unchanged),
+            prepared_node_changes=tuple(
+                sorted(prepared_node_changes, key=lambda item: str(item.uri))
+            ),
             identity_changes=tuple(sorted(identity_changes, key=lambda item: str(item.source_uri))),
             added_relations=plan.commit.relation_plan.added,
             removed_relations=plan.commit.relation_plan.removed,
@@ -102,7 +137,17 @@ class MemoryChangeReceiptProjector:
             raise MemoryChangeReceiptError("transaction journal does not match the receipt source")
         if journal.state is not MemoryTransactionJournalState.COMMITTED:
             raise MemoryChangeReceiptError("only a COMMITTED transaction can finalize a change receipt")
-        node_changes = tuple(self._node_change(entry) for entry in journal.entries)
+        prepared_by_uri = {str(change.uri): change for change in current.prepared_node_changes}
+        actual_prepared: list[MemoryPreparedNodeChange] = []
+        node_changes: list[MemoryNodeChange] = []
+        for entry in journal.entries:
+            expected = prepared_by_uri.get(str(entry.uri))
+            if expected is None:
+                raise MemoryChangeReceiptError("transaction journal contains an unprepared node change")
+            actual_prepared.append(self._prepared_change(entry, expected))
+            node_changes.append(self._node_change(entry))
+        if tuple(actual_prepared) != current.prepared_node_changes:
+            raise MemoryChangeReceiptError("committed node content differs from the prepared receipt")
         self._verify_relations(current, journal)
         committed = MemoryChangeReceipt(
             source=current.source,
@@ -113,16 +158,73 @@ class MemoryChangeReceiptProjector:
             expected_updated_uris=current.expected_updated_uris,
             expected_deleted_uris=current.expected_deleted_uris,
             unchanged_uris=current.unchanged_uris,
+            prepared_node_changes=current.prepared_node_changes,
             identity_changes=current.identity_changes,
             added_relations=current.added_relations,
             removed_relations=current.removed_relations,
-            node_changes=node_changes,
+            node_changes=tuple(node_changes),
         )
         if current.state is MemoryChangeReceiptState.COMMITTED:
             if current != committed:
                 raise MemoryChangeReceiptError("committed change receipt conflicts with its transaction journal")
             return current
         return committed
+
+    def _prepared_change(
+        self,
+        entry: MemoryTransactionJournalEntry,
+        expected: MemoryPreparedNodeChange,
+    ) -> MemoryPreparedNodeChange:
+        before = entry.before
+        after = entry.after
+        if before is None and after is not None:
+            action = MemoryNodeChangeAction.CREATE
+        elif before is not None and after is not None:
+            action = MemoryNodeChangeAction.UPDATE
+        elif before is not None:
+            action = MemoryNodeChangeAction.DELETE
+        else:
+            raise MemoryChangeReceiptError("transaction journal contains an empty change")
+        self._verify_confirmation(before, after, expected)
+        return MemoryPreparedNodeChange(
+            action=action,
+            uri=entry.uri,
+            before_digest=self._document_digest(before),
+            expected_after_digest=(
+                None
+                if after is None
+                else memory_logical_content_digest(
+                    uri=entry.uri,
+                    kind=after.kind,
+                    fields=after.fields,
+                    links=after.links,
+                    backlinks=after.backlinks,
+                    confirms_intention=expected.confirms_intention,
+                )
+            ),
+            confirms_intention=expected.confirms_intention,
+        )
+
+    @staticmethod
+    def _verify_confirmation(
+        before: MemoryDocument | None,
+        after: MemoryDocument | None,
+        expected: MemoryPreparedNodeChange,
+    ) -> None:
+        if after is None:
+            if expected.confirms_intention:
+                raise MemoryChangeReceiptError("deleted node cannot refresh Intention confirmation")
+            return
+        if expected.confirms_intention:
+            if after.metadata.last_confirmed_at != after.metadata.updated_at:
+                raise MemoryChangeReceiptError("committed Intention did not apply the prepared confirmation")
+            return
+        if before is None:
+            if after.metadata.last_confirmed_at is not None:
+                raise MemoryChangeReceiptError("unprepared Intention confirmation appeared during commit")
+            return
+        if after.metadata.last_confirmed_at != before.metadata.last_confirmed_at:
+            raise MemoryChangeReceiptError("Intention confirmation changed outside the prepared plan")
 
     def _node_change(self, entry: MemoryTransactionJournalEntry) -> MemoryNodeChange:
         if not isinstance(entry, MemoryTransactionJournalEntry):
@@ -186,6 +288,7 @@ class MemoryChangeReceiptProjector:
 
         return (
             left.source == right.source
+            and left.prepared_node_changes == right.prepared_node_changes
             and left.expected_created_uris == right.expected_created_uris
             and left.expected_updated_uris == right.expected_updated_uris
             and left.expected_deleted_uris == right.expected_deleted_uris

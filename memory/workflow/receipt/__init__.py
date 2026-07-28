@@ -8,6 +8,7 @@ from memory.workflow.receipt.model import (
     MemoryIdentityChange,
     MemoryNodeChange,
     MemoryNodeChangeAction,
+    MemoryPreparedNodeChange,
 )
 from memory.workflow.receipt.projector import MemoryChangeReceiptProjector
 from memory.workflow.receipt.store import (
@@ -26,4 +27,5 @@ __all__ = [
     "MemoryIdentityChange",
     "MemoryNodeChange",
     "MemoryNodeChangeAction",
+    "MemoryPreparedNodeChange",
 ]

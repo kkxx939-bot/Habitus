@@ -34,6 +34,7 @@ from memory.workflow.receipt import (
     MemoryIdentityChange,
     MemoryNodeChange,
     MemoryNodeChangeAction,
+    MemoryPreparedNodeChange,
 )
 from memory.workflow.runner import MemoryJobClaim, MemoryJobRunner, MemoryJobRunResult
 
@@ -68,4 +69,5 @@ __all__ = [
     "MemoryWorkflowLifecycleConfig",
     "MemoryNodeChange",
     "MemoryNodeChangeAction",
+    "MemoryPreparedNodeChange",
 ]

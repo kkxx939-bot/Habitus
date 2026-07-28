@@ -85,6 +85,7 @@ from memory.editor.transaction import (
     MemoryCommitConfig,
     MemoryCommitConflictError,
     MemoryCommitError,
+    MemoryCommitLogicalWrite,
     MemoryCommitPlan,
     MemoryCommitRecoveryError,
     MemoryCommitResult,
@@ -92,6 +93,7 @@ from memory.editor.transaction import (
     MemoryCommitStatus,
     MemoryCommitTransaction,
     MemoryCommitWrite,
+    memory_logical_content_digest,
 )
 from memory.editor.transaction_log import (
     MemoryTransactionJournal,
@@ -113,6 +115,7 @@ __all__ = [
     "MemoryCommitConfig",
     "MemoryCommitConflictError",
     "MemoryCommitError",
+    "MemoryCommitLogicalWrite",
     "MemoryCommitPlan",
     "MemoryCommitRecoveryError",
     "MemoryCommitResult",
@@ -186,4 +189,5 @@ __all__ = [
     "MemoryTransactionJournalError",
     "MemoryTransactionJournalRecord",
     "MemoryTransactionJournalState",
+    "memory_logical_content_digest",
 ]

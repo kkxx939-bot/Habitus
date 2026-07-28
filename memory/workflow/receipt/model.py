@@ -11,6 +11,7 @@ from enum import Enum
 from memory.document import MemoryStoredLink
 from memory.editor.candidate import MemoryIdentityProposalBasis
 from memory.editor.identity import MemoryNodeDisposition
+from memory.model import MemoryKind
 from memory.uri import MemoryURI
 from memory.workflow.jobs import MemoryJob
 from pre.conversation import ConversationSegment
@@ -199,6 +200,80 @@ class MemoryIdentityChange:
 
 
 @dataclass(frozen=True)
+class MemoryPreparedNodeChange:
+    """准备态绑定的旧文档摘要与无时间最终内容摘要。"""
+
+    action: MemoryNodeChangeAction
+    uri: MemoryURI
+    before_digest: str | None
+    expected_after_digest: str | None
+    confirms_intention: bool = False
+
+    def __post_init__(self) -> None:
+        action = MemoryNodeChangeAction(self.action)
+        if not isinstance(self.uri, MemoryURI):
+            raise TypeError("prepared node change uri must be MemoryURI")
+        address = self.uri.to_address()
+        for name in ("before_digest", "expected_after_digest"):
+            value = getattr(self, name)
+            if value is not None:
+                require_sha256(value, name)
+        if not isinstance(self.confirms_intention, bool):
+            raise TypeError("confirms_intention must be boolean")
+        if self.confirms_intention and address.kind is not MemoryKind.INTENTION:
+            raise ValueError("only an Intention prepared change can refresh confirmation time")
+        if action is MemoryNodeChangeAction.CREATE:
+            if self.before_digest is not None:
+                raise ValueError("prepared create cannot contain before state")
+            if self.expected_after_digest is None:
+                raise ValueError("prepared create requires expected after content")
+            if address.kind is MemoryKind.INTENTION and not self.confirms_intention:
+                raise ValueError("prepared Intention create must establish confirmation time")
+        elif action is MemoryNodeChangeAction.UPDATE:
+            if self.before_digest is None or self.expected_after_digest is None:
+                raise ValueError("prepared update requires before and expected after content")
+        else:
+            if self.before_digest is None:
+                raise ValueError("prepared delete requires before state")
+            if self.expected_after_digest is not None:
+                raise ValueError("prepared delete cannot contain expected after content")
+            if self.confirms_intention:
+                raise ValueError("prepared delete cannot refresh Intention confirmation")
+        object.__setattr__(self, "action", action)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "action": self.action.value,
+            "uri": str(self.uri),
+            "before_digest": self.before_digest,
+            "expected_after_digest": self.expected_after_digest,
+            "confirms_intention": self.confirms_intention,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> MemoryPreparedNodeChange:
+        expected = {
+            "action",
+            "uri",
+            "before_digest",
+            "expected_after_digest",
+            "confirms_intention",
+        }
+        if not isinstance(value, Mapping) or set(value) != expected:
+            raise ValueError("prepared memory node change has an invalid shape")
+        uri = value["uri"]
+        if not isinstance(uri, str):
+            raise ValueError("prepared memory node change URI must be text")
+        return cls(
+            action=MemoryNodeChangeAction(value["action"]),
+            uri=MemoryURI.parse(uri),
+            before_digest=value["before_digest"],
+            expected_after_digest=value["expected_after_digest"],
+            confirms_intention=value["confirms_intention"],
+        )
+
+
+@dataclass(frozen=True)
 class MemoryNodeChange:
     """一个实际提交节点的前后 revision 和物理摘要。"""
 
@@ -289,12 +364,13 @@ class MemoryChangeReceipt:
     expected_updated_uris: tuple[MemoryURI, ...]
     expected_deleted_uris: tuple[MemoryURI, ...]
     unchanged_uris: tuple[MemoryURI, ...]
+    prepared_node_changes: tuple[MemoryPreparedNodeChange, ...]
     identity_changes: tuple[MemoryIdentityChange, ...]
     added_relations: tuple[MemoryStoredLink, ...]
     removed_relations: tuple[MemoryStoredLink, ...]
     node_changes: tuple[MemoryNodeChange, ...] = ()
 
-    SCHEMA_VERSION = "memory_change_receipt_v1"
+    SCHEMA_VERSION = "memory_change_receipt_v2"
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, MemoryChangeSource):
@@ -333,6 +409,7 @@ class MemoryChangeReceipt:
         if any(left & right for index, left in enumerate(expected_sets) for right in expected_sets[index + 1 :]):
             raise ValueError("receipt expected change URI sets must be disjoint")
         for name, item_type, key in (
+            ("prepared_node_changes", MemoryPreparedNodeChange, lambda item: str(item.uri)),
             ("identity_changes", MemoryIdentityChange, lambda item: str(item.source_uri)),
             ("added_relations", MemoryStoredLink, lambda item: item.identity),
             ("removed_relations", MemoryStoredLink, lambda item: item.identity),
@@ -346,15 +423,25 @@ class MemoryChangeReceipt:
                 raise ValueError(f"{name} must be unique and sorted")
         if {link.identity for link in self.added_relations} & {link.identity for link in self.removed_relations}:
             raise ValueError("the same relation cannot be added and removed")
+        prepared_actual = {
+            action: {
+                str(change.uri)
+                for change in self.prepared_node_changes
+                if change.action is action
+            }
+            for action in MemoryNodeChangeAction
+        }
+        expected = {
+            MemoryNodeChangeAction.CREATE: {str(uri) for uri in self.expected_created_uris},
+            MemoryNodeChangeAction.UPDATE: {str(uri) for uri in self.expected_updated_uris},
+            MemoryNodeChangeAction.DELETE: {str(uri) for uri in self.expected_deleted_uris},
+        }
+        if prepared_actual != expected:
+            raise ValueError("prepared node changes do not match the expected change sets")
         if state is MemoryChangeReceiptState.COMMITTED:
             actual = {
                 action: {str(change.uri) for change in self.node_changes if change.action is action}
                 for action in MemoryNodeChangeAction
-            }
-            expected = {
-                MemoryNodeChangeAction.CREATE: {str(uri) for uri in self.expected_created_uris},
-                MemoryNodeChangeAction.UPDATE: {str(uri) for uri in self.expected_updated_uris},
-                MemoryNodeChangeAction.DELETE: {str(uri) for uri in self.expected_deleted_uris},
             }
             if actual != expected:
                 raise ValueError("committed node changes do not match the prepared change sets")
@@ -374,6 +461,7 @@ class MemoryChangeReceipt:
             "expected_updated_uris": [str(uri) for uri in self.expected_updated_uris],
             "expected_deleted_uris": [str(uri) for uri in self.expected_deleted_uris],
             "unchanged_uris": [str(uri) for uri in self.unchanged_uris],
+            "prepared_node_changes": [change.to_dict() for change in self.prepared_node_changes],
             "identity_changes": [change.to_dict() for change in self.identity_changes],
             "added_relations": [relation.to_dict() for relation in self.added_relations],
             "removed_relations": [relation.to_dict() for relation in self.removed_relations],
@@ -392,6 +480,7 @@ class MemoryChangeReceipt:
             "expected_updated_uris",
             "expected_deleted_uris",
             "unchanged_uris",
+            "prepared_node_changes",
             "identity_changes",
             "added_relations",
             "removed_relations",
@@ -406,6 +495,7 @@ class MemoryChangeReceipt:
             "expected_updated_uris",
             "expected_deleted_uris",
             "unchanged_uris",
+            "prepared_node_changes",
             "identity_changes",
             "added_relations",
             "removed_relations",
@@ -425,6 +515,9 @@ class MemoryChangeReceipt:
             expected_updated_uris=cls._uris(value["expected_updated_uris"]),
             expected_deleted_uris=cls._uris(value["expected_deleted_uris"]),
             unchanged_uris=cls._uris(value["unchanged_uris"]),
+            prepared_node_changes=tuple(
+                MemoryPreparedNodeChange.from_dict(item) for item in value["prepared_node_changes"]
+            ),
             identity_changes=tuple(MemoryIdentityChange.from_dict(item) for item in value["identity_changes"]),
             added_relations=tuple(MemoryStoredLink.from_dict(item) for item in value["added_relations"]),
             removed_relations=tuple(MemoryStoredLink.from_dict(item) for item in value["removed_relations"]),
@@ -465,4 +558,5 @@ __all__ = [
     "MemoryIdentityChange",
     "MemoryNodeChange",
     "MemoryNodeChangeAction",
+    "MemoryPreparedNodeChange",
 ]
