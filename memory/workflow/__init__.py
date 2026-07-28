@@ -7,6 +7,7 @@ from memory.workflow.ingest import (
 )
 from memory.workflow.jobs import (
     MemoryJob,
+    MemoryJobAbandonment,
     MemoryJobBlockedError,
     MemoryJobConfig,
     MemoryJobError,
@@ -53,6 +54,7 @@ __all__ = [
     "MemoryChangeSource",
     "MemoryIdentityChange",
     "MemoryJob",
+    "MemoryJobAbandonment",
     "MemoryJobBlockedError",
     "MemoryJobClaim",
     "MemoryJobConfig",

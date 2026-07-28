@@ -275,8 +275,16 @@ class ConversationMessageJournal:
                 latest = self._latest_retained_segment(address, state, references)
                 live_messages = self._recover_archived_prefix(address, latest, live_messages)
                 self._require_tail_continuity(state, live_messages)
-                known = self._known_tail(latest, live_messages)
                 expected_next = self._expected_next_sequence(state, live_messages)
+                known = self._known_for_append(
+                    address,
+                    batch,
+                    state,
+                    references,
+                    latest,
+                    live_messages,
+                    expected_next=expected_next,
+                )
 
                 known_by_sequence = {message.sequence: message for message in known}
                 known_ids = {message.message_id: message.sequence for message in known}
@@ -874,6 +882,39 @@ class ConversationMessageJournal:
     ) -> tuple[ConversationMessage, ...]:
         archived = latest.messages if latest is not None else ()
         return tuple([*archived, *live_messages])
+
+    def _known_for_append(
+        self,
+        address: ConversationAddress,
+        batch: ConversationBatch,
+        state: ConversationJournalState,
+        references: tuple[_HistoryReference, ...],
+        latest: ConversationSegment | None,
+        live_messages: list[ConversationMessage],
+        *,
+        expected_next: int,
+    ) -> tuple[ConversationMessage, ...]:
+        """为一次可能跨多个新 Segment 的重放恢复仍可验证的事实范围。"""
+
+        if batch.start_sequence < expected_next and batch.start_sequence <= state.released_through:
+            raise ConversationWriteConflictError(
+                "append replay predates released conversation history"
+            )
+        known_by_sequence = {
+            item.sequence: item for item in self._known_tail(latest, live_messages)
+        }
+        if batch.start_sequence < expected_next:
+            for reference in references:
+                if (
+                    reference.end_sequence < batch.start_sequence
+                    or reference.start_sequence >= expected_next
+                ):
+                    continue
+                segment = self.read_segment(address, reference.segment_id)
+                for item in segment.messages:
+                    if batch.start_sequence <= item.sequence < expected_next:
+                        known_by_sequence[item.sequence] = item
+        return tuple(known_by_sequence[key] for key in sorted(known_by_sequence))
 
     @staticmethod
     def _require_tail_continuity(

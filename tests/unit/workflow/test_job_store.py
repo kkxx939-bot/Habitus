@@ -146,6 +146,27 @@ def test_non_retryable_failure_blocks_immediately_and_high_watermark_survives_cl
     assert not jobs.discard_committed(committed)
 
 
+def test_explicit_abandonment_is_durable_idempotent_and_releases_later_sequence(tmp_path: Path) -> None:
+    clock = Clock()
+    jobs = store(tmp_path, clock)
+    first_address = ConversationAddress("conversation-a", date(2026, 7, 1))
+    second_address = ConversationAddress("conversation-b", date(2026, 7, 1))
+    first = jobs.activate(jobs.stage(first_address, source("conversation-a", 0)))
+    second = jobs.activate(jobs.stage(second_address, source("conversation-b", 0)))
+    failed = jobs.fail(jobs.claim(first, "worker"), ValueError("permanent"), retryable=False)
+
+    record = jobs.abandon_failed(failed, reason="人工确认来源数据不可恢复")
+
+    assert record.memory_sequence == failed.memory_sequence
+    assert record.reason == "人工确认来源数据不可恢复"
+    assert jobs.try_read_abandonment(failed) == record
+    assert jobs.abandon_failed(failed, reason="重复请求不会覆盖原始决定") == record
+    with pytest.raises(MemoryJobBlockedError, match="abandonment decision"):
+        jobs.retry_failed(failed)
+    assert jobs.oldest_uncommitted() == second
+    assert jobs.claim(second, "worker-2").job.memory_sequence == 2
+
+
 def test_durable_failed_job_without_error_is_rejected_as_corrupt_state(tmp_path: Path) -> None:
     clock = Clock()
     jobs = store(tmp_path, clock)

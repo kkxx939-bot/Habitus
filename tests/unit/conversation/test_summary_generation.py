@@ -32,8 +32,8 @@ from ModelClient import (
     ProviderConfig,
     StructuredChatClient,
 )
-from pre.conversation import ConversationRangeSummaryStage
-from tests.helpers import BASE_TIME, closed_turn, segment, segment_summary, summary_content
+from pre.conversation import ConversationMessageRole, ConversationRangeSummaryStage
+from tests.helpers import BASE_TIME, closed_turn, message, segment, segment_summary, summary_content
 
 SUMMARY_TIME = BASE_TIME + timedelta(minutes=1)
 
@@ -103,9 +103,26 @@ def test_segment_summary_binds_all_source_identity_in_code_and_preserves_process
     assert result.source_message_digest == source.digest
     assert result.generated_at == SUMMARY_TIME
     request = provider.requests[0]
-    assert request.prompt_version == "conversation_segment_summary_v1"
+    assert request.prompt_version == "conversation_segment_summary_v2"
     assert "不要把内容分类成长记忆" in request.messages[-2].content
     assert source.messages[-2].content in request.messages[-1].content
+
+
+def test_partial_segment_summary_preserves_system_owned_turn_boundaries() -> None:
+    source = segment(
+        segment_id="000000000000-000000000000",
+        messages=(message(0, ConversationMessageRole.PROMPT, "继续分析这个大任务"),),
+    )
+    provider = RecordingProvider([content_dict()])
+    generator = ConversationSummaryGenerator(structured(provider), clock=lambda: SUMMARY_TIME)
+
+    result = asyncio.run(generator.generate(source))
+
+    assert not result.starts_mid_turn
+    assert result.ends_mid_turn
+    result.require_matches_source(source)
+    request = provider.requests[0]
+    assert "ends_mid_turn=true" in request.messages[-1].content
 
 
 def test_segment_summary_rejects_oversized_complete_source_without_truncating_or_calling_model() -> None:
@@ -165,7 +182,7 @@ def test_range_summary_uses_contiguous_sources_and_system_owned_range_identity()
     result.require_matches_sources((first, second))
     assert result.range_id == "000000000000-000000000003"
     assert result.source_refs == plan.source_refs
-    assert provider.requests[0].prompt_version == "conversation_range_summary_v1"
+    assert provider.requests[0].prompt_version == "conversation_range_summary_v2"
 
 
 def test_range_summary_enforces_stage_specific_source_bound_before_model_call() -> None:

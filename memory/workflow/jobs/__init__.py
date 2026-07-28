@@ -2,6 +2,7 @@
 
 from memory.workflow.jobs.model import (
     MemoryJob,
+    MemoryJobAbandonment,
     MemoryJobBlockedError,
     MemoryJobConfig,
     MemoryJobError,
@@ -16,6 +17,7 @@ from memory.workflow.jobs.store import MemoryJobStore
 
 __all__ = [
     "MemoryJob",
+    "MemoryJobAbandonment",
     "MemoryJobBlockedError",
     "MemoryJobConfig",
     "MemoryJobError",

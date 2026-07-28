@@ -24,6 +24,7 @@ from memory.conversation import ConversationAddress, ConversationLayout
 from memory.workflow.jobs.model import (
     MEMORY_JOB_ERROR_MAX_CHARS,
     MemoryJob,
+    MemoryJobAbandonment,
     MemoryJobBlockedError,
     MemoryJobConfig,
     MemoryJobError,
@@ -77,6 +78,7 @@ class MemoryJobStore:
         self.root = requested.resolve(strict=False)
         self.memory_root = requested_memory_root.resolve(strict=False)
         self.jobs_root = self.root / "jobs"
+        self.abandonments_root = self.root / "job_abandonments"
         self.state_path = self.jobs_root / "state.json"
         try:
             self.jobs_root.relative_to(self.memory_root)
@@ -395,6 +397,12 @@ class MemoryJobStore:
         if job.status is not MemoryJobStatus.FAILED:
             raise ValueError("only a failed memory job can be retried")
         with self._queue_fence():
+            if self._try_read_abandonment_path(
+                self._abandonment_path(self._source_key_from_job(job))
+            ) is not None:
+                raise MemoryJobBlockedError(
+                    "failed memory job already has an abandonment decision; finish abandonment instead of retrying"
+                )
             current = self._oldest_required(job)
             if current.status in {MemoryJobStatus.STAGED, MemoryJobStatus.QUEUED}:
                 if current.attempts == 0 and current.last_error is None:
@@ -420,6 +428,66 @@ class MemoryJobStore:
             )
             self._write(queued)
             return queued
+
+    def abandon_failed(self, job: MemoryJob, *, reason: str) -> MemoryJobAbandonment:
+        """记录显式人工决定后删除最早 FAILED Job，使后续序号可以继续。"""
+
+        self._require_job(job)
+        if job.status is not MemoryJobStatus.FAILED:
+            raise ValueError("only a failed memory job can be abandoned")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("abandonment reason must be non-empty text")
+        with self._queue_fence():
+            path = self._abandonment_path(self._source_key_from_job(job))
+            existing = self._try_read_abandonment_path(path)
+            current_path = self._path(self._source_key_from_job(job))
+            current = self._try_read_path(current_path)
+            if existing is not None:
+                if existing.source_identity != job.source_identity or existing.transaction_id != job.transaction_id:
+                    raise MemoryJobError("memory job abandonment conflicts with the requested source")
+                if current is not None:
+                    if current != job:
+                        raise MemoryJobBlockedError("failed memory job changed after abandonment was recorded")
+                    durable_unlink(current_path, artifact_root=self.root)
+                return existing
+            current = self._oldest_required(job)
+            if current.status is not MemoryJobStatus.FAILED:
+                raise MemoryJobError("memory job is no longer in a failed state")
+            if current != job:
+                raise MemoryJobBlockedError("failed memory job changed after this abandonment decision")
+            record = MemoryJobAbandonment.from_failed_job(
+                current,
+                reason=reason,
+                abandoned_at=self._timestamp(),
+            )
+            atomic_create_bytes(path, self._encode_abandonment(record), artifact_root=self.root)
+            if not durable_unlink(current_path, artifact_root=self.root):
+                raise MemoryJobError("failed memory job disappeared after abandonment was recorded")
+            return self._read_abandonment_path(path)
+
+    def try_read_abandonment(self, job: MemoryJob) -> MemoryJobAbandonment | None:
+        """按 Job 的不可变来源身份读取人工放弃记录。"""
+
+        self._require_job(job)
+        return self._try_read_abandonment_path(
+            self._abandonment_path(self._source_key_from_job(job))
+        )
+
+    def list_abandonments(self) -> tuple[MemoryJobAbandonment, ...]:
+        """按全局序号返回全部仍保留的人工失败处置记录。"""
+
+        if not self.abandonments_root.exists():
+            return ()
+        if self.abandonments_root.is_symlink() or not self.abandonments_root.is_dir():
+            raise MemoryJobError("memory job abandonments path is not a safe directory")
+        records: list[MemoryJobAbandonment] = []
+        for entry_count, child in enumerate(self.abandonments_root.iterdir(), start=1):
+            if entry_count > self.config.max_files:
+                raise MemoryJobError("memory job abandonment count exceeds its configured bound")
+            if child.suffix != ".json" or child.is_symlink() or not child.is_file():
+                raise MemoryJobError("memory job abandonments directory contains an unsupported entry")
+            records.append(self._read_abandonment_path(child))
+        return tuple(sorted(records, key=lambda item: item.memory_sequence))
 
     def _finish(
         self,
@@ -627,6 +695,76 @@ class MemoryJobStore:
         if not MemoryJob._hex(source_key, 64):
             raise ValueError("memory job source key must be lowercase SHA-256 text")
         return self.jobs_root / f"{source_key}.json"
+
+    def _abandonment_path(self, source_key: str) -> Path:
+        if not MemoryJob._hex(source_key, 64):
+            raise ValueError("memory job source key must be lowercase SHA-256 text")
+        return self.abandonments_root / f"{source_key}.json"
+
+    def _encode_abandonment(self, record: MemoryJobAbandonment) -> bytes:
+        encoded = canonical_json(
+            {
+                "schema": record.SCHEMA_VERSION,
+                "memory_sequence": record.memory_sequence,
+                "conversation_id": record.conversation_id,
+                "started_on": record.started_on.isoformat(),
+                "segment_id": record.segment_id,
+                "source_segment_digest": record.source_segment_digest,
+                "transaction_id": record.transaction_id,
+                "attempts": record.attempts,
+                "last_error": record.last_error,
+                "reason": record.reason,
+                "abandoned_at": self._format_time(record.abandoned_at),
+            }
+        ).encode("utf-8")
+        if len(encoded) > self.config.max_file_bytes:
+            raise MemoryJobError("memory job abandonment exceeds its configured file bound")
+        return encoded
+
+    def _read_abandonment_path(self, path: Path) -> MemoryJobAbandonment:
+        try:
+            encoded = read_regular_bytes(
+                path,
+                artifact_root=self.root,
+                max_bytes=self.config.max_file_bytes,
+            )
+            value = json.loads(encoded)
+            expected = {
+                "schema", "memory_sequence", "conversation_id", "started_on", "segment_id",
+                "source_segment_digest", "transaction_id", "attempts", "last_error", "reason",
+                "abandoned_at",
+            }
+            if not isinstance(value, Mapping) or set(value) != expected:
+                raise MemoryJobError("memory job abandonment has an invalid shape")
+            if value["schema"] != MemoryJobAbandonment.SCHEMA_VERSION:
+                raise MemoryJobError("memory job abandonment has an unsupported schema")
+            record = MemoryJobAbandonment(
+                memory_sequence=value["memory_sequence"],
+                conversation_id=value["conversation_id"],
+                started_on=date.fromisoformat(value["started_on"]),
+                segment_id=value["segment_id"],
+                source_segment_digest=value["source_segment_digest"],
+                transaction_id=value["transaction_id"],
+                attempts=value["attempts"],
+                last_error=value["last_error"],
+                reason=value["reason"],
+                abandoned_at=self._parse_time(value["abandoned_at"]),
+            )
+            if encoded != self._encode_abandonment(record):
+                raise MemoryJobError("memory job abandonment is not canonically encoded")
+            return record
+        except Exception as exc:
+            if isinstance(exc, MemoryJobError):
+                raise
+            raise MemoryJobError("failed to read memory job abandonment") from exc
+
+    def _try_read_abandonment_path(self, path: Path) -> MemoryJobAbandonment | None:
+        try:
+            return self._read_abandonment_path(path)
+        except MemoryJobError as exc:
+            if isinstance(exc.__cause__, FileNotFoundError):
+                return None
+            raise
 
     @staticmethod
     def _source_key(

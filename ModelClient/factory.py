@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import cast
 
+from foundation.observability import Observer
 from ModelClient.client import ChatClient
 from ModelClient.config import (
     CapabilityConfig,
@@ -105,17 +106,23 @@ class ProviderFactory:
         config: ChatModelConfig,
         *,
         environ: Mapping[str, str] | None = None,
+        observer: Observer | None = None,
     ) -> ChatClient:
-        return ChatClient(config, self.create_chat_provider(config, environ=environ))
+        return ChatClient(
+            config,
+            self.create_chat_provider(config, environ=environ),
+            observer=observer,
+        )
 
     def create_embedder(
         self,
         config: EmbeddingModelConfig,
         *,
         environ: Mapping[str, str] | None = None,
+        observer: Observer | None = None,
     ) -> Embedder:
         provider = cast(EmbeddingProvider, self.create(config, environ=environ))
-        return EmbeddingClient(config, provider)
+        return EmbeddingClient(config, provider, observer=observer)
 
     def create_reranker(
         self,
@@ -140,9 +147,9 @@ class ProviderFactory:
     @staticmethod
     def _validate_component(config: CapabilityConfig, component: object) -> None:
         required_methods: dict[ModelCapability, tuple[str, ...]] = {
-            "chat": ("complete", "complete_async", "stream", "stream_async", "health_check"),
-            "embedding": ("embed",),
-            "rerank": ("rerank",),
+            "chat": ("complete", "complete_async", "stream", "stream_async", "health_check", "aclose"),
+            "embedding": ("embed", "aclose"),
+            "rerank": ("rerank", "aclose"),
         }
         missing = tuple(
             name for name in required_methods[config.capability] if not callable(getattr(component, name, None))
@@ -162,9 +169,13 @@ class ProviderFactory:
 
     @staticmethod
     def _capability(value: object) -> ModelCapability:
-        if value not in {"chat", "embedding", "rerank"}:
-            raise ValueError("model capability must be chat, embedding or rerank")
-        return cast(ModelCapability, value)
+        if value == "chat":
+            return "chat"
+        if value == "embedding":
+            return "embedding"
+        if value == "rerank":
+            return "rerank"
+        raise ValueError("model capability must be chat, embedding or rerank")
 
     @staticmethod
     def _adapter(value: object) -> str:

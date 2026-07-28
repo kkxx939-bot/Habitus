@@ -432,6 +432,27 @@ class MemoryMatchedMemory:
         return self.hit.uri
 
 
+class MemorySearchDegradationStage(str, Enum):
+    """可选增强失败后已经采用的确定性降级阶段。"""
+
+    QUERY_PLANNER = "query_planner"
+    RETRIEVAL_GRADER = "retrieval_grader"
+    SUMMARY_FALLBACK = "summary_fallback"
+
+
+@dataclass(frozen=True)
+class MemorySearchDegradation:
+    """不包含敏感异常正文的检索降级事实。"""
+
+    stage: MemorySearchDegradationStage
+    error_type: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "stage", MemorySearchDegradationStage(self.stage))
+        if not isinstance(self.error_type, str) or not self.error_type or len(self.error_type) > 256:
+            raise ValueError("search degradation error_type must be non-empty bounded text")
+
+
 @dataclass(frozen=True)
 class MemorySearchResult:
     """可直接交给 Agent 的完整、可溯源、受预算约束的记忆结果。"""
@@ -448,6 +469,7 @@ class MemorySearchResult:
     summary_fallbacks: tuple[ConversationSummaryMatch, ...]
     context: str
     budget_exhausted: bool
+    degradations: tuple[MemorySearchDegradation, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "query", _bounded_text(self.query, "search result query", 1_000_000))
@@ -473,6 +495,13 @@ class MemorySearchResult:
             not isinstance(result, MemoryQueryResult) for result in self.query_results
         ):
             raise TypeError("search result query_results are invalid")
+        if not isinstance(self.degradations, tuple) or any(
+            not isinstance(item, MemorySearchDegradation) for item in self.degradations
+        ):
+            raise TypeError("search result degradations are invalid")
+        stages = tuple(item.stage for item in self.degradations)
+        if len(stages) != len(set(stages)):
+            raise ValueError("search result degradation stages must be unique")
         if tuple(result.query for result in self.query_results) != self.plan.queries:
             raise ValueError("search result query_results do not match the query plan")
         if not isinstance(self.memories, tuple) or any(
@@ -578,6 +607,8 @@ __all__ = [
     "MemoryRetrievalAssessment",
     "MemoryRetrievalSufficiency",
     "MemorySearchError",
+    "MemorySearchDegradation",
+    "MemorySearchDegradationStage",
     "MemorySearchHit",
     "MemorySearchResult",
     "MemorySearchServiceConfig",

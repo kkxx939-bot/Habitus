@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from typing import Protocol
 
+from foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
 from memory.conversation import ConversationAddress
 from memory.conversation.indexing import ConversationSummaryMatch
 from memory.document import MemoryDocument, MemoryStoredLink
@@ -28,6 +30,8 @@ from memory.retrieval.model import (
     MemoryRelatedMemory,
     MemoryRetrievalAssessment,
     MemoryRetrievalSufficiency,
+    MemorySearchDegradation,
+    MemorySearchDegradationStage,
     MemorySearchError,
     MemorySearchHit,
     MemorySearchResult,
@@ -82,6 +86,7 @@ class SearchService:
         config: MemorySearchServiceConfig | None = None,
         intention_reviewer: MemoryIntentionReviewer | None = None,
         clock: Callable[[], datetime] | None = None,
+        observer: Observer | None = None,
     ) -> None:
         if not isinstance(tree, MemoryTree):
             raise TypeError("tree must be MemoryTree")
@@ -131,6 +136,7 @@ class SearchService:
         self.config = resolved_config
         self.intention_reviewer = intention_reviewer or MemoryIntentionReviewer()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.observer = observer or NullObserver()
 
     async def find(
         self,
@@ -158,6 +164,7 @@ class SearchService:
             allowed_kinds,
             allowed_intention_scope,
             assess_for_summary=False,
+            degradations=(),
         )
 
     async def search(
@@ -178,17 +185,27 @@ class SearchService:
         maximum = self._limit(limit)
         threshold = self._threshold(score_threshold)
         allowed_kinds, allowed_intention_scope = self._recall_filters(kinds, intention_scope)
+        degradations: tuple[MemorySearchDegradation, ...] = ()
         if conversation is None:
             plan = self.query_planner.direct(normalized)
         else:
             if not isinstance(conversation, ConversationAddress):
                 raise TypeError("conversation must be ConversationAddress or None")
-            context = self.conversation_context.read(conversation)
-            plan = await self.query_planner.plan(
-                normalized,
-                context,
-                target_context=self._target_context(roots),
-            )
+            try:
+                context = self.conversation_context.read(conversation)
+                plan = await self.query_planner.plan(
+                    normalized,
+                    context,
+                    target_context=self._target_context(roots),
+                )
+            except Exception as exc:
+                plan = self.query_planner.direct(normalized)
+                degradations = (
+                    MemorySearchDegradation(
+                        MemorySearchDegradationStage.QUERY_PLANNER,
+                        type(exc).__name__,
+                    ),
+                )
         return await self._execute(
             plan,
             roots,
@@ -197,6 +214,7 @@ class SearchService:
             allowed_kinds,
             allowed_intention_scope,
             assess_for_summary=True,
+            degradations=degradations,
         )
 
     async def _execute(
@@ -209,9 +227,12 @@ class SearchService:
         intention_scope: MemoryIntentionRecallScope,
         *,
         assess_for_summary: bool,
+        degradations: tuple[MemorySearchDegradation, ...] = (),
     ) -> MemorySearchResult:
         if not isinstance(assess_for_summary, bool):
             raise TypeError("assess_for_summary must be boolean")
+        started = time.monotonic()
+        applied_degradations = list(degradations)
         candidate_limit = min(
             1_000,
             max(limit, limit * self.config.candidate_multiplier),
@@ -255,24 +276,42 @@ class SearchService:
         assessment: MemoryRetrievalAssessment | None = None
         summary_fallback_attempted = False
         if assess_for_summary:
-            assessment = await self.retrieval_grader.assess(
-                plan,
-                assembly.memories,
-                assembly.context,
-            )
+            try:
+                assessment = await self.retrieval_grader.assess(
+                    plan,
+                    assembly.memories,
+                    assembly.context,
+                )
+            except Exception as exc:
+                applied_degradations.append(
+                    MemorySearchDegradation(
+                        MemorySearchDegradationStage.RETRIEVAL_GRADER,
+                        type(exc).__name__,
+                    )
+                )
             if (
                 self.config.summary_fallback_enabled
+                and assessment is not None
                 and assessment.decision is MemoryRetrievalSufficiency.INSUFFICIENT
                 and not assembly.budget_exhausted
             ):
                 assert assessment.summary_query is not None
                 summary_fallback_attempted = True
-                summaries = await self._search_summaries(assessment.summary_query)
-                assembly = self.assembler.assemble(
-                    expanded,
-                    summary_fallbacks=summaries,
-                )
-        return MemorySearchResult(
+                try:
+                    summaries = await self._search_summaries(assessment.summary_query)
+                except Exception as exc:
+                    applied_degradations.append(
+                        MemorySearchDegradation(
+                            MemorySearchDegradationStage.SUMMARY_FALLBACK,
+                            type(exc).__name__,
+                        )
+                    )
+                else:
+                    assembly = self.assembler.assemble(
+                        expanded,
+                        summary_fallbacks=summaries,
+                    )
+        result = MemorySearchResult(
             query=plan.original_query,
             target_roots=roots,
             kinds=kinds,
@@ -285,7 +324,23 @@ class SearchService:
             summary_fallbacks=assembly.summary_fallbacks,
             context=assembly.context,
             budget_exhausted=assembly.budget_exhausted,
+            degradations=tuple(applied_degradations),
         )
+        self.observer.record(
+            ObservationEvent(
+                category="retrieval",
+                operation="search",
+                status=(ObservationStatus.DEGRADED if applied_degradations else ObservationStatus.SUCCESS),
+                duration_seconds=max(0.0, time.monotonic() - started),
+                attributes={
+                    "queries": len(plan.queries),
+                    "memories": len(result.memories),
+                    "summaries": len(result.summary_fallbacks),
+                    "degradations": len(result.degradations),
+                },
+            )
+        )
+        return result
 
     async def _search_summaries(
         self,
@@ -333,6 +388,15 @@ class SearchService:
                 limit=limit,
             )
         except Exception as exc:
+            self.observer.record(
+                ObservationEvent(
+                    category="retrieval",
+                    operation="semantic_search",
+                    status=ObservationStatus.FAILURE,
+                    duration_seconds=0.0,
+                    attributes={"error_type": type(exc).__name__},
+                )
+            )
             raise MemorySearchError("memory semantic search failed") from exc
         if isinstance(raw_hits, str) or not isinstance(raw_hits, Sequence):
             raise MemorySearchError("memory semantic search must return a sequence of hits")

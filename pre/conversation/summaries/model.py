@@ -186,8 +186,10 @@ class ConversationSegmentSummary:
     corrections: tuple[str, ...]
     ending_state: str
     open_threads: tuple[str, ...]
+    starts_mid_turn: bool = False
+    ends_mid_turn: bool = False
 
-    SCHEMA_VERSION = "conversation_segment_summary_v1"
+    SCHEMA_VERSION = "conversation_segment_summary_v2"
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -237,6 +239,11 @@ class ConversationSegmentSummary:
             "open_threads",
             _text_sequence(self.open_threads, "open_threads", required=False),
         )
+        if not isinstance(self.starts_mid_turn, bool) or not isinstance(
+            self.ends_mid_turn,
+            bool,
+        ):
+            raise ConversationSummarySchemaError("summary turn-boundary flags must be boolean")
 
     @property
     def digest(self) -> str:
@@ -255,6 +262,8 @@ class ConversationSegmentSummary:
             segment.end_sequence,
             segment.started_at,
             segment.ended_at,
+            segment.starts_mid_turn,
+            segment.ends_mid_turn,
         )
         actual = (
             self.conversation_id,
@@ -264,6 +273,8 @@ class ConversationSegmentSummary:
             self.end_sequence,
             self.started_at,
             self.ended_at,
+            self.starts_mid_turn,
+            self.ends_mid_turn,
         )
         if actual != expected:
             raise ConversationSummarySchemaError("conversation summary does not match its source segment")
@@ -285,6 +296,8 @@ class ConversationSegmentSummary:
                 "corrections": self.corrections,
                 "ending_state": self.ending_state,
                 "open_threads": self.open_threads,
+                "starts_mid_turn": self.starts_mid_turn,
+                "ends_mid_turn": self.ends_mid_turn,
             }
         )
 
@@ -305,6 +318,8 @@ class ConversationSegmentSummary:
             "corrections",
             "ending_state",
             "open_threads",
+            "starts_mid_turn",
+            "ends_mid_turn",
         }
         unknown = set(payload) - allowed
         if unknown:
@@ -331,6 +346,8 @@ class ConversationSegmentSummary:
             corrections=payload["corrections"],
             ending_state=payload["ending_state"],
             open_threads=payload["open_threads"],
+            starts_mid_turn=payload["starts_mid_turn"],
+            ends_mid_turn=payload["ends_mid_turn"],
         )
 
 
@@ -442,8 +459,10 @@ class ConversationRangeSummary:
     corrections: tuple[str, ...]
     ending_state: str
     open_threads: tuple[str, ...]
+    starts_mid_turn: bool = False
+    ends_mid_turn: bool = False
 
-    SCHEMA_VERSION = "conversation_range_summary_v1"
+    SCHEMA_VERSION = "conversation_range_summary_v2"
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -495,6 +514,13 @@ class ConversationRangeSummary:
         object.__setattr__(self, "corrections", content.corrections)
         object.__setattr__(self, "ending_state", content.ending_state)
         object.__setattr__(self, "open_threads", content.open_threads)
+        if not isinstance(self.starts_mid_turn, bool) or not isinstance(
+            self.ends_mid_turn,
+            bool,
+        ):
+            raise ConversationSummarySchemaError(
+                "range summary turn-boundary flags must be boolean"
+            )
 
     @property
     def digest(self) -> str:
@@ -528,6 +554,13 @@ class ConversationRangeSummary:
             raise ConversationSummarySchemaError("range summary source bindings do not match")
         if self.started_at != sources[0].started_at or self.ended_at != sources[-1].ended_at:
             raise ConversationSummarySchemaError("range summary time coverage does not match its sources")
+        if (
+            self.starts_mid_turn != sources[0].starts_mid_turn
+            or self.ends_mid_turn != sources[-1].ends_mid_turn
+        ):
+            raise ConversationSummarySchemaError(
+                "range summary turn-boundary flags do not match its sources"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return canonicalize(
@@ -547,6 +580,8 @@ class ConversationRangeSummary:
                 "corrections": self.corrections,
                 "ending_state": self.ending_state,
                 "open_threads": self.open_threads,
+                "starts_mid_turn": self.starts_mid_turn,
+                "ends_mid_turn": self.ends_mid_turn,
             }
         )
 
@@ -568,6 +603,8 @@ class ConversationRangeSummary:
             "corrections",
             "ending_state",
             "open_threads",
+            "starts_mid_turn",
+            "ends_mid_turn",
         }
         if set(payload) != expected:
             raise ConversationSummarySchemaError("range summary fields do not match the schema")
@@ -595,6 +632,8 @@ class ConversationRangeSummary:
             corrections=payload["corrections"],
             ending_state=payload["ending_state"],
             open_threads=payload["open_threads"],
+            starts_mid_turn=payload["starts_mid_turn"],
+            ends_mid_turn=payload["ends_mid_turn"],
         )
 
 

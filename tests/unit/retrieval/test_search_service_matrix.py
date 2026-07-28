@@ -280,44 +280,47 @@ def test_timezone_clock_is_normalized_for_active_intention_review(tmp_path: Path
 
 
 @pytest.mark.parametrize("raw", ["matches", 1, object()])
-def test_summary_backend_must_return_a_sequence(tmp_path: Path, raw: object) -> None:
+def test_invalid_summary_backend_degrades_to_memory_only(tmp_path: Path, raw: object) -> None:
     class InvalidSummary:
         async def search(self, _query, *, limit):
             return raw
 
     instance = service(tmp_path, semantic=SemanticSearch(), summaries=SummarySearch())
     instance.summary_search = InvalidSummary()
-    with pytest.raises(MemorySearchError, match="must return a sequence"):
-        asyncio.run(instance.search("历史"))
+    result = asyncio.run(instance.search("历史"))
+    assert result.summary_fallbacks == ()
+    assert result.degradations[0].stage.value == "summary_fallback"
 
 
-def test_summary_backend_failure_is_normalized(tmp_path: Path) -> None:
+def test_summary_backend_failure_degrades_to_memory_only(tmp_path: Path) -> None:
     class FailingSummary:
         async def search(self, _query, *, limit):
             raise TimeoutError("summary timeout")
 
     instance = service(tmp_path, semantic=SemanticSearch(), summaries=SummarySearch())
     instance.summary_search = FailingSummary()
-    with pytest.raises(MemorySearchError, match="fallback search failed"):
-        asyncio.run(instance.search("历史"))
+    result = asyncio.run(instance.search("历史"))
+    assert result.summary_fallbacks == ()
+    assert result.degradations[0].stage.value == "summary_fallback"
 
 
-def test_summary_backend_cannot_exceed_limit(tmp_path: Path) -> None:
+def test_summary_backend_over_limit_degrades_to_memory_only(tmp_path: Path) -> None:
     config = replace(MemorySearchServiceConfig(), summary_fallback_limit=1)
     summaries = SummarySearch((summary_match(), summary_match()))
     instance = service(tmp_path, semantic=SemanticSearch(), summaries=summaries, config=config)
-    with pytest.raises(MemorySearchError, match="exceeded its requested limit"):
-        asyncio.run(instance.search("历史"))
+    result = asyncio.run(instance.search("历史"))
+    assert result.summary_fallbacks == ()
+    assert result.degradations[0].stage.value == "summary_fallback"
 
 
-def test_summary_backend_rejects_invalid_duplicate_and_unsorted_matches(tmp_path: Path) -> None:
+def test_summary_backend_invalid_matches_degrade_to_memory_only(tmp_path: Path) -> None:
     match = summary_match()
     instance = service(tmp_path, semantic=SemanticSearch(), summaries=SummarySearch((match, match)))
-    with pytest.raises(MemorySearchError, match="unique and relevance-sorted"):
-        asyncio.run(instance.search("历史"))
+    result = asyncio.run(instance.search("历史"))
+    assert result.degradations[0].stage.value == "summary_fallback"
     instance.summary_search = SummarySearch((object(),))
-    with pytest.raises(MemorySearchError, match="invalid match"):
-        asyncio.run(instance.search("历史"))
+    result = asyncio.run(instance.search("历史"))
+    assert result.degradations[0].stage.value == "summary_fallback"
 
 
 def test_disabled_summary_fallback_still_grades_but_never_queries_summary(tmp_path: Path) -> None:

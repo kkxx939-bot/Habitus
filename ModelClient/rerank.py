@@ -15,5 +15,7 @@ class Reranker(Protocol):
 
     async def rerank(self, query: str, documents: Sequence[str]) -> tuple[float, ...]: ...
 
+    async def aclose(self) -> None: ...
+
 
 __all__ = ["Reranker"]

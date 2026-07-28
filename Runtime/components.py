@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Awaitable
+from dataclasses import dataclass, field
+from typing import cast
 
+from foundation.observability import MetricRegistry, Observer
 from infrastructure.store.contracts import PathLock
 from infrastructure.vector import VectorStoreFactory
 from memory.conversation import (
     ConversationMessageJournal,
     ConversationRetentionPlanner,
+    ConversationSemanticBoundaryScorer,
     ConversationSummaryCompactor,
     ConversationSummaryService,
     PersistentConversationSummaryVectorIndex,
@@ -42,12 +46,20 @@ class RuntimeInfrastructure:
 
     path_lock: PathLock
     vector_stores: VectorStoreFactory
+    observability: MetricRegistry = field(default_factory=MetricRegistry)
+    observer: Observer | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.path_lock, PathLock):
             raise TypeError("path_lock must be PathLock")
         if not isinstance(self.vector_stores, VectorStoreFactory):
             raise TypeError("vector_stores must be VectorStoreFactory")
+        if not isinstance(self.observability, MetricRegistry):
+            raise TypeError("observability must be MetricRegistry")
+        if self.observer is None:
+            object.__setattr__(self, "observer", self.observability)
+        elif not callable(getattr(self.observer, "record", None)):
+            raise TypeError("observer must implement record")
 
     def initialize(self) -> None:
         initializer = getattr(self.path_lock.lock_store, "initialize", None)
@@ -83,6 +95,29 @@ class RuntimeModels:
         if self.reranker is not None and not callable(getattr(self.reranker, "rerank", None)):
             raise TypeError("reranker must implement the Reranker contract")
 
+    async def aclose(self) -> None:
+        """关闭所有模型能力；即使某一项失败也继续释放剩余资源。"""
+
+        resources = (self.chat, self.embedder, self.reranker)
+        first_error: BaseException | None = None
+        seen: set[int] = set()
+        for resource in resources:
+            if resource is None or id(resource) in seen:
+                continue
+            seen.add(id(resource))
+            close = getattr(resource, "aclose", None)
+            if not callable(close):
+                if first_error is None:
+                    first_error = TypeError("runtime model resource does not implement aclose")
+                continue
+            try:
+                await cast(Awaitable[None], close())
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+
 
 @dataclass(frozen=True)
 class RuntimeConversation:
@@ -90,6 +125,7 @@ class RuntimeConversation:
 
     journal: ConversationMessageJournal
     retention: ConversationRetentionPlanner
+    boundary_scorer: ConversationSemanticBoundaryScorer
     summaries: ConversationSummaryService
     summary_compactor: ConversationSummaryCompactor
     summary_vector_index: PersistentConversationSummaryVectorIndex
@@ -99,6 +135,11 @@ class RuntimeConversation:
             raise TypeError("journal must be ConversationMessageJournal")
         if not isinstance(self.retention, ConversationRetentionPlanner):
             raise TypeError("retention must be ConversationRetentionPlanner")
+        if not isinstance(
+            self.boundary_scorer,
+            ConversationSemanticBoundaryScorer,
+        ):
+            raise TypeError("boundary_scorer must be ConversationSemanticBoundaryScorer")
         if not isinstance(self.summaries, ConversationSummaryService):
             raise TypeError("summaries must be ConversationSummaryService")
         if not isinstance(self.summary_compactor, ConversationSummaryCompactor):

@@ -9,6 +9,18 @@ from Runtime.components import (
     RuntimeModels,
     RuntimeWorkflow,
 )
+from Runtime.consistency import (
+    MemoryConsistencyService,
+    MemoryConsistencySnapshot,
+    MemoryConsistencyState,
+    MemoryConsistencyTimeoutError,
+)
+from Runtime.health import (
+    RuntimeHealthCheck,
+    RuntimeHealthReport,
+    RuntimeHealthService,
+    RuntimeHealthStatus,
+)
 from Runtime.lifecycle import (
     LifecycleMaintenanceCycleResult,
     LifecycleMaintenanceFailure,
@@ -18,8 +30,10 @@ from Runtime.lifecycle import (
     LifecycleWorkerStateError,
 )
 from Runtime.runtime import (
+    MemoryJobAbandonResult,
     MemoryJobRetryResult,
     Runtime,
+    RuntimeConversationProtocolIngestResult,
     RuntimeInitialization,
     RuntimeInitializationError,
     RuntimeState,
@@ -39,7 +53,17 @@ __all__ = [
     "RuntimeState",
     "RuntimeStateError",
     "RuntimeWorkflow",
+    "RuntimeHealthCheck",
+    "RuntimeHealthReport",
+    "RuntimeHealthService",
+    "RuntimeHealthStatus",
     "MemoryJobRetryResult",
+    "MemoryJobAbandonResult",
+    "RuntimeConversationProtocolIngestResult",
+    "MemoryConsistencyService",
+    "MemoryConsistencySnapshot",
+    "MemoryConsistencyState",
+    "MemoryConsistencyTimeoutError",
     "LifecycleMaintenanceCycleResult",
     "LifecycleMaintenanceFailure",
     "LifecycleWorker",

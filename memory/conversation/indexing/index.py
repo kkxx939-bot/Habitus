@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 from collections.abc import Sequence
 from datetime import date
 
 from foundation.integrity import canonical_digest
+from foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
 from infrastructure.vector import (
     VectorStore,
     VectorStoreConflictError,
@@ -30,6 +32,8 @@ from memory.conversation.layout import ConversationAddress
 from memory.conversation.messages import ConversationMessageJournal
 from ModelClient import Embedder, EmbeddingVector, Reranker
 
+logger = logging.getLogger(__name__)
+
 _SCHEMA_VERSION = "m2bos_conversation_summary_vector_v1"
 _SUMMARY_KIND = "conversation_summary"
 _SUMMARY_LEVEL = 2
@@ -49,6 +53,7 @@ class PersistentConversationSummaryVectorIndex:
         embedding_fingerprint: str,
         reranker: Reranker | None = None,
         config: ConversationSummaryVectorIndexConfig | None = None,
+        observer: Observer | None = None,
     ) -> None:
         if not isinstance(journal, ConversationMessageJournal):
             raise TypeError("journal must be ConversationMessageJournal")
@@ -78,6 +83,7 @@ class PersistentConversationSummaryVectorIndex:
         self.embedding_fingerprint = embedding_fingerprint.strip()
         self.reranker = reranker
         self.config = resolved_config
+        self.observer = observer or NullObserver()
         self.sources = ConversationSummaryIndexSourceReader(
             journal,
             compactor,
@@ -189,30 +195,51 @@ class PersistentConversationSummaryVectorIndex:
         documents = tuple(
             item.content[: self.config.max_rerank_document_chars] for item in selected
         )
-        scores = await self.reranker.rerank(normalized, documents)
-        if not isinstance(scores, tuple) or len(scores) != len(selected):
-            raise ConversationSummaryIndexError("reranker returned an unexpected Summary score count")
+        try:
+            scores = await self.reranker.rerank(normalized, documents)
+            if not isinstance(scores, tuple) or len(scores) != len(selected):
+                raise ConversationSummaryIndexError("reranker returned an unexpected Summary score count")
+        except Exception as exc:
+            logger.warning("Summary reranker failed; using vector scores", exc_info=exc)
+            self._observe_rerank_fallback(exc)
+            return candidates[:maximum]
         reranked: list[ConversationSummaryMatch] = []
-        for item, score in zip(selected, scores, strict=True):
-            if isinstance(score, bool) or not isinstance(score, int | float):
-                raise ConversationSummaryIndexError("reranker returned a non-numeric Summary score")
-            rerank_score = float(score)
-            if not math.isfinite(rerank_score):
-                raise ConversationSummaryIndexError("reranker returned a non-finite Summary score")
-            if rerank_score < self.config.rerank_score_threshold:
-                continue
-            reranked.append(
-                ConversationSummaryMatch(
-                    reference=item.reference,
-                    summary=item.summary,
-                    content=item.content,
-                    score=rerank_score,
-                    vector_score=item.vector_score,
-                    rerank_score=rerank_score,
+        try:
+            for item, score in zip(selected, scores, strict=True):
+                if isinstance(score, bool) or not isinstance(score, int | float):
+                    raise ConversationSummaryIndexError("reranker returned a non-numeric Summary score")
+                rerank_score = float(score)
+                if not math.isfinite(rerank_score):
+                    raise ConversationSummaryIndexError("reranker returned a non-finite Summary score")
+                if rerank_score < self.config.rerank_score_threshold:
+                    continue
+                reranked.append(
+                    ConversationSummaryMatch(
+                        reference=item.reference,
+                        summary=item.summary,
+                        content=item.content,
+                        score=rerank_score,
+                        vector_score=item.vector_score,
+                        rerank_score=rerank_score,
+                    )
                 )
-            )
+        except Exception as exc:
+            logger.warning("Summary reranker scores were invalid; using vector scores", exc_info=exc)
+            self._observe_rerank_fallback(exc)
+            return candidates[:maximum]
         reranked.sort(key=lambda item: (-item.score, item.reference.identity))
         return tuple(reranked[:maximum])
+
+    def _observe_rerank_fallback(self, error: BaseException) -> None:
+        self.observer.record(
+            ObservationEvent(
+                category="retrieval",
+                operation="rerank_fallback",
+                status=ObservationStatus.DEGRADED,
+                duration_seconds=0.0,
+                attributes={"stage": "summary", "error_type": type(error).__name__},
+            )
+        )
 
     async def close(self) -> None:
         await self.store.close()

@@ -115,6 +115,8 @@ def segment_summary(source: ConversationSegment | None = None) -> ConversationSe
         started_at=source.started_at,
         ended_at=source.ended_at,
         generated_at=source.ended_at + timedelta(seconds=1),
+        starts_mid_turn=source.starts_mid_turn,
+        ends_mid_turn=source.ends_mid_turn,
         **content.to_dict(),
     )
 

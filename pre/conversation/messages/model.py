@@ -108,8 +108,11 @@ class ConversationMessage:
     source_ref: str | None = None
     original_size_bytes: int | None = None
     original_sha256: str | None = None
+    logical_message_id: str | None = None
+    logical_part_index: int | None = None
+    logical_part_count: int | None = None
 
-    SCHEMA_VERSION = "conversation_message_v1"
+    SCHEMA_VERSION = "conversation_message_v2"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "message_id", _clean_identifier(self.message_id, "message_id"))
@@ -129,9 +132,54 @@ class ConversationMessage:
         tool_call_id = _optional_clean_text(self.tool_call_id, "tool_call_id")
         tool_name = _optional_clean_text(self.tool_name, "tool_name")
         source_ref = _optional_clean_text(self.source_ref, "source_ref")
+        logical_message_id = _optional_clean_text(
+            self.logical_message_id,
+            "logical_message_id",
+        )
         object.__setattr__(self, "tool_call_id", tool_call_id)
         object.__setattr__(self, "tool_name", tool_name)
         object.__setattr__(self, "source_ref", source_ref)
+        object.__setattr__(self, "logical_message_id", logical_message_id)
+
+        part_values = (self.logical_part_index, self.logical_part_count)
+        if any(value is not None for value in part_values):
+            if logical_message_id is None or any(value is None for value in part_values):
+                raise ConversationMessageSchemaError(
+                    "logical message parts require id, index and count together"
+                )
+            assert self.logical_part_index is not None
+            assert self.logical_part_count is not None
+            if (
+                isinstance(self.logical_part_index, bool)
+                or not isinstance(self.logical_part_index, int)
+                or self.logical_part_index < 0
+            ):
+                raise ConversationMessageSchemaError(
+                    "logical_part_index must be a non-negative integer"
+                )
+            if (
+                isinstance(self.logical_part_count, bool)
+                or not isinstance(self.logical_part_count, int)
+                or self.logical_part_count < 2
+            ):
+                raise ConversationMessageSchemaError(
+                    "logical_part_count must be an integer greater than one"
+                )
+            if self.logical_part_index >= self.logical_part_count:
+                raise ConversationMessageSchemaError(
+                    "logical_part_index must be less than logical_part_count"
+                )
+            if role not in {
+                ConversationMessageRole.PROMPT,
+                ConversationMessageRole.COMPLETION,
+            }:
+                raise ConversationMessageSchemaError(
+                    "only prompt and completion text can have logical parts"
+                )
+        elif logical_message_id is not None:
+            raise ConversationMessageSchemaError(
+                "logical_message_id is only valid for a split logical message"
+            )
 
         if self.original_size_bytes is not None:
             if (
@@ -245,6 +293,10 @@ class ConversationMessage:
             payload["original_size_bytes"] = self.original_size_bytes
         if self.original_sha256 is not None:
             payload["original_sha256"] = self.original_sha256
+        if self.logical_message_id is not None:
+            payload["logical_message_id"] = self.logical_message_id
+            payload["logical_part_index"] = self.logical_part_index
+            payload["logical_part_count"] = self.logical_part_count
         return canonicalize(payload)
 
     @classmethod
@@ -263,6 +315,9 @@ class ConversationMessage:
             "source_ref",
             "original_size_bytes",
             "original_sha256",
+            "logical_message_id",
+            "logical_part_index",
+            "logical_part_count",
         }
         unknown = set(payload) - allowed
         if unknown:
@@ -305,6 +360,24 @@ class ConversationMessage:
             source_ref=payload.get("source_ref"),
             original_size_bytes=payload.get("original_size_bytes"),
             original_sha256=payload.get("original_sha256"),
+            logical_message_id=payload.get("logical_message_id"),
+            logical_part_index=payload.get("logical_part_index"),
+            logical_part_count=payload.get("logical_part_count"),
+        )
+
+    @property
+    def is_logical_continuation(self) -> bool:
+        """当前物理消息是否延续前一个同源文本分块。"""
+
+        return self.logical_part_index is not None and self.logical_part_index > 0
+
+    @property
+    def completes_logical_message(self) -> bool:
+        """当前物理消息是否结束其所属的逻辑消息。"""
+
+        return (
+            self.logical_part_count is None
+            or self.logical_part_index == self.logical_part_count - 1
         )
 
 
@@ -326,6 +399,30 @@ def _validated_messages(messages: object) -> tuple[ConversationMessage, ...]:
         for current, following in zip(resolved, resolved[1:], strict=False)
     ):
         raise ConversationMessageSchemaError("conversation messages must be chronological")
+    logical_parts: dict[str, list[tuple[int, ConversationMessage]]] = {}
+    for position, item in enumerate(resolved):
+        if item.logical_message_id is not None:
+            logical_parts.setdefault(item.logical_message_id, []).append((position, item))
+    for logical_id, parts in logical_parts.items():
+        positions = [position for position, _item in parts]
+        values = [item for _position, item in parts]
+        if positions != list(range(positions[0], positions[0] + len(positions))):
+            raise ConversationMessageSchemaError(
+                f"logical message parts are not contiguous: {logical_id}"
+            )
+        if len({item.role for item in values}) != 1 or len({item.occurred_at for item in values}) != 1:
+            raise ConversationMessageSchemaError(
+                f"logical message parts do not preserve role and time: {logical_id}"
+            )
+        counts = {item.logical_part_count for item in values}
+        indices: list[int] = []
+        for item in values:
+            assert item.logical_part_index is not None
+            indices.append(item.logical_part_index)
+        if len(counts) != 1 or indices != list(range(indices[0], indices[0] + len(indices))):
+            raise ConversationMessageSchemaError(
+                f"logical message part metadata is inconsistent: {logical_id}"
+            )
     tool_call_ids = [
         item.tool_call_id
         for item in resolved
@@ -438,7 +535,7 @@ class ConversationSegment:
     segment_id: str
     messages: tuple[ConversationMessage, ...]
 
-    SCHEMA_VERSION = "conversation_segment_v1"
+    SCHEMA_VERSION = "conversation_segment_v2"
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -470,6 +567,26 @@ class ConversationSegment:
         return len(self.messages)
 
     @property
+    def starts_mid_turn(self) -> bool:
+        """片段是否从前一个 History Segment 延续同一逻辑轮次。"""
+
+        first = self.messages[0]
+        return (
+            first.role is not ConversationMessageRole.PROMPT
+            or first.is_logical_continuation
+        )
+
+    @property
+    def ends_mid_turn(self) -> bool:
+        """片段是否尚未到达本轮最终 completion。"""
+
+        final = self.messages[-1]
+        return (
+            final.role is not ConversationMessageRole.COMPLETION
+            or not final.completes_logical_message
+        )
+
+    @property
     def digest(self) -> str:
         return canonical_digest(self.to_dict())
 
@@ -479,13 +596,22 @@ class ConversationSegment:
                 "schema_version": self.SCHEMA_VERSION,
                 "conversation_id": self.conversation_id,
                 "segment_id": self.segment_id,
+                "starts_mid_turn": self.starts_mid_turn,
+                "ends_mid_turn": self.ends_mid_turn,
                 "messages": [message.to_dict() for message in self.messages],
             }
         )
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> ConversationSegment:
-        allowed = {"schema_version", "conversation_id", "segment_id", "messages"}
+        allowed = {
+            "schema_version",
+            "conversation_id",
+            "segment_id",
+            "starts_mid_turn",
+            "ends_mid_turn",
+            "messages",
+        }
         unknown = set(payload) - allowed
         if unknown:
             raise ConversationMessageSchemaError(
@@ -493,7 +619,13 @@ class ConversationSegment:
             )
         if payload.get("schema_version") != cls.SCHEMA_VERSION:
             raise ConversationMessageSchemaError("unsupported conversation segment schema")
-        missing = {"conversation_id", "segment_id", "messages"} - set(payload)
+        missing = {
+            "conversation_id",
+            "segment_id",
+            "starts_mid_turn",
+            "ends_mid_turn",
+            "messages",
+        } - set(payload)
         if missing:
             raise ConversationMessageSchemaError(f"conversation segment is missing fields: {sorted(missing)}")
         raw_messages = payload["messages"]
@@ -501,11 +633,26 @@ class ConversationSegment:
             raise ConversationMessageSchemaError("conversation segment messages must be a list")
         if any(not isinstance(item, Mapping) for item in raw_messages):
             raise ConversationMessageSchemaError("conversation segment contains a non-object message")
-        return cls(
+        segment = cls(
             conversation_id=payload["conversation_id"],
             segment_id=payload["segment_id"],
             messages=tuple(ConversationMessage.from_dict(item) for item in raw_messages),
         )
+        if not isinstance(payload["starts_mid_turn"], bool) or not isinstance(
+            payload["ends_mid_turn"],
+            bool,
+        ):
+            raise ConversationMessageSchemaError(
+                "conversation segment turn-boundary flags must be boolean"
+            )
+        if (
+            payload["starts_mid_turn"] != segment.starts_mid_turn
+            or payload["ends_mid_turn"] != segment.ends_mid_turn
+        ):
+            raise ConversationMessageSchemaError(
+                "conversation segment turn-boundary flags do not match its messages"
+            )
+        return segment
 
 
 __all__ = [

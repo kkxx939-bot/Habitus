@@ -75,7 +75,7 @@ class DispatchingChatProvider:
     def complete(self, request):
         self.prompt_versions.append(request.prompt_version)
         payloads = {
-            "conversation_segment_summary_v1": summary_content().to_dict(),
+            "conversation_segment_summary_v2": summary_content().to_dict(),
             "memory_retrieval_grader_v1": {
                 "status": "irrelevant",
                 "action": "finish",
@@ -111,6 +111,9 @@ class DispatchingChatProvider:
     def health_check(self):
         return {"ok": True}
 
+    async def aclose(self):
+        return None
+
 
 class EmbeddingProvider:
     is_remote = False
@@ -122,6 +125,9 @@ class EmbeddingProvider:
 
     async def embed(self, _text: str, *, is_query: bool) -> EmbeddingVector:
         return EmbeddingVector((1.0,) + (0.0,) * (self.dimension - 1))
+
+    async def aclose(self):
+        return None
 
 
 class DurableVectorBackend:
@@ -259,7 +265,7 @@ def test_full_job_chain_commits_summary_receipt_indexes_and_job_before_cleaning_
     assert isinstance(memory_state, VectorStoreState) and memory_state.checkpoint == 1
     assert isinstance(summary_state, VectorStoreState) and summary_state.checkpoint == 1
     assert set(chats[0].prompt_versions) == {
-        "conversation_segment_summary_v1",
+        "conversation_segment_summary_v2",
         "memory_retrieval_grader_v1",
         "memory_candidate_extraction_v2",
         "memory_candidate_review_v2",

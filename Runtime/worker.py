@@ -10,6 +10,7 @@ from enum import Enum
 from uuid import uuid4
 
 from Config import WorkerConfig
+from foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
 from memory.workflow import (
     MemoryJob,
     MemoryJobBlockedError,
@@ -47,6 +48,7 @@ class MemoryWorker:
         config: WorkerConfig,
         *,
         worker_id: str | None = None,
+        observer: Observer | None = None,
     ) -> None:
         if not isinstance(runner, MemoryJobRunner):
             raise TypeError("runner must be MemoryJobRunner")
@@ -68,6 +70,7 @@ class MemoryWorker:
         self._stop_requested = asyncio.Event()
         self._wake_event = asyncio.Event()
         self._last_error: BaseException | None = None
+        self.observer = observer or NullObserver()
 
     @property
     def state(self) -> MemoryWorkerState:
@@ -160,9 +163,18 @@ class MemoryWorker:
                     await self._wait_until(exc.available_at)
                     continue
                 except MemoryJobLeaseLostError:
+                    self._observe("job_lease", ObservationStatus.DEGRADED, {"error_type": "MemoryJobLeaseLostError"})
                     await self._wait(self.config.poll_interval_seconds)
                     continue
                 except MemoryJobExecutionError as exc:
+                    self._observe(
+                        "job_execution",
+                        ObservationStatus.FAILURE,
+                        {
+                            "error_type": type(exc).__name__,
+                            "memory_sequence": 0 if exc.job is None else exc.job.memory_sequence,
+                        },
+                    )
                     if exc.job is not None and exc.job.status is MemoryJobStatus.FAILED:
                         self._last_error = exc
                         self._state = MemoryWorkerState.BLOCKED
@@ -172,6 +184,11 @@ class MemoryWorker:
                 except MemoryJobBlockedError as exc:
                     oldest = await asyncio.to_thread(self.runner.store.oldest_uncommitted)
                     if oldest is not None and oldest.status is MemoryJobStatus.FAILED:
+                        self._observe(
+                            "job_queue",
+                            ObservationStatus.DEGRADED,
+                            {"error_type": type(exc).__name__, "memory_sequence": oldest.memory_sequence},
+                        )
                         self._last_error = exc
                         self._state = MemoryWorkerState.BLOCKED
                         return
@@ -179,11 +196,21 @@ class MemoryWorker:
                     continue
                 if result.job is None:
                     await self._wait(self.config.poll_interval_seconds)
+                else:
+                    self._observe(
+                        "job_execution",
+                        ObservationStatus.SUCCESS,
+                        {
+                            "memory_sequence": result.job.memory_sequence,
+                            "status": result.job.status.value,
+                        },
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self._last_error = exc
             self._state = MemoryWorkerState.FAILED
+            self._observe("worker_loop", ObservationStatus.FAILURE, {"error_type": type(exc).__name__})
         finally:
             active = self._active_execution
             if active is not None and not active.done():
@@ -280,6 +307,22 @@ class MemoryWorker:
             await asyncio.wait_for(self._wake_event.wait(), timeout=delay_seconds)
         except asyncio.TimeoutError:
             pass
+
+    def _observe(
+        self,
+        operation: str,
+        status: ObservationStatus,
+        attributes: dict[str, str | int | float | bool],
+    ) -> None:
+        self.observer.record(
+            ObservationEvent(
+                category="workflow",
+                operation=operation,
+                status=status,
+                duration_seconds=0.0,
+                attributes=attributes,
+            )
+        )
 
 
 __all__ = [

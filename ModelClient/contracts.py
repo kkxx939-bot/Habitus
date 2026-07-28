@@ -368,6 +368,8 @@ class ChatProvider(Protocol):
 
     def health_check(self) -> Mapping[str, object]: ...
 
+    async def aclose(self) -> None: ...
+
 
 class ModelClientError(RuntimeError):
     """携带重试和故障转移策略元数据的基础异常。"""

@@ -93,6 +93,7 @@ class OpenAICompatibleChatProvider:
             httpx.AsyncClient,
         ] = weakref.WeakKeyDictionary()
         self._async_clients_lock = threading.Lock()
+        self._closed = False
 
     def complete(self, request: ChatRequest) -> ModelResponse:
         started = time.monotonic()
@@ -204,7 +205,35 @@ class OpenAICompatibleChatProvider:
             "model": self.model,
         }
 
+    async def aclose(self) -> None:
+        """幂等关闭同步与所有事件循环对应的异步 HTTP 连接池。"""
+
+        with self._async_clients_lock:
+            if self._closed:
+                return
+            self._closed = True
+            clients = tuple(self._async_clients.values())
+            self._async_clients.clear()
+        first_error: BaseException | None = None
+        try:
+            await asyncio.to_thread(self._sync_client.close)
+        except BaseException as exc:
+            first_error = exc
+        results = await asyncio.gather(
+            *(client.aclose() for client in clients),
+            return_exceptions=True,
+        )
+        if first_error is None:
+            first_error = next(
+                (result for result in results if isinstance(result, BaseException)),
+                None,
+            )
+        if first_error is not None:
+            raise first_error
+
     def _payload(self, request: ChatRequest, *, stream: bool) -> dict[str, object]:
+        if self._closed:
+            raise ModelConfigurationError("chat provider is closed")
         if not isinstance(request, ChatRequest):
             raise TypeError("request must be ChatRequest")
         payload: dict[str, object] = {

@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import heapq
+import logging
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 
+from foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
 from memory.indexing import MemoryVectorIndex, MemoryVectorMatch
 from memory.intention import MemoryIntentionRecallScope
 from memory.model import MemoryKind, MemoryLevel
 from memory.retrieval.model import MemorySearchHit
 from memory.uri import MemoryURI, MemoryURINodeType
 from ModelClient import Embedder, EmbeddingVector, Reranker
+
+logger = logging.getLogger(__name__)
 
 
 class MemorySearchMode(str, Enum):
@@ -86,6 +90,7 @@ class MemorySemanticSearchEngine:
         index: MemoryVectorIndex,
         reranker: Reranker | None = None,
         config: MemorySemanticSearchConfig | None = None,
+        observer: Observer | None = None,
     ) -> None:
         if not callable(getattr(embedder, "embed_query", None)):
             raise TypeError("embedder must implement embed_query")
@@ -97,6 +102,7 @@ class MemorySemanticSearchEngine:
         self.index = index
         self.reranker = reranker
         self.config = config or MemorySemanticSearchConfig()
+        self.observer = observer or NullObserver()
 
     async def search(
         self,
@@ -228,15 +234,21 @@ class MemorySemanticSearchEngine:
             return ()
         if self.reranker is None or not self.config.rerank_hierarchy:
             return tuple((match, match.score) for match in matches)
-        scores = await self.reranker.rerank(
-            query,
-            tuple(self._rerank_text(match.content) for match in matches),
-        )
-        if not isinstance(scores, tuple) or len(scores) != len(matches):
-            raise ValueError("reranker returned an unexpected hierarchy score count")
-        return tuple(
-            (match, self._score(score, "hierarchy rerank")) for match, score in zip(matches, scores, strict=True)
-        )
+        try:
+            scores = await self.reranker.rerank(
+                query,
+                tuple(self._rerank_text(match.content) for match in matches),
+            )
+            if not isinstance(scores, tuple) or len(scores) != len(matches):
+                raise ValueError("reranker returned an unexpected hierarchy score count")
+            return tuple(
+                (match, self._score(score, "hierarchy rerank"))
+                for match, score in zip(matches, scores, strict=True)
+            )
+        except Exception as exc:
+            logger.warning("hierarchy reranker failed; using vector scores", exc_info=exc)
+            self._observe_rerank_fallback("hierarchy", exc)
+            return tuple((match, match.score) for match in matches)
 
     async def _rerank_final(
         self,
@@ -248,27 +260,64 @@ class MemorySemanticSearchEngine:
         if not selected:
             return ()
         assert self.reranker is not None
-        scores = await self.reranker.rerank(
-            query,
-            tuple(self._rerank_text(candidate.content) for candidate in selected),
-        )
-        if not isinstance(scores, tuple) or len(scores) != len(selected):
-            raise ValueError("reranker returned an unexpected final score count")
-        hits: list[MemorySearchHit] = []
-        for candidate, raw_score in zip(selected, scores, strict=True):
-            score = self._score(raw_score, "final rerank")
-            if score < self.config.rerank_score_threshold:
-                continue
-            hits.append(
+        try:
+            scores = await self.reranker.rerank(
+                query,
+                tuple(self._rerank_text(candidate.content) for candidate in selected),
+            )
+            if not isinstance(scores, tuple) or len(scores) != len(selected):
+                raise ValueError("reranker returned an unexpected final score count")
+        except Exception as exc:
+            logger.warning("final reranker failed; using vector scores", exc_info=exc)
+            self._observe_rerank_fallback("final", exc)
+            return tuple(
                 MemorySearchHit(
                     uri=candidate.uri,
-                    score=score,
+                    score=candidate.score,
                     vector_score=candidate.vector_score,
-                    rerank_score=score,
                 )
-            )
+                for candidate in candidates
+                if candidate.score >= self.config.vector_score_threshold
+            )[:limit]
+        hits: list[MemorySearchHit] = []
+        try:
+            for candidate, raw_score in zip(selected, scores, strict=True):
+                score = self._score(raw_score, "final rerank")
+                if score < self.config.rerank_score_threshold:
+                    continue
+                hits.append(
+                    MemorySearchHit(
+                        uri=candidate.uri,
+                        score=score,
+                        vector_score=candidate.vector_score,
+                        rerank_score=score,
+                    )
+                )
+        except Exception as exc:
+            logger.warning("final reranker scores were invalid; using vector scores", exc_info=exc)
+            self._observe_rerank_fallback("final", exc)
+            return tuple(
+                MemorySearchHit(
+                    uri=candidate.uri,
+                    score=candidate.score,
+                    vector_score=candidate.vector_score,
+                )
+                for candidate in candidates
+                if candidate.score >= self.config.vector_score_threshold
+            )[:limit]
         hits.sort(key=lambda item: (-item.score, str(item.uri)))
         return tuple(hits[:limit])
+
+    def _observe_rerank_fallback(self, stage: str, error: BaseException) -> None:
+        self.observer.record(
+            ObservationEvent(
+                category="retrieval",
+                operation="rerank_fallback",
+                status=ObservationStatus.DEGRADED,
+                duration_seconds=0.0,
+                attributes={"stage": stage, "error_type": type(error).__name__},
+            )
+        )
 
     def _merge_matches(
         self,

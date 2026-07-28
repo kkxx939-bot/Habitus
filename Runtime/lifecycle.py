@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from Config import ConversationLifecycleConfig
 from foundation.integrity import canonical_json
+from foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
 from infrastructure.store.contracts import LockToken
 from infrastructure.store.filesystem import atomic_replace_bytes, read_regular_bytes
 from memory.conversation import ConversationAddress, ConversationMessageJournal
@@ -176,6 +177,7 @@ class LifecycleWorker:
         config: ConversationLifecycleConfig,
         *,
         worker_id: str | None = None,
+        observer: Observer | None = None,
     ) -> None:
         if not isinstance(manager, ConversationLifecycleManager):
             raise TypeError("manager must be ConversationLifecycleManager")
@@ -202,6 +204,7 @@ class LifecycleWorker:
         self._wake_event = asyncio.Event()
         self._last_cycle: LifecycleMaintenanceCycleResult | None = None
         self._last_error: BaseException | None = None
+        self.observer = observer or NullObserver()
 
     @property
     def state(self) -> LifecycleWorkerState:
@@ -277,6 +280,7 @@ class LifecycleWorker:
         result = await self._run_once()
         self._last_cycle = result
         self._last_error = None
+        self._observe_cycle(result)
         return result
 
     def wake(self) -> None:
@@ -296,14 +300,17 @@ class LifecycleWorker:
                     raise
                 except Exception as exc:
                     self._last_error = exc
+                    self._observe_failure(exc)
                     continue
                 self._last_cycle = result
                 self._last_error = None
+                self._observe_cycle(result)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self._last_error = exc
             self._state = LifecycleWorkerState.FAILED
+            self._observe_failure(exc)
         finally:
             active = self._active_cycle
             if active is not None and not active.done():
@@ -482,6 +489,33 @@ class LifecycleWorker:
             pass
         finally:
             self._wake_event.clear()
+
+    def _observe_cycle(self, result: LifecycleMaintenanceCycleResult) -> None:
+        self.observer.record(
+            ObservationEvent(
+                category="lifecycle",
+                operation="maintenance_cycle",
+                status=(ObservationStatus.DEGRADED if result.failures else ObservationStatus.SUCCESS),
+                duration_seconds=max(0.0, (result.finished_at - result.started_at).total_seconds()),
+                attributes={
+                    "lease_acquired": result.lease_acquired,
+                    "selected": len(result.selected_addresses),
+                    "maintained": len(result.maintained_addresses),
+                    "failures": len(result.failures),
+                },
+            )
+        )
+
+    def _observe_failure(self, error: BaseException) -> None:
+        self.observer.record(
+            ObservationEvent(
+                category="lifecycle",
+                operation="maintenance_cycle",
+                status=ObservationStatus.FAILURE,
+                duration_seconds=0.0,
+                attributes={"error_type": type(error).__name__},
+            )
+        )
 
 
 __all__ = [

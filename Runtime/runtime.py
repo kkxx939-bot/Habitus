@@ -9,18 +9,34 @@ from enum import Enum
 from pathlib import Path
 
 from Config import M2BOSConfig
+from foundation.observability import ObservabilitySnapshot
 from memory.conversation import ConversationAddress
+from memory.editor import MemoryTransactionJournalState
 from memory.intention import MemoryIntentionRecallScope
 from memory.model import MemoryKind
 from memory.retrieval import MemorySearchResult
 from memory.uri import MemoryURI
 from memory.workflow import (
     ConversationLifecycleMaintenanceResult,
+    ConversationMemoryFlushResult,
+    ConversationMemoryIngestResult,
+    MemoryChangeReceipt,
+    MemoryChangeSource,
     MemoryJob,
+    MemoryJobAbandonment,
     MemoryJobRunResult,
     MemoryJobStatus,
 )
+from pre.conversation import (
+    ConversationAdaptation,
+    ConversationAdapterContext,
+    ConversationAdapterRegistry,
+    ConversationBatch,
+    ConversationSegment,
+)
 from Runtime.components import RuntimeComponents
+from Runtime.consistency import MemoryConsistencyService, MemoryConsistencySnapshot
+from Runtime.health import RuntimeHealthReport, RuntimeHealthService
 from Runtime.worker import MemoryWorkerState
 
 
@@ -81,6 +97,24 @@ class MemoryJobRetryResult:
             raise TypeError("worker_restarted must be boolean")
 
 
+@dataclass(frozen=True)
+class MemoryJobAbandonResult:
+    """一次显式永久失败处置及其 Worker 恢复结果。"""
+
+    failed_job: MemoryJob
+    abandonment: MemoryJobAbandonment
+    worker_restarted: bool
+
+
+@dataclass(frozen=True)
+class RuntimeConversationProtocolIngestResult:
+    """外部协议转换事实与实际写入结果。"""
+
+    adaptation: ConversationAdaptation
+    ingest: ConversationMemoryIngestResult
+
+
+# TODO(memory-tree-public-read): 前端树形展示协议确定后，再增加独立公共读取服务；当前不得泄露内部存储布局。
 class Runtime:
     """只管理组装、初始化顺序和 Job 执行入口，不承载领域规则。"""
 
@@ -103,6 +137,13 @@ class Runtime:
         self.components = components
         self._state = RuntimeState.CREATED
         self._initialization: RuntimeInitialization | None = None
+        self._consistency = MemoryConsistencyService(
+            components.workflow.jobs,
+            components.workflow.receipts,
+            observer=components.infrastructure.observer,
+        )
+        self._conversation_adapters = ConversationAdapterRegistry.with_builtins()
+        self._health = RuntimeHealthService(components)
 
     @property
     def state(self) -> RuntimeState:
@@ -175,6 +216,171 @@ class Runtime:
         self._require_ready()
         return await self.components.workflow.worker.run_once()
 
+    async def append_conversation(
+        self,
+        address: ConversationAddress,
+        batch: ConversationBatch,
+        *,
+        after_turn: bool = False,
+        omit_tool_call_ids: frozenset[str] = frozenset(),
+    ) -> ConversationMemoryIngestResult:
+        """追加规范化消息并返回可用于一致性等待的耐久 Job 句柄。"""
+
+        self._require_initialized("conversation append")
+        appended = await asyncio.to_thread(
+            self.components.workflow.enqueuer.append,
+            address,
+            batch,
+            omit_tool_call_ids=omit_tool_call_ids,
+        )
+        boundary_hints = None
+        preview = await asyncio.to_thread(
+            self.components.workflow.enqueuer.preview_retention,
+            address,
+            after_turn=after_turn,
+        )
+        if preview.should_seal:
+            live = await asyncio.to_thread(
+                self.components.conversation.journal.read_live,
+                address,
+            )
+            boundary_hints = await self.components.conversation.boundary_scorer.score(live)
+        jobs, retention = await asyncio.to_thread(
+            self.components.workflow.enqueuer.enqueue_ready_segments,
+            address,
+            after_turn=after_turn,
+            flush=False,
+            boundary_hints=boundary_hints,
+        )
+        result = ConversationMemoryIngestResult(
+            append=appended,
+            jobs=jobs,
+            retention=retention,
+        )
+        if result.jobs and self._state is RuntimeState.RUNNING:
+            self.components.workflow.worker.wake()
+        return result
+
+    async def append_protocol_conversation(
+        self,
+        address: ConversationAddress,
+        *,
+        protocol: str,
+        payload: object,
+        start_sequence: int,
+        occurred_at: datetime,
+        after_turn: bool | None = None,
+        omit_tool_call_ids: frozenset[str] = frozenset(),
+    ) -> RuntimeConversationProtocolIngestResult:
+        """适配 OpenAI/Anthropic 协议后进入唯一 Conversation 写入主链。"""
+
+        self._require_initialized("protocol conversation append")
+        context = ConversationAdapterContext(
+            conversation_id=address.conversation_id,
+            start_sequence=start_sequence,
+            occurred_at=occurred_at,
+        )
+        adaptation = self._conversation_adapters.adapt(protocol, payload, context)
+        resolved_after_turn = adaptation.after_turn if after_turn is None else after_turn
+        if not isinstance(resolved_after_turn, bool):
+            raise TypeError("after_turn must be boolean or None")
+        ingest = await self.append_conversation(
+            address,
+            adaptation.batch,
+            after_turn=resolved_after_turn,
+            omit_tool_call_ids=omit_tool_call_ids,
+        )
+        return RuntimeConversationProtocolIngestResult(adaptation, ingest)
+
+    def conversation_protocols(self) -> tuple[str, ...]:
+        """返回当前显式注册的协议名，供 HTTP/Agent 接入层发现能力。"""
+
+        return self._conversation_adapters.protocols()
+
+    async def flush_conversation(
+        self,
+        address: ConversationAddress,
+    ) -> ConversationMemoryFlushResult:
+        """在完整轮次边界封存剩余消息并返回提交任务。"""
+
+        self._require_initialized("conversation flush")
+        preview = await asyncio.to_thread(
+            self.components.workflow.enqueuer.preview_retention,
+            address,
+            after_turn=False,
+            flush=True,
+        )
+        boundary_hints = None
+        if preview.should_seal:
+            live = await asyncio.to_thread(
+                self.components.conversation.journal.read_live,
+                address,
+            )
+            boundary_hints = await self.components.conversation.boundary_scorer.score(live)
+        jobs, retention = await asyncio.to_thread(
+            self.components.workflow.enqueuer.enqueue_ready_segments,
+            address,
+            after_turn=False,
+            flush=True,
+            boundary_hints=boundary_hints,
+        )
+        result = ConversationMemoryFlushResult(jobs=jobs, retention=retention)
+        if result.jobs and self._state is RuntimeState.RUNNING:
+            self.components.workflow.worker.wake()
+        return result
+
+    async def read_live_conversation(self, address: ConversationAddress) -> ConversationBatch | None:
+        """读取尚未封存的 Conversation 原始事实。"""
+
+        self._require_initialized("conversation read")
+        return await asyncio.to_thread(self.components.conversation.journal.read_live, address)
+
+    async def list_conversation_history(
+        self,
+        address: ConversationAddress,
+    ) -> tuple[ConversationSegment, ...]:
+        """按消息范围返回当前仍保留的不可变 History Segment。"""
+
+        self._require_initialized("conversation history read")
+        return await asyncio.to_thread(self.components.conversation.journal.list_history, address)
+
+    async def memory_consistency(self, job: MemoryJob) -> MemoryConsistencySnapshot:
+        """读取异步写入当前是否已提交、失败或被人工放弃。"""
+
+        self._require_initialized("memory consistency inspection")
+        return await asyncio.to_thread(self._consistency.inspect, job)
+
+    async def wait_memory_consistency(
+        self,
+        job: MemoryJob,
+        *,
+        timeout_seconds: float,
+        poll_interval_seconds: float = 0.05,
+    ) -> MemoryConsistencySnapshot:
+        """等待指定 Job 达到可解释终态；超时不会取消后台任务。"""
+
+        self._require_initialized("memory consistency wait")
+        return await self._consistency.wait(
+            job,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+
+    async def memory_change_receipt(self, job: MemoryJob) -> MemoryChangeReceipt | None:
+        """按写入句柄读取可审计的 Memory Change Receipt。"""
+
+        self._require_initialized("memory change receipt read")
+        return await asyncio.to_thread(
+            self.components.workflow.receipts.try_read,
+            MemoryChangeSource.from_job(job),
+        )
+
+    async def list_memory_jobs(self, address: ConversationAddress) -> tuple[MemoryJob, ...]:
+        """读取一个 Conversation 当前仍保留的后台任务。"""
+
+        self._require_initialized("memory job read")
+        return await asyncio.to_thread(self.components.workflow.jobs.list_for_conversation, address)
+
     async def failed_memory_job(self) -> MemoryJob | None:
         """读取当前阻塞全队列的最早 FAILED Job，供人工检查错误和版本。"""
 
@@ -213,6 +419,46 @@ class Runtime:
             reopened_job=reopened,
             worker_restarted=restart_worker,
         )
+
+    async def abandon_failed_memory_job(
+        self,
+        failed_job: MemoryJob,
+        *,
+        reason: str,
+    ) -> MemoryJobAbandonResult:
+        """显式放弃无法修复的最早 Job；有任何未决或已提交副作用时拒绝执行。"""
+
+        if not isinstance(failed_job, MemoryJob) or failed_job.status is not MemoryJobStatus.FAILED:
+            raise ValueError("failed_job must be a FAILED MemoryJob snapshot")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("reason must be non-empty text")
+        self._require_initialized("failed memory job abandonment")
+        source = MemoryChangeSource.from_job(failed_job)
+        receipt = await asyncio.to_thread(self.components.workflow.receipts.try_read, source)
+        if receipt is not None:
+            raise RuntimeStateError("a failed job with a prepared or committed receipt cannot be abandoned")
+        journal = await asyncio.to_thread(
+            self.components.memory.editor.transaction.journal.try_read,
+            failed_job.transaction_id,
+        )
+        if journal is not None and journal.state is not MemoryTransactionJournalState.ROLLED_BACK:
+            raise RuntimeStateError("a failed job with a pending or committed transaction cannot be abandoned")
+        worker = self.components.workflow.worker
+        restart_worker = self._state is RuntimeState.RUNNING
+        if restart_worker:
+            if worker.state is not MemoryWorkerState.BLOCKED or worker.busy:
+                raise RuntimeStateError(
+                    "running runtime can only abandon a failed job after its memory worker is blocked and idle"
+                )
+            await worker.wait_stopped()
+        abandonment = await asyncio.to_thread(
+            self.components.workflow.jobs.abandon_failed,
+            failed_job,
+            reason=reason,
+        )
+        if restart_worker:
+            await worker.start()
+        return MemoryJobAbandonResult(failed_job, abandonment, restart_worker)
 
     async def find_memory(
         self,
@@ -274,6 +520,21 @@ class Runtime:
             raise RuntimeStateError("conversation maintenance requires an initialized runtime")
         return await self.components.workflow.lifecycle.maintain_once(address, now=now)
 
+    async def health(self, *, deep: bool = False) -> RuntimeHealthReport:
+        """返回无副作用健康报告；deep 额外探测 Chat Provider。"""
+
+        return await self._health.report(self._state.value, deep=deep)
+
+    def metrics_snapshot(self) -> ObservabilitySnapshot:
+        """返回进程内指标不可变快照，供 HTTP/OTel Adapter 导出。"""
+
+        return self.components.infrastructure.observability.snapshot()
+
+    def prometheus_metrics(self) -> str:
+        """返回 Prometheus exposition 文本，不启动 HTTP 服务。"""
+
+        return self.components.infrastructure.observability.prometheus_text()
+
     async def close(self) -> None:
         """先停止生命周期维护，再停止 Job Worker 并关闭 Runtime。"""
 
@@ -292,7 +553,10 @@ class Runtime:
                 try:
                     await self.components.memory.vector_index.close()
                 finally:
-                    self._state = RuntimeState.CLOSED
+                    try:
+                        await self.components.models.aclose()
+                    finally:
+                        self._state = RuntimeState.CLOSED
 
     async def __aenter__(self) -> Runtime:
         await self.start()
@@ -346,6 +610,8 @@ class Runtime:
 
 
 __all__ = [
+    "MemoryJobAbandonResult",
+    "RuntimeConversationProtocolIngestResult",
     "Runtime",
     "RuntimeInitialization",
     "RuntimeInitializationError",

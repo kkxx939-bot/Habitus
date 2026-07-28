@@ -9,6 +9,7 @@ import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import replace
 
+from foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
 from ModelClient.config import ChatModelConfig
 from ModelClient.contracts import (
     ChatMessage,
@@ -32,6 +33,7 @@ class ChatClient:
         *,
         sleep: Callable[[float], None] = time.sleep,
         async_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        observer: Observer | None = None,
     ) -> None:
         if not isinstance(config, ChatModelConfig):
             raise TypeError("config must be ChatModelConfig")
@@ -44,6 +46,7 @@ class ChatClient:
             weakref.WeakKeyDictionary()
         )
         self._async_slots_lock = threading.Lock()
+        self._observer = observer or NullObserver()
 
     @property
     def provider_name(self) -> str:
@@ -73,15 +76,19 @@ class ChatClient:
 
     async def complete_async(self, request: ChatRequest | str) -> ModelResponse:
         normalized = self._request(request)
+        started = time.monotonic()
         async with self._async_slot():
             for attempt in range(self.config.route.max_retries + 1):
                 try:
-                    return self._require_response(await self.provider.complete_async(normalized))
+                    response = self._require_response(await self.provider.complete_async(normalized))
+                    self._observe("complete_async", ObservationStatus.SUCCESS, started, response=response)
+                    return response
                 except Exception as exc:
                     failure = normalize_provider_error(exc)
                     if failure.retryable and attempt < self.config.route.max_retries:
                         await self._async_sleep(self._retry_delay(attempt, failure))
                         continue
+                    self._observe("complete_async", ObservationStatus.FAILURE, started, error=failure)
                     raise failure from exc
         raise AssertionError("chat retry loop exhausted without a result")  # pragma: no cover
 
@@ -124,6 +131,11 @@ class ChatClient:
                 "model": self.provider.model,
                 "error_code": failure.code,
             }
+
+    async def aclose(self) -> None:
+        """释放 Chat Provider 的同步和异步传输资源。"""
+
+        await self.provider.aclose()
 
     def _stream_sync(self, request: ChatRequest) -> Iterator[ModelStreamEvent]:
         with self._sync_slots:
@@ -180,6 +192,37 @@ class ChatClient:
                 semaphore = asyncio.Semaphore(self.config.route.max_concurrent)
                 self._async_slots[loop] = semaphore
             return semaphore
+
+    def _observe(
+        self,
+        operation: str,
+        status: ObservationStatus,
+        started: float,
+        *,
+        response: ModelResponse | None = None,
+        error: ModelClientError | None = None,
+    ) -> None:
+        attributes: dict[str, str | int | float | bool] = {
+            "provider": self.provider_name,
+            "model": self.model,
+        }
+        if response is not None:
+            attributes.update(
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                total_tokens=response.usage.total_tokens,
+            )
+        if error is not None:
+            attributes["error_code"] = error.code
+        self._observer.record(
+            ObservationEvent(
+                category="model",
+                operation=operation,
+                status=status,
+                duration_seconds=max(0.0, time.monotonic() - started),
+                attributes=attributes,
+            )
+        )
 
 
 __all__ = ["ChatClient"]

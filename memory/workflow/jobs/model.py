@@ -56,10 +56,85 @@ class MemoryJobStatus(str, Enum):
 
 
 @dataclass(frozen=True)
+class MemoryJobAbandonment:
+    """人工确认不再重试后保存的不可变失败处置记录。"""
+
+    memory_sequence: int
+    conversation_id: str
+    started_on: date
+    segment_id: str
+    source_segment_digest: str
+    transaction_id: str
+    attempts: int
+    last_error: str
+    reason: str
+    abandoned_at: datetime
+
+    SCHEMA_VERSION = "memory_job_abandonment_v1"
+
+    def __post_init__(self) -> None:
+        if isinstance(self.memory_sequence, bool) or not isinstance(self.memory_sequence, int) or self.memory_sequence <= 0:
+            raise ValueError("memory_sequence must be a positive integer")
+        for name in ("conversation_id", "segment_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value or value != value.strip():
+                raise ValueError(f"{name} must be non-empty normalized text")
+        if isinstance(self.started_on, datetime) or not isinstance(self.started_on, date):
+            raise ValueError("started_on must be a calendar date")
+        if not MemoryJob._hex(self.source_segment_digest, 64):
+            raise ValueError("source_segment_digest must be lowercase SHA-256 text")
+        if not MemoryJob._hex(self.transaction_id, 32):
+            raise ValueError("transaction_id must be 32 lowercase hexadecimal characters")
+        if isinstance(self.attempts, bool) or not isinstance(self.attempts, int) or self.attempts <= 0:
+            raise ValueError("attempts must be a positive integer")
+        for name, maximum in (("last_error", MEMORY_JOB_ERROR_MAX_CHARS), ("reason", 2_000)):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+                raise ValueError(f"{name} must be non-empty bounded text")
+            object.__setattr__(self, name, " ".join(value.split()))
+        if not isinstance(self.abandoned_at, datetime) or self.abandoned_at.tzinfo is None:
+            raise ValueError("abandoned_at must be timezone-aware")
+        object.__setattr__(self, "abandoned_at", self.abandoned_at.astimezone(timezone.utc))
+
+    @classmethod
+    def from_failed_job(
+        cls,
+        job: MemoryJob,
+        *,
+        reason: str,
+        abandoned_at: datetime,
+    ) -> MemoryJobAbandonment:
+        if not isinstance(job, MemoryJob) or job.status is not MemoryJobStatus.FAILED:
+            raise ValueError("abandonment requires a FAILED MemoryJob")
+        assert job.last_error is not None
+        return cls(
+            memory_sequence=job.memory_sequence,
+            conversation_id=job.conversation_id,
+            started_on=job.started_on,
+            segment_id=job.segment_id,
+            source_segment_digest=job.source_segment_digest,
+            transaction_id=job.transaction_id,
+            attempts=job.attempts,
+            last_error=job.last_error,
+            reason=reason,
+            abandoned_at=abandoned_at,
+        )
+
+    @property
+    def source_identity(self) -> tuple[str, date, str, str]:
+        return (
+            self.conversation_id,
+            self.started_on,
+            self.segment_id,
+            self.source_segment_digest,
+        )
+
+
+@dataclass(frozen=True)
 class MemoryJobConfig:
     """跨 Conversation 队列的显式重试、租约与锁边界。"""
 
-    max_attempts: int = 3
+    max_attempts: int = 5
     max_file_bytes: int = 64 * 1024
     max_files: int = 100_000
     lease_ttl_seconds: int = 120
@@ -271,6 +346,7 @@ class MemoryJobLease:
 
 __all__ = [
     "MemoryJob",
+    "MemoryJobAbandonment",
     "MemoryJobBlockedError",
     "MemoryJobConfig",
     "MemoryJobError",

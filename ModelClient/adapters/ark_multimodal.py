@@ -57,8 +57,11 @@ class ArkMultimodalEmbeddingProvider:
             httpx.AsyncClient,
         ] = weakref.WeakKeyDictionary()
         self._cache_lock = threading.Lock()
+        self._closed = False
 
     async def embed(self, text: str, *, is_query: bool) -> EmbeddingVector:
+        if self._closed:
+            raise ModelConfigurationError("embedding provider is closed")
         parameters = self.config.query_parameters if is_query else self.config.document_parameters
         payload: dict[str, object] = {
             **dict(self.config.route.extra_body),
@@ -69,6 +72,26 @@ class ArkMultimodalEmbeddingProvider:
         }
         response_payload = await self._post(payload)
         return self._vector(response_payload)
+
+    async def aclose(self) -> None:
+        """幂等关闭所有事件循环对应的异步 HTTP 连接池。"""
+
+        with self._cache_lock:
+            if self._closed:
+                return
+            self._closed = True
+            clients = tuple(self._clients.values())
+            self._clients.clear()
+        results = await asyncio.gather(
+            *(client.aclose() for client in clients),
+            return_exceptions=True,
+        )
+        first_error = next(
+            (result for result in results if isinstance(result, BaseException)),
+            None,
+        )
+        if first_error is not None:
+            raise first_error
 
     async def _post(self, payload: Mapping[str, object]) -> Mapping[str, object]:
         client = self._client()

@@ -10,6 +10,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from foundation.integrity import canonical_json
+from memory.conversation.segmentation import (
+    SEMANTIC_CHUNKER_VERSION,
+    ConversationBoundaryHints,
+)
 from pre.conversation.messages import (
     ConversationBatch,
     ConversationMessage,
@@ -66,7 +70,8 @@ class ConversationSegmentationConfig:
     max_live_bytes: int = 2 * 1024 * 1024
     max_segment_messages: int = 500
     max_segment_bytes: int = 1024 * 1024
-    max_segment_tokens: int | None = None
+    max_segment_tokens: int = 12_000
+    semantic_boundary_min_ratio: float = 0.60
     max_inline_tool_result_bytes: int = 64 * 1024
     max_tool_result_summary_chars: int = 4_000
 
@@ -99,11 +104,23 @@ class ConversationSegmentationConfig:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
                 raise ValueError(f"{name} must be between {minimum} and {maximum}")
-        for token_name, token_value in (("max_segment_tokens", self.max_segment_tokens),):
-            if token_value is not None and (
-                isinstance(token_value, bool) or not isinstance(token_value, int) or not 1 <= token_value <= 10_000_000
-            ):
-                raise ValueError(f"{token_name} must be null or a positive bounded integer")
+        if (
+            isinstance(self.max_segment_tokens, bool)
+            or not isinstance(self.max_segment_tokens, int)
+            or not 1 <= self.max_segment_tokens <= 10_000_000
+        ):
+            raise ValueError("max_segment_tokens must be a positive bounded integer")
+        if (
+            isinstance(self.semantic_boundary_min_ratio, bool)
+            or not isinstance(self.semantic_boundary_min_ratio, int | float)
+            or not 0.1 <= float(self.semantic_boundary_min_ratio) <= 1.0
+        ):
+            raise ValueError("semantic_boundary_min_ratio must be between 0.1 and 1.0")
+        object.__setattr__(
+            self,
+            "semantic_boundary_min_ratio",
+            float(self.semantic_boundary_min_ratio),
+        )
 
 
 @dataclass(frozen=True)
@@ -139,6 +156,9 @@ class ConversationRetentionPlan:
     pending_tokens: int
     budget_exceeded: bool
     reason: str
+    boundary_kind: str | None = None
+    embedding_fingerprint: str | None = None
+    chunker_version: str = SEMANTIC_CHUNKER_VERSION
 
     def __post_init__(self) -> None:
         if not isinstance(self.triggered, bool) or not isinstance(self.flush, bool):
@@ -149,6 +169,17 @@ class ConversationRetentionPlan:
             raise TypeError("budget_exceeded must be boolean")
         if not isinstance(self.reason, str) or not self.reason.strip():
             raise ValueError("retention reason must be non-empty text")
+        if self.boundary_kind is not None and (
+            not isinstance(self.boundary_kind, str) or not self.boundary_kind.strip()
+        ):
+            raise ValueError("boundary_kind must be non-empty text or None")
+        if self.embedding_fingerprint is not None and (
+            not isinstance(self.embedding_fingerprint, str)
+            or not self.embedding_fingerprint.strip()
+        ):
+            raise ValueError("embedding_fingerprint must be non-empty text or None")
+        if not isinstance(self.chunker_version, str) or not self.chunker_version.strip():
+            raise ValueError("chunker_version must be non-empty text")
         if self.through_sequence is None:
             if self.archive_messages:
                 raise ValueError("retention plan without a boundary cannot archive messages")
@@ -183,10 +214,15 @@ class ConversationRetentionPlanner:
         after_turn: bool = False,
         flush: bool = False,
         drain_pending: bool = False,
+        boundary_hints: ConversationBoundaryHints | None = None,
+        leading_continuation: bool = False,
     ) -> ConversationRetentionPlan:
-        """在 afterTurn 或显式 flush 时选择完整、连续且不重复的封存前缀。"""
+        """在完整轮次已闭合后选择连续、安全且不超过硬上限的语义前缀。"""
 
-        if any(not isinstance(value, bool) for value in (after_turn, flush, drain_pending)):
+        if any(
+            not isinstance(value, bool)
+            for value in (after_turn, flush, drain_pending, leading_continuation)
+        ):
             raise TypeError("retention control flags must be boolean")
         if drain_pending and (not after_turn or flush):
             raise ValueError("drain_pending is only valid while completing one afterTurn commit")
@@ -194,6 +230,13 @@ class ConversationRetentionPlanner:
             return self._empty(flush=flush, reason="live conversation is empty")
         if not isinstance(live, ConversationBatch):
             raise TypeError("live must be ConversationBatch or None")
+        if boundary_hints is not None and not isinstance(
+            boundary_hints,
+            ConversationBoundaryHints,
+        ):
+            raise TypeError("boundary_hints must be ConversationBoundaryHints or None")
+        # 消息序号一经写入不可改；后续封存只裁剪前缀，因此完整 live 快照产生的
+        # 边界提示仍可安全用于它的连续后缀。新追加内容没有提示时自动使用结构分数。
 
         messages = live.messages
         if not after_turn and not flush:
@@ -204,11 +247,18 @@ class ConversationRetentionPlanner:
             )
 
         turns = self._turns(messages)
-        self._require_complete_turns(turns)
+        self._require_complete_turns(
+            turns,
+            leading_continuation=leading_continuation,
+        )
         retained_turns = () if flush else self._retained_turns(turns)
         archive_turn_count = len(turns) - len(retained_turns)
-        pending_turns = turns[:archive_turn_count]
-        pending_messages = self._flatten_turns(pending_turns)
+        pending_messages = self._flatten_turns(turns[:archive_turn_count])
+        if not flush:
+            pending_messages = self._extend_pending_for_oversized_tail(
+                messages,
+                pending_messages,
+            )
         pending_tokens = self._tokens(pending_messages)
         triggered, trigger_reason = self._trigger(
             messages,
@@ -227,7 +277,7 @@ class ConversationRetentionPlanner:
                 budget_exceeded=self._live_safety_exceeded(messages),
                 reason=trigger_reason,
             )
-        if not pending_turns:
+        if not pending_messages:
             return ConversationRetentionPlan(
                 through_sequence=None,
                 archive_messages=(),
@@ -236,12 +286,17 @@ class ConversationRetentionPlanner:
                 flush=flush,
                 pending_tokens=0,
                 budget_exceeded=self._live_safety_exceeded(messages),
-                reason=f"{trigger_reason}; newest complete turn is retained as one atomic unit",
+                reason=f"{trigger_reason}; retained window does not require a safe prefix",
             )
 
-        selected_turns = self._bounded_archive_prefix(pending_turns)
-        archived = self._flatten_turns(selected_turns)
+        archived, boundary_kind = self._bounded_archive_prefix(
+            pending_messages,
+            boundary_hints=boundary_hints,
+        )
         retained = messages[len(archived) :]
+        embedding_fingerprint = (
+            boundary_hints.embedding_fingerprint if boundary_hints is not None else None
+        )
         return ConversationRetentionPlan(
             through_sequence=archived[-1].sequence,
             archive_messages=archived,
@@ -250,7 +305,9 @@ class ConversationRetentionPlanner:
             flush=flush,
             pending_tokens=pending_tokens,
             budget_exceeded=self._live_safety_exceeded(retained),
-            reason=trigger_reason,
+            reason=f"{trigger_reason}; selected {boundary_kind} boundary",
+            boundary_kind=boundary_kind,
+            embedding_fingerprint=embedding_fingerprint,
         )
 
     def _trigger(
@@ -267,6 +324,8 @@ class ConversationRetentionPlanner:
             return True, "draining the remaining eligible messages from one afterTurn commit"
         if pending_tokens >= self.config.commit_token_threshold:
             return True, "pending conversation token threshold reached"
+        if self._tokens(messages) > self.config.retained_message_token_budget:
+            return True, "retained conversation token budget exceeded"
         if len(messages) > self.config.max_live_messages:
             return True, "live message count exceeded"
         if self._bytes(messages) > self.config.max_live_bytes:
@@ -292,29 +351,85 @@ class ConversationRetentionPlanner:
             selected_tokens += turn_tokens
         return tuple(selected)
 
+    def _extend_pending_for_oversized_tail(
+        self,
+        messages: tuple[ConversationMessage, ...],
+        pending: tuple[ConversationMessage, ...],
+    ) -> tuple[ConversationMessage, ...]:
+        """当最近轮次本身过大时，把其最小安全前缀也纳入待封存范围。"""
+
+        if len(pending) == len(messages):
+            return pending
+        tail_start = len(pending)
+        tail = messages[tail_start:]
+        if self._within_live_window(tail):
+            return pending
+        safe_sequences = set(self._safe_boundaries(tail))
+        for offset, message in enumerate(tail, start=tail_start):
+            if message.sequence not in safe_sequences:
+                continue
+            remainder = messages[offset + 1 :]
+            if not remainder or self._within_live_window(remainder):
+                return messages[: offset + 1]
+        raise ConversationRetentionError(
+            "the retained conversation tail has no safe boundary within its configured budget"
+        )
+
     def _bounded_archive_prefix(
         self,
-        turns: tuple[ConversationTurn, ...],
-    ) -> tuple[ConversationTurn, ...]:
-        selected: list[ConversationTurn] = []
-        for turn in turns:
-            candidate = self._flatten_turns((*selected, turn))
-            if not self._within_segment_budget(candidate):
-                if not selected:
-                    raise ConversationRetentionError("the oldest complete turn exceeds the configured segment bound")
-                break
-            selected.append(turn)
-        return tuple(selected)
+        messages: tuple[ConversationMessage, ...],
+        *,
+        boundary_hints: ConversationBoundaryHints | None,
+    ) -> tuple[tuple[ConversationMessage, ...], str]:
+        if self._within_segment_budget(messages):
+            return messages, self._boundary_kind(messages, len(messages) - 1)
+
+        safe_sequences = set(self._safe_boundaries(messages))
+        candidates: list[tuple[float, int, str]] = []
+        minimum_tokens = int(
+            self.config.max_segment_tokens * self.config.semantic_boundary_min_ratio
+        )
+        for index, message in enumerate(messages):
+            if message.sequence not in safe_sequences:
+                continue
+            prefix = messages[: index + 1]
+            if not self._within_segment_budget(prefix):
+                continue
+            tokens = self._tokens(prefix)
+            boundary_kind = self._boundary_kind(messages, index)
+            structural = {
+                "turn": 40.0,
+                "assistant_step": 30.0,
+                "message": 20.0,
+                "content": 10.0,
+            }[boundary_kind]
+            semantic = 0.0
+            if boundary_hints is not None:
+                semantic = boundary_hints.distance_after(message.sequence) or 0.0
+            budget_closeness = tokens / self.config.max_segment_tokens
+            score = structural + semantic * 2.0 + budget_closeness
+            candidates.append((score, index, boundary_kind))
+
+        if not candidates:
+            raise ConversationRetentionError(
+                "one atomic tool exchange exceeds the configured segment bound"
+            )
+        preferred = [
+            item
+            for item in candidates
+            if self._tokens(messages[: item[1] + 1]) >= minimum_tokens
+        ]
+        selected = max(preferred or candidates, key=lambda item: (item[0], item[1]))
+        return messages[: selected[1] + 1], selected[2]
 
     def _live_safety_exceeded(self, messages: tuple[ConversationMessage, ...]) -> bool:
-        if len(messages) > self.config.max_live_messages:
-            return True
-        if self._bytes(messages) > self.config.max_live_bytes:
-            return True
-        turns = self._turns(messages) if messages else ()
-        retained = self._retained_turns(turns)
+        return not self._within_live_window(messages)
+
+    def _within_live_window(self, messages: tuple[ConversationMessage, ...]) -> bool:
         return (
-            bool(retained) and self._tokens(self._flatten_turns(retained)) > self.config.retained_message_token_budget
+            len(messages) <= self.config.max_live_messages
+            and self._bytes(messages) <= self.config.max_live_bytes
+            and self._tokens(messages) <= self.config.retained_message_token_budget
         )
 
     def _within_segment_budget(self, messages: tuple[ConversationMessage, ...]) -> bool:
@@ -322,9 +437,7 @@ class ConversationRetentionPlanner:
             return False
         if self._bytes(messages) > self.config.max_segment_bytes:
             return False
-        return not (
-            self.config.max_segment_tokens is not None and self._tokens(messages) > self.config.max_segment_tokens
-        )
+        return self._tokens(messages) <= self.config.max_segment_tokens
 
     def _tokens(self, messages: tuple[ConversationMessage, ...]) -> int:
         total = 0
@@ -343,7 +456,10 @@ class ConversationRetentionPlanner:
     def _turns(messages: tuple[ConversationMessage, ...]) -> tuple[ConversationTurn, ...]:
         grouped: list[list[ConversationMessage]] = []
         for message in messages:
-            if message.role is ConversationMessageRole.PROMPT or not grouped:
+            if (
+                message.role is ConversationMessageRole.PROMPT
+                and not message.is_logical_continuation
+            ) or not grouped:
                 grouped.append([message])
             else:
                 grouped[-1].append(message)
@@ -356,12 +472,22 @@ class ConversationRetentionPlanner:
         return tuple(message for turn in turns for message in turn.messages)
 
     @staticmethod
-    def _require_complete_turns(turns: tuple[ConversationTurn, ...]) -> None:
-        for turn in turns:
-            if turn.messages[0].role is not ConversationMessageRole.PROMPT:
+    def _require_complete_turns(
+        turns: tuple[ConversationTurn, ...],
+        *,
+        leading_continuation: bool,
+    ) -> None:
+        for index, turn in enumerate(turns):
+            if turn.messages[0].role is not ConversationMessageRole.PROMPT and not (
+                index == 0 and leading_continuation
+            ):
                 raise ConversationRetentionError("every conversation turn must start with a prompt")
             if turn.messages[-1].role is not ConversationMessageRole.COMPLETION:
                 raise ConversationRetentionError("afterTurn requires every turn to end with a final completion")
+            if not turn.messages[-1].completes_logical_message:
+                raise ConversationRetentionError(
+                    "afterTurn requires the final completion logical message to be complete"
+                )
             calls = {
                 message.tool_call_id for message in turn.messages if message.role is ConversationMessageRole.TOOL_CALL
             }
@@ -372,6 +498,66 @@ class ConversationRetentionPlanner:
                 raise ConversationRetentionError(
                     "afterTurn requires every tool_call to have one terminal tool_result in the same turn"
                 )
+
+    @staticmethod
+    def _safe_boundaries(messages: tuple[ConversationMessage, ...]) -> tuple[int, ...]:
+        """返回不会切开 tool_call/tool_result 的消息序号。"""
+
+        open_calls: set[str] = set()
+        boundaries: list[int] = []
+        for index, message in enumerate(messages):
+            if message.role is ConversationMessageRole.TOOL_CALL:
+                assert message.tool_call_id is not None
+                open_calls.add(message.tool_call_id)
+            elif message.role is ConversationMessageRole.TOOL_RESULT:
+                assert message.tool_call_id is not None
+                open_calls.discard(message.tool_call_id)
+            if open_calls:
+                continue
+            following = messages[index + 1] if index + 1 < len(messages) else None
+            if (
+                message.role is ConversationMessageRole.COMPLETION
+                and message.completes_logical_message
+                and following is not None
+                and not (
+                    following.role is ConversationMessageRole.PROMPT
+                    and not following.is_logical_continuation
+                )
+            ):
+                # 中间 completion 后仍有同轮工具步骤时不在此切割，确保 Segment
+                # 仅凭首尾角色就能确定 starts/ends_mid_turn。
+                continue
+            boundaries.append(message.sequence)
+        return tuple(boundaries)
+
+    @staticmethod
+    def _boundary_kind(
+        messages: tuple[ConversationMessage, ...],
+        index: int,
+    ) -> str:
+        current = messages[index]
+        following = messages[index + 1] if index + 1 < len(messages) else None
+        if (
+            current.role is ConversationMessageRole.COMPLETION
+            and current.completes_logical_message
+            and (
+                following is None
+                or (
+                    following.role is ConversationMessageRole.PROMPT
+                    and not following.is_logical_continuation
+                )
+            )
+        ):
+            return "turn"
+        if current.role is ConversationMessageRole.TOOL_RESULT:
+            return "assistant_step"
+        if (
+            current.logical_message_id is not None
+            and following is not None
+            and following.logical_message_id == current.logical_message_id
+        ):
+            return "content"
+        return "message"
 
     @staticmethod
     def _empty(
@@ -405,6 +591,7 @@ class ConversationToolResultReducer:
         message: ConversationMessage,
         *,
         force_omit: bool = False,
+        force_summarize: bool = False,
         description: str | None = None,
     ) -> ConversationMessage:
         """保留小结果；把大文本概括，把媒体或不可保留结果明确省略。"""
@@ -415,12 +602,20 @@ class ConversationToolResultReducer:
             raise ValueError("only tool_result messages can be reduced")
         if not isinstance(force_omit, bool):
             raise TypeError("force_omit must be boolean")
+        if not isinstance(force_summarize, bool):
+            raise TypeError("force_summarize must be boolean")
+        if force_omit and force_summarize:
+            raise ValueError("tool result cannot be force-omitted and force-summarized together")
         encoded = canonical_json(message.content).encode("utf-8")
         size = len(encoded)
         digest = hashlib.sha256(encoded).hexdigest()
         if message.content_mode is not ConversationToolResultContentMode.INLINE:
             return message
-        if not force_omit and size <= self.config.max_inline_tool_result_bytes:
+        if (
+            not force_omit
+            and not force_summarize
+            and size <= self.config.max_inline_tool_result_bytes
+        ):
             return message
 
         if force_omit:

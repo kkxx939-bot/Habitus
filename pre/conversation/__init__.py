@@ -1,5 +1,18 @@
 """Conversation 原始消息与可重建历史过程摘要的数据契约。"""
 
+from pre.conversation.adapters import (
+    AnthropicMessagesConversationAdapter,
+    ClaudeCodeConversationAdapter,
+    CodexRolloutConversationAdapter,
+    ConversationAdaptation,
+    ConversationAdapterContext,
+    ConversationAdapterRegistry,
+    ConversationProtocolAdapter,
+    ConversationProtocolError,
+    OpenAIChatCompletionsConversationAdapter,
+    OpenAIResponsesConversationAdapter,
+    OpenClawConversationAdapter,
+)
 from pre.conversation.messages import (
     ConversationBatch,
     ConversationMessage,
@@ -20,6 +33,17 @@ from pre.conversation.summaries import (
 )
 
 __all__ = [
+    "AnthropicMessagesConversationAdapter",
+    "ClaudeCodeConversationAdapter",
+    "CodexRolloutConversationAdapter",
+    "ConversationAdaptation",
+    "ConversationAdapterContext",
+    "ConversationAdapterRegistry",
+    "ConversationProtocolAdapter",
+    "ConversationProtocolError",
+    "OpenAIChatCompletionsConversationAdapter",
+    "OpenAIResponsesConversationAdapter",
+    "OpenClawConversationAdapter",
     "ConversationBatch",
     "ConversationMessage",
     "ConversationMessageRole",

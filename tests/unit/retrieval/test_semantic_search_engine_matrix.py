@@ -395,15 +395,16 @@ def test_final_reranker_receives_bounded_documents_and_controls_order() -> None:
 
 
 @pytest.mark.parametrize("scores", [[], [0.5], (0.5,), (0.5, math.nan)])
-def test_final_reranker_rejects_wrong_shape_or_nonfinite_score(scores: object) -> None:
+def test_final_reranker_invalid_output_falls_back_to_vector_scores(scores: object) -> None:
     matches = (detail_match("A", 0.9), detail_match("B", 0.8))
     current = engine(
         index=ScriptedIndex(searches=[matches]),
         reranker=ScriptedReranker(scores),
         config=MemorySemanticSearchConfig(mode=MemorySearchMode.VECTOR),
     )
-    with pytest.raises((TypeError, ValueError), match="rerank"):
-        search(current)
+    result = search(current)
+    assert tuple(hit.vector_score for hit in result) == (0.9, 0.8)
+    assert all(hit.rerank_score is None for hit in result)
 
 
 def test_hierarchy_reranker_scores_children_before_parent_propagation() -> None:
@@ -427,7 +428,7 @@ def test_hierarchy_reranker_scores_children_before_parent_propagation() -> None:
 
 
 @pytest.mark.parametrize("scores", [[0.5], (0.5,), (math.inf, 0.5)])
-def test_hierarchy_reranker_rejects_wrong_shape_or_nonfinite_score(scores: object) -> None:
+def test_hierarchy_reranker_invalid_output_falls_back_to_vector_scores(scores: object) -> None:
     root = MemoryURI.from_directory(MemoryDirectory.preferences())
     children = (detail_match("A", 0.8), detail_match("B", 0.7))
     current = engine(
@@ -435,8 +436,8 @@ def test_hierarchy_reranker_rejects_wrong_shape_or_nonfinite_score(scores: objec
         reranker=ScriptedReranker(scores),
         config=MemorySemanticSearchConfig(rerank_hierarchy=True),
     )
-    with pytest.raises((TypeError, ValueError), match="rerank"):
-        search(current, roots=(root,))
+    result = search(current, roots=(root,))
+    assert tuple(hit.vector_score for hit in result) == (0.8, 0.7)
 
 
 @pytest.mark.parametrize(

@@ -98,3 +98,67 @@ def test_flush_seals_remaining_complete_turn_without_closing_conversation(tmp_pa
     )
     assert jobs.high_watermark() == 2
 
+
+def test_oversized_turn_uses_regular_contiguous_history_segments_and_jobs(tmp_path: Path) -> None:
+    path_lock = PathLock(ProcessLocalLockStore())
+    journal = ConversationMessageJournal(tmp_path / "conversation", path_lock)
+    jobs = MemoryJobStore(
+        tmp_path / "workflow",
+        path_lock,
+        memory_root=tmp_path / "memory",
+    )
+    config = ConversationSegmentationConfig(
+        commit_token_threshold=1,
+        keep_recent_turn_count=1,
+        retained_message_token_budget=30,
+        max_segment_tokens=30,
+        max_live_messages=1_000,
+        max_live_bytes=1_000_000,
+        max_segment_messages=1_000,
+        max_segment_bytes=1_000_000,
+    )
+    planner = ConversationRetentionPlanner(
+        config,
+        token_estimator=lambda item: len(item.content) if isinstance(item.content, str) else 1,
+    )
+    enqueuer = ConversationMemoryEnqueuer(journal, jobs, planner)
+    address = ConversationAddress("conversation-1", date(2026, 7, 1))
+    source_prompt = "A" * 80
+
+    appended = enqueuer.append_and_maybe_enqueue(
+        address,
+        ConversationBatch("conversation-1", closed_turn(prompt=source_prompt)),
+        after_turn=True,
+    )
+    replay = enqueuer.append_and_maybe_enqueue(
+        address,
+        ConversationBatch("conversation-1", closed_turn(prompt=source_prompt)),
+        after_turn=True,
+    )
+    flushed = enqueuer.flush(address)
+    history = journal.list_history(address)
+
+    assert len(appended.jobs) == 2
+    assert replay.append.appended_count == 0
+    assert replay.jobs == ()
+    assert len(flushed.jobs) == 1
+    assert tuple(item.segment_id for item in history) == (
+        "000000000000-000000000000",
+        "000000000001-000000000001",
+        "000000000002-000000000003",
+    )
+    assert tuple((item.starts_mid_turn, item.ends_mid_turn) for item in history) == (
+        (False, True),
+        (True, True),
+        (True, False),
+    )
+    prompt_parts = tuple(
+        message
+        for segment in history
+        for message in segment.messages
+        if message.role.value == "prompt"
+    )
+    assert "".join(str(item.content) for item in prompt_parts) == source_prompt
+    assert len({item.logical_message_id for item in prompt_parts}) == 1
+    assert journal.read_live(address) is None
+    assert jobs.high_watermark() == 3

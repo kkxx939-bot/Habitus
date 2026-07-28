@@ -14,6 +14,10 @@ from memory.conversation.retention import (
     ConversationRetentionPlanner,
     ConversationToolResultReducer,
 )
+from memory.conversation.segmentation import (
+    ConversationBoundaryHints,
+    ConversationMessageChunker,
+)
 from memory.workflow.jobs import MemoryJob, MemoryJobError, MemoryJobStore
 from pre.conversation import (
     ConversationBatch,
@@ -62,6 +66,7 @@ class ConversationMemoryEnqueuer:
         jobs: MemoryJobStore,
         retention_planner: ConversationRetentionPlanner | None = None,
         tool_result_reducer: ConversationToolResultReducer | None = None,
+        message_chunker: ConversationMessageChunker | None = None,
     ) -> None:
         if not isinstance(conversations, ConversationMessageJournal):
             raise TypeError("conversations must be a ConversationMessageJournal")
@@ -77,10 +82,19 @@ class ConversationMemoryEnqueuer:
             ConversationToolResultReducer,
         ):
             raise TypeError("tool_result_reducer must be ConversationToolResultReducer")
+        if message_chunker is not None and not isinstance(
+            message_chunker,
+            ConversationMessageChunker,
+        ):
+            raise TypeError("message_chunker must be ConversationMessageChunker")
         self.conversations = conversations
         self.jobs = jobs
         self.retention_planner = retention_planner or ConversationRetentionPlanner()
         self.tool_result_reducer = tool_result_reducer or ConversationToolResultReducer(self.retention_planner.config)
+        self.message_chunker = message_chunker or ConversationMessageChunker(
+            max_message_tokens=self.retention_planner.config.max_segment_tokens,
+            token_estimator=self.retention_planner.token_estimator,
+        )
 
     def append_and_maybe_enqueue(
         self,
@@ -100,20 +114,12 @@ class ConversationMemoryEnqueuer:
             not isinstance(identifier, str) or not identifier for identifier in omit_tool_call_ids
         ):
             raise TypeError("omit_tool_call_ids must be a frozenset of non-empty strings")
-        normalized = ConversationBatch(
-            batch.conversation_id,
-            tuple(
-                self.tool_result_reducer.reduce(
-                    message,
-                    force_omit=message.tool_call_id in omit_tool_call_ids,
-                )
-                if message.role is ConversationMessageRole.TOOL_RESULT
-                else message
-                for message in batch.messages
-            ),
+        appended = self.append(
+            address,
+            batch,
+            omit_tool_call_ids=omit_tool_call_ids,
         )
-        appended = self.conversations.append(address, normalized)
-        queued, final_plan = self._enqueue_ready_segments(
+        queued, final_plan = self.enqueue_ready_segments(
             address,
             after_turn=after_turn,
             flush=False,
@@ -124,29 +130,108 @@ class ConversationMemoryEnqueuer:
             retention=final_plan,
         )
 
+    def append(
+        self,
+        address: ConversationAddress,
+        batch: ConversationBatch,
+        *,
+        omit_tool_call_ids: frozenset[str] = frozenset(),
+    ) -> ConversationAppendResult:
+        """降载工具结果、切分超长文本，再写入唯一 live 主链。"""
+
+        if not isinstance(batch, ConversationBatch):
+            raise TypeError("batch must be ConversationBatch")
+        if not isinstance(omit_tool_call_ids, frozenset) or any(
+            not isinstance(identifier, str) or not identifier for identifier in omit_tool_call_ids
+        ):
+            raise TypeError("omit_tool_call_ids must be a frozenset of non-empty strings")
+        reduced = ConversationBatch(
+            batch.conversation_id,
+            tuple(
+                self.tool_result_reducer.reduce(
+                    message,
+                    force_omit=message.tool_call_id in omit_tool_call_ids,
+                    force_summarize=(
+                        message.tool_call_id not in omit_tool_call_ids
+                        and self.retention_planner.token_estimator(message)
+                        > self.retention_planner.config.max_segment_tokens
+                    ),
+                )
+                if message.role is ConversationMessageRole.TOOL_RESULT
+                else message
+                for message in batch.messages
+            ),
+        )
+        normalized = self.message_chunker.normalize(reduced)
+        return self.conversations.append(address, normalized)
+
     def flush(self, address: ConversationAddress) -> ConversationMemoryFlushResult:
         """显式提交全部剩余完整轮次，不关闭或冻结 Conversation。"""
 
-        queued, final_plan = self._enqueue_ready_segments(
+        queued, final_plan = self.enqueue_ready_segments(
             address,
             after_turn=False,
             flush=True,
         )
         return ConversationMemoryFlushResult(jobs=queued, retention=final_plan)
 
-    def _enqueue_ready_segments(
+    def preview_retention(
+        self,
+        address: ConversationAddress,
+        *,
+        after_turn: bool,
+        flush: bool = False,
+        boundary_hints: ConversationBoundaryHints | None = None,
+    ) -> ConversationRetentionPlan:
+        """读取当前 live 快照并执行一次无副作用切段规划。"""
+
+        live = self.conversations.read_live(address)
+        state = self.conversations.read_state(address)
+        leading_continuation = bool(
+            live is not None
+            and state.archived_through_sequence is not None
+            and live.start_sequence == state.archived_through_sequence + 1
+            and (
+                live.messages[0].role is not ConversationMessageRole.PROMPT
+                or live.messages[0].is_logical_continuation
+            )
+        )
+        return self.retention_planner.plan(
+            live,
+            after_turn=after_turn,
+            flush=flush,
+            drain_pending=False,
+            boundary_hints=boundary_hints,
+            leading_continuation=leading_continuation,
+        )
+
+    def enqueue_ready_segments(
         self,
         address: ConversationAddress,
         *,
         after_turn: bool,
         flush: bool,
+        boundary_hints: ConversationBoundaryHints | None = None,
     ) -> tuple[tuple[MemoryJob, ...], ConversationRetentionPlan]:
         queued: list[MemoryJob] = []
+        live = self.conversations.read_live(address)
+        state = self.conversations.read_state(address)
+        leading_continuation = bool(
+            live is not None
+            and state.archived_through_sequence is not None
+            and live.start_sequence == state.archived_through_sequence + 1
+            and (
+                live.messages[0].role is not ConversationMessageRole.PROMPT
+                or live.messages[0].is_logical_continuation
+            )
+        )
         final_plan = self.retention_planner.plan(
-            self.conversations.read_live(address),
+            live,
             after_turn=after_turn,
             flush=flush,
             drain_pending=False,
+            boundary_hints=boundary_hints,
+            leading_continuation=leading_continuation,
         )
         for _ in range(1_000):
             if not final_plan.should_seal:
@@ -158,11 +243,24 @@ class ConversationMemoryEnqueuer:
                     through_sequence=final_plan.through_sequence,
                 )
             )
+            live = self.conversations.read_live(address)
+            state = self.conversations.read_state(address)
+            leading_continuation = bool(
+                live is not None
+                and state.archived_through_sequence is not None
+                and live.start_sequence == state.archived_through_sequence + 1
+                and (
+                    live.messages[0].role is not ConversationMessageRole.PROMPT
+                    or live.messages[0].is_logical_continuation
+                )
+            )
             final_plan = self.retention_planner.plan(
-                self.conversations.read_live(address),
+                live,
                 after_turn=after_turn,
                 flush=flush,
                 drain_pending=after_turn and not flush,
+                boundary_hints=boundary_hints,
+                leading_continuation=leading_continuation,
             )
         raise MemoryJobError("automatic conversation sealing exceeded its progress bound")
 

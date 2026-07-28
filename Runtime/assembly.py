@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from Config import M2BOSConfig
+from foundation.observability import CompositeObserver, MetricRegistry, Observer
 from infrastructure.store.contracts import PathLock
 from infrastructure.store.sqlite import SQLiteLockStore
 from infrastructure.vector import VectorStoreFactory, VectorStoreRequirements
@@ -14,6 +15,7 @@ from memory.conversation import (
     ConversationRangeSummaryGenerator,
     ConversationRangeSummaryStore,
     ConversationRetentionPlanner,
+    ConversationSemanticBoundaryScorer,
     ConversationSummaryCompactor,
     ConversationSummaryGenerator,
     ConversationSummaryService,
@@ -71,6 +73,7 @@ def build_runtime(
     vector_stores: VectorStoreFactory | None = None,
     path_lock: PathLock | None = None,
     environ: Mapping[str, str] | None = None,
+    observer: Observer | None = None,
 ) -> Runtime:
     """无存储写入、无模型请求地完成一次显式依赖组装。"""
 
@@ -84,6 +87,8 @@ def build_runtime(
         raise TypeError("path_lock must be PathLock or None")
     if environ is not None and not isinstance(environ, Mapping):
         raise TypeError("environ must be a string mapping or None")
+    if observer is not None and not callable(getattr(observer, "record", None)):
+        raise TypeError("observer must implement record")
 
     resolved_providers = providers or _builtin_provider_factory()
     resolved_vector_stores = vector_stores or register_builtin_vector_adapters()
@@ -96,6 +101,10 @@ def build_runtime(
     )
 
     schema_registry = MemorySchemaRegistry.load_default()
+    observability = MetricRegistry()
+    operation_observer: Observer = (
+        observability if observer is None else CompositeObserver(observability, observer)
+    )
     codec = MemoryDocumentCodec(schema_registry)
     model_config = config.models
     conversation_config = config.conversation
@@ -112,6 +121,7 @@ def build_runtime(
     embedder = resolved_providers.create_embedder(
         model_config.embedding,
         environ=environ,
+        observer=operation_observer,
     )
     reranker = (
         resolved_providers.create_reranker(model_config.rerank, environ=environ)
@@ -147,6 +157,7 @@ def build_runtime(
         index=vector_index,
         reranker=reranker,
         config=memory_config.semantic_search,
+        observer=operation_observer,
     )
     retriever = MemoryRelatedRetriever(
         schema_registry=schema_registry,
@@ -155,7 +166,11 @@ def build_runtime(
         config=memory_config.retrieval,
     )
 
-    chat = resolved_providers.create_chat_client(model_config.chat, environ=environ)
+    chat = resolved_providers.create_chat_client(
+        model_config.chat,
+        environ=environ,
+        observer=operation_observer,
+    )
     structured_chat = StructuredChatClient(
         chat,
         allow_json_repair=model_config.structured_output.allow_json_repair,
@@ -201,6 +216,18 @@ def build_runtime(
         config=conversation_config.journal,
     )
     retention = ConversationRetentionPlanner(conversation_config.segmentation)
+    boundary_embedding_fingerprint = conversation_summary_embedding_fingerprint(
+        provider=model_config.embedding.route.provider,
+        model=model_config.embedding.route.model,
+        dimension=model_config.embedding.dimension,
+        input_mode=model_config.embedding.input_mode,
+        document_parameters=model_config.embedding.document_parameters,
+    )
+    boundary_scorer = ConversationSemanticBoundaryScorer(
+        embedder,
+        embedding_fingerprint=boundary_embedding_fingerprint,
+        max_unit_chars=model_config.embedding.max_input_chars,
+    )
     summary_store = ConversationSummaryStore(
         conversations.layout,
         config=conversation_config.summary,
@@ -242,15 +269,10 @@ def build_runtime(
         embedder,
         summary_vector_store,
         dimension=model_config.embedding.dimension,
-        embedding_fingerprint=conversation_summary_embedding_fingerprint(
-            provider=model_config.embedding.route.provider,
-            model=model_config.embedding.route.model,
-            dimension=model_config.embedding.dimension,
-            input_mode=model_config.embedding.input_mode,
-            document_parameters=model_config.embedding.document_parameters,
-        ),
+        embedding_fingerprint=boundary_embedding_fingerprint,
         reranker=reranker,
         config=conversation_config.summary_vector_index,
+        observer=operation_observer,
     )
     search_context_reader = ConversationSearchContextReader(
         conversations,
@@ -276,6 +298,7 @@ def build_runtime(
         assembler=MemoryContextAssembler(config=memory_config.search_service),
         config=memory_config.search_service,
         intention_reviewer=MemoryIntentionReviewer(memory_config.intention_review),
+        observer=operation_observer,
     )
 
     jobs = MemoryJobStore(
@@ -316,16 +339,19 @@ def build_runtime(
         summary_vector_index,
         receipts,
     )
-    worker = MemoryWorker(runner, workflow_config.worker)
+    worker = MemoryWorker(runner, workflow_config.worker, observer=operation_observer)
     lifecycle_worker = LifecycleWorker(
         conversation_lifecycle,
         conversation_config.lifecycle,
+        observer=operation_observer,
     )
 
     components = RuntimeComponents(
         infrastructure=RuntimeInfrastructure(
             path_lock=resolved_lock,
             vector_stores=resolved_vector_stores,
+            observability=observability,
+            observer=operation_observer,
         ),
         models=RuntimeModels(
             providers=resolved_providers,
@@ -337,6 +363,7 @@ def build_runtime(
         conversation=RuntimeConversation(
             journal=conversations,
             retention=retention,
+            boundary_scorer=boundary_scorer,
             summaries=summaries,
             summary_compactor=summary_compactor,
             summary_vector_index=summary_vector_index,

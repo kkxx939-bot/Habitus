@@ -1,6 +1,7 @@
 """顶层 Runtime 对所有领域组件的唯一组装与初始化主链测试。"""
 
 import asyncio
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,8 @@ from Config import M2BOSConfig
 from infrastructure.store.contracts import PathLock
 from infrastructure.store.locks import ProcessLocalLockStore
 from infrastructure.vector import VectorStoreFactory
+from integrations import RuntimeHTTPHandlers
+from memory.conversation import ConversationAddress
 from memory.model import MemoryKind
 from memory.retrieval import MemoryRetrievalSufficiency
 from memory.uri import MemoryURI
@@ -26,6 +29,7 @@ from Runtime import (
     RuntimeStateError,
     build_runtime,
 )
+from tests.helpers import BASE_TIME
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
@@ -37,6 +41,7 @@ class FakeChatProvider:
     def __init__(self, provider_name: str, model: str) -> None:
         self.provider_name = provider_name
         self.model = model
+        self.closed = False
 
     def complete(self, _request):
         return ModelResponse("{}", self.model, self.provider_name)
@@ -54,6 +59,9 @@ class FakeChatProvider:
     def health_check(self):
         return {"ok": True}
 
+    async def aclose(self):
+        self.closed = True
+
 
 class FakeEmbeddingProvider:
     is_remote = False
@@ -62,9 +70,13 @@ class FakeEmbeddingProvider:
         self.provider_name = provider_name
         self.model = model
         self.dimension = dimension
+        self.closed = False
 
     async def embed(self, _text: str, *, is_query: bool) -> EmbeddingVector:
         return EmbeddingVector((1.0,) + (0.0,) * (self.dimension - 1))
+
+    async def aclose(self):
+        self.closed = True
 
 
 class FakeVectorBackend:
@@ -244,8 +256,63 @@ def test_runtime_start_stop_restart_and_close_coordinate_both_workers(tmp_path: 
         await runtime.close()
         await runtime.close()
         assert runtime.state is RuntimeState.CLOSED
+        assert runtime.components.models.chat.provider.closed
+        assert runtime.components.models.embedder.provider.closed
         with pytest.raises(RuntimeStateError, match="closed runtime"):
             await runtime.start()
+
+    asyncio.run(scenario())
+
+
+def test_runtime_public_conversation_interface_returns_pending_consistency_handle(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        providers, vectors = runtime_dependencies()
+        runtime = build_runtime(
+            runtime_config(tmp_path),
+            providers=providers,
+            vector_stores=vectors,
+            path_lock=PathLock(ProcessLocalLockStore()),
+            environ={},
+        )
+        runtime.initialize()
+        address = ConversationAddress("conversation-public", date(2026, 7, 28))
+        result = await runtime.append_protocol_conversation(
+            address,
+            protocol="openai_chat_completions",
+            payload={
+                "messages": [
+                    {"role": "user", "content": "记住我喜欢简洁回答"},
+                    {"role": "assistant", "content": "好的"},
+                ]
+            },
+            start_sequence=0,
+            occurred_at=BASE_TIME,
+            after_turn=False,
+        )
+        assert result.ingest.jobs == ()
+        flushed = await runtime.flush_conversation(address)
+        assert len(flushed.jobs) == 1
+        consistency = await runtime.memory_consistency(flushed.jobs[0])
+        assert consistency.state.value == "pending"
+        assert await runtime.read_live_conversation(address) is None
+        assert len(await runtime.list_conversation_history(address)) == 1
+        assert runtime.conversation_protocols() == (
+            "anthropic_messages",
+            "claude_code",
+            "codex_rollout",
+            "openai_chat_completions",
+            "openai_responses",
+            "openclaw",
+        )
+        report = await runtime.health()
+        assert report.status.value in {"healthy", "degraded"}
+        assert "m2bos_" in runtime.prometheus_metrics()
+        http = RuntimeHTTPHandlers(runtime)
+        assert http.protocols()["protocols"] == list(runtime.conversation_protocols())
+        status, readiness = await http.readiness()
+        assert status in {200, 503}
+        assert readiness["status"] in {"healthy", "degraded", "unhealthy"}
+        await runtime.close()
 
     asyncio.run(scenario())
 

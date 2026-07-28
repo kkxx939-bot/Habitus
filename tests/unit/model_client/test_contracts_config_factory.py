@@ -136,6 +136,9 @@ class FakeEmbeddingProvider:
     async def embed(self, text: str, *, is_query: bool) -> EmbeddingVector:
         return EmbeddingVector((1, 0))
 
+    async def aclose(self) -> None:
+        return None
+
 
 @dataclass
 class FakeReranker:
@@ -145,6 +148,9 @@ class FakeReranker:
 
     async def rerank(self, query: str, documents: tuple[str, ...]) -> tuple[float, ...]:
         return tuple(1.0 for _ in documents)
+
+    async def aclose(self) -> None:
+        return None
 
 
 def test_factory_resolves_by_capability_and_adapter_and_wraps_embedding_runtime() -> None:

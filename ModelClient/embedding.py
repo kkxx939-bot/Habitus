@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
 from ModelClient.config import EmbeddingModelConfig
 from ModelClient.contracts import ModelClientError, ModelResponseError
 from ModelClient.retry import normalize_provider_error, retry_delay
@@ -76,6 +77,8 @@ class EmbeddingProvider(Protocol):
 
         ...
 
+    async def aclose(self) -> None: ...
+
 
 class Embedder(Protocol):
     """供检索领域使用的查询与文档向量接口。"""
@@ -93,6 +96,8 @@ class Embedder(Protocol):
 
     async def embed_documents(self, texts: Sequence[str]) -> tuple[EmbeddingVector, ...]: ...
 
+    async def aclose(self) -> None: ...
+
 
 class EmbeddingClient:
     """统一执行输入校验、批量调度、共享并发限制和有界重试。"""
@@ -104,6 +109,7 @@ class EmbeddingClient:
         *,
         async_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         monotonic: Callable[[], float] = time.monotonic,
+        observer: Observer | None = None,
     ) -> None:
         if not isinstance(config, EmbeddingModelConfig):
             raise TypeError("config must be EmbeddingModelConfig")
@@ -111,6 +117,7 @@ class EmbeddingClient:
         self.provider = provider
         self._async_sleep = async_sleep
         self._monotonic = monotonic
+        self._observer = observer or NullObserver()
 
     @property
     def provider_name(self) -> str:
@@ -146,6 +153,11 @@ class EmbeddingClient:
             )
         return tuple(result)
 
+    async def aclose(self) -> None:
+        """释放 Provider 持有的连接池；重复调用由 Provider 保证幂等。"""
+
+        await self.provider.aclose()
+
     async def _embed_one(self, text: str, *, is_query: bool) -> EmbeddingVector:
         operation = "embed_query" if is_query else "embed_document"
         for attempt in range(self.config.route.max_retries + 1):
@@ -162,6 +174,15 @@ class EmbeddingClient:
                     timeout=self.config.route.timeout_seconds,
                 )
                 self._validate_vector(vector)
+                self._observer.record(
+                    ObservationEvent(
+                        category="model",
+                        operation=operation,
+                        status=ObservationStatus.SUCCESS,
+                        duration_seconds=max(0.0, self._monotonic() - started),
+                        attributes={"provider": self.provider_name, "model": self.model},
+                    )
+                )
                 return vector
             except Exception as exc:
                 failure = normalize_provider_error(exc)
@@ -181,6 +202,19 @@ class EmbeddingClient:
             if failure.retryable and attempt < self.config.route.max_retries:
                 await self._async_sleep(self._retry_delay(attempt, failure))
                 continue
+            self._observer.record(
+                ObservationEvent(
+                    category="model",
+                    operation=operation,
+                    status=ObservationStatus.FAILURE,
+                    duration_seconds=max(0.0, duration_seconds),
+                    attributes={
+                        "provider": self.provider_name,
+                        "model": self.model,
+                        "error_code": failure.code,
+                    },
+                )
+            )
             raise failure from source_error
         raise AssertionError("embedding retry loop exhausted without a result")  # pragma: no cover
 

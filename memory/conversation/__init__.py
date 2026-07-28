@@ -48,6 +48,13 @@ from memory.conversation.retention import (
     ConversationTurn,
     estimate_conversation_message_tokens,
 )
+from memory.conversation.segmentation import (
+    SEMANTIC_CHUNKER_VERSION,
+    ConversationBoundaryHints,
+    ConversationMessageChunker,
+    ConversationSemanticBoundary,
+    ConversationSemanticBoundaryScorer,
+)
 from memory.conversation.summary import (
     ConversationSummaryConfig,
     ConversationSummaryError,
@@ -60,12 +67,14 @@ __all__ = [
     "ConversationAddress",
     "ConversationAppendResult",
     "ConversationAppendStatus",
+    "ConversationBoundaryHints",
     "ConversationJournalConfig",
     "ConversationJournalError",
     "ConversationJournalState",
     "ConversationLayout",
     "ConversationLayoutError",
     "ConversationMessageJournal",
+    "ConversationMessageChunker",
     "ConversationRangeSummaryGenerator",
     "ConversationRangeSummaryCompactionConfig",
     "ConversationRangeSummaryStore",
@@ -74,6 +83,8 @@ __all__ = [
     "ConversationRetentionError",
     "ConversationRetentionPlan",
     "ConversationRetentionPlanner",
+    "ConversationSemanticBoundary",
+    "ConversationSemanticBoundaryScorer",
     "ConversationSealResult",
     "ConversationSealStatus",
     "ConversationSummaryConfig",
@@ -98,6 +109,7 @@ __all__ = [
     "ConversationTurn",
     "ConversationWriteConflictError",
     "PersistentConversationSummaryVectorIndex",
+    "SEMANTIC_CHUNKER_VERSION",
     "conversation_summary_embedding_fingerprint",
     "estimate_conversation_message_tokens",
 ]
