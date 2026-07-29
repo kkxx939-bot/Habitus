@@ -543,7 +543,7 @@ class MemoryCandidateBatch:
             if message.tool_status is ConversationToolResultStatus.COMPLETED:
                 successful_names.add(message.tool_name)
                 succeeded_at.setdefault(message.tool_name, []).append(message.sequence)
-            else:
+            elif message.tool_status is ConversationToolResultStatus.ERROR:
                 failed_at.setdefault(message.tool_name, []).append(message.sequence)
 
         for candidate in self.tools:

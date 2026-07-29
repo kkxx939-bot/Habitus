@@ -48,6 +48,7 @@ class MemoryBackend:
         return {name: self.metadata[name] for name in names if name in self.metadata}
 
     async def write_metadata(self, values, *, dimension):
+        self.calls.append(("metadata", dict(values)))
         self.metadata.update({name: dict(value) for name, value in values.items()})
 
     async def ensure_schema(self, dimension, *, published_dimension):
@@ -57,6 +58,7 @@ class MemoryBackend:
         return tuple(self.records[item] for item in identities if item in self.records)
 
     async def delete_all(self):
+        self.calls.append("delete_all")
         self.records.clear()
 
     async def upsert(self, records):
@@ -150,6 +152,48 @@ def test_unfinished_incremental_publication_is_not_silently_reused() -> None:
             await store.apply((), (), checkpoint=2, expected_generation=1, expected_checkpoint=1)
         with pytest.raises(VectorStoreBusyError):
             await store.search(EmbeddingVector((1.0, 0.0)), filters=VectorStoreFilter({}, {}), limit=1)
+
+    asyncio.run(scenario())
+
+
+def test_full_replacement_claims_building_before_deleting_records() -> None:
+    async def scenario() -> None:
+        backend = MemoryBackend()
+        store = PublishedVectorStore(backend)
+        await store.replace_all(
+            (make_record("a"),),
+            schema_version="v1",
+            embedding_fingerprint="e1",
+            dimension=2,
+            checkpoint=1,
+            expected_generation=None,
+        )
+        building_index = next(
+            index
+            for index, call in enumerate(backend.calls)
+            if isinstance(call, tuple)
+            and call[0] == "metadata"
+            and call[1].get("claim", {}).get("building") is True
+        )
+        assert building_index < backend.calls.index("delete_all")
+
+    asyncio.run(scenario())
+
+
+def test_building_claim_without_published_state_never_looks_like_empty_index() -> None:
+    async def scenario() -> None:
+        backend = MemoryBackend()
+        backend.metadata["claim"] = {
+            "format": "m2bos_vector_publication_v1",
+            "building": True,
+        }
+        store = PublishedVectorStore(backend)
+        with pytest.raises(VectorStoreBusyError):
+            await store.search(
+                EmbeddingVector((1.0, 0.0)),
+                filters=VectorStoreFilter({}, {}),
+                limit=1,
+            )
 
     asyncio.run(scenario())
 

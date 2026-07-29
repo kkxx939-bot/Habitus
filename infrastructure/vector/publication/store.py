@@ -101,8 +101,8 @@ class PublishedVectorStore:
                 published_dimension=None if current is None else current.dimension,
             )
             await self.backend.validate_records(normalized, replacing=True)
-            await self.backend.delete_all()
             await self._write_claim(building=True, dimension=dimension)
+            await self.backend.delete_all()
             await self.backend.upsert(normalized)
             await self.backend.wait_visible(normalized, (), complete=True)
             next_state = VectorStoreState(
@@ -186,11 +186,14 @@ class PublishedVectorStore:
         if not isinstance(query_vector, EmbeddingVector):
             raise TypeError("query_vector must be EmbeddingVector")
         _search_inputs(filters, limit, self.backend.max_search_hits)
-        state = await self.state()
+        await self.initialize()
+        publication = await self._load_publication()
+        _validate_publication(publication, operation="search")
+        if publication.building:
+            raise VectorStoreBusyError("vector index is being rebuilt")
+        state = publication.state
         if state is None:
             return ()
-        if not state.ready:
-            raise VectorStoreBusyError("vector index is being rebuilt")
         if query_vector.dimension != state.dimension:
             raise VectorStoreIntegrityError("query vector dimension does not match the published index")
         matches = tuple(await self.backend.search(query_vector, filters=filters, limit=limit))
@@ -205,11 +208,14 @@ class PublishedVectorStore:
         limit: int,
     ) -> tuple[VectorStoreRecord, ...]:
         _search_inputs(filters, limit, self.backend.max_records)
-        state = await self.state()
+        await self.initialize()
+        publication = await self._load_publication()
+        _validate_publication(publication, operation="scan")
+        if publication.building:
+            raise VectorStoreBusyError("vector index is being rebuilt")
+        state = publication.state
         if state is None:
             return ()
-        if not state.ready:
-            raise VectorStoreBusyError("vector index is being rebuilt")
         records = tuple(await self.backend.scan(filters=filters, limit=limit))
         _validate_scan_result(records, maximum=limit)
         return records

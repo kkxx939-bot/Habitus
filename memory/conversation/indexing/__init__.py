@@ -11,6 +11,7 @@ from memory.conversation.indexing.model import (
     ConversationSummaryMatch,
     ConversationSummaryReference,
     ConversationSummaryStage,
+    ConversationSummaryVectorConsistencyReport,
 )
 from memory.conversation.indexing.source import ConversationSummaryIndexSourceReader
 
@@ -21,6 +22,7 @@ __all__ = [
     "ConversationSummaryMatch",
     "ConversationSummaryReference",
     "ConversationSummaryStage",
+    "ConversationSummaryVectorConsistencyReport",
     "ConversationSummaryVectorIndexConfig",
     "PersistentConversationSummaryVectorIndex",
     "conversation_summary_embedding_fingerprint",

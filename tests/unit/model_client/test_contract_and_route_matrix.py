@@ -920,14 +920,19 @@ def test_chat_model_config_accepts_supported_mode_and_reasoning(mode: str, reaso
     assert config.capability == "chat"
 
 
-@pytest.mark.parametrize("maximum", [None, 1, 10_000_000])
+@pytest.mark.parametrize("maximum", [None, 1, 63_999])
 def test_chat_model_config_accepts_output_limit_boundaries(maximum: int | None) -> None:
     assert ChatModelConfig(route(), max_output_tokens=maximum).max_output_tokens == maximum
 
 
+@pytest.mark.parametrize("maximum", [1024, 64_000, 10_000_000])
+def test_chat_model_config_accepts_context_window_boundaries(maximum: int) -> None:
+    assert ChatModelConfig(route(), context_window_tokens=maximum).context_window_tokens == maximum
+
+
 @pytest.mark.parametrize(
     "invalid",
-    tuple(value for value in INVALID_INTEGER_VALUES if value is not None) + (10_000_001,),
+    tuple(value for value in INVALID_INTEGER_VALUES if value is not None) + (64_000, 10_000_001),
 )
 def test_chat_model_config_rejects_invalid_output_limit(invalid: object) -> None:
     with pytest.raises(ValueError):

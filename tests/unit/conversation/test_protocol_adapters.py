@@ -49,7 +49,7 @@ def test_openai_chat_preserves_text_tools_and_ignores_system_metadata() -> None:
         ConversationMessageRole.COMPLETION,
     )
     assert result.batch.messages[1].tool_name == result.batch.messages[2].tool_name == "get_weather"
-    assert result.batch.messages[2].tool_status is ConversationToolResultStatus.COMPLETED
+    assert result.batch.messages[2].tool_status is ConversationToolResultStatus.UNKNOWN
     assert result.batch.start_sequence == 10
     assert registry.adapt("openai_chat_completions", payload, context()).batch == result.batch
 
@@ -64,6 +64,34 @@ def test_openai_responses_maps_function_items_and_keeps_pending_turn_open() -> N
     result = ConversationAdapterRegistry.with_builtins().adapt("openai_responses", payload, context())
     assert not result.after_turn
     assert result.batch.messages[-1].role is ConversationMessageRole.TOOL_CALL
+
+
+def test_tool_result_requires_explicit_terminal_status_before_it_is_verified() -> None:
+    payload = {
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {"name": "search", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": "完成",
+                "status": "completed",
+            },
+        ]
+    }
+    result = ConversationAdapterRegistry.with_builtins().adapt(
+        "openai_chat_completions",
+        payload,
+        context(),
+    )
+    assert result.batch.messages[-1].tool_status is ConversationToolResultStatus.COMPLETED
 
 
 def test_anthropic_maps_error_tool_result_without_losing_tool_name() -> None:
@@ -136,6 +164,7 @@ def test_codex_rollout_keeps_function_call_result_and_record_timestamps() -> Non
     assert result.ignored_items == 1
     assert result.after_turn
     assert result.batch.messages[1].tool_name == result.batch.messages[2].tool_name == "read_file"
+    assert result.batch.messages[2].tool_status is ConversationToolResultStatus.UNKNOWN
     assert result.batch.messages[0].occurred_at.isoformat() == "2026-07-28T00:00:01+00:00"
 
 

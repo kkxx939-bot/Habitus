@@ -16,7 +16,9 @@ class MemoryExtractionConfig:
     max_query_chars: int = 5_000
     max_old_memory_items: int = 64
     max_old_memory_bytes: int = 4_000_000
+    max_old_memory_tokens: int = 28_000
     max_context_chars: int = 1_000_000
+    max_input_tokens: int = 56_000
     max_observation_chars: int = 12_000
     max_relation_neighbors_per_seed: int = 8
     max_relation_neighbors_total: int = 32
@@ -36,7 +38,9 @@ class MemoryExtractionConfig:
                 EXISTING_PAGE_ID_MAX,
             ),
             "max_old_memory_bytes": (self.max_old_memory_bytes, 1, 32_000_000),
+            "max_old_memory_tokens": (self.max_old_memory_tokens, 1, 1_000_000),
             "max_context_chars": (self.max_context_chars, 1, 4_000_000),
+            "max_input_tokens": (self.max_input_tokens, 1_024, 4_000_000),
             "max_observation_chars": (self.max_observation_chars, 1, 100_000),
             "max_relation_neighbors_per_seed": (
                 self.max_relation_neighbors_per_seed,

@@ -125,6 +125,10 @@ def test_strict_helpers_reject_loose_types_and_missing_required_fields() -> None
             ),
             "live message bound",
         ),
+        (
+            lambda p: p["memory"]["extraction"].update(max_input_tokens=60_000),
+            "context_window_tokens",
+        ),
     ],
 )
 def test_cross_domain_capacity_mismatches_fail_before_runtime_assembly(tmp_path, mutator, message: str) -> None:

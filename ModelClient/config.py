@@ -101,6 +101,7 @@ class ChatModelConfig:
     """对话生成能力配置；供应商专用字段只能放入 route.extra_body。"""
 
     route: ProviderConfig
+    context_window_tokens: int = 64_000
     max_output_tokens: int | None = None
     structured_output_mode: ChatStructuredOutputMode = "none"
     reasoning: bool = False
@@ -108,6 +109,12 @@ class ChatModelConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.route, ProviderConfig):
             raise TypeError("chat route must be ProviderConfig")
+        _bounded_int(
+            self.context_window_tokens,
+            "chat context_window_tokens",
+            minimum=1_024,
+            maximum=10_000_000,
+        )
         if self.max_output_tokens is not None:
             _bounded_int(
                 self.max_output_tokens,
@@ -115,6 +122,8 @@ class ChatModelConfig:
                 minimum=1,
                 maximum=10_000_000,
             )
+            if self.max_output_tokens >= self.context_window_tokens:
+                raise ValueError("chat max_output_tokens must be below context_window_tokens")
         if self.structured_output_mode not in {"none", "json_object", "json_schema"}:
             raise ValueError(
                 "chat structured_output_mode must be none, json_object or json_schema"

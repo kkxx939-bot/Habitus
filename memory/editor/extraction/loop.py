@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
+from memory.document import MemoryDocument
 from memory.editor.candidate import MemoryCandidateBatch, MemoryCandidateError
 from memory.editor.extraction.config import MemoryExtractionConfig
 from memory.editor.extraction.context import MemoryExtractionContext
@@ -9,7 +11,8 @@ from memory.editor.extraction.model import (
     MemoryCandidateRejectedError,
     MemoryCandidateReview,
     MemoryCandidateReviewIssue,
-    MemoryExtractionError,
+    MemoryExtractionCapacityError,
+    MemoryExtractionPermanentError,
     MemoryExtractionResult,
     MemoryRetrievalAction,
     MemoryRetrievalDecision,
@@ -27,9 +30,11 @@ from memory.editor.mutation import (
     MemoryMutationReadSetLoader,
     MemoryNodeMatchError,
 )
-from memory.editor.retrieval import MemoryRelatedRetriever
-from ModelClient import StructuredChatClient
-from pre.conversation import ConversationSegment
+from memory.editor.retrieval import MemoryRelatedContext, MemoryRelatedRetriever
+from memory.model import MemoryAddress
+from memory.uri import MemoryURI
+from ModelClient import StructuredChatClient, estimate_utf8_bytes_tokens
+from pre.conversation import ConversationMessageRole, ConversationSegment
 
 
 class MemoryExtractionLoop:
@@ -70,7 +75,7 @@ class MemoryExtractionLoop:
 
         if not isinstance(segment, ConversationSegment):
             raise TypeError("segment must be a ConversationSegment")
-        initial = await self.retriever.retrieve(segment)
+        initial = self._fit_initial_context(segment, await self.retriever.retrieve(segment))
         context = MemoryExtractionContext(
             initial,
             snapshot_reader=self.retriever.snapshot_reader,
@@ -101,7 +106,7 @@ class MemoryExtractionLoop:
                 break
             observations.append(await context.execute(decision, iteration=iteration))
         else:  # pragma: no cover - 最终轮动作会在上方明确失败
-            raise MemoryExtractionError("retrieval loop ended without a final decision")
+            raise MemoryExtractionPermanentError("retrieval loop ended without a final decision")
 
         old_memories = context.snapshots
         page_ids = context.page_ids
@@ -127,7 +132,9 @@ class MemoryExtractionLoop:
                 feedback = (self._context_issue(exc),)
                 previous_candidates = candidates
                 if attempt >= maximum_attempts:
-                    raise MemoryExtractionError("memory candidate batch failed source-context validation") from exc
+                    raise MemoryExtractionPermanentError(
+                        "memory candidate batch failed source-context validation"
+                    ) from exc
                 continue
 
             try:
@@ -141,7 +148,9 @@ class MemoryExtractionLoop:
                 feedback = (self._context_issue(exc),)
                 previous_candidates = candidates
                 if attempt >= maximum_attempts:
-                    raise MemoryExtractionError("memory candidate batch failed preliminary mutation planning") from exc
+                    raise MemoryExtractionPermanentError(
+                        "memory candidate batch failed preliminary mutation planning"
+                    ) from exc
                 continue
 
             review_response = await self.client.complete_model_async(
@@ -170,7 +179,7 @@ class MemoryExtractionLoop:
                     feedback = (self._context_issue(exc),)
                     previous_candidates = candidates
                     if attempt >= maximum_attempts:
-                        raise MemoryExtractionError(
+                        raise MemoryExtractionPermanentError(
                             "reviewed identity proposals failed deterministic planning"
                         ) from exc
                     continue
@@ -183,6 +192,66 @@ class MemoryExtractionLoop:
                     f"memory candidate batch remained rejected after {attempt} attempt(s): {details}"
                 )
         raise AssertionError("candidate review loop exhausted without a result")  # pragma: no cover
+
+    def _fit_initial_context(
+        self,
+        segment: ConversationSegment,
+        initial: MemoryRelatedContext,
+    ) -> MemoryRelatedContext:
+        """完整保留高优先级旧节点，并按相关性整节点准入其余快照。"""
+
+        by_identity = {snapshot.identity: snapshot for snapshot in initial.snapshots.snapshots}
+        essential = {str(MemoryURI.from_address(MemoryAddress.profile()))}
+        for message in segment.messages:
+            if message.role is ConversationMessageRole.TOOL_CALL:
+                assert message.tool_name is not None
+                essential.add(str(MemoryURI.from_address(MemoryAddress.tool(message.tool_name))))
+
+        priority: list[str] = []
+        seen: set[str] = set()
+        for identity in (*sorted(essential), *(str(hit.uri) for hit in initial.search_hits)):
+            if identity in by_identity and identity not in seen:
+                priority.append(identity)
+                seen.add(identity)
+        priority.extend(identity for identity in sorted(by_identity) if identity not in seen)
+
+        selected: list[VersionedSnapshot[MemoryDocument]] = []
+        total_bytes = 0
+        total_tokens = 0
+        for identity in priority:
+            snapshot = by_identity[identity]
+            next_bytes = total_bytes + snapshot.size_bytes
+            next_tokens = total_tokens + estimate_utf8_bytes_tokens(snapshot.size_bytes)
+            fits = (
+                len(selected) < self.config.max_old_memory_items
+                and next_bytes <= self.config.max_old_memory_bytes
+                and next_tokens <= self.config.max_old_memory_tokens
+            )
+            if not fits:
+                if identity in essential and snapshot.exists:
+                    raise MemoryExtractionCapacityError(
+                        "required profile or tool memory cannot fit the extraction input budget"
+                    )
+                continue
+            selected.append(snapshot)
+            total_bytes = next_bytes
+            total_tokens = next_tokens
+
+        selected_ids = {snapshot.identity for snapshot in selected}
+        return MemoryRelatedContext(
+            conversation_id=initial.conversation_id,
+            segment_id=initial.segment_id,
+            source_segment_digest=initial.source_segment_digest,
+            query=initial.query,
+            search_roots=initial.search_roots,
+            search_hits=tuple(
+                hit for hit in initial.search_hits if str(hit.uri) in selected_ids
+            ),
+            snapshots=SnapshotBatch(
+                snapshots=tuple(sorted(selected, key=lambda snapshot: snapshot.identity)),
+                total_bytes=total_bytes,
+            ),
+        )
 
     @staticmethod
     def _context_issue(error: ValueError) -> MemoryCandidateReviewIssue:

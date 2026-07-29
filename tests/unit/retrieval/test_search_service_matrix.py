@@ -430,17 +430,15 @@ def test_relation_snapshot_failure_is_normalized(tmp_path: Path, monkeypatch: py
     instance = service(tmp_path, semantic=SemanticSearch((MemorySearchHit(uri, 0.9),)), summaries=SummarySearch())
     instance.tree.write(seed)
     instance.tree.write(neighbors[0])
-    original = instance.snapshot_reader.read_many
-    calls = 0
+    original = instance.snapshot_reader.read
+    neighbor_uri = MemoryURI.from_address(neighbors[0].address)
 
-    def fail_second(uris):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
+    def fail_neighbor(target):
+        if MemoryURI.parse(target) == neighbor_uri:
             raise OSError("disk unavailable")
-        return original(uris)
+        return original(target)
 
-    monkeypatch.setattr(instance.snapshot_reader, "read_many", fail_second)
+    monkeypatch.setattr(instance.snapshot_reader, "read", fail_neighbor)
     with pytest.raises(MemorySearchError, match="one-hop"):
         asyncio.run(instance.find("身份"))
 

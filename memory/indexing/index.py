@@ -137,9 +137,18 @@ class PersistentMemoryVectorIndex:
             return await self._rebuild_locked(checkpoint=selected)
 
     async def check_consistency(self) -> MemoryVectorConsistencyReport:
-        """比较全部 URI 和内容摘要，同时发现缺失、陈旧与孤儿记录。"""
+        """显式管理检查会先确保索引存在，再执行只读差异审计。"""
 
-        state = await self.ensure_ready()
+        await self.ensure_ready()
+        return await self.audit_consistency()
+
+    async def audit_consistency(self) -> MemoryVectorConsistencyReport:
+        """无副作用比较全部 URI 和内容摘要，不触发重建。"""
+
+        state = await self.store.state()
+        if not self._state_matches(state):
+            raise MemoryVectorIndexError("memory vector index is not ready for consistency audit")
+        assert state is not None
         expected = {source.identity: source for source in self.sources.walk()}
         indexed = {
             record.identity: record

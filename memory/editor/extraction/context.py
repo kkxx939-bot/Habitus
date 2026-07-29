@@ -9,6 +9,7 @@ from infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
 from memory.document import MemoryDocument, MemoryStoredLink
 from memory.editor.extraction.config import MemoryExtractionConfig
 from memory.editor.extraction.model import (
+    MemoryExtractionCapacityError,
     MemoryExtractionError,
     MemoryRetrievalAction,
     MemoryRetrievalDecision,
@@ -22,6 +23,7 @@ from memory.intention import MemoryIntentionRecallScope
 from memory.retrieval import MemorySearchHit, MemorySemanticSearch
 from memory.snapshot import MemorySnapshotBatch, MemorySnapshotReader
 from memory.uri import MemoryURI, MemoryURINodeType
+from ModelClient import estimate_utf8_bytes_tokens
 
 
 class MemoryExtractionContext:
@@ -54,6 +56,7 @@ class MemoryExtractionContext:
         self.config = config
         self._snapshots: dict[str, VersionedSnapshot[MemoryDocument]] = {}
         self._total_bytes = 0
+        self._total_tokens = 0
         self._page_ids = MemoryPageIdMap()
         self._allowed_read_uris: set[str] = set()
         self._search_hits: dict[str, MemorySearchHit] = {}
@@ -298,15 +301,21 @@ class MemoryExtractionContext:
             snapshot.exists for snapshot in pending
         )
         if item_count > self.config.max_old_memory_items:
-            raise MemoryExtractionError("old-memory context exceeds its item limit")
+            raise MemoryExtractionCapacityError("old-memory context exceeds its item limit")
         if byte_count > self.config.max_old_memory_bytes:
-            raise MemoryExtractionError("old-memory context exceeds its byte limit")
+            raise MemoryExtractionCapacityError("old-memory context exceeds its byte limit")
+        token_count = self._total_tokens + sum(
+            estimate_utf8_bytes_tokens(snapshot.size_bytes) for snapshot in pending
+        )
+        if token_count > self.config.max_old_memory_tokens:
+            raise MemoryExtractionCapacityError("old-memory context exceeds its token limit")
         if found_count > EXISTING_PAGE_ID_MAX:
-            raise MemoryExtractionError("old-memory context exhausts the existing page_id range")
+            raise MemoryExtractionCapacityError("old-memory context exhausts the existing page_id range")
 
         for snapshot in pending:
             self._snapshots[snapshot.identity] = snapshot
             self._total_bytes += snapshot.size_bytes
+            self._total_tokens += estimate_utf8_bytes_tokens(snapshot.size_bytes)
             self._allowed_read_uris.add(snapshot.identity)
             if snapshot.exists:
                 self._page_ids.register_existing(snapshot.identity)

@@ -22,11 +22,19 @@ class MemoryExtractionError(RuntimeError):
     """Conversation 无法在确定性边界内解析为可靠记忆候选。"""
 
 
-class MemoryRetrievalIncompleteError(MemoryExtractionError):
+class MemoryExtractionPermanentError(MemoryExtractionError):
+    """相同输入重试不会改变结果的提取失败。"""
+
+
+class MemoryExtractionCapacityError(MemoryExtractionPermanentError):
+    """完整事实无法装入已配置的模型或旧记忆预算。"""
+
+
+class MemoryRetrievalIncompleteError(MemoryExtractionPermanentError):
     """受控检索达到上限后，旧记忆上下文仍不足。"""
 
 
-class MemoryCandidateRejectedError(MemoryExtractionError):
+class MemoryCandidateRejectedError(MemoryExtractionPermanentError):
     """候选在有界重新生成后仍未通过二次审查。"""
 
 
@@ -432,6 +440,8 @@ __all__ = [
     "MemoryCandidateReview",
     "MemoryCandidateReviewIssue",
     "MemoryExtractionError",
+    "MemoryExtractionCapacityError",
+    "MemoryExtractionPermanentError",
     "MemoryExtractionResult",
     "MemoryRetrievalAction",
     "MemoryRetrievalDecision",

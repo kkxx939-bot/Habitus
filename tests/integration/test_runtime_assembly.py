@@ -243,6 +243,12 @@ def test_runtime_start_stop_restart_and_close_coordinate_both_workers(tmp_path: 
         assert runtime.state is RuntimeState.RUNNING
         assert runtime.components.workflow.worker.state is MemoryWorkerState.RUNNING
         assert runtime.components.workflow.lifecycle_worker.state is LifecycleWorkerState.RUNNING
+        deep_health = await runtime.health(deep=True)
+        assert {
+            "chat_model",
+            "memory_index_consistency",
+            "summary_index_consistency",
+        }.issubset({check.name for check in deep_health.checks})
         with pytest.raises(RuntimeStateError, match="worker stopped"):
             await runtime.run_next()
 

@@ -8,6 +8,7 @@ from infrastructure.vector import (
     VectorStoreError,
     VectorStoreIntegrityError,
 )
+from memory.editor.extraction.model import MemoryExtractionPermanentError
 from memory.editor.transaction import MemoryCommitConflictError
 from memory.workflow.jobs import MemoryJobError, MemoryJobLeaseLostError
 from ModelClient import ModelClientError
@@ -28,6 +29,8 @@ def memory_job_failure_is_retryable(error: BaseException) -> bool:
         return False
     if isinstance(error, ModelClientError):
         return bool(error.retryable)
+    if isinstance(error, MemoryExtractionPermanentError):
+        return False
     if isinstance(error, MemoryJobError | ValueError | TypeError):
         return False
     return True

@@ -9,12 +9,12 @@ from memory.editor.extraction.config import MemoryExtractionConfig
 from memory.editor.extraction.context import MemoryExtractionContext
 from memory.editor.extraction.model import (
     MemoryCandidateReviewIssue,
-    MemoryExtractionError,
+    MemoryExtractionCapacityError,
     MemoryRetrievalDecision,
     MemoryRetrievalObservation,
 )
 from memory.editor.mutation import MemoryMutationPlan
-from ModelClient import ChatMessage, ChatRequest
+from ModelClient import ChatMessage, ChatRequest, estimate_chat_request_tokens
 from pre.conversation import ConversationSegment
 
 
@@ -57,7 +57,7 @@ class MemoryExtractionPromptBuilder:
             if allow_action
             else "这是最后一次充分性判断，系统不会再执行工具；如果仍不足，应如实返回不足动作，系统将明确失败。"
         )
-        return ChatRequest(
+        request = ChatRequest(
             messages=(
                 ChatMessage(
                     role="system",
@@ -81,6 +81,7 @@ class MemoryExtractionPromptBuilder:
             max_output_tokens=self.config.grader_max_output_tokens,
             prompt_version="memory_retrieval_grader_v1",
         )
+        return self._bounded_request(request)
 
     def candidate_request(
         self,
@@ -109,7 +110,7 @@ class MemoryExtractionPromptBuilder:
             if feedback
             else "这是第一次候选生成。"
         )
-        return ChatRequest(
+        request = ChatRequest(
             messages=(
                 ChatMessage(
                     role="system",
@@ -157,6 +158,7 @@ class MemoryExtractionPromptBuilder:
             max_output_tokens=self.config.candidate_max_output_tokens,
             prompt_version="memory_candidate_extraction_v2",
         )
+        return self._bounded_request(request)
 
     def review_request(
         self,
@@ -185,7 +187,7 @@ class MemoryExtractionPromptBuilder:
             for mutation in mutations.mutations
         ]
         content = self._bounded_payload(payload)
-        return ChatRequest(
+        request = ChatRequest(
             messages=(
                 ChatMessage(
                     role="system",
@@ -216,6 +218,7 @@ class MemoryExtractionPromptBuilder:
             max_output_tokens=self.config.reviewer_max_output_tokens,
             prompt_version="memory_candidate_review_v2",
         )
+        return self._bounded_request(request)
 
     def _base_payload(
         self,
@@ -273,10 +276,17 @@ class MemoryExtractionPromptBuilder:
     def _bounded_payload(self, payload: dict[str, object]) -> str:
         text = canonical_json(payload)
         if len(text) > self.config.max_context_chars:
-            raise MemoryExtractionError(
+            raise MemoryExtractionCapacityError(
                 "complete conversation and old-memory context exceeds its configured character limit"
             )
         return text
+
+    def _bounded_request(self, request: ChatRequest) -> ChatRequest:
+        if estimate_chat_request_tokens(request) > self.config.max_input_tokens:
+            raise MemoryExtractionCapacityError(
+                "complete conversation and old-memory context exceed the extraction input-token budget"
+            )
+        return request
 
 
 __all__ = ["MemoryExtractionPromptBuilder"]

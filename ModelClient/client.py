@@ -16,11 +16,13 @@ from ModelClient.contracts import (
     ChatProvider,
     ChatRequest,
     ModelClientError,
+    ModelInputTooLargeError,
     ModelResponse,
     ModelResponseError,
     ModelStreamEvent,
 )
 from ModelClient.retry import normalize_provider_error, retry_delay
+from ModelClient.token_budget import estimate_chat_request_tokens
 
 
 class ChatClient:
@@ -167,7 +169,13 @@ class ChatClient:
         if not isinstance(request, ChatRequest):
             raise TypeError("model request must be ChatRequest or non-empty text")
         if request.max_output_tokens is None and self.config.max_output_tokens is not None:
-            return replace(request, max_output_tokens=self.config.max_output_tokens)
+            request = replace(request, max_output_tokens=self.config.max_output_tokens)
+        reserved_output = request.max_output_tokens or 0
+        estimated_input = estimate_chat_request_tokens(request)
+        if estimated_input + reserved_output > self.config.context_window_tokens:
+            raise ModelInputTooLargeError(
+                "estimated chat input and reserved output exceed the configured context window"
+            )
         return request
 
     @staticmethod

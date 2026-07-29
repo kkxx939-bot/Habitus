@@ -1,21 +1,25 @@
 """变更回执的严格审计 Schema、耐久存储与 Job 失败分类测试。"""
 
+from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 
+from infrastructure.store.contracts import PathLock
+from infrastructure.store.locks import ProcessLocalLockStore
 from infrastructure.vector import (
     VectorStoreBusyError,
     VectorStoreConflictError,
     VectorStoreIntegrityError,
 )
 from memory.conversation import ConversationAddress
+from memory.editor.extraction import MemoryExtractionCapacityError
 from memory.editor.transaction import MemoryCommitConflictError
 from memory.model import MemoryKind
 from memory.uri import MemoryURI
 from memory.workflow.failure import memory_job_failure_is_retryable
-from memory.workflow.jobs import MemoryJobError, MemoryJobLeaseLostError
+from memory.workflow.jobs import MemoryJobConfig, MemoryJobError, MemoryJobLeaseLostError, MemoryJobStore
 from memory.workflow.receipt import (
     MemoryChangeReceipt,
     MemoryChangeReceiptError,
@@ -27,7 +31,8 @@ from memory.workflow.receipt import (
     MemoryPreparedNodeChange,
 )
 from ModelClient import ModelResponseError, ModelTransportError
-from tests.helpers import BASE_TIME, codec, document
+from Runtime.consistency import MemoryConsistencyService, MemoryConsistencyState
+from tests.helpers import BASE_TIME, closed_turn, codec, document, segment
 
 
 def source(*, sequence: int = 1) -> MemoryChangeSource:
@@ -153,6 +158,7 @@ def test_receipt_store_is_canonical_listed_by_sequence_and_cleanup_checks_state(
         (MemoryJobLeaseLostError("lost"), False),
         (VectorStoreIntegrityError("corrupt"), False),
         (ModelResponseError("invalid"), False),
+        (MemoryExtractionCapacityError("too large"), False),
         (MemoryJobError("invalid state"), False),
         (ValueError("bad input"), False),
         (RuntimeError("unknown runtime fault"), True),
@@ -163,3 +169,33 @@ def test_failure_policy_retries_only_transient_or_unknown_runtime_faults(
     retryable: bool,
 ) -> None:
     assert memory_job_failure_is_retryable(error) is retryable
+
+
+def test_committed_receipt_does_not_finish_consistency_before_job_terminal_state(
+    tmp_path: Path,
+) -> None:
+    jobs = MemoryJobStore(
+        tmp_path / "workflow",
+        PathLock(ProcessLocalLockStore()),
+        memory_root=tmp_path / "memory",
+        config=MemoryJobConfig(),
+    )
+    address = ConversationAddress("conversation-1", date(2026, 7, 1))
+    source_segment = segment(
+        conversation_id=address.conversation_id,
+        segment_id="000000000000-000000000001",
+        messages=closed_turn(),
+    )
+    queued = jobs.activate(jobs.stage(address, source_segment))
+    lease = jobs.claim(queued, "worker-1")
+    receipts = MemoryChangeReceiptStore(tmp_path / "workflow", codec())
+    receipt = replace(
+        committed_receipt(),
+        source=MemoryChangeSource.from_job(lease.job),
+    )
+    receipts._create(receipt)
+    consistency = MemoryConsistencyService(jobs, receipts)
+
+    assert consistency.inspect(queued).state is MemoryConsistencyState.PENDING
+    jobs.complete(lease)
+    assert consistency.inspect(queued).state is MemoryConsistencyState.COMMITTED

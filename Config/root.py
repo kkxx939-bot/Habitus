@@ -185,6 +185,22 @@ class M2BOSConfig:
             raise ConfigError("memory.extraction.max_old_memory_items cannot exceed memory.snapshot.max_items")
         if memory.extraction.max_old_memory_bytes > memory.snapshot.max_total_bytes:
             raise ConfigError("memory.extraction.max_old_memory_bytes cannot exceed memory.snapshot.max_total_bytes")
+        maximum_extraction_output = max(
+            memory.extraction.grader_max_output_tokens,
+            memory.extraction.candidate_max_output_tokens,
+            memory.extraction.reviewer_max_output_tokens,
+        )
+        if (
+            memory.extraction.max_input_tokens + maximum_extraction_output
+            > models.chat.context_window_tokens
+        ):
+            raise ConfigError(
+                "memory.extraction input and output budgets exceed models.chat.context_window_tokens"
+            )
+        if memory.extraction.max_old_memory_tokens >= memory.extraction.max_input_tokens:
+            raise ConfigError(
+                "memory.extraction.max_old_memory_tokens must leave room for Conversation and prompts"
+            )
         if segmentation.max_inline_tool_result_bytes > segmentation.max_segment_bytes:
             raise ConfigError("conversation.segmentation.max_inline_tool_result_bytes cannot exceed max_segment_bytes")
         if memory.vector_index.max_record_chars > models.embedding.max_input_chars:

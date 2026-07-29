@@ -581,13 +581,20 @@ class VikingDBBackend:
             )
 
     async def _delete_all_data(self) -> None:
-        await self._client.data(
-            "/api/vikingdb/data/delete",
-            {
-                **self._data_identity(),
-                "del_all": True,
-            },
+        items = await self._scan_raw(
+            filter_payload=_record_type_filter(),
+            limit=self.config.max_records + 1,
+            output_fields=(),
         )
+        if len(items) > self.config.max_records:
+            raise VectorStoreIntegrityError("VikingDB index exceeds the configured record capacity")
+        ids: list[str] = []
+        for item in items:
+            point_id = item.get("id")
+            if not isinstance(point_id, str) or not point_id:
+                raise VectorStoreIntegrityError("VikingDB data scan returned an invalid point id")
+            ids.append(point_id)
+        await self._delete_ids(tuple(ids))
 
     async def _list_memory_digests(self, *, limit: int) -> dict[str, str]:
         items = await self._scan_raw(

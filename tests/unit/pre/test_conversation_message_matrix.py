@@ -499,6 +499,6 @@ def test_message_from_dict_rejects_each_missing_required_field() -> None:
 @pytest.mark.parametrize("field", ["role", "tool_status", "content_mode"])
 def test_message_from_dict_rejects_unknown_enum_values(field: str) -> None:
     payload = (_tool_result() if field != "role" else _text_message()).to_dict()
-    payload[field] = "unknown"
+    payload[field] = "not-a-real-value"
     with pytest.raises(ConversationMessageSchemaError, match="unsupported"):
         ConversationMessage.from_dict(payload)

@@ -13,6 +13,7 @@ from ModelClient import (
     ChatModelConfig,
     ChatRequest,
     ModelAuthenticationError,
+    ModelInputTooLargeError,
     ModelResponse,
     ModelResponseError,
     ModelStreamEvent,
@@ -40,6 +41,19 @@ def config(*, retries: int = 1, concurrent: int = 2, output_tokens: int | None =
 
 def response(content: str = "ok") -> ModelResponse:
     return ModelResponse(content, "scripted-model", "scripted")
+
+
+def test_chat_client_rejects_estimated_context_overflow_before_provider_call() -> None:
+    provider = ScriptedProvider()
+    selected = ChatModelConfig(
+        config().route,
+        context_window_tokens=1_024,
+        max_output_tokens=128,
+    )
+    client = ChatClient(selected, provider)
+    with pytest.raises(ModelInputTooLargeError):
+        client.complete(ChatRequest(messages=(ChatMessage(role="user", content="x" * 10_000),)))
+    assert provider.requests == []
 
 
 def stream_events() -> tuple[ModelStreamEvent, ...]:

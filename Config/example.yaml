@@ -20,6 +20,7 @@ models:
       max_response_bytes: 8388608
       extra_headers: {}
       extra_body: {}
+    context_window_tokens: 64000
     max_output_tokens: null
     structured_output_mode: json_object
     reasoning: false
@@ -268,7 +269,9 @@ memory:
     max_query_chars: 5000
     max_old_memory_items: 64
     max_old_memory_bytes: 4000000
+    max_old_memory_tokens: 28000
     max_context_chars: 1000000
+    max_input_tokens: 56000
     max_observation_chars: 12000
     max_relation_neighbors_per_seed: 8
     max_relation_neighbors_total: 32

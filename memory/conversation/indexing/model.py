@@ -92,6 +92,27 @@ class ConversationSummaryIndexSource:
 
 
 @dataclass(frozen=True)
+class ConversationSummaryVectorConsistencyReport:
+    """活跃 Summary 前沿与远程向量记录的完整差异。"""
+
+    expected_count: int
+    indexed_count: int
+    missing_identities: tuple[str, ...] = ()
+    stale_identities: tuple[str, ...] = ()
+    orphan_identities: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("expected_count", "indexed_count"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be non-negative")
+
+    @property
+    def ok(self) -> bool:
+        return not (self.missing_identities or self.stale_identities or self.orphan_identities)
+
+
+@dataclass(frozen=True)
 class ConversationSummaryMatch:
     """Memory 不充分时返回的一条可溯源历史摘要。"""
 
@@ -176,6 +197,7 @@ __all__ = [
     "ConversationSummary",
     "ConversationSummaryIndexError",
     "ConversationSummaryIndexSource",
+    "ConversationSummaryVectorConsistencyReport",
     "ConversationSummaryMatch",
     "ConversationSummaryReference",
     "ConversationSummaryStage",

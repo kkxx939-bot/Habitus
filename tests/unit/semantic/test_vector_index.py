@@ -1,6 +1,8 @@
 """MemoryTree 真相源到远程 VectorStore 的重建、增量和过滤测试。"""
 
 import asyncio
+import hashlib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -89,6 +91,25 @@ def test_missing_remote_index_is_fully_rebuilt_from_tree_and_consistency_is_clea
     assert len(embedder.inputs) == 2
     assert report.ok
     assert report.expected_count == report.indexed_count == 2
+
+
+def test_read_only_consistency_audit_reports_stale_record_without_rebuilding(tmp_path: Path) -> None:
+    tree, embedder, store, vector_index = index(tmp_path)
+    tree.write(document(MemoryKind.PROFILE))
+    asyncio.run(vector_index.ensure_ready())
+    identity = next(iter(store.records))
+    stale_content = store.records[identity].content + "\n陈旧内容"
+    store.records[identity] = replace(
+        store.records[identity],
+        content=stale_content,
+        content_digest=hashlib.sha256(stale_content.encode("utf-8")).hexdigest(),
+    )
+    embedded_before = tuple(embedder.inputs)
+
+    report = asyncio.run(vector_index.audit_consistency())
+
+    assert report.stale_identities == (identity,)
+    assert tuple(embedder.inputs) == embedded_before
 
 
 def test_incremental_sync_updates_changed_l2_and_advances_global_job_checkpoint(tmp_path: Path) -> None:

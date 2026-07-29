@@ -206,7 +206,7 @@ class OpenAIChatCompletionsConversationAdapter:
                     source_index=str(index),
                     tool_call_id=call_id,
                     tool_name=result_name,
-                    tool_status=ConversationToolResultStatus.COMPLETED,
+                    tool_status=_tool_result_status(item.get("status")),
                 )
                 continue
             raise ConversationProtocolError(f"unsupported Chat Completions role: {role}")
@@ -265,7 +265,7 @@ class OpenAIResponsesConversationAdapter:
                     source_index=str(index),
                     tool_call_id=call_id,
                     tool_name=result_name,
-                    tool_status=ConversationToolResultStatus.COMPLETED,
+                    tool_status=_tool_result_status(item.get("status")),
                 )
             else:
                 ignored += 1
@@ -351,7 +351,7 @@ class CodexRolloutConversationAdapter:
                     source_index=str(index),
                     tool_call_id=call_id,
                     tool_name=result_name,
-                    tool_status=ConversationToolResultStatus.COMPLETED,
+                    tool_status=_tool_result_status(item.get("status")),
                     occurred_at=occurred_at,
                 )
             else:
@@ -497,11 +497,7 @@ def _add_anthropic_content(
                 source_index=source_index,
                 tool_call_id=call_id,
                 tool_name=result_name,
-                tool_status=(
-                    ConversationToolResultStatus.ERROR
-                    if block.get("is_error") is True
-                    else ConversationToolResultStatus.COMPLETED
-                ),
+                tool_status=_tool_result_status_from_error_flag(block.get("is_error")),
                 occurred_at=occurred_at,
             )
         else:
@@ -570,6 +566,33 @@ def _tool_result_content(value: object) -> object:
         if texts:
             return "\n".join(texts)
     return value
+
+
+def _tool_result_status(value: object) -> ConversationToolResultStatus:
+    """只接受协议显式给出的终态；缺失或非终态不能伪装成成功。"""
+
+    if value is None:
+        return ConversationToolResultStatus.UNKNOWN
+    if not isinstance(value, str):
+        raise ConversationProtocolError("tool result status must be text when provided")
+    normalized = value.strip().casefold()
+    if normalized in {"completed", "succeeded", "success"}:
+        return ConversationToolResultStatus.COMPLETED
+    if normalized in {"error", "failed", "failure"}:
+        return ConversationToolResultStatus.ERROR
+    if normalized in {"cancelled", "canceled"}:
+        return ConversationToolResultStatus.CANCELLED
+    return ConversationToolResultStatus.UNKNOWN
+
+
+def _tool_result_status_from_error_flag(value: object) -> ConversationToolResultStatus:
+    if value is True:
+        return ConversationToolResultStatus.ERROR
+    if value is False:
+        return ConversationToolResultStatus.COMPLETED
+    if value is None:
+        return ConversationToolResultStatus.UNKNOWN
+    raise ConversationProtocolError("tool_result.is_error must be boolean when provided")
 
 
 __all__ = [

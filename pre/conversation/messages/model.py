@@ -31,6 +31,7 @@ class ConversationToolResultStatus(str, Enum):
     COMPLETED = "completed"
     ERROR = "error"
     CANCELLED = "cancelled"
+    UNKNOWN = "unknown"
 
 
 class ConversationToolResultContentMode(str, Enum):

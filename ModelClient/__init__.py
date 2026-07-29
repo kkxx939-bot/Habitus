@@ -49,6 +49,11 @@ from ModelClient.json_parser import JSONParseMode, ParsedJSON, parse_json_respon
 from ModelClient.rerank import Reranker
 from ModelClient.schema_validation import JSONSchemaValidationError, validate_json_schema
 from ModelClient.structured import StructuredChatClient, StructuredResponse
+from ModelClient.token_budget import (
+    estimate_chat_request_tokens,
+    estimate_text_tokens,
+    estimate_utf8_bytes_tokens,
+)
 
 __all__ = [
     "CapabilityConfig",
@@ -100,4 +105,7 @@ __all__ = [
     "ToolDefinition",
     "parse_json_response",
     "validate_json_schema",
+    "estimate_chat_request_tokens",
+    "estimate_text_tokens",
+    "estimate_utf8_bytes_tokens",
 ]

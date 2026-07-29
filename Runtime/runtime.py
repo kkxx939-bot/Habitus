@@ -521,7 +521,7 @@ class Runtime:
         return await self.components.workflow.lifecycle.maintain_once(address, now=now)
 
     async def health(self, *, deep: bool = False) -> RuntimeHealthReport:
-        """返回无副作用健康报告；deep 额外探测 Chat Provider。"""
+        """返回无副作用健康报告；deep 额外探测模型与两套派生索引。"""
 
         return await self._health.report(self._state.value, deep=deep)
 

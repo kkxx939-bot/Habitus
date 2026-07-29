@@ -26,6 +26,7 @@ from memory.conversation.indexing.model import (
     ConversationSummaryMatch,
     ConversationSummaryReference,
     ConversationSummaryStage,
+    ConversationSummaryVectorConsistencyReport,
 )
 from memory.conversation.indexing.source import ConversationSummaryIndexSourceReader
 from memory.conversation.layout import ConversationAddress
@@ -161,6 +162,44 @@ class PersistentConversationSummaryVectorIndex:
             if isinstance(selected, bool) or not isinstance(selected, int) or selected < 0:
                 raise ValueError("summary vector rebuild checkpoint must be non-negative")
             return await self._rebuild_locked(checkpoint=selected)
+
+    async def audit_consistency(self) -> ConversationSummaryVectorConsistencyReport:
+        """无副作用比较活跃摘要前沿和远程记录，不触发重建。"""
+
+        state = await self.store.state()
+        if not self._state_matches(state):
+            raise ConversationSummaryIndexError(
+                "summary vector index is not ready for consistency audit"
+            )
+        assert state is not None
+        expected = {source.identity: source for source in self.sources.walk()}
+        indexed = {
+            record.identity: record
+            for record in await self.store.scan(
+                filters=VectorStoreFilter(equals={"kind": _SUMMARY_KIND}, one_of={}),
+                limit=self.config.max_records,
+            )
+        }
+        if len(indexed) != state.record_count:
+            raise ConversationSummaryIndexError(
+                "remote Summary vector record count does not match published state"
+            )
+        expected_ids = set(expected)
+        indexed_ids = set(indexed)
+        stale = tuple(
+            sorted(
+                identity
+                for identity in expected_ids & indexed_ids
+                if expected[identity].content_digest != indexed[identity].content_digest
+            )
+        )
+        return ConversationSummaryVectorConsistencyReport(
+            expected_count=len(expected),
+            indexed_count=len(indexed),
+            missing_identities=tuple(sorted(expected_ids - indexed_ids)),
+            stale_identities=stale,
+            orphan_identities=tuple(sorted(indexed_ids - expected_ids)),
+        )
 
     async def search(self, query: str, *, limit: int) -> tuple[ConversationSummaryMatch, ...]:
         """只在调用方确认 Memory 不充分后执行一次独立 Summary 语义召回。"""

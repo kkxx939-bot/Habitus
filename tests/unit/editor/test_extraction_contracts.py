@@ -15,8 +15,8 @@ from memory.editor import (
     MemoryReviewDecision,
     MemoryReviewIssueCode,
 )
-from pre.conversation import ConversationSegment
-from tests.helpers import tool_turn
+from pre.conversation import ConversationMessageRole, ConversationSegment
+from tests.helpers import message, tool_turn
 
 
 def test_retrieval_decision_allows_exactly_one_action_shape() -> None:
@@ -171,6 +171,29 @@ def test_query_builder_truncates_each_role_and_total_query_without_losing_role_h
     assert query.startswith("[0][prompt]")
 
 
+def test_query_builder_keeps_latest_user_correction_under_total_budget() -> None:
+    source = ConversationSegment(
+        "conversation-1",
+        "segment-1",
+        (
+            message(0, ConversationMessageRole.PROMPT, "最初要求剪成六十秒" * 20),
+            message(1, ConversationMessageRole.COMPLETION, "已按六十秒处理" * 20),
+            message(2, ConversationMessageRole.PROMPT, "最终纠正：必须剪成三十秒"),
+            message(3, ConversationMessageRole.COMPLETION, "已确认最终要求"),
+        ),
+    )
+    query = ConversationSegmentQueryBuilder(
+        MemoryRetrievalConfig(
+            max_query_chars=90,
+            max_prompt_chars=80,
+            max_completion_chars=40,
+            max_tool_message_chars=40,
+        )
+    ).build(source)
+    assert "最终纠正：必须剪成三十秒" in query
+    assert "最初要求剪成六十秒" not in query
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -183,4 +206,3 @@ def test_query_builder_truncates_each_role_and_total_query_without_losing_role_h
 def test_extraction_config_enforces_cost_and_page_id_bounds(field: str, value: int) -> None:
     with pytest.raises(ValueError):
         MemoryExtractionConfig(**{field: value})
-

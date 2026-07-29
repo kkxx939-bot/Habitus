@@ -333,21 +333,27 @@ def test_upsert_and_delete_apply_configured_batch_sizes(batch_size: int) -> None
         asyncio.run(current.close())
 
 
-def test_delete_all_and_empty_upsert_use_explicit_remote_protocol() -> None:
+def test_delete_all_removes_only_memory_records_and_preserves_metadata() -> None:
     current = backend()
-    calls: list[tuple[str, dict[str, object]]] = []
+    deleted: list[tuple[str, ...]] = []
+    memory_ids = tuple(
+        protocol._point_id(current._scope, identity)
+        for identity in ("a", "b")
+    )
 
-    async def data(path, body):
-        calls.append((path, body))
-        return {"result": {}}
+    async def scan_raw(**_kwargs):
+        return tuple({"id": point_id} for point_id in memory_ids)
 
-    current._client.data = data
+    async def delete_ids(ids):
+        deleted.append(ids)
+
+    current._scan_raw = scan_raw
+    current._delete_ids = delete_ids
     try:
         asyncio.run(current._upsert(()))
-        assert calls == []
         asyncio.run(current.delete_all())
-        assert calls[0][0].endswith("/delete")
-        assert calls[0][1]["del_all"] is True
+        assert deleted == [memory_ids]
+        assert all("metadata" not in point_id for point_id in deleted[0])
     finally:
         asyncio.run(current.close())
 

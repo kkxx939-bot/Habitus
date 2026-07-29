@@ -1,6 +1,8 @@
 """Conversation Summary 独立远程索引的真相源、身份和陈旧命中测试。"""
 
 import asyncio
+import hashlib
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -162,3 +164,30 @@ def test_summary_index_rebuilds_active_frontier_and_rejects_stale_remote_hit(tmp
     segment_store.delete_by_id(address, source.segment_id)
     with pytest.raises(ConversationSummaryIndexError, match="no longer part"):
         asyncio.run(index.search("之前如何决定", limit=1))
+
+
+def test_summary_consistency_audit_is_read_only_and_reports_stale_record(tmp_path: Path) -> None:
+    _address, _source, _segment_store, compactor = source_chain(tmp_path)
+    embedder = Embedder()
+    store = VectorStore()
+    index = PersistentConversationSummaryVectorIndex(
+        compactor.journal,
+        compactor,
+        embedder,
+        store,
+        dimension=2,
+        embedding_fingerprint="summary-v1",
+        config=ConversationSummaryVectorIndexConfig(min_vector_candidates=1),
+    )
+    asyncio.run(index.ensure_ready())
+    identity = next(iter(store.records))
+    stale_content = store.records[identity].content + "\n陈旧摘要"
+    store.records[identity] = replace(
+        store.records[identity],
+        content=stale_content,
+        content_digest=hashlib.sha256(stale_content.encode("utf-8")).hexdigest(),
+    )
+
+    report = asyncio.run(index.audit_consistency())
+
+    assert report.stale_identities == (identity,)

@@ -486,11 +486,9 @@ class SearchService:
     ) -> tuple[MemoryMatchedMemory, ...]:
         if not memories or self.config.max_relation_neighbors_total == 0:
             return memories
-        direct_uris = {memory.uri for memory in memories}
         direct_documents = {memory.uri: memory.document for memory in memories}
         selected_relations: dict[MemoryURI, list[MemoryStoredLink]] = {memory.uri: [] for memory in memories}
-        neighbor_uris: list[MemoryURI] = []
-        assigned_neighbors: set[MemoryURI] = set()
+        neighbor_documents: dict[MemoryURI, MemoryDocument] = {}
         assigned_relations: set[tuple[str, str, str]] = set()
         for memory in memories:
             relations = tuple(
@@ -502,21 +500,31 @@ class SearchService:
                     continue
                 if not any(neighbor.matches_prefix(root) for root in roots):
                     continue
+                document = direct_documents.get(neighbor) or neighbor_documents.get(neighbor)
+                if document is None:
+                    try:
+                        snapshot = self.snapshot_reader.read(neighbor)
+                    except Exception as exc:
+                        raise MemorySearchError("failed to read one-hop related memory document") from exc
+                    if not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
+                        raise MemorySearchError("memory relation points to a missing L2 document")
+                    document = snapshot.value
+                    neighbor_documents[neighbor] = document
+                self._require_reciprocal(memory.document, document, relation)
+                if document.kind is MemoryKind.INTENTION and not intention_matches_scope(
+                    document.fields.get("status"),
+                    intention_scope,
+                ):
+                    # 不符合召回范围的关系不能先占用一跳配额。
+                    continue
                 if len(selected_relations[memory.uri]) >= self.config.max_relation_neighbors_per_match:
                     break
                 if len(assigned_relations) >= self.config.max_relation_neighbors_total:
                     break
                 selected_relations[memory.uri].append(relation)
                 assigned_relations.add(relation.identity)
-                if neighbor not in direct_uris and neighbor not in assigned_neighbors:
-                    neighbor_uris.append(neighbor)
-                    assigned_neighbors.add(neighbor)
             if len(assigned_relations) >= self.config.max_relation_neighbors_total:
                 break
-        try:
-            neighbors = self.snapshot_reader.read_many(tuple(neighbor_uris))
-        except Exception as exc:
-            raise MemorySearchError("failed to read one-hop related memory documents") from exc
 
         expanded: list[MemoryMatchedMemory] = []
         for memory in memories:
@@ -525,17 +533,7 @@ class SearchService:
                 neighbor_uri = relation.to_uri if relation.from_uri == memory.uri else relation.from_uri
                 document = direct_documents.get(neighbor_uri)
                 if document is None:
-                    snapshot = neighbors.get(str(neighbor_uri))
-                    if snapshot is None or not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
-                        raise MemorySearchError("memory relation points to a missing L2 document")
-                    document = snapshot.value
-                self._require_reciprocal(memory.document, document, relation)
-                if (
-                    intention_scope is MemoryIntentionRecallScope.ACTIVE
-                    and document.kind is MemoryKind.INTENTION
-                    and document.fields.get("status") == "completed"
-                ):
-                    continue
+                    document = neighbor_documents[neighbor_uri]
                 related.append(
                     MemoryRelatedMemory(
                         relation=relation,
