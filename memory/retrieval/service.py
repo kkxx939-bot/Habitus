@@ -337,6 +337,8 @@ class SearchService:
                     "memories": len(result.memories),
                     "summaries": len(result.summary_fallbacks),
                     "degradations": len(result.degradations),
+                    "result_count": len(result.memories) + len(result.summary_fallbacks),
+                    "degradation_count": len(result.degradations),
                 },
             )
         )

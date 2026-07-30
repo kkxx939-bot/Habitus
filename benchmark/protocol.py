@@ -7,7 +7,7 @@ from enum import Enum
 from benchmark.model import BenchmarkDatasetName
 
 # 对齐时实际核对的 OpenViking main。运行清单会记录该值，避免“对齐”变成无版本口号。
-OPENVIKING_REFERENCE_REVISION = "f0445e0cce5b703cd955ba19378f12b0bcbcd00b"
+OPENVIKING_REFERENCE_REVISION = "291e9c580ffb71c3a17304fd0ebf175a144118c3"
 OPENVIKING_PUBLIC_RETRIEVAL_LIMIT = 10
 OPENVIKING_PUBLIC_ANSWER_CONTEXT_CHARS = 4_000
 

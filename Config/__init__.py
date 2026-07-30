@@ -7,9 +7,17 @@ from Config.conversation import (
     ConversationSegmentSummaryCompactionConfig,
     ConversationSummaryCompactionConfig,
 )
+from Config.http import HTTPAPIConfig
 from Config.loader import ConfigError
 from Config.memory import MemoryConfig
 from Config.models import ModelConfig, StructuredOutputConfig
+from Config.observability import (
+    ObservabilityAuditConfig,
+    ObservabilityConfig,
+    ObservabilityLoggingConfig,
+    ObservabilityMetricsConfig,
+    ObservabilityTracingConfig,
+)
 from Config.root import M2BOSConfig
 from Config.storage import StorageConfig
 from Config.workflow import MemoryWorkflowLifecycleConfig, WorkerConfig, WorkflowConfig
@@ -23,12 +31,18 @@ __all__ = [
     "ConversationRangeSummaryCompactionConfig",
     "ConversationSegmentSummaryCompactionConfig",
     "ConversationSummaryCompactionConfig",
+    "HTTPAPIConfig",
     "M2BOSConfig",
     "MemoryConfig",
     "MemoryIntentionReviewConfig",
     "MemorySearchServiceConfig",
     "MemoryWorkflowLifecycleConfig",
     "ModelConfig",
+    "ObservabilityAuditConfig",
+    "ObservabilityConfig",
+    "ObservabilityLoggingConfig",
+    "ObservabilityMetricsConfig",
+    "ObservabilityTracingConfig",
     "StorageConfig",
     "StructuredOutputConfig",
     "WorkerConfig",

@@ -9,22 +9,37 @@ requires-python = ">=3.10"
 dependencies = ["PyYAML>=6.0.2,<7", "httpx>=0.28,<1"]
 
 [project.optional-dependencies]
+http = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.34,<1",
+]
 model = [
     "json-repair>=0.25.0,<1",
     "jsonschema>=4,<5",
 ]
 vikingdb = ["volcengine>=1.0.216"]
+observability = [
+    "opentelemetry-api>=1.30,<2",
+    "opentelemetry-sdk>=1.30,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.30,<2",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.30,<2",
+]
 test = [
     "coverage[toml]>=7.6,<8",
     "pytest>=8.3,<9",
     "pytest-cov>=5,<8",
 ]
 
+[project.scripts]
+m2bos-benchmark = "benchmark.cli:main"
+m2bos-http = "integrations.http_api.bootstrap:main"
+
 [tool.setuptools.packages.find]
-include = ["Config*", "Runtime*", "ModelClient*", "pre*", "memory*", "infrastructure*", "foundation*", "integrations*"]
+include = ["Config*", "Runtime*", "ModelClient*", "pre*", "memory*", "infrastructure*", "foundation*", "integrations*", "benchmark*"]
 
 [tool.setuptools.package-data]
 "Config" = ["*.yaml"]
+"benchmark" = ["README.md", "datasets/*.json", "policies/*.json"]
 "memory.schema.definitions" = ["*.yaml"]
 
 [tool.ruff]
@@ -45,7 +60,7 @@ warn_redundant_casts = true
 [tool.pyright]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
-include = ["Config", "Runtime", "ModelClient", "pre", "memory", "infrastructure", "foundation"]
+include = ["Config", "Runtime", "ModelClient", "pre", "memory", "infrastructure", "foundation", "integrations", "benchmark"]
 reportUnsupportedDunderAll = false
 
 [tool.pytest.ini_options]
@@ -57,11 +72,12 @@ addopts = "-ra --strict-config --strict-markers"
 
 [tool.coverage.run]
 branch = true
-source = ["Config", "Runtime", "ModelClient", "pre", "memory", "infrastructure", "foundation"]
+source = ["Config", "Runtime", "ModelClient", "pre", "memory", "infrastructure", "foundation", "integrations"]
 omit = ["tests/*"]
 
 [tool.coverage.report]
 precision = 2
+fail_under = 79
 show_missing = true
 skip_covered = false
 exclude_also = [

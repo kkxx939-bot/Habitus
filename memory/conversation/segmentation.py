@@ -162,7 +162,10 @@ class ConversationSemanticBoundaryScorer:
             )
         except Exception as exc:
             reason = f"{type(exc).__name__}: {' '.join(str(exc).split())}"[:500]
-            logger.warning("Conversation 语义边界评分失败，退回确定性结构边界：%s", reason)
+            logger.warning(
+                "Conversation 语义边界评分失败，退回确定性结构边界：%s",
+                type(exc).__name__,
+            )
             return ConversationBoundaryHints(live.digest, (), None, reason)
 
     def _bounded_text(self, value: str) -> str:

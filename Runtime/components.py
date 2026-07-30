@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import cast
 
 from foundation.observability import MetricRegistry, Observer
+from infrastructure.observability import ManagedObservability
 from infrastructure.store.contracts import PathLock
 from infrastructure.vector import VectorStoreFactory
 from memory.conversation import (
@@ -48,6 +49,7 @@ class RuntimeInfrastructure:
     vector_stores: VectorStoreFactory
     observability: MetricRegistry = field(default_factory=MetricRegistry)
     observer: Observer | None = None
+    managed_observability: ManagedObservability | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.path_lock, PathLock):
@@ -60,8 +62,15 @@ class RuntimeInfrastructure:
             object.__setattr__(self, "observer", self.observability)
         elif not callable(getattr(self.observer, "record", None)):
             raise TypeError("observer must implement record")
+        if self.managed_observability is not None and not isinstance(
+            self.managed_observability,
+            ManagedObservability,
+        ):
+            raise TypeError("managed_observability must be ManagedObservability or None")
 
     def initialize(self) -> None:
+        if self.managed_observability is not None:
+            self.managed_observability.initialize()
         initializer = getattr(self.path_lock.lock_store, "initialize", None)
         if initializer is not None:
             if not callable(initializer):

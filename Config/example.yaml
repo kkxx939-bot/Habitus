@@ -4,6 +4,36 @@ storage:
   sqlite_lock:
     timeout_seconds: 5.0
 
+http:
+  host: 127.0.0.1
+  port: 8787
+  api_key_env: M2BOS_HTTP_API_KEY
+  operations_api_key_env: M2BOS_HTTP_OPERATIONS_API_KEY
+  max_request_bytes: 16777216
+
+observability:
+  metrics:
+    enabled: true
+    namespace: m2bos
+    max_recent_events: 512
+    duration_buckets_seconds: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0]
+  logging:
+    enabled: true
+    level: INFO
+  tracing:
+    enabled: false
+    endpoint: http://127.0.0.1:4318
+    protocol: http
+    service_name: m2bos
+    insecure: true
+    headers_env: M2BOS_OTEL_EXPORTER_HEADERS
+    export_interval_seconds: 10.0
+  audit:
+    enabled: true
+    retention_days: 14
+    max_records: 10000
+  lock_warning_seconds: 300.0
+
 models:
   chat:
     route:
@@ -47,7 +77,26 @@ models:
     query_parameters: {}
     document_parameters: {}
 
-  rerank: null
+  rerank:
+    route:
+      provider: aliyun
+      adapter: openai_compatible_rerank
+      model: qwen3-rerank
+      # 替换为创建 API Key 时显示的 API Host；华北 2（北京）需填真实 WorkspaceId。
+      base_url: https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-api/v1
+      api_key_env: DASHSCOPE_API_KEY
+      timeout_seconds: 30.0
+      max_retries: 2
+      retry_base_delay_seconds: 0.5
+      retry_max_delay_seconds: 30.0
+      max_concurrent: 8
+      max_response_bytes: 8388608
+      extra_headers: {}
+      extra_body:
+        instruct: Given a web search query, retrieve relevant passages that answer the query.
+    max_documents: 100
+    max_query_chars: 8000
+    max_document_chars: 16000
 
   structured_output:
     allow_json_repair: true

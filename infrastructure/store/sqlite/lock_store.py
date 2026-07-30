@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from math import isfinite
 from pathlib import Path
 
-from infrastructure.store.contracts.lock import LockLostError, LockToken
+from infrastructure.store.contracts.lock import LockLostError, LockStoreSnapshot, LockToken
 
 _LOCK_TABLE_LAYOUT = (
     ("lock_key", "TEXT", 0, None, 1),
@@ -256,6 +256,32 @@ class SQLiteLockStore:
             raise
         finally:
             conn.close()
+
+    def observability_snapshot(self, *, warning_seconds: float) -> LockStoreSnapshot:
+        """只聚合有效租约和持有时长，不返回锁键、owner 或 token。"""
+
+        self.initialize()
+        now = datetime.now(timezone.utc)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT expires_at, created_at FROM locks WHERE token != ''"
+            ).fetchall()
+        ages: list[float] = []
+        for row in rows:
+            if not self._lease_active(str(row["expires_at"]), now):
+                continue
+            try:
+                created_at = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            ages.append(max(0.0, (now - created_at.astimezone(timezone.utc)).total_seconds()))
+        return LockStoreSnapshot(
+            active_count=len(ages),
+            hanging_count=sum(age >= warning_seconds for age in ages),
+            max_active_age_seconds=max(ages, default=0.0),
+        )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=self.sqlite_timeout_seconds)

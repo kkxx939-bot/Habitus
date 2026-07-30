@@ -187,9 +187,11 @@ class BenchmarkSample:
                             "tool_call_id": message.tool_call_id,
                             "tool_name": message.tool_name,
                             "tool_status": message.tool_status,
+                            "source_ref": message.source_ref,
                         }
                         for message in session.messages
                     ],
+                    "source_label": session.source_label,
                 }
                 for session in self.sessions
             ],
@@ -199,6 +201,10 @@ class BenchmarkSample:
                     "question": question.question,
                     "reference_answer": question.reference_answer,
                     "question_type": question.question_type,
+                    "question_time": None if question.question_time is None else question.question_time.isoformat(),
+                    "evidence_refs": list(question.evidence_refs),
+                    "evidence_texts": list(question.evidence_texts),
+                    "metadata": dict(question.metadata),
                 }
                 for question in self.questions
             ],

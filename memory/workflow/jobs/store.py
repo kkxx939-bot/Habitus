@@ -51,6 +51,19 @@ class _MemoryJobSequenceState:
             raise MemoryJobError("memory job sequence high-watermark must be non-negative")
 
 
+@dataclass(frozen=True)
+class MemoryJobQueueSnapshot:
+    """不包含错误正文和来源身份的队列聚合快照。"""
+
+    staged: int
+    queued: int
+    running: int
+    failed: int
+    committed: int
+    high_watermark: int
+    oldest_age_seconds: float
+
+
 class MemoryJobStore:
     """在持久化队列锁内维护全局序号、重试和 Worker fencing。"""
 
@@ -170,6 +183,30 @@ class MemoryJobStore:
                 job
                 for job in self._read_all()
                 if job.conversation_id == address.conversation_id and job.started_on == address.started_on
+            )
+
+    def observability_snapshot(self) -> MemoryJobQueueSnapshot:
+        """在同一队列栅栏内读取状态分布和最老任务年龄。"""
+
+        with self._queue_fence():
+            jobs = self._read_all()
+            state = self._load_or_initialize_state(jobs)
+            counts = {status: 0 for status in MemoryJobStatus}
+            for job in jobs:
+                counts[job.status] += 1
+            oldest = next(
+                (item for item in jobs if item.status is not MemoryJobStatus.COMMITTED),
+                None,
+            )
+            age = 0.0 if oldest is None else max(0.0, (self._timestamp() - oldest.created_at).total_seconds())
+            return MemoryJobQueueSnapshot(
+                staged=counts[MemoryJobStatus.STAGED],
+                queued=counts[MemoryJobStatus.QUEUED],
+                running=counts[MemoryJobStatus.RUNNING],
+                failed=counts[MemoryJobStatus.FAILED],
+                committed=counts[MemoryJobStatus.COMMITTED],
+                high_watermark=state.last_allocated_memory_sequence,
+                oldest_age_seconds=age,
             )
 
     def discard_committed(self, job: MemoryJob) -> bool:
@@ -921,4 +958,4 @@ class MemoryJobStore:
         return value.astimezone(timezone.utc)
 
 
-__all__ = ["MemoryJobStore"]
+__all__ = ["MemoryJobQueueSnapshot", "MemoryJobStore"]

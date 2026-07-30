@@ -9,9 +9,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from Config.conversation import ConversationConfig
+from Config.http import HTTPAPIConfig
 from Config.loader import ConfigError, group_fields, load_config_object, required_field
 from Config.memory import MemoryConfig
 from Config.models import ModelConfig
+from Config.observability import ObservabilityConfig
 from Config.storage import StorageConfig
 from Config.workflow import WorkflowConfig
 
@@ -28,11 +30,15 @@ class M2BOSConfig:
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
+    http: HTTPAPIConfig = field(default_factory=HTTPAPIConfig)
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def __post_init__(self) -> None:
         expected = (
             ("storage", self.storage, StorageConfig),
             ("models", self.models, ModelConfig),
+            ("http", self.http, HTTPAPIConfig),
+            ("observability", self.observability, ObservabilityConfig),
             ("conversation", self.conversation, ConversationConfig),
             ("memory", self.memory, MemoryConfig),
             ("workflow", self.workflow, WorkflowConfig),
@@ -80,6 +86,8 @@ class M2BOSConfig:
         return cls(
             storage=StorageConfig.from_mapping(required_field(data, "storage", path="config")),
             models=ModelConfig.from_mapping(required_field(data, "models", path="config")),
+            http=HTTPAPIConfig.from_mapping(data.get("http", {})),
+            observability=ObservabilityConfig.from_mapping(data.get("observability", {})),
             conversation=ConversationConfig.from_mapping(data.get("conversation", {})),
             memory=MemoryConfig.from_mapping(data.get("memory", {})),
             workflow=WorkflowConfig.from_mapping(data.get("workflow", {})),

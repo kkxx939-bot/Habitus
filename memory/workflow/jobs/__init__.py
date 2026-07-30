@@ -13,7 +13,7 @@ from memory.workflow.jobs.model import (
     MemoryJobNotReadyError,
     MemoryJobStatus,
 )
-from memory.workflow.jobs.store import MemoryJobStore
+from memory.workflow.jobs.store import MemoryJobQueueSnapshot, MemoryJobStore
 
 __all__ = [
     "MemoryJob",
@@ -26,6 +26,7 @@ __all__ = [
     "MemoryJobLeaseError",
     "MemoryJobLeaseLostError",
     "MemoryJobNotReadyError",
+    "MemoryJobQueueSnapshot",
     "MemoryJobStatus",
     "MemoryJobStore",
 ]

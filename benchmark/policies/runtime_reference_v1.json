@@ -1,0 +1,15 @@
+{
+  "schema_version": "m2bos_boundary_policy_v1",
+  "policy_id": "runtime-reference-v1-not-production-sla",
+  "max_error_rate": 0.01,
+  "max_degraded_read_rate": 0.01,
+  "max_p95_ms": 2000,
+  "max_p99_ms": 5000,
+  "min_recall_at_k": 0.8,
+  "max_queue_depth": 1000,
+  "max_queue_oldest_age_seconds": 300,
+  "max_drain_seconds": 900,
+  "max_rss_growth_bytes": 2147483648,
+  "plateau_gain_fraction": 0.05,
+  "knee_latency_multiplier": 2.0
+}

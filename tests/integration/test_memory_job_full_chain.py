@@ -50,6 +50,11 @@ def runtime_config(tmp_path: Path, *, max_attempts: int = 3) -> M2BOSConfig:
         adapter="fake_embedding",
         api_key_env=None,
     )
+    payload["models"]["rerank"]["route"].update(
+        provider="fake",
+        adapter="fake_rerank",
+        api_key_env=None,
+    )
     payload["memory"]["vector_store"]["route"].update(
         provider="fake",
         adapter="fake_vector",
@@ -125,6 +130,20 @@ class EmbeddingProvider:
 
     async def embed(self, _text: str, *, is_query: bool) -> EmbeddingVector:
         return EmbeddingVector((1.0,) + (0.0,) * (self.dimension - 1))
+
+    async def aclose(self):
+        return None
+
+
+class RerankProvider:
+    is_remote = False
+
+    def __init__(self, provider_name: str, model: str) -> None:
+        self.provider_name = provider_name
+        self.model = model
+
+    async def rerank(self, _query: str, documents) -> tuple[float, ...]:
+        return tuple(1.0 for _ in documents)
 
     async def aclose(self):
         return None
@@ -209,6 +228,11 @@ def dependencies():
             context.route.model,
             context.config.dimension,
         ),
+    )
+    providers.register_adapter(
+        "rerank",
+        "fake_rerank",
+        lambda context: RerankProvider(context.route.provider, context.route.model),
     )
     vectors = VectorStoreFactory()
 

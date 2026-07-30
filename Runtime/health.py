@@ -49,7 +49,12 @@ class RuntimeHealthService:
             raise ValueError("runtime_state must be non-empty text")
         if not isinstance(deep, bool):
             raise TypeError("deep must be boolean")
-        checks = [self._runtime_check(runtime_state), self._memory_worker_check(), self._lifecycle_check()]
+        checks = [
+            self._runtime_check(runtime_state),
+            self._memory_worker_check(),
+            self._lifecycle_check(),
+            self._observability_check(),
+        ]
         checks.append(await self._queue_check())
         checks.extend(await asyncio.gather(self._vector_check("memory_vector", self.components.memory.vector_index.store), self._vector_check("summary_vector", self.components.conversation.summary_vector_index.store)))
         if deep:
@@ -107,6 +112,19 @@ class RuntimeHealthService:
         if worker.last_error is not None:
             return RuntimeHealthCheck("lifecycle_worker", RuntimeHealthStatus.DEGRADED, self._error(worker.last_error), critical=False)
         return RuntimeHealthCheck("lifecycle_worker", RuntimeHealthStatus.HEALTHY, worker.state.value, critical=False)
+
+    def _observability_check(self) -> RuntimeHealthCheck:
+        manager = self.components.infrastructure.managed_observability
+        if manager is None:
+            return RuntimeHealthCheck(
+                "observability",
+                RuntimeHealthStatus.DEGRADED,
+                "not_configured",
+                critical=False,
+            )
+        status, detail = manager.health()
+        resolved = RuntimeHealthStatus.HEALTHY if status == "healthy" else RuntimeHealthStatus.DEGRADED
+        return RuntimeHealthCheck("observability", resolved, detail, critical=False)
 
     async def _queue_check(self) -> RuntimeHealthCheck:
         try:

@@ -47,9 +47,13 @@ def judge_prompt(
     evidence = ""
     if evidence_texts:
         evidence = "\nSupporting source evidence:\n" + "\n".join(f"- {item}" for item in evidence_texts)
-    rules = _strict_judge_rules(record.dataset) if policy is BenchmarkJudgePolicy.STRICT else _default_judge_rules(
-        record.dataset,
-        has_evidence=bool(evidence_texts),
+    rules = (
+        _strict_judge_rules(record.dataset)
+        if policy is BenchmarkJudgePolicy.STRICT
+        else _default_judge_rules(
+            record.dataset,
+            has_evidence=bool(evidence_texts),
+        )
     )
     return f"""You are an independent evaluator for a long-term-memory benchmark.
 Judge whether the model response correctly answers the question according to the reference answer.
@@ -104,7 +108,10 @@ def _strict_judge_rules(dataset: str) -> str:
         "6. Evaluate answer quality only; retrieval of related material alone earns no credit."
     )
     if dataset == BenchmarkDatasetName.LONGMEMEVAL.value:
-        return common + "\n7. Preserve positive and negative preferences and use the current value for knowledge-update questions."
+        return (
+            common
+            + "\n7. Preserve positive and negative preferences and use the current value for knowledge-update questions."
+        )
     return common
 
 

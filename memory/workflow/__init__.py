@@ -16,6 +16,7 @@ from memory.workflow.jobs import (
     MemoryJobLeaseError,
     MemoryJobLeaseLostError,
     MemoryJobNotReadyError,
+    MemoryJobQueueSnapshot,
     MemoryJobStatus,
     MemoryJobStore,
 )
@@ -64,6 +65,7 @@ __all__ = [
     "MemoryJobLeaseError",
     "MemoryJobLeaseLostError",
     "MemoryJobNotReadyError",
+    "MemoryJobQueueSnapshot",
     "MemoryJobRunner",
     "MemoryJobRunResult",
     "MemoryJobStatus",

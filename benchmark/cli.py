@@ -5,13 +5,22 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from collections.abc import Sequence
+import os
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from benchmark.boundary import (
+    BoundaryPolicy,
+    BoundaryProfile,
+    BoundaryProfileName,
+    aggregate_boundary_runs,
+)
 from benchmark.coverage import audit_dataset_coverage
 from benchmark.datasets import load_dataset
 from benchmark.evaluation import judge_answers
+from benchmark.http_boundary import HTTPBoundaryBenchmark
 from benchmark.lifecycle import LifecycleBenchmark
+from benchmark.lifecycle_boundary import LifecycleBoundaryBenchmark
 from benchmark.load import RuntimeLoadBenchmark
 from benchmark.model import BenchmarkDataset, BenchmarkDatasetName, BenchmarkJudgeRecord
 from benchmark.protocol import (
@@ -19,10 +28,13 @@ from benchmark.protocol import (
     OPENVIKING_PUBLIC_RETRIEVAL_LIMIT,
     BenchmarkJudgePolicy,
 )
+from benchmark.recovery_boundary import RecoveryBoundaryBenchmark
 from benchmark.reliability import RecoveryBenchmark
 from benchmark.report import build_report
 from benchmark.runner import BenchmarkRunner
+from benchmark.runtime_boundary import RuntimeBoundaryBenchmark
 from benchmark.vector import VectorBenchmarkRunner, load_vector_dataset
+from benchmark.vector_boundary import VectorBoundaryBenchmark
 from Config import M2BOSConfig
 
 
@@ -83,6 +95,76 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--ingest", type=Path)
     report.add_argument("--output", type=Path, required=True)
 
+    boundary_plan = commands.add_parser("boundary-plan", help="输出产品边界压力矩阵，不连接外部服务")
+    _boundary_profile_arguments(boundary_plan)
+
+    boundary_runtime = commands.add_parser("boundary-runtime", help="测量 Runtime、读写混合和 Job 队列边界")
+    _dataset_arguments(boundary_runtime)
+    _boundary_run_arguments(boundary_runtime, vector_capacity=False)
+    boundary_runtime.add_argument("--config", type=Path, required=True)
+    boundary_runtime.add_argument("--work", type=Path, required=True)
+    boundary_runtime.add_argument("--top-k", type=int, default=10)
+    boundary_runtime.add_argument("--drain-timeout", type=float, default=1_800.0)
+
+    boundary_http = commands.add_parser("boundary-http", help="从真实远程调用方测量 HTTP 服务边界")
+    _dataset_arguments(boundary_http)
+    _boundary_run_arguments(boundary_http, conversation_scale=False, vector_capacity=False)
+    boundary_http.add_argument("--server-url", required=True)
+    boundary_http.add_argument(
+        "--server-identity",
+        required=True,
+        help="不可变部署身份，例如代码 SHA 与配置版本组合；用于阻止误聚合不同服务",
+    )
+    boundary_http.add_argument("--api-key-env", default="M2BOS_HTTP_API_KEY")
+    boundary_http.add_argument("--top-k", type=int, default=10)
+    boundary_http.add_argument("--allow-writes", action="store_true")
+    boundary_http.add_argument("--seed-dataset", action="store_true")
+    boundary_http.add_argument("--request-timeout", type=float, default=120.0)
+    boundary_http.add_argument("--drain-timeout", type=float, default=1_800.0)
+
+    boundary_vector = commands.add_parser("boundary-vector", help="测量 VectorStore 规模与并发边界")
+    _boundary_run_arguments(boundary_vector, conversation_scale=False, write_fraction=False)
+    boundary_vector.add_argument("--input", type=Path, required=True, help="m2bos_vector_benchmark_v1 JSON")
+    boundary_vector.add_argument("--config", type=Path, required=True)
+    boundary_vector.add_argument("--work", type=Path, required=True)
+    boundary_vector.add_argument("--top-k", type=int, default=10)
+    boundary_vector.add_argument("--update-fraction", type=float, default=0.05)
+    boundary_vector.add_argument("--delete-fraction", type=float, default=0.05)
+    boundary_vector.add_argument("--maximum-documents", type=int)
+
+    boundary_lifecycle = commands.add_parser("boundary-lifecycle", help="测量正式 Conversation 生命周期边界")
+    _dataset_arguments(boundary_lifecycle)
+    _boundary_run_arguments(
+        boundary_lifecycle,
+        vector_capacity=False,
+        concurrency=False,
+        write_fraction=False,
+        timing=False,
+    )
+    boundary_lifecycle.add_argument("--config", type=Path, required=True)
+    boundary_lifecycle.add_argument("--work", type=Path, required=True)
+    boundary_lifecycle.add_argument("--age-days", type=int, default=400)
+    boundary_lifecycle.add_argument("--max-cycles", type=int, default=10_000)
+
+    boundary_recovery = commands.add_parser("boundary-recovery", help="测量连续故障与 Job 重试耗尽边界")
+    _dataset_arguments(boundary_recovery)
+    _boundary_run_arguments(
+        boundary_recovery,
+        conversation_scale=False,
+        vector_capacity=False,
+        concurrency=False,
+        write_fraction=False,
+        timing=False,
+    )
+    boundary_recovery.add_argument("--config", type=Path, required=True)
+    boundary_recovery.add_argument("--work", type=Path, required=True)
+    boundary_recovery.add_argument("--fault-count", type=int, action="append")
+
+    boundary_aggregate = commands.add_parser("boundary-aggregate", help="聚合不同进程的独立边界结果")
+    boundary_aggregate.add_argument("inputs", nargs="+", type=Path)
+    boundary_aggregate.add_argument("--policy", type=Path, required=True)
+    boundary_aggregate.add_argument("--output", type=Path, required=True)
+
     load = commands.add_parser("load", help="执行检索与 Conversation/MemoryJob 混合负载")
     _dataset_arguments(load)
     load.add_argument("--config", type=Path, required=True)
@@ -138,9 +220,70 @@ def _dataset_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _boundary_profile_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    conversation_scale: bool = True,
+    vector_capacity: bool = True,
+    concurrency: bool = True,
+    write_fraction: bool = True,
+    timing: bool = True,
+) -> None:
+    parser.add_argument(
+        "--profile",
+        choices=tuple(item.value for item in BoundaryProfileName),
+        default=BoundaryProfileName.STANDARD.value,
+    )
+    if conversation_scale:
+        parser.add_argument("--conversation-scale", type=int, action="append")
+    if vector_capacity:
+        parser.add_argument("--vector-capacity-fraction", type=float, action="append")
+    if concurrency:
+        parser.add_argument("--concurrency", type=int, action="append")
+    if write_fraction:
+        parser.add_argument("--write-fraction", type=float, action="append")
+    if timing:
+        parser.add_argument("--warmup-seconds", type=float)
+        parser.add_argument("--phase-seconds", type=float)
+    parser.add_argument("--repetitions", type=int)
+
+
+def _boundary_run_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    conversation_scale: bool = True,
+    vector_capacity: bool = True,
+    concurrency: bool = True,
+    write_fraction: bool = True,
+    timing: bool = True,
+) -> None:
+    _boundary_profile_arguments(
+        parser,
+        conversation_scale=conversation_scale,
+        vector_capacity=vector_capacity,
+        concurrency=concurrency,
+        write_fraction=write_fraction,
+        timing=timing,
+    )
+    parser.add_argument("--policy", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    result: Mapping[str, object]
     try:
+        if args.command == "boundary-plan":
+            print(json.dumps(_boundary_profile(args).to_dict(), ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "boundary-aggregate":
+            result = aggregate_boundary_runs(
+                args.inputs,
+                policy=BoundaryPolicy.from_file(args.policy),
+                output_directory=args.output,
+            )
+            print(json.dumps(result["aggregate"], ensure_ascii=False, indent=2))
+            return 0
         if args.command == "report":
             summary = build_report(
                 answers_path=args.answers,
@@ -149,6 +292,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output_directory=args.output,
             )
             print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "boundary-vector":
+            result = asyncio.run(
+                VectorBoundaryBenchmark(
+                    M2BOSConfig.from_file(args.config),
+                    load_vector_dataset(args.input),
+                    profile=_boundary_profile(args),
+                    policy=BoundaryPolicy.from_file(args.policy),
+                    output_directory=args.output,
+                    work_directory=args.work,
+                    top_k=args.top_k,
+                    update_fraction=args.update_fraction,
+                    delete_fraction=args.delete_fraction,
+                    maximum_documents=args.maximum_documents,
+                ).run()
+            )
+            print(json.dumps(result["aggregate"], ensure_ascii=False, indent=2))
             return 0
         if args.command == "vector":
             result = asyncio.run(
@@ -168,6 +328,72 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         dataset = _load_selected_dataset(args)
+        if args.command == "boundary-runtime":
+            result = asyncio.run(
+                RuntimeBoundaryBenchmark(
+                    M2BOSConfig.from_file(args.config),
+                    dataset,
+                    profile=_boundary_profile(args),
+                    policy=BoundaryPolicy.from_file(args.policy),
+                    output_directory=args.output,
+                    work_directory=args.work,
+                    top_k=args.top_k,
+                    drain_timeout_seconds=args.drain_timeout,
+                ).run()
+            )
+            print(json.dumps(result["aggregate"], ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "boundary-http":
+            api_key = os.environ.get(args.api_key_env)
+            if api_key is None or not api_key.strip():
+                raise ValueError(f"HTTP benchmark API key environment is missing: {args.api_key_env}")
+            result = asyncio.run(
+                HTTPBoundaryBenchmark(
+                    dataset,
+                    profile=_boundary_profile(args),
+                    policy=BoundaryPolicy.from_file(args.policy),
+                    server_url=args.server_url,
+                    server_identity=args.server_identity,
+                    api_key=api_key,
+                    output_directory=args.output,
+                    top_k=args.top_k,
+                    allow_writes=args.allow_writes,
+                    seed_dataset=args.seed_dataset,
+                    request_timeout_seconds=args.request_timeout,
+                    drain_timeout_seconds=args.drain_timeout,
+                ).run()
+            )
+            print(json.dumps(result["aggregate"], ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "boundary-lifecycle":
+            result = asyncio.run(
+                LifecycleBoundaryBenchmark(
+                    M2BOSConfig.from_file(args.config),
+                    dataset,
+                    profile=_boundary_profile(args),
+                    policy=BoundaryPolicy.from_file(args.policy),
+                    output_directory=args.output,
+                    work_directory=args.work,
+                    age_days=args.age_days,
+                    max_cycles=args.max_cycles,
+                ).run()
+            )
+            print(json.dumps(result["aggregate"], ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "boundary-recovery":
+            result = asyncio.run(
+                RecoveryBoundaryBenchmark(
+                    M2BOSConfig.from_file(args.config),
+                    dataset,
+                    profile=_boundary_profile(args),
+                    policy=BoundaryPolicy.from_file(args.policy),
+                    output_directory=args.output,
+                    work_directory=args.work,
+                    fault_counts=args.fault_count,
+                ).run()
+            )
+            print(json.dumps(result["aggregate"], ensure_ascii=False, indent=2))
+            return 0
         if args.command == "inspect":
             print(json.dumps(_dataset_summary(dataset), ensure_ascii=False, indent=2))
             return 0
@@ -292,6 +518,18 @@ def _load_selected_dataset(args: argparse.Namespace) -> BenchmarkDataset:
         sample_indices=tuple(args.sample),
         question_limit=args.question_limit,
         include_adversarial=args.include_adversarial,
+    )
+
+
+def _boundary_profile(args: argparse.Namespace) -> BoundaryProfile:
+    return BoundaryProfile.named(args.profile).override(
+        conversation_scales=getattr(args, "conversation_scale", None),
+        vector_capacity_fractions=getattr(args, "vector_capacity_fraction", None),
+        concurrency_levels=getattr(args, "concurrency", None),
+        write_fractions=getattr(args, "write_fraction", None),
+        warmup_seconds=getattr(args, "warmup_seconds", None),
+        phase_seconds=getattr(args, "phase_seconds", None),
+        repetitions=args.repetitions,
     )
 
 

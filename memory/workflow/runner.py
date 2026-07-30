@@ -5,6 +5,7 @@ from __future__ import annotations
 from asyncio import to_thread
 from dataclasses import dataclass
 
+from foundation.observability import NullObserver, Observer, bind_observation_context, observe_operation
 from memory.conversation import ConversationMessageJournal
 from memory.conversation.indexing import PersistentConversationSummaryVectorIndex
 from memory.conversation.summary import ConversationSummaryService
@@ -74,6 +75,8 @@ class MemoryJobRunner:
         summary_service: ConversationSummaryService,
         summary_vector_index: PersistentConversationSummaryVectorIndex,
         change_receipts: MemoryChangeReceiptStore,
+        *,
+        observer: Observer | None = None,
     ) -> None:
         if not isinstance(store, MemoryJobStore):
             raise TypeError("store must be MemoryJobStore")
@@ -96,6 +99,7 @@ class MemoryJobRunner:
         if change_receipts.root != store.root:
             raise ValueError("change receipt store and MemoryJobStore must use the same root")
         self.store = store
+        self.observer = observer or NullObserver()
         self.staged_recovery = MemoryStagedJobRecovery(conversations, store)
         self.transaction_recovery = MemoryJobTransactionRecovery(
             editor.transaction,
@@ -107,6 +111,7 @@ class MemoryJobRunner:
             summary_service,
             change_receipts,
             store,
+            observer=self.observer,
         )
         self.committed_finalizer = MemoryCommittedJobFinalizer(
             store,
@@ -117,6 +122,7 @@ class MemoryJobRunner:
             semantic_refresher,
             vector_index,
             self.transaction_recovery,
+            observer=self.observer,
         )
 
     def claim_next(self, worker_id: str) -> MemoryJobClaim | None:
@@ -142,18 +148,43 @@ class MemoryJobRunner:
         lease = claim.lease
         job = self.store.assert_current(lease)
         source = MemoryChangeSource.from_job(job)
-        try:
-            await to_thread(self.transaction_recovery.recover_pending)
-            self.store.assert_current(lease)
-            journal = await to_thread(self.transaction_recovery.inspect, job)
-            if claim.expired_attempts_exhausted and journal is None:
-                raise MemoryJobError("expired worker lease exhausted attempts without a committed transaction")
-            if journal is not None:
-                completion = await self.committed_finalizer.finalize(lease, journal)
+        observer = getattr(self, "observer", None) or NullObserver()
+        with bind_observation_context(
+            memory_sequence=job.memory_sequence,
+            transaction_id=job.transaction_id,
+            attempt=job.attempts,
+        ):
+            try:
+                with observe_operation(observer, "workflow", "transaction_recovery"):
+                    await to_thread(self.transaction_recovery.recover_pending)
+                self.store.assert_current(lease)
+                with observe_operation(observer, "workflow", "transaction_inspection"):
+                    journal = await to_thread(self.transaction_recovery.inspect, job)
+                if claim.expired_attempts_exhausted and journal is None:
+                    raise MemoryJobError("expired worker lease exhausted attempts without a committed transaction")
+                if journal is not None:
+                    completion = await self.committed_finalizer.finalize(lease, journal)
+                    return MemoryJobRunResult(
+                        job=completion.job,
+                        commit=None,
+                        recovered=True,
+                        semantic_refreshed=True,
+                        vector_indexed=completion.vector_indexed,
+                        summary_indexed=completion.summary_indexed,
+                        journal_cleaned=completion.journal_cleaned,
+                        summary_generated=completion.summary_generated,
+                        change_receipt=completion.change_receipt,
+                    )
+
+                execution = await self.executor.execute(lease)
+                completion = await self.committed_finalizer.finalize(
+                    lease,
+                    execution.journal,
+                    summary_generated=execution.summary_generated,
+                )
                 return MemoryJobRunResult(
                     job=completion.job,
-                    commit=None,
-                    recovered=True,
+                    commit=execution.commit,
                     semantic_refreshed=True,
                     vector_indexed=completion.vector_indexed,
                     summary_indexed=completion.summary_indexed,
@@ -161,36 +192,19 @@ class MemoryJobRunner:
                     summary_generated=completion.summary_generated,
                     change_receipt=completion.change_receipt,
                 )
-
-            execution = await self.executor.execute(lease)
-            completion = await self.committed_finalizer.finalize(
-                lease,
-                execution.journal,
-                summary_generated=execution.summary_generated,
-            )
-            return MemoryJobRunResult(
-                job=completion.job,
-                commit=execution.commit,
-                semantic_refreshed=True,
-                vector_indexed=completion.vector_indexed,
-                summary_indexed=completion.summary_indexed,
-                journal_cleaned=completion.journal_cleaned,
-                summary_generated=completion.summary_generated,
-                change_receipt=completion.change_receipt,
-            )
-        except MemoryJobLeaseLostError:
-            raise
-        except Exception as exc:
-            failed = self.store.fail(
-                lease,
-                exc,
-                retryable=memory_job_failure_is_retryable(exc),
-                before_settlement=lambda: self.transaction_recovery.discard_uncommitted(source),
-            )
-            raise MemoryJobExecutionError(
-                f"memory job {failed.memory_sequence} failed with status {failed.status.value}",
-                job=failed,
-            ) from exc
+            except MemoryJobLeaseLostError:
+                raise
+            except Exception as exc:
+                failed = self.store.fail(
+                    lease,
+                    exc,
+                    retryable=memory_job_failure_is_retryable(exc),
+                    before_settlement=lambda: self.transaction_recovery.discard_uncommitted(source),
+                )
+                raise MemoryJobExecutionError(
+                    f"memory job {failed.memory_sequence} failed with status {failed.status.value}",
+                    job=failed,
+                ) from exc
 
 
 __all__ = ["MemoryJobClaim", "MemoryJobRunResult", "MemoryJobRunner"]

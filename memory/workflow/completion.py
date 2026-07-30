@@ -5,6 +5,7 @@ from __future__ import annotations
 from asyncio import to_thread
 from dataclasses import dataclass
 
+from foundation.observability import NullObserver, Observer, observe_operation
 from memory.conversation import ConversationAddress, ConversationMessageJournal
 from memory.conversation.indexing import PersistentConversationSummaryVectorIndex
 from memory.conversation.summary import ConversationSummaryService
@@ -73,6 +74,8 @@ class MemoryCommittedJobFinalizer:
         semantic_refresher: MemorySemanticRefresher,
         vector_index: PersistentMemoryVectorIndex,
         transaction_recovery: MemoryJobTransactionRecovery,
+        *,
+        observer: Observer | None = None,
     ) -> None:
         if not isinstance(store, MemoryJobStore):
             raise TypeError("store must be MemoryJobStore")
@@ -112,6 +115,7 @@ class MemoryCommittedJobFinalizer:
         self.semantic_refresher = semantic_refresher
         self.vector_index = vector_index
         self.transaction_recovery = transaction_recovery
+        self.observer = observer or NullObserver()
 
     async def finalize(
         self,
@@ -139,29 +143,36 @@ class MemoryCommittedJobFinalizer:
         if segment.digest != job.source_segment_digest:
             raise MemoryJobError("sealed ConversationSegment digest does not match its MemoryJob")
         summary_existed = self.summary_service.store.try_read(address, segment) is not None
-        summary = await self.summary_service.get_or_create(address, segment)
+        with observe_operation(self.observer, "workflow", "summary_persist"):
+            summary = await self.summary_service.get_or_create(address, segment)
         summary.require_matches_source(segment)
         self.store.assert_current(lease)
         resolved_summary_generated = not summary_existed if summary_generated is None else summary_generated
-        await self.summary_vector_index.synchronize(
-            address,
-            checkpoint=job.memory_sequence,
-        )
+        with observe_operation(self.observer, "workflow", "summary_vector_publish"):
+            await self.summary_vector_index.synchronize(
+                address,
+                checkpoint=job.memory_sequence,
+            )
         self.store.assert_current(lease)
 
         source = MemoryChangeSource.from_job(job)
-        change_receipt = self.change_receipts.finalize(source, journal)
+        with observe_operation(self.observer, "workflow", "receipt_finalize"):
+            change_receipt = self.change_receipts.finalize(source, journal)
         self.store.assert_current(lease)
-        semantic_results = await to_thread(self._refresh_semantic_layers, change_receipt)
+        with observe_operation(self.observer, "workflow", "semantic_refresh"):
+            semantic_results = await to_thread(self._refresh_semantic_layers, change_receipt)
         self.store.assert_current(lease)
-        await self.vector_index.synchronize(
-            changed_uris=change_receipt.changed_uris,
-            semantic_results=semantic_results,
-            checkpoint=change_receipt.source.memory_sequence,
-        )
+        with observe_operation(self.observer, "workflow", "memory_vector_publish"):
+            await self.vector_index.synchronize(
+                changed_uris=change_receipt.changed_uris,
+                semantic_results=semantic_results,
+                checkpoint=change_receipt.source.memory_sequence,
+            )
         self.store.assert_current(lease)
-        committed = self.store.complete(lease)
-        journal_cleaned = self.transaction_recovery.discard_terminal(job.transaction_id)
+        with observe_operation(self.observer, "workflow", "job_complete"):
+            committed = self.store.complete(lease)
+        with observe_operation(self.observer, "workflow", "transaction_cleanup"):
+            journal_cleaned = self.transaction_recovery.discard_terminal(job.transaction_id)
         return MemoryJobCompletion(
             job=committed,
             change_receipt=change_receipt,

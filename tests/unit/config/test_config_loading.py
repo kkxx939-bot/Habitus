@@ -26,7 +26,10 @@ def test_example_yaml_declares_a_complete_cross_domain_configuration(tmp_path) -
     assert config.conversation_root == config.storage_root / "conversation"
     assert config.workflow_root == config.storage_root / "workflow"
     assert config.workflow.jobs.max_attempts == 5
-    assert config.models.rerank is None
+    assert config.models.rerank is not None
+    assert config.models.rerank.route.provider == "aliyun"
+    assert config.models.rerank.route.adapter == "openai_compatible_rerank"
+    assert config.models.rerank.route.model == "qwen3-rerank"
 
 
 def test_from_file_and_from_env_use_only_the_single_yaml_entrypoint(tmp_path) -> None:

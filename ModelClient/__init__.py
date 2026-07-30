@@ -46,7 +46,7 @@ from ModelClient.embedding import (
 )
 from ModelClient.factory import ProviderBuildContext, ProviderBuilder, ProviderFactory
 from ModelClient.json_parser import JSONParseMode, ParsedJSON, parse_json_response
-from ModelClient.rerank import Reranker
+from ModelClient.rerank import RerankClient, Reranker, RerankProvider
 from ModelClient.schema_validation import JSONSchemaValidationError, validate_json_schema
 from ModelClient.structured import StructuredChatClient, StructuredResponse
 from ModelClient.token_budget import (
@@ -95,7 +95,9 @@ __all__ = [
     "ProviderFactory",
     "ReasoningOptions",
     "RerankModelConfig",
+    "RerankClient",
     "Reranker",
+    "RerankProvider",
     "ResponseFormat",
     "StreamEventKind",
     "StructuredChatClient",

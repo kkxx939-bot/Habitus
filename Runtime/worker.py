@@ -4,16 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from contextlib import suppress
 from datetime import datetime, timezone
 from enum import Enum
 from uuid import uuid4
 
 from Config import WorkerConfig
-from foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
+from foundation.observability import (
+    NullObserver,
+    ObservationEvent,
+    ObservationStatus,
+    Observer,
+    SpanController,
+    bind_observation_context,
+)
 from memory.workflow import (
     MemoryJob,
     MemoryJobBlockedError,
+    MemoryJobClaim,
     MemoryJobExecutionError,
     MemoryJobLease,
     MemoryJobLeaseLostError,
@@ -49,6 +58,7 @@ class MemoryWorker:
         *,
         worker_id: str | None = None,
         observer: Observer | None = None,
+        span_controller: SpanController | None = None,
     ) -> None:
         if not isinstance(runner, MemoryJobRunner):
             raise TypeError("runner must be MemoryJobRunner")
@@ -71,6 +81,7 @@ class MemoryWorker:
         self._wake_event = asyncio.Event()
         self._last_error: BaseException | None = None
         self.observer = observer or NullObserver()
+        self.span_controller = span_controller
 
     @property
     def state(self) -> MemoryWorkerState:
@@ -167,14 +178,6 @@ class MemoryWorker:
                     await self._wait(self.config.poll_interval_seconds)
                     continue
                 except MemoryJobExecutionError as exc:
-                    self._observe(
-                        "job_execution",
-                        ObservationStatus.FAILURE,
-                        {
-                            "error_type": type(exc).__name__,
-                            "memory_sequence": 0 if exc.job is None else exc.job.memory_sequence,
-                        },
-                    )
                     if exc.job is not None and exc.job.status is MemoryJobStatus.FAILED:
                         self._last_error = exc
                         self._state = MemoryWorkerState.BLOCKED
@@ -196,15 +199,6 @@ class MemoryWorker:
                     continue
                 if result.job is None:
                     await self._wait(self.config.poll_interval_seconds)
-                else:
-                    self._observe(
-                        "job_execution",
-                        ObservationStatus.SUCCESS,
-                        {
-                            "memory_sequence": result.job.memory_sequence,
-                            "status": result.job.status.value,
-                        },
-                    )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -224,7 +218,55 @@ class MemoryWorker:
         claim = await asyncio.to_thread(self.runner.claim_next, self.worker_id)
         if claim is None:
             return MemoryJobRunResult(job=None, commit=None)
+        job = claim.lease.job
+        started = time.monotonic()
+        with bind_observation_context(
+            memory_sequence=job.memory_sequence,
+            transaction_id=job.transaction_id,
+            worker_id=self.worker_id,
+            attempt=job.attempts,
+        ):
+            span = (
+                self.span_controller.start_span(
+                    "workflow",
+                    "memory_job",
+                    attributes={"job_status": job.status.value},
+                )
+                if self.span_controller is not None
+                else _NullSpan()
+            )
+            try:
+                with span:
+                    result = await self._execute_claim(claim)
+            except asyncio.CancelledError:
+                self._observe(
+                    "job_execution",
+                    ObservationStatus.DEGRADED,
+                    {"error_type": "CancelledError", "job_status": job.status.value},
+                    started=started,
+                )
+                raise
+            except Exception as exc:
+                failed_job = exc.job if isinstance(exc, MemoryJobExecutionError) else None
+                self._observe(
+                    "job_execution",
+                    ObservationStatus.FAILURE,
+                    {
+                        "error_type": type(exc).__name__,
+                        "job_status": job.status.value if failed_job is None else failed_job.status.value,
+                    },
+                    started=started,
+                )
+                raise
+            self._observe(
+                "job_execution",
+                ObservationStatus.SUCCESS,
+                {"job_status": "unknown" if result.job is None else result.job.status.value},
+                started=started,
+            )
+            return result
 
+    async def _execute_claim(self, claim: MemoryJobClaim) -> MemoryJobRunResult:
         execution = asyncio.create_task(
             self.runner.run_claimed(claim),
             name=(f"m2bos-memory-job:{claim.lease.job.memory_sequence}:{claim.lease.claim_generation}"),
@@ -313,16 +355,29 @@ class MemoryWorker:
         operation: str,
         status: ObservationStatus,
         attributes: dict[str, str | int | float | bool],
+        *,
+        started: float | None = None,
     ) -> None:
-        self.observer.record(
-            ObservationEvent(
-                category="workflow",
-                operation=operation,
-                status=status,
-                duration_seconds=0.0,
-                attributes=attributes,
+        try:
+            self.observer.record(
+                ObservationEvent(
+                    category="workflow",
+                    operation=operation,
+                    status=status,
+                    duration_seconds=(0.0 if started is None else max(0.0, time.monotonic() - started)),
+                    attributes=attributes,
+                )
             )
-        )
+        except Exception:
+            pass
+
+
+class _NullSpan:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        return None
 
 
 __all__ = [

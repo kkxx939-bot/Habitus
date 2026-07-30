@@ -13,6 +13,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from itertools import count
 from pathlib import Path
 
 from benchmark.isolation import isolated_config, require_empty_directory
@@ -147,6 +148,9 @@ class VectorBenchmarkRunner:
         repeats: int = 1,
         update_fraction: float = 0.05,
         delete_fraction: float = 0.05,
+        warmup_seconds: float = 0.0,
+        phase_seconds: float | None = None,
+        concurrency_levels: Sequence[int] | None = None,
     ) -> None:
         if not isinstance(config, M2BOSConfig):
             raise TypeError("config must be M2BOSConfig")
@@ -163,6 +167,28 @@ class VectorBenchmarkRunner:
             raise ValueError("update and delete fractions must leave retained records")
         if len(dataset.documents) > config.memory.vector_index.max_records:
             raise ValueError("vector dataset exceeds configured record capacity")
+        if (
+            isinstance(warmup_seconds, bool)
+            or not isinstance(warmup_seconds, int | float)
+            or not 0 <= float(warmup_seconds) <= 3_600
+        ):
+            raise ValueError("warmup_seconds must be between zero and 3600")
+        if phase_seconds is not None and (
+            isinstance(phase_seconds, bool)
+            or not isinstance(phase_seconds, int | float)
+            or not 1 <= float(phase_seconds) <= 86_400
+        ):
+            raise ValueError("phase_seconds must be between one and 86400 or None")
+        selected_concurrency = (concurrency,) if concurrency_levels is None else tuple(concurrency_levels)
+        if (
+            not selected_concurrency
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 256
+                for value in selected_concurrency
+            )
+            or tuple(sorted(set(selected_concurrency))) != selected_concurrency
+        ):
+            raise ValueError("concurrency_levels must contain sorted unique integers between one and 256")
         self.config = config
         self.dataset = dataset
         self.output_directory = Path(output_directory).expanduser().resolve()
@@ -172,6 +198,9 @@ class VectorBenchmarkRunner:
         self.repeats = repeats
         self.update_fraction = float(update_fraction)
         self.delete_fraction = float(delete_fraction)
+        self.warmup_seconds = float(warmup_seconds)
+        self.phase_seconds = None if phase_seconds is None else float(phase_seconds)
+        self.concurrency_levels = selected_concurrency
 
     async def run(self) -> Mapping[str, object]:
         """执行全量发布、并发过滤检索、增量更新删除和最终一致性检查。"""
@@ -210,8 +239,25 @@ class VectorBenchmarkRunner:
             )
             build_latency_ms = (time.perf_counter() - build_started) * 1_000
             query_vectors = await asyncio.gather(*(embedder.embed_query(query.query) for query in self.dataset.queries))
-            events, search_wall_ms = await self._search(store, tuple(query_vectors))
+            search_points: list[dict[str, object]] = []
+            query_events: list[tuple[int, tuple[dict[str, object], ...]]] = []
+            for concurrency in self.concurrency_levels:
+                await self._warmup(store, tuple(query_vectors), concurrency=concurrency)
+                events, search_wall_ms = await self._search(
+                    store,
+                    tuple(query_vectors),
+                    concurrency=concurrency,
+                )
+                search_points.append(
+                    {
+                        "concurrency": concurrency,
+                        "query_execution_count": len(events),
+                        "search": _search_summary(events, wall_latency_ms=search_wall_ms),
+                    }
+                )
+                query_events.append((concurrency, events))
             mutation = await self._mutate(store, state, records, embedder)
+            primary_search = search_points[0]
             result: dict[str, object] = {
                 "schema_version": "m2bos_vector_benchmark_result_v1",
                 "started_at": started_at,
@@ -224,21 +270,30 @@ class VectorBenchmarkRunner:
                 "collection": store.collection,
                 "document_count": len(records),
                 "query_count": len(self.dataset.queries),
-                "query_execution_count": len(events),
+                "query_execution_count": sum(len(events) for _, events in query_events),
                 "dimension": self.config.models.embedding.dimension,
                 "embedding": _embedding_identity(self.config),
                 "top_k": self.top_k,
                 "concurrency": self.concurrency,
+                "concurrency_levels": list(self.concurrency_levels),
                 "repeats": self.repeats,
+                "search_mode": "fixed_repeats" if self.phase_seconds is None else "time_based_steady_state",
+                "warmup_seconds": self.warmup_seconds,
+                "target_phase_seconds": self.phase_seconds,
                 "embedding_latency_ms": embedding_latency_ms,
                 "full_publish_latency_ms": build_latency_ms,
                 "full_publish_records_per_second": len(records) / max(build_latency_ms / 1_000, 1e-9),
-                "search": _search_summary(events, wall_latency_ms=search_wall_ms),
+                "search": primary_search["search"],
+                "search_points": search_points,
                 "incremental": mutation,
                 "environment": _environment(),
             }
             _write_json(self.output_directory / "summary.json", result)
-            _write_jsonl(self.output_directory / "queries.jsonl", events)
+            if len(query_events) == 1:
+                _write_jsonl(self.output_directory / "queries.jsonl", query_events[0][1])
+            else:
+                for concurrency, events in query_events:
+                    _write_jsonl(self.output_directory / f"queries-c{concurrency:03d}.jsonl", events)
             return result
         finally:
             await runtime.close()
@@ -247,8 +302,10 @@ class VectorBenchmarkRunner:
         self,
         store: VectorStore,
         query_vectors: tuple[EmbeddingVector, ...],
+        *,
+        concurrency: int,
     ) -> tuple[tuple[dict[str, object], ...], float]:
-        semaphore = asyncio.Semaphore(self.concurrency)
+        semaphore = asyncio.Semaphore(concurrency)
 
         async def execute(
             query: VectorBenchmarkQuery,
@@ -302,16 +359,69 @@ class VectorBenchmarkRunner:
                     }
 
         started = time.perf_counter()
-        events = tuple(
-            await asyncio.gather(
-                *(
-                    execute(query, query_vectors[index], repeat)
-                    for repeat in range(self.repeats)
-                    for index, query in enumerate(self.dataset.queries)
+        if self.phase_seconds is None:
+            events = tuple(
+                await asyncio.gather(
+                    *(
+                        execute(query, query_vectors[index], repeat)
+                        for repeat in range(self.repeats)
+                        for index, query in enumerate(self.dataset.queries)
+                    )
                 )
             )
-        )
+        else:
+            collected: list[dict[str, object]] = []
+            operation_ids = count()
+            stop = asyncio.Event()
+            ready = asyncio.Event()
+
+            async def worker() -> None:
+                await ready.wait()
+                while not stop.is_set():
+                    operation_id = next(operation_ids)
+                    query_index = operation_id % len(self.dataset.queries)
+                    collected.append(
+                        await execute(
+                            self.dataset.queries[query_index],
+                            query_vectors[query_index],
+                            operation_id,
+                        )
+                    )
+
+            tasks = [asyncio.create_task(worker()) for _ in range(concurrency)]
+            ready.set()
+            await asyncio.sleep(self.phase_seconds)
+            stop.set()
+            await asyncio.gather(*tasks)
+            events = tuple(collected)
         return events, (time.perf_counter() - started) * 1_000
+
+    async def _warmup(
+        self,
+        store: VectorStore,
+        query_vectors: tuple[EmbeddingVector, ...],
+        *,
+        concurrency: int,
+    ) -> None:
+        if self.warmup_seconds <= 0:
+            return
+        deadline = time.monotonic() + self.warmup_seconds
+
+        async def worker(offset: int) -> None:
+            query_index = offset
+            while time.monotonic() < deadline:
+                query = self.dataset.queries[query_index % len(self.dataset.queries)]
+                await store.search(
+                    query_vectors[query_index % len(query_vectors)],
+                    filters=VectorStoreFilter(
+                        equals={"kind": "benchmark"},
+                        one_of={"scope_roots": (query.scope,)},
+                    ),
+                    limit=self.top_k,
+                )
+                query_index += concurrency
+
+        await asyncio.gather(*(worker(index) for index in range(concurrency)))
 
     async def _mutate(
         self,

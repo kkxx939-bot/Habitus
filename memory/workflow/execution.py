@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from foundation.observability import NullObserver, Observer, observe_operation
 from memory.conversation import ConversationAddress, ConversationMessageJournal
 from memory.conversation.summary import ConversationSummaryService
 from memory.editor.engine import MemoryEditor
@@ -56,6 +57,7 @@ class MemoryJobExecutor:
         jobs: MemoryJobStore,
         *,
         clock: Callable[[], datetime] | None = None,
+        observer: Observer | None = None,
     ) -> None:
         if not isinstance(conversations, ConversationMessageJournal):
             raise TypeError("conversations must be ConversationMessageJournal")
@@ -80,6 +82,7 @@ class MemoryJobExecutor:
         self.jobs = jobs
         self.segment_products = MemorySegmentProductBuilder(summary_service, editor)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.observer = observer or NullObserver()
 
     async def execute(self, lease: MemoryJobLease) -> MemoryJobCommit:
         """只接受当前 claim，成功时保证事务日志已经到达 COMMITTED。"""
@@ -88,26 +91,30 @@ class MemoryJobExecutor:
             raise TypeError("lease must be a MemoryJobLease")
         job = self.jobs.assert_current(lease)
         address = ConversationAddress(job.conversation_id, job.started_on)
-        segment = self.conversations.read_segment(address, job.segment_id)
+        with observe_operation(self.observer, "workflow", "segment_read"):
+            segment = self.conversations.read_segment(address, job.segment_id)
         if segment.digest != job.source_segment_digest:
             raise MemoryJobError("sealed ConversationSegment digest does not match its MemoryJob")
         summary_existed = self.summary_service.store.try_read(address, segment) is not None
-        products = await self.segment_products.build(address, segment)
+        with observe_operation(self.observer, "workflow", "memory_plan"):
+            products = await self.segment_products.build(address, segment)
         products.summary.require_matches_source(segment)
         self.jobs.assert_current(lease)
 
         source = MemoryChangeSource.from_job(job)
-        self.change_receipts.prepare(
-            source,
-            products.editor_plan,
-            timestamp=self._timestamp(),
-        )
+        with observe_operation(self.observer, "workflow", "receipt_prepare"):
+            self.change_receipts.prepare(
+                source,
+                products.editor_plan,
+                timestamp=self._timestamp(),
+            )
         self.jobs.assert_current(lease)
-        commit = self.editor.commit(
-            products.editor_plan,
-            transaction_id=job.transaction_id,
-            retain_transaction_journal=True,
-        )
+        with observe_operation(self.observer, "workflow", "l2_commit"):
+            commit = self.editor.commit(
+                products.editor_plan,
+                transaction_id=job.transaction_id,
+                retain_transaction_journal=True,
+            )
         self.jobs.assert_current(lease)
         journal = self.editor.transaction.journal.read(job.transaction_id)
         return MemoryJobCommit(

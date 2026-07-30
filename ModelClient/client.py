@@ -20,6 +20,7 @@ from ModelClient.contracts import (
     ModelResponse,
     ModelResponseError,
     ModelStreamEvent,
+    TokenUsage,
 )
 from ModelClient.retry import normalize_provider_error, retry_delay
 from ModelClient.token_budget import estimate_chat_request_tokens
@@ -64,15 +65,31 @@ class ChatClient:
 
     def complete(self, request: ChatRequest | str) -> ModelResponse:
         normalized = self._request(request)
+        started = time.monotonic()
         with self._sync_slots:
             for attempt in range(self.config.route.max_retries + 1):
                 try:
-                    return self._require_response(self.provider.complete(normalized))
+                    response = self._require_response(self.provider.complete(normalized))
+                    self._observe(
+                        "complete",
+                        ObservationStatus.SUCCESS,
+                        started,
+                        response=response,
+                        retry_count=attempt,
+                    )
+                    return response
                 except Exception as exc:
                     failure = normalize_provider_error(exc)
                     if failure.retryable and attempt < self.config.route.max_retries:
                         self._sleep(self._retry_delay(attempt, failure))
                         continue
+                    self._observe(
+                        "complete",
+                        ObservationStatus.FAILURE,
+                        started,
+                        error=failure,
+                        retry_count=attempt,
+                    )
                     raise failure from exc
         raise AssertionError("chat retry loop exhausted without a result")  # pragma: no cover
 
@@ -83,14 +100,26 @@ class ChatClient:
             for attempt in range(self.config.route.max_retries + 1):
                 try:
                     response = self._require_response(await self.provider.complete_async(normalized))
-                    self._observe("complete_async", ObservationStatus.SUCCESS, started, response=response)
+                    self._observe(
+                        "complete_async",
+                        ObservationStatus.SUCCESS,
+                        started,
+                        response=response,
+                        retry_count=attempt,
+                    )
                     return response
                 except Exception as exc:
                     failure = normalize_provider_error(exc)
                     if failure.retryable and attempt < self.config.route.max_retries:
                         await self._async_sleep(self._retry_delay(attempt, failure))
                         continue
-                    self._observe("complete_async", ObservationStatus.FAILURE, started, error=failure)
+                    self._observe(
+                        "complete_async",
+                        ObservationStatus.FAILURE,
+                        started,
+                        error=failure,
+                        retry_count=attempt,
+                    )
                     raise failure from exc
         raise AssertionError("chat retry loop exhausted without a result")  # pragma: no cover
 
@@ -100,25 +129,50 @@ class ChatClient:
 
     async def stream_async(self, request: ChatRequest | str) -> AsyncIterator[ModelStreamEvent]:
         normalized = self._request(request)
+        started = time.monotonic()
         async with self._async_slot():
             for attempt in range(self.config.route.max_retries + 1):
                 emitted = False
+                usage: TokenUsage | None = None
                 try:
                     async for event in self.provider.stream_async(normalized):
                         if not isinstance(event, ModelStreamEvent):
                             raise ModelResponseError("provider returned an invalid stream event")
                         emitted = True
+                        if event.usage is not None:
+                            usage = event.usage
                         yield event
                     if not emitted:
                         raise ModelResponseError("provider returned an empty stream")
+                    self._observe(
+                        "stream_async",
+                        ObservationStatus.SUCCESS,
+                        started,
+                        usage=usage,
+                        retry_count=attempt,
+                    )
                     return
                 except Exception as exc:
                     failure = normalize_provider_error(exc)
                     if emitted:
+                        self._observe(
+                            "stream_async",
+                            ObservationStatus.FAILURE,
+                            started,
+                            error=failure,
+                            retry_count=attempt,
+                        )
                         raise failure from exc
                     if failure.retryable and attempt < self.config.route.max_retries:
                         await self._async_sleep(self._retry_delay(attempt, failure))
                         continue
+                    self._observe(
+                        "stream_async",
+                        ObservationStatus.FAILURE,
+                        started,
+                        error=failure,
+                        retry_count=attempt,
+                    )
                     raise failure from exc
 
     def health_check(self) -> dict[str, object]:
@@ -140,25 +194,50 @@ class ChatClient:
         await self.provider.aclose()
 
     def _stream_sync(self, request: ChatRequest) -> Iterator[ModelStreamEvent]:
+        started = time.monotonic()
         with self._sync_slots:
             for attempt in range(self.config.route.max_retries + 1):
                 emitted = False
+                usage: TokenUsage | None = None
                 try:
                     for event in self.provider.stream(request):
                         if not isinstance(event, ModelStreamEvent):
                             raise ModelResponseError("provider returned an invalid stream event")
                         emitted = True
+                        if event.usage is not None:
+                            usage = event.usage
                         yield event
                     if not emitted:
                         raise ModelResponseError("provider returned an empty stream")
+                    self._observe(
+                        "stream",
+                        ObservationStatus.SUCCESS,
+                        started,
+                        usage=usage,
+                        retry_count=attempt,
+                    )
                     return
                 except Exception as exc:
                     failure = normalize_provider_error(exc)
                     if emitted:
+                        self._observe(
+                            "stream",
+                            ObservationStatus.FAILURE,
+                            started,
+                            error=failure,
+                            retry_count=attempt,
+                        )
                         raise failure from exc
                     if failure.retryable and attempt < self.config.route.max_retries:
                         self._sleep(self._retry_delay(attempt, failure))
                         continue
+                    self._observe(
+                        "stream",
+                        ObservationStatus.FAILURE,
+                        started,
+                        error=failure,
+                        retry_count=attempt,
+                    )
                     raise failure from exc
 
     def _request(self, request: ChatRequest | str) -> ChatRequest:
@@ -208,17 +287,21 @@ class ChatClient:
         started: float,
         *,
         response: ModelResponse | None = None,
+        usage: TokenUsage | None = None,
         error: ModelClientError | None = None,
+        retry_count: int = 0,
     ) -> None:
         attributes: dict[str, str | int | float | bool] = {
             "provider": self.provider_name,
             "model": self.model,
+            "retry_count": retry_count,
         }
-        if response is not None:
+        resolved_usage = response.usage if response is not None else usage
+        if resolved_usage is not None:
             attributes.update(
-                input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens,
-                total_tokens=response.usage.total_tokens,
+                input_tokens=resolved_usage.input_tokens,
+                output_tokens=resolved_usage.output_tokens,
+                total_tokens=resolved_usage.total_tokens,
             )
         if error is not None:
             attributes["error_code"] = error.code

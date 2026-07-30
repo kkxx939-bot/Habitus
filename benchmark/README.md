@@ -4,7 +4,7 @@
 
 主链路与 OpenViking 的 LoCoMo/LongMemEval benchmark 对齐：
 
-- 对照版本：OpenViking `f0445e0cce5b703cd955ba19378f12b0bcbcd00b`。
+- 本轮边界方法对照版本：本地 OpenViking `291e9c580ffb71c3a17304fd0ebf175a144118c3`。
 - 公开 QA 默认使用 Top-10 和 4000 字符回答内容预算；超预算时整块跳过 Memory、关系节点或 Summary，不截断正文。
 - LoCoMo、LongMemEval 使用各自的回答语义规则；Judge 默认复现 OpenViking 的宽松口径，也可显式切换严格口径。
 - m2bOS 原生数据默认使用严格 Judge，因为 OpenViking 没有六类树、关系迁移、Summary fallback 等对应金标准。
@@ -171,7 +171,88 @@ python -m benchmark coverage \
 
 该命令同时输出 OpenViking 对照 revision、公开 QA 协议和 suite matrix。`--strict` 检查的是数据是否实际覆盖 28 类 m2bOS 记忆场景，不会因为代码中存在某个分支就冒充已覆盖。
 
-## 6. SearchService 与写入争用
+## 6. 产品边界矩阵
+
+`boundary-*` 才用于回答“m2bOS 在什么规模、并发和故障压力下越过产品预算”。它不是 pytest，也不使用 fake Runtime：
+
+- `smoke`：验证真实链路可执行，不形成容量承诺；
+- `standard`：多规模、多并发、多读写比例，三次独立压力点；
+- `stress`：继续提高规模和并发，主动寻找首次不满足预算的位置；
+- `soak`：一小时稳态运行，观察排空和资源增长。
+
+先检查矩阵：
+
+```bash
+python -m benchmark boundary-plan --profile standard
+```
+
+Runtime、VectorStore、生命周期和恢复边界分别运行：
+
+```bash
+python -m benchmark boundary-runtime \
+  --dataset m2bos \
+  --input benchmark/datasets/m2bos_core_v1.json \
+  --config /path/to/config.yaml \
+  --policy benchmark/policies/runtime_reference_v1.json \
+  --output /path/to/empty/runtime-result \
+  --work /path/to/empty/runtime-work \
+  --profile standard
+
+python -m benchmark boundary-vector \
+  --input benchmark/datasets/vector_core_v1.json \
+  --config /path/to/config.yaml \
+  --policy benchmark/policies/vector_reference_v1.json \
+  --output /path/to/empty/vector-result \
+  --work /path/to/empty/vector-work \
+  --profile standard
+
+python -m benchmark boundary-lifecycle \
+  --dataset m2bos \
+  --input benchmark/datasets/m2bos_core_v1.json \
+  --sample 0 \
+  --config /path/to/config.yaml \
+  --policy benchmark/policies/lifecycle_reference_v1.json \
+  --output /path/to/empty/lifecycle-result \
+  --work /path/to/empty/lifecycle-work \
+  --profile standard
+
+python -m benchmark boundary-recovery \
+  --dataset m2bos \
+  --input benchmark/datasets/m2bos_core_v1.json \
+  --sample 0 \
+  --config /path/to/config.yaml \
+  --policy benchmark/policies/recovery_reference_v1.json \
+  --output /path/to/empty/recovery-result \
+  --work /path/to/empty/recovery-work \
+  --profile standard
+```
+
+HTTP 边界从外部调用方执行。写入默认禁止；开启后会产生真实持久数据。`--server-identity` 必须是不可变的代码 SHA 与配置版本组合，防止把不同部署误聚合：
+
+```bash
+M2BOS_HTTP_API_KEY=... python -m benchmark boundary-http \
+  --dataset m2bos \
+  --input benchmark/datasets/m2bos_core_v1.json \
+  --server-url https://memory.example.com \
+  --server-identity fab23d0-config-v3 \
+  --policy benchmark/policies/http_reference_v1.json \
+  --output /path/to/empty/http-result \
+  --profile standard \
+  --allow-writes --seed-dataset
+```
+
+每次运行保留压力点 JSON、JSONL、聚合 JSON 和 Markdown。聚合使用 median/MAD，并分别给出并发边界、规模边界、首次失败点、已测上限、非单调恢复和经验拐点。跨进程结果只能在代码/配置/数据身份一致时聚合：
+
+```bash
+python -m benchmark boundary-aggregate \
+  /path/run-a/run_summary.json /path/run-b/run_summary.json \
+  --policy /path/to/approved-policy.json \
+  --output /path/to/empty/aggregate
+```
+
+`benchmark/policies/*_reference_v1.json` 只是可运行的参考预算，ID 明确标记为 `not-production-sla`。正式结论必须换成产品负责人批准的预算文件。
+
+## 7. 单点 SearchService 与写入诊断
 
 对应 OpenViking 的 Session contention / 检索性能维度，但调用的是 m2bOS 的真实 Runtime：
 
@@ -189,7 +270,7 @@ python -m benchmark load \
 
 输出搜索和写入 QPS、错误率、p50/p95/p99，并等待真实 MemoryJob 队列排空。
 
-## 7. VectorStore 基准
+## 8. 单点 VectorStore 诊断
 
 ```bash
 python -m benchmark vector \
@@ -206,7 +287,7 @@ python -m benchmark vector \
 
 OpenViking 的 `cuvs` 是本地索引专项，而 m2bOS 当前只允许远程 VectorStore，因此不会伪造一个本地 cuVS 对标。OpenViking `vectordb_perf` 的预计算向量和 read-only/write-only 运维模式也不等同于 m2bOS 的端到端 Embedder + VectorStore 基准；两者应分别报告，不能把数字放在同一列直接比较。
 
-## 8. 生命周期与故障恢复
+## 9. 单点生命周期与故障恢复诊断
 
 ```bash
 python -m benchmark lifecycle \

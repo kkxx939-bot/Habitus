@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
 from Config import M2BOSConfig
-from foundation.observability import ObservabilitySnapshot
+from foundation.observability import (
+    ObservabilitySnapshot,
+    ObservationEvent,
+    ObservationStatus,
+    bind_observation_context,
+)
+from infrastructure.observability import AuditRecord
+from infrastructure.store.contracts import LockStoreSnapshot
 from memory.conversation import ConversationAddress
 from memory.editor import MemoryTransactionJournalState
 from memory.intention import MemoryIntentionRecallScope
@@ -37,6 +45,7 @@ from pre.conversation import (
 from Runtime.components import RuntimeComponents
 from Runtime.consistency import MemoryConsistencyService, MemoryConsistencySnapshot
 from Runtime.health import RuntimeHealthReport, RuntimeHealthService
+from Runtime.lifecycle import LifecycleWorkerState
 from Runtime.worker import MemoryWorkerState
 
 
@@ -156,44 +165,84 @@ class Runtime:
     def initialize(self) -> RuntimeInitialization:
         """初始化树；无任务时恢复孤儿事务，有任务时留给租约持有者恢复。"""
 
+        started = time.monotonic()
         if self._state is RuntimeState.CLOSED:
             raise RuntimeStateError("closed runtime cannot be initialized")
         if self._initialization is not None:
             return self._initialization
-        self._ensure_storage_root()
-        self.components.infrastructure.initialize()
-        memory_root = self.components.memory.tree.initialize()
-        self.components.workflow.jobs.initialize()
-        oldest_job = self.components.workflow.jobs.oldest_uncommitted()
-        recovered = self.components.workflow.runner.transaction_recovery.recover_pending() if oldest_job is None else ()
-        initialization = RuntimeInitialization(
-            memory_root=memory_root,
-            recovered_transaction_ids=recovered,
+        try:
+            self._ensure_storage_root()
+            self.components.infrastructure.initialize()
+            memory_root = self.components.memory.tree.initialize()
+            self.components.workflow.jobs.initialize()
+            oldest_job = self.components.workflow.jobs.oldest_uncommitted()
+            recovered = (
+                self.components.workflow.runner.transaction_recovery.recover_pending()
+                if oldest_job is None
+                else ()
+            )
+            initialization = RuntimeInitialization(
+                memory_root=memory_root,
+                recovered_transaction_ids=recovered,
+            )
+            self._initialization = initialization
+            self._state = RuntimeState.READY
+        except Exception as exc:
+            self._observe(
+                "runtime",
+                "initialization",
+                ObservationStatus.FAILURE,
+                started,
+                {"error_type": type(exc).__name__},
+            )
+            raise
+        self._observe(
+            "runtime",
+            "initialization",
+            ObservationStatus.SUCCESS,
+            started,
+            {"recovered_transactions": len(recovered)},
         )
-        self._initialization = initialization
-        self._state = RuntimeState.READY
         return initialization
 
     async def start(self) -> None:
         """完成初始化后依次启动 Job Worker 和生命周期维护 Worker。"""
 
+        started = time.monotonic()
         if self._state is RuntimeState.CLOSED:
             raise RuntimeStateError("closed runtime cannot be started")
-        self.initialize()
-        if self._state is RuntimeState.RUNNING:
-            return
-        await self.components.memory.vector_index.ensure_ready()
-        await self.components.conversation.summary_vector_index.ensure_ready()
-        await self.components.workflow.worker.start()
         try:
-            await self.components.workflow.lifecycle_worker.start()
-        except BaseException:
+            self.initialize()
+            if self._state is RuntimeState.RUNNING:
+                return
+            await self.components.memory.vector_index.ensure_ready()
+            await self.components.conversation.summary_vector_index.ensure_ready()
+            await self.components.workflow.worker.start()
             try:
-                await self.components.workflow.lifecycle_worker.stop()
-            finally:
-                await self.components.workflow.worker.stop()
+                await self.components.workflow.lifecycle_worker.start()
+            except BaseException:
+                try:
+                    await self.components.workflow.lifecycle_worker.stop()
+                finally:
+                    await self.components.workflow.worker.stop()
+                raise
+            self._state = RuntimeState.RUNNING
+        except BaseException as exc:
+            self._observe(
+                "runtime",
+                "start",
+                ObservationStatus.FAILURE,
+                started,
+                {"error_type": type(exc).__name__},
+            )
             raise
-        self._state = RuntimeState.RUNNING
+        self._observe(
+            "runtime",
+            "start",
+            ObservationStatus.SUCCESS,
+            started,
+            {"runtime_state": self._state.value},
+        )
 
     async def stop(self) -> None:
         """停止认领并有界排空 Worker，保留 Runtime 供再次启动。"""
@@ -399,26 +448,49 @@ class Runtime:
             raise ValueError("failed_job must be a FAILED MemoryJob snapshot")
         self._require_initialized("failed memory job retry")
 
-        worker = self.components.workflow.worker
-        restart_worker = self._state is RuntimeState.RUNNING
-        if restart_worker:
-            if worker.state is not MemoryWorkerState.BLOCKED or worker.busy:
-                raise RuntimeStateError(
-                    "running runtime can only retry a failed job after its memory worker is blocked and idle"
-                )
-            await worker.wait_stopped()
+        started = time.monotonic()
+        with bind_observation_context(
+            memory_sequence=failed_job.memory_sequence,
+            transaction_id=failed_job.transaction_id,
+        ):
+            try:
+                worker = self.components.workflow.worker
+                restart_worker = self._state is RuntimeState.RUNNING
+                if restart_worker:
+                    if worker.state is not MemoryWorkerState.BLOCKED or worker.busy:
+                        raise RuntimeStateError(
+                            "running runtime can only retry a failed job after its memory worker is blocked and idle"
+                        )
+                    await worker.wait_stopped()
 
-        reopened = await asyncio.to_thread(
-            self.components.workflow.jobs.retry_failed,
-            failed_job,
-        )
-        if restart_worker:
-            await worker.start()
-        return MemoryJobRetryResult(
-            failed_job=failed_job,
-            reopened_job=reopened,
-            worker_restarted=restart_worker,
-        )
+                reopened = await asyncio.to_thread(
+                    self.components.workflow.jobs.retry_failed,
+                    failed_job,
+                )
+                if restart_worker:
+                    await worker.start()
+                result = MemoryJobRetryResult(
+                    failed_job=failed_job,
+                    reopened_job=reopened,
+                    worker_restarted=restart_worker,
+                )
+            except Exception as exc:
+                self._observe(
+                    "operations",
+                    "retry_job",
+                    ObservationStatus.FAILURE,
+                    started,
+                    {"error_type": type(exc).__name__, "job_status": failed_job.status.value},
+                )
+                raise
+            self._observe(
+                "operations",
+                "retry_job",
+                ObservationStatus.SUCCESS,
+                started,
+                {"job_status": reopened.status.value},
+            )
+            return result
 
     async def abandon_failed_memory_job(
         self,
@@ -525,6 +597,81 @@ class Runtime:
 
         return await self._health.report(self._state.value, deep=deep)
 
+    async def refresh_observability(self) -> ObservabilitySnapshot:
+        """只读刷新队列、Worker 和锁聚合值；采集失败不阻断业务或指标端点。"""
+
+        attributes: dict[str, str | int | float | bool] = {}
+        status = ObservationStatus.SUCCESS
+        try:
+            queue = await asyncio.to_thread(self.components.workflow.jobs.observability_snapshot)
+            attributes.update(
+                queue_staged=queue.staged,
+                queue_queued=queue.queued,
+                queue_running=queue.running,
+                queue_failed=queue.failed,
+                queue_committed=queue.committed,
+                queue_oldest_age_seconds=queue.oldest_age_seconds,
+                queue_high_watermark=queue.high_watermark,
+            )
+        except Exception as exc:
+            status = ObservationStatus.DEGRADED
+            attributes["queue_error_type"] = type(exc).__name__
+        snapshotter = getattr(self.components.infrastructure.path_lock.lock_store, "observability_snapshot", None)
+        if callable(snapshotter):
+            try:
+                lock_snapshot = await asyncio.to_thread(
+                    snapshotter,
+                    warning_seconds=float(self.config.observability.lock_warning_seconds),
+                )
+                if not isinstance(lock_snapshot, LockStoreSnapshot):
+                    raise TypeError("lock store returned an invalid observability snapshot")
+                attributes.update(
+                    active_locks=lock_snapshot.active_count,
+                    hanging_locks=lock_snapshot.hanging_count,
+                    max_active_lock_age_seconds=lock_snapshot.max_active_age_seconds,
+                )
+            except Exception as exc:
+                status = ObservationStatus.DEGRADED
+                attributes["lock_error_type"] = type(exc).__name__
+        registry = self.components.infrastructure.observability
+        for memory_worker_state in MemoryWorkerState:
+            registry.set_gauge(
+                "memory_worker_state",
+                int(memory_worker_state is self.components.workflow.worker.state),
+                labels={"worker_state": memory_worker_state.value},
+            )
+        for lifecycle_worker_state in LifecycleWorkerState:
+            registry.set_gauge(
+                "lifecycle_worker_state",
+                int(lifecycle_worker_state is self.components.workflow.lifecycle_worker.state),
+                labels={"worker_state": lifecycle_worker_state.value},
+            )
+        manager = self.components.infrastructure.managed_observability
+        if manager is not None:
+            backend_status, _detail = manager.health()
+            registry.set_gauge("observability_backend_healthy", 1 if backend_status == "healthy" else 0)
+        observer = self.components.infrastructure.observer
+        if observer is not None:
+            observer.record(
+                ObservationEvent(
+                    category="observability",
+                    operation="snapshot",
+                    status=status,
+                    duration_seconds=0.0,
+                    attributes=attributes,
+                )
+            )
+        return registry.snapshot()
+
+    async def recent_audit_events(self, *, limit: int = 100) -> tuple[AuditRecord, ...]:
+        """读取最小安全与运维审计；没有启用审计时返回空结果。"""
+
+        self._require_initialized("audit event read")
+        manager = self.components.infrastructure.managed_observability
+        if manager is None:
+            return ()
+        return await asyncio.to_thread(manager.recent_audit, limit=limit)
+
     def metrics_snapshot(self) -> ObservabilitySnapshot:
         """返回进程内指标不可变快照，供 HTTP/OTel Adapter 导出。"""
 
@@ -556,6 +703,9 @@ class Runtime:
                     try:
                         await self.components.models.aclose()
                     finally:
+                        manager = self.components.infrastructure.managed_observability
+                        if manager is not None:
+                            manager.close()
                         self._state = RuntimeState.CLOSED
 
     async def __aenter__(self) -> Runtime:
@@ -607,6 +757,30 @@ class Runtime:
                 directory.chmod(0o700)
             except OSError:
                 pass
+
+    def _observe(
+        self,
+        category: str,
+        operation: str,
+        status: ObservationStatus,
+        started: float,
+        attributes: dict[str, str | int | float | bool],
+    ) -> None:
+        observer = self.components.infrastructure.observer
+        if observer is None:
+            return
+        try:
+            observer.record(
+                ObservationEvent(
+                    category=category,
+                    operation=operation,
+                    status=status,
+                    duration_seconds=max(0.0, time.monotonic() - started),
+                    attributes=attributes,
+                )
+            )
+        except Exception:
+            pass
 
 
 __all__ = [

@@ -20,7 +20,7 @@ from ModelClient.config import (
 )
 from ModelClient.contracts import ChatProvider, ModelConfigurationError
 from ModelClient.embedding import Embedder, EmbeddingClient, EmbeddingProvider
-from ModelClient.rerank import Reranker
+from ModelClient.rerank import ObservedReranker, RerankClient, Reranker, RerankProvider
 
 _ADAPTER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 
@@ -129,9 +129,12 @@ class ProviderFactory:
         config: RerankModelConfig,
         *,
         environ: Mapping[str, str] | None = None,
+        observer: Observer | None = None,
     ) -> Reranker:
         component = self.create(config, environ=environ)
-        return cast(Reranker, component)
+        provider = cast(RerankProvider, component)
+        reranker: Reranker = RerankClient(config, provider)
+        return reranker if observer is None else ObservedReranker(reranker, observer=observer)
 
     @staticmethod
     def _credential(route: ProviderConfig, environ: Mapping[str, str]) -> str:

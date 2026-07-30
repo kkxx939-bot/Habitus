@@ -160,6 +160,7 @@ class EmbeddingClient:
 
     async def _embed_one(self, text: str, *, is_query: bool) -> EmbeddingVector:
         operation = "embed_query" if is_query else "embed_document"
+        operation_started = self._monotonic()
         for attempt in range(self.config.route.max_retries + 1):
             failure: ModelClientError | None = None
             source_error: Exception | None = None
@@ -179,8 +180,12 @@ class EmbeddingClient:
                         category="model",
                         operation=operation,
                         status=ObservationStatus.SUCCESS,
-                        duration_seconds=max(0.0, self._monotonic() - started),
-                        attributes={"provider": self.provider_name, "model": self.model},
+                        duration_seconds=max(0.0, self._monotonic() - operation_started),
+                        attributes={
+                            "provider": self.provider_name,
+                            "model": self.model,
+                            "retry_count": attempt,
+                        },
                     )
                 )
                 return vector
@@ -207,11 +212,12 @@ class EmbeddingClient:
                     category="model",
                     operation=operation,
                     status=ObservationStatus.FAILURE,
-                    duration_seconds=max(0.0, duration_seconds),
+                    duration_seconds=max(0.0, self._monotonic() - operation_started),
                     attributes={
                         "provider": self.provider_name,
                         "model": self.model,
                         "error_code": failure.code,
+                        "retry_count": attempt,
                     },
                 )
             )

@@ -2,7 +2,8 @@
 
 from ModelClient.adapters.ark_multimodal import ArkMultimodalEmbeddingProvider
 from ModelClient.adapters.openai_compatible_chat import OpenAICompatibleChatProvider
-from ModelClient.config import ChatModelConfig, EmbeddingModelConfig
+from ModelClient.adapters.openai_compatible_rerank import OpenAICompatibleRerankProvider
+from ModelClient.config import ChatModelConfig, EmbeddingModelConfig, RerankModelConfig
 from ModelClient.contracts import ModelConfigurationError
 from ModelClient.factory import ProviderBuildContext, ProviderFactory
 
@@ -31,6 +32,19 @@ def build_openai_compatible_chat_provider(
     return OpenAICompatibleChatProvider(config, api_key=context.api_key)
 
 
+def build_openai_compatible_rerank_provider(
+    context: ProviderBuildContext,
+) -> OpenAICompatibleRerankProvider:
+    """从统一构造上下文创建一个 OpenAI-compatible Rerank Provider。"""
+
+    config = context.config
+    if not isinstance(config, RerankModelConfig):
+        raise ModelConfigurationError(
+            "openai_compatible_rerank adapter requires RerankModelConfig"
+        )
+    return OpenAICompatibleRerankProvider(config, api_key=context.api_key)
+
+
 def register_builtin_adapters(factory: ProviderFactory) -> None:
     """注册 m2bOS 当前内置的协议适配器，不执行任何外部调用。"""
 
@@ -46,12 +60,19 @@ def register_builtin_adapters(factory: ProviderFactory) -> None:
         "openai_compatible_chat",
         build_openai_compatible_chat_provider,
     )
+    factory.register_adapter(
+        "rerank",
+        "openai_compatible_rerank",
+        build_openai_compatible_rerank_provider,
+    )
 
 
 __all__ = [
     "ArkMultimodalEmbeddingProvider",
     "OpenAICompatibleChatProvider",
+    "OpenAICompatibleRerankProvider",
     "build_ark_multimodal_embedding_provider",
     "build_openai_compatible_chat_provider",
+    "build_openai_compatible_rerank_provider",
     "register_builtin_adapters",
 ]

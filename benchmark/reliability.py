@@ -29,14 +29,21 @@ from Runtime import build_runtime
 
 
 class TransientFailureVectorStore:
-    """仅在指定发布操作失败一次，其余请求全部委托真实 VectorStore。"""
+    """在指定发布操作连续失败有限次数，其余请求全部委托真实 VectorStore。"""
 
-    def __init__(self, delegate: VectorStore, *, operation: str = "apply") -> None:
+    def __init__(self, delegate: VectorStore, *, operation: str = "apply", failures: int = 1) -> None:
         if operation not in {"apply", "replace_all"}:
             raise ValueError("fault operation must be apply or replace_all")
+        if isinstance(failures, bool) or not isinstance(failures, int) or not 1 <= failures <= 100:
+            raise ValueError("failures must be between one and 100")
         self.delegate = delegate
         self.operation = operation
-        self.injected = False
+        self.failures = failures
+        self.injected_count = 0
+
+    @property
+    def injected(self) -> bool:
+        return self.injected_count > 0
 
     @property
     def adapter_name(self) -> str:
@@ -118,9 +125,11 @@ class TransientFailureVectorStore:
         await self.delegate.close()
 
     def _fail(self, operation: str) -> None:
-        if not self.injected and operation == self.operation:
-            self.injected = True
-            raise VectorStoreBusyError(f"benchmark injected one transient {operation} failure")
+        if self.injected_count < self.failures and operation == self.operation:
+            self.injected_count += 1
+            raise VectorStoreBusyError(
+                f"benchmark injected transient {operation} failure {self.injected_count}/{self.failures}"
+            )
 
 
 class RecoveryBenchmark:

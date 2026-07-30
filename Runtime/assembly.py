@@ -6,6 +6,7 @@ from collections.abc import Mapping
 
 from Config import M2BOSConfig
 from foundation.observability import CompositeObserver, MetricRegistry, Observer
+from infrastructure.observability import ManagedObservability
 from infrastructure.store.contracts import PathLock
 from infrastructure.store.sqlite import SQLiteLockStore
 from infrastructure.vector import VectorStoreFactory, VectorStoreRequirements
@@ -92,19 +93,31 @@ def build_runtime(
 
     resolved_providers = providers or _builtin_provider_factory()
     resolved_vector_stores = vector_stores or register_builtin_vector_adapters()
+    metrics_config = config.observability.metrics
+    observability = MetricRegistry(
+        enabled=metrics_config.enabled,
+        namespace=metrics_config.namespace,
+        max_recent_events=metrics_config.max_recent_events,
+        duration_buckets=metrics_config.duration_buckets_seconds,
+    )
+    managed_observability = ManagedObservability(
+        config.observability,
+        workflow_root=config.workflow_root,
+    )
+    observers: list[Observer] = [observability, managed_observability]
+    if observer is not None:
+        observers.append(observer)
+    operation_observer: Observer = CompositeObserver(*observers)
     resolved_lock = path_lock or PathLock(
         SQLiteLockStore(
             config.workflow_root / "locks.sqlite3",
             config=config.storage.sqlite_lock,
             initialize=False,
-        )
+        ),
+        observer=operation_observer,
     )
 
     schema_registry = MemorySchemaRegistry.load_default()
-    observability = MetricRegistry()
-    operation_observer: Observer = (
-        observability if observer is None else CompositeObserver(observability, observer)
-    )
     codec = MemoryDocumentCodec(schema_registry)
     model_config = config.models
     conversation_config = config.conversation
@@ -124,7 +137,11 @@ def build_runtime(
         observer=operation_observer,
     )
     reranker = (
-        resolved_providers.create_reranker(model_config.rerank, environ=environ)
+        resolved_providers.create_reranker(
+            model_config.rerank,
+            environ=environ,
+            observer=operation_observer,
+        )
         if model_config.rerank is not None
         else None
     )
@@ -338,8 +355,14 @@ def build_runtime(
         summaries,
         summary_vector_index,
         receipts,
+        observer=operation_observer,
     )
-    worker = MemoryWorker(runner, workflow_config.worker, observer=operation_observer)
+    worker = MemoryWorker(
+        runner,
+        workflow_config.worker,
+        observer=operation_observer,
+        span_controller=managed_observability,
+    )
     lifecycle_worker = LifecycleWorker(
         conversation_lifecycle,
         conversation_config.lifecycle,
@@ -352,6 +375,7 @@ def build_runtime(
             vector_stores=resolved_vector_stores,
             observability=observability,
             observer=operation_observer,
+            managed_observability=managed_observability,
         ),
         models=RuntimeModels(
             providers=resolved_providers,

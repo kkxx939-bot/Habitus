@@ -79,6 +79,21 @@ class FakeEmbeddingProvider:
         self.closed = True
 
 
+class FakeRerankProvider:
+    is_remote = False
+
+    def __init__(self, provider_name: str, model: str) -> None:
+        self.provider_name = provider_name
+        self.model = model
+        self.closed = False
+
+    async def rerank(self, _query: str, documents) -> tuple[float, ...]:
+        return tuple(1.0 for _ in documents)
+
+    async def aclose(self):
+        self.closed = True
+
+
 class FakeVectorBackend:
     adapter_name = "fake_vector"
     max_records = 100_000
@@ -144,6 +159,11 @@ def runtime_dependencies() -> tuple[ProviderFactory, VectorStoreFactory]:
             context.config.dimension,
         ),
     )
+    providers.register_adapter(
+        "rerank",
+        "fake_rerank",
+        lambda context: FakeRerankProvider(context.route.provider, context.route.model),
+    )
     vectors = VectorStoreFactory()
     vectors.register_adapter(
         "fake_vector",
@@ -166,6 +186,11 @@ def runtime_config(tmp_path: Path) -> M2BOSConfig:
     payload["models"]["embedding"]["route"].update(
         provider="fake",
         adapter="fake_embedding",
+        api_key_env=None,
+    )
+    payload["models"]["rerank"]["route"].update(
+        provider="fake",
+        adapter="fake_rerank",
         api_key_env=None,
     )
     for name in ("vector_store",):
