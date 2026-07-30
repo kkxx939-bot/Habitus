@@ -98,6 +98,19 @@ class RecallRequest(StrictSchema):
         return self
 
 
+class FlushRequest(StrictSchema):
+    conversation_id: Annotated[str, Field(min_length=1, max_length=256)]
+    started_on: date
+    wait_timeout_seconds: PositiveTimeout | None = None
+
+    @field_validator("conversation_id")
+    @classmethod
+    def validate_conversation_id(cls, value: str) -> str:
+        if value != value.strip():
+            raise ValueError("conversation_id must not contain surrounding whitespace")
+        return value
+
+
 class ProtocolsResult(StrictSchema):
     protocols: list[str]
 
@@ -117,8 +130,18 @@ class ConsistencyResult(StrictSchema):
 class RememberResult(StrictSchema):
     ignored_items: NonNegativeSequence
     after_turn: bool
+    next_sequence: NonNegativeSequence
     jobs: list[RememberJobResult]
     consistency: list[ConsistencyResult]
+
+
+class FlushResult(StrictSchema):
+    jobs: list[RememberJobResult]
+    consistency: list[ConsistencyResult]
+
+
+class ConversationCursorResult(StrictSchema):
+    next_sequence: NonNegativeSequence
 
 
 class RecallMemoryResult(StrictSchema):
@@ -250,6 +273,9 @@ __all__ = [
     "HTTPErrorCode",
     "BlockedJobResult",
     "AuditListResult",
+    "ConversationCursorResult",
+    "FlushRequest",
+    "FlushResult",
     "HealthResult",
     "JobListResult",
     "JobStatusResult",

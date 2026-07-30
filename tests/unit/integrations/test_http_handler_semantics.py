@@ -10,6 +10,15 @@ from unittest.mock import AsyncMock
 import pytest
 
 from integrations.http import HTTPMemoryJobConflictError, RuntimeHTTPHandlers
+from integrations.sdk import (
+    AgentFlushResult,
+    AgentHookSession,
+    AgentMemoryHooks,
+    AgentRecallResult,
+    AgentRememberResult,
+    ConversationRef,
+    PreparedAgentTurn,
+)
 from memory.workflow import MemoryJob, MemoryJobStatus
 from Runtime import (
     MemoryConsistencySnapshot,
@@ -22,14 +31,20 @@ UTC = timezone.utc
 
 def _runtime(*, adapted_after_turn: bool) -> Runtime:
     runtime = object.__new__(Runtime)
-    runtime.append_protocol_conversation = AsyncMock(  # type: ignore[method-assign]
-        return_value=SimpleNamespace(
+    async def append_protocol_conversation(_address: object, **values: object) -> SimpleNamespace:
+        override = values["after_turn"]
+        return SimpleNamespace(
             adaptation=SimpleNamespace(
                 ignored_items=0,
                 after_turn=adapted_after_turn,
             ),
             ingest=SimpleNamespace(jobs=()),
+            effective_after_turn=(adapted_after_turn if override is None else override),
+            next_sequence=2,
         )
+
+    runtime.append_protocol_conversation = AsyncMock(  # type: ignore[method-assign]
+        side_effect=append_protocol_conversation
     )
     return runtime
 
@@ -92,6 +107,105 @@ def test_remember_reports_adapter_boundary_when_caller_does_not_override_it() ->
     )
 
     assert result["after_turn"] is True
+    assert result["next_sequence"] == 2
+
+
+def test_agent_hooks_cover_resume_recall_remember_checkpoint_and_close() -> None:
+    address_date = date(2026, 7, 30)
+    recalled = AgentRecallResult(
+        query="用户偏好",
+        queries=("用户偏好",),
+        context="用户偏好简洁回答。",
+        memories=(),
+        summaries=(),
+        degradations=(),
+        budget_exhausted=False,
+    )
+    memory = SimpleNamespace(
+        cursor=AsyncMock(return_value=4),
+        recall=AsyncMock(return_value=recalled),
+        remember=AsyncMock(
+            return_value=AgentRememberResult(
+                ignored_items=0,
+                after_turn=True,
+                next_sequence=6,
+            )
+        ),
+        flush=AsyncMock(return_value=AgentFlushResult()),
+    )
+    hooks = AgentMemoryHooks(memory)
+
+    async def scenario() -> None:
+        session = await hooks.resume_session(
+            "conversation-hooks",
+            address_date,
+            "openai_chat_completions",
+        )
+        assert session.next_sequence == 4
+        assert AgentHookSession.from_dict(session.to_dict()) == session
+
+        before = await hooks.before_turn(session, "用户偏好")
+        assert before.context == "用户偏好简洁回答。"
+        prepared = hooks.prepare_after_turn(
+            session,
+            {"messages": [{"role": "assistant", "content": "好的"}]},
+            occurred_at=datetime(2026, 7, 30, tzinfo=UTC),
+            after_turn=True,
+        )
+        assert PreparedAgentTurn.from_dict(prepared.to_dict()) == prepared
+        after = await hooks.after_turn(prepared)
+        assert session.next_sequence == 4
+        assert after.session.next_sequence == 6
+        closed = await hooks.on_session_close(after.session, wait_timeout_seconds=2.0)
+        assert closed.session == after.session
+
+    asyncio.run(scenario())
+
+    memory.cursor.assert_awaited_once()
+    assert memory.recall.await_args.kwargs["conversation"].conversation_id == "conversation-hooks"
+    assert memory.remember.await_args.kwargs["start_sequence"] == 4
+    assert memory.remember.await_args.kwargs["protocol"] == "openai_chat_completions"
+    assert memory.flush.await_args.kwargs["wait_timeout_seconds"] == 2.0
+
+
+def test_agent_hook_retries_the_same_prepared_turn_without_advancing_after_failure() -> None:
+    session = AgentMemoryHooks.new_session(
+        "conversation-hooks-failure",
+        date(2026, 7, 30),
+        "anthropic_messages",
+    )
+    remembered = AgentRememberResult(
+        ignored_items=0,
+        after_turn=True,
+        next_sequence=2,
+    )
+    memory = SimpleNamespace(
+        cursor=AsyncMock(return_value=0),
+        recall=AsyncMock(),
+        remember=AsyncMock(side_effect=(TimeoutError("response lost"), remembered)),
+        flush=AsyncMock(),
+    )
+    hooks = AgentMemoryHooks(memory)
+    prepared = hooks.prepare_after_turn(
+        session,
+        {"messages": [{"role": "assistant", "content": "结果"}]},
+        occurred_at=datetime(2026, 7, 30, tzinfo=UTC),
+        after_turn=True,
+    )
+
+    with pytest.raises(TimeoutError, match="response lost"):
+        asyncio.run(hooks.after_turn(prepared))
+
+    assert session.next_sequence == 0
+    result = asyncio.run(hooks.after_turn(PreparedAgentTurn.from_dict(prepared.to_dict())))
+    assert result.session.next_sequence == 2
+    first, second = memory.remember.await_args_list
+    assert first.kwargs == second.kwargs
+
+
+def test_sdk_conversation_ref_rejects_datetime_as_started_on() -> None:
+    with pytest.raises(TypeError, match="calendar date"):
+        ConversationRef("conversation-invalid-date", datetime(2026, 7, 30, tzinfo=UTC))
 
 
 def test_job_queries_apply_reverse_pagination_filtering_and_safe_failure_details() -> None:
@@ -183,10 +297,6 @@ def test_retry_requires_exact_current_blocker_version_and_returns_reopened_job()
     runtime.retry_failed_memory_job.assert_awaited_once_with(failed)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="M2BOS-BUG-HTTP-002: remember response reports adapter boundary instead of explicit override",
-)
 def test_remember_reports_the_effective_true_override() -> None:
     handler = RuntimeHTTPHandlers(_runtime(adapted_after_turn=False))
 
@@ -205,10 +315,6 @@ def test_remember_reports_the_effective_true_override() -> None:
     assert result["after_turn"] is True
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="M2BOS-BUG-HTTP-002: remember response reports adapter boundary instead of explicit override",
-)
 def test_remember_reports_the_effective_false_override() -> None:
     handler = RuntimeHTTPHandlers(_runtime(adapted_after_turn=True))
 

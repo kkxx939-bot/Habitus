@@ -121,6 +121,21 @@ class RuntimeConversationProtocolIngestResult:
 
     adaptation: ConversationAdaptation
     ingest: ConversationMemoryIngestResult
+    effective_after_turn: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.adaptation, ConversationAdaptation):
+            raise TypeError("adaptation must be ConversationAdaptation")
+        if not isinstance(self.ingest, ConversationMemoryIngestResult):
+            raise TypeError("ingest must be ConversationMemoryIngestResult")
+        if not isinstance(self.effective_after_turn, bool):
+            raise TypeError("effective_after_turn must be boolean")
+
+    @property
+    def next_sequence(self) -> int:
+        """返回写入锁内确认的 Conversation 权威下一序号。"""
+
+        return self.ingest.append.next_sequence
 
 
 # TODO(memory-tree-public-read): 前端树形展示协议确定后，再增加独立公共读取服务；当前不得泄露内部存储布局。
@@ -339,7 +354,7 @@ class Runtime:
             after_turn=resolved_after_turn,
             omit_tool_call_ids=omit_tool_call_ids,
         )
-        return RuntimeConversationProtocolIngestResult(adaptation, ingest)
+        return RuntimeConversationProtocolIngestResult(adaptation, ingest, resolved_after_turn)
 
     def conversation_protocols(self) -> tuple[str, ...]:
         """返回当前显式注册的协议名，供 HTTP/Agent 接入层发现能力。"""
@@ -383,6 +398,12 @@ class Runtime:
 
         self._require_initialized("conversation read")
         return await asyncio.to_thread(self.components.conversation.journal.read_live, address)
+
+    async def conversation_cursor(self, address: ConversationAddress) -> int:
+        """读取服务端耐久 Conversation 的下一消息序号。"""
+
+        self._require_initialized("conversation cursor read")
+        return await asyncio.to_thread(self.components.conversation.journal.next_sequence, address)
 
     async def list_conversation_history(
         self,

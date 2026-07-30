@@ -1,16 +1,1 @@
-"""复用 Runtime 应用接口的外部 Agent 与 HTTP 传输边界。"""
-
-from integrations.agent import AgentMemoryGateway, AgentRememberResult
-from integrations.http import (
-    HTTPMemoryJobConflictError,
-    HTTPMemoryJobNotFoundError,
-    RuntimeHTTPHandlers,
-)
-
-__all__ = [
-    "AgentMemoryGateway",
-    "AgentRememberResult",
-    "HTTPMemoryJobConflictError",
-    "HTTPMemoryJobNotFoundError",
-    "RuntimeHTTPHandlers",
-]
+"""m2bOS 外部集成命名空间；具体能力必须从明确子模块导入。"""

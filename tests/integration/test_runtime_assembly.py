@@ -3,6 +3,7 @@
 import asyncio
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -11,7 +12,9 @@ from Config import M2BOSConfig
 from infrastructure.store.contracts import PathLock
 from infrastructure.store.locks import ProcessLocalLockStore
 from infrastructure.vector import VectorStoreFactory
-from integrations import RuntimeHTTPHandlers
+from integrations.agent import AgentMemoryGateway
+from integrations.http import RuntimeHTTPHandlers
+from integrations.sdk import AgentMemoryHooks, PreparedAgentTurn
 from memory.conversation import ConversationAddress
 from memory.model import MemoryKind
 from memory.retrieval import MemoryRetrievalSufficiency
@@ -307,20 +310,61 @@ def test_runtime_public_conversation_interface_returns_pending_consistency_handl
         )
         runtime.initialize()
         address = ConversationAddress("conversation-public", date(2026, 7, 28))
+        assert await runtime.conversation_cursor(address) == 0
+        payload = {
+            "messages": [
+                {"role": "user", "content": "记住我喜欢简洁回答"},
+                {"role": "assistant", "content": "好的"},
+            ]
+        }
         result = await runtime.append_protocol_conversation(
             address,
             protocol="openai_chat_completions",
-            payload={
-                "messages": [
-                    {"role": "user", "content": "记住我喜欢简洁回答"},
-                    {"role": "assistant", "content": "好的"},
-                ]
-            },
+            payload=payload,
             start_sequence=0,
             occurred_at=BASE_TIME,
             after_turn=False,
         )
         assert result.ingest.jobs == ()
+        assert result.effective_after_turn is False
+        assert result.next_sequence == 2
+        assert await runtime.conversation_cursor(address) == 2
+        replayed = await runtime.append_protocol_conversation(
+            address,
+            protocol="openai_chat_completions",
+            payload=payload,
+            start_sequence=0,
+            occurred_at=BASE_TIME,
+            after_turn=False,
+        )
+        assert replayed.ingest.append.status.value == "unchanged"
+        assert replayed.next_sequence == 2
+        second_payload = {
+            "messages": [
+                {"role": "user", "content": "第二轮"},
+                {"role": "assistant", "content": "继续保持简洁"},
+            ]
+        }
+        second = await runtime.append_protocol_conversation(
+            address,
+            protocol="openai_chat_completions",
+            payload=second_payload,
+            start_sequence=2,
+            occurred_at=BASE_TIME,
+            after_turn=False,
+        )
+        assert second.next_sequence == 4
+        stale_replay = await runtime.append_protocol_conversation(
+            address,
+            protocol="openai_chat_completions",
+            payload=payload,
+            start_sequence=0,
+            occurred_at=BASE_TIME,
+            after_turn=False,
+        )
+        assert stale_replay.ingest.append.status.value == "unchanged"
+        assert stale_replay.next_sequence == 4
+        assert await runtime.conversation_cursor(address) == 4
         flushed = await runtime.flush_conversation(address)
         assert len(flushed.jobs) == 1
         consistency = await runtime.memory_consistency(flushed.jobs[0])
@@ -343,6 +387,65 @@ def test_runtime_public_conversation_interface_returns_pending_consistency_handl
         status, readiness = await http.readiness()
         assert status in {200, 503}
         assert readiness["status"] in {"healthy", "degraded", "unhealthy"}
+
+        hooks = AgentMemoryHooks(AgentMemoryGateway(runtime))
+        hook_session = hooks.new_session(
+            "conversation-hook-runtime",
+            date(2026, 7, 28),
+            "openai_chat_completions",
+        )
+        prepared = hooks.prepare_after_turn(
+            hook_session,
+            payload,
+            occurred_at=BASE_TIME,
+            after_turn=False,
+        )
+        hook_result = await hooks.after_turn(prepared)
+        assert hook_result.session.next_sequence == 2
+        hook_closed = await hooks.on_session_close(hook_result.session)
+        assert len(hook_closed.flush.jobs) == 1
+
+        retry_gateway = AgentMemoryGateway(runtime)
+        attempts = 0
+
+        async def remember_then_lose_response(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            remembered = await retry_gateway.remember(*args, **kwargs)
+            if attempts == 1:
+                raise TimeoutError("simulated lost response")
+            return remembered
+
+        retry_hooks = AgentMemoryHooks(
+            SimpleNamespace(
+                remember=remember_then_lose_response,
+                recall=retry_gateway.recall,
+                flush=retry_gateway.flush,
+                cursor=retry_gateway.cursor,
+            )
+        )
+        retry_session = retry_hooks.new_session(
+            "conversation-hook-retry",
+            date(2026, 7, 28),
+            "openai_chat_completions",
+        )
+        retry_prepared = retry_hooks.prepare_after_turn(
+            retry_session,
+            payload,
+            occurred_at=BASE_TIME,
+            after_turn=False,
+        )
+        with pytest.raises(TimeoutError, match="simulated lost response"):
+            await retry_hooks.after_turn(retry_prepared)
+        retry_address = ConversationAddress("conversation-hook-retry", date(2026, 7, 28))
+        assert await runtime.conversation_cursor(retry_address) == 2
+        restored_prepared = PreparedAgentTurn.from_dict(retry_prepared.to_dict())
+        retry_result = await retry_hooks.after_turn(restored_prepared)
+        assert retry_result.session.next_sequence == 2
+        retry_live = await runtime.read_live_conversation(retry_address)
+        assert retry_live is not None and len(retry_live.messages) == 2
+        retry_closed = await retry_hooks.on_session_close(retry_result.session)
+        assert len(retry_closed.flush.jobs) == 1
         await runtime.close()
 
     asyncio.run(scenario())

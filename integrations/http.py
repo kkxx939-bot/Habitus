@@ -7,6 +7,8 @@ import re
 from datetime import date, datetime
 
 from integrations.agent import AgentMemoryGateway
+from integrations.sdk.contracts import ConversationRef
+from integrations.sdk.wire import encode_flush, encode_recall, encode_remember
 from memory.conversation import ConversationAddress
 from memory.intention import MemoryIntentionRecallScope
 from memory.model import MemoryKind
@@ -54,8 +56,8 @@ class RuntimeHTTPHandlers:
     ) -> dict[str, object]:
         """供 HTTP 路由层调用的协议写入 handler；URL、认证和 owner 由上层决定。"""
 
-        result = await self.agent.remember(
-            ConversationAddress(conversation_id, started_on),
+        detailed = await self.agent.remember_with_runtime_jobs(
+            ConversationRef(conversation_id, started_on),
             protocol=protocol,
             payload=payload,
             start_sequence=start_sequence,
@@ -63,29 +65,46 @@ class RuntimeHTTPHandlers:
             after_turn=after_turn,
             wait_timeout_seconds=wait_timeout_seconds,
         )
-        return {
-            "ignored_items": result.ingest.adaptation.ignored_items,
-            "after_turn": result.ingest.adaptation.after_turn,
-            "jobs": [
-                {
-                    "memory_sequence": job.memory_sequence,
-                    "conversation_id": job.conversation_id,
-                    "started_on": job.started_on.isoformat(),
-                    "segment_id": job.segment_id,
-                    "source_segment_digest": job.source_segment_digest,
-                    "transaction_id": job.transaction_id,
-                    "status": job.status.value,
-                }
-                for job in result.ingest.ingest.jobs
-            ],
-            "consistency": [
-                {
-                    "memory_sequence": snapshot.requested_job.memory_sequence,
-                    "state": snapshot.state.value,
-                }
-                for snapshot in result.consistency
-            ],
-        }
+        result = detailed.public
+        runtime_jobs = {job.memory_sequence: job for job in detailed.runtime_jobs}
+        payload_result = encode_remember(result)
+        jobs = payload_result["jobs"]
+        if not isinstance(jobs, list):
+            raise RuntimeError("remember wire encoder returned invalid jobs")
+        for job in jobs:
+            if not isinstance(job, dict):
+                raise RuntimeError("remember wire encoder returned an invalid job")
+            sequence = job.get("memory_sequence")
+            if not isinstance(sequence, int):
+                raise RuntimeError("remember wire encoder omitted memory_sequence")
+            job["transaction_id"] = runtime_jobs[sequence].transaction_id
+        return payload_result
+
+    async def conversation_cursor(
+        self,
+        *,
+        conversation_id: str,
+        started_on: date,
+    ) -> dict[str, object]:
+        """返回 Agent 恢复同一 Conversation 时应继续使用的耐久序号。"""
+
+        next_sequence = await self.agent.cursor(ConversationRef(conversation_id, started_on))
+        return {"next_sequence": next_sequence}
+
+    async def flush(
+        self,
+        *,
+        conversation_id: str,
+        started_on: date,
+        wait_timeout_seconds: float | None = None,
+    ) -> dict[str, object]:
+        """在 Agent 会话关闭边界显式提交剩余完整轮次。"""
+
+        result = await self.agent.flush(
+            ConversationRef(conversation_id, started_on),
+            wait_timeout_seconds=wait_timeout_seconds,
+        )
+        return encode_flush(result)
 
     async def recall(
         self,
@@ -101,40 +120,17 @@ class RuntimeHTTPHandlers:
 
         if (conversation_id is None) != (started_on is None):
             raise ValueError("conversation_id and started_on must be provided together")
-        address = (
-            None if conversation_id is None or started_on is None else ConversationAddress(conversation_id, started_on)
+        conversation = (
+            None if conversation_id is None or started_on is None else ConversationRef(conversation_id, started_on)
         )
         result = await self.agent.recall(
             query,
-            conversation=address,
+            conversation=conversation,
             limit=limit,
-            kinds=kinds,
-            intention_scope=intention_scope,
+            kinds=tuple(kind.value for kind in kinds),
+            intention_scope=intention_scope.value,
         )
-        return {
-            "query": result.query,
-            "queries": [item.query for item in result.plan.queries],
-            "context": result.context,
-            "memories": [
-                {
-                    "uri": str(memory.uri),
-                    "score": memory.hit.score,
-                    "matched_queries": list(memory.matched_queries),
-                }
-                for memory in result.memories
-            ],
-            "summaries": [
-                {
-                    "reference": match.reference.identity,
-                    "score": match.score,
-                }
-                for match in result.summary_fallbacks
-            ],
-            "degradations": [
-                {"stage": item.stage.value, "error_type": item.error_type} for item in result.degradations
-            ],
-            "budget_exhausted": result.budget_exhausted,
-        }
+        return encode_recall(result)
 
     async def job_status(
         self,

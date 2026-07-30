@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+import subprocess
+import sys
+from collections.abc import Mapping
+from datetime import date, datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -15,9 +19,11 @@ from fastapi.testclient import TestClient
 from Config import HTTPAPIConfig
 from foundation.observability import ObservationEvent
 from integrations.http_api import app as app_module
+from integrations.sdk import ConversationRef, M2BOSHTTPClient
 from Runtime import Runtime
 
 UTC = timezone.utc
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 API_KEY = "m" * 32
 OPERATIONS_KEY = "o" * 32
 AUTH = {"Authorization": f"Bearer {API_KEY}"}
@@ -30,6 +36,24 @@ class CollectingObserver:
 
     def record(self, event: ObservationEvent) -> None:
         self.events.append(event)
+
+
+class DelegatingHTTPTransport:
+    """证明 SDK 只依赖 request 能力，而非具体 httpx.AsyncClient 类型。"""
+
+    def __init__(self, client: httpx.AsyncClient) -> None:
+        self.client = client
+
+    async def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        json: object | None,
+        params: Mapping[str, str] | None,
+    ) -> httpx.Response:
+        return await self.client.request(method, url, headers=headers, json=json, params=params)
 
 
 def _job(sequence: int = 7, *, status: str = "failed", blocking: bool = True) -> dict[str, object]:
@@ -66,6 +90,7 @@ class CapabilityHandlers:
         return {
             "ignored_items": 0,
             "after_turn": bool(values["after_turn"]),
+            "next_sequence": 2,
             "jobs": [
                 {
                     "memory_sequence": 7,
@@ -79,6 +104,14 @@ class CapabilityHandlers:
             ],
             "consistency": [],
         }
+
+    async def conversation_cursor(self, **values: object) -> dict[str, object]:
+        self.calls.append(("conversation_cursor", values))
+        return {"next_sequence": 2}
+
+    async def flush(self, **values: object) -> dict[str, object]:
+        self.calls.append(("flush", values))
+        return {"jobs": [], "consistency": []}
 
     async def recall(self, query: str, **values: object) -> dict[str, object]:
         self.calls.append(("recall", {"query": query, **values}))
@@ -206,6 +239,16 @@ def test_memory_routes_expose_public_results_and_preserve_handler_inputs(monkeyp
     with TestClient(app, raise_server_exceptions=False) as client:
         protocols = client.get("/api/v1/protocols", headers=AUTH)
         remembered = client.post("/api/v1/memory/remember", headers=AUTH, json=remember_body)
+        cursor = client.get(
+            "/api/v1/memory/conversations/cursor",
+            headers=AUTH,
+            params={"conversation_id": "conversation-http", "started_on": "2026-07-30"},
+        )
+        flushed = client.post(
+            "/api/v1/memory/flush",
+            headers=AUTH,
+            json={"conversation_id": "conversation-http", "started_on": "2026-07-30"},
+        )
         recalled = client.post(
             "/api/v1/memory/recall",
             headers=AUTH,
@@ -223,7 +266,10 @@ def test_memory_routes_expose_public_results_and_preserve_handler_inputs(monkeyp
             params={"conversation_id": "conversation-http", "started_on": "2026-07-30"},
         )
 
-    assert all(response.status_code == 200 for response in (protocols, remembered, recalled, jobs, blocked, status))
+    assert all(
+        response.status_code == 200
+        for response in (protocols, remembered, cursor, flushed, recalled, jobs, blocked, status)
+    )
     assert protocols.json()["result"] == {"protocols": ["openai", "anthropic"]}
     public_job = remembered.json()["result"]["jobs"][0]
     assert public_job == {
@@ -233,6 +279,9 @@ def test_memory_routes_expose_public_results_and_preserve_handler_inputs(monkeyp
         "status": "queued",
     }
     assert "transaction_id" not in public_job
+    assert remembered.json()["result"]["next_sequence"] == 2
+    assert cursor.json()["result"] == {"next_sequence": 2}
+    assert flushed.json()["result"] == {"jobs": [], "consistency": []}
     assert recalled.json()["result"]["memories"][0]["uri"].startswith("memory://")
     assert jobs.json()["result"]["jobs"][0]["manual_action_required"] is True
     assert blocked.json()["result"]["job"]["blocking"] is True
@@ -241,12 +290,74 @@ def test_memory_routes_expose_public_results_and_preserve_handler_inputs(monkeyp
     assert isinstance(remember_call, dict)
     assert remember_call["payload"] == remember_body["payload"]
     assert remember_call["after_turn"] is True
-    assert any(event.operation == "job_accepted" for event in observer.events)
+    assert any(name == "conversation_cursor" for name, _value in handlers.calls)
+    assert any(name == "flush" for name, _value in handlers.calls)
+    accepted = next(event for event in observer.events if event.operation == "job_accepted")
+    assert accepted.context.memory_sequence == 7
+    assert accepted.context.transaction_id == "transaction-http-7"
     request_events = [event for event in observer.events if event.operation == "request"]
     assert request_events
     assert all(event.attributes["http_route"] != "/__unmatched__" for event in request_events)
     runtime.start.assert_awaited_once()
     runtime.close.assert_awaited_once()
+
+
+def test_http_client_implements_the_same_agent_memory_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    app, _runtime_value, handlers, _observer = _app(monkeypatch)
+
+    async def scenario() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport) as raw_client:
+            client = M2BOSHTTPClient(
+                "http://m2bos.local",
+                api_key=API_KEY,
+                transport=DelegatingHTTPTransport(raw_client),
+            )
+            conversation = ConversationRef("conversation-http", date(2026, 7, 30))
+            protocols = await client.protocols()
+            remembered = await client.remember(
+                conversation,
+                protocol="openai_chat_completions",
+                payload={"messages": [{"role": "assistant", "content": "好的"}]},
+                start_sequence=0,
+                occurred_at=datetime(2026, 7, 30, 1, tzinfo=UTC),
+                after_turn=True,
+            )
+            cursor = await client.cursor(conversation)
+            recalled = await client.recall("回答风格", conversation=conversation)
+            flushed = await client.flush(conversation)
+            await client.close()
+
+        assert remembered.after_turn is True
+        assert protocols == ("openai", "anthropic")
+        assert remembered.next_sequence == 2
+        assert remembered.jobs[0].status == "queued"
+        assert cursor == 2
+        assert recalled.context == "用户偏好简洁回答。"
+        assert flushed.jobs == ()
+
+    asyncio.run(scenario())
+
+    assert any(name == "remember" for name, _value in handlers.calls)
+    assert any(name == "conversation_cursor" for name, _value in handlers.calls)
+    assert any(name == "recall" for name, _value in handlers.calls)
+    assert any(name == "flush" for name, _value in handlers.calls)
+
+
+def test_sdk_import_does_not_load_runtime_or_memory_packages() -> None:
+    script = (
+        "import json, sys; import integrations.sdk; "
+        "print(json.dumps({'runtime': 'Runtime' in sys.modules, 'memory': 'memory' in sys.modules}))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=REPOSITORY_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {"runtime": False, "memory": False}
 
 
 def test_operations_key_is_isolated_and_state_changing_route_requires_it(monkeypatch: pytest.MonkeyPatch) -> None:

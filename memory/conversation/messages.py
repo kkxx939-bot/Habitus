@@ -150,6 +150,21 @@ class ConversationAppendResult:
     status: ConversationAppendStatus
     appended_count: int
     live: ConversationBatch | None
+    next_sequence: int
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.appended_count, bool)
+            or not isinstance(self.appended_count, int)
+            or self.appended_count < 0
+        ):
+            raise ValueError("appended_count must be a non-negative integer")
+        if (
+            isinstance(self.next_sequence, bool)
+            or not isinstance(self.next_sequence, int)
+            or self.next_sequence < 0
+        ):
+            raise ValueError("next_sequence must be a non-negative integer")
 
 
 @dataclass(frozen=True)
@@ -342,6 +357,7 @@ class ConversationMessageJournal:
                         status=ConversationAppendStatus.UNCHANGED,
                         appended_count=0,
                         live=self._batch_or_none(address, live_messages),
+                        next_sequence=expected_next,
                     )
 
                 updated_live = tuple([*live_messages, *unseen])
@@ -357,6 +373,7 @@ class ConversationMessageJournal:
                     status=status,
                     appended_count=len(unseen),
                     live=ConversationBatch(address.conversation_id, updated_live),
+                    next_sequence=expected_next + len(unseen),
                 )
 
     def read_live(self, address: ConversationAddress) -> ConversationBatch | None:
@@ -376,6 +393,24 @@ class ConversationMessageJournal:
                 live_messages = self._recover_archived_prefix(address, latest, live_messages)
                 self._require_tail_continuity(state, live_messages)
                 return self._batch_or_none(address, live_messages)
+
+    def next_sequence(self, address: ConversationAddress) -> int:
+        """在 Conversation 租约内返回下一条消息的全局序号。"""
+
+        with self.path_lock.acquire(
+            self.layout.lock_key(address),
+            ttl_seconds=self.config.lock_ttl_seconds,
+            wait_timeout_seconds=self.config.lock_wait_timeout_seconds,
+            retry_delay_seconds=self.config.lock_retry_delay_seconds,
+        ) as guard:
+            with guard.fenced():
+                live_messages = list(self._read_live_messages(address))
+                references = self._history_references(address)
+                state = self._load_state(address, references)
+                latest = self._latest_retained_segment(address, state, references)
+                live_messages = self._recover_archived_prefix(address, latest, live_messages)
+                self._require_tail_continuity(state, live_messages)
+                return self._expected_next_sequence(state, live_messages)
 
     def seal(
         self,

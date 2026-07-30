@@ -33,6 +33,9 @@ from integrations.http_api.request_id import REQUEST_ID_HEADER, RequestIDMiddlew
 from integrations.http_api.schemas import (
     AuditListResult,
     BlockedJobResult,
+    ConversationCursorResult,
+    FlushRequest,
+    FlushResult,
     HealthResult,
     HTTPErrorCode,
     JobListResult,
@@ -84,7 +87,20 @@ def _remember_result(payload: dict[str, object]) -> RememberResult:
         {
             "ignored_items": payload.get("ignored_items"),
             "after_turn": payload.get("after_turn"),
+            "next_sequence": payload.get("next_sequence"),
             "jobs": public_jobs,
+            "consistency": payload.get("consistency"),
+        }
+    )
+
+
+def _flush_result(payload: dict[str, object]) -> FlushResult:
+    raw_jobs = payload.get("jobs")
+    if not isinstance(raw_jobs, list) or any(not isinstance(item, dict) for item in raw_jobs):
+        raise RuntimeError("flush handler returned invalid jobs")
+    return FlushResult.model_validate(
+        {
+            "jobs": [RememberJobResult.model_validate(item) for item in raw_jobs],
             "consistency": payload.get("consistency"),
         }
     )
@@ -146,6 +162,35 @@ def _build_authenticated_router(
                         )
                     )
         return _success(request, _remember_result(result))
+
+    @router.get(
+        "/memory/conversations/cursor",
+        response_model=SuccessResponse[ConversationCursorResult],
+    )
+    async def conversation_cursor(
+        request: Request,
+        conversation_id: Annotated[str, Query(min_length=1, max_length=256)],
+        started_on: Annotated[date, Query()],
+    ) -> SuccessResponse[object]:
+        if conversation_id != conversation_id.strip():
+            raise ValueError("conversation_id must not contain surrounding whitespace")
+        result = await handlers.conversation_cursor(
+            conversation_id=conversation_id,
+            started_on=started_on,
+        )
+        return _success(request, ConversationCursorResult.model_validate(result))
+
+    @router.post("/memory/flush", response_model=SuccessResponse[FlushResult])
+    async def flush(
+        request: Request,
+        body: FlushRequest,
+    ) -> SuccessResponse[object]:
+        result = await handlers.flush(
+            conversation_id=body.conversation_id,
+            started_on=body.started_on,
+            wait_timeout_seconds=body.wait_timeout_seconds,
+        )
+        return _success(request, _flush_result(result))
 
     @router.post("/memory/recall", response_model=SuccessResponse[RecallResult])
     async def recall(
