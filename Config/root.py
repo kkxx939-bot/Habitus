@@ -151,6 +151,12 @@ class M2BOSConfig:
             raise ConfigError("memory.search_service.max_limit cannot exceed memory.snapshot.max_items")
         if memory.search_service.max_relation_neighbors_total > memory.snapshot.max_items:
             raise ConfigError("memory.search_service relation expansion cannot exceed memory.snapshot.max_items")
+        lifecycle_candidate_limit = memory.search_service.max_limit * memory.search_service.candidate_multiplier
+        if (
+            memory.recall_lifecycle.enabled
+            and lifecycle_candidate_limit > memory.recall_lifecycle.max_batch_size
+        ):
+            raise ConfigError("memory recall lifecycle cannot rank the maximum search candidate batch")
         if memory.search_service.max_context_chars < memory.document.max_markdown_body_chars + 2_048:
             raise ConfigError("memory.search_service.max_context_chars cannot fit one maximum-size memory document")
         planner_context_bound = (

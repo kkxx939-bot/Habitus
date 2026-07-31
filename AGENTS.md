@@ -46,7 +46,7 @@
 - 结构化输出采用分层容错：可以从代码块或外围文本提取 JSON，并可修复尾逗号、单引号等纯语法问题；修复只针对提取出的 JSON 候选，修复结果仍必须通过完整 JSON Schema 和领域模型校验。禁止把 list/dict/number 自动转成 string、把 string/dict 自动包成 list、把非法枚举替换为默认值、忽略未知字段、补造必填值或猜测业务内容。解析、JSON Schema、领域校验失败必须区分阶段，并把精确错误反馈给模型做有界重试；重试提示要求保留已经合法的值，不得通过有损类型转换规避校验。超过重试次数后返回明确失败，不生成结构化结果。
 - 通用 Context、ContextURI、ContextProjectionSanitizer 以及旧 Catalog/FTS/Vector/Trace/L0/L1 链路已经退出，不得被新记忆树复用或恢复。
 - Behavior、ActionPolicy、SessionArchive、Resource 和 Skill 当前没有公开入口或运行时主链；后续重构必须作为新设计另行确认。
-- `memoryos` 暂时只保留为 Python 发行名称；旧 CLI、环境变量协议和 `memoryos://` URI scheme 不再构成稳定契约。
+- Python 发行名称统一为 `m2bos`；旧 CLI、环境变量协议和 `memoryos://` URI scheme 不再构成稳定契约。
 
 ## 工作区安全
 

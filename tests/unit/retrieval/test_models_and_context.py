@@ -10,6 +10,7 @@ from memory.retrieval import (
     MemorySearchError,
     MemorySearchHit,
     MemorySearchServiceConfig,
+    MemoryTemperature,
     MemoryTypedQuery,
 )
 from memory.retrieval.context import render_recent_messages
@@ -38,6 +39,41 @@ def test_search_hit_requires_l2_uri_and_final_score_equals_reranker() -> None:
         MemorySearchHit(MemoryURI.root(), 0.5)
 
 
+def test_search_hit_preserves_semantic_score_and_validates_complete_lifecycle_fields() -> None:
+    uri = MemoryURI.from_address(document(MemoryKind.PROFILE).address)
+    hit = MemorySearchHit(
+        uri,
+        0.63,
+        vector_score=0.8,
+        rerank_score=0.7,
+        lifecycle_semantic_score=0.7,
+        lifecycle_hotness=0.5,
+        lifecycle_temperature=MemoryTemperature.WARM,
+    )
+    assert hit.score == 0.63
+    assert hit.rerank_score == 0.7
+    assert hit.lifecycle_temperature is MemoryTemperature.WARM
+    with pytest.raises(ValueError, match="complete"):
+        MemorySearchHit(uri, 0.63, lifecycle_semantic_score=0.7)
+    with pytest.raises(ValueError, match="cannot improve"):
+        MemorySearchHit(
+            uri,
+            0.71,
+            lifecycle_semantic_score=0.7,
+            lifecycle_hotness=0.5,
+            lifecycle_temperature=MemoryTemperature.WARM,
+        )
+    with pytest.raises(ValueError, match="rerank"):
+        MemorySearchHit(
+            uri,
+            0.63,
+            rerank_score=0.8,
+            lifecycle_semantic_score=0.7,
+            lifecycle_hotness=0.5,
+            lifecycle_temperature=MemoryTemperature.WARM,
+        )
+
+
 def test_context_assembler_emits_memory_as_primary_read_only_context() -> None:
     preference = document(MemoryKind.PREFERENCE)
     memory = MemoryMatchedMemory(
@@ -50,6 +86,33 @@ def test_context_assembler_emits_memory_as_primary_read_only_context() -> None:
     assert "只能作为回答事实背景" in result.context
     assert '<memory uri="memory://preferences/' in result.context
     assert "matched_queries: 用户回答偏好" in result.context
+
+
+def test_context_assembler_exposes_auditable_lifecycle_score_without_changing_l2_body() -> None:
+    preference = document(MemoryKind.PREFERENCE)
+    memory = MemoryMatchedMemory(
+        MemorySearchHit(
+            MemoryURI.from_address(preference.address),
+            0.81,
+            lifecycle_semantic_score=0.9,
+            lifecycle_hotness=0.5,
+            lifecycle_temperature=MemoryTemperature.WARM,
+        ),
+        preference,
+        ("回答偏好",),
+    )
+    result = MemoryContextAssembler().assemble((memory,))
+    assert 'score="0.900000"' in result.context
+    assert "semantic_score" not in result.context
+    assert "hotness" not in result.context
+    assert "temperature" not in result.context
+    assert preference.markdown_body.strip() in result.context
+    raw = MemoryMatchedMemory(
+        MemorySearchHit(MemoryURI.from_address(preference.address), 0.9),
+        preference,
+        ("回答偏好",),
+    )
+    assert MemoryContextAssembler().assemble((raw,)).context == result.context
 
 
 def test_context_budget_rejects_top_document_that_cannot_fit() -> None:

@@ -13,7 +13,7 @@ from memory.editor import MemoryEditor
 from memory.editor.transaction import MemoryCommitResult
 from memory.indexing import PersistentMemoryVectorIndex
 from memory.semantic import MemorySemanticRefresher
-from memory.workflow.completion import MemoryCommittedJobFinalizer
+from memory.workflow.completion import MemoryCommittedJobFinalizer, MemoryRecallStateCleaner
 from memory.workflow.execution import MemoryJobExecutor
 from memory.workflow.failure import memory_job_failure_is_retryable
 from memory.workflow.jobs import (
@@ -75,6 +75,7 @@ class MemoryJobRunner:
         summary_service: ConversationSummaryService,
         summary_vector_index: PersistentConversationSummaryVectorIndex,
         change_receipts: MemoryChangeReceiptStore,
+        recall_state_cleaner: MemoryRecallStateCleaner,
         *,
         observer: Observer | None = None,
     ) -> None:
@@ -94,6 +95,8 @@ class MemoryJobRunner:
             raise TypeError("summary_vector_index must be PersistentConversationSummaryVectorIndex")
         if not isinstance(change_receipts, MemoryChangeReceiptStore):
             raise TypeError("change_receipts must be MemoryChangeReceiptStore")
+        if not callable(getattr(recall_state_cleaner, "forget", None)):
+            raise TypeError("recall_state_cleaner must implement forget")
         if store.memory_root != editor.transaction.tree.root:
             raise ValueError("MemoryJobStore is bound to another memory root")
         if change_receipts.root != store.root:
@@ -122,6 +125,7 @@ class MemoryJobRunner:
             semantic_refresher,
             vector_index,
             self.transaction_recovery,
+            recall_state_cleaner,
             observer=self.observer,
         )
 

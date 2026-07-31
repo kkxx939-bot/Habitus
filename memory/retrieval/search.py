@@ -39,8 +39,8 @@ class MemorySemanticSearchConfig:
     max_directory_expansions: int = 128
     max_rerank_candidates: int = 50
     max_rerank_document_chars: int = 12_000
-    vector_score_threshold: float = -1.0
-    rerank_score_threshold: float = 0.0
+    vector_score_threshold: float = 0.0
+    rerank_score_threshold: float = 0.2
     score_propagation_alpha: float = 0.8
     rerank_hierarchy: bool = False
 
@@ -270,15 +270,7 @@ class MemorySemanticSearchEngine:
         except Exception as exc:
             logger.warning("final reranker failed; using vector scores", exc_info=exc)
             self._observe_rerank_fallback("final", exc)
-            return tuple(
-                MemorySearchHit(
-                    uri=candidate.uri,
-                    score=candidate.score,
-                    vector_score=candidate.vector_score,
-                )
-                for candidate in candidates
-                if candidate.score >= self.config.vector_score_threshold
-            )[:limit]
+            return self._vector_fallback(candidates, limit)
         hits: list[MemorySearchHit] = []
         try:
             for candidate, raw_score in zip(selected, scores, strict=True):
@@ -296,17 +288,24 @@ class MemorySemanticSearchEngine:
         except Exception as exc:
             logger.warning("final reranker scores were invalid; using vector scores", exc_info=exc)
             self._observe_rerank_fallback("final", exc)
-            return tuple(
-                MemorySearchHit(
-                    uri=candidate.uri,
-                    score=candidate.score,
-                    vector_score=candidate.vector_score,
-                )
-                for candidate in candidates
-                if candidate.score >= self.config.vector_score_threshold
-            )[:limit]
+            return self._vector_fallback(candidates, limit)
         hits.sort(key=lambda item: (-item.score, str(item.uri)))
         return tuple(hits[:limit])
+
+    def _vector_fallback(
+        self,
+        candidates: Sequence[_Candidate],
+        limit: int,
+    ) -> tuple[MemorySearchHit, ...]:
+        return tuple(
+            MemorySearchHit(
+                uri=candidate.uri,
+                score=candidate.score,
+                vector_score=candidate.vector_score,
+            )
+            for candidate in candidates
+            if candidate.score >= self.config.vector_score_threshold
+        )[:limit]
 
     def _observe_rerank_fallback(self, stage: str, error: BaseException) -> None:
         self.observer.record(

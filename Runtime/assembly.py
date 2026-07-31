@@ -37,10 +37,12 @@ from memory.intention import MemoryIntentionReviewer
 from memory.retrieval import (
     ConversationSearchContextReader,
     MemoryContextAssembler,
+    MemoryRecallLifecycle,
     MemoryRetrievalGrader,
     MemorySearchQueryPlanner,
     MemorySemanticSearchEngine,
     SearchService,
+    SQLiteMemoryRecallLifecycleStore,
 )
 from memory.schema import MemorySchemaRegistry
 from memory.semantic import LLMMemoryOverviewGenerator, MemorySemanticRefresher
@@ -304,6 +306,14 @@ def build_runtime(
         structured_chat,
         config=memory_config.search_service,
     )
+    recall_lifecycle = MemoryRecallLifecycle(
+        SQLiteMemoryRecallLifecycleStore(
+            config.workflow_root / "memory_recall_lifecycle.sqlite3",
+            config=memory_config.recall_lifecycle,
+            initialize=False,
+        ),
+        config=memory_config.recall_lifecycle,
+    )
     search_service = SearchService(
         tree=tree,
         snapshot_reader=snapshot_reader,
@@ -311,6 +321,7 @@ def build_runtime(
         summary_search=summary_vector_index,
         query_planner=search_query_planner,
         retrieval_grader=retrieval_grader,
+        recall_lifecycle=recall_lifecycle,
         conversation_context=search_context_reader,
         assembler=MemoryContextAssembler(config=memory_config.search_service),
         config=memory_config.search_service,
@@ -355,6 +366,7 @@ def build_runtime(
         summaries,
         summary_vector_index,
         receipts,
+        recall_lifecycle,
         observer=operation_observer,
     )
     worker = MemoryWorker(

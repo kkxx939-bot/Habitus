@@ -6,6 +6,7 @@ import asyncio
 import math
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -23,6 +24,12 @@ from memory.model import MemoryKind, MemoryLevel
 from memory.retrieval.assembler import MemoryContextAssembler
 from memory.retrieval.context import ConversationSearchContextReader
 from memory.retrieval.grader import MemoryRetrievalGrader
+from memory.retrieval.lifecycle import (
+    MemoryRecallCandidate,
+    MemoryRecallLifecycle,
+    MemoryRecallLifecycleError,
+    MemoryRecallTarget,
+)
 from memory.retrieval.model import (
     MemoryMatchedMemory,
     MemoryQueryPlan,
@@ -81,6 +88,7 @@ class SearchService:
         summary_search: ConversationSummarySemanticSearch,
         query_planner: MemorySearchQueryPlanner,
         retrieval_grader: MemoryRetrievalGrader,
+        recall_lifecycle: MemoryRecallLifecycle,
         conversation_context: ConversationSearchContextReader,
         assembler: MemoryContextAssembler | None = None,
         config: MemorySearchServiceConfig | None = None,
@@ -102,6 +110,8 @@ class SearchService:
             raise TypeError("query_planner must be MemorySearchQueryPlanner")
         if not isinstance(retrieval_grader, MemoryRetrievalGrader):
             raise TypeError("retrieval_grader must be MemoryRetrievalGrader")
+        if not isinstance(recall_lifecycle, MemoryRecallLifecycle):
+            raise TypeError("recall_lifecycle must be MemoryRecallLifecycle")
         if not isinstance(conversation_context, ConversationSearchContextReader):
             raise TypeError("conversation_context must be ConversationSearchContextReader")
         if config is not None and not isinstance(config, MemorySearchServiceConfig):
@@ -131,6 +141,7 @@ class SearchService:
         self.summary_search = summary_search
         self.query_planner = query_planner
         self.retrieval_grader = retrieval_grader
+        self.recall_lifecycle = recall_lifecycle
         self.conversation_context = conversation_context
         self.assembler = resolved_assembler
         self.config = resolved_config
@@ -258,14 +269,25 @@ class SearchService:
             self.snapshot_reader.config.max_items,
             max(limit, limit * self.config.candidate_multiplier),
         )
-        direct = self._read_direct(
+        direct_candidates = self._read_direct(
             hits[:read_limit],
             matched_queries,
-            limit,
             review_now=review_now,
             kinds=kinds,
             intention_scope=intention_scope,
         )
+        try:
+            direct = self._rank_recall_lifecycle(
+                direct_candidates,
+                now=review_now,
+            )[:limit]
+        except MemoryRecallLifecycleError as exc:
+            direct = direct_candidates[:limit]
+            self._append_degradation(
+                applied_degradations,
+                MemorySearchDegradationStage.RECALL_LIFECYCLE,
+                exc,
+            )
         expanded = self._expand_relations(
             direct,
             roots=roots,
@@ -311,6 +333,29 @@ class SearchService:
                         expanded,
                         summary_fallbacks=summaries,
                     )
+        if (
+            assessment is not None
+            and assessment.decision is MemoryRetrievalSufficiency.SUFFICIENT
+            and assembly.memories
+        ):
+            try:
+                self.recall_lifecycle.record_success(
+                    tuple(
+                        MemoryRecallTarget(
+                            memory.uri,
+                            memory.document.metadata.revision,
+                            memory.document.metadata.created_at,
+                        )
+                        for memory in assembly.memories
+                    ),
+                    recalled_at=review_now,
+                )
+            except MemoryRecallLifecycleError as exc:
+                self._append_degradation(
+                    applied_degradations,
+                    MemorySearchDegradationStage.RECALL_LIFECYCLE,
+                    exc,
+                )
         result = MemorySearchResult(
             query=plan.original_query,
             target_roots=roots,
@@ -339,6 +384,21 @@ class SearchService:
                     "degradations": len(result.degradations),
                     "result_count": len(result.memories) + len(result.summary_fallbacks),
                     "degradation_count": len(result.degradations),
+                    "hot_memories": sum(
+                        memory.hit.lifecycle_temperature is not None
+                        and memory.hit.lifecycle_temperature.value == "hot"
+                        for memory in result.memories
+                    ),
+                    "warm_memories": sum(
+                        memory.hit.lifecycle_temperature is not None
+                        and memory.hit.lifecycle_temperature.value == "warm"
+                        for memory in result.memories
+                    ),
+                    "cold_memories": sum(
+                        memory.hit.lifecycle_temperature is not None
+                        and memory.hit.lifecycle_temperature.value == "cold"
+                        for memory in result.memories
+                    ),
                 },
             )
         )
@@ -441,7 +501,6 @@ class SearchService:
         self,
         hits: tuple[MemorySearchHit, ...],
         matched_queries: dict[MemoryURI, tuple[str, ...]],
-        limit: int,
         *,
         review_now: datetime,
         kinds: tuple[MemoryKind, ...],
@@ -474,9 +533,57 @@ class SearchService:
                     intention_review=self._intention_review(document, now=review_now),
                 )
             )
-            if len(selected) == limit:
-                break
         return tuple(selected)
+
+    def _rank_recall_lifecycle(
+        self,
+        memories: tuple[MemoryMatchedMemory, ...],
+        *,
+        now: datetime,
+    ) -> tuple[MemoryMatchedMemory, ...]:
+        if not memories:
+            return ()
+        rankings = self.recall_lifecycle.rank(
+            tuple(
+                MemoryRecallCandidate(
+                    target=MemoryRecallTarget(
+                        memory.uri,
+                        memory.document.metadata.revision,
+                        memory.document.metadata.created_at,
+                    ),
+                    kind=memory.document.kind,
+                    updated_at=memory.document.metadata.updated_at,
+                    semantic_score=memory.hit.score,
+                )
+                for memory in memories
+            ),
+            now=now,
+        )
+        by_uri = {memory.uri: memory for memory in memories}
+        ranked: list[MemoryMatchedMemory] = []
+        for ranking in rankings:
+            memory = by_uri[ranking.candidate.uri]
+            hit = memory.hit
+            if ranking.hotness is not None and ranking.temperature is not None:
+                hit = replace(
+                    hit,
+                    score=ranking.final_score,
+                    lifecycle_semantic_score=ranking.candidate.semantic_score,
+                    lifecycle_hotness=ranking.hotness,
+                    lifecycle_temperature=ranking.temperature,
+                )
+            ranked.append(replace(memory, hit=hit))
+        return tuple(ranked)
+
+    @staticmethod
+    def _append_degradation(
+        degradations: list[MemorySearchDegradation],
+        stage: MemorySearchDegradationStage,
+        error: BaseException,
+    ) -> None:
+        if any(item.stage is stage for item in degradations):
+            return
+        degradations.append(MemorySearchDegradation(stage, type(error).__name__))
 
     def _expand_relations(
         self,

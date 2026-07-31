@@ -111,7 +111,12 @@ def test_retrieval_assessment_round_trips_each_decision(decision: MemoryRetrieva
 @pytest.mark.parametrize("reason", ["", " ", " reason", "reason ", None, 1, "x" * 10_001])
 def test_retrieval_assessment_rejects_invalid_reason(reason: object) -> None:
     with pytest.raises((TypeError, ValueError)):
-        MemoryRetrievalAssessment(MemoryRetrievalSufficiency.SUFFICIENT, reason, (), None)  # type: ignore[arg-type]
+        MemoryRetrievalAssessment(
+            MemoryRetrievalSufficiency.SUFFICIENT,
+            reason,
+            (),
+            None,
+        )  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("missing", [[], "missing", None, ("",), (" ",), (" x",), ("x ",), (1,), ("x", "x")])
@@ -139,10 +144,20 @@ def test_sufficient_assessment_forbids_and_insufficient_requires_fallback_fields
     summary_query: str | None,
 ) -> None:
     if missing == () and summary_query is None:
-        MemoryRetrievalAssessment(MemoryRetrievalSufficiency.SUFFICIENT, "足够。", missing, summary_query)
+        MemoryRetrievalAssessment(
+            MemoryRetrievalSufficiency.SUFFICIENT,
+            "足够。",
+            missing,
+            summary_query,
+        )
     else:
         with pytest.raises(ValueError):
-            MemoryRetrievalAssessment(MemoryRetrievalSufficiency.SUFFICIENT, "足够。", missing, summary_query)
+            MemoryRetrievalAssessment(
+                MemoryRetrievalSufficiency.SUFFICIENT,
+                "足够。",
+                missing,
+                summary_query,
+            )
     if missing and summary_query:
         MemoryRetrievalAssessment(MemoryRetrievalSufficiency.INSUFFICIENT, "不足。", missing, summary_query)
     else:
@@ -156,9 +171,17 @@ def test_retrieval_assessment_parser_requires_exact_object(value: object) -> Non
         MemoryRetrievalAssessment.model_validate(value)
 
 
-@pytest.mark.parametrize("field", ["decision", "reason", "missing_information", "summary_query"])
+@pytest.mark.parametrize(
+    "field",
+    ["decision", "reason", "missing_information", "summary_query"],
+)
 def test_retrieval_assessment_parser_rejects_each_missing_field(field: str) -> None:
-    value = {"decision": "sufficient", "reason": "足够。", "missing_information": [], "summary_query": None}
+    value = {
+        "decision": "sufficient",
+        "reason": "足够。",
+        "missing_information": [],
+        "summary_query": None,
+    }
     value.pop(field)
     with pytest.raises(ValueError):
         MemoryRetrievalAssessment.model_validate(value)

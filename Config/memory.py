@@ -17,6 +17,7 @@ from memory.editor import (
 from memory.indexing import MemoryVectorIndexConfig
 from memory.intention import MemoryIntentionReviewConfig
 from memory.retrieval import (
+    MemoryRecallLifecycleConfig,
     MemorySearchServiceConfig,
     MemorySemanticSearchConfig,
 )
@@ -33,6 +34,7 @@ class MemoryConfig:
     tree: MemoryTreeConfig = field(default_factory=MemoryTreeConfig)
     snapshot: SnapshotReadConfig = field(default_factory=SnapshotReadConfig)
     search_service: MemorySearchServiceConfig = field(default_factory=MemorySearchServiceConfig)
+    recall_lifecycle: MemoryRecallLifecycleConfig = field(default_factory=MemoryRecallLifecycleConfig)
     retrieval: MemoryRetrievalConfig = field(default_factory=MemoryRetrievalConfig)
     vector_store: VectorStoreConfig = field(default_factory=VectorStoreConfig)
     vector_index: MemoryVectorIndexConfig = field(default_factory=MemoryVectorIndexConfig)
@@ -49,6 +51,7 @@ class MemoryConfig:
             ("tree", self.tree, MemoryTreeConfig),
             ("snapshot", self.snapshot, SnapshotReadConfig),
             ("search_service", self.search_service, MemorySearchServiceConfig),
+            ("recall_lifecycle", self.recall_lifecycle, MemoryRecallLifecycleConfig),
             ("retrieval", self.retrieval, MemoryRetrievalConfig),
             ("vector_store", self.vector_store, VectorStoreConfig),
             ("vector_index", self.vector_index, MemoryVectorIndexConfig),
@@ -98,6 +101,11 @@ class MemoryConfig:
                 MemorySearchServiceConfig,
                 data.get("search_service", {}),
                 "config.memory.search_service",
+            ),
+            recall_lifecycle=construct_config(
+                MemoryRecallLifecycleConfig,
+                data.get("recall_lifecycle", {}),
+                "config.memory.recall_lifecycle",
             ),
             retrieval=construct_config(
                 MemoryRetrievalConfig,

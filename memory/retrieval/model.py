@@ -15,6 +15,7 @@ from memory.intention import (
     intention_matches_scope,
 )
 from memory.model import MemoryKind
+from memory.retrieval.lifecycle import MemoryTemperature
 from memory.uri import MemoryURI, MemoryURINodeType
 
 
@@ -228,6 +229,9 @@ class MemorySearchHit:
     score: float
     vector_score: float | None = None
     rerank_score: float | None = None
+    lifecycle_semantic_score: float | None = None
+    lifecycle_hotness: float | None = None
+    lifecycle_temperature: MemoryTemperature | None = None
 
     def __post_init__(self) -> None:
         parsed = MemoryURI.parse(self.uri)
@@ -249,9 +253,36 @@ class MemorySearchHit:
         object.__setattr__(self, "vector_score", vector_score)
         if self.rerank_score is not None:
             rerank_score = _finite_score(self.rerank_score, "memory search rerank_score")
-            if score != rerank_score:
-                raise ValueError("memory search final score must equal its rerank score")
             object.__setattr__(self, "rerank_score", rerank_score)
+        lifecycle_values = (
+            self.lifecycle_semantic_score,
+            self.lifecycle_hotness,
+            self.lifecycle_temperature,
+        )
+        if all(value is None for value in lifecycle_values):
+            if self.rerank_score is not None and score != self.rerank_score:
+                raise ValueError("memory search final score must equal its rerank score")
+            return
+        if any(value is None for value in lifecycle_values):
+            raise ValueError("memory search lifecycle score fields must be complete")
+        semantic_score = _finite_score(
+            self.lifecycle_semantic_score,
+            "memory search lifecycle_semantic_score",
+        )
+        hotness = _finite_score(
+            self.lifecycle_hotness,
+            "memory search lifecycle_hotness",
+        )
+        if not 0.0 <= hotness <= 1.0:
+            raise ValueError("memory search lifecycle_hotness must be between zero and one")
+        temperature = MemoryTemperature(self.lifecycle_temperature)
+        if self.rerank_score is not None and semantic_score != self.rerank_score:
+            raise ValueError("memory search lifecycle semantic score must equal its rerank score")
+        if score > semantic_score:
+            raise ValueError("memory search lifecycle adjustment cannot improve the semantic score")
+        object.__setattr__(self, "lifecycle_semantic_score", semantic_score)
+        object.__setattr__(self, "lifecycle_hotness", hotness)
+        object.__setattr__(self, "lifecycle_temperature", temperature)
 
 
 @dataclass(frozen=True)
@@ -436,6 +467,7 @@ class MemorySearchDegradationStage(str, Enum):
     """可选增强失败后已经采用的确定性降级阶段。"""
 
     QUERY_PLANNER = "query_planner"
+    RECALL_LIFECYCLE = "recall_lifecycle"
     RETRIEVAL_GRADER = "retrieval_grader"
     SUMMARY_FALLBACK = "summary_fallback"
 

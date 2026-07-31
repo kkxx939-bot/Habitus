@@ -227,7 +227,7 @@ class VikingDBRestClient:
         except ImportError as exc:
             raise VectorStoreError(
                 "vikingdb ak_sk authentication requires the 'volcengine' package; "
-                "install the memoryos[vikingdb] extra"
+                "install the m2bos[vikingdb] extra"
             ) from exc
         parsed = urlsplit(origin)
         request = Request()

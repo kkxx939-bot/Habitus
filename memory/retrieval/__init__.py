@@ -11,6 +11,21 @@ from memory.retrieval.context import (
     ConversationSearchContextReader,
 )
 from memory.retrieval.grader import MemoryRetrievalGrader
+from memory.retrieval.lifecycle import (
+    MemoryRecallCandidate,
+    MemoryRecallLifecycle,
+    MemoryRecallLifecycleConfig,
+    MemoryRecallLifecycleError,
+    MemoryRecallRanking,
+    MemoryRecallState,
+    MemoryRecallStateStore,
+    MemoryRecallTarget,
+    MemoryTemperature,
+    lifecycle_adjusted_score,
+    memory_hotness,
+    memory_temperature,
+)
+from memory.retrieval.lifecycle_store import SQLiteMemoryRecallLifecycleStore
 from memory.retrieval.model import (
     MemoryMatchedMemory,
     MemoryQueryPlan,
@@ -50,6 +65,14 @@ __all__ = [
     "MemoryQueryPlanContent",
     "MemoryQueryResult",
     "MemoryRelatedMemory",
+    "MemoryRecallCandidate",
+    "MemoryRecallLifecycle",
+    "MemoryRecallLifecycleConfig",
+    "MemoryRecallLifecycleError",
+    "MemoryRecallRanking",
+    "MemoryRecallState",
+    "MemoryRecallStateStore",
+    "MemoryRecallTarget",
     "MemoryRetrievalAssessment",
     "MemoryRetrievalGrader",
     "MemoryRetrievalSufficiency",
@@ -65,8 +88,13 @@ __all__ = [
     "MemorySemanticSearchConfig",
     "MemorySemanticSearchEngine",
     "MemoryTypedQuery",
+    "MemoryTemperature",
     "MemoryVectorIndex",
     "MemoryVectorIndexError",
     "MemoryVectorMatch",
     "SearchService",
+    "SQLiteMemoryRecallLifecycleStore",
+    "lifecycle_adjusted_score",
+    "memory_hotness",
+    "memory_temperature",
 ]

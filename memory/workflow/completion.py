@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import time
 from asyncio import to_thread
 from dataclasses import dataclass
+from typing import Protocol
 
-from foundation.observability import NullObserver, Observer, observe_operation
+from foundation.observability import (
+    NullObserver,
+    ObservationEvent,
+    ObservationStatus,
+    Observer,
+    observe_operation,
+)
 from memory.conversation import ConversationAddress, ConversationMessageJournal
 from memory.conversation.indexing import PersistentConversationSummaryVectorIndex
 from memory.conversation.summary import ConversationSummaryService
@@ -15,6 +23,7 @@ from memory.editor.transaction_log import (
 )
 from memory.indexing import PersistentMemoryVectorIndex
 from memory.semantic import MemorySemanticRefresher, MemorySemanticRefreshResult
+from memory.uri import MemoryURI
 from memory.workflow.jobs import (
     MemoryJob,
     MemoryJobError,
@@ -29,6 +38,10 @@ from memory.workflow.receipt import (
     MemoryChangeSource,
 )
 from memory.workflow.recovery import MemoryJobTransactionRecovery
+
+
+class MemoryRecallStateCleaner(Protocol):
+    def forget(self, uris: tuple[MemoryURI, ...]) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -74,6 +87,7 @@ class MemoryCommittedJobFinalizer:
         semantic_refresher: MemorySemanticRefresher,
         vector_index: PersistentMemoryVectorIndex,
         transaction_recovery: MemoryJobTransactionRecovery,
+        recall_state_cleaner: MemoryRecallStateCleaner,
         *,
         observer: Observer | None = None,
     ) -> None:
@@ -93,6 +107,8 @@ class MemoryCommittedJobFinalizer:
             raise TypeError("vector_index must be PersistentMemoryVectorIndex")
         if not isinstance(transaction_recovery, MemoryJobTransactionRecovery):
             raise TypeError("transaction_recovery must be MemoryJobTransactionRecovery")
+        if not callable(getattr(recall_state_cleaner, "forget", None)):
+            raise TypeError("recall_state_cleaner must implement forget")
         if summary_service.store.layout.root != conversations.layout.root:
             raise ValueError("summary service and conversations must use one conversation root")
         if summary_vector_index.journal is not conversations:
@@ -115,6 +131,7 @@ class MemoryCommittedJobFinalizer:
         self.semantic_refresher = semantic_refresher
         self.vector_index = vector_index
         self.transaction_recovery = transaction_recovery
+        self.recall_state_cleaner = recall_state_cleaner
         self.observer = observer or NullObserver()
 
     async def finalize(
@@ -159,6 +176,7 @@ class MemoryCommittedJobFinalizer:
         with observe_operation(self.observer, "workflow", "receipt_finalize"):
             change_receipt = self.change_receipts.finalize(source, journal)
         self.store.assert_current(lease)
+        await self._forget_retired_recall_state(change_receipt.expected_deleted_uris)
         with observe_operation(self.observer, "workflow", "semantic_refresh"):
             semantic_results = await to_thread(self._refresh_semantic_layers, change_receipt)
         self.store.assert_current(lease)
@@ -182,6 +200,39 @@ class MemoryCommittedJobFinalizer:
             journal_cleaned=journal_cleaned,
         )
 
+    async def _forget_retired_recall_state(
+        self,
+        deleted_uris: tuple[MemoryURI, ...],
+    ) -> None:
+        if not deleted_uris:
+            return
+        started = time.monotonic()
+        try:
+            deleted = await to_thread(self.recall_state_cleaner.forget, deleted_uris)
+        except Exception as exc:
+            self.observer.record(
+                ObservationEvent(
+                    category="retrieval",
+                    operation="recall_lifecycle_cleanup",
+                    status=ObservationStatus.DEGRADED,
+                    duration_seconds=max(0.0, time.monotonic() - started),
+                    attributes={
+                        "error_type": type(exc).__name__,
+                        "requested": len(deleted_uris),
+                    },
+                )
+            )
+            return
+        self.observer.record(
+            ObservationEvent(
+                category="retrieval",
+                operation="recall_lifecycle_cleanup",
+                status=ObservationStatus.SUCCESS,
+                duration_seconds=max(0.0, time.monotonic() - started),
+                attributes={"requested": len(deleted_uris), "deleted": deleted},
+            )
+        )
+
     def _refresh_semantic_layers(
         self,
         receipt: MemoryChangeReceipt,
@@ -194,4 +245,4 @@ class MemoryCommittedJobFinalizer:
         return self.semantic_refresher.refresh_for_many(addresses)
 
 
-__all__ = ["MemoryCommittedJobFinalizer", "MemoryJobCompletion"]
+__all__ = ["MemoryCommittedJobFinalizer", "MemoryJobCompletion", "MemoryRecallStateCleaner"]

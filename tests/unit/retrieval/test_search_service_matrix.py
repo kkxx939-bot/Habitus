@@ -43,6 +43,7 @@ def _constructor_arguments(instance: SearchService) -> dict[str, object]:
         "summary_search": instance.summary_search,
         "query_planner": instance.query_planner,
         "retrieval_grader": instance.retrieval_grader,
+        "recall_lifecycle": instance.recall_lifecycle,
         "conversation_context": instance.conversation_context,
         "assembler": instance.assembler,
         "config": instance.config,
@@ -60,6 +61,7 @@ def _constructor_arguments(instance: SearchService) -> dict[str, object]:
         ("summary_search", object(), "summary_search must implement"),
         ("query_planner", object(), "query_planner must be"),
         ("retrieval_grader", object(), "retrieval_grader must be"),
+        ("recall_lifecycle", object(), "recall_lifecycle must be"),
         ("conversation_context", object(), "conversation_context must be"),
         ("assembler", object(), "assembler must be"),
         ("config", object(), "config must be"),
@@ -229,7 +231,7 @@ def test_duplicate_semantic_hits_keep_highest_score_and_stable_order(tmp_path: P
     instance.tree.write(second)
     result = asyncio.run(instance.find("记忆"))
     assert tuple(item.uri for item in result.memories) == (first_uri, second_uri)
-    assert tuple(item.hit.score for item in result.memories) == (0.9, 0.8)
+    assert tuple(item.hit.lifecycle_semantic_score for item in result.memories) == (0.9, 0.8)
 
 
 def test_missing_l2_document_from_index_fails_closed(tmp_path: Path) -> None:
@@ -381,6 +383,34 @@ def test_relation_expansion_respects_per_match_and_total_capacity(
         instance.tree.write(neighbor)
     result = asyncio.run(instance.find("身份"))
     assert len(result.memories[0].related) == expected
+
+
+def test_successful_search_heats_direct_memory_but_not_relation_neighbor(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
+    seed, neighbors = _linked_preferences(1)
+    seed_uri = MemoryURI.from_address(seed.address)
+    neighbor_uri = MemoryURI.from_address(neighbors[0].address)
+    instance = service(
+        tmp_path,
+        semantic=SemanticSearch((MemorySearchHit(seed_uri, 0.9),)),
+        summaries=SummarySearch(),
+        responses=[
+            {
+                "decision": "sufficient",
+                "reason": "直接记忆足够支持回答。",
+                "missing_information": [],
+                "summary_query": None,
+            }
+        ],
+        clock=lambda: now,
+    )
+    instance.tree.write(seed)
+    instance.tree.write(neighbors[0])
+
+    result = asyncio.run(instance.search("身份"))
+    assert result.memories[0].related[0].document == neighbors[0]
+    states = instance.recall_lifecycle.store.read_many((seed_uri, neighbor_uri))
+    assert tuple(state.uri for state in states) == (seed_uri,)
 
 
 def test_relation_neighbor_outside_target_root_is_not_loaded(tmp_path: Path) -> None:

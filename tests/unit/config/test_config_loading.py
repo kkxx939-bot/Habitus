@@ -25,6 +25,12 @@ def test_example_yaml_declares_a_complete_cross_domain_configuration(tmp_path) -
     assert config.memory_root == config.storage_root / "memory"
     assert config.conversation_root == config.storage_root / "conversation"
     assert config.workflow_root == config.storage_root / "workflow"
+    assert config.memory.recall_lifecycle.enabled
+    assert config.memory.recall_lifecycle.ranking_alpha == 0.2
+    assert config.memory.recall_lifecycle.profile_half_life_days == 180.0
+    assert config.memory.recall_lifecycle.event_half_life_days == 14.0
+    assert config.memory.semantic_search.vector_score_threshold == 0.0
+    assert config.memory.semantic_search.rerank_score_threshold == 0.2
     assert config.workflow.jobs.max_attempts == 5
     assert config.models.rerank is not None
     assert config.models.rerank.route.provider == "aliyun"
@@ -131,6 +137,10 @@ def test_strict_helpers_reject_loose_types_and_missing_required_fields() -> None
         (
             lambda p: p["memory"]["extraction"].update(max_input_tokens=60_000),
             "context_window_tokens",
+        ),
+        (
+            lambda p: p["memory"]["recall_lifecycle"].update(max_batch_size=10),
+            "maximum search candidate batch",
         ),
     ],
 )

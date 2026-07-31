@@ -1,6 +1,9 @@
 """顶层 Runtime 对所有领域组件的唯一组装与初始化主链测试。"""
 
 import asyncio
+import sqlite3
+from contextlib import closing
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +20,7 @@ from integrations.http import RuntimeHTTPHandlers
 from integrations.sdk import AgentMemoryHooks, PreparedAgentTurn
 from memory.conversation import ConversationAddress
 from memory.model import MemoryKind
-from memory.retrieval import MemoryRetrievalSufficiency
+from memory.retrieval import MemoryRetrievalSufficiency, SQLiteMemoryRecallLifecycleStore
 from memory.uri import MemoryURI
 from ModelClient import (
     EmbeddingVector,
@@ -229,6 +232,12 @@ def test_assembly_wires_one_shared_chain_without_touching_storage(tmp_path: Path
     assert components.workflow.runner.executor.editor is components.memory.editor
     assert components.memory.search.semantic_search.index is components.memory.vector_index
     assert components.memory.search.summary_search is components.conversation.summary_vector_index
+    assert components.memory.search.recall_lifecycle.config is config.memory.recall_lifecycle
+    recall_store = components.memory.search.recall_lifecycle.store
+    assert isinstance(recall_store, SQLiteMemoryRecallLifecycleStore)
+    assert recall_store.path == config.workflow_root / "memory_recall_lifecycle.sqlite3"
+    assert not recall_store.initialized
+    assert not recall_store.path.exists()
     assert components.workflow.worker.runner is components.workflow.runner
 
 
@@ -252,7 +261,43 @@ def test_initialize_is_idempotent_and_creates_only_local_durable_roots(tmp_path:
     assert runtime.state is RuntimeState.READY
     assert config.memory_root.is_dir()
     assert config.workflow_root.is_dir()
+    recall_store = runtime.components.memory.search.recall_lifecycle.store
+    assert isinstance(recall_store, SQLiteMemoryRecallLifecycleStore)
+    assert not recall_store.initialized
+    assert not recall_store.path.exists()
     assert not config.conversation_root.exists()
+
+
+def test_disabled_recall_lifecycle_ignores_bad_store_and_skips_batch_constraint(tmp_path: Path) -> None:
+    base = runtime_config(tmp_path)
+    lifecycle_config = replace(
+        base.memory.recall_lifecycle,
+        enabled=False,
+        max_batch_size=1,
+    )
+    config = replace(
+        base,
+        memory=replace(base.memory, recall_lifecycle=lifecycle_config),
+    )
+    path = config.workflow_root / "memory_recall_lifecycle.sqlite3"
+    path.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("CREATE TABLE memory_recall_lifecycle (uri TEXT PRIMARY KEY)")
+
+    providers, vectors = runtime_dependencies()
+    runtime = build_runtime(
+        config,
+        providers=providers,
+        vector_stores=vectors,
+        path_lock=PathLock(ProcessLocalLockStore()),
+        environ={},
+    )
+    runtime.initialize()
+
+    assert runtime.state is RuntimeState.READY
+    recall_store = runtime.components.memory.search.recall_lifecycle.store
+    assert isinstance(recall_store, SQLiteMemoryRecallLifecycleStore)
+    assert not recall_store.initialized
 
 
 def test_runtime_start_stop_restart_and_close_coordinate_both_workers(tmp_path: Path) -> None:

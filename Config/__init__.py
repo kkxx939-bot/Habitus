@@ -22,7 +22,7 @@ from Config.root import M2BOSConfig
 from Config.storage import StorageConfig
 from Config.workflow import MemoryWorkflowLifecycleConfig, WorkerConfig, WorkflowConfig
 from memory.intention import MemoryIntentionReviewConfig
-from memory.retrieval import MemorySearchServiceConfig
+from memory.retrieval import MemoryRecallLifecycleConfig, MemorySearchServiceConfig
 
 __all__ = [
     "ConfigError",
@@ -35,6 +35,7 @@ __all__ = [
     "M2BOSConfig",
     "MemoryConfig",
     "MemoryIntentionReviewConfig",
+    "MemoryRecallLifecycleConfig",
     "MemorySearchServiceConfig",
     "MemoryWorkflowLifecycleConfig",
     "ModelConfig",

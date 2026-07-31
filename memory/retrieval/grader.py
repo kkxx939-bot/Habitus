@@ -77,10 +77,14 @@ class MemoryRetrievalGrader:
                         role="system",
                         content=(
                             "你是只读 Memory 检索充分性审查器。只判断给出的长期 Memory 是否足以支持回答"
-                            "当前问题。Memory 已包含完整 L2 与有界 Links/Backlinks 一跳结果。不要因为想获得"
-                            "更多背景就判定不足；只有缺少回答所必需的事实、过程、时间线、纠正或上下文时才"
-                            "判定 insufficient。向量分数只代表相关性，不能单独当作事实置信度。若 sufficient，"
-                            "missing_information 必须为空且 summary_query 必须为 null。若 insufficient，列出"
+                            "当前问题。Memory 已包含完整 L2 与有界 Links/Backlinks 一跳结果。sufficient 的"
+                            "标准是 Memory 能够独立、明确地覆盖 current_query 实际要求的信息；相关命中、"
+                            "关键词重合或只包含最终结论都不等于充分。当问题询问原因、过程、决策依据、"
+                            "时间线、变化、纠正关系，或需要历史上下文才能解释的指代时，只要 Memory 缺少"
+                            "对应支撑，就必须判定 insufficient。若问题只要求结论且 Memory 已经完整覆盖，"
+                            "不要仅因还能获得额外背景而判定不足。向量分数只代表相关性，不能单独当作事实"
+                            "置信度。若 sufficient，missing_information 必须为空且 summary_query 必须为 null。"
+                            "若 insufficient，列出"
                             "至多指定数量的真实缺口，并结合 resolved_memory_queries 中已经补全的指代，生成一条"
                             "只用于搜索历史 Conversation Summary 的查询。resolved_memory_queries 只是查询上下文，"
                             "不是历史 Summary 召回结果。"
@@ -95,7 +99,7 @@ class MemoryRetrievalGrader:
                 ),
                 temperature=0.0,
                 max_output_tokens=self.config.retrieval_grader_max_output_tokens,
-                prompt_version="agent_memory_retrieval_grader_v1",
+                prompt_version="agent_memory_retrieval_grader_v2",
             ),
             schema=self._schema(),
             validator=self._validate_assessment,

@@ -148,9 +148,11 @@ class MemoryContextAssembler:
     def _direct_block(memory: MemoryMatchedMemory) -> str:
         queries = " | ".join(memory.matched_queries)
         review = MemoryContextAssembler._review_attributes(memory.intention_review)
+        semantic_score = memory.hit.lifecycle_semantic_score
+        context_score = memory.hit.score if semantic_score is None else semantic_score
         return (
             f'<memory uri="{memory.uri}" kind="{memory.document.kind.value}" '
-            f'score="{memory.hit.score:.6f}"{review}>\n'
+            f'score="{context_score:.6f}"{review}>\n'
             f"matched_queries: {queries}\n"
             f"{memory.document.markdown_body.strip()}\n"
             "</memory>\n"

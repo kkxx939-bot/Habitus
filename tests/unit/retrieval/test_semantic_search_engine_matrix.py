@@ -267,6 +267,19 @@ def test_vector_mode_returns_sorted_thresholded_direct_l2_hits() -> None:
     assert call["limit"] == 20
 
 
+def test_default_vector_admission_rejects_negative_candidates_without_filling_limit() -> None:
+    rejected = detail_match("无关", -0.01)
+    admitted = detail_match("相关", 0.7)
+    current = engine(
+        index=ScriptedIndex(searches=[(rejected, admitted)]),
+        config=MemorySemanticSearchConfig(mode=MemorySearchMode.VECTOR),
+    )
+
+    result = search(current, limit=5)
+
+    assert tuple(hit.uri for hit in result) == (admitted.uri,)
+
+
 def test_direct_candidates_deduplicate_by_uri_and_keep_highest_score() -> None:
     low = detail_match("相同", 0.2)
     high = detail_match("相同", 0.8, content="更相关版本")
@@ -394,6 +407,34 @@ def test_final_reranker_receives_bounded_documents_and_controls_order() -> None:
     assert reranker.calls == [("回答风格", ("AAAAA...", "BBBBB..."))]
 
 
+def test_default_rerank_admission_rejects_low_relevance_without_filling_limit() -> None:
+    relevant = detail_match("相关", 0.7)
+    hitchhiker = detail_match("搭便车", 0.9)
+    reranker = ScriptedReranker((0.19, 0.91))
+    current = engine(
+        index=ScriptedIndex(searches=[(relevant, hitchhiker)]),
+        reranker=reranker,
+        config=MemorySemanticSearchConfig(mode=MemorySearchMode.VECTOR),
+    )
+
+    result = search(current, limit=5)
+
+    assert tuple(hit.uri for hit in result) == (relevant.uri,)
+    assert result[0].rerank_score == 0.91
+
+
+def test_default_rerank_admission_can_return_zero_results() -> None:
+    first = detail_match("A", 0.9)
+    second = detail_match("B", 0.8)
+    current = engine(
+        index=ScriptedIndex(searches=[(first, second)]),
+        reranker=ScriptedReranker((0.1, 0.19)),
+        config=MemorySemanticSearchConfig(mode=MemorySearchMode.VECTOR),
+    )
+
+    assert search(current, limit=5) == ()
+
+
 @pytest.mark.parametrize("scores", [[], [0.5], (0.5,), (0.5, math.nan)])
 def test_final_reranker_invalid_output_falls_back_to_vector_scores(scores: object) -> None:
     matches = (detail_match("A", 0.9), detail_match("B", 0.8))
@@ -405,6 +446,21 @@ def test_final_reranker_invalid_output_falls_back_to_vector_scores(scores: objec
     result = search(current)
     assert tuple(hit.vector_score for hit in result) == (0.9, 0.8)
     assert all(hit.rerank_score is None for hit in result)
+
+
+def test_reranker_failure_uses_vector_admission_instead_of_accepting_every_candidate() -> None:
+    admitted = detail_match("相关", 0.8)
+    rejected = detail_match("无关", -0.1)
+    current = engine(
+        index=ScriptedIndex(searches=[(admitted, rejected)]),
+        reranker=ScriptedReranker(RuntimeError("reranker unavailable")),
+        config=MemorySemanticSearchConfig(mode=MemorySearchMode.VECTOR),
+    )
+
+    result = search(current, limit=5)
+
+    assert tuple(hit.uri for hit in result) == (admitted.uri,)
+    assert result[0].rerank_score is None
 
 
 def test_hierarchy_reranker_scores_children_before_parent_propagation() -> None:

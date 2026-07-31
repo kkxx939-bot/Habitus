@@ -13,13 +13,16 @@ from infrastructure.store.contracts import PathLock
 from infrastructure.store.locks import ProcessLocalLockStore
 from memory.conversation import ConversationAddress
 from memory.editor import MemoryTransactionJournalState
+from memory.model import MemoryKind
+from memory.retrieval import MemoryRecallTarget
+from memory.uri import MemoryURI
 from memory.workflow import MemoryChangeReceiptState, MemoryChangeSource, MemoryJobError, MemoryJobStatus
 from memory.workflow.completion import MemoryCommittedJobFinalizer, MemoryJobCompletion
 from memory.workflow.execution import MemoryJobCommit, MemoryJobExecutor
 from memory.workflow.planning import MemorySegmentProductBuilder, MemorySegmentProducts
 from pre.conversation import ConversationBatch
 from Runtime import build_runtime
-from tests.helpers import BASE_TIME, closed_turn, segment, segment_summary
+from tests.helpers import BASE_TIME, closed_turn, document, segment, segment_summary
 from tests.integration.test_change_receipt_chain import editor_plan
 from tests.integration.test_memory_job_full_chain import dependencies, runtime_config
 
@@ -253,6 +256,7 @@ def test_job_commit_rejects_non_committed_or_foreign_journal(tmp_path: Path) -> 
         ("semantic_refresher", object(), "semantic_refresher must be"),
         ("vector_index", object(), "vector_index must be"),
         ("transaction_recovery", object(), "transaction_recovery must be"),
+        ("recall_state_cleaner", object(), "recall_state_cleaner must implement"),
     ],
 )
 def test_finalizer_constructor_rejects_invalid_dependencies(
@@ -271,6 +275,7 @@ def test_finalizer_constructor_rejects_invalid_dependencies(
         "semantic_refresher": finalizer.semantic_refresher,
         "vector_index": finalizer.vector_index,
         "transaction_recovery": finalizer.transaction_recovery,
+        "recall_state_cleaner": finalizer.recall_state_cleaner,
     }
     arguments[field] = invalid
     with pytest.raises(TypeError, match=message):
@@ -319,6 +324,26 @@ def test_full_completion_result_is_strict_and_all_durable_steps_are_true(tmp_pat
     assert result.job.status is MemoryJobStatus.COMMITTED
     assert result.change_receipt.state is MemoryChangeReceiptState.COMMITTED
     assert result.summary_indexed and result.vector_indexed and result.journal_cleaned
+
+
+def test_finalizer_forgets_retired_recall_state_and_cleanup_failure_is_non_blocking(tmp_path: Path) -> None:
+    value = runtime(tmp_path)
+    lifecycle = value.components.memory.search.recall_lifecycle
+    item = document(MemoryKind.PREFERENCE)
+    uri = MemoryURI.from_address(item.address)
+    target = MemoryRecallTarget(uri, item.metadata.revision, item.metadata.created_at)
+    lifecycle.record_success((target,), recalled_at=BASE_TIME)
+    finalizer = value.components.workflow.runner.committed_finalizer
+
+    asyncio.run(finalizer._forget_retired_recall_state((uri,)))
+    assert lifecycle.store.read_many((uri,)) == ()
+
+    class FailingCleaner:
+        def forget(self, uris):
+            raise OSError("state store unavailable")
+
+    finalizer.recall_state_cleaner = FailingCleaner()
+    asyncio.run(finalizer._forget_retired_recall_state((uri,)))
 
 
 @pytest.mark.parametrize("field", ["summary_generated", "summary_indexed", "vector_indexed", "journal_cleaned"])

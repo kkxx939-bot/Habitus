@@ -247,6 +247,21 @@ memory:
     summary_fallback_max_query_chars: 2000
     summary_fallback_max_context_chars: 24000
 
+  recall_lifecycle:
+    enabled: true
+    ranking_alpha: 0.2
+    cold_threshold: 0.2
+    hot_threshold: 0.6
+    profile_half_life_days: 180.0
+    preference_half_life_days: 90.0
+    entity_half_life_days: 60.0
+    tool_half_life_days: 30.0
+    event_half_life_days: 14.0
+    intention_half_life_days: 30.0
+    sqlite_timeout_seconds: 5.0
+    max_batch_size: 1000
+    max_successful_recall_count: 1000000000
+
   retrieval:
     max_query_chars: 5000
     max_prompt_chars: 1000
@@ -307,8 +322,8 @@ memory:
     max_directory_expansions: 128
     max_rerank_candidates: 50
     max_rerank_document_chars: 12000
-    vector_score_threshold: -1.0
-    rerank_score_threshold: 0.0
+    vector_score_threshold: 0.0
+    rerank_score_threshold: 0.2
     score_propagation_alpha: 0.8
     rerank_hierarchy: false
 
