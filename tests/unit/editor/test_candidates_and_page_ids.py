@@ -177,3 +177,18 @@ def test_completed_intention_must_reuse_existing_page_and_be_explicitly_confirme
     output["intentions"][0]["confirmed"] = False
     with pytest.raises(MemoryCandidateError, match="explicit confirmation"):
         MemoryCandidateBatch.model_validate(output).validate_context(segment(), old_batch, page_ids)
+
+
+def test_event_candidate_uses_schema_date_and_rejects_only_future_date_invariant() -> None:
+    output = empty_output()
+    output["events"] = [candidate_item(MemoryKind.EVENT, 100)]
+    batch = MemoryCandidateBatch.model_validate(output)
+    batch.validate_context(segment(), SnapshotBatch((), 0), MemoryPageIdMap())
+
+    output["events"][0]["event_date"] = "2099-01-01"
+    with pytest.raises(MemoryCandidateError, match="future event date"):
+        MemoryCandidateBatch.model_validate(output).validate_context(
+            segment(),
+            SnapshotBatch((), 0),
+            MemoryPageIdMap(),
+        )

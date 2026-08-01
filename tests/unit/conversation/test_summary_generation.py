@@ -12,6 +12,7 @@ import pytest
 
 from memory.conversation import (
     ConversationAddress,
+    ConversationJournalConfig,
     ConversationRangeSummaryGenerator,
     ConversationSegmentSummaryCompactionConfig,
     ConversationSummaryCompactionConfig,
@@ -34,6 +35,7 @@ from ModelClient import (
 )
 from pre.conversation import ConversationMessageRole, ConversationRangeSummaryStage
 from tests.helpers import BASE_TIME, closed_turn, message, segment, segment_summary, summary_content
+from tests.model_helpers import prepare_chat_request
 
 SUMMARY_TIME = BASE_TIME + timedelta(minutes=1)
 
@@ -47,8 +49,10 @@ class RecordingProvider:
     is_remote: bool = False
     capabilities: ProviderCapabilities = ProviderCapabilities()
 
-    def complete(self, request):
-        self.requests.append(request)
+    prepare = staticmethod(prepare_chat_request)
+
+    def complete(self, prepared):
+        self.requests.append(prepared.request)
         return ModelResponse(
             json.dumps(self.responses.pop(0), ensure_ascii=False),
             self.model,
@@ -103,7 +107,7 @@ def test_segment_summary_binds_all_source_identity_in_code_and_preserves_process
     assert result.source_message_digest == source.digest
     assert result.generated_at == SUMMARY_TIME
     request = provider.requests[0]
-    assert request.prompt_version == "conversation_segment_summary_v2"
+    assert request.response_format.name == "conversation_segment_summary_content"
     assert "不要把内容分类成长记忆" in request.messages[-2].content
     assert source.messages[-2].content in request.messages[-1].content
 
@@ -141,7 +145,13 @@ def test_segment_summary_rejects_oversized_complete_source_without_truncating_or
 def test_summary_service_reuses_bound_immutable_summary_without_second_model_call(tmp_path: Path) -> None:
     source = segment(segment_id="000000000000-000000000001")
     address = ConversationAddress(source.conversation_id, date(2026, 7, 1))
-    store = ConversationSummaryStore(ConversationLayout(tmp_path / "conversation"))
+    config = ConversationJournalConfig()
+    store = ConversationSummaryStore(
+        ConversationLayout(
+            tmp_path / "conversation",
+            max_conversation_tree_entries=config.max_conversation_tree_entries,
+        )
+    )
     provider = RecordingProvider([content_dict(), content_dict()])
     service = ConversationSummaryService(
         store,
@@ -182,7 +192,7 @@ def test_range_summary_uses_contiguous_sources_and_system_owned_range_identity()
     result.require_matches_sources((first, second))
     assert result.range_id == "000000000000-000000000003"
     assert result.source_refs == plan.source_refs
-    assert provider.requests[0].prompt_version == "conversation_range_summary_v2"
+    assert provider.requests[0].response_format.name == "conversation_range_summary_content"
 
 
 def test_range_summary_enforces_stage_specific_source_bound_before_model_call() -> None:

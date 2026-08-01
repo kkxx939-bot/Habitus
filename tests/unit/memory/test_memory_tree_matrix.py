@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
+import infrastructure.store.filesystem.durable_io.atomic_file as atomic_file_module
 from memory.document import MemoryDocumentConfig, MemoryDocumentMetadata
+from memory.editor import MemoryDocumentLockKeyspace
 from memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
 from memory.tree import MemoryTree, MemoryTreeConfig, MemoryTreeIntegrityError
 from memory.uri import MemoryURI
@@ -68,7 +70,7 @@ def test_tree_constructor_rejects_symbolic_link_root(tmp_path: Path) -> None:
     [
         (MemoryAddress.profile(), "profile.md"),
         (MemoryAddress.preference("回答风格"), "preferences/回答风格.md"),
-        (MemoryAddress.entity("项目", "m2bOS"), "entities/项目/m2bOS.md"),
+        (MemoryAddress.entity("项目", "m2bOS"), "entities/项目/m2bos.md"),
         (MemoryAddress.tool("workspace.inspect"), "tools/workspace.inspect.md"),
         (MemoryAddress.event(date(1, 1, 1), "开始"), "events/0001/01/01/开始.md"),
         (MemoryAddress.event(date(9999, 12, 31), "结束"), "events/9999/12/31/结束.md"),
@@ -83,6 +85,175 @@ def test_tree_maps_every_address_to_exact_confirmed_physical_path(
     tree = MemoryTree(tmp_path / "memory")
     assert tree.path_for(address) == tree.root / relative
     assert tree.path_for_uri(MemoryURI.from_address(address)) == tree.root / relative
+
+
+@pytest.mark.parametrize(
+    ("first_name", "alias_name"),
+    [
+        ("Theme", "theme"),
+        ("Café", "Cafe\u0301"),
+    ],
+)
+def test_filesystem_aliases_share_one_memory_identity_and_lock(
+    tmp_path: Path,
+    first_name: str,
+    alias_name: str,
+) -> None:
+    tree = MemoryTree(tmp_path / "memory")
+    first = document(
+        MemoryKind.PREFERENCE,
+        fields={"topic": first_name, "content": "- first"},
+    )
+    try:
+        alias = document(
+            MemoryKind.PREFERENCE,
+            fields={"topic": alias_name, "content": "- second"},
+        )
+    except ValueError:
+        return
+    tree.write(first)
+    first_path = tree.path_for(first.address)
+    alias_path = tree.path_for(alias.address)
+    if not alias_path.exists() or not first_path.samefile(alias_path):
+        pytest.skip("filesystem does not alias these names")
+
+    first_uri = MemoryURI.from_address(first.address)
+    alias_uri = MemoryURI.from_address(alias.address)
+    keyspace = MemoryDocumentLockKeyspace(tree.root)
+    assert first_uri == alias_uri
+    assert keyspace.key(first_uri) == keyspace.key(alias_uri)
+
+
+def test_tree_reads_and_updates_one_legacy_case_preserving_path(tmp_path: Path) -> None:
+    document_codec = codec()
+    tree = MemoryTree(tmp_path / "memory", document_codec=document_codec)
+    tree.initialize()
+    legacy = document(
+        MemoryKind.PREFERENCE,
+        fields={"topic": "Theme", "content": "- legacy"},
+    )
+    legacy_path = tree.root / "preferences" / "Theme.md"
+    legacy_path.write_text(document_codec.encode(legacy), encoding="utf-8")
+
+    canonical_address = MemoryAddress.preference("theme")
+    assert tree.exists(canonical_address)
+    assert tree.read(canonical_address).fields["content"] == "- legacy"
+    assert tree.list_addresses(MemoryKind.PREFERENCE) == (legacy.address,)
+
+    updated = document(
+        MemoryKind.PREFERENCE,
+        fields={"topic": "theme", "content": "- updated"},
+        revision=2,
+    )
+    tree.write(updated)
+    assert legacy_path.exists()
+    assert [path.name for path in (tree.root / "preferences").iterdir()] == ["Theme.md"]
+    assert tree.read(canonical_address).fields["content"] == "- updated"
+
+
+def test_tree_rejects_multiple_physical_aliases_for_one_identity(tmp_path: Path) -> None:
+    document_codec = codec()
+    tree = MemoryTree(tmp_path / "memory", document_codec=document_codec)
+    tree.initialize()
+    first = document(
+        MemoryKind.PREFERENCE,
+        fields={"topic": "Theme", "content": "- first"},
+    )
+    alias = document(
+        MemoryKind.PREFERENCE,
+        fields={"topic": "theme", "content": "- alias"},
+    )
+    first_path = tree.root / "preferences" / "Theme.md"
+    alias_path = tree.root / "preferences" / "theme.md"
+    first_path.write_text(document_codec.encode(first), encoding="utf-8")
+    alias_path.write_text(document_codec.encode(alias), encoding="utf-8")
+    if first_path.samefile(alias_path):
+        return
+
+    with pytest.raises(MemoryTreeIntegrityError, match="aliases"):
+        tree.read(MemoryAddress.preference("theme"))
+
+
+@pytest.mark.parametrize("operation", ["read", "delete"])
+def test_tree_rejects_parent_swapped_to_symlink_before_leaf_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    document_codec = codec()
+    tree = MemoryTree(tmp_path / "memory", document_codec=document_codec)
+    outside = MemoryTree(tmp_path / "outside", document_codec=document_codec)
+    inside_document = document(
+        MemoryKind.PREFERENCE,
+        fields={"topic": "回答风格", "content": "- 内部可信内容"},
+    )
+    outside_document = document(
+        MemoryKind.PREFERENCE,
+        fields={"topic": "回答风格", "content": "- 外部替换内容"},
+    )
+    tree.write(inside_document)
+    outside.write(outside_document)
+    inside_filename = tree.path_for(inside_document.address).name
+    inside_parent = tree.root / "preferences"
+    outside_parent = outside.root / "preferences"
+    parked = tree.root / "preferences-parked"
+    original = atomic_file_module.require_safe_artifact_path
+    swapped = False
+
+    def validate_then_swap(root_value, path_value, *, label):
+        nonlocal swapped
+        candidate = original(root_value, path_value, label=label)
+        if not swapped:
+            inside_parent.rename(parked)
+            inside_parent.symlink_to(outside_parent, target_is_directory=True)
+            swapped = True
+        return candidate
+
+    monkeypatch.setattr(
+        atomic_file_module,
+        "require_safe_artifact_path",
+        validate_then_swap,
+    )
+
+    with pytest.raises(MemoryTreeIntegrityError, match="safely"):
+        getattr(tree, operation)(inside_document.address)
+    assert outside.path_for(outside_document.address).exists()
+    assert (parked / inside_filename).exists()
+
+
+def test_tree_rejects_parent_swapped_to_symlink_before_directory_enumeration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tree = MemoryTree(tmp_path / "memory")
+    outside = MemoryTree(tmp_path / "outside")
+    tree.write(document(MemoryKind.PREFERENCE, fields={"topic": "内部", "content": "- inside"}))
+    outside.write(document(MemoryKind.PREFERENCE, fields={"topic": "外部", "content": "- outside"}))
+    inside_parent = tree.root / "preferences"
+    outside_parent = outside.root / "preferences"
+    parked = tree.root / "preferences-parked"
+    original = atomic_file_module.require_safe_artifact_path
+    swapped = False
+
+    def validate_then_swap(root_value, path_value, *, label):
+        nonlocal swapped
+        candidate = original(root_value, path_value, label=label)
+        if not swapped:
+            inside_parent.rename(parked)
+            inside_parent.symlink_to(outside_parent, target_is_directory=True)
+            swapped = True
+        return candidate
+
+    monkeypatch.setattr(
+        atomic_file_module,
+        "require_safe_artifact_path",
+        validate_then_swap,
+    )
+
+    with pytest.raises(MemoryTreeIntegrityError, match="safely"):
+        tree.list_addresses(MemoryKind.PREFERENCE)
+    assert (outside_parent / "外部.md").exists()
+    assert (parked / "内部.md").exists()
 
 
 @pytest.mark.parametrize("directory", DIRECTORIES)
@@ -120,7 +291,9 @@ def test_initialize_is_idempotent_and_creates_only_static_tree(tmp_path: Path) -
 
 @pytest.mark.parametrize("kind", tuple(MemoryKind))
 @pytest.mark.parametrize("revision", [1, 2, 10])
-def test_tree_write_read_and_overwrite_round_trip_each_kind_revision(tmp_path: Path, kind: MemoryKind, revision: int) -> None:
+def test_tree_write_read_and_overwrite_round_trip_each_kind_revision(
+    tmp_path: Path, kind: MemoryKind, revision: int
+) -> None:
     tree = MemoryTree(tmp_path / "memory")
     item = document(kind, revision=revision)
     assert tree.write(item) == item
@@ -187,7 +360,9 @@ def test_tree_layers_round_trip_for_every_valid_directory(
     assert tree.delete_layers(directory) is False
 
 
-@pytest.mark.parametrize(("abstract", "overview"), [("", "overview"), (" ", "overview"), ("abstract", ""), ("abstract", "\n")])
+@pytest.mark.parametrize(
+    ("abstract", "overview"), [("", "overview"), (" ", "overview"), ("abstract", ""), ("abstract", "\n")]
+)
 def test_tree_layers_reject_empty_semantics(tmp_path: Path, abstract: str, overview: str) -> None:
     tree = MemoryTree(tmp_path / "memory")
     tree.initialize()
@@ -195,7 +370,9 @@ def test_tree_layers_reject_empty_semantics(tmp_path: Path, abstract: str, overv
         tree.write_layers(MemoryDirectory.root(), abstract=abstract, overview=overview)
 
 
-@pytest.mark.parametrize(("abstract", "overview"), [(1, "overview"), ("abstract", 1), (None, "overview"), ("abstract", None)])
+@pytest.mark.parametrize(
+    ("abstract", "overview"), [(1, "overview"), ("abstract", 1), (None, "overview"), ("abstract", None)]
+)
 def test_tree_layers_reject_non_text_semantics(tmp_path: Path, abstract: object, overview: object) -> None:
     tree = MemoryTree(tmp_path / "memory")
     tree.initialize()
@@ -362,18 +539,27 @@ def test_tree_detects_non_utf8_document_before_decode(tmp_path: Path, kind: Memo
         tree.read(item.address)
 
 
-@pytest.mark.parametrize("directory", [MemoryDirectory.root(), MemoryDirectory.preferences(), MemoryDirectory.entities(), MemoryDirectory.events()])
+@pytest.mark.parametrize(
+    "directory",
+    [MemoryDirectory.root(), MemoryDirectory.preferences(), MemoryDirectory.entities(), MemoryDirectory.events()],
+)
 def test_tree_detects_unsupported_hidden_entry(tmp_path: Path, directory: MemoryDirectory) -> None:
     tree = MemoryTree(tmp_path / "memory")
     tree.initialize()
     path = tree.directory_path(directory)
     (path / ".unknown").write_text("x", encoding="utf-8")
-    operation = tree.direct_addresses if directory not in {MemoryDirectory.entities(), MemoryDirectory.events()} else tree.child_directories
+    operation = (
+        tree.direct_addresses
+        if directory not in {MemoryDirectory.entities(), MemoryDirectory.events()}
+        else tree.child_directories
+    )
     with pytest.raises(MemoryTreeIntegrityError, match="hidden"):
         operation(directory)
 
 
-@pytest.mark.parametrize("directory", [MemoryDirectory.preferences(), MemoryDirectory.tools(), MemoryDirectory.intentions()])
+@pytest.mark.parametrize(
+    "directory", [MemoryDirectory.preferences(), MemoryDirectory.tools(), MemoryDirectory.intentions()]
+)
 def test_tree_detects_subdirectory_in_leaf_directory(tmp_path: Path, directory: MemoryDirectory) -> None:
     tree = MemoryTree(tmp_path / "memory")
     tree.initialize()

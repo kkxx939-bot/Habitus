@@ -9,6 +9,7 @@ from types import MappingProxyType
 import pytest
 
 from ModelClient import (
+    ChatCallContext,
     ChatMessage,
     ChatModelConfig,
     ChatRequest,
@@ -28,6 +29,7 @@ from ModelClient import (
     ModelStreamEvent,
     ModelStructuredOutputError,
     ModelTransportError,
+    PreparedChatRequest,
     ProviderCapabilities,
     ProviderConfig,
     ReasoningOptions,
@@ -390,16 +392,43 @@ def test_chat_request_tools_require_normalized_tool_definitions(invalid: object)
     "metadata",
     [{}, {"trace": "1"}, {"attempt": 0}, {"enabled": False}, MappingProxyType({"source": "test"})],
 )
-def test_chat_request_copies_metadata_mapping(metadata: object) -> None:
-    request = ChatRequest(messages=(message(),), metadata=metadata)
-    assert request.metadata == dict(metadata)
-    assert isinstance(request.metadata, dict)
+def test_chat_call_context_copies_internal_metadata_mapping(metadata: object) -> None:
+    context = ChatCallContext(metadata=metadata)
+    assert context.metadata == dict(metadata)
+    assert isinstance(context.metadata, dict)
 
 
 @pytest.mark.parametrize("invalid", NON_MAPPING_VALUES)
-def test_chat_request_rejects_non_mapping_metadata(invalid: object) -> None:
+def test_chat_call_context_rejects_non_mapping_metadata(invalid: object) -> None:
     with pytest.raises((TypeError, ValueError)):
-        ChatRequest(messages=(message(),), metadata=invalid)
+        ChatCallContext(metadata=invalid)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    INVALID_EMPTY_TEXT + tuple(value for value in NON_TEXT_VALUES if value is not None),
+)
+def test_chat_call_context_rejects_invalid_prompt_version(invalid: object) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        ChatCallContext(prompt_version=invalid)
+
+
+@pytest.mark.parametrize("invalid", tuple(value for value in INVALID_INTEGER_VALUES if value is not None) + (0,))
+def test_chat_call_context_rejects_invalid_input_token_limit(invalid: object) -> None:
+    with pytest.raises(ValueError):
+        ChatCallContext(input_token_limit=invalid)
+
+
+def test_prepared_chat_request_binds_body_budget_and_stream_to_logical_request() -> None:
+    request = ChatRequest(messages=(message(),), max_output_tokens=64)
+    prepared = PreparedChatRequest(request, b'{"wire":true}', b"{}", 64, False)
+
+    assert prepared.request is request
+    assert prepared.body == b'{"wire":true}'
+    assert prepared.model_visible_body == b"{}"
+    assert prepared.estimated_input_tokens > 0
+    assert prepared.reserved_output_tokens == 64
+    assert prepared.stream is False
 
 
 @pytest.mark.parametrize("invalid", ["format", {}, [], 1, True, object()])

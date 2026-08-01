@@ -143,7 +143,9 @@ def test_address_rejects_fields_not_owned_by_memory_kind(kind: MemoryKind, extra
         (("intentions",), ()),
     ],
 )
-def test_memory_directory_parent_and_lineage_are_lossless(parts: tuple[str, ...], parent: tuple[str, ...] | None) -> None:
+def test_memory_directory_parent_and_lineage_are_lossless(
+    parts: tuple[str, ...], parent: tuple[str, ...] | None
+) -> None:
     directory = MemoryDirectory(parts)
     assert (None if directory.parent() is None else directory.parent().parts) == parent
     assert directory.lineage()[-1] == MemoryDirectory.root()
@@ -297,7 +299,7 @@ def test_uri_rejects_noncanonical_encoding_unknown_tree_and_invalid_node(uri: st
         ("memory://preferences/a%20b.md", "memory://preferences/a%20b.md", "preferences/a b.md"),
         ("memory://preferences/a%23b.md", "memory://preferences/a%23b.md", "preferences/a#b.md"),
         ("memory://preferences/a%25b.md", "memory://preferences/a%25b.md", "preferences/a%b.md"),
-        ("memory://preferences/a%3fb.md", "memory://preferences/a%3Fb.md", "preferences/a?b.md"),
+        ("memory://preferences/a%2bb.md", "memory://preferences/a%2Bb.md", "preferences/a+b.md"),
         ("memory://preferences/a%40b.md", "memory://preferences/a%40b.md", "preferences/a@b.md"),
         ("memory://preferences/中文.md", "memory://preferences/中文.md", "preferences/中文.md"),
     ],
@@ -370,14 +372,14 @@ def test_uri_build_and_join_reject_unsafe_or_non_text_parts(part: object) -> Non
 
 
 def test_uri_is_immutable_hashable_and_compares_only_normalized_identity() -> None:
-    uri = MemoryURI("memory://preferences/a%3fb.md")
-    same = MemoryURI("memory://preferences/a%3Fb.md")
+    uri = MemoryURI("memory://preferences/a%2bb.md")
+    same = MemoryURI("memory://preferences/a%2Bb.md")
     assert uri == same
     assert uri == str(same)
     assert uri != "memory://preferences/other.md"
     assert uri != object()
     assert len({uri, same}) == 1
-    assert repr(uri) == "MemoryURI('memory://preferences/a%3Fb.md')"
+    assert repr(uri) == "MemoryURI('memory://preferences/a%2Bb.md')"
     with pytest.raises(AttributeError):
         uri._uri = "memory://profile.md"  # type: ignore[misc]
 
@@ -405,10 +407,7 @@ def test_document_metadata_rejects_invalid_revision(revision: object) -> None:
         for field in ("created_at", "updated_at")
         for value in (None, "2026-07-28", 1, date(2026, 7, 28), datetime(2026, 7, 28))
     )
-    + tuple(
-        ("last_confirmed_at", value)
-        for value in ("2026-07-28", 1, date(2026, 7, 28), datetime(2026, 7, 28))
-    ),
+    + tuple(("last_confirmed_at", value) for value in ("2026-07-28", 1, date(2026, 7, 28), datetime(2026, 7, 28))),
 )
 def test_document_metadata_rejects_missing_non_datetime_or_naive_timestamps(field: str, value: object) -> None:
     kwargs: dict[str, object] = {
@@ -481,7 +480,14 @@ def test_relation_cannot_point_to_same_document(link_type: MemoryLinkType) -> No
         MemoryStoredLink(uri, uri, link_type)
 
 
-@pytest.mark.parametrize("endpoint", [MemoryURI.root(), MemoryURI.from_directory(MemoryDirectory.preferences()), MemoryURI.from_layer(MemoryDirectory.root(), MemoryLevel.ABSTRACT)])
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        MemoryURI.root(),
+        MemoryURI.from_directory(MemoryDirectory.preferences()),
+        MemoryURI.from_layer(MemoryDirectory.root(), MemoryLevel.ABSTRACT),
+    ],
+)
 @pytest.mark.parametrize("position", ["from_uri", "to_uri"])
 def test_relation_endpoints_must_be_l2_documents(endpoint: MemoryURI, position: str) -> None:
     kwargs = {
@@ -515,7 +521,12 @@ def test_relation_endpoints_reject_non_uri_objects(value: object, position: str)
         "link",
         {},
         {"from_uri": "memory://profile.md"},
-        {"from_uri": "memory://profile.md", "to_uri": "memory://preferences/a.md", "link_type": "related_to", "extra": 1},
+        {
+            "from_uri": "memory://profile.md",
+            "to_uri": "memory://preferences/a.md",
+            "link_type": "related_to",
+            "extra": 1,
+        },
         {"from_uri": 1, "to_uri": "memory://preferences/a.md", "link_type": "related_to"},
         {"from_uri": "memory://profile.md", "to_uri": 1, "link_type": "related_to"},
         {"from_uri": "memory://profile.md", "to_uri": "memory://preferences/a.md", "link_type": 1},
@@ -530,7 +541,9 @@ def test_stored_link_parser_rejects_invalid_shapes_and_values(value: object) -> 
 def test_relation_collection_is_sorted_immutable_and_rejects_duplicates() -> None:
     source = MemoryURI.from_address(MemoryAddress.profile())
     first = MemoryStoredLink(source, MemoryURI.from_address(MemoryAddress.preference("A")), MemoryLinkType.DERIVED_FROM)
-    second = MemoryStoredLink(source, MemoryURI.from_address(MemoryAddress.preference("B")), MemoryLinkType.DERIVED_FROM)
+    second = MemoryStoredLink(
+        source, MemoryURI.from_address(MemoryAddress.preference("B")), MemoryLinkType.DERIVED_FROM
+    )
     assert normalize_stored_links((second, first), label="links") == (first, second)
     assert parse_stored_links([second.to_dict(), first.to_dict()], label="links") == (first, second)
     with pytest.raises(ValueError, match="duplicate"):
@@ -590,7 +603,10 @@ def _replace_metadata(raw: str, transform: object) -> str:
     return body + marker + json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2) + "\n-->\n"
 
 
-@pytest.mark.parametrize("field", ["memory_type", "revision", "created_at", "updated_at", "last_confirmed_at", "fields", "links", "backlinks"])
+@pytest.mark.parametrize(
+    "field",
+    ["memory_type", "revision", "created_at", "updated_at", "last_confirmed_at", "fields", "links", "backlinks"],
+)
 def test_codec_rejects_missing_system_metadata_field(field: str) -> None:
     source = document(MemoryKind.INTENTION)
     raw = CODEC.encode(source)
@@ -677,7 +693,7 @@ def test_codec_rejects_missing_duplicate_nonterminal_tampered_or_path_divergent_
 def test_codec_rejects_noncanonical_whitespace_in_metadata(kind: MemoryKind) -> None:
     source = document(kind)
     raw = CODEC.encode(source)
-    corrupted = raw.replace("\n  \"backlinks\"", "\n    \"backlinks\"", 1)
+    corrupted = raw.replace('\n  "backlinks"', '\n    "backlinks"', 1)
     with pytest.raises(MemoryDocumentIntegrityError, match="canonically"):
         CODEC.decode(corrupted, expected_address=source.address)
 

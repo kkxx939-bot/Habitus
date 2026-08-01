@@ -36,6 +36,7 @@ from Runtime import (
     build_runtime,
 )
 from tests.helpers import BASE_TIME
+from tests.model_helpers import prepare_chat_request
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
@@ -48,6 +49,8 @@ class FakeChatProvider:
         self.provider_name = provider_name
         self.model = model
         self.closed = False
+
+    prepare = staticmethod(prepare_chat_request)
 
     def complete(self, _request):
         return ModelResponse("{}", self.model, self.provider_name)
@@ -102,6 +105,7 @@ class FakeRerankProvider:
 
 class FakeVectorBackend:
     adapter_name = "fake_vector"
+    requires_cross_process_publication_fencing = False
     max_records = 100_000
     max_search_hits = 10_000
 
@@ -177,6 +181,7 @@ def runtime_dependencies() -> tuple[ProviderFactory, VectorStoreFactory]:
             context.config.provider,
             context.config.collection,
         ),
+        requires_cross_process_publication_fencing=False,
     )
     return providers, vectors
 
@@ -239,6 +244,31 @@ def test_assembly_wires_one_shared_chain_without_touching_storage(tmp_path: Path
     assert not recall_store.initialized
     assert not recall_store.path.exists()
     assert components.workflow.worker.runner is components.workflow.runner
+
+
+def test_default_vector_publication_fences_use_dedicated_lock_databases(tmp_path: Path) -> None:
+    config = runtime_config(tmp_path)
+    providers, vectors = runtime_dependencies()
+
+    runtime = build_runtime(
+        config,
+        providers=providers,
+        vector_stores=vectors,
+        environ={},
+    )
+
+    components = runtime.components
+    memory_store = components.memory.vector_index.store
+    summary_store = components.conversation.summary_vector_index.store
+    transaction_lock = components.infrastructure.path_lock.lock_store
+    memory_lock = memory_store._path_lock.lock_store
+    summary_lock = summary_store._path_lock.lock_store
+
+    assert transaction_lock.path == config.workflow_root / "locks.sqlite3"
+    assert memory_lock.path == config.workflow_root / "memory_vector_locks.sqlite3"
+    assert summary_lock.path == config.workflow_root / "summary_vector_locks.sqlite3"
+    assert len({transaction_lock.path, memory_lock.path, summary_lock.path}) == 3
+    assert not config.storage_root.exists()
 
 
 def test_initialize_is_idempotent_and_creates_only_local_durable_roots(tmp_path: Path) -> None:
@@ -369,6 +399,7 @@ def test_runtime_public_conversation_interface_returns_pending_consistency_handl
             start_sequence=0,
             occurred_at=BASE_TIME,
             after_turn=False,
+            delivery_id="a" * 64,
         )
         assert result.ingest.jobs == ()
         assert result.effective_after_turn is False
@@ -381,6 +412,7 @@ def test_runtime_public_conversation_interface_returns_pending_consistency_handl
             start_sequence=0,
             occurred_at=BASE_TIME,
             after_turn=False,
+            delivery_id="a" * 64,
         )
         assert replayed.ingest.append.status.value == "unchanged"
         assert replayed.next_sequence == 2
@@ -428,7 +460,10 @@ def test_runtime_public_conversation_interface_returns_pending_consistency_handl
         assert report.status.value in {"healthy", "degraded"}
         assert "m2bos_" in runtime.prometheus_metrics()
         http = RuntimeHTTPHandlers(runtime)
-        assert http.protocols()["protocols"] == list(runtime.conversation_protocols())
+        capabilities = http.capabilities()
+        assert capabilities["api_version"] == "1.0"
+        assert capabilities["protocols"] == list(runtime.conversation_protocols())
+        assert "remember_idempotency_v1" in capabilities["features"]
         status, readiness = await http.readiness()
         assert status in {200, 503}
         assert readiness["status"] in {"healthy", "degraded", "unhealthy"}

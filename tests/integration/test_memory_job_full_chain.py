@@ -31,14 +31,13 @@ from ModelClient import (
 from pre.conversation import ConversationBatch
 from Runtime import build_runtime
 from tests.helpers import BASE_TIME, closed_turn, summary_content
+from tests.model_helpers import prepare_chat_request
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 def runtime_config(tmp_path: Path, *, max_attempts: int = 3) -> M2BOSConfig:
-    payload = yaml.safe_load(
-        (REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8")
-    )
+    payload = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
     payload["models"]["chat"]["route"].update(
         provider="fake",
@@ -73,22 +72,27 @@ def runtime_config(tmp_path: Path, *, max_attempts: int = 3) -> M2BOSConfig:
 class DispatchingChatProvider:
     provider_name: str
     model: str
-    prompt_versions: list[str | None] = field(default_factory=list)
+    response_names: list[str] = field(default_factory=list)
     capabilities: ProviderCapabilities = ProviderCapabilities()
     is_remote: bool = False
 
-    def complete(self, request):
-        self.prompt_versions.append(request.prompt_version)
+    prepare = staticmethod(prepare_chat_request)
+
+    def complete(self, prepared):
+        request = prepared.request
+        assert request.response_format is not None
+        response_name = request.response_format.name
+        self.response_names.append(response_name)
         payloads = {
-            "conversation_segment_summary_v2": summary_content().to_dict(),
-            "memory_retrieval_grader_v1": {
+            "conversation_segment_summary_content": summary_content().to_dict(),
+            "memory_retrieval_decision": {
                 "status": "irrelevant",
                 "action": "finish",
                 "query": None,
                 "uri": None,
                 "reason": "当前没有相关旧记忆。",
             },
-            "memory_candidate_extraction_v2": {
+            "memory_candidate_batch": {
                 "profile": [],
                 "preferences": [],
                 "entities": [],
@@ -98,9 +102,8 @@ class DispatchingChatProvider:
                 "identity_proposals": [],
                 "relations": [],
             },
-            "memory_candidate_review_v2": {"decision": "accept", "issues": []},
         }
-        payload = payloads[request.prompt_version]
+        payload = payloads[response_name]
         return ModelResponse(json.dumps(payload, ensure_ascii=False), self.model, self.provider_name)
 
     async def complete_async(self, request):
@@ -151,6 +154,7 @@ class RerankProvider:
 
 class DurableVectorBackend:
     adapter_name = "fake_vector"
+    requires_cross_process_publication_fencing = False
     max_records = 100_000
     max_search_hits = 10_000
 
@@ -197,9 +201,7 @@ class DurableVectorBackend:
 
     async def search(self, _query_vector, *, filters, limit):
         return tuple(
-            VectorStoreMatch(record, 1.0)
-            for record in self.records.values()
-            if filters.matches(record.attributes)
+            VectorStoreMatch(record, 1.0) for record in self.records.values() if filters.matches(record.attributes)
         )[:limit]
 
     async def scan(self, *, filters, limit):
@@ -244,6 +246,7 @@ def dependencies():
     vectors.register_adapter(
         "fake_vector",
         vector_builder,
+        requires_cross_process_publication_fencing=False,
     )
     return providers, vectors, chat_instances, vector_instances
 
@@ -288,11 +291,10 @@ def test_full_job_chain_commits_summary_receipt_indexes_and_job_before_cleaning_
     summary_state = asyncio.run(runtime.components.conversation.summary_vector_index.store.state())
     assert isinstance(memory_state, VectorStoreState) and memory_state.checkpoint == 1
     assert isinstance(summary_state, VectorStoreState) and summary_state.checkpoint == 1
-    assert set(chats[0].prompt_versions) == {
-        "conversation_segment_summary_v2",
-        "memory_retrieval_grader_v1",
-        "memory_candidate_extraction_v2",
-        "memory_candidate_review_v2",
+    assert set(chats[0].response_names) == {
+        "conversation_segment_summary_content",
+        "memory_retrieval_decision",
+        "memory_candidate_batch",
     }
 
 
@@ -317,9 +319,7 @@ def test_committed_l2_job_resumes_after_vector_timeout_without_replanning(
     )
     queued = runtime.components.workflow.enqueuer.flush(address).jobs[0]
     memory_collection = runtime.components.memory.vector_index.store.collection
-    memory_backend = next(
-        backend for backend in vector_backends if backend.collection == memory_collection
-    )
+    memory_backend = next(backend for backend in vector_backends if backend.collection == memory_collection)
     memory_backend.fail_incremental_visibility_once = True
 
     try:
@@ -335,7 +335,7 @@ def test_committed_l2_job_resumes_after_vector_timeout_without_replanning(
     journal = runtime.components.memory.editor.transaction.journal.read(failed.transaction_id)
     assert receipt.state is MemoryChangeReceiptState.COMMITTED
     assert journal.state is MemoryTransactionJournalState.COMMITTED
-    assert chats[0].prompt_versions.count("memory_candidate_extraction_v2") == 1
+    assert chats[0].response_names.count("memory_candidate_batch") == 1
     assert asyncio.run(runtime.failed_memory_job()) == failed
 
     retried = asyncio.run(runtime.retry_failed_memory_job(failed))
@@ -345,8 +345,20 @@ def test_committed_l2_job_resumes_after_vector_timeout_without_replanning(
     assert result.recovered
     assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
     assert result.change_receipt is not None
-    assert result.change_receipt.source == source
-    assert chats[0].prompt_versions.count("memory_candidate_extraction_v2") == 1
+    receipt_source = result.change_receipt.source
+    assert receipt_source.same_trigger(source)
+    trigger = runtime.components.workflow.runner.executor.conversations.read_segment(
+        address,
+        failed.segment_id,
+    )
+    editor_segment = runtime.components.workflow.runner.executor.conversations.read_editor_segment(
+        address,
+        trigger,
+    )
+    assert editor_segment is not None
+    assert receipt_source.editor_segment_id == editor_segment.segment_id
+    assert receipt_source.editor_segment_digest == editor_segment.digest
+    assert chats[0].response_names.count("memory_candidate_batch") == 1
     assert runtime.components.memory.editor.transaction.journal.try_read(queued.transaction_id) is None
     assert asyncio.run(runtime.failed_memory_job()) is None
 
@@ -376,37 +388,42 @@ def test_lifecycle_releases_history_then_purges_source_but_preserves_summary_sem
     source = completed.change_receipt.source
     maintenance_time = BASE_TIME + timedelta(days=400)
 
-    released = asyncio.run(
-        runtime.maintain_conversation(address, now=maintenance_time)
-    )
+    released = asyncio.run(runtime.maintain_conversation(address, now=maintenance_time))
 
     assert released.released_history_segment_ids == (queued.segment_id,)
     assert released.purged_history_segment_ids == ()
     assert released.deleted_memory_job_sequences == (queued.memory_sequence,)
     assert released.deleted_memory_receipt_ids == (source.receipt_id,)
-    assert runtime.components.workflow.jobs.try_read_source(
-        address,
-        queued.segment_id,
-        queued.source_segment_digest,
-    ) is None
+    assert (
+        runtime.components.workflow.jobs.try_read_source(
+            address,
+            queued.segment_id,
+            queued.source_segment_digest,
+        )
+        is None
+    )
     assert runtime.components.workflow.receipts.try_read(source) is None
-    assert runtime.components.conversation.summaries.store.try_read_by_id(
-        address,
-        queued.segment_id,
-    ) is not None
+    assert (
+        runtime.components.conversation.summaries.store.try_read_by_id(
+            address,
+            queued.segment_id,
+        )
+        is not None
+    )
     history_path = runtime.components.conversation.journal.layout.history_path(
         address,
         queued.segment_id,
     )
     assert not history_path.exists()
 
-    purged = asyncio.run(
-        runtime.maintain_conversation(address, now=maintenance_time)
-    )
+    purged = asyncio.run(runtime.maintain_conversation(address, now=maintenance_time))
 
     assert purged.purged_history_segment_ids == ()
     assert purged.released_history_segment_ids == ()
-    assert runtime.components.conversation.summaries.store.try_read_by_id(
-        address,
-        queued.segment_id,
-    ) is not None
+    assert (
+        runtime.components.conversation.summaries.store.try_read_by_id(
+            address,
+            queued.segment_id,
+        )
+        is not None
+    )

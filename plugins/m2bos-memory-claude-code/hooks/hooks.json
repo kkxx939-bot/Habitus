@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/session-start.mjs", "timeout": 30}]}
+    ],
+    "UserPromptSubmit": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt.mjs", "timeout": 30}]}
+    ],
+    "Stop": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/stop.mjs", "timeout": 15}]}
+    ],
+    "PreCompact": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/pre-compact.mjs", "timeout": 60}]}
+    ],
+    "SessionEnd": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/session-end.mjs", "timeout": 60}]}
+    ],
+    "SubagentStart": [
+      {"hooks": [{"type": "command", "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/subagent-start.mjs", "timeout": 30}]}
+    ],
+    "SubagentStop": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/subagent-stop.mjs", "timeout": 60}]}
+    ]
+  }
+}

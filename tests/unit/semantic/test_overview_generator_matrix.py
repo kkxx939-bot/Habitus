@@ -24,6 +24,7 @@ from ModelClient import (
     ProviderConfig,
     StructuredChatClient,
 )
+from tests.model_helpers import prepare_chat_request
 
 
 @dataclass
@@ -35,8 +36,10 @@ class RecordingOverviewProvider:
     is_remote: bool = False
     capabilities: ProviderCapabilities = ProviderCapabilities()
 
-    def complete(self, request):
-        self.requests.append(request)
+    prepare = staticmethod(prepare_chat_request)
+
+    def complete(self, prepared):
+        self.requests.append(prepared.request)
         return ModelResponse(
             json.dumps(self.outputs.pop(0), ensure_ascii=False),
             self.model,

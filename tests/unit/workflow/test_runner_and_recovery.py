@@ -120,6 +120,33 @@ def test_segment_product_failure_waits_for_sibling_but_never_returns_partial_pro
     assert sibling_finished
 
 
+def test_segment_products_defer_editor_until_a_complete_turn_boundary() -> None:
+    source = segment()
+    address = ConversationAddress(source.conversation_id, date(2026, 7, 1))
+
+    async def scenario():
+        summary_service = SimpleNamespace()
+        editor = object.__new__(MemoryEditor)
+
+        async def get_or_create(_address, current):
+            return segment_summary(current)
+
+        async def unexpected_plan(_current):
+            raise AssertionError("deferred segment must not invoke the editor")
+
+        summary_service.get_or_create = get_or_create
+        editor.plan = unexpected_plan
+        builder = object.__new__(MemorySegmentProductBuilder)
+        builder.summary_service = summary_service
+        builder.editor = editor
+        return await builder.build(address, source, editor_segment=None)
+
+    products = asyncio.run(scenario())
+    assert products.summary == segment_summary(source)
+    assert products.editor_plan.deferred
+    assert products.editor_plan.commit.changed_uris == ()
+
+
 def test_staged_recovery_publishes_exact_history_then_activates_job(tmp_path: Path) -> None:
     path_lock = PathLock(ProcessLocalLockStore())
     journal = ConversationMessageJournal(tmp_path / "conversation", path_lock)

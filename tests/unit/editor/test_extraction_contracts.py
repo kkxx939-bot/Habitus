@@ -1,10 +1,9 @@
-"""受控 ReAct、Retrieval Grader 和第二遍候选审查的严格契约测试。"""
+"""受控 ReAct、Retrieval Grader 和候选解析的严格契约测试。"""
 
 import pytest
 
 from memory.editor import (
     ConversationSegmentQueryBuilder,
-    MemoryCandidateReview,
     MemoryExtractionConfig,
     MemoryRetrievalAction,
     MemoryRetrievalConfig,
@@ -12,8 +11,6 @@ from memory.editor import (
     MemoryRetrievalIncompleteError,
     MemoryRetrievalObservation,
     MemoryRetrievalStatus,
-    MemoryReviewDecision,
-    MemoryReviewIssueCode,
 )
 from pre.conversation import ConversationMessageRole, ConversationSegment
 from tests.helpers import message, tool_turn
@@ -119,32 +116,6 @@ def test_observation_is_a_bounded_audit_reference_not_a_document_copy() -> None:
         )
 
 
-def test_candidate_review_only_accepts_clean_batch_or_rejects_with_controlled_issues() -> None:
-    accepted = MemoryCandidateReview.model_validate({"decision": "accept", "issues": []})
-    assert accepted.decision is MemoryReviewDecision.ACCEPT
-    rejected = MemoryCandidateReview.model_validate(
-        {
-            "decision": "reject",
-            "issues": [
-                {
-                    "code": MemoryReviewIssueCode.INFORMATION_LOSS.value,
-                    "detail": "遗漏了用户明确纠正后的最终偏好。",
-                }
-            ],
-        }
-    )
-    assert rejected.decision is MemoryReviewDecision.REJECT
-    with pytest.raises(ValueError, match="cannot contain issues"):
-        MemoryCandidateReview.model_validate(
-            {
-                "decision": "accept",
-                "issues": [{"code": "information_loss", "detail": "不应存在"}],
-            }
-        )
-    with pytest.raises(ValueError, match="requires at least one"):
-        MemoryCandidateReview.model_validate({"decision": "reject", "issues": []})
-
-
 def test_query_builder_preserves_roles_tool_identity_status_and_prompt_priority() -> None:
     source = ConversationSegment("conversation-1", "segment-1", tool_turn())
     query = ConversationSegmentQueryBuilder().build(source)
@@ -200,9 +171,14 @@ def test_query_builder_keeps_latest_user_correction_under_total_budget() -> None
         ("max_retrieval_iterations", 0),
         ("max_retrieval_iterations", 9),
         ("max_old_memory_items", 100),
-        ("max_candidate_regenerations", 10),
     ],
 )
 def test_extraction_config_enforces_cost_and_page_id_bounds(field: str, value: int) -> None:
     with pytest.raises(ValueError):
         MemoryExtractionConfig(**{field: value})
+
+
+@pytest.mark.parametrize("field", ["max_candidate_regenerations", "reviewer_max_output_tokens"])
+def test_extraction_config_does_not_keep_removed_review_controls(field: str) -> None:
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        MemoryExtractionConfig(**{field: 1})

@@ -27,12 +27,10 @@ from memory.editor import (
     MemoryRelationResolver,
 )
 from memory.editor.extraction import (
-    MemoryCandidateReview,
     MemoryExtractionResult,
     MemoryRetrievalAction,
     MemoryRetrievalDecision,
     MemoryRetrievalStatus,
-    MemoryReviewDecision,
 )
 from memory.editor.transaction import MemoryCommitPlan, MemoryCommitTransaction
 from memory.editor.transaction_log import MemoryTransactionJournal
@@ -102,8 +100,6 @@ def editor_plan(*, preference_content: str = "- 偏好简洁回答", with_relati
             ),
         ),
         retrieval_observations=(),
-        review=MemoryCandidateReview(MemoryReviewDecision.ACCEPT, ()),
-        candidate_attempts=1,
     )
     return MemoryEditorPlan(extraction, mutations, identities, commit)
 
@@ -169,8 +165,6 @@ def update_editor_plan(
             ),
         ),
         retrieval_observations=(),
-        review=MemoryCandidateReview(MemoryReviewDecision.ACCEPT, ()),
-        candidate_attempts=1,
     )
     return MemoryEditorPlan(extraction, mutations, identities, commit)
 

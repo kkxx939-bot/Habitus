@@ -24,12 +24,6 @@ from Runtime import Runtime
 
 UTC = timezone.utc
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-API_KEY = "m" * 32
-OPERATIONS_KEY = "o" * 32
-AUTH = {"Authorization": f"Bearer {API_KEY}"}
-OPERATIONS_AUTH = {"Authorization": f"Bearer {OPERATIONS_KEY}"}
-
-
 class CollectingObserver:
     def __init__(self) -> None:
         self.events: list[ObservationEvent] = []
@@ -76,14 +70,19 @@ def _job(sequence: int = 7, *, status: str = "failed", blocking: bool = True) ->
 
 
 class CapabilityHandlers:
-    """只替代领域执行，保留真实 FastAPI、Schema、中间件和认证链。"""
+    """只替代领域执行，保留真实 FastAPI、Schema 和中间件链。"""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
 
-    def protocols(self) -> dict[str, object]:
-        self.calls.append(("protocols", None))
-        return {"protocols": ["openai", "anthropic"]}
+    def capabilities(self) -> dict[str, object]:
+        self.calls.append(("capabilities", None))
+        return {
+            "api_version": "1.0",
+            "service_version": "0.1.0",
+            "protocols": ["openai", "anthropic"],
+            "features": ["recall", "remember", "remember_idempotency_v1"],
+        }
 
     async def remember(self, **values: object) -> dict[str, object]:
         self.calls.append(("remember", values))
@@ -210,15 +209,13 @@ def _runtime(observer: CollectingObserver | None = None) -> Runtime:
     return runtime
 
 
-def _app(monkeypatch: pytest.MonkeyPatch, *, operations: bool = True, max_bytes: int = 4096):
+def _app(monkeypatch: pytest.MonkeyPatch, *, max_bytes: int = 4096):
     handlers = CapabilityHandlers()
     observer = CollectingObserver()
     runtime = _runtime(observer)
     monkeypatch.setattr(app_module, "RuntimeHTTPHandlers", lambda _runtime: handlers)
     app = app_module.create_http_app(
         runtime,
-        api_key=API_KEY,
-        operations_api_key=OPERATIONS_KEY if operations else None,
         config=HTTPAPIConfig(max_request_bytes=max_bytes),
     )
     return app, runtime, handlers, observer
@@ -227,6 +224,7 @@ def _app(monkeypatch: pytest.MonkeyPatch, *, operations: bool = True, max_bytes:
 def test_memory_routes_expose_public_results_and_preserve_handler_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
     app, runtime, handlers, observer = _app(monkeypatch)
     remember_body = {
+        "delivery_id": "d" * 64,
         "conversation_id": "conversation-http",
         "started_on": "2026-07-30",
         "protocol": "openai",
@@ -236,41 +234,41 @@ def test_memory_routes_expose_public_results_and_preserve_handler_inputs(monkeyp
         "after_turn": True,
     }
 
-    with TestClient(app, raise_server_exceptions=False) as client:
-        protocols = client.get("/api/v1/protocols", headers=AUTH)
-        remembered = client.post("/api/v1/memory/remember", headers=AUTH, json=remember_body)
+    with TestClient(app, base_url="http://127.0.0.1:8787", raise_server_exceptions=False) as client:
+        capabilities = client.get("/api/v1/capabilities")
+        remembered = client.post("/api/v1/memory/remember", json=remember_body)
         cursor = client.get(
             "/api/v1/memory/conversations/cursor",
-            headers=AUTH,
             params={"conversation_id": "conversation-http", "started_on": "2026-07-30"},
         )
         flushed = client.post(
             "/api/v1/memory/flush",
-            headers=AUTH,
             json={"conversation_id": "conversation-http", "started_on": "2026-07-30"},
         )
         recalled = client.post(
             "/api/v1/memory/recall",
-            headers=AUTH,
             json={"query": "我喜欢什么回答风格？", "limit": 5},
         )
         jobs = client.get(
             "/api/v1/memory/jobs",
-            headers=AUTH,
             params={"conversation_id": "conversation-http", "started_on": "2026-07-30"},
         )
-        blocked = client.get("/api/v1/memory/jobs/blocked", headers=AUTH)
+        blocked = client.get("/api/v1/memory/jobs/blocked")
         status = client.get(
             "/api/v1/memory/jobs/7",
-            headers=AUTH,
             params={"conversation_id": "conversation-http", "started_on": "2026-07-30"},
         )
 
     assert all(
         response.status_code == 200
-        for response in (protocols, remembered, cursor, flushed, recalled, jobs, blocked, status)
+        for response in (capabilities, remembered, cursor, flushed, recalled, jobs, blocked, status)
     )
-    assert protocols.json()["result"] == {"protocols": ["openai", "anthropic"]}
+    assert capabilities.json()["result"] == {
+        "api_version": "1.0",
+        "service_version": "0.1.0",
+        "protocols": ["openai", "anthropic"],
+        "features": ["recall", "remember", "remember_idempotency_v1"],
+    }
     public_job = remembered.json()["result"]["jobs"][0]
     assert public_job == {
         "memory_sequence": 7,
@@ -290,6 +288,7 @@ def test_memory_routes_expose_public_results_and_preserve_handler_inputs(monkeyp
     assert isinstance(remember_call, dict)
     assert remember_call["payload"] == remember_body["payload"]
     assert remember_call["after_turn"] is True
+    assert remember_call["delivery_id"] == "d" * 64
     assert any(name == "conversation_cursor" for name, _value in handlers.calls)
     assert any(name == "flush" for name, _value in handlers.calls)
     accepted = next(event for event in observer.events if event.operation == "job_accepted")
@@ -309,12 +308,11 @@ def test_http_client_implements_the_same_agent_memory_port(monkeypatch: pytest.M
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport) as raw_client:
             client = M2BOSHTTPClient(
-                "http://m2bos.local",
-                api_key=API_KEY,
+                "http://127.0.0.1",
                 transport=DelegatingHTTPTransport(raw_client),
             )
             conversation = ConversationRef("conversation-http", date(2026, 7, 30))
-            protocols = await client.protocols()
+            capabilities = await client.capabilities()
             remembered = await client.remember(
                 conversation,
                 protocol="openai_chat_completions",
@@ -322,6 +320,7 @@ def test_http_client_implements_the_same_agent_memory_port(monkeypatch: pytest.M
                 start_sequence=0,
                 occurred_at=datetime(2026, 7, 30, 1, tzinfo=UTC),
                 after_turn=True,
+                delivery_id="e" * 64,
             )
             cursor = await client.cursor(conversation)
             recalled = await client.recall("回答风格", conversation=conversation)
@@ -329,7 +328,8 @@ def test_http_client_implements_the_same_agent_memory_port(monkeypatch: pytest.M
             await client.close()
 
         assert remembered.after_turn is True
-        assert protocols == ("openai", "anthropic")
+        assert capabilities.api_version == "1.0"
+        assert capabilities.protocols == ("openai", "anthropic")
         assert remembered.next_sequence == 2
         assert remembered.jobs[0].status == "queued"
         assert cursor == 2
@@ -339,9 +339,51 @@ def test_http_client_implements_the_same_agent_memory_port(monkeypatch: pytest.M
     asyncio.run(scenario())
 
     assert any(name == "remember" for name, _value in handlers.calls)
+    sdk_remember = next(value for name, value in handlers.calls if name == "remember")
+    assert isinstance(sdk_remember, dict)
+    assert sdk_remember["delivery_id"] == "e" * 64
     assert any(name == "conversation_cursor" for name, _value in handlers.calls)
     assert any(name == "recall" for name, _value in handlers.calls)
     assert any(name == "flush" for name, _value in handlers.calls)
+
+
+def test_unauthenticated_sdk_rejects_a_non_loopback_service_url() -> None:
+    with pytest.raises(ValueError, match="loopback"):
+        M2BOSHTTPClient("http://192.168.1.20:8787")
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://user:secret@127.0.0.1:8787",
+        "http://127.0.0.1:8787/api",
+        "http://127.0.0.1:8787;params",
+        "http://127.0.0.1:8787?query=1",
+        "http://127.0.0.1:8787#fragment",
+        "http://127.0.0.1:invalid",
+    ],
+)
+def test_unauthenticated_sdk_accepts_only_a_loopback_origin(base_url: str) -> None:
+    with pytest.raises(ValueError):
+        M2BOSHTTPClient(base_url)
+
+
+def test_sdk_rejects_an_invalid_delivery_identity_before_network_io() -> None:
+    client = M2BOSHTTPClient("http://127.0.0.1:8787")
+
+    async def scenario() -> None:
+        with pytest.raises(ValueError, match="delivery_id"):
+            await client.remember(
+                ConversationRef("delivery", date(2026, 8, 1)),
+                protocol="codex_rollout",
+                payload={"records": []},
+                start_sequence=0,
+                occurred_at=datetime(2026, 8, 1, tzinfo=UTC),
+                delivery_id="not-a-delivery-id",
+            )
+        await client.close()
+
+    asyncio.run(scenario())
 
 
 def test_sdk_import_does_not_load_runtime_or_memory_packages() -> None:
@@ -360,50 +402,27 @@ def test_sdk_import_does_not_load_runtime_or_memory_packages() -> None:
     assert json.loads(completed.stdout) == {"runtime": False, "memory": False}
 
 
-def test_operations_key_is_isolated_and_state_changing_route_requires_it(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_operations_and_metrics_are_available_on_the_loopback_service(monkeypatch: pytest.MonkeyPatch) -> None:
     app, _runtime_value, handlers, _observer = _app(monkeypatch)
     params = {"conversation_id": "conversation-http", "started_on": "2026-07-30"}
 
-    with TestClient(app, raise_server_exceptions=False) as client:
-        operations_on_memory_route = client.get("/api/v1/protocols", headers=OPERATIONS_AUTH)
-        main_on_operations_route = client.post(
-            "/api/v1/operations/memory/jobs/7/retry",
-            headers=AUTH,
-            params=params,
-            json={"expected_version": "a" * 64},
-        )
+    with TestClient(app, base_url="http://127.0.0.1:8787", raise_server_exceptions=False) as client:
         retried = client.post(
             "/api/v1/operations/memory/jobs/7/retry",
-            headers=OPERATIONS_AUTH,
             params=params,
             json={"expected_version": "a" * 64},
         )
-        audit = client.get("/api/v1/operations/audit", headers=OPERATIONS_AUTH, params={"limit": 25})
-        metrics_without_auth = client.get("/metrics")
-        metrics = client.get("/metrics", headers=AUTH)
+        audit = client.get("/api/v1/operations/audit", params={"limit": 25})
+        metrics = client.get("/metrics")
 
-    assert operations_on_memory_route.status_code == 401
-    assert main_on_operations_route.status_code == 401
     assert retried.status_code == 202
     assert retried.json()["result"]["job"]["job_status"] == "queued"
     assert audit.status_code == 200
     assert audit.json()["result"]["events"][0]["operation"] == "retry_job"
-    assert metrics_without_auth.status_code == 401
     assert metrics.status_code == 200
     assert metrics.text == "m2bos_operations_total 3\n"
     retry_call = next(value for name, value in handlers.calls if name == "retry_failed_job")
     assert isinstance(retry_call, dict) and retry_call["expected_version"] == "a" * 64
-
-
-def test_operations_routes_are_absent_when_no_independent_key_is_configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    app, _runtime_value, _handlers, _observer = _app(monkeypatch, operations=False)
-
-    with TestClient(app, raise_server_exceptions=False) as client:
-        response = client.get("/api/v1/operations/audit", headers=AUTH)
-
-    assert response.status_code == 404
-    assert response.json()["error"]["code"] == "NOT_FOUND"
-
 
 def test_readiness_keeps_health_snapshot_on_503_and_lifespan_closes_after_start_failure(
     monkeypatch: pytest.MonkeyPatch,
@@ -411,7 +430,7 @@ def test_readiness_keeps_health_snapshot_on_503_and_lifespan_closes_after_start_
     app, runtime, handlers, _observer = _app(monkeypatch)
     handlers.readiness = AsyncMock(return_value=(503, _health(ready=False)))  # type: ignore[method-assign]
 
-    with TestClient(app, raise_server_exceptions=False) as client:
+    with TestClient(app, base_url="http://127.0.0.1:8787", raise_server_exceptions=False) as client:
         response = client.get("/ready", headers={"X-Request-ID": "ready-check"})
 
     assert response.status_code == 503
@@ -422,7 +441,7 @@ def test_readiness_keeps_health_snapshot_on_503_and_lifespan_closes_after_start_
     failing_app, failing_runtime, _handlers, _observer = _app(monkeypatch)
     failing_runtime.start.side_effect = RuntimeError("startup failed")
     with pytest.raises(RuntimeError, match="startup failed"):
-        with TestClient(failing_app):
+        with TestClient(failing_app, base_url="http://127.0.0.1:8787"):
             pass
     failing_runtime.close.assert_awaited_once()
 
@@ -430,10 +449,10 @@ def test_readiness_keeps_health_snapshot_on_503_and_lifespan_closes_after_start_
 def test_declared_oversized_request_is_rejected_before_domain_handler(monkeypatch: pytest.MonkeyPatch) -> None:
     app, _runtime_value, handlers, _observer = _app(monkeypatch, max_bytes=1024)
 
-    with TestClient(app, raise_server_exceptions=False) as client:
+    with TestClient(app, base_url="http://127.0.0.1:8787", raise_server_exceptions=False) as client:
         response = client.post(
             "/api/v1/memory/remember",
-            headers={**AUTH, "Content-Length": "1025", "Content-Type": "application/json"},
+            headers={"Content-Length": "1025", "Content-Type": "application/json"},
             content=b"{}",
         )
 
@@ -442,10 +461,28 @@ def test_declared_oversized_request_is_rejected_before_domain_handler(monkeypatc
     assert not any(name == "remember" for name, _value in handlers.calls)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="M2BOS-BUG-HTTP-001: chunked request bodies are not counted against max_request_bytes",
+@pytest.mark.parametrize(
+    ("headers", "detail"),
+    [
+        ({"Host": "attacker.example"}, "Host"),
+        ({"Origin": "https://attacker.example"}, "Origin"),
+        ({"Origin": "null"}, "Origin"),
+    ],
 )
+def test_local_service_rejects_non_loopback_host_and_origin(
+    monkeypatch: pytest.MonkeyPatch,
+    headers: dict[str, str],
+    detail: str,
+) -> None:
+    app, _runtime_value, handlers, _observer = _app(monkeypatch)
+    with TestClient(app, base_url="http://127.0.0.1:8787", raise_server_exceptions=False) as client:
+        response = client.get("/api/v1/capabilities", headers=headers)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_ARGUMENT"
+    assert detail in response.json()["error"]["message"]
+    assert not handlers.calls
+
+
 def test_chunked_oversized_request_cannot_bypass_body_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     app, _runtime_value, handlers, _observer = _app(monkeypatch, max_bytes=1024)
     body = {
@@ -466,11 +503,11 @@ def test_chunked_oversized_request_cannot_bypass_body_limit(monkeypatch: pytest.
     async def scenario() -> httpx.Response:
         transport = httpx.ASGITransport(app=app)
         async with app.router.lifespan_context(app):
-            async with httpx.AsyncClient(transport=transport, base_url="http://m2bos.test") as client:
+            async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8787") as client:
                 request = client.build_request(
                     "POST",
                     "/api/v1/memory/remember",
-                    headers={**AUTH, "Content-Type": "application/json"},
+                    headers={"Content-Type": "application/json"},
                     content=chunks(),
                 )
                 assert "content-length" not in request.headers

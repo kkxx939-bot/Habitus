@@ -135,6 +135,7 @@ def test_product_builder_propagates_editor_failure_after_summary_branch_finishes
 
     async def scenario() -> None:
         nonlocal summary_finished
+
         async def summarize(_address, current):
             nonlocal summary_finished
             await asyncio.sleep(0)
@@ -324,6 +325,20 @@ def test_full_completion_result_is_strict_and_all_durable_steps_are_true(tmp_pat
     assert result.job.status is MemoryJobStatus.COMMITTED
     assert result.change_receipt.state is MemoryChangeReceiptState.COMMITTED
     assert result.summary_indexed and result.vector_indexed and result.journal_cleaned
+
+
+def test_execution_receipt_audits_the_exact_editor_segment(tmp_path: Path) -> None:
+    value, lease, _commit = execution_result(tmp_path)
+    source = MemoryChangeSource.from_job(lease.job)
+    receipt = value.components.workflow.receipts.read(source)
+    address = ConversationAddress(lease.job.conversation_id, lease.job.started_on)
+    conversations = value.components.workflow.runner.executor.conversations
+    trigger = conversations.read_segment(address, lease.job.segment_id)
+    editor_segment = conversations.read_editor_segment(address, trigger)
+
+    assert editor_segment is not None
+    assert receipt.source.editor_segment_id == editor_segment.segment_id
+    assert receipt.source.editor_segment_digest == editor_segment.digest
 
 
 def test_finalizer_forgets_retired_recall_state_and_cleanup_failure_is_non_blocking(tmp_path: Path) -> None:

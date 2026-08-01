@@ -7,6 +7,7 @@ import pytest
 
 from memory.conversation import (
     ConversationAddress,
+    ConversationJournalConfig,
     ConversationLayout,
     ConversationRangeSummaryCompactionConfig,
     ConversationSegmentSummaryCompactionConfig,
@@ -33,7 +34,11 @@ def sources():
 
 
 def test_summary_store_is_immutable_idempotent_and_revalidates_source_digest(tmp_path: Path) -> None:
-    layout = ConversationLayout(tmp_path)
+    config = ConversationJournalConfig()
+    layout = ConversationLayout(
+        tmp_path,
+        max_conversation_tree_entries=config.max_conversation_tree_entries,
+    )
     store = ConversationSummaryStore(layout)
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
     source = segment(
@@ -55,7 +60,11 @@ def test_summary_store_is_immutable_idempotent_and_revalidates_source_digest(tmp
 
 
 def test_summary_store_rejects_noncanonical_or_path_mismatched_content(tmp_path: Path) -> None:
-    layout = ConversationLayout(tmp_path)
+    config = ConversationJournalConfig()
+    layout = ConversationLayout(
+        tmp_path,
+        max_conversation_tree_entries=config.max_conversation_tree_entries,
+    )
     store = ConversationSummaryStore(layout)
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
     source = segment(
@@ -129,4 +138,3 @@ def test_compaction_frontier_and_plan_reject_overlap_gap_and_cross_conversation(
         ConversationSummaryCompactionPlan(
             ConversationRangeSummaryStage.RANGE, (first, other), "source_count"
         )
-

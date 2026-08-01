@@ -10,6 +10,8 @@ import httpx
 import pytest
 
 from ModelClient import (
+    ChatCallContext,
+    ChatClient,
     ChatMessage,
     ChatModelConfig,
     ChatRequest,
@@ -18,12 +20,15 @@ from ModelClient import (
     ModelResponseError,
     ProviderConfig,
     ReasoningOptions,
+    RerankModelConfig,
     ResponseFormat,
+    StructuredChatClient,
     ToolCall,
     ToolDefinition,
 )
 from ModelClient.adapters.ark_multimodal import ArkMultimodalEmbeddingProvider
 from ModelClient.adapters.openai_compatible_chat import OpenAICompatibleChatProvider
+from ModelClient.adapters.openai_compatible_rerank import OpenAICompatibleRerankProvider
 
 
 def chat_config(**overrides: object) -> ChatModelConfig:
@@ -70,12 +75,47 @@ def embedding_config(**overrides: object) -> EmbeddingModelConfig:
     return EmbeddingModelConfig(ProviderConfig(**route_values), **model_values)
 
 
+def rerank_config(**overrides: object) -> RerankModelConfig:
+    route_values: dict[str, object] = {
+        "provider": "test-provider",
+        "adapter": "openai_compatible_rerank",
+        "model": "rerank-model",
+        "base_url": "https://example.com/v1",
+        "max_retries": 0,
+    }
+    route_values.update(overrides)
+    return RerankModelConfig(ProviderConfig(**route_values))
+
+
 def request(**overrides: object) -> ChatRequest:
     values: dict[str, object] = {
         "messages": (ChatMessage(role="user", content="hello"),),
     }
     values.update(overrides)
     return ChatRequest(**values)
+
+
+def prepared_payload(
+    provider: OpenAICompatibleChatProvider,
+    logical_request: ChatRequest,
+    *,
+    stream: bool,
+) -> dict[str, object]:
+    return json.loads(provider.prepare(logical_request, stream=stream).body)
+
+
+def complete(
+    provider: OpenAICompatibleChatProvider,
+    logical_request: ChatRequest,
+):
+    return provider.complete(provider.prepare(logical_request, stream=False))
+
+
+def stream(
+    provider: OpenAICompatibleChatProvider,
+    logical_request: ChatRequest,
+):
+    return provider.stream(provider.prepare(logical_request, stream=True))
 
 
 def response_payload(**overrides: object) -> dict[str, object]:
@@ -210,7 +250,7 @@ def test_openai_payload_preserves_every_message_role_and_tool_binding(
 ) -> None:
     provider = OpenAICompatibleChatProvider(chat_config())
     try:
-        payload = provider._payload(ChatRequest(messages=messages), stream=False)
+        payload = prepared_payload(provider, ChatRequest(messages=messages), stream=False)
         assert [item["role"] for item in payload["messages"]] == [item.role for item in messages]
         if messages[0].role == "tool":
             assert payload["messages"][0]["tool_call_id"] == "call-1"
@@ -236,7 +276,8 @@ def test_openai_payload_serializes_tool_schema_choice_and_strictness(
     )
     provider = OpenAICompatibleChatProvider(chat_config())
     try:
-        payload = provider._payload(
+        payload = prepared_payload(
+            provider,
             request(tools=(definition,), tool_choice=choice),
             stream=False,
         )
@@ -254,7 +295,7 @@ def test_openai_payload_adapts_structured_output_to_route_capability(mode: str) 
     provider = OpenAICompatibleChatProvider(chat_config(structured_output_mode=mode))
     format_ = ResponseFormat("memory", {"type": "object"}, strict=True)
     try:
-        payload = provider._payload(request(response_format=format_), stream=False)
+        payload = prepared_payload(provider, request(response_format=format_), stream=False)
         if mode == "none":
             assert "response_format" not in payload
         elif mode == "json_object":
@@ -273,7 +314,8 @@ def test_openai_payload_adapts_structured_output_to_route_capability(mode: str) 
 def test_openai_payload_emits_reasoning_effort_and_omits_temperature(effort: str) -> None:
     provider = OpenAICompatibleChatProvider(chat_config(reasoning=True))
     try:
-        payload = provider._payload(
+        payload = prepared_payload(
+            provider,
             request(temperature=1.5, reasoning=ReasoningOptions(effort)),
             stream=False,
         )
@@ -287,7 +329,11 @@ def test_openai_payload_rejects_reasoning_when_route_does_not_enable_it() -> Non
     provider = OpenAICompatibleChatProvider(chat_config(reasoning=False))
     try:
         with pytest.raises(ModelConfigurationError, match="does not enable reasoning"):
-            provider._payload(request(reasoning=ReasoningOptions("medium")), stream=False)
+            prepared_payload(
+                provider,
+                request(reasoning=ReasoningOptions("medium")),
+                stream=False,
+            )
     finally:
         provider._sync_client.close()
 
@@ -303,7 +349,11 @@ def test_openai_payload_uses_request_output_limit_before_route_default(
 ) -> None:
     provider = OpenAICompatibleChatProvider(chat_config(max_output_tokens=config_limit))
     try:
-        payload = provider._payload(request(max_output_tokens=request_limit), stream=False)
+        payload = prepared_payload(
+            provider,
+            request(max_output_tokens=request_limit),
+            stream=False,
+        )
         assert payload.get("max_tokens") == expected
     finally:
         provider._sync_client.close()
@@ -315,7 +365,7 @@ def test_openai_payload_preserves_safe_extra_body_and_adds_stream_options_only_f
         chat_config(extra_body={"top_p": 0.8, "seed": 7, "stream_options": {"include_usage": False}})
     )
     try:
-        payload = provider._payload(request(), stream=stream)
+        payload = prepared_payload(provider, request(), stream=stream)
         assert payload["top_p"] == 0.8
         assert payload["seed"] == 7
         if stream:
@@ -327,12 +377,58 @@ def test_openai_payload_preserves_safe_extra_body_and_adds_stream_options_only_f
         provider._sync_client.close()
 
 
+def test_openai_prepare_freezes_transport_and_model_visible_projections_separately() -> None:
+    plain = OpenAICompatibleChatProvider(chat_config())
+    with_transport_metadata = OpenAICompatibleChatProvider(
+        chat_config(extra_body={"seed": 7, "trace_options": {"request_id": "internal"}})
+    )
+    logical_request = request()
+    try:
+        plain_prepared = plain.prepare(logical_request, stream=False)
+        metadata_prepared = with_transport_metadata.prepare(logical_request, stream=False)
+
+        assert plain_prepared.model_visible_body == metadata_prepared.model_visible_body
+        assert plain_prepared.estimated_input_tokens == metadata_prepared.estimated_input_tokens
+        assert plain_prepared.body != metadata_prepared.body
+        assert json.loads(metadata_prepared.body)["trace_options"] == {
+            "request_id": "internal"
+        }
+    finally:
+        plain._sync_client.close()
+        with_transport_metadata._sync_client.close()
+
+
+@pytest.mark.parametrize("mode", ["none", "json_object", "json_schema"])
+def test_structured_prepare_counts_schema_only_where_selected_mode_sends_it(mode: str) -> None:
+    provider = OpenAICompatibleChatProvider(chat_config(structured_output_mode=mode))
+    structured = StructuredChatClient(ChatClient(provider.config, provider))
+    schema = {"type": "object", "description": "unique-schema-marker"}
+    try:
+        logical_request = structured._prepare("return data", schema=schema, name="result")
+        prepared = provider.prepare(logical_request, stream=False)
+        visible = json.loads(prepared.model_visible_body)
+        messages_text = json.dumps(visible["messages"], ensure_ascii=False)
+        response_format_text = json.dumps(
+            visible.get("response_format", {}),
+            ensure_ascii=False,
+        )
+
+        if mode == "json_schema":
+            assert "unique-schema-marker" not in messages_text
+            assert "unique-schema-marker" in response_format_text
+        else:
+            assert "unique-schema-marker" in messages_text
+            assert "unique-schema-marker" not in response_format_text
+    finally:
+        provider._sync_client.close()
+
+
 @pytest.mark.parametrize("invalid", [None, "request", {}, [], 1, True, object()])
 def test_openai_payload_requires_normalized_chat_request(invalid: object) -> None:
     provider = OpenAICompatibleChatProvider(chat_config())
     try:
         with pytest.raises(TypeError):
-            provider._payload(invalid, stream=False)
+            provider.prepare(invalid, stream=False)
     finally:
         provider._sync_client.close()
 
@@ -353,7 +449,10 @@ def test_openai_complete_normalizes_text_or_text_part_response(content: object, 
         )
     )
     try:
-        response = provider.complete(request(prompt_version="prompt-v1"))
+        response = ChatClient(provider.config, provider).complete(
+            request(),
+            context=ChatCallContext(prompt_version="prompt-v1"),
+        )
         assert response.content == expected
         assert response.model == "served-model"
         assert response.provider == "test-provider"
@@ -380,18 +479,27 @@ def test_openai_complete_normalizes_text_or_text_part_response(content: object, 
     ],
 )
 def test_openai_complete_normalizes_usage_variants_without_type_coercion(usage: dict[str, object]) -> None:
-    provider = sync_provider(
-        lambda _request: httpx.Response(200, json=response_payload(usage=usage))
-    )
+    provider = sync_provider(lambda _request: httpx.Response(200, json=response_payload(usage=usage)))
     try:
-        response = provider.complete(request())
+        response = complete(provider, request())
         expected_input = usage.get("prompt_tokens", usage.get("input_tokens", 0))
-        expected_input = expected_input if isinstance(expected_input, int) and not isinstance(expected_input, bool) and expected_input >= 0 else 0
+        expected_input = (
+            expected_input
+            if isinstance(expected_input, int) and not isinstance(expected_input, bool) and expected_input >= 0
+            else 0
+        )
         expected_output = usage.get("completion_tokens", usage.get("output_tokens", 0))
-        expected_output = expected_output if isinstance(expected_output, int) and not isinstance(expected_output, bool) and expected_output >= 0 else 0
+        expected_output = (
+            expected_output
+            if isinstance(expected_output, int) and not isinstance(expected_output, bool) and expected_output >= 0
+            else 0
+        )
         assert response.usage.input_tokens == expected_input
         assert response.usage.output_tokens == expected_output
-        assert response.usage.total_tokens >= expected_input + expected_output or usage.get("total_tokens") == response.usage.total_tokens
+        assert (
+            response.usage.total_tokens >= expected_input + expected_output
+            or usage.get("total_tokens") == response.usage.total_tokens
+        )
         assert response.usage.details == usage
     finally:
         provider._sync_client.close()
@@ -417,7 +525,7 @@ def test_openai_complete_normalizes_tool_call_arguments_from_text_or_mapping(arg
     )
     provider = sync_provider(lambda _request: httpx.Response(200, json=payload))
     try:
-        response = provider.complete(request())
+        response = complete(provider, request())
         assert response.tool_calls[0].id == "call-1"
         assert response.tool_calls[0].name == "inspect"
         assert response.tool_calls[0].arguments == ({"path": "."} if argument_shape != "{}" else {})
@@ -475,7 +583,7 @@ def test_openai_complete_rejects_malformed_response_or_tool_calls(payload: dict[
     provider = sync_provider(lambda _request: httpx.Response(200, json=payload))
     try:
         with pytest.raises(ModelResponseError):
-            provider.complete(request())
+            complete(provider, request())
     finally:
         provider._sync_client.close()
 
@@ -485,7 +593,7 @@ def test_openai_complete_rejects_non_object_malformed_or_non_finite_json(body: b
     provider = sync_provider(lambda _request: httpx.Response(200, content=body))
     try:
         with pytest.raises(ModelResponseError):
-            provider.complete(request())
+            complete(provider, request())
     finally:
         provider._sync_client.close()
 
@@ -510,7 +618,7 @@ def test_openai_complete_preserves_http_status_message_and_retry_after(
     provider = sync_provider(lambda _request: httpx.Response(status, json=body, headers=headers))
     try:
         with pytest.raises(RuntimeError) as caught:
-            provider.complete(request())
+            complete(provider, request())
         assert expected_message in str(caught.value)
         assert caught.value.status_code == status
         if retry_after == "2.5":
@@ -530,7 +638,7 @@ def test_openai_complete_rejects_response_over_byte_bound() -> None:
     )
     try:
         with pytest.raises(ModelResponseError, match="byte bound"):
-            provider.complete(request())
+            complete(provider, request())
     finally:
         provider._sync_client.close()
 
@@ -538,10 +646,16 @@ def test_openai_complete_rejects_response_over_byte_bound() -> None:
 @pytest.mark.parametrize(
     ("wire", "kinds"),
     [
-        (b'data: {"choices":[{"delta":{"content":"a"},"finish_reason":null}]}\n\n', ["content_delta", "done"]),
-        (b'data: {"choices":[{"delta":{"reasoning_content":"r"},"finish_reason":null}]}\n\n', ["reasoning_delta", "done"]),
-        (b'data: {"usage":{"prompt_tokens":1,"completion_tokens":2}}\n\n', ["usage", "done"]),
-        (b': heartbeat\n\ndata: [DONE]\n\n', ["done"]),
+        (
+            b'data: {"choices":[{"delta":{"reasoning_content":"r"},"finish_reason":null}]}\n\n'
+            b'data: {"choices":[{"delta":{"content":"a"},"finish_reason":"stop"}]}\n\n',
+            ["reasoning_delta", "content_delta", "done"],
+        ),
+        (
+            b'data: {"choices":[{"delta":{"content":"a"},"finish_reason":"stop"}]}\n\n'
+            b'data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2}}\n\n',
+            ["content_delta", "usage", "done"],
+        ),
         (b'{"choices":[{"delta":{"content":"raw"},"finish_reason":"length"}]}\n\n', ["content_delta", "done"]),
     ],
 )
@@ -553,7 +667,7 @@ def test_openai_stream_decodes_supported_sse_shapes_and_single_terminal_event(
         lambda _request: httpx.Response(200, content=wire, headers={"content-type": "text/event-stream"})
     )
     try:
-        events = tuple(provider.stream(request()))
+        events = tuple(stream(provider, request()))
         assert [event.kind for event in events] == kinds
         assert sum(event.kind == "done" for event in events) == 1
     finally:
@@ -563,7 +677,7 @@ def test_openai_stream_decodes_supported_sse_shapes_and_single_terminal_event(
 def test_openai_stream_preserves_fragmented_tool_call_delta_and_finish_reason() -> None:
     wire = (
         b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1",'
-        b'"function":{"name":"inspect","arguments":"{\\"path\\":"}}]},"finish_reason":null}]}\n\n'
+        b'"function":{"name":"inspect","arguments":"{\\"path\\":\\""}}]},"finish_reason":null}]}\n\n'
         b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":".\\"}"}}]},'
         b'"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n'
     )
@@ -571,7 +685,7 @@ def test_openai_stream_preserves_fragmented_tool_call_delta_and_finish_reason() 
         lambda _request: httpx.Response(200, content=wire, headers={"content-type": "text/event-stream"})
     )
     try:
-        events = tuple(provider.stream(request()))
+        events = tuple(stream(provider, request()))
         assert [event.kind for event in events] == ["tool_call_delta", "tool_call_delta", "done"]
         assert events[0].tool_call_id == "call-1"
         assert events[0].tool_name == "inspect"
@@ -587,7 +701,56 @@ def test_openai_stream_rejects_malformed_or_non_utf8_sse_payload(wire: bytes) ->
     )
     try:
         with pytest.raises(ModelResponseError):
-            tuple(provider.stream(request()))
+            tuple(stream(provider, request()))
+    finally:
+        provider._sync_client.close()
+
+
+@pytest.mark.parametrize(
+    "wire",
+    [
+        b'data: {"error":{"message":"upstream failed"}}\n\n',
+        b'data: {"choices":[]}\n\n',
+        b'data: {"usage":{"prompt_tokens":1,"completion_tokens":2}}\n\n',
+        b'data: {"choices":[{"delta":{"reasoning_content":"r"},"finish_reason":"stop"}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":"   "},"finish_reason":"stop"}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":"ok","tool_calls":[42]},"finish_reason":"stop"}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":"ok","tool_calls":"bad"},"finish_reason":"stop"}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":"ok","tool_calls":[{"function":42}]},"finish_reason":"stop"}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":123}]}\n\ndata: [DONE]\n\n',
+        b'data: {"choices":[{"delta":{"content":"ok","reasoning_content":42},"finish_reason":"stop"}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":"ok","tool_calls":[{"index":0,"id":42}]},"finish_reason":"stop"}]}\n\n',
+        (
+            b'data: {"choices":[{"delta":{"content":"a"},"finish_reason":"stop"}]}\n\n'
+            b'data: {"choices":[{"delta":{"content":"b"},"finish_reason":null}]}\n\n'
+        ),
+        (
+            b'data: {"choices":[{"delta":{"content":"a"},"finish_reason":"stop"}]}\n\n'
+            b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n'
+        ),
+        (
+            b'data: {"choices":[{"delta":{"content":"a"},"finish_reason":"stop"}]}\n\n'
+            b'data: [DONE]\n\ndata: {"choices":[{"delta":{"content":"b"},"finish_reason":null}]}\n\n'
+        ),
+        b'data: {"choices":[{"delta":{"content":"partial output"},"finish_reason":null}]}\n\n',
+        (b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1"}]},"finish_reason":"tool_calls"}]}\n\n'),
+        (
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1",'
+            b'"function":{"name":"inspect","arguments":"{\\"x\\":1,\\"x\\":2}"}}]},'
+            b'"finish_reason":"tool_calls"}]}\n\n'
+        ),
+        b": heartbeat\n\ndata: [DONE]\n\n",
+        b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+        b"",
+    ],
+)
+def test_openai_stream_rejects_success_status_without_a_valid_choice(wire: bytes) -> None:
+    provider = sync_provider(
+        lambda _request: httpx.Response(200, content=wire, headers={"content-type": "text/event-stream"})
+    )
+    try:
+        with pytest.raises(ModelResponseError):
+            tuple(stream(provider, request()))
     finally:
         provider._sync_client.close()
 
@@ -599,19 +762,17 @@ def test_openai_stream_rejects_body_over_byte_bound() -> None:
     )
     try:
         with pytest.raises(ModelResponseError, match="stream exceeds"):
-            tuple(provider.stream(request()))
+            tuple(stream(provider, request()))
     finally:
         provider._sync_client.close()
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 429, 500, 503])
 def test_openai_stream_rejects_http_error_before_parsing_sse(status: int) -> None:
-    provider = sync_provider(
-        lambda _request: httpx.Response(status, json={"error": {"message": "stream failed"}})
-    )
+    provider = sync_provider(lambda _request: httpx.Response(status, json={"error": {"message": "stream failed"}}))
     try:
         with pytest.raises(RuntimeError, match="stream failed"):
-            tuple(provider.stream(request()))
+            tuple(stream(provider, request()))
     finally:
         provider._sync_client.close()
 
@@ -647,8 +808,15 @@ def test_openai_async_complete_and_stream_use_same_protocol_semantics() -> None:
     async def invoke():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             provider._async_client = lambda: client
-            completed = await provider.complete_async(request())
-            streamed = tuple([event async for event in provider.stream_async(request())])
+            completed = await provider.complete_async(provider.prepare(request(), stream=False))
+            streamed = tuple(
+                [
+                    event
+                    async for event in provider.stream_async(
+                        provider.prepare(request(), stream=True)
+                    )
+                ]
+            )
             return completed, streamed
 
     try:
@@ -773,7 +941,16 @@ def test_ark_adapter_rejects_malformed_count_shape_dimension_or_numeric_vector(
         provider._vector(payload)
 
 
-@pytest.mark.parametrize("body", [b"not-json", b"[]", b"null", b"\xff"])
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not-json",
+        b"[]",
+        b"null",
+        b"\xff",
+        b'{"data":{"embedding":[1,0]},"data":{"embedding":[0,1]}}',
+    ],
+)
 def test_ark_adapter_rejects_malformed_or_non_object_http_response(body: bytes) -> None:
     provider = ArkMultimodalEmbeddingProvider(embedding_config(), api_key="secret")
 
@@ -785,6 +962,21 @@ def test_ark_adapter_rejects_malformed_or_non_object_http_response(body: bytes) 
             return await provider.embed("text", is_query=True)
 
     with pytest.raises(ModelResponseError):
+        asyncio.run(invoke())
+
+
+def test_rerank_adapter_rejects_duplicate_json_keys_in_success_response() -> None:
+    provider = OpenAICompatibleRerankProvider(rerank_config(), api_key="secret")
+    body = b'{"results":[{"index":0,"relevance_score":0.1,"relevance_score":0.9}]}'
+
+    async def invoke():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=body))
+        ) as client:
+            provider._client = lambda: client
+            return await provider.rerank("query", ("document",))
+
+    with pytest.raises(ModelResponseError, match="malformed JSON"):
         asyncio.run(invoke())
 
 
@@ -809,9 +1001,7 @@ def test_ark_adapter_preserves_http_error_status_message_and_retry_after(
 
     async def invoke():
         async with httpx.AsyncClient(
-            transport=httpx.MockTransport(
-                lambda _request: httpx.Response(status, json=body, headers=headers)
-            )
+            transport=httpx.MockTransport(lambda _request: httpx.Response(status, json=body, headers=headers))
         ) as client:
             provider._client = lambda: client
             return await provider.embed("text", is_query=True)

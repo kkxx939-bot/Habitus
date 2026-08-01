@@ -96,11 +96,30 @@ def test_json_logging_redacts_secrets_and_posix_paths_but_keeps_correlation() ->
 
 @pytest.mark.parametrize(
     "path",
-    [r"C:\Users\alice\private\secret.txt", r"\\server\private\secret.txt"],
-)
-@pytest.mark.xfail(
-    strict=True,
-    reason="M2BOS-BUG-OBS-001: structured logs do not redact Windows or UNC absolute paths",
+    [
+        r"C:\Users\Alice Smith\private folder\secret.txt",
+        "C:/Users/Alice Smith/private folder/secret.txt",
+        r"\\server\private share\Alice Smith\secret.txt",
+        "/Users/Alice Smith/private folder/secret.txt",
+        "/Users Name/private/secret.txt",
+        "/Top Folder/private/secret.txt",
+        "/Users/Alice, Smith/private/secret.txt",
+        r"C:\Users\Alice, Smith\private\secret.txt",
+        r"\\server\Alice, Smith\private\secret.txt",
+        "//server/share/private folder/secret.txt",
+        "file://server/share/private/secret.txt",
+        "smb://server/private/Alice/secret.txt",
+        "nfs://server/home/alice/secret",
+        "afp://server/private/Alice/secret.txt",
+        "path:/Users/Alice Smith/private/secret.txt",
+        r"\Users\Alice Smith\private\secret.txt",
+        r"\ProgramData\Alice Smith\secret.txt",
+        r"C:Users\Alice Smith\private\secret.txt",
+        r"\Top Folder\private\secret.txt",
+        r"C:Top Folder\private\secret.txt",
+        "/secret",
+        r"\secret",
+    ],
 )
 def test_json_logging_redacts_cross_platform_absolute_paths(path: str) -> None:
     formatter = JSONLogFormatter()
@@ -116,8 +135,9 @@ def test_json_logging_redacts_cross_platform_absolute_paths(path: str) -> None:
 
     payload = json.loads(formatter.format(record))
 
-    assert "alice" not in payload["message"]
+    assert "Alice Smith" not in payload["message"]
     assert "server" not in payload["message"]
+    assert path not in payload["message"]
     assert "[PATH]" in payload["message"]
 
 

@@ -1,0 +1,48 @@
+memory_type: entity
+description: >-
+  为具有可识别稳定名称，并且至少存在一条以后可能再次使用的稳定事实或关系的人物、组织、地点、
+  作品、产品、动物、项目或概念保存实体卡片。临时举例、顺带提及或没有可复用事实的普通名词不生成
+  Entity；重点保留实体是什么以及与用户或其他事实的持久关系。
+path_template: entities/{category}/{name}.md
+operation_mode: upsert
+markdown_template: |
+  # {name}
+
+  **Category:** {category}
+
+  {summary}
+
+  {details}
+fields:
+  - name: category
+    type: string
+    role: address
+    required: true
+    merge: immutable
+    description: >-
+      简洁、自然的实体类别，用于目录分组；类别由内容语义产生，不依赖受控 registry。
+  - name: name
+    type: string
+    role: address
+    required: true
+    merge: immutable
+    description: >-
+      用户能够识别且以后可以再次指代的稳定实体名称，保持原有专名，不生成额外文件身份；
+      临时示例名称、宽泛普通名词和只出现一次但没有稳定事实的概念不建立实体。
+  - name: summary
+    type: string
+    role: content
+    required: true
+    merge: replace
+    description: >-
+      用一个普通句子说明实体是什么，并至少保留一条来源中已经明确的稳定事实或关系；
+      更新时读取旧内容后完整重写该句，不加入来源没有提供的常识或推测。
+  - name: details
+    type: string
+    role: content
+    required: false
+    merge: patch
+    description: >-
+      仅在来源确实提供了 summary 之外的稳定信息时，使用自然的 H2 section 和 bullet 保存事实、
+      角色、关系以及以后可能精确询问的名称、数量、日期和地点；信息不足时必须省略，不得重复
+      summary、扩写常识或推测细节。更新时去重，但不把具体事实泛化丢失。

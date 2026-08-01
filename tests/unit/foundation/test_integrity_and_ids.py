@@ -21,7 +21,31 @@ def test_safe_path_segment_accepts_single_non_empty_segment(value: str) -> None:
     assert require_safe_path_segment(value, "id") == value
 
 
-@pytest.mark.parametrize("value", ["", ".", "..", "a/b", "a\\b", "a\x00b", None])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        ".",
+        "..",
+        "a/b",
+        "a\\b",
+        "a\x00b",
+        "a:b",
+        "a*",
+        "a?",
+        "Project.",
+        "Project ",
+        "CON",
+        "con.txt",
+        "LPT9",
+        "COM¹",
+        "COM².txt",
+        "LPT³",
+        "CONIN$",
+        "CONOUT$",
+        None,
+    ],
+)
 def test_safe_path_segment_rejects_escape_and_empty_values(value: object) -> None:
     with pytest.raises(ValueError, match="safe non-empty path segment"):
         require_safe_path_segment(value, "id")
@@ -66,4 +90,3 @@ def test_immutable_snapshot_detaches_and_freezes_nested_values() -> None:
 def test_digest_is_deterministic_but_text_digest_preserves_exact_bytes() -> None:
     assert canonical_digest({"b": 2, "a": 1}) == canonical_digest({"a": 1, "b": 2})
     assert text_digest("a\n") != text_digest("a")
-

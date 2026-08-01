@@ -21,6 +21,7 @@ from ModelClient import (
     ModelResponseError,
     ModelStreamEvent,
     ModelTransportError,
+    PreparedChatRequest,
     ProviderCapabilities,
     ProviderConfig,
     ReasoningOptions,
@@ -31,6 +32,7 @@ from ModelClient import (
 from ModelClient.adapters.ark_multimodal import ArkMultimodalEmbeddingProvider
 from ModelClient.adapters.openai_compatible_chat import OpenAICompatibleChatProvider
 from ModelClient.retry import normalize_provider_error, retry_delay
+from tests.model_helpers import prepare_chat_request
 
 
 def route(adapter: str, **overrides: object) -> ProviderConfig:
@@ -60,6 +62,8 @@ class FlakyChatProvider:
     def __post_init__(self) -> None:
         self.calls = 0
 
+    prepare = staticmethod(prepare_chat_request)
+
     def _result(self):
         self.calls += 1
         if self.calls <= self.failures:
@@ -68,13 +72,13 @@ class FlakyChatProvider:
             return "invalid"
         return ModelResponse("ok", self.model, self.provider_name)
 
-    def complete(self, request: ChatRequest):
+    def complete(self, request: PreparedChatRequest):
         return self._result()
 
-    async def complete_async(self, request: ChatRequest):
+    async def complete_async(self, request: PreparedChatRequest):
         return self._result()
 
-    def stream(self, request: ChatRequest):
+    def stream(self, request: PreparedChatRequest):
         if self.failures and self.calls < self.failures:
             self.calls += 1
             raise TimeoutError("temporary timeout")
@@ -82,7 +86,7 @@ class FlakyChatProvider:
         yield ModelStreamEvent(kind="content_delta", content_delta="ok")
         yield ModelStreamEvent(kind="done", finish_reason="stop")
 
-    async def stream_async(self, request: ChatRequest):
+    async def stream_async(self, request: PreparedChatRequest):
         for event in self.stream(request):
             yield event
 
@@ -123,7 +127,7 @@ def test_chat_client_rejects_invalid_normalized_response_and_health_check_return
 
 def test_chat_stream_does_not_retry_after_any_event_has_been_emitted() -> None:
     class PartialProvider(FlakyChatProvider):
-        def stream(self, request: ChatRequest):
+        def stream(self, request: PreparedChatRequest):
             yield ModelStreamEvent(kind="content_delta", content_delta="partial")
             raise TimeoutError("lost connection")
 
@@ -228,6 +232,7 @@ def test_openai_compatible_adapter_sends_messages_tools_schema_and_normalizes_re
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["headers"] = dict(request.headers)
+        captured["body"] = request.content
         captured["payload"] = json.loads(request.content)
         return httpx.Response(
             200,
@@ -253,7 +258,8 @@ def test_openai_compatible_adapter_sends_messages_tools_schema_and_normalizes_re
         response_format=ResponseFormat("result", {"type": "object"}),
         reasoning=ReasoningOptions("medium"),
     )
-    response = provider.complete(request)
+    prepared = provider.prepare(request, stream=False)
+    response = provider.complete(prepared)
     payload = captured["payload"]
 
     assert response.content == "done"
@@ -261,6 +267,7 @@ def test_openai_compatible_adapter_sends_messages_tools_schema_and_normalizes_re
     assert payload["tools"][0]["function"]["name"] == "inspect"
     assert payload["response_format"]["type"] == "json_schema"
     assert payload["reasoning_effort"] == "medium"
+    assert captured["body"] == prepared.body
     assert captured["headers"]["authorization"] == "Bearer secret"
 
 
@@ -302,8 +309,8 @@ def test_openai_compatible_adapter_normalizes_tool_calls_and_stream_events() -> 
     provider._sync_client = httpx.Client(transport=httpx.MockTransport(lambda request: next(responses)))
     request = ChatRequest(messages=(ChatMessage(role="user", content="run"),))
 
-    response = provider.complete(request)
-    events = tuple(provider.stream(request))
+    response = provider.complete(provider.prepare(request, stream=False))
+    events = tuple(provider.stream(provider.prepare(request, stream=True)))
     assert response.tool_calls == (ToolCall("call-1", "inspect", {"path": "."}),)
     assert [event.kind for event in events] == ["content_delta", "done"]
     assert events[0].content_delta == "hello"

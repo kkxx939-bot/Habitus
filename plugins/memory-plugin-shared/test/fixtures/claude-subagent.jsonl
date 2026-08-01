@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-08-01T00:00:00Z","message":{"role":"user","content":[{"type":"text","text":"investigate"}]}}
+{"type":"assistant","timestamp":"2026-08-01T00:00:01Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"source evidence"}]}}

@@ -91,7 +91,12 @@ def test_job_retry_backoff_rejects_invalid_attempt_count(attempts: object) -> No
 def test_job_accepts_each_coherent_durable_status(status: MemoryJobStatus) -> None:
     value = _job(status)
     assert value.status is status
-    assert value.source_identity == (value.conversation_id, value.started_on, value.segment_id, value.source_segment_digest)
+    assert value.source_identity == (
+        value.conversation_id,
+        value.started_on,
+        value.segment_id,
+        value.source_segment_digest,
+    )
 
 
 @pytest.mark.parametrize("status", tuple(MemoryJobStatus))
@@ -252,7 +257,40 @@ def test_change_source_round_trip_and_receipt_identity_are_deterministic(sequenc
     assert source.receipt_id == restored.receipt_id
 
 
-@pytest.mark.parametrize("field", ["memory_sequence", "transaction_id", "conversation_id", "started_on", "segment_id", "source_segment_digest"])
+def test_change_source_binds_and_round_trips_the_complete_editor_segment() -> None:
+    editor_segment = segment(segment_id="000000000000-000000000001")
+    job = _job(
+        MemoryJobStatus.STAGED,
+        source_segment_digest=editor_segment.digest,
+    )
+    source = MemoryChangeSource.from_job(job, editor_segment=editor_segment)
+
+    assert source.editor_segment_id == editor_segment.segment_id
+    assert source.editor_segment_digest == editor_segment.digest
+    restored = MemoryChangeSource.from_dict(source.to_dict())
+    assert restored == source
+    assert restored.to_dict() == source.to_dict()
+
+    mismatched = segment(
+        conversation_id="another-conversation",
+        segment_id=editor_segment.segment_id,
+    )
+    with pytest.raises(ValueError, match="another conversation"):
+        MemoryChangeSource.from_job(job, editor_segment=mismatched)
+
+
+@pytest.mark.parametrize("field", ["editor_segment_id", "editor_segment_digest"])
+def test_change_source_rejects_partial_editor_segment_provenance(field: str) -> None:
+    value = _source().to_dict()
+    value[field] = "a" * 64
+    with pytest.raises(ValueError, match="invalid shape|present together"):
+        MemoryChangeSource.from_dict(value)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["memory_sequence", "transaction_id", "conversation_id", "started_on", "segment_id", "source_segment_digest"],
+)
 def test_change_source_parser_rejects_each_missing_field(field: str) -> None:
     value = _source().to_dict()
     value.pop(field)
@@ -300,7 +338,9 @@ def test_identity_change_round_trips_merge_and_delete(action: MemoryNodeDisposit
     assert MemoryIdentityChange.from_dict(value.to_dict()) == value
 
 
-@pytest.mark.parametrize("action", [MemoryNodeDisposition.CREATE, MemoryNodeDisposition.UPDATE, MemoryNodeDisposition.NOOP])
+@pytest.mark.parametrize(
+    "action", [MemoryNodeDisposition.CREATE, MemoryNodeDisposition.UPDATE, MemoryNodeDisposition.NOOP]
+)
 def test_identity_change_rejects_non_retirement_dispositions(action: MemoryNodeDisposition) -> None:
     with pytest.raises(ValueError, match="merge or delete"):
         MemoryIdentityChange(
@@ -317,14 +357,16 @@ def test_prepared_node_change_accepts_coherent_action_for_every_memory_kind(
     action: MemoryNodeChangeAction,
     kind: MemoryKind,
 ) -> None:
-    uri = MemoryURI.from_address({
-        MemoryKind.PROFILE: MemoryAddress.profile(),
-        MemoryKind.PREFERENCE: MemoryAddress.preference("主题"),
-        MemoryKind.ENTITY: MemoryAddress.entity("分类", "实体"),
-        MemoryKind.TOOL: MemoryAddress.tool("tool.name"),
-        MemoryKind.EVENT: MemoryAddress.event(date(2026, 7, 1), "事件"),
-        MemoryKind.INTENTION: MemoryAddress.intention("事项"),
-    }[kind])
+    uri = MemoryURI.from_address(
+        {
+            MemoryKind.PROFILE: MemoryAddress.profile(),
+            MemoryKind.PREFERENCE: MemoryAddress.preference("主题"),
+            MemoryKind.ENTITY: MemoryAddress.entity("分类", "实体"),
+            MemoryKind.TOOL: MemoryAddress.tool("tool.name"),
+            MemoryKind.EVENT: MemoryAddress.event(date(2026, 7, 1), "事件"),
+            MemoryKind.INTENTION: MemoryAddress.intention("事项"),
+        }[kind]
+    )
     confirms = kind is MemoryKind.INTENTION and action is MemoryNodeChangeAction.CREATE
     values = {
         MemoryNodeChangeAction.CREATE: (None, "a" * 64),
@@ -440,12 +482,25 @@ def test_prepared_and_committed_receipt_round_trip_exactly() -> None:
     assert committed.changed_uris == (uri,)
 
 
-@pytest.mark.parametrize("field", [
-    "schema_version", "source", "state", "prepared_at", "committed_at",
-    "expected_created_uris", "expected_updated_uris", "expected_deleted_uris",
-    "unchanged_uris", "prepared_node_changes", "identity_changes",
-    "added_relations", "removed_relations", "node_changes",
-])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "schema_version",
+        "source",
+        "state",
+        "prepared_at",
+        "committed_at",
+        "expected_created_uris",
+        "expected_updated_uris",
+        "expected_deleted_uris",
+        "unchanged_uris",
+        "prepared_node_changes",
+        "identity_changes",
+        "added_relations",
+        "removed_relations",
+        "node_changes",
+    ],
+)
 def test_receipt_parser_rejects_each_missing_field(field: str) -> None:
     value = _prepared_receipt().to_dict()
     value.pop(field)
@@ -453,11 +508,20 @@ def test_receipt_parser_rejects_each_missing_field(field: str) -> None:
         MemoryChangeReceipt.from_dict(value)
 
 
-@pytest.mark.parametrize("field", [
-    "expected_created_uris", "expected_updated_uris", "expected_deleted_uris",
-    "unchanged_uris", "prepared_node_changes", "identity_changes",
-    "added_relations", "removed_relations", "node_changes",
-])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "expected_created_uris",
+        "expected_updated_uris",
+        "expected_deleted_uris",
+        "unchanged_uris",
+        "prepared_node_changes",
+        "identity_changes",
+        "added_relations",
+        "removed_relations",
+        "node_changes",
+    ],
+)
 @pytest.mark.parametrize("value", [None, (), {}, "items", 1, True])
 def test_receipt_parser_requires_json_arrays_for_every_collection(field: str, value: object) -> None:
     raw = _prepared_receipt().to_dict()
@@ -466,9 +530,9 @@ def test_receipt_parser_requires_json_arrays_for_every_collection(field: str, va
         MemoryChangeReceipt.from_dict(raw)
 
 
-@pytest.mark.parametrize("field", [
-    "expected_created_uris", "expected_updated_uris", "expected_deleted_uris", "unchanged_uris"
-])
+@pytest.mark.parametrize(
+    "field", ["expected_created_uris", "expected_updated_uris", "expected_deleted_uris", "unchanged_uris"]
+)
 def test_receipt_uri_collections_must_be_unique_and_sorted(field: str) -> None:
     profile = MemoryURI.from_address(MemoryAddress.profile())
     preference = MemoryURI.from_address(MemoryAddress.preference("主题"))

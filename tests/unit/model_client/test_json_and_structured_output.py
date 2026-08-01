@@ -11,6 +11,7 @@ from ModelClient import (
     ChatRequest,
     ModelResponse,
     ModelStructuredOutputError,
+    PreparedChatRequest,
     ProviderCapabilities,
     ProviderConfig,
     StructuredChatClient,
@@ -18,6 +19,7 @@ from ModelClient import (
     validate_json_schema,
 )
 from ModelClient.schema_validation import JSONSchemaValidationError
+from tests.model_helpers import prepare_chat_request
 
 SCHEMA = {
     "type": "object",
@@ -37,6 +39,8 @@ SCHEMA = {
         ('```json\n{"status":"ok","items":[]}\n```', "code_fence"),
         ('result: {"status":"ok","items":[]}', "extracted"),
         ('{"status":"ok","items":[],}', "trailing_comma_repair"),
+        ('{status:"ok",items:[]}', "json_repair"),
+        ('{"status":"ok",/* model note */"items":[]}', "json_repair"),
     ],
 )
 def test_json_parser_audits_each_allowed_syntax_path(source: str, mode: str) -> None:
@@ -84,17 +88,19 @@ class QueueProvider:
     def __post_init__(self) -> None:
         self.requests: list[ChatRequest] = []
 
-    def complete(self, request: ChatRequest) -> ModelResponse:
-        self.requests.append(request)
+    prepare = staticmethod(prepare_chat_request)
+
+    def complete(self, prepared) -> ModelResponse:
+        self.requests.append(prepared.request)
         return self.responses.pop(0)
 
-    async def complete_async(self, request: ChatRequest) -> ModelResponse:
-        return self.complete(request)
+    async def complete_async(self, prepared) -> ModelResponse:
+        return self.complete(prepared)
 
-    def stream(self, request: ChatRequest):
+    def stream(self, request: PreparedChatRequest):
         return iter(())
 
-    async def stream_async(self, request: ChatRequest):
+    async def stream_async(self, request: PreparedChatRequest):
         if False:
             yield None
 

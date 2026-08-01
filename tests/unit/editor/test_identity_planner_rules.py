@@ -22,12 +22,10 @@ from memory.editor import (
     MemoryRelationCandidate,
 )
 from memory.editor.extraction import (
-    MemoryCandidateReview,
     MemoryExtractionResult,
     MemoryRetrievalAction,
     MemoryRetrievalDecision,
     MemoryRetrievalStatus,
-    MemoryReviewDecision,
 )
 from memory.editor.mutation import MemoryFieldMerger, MemoryNodeMatch, MemoryNodeMatchStatus
 from memory.model import MemoryKind
@@ -92,8 +90,6 @@ def extraction(old_documents, candidate, proposal, *, relations=()):
             ),
         ),
         retrieval_observations=(),
-        review=MemoryCandidateReview(MemoryReviewDecision.ACCEPT, ()),
-        candidate_attempts=1,
     )
 
 
@@ -127,7 +123,7 @@ def test_same_memory_merge_requires_allowed_kind_and_preserves_live_target() -> 
     assert result.resolve(source_page) == MemoryURI.from_address(target.address)  # type: ignore[arg-type]
 
 
-def test_same_memory_rejects_cross_kind_and_event_merges_even_after_model_review() -> None:
+def test_same_memory_rejects_cross_kind_and_event_merges_after_candidate_validation() -> None:
     preference = document(MemoryKind.PREFERENCE)
     entity = document(MemoryKind.ENTITY)
     old = snapshot_batch(preference, entity)
@@ -216,7 +212,7 @@ def test_retired_identity_source_cannot_also_participate_in_relation_candidate()
     "basis",
     [MemoryIdentityProposalBasis.EXPLICIT_FORGET, MemoryIdentityProposalBasis.FULLY_INVALIDATED],
 )
-def test_reviewed_remove_memory_becomes_delete_without_creating_a_content_mutation(basis) -> None:
+def test_validated_remove_memory_becomes_delete_without_creating_a_content_mutation(basis) -> None:
     source = document(MemoryKind.ENTITY)
     old = snapshot_batch(source)
     pages = MemoryPageIdMap.from_snapshots(old)

@@ -30,6 +30,7 @@ from ModelClient import (
 )
 from pre.conversation import ConversationBatch, ConversationMessageRole
 from tests.helpers import closed_turn, message, tool_turn
+from tests.model_helpers import prepare_chat_request
 from tests.unit.runtime.test_lifecycle_worker import manager
 
 
@@ -42,8 +43,10 @@ class RecordingPlannerProvider:
     is_remote: bool = False
     capabilities: ProviderCapabilities = ProviderCapabilities()
 
-    def complete(self, request):
-        self.requests.append(request)
+    prepare = staticmethod(prepare_chat_request)
+
+    def complete(self, prepared):
+        self.requests.append(prepared.request)
         return ModelResponse(
             json.dumps(self.outputs.pop(0), ensure_ascii=False),
             self.model,
@@ -266,7 +269,7 @@ def test_contextual_plan_keeps_original_query_and_orders_model_queries_by_priori
     assert tuple(item.priority for item in plan.queries) == tuple(sorted(item.priority for item in plan.queries))
     assert plan.conversation_id == "conversation-1"
     request = provider.requests[0]
-    assert request.prompt_version == "memory_search_query_plan_v1"
+    assert request.response_format.name == "memory_search_query_plan"
     assert request.temperature == 0.0
     assert "不要输出 memory URI" in request.messages[-2].content
     assert "memory://entities/项目/" in request.messages[-1].content

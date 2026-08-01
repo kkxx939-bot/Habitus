@@ -4,22 +4,29 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from dataclasses import asdict, replace
 
 import pytest
 
+from foundation.integrity import canonical_json
 from ModelClient import (
+    ChatCallContext,
     ChatClient,
     ChatMessage,
     ChatModelConfig,
     ChatRequest,
+    ChatStructuredOutputMode,
     ModelAuthenticationError,
     ModelInputTooLargeError,
     ModelResponse,
     ModelResponseError,
     ModelStreamEvent,
     ModelTransportError,
+    PreparedChatRequest,
     ProviderCapabilities,
     ProviderConfig,
+    ResponseFormat,
+    ToolCall,
 )
 
 
@@ -56,6 +63,95 @@ def test_chat_client_rejects_estimated_context_overflow_before_provider_call() -
     assert provider.requests == []
 
 
+def test_chat_client_counts_historical_tool_calls_before_provider_call() -> None:
+    provider = ScriptedProvider()
+    selected = ChatModelConfig(
+        config().route,
+        context_window_tokens=1_024,
+        max_output_tokens=128,
+    )
+    client = ChatClient(selected, provider)
+    request = ChatRequest(
+        messages=(
+            ChatMessage(
+                role="assistant",
+                tool_calls=(ToolCall("call-large", "inspect", {"payload": "x" * 100_000}),),
+            ),
+        )
+    )
+
+    with pytest.raises(ModelInputTooLargeError):
+        client.complete(request)
+    assert provider.requests == []
+
+
+def test_chat_client_does_not_count_transport_extra_body_in_model_input_budget() -> None:
+    provider = ScriptedProvider()
+    selected = ChatModelConfig(
+        replace(config().route, extra_body={"documents": ["x" * 100_000]}),
+        context_window_tokens=1_024,
+        max_output_tokens=128,
+    )
+    client = ChatClient(selected, provider)
+
+    assert client.complete("small prompt") == response()
+    assert len(provider.requests) == 1
+
+
+def test_chat_client_does_not_count_internal_metadata_in_context_budget() -> None:
+    provider = ScriptedProvider()
+    selected = ChatModelConfig(
+        config().route,
+        context_window_tokens=1_024,
+        max_output_tokens=128,
+    )
+    client = ChatClient(selected, provider)
+    request = ChatRequest(messages=(ChatMessage(role="user", content="small prompt"),))
+    context = ChatCallContext(
+        prompt_version="small-prompt-v1",
+        metadata={"trace": "x" * 100_000},
+    )
+
+    result = client.complete(request, context=context)
+    assert result.content == "ok"
+    assert result.prompt_version == "small-prompt-v1"
+    assert len(provider.requests) == 1
+    assert not hasattr(provider.requests[0], "metadata")
+
+
+@pytest.mark.parametrize(
+    ("mode", "expect_rejection"),
+    [("none", False), ("json_object", False), ("json_schema", True)],
+)
+def test_chat_client_counts_only_response_format_sent_by_selected_mode(
+    mode: ChatStructuredOutputMode,
+    expect_rejection: bool,
+) -> None:
+    provider = ScriptedProvider(structured_output_mode=mode)
+    selected = ChatModelConfig(
+        config().route,
+        context_window_tokens=1_024,
+        max_output_tokens=128,
+        structured_output_mode=mode,
+    )
+    client = ChatClient(selected, provider)
+    request = ChatRequest(
+        messages=(ChatMessage(role="user", content="small prompt"),),
+        response_format=ResponseFormat(
+            "large_schema",
+            {"type": "object", "description": "x" * 100_000},
+        ),
+    )
+
+    if expect_rejection:
+        with pytest.raises(ModelInputTooLargeError):
+            client.complete(request)
+        assert provider.requests == []
+    else:
+        assert client.complete(request) == response()
+        assert len(provider.requests) == 1
+
+
 def stream_events() -> tuple[ModelStreamEvent, ...]:
     return (
         ModelStreamEvent(kind="content_delta", content_delta="ok"),
@@ -79,13 +175,40 @@ class ScriptedProvider:
         streams: list[object] | None = None,
         async_streams: list[object] | None = None,
         health: object = None,
+        structured_output_mode: ChatStructuredOutputMode = "none",
     ) -> None:
         self.completions = completions or [response()]
         self.async_completions = async_completions or [response()]
         self.streams = streams or [stream_events()]
         self.async_streams = async_streams or [stream_events()]
         self.health = {"ok": True} if health is None else health
+        self.structured_output_mode = structured_output_mode
         self.requests: list[ChatRequest] = []
+        self.prepared_requests: list[PreparedChatRequest] = []
+        self.prepare_calls = 0
+
+    def prepare(self, request: ChatRequest, *, stream: bool) -> PreparedChatRequest:
+        self.prepare_calls += 1
+        visible: dict[str, object] = {
+            "messages": [asdict(message) for message in request.messages]
+        }
+        if request.tools:
+            visible["tools"] = [asdict(tool) for tool in request.tools]
+        if request.response_format is not None:
+            if self.structured_output_mode == "json_object":
+                visible["response_format"] = {"type": "json_object"}
+            elif self.structured_output_mode == "json_schema":
+                visible["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": asdict(request.response_format),
+                }
+        return PreparedChatRequest(
+            request=request,
+            body=canonical_json(visible).encode("utf-8"),
+            model_visible_body=canonical_json(visible).encode("utf-8"),
+            reserved_output_tokens=request.max_output_tokens or 0,
+            stream=stream,
+        )
 
     @staticmethod
     def _take(queue: list[object]) -> object:
@@ -94,21 +217,25 @@ class ScriptedProvider:
             raise current
         return current
 
-    def complete(self, request: ChatRequest):
-        self.requests.append(request)
+    def complete(self, request: PreparedChatRequest):
+        self.prepared_requests.append(request)
+        self.requests.append(request.request)
         return self._take(self.completions)
 
-    async def complete_async(self, request: ChatRequest):
-        self.requests.append(request)
+    async def complete_async(self, request: PreparedChatRequest):
+        self.prepared_requests.append(request)
+        self.requests.append(request.request)
         return self._take(self.async_completions)
 
-    def stream(self, request: ChatRequest):
-        self.requests.append(request)
+    def stream(self, request: PreparedChatRequest):
+        self.prepared_requests.append(request)
+        self.requests.append(request.request)
         current = self._take(self.streams)
         yield from current
 
-    async def stream_async(self, request: ChatRequest):
-        self.requests.append(request)
+    async def stream_async(self, request: PreparedChatRequest):
+        self.prepared_requests.append(request)
+        self.requests.append(request.request)
         current = self._take(self.async_streams)
         for event in current:
             yield event
@@ -178,6 +305,8 @@ def test_sync_completion_retries_transport_error_and_records_delay() -> None:
 
     assert client.complete("hello") == response()
     assert len(provider.requests) == 2
+    assert provider.prepare_calls == 1
+    assert provider.prepared_requests[0] is provider.prepared_requests[1]
     assert len(delays) == 1
     assert 0 <= delays[0] <= 0.1
 
@@ -249,8 +378,9 @@ def test_async_concurrency_never_exceeds_route_limit() -> None:
             self.active = 0
             self.peak = 0
 
-        async def complete_async(self, request: ChatRequest):
-            self.requests.append(request)
+        async def complete_async(self, request: PreparedChatRequest):
+            self.prepared_requests.append(request)
+            self.requests.append(request.request)
             self.active += 1
             self.peak = max(self.peak, self.active)
             await asyncio.sleep(0.01)
@@ -295,8 +425,9 @@ def test_sync_stream_rejects_final_empty_or_invalid_event(stream: tuple[object, 
 
 def test_sync_stream_never_retries_after_emitting_event() -> None:
     class PartialProvider(ScriptedProvider):
-        def stream(self, request: ChatRequest):
-            self.requests.append(request)
+        def stream(self, request: PreparedChatRequest):
+            self.prepared_requests.append(request)
+            self.requests.append(request.request)
             yield stream_events()[0]
             raise TimeoutError("disconnected")
 
@@ -344,8 +475,9 @@ def test_async_stream_rejects_final_empty_or_invalid_event(stream: tuple[object,
 
 def test_async_stream_never_retries_after_emitting_event() -> None:
     class PartialProvider(ScriptedProvider):
-        async def stream_async(self, request: ChatRequest):
-            self.requests.append(request)
+        async def stream_async(self, request: PreparedChatRequest):
+            self.prepared_requests.append(request)
+            self.requests.append(request.request)
             yield stream_events()[0]
             raise TimeoutError("disconnected")
 

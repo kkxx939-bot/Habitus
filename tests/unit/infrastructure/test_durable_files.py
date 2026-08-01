@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import infrastructure.store.filesystem.durable_io.atomic_file as atomic_file_module
 from infrastructure.store.filesystem.durable_io.atomic_file import (
     ImmutableArtifactConflictError,
     atomic_create_bytes,
@@ -74,3 +75,65 @@ def test_symlink_cannot_be_used_as_root_intermediate_or_leaf(tmp_path: Path) -> 
 def test_atomic_temporary_name_parser_is_strict(name: str, expected: str | None) -> None:
     assert atomic_temporary_destination(name) == expected
 
+
+def test_read_rejects_parent_directory_replaced_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "root"
+    inside = root / "sub"
+    inside.mkdir(parents=True)
+    target = inside / "payload"
+    target.write_bytes(b"inside")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "payload").write_bytes(b"outside")
+    parked = root / "parked"
+    original = atomic_file_module.require_safe_artifact_path
+    swapped = False
+
+    def validate_then_swap(root_value, path_value, *, label):
+        nonlocal swapped
+        candidate = original(root_value, path_value, label=label)
+        if not swapped:
+            inside.rename(parked)
+            inside.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return candidate
+
+    monkeypatch.setattr(atomic_file_module, "require_safe_artifact_path", validate_then_swap)
+
+    with pytest.raises(DurablePathIntegrityError):
+        read_regular_bytes(target, artifact_root=root, max_bytes=64)
+
+
+def test_read_rejects_artifact_root_ancestor_replaced_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trusted = tmp_path / "trusted"
+    root = trusted / "root"
+    target = root / "sub" / "payload"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"inside")
+    outside = tmp_path / "outside"
+    outside_target = outside / "root" / "sub" / "payload"
+    outside_target.parent.mkdir(parents=True)
+    outside_target.write_bytes(b"outside")
+    parked = tmp_path / "trusted-parked"
+    original = atomic_file_module.require_safe_artifact_path
+    swapped = False
+
+    def validate_then_swap(root_value, path_value, *, label):
+        nonlocal swapped
+        candidate = original(root_value, path_value, label=label)
+        if not swapped:
+            trusted.rename(parked)
+            trusted.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return candidate
+
+    monkeypatch.setattr(atomic_file_module, "require_safe_artifact_path", validate_then_swap)
+
+    with pytest.raises(DurablePathIntegrityError):
+        read_regular_bytes(target, artifact_root=root, max_bytes=64)

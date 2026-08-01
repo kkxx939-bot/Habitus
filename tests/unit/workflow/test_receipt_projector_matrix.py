@@ -40,7 +40,10 @@ def committed_triplet(
 ):
     document_codec = codec()
     tree = MemoryTree(tmp_path / "memory", document_codec=document_codec)
-    journal_store = MemoryTransactionJournal(tmp_path / "transactions", document_codec)
+    journal_store = MemoryTransactionJournal(
+        tmp_path / "workflow" / "transactions",
+        document_codec,
+    )
     transaction = MemoryCommitTransaction(
         tree,
         MemorySnapshotReader(tree),

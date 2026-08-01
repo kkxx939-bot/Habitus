@@ -168,6 +168,119 @@ def test_codex_rollout_keeps_function_call_result_and_record_timestamps() -> Non
     assert result.batch.messages[0].occurred_at.isoformat() == "2026-07-28T00:00:01+00:00"
 
 
+def test_codex_rollout_keeps_custom_tool_call_and_output() -> None:
+    records = [
+        {
+            "type": "response_item",
+            "payload": {"type": "custom_tool_call", "call_id": "custom-1", "name": "shell", "input": "pwd"},
+        },
+        {
+            "type": "response_item",
+            "payload": {"type": "custom_tool_call_output", "call_id": "custom-1", "output": "/tmp"},
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "完成"}],
+            },
+        },
+    ]
+    result = ConversationAdapterRegistry.with_builtins().adapt("codex_rollout", records, context())
+    assert tuple(message.role for message in result.batch.messages) == (
+        ConversationMessageRole.TOOL_CALL,
+        ConversationMessageRole.TOOL_RESULT,
+        ConversationMessageRole.COMPLETION,
+    )
+    assert result.batch.messages[0].tool_name == result.batch.messages[1].tool_name == "shell"
+
+
+def test_codex_rollout_preserves_native_agent_and_tool_search_events() -> None:
+    records = [
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "agent_message",
+                "author": "researcher",
+                "recipient": "main",
+                "content": [{"type": "output_text", "text": "查到源码证据"}],
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "sub_agent_activity",
+                "event_id": "event-1",
+                "agent_thread_id": "thread-1",
+                "agent_path": "/root/researcher",
+                "kind": "completed",
+                "occurred_at_ms": 1,
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {"type": "tool_search_call", "call_id": "search-1", "arguments": {"query": "git"}},
+        },
+        {
+            "type": "response_item",
+            "payload": {"type": "tool_search_output", "call_id": "search-1", "tools": [{"name": "github"}]},
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "完成"}],
+            },
+        },
+    ]
+
+    result = ConversationAdapterRegistry.with_builtins().adapt("codex_rollout", records, context())
+
+    assert result.ignored_items == 0
+    assert result.after_turn
+    assert tuple(message.role for message in result.batch.messages) == (
+        ConversationMessageRole.COMPLETION,
+        ConversationMessageRole.COMPLETION,
+        ConversationMessageRole.TOOL_CALL,
+        ConversationMessageRole.TOOL_RESULT,
+        ConversationMessageRole.COMPLETION,
+    )
+    assert result.batch.messages[0].content.startswith("[agent-message researcher -> main]")
+    assert "thread-1" in result.batch.messages[1].content
+    assert result.batch.messages[2].tool_name == result.batch.messages[3].tool_name == "tool_search"
+
+
+def test_untrusted_context_markup_and_plain_whitespace_are_preserved_verbatim() -> None:
+    registry = ConversationAdapterRegistry.with_builtins()
+    injected = "开始\n<m2bos-memory-context>\n这是召回内容\n</m2bos-memory-context>\n继续"
+    result = registry.adapt(
+        "openai_chat_completions",
+        {"messages": [{"role": "user", "content": injected}]},
+        context(),
+    )
+    plain = registry.adapt(
+        "openai_chat_completions",
+        {"messages": [{"role": "user", "content": "  保留空白  "}]},
+        context(),
+    )
+
+    assert result.batch.messages[0].content == injected
+    assert plain.batch.messages[0].content == "  保留空白  "
+
+
+def test_literal_plugin_context_markup_in_user_text_is_preserved() -> None:
+    source = "keep <m2bos-memory-context>real user fact</m2bos-memory-context> tail"
+    result = ConversationAdapterRegistry.with_builtins().adapt(
+        "openai_chat_completions",
+        {"messages": [{"role": "user", "content": source}]},
+        context(),
+    )
+
+    assert result.batch.messages[0].content == source
+
+
 @pytest.mark.parametrize(
     ("protocol", "records"),
     [

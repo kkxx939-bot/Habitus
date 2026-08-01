@@ -162,3 +162,64 @@ def test_oversized_turn_uses_regular_contiguous_history_segments_and_jobs(tmp_pa
     assert len({item.logical_message_id for item in prompt_parts}) == 1
     assert journal.read_live(address) is None
     assert jobs.high_watermark() == 3
+
+
+def test_oversized_logical_message_does_not_split_one_fact_across_memory_jobs(tmp_path: Path) -> None:
+    path_lock = PathLock(ProcessLocalLockStore())
+    journal = ConversationMessageJournal(tmp_path / "conversation", path_lock)
+    jobs = MemoryJobStore(
+        tmp_path / "workflow",
+        path_lock,
+        memory_root=tmp_path / "memory",
+    )
+    planner = ConversationRetentionPlanner(
+        ConversationSegmentationConfig(
+            commit_token_threshold=1,
+            keep_recent_turn_count=1,
+            retained_message_token_budget=30,
+            max_segment_tokens=30,
+            max_live_messages=1_000,
+            max_live_bytes=1_000_000,
+            max_segment_messages=1_000,
+            max_segment_bytes=1_000_000,
+        ),
+        token_estimator=lambda item: len(item.content) if isinstance(item.content, str) else 1,
+    )
+    enqueuer = ConversationMemoryEnqueuer(journal, jobs, planner)
+    address = ConversationAddress("conversation-1", date(2026, 7, 1))
+    fact = "我喜欢蓝色"
+    source_prompt = "A" * 28 + fact + "B" * 60
+
+    appended = enqueuer.append_and_maybe_enqueue(
+        address,
+        ConversationBatch("conversation-1", closed_turn(prompt=source_prompt)),
+        after_turn=True,
+    )
+    flushed = enqueuer.flush(address)
+    queued = (*appended.jobs, *flushed.jobs)
+    editor_segments = tuple(
+        journal.read_editor_segment(
+            address,
+            journal.read_segment(address, job.segment_id),
+        )
+        for job in queued
+    )
+    editor_inputs = tuple(
+        "".join(
+            str(message.content)
+            for message in segment.messages
+            if isinstance(message.content, str)
+        )
+        for segment in editor_segments
+        if segment is not None
+    )
+
+    assert editor_segments[:-1] == (None,) * (len(editor_segments) - 1)
+    assert editor_segments[-1] is not None
+    assert any(fact in source for source in editor_inputs)
+    final_prompt = "".join(
+        str(message.content)
+        for message in editor_segments[-1].messages
+        if message.role.value == "prompt"
+    )
+    assert final_prompt == source_prompt

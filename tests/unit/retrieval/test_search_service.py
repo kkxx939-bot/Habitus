@@ -56,6 +56,7 @@ from ModelClient import (
     StructuredChatClient,
 )
 from tests.helpers import document, segment, segment_summary
+from tests.model_helpers import prepare_chat_request
 
 
 @dataclass
@@ -65,6 +66,8 @@ class QueueChatProvider:
     model: str = "test"
     is_remote: bool = False
     capabilities: ProviderCapabilities = ProviderCapabilities()
+
+    prepare = staticmethod(prepare_chat_request)
 
     def complete(self, request):
         return ModelResponse(json.dumps(self.responses.pop(0), ensure_ascii=False), self.model, self.provider_name)

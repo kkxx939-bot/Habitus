@@ -1,4 +1,4 @@
-"""完整 Conversation 经受控检索、候选生成和二次审查的解析循环测试。"""
+"""完整 Conversation 经受控检索和一次模型候选生成的解析流程测试。"""
 
 import asyncio
 import json
@@ -8,13 +8,10 @@ from pathlib import Path
 import pytest
 
 from memory.editor import (
-    MemoryCandidateBatch,
-    MemoryCandidateRejectedError,
+    MemoryEditor,
     MemoryExtractionConfig,
     MemoryExtractionError,
     MemoryExtractionLoop,
-    MemoryIdentityPlanner,
-    MemoryIdentityPlanningError,
     MemoryRelatedRetriever,
     MemoryRetrievalIncompleteError,
 )
@@ -31,6 +28,7 @@ from ModelClient import (
     StructuredChatClient,
 )
 from tests.helpers import memory_fields, segment, tool_turn
+from tests.model_helpers import prepare_chat_request
 
 
 @dataclass
@@ -40,6 +38,8 @@ class QueueProvider:
     model: str = "test"
     is_remote: bool = False
     capabilities: ProviderCapabilities = ProviderCapabilities()
+
+    prepare = staticmethod(prepare_chat_request)
 
     def complete(self, _request):
         return ModelResponse(
@@ -90,22 +90,6 @@ def empty_candidates() -> dict[str, object]:
     }
 
 
-def accepted() -> dict[str, object]:
-    return {"decision": "accept", "issues": []}
-
-
-def rejected() -> dict[str, object]:
-    return {
-        "decision": "reject",
-        "issues": [
-            {
-                "code": "unsupported_long_term",
-                "detail": "当前内容不足以形成长期记忆。",
-            }
-        ],
-    }
-
-
 def candidate_item(kind: MemoryKind, page_id: int, **controls: object) -> dict[str, object]:
     """构造一个符合对应记忆 YAML 的结构化候选。"""
 
@@ -126,13 +110,6 @@ def all_kind_candidates() -> dict[str, object]:
     result["events"] = [candidate_item(MemoryKind.EVENT, 104)]
     result["intentions"] = [candidate_item(MemoryKind.INTENTION, 105, confirmed=True)]
     return result
-
-
-class RejectingIdentityPlanner(MemoryIdentityPlanner):
-    """模拟第二遍审查通过后确定性身份规则仍拒绝候选。"""
-
-    def plan(self, _extraction):
-        raise MemoryIdentityPlanningError("same_memory target does not preserve source")
 
 
 def extraction_loop(
@@ -161,39 +138,15 @@ def extraction_loop(
     return MemoryExtractionLoop(client=client, retriever=retriever, config=config)
 
 
-def test_loop_accepts_empty_memory_batch_after_complete_retrieval_review(tmp_path: Path) -> None:
-    result = asyncio.run(
-        extraction_loop(tmp_path, [finish(), empty_candidates(), accepted()]).extract(segment())
-    )
+def test_loop_returns_model_candidates_without_second_semantic_review(tmp_path: Path) -> None:
+    responses = [finish(), empty_candidates()]
+    result = asyncio.run(extraction_loop(tmp_path, responses).extract(segment()))
 
+    assert responses == []
     assert result.candidates.iter_candidates() == ()
     assert result.mutations.mutations == ()
     assert result.retrieval_decisions[0].action.value == "finish"
-    assert result.candidate_attempts == 1
     assert result.source_segment_digest == segment().digest
-
-
-def test_rejected_candidate_is_regenerated_as_a_complete_batch_within_bound(tmp_path: Path) -> None:
-    result = asyncio.run(
-        extraction_loop(
-            tmp_path,
-            [finish(), empty_candidates(), rejected(), empty_candidates(), accepted()],
-            config=MemoryExtractionConfig(max_candidate_regenerations=1),
-        ).extract(segment())
-    )
-
-    assert result.candidate_attempts == 2
-    assert result.review.decision.value == "accept"
-
-
-def test_rejection_after_last_attempt_fails_without_returning_partial_candidates(tmp_path: Path) -> None:
-    loop = extraction_loop(
-        tmp_path,
-        [finish(), empty_candidates(), rejected()],
-        config=MemoryExtractionConfig(max_candidate_regenerations=0),
-    )
-    with pytest.raises(MemoryCandidateRejectedError, match="remained rejected"):
-        asyncio.run(loop.extract(segment()))
 
 
 def test_last_retrieval_round_cannot_execute_another_search(tmp_path: Path) -> None:
@@ -221,7 +174,6 @@ def test_last_retrieval_round_cannot_execute_another_search(tmp_path: Path) -> N
         ("config", object(), "config"),
         ("mutation_reader", object(), "mutation_reader"),
         ("mutation_planner", object(), "mutation_planner"),
-        ("identity_planner", object(), "identity_planner"),
     ],
 )
 def test_loop_rejects_each_invalid_collaborator(
@@ -237,11 +189,19 @@ def test_loop_rejects_each_invalid_collaborator(
         "config": current.config,
         "mutation_reader": current.mutation_reader,
         "mutation_planner": current.mutation_planner,
-        "identity_planner": current.identity_planner,
         field: value,
     }
     with pytest.raises(TypeError, match=message):
         MemoryExtractionLoop(**values)
+
+
+def test_identity_planner_is_owned_and_validated_by_memory_editor(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="identity_planner"):
+        MemoryEditor(
+            extraction_loop=extraction_loop(tmp_path, []),
+            identity_planner=object(),  # type: ignore[arg-type]
+            transaction=object(),  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.parametrize("invalid", [None, object(), "segment", 1, True])
@@ -262,7 +222,7 @@ def test_loop_executes_one_search_then_finishes_with_auditable_observation(tmp_p
     result = asyncio.run(
         extraction_loop(
             tmp_path,
-            [search, finish(), empty_candidates(), accepted()],
+            [search, finish(), empty_candidates()],
             config=MemoryExtractionConfig(max_retrieval_iterations=2),
         ).extract(segment())
     )
@@ -275,76 +235,32 @@ def test_loop_executes_one_search_then_finishes_with_auditable_observation(tmp_p
     assert result.retrieval_observations[0].input_value == "回答风格"
 
 
-def test_source_context_failure_regenerates_complete_candidate_batch(tmp_path: Path) -> None:
+def test_source_context_failure_does_not_trigger_semantic_regeneration(tmp_path: Path) -> None:
     invalid = empty_candidates()
     invalid["preferences"] = [candidate_item(MemoryKind.PREFERENCE, 1)]
-    result = asyncio.run(
-        extraction_loop(
-            tmp_path,
-            [finish(), invalid, empty_candidates(), accepted()],
-            config=MemoryExtractionConfig(max_candidate_regenerations=1),
-        ).extract(segment())
-    )
-
-    assert result.candidate_attempts == 2
-    assert result.candidates == MemoryCandidateBatch.model_validate(empty_candidates())
-
-
-def test_source_context_failure_exhaustion_returns_no_partial_result(tmp_path: Path) -> None:
-    invalid = empty_candidates()
-    invalid["preferences"] = [candidate_item(MemoryKind.PREFERENCE, 1)]
-    loop = extraction_loop(
-        tmp_path,
-        [finish(), invalid],
-        config=MemoryExtractionConfig(max_candidate_regenerations=0),
-    )
+    unused_retry = empty_candidates()
+    responses = [finish(), invalid, unused_retry]
+    loop = extraction_loop(tmp_path, responses)
 
     with pytest.raises(MemoryExtractionError, match="source-context validation"):
         asyncio.run(loop.extract(segment()))
+    assert responses == [unused_retry]
 
 
-def test_preliminary_mutation_failure_regenerates_candidate_batch(tmp_path: Path) -> None:
+def test_preliminary_mutation_failure_does_not_trigger_semantic_regeneration(
+    tmp_path: Path,
+) -> None:
     unconfirmed_intention = empty_candidates()
     unconfirmed_intention["intentions"] = [
         candidate_item(MemoryKind.INTENTION, 100, confirmed=False)
     ]
-    result = asyncio.run(
-        extraction_loop(
-            tmp_path,
-            [finish(), unconfirmed_intention, empty_candidates(), accepted()],
-            config=MemoryExtractionConfig(max_candidate_regenerations=1),
-        ).extract(segment())
-    )
-
-    assert result.candidate_attempts == 2
-    assert result.mutations.mutations == ()
-
-
-def test_preliminary_mutation_failure_exhaustion_returns_no_partial_plan(tmp_path: Path) -> None:
-    unconfirmed_intention = empty_candidates()
-    unconfirmed_intention["intentions"] = [
-        candidate_item(MemoryKind.INTENTION, 100, confirmed=False)
-    ]
-    loop = extraction_loop(
-        tmp_path,
-        [finish(), unconfirmed_intention],
-        config=MemoryExtractionConfig(max_candidate_regenerations=0),
-    )
+    unused_retry = empty_candidates()
+    responses = [finish(), unconfirmed_intention, unused_retry]
+    loop = extraction_loop(tmp_path, responses)
 
     with pytest.raises(MemoryExtractionError, match="preliminary mutation planning"):
         asyncio.run(loop.extract(segment()))
-
-
-def test_identity_planning_failure_regenerates_after_review_acceptance(tmp_path: Path) -> None:
-    loop = extraction_loop(
-        tmp_path,
-        [finish(), empty_candidates(), accepted(), empty_candidates(), accepted()],
-        config=MemoryExtractionConfig(max_candidate_regenerations=1),
-    )
-    loop.identity_planner = RejectingIdentityPlanner()
-
-    with pytest.raises(MemoryExtractionError, match="deterministic planning"):
-        asyncio.run(loop.extract(segment()))
+    assert responses == [unused_retry]
 
 
 def test_successful_loop_plans_all_six_memory_kinds_without_writing_tree(tmp_path: Path) -> None:
@@ -353,7 +269,7 @@ def test_successful_loop_plans_all_six_memory_kinds_without_writing_tree(tmp_pat
     result = asyncio.run(
         extraction_loop(
             tmp_path,
-            [finish(), all_kind_candidates(), accepted()],
+            [finish(), all_kind_candidates()],
         ).extract(source)
     )
 
@@ -363,21 +279,3 @@ def test_successful_loop_plans_all_six_memory_kinds_without_writing_tree(tmp_pat
     assert all(mutation.action.value == "create" for mutation in result.mutations.mutations)
     assert result.page_ids.page_ids() == frozenset()
     assert tuple(tree_root.rglob("*.md")) == ()
-
-
-@pytest.mark.parametrize(
-    ("message", "expected"),
-    [
-        ("same_memory merge rejected", "unjustified_identity_merge"),
-        ("remove_memory delete rejected", "unjustified_memory_delete"),
-        ("tool evidence missing", "invalid_tool_generalization"),
-        ("intention transition invalid", "event_intention_confusion"),
-        ("relation remove missing", "invalid_relation_remove"),
-        ("relation unsupported", "unjustified_relation"),
-        ("unknown page", "invalid_page_identity"),
-    ],
-)
-def test_context_failure_is_mapped_to_controlled_review_issue(message: str, expected: str) -> None:
-    issue = MemoryExtractionLoop._context_issue(ValueError(message))
-    assert issue.code.value == expected
-    assert issue.detail == message

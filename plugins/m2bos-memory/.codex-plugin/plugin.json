@@ -1,0 +1,24 @@
+{
+  "name": "m2bos-memory",
+  "version": "0.1.0",
+  "description": "Single-user local semantic memory for Codex, powered by m2bOS.",
+  "author": {
+    "name": "m2bOS"
+  },
+  "license": "Apache-2.0",
+  "keywords": ["memory", "m2bos", "codex", "local-first"],
+  "interface": {
+    "displayName": "m2bOS Memory",
+    "shortDescription": "Local long-term memory for Codex.",
+    "longDescription": "Captures completed Codex turns into the local m2bOS service, recalls bounded memory before prompts, and flushes safely before compaction.",
+    "developerName": "m2bOS",
+    "category": "Productivity",
+    "capabilities": [
+      "Automatic memory recall before prompts",
+      "Durable incremental conversation capture",
+      "Pre-compaction memory flush",
+      "Offline outbox with exact replay"
+    ],
+    "defaultPrompt": ["Recall relevant local memory for this task."]
+  }
+}

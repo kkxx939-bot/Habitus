@@ -44,7 +44,7 @@ def _app() -> FastAPI:
 
 
 def test_supplied_request_id_is_returned_and_available_inside_request_context() -> None:
-    with TestClient(_app(), raise_server_exceptions=False) as client:
+    with TestClient(_app(), base_url="http://127.0.0.1:8787", raise_server_exceptions=False) as client:
         response = client.get("/ok", headers={REQUEST_ID_HEADER: "agent-turn-42"})
 
     assert response.status_code == 200
@@ -54,7 +54,7 @@ def test_supplied_request_id_is_returned_and_available_inside_request_context() 
 
 
 def test_missing_request_id_generates_one_and_invalid_or_duplicate_values_are_rejected() -> None:
-    with TestClient(_app(), raise_server_exceptions=False) as client:
+    with TestClient(_app(), base_url="http://127.0.0.1:8787", raise_server_exceptions=False) as client:
         generated = client.get("/ok")
         invalid = client.get("/ok", headers={REQUEST_ID_HEADER: "contains spaces"})
         duplicate = client.get(
@@ -73,7 +73,7 @@ def test_missing_request_id_generates_one_and_invalid_or_duplicate_values_are_re
 
 
 def test_validation_framework_and_domain_errors_use_the_stable_envelope() -> None:
-    with TestClient(_app(), raise_server_exceptions=False) as client:
+    with TestClient(_app(), base_url="http://127.0.0.1:8787", raise_server_exceptions=False) as client:
         validation = client.get("/items/not-an-integer", headers={REQUEST_ID_HEADER: "validation-1"})
         method = client.post("/ok", headers={REQUEST_ID_HEADER: "method-1"})
         conflict = client.get("/conflict", headers={REQUEST_ID_HEADER: "conflict-1"})
@@ -95,7 +95,7 @@ def test_validation_framework_and_domain_errors_use_the_stable_envelope() -> Non
 
 
 def test_unhandled_500_keeps_request_id_and_hides_internal_message() -> None:
-    with TestClient(_app(), raise_server_exceptions=False) as client:
+    with TestClient(_app(), base_url="http://127.0.0.1:8787", raise_server_exceptions=False) as client:
         response = client.get("/boom", headers={REQUEST_ID_HEADER: "failure-1"})
 
     assert response.status_code == 500
@@ -112,7 +112,7 @@ def test_unhandled_500_keeps_request_id_and_hides_internal_message() -> None:
 
 
 def test_retryable_failure_returns_body_advice_and_retry_after_header() -> None:
-    with TestClient(_app(), raise_server_exceptions=False) as client:
+    with TestClient(_app(), base_url="http://127.0.0.1:8787", raise_server_exceptions=False) as client:
         response = client.get("/rate-limit", headers={REQUEST_ID_HEADER: "rate-1"})
 
     assert response.status_code == 429

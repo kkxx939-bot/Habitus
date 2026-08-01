@@ -38,11 +38,11 @@ def test_strict_json_root_types_round_trip_without_repair(source: str, expected:
     ("source", "expected_mode", "expected"),
     [
         ('```json\n{"a":1}\n```', "code_fence", {"a": 1}),
-        ('```JSON\n[1,2]\n```', "code_fence", [1, 2]),
+        ("```JSON\n[1,2]\n```", "code_fence", [1, 2]),
         ('```\n{"a":1}\n```', "code_fence", {"a": 1}),
         ('before {"a":{"b":[1,2]}} after', "extracted", {"a": {"b": [1, 2]}}),
         ('prefix [1,{"text":"} ] inside"},3] suffix', "extracted", [1, {"text": "} ] inside"}, 3]),
-        ('prefix {"escaped":"quote \\\" and slash \\\\"} suffix', "extracted", {"escaped": 'quote " and slash \\'}),
+        ('prefix {"escaped":"quote \\" and slash \\\\"} suffix', "extracted", {"escaped": 'quote " and slash \\'}),
     ],
 )
 def test_parser_extracts_fenced_or_balanced_json_without_changing_value(
@@ -60,7 +60,7 @@ def test_parser_extracts_fenced_or_balanced_json_without_changing_value(
     "source",
     [
         '{"a":1,}',
-        '[1,2,]',
+        "[1,2,]",
         '{"a":[1,2,],}',
         'prefix {"a":1,} suffix',
         '```json\n{"a":1,}\n```',
@@ -79,11 +79,30 @@ def test_trailing_comma_repair_changes_only_punctuation(source: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('{"x": ",}",}', {"x": ",}"}),
+        ('{"x":"text,]","y":1,}', {"x": "text,]", "y": 1}),
+        ('[",]",]', [",]"]),
+        ('{"x":"escaped \\"quote,} still text","y":2,}', {"x": 'escaped "quote,} still text', "y": 2}),
+    ],
+)
+def test_trailing_comma_repair_preserves_commas_inside_strings(
+    source: str,
+    expected: object,
+) -> None:
+    parsed = parse_json_response(source)
+    assert parsed.value == expected
+    assert parsed.mode == "trailing_comma_repair"
+
+
+@pytest.mark.parametrize(
     "source",
     [
         '{"a":1,}',
         "{'a': 1}",
-        "prefix {\"a\":1,} suffix",
+        '{decision:"keep"}',
+        'prefix {"a":1,} suffix',
         "plain text",
     ],
 )
@@ -96,7 +115,7 @@ def test_disabling_repair_rejects_every_non_json_candidate(source: str) -> None:
     ("source", "expected"),
     [
         ('prefix {"a":1} suffix', {"a": 1}),
-        ('prefix [1,2] suffix', [1, 2]),
+        ("prefix [1,2] suffix", [1, 2]),
         ('```json\n{"a":1}\n``` trailing {"b":2}', {"a": 1}),
     ],
 )
@@ -109,7 +128,7 @@ def test_extraction_still_works_when_repair_is_disabled(source: str, expected: o
     [
         ('prefix {"text":"[not structure]"} suffix', '{"text":"[not structure]"}'),
         ('x [{"a":1},2] y', '[{"a":1},2]'),
-        ('x {"a":"escaped \\\" brace }","b":2} y', '{"a":"escaped \\\" brace }","b":2}'),
+        ('x {"a":"escaped \\" brace }","b":2} y', '{"a":"escaped \\" brace }","b":2}'),
     ],
 )
 def test_balanced_extractor_respects_nested_structures_and_json_strings(source: str, expected: str) -> None:
@@ -189,6 +208,19 @@ def test_optional_repair_is_absent_without_dependency(monkeypatch: pytest.Monkey
     assert parsed == ParsedJSON({"a": 1}, "python_literal_repair")
 
 
+def test_dependency_only_repair_is_absent_without_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = importlib.import_module
+
+    def missing(name: str):
+        if name == "json_repair":
+            raise ImportError("forced missing dependency")
+        return original(name)
+
+    monkeypatch.setattr(json_parser.importlib, "import_module", missing)
+    with pytest.raises(ValueError, match="could not be repaired"):
+        parse_json_response('{decision:"keep"}')
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -221,6 +253,90 @@ def test_non_json_semantics_are_also_rejected_without_optional_repair(
         parse_json_response(source)
 
 
+def test_strict_loader_rejects_duplicate_object_keys_at_every_depth() -> None:
+    with pytest.raises(ValueError, match="duplicate JSON object key"):
+        parse_json_response('{"decision":"keep","nested":{"decision":"delete","decision":"keep"}}')
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{'decision':'keep','decision':'delete'}",
+        "{'outer': {'decision':'keep', 'decision':'delete'}}",
+        "{'decision':'keep }', 'decision':'delete'}",
+        "{r'decision':'keep', 'decision':'delete'}",
+        "{u'decision':'keep', 'decision':'delete'}",
+        "{'deci' 'sion':'keep', 'decision':'delete'}",
+        "{('decision'):'keep', 'decision':'delete'}",
+    ],
+)
+def test_repair_paths_cannot_hide_duplicate_object_keys(source: str) -> None:
+    with pytest.raises(ValueError, match="duplicate JSON object key"):
+        parse_json_response(source)
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('{decision:"keep", note:"ok"}', {"decision": "keep", "note": "ok"}),
+        ('{"decision":"keep" /* note */}', {"decision": "keep"}),
+        (
+            "{decision:'keep', /* decision: only mentioned in comment */ note:'ok'}",
+            {"decision": "keep", "note": "ok"},
+        ),
+        ('{"decision":"keep" "note":"ok"}', {"decision": "keep", "note": "ok"}),
+        (
+            '{url:"https://example.com/#fragment",note:"/* literal */"}',
+            {"url": "https://example.com/#fragment", "note": "/* literal */"},
+        ),
+        ('{// model note\ndecision:"keep",# rest\nnote:"ok"}', {"decision": "keep", "note": "ok"}),
+        ('[{decision:"keep"},{decision:"delete"}]', [{"decision": "keep"}, {"decision": "delete"}]),
+    ],
+)
+def test_optional_dependency_restores_unambiguous_syntax_only_repairs(
+    source: str,
+    expected: object,
+) -> None:
+    parsed = parse_json_response(source)
+    assert parsed == ParsedJSON(expected, "json_repair")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{1abc: 1, 2abc: 2}",
+        '{decision:"keep", decision:"delete"}',
+        '{"decision":"keep" "decision":"delete"}',
+        '{outer:{decision:"keep",decision:"delete"}}',
+        '{outer:{decision:"keep",/* note */decision:"delete"}}',
+        '{decision:"keep","decision":"delete"}',
+        '[{decision:"keep",decision:"delete"}]',
+        '{items:(1,2), note:"x"}',
+    ],
+)
+def test_ambiguous_dependency_level_repairs_are_rejected(source: str) -> None:
+    with pytest.raises(ValueError):
+        parse_json_response(source)
+
+
+def test_optional_dependency_uses_strict_wrapped_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    class StrictRepair:
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        @classmethod
+        def loads(cls, source: str, **kwargs: object) -> object:
+            cls.calls.append((source, kwargs))
+            return [{"decision": "keep"}]
+
+    monkeypatch.setattr(json_parser.importlib, "import_module", lambda _name: StrictRepair)
+    repaired = json_parser._repair_with_optional_dependency('{decision:"keep"}')
+
+    assert repaired == {"decision": "keep"}
+    assert StrictRepair.calls == [
+        ('[{decision:"keep"}]', {"skip_json_loads": True, "strict": True}),
+    ]
+
+
 @pytest.mark.parametrize("error", [TypeError("bad type"), ValueError("bad value"), json.JSONDecodeError("bad", "x", 0)])
 def test_optional_repair_normalizes_dependency_parse_failures(
     monkeypatch: pytest.MonkeyPatch,
@@ -228,7 +344,7 @@ def test_optional_repair_normalizes_dependency_parse_failures(
 ) -> None:
     class BrokenRepair:
         @staticmethod
-        def loads(_source: str) -> object:
+        def loads(_source: str, **_kwargs: object) -> object:
             raise error
 
     monkeypatch.setattr(json_parser.importlib, "import_module", lambda _name: BrokenRepair)

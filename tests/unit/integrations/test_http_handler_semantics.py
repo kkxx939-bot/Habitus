@@ -333,15 +333,22 @@ def test_remember_reports_the_effective_false_override() -> None:
     assert result["after_turn"] is False
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="M2BOS-BUG-OBS-001: public Job errors do not redact Windows or UNC absolute paths",
-)
 def test_public_job_failure_redacts_windows_and_unc_absolute_paths() -> None:
-    windows = RuntimeHTTPHandlers._sanitize_failure(r"failed at C:\Users\alice\private\secret.txt")
-    unc = RuntimeHTTPHandlers._sanitize_failure(r"failed at \\server\private\secret.txt")
+    windows = RuntimeHTTPHandlers._sanitize_failure(
+        r"failed at C:\Users\Alice Smith\Private Folder\secret.txt"
+    )
+    slash_windows = RuntimeHTTPHandlers._sanitize_failure(
+        "failed at C:/Users/Alice Smith/Private Folder/secret.txt"
+    )
+    unc = RuntimeHTTPHandlers._sanitize_failure(
+        r"failed at \\server\Private Share\Alice Smith\secret.txt"
+    )
+    extended = RuntimeHTTPHandlers._sanitize_failure(
+        r"failed at \\?\C:\Users\Alice Smith\secret.txt"
+    )
 
-    assert "alice" not in windows
+    assert "Alice Smith" not in windows
+    assert "Alice Smith" not in slash_windows
     assert "server" not in unc
-    assert "[PATH]" in windows
-    assert "[PATH]" in unc
+    assert "Alice Smith" not in extended
+    assert all("[PATH]" in value for value in (windows, slash_windows, unc, extended))

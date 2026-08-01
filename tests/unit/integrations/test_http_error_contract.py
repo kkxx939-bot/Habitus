@@ -33,12 +33,14 @@ def test_openapi_error_responses_publish_the_shared_schema_codes_and_headers() -
     assert responses[409]["model"] is ErrorResponse
     assert responses[409]["description"] == "m2bOS error: ABORTED, CONFLICT"
     assert set(responses[409]["headers"]) == {"Retry-After", "X-Request-ID"}
+    assert 401 not in responses
+    assert 403 not in responses
     assert 503 not in without_unavailable
 
 
 def test_actual_openapi_uses_error_schema_but_keeps_readiness_503_as_health_snapshot() -> None:
     runtime = object.__new__(Runtime)
-    schema = create_http_app(runtime, api_key="x" * 32).openapi()
+    schema = create_http_app(runtime).openapi()
 
     remember_responses = schema["paths"]["/api/v1/memory/remember"]["post"]["responses"]
     readiness_responses = schema["paths"]["/ready"]["get"]["responses"]

@@ -1,9 +1,13 @@
 """向量通用模型、路由配置和显式 Adapter 工厂测试。"""
 
+import asyncio
 import hashlib
 
 import pytest
 
+from infrastructure.store.contracts import PathLock
+from infrastructure.store.locks import ProcessLocalLockStore
+from infrastructure.store.sqlite import SQLiteLockStore
 from infrastructure.vector import (
     PublishedVectorStore,
     VectorStoreConfig,
@@ -14,7 +18,9 @@ from infrastructure.vector import (
     VectorStoreRecord,
     VectorStoreRequirements,
     VectorStoreRouteConfig,
+    VectorStoreUnsupportedTopologyError,
 )
+from infrastructure.vector.adapters import register_builtin_vector_adapters
 from infrastructure.vector.adapters.vikingdb_config import (
     VikingDBVectorStoreConfig,
     bounded_retry_after,
@@ -92,41 +98,117 @@ def test_factory_resolves_credentials_and_rejects_unregistered_or_mismatched_bac
 
         class Backend:
             adapter_name = "vikingdb"
+            requires_cross_process_publication_fencing = False
             provider_name = "volcengine"
             collection = "memory"
             max_records = 100
             max_search_hits = 10
 
-            async def initialize(self): pass
-            async def read_metadata(self, names): return {}
-            async def write_metadata(self, values, *, dimension): pass
-            async def ensure_schema(self, dimension, *, published_dimension): pass
-            async def read(self, identities): return ()
-            async def delete_all(self): pass
-            async def upsert(self, records): pass
-            async def delete(self, identities): pass
-            async def validate_records(self, records, *, replacing): pass
-            async def wait_visible(self, upserts, deletes, *, complete): pass
-            async def search(self, query_vector, *, filters, limit): return ()
-            async def scan(self, *, filters, limit): return ()
-            async def close(self): pass
+            async def initialize(self):
+                pass
+
+            async def read_metadata(self, names):
+                return {}
+
+            async def write_metadata(self, values, *, dimension):
+                pass
+
+            async def ensure_schema(self, dimension, *, published_dimension):
+                pass
+
+            async def read(self, identities):
+                return ()
+
+            async def delete_all(self):
+                pass
+
+            async def upsert(self, records):
+                pass
+
+            async def delete(self, identities):
+                pass
+
+            async def validate_records(self, records, *, replacing):
+                pass
+
+            async def wait_visible(self, upserts, deletes, *, complete):
+                pass
+
+            async def search(self, query_vector, *, filters, limit):
+                return ()
+
+            async def scan(self, *, filters, limit):
+                return ()
+
+            async def close(self):
+                pass
 
         return Backend()
 
-    factory.register_adapter("vikingdb", builder)
-    config = VectorStoreConfig(
-        route=VectorStoreRouteConfig(credential_env={"api_key": "VIKING_KEY"})
+    factory.register_adapter(
+        "vikingdb",
+        builder,
+        requires_cross_process_publication_fencing=False,
     )
+    config = VectorStoreConfig(route=VectorStoreRouteConfig(credential_env={"api_key": "VIKING_KEY"}))
     requirements = VectorStoreRequirements(2, 100, 10, 100)
-    store = factory.create(config, requirements=requirements, environ={"VIKING_KEY": " secret "})
+    publication_lock = PathLock(ProcessLocalLockStore())
+    store = factory.create(
+        config,
+        requirements=requirements,
+        environ={"VIKING_KEY": " secret "},
+        path_lock=publication_lock,
+    )
     assert isinstance(store, PublishedVectorStore)
     assert captured == {"api_key": "secret"}
     with pytest.raises(ValueError, match="already registered"):
-        factory.register_adapter("vikingdb", builder)
+        factory.register_adapter(
+            "vikingdb",
+            builder,
+            requires_cross_process_publication_fencing=False,
+        )
     with pytest.raises(VectorStoreError, match="not registered"):
-        VectorStoreFactory().create(config, requirements=requirements, environ={"VIKING_KEY": "x"})
+        VectorStoreFactory().create(
+            config,
+            requirements=requirements,
+            environ={"VIKING_KEY": "x"},
+            path_lock=publication_lock,
+        )
     with pytest.raises(VectorStoreError, match="missing"):
-        factory.create(config, requirements=requirements, environ={})
+        factory.create(
+            config,
+            requirements=requirements,
+            environ={},
+            path_lock=publication_lock,
+        )
+    with pytest.raises(VectorStoreError, match="PathLock"):
+        factory.create(
+            config,
+            requirements=requirements,
+            environ={"VIKING_KEY": "x"},
+        )
+
+
+def test_factory_rejects_process_local_fencing_before_invoking_remote_backend_builder() -> None:
+    builder_calls: list[str] = []
+
+    def builder(_context):
+        builder_calls.append("builder")
+        raise AssertionError("unsupported remote builder must not be invoked")
+
+    factory = VectorStoreFactory()
+    factory.register_adapter(
+        "vikingdb",
+        builder,
+        requires_cross_process_publication_fencing=True,
+    )
+    with pytest.raises(VectorStoreUnsupportedTopologyError, match="host-scoped"):
+        factory.create(
+            VectorStoreConfig(),
+            requirements=VectorStoreRequirements(2, 100, 10, 100),
+            path_lock=PathLock(ProcessLocalLockStore()),
+        )
+    assert builder_calls == []
 
 
 def test_vikingdb_options_cover_public_private_and_capacity_combinations() -> None:
@@ -146,9 +228,32 @@ def test_vikingdb_options_cover_public_private_and_capacity_combinations() -> No
     with pytest.raises(ValueError, match="managed schema"):
         VikingDBVectorStoreConfig(auth_mode="api_key", schema_mode="managed")
     with pytest.raises(ValueError, match="max_records"):
-        public.validate_requirements(
-            VectorStoreRequirements(2, public.max_records + 1, 10, 100), route
-        )
+        public.validate_requirements(VectorStoreRequirements(2, public.max_records + 1, 10, 100), route)
     assert bounded_retry_after("999", 10) == 10
     assert bounded_retry_after("invalid", 10) is None
 
+
+def test_builtin_vikingdb_requires_host_scoped_publication_fencing(tmp_path) -> None:
+    factory = register_builtin_vector_adapters()
+    config = VectorStoreConfig(
+        route=VectorStoreRouteConfig(credential_env={"api_key": "VIKING_KEY"}),
+    )
+    requirements = VectorStoreRequirements(2, 100, 10, 100)
+    with pytest.raises(VectorStoreUnsupportedTopologyError, match="host-scoped"):
+        factory.create(
+            config,
+            requirements=requirements,
+            environ={"VIKING_KEY": "secret"},
+            path_lock=PathLock(ProcessLocalLockStore()),
+        )
+    store = factory.create(
+        config,
+        requirements=requirements,
+        environ={"VIKING_KEY": "secret"},
+        path_lock=PathLock(SQLiteLockStore(tmp_path / "publication.sqlite3", initialize=False)),
+    )
+    assert isinstance(store, PublishedVectorStore)
+    assert store.adapter_name == "vikingdb"
+    assert store.provider_name == config.provider
+    assert store.collection == config.collection
+    asyncio.run(store.close())
