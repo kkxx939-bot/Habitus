@@ -6,7 +6,6 @@ import asyncio
 from dataclasses import replace
 from datetime import date, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -19,10 +18,6 @@ from memory.workflow import (
     MemoryChangeReceipt,
     MemoryChangeReceiptState,
     MemoryChangeSource,
-)
-from pre.conversation import (
-    ConversationSummarySourceKind,
-    ConversationSummarySourceRef,
 )
 from tests.helpers import BASE_TIME, closed_turn, segment
 from tests.unit.workflow.test_lifecycle_manager import lifecycle_manager
@@ -114,6 +109,7 @@ def test_maintain_once_normalizes_offset_time_to_utc(tmp_path: Path) -> None:
         ("released_history_segment_ids", ("",), "must contain"),
         ("deleted_segment_summary_ids", (1,), "must contain"),
         ("deleted_range_summary_ids", None, "must contain"),
+        ("deleted_archive_summary_ids", None, "must contain"),
         ("deleted_memory_receipt_ids", ("",), "must contain"),
         ("deleted_memory_job_sequences", (0,), "positive integers"),
         ("deleted_memory_job_sequences", (True,), "positive integers"),
@@ -150,52 +146,6 @@ def test_history_release_check_uses_segment_end_sequence(
     expected: bool,
 ) -> None:
     assert ConversationLifecycleManager._source_history_is_released(segment_id, released_through) is expected
-
-
-def _source_ref(
-    start: int,
-    end: int,
-    *,
-    kind: ConversationSummarySourceKind = ConversationSummarySourceKind.SEGMENT,
-) -> ConversationSummarySourceRef:
-    return ConversationSummarySourceRef(
-        kind,
-        f"{start:012d}-{end:012d}",
-        f"{start + 1:064x}",
-        start,
-        end,
-    )
-
-
-def test_parent_map_indexes_each_source_to_its_parent() -> None:
-    first = _source_ref(0, 1)
-    second = _source_ref(2, 3)
-    parent = SimpleNamespace(source_refs=(first, second))
-    result = ConversationLifecycleManager._parent_map(
-        (parent,),  # type: ignore[arg-type]
-        expected_kind=ConversationSummarySourceKind.SEGMENT,
-    )
-    assert result == {first.summary_id: (parent, first), second.summary_id: (parent, second)}
-
-
-def test_parent_map_rejects_wrong_source_kind() -> None:
-    parent = SimpleNamespace(source_refs=(_source_ref(0, 1, kind=ConversationSummarySourceKind.RANGE),))
-    with pytest.raises(ConversationLifecycleError, match="invalid source kind"):
-        ConversationLifecycleManager._parent_map(
-            (parent,),  # type: ignore[arg-type]
-            expected_kind=ConversationSummarySourceKind.SEGMENT,
-        )
-
-
-def test_parent_map_rejects_source_covered_by_multiple_parents() -> None:
-    reference = _source_ref(0, 1)
-    first = SimpleNamespace(source_refs=(reference,))
-    second = SimpleNamespace(source_refs=(reference,))
-    with pytest.raises(ConversationLifecycleError, match="multiple parents"):
-        ConversationLifecycleManager._parent_map(
-            (first, second),  # type: ignore[arg-type]
-            expected_kind=ConversationSummarySourceKind.SEGMENT,
-        )
 
 
 def _committed_workflow(manager: ConversationLifecycleManager, address: ConversationAddress):

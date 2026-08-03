@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -19,7 +19,11 @@ from foundation.observability import (
 )
 from infrastructure.observability import AuditRecord
 from infrastructure.store.contracts import LockStoreSnapshot
-from memory.conversation import ConversationAddress, ConversationIngressRequest
+from memory.conversation import (
+    ConversationAddress,
+    ConversationIngressRequest,
+    ConversationSummaryReference,
+)
 from memory.editor import MemoryTransactionJournalState
 from memory.intention import MemoryIntentionRecallScope
 from memory.model import MemoryKind
@@ -81,6 +85,28 @@ class RuntimeInitialization:
             not isinstance(identifier, str) or not identifier for identifier in self.recovered_transaction_ids
         ):
             raise TypeError("recovered_transaction_ids must contain non-empty strings")
+
+
+@dataclass(frozen=True)
+class MemoryUseReceipt:
+    """回答消费方显式确认实际使用的 L2 与 Summary 身份。"""
+
+    memory_uris: tuple[MemoryURI, ...]
+    summary_references: tuple[ConversationSummaryReference, ...]
+    used_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.memory_uris, tuple) or any(
+            not isinstance(uri, MemoryURI) for uri in self.memory_uris
+        ):
+            raise TypeError("memory_uris must contain MemoryURI values")
+        if not isinstance(self.summary_references, tuple) or any(
+            not isinstance(reference, ConversationSummaryReference)
+            for reference in self.summary_references
+        ):
+            raise TypeError("summary_references must contain ConversationSummaryReference values")
+        if self.used_at.tzinfo is None or self.used_at.utcoffset() is None:
+            raise ValueError("used_at must be timezone-aware")
 
 
 @dataclass(frozen=True)
@@ -201,6 +227,9 @@ class Runtime:
             self.components.infrastructure.initialize()
             memory_root = self.components.memory.tree.initialize()
             self.components.workflow.jobs.initialize()
+            self.components.memory.lifecycle.initialize()
+            self.components.conversation.summary_use.initialize()
+            self.components.workflow.lifecycle.retirement_store.initialize()
             oldest_job = self.components.workflow.jobs.oldest_uncommitted()
             recovered = (
                 self.components.workflow.runner.transaction_recovery.recover_pending()
@@ -626,6 +655,43 @@ class Runtime:
             kinds=kinds,
             intention_scope=intention_scope,
         )
+
+    async def record_memory_use(
+        self,
+        *,
+        memory_uris: tuple[MemoryURI | str, ...] = (),
+        summary_references: tuple[ConversationSummaryReference, ...] = (),
+        used_at: datetime | None = None,
+    ) -> MemoryUseReceipt:
+        """手动兼容入口；标准检索链已按最终模型可见 Context 自动计入，勿重复上报。"""
+
+        self._require_initialized("memory use receipt")
+        if not isinstance(memory_uris, tuple):
+            raise TypeError("memory_uris must be a tuple")
+        parsed_uris = tuple(MemoryURI.parse(uri) for uri in memory_uris)
+        for uri in parsed_uris:
+            uri.to_address()
+        if len(parsed_uris) != len(set(parsed_uris)):
+            raise ValueError("memory_uris must be unique")
+        if not isinstance(summary_references, tuple) or any(
+            not isinstance(reference, ConversationSummaryReference)
+            for reference in summary_references
+        ):
+            raise TypeError("summary_references must contain ConversationSummaryReference values")
+        if len({reference.identity for reference in summary_references}) != len(summary_references):
+            raise ValueError("summary_references must be unique")
+        timestamp = used_at or datetime.now(timezone.utc)
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ValueError("used_at must be timezone-aware")
+        if parsed_uris:
+            await self.components.memory.lifecycle.record_use(parsed_uris, used_at=timestamp)
+        if summary_references:
+            await asyncio.to_thread(
+                self.components.conversation.summary_use.record_use,
+                summary_references,
+                used_at=timestamp,
+            )
+        return MemoryUseReceipt(parsed_uris, summary_references, timestamp)
 
     async def maintain_conversation(
         self,

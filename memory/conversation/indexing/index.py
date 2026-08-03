@@ -28,7 +28,10 @@ from memory.conversation.indexing.model import (
     ConversationSummaryStage,
     ConversationSummaryVectorConsistencyReport,
 )
-from memory.conversation.indexing.source import ConversationSummaryIndexSourceReader
+from memory.conversation.indexing.source import (
+    ConversationSummaryIndexSourceReader,
+    ConversationSummaryRetirementFilter,
+)
 from memory.conversation.layout import ConversationAddress
 from memory.conversation.messages import ConversationMessageJournal
 from ModelClient import Embedder, EmbeddingVector, Reranker
@@ -55,6 +58,7 @@ class PersistentConversationSummaryVectorIndex:
         reranker: Reranker | None = None,
         config: ConversationSummaryVectorIndexConfig | None = None,
         observer: Observer | None = None,
+        retirement_store: ConversationSummaryRetirementFilter | None = None,
     ) -> None:
         if not isinstance(journal, ConversationMessageJournal):
             raise TypeError("journal must be ConversationMessageJournal")
@@ -89,6 +93,7 @@ class PersistentConversationSummaryVectorIndex:
             journal,
             compactor,
             config=resolved_config,
+            retirement_store=retirement_store,
         )
         self._lock = asyncio.Lock()
 
@@ -109,6 +114,7 @@ class PersistentConversationSummaryVectorIndex:
         address: ConversationAddress,
         *,
         checkpoint: int | None = None,
+        removed_references: tuple[ConversationSummaryReference, ...] = (),
     ) -> VectorStoreState:
         """让一个 Conversation 的远程记录精确等于其当前活跃摘要前沿。"""
 
@@ -118,6 +124,12 @@ class PersistentConversationSummaryVectorIndex:
             isinstance(checkpoint, bool) or not isinstance(checkpoint, int) or checkpoint < 0
         ):
             raise ValueError("summary vector checkpoint must be non-negative or None")
+        if not isinstance(removed_references, tuple) or any(
+            not isinstance(item, ConversationSummaryReference) for item in removed_references
+        ):
+            raise TypeError("removed_references must contain ConversationSummaryReference values")
+        if any(item.address != address for item in removed_references):
+            raise ValueError("removed Summary references belong to another Conversation")
         await self.ensure_ready()
         async with self._lock:
             for _ in range(self.config.stale_retries + 1):
@@ -132,6 +144,7 @@ class PersistentConversationSummaryVectorIndex:
                 active_by_id = {source.identity: source for source in active}
                 known_ids = {reference.identity for reference in self.sources.all_references(address)}
                 known_ids.update(active_by_id)
+                known_ids.update(reference.identity for reference in removed_references)
                 existing = {
                     record.identity: record
                     for record in await self.store.read(tuple(sorted(known_ids)))
@@ -139,13 +152,22 @@ class PersistentConversationSummaryVectorIndex:
                 upserts = await self._materialize(active, existing=existing)
                 deletes = tuple(sorted(set(existing) - set(active_by_id)))
                 try:
-                    return await self.store.apply(
+                    published = await self.store.apply(
                         upserts,
                         deletes,
                         checkpoint=selected_checkpoint,
                         expected_generation=state.generation,
                         expected_checkpoint=state.checkpoint,
                     )
+                    if removed_references:
+                        remaining = await self.store.read(
+                            tuple(reference.identity for reference in removed_references)
+                        )
+                        if remaining:
+                            raise ConversationSummaryIndexError(
+                                "retiring Summary vector records failed exact deletion verification"
+                            )
+                    return published
                 except VectorStoreConflictError:
                     continue
             raise ConversationSummaryIndexError(

@@ -11,6 +11,7 @@ import pytest
 
 from infrastructure.store.contracts import PathLock
 from infrastructure.store.locks import ProcessLocalLockStore
+from memory.compaction import MemoryContextUseResult
 from memory.conversation import (
     ConversationAddress,
     ConversationMessageJournal,
@@ -262,7 +263,7 @@ def test_sufficient_memory_is_primary_and_prevents_summary_search(tmp_path: Path
     assert result.context.index("长期记忆") < result.context.index("偏好")
 
 
-def test_find_applies_lifecycle_ranking_without_recording_success(tmp_path: Path) -> None:
+def test_find_records_only_the_final_model_visible_memory_as_success(tmp_path: Path) -> None:
     now = datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
     preference = document(MemoryKind.PREFERENCE, timestamp=now)
     uri = MemoryURI.from_address(preference.address)
@@ -279,10 +280,10 @@ def test_find_applies_lifecycle_ranking_without_recording_success(tmp_path: Path
     assert result.memories[0].hit.lifecycle_hotness == pytest.approx(0.5)
     assert result.memories[0].hit.lifecycle_temperature.value == "warm"
     assert "temperature" not in result.context
-    assert instance.recall_lifecycle.store.read_many((uri,)) == ()
+    assert instance.recall_lifecycle.store.read_many((uri,))[0].useful_recall_count == 1
 
 
-def test_only_sufficient_final_direct_memory_heats_and_l2_document_stays_unchanged(tmp_path: Path) -> None:
+def test_sufficient_grader_result_records_only_retained_direct_memory_and_keeps_l2(tmp_path: Path) -> None:
     now = datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
     first = document(
         MemoryKind.PREFERENCE,
@@ -317,17 +318,17 @@ def test_only_sufficient_final_direct_memory_heats_and_l2_document_stays_unchang
     assert tuple(memory.uri for memory in result.memories) == (first_uri,)
     assert result.memories[0].hit.lifecycle_temperature.value == "warm"
     states = instance.recall_lifecycle.store.read_many((first_uri, second_uri))
-    assert len(states) == 1
-    assert states[0].uri == first_uri
-    assert states[0].successful_recall_count == 1
+    assert tuple((state.uri, state.useful_recall_count) for state in states) == (
+        (first_uri, 1),
+    )
     assert instance.tree.read(first.address) == first
 
     recalled = asyncio.run(instance.find("回答偏好", limit=1))
     assert recalled.memories[0].hit.lifecycle_temperature.value == "hot"
-    assert instance.recall_lifecycle.store.read_many((first_uri,))[0].successful_recall_count == 1
+    assert instance.recall_lifecycle.store.read_many((first_uri,))[0].useful_recall_count == 2
 
 
-def test_sufficient_result_heats_each_final_direct_recalled_memory(tmp_path: Path) -> None:
+def test_final_context_exposure_heats_each_retained_direct_memory(tmp_path: Path) -> None:
     now = datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
     first = document(
         MemoryKind.PREFERENCE,
@@ -363,7 +364,10 @@ def test_sufficient_result_heats_each_final_direct_recalled_memory(tmp_path: Pat
     result = asyncio.run(instance.search("回答应该多长并如何组织", limit=2))
     assert len(result.memories) == 2
     states = instance.recall_lifecycle.store.read_many((first_uri, second_uri))
-    assert tuple(state.uri for state in states) == (first_uri, second_uri)
+    assert tuple((state.uri, state.useful_recall_count) for state in states) == (
+        (first_uri, 1),
+        (second_uri, 1),
+    )
 
 
 def test_hot_low_relevance_memory_cannot_bypass_rerank_admission_or_enter_agent_context(
@@ -427,9 +431,9 @@ def test_hot_low_relevance_memory_cannot_bypass_rerank_admission_or_enter_agent_
         hitchhiker.metadata.created_at,
     )
     for index in range(3):
-        instance.recall_lifecycle.record_success(
+        instance.recall_lifecycle.record_use(
             (hitchhiker_target,),
-            recalled_at=now + timedelta(seconds=index),
+            used_at=now + timedelta(seconds=index),
         )
 
     result = asyncio.run(instance.search("回答应该多长", limit=2))
@@ -437,13 +441,13 @@ def test_hot_low_relevance_memory_cannot_bypass_rerank_admission_or_enter_agent_
     assert tuple(memory.uri for memory in result.memories) == (relevant_uri,)
     assert "偏好深色主题" not in result.context
     states = instance.recall_lifecycle.store.read_many((relevant_uri, hitchhiker_uri))
-    assert tuple((state.uri, state.successful_recall_count) for state in states) == (
+    assert tuple((state.uri, state.useful_recall_count) for state in states) == (
         (relevant_uri, 1),
         (hitchhiker_uri, 3),
     )
 
 
-def test_insufficient_memory_and_summary_fallback_do_not_heat_any_state(tmp_path: Path) -> None:
+def test_insufficient_memory_with_summary_still_records_final_direct_context_use(tmp_path: Path) -> None:
     now = datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
     preference = document(MemoryKind.PREFERENCE, timestamp=now)
     uri = MemoryURI.from_address(preference.address)
@@ -465,7 +469,55 @@ def test_insufficient_memory_and_summary_fallback_do_not_heat_any_state(tmp_path
 
     result = asyncio.run(instance.search("之前怎么决定的"))
     assert result.summary_fallbacks == (summary_match(),)
-    assert instance.recall_lifecycle.store.read_many((uri,)) == ()
+    assert instance.recall_lifecycle.store.read_many((uri,))[0].useful_recall_count == 1
+
+
+def test_rejected_final_context_is_regraded_and_can_trigger_summary_fallback(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
+    preference = document(MemoryKind.PREFERENCE, timestamp=now)
+    uri = MemoryURI.from_address(preference.address)
+    summaries = SummarySearch((summary_match(),))
+    instance = service(
+        tmp_path,
+        semantic=SemanticSearch((MemorySearchHit(uri, 0.9),)),
+        summaries=summaries,
+        responses=[
+            {
+                "decision": "sufficient",
+                "reason": "候选记忆看起来足够。",
+                "missing_information": [],
+                "summary_query": None,
+            },
+            {
+                "decision": "insufficient",
+                "reason": "最终记忆因 revision fence 被拒绝。",
+                "missing_information": ["决定过程"],
+                "summary_query": "决定过程",
+            },
+        ],
+        clock=lambda: now,
+    )
+    instance.tree.write(preference)
+
+    class RejectingContextUse:
+        @staticmethod
+        def expand_for_probe(value):
+            return value
+
+        @staticmethod
+        async def record_context_use(targets, *, used_at):
+            return MemoryContextUseResult((), tuple(target.uri for target in targets))
+
+    instance.cold_probe_expander = RejectingContextUse()
+    result = asyncio.run(instance.search("之前怎么决定的"))
+
+    assert result.memories == ()
+    assert result.retrieval_assessment is not None
+    assert result.retrieval_assessment.decision.value == "insufficient"
+    assert result.summary_fallback_attempted
+    assert result.summary_fallbacks == (summary_match(),)
+    assert summaries.calls == [("之前怎么决定的", instance.config.summary_fallback_limit)]
+    assert tuple(item.stage.value for item in result.degradations) == ("recall_lifecycle",)
 
 
 class FailingRecallStateStore:
@@ -481,10 +533,37 @@ class FailingRecallStateStore:
             raise MemoryRecallLifecycleError("read failed")
         return ()
 
-    def record_success(self, targets, *, recalled_at):
+    def record_use(self, targets, *, used_at):
         if self.fail_write:
             raise MemoryRecallLifecycleError("write failed")
         return ()
+
+    def record_probe(self, targets, *, probed_at):
+        if self.fail_write:
+            raise MemoryRecallLifecycleError("write failed")
+        return ()
+
+    def mark_compacted(
+        self,
+        target,
+        *,
+        lifecycle_activity_at,
+        compacted_at,
+        expected_version,
+    ):
+        if self.fail_write:
+            raise MemoryRecallLifecycleError("write failed")
+        raise AssertionError("not used by SearchService")
+
+    def mark_retire_candidate(self, target, *, marked_at, expected_version):
+        if self.fail_write:
+            raise MemoryRecallLifecycleError("write failed")
+        raise AssertionError("not used by SearchService")
+
+    def mark_retired(self, target, *, retired_at, expected_version):
+        if self.fail_write:
+            raise MemoryRecallLifecycleError("write failed")
+        raise AssertionError("not used by SearchService")
 
     def delete_many(self, uris):
         return 0
@@ -510,7 +589,7 @@ def test_lifecycle_read_failure_keeps_semantic_order_and_marks_degradation(tmp_p
     assert tuple(item.stage.value for item in result.degradations) == ("recall_lifecycle",)
 
 
-def test_lifecycle_write_failure_returns_sufficient_result_with_degradation(tmp_path: Path) -> None:
+def test_actual_use_write_failure_keeps_detailed_memory_and_marks_degradation(tmp_path: Path) -> None:
     now = datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
     preference = document(MemoryKind.PREFERENCE, timestamp=now)
     uri = MemoryURI.from_address(preference.address)

@@ -83,8 +83,23 @@ class DispatchingChatProvider:
         assert request.response_format is not None
         response_name = request.response_format.name
         self.response_names.append(response_name)
+        summary = summary_content()
         payloads = {
-            "conversation_segment_summary_content": summary_content().to_dict(),
+            "conversation_segment_summary_field_operations": {
+                "operations": [
+                    {"field": "overview", "operation": "update", "content": summary.overview},
+                    {
+                        "field": "chronology",
+                        "operation": "append",
+                        "items": list(summary.chronology),
+                    },
+                    {
+                        "field": "ending_state",
+                        "operation": "update",
+                        "content": summary.ending_state,
+                    },
+                ]
+            },
             "memory_retrieval_decision": {
                 "status": "irrelevant",
                 "action": "finish",
@@ -291,7 +306,7 @@ def test_full_job_chain_commits_summary_receipt_indexes_and_job_before_cleaning_
     assert isinstance(memory_state, VectorStoreState) and memory_state.checkpoint == 1
     assert isinstance(summary_state, VectorStoreState) and summary_state.checkpoint == 1
     assert set(chats[0].response_names) == {
-        "conversation_segment_summary_content",
+        "conversation_segment_summary_field_operations",
         "memory_retrieval_decision",
         "memory_candidate_batch",
     }
@@ -361,7 +376,7 @@ def test_committed_l2_job_resumes_after_vector_timeout_without_replanning(
     assert asyncio.run(runtime.failed_memory_job()) is None
 
 
-def test_lifecycle_releases_history_then_purges_source_but_preserves_summary_semantics(
+def test_lifecycle_keeps_history_and_summary_sources_until_terminal_archive_retirement(
     tmp_path: Path,
 ) -> None:
     config = runtime_config(tmp_path)
@@ -387,19 +402,19 @@ def test_lifecycle_releases_history_then_purges_source_but_preserves_summary_sem
 
     released = asyncio.run(runtime.maintain_conversation(address, now=maintenance_time))
 
-    assert released.released_history_segment_ids == (queued.segment_id,)
+    assert released.released_history_segment_ids == ()
     assert released.purged_history_segment_ids == ()
-    assert released.deleted_memory_job_sequences == (queued.memory_sequence,)
-    assert released.deleted_memory_receipt_ids == (source.receipt_id,)
+    assert released.deleted_memory_job_sequences == ()
+    assert released.deleted_memory_receipt_ids == ()
     assert (
         runtime.components.workflow.jobs.try_read_source(
             address,
             queued.segment_id,
             queued.source_segment_digest,
         )
-        is None
+        is not None
     )
-    assert runtime.components.workflow.receipts.try_read(source) is None
+    assert runtime.components.workflow.receipts.try_read(source) is not None
     assert (
         runtime.components.conversation.summaries.store.try_read_by_id(
             address,
@@ -411,7 +426,7 @@ def test_lifecycle_releases_history_then_purges_source_but_preserves_summary_sem
         address,
         queued.segment_id,
     )
-    assert not history_path.exists()
+    assert history_path.exists()
 
     purged = asyncio.run(runtime.maintain_conversation(address, now=maintenance_time))
 

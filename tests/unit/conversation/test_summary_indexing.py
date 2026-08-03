@@ -97,6 +97,14 @@ class VectorStore:
         return None
 
 
+class RetirementFilter:
+    def __init__(self) -> None:
+        self.hidden_identities = set()
+
+    def hidden(self, reference) -> bool:
+        return reference.identity in self.hidden_identities
+
+
 def source_chain(tmp_path: Path):
     path_lock = PathLock(ProcessLocalLockStore())
     journal = ConversationMessageJournal(tmp_path / "conversation", path_lock)
@@ -164,6 +172,33 @@ def test_summary_index_rebuilds_active_frontier_and_rejects_stale_remote_hit(tmp
     segment_store.delete_by_id(address, source.segment_id)
     with pytest.raises(ConversationSummaryIndexError, match="no longer part"):
         asyncio.run(index.search("之前如何决定", limit=1))
+
+
+def test_summary_synchronize_exactly_deletes_manifest_hidden_identity(tmp_path: Path) -> None:
+    address, source, segment_store, compactor = source_chain(tmp_path)
+    store = VectorStore()
+    retirements = RetirementFilter()
+    index = PersistentConversationSummaryVectorIndex(
+        compactor.journal,
+        compactor,
+        Embedder(),
+        store,
+        dimension=2,
+        embedding_fingerprint="summary-v1",
+        config=ConversationSummaryVectorIndexConfig(min_vector_candidates=1),
+        retirement_store=retirements,
+    )
+    reference = summary_reference(address, segment_store.read(address, source))
+    asyncio.run(index.ensure_ready())
+    assert tuple(store.records) == (reference.identity,)
+
+    retirements.hidden_identities.add(reference.identity)
+    state = asyncio.run(
+        index.synchronize(address, removed_references=(reference,))
+    )
+
+    assert state.record_count == 0
+    assert store.records == {}
 
 
 def test_summary_consistency_audit_is_read_only_and_reports_stale_record(tmp_path: Path) -> None:

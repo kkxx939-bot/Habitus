@@ -208,7 +208,9 @@ conversation:
         min_source_count: 2
         max_source_count: 24
         max_source_chars: 500000
-      superseded_source_retention_days: 30
+      recent_use_protection_days: 90
+      archive_retire_days: 1095
+      archive_retire_grace_days: 90
       cleanup_batch_size: 100
 
 memory:
@@ -261,7 +263,8 @@ memory:
   recall_lifecycle:
     enabled: true
     ranking_alpha: 0.2
-    cold_threshold: 0.2
+    cold2_threshold: 0.08
+    cold1_threshold: 0.2
     hot_threshold: 0.6
     profile_half_life_days: 180.0
     preference_half_life_days: 90.0
@@ -269,9 +272,29 @@ memory:
     tool_half_life_days: 30.0
     event_half_life_days: 14.0
     intention_half_life_days: 30.0
+    profile_retire_days: 720.0
+    preference_retire_days: 365.0
+    entity_retire_days: 270.0
+    tool_retire_days: 180.0
+    event_retire_days: 180.0
+    intention_retire_days: 540.0
+    retire_candidate_grace_days: 30.0
+    cold2_probe_interval_days: 30.0
+    cold2_probe_limit: 2
+    max_cold2_probes_per_search: 1
     sqlite_timeout_seconds: 5.0
     max_batch_size: 1000
-    max_successful_recall_count: 1000000000
+    max_useful_recall_count: 1000000000
+
+  field_compaction:
+    max_input_chars: 2000000
+    max_output_tokens: 4096
+    max_field_chars: 1000000
+
+  lifecycle_maintenance:
+    max_scan_items: 256
+    max_compactions_per_cycle: 4
+    max_retirements_per_cycle: 4
 
   retrieval:
     max_query_chars: 5000

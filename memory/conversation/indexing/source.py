@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Protocol
 
 from memory.conversation.compaction import ConversationSummaryCompactor
 from memory.conversation.indexing.config import ConversationSummaryVectorIndexConfig
@@ -17,6 +18,10 @@ from memory.conversation.messages import ConversationMessageJournal
 from pre.conversation import ConversationRangeSummaryStage
 
 
+class ConversationSummaryRetirementFilter(Protocol):
+    def hidden(self, reference: ConversationSummaryReference) -> bool: ...
+
+
 class ConversationSummaryIndexSourceReader:
     """只读取 Summary 真相源，不生成向量或修改生命周期。"""
 
@@ -26,6 +31,7 @@ class ConversationSummaryIndexSourceReader:
         compactor: ConversationSummaryCompactor,
         *,
         config: ConversationSummaryVectorIndexConfig,
+        retirement_store: ConversationSummaryRetirementFilter | None = None,
     ) -> None:
         if not isinstance(journal, ConversationMessageJournal):
             raise TypeError("journal must be ConversationMessageJournal")
@@ -38,6 +44,9 @@ class ConversationSummaryIndexSourceReader:
         self.journal = journal
         self.compactor = compactor
         self.config = config
+        if retirement_store is not None and not callable(getattr(retirement_store, "hidden", None)):
+            raise TypeError("retirement_store must implement hidden(reference)")
+        self.retirement_store = retirement_store
 
     def active(self, address: ConversationAddress) -> tuple[ConversationSummaryIndexSource, ...]:
         """读取单个 Conversation 当前不重叠的唯一活跃摘要前沿。"""
@@ -47,7 +56,12 @@ class ConversationSummaryIndexSourceReader:
         summaries = self.compactor.frontier(address).active
         if len(summaries) > self.config.max_records_per_conversation:
             raise ValueError("active Conversation Summary frontier exceeds its index bound")
-        return tuple(self._source(address, summary) for summary in summaries)
+        return tuple(
+            self._source(address, summary)
+            for summary in summaries
+            if self.retirement_store is None
+            or not self.retirement_store.hidden(summary_reference(address, summary))
+        )
 
     def all_references(self, address: ConversationAddress) -> tuple[ConversationSummaryReference, ...]:
         """枚举仍在物理保存的全部摘要身份，供活跃前沿切换时删除旧记录。"""

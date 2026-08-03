@@ -454,31 +454,47 @@ class MemoryTree:
         kind: MemoryKind | None = None,
         *,
         limit: int = 256,
+        after: MemoryAddress | None = None,
     ) -> tuple[MemoryAddress, ...]:
-        """按固定类型顺序和路径字典序有界枚举记忆地址。"""
+        """按固定类型顺序和路径字典序，从可选游标之后有界枚举。"""
 
-        return self._read_visible(lambda: self._list_addresses_physical(kind, limit=limit))
+        return self._read_visible(
+            lambda: self._list_addresses_physical(kind, limit=limit, after=after)
+        )
 
     def _list_addresses_physical(
         self,
         kind: MemoryKind | None,
         *,
         limit: int,
+        after: MemoryAddress | None,
     ) -> tuple[MemoryAddress, ...]:
 
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > 10_000:
             raise ValueError("memory tree list limit must be between 1 and 10000")
+        if after is not None and not isinstance(after, MemoryAddress):
+            raise TypeError("memory tree list cursor must be MemoryAddress or None")
+        selected_kind = None if kind is None else MemoryKind(kind)
+        if after is not None and selected_kind is not None and after.kind is not selected_kind:
+            raise ValueError("memory tree list cursor kind does not match the selected kind")
+        after_key = None if after is None else self._address_order_key(after)
         maximum = limit
         if not self._directory_exists_physical(MemoryDirectory.root()):
             return ()
-        kinds = (MemoryKind(kind),) if kind is not None else tuple(MemoryKind)
+        kinds = (selected_kind,) if selected_kind is not None else tuple(MemoryKind)
         result: list[MemoryAddress] = []
         for selected in kinds:
             for address in self._iter_kind(selected):
+                if after_key is not None and self._address_order_key(address) <= after_key:
+                    continue
                 result.append(address)
                 if len(result) >= maximum:
                     return tuple(result)
         return tuple(result)
+
+    @classmethod
+    def _address_order_key(cls, address: MemoryAddress) -> tuple[int, str]:
+        return tuple(MemoryKind).index(address.kind), cls._relative_path(address).as_posix()
 
     @staticmethod
     def _relative_path(address: MemoryAddress) -> Path:

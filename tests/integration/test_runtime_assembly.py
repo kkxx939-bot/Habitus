@@ -374,8 +374,11 @@ def test_initialize_is_idempotent_and_creates_only_local_durable_roots(tmp_path:
     assert config.workflow_root.is_dir()
     recall_store = runtime.components.memory.search.recall_lifecycle.store
     assert isinstance(recall_store, SQLiteMemoryRecallLifecycleStore)
-    assert not recall_store.initialized
-    assert not recall_store.path.exists()
+    assert recall_store.initialized
+    assert runtime.components.conversation.summary_use.initialized
+    assert runtime.components.memory.lifecycle.operation_store.pending() == ()
+    assert recall_store.path.exists()
+    assert runtime.components.conversation.summary_use.path.exists()
     assert not config.conversation_root.exists()
 
 

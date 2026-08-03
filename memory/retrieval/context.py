@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from foundation.integrity import canonical_json
 from memory.conversation import (
@@ -10,6 +11,7 @@ from memory.conversation import (
     ConversationMessageJournal,
     ConversationSummaryCompactor,
 )
+from memory.conversation.indexing import ConversationSummaryReference, summary_reference
 from memory.retrieval.model import MemorySearchError, MemorySearchServiceConfig
 from pre.conversation import ConversationMessage
 
@@ -37,6 +39,10 @@ class ConversationSearchContext:
         return not self.summary_context and not self.recent_messages
 
 
+class ConversationSummaryServingFilter(Protocol):
+    def hidden(self, reference: ConversationSummaryReference) -> bool: ...
+
+
 class ConversationSearchContextReader:
     """按照当前不可变摘要前沿和 live 尾部构造有界查询规划上下文。"""
 
@@ -46,6 +52,7 @@ class ConversationSearchContextReader:
         compactor: ConversationSummaryCompactor,
         *,
         config: MemorySearchServiceConfig | None = None,
+        retirement_filter: ConversationSummaryServingFilter | None = None,
     ) -> None:
         if not isinstance(journal, ConversationMessageJournal):
             raise TypeError("journal must be ConversationMessageJournal")
@@ -55,9 +62,12 @@ class ConversationSearchContextReader:
             raise ValueError("search context reader must share the Conversation journal")
         if config is not None and not isinstance(config, MemorySearchServiceConfig):
             raise TypeError("config must be MemorySearchServiceConfig")
+        if retirement_filter is not None and not callable(getattr(retirement_filter, "hidden", None)):
+            raise TypeError("retirement_filter must implement hidden(reference)")
         self.journal = journal
         self.compactor = compactor
         self.config = config or MemorySearchServiceConfig()
+        self.retirement_filter = retirement_filter
 
     def read(self, address: ConversationAddress) -> ConversationSearchContext:
         """读取当前活跃摘要和 live 尾部；损坏数据不得伪装成空上下文。"""
@@ -69,7 +79,13 @@ class ConversationSearchContextReader:
             live = self.journal.read_live(address)
         except Exception as exc:
             raise MemorySearchError("failed to read Conversation context for memory search") from exc
-        summary_context = self._summary_context(frontier.active)
+        active = tuple(
+            summary
+            for summary in frontier.active
+            if self.retirement_filter is None
+            or not self.retirement_filter.hidden(summary_reference(address, summary))
+        )
+        summary_context = self._summary_context(active)
         recent_messages = () if live is None else live.messages[-self.config.max_recent_messages :]
         return ConversationSearchContext(
             conversation_id=address.conversation_id,
@@ -131,5 +147,6 @@ def _truncate(value: str, maximum: int) -> str:
 __all__ = [
     "ConversationSearchContext",
     "ConversationSearchContextReader",
+    "ConversationSummaryServingFilter",
     "render_recent_messages",
 ]

@@ -17,6 +17,8 @@ from infrastructure.store.filesystem import (
     durable_unlink,
     read_regular_bytes,
 )
+from memory.compaction.field_ops import SemanticFieldOperationBatch
+from memory.conversation.field_validation import summary_content_from_operations
 from memory.conversation.layout import ConversationAddress, ConversationLayout
 from ModelClient import (
     ChatCallContext,
@@ -27,7 +29,6 @@ from ModelClient import (
 from pre.conversation import (
     ConversationSegment,
     ConversationSegmentSummary,
-    ConversationSummaryContent,
     ConversationSummarySchemaError,
 )
 
@@ -278,7 +279,9 @@ class ConversationSummaryGenerator:
                             "corrections 只列明确纠正；ending_state 描述结束时已经确定的状态；open_threads"
                             "只列结束时仍未解决或待继续讨论的事项。若系统声明片段从轮次中间开始或在轮次"
                             "中间结束，必须把它视为相邻 Segment 的连续部分，不得把局部开头解释为新问题，"
-                            "也不得把局部结尾解释为整轮已经完成。"
+                            "也不得把局部结尾解释为整轮已经完成。只输出字段操作：overview 与 ending_state"
+                            "使用 UPDATE；chronology、corrections 与 open_threads 使用 APPEND；确实没有内容"
+                            "的可选字段使用 KEEP 或省略。不得输出未知字段。"
                         ),
                     ),
                     ChatMessage(
@@ -294,12 +297,15 @@ class ConversationSummaryGenerator:
                 temperature=0.0,
                 max_output_tokens=self.config.max_output_tokens,
             ),
-            model_class=ConversationSummaryContent,
-            name="conversation_segment_summary_content",
-            context=ChatCallContext(prompt_version="conversation_segment_summary_v2"),
+            model_class=SemanticFieldOperationBatch,
+            name="conversation_segment_summary_field_operations",
+            context=ChatCallContext(prompt_version="conversation_segment_summary_v3"),
         )
         generated_at = self._timestamp()
-        content = response.value
+        try:
+            content = summary_content_from_operations(response.value)
+        except (TypeError, ValueError) as exc:
+            raise ConversationSummaryError("conversation Summary field operations are invalid") from exc
         return ConversationSegmentSummary(
             conversation_id=segment.conversation_id,
             segment_id=segment.segment_id,

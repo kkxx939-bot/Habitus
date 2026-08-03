@@ -56,6 +56,27 @@ class ConversationSummaryReference:
     def conversation_scope(self) -> str:
         return f"conversation-summary-scope:{self.address.started_on.isoformat()}:{self.address.conversation_id}"
 
+    @classmethod
+    def parse(cls, value: str) -> ConversationSummaryReference:
+        if not isinstance(value, str) or not value.startswith("conversation-summary:"):
+            raise ValueError("summary reference identity is invalid")
+        payload = value.removeprefix("conversation-summary:")
+        if len(payload) < 12 or payload[10] != ":":
+            raise ValueError("summary reference identity lacks its date")
+        try:
+            started_on = datetime.fromisoformat(payload[:10]).date()
+            conversation_id, stage, summary_id = payload[11:].rsplit(":", 2)
+            reference = cls(
+                ConversationAddress(conversation_id, started_on),
+                ConversationSummaryStage(stage),
+                summary_id,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("summary reference identity is invalid") from exc
+        if reference.identity != value:
+            raise ValueError("summary reference identity is not canonical")
+        return reference
+
 
 @dataclass(frozen=True)
 class ConversationSummaryIndexSource:

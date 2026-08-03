@@ -410,7 +410,9 @@ def test_successful_search_heats_direct_memory_but_not_relation_neighbor(tmp_pat
     result = asyncio.run(instance.search("身份"))
     assert result.memories[0].related[0].document == neighbors[0]
     states = instance.recall_lifecycle.store.read_many((seed_uri, neighbor_uri))
-    assert tuple(state.uri for state in states) == (seed_uri,)
+    assert tuple((state.uri, state.useful_recall_count) for state in states) == (
+        (seed_uri, 1),
+    )
 
 
 def test_relation_neighbor_outside_target_root_is_not_loaded(tmp_path: Path) -> None:

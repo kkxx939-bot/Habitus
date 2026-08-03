@@ -127,6 +127,11 @@ class ConversationConfig:
                 raise ValueError("summary compaction source chars cannot exceed summary max_input_chars")
             if stage.max_source_count > self.summary.max_files_per_conversation:
                 raise ValueError("summary compaction source count cannot exceed summary file enumeration bound")
+        expansion_reads = self.lifecycle.summary_compaction.range_to_archive.max_source_count * (
+            1 + self.lifecycle.summary_compaction.segment_to_range.max_source_count
+        )
+        if expansion_reads > 100_000:
+            raise ValueError("summary compaction fanout exceeds the bounded fallback expansion limit")
 
     @classmethod
     def from_mapping(cls, value: object) -> ConversationConfig:
@@ -193,12 +198,20 @@ def _summary_compaction_config(value: object) -> ConversationSummaryCompactionCo
                 data.get("range_to_archive", {}),
                 f"{path}.range_to_archive",
             ),
-            superseded_source_retention_days=_integer_value(
+            recent_use_protection_days=_integer_value(
                 data.get(
-                    "superseded_source_retention_days",
-                    defaults.superseded_source_retention_days,
+                    "recent_use_protection_days",
+                    defaults.recent_use_protection_days,
                 ),
-                f"{path}.superseded_source_retention_days",
+                f"{path}.recent_use_protection_days",
+            ),
+            archive_retire_days=_integer_value(
+                data.get("archive_retire_days", defaults.archive_retire_days),
+                f"{path}.archive_retire_days",
+            ),
+            archive_retire_grace_days=_integer_value(
+                data.get("archive_retire_grace_days", defaults.archive_retire_grace_days),
+                f"{path}.archive_retire_grace_days",
             ),
             cleanup_batch_size=_integer_value(
                 data.get("cleanup_batch_size", defaults.cleanup_batch_size),

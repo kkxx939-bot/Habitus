@@ -76,6 +76,40 @@ class ConversationSummarySemanticSearch(Protocol):
     ) -> Sequence[ConversationSummaryMatch]: ...
 
 
+class MemoryColdProbeExpander(Protocol):
+    """展开活动基线，并在最终 Context 前完成 L2 恢复与使用确认。"""
+
+    def expand_for_probe(self, document: MemoryDocument) -> MemoryDocument: ...
+
+    async def record_context_use(
+        self,
+        targets: tuple[MemoryRecallTarget, ...],
+        *,
+        used_at: datetime | None = None,
+    ) -> MemoryContextUseReceipt: ...
+
+
+class MemoryContextUseReceipt(Protocol):
+    @property
+    def documents(self) -> tuple[MemoryDocument, ...]: ...
+
+    @property
+    def rejected_uris(self) -> tuple[MemoryURI, ...]: ...
+
+
+class ConversationSummaryFallbackExpander(Protocol):
+    def expand(
+        self,
+        match: ConversationSummaryMatch,
+        *,
+        max_chars: int,
+    ) -> ConversationSummaryMatch: ...
+
+
+class ConversationSummaryUseRecorder(Protocol):
+    def record_use(self, references: tuple, *, used_at: datetime) -> tuple: ...
+
+
 class SearchService:
     """参考 OpenViking 的 find/search 分层，返回完整且可溯源的 L2 记忆上下文。"""
 
@@ -93,6 +127,9 @@ class SearchService:
         assembler: MemoryContextAssembler | None = None,
         config: MemorySearchServiceConfig | None = None,
         intention_reviewer: MemoryIntentionReviewer | None = None,
+        cold_probe_expander: MemoryColdProbeExpander | None = None,
+        summary_fallback_expander: ConversationSummaryFallbackExpander | None = None,
+        summary_use_recorder: ConversationSummaryUseRecorder | None = None,
         clock: Callable[[], datetime] | None = None,
         observer: Observer | None = None,
     ) -> None:
@@ -123,6 +160,22 @@ class SearchService:
             raise TypeError("intention_reviewer must be MemoryIntentionReviewer")
         if clock is not None and not callable(clock):
             raise TypeError("clock must be callable")
+        if cold_probe_expander is not None and not callable(
+            getattr(cold_probe_expander, "expand_for_probe", None)
+        ):
+            raise TypeError("cold_probe_expander must implement expand_for_probe")
+        if cold_probe_expander is not None and not callable(
+            getattr(cold_probe_expander, "record_context_use", None)
+        ):
+            raise TypeError("cold_probe_expander must implement record_context_use")
+        if summary_fallback_expander is not None and not callable(
+            getattr(summary_fallback_expander, "expand", None)
+        ):
+            raise TypeError("summary_fallback_expander must implement expand")
+        if summary_use_recorder is not None and not callable(
+            getattr(summary_use_recorder, "record_use", None)
+        ):
+            raise TypeError("summary_use_recorder must implement record_use")
         resolved_config = config or MemorySearchServiceConfig()
         resolved_assembler = assembler or MemoryContextAssembler(config=resolved_config)
         if not isinstance(resolved_assembler, MemoryContextAssembler):
@@ -146,6 +199,9 @@ class SearchService:
         self.assembler = resolved_assembler
         self.config = resolved_config
         self.intention_reviewer = intention_reviewer or MemoryIntentionReviewer()
+        self.cold_probe_expander = cold_probe_expander
+        self.summary_fallback_expander = summary_fallback_expander
+        self.summary_use_recorder = summary_use_recorder
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.observer = observer or NullObserver()
 
@@ -279,8 +335,9 @@ class SearchService:
         try:
             direct = self._rank_recall_lifecycle(
                 direct_candidates,
+                limit=limit,
                 now=review_now,
-            )[:limit]
+            )
         except MemoryRecallLifecycleError as exc:
             direct = direct_candidates[:limit]
             self._append_degradation(
@@ -288,8 +345,17 @@ class SearchService:
                 MemorySearchDegradationStage.RECALL_LIFECYCLE,
                 exc,
             )
+        direct_targets = {
+            memory.uri: MemoryRecallTarget(
+                memory.uri,
+                memory.document.metadata.revision,
+                memory.document.metadata.created_at,
+            )
+            for memory in direct
+        }
+        budgeted_direct = self._expand_cold_for_budget(direct)
         expanded = self._expand_relations(
-            direct,
+            budgeted_direct,
             roots=roots,
             intention_scope=intention_scope,
             review_now=review_now,
@@ -333,29 +399,54 @@ class SearchService:
                         expanded,
                         summary_fallbacks=summaries,
                     )
-        if (
-            assessment is not None
-            and assessment.decision is MemoryRetrievalSufficiency.SUFFICIENT
-            and assembly.memories
-        ):
+        pre_ack_uris = {memory.uri for memory in assembly.memories}
+        assembly = await self._acknowledge_final_context(
+            assembly,
+            targets=direct_targets,
+            used_at=review_now,
+            degradations=applied_degradations,
+        )
+        post_ack_uris = {memory.uri for memory in assembly.memories}
+        if assess_for_summary and not summary_fallback_attempted and post_ack_uris != pre_ack_uris:
             try:
-                self.recall_lifecycle.record_success(
-                    tuple(
-                        MemoryRecallTarget(
-                            memory.uri,
-                            memory.document.metadata.revision,
-                            memory.document.metadata.created_at,
-                        )
-                        for memory in assembly.memories
-                    ),
-                    recalled_at=review_now,
+                assessment = await self.retrieval_grader.assess(
+                    plan,
+                    assembly.memories,
+                    assembly.context,
                 )
-            except MemoryRecallLifecycleError as exc:
+            except Exception as exc:
+                assessment = None
                 self._append_degradation(
                     applied_degradations,
-                    MemorySearchDegradationStage.RECALL_LIFECYCLE,
+                    MemorySearchDegradationStage.RETRIEVAL_GRADER,
                     exc,
                 )
+            if (
+                self.config.summary_fallback_enabled
+                and assessment is not None
+                and assessment.decision is MemoryRetrievalSufficiency.INSUFFICIENT
+                and not assembly.budget_exhausted
+            ):
+                assert assessment.summary_query is not None
+                summary_fallback_attempted = True
+                try:
+                    summaries = await self._search_summaries(assessment.summary_query)
+                except Exception as exc:
+                    self._append_degradation(
+                        applied_degradations,
+                        MemorySearchDegradationStage.SUMMARY_FALLBACK,
+                        exc,
+                    )
+                else:
+                    assembly = self.assembler.assemble(
+                        assembly.memories,
+                        summary_fallbacks=summaries,
+                    )
+        assembly = await self._acknowledge_final_summaries(
+            assembly,
+            used_at=review_now,
+            degradations=applied_degradations,
+        )
         result = MemorySearchResult(
             query=plan.original_query,
             target_roots=roots,
@@ -394,9 +485,14 @@ class SearchService:
                         and memory.hit.lifecycle_temperature.value == "warm"
                         for memory in result.memories
                     ),
-                    "cold_memories": sum(
+                    "cold1_memories": sum(
                         memory.hit.lifecycle_temperature is not None
-                        and memory.hit.lifecycle_temperature.value == "cold"
+                        and memory.hit.lifecycle_temperature.value == "cold_1"
+                        for memory in result.memories
+                    ),
+                    "cold2_memories": sum(
+                        memory.hit.lifecycle_temperature is not None
+                        and memory.hit.lifecycle_temperature.value == "cold_2"
                         for memory in result.memories
                     ),
                 },
@@ -429,7 +525,15 @@ class SearchService:
         )
         if values != expected or len({item.reference.identity for item in values}) != len(values):
             raise MemorySearchError("Summary fallback matches must be unique and relevance-sorted")
-        return values
+        if self.summary_fallback_expander is None:
+            return values
+        expanded: list[ConversationSummaryMatch] = []
+        remaining = self.config.summary_fallback_max_context_chars
+        for item in values:
+            value = self.summary_fallback_expander.expand(item, max_chars=max(1, remaining))
+            expanded.append(value)
+            remaining = max(0, remaining - len(value.content))
+        return tuple(expanded)
 
     async def _execute_query(
         self,
@@ -539,11 +643,12 @@ class SearchService:
         self,
         memories: tuple[MemoryMatchedMemory, ...],
         *,
+        limit: int,
         now: datetime,
     ) -> tuple[MemoryMatchedMemory, ...]:
         if not memories:
             return ()
-        rankings = self.recall_lifecycle.rank(
+        rankings = self.recall_lifecycle.select(
             tuple(
                 MemoryRecallCandidate(
                     target=MemoryRecallTarget(
@@ -557,6 +662,7 @@ class SearchService:
                 )
                 for memory in memories
             ),
+            limit=limit,
             now=now,
         )
         by_uri = {memory.uri: memory for memory in memories}
@@ -574,6 +680,134 @@ class SearchService:
                 )
             ranked.append(replace(memory, hit=hit))
         return tuple(ranked)
+
+    def _expand_cold_for_budget(
+        self,
+        memories: tuple[MemoryMatchedMemory, ...],
+    ) -> tuple[MemoryMatchedMemory, ...]:
+        if self.cold_probe_expander is None:
+            return memories
+        expanded: list[MemoryMatchedMemory] = []
+        for memory in memories:
+            document = memory.document
+            if (
+                memory.hit.lifecycle_temperature is not None
+                and memory.hit.lifecycle_temperature.value == "cold_2"
+            ):
+                document = self.cold_probe_expander.expand_for_probe(document)
+            expanded.append(replace(memory, document=document))
+        return tuple(expanded)
+
+    async def _acknowledge_final_context(
+        self,
+        assembly,
+        *,
+        targets: dict[MemoryURI, MemoryRecallTarget],
+        used_at: datetime,
+        degradations: list[MemorySearchDegradation],
+    ):
+        """只让最终模型可见的主记忆升温；失败或过期目标从 Context 中剔除。"""
+
+        retained_targets = tuple(
+            targets[memory.uri]
+            for memory in assembly.memories
+            if memory.uri in targets
+        )
+        if not retained_targets:
+            return assembly
+        if self.cold_probe_expander is None:
+            cold = {
+                memory.uri
+                for memory in assembly.memories
+                if memory.hit.lifecycle_temperature is not None
+                and memory.hit.lifecycle_temperature.value == "cold_2"
+            }
+            safe_targets = tuple(target for target in retained_targets if target.uri not in cold)
+            try:
+                self.recall_lifecycle.record_use(safe_targets, used_at=used_at)
+            except MemoryRecallLifecycleError as exc:
+                self._append_degradation(
+                    degradations,
+                    MemorySearchDegradationStage.RECALL_LIFECYCLE,
+                    exc,
+                )
+                # 普通详细 L2 仍可安全返回；只把无法同步恢复的 COLD_2 排除。
+            accepted = {target.uri for target in safe_targets}
+            if accepted != {target.uri for target in retained_targets}:
+                self._append_degradation(
+                    degradations,
+                    MemorySearchDegradationStage.RECALL_LIFECYCLE,
+                    MemoryRecallLifecycleError("COLD_2 final Context requires synchronous L2 restore"),
+                )
+            safe_memories = tuple(memory for memory in assembly.memories if memory.uri in accepted)
+            return self.assembler.assemble(
+                safe_memories,
+                summary_fallbacks=assembly.summary_fallbacks,
+            )
+        try:
+            receipt = await self.cold_probe_expander.record_context_use(
+                retained_targets,
+                used_at=used_at,
+            )
+            documents = tuple(receipt.documents)
+            rejected = set(receipt.rejected_uris)
+        except Exception as exc:
+            self._append_degradation(
+                degradations,
+                MemorySearchDegradationStage.RECALL_LIFECYCLE,
+                exc,
+            )
+            return self.assembler.assemble((), summary_fallbacks=assembly.summary_fallbacks)
+        if rejected:
+            self._append_degradation(
+                degradations,
+                MemorySearchDegradationStage.RECALL_LIFECYCLE,
+                MemoryRecallLifecycleError("one or more final Context memories lost their lifecycle fence"),
+            )
+        by_uri = {MemoryURI.from_address(document.address): document for document in documents}
+        retained: list[MemoryMatchedMemory] = []
+        for memory in assembly.memories:
+            if memory.uri in rejected:
+                continue
+            document = by_uri.get(memory.uri)
+            if document is None:
+                continue
+            retained.append(replace(memory, document=document))
+        return self.assembler.assemble(
+            tuple(retained),
+            summary_fallbacks=assembly.summary_fallbacks,
+        )
+
+    async def _acknowledge_final_summaries(
+        self,
+        assembly,
+        *,
+        used_at: datetime,
+        degradations: list[MemorySearchDegradation],
+    ):
+        if self.summary_use_recorder is None or not assembly.summary_fallbacks:
+            return assembly
+        retained: list[ConversationSummaryMatch] = []
+        for summary in assembly.summary_fallbacks:
+            try:
+                states = await asyncio.to_thread(
+                    self.summary_use_recorder.record_use,
+                    (summary.reference,),
+                    used_at=used_at,
+                )
+            except Exception as exc:
+                self._append_degradation(
+                    degradations,
+                    MemorySearchDegradationStage.SUMMARY_FALLBACK,
+                    exc,
+                )
+                continue
+            if states:
+                retained.append(summary)
+        return self.assembler.assemble(
+            assembly.memories,
+            summary_fallbacks=tuple(retained),
+        )
 
     @staticmethod
     def _append_degradation(

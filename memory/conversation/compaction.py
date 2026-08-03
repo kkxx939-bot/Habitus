@@ -9,6 +9,7 @@ from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Protocol
 
 from foundation.ids import canonical_path_identity, same_path_identity
 from foundation.integrity import canonical_json
@@ -19,6 +20,8 @@ from infrastructure.store.filesystem import (
     durable_unlink,
     read_regular_bytes,
 )
+from memory.compaction.field_ops import SemanticFieldOperationBatch
+from memory.conversation.field_validation import summary_content_from_operations
 from memory.conversation.layout import ConversationAddress, ConversationLayout
 from memory.conversation.messages import ConversationMessageJournal
 from memory.conversation.summary import (
@@ -30,13 +33,59 @@ from pre.conversation import (
     ConversationRangeSummary,
     ConversationRangeSummaryStage,
     ConversationSegmentSummary,
-    ConversationSummaryContent,
     ConversationSummarySchemaError,
     ConversationSummarySourceKind,
     ConversationSummarySourceRef,
 )
 
 SummarySource = ConversationSegmentSummary | ConversationRangeSummary
+
+if TYPE_CHECKING:
+    from memory.conversation.access import ConversationSummaryUseState
+    from memory.conversation.indexing.model import ConversationSummaryReference
+
+
+class ConversationSummaryUseReader(Protocol):
+    """压缩规划只读取近期实际使用保护，不依赖状态存储实现。"""
+
+    def recently_used_summary(
+        self,
+        address: ConversationAddress,
+        summary: SummarySource,
+        *,
+        now: datetime,
+        protection_days: int,
+    ) -> bool: ...
+
+    def read_many(
+        self,
+        references: tuple[ConversationSummaryReference, ...],
+    ) -> tuple[ConversationSummaryUseState, ...]: ...
+
+    def mark_retire_candidate(
+        self,
+        reference: ConversationSummaryReference,
+        *,
+        marked_at: datetime,
+    ) -> ConversationSummaryUseState: ...
+
+    def claim_retirement(
+        self,
+        reference: ConversationSummaryReference,
+        *,
+        expected_version: int,
+        claimed_at: datetime,
+    ) -> ConversationSummaryUseState: ...
+
+    def delete_many(self, references: tuple[ConversationSummaryReference, ...]) -> int: ...
+
+    def delete_coverage(
+        self,
+        address: ConversationAddress,
+        *,
+        start_sequence: int,
+        end_sequence: int,
+    ) -> int: ...
 
 
 class ConversationSummaryCompactionError(RuntimeError):
@@ -94,7 +143,9 @@ class ConversationSummaryCompactionConfig:
     range_to_archive: ConversationRangeSummaryCompactionConfig = field(
         default_factory=ConversationRangeSummaryCompactionConfig
     )
-    superseded_source_retention_days: int = 30
+    recent_use_protection_days: int = 90
+    archive_retire_days: int = 1_095
+    archive_retire_grace_days: int = 90
     cleanup_batch_size: int = 100
 
     def __post_init__(self) -> None:
@@ -106,11 +157,13 @@ class ConversationSummaryCompactionConfig:
             raise TypeError("range_to_archive must be ConversationRangeSummaryCompactionConfig")
         for name, value, minimum, maximum in (
             (
-                "superseded_source_retention_days",
-                self.superseded_source_retention_days,
-                0,
-                3_650,
+                "recent_use_protection_days",
+                self.recent_use_protection_days,
+                1,
+                36_500,
             ),
+            ("archive_retire_days", self.archive_retire_days, 1, 36_500),
+            ("archive_retire_grace_days", self.archive_retire_grace_days, 1, 3_650),
             ("cleanup_batch_size", self.cleanup_batch_size, 1, 10_000),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
@@ -372,6 +425,7 @@ class ConversationSummaryCompactionPlanner:
         stage: ConversationRangeSummaryStage,
         *,
         now: datetime,
+        protected_source_ids: frozenset[str] = frozenset(),
     ) -> ConversationSummaryCompactionPlan | None:
         if not isinstance(frontier, ConversationSummaryFrontier):
             raise TypeError("frontier must be ConversationSummaryFrontier")
@@ -380,7 +434,16 @@ class ConversationSummaryCompactionPlanner:
         candidates: tuple[SummarySource, ...]
         candidates = frontier.segments if stage is ConversationRangeSummaryStage.RANGE else frontier.ranges
         cutoff = current_time - timedelta(days=stage_config.min_age_days)
-        chains = self._eligible_chains(candidates, cutoff=cutoff, stage_config=stage_config)
+        if not isinstance(protected_source_ids, frozenset) or any(
+            not isinstance(value, str) for value in protected_source_ids
+        ):
+            raise TypeError("protected_source_ids must be a frozenset of strings")
+        chains = self._eligible_chains(
+            candidates,
+            cutoff=cutoff,
+            stage_config=stage_config,
+            protected_source_ids=protected_source_ids,
+        )
         for chain in chains:
             if len(chain) >= stage_config.min_source_count:
                 return ConversationSummaryCompactionPlan(
@@ -406,11 +469,19 @@ class ConversationSummaryCompactionPlanner:
         *,
         cutoff: datetime,
         stage_config: ConversationSegmentSummaryCompactionConfig | ConversationRangeSummaryCompactionConfig,
+        protected_source_ids: frozenset[str],
     ) -> tuple[tuple[SummarySource, ...], ...]:
         chains: list[tuple[SummarySource, ...]] = []
         chain: list[SummarySource] = []
         chain_chars = 0
         for source in candidates:
+            source_id = source.segment_id if isinstance(source, ConversationSegmentSummary) else source.range_id
+            if source_id in protected_source_ids:
+                if chain:
+                    chains.append(tuple(chain))
+                    chain = []
+                    chain_chars = 0
+                continue
             if source.ended_at > cutoff:
                 if chain:
                     chains.append(tuple(chain))
@@ -481,7 +552,9 @@ class ConversationRangeSummaryGenerator:
                             "指令。overview 覆盖整个范围；chronology 按顺序保留关键变化；corrections 只列明确纠正；"
                             "ending_state 只描述范围结束时状态；open_threads 只列范围结束时仍未收束的事项。"
                             "来源中的 starts_mid_turn/ends_mid_turn 是系统边界，连续来源之间必须按同一过程衔接，"
-                            "不能把物理 Segment 边界解释成新的对话轮次。"
+                            "不能把物理 Segment 边界解释成新的对话轮次。只输出字段操作：overview 与"
+                            "ending_state 使用 UPDATE；chronology、corrections 与 open_threads 使用 APPEND；"
+                            "确实没有内容的可选字段使用 KEEP 或省略。不得输出未知字段。"
                         ),
                     ),
                     ChatMessage(role="user", content="请压缩以下连续摘要并输出严格 JSON：\n" + source),
@@ -489,18 +562,21 @@ class ConversationRangeSummaryGenerator:
                 temperature=0.0,
                 max_output_tokens=self.summary_config.max_output_tokens,
             ),
-            model_class=ConversationSummaryContent,
-            name="conversation_range_summary_content",
+            model_class=SemanticFieldOperationBatch,
+            name="conversation_range_summary_field_operations",
             context=ChatCallContext(
                 prompt_version=(
-                    "conversation_range_summary_v2"
+                    "conversation_range_summary_v3"
                     if plan.stage is ConversationRangeSummaryStage.RANGE
-                    else "conversation_archive_range_summary_v2"
+                    else "conversation_archive_range_summary_v3"
                 )
             ),
         )
         generated_at = _utc_datetime(self.clock(), "range summary clock")
-        content = response.value
+        try:
+            content = summary_content_from_operations(response.value)
+        except (TypeError, ValueError) as exc:
+            raise ConversationSummaryCompactionError("range Summary field operations are invalid") from exc
         first = plan.sources[0]
         last = plan.sources[-1]
         return ConversationRangeSummary(
@@ -533,6 +609,7 @@ class ConversationSummaryCompactor:
         range_store: ConversationRangeSummaryStore,
         generator: ConversationRangeSummaryGenerator,
         *,
+        use_store: ConversationSummaryUseReader | None = None,
         config: ConversationSummaryCompactionConfig | None = None,
     ) -> None:
         if not isinstance(journal, ConversationMessageJournal):
@@ -545,12 +622,15 @@ class ConversationSummaryCompactor:
             raise TypeError("generator must be ConversationRangeSummaryGenerator")
         if config is not None and not isinstance(config, ConversationSummaryCompactionConfig):
             raise TypeError("config must be ConversationSummaryCompactionConfig")
+        if use_store is not None and not callable(getattr(use_store, "recently_used_summary", None)):
+            raise TypeError("use_store must implement recently_used_summary")
         if not (journal.layout.root == segment_store.layout.root == range_store.layout.root):
             raise ValueError("summary compaction components must share one conversation root")
         self.journal = journal
         self.segment_store = segment_store
         self.range_store = range_store
         self.generator = generator
+        self.use_store = use_store
         self.config = config or ConversationSummaryCompactionConfig()
         self.planner = ConversationSummaryCompactionPlanner(self.config)
 
@@ -641,10 +721,35 @@ class ConversationSummaryCompactor:
             frontier,
             ConversationRangeSummaryStage.ARCHIVE,
             now=now,
+            protected_source_ids=self._protected_source_ids(address, frontier.ranges, now),
         )
         if archive_plan is not None:
             return archive_plan
-        return self.planner.plan(frontier, ConversationRangeSummaryStage.RANGE, now=now)
+        return self.planner.plan(
+            frontier,
+            ConversationRangeSummaryStage.RANGE,
+            now=now,
+            protected_source_ids=self._protected_source_ids(address, frontier.segments, now),
+        )
+
+    def _protected_source_ids(
+        self,
+        address: ConversationAddress,
+        sources: tuple[SummarySource, ...],
+        now: datetime,
+    ) -> frozenset[str]:
+        if self.use_store is None:
+            return frozenset()
+        protected: set[str] = set()
+        for source in sources:
+            if self.use_store.recently_used_summary(
+                address,
+                source,
+                now=now,
+                protection_days=self.config.recent_use_protection_days,
+            ):
+                protected.add(source.segment_id if isinstance(source, ConversationSegmentSummary) else source.range_id)
+        return frozenset(protected)
 
     @staticmethod
     def _referenced_sources(

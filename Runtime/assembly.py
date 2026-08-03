@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from Config import M2BOSConfig
 from foundation.observability import CompositeObserver, MetricRegistry, Observer
 from infrastructure.observability import ManagedObservability
@@ -9,6 +11,12 @@ from infrastructure.store.contracts import PathLock
 from infrastructure.store.sqlite import SQLiteLockStore
 from infrastructure.vector import VectorStoreFactory, VectorStoreRequirements
 from infrastructure.vector.adapters import register_builtin_vector_adapters
+from memory.compaction import (
+    MemoryFieldCompactor,
+    MemoryLifecycleCommitter,
+    MemoryLifecycleManager,
+    MemoryRecoveryStore,
+)
 from memory.conversation import (
     ConversationMessageJournal,
     ConversationRangeSummaryGenerator,
@@ -16,10 +24,13 @@ from memory.conversation import (
     ConversationRetentionPlanner,
     ConversationSemanticBoundaryScorer,
     ConversationSummaryCompactor,
+    ConversationSummaryExpander,
     ConversationSummaryGenerator,
+    ConversationSummaryRetirementStore,
     ConversationSummaryService,
     ConversationSummaryStore,
     PersistentConversationSummaryVectorIndex,
+    SQLiteConversationSummaryUseStore,
     conversation_summary_embedding_fingerprint,
 )
 from memory.document import MemoryDocumentCodec
@@ -287,12 +298,29 @@ def build_runtime(
         summary_config=conversation_config.summary,
         compaction_config=conversation_config.lifecycle.summary_compaction,
     )
+    summary_use = SQLiteConversationSummaryUseStore(
+        config.workflow_root / "conversation_summary_use.sqlite3",
+        initialize=False,
+    )
     summary_compactor = ConversationSummaryCompactor(
         conversations,
         summary_store,
         range_summary_store,
         range_summary_generator,
+        use_store=summary_use,
         config=conversation_config.lifecycle.summary_compaction,
+    )
+    summary_retirements = ConversationSummaryRetirementStore(config.workflow_root)
+    summary_expander = ConversationSummaryExpander(
+        summary_store,
+        range_summary_store,
+        max_source_reads=(
+            conversation_config.lifecycle.summary_compaction.range_to_archive.max_source_count
+            * (
+                1
+                + conversation_config.lifecycle.summary_compaction.segment_to_range.max_source_count
+            )
+        ),
     )
     summary_vector_store = resolved_vector_stores.create(
         conversation_config.summary_vector_store,
@@ -317,11 +345,13 @@ def build_runtime(
         reranker=reranker,
         config=conversation_config.summary_vector_index,
         observer=operation_observer,
+        retirement_store=summary_retirements,
     )
     search_context_reader = ConversationSearchContextReader(
         conversations,
         summary_compactor,
         config=memory_config.search_service,
+        retirement_filter=summary_retirements,
     )
     search_query_planner = MemorySearchQueryPlanner(
         structured_chat,
@@ -339,6 +369,29 @@ def build_runtime(
         ),
         config=memory_config.recall_lifecycle,
     )
+    field_compactor = MemoryFieldCompactor(
+        structured_chat,
+        registry=schema_registry,
+        config=memory_config.field_compaction,
+    )
+    recovery_store = MemoryRecoveryStore(tree)
+    lifecycle_committer = MemoryLifecycleCommitter(transaction, snapshot_reader)
+
+    async def refresh_lifecycle_derivatives(uris):
+        addresses = tuple(uri.to_address() for uri in uris)
+        await asyncio.to_thread(semantic_refresher.refresh_for_many, addresses)
+        await vector_index.rebuild()
+
+    memory_lifecycle = MemoryLifecycleManager(
+        tree,
+        snapshot_reader,
+        recall_lifecycle,
+        field_compactor,
+        recovery_store,
+        lifecycle_committer,
+        config=memory_config.lifecycle_maintenance,
+        derived_refresh=refresh_lifecycle_derivatives,
+    )
     search_service = SearchService(
         tree=tree,
         snapshot_reader=snapshot_reader,
@@ -351,6 +404,9 @@ def build_runtime(
         assembler=MemoryContextAssembler(config=memory_config.search_service),
         config=memory_config.search_service,
         intention_reviewer=MemoryIntentionReviewer(memory_config.intention_review),
+        cold_probe_expander=memory_lifecycle,
+        summary_fallback_expander=summary_expander,
+        summary_use_recorder=summary_use,
         observer=operation_observer,
     )
 
@@ -374,6 +430,7 @@ def build_runtime(
         jobs,
         receipts,
         transaction_journal,
+        summary_retirements,
         summary_config=conversation_config.lifecycle.summary_compaction,
         workflow_config=workflow_config.lifecycle,
     )
@@ -403,6 +460,7 @@ def build_runtime(
     lifecycle_worker = LifecycleWorker(
         conversation_lifecycle,
         conversation_config.lifecycle,
+        memory_manager=memory_lifecycle,
         observer=operation_observer,
     )
 
@@ -428,6 +486,8 @@ def build_runtime(
             summaries=summaries,
             summary_compactor=summary_compactor,
             summary_vector_index=summary_vector_index,
+            summary_use=summary_use,
+            summary_expander=summary_expander,
         ),
         memory=RuntimeMemory(
             tree=tree,
@@ -435,6 +495,7 @@ def build_runtime(
             editor=editor,
             semantic_refresher=semantic_refresher,
             vector_index=vector_index,
+            lifecycle=memory_lifecycle,
         ),
         workflow=RuntimeWorkflow(
             jobs=jobs,

@@ -49,7 +49,9 @@ from memory.retrieval.search import (
     MemorySemanticSearchEngine,
 )
 from memory.retrieval.service import (
+    ConversationSummaryFallbackExpander,
     ConversationSummarySemanticSearch,
+    MemoryColdProbeExpander,
     MemorySemanticSearch,
     SearchService,
 )
@@ -58,6 +60,8 @@ __all__ = [
     "ConversationSearchContext",
     "ConversationSearchContextReader",
     "ConversationSummarySemanticSearch",
+    "ConversationSummaryFallbackExpander",
+    "MemoryColdProbeExpander",
     "MemoryContextAssembler",
     "MemoryContextAssembly",
     "MemoryMatchedMemory",

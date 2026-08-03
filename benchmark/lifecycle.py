@@ -216,7 +216,9 @@ def _lifecycle_benchmark_config(config: M2BOSConfig, source_count: int) -> M2BOS
             min_source_count=2,
             max_source_count=max(2, source_count),
         ),
-        superseded_source_retention_days=0,
+        recent_use_protection_days=1,
+        archive_retire_days=1,
+        archive_retire_grace_days=1,
     )
     conversation = replace(
         config.conversation,

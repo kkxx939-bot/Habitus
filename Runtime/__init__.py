@@ -32,6 +32,7 @@ from Runtime.lifecycle import (
 from Runtime.runtime import (
     MemoryJobAbandonResult,
     MemoryJobRetryResult,
+    MemoryUseReceipt,
     Runtime,
     RuntimeConversationProtocolIngestResult,
     RuntimeInitialization,
@@ -59,6 +60,7 @@ __all__ = [
     "RuntimeHealthStatus",
     "MemoryJobRetryResult",
     "MemoryJobAbandonResult",
+    "MemoryUseReceipt",
     "RuntimeConversationProtocolIngestResult",
     "MemoryConsistencyService",
     "MemoryConsistencySnapshot",

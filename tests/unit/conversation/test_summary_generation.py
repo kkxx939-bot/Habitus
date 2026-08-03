@@ -87,7 +87,14 @@ def structured(provider: RecordingProvider) -> StructuredChatClient:
 
 
 def content_dict() -> dict[str, object]:
-    return summary_content().to_dict()
+    content = summary_content()
+    return {
+        "operations": [
+            {"field": "overview", "operation": "update", "content": content.overview},
+            {"field": "chronology", "operation": "append", "items": list(content.chronology)},
+            {"field": "ending_state", "operation": "update", "content": content.ending_state},
+        ]
+    }
 
 
 def test_segment_summary_binds_all_source_identity_in_code_and_preserves_process_semantics() -> None:
@@ -107,7 +114,7 @@ def test_segment_summary_binds_all_source_identity_in_code_and_preserves_process
     assert result.source_message_digest == source.digest
     assert result.generated_at == SUMMARY_TIME
     request = provider.requests[0]
-    assert request.response_format.name == "conversation_segment_summary_content"
+    assert request.response_format.name == "conversation_segment_summary_field_operations"
     assert "不要把内容分类成长记忆" in request.messages[-2].content
     assert source.messages[-2].content in request.messages[-1].content
 
@@ -127,6 +134,17 @@ def test_partial_segment_summary_preserves_system_owned_turn_boundaries() -> Non
     result.require_matches_source(source)
     request = provider.requests[0]
     assert "ends_mid_turn=true" in request.messages[-1].content
+
+
+def test_segment_summary_rejects_unknown_model_field_in_server_merge() -> None:
+    source = segment(segment_id="000000000000-000000000001")
+    provider = RecordingProvider(
+        [{"operations": [{"field": "system_metadata", "operation": "keep"}]}]
+    )
+    generator = ConversationSummaryGenerator(structured(provider), clock=lambda: SUMMARY_TIME)
+
+    with pytest.raises(ConversationSummaryError, match="field operations"):
+        asyncio.run(generator.generate(source))
 
 
 def test_segment_summary_rejects_oversized_complete_source_without_truncating_or_calling_model() -> None:
@@ -192,7 +210,7 @@ def test_range_summary_uses_contiguous_sources_and_system_owned_range_identity()
     result.require_matches_sources((first, second))
     assert result.range_id == "000000000000-000000000003"
     assert result.source_refs == plan.source_refs
-    assert provider.requests[0].response_format.name == "conversation_range_summary_content"
+    assert provider.requests[0].response_format.name == "conversation_range_summary_field_operations"
 
 
 def test_range_summary_enforces_stage_specific_source_bound_before_model_call() -> None:

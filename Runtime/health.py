@@ -51,6 +51,7 @@ class RuntimeHealthService:
             raise TypeError("deep must be boolean")
         checks = [
             self._runtime_check(runtime_state),
+            self._lifecycle_storage_check(runtime_state),
             self._memory_worker_check(),
             self._lifecycle_check(),
             self._observability_check(),
@@ -112,6 +113,38 @@ class RuntimeHealthService:
         if worker.last_error is not None:
             return RuntimeHealthCheck("lifecycle_worker", RuntimeHealthStatus.DEGRADED, self._error(worker.last_error), critical=False)
         return RuntimeHealthCheck("lifecycle_worker", RuntimeHealthStatus.HEALTHY, worker.state.value, critical=False)
+
+    def _lifecycle_storage_check(self, runtime_state: str) -> RuntimeHealthCheck:
+        recall_store = self.components.memory.search.recall_lifecycle.store
+        summary_use = self.components.conversation.summary_use
+        if runtime_state == "created":
+            return RuntimeHealthCheck(
+                "lifecycle_storage",
+                RuntimeHealthStatus.DEGRADED,
+                "not_initialized",
+            )
+        if not getattr(recall_store, "initialized", False) or not summary_use.initialized:
+            return RuntimeHealthCheck(
+                "lifecycle_storage",
+                RuntimeHealthStatus.UNHEALTHY,
+                "not_initialized",
+            )
+        try:
+            pending_l2 = len(self.components.memory.lifecycle.operation_store.pending())
+            pending_summaries = len(
+                self.components.workflow.lifecycle.retirement_store.pending()
+            )
+        except Exception as exc:
+            return RuntimeHealthCheck(
+                "lifecycle_storage",
+                RuntimeHealthStatus.UNHEALTHY,
+                type(exc).__name__,
+            )
+        return RuntimeHealthCheck(
+            "lifecycle_storage",
+            RuntimeHealthStatus.HEALTHY,
+            f"l2_pending={pending_l2};summary_pending={pending_summaries}",
+        )
 
     def _observability_check(self) -> RuntimeHealthCheck:
         manager = self.components.infrastructure.managed_observability

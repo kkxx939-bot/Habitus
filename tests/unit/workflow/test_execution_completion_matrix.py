@@ -346,7 +346,7 @@ def test_finalizer_forgets_retired_recall_state_and_cleanup_failure_is_non_block
     item = document(MemoryKind.PREFERENCE)
     uri = MemoryURI.from_address(item.address)
     target = MemoryRecallTarget(uri, item.metadata.revision, item.metadata.created_at)
-    lifecycle.record_success((target,), recalled_at=BASE_TIME)
+    lifecycle.record_use((target,), used_at=BASE_TIME)
     finalizer = value.components.workflow.runner.committed_finalizer
 
     asyncio.run(finalizer._forget_retired_recall_state((uri,)))

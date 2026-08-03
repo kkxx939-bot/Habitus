@@ -7,6 +7,10 @@ from dataclasses import dataclass, field
 from Config.loader import construct_config, group_fields
 from infrastructure.editor.snapshot import SnapshotReadConfig
 from infrastructure.vector import VectorStoreConfig
+from memory.compaction import (
+    MemoryFieldCompactionConfig,
+    MemoryLifecycleMaintenanceConfig,
+)
 from memory.document import MemoryDocumentConfig
 from memory.editor import (
     MemoryCommitConfig,
@@ -35,6 +39,10 @@ class MemoryConfig:
     snapshot: SnapshotReadConfig = field(default_factory=SnapshotReadConfig)
     search_service: MemorySearchServiceConfig = field(default_factory=MemorySearchServiceConfig)
     recall_lifecycle: MemoryRecallLifecycleConfig = field(default_factory=MemoryRecallLifecycleConfig)
+    field_compaction: MemoryFieldCompactionConfig = field(default_factory=MemoryFieldCompactionConfig)
+    lifecycle_maintenance: MemoryLifecycleMaintenanceConfig = field(
+        default_factory=MemoryLifecycleMaintenanceConfig
+    )
     retrieval: MemoryRetrievalConfig = field(default_factory=MemoryRetrievalConfig)
     vector_store: VectorStoreConfig = field(default_factory=VectorStoreConfig)
     vector_index: MemoryVectorIndexConfig = field(default_factory=MemoryVectorIndexConfig)
@@ -52,6 +60,8 @@ class MemoryConfig:
             ("snapshot", self.snapshot, SnapshotReadConfig),
             ("search_service", self.search_service, MemorySearchServiceConfig),
             ("recall_lifecycle", self.recall_lifecycle, MemoryRecallLifecycleConfig),
+            ("field_compaction", self.field_compaction, MemoryFieldCompactionConfig),
+            ("lifecycle_maintenance", self.lifecycle_maintenance, MemoryLifecycleMaintenanceConfig),
             ("retrieval", self.retrieval, MemoryRetrievalConfig),
             ("vector_store", self.vector_store, VectorStoreConfig),
             ("vector_index", self.vector_index, MemoryVectorIndexConfig),
@@ -106,6 +116,16 @@ class MemoryConfig:
                 MemoryRecallLifecycleConfig,
                 data.get("recall_lifecycle", {}),
                 "config.memory.recall_lifecycle",
+            ),
+            field_compaction=construct_config(
+                MemoryFieldCompactionConfig,
+                data.get("field_compaction", {}),
+                "config.memory.field_compaction",
+            ),
+            lifecycle_maintenance=construct_config(
+                MemoryLifecycleMaintenanceConfig,
+                data.get("lifecycle_maintenance", {}),
+                "config.memory.lifecycle_maintenance",
             ),
             retrieval=construct_config(
                 MemoryRetrievalConfig,

@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import threading
 from bisect import bisect_right
 from collections.abc import Mapping
 from contextlib import suppress
@@ -19,6 +20,7 @@ from foundation.integrity import canonical_json
 from foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
 from infrastructure.store.contracts import LockToken
 from infrastructure.store.filesystem import atomic_replace_bytes, read_regular_bytes
+from memory.compaction import MemoryLifecycleMaintenanceResult, MemoryLifecycleManager
 from memory.conversation import ConversationAddress, ConversationMessageJournal
 from memory.workflow import ConversationLifecycleManager
 
@@ -72,6 +74,7 @@ class LifecycleMaintenanceCycleResult:
     selected_addresses: tuple[ConversationAddress, ...]
     maintained_addresses: tuple[ConversationAddress, ...]
     failures: tuple[LifecycleMaintenanceFailure, ...]
+    memory_maintenance: MemoryLifecycleMaintenanceResult | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.lease_acquired, bool):
@@ -99,6 +102,13 @@ class LifecycleMaintenanceCycleResult:
             raise ValueError("one address cannot both succeed and fail in one cycle")
         if not self.lease_acquired and (self.selected_addresses or self.maintained_addresses or self.failures):
             raise ValueError("a skipped lease cycle cannot contain maintenance results")
+        if self.memory_maintenance is not None and not isinstance(
+            self.memory_maintenance,
+            MemoryLifecycleMaintenanceResult,
+        ):
+            raise TypeError("memory_maintenance must be MemoryLifecycleMaintenanceResult or None")
+        if not self.lease_acquired and self.memory_maintenance is not None:
+            raise ValueError("a skipped lease cycle cannot maintain L2 memory")
 
 
 class _LifecycleCursorStore:
@@ -177,6 +187,7 @@ class LifecycleWorker:
         config: ConversationLifecycleConfig,
         *,
         worker_id: str | None = None,
+        memory_manager: MemoryLifecycleManager | None = None,
         observer: Observer | None = None,
     ) -> None:
         if not isinstance(manager, ConversationLifecycleManager):
@@ -184,6 +195,8 @@ class LifecycleWorker:
         if not isinstance(config, ConversationLifecycleConfig):
             raise TypeError("config must be ConversationLifecycleConfig")
         resolved_worker_id = worker_id or f"lifecycle-{os.getpid()}-{uuid4().hex}"
+        if memory_manager is not None and not isinstance(memory_manager, MemoryLifecycleManager):
+            raise TypeError("memory_manager must be MemoryLifecycleManager")
         if (
             not isinstance(resolved_worker_id, str)
             or not resolved_worker_id
@@ -194,6 +207,7 @@ class LifecycleWorker:
         self.journal: ConversationMessageJournal = manager.journal
         self.config = config
         self.worker_id = resolved_worker_id
+        self.memory_manager = memory_manager
         root_digest = hashlib.sha256(str(self.journal.layout.root).encode("utf-8")).hexdigest()[:24]
         self.lock_key = f"runtime:lifecycle:{root_digest}"
         self._cursor_store = _LifecycleCursorStore(manager)
@@ -345,9 +359,16 @@ class LifecycleWorker:
             name=f"m2bos-lifecycle-cycle:{self.worker_id}",
         )
         self._active_cycle = execution
-        heartbeat_stop = asyncio.Event()
+        heartbeat_stop = threading.Event()
+        loop = asyncio.get_running_loop()
         heartbeat = asyncio.create_task(
-            self._heartbeat(token, execution, heartbeat_stop),
+            asyncio.to_thread(
+                self._heartbeat_blocking,
+                token,
+                execution,
+                heartbeat_stop,
+                loop,
+            ),
             name=f"m2bos-lifecycle-heartbeat:{self.worker_id}",
         )
         body_error: BaseException | None = None
@@ -369,10 +390,7 @@ class LifecycleWorker:
             raise
         finally:
             heartbeat_stop.set()
-            if not heartbeat.done():
-                heartbeat.cancel()
-            with suppress(asyncio.CancelledError):
-                await heartbeat
+            await asyncio.gather(heartbeat, return_exceptions=True)
             if not execution.done():
                 execution.cancel()
                 await asyncio.gather(execution, return_exceptions=True)
@@ -407,6 +425,10 @@ class LifecycleWorker:
             finally:
                 await asyncio.to_thread(self._write_cursor_fenced, token, address)
         await asyncio.to_thread(lock_store.assert_owned, token)
+        memory_maintenance = None
+        if self.memory_manager is not None:
+            memory_maintenance = await self.memory_manager.maintain()
+            await asyncio.to_thread(lock_store.assert_owned, token)
         return LifecycleMaintenanceCycleResult(
             lease_acquired=True,
             started_at=started_at,
@@ -414,6 +436,7 @@ class LifecycleWorker:
             selected_addresses=selected,
             maintained_addresses=tuple(maintained),
             failures=tuple(failures),
+            memory_maintenance=memory_maintenance,
         )
 
     def _write_cursor_fenced(
@@ -427,33 +450,25 @@ class LifecycleWorker:
         with lock_store.fenced((token,), ttl_seconds=self.config.lease_ttl_seconds):
             self._cursor_store.write(address)
 
-    async def _heartbeat(
+    def _heartbeat_blocking(
         self,
         token: LockToken,
         execution: asyncio.Task[LifecycleMaintenanceCycleResult],
-        stop: asyncio.Event,
+        stop: threading.Event,
+        loop: asyncio.AbstractEventLoop,
     ) -> None:
+        """在独立线程续租，避免同步文件或 SQLite 操作阻塞事件循环时丢 lease。"""
+
         lock_store = self.journal.path_lock.lock_store
-        while not stop.is_set():
+        while not stop.wait(timeout=self.config.heartbeat_interval_seconds):
             try:
-                await asyncio.wait_for(
-                    stop.wait(),
-                    timeout=self.config.heartbeat_interval_seconds,
-                )
-                return
-            except asyncio.TimeoutError:
-                try:
-                    await asyncio.to_thread(
-                        lock_store.renew,
-                        token,
-                        self.config.lease_ttl_seconds,
-                    )
-                except TimeoutError as exc:
-                    execution.cancel()
-                    raise LifecycleWorkerLeaseLostError("lifecycle lease could not be renewed") from exc
-                except Exception:
-                    execution.cancel()
-                    raise
+                lock_store.renew(token, self.config.lease_ttl_seconds)
+            except TimeoutError as exc:
+                loop.call_soon_threadsafe(execution.cancel)
+                raise LifecycleWorkerLeaseLostError("lifecycle lease could not be renewed") from exc
+            except Exception:
+                loop.call_soon_threadsafe(execution.cancel)
+                raise
 
     def _select_batch(
         self,
@@ -491,17 +506,27 @@ class LifecycleWorker:
             self._wake_event.clear()
 
     def _observe_cycle(self, result: LifecycleMaintenanceCycleResult) -> None:
+        memory_failures = (
+            0
+            if result.memory_maintenance is None
+            else len(result.memory_maintenance.failures)
+        )
         self.observer.record(
             ObservationEvent(
                 category="lifecycle",
                 operation="maintenance_cycle",
-                status=(ObservationStatus.DEGRADED if result.failures else ObservationStatus.SUCCESS),
+                status=(
+                    ObservationStatus.DEGRADED
+                    if result.failures or memory_failures
+                    else ObservationStatus.SUCCESS
+                ),
                 duration_seconds=max(0.0, (result.finished_at - result.started_at).total_seconds()),
                 attributes={
                     "lease_acquired": result.lease_acquired,
                     "selected": len(result.selected_addresses),
                     "maintained": len(result.maintained_addresses),
                     "failures": len(result.failures),
+                    "memory_failures": memory_failures,
                 },
             )
         )

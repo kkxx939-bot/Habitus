@@ -110,6 +110,26 @@ def test_compaction_planner_selects_only_old_contiguous_sources_by_count() -> No
     )
 
 
+def test_recently_used_summary_splits_eligible_chain_without_hot_cold_ranking() -> None:
+    first, second = sources()
+    config = ConversationSummaryCompactionConfig(
+        segment_to_range=ConversationSegmentSummaryCompactionConfig(
+            min_age_days=0,
+            min_source_count=2,
+            max_wait_days=180,
+            max_source_count=10,
+            max_source_chars=100_000,
+        )
+    )
+    plan = ConversationSummaryCompactionPlanner(config).plan(
+        ConversationSummaryFrontier((first, second), (), ()),
+        ConversationRangeSummaryStage.RANGE,
+        now=BASE_TIME + timedelta(days=1),
+        protected_source_ids=frozenset({first.segment_id}),
+    )
+    assert plan is None
+
+
 def test_compaction_frontier_and_plan_reject_overlap_gap_and_cross_conversation() -> None:
     first, second = sources()
     overlapping = segment_summary(

@@ -1,5 +1,10 @@
 """Conversation 原始消息 live/history 写入主链。"""
 
+from memory.conversation.access import (
+    ConversationSummaryUseError,
+    ConversationSummaryUseState,
+    SQLiteConversationSummaryUseStore,
+)
 from memory.conversation.compaction import (
     ConversationRangeSummaryCompactionConfig,
     ConversationRangeSummaryGenerator,
@@ -12,6 +17,10 @@ from memory.conversation.compaction import (
     ConversationSummaryCompactionResult,
     ConversationSummaryCompactor,
     ConversationSummaryFrontier,
+)
+from memory.conversation.expansion import (
+    ConversationSummaryExpander,
+    ConversationSummaryExpansionError,
 )
 from memory.conversation.indexing import (
     ConversationSummaryIndexError,
@@ -54,6 +63,13 @@ from memory.conversation.retention import (
     ConversationToolResultReducer,
     ConversationTurn,
     estimate_conversation_message_tokens,
+)
+from memory.conversation.retirement import (
+    ConversationSummaryRetirementError,
+    ConversationSummaryRetirementManifest,
+    ConversationSummaryRetirementPhase,
+    ConversationSummaryRetirementSource,
+    ConversationSummaryRetirementStore,
 )
 from memory.conversation.segmentation import (
     SEMANTIC_CHUNKER_VERSION,
@@ -115,6 +131,16 @@ __all__ = [
     "ConversationSummaryStage",
     "ConversationSummaryStore",
     "ConversationSummaryVectorIndexConfig",
+    "ConversationSummaryUseError",
+    "ConversationSummaryUseState",
+    "ConversationSummaryRetirementError",
+    "ConversationSummaryRetirementManifest",
+    "ConversationSummaryRetirementPhase",
+    "ConversationSummaryRetirementSource",
+    "ConversationSummaryRetirementStore",
+    "SQLiteConversationSummaryUseStore",
+    "ConversationSummaryExpander",
+    "ConversationSummaryExpansionError",
     "ConversationSummaryFrontier",
     "ConversationTokenEstimator",
     "ConversationToolResultReducer",

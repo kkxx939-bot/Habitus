@@ -10,13 +10,16 @@ from foundation.observability import MetricRegistry, Observer
 from infrastructure.observability import ManagedObservability
 from infrastructure.store.contracts import PathLock
 from infrastructure.vector import VectorStoreFactory
+from memory.compaction import MemoryLifecycleManager
 from memory.conversation import (
     ConversationMessageJournal,
     ConversationRetentionPlanner,
     ConversationSemanticBoundaryScorer,
     ConversationSummaryCompactor,
+    ConversationSummaryExpander,
     ConversationSummaryService,
     PersistentConversationSummaryVectorIndex,
+    SQLiteConversationSummaryUseStore,
 )
 from memory.editor import MemoryEditor
 from memory.indexing import PersistentMemoryVectorIndex
@@ -138,6 +141,8 @@ class RuntimeConversation:
     summaries: ConversationSummaryService
     summary_compactor: ConversationSummaryCompactor
     summary_vector_index: PersistentConversationSummaryVectorIndex
+    summary_use: SQLiteConversationSummaryUseStore
+    summary_expander: ConversationSummaryExpander
 
     def __post_init__(self) -> None:
         if not isinstance(self.journal, ConversationMessageJournal):
@@ -160,6 +165,10 @@ class RuntimeConversation:
             raise TypeError(
                 "summary_vector_index must be PersistentConversationSummaryVectorIndex"
             )
+        if not isinstance(self.summary_use, SQLiteConversationSummaryUseStore):
+            raise TypeError("summary_use must be SQLiteConversationSummaryUseStore")
+        if not isinstance(self.summary_expander, ConversationSummaryExpander):
+            raise TypeError("summary_expander must be ConversationSummaryExpander")
         if self.summaries.store.layout.root != self.journal.layout.root:
             raise ValueError("conversation journal and summaries must share one root")
         if self.summary_compactor.journal is not self.journal:
@@ -168,6 +177,10 @@ class RuntimeConversation:
             raise ValueError("conversation summary compactor must use the shared segment summary store")
         if self.summary_vector_index.compactor is not self.summary_compactor:
             raise ValueError("Conversation must share one Summary compactor and vector index")
+        if self.summary_compactor.use_store is not self.summary_use:
+            raise ValueError("Conversation must share one Summary use store")
+        if self.summary_expander.segment_store is not self.summaries.store:
+            raise ValueError("Conversation must share one Summary source expander")
 
 
 @dataclass(frozen=True)
@@ -179,6 +192,7 @@ class RuntimeMemory:
     editor: MemoryEditor
     semantic_refresher: MemorySemanticRefresher
     vector_index: PersistentMemoryVectorIndex
+    lifecycle: MemoryLifecycleManager
 
     def __post_init__(self) -> None:
         if not isinstance(self.tree, MemoryTree):
@@ -191,6 +205,8 @@ class RuntimeMemory:
             raise TypeError("semantic_refresher must be MemorySemanticRefresher")
         if not isinstance(self.vector_index, PersistentMemoryVectorIndex):
             raise TypeError("vector_index must be PersistentMemoryVectorIndex")
+        if not isinstance(self.lifecycle, MemoryLifecycleManager):
+            raise TypeError("lifecycle must be MemoryLifecycleManager")
         if self.search.tree is not self.tree:
             raise ValueError("memory search must use the shared memory tree")
         if self.editor.transaction.tree is not self.tree:
@@ -199,6 +215,8 @@ class RuntimeMemory:
             raise ValueError("semantic refresher must use the shared memory tree")
         if self.vector_index.tree is not self.tree:
             raise ValueError("memory vector index must use the shared memory tree")
+        if self.lifecycle.tree is not self.tree:
+            raise ValueError("memory lifecycle must use the shared memory tree")
         if not isinstance(self.search.semantic_search, MemorySemanticSearchEngine):
             raise TypeError("memory search must use MemorySemanticSearchEngine")
         if self.search.semantic_search.index is not self.vector_index:

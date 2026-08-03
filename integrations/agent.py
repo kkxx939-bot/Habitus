@@ -17,7 +17,7 @@ from integrations.sdk.contracts import (
     AgentRememberResult,
     ConversationRef,
 )
-from memory.conversation import ConversationAddress
+from memory.conversation import ConversationAddress, ConversationSummaryReference
 from memory.intention import MemoryIntentionRecallScope
 from memory.model import MemoryKind
 from memory.workflow import MemoryJob
@@ -153,6 +153,23 @@ class AgentMemoryGateway:
         return AgentFlushResult(
             jobs=tuple(self._job(job) for job in flushed.jobs),
             consistency=tuple(self._consistency(snapshot) for snapshot in settled),
+        )
+
+    async def record_use(
+        self,
+        *,
+        memory_uris: tuple[str, ...] = (),
+        summary_references: tuple[str, ...] = (),
+        used_at: datetime | None = None,
+    ) -> None:
+        """手动兼容入口；标准 recall 已按最终模型可见 Context 自动计入，勿重复上报。"""
+
+        await self.runtime.record_memory_use(
+            memory_uris=memory_uris,
+            summary_references=tuple(
+                ConversationSummaryReference.parse(value) for value in summary_references
+            ),
+            used_at=used_at,
         )
 
     async def cursor(self, conversation: ConversationRef) -> int:

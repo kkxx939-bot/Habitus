@@ -477,6 +477,27 @@ def test_list_addresses_kind_filter_and_global_limit(tmp_path: Path, kind: Memor
     assert tree.list_addresses(limit=6) == tuple(item.address for item in items)
 
 
+def test_list_addresses_continues_strictly_after_cursor(tmp_path: Path) -> None:
+    tree = MemoryTree(tmp_path / "memory", document_codec=codec())
+    items = tuple(
+        document(
+            MemoryKind.PREFERENCE,
+            fields={"topic": topic, "content": f"- {topic}"},
+        )
+        for topic in ("a", "b", "c")
+    )
+    for item in items:
+        tree.write(item)
+
+    first = tree.list_addresses(MemoryKind.PREFERENCE, limit=2)
+    assert first == tuple(item.address for item in items[:2])
+    assert tree.list_addresses(
+        MemoryKind.PREFERENCE,
+        limit=2,
+        after=first[-1],
+    ) == (items[-1].address,)
+
+
 @pytest.mark.parametrize("limit", [0, -1, 10_001, 1_000_000, True, False, 1.5, "1"])
 def test_global_list_rejects_invalid_limit(tmp_path: Path, limit: object) -> None:
     with pytest.raises(ValueError):
