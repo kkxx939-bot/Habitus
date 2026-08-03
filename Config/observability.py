@@ -10,7 +10,6 @@ from urllib.parse import urlsplit
 
 from Config.loader import construct_config, group_fields
 
-_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 
 
@@ -88,14 +87,14 @@ class ObservabilityLoggingConfig:
 
 @dataclass(frozen=True)
 class ObservabilityTracingConfig:
-    """可选 OTLP 导出配置；认证头只允许从环境变量读取。"""
+    """可选 OTLP 导出配置；认证头通过统一凭据注册表引用。"""
 
     enabled: bool = False
     endpoint: str = "http://127.0.0.1:4318"
     protocol: str = "http"
     service_name: str = "m2bos"
     insecure: bool = True
-    headers_env: str = "M2BOS_OTEL_EXPORTER_HEADERS"
+    credential_ref: str = ""
     export_interval_seconds: float = 10.0
 
     def __post_init__(self) -> None:
@@ -118,8 +117,12 @@ class ObservabilityTracingConfig:
             raise ValueError("endpoint must be an HTTP(S) origin without credentials, path, query or fragment")
         if not isinstance(self.service_name, str) or _NAME.fullmatch(self.service_name) is None:
             raise ValueError("service_name must be a normalized bounded name")
-        if not isinstance(self.headers_env, str) or _ENV_NAME.fullmatch(self.headers_env) is None:
-            raise ValueError("headers_env must be a normalized environment variable name")
+        if not isinstance(self.credential_ref, str):
+            raise TypeError("credential_ref must be a string")
+        credential_ref = self.credential_ref.strip().lower()
+        if credential_ref and _NAME.fullmatch(credential_ref) is None:
+            raise ValueError("credential_ref must be a normalized credential name")
+        object.__setattr__(self, "credential_ref", credential_ref)
         if (
             isinstance(self.export_interval_seconds, bool)
             or not isinstance(self.export_interval_seconds, int | float)

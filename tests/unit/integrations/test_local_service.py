@@ -19,6 +19,7 @@ from integrations.local_service import (
     ServiceInstanceLock,
     ServiceInstanceLockError,
     run_doctor,
+    run_doctor_from_env,
 )
 from integrations.local_service import doctor as doctor_module
 from Runtime import Runtime
@@ -26,15 +27,27 @@ from Runtime import Runtime
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _config(tmp_path: Path, *, port: int = 8787, credentials: bool = False) -> M2BOSConfig:
+def _config(
+    tmp_path: Path,
+    *,
+    port: int = 8787,
+    credentials: bool = False,
+    filled: bool = False,
+) -> M2BOSConfig:
     payload = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
     payload["http"]["port"] = port
     if not credentials:
         for name in ("chat", "embedding", "rerank"):
-            payload["models"][name]["route"]["api_key_env"] = None
-        payload["memory"]["vector_store"]["route"]["credential_env"] = {}
-        payload["conversation"]["summary_vector_store"]["route"]["credential_env"] = {}
+            payload["models"][name]["route"]["credential_ref"] = ""
+        payload["memory"]["vector_store"]["route"]["credential_ref"] = ""
+        payload["conversation"]["summary_vector_store"]["route"]["credential_ref"] = ""
+    elif filled:
+        payload["credentials"]["deepseek"]["api_key"] = "deepseek-secret"
+        payload["credentials"]["ark"]["api_key"] = "ark-secret"
+        payload["credentials"]["dashscope"]["api_key"] = "dashscope-secret"
+        payload["credentials"]["vikingdb"]["access_key"] = "viking-access"
+        payload["credentials"]["vikingdb"]["secret_key"] = "viking-secret"
     return M2BOSConfig.from_mapping(payload)
 
 
@@ -86,14 +99,15 @@ def test_http_lifespan_holds_and_releases_the_same_instance_lock(tmp_path: Path)
     runtime.close.assert_awaited_once()
 
 
-def test_doctor_reports_only_provider_credentials_not_a_service_api_key(tmp_path: Path) -> None:
-    report = run_doctor(_config(tmp_path, credentials=True), environ={}, check_port=False)
+def test_doctor_reports_empty_yaml_credentials_without_a_service_api_key(tmp_path: Path) -> None:
+    report = run_doctor(_config(tmp_path, credentials=True), check_port=False)
     credentials = next(check for check in report.checks if check.name == "credentials")
 
     assert credentials.status is DoctorStatus.FAIL
-    assert "DEEPSEEK_API_KEY" in credentials.detail
-    assert "ARK_API_KEY" in credentials.detail
-    assert "DASHSCOPE_API_KEY" in credentials.detail
+    assert "credentials.deepseek.api_key" in credentials.detail
+    assert "credentials.ark.api_key" in credentials.detail
+    assert "credentials.dashscope.api_key" in credentials.detail
+    assert "credentials.vikingdb.access_key" in credentials.detail
     assert "M2BOS_HTTP" not in credentials.detail
 
 
@@ -101,32 +115,40 @@ def test_doctor_detects_a_listener_collision_without_starting_runtime(tmp_path: 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
         occupied.bind(("127.0.0.1", 0))
         port = occupied.getsockname()[1]
-        report = run_doctor(_config(tmp_path, port=port), environ={}, check_port=True)
+        report = run_doctor(_config(tmp_path, port=port), check_port=True)
 
     port_check = next(check for check in report.checks if check.name == "port")
     assert port_check.status is DoctorStatus.FAIL
     assert report.ok is False
 
 
-def test_doctor_rejects_whitespace_only_provider_credentials(tmp_path: Path) -> None:
-    config = _config(tmp_path, credentials=True)
-    required = {
-        route.api_key_env
-        for route in (config.models.chat.route, config.models.embedding.route, config.models.rerank.route)
-        if route is not None and route.api_key_env
-    }
-    required.update(config.memory.vector_store.route.credential_env.values())
-    required.update(config.conversation.summary_vector_store.route.credential_env.values())
-
-    report = run_doctor(
-        config,
-        environ={name: " \t " for name in required},
-        check_port=False,
-    )
+def test_doctor_accepts_multiple_filled_named_yaml_credentials(tmp_path: Path) -> None:
+    report = run_doctor(_config(tmp_path, credentials=True, filled=True), check_port=False)
     credentials = next(check for check in report.checks if check.name == "credentials")
 
-    assert credentials.status is DoctorStatus.FAIL
-    assert report.ok is False
+    assert credentials.status is DoctorStatus.PASS
+    assert "4 named YAML credentials" in credentials.detail
+
+
+def test_doctor_requires_private_permissions_for_the_secret_bearing_yaml(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_bytes((REPOSITORY_ROOT / "Config" / "example.yaml").read_bytes())
+    path.chmod(0o644)
+
+    exposed = run_doctor_from_env(
+        environ={"M2BOS_CONFIG_FILE": str(path)},
+        check_port=False,
+    )
+    permissions = next(check for check in exposed.checks if check.name == "config_permissions")
+    assert permissions.status is DoctorStatus.FAIL
+
+    path.chmod(0o600)
+    private = run_doctor_from_env(
+        environ={"M2BOS_CONFIG_FILE": str(path)},
+        check_port=False,
+    )
+    permissions = next(check for check in private.checks if check.name == "config_permissions")
+    assert permissions.status is DoctorStatus.PASS
 
 
 def test_deep_doctor_is_opt_in_and_appends_provider_probes(
@@ -141,8 +163,8 @@ def test_deep_doctor_is_opt_in_and_appends_provider_probes(
         return [doctor_module.DoctorCheck("embedding_probe", DoctorStatus.PASS, "dimension=1024")]
 
     monkeypatch.setattr(doctor_module, "_deep_checks", deep_checks)
-    shallow = run_doctor(_config(tmp_path), environ={}, check_port=False)
-    deep = run_doctor(_config(tmp_path), environ={}, check_port=False, deep=True, probe_timeout_seconds=1)
+    shallow = run_doctor(_config(tmp_path), check_port=False)
+    deep = run_doctor(_config(tmp_path), check_port=False, deep=True, probe_timeout_seconds=1)
 
     assert called == 1
     assert all(check.name != "embedding_probe" for check in shallow.checks)

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import cast
 
@@ -73,7 +72,7 @@ class ProviderFactory:
         self,
         config: CapabilityConfig,
         *,
-        environ: Mapping[str, str] | None = None,
+        api_key: str = "",
     ) -> object:
         if not isinstance(config, ChatModelConfig | EmbeddingModelConfig | RerankModelConfig):
             raise TypeError("config must be a supported capability config")
@@ -83,10 +82,9 @@ class ProviderFactory:
             raise ModelConfigurationError(
                 f"adapter is not registered for capability: {config.capability}/{config.route.adapter}"
             )
-        environment = os.environ if environ is None else environ
         context = ProviderBuildContext(
             config=config,
-            api_key=self._credential(config.route, environment),
+            api_key=self._credential(config.route, api_key),
         )
         component = builder(context)
         self._validate_component(config, component)
@@ -96,21 +94,21 @@ class ProviderFactory:
         self,
         config: ChatModelConfig,
         *,
-        environ: Mapping[str, str] | None = None,
+        api_key: str = "",
     ) -> ChatProvider:
-        component = self.create(config, environ=environ)
+        component = self.create(config, api_key=api_key)
         return cast(ChatProvider, component)
 
     def create_chat_client(
         self,
         config: ChatModelConfig,
         *,
-        environ: Mapping[str, str] | None = None,
+        api_key: str = "",
         observer: Observer | None = None,
     ) -> ChatClient:
         return ChatClient(
             config,
-            self.create_chat_provider(config, environ=environ),
+            self.create_chat_provider(config, api_key=api_key),
             observer=observer,
         )
 
@@ -118,32 +116,36 @@ class ProviderFactory:
         self,
         config: EmbeddingModelConfig,
         *,
-        environ: Mapping[str, str] | None = None,
+        api_key: str = "",
         observer: Observer | None = None,
     ) -> Embedder:
-        provider = cast(EmbeddingProvider, self.create(config, environ=environ))
+        provider = cast(EmbeddingProvider, self.create(config, api_key=api_key))
         return EmbeddingClient(config, provider, observer=observer)
 
     def create_reranker(
         self,
         config: RerankModelConfig,
         *,
-        environ: Mapping[str, str] | None = None,
+        api_key: str = "",
         observer: Observer | None = None,
     ) -> Reranker:
-        component = self.create(config, environ=environ)
+        component = self.create(config, api_key=api_key)
         provider = cast(RerankProvider, component)
         reranker: Reranker = RerankClient(config, provider)
         return reranker if observer is None else ObservedReranker(reranker, observer=observer)
 
     @staticmethod
-    def _credential(route: ProviderConfig, environ: Mapping[str, str]) -> str:
-        if not route.api_key_env:
+    def _credential(route: ProviderConfig, api_key: str) -> str:
+        if not isinstance(api_key, str):
+            raise TypeError("model api_key must be a string")
+        value = api_key.strip()
+        if not route.credential_ref:
+            if value:
+                raise ModelConfigurationError("model route received an undeclared credential")
             return ""
-        value = str(environ.get(route.api_key_env, "")).strip()
         if not value:
             raise ModelConfigurationError(
-                f"model credential environment variable is missing: {route.api_key_env}"
+                f"model credential is missing for reference: {route.credential_ref}"
             )
         return value
 

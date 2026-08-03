@@ -65,7 +65,7 @@ def test_vector_record_filter_and_match_have_backend_independent_semantics() -> 
         {"base_url": "http://remote.example.com"},
         {"base_url": "https://user:pass@example.com"},
         {"extra_headers": {"Authorization": "secret"}},
-        {"credential_env": {"api-key": "not-valid-env-name"}},
+        {"credential_ref": "not/valid"},
     ],
 )
 def test_vector_route_rejects_insecure_address_and_credential_leaks(route: dict[str, object]) -> None:
@@ -150,13 +150,13 @@ def test_factory_resolves_credentials_and_rejects_unregistered_or_mismatched_bac
         builder,
         requires_cross_process_publication_fencing=False,
     )
-    config = VectorStoreConfig(route=VectorStoreRouteConfig(credential_env={"api_key": "VIKING_KEY"}))
+    config = VectorStoreConfig(route=VectorStoreRouteConfig(credential_ref="vikingdb"))
     requirements = VectorStoreRequirements(2, 100, 10, 100)
     publication_lock = PathLock(ProcessLocalLockStore())
     store = factory.create(
         config,
         requirements=requirements,
-        environ={"VIKING_KEY": " secret "},
+        credentials={"api_key": " secret "},
         path_lock=publication_lock,
     )
     assert isinstance(store, PublishedVectorStore)
@@ -171,21 +171,21 @@ def test_factory_resolves_credentials_and_rejects_unregistered_or_mismatched_bac
         VectorStoreFactory().create(
             config,
             requirements=requirements,
-            environ={"VIKING_KEY": "x"},
+            credentials={"api_key": "x"},
             path_lock=publication_lock,
         )
     with pytest.raises(VectorStoreError, match="missing"):
         factory.create(
             config,
             requirements=requirements,
-            environ={},
+            credentials={},
             path_lock=publication_lock,
         )
     with pytest.raises(VectorStoreError, match="PathLock"):
         factory.create(
             config,
             requirements=requirements,
-            environ={"VIKING_KEY": "x"},
+            credentials={"api_key": "x"},
         )
 
 
@@ -236,20 +236,20 @@ def test_vikingdb_options_cover_public_private_and_capacity_combinations() -> No
 def test_builtin_vikingdb_requires_host_scoped_publication_fencing(tmp_path) -> None:
     factory = register_builtin_vector_adapters()
     config = VectorStoreConfig(
-        route=VectorStoreRouteConfig(credential_env={"api_key": "VIKING_KEY"}),
+        route=VectorStoreRouteConfig(credential_ref="vikingdb"),
     )
     requirements = VectorStoreRequirements(2, 100, 10, 100)
     with pytest.raises(VectorStoreUnsupportedTopologyError, match="host-scoped"):
         factory.create(
             config,
             requirements=requirements,
-            environ={"VIKING_KEY": "secret"},
+            credentials={"api_key": "secret"},
             path_lock=PathLock(ProcessLocalLockStore()),
         )
     store = factory.create(
         config,
         requirements=requirements,
-        environ={"VIKING_KEY": "secret"},
+        credentials={"api_key": "secret"},
         path_lock=PathLock(SQLiteLockStore(tmp_path / "publication.sqlite3", initialize=False)),
     )
     assert isinstance(store, PublishedVectorStore)

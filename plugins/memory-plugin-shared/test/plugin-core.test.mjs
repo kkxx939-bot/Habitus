@@ -8,6 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { executePluginLifecycle, parseArgs, prepareMarketplace } from "../../install-memory-plugin.mjs";
+import { HARNESS_REGISTRY, createHarnessRegistry } from "../../harnesses.mjs";
 import { outboxInventory, runPluginDoctor } from "../doctor.mjs";
 import { loadPluginConfig } from "../lib/config.mjs";
 import { requireHostAdapter } from "../lib/host-adapter.mjs";
@@ -284,9 +285,45 @@ test("plugin lifecycle is idempotent, migrates sources, rolls back, and removes 
 
 test("plugin lifecycle argument parser exposes all supported operations", () => {
   assert.equal(parseArgs(["status", "--host", "codex", "--json"]).action, "status");
+  assert.deepEqual(parseArgs(["status", "--harness", "cc"]).harnesses, ["cc"]);
   assert.equal(parseArgs(["update", "--prepare-only"]).prepareOnly, true);
   assert.equal(parseArgs(["remove"]).action, "remove");
+  assert.equal(parseArgs(["harnesses", "--json"]).action, "harnesses");
   assert.throws(() => parseArgs(["status", "--prepare-only"]), /prepare-only/);
+});
+
+test("Harness registry drives a future adapter through lifecycle orchestration", async (t) => {
+  const codex = HARNESS_REGISTRY.resolve("codex");
+  const future = {
+    ...codex,
+    id: "future-harness",
+    aliases: ["future-harness", "fh"],
+    displayName: "Future Harness",
+    command: "future-harness",
+    protocol: "future_protocol",
+  };
+  const registry = createHarnessRegistry([future]);
+  const root = await temporaryRoot(t);
+  const runner = {
+    available: (command) => command === "future-harness",
+    json: () => [],
+    run: () => assert.fail("prepare-only must not register the plugin"),
+  };
+
+  assert.equal(registry.resolve("fh").id, "future-harness");
+  const result = await executePluginLifecycle(
+    {
+      action: "install",
+      harnesses: ["fh"],
+      root,
+      prepareOnly: true,
+      json: true,
+    },
+    { registry, runner },
+  );
+  assert.equal(result.preparedOnly, true);
+  assert.equal(result.harnesses[0].harness, "future-harness");
+  assert.equal(result.harnesses[0].available, true);
 });
 
 test("realpath-aware entrypoints execute through filesystem symlinks", async (t) => {
@@ -515,7 +552,7 @@ test("plugin doctor reports every durable outbox lifecycle state", async (t) => 
   };
   const report = await runPluginDoctor(
     { stateRoot },
-    { service, inspectHosts: async () => [] },
+    { service, inspectHarnesses: async () => [] },
   );
   const outbox = report.checks.find((check) => check.name === "outbox");
   assert.equal(report.ok, true);
@@ -546,7 +583,7 @@ test("plugin doctor fails when an outbox session lost its durable state", async 
 
   const report = await runPluginDoctor(
     { stateRoot },
-    { service, inspectHosts: async () => [] },
+    { service, inspectHarnesses: async () => [] },
   );
   const outbox = report.checks.find((check) => check.name === "outbox");
   assert.equal(report.ok, false);

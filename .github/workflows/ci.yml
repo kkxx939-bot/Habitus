@@ -40,10 +40,20 @@ jobs:
         run: |
           python -m coverage run --branch -m pytest -q
           python -m coverage report
+      - name: Verify unified bootstrap and secure non-interactive init
+        run: |
+          init_root="$RUNNER_TEMP/m2bos-init"
+          m2bos --help
+          m2bos-server init --help
+          m2bos init --config "$init_root/config.yaml" --from-config Config/example.yaml --non-interactive --skip-doctor --no-start
+          test -f "$init_root/config.yaml"
+          test "$(stat -c '%a' "$init_root/config.yaml")" = "600"
+          M2BOS_CI_CONFIG_PATH="$init_root/config.yaml" python -c 'import os; from Config import M2BOSConfig; c=M2BOSConfig.from_file(os.environ["M2BOS_CI_CONFIG_PATH"]); assert c.models.chat.route.credential_ref == "deepseek"; assert c.models.embedding.route.credential_ref == "ark"; assert c.models.rerank.route.credential_ref == "dashscope"; assert c.memory.vector_store.route.credential_ref == "vikingdb"'
+          m2bos harnesses
       - name: Build wheel with service and plugin assets
         run: |
           python -m build --wheel
-          python -c 'import zipfile,glob; p=glob.glob("dist/*.whl")[0]; names=zipfile.ZipFile(p).namelist(); assert any(n.endswith("share/m2bos/plugins/install-memory-plugin.mjs") for n in names)'
+          python -c 'import zipfile,glob; p=glob.glob("dist/*.whl")[0]; names=zipfile.ZipFile(p).namelist(); assert any(n.endswith("share/m2bos/plugins/install-memory-plugin.mjs") for n in names); assert any(n.endswith("share/m2bos/plugins/harnesses.mjs") for n in names)'
       - name: Install wheel and execute packaged plugin lifecycle
         run: |
           smoke_venv="$RUNNER_TEMP/m2bos-wheel-smoke"
@@ -51,6 +61,9 @@ jobs:
           doctor_output="$RUNNER_TEMP/m2bos-plugin-doctor.json"
           python -m venv "$smoke_venv"
           "$smoke_venv/bin/pip" install --no-deps dist/*.whl
+          "$smoke_venv/bin/m2bos" --help
+          "$smoke_venv/bin/m2bos-server" init --help
+          "$smoke_venv/bin/m2bos-plugin" harnesses --json
           "$smoke_venv/bin/m2bos-plugin" install --prepare-only --root "$marketplace_root" --json
           "$smoke_venv/bin/m2bos-plugin" update --prepare-only --root "$marketplace_root" --json
           "$smoke_venv/bin/m2bos-plugin" status --root "$marketplace_root" --json

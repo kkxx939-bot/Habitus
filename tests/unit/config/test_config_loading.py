@@ -50,6 +50,61 @@ def test_from_file_and_from_env_use_only_the_single_yaml_entrypoint(tmp_path) ->
         M2BOSConfig.from_env(environ={})
 
 
+def test_named_credentials_support_multiple_vendors_without_leaking_repr(tmp_path) -> None:
+    payload = valid_mapping(tmp_path)
+    payload["credentials"]["deepseek"]["api_key"] = "deepseek-secret"
+    payload["credentials"]["ark"]["api_key"] = "ark-secret"
+    payload["credentials"]["dashscope"]["api_key"] = "dashscope-secret"
+    payload["credentials"]["vikingdb"]["access_key"] = "viking-access"
+    payload["credentials"]["vikingdb"]["secret_key"] = "viking-secret"
+
+    config = M2BOSConfig.from_mapping(payload)
+
+    assert config.models.chat.route.credential_ref == "deepseek"
+    assert config.models.embedding.route.credential_ref == "ark"
+    assert config.models.rerank is not None
+    assert config.models.rerank.route.credential_ref == "dashscope"
+    assert dict(config.credentials.resolve("vikingdb")) == {
+        "access_key": "viking-access",
+        "secret_key": "viking-secret",
+    }
+    rendered = repr(config)
+    assert "deepseek-secret" not in rendered
+    assert "viking-secret" not in rendered
+
+
+def test_secret_bearing_yaml_requires_private_file_permissions(tmp_path) -> None:
+    payload = valid_mapping(tmp_path)
+    payload["credentials"]["deepseek"]["api_key"] = "private-secret"
+    path = tmp_path / "m2bos.yaml"
+    path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    path.chmod(0o644)
+
+    with pytest.raises(ConfigError, match="group or other"):
+        M2BOSConfig.from_file(path)
+
+    path.chmod(0o600)
+    assert M2BOSConfig.from_file(path).credentials.resolve("deepseek")["api_key"] == "private-secret"
+
+
+def test_credential_registry_rejects_missing_references_fields_and_unsafe_values(tmp_path) -> None:
+    payload = valid_mapping(tmp_path)
+    payload["models"]["chat"]["route"]["credential_ref"] = "missing-provider"
+    with pytest.raises(ConfigError, match="does not exist"):
+        M2BOSConfig.from_mapping(payload)
+
+    payload = valid_mapping(tmp_path)
+    payload["credentials"]["deepseek"].pop("api_key")
+    payload["credentials"]["deepseek"]["token"] = "secret"
+    with pytest.raises(ConfigError, match="missing fields"):
+        M2BOSConfig.from_mapping(payload)
+
+    payload = valid_mapping(tmp_path)
+    payload["credentials"]["deepseek"]["api_key"] = " secret "
+    with pytest.raises(ValueError, match="surrounding whitespace"):
+        M2BOSConfig.from_mapping(payload)
+
+
 def test_yaml_loader_rejects_duplicate_keys_unknown_fields_and_typo_with_suggestion(tmp_path) -> None:
     duplicate = tmp_path / "duplicate.yaml"
     duplicate.write_text("storage: {}\nstorage: {}\n", encoding="utf-8")
@@ -60,6 +115,16 @@ def test_yaml_loader_rejects_duplicate_keys_unknown_fields_and_typo_with_suggest
     payload["memroy"] = payload.pop("memory")
     with pytest.raises(ConfigError, match="did you mean 'config.memory'"):
         M2BOSConfig.from_mapping(payload)
+
+
+def test_yaml_parse_errors_never_echo_secret_source_lines(tmp_path) -> None:
+    path = tmp_path / "malformed.yaml"
+    path.write_text('credentials: ["do-not-echo-secret"\n', encoding="utf-8")
+
+    with pytest.raises(ConfigError) as captured:
+        load_config_object(path)
+
+    assert "do-not-echo-secret" not in str(captured.value)
 
 
 @pytest.mark.parametrize(
@@ -159,7 +224,7 @@ def test_rerank_limits_are_checked_only_when_a_real_route_is_configured(tmp_path
             "adapter": "future-rerank",
             "model": "rerank-model",
             "base_url": "https://example.com/v1",
-            "api_key_env": "RERANK_API_KEY",
+            "credential_ref": "dashscope",
         },
         "max_documents": 1,
         "max_query_chars": 8000,

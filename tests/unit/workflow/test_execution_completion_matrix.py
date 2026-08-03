@@ -34,7 +34,6 @@ def runtime(tmp_path: Path):
         providers=providers,
         vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
-        environ={},
     )
     value.initialize()
     return value

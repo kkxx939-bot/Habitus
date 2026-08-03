@@ -14,17 +14,16 @@ from urllib.parse import urlsplit
 
 _NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _COLLECTION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
-_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
 class VectorStoreRouteConfig:
-    """描述服务来源、协议 Adapter、凭据环境变量和通用运行边界。"""
+    """描述服务来源、协议 Adapter、具名凭据引用和通用运行边界。"""
 
     provider: str = "volcengine"
     adapter: str = "vikingdb"
     base_url: str = ""
-    credential_env: Mapping[str, str] = field(default_factory=dict)
+    credential_ref: str = ""
     timeout_seconds: float = 30.0
     max_retries: int = 2
     retry_base_delay_seconds: float = 0.5
@@ -43,12 +42,16 @@ class VectorStoreRouteConfig:
         base_url = self.base_url.strip().rstrip("/")
         if base_url:
             _validate_base_url(base_url)
-        credentials = _credential_mapping(self.credential_env)
+        if not isinstance(self.credential_ref, str):
+            raise TypeError("vector store credential_ref must be a string")
+        credential_ref = self.credential_ref.strip().lower()
+        if credential_ref and _NAME.fullmatch(credential_ref) is None:
+            raise ValueError("vector store credential_ref must be a normalized name")
         headers = _header_mapping(self.extra_headers)
         object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "adapter", adapter)
         object.__setattr__(self, "base_url", base_url)
-        object.__setattr__(self, "credential_env", MappingProxyType(credentials))
+        object.__setattr__(self, "credential_ref", credential_ref)
         object.__setattr__(self, "extra_headers", MappingProxyType(headers))
 
         timeout = _bounded_float(self.timeout_seconds, "timeout_seconds", 0.001, 600.0)
@@ -161,20 +164,6 @@ def _strict_dataclass_mapping(
     if unknown:
         raise ValueError(f"{label} contains unknown fields: {unknown}")
     return dict(cast(Mapping[str, object], value))
-
-
-def _credential_mapping(value: object) -> dict[str, str]:
-    if not isinstance(value, Mapping):
-        raise TypeError("vector store credential_env must be an object")
-    result: dict[str, str] = {}
-    for raw_name, raw_env in value.items():
-        name = _normalized_name(raw_name, "vector store credential name")
-        if name in result:
-            raise ValueError("vector store credential_env contains duplicate normalized names")
-        if not isinstance(raw_env, str) or _ENV_NAME.fullmatch(raw_env.strip()) is None:
-            raise ValueError("vector store credential_env values must be environment variable names")
-        result[name] = raw_env.strip()
-    return result
 
 
 def _header_mapping(value: object) -> dict[str, str]:

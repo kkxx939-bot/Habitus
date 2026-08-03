@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -81,7 +80,7 @@ class VectorStoreFactory:
         config: VectorStoreConfig,
         *,
         requirements: VectorStoreRequirements,
-        environ: Mapping[str, str] | None = None,
+        credentials: Mapping[str, str] | None = None,
         path_lock: PathLock | None = None,
     ) -> VectorStore:
         if not isinstance(config, VectorStoreConfig):
@@ -102,14 +101,12 @@ class VectorStoreFactory:
             raise VectorStoreUnsupportedTopologyError(
                 "remote vector publication requires a host-scoped publication PathLock"
             )
-        environment = os.environ if environ is None else environ
-        if not isinstance(environment, Mapping):
-            raise TypeError("vector store environ must be a string mapping")
+        resolved_credentials = self._credentials(config, credentials)
         backend = registration.builder(
             VectorStoreBuildContext(
                 config=config,
                 requirements=requirements,
-                credentials=self._credentials(config, environment),
+                credentials=resolved_credentials,
             )
         )
         for name in (
@@ -157,16 +154,26 @@ class VectorStoreFactory:
     @staticmethod
     def _credentials(
         config: VectorStoreConfig,
-        environ: Mapping[str, str],
+        credentials: Mapping[str, str] | None,
     ) -> dict[str, str]:
-        resolved: dict[str, str] = {}
-        for name, env_name in config.route.credential_env.items():
-            value = environ.get(env_name)
-            if not isinstance(value, str) or not value.strip():
-                raise VectorStoreError(
-                    f"vector store credential environment variable is missing: {env_name}"
-                )
-            resolved[name] = value.strip()
+        if credentials is None:
+            resolved: dict[str, str] = {}
+        elif not isinstance(credentials, Mapping):
+            raise TypeError("vector store credentials must be a string mapping")
+        else:
+            resolved = {}
+            for name, value in credentials.items():
+                if not isinstance(name, str) or not isinstance(value, str):
+                    raise TypeError("vector store credentials must be a string mapping")
+                if not name or not value.strip():
+                    raise VectorStoreError("vector store credentials cannot contain empty values")
+                resolved[name] = value.strip()
+        if config.route.credential_ref and not resolved:
+            raise VectorStoreError(
+                f"vector store credential is missing for reference: {config.route.credential_ref}"
+            )
+        if not config.route.credential_ref and resolved:
+            raise VectorStoreError("vector store route received undeclared credentials")
         return resolved
 
     @staticmethod

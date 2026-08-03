@@ -16,7 +16,13 @@ from infrastructure.observability.otel import OpenTelemetryBackend
 class ManagedObservability:
     """可观测后端是非关键旁路；任何后端失败都不改变记忆事务结果。"""
 
-    def __init__(self, config: ObservabilityConfig, *, workflow_root: Path) -> None:
+    def __init__(
+        self,
+        config: ObservabilityConfig,
+        *,
+        workflow_root: Path,
+        tracing_headers: Mapping[str, str] | None = None,
+    ) -> None:
         if not isinstance(config, ObservabilityConfig):
             raise TypeError("config must be ObservabilityConfig")
         self.config = config
@@ -30,7 +36,11 @@ class ManagedObservability:
             if config.audit.enabled
             else None
         )
-        self.otel = OpenTelemetryBackend(config.tracing) if config.tracing.enabled else None
+        self.otel = (
+            OpenTelemetryBackend(config.tracing, headers=tracing_headers)
+            if config.tracing.enabled
+            else None
+        )
         self._initialized = False
         self._degraded_reason: str | None = None
 

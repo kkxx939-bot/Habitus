@@ -7,6 +7,7 @@ from Config.conversation import (
     ConversationSegmentSummaryCompactionConfig,
     ConversationSummaryCompactionConfig,
 )
+from Config.credentials import CredentialRegistry
 from Config.http import HTTPAPIConfig
 from Config.loader import ConfigError
 from Config.memory import MemoryConfig
@@ -26,6 +27,7 @@ from memory.retrieval import MemoryRecallLifecycleConfig, MemorySearchServiceCon
 
 __all__ = [
     "ConfigError",
+    "CredentialRegistry",
     "ConversationConfig",
     "ConversationLifecycleConfig",
     "ConversationRangeSummaryCompactionConfig",

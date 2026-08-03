@@ -16,18 +16,17 @@ ChatStructuredOutputMode = Literal["none", "json_object", "json_schema"]
 
 _PROVIDER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$")
-_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
 class ProviderConfig:
-    """分离厂商身份和协议适配器的公共路由；只保存密钥环境变量名。"""
+    """分离厂商身份和协议适配器的公共路由；只保存具名凭据引用。"""
 
     provider: str
     adapter: str
     model: str
     base_url: str = ""
-    api_key_env: str = ""
+    credential_ref: str = ""
     timeout_seconds: float = 30.0
     max_retries: int = 2
     retry_base_delay_seconds: float = 0.5
@@ -42,12 +41,12 @@ class ProviderConfig:
         adapter = str(self.adapter or "").strip().lower()
         model = str(self.model or "").strip()
         base_url = str(self.base_url or "").strip().rstrip("/")
-        api_key_env = str(self.api_key_env or "").strip()
+        credential_ref = str(self.credential_ref or "").strip().lower()
         object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "adapter", adapter)
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "base_url", base_url)
-        object.__setattr__(self, "api_key_env", api_key_env)
+        object.__setattr__(self, "credential_ref", credential_ref)
 
         if not provider or not _PROVIDER_NAME.fullmatch(provider):
             raise ValueError("model provider must be a non-empty normalized name")
@@ -55,8 +54,8 @@ class ProviderConfig:
             raise ValueError("model adapter must be a non-empty normalized name")
         if not model or not _MODEL_NAME.fullmatch(model):
             raise ValueError("model name contains unsupported characters")
-        if api_key_env and not _ENV_NAME.fullmatch(api_key_env):
-            raise ValueError("model api_key_env must be an environment variable name")
+        if credential_ref and not _PROVIDER_NAME.fullmatch(credential_ref):
+            raise ValueError("model credential_ref must be a normalized credential name")
         if base_url:
             _validate_base_url(base_url)
 

@@ -89,7 +89,7 @@ def _construct_model_config(
 
 def _provider_config(value: object, path: str) -> ProviderConfig:
     data = group_fields(ProviderConfig, value, path)
-    for name in ("provider", "adapter", "model", "base_url", "api_key_env"):
+    for name in ("provider", "adapter", "model", "base_url", "credential_ref"):
         field_value = data.get(name)
         if field_value is not None and not isinstance(field_value, str):
             raise ConfigError(f"'{path}.{name}' must be a string")

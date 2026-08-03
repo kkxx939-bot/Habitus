@@ -56,16 +56,12 @@ class StartupPreflightError(RuntimeError):
 def run_doctor(
     config: M2BOSConfig,
     *,
-    environ: Mapping[str, str] | None = None,
     check_port: bool = True,
     deep: bool = False,
     probe_timeout_seconds: float = 15.0,
 ) -> DoctorReport:
     if not isinstance(config, M2BOSConfig):
         raise TypeError("config must be M2BOSConfig")
-    values = os.environ if environ is None else environ
-    if not isinstance(values, Mapping):
-        raise TypeError("environ must be a string mapping")
     if not isinstance(deep, bool):
         raise TypeError("deep must be boolean")
     if (
@@ -81,13 +77,13 @@ def run_doctor(
         _python_dependency_check("fastapi"),
         _python_dependency_check("uvicorn"),
         _node_check(),
-        _credential_check(config, values),
+        _credential_check(config),
         _ingress_capacity_check(config),
     ]
     if check_port:
         checks.append(_port_check(config.http.host, config.http.port))
     if deep:
-        checks.extend(_deep_checks(config, values, timeout_seconds=float(probe_timeout_seconds)))
+        checks.extend(_deep_checks(config, timeout_seconds=float(probe_timeout_seconds)))
     return DoctorReport(tuple(checks))
 
 
@@ -108,13 +104,13 @@ def run_doctor_from_env(
     except (ConfigError, OSError, TypeError, ValueError) as exc:
         detail = str(exc).strip() or "configuration could not be loaded"
         return DoctorReport((DoctorCheck("config", DoctorStatus.FAIL, detail),))
-    return run_doctor(
+    report = run_doctor(
         config,
-        environ=values,
         check_port=check_port,
         deep=deep,
         probe_timeout_seconds=probe_timeout_seconds,
     )
+    return DoctorReport((_config_file_security(values), *report.checks))
 
 
 def run_startup_preflight(
@@ -122,7 +118,9 @@ def run_startup_preflight(
     *,
     environ: Mapping[str, str] | None = None,
 ) -> None:
-    report = run_doctor(config, environ=environ, check_port=True)
+    report = run_doctor(config, check_port=True)
+    if environ is not None:
+        report = DoctorReport((_config_file_security(environ), *report.checks))
     failures = [check for check in report.checks if check.status is DoctorStatus.FAIL]
     if failures:
         detail = "; ".join(f"{check.name}: {check.detail}" for check in failures)
@@ -196,7 +194,6 @@ def _ingress_capacity_check(config: M2BOSConfig) -> DoctorCheck:
 
 def _deep_checks(
     config: M2BOSConfig,
-    environ: Mapping[str, str],
     *,
     timeout_seconds: float,
 ) -> list[DoctorCheck]:
@@ -205,7 +202,7 @@ def _deep_checks(
     try:
         from Runtime import build_runtime
 
-        runtime = build_runtime(config, environ=environ)
+        runtime = build_runtime(config)
     except Exception as exc:
         return [DoctorCheck("component_construction", DoctorStatus.FAIL, type(exc).__name__)]
 
@@ -257,25 +254,52 @@ def _deep_checks(
     return checks
 
 
-def _credential_check(config: M2BOSConfig, environ: Mapping[str, str]) -> DoctorCheck:
-    required: set[str] = set()
+def _credential_check(config: M2BOSConfig) -> DoctorCheck:
+    required: set[tuple[str, str]] = set()
     model_routes = [config.models.chat.route, config.models.embedding.route]
     if config.models.rerank is not None:
         model_routes.append(config.models.rerank.route)
     for route in model_routes:
-        if route.api_key_env:
-            required.add(route.api_key_env)
+        if route.credential_ref:
+            required.add((route.credential_ref, "api_key"))
     vector_configs = (config.memory.vector_store, config.conversation.summary_vector_store)
     for vector in vector_configs:
-        required.update(vector.route.credential_env.values())
+        reference = vector.route.credential_ref
+        if reference:
+            required.update((reference, field) for field in config.credentials.resolve(reference))
+    tracing_reference = config.observability.tracing.credential_ref
+    if config.observability.tracing.enabled and tracing_reference:
+        required.update(
+            (tracing_reference, field)
+            for field in config.credentials.resolve(tracing_reference)
+        )
     missing = sorted(
-        name
-        for name in required
-        if not isinstance(environ.get(name), str) or not environ[name].strip()
+        f"credentials.{reference}.{field}"
+        for reference, field in required
+        if not config.credentials.resolve(reference).get(field, "").strip()
     )
     if missing:
-        return DoctorCheck("credentials", DoctorStatus.FAIL, "missing environment variables: " + ", ".join(missing))
-    return DoctorCheck("credentials", DoctorStatus.PASS, f"resolved {len(required)} configured environment variables")
+        return DoctorCheck("credentials", DoctorStatus.FAIL, "empty YAML credential fields: " + ", ".join(missing))
+    references = {reference for reference, _field in required}
+    return DoctorCheck("credentials", DoctorStatus.PASS, f"resolved {len(references)} named YAML credentials")
+
+
+def _config_file_security(environ: Mapping[str, str]) -> DoctorCheck:
+    raw_path = environ.get("M2BOS_CONFIG_FILE")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return DoctorCheck("config_permissions", DoctorStatus.FAIL, "M2BOS_CONFIG_FILE is missing")
+    path = Path(raw_path).expanduser().absolute()
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError as exc:
+        return DoctorCheck("config_permissions", DoctorStatus.FAIL, type(exc).__name__)
+    if mode & 0o077:
+        return DoctorCheck(
+            "config_permissions",
+            DoctorStatus.FAIL,
+            f"{path} mode={mode:03o}; expected no group or other permissions",
+        )
+    return DoctorCheck("config_permissions", DoctorStatus.PASS, f"{path} mode={mode:03o}")
 
 
 def _port_check(host: str, port: int) -> DoctorCheck:

@@ -43,7 +43,7 @@ def route(**overrides: object) -> ProviderConfig:
         "adapter": "test-adapter",
         "model": "test-model",
         "base_url": "https://example.com/v1",
-        "api_key_env": "TEST_API_KEY",
+        "credential_ref": "test-credential",
         "max_retries": 0,
     }
     values.update(overrides)
@@ -55,7 +55,7 @@ def test_provider_route_normalizes_identity_but_never_embeds_secret_values() -> 
     assert config.provider == "test.provider"
     assert config.adapter == "test-adapter"
     assert config.base_url == "https://example.com/v1"
-    assert config.api_key_env == "TEST_API_KEY"
+    assert config.credential_ref == "test-credential"
 
 
 @pytest.mark.parametrize(
@@ -64,7 +64,7 @@ def test_provider_route_normalizes_identity_but_never_embeds_secret_values() -> 
         {"base_url": "http://remote.example.com/v1"},
         {"base_url": "https://user:secret@example.com/v1"},
         {"base_url": "https://example.com/v1?token=secret"},
-        {"api_key_env": "not-valid-name"},
+        {"credential_ref": "not/valid"},
         {"extra_headers": {"Authorization": "secret"}},
         {"extra_body": {"model": "override"}},
     ],
@@ -160,7 +160,7 @@ def test_factory_resolves_by_capability_and_adapter_and_wraps_embedding_runtime(
     factory = ProviderFactory()
     factory.register_adapter("embedding", "test-adapter", lambda context: FakeEmbeddingProvider())
     config = EmbeddingModelConfig(route(), dimension=2)
-    embedder = factory.create_embedder(config, environ={"TEST_API_KEY": "secret"})
+    embedder = factory.create_embedder(config, api_key="secret")
 
     assert isinstance(embedder, EmbeddingClient)
     assert asyncio.run(embedder.embed_query("query")).dimension == 2
@@ -171,7 +171,7 @@ def test_factory_does_not_guess_adapter_or_silently_fall_back() -> None:
     factory = ProviderFactory()
     config = EmbeddingModelConfig(route(adapter="unknown"), dimension=2)
     with pytest.raises(ModelConfigurationError, match="not registered"):
-        factory.create_embedder(config, environ={"TEST_API_KEY": "secret"})
+        factory.create_embedder(config, api_key="secret")
 
 
 def test_factory_requires_declared_credential_and_matching_component_identity() -> None:
@@ -179,9 +179,9 @@ def test_factory_requires_declared_credential_and_matching_component_identity() 
     factory.register_adapter("embedding", "test-adapter", lambda context: FakeEmbeddingProvider(model="wrong"))
     config = EmbeddingModelConfig(route(), dimension=2)
     with pytest.raises(ModelConfigurationError, match="credential"):
-        factory.create_embedder(config, environ={})
+        factory.create_embedder(config, api_key="")
     with pytest.raises(ModelConfigurationError, match="identity"):
-        factory.create_embedder(config, environ={"TEST_API_KEY": "secret"})
+        factory.create_embedder(config, api_key="secret")
 
 
 def test_builtin_registry_has_chat_embedding_and_real_rerank_protocols() -> None:
@@ -193,7 +193,7 @@ def test_builtin_registry_has_chat_embedding_and_real_rerank_protocols() -> None
 
     rerank = RerankModelConfig(route(adapter="future-rerank"))
     with pytest.raises(ModelConfigurationError, match="not registered"):
-        factory.create_reranker(rerank, environ={"TEST_API_KEY": "secret"})
+        factory.create_reranker(rerank, api_key="secret")
 
 
 def test_builtin_registry_constructs_real_protocol_adapters_without_network_io() -> None:
@@ -211,9 +211,9 @@ def test_builtin_registry_constructs_real_protocol_adapters_without_network_io()
         route(adapter="openai_compatible_rerank"),
     )
 
-    chat = factory.create_chat_provider(chat_config, environ={"TEST_API_KEY": "secret"})
-    embedder = factory.create_embedder(embedding_config, environ={"TEST_API_KEY": "secret"})
-    reranker = factory.create_reranker(rerank_config, environ={"TEST_API_KEY": "secret"})
+    chat = factory.create_chat_provider(chat_config, api_key="secret")
+    embedder = factory.create_embedder(embedding_config, api_key="secret")
+    reranker = factory.create_reranker(rerank_config, api_key="secret")
 
     assert isinstance(chat, OpenAICompatibleChatProvider)
     assert isinstance(embedder, EmbeddingClient)
@@ -240,5 +240,5 @@ def test_builtin_adapter_builders_reject_a_capability_config_from_the_wrong_prot
 def test_factory_can_accept_a_future_real_rerank_adapter_without_changing_retrieval_contract() -> None:
     factory = ProviderFactory()
     factory.register_adapter("rerank", "test-adapter", lambda context: FakeReranker())
-    reranker = factory.create_reranker(RerankModelConfig(route()), environ={"TEST_API_KEY": "secret"})
+    reranker = factory.create_reranker(RerankModelConfig(route()), api_key="secret")
     assert asyncio.run(reranker.rerank("query", ("a", "b"))) == (1.0, 1.0)

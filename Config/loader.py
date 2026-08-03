@@ -57,8 +57,14 @@ def load_config_object(path: str | Path) -> dict[str, object]:
         parsed = yaml.load(decoded, Loader=_StrictSafeLoader)
     except ConfigError:
         raise
+    except yaml.MarkedYAMLError as exc:
+        mark = exc.problem_mark
+        location = ""
+        if mark is not None:
+            location = f" at line {mark.line + 1}, column {mark.column + 1}"
+        raise ConfigError(f"config file contains invalid YAML{location}") from exc
     except yaml.YAMLError as exc:
-        raise ConfigError(f"config file contains invalid YAML: {exc}") from exc
+        raise ConfigError("config file contains invalid YAML") from exc
     _reject_non_finite_numbers(parsed, path="config")
     return strict_object(parsed, path="config")
 

@@ -66,7 +66,7 @@ def test_factory_uses_one_config_and_creates_storage_scoped_instance_lock(
 
     assert result is app
     from_env.assert_called_once_with(environ=environ)
-    build.assert_called_once_with(config, environ=environ)
+    build.assert_called_once_with(config)
     configure.assert_called_once_with(level="WARNING")
     call = create.call_args
     assert call.args == (runtime,)
@@ -106,7 +106,7 @@ def test_doctor_subcommand_uses_the_same_config_and_never_builds_runtime(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     doctor = Mock(return_value=_DoctorReport())
-    monkeypatch.setattr(local_cli, "run_doctor_from_env", doctor)
+    monkeypatch.setattr(doctor_module, "run_doctor_from_env", doctor)
 
     local_cli.main(["doctor", "--config", "/tmp/doctor.yaml", "--json", "--skip-port"])
 

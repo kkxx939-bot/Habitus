@@ -9,7 +9,7 @@ import pytest
 from integrations.local_service import plugin_cli
 
 
-@pytest.mark.parametrize("command", ["install", "status", "update", "remove"])
+@pytest.mark.parametrize("command", ["harnesses", "install", "status", "update", "remove"])
 def test_plugin_cli_delegates_lifecycle_action(
     command: str,
     monkeypatch: pytest.MonkeyPatch,

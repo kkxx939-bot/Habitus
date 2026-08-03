@@ -34,7 +34,6 @@ def runtime_pair(tmp_path: Path):
                 providers=providers,
                 vector_stores=vectors,
                 path_lock=PathLock(ProcessLocalLockStore()),
-                environ={},
             )
         )
     return tuple(values)

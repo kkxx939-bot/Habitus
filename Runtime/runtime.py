@@ -147,11 +147,17 @@ class Runtime:
         self,
         config: M2BOSConfig,
         components: RuntimeComponents,
+        *,
+        conversation_adapters: ConversationAdapterRegistry | None = None,
     ) -> None:
         if not isinstance(config, M2BOSConfig):
             raise TypeError("config must be M2BOSConfig")
         if not isinstance(components, RuntimeComponents):
             raise TypeError("components must be RuntimeComponents")
+        if conversation_adapters is not None and not isinstance(
+            conversation_adapters, ConversationAdapterRegistry
+        ):
+            raise TypeError("conversation_adapters must be ConversationAdapterRegistry or None")
         if components.memory.tree.root != config.memory_root:
             raise ValueError("runtime components are bound to another memory root")
         if components.conversation.journal.layout.root != config.conversation_root:
@@ -167,7 +173,11 @@ class Runtime:
             components.workflow.receipts,
             observer=components.infrastructure.observer,
         )
-        self._conversation_adapters = ConversationAdapterRegistry.with_builtins()
+        self._conversation_adapters = (
+            conversation_adapters
+            if conversation_adapters is not None
+            else ConversationAdapterRegistry.with_builtins()
+        )
         self._health = RuntimeHealthService(components)
 
     @property

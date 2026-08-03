@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 from Config import M2BOSConfig
 from foundation.observability import CompositeObserver, MetricRegistry, Observer
 from infrastructure.observability import ManagedObservability
@@ -57,6 +55,7 @@ from memory.workflow import (
     MemoryJobStore,
 )
 from ModelClient import ProviderFactory, StructuredChatClient
+from pre.conversation import ConversationAdapterRegistry
 from Runtime.components import (
     RuntimeComponents,
     RuntimeConversation,
@@ -75,8 +74,8 @@ def build_runtime(
     *,
     providers: ProviderFactory | None = None,
     vector_stores: VectorStoreFactory | None = None,
+    conversation_adapters: ConversationAdapterRegistry | None = None,
     path_lock: PathLock | None = None,
-    environ: Mapping[str, str] | None = None,
     observer: Observer | None = None,
 ) -> Runtime:
     """无存储写入、无模型请求地完成一次显式依赖组装。"""
@@ -87,10 +86,12 @@ def build_runtime(
         raise TypeError("providers must be ProviderFactory or None")
     if vector_stores is not None and not isinstance(vector_stores, VectorStoreFactory):
         raise TypeError("vector_stores must be VectorStoreFactory or None")
+    if conversation_adapters is not None and not isinstance(
+        conversation_adapters, ConversationAdapterRegistry
+    ):
+        raise TypeError("conversation_adapters must be ConversationAdapterRegistry or None")
     if path_lock is not None and not isinstance(path_lock, PathLock):
         raise TypeError("path_lock must be PathLock or None")
-    if environ is not None and not isinstance(environ, Mapping):
-        raise TypeError("environ must be a string mapping or None")
     if observer is not None and not callable(getattr(observer, "record", None)):
         raise TypeError("observer must implement record")
 
@@ -106,6 +107,7 @@ def build_runtime(
     managed_observability = ManagedObservability(
         config.observability,
         workflow_root=config.workflow_root,
+        tracing_headers=config.credentials.resolve(config.observability.tracing.credential_ref),
     )
     observers: list[Observer] = [observability, managed_observability]
     if observer is not None:
@@ -152,13 +154,13 @@ def build_runtime(
 
     embedder = resolved_providers.create_embedder(
         model_config.embedding,
-        environ=environ,
+        api_key=_model_api_key(config, model_config.embedding.route.credential_ref),
         observer=operation_observer,
     )
     reranker = (
         resolved_providers.create_reranker(
             model_config.rerank,
-            environ=environ,
+            api_key=_model_api_key(config, model_config.rerank.route.credential_ref),
             observer=operation_observer,
         )
         if model_config.rerank is not None
@@ -172,7 +174,7 @@ def build_runtime(
             max_search_hits=memory_config.vector_index.max_search_hits,
             max_record_chars=memory_config.vector_index.max_record_chars,
         ),
-        environ=environ,
+        credentials=config.credentials.resolve(memory_config.vector_store.route.credential_ref),
         path_lock=memory_vector_lock,
     )
     vector_index = PersistentMemoryVectorIndex(
@@ -206,7 +208,7 @@ def build_runtime(
 
     chat = resolved_providers.create_chat_client(
         model_config.chat,
-        environ=environ,
+        api_key=_model_api_key(config, model_config.chat.route.credential_ref),
         observer=operation_observer,
     )
     structured_chat = StructuredChatClient(
@@ -300,7 +302,9 @@ def build_runtime(
             max_search_hits=conversation_config.summary_vector_index.max_search_hits,
             max_record_chars=conversation_config.summary_vector_index.max_record_chars,
         ),
-        environ=environ,
+        credentials=config.credentials.resolve(
+            conversation_config.summary_vector_store.route.credential_ref
+        ),
         path_lock=summary_vector_lock,
     )
     summary_vector_index = PersistentConversationSummaryVectorIndex(
@@ -442,7 +446,7 @@ def build_runtime(
             lifecycle_worker=lifecycle_worker,
         ),
     )
-    return Runtime(config, components)
+    return Runtime(config, components, conversation_adapters=conversation_adapters)
 
 
 def _builtin_provider_factory() -> ProviderFactory:
@@ -453,6 +457,11 @@ def _builtin_provider_factory() -> ProviderFactory:
     providers = ProviderFactory()
     register_builtin_adapters(providers)
     return providers
+
+
+def _model_api_key(config: M2BOSConfig, reference: str) -> str:
+    credential = config.credentials.resolve(reference)
+    return credential.get("api_key", "")
 
 
 __all__ = ["build_runtime"]

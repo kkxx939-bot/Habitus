@@ -47,7 +47,7 @@ def route(**overrides: object) -> ProviderConfig:
         "adapter": "test-adapter",
         "model": "test-model",
         "base_url": "https://example.com/v1",
-        "api_key_env": "TEST_API_KEY",
+        "credential_ref": "test-credential",
     }
     values.update(overrides)
     return ProviderConfig(**values)
@@ -797,15 +797,15 @@ def test_provider_route_rejects_insecure_or_non_origin_base_url(base_url: str) -
         route(base_url=base_url)
 
 
-@pytest.mark.parametrize("name", ["", "API_KEY", "_API_KEY", "A1", "provider_api_key"])
-def test_provider_route_accepts_empty_or_valid_environment_variable_name(name: str) -> None:
-    assert route(api_key_env=f" {name} ").api_key_env == name
+@pytest.mark.parametrize("name", ["", "provider", "Provider_Key", "provider-key", "provider.key"])
+def test_provider_route_accepts_empty_or_valid_credential_reference(name: str) -> None:
+    assert route(credential_ref=f" {name} ").credential_ref == name.lower()
 
 
-@pytest.mark.parametrize("name", ["1KEY", "API-KEY", "API.KEY", "API KEY", "$API_KEY", "中文"])
-def test_provider_route_rejects_invalid_environment_variable_name(name: str) -> None:
+@pytest.mark.parametrize("name", ["1key", "bad/name", "bad name", "$api_key", "中文"])
+def test_provider_route_rejects_invalid_credential_reference(name: str) -> None:
     with pytest.raises(ValueError):
-        route(api_key_env=name)
+        route(credential_ref=name)
 
 
 PROVIDER_INTEGER_BOUNDS = (

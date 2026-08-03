@@ -32,11 +32,13 @@ test = [
 
 [project.scripts]
 m2bos-benchmark = "benchmark.cli:main"
+m2bos = "integrations.local_service.cli:main"
+m2bos-server = "integrations.local_service.cli:main"
 m2bos-http = "integrations.local_service.cli:main"
 m2bos-plugin = "integrations.local_service.plugin_cli:main"
 
 [tool.setuptools.data-files]
-"share/m2bos/plugins" = ["plugins/install-memory-plugin.mjs", "plugins/package.json"]
+"share/m2bos/plugins" = ["plugins/harnesses.mjs", "plugins/install-memory-plugin.mjs", "plugins/package.json"]
 "share/m2bos/plugins/memory-plugin-shared" = ["plugins/memory-plugin-shared/doctor.mjs"]
 "share/m2bos/plugins/memory-plugin-shared/lib" = ["plugins/memory-plugin-shared/lib/*.mjs"]
 "share/m2bos/plugins/m2bos-memory/.codex-plugin" = ["plugins/m2bos-memory/.codex-plugin/plugin.json"]

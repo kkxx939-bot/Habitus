@@ -307,36 +307,26 @@ def test_vector_route_rejects_invalid_provider_or_adapter(field: str, value: obj
         VectorStoreRouteConfig(**{field: value})
 
 
-@pytest.mark.parametrize(
-    "credential_env",
-    [
-        {"api_key": "API_KEY"},
-        {"Access_Key": " VOLC_ACCESS_KEY "},
-        {"token-1": "TOKEN_1"},
-    ],
-)
-def test_vector_route_normalizes_credential_names_and_env_values(credential_env: dict[str, str]) -> None:
-    route = VectorStoreRouteConfig(credential_env=credential_env)
-    assert all(name == name.lower() for name in route.credential_env)
-    assert all(value == value.strip() for value in route.credential_env.values())
+@pytest.mark.parametrize("credential_ref", ["", "vikingdb", "VikingDB.Main", "private-vector"])
+def test_vector_route_normalizes_credential_reference(credential_ref: str) -> None:
+    route = VectorStoreRouteConfig(credential_ref=f" {credential_ref} ")
+    assert route.credential_ref == credential_ref.lower()
 
 
 @pytest.mark.parametrize(
-    "credential_env",
+    "credential_ref",
     [
         None,
         [],
-        {"": "API_KEY"},
-        {1: "API_KEY"},
-        {"api_key": ""},
-        {"api_key": "1BAD"},
-        {"api_key": "BAD-NAME"},
-        {"API_KEY": "ONE", "api_key": "TWO"},
+        "1bad",
+        "bad/name",
+        "bad name",
+        "$credential",
     ],
 )
-def test_vector_route_rejects_invalid_or_duplicate_credential_mapping(credential_env: object) -> None:
+def test_vector_route_rejects_invalid_credential_reference(credential_ref: object) -> None:
     with pytest.raises((TypeError, ValueError)):
-        VectorStoreRouteConfig(credential_env=credential_env)  # type: ignore[arg-type]
+        VectorStoreRouteConfig(credential_ref=credential_ref)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

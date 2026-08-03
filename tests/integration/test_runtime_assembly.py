@@ -28,6 +28,7 @@ from ModelClient import (
     ProviderCapabilities,
     ProviderFactory,
 )
+from pre.conversation import ConversationAdapterRegistry
 from Runtime import (
     LifecycleWorkerState,
     MemoryWorkerState,
@@ -186,36 +187,96 @@ def runtime_dependencies() -> tuple[ProviderFactory, VectorStoreFactory]:
     return providers, vectors
 
 
-def runtime_config(tmp_path: Path) -> M2BOSConfig:
+def runtime_config(tmp_path: Path, *, with_credentials: bool = False) -> M2BOSConfig:
     payload = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
     payload["models"]["chat"]["route"].update(
         provider="fake",
         adapter="fake_chat",
-        api_key_env=None,
+        credential_ref="deepseek" if with_credentials else "",
     )
     payload["models"]["embedding"]["route"].update(
         provider="fake",
         adapter="fake_embedding",
-        api_key_env=None,
+        credential_ref="ark" if with_credentials else "",
     )
     payload["models"]["rerank"]["route"].update(
         provider="fake",
         adapter="fake_rerank",
-        api_key_env=None,
+        credential_ref="dashscope" if with_credentials else "",
     )
     for name in ("vector_store",):
         payload["memory"][name]["route"].update(
             provider="fake",
             adapter="fake_vector",
-            credential_env={},
+            credential_ref="vikingdb" if with_credentials else "",
         )
     payload["conversation"]["summary_vector_store"]["route"].update(
         provider="fake",
         adapter="fake_vector",
-        credential_env={},
+        credential_ref="vikingdb" if with_credentials else "",
     )
+    if with_credentials:
+        payload["credentials"]["deepseek"]["api_key"] = "deepseek-secret"
+        payload["credentials"]["ark"]["api_key"] = "ark-secret"
+        payload["credentials"]["dashscope"]["api_key"] = "dashscope-secret"
+        payload["credentials"]["vikingdb"]["access_key"] = "viking-access"
+        payload["credentials"]["vikingdb"]["secret_key"] = "viking-secret"
     return M2BOSConfig.from_mapping(payload)
+
+
+def test_assembly_resolves_each_provider_and_database_credential_by_reference(tmp_path: Path) -> None:
+    model_credentials: dict[str, str] = {}
+    vector_credentials: list[dict[str, str]] = []
+    providers = ProviderFactory()
+
+    def chat_builder(context):
+        model_credentials["chat"] = context.api_key
+        return FakeChatProvider(context.route.provider, context.route.model)
+
+    def embedding_builder(context):
+        model_credentials["embedding"] = context.api_key
+        return FakeEmbeddingProvider(
+            context.route.provider,
+            context.route.model,
+            context.config.dimension,
+        )
+
+    def rerank_builder(context):
+        model_credentials["rerank"] = context.api_key
+        return FakeRerankProvider(context.route.provider, context.route.model)
+
+    providers.register_adapter("chat", "fake_chat", chat_builder)
+    providers.register_adapter("embedding", "fake_embedding", embedding_builder)
+    providers.register_adapter("rerank", "fake_rerank", rerank_builder)
+    vectors = VectorStoreFactory()
+
+    def vector_builder(context):
+        vector_credentials.append(dict(context.credentials))
+        return FakeVectorBackend(context.config.provider, context.config.collection)
+
+    vectors.register_adapter(
+        "fake_vector",
+        vector_builder,
+        requires_cross_process_publication_fencing=False,
+    )
+
+    build_runtime(
+        runtime_config(tmp_path, with_credentials=True),
+        providers=providers,
+        vector_stores=vectors,
+        path_lock=PathLock(ProcessLocalLockStore()),
+    )
+
+    assert model_credentials == {
+        "chat": "deepseek-secret",
+        "embedding": "ark-secret",
+        "rerank": "dashscope-secret",
+    }
+    assert vector_credentials == [
+        {"access_key": "viking-access", "secret_key": "viking-secret"},
+        {"access_key": "viking-access", "secret_key": "viking-secret"},
+    ]
 
 
 def test_assembly_wires_one_shared_chain_without_touching_storage(tmp_path: Path) -> None:
@@ -227,7 +288,6 @@ def test_assembly_wires_one_shared_chain_without_touching_storage(tmp_path: Path
         providers=providers,
         vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
-        environ={},
     )
 
     components = runtime.components
@@ -246,6 +306,29 @@ def test_assembly_wires_one_shared_chain_without_touching_storage(tmp_path: Path
     assert components.workflow.worker.runner is components.workflow.runner
 
 
+def test_assembly_accepts_an_external_harness_protocol_registry(tmp_path: Path) -> None:
+    class FutureHarnessAdapter:
+        protocol = "future_harness"
+
+        def adapt(self, _payload, _context):
+            raise AssertionError("protocol listing must not invoke adaptation")
+
+    config = runtime_config(tmp_path)
+    providers, vectors = runtime_dependencies()
+    adapters = ConversationAdapterRegistry()
+    adapters.register(FutureHarnessAdapter())
+
+    runtime = build_runtime(
+        config,
+        providers=providers,
+        vector_stores=vectors,
+        conversation_adapters=adapters,
+        path_lock=PathLock(ProcessLocalLockStore()),
+    )
+
+    assert runtime.conversation_protocols() == ("future_harness",)
+
+
 def test_default_vector_publication_fences_use_dedicated_lock_databases(tmp_path: Path) -> None:
     config = runtime_config(tmp_path)
     providers, vectors = runtime_dependencies()
@@ -254,7 +337,6 @@ def test_default_vector_publication_fences_use_dedicated_lock_databases(tmp_path
         config,
         providers=providers,
         vector_stores=vectors,
-        environ={},
     )
 
     components = runtime.components
@@ -279,7 +361,6 @@ def test_initialize_is_idempotent_and_creates_only_local_durable_roots(tmp_path:
         providers=providers,
         vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
-        environ={},
     )
 
     first = runtime.initialize()
@@ -320,7 +401,6 @@ def test_disabled_recall_lifecycle_ignores_bad_store_and_skips_batch_constraint(
         providers=providers,
         vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
-        environ={},
     )
     runtime.initialize()
 
@@ -338,7 +418,6 @@ def test_runtime_start_stop_restart_and_close_coordinate_both_workers(tmp_path: 
             providers=providers,
             vector_stores=vectors,
             path_lock=PathLock(ProcessLocalLockStore()),
-            environ={},
         )
 
         await runtime.start()
@@ -381,7 +460,6 @@ def test_runtime_public_conversation_interface_returns_pending_consistency_handl
             providers=providers,
             vector_stores=vectors,
             path_lock=PathLock(ProcessLocalLockStore()),
-            environ={},
         )
         runtime.initialize()
         address = ConversationAddress("conversation-public", date(2026, 7, 28))
@@ -539,7 +617,6 @@ def test_runtime_memory_search_facades_use_the_real_search_service_and_lifecycle
             providers=providers,
             vector_stores=vectors,
             path_lock=PathLock(ProcessLocalLockStore()),
-            environ={},
         )
 
         with pytest.raises(RuntimeStateError, match="initialized runtime"):

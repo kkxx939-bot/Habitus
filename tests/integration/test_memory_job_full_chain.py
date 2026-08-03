@@ -42,27 +42,27 @@ def runtime_config(tmp_path: Path, *, max_attempts: int = 3) -> M2BOSConfig:
     payload["models"]["chat"]["route"].update(
         provider="fake",
         adapter="fake_chat",
-        api_key_env=None,
+        credential_ref="",
     )
     payload["models"]["embedding"]["route"].update(
         provider="fake",
         adapter="fake_embedding",
-        api_key_env=None,
+        credential_ref="",
     )
     payload["models"]["rerank"]["route"].update(
         provider="fake",
         adapter="fake_rerank",
-        api_key_env=None,
+        credential_ref="",
     )
     payload["memory"]["vector_store"]["route"].update(
         provider="fake",
         adapter="fake_vector",
-        credential_env={},
+        credential_ref="",
     )
     payload["conversation"]["summary_vector_store"]["route"].update(
         provider="fake",
         adapter="fake_vector",
-        credential_env={},
+        credential_ref="",
     )
     payload["workflow"]["jobs"]["max_attempts"] = max_attempts
     return M2BOSConfig.from_mapping(payload)
@@ -261,7 +261,6 @@ def test_full_job_chain_commits_summary_receipt_indexes_and_job_before_cleaning_
         providers=providers,
         vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
-        environ={},
     )
     runtime.initialize()
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
@@ -308,7 +307,6 @@ def test_committed_l2_job_resumes_after_vector_timeout_without_replanning(
         providers=providers,
         vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
-        environ={},
     )
     runtime.initialize()
     address = ConversationAddress("conversation-recovery", date(2026, 7, 2))
@@ -373,7 +371,6 @@ def test_lifecycle_releases_history_then_purges_source_but_preserves_summary_sem
         providers=providers,
         vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
-        environ={},
     )
     runtime.initialize()
     address = ConversationAddress("conversation-lifecycle", date(2026, 7, 3))

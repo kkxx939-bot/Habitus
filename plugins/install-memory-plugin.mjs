@@ -6,39 +6,17 @@ import { cp, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFi
 import { homedir } from "node:os";
 import { basename, dirname, join, parse, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  HARNESS_REGISTRY,
+  MARKETPLACE_NAME,
+  PLUGIN_ID,
+  PLUGIN_NAME,
+  publicHarnessDescriptor,
+} from "./harnesses.mjs";
 
 const REPOSITORY_PLUGINS = dirname(fileURLToPath(import.meta.url));
-const MARKETPLACE = "m2bos-local";
-const PLUGIN = "m2bos-memory";
-const PLUGIN_ID = `${PLUGIN}@${MARKETPLACE}`;
 const INSTALL_SCHEMA = 1;
-const ACTIONS = new Set(["install", "status", "update", "remove"]);
-
-function marketplaceManifests() {
-  return {
-    codex: {
-      name: MARKETPLACE,
-      interface: { displayName: "m2bOS Local" },
-      plugins: [{
-        name: PLUGIN,
-        source: { source: "local", path: "./plugins/m2bos-memory" },
-        policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
-        category: "Productivity",
-      }],
-    },
-    claude: {
-      name: MARKETPLACE,
-      description: "Local m2bOS plugins for Claude Code.",
-      owner: { name: "m2bOS" },
-      plugins: [{
-        name: PLUGIN,
-        description: "Single-user local semantic memory for Claude Code.",
-        source: "./plugins/m2bos-memory-claude-code",
-        category: "productivity",
-      }],
-    },
-  };
-}
+const ACTIONS = new Set(["install", "status", "update", "remove", "harnesses"]);
 
 function dedicatedRoot(root, sourceRoot) {
   const resolvedRoot = resolve(root);
@@ -60,9 +38,14 @@ async function syncDirectory(path) {
   finally { await handle.close(); }
 }
 
-async function sourceDigest(sourceRoot) {
+async function sourceDigest(sourceRoot, registry) {
   const hash = createHash("sha256");
-  for (const name of ["m2bos-memory", "m2bos-memory-claude-code", "memory-plugin-shared"]) {
+  const names = [
+    ...new Set(registry.list().map((definition) => definition.pluginDirectory)),
+    "memory-plugin-shared",
+    "harnesses.mjs",
+  ];
+  for (const name of names.sort()) {
     await digestTree(join(sourceRoot, name), name, hash);
   }
   return hash.digest("hex");
@@ -79,38 +62,35 @@ async function digestTree(path, logicalPath, hash) {
   hash.update(logicalPath).update("\0").update(await readFile(path)).update("\0");
 }
 
-async function stageMarketplace(root, sourceRoot) {
+async function stageMarketplace(root, sourceRoot, registry) {
   const parent = dirname(root);
   await mkdir(parent, { recursive: true, mode: 0o700 });
   const staging = join(parent, `.${basename(root)}.staging-${randomUUID()}`);
   await mkdir(join(staging, "plugins"), { recursive: true, mode: 0o700 });
   try {
-    for (const name of ["m2bos-memory", "m2bos-memory-claude-code"]) {
+    const definitions = registry.list();
+    for (const name of [...new Set(definitions.map((definition) => definition.pluginDirectory))]) {
       await cp(join(sourceRoot, name), join(staging, "plugins", name), {
         recursive: true,
         force: false,
         errorOnExist: true,
       });
     }
-    await mkdir(join(staging, ".agents", "plugins"), { recursive: true, mode: 0o700 });
-    await mkdir(join(staging, ".claude-plugin"), { recursive: true, mode: 0o700 });
-    const manifests = marketplaceManifests();
-    await writeFile(
-      join(staging, ".agents", "plugins", "marketplace.json"),
-      `${JSON.stringify(manifests.codex, null, 2)}\n`,
-      { mode: 0o600 },
-    );
-    await writeFile(
-      join(staging, ".claude-plugin", "marketplace.json"),
-      `${JSON.stringify(manifests.claude, null, 2)}\n`,
-      { mode: 0o600 },
-    );
+    for (const definition of definitions) {
+      const destination = join(staging, definition.marketplaceManifest.path);
+      await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+      await writeFile(
+        destination,
+        `${JSON.stringify(definition.marketplaceManifest.document, null, 2)}\n`,
+        { mode: 0o600 },
+      );
+    }
     await writeFile(
       join(staging, ".m2bos-install.json"),
       `${JSON.stringify({
         schemaVersion: INSTALL_SCHEMA,
-        marketplace: MARKETPLACE,
-        sourceDigest: await sourceDigest(sourceRoot),
+        marketplace: MARKETPLACE_NAME,
+        sourceDigest: await sourceDigest(sourceRoot, registry),
         preparedAt: new Date().toISOString(),
       }, null, 2)}\n`,
       { mode: 0o600 },
@@ -122,9 +102,12 @@ async function stageMarketplace(root, sourceRoot) {
   }
 }
 
-async function swapMarketplace(rootValue, { sourceRoot = REPOSITORY_PLUGINS } = {}) {
+async function swapMarketplace(
+  rootValue,
+  { sourceRoot = REPOSITORY_PLUGINS, registry = HARNESS_REGISTRY } = {},
+) {
   const root = dedicatedRoot(rootValue, sourceRoot);
-  const staging = await stageMarketplace(root, sourceRoot);
+  const staging = await stageMarketplace(root, sourceRoot, registry);
   const backup = `${root}.backup-${randomUUID()}`;
   let hadPrevious = false;
   try {
@@ -187,27 +170,8 @@ class CommandRunner {
   }
 }
 
-function hostDefinition(host) {
-  if (host === "codex") return {
-    command: "codex",
-    marketplaceInventory: ["plugin", "marketplace", "list", "--json"],
-    pluginInventory: ["plugin", "list", "--json", "--available"],
-    marketplaceAdd: (root) => ["plugin", "marketplace", "add", root],
-    marketplaceRemove: ["plugin", "marketplace", "remove", MARKETPLACE],
-    pluginAdd: ["plugin", "add", PLUGIN_ID],
-    pluginRemove: ["plugin", "remove", PLUGIN_ID, "--json"],
-    pluginEnable: null,
-  };
-  return {
-    command: "claude",
-    marketplaceInventory: ["plugin", "marketplace", "list", "--json"],
-    pluginInventory: ["plugin", "list", "--json"],
-    marketplaceAdd: (root) => ["plugin", "marketplace", "add", root],
-    marketplaceRemove: ["plugin", "marketplace", "remove", MARKETPLACE],
-    pluginAdd: ["plugin", "install", PLUGIN_ID],
-    pluginRemove: ["plugin", "uninstall", PLUGIN_ID],
-    pluginEnable: ["plugin", "enable", PLUGIN_ID],
-  };
+function commandArguments(values, root) {
+  return values.map((value) => value === "{root}" ? root : value);
 }
 
 function marketplaceEntries(value) {
@@ -231,20 +195,26 @@ function pluginIsInstalled(entry) {
   return entry?.installed !== false;
 }
 
-async function inspectHost(host, runner) {
-  const definition = hostDefinition(host);
+async function inspectHarness(definition, runner) {
   if (!runner.available(definition.command)) {
-    return { host, available: false, marketplaceSource: null, installed: false, enabled: false };
+    return {
+      harness: definition.id,
+      available: false,
+      marketplaceSource: null,
+      installed: false,
+      enabled: false,
+    };
   }
   const marketplaces = marketplaceEntries(runner.json(definition.command, definition.marketplaceInventory));
   const plugins = pluginEntries(runner.json(definition.command, definition.pluginInventory));
-  const marketplace = marketplaces.find((entry) => entry?.name === MARKETPLACE);
+  const marketplace = marketplaces.find((entry) => entry?.name === MARKETPLACE_NAME);
   const plugin = plugins.find((entry) => (
     entry?.pluginId === PLUGIN_ID
-    || (entry?.name === PLUGIN && (entry?.marketplaceName === MARKETPLACE || entry?.marketplace === MARKETPLACE))
+    || (entry?.name === PLUGIN_NAME
+      && (entry?.marketplaceName === MARKETPLACE_NAME || entry?.marketplace === MARKETPLACE_NAME))
   ));
   return {
-    host,
+    harness: definition.id,
     available: true,
     marketplaceSource: marketplaceSource(marketplace),
     installed: Boolean(plugin && pluginIsInstalled(plugin)),
@@ -252,32 +222,34 @@ async function inspectHost(host, runner) {
   };
 }
 
-function removeHostRegistration(snapshot, runner) {
-  const definition = hostDefinition(snapshot.host);
+function removeHarnessRegistration(snapshot, definition, runner) {
   if (snapshot.installed) runner.run(definition.command, definition.pluginRemove);
   if (snapshot.marketplaceSource) runner.run(definition.command, definition.marketplaceRemove);
 }
 
-function installHostRegistration(snapshot, root, runner, { refresh }) {
-  const definition = hostDefinition(snapshot.host);
+function installHarnessRegistration(snapshot, definition, root, runner, { refresh }) {
   const sourceChanged = snapshot.marketplaceSource != null
     && resolve(snapshot.marketplaceSource) !== resolve(root);
   const mustRefresh = refresh || sourceChanged || (snapshot.installed && !snapshot.enabled);
-  if (mustRefresh) removeHostRegistration(snapshot, runner);
+  if (mustRefresh) removeHarnessRegistration(snapshot, definition, runner);
   const marketplacePresent = snapshot.marketplaceSource && !mustRefresh;
   const pluginPresent = snapshot.installed && snapshot.enabled && !mustRefresh;
-  if (!marketplacePresent) runner.run(definition.command, definition.marketplaceAdd(root));
+  if (!marketplacePresent) {
+    runner.run(definition.command, commandArguments(definition.marketplaceAdd, root));
+  }
   if (!pluginPresent) runner.run(definition.command, definition.pluginAdd);
   if (definition.pluginEnable) runner.run(definition.command, definition.pluginEnable);
 }
 
-async function restoreHost(snapshot, runner) {
+async function restoreHarness(snapshot, definition, runner) {
   if (!snapshot.available) return;
-  const current = await inspectHost(snapshot.host, runner);
-  try { removeHostRegistration(current, runner); } catch {}
+  const current = await inspectHarness(definition, runner);
+  try { removeHarnessRegistration(current, definition, runner); } catch {}
   if (snapshot.marketplaceSource) {
-    const definition = hostDefinition(snapshot.host);
-    runner.run(definition.command, definition.marketplaceAdd(snapshot.marketplaceSource));
+    runner.run(
+      definition.command,
+      commandArguments(definition.marketplaceAdd, snapshot.marketplaceSource),
+    );
     if (snapshot.installed) {
       runner.run(definition.command, definition.pluginAdd);
       if (definition.pluginEnable) runner.run(definition.command, definition.pluginEnable);
@@ -285,14 +257,21 @@ async function restoreHost(snapshot, runner) {
   }
 }
 
-function selectedHosts(host) {
-  return host === "all" ? ["codex", "claude-code"] : [host];
+function selectedHarnesses(values, registry) {
+  const requested = values.length === 0 ? ["all"] : values;
+  if (requested.includes("all")) return registry.list();
+  const unique = new Map();
+  for (const value of requested) {
+    const definition = registry.resolve(value);
+    unique.set(definition.id, definition);
+  }
+  return [...unique.values()];
 }
 
 async function marketplaceStatus(root) {
   try {
     const marker = JSON.parse(await readFile(join(root, ".m2bos-install.json"), "utf8"));
-    if (marker.schemaVersion !== INSTALL_SCHEMA || marker.marketplace !== MARKETPLACE) throw new Error("invalid marker");
+    if (marker.schemaVersion !== INSTALL_SCHEMA || marker.marketplace !== MARKETPLACE_NAME) throw new Error("invalid marker");
     return { prepared: true, sourceDigest: marker.sourceDigest, preparedAt: marker.preparedAt };
   } catch (error) {
     if (error?.code === "ENOENT") return { prepared: false, sourceDigest: null, preparedAt: null };
@@ -309,52 +288,105 @@ async function removeMarketplaceRoot(rootValue) {
   return true;
 }
 
-export async function executePluginLifecycle(options, { runner = new CommandRunner(), sourceRoot = REPOSITORY_PLUGINS } = {}) {
+export async function executePluginLifecycle(
+  options,
+  {
+    runner = new CommandRunner(),
+    sourceRoot = REPOSITORY_PLUGINS,
+    registry = HARNESS_REGISTRY,
+  } = {},
+) {
+  if (options.action === "harnesses") {
+    return {
+      action: "harnesses",
+      harnesses: registry.list().map((definition) => publicHarnessDescriptor(
+        definition,
+        { available: runner.available(definition.command) },
+      )),
+    };
+  }
   const root = dedicatedRoot(options.root, sourceRoot);
-  const hosts = selectedHosts(options.host);
+  const requestedHarnesses = options.harnesses
+    ?? (options.host ? [options.host] : []);
+  const definitions = selectedHarnesses(requestedHarnesses, registry);
+  const allowUnavailable = requestedHarnesses.length === 0 || requestedHarnesses.includes("all");
   const snapshots = [];
-  for (const host of hosts) {
-    const snapshot = await inspectHost(host, runner);
-    if (!snapshot.available && options.host !== "all" && options.action !== "status") {
-      throw new Error(`${host} CLI is not installed`);
+  for (const definition of definitions) {
+    const snapshot = await inspectHarness(definition, runner);
+    if (
+      !snapshot.available
+      && !allowUnavailable
+      && options.action !== "status"
+    ) {
+      throw new Error(`${definition.id} CLI is not installed`);
     }
-    snapshots.push(snapshot);
+    snapshots.push({ snapshot, definition });
   }
   if (options.action === "status") {
-    return { action: "status", root, marketplace: await marketplaceStatus(root), hosts: snapshots };
+    return {
+      action: "status",
+      root,
+      marketplace: await marketplaceStatus(root),
+      harnesses: snapshots.map((value) => value.snapshot),
+    };
   }
   if (options.action === "remove") {
     const processed = [];
     try {
-      for (const snapshot of snapshots.filter((value) => value.available)) {
-        processed.push(snapshot);
-        removeHostRegistration(snapshot, runner);
+      for (const value of snapshots.filter((item) => item.snapshot.available)) {
+        processed.push(value);
+        removeHarnessRegistration(value.snapshot, value.definition, runner);
       }
     } catch (error) {
-      for (const snapshot of processed.reverse()) await restoreHost(snapshot, runner).catch(() => {});
+      for (const value of processed.reverse()) {
+        await restoreHarness(value.snapshot, value.definition, runner).catch(() => {});
+      }
       throw error;
     }
-    return { action: "remove", root, removed: await removeMarketplaceRoot(root), hosts: snapshots };
+    return {
+      action: "remove",
+      root,
+      removed: await removeMarketplaceRoot(root),
+      harnesses: snapshots.map((value) => value.snapshot),
+    };
   }
 
-  const transaction = await swapMarketplace(root, { sourceRoot });
+  const transaction = await swapMarketplace(root, { sourceRoot, registry });
   if (options.prepareOnly) {
     await transaction.commit();
-    return { action: options.action, root, preparedOnly: true, hosts: snapshots };
+    return {
+      action: options.action,
+      root,
+      preparedOnly: true,
+      harnesses: snapshots.map((value) => value.snapshot),
+    };
   }
   const processed = [];
   try {
-    for (const snapshot of snapshots.filter((value) => value.available)) {
-      processed.push(snapshot);
-      installHostRegistration(snapshot, root, runner, { refresh: options.action === "update" });
+    for (const value of snapshots.filter((item) => item.snapshot.available)) {
+      processed.push(value);
+      installHarnessRegistration(
+        value.snapshot,
+        value.definition,
+        root,
+        runner,
+        { refresh: options.action === "update" },
+      );
     }
     await transaction.commit();
   } catch (error) {
     await transaction.rollback();
-    for (const snapshot of processed.reverse()) await restoreHost(snapshot, runner).catch(() => {});
+    for (const value of processed.reverse()) {
+      await restoreHarness(value.snapshot, value.definition, runner).catch(() => {});
+    }
     throw error;
   }
-  return { action: options.action, root, preparedOnly: false, hosts: snapshots };
+  return {
+    action: options.action,
+    root,
+    preparedOnly: false,
+    harnesses: snapshots.map((value) => value.snapshot),
+  };
 }
 
 export function parseArgs(argv) {
@@ -362,21 +394,22 @@ export function parseArgs(argv) {
   const action = ACTIONS.has(values[0]) ? values.shift() : "install";
   const options = {
     action,
-    host: "all",
+    harnesses: [],
     root: join(homedir(), ".m2bos", "plugin-marketplace"),
     prepareOnly: false,
     json: false,
   };
   for (let index = 0; index < values.length; index += 1) {
     const value = values[index];
-    if (value === "--host") options.host = values[++index];
+    if (value === "--host" || value === "--harness") options.harnesses.push(values[++index]);
     else if (value === "--root") options.root = values[++index];
     else if (value === "--prepare-only") options.prepareOnly = true;
     else if (value === "--json") options.json = true;
+    else if (value === "-h" || value === "--help") options.help = true;
     else throw new Error(`unknown argument: ${value}`);
   }
-  if (!["all", "codex", "claude-code"].includes(options.host)) {
-    throw new Error("--host must be all, codex, or claude-code");
+  if (options.harnesses.some((value) => value == null)) {
+    throw new Error("--harness requires an Agent Harness id");
   }
   if (options.prepareOnly && !["install", "update"].includes(options.action)) {
     throw new Error("--prepare-only is valid only for install or update");
@@ -393,9 +426,19 @@ async function isMainModule() {
 if (await isMainModule()) {
   try {
     const options = parseArgs(process.argv.slice(2));
+    if (options.help) {
+      process.stdout.write(
+        "usage: m2bos-plugin [install|status|update|remove|harnesses] "
+        + "[--harness ID|--host ID] [--root PATH] [--prepare-only] [--json]\n",
+      );
+      process.exitCode = 0;
+    } else {
     const result = await executePluginLifecycle(options);
-    if (options.json || options.action === "status") process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    if (options.json || ["status", "harnesses"].includes(options.action)) {
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    }
     else process.stdout.write(`m2bOS plugin ${options.action} completed at ${result.root}\n`);
+    }
   } catch (error) {
     process.stderr.write(`m2bOS plugin lifecycle failed: ${error?.message || error}\n`);
     process.exitCode = 1;

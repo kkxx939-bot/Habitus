@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from Config.conversation import ConversationConfig
+from Config.credentials import CredentialRegistry
 from Config.http import HTTPAPIConfig
 from Config.loader import ConfigError, group_fields, load_config_object, required_field
 from Config.memory import MemoryConfig
@@ -27,6 +28,7 @@ class M2BOSConfig:
 
     storage: StorageConfig
     models: ModelConfig
+    credentials: CredentialRegistry = field(repr=False)
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
@@ -37,6 +39,7 @@ class M2BOSConfig:
         expected = (
             ("storage", self.storage, StorageConfig),
             ("models", self.models, ModelConfig),
+            ("credentials", self.credentials, CredentialRegistry),
             ("http", self.http, HTTPAPIConfig),
             ("observability", self.observability, ObservabilityConfig),
             ("conversation", self.conversation, ConversationConfig),
@@ -86,6 +89,9 @@ class M2BOSConfig:
         return cls(
             storage=StorageConfig.from_mapping(required_field(data, "storage", path="config")),
             models=ModelConfig.from_mapping(required_field(data, "models", path="config")),
+            credentials=CredentialRegistry.from_mapping(
+                required_field(data, "credentials", path="config")
+            ),
             http=HTTPAPIConfig.from_mapping(data.get("http", {})),
             observability=ObservabilityConfig.from_mapping(data.get("observability", {})),
             conversation=ConversationConfig.from_mapping(data.get("conversation", {})),
@@ -97,7 +103,11 @@ class M2BOSConfig:
     def from_file(cls, path: str | Path) -> M2BOSConfig:
         """从单一有界 YAML 文件加载全部 m2bOS 配置。"""
 
-        return cls.from_mapping(load_config_object(path))
+        resolved = Path(path).expanduser().absolute()
+        config = cls.from_mapping(load_config_object(resolved))
+        if config.credentials.contains_secret_values and resolved.stat().st_mode & 0o077:
+            raise ConfigError("secret-bearing config file must not grant group or other permissions")
+        return config
 
     @classmethod
     def from_env(
@@ -106,7 +116,7 @@ class M2BOSConfig:
         environ: Mapping[str, str] | None = None,
         config_path_env: str = "M2BOS_CONFIG_FILE",
     ) -> M2BOSConfig:
-        """环境只选择统一 YAML 文件；模型密钥仍在调用时解析。"""
+        """环境只选择统一 YAML 文件；全部运行配置和秘密值都来自该文件。"""
 
         values = os.environ if environ is None else environ
         if not isinstance(values, Mapping):
@@ -119,6 +129,7 @@ class M2BOSConfig:
         return cls.from_file(raw_path.strip())
 
     def _validate_cross_domain_limits(self) -> None:
+        self._validate_credential_references()
         memory = self.memory
         models = self.models
         workflow = self.workflow
@@ -290,6 +301,25 @@ class M2BOSConfig:
                 raise ConfigError(
                     "Summary fallback limit cannot exceed its rerank candidate bound"
                 )
+
+    def _validate_credential_references(self) -> None:
+        model_routes = [
+            ("config.models.chat.route", self.models.chat.route.credential_ref),
+            ("config.models.embedding.route", self.models.embedding.route.credential_ref),
+        ]
+        if self.models.rerank is not None:
+            model_routes.append(
+                ("config.models.rerank.route", self.models.rerank.route.credential_ref)
+            )
+        for path, reference in model_routes:
+            self.credentials.require_fields(reference, {"api_key"}, path=path)
+        for reference in (
+            self.memory.vector_store.route.credential_ref,
+            self.conversation.summary_vector_store.route.credential_ref,
+            self.observability.tracing.credential_ref,
+        ):
+            if reference:
+                self.credentials.resolve(reference)
 
 
 __all__ = ["M2BOSConfig"]

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from importlib import import_module
@@ -15,10 +14,21 @@ from foundation.observability import ObservationEvent, project_metric_updates
 class OpenTelemetryBackend:
     """拥有自己的 Provider，不覆盖嵌入式宿主进程的全局 Provider。"""
 
-    def __init__(self, config: ObservabilityTracingConfig) -> None:
+    def __init__(
+        self,
+        config: ObservabilityTracingConfig,
+        *,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
         if not isinstance(config, ObservabilityTracingConfig):
             raise TypeError("config must be ObservabilityTracingConfig")
         self.config = config
+        if headers is not None and (
+            not isinstance(headers, Mapping)
+            or any(not isinstance(key, str) or not isinstance(value, str) for key, value in headers.items())
+        ):
+            raise TypeError("OTLP headers must be a string mapping")
+        self._headers = dict(headers or {})
         self._tracer: Any = None
         self._meter: Any = None
         self._tracer_provider: Any = None
@@ -39,7 +49,6 @@ class OpenTelemetryBackend:
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-        headers = _headers_from_environment(self.config.headers_env)
         protocol_module = "http" if self.config.protocol == "http" else "grpc"
         metric_module = import_module(
             f"opentelemetry.exporter.otlp.proto.{protocol_module}.metric_exporter"
@@ -57,7 +66,7 @@ class OpenTelemetryBackend:
             base_endpoint = self.config.endpoint.rstrip("/")
             trace_endpoint = f"{base_endpoint}/v1/traces"
             metric_endpoint = f"{base_endpoint}/v1/metrics"
-        common_kwargs: dict[str, object] = {"headers": headers}
+        common_kwargs: dict[str, object] = {"headers": dict(self._headers)}
         if self.config.protocol == "grpc":
             common_kwargs["insecure"] = self.config.insecure
         span_exporter = span_exporter_type(endpoint=trace_endpoint, **common_kwargs)
@@ -156,16 +165,6 @@ class OpenTelemetryBackend:
             instrument = self._meter.create_histogram(f"m2bos.{name}", unit="s")
         self._instruments[key] = instrument
         return instrument
-
-
-def _headers_from_environment(name: str) -> dict[str, str]:
-    raw = os.environ.get(name, "")
-    headers: dict[str, str] = {}
-    for item in raw.split(","):
-        key, separator, value = item.partition("=")
-        if separator and key.strip() and value.strip():
-            headers[key.strip()] = value.strip()
-    return headers
 
 
 def _trace_attributes(event: ObservationEvent) -> dict[str, str | int | float | bool]:

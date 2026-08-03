@@ -21,7 +21,7 @@ def create_app_from_env(*, environ: Mapping[str, str] | None = None):  # noqa: A
     if config.observability.logging.enabled:
         configure_json_logging(level=config.observability.logging.level)
     run_startup_preflight(config, environ=values)
-    runtime = build_runtime(config, environ=values)
+    runtime = build_runtime(config)
     return create_http_app(
         runtime,
         config=config.http,

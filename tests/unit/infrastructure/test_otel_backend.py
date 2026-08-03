@@ -104,6 +104,16 @@ def test_uninitialized_backend_is_a_noop_for_record_and_span() -> None:
     assert backend._instruments == {}
 
 
+def test_backend_accepts_yaml_resolved_headers_without_exposing_values_in_repr() -> None:
+    backend = OpenTelemetryBackend(
+        ObservabilityTracingConfig(credential_ref="otel"),
+        headers={"authorization": "Bearer private-token"},
+    )
+
+    assert backend._headers == {"authorization": "Bearer private-token"}
+    assert "private-token" not in repr(backend)
+
+
 def test_initialized_backend_projects_metrics_and_safe_trace_event(monkeypatch: pytest.MonkeyPatch) -> None:
     backend = OpenTelemetryBackend(ObservabilityTracingConfig())
     meter = Meter()
