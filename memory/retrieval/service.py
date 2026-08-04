@@ -111,7 +111,7 @@ class ConversationSummaryUseRecorder(Protocol):
 
 
 class SearchService:
-    """参考 OpenViking 的 find/search 分层，返回完整且可溯源的 L2 记忆上下文。"""
+    """按 find/search 分层返回完整且可溯源的 L2 记忆上下文。"""
 
     def __init__(
         self,

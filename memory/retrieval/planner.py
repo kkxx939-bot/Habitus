@@ -16,7 +16,7 @@ from ModelClient import ChatCallContext, ChatMessage, ChatRequest, StructuredCha
 
 
 class MemorySearchQueryPlanner:
-    """参考 OpenViking IntentAnalyzer，但不允许模型决定 URI 或记忆操作。"""
+    """分析召回意图，但不允许模型决定 URI 或记忆操作。"""
 
     def __init__(
         self,

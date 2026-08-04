@@ -63,7 +63,7 @@ class MemoryFieldCompactionResult:
 
 
 class MemoryFieldCompactor:
-    """参考 OpenViking 的字段操作协议，把详细 L2 压缩为可检索概念。"""
+    """按受控字段操作协议，把详细 L2 压缩为可检索概念。"""
 
     def __init__(
         self,

@@ -192,7 +192,7 @@ class ConversationRetentionPlan:
 
 
 class ConversationRetentionPlanner:
-    """参考 OpenViking 的纯规划方式，但只输出非重叠的安全前缀。"""
+    """只输出非重叠且可安全回收的历史前缀规划。"""
 
     def __init__(
         self,

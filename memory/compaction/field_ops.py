@@ -1,4 +1,4 @@
-"""参考 OpenViking 的 KEEP/UPDATE/APPEND 字段压缩协议。"""
+"""KEEP、UPDATE 和 APPEND 字段压缩协议及其确定性合并边界。"""
 
 from __future__ import annotations
 
@@ -183,7 +183,7 @@ class SemanticFieldOperationBatch:
 
 @dataclass(frozen=True)
 class SemanticFieldMergePolicy:
-    """一个业务字段允许的 OpenViking 风格合并边界。"""
+    """返回一个业务字段可接受的确定性合并边界。"""
 
     field: str
     allow_update: bool = True

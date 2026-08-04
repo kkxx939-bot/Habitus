@@ -1,4 +1,4 @@
-"""OpenViking 式的单用户 m2bOS 轻量启动与初始化入口。"""
+"""单用户 m2bOS 的轻量初始化、本地服务和插件启动入口。"""
 
 from __future__ import annotations
 

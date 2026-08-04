@@ -21,7 +21,7 @@ from pre.conversation import ConversationMessageRole, ConversationSegment
 
 
 class MemoryRelatedRetriever:
-    """复用 OpenViking 的固定直读、目录搜索和 Top-N 预取编排。"""
+    """编排固定节点直读、受限目录搜索和有界 Top-N 旧记忆预取。"""
 
     def __init__(
         self,
