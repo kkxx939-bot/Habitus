@@ -132,16 +132,22 @@ def test_summary_reference_has_independent_non_memory_identity_and_stable_finger
     reference = summary_reference(address, summary)
     first = conversation_summary_embedding_fingerprint(
         provider="p",
+        adapter="a",
         model="m",
+        base_url="https://embedding.example.com/v1",
         dimension=2,
         input_mode="text",
+        extra_body={},
         document_parameters={},
     )
     second = conversation_summary_embedding_fingerprint(
         provider="p",
+        adapter="a",
         model="m2",
+        base_url="https://embedding.example.com/v1",
         dimension=2,
         input_mode="text",
+        extra_body={},
         document_parameters={},
     )
     assert reference.identity.startswith("conversation-summary:")

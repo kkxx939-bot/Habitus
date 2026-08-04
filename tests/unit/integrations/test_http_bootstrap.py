@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import ANY, Mock
 
 import pytest
 
@@ -117,5 +117,6 @@ def test_doctor_subcommand_uses_the_same_config_and_never_builds_runtime(
         check_port=False,
         deep=False,
         probe_timeout_seconds=15.0,
+        catalog=ANY,
     )
     assert capsys.readouterr().out == '{"checks": [], "ok": true}\n'

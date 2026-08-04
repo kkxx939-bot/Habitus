@@ -5,8 +5,8 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
-import sysconfig
 from collections.abc import Sequence
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 
 
@@ -43,10 +43,25 @@ def main(argv: Sequence[str] | None = None) -> None:
     raise SystemExit(code)
 
 
-def _plugin_root() -> Path:
-    source = Path(__file__).resolve().parents[2] / "plugins"
-    installed = Path(sysconfig.get_path("data")) / "share" / "m2bos" / "plugins"
-    for candidate in (source, installed):
+def _plugin_root(
+    *,
+    source: Path | None = None,
+    search_paths: Sequence[str | Path] | None = None,
+) -> Path:
+    source_root = Path(__file__).resolve().parents[2] / "plugins" if source is None else source
+    candidates = [source_root]
+    try:
+        package = distribution("m2bos")
+    except PackageNotFoundError:
+        package = None
+    if package is not None:
+        for item in package.files or ():
+            normalized = str(item).replace("\\", "/")
+            if normalized.endswith("share/m2bos/plugins/install-memory-plugin.mjs"):
+                candidates.append(Path(str(package.locate_file(item))).resolve().parent)
+    for entry in sys.path if search_paths is None else search_paths:
+        candidates.append(Path(entry).resolve() / "share" / "m2bos" / "plugins")
+    for candidate in candidates:
         if (candidate / "install-memory-plugin.mjs").is_file():
             return candidate
     raise SystemExit("m2bOS plugin assets are not installed")

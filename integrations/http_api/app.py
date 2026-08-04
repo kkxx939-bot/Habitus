@@ -17,7 +17,6 @@ from foundation.observability import (
     ObservationEvent,
     ObservationStatus,
     Observer,
-    SpanController,
     bind_observation_context,
 )
 from integrations.http import RuntimeHTTPHandlers
@@ -29,6 +28,7 @@ from integrations.http_api.errors import (
     unhandled_error,
 )
 from integrations.http_api.local_security import local_request_violation
+from integrations.http_api.observation import HTTPObservationMiddleware
 from integrations.http_api.request_id import REQUEST_ID_HEADER, RequestIDMiddleware
 from integrations.http_api.schemas import (
     AuditListResult,
@@ -322,7 +322,7 @@ def create_http_app(
         else NullObserver()
     )
     candidate_span_controller = getattr(infrastructure, "managed_observability", None)
-    span_controller: SpanController | None = (
+    span_controller = (
         candidate_span_controller
         if callable(getattr(candidate_span_controller, "start_span", None))
         else None
@@ -395,17 +395,18 @@ def create_http_app(
                     response = await call_next(request)
         return response
 
-    # 通用异常渲染必须位于请求 ID 层之内，确保未处理 500 仍返回同一关联身份。
+    # 请求身份位于最外层；观测包围异常渲染，从而记录最终 HTTP 状态。
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=resolved_config.max_request_bytes,
     )
     app.add_middleware(ExceptionMiddleware, handlers={Exception: unhandled_error})
     app.add_middleware(
-        RequestIDMiddleware,
+        HTTPObservationMiddleware,
         observer=observer,
         span_controller=span_controller,
     )
+    app.add_middleware(RequestIDMiddleware)
 
     app.include_router(_build_public_router(handlers, observer))
     app.include_router(_build_operations_router(handlers))

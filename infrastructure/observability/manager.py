@@ -89,13 +89,31 @@ class ManagedObservability:
         if self.otel is None or not self.otel.initialized:
             yield
             return
-        with self.otel.start_span(
-            category,
-            operation,
-            attributes=attributes,
-            traceparent=traceparent,
-        ):
+        try:
+            manager = self.otel.start_span(
+                category,
+                operation,
+                attributes=attributes,
+                traceparent=traceparent,
+            )
+            manager.__enter__()
+        except Exception as exc:
+            self._degraded_reason = f"otel_span_enter:{type(exc).__name__}"
             yield
+            return
+        try:
+            yield
+        except BaseException as exc:
+            try:
+                manager.__exit__(type(exc), exc, exc.__traceback__)
+            except Exception as span_exc:
+                self._degraded_reason = f"otel_span_exit:{type(span_exc).__name__}"
+            raise
+        else:
+            try:
+                manager.__exit__(None, None, None)
+            except Exception as exc:
+                self._degraded_reason = f"otel_span_exit:{type(exc).__name__}"
 
     def health(self) -> tuple[str, str]:
         if not self._initialized:

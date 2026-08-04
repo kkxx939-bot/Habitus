@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from collections.abc import Mapping
@@ -16,6 +17,8 @@ from Config.loader import load_config_object, strict_object
 from infrastructure.store.filesystem.durable_io.atomic_file import atomic_replace_bytes
 
 DEFAULT_CONFIG_PATH = Path("~/.m2bos/config.yaml")
+DEFAULT_PLUGIN_CONNECTION_PATH = Path("~/.m2bos/agent-plugin/connection.json")
+_MAX_INITIALIZED_CONFIG_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,22 @@ def resolve_config_path(
     return path
 
 
+def resolve_plugin_connection_path(
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> Path:
+    """解析 Hook 的持久连接投影；显式 state root 优先于单用户默认目录。"""
+
+    values = os.environ if environ is None else environ
+    configured = values.get("M2BOS_PLUGIN_STATE_DIR")
+    if isinstance(configured, str) and configured.strip():
+        state_root = Path(configured).expanduser().absolute()
+        if state_root == Path(state_root.anchor):
+            raise ValueError("plugin state root must be a dedicated child directory")
+        return state_root / "connection.json"
+    return DEFAULT_PLUGIN_CONNECTION_PATH.expanduser().absolute()
+
+
 def initialize_config(
     destination: Path,
     *,
@@ -81,24 +100,52 @@ def initialize_config(
     return ConfigInitializationResult(path=path, created=True, backup_path=backup_path)
 
 
+def initialize_config_from_mapping(
+    destination: Path,
+    payload: Mapping[str, object],
+    *,
+    force: bool = False,
+) -> ConfigInitializationResult:
+    """把已经完成云端规划的完整严格配置安全写入目标位置。"""
+
+    if not isinstance(payload, Mapping):
+        raise TypeError("config payload must be an object")
+    M2BOSConfig.from_mapping(payload)
+    encoded = yaml.safe_dump(dict(payload), allow_unicode=True, sort_keys=False).encode("utf-8")
+    if len(encoded) > _MAX_INITIALIZED_CONFIG_BYTES:
+        raise ValueError("m2bOS config exceeds the one-megabyte limit")
+    return _initialize_encoded(resolve_config_path(destination), encoded, force=force)
+
+
+def load_initialization_mapping(source: Path | None = None) -> dict[str, object]:
+    """读取现有配置或包内模板，并返回供初始化规划使用的普通对象。"""
+
+    if source is not None:
+        path = resolve_config_path(source)
+        encoded = _read_required_regular_file(path)
+        payload = load_config_object(path)
+    else:
+        resource = resources.files("Config").joinpath("example.yaml")
+        with resources.as_file(resource) as template:
+            encoded = template.read_bytes()
+            payload = load_config_object(template)
+    if not encoded:
+        raise ValueError("m2bOS config cannot be empty")
+    M2BOSConfig.from_mapping(payload)
+    return payload
+
+
 def missing_credential_fields(path: Path) -> tuple[CredentialField, ...]:
     """返回当前运行链实际引用但尚未填写的秘密字段。"""
 
     config = M2BOSConfig.from_file(path)
-    required: set[CredentialField] = set()
-    model_routes = [config.models.chat.route, config.models.embedding.route]
-    if config.models.rerank is not None:
-        model_routes.append(config.models.rerank.route)
-    for route in model_routes:
-        if route.credential_ref:
-            required.add(CredentialField(route.credential_ref, "api_key"))
-    for vector in (config.memory.vector_store, config.conversation.summary_vector_store):
-        reference = vector.route.credential_ref
-        if reference:
-            required.update(
-                CredentialField(reference, field)
-                for field in config.credentials.resolve(reference)
-            )
+    from integrations.local_service.adapter_catalog import load_adapter_catalog
+
+    required = {
+        CredentialField(reference, field)
+        for reference, fields in load_adapter_catalog().setup.required_credentials(config).items()
+        for field in fields
+    }
     tracing_reference = config.observability.tracing.credential_ref
     if config.observability.tracing.enabled and tracing_reference:
         required.update(
@@ -152,6 +199,32 @@ def configure_credentials(
     return config
 
 
+def write_plugin_connection(
+    config: M2BOSConfig,
+    destination: Path | None = None,
+) -> Path:
+    """把 YAML 中的本地监听地址投影成插件可读取的无秘密派生配置。"""
+
+    if not isinstance(config, M2BOSConfig):
+        raise TypeError("config must be M2BOSConfig")
+    path = (
+        Path(destination).expanduser().absolute()
+        if destination is not None
+        else DEFAULT_PLUGIN_CONNECTION_PATH.expanduser().absolute()
+    )
+    if path.parent == Path(path.anchor):
+        raise ValueError("plugin connection must be stored in a dedicated child directory")
+    host = config.http.host
+    authority = f"[{host}]" if ":" in host else host
+    payload = {
+        "schema_version": 1,
+        "base_url": f"http://{authority}:{config.http.port}",
+    }
+    encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    atomic_replace_bytes(path, encoded, artifact_root=path.parent)
+    return path
+
+
 def _validated_template(source: Path | None) -> bytes:
     if source is not None:
         template = Path(source).expanduser().absolute()
@@ -162,6 +235,29 @@ def _validated_template(source: Path | None) -> bytes:
     with resources.as_file(resource) as template:
         M2BOSConfig.from_file(template)
         return template.read_bytes()
+
+
+def _initialize_encoded(
+    path: Path,
+    encoded: bytes,
+    *,
+    force: bool,
+) -> ConfigInitializationResult:
+    if not isinstance(force, bool):
+        raise TypeError("force must be boolean")
+    existing = _read_existing(path)
+    if existing is not None and not force:
+        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+            atomic_replace_bytes(path, existing, artifact_root=path.parent)
+        M2BOSConfig.from_file(path)
+        return ConfigInitializationResult(path=path, created=False, backup_path=None)
+    backup_path = None
+    if existing is not None:
+        backup_path = path.with_name(f"{path.stem}.bak{path.suffix}")
+        atomic_replace_bytes(backup_path, existing, artifact_root=path.parent)
+    atomic_replace_bytes(path, encoded, artifact_root=path.parent)
+    M2BOSConfig.from_file(path)
+    return ConfigInitializationResult(path=path, created=True, backup_path=backup_path)
 
 
 def _read_existing(path: Path) -> bytes | None:
@@ -204,8 +300,13 @@ __all__ = [
     "ConfigInitializationResult",
     "CredentialField",
     "DEFAULT_CONFIG_PATH",
+    "DEFAULT_PLUGIN_CONNECTION_PATH",
     "configure_credentials",
     "initialize_config",
+    "initialize_config_from_mapping",
+    "load_initialization_mapping",
     "missing_credential_fields",
     "resolve_config_path",
+    "resolve_plugin_connection_path",
+    "write_plugin_connection",
 ]

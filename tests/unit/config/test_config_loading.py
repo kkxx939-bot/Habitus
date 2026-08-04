@@ -87,7 +87,7 @@ def test_secret_bearing_yaml_requires_private_file_permissions(tmp_path) -> None
     assert M2BOSConfig.from_file(path).credentials.resolve("deepseek")["api_key"] == "private-secret"
 
 
-def test_credential_registry_rejects_missing_references_fields_and_unsafe_values(tmp_path) -> None:
+def test_credential_registry_rejects_missing_references_and_unsafe_values_without_owning_adapter_fields(tmp_path) -> None:
     payload = valid_mapping(tmp_path)
     payload["models"]["chat"]["route"]["credential_ref"] = "missing-provider"
     with pytest.raises(ConfigError, match="does not exist"):
@@ -96,8 +96,8 @@ def test_credential_registry_rejects_missing_references_fields_and_unsafe_values
     payload = valid_mapping(tmp_path)
     payload["credentials"]["deepseek"].pop("api_key")
     payload["credentials"]["deepseek"]["token"] = "secret"
-    with pytest.raises(ConfigError, match="missing fields"):
-        M2BOSConfig.from_mapping(payload)
+    config = M2BOSConfig.from_mapping(payload)
+    assert dict(config.credentials.resolve("deepseek")) == {"token": "secret"}
 
     payload = valid_mapping(tmp_path)
     payload["credentials"]["deepseek"]["api_key"] = " secret "

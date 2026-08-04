@@ -18,6 +18,13 @@ model = [
     "jsonschema>=4,<5",
 ]
 vikingdb = ["volcengine>=1.0.216"]
+cloud = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.34,<1",
+    "json-repair>=0.58.5,<1",
+    "jsonschema>=4,<5",
+    "volcengine>=1.0.216",
+]
 observability = [
     "opentelemetry-api>=1.30,<2",
     "opentelemetry-sdk>=1.30,<2",

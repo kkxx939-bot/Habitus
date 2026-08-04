@@ -311,8 +311,9 @@ class M2BOSConfig:
             model_routes.append(
                 ("config.models.rerank.route", self.models.rerank.route.credential_ref)
             )
-        for path, reference in model_routes:
-            self.credentials.require_fields(reference, {"api_key"}, path=path)
+        for _path, reference in model_routes:
+            if reference:
+                self.credentials.resolve(reference)
         for reference in (
             self.memory.vector_store.route.credential_ref,
             self.conversation.summary_vector_store.route.credential_ref,

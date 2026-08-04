@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from infrastructure.vector import VectorStoreMatch, VectorStoreState
-from memory.indexing import MemoryVectorIndexError, PersistentMemoryVectorIndex
+from memory.indexing import (
+    MemoryVectorIndexError,
+    PersistentMemoryVectorIndex,
+    memory_embedding_fingerprint,
+)
 from memory.intention import MemoryIntentionRecallScope
 from memory.model import MemoryKind, MemoryLevel
 from memory.tree import MemoryTree
@@ -78,6 +82,41 @@ def index(tmp_path: Path):
     store = VectorStore()
     return tree, embedder, store, PersistentMemoryVectorIndex(
         tree, embedder, store, dimension=2, embedding_fingerprint="embed-v1"
+    )
+
+
+def test_memory_embedding_fingerprint_includes_the_effective_document_encoder_route() -> None:
+    common = {
+        "provider": "provider",
+        "model": "embedding-model",
+        "dimension": 2,
+        "input_mode": "text",
+        "document_parameters": {},
+    }
+    baseline = memory_embedding_fingerprint(
+        adapter="adapter-a",
+        base_url="https://embedding-a.example.com/v1",
+        extra_body={"encoding": "dense"},
+        **common,
+    )
+
+    assert baseline != memory_embedding_fingerprint(
+        adapter="adapter-b",
+        base_url="https://embedding-a.example.com/v1",
+        extra_body={"encoding": "dense"},
+        **common,
+    )
+    assert baseline != memory_embedding_fingerprint(
+        adapter="adapter-a",
+        base_url="https://embedding-b.example.com/v1",
+        extra_body={"encoding": "dense"},
+        **common,
+    )
+    assert baseline != memory_embedding_fingerprint(
+        adapter="adapter-a",
+        base_url="https://embedding-a.example.com/v1",
+        extra_body={"encoding": "sparse"},
+        **common,
     )
 
 

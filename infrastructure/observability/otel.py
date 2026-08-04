@@ -8,7 +8,7 @@ from importlib import import_module
 from typing import Any
 
 from Config.observability import ObservabilityTracingConfig
-from foundation.observability import ObservationEvent, project_metric_updates
+from foundation.observability import ObservationEvent, ObservationStatus, project_metric_updates
 
 
 class OpenTelemetryBackend:
@@ -98,6 +98,8 @@ class OpenTelemetryBackend:
 
         span = trace.get_current_span()
         if span is not None and span.is_recording():
+            if event.status is ObservationStatus.FAILURE:
+                span.set_status(trace.Status(trace.StatusCode.ERROR))
             span.add_event(
                 f"{event.category}.{event.operation}",
                 attributes=_trace_attributes(event),
@@ -135,7 +137,10 @@ class OpenTelemetryBackend:
             try:
                 yield
             except BaseException as exc:
+                from opentelemetry.trace import Status, StatusCode
+
                 span.set_attribute("m2bos.error_type", type(exc).__name__)
+                span.set_status(Status(StatusCode.ERROR))
                 raise
 
     def shutdown(self) -> None:

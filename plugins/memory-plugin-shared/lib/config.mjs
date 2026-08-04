@@ -1,5 +1,6 @@
+import { lstatSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 function booleanValue(value, fallback) {
   if (value == null || value === "") return fallback;
@@ -31,11 +32,43 @@ function requireLoopbackURL(value) {
   return parsed.toString().replace(/\/$/, "");
 }
 
+function connectionURL(stateRoot) {
+  const path = join(stateRoot, "connection.json");
+  try {
+    const metadata = lstatSync(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 4096) {
+      throw new Error("plugin connection config must be a bounded regular file");
+    }
+    if ((metadata.mode & 0o022) !== 0) {
+      throw new Error("plugin connection config must have private, non-writable permissions");
+    }
+    if (typeof process.getuid === "function" && metadata.uid !== process.getuid()) {
+      throw new Error("plugin connection config must be owned by the current user");
+    }
+    const value = JSON.parse(readFileSync(path, "utf8"));
+    const keys = Object.keys(value || {}).sort();
+    if (
+      value?.schema_version !== 1
+      || typeof value?.base_url !== "string"
+      || keys.join(",") !== "base_url,schema_version"
+    ) {
+      throw new Error("plugin connection config has an invalid schema");
+    }
+    return value.base_url;
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 export function loadPluginConfig(env = process.env) {
-  const stateRoot = resolve(env.M2BOS_PLUGIN_STATE_DIR || join(homedir(), ".m2bos", "agent-plugin"));
+  const selectedConfig = env.M2BOS_CONFIG_FILE
+    ? join(dirname(resolve(env.M2BOS_CONFIG_FILE)), "agent-plugin")
+    : join(homedir(), ".m2bos", "agent-plugin");
+  const stateRoot = resolve(env.M2BOS_PLUGIN_STATE_DIR || selectedConfig);
   return Object.freeze({
     enabled: booleanValue(env.M2BOS_MEMORY_ENABLED, true),
-    baseUrl: requireLoopbackURL(env.M2BOS_URL || "http://127.0.0.1:8787"),
+    baseUrl: requireLoopbackURL(env.M2BOS_URL || connectionURL(stateRoot) || "http://127.0.0.1:8787"),
     stateRoot,
     timeoutMs: integerValue(env.M2BOS_PLUGIN_TIMEOUT_MS, 15_000, 250, 120_000),
     maxTranscriptBytes: integerValue(env.M2BOS_PLUGIN_MAX_TRANSCRIPT_BYTES, 64 * 1024 * 1024, 1024, 256 * 1024 * 1024),

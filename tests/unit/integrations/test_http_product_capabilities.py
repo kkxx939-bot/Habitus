@@ -24,6 +24,16 @@ from Runtime import Runtime
 
 UTC = timezone.utc
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _assert_response_request_id(response: httpx.Response) -> str:
+    request_id = response.headers["X-Request-ID"]
+    assert len(request_id) == 32
+    int(request_id, 16)
+    assert response.json()["request_id"] == request_id
+    return request_id
+
+
 class CollectingObserver:
     def __init__(self) -> None:
         self.events: list[ObservationEvent] = []
@@ -428,13 +438,14 @@ def test_readiness_keeps_health_snapshot_on_503_and_lifespan_closes_after_start_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, runtime, handlers, _observer = _app(monkeypatch)
-    handlers.readiness = AsyncMock(return_value=(503, _health(ready=False)))  # type: ignore[method-assign]
+    handlers.readiness = AsyncMock(return_value=(503, _health(ready=False)))
 
     with TestClient(app, base_url="http://127.0.0.1:8787", raise_server_exceptions=False) as client:
         response = client.get("/ready", headers={"X-Request-ID": "ready-check"})
 
     assert response.status_code == 503
-    assert response.headers["X-Request-ID"] == "ready-check"
+    assert response.headers["X-Request-ID"] != "ready-check"
+    _assert_response_request_id(response)
     assert response.json()["status"] == "ok"
     assert response.json()["result"]["ready"] is False
 
@@ -458,6 +469,7 @@ def test_declared_oversized_request_is_rejected_before_domain_handler(monkeypatc
 
     assert response.status_code == 413
     assert response.json()["error"]["code"] == "REQUEST_TOO_LARGE"
+    _assert_response_request_id(response)
     assert not any(name == "remember" for name, _value in handlers.calls)
 
 
@@ -479,6 +491,7 @@ def test_local_service_rejects_non_loopback_host_and_origin(
         response = client.get("/api/v1/capabilities", headers=headers)
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "INVALID_ARGUMENT"
+    _assert_response_request_id(response)
     assert detail in response.json()["error"]["message"]
     assert not handlers.calls
 
@@ -517,4 +530,5 @@ def test_chunked_oversized_request_cannot_bypass_body_limit(monkeypatch: pytest.
 
     assert response.status_code == 413
     assert response.json()["error"]["code"] == "REQUEST_TOO_LARGE"
+    _assert_response_request_id(response)
     assert not any(name == "remember" for name, _value in handlers.calls)

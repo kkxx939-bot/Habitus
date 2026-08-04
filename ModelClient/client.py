@@ -6,8 +6,9 @@ import asyncio
 import threading
 import time
 import weakref
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from dataclasses import replace
+from typing import cast
 
 from foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
 from ModelClient.config import ChatModelConfig
@@ -207,6 +208,33 @@ class ChatClient:
     def health_check(self) -> dict[str, object]:
         try:
             result = self.provider.health_check()
+            return dict(result)
+        except Exception as exc:
+            failure = normalize_provider_error(exc)
+            return {
+                "ok": False,
+                "provider": self.provider.provider_name,
+                "model": self.provider.model,
+                "error_code": failure.code,
+            }
+
+    async def health_check_async(self) -> dict[str, object]:
+        """只调用 Provider 显式提供的异步探针，保证调用方可真正取消。"""
+
+        probe = getattr(self.provider, "health_check_async", None)
+        if not callable(probe):
+            return {
+                "ok": False,
+                "provider": self.provider.provider_name,
+                "model": self.provider.model,
+                "error_code": "async_health_check_unsupported",
+            }
+        try:
+            async_probe = cast(
+                Callable[[], Awaitable[Mapping[str, object]]],
+                probe,
+            )
+            result = await async_probe()
             return dict(result)
         except Exception as exc:
             failure = normalize_provider_error(exc)

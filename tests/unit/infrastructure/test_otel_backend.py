@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import ModuleType
 
@@ -54,6 +55,7 @@ class Span:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict[str, object], int]] = []
         self.attributes: dict[str, str] = {}
+        self.statuses: list[object] = []
 
     def is_recording(self) -> bool:
         return True
@@ -63,6 +65,9 @@ class Span:
 
     def set_attribute(self, name: str, value: str) -> None:
         self.attributes[name] = value
+
+    def set_status(self, status: object) -> None:
+        self.statuses.append(status)
 
 
 class Tracer:
@@ -124,7 +129,17 @@ def test_initialized_backend_projects_metrics_and_safe_trace_event(monkeypatch: 
     backend._tracer = tracer
     package = ModuleType("opentelemetry")
     trace_module = ModuleType("opentelemetry.trace")
+
+    class StatusCode:
+        ERROR = "error"
+
+    class Status:
+        def __init__(self, status_code: str) -> None:
+            self.status_code = status_code
+
     trace_module.get_current_span = lambda: current_span  # type: ignore[attr-defined]
+    trace_module.Status = Status  # type: ignore[attr-defined]
+    trace_module.StatusCode = StatusCode  # type: ignore[attr-defined]
     package.trace = trace_module  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "opentelemetry", package)
     monkeypatch.setitem(sys.modules, "opentelemetry.trace", trace_module)
@@ -132,14 +147,17 @@ def test_initialized_backend_projects_metrics_and_safe_trace_event(monkeypatch: 
     event = _event()
     backend.record(event)
     backend.record(event)
+    backend.record(replace(event, status=ObservationStatus.FAILURE))
 
     assert len(meter.created) == 4
-    assert all(len(instrument.values) == 2 for instrument in meter.created.values())
+    assert all(len(instrument.values) == 3 for instrument in meter.created.values())
     assert current_span.events[0][0] == "http.request"
     trace_attributes = current_span.events[0][1]
     assert trace_attributes["m2bos.request_id"] == "otel-request"
     assert trace_attributes["m2bos.memory_sequence"] == 3
     assert "content" not in trace_attributes
+    assert len(current_span.statuses) == 1
+    assert current_span.statuses[0].status_code == "error"  # type: ignore[attr-defined]
 
 
 def test_span_keeps_bounded_attributes_and_marks_error_type() -> None:
@@ -159,6 +177,7 @@ def test_span_keeps_bounded_attributes_and_marks_error_type() -> None:
     assert tracer.calls[0]["name"] == "memory.commit"
     assert tracer.calls[0]["attributes"] == {"m2bos.stage": "l2_commit"}
     assert tracer.span.attributes == {"m2bos.error_type": "ValueError"}
+    assert len(tracer.span.statuses) == 1
 
 
 def test_shutdown_attempts_both_providers_and_reports_first_failure() -> None:

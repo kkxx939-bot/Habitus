@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 
 from Config import M2BOSConfig
 from foundation.observability import CompositeObserver, MetricRegistry, Observer
@@ -165,13 +166,13 @@ def build_runtime(
 
     embedder = resolved_providers.create_embedder(
         model_config.embedding,
-        api_key=_model_api_key(config, model_config.embedding.route.credential_ref),
+        credentials=_model_credentials(config, model_config.embedding.route.credential_ref),
         observer=operation_observer,
     )
     reranker = (
         resolved_providers.create_reranker(
             model_config.rerank,
-            api_key=_model_api_key(config, model_config.rerank.route.credential_ref),
+            credentials=_model_credentials(config, model_config.rerank.route.credential_ref),
             observer=operation_observer,
         )
         if model_config.rerank is not None
@@ -195,9 +196,12 @@ def build_runtime(
         dimension=model_config.embedding.dimension,
         embedding_fingerprint=memory_embedding_fingerprint(
             provider=model_config.embedding.route.provider,
+            adapter=model_config.embedding.route.adapter,
             model=model_config.embedding.route.model,
+            base_url=model_config.embedding.route.base_url,
             dimension=model_config.embedding.dimension,
             input_mode=model_config.embedding.input_mode,
+            extra_body=model_config.embedding.route.extra_body,
             document_parameters=model_config.embedding.document_parameters,
         ),
         config=memory_config.vector_index,
@@ -219,7 +223,7 @@ def build_runtime(
 
     chat = resolved_providers.create_chat_client(
         model_config.chat,
-        api_key=_model_api_key(config, model_config.chat.route.credential_ref),
+        credentials=_model_credentials(config, model_config.chat.route.credential_ref),
         observer=operation_observer,
     )
     structured_chat = StructuredChatClient(
@@ -270,9 +274,12 @@ def build_runtime(
     retention = ConversationRetentionPlanner(conversation_config.segmentation)
     boundary_embedding_fingerprint = conversation_summary_embedding_fingerprint(
         provider=model_config.embedding.route.provider,
+        adapter=model_config.embedding.route.adapter,
         model=model_config.embedding.route.model,
+        base_url=model_config.embedding.route.base_url,
         dimension=model_config.embedding.dimension,
         input_mode=model_config.embedding.input_mode,
+        extra_body=model_config.embedding.route.extra_body,
         document_parameters=model_config.embedding.document_parameters,
     )
     boundary_scorer = ConversationSemanticBoundaryScorer(
@@ -520,9 +527,8 @@ def _builtin_provider_factory() -> ProviderFactory:
     return providers
 
 
-def _model_api_key(config: M2BOSConfig, reference: str) -> str:
-    credential = config.credentials.resolve(reference)
-    return credential.get("api_key", "")
+def _model_credentials(config: M2BOSConfig, reference: str) -> Mapping[str, str]:
+    return config.credentials.resolve(reference)
 
 
 __all__ = ["build_runtime"]

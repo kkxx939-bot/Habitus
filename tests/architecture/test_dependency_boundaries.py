@@ -88,6 +88,31 @@ def test_config_root_does_not_branch_on_specific_model_or_vector_adapters() -> N
         assert adapter_name not in source
 
 
+def test_local_setup_cli_renders_registry_without_vendor_branches() -> None:
+    source = (REPOSITORY_ROOT / "integrations" / "local_service" / "cli.py").read_text(
+        encoding="utf-8"
+    )
+    for vendor_identifier in (
+        "deepseek",
+        "volcengine",
+        "aliyun",
+        "qwen3-rerank",
+        "vikingdb",
+        "openai_compatible_chat",
+        "ark_multimodal",
+    ):
+        assert vendor_identifier not in source.casefold()
+
+
+def test_memory_kernel_never_imports_the_local_product_shell() -> None:
+    violations = [
+        str(path.relative_to(REPOSITORY_ROOT))
+        for path in (REPOSITORY_ROOT / "memory").rglob("*.py")
+        if "integrations" in imported_roots(path)
+    ]
+    assert violations == []
+
+
 def test_memory_schema_contains_exactly_the_six_confirmed_l2_kinds() -> None:
     definitions = REPOSITORY_ROOT / "memory" / "schema" / "definitions"
     assert {path.stem for path in definitions.glob("*.yaml")} == {
@@ -98,4 +123,3 @@ def test_memory_schema_contains_exactly_the_six_confirmed_l2_kinds() -> None:
         "events",
         "intentions",
     }
-

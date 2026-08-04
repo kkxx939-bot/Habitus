@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import socket
 import stat
+import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
 from fastapi.testclient import TestClient
 
 from Config import M2BOSConfig
+from infrastructure.vector import VectorStoreState
 from integrations.http_api.app import create_http_app
 from integrations.local_service import (
     DoctorStatus,
@@ -22,6 +25,7 @@ from integrations.local_service import (
     run_doctor_from_env,
 )
 from integrations.local_service import doctor as doctor_module
+from ModelClient import EmbeddingVector
 from Runtime import Runtime
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -130,6 +134,62 @@ def test_doctor_accepts_multiple_filled_named_yaml_credentials(tmp_path: Path) -
     assert "4 named YAML credentials" in credentials.detail
 
 
+def test_doctor_resolves_conditional_adapter_dependencies_from_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checked: list[str] = []
+
+    def dependency(module: str) -> doctor_module.DoctorCheck:
+        checked.append(module)
+        return doctor_module.DoctorCheck(module, DoctorStatus.PASS, "available")
+
+    monkeypatch.setattr(doctor_module, "_python_dependency_check", dependency)
+    managed = _config(tmp_path)
+    run_doctor(managed, check_port=False)
+    assert "volcengine" in checked
+
+    payload = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
+    payload["storage"]["root"] = str(tmp_path / "api-key")
+    for group, name in (("memory", "vector_store"), ("conversation", "summary_vector_store")):
+        target = payload[group][name]
+        target["route"]["credential_ref"] = ""
+        target["options"].update({"auth_mode": "api_key", "schema_mode": "precreated"})
+    checked.clear()
+    run_doctor(M2BOSConfig.from_mapping(payload), check_port=False)
+
+    assert "volcengine" not in checked
+
+
+def test_doctor_reports_unregistered_adapter_without_raising(tmp_path: Path) -> None:
+    payload = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
+    payload["storage"]["root"] = str(tmp_path / "data")
+    payload["models"]["chat"]["route"].update(
+        {"adapter": "future_chat", "credential_ref": ""}
+    )
+    config = M2BOSConfig.from_mapping(payload)
+
+    report = run_doctor(config, check_port=False)
+
+    adapter = next(check for check in report.checks if check.name == "adapter_configuration")
+    dependencies = next(check for check in report.checks if check.name == "dependencies")
+    assert adapter.status is DoctorStatus.FAIL
+    assert dependencies.status is DoctorStatus.FAIL
+
+
+def test_doctor_fails_adapter_capacity_before_remote_probe(tmp_path: Path) -> None:
+    payload = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
+    payload["storage"]["root"] = str(tmp_path / "data")
+    payload["models"]["embedding"]["dimension"] = 65_536
+    config = M2BOSConfig.from_mapping(payload)
+
+    report = run_doctor(config, check_port=False)
+
+    adapter = next(check for check in report.checks if check.name == "adapter_configuration")
+    assert adapter.status is DoctorStatus.FAIL
+    assert "read page sizes" in adapter.detail
+
+
 def test_doctor_requires_private_permissions_for_the_secret_bearing_yaml(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_bytes((REPOSITORY_ROOT / "Config" / "example.yaml").read_bytes())
@@ -169,3 +229,69 @@ def test_deep_doctor_is_opt_in_and_appends_provider_probes(
     assert called == 1
     assert all(check.name != "embedding_probe" for check in shallow.checks)
     assert any(check.name == "embedding_probe" for check in deep.checks)
+
+
+def test_deep_doctor_does_not_report_an_unready_vector_publication_as_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class Chat:
+        def health_check(self) -> dict[str, bool]:
+            return {"ok": True}
+
+    class Embedder:
+        async def embed_query(self, _text: str) -> EmbeddingVector:
+            return EmbeddingVector(tuple(0.0 for _ in range(1024)))
+
+    state = VectorStoreState("schema", "fingerprint", 1024, 0, 1, 0, ready=False)
+    store = SimpleNamespace(state=AsyncMock(return_value=state))
+    runtime = SimpleNamespace(
+        components=SimpleNamespace(
+            models=SimpleNamespace(chat=Chat(), embedder=Embedder()),
+            memory=SimpleNamespace(vector_index=SimpleNamespace(store=store)),
+            conversation=SimpleNamespace(summary_vector_index=SimpleNamespace(store=store)),
+        ),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr("Runtime.build_runtime", Mock(return_value=runtime))
+
+    checks = doctor_module._deep_checks(_config(tmp_path), timeout_seconds=0.5)
+
+    vector_checks = [check for check in checks if check.name.endswith("vector_probe")]
+    assert len(vector_checks) == 2
+    assert all(check.status is not DoctorStatus.PASS for check in vector_checks)
+
+
+def test_deep_doctor_chat_timeout_is_a_real_wall_clock_bound(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class Chat:
+        def health_check(self) -> dict[str, bool]:
+            time.sleep(0.3)
+            return {"ok": True}
+
+        async def health_check_async(self) -> dict[str, bool]:
+            await asyncio.sleep(0.3)
+            return {"ok": True}
+
+    class Embedder:
+        async def embed_query(self, _text: str) -> EmbeddingVector:
+            return EmbeddingVector(tuple(0.0 for _ in range(1024)))
+
+    store = SimpleNamespace(state=AsyncMock(return_value=None))
+    runtime = SimpleNamespace(
+        components=SimpleNamespace(
+            models=SimpleNamespace(chat=Chat(), embedder=Embedder()),
+            memory=SimpleNamespace(vector_index=SimpleNamespace(store=store)),
+            conversation=SimpleNamespace(summary_vector_index=SimpleNamespace(store=store)),
+        ),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr("Runtime.build_runtime", Mock(return_value=runtime))
+    started = time.monotonic()
+
+    checks = doctor_module._deep_checks(_config(tmp_path), timeout_seconds=0.01)
+
+    assert time.monotonic() - started < 0.15
+    assert next(check for check in checks if check.name == "chat_probe").status is DoctorStatus.FAIL

@@ -455,9 +455,12 @@ class PersistentMemoryVectorIndex:
 def memory_embedding_fingerprint(
     *,
     provider: str,
+    adapter: str,
     model: str,
+    base_url: str,
     dimension: int,
     input_mode: str,
+    extra_body: object,
     document_parameters: object,
 ) -> str:
     """模型或文档编码参数变化时确定性触发全量重建。"""
@@ -466,9 +469,12 @@ def memory_embedding_fingerprint(
         {
             "schema": _SCHEMA_VERSION,
             "provider": provider,
+            "adapter": adapter,
             "model": model,
+            "base_url": base_url,
             "dimension": dimension,
             "input_mode": input_mode,
+            "extra_body": extra_body,
             "document_parameters": document_parameters,
         }
     )

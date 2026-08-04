@@ -242,3 +242,20 @@ def test_factory_can_accept_a_future_real_rerank_adapter_without_changing_retrie
     factory.register_adapter("rerank", "test-adapter", lambda context: FakeReranker())
     reranker = factory.create_reranker(RerankModelConfig(route()), api_key="secret")
     assert asyncio.run(reranker.rerank("query", ("a", "b"))) == (1.0, 1.0)
+
+
+def test_factory_passes_an_adapter_owned_credential_mapping_without_assuming_api_key() -> None:
+    factory = ProviderFactory()
+    observed: list[ProviderBuildContext] = []
+
+    def build(context: ProviderBuildContext) -> FakeEmbeddingProvider:
+        observed.append(context)
+        return FakeEmbeddingProvider()
+
+    factory.register_adapter("embedding", "test-adapter", build)
+    config = EmbeddingModelConfig(route(), dimension=2)
+
+    factory.create_embedder(config, credentials={"token": "secret"})
+
+    assert dict(observed[0].credentials) == {"token": "secret"}
+    assert observed[0].api_key == ""

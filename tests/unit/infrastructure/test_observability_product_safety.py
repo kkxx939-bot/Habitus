@@ -166,3 +166,71 @@ def test_managed_observability_reports_otel_failure_without_breaking_business(
     assert status == "degraded"
     assert detail == "otel:ImportError"
     assert managed.recent_audit(limit=10)[0].operation == "initialization"
+
+
+@pytest.mark.parametrize("failure_phase", ["create", "enter", "exit"])
+def test_managed_observability_isolates_span_lifecycle_failures(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_phase: str,
+) -> None:
+    managed = ManagedObservability(
+        ObservabilityConfig(tracing=ObservabilityTracingConfig(enabled=True)),
+        workflow_root=tmp_path,
+    )
+    assert managed.otel is not None
+    managed._initialized = True
+    managed.otel._initialized = True
+
+    class FaultingManager:
+        def __enter__(self) -> None:
+            if failure_phase == "enter":
+                raise RuntimeError("enter failed")
+
+        def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+            if failure_phase == "exit":
+                raise RuntimeError("exit failed")
+
+    def start_span(*args: object, **kwargs: object) -> FaultingManager:
+        if failure_phase == "create":
+            raise RuntimeError("creation failed")
+        return FaultingManager()
+
+    monkeypatch.setattr(managed.otel, "start_span", start_span)
+    business_completed = False
+    with managed.start_span("http", "request"):
+        business_completed = True
+
+    assert business_completed is True
+    status, detail = managed.health()
+    assert status == "degraded"
+    expected_stage = "otel_span_exit" if failure_phase == "exit" else "otel_span_enter"
+    assert detail == f"{expected_stage}:RuntimeError"
+
+
+def test_managed_observability_preserves_business_error_when_span_exit_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    managed = ManagedObservability(
+        ObservabilityConfig(tracing=ObservabilityTracingConfig(enabled=True)),
+        workflow_root=tmp_path,
+    )
+    assert managed.otel is not None
+    managed._initialized = True
+    managed.otel._initialized = True
+
+    class FaultingExitManager:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+            raise RuntimeError("span exit failed")
+
+    monkeypatch.setattr(managed.otel, "start_span", lambda *args, **kwargs: FaultingExitManager())
+
+    with pytest.raises(ValueError, match="business failed"):
+        with managed.start_span("memory", "commit"):
+            raise ValueError("business failed")
+
+    assert managed.health() == ("degraded", "otel_span_exit:RuntimeError")

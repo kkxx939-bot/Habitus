@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -234,6 +234,40 @@ test("configuration accepts only unauthenticated loopback service URLs", () => {
   );
   assert.throws(() => loadPluginConfig({ M2BOS_URL: "http://127.0.0.1:8787/api" }), /must not contain a path/);
   assert.throws(() => loadPluginConfig({ M2BOS_URL: "http://127.0.0.1:8787?x=1" }), /loopback/);
+});
+
+test("configuration reads the service URL projected beside a selected m2bOS YAML", async (t) => {
+  const root = await temporaryRoot(t);
+  const configPath = join(root, "config.yaml");
+  const stateRoot = join(root, "agent-plugin");
+  await writeFile(configPath, "storage: {}\n", { mode: 0o600 });
+  await mkdir(stateRoot, { recursive: true });
+  await writeFile(
+    join(stateRoot, "connection.json"),
+    `${JSON.stringify({ schema_version: 1, base_url: "http://127.0.0.1:8899" })}\n`,
+    { mode: 0o600 },
+  );
+
+  const config = loadPluginConfig({ M2BOS_CONFIG_FILE: configPath });
+
+  assert.equal(config.baseUrl, "http://127.0.0.1:8899");
+  assert.equal(config.stateRoot, stateRoot);
+});
+
+test("configuration rejects a group or world writable service connection file", async (t) => {
+  const root = await temporaryRoot(t);
+  const connection = join(root, "connection.json");
+  await writeFile(
+    connection,
+    `${JSON.stringify({ schema_version: 1, base_url: "http://127.0.0.1:9999" })}\n`,
+    { mode: 0o600 },
+  );
+  await chmod(connection, 0o666);
+
+  assert.throws(
+    () => loadPluginConfig({ M2BOS_PLUGIN_STATE_DIR: root }),
+    /permissions|writable|private/,
+  );
 });
 
 test("marketplace preparation is isolated and produces private manifests", async (t) => {

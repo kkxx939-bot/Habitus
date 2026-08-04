@@ -12,8 +12,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from Config import ConfigError, M2BOSConfig
+
+if TYPE_CHECKING:
+    from integrations.local_service.adapter_catalog import AdapterCatalog
 
 _MINIMUM_FREE_BYTES = 1024**3
 
@@ -59,6 +63,7 @@ def run_doctor(
     check_port: bool = True,
     deep: bool = False,
     probe_timeout_seconds: float = 15.0,
+    catalog: AdapterCatalog | None = None,
 ) -> DoctorReport:
     if not isinstance(config, M2BOSConfig):
         raise TypeError("config must be M2BOSConfig")
@@ -70,20 +75,30 @@ def run_doctor(
         or not 0 < float(probe_timeout_seconds) <= 120
     ):
         raise ValueError("probe_timeout_seconds must be greater than zero and at most 120")
+    if catalog is None:
+        from integrations.local_service.adapter_catalog import load_adapter_catalog
+
+        catalog = load_adapter_catalog()
     checks = [
         DoctorCheck("config", DoctorStatus.PASS, "strict configuration loaded"),
         DoctorCheck("listener", DoctorStatus.PASS, f"loopback {config.http.host}:{config.http.port}"),
         _storage_check(config.storage_root),
-        _python_dependency_check("fastapi"),
-        _python_dependency_check("uvicorn"),
+        _adapter_configuration_check(config, catalog),
+        *_dependency_checks(config, catalog),
         _node_check(),
-        _credential_check(config),
+        _credential_check(config, catalog),
         _ingress_capacity_check(config),
     ]
     if check_port:
         checks.append(_port_check(config.http.host, config.http.port))
     if deep:
-        checks.extend(_deep_checks(config, timeout_seconds=float(probe_timeout_seconds)))
+        checks.extend(
+            _deep_checks(
+                config,
+                timeout_seconds=float(probe_timeout_seconds),
+                catalog=catalog,
+            )
+        )
     return DoctorReport(tuple(checks))
 
 
@@ -93,6 +108,7 @@ def run_doctor_from_env(
     check_port: bool = True,
     deep: bool = False,
     probe_timeout_seconds: float = 15.0,
+    catalog: AdapterCatalog | None = None,
 ) -> DoctorReport:
     """即使配置无效也返回结构化诊断，不把解析异常泄露到 CLI。"""
 
@@ -109,6 +125,7 @@ def run_doctor_from_env(
         check_port=check_port,
         deep=deep,
         probe_timeout_seconds=probe_timeout_seconds,
+        catalog=catalog,
     )
     return DoctorReport((_config_file_security(values), *report.checks))
 
@@ -117,8 +134,9 @@ def run_startup_preflight(
     config: M2BOSConfig,
     *,
     environ: Mapping[str, str] | None = None,
+    catalog: AdapterCatalog | None = None,
 ) -> None:
-    report = run_doctor(config, check_port=True)
+    report = run_doctor(config, check_port=True, catalog=catalog)
     if environ is not None:
         report = DoctorReport((_config_file_security(environ), *report.checks))
     failures = [check for check in report.checks if check.status is DoctorStatus.FAIL]
@@ -150,6 +168,34 @@ def _python_dependency_check(module: str) -> DoctorCheck:
     if importlib.util.find_spec(module) is None:
         return DoctorCheck(module, DoctorStatus.FAIL, "Python dependency is not installed")
     return DoctorCheck(module, DoctorStatus.PASS, "available")
+
+
+def _dependency_checks(
+    config: M2BOSConfig,
+    catalog: AdapterCatalog,
+) -> tuple[DoctorCheck, ...]:
+    try:
+        modules = catalog.setup.dependency_modules(config)
+    except (TypeError, ValueError) as exc:
+        detail = str(exc).strip() or type(exc).__name__
+        return (DoctorCheck("dependencies", DoctorStatus.FAIL, detail),)
+    return tuple(_python_dependency_check(module) for module in modules)
+
+
+def _adapter_configuration_check(
+    config: M2BOSConfig,
+    catalog: AdapterCatalog,
+) -> DoctorCheck:
+    try:
+        catalog.validate(config)
+    except (OSError, TypeError, ValueError) as exc:
+        detail = str(exc).strip() or type(exc).__name__
+        return DoctorCheck("adapter_configuration", DoctorStatus.FAIL, detail)
+    return DoctorCheck(
+        "adapter_configuration",
+        DoctorStatus.PASS,
+        "registered model and vector adapters accept the configured limits",
+    )
 
 
 def _node_check() -> DoctorCheck:
@@ -196,13 +242,22 @@ def _deep_checks(
     config: M2BOSConfig,
     *,
     timeout_seconds: float,
+    catalog: AdapterCatalog | None = None,
 ) -> list[DoctorCheck]:
     """只在显式 deep 模式构造真实 Adapter，并执行有界远端探测。"""
 
     try:
         from Runtime import build_runtime
 
-        runtime = build_runtime(config)
+        if catalog is None:
+            from integrations.local_service.adapter_catalog import load_adapter_catalog
+
+            catalog = load_adapter_catalog()
+        runtime = build_runtime(
+            config,
+            providers=catalog.providers,
+            vector_stores=catalog.vector_stores,
+        )
     except Exception as exc:
         return [DoctorCheck("component_construction", DoctorStatus.FAIL, type(exc).__name__)]
 
@@ -217,6 +272,23 @@ def _deep_checks(
     async def probe() -> list[DoctorCheck]:
         results: list[DoctorCheck] = []
         try:
+            try:
+                chat_result = await asyncio.wait_for(
+                    runtime.components.models.chat.health_check_async(),
+                    timeout=timeout_seconds,
+                )
+                chat_ok = chat_result.get("ok") is True
+                results.append(
+                    DoctorCheck(
+                        "chat_probe",
+                        DoctorStatus.PASS if chat_ok else DoctorStatus.FAIL,
+                        "provider health endpoint responded"
+                        if chat_ok
+                        else str(chat_result.get("error_code", "health check failed")),
+                    )
+                )
+            except Exception as exc:
+                results.append(DoctorCheck("chat_probe", DoctorStatus.FAIL, type(exc).__name__))
             try:
                 vector = await asyncio.wait_for(
                     runtime.components.models.embedder.embed_query("m2bOS doctor probe"),
@@ -236,10 +308,41 @@ def _deep_checks(
                 ("summary_vector_probe", runtime.components.conversation.summary_vector_index.store),
             ):
                 try:
-                    await asyncio.wait_for(store.initialize(), timeout=timeout_seconds)
-                    results.append(DoctorCheck(name, DoctorStatus.PASS, "configured collection is reachable"))
+                    state = await asyncio.wait_for(store.state(), timeout=timeout_seconds)
+                    if state is None:
+                        results.append(
+                            DoctorCheck(
+                                name,
+                                DoctorStatus.WARN,
+                                "control plane is reachable; collection has no m2bOS publication yet",
+                            )
+                        )
+                    elif not state.ready:
+                        results.append(
+                            DoctorCheck(
+                                name,
+                                DoctorStatus.WARN,
+                                "publication exists but is not ready",
+                            )
+                        )
+                    else:
+                        results.append(
+                            DoctorCheck(
+                                name,
+                                DoctorStatus.PASS,
+                                f"publication is readable; ready={state.ready}",
+                            )
+                        )
                 except Exception as exc:
                     results.append(DoctorCheck(name, DoctorStatus.FAIL, type(exc).__name__))
+            if config.models.rerank is not None:
+                results.append(
+                    DoctorCheck(
+                        "rerank_probe",
+                        DoctorStatus.WARN,
+                        "configured adapter has no side-effect-free health endpoint; construction passed",
+                    )
+                )
         finally:
             try:
                 await asyncio.wait_for(runtime.close(), timeout=timeout_seconds)
@@ -254,19 +357,16 @@ def _deep_checks(
     return checks
 
 
-def _credential_check(config: M2BOSConfig) -> DoctorCheck:
-    required: set[tuple[str, str]] = set()
-    model_routes = [config.models.chat.route, config.models.embedding.route]
-    if config.models.rerank is not None:
-        model_routes.append(config.models.rerank.route)
-    for route in model_routes:
-        if route.credential_ref:
-            required.add((route.credential_ref, "api_key"))
-    vector_configs = (config.memory.vector_store, config.conversation.summary_vector_store)
-    for vector in vector_configs:
-        reference = vector.route.credential_ref
-        if reference:
-            required.update((reference, field) for field in config.credentials.resolve(reference))
+def _credential_check(config: M2BOSConfig, catalog: AdapterCatalog) -> DoctorCheck:
+    try:
+        required = {
+            (reference, field)
+            for reference, fields in catalog.setup.required_credentials(config).items()
+            for field in fields
+        }
+    except (TypeError, ValueError) as exc:
+        detail = str(exc).strip() or type(exc).__name__
+        return DoctorCheck("credentials", DoctorStatus.FAIL, detail)
     tracing_reference = config.observability.tracing.credential_ref
     if config.observability.tracing.enabled and tracing_reference:
         required.update(

@@ -196,6 +196,25 @@ class OpenAICompatibleChatProvider:
             "model": self.model,
         }
 
+    async def health_check_async(self) -> Mapping[str, object]:
+        client = self._async_client()
+        async with client.stream(
+            "GET",
+            self._models_endpoint,
+            headers=self._headers(),
+        ) as response:
+            content = await _read_limited_async(
+                response.aiter_bytes(),
+                self.config.route.max_response_bytes,
+            )
+            self._require_success(response, content)
+            _decode_json_object(content)
+        return {
+            "ok": True,
+            "provider": self.provider_name,
+            "model": self.model,
+        }
+
     async def aclose(self) -> None:
         """幂等关闭同步与所有事件循环对应的异步 HTTP 连接池。"""
 
