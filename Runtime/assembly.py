@@ -5,6 +5,15 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 
+from behavior.claim import (
+    ClaimPipelineService,
+    ClaimProducerRegistry,
+    DirectStructuredClaimProducer,
+    StructuredSemanticClaimProducer,
+)
+from behavior.evidence import EvidenceService
+from behavior.persistence.sqlite import SQLiteBehaviorEvidenceClaimStore
+from behavior.source import SourceRecordService
 from Config import M2BOSConfig
 from foundation.observability import CompositeObserver, MetricRegistry, Observer
 from infrastructure.observability import ManagedObservability
@@ -69,6 +78,7 @@ from memory.workflow import (
 from ModelClient import ProviderFactory, StructuredChatClient
 from pre.conversation import ConversationAdapterRegistry
 from Runtime.components import (
+    RuntimeBehavior,
     RuntimeComponents,
     RuntimeConversation,
     RuntimeInfrastructure,
@@ -230,6 +240,36 @@ def build_runtime(
         chat,
         allow_json_repair=model_config.structured_output.allow_json_repair,
         validation_retries=model_config.structured_output.validation_retries,
+    )
+    behavior_store = SQLiteBehaviorEvidenceClaimStore(
+        config.behavior_root,
+        config=config.behavior,
+        initialize=False,
+    )
+    behavior_source_service = SourceRecordService(
+        behavior_store,
+        config=config.behavior.source,
+    )
+    behavior_evidence_service = EvidenceService(
+        behavior_store,
+        config=config.behavior.evidence,
+        observer=operation_observer,
+    )
+    behavior_producers = ClaimProducerRegistry()
+    behavior_producers.register(DirectStructuredClaimProducer())
+    behavior_producers.register(
+        StructuredSemanticClaimProducer(
+            structured_chat,
+            config=config.behavior.claim,
+        )
+    )
+    behavior_pipeline = ClaimPipelineService(
+        behavior_store,
+        behavior_source_service,
+        behavior_evidence_service,
+        behavior_producers,
+        config=config.behavior.claim,
+        observer=operation_observer,
     )
     extraction_loop = MemoryExtractionLoop(
         client=structured_chat,
@@ -503,6 +543,14 @@ def build_runtime(
             semantic_refresher=semantic_refresher,
             vector_index=vector_index,
             lifecycle=memory_lifecycle,
+        ),
+        behavior=RuntimeBehavior(
+            store=behavior_store,
+            source_service=behavior_source_service,
+            evidence_service=behavior_evidence_service,
+            claim_producers=behavior_producers,
+            claim_pipeline=behavior_pipeline,
+            structured_chat=structured_chat,
         ),
         workflow=RuntimeWorkflow(
             jobs=jobs,

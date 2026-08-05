@@ -1,5 +1,6 @@
 """m2bOS 唯一外部配置入口。"""
 
+from Config.behavior import BehaviorConfig, ClaimConfig, EvidenceConfig, SourceConfig, StoreConfig
 from Config.conversation import (
     ConversationConfig,
     ConversationLifecycleConfig,
@@ -27,7 +28,10 @@ from memory.retrieval import MemoryRecallLifecycleConfig, MemorySearchServiceCon
 
 __all__ = [
     "ConfigError",
+    "BehaviorConfig",
+    "ClaimConfig",
     "CredentialRegistry",
+    "EvidenceConfig",
     "ConversationConfig",
     "ConversationLifecycleConfig",
     "ConversationRangeSummaryCompactionConfig",
@@ -47,6 +51,8 @@ __all__ = [
     "ObservabilityMetricsConfig",
     "ObservabilityTracingConfig",
     "StorageConfig",
+    "SourceConfig",
+    "StoreConfig",
     "StructuredOutputConfig",
     "WorkerConfig",
     "WorkflowConfig",

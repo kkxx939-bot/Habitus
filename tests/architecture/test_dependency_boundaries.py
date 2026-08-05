@@ -12,6 +12,7 @@ PRODUCTION_ROOTS = (
     "ModelClient",
     "pre",
     "memory",
+    "behavior",
     "infrastructure",
     "foundation",
 )
@@ -60,7 +61,7 @@ def test_retired_memory_contracts_and_uri_schemes_do_not_reappear() -> None:
 
 @pytest.mark.parametrize(
     "package",
-    ("ModelClient", "pre", "memory", "infrastructure", "foundation"),
+    ("ModelClient", "pre", "memory", "behavior", "infrastructure", "foundation"),
 )
 def test_domain_packages_never_import_top_level_runtime(package: str) -> None:
     violations = [
@@ -123,3 +124,59 @@ def test_memory_schema_contains_exactly_the_six_confirmed_l2_kinds() -> None:
         "events",
         "intentions",
     }
+
+
+def test_behavior_and_memory_keep_strict_peer_dependency_boundaries() -> None:
+    behavior_violations = [
+        str(path.relative_to(REPOSITORY_ROOT))
+        for path in (REPOSITORY_ROOT / "behavior").rglob("*.py")
+        if imported_roots(path) & {"memory", "integrations", "Runtime", "Config"}
+    ]
+    memory_violations = [
+        str(path.relative_to(REPOSITORY_ROOT))
+        for path in (REPOSITORY_ROOT / "memory").rglob("*.py")
+        if "behavior" in imported_roots(path)
+    ]
+    integration_violations = [
+        str(path.relative_to(REPOSITORY_ROOT))
+        for path in (REPOSITORY_ROOT / "integrations").rglob("*.py")
+        if "behavior" in imported_roots(path)
+    ]
+    assert behavior_violations == []
+    assert memory_violations == []
+    assert integration_violations == []
+
+
+def test_behavior_has_no_internal_multi_owner_partition_model() -> None:
+    disallowed_partition_terms = ("user_id", "tenant_id", "account_id")
+    violations = []
+    for path in (REPOSITORY_ROOT / "behavior").rglob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        for term in disallowed_partition_terms:
+            if term in source:
+                violations.append(f"{path.relative_to(REPOSITORY_ROOT)}: {term}")
+    assert violations == []
+
+
+def test_behavior_does_not_extend_memory_kind() -> None:
+    source = (REPOSITORY_ROOT / "memory" / "model.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    memory_kind = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "MemoryKind"
+    )
+    member_names = {
+        target.id
+        for node in memory_kind.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    assert "BEHAVIOR" not in member_names
+    memory_tree_source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (REPOSITORY_ROOT / "memory" / "tree").rglob("*.py")
+    )
+    assert "behaviors" not in memory_tree_source
+    assert not (REPOSITORY_ROOT / "memory" / "schema" / "definitions" / "behavior.yaml").exists()

@@ -2,6 +2,7 @@
 
 from Runtime.assembly import build_runtime
 from Runtime.components import (
+    RuntimeBehavior,
     RuntimeComponents,
     RuntimeConversation,
     RuntimeInfrastructure,
@@ -45,6 +46,7 @@ from Runtime.worker import MemoryWorker, MemoryWorkerState, MemoryWorkerStateErr
 __all__ = [
     "Runtime",
     "RuntimeComponents",
+    "RuntimeBehavior",
     "RuntimeConversation",
     "RuntimeInfrastructure",
     "RuntimeInitialization",

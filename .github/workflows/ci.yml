@@ -8,7 +8,7 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     env:
-      M2BOS_PYTHON_PATHS: Config Runtime ModelClient pre memory infrastructure foundation integrations benchmark
+      M2BOS_PYTHON_PATHS: Config Runtime ModelClient pre memory behavior infrastructure foundation integrations benchmark
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

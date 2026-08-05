@@ -76,11 +76,14 @@ class RuntimeInitialization:
     """一次成功初始化的可审计结果。"""
 
     memory_root: Path
+    behavior_root: Path
     recovered_transaction_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if not isinstance(self.memory_root, Path) or not self.memory_root.is_absolute():
             raise ValueError("memory_root must be an absolute Path")
+        if not isinstance(self.behavior_root, Path) or not self.behavior_root.is_absolute():
+            raise ValueError("behavior_root must be an absolute Path")
         if not isinstance(self.recovered_transaction_ids, tuple) or any(
             not isinstance(identifier, str) or not identifier for identifier in self.recovered_transaction_ids
         ):
@@ -186,6 +189,8 @@ class Runtime:
             raise TypeError("conversation_adapters must be ConversationAdapterRegistry or None")
         if components.memory.tree.root != config.memory_root:
             raise ValueError("runtime components are bound to another memory root")
+        if components.behavior.store.root != config.behavior_root:
+            raise ValueError("runtime components are bound to another behavior root")
         if components.conversation.journal.layout.root != config.conversation_root:
             raise ValueError("runtime components are bound to another conversation root")
         if components.workflow.jobs.root != config.workflow_root:
@@ -226,6 +231,7 @@ class Runtime:
             self._ensure_storage_root()
             self.components.infrastructure.initialize()
             memory_root = self.components.memory.tree.initialize()
+            self.components.behavior.store.initialize()
             self.components.workflow.jobs.initialize()
             self.components.memory.lifecycle.initialize()
             self.components.conversation.summary_use.initialize()
@@ -238,6 +244,7 @@ class Runtime:
             )
             initialization = RuntimeInitialization(
                 memory_root=memory_root,
+                behavior_root=self.components.behavior.store.root,
                 recovered_transaction_ids=recovered,
             )
             self._initialization = initialization

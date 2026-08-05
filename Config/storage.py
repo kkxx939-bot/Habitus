@@ -11,7 +11,7 @@ from infrastructure.store.sqlite import SQLiteLockStoreConfig
 
 @dataclass(frozen=True)
 class StorageConfig:
-    """Conversation、Memory 和 Workflow 的共同物理根目录。"""
+    """Conversation、Memory、Behavior 和 Workflow 的共同物理根目录。"""
 
     root: str | Path
     sqlite_lock: SQLiteLockStoreConfig = field(default_factory=SQLiteLockStoreConfig)

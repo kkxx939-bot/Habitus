@@ -293,6 +293,8 @@ def test_assembly_wires_one_shared_chain_without_touching_storage(tmp_path: Path
     components = runtime.components
     assert runtime.state is RuntimeState.CREATED
     assert not config.storage_root.exists()
+    assert components.behavior.store.root == config.behavior_root
+    assert components.behavior.structured_chat is components.models.structured_chat
     assert components.workflow.enqueuer.conversations is components.conversation.journal
     assert components.workflow.runner.executor.editor is components.memory.editor
     assert components.memory.search.semantic_search.index is components.memory.vector_index
@@ -369,9 +371,12 @@ def test_initialize_is_idempotent_and_creates_only_local_durable_roots(tmp_path:
     assert first is second
     assert first.recovered_transaction_ids == ()
     assert first.memory_root == config.memory_root
+    assert first.behavior_root == config.behavior_root
     assert runtime.state is RuntimeState.READY
     assert config.memory_root.is_dir()
     assert config.workflow_root.is_dir()
+    assert config.behavior_root.is_dir()
+    assert runtime.components.behavior.store.path.exists()
     recall_store = runtime.components.memory.search.recall_lifecycle.store
     assert isinstance(recall_store, SQLiteMemoryRecallLifecycleStore)
     assert recall_store.initialized

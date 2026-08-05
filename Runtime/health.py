@@ -52,6 +52,7 @@ class RuntimeHealthService:
         checks = [
             self._runtime_check(runtime_state),
             self._lifecycle_storage_check(runtime_state),
+            self._behavior_store_check(runtime_state),
             self._memory_worker_check(),
             self._lifecycle_check(),
             self._observability_check(),
@@ -158,6 +159,20 @@ class RuntimeHealthService:
         status, detail = manager.health()
         resolved = RuntimeHealthStatus.HEALTHY if status == "healthy" else RuntimeHealthStatus.DEGRADED
         return RuntimeHealthCheck("observability", resolved, detail, critical=False)
+
+    def _behavior_store_check(self, runtime_state: str) -> RuntimeHealthCheck:
+        if runtime_state == "created":
+            return RuntimeHealthCheck(
+                "behavior_store",
+                RuntimeHealthStatus.DEGRADED,
+                "not_initialized",
+            )
+        ready, detail = self.components.behavior.store.readiness()
+        return RuntimeHealthCheck(
+            "behavior_store",
+            RuntimeHealthStatus.HEALTHY if ready else RuntimeHealthStatus.UNHEALTHY,
+            detail,
+        )
 
     async def _queue_check(self) -> RuntimeHealthCheck:
         try:
