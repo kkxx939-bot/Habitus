@@ -149,7 +149,7 @@ class M2BOSConfig:
         segmentation = conversation.segmentation
 
         if (
-            behavior.claim.max_model_input_chars + behavior.claim.max_model_output_tokens
+            behavior.claim.max_model_input_tokens + behavior.claim.max_model_output_tokens
             > models.chat.context_window_tokens
         ):
             raise ConfigError("behavior Claim model budgets exceed models.chat.context_window_tokens")

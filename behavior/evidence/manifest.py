@@ -1,20 +1,15 @@
-"""EvidenceWindow 的确定性不可变封存快照。"""
+"""封存 Owner-scoped 语义记录快照与显式 Coverage。"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any
 
 from behavior._validation import (
-    external_reference,
     identifier,
     identifier_tuple,
-    json_snapshot,
     non_negative_int,
-    optional_bounded_text,
     optional_identifier,
     parse_utc,
     require_fields,
@@ -24,126 +19,112 @@ from behavior._validation import (
     utc_text,
 )
 from behavior.errors import EvidenceManifestError
-from behavior.evidence.model import EvidenceSealReason, EvidenceWindow, EvidenceWindowState
-from behavior.source.model import CaptureState, Modality, SourceRecord, SourceType
+from behavior.evidence.bundle import (
+    EvidenceBundleState,
+    EvidenceSealReason,
+    SemanticEvidenceBundle,
+)
+from behavior.ingress.evidence_ref import EvidenceReference
+from behavior.ingress.model import OwnerScopedSemanticRecord, SemanticModality, SemanticRecordKind
+from behavior.ingress.payloads import CoverageIntervalPayload, CoverageStatus
 from foundation.integrity import canonical_digest
 
-EVIDENCE_MANIFEST_SCHEMA_VERSION = "1"
+EVIDENCE_MANIFEST_SCHEMA_VERSION = "2"
 
 
-class EvidenceCoverageState(str, Enum):
-    COMPLETE = "COMPLETE"
-    PARTIAL = "PARTIAL"
+class CoverageSummary(str, Enum):
+    COVERED = "COVERED"
     BLIND = "BLIND"
+    UNKNOWN = "UNKNOWN"
+    MIXED = "MIXED"
 
 
 @dataclass(frozen=True)
-class BlindInterval:
-    started_at: datetime
-    ended_at: datetime
-    source_record_id: str
+class CoverageInterval:
+    modality: str
+    event_time_start: datetime
+    event_time_end: datetime
+    semantic_record_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "started_at", strict_utc(self.started_at, "started_at"))
-        object.__setattr__(self, "ended_at", strict_utc(self.ended_at, "ended_at"))
-        if self.ended_at < self.started_at:
-            raise EvidenceManifestError("blind interval end cannot precede start")
-        object.__setattr__(self, "source_record_id", identifier(self.source_record_id, "source_record_id"))
+        object.__setattr__(self, "modality", identifier(self.modality, "coverage.modality"))
+        object.__setattr__(self, "event_time_start", strict_utc(self.event_time_start, "coverage.event_time_start"))
+        object.__setattr__(self, "event_time_end", strict_utc(self.event_time_end, "coverage.event_time_end"))
+        if self.event_time_end < self.event_time_start:
+            raise EvidenceManifestError("Coverage interval end cannot precede start")
+        ids = identifier_tuple(self.semantic_record_ids, "coverage.semantic_record_ids", maximum_items=10_000)
+        object.__setattr__(self, "semantic_record_ids", ids)
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "started_at": utc_text(self.started_at),
-            "ended_at": utc_text(self.ended_at),
-            "source_record_id": self.source_record_id,
+            "modality": self.modality,
+            "event_time_start": utc_text(self.event_time_start),
+            "event_time_end": utc_text(self.event_time_end),
+            "semantic_record_ids": self.semantic_record_ids,
         }
 
     @classmethod
-    def from_dict(cls, value: object) -> BlindInterval:
-        fields = frozenset({"started_at", "ended_at", "source_record_id"})
-        data = strict_fields(value, "blind_interval", fields)
-        require_fields(data, "blind_interval", fields)
+    def from_dict(cls, value: object) -> CoverageInterval:
+        fields = frozenset({"modality", "event_time_start", "event_time_end", "semantic_record_ids"})
+        data = strict_fields(value, "coverage_interval", fields)
+        require_fields(data, "coverage_interval", fields)
         return cls(
-            started_at=parse_utc(data["started_at"], "started_at"),
-            ended_at=parse_utc(data["ended_at"], "ended_at"),
-            source_record_id=data["source_record_id"],
+            modality=data["modality"],
+            event_time_start=parse_utc(data["event_time_start"], "coverage.event_time_start"),
+            event_time_end=parse_utc(data["event_time_end"], "coverage.event_time_end"),
+            semantic_record_ids=tuple(data["semantic_record_ids"]),
         )
 
 
 @dataclass(frozen=True)
-class ManifestSourceRecord:
-    source_record_id: str
+class ManifestSemanticRecordSnapshot:
+    semantic_record_id: str
+    semantic_record_digest: str
     stream_id: str
     source_sequence: int
-    source_type: SourceType
-    modality: Modality
+    record_kind: SemanticRecordKind
+    modality: SemanticModality
     event_time_start: datetime
     event_time_end: datetime
-    payload_ref: str
-    payload_digest: str
-    semantic_projection_digest: str
-    semantic_text: str | None
-    semantic_data: Mapping[str, Any]
     scene_ref: str | None
-    track_refs: tuple[str, ...]
-    entity_refs: tuple[str, ...]
-    capture_state: CaptureState
+    evidence_refs: tuple[EvidenceReference, ...]
+    payload_digest: str
 
     def __post_init__(self) -> None:
-        for name in ("source_record_id", "stream_id"):
-            object.__setattr__(self, name, identifier(getattr(self, name), name))
+        object.__setattr__(self, "semantic_record_id", identifier(self.semantic_record_id, "semantic_record_id"))
+        object.__setattr__(
+            self, "semantic_record_digest", sha256_digest(self.semantic_record_digest, "semantic_record_digest")
+        )
+        object.__setattr__(self, "stream_id", identifier(self.stream_id, "stream_id"))
         object.__setattr__(self, "source_sequence", non_negative_int(self.source_sequence, "source_sequence"))
-        object.__setattr__(self, "source_type", SourceType(self.source_type))
-        object.__setattr__(self, "modality", Modality(self.modality))
+        object.__setattr__(self, "record_kind", SemanticRecordKind(self.record_kind))
+        object.__setattr__(self, "modality", SemanticModality(self.modality))
         object.__setattr__(self, "event_time_start", strict_utc(self.event_time_start, "event_time_start"))
         object.__setattr__(self, "event_time_end", strict_utc(self.event_time_end, "event_time_end"))
         if self.event_time_end < self.event_time_start:
-            raise EvidenceManifestError("manifest source end cannot precede start")
-        try:
-            resolved_payload_ref = external_reference(
-                self.payload_ref,
-                "payload_ref",
-                maximum=1_000_000,
-            )
-        except (TypeError, ValueError) as exc:
-            raise EvidenceManifestError("manifest payload_ref must be bounded reference text") from exc
-        object.__setattr__(self, "payload_ref", resolved_payload_ref)
-        object.__setattr__(self, "payload_digest", sha256_digest(self.payload_digest, "payload_digest"))
-        object.__setattr__(
-            self,
-            "semantic_projection_digest",
-            sha256_digest(self.semantic_projection_digest, "semantic_projection_digest"),
-        )
-        object.__setattr__(self, "semantic_text", optional_bounded_text(self.semantic_text, "semantic_text", maximum=1_000_000))
-        object.__setattr__(self, "semantic_data", json_snapshot(self.semantic_data, "semantic_data", maximum_chars=1_000_000))
+            raise EvidenceManifestError("Manifest record end cannot precede start")
         object.__setattr__(self, "scene_ref", optional_identifier(self.scene_ref, "scene_ref"))
-        object.__setattr__(self, "track_refs", identifier_tuple(self.track_refs, "track_refs", maximum_items=10_000))
-        object.__setattr__(self, "entity_refs", identifier_tuple(self.entity_refs, "entity_refs", maximum_items=10_000))
-        object.__setattr__(self, "capture_state", CaptureState(self.capture_state))
-        expected_projection = canonical_digest(
-            {"semantic_text": self.semantic_text, "semantic_data": self.semantic_data}
-        )
-        if self.semantic_projection_digest != expected_projection:
-            raise EvidenceManifestError("semantic projection digest mismatch")
+        refs = tuple(self.evidence_refs)
+        if any(not isinstance(item, EvidenceReference) for item in refs):
+            raise TypeError("evidence_refs must contain EvidenceReference values")
+        object.__setattr__(self, "evidence_refs", refs)
+        object.__setattr__(self, "payload_digest", sha256_digest(self.payload_digest, "payload_digest"))
 
     @classmethod
-    def from_source(cls, record: SourceRecord) -> ManifestSourceRecord:
+    def from_record(cls, record: OwnerScopedSemanticRecord) -> ManifestSemanticRecordSnapshot:
+        value = record.semantic_input
         return cls(
-            source_record_id=record.source_record_id,
-            stream_id=record.stream_id,
-            source_sequence=record.source_sequence,
-            source_type=record.source_type,
-            modality=record.modality,
-            event_time_start=record.event_time_start,
-            event_time_end=record.event_time_end,
-            payload_ref=record.payload_ref,
+            semantic_record_id=record.semantic_record_id,
+            semantic_record_digest=record.canonical_digest,
+            stream_id=value.stream_id,
+            source_sequence=value.source_sequence,
+            record_kind=value.record_kind,
+            modality=value.modality,
+            event_time_start=value.event_time_start,
+            event_time_end=value.event_time_end,
+            scene_ref=value.scene_ref,
+            evidence_refs=value.evidence_refs,
             payload_digest=record.payload_digest,
-            semantic_projection_digest=record.semantic_projection_digest,
-            semantic_text=record.semantic_text,
-            semantic_data=record.semantic_data,
-            scene_ref=record.scene_ref,
-            track_refs=record.track_refs,
-            entity_refs=record.entity_refs,
-            capture_state=record.capture_state,
         )
 
     @property
@@ -153,239 +134,243 @@ class ManifestSourceRecord:
             self.event_time_end,
             self.stream_id,
             self.source_sequence,
-            self.source_record_id,
+            self.semantic_record_id,
         )
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "source_record_id": self.source_record_id,
+            "semantic_record_id": self.semantic_record_id,
+            "semantic_record_digest": self.semantic_record_digest,
             "stream_id": self.stream_id,
             "source_sequence": self.source_sequence,
-            "source_type": self.source_type.value,
+            "record_kind": self.record_kind.value,
             "modality": self.modality.value,
             "event_time_start": utc_text(self.event_time_start),
             "event_time_end": utc_text(self.event_time_end),
-            "payload_ref": self.payload_ref,
-            "payload_digest": self.payload_digest,
-            "semantic_projection_digest": self.semantic_projection_digest,
-            "semantic_text": self.semantic_text,
-            "semantic_data": self.semantic_data,
             "scene_ref": self.scene_ref,
-            "track_refs": self.track_refs,
-            "entity_refs": self.entity_refs,
-            "capture_state": self.capture_state.value,
+            "evidence_refs": tuple(item.to_dict() for item in self.evidence_refs),
+            "payload_digest": self.payload_digest,
         }
 
     @classmethod
-    def from_dict(cls, value: object) -> ManifestSourceRecord:
+    def from_dict(cls, value: object) -> ManifestSemanticRecordSnapshot:
         fields = frozenset(
             {
-                "source_record_id",
+                "semantic_record_id",
+                "semantic_record_digest",
                 "stream_id",
                 "source_sequence",
-                "source_type",
+                "record_kind",
                 "modality",
                 "event_time_start",
                 "event_time_end",
-                "payload_ref",
-                "payload_digest",
-                "semantic_projection_digest",
-                "semantic_text",
-                "semantic_data",
                 "scene_ref",
-                "track_refs",
-                "entity_refs",
-                "capture_state",
+                "evidence_refs",
+                "payload_digest",
             }
         )
-        data = strict_fields(value, "manifest_source_record", fields)
-        require_fields(data, "manifest_source_record", fields)
+        data = strict_fields(value, "manifest_semantic_record", fields)
+        require_fields(data, "manifest_semantic_record", fields)
         return cls(
-            source_record_id=data["source_record_id"],
+            semantic_record_id=data["semantic_record_id"],
+            semantic_record_digest=data["semantic_record_digest"],
             stream_id=data["stream_id"],
             source_sequence=data["source_sequence"],
-            source_type=SourceType(data["source_type"]),
-            modality=Modality(data["modality"]),
+            record_kind=SemanticRecordKind(data["record_kind"]),
+            modality=SemanticModality(data["modality"]),
             event_time_start=parse_utc(data["event_time_start"], "event_time_start"),
             event_time_end=parse_utc(data["event_time_end"], "event_time_end"),
-            payload_ref=data["payload_ref"],
-            payload_digest=data["payload_digest"],
-            semantic_projection_digest=data["semantic_projection_digest"],
-            semantic_text=data["semantic_text"],
-            semantic_data=data["semantic_data"],
             scene_ref=data["scene_ref"],
-            track_refs=tuple(data["track_refs"]),
-            entity_refs=tuple(data["entity_refs"]),
-            capture_state=CaptureState(data["capture_state"]),
+            evidence_refs=tuple(EvidenceReference.from_dict(item) for item in data["evidence_refs"]),
+            payload_digest=data["payload_digest"],
         )
 
 
 @dataclass(frozen=True)
 class EvidenceManifest:
     manifest_id: str
-    window_id: str
-    owner_binding_digest: str
+    bundle_id: str
+    owner_identity_digest: str
     started_at: datetime
     ended_at: datetime
     sealed_at: datetime
     seal_reason: EvidenceSealReason
-    scene_ref: str | None
-    track_refs: tuple[str, ...]
-    modalities: tuple[Modality, ...]
-    coverage_state: EvidenceCoverageState
-    blind_intervals: tuple[BlindInterval, ...]
-    ordered_source_records: tuple[ManifestSourceRecord, ...]
+    ordered_record_snapshots: tuple[ManifestSemanticRecordSnapshot, ...]
+    modalities: tuple[SemanticModality, ...]
+    scene_refs: tuple[str, ...]
+    covered_intervals: tuple[CoverageInterval, ...]
+    blind_intervals: tuple[CoverageInterval, ...]
+    unknown_intervals: tuple[CoverageInterval, ...]
+    coverage_summary: CoverageSummary
     total_projection_chars: int
-    manifest_digest: str
+    content_digest: str
     schema_version: str = EVIDENCE_MANIFEST_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "manifest_id", identifier(self.manifest_id, "manifest_id"))
-        object.__setattr__(self, "window_id", identifier(self.window_id, "window_id"))
-        object.__setattr__(self, "owner_binding_digest", sha256_digest(self.owner_binding_digest, "owner_binding_digest"))
+        object.__setattr__(self, "bundle_id", identifier(self.bundle_id, "bundle_id"))
+        object.__setattr__(
+            self, "owner_identity_digest", sha256_digest(self.owner_identity_digest, "owner_identity_digest")
+        )
         for name in ("started_at", "ended_at", "sealed_at"):
             object.__setattr__(self, name, strict_utc(getattr(self, name), name))
-        if self.ended_at < self.started_at or self.sealed_at < self.ended_at:
-            raise EvidenceManifestError("manifest time bounds are inconsistent")
+        if self.ended_at < self.started_at:
+            raise EvidenceManifestError("Manifest end cannot precede start")
         object.__setattr__(self, "seal_reason", EvidenceSealReason(self.seal_reason))
-        object.__setattr__(self, "scene_ref", optional_identifier(self.scene_ref, "scene_ref"))
-        object.__setattr__(self, "track_refs", identifier_tuple(self.track_refs, "track_refs", maximum_items=10_000))
-        modalities = tuple(sorted((Modality(value) for value in self.modalities), key=lambda item: item.value))
+        snapshots = tuple(self.ordered_record_snapshots)
+        if not snapshots or any(not isinstance(item, ManifestSemanticRecordSnapshot) for item in snapshots):
+            raise EvidenceManifestError("Manifest requires semantic record snapshots")
+        if tuple(sorted(snapshots, key=lambda item: item.stable_sort_key)) != snapshots:
+            raise EvidenceManifestError("Manifest record snapshots are not stably sorted")
+        if len({item.semantic_record_id for item in snapshots}) != len(snapshots):
+            raise EvidenceManifestError("Manifest record identities must be unique")
+        object.__setattr__(self, "ordered_record_snapshots", snapshots)
+        modalities = tuple(sorted((SemanticModality(item) for item in self.modalities), key=lambda item: item.value))
         if not modalities or len(set(modalities)) != len(modalities):
-            raise EvidenceManifestError("manifest modalities must be a non-empty unique tuple")
+            raise EvidenceManifestError("Manifest modalities must be non-empty and unique")
         object.__setattr__(self, "modalities", modalities)
-        object.__setattr__(self, "coverage_state", EvidenceCoverageState(self.coverage_state))
-        intervals = tuple(self.blind_intervals)
-        if any(not isinstance(item, BlindInterval) for item in intervals):
-            raise TypeError("blind_intervals must contain BlindInterval values")
-        object.__setattr__(self, "blind_intervals", intervals)
-        records = tuple(self.ordered_source_records)
-        if not records or any(not isinstance(item, ManifestSourceRecord) for item in records):
-            raise EvidenceManifestError("manifest must contain SourceRecord snapshots")
-        if tuple(sorted(records, key=lambda item: item.stable_sort_key)) != records:
-            raise EvidenceManifestError("manifest SourceRecord snapshots are not stably sorted")
-        record_ids = tuple(item.source_record_id for item in records)
-        if len(set(record_ids)) != len(record_ids):
-            raise EvidenceManifestError("manifest SourceRecord identities must be unique")
-        object.__setattr__(self, "ordered_source_records", records)
-        object.__setattr__(self, "total_projection_chars", non_negative_int(self.total_projection_chars, "total_projection_chars"))
-        object.__setattr__(self, "manifest_digest", sha256_digest(self.manifest_digest, "manifest_digest"))
+        scenes = tuple(sorted(identifier_tuple(self.scene_refs, "scene_refs", maximum_items=10_000)))
+        object.__setattr__(self, "scene_refs", scenes)
+        for name in ("covered_intervals", "blind_intervals", "unknown_intervals"):
+            intervals = tuple(getattr(self, name))
+            if any(not isinstance(item, CoverageInterval) for item in intervals):
+                raise TypeError(f"{name} must contain CoverageInterval values")
+            object.__setattr__(self, name, intervals)
+        object.__setattr__(self, "coverage_summary", CoverageSummary(self.coverage_summary))
+        object.__setattr__(
+            self, "total_projection_chars", non_negative_int(self.total_projection_chars, "total_projection_chars")
+        )
+        object.__setattr__(self, "content_digest", sha256_digest(self.content_digest, "content_digest"))
         object.__setattr__(self, "schema_version", identifier(self.schema_version, "schema_version", maximum=32))
-        expected_digest = canonical_digest(self._digest_payload())
-        if self.manifest_digest != expected_digest:
-            raise EvidenceManifestError("manifest digest mismatch")
-        if self.manifest_id != "manifest_" + expected_digest:
+        expected_content = canonical_digest(self._content_payload())
+        if self.content_digest != expected_content:
+            raise EvidenceManifestError("Manifest content digest mismatch")
+        expected_id = "manifest_" + canonical_digest(self._identity_payload())
+        if self.manifest_id != expected_id:
             raise EvidenceManifestError("manifest_id does not match deterministic identity")
 
     @classmethod
     def seal(
         cls,
-        window: EvidenceWindow,
-        records: Sequence[SourceRecord],
+        bundle: SemanticEvidenceBundle,
+        records: tuple[OwnerScopedSemanticRecord, ...],
         *,
         reason: EvidenceSealReason,
-        max_blind_intervals: int,
+        sealed_at: datetime,
+        max_coverage_intervals: int,
     ) -> EvidenceManifest:
-        if not isinstance(window, EvidenceWindow):
-            raise TypeError("window must be EvidenceWindow")
-        if window.state is not EvidenceWindowState.SEALED:
-            raise EvidenceManifestError("only a SEALED EvidenceWindow can publish a Manifest")
+        if not isinstance(bundle, SemanticEvidenceBundle) or bundle.state is not EvidenceBundleState.SEALED:
+            raise EvidenceManifestError("only a SEALED Bundle can publish a Manifest")
         ordered = tuple(sorted(records, key=lambda item: item.stable_sort_key))
-        if not ordered:
-            raise EvidenceManifestError("empty windows cannot create manifests")
-        if tuple(item.source_record_id for item in ordered) != window.ordered_source_record_ids:
-            raise EvidenceManifestError("window membership does not match SourceRecord snapshots")
-        snapshots = tuple(ManifestSourceRecord.from_source(record) for record in ordered)
-        blind = tuple(
-            BlindInterval(record.event_time_start, record.event_time_end, record.source_record_id)
-            for record in ordered
-            if record.capture_state is CaptureState.BLIND
+        if tuple(item.semantic_record_id for item in ordered) != bundle.ordered_semantic_record_ids:
+            raise EvidenceManifestError("Bundle membership does not match semantic records")
+        snapshots = tuple(ManifestSemanticRecordSnapshot.from_record(item) for item in ordered)
+        covered, blind, unknown, summary = _coverage(
+            ordered,
+            started_at=bundle.started_at,
+            ended_at=bundle.ended_at,
+            maximum=max_coverage_intervals,
         )
-        if len(blind) > max_blind_intervals:
-            raise EvidenceManifestError("explicit blind intervals exceed their configured boundary")
-        capture_states = {record.capture_state for record in ordered}
-        if capture_states == {CaptureState.BLIND}:
-            coverage = EvidenceCoverageState.BLIND
-        elif capture_states <= {CaptureState.COMPLETE, CaptureState.STREAM_END}:
-            coverage = EvidenceCoverageState.COMPLETE
-        else:
-            coverage = EvidenceCoverageState.PARTIAL
-        sealed_at = max(max(record.ingested_at for record in ordered), window.ended_at)
-        payload: dict[str, Any] = {
-            "window_id": window.window_id,
-            "owner_binding_digest": window.owner_binding_digest,
-            "started_at": utc_text(window.started_at),
-            "ended_at": utc_text(window.ended_at),
-            "sealed_at": utc_text(sealed_at),
+        identity_payload = {
+            "bundle_id": bundle.bundle_id,
+            "ordered_record_digests": tuple(item.semantic_record_digest for item in snapshots),
             "seal_reason": EvidenceSealReason(reason).value,
-            "scene_ref": window.scene_ref,
-            "track_refs": tuple(sorted({track for record in ordered for track in record.track_refs})),
-            "modalities": tuple(sorted({record.modality.value for record in ordered})),
-            "coverage_state": coverage.value,
-            "blind_intervals": tuple(item.to_dict() for item in blind),
-            "ordered_source_records": tuple(item.to_dict() for item in snapshots),
-            "total_projection_chars": sum(record.semantic_projection_chars for record in ordered),
             "schema_version": EVIDENCE_MANIFEST_SCHEMA_VERSION,
         }
-        digest = canonical_digest(payload)
+        modalities = tuple(sorted({item.semantic_input.modality.value for item in ordered}))
+        scene_refs = tuple(
+            sorted({item.semantic_input.scene_ref for item in ordered if item.semantic_input.scene_ref is not None})
+        )
+        total_projection_chars = sum(item.projection_chars for item in ordered)
+        content_payload = {
+            "bundle_id": bundle.bundle_id,
+            "owner_identity_digest": bundle.owner_identity_digest,
+            "started_at": utc_text(bundle.started_at),
+            "ended_at": utc_text(bundle.ended_at),
+            "seal_reason": EvidenceSealReason(reason).value,
+            "ordered_record_snapshots": tuple(item.to_dict() for item in snapshots),
+            "modalities": modalities,
+            "scene_refs": scene_refs,
+            "covered_intervals": tuple(item.to_dict() for item in covered),
+            "blind_intervals": tuple(item.to_dict() for item in blind),
+            "unknown_intervals": tuple(item.to_dict() for item in unknown),
+            "coverage_summary": summary.value,
+            "total_projection_chars": total_projection_chars,
+            "schema_version": EVIDENCE_MANIFEST_SCHEMA_VERSION,
+        }
         return cls(
-            manifest_id="manifest_" + digest,
-            manifest_digest=digest,
-            window_id=window.window_id,
-            owner_binding_digest=window.owner_binding_digest,
-            started_at=window.started_at,
-            ended_at=window.ended_at,
+            manifest_id="manifest_" + canonical_digest(identity_payload),
+            bundle_id=bundle.bundle_id,
+            owner_identity_digest=bundle.owner_identity_digest,
+            started_at=bundle.started_at,
+            ended_at=bundle.ended_at,
             sealed_at=sealed_at,
             seal_reason=reason,
-            scene_ref=window.scene_ref,
-            track_refs=tuple(payload["track_refs"]),
-            modalities=tuple(Modality(value) for value in payload["modalities"]),
-            coverage_state=coverage,
+            ordered_record_snapshots=snapshots,
+            modalities=tuple(SemanticModality(item) for item in modalities),
+            scene_refs=scene_refs,
+            covered_intervals=covered,
             blind_intervals=blind,
-            ordered_source_records=snapshots,
-            total_projection_chars=payload["total_projection_chars"],
+            unknown_intervals=unknown,
+            coverage_summary=summary,
+            total_projection_chars=total_projection_chars,
+            content_digest=canonical_digest(content_payload),
         )
 
-    def _digest_payload(self) -> dict[str, object]:
+    def _identity_payload(self) -> dict[str, object]:
         return {
-            "window_id": self.window_id,
-            "owner_binding_digest": self.owner_binding_digest,
+            "bundle_id": self.bundle_id,
+            "ordered_record_digests": tuple(item.semantic_record_digest for item in self.ordered_record_snapshots),
+            "seal_reason": self.seal_reason.value,
+            "schema_version": self.schema_version,
+        }
+
+    def _content_payload(self) -> dict[str, object]:
+        return {
+            "bundle_id": self.bundle_id,
+            "owner_identity_digest": self.owner_identity_digest,
             "started_at": utc_text(self.started_at),
             "ended_at": utc_text(self.ended_at),
-            "sealed_at": utc_text(self.sealed_at),
             "seal_reason": self.seal_reason.value,
-            "scene_ref": self.scene_ref,
-            "track_refs": self.track_refs,
+            "ordered_record_snapshots": tuple(item.to_dict() for item in self.ordered_record_snapshots),
             "modalities": tuple(item.value for item in self.modalities),
-            "coverage_state": self.coverage_state.value,
+            "scene_refs": self.scene_refs,
+            "covered_intervals": tuple(item.to_dict() for item in self.covered_intervals),
             "blind_intervals": tuple(item.to_dict() for item in self.blind_intervals),
-            "ordered_source_records": tuple(item.to_dict() for item in self.ordered_source_records),
+            "unknown_intervals": tuple(item.to_dict() for item in self.unknown_intervals),
+            "coverage_summary": self.coverage_summary.value,
             "total_projection_chars": self.total_projection_chars,
             "schema_version": self.schema_version,
         }
 
     def to_dict(self) -> dict[str, object]:
-        return {"manifest_id": self.manifest_id, **self._digest_payload(), "manifest_digest": self.manifest_digest}
+        return {
+            "manifest_id": self.manifest_id,
+            **self._content_payload(),
+            "sealed_at": utc_text(self.sealed_at),
+            "content_digest": self.content_digest,
+        }
 
     @classmethod
     def from_dict(cls, value: object) -> EvidenceManifest:
         fields = frozenset(
             {
                 "manifest_id",
-                "window_id",
-                "owner_binding_digest",
+                "bundle_id",
+                "owner_identity_digest",
                 "started_at",
                 "ended_at",
                 "sealed_at",
                 "seal_reason",
-                "scene_ref",
-                "track_refs",
+                "ordered_record_snapshots",
                 "modalities",
-                "coverage_state",
+                "scene_refs",
+                "covered_intervals",
                 "blind_intervals",
-                "ordered_source_records",
+                "unknown_intervals",
+                "coverage_summary",
                 "total_projection_chars",
-                "manifest_digest",
+                "content_digest",
                 "schema_version",
             }
         )
@@ -393,30 +378,117 @@ class EvidenceManifest:
         require_fields(data, "evidence_manifest", fields)
         return cls(
             manifest_id=data["manifest_id"],
-            window_id=data["window_id"],
-            owner_binding_digest=data["owner_binding_digest"],
+            bundle_id=data["bundle_id"],
+            owner_identity_digest=data["owner_identity_digest"],
             started_at=parse_utc(data["started_at"], "started_at"),
             ended_at=parse_utc(data["ended_at"], "ended_at"),
             sealed_at=parse_utc(data["sealed_at"], "sealed_at"),
             seal_reason=EvidenceSealReason(data["seal_reason"]),
-            scene_ref=data["scene_ref"],
-            track_refs=tuple(data["track_refs"]),
-            modalities=tuple(Modality(value) for value in data["modalities"]),
-            coverage_state=EvidenceCoverageState(data["coverage_state"]),
-            blind_intervals=tuple(BlindInterval.from_dict(item) for item in data["blind_intervals"]),
-            ordered_source_records=tuple(
-                ManifestSourceRecord.from_dict(item) for item in data["ordered_source_records"]
+            ordered_record_snapshots=tuple(
+                ManifestSemanticRecordSnapshot.from_dict(item) for item in data["ordered_record_snapshots"]
             ),
+            modalities=tuple(SemanticModality(item) for item in data["modalities"]),
+            scene_refs=tuple(data["scene_refs"]),
+            covered_intervals=tuple(CoverageInterval.from_dict(item) for item in data["covered_intervals"]),
+            blind_intervals=tuple(CoverageInterval.from_dict(item) for item in data["blind_intervals"]),
+            unknown_intervals=tuple(CoverageInterval.from_dict(item) for item in data["unknown_intervals"]),
+            coverage_summary=CoverageSummary(data["coverage_summary"]),
             total_projection_chars=data["total_projection_chars"],
-            manifest_digest=data["manifest_digest"],
+            content_digest=data["content_digest"],
             schema_version=data["schema_version"],
         )
 
 
+def _coverage(
+    records: tuple[OwnerScopedSemanticRecord, ...],
+    *,
+    started_at: datetime,
+    ended_at: datetime,
+    maximum: int,
+) -> tuple[
+    tuple[CoverageInterval, ...],
+    tuple[CoverageInterval, ...],
+    tuple[CoverageInterval, ...],
+    CoverageSummary,
+]:
+    explicit: dict[str, list[tuple[datetime, datetime, CoverageStatus, str]]] = {}
+    for record in records:
+        if record.semantic_input.record_kind is not SemanticRecordKind.COVERAGE_INTERVAL:
+            continue
+        payload = record.semantic_input.payload
+        if not isinstance(payload, CoverageIntervalPayload):
+            raise EvidenceManifestError("Coverage record has an invalid Payload")
+        explicit.setdefault(payload.modality, []).append(
+            (
+                record.semantic_input.event_time_start,
+                record.semantic_input.event_time_end,
+                payload.coverage_status,
+                record.semantic_record_id,
+            )
+        )
+    if not explicit:
+        unknown: tuple[CoverageInterval, ...] = (CoverageInterval("MULTIMODAL", started_at, ended_at, ()),)
+        return (), (), unknown, CoverageSummary.UNKNOWN
+    by_status: dict[CoverageStatus, list[CoverageInterval]] = {
+        CoverageStatus.COVERED: [],
+        CoverageStatus.BLIND: [],
+        CoverageStatus.UNKNOWN: [],
+    }
+    priority = (CoverageStatus.BLIND, CoverageStatus.UNKNOWN, CoverageStatus.COVERED)
+    for modality in sorted(explicit):
+        source = explicit[modality]
+        points = sorted({started_at, ended_at, *(item[0] for item in source), *(item[1] for item in source)})
+        segments = tuple(zip(points, points[1:], strict=False))
+        if not segments:
+            statuses = {item[2] for item in source if item[0] <= started_at <= item[1]}
+            status = next((item for item in priority if item in statuses), CoverageStatus.UNKNOWN)
+            ids = tuple(sorted(item[3] for item in source if item[2] is status))
+            by_status[status].append(CoverageInterval(modality, started_at, ended_at, ids))
+            continue
+        for start, end in segments:
+            covering = tuple(item for item in source if item[0] <= start and item[1] >= end)
+            statuses = {item[2] for item in covering}
+            status = next((item for item in priority if item in statuses), CoverageStatus.UNKNOWN)
+            ids = tuple(sorted(item[3] for item in covering if item[2] is status))
+            interval = CoverageInterval(modality, start, end, ids)
+            target = by_status[status]
+            if target and target[-1].modality == modality and target[-1].event_time_end == start:
+                previous = target.pop()
+                target.append(
+                    CoverageInterval(
+                        modality,
+                        previous.event_time_start,
+                        end,
+                        tuple(sorted(set(previous.semantic_record_ids) | set(ids))),
+                    )
+                )
+            else:
+                target.append(interval)
+    explicit_modalities = set(explicit)
+    record_modalities = {item.semantic_input.modality.value for item in records}
+    for modality in sorted(record_modalities - explicit_modalities):
+        by_status[CoverageStatus.UNKNOWN].append(CoverageInterval(modality, started_at, ended_at, ()))
+    total = sum(len(items) for items in by_status.values())
+    if total > maximum:
+        raise EvidenceManifestError("Coverage intervals exceed their configured boundary")
+    covered = tuple(by_status[CoverageStatus.COVERED])
+    blind = tuple(by_status[CoverageStatus.BLIND])
+    unknown = tuple(by_status[CoverageStatus.UNKNOWN])
+    if unknown:
+        summary = CoverageSummary.UNKNOWN
+    elif covered and not blind:
+        summary = CoverageSummary.COVERED
+    elif blind and not covered:
+        summary = CoverageSummary.BLIND
+    else:
+        summary = CoverageSummary.MIXED
+    return covered, blind, unknown, summary
+
+
 __all__ = [
-    "BlindInterval",
+    "CoverageInterval",
+    "CoverageSummary",
     "EVIDENCE_MANIFEST_SCHEMA_VERSION",
-    "EvidenceCoverageState",
     "EvidenceManifest",
-    "ManifestSourceRecord",
+    "ManifestSemanticRecordSnapshot",
 ]

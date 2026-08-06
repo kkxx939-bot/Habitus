@@ -1,52 +1,61 @@
-"""ClaimProposal 生成、验证、准入与发布公共边界。"""
+"""Claim 规范化、系统绑定、准入与发布公共边界。"""
 
-from behavior.claim.admission import ClaimAdmissionDecision, ClaimAdmissionGate, ClaimAdmissionStatus
+from behavior.claim.admission import (
+    ClaimAdmissionDecision,
+    ClaimAdmissionPolicy,
+    ClaimAdmissionStatus,
+    StaticAdmissionResult,
+)
+from behavior.claim.binder import ClaimBinder
+from behavior.claim.confidence import ClaimConfidencePolicy
 from behavior.claim.model import (
     Claim,
     ClaimBatch,
+    ClaimNormalizerRun,
+    ClaimNormalizerRunStatus,
     ClaimProcessingReceipt,
-    ClaimProducerRun,
-    ClaimProducerRunStatus,
-)
-from behavior.claim.producer import (
-    ClaimProducer,
-    DirectStructuredClaimProducer,
-    ProducerFingerprint,
-    StructuredSemanticClaimProducer,
-)
-from behavior.claim.proposal import (
-    ActorRole,
-    ClaimKind,
-    ClaimProposal,
-    ClaimProposalBatch,
     EpistemicClass,
-    SubjectRole,
 )
-from behavior.claim.registry import ClaimProducerRegistry
-from behavior.claim.service import ClaimPipelineService, ClaimProcessingResult
-from behavior.claim.validator import ClaimValidator
+from behavior.claim.normalizer import (
+    ClaimNormalizer,
+    ClaimNormalizerKind,
+    DeterministicClaimNormalizer,
+    ModelClaimNormalizer,
+    NormalizerFingerprint,
+)
+from behavior.claim.proposal import ClaimKind, ClaimSemanticProposal, ClaimSemanticProposalBatch
+from behavior.claim.registry import ClaimNormalizerRegistry
+from behavior.claim.router import ClaimNormalizationRouter
+from behavior.claim.service import (
+    ClaimPipelineService,
+    ClaimProcessingResult,
+    SemanticPipelineIngestResult,
+)
 
 __all__ = [
-    "ActorRole",
     "Claim",
     "ClaimAdmissionDecision",
-    "ClaimAdmissionGate",
+    "ClaimAdmissionPolicy",
     "ClaimAdmissionStatus",
     "ClaimBatch",
+    "ClaimBinder",
+    "ClaimConfidencePolicy",
     "ClaimKind",
+    "ClaimNormalizationRouter",
+    "ClaimNormalizer",
+    "ClaimNormalizerKind",
+    "ClaimNormalizerRegistry",
+    "ClaimNormalizerRun",
+    "ClaimNormalizerRunStatus",
     "ClaimPipelineService",
     "ClaimProcessingReceipt",
     "ClaimProcessingResult",
-    "ClaimProducer",
-    "ClaimProducerRegistry",
-    "ClaimProducerRun",
-    "ClaimProducerRunStatus",
-    "ClaimProposal",
-    "ClaimProposalBatch",
-    "ClaimValidator",
-    "DirectStructuredClaimProducer",
+    "ClaimSemanticProposal",
+    "ClaimSemanticProposalBatch",
+    "DeterministicClaimNormalizer",
     "EpistemicClass",
-    "ProducerFingerprint",
-    "StructuredSemanticClaimProducer",
-    "SubjectRole",
+    "ModelClaimNormalizer",
+    "NormalizerFingerprint",
+    "SemanticPipelineIngestResult",
+    "StaticAdmissionResult",
 ]

@@ -14,8 +14,10 @@ def test_runtime_behavior_uses_shared_model_store_and_initializes_without_worker
     assert isinstance(behavior, RuntimeBehavior)
     assert behavior.store.root == config.behavior_root
     assert behavior.structured_chat is runtime.components.models.structured_chat
-    structured = behavior.claim_producers.get("structured_semantic")
+    structured = behavior.claim_normalizers.get("model_text")
     assert structured.client is runtime.components.models.structured_chat
+    assert behavior.claim_router.registry is behavior.claim_normalizers
+    assert behavior.claim_pipeline.ingress_service is behavior.ingress_service
     assert not config.storage_root.exists()
     initialization = runtime.initialize()
     assert initialization.behavior_root == config.behavior_root
@@ -24,4 +26,8 @@ def test_runtime_behavior_uses_shared_model_store_and_initializes_without_worker
     assert runtime.state is RuntimeState.READY
     report = asyncio.run(runtime.health())
     check = next(item for item in report.checks if item.name == "behavior_store")
-    assert check.detail == "schema=1"
+    assert "schema=2" in check.detail
+    assert "semantic_records=0" in check.detail
+    assert "active_bundles=0" in check.detail
+    assert "manifests=0" in check.detail
+    assert "claims=0" in check.detail

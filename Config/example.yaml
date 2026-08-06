@@ -393,40 +393,60 @@ memory:
     stale_retries: 1
 
 behavior:
-  source:
-    max_payload_ref_chars: 2048
-    max_semantic_text_chars: 16384
-    max_semantic_data_chars: 16384
-    max_attributes_chars: 8192
-    max_track_refs: 64
+  ingress:
+    max_evidence_refs: 32
+    max_object_refs: 64
     max_entity_refs: 64
+    max_payload_chars: 32768
+    max_text_chars: 16384
     max_batch_size: 256
+    max_event_time_uncertainty_ms: 300000
+    max_future_event_skew_seconds: 300.0
+    max_past_event_age_seconds: 31536000.0
+    allowed_lateness_seconds: 30.0
+    max_query_limit: 500
+    max_reference_chars: 2048
+    max_identifier_chars: 256
+    max_payload_items: 128
+    max_payload_depth: 12
   evidence:
     allowed_lateness_seconds: 30.0
     max_gap_seconds: 15.0
-    max_window_duration_seconds: 300.0
-    max_records_per_window: 256
-    max_projection_chars_per_window: 32768
-    max_active_windows: 1024
-    max_blind_intervals: 64
+    max_bundle_duration_seconds: 300.0
+    max_records_per_bundle: 256
+    max_projection_chars_per_bundle: 65536
+    max_active_bundles: 1024
+    max_coverage_intervals: 256
     max_query_limit: 500
   claim:
-    max_producers_per_processing: 16
+    max_claims_per_record: 16
     max_claims_per_batch: 64
+    max_normalizers_per_processing: 1024
     max_model_input_chars: 49152
+    max_model_input_tokens: 16384
     max_model_output_tokens: 4096
     max_semantic_payload_chars: 32768
     max_human_summary_chars: 2048
-    min_direct_score: 0.0
-    min_model_score: 0.55
+    min_direct_confidence: 0.0
+    min_sensor_confidence: 0.35
+    min_model_confidence: 0.55
     repeat_state_suppression_seconds: 30.0
     max_alternative_group_size: 16
+    normalize_owner_utterances: false
     max_query_limit: 500
   store:
     sqlite_timeout_seconds: 5.0
     max_json_bytes: 16777216
+    max_semantic_records: 1000000
+    max_ingress_decisions: 1000000
+    max_active_bundles: 1024
+    max_manifests: 250000
+    max_normalizer_runs: 1000000
+    max_claim_batches: 1000000
     max_claims: 1000000
-    max_receipts: 100000
+    max_admission_decisions: 1000000
+    max_receipts: 250000
+    max_database_bytes: 8589934592
     max_query_limit: 500
 
 workflow:

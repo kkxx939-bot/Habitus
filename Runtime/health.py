@@ -168,6 +168,25 @@ class RuntimeHealthService:
                 "not_initialized",
             )
         ready, detail = self.components.behavior.store.readiness()
+        if ready:
+            try:
+                snapshot = self.components.behavior.store.health_snapshot()
+                detail = ";".join(
+                    (
+                        f"schema={snapshot['schema_version']}",
+                        f"semantic_records={snapshot['semantic_record_count']}",
+                        f"active_bundles={snapshot['active_bundle_count']}",
+                        f"manifests={snapshot['manifest_count']}",
+                        f"claims={snapshot['claim_count']}",
+                        f"database_size_warning={str(snapshot['database_size_warning']).lower()}",
+                    )
+                )
+            except Exception as exc:
+                return RuntimeHealthCheck(
+                    "behavior_store",
+                    RuntimeHealthStatus.UNHEALTHY,
+                    type(exc).__name__,
+                )
         return RuntimeHealthCheck(
             "behavior_store",
             RuntimeHealthStatus.HEALTHY if ready else RuntimeHealthStatus.UNHEALTHY,

@@ -1,4 +1,4 @@
-"""Manifest 到幂等 Claim 发布的无 Worker 应用编排。"""
+"""Manifest 到可审计 Claim 的无 Worker 应用编排。"""
 
 from __future__ import annotations
 
@@ -6,56 +6,77 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
-from behavior._validation import strict_utc, utc_text
+from behavior._validation import identifier, strict_utc
 from behavior.claim.admission import (
     ClaimAdmissionDecision,
-    ClaimAdmissionGate,
+    ClaimAdmissionPolicy,
     ClaimAdmissionStatus,
 )
+from behavior.claim.binder import ClaimBinder
 from behavior.claim.model import (
-    CLAIM_SCHEMA_VERSION,
-    PIPELINE_VERSION,
     Claim,
     ClaimBatch,
+    ClaimNormalizerRun,
+    ClaimNormalizerRunStatus,
     ClaimProcessingReceipt,
-    ClaimProducerRun,
-    ClaimProducerRunStatus,
 )
-from behavior.claim.registry import ClaimProducerRegistry
-from behavior.claim.validator import ClaimValidator
+from behavior.claim.normalizer import ClaimNormalizer
+from behavior.claim.registry import ClaimNormalizerRegistry
+from behavior.claim.router import ClaimNormalizationRouter
 from behavior.config import ClaimConfig
 from behavior.errors import ClaimProcessingConflictError, ClaimStoreError
+from behavior.evidence.bundle import EvidenceSealReason, SemanticIngestResult
 from behavior.evidence.manifest import EvidenceManifest
-from behavior.evidence.model import EvidenceSealReason, SourceIngestResult
 from behavior.evidence.service import EvidenceService
+from behavior.ingress.model import IngressDecision, OwnerScopedSemanticRecord
+from behavior.ingress.service import Clock, SemanticRecordService, SystemClock
+from behavior.owner import ConfirmedOwnerBinding
 from behavior.persistence.contracts import BehaviorEvidenceClaimStore
-from behavior.source.model import SourceRecord, SourceRecordBatch
-from behavior.source.service import SourceRecordService
 from foundation.integrity import canonical_digest
 from foundation.observability import ObservationEvent, ObservationStatus, Observer
+
+
+@dataclass(frozen=True)
+class SemanticPipelineIngestResult:
+    decision: IngressDecision
+    bundle_result: SemanticIngestResult | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.decision, IngressDecision):
+            raise TypeError("decision must be IngressDecision")
+        if self.bundle_result is not None and not isinstance(self.bundle_result, SemanticIngestResult):
+            raise TypeError("bundle_result must be SemanticIngestResult or None")
 
 
 @dataclass(frozen=True)
 class ClaimProcessingResult:
     manifest_id: str
     processing_identity: str
-    producer_runs: tuple[ClaimProducerRun, ...]
+    normalizer_runs: tuple[ClaimNormalizerRun, ...]
+    validated_claims: tuple[Claim, ...]
     accepted_claims: tuple[Claim, ...]
     rejected_decisions: tuple[ClaimAdmissionDecision, ...]
     reused: bool
     completed_at: datetime
 
     def __post_init__(self) -> None:
-        if not self.manifest_id or not self.processing_identity:
-            raise ValueError("processing result identities must be non-empty")
-        if any(not isinstance(run, ClaimProducerRun) for run in self.producer_runs):
-            raise TypeError("producer_runs must contain ClaimProducerRun values")
-        if any(not isinstance(claim, Claim) for claim in self.accepted_claims):
-            raise TypeError("accepted_claims must contain Claim values")
+        object.__setattr__(self, "manifest_id", identifier(self.manifest_id, "manifest_id"))
+        object.__setattr__(
+            self,
+            "processing_identity",
+            identifier(self.processing_identity, "processing_identity"),
+        )
+        if any(not isinstance(item, ClaimNormalizerRun) for item in self.normalizer_runs):
+            raise TypeError("normalizer_runs must contain ClaimNormalizerRun values")
+        if any(not isinstance(item, Claim) for item in (*self.validated_claims, *self.accepted_claims)):
+            raise TypeError("Claim result collections must contain Claim values")
+        if not {item.claim_id for item in self.accepted_claims}.issubset(
+            {item.claim_id for item in self.validated_claims}
+        ):
+            raise ValueError("accepted Claims must belong to the validated Claim collection")
         if any(
-            not isinstance(decision, ClaimAdmissionDecision)
-            or decision.status is ClaimAdmissionStatus.ACCEPTED
-            for decision in self.rejected_decisions
+            not isinstance(item, ClaimAdmissionDecision) or item.status is ClaimAdmissionStatus.ACCEPTED
+            for item in self.rejected_decisions
         ):
             raise TypeError("rejected_decisions must contain non-accepted decisions")
         if not isinstance(self.reused, bool):
@@ -64,56 +85,78 @@ class ClaimProcessingResult:
 
 
 class ClaimPipelineService:
-    """模型调用在事务外，最终结果由 Store 单事务发布。"""
+    """自动路由单条记录；模型调用发生在最终 SQLite 事务之外。"""
 
     def __init__(
         self,
         store: BehaviorEvidenceClaimStore,
-        source_service: SourceRecordService,
+        ingress_service: SemanticRecordService,
         evidence_service: EvidenceService,
-        producers: ClaimProducerRegistry,
+        normalizers: ClaimNormalizerRegistry,
+        router: ClaimNormalizationRouter,
         *,
         config: ClaimConfig,
         observer: Observer,
+        clock: Clock | None = None,
     ) -> None:
         if not isinstance(store, BehaviorEvidenceClaimStore):
             raise TypeError("store must implement BehaviorEvidenceClaimStore")
-        if not isinstance(source_service, SourceRecordService) or source_service.store is not store:
-            raise ValueError("source_service must use the shared Store")
+        if not isinstance(ingress_service, SemanticRecordService) or ingress_service.store is not store:
+            raise ValueError("ingress_service must use the shared Store")
         if not isinstance(evidence_service, EvidenceService) or evidence_service.store is not store:
             raise ValueError("evidence_service must use the shared Store")
-        if not isinstance(producers, ClaimProducerRegistry):
-            raise TypeError("producers must be ClaimProducerRegistry")
+        if not isinstance(normalizers, ClaimNormalizerRegistry):
+            raise TypeError("normalizers must be ClaimNormalizerRegistry")
+        if not isinstance(router, ClaimNormalizationRouter) or router.registry is not normalizers:
+            raise ValueError("router must use the shared Normalizer Registry")
         if not isinstance(config, ClaimConfig):
             raise TypeError("config must be ClaimConfig")
         if not callable(getattr(observer, "record", None)):
             raise TypeError("observer must implement record")
+        resolved_clock = clock or SystemClock()
+        if not isinstance(resolved_clock, Clock):
+            raise TypeError("clock must implement Clock")
         self.store = store
-        self.source_service = source_service
+        self.ingress_service = ingress_service
         self.evidence_service = evidence_service
-        self.producers = producers
+        self.normalizers = normalizers
+        self.router = router
         self.config = config
         self.observer = observer
-        self.validator = ClaimValidator(store, config=config)
-        self.admission = ClaimAdmissionGate(store, config=config)
+        self.clock = resolved_clock
+        self.binder = ClaimBinder(config=config, clock=resolved_clock)
+        self.admission = ClaimAdmissionPolicy(config=config)
 
-    def ingest_source(self, record: SourceRecord) -> SourceIngestResult:
-        return self.evidence_service.ingest_source(record)
-
-    def ingest_source_batch(self, batch: SourceRecordBatch) -> tuple[SourceIngestResult, ...]:
-        if not isinstance(batch, SourceRecordBatch):
-            raise TypeError("batch must be SourceRecordBatch")
-        validated = SourceRecordBatch(batch.records, config=self.source_service.config)
-        ordered = tuple(sorted(validated.records, key=lambda record: record.stable_sort_key))
-        return tuple(self.ingest_source(record) for record in ordered)
-
-    def seal_window(
+    async def ingest_semantic(
         self,
-        window_id: str,
+        adapter_name: str,
+        payload: object,
+        *,
+        owner_binding: ConfirmedOwnerBinding,
+    ) -> tuple[SemanticPipelineIngestResult, ...]:
+        prepared = await self.ingress_service.prepare(
+            adapter_name,
+            payload,
+            owner_binding=owner_binding,
+        )
+        results: list[SemanticPipelineIngestResult] = []
+        for item in prepared:
+            bundle_result = None if item.record is None else self.evidence_service.ingest(item.record, item.decision)
+            results.append(
+                SemanticPipelineIngestResult(
+                    item.decision if bundle_result is None else bundle_result.decision,
+                    bundle_result,
+                )
+            )
+        return tuple(results)
+
+    def seal_bundle(
+        self,
+        bundle_id: str,
         *,
         reason: EvidenceSealReason = EvidenceSealReason.EXPLICIT,
     ) -> EvidenceManifest | None:
-        return self.evidence_service.seal_window(window_id, reason=reason)
+        return self.evidence_service.seal_bundle(bundle_id, reason=reason)
 
     def read_manifest(self, manifest_id: str) -> EvidenceManifest | None:
         return self.store.read_manifest(manifest_id)
@@ -131,185 +174,166 @@ class ClaimPipelineService:
     ) -> tuple[Claim, ...]:
         return self.store.list_claims(start=start, end=end, limit=limit, cursor=cursor)
 
-    async def process_manifest(
+    def list_accepted_claims(
         self,
-        manifest_id: str,
-        producer_names: tuple[str, ...],
-    ) -> ClaimProcessingResult:
+        *,
+        start: datetime,
+        end: datetime,
+        limit: int,
+        cursor: str | None = None,
+    ) -> tuple[Claim, ...]:
+        return self.store.list_accepted_claims(start=start, end=end, limit=limit, cursor=cursor)
+
+    async def process_manifest(self, manifest_id: str) -> ClaimProcessingResult:
         manifest = self.store.read_manifest(manifest_id)
         if manifest is None:
             raise ClaimStoreError("EvidenceManifest does not exist")
-        if not isinstance(producer_names, tuple):
-            raise TypeError("producer_names must be a tuple")
-        if not 1 <= len(producer_names) <= self.config.max_producers_per_processing:
-            raise ValueError("producer_names size is outside its configured boundary")
-        resolved = tuple(self.producers.get(name) for name in producer_names)
-        if len({producer.name for producer in resolved}) != len(resolved):
-            raise ValueError("producer_names cannot contain duplicates")
-        fingerprints = tuple(producer.fingerprint.digest for producer in resolved)
-        processing_identity = "processing_" + canonical_digest(
-            {
-                "claim_schema_version": CLAIM_SCHEMA_VERSION,
-                "manifest_digest": manifest.manifest_digest,
-                "pipeline_version": PIPELINE_VERSION,
-                "producer_fingerprints": fingerprints,
-            }
+        routed: list[tuple[OwnerScopedSemanticRecord, ClaimNormalizer]] = []
+        for snapshot in manifest.ordered_record_snapshots:
+            record = self.store.read_semantic_record(snapshot.semantic_record_id)
+            if record is None or record.canonical_digest != snapshot.semantic_record_digest:
+                raise ClaimProcessingConflictError("Manifest references a missing or conflicting semantic record")
+            routed.extend((record, normalizer) for normalizer in self.router.route(record))
+        if not 1 <= len(routed) <= self.config.max_normalizers_per_processing:
+            raise ClaimProcessingConflictError("automatic Normalizer route exceeds its processing boundary")
+        fingerprints = tuple(normalizer.fingerprint.digest for _, normalizer in routed)
+        processing = ClaimProcessingReceipt.processing_identity_for(
+            manifest_digest=manifest.content_digest,
+            normalizer_fingerprints=fingerprints,
         )
-        existing = self.store.read_receipt(processing_identity)
+        existing = self.store.read_receipt(processing)
         if existing is not None:
             result = self._result_from_receipt(existing, reused=True)
-            self._observe("claim_processing_reused", {"reused": True, "result_count": len(result.accepted_claims)})
+            self._observe(
+                "claim_processing_reused",
+                {"reused": True, "result_count": len(result.accepted_claims)},
+            )
             return result
 
-        runs: list[ClaimProducerRun] = []
+        runs: list[ClaimNormalizerRun] = []
         batches: list[ClaimBatch] = []
-        accepted: list[Claim] = []
-        decisions: list[ClaimAdmissionDecision] = []
-        for producer in resolved:
+        claims: list[Claim] = []
+        for record, normalizer in routed:
+            started_at = self._now()
             started = time.monotonic()
-            proposal_batch = await producer.produce(manifest)
-            if len(proposal_batch.claims) > self.config.max_claims_per_batch:
-                raise ClaimProcessingConflictError(
-                    "Producer output exceeds the configured ClaimBatch boundary"
-                )
-            alternative_groups: dict[str, int] = {}
+            proposal_batch = await normalizer.normalize(record)
+            completed_at = self._now()
+            if len(proposal_batch.claims) > self.config.max_claims_per_record:
+                raise ClaimProcessingConflictError("Normalizer output exceeds the per-record Claim boundary")
+            groups: dict[str, int] = {}
             for proposal in proposal_batch.claims:
                 if proposal.alternative_group_id is not None:
-                    alternative_groups[proposal.alternative_group_id] = (
-                        alternative_groups.get(proposal.alternative_group_id, 0) + 1
-                    )
-            if (
-                alternative_groups
-                and max(alternative_groups.values()) > self.config.max_alternative_group_size
-            ):
-                raise ClaimProcessingConflictError(
-                    "Producer alternative group exceeds its configured boundary"
-                )
+                    groups[proposal.alternative_group_id] = groups.get(proposal.alternative_group_id, 0) + 1
+            if groups and max(groups.values()) > self.config.max_alternative_group_size:
+                raise ClaimProcessingConflictError("Normalizer alternative group exceeds its configured boundary")
             proposal_digest = canonical_digest(proposal_batch.to_dict())
-            batch_id = "batch_" + canonical_digest(
-                {
-                    "manifest_digest": manifest.manifest_digest,
-                    "processing_identity": processing_identity,
-                    "producer_fingerprint": producer.fingerprint.digest,
-                    "proposal_batch": proposal_batch.to_dict(),
-                    "schema_version": CLAIM_SCHEMA_VERSION,
-                }
-            )
-            validated = tuple(
-                self.validator.validate_and_bind(
-                    manifest=manifest,
-                    proposal=proposal,
-                    producer=producer.fingerprint,
-                    producer_kind=producer.kind,
-                    claim_batch_id=batch_id,
-                )
+            local_claims = tuple(
+                self.binder.bind(manifest, record, proposal, normalizer.fingerprint)
                 for proposal in proposal_batch.claims
             )
-            if validated:
-                self._observe("claim_validated", {"claim_count": len(validated)})
-            local_ids: list[str] = []
-            for claim in validated:
-                decision = self.admission.decide(
-                    claim,
-                    processing_identity=processing_identity,
-                    pending_accepted=tuple(accepted),
-                )
-                decisions.append(decision)
-                local_ids.append(claim.claim_id)
-                if decision.status is ClaimAdmissionStatus.ACCEPTED:
-                    accepted.append(claim)
-                    self._observe("claim_admitted", {"reason_code": decision.reason_code, "claim_count": 1})
-                else:
-                    self._observe("claim_rejected", {"reason_code": decision.reason_code, "claim_count": 1})
-            batches.append(
-                ClaimBatch(
-                    claim_batch_id=batch_id,
-                    manifest_id=manifest.manifest_id,
-                    manifest_digest=manifest.manifest_digest,
-                    producer_name=producer.name,
-                    producer_fingerprint=producer.fingerprint.digest,
-                    abstained=proposal_batch.abstained,
-                    claim_ids=tuple(local_ids),
-                    proposal_digest=proposal_digest,
-                    created_at=manifest.sealed_at,
-                )
+            claims.extend(local_claims)
+            batch_id = ClaimBatch.identity_for(
+                manifest_digest=manifest.content_digest,
+                semantic_record_id=record.semantic_record_id,
+                normalizer_fingerprint=normalizer.fingerprint.digest,
             )
-            run_status = (
-                ClaimProducerRunStatus.ABSTAINED
-                if proposal_batch.abstained
-                else ClaimProducerRunStatus.COMPLETED
+            batch = ClaimBatch(
+                claim_batch_id=batch_id,
+                processing_identity=processing,
+                manifest_id=manifest.manifest_id,
+                manifest_digest=manifest.content_digest,
+                semantic_record_id=record.semantic_record_id,
+                normalizer_name=normalizer.name,
+                normalizer_fingerprint=normalizer.fingerprint.digest,
+                abstained=proposal_batch.abstained,
+                claim_ids=tuple(item.claim_id for item in local_claims),
+                proposal_digest=proposal_digest,
+                created_at=completed_at,
             )
-            runs.append(
-                ClaimProducerRun(
-                    run_id="run_" + canonical_digest(
-                        {"processing_identity": processing_identity, "producer_fingerprint": producer.fingerprint.digest}
-                    ),
-                    processing_identity=processing_identity,
-                    manifest_id=manifest.manifest_id,
-                    producer_name=producer.name,
-                    producer_fingerprint=producer.fingerprint.digest,
-                    status=run_status,
-                    proposal_digest=proposal_digest,
-                    claim_count=len(validated),
-                    completed_at=manifest.sealed_at,
-                )
+            if any(item.claim_batch_id != batch.claim_batch_id for item in local_claims):
+                raise ClaimProcessingConflictError("bound Claim and ClaimBatch identities diverged")
+            batches.append(batch)
+            run = ClaimNormalizerRun(
+                run_id="run_"
+                + canonical_digest(
+                    {
+                        "manifest_id": manifest.manifest_id,
+                        "normalizer_fingerprint": normalizer.fingerprint.digest,
+                        "processing_identity": processing,
+                        "semantic_record_id": record.semantic_record_id,
+                    }
+                ),
+                processing_identity=processing,
+                manifest_id=manifest.manifest_id,
+                semantic_record_id=record.semantic_record_id,
+                normalizer_name=normalizer.name,
+                normalizer_fingerprint=normalizer.fingerprint.digest,
+                status=(
+                    ClaimNormalizerRunStatus.ABSTAINED
+                    if proposal_batch.abstained
+                    else ClaimNormalizerRunStatus.COMPLETED
+                ),
+                proposal_digest=proposal_digest,
+                claim_count=len(local_claims),
+                normalization_started_at=started_at,
+                normalization_completed_at=completed_at,
             )
+            runs.append(run)
             self._observe(
-                "producer_abstained" if proposal_batch.abstained else "producer_completed",
+                "normalizer_abstained" if proposal_batch.abstained else "normalizer_completed",
                 {
-                    "producer_name": producer.name,
-                    "claim_count": len(validated),
+                    "normalizer_name": normalizer.name,
+                    "claim_count": len(local_claims),
                     "duration": max(0.0, time.monotonic() - started),
                 },
             )
-        receipt_payload = {
-            "processing_identity": processing_identity,
-            "manifest_id": manifest.manifest_id,
-            "manifest_digest": manifest.manifest_digest,
-            "producer_fingerprints": fingerprints,
-            "claim_batch_ids": tuple(batch.claim_batch_id for batch in batches),
-            "accepted_claim_ids": tuple(claim.claim_id for claim in accepted),
-            "decision_ids": tuple(decision.decision_id for decision in decisions),
-            "completed_at": manifest.sealed_at,
-            "schema_version": CLAIM_SCHEMA_VERSION,
-        }
-        receipt_digest_payload = {
-            **receipt_payload,
-            "completed_at": utc_text(manifest.sealed_at),
-        }
-        receipt = ClaimProcessingReceipt(
-            processing_identity=processing_identity,
-            manifest_id=manifest.manifest_id,
-            manifest_digest=manifest.manifest_digest,
-            producer_fingerprints=fingerprints,
-            claim_batch_ids=tuple(batch.claim_batch_id for batch in batches),
-            accepted_claim_ids=tuple(claim.claim_id for claim in accepted),
-            decision_ids=tuple(decision.decision_id for decision in decisions),
-            completed_at=manifest.sealed_at,
-            receipt_digest=canonical_digest(receipt_digest_payload),
-            schema_version=CLAIM_SCHEMA_VERSION,
+        if len({item.claim_id for item in claims}) != len(claims):
+            raise ClaimProcessingConflictError("processing produced duplicate deterministic Claim identities")
+        owner_digest = self.store.owner_identity_digest()
+        static_results = tuple(
+            self.admission.evaluate_static(claim, owner_identity_digest=owner_digest) for claim in claims
         )
-        published, reused = self.store.publish_processing(
-            receipt=receipt,
-            producer_runs=tuple(runs),
+        decided_at = self._now()
+        published_at = self._now()
+        completed_at = self._now()
+        receipt, reused = self.store.publish_processing(
+            processing_identity=processing,
+            manifest=manifest,
+            normalizer_fingerprints=fingerprints,
+            normalizer_runs=tuple(runs),
             batches=tuple(batches),
-            accepted_claims=tuple(accepted),
-            decisions=tuple(decisions),
+            claims=tuple(claims),
+            static_results=static_results,
+            admission_policy=self.admission,
+            decided_at=decided_at,
+            published_at=published_at,
+            completed_at=completed_at,
         )
-        if reused:
-            return self._result_from_receipt(published, reused=True)
-        self._observe("claim_batch_published", {"claim_count": len(accepted), "reused": False})
-        return ClaimProcessingResult(
-            manifest_id=manifest.manifest_id,
-            processing_identity=processing_identity,
-            producer_runs=tuple(runs),
-            accepted_claims=tuple(accepted),
-            rejected_decisions=tuple(
-                decision for decision in decisions if decision.status is not ClaimAdmissionStatus.ACCEPTED
-            ),
-            reused=False,
-            completed_at=receipt.completed_at,
+        result = self._result_from_receipt(receipt, reused=reused)
+        if not reused and result.validated_claims:
+            self._observe("claim_validated", {"claim_count": len(result.validated_claims)})
+        if not reused and result.accepted_claims:
+            self._observe(
+                "claim_admitted",
+                {
+                    "claim_count": len(result.accepted_claims),
+                    "reason_code": "claim_passed_admission",
+                },
+            )
+        if not reused:
+            rejected_counts: dict[str, int] = {}
+            for decision in result.rejected_decisions:
+                rejected_counts[decision.reason_code] = rejected_counts.get(decision.reason_code, 0) + 1
+            for reason_code, count in sorted(rejected_counts.items()):
+                self._observe(
+                    "claim_rejected",
+                    {"claim_count": count, "reason_code": reason_code},
+                )
+        self._observe(
+            "claim_batch_published" if not reused else "claim_processing_reused",
+            {"claim_count": len(result.accepted_claims), "reused": reused},
         )
+        return result
 
     def _result_from_receipt(
         self,
@@ -317,36 +341,46 @@ class ClaimPipelineService:
         *,
         reused: bool,
     ) -> ClaimProcessingResult:
-        claims: list[Claim] = []
-        for claim_id in receipt.accepted_claim_ids:
-            claim = self.store.read_claim(claim_id)
-            if claim is None:
-                raise ClaimProcessingConflictError("ProcessingReceipt references a missing Claim")
-            claims.append(claim)
+        validated = (
+            self.store.list_claims_by_processing(
+                receipt.processing_identity,
+                limit=max(1, len(receipt.claim_ids)),
+            )
+            if receipt.claim_ids
+            else ()
+        )
+        by_id = {item.claim_id: item for item in validated}
+        if set(by_id) != set(receipt.claim_ids):
+            raise ClaimProcessingConflictError("ProcessingReceipt references missing validated Claims")
+        accepted = tuple(by_id[item] for item in receipt.accepted_claim_ids)
         decisions = self.store.read_decisions(receipt.processing_identity)
+        if tuple(item.decision_id for item in decisions) != receipt.decision_ids:
+            by_decision = {item.decision_id: item for item in decisions}
+            try:
+                decisions = tuple(by_decision[item] for item in receipt.decision_ids)
+            except KeyError as exc:
+                raise ClaimProcessingConflictError("ProcessingReceipt references a missing AdmissionDecision") from exc
         return ClaimProcessingResult(
             manifest_id=receipt.manifest_id,
             processing_identity=receipt.processing_identity,
-            producer_runs=self._ordered_runs(receipt),
-            accepted_claims=tuple(claims),
-            rejected_decisions=tuple(
-                decision for decision in decisions if decision.status is not ClaimAdmissionStatus.ACCEPTED
-            ),
+            normalizer_runs=self._ordered_runs(receipt),
+            validated_claims=tuple(by_id[item] for item in receipt.claim_ids),
+            accepted_claims=accepted,
+            rejected_decisions=tuple(item for item in decisions if item.status is not ClaimAdmissionStatus.ACCEPTED),
             reused=reused,
             completed_at=receipt.completed_at,
         )
 
-    def _ordered_runs(self, receipt: ClaimProcessingReceipt) -> tuple[ClaimProducerRun, ...]:
-        runs = self.store.read_producer_runs(receipt.processing_identity)
-        by_fingerprint = {run.producer_fingerprint: run for run in runs}
+    def _ordered_runs(self, receipt: ClaimProcessingReceipt) -> tuple[ClaimNormalizerRun, ...]:
+        runs = self.store.read_normalizer_runs(receipt.processing_identity)
+        by_id = {item.run_id: item for item in runs}
         try:
-            return tuple(
-                by_fingerprint[fingerprint] for fingerprint in receipt.producer_fingerprints
-            )
+            return tuple(by_id[item] for item in receipt.normalizer_run_ids)
         except KeyError as exc:
-            raise ClaimProcessingConflictError(
-                "ProcessingReceipt references a missing ProducerRun"
-            ) from exc
+            raise ClaimProcessingConflictError("ProcessingReceipt references a missing NormalizerRun") from exc
+
+    def _now(self) -> datetime:
+        return strict_utc(self.clock.now(), "clock.now")
 
     def _observe(self, operation: str, attributes: dict[str, str | int | float | bool]) -> None:
         try:
@@ -363,4 +397,8 @@ class ClaimPipelineService:
             return
 
 
-__all__ = ["ClaimPipelineService", "ClaimProcessingResult"]
+__all__ = [
+    "ClaimPipelineService",
+    "ClaimProcessingResult",
+    "SemanticPipelineIngestResult",
+]

@@ -6,14 +6,15 @@ import asyncio
 from collections.abc import Mapping
 
 from behavior.claim import (
+    ClaimNormalizationRouter,
+    ClaimNormalizerRegistry,
     ClaimPipelineService,
-    ClaimProducerRegistry,
-    DirectStructuredClaimProducer,
-    StructuredSemanticClaimProducer,
+    DeterministicClaimNormalizer,
+    ModelClaimNormalizer,
 )
 from behavior.evidence import EvidenceService
+from behavior.ingress import SemanticIngressAdapterRegistry, SemanticRecordService
 from behavior.persistence.sqlite import SQLiteBehaviorEvidenceClaimStore
-from behavior.source import SourceRecordService
 from Config import M2BOSConfig
 from foundation.observability import CompositeObserver, MetricRegistry, Observer
 from infrastructure.observability import ManagedObservability
@@ -246,28 +247,35 @@ def build_runtime(
         config=config.behavior,
         initialize=False,
     )
-    behavior_source_service = SourceRecordService(
+    behavior_adapters = SemanticIngressAdapterRegistry()
+    behavior_ingress_service = SemanticRecordService(
         behavior_store,
-        config=config.behavior.source,
+        behavior_adapters,
+        config=config.behavior.ingress,
     )
     behavior_evidence_service = EvidenceService(
         behavior_store,
         config=config.behavior.evidence,
         observer=operation_observer,
     )
-    behavior_producers = ClaimProducerRegistry()
-    behavior_producers.register(DirectStructuredClaimProducer())
-    behavior_producers.register(
-        StructuredSemanticClaimProducer(
+    behavior_normalizers = ClaimNormalizerRegistry()
+    behavior_normalizers.register(DeterministicClaimNormalizer())
+    behavior_normalizers.register(
+        ModelClaimNormalizer(
             structured_chat,
             config=config.behavior.claim,
         )
     )
+    behavior_router = ClaimNormalizationRouter(
+        behavior_normalizers,
+        config=config.behavior.claim,
+    )
     behavior_pipeline = ClaimPipelineService(
         behavior_store,
-        behavior_source_service,
+        behavior_ingress_service,
         behavior_evidence_service,
-        behavior_producers,
+        behavior_normalizers,
+        behavior_router,
         config=config.behavior.claim,
         observer=operation_observer,
     )
@@ -546,9 +554,10 @@ def build_runtime(
         ),
         behavior=RuntimeBehavior(
             store=behavior_store,
-            source_service=behavior_source_service,
+            ingress_service=behavior_ingress_service,
             evidence_service=behavior_evidence_service,
-            claim_producers=behavior_producers,
+            claim_normalizers=behavior_normalizers,
+            claim_router=behavior_router,
             claim_pipeline=behavior_pipeline,
             structured_chat=structured_chat,
         ),

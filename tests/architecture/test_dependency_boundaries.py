@@ -180,3 +180,72 @@ def test_behavior_does_not_extend_memory_kind() -> None:
     )
     assert "behaviors" not in memory_tree_source
     assert not (REPOSITORY_ROOT / "memory" / "schema" / "definitions" / "behavior.yaml").exists()
+
+
+def test_behavior_old_ingress_window_and_producer_contracts_are_removed() -> None:
+    retired = (
+        "SourceRecord",
+        "SourceType",
+        "EvidenceWindow",
+        "DirectStructuredClaimProducer",
+        "StructuredSemanticClaimProducer",
+        "ClaimProducerRegistry",
+        "OwnerRouteDecision",
+        "OwnerRouteStatus",
+    )
+    violations = []
+    for path in (REPOSITORY_ROOT / "behavior").rglob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        for symbol in retired:
+            if symbol in source:
+                violations.append(f"{path.relative_to(REPOSITORY_ROOT)}: {symbol}")
+    assert violations == []
+    assert not (REPOSITORY_ROOT / "behavior" / "source").exists()
+
+
+def test_behavior_has_no_track_selection_raw_media_or_future_layer_implementation() -> None:
+    forbidden = (
+        "min(track_refs)",
+        "CAMERA_FRAME",
+        "AUDIO_CLIP",
+        "CanonicalEvent",
+        "EventResolver",
+        "EventResolution",
+        "CurrentState",
+        "Episode",
+        "ExperienceJournal",
+        "BehaviorDiscovery",
+        "BehaviorHypothesis",
+        "Opportunity",
+        "BehaviorCase",
+        "BehaviorPattern",
+        "BehaviorTree",
+        "Prediction",
+        "Feedback",
+        "Calibration",
+        "ActionPolicy",
+        "PolicyGate",
+        "ActionExecutor",
+        "behavior://",
+    )
+    violations = []
+    for path in (REPOSITORY_ROOT / "behavior").rglob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        for symbol in forbidden:
+            if symbol in source:
+                violations.append(f"{path.relative_to(REPOSITORY_ROOT)}: {symbol}")
+    assert violations == []
+
+
+def test_behavior_production_has_no_placeholder_or_suppression_escape_hatches() -> None:
+    forbidden = ("NotImplementedError", "# noqa", "# type: ignore")
+    violations = []
+    for path in (REPOSITORY_ROOT / "behavior").rglob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        if any(isinstance(node, ast.Pass) for node in ast.walk(tree)):
+            violations.append(f"{path.relative_to(REPOSITORY_ROOT)}: pass")
+        for marker in forbidden:
+            if marker in source:
+                violations.append(f"{path.relative_to(REPOSITORY_ROOT)}: {marker}")
+    assert violations == []

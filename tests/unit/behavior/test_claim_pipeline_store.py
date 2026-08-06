@@ -1,381 +1,481 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import replace
 from datetime import timedelta
-from threading import Barrier, Thread
 
 import pytest
 
 from behavior.claim import (
-    ClaimAdmissionGate,
     ClaimAdmissionStatus,
-    ClaimProducerRegistry,
-    ClaimProposal,
-    ClaimProposalBatch,
-    ClaimValidator,
-    DirectStructuredClaimProducer,
-    ProducerFingerprint,
+    ClaimBinder,
+    ClaimConfidencePolicy,
+    ClaimKind,
+    ClaimNormalizerKind,
+    ClaimSemanticProposal,
+    DeterministicClaimNormalizer,
+    EpistemicClass,
+    NormalizerFingerprint,
 )
-from behavior.claim.producer import ClaimProducerKind
 from behavior.config import BehaviorConfig
-from behavior.errors import (
-    ClaimValidationError,
-    SourceRecordConflictError,
+from behavior.errors import ClaimBindingError, ClaimStoreError
+from behavior.evidence import EvidenceService
+from behavior.ingress import (
+    ActionEventPayload,
+    ActivitySegmentPayload,
+    BoundarySignal,
+    IngressTrustClass,
+    PhaseHint,
+    SemanticActorRole,
+    SemanticModality,
+    SemanticRecordKind,
+    SemanticSubjectRole,
+    SensorFactPayload,
+    StateTransitionPayload,
+    UtteranceChannel,
+    UtteranceSegmentPayload,
 )
-from behavior.evidence import EvidenceService, EvidenceWindowAssembler
 from behavior.persistence.sqlite import SQLiteBehaviorEvidenceClaimStore
-from behavior.source import Modality, SourceType
 from foundation.observability import NullObserver
 from tests.unit.behavior.conftest import (
     BASE_TIME,
-    direct_claim_projection,
+    FakeClock,
+    accepted_decision,
+    bind_record,
+    make_input,
     make_pipeline,
-    make_source,
 )
 
 
-class StaticProducer:
-    kind = ClaimProducerKind.MODEL
-
-    def __init__(self, name: str, batch: ClaimProposalBatch) -> None:
-        self.name = name
-        self.batch = batch
-        self._fingerprint = ProducerFingerprint(
-            name,
-            "1",
-            "test",
-            "fake_chat",
-            "fake_model",
-            "test_prompt_v1",
-        )
-        self.calls = 0
-
-    @property
-    def fingerprint(self) -> ProducerFingerprint:
-        return self._fingerprint
-
-    async def produce(self, manifest):
-        self.calls += 1
-        return self.batch
-
-
-def _manifest_with_sources(store, owner, records):
-    service = EvidenceService(store, config=store.config.evidence, observer=NullObserver())
-    active = None
-    for record in records:
-        result = service.ingest_source(record)
-        active = result.active_window
-    assert active is not None
-    manifest = service.seal_window(active.window_id)
+def publish_manifest(store, owner, semantic_input, *, clock: FakeClock | None = None):
+    service = EvidenceService(
+        store,
+        config=store.config.evidence,
+        observer=NullObserver(),
+        clock=clock,
+    )
+    record = bind_record(owner, semantic_input, trust=_trust_for(semantic_input.record_kind))
+    result = service.ingest(record, accepted_decision(record))
+    manifest = (
+        store.read_manifest(result.manifest_ids[0])
+        if result.manifest_ids
+        else service.seal_bundle(result.active_bundle.bundle_id)
+    )
     assert manifest is not None
-    return manifest
+    return manifest, record
 
 
-def _proposal(source_ids, **updates) -> ClaimProposal:
-    value = {
-        **direct_claim_projection(epistemic="MODEL_INFERRED"),
-        "scene_ref": "scene-main",
-        "time_start": "2026-08-05T01:02:03Z",
-        "time_end": "2026-08-05T01:02:03Z",
-        "time_uncertainty_ms": 0,
-        "source_record_ids": list(source_ids),
+def _trust_for(kind: SemanticRecordKind) -> IngressTrustClass:
+    if kind is SemanticRecordKind.OWNER_STATE_TRANSITION:
+        return IngressTrustClass.SENSOR_INFERRED
+    return IngressTrustClass.DIRECT_DEVICE_FACT
+
+
+def proposal(**updates: object) -> ClaimSemanticProposal:
+    values: dict[str, object] = {
+        "claim_kind": ClaimKind.STATE_ASSERTION,
+        "predicate": "power",
+        "semantic_family": "device_state",
+        "activity": None,
+        "phase": None,
+        "object_refs": (),
+        "location_ref": None,
+        "semantic_payload": {"value": "on"},
+        "human_summary": "Device state",
+        "alternative_group_id": None,
+        "normalizer_confidence": 1.0,
     }
-    value.update(updates)
-    return ClaimProposal.model_validate(value)
+    values.update(updates)
+    return ClaimSemanticProposal(**values)
 
 
-def test_validator_binds_deterministic_claim_and_rejects_scope_forgery(store, owner, monkeypatch) -> None:
-    record = make_source(owner, semantic_data={})
-    manifest = _manifest_with_sources(store, owner, (record,))
-    direct = DirectStructuredClaimProducer()
-    proposal = ClaimProposal.model_validate(
-        {
-            **direct_claim_projection(),
-            "scene_ref": "scene-main",
-            "time_start": "2026-08-05T01:02:03Z",
-            "time_end": "2026-08-05T01:02:03Z",
-            "time_uncertainty_ms": 0,
-            "source_record_ids": [record.source_record_id],
-        }
+def test_binder_owns_role_time_epistemic_and_confidence(store, owner) -> None:
+    manifest, record = publish_manifest(store, owner, make_input())
+    fingerprint = DeterministicClaimNormalizer().fingerprint
+    claim = ClaimBinder(config=store.config.claim, clock=FakeClock(BASE_TIME + timedelta(hours=1))).bind(
+        manifest,
+        record,
+        proposal(),
+        fingerprint,
     )
-    validator = ClaimValidator(store, config=store.config.claim)
-    first = validator.validate_and_bind(
-        manifest=manifest,
-        proposal=proposal,
-        producer=direct.fingerprint,
-        producer_kind=direct.kind,
-        claim_batch_id="batch-test",
-    )
-    second = validator.validate_and_bind(
-        manifest=manifest,
-        proposal=proposal,
-        producer=direct.fingerprint,
-        producer_kind=direct.kind,
-        claim_batch_id="batch-test",
-    )
-    assert first == second
+    assert claim.subject_role is record.semantic_input.subject_role
+    assert claim.actor_role is record.semantic_input.actor_role
+    assert claim.time_start == record.semantic_input.event_time_start
+    assert claim.time_end == record.semantic_input.event_time_end
+    assert claim.epistemic_class is EpistemicClass.DIRECT_SOURCE
+    assert claim.effective_confidence == record.semantic_input.source_confidence
+    assert claim.created_at == BASE_TIME + timedelta(hours=1)
 
-    with pytest.raises(ClaimValidationError, match="outside the Manifest"):
-        validator.validate_and_bind(
-            manifest=manifest,
-            proposal=replace(proposal, source_record_ids=("src_" + "f" * 64,)),
-            producer=direct.fingerprint,
-            producer_kind=direct.kind,
-            claim_batch_id="batch-test",
+
+def test_model_confidence_policy_is_conservative() -> None:
+    policy = ClaimConfidencePolicy()
+    fingerprint = NormalizerFingerprint(
+        "model",
+        "2",
+        ClaimNormalizerKind.MODEL,
+        "test",
+        "test",
+        "model",
+        "prompt-v2",
+    )
+    assert (
+        policy.effective(
+            source_confidence=0.8,
+            normalizer_confidence=0.6,
+            normalizer_kind=fingerprint.normalizer_kind,
         )
-    with pytest.raises(ClaimValidationError, match="time range"):
-        validator.validate_and_bind(
-            manifest=manifest,
-            proposal=replace(
-                proposal,
-                time_start=BASE_TIME - timedelta(seconds=1),
-                time_end=BASE_TIME,
+        == 0.6
+    )
+
+
+@pytest.mark.parametrize(
+    ("semantic_input", "trust", "claim_updates", "expected"),
+    [
+        (
+            make_input(),
+            IngressTrustClass.DIRECT_DEVICE_FACT,
+            {},
+            EpistemicClass.DIRECT_SOURCE,
+        ),
+        (
+            make_input(
+                kind=SemanticRecordKind.ROBOT_ACTION_EVENT,
+                payload=ActionEventPayload("wave", "completed", None, {}),
+                subject_role=SemanticSubjectRole.ROBOT,
+                actor_role=SemanticActorRole.ROBOT,
+                modality=SemanticModality.ROBOT,
             ),
-            producer=direct.fingerprint,
-            producer_kind=direct.kind,
-            claim_batch_id="batch-test",
-        )
-    with pytest.raises(ClaimValidationError, match="object_refs"):
-        validator.validate_and_bind(
-            manifest=manifest,
-            proposal=replace(proposal, object_refs=("unknown-object",)),
-            producer=direct.fingerprint,
-            producer_kind=direct.kind,
-            claim_batch_id="batch-test",
-        )
-    with pytest.raises(ClaimValidationError, match="model Producer"):
-        validator.validate_and_bind(
-            manifest=manifest,
-            proposal=proposal,
-            producer=direct.fingerprint,
-            producer_kind=ClaimProducerKind.MODEL,
-            claim_batch_id="batch-test",
-        )
-    user_explicit = replace(proposal, epistemic_class=__import__("behavior").EpistemicClass.USER_EXPLICIT)
-    with pytest.raises(ClaimValidationError, match="Conversation or ASR"):
-        validator.validate_and_bind(
-            manifest=manifest,
-            proposal=user_explicit,
-            producer=direct.fingerprint,
-            producer_kind=direct.kind,
-            claim_batch_id="batch-test",
-        )
+            IngressTrustClass.DIRECT_SYSTEM_LOG,
+            {"claim_kind": ClaimKind.ROBOT_ACTION},
+            EpistemicClass.DIRECT_SOURCE,
+        ),
+        (
+            make_input(
+                kind=SemanticRecordKind.OWNER_UTTERANCE_SEGMENT,
+                payload=UtteranceSegmentPayload("hello", "en", UtteranceChannel.VOICE),
+                subject_role=SemanticSubjectRole.OWNER,
+                actor_role=SemanticActorRole.OWNER,
+                modality=SemanticModality.AUDIO,
+            ),
+            IngressTrustClass.OWNER_EXPLICIT,
+            {"claim_kind": ClaimKind.UTTERANCE},
+            EpistemicClass.USER_EXPLICIT,
+        ),
+        (
+            make_input(
+                kind=SemanticRecordKind.OWNER_SENSOR_FACT,
+                payload=SensorFactPayload("heart_rate", 70, "bpm", None, {}),
+                subject_role=SemanticSubjectRole.OWNER,
+                actor_role=SemanticActorRole.SYSTEM,
+                modality=SemanticModality.SENSOR,
+            ),
+            IngressTrustClass.SENSOR_INFERRED,
+            {},
+            EpistemicClass.SENSOR_INFERRED,
+        ),
+        (
+            make_input(
+                kind=SemanticRecordKind.OWNER_ACTIVITY_SEGMENT,
+                payload=ActivitySegmentPayload("walking", PhaseHint.IN_PROGRESS, {}),
+                subject_role=SemanticSubjectRole.OWNER,
+                actor_role=SemanticActorRole.OWNER,
+                modality=SemanticModality.MULTIMODAL,
+            ),
+            IngressTrustClass.MULTIMODAL_MODEL_INFERRED,
+            {
+                "claim_kind": ClaimKind.ACTIVITY_PHASE,
+                "activity": "walking",
+                "phase": "in_progress",
+            },
+            EpistemicClass.MULTIMODAL_MODEL_INFERRED,
+        ),
+    ],
+)
+def test_binder_maps_system_trust_to_epistemic_class(
+    store,
+    owner,
+    semantic_input,
+    trust,
+    claim_updates,
+    expected,
+) -> None:
+    service = EvidenceService(store, config=store.config.evidence, observer=NullObserver())
+    record = bind_record(owner, semantic_input, trust=trust)
+    result = service.ingest(record, accepted_decision(record))
+    manifest = service.seal_bundle(result.active_bundle.bundle_id)
+    assert manifest is not None
+    claim = ClaimBinder(config=store.config.claim).bind(
+        manifest,
+        record,
+        proposal(**claim_updates),
+        DeterministicClaimNormalizer().fingerprint,
+    )
+    assert claim.epistemic_class is expected
 
-    other_record = make_source(owner, sequence=1, offset_seconds=10, semantic_data={})
-    other_manifest = _manifest_with_sources(store, owner, (other_record,))
-    monkeypatch.setattr(store, "read_manifest", lambda _identity: other_manifest)
-    with pytest.raises(ClaimValidationError, match="digest mismatch"):
-        validator.validate_and_bind(
-            manifest=manifest,
-            proposal=proposal,
-            producer=direct.fingerprint,
-            producer_kind=direct.kind,
-            claim_batch_id="batch-test",
-        )
+
+def test_binder_rejects_cross_record_references_and_wrong_kind(store, owner) -> None:
+    semantic_input = make_input(object_refs=("object-a",), location_ref="kitchen")
+    manifest, record = publish_manifest(store, owner, semantic_input)
+    binder = ClaimBinder(config=store.config.claim)
+    fingerprint = DeterministicClaimNormalizer().fingerprint
+    with pytest.raises(ClaimBindingError):
+        binder.bind(manifest, record, proposal(object_refs=("object-b",)), fingerprint)
+    with pytest.raises(ClaimBindingError):
+        binder.bind(manifest, record, proposal(location_ref="garage"), fingerprint)
+    with pytest.raises(ClaimBindingError):
+        binder.bind(manifest, record, proposal(claim_kind=ClaimKind.ROBOT_ACTION), fingerprint)
 
 
-def test_pipeline_publishes_atomically_and_reuses_receipt(store, owner, behavior_config) -> None:
+def test_claim_identity_excludes_created_at(store, owner) -> None:
+    manifest, record = publish_manifest(store, owner, make_input())
+    fingerprint = DeterministicClaimNormalizer().fingerprint
+    first = ClaimBinder(config=store.config.claim, clock=FakeClock(BASE_TIME)).bind(
+        manifest, record, proposal(), fingerprint
+    )
+    second = ClaimBinder(
+        config=store.config.claim,
+        clock=FakeClock(BASE_TIME + timedelta(days=1)),
+    ).bind(manifest, record, proposal(), fingerprint)
+    assert first.claim_id == second.claim_id
+    assert first.created_at != second.created_at
+
+
+def test_pipeline_routes_automatically_publishes_and_reuses(store, owner, behavior_config) -> None:
+    manifest, _ = publish_manifest(
+        store,
+        owner,
+        make_input(boundary_signal=BoundarySignal.END),
+    )
     pipeline = make_pipeline(store, behavior_config)
-    ingested = pipeline.ingest_source(make_source(owner))
-    manifest = pipeline.seal_window(ingested.active_window.window_id)
-    first = asyncio.run(pipeline.process_manifest(manifest.manifest_id, ("direct_structured",)))
-    second = asyncio.run(pipeline.process_manifest(manifest.manifest_id, ("direct_structured",)))
-    assert len(first.accepted_claims) == 1
-    assert second.reused
-    assert second.processing_identity == first.processing_identity
-    assert second.accepted_claims == first.accepted_claims
-    assert store.read_receipt(first.processing_identity) is not None
-    duplicate = ClaimAdmissionGate(store, config=behavior_config.claim).decide(
-        first.accepted_claims[0],
-        processing_identity="manual-duplicate-check",
+    first = asyncio.run(pipeline.process_manifest(manifest.manifest_id))
+    replay = asyncio.run(pipeline.process_manifest(manifest.manifest_id))
+    assert len(first.validated_claims) == len(first.accepted_claims) == 1
+    assert replay.reused
+    assert replay.processing_identity == first.processing_identity
+    assert replay.accepted_claims[0].claim_id == first.accepted_claims[0].claim_id
+    assert store.read_claim(first.accepted_claims[0].claim_id) == first.accepted_claims[0]
+
+
+def test_below_threshold_claim_is_still_durable_and_not_accepted(tmp_path, owner) -> None:
+    config = BehaviorConfig(claim=replace(BehaviorConfig().claim, min_direct_confidence=0.9))
+    store = SQLiteBehaviorEvidenceClaimStore(tmp_path / "threshold", config=config, initialize=True)
+    manifest, _ = publish_manifest(
+        store,
+        owner,
+        make_input(source_confidence=0.2, boundary_signal=BoundarySignal.END),
     )
-    assert duplicate.status is ClaimAdmissionStatus.EXACT_DUPLICATE
-
-
-def test_state_repeat_suppression_does_not_suppress_change_kinds(tmp_path, owner) -> None:
-    config = BehaviorConfig()
-    store = SQLiteBehaviorEvidenceClaimStore(tmp_path / "repeat", config=config)
-    store.initialize()
-    pipeline = make_pipeline(store, config)
-    first_ingest = pipeline.ingest_source(make_source(owner, sequence=0))
-    first_manifest = pipeline.seal_window(first_ingest.active_window.window_id)
-    first = asyncio.run(pipeline.process_manifest(first_manifest.manifest_id, ("direct_structured",)))
-    assert len(first.accepted_claims) == 1
-
-    repeated = make_source(owner, sequence=1, offset_seconds=10)
-    repeated_ingest = pipeline.ingest_source(repeated)
-    repeated_manifest = pipeline.seal_window(repeated_ingest.active_window.window_id)
-    repeated_result = asyncio.run(
-        pipeline.process_manifest(repeated_manifest.manifest_id, ("direct_structured",))
-    )
-    assert repeated_result.accepted_claims == ()
-    assert repeated_result.rejected_decisions[0].status is ClaimAdmissionStatus.REPEATED_STATE_SUPPRESSED
-
-    for sequence, kind in ((2, "STATE_TRANSITION"), (3, "FEEDBACK")):
-        record = make_source(
-            owner,
-            sequence=sequence,
-            offset_seconds=10 + sequence,
-            semantic_data={"claim": direct_claim_projection(kind=kind)},
+    result = asyncio.run(make_pipeline(store, config).process_manifest(manifest.manifest_id))
+    assert result.accepted_claims == ()
+    assert result.rejected_decisions[0].status is ClaimAdmissionStatus.BELOW_SCORE_THRESHOLD
+    claim = result.validated_claims[0]
+    assert store.read_claim(claim.claim_id) == claim
+    assert store.read_claim_decision(claim.claim_id).status is ClaimAdmissionStatus.BELOW_SCORE_THRESHOLD
+    assert (
+        store.list_accepted_claims(
+            start=BASE_TIME - timedelta(days=1),
+            end=BASE_TIME + timedelta(days=1),
+            limit=10,
         )
-        ingested = pipeline.ingest_source(record)
-        manifest = pipeline.seal_window(ingested.active_window.window_id)
-        result = asyncio.run(pipeline.process_manifest(manifest.manifest_id, ("direct_structured",)))
-        assert len(result.accepted_claims) == 1
-        assert result.accepted_claims[0].proposal.claim_kind.value == kind
-
-
-def test_threshold_no_information_gain_and_alternative_candidates(tmp_path, owner) -> None:
-    config = BehaviorConfig()
-    store = SQLiteBehaviorEvidenceClaimStore(tmp_path / "admission", config=config)
-    store.initialize()
-    first_source = make_source(
-        owner,
-        source_type=SourceType.VLM_OUTPUT,
-        modality=Modality.TEXT,
-        semantic_data={},
+        == ()
     )
-    second_source = make_source(
-        owner,
-        sequence=1,
-        stream_id="stream-second",
-        source_type=SourceType.AUDIO_SEMANTIC,
-        modality=Modality.AUDIO,
-        semantic_data={},
-    )
-    manifest = _manifest_with_sources(store, owner, (first_source, second_source))
-    low = _proposal((first_source.source_record_id,), raw_score=0.1)
-    same_a = _proposal((first_source.source_record_id,), predicate="same_semantics", raw_score=0.9)
-    same_b = _proposal((second_source.source_record_id,), predicate="same_semantics", raw_score=0.9)
-    alternative_a = _proposal(
-        (first_source.source_record_id,),
-        predicate="candidate_a",
-        alternative_group_id="alternative-1",
-        raw_score=0.9,
-    )
-    alternative_b = _proposal(
-        (second_source.source_record_id,),
-        predicate="candidate_b",
-        alternative_group_id="alternative-1",
-        raw_score=0.9,
-    )
-    transition_a = _proposal(
-        (first_source.source_record_id,),
-        claim_kind="STATE_TRANSITION",
-        predicate="changed_state",
-        raw_score=0.9,
-    )
-    transition_b = _proposal(
-        (second_source.source_record_id,),
-        claim_kind="STATE_TRANSITION",
-        predicate="changed_state",
-        raw_score=0.9,
-    )
-    batch = ClaimProposalBatch(
-        False,
-        (low, same_a, same_b, alternative_a, alternative_b, transition_a, transition_b),
-    )
-    producer = StaticProducer("static_model", batch)
-    registry = ClaimProducerRegistry()
-    registry.register(producer)
-    pipeline = make_pipeline(store, config, registry=registry)
-    result = asyncio.run(pipeline.process_manifest(manifest.manifest_id, (producer.name,)))
-    statuses = {decision.status for decision in result.rejected_decisions}
-    assert ClaimAdmissionStatus.BELOW_SCORE_THRESHOLD in statuses
-    assert ClaimAdmissionStatus.NO_INFORMATION_GAIN in statuses
-    alternative_claims = [
-        claim for claim in result.accepted_claims if claim.proposal.alternative_group_id == "alternative-1"
-    ]
-    assert len(alternative_claims) == 2
-    transition_claims = [
-        claim
-        for claim in result.accepted_claims
-        if claim.proposal.claim_kind.value == "STATE_TRANSITION"
-    ]
-    assert len(transition_claims) == 2
 
 
-def test_concurrent_identical_processing_reuses_the_committed_receipt(store, owner, behavior_config) -> None:
-    source = make_source(
-        owner,
-        source_type=SourceType.VLM_OUTPUT,
-        modality=Modality.TEXT,
-        semantic_data={},
-    )
-    manifest = _manifest_with_sources(store, owner, (source,))
-    proposal = _proposal((source.source_record_id,), raw_score=0.9)
-
-    class YieldingProducer(StaticProducer):
-        async def produce(self, manifest):
-            self.calls += 1
-            await asyncio.sleep(0)
-            return self.batch
-
-    producer = YieldingProducer("yielding_model", ClaimProposalBatch(False, (proposal,)))
-    registry = ClaimProducerRegistry()
-    registry.register(producer)
-    pipeline = make_pipeline(store, behavior_config, registry=registry)
-
-    async def run_both():
-        return await asyncio.gather(
-            pipeline.process_manifest(manifest.manifest_id, (producer.name,)),
-            pipeline.process_manifest(manifest.manifest_id, (producer.name,)),
-        )
-
-    first, second = asyncio.run(run_both())
-    assert producer.calls == 2
-    assert first.processing_identity == second.processing_identity
-    assert first.accepted_claims == second.accepted_claims
-    assert {first.reused, second.reused} == {False, True}
-
-
-def test_processing_publication_rolls_back_on_failure(store, owner, behavior_config, monkeypatch) -> None:
+def test_repeated_state_is_suppressed_but_transition_is_not(store, owner, behavior_config) -> None:
     pipeline = make_pipeline(store, behavior_config)
-    ingested = pipeline.ingest_source(make_source(owner))
-    manifest = pipeline.seal_window(ingested.active_window.window_id)
-
-    def fail_decision(*args, **kwargs):
-        raise RuntimeError("simulated decision write failure")
-
-    monkeypatch.setattr(store, "_insert_decision", fail_decision)
-    with pytest.raises(RuntimeError, match="simulated"):
-        asyncio.run(pipeline.process_manifest(manifest.manifest_id, ("direct_structured",)))
-    assert store.claim_count() == 0
-    assert store.read_claim("claim_" + "a" * 64) is None
-
-
-def test_concurrent_source_replay_and_conflict_are_explicit(tmp_path, owner) -> None:
-    config = BehaviorConfig()
-    store = SQLiteBehaviorEvidenceClaimStore(tmp_path / "concurrent", config=config)
-    store.initialize()
-    assembler = EvidenceWindowAssembler(config.evidence)
-    record = make_source(owner)
-    barrier = Barrier(2)
-    results = []
-    errors = []
-
-    def write(value):
-        try:
-            barrier.wait()
-            results.append(store.ingest_source(value, assembler).status)
-        except Exception as exc:
-            errors.append(exc)
-
-    same = make_source(owner)
-    threads = [Thread(target=write, args=(record,)), Thread(target=write, args=(same,))]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    assert errors == []
-    assert {status.value for status in results} == {"ACCEPTED", "REPLAYED"}
-
-    conflict = make_source(
+    first_manifest, _ = publish_manifest(
+        store,
         owner,
-        sequence=0,
-        semantic_data={},
-        modality=Modality.TEXT,
+        make_input(sequence=0, boundary_signal=BoundarySignal.END),
     )
-    with pytest.raises(SourceRecordConflictError):
-        store.ingest_source(conflict, assembler)
+    first = asyncio.run(pipeline.process_manifest(first_manifest.manifest_id))
+    second_manifest, _ = publish_manifest(
+        store,
+        owner,
+        make_input(sequence=1, offset_seconds=10, boundary_signal=BoundarySignal.END),
+    )
+    second = asyncio.run(pipeline.process_manifest(second_manifest.manifest_id))
+    assert first.accepted_claims
+    assert second.rejected_decisions[0].status is ClaimAdmissionStatus.REPEATED_STATE_SUPPRESSED
+
+    transition_input = make_input(
+        sequence=2,
+        offset_seconds=11,
+        kind=SemanticRecordKind.OWNER_STATE_TRANSITION,
+        payload=StateTransitionPayload("presence", False, True),
+        subject_role=SemanticSubjectRole.OWNER,
+        actor_role=SemanticActorRole.OWNER,
+        boundary_signal=BoundarySignal.END,
+    )
+    transition_manifest, _ = publish_manifest(store, owner, transition_input)
+    transition = asyncio.run(pipeline.process_manifest(transition_manifest.manifest_id))
+    assert transition.accepted_claims[0].proposal.claim_kind is ClaimKind.STATE_TRANSITION
+
+
+def test_alternative_claims_are_not_resolved_by_first_layer(store, owner, behavior_config) -> None:
+    manifest, record = publish_manifest(store, owner, make_input())
+    binder = ClaimBinder(config=behavior_config.claim)
+    fingerprint = DeterministicClaimNormalizer().fingerprint
+    first = binder.bind(
+        manifest,
+        record,
+        proposal(predicate="candidate_a", alternative_group_id="alternatives"),
+        fingerprint,
+    )
+    second = binder.bind(
+        manifest,
+        record,
+        proposal(predicate="candidate_b", alternative_group_id="alternatives"),
+        fingerprint,
+    )
+    assert first.claim_id != second.claim_id
+    assert first.proposal.alternative_group_id == second.proposal.alternative_group_id
+
+
+def test_claim_and_receipt_publication_is_atomic_and_query_bounded(store, owner, behavior_config) -> None:
+    manifest, _ = publish_manifest(store, owner, make_input(boundary_signal=BoundarySignal.END))
+    result = asyncio.run(make_pipeline(store, behavior_config).process_manifest(manifest.manifest_id))
+    receipt = store.read_receipt(result.processing_identity)
+    assert receipt is not None
+    assert receipt.claim_ids == tuple(item.claim_id for item in result.validated_claims)
+    assert store.list_claims_by_processing(result.processing_identity, limit=10) == result.validated_claims
+    with pytest.raises(ValueError):
+        store.list_claims_by_processing(result.processing_identity, limit=0)
+    with closing(sqlite3.connect(store.path)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM claim_batches").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM claim_processing_receipts").fetchone()[0] == 1
+
+
+def test_claim_time_query_uses_a_stable_composite_cursor(store, owner, behavior_config) -> None:
+    first_manifest, _ = publish_manifest(
+        store,
+        owner,
+        make_input(sequence=40, correlation_id="claim-cursor-a", boundary_signal=BoundarySignal.END),
+    )
+    second_manifest, _ = publish_manifest(
+        store,
+        owner,
+        make_input(
+            sequence=41,
+            offset_seconds=1,
+            correlation_id="claim-cursor-b",
+            boundary_signal=BoundarySignal.END,
+        ),
+    )
+    asyncio.run(
+        make_pipeline(store, behavior_config, clock=FakeClock(BASE_TIME + timedelta(seconds=5))).process_manifest(
+            first_manifest.manifest_id
+        )
+    )
+    asyncio.run(
+        make_pipeline(store, behavior_config, clock=FakeClock(BASE_TIME + timedelta(seconds=6))).process_manifest(
+            second_manifest.manifest_id
+        )
+    )
+    page_one = store.list_claims(
+        start=BASE_TIME,
+        end=BASE_TIME + timedelta(seconds=10),
+        limit=1,
+    )
+    page_two = store.list_claims(
+        start=BASE_TIME,
+        end=BASE_TIME + timedelta(seconds=10),
+        limit=1,
+        cursor=page_one[0].claim_id,
+    )
+    assert len(page_one) == len(page_two) == 1
+    assert page_one[0].claim_id != page_two[0].claim_id
+
+
+def test_concurrent_same_processing_reuses_one_atomic_result(store, owner, behavior_config) -> None:
+    manifest, _ = publish_manifest(store, owner, make_input(boundary_signal=BoundarySignal.END))
+
+    def process():
+        return asyncio.run(make_pipeline(store, behavior_config).process_manifest(manifest.manifest_id))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(lambda _: process(), range(2)))
+    assert results[0].processing_identity == results[1].processing_identity
+    assert sum(item.reused for item in results) >= 1
+    with closing(sqlite3.connect(store.path)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM claim_processing_receipts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 1
+
+
+def test_concurrent_distinct_processing_suppresses_one_repeated_state(
+    store,
+    owner,
+    behavior_config,
+) -> None:
+    first_manifest, _ = publish_manifest(
+        store,
+        owner,
+        make_input(sequence=10, offset_seconds=0, boundary_signal=BoundarySignal.END),
+    )
+    second_manifest, _ = publish_manifest(
+        store,
+        owner,
+        make_input(sequence=11, offset_seconds=1, boundary_signal=BoundarySignal.END),
+    )
+
+    def process(manifest_id: str):
+        return asyncio.run(make_pipeline(store, behavior_config).process_manifest(manifest_id))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(process, (first_manifest.manifest_id, second_manifest.manifest_id)))
+    statuses = []
+    for result in results:
+        statuses.extend(
+            [ClaimAdmissionStatus.ACCEPTED] * len(result.accepted_claims)
+            + [item.status for item in result.rejected_decisions]
+        )
+    assert statuses.count(ClaimAdmissionStatus.ACCEPTED) == 1
+    assert statuses.count(ClaimAdmissionStatus.REPEATED_STATE_SUPPRESSED) == 1
+
+
+def test_accepted_capacity_rejection_keeps_validated_claim_auditable(tmp_path, owner) -> None:
+    defaults = BehaviorConfig()
+    config = BehaviorConfig(
+        ingress=defaults.ingress,
+        evidence=defaults.evidence,
+        claim=replace(defaults.claim, max_claims_per_record=1, max_claims_per_batch=1),
+        store=replace(defaults.store, max_claims=1),
+    )
+    store = SQLiteBehaviorEvidenceClaimStore(tmp_path / "capacity", config=config, initialize=True)
+    first_manifest, _ = publish_manifest(
+        store,
+        owner,
+        make_input(sequence=20, boundary_signal=BoundarySignal.END),
+    )
+    first = asyncio.run(make_pipeline(store, config).process_manifest(first_manifest.manifest_id))
+    assert len(first.accepted_claims) == 1
+    transition_manifest, _ = publish_manifest(
+        store,
+        owner,
+        make_input(
+            sequence=21,
+            offset_seconds=1,
+            kind=SemanticRecordKind.OWNER_STATE_TRANSITION,
+            payload=StateTransitionPayload("presence", False, True),
+            subject_role=SemanticSubjectRole.OWNER,
+            actor_role=SemanticActorRole.OWNER,
+            boundary_signal=BoundarySignal.END,
+        ),
+    )
+    second = asyncio.run(make_pipeline(store, config).process_manifest(transition_manifest.manifest_id))
+    assert second.accepted_claims == ()
+    assert second.rejected_decisions[0].status is ClaimAdmissionStatus.CAPACITY_REJECTED
+    assert store.read_claim(second.validated_claims[0].claim_id) == second.validated_claims[0]
+
+
+def test_schema_v1_is_explicitly_rejected(tmp_path) -> None:
+    root = tmp_path / "old"
+    root.mkdir()
+    path = root / "evidence_claims.sqlite3"
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("CREATE TABLE behavior_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        connection.execute("INSERT INTO behavior_metadata VALUES('schema_version', '1')")
+    with pytest.raises(ClaimStoreError, match="migration is not supported"):
+        SQLiteBehaviorEvidenceClaimStore(root, config=BehaviorConfig(), initialize=True)

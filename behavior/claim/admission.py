@@ -1,9 +1,9 @@
-"""合法 Claim 的有界重复、增量与质量准入。"""
+"""Claim 静态准入策略与事务内动态决策规则。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 
 from behavior._validation import (
@@ -15,11 +15,10 @@ from behavior._validation import (
     strict_utc,
     utc_text,
 )
-from behavior.claim.model import Claim
-from behavior.claim.proposal import ClaimKind, EpistemicClass
+from behavior.claim.model import Claim, EpistemicClass
+from behavior.claim.proposal import ClaimKind
 from behavior.config import ClaimConfig
 from behavior.errors import ClaimAdmissionError
-from behavior.persistence.contracts import BehaviorEvidenceClaimStore
 from foundation.integrity import canonical_digest
 
 
@@ -34,6 +33,28 @@ class ClaimAdmissionStatus(str, Enum):
 
 
 @dataclass(frozen=True)
+class StaticAdmissionResult:
+    claim_id: str
+    rejection_status: ClaimAdmissionStatus | None
+    reason_code: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "claim_id", identifier(self.claim_id, "claim_id"))
+        if self.rejection_status is not None:
+            status = ClaimAdmissionStatus(self.rejection_status)
+            if status in {
+                ClaimAdmissionStatus.ACCEPTED,
+                ClaimAdmissionStatus.EXACT_DUPLICATE,
+                ClaimAdmissionStatus.REPEATED_STATE_SUPPRESSED,
+                ClaimAdmissionStatus.NO_INFORMATION_GAIN,
+                ClaimAdmissionStatus.CAPACITY_REJECTED,
+            }:
+                raise ClaimAdmissionError("static Admission cannot decide a dynamic status")
+            object.__setattr__(self, "rejection_status", status)
+        object.__setattr__(self, "reason_code", identifier(self.reason_code, "reason_code"))
+
+
+@dataclass(frozen=True)
 class ClaimAdmissionDecision:
     decision_id: str
     processing_identity: str
@@ -44,15 +65,9 @@ class ClaimAdmissionDecision:
     existing_claim_id: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "decision_id", identifier(self.decision_id, "decision_id"))
-        object.__setattr__(
-            self,
-            "processing_identity",
-            identifier(self.processing_identity, "processing_identity"),
-        )
-        object.__setattr__(self, "claim_id", identifier(self.claim_id, "claim_id"))
+        for name in ("decision_id", "processing_identity", "claim_id", "reason_code"):
+            object.__setattr__(self, name, identifier(getattr(self, name), name))
         object.__setattr__(self, "status", ClaimAdmissionStatus(self.status))
-        object.__setattr__(self, "reason_code", identifier(self.reason_code, "reason_code"))
         object.__setattr__(self, "decided_at", strict_utc(self.decided_at, "decided_at"))
         object.__setattr__(
             self,
@@ -60,31 +75,31 @@ class ClaimAdmissionDecision:
             optional_identifier(self.existing_claim_id, "existing_claim_id"),
         )
         expected = self.identity_for(
-            claim_id=self.claim_id,
             processing_identity=self.processing_identity,
+            claim_id=self.claim_id,
             status=self.status,
             reason_code=self.reason_code,
             existing_claim_id=self.existing_claim_id,
         )
         if self.decision_id != expected:
-            raise ClaimAdmissionError("decision_id does not match deterministic identity")
+            raise ClaimAdmissionError("AdmissionDecision identity mismatch")
 
     @staticmethod
     def identity_for(
         *,
-        claim_id: str,
         processing_identity: str,
+        claim_id: str,
         status: ClaimAdmissionStatus,
         reason_code: str,
         existing_claim_id: str | None,
     ) -> str:
         return "decision_" + canonical_digest(
             {
-                "claim_id": claim_id,
                 "processing_identity": processing_identity,
-                "existing_claim_id": existing_claim_id,
-                "reason_code": reason_code,
+                "claim_id": claim_id,
                 "status": ClaimAdmissionStatus(status).value,
+                "reason_code": reason_code,
+                "existing_claim_id": existing_claim_id,
             }
         )
 
@@ -96,21 +111,23 @@ class ClaimAdmissionDecision:
         reason_code: str,
         *,
         processing_identity: str,
+        decided_at: datetime,
         existing_claim_id: str | None = None,
     ) -> ClaimAdmissionDecision:
-        return cls(
-            decision_id=cls.identity_for(
-                claim_id=claim.claim_id,
-                processing_identity=processing_identity,
-                status=status,
-                reason_code=reason_code,
-                existing_claim_id=existing_claim_id,
-            ),
+        decision_id = cls.identity_for(
             processing_identity=processing_identity,
             claim_id=claim.claim_id,
             status=status,
             reason_code=reason_code,
-            decided_at=claim.created_at,
+            existing_claim_id=existing_claim_id,
+        )
+        return cls(
+            decision_id=decision_id,
+            processing_identity=processing_identity,
+            claim_id=claim.claim_id,
+            status=status,
+            reason_code=reason_code,
+            decided_at=decided_at,
             existing_claim_id=existing_claim_id,
         )
 
@@ -151,104 +168,79 @@ class ClaimAdmissionDecision:
         )
 
 
-class ClaimAdmissionGate:
-    def __init__(self, store: BehaviorEvidenceClaimStore, *, config: ClaimConfig) -> None:
-        if not isinstance(store, BehaviorEvidenceClaimStore):
-            raise TypeError("store must implement BehaviorEvidenceClaimStore")
+class ClaimAdmissionPolicy:
+    def __init__(self, *, config: ClaimConfig) -> None:
         if not isinstance(config, ClaimConfig):
             raise TypeError("config must be ClaimConfig")
-        self.store = store
         self.config = config
 
-    def decide(
+    def evaluate_static(self, claim: Claim, *, owner_identity_digest: str | None) -> StaticAdmissionResult:
+        if not isinstance(claim, Claim):
+            raise TypeError("claim must be Claim")
+        if owner_identity_digest is None or claim.owner_identity_digest != owner_identity_digest:
+            return StaticAdmissionResult(
+                claim.claim_id,
+                ClaimAdmissionStatus.OWNER_SCOPE_REJECTED,
+                "owner_scope_mismatch",
+            )
+        if claim.epistemic_class is EpistemicClass.SENSOR_INFERRED:
+            threshold = self.config.min_sensor_confidence
+        elif claim.epistemic_class in {
+            EpistemicClass.MODEL_INFERRED,
+            EpistemicClass.MULTIMODAL_MODEL_INFERRED,
+        }:
+            threshold = self.config.min_model_confidence
+        else:
+            threshold = self.config.min_direct_confidence
+        if claim.effective_confidence < threshold:
+            return StaticAdmissionResult(
+                claim.claim_id,
+                ClaimAdmissionStatus.BELOW_SCORE_THRESHOLD,
+                "confidence_below_configured_threshold",
+            )
+        return StaticAdmissionResult(claim.claim_id, None, "static_admission_passed")
+
+    def evaluate_dynamic(
         self,
         claim: Claim,
         *,
-        processing_identity: str,
-        pending_accepted: tuple[Claim, ...] = (),
-    ) -> ClaimAdmissionDecision:
-        if not isinstance(claim, Claim):
-            raise TypeError("claim must be Claim")
-        owner_digest = self.store.owner_binding_digest()
-        if owner_digest is None or owner_digest != claim.owner_binding_digest:
-            return ClaimAdmissionDecision.create(
-                claim,
-                ClaimAdmissionStatus.OWNER_SCOPE_REJECTED,
-                "owner_scope_mismatch",
-                processing_identity=processing_identity,
-            )
-        existing = self.store.read_claim(claim.claim_id)
-        if existing is not None:
-            return ClaimAdmissionDecision.create(
-                claim,
+        exact_claim_id: str | None,
+        same_batch_claim_id: str | None,
+        recent_state_claim_id: str | None,
+        capacity_reached: bool,
+    ) -> tuple[ClaimAdmissionStatus, str, str | None]:
+        if exact_claim_id is not None:
+            return (
                 ClaimAdmissionStatus.EXACT_DUPLICATE,
                 "claim_identity_already_published",
-                processing_identity=processing_identity,
-                existing_claim_id=existing.claim_id,
+                exact_claim_id,
             )
-        threshold = (
-            self.config.min_direct_score
-            if claim.proposal.epistemic_class is EpistemicClass.DIRECT_SOURCE
-            else self.config.min_model_score
-        )
-        if claim.proposal.raw_score < threshold:
-            return ClaimAdmissionDecision.create(
-                claim,
-                ClaimAdmissionStatus.BELOW_SCORE_THRESHOLD,
-                "score_below_configured_threshold",
-                processing_identity=processing_identity,
-            )
-        exact_pending = next(
-            (item for item in pending_accepted if item.claim_id == claim.claim_id),
-            None,
-        )
-        semantic_pending = next(
-            (
-                item
-                for item in pending_accepted
-                if claim.proposal.claim_kind is ClaimKind.STATE_ASSERTION
-                and item.proposal.claim_kind is ClaimKind.STATE_ASSERTION
-                and item.semantic_fingerprint == claim.semantic_fingerprint
-            ),
-            None,
-        )
-        no_gain = exact_pending or semantic_pending
-        if no_gain is not None:
-            return ClaimAdmissionDecision.create(
-                claim,
+        if same_batch_claim_id is not None:
+            return (
                 ClaimAdmissionStatus.NO_INFORMATION_GAIN,
-                "same_batch_semantic_duplicate",
-                processing_identity=processing_identity,
-                existing_claim_id=no_gain.claim_id,
+                "same_processing_semantic_duplicate",
+                same_batch_claim_id,
             )
-        if claim.proposal.claim_kind is ClaimKind.STATE_ASSERTION:
-            since = claim.proposal.time_start - timedelta(seconds=self.config.repeat_state_suppression_seconds)
-            previous = self.store.find_recent_accepted_claim(
-                semantic_fingerprint=claim.semantic_fingerprint,
-                since=since,
-                until=claim.proposal.time_end,
+        if claim.proposal.claim_kind is ClaimKind.STATE_ASSERTION and recent_state_claim_id is not None:
+            return (
+                ClaimAdmissionStatus.REPEATED_STATE_SUPPRESSED,
+                "state_repeated_within_configured_window",
+                recent_state_claim_id,
             )
-            if previous is not None:
-                return ClaimAdmissionDecision.create(
-                    claim,
-                    ClaimAdmissionStatus.REPEATED_STATE_SUPPRESSED,
-                    "state_repeated_within_configured_window",
-                    processing_identity=processing_identity,
-                    existing_claim_id=previous.claim_id,
-                )
-        if self.store.claim_count() >= self.store.max_claim_capacity:
-            return ClaimAdmissionDecision.create(
-                claim,
+        if not isinstance(capacity_reached, bool):
+            raise TypeError("capacity_reached must be boolean")
+        if capacity_reached:
+            return (
                 ClaimAdmissionStatus.CAPACITY_REJECTED,
-                "claim_store_capacity_reached",
-                processing_identity=processing_identity,
+                "accepted_claim_capacity_reached",
+                None,
             )
-        return ClaimAdmissionDecision.create(
-            claim,
-            ClaimAdmissionStatus.ACCEPTED,
-            "claim_passed_admission",
-            processing_identity=processing_identity,
-        )
+        return ClaimAdmissionStatus.ACCEPTED, "claim_passed_admission", None
 
 
-__all__ = ["ClaimAdmissionDecision", "ClaimAdmissionGate", "ClaimAdmissionStatus"]
+__all__ = [
+    "ClaimAdmissionDecision",
+    "ClaimAdmissionPolicy",
+    "ClaimAdmissionStatus",
+    "StaticAdmissionResult",
+]

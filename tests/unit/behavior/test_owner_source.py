@@ -1,151 +1,464 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import sqlite3
+from contextlib import closing
+from dataclasses import replace
+from datetime import timedelta
+
 import pytest
 
 from behavior.errors import (
     BehaviorOwnerConflictError,
-    BehaviorOwnerError,
-    SourceRecordConflictError,
-    SourceRecordError,
+    SemanticIngressError,
+    SemanticRecordConflictError,
+    SemanticRecordError,
 )
-from behavior.owner import ConfirmedOwnerBinding, OwnerRouteDecision, OwnerRouteStatus
-from behavior.source import (
-    BehaviorSourceAdapterRegistry,
-    Modality,
-    SourceRecord,
-    SourceRecordBatch,
-    SourceRecordService,
-    SourceType,
+from behavior.evidence import EvidenceService
+from behavior.ingress import (
+    ActionEventPayload,
+    ActivitySegmentPayload,
+    ClockSyncStatus,
+    CoverageIntervalPayload,
+    CoverageStatus,
+    EnvironmentChangePayload,
+    EvidenceKind,
+    EvidenceReference,
+    FreeTextSemanticPayload,
+    IngressDecisionStatus,
+    IngressTrustClass,
+    InteractionCounterpartyRole,
+    InteractionSegmentPayload,
+    PhaseHint,
+    SemanticActorRole,
+    SemanticIngressAdapterRegistry,
+    SemanticModality,
+    SemanticRecordInput,
+    SemanticRecordKind,
+    SemanticRecordService,
+    SemanticSubjectRole,
+    SensorFactPayload,
+    StateAssertionPayload,
+    StateTransitionPayload,
+    ToolResultPayload,
+    UtteranceChannel,
+    UtteranceSegmentPayload,
 )
-from tests.unit.behavior.conftest import BASE_TIME, digest, make_source
+from behavior.owner import ConfirmedOwnerBinding
+from foundation.integrity import canonical_json
+from foundation.observability import NullObserver
+from ModelClient.schema_validation import JSONSchemaValidationError, validate_json_schema
+from tests.unit.behavior.conftest import (
+    BASE_TIME,
+    FakeAdapter,
+    FakeClock,
+    accepted_decision,
+    bind_record,
+    digest,
+    make_input,
+)
 
 
-@pytest.mark.parametrize("status", [OwnerRouteStatus.OTHER_PERSON, OwnerRouteStatus.UNRESOLVED])
-def test_only_confirmed_owner_route_can_enter_behavior(status: OwnerRouteStatus) -> None:
-    decision = OwnerRouteDecision(status, None, "router-v1", BASE_TIME, digest(status.value))
-    with pytest.raises(BehaviorOwnerError):
-        decision.confirm()
-
-    confirmed = OwnerRouteDecision(
-        OwnerRouteStatus.OWNER_CONFIRMED,
-        "local-binding",
-        "router-v1",
-        BASE_TIME,
-        digest("confirmed"),
-    ).confirm()
-    assert isinstance(confirmed, ConfirmedOwnerBinding)
-    assert confirmed.binding_digest == ConfirmedOwnerBinding.from_dict(confirmed.to_dict()).binding_digest
+def test_owner_identity_excludes_resolver_audit_fields() -> None:
+    first = ConfirmedOwnerBinding("owner-a", "resolver-v1", BASE_TIME, digest("one"))
+    second = ConfirmedOwnerBinding(
+        "owner-a",
+        "resolver-v2",
+        BASE_TIME + timedelta(days=1),
+        digest("two"),
+    )
+    assert first.owner_identity_digest == second.owner_identity_digest
+    assert first.to_dict()["resolver_fingerprint"] != second.to_dict()["resolver_fingerprint"]
 
 
-def test_store_rejects_a_different_owner_binding(store, owner) -> None:
-    first = make_source(owner)
-    store.ingest_source(first, __import__("behavior").EvidenceWindowAssembler(store.config.evidence))
-    other = ConfirmedOwnerBinding("other-local-binding", "router-v1", BASE_TIME, digest("other"))
+def test_store_binds_only_one_owner_identity(store, owner) -> None:
+    record = bind_record(owner)
+    EvidenceService(store, config=store.config.evidence, observer=NullObserver()).ingest(
+        record,
+        accepted_decision(record),
+    )
+    other = ConfirmedOwnerBinding("owner-b", "resolver-v2", BASE_TIME, digest("other"))
+    conflict = bind_record(other, make_input(sequence=1))
     with pytest.raises(BehaviorOwnerConflictError):
-        store.ingest_source(
-            make_source(other, sequence=1),
-            __import__("behavior").EvidenceWindowAssembler(store.config.evidence),
+        EvidenceService(store, config=store.config.evidence, observer=NullObserver()).ingest(
+            conflict,
+            accepted_decision(conflict),
         )
 
 
-@pytest.mark.parametrize("source_type", tuple(SourceType))
-def test_every_source_type_is_a_valid_raw_source(source_type: SourceType, owner) -> None:
-    record = make_source(
-        owner,
-        source_type=source_type,
-        modality=Modality.TEXT,
-        semantic_data={},
+def test_evidence_reference_is_external_bounded_and_media_free() -> None:
+    reference = EvidenceReference(
+        reference="blob://perception/frame/42",
+        evidence_kind=EvidenceKind.IMAGE_FRAME,
+        digest=digest("frame"),
+        event_time_start=BASE_TIME,
+        event_time_end=BASE_TIME,
+        media_type="image/jpeg",
+        size_bytes=1234,
+        source_system_ref="perception-runtime",
     )
-    assert record.source_type is source_type
+    assert reference.evidence_kind is EvidenceKind.IMAGE_FRAME
+    for invalid in ("data:image/jpeg;base64,AAAA", "AAAA==", b"bytes"):
+        with pytest.raises(SemanticRecordError):
+            EvidenceReference(
+                reference=invalid,
+                evidence_kind=EvidenceKind.IMAGE_FRAME,
+                digest=digest("frame"),
+                event_time_start=BASE_TIME,
+                event_time_end=BASE_TIME,
+                media_type="image/jpeg",
+                size_bytes=1,
+                source_system_ref="source",
+            )
+    with pytest.raises(SemanticRecordError):
+        EvidenceReference(
+            reference="blob://camera/frame-1",
+            evidence_kind=EvidenceKind.IMAGE_FRAME,
+            digest=digest("frame"),
+            event_time_start=BASE_TIME,
+            event_time_end=BASE_TIME,
+            media_type="image/jpeg",
+            size_bytes=9_223_372_036_854_775_808,
+            source_system_ref="camera-edge",
+        )
 
 
-@pytest.mark.parametrize("modality", tuple(Modality))
-def test_every_modality_is_supported(modality: Modality, owner) -> None:
-    assert make_source(owner, modality=modality).modality is modality
+def test_record_kind_has_no_raw_media_ingress_values() -> None:
+    values = {item.value for item in SemanticRecordKind}
+    assert values.isdisjoint({"CAMERA_FRAME", "VIDEO_CLIP", "AUDIO_CLIP"})
+    assert {item.value for item in EvidenceKind}.issuperset({"IMAGE_FRAME", "VIDEO_CLIP", "AUDIO_SEGMENT"})
+    assert {item.value for item in SemanticModality} == {
+        "VISION",
+        "AUDIO",
+        "TEXT",
+        "SENSOR",
+        "IMU",
+        "LOCATION",
+        "DEVICE",
+        "ROBOT",
+        "AGENT",
+        "TOOL",
+        "MULTIMODAL",
+    }
 
 
-def test_source_record_time_digest_json_and_media_boundaries(owner) -> None:
-    record = make_source(owner)
-    assert record.event_time_start.tzinfo is not None
-    assert SourceRecord.from_dict(record.to_dict()).source_record_id == record.source_record_id
-    with pytest.raises(SourceRecordError, match="timezone-aware"):
-        SourceRecord.from_dict({**record.to_dict(), "event_time_start": "2026-08-05T01:02:03"})
-    with pytest.raises(SourceRecordError, match="earlier"):
-        make_source(owner, duration_seconds=-1)
-    with pytest.raises(SourceRecordError, match="SHA-256"):
-        SourceRecord.from_dict({**record.to_dict(), "payload_digest": "ABC"})
-    with pytest.raises(SourceRecordError, match="non-finite"):
-        make_source(owner, semantic_data={"score": float("nan")})
-    with pytest.raises(SourceRecordError, match="unsupported type"):
-        make_source(owner, semantic_data={"object": object()})
-    with pytest.raises(SourceRecordError, match="recursive"):
-        recursive = {}
-        recursive["self"] = recursive
-        make_source(owner, semantic_data=recursive)
-    with pytest.raises(SourceRecordError, match="base64"):
-        data = record.to_dict()
-        data["payload_ref"] = "data:image/png;base64,AAAA"
-        SourceRecord.from_dict(data)
-    with pytest.raises(SourceRecordError, match="URI scheme"):
-        data = record.to_dict()
-        data["payload_ref"] = "not-an-external-reference"
-        SourceRecord.from_dict(data)
-    with pytest.raises(SourceRecordError, match="base64 media"):
-        make_source(owner, semantic_data={"projection": "data:audio/wav;base64,AAAA"})
-    with pytest.raises(SourceRecordError, match="binary"):
-        make_source(owner, semantic_data={"raw": b"media"})
+def test_record_kind_payload_role_and_trust_matrix(owner) -> None:
+    cases = (
+        (
+            SemanticRecordKind.OWNER_ACTIVITY_SEGMENT,
+            ActivitySegmentPayload("walking", PhaseHint.IN_PROGRESS, {}),
+            "OWNER",
+            "OWNER",
+            IngressTrustClass.MODEL_INFERRED,
+            SemanticModality.VISION,
+        ),
+        (
+            SemanticRecordKind.OWNER_UTTERANCE_SEGMENT,
+            UtteranceSegmentPayload("hello", "en", UtteranceChannel.VOICE),
+            "OWNER",
+            "OWNER",
+            IngressTrustClass.OWNER_EXPLICIT,
+            SemanticModality.AUDIO,
+        ),
+        (
+            SemanticRecordKind.OWNER_STATE_ASSERTION,
+            StateAssertionPayload("awake", True),
+            "OWNER",
+            "SYSTEM",
+            IngressTrustClass.SENSOR_INFERRED,
+            SemanticModality.SENSOR,
+        ),
+        (
+            SemanticRecordKind.OWNER_STATE_TRANSITION,
+            StateTransitionPayload("presence", False, True),
+            "OWNER",
+            "SYSTEM",
+            IngressTrustClass.SENSOR_INFERRED,
+            SemanticModality.SENSOR,
+        ),
+        (
+            SemanticRecordKind.OWNER_INTERACTION_SEGMENT,
+            InteractionSegmentPayload(
+                "handover",
+                InteractionCounterpartyRole.ROBOT,
+                PhaseHint.IN_PROGRESS,
+                {},
+            ),
+            "OWNER",
+            "OWNER",
+            IngressTrustClass.MODEL_INFERRED,
+            SemanticModality.VISION,
+        ),
+        (
+            SemanticRecordKind.ROBOT_ACTION_EVENT,
+            ActionEventPayload("wave", "completed", None, {}),
+            "ROBOT",
+            "ROBOT",
+            IngressTrustClass.DIRECT_SYSTEM_LOG,
+            SemanticModality.ROBOT,
+        ),
+        (
+            SemanticRecordKind.AGENT_ACTION_EVENT,
+            ActionEventPayload("notify", "completed", "ok", {}),
+            "AGENT",
+            "AGENT",
+            IngressTrustClass.DIRECT_SYSTEM_LOG,
+            SemanticModality.AGENT,
+        ),
+        (
+            SemanticRecordKind.TOOL_RESULT_EVENT,
+            ToolResultPayload("weather", "call-1", "ok", "blob://result/1", "sunny"),
+            "TOOL",
+            "TOOL",
+            IngressTrustClass.DIRECT_SYSTEM_LOG,
+            SemanticModality.TOOL,
+        ),
+        (
+            SemanticRecordKind.OWNER_SENSOR_FACT,
+            SensorFactPayload("heart_rate", 70, "bpm", "sample", {}),
+            "OWNER",
+            "SYSTEM",
+            IngressTrustClass.DIRECT_DEVICE_FACT,
+            SemanticModality.SENSOR,
+        ),
+        (
+            SemanticRecordKind.ENVIRONMENT_SENSOR_FACT,
+            SensorFactPayload("temperature", 22, "celsius", "sample", {}),
+            "ENVIRONMENT",
+            "SYSTEM",
+            IngressTrustClass.DIRECT_DEVICE_FACT,
+            SemanticModality.SENSOR,
+        ),
+        (
+            SemanticRecordKind.ENVIRONMENT_CHANGE,
+            EnvironmentChangePayload("light_changed", "off", "on", {}),
+            "ENVIRONMENT",
+            "SYSTEM",
+            IngressTrustClass.DIRECT_DEVICE_FACT,
+            SemanticModality.DEVICE,
+        ),
+        (
+            SemanticRecordKind.COVERAGE_INTERVAL,
+            CoverageIntervalPayload("VISION", CoverageStatus.UNKNOWN, "camera-repositioned"),
+            "ENVIRONMENT",
+            "SYSTEM",
+            IngressTrustClass.DIRECT_DEVICE_FACT,
+            SemanticModality.VISION,
+        ),
+        (
+            SemanticRecordKind.FREE_TEXT_SEMANTIC,
+            FreeTextSemanticPayload("bounded semantic", "en", ()),
+            "OWNER",
+            "OWNER",
+            IngressTrustClass.MODEL_INFERRED,
+            SemanticModality.TEXT,
+        ),
+    )
+    for sequence, (kind, payload, subject, actor, trust, modality) in enumerate(cases):
+        semantic_input = make_input(
+            sequence=sequence,
+            kind=kind,
+            payload=payload,
+            subject_role=subject,
+            actor_role=actor,
+            modality=modality,
+        )
+        assert bind_record(owner, semantic_input, trust=trust).semantic_input.payload == payload
 
 
-def test_source_capacity_identity_replay_and_conflict(store, owner) -> None:
-    with pytest.raises(SourceRecordError, match="boundary"):
-        make_source(owner, semantic_text="x" * 16_385)
-
-    first = make_source(owner)
-    same = SourceRecord.from_dict(first.to_dict())
-    assembler = __import__("behavior").EvidenceWindowAssembler(store.config.evidence)
-    accepted = store.ingest_source(first, assembler)
-    replayed = store.ingest_source(same, assembler)
-    assert accepted.source_record_id == replayed.source_record_id == first.source_record_id
-    assert replayed.status.value == "REPLAYED"
-
-    conflict_data = first.to_dict()
-    conflict_data["modality"] = Modality.TEXT.value
-    conflict = SourceRecord.from_dict(conflict_data)
-    assert conflict.source_record_id == first.source_record_id
-    with pytest.raises(SourceRecordConflictError):
-        store.ingest_source(conflict, assembler)
+def test_record_kind_rejects_incompatible_roles() -> None:
+    with pytest.raises(SemanticRecordError):
+        make_input(
+            kind=SemanticRecordKind.ROBOT_ACTION_EVENT,
+            payload=ActionEventPayload("wave", "completed", None, {}),
+        )
 
 
-class FakeAdapter:
-    name = "Fake-Adapter"
+def test_payload_discriminant_and_unknown_fields_are_strict() -> None:
+    value = make_input().to_dict()
+    value["payload"] = {"device_ref": "d", "state_name": "power", "value": "on", "unknown": 1}
+    with pytest.raises(SemanticRecordError):
+        SemanticRecordInput.model_validate(value)
+    with pytest.raises((SemanticRecordError, ValueError)):
+        make_input(payload=replace(make_input().payload, value={"prediction": "future"}))
+    value = make_input().to_dict()
+    value["record_kind"] = SemanticRecordKind.FREE_TEXT_SEMANTIC.value
+    with pytest.raises(SemanticRecordError):
+        SemanticRecordInput.model_validate(value)
 
-    def __init__(self, record: SourceRecord, result: object | None = None) -> None:
-        self.record = record
-        self.result = result
 
-    async def adapt(self, payload: object, *, owner_binding: ConfirmedOwnerBinding):
-        assert payload == {"external": True}
-        assert owner_binding is self.record.owner_binding
-        return self.record if self.result is None else self.result
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), object(), {"nested": object()}])
+def test_payload_rejects_noncanonical_values(invalid: object) -> None:
+    with pytest.raises((SemanticRecordError, TypeError, ValueError)):
+        make_input(payload=replace(make_input().payload, value=invalid))
 
 
-def test_source_adapter_registry_and_return_contract(store, owner) -> None:
-    import asyncio
+def test_external_input_schema_excludes_all_system_owned_fields() -> None:
+    properties = SemanticRecordInput.model_json_schema()["properties"]
+    assert set(properties).isdisjoint(
+        {
+            "semantic_record_id",
+            "owner_identity_digest",
+            "trust_class",
+            "epistemic_class",
+            "claim_id",
+            "manifest_id",
+            "ingested_at",
+        }
+    )
 
-    record = make_source(owner)
-    registry = BehaviorSourceAdapterRegistry()
-    registry.register(FakeAdapter(record))
-    assert registry.names() == ("fake_adapter",)
-    with pytest.raises(SourceRecordError, match="already"):
-        registry.register(FakeAdapter(record))
-    with pytest.raises(SourceRecordError, match="unknown"):
+
+def test_external_input_json_schema_matches_payload_and_evidence_structure() -> None:
+    evidence = EvidenceReference(
+        reference="blob://camera/frame-1",
+        evidence_kind=EvidenceKind.IMAGE_FRAME,
+        digest=digest("frame"),
+        event_time_start=BASE_TIME,
+        event_time_end=BASE_TIME,
+        media_type="image/jpeg",
+        size_bytes=123,
+        source_system_ref="camera-edge",
+    )
+    value = json.loads(canonical_json(make_input(evidence_refs=(evidence,)).to_dict()))
+    validate_json_schema(value, SemanticRecordInput.model_json_schema())
+    evidence_values = value["evidence_refs"]
+    assert isinstance(evidence_values, list)
+    assert isinstance(evidence_values[0], dict)
+    evidence_values[0]["unknown"] = True
+    with pytest.raises(JSONSchemaValidationError):
+        validate_json_schema(value, SemanticRecordInput.model_json_schema())
+
+
+def test_semantic_record_identity_is_deterministic_and_ignores_audit_track(owner) -> None:
+    first = bind_record(owner, make_input(upstream_subject_ref="track-a"))
+    replay = bind_record(
+        owner, make_input(upstream_subject_ref="track-a"), ingested_at=BASE_TIME + timedelta(seconds=9)
+    )
+    changed_track = bind_record(owner, make_input(upstream_subject_ref="track-b"))
+    assert first.semantic_record_id == replay.semantic_record_id
+    assert first.canonical_digest == replay.canonical_digest
+    assert changed_track.semantic_record_id != first.semantic_record_id
+    assert changed_track.owner_identity_digest == first.owner_identity_digest
+
+
+def test_same_record_identity_with_changed_system_trust_is_a_conflict(store, owner) -> None:
+    semantic_input = make_input(
+        kind=SemanticRecordKind.OWNER_SENSOR_FACT,
+        payload=SensorFactPayload("heart_rate", 70, "bpm", None, {}),
+        subject_role=SemanticSubjectRole.OWNER,
+        actor_role=SemanticActorRole.SYSTEM,
+        modality=SemanticModality.SENSOR,
+    )
+    direct = bind_record(owner, semantic_input, trust=IngressTrustClass.DIRECT_DEVICE_FACT)
+    inferred = bind_record(owner, semantic_input, trust=IngressTrustClass.SENSOR_INFERRED)
+    assert direct.semantic_record_id == inferred.semantic_record_id
+    assert direct.canonical_digest != inferred.canonical_digest
+    evidence = EvidenceService(store, config=store.config.evidence, observer=NullObserver())
+    evidence.ingest(direct, accepted_decision(direct))
+    with pytest.raises(SemanticRecordConflictError, match="identity conflicts"):
+        evidence.ingest(inferred, accepted_decision(inferred))
+
+
+def test_registry_rejects_duplicates_and_unknown_adapter() -> None:
+    registry = SemanticIngressAdapterRegistry()
+    adapter = FakeAdapter(make_input())
+    registry.register(adapter)
+    with pytest.raises(SemanticIngressError):
+        registry.register(adapter)
+    with pytest.raises(SemanticIngressError):
         registry.get("missing")
-    service = SourceRecordService(store, registry)
-    batch = asyncio.run(service.adapt("fake-adapter", {"external": True}, owner_binding=owner))
-    assert batch == SourceRecordBatch((record,))
 
-    bad_registry = BehaviorSourceAdapterRegistry()
-    bad_registry.register(FakeAdapter(record, result={"not": "a SourceRecord"}))
-    bad_service = SourceRecordService(store, bad_registry)
-    with pytest.raises(TypeError, match="unsupported"):
-        asyncio.run(bad_service.adapt("fake-adapter", {"external": True}, owner_binding=owner))
+
+def test_trust_capability_cannot_be_supplied_by_payload(store, owner) -> None:
+    free_text = make_input(
+        kind=SemanticRecordKind.FREE_TEXT_SEMANTIC,
+        payload=FreeTextSemanticPayload("semantic description", "en", ()),
+        modality=SemanticModality.TEXT,
+        subject_role=SemanticSubjectRole.OWNER,
+    )
+    with pytest.raises(SemanticIngressError):
+        FakeAdapter(
+            free_text,
+            trust=IngressTrustClass.DIRECT_DEVICE_FACT,
+            allowed=(SemanticRecordKind.FREE_TEXT_SEMANTIC,),
+        )
+    assert "trust_class" not in free_text.to_dict()
+    assert "epistemic_class" not in free_text.to_dict()
+
+
+def test_owner_explicit_requires_speaker_binding() -> None:
+    utterance = make_input(
+        kind=SemanticRecordKind.OWNER_UTTERANCE_SEGMENT,
+        payload=UtteranceSegmentPayload("hello", "en", UtteranceChannel.VOICE),
+        modality=SemanticModality.AUDIO,
+        subject_role=SemanticSubjectRole.OWNER,
+        actor_role=SemanticActorRole.OWNER,
+    )
+    with pytest.raises(SemanticIngressError):
+        FakeAdapter(
+            utterance,
+            trust=IngressTrustClass.OWNER_EXPLICIT,
+            allowed=(SemanticRecordKind.OWNER_UTTERANCE_SEGMENT,),
+        )
+
+
+def test_clock_rejections_are_audited_without_record_or_watermark(store, owner) -> None:
+    future = make_input(offset_seconds=1_000)
+    registry = SemanticIngressAdapterRegistry()
+    registry.register(FakeAdapter(future))
+    service = SemanticRecordService(
+        store,
+        registry,
+        config=store.config.ingress,
+        clock=FakeClock(),
+    )
+    result = asyncio.run(service.prepare("fake_semantic", {}, owner_binding=owner))[0]
+    assert result.record is None
+    assert result.decision.status is IngressDecisionStatus.CLOCK_SKEW_REJECTED
+    assert store.read_semantic_record(result.decision.semantic_record_id) is None
+    with closing(sqlite3.connect(store.path)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM semantic_ingress_decisions").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM evidence_watermarks").fetchone()[0] == 0
+
+
+def test_past_and_uncertainty_bounds_are_enforced(store, owner) -> None:
+    old = make_input(offset_seconds=-(store.config.ingress.max_past_event_age_seconds + 1))
+    registry = SemanticIngressAdapterRegistry()
+    registry.register(FakeAdapter(old))
+    service = SemanticRecordService(store, registry, clock=FakeClock(), config=store.config.ingress)
+    result = asyncio.run(service.prepare("fake_semantic", None, owner_binding=owner))[0]
+    assert result.decision.status is IngressDecisionStatus.EVENT_TOO_OLD_REJECTED
+    with pytest.raises(SemanticRecordError):
+        make_input(uncertainty_ms=store.config.ingress.max_event_time_uncertainty_ms + 1)
+
+
+def test_unsynchronized_clock_is_accepted_but_does_not_advance_watermark(store, owner) -> None:
+    value = make_input(clock_sync_status=ClockSyncStatus.UNKNOWN)
+    record = bind_record(owner, value)
+    result = EvidenceService(store, config=store.config.evidence, observer=NullObserver()).ingest(
+        record,
+        accepted_decision(record),
+    )
+    assert result.active_bundle is not None
+    assert result.active_bundle.watermark is None
+
+
+def test_unsynchronized_clock_cannot_bypass_committed_lateness(store, owner) -> None:
+    service = EvidenceService(store, config=store.config.evidence, observer=NullObserver())
+    trusted = bind_record(
+        owner,
+        make_input(sequence=0, offset_seconds=100, boundary_signal="END"),
+    )
+    assert service.ingest(trusted, accepted_decision(trusted)).manifest_ids
+    untrusted = bind_record(
+        owner,
+        make_input(
+            sequence=1,
+            offset_seconds=0,
+            clock_sync_status=ClockSyncStatus.UNKNOWN,
+        ),
+    )
+    result = service.ingest(untrusted, accepted_decision(untrusted))
+    assert result.status.name == "LATE_REJECTED"
+    assert store.read_semantic_record(untrusted.semantic_record_id) is None

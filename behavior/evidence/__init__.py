@@ -1,31 +1,31 @@
-"""有界证据窗口与不可变 Manifest 公共边界。"""
+"""语义 Evidence Bundle 与不可变 Manifest 公共边界。"""
 
-from behavior.evidence.manifest import (
-    BlindInterval,
-    EvidenceCoverageState,
-    EvidenceManifest,
-    ManifestSourceRecord,
-)
-from behavior.evidence.model import (
+from behavior.evidence.bundle import (
+    EvidenceBundleState,
     EvidenceSealReason,
-    EvidenceWindow,
-    EvidenceWindowState,
-    SourceIngestResult,
-    SourceIngestStatus,
+    SemanticEvidenceBundle,
+    SemanticEvidenceBundleAssembler,
+    SemanticIngestResult,
+    SemanticIngestStatus,
+)
+from behavior.evidence.manifest import (
+    CoverageInterval,
+    CoverageSummary,
+    EvidenceManifest,
+    ManifestSemanticRecordSnapshot,
 )
 from behavior.evidence.service import EvidenceService
-from behavior.evidence.window import EvidenceWindowAssembler
 
 __all__ = [
-    "BlindInterval",
-    "EvidenceCoverageState",
+    "CoverageInterval",
+    "CoverageSummary",
+    "EvidenceBundleState",
     "EvidenceManifest",
     "EvidenceSealReason",
     "EvidenceService",
-    "EvidenceWindow",
-    "EvidenceWindowAssembler",
-    "EvidenceWindowState",
-    "ManifestSourceRecord",
-    "SourceIngestResult",
-    "SourceIngestStatus",
+    "ManifestSemanticRecordSnapshot",
+    "SemanticEvidenceBundle",
+    "SemanticEvidenceBundleAssembler",
+    "SemanticIngestResult",
+    "SemanticIngestStatus",
 ]

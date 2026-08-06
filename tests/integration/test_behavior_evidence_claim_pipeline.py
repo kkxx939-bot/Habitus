@@ -1,151 +1,135 @@
 from __future__ import annotations
 
 import asyncio
-from types import MethodType, SimpleNamespace
 
 from behavior.claim import (
+    ClaimNormalizationRouter,
+    ClaimNormalizerRegistry,
     ClaimPipelineService,
-    ClaimProducerRegistry,
-    ClaimProposal,
-    ClaimProposalBatch,
-    DirectStructuredClaimProducer,
-    StructuredSemanticClaimProducer,
+    DeterministicClaimNormalizer,
 )
 from behavior.config import BehaviorConfig
-from behavior.evidence import EvidenceService
+from behavior.evidence import EvidenceService, SemanticIngestStatus
+from behavior.ingress import (
+    ActivitySegmentPayload,
+    BoundarySignal,
+    IngressTrustClass,
+    SemanticActorRole,
+    SemanticIngressAdapterRegistry,
+    SemanticModality,
+    SemanticRecordKind,
+    SemanticRecordService,
+    SemanticSubjectRole,
+    UtteranceChannel,
+    UtteranceSegmentPayload,
+)
 from behavior.owner import ConfirmedOwnerBinding
 from behavior.persistence.sqlite import SQLiteBehaviorEvidenceClaimStore
-from behavior.source import Modality, SourceRecordBatch, SourceRecordService, SourceType
 from foundation.observability import NullObserver
-from ModelClient.config import ChatModelConfig, ProviderConfig
-from ModelClient.structured import StructuredChatClient
-from tests.unit.behavior.conftest import BASE_TIME, digest, direct_claim_projection, make_source
+from tests.unit.behavior.conftest import BASE_TIME, FakeAdapter, FakeClock, digest, make_input
 
 
-def _structured_client(output: ClaimProposalBatch):
-    client = object.__new__(StructuredChatClient)
-    client.client = SimpleNamespace(
-        config=ChatModelConfig(
-            route=ProviderConfig(provider="test", adapter="fake_chat", model="fake-model"),
-            structured_output_mode="json_schema",
-        )
-    )
-    calls = []
-
-    async def complete_model_async(self, request, **kwargs):
-        calls.append((request, kwargs))
-        return SimpleNamespace(value=output)
-
-    client.complete_model_async = MethodType(complete_model_async, client)
-    return client, calls
-
-
-def test_multimodal_out_of_order_evidence_to_claim_flow_is_idempotent(tmp_path) -> None:
-    owner = ConfirmedOwnerBinding(
-        "local-owner",
-        "owner-router-v1",
-        BASE_TIME,
-        digest("owner-evidence"),
-    )
+def test_owner_scoped_semantic_records_to_atomic_claims_is_replayable(tmp_path) -> None:
+    owner = ConfirmedOwnerBinding("local-owner", "resolver-v2", BASE_TIME, digest("owner"))
     config = BehaviorConfig()
-    store = SQLiteBehaviorEvidenceClaimStore(tmp_path / "behavior", config=config)
-    store.initialize()
-    visual = make_source(
-        owner,
-        sequence=0,
-        offset_seconds=2,
-        stream_id="vision-stream",
-        source_type=SourceType.VLM_OUTPUT,
-        modality=Modality.VISION,
-        semantic_text="The owner may be interacting with the sink area.",
-        semantic_data={"candidate": "sink_interaction"},
-    )
-    audio = make_source(
-        owner,
-        sequence=0,
-        offset_seconds=1,
-        stream_id="audio-stream",
-        source_type=SourceType.AUDIO_SEMANTIC,
-        modality=Modality.AUDIO,
-        semantic_text="Running water is detected.",
-        semantic_data={"sound": "running_water"},
-    )
-    device = make_source(
-        owner,
+    clock = FakeClock()
+    store = SQLiteBehaviorEvidenceClaimStore(tmp_path / "behavior", config=config, initialize=True)
+    adapters = SemanticIngressAdapterRegistry()
+    visual = make_input(
         sequence=0,
         offset_seconds=0,
-        stream_id="device-stream",
-        source_type=SourceType.DEVICE_STATE,
-        modality=Modality.DEVICE_STATE,
-        semantic_data={
-            "claim": direct_claim_projection(
-                predicate="faucet_on",
-                object_refs=["track-main"],
-            )
-        },
+        kind=SemanticRecordKind.OWNER_ACTIVITY_SEGMENT,
+        payload=ActivitySegmentPayload("preparing_tea", "IN_PROGRESS", {"quality": "high"}),
+        subject_role=SemanticSubjectRole.OWNER,
+        actor_role=SemanticActorRole.OWNER,
+        modality=SemanticModality.VISION,
+        stream_id="vision-semantics",
+        upstream_subject_ref="opaque-track-7",
+        source_confidence=0.91,
     )
-    model_proposal = ClaimProposal.model_validate(
-        {
-            **direct_claim_projection(
-                kind="ACTIVITY_PHASE",
-                predicate="sink_activity_in_progress",
-                epistemic="MULTIMODAL_MODEL_INFERRED",
-                score=0.82,
-            ),
-            "scene_ref": "scene-main",
-            "time_start": BASE_TIME.isoformat().replace("+00:00", "Z"),
-            "time_end": visual.event_time_end.isoformat().replace("+00:00", "Z"),
-            "time_uncertainty_ms": 500,
-            "source_record_ids": [visual.source_record_id, audio.source_record_id],
-        }
+    audio = make_input(
+        sequence=0,
+        offset_seconds=10,
+        kind=SemanticRecordKind.OWNER_UTTERANCE_SEGMENT,
+        payload=UtteranceSegmentPayload("tea is ready", "en", UtteranceChannel.VOICE),
+        subject_role=SemanticSubjectRole.OWNER,
+        actor_role=SemanticActorRole.OWNER,
+        modality=SemanticModality.AUDIO,
+        stream_id="audio-semantics",
+        upstream_subject_ref="opaque-speaker-track-2",
+        boundary_signal=BoundarySignal.END,
+        source_confidence=0.99,
     )
-    client, calls = _structured_client(ClaimProposalBatch(False, (model_proposal,)))
-    registry = ClaimProducerRegistry()
-    registry.register(DirectStructuredClaimProducer())
-    registry.register(StructuredSemanticClaimProducer(client, config=config.claim))
-    source_service = SourceRecordService(store)
-    evidence_service = EvidenceService(store, config=config.evidence, observer=NullObserver())
+    device = make_input(
+        sequence=0,
+        offset_seconds=5,
+        stream_id="device-semantics",
+        source_confidence=1.0,
+    )
+    adapters.register(
+        FakeAdapter(
+            visual,
+            name="fake_visual",
+            trust=IngressTrustClass.MULTIMODAL_MODEL_INFERRED,
+            allowed=(SemanticRecordKind.OWNER_ACTIVITY_SEGMENT,),
+        )
+    )
+    adapters.register(
+        FakeAdapter(
+            audio,
+            name="fake_audio",
+            trust=IngressTrustClass.OWNER_EXPLICIT,
+            allowed=(SemanticRecordKind.OWNER_UTTERANCE_SEGMENT,),
+            owner_speaker_binding=True,
+        )
+    )
+    adapters.register(FakeAdapter(device, name="fake_device"))
+
+    ingress = SemanticRecordService(store, adapters, config=config.ingress, clock=clock)
+    evidence = EvidenceService(
+        store,
+        config=config.evidence,
+        observer=NullObserver(),
+        clock=clock,
+    )
+    normalizers = ClaimNormalizerRegistry()
+    normalizers.register(DeterministicClaimNormalizer())
+    router = ClaimNormalizationRouter(normalizers, config=config.claim)
     pipeline = ClaimPipelineService(
         store,
-        source_service,
-        evidence_service,
-        registry,
+        ingress,
+        evidence,
+        normalizers,
+        router,
         config=config.claim,
         observer=NullObserver(),
+        clock=clock,
     )
-    results = pipeline.ingest_source_batch(SourceRecordBatch((visual, device, audio)))
-    active = next(result.active_window for result in reversed(results) if result.active_window is not None)
-    manifest = pipeline.seal_window(active.window_id)
-    assert manifest is not None
-    assert tuple(item.source_record_id for item in manifest.ordered_source_records) == (
-        device.source_record_id,
-        audio.source_record_id,
-        visual.source_record_id,
+
+    device_result = asyncio.run(pipeline.ingest_semantic("fake_device", {}, owner_binding=owner))[0]
+    visual_result = asyncio.run(pipeline.ingest_semantic("fake_visual", {}, owner_binding=owner))[0]
+    audio_result = asyncio.run(pipeline.ingest_semantic("fake_audio", {}, owner_binding=owner))[0]
+    assert device_result.bundle_result.status is SemanticIngestStatus.ACCEPTED
+    assert visual_result.bundle_result.status is SemanticIngestStatus.ACCEPTED
+    assert audio_result.bundle_result.manifest_ids
+    manifest = store.read_manifest(audio_result.bundle_result.manifest_ids[0])
+    assert tuple(item.record_kind for item in manifest.ordered_record_snapshots) == (
+        SemanticRecordKind.OWNER_ACTIVITY_SEGMENT,
+        SemanticRecordKind.DEVICE_STATE,
+        SemanticRecordKind.OWNER_UTTERANCE_SEGMENT,
     )
-    first = asyncio.run(
-        pipeline.process_manifest(
-            manifest.manifest_id,
-            ("direct_structured", "structured_semantic"),
-        )
-    )
-    replay = asyncio.run(
-        pipeline.process_manifest(
-            manifest.manifest_id,
-            ("direct_structured", "structured_semantic"),
-        )
-    )
-    assert len(first.accepted_claims) == 2
+
+    first = asyncio.run(pipeline.process_manifest(manifest.manifest_id))
+    replay = asyncio.run(pipeline.process_manifest(manifest.manifest_id))
+    assert len(first.validated_claims) == len(first.accepted_claims) == 3
     assert replay.reused
-    assert replay.accepted_claims == first.accepted_claims
-    assert len(calls) == 1
-    assert all(claim.__class__.__name__ == "Claim" for claim in first.accepted_claims)
-    forbidden_outputs = {
-        "CanonicalEvent",
-        "EventResolver",
-        "Episode",
-        "Opportunity",
-        "BehaviorCase",
-        "BehaviorPattern",
-        "Prediction",
-    }
-    assert forbidden_outputs.isdisjoint({claim.__class__.__name__ for claim in first.accepted_claims})
+    assert tuple(item.claim_id for item in replay.validated_claims) == tuple(
+        item.claim_id for item in first.validated_claims
+    )
+    accepted = store.list_accepted_claims(
+        start=manifest.started_at,
+        end=clock.now(),
+        limit=10,
+    )
+    assert {item.claim_id for item in accepted} == {item.claim_id for item in first.accepted_claims}
+    assert all(type(item).__name__ == "Claim" for item in first.validated_claims)

@@ -19,8 +19,9 @@ def mapping(tmp_path):
 def test_behavior_config_is_strict_typed_and_has_an_independent_root(tmp_path) -> None:
     config = M2BOSConfig.from_mapping(mapping(tmp_path))
     assert config.behavior_root == config.storage_root / "behavior"
-    assert config.behavior.evidence.max_records_per_window == 256
-    assert config.behavior.claim.min_model_score == 0.55
+    assert config.behavior.evidence.max_records_per_bundle == 256
+    assert config.behavior.claim.min_model_confidence == 0.55
+    assert config.behavior.claim.max_model_input_tokens == 16384
     assert config.behavior.store.max_query_limit == 500
 
 
@@ -28,11 +29,11 @@ def test_behavior_config_is_strict_typed_and_has_an_independent_root(tmp_path) -
     "mutation",
     [
         lambda payload: payload["behavior"].update(unknown=True),
-        lambda payload: payload["behavior"]["source"].update(max_batch_size=True),
-        lambda payload: payload["behavior"]["claim"].update(min_model_score=float("nan")),
+        lambda payload: payload["behavior"]["ingress"].update(max_batch_size=True),
+        lambda payload: payload["behavior"]["claim"].update(min_model_confidence=float("nan")),
         lambda payload: payload["behavior"]["evidence"].update(max_gap_seconds=400.0),
-        lambda payload: payload["behavior"]["claim"].update(max_model_input_chars=64000),
-        lambda payload: payload["behavior"]["store"].update(max_json_bytes=1024),
+        lambda payload: payload["behavior"]["claim"].update(max_model_input_tokens=64000),
+        lambda payload: payload["behavior"]["store"].update(max_database_bytes=1024),
     ],
 )
 def test_behavior_config_rejects_unknown_invalid_and_cross_domain_values(tmp_path, mutation) -> None:

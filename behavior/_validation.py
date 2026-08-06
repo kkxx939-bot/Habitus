@@ -15,6 +15,19 @@ from foundation.integrity import canonical_json
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+\-]{0,255}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _REFERENCE_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_RESERVED_FUTURE_SEMANTIC_KEYS = frozenset(
+    {
+        "claim_id",
+        "claim_kind",
+        "epistemic_class",
+        "habit",
+        "opportunity",
+        "pattern",
+        "prediction",
+        "q_value",
+        "reward",
+    }
+)
 
 
 def strict_utc(value: object, field_name: str) -> datetime:
@@ -153,6 +166,29 @@ def json_snapshot(
     return _freeze(normalized)
 
 
+def json_value_snapshot(
+    value: object,
+    field_name: str,
+    *,
+    maximum_chars: int,
+    maximum_items: int = 128,
+    maximum_depth: int = 12,
+) -> Any:
+    """冻结任意规范 JSON 值，并对根值应用同一字符边界。"""
+
+    normalized = _json_value(
+        value,
+        field_name,
+        active=set(),
+        depth=0,
+        maximum_items=maximum_items,
+        maximum_depth=maximum_depth,
+    )
+    if len(canonical_json(normalized)) > maximum_chars:
+        raise ValueError(f"{field_name} exceeds its canonical JSON boundary")
+    return _freeze(normalized)
+
+
 def _json_value(
     value: object,
     field_name: str,
@@ -189,6 +225,8 @@ def _json_value(
             for key, item in value.items():
                 if not isinstance(key, str) or not key or len(key) > 128:
                     raise TypeError(f"{field_name} must contain bounded string keys")
+                if key.casefold() in _RESERVED_FUTURE_SEMANTIC_KEYS:
+                    raise ValueError(f"{field_name} contains a reserved system semantic field")
                 if key in result:
                     raise ValueError(f"{field_name} contains duplicate keys")
                 result[key] = _json_value(
@@ -258,6 +296,7 @@ __all__ = [
     "identifier",
     "identifier_tuple",
     "json_snapshot",
+    "json_value_snapshot",
     "non_negative_int",
     "optional_bounded_text",
     "optional_identifier",

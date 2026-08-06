@@ -7,15 +7,35 @@ from pathlib import Path
 import pytest
 
 from behavior.claim import (
+    ClaimNormalizationRouter,
+    ClaimNormalizerRegistry,
     ClaimPipelineService,
-    ClaimProducerRegistry,
-    DirectStructuredClaimProducer,
+    DeterministicClaimNormalizer,
 )
 from behavior.config import BehaviorConfig
 from behavior.evidence import EvidenceService
+from behavior.ingress import (
+    BoundarySignal,
+    ClockSyncStatus,
+    DeviceStatePayload,
+    IngressAdapterCapability,
+    IngressDecision,
+    IngressDecisionStatus,
+    IngressTrustClass,
+    OwnerScopedSemanticRecord,
+    ProducerFingerprint,
+    RecordIntegrity,
+    SemanticActorRole,
+    SemanticIngressAdapterRegistry,
+    SemanticModality,
+    SemanticRecordInput,
+    SemanticRecordInputBatch,
+    SemanticRecordKind,
+    SemanticRecordService,
+    SemanticSubjectRole,
+)
 from behavior.owner import ConfirmedOwnerBinding
 from behavior.persistence.sqlite import SQLiteBehaviorEvidenceClaimStore
-from behavior.source import CaptureState, Modality, SourceRecord, SourceRecordService, SourceType
 from foundation.observability import NullObserver
 
 BASE_TIME = datetime(2026, 8, 5, 1, 2, 3, tzinfo=timezone.utc)
@@ -25,104 +45,140 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def direct_claim_projection(
-    *,
-    kind: str = "STATE_ASSERTION",
-    predicate: str = "door_open",
-    epistemic: str = "DIRECT_SOURCE",
-    score: float = 1.0,
-    object_refs: list[str] | None = None,
-    alternative_group_id: str | None = None,
-) -> dict[str, object]:
-    activity = "bounded_activity" if kind == "ACTIVITY_PHASE" else None
-    phase = "in_progress" if kind == "ACTIVITY_PHASE" else None
-    return {
-        "claim_kind": kind,
-        "subject_role": "OWNER",
-        "actor_role": "OWNER",
-        "predicate": predicate,
-        "semantic_family": "test_family",
-        "activity": activity,
-        "phase": phase,
-        "object_refs": ["track-main"] if object_refs is None else object_refs,
-        "location_ref": None,
-        "epistemic_class": epistemic,
-        "raw_score": score,
-        "alternative_group_id": alternative_group_id,
-        "semantic_payload": {"value": predicate},
-        "human_summary": f"Auditable summary for {predicate}",
-    }
+class FakeClock:
+    def __init__(self, current: datetime = BASE_TIME) -> None:
+        self.current = current
+
+    def now(self) -> datetime:
+        return self.current
+
+    def advance(self, seconds: float = 1.0) -> None:
+        self.current += timedelta(seconds=seconds)
+
+
+@pytest.fixture
+def clock() -> FakeClock:
+    return FakeClock()
 
 
 @pytest.fixture
 def owner() -> ConfirmedOwnerBinding:
     return ConfirmedOwnerBinding(
         "local-owner",
-        "owner-router-v1",
+        "owner-router-v2",
         BASE_TIME,
         digest("owner-evidence"),
     )
 
 
-def make_source(
-    owner_binding: ConfirmedOwnerBinding,
+def make_input(
     *,
     sequence: int = 0,
     offset_seconds: float = 0.0,
     duration_seconds: float = 0.0,
-    source_type: SourceType = SourceType.DEVICE_STATE,
-    modality: Modality = Modality.DEVICE_STATE,
-    stream_id: str = "stream-main",
-    correlation_key: str = "correlation-main",
+    kind: SemanticRecordKind = SemanticRecordKind.DEVICE_STATE,
+    payload: object | None = None,
+    subject_role: SemanticSubjectRole = SemanticSubjectRole.ENVIRONMENT,
+    actor_role: SemanticActorRole = SemanticActorRole.SYSTEM,
+    modality: SemanticModality = SemanticModality.DEVICE,
+    stream_id: str = "semantic-stream",
+    correlation_id: str = "correlation-main",
+    boundary_signal: BoundarySignal = BoundarySignal.CONTINUE,
+    clock_sync_status: ClockSyncStatus = ClockSyncStatus.SYNCHRONIZED,
+    uncertainty_ms: int = 0,
     scene_ref: str | None = "scene-main",
-    track_refs: tuple[str, ...] = ("track-main",),
-    entity_refs: tuple[str, ...] = ("entity-main",),
-    semantic_text: str | None = None,
-    semantic_data: object | None = None,
-    capture_state: CaptureState = CaptureState.COMPLETE,
-    ingested_offset_seconds: float | None = None,
-) -> SourceRecord:
+    upstream_subject_ref: str | None = None,
+    object_refs: tuple[str, ...] = (),
+    entity_refs: tuple[str, ...] = (),
+    location_ref: str | None = None,
+    evidence_refs: tuple[object, ...] = (),
+    source_confidence: float = 1.0,
+) -> SemanticRecordInput:
     start = BASE_TIME + timedelta(seconds=offset_seconds)
-    end = start + timedelta(seconds=duration_seconds)
-    ingested = BASE_TIME + timedelta(
-        seconds=offset_seconds if ingested_offset_seconds is None else ingested_offset_seconds
-    )
-    projection = (
-        {"claim": direct_claim_projection()}
-        if semantic_data is None and source_type in {
-            SourceType.SENSOR_SAMPLE,
-            SourceType.SENSOR_WINDOW,
-            SourceType.DEVICE_STATE,
-            SourceType.ROBOT_ACTION_LOG,
-            SourceType.TOOL_RESULT_REFERENCE,
-            SourceType.COVERAGE_SIGNAL,
-            SourceType.UPSTREAM_SEMANTIC,
-        }
-        else ({} if semantic_data is None else semantic_data)
-    )
-    return SourceRecord(
+    return SemanticRecordInput(
         stream_id=stream_id,
         source_sequence=sequence,
-        source_type=source_type,
+        record_kind=kind,
+        subject_role=subject_role,
+        actor_role=actor_role,
         modality=modality,
-        producer_ref="test-producer",
         event_time_start=start,
-        event_time_end=end,
-        ingested_at=ingested,
-        payload_ref=f"blob://source/{stream_id}/{sequence}",
-        payload_digest=digest(f"{stream_id}:{sequence}:{source_type.value}"),
-        payload_media_type="application/json",
-        payload_size_bytes=32,
-        semantic_text=semantic_text,
-        semantic_data=projection,
+        event_time_end=start + timedelta(seconds=duration_seconds),
+        event_time_uncertainty_ms=uncertainty_ms,
+        clock_domain="upstream-clock",
+        clock_sync_status=clock_sync_status,
+        correlation_id=correlation_id,
+        boundary_signal=boundary_signal,
         scene_ref=scene_ref,
-        track_refs=track_refs,
+        upstream_subject_ref=upstream_subject_ref,
+        object_refs=object_refs,
         entity_refs=entity_refs,
-        correlation_key=correlation_key,
-        capture_state=capture_state,
-        owner_binding=owner_binding,
-        attributes={"quality": "test"},
+        location_ref=location_ref,
+        payload=payload or DeviceStatePayload("device-main", "power", "on"),
+        evidence_refs=evidence_refs,
+        source_confidence=source_confidence,
+        integrity=RecordIntegrity.COMPLETE,
     )
+
+
+def producer_fingerprint(name: str = "fake-device") -> ProducerFingerprint:
+    return ProducerFingerprint(name, "2", "semantic-v2", "none", "none", "none", "2")
+
+
+def bind_record(
+    owner_binding: ConfirmedOwnerBinding,
+    semantic_input: SemanticRecordInput | None = None,
+    *,
+    trust: IngressTrustClass = IngressTrustClass.DIRECT_DEVICE_FACT,
+    ingested_at: datetime = BASE_TIME,
+    producer: ProducerFingerprint | None = None,
+) -> OwnerScopedSemanticRecord:
+    return OwnerScopedSemanticRecord(
+        semantic_input=semantic_input or make_input(),
+        owner_binding=owner_binding,
+        producer_fingerprint=producer or producer_fingerprint(),
+        ingress_trust_class=trust,
+        ingested_at=ingested_at,
+    )
+
+
+def accepted_decision(record: OwnerScopedSemanticRecord, *, decided_at: datetime = BASE_TIME) -> IngressDecision:
+    return IngressDecision(
+        status=IngressDecisionStatus.ACCEPTED,
+        reason_code="semantic_record_clock_accepted",
+        record=record,
+        decided_at=decided_at,
+    )
+
+
+class FakeAdapter:
+    def __init__(
+        self,
+        records: SemanticRecordInput | SemanticRecordInputBatch,
+        *,
+        name: str = "fake_semantic",
+        trust: IngressTrustClass = IngressTrustClass.DIRECT_DEVICE_FACT,
+        allowed: tuple[SemanticRecordKind, ...] = (SemanticRecordKind.DEVICE_STATE,),
+        owner_speaker_binding: bool = False,
+    ) -> None:
+        self.name = name
+        self.records = records
+        self.fingerprint = producer_fingerprint(name)
+        self.capabilities = IngressAdapterCapability(
+            trust,
+            allowed,
+            32,
+            owner_speaker_binding=owner_speaker_binding,
+        )
+
+    async def adapt(
+        self,
+        payload: object,
+        *,
+        owner_binding: ConfirmedOwnerBinding,
+    ) -> SemanticRecordInput | SemanticRecordInputBatch:
+        del payload, owner_binding
+        return self.records
 
 
 @pytest.fixture
@@ -141,28 +197,45 @@ def make_pipeline(
     store: SQLiteBehaviorEvidenceClaimStore,
     config: BehaviorConfig,
     *,
-    registry: ClaimProducerRegistry | None = None,
+    clock: FakeClock | None = None,
 ) -> ClaimPipelineService:
+    resolved_clock = clock or FakeClock()
     observer = NullObserver()
-    source_service = SourceRecordService(store)
-    evidence_service = EvidenceService(store, config=config.evidence, observer=observer)
-    resolved_registry = registry or ClaimProducerRegistry()
-    if registry is None:
-        resolved_registry.register(DirectStructuredClaimProducer())
+    ingress = SemanticRecordService(
+        store,
+        SemanticIngressAdapterRegistry(),
+        config=config.ingress,
+        clock=resolved_clock,
+    )
+    evidence = EvidenceService(
+        store,
+        config=config.evidence,
+        observer=observer,
+        clock=resolved_clock,
+    )
+    normalizers = ClaimNormalizerRegistry()
+    normalizers.register(DeterministicClaimNormalizer())
+    router = ClaimNormalizationRouter(normalizers, config=config.claim)
     return ClaimPipelineService(
         store,
-        source_service,
-        evidence_service,
-        resolved_registry,
+        ingress,
+        evidence,
+        normalizers,
+        router,
         config=config.claim,
         observer=observer,
+        clock=resolved_clock,
     )
 
 
 __all__ = [
     "BASE_TIME",
+    "FakeAdapter",
+    "FakeClock",
+    "accepted_decision",
+    "bind_record",
     "digest",
-    "direct_claim_projection",
+    "make_input",
     "make_pipeline",
-    "make_source",
+    "producer_fingerprint",
 ]

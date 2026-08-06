@@ -1,6 +1,6 @@
 """m2bOS 唯一外部配置入口。"""
 
-from Config.behavior import BehaviorConfig, ClaimConfig, EvidenceConfig, SourceConfig, StoreConfig
+from Config.behavior import BehaviorConfig, ClaimConfig, EvidenceConfig, IngressConfig, StoreConfig
 from Config.conversation import (
     ConversationConfig,
     ConversationLifecycleConfig,
@@ -51,7 +51,7 @@ __all__ = [
     "ObservabilityMetricsConfig",
     "ObservabilityTracingConfig",
     "StorageConfig",
-    "SourceConfig",
+    "IngressConfig",
     "StoreConfig",
     "StructuredOutputConfig",
     "WorkerConfig",

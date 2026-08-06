@@ -1,4 +1,4 @@
-"""Behavior 证据与声明层的稳定错误分类。"""
+"""Behavior 语义入口、证据与声明层的稳定错误分类。"""
 
 
 class BehaviorError(Exception):
@@ -6,31 +6,39 @@ class BehaviorError(Exception):
 
 
 class BehaviorOwnerError(BehaviorError, ValueError):
-    """上游 Owner 路由尚未形成可接受的单 Owner 绑定。"""
+    """上游没有提供合法的单 Owner 绑定。"""
 
 
 class BehaviorOwnerConflictError(BehaviorOwnerError):
-    """当前 Store 已绑定到另一个 Owner 规范指纹。"""
+    """当前 Store 已经永久绑定到另一个 Owner 身份摘要。"""
 
 
-class SourceRecordError(BehaviorError, ValueError):
-    """来源记录不满足严格结构或容量边界。"""
+class SemanticIngressError(BehaviorError, ValueError):
+    """语义入口协议、Adapter 或能力绑定不合法。"""
 
 
-class SourceRecordConflictError(SourceRecordError):
-    """相同来源身份对应不同的规范内容。"""
+class SemanticRecordError(SemanticIngressError):
+    """Owner-scoped 语义记录不满足严格结构或容量边界。"""
 
 
-class SourceRecordLateError(SourceRecordError):
-    """来源事件时间已经越过提交的 watermark。"""
+class SemanticRecordConflictError(SemanticRecordError):
+    """相同语义记录身份对应了不同的规范内容。"""
 
 
-class EvidenceWindowError(BehaviorError, ValueError):
-    """证据窗口无法按硬边界处理。"""
+class SemanticRecordLateError(SemanticRecordError):
+    """语义记录的可信事件时间已经越过提交 Watermark。"""
 
 
-class EvidenceWindowStateError(EvidenceWindowError):
-    """证据窗口状态不允许当前操作。"""
+class SemanticClockError(SemanticRecordError):
+    """事件时间不满足注入 Clock 的保守边界。"""
+
+
+class EvidenceBundleError(BehaviorError, ValueError):
+    """语义证据 Bundle 无法按硬边界处理。"""
+
+
+class EvidenceBundleStateError(EvidenceBundleError):
+    """语义证据 Bundle 状态不允许当前操作。"""
 
 
 class EvidenceManifestError(BehaviorError, ValueError):
@@ -38,23 +46,47 @@ class EvidenceManifestError(BehaviorError, ValueError):
 
 
 class ClaimSchemaError(BehaviorError, ValueError):
-    """ClaimProposal 或 ClaimBatch 不满足严格 Schema。"""
+    """Claim 语义提案、Claim 或批次不满足严格 Schema。"""
 
 
 class ClaimProductionError(BehaviorError):
-    """Producer 调用或输出处理失败。"""
+    """Claim Normalizer 调用或输出处理失败。"""
 
 
-class ClaimModelNetworkError(ClaimProductionError):
-    """模型网络或共享客户端调用失败。"""
+class ClaimModelTransportError(ClaimProductionError):
+    """模型传输或限流失败。"""
 
 
 class ClaimModelSchemaError(ClaimProductionError):
-    """模型响应未通过严格 ClaimProposal Schema。"""
+    """模型响应或结构化输出不合法。"""
 
 
-class ClaimValidationError(BehaviorError, ValueError):
-    """ClaimProposal 无法忠实绑定指定 Manifest。"""
+class ClaimModelInputError(ClaimProductionError):
+    """模型输入超过字符或 Token 边界。"""
+
+
+class ClaimModelAuthenticationError(ClaimProductionError):
+    """模型认证失败。"""
+
+
+class ClaimModelPermissionError(ClaimProductionError):
+    """模型权限不足。"""
+
+
+class ClaimModelConfigurationError(ClaimProductionError):
+    """模型配置无效。"""
+
+
+class ClaimModelQuotaError(ClaimProductionError):
+    """模型配额不足。"""
+
+
+class ClaimModelContentSafetyError(ClaimProductionError):
+    """模型内容安全策略拒绝本次规范化。"""
+
+
+class ClaimBindingError(BehaviorError, ValueError):
+    """语义提案无法忠实绑定当前 Manifest 和语义记录。"""
 
 
 class ClaimAdmissionError(BehaviorError, ValueError):
@@ -62,7 +94,11 @@ class ClaimAdmissionError(BehaviorError, ValueError):
 
 
 class ClaimStoreError(BehaviorError):
-    """Evidence/Claim SQLite Store 初始化或读写失败。"""
+    """Behavior SQLite Store 初始化或读写失败。"""
+
+
+class ClaimStoreCapacityError(ClaimStoreError):
+    """Behavior Store 的显式容量边界已达到。"""
 
 
 class ClaimProcessingConflictError(ClaimStoreError):
@@ -74,17 +110,26 @@ __all__ = [
     "BehaviorOwnerConflictError",
     "BehaviorOwnerError",
     "ClaimAdmissionError",
-    "ClaimModelNetworkError",
+    "ClaimBindingError",
+    "ClaimModelAuthenticationError",
+    "ClaimModelConfigurationError",
+    "ClaimModelContentSafetyError",
+    "ClaimModelInputError",
+    "ClaimModelPermissionError",
+    "ClaimModelQuotaError",
     "ClaimModelSchemaError",
+    "ClaimModelTransportError",
     "ClaimProcessingConflictError",
     "ClaimProductionError",
     "ClaimSchemaError",
+    "ClaimStoreCapacityError",
     "ClaimStoreError",
-    "ClaimValidationError",
+    "EvidenceBundleError",
+    "EvidenceBundleStateError",
     "EvidenceManifestError",
-    "EvidenceWindowError",
-    "EvidenceWindowStateError",
-    "SourceRecordConflictError",
-    "SourceRecordError",
-    "SourceRecordLateError",
+    "SemanticClockError",
+    "SemanticIngressError",
+    "SemanticRecordConflictError",
+    "SemanticRecordError",
+    "SemanticRecordLateError",
 ]
