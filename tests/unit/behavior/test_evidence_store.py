@@ -13,9 +13,9 @@ from behavior.errors import ClaimStoreError, SemanticRecordConflictError
 from behavior.evidence import (
     CoverageSummary,
     EvidenceSealReason,
-    EvidenceService,
     SemanticIngestStatus,
 )
+from behavior.evidence.service import EvidenceService
 from behavior.ingress import (
     BoundarySignal,
     CoverageIntervalPayload,
@@ -29,7 +29,7 @@ from behavior.persistence.sqlite import SQLiteBehaviorEvidenceClaimStore
 from foundation.observability import NullObserver
 from tests.unit.behavior.conftest import (
     BASE_TIME,
-    accepted_decision,
+    accepted_ingress,
     bind_record,
     digest,
     make_input,
@@ -37,7 +37,9 @@ from tests.unit.behavior.conftest import (
 
 
 def ingest(service: EvidenceService, record):
-    return service.ingest(record, accepted_decision(record))
+    return service.ingest(
+        accepted_ingress(record, ingress_config=service.store.config.ingress)
+    )
 
 
 def test_out_of_order_records_are_stably_sorted_and_track_is_not_grouping(owner, store) -> None:
@@ -74,7 +76,7 @@ def test_same_input_different_arrival_and_seal_times_has_same_manifest_identity(
         assert active is not None
         manifest = service.seal_bundle(active.bundle_id)
         assert manifest is not None
-        identities.append((manifest.manifest_id, manifest.content_digest))
+        identities.append((manifest.manifest_id, manifest.manifest_semantic_digest))
     assert identities[0] == identities[1]
 
 
@@ -322,7 +324,7 @@ def test_store_permissions_schema_and_symlink_rejection(tmp_path) -> None:
     assert os.stat(store.path).st_mode & 0o777 == 0o600
     store.initialize()
     with closing(sqlite3.connect(store.path)) as connection:
-        assert connection.execute("SELECT value FROM behavior_metadata WHERE key='schema_version'").fetchone()[0] == "2"
+        assert connection.execute("SELECT value FROM behavior_metadata WHERE key='schema_version'").fetchone()[0] == "3"
     target = tmp_path / "target"
     target.mkdir()
     link = tmp_path / "link"

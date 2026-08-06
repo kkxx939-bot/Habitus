@@ -15,7 +15,7 @@ from behavior.errors import (
     SemanticRecordConflictError,
     SemanticRecordError,
 )
-from behavior.evidence import EvidenceService
+from behavior.evidence.service import EvidenceService
 from behavior.ingress import (
     ActionEventPayload,
     ActivitySegmentPayload,
@@ -53,7 +53,7 @@ from tests.unit.behavior.conftest import (
     BASE_TIME,
     FakeAdapter,
     FakeClock,
-    accepted_decision,
+    accepted_ingress,
     bind_record,
     digest,
     make_input,
@@ -75,15 +75,13 @@ def test_owner_identity_excludes_resolver_audit_fields() -> None:
 def test_store_binds_only_one_owner_identity(store, owner) -> None:
     record = bind_record(owner)
     EvidenceService(store, config=store.config.evidence, observer=NullObserver()).ingest(
-        record,
-        accepted_decision(record),
+        accepted_ingress(record),
     )
     other = ConfirmedOwnerBinding("owner-b", "resolver-v2", BASE_TIME, digest("other"))
     conflict = bind_record(other, make_input(sequence=1))
     with pytest.raises(BehaviorOwnerConflictError):
         EvidenceService(store, config=store.config.evidence, observer=NullObserver()).ingest(
-            conflict,
-            accepted_decision(conflict),
+            accepted_ingress(conflict),
         )
 
 
@@ -337,7 +335,8 @@ def test_semantic_record_identity_is_deterministic_and_ignores_audit_track(owner
     )
     changed_track = bind_record(owner, make_input(upstream_subject_ref="track-b"))
     assert first.semantic_record_id == replay.semantic_record_id
-    assert first.canonical_digest == replay.canonical_digest
+    assert first.semantic_digest == replay.semantic_digest
+    assert first.content_digest != replay.content_digest
     assert changed_track.semantic_record_id != first.semantic_record_id
     assert changed_track.owner_identity_digest == first.owner_identity_digest
 
@@ -353,11 +352,11 @@ def test_same_record_identity_with_changed_system_trust_is_a_conflict(store, own
     direct = bind_record(owner, semantic_input, trust=IngressTrustClass.DIRECT_DEVICE_FACT)
     inferred = bind_record(owner, semantic_input, trust=IngressTrustClass.SENSOR_INFERRED)
     assert direct.semantic_record_id == inferred.semantic_record_id
-    assert direct.canonical_digest != inferred.canonical_digest
+    assert direct.semantic_digest != inferred.semantic_digest
     evidence = EvidenceService(store, config=store.config.evidence, observer=NullObserver())
-    evidence.ingest(direct, accepted_decision(direct))
+    evidence.ingest(accepted_ingress(direct))
     with pytest.raises(SemanticRecordConflictError, match="identity conflicts"):
-        evidence.ingest(inferred, accepted_decision(inferred))
+        evidence.ingest(accepted_ingress(inferred))
 
 
 def test_registry_rejects_duplicates_and_unknown_adapter() -> None:
@@ -414,7 +413,7 @@ def test_clock_rejections_are_audited_without_record_or_watermark(store, owner) 
         clock=FakeClock(),
     )
     result = asyncio.run(service.prepare("fake_semantic", {}, owner_binding=owner))[0]
-    assert result.record is None
+    assert result.accepted is None
     assert result.decision.status is IngressDecisionStatus.CLOCK_SKEW_REJECTED
     assert store.read_semantic_record(result.decision.semantic_record_id) is None
     with closing(sqlite3.connect(store.path)) as connection:
@@ -437,8 +436,7 @@ def test_unsynchronized_clock_is_accepted_but_does_not_advance_watermark(store, 
     value = make_input(clock_sync_status=ClockSyncStatus.UNKNOWN)
     record = bind_record(owner, value)
     result = EvidenceService(store, config=store.config.evidence, observer=NullObserver()).ingest(
-        record,
-        accepted_decision(record),
+        accepted_ingress(record),
     )
     assert result.active_bundle is not None
     assert result.active_bundle.watermark is None
@@ -450,7 +448,7 @@ def test_unsynchronized_clock_cannot_bypass_committed_lateness(store, owner) -> 
         owner,
         make_input(sequence=0, offset_seconds=100, boundary_signal="END"),
     )
-    assert service.ingest(trusted, accepted_decision(trusted)).manifest_ids
+    assert service.ingest(accepted_ingress(trusted)).manifest_ids
     untrusted = bind_record(
         owner,
         make_input(
@@ -459,6 +457,6 @@ def test_unsynchronized_clock_cannot_bypass_committed_lateness(store, owner) -> 
             clock_sync_status=ClockSyncStatus.UNKNOWN,
         ),
     )
-    result = service.ingest(untrusted, accepted_decision(untrusted))
+    result = service.ingest(accepted_ingress(untrusted))
     assert result.status.name == "LATE_REJECTED"
     assert store.read_semantic_record(untrusted.semantic_record_id) is None

@@ -12,6 +12,7 @@ from ModelClient.contracts import (
     ChatCallContext,
     ChatMessage,
     ChatRequest,
+    ModelContentSafetyError,
     ModelResponse,
     ModelStructuredOutputError,
     ResponseFormat,
@@ -254,10 +255,7 @@ class StructuredChatClient:
                 ValueError("structured model response was truncated"),
             )
         if response.finish_reason in {"content_filter", "safety"}:
-            raise _StructuredValidationFailure(
-                "response",
-                ValueError("structured model response was blocked by content safety"),
-            )
+            raise ModelContentSafetyError("structured model response was blocked by content safety")
         if not response.content:
             raise _StructuredValidationFailure(
                 "response",

@@ -9,7 +9,8 @@ from behavior.claim import (
     DeterministicClaimNormalizer,
 )
 from behavior.config import BehaviorConfig
-from behavior.evidence import EvidenceService, SemanticIngestStatus
+from behavior.evidence import SemanticIngestStatus
+from behavior.evidence.service import EvidenceService
 from behavior.ingress import (
     ActivitySegmentPayload,
     BoundarySignal,
@@ -26,7 +27,7 @@ from behavior.ingress import (
 from behavior.owner import ConfirmedOwnerBinding
 from behavior.persistence.sqlite import SQLiteBehaviorEvidenceClaimStore
 from foundation.observability import NullObserver
-from tests.unit.behavior.conftest import BASE_TIME, FakeAdapter, FakeClock, digest, make_input
+from tests.unit.behavior.conftest import BASE_TIME, FakeAdapter, FakeClock, NoopModelNormalizer, digest, make_input
 
 
 def test_owner_scoped_semantic_records_to_atomic_claims_is_replayable(tmp_path) -> None:
@@ -91,9 +92,11 @@ def test_owner_scoped_semantic_records_to_atomic_claims_is_replayable(tmp_path) 
         config=config.evidence,
         observer=NullObserver(),
         clock=clock,
+        adapters=adapters,
     )
     normalizers = ClaimNormalizerRegistry()
     normalizers.register(DeterministicClaimNormalizer())
+    normalizers.register(NoopModelNormalizer())
     router = ClaimNormalizationRouter(normalizers, config=config.claim)
     pipeline = ClaimPipelineService(
         store,
@@ -121,15 +124,17 @@ def test_owner_scoped_semantic_records_to_atomic_claims_is_replayable(tmp_path) 
 
     first = asyncio.run(pipeline.process_manifest(manifest.manifest_id))
     replay = asyncio.run(pipeline.process_manifest(manifest.manifest_id))
-    assert len(first.validated_claims) == len(first.accepted_claims) == 3
-    assert replay.reused
-    assert tuple(item.claim_id for item in replay.validated_claims) == tuple(
-        item.claim_id for item in first.validated_claims
+    assert len(first.core_result.validated_claims) == len(first.core_result.accepted_claims) == 3
+    assert replay.core_result.reused
+    assert tuple(item.claim_id for item in replay.core_result.validated_claims) == tuple(
+        item.claim_id for item in first.core_result.validated_claims
     )
-    accepted = store.list_accepted_claims(
+    accepted = pipeline.list_accepted_claims(
         start=manifest.started_at,
         end=clock.now(),
         limit=10,
     )
-    assert {item.claim_id for item in accepted} == {item.claim_id for item in first.accepted_claims}
-    assert all(type(item).__name__ == "Claim" for item in first.validated_claims)
+    assert {item.claim_id for item in accepted} == {
+        item.claim_id for item in first.core_result.accepted_claims
+    }
+    assert all(type(item).__name__ == "Claim" for item in first.core_result.validated_claims)

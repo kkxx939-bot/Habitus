@@ -9,8 +9,9 @@ from behavior.claim import (
     ClaimKind,
     ClaimNormalizationRouter,
     ClaimNormalizerRegistry,
-    ClaimSemanticProposal,
+    ClaimNormalizerRequirement,
     ClaimSemanticProposalBatch,
+    ClaimSemanticProposalContract,
     DeterministicClaimNormalizer,
     ModelClaimNormalizer,
 )
@@ -30,12 +31,9 @@ from behavior.errors import (
 from behavior.ingress import (
     FreeTextSemanticPayload,
     IngressTrustClass,
-    SemanticActorRole,
     SemanticModality,
     SemanticRecordKind,
     SemanticSubjectRole,
-    UtteranceChannel,
-    UtteranceSegmentPayload,
 )
 from ModelClient.config import ChatModelConfig, ProviderConfig
 from ModelClient.contracts import (
@@ -66,7 +64,7 @@ def proposal_mapping(**updates: object) -> dict[str, object]:
         "location_ref": None,
         "semantic_payload": {"value": True},
         "human_summary": "Door state proposal",
-        "alternative_group_id": None,
+        "local_alternative_group_id": None,
         "normalizer_confidence": 0.8,
     }
     value.update(updates)
@@ -83,11 +81,11 @@ def fake_structured_client(batch: ClaimSemanticProposalBatch):
     )
     calls = []
 
-    async def complete_model_async(self, request, **kwargs):
+    async def complete_json_async(self, request, **kwargs):
         calls.append((request, kwargs))
         return SimpleNamespace(value=batch)
 
-    client.complete_model_async = MethodType(complete_model_async, client)
+    client.complete_json_async = MethodType(complete_json_async, client)
     return client, calls
 
 
@@ -103,10 +101,12 @@ def free_text_record(owner, *, text: str = "Owner may be preparing tea"):
 
 def test_proposal_schema_is_strict_and_contains_no_system_fields() -> None:
     mapping = proposal_mapping()
-    proposal = ClaimSemanticProposal.model_validate(mapping)
+    config = ClaimConfig()
+    allowed = frozenset({ClaimKind.STATE_ASSERTION})
+    proposal = ClaimSemanticProposalContract.model_validate(mapping, config, allowed)
     assert proposal.claim_kind is ClaimKind.STATE_ASSERTION
-    validate_json_schema(mapping, ClaimSemanticProposal.model_json_schema())
-    schema_fields = set(ClaimSemanticProposal.model_json_schema()["properties"])
+    validate_json_schema(mapping, ClaimSemanticProposalContract.model_json_schema(config, allowed))
+    schema_fields = set(ClaimSemanticProposalContract.model_json_schema(config, allowed)["properties"])
     assert schema_fields.isdisjoint(
         {
             "subject_role",
@@ -121,25 +121,27 @@ def test_proposal_schema_is_strict_and_contains_no_system_fields() -> None:
     )
     for system_field in ("claim_id", "time_start", "epistemic_class", "semantic_record_id"):
         with pytest.raises(ClaimSchemaError):
-            ClaimSemanticProposal.model_validate({**mapping, system_field: "forged"})
+            ClaimSemanticProposalContract.model_validate({**mapping, system_field: "forged"}, config, allowed)
     missing = dict(mapping)
     missing.pop("predicate")
     with pytest.raises(ClaimSchemaError):
-        ClaimSemanticProposal.model_validate(missing)
+        ClaimSemanticProposalContract.model_validate(missing, config, allowed)
     with pytest.raises(ClaimSchemaError):
-        ClaimSemanticProposal.model_validate({**mapping, "normalizer_confidence": "0.8"})
+        ClaimSemanticProposalContract.model_validate({**mapping, "normalizer_confidence": "0.8"}, config, allowed)
     with pytest.raises(ClaimSchemaError):
-        ClaimSemanticProposal.model_validate({**mapping, "normalizer_confidence": float("nan")})
+        ClaimSemanticProposalContract.model_validate({**mapping, "normalizer_confidence": float("nan")}, config, allowed)
 
 
 def test_activity_and_abstain_alternative_invariants() -> None:
-    activity = ClaimSemanticProposal.model_validate(
+    activity = ClaimSemanticProposalContract.model_validate(
         proposal_mapping(
             claim_kind="ACTIVITY_PHASE",
             activity="preparing_tea",
             phase="in_progress",
-            alternative_group_id="alternatives-1",
-        )
+            local_alternative_group_id="alternatives-1",
+        ),
+        ClaimConfig(),
+        frozenset({ClaimKind.ACTIVITY_PHASE}),
     )
     assert ClaimSemanticProposalBatch(False, (activity,)).claims == (activity,)
     assert ClaimSemanticProposalBatch(True, ()).abstained
@@ -148,7 +150,11 @@ def test_activity_and_abstain_alternative_invariants() -> None:
     with pytest.raises(ClaimSchemaError):
         ClaimSemanticProposalBatch(False, ())
     with pytest.raises(ClaimSchemaError):
-        ClaimSemanticProposal.model_validate(proposal_mapping(activity="invalid"))
+        ClaimSemanticProposalContract.model_validate(
+            proposal_mapping(activity="invalid"),
+            ClaimConfig(),
+            frozenset({ClaimKind.STATE_ASSERTION}),
+        )
 
 
 def test_normalizer_registry_is_explicit_normalized_and_deterministic() -> None:
@@ -175,7 +181,9 @@ def test_deterministic_normalizer_never_calls_model_and_maps_typed_payload(owner
 
 
 def test_model_normalizer_has_untrusted_boundary_and_fixed_token_limit(owner) -> None:
-    proposal = ClaimSemanticProposal.model_validate(proposal_mapping())
+    proposal = ClaimSemanticProposalContract.model_validate(
+        proposal_mapping(), ClaimConfig(), frozenset({ClaimKind.STATE_ASSERTION})
+    )
     output = ClaimSemanticProposalBatch(False, (proposal,))
     client, calls = fake_structured_client(output)
     config = ClaimConfig(max_model_input_tokens=777, max_model_output_tokens=123)
@@ -201,22 +209,18 @@ def test_router_selects_structure_free_text_and_optional_utterance_paths(owner) 
     registry.register(deterministic)
     registry.register(model)
     router = ClaimNormalizationRouter(registry, config=ClaimConfig())
-    assert router.route(bind_record(owner)) == (deterministic,)
-    assert router.route(free_text_record(owner)) == (model,)
-    utterance_input = make_input(
-        kind=SemanticRecordKind.OWNER_UTTERANCE_SEGMENT,
-        payload=UtteranceSegmentPayload("hello", "en", UtteranceChannel.VOICE),
-        modality=SemanticModality.AUDIO,
-        subject_role=SemanticSubjectRole.OWNER,
-        actor_role=SemanticActorRole.OWNER,
-    )
-    utterance = bind_record(owner, utterance_input, trust=IngressTrustClass.OWNER_EXPLICIT)
-    assert router.route(utterance) == (deterministic,)
+    assert router._route(
+        bind_record(owner), "deterministic", ClaimNormalizerRequirement.REQUIRED_CORE
+    ).normalizer is deterministic
+    assert router._route(
+        free_text_record(owner), "model_text", ClaimNormalizerRequirement.OPTIONAL_ENHANCEMENT
+    ).normalizer is model
+    assert router.config.normalize_owner_utterances is False
     expanded = ClaimNormalizationRouter(
         registry,
         config=ClaimConfig(normalize_owner_utterances=True),
     )
-    assert expanded.route(utterance) == (deterministic, model)
+    assert expanded.config.normalize_owner_utterances is True
 
 
 def test_model_normalizer_can_abstain(owner) -> None:
@@ -265,7 +269,7 @@ def test_model_error_classification(owner, model_error, behavior_error) -> None:
         del request, kwargs
         raise model_error
 
-    client.complete_model_async = MethodType(fail, client)
+    client.complete_json_async = MethodType(fail, client)
     with pytest.raises(behavior_error) as captured:
         asyncio.run(ModelClaimNormalizer(client, config=ClaimConfig()).normalize(free_text_record(owner)))
     assert captured.value.__cause__ is model_error

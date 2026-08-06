@@ -14,7 +14,6 @@ from behavior.evidence.manifest import (
     EvidenceManifest,
     ManifestSemanticRecordSnapshot,
 )
-from behavior.evidence.service import EvidenceService
 
 __all__ = [
     "CoverageInterval",
@@ -22,7 +21,6 @@ __all__ = [
     "EvidenceBundleState",
     "EvidenceManifest",
     "EvidenceSealReason",
-    "EvidenceService",
     "ManifestSemanticRecordSnapshot",
     "SemanticEvidenceBundle",
     "SemanticEvidenceBundleAssembler",

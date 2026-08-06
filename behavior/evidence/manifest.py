@@ -18,6 +18,7 @@ from behavior._validation import (
     strict_utc,
     utc_text,
 )
+from behavior.config import IngressConfig
 from behavior.errors import EvidenceManifestError
 from behavior.evidence.bundle import (
     EvidenceBundleState,
@@ -27,9 +28,9 @@ from behavior.evidence.bundle import (
 from behavior.ingress.evidence_ref import EvidenceReference
 from behavior.ingress.model import OwnerScopedSemanticRecord, SemanticModality, SemanticRecordKind
 from behavior.ingress.payloads import CoverageIntervalPayload, CoverageStatus
-from foundation.integrity import canonical_digest
+from foundation.integrity import canonical_digest, canonical_json
 
-EVIDENCE_MANIFEST_SCHEMA_VERSION = "2"
+EVIDENCE_MANIFEST_SCHEMA_VERSION = "3"
 
 
 class CoverageSummary(str, Enum):
@@ -41,13 +42,19 @@ class CoverageSummary(str, Enum):
 
 @dataclass(frozen=True)
 class CoverageInterval:
-    modality: str
+    modality: SemanticModality
+    coverage_scope_ref: str | None
     event_time_start: datetime
     event_time_end: datetime
     semantic_record_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "modality", identifier(self.modality, "coverage.modality"))
+        object.__setattr__(self, "modality", SemanticModality(self.modality))
+        object.__setattr__(
+            self,
+            "coverage_scope_ref",
+            optional_identifier(self.coverage_scope_ref, "coverage.coverage_scope_ref"),
+        )
         object.__setattr__(self, "event_time_start", strict_utc(self.event_time_start, "coverage.event_time_start"))
         object.__setattr__(self, "event_time_end", strict_utc(self.event_time_end, "coverage.event_time_end"))
         if self.event_time_end < self.event_time_start:
@@ -57,7 +64,8 @@ class CoverageInterval:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "modality": self.modality,
+            "modality": self.modality.value,
+            "coverage_scope_ref": self.coverage_scope_ref,
             "event_time_start": utc_text(self.event_time_start),
             "event_time_end": utc_text(self.event_time_end),
             "semantic_record_ids": self.semantic_record_ids,
@@ -65,11 +73,14 @@ class CoverageInterval:
 
     @classmethod
     def from_dict(cls, value: object) -> CoverageInterval:
-        fields = frozenset({"modality", "event_time_start", "event_time_end", "semantic_record_ids"})
+        fields = frozenset(
+            {"modality", "coverage_scope_ref", "event_time_start", "event_time_end", "semantic_record_ids"}
+        )
         data = strict_fields(value, "coverage_interval", fields)
         require_fields(data, "coverage_interval", fields)
         return cls(
-            modality=data["modality"],
+            modality=SemanticModality(data["modality"]),
+            coverage_scope_ref=data["coverage_scope_ref"],
             event_time_start=parse_utc(data["event_time_start"], "coverage.event_time_start"),
             event_time_end=parse_utc(data["event_time_end"], "coverage.event_time_end"),
             semantic_record_ids=tuple(data["semantic_record_ids"]),
@@ -115,7 +126,7 @@ class ManifestSemanticRecordSnapshot:
         value = record.semantic_input
         return cls(
             semantic_record_id=record.semantic_record_id,
-            semantic_record_digest=record.canonical_digest,
+            semantic_record_digest=record.semantic_digest,
             stream_id=value.stream_id,
             source_sequence=value.source_sequence,
             record_kind=value.record_kind,
@@ -153,7 +164,12 @@ class ManifestSemanticRecordSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, value: object) -> ManifestSemanticRecordSnapshot:
+    def from_dict(
+        cls,
+        value: object,
+        *,
+        ingress_config: IngressConfig | None = None,
+    ) -> ManifestSemanticRecordSnapshot:
         fields = frozenset(
             {
                 "semantic_record_id",
@@ -181,7 +197,9 @@ class ManifestSemanticRecordSnapshot:
             event_time_start=parse_utc(data["event_time_start"], "event_time_start"),
             event_time_end=parse_utc(data["event_time_end"], "event_time_end"),
             scene_ref=data["scene_ref"],
-            evidence_refs=tuple(EvidenceReference.from_dict(item) for item in data["evidence_refs"]),
+            evidence_refs=tuple(
+                EvidenceReference.from_dict(item, config=ingress_config) for item in data["evidence_refs"]
+            ),
             payload_digest=data["payload_digest"],
         )
 
@@ -203,6 +221,7 @@ class EvidenceManifest:
     unknown_intervals: tuple[CoverageInterval, ...]
     coverage_summary: CoverageSummary
     total_projection_chars: int
+    manifest_semantic_digest: str
     content_digest: str
     schema_version: str = EVIDENCE_MANIFEST_SCHEMA_VERSION
 
@@ -240,11 +259,17 @@ class EvidenceManifest:
         object.__setattr__(
             self, "total_projection_chars", non_negative_int(self.total_projection_chars, "total_projection_chars")
         )
+        object.__setattr__(
+            self,
+            "manifest_semantic_digest",
+            sha256_digest(self.manifest_semantic_digest, "manifest_semantic_digest"),
+        )
         object.__setattr__(self, "content_digest", sha256_digest(self.content_digest, "content_digest"))
         object.__setattr__(self, "schema_version", identifier(self.schema_version, "schema_version", maximum=32))
-        expected_content = canonical_digest(self._content_payload())
-        if self.content_digest != expected_content:
-            raise EvidenceManifestError("Manifest content digest mismatch")
+        if self.manifest_semantic_digest != canonical_digest(self._semantic_payload()):
+            raise EvidenceManifestError("Manifest semantic digest mismatch")
+        if self.content_digest != canonical_digest(self._content_payload()):
+            raise EvidenceManifestError("Manifest full content digest mismatch")
         expected_id = "manifest_" + canonical_digest(self._identity_payload())
         if self.manifest_id != expected_id:
             raise EvidenceManifestError("manifest_id does not match deterministic identity")
@@ -258,6 +283,7 @@ class EvidenceManifest:
         reason: EvidenceSealReason,
         sealed_at: datetime,
         max_coverage_intervals: int,
+        max_manifest_encoded_bytes: int,
     ) -> EvidenceManifest:
         if not isinstance(bundle, SemanticEvidenceBundle) or bundle.state is not EvidenceBundleState.SEALED:
             raise EvidenceManifestError("only a SEALED Bundle can publish a Manifest")
@@ -282,7 +308,7 @@ class EvidenceManifest:
             sorted({item.semantic_input.scene_ref for item in ordered if item.semantic_input.scene_ref is not None})
         )
         total_projection_chars = sum(item.projection_chars for item in ordered)
-        content_payload = {
+        semantic_payload = {
             "bundle_id": bundle.bundle_id,
             "owner_identity_digest": bundle.owner_identity_digest,
             "started_at": utc_text(bundle.started_at),
@@ -298,7 +324,14 @@ class EvidenceManifest:
             "total_projection_chars": total_projection_chars,
             "schema_version": EVIDENCE_MANIFEST_SCHEMA_VERSION,
         }
-        return cls(
+        semantic_digest = canonical_digest(semantic_payload)
+        content_payload = {
+            "manifest_id": "manifest_" + canonical_digest(identity_payload),
+            **semantic_payload,
+            "sealed_at": utc_text(sealed_at),
+            "manifest_semantic_digest": semantic_digest,
+        }
+        manifest = cls(
             manifest_id="manifest_" + canonical_digest(identity_payload),
             bundle_id=bundle.bundle_id,
             owner_identity_digest=bundle.owner_identity_digest,
@@ -314,8 +347,12 @@ class EvidenceManifest:
             unknown_intervals=unknown,
             coverage_summary=summary,
             total_projection_chars=total_projection_chars,
+            manifest_semantic_digest=semantic_digest,
             content_digest=canonical_digest(content_payload),
         )
+        if len(canonical_json(manifest.to_dict()).encode("utf-8")) > max_manifest_encoded_bytes:
+            raise EvidenceManifestError("Manifest canonical encoding exceeds its configured byte boundary")
+        return manifest
 
     def _identity_payload(self) -> dict[str, object]:
         return {
@@ -325,7 +362,7 @@ class EvidenceManifest:
             "schema_version": self.schema_version,
         }
 
-    def _content_payload(self) -> dict[str, object]:
+    def _semantic_payload(self) -> dict[str, object]:
         return {
             "bundle_id": self.bundle_id,
             "owner_identity_digest": self.owner_identity_digest,
@@ -343,16 +380,27 @@ class EvidenceManifest:
             "schema_version": self.schema_version,
         }
 
-    def to_dict(self) -> dict[str, object]:
+    def _content_payload(self) -> dict[str, object]:
         return {
             "manifest_id": self.manifest_id,
-            **self._content_payload(),
+            **self._semantic_payload(),
             "sealed_at": utc_text(self.sealed_at),
+            "manifest_semantic_digest": self.manifest_semantic_digest,
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            **self._content_payload(),
             "content_digest": self.content_digest,
         }
 
     @classmethod
-    def from_dict(cls, value: object) -> EvidenceManifest:
+    def from_dict(
+        cls,
+        value: object,
+        *,
+        ingress_config: IngressConfig | None = None,
+    ) -> EvidenceManifest:
         fields = frozenset(
             {
                 "manifest_id",
@@ -370,6 +418,7 @@ class EvidenceManifest:
                 "unknown_intervals",
                 "coverage_summary",
                 "total_projection_chars",
+                "manifest_semantic_digest",
                 "content_digest",
                 "schema_version",
             }
@@ -385,7 +434,8 @@ class EvidenceManifest:
             sealed_at=parse_utc(data["sealed_at"], "sealed_at"),
             seal_reason=EvidenceSealReason(data["seal_reason"]),
             ordered_record_snapshots=tuple(
-                ManifestSemanticRecordSnapshot.from_dict(item) for item in data["ordered_record_snapshots"]
+                ManifestSemanticRecordSnapshot.from_dict(item, ingress_config=ingress_config)
+                for item in data["ordered_record_snapshots"]
             ),
             modalities=tuple(SemanticModality(item) for item in data["modalities"]),
             scene_refs=tuple(data["scene_refs"]),
@@ -394,6 +444,7 @@ class EvidenceManifest:
             unknown_intervals=tuple(CoverageInterval.from_dict(item) for item in data["unknown_intervals"]),
             coverage_summary=CoverageSummary(data["coverage_summary"]),
             total_projection_chars=data["total_projection_chars"],
+            manifest_semantic_digest=data["manifest_semantic_digest"],
             content_digest=data["content_digest"],
             schema_version=data["schema_version"],
         )
@@ -411,14 +462,17 @@ def _coverage(
     tuple[CoverageInterval, ...],
     CoverageSummary,
 ]:
-    explicit: dict[str, list[tuple[datetime, datetime, CoverageStatus, str]]] = {}
+    explicit: dict[
+        tuple[SemanticModality, str | None],
+        list[tuple[datetime, datetime, CoverageStatus, str]],
+    ] = {}
     for record in records:
         if record.semantic_input.record_kind is not SemanticRecordKind.COVERAGE_INTERVAL:
             continue
         payload = record.semantic_input.payload
         if not isinstance(payload, CoverageIntervalPayload):
             raise EvidenceManifestError("Coverage record has an invalid Payload")
-        explicit.setdefault(payload.modality, []).append(
+        explicit.setdefault((payload.modality, payload.coverage_scope_ref), []).append(
             (
                 record.semantic_input.event_time_start,
                 record.semantic_input.event_time_end,
@@ -427,7 +481,9 @@ def _coverage(
             )
         )
     if not explicit:
-        unknown: tuple[CoverageInterval, ...] = (CoverageInterval("MULTIMODAL", started_at, ended_at, ()),)
+        unknown: tuple[CoverageInterval, ...] = (
+            CoverageInterval(SemanticModality.MULTIMODAL, None, started_at, ended_at, ()),
+        )
         return (), (), unknown, CoverageSummary.UNKNOWN
     by_status: dict[CoverageStatus, list[CoverageInterval]] = {
         CoverageStatus.COVERED: [],
@@ -435,28 +491,34 @@ def _coverage(
         CoverageStatus.UNKNOWN: [],
     }
     priority = (CoverageStatus.BLIND, CoverageStatus.UNKNOWN, CoverageStatus.COVERED)
-    for modality in sorted(explicit):
-        source = explicit[modality]
+    for modality, scope in sorted(explicit, key=lambda item: (item[0].value, item[1] or "")):
+        source = explicit[(modality, scope)]
         points = sorted({started_at, ended_at, *(item[0] for item in source), *(item[1] for item in source)})
         segments = tuple(zip(points, points[1:], strict=False))
         if not segments:
             statuses = {item[2] for item in source if item[0] <= started_at <= item[1]}
             status = next((item for item in priority if item in statuses), CoverageStatus.UNKNOWN)
             ids = tuple(sorted(item[3] for item in source if item[2] is status))
-            by_status[status].append(CoverageInterval(modality, started_at, ended_at, ids))
+            by_status[status].append(CoverageInterval(modality, scope, started_at, ended_at, ids))
             continue
         for start, end in segments:
             covering = tuple(item for item in source if item[0] <= start and item[1] >= end)
             statuses = {item[2] for item in covering}
             status = next((item for item in priority if item in statuses), CoverageStatus.UNKNOWN)
             ids = tuple(sorted(item[3] for item in covering if item[2] is status))
-            interval = CoverageInterval(modality, start, end, ids)
+            interval = CoverageInterval(modality, scope, start, end, ids)
             target = by_status[status]
-            if target and target[-1].modality == modality and target[-1].event_time_end == start:
+            if (
+                target
+                and target[-1].modality == modality
+                and target[-1].coverage_scope_ref == scope
+                and target[-1].event_time_end == start
+            ):
                 previous = target.pop()
                 target.append(
                     CoverageInterval(
                         modality,
+                        scope,
                         previous.event_time_start,
                         end,
                         tuple(sorted(set(previous.semantic_record_ids) | set(ids))),
@@ -464,10 +526,10 @@ def _coverage(
                 )
             else:
                 target.append(interval)
-    explicit_modalities = set(explicit)
-    record_modalities = {item.semantic_input.modality.value for item in records}
-    for modality in sorted(record_modalities - explicit_modalities):
-        by_status[CoverageStatus.UNKNOWN].append(CoverageInterval(modality, started_at, ended_at, ()))
+    explicit_modalities = {item[0] for item in explicit}
+    record_modalities = {item.semantic_input.modality for item in records}
+    for modality in sorted(record_modalities - explicit_modalities, key=lambda item: item.value):
+        by_status[CoverageStatus.UNKNOWN].append(CoverageInterval(modality, None, started_at, ended_at, ()))
     total = sum(len(items) for items in by_status.values())
     if total > maximum:
         raise EvidenceManifestError("Coverage intervals exceed their configured boundary")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 from behavior.config import EvidenceConfig
+from behavior.errors import SemanticRecordConflictError
 from behavior.evidence.bundle import (
     EvidenceSealReason,
     SemanticEvidenceBundleAssembler,
@@ -12,8 +13,8 @@ from behavior.evidence.bundle import (
     SemanticIngestStatus,
 )
 from behavior.evidence.manifest import EvidenceManifest
-from behavior.ingress.model import IngressDecision, OwnerScopedSemanticRecord
-from behavior.ingress.service import Clock, SystemClock
+from behavior.ingress.registry import SemanticIngressAdapterRegistry
+from behavior.ingress.service import AcceptedSemanticIngress, Clock, SystemClock
 from behavior.persistence.contracts import BehaviorEvidenceClaimStore
 from foundation.observability import ObservationEvent, ObservationStatus, Observer
 
@@ -26,6 +27,7 @@ class EvidenceService:
         config: EvidenceConfig,
         observer: Observer,
         clock: Clock | None = None,
+        adapters: SemanticIngressAdapterRegistry | None = None,
     ) -> None:
         if not isinstance(store, BehaviorEvidenceClaimStore):
             raise TypeError("store must implement BehaviorEvidenceClaimStore")
@@ -40,21 +42,25 @@ class EvidenceService:
         self.config = config
         self.observer = observer
         self.clock = resolved_clock
+        if adapters is not None and not isinstance(adapters, SemanticIngressAdapterRegistry):
+            raise TypeError("adapters must be SemanticIngressAdapterRegistry or None")
+        self.adapters = adapters
         self.assembler = SemanticEvidenceBundleAssembler(config)
 
     def ingest(
         self,
-        record: OwnerScopedSemanticRecord,
-        decision: IngressDecision,
+        accepted: AcceptedSemanticIngress,
     ) -> SemanticIngestResult:
-        if not isinstance(record, OwnerScopedSemanticRecord):
-            raise TypeError("record must be OwnerScopedSemanticRecord")
-        if not isinstance(decision, IngressDecision):
-            raise TypeError("decision must be IngressDecision")
+        if not isinstance(accepted, AcceptedSemanticIngress):
+            raise TypeError("accepted must be AcceptedSemanticIngress")
+        if self.adapters is not None and accepted.adapter_registry is not self.adapters:
+            raise SemanticRecordConflictError(
+                "accepted ingress Registry differs from the authoritative Evidence Registry"
+            )
+        record = accepted.record
         started = time.monotonic()
         result = self.store.ingest_semantic_record(
-            record,
-            decision,
+            accepted,
             self.assembler,
             sealed_at=self.clock.now(),
         )

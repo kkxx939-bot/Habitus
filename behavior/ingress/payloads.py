@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 from behavior._validation import (
     bounded_text,
@@ -21,6 +21,9 @@ from behavior._validation import (
 )
 from behavior.config import IngressConfig
 from behavior.errors import SemanticRecordError
+
+if TYPE_CHECKING:
+    from behavior.ingress.model import SemanticModality
 
 
 class PhaseHint(str, Enum):
@@ -328,27 +331,41 @@ class EnvironmentChangePayload:
 
 @dataclass(frozen=True, init=False)
 class CoverageIntervalPayload:
-    modality: str
+    modality: SemanticModality
     coverage_status: CoverageStatus
     reason: str | None
+    coverage_scope_ref: str | None
 
     def __init__(
         self,
         modality: object,
         coverage_status: CoverageStatus | str,
         reason: object,
+        coverage_scope_ref: object = None,
         *,
         config: IngressConfig | None = None,
     ) -> None:
         limits = _limits(config)
-        object.__setattr__(self, "modality", identifier(modality, "payload.modality"))
+        from behavior.ingress.model import SemanticModality
+
+        object.__setattr__(self, "modality", SemanticModality(modality))
+        object.__setattr__(
+            self,
+            "coverage_scope_ref",
+            optional_identifier(coverage_scope_ref, "payload.coverage_scope_ref"),
+        )
         object.__setattr__(self, "coverage_status", CoverageStatus(coverage_status))
         object.__setattr__(
             self, "reason", optional_bounded_text(reason, "payload.reason", maximum=limits.max_text_chars)
         )
 
     def to_dict(self) -> dict[str, object]:
-        return {"modality": self.modality, "coverage_status": self.coverage_status.value, "reason": self.reason}
+        return {
+            "modality": self.modality.value,
+            "coverage_scope_ref": self.coverage_scope_ref,
+            "coverage_status": self.coverage_status.value,
+            "reason": self.reason,
+        }
 
 
 @dataclass(frozen=True, init=False)
@@ -434,7 +451,11 @@ def payload_from_dict(record_kind: object, value: object, *, config: IngressConf
             data = _object(value, "payload", frozenset({"predicate", "before", "after", "attributes"}))
             return EnvironmentChangePayload(**data, config=limits)
         if kind is SemanticRecordKind.COVERAGE_INTERVAL:
-            data = _object(value, "payload", frozenset({"modality", "coverage_status", "reason"}))
+            data = _object(
+                value,
+                "payload",
+                frozenset({"modality", "coverage_scope_ref", "coverage_status", "reason"}),
+            )
             return CoverageIntervalPayload(**data, config=limits)
         if kind is SemanticRecordKind.FREE_TEXT_SEMANTIC:
             data = _object(value, "payload", frozenset({"text", "language", "labels"}))
@@ -570,9 +591,12 @@ def payload_json_schema(
             {"predicate": _identifier_schema(), "before": json_value, "after": json_value, "attributes": attributes}
         )
     if kind is SemanticRecordKind.COVERAGE_INTERVAL:
+        from behavior.ingress.model import SemanticModality
+
         return _strict_schema(
             {
-                "modality": _identifier_schema(),
+                "modality": {"type": "string", "enum": [item.value for item in SemanticModality]},
+                "coverage_scope_ref": nullable_identifier,
                 "coverage_status": {"type": "string", "enum": [item.value for item in CoverageStatus]},
                 "reason": {
                     "anyOf": [

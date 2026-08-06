@@ -7,13 +7,17 @@ from pathlib import Path
 import pytest
 
 from behavior.claim import (
+    ClaimCompatibilityPolicy,
     ClaimNormalizationRouter,
+    ClaimNormalizerKind,
     ClaimNormalizerRegistry,
     ClaimPipelineService,
+    ClaimSemanticProposalBatch,
     DeterministicClaimNormalizer,
+    NormalizerFingerprint,
 )
-from behavior.config import BehaviorConfig
-from behavior.evidence import EvidenceService
+from behavior.config import BehaviorConfig, IngressConfig
+from behavior.evidence.service import EvidenceService
 from behavior.ingress import (
     BoundarySignal,
     ClockSyncStatus,
@@ -34,9 +38,12 @@ from behavior.ingress import (
     SemanticRecordService,
     SemanticSubjectRole,
 )
+from behavior.ingress.service import AcceptedSemanticIngress
 from behavior.owner import ConfirmedOwnerBinding
 from behavior.persistence.sqlite import SQLiteBehaviorEvidenceClaimStore
+from foundation.integrity import canonical_digest
 from foundation.observability import NullObserver
+from ModelClient import StructuredChatClient
 
 BASE_TIME = datetime(2026, 8, 5, 1, 2, 3, tzinfo=timezone.utc)
 
@@ -54,6 +61,31 @@ class FakeClock:
 
     def advance(self, seconds: float = 1.0) -> None:
         self.current += timedelta(seconds=seconds)
+
+
+class NoopModelNormalizer:
+    name = "model_text"
+    kind = ClaimNormalizerKind.MODEL
+    allowed_record_kinds = frozenset(
+        {SemanticRecordKind.FREE_TEXT_SEMANTIC, SemanticRecordKind.OWNER_UTTERANCE_SEGMENT}
+    )
+
+    def __init__(self) -> None:
+        self.model_client = object.__new__(StructuredChatClient)
+        self.compatibility_policy = ClaimCompatibilityPolicy()
+        self.fingerprint = NormalizerFingerprint(
+            self.name,
+            "noop-test-v3",
+            self.kind,
+            "test",
+            "noop",
+            "model",
+            "noop-v3",
+        )
+
+    async def normalize(self, record: OwnerScopedSemanticRecord) -> ClaimSemanticProposalBatch:
+        del record
+        return ClaimSemanticProposalBatch(True, ())
 
 
 @pytest.fixture
@@ -151,6 +183,41 @@ def accepted_decision(record: OwnerScopedSemanticRecord, *, decided_at: datetime
     )
 
 
+def accepted_ingress(
+    record: OwnerScopedSemanticRecord,
+    *,
+    decided_at: datetime = BASE_TIME,
+    ingress_config: IngressConfig | None = None,
+) -> AcceptedSemanticIngress:
+    capability = IngressAdapterCapability(
+        record.ingress_trust_class,
+        (record.semantic_input.record_kind,),
+        1,
+        owner_speaker_binding=record.ingress_trust_class is IngressTrustClass.OWNER_EXPLICIT,
+    )
+    registry = SemanticIngressAdapterRegistry()
+    adapter = FakeAdapter(
+        record.semantic_input,
+        name=record.producer_fingerprint.producer_name,
+        trust=record.ingress_trust_class,
+        allowed=(record.semantic_input.record_kind,),
+        owner_speaker_binding=record.ingress_trust_class is IngressTrustClass.OWNER_EXPLICIT,
+    )
+    adapter.fingerprint = record.producer_fingerprint
+    adapter.capabilities = capability
+    registry.register(adapter)
+    return AcceptedSemanticIngress(
+        record=record,
+        decision=accepted_decision(record, decided_at=decided_at),
+        adapter_name=adapter.name,
+        adapter_registry=registry,
+        adapter_fingerprint=record.producer_fingerprint.digest,
+        capability=capability,
+        capability_digest=capability.digest,
+        ingress_policy_digest=canonical_digest((ingress_config or IngressConfig()).__dict__),
+    )
+
+
 class FakeAdapter:
     def __init__(
         self,
@@ -212,9 +279,11 @@ def make_pipeline(
         config=config.evidence,
         observer=observer,
         clock=resolved_clock,
+        adapters=ingress.adapters,
     )
     normalizers = ClaimNormalizerRegistry()
     normalizers.register(DeterministicClaimNormalizer())
+    normalizers.register(NoopModelNormalizer())
     router = ClaimNormalizationRouter(normalizers, config=config.claim)
     return ClaimPipelineService(
         store,
@@ -232,7 +301,9 @@ __all__ = [
     "BASE_TIME",
     "FakeAdapter",
     "FakeClock",
+    "NoopModelNormalizer",
     "accepted_decision",
+    "accepted_ingress",
     "bind_record",
     "digest",
     "make_input",

@@ -25,9 +25,10 @@ from behavior.ingress.model import (
     IngressDecision,
     OwnerScopedSemanticRecord,
 )
-from foundation.integrity import canonical_digest
+from foundation.integrity import canonical_digest, canonical_json
 
-SEMANTIC_EVIDENCE_BUNDLE_SCHEMA_VERSION = "2"
+SEMANTIC_EVIDENCE_BUNDLE_SCHEMA_VERSION = "3"
+_MANIFEST_FIXED_OVERHEAD_BYTES = 4_096
 
 
 class EvidenceBundleState(str, Enum):
@@ -261,6 +262,9 @@ class SemanticEvidenceBundleAssembler:
                 current.clear()
 
         for record in ordered:
+            encoded_bytes = len(canonical_json(record.to_dict()).encode("utf-8"))
+            if encoded_bytes + _MANIFEST_FIXED_OVERHEAD_BYTES > self.config.max_manifest_encoded_bytes:
+                raise EvidenceBundleError("one semantic record cannot fit the Manifest byte boundary")
             duration = (record.semantic_input.event_time_end - record.semantic_input.event_time_start).total_seconds()
             if duration > self.config.max_bundle_duration_seconds:
                 raise EvidenceBundleError("one semantic record duration exceeds the Bundle boundary")
@@ -280,6 +284,13 @@ class SemanticEvidenceBundleAssembler:
                 elif (
                     sum(item.projection_chars for item in current) + record.projection_chars
                     > self.config.max_projection_chars_per_bundle
+                ):
+                    seal(EvidenceSealReason.MAX_PROJECTION_SIZE)
+                elif (
+                    sum(len(canonical_json(item.to_dict()).encode("utf-8")) for item in current)
+                    + encoded_bytes
+                    + _MANIFEST_FIXED_OVERHEAD_BYTES
+                    > self.config.max_manifest_encoded_bytes
                 ):
                     seal(EvidenceSealReason.MAX_PROJECTION_SIZE)
             current.append(record)

@@ -9,6 +9,7 @@ from ModelClient import (
     ChatClient,
     ChatModelConfig,
     ChatRequest,
+    ModelContentSafetyError,
     ModelResponse,
     ModelStructuredOutputError,
     PreparedChatRequest,
@@ -156,11 +157,23 @@ def test_structured_client_stops_after_bound_and_reports_validation_phase() -> N
         _structured(provider).complete_json("return data", schema=SCHEMA)
 
 
-@pytest.mark.parametrize("finish_reason", ["length", "content_filter", "safety"])
-def test_structured_client_rejects_truncated_or_safety_blocked_responses(finish_reason: str) -> None:
-    provider = QueueProvider([_response("{}", finish_reason=finish_reason)])
+def test_structured_client_rejects_truncated_response_as_schema_failure() -> None:
+    provider = QueueProvider([_response("{}", finish_reason="length")])
     with pytest.raises(ModelStructuredOutputError, match="response validation"):
         _structured(provider, retries=0).complete_json("return data", schema=SCHEMA)
+
+
+@pytest.mark.parametrize("finish_reason", ["content_filter", "safety"])
+def test_structured_client_classifies_safety_without_correction_retry(finish_reason: str) -> None:
+    provider = QueueProvider(
+        [
+            _response("sensitive-source-text", finish_reason=finish_reason),
+            _response('{"status":"ok","items":[]}'),
+        ]
+    )
+    with pytest.raises(ModelContentSafetyError):
+        _structured(provider, retries=1).complete_json("return data", schema=SCHEMA)
+    assert len(provider.requests) == 1
 
 
 def test_structured_async_path_uses_same_validation_and_retry_semantics() -> None:

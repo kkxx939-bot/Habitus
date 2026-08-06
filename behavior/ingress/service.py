@@ -17,9 +17,10 @@ from behavior.ingress.model import (
     SemanticRecordInputBatch,
 )
 from behavior.ingress.registry import SemanticIngressAdapterRegistry
-from behavior.ingress.trust import require_record_trust_compatibility
+from behavior.ingress.trust import IngressAdapterCapability, require_record_trust_compatibility
 from behavior.owner import ConfirmedOwnerBinding
 from behavior.persistence.contracts import BehaviorEvidenceClaimStore
+from foundation.integrity import canonical_digest
 
 
 @runtime_checkable
@@ -34,20 +35,63 @@ class SystemClock:
 
 @dataclass(frozen=True)
 class SemanticIngressPreparation:
-    record: OwnerScopedSemanticRecord | None
+    accepted: AcceptedSemanticIngress | None
     decision: IngressDecision
 
     def __post_init__(self) -> None:
-        if self.record is not None and not isinstance(self.record, OwnerScopedSemanticRecord):
-            raise TypeError("record must be OwnerScopedSemanticRecord or None")
+        if self.accepted is not None and not isinstance(self.accepted, AcceptedSemanticIngress):
+            raise TypeError("accepted must be AcceptedSemanticIngress or None")
         if not isinstance(self.decision, IngressDecision):
             raise TypeError("decision must be IngressDecision")
         rejected = self.decision.status not in {
             IngressDecisionStatus.ACCEPTED,
             IngressDecisionStatus.REPLAYED,
         }
-        if rejected != (self.record is None):
+        if rejected != (self.accepted is None):
             raise ValueError("rejected ingress preparations cannot carry a durable record")
+
+
+@dataclass(frozen=True)
+class AcceptedSemanticIngress:
+    record: OwnerScopedSemanticRecord
+    decision: IngressDecision
+    adapter_name: str
+    adapter_registry: SemanticIngressAdapterRegistry
+    adapter_fingerprint: str
+    capability: IngressAdapterCapability
+    capability_digest: str
+    ingress_policy_digest: str
+
+    def __post_init__(self) -> None:
+        from behavior._validation import sha256_digest
+
+        if not isinstance(self.record, OwnerScopedSemanticRecord) or not isinstance(self.decision, IngressDecision):
+            raise TypeError("accepted ingress requires a record and decision")
+        if self.decision.status is not IngressDecisionStatus.ACCEPTED:
+            raise ValueError("AcceptedSemanticIngress requires an ACCEPTED decision")
+        if self.decision.semantic_record_id != self.record.semantic_record_id:
+            raise ValueError("accepted ingress record and decision differ")
+        if not isinstance(self.adapter_registry, SemanticIngressAdapterRegistry):
+            raise TypeError("adapter_registry must be SemanticIngressAdapterRegistry")
+        adapter = self.adapter_registry.get(self.adapter_name)
+        if self.adapter_fingerprint != self.record.producer_fingerprint.digest:
+            raise ValueError("accepted ingress Adapter fingerprint differs from the semantic record")
+        if not isinstance(self.capability, IngressAdapterCapability):
+            raise TypeError("capability must be IngressAdapterCapability")
+        if (
+            self.capability.trust_class is not self.record.ingress_trust_class
+            or self.record.semantic_input.record_kind not in self.capability.allowed_record_kinds
+        ):
+            raise ValueError("accepted ingress capability differs from the semantic record")
+        for name in ("adapter_fingerprint", "capability_digest", "ingress_policy_digest"):
+            object.__setattr__(self, name, sha256_digest(getattr(self, name), name))
+        if self.capability_digest != self.capability.digest:
+            raise ValueError("accepted ingress capability digest mismatch")
+        if (
+            adapter.fingerprint.digest != self.adapter_fingerprint
+            or adapter.capabilities.digest != self.capability_digest
+        ):
+            raise ValueError("accepted ingress provenance differs from the registered Adapter")
 
 
 class SemanticRecordService:
@@ -124,7 +168,18 @@ class SemanticRecordService:
                 decided_at=self._now(),
             )
             if status is IngressDecisionStatus.ACCEPTED:
-                preparations.append(SemanticIngressPreparation(record, decision))
+                ingress_policy_digest = canonical_digest(self.config.__dict__)
+                accepted = AcceptedSemanticIngress(
+                    record,
+                    decision,
+                    adapter.name,
+                    self.adapters,
+                    adapter.fingerprint.digest,
+                    adapter.capabilities,
+                    adapter.capabilities.digest,
+                    ingress_policy_digest,
+                )
+                preparations.append(SemanticIngressPreparation(accepted, decision))
                 continue
             self.store.record_ingress_decision(decision, record=record)
             preparations.append(SemanticIngressPreparation(None, decision))
@@ -162,4 +217,9 @@ class SemanticRecordService:
             raise SemanticClockError("Clock returned a non-UTC-aware datetime") from exc
 
 
-__all__ = ["Clock", "SemanticIngressPreparation", "SemanticRecordService", "SystemClock"]
+__all__ = [
+    "Clock",
+    "SemanticIngressPreparation",
+    "SemanticRecordService",
+    "SystemClock",
+]

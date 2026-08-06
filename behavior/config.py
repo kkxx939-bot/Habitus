@@ -73,6 +73,7 @@ class EvidenceConfig:
     max_projection_chars_per_bundle: int = 65_536
     max_active_bundles: int = 1_024
     max_coverage_intervals: int = 256
+    max_manifest_encoded_bytes: int = 4_194_304
     max_query_limit: int = 500
 
     def __post_init__(self) -> None:
@@ -90,6 +91,12 @@ class EvidenceConfig:
             "max_query_limit",
         ):
             _bounded_int(f"evidence.{name}", getattr(self, name), 1, 1_000_000)
+        _bounded_int(
+            "evidence.max_manifest_encoded_bytes",
+            self.max_manifest_encoded_bytes,
+            1,
+            1_000_000_000,
+        )
         if self.max_gap_seconds > self.max_bundle_duration_seconds:
             raise ValueError("evidence.max_gap_seconds cannot exceed max_bundle_duration_seconds")
 
@@ -99,6 +106,7 @@ class ClaimConfig:
     max_claims_per_record: int = 16
     max_claims_per_batch: int = 64
     max_normalizers_per_processing: int = 1_024
+    max_claims_per_processing: int = 10_000
     max_model_input_chars: int = 49_152
     max_model_input_tokens: int = 16_384
     max_model_output_tokens: int = 4_096
@@ -114,9 +122,10 @@ class ClaimConfig:
 
     def __post_init__(self) -> None:
         for name, maximum in {
-            "max_claims_per_record": 64,
-            "max_claims_per_batch": 1_024,
+            "max_claims_per_record": 100_000,
+            "max_claims_per_batch": 100_000,
             "max_normalizers_per_processing": 100_000,
+            "max_claims_per_processing": 100_000,
             "max_alternative_group_size": 64,
         }.items():
             _bounded_int(f"claim.{name}", getattr(self, name), 1, maximum)
@@ -155,11 +164,12 @@ class StoreConfig:
     max_ingress_decisions: int = 1_000_000
     max_active_bundles: int = 1_024
     max_manifests: int = 250_000
-    max_normalizer_runs: int = 1_000_000
+    max_normalizer_attempts: int = 1_000_000
     max_claim_batches: int = 1_000_000
-    max_claims: int = 1_000_000
+    max_validated_claims: int = 1_000_000
+    max_accepted_claims: int = 1_000_000
     max_admission_decisions: int = 1_000_000
-    max_receipts: int = 250_000
+    max_processing_receipts: int = 250_000
     max_database_bytes: int = 8_589_934_592
     max_query_limit: int = 500
 
@@ -171,11 +181,12 @@ class StoreConfig:
             "max_ingress_decisions",
             "max_active_bundles",
             "max_manifests",
-            "max_normalizer_runs",
+            "max_normalizer_attempts",
             "max_claim_batches",
-            "max_claims",
+            "max_validated_claims",
+            "max_accepted_claims",
             "max_admission_decisions",
-            "max_receipts",
+            "max_processing_receipts",
             "max_database_bytes",
             "max_query_limit",
         ):
@@ -214,10 +225,21 @@ class BehaviorConfig:
             > self.store.max_query_limit
         ):
             raise ValueError("domain query limits cannot exceed the Store query boundary")
-        if self.claim.max_claims_per_batch > self.store.max_claims:
+        if self.claim.max_claims_per_processing > self.store.max_validated_claims:
             raise ValueError("one Claim batch cannot exceed Store Claim capacity")
-        if self.store.max_claims > self.store.max_admission_decisions:
+        route_factor = 2 if self.claim.normalize_owner_utterances else 1
+        maximum_routes = self.evidence.max_records_per_bundle * route_factor
+        if self.claim.max_normalizers_per_processing < maximum_routes:
+            raise ValueError("Claim Normalizer capacity cannot process one maximum Evidence Bundle")
+        maximum_claims = maximum_routes * self.claim.max_claims_per_record
+        if self.claim.max_claims_per_processing < maximum_claims:
+            raise ValueError("Claim capacity cannot process one maximum Evidence Bundle")
+        if self.store.max_validated_claims > self.store.max_admission_decisions:
             raise ValueError("accepted Claim capacity cannot exceed AdmissionDecision capacity")
+        if self.store.max_accepted_claims > self.store.max_validated_claims:
+            raise ValueError("accepted Claim capacity cannot exceed validated Claim capacity")
+        if self.evidence.max_manifest_encoded_bytes > self.store.max_json_bytes:
+            raise ValueError("one EvidenceManifest cannot exceed the Store JSON boundary")
         if self.store.max_json_bytes > self.store.max_database_bytes:
             raise ValueError("one Store JSON value cannot exceed the database byte capacity")
 

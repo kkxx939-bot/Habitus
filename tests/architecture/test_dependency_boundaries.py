@@ -192,6 +192,7 @@ def test_behavior_old_ingress_window_and_producer_contracts_are_removed() -> Non
         "ClaimProducerRegistry",
         "OwnerRouteDecision",
         "OwnerRouteStatus",
+        "ClaimNormalizerRun",
     )
     violations = []
     for path in (REPOSITORY_ROOT / "behavior").rglob("*.py"):
@@ -249,3 +250,86 @@ def test_behavior_production_has_no_placeholder_or_suppression_escape_hatches() 
             if marker in source:
                 violations.append(f"{path.relative_to(REPOSITORY_ROOT)}: {marker}")
     assert violations == []
+
+
+def test_behavior_v3_claim_model_keeps_system_fields_out_of_model_contract() -> None:
+    proposal_source = (REPOSITORY_ROOT / "behavior" / "claim" / "proposal.py").read_text(
+        encoding="utf-8"
+    )
+    proposal_tree = ast.parse(proposal_source)
+    system_fields = {
+        "subject_role",
+        "actor_role",
+        "time_start",
+        "time_end",
+        "source_epistemic_class",
+        "derivation_class",
+        "semantic_record_id",
+        "manifest_id",
+        "claim_id",
+    }
+    proposal_fields = next(
+        node
+        for node in proposal_tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_PROPOSAL_FIELDS" for target in node.targets)
+    )
+    names = {
+        item.value
+        for item in ast.walk(proposal_fields)
+        if isinstance(item, ast.Constant) and isinstance(item.value, str)
+    }
+    assert names.isdisjoint(system_fields)
+    assert "ClaimConfig()" not in proposal_source
+
+
+def test_behavior_v3_batch_and_receipt_graph_are_processing_scoped() -> None:
+    model_source = (REPOSITORY_ROOT / "behavior" / "claim" / "model.py").read_text(encoding="utf-8")
+    sqlite_source = (REPOSITORY_ROOT / "behavior" / "persistence" / "sqlite.py").read_text(
+        encoding="utf-8"
+    )
+    model_tree = ast.parse(model_source)
+    claim = next(node for node in model_tree.body if isinstance(node, ast.ClassDef) and node.name == "Claim")
+    claim_fields = {
+        target.id
+        for node in claim.body
+        if isinstance(node, ast.AnnAssign) and isinstance((target := node.target), ast.Name)
+    }
+    assert "claim_batch_id" not in claim_fields
+    assert '"processing_identity": processing_identity' in model_source
+    assert "CREATE TABLE claim_batch_members" in sqlite_source
+    assert "PRIMARY KEY(claim_batch_id, claim_id)" in sqlite_source
+    assert "UNIQUE(claim_batch_id, member_order)" in sqlite_source
+
+
+def test_behavior_v3_model_client_and_receipt_rebuild_boundaries_are_mechanical() -> None:
+    normalizer_source = (REPOSITORY_ROOT / "behavior" / "claim" / "normalizer.py").read_text(
+        encoding="utf-8"
+    )
+    registry_source = (REPOSITORY_ROOT / "behavior" / "claim" / "registry.py").read_text(
+        encoding="utf-8"
+    )
+    runtime_source = (REPOSITORY_ROOT / "Runtime" / "components.py").read_text(encoding="utf-8")
+    service_source = (REPOSITORY_ROOT / "behavior" / "claim" / "service.py").read_text(
+        encoding="utf-8"
+    )
+    assert "def model_client(" in normalizer_source
+    assert "normalizer.model_client" in registry_source
+    assert "normalizer.model_client is not self.structured_chat" in runtime_source
+    assert "isinstance(normalizer, ModelClaimNormalizer)" not in runtime_source
+    result_method = service_source.split("def _result_from_receipt", 1)[1].split("@staticmethod", 1)[0]
+    assert "read_claims_by_ids" in result_method
+    assert "read_decisions_by_ids" in result_method
+    assert "read_attempts_by_ids" in result_method
+    assert "list_claims_by_processing" not in result_method
+
+
+def test_behavior_v3_content_safety_and_full_digest_code_paths_remain_distinct() -> None:
+    structured_source = (REPOSITORY_ROOT / "ModelClient" / "structured.py").read_text(encoding="utf-8")
+    behavior_sources = "\n".join(
+        path.read_text(encoding="utf-8") for path in (REPOSITORY_ROOT / "behavior").rglob("*.py")
+    )
+    assert 'finish_reason in {"content_filter", "safety"}' in structured_source
+    assert "raise ModelContentSafetyError" in structured_source
+    assert "content_digest=semantic_digest" not in behavior_sources
+    assert "content_digest = semantic_digest" not in behavior_sources

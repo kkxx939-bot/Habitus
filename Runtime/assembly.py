@@ -6,13 +6,14 @@ import asyncio
 from collections.abc import Mapping
 
 from behavior.claim import (
+    ClaimBindingPolicy,
     ClaimNormalizationRouter,
     ClaimNormalizerRegistry,
     ClaimPipelineService,
     DeterministicClaimNormalizer,
     ModelClaimNormalizer,
 )
-from behavior.evidence import EvidenceService
+from behavior.evidence.service import EvidenceService
 from behavior.ingress import SemanticIngressAdapterRegistry, SemanticRecordService
 from behavior.persistence.sqlite import SQLiteBehaviorEvidenceClaimStore
 from Config import M2BOSConfig
@@ -98,6 +99,7 @@ def build_runtime(
     providers: ProviderFactory | None = None,
     vector_stores: VectorStoreFactory | None = None,
     conversation_adapters: ConversationAdapterRegistry | None = None,
+    behavior_adapters: SemanticIngressAdapterRegistry | None = None,
     path_lock: PathLock | None = None,
     observer: Observer | None = None,
 ) -> Runtime:
@@ -113,6 +115,10 @@ def build_runtime(
         conversation_adapters, ConversationAdapterRegistry
     ):
         raise TypeError("conversation_adapters must be ConversationAdapterRegistry or None")
+    if behavior_adapters is not None and not isinstance(
+        behavior_adapters, SemanticIngressAdapterRegistry
+    ):
+        raise TypeError("behavior_adapters must be SemanticIngressAdapterRegistry or None")
     if path_lock is not None and not isinstance(path_lock, PathLock):
         raise TypeError("path_lock must be PathLock or None")
     if observer is not None and not callable(getattr(observer, "record", None)):
@@ -247,23 +253,26 @@ def build_runtime(
         config=config.behavior,
         initialize=False,
     )
-    behavior_adapters = SemanticIngressAdapterRegistry()
+    resolved_behavior_adapters = behavior_adapters or SemanticIngressAdapterRegistry()
     behavior_ingress_service = SemanticRecordService(
         behavior_store,
-        behavior_adapters,
+        resolved_behavior_adapters,
         config=config.behavior.ingress,
     )
     behavior_evidence_service = EvidenceService(
         behavior_store,
         config=config.behavior.evidence,
         observer=operation_observer,
+        adapters=resolved_behavior_adapters,
     )
     behavior_normalizers = ClaimNormalizerRegistry()
+    behavior_binding_policy = ClaimBindingPolicy()
     behavior_normalizers.register(DeterministicClaimNormalizer())
     behavior_normalizers.register(
         ModelClaimNormalizer(
             structured_chat,
             config=config.behavior.claim,
+            compatibility_policy=behavior_binding_policy.compatibility,
         )
     )
     behavior_router = ClaimNormalizationRouter(
@@ -278,6 +287,7 @@ def build_runtime(
         behavior_router,
         config=config.behavior.claim,
         observer=operation_observer,
+        binding_policy=behavior_binding_policy,
     )
     extraction_loop = MemoryExtractionLoop(
         client=structured_chat,
@@ -554,6 +564,7 @@ def build_runtime(
         ),
         behavior=RuntimeBehavior(
             store=behavior_store,
+            adapters=resolved_behavior_adapters,
             ingress_service=behavior_ingress_service,
             evidence_service=behavior_evidence_service,
             claim_normalizers=behavior_normalizers,

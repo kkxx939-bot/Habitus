@@ -1,18 +1,13 @@
-"""Claim 规范化、系统绑定、准入与发布公共边界。"""
+"""Stable Claim normalization and processing contracts."""
 
-from behavior.claim.admission import (
-    ClaimAdmissionDecision,
-    ClaimAdmissionPolicy,
-    ClaimAdmissionStatus,
-    StaticAdmissionResult,
-)
+from behavior.claim.admission import ClaimAdmissionDecision, ClaimAdmissionPolicy, ClaimAdmissionStatus
 from behavior.claim.binder import ClaimBinder
 from behavior.claim.confidence import ClaimConfidencePolicy
 from behavior.claim.model import (
     Claim,
     ClaimBatch,
-    ClaimNormalizerRun,
-    ClaimNormalizerRunStatus,
+    ClaimNormalizerAttempt,
+    ClaimNormalizerAttemptStatus,
     ClaimProcessingReceipt,
     EpistemicClass,
 )
@@ -23,12 +18,28 @@ from behavior.claim.normalizer import (
     ModelClaimNormalizer,
     NormalizerFingerprint,
 )
-from behavior.claim.proposal import ClaimKind, ClaimSemanticProposal, ClaimSemanticProposalBatch
+from behavior.claim.policy import (
+    ClaimBindingPolicy,
+    ClaimCompatibilityPolicy,
+    ClaimDerivationClass,
+    ClaimNormalizerRequirement,
+    ClaimProcessingLane,
+)
+from behavior.claim.proposal import (
+    ClaimKind,
+    ClaimSemanticProposal,
+    ClaimSemanticProposalBatch,
+    ClaimSemanticProposalBatchContract,
+    ClaimSemanticProposalContract,
+)
 from behavior.claim.registry import ClaimNormalizerRegistry
-from behavior.claim.router import ClaimNormalizationRouter
+from behavior.claim.router import ClaimNormalizationPlan, ClaimNormalizationRoute, ClaimNormalizationRouter
 from behavior.claim.service import (
+    ClaimLaneProcessingResult,
     ClaimPipelineService,
-    ClaimProcessingResult,
+    ClaimProcessingDegradation,
+    ManifestClaimProcessingResult,
+    ManifestClaimProcessingStatus,
     SemanticPipelineIngestResult,
 )
 
@@ -38,24 +49,35 @@ __all__ = [
     "ClaimAdmissionPolicy",
     "ClaimAdmissionStatus",
     "ClaimBatch",
+    "ClaimBindingPolicy",
     "ClaimBinder",
+    "ClaimCompatibilityPolicy",
     "ClaimConfidencePolicy",
+    "ClaimDerivationClass",
     "ClaimKind",
+    "ClaimLaneProcessingResult",
+    "ClaimNormalizationPlan",
+    "ClaimNormalizationRoute",
     "ClaimNormalizationRouter",
     "ClaimNormalizer",
+    "ClaimNormalizerAttempt",
+    "ClaimNormalizerAttemptStatus",
     "ClaimNormalizerKind",
     "ClaimNormalizerRegistry",
-    "ClaimNormalizerRun",
-    "ClaimNormalizerRunStatus",
+    "ClaimNormalizerRequirement",
     "ClaimPipelineService",
+    "ClaimProcessingDegradation",
+    "ClaimProcessingLane",
     "ClaimProcessingReceipt",
-    "ClaimProcessingResult",
     "ClaimSemanticProposal",
     "ClaimSemanticProposalBatch",
+    "ClaimSemanticProposalBatchContract",
+    "ClaimSemanticProposalContract",
     "DeterministicClaimNormalizer",
     "EpistemicClass",
+    "ManifestClaimProcessingResult",
+    "ManifestClaimProcessingStatus",
     "ModelClaimNormalizer",
     "NormalizerFingerprint",
     "SemanticPipelineIngestResult",
-    "StaticAdmissionResult",
 ]

@@ -417,11 +417,13 @@ behavior:
     max_projection_chars_per_bundle: 65536
     max_active_bundles: 1024
     max_coverage_intervals: 256
+    max_manifest_encoded_bytes: 4194304
     max_query_limit: 500
   claim:
     max_claims_per_record: 16
     max_claims_per_batch: 64
     max_normalizers_per_processing: 1024
+    max_claims_per_processing: 10000
     max_model_input_chars: 49152
     max_model_input_tokens: 16384
     max_model_output_tokens: 4096
@@ -441,11 +443,12 @@ behavior:
     max_ingress_decisions: 1000000
     max_active_bundles: 1024
     max_manifests: 250000
-    max_normalizer_runs: 1000000
+    max_normalizer_attempts: 1000000
     max_claim_batches: 1000000
-    max_claims: 1000000
+    max_validated_claims: 1000000
+    max_accepted_claims: 1000000
     max_admission_decisions: 1000000
-    max_receipts: 250000
+    max_processing_receipts: 250000
     max_database_bytes: 8589934592
     max_query_limit: 500
 

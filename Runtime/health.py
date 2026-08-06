@@ -170,14 +170,20 @@ class RuntimeHealthService:
         ready, detail = self.components.behavior.store.readiness()
         if ready:
             try:
-                snapshot = self.components.behavior.store.health_snapshot()
+                snapshot = self.components.behavior.store.health_snapshot(
+                    admission_policy_digest=self.components.behavior.claim_pipeline.admission.digest
+                )
                 detail = ";".join(
                     (
                         f"schema={snapshot['schema_version']}",
                         f"semantic_records={snapshot['semantic_record_count']}",
                         f"active_bundles={snapshot['active_bundle_count']}",
                         f"manifests={snapshot['manifest_count']}",
-                        f"claims={snapshot['claim_count']}",
+                        f"validated_claims={snapshot['validated_claim_count']}",
+                        f"accepted_claims={snapshot['current_policy_accepted_claim_count']}",
+                        f"admission_decisions={snapshot['admission_decision_count']}",
+                        f"normalizer_attempts={snapshot['normalizer_attempt_count']}",
+                        f"processing_receipts={snapshot['processing_receipt_count']}",
                         f"database_size_warning={str(snapshot['database_size_warning']).lower()}",
                     )
                 )

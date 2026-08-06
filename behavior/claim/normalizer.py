@@ -8,10 +8,12 @@ from typing import Protocol, runtime_checkable
 
 from behavior._validation import identifier, sha256_digest
 from behavior.claim.model import CLAIM_SCHEMA_VERSION
+from behavior.claim.policy import ClaimCompatibilityPolicy
 from behavior.claim.proposal import (
     ClaimKind,
     ClaimSemanticProposal,
     ClaimSemanticProposalBatch,
+    ClaimSemanticProposalBatchContract,
 )
 from behavior.config import ClaimConfig
 from behavior.errors import (
@@ -60,7 +62,7 @@ from ModelClient import (
     estimate_text_tokens,
 )
 
-NORMALIZER_FINGERPRINT_SCHEMA_VERSION = "2"
+NORMALIZER_FINGERPRINT_SCHEMA_VERSION = "3"
 
 
 class ClaimNormalizerKind(str, Enum):
@@ -164,6 +166,10 @@ class ClaimNormalizer(Protocol):
     kind: ClaimNormalizerKind
     fingerprint: NormalizerFingerprint
     allowed_record_kinds: frozenset[SemanticRecordKind]
+    @property
+    def compatibility_policy(self) -> ClaimCompatibilityPolicy | None: ...
+    @property
+    def model_client(self) -> StructuredChatClient | None: ...
 
     async def normalize(self, record: OwnerScopedSemanticRecord) -> ClaimSemanticProposalBatch: ...
 
@@ -171,11 +177,13 @@ class ClaimNormalizer(Protocol):
 class DeterministicClaimNormalizer:
     name = "deterministic"
     kind = ClaimNormalizerKind.DETERMINISTIC
+    model_client: StructuredChatClient | None = None
+    compatibility_policy: ClaimCompatibilityPolicy | None = None
     allowed_record_kinds: frozenset[SemanticRecordKind] = frozenset(
         item for item in SemanticRecordKind if item is not SemanticRecordKind.FREE_TEXT_SEMANTIC
     )
 
-    def __init__(self, *, version: str = "2") -> None:
+    def __init__(self, *, version: str = "3") -> None:
         self.fingerprint = NormalizerFingerprint(
             self.name,
             version,
@@ -263,7 +271,7 @@ class DeterministicClaimNormalizer:
             location_ref=record.semantic_input.location_ref,
             semantic_payload=payload.to_dict(),
             human_summary=f"Normalized {kind.value.casefold()} semantic record",
-            alternative_group_id=None,
+            local_alternative_group_id=None,
             normalizer_confidence=1.0,
         )
         return ClaimSemanticProposalBatch(False, (proposal,))
@@ -284,15 +292,19 @@ class ModelClaimNormalizer:
         client: StructuredChatClient,
         *,
         config: ClaimConfig,
-        version: str = "2",
-        prompt_version: str = "semantic_claim_normalization_v2",
+        compatibility_policy: ClaimCompatibilityPolicy | None = None,
+        version: str = "3",
+        prompt_version: str = "semantic_claim_normalization_v3",
     ) -> None:
         if not isinstance(client, StructuredChatClient):
             raise TypeError("client must be StructuredChatClient")
         if not isinstance(config, ClaimConfig):
             raise TypeError("config must be ClaimConfig")
-        self.client = client
+        self._model_client = client
         self.config = config
+        self.compatibility_policy = compatibility_policy or ClaimCompatibilityPolicy()
+        if not isinstance(self.compatibility_policy, ClaimCompatibilityPolicy):
+            raise TypeError("compatibility_policy must be ClaimCompatibilityPolicy")
         route = client.client.config.route
         self.fingerprint = NormalizerFingerprint(
             self.name,
@@ -303,6 +315,10 @@ class ModelClaimNormalizer:
             route.model,
             prompt_version,
         )
+
+    @property
+    def model_client(self) -> StructuredChatClient:
+        return self._model_client
 
     async def normalize(self, record: OwnerScopedSemanticRecord) -> ClaimSemanticProposalBatch:
         if not isinstance(record, OwnerScopedSemanticRecord):
@@ -342,14 +358,27 @@ class ModelClaimNormalizer:
             prompt_version=self.fingerprint.prompt_version,
             metadata={
                 "component": "behavior_claim_normalizer",
-                "semantic_record_digest": record.canonical_digest,
+                "semantic_record_digest": record.semantic_digest,
             },
             input_token_limit=self.config.max_model_input_tokens,
         )
         try:
-            response = await self.client.complete_model_async(
+            allowed_claim_kinds = self.compatibility_policy.allowed_model_kinds(
+                record.semantic_input.record_kind,
+                record.semantic_input.subject_role,
+                record.semantic_input.actor_role,
+            )
+            response = await self.model_client.complete_json_async(
                 request,
-                model_class=ClaimSemanticProposalBatch,
+                schema=ClaimSemanticProposalBatchContract.model_json_schema(
+                    self.config,
+                    allowed_claim_kinds,
+                ),
+                validator=lambda value: ClaimSemanticProposalBatchContract.model_validate(
+                    value,
+                    self.config,
+                    allowed_claim_kinds,
+                ),
                 name="behavior_claim_semantic_proposal_batch",
                 context=context,
             )
@@ -374,12 +403,14 @@ class ModelClaimNormalizer:
         except (TypeError, ValueError) as exc:
             raise ClaimModelSchemaError("Model Normalizer output failed domain validation") from exc
         batch = response.value
+        if not isinstance(batch, ClaimSemanticProposalBatch):
+            raise ClaimModelSchemaError("Model Normalizer output did not satisfy the proposal contract")
         if len(batch.claims) > self.config.max_claims_per_record:
             raise ClaimModelSchemaError("Model Normalizer emitted too many proposals for one record")
         groups: dict[str, int] = {}
         for proposal in batch.claims:
-            if proposal.alternative_group_id is not None:
-                groups[proposal.alternative_group_id] = groups.get(proposal.alternative_group_id, 0) + 1
+            if proposal.local_alternative_group_id is not None:
+                groups[proposal.local_alternative_group_id] = groups.get(proposal.local_alternative_group_id, 0) + 1
         if groups and max(groups.values()) > self.config.max_alternative_group_size:
             raise ClaimModelSchemaError("Model alternative group exceeds its configured boundary")
         return batch

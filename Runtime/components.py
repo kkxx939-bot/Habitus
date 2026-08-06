@@ -8,12 +8,12 @@ from typing import cast
 
 from behavior.claim import (
     ClaimNormalizationRouter,
+    ClaimNormalizerKind,
     ClaimNormalizerRegistry,
     ClaimPipelineService,
-    ModelClaimNormalizer,
 )
-from behavior.evidence import EvidenceService
-from behavior.ingress import SemanticRecordService
+from behavior.evidence.service import EvidenceService
+from behavior.ingress import SemanticIngressAdapterRegistry, SemanticRecordService
 from behavior.persistence.sqlite import SQLiteBehaviorEvidenceClaimStore
 from foundation.observability import MetricRegistry, Observer
 from infrastructure.observability import ManagedObservability
@@ -145,6 +145,7 @@ class RuntimeBehavior:
     """Evidence & Claim Layer 的单 Store、单模型客户端组合结果。"""
 
     store: SQLiteBehaviorEvidenceClaimStore
+    adapters: SemanticIngressAdapterRegistry
     ingress_service: SemanticRecordService
     evidence_service: EvidenceService
     claim_normalizers: ClaimNormalizerRegistry
@@ -155,6 +156,8 @@ class RuntimeBehavior:
     def __post_init__(self) -> None:
         if not isinstance(self.store, SQLiteBehaviorEvidenceClaimStore):
             raise TypeError("store must be SQLiteBehaviorEvidenceClaimStore")
+        if not isinstance(self.adapters, SemanticIngressAdapterRegistry):
+            raise TypeError("adapters must be SemanticIngressAdapterRegistry")
         if not isinstance(self.ingress_service, SemanticRecordService):
             raise TypeError("ingress_service must be SemanticRecordService")
         if not isinstance(self.evidence_service, EvidenceService):
@@ -169,8 +172,12 @@ class RuntimeBehavior:
             raise TypeError("structured_chat must be StructuredChatClient")
         if self.ingress_service.store is not self.store:
             raise ValueError("Behavior ingress service must use the shared Store")
+        if self.ingress_service.adapters is not self.adapters:
+            raise ValueError("Behavior ingress service must use the injected Adapter Registry")
         if self.evidence_service.store is not self.store:
             raise ValueError("Behavior evidence service must use the shared Store")
+        if self.evidence_service.adapters is not self.adapters:
+            raise ValueError("Behavior evidence service must use the injected Adapter Registry")
         if self.claim_pipeline.store is not self.store:
             raise ValueError("Behavior Claim pipeline must use the shared Store")
         if self.claim_pipeline.ingress_service is not self.ingress_service:
@@ -189,10 +196,15 @@ class RuntimeBehavior:
             raise ValueError("Behavior evidence service must use the Store evidence configuration")
         if self.claim_pipeline.config != self.store.config.claim:
             raise ValueError("Behavior Claim pipeline must use the Store Claim configuration")
+        if self.claim_router.config != self.store.config.claim:
+            raise ValueError("Behavior Claim router must use the Store Claim configuration")
         for name in self.claim_normalizers.names():
             normalizer = self.claim_normalizers.get(name)
-            if isinstance(normalizer, ModelClaimNormalizer) and normalizer.client is not self.structured_chat:
+            if normalizer.kind is ClaimNormalizerKind.MODEL and normalizer.model_client is not self.structured_chat:
                 raise ValueError("Behavior model Normalizer must use the shared StructuredChatClient")
+            normalizer_config = getattr(normalizer, "config", self.store.config.claim)
+            if normalizer_config != self.store.config.claim:
+                raise ValueError("Behavior Claim Normalizer must use the Store Claim configuration")
 
 
 @dataclass(frozen=True)

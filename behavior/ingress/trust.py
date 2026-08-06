@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from behavior._validation import identifier, positive_int, sha256_digest
 from behavior.errors import SemanticIngressError
 from foundation.integrity import canonical_digest
+
+if TYPE_CHECKING:
+    from behavior.ingress.model import SemanticRecordKind
 
 PRODUCER_FINGERPRINT_SCHEMA_VERSION = "2"
 
@@ -107,7 +111,7 @@ class ProducerFingerprint:
 @dataclass(frozen=True)
 class IngressAdapterCapability:
     trust_class: IngressTrustClass
-    allowed_record_kinds: tuple[object, ...]
+    allowed_record_kinds: tuple[SemanticRecordKind, ...]
     maximum_batch_size: int
     owner_speaker_binding: bool = False
 
@@ -126,6 +130,17 @@ class IngressAdapterCapability:
             raise SemanticIngressError("OWNER_EXPLICIT capability requires confirmed Owner speaker binding")
         for kind in kinds:
             require_record_trust_compatibility(kind, self.trust_class)
+
+    @property
+    def digest(self) -> str:
+        return canonical_digest(
+            {
+                "trust_class": self.trust_class.value,
+                "allowed_record_kinds": tuple(item.value for item in self.allowed_record_kinds),
+                "maximum_batch_size": self.maximum_batch_size,
+                "owner_speaker_binding": self.owner_speaker_binding,
+            }
+        )
 
 
 _COMPATIBLE_TRUST: dict[str, frozenset[IngressTrustClass]] = {

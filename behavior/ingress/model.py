@@ -32,7 +32,7 @@ from behavior.ingress.trust import (
 from behavior.owner import ConfirmedOwnerBinding
 from foundation.integrity import canonical_digest, canonical_json
 
-SEMANTIC_RECORD_SCHEMA_VERSION = "2"
+SEMANTIC_RECORD_SCHEMA_VERSION = "3"
 
 
 class SemanticRecordKind(str, Enum):
@@ -514,7 +514,8 @@ class OwnerScopedSemanticRecord:
     ingress_trust_class: IngressTrustClass
     ingested_at: datetime
     payload_digest: str
-    canonical_digest: str
+    semantic_digest: str
+    content_digest: str
     semantic_input: SemanticRecordInput
 
     def __init__(
@@ -555,8 +556,10 @@ class OwnerScopedSemanticRecord:
         object.__setattr__(self, "ingress_trust_class", trust)
         object.__setattr__(self, "ingested_at", timestamp)
         object.__setattr__(self, "payload_digest", semantic_input.payload_digest)
-        object.__setattr__(self, "canonical_digest", canonical_digest(stable_payload))
+        semantic_digest = canonical_digest(stable_payload)
+        object.__setattr__(self, "semantic_digest", semantic_digest)
         object.__setattr__(self, "semantic_input", semantic_input)
+        object.__setattr__(self, "content_digest", canonical_digest(self._content_payload()))
 
     @property
     def stable_sort_key(self) -> tuple[datetime, datetime, str, int, str]:
@@ -573,7 +576,7 @@ class OwnerScopedSemanticRecord:
     def projection_chars(self) -> int:
         return self.semantic_input.projection_chars
 
-    def to_dict(self) -> dict[str, object]:
+    def _content_payload(self) -> dict[str, object]:
         return {
             "semantic_record_id": self.semantic_record_id,
             "owner_binding": self.owner_binding.to_dict(),
@@ -582,9 +585,12 @@ class OwnerScopedSemanticRecord:
             "ingress_trust_class": self.ingress_trust_class.value,
             "ingested_at": utc_text(self.ingested_at),
             "payload_digest": self.payload_digest,
-            "canonical_digest": self.canonical_digest,
+            "semantic_digest": self.semantic_digest,
             "semantic_input": self.semantic_input.to_dict(),
         }
+
+    def to_dict(self) -> dict[str, object]:
+        return {**self._content_payload(), "content_digest": self.content_digest}
 
     @classmethod
     def from_dict(cls, value: object, *, config: IngressConfig | None = None) -> OwnerScopedSemanticRecord:
@@ -597,7 +603,8 @@ class OwnerScopedSemanticRecord:
                 "ingress_trust_class",
                 "ingested_at",
                 "payload_digest",
-                "canonical_digest",
+                "semantic_digest",
+                "content_digest",
                 "semantic_input",
             }
         )
@@ -615,10 +622,12 @@ class OwnerScopedSemanticRecord:
                 "semantic_record_id",
                 "owner_identity_digest",
                 "payload_digest",
-                "canonical_digest",
+                "semantic_digest",
             ):
                 if data[name] != getattr(result, name):
                     raise SemanticRecordError(f"{name} does not match deterministic content")
+            if data["content_digest"] != result.content_digest:
+                raise SemanticRecordError("content_digest does not cover the complete durable record")
             return result
         except (TypeError, ValueError) as exc:
             if isinstance(exc, SemanticRecordError):
@@ -638,6 +647,7 @@ class IngressDecision:
     source_sequence: int
     record_kind: SemanticRecordKind
     decided_at: datetime
+    decision_identity_digest: str
     content_digest: str
 
     def __init__(
@@ -665,7 +675,10 @@ class IngressDecision:
             "schema_version": SEMANTIC_RECORD_SCHEMA_VERSION,
         }
         digest = canonical_digest(stable)
-        object.__setattr__(self, "decision_id", "ingress_" + digest)
+        decision_id = "ingress_" + canonical_digest(
+            {"decision_identity_digest": digest, "decided_at": utc_text(timestamp)}
+        )
+        object.__setattr__(self, "decision_id", decision_id)
         object.__setattr__(self, "status", resolved_status)
         object.__setattr__(self, "reason_code", resolved_reason)
         object.__setattr__(self, "semantic_record_id", record.semantic_record_id)
@@ -675,9 +688,10 @@ class IngressDecision:
         object.__setattr__(self, "source_sequence", record.semantic_input.source_sequence)
         object.__setattr__(self, "record_kind", record.semantic_input.record_kind)
         object.__setattr__(self, "decided_at", timestamp)
-        object.__setattr__(self, "content_digest", digest)
+        object.__setattr__(self, "decision_identity_digest", digest)
+        object.__setattr__(self, "content_digest", canonical_digest(self._content_payload()))
 
-    def to_dict(self) -> dict[str, object]:
+    def _content_payload(self) -> dict[str, object]:
         return {
             "decision_id": self.decision_id,
             "status": self.status.value,
@@ -689,8 +703,11 @@ class IngressDecision:
             "source_sequence": self.source_sequence,
             "record_kind": self.record_kind.value,
             "decided_at": utc_text(self.decided_at),
-            "content_digest": self.content_digest,
+            "decision_identity_digest": self.decision_identity_digest,
         }
+
+    def to_dict(self) -> dict[str, object]:
+        return {**self._content_payload(), "content_digest": self.content_digest}
 
     @classmethod
     def from_dict(cls, value: object) -> IngressDecision:
@@ -706,6 +723,7 @@ class IngressDecision:
                 "source_sequence",
                 "record_kind",
                 "decided_at",
+                "decision_identity_digest",
                 "content_digest",
             }
         )
@@ -734,7 +752,14 @@ class IngressDecision:
             }
             digest = canonical_digest(stable)
             result = object.__new__(cls)
-            object.__setattr__(result, "decision_id", "ingress_" + digest)
+            object.__setattr__(
+                result,
+                "decision_id",
+                "ingress_"
+                + canonical_digest(
+                    {"decision_identity_digest": digest, "decided_at": utc_text(decided_at)}
+                ),
+            )
             object.__setattr__(result, "status", status)
             object.__setattr__(result, "reason_code", reason)
             object.__setattr__(result, "semantic_record_id", semantic_record_id)
@@ -744,8 +769,13 @@ class IngressDecision:
             object.__setattr__(result, "source_sequence", source_sequence)
             object.__setattr__(result, "record_kind", record_kind)
             object.__setattr__(result, "decided_at", decided_at)
-            object.__setattr__(result, "content_digest", digest)
-            if data["decision_id"] != result.decision_id or data["content_digest"] != result.content_digest:
+            object.__setattr__(result, "decision_identity_digest", digest)
+            object.__setattr__(result, "content_digest", canonical_digest(result._content_payload()))
+            if (
+                data["decision_id"] != result.decision_id
+                or data["decision_identity_digest"] != result.decision_identity_digest
+                or data["content_digest"] != result.content_digest
+            ):
                 raise SemanticRecordError("IngressDecision deterministic identity mismatch")
             return result
         except (TypeError, ValueError) as exc:
