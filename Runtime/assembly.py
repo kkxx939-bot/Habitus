@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 
 from behavior.claim import (
-    ClaimBindingPolicy,
-    ClaimNormalizationRouter,
+    BuiltinDeterministicClaimNormalizer,
+    ClaimBinder,
+    ClaimNormalizationPlanner,
+    ClaimNormalizationService,
     ClaimNormalizerRegistry,
-    ClaimPipelineService,
-    DeterministicClaimNormalizer,
-    ModelClaimNormalizer,
+    StructuredModelClaimNormalizer,
 )
-from behavior.evidence.service import EvidenceService
-from behavior.ingress import SemanticIngressAdapterRegistry, SemanticRecordService
-from behavior.persistence.sqlite import SQLiteBehaviorEvidenceClaimStore
+from behavior.evidence import BehaviorEvidenceIngressService, BehaviorSemanticAdapterRegistry
+from behavior.persistence import BehaviorDatabase, SQLiteBehaviorClaimLedger, SQLiteBehaviorEvidenceLedger
 from Config import M2BOSConfig
 from foundation.observability import CompositeObserver, MetricRegistry, Observer
 from infrastructure.observability import ManagedObservability
@@ -93,13 +93,87 @@ from Runtime.runtime import Runtime
 from Runtime.worker import MemoryWorker
 
 
+class _RuntimeProcessingLock:
+    """把耐久 PathLock 适配为可跨模型 await 持有并续约的异步处理租约。"""
+
+    def __init__(
+        self,
+        path_lock: PathLock,
+        *,
+        renewal_interval_seconds: float = 60.0,
+    ) -> None:
+        self.path_lock = path_lock
+        if renewal_interval_seconds <= 0:
+            raise ValueError("renewal_interval_seconds must be positive")
+        self.renewal_interval_seconds = renewal_interval_seconds
+
+    @asynccontextmanager
+    async def acquire(self, processing_identity: str) -> AsyncIterator[object]:
+        context = self.path_lock.acquire(
+            "behavior-processing:" + processing_identity,
+            ttl_seconds=300,
+            wait_timeout_seconds=30.0,
+            retry_delay_seconds=0.02,
+        )
+        guard = await asyncio.to_thread(context.__enter__)
+        owner_task = asyncio.current_task()
+        if owner_task is None:
+            await asyncio.to_thread(context.__exit__, None, None, None)
+            raise RuntimeError("Behavior processing lock requires an active asyncio Task")
+        renewal_error: BaseException | None = None
+
+        async def renew() -> None:
+            nonlocal renewal_error
+            try:
+                while True:
+                    await asyncio.sleep(self.renewal_interval_seconds)
+                    await asyncio.to_thread(guard.checkpoint)
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:
+                renewal_error = exc
+                owner_task.cancel()
+
+        renewal = asyncio.create_task(renew())
+        body_error: BaseException | None = None
+        try:
+            yield guard
+            if renewal_error is not None:
+                raise RuntimeError("Behavior processing lease renewal failed") from renewal_error
+        except asyncio.CancelledError as exc:
+            if renewal_error is not None:
+                lease_failure = RuntimeError("Behavior processing lease renewal failed")
+                body_error = lease_failure
+                raise lease_failure from renewal_error
+            body_error = exc
+            raise
+        except BaseException as exc:
+            body_error = exc
+            raise
+        finally:
+            renewal.cancel()
+            try:
+                await renewal
+            except BaseException as exc:
+                if not isinstance(exc, asyncio.CancelledError) and renewal_error is None:
+                    renewal_error = exc
+            try:
+                await asyncio.to_thread(context.__exit__, None, None, None)
+            except Exception as exc:
+                if body_error is None:
+                    raise
+                raise body_error from exc
+            if body_error is None and renewal_error is not None:
+                raise RuntimeError("Behavior processing lease renewal failed") from renewal_error
+
+
 def build_runtime(
     config: M2BOSConfig,
     *,
     providers: ProviderFactory | None = None,
     vector_stores: VectorStoreFactory | None = None,
     conversation_adapters: ConversationAdapterRegistry | None = None,
-    behavior_adapters: SemanticIngressAdapterRegistry | None = None,
+    behavior_adapters: BehaviorSemanticAdapterRegistry | None = None,
     path_lock: PathLock | None = None,
     observer: Observer | None = None,
 ) -> Runtime:
@@ -116,9 +190,9 @@ def build_runtime(
     ):
         raise TypeError("conversation_adapters must be ConversationAdapterRegistry or None")
     if behavior_adapters is not None and not isinstance(
-        behavior_adapters, SemanticIngressAdapterRegistry
+        behavior_adapters, BehaviorSemanticAdapterRegistry
     ):
-        raise TypeError("behavior_adapters must be SemanticIngressAdapterRegistry or None")
+        raise TypeError("behavior_adapters must be BehaviorSemanticAdapterRegistry or None")
     if path_lock is not None and not isinstance(path_lock, PathLock):
         raise TypeError("path_lock must be PathLock or None")
     if observer is not None and not callable(getattr(observer, "record", None)):
@@ -248,46 +322,42 @@ def build_runtime(
         allow_json_repair=model_config.structured_output.allow_json_repair,
         validation_retries=model_config.structured_output.validation_retries,
     )
-    behavior_store = SQLiteBehaviorEvidenceClaimStore(
+    behavior_database = BehaviorDatabase(
         config.behavior_root,
         config=config.behavior,
         initialize=False,
     )
-    resolved_behavior_adapters = behavior_adapters or SemanticIngressAdapterRegistry()
-    behavior_ingress_service = SemanticRecordService(
-        behavior_store,
+    behavior_evidence_ledger = SQLiteBehaviorEvidenceLedger(behavior_database)
+    behavior_claim_ledger = SQLiteBehaviorClaimLedger(behavior_database)
+    resolved_behavior_adapters = behavior_adapters or BehaviorSemanticAdapterRegistry()
+    behavior_ingress_service = BehaviorEvidenceIngressService(
+        behavior_evidence_ledger,
         resolved_behavior_adapters,
-        config=config.behavior.ingress,
-    )
-    behavior_evidence_service = EvidenceService(
-        behavior_store,
-        config=config.behavior.evidence,
+        config=config.behavior,
         observer=operation_observer,
-        adapters=resolved_behavior_adapters,
     )
     behavior_normalizers = ClaimNormalizerRegistry()
-    behavior_binding_policy = ClaimBindingPolicy()
-    behavior_normalizers.register(DeterministicClaimNormalizer())
+    behavior_normalizers.register(BuiltinDeterministicClaimNormalizer())
     behavior_normalizers.register(
-        ModelClaimNormalizer(
+        StructuredModelClaimNormalizer(
             structured_chat,
-            config=config.behavior.claim,
-            compatibility_policy=behavior_binding_policy.compatibility,
+            config=config.behavior.normalization,
         )
     )
-    behavior_router = ClaimNormalizationRouter(
+    behavior_planner = ClaimNormalizationPlanner(
         behavior_normalizers,
-        config=config.behavior.claim,
+        config.behavior.normalization,
     )
-    behavior_pipeline = ClaimPipelineService(
-        behavior_store,
-        behavior_ingress_service,
-        behavior_evidence_service,
+    behavior_binder = ClaimBinder(config=config.behavior.normalization)
+    behavior_processing_lock = _RuntimeProcessingLock(resolved_lock)
+    behavior_normalization = ClaimNormalizationService(
+        behavior_evidence_ledger,
+        behavior_claim_ledger,
         behavior_normalizers,
-        behavior_router,
-        config=config.behavior.claim,
+        behavior_planner,
+        behavior_binder,
+        behavior_processing_lock,
         observer=operation_observer,
-        binding_policy=behavior_binding_policy,
     )
     extraction_loop = MemoryExtractionLoop(
         client=structured_chat,
@@ -563,14 +633,16 @@ def build_runtime(
             lifecycle=memory_lifecycle,
         ),
         behavior=RuntimeBehavior(
-            store=behavior_store,
-            adapters=resolved_behavior_adapters,
-            ingress_service=behavior_ingress_service,
-            evidence_service=behavior_evidence_service,
+            database=behavior_database,
+            evidence_adapters=resolved_behavior_adapters,
+            evidence_ledger=behavior_evidence_ledger,
+            evidence_ingress=behavior_ingress_service,
+            claim_ledger=behavior_claim_ledger,
             claim_normalizers=behavior_normalizers,
-            claim_router=behavior_router,
-            claim_pipeline=behavior_pipeline,
+            claim_planner=behavior_planner,
+            claim_normalization=behavior_normalization,
             structured_chat=structured_chat,
+            processing_lock=behavior_processing_lock,
         ),
         workflow=RuntimeWorkflow(
             jobs=jobs,

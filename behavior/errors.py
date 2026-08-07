@@ -1,116 +1,120 @@
-"""Behavior 语义入口、证据与声明层的稳定错误分类。"""
+"""Behavior 第一层可预期错误的稳定分类。"""
 
 
 class BehaviorError(Exception):
-    """Behavior 第一层所有可预期领域错误的基类。"""
+    """Behavior 第一层错误基类。"""
 
 
-class BehaviorOwnerError(BehaviorError, ValueError):
-    """上游没有提供合法的单 Owner 绑定。"""
+class BehaviorEvidenceError(BehaviorError):
+    """Evidence 输入或耐久化错误。"""
 
 
-class BehaviorOwnerConflictError(BehaviorOwnerError):
-    """当前 Store 已经永久绑定到另一个 Owner 身份摘要。"""
+class BehaviorEvidenceSchemaError(BehaviorEvidenceError, ValueError):
+    """Evidence 输入不满足严格结构。"""
 
 
-class SemanticIngressError(BehaviorError, ValueError):
-    """语义入口协议、Adapter 或能力绑定不合法。"""
+class BehaviorEvidenceConflictError(BehaviorEvidenceError):
+    """相同输入身份对应不同内容。"""
 
 
-class SemanticRecordError(SemanticIngressError):
-    """Owner-scoped 语义记录不满足严格结构或容量边界。"""
+class BehaviorEvidenceCapacityError(BehaviorEvidenceError):
+    """Evidence 或 Receipt 容量耗尽。"""
 
 
-class SemanticRecordConflictError(SemanticRecordError):
-    """相同语义记录身份对应了不同的规范内容。"""
+class BehaviorEvidenceClockError(BehaviorEvidenceError):
+    """Evidence 事件时间不满足保守时间策略。"""
 
 
-class SemanticRecordLateError(SemanticRecordError):
-    """语义记录的可信事件时间已经越过提交 Watermark。"""
+class BehaviorAdapterError(BehaviorError):
+    """Adapter 注册、查找或执行失败。"""
 
 
-class SemanticClockError(SemanticRecordError):
-    """事件时间不满足注入 Clock 的保守边界。"""
+class BehaviorAdapterCapabilityError(BehaviorAdapterError, ValueError):
+    """Adapter 输出超出其已绑定能力。"""
 
 
-class EvidenceBundleError(BehaviorError, ValueError):
-    """语义证据 Bundle 无法按硬边界处理。"""
+class BehaviorClaimError(BehaviorError):
+    """Claim 结构或耐久化错误。"""
 
 
-class EvidenceBundleStateError(EvidenceBundleError):
-    """语义证据 Bundle 状态不允许当前操作。"""
+class BehaviorClaimSchemaError(BehaviorClaimError, ValueError):
+    """Claim 或 Proposal 不满足严格结构。"""
 
 
-class EvidenceManifestError(BehaviorError, ValueError):
-    """EvidenceManifest 不满足不可变规范。"""
+class ClaimCompatibilityError(BehaviorClaimSchemaError):
+    """Normalizer Proposal 与当前 Evidence 的兼容策略冲突。"""
 
 
-class ClaimSchemaError(BehaviorError, ValueError):
-    """Claim 语义提案、Claim 或批次不满足严格 Schema。"""
+class BehaviorClaimConflictError(BehaviorClaimError):
+    """相同 Claim 身份对应不同内容。"""
 
 
-class ClaimProductionError(BehaviorError):
-    """Claim Normalizer 调用或输出处理失败。"""
+class BehaviorClaimCapacityError(BehaviorClaimError):
+    """Claim、Attempt 或 Receipt 容量耗尽。"""
 
 
-class ClaimModelTransportError(ClaimProductionError):
+class ClaimNormalizationError(BehaviorClaimError):
+    """Claim 规范化失败。"""
+
+
+class ClaimNormalizationConflictError(ClaimNormalizationError):
+    """同一处理身份出现不一致发布。"""
+
+
+class ClaimModelTransportError(ClaimNormalizationError):
     """模型传输或限流失败。"""
 
 
-class ClaimModelSchemaError(ClaimProductionError):
-    """模型响应或结构化输出不合法。"""
+class ClaimModelSchemaError(ClaimNormalizationError):
+    """模型响应或结构化输出失败。"""
 
 
-class ClaimModelInputError(ClaimProductionError):
+class ClaimModelInputError(ClaimNormalizationError):
     """模型输入超过字符或 Token 边界。"""
 
 
-class ClaimModelAuthenticationError(ClaimProductionError):
+class ClaimModelContentSafetyError(ClaimNormalizationError):
+    """模型内容安全策略拒绝本次调用。"""
+
+
+class ClaimModelAuthenticationError(ClaimNormalizationError):
     """模型认证失败。"""
 
 
-class ClaimModelPermissionError(ClaimProductionError):
+class ClaimModelPermissionError(ClaimNormalizationError):
     """模型权限不足。"""
 
 
-class ClaimModelConfigurationError(ClaimProductionError):
+class ClaimModelConfigurationError(ClaimNormalizationError):
     """模型配置无效。"""
 
 
-class ClaimModelQuotaError(ClaimProductionError):
+class ClaimModelQuotaError(ClaimNormalizationError):
     """模型配额不足。"""
 
 
-class ClaimModelContentSafetyError(ClaimProductionError):
-    """模型内容安全策略拒绝本次规范化。"""
+class BehaviorStoreError(BehaviorError):
+    """Behavior SQLite 初始化、完整性或读写错误。"""
 
 
-class ClaimBindingError(BehaviorError, ValueError):
-    """语义提案无法忠实绑定当前 Manifest 和语义记录。"""
-
-
-class ClaimAdmissionError(BehaviorError, ValueError):
-    """Claim 准入过程无法形成确定性决定。"""
-
-
-class ClaimStoreError(BehaviorError):
-    """Behavior SQLite Store 初始化或读写失败。"""
-
-
-class ClaimStoreCapacityError(ClaimStoreError):
-    """Behavior Store 的显式容量边界已达到。"""
-
-
-class ClaimProcessingConflictError(ClaimStoreError):
-    """同一处理身份存在不同内容或不完整发布。"""
+class LegacyBehaviorStoreError(BehaviorStoreError):
+    """检测到不兼容的旧 Behavior 数据库。"""
 
 
 __all__ = [
+    "BehaviorAdapterCapabilityError",
+    "BehaviorAdapterError",
+    "BehaviorClaimCapacityError",
+    "BehaviorClaimConflictError",
+    "BehaviorClaimError",
+    "BehaviorClaimSchemaError",
     "BehaviorError",
-    "BehaviorOwnerConflictError",
-    "BehaviorOwnerError",
-    "ClaimAdmissionError",
-    "ClaimBindingError",
+    "BehaviorEvidenceCapacityError",
+    "BehaviorEvidenceClockError",
+    "BehaviorEvidenceConflictError",
+    "BehaviorEvidenceError",
+    "BehaviorEvidenceSchemaError",
+    "BehaviorStoreError",
     "ClaimModelAuthenticationError",
     "ClaimModelConfigurationError",
     "ClaimModelContentSafetyError",
@@ -119,17 +123,8 @@ __all__ = [
     "ClaimModelQuotaError",
     "ClaimModelSchemaError",
     "ClaimModelTransportError",
-    "ClaimProcessingConflictError",
-    "ClaimProductionError",
-    "ClaimSchemaError",
-    "ClaimStoreCapacityError",
-    "ClaimStoreError",
-    "EvidenceBundleError",
-    "EvidenceBundleStateError",
-    "EvidenceManifestError",
-    "SemanticClockError",
-    "SemanticIngressError",
-    "SemanticRecordConflictError",
-    "SemanticRecordError",
-    "SemanticRecordLateError",
+    "ClaimCompatibilityError",
+    "ClaimNormalizationConflictError",
+    "ClaimNormalizationError",
+    "LegacyBehaviorStoreError",
 ]

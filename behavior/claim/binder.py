@@ -1,145 +1,154 @@
-"""Bind one proposal to one immutable semantic record and its Manifest."""
+"""将 Proposal 的系统字段绑定到当前单条 Evidence。"""
 
 from __future__ import annotations
 
-from behavior.claim.confidence import ClaimConfidencePolicy
-from behavior.claim.model import Claim, EpistemicClass
-from behavior.claim.normalizer import ClaimNormalizerKind, NormalizerFingerprint
-from behavior.claim.policy import ClaimBindingPolicy, ClaimDerivationClass
-from behavior.claim.proposal import ClaimSemanticProposal, ClaimSemanticProposalContract
-from behavior.config import ClaimConfig
-from behavior.errors import ClaimBindingError
-from behavior.evidence.manifest import EvidenceManifest
-from behavior.ingress.model import OwnerScopedSemanticRecord
-from behavior.ingress.service import Clock, SystemClock
-from behavior.ingress.trust import IngressTrustClass
-from foundation.integrity import canonical_digest
+from dataclasses import dataclass, field
+from datetime import datetime
 
-_EPISTEMIC_MAP = {
-    IngressTrustClass.DIRECT_SYSTEM_LOG: EpistemicClass.DIRECT_SOURCE,
-    IngressTrustClass.DIRECT_DEVICE_FACT: EpistemicClass.DIRECT_SOURCE,
-    IngressTrustClass.OWNER_EXPLICIT: EpistemicClass.USER_EXPLICIT,
-    IngressTrustClass.SENSOR_INFERRED: EpistemicClass.SENSOR_INFERRED,
-    IngressTrustClass.MODEL_INFERRED: EpistemicClass.MODEL_INFERRED,
-    IngressTrustClass.MULTIMODAL_MODEL_INFERRED: EpistemicClass.MULTIMODAL_MODEL_INFERRED,
-}
+from behavior.claim.compatibility import ClaimCompatibilityPolicy
+from behavior.claim.confidence import ClaimConfidencePolicy
+from behavior.claim.model import BehaviorClaim, DerivationClass, source_epistemic_class
+from behavior.claim.normalizer import ClaimNormalizerKind
+from behavior.claim.proposal import ClaimSemanticProposal
+from behavior.config import ClaimNormalizationConfig
+from behavior.errors import BehaviorClaimSchemaError, ClaimCompatibilityError
+from behavior.evidence.record import BehaviorEvidenceRecord
+from behavior.evidence.trust import BehaviorSourceTrust
+from foundation.integrity import canonical_digest, canonical_json
+
+CLAIM_BINDING_POLICY_VERSION = "claim_binding_v1"
+ALTERNATIVE_GROUP_POLICY_VERSION = "claim_alternative_group_v1"
+
+@dataclass(frozen=True)
+class ClaimBindingPolicy:
+    version: str = CLAIM_BINDING_POLICY_VERSION
+    alternative_group_version: str = ALTERNATIVE_GROUP_POLICY_VERSION
+    digest: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        if self.version != CLAIM_BINDING_POLICY_VERSION:
+            raise ValueError("unsupported Claim binding policy version")
+        if self.alternative_group_version != ALTERNATIVE_GROUP_POLICY_VERSION:
+            raise ValueError("unsupported alternative group policy version")
+        object.__setattr__(
+            self,
+            "digest",
+            canonical_digest(
+                {
+                    "alternative_group_version": self.alternative_group_version,
+                    "source_epistemic_mapping": {
+                        trust.value: source_epistemic_class(trust).value
+                        for trust in BehaviorSourceTrust
+                    },
+                    "version": self.version,
+                }
+            ),
+        )
 
 
 class ClaimBinder:
     def __init__(
         self,
         *,
-        config: ClaimConfig,
-        confidence_policy: ClaimConfidencePolicy | None = None,
-        binding_policy: ClaimBindingPolicy | None = None,
-        clock: Clock | None = None,
+        config: ClaimNormalizationConfig,
+        compatibility: ClaimCompatibilityPolicy | None = None,
+        binding: ClaimBindingPolicy | None = None,
+        confidence: ClaimConfidencePolicy | None = None,
     ) -> None:
-        if not isinstance(config, ClaimConfig):
-            raise TypeError("config must be ClaimConfig")
+        if not isinstance(config, ClaimNormalizationConfig):
+            raise TypeError("config must be ClaimNormalizationConfig")
         self.config = config
-        self.confidence_policy = confidence_policy or ClaimConfidencePolicy()
-        self.binding_policy = binding_policy or ClaimBindingPolicy()
-        self.clock = clock or SystemClock()
-        if not isinstance(self.confidence_policy, ClaimConfidencePolicy):
-            raise TypeError("confidence_policy must be ClaimConfidencePolicy")
-        if not isinstance(self.binding_policy, ClaimBindingPolicy):
-            raise TypeError("binding_policy must be ClaimBindingPolicy")
-        if not isinstance(self.clock, Clock):
-            raise TypeError("clock must implement Clock")
+        self.compatibility = compatibility or ClaimCompatibilityPolicy()
+        self.binding = binding or ClaimBindingPolicy()
+        self.confidence = confidence or ClaimConfidencePolicy()
 
     def bind(
         self,
-        manifest: EvidenceManifest,
-        record: OwnerScopedSemanticRecord,
+        record: BehaviorEvidenceRecord,
         proposal: ClaimSemanticProposal,
-        normalizer_fingerprint: NormalizerFingerprint,
-    ) -> Claim:
-        if not isinstance(manifest, EvidenceManifest):
-            raise TypeError("manifest must be EvidenceManifest")
-        if not isinstance(record, OwnerScopedSemanticRecord):
-            raise TypeError("record must be OwnerScopedSemanticRecord")
-        if not isinstance(normalizer_fingerprint, NormalizerFingerprint):
-            raise TypeError("normalizer_fingerprint must be NormalizerFingerprint")
-        derivation = (
-            ClaimDerivationClass.DETERMINISTIC
-            if normalizer_fingerprint.normalizer_kind is ClaimNormalizerKind.DETERMINISTIC
-            else ClaimDerivationClass.MODEL
+        *,
+        normalizer_fingerprint: str,
+        normalizer_kind: ClaimNormalizerKind,
+        derivation_class: DerivationClass,
+        created_at: datetime,
+    ) -> BehaviorClaim:
+        if not isinstance(record, BehaviorEvidenceRecord):
+            raise TypeError("record must be BehaviorEvidenceRecord")
+        if not isinstance(proposal, ClaimSemanticProposal):
+            raise TypeError("proposal must be ClaimSemanticProposal")
+        kind = ClaimNormalizerKind(normalizer_kind)
+        derivation = DerivationClass(derivation_class)
+        expected_derivation = (
+            DerivationClass.DETERMINISTIC
+            if kind is ClaimNormalizerKind.DETERMINISTIC
+            else DerivationClass.MODEL
         )
-        allowed = (
-            frozenset({proposal.claim_kind})
-            if derivation is ClaimDerivationClass.DETERMINISTIC
-            else self.binding_policy.compatibility.allowed_model_kinds(
-                record.semantic_input.record_kind,
-                record.semantic_input.subject_role,
-                record.semantic_input.actor_role,
+        if derivation is not expected_derivation:
+            raise BehaviorClaimSchemaError(
+                "Normalizer kind and Claim derivation class disagree"
             )
-        )
-        proposal = ClaimSemanticProposalContract.model_validate(proposal.to_dict(), self.config, allowed)
-        if manifest.owner_identity_digest != record.owner_identity_digest:
-            raise ClaimBindingError("Manifest and semantic record Owner scope differ")
-        snapshot = next(
-            (item for item in manifest.ordered_record_snapshots if item.semantic_record_id == record.semantic_record_id),
-            None,
-        )
-        if snapshot is None or snapshot.semantic_record_digest != record.semantic_digest:
-            raise ClaimBindingError("semantic record is not bound to this Manifest")
-        compatibility = self.binding_policy.compatibility.evaluate(
-            record_kind=record.semantic_input.record_kind,
-            subject_role=record.semantic_input.subject_role,
-            actor_role=record.semantic_input.actor_role,
-            derivation_class=derivation,
+        compatibility = self.compatibility.evaluate(
+            record_kind=record.semantic_content.record_kind,
+            subject_role=record.semantic_content.subject_role,
+            actor_role=record.semantic_content.actor_role,
+            normalizer_kind=kind,
             claim_kind=proposal.claim_kind,
         )
         if not compatibility.allowed:
-            raise ClaimBindingError(compatibility.reason_code)
-        allowed_refs = set(record.semantic_input.object_refs) | set(record.semantic_input.entity_refs)
-        if not set(proposal.object_refs).issubset(allowed_refs):
-            raise ClaimBindingError("Proposal object_refs are outside the current semantic record")
-        if proposal.location_ref is not None and proposal.location_ref != record.semantic_input.location_ref:
-            raise ClaimBindingError("Proposal location_ref is outside the current semantic record")
-        if derivation is ClaimDerivationClass.DETERMINISTIC and proposal.normalizer_confidence != 1.0:
-            raise ClaimBindingError("deterministic Proposal confidence must be one")
-        effective = self.confidence_policy.effective(
-            source_confidence=record.semantic_input.source_confidence,
-            normalizer_confidence=proposal.normalizer_confidence,
+            raise ClaimCompatibilityError(
+                f"Claim compatibility rejected proposal: {compatibility.reason_code}"
+            )
+        if len(canonical_json(proposal.semantic_payload)) > self.config.max_semantic_payload_chars:
+            raise BehaviorClaimSchemaError("Claim semantic payload exceeds configured boundary")
+        if (
+            proposal.human_summary is not None
+            and len(proposal.human_summary) > self.config.max_human_summary_chars
+        ):
+            raise BehaviorClaimSchemaError("Claim human summary exceeds configured boundary")
+        effective = self.confidence.effective(
+            record.semantic_content.source_confidence,
+            proposal.normalizer_confidence,
             derivation_class=derivation,
         )
-        local_group = proposal.local_alternative_group_id
         alternative_key = (
             None
-            if local_group is None
+            if proposal.local_alternative_group_id is None
             else canonical_digest(
                 {
-                    "semantic_record_id": record.semantic_record_id,
-                    "normalizer_fingerprint": normalizer_fingerprint.digest,
-                    "local_alternative_group_id": local_group,
-                    "policy_version": self.binding_policy.alternative_group_policy_version,
+                    "evidence_record_id": record.evidence_record_id,
+                    "local_alternative_group_id": proposal.local_alternative_group_id,
+                    "normalizer_fingerprint": normalizer_fingerprint,
+                    "policy_version": self.binding.alternative_group_version,
                 }
             )
         )
-        return Claim.create(
-            owner_identity_digest=record.owner_identity_digest,
-            semantic_record_id=record.semantic_record_id,
-            semantic_record_digest=record.semantic_digest,
-            manifest_id=manifest.manifest_id,
-            manifest_digest=manifest.manifest_semantic_digest,
-            subject_role=record.semantic_input.subject_role,
-            actor_role=record.semantic_input.actor_role,
-            time_start=record.semantic_input.event_time_start,
-            time_end=record.semantic_input.event_time_end,
-            time_uncertainty_ms=record.semantic_input.event_time_uncertainty_ms,
-            source_epistemic_class=_EPISTEMIC_MAP[record.ingress_trust_class],
+        return BehaviorClaim(
+            evidence_record_id=record.evidence_record_id,
+            evidence_record_digest=record.content_digest,
+            subject_role=record.semantic_content.subject_role,
+            actor_role=record.semantic_content.actor_role,
+            time_start=record.semantic_content.event_time_start,
+            time_end=record.semantic_content.event_time_end,
+            time_uncertainty_ms=record.semantic_content.event_time_uncertainty_ms,
+            claim_kind=proposal.claim_kind,
+            semantic_family=proposal.semantic_family,
+            predicate=proposal.predicate,
+            activity=proposal.activity,
+            phase=proposal.phase,
+            semantic_payload=proposal.semantic_payload,
+            human_summary=proposal.human_summary,
+            source_epistemic_class=source_epistemic_class(record.source_trust),
             derivation_class=derivation,
-            source_confidence=record.semantic_input.source_confidence,
+            source_confidence=record.semantic_content.source_confidence,
             normalizer_confidence=proposal.normalizer_confidence,
             effective_confidence=effective,
-            confidence_policy_digest=self.confidence_policy.digest,
-            binding_policy_digest=self.binding_policy.digest,
-            normalizer_fingerprint=normalizer_fingerprint.digest,
-            proposal=proposal,
-            local_alternative_group_id=local_group,
+            local_alternative_group_id=proposal.local_alternative_group_id,
             alternative_group_key=alternative_key,
-            created_at=self.clock.now(),
+            normalizer_fingerprint=normalizer_fingerprint,
+            compatibility_policy_digest=self.compatibility.digest,
+            binding_policy_digest=self.binding.digest,
+            confidence_policy_digest=self.confidence.digest,
+            created_at=created_at,
         )
 
 

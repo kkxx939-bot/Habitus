@@ -60,7 +60,19 @@ m2bos-plugin = "integrations.local_service.plugin_cli:main"
 "share/m2bos/plugins/m2bos-memory-claude-code/scripts/shared" = ["plugins/m2bos-memory-claude-code/scripts/shared/*.mjs"]
 
 [tool.setuptools.packages.find]
-include = ["Config*", "Runtime*", "ModelClient*", "pre*", "memory*", "behavior*", "infrastructure*", "foundation*", "integrations*", "benchmark*"]
+where = ["."]
+include = [
+    "Config*",
+    "Runtime*",
+    "ModelClient*",
+    "pre*",
+    "memory*",
+    "behavior*",
+    "infrastructure*",
+    "foundation*",
+    "integrations*",
+    "benchmark*",
+]
 
 [tool.setuptools.package-data]
 "Config" = ["*.yaml"]

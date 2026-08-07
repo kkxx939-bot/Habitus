@@ -1,251 +1,164 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import pytest
 
-from behavior.claim import (
-    ClaimCompatibilityPolicy,
-    ClaimNormalizationRouter,
-    ClaimNormalizerKind,
-    ClaimNormalizerRegistry,
-    ClaimPipelineService,
-    ClaimSemanticProposalBatch,
-    DeterministicClaimNormalizer,
-    NormalizerFingerprint,
-)
-from behavior.config import BehaviorConfig, IngressConfig
-from behavior.evidence.service import EvidenceService
-from behavior.ingress import (
-    BoundarySignal,
-    ClockSyncStatus,
-    DeviceStatePayload,
-    IngressAdapterCapability,
-    IngressDecision,
-    IngressDecisionStatus,
-    IngressTrustClass,
-    OwnerScopedSemanticRecord,
+from behavior.claim import ClaimNormalizerKind, NormalizerFingerprint
+from behavior.config import BehaviorConfig
+from behavior.evidence import (
+    BehaviorAdapterCapability,
+    BehaviorModality,
+    BehaviorOriginKind,
+    BehaviorRecordKind,
+    BehaviorRole,
+    BehaviorSemanticInput,
+    BehaviorSourceDescriptor,
+    BehaviorSourceTrust,
+    BehaviorTimeMode,
     ProducerFingerprint,
-    RecordIntegrity,
-    SemanticActorRole,
-    SemanticIngressAdapterRegistry,
-    SemanticModality,
-    SemanticRecordInput,
-    SemanticRecordInputBatch,
-    SemanticRecordKind,
-    SemanticRecordService,
-    SemanticSubjectRole,
+    ProducerImplementationKind,
+    SourceEventRef,
+    StreamRef,
 )
-from behavior.ingress.service import AcceptedSemanticIngress
-from behavior.owner import ConfirmedOwnerBinding
-from behavior.persistence.sqlite import SQLiteBehaviorEvidenceClaimStore
-from foundation.integrity import canonical_digest
-from foundation.observability import NullObserver
-from ModelClient import StructuredChatClient
+from behavior.persistence import BehaviorDatabase, SQLiteBehaviorClaimLedger, SQLiteBehaviorEvidenceLedger
+from infrastructure.store.contracts import PathLock
+from infrastructure.store.sqlite import SQLiteLockStore, SQLiteLockStoreConfig
 
-BASE_TIME = datetime(2026, 8, 5, 1, 2, 3, tzinfo=timezone.utc)
+BASE_TIME = datetime(2026, 8, 6, 1, 2, 3, tzinfo=timezone.utc)
 
 
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+@dataclass
 class FakeClock:
-    def __init__(self, current: datetime = BASE_TIME) -> None:
-        self.current = current
+    value: datetime = BASE_TIME
 
     def now(self) -> datetime:
-        return self.current
-
-    def advance(self, seconds: float = 1.0) -> None:
-        self.current += timedelta(seconds=seconds)
-
-
-class NoopModelNormalizer:
-    name = "model_text"
-    kind = ClaimNormalizerKind.MODEL
-    allowed_record_kinds = frozenset(
-        {SemanticRecordKind.FREE_TEXT_SEMANTIC, SemanticRecordKind.OWNER_UTTERANCE_SEGMENT}
-    )
-
-    def __init__(self) -> None:
-        self.model_client = object.__new__(StructuredChatClient)
-        self.compatibility_policy = ClaimCompatibilityPolicy()
-        self.fingerprint = NormalizerFingerprint(
-            self.name,
-            "noop-test-v3",
-            self.kind,
-            "test",
-            "noop",
-            "model",
-            "noop-v3",
-        )
-
-    async def normalize(self, record: OwnerScopedSemanticRecord) -> ClaimSemanticProposalBatch:
-        del record
-        return ClaimSemanticProposalBatch(True, ())
-
-
-@pytest.fixture
-def clock() -> FakeClock:
-    return FakeClock()
-
-
-@pytest.fixture
-def owner() -> ConfirmedOwnerBinding:
-    return ConfirmedOwnerBinding(
-        "local-owner",
-        "owner-router-v2",
-        BASE_TIME,
-        digest("owner-evidence"),
-    )
-
-
-def make_input(
-    *,
-    sequence: int = 0,
-    offset_seconds: float = 0.0,
-    duration_seconds: float = 0.0,
-    kind: SemanticRecordKind = SemanticRecordKind.DEVICE_STATE,
-    payload: object | None = None,
-    subject_role: SemanticSubjectRole = SemanticSubjectRole.ENVIRONMENT,
-    actor_role: SemanticActorRole = SemanticActorRole.SYSTEM,
-    modality: SemanticModality = SemanticModality.DEVICE,
-    stream_id: str = "semantic-stream",
-    correlation_id: str = "correlation-main",
-    boundary_signal: BoundarySignal = BoundarySignal.CONTINUE,
-    clock_sync_status: ClockSyncStatus = ClockSyncStatus.SYNCHRONIZED,
-    uncertainty_ms: int = 0,
-    scene_ref: str | None = "scene-main",
-    upstream_subject_ref: str | None = None,
-    object_refs: tuple[str, ...] = (),
-    entity_refs: tuple[str, ...] = (),
-    location_ref: str | None = None,
-    evidence_refs: tuple[object, ...] = (),
-    source_confidence: float = 1.0,
-) -> SemanticRecordInput:
-    start = BASE_TIME + timedelta(seconds=offset_seconds)
-    return SemanticRecordInput(
-        stream_id=stream_id,
-        source_sequence=sequence,
-        record_kind=kind,
-        subject_role=subject_role,
-        actor_role=actor_role,
-        modality=modality,
-        event_time_start=start,
-        event_time_end=start + timedelta(seconds=duration_seconds),
-        event_time_uncertainty_ms=uncertainty_ms,
-        clock_domain="upstream-clock",
-        clock_sync_status=clock_sync_status,
-        correlation_id=correlation_id,
-        boundary_signal=boundary_signal,
-        scene_ref=scene_ref,
-        upstream_subject_ref=upstream_subject_ref,
-        object_refs=object_refs,
-        entity_refs=entity_refs,
-        location_ref=location_ref,
-        payload=payload or DeviceStatePayload("device-main", "power", "on"),
-        evidence_refs=evidence_refs,
-        source_confidence=source_confidence,
-        integrity=RecordIntegrity.COMPLETE,
-    )
-
-
-def producer_fingerprint(name: str = "fake-device") -> ProducerFingerprint:
-    return ProducerFingerprint(name, "2", "semantic-v2", "none", "none", "none", "2")
-
-
-def bind_record(
-    owner_binding: ConfirmedOwnerBinding,
-    semantic_input: SemanticRecordInput | None = None,
-    *,
-    trust: IngressTrustClass = IngressTrustClass.DIRECT_DEVICE_FACT,
-    ingested_at: datetime = BASE_TIME,
-    producer: ProducerFingerprint | None = None,
-) -> OwnerScopedSemanticRecord:
-    return OwnerScopedSemanticRecord(
-        semantic_input=semantic_input or make_input(),
-        owner_binding=owner_binding,
-        producer_fingerprint=producer or producer_fingerprint(),
-        ingress_trust_class=trust,
-        ingested_at=ingested_at,
-    )
-
-
-def accepted_decision(record: OwnerScopedSemanticRecord, *, decided_at: datetime = BASE_TIME) -> IngressDecision:
-    return IngressDecision(
-        status=IngressDecisionStatus.ACCEPTED,
-        reason_code="semantic_record_clock_accepted",
-        record=record,
-        decided_at=decided_at,
-    )
-
-
-def accepted_ingress(
-    record: OwnerScopedSemanticRecord,
-    *,
-    decided_at: datetime = BASE_TIME,
-    ingress_config: IngressConfig | None = None,
-) -> AcceptedSemanticIngress:
-    capability = IngressAdapterCapability(
-        record.ingress_trust_class,
-        (record.semantic_input.record_kind,),
-        1,
-        owner_speaker_binding=record.ingress_trust_class is IngressTrustClass.OWNER_EXPLICIT,
-    )
-    registry = SemanticIngressAdapterRegistry()
-    adapter = FakeAdapter(
-        record.semantic_input,
-        name=record.producer_fingerprint.producer_name,
-        trust=record.ingress_trust_class,
-        allowed=(record.semantic_input.record_kind,),
-        owner_speaker_binding=record.ingress_trust_class is IngressTrustClass.OWNER_EXPLICIT,
-    )
-    adapter.fingerprint = record.producer_fingerprint
-    adapter.capabilities = capability
-    registry.register(adapter)
-    return AcceptedSemanticIngress(
-        record=record,
-        decision=accepted_decision(record, decided_at=decided_at),
-        adapter_name=adapter.name,
-        adapter_registry=registry,
-        adapter_fingerprint=record.producer_fingerprint.digest,
-        capability=capability,
-        capability_digest=capability.digest,
-        ingress_policy_digest=canonical_digest((ingress_config or IngressConfig()).__dict__),
-    )
+        return self.value
 
 
 class FakeAdapter:
     def __init__(
         self,
-        records: SemanticRecordInput | SemanticRecordInputBatch,
+        result: BehaviorSemanticInput | object,
         *,
-        name: str = "fake_semantic",
-        trust: IngressTrustClass = IngressTrustClass.DIRECT_DEVICE_FACT,
-        allowed: tuple[SemanticRecordKind, ...] = (SemanticRecordKind.DEVICE_STATE,),
-        owner_speaker_binding: bool = False,
+        name: str = "fake_adapter",
+        trust: BehaviorSourceTrust = BehaviorSourceTrust.MODEL_INFERRED,
+        time_mode: BehaviorTimeMode = BehaviorTimeMode.BACKFILL,
+        origins: tuple[BehaviorOriginKind, ...] = (BehaviorOriginKind.DIRECT_PERCEPTION,),
+        kinds: tuple[BehaviorRecordKind, ...] = (BehaviorRecordKind.ACTIVITY_SEGMENT,),
+        modalities: tuple[BehaviorModality, ...] = (BehaviorModality.VISION,),
+        role_pairs: tuple[tuple[BehaviorRole, BehaviorRole | None], ...] = (
+            (BehaviorRole.USER, BehaviorRole.USER),
+        ),
+        maximum_batch_size: int = 32,
+        fingerprint: ProducerFingerprint | None = None,
     ) -> None:
         self.name = name
-        self.records = records
-        self.fingerprint = producer_fingerprint(name)
-        self.capabilities = IngressAdapterCapability(
-            trust,
-            allowed,
-            32,
-            owner_speaker_binding=owner_speaker_binding,
+        self.result = result
+        self.fingerprint = fingerprint or ProducerFingerprint(
+            producer_name=name,
+            producer_version="1",
+            pipeline_version="1",
+            output_schema_version="1",
+            implementation_kind=ProducerImplementationKind.ADAPTER,
+        )
+        self.capabilities = BehaviorAdapterCapability(
+            source_trust=trust,
+            time_mode=time_mode,
+            allowed_origin_kinds=origins,
+            allowed_record_kinds=kinds,
+            allowed_modalities=modalities,
+            allowed_role_pairs=role_pairs,
+            maximum_batch_size=maximum_batch_size,
         )
 
-    async def adapt(
-        self,
-        payload: object,
-        *,
-        owner_binding: ConfirmedOwnerBinding,
-    ) -> SemanticRecordInput | SemanticRecordInputBatch:
-        del payload, owner_binding
-        return self.records
+    async def adapt(self, payload: object):
+        del payload
+        return self.result
+
+
+def source_descriptor(
+    *,
+    event: str = "event-1",
+    stream: str = "stream-1",
+    generation: int = 0,
+    sequence: int = 1,
+    item_index: int = 0,
+    origin: BehaviorOriginKind = BehaviorOriginKind.DIRECT_PERCEPTION,
+    content_digest: str | None = None,
+) -> BehaviorSourceDescriptor:
+    return BehaviorSourceDescriptor(
+        source_event_ref=SourceEventRef("test", event),
+        stream_ref=StreamRef("test", stream, generation),
+        source_sequence=sequence,
+        source_item_index=item_index,
+        origin_kind=origin,
+        source_ref=None,
+        source_content_digest=content_digest or digest(event),
+        parent_source_event_refs=(),
+        correlation_refs=(),
+        causal_refs=(),
+        projection_ref=None,
+    )
+
+
+class SQLiteProcessingLock:
+    def __init__(self, tmp_path) -> None:
+        store = SQLiteLockStore(
+            tmp_path / "processing-locks.sqlite3",
+            config=SQLiteLockStoreConfig(),
+            initialize=True,
+        )
+        self.path_lock = PathLock(store)
+
+    @asynccontextmanager
+    async def acquire(self, processing_identity: str):
+        context = self.path_lock.acquire(
+            "behavior-processing:" + processing_identity,
+            ttl_seconds=30,
+            wait_timeout_seconds=5.0,
+        )
+        guard = await asyncio.to_thread(context.__enter__)
+        try:
+            yield guard
+        finally:
+            await asyncio.to_thread(context.__exit__, None, None, None)
+
+
+class FakeModelNormalizer:
+    kind = ClaimNormalizerKind.MODEL
+
+    def __init__(self, proposals=(), *, error: Exception | None = None, name: str = "fake_model") -> None:
+        self.name = name
+        self.proposals = proposals
+        self.error = error
+        self.calls = 0
+        self.fingerprint = NormalizerFingerprint(
+            normalizer_name=name,
+            normalizer_version="1",
+            pipeline_version="1",
+            output_schema_version="1",
+            kind=self.kind,
+            model_provider="test",
+            model_name="test-model",
+            prompt_version="1",
+        )
+
+    async def normalize(self, record):
+        del record
+        self.calls += 1
+        await asyncio.sleep(0)
+        if self.error is not None:
+            raise self.error
+        return tuple(self.proposals)
 
 
 @pytest.fixture
@@ -254,59 +167,10 @@ def behavior_config() -> BehaviorConfig:
 
 
 @pytest.fixture
-def store(tmp_path: Path, behavior_config: BehaviorConfig) -> SQLiteBehaviorEvidenceClaimStore:
-    result = SQLiteBehaviorEvidenceClaimStore(tmp_path / "behavior", config=behavior_config)
-    result.initialize()
-    return result
-
-
-def make_pipeline(
-    store: SQLiteBehaviorEvidenceClaimStore,
-    config: BehaviorConfig,
-    *,
-    clock: FakeClock | None = None,
-) -> ClaimPipelineService:
-    resolved_clock = clock or FakeClock()
-    observer = NullObserver()
-    ingress = SemanticRecordService(
-        store,
-        SemanticIngressAdapterRegistry(),
-        config=config.ingress,
-        clock=resolved_clock,
+def ledgers(tmp_path, behavior_config):
+    database = BehaviorDatabase(tmp_path / "behavior", config=behavior_config, initialize=True)
+    return (
+        database,
+        SQLiteBehaviorEvidenceLedger(database),
+        SQLiteBehaviorClaimLedger(database),
     )
-    evidence = EvidenceService(
-        store,
-        config=config.evidence,
-        observer=observer,
-        clock=resolved_clock,
-        adapters=ingress.adapters,
-    )
-    normalizers = ClaimNormalizerRegistry()
-    normalizers.register(DeterministicClaimNormalizer())
-    normalizers.register(NoopModelNormalizer())
-    router = ClaimNormalizationRouter(normalizers, config=config.claim)
-    return ClaimPipelineService(
-        store,
-        ingress,
-        evidence,
-        normalizers,
-        router,
-        config=config.claim,
-        observer=observer,
-        clock=resolved_clock,
-    )
-
-
-__all__ = [
-    "BASE_TIME",
-    "FakeAdapter",
-    "FakeClock",
-    "NoopModelNormalizer",
-    "accepted_decision",
-    "accepted_ingress",
-    "bind_record",
-    "digest",
-    "make_input",
-    "make_pipeline",
-    "producer_fingerprint",
-]

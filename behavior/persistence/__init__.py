@@ -1,5 +1,7 @@
-"""Behavior 耐久契约；SQLite 细节不从顶级包导出。"""
+"""Behavior SQLite 内部实现；不属于 behavior 顶层公共 API。"""
 
-from behavior.persistence.contracts import BehaviorEvidenceClaimStore
+from behavior.persistence.claim import SQLiteBehaviorClaimLedger
+from behavior.persistence.database import BehaviorDatabase
+from behavior.persistence.evidence import SQLiteBehaviorEvidenceLedger
 
-__all__ = ["BehaviorEvidenceClaimStore"]
+__all__ = ["BehaviorDatabase", "SQLiteBehaviorClaimLedger", "SQLiteBehaviorEvidenceLedger"]

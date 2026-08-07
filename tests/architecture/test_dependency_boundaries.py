@@ -147,8 +147,15 @@ def test_behavior_and_memory_keep_strict_peer_dependency_boundaries() -> None:
     assert integration_violations == []
 
 
-def test_behavior_has_no_internal_multi_owner_partition_model() -> None:
-    disallowed_partition_terms = ("user_id", "tenant_id", "account_id")
+def test_behavior_has_no_identity_partition_model() -> None:
+    disallowed_partition_terms = (
+        "owner_ref",
+        "owner_binding",
+        "owner_identity",
+        "user_id",
+        "tenant_id",
+        "account_id",
+    )
     violations = []
     for path in (REPOSITORY_ROOT / "behavior").rglob("*.py"):
         source = path.read_text(encoding="utf-8")
@@ -182,17 +189,28 @@ def test_behavior_does_not_extend_memory_kind() -> None:
     assert not (REPOSITORY_ROOT / "memory" / "schema" / "definitions" / "behavior.yaml").exists()
 
 
-def test_behavior_old_ingress_window_and_producer_contracts_are_removed() -> None:
+def test_behavior_old_first_layer_contracts_are_removed() -> None:
     retired = (
-        "SourceRecord",
-        "SourceType",
+        "ConfirmedOwnerBinding",
+        "OwnerScopedSemanticRecord",
+        "SemanticRecordInput",
+        "SemanticEvidenceBundle",
+        "SemanticEvidenceBundleAssembler",
+        "EvidenceBundleState",
+        "EvidenceManifest",
+        "EvidenceWatermark",
+        "allowed_lateness",
+        "LATE_REJECTED",
+        "ClaimAdmissionPolicy",
+        "ClaimAdmissionDecision",
+        "ClaimBatch",
+        "ClaimProcessingLane",
+        "ClaimProcessingReceipt",
+        "ClaimPipelineService",
+        "ClaimNormalizationRouter",
+        "EvidenceService",
+        "SQLiteBehaviorEvidenceClaimStore",
         "EvidenceWindow",
-        "DirectStructuredClaimProducer",
-        "StructuredSemanticClaimProducer",
-        "ClaimProducerRegistry",
-        "OwnerRouteDecision",
-        "OwnerRouteStatus",
-        "ClaimNormalizerRun",
     )
     violations = []
     for path in (REPOSITORY_ROOT / "behavior").rglob("*.py"):
@@ -201,33 +219,36 @@ def test_behavior_old_ingress_window_and_producer_contracts_are_removed() -> Non
             if symbol in source:
                 violations.append(f"{path.relative_to(REPOSITORY_ROOT)}: {symbol}")
     assert violations == []
-    assert not (REPOSITORY_ROOT / "behavior" / "source").exists()
+    assert not (REPOSITORY_ROOT / "behavior" / "owner.py").exists()
+    assert not (REPOSITORY_ROOT / "behavior" / "ingress").exists()
+    behavior_source = "\n".join(
+        path.read_text(encoding="utf-8") for path in (REPOSITORY_ROOT / "behavior").rglob("*.py")
+    )
+    assert "evidence_claims.sqlite3" not in behavior_source
 
 
-def test_behavior_has_no_track_selection_raw_media_or_future_layer_implementation() -> None:
+def test_behavior_has_no_raw_media_or_later_layer_implementation() -> None:
     forbidden = (
-        "min(track_refs)",
         "CAMERA_FRAME",
         "AUDIO_CLIP",
+        "EventCandidate",
         "CanonicalEvent",
         "EventResolver",
-        "EventResolution",
-        "CurrentState",
+        "EventRelationGraph",
+        "EventTree",
         "Episode",
-        "ExperienceJournal",
-        "BehaviorDiscovery",
         "BehaviorHypothesis",
         "Opportunity",
         "BehaviorCase",
         "BehaviorPattern",
-        "BehaviorTree",
         "Prediction",
-        "Feedback",
-        "Calibration",
         "ActionPolicy",
         "PolicyGate",
-        "ActionExecutor",
-        "behavior://",
+        "AgentActionDirective",
+        "MemoryBehaviorRouter",
+        "ConversationBehaviorProjector",
+        "ProjectionWorker",
+        "ProjectionJob",
     )
     violations = []
     for path in (REPOSITORY_ROOT / "behavior").rglob("*.py"):
@@ -252,7 +273,7 @@ def test_behavior_production_has_no_placeholder_or_suppression_escape_hatches() 
     assert violations == []
 
 
-def test_behavior_v3_claim_model_keeps_system_fields_out_of_model_contract() -> None:
+def test_behavior_claim_proposal_keeps_system_fields_out_of_model_contract() -> None:
     proposal_source = (REPOSITORY_ROOT / "behavior" / "claim" / "proposal.py").read_text(
         encoding="utf-8"
     )
@@ -264,67 +285,63 @@ def test_behavior_v3_claim_model_keeps_system_fields_out_of_model_contract() -> 
         "time_end",
         "source_epistemic_class",
         "derivation_class",
-        "semantic_record_id",
-        "manifest_id",
+        "evidence_record_id",
+        "source_trust",
+        "compatibility_policy_digest",
         "claim_id",
+        "created_at",
     }
-    proposal_fields = next(
-        node
-        for node in proposal_tree.body
-        if isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Name) and target.id == "_PROPOSAL_FIELDS" for target in node.targets)
+    proposal = next(
+        node for node in proposal_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ClaimSemanticProposal"
     )
     names = {
-        item.value
-        for item in ast.walk(proposal_fields)
-        if isinstance(item, ast.Constant) and isinstance(item.value, str)
+        node.target.id
+        for node in proposal.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
     }
     assert names.isdisjoint(system_fields)
-    assert "ClaimConfig()" not in proposal_source
+    assert "ClaimNormalizationConfig()" not in proposal_source
+    assert '"additionalProperties": False' in proposal_source
 
 
-def test_behavior_v3_batch_and_receipt_graph_are_processing_scoped() -> None:
+def test_behavior_sqlite_has_two_sequences_foreign_keys_and_atomic_receipt_members() -> None:
     model_source = (REPOSITORY_ROOT / "behavior" / "claim" / "model.py").read_text(encoding="utf-8")
-    sqlite_source = (REPOSITORY_ROOT / "behavior" / "persistence" / "sqlite.py").read_text(
+    schema_source = (REPOSITORY_ROOT / "behavior" / "persistence" / "schema.py").read_text(
         encoding="utf-8"
     )
     model_tree = ast.parse(model_source)
-    claim = next(node for node in model_tree.body if isinstance(node, ast.ClassDef) and node.name == "Claim")
+    claim = next(node for node in model_tree.body if isinstance(node, ast.ClassDef) and node.name == "BehaviorClaim")
     claim_fields = {
         target.id
         for node in claim.body
         if isinstance(node, ast.AnnAssign) and isinstance((target := node.target), ast.Name)
     }
-    assert "claim_batch_id" not in claim_fields
-    assert '"processing_identity": processing_identity' in model_source
-    assert "CREATE TABLE claim_batch_members" in sqlite_source
-    assert "PRIMARY KEY(claim_batch_id, claim_id)" in sqlite_source
-    assert "UNIQUE(claim_batch_id, member_order)" in sqlite_source
+    assert "event_id" not in claim_fields
+    assert "claim_sequence INTEGER PRIMARY KEY AUTOINCREMENT" in schema_source
+    assert "evidence_sequence INTEGER PRIMARY KEY AUTOINCREMENT" in schema_source
+    assert "CREATE TABLE claim_receipt_members" in schema_source
+    assert "FOREIGN KEY (evidence_record_id) REFERENCES behavior_evidence_records" in schema_source
+    assert "behavior_first_layer_v1" in schema_source
 
 
-def test_behavior_v3_model_client_and_receipt_rebuild_boundaries_are_mechanical() -> None:
+def test_behavior_model_client_and_processing_lock_boundaries_are_mechanical() -> None:
     normalizer_source = (REPOSITORY_ROOT / "behavior" / "claim" / "normalizer.py").read_text(
-        encoding="utf-8"
-    )
-    registry_source = (REPOSITORY_ROOT / "behavior" / "claim" / "registry.py").read_text(
         encoding="utf-8"
     )
     runtime_source = (REPOSITORY_ROOT / "Runtime" / "components.py").read_text(encoding="utf-8")
     service_source = (REPOSITORY_ROOT / "behavior" / "claim" / "service.py").read_text(
         encoding="utf-8"
     )
-    assert "def model_client(" in normalizer_source
-    assert "normalizer.model_client" in registry_source
-    assert "normalizer.model_client is not self.structured_chat" in runtime_source
-    assert "isinstance(normalizer, ModelClaimNormalizer)" not in runtime_source
-    result_method = service_source.split("def _result_from_receipt", 1)[1].split("@staticmethod", 1)[0]
-    assert "read_claims_by_ids" in result_method
-    assert "read_decisions_by_ids" in result_method
-    assert "read_attempts_by_ids" in result_method
-    assert "list_claims_by_processing" not in result_method
+    assert "model_client: StructuredChatClient" in normalizer_source
+    assert 'getattr(normalizer, "model_client", None)' in runtime_source
+    assert "isinstance(normalizer, StructuredModelClaimNormalizer)" not in runtime_source
+    assert "async with self.processing_lock.acquire(identity)" in service_source
+    assert "await normalizer.normalize(record)" in service_source
+    assert "publish_route(attempt, claims, receipt)" in service_source
 
 
-def test_behavior_v3_content_safety_and_full_digest_code_paths_remain_distinct() -> None:
+def test_behavior_content_safety_and_full_digest_code_paths_remain_distinct() -> None:
     structured_source = (REPOSITORY_ROOT / "ModelClient" / "structured.py").read_text(encoding="utf-8")
     behavior_sources = "\n".join(
         path.read_text(encoding="utf-8") for path in (REPOSITORY_ROOT / "behavior").rglob("*.py")
@@ -333,3 +350,34 @@ def test_behavior_v3_content_safety_and_full_digest_code_paths_remain_distinct()
     assert "raise ModelContentSafetyError" in structured_source
     assert "content_digest=semantic_digest" not in behavior_sources
     assert "content_digest = semantic_digest" not in behavior_sources
+
+
+def test_behavior_public_api_does_not_export_sqlite_or_private_policies() -> None:
+    namespace: dict[str, object] = {}
+    source = (REPOSITORY_ROOT / "behavior" / "__init__.py").read_text(encoding="utf-8")
+    exec(compile(source, "behavior/__init__.py", "exec"), namespace)
+    exported = set(namespace["__all__"])
+    assert not {
+        "BehaviorDatabase",
+        "BehaviorSQLiteConnection",
+        "SQLiteBehaviorEvidenceLedger",
+        "SQLiteBehaviorClaimLedger",
+        "ClaimCompatibilityPolicy",
+        "ClaimBinder",
+    } & exported
+
+
+def test_behavior_ledgers_expose_no_business_update_or_delete() -> None:
+    evidence_source = (REPOSITORY_ROOT / "behavior" / "evidence" / "ledger.py").read_text(encoding="utf-8")
+    claim_source = (REPOSITORY_ROOT / "behavior" / "claim" / "ledger.py").read_text(encoding="utf-8")
+    for source in (evidence_source, claim_source):
+        tree = ast.parse(source)
+        methods = {
+            node.name
+            for item in tree.body
+            if isinstance(item, ast.ClassDef)
+            for node in item.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        assert "update" not in methods
+        assert "delete" not in methods

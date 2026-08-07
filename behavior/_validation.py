@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import math
 import re
 import unicodedata
@@ -12,27 +14,90 @@ from typing import Any
 
 from foundation.integrity import canonical_json
 
-_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+\-]{0,255}$")
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/\-]{0,255}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _REFERENCE_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
-_RESERVED_FUTURE_SEMANTIC_KEYS = frozenset(
+_MAX_SIGNED_SQLITE_INTEGER = 9_223_372_036_854_775_807
+_EMAIL_LIKE = re.compile(r"(?:^|[^A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}(?:$|[^A-Za-z0-9.\-])")
+_RESERVED_SEMANTIC_KEYS = frozenset(
     {
         "claim_id",
         "claim_kind",
+        "claim_sequence",
+        "content_digest",
         "epistemic_class",
-        "habit",
-        "opportunity",
-        "pattern",
-        "prediction",
-        "q_value",
-        "reward",
+        "encoded_digest",
+        "derivation_class",
+        "evidence_record_id",
+        "evidence_sequence",
+        "ingested_at",
+        "normalizer_fingerprint",
+        "processing_identity",
+        "producer_fingerprint",
+        "capability_digest",
+        "source_trust",
+        "semantic_digest",
+        "policy_digest",
+        "compatibility_policy_digest",
+        "binding_policy_digest",
+        "confidence_policy_digest",
+        "event_id",
+        "episode_id",
+        "pattern_id",
+        "prediction_id",
+        "storage_metadata",
+        "attempt_id",
+    }
+)
+_FORBIDDEN_IDENTITY_PREFIXES = (
+    "own" + "er_",
+    "us" + "er_",
+    "ten" + "ant_",
+    "acc" + "ount_",
+)
+_RESERVED_CLAIM_SYSTEM_KEYS = _RESERVED_SEMANTIC_KEYS | frozenset(
+    {
+        "actor_role",
+        "alternative_group_key",
+        "attempt_id",
+        "binding_policy_digest",
+        "capability_digest",
+        "claim_sequence",
+        "compatibility_policy_digest",
+        "confidence_policy_digest",
+        "content_digest",
+        "created_at",
+        "derivation_class",
+        "effective_confidence",
+        "encoded_digest",
+        "evidence_record_digest",
+        "evidence_record_id",
+        "evidence_sequence",
+        "ingested_at",
+        "normalizer_fingerprint",
+        "processing_identity",
+        "producer_fingerprint",
+        "semantic_digest",
+        "semantic_fingerprint",
+        "source_confidence",
+        "source_epistemic_class",
+        "source_trust",
+        "subject_role",
+        "time_end",
+        "time_start",
+        "time_uncertainty_ms",
     }
 )
 
 
 def strict_utc(value: object, field_name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{field_name} must be a timezone-aware datetime")
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise ValueError(f"{field_name} must be a timezone-aware UTC datetime")
+    offset = value.utcoffset()
+    if offset is None:
+        raise ValueError(f"{field_name} must be a timezone-aware UTC datetime")
+    if offset.total_seconds() != 0:
+        raise ValueError(f"{field_name} must use UTC")
     return value.astimezone(timezone.utc)
 
 
@@ -62,8 +127,8 @@ def bounded_text(
         raise TypeError(f"{field_name} must be text")
     normalized = unicodedata.normalize("NFC", value)
     if normalized != normalized.strip() or (not allow_empty and not normalized):
-        raise ValueError(f"{field_name} must be normalized non-empty text")
-    if len(normalized) > maximum or any(ord(character) < 32 for character in normalized):
+        raise ValueError(f"{field_name} must be normalized text")
+    if len(normalized) > maximum or any(unicodedata.category(character) == "Cc" for character in normalized):
         raise ValueError(f"{field_name} exceeds its safe text boundary")
     return normalized
 
@@ -78,9 +143,9 @@ def external_reference(value: object, field_name: str, *, maximum: int) -> str:
     reference = bounded_text(value, field_name, maximum=maximum)
     folded = reference.casefold()
     if _REFERENCE_SCHEME.match(reference) is None:
-        raise ValueError(f"{field_name} must be an external reference with a URI scheme")
-    if folded.startswith("data:") or ";base64," in folded:
-        raise ValueError(f"{field_name} cannot contain inline media or base64 data")
+        raise ValueError(f"{field_name} must have a URI scheme")
+    if folded.startswith("data:") or ";base64," in folded or folded.startswith("base64:"):
+        raise ValueError(f"{field_name} cannot contain inline or base64 data")
     return reference
 
 
@@ -88,6 +153,13 @@ def identifier(value: object, field_name: str, *, maximum: int = 256) -> str:
     normalized = bounded_text(value, field_name, maximum=maximum)
     if _IDENTIFIER.fullmatch(normalized) is None:
         raise ValueError(f"{field_name} must be a safe normalized identifier")
+    return normalized
+
+
+def pii_safe_identifier(value: object, field_name: str, *, maximum: int = 256) -> str:
+    normalized = identifier(value, field_name, maximum=maximum)
+    if "@" in normalized or _EMAIL_LIKE.search(normalized) is not None:
+        raise ValueError(f"{field_name} cannot contain personal contact information")
     return normalized
 
 
@@ -104,14 +176,22 @@ def sha256_digest(value: object, field_name: str) -> str:
 
 
 def non_negative_int(value: object, field_name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{field_name} must be a non-negative integer")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= _MAX_SIGNED_SQLITE_INTEGER
+    ):
+        raise ValueError(f"{field_name} must be a bounded non-negative integer")
     return value
 
 
 def positive_int(value: object, field_name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ValueError(f"{field_name} must be a positive integer")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 < value <= _MAX_SIGNED_SQLITE_INTEGER
+    ):
+        raise ValueError(f"{field_name} must be a bounded positive integer")
     return value
 
 
@@ -124,6 +204,16 @@ def finite_score(value: object, field_name: str) -> float:
     return result
 
 
+def typed_tuple(value: object, field_name: str, item_type: type[Any], *, maximum_items: int) -> tuple[Any, ...]:
+    if not isinstance(value, tuple):
+        raise TypeError(f"{field_name} must be a tuple")
+    if len(value) > maximum_items or any(not isinstance(item, item_type) for item in value):
+        raise ValueError(f"{field_name} exceeds its typed item boundary")
+    if len(set(value)) != len(value):
+        raise ValueError(f"{field_name} must not contain duplicates")
+    return value
+
+
 def identifier_tuple(
     value: object,
     field_name: str,
@@ -131,8 +221,8 @@ def identifier_tuple(
     maximum_items: int,
     item_maximum: int = 256,
 ) -> tuple[str, ...]:
-    if isinstance(value, str | bytes) or not isinstance(value, Sequence):
-        raise TypeError(f"{field_name} must be a sequence of identifiers")
+    if not isinstance(value, tuple):
+        raise TypeError(f"{field_name} must be a tuple of identifiers")
     if len(value) > maximum_items:
         raise ValueError(f"{field_name} exceeds its item boundary")
     result = tuple(identifier(item, f"{field_name}[{index}]", maximum=item_maximum) for index, item in enumerate(value))
@@ -148,6 +238,7 @@ def json_snapshot(
     maximum_chars: int,
     maximum_items: int = 128,
     maximum_depth: int = 12,
+    reserved_keys: frozenset[str] = _RESERVED_SEMANTIC_KEYS,
 ) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError(f"{field_name} must be an object")
@@ -158,6 +249,7 @@ def json_snapshot(
         depth=0,
         maximum_items=maximum_items,
         maximum_depth=maximum_depth,
+        reserved_keys=reserved_keys,
     )
     if not isinstance(normalized, dict):
         raise TypeError(f"{field_name} must be an object")
@@ -174,8 +266,6 @@ def json_value_snapshot(
     maximum_items: int = 128,
     maximum_depth: int = 12,
 ) -> Any:
-    """冻结任意规范 JSON 值，并对根值应用同一字符边界。"""
-
     normalized = _json_value(
         value,
         field_name,
@@ -183,6 +273,7 @@ def json_value_snapshot(
         depth=0,
         maximum_items=maximum_items,
         maximum_depth=maximum_depth,
+        reserved_keys=_RESERVED_SEMANTIC_KEYS,
     )
     if len(canonical_json(normalized)) > maximum_chars:
         raise ValueError(f"{field_name} exceeds its canonical JSON boundary")
@@ -197,16 +288,18 @@ def _json_value(
     depth: int,
     maximum_items: int,
     maximum_depth: int,
+    reserved_keys: frozenset[str],
 ) -> Any:
     if depth > maximum_depth:
         raise ValueError(f"{field_name} exceeds its nesting boundary")
     if value is None or isinstance(value, bool | int):
         return value
     if isinstance(value, str):
-        folded = value.casefold()
-        if folded.startswith("data:") and ";base64," in folded:
-            raise TypeError(f"{field_name} cannot contain inline base64 media")
-        return value
+        text = bounded_text(value, field_name, maximum=1_000_000, allow_empty=True)
+        folded = text.casefold()
+        if folded.startswith("data:") or folded.startswith("base64:") or ";base64," in folded:
+            raise TypeError(f"{field_name} cannot contain inline or base64 data")
+        return text
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError(f"{field_name} cannot contain non-finite numbers")
@@ -225,7 +318,10 @@ def _json_value(
             for key, item in value.items():
                 if not isinstance(key, str) or not key or len(key) > 128:
                     raise TypeError(f"{field_name} must contain bounded string keys")
-                if key.casefold() in _RESERVED_FUTURE_SEMANTIC_KEYS:
+                folded_key = key.casefold()
+                if folded_key in reserved_keys or any(
+                    folded_key.startswith(prefix) for prefix in _FORBIDDEN_IDENTITY_PREFIXES
+                ):
                     raise ValueError(f"{field_name} contains a reserved system semantic field")
                 if key in result:
                     raise ValueError(f"{field_name} contains duplicate keys")
@@ -236,6 +332,7 @@ def _json_value(
                     depth=depth + 1,
                     maximum_items=maximum_items,
                     maximum_depth=maximum_depth,
+                    reserved_keys=reserved_keys,
                 )
             return {key: result[key] for key in sorted(result)}
         finally:
@@ -256,12 +353,31 @@ def _json_value(
                     depth=depth + 1,
                     maximum_items=maximum_items,
                     maximum_depth=maximum_depth,
+                    reserved_keys=reserved_keys,
                 )
                 for index, item in enumerate(value)
             ]
         finally:
             active.remove(marker)
     raise TypeError(f"{field_name} contains unsupported type {type(value).__name__}")
+
+
+def claim_semantic_json_snapshot(
+    value: object,
+    field_name: str,
+    *,
+    maximum_chars: int,
+    maximum_items: int = 128,
+    maximum_depth: int = 12,
+) -> Mapping[str, Any]:
+    return json_snapshot(
+        value,
+        field_name,
+        maximum_chars=maximum_chars,
+        maximum_items=maximum_items,
+        maximum_depth=maximum_depth,
+        reserved_keys=_RESERVED_CLAIM_SYSTEM_KEYS,
+    )
 
 
 def _freeze(value: Any) -> Any:
@@ -289,8 +405,28 @@ def require_fields(value: Mapping[str, Any], field_name: str, required: frozense
         raise ValueError(f"{field_name} is missing required fields: {missing}")
 
 
+def encode_cursor(payload: Mapping[str, object]) -> str:
+    return base64.urlsafe_b64encode(canonical_json(payload).encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def decode_cursor(value: object) -> Mapping[str, object]:
+    if not isinstance(value, str) or not value or len(value) > 2_048:
+        raise ValueError("cursor must be bounded text")
+    try:
+        padding = "=" * (-len(value) % 4)
+        raw = base64.b64decode(value + padding, altchars=b"-_", validate=True)
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("cursor is malformed") from exc
+    if not isinstance(parsed, dict) or canonical_json(parsed).encode("utf-8") != raw:
+        raise ValueError("cursor is not canonical")
+    return parsed
+
+
 __all__ = [
     "bounded_text",
+    "decode_cursor",
+    "encode_cursor",
     "external_reference",
     "finite_score",
     "identifier",
@@ -301,10 +437,12 @@ __all__ = [
     "optional_bounded_text",
     "optional_identifier",
     "parse_utc",
+    "pii_safe_identifier",
     "positive_int",
     "require_fields",
     "sha256_digest",
     "strict_fields",
     "strict_utc",
+    "typed_tuple",
     "utc_text",
 ]

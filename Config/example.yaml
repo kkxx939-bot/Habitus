@@ -393,8 +393,11 @@ memory:
     stale_retries: 1
 
 behavior:
-  ingress:
+  evidence:
     max_evidence_refs: 32
+    max_correlation_refs: 32
+    max_causal_refs: 32
+    max_parent_source_refs: 32
     max_object_refs: 64
     max_entity_refs: 64
     max_payload_chars: 32768
@@ -402,53 +405,31 @@ behavior:
     max_batch_size: 256
     max_event_time_uncertainty_ms: 300000
     max_future_event_skew_seconds: 300.0
-    max_past_event_age_seconds: 31536000.0
-    allowed_lateness_seconds: 30.0
-    max_query_limit: 500
+    max_live_event_age_seconds: 31536000.0
     max_reference_chars: 2048
     max_identifier_chars: 256
     max_payload_items: 128
     max_payload_depth: 12
-  evidence:
-    allowed_lateness_seconds: 30.0
-    max_gap_seconds: 15.0
-    max_bundle_duration_seconds: 300.0
-    max_records_per_bundle: 256
-    max_projection_chars_per_bundle: 65536
-    max_active_bundles: 1024
-    max_coverage_intervals: 256
-    max_manifest_encoded_bytes: 4194304
     max_query_limit: 500
-  claim:
+  normalization:
     max_claims_per_record: 16
-    max_claims_per_batch: 64
-    max_normalizers_per_processing: 1024
-    max_claims_per_processing: 10000
+    max_enhancement_normalizers_per_record: 8
     max_model_input_chars: 49152
     max_model_input_tokens: 16384
     max_model_output_tokens: 4096
     max_semantic_payload_chars: 32768
     max_human_summary_chars: 2048
-    min_direct_confidence: 0.0
-    min_sensor_confidence: 0.35
-    min_model_confidence: 0.55
-    repeat_state_suppression_seconds: 30.0
     max_alternative_group_size: 16
-    normalize_owner_utterances: false
+    normalize_user_utterances: false
     max_query_limit: 500
   store:
     sqlite_timeout_seconds: 5.0
     max_json_bytes: 16777216
-    max_semantic_records: 1000000
-    max_ingress_decisions: 1000000
-    max_active_bundles: 1024
-    max_manifests: 250000
-    max_normalizer_attempts: 1000000
-    max_claim_batches: 1000000
-    max_validated_claims: 1000000
-    max_accepted_claims: 1000000
-    max_admission_decisions: 1000000
-    max_processing_receipts: 250000
+    max_evidence_records: 1000000
+    max_ingress_receipts: 1000000
+    max_claims: 1000000
+    max_normalization_attempts: 1000000
+    max_normalization_receipts: 1000000
     max_database_bytes: 8589934592
     max_query_limit: 500
 

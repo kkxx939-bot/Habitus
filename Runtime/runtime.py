@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
+from behavior.claim.service import ClaimNormalizationResult
+from behavior.evidence.ingress import BehaviorEvidenceIngressResult
 from Config import M2BOSConfig
 from foundation.integrity import canonical_digest
 from foundation.observability import (
@@ -189,7 +191,7 @@ class Runtime:
             raise TypeError("conversation_adapters must be ConversationAdapterRegistry or None")
         if components.memory.tree.root != config.memory_root:
             raise ValueError("runtime components are bound to another memory root")
-        if components.behavior.store.root != config.behavior_root:
+        if components.behavior.database.root != config.behavior_root:
             raise ValueError("runtime components are bound to another behavior root")
         if components.conversation.journal.layout.root != config.conversation_root:
             raise ValueError("runtime components are bound to another conversation root")
@@ -231,7 +233,7 @@ class Runtime:
             self._ensure_storage_root()
             self.components.infrastructure.initialize()
             memory_root = self.components.memory.tree.initialize()
-            self.components.behavior.store.initialize()
+            self.components.behavior.database.initialize()
             self.components.workflow.jobs.initialize()
             self.components.memory.lifecycle.initialize()
             self.components.conversation.summary_use.initialize()
@@ -244,7 +246,7 @@ class Runtime:
             )
             initialization = RuntimeInitialization(
                 memory_root=memory_root,
-                behavior_root=self.components.behavior.store.root,
+                behavior_root=self.components.behavior.database.root,
                 recovered_transaction_ids=recovered,
             )
             self._initialization = initialization
@@ -266,6 +268,43 @@ class Runtime:
             {"recovered_transactions": len(recovered)},
         )
         return initialization
+
+    async def ingest_behavior_semantic(
+        self,
+        adapter_name: str,
+        payload: object,
+        delivery_id: str,
+    ) -> BehaviorEvidenceIngressResult:
+        """通过已注册强类型 Adapter 原子写入 Evidence；不自动规范化 Claim。"""
+
+        self._require_initialized("Behavior Evidence ingest")
+        return await self.components.behavior.evidence_ingress.ingest(
+            adapter_name,
+            payload,
+            delivery_id=delivery_id,
+        )
+
+    async def normalize_behavior_evidence(
+        self,
+        evidence_record_id: str,
+    ) -> ClaimNormalizationResult:
+        """独立处理一条已落盘 Evidence 的 Core 与可选 Enhancement。"""
+
+        self._require_initialized("Behavior Claim normalization")
+        return await self.components.behavior.claim_normalization.normalize(evidence_record_id)
+
+    async def retry_behavior_enhancement(
+        self,
+        evidence_record_id: str,
+        normalizer_name: str,
+    ) -> ClaimNormalizationResult:
+        """只重试指定 Evidence 的指定 Enhancement 路由。"""
+
+        self._require_initialized("Behavior Enhancement retry")
+        return await self.components.behavior.claim_normalization.retry_enhancement(
+            evidence_record_id,
+            normalizer_name,
+        )
 
     async def start(self) -> None:
         """完成初始化后依次启动 Job Worker 和生命周期维护 Worker。"""
@@ -825,6 +864,7 @@ class Runtime:
                     try:
                         await self.components.models.aclose()
                     finally:
+                        self.components.behavior.database.close()
                         manager = self.components.infrastructure.managed_observability
                         if manager is not None:
                             manager.close()
