@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -17,7 +18,7 @@ from behavior._validation import (
     strict_utc,
     utc_text,
 )
-from behavior.config import BehaviorConfig
+from behavior.config import BehaviorConfig, BehaviorEvidenceConfig
 from behavior.errors import (
     BehaviorAdapterCapabilityError,
     BehaviorAdapterError,
@@ -44,7 +45,7 @@ from behavior.evidence.provenance import (
 from behavior.evidence.record import BehaviorEvidenceRecord
 from behavior.evidence.registry import BehaviorSemanticAdapterRegistry
 from behavior.evidence.trust import BehaviorAdapterCapability, BehaviorTimeMode
-from foundation.integrity import canonical_digest
+from foundation.integrity import canonical_digest, canonical_json
 from foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
 
 INGRESS_CONTRACT_VERSION = "behavior_evidence_ingress_v1"
@@ -208,7 +209,7 @@ class BehaviorEvidenceIngressService:
             self._observe("behavior_evidence_replayed", started, prior, len(replayed_records))
             return BehaviorEvidenceIngressResult(prior, replayed_records, True)
         try:
-            adapted = await adapter.adapt(payload)
+            adapted = await adapter.adapt(json.loads(canonical_json(raw)))
         except Exception as exc:
             if isinstance(exc, (BehaviorEvidenceSchemaError, BehaviorAdapterCapabilityError)):
                 raise
@@ -334,6 +335,16 @@ class BehaviorEvidenceIngressService:
         ):
             raise BehaviorAdapterCapabilityError("Adapter output exceeds its declared capability")
         limits = self.config.evidence
+        self._validate_reference_limits(content, source, limits)
+        self._validate_identifier_limits(content, source, limits)
+        self._validate_payload_limits(content, limits)
+
+    @staticmethod
+    def _validate_reference_limits(
+        content: BehaviorSemanticContent,
+        source: BehaviorSourceDescriptor,
+        limits: BehaviorEvidenceConfig,
+    ) -> None:
         if len(content.evidence_refs) > limits.max_evidence_refs:
             raise BehaviorEvidenceSchemaError("too many Evidence references")
         if len(content.object_refs) > limits.max_object_refs or len(content.entity_refs) > limits.max_entity_refs:
@@ -363,6 +374,13 @@ class BehaviorEvidenceIngressService:
         for causal_ref in source.causal_refs:
             if len(causal_ref.reference) > limits.max_reference_chars:
                 raise BehaviorEvidenceSchemaError("causal reference exceeds the configured boundary")
+
+    @staticmethod
+    def _validate_identifier_limits(
+        content: BehaviorSemanticContent,
+        source: BehaviorSourceDescriptor,
+        limits: BehaviorEvidenceConfig,
+    ) -> None:
         identifier_values = [
             content.clock_domain,
             content.scene_ref,
@@ -385,6 +403,12 @@ class BehaviorEvidenceIngressService:
             for value in identifier_values
         ):
             raise BehaviorEvidenceSchemaError("semantic identifier exceeds the configured boundary")
+
+    @staticmethod
+    def _validate_payload_limits(
+        content: BehaviorSemanticContent,
+        limits: BehaviorEvidenceConfig,
+    ) -> None:
         payload = payload_to_dict(content.payload)
         for name in (
             "activity",

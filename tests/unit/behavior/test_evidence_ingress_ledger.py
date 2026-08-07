@@ -277,6 +277,29 @@ def test_adapter_metadata_cannot_change_during_adaptation(tmp_path) -> None:
     assert ledger.read_ingress_receipt(delivery) is None
 
 
+def test_adapter_receives_digest_bound_canonical_payload_copy(tmp_path) -> None:
+    class CapturingAdapter(FakeAdapter):
+        received: object | None = None
+
+        async def adapt(self, payload: object):
+            self.received = payload
+            assert isinstance(payload, dict)
+            nested = payload["nested"]
+            assert isinstance(nested, list)
+            nested.append("adapter-local")
+            return self.result
+
+    adapter = CapturingAdapter(semantic_input())
+    _, ledger, ingress = service(tmp_path, adapter)
+    raw = {"nested": ["source"]}
+    result = asyncio.run(ingress.ingest(adapter.name, raw, delivery_id=digest("canonical-copy")))
+
+    assert result.receipt.status is IngressReceiptStatus.COMMITTED
+    assert raw == {"nested": ["source"]}
+    assert adapter.received == {"nested": ["source", "adapter-local"]}
+    assert len(ledger.list_after_sequence(0, 10)) == 1
+
+
 def test_source_and_stream_identity_conflicts_fail_without_receipt(tmp_path) -> None:
     adapter = FakeAdapter(semantic_input())
     _, ledger, ingress = service(tmp_path, adapter)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from behavior.evidence.content import BehaviorRecordKind
 from behavior.evidence.record import BehaviorEvidenceLedgerEntry, BehaviorEvidenceRecord
@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 EvidencePage = tuple[tuple[BehaviorEvidenceLedgerEntry, ...], str | None]
 
 
+@runtime_checkable
 class BehaviorEvidenceLedger(Protocol):
     def append_delivery(
         self,

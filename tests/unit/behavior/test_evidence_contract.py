@@ -329,6 +329,13 @@ def test_payload_unknown_fields_strict_types_nonfinite_binary_and_recursion_fail
         with pytest.raises(ValueError, match="reserved"):
             StateAssertionPayload("state", {"nested": {reserved: "forbidden"}}, {})
 
+    allowed_semantic_names = {
+        "user_action": "walk",
+        "account_status": "active",
+        "tenant_mode": "shared",
+    }
+    assert StateAssertionPayload("state", allowed_semantic_names, {}).value == allowed_semantic_names
+
     valid = content(
         BehaviorRecordKind.STATE_ASSERTION,
         StateAssertionPayload("ready", True, {}),

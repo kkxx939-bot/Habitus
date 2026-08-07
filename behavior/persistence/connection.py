@@ -75,11 +75,22 @@ class BehaviorSQLiteConnection:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute(f"PRAGMA busy_timeout={int(self.config.sqlite_timeout_seconds * 1000)}")
+        mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        if str(mode).casefold() != "wal":
+            mode = self._enable_wal(connection)
+        if str(mode).casefold() != "wal":
+            connection.close()
+            raise BehaviorStoreError("Behavior database did not enter WAL mode")
+        if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+            connection.close()
+            raise BehaviorStoreError("Behavior database foreign keys are disabled")
+        return connection
+
+    def _enable_wal(self, connection: sqlite3.Connection) -> str:
         deadline = time.monotonic() + self.config.sqlite_timeout_seconds
         while True:
             try:
-                mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
-                break
+                return str(connection.execute("PRAGMA journal_mode=WAL").fetchone()[0])
             except sqlite3.OperationalError as exc:
                 if "locked" not in str(exc).casefold() and "busy" not in str(exc).casefold():
                     connection.close()
@@ -88,13 +99,6 @@ class BehaviorSQLiteConnection:
                     connection.close()
                     raise BehaviorStoreError("Behavior database WAL initialization timed out") from exc
                 time.sleep(0.02)
-        if str(mode).casefold() != "wal":
-            connection.close()
-            raise BehaviorStoreError("Behavior database did not enter WAL mode")
-        if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
-            connection.close()
-            raise BehaviorStoreError("Behavior database foreign keys are disabled")
-        return connection
 
     @contextmanager
     def read(self) -> Iterator[sqlite3.Connection]:

@@ -8,12 +8,12 @@ from typing import Any
 
 from behavior._validation import (
     external_reference,
+    fingerprint_fields,
     identifier,
     non_negative_int,
-    optional_identifier,
-    require_fields,
     sha256_digest,
-    strict_fields,
+    strict_object,
+    typed_tuple,
 )
 from behavior.evidence.refs import CausalRef, CausalRefKind, CorrelationRef, ProjectionRef, SourceEventRef, StreamRef
 from foundation.integrity import canonical_digest
@@ -50,23 +50,34 @@ class ProducerFingerprint:
 
     def __post_init__(self) -> None:
         kind = ProducerImplementationKind(self.implementation_kind)
+        (
+            producer_name,
+            producer_version,
+            pipeline_version,
+            output_schema_version,
+            model_provider,
+            model_name,
+            prompt_version,
+        ) = fingerprint_fields(
+            name=self.producer_name,
+            version=self.producer_version,
+            pipeline_version=self.pipeline_version,
+            output_schema_version=self.output_schema_version,
+            model_provider=self.model_provider,
+            model_name=self.model_name,
+            prompt_version=self.prompt_version,
+            field_prefix="producer",
+            model_backed=kind is ProducerImplementationKind.MODEL,
+        )
         values = {
-            "producer_name": identifier(self.producer_name, "producer.producer_name"),
-            "producer_version": identifier(self.producer_version, "producer.producer_version"),
-            "pipeline_version": identifier(self.pipeline_version, "producer.pipeline_version"),
-            "output_schema_version": identifier(
-                self.output_schema_version,
-                "producer.output_schema_version",
-            ),
-            "model_provider": optional_identifier(self.model_provider, "producer.model_provider"),
-            "model_name": optional_identifier(self.model_name, "producer.model_name"),
-            "prompt_version": optional_identifier(self.prompt_version, "producer.prompt_version"),
+            "producer_name": producer_name,
+            "producer_version": producer_version,
+            "pipeline_version": pipeline_version,
+            "output_schema_version": output_schema_version,
+            "model_provider": model_provider,
+            "model_name": model_name,
+            "prompt_version": prompt_version,
         }
-        model_values = (values["model_provider"], values["model_name"], values["prompt_version"])
-        if kind is ProducerImplementationKind.MODEL and any(value is None for value in model_values):
-            raise ValueError("MODEL producer must identify provider, model, and prompt version")
-        if kind is not ProducerImplementationKind.MODEL and any(value is not None for value in model_values):
-            raise ValueError("non-MODEL producer cannot declare model fields")
         for name, value in values.items():
             object.__setattr__(self, name, value)
         object.__setattr__(self, "implementation_kind", kind)
@@ -103,23 +114,24 @@ class BehaviorSourceDescriptor:
         if not isinstance(self.stream_ref, StreamRef):
             raise TypeError("descriptor.stream_ref must be StreamRef")
         origin = BehaviorOriginKind(self.origin_kind)
-        if not isinstance(self.parent_source_event_refs, tuple) or any(
-            not isinstance(item, SourceEventRef) for item in self.parent_source_event_refs
-        ):
-            raise TypeError("descriptor.parent_source_event_refs must contain SourceEventRef values")
-        if not isinstance(self.correlation_refs, tuple) or any(
-            not isinstance(item, CorrelationRef) for item in self.correlation_refs
-        ):
-            raise TypeError("descriptor.correlation_refs must contain CorrelationRef values")
-        if not isinstance(self.causal_refs, tuple) or any(not isinstance(item, CausalRef) for item in self.causal_refs):
-            raise TypeError("descriptor.causal_refs must contain CausalRef values")
-        for name, values in (
-            ("parent_source_event_refs", self.parent_source_event_refs),
-            ("correlation_refs", self.correlation_refs),
-            ("causal_refs", self.causal_refs),
-        ):
-            if len(values) > 10_000 or len(values) != len(set(values)):
-                raise ValueError(f"descriptor.{name} must be bounded and unique")
+        typed_tuple(
+            self.parent_source_event_refs,
+            "descriptor.parent_source_event_refs",
+            SourceEventRef,
+            maximum_items=10_000,
+        )
+        typed_tuple(
+            self.correlation_refs,
+            "descriptor.correlation_refs",
+            CorrelationRef,
+            maximum_items=10_000,
+        )
+        typed_tuple(
+            self.causal_refs,
+            "descriptor.causal_refs",
+            CausalRef,
+            maximum_items=10_000,
+        )
         if origin is BehaviorOriginKind.CONVERSATION_PROJECTION:
             if not isinstance(self.projection_ref, ProjectionRef):
                 raise ValueError("conversation projection origin requires ProjectionRef")
@@ -188,8 +200,7 @@ def producer_from_dict(value: object) -> ProducerFingerprint:
             "digest",
         }
     )
-    data = strict_fields(value, "producer_fingerprint", fields)
-    require_fields(data, "producer_fingerprint", fields)
+    data = strict_object(value, "producer_fingerprint", fields)
     result = ProducerFingerprint(
         producer_name=data["producer_name"],
         producer_version=data["producer_version"],
@@ -257,18 +268,19 @@ def descriptor_from_dict(value: object) -> BehaviorSourceDescriptor:
             "projection_ref",
         }
     )
-    data = strict_fields(value, "source_descriptor", fields)
-    require_fields(data, "source_descriptor", fields)
-    stream = strict_fields(data["stream_ref"], "stream_ref", frozenset({"namespace", "value", "generation"}))
-    require_fields(stream, "stream_ref", frozenset({"namespace", "value", "generation"}))
+    data = strict_object(value, "source_descriptor", fields)
+    stream = strict_object(
+        data["stream_ref"],
+        "stream_ref",
+        frozenset({"namespace", "value", "generation"}),
+    )
     projection = data["projection_ref"]
     if projection is not None:
-        projection_data = strict_fields(
+        projection_data = strict_object(
             projection,
             "projection_ref",
             frozenset({"namespace", "value", "source_digest"}),
         )
-        require_fields(projection_data, "projection_ref", frozenset({"namespace", "value", "source_digest"}))
         projection_value = ProjectionRef(**projection_data)
     else:
         projection_value = None
@@ -302,8 +314,7 @@ def provenance_to_dict(value: BehaviorSourceProvenance) -> dict[str, Any]:
 
 def provenance_from_dict(value: object) -> BehaviorSourceProvenance:
     fields = frozenset({"descriptor", "adapter_name", "producer_fingerprint", "capability_digest"})
-    data = strict_fields(value, "provenance", fields)
-    require_fields(data, "provenance", fields)
+    data = strict_object(value, "provenance", fields)
     return BehaviorSourceProvenance(
         descriptor=descriptor_from_dict(data["descriptor"]),
         adapter_name=data["adapter_name"],
@@ -318,8 +329,7 @@ def _source_event_to_dict(value: SourceEventRef) -> dict[str, str]:
 
 def _source_event_from_dict(value: object) -> SourceEventRef:
     fields = frozenset({"namespace", "value", "identity_digest"})
-    data = strict_fields(value, "source_event_ref", fields)
-    require_fields(data, "source_event_ref", fields)
+    data = strict_object(value, "source_event_ref", fields)
     result = SourceEventRef(data["namespace"], data["value"])
     if result.identity_digest != data["identity_digest"]:
         raise ValueError("source event identity digest mismatch")
@@ -328,15 +338,13 @@ def _source_event_from_dict(value: object) -> SourceEventRef:
 
 def _correlation_from_dict(value: object) -> CorrelationRef:
     fields = frozenset({"namespace", "value", "root_value"})
-    data = strict_fields(value, "correlation_ref", fields)
-    require_fields(data, "correlation_ref", fields)
+    data = strict_object(value, "correlation_ref", fields)
     return CorrelationRef(data["namespace"], data["value"], data["root_value"])
 
 
 def _causal_from_dict(value: object) -> CausalRef:
     fields = frozenset({"kind", "reference", "reference_digest"})
-    data = strict_fields(value, "causal_ref", fields)
-    require_fields(data, "causal_ref", fields)
+    data = strict_object(value, "causal_ref", fields)
     return CausalRef(CausalRefKind(data["kind"]), data["reference"], data["reference_digest"])
 
 

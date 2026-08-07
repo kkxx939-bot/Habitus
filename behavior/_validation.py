@@ -9,10 +9,14 @@ import re
 import unicodedata
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
+from enum import Enum
 from types import MappingProxyType
-from typing import Any
+from typing import Any, TypeVar
 
-from foundation.integrity import canonical_json
+from foundation.integrity import canonical_digest, canonical_json
+
+T = TypeVar("T")
+E = TypeVar("E", bound=Enum)
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/\-]{0,255}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -49,11 +53,18 @@ _RESERVED_SEMANTIC_KEYS = frozenset(
         "attempt_id",
     }
 )
-_FORBIDDEN_IDENTITY_PREFIXES = (
-    "own" + "er_",
-    "us" + "er_",
-    "ten" + "ant_",
-    "acc" + "ount_",
+_FORBIDDEN_PARTITION_KEYS = frozenset(
+    {
+        "own" + "er_ref",
+        "own" + "er_binding",
+        "own" + "er_identity",
+        "own" + "er_identity_digest",
+        "us" + "er_id",
+        "ten" + "ant_id",
+        "acc" + "ount_id",
+        "resol" + "ver_fingerprint",
+        "resolution_" + "evidence_digest",
+    }
 )
 _RESERVED_CLAIM_SYSTEM_KEYS = _RESERVED_SEMANTIC_KEYS | frozenset(
     {
@@ -169,6 +180,35 @@ def optional_identifier(value: object, field_name: str, *, maximum: int = 256) -
     return identifier(value, field_name, maximum=maximum)
 
 
+def fingerprint_fields(
+    *,
+    name: object,
+    version: object,
+    pipeline_version: object,
+    output_schema_version: object,
+    model_provider: object,
+    model_name: object,
+    prompt_version: object,
+    field_prefix: str,
+    model_backed: bool,
+) -> tuple[str, str, str, str, str | None, str | None, str | None]:
+    resolved = (
+        identifier(name, f"{field_prefix}.name"),
+        identifier(version, f"{field_prefix}.version"),
+        identifier(pipeline_version, f"{field_prefix}.pipeline_version"),
+        identifier(output_schema_version, f"{field_prefix}.output_schema_version"),
+        optional_identifier(model_provider, f"{field_prefix}.model_provider"),
+        optional_identifier(model_name, f"{field_prefix}.model_name"),
+        optional_identifier(prompt_version, f"{field_prefix}.prompt_version"),
+    )
+    model_values = resolved[4:]
+    if model_backed and any(value is None for value in model_values):
+        raise ValueError(f"{field_prefix} model fingerprint requires provider, model, and prompt version")
+    if not model_backed and any(value is not None for value in model_values):
+        raise ValueError(f"{field_prefix} non-model fingerprint cannot declare model fields")
+    return resolved
+
+
 def sha256_digest(value: object, field_name: str) -> str:
     if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
         raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
@@ -204,14 +244,41 @@ def finite_score(value: object, field_name: str) -> float:
     return result
 
 
-def typed_tuple(value: object, field_name: str, item_type: type[Any], *, maximum_items: int) -> tuple[Any, ...]:
+def typed_tuple(
+    value: object,
+    field_name: str,
+    item_type: type[T],
+    *,
+    maximum_items: int,
+    allow_empty: bool = True,
+) -> tuple[T, ...]:
     if not isinstance(value, tuple):
         raise TypeError(f"{field_name} must be a tuple")
-    if len(value) > maximum_items or any(not isinstance(item, item_type) for item in value):
+    if (not allow_empty and not value) or len(value) > maximum_items:
+        raise ValueError(f"{field_name} exceeds its item boundary")
+    if any(not isinstance(item, item_type) for item in value):
         raise ValueError(f"{field_name} exceeds its typed item boundary")
     if len(set(value)) != len(value):
         raise ValueError(f"{field_name} must not contain duplicates")
     return value
+
+
+def enum_tuple(
+    value: object,
+    field_name: str,
+    enum_type: type[E],
+    *,
+    maximum_items: int,
+    allow_empty: bool = False,
+) -> tuple[E, ...]:
+    if not isinstance(value, tuple):
+        raise TypeError(f"{field_name} must be a tuple")
+    if (not allow_empty and not value) or len(value) > maximum_items:
+        raise ValueError(f"{field_name} exceeds its item boundary")
+    resolved = tuple(enum_type(item) for item in value)
+    if len(set(resolved)) != len(resolved):
+        raise ValueError(f"{field_name} must not contain duplicates")
+    return resolved
 
 
 def identifier_tuple(
@@ -319,9 +386,7 @@ def _json_value(
                 if not isinstance(key, str) or not key or len(key) > 128:
                     raise TypeError(f"{field_name} must contain bounded string keys")
                 folded_key = key.casefold()
-                if folded_key in reserved_keys or any(
-                    folded_key.startswith(prefix) for prefix in _FORBIDDEN_IDENTITY_PREFIXES
-                ):
+                if folded_key in reserved_keys or folded_key in _FORBIDDEN_PARTITION_KEYS:
                     raise ValueError(f"{field_name} contains a reserved system semantic field")
                 if key in result:
                     raise ValueError(f"{field_name} contains duplicate keys")
@@ -388,21 +453,19 @@ def _freeze(value: Any) -> Any:
     return value
 
 
-def strict_fields(value: object, field_name: str, allowed: frozenset[str]) -> dict[str, Any]:
+def strict_object(value: object, field_name: str, fields: frozenset[str]) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError(f"{field_name} must be an object")
     if any(not isinstance(key, str) for key in value):
         raise TypeError(f"{field_name} must contain string keys")
-    unknown = sorted(set(value) - allowed)
+    keys = set(value)
+    unknown = sorted(keys - fields)
     if unknown:
         raise ValueError(f"{field_name} contains unknown fields: {unknown}")
-    return dict(value)
-
-
-def require_fields(value: Mapping[str, Any], field_name: str, required: frozenset[str]) -> None:
-    missing = sorted(required - set(value))
+    missing = sorted(fields - keys)
     if missing:
         raise ValueError(f"{field_name} is missing required fields: {missing}")
+    return dict(value)
 
 
 def encode_cursor(payload: Mapping[str, object]) -> str:
@@ -423,12 +486,39 @@ def decode_cursor(value: object) -> Mapping[str, object]:
     return parsed
 
 
+def encode_sequence_cursor(kind: str, query: Mapping[str, object], sequence: int) -> str:
+    return encode_cursor(
+        {
+            "kind": kind,
+            "query_digest": canonical_digest(query),
+            "sequence": non_negative_int(sequence, "cursor.sequence"),
+        }
+    )
+
+
+def decode_sequence_cursor(
+    value: object,
+    *,
+    kind: str,
+    query: Mapping[str, object],
+    subject: str,
+) -> int:
+    data = decode_cursor(value)
+    if data.get("kind") != kind or data.get("query_digest") != canonical_digest(query):
+        raise ValueError(f"cursor does not belong to this {subject} query")
+    return non_negative_int(data.get("sequence"), "cursor.sequence")
+
+
 __all__ = [
     "bounded_text",
     "decode_cursor",
+    "decode_sequence_cursor",
     "encode_cursor",
+    "encode_sequence_cursor",
+    "enum_tuple",
     "external_reference",
     "finite_score",
+    "fingerprint_fields",
     "identifier",
     "identifier_tuple",
     "json_snapshot",
@@ -439,9 +529,8 @@ __all__ = [
     "parse_utc",
     "pii_safe_identifier",
     "positive_int",
-    "require_fields",
     "sha256_digest",
-    "strict_fields",
+    "strict_object",
     "strict_utc",
     "typed_tuple",
     "utc_text",

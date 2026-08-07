@@ -253,6 +253,28 @@ def test_deterministic_core_maps_without_model_and_binds_evidence_fields() -> No
     assert claim.effective_confidence == record.semantic_content.source_confidence
 
 
+def test_unexpected_normalizer_bug_is_not_hidden_as_domain_degradation(tmp_path) -> None:
+    config = BehaviorConfig()
+    database = BehaviorDatabase(tmp_path / "behavior", config=config, initialize=True)
+    evidence_ledger, record = asyncio.run(ingest_record(database, free_text_input(), config=config))
+    normalizer = FakeModelNormalizer(error=RuntimeError("programming defect"))
+    claim_ledger, service = normalization_service(
+        tmp_path,
+        database,
+        evidence_ledger,
+        config,
+        normalizer,
+    )
+    plan = service.planner.plan(record)
+    identity = service._route_identity(record, plan, plan.enhancement_routes[0])
+
+    with pytest.raises(RuntimeError, match="programming defect"):
+        asyncio.run(service.normalize(record.evidence_record_id))
+
+    assert claim_ledger.read_latest_attempt(identity) is None
+    assert claim_ledger.read_receipt(identity) is None
+
+
 def test_binder_rejects_normalizer_kind_derivation_mismatch() -> None:
     normalizer = BuiltinDeterministicClaimNormalizer()
     record = direct_record(semantic_input())

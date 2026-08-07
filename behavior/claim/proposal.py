@@ -14,8 +14,7 @@ from behavior._validation import (
     identifier,
     optional_bounded_text,
     optional_identifier,
-    require_fields,
-    strict_fields,
+    strict_object,
 )
 from behavior.config import ClaimNormalizationConfig
 from behavior.errors import BehaviorClaimSchemaError
@@ -127,8 +126,7 @@ def proposal_from_dict(value: object, config: ClaimNormalizationConfig) -> Claim
         }
     )
     try:
-        data = strict_fields(value, "claim_proposal", fields)
-        require_fields(data, "claim_proposal", fields)
+        data = strict_object(value, "claim_proposal", fields)
         proposal = ClaimSemanticProposal(
             claim_kind=ClaimKind(data["claim_kind"]),
             semantic_family=data["semantic_family"],
@@ -155,8 +153,7 @@ def proposal_batch_from_dict(
     value: object,
     config: ClaimNormalizationConfig,
 ) -> tuple[ClaimSemanticProposal, ...]:
-    data = strict_fields(value, "claim_proposals", frozenset({"proposals"}))
-    require_fields(data, "claim_proposals", frozenset({"proposals"}))
+    data = strict_object(value, "claim_proposals", frozenset({"proposals"}))
     raw = data["proposals"]
     if not isinstance(raw, list | tuple):
         raise BehaviorClaimSchemaError("proposals must be an array")

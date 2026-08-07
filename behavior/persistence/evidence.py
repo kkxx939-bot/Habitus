@@ -7,8 +7,8 @@ from collections.abc import Mapping
 from datetime import datetime
 
 from behavior._validation import (
-    decode_cursor,
-    encode_cursor,
+    decode_sequence_cursor,
+    encode_sequence_cursor,
     identifier,
     non_negative_int,
     sha256_digest,
@@ -29,9 +29,13 @@ from behavior.evidence.ingress import (
 from behavior.evidence.ledger import EvidencePage
 from behavior.evidence.record import BehaviorEvidenceLedgerEntry, BehaviorEvidenceRecord, record_to_dict
 from behavior.evidence.refs import CorrelationRef, SourceEventRef
-from behavior.persistence.codecs import decode_evidence_record, decode_ingress_receipt, encode_value
+from behavior.persistence.codecs import (
+    decode_evidence_record,
+    decode_ingress_receipt,
+    encode_value,
+    verify_projection,
+)
 from behavior.persistence.database import BehaviorDatabase
-from foundation.integrity import canonical_digest
 
 
 class _CapacitySignal(Exception):
@@ -431,9 +435,11 @@ class SQLiteBehaviorEvidenceLedger:
             "semantic_digest": record.semantic_digest,
             "content_digest": record.content_digest,
         }
-        for name, value in projected.items():
-            if row[name] != value:
-                raise BehaviorStoreError("Evidence indexed column disagrees with canonical content")
+        verify_projection(
+            row,
+            projected,
+            "Evidence indexed column disagrees with canonical content",
+        )
         self._validate_members(connection, record)
         return BehaviorEvidenceLedgerEntry(int(row["evidence_sequence"]), record)
 
@@ -505,13 +511,7 @@ class SQLiteBehaviorEvidenceLedger:
         entries = tuple(self._entry(connection, row) for row in visible)
         next_cursor = None
         if len(rows) > limit and entries:
-            next_cursor = encode_cursor(
-                {
-                    "kind": kind,
-                    "query_digest": canonical_digest(query),
-                    "sequence": entries[-1].sequence,
-                }
-            )
+            next_cursor = encode_sequence_cursor(kind, query, entries[-1].sequence)
         return entries, next_cursor
 
     @staticmethod
@@ -525,10 +525,12 @@ class SQLiteBehaviorEvidenceLedger:
     ) -> int:
         if cursor is None:
             return 0
-        data = decode_cursor(cursor)
-        if data.get("kind") != kind or data.get("query_digest") != canonical_digest(query):
-            raise ValueError("cursor does not belong to this Evidence query")
-        sequence = non_negative_int(data.get("sequence"), "cursor.sequence")
+        sequence = decode_sequence_cursor(
+            cursor,
+            kind=kind,
+            query=query,
+            subject="Evidence",
+        )
         matches = int(
             connection.execute(
                 f"SELECT COUNT(*) FROM behavior_evidence_records WHERE {where} "
@@ -566,18 +568,20 @@ class SQLiteBehaviorEvidenceLedger:
     @staticmethod
     def _decode_receipt_row(row: sqlite3.Row) -> BehaviorEvidenceIngressReceipt:
         receipt = decode_ingress_receipt(row["content_json"], row["encoded_digest"])
-        for name in (
-            "delivery_id",
-            "request_digest",
-            "adapter_name",
-            "adapter_fingerprint",
-            "capability_digest",
-            "content_digest",
-        ):
-            if row[name] != getattr(receipt, name):
-                raise BehaviorStoreError("Evidence Receipt indexed column disagrees with canonical content")
-        if row["status"] != receipt.status.value or row["recorded_at"] != utc_text(receipt.recorded_at):
-            raise BehaviorStoreError("Evidence Receipt projection disagrees with canonical content")
+        verify_projection(
+            row,
+            {
+                "delivery_id": receipt.delivery_id,
+                "request_digest": receipt.request_digest,
+                "adapter_name": receipt.adapter_name,
+                "adapter_fingerprint": receipt.adapter_fingerprint,
+                "capability_digest": receipt.capability_digest,
+                "status": receipt.status.value,
+                "recorded_at": utc_text(receipt.recorded_at),
+                "content_digest": receipt.content_digest,
+            },
+            "Evidence Receipt projection disagrees with canonical content",
+        )
         return receipt
 
     def _resolve_receipt_replay(

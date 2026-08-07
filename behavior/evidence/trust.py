@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
-from behavior._validation import positive_int
+from behavior._validation import enum_tuple, positive_int
 from behavior.evidence.content import BehaviorModality, BehaviorRecordKind, BehaviorRole
 from behavior.evidence.provenance import BehaviorOriginKind
 from foundation.integrity import canonical_digest
@@ -44,9 +44,24 @@ class BehaviorAdapterCapability:
     def __post_init__(self) -> None:
         trust = BehaviorSourceTrust(self.source_trust)
         time_mode = BehaviorTimeMode(self.time_mode)
-        origins = _enum_tuple(self.allowed_origin_kinds, BehaviorOriginKind, "allowed_origin_kinds")
-        record_kinds = _enum_tuple(self.allowed_record_kinds, BehaviorRecordKind, "allowed_record_kinds")
-        modalities = _enum_tuple(self.allowed_modalities, BehaviorModality, "allowed_modalities")
+        origins = enum_tuple(
+            self.allowed_origin_kinds,
+            "allowed_origin_kinds",
+            BehaviorOriginKind,
+            maximum_items=10_000,
+        )
+        record_kinds = enum_tuple(
+            self.allowed_record_kinds,
+            "allowed_record_kinds",
+            BehaviorRecordKind,
+            maximum_items=10_000,
+        )
+        modalities = enum_tuple(
+            self.allowed_modalities,
+            "allowed_modalities",
+            BehaviorModality,
+            maximum_items=10_000,
+        )
         if not isinstance(self.allowed_role_pairs, tuple) or not self.allowed_role_pairs:
             raise ValueError("allowed_role_pairs must be a non-empty tuple")
         role_pairs: list[RolePair] = []
@@ -105,16 +120,6 @@ class BehaviorAdapterCapability:
             and modality in self.allowed_modalities
             and (subject_role, actor_role) in self.allowed_role_pairs
         )
-
-
-def _enum_tuple(value: object, enum_type: type[Enum], field_name: str) -> tuple:
-    if not isinstance(value, tuple) or not value:
-        raise ValueError(f"{field_name} must be a non-empty tuple")
-    resolved = tuple(enum_type(item) for item in value)
-    if len(resolved) != len(set(resolved)):
-        raise ValueError(f"{field_name} must not contain duplicates")
-    return resolved
-
 
 def _validate_trust_origin(
     trust: BehaviorSourceTrust,

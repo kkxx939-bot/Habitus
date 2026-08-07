@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from behavior._validation import identifier, optional_identifier
+from behavior._validation import fingerprint_fields
 from behavior.claim.proposal import (
     ClaimKind,
     ClaimSemanticProposal,
@@ -81,23 +81,34 @@ class NormalizerFingerprint:
 
     def __post_init__(self) -> None:
         kind = ClaimNormalizerKind(self.kind)
+        (
+            normalizer_name,
+            normalizer_version,
+            pipeline_version,
+            output_schema_version,
+            model_provider,
+            model_name,
+            prompt_version,
+        ) = fingerprint_fields(
+            name=self.normalizer_name,
+            version=self.normalizer_version,
+            pipeline_version=self.pipeline_version,
+            output_schema_version=self.output_schema_version,
+            model_provider=self.model_provider,
+            model_name=self.model_name,
+            prompt_version=self.prompt_version,
+            field_prefix="normalizer",
+            model_backed=kind is ClaimNormalizerKind.MODEL,
+        )
         values = {
-            "normalizer_name": identifier(self.normalizer_name, "normalizer.name"),
-            "normalizer_version": identifier(self.normalizer_version, "normalizer.version"),
-            "pipeline_version": identifier(self.pipeline_version, "normalizer.pipeline_version"),
-            "output_schema_version": identifier(
-                self.output_schema_version,
-                "normalizer.output_schema_version",
-            ),
-            "model_provider": optional_identifier(self.model_provider, "normalizer.model_provider"),
-            "model_name": optional_identifier(self.model_name, "normalizer.model_name"),
-            "prompt_version": optional_identifier(self.prompt_version, "normalizer.prompt_version"),
+            "normalizer_name": normalizer_name,
+            "normalizer_version": normalizer_version,
+            "pipeline_version": pipeline_version,
+            "output_schema_version": output_schema_version,
+            "model_provider": model_provider,
+            "model_name": model_name,
+            "prompt_version": prompt_version,
         }
-        model_values = (values["model_provider"], values["model_name"], values["prompt_version"])
-        if kind is ClaimNormalizerKind.MODEL and any(value is None for value in model_values):
-            raise ValueError("MODEL Normalizer fingerprint requires model and prompt fields")
-        if kind is ClaimNormalizerKind.DETERMINISTIC and any(value is not None for value in model_values):
-            raise ValueError("DETERMINISTIC Normalizer cannot declare model fields")
         for name, value in values.items():
             object.__setattr__(self, name, value)
         object.__setattr__(self, "kind", kind)

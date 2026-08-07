@@ -337,7 +337,19 @@ def test_behavior_model_client_and_processing_lock_boundaries_are_mechanical() -
     assert 'getattr(normalizer, "model_client", None)' in runtime_source
     assert "isinstance(normalizer, StructuredModelClaimNormalizer)" not in runtime_source
     assert "async with self.processing_lock.acquire(identity)" in service_source
-    assert "await normalizer.normalize(record)" in service_source
+    service_tree = ast.parse(service_source)
+    normalize_route = next(
+        node
+        for node in ast.walk(service_tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_normalize_route"
+    )
+    assert any(
+        isinstance(node, ast.Await)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "normalize"
+        for node in ast.walk(normalize_route)
+    )
     assert "publish_route(attempt, claims, receipt)" in service_source
 
 

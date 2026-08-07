@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Callable, Mapping
 from typing import Any, TypeVar
 
-from behavior._validation import parse_utc, require_fields, strict_fields
+from behavior._validation import parse_utc, strict_object
 from behavior.claim.model import (
     BehaviorClaim,
     DerivationClass,
@@ -41,6 +42,15 @@ T = TypeVar("T")
 def encode_value(value: object, encoder: Callable[[Any], Mapping[str, object]]) -> tuple[str, str]:
     text = canonical_json(encoder(value))
     return text, text_digest(text)
+
+
+def verify_projection(
+    row: sqlite3.Row,
+    expected: Mapping[str, object],
+    error_message: str,
+) -> None:
+    if any(row[name] != value for name, value in expected.items()):
+        raise BehaviorStoreError(error_message)
 
 
 def decode_evidence_record(text: str, encoded_digest: str) -> BehaviorEvidenceRecord:
@@ -264,8 +274,7 @@ def _decode(text: str, encoded_digest: str, expected: frozenset[str] | set[str])
     if canonical_json(value) != text:
         raise BehaviorStoreError("Behavior content JSON is not canonical")
     try:
-        data = strict_fields(value, "durable_value", frozenset(expected))
-        require_fields(data, "durable_value", frozenset(expected))
+        data = strict_object(value, "durable_value", frozenset(expected))
     except (TypeError, ValueError) as exc:
         raise BehaviorStoreError("Behavior durable value schema has drifted") from exc
     return data
@@ -302,4 +311,5 @@ __all__ = [
     "decode_ingress_receipt",
     "decode_normalization_receipt",
     "encode_value",
+    "verify_projection",
 ]

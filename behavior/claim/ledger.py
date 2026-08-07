@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from behavior.claim.model import BehaviorClaim, BehaviorClaimLedgerEntry
 from behavior.claim.receipt import ClaimNormalizationAttempt, ClaimNormalizationReceipt
@@ -11,6 +11,7 @@ from behavior.claim.receipt import ClaimNormalizationAttempt, ClaimNormalization
 ClaimPage = tuple[tuple[BehaviorClaimLedgerEntry, ...], str | None]
 
 
+@runtime_checkable
 class BehaviorClaimLedger(Protocol):
     def publish_route(
         self,

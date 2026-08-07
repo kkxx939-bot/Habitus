@@ -11,13 +11,13 @@ from behavior._validation import (
     bounded_text,
     external_reference,
     identifier,
+    identifier_tuple,
     json_snapshot,
     json_value_snapshot,
     optional_bounded_text,
     optional_identifier,
-    require_fields,
     sha256_digest,
-    strict_fields,
+    strict_object,
 )
 from behavior.config import BehaviorEvidenceConfig
 
@@ -289,12 +289,11 @@ class FreeTextSemanticPayload:
     def __post_init__(self) -> None:
         object.__setattr__(self, "text", bounded_text(self.text, "payload.text", maximum=_ABSOLUTE_CHARS))
         object.__setattr__(self, "language", optional_identifier(self.language, "payload.language", maximum=64))
-        if not isinstance(self.labels, tuple) or len(self.labels) > _ABSOLUTE_ITEMS:
-            raise TypeError("payload.labels must be a bounded tuple")
-        labels = tuple(identifier(item, f"payload.labels[{index}]") for index, item in enumerate(self.labels))
-        if len(labels) != len(set(labels)):
-            raise ValueError("payload.labels must not contain duplicates")
-        object.__setattr__(self, "labels", labels)
+        object.__setattr__(
+            self,
+            "labels",
+            identifier_tuple(self.labels, "payload.labels", maximum_items=_ABSOLUTE_ITEMS),
+        )
 
 
 BehaviorPayload: TypeAlias = (
@@ -311,6 +310,70 @@ BehaviorPayload: TypeAlias = (
     | FeedbackPayload
     | FreeTextSemanticPayload
 )
+
+
+@dataclass(frozen=True)
+class _PayloadContract:
+    payload_type: type[Any]
+    fields: frozenset[str]
+
+
+_PAYLOAD_CONTRACTS = {
+    "ACTIVITY_SEGMENT": _PayloadContract(
+        ActivitySegmentPayload,
+        frozenset({"activity", "phase_hint", "attributes"}),
+    ),
+    "UTTERANCE_SEGMENT": _PayloadContract(
+        UtteranceSegmentPayload,
+        frozenset({"text", "language", "interaction_mode", "communication_channel"}),
+    ),
+    "STATE_ASSERTION": _PayloadContract(
+        StateAssertionPayload,
+        frozenset({"state_name", "value", "attributes"}),
+    ),
+    "STATE_TRANSITION": _PayloadContract(
+        StateTransitionPayload,
+        frozenset({"state_name", "before", "after", "attributes"}),
+    ),
+    "INTERACTION_SEGMENT": _PayloadContract(
+        InteractionSegmentPayload,
+        frozenset({"interaction_type", "counterparty_role", "phase_hint", "attributes"}),
+    ),
+    "ACTION_EVENT": _PayloadContract(
+        ActionEventPayload,
+        frozenset({"action_name", "phase", "result", "capability_ref", "target_ref", "attributes"}),
+    ),
+    "TOOL_CALL_EVENT": _PayloadContract(
+        ToolCallPayload,
+        frozenset({"tool_name", "tool_call_id", "arguments_digest", "arguments_summary", "capability_ref"}),
+    ),
+    "TOOL_RESULT_EVENT": _PayloadContract(
+        ToolResultPayload,
+        frozenset({"tool_name", "tool_call_id", "status", "result_ref", "result_digest", "result_summary"}),
+    ),
+    "ENVIRONMENT_CHANGE": _PayloadContract(
+        EnvironmentChangePayload,
+        frozenset({"predicate", "before", "after", "attributes"}),
+    ),
+    "COVERAGE_INTERVAL": _PayloadContract(
+        CoverageIntervalPayload,
+        frozenset({"modality", "coverage_status", "coverage_scope_ref", "reason"}),
+    ),
+    "FEEDBACK_EVENT": _PayloadContract(
+        FeedbackPayload,
+        frozenset({"feedback_kind", "target_ref", "polarity", "explicit_text_ref", "attributes"}),
+    ),
+    "FREE_TEXT_SEMANTIC": _PayloadContract(
+        FreeTextSemanticPayload,
+        frozenset({"text", "language", "labels"}),
+    ),
+}
+
+
+def payload_type_for(record_kind: BehaviorRecordKind) -> type[Any]:
+    from behavior.evidence.content import BehaviorRecordKind
+
+    return _PAYLOAD_CONTRACTS[BehaviorRecordKind(record_kind).value].payload_type
 
 
 def payload_to_dict(payload: BehaviorPayload) -> dict[str, Any]:
@@ -394,36 +457,7 @@ def payload_from_dict(
     from behavior.evidence.content import BehaviorModality, BehaviorRecordKind, BehaviorRole
 
     kind = BehaviorRecordKind(record_kind)
-    fields: dict[BehaviorRecordKind, frozenset[str]] = {
-        BehaviorRecordKind.ACTIVITY_SEGMENT: frozenset({"activity", "phase_hint", "attributes"}),
-        BehaviorRecordKind.UTTERANCE_SEGMENT: frozenset(
-            {"text", "language", "interaction_mode", "communication_channel"}
-        ),
-        BehaviorRecordKind.STATE_ASSERTION: frozenset({"state_name", "value", "attributes"}),
-        BehaviorRecordKind.STATE_TRANSITION: frozenset({"state_name", "before", "after", "attributes"}),
-        BehaviorRecordKind.INTERACTION_SEGMENT: frozenset(
-            {"interaction_type", "counterparty_role", "phase_hint", "attributes"}
-        ),
-        BehaviorRecordKind.ACTION_EVENT: frozenset(
-            {"action_name", "phase", "result", "capability_ref", "target_ref", "attributes"}
-        ),
-        BehaviorRecordKind.TOOL_CALL_EVENT: frozenset(
-            {"tool_name", "tool_call_id", "arguments_digest", "arguments_summary", "capability_ref"}
-        ),
-        BehaviorRecordKind.TOOL_RESULT_EVENT: frozenset(
-            {"tool_name", "tool_call_id", "status", "result_ref", "result_digest", "result_summary"}
-        ),
-        BehaviorRecordKind.ENVIRONMENT_CHANGE: frozenset({"predicate", "before", "after", "attributes"}),
-        BehaviorRecordKind.COVERAGE_INTERVAL: frozenset(
-            {"modality", "coverage_status", "coverage_scope_ref", "reason"}
-        ),
-        BehaviorRecordKind.FEEDBACK_EVENT: frozenset(
-            {"feedback_kind", "target_ref", "polarity", "explicit_text_ref", "attributes"}
-        ),
-        BehaviorRecordKind.FREE_TEXT_SEMANTIC: frozenset({"text", "language", "labels"}),
-    }
-    data = strict_fields(value, "payload", fields[kind])
-    require_fields(data, "payload", fields[kind])
+    data = strict_object(value, "payload", _PAYLOAD_CONTRACTS[kind.value].fields)
     if kind is BehaviorRecordKind.ACTIVITY_SEGMENT:
         return ActivitySegmentPayload(data["activity"], PhaseHint(data["phase_hint"]), data["attributes"])
     if kind is BehaviorRecordKind.UTTERANCE_SEGMENT:
@@ -527,5 +561,6 @@ __all__ = [
     "UtteranceSegmentPayload",
     "payload_from_dict",
     "payload_to_dict",
+    "payload_type_for",
     "validate_payload_capacity",
 ]

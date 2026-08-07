@@ -161,26 +161,6 @@ class RuntimeBehavior:
     processing_lock: ProcessingLock
 
     def __post_init__(self) -> None:
-        if not isinstance(self.database, BehaviorDatabase):
-            raise TypeError("database must be BehaviorDatabase")
-        if not isinstance(self.evidence_adapters, BehaviorSemanticAdapterRegistry):
-            raise TypeError("evidence_adapters must be BehaviorSemanticAdapterRegistry")
-        if not callable(getattr(self.evidence_ledger, "append_delivery", None)):
-            raise TypeError("evidence_ledger must implement BehaviorEvidenceLedger")
-        if not isinstance(self.evidence_ingress, BehaviorEvidenceIngressService):
-            raise TypeError("evidence_ingress must be BehaviorEvidenceIngressService")
-        if not callable(getattr(self.claim_ledger, "publish_route", None)):
-            raise TypeError("claim_ledger must implement BehaviorClaimLedger")
-        if not isinstance(self.claim_normalizers, ClaimNormalizerRegistry):
-            raise TypeError("claim_normalizers must be ClaimNormalizerRegistry")
-        if not isinstance(self.claim_planner, ClaimNormalizationPlanner):
-            raise TypeError("claim_planner must be ClaimNormalizationPlanner")
-        if not isinstance(self.claim_normalization, ClaimNormalizationService):
-            raise TypeError("claim_normalization must be ClaimNormalizationService")
-        if not isinstance(self.structured_chat, StructuredChatClient):
-            raise TypeError("structured_chat must be StructuredChatClient")
-        if not callable(getattr(self.processing_lock, "acquire", None)):
-            raise TypeError("processing_lock must implement ProcessingLock")
         if self.evidence_ingress.ledger is not self.evidence_ledger:
             raise ValueError("Behavior ingress must use the shared Evidence Ledger")
         if self.evidence_ingress.adapters is not self.evidence_adapters:

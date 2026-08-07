@@ -7,8 +7,8 @@ from collections.abc import Mapping
 from datetime import datetime
 
 from behavior._validation import (
-    decode_cursor,
-    encode_cursor,
+    decode_sequence_cursor,
+    encode_sequence_cursor,
     identifier,
     non_negative_int,
     sha256_digest,
@@ -43,9 +43,9 @@ from behavior.persistence.codecs import (
     decode_evidence_record,
     decode_normalization_receipt,
     encode_value,
+    verify_projection,
 )
 from behavior.persistence.database import BehaviorDatabase
-from foundation.integrity import canonical_digest
 
 
 class SQLiteBehaviorClaimLedger:
@@ -308,11 +308,14 @@ class SQLiteBehaviorClaimLedger:
         if row is None:
             raise BehaviorClaimConflictError("Claim publication references missing Evidence")
         record = decode_evidence_record(row["content_json"], row["encoded_digest"])
-        if (
-            row["evidence_record_id"] != record.evidence_record_id
-            or row["content_digest"] != record.content_digest
-        ):
-            raise BehaviorStoreError("Evidence binding projection disagrees with canonical content")
+        verify_projection(
+            row,
+            {
+                "evidence_record_id": record.evidence_record_id,
+                "content_digest": record.content_digest,
+            },
+            "Evidence binding projection disagrees with canonical content",
+        )
         content = record.semantic_content
         for claim in claims:
             expected_effective = (
@@ -489,9 +492,11 @@ class SQLiteBehaviorClaimLedger:
             "created_at": utc_text(claim.created_at),
             "content_digest": claim.content_digest,
         }
-        for name, value in indexed.items():
-            if row[name] != value:
-                raise BehaviorStoreError("Claim indexed column disagrees with canonical content")
+        verify_projection(
+            row,
+            indexed,
+            "Claim indexed column disagrees with canonical content",
+        )
         if abs(float(row["effective_confidence"]) - claim.effective_confidence) > 1e-12:
             raise BehaviorStoreError("Claim confidence projection disagrees with canonical content")
         return BehaviorClaimLedgerEntry(int(row["claim_sequence"]), claim)
@@ -512,9 +517,11 @@ class SQLiteBehaviorClaimLedger:
             "completed_at": utc_text(attempt.completed_at),
             "content_digest": attempt.content_digest,
         }
-        for name, value in indexed.items():
-            if row[name] != value:
-                raise BehaviorStoreError("Normalization Attempt index disagrees with canonical content")
+        verify_projection(
+            row,
+            indexed,
+            "Normalization Attempt index disagrees with canonical content",
+        )
         return attempt
 
     def _decode_receipt(
@@ -537,9 +544,11 @@ class SQLiteBehaviorClaimLedger:
             "publication_recorded_at": utc_text(receipt.publication_recorded_at),
             "content_digest": receipt.content_digest,
         }
-        for name, value in indexed.items():
-            if row[name] != value:
-                raise BehaviorStoreError("Normalization Receipt index disagrees with canonical content")
+        verify_projection(
+            row,
+            indexed,
+            "Normalization Receipt index disagrees with canonical content",
+        )
         attempt_rows = connection.execute(
             "SELECT attempt.* FROM claim_receipt_members AS member "
             "JOIN claim_normalization_attempts AS attempt ON attempt.attempt_id=member.attempt_id "
@@ -593,13 +602,7 @@ class SQLiteBehaviorClaimLedger:
             entries = tuple(self._claim_entry(row) for row in visible)
             next_cursor = None
             if len(rows) > bounded and entries:
-                next_cursor = encode_cursor(
-                    {
-                        "kind": kind,
-                        "query_digest": canonical_digest(query),
-                        "sequence": entries[-1].sequence,
-                    }
-                )
+                next_cursor = encode_sequence_cursor(kind, query, entries[-1].sequence)
             return entries, next_cursor
 
     @staticmethod
@@ -613,10 +616,12 @@ class SQLiteBehaviorClaimLedger:
     ) -> int:
         if cursor is None:
             return 0
-        data = decode_cursor(cursor)
-        if data.get("kind") != kind or data.get("query_digest") != canonical_digest(query):
-            raise ValueError("cursor does not belong to this Claim query")
-        sequence = non_negative_int(data.get("sequence"), "cursor.sequence")
+        sequence = decode_sequence_cursor(
+            cursor,
+            kind=kind,
+            query=query,
+            subject="Claim",
+        )
         matches = int(
             connection.execute(
                 f"SELECT COUNT(*) FROM behavior_claims WHERE {where} AND claim_sequence=?",

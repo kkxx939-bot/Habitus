@@ -14,27 +14,18 @@ from behavior._validation import (
     non_negative_int,
     optional_identifier,
     parse_utc,
-    require_fields,
-    strict_fields,
+    strict_object,
     strict_utc,
+    typed_tuple,
     utc_text,
 )
 from behavior.evidence.payloads import (
-    ActionEventPayload,
-    ActivitySegmentPayload,
     BehaviorPayload,
     CoverageIntervalPayload,
-    EnvironmentChangePayload,
-    FeedbackPayload,
-    FreeTextSemanticPayload,
     InteractionSegmentPayload,
-    StateAssertionPayload,
-    StateTransitionPayload,
-    ToolCallPayload,
-    ToolResultPayload,
-    UtteranceSegmentPayload,
     payload_from_dict,
     payload_to_dict,
+    payload_type_for,
 )
 from behavior.evidence.refs import EvidenceKind, EvidenceReference
 
@@ -91,21 +82,6 @@ class BehaviorRecordKind(str, Enum):
     FEEDBACK_EVENT = "FEEDBACK_EVENT"
     FREE_TEXT_SEMANTIC = "FREE_TEXT_SEMANTIC"
 
-
-_PAYLOAD_TYPES: dict[BehaviorRecordKind, type[BehaviorPayload]] = {
-    BehaviorRecordKind.ACTIVITY_SEGMENT: ActivitySegmentPayload,
-    BehaviorRecordKind.UTTERANCE_SEGMENT: UtteranceSegmentPayload,
-    BehaviorRecordKind.STATE_ASSERTION: StateAssertionPayload,
-    BehaviorRecordKind.STATE_TRANSITION: StateTransitionPayload,
-    BehaviorRecordKind.INTERACTION_SEGMENT: InteractionSegmentPayload,
-    BehaviorRecordKind.ACTION_EVENT: ActionEventPayload,
-    BehaviorRecordKind.TOOL_CALL_EVENT: ToolCallPayload,
-    BehaviorRecordKind.TOOL_RESULT_EVENT: ToolResultPayload,
-    BehaviorRecordKind.ENVIRONMENT_CHANGE: EnvironmentChangePayload,
-    BehaviorRecordKind.COVERAGE_INTERVAL: CoverageIntervalPayload,
-    BehaviorRecordKind.FEEDBACK_EVENT: FeedbackPayload,
-    BehaviorRecordKind.FREE_TEXT_SEMANTIC: FreeTextSemanticPayload,
-}
 
 _SELF_ROLES = frozenset({BehaviorRole.USER, BehaviorRole.AGENT, BehaviorRole.ROBOT})
 _STATE_SUBJECTS = frozenset(
@@ -210,18 +186,18 @@ class BehaviorSemanticContent:
             self.event_time_uncertainty_ms,
             "semantic_content.event_time_uncertainty_ms",
         )
-        if not isinstance(self.payload, _PAYLOAD_TYPES[kind]):
+        if not isinstance(self.payload, payload_type_for(kind)):
             raise TypeError(f"{kind.value} has the wrong payload type")
         validate_record_roles(kind, subject, actor, self.payload)
-        if not isinstance(self.evidence_refs, tuple) or any(
-            not isinstance(reference, EvidenceReference) for reference in self.evidence_refs
-        ):
-            raise TypeError("semantic_content.evidence_refs must contain EvidenceReference values")
-        if len(set(self.evidence_refs)) != len(self.evidence_refs):
-            raise ValueError("semantic_content.evidence_refs must not contain duplicates")
+        evidence_refs = typed_tuple(
+            self.evidence_refs,
+            "semantic_content.evidence_refs",
+            EvidenceReference,
+            maximum_items=10_000,
+        )
         expanded_start = start - timedelta(milliseconds=uncertainty)
         expanded_end = end + timedelta(milliseconds=uncertainty)
-        for reference in self.evidence_refs:
+        for reference in evidence_refs:
             if reference.event_time_end < expanded_start or reference.event_time_start > expanded_end:
                 raise ValueError("EvidenceReference time does not overlap semantic time uncertainty")
         if isinstance(self.payload, CoverageIntervalPayload) and self.payload.modality is not modality:
@@ -303,8 +279,7 @@ def content_from_dict(value: object) -> BehaviorSemanticContent:
             "schema_version",
         }
     )
-    data = strict_fields(value, "semantic_content", fields)
-    require_fields(data, "semantic_content", fields)
+    data = strict_object(value, "semantic_content", fields)
     kind = BehaviorRecordKind(data["record_kind"])
     object_refs = _tuple_value(data["object_refs"], "semantic_content.object_refs")
     entity_refs = _tuple_value(data["entity_refs"], "semantic_content.entity_refs")
@@ -363,8 +338,7 @@ def _evidence_reference_from_dict(value: object) -> EvidenceReference:
             "source_system_ref",
         }
     )
-    data = strict_fields(value, "evidence_reference", fields)
-    require_fields(data, "evidence_reference", fields)
+    data = strict_object(value, "evidence_reference", fields)
     return EvidenceReference(
         reference=data["reference"],
         evidence_kind=EvidenceKind(data["evidence_kind"]),

@@ -5,8 +5,9 @@ from __future__ import annotations
 import time
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from behavior.claim.binder import ClaimBinder
 from behavior.claim.ledger import BehaviorClaimLedger, ClaimPage
@@ -49,7 +50,21 @@ from behavior.evidence.record import BehaviorEvidenceRecord
 from foundation.integrity import canonical_digest
 from foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
 
+_FAILURE_RULES: tuple[tuple[type[Exception], AttemptStatus, str, bool], ...] = (
+    (ClaimModelTransportError, AttemptStatus.FAILED_RETRYABLE, "MODEL_TRANSPORT", True),
+    (ClaimModelContentSafetyError, AttemptStatus.FAILED_POLICY, "MODEL_CONTENT_SAFETY", False),
+    (ClaimModelSchemaError, AttemptStatus.FAILED_NON_RETRYABLE, "MODEL_SCHEMA", False),
+    (ClaimModelInputError, AttemptStatus.FAILED_NON_RETRYABLE, "MODEL_INPUT", False),
+    (ClaimModelAuthenticationError, AttemptStatus.FAILED_NON_RETRYABLE, "MODEL_AUTHENTICATION", False),
+    (ClaimModelPermissionError, AttemptStatus.FAILED_NON_RETRYABLE, "MODEL_PERMISSION", False),
+    (ClaimModelConfigurationError, AttemptStatus.FAILED_NON_RETRYABLE, "MODEL_CONFIGURATION", False),
+    (ClaimModelQuotaError, AttemptStatus.FAILED_NON_RETRYABLE, "MODEL_QUOTA", False),
+    (ClaimCompatibilityError, AttemptStatus.FAILED_POLICY, "COMPATIBILITY_POLICY", False),
+    (BehaviorClaimSchemaError, AttemptStatus.FAILED_NON_RETRYABLE, "CLAIM_SCHEMA", False),
+)
 
+
+@runtime_checkable
 class ProcessingLock(Protocol):
     def acquire(self, processing_identity: str) -> AbstractAsyncContextManager[object]: ...
 
@@ -89,9 +104,9 @@ class ClaimNormalizationService:
         clock: Clock | None = None,
         observer: Observer | None = None,
     ) -> None:
-        if not callable(getattr(evidence_ledger, "read", None)):
+        if not isinstance(evidence_ledger, BehaviorEvidenceLedger):
             raise TypeError("evidence_ledger must implement BehaviorEvidenceLedger")
-        if not callable(getattr(claim_ledger, "publish_route", None)):
+        if not isinstance(claim_ledger, BehaviorClaimLedger):
             raise TypeError("claim_ledger must implement BehaviorClaimLedger")
         if not isinstance(normalizers, ClaimNormalizerRegistry):
             raise TypeError("normalizers must be ClaimNormalizerRegistry")
@@ -99,7 +114,7 @@ class ClaimNormalizationService:
             raise TypeError("planner must be ClaimNormalizationPlanner")
         if not isinstance(binder, ClaimBinder):
             raise TypeError("binder must be ClaimBinder")
-        if not callable(getattr(processing_lock, "acquire", None)):
+        if not isinstance(processing_lock, ProcessingLock):
             raise TypeError("processing_lock must implement ProcessingLock")
         self.evidence_ledger = evidence_ledger
         self.claim_ledger = claim_ledger
@@ -303,109 +318,47 @@ class ClaimNormalizationService:
             elif retry:
                 raise ClaimNormalizationConflictError("Enhancement has no retryable failed Attempt")
             attempt_number = 1 if latest is None else latest.attempt_number + 1
-            normalizer = self.normalizers.get(route.normalizer_name)
             started_at = self.clock.now()
             try:
-                proposals = await normalizer.normalize(record)
-                if not isinstance(proposals, tuple) or any(
-                    not isinstance(proposal, ClaimSemanticProposal) for proposal in proposals
-                ):
-                    raise BehaviorClaimSchemaError("Normalizer returned an invalid Proposal sequence")
-                if len(proposals) > self.planner.config.max_claims_per_record:
-                    raise BehaviorClaimSchemaError("Normalizer exceeded Claim count capacity")
-                alternative_counts: dict[str, int] = {}
-                for proposal in proposals:
-                    group = proposal.local_alternative_group_id
-                    if group is None:
-                        continue
-                    alternative_counts[group] = alternative_counts.get(group, 0) + 1
-                    if (
-                        alternative_counts[group]
-                        > self.planner.config.max_alternative_group_size
-                    ):
-                        raise BehaviorClaimSchemaError(
-                            "Normalizer exceeded alternative group capacity"
-                        )
-                claims = tuple(
-                    self.binder.bind(
-                        record,
-                        proposal,
-                        normalizer_fingerprint=route.normalizer_fingerprint,
-                        normalizer_kind=route.normalizer_kind,
-                        derivation_class=(
-                            DerivationClass.DETERMINISTIC
-                            if route.normalizer_kind is ClaimNormalizerKind.DETERMINISTIC
-                            else DerivationClass.MODEL
-                        ),
-                        created_at=self.clock.now(),
-                    )
-                    for proposal in proposals
-                )
-            except Exception as exc:
-                status, code, retryable = self._failure(exc)
-                completed_at = self.clock.now()
-                attempt = ClaimNormalizationAttempt(
-                    processing_identity=identity,
-                    evidence_record_id=record.evidence_record_id,
-                    normalizer_name=route.normalizer_name,
-                    normalizer_fingerprint=route.normalizer_fingerprint,
-                    lane=route.lane,
+                proposals, claims = await self._normalize_route(record, route)
+            except (
+                BehaviorClaimSchemaError,
+                ClaimCompatibilityError,
+                ClaimModelAuthenticationError,
+                ClaimModelConfigurationError,
+                ClaimModelContentSafetyError,
+                ClaimModelInputError,
+                ClaimModelPermissionError,
+                ClaimModelQuotaError,
+                ClaimModelSchemaError,
+                ClaimModelTransportError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                degradation = self._publish_failure(
+                    identity=identity,
+                    record=record,
+                    route=route,
                     attempt_number=attempt_number,
-                    status=status,
-                    proposal_digest=None,
-                    claim_count=0,
-                    error_code=code,
-                    retryable=retryable,
                     started_at=started_at,
-                    completed_at=completed_at,
+                    started_metric=started_metric,
+                    error=exc,
                 )
-                self.claim_ledger.publish_failed_attempt(attempt)
                 if route.lane is NormalizationLane.CORE:
-                    self._observe("claim_core_completed", started_metric, record, None, code)
                     raise ClaimNormalizationError("Deterministic Core normalization failed") from exc
-                self._observe("claim_enhancement_failed", started_metric, record, None, code, retryable)
-                return None, ClaimProcessingDegradation(route.normalizer_name, code, retryable)
-            completed_at = self.clock.now()
-            abstained = not proposals
-            attempt_status = AttemptStatus.ABSTAINED if abstained else AttemptStatus.COMPLETED
-            proposal_digest = canonical_digest(
-                [proposal_to_dict(item) for item in proposals]
-            )
-            attempt = ClaimNormalizationAttempt(
-                processing_identity=identity,
-                evidence_record_id=record.evidence_record_id,
-                normalizer_name=route.normalizer_name,
-                normalizer_fingerprint=route.normalizer_fingerprint,
-                lane=route.lane,
+                return None, degradation
+            attempt, receipt = self._success_publication(
+                identity=identity,
+                record=record,
+                plan=plan,
+                route=route,
                 attempt_number=attempt_number,
-                status=attempt_status,
-                proposal_digest=proposal_digest,
-                claim_count=len(claims),
-                error_code=None,
-                retryable=False,
                 started_at=started_at,
-                completed_at=completed_at,
-            )
-            publication_at = self.clock.now()
-            receipt = ClaimNormalizationReceipt(
-                processing_identity=identity,
-                evidence_record_id=record.evidence_record_id,
-                lane=route.lane,
-                normalizer_fingerprint=route.normalizer_fingerprint,
-                planner_policy_digest=plan.planner_policy_digest,
-                compatibility_policy_digest=self.binder.compatibility.digest,
-                binding_policy_digest=self.binder.binding.digest,
-                confidence_policy_digest=self.binder.confidence.digest,
-                status=ReceiptStatus.ABSTAINED if abstained else ReceiptStatus.COMPLETED,
-                attempt_ids=tuple(
-                    attempt_identity(identity, number)
-                    for number in range(1, attempt.attempt_number + 1)
-                ),
-                claim_ids=tuple(claim.claim_id for claim in claims),
-                completed_at=completed_at,
-                publication_recorded_at=publication_at,
+                proposals=proposals,
+                claims=claims,
             )
             stored, reused = self.claim_ledger.publish_route(attempt, claims, receipt)
+            abstained = not proposals
             if route.lane is NormalizationLane.CORE:
                 operation = "claim_core_reused" if reused else "claim_core_completed"
             elif abstained:
@@ -416,6 +369,132 @@ class ClaimNormalizationService:
                 operation = "claim_enhancement_completed"
             self._observe(operation, started_metric, record, stored, None)
             return stored, None
+
+    async def _normalize_route(
+        self,
+        record: BehaviorEvidenceRecord,
+        route: ClaimNormalizationRoute,
+    ) -> tuple[tuple[ClaimSemanticProposal, ...], tuple[BehaviorClaim, ...]]:
+        proposals = await self.normalizers.get(route.normalizer_name).normalize(record)
+        self._validate_proposals(proposals)
+        derivation = (
+            DerivationClass.DETERMINISTIC
+            if route.normalizer_kind is ClaimNormalizerKind.DETERMINISTIC
+            else DerivationClass.MODEL
+        )
+        claims = tuple(
+            self.binder.bind(
+                record,
+                proposal,
+                normalizer_fingerprint=route.normalizer_fingerprint,
+                normalizer_kind=route.normalizer_kind,
+                derivation_class=derivation,
+                created_at=self.clock.now(),
+            )
+            for proposal in proposals
+        )
+        return proposals, claims
+
+    def _validate_proposals(self, proposals: object) -> None:
+        if not isinstance(proposals, tuple) or any(
+            not isinstance(proposal, ClaimSemanticProposal) for proposal in proposals
+        ):
+            raise BehaviorClaimSchemaError("Normalizer returned an invalid Proposal sequence")
+        if len(proposals) > self.planner.config.max_claims_per_record:
+            raise BehaviorClaimSchemaError("Normalizer exceeded Claim count capacity")
+        alternative_counts: dict[str, int] = {}
+        for proposal in proposals:
+            group = proposal.local_alternative_group_id
+            if group is None:
+                continue
+            alternative_counts[group] = alternative_counts.get(group, 0) + 1
+            if alternative_counts[group] > self.planner.config.max_alternative_group_size:
+                raise BehaviorClaimSchemaError("Normalizer exceeded alternative group capacity")
+
+    def _publish_failure(
+        self,
+        *,
+        identity: str,
+        record: BehaviorEvidenceRecord,
+        route: ClaimNormalizationRoute,
+        attempt_number: int,
+        started_at: datetime,
+        started_metric: float,
+        error: Exception,
+    ) -> ClaimProcessingDegradation:
+        status, code, retryable = self._failure(error)
+        attempt = ClaimNormalizationAttempt(
+            processing_identity=identity,
+            evidence_record_id=record.evidence_record_id,
+            normalizer_name=route.normalizer_name,
+            normalizer_fingerprint=route.normalizer_fingerprint,
+            lane=route.lane,
+            attempt_number=attempt_number,
+            status=status,
+            proposal_digest=None,
+            claim_count=0,
+            error_code=code,
+            retryable=retryable,
+            started_at=started_at,
+            completed_at=self.clock.now(),
+        )
+        self.claim_ledger.publish_failed_attempt(attempt)
+        operation = (
+            "claim_core_completed"
+            if route.lane is NormalizationLane.CORE
+            else "claim_enhancement_failed"
+        )
+        self._observe(operation, started_metric, record, None, code, retryable)
+        return ClaimProcessingDegradation(route.normalizer_name, code, retryable)
+
+    def _success_publication(
+        self,
+        *,
+        identity: str,
+        record: BehaviorEvidenceRecord,
+        plan: ClaimNormalizationPlan,
+        route: ClaimNormalizationRoute,
+        attempt_number: int,
+        started_at: datetime,
+        proposals: tuple[ClaimSemanticProposal, ...],
+        claims: tuple[BehaviorClaim, ...],
+    ) -> tuple[ClaimNormalizationAttempt, ClaimNormalizationReceipt]:
+        completed_at = self.clock.now()
+        abstained = not proposals
+        attempt = ClaimNormalizationAttempt(
+            processing_identity=identity,
+            evidence_record_id=record.evidence_record_id,
+            normalizer_name=route.normalizer_name,
+            normalizer_fingerprint=route.normalizer_fingerprint,
+            lane=route.lane,
+            attempt_number=attempt_number,
+            status=AttemptStatus.ABSTAINED if abstained else AttemptStatus.COMPLETED,
+            proposal_digest=canonical_digest([proposal_to_dict(item) for item in proposals]),
+            claim_count=len(claims),
+            error_code=None,
+            retryable=False,
+            started_at=started_at,
+            completed_at=completed_at,
+        )
+        receipt = ClaimNormalizationReceipt(
+            processing_identity=identity,
+            evidence_record_id=record.evidence_record_id,
+            lane=route.lane,
+            normalizer_fingerprint=route.normalizer_fingerprint,
+            planner_policy_digest=plan.planner_policy_digest,
+            compatibility_policy_digest=self.binder.compatibility.digest,
+            binding_policy_digest=self.binder.binding.digest,
+            confidence_policy_digest=self.binder.confidence.digest,
+            status=ReceiptStatus.ABSTAINED if abstained else ReceiptStatus.COMPLETED,
+            attempt_ids=tuple(
+                attempt_identity(identity, number)
+                for number in range(1, attempt.attempt_number + 1)
+            ),
+            claim_ids=tuple(claim.claim_id for claim in claims),
+            completed_at=completed_at,
+            publication_recorded_at=self.clock.now(),
+        )
+        return attempt, receipt
 
     def _core_identity(self, record: BehaviorEvidenceRecord, plan: ClaimNormalizationPlan) -> str:
         fingerprint = (
@@ -451,26 +530,9 @@ class ClaimNormalizationService:
 
     @staticmethod
     def _failure(exc: Exception) -> tuple[AttemptStatus, str, bool]:
-        if isinstance(exc, ClaimModelTransportError):
-            return AttemptStatus.FAILED_RETRYABLE, "MODEL_TRANSPORT", True
-        if isinstance(exc, ClaimModelContentSafetyError):
-            return AttemptStatus.FAILED_POLICY, "MODEL_CONTENT_SAFETY", False
-        if isinstance(exc, ClaimModelSchemaError):
-            return AttemptStatus.FAILED_NON_RETRYABLE, "MODEL_SCHEMA", False
-        if isinstance(exc, ClaimModelInputError):
-            return AttemptStatus.FAILED_NON_RETRYABLE, "MODEL_INPUT", False
-        if isinstance(exc, ClaimModelAuthenticationError):
-            return AttemptStatus.FAILED_NON_RETRYABLE, "MODEL_AUTHENTICATION", False
-        if isinstance(exc, ClaimModelPermissionError):
-            return AttemptStatus.FAILED_NON_RETRYABLE, "MODEL_PERMISSION", False
-        if isinstance(exc, ClaimModelConfigurationError):
-            return AttemptStatus.FAILED_NON_RETRYABLE, "MODEL_CONFIGURATION", False
-        if isinstance(exc, ClaimModelQuotaError):
-            return AttemptStatus.FAILED_NON_RETRYABLE, "MODEL_QUOTA", False
-        if isinstance(exc, ClaimCompatibilityError):
-            return AttemptStatus.FAILED_POLICY, "COMPATIBILITY_POLICY", False
-        if isinstance(exc, BehaviorClaimSchemaError):
-            return AttemptStatus.FAILED_NON_RETRYABLE, "CLAIM_SCHEMA", False
+        for error_type, status, code, retryable in _FAILURE_RULES:
+            if isinstance(exc, error_type):
+                return status, code, retryable
         return AttemptStatus.FAILED_NON_RETRYABLE, "NORMALIZATION_ERROR", False
 
     def _observe(
