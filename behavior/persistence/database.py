@@ -81,6 +81,3 @@ class BehaviorDatabase:
 
     def close(self) -> None:
         self.connection.close()
-
-
-__all__ = ["BehaviorDatabase"]

@@ -16,34 +16,27 @@ from behavior._validation import (
     utc_text,
 )
 from behavior.claim.ledger import ClaimPage
-from behavior.claim.model import (
-    BehaviorClaim,
-    BehaviorClaimLedgerEntry,
-    DerivationClass,
-    claim_to_dict,
-    source_epistemic_class,
-)
+from behavior.claim.model import BehaviorClaim, BehaviorClaimLedgerEntry, claim_to_dict
+from behavior.claim.publication import ClaimPublication
 from behavior.claim.receipt import (
     AttemptStatus,
     ClaimNormalizationAttempt,
     ClaimNormalizationReceipt,
-    ReceiptStatus,
     attempt_to_dict,
     normalization_receipt_to_dict,
 )
 from behavior.errors import (
     BehaviorClaimCapacityError,
     BehaviorClaimConflictError,
-    BehaviorStoreError,
     ClaimNormalizationConflictError,
 )
+from behavior.evidence.record import BehaviorEvidenceRecord
 from behavior.persistence.codecs import (
     decode_attempt,
     decode_claim,
     decode_evidence_record,
     decode_normalization_receipt,
     encode_value,
-    verify_projection,
 )
 from behavior.persistence.database import BehaviorDatabase
 
@@ -55,50 +48,27 @@ class SQLiteBehaviorClaimLedger:
         self.database = database
         self.config = database.config
 
-    def publish_route(
+    def publish(
+        self,
+        publication: ClaimPublication,
+    ) -> tuple[ClaimNormalizationReceipt, bool]:
+        return self._publish(
+            publication.attempt,
+            publication.claims,
+            publication.receipt,
+        )
+
+    def _publish(
         self,
         attempt: ClaimNormalizationAttempt | None,
         claims: tuple[BehaviorClaim, ...],
         receipt: ClaimNormalizationReceipt,
     ) -> tuple[ClaimNormalizationReceipt, bool]:
-        if attempt is not None and not isinstance(attempt, ClaimNormalizationAttempt):
-            raise TypeError("attempt must be ClaimNormalizationAttempt or None")
-        if not isinstance(claims, tuple) or any(not isinstance(item, BehaviorClaim) for item in claims):
-            raise TypeError("claims must contain BehaviorClaim values")
-        if not isinstance(receipt, ClaimNormalizationReceipt):
-            raise TypeError("receipt must be ClaimNormalizationReceipt")
-        if attempt is None and receipt.attempt_ids:
-            raise ValueError("Receipt cannot contain Attempts when none are published")
-        if attempt is not None and (
-            not receipt.attempt_ids or receipt.attempt_ids[-1] != attempt.attempt_id
-        ):
-            raise ValueError("Receipt must end with the published Attempt")
-        if receipt.claim_ids != tuple(claim.claim_id for claim in claims):
-            raise ValueError("Receipt Claim members disagree with publication")
-        if attempt is None and receipt.status is not ReceiptStatus.NO_CORE_REQUIRED:
-            raise ValueError("only NO_CORE_REQUIRED can publish without an Attempt")
-        if attempt is not None:
-            if attempt.processing_identity != receipt.processing_identity:
-                raise ValueError("Attempt and Receipt processing identities disagree")
-            if attempt.evidence_record_id != receipt.evidence_record_id:
-                raise ValueError("Attempt and Receipt Evidence identities disagree")
-            if attempt.lane is not receipt.lane:
-                raise ValueError("Attempt and Receipt lanes disagree")
-            if attempt.normalizer_fingerprint != receipt.normalizer_fingerprint:
-                raise ValueError("Attempt and Receipt Normalizer fingerprints disagree")
-            if attempt.status not in {AttemptStatus.COMPLETED, AttemptStatus.ABSTAINED}:
-                raise ValueError("successful publication requires a completed or abstained Attempt")
-            if attempt.claim_count != len(claims):
-                raise ValueError("Attempt Claim count disagrees with publication")
-            if (attempt.status is AttemptStatus.ABSTAINED) != (
-                receipt.status is ReceiptStatus.ABSTAINED
-            ):
-                raise ValueError("Attempt and Receipt statuses disagree")
         try:
             with self.database.connection.write() as connection:
                 prior = self._read_receipt_row(connection, receipt.processing_identity)
                 if prior is not None:
-                    existing = self._decode_receipt(connection, prior)
+                    existing = self._decode_receipt(prior)
                     if existing.content_digest != receipt.content_digest:
                         raise ClaimNormalizationConflictError("processing Receipt replay changed content")
                     self._validate_route_replay(connection, attempt, claims)
@@ -115,15 +85,19 @@ class SQLiteBehaviorClaimLedger:
                     raise ClaimNormalizationConflictError(
                         "Receipt Attempt history disagrees with durable Attempts"
                     )
-                self._validate_evidence_binding(connection, receipt.evidence_record_id, claims)
-                self._require_capacities(connection, len(claims), 0 if attempt is None else 1, 1)
+                self._validate_publication_binding(connection, receipt, claims)
+                new_claims = self._new_claims(connection, claims)
+                self._require_capacities(connection, len(new_claims), 0 if attempt is None else 1, 1)
                 encoded_values: list[tuple[str, str]] = []
                 encoded_attempt = None
                 if attempt is not None:
                     encoded_attempt = encode_value(attempt, attempt_to_dict)
                     encoded_values.append(encoded_attempt)
-                encoded_claims = [encode_value(claim, claim_to_dict) for claim in claims]
-                encoded_values.extend(encoded_claims)
+                encoded_claims = [
+                    (claim, encode_value(claim, claim_to_dict))
+                    for claim in new_claims
+                ]
+                encoded_values.extend(encoded for _, encoded in encoded_claims)
                 encoded_receipt = encode_value(receipt, normalization_receipt_to_dict)
                 encoded_values.append(encoded_receipt)
                 self._require_encoded_sizes(encoded_values)
@@ -131,7 +105,7 @@ class SQLiteBehaviorClaimLedger:
                 btree_writes = (
                     2
                     + (0 if attempt is None else 5)
-                    + 7 * len(claims)
+                    + 7 * len(new_claims)
                     + 4 * (len(receipt.attempt_ids) + len(receipt.claim_ids))
                 )
                 if self.database.connection.projected_write_size(
@@ -142,7 +116,7 @@ class SQLiteBehaviorClaimLedger:
                     raise BehaviorClaimCapacityError("Claim publication exceeds database capacity")
                 if attempt is not None and encoded_attempt is not None:
                     self._insert_attempt(connection, attempt, encoded_attempt)
-                for claim, encoded in zip(claims, encoded_claims, strict=True):
+                for claim, encoded in encoded_claims:
                     self._insert_claim(connection, claim, encoded)
                 self._insert_receipt(connection, receipt, encoded_receipt)
                 self._insert_members(connection, receipt)
@@ -175,7 +149,7 @@ class SQLiteBehaviorClaimLedger:
                     if existing.content_digest != attempt.content_digest:
                         raise ClaimNormalizationConflictError("failed Attempt replay changed content")
                     return existing
-                self._validate_evidence_binding(connection, attempt.evidence_record_id, ())
+                self._require_evidence(connection, attempt.evidence_record_id)
                 self._require_capacities(connection, 0, 1, 0)
                 encoded = encode_value(attempt, attempt_to_dict)
                 self._require_encoded_sizes([encoded])
@@ -293,49 +267,56 @@ class SQLiteBehaviorClaimLedger:
         identity = sha256_digest(processing_identity, "processing_identity")
         with self.database.connection.read() as connection:
             row = self._read_receipt_row(connection, identity)
-            return None if row is None else self._decode_receipt(connection, row)
+            return None if row is None else self._decode_receipt(row)
 
     @staticmethod
-    def _validate_evidence_binding(
+    def _validate_publication_binding(
         connection: sqlite3.Connection,
-        evidence_record_id: str,
+        receipt: ClaimNormalizationReceipt,
         claims: tuple[BehaviorClaim, ...],
     ) -> None:
+        record = SQLiteBehaviorClaimLedger._require_evidence(
+            connection,
+            receipt.evidence_record_id,
+        )
+        for claim in claims:
+            if (
+                claim.evidence_record_id != receipt.evidence_record_id
+                or claim.evidence_record_digest != record.content_digest
+            ):
+                raise BehaviorClaimConflictError(
+                    "Claim Evidence binding disagrees with durable Evidence"
+                )
+
+    @staticmethod
+    def _require_evidence(
+        connection: sqlite3.Connection,
+        evidence_record_id: str,
+    ) -> BehaviorEvidenceRecord:
         row = connection.execute(
             "SELECT * FROM behavior_evidence_records WHERE evidence_record_id=?",
             (evidence_record_id,),
         ).fetchone()
         if row is None:
             raise BehaviorClaimConflictError("Claim publication references missing Evidence")
-        record = decode_evidence_record(row["content_json"], row["encoded_digest"])
-        verify_projection(
-            row,
-            {
-                "evidence_record_id": record.evidence_record_id,
-                "content_digest": record.content_digest,
-            },
-            "Evidence binding projection disagrees with canonical content",
-        )
-        content = record.semantic_content
+        return decode_evidence_record(row["content_json"], row["encoded_digest"])
+
+    def _new_claims(
+        self,
+        connection: sqlite3.Connection,
+        claims: tuple[BehaviorClaim, ...],
+    ) -> tuple[BehaviorClaim, ...]:
+        new: list[BehaviorClaim] = []
         for claim in claims:
-            expected_effective = (
-                content.source_confidence
-                if claim.derivation_class is DerivationClass.DETERMINISTIC
-                else min(content.source_confidence, claim.normalizer_confidence)
-            )
-            if (
-                claim.evidence_record_id != evidence_record_id
-                or claim.evidence_record_digest != record.content_digest
-                or claim.subject_role is not content.subject_role
-                or claim.actor_role is not content.actor_role
-                or claim.time_start != content.event_time_start
-                or claim.time_end != content.event_time_end
-                or claim.time_uncertainty_ms != content.event_time_uncertainty_ms
-                or claim.source_epistemic_class is not source_epistemic_class(record.source_trust)
-                or claim.source_confidence != content.source_confidence
-                or abs(claim.effective_confidence - expected_effective) > 1e-12
-            ):
-                raise BehaviorClaimConflictError("Claim is not bound to the published Evidence")
+            row = connection.execute(
+                "SELECT * FROM behavior_claims WHERE claim_id=?",
+                (claim.claim_id,),
+            ).fetchone()
+            if row is None:
+                new.append(claim)
+            elif self._claim_entry(row).claim.content_digest != claim.content_digest:
+                raise BehaviorClaimConflictError("Claim identity replay changed content")
+        return tuple(new)
 
     def _insert_claim(
         self,
@@ -343,15 +324,6 @@ class SQLiteBehaviorClaimLedger:
         claim: BehaviorClaim,
         encoded: tuple[str, str],
     ) -> None:
-        prior = connection.execute(
-            "SELECT * FROM behavior_claims WHERE claim_id=?",
-            (claim.claim_id,),
-        ).fetchone()
-        if prior is not None:
-            existing = self._claim_entry(prior).claim
-            if existing.content_digest != claim.content_digest:
-                raise BehaviorClaimConflictError("Claim identity replay changed content")
-            return
         connection.execute(
             """INSERT INTO behavior_claims(
                 claim_id, evidence_record_id, claim_kind, subject_role, actor_role, semantic_family,
@@ -476,110 +448,15 @@ class SQLiteBehaviorClaimLedger:
 
     def _claim_entry(self, row: sqlite3.Row) -> BehaviorClaimLedgerEntry:
         claim = decode_claim(row["content_json"], row["encoded_digest"])
-        indexed = {
-            "claim_id": claim.claim_id,
-            "evidence_record_id": claim.evidence_record_id,
-            "claim_kind": claim.claim_kind.value,
-            "subject_role": claim.subject_role.value,
-            "actor_role": None if claim.actor_role is None else claim.actor_role.value,
-            "semantic_family": claim.semantic_family,
-            "predicate": claim.predicate,
-            "time_start": utc_text(claim.time_start),
-            "time_end": utc_text(claim.time_end),
-            "derivation_class": claim.derivation_class.value,
-            "source_epistemic_class": claim.source_epistemic_class.value,
-            "semantic_fingerprint": claim.semantic_fingerprint,
-            "created_at": utc_text(claim.created_at),
-            "content_digest": claim.content_digest,
-        }
-        verify_projection(
-            row,
-            indexed,
-            "Claim indexed column disagrees with canonical content",
-        )
-        if abs(float(row["effective_confidence"]) - claim.effective_confidence) > 1e-12:
-            raise BehaviorStoreError("Claim confidence projection disagrees with canonical content")
         return BehaviorClaimLedgerEntry(int(row["claim_sequence"]), claim)
 
     @staticmethod
     def _decode_attempt_row(row: sqlite3.Row) -> ClaimNormalizationAttempt:
-        attempt = decode_attempt(row["content_json"], row["encoded_digest"])
-        indexed = {
-            "attempt_id": attempt.attempt_id,
-            "processing_identity": attempt.processing_identity,
-            "evidence_record_id": attempt.evidence_record_id,
-            "normalizer_name": attempt.normalizer_name,
-            "normalizer_fingerprint": attempt.normalizer_fingerprint,
-            "lane": attempt.lane.value,
-            "attempt_number": attempt.attempt_number,
-            "status": attempt.status.value,
-            "retryable": int(attempt.retryable),
-            "completed_at": utc_text(attempt.completed_at),
-            "content_digest": attempt.content_digest,
-        }
-        verify_projection(
-            row,
-            indexed,
-            "Normalization Attempt index disagrees with canonical content",
-        )
-        return attempt
+        return decode_attempt(row["content_json"], row["encoded_digest"])
 
-    def _decode_receipt(
-        self,
-        connection: sqlite3.Connection,
-        row: sqlite3.Row,
-    ) -> ClaimNormalizationReceipt:
-        receipt = decode_normalization_receipt(row["content_json"], row["encoded_digest"])
-        indexed = {
-            "processing_identity": receipt.processing_identity,
-            "evidence_record_id": receipt.evidence_record_id,
-            "lane": receipt.lane.value,
-            "normalizer_fingerprint": receipt.normalizer_fingerprint,
-            "planner_policy_digest": receipt.planner_policy_digest,
-            "compatibility_policy_digest": receipt.compatibility_policy_digest,
-            "binding_policy_digest": receipt.binding_policy_digest,
-            "confidence_policy_digest": receipt.confidence_policy_digest,
-            "status": receipt.status.value,
-            "completed_at": utc_text(receipt.completed_at),
-            "publication_recorded_at": utc_text(receipt.publication_recorded_at),
-            "content_digest": receipt.content_digest,
-        }
-        verify_projection(
-            row,
-            indexed,
-            "Normalization Receipt index disagrees with canonical content",
-        )
-        attempt_rows = connection.execute(
-            "SELECT attempt.* FROM claim_receipt_members AS member "
-            "JOIN claim_normalization_attempts AS attempt ON attempt.attempt_id=member.attempt_id "
-            "WHERE member.processing_identity=? AND member.member_kind='ATTEMPT' "
-            "ORDER BY member.member_order",
-            (receipt.processing_identity,),
-        ).fetchall()
-        claim_rows = connection.execute(
-            "SELECT claim.* FROM claim_receipt_members AS member "
-            "JOIN behavior_claims AS claim ON claim.claim_id=member.claim_id "
-            "WHERE member.processing_identity=? AND member.member_kind='CLAIM' "
-            "ORDER BY member.member_order",
-            (receipt.processing_identity,),
-        ).fetchall()
-        attempts = tuple(self._decode_attempt_row(item) for item in attempt_rows)
-        claims = tuple(self._claim_entry(item).claim for item in claim_rows)
-        if tuple(item.attempt_id for item in attempts) != receipt.attempt_ids:
-            raise BehaviorStoreError("Normalization Receipt Attempt members disagree")
-        if tuple(item.claim_id for item in claims) != receipt.claim_ids:
-            raise BehaviorStoreError("Normalization Receipt Claim members disagree")
-        if any(
-            item.processing_identity != receipt.processing_identity
-            or item.evidence_record_id != receipt.evidence_record_id
-            or item.lane is not receipt.lane
-            or item.normalizer_fingerprint != receipt.normalizer_fingerprint
-            for item in attempts
-        ):
-            raise BehaviorStoreError("Normalization Receipt Attempt binding disagrees")
-        if any(item.evidence_record_id != receipt.evidence_record_id for item in claims):
-            raise BehaviorStoreError("Normalization Receipt Claim binding disagrees")
-        return receipt
+    @staticmethod
+    def _decode_receipt(row: sqlite3.Row) -> ClaimNormalizationReceipt:
+        return decode_normalization_receipt(row["content_json"], row["encoded_digest"])
 
     def _page(
         self,
@@ -644,13 +521,11 @@ class SQLiteBehaviorClaimLedger:
         attempts: int,
         receipts: int,
     ) -> None:
-        current_claims = int(connection.execute("SELECT COUNT(*) FROM behavior_claims").fetchone()[0])
-        current_attempts = int(
-            connection.execute("SELECT COUNT(*) FROM claim_normalization_attempts").fetchone()[0]
-        )
-        current_receipts = int(
-            connection.execute("SELECT COUNT(*) FROM claim_normalization_receipts").fetchone()[0]
-        )
+        current_claims, current_attempts, current_receipts = connection.execute(
+            "SELECT (SELECT COUNT(*) FROM behavior_claims), "
+            "(SELECT COUNT(*) FROM claim_normalization_attempts), "
+            "(SELECT COUNT(*) FROM claim_normalization_receipts)"
+        ).fetchone()
         if current_claims + claims > self.config.store.max_claims:
             raise BehaviorClaimCapacityError("Claim capacity is exhausted")
         if current_attempts + attempts > self.config.store.max_normalization_attempts:
@@ -668,6 +543,3 @@ class SQLiteBehaviorClaimLedger:
             "SELECT * FROM claim_normalization_receipts WHERE processing_identity=?",
             (identity,),
         ).fetchone()
-
-
-__all__ = ["SQLiteBehaviorClaimLedger"]

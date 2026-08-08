@@ -12,19 +12,21 @@ from behavior.claim import (
     ClaimNormalizationReceipt,
     ReceiptStatus,
 )
-from behavior.claim.model import DerivationClass
 from behavior.claim.proposal import proposal_to_dict
+from behavior.claim.publication import ClaimPublication
 from behavior.claim.receipt import AttemptStatus
 from behavior.config import BehaviorConfig
 from behavior.errors import (
     BehaviorClaimCapacityError,
     BehaviorClaimConflictError,
     BehaviorStoreError,
+    ClaimNormalizationConflictError,
 )
-from behavior.persistence import BehaviorDatabase
+from behavior.persistence import BehaviorAuditService, BehaviorDatabase
 from foundation.integrity import canonical_digest
 from tests.unit.behavior.conftest import BASE_TIME, FakeModelNormalizer
 from tests.unit.behavior.test_claim_normalization import (
+    create_claim,
     free_text_input,
     ingest_record,
     normalization_service,
@@ -126,12 +128,51 @@ def test_attempt_claim_receipt_publication_rolls_back_as_one_transaction(tmp_pat
         asyncio.run(service.normalize(record.evidence_record_id))
     assert claim_ledger.list_after_sequence(0, 10) == ()
     plan = service.planner.plan(record)
-    identity = service._route_identity(record, plan, plan.enhancement_routes[0])
+    identity = service.route_executor.identity(record, plan, plan.enhancement_routes[0]).value
     assert claim_ledger.read_latest_attempt(identity) is None
     assert claim_ledger.read_receipt(identity) is None
 
 
-def test_claim_canonical_tamper_detection(tmp_path) -> None:
+def test_claim_capacity_counts_only_genuinely_new_claim_rows(tmp_path) -> None:
+    config = BehaviorConfig(store=replace(BehaviorConfig().store, max_claims=1))
+    database = BehaviorDatabase(tmp_path / "behavior", config=config, initialize=True)
+    evidence_ledger, record = asyncio.run(
+        ingest_record(database, free_text_input(), config=config)
+    )
+    model = FakeModelNormalizer((state_proposal(),))
+    claim_ledger, service = normalization_service(
+        tmp_path,
+        database,
+        evidence_ledger,
+        config,
+        model,
+    )
+    first = asyncio.run(service.normalize(record.evidence_record_id))
+    claim = claim_ledger.read_claim(first.enhancement_receipts[0].claim_ids[0])
+    assert claim is not None
+    route = service.planner.plan(record).enhancement_routes[0]
+    changed_plan = replace(
+        service.planner.plan(record),
+        planner_policy_digest=canonical_digest({"planner": "changed"}),
+    )
+    publication = service.route_executor.publication_factory.success(
+        record,
+        changed_plan,
+        route,
+        attempt_number=1,
+        started_at=BASE_TIME,
+        completed_at=BASE_TIME,
+        publication_recorded_at=BASE_TIME,
+        proposals=(state_proposal(),),
+        claims=(claim,),
+    )
+    stored, reused = claim_ledger.publish(publication)
+    assert not reused
+    assert stored.claim_ids == (claim.claim_id,)
+    assert len(claim_ledger.list_after_sequence(0, 10)) == 1
+
+
+def test_normal_read_skips_index_projection_and_deep_audit_detects_tamper(tmp_path) -> None:
     config = BehaviorConfig()
     database = BehaviorDatabase(tmp_path / "behavior", config=config, initialize=True)
     evidence_ledger, record = asyncio.run(ingest_record(database, free_text_input(), config=config))
@@ -144,11 +185,12 @@ def test_claim_canonical_tamper_detection(tmp_path) -> None:
             "UPDATE behavior_claims SET semantic_fingerprint=? WHERE claim_id=?",
             ("0" * 64, claim_id),
         )
+    assert claim_ledger.read_claim(claim_id) is not None
     with pytest.raises(BehaviorStoreError):
-        claim_ledger.read_claim(claim_id)
+        BehaviorAuditService(database).deep_check()
 
 
-def test_receipt_reuse_detects_tampered_claim_member(tmp_path) -> None:
+def test_deep_audit_detects_tampered_claim_member(tmp_path) -> None:
     config = BehaviorConfig()
     database = BehaviorDatabase(tmp_path / "behavior", config=config, initialize=True)
     evidence_ledger, record = asyncio.run(ingest_record(database, free_text_input(), config=config))
@@ -161,11 +203,13 @@ def test_receipt_reuse_detects_tampered_claim_member(tmp_path) -> None:
             "UPDATE behavior_claims SET content_json='{}' WHERE claim_id=?",
             (claim_id,),
         )
+    replay = asyncio.run(service.normalize(record.evidence_record_id))
+    assert replay.enhancement_receipts
     with pytest.raises(BehaviorStoreError):
-        asyncio.run(service.normalize(record.evidence_record_id))
+        BehaviorAuditService(database).deep_check()
 
 
-def test_receipt_reuse_detects_tampered_attempt_member(tmp_path) -> None:
+def test_deep_audit_detects_tampered_attempt_member(tmp_path) -> None:
     config = BehaviorConfig()
     database = BehaviorDatabase(tmp_path / "behavior", config=config, initialize=True)
     evidence_ledger, record = asyncio.run(ingest_record(database, free_text_input(), config=config))
@@ -178,11 +222,40 @@ def test_receipt_reuse_detects_tampered_attempt_member(tmp_path) -> None:
             "UPDATE claim_normalization_attempts SET content_json='{}' WHERE attempt_id=?",
             (attempt_id,),
         )
+    replay = asyncio.run(service.normalize(record.evidence_record_id))
+    assert replay.enhancement_receipts
     with pytest.raises(BehaviorStoreError):
-        asyncio.run(service.normalize(record.evidence_record_id))
+        BehaviorAuditService(database).deep_check()
 
 
-def test_claim_publication_rechecks_all_evidence_bound_system_fields(tmp_path) -> None:
+def test_receipt_member_table_is_checked_only_by_deep_audit(tmp_path) -> None:
+    config = BehaviorConfig()
+    database = BehaviorDatabase(tmp_path / "behavior", config=config, initialize=True)
+    evidence_ledger, record = asyncio.run(
+        ingest_record(database, free_text_input(), config=config)
+    )
+    model = FakeModelNormalizer((state_proposal(),))
+    claim_ledger, service = normalization_service(
+        tmp_path,
+        database,
+        evidence_ledger,
+        config,
+        model,
+    )
+    result = asyncio.run(service.normalize(record.evidence_record_id))
+    receipt = result.enhancement_receipts[0]
+    with database.connection.write() as connection:
+        connection.execute(
+            "DELETE FROM claim_receipt_members WHERE processing_identity=? "
+            "AND member_kind='CLAIM'",
+            (receipt.processing_identity,),
+        )
+    assert claim_ledger.read_receipt(receipt.processing_identity) == receipt
+    with pytest.raises(BehaviorStoreError, match="Claim members"):
+        BehaviorAuditService(database).deep_check()
+
+
+def test_claim_publication_closes_policy_ownership(tmp_path) -> None:
     config = BehaviorConfig()
     database = BehaviorDatabase(tmp_path / "behavior", config=config, initialize=True)
     evidence_ledger, record = asyncio.run(ingest_record(database, free_text_input(), config=config))
@@ -190,17 +263,10 @@ def test_claim_publication_rechecks_all_evidence_bound_system_fields(tmp_path) -
     claim_ledger, service = normalization_service(tmp_path, database, evidence_ledger, config, model)
     plan = service.planner.plan(record)
     route = plan.enhancement_routes[0]
-    identity = service._route_identity(record, plan, route)
+    identity = service.route_executor.identity(record, plan, route).value
     proposal = state_proposal()
-    claim = service.binder.bind(
-        record,
-        proposal,
-        normalizer_fingerprint=route.normalizer_fingerprint,
-        normalizer_kind=route.normalizer_kind,
-        derivation_class=DerivationClass.MODEL,
-        created_at=BASE_TIME,
-    )
-    tampered = replace(claim, source_confidence=0.1, effective_confidence=0.1)
+    claim = service.route_executor.claim_factory.create(record, proposal, route, created_at=BASE_TIME)
+    tampered = replace(claim, compatibility_policy_digest="0" * 64)
     attempt = ClaimNormalizationAttempt(
         processing_identity=identity,
         evidence_record_id=record.evidence_record_id,
@@ -222,17 +288,22 @@ def test_claim_publication_rechecks_all_evidence_bound_system_fields(tmp_path) -
         lane=route.lane,
         normalizer_fingerprint=route.normalizer_fingerprint,
         planner_policy_digest=plan.planner_policy_digest,
-        compatibility_policy_digest=service.binder.compatibility.digest,
-        binding_policy_digest=service.binder.binding.digest,
-        confidence_policy_digest=service.binder.confidence.digest,
+        compatibility_policy_digest=service.route_executor.claim_factory.compatibility.digest,
+        binding_policy_digest=service.route_executor.claim_factory.binding.digest,
+        confidence_policy_digest=service.route_executor.claim_factory.confidence.digest,
         status=ReceiptStatus.COMPLETED,
         attempt_ids=(attempt.attempt_id,),
         claim_ids=(tampered.claim_id,),
         completed_at=BASE_TIME,
         publication_recorded_at=BASE_TIME,
     )
-    with pytest.raises(BehaviorClaimConflictError, match="not bound"):
-        claim_ledger.publish_route(attempt, (tampered,), receipt)
+    with pytest.raises(ClaimNormalizationConflictError, match="ownership"):
+        ClaimPublication(
+            service.route_executor.identity(record, plan, route),
+            attempt,
+            (tampered,),
+            receipt,
+        )
     assert claim_ledger.list_after_sequence(0, 10) == ()
 
 
@@ -253,11 +324,23 @@ def test_processing_receipt_replay_still_validates_full_claim_content(tmp_path) 
     attempt = claim_ledger.read_attempt(receipt.attempt_ids[0])
     claim = claim_ledger.read_claim(receipt.claim_ids[0])
     assert attempt is not None and claim is not None
-    conflicting_claim = replace(claim, human_summary="changed-summary")
+    conflicting_claim = create_claim(
+        record,
+        state_proposal(summary="changed-summary"),
+        model,
+    )
     assert conflicting_claim.claim_id == claim.claim_id
     assert conflicting_claim.content_digest != claim.content_digest
+    plan = service.planner.plan(record)
+    route = plan.enhancement_routes[0]
+    publication = ClaimPublication(
+        service.route_executor.identity(record, plan, route),
+        attempt,
+        (conflicting_claim,),
+        receipt,
+    )
     with pytest.raises(BehaviorClaimConflictError):
-        claim_ledger.publish_route(attempt, (conflicting_claim,), receipt)
+        claim_ledger.publish(publication)
 
 
 def test_claim_kind_is_not_filtered_by_a_score_gate() -> None:

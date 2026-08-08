@@ -45,6 +45,3 @@ class ClaimConfidencePolicy:
         if value == "MODEL":
             return min(source, normalizer)
         raise ValueError("unknown Claim derivation class")
-
-
-__all__ = ["ClaimConfidencePolicy"]

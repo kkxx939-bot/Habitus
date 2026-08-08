@@ -12,7 +12,11 @@ from pathlib import Path
 from behavior.claim.service import ClaimNormalizationResult
 from behavior.evidence.ingress import BehaviorEvidenceIngressResult
 from Config import M2BOSConfig
-from foundation.integrity import canonical_digest
+from conversation import (
+    ConversationSourceDispatchResult,
+    ConversationSourceEnvelope,
+    conversation_source_request_digest,
+)
 from foundation.observability import (
     ObservabilitySnapshot,
     ObservationEvent,
@@ -318,6 +322,13 @@ class Runtime:
                 return
             await self.components.memory.vector_index.ensure_ready()
             await self.components.conversation.summary_vector_index.ensure_ready()
+            source_recoveries = await self.components.conversation.source_recovery.recover_pending()
+            memory_recovery_error = next(
+                (result.memory_error for result in source_recoveries if result.memory_error is not None),
+                None,
+            )
+            if memory_recovery_error is not None:
+                raise memory_recovery_error
             await self.components.workflow.worker.start()
             try:
                 await self.components.workflow.lifecycle_worker.start()
@@ -374,41 +385,52 @@ class Runtime:
         after_turn: bool = False,
         omit_tool_call_ids: frozenset[str] = frozenset(),
         ingress: ConversationIngressRequest | None = None,
+        protocol: str = "normalized",
     ) -> ConversationMemoryIngestResult:
-        """追加规范化消息并返回可用于一致性等待的耐久 Job 句柄。"""
+        """先保存规范 Source，再并行分发 Memory 与 Behavior Projection。"""
 
         self._require_initialized("conversation append")
-        appended = await asyncio.to_thread(
-            self.components.workflow.enqueuer.append,
-            address,
-            batch,
+        request_digest = conversation_source_request_digest(
+            conversation_id=address.conversation_id,
+            started_on=address.started_on,
+            protocol=protocol,
+            batch=batch,
+            after_turn=after_turn,
             omit_tool_call_ids=omit_tool_call_ids,
-            ingress=ingress,
         )
-        boundary_hints = None
-        preview = await asyncio.to_thread(
-            self.components.workflow.enqueuer.preview_retention,
-            address,
+        delivery_id = request_digest
+        if ingress is not None:
+            request_digest = ingress.request_digest
+            delivery_id = ingress.delivery_id
+        envelope = ConversationSourceEnvelope.create(
+            conversation_id=address.conversation_id,
+            started_on=address.started_on,
+            protocol=protocol,
+            batch=batch,
             after_turn=after_turn,
+            omit_tool_call_ids=omit_tool_call_ids,
+            delivery_id=delivery_id,
+            request_digest=request_digest,
+            created_at=datetime.now(timezone.utc),
         )
-        if preview.should_seal:
-            live = await asyncio.to_thread(
-                self.components.conversation.journal.read_live,
-                address,
+        started = time.monotonic()
+        dispatched = await self.components.conversation.source_coordinator.dispatch(envelope)
+        if dispatched.behavior_projection_error is not None:
+            self._observe(
+                "conversation",
+                "behavior_projection",
+                ObservationStatus.DEGRADED,
+                started,
+                {
+                    "error_type": type(dispatched.behavior_projection_error).__name__,
+                    "source_id": dispatched.envelope.source_id,
+                },
             )
-            boundary_hints = await self.components.conversation.boundary_scorer.score(live)
-        jobs, retention = await asyncio.to_thread(
-            self.components.workflow.enqueuer.enqueue_ready_segments,
-            address,
-            after_turn=after_turn,
-            flush=False,
-            boundary_hints=boundary_hints,
-        )
-        result = ConversationMemoryIngestResult(
-            append=appended,
-            jobs=jobs,
-            retention=retention,
-        )
+        if dispatched.memory_error is not None:
+            raise dispatched.memory_error
+        result = dispatched.memory_result
+        if not isinstance(result, ConversationMemoryIngestResult):
+            raise RuntimeError("Memory Conversation Consumer completed without an ingest result")
         if result.jobs and self._state is RuntimeState.RUNNING:
             self.components.workflow.worker.wake()
         return result
@@ -439,15 +461,13 @@ class Runtime:
             raise TypeError("after_turn must be boolean or None")
         ingress = None
         if delivery_id is not None:
-            request_digest = canonical_digest(
-                {
-                    "conversation_id": address.conversation_id,
-                    "started_on": address.started_on,
-                    "protocol": protocol,
-                    "batch": adaptation.batch.to_dict(),
-                    "after_turn": resolved_after_turn,
-                    "omit_tool_call_ids": omit_tool_call_ids,
-                }
+            request_digest = conversation_source_request_digest(
+                conversation_id=address.conversation_id,
+                started_on=address.started_on,
+                protocol=protocol,
+                batch=adaptation.batch,
+                after_turn=resolved_after_turn,
+                omit_tool_call_ids=omit_tool_call_ids,
             )
             ingress = ConversationIngressRequest(delivery_id, request_digest)
         ingest = await self.append_conversation(
@@ -456,6 +476,7 @@ class Runtime:
             after_turn=resolved_after_turn,
             omit_tool_call_ids=omit_tool_call_ids,
             ingress=ingress,
+            protocol=protocol,
         )
         return RuntimeConversationProtocolIngestResult(adaptation, ingest, resolved_after_turn)
 
@@ -463,6 +484,19 @@ class Runtime:
         """返回当前显式注册的协议名，供 HTTP/Agent 接入层发现能力。"""
 
         return self._conversation_adapters.protocols()
+
+    async def recover_conversation_sources(self) -> tuple[ConversationSourceDispatchResult, ...]:
+        """只补跑缺少终态 Receipt 的 Source Consumer。"""
+
+        self._require_initialized("conversation source recovery")
+        results = await self.components.conversation.source_recovery.recover_pending()
+        if self._state is RuntimeState.RUNNING and any(
+            isinstance(result.memory_result, ConversationMemoryIngestResult)
+            and bool(result.memory_result.jobs)
+            for result in results
+        ):
+            self.components.workflow.worker.wake()
+        return results
 
     async def flush_conversation(
         self,

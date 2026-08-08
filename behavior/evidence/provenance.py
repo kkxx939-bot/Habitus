@@ -352,18 +352,3 @@ def _array(value: object, field_name: str) -> tuple[Any, ...] | list[Any]:
     if not isinstance(value, tuple | list):
         raise TypeError(f"{field_name} must be an array")
     return value
-
-
-__all__ = [
-    "BehaviorOriginKind",
-    "BehaviorSourceDescriptor",
-    "BehaviorSourceProvenance",
-    "ProducerFingerprint",
-    "ProducerImplementationKind",
-    "descriptor_from_dict",
-    "descriptor_to_dict",
-    "producer_from_dict",
-    "producer_to_dict",
-    "provenance_from_dict",
-    "provenance_to_dict",
-]

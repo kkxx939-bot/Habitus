@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from behavior.claim.model import BehaviorClaim, BehaviorClaimLedgerEntry
+from behavior.claim.publication import ClaimPublication
 from behavior.claim.receipt import ClaimNormalizationAttempt, ClaimNormalizationReceipt
 
 ClaimPage = tuple[tuple[BehaviorClaimLedgerEntry, ...], str | None]
@@ -13,11 +14,9 @@ ClaimPage = tuple[tuple[BehaviorClaimLedgerEntry, ...], str | None]
 
 @runtime_checkable
 class BehaviorClaimLedger(Protocol):
-    def publish_route(
+    def publish(
         self,
-        attempt: ClaimNormalizationAttempt | None,
-        claims: tuple[BehaviorClaim, ...],
-        receipt: ClaimNormalizationReceipt,
+        publication: ClaimPublication,
     ) -> tuple[ClaimNormalizationReceipt, bool]: ...
 
     def publish_failed_attempt(
@@ -58,6 +57,3 @@ class BehaviorClaimLedger(Protocol):
     def read_latest_attempt(self, processing_identity: str) -> ClaimNormalizationAttempt | None: ...
 
     def read_receipt(self, processing_identity: str) -> ClaimNormalizationReceipt | None: ...
-
-
-__all__ = ["BehaviorClaimLedger", "BehaviorClaimLedgerEntry"]

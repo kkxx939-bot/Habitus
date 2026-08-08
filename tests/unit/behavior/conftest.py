@@ -11,6 +11,7 @@ import pytest
 from behavior.claim import ClaimNormalizerKind, NormalizerFingerprint
 from behavior.config import BehaviorConfig
 from behavior.evidence import (
+    AdapterOutputContract,
     BehaviorAdapterCapability,
     BehaviorModality,
     BehaviorOriginKind,
@@ -60,6 +61,7 @@ class FakeAdapter:
         ),
         maximum_batch_size: int = 32,
         fingerprint: ProducerFingerprint | None = None,
+        outputs: tuple[AdapterOutputContract, ...] | None = None,
     ) -> None:
         self.name = name
         self.result = result
@@ -70,13 +72,24 @@ class FakeAdapter:
             output_schema_version="1",
             implementation_kind=ProducerImplementationKind.ADAPTER,
         )
+        if outputs is None:
+            if not (
+                len(origins) == len(kinds) == len(modalities) == len(role_pairs) == 1
+            ):
+                raise ValueError("FakeAdapter requires explicit exact output contracts")
+            outputs = (
+                AdapterOutputContract(
+                    origins[0],
+                    kinds[0],
+                    modalities[0],
+                    role_pairs[0][0],
+                    role_pairs[0][1],
+                    trust,
+                ),
+            )
         self.capabilities = BehaviorAdapterCapability(
-            source_trust=trust,
+            allowed_outputs=outputs,
             time_mode=time_mode,
-            allowed_origin_kinds=origins,
-            allowed_record_kinds=kinds,
-            allowed_modalities=modalities,
-            allowed_role_pairs=role_pairs,
             maximum_batch_size=maximum_batch_size,
         )
 

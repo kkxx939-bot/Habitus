@@ -45,6 +45,10 @@ class ClaimCompatibilityError(BehaviorClaimSchemaError):
     """Normalizer Proposal 与当前 Evidence 的兼容策略冲突。"""
 
 
+class NormalizerOutputError(BehaviorClaimSchemaError):
+    """Normalizer 输出没有通过统一 Proposal 边界。"""
+
+
 class BehaviorClaimConflictError(BehaviorClaimError):
     """相同 Claim 身份对应不同内容。"""
 
@@ -99,32 +103,3 @@ class BehaviorStoreError(BehaviorError):
 
 class LegacyBehaviorStoreError(BehaviorStoreError):
     """检测到不兼容的旧 Behavior 数据库。"""
-
-
-__all__ = [
-    "BehaviorAdapterCapabilityError",
-    "BehaviorAdapterError",
-    "BehaviorClaimCapacityError",
-    "BehaviorClaimConflictError",
-    "BehaviorClaimError",
-    "BehaviorClaimSchemaError",
-    "BehaviorError",
-    "BehaviorEvidenceCapacityError",
-    "BehaviorEvidenceClockError",
-    "BehaviorEvidenceConflictError",
-    "BehaviorEvidenceError",
-    "BehaviorEvidenceSchemaError",
-    "BehaviorStoreError",
-    "ClaimModelAuthenticationError",
-    "ClaimModelConfigurationError",
-    "ClaimModelContentSafetyError",
-    "ClaimModelInputError",
-    "ClaimModelPermissionError",
-    "ClaimModelQuotaError",
-    "ClaimModelSchemaError",
-    "ClaimModelTransportError",
-    "ClaimCompatibilityError",
-    "ClaimNormalizationConflictError",
-    "ClaimNormalizationError",
-    "LegacyBehaviorStoreError",
-]

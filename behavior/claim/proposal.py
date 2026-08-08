@@ -1,4 +1,4 @@
-"""Normalizer 唯一允许输出的无系统字段语义 Proposal。"""
+"""Normalizer 输出的唯一结构与容量边界。"""
 
 from __future__ import annotations
 
@@ -8,17 +8,63 @@ from enum import Enum
 from typing import Any
 
 from behavior._validation import (
-    bounded_text,
-    claim_semantic_json_snapshot,
     finite_score,
     identifier,
+    json_snapshot,
     optional_bounded_text,
     optional_identifier,
     strict_object,
 )
 from behavior.config import ClaimNormalizationConfig
-from behavior.errors import BehaviorClaimSchemaError
-from foundation.integrity import canonical_json
+from behavior.errors import NormalizerOutputError
+
+_PROPOSAL_FIELDS = frozenset(
+    {
+        "claim_kind",
+        "semantic_family",
+        "predicate",
+        "activity",
+        "phase",
+        "semantic_payload",
+        "human_summary",
+        "local_alternative_group_id",
+        "normalizer_confidence",
+    }
+)
+_CLAIM_SYSTEM_FIELDS = frozenset(
+    {
+        "actor_role",
+        "alternative_group_key",
+        "attempt_id",
+        "binding_policy_digest",
+        "capability_digest",
+        "claim_id",
+        "claim_sequence",
+        "compatibility_policy_digest",
+        "confidence_policy_digest",
+        "content_digest",
+        "created_at",
+        "derivation_class",
+        "effective_confidence",
+        "encoded_digest",
+        "evidence_record_digest",
+        "evidence_record_id",
+        "evidence_sequence",
+        "ingested_at",
+        "normalizer_fingerprint",
+        "processing_identity",
+        "producer_fingerprint",
+        "semantic_digest",
+        "semantic_fingerprint",
+        "source_confidence",
+        "source_epistemic_class",
+        "source_trust",
+        "subject_role",
+        "time_end",
+        "time_start",
+        "time_uncertainty_ms",
+    }
+)
 
 
 class ClaimKind(str, Enum):
@@ -36,7 +82,7 @@ class ClaimKind(str, Enum):
     FREE_TEXT = "FREE_TEXT"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ClaimSemanticProposal:
     claim_kind: ClaimKind
     semantic_family: str | None
@@ -48,45 +94,137 @@ class ClaimSemanticProposal:
     local_alternative_group_id: str | None
     normalizer_confidence: float
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "claim_kind", ClaimKind(self.claim_kind))
-        object.__setattr__(
-            self,
-            "semantic_family",
-            optional_identifier(self.semantic_family, "proposal.semantic_family"),
+
+@dataclass(frozen=True, slots=True)
+class ValidatedClaimProposalBatch:
+    proposals: tuple[ClaimSemanticProposal, ...]
+
+
+class ClaimProposalParser:
+    def __init__(self, config: ClaimNormalizationConfig) -> None:
+        self.config = config
+
+    def parse_batch(self, value: object) -> ValidatedClaimProposalBatch:
+        try:
+            data = strict_object(value, "claim_proposals", frozenset({"proposals"}))
+            raw = data["proposals"]
+            if not isinstance(raw, list | tuple):
+                raise TypeError("proposals must be an array")
+            return self._validated(tuple(self._parse(item) for item in raw))
+        except NormalizerOutputError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise NormalizerOutputError("Claim proposal batch failed strict validation") from exc
+
+    def validate_batch(self, value: object) -> ValidatedClaimProposalBatch:
+        if not isinstance(value, tuple | list):
+            raise NormalizerOutputError("Normalizer output must be a Proposal sequence")
+        if any(not isinstance(item, ClaimSemanticProposal) for item in value):
+            raise NormalizerOutputError(
+                "Normalizer output must contain ClaimSemanticProposal values"
+            )
+        return self.parse_batch(
+            {"proposals": [proposal_to_dict(item) for item in value]}
         )
-        object.__setattr__(self, "predicate", identifier(self.predicate, "proposal.predicate"))
-        object.__setattr__(self, "activity", optional_identifier(self.activity, "proposal.activity"))
-        object.__setattr__(self, "phase", optional_identifier(self.phase, "proposal.phase"))
-        object.__setattr__(
-            self,
-            "semantic_payload",
-            claim_semantic_json_snapshot(
-                self.semantic_payload,
-                "proposal.semantic_payload",
-                maximum_chars=1_000_000,
-                maximum_items=10_000,
-                maximum_depth=32,
+
+    def _parse(self, value: object) -> ClaimSemanticProposal:
+        data = strict_object(value, "claim_proposal", _PROPOSAL_FIELDS)
+        return ClaimSemanticProposal(
+            claim_kind=ClaimKind(data["claim_kind"]),
+            semantic_family=optional_identifier(
+                data["semantic_family"],
+                "proposal.semantic_family",
             ),
-        )
-        object.__setattr__(
-            self,
-            "human_summary",
-            optional_bounded_text(self.human_summary, "proposal.human_summary", maximum=1_000_000),
-        )
-        object.__setattr__(
-            self,
-            "local_alternative_group_id",
-            optional_identifier(
-                self.local_alternative_group_id,
+            predicate=identifier(data["predicate"], "proposal.predicate"),
+            activity=optional_identifier(data["activity"], "proposal.activity"),
+            phase=optional_identifier(data["phase"], "proposal.phase"),
+            semantic_payload=json_snapshot(
+                data["semantic_payload"],
+                "proposal.semantic_payload",
+                maximum_chars=self.config.max_semantic_payload_chars,
+                maximum_items=128,
+                maximum_depth=12,
+                forbidden_keys=_CLAIM_SYSTEM_FIELDS,
+            ),
+            human_summary=optional_bounded_text(
+                data["human_summary"],
+                "proposal.human_summary",
+                maximum=self.config.max_human_summary_chars,
+            ),
+            local_alternative_group_id=optional_identifier(
+                data["local_alternative_group_id"],
                 "proposal.local_alternative_group_id",
             ),
+            normalizer_confidence=finite_score(
+                data["normalizer_confidence"],
+                "proposal.normalizer_confidence",
+            ),
         )
-        object.__setattr__(
-            self,
-            "normalizer_confidence",
-            finite_score(self.normalizer_confidence, "proposal.normalizer_confidence"),
-        )
+
+    def _validated(
+        self,
+        proposals: tuple[ClaimSemanticProposal, ...],
+    ) -> ValidatedClaimProposalBatch:
+        if len(proposals) > self.config.max_claims_per_record:
+            raise NormalizerOutputError("proposal count exceeds configured boundary")
+        groups: dict[str, int] = {}
+        for proposal in proposals:
+            group = proposal.local_alternative_group_id
+            if group is None:
+                continue
+            groups[group] = groups.get(group, 0) + 1
+            if groups[group] > self.config.max_alternative_group_size:
+                raise NormalizerOutputError("alternative group exceeds configured boundary")
+        return ValidatedClaimProposalBatch(proposals)
+
+    def json_schema(self) -> dict[str, object]:
+        nullable_identifier: dict[str, object] = {
+            "anyOf": [
+                {"type": "string", "minLength": 1, "maxLength": 256},
+                {"type": "null"},
+            ]
+        }
+        item: dict[str, object] = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": sorted(_PROPOSAL_FIELDS),
+            "properties": {
+                "claim_kind": {"type": "string", "enum": [item.value for item in ClaimKind]},
+                "semantic_family": nullable_identifier,
+                "predicate": {"type": "string", "minLength": 1, "maxLength": 256},
+                "activity": nullable_identifier,
+                "phase": nullable_identifier,
+                "semantic_payload": {"type": "object"},
+                "human_summary": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": self.config.max_human_summary_chars,
+                        },
+                        {"type": "null"},
+                    ]
+                },
+                "local_alternative_group_id": nullable_identifier,
+                "normalizer_confidence": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                },
+            },
+        }
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["proposals"],
+            "properties": {
+                "proposals": {
+                    "type": "array",
+                    "maxItems": self.config.max_claims_per_record,
+                    "items": item,
+                }
+            },
+        }
 
 
 def proposal_to_dict(
@@ -94,6 +232,8 @@ def proposal_to_dict(
     *,
     include_human_summary: bool = True,
 ) -> dict[str, Any]:
+    if not isinstance(value, ClaimSemanticProposal):
+        raise TypeError("value must be ClaimSemanticProposal")
     result = {
         "claim_kind": value.claim_kind.value,
         "semantic_family": value.semantic_family,
@@ -107,132 +247,3 @@ def proposal_to_dict(
     if include_human_summary:
         result["human_summary"] = value.human_summary
     return result
-
-
-def proposal_from_dict(value: object, config: ClaimNormalizationConfig) -> ClaimSemanticProposal:
-    if not isinstance(config, ClaimNormalizationConfig):
-        raise TypeError("config must be ClaimNormalizationConfig")
-    fields = frozenset(
-        {
-            "claim_kind",
-            "semantic_family",
-            "predicate",
-            "activity",
-            "phase",
-            "semantic_payload",
-            "human_summary",
-            "local_alternative_group_id",
-            "normalizer_confidence",
-        }
-    )
-    try:
-        data = strict_object(value, "claim_proposal", fields)
-        proposal = ClaimSemanticProposal(
-            claim_kind=ClaimKind(data["claim_kind"]),
-            semantic_family=data["semantic_family"],
-            predicate=data["predicate"],
-            activity=data["activity"],
-            phase=data["phase"],
-            semantic_payload=data["semantic_payload"],
-            human_summary=data["human_summary"],
-            local_alternative_group_id=data["local_alternative_group_id"],
-            normalizer_confidence=data["normalizer_confidence"],
-        )
-        if len(bounded_text(proposal.predicate, "proposal.predicate", maximum=256)) > 256:
-            raise ValueError("proposal predicate boundary exceeded")
-        if len(canonical_json(proposal.semantic_payload)) > config.max_semantic_payload_chars:
-            raise ValueError("proposal semantic payload boundary exceeded")
-        if proposal.human_summary is not None and len(proposal.human_summary) > config.max_human_summary_chars:
-            raise ValueError("proposal human summary boundary exceeded")
-        return proposal
-    except (TypeError, ValueError) as exc:
-        raise BehaviorClaimSchemaError("Claim proposal failed strict validation") from exc
-
-
-def proposal_batch_from_dict(
-    value: object,
-    config: ClaimNormalizationConfig,
-) -> tuple[ClaimSemanticProposal, ...]:
-    data = strict_object(value, "claim_proposals", frozenset({"proposals"}))
-    raw = data["proposals"]
-    if not isinstance(raw, list | tuple):
-        raise BehaviorClaimSchemaError("proposals must be an array")
-    if len(raw) > config.max_claims_per_record:
-        raise BehaviorClaimSchemaError("proposal count exceeds configured boundary")
-    proposals = tuple(proposal_from_dict(item, config) for item in raw)
-    alternative_counts: dict[str, int] = {}
-    for proposal in proposals:
-        if proposal.local_alternative_group_id is not None:
-            group = proposal.local_alternative_group_id
-            alternative_counts[group] = alternative_counts.get(group, 0) + 1
-            if alternative_counts[group] > config.max_alternative_group_size:
-                raise BehaviorClaimSchemaError("alternative group exceeds configured boundary")
-    return proposals
-
-
-def proposal_batch_json_schema(config: ClaimNormalizationConfig) -> dict[str, object]:
-    if not isinstance(config, ClaimNormalizationConfig):
-        raise TypeError("config must be ClaimNormalizationConfig")
-    nullable_identifier: dict[str, object] = {
-        "anyOf": [
-            {"type": "string", "minLength": 1, "maxLength": 256},
-            {"type": "null"},
-        ]
-    }
-    item: dict[str, object] = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": [
-            "claim_kind",
-            "semantic_family",
-            "predicate",
-            "activity",
-            "phase",
-            "semantic_payload",
-            "human_summary",
-            "local_alternative_group_id",
-            "normalizer_confidence",
-        ],
-        "properties": {
-            "claim_kind": {"type": "string", "enum": [item.value for item in ClaimKind]},
-            "semantic_family": nullable_identifier,
-            "predicate": {"type": "string", "minLength": 1, "maxLength": 256},
-            "activity": nullable_identifier,
-            "phase": nullable_identifier,
-            "semantic_payload": {"type": "object"},
-            "human_summary": {
-                "anyOf": [
-                    {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": config.max_human_summary_chars,
-                    },
-                    {"type": "null"},
-                ]
-            },
-            "local_alternative_group_id": nullable_identifier,
-            "normalizer_confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-        },
-    }
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["proposals"],
-        "properties": {
-            "proposals": {
-                "type": "array",
-                "maxItems": config.max_claims_per_record,
-                "items": item,
-            }
-        },
-    }
-
-
-__all__ = [
-    "ClaimKind",
-    "ClaimSemanticProposal",
-    "proposal_batch_from_dict",
-    "proposal_batch_json_schema",
-    "proposal_from_dict",
-    "proposal_to_dict",
-]

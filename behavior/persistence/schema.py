@@ -262,6 +262,3 @@ def _column_names(sql: str) -> list[str]:
 EXPECTED_COLUMNS = {
     name: tuple(_column_names(sql)) for name, sql in TABLE_SQL.items()
 }
-
-
-__all__ = ["BEHAVIOR_SCHEMA_VERSION", "initialize_schema", "validate_schema"]

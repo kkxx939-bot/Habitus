@@ -9,7 +9,7 @@ import pytest
 
 from behavior.claim import (
     BuiltinDeterministicClaimNormalizer,
-    ClaimBinder,
+    ClaimFactory,
     ClaimKind,
     ClaimNormalizationPlanner,
     ClaimNormalizationService,
@@ -20,7 +20,13 @@ from behavior.claim import (
 )
 from behavior.claim.compatibility import ClaimCompatibilityPolicy
 from behavior.claim.model import DerivationClass, SourceEpistemicClass
+from behavior.claim.model_input import ModelNormalizationProjection
+from behavior.claim.planner import ClaimNormalizationRoute, NormalizationLane
+from behavior.claim.proposal import ClaimProposalParser
+from behavior.claim.publication import ClaimPublicationFactory, ProcessingIdentity
 from behavior.claim.receipt import AttemptStatus
+from behavior.claim.route_executor import NormalizationRouteExecutor
+from behavior.claim.service import ClaimNormalizationResultStatus
 from behavior.config import BehaviorConfig
 from behavior.errors import (
     BehaviorClaimSchemaError,
@@ -38,6 +44,7 @@ from behavior.errors import (
 from behavior.evidence import (
     ActionEventPayload,
     ActivitySegmentPayload,
+    AdapterOutputContract,
     BehaviorModality,
     BehaviorOriginKind,
     BehaviorRecordKind,
@@ -45,7 +52,6 @@ from behavior.evidence import (
     BehaviorSemanticAdapterRegistry,
     BehaviorSemanticContent,
     BehaviorSemanticInput,
-    BehaviorSourceProvenance,
     BehaviorSourceTrust,
     ClockSyncStatus,
     CommunicationChannel,
@@ -53,6 +59,8 @@ from behavior.evidence import (
     CoverageStatus,
     EnvironmentChangePayload,
     EvidenceIntegrity,
+    EvidenceKind,
+    EvidenceReference,
     FeedbackPayload,
     FeedbackPolarity,
     FreeTextSemanticPayload,
@@ -68,7 +76,9 @@ from behavior.evidence import (
     ToolResultStatus,
     UtteranceSegmentPayload,
 )
+from behavior.evidence.factory import EvidenceFactory
 from behavior.evidence.ingress import BehaviorEvidenceIngressService
+from behavior.evidence.policy import ValidatedEvidenceInput
 from behavior.evidence.record import BehaviorEvidenceRecord
 from behavior.persistence import BehaviorDatabase, SQLiteBehaviorClaimLedger, SQLiteBehaviorEvidenceLedger
 from ModelClient import (
@@ -99,12 +109,26 @@ from tests.unit.behavior.test_evidence_ingress_ledger import semantic_input
 
 def direct_record(value: BehaviorSemanticInput) -> BehaviorEvidenceRecord:
     producer = ProducerFingerprint("test", "1", "1", "1", ProducerImplementationKind.ADAPTER)
-    return BehaviorEvidenceRecord(
-        semantic_content=value.content,
-        provenance=BehaviorSourceProvenance(value.source, "test", producer, digest("capability")),
-        source_trust=BehaviorSourceTrust.MODEL_INFERRED,
-        ingested_at=BASE_TIME,
+    trust = (
+        BehaviorSourceTrust.USER_EXPLICIT
+        if value.source.origin_kind is BehaviorOriginKind.DIRECT_AMBIENT_ASR
+        else BehaviorSourceTrust.MODEL_INFERRED
     )
+    contract = AdapterOutputContract(
+        value.source.origin_kind,
+        value.content.record_kind,
+        value.content.modality,
+        value.content.subject_role,
+        value.content.actor_role,
+        trust,
+    )
+    return EvidenceFactory().create_batch(
+        (ValidatedEvidenceInput(value, contract),),
+        adapter_name="test",
+        producer=producer,
+        capability_digest=digest("capability"),
+        ingested_at=BASE_TIME,
+    )[0]
 
 
 def free_text_input() -> BehaviorSemanticInput:
@@ -184,6 +208,24 @@ def state_proposal(
     )
 
 
+def route_for(normalizer, lane: NormalizationLane) -> ClaimNormalizationRoute:
+    return ClaimNormalizationRoute(
+        normalizer.name,
+        normalizer.fingerprint.digest,
+        normalizer.kind,
+        lane,
+    )
+
+
+def create_claim(record, proposal, normalizer, *, created_at=BASE_TIME):
+    return ClaimFactory().create(
+        record,
+        proposal,
+        route_for(normalizer, NormalizationLane.ENHANCEMENT),
+        created_at=created_at,
+    )
+
+
 async def ingest_record(database, input_value, *, config, name="adapter"):
     ledger = SQLiteBehaviorEvidenceLedger(database)
     registry = BehaviorSemanticAdapterRegistry()
@@ -218,15 +260,26 @@ def normalization_service(tmp_path, database, evidence_ledger, config, *model_no
     for normalizer in model_normalizers:
         registry.register(normalizer)
     planner = ClaimNormalizationPlanner(registry, config.normalization)
-    binder = ClaimBinder(config=config.normalization)
+    claim_factory = ClaimFactory()
+    processing_lock = SQLiteProcessingLock(tmp_path)
+    route_executor = NormalizationRouteExecutor(
+        ledger=claim_ledger,
+        normalizers=registry,
+        proposal_parser=ClaimProposalParser(config.normalization),
+        claim_factory=claim_factory,
+        publication_factory=ClaimPublicationFactory(
+            compatibility_policy_digest=claim_factory.compatibility.digest,
+            binding_policy_digest=claim_factory.binding.digest,
+            confidence_policy_digest=claim_factory.confidence.digest,
+        ),
+        processing_lock=processing_lock,
+        clock=FakeClock(),
+    )
     service = ClaimNormalizationService(
         evidence_ledger,
         claim_ledger,
-        registry,
         planner,
-        binder,
-        SQLiteProcessingLock(tmp_path),
-        clock=FakeClock(),
+        route_executor,
     )
     return claim_ledger, service
 
@@ -236,13 +289,17 @@ def test_deterministic_core_maps_without_model_and_binds_evidence_fields() -> No
     record = direct_record(semantic_input())
     proposals = asyncio.run(normalizer.normalize(record))
     assert len(proposals) == 1 and proposals[0].claim_kind is ClaimKind.ACTIVITY
-    binder = ClaimBinder(config=BehaviorConfig().normalization)
-    claim = binder.bind(
+    claim_factory = ClaimFactory()
+    route = ClaimNormalizationRoute(
+        normalizer.name,
+        normalizer.fingerprint.digest,
+        normalizer.kind,
+        NormalizationLane.CORE,
+    )
+    claim = claim_factory.create(
         record,
         proposals[0],
-        normalizer_fingerprint=normalizer.fingerprint.digest,
-        normalizer_kind=normalizer.kind,
-        derivation_class=DerivationClass.DETERMINISTIC,
+        route,
         created_at=BASE_TIME,
     )
     assert claim.evidence_record_id == record.evidence_record_id
@@ -253,11 +310,18 @@ def test_deterministic_core_maps_without_model_and_binds_evidence_fields() -> No
     assert claim.effective_confidence == record.semantic_content.source_confidence
 
 
-def test_unexpected_normalizer_bug_is_not_hidden_as_domain_degradation(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "program_error",
+    [RuntimeError("programming defect"), TypeError("programming defect"), ValueError("programming defect")],
+)
+def test_unexpected_normalizer_bug_is_not_hidden_as_domain_degradation(
+    tmp_path,
+    program_error,
+) -> None:
     config = BehaviorConfig()
     database = BehaviorDatabase(tmp_path / "behavior", config=config, initialize=True)
     evidence_ledger, record = asyncio.run(ingest_record(database, free_text_input(), config=config))
-    normalizer = FakeModelNormalizer(error=RuntimeError("programming defect"))
+    normalizer = FakeModelNormalizer(error=program_error)
     claim_ledger, service = normalization_service(
         tmp_path,
         database,
@@ -266,29 +330,27 @@ def test_unexpected_normalizer_bug_is_not_hidden_as_domain_degradation(tmp_path)
         normalizer,
     )
     plan = service.planner.plan(record)
-    identity = service._route_identity(record, plan, plan.enhancement_routes[0])
+    identity = service.route_executor.identity(record, plan, plan.enhancement_routes[0]).value
 
-    with pytest.raises(RuntimeError, match="programming defect"):
+    with pytest.raises(type(program_error), match="programming defect"):
         asyncio.run(service.normalize(record.evidence_record_id))
 
     assert claim_ledger.read_latest_attempt(identity) is None
     assert claim_ledger.read_receipt(identity) is None
 
 
-def test_binder_rejects_normalizer_kind_derivation_mismatch() -> None:
+def test_claim_factory_derivation_is_owned_by_route() -> None:
     normalizer = BuiltinDeterministicClaimNormalizer()
     record = direct_record(semantic_input())
     proposal = asyncio.run(normalizer.normalize(record))[0]
-    binder = ClaimBinder(config=BehaviorConfig().normalization)
-    with pytest.raises(BehaviorClaimSchemaError, match="derivation class disagree"):
-        binder.bind(
-            record,
-            proposal,
-            normalizer_fingerprint=normalizer.fingerprint.digest,
-            normalizer_kind=normalizer.kind,
-            derivation_class=DerivationClass.MODEL,
-            created_at=BASE_TIME,
-        )
+    route = ClaimNormalizationRoute(
+        normalizer.name,
+        normalizer.fingerprint.digest,
+        normalizer.kind,
+        NormalizationLane.CORE,
+    )
+    claim = ClaimFactory().create(record, proposal, route, created_at=BASE_TIME)
+    assert claim.derivation_class is DerivationClass.DETERMINISTIC
 
 
 @pytest.mark.parametrize(
@@ -390,7 +452,7 @@ def test_model_failure_isolated_from_evidence_and_no_success_receipt(
     assert claim_ledger.list_after_sequence(0, 10) == ()
     assert result.degradations[0].retryable is retryable
     plan = service.planner.plan(record)
-    identity = service._route_identity(record, plan, plan.enhancement_routes[0])
+    identity = service.route_executor.identity(record, plan, plan.enhancement_routes[0]).value
     attempt = claim_ledger.read_latest_attempt(identity)
     assert attempt is not None and attempt.status is status
     assert claim_ledger.read_receipt(identity) is None
@@ -401,7 +463,7 @@ def test_invalid_model_proposal_sequence_is_non_retryable_schema_failure(tmp_pat
         async def normalize(self, record):
             del record
             self.calls += 1
-            return [state_proposal()]
+            return (object(),)
 
     config = BehaviorConfig()
     database = BehaviorDatabase(tmp_path / "behavior", config=config, initialize=True)
@@ -419,10 +481,10 @@ def test_invalid_model_proposal_sequence_is_non_retryable_schema_failure(tmp_pat
 
     result = asyncio.run(service.normalize(record.evidence_record_id))
 
-    assert result.degradations[0].error_code == "CLAIM_SCHEMA"
+    assert result.degradations[0].error_code == "NORMALIZER_OUTPUT"
     assert result.degradations[0].retryable is False
     plan = service.planner.plan(record)
-    identity = service._route_identity(record, plan, plan.enhancement_routes[0])
+    identity = service.route_executor.identity(record, plan, plan.enhancement_routes[0]).value
     attempt = claim_ledger.read_latest_attempt(identity)
     assert attempt is not None
     assert attempt.status is AttemptStatus.FAILED_NON_RETRYABLE
@@ -502,6 +564,47 @@ def test_structured_model_normalizer_uses_dynamic_schema_untrusted_boundary_and_
         )
 
 
+def test_model_normalization_projection_excludes_internal_and_external_references() -> None:
+    value = free_text_input()
+    sensitive = "s3://private/signed-reference"
+    value = replace(
+        value,
+        content=replace(
+            value.content,
+            scene_ref="private-scene",
+            location_ref="private-location",
+            object_refs=("private-object",),
+            entity_refs=("private-entity",),
+            evidence_refs=(
+                EvidenceReference(
+                    sensitive,
+                    EvidenceKind.TRANSCRIPT,
+                    digest("transcript"),
+                    BASE_TIME,
+                    BASE_TIME,
+                    source_system_ref="device://private/system",
+                ),
+            ),
+        ),
+        source=replace(value.source, source_ref="file:///private/source"),
+    )
+    projected = ModelNormalizationProjection().project(direct_record(value))
+    assert set(projected) == {
+        "record_kind",
+        "subject_role",
+        "actor_role",
+        "modality",
+        "event_time_start",
+        "event_time_end",
+        "duration_seconds",
+        "payload",
+        "source_confidence",
+        "integrity",
+    }
+    assert sensitive not in repr(projected)
+    assert "private-scene" not in repr(projected)
+
+
 def test_retry_enhancement_only_retries_retryable_failure(tmp_path) -> None:
     config = BehaviorConfig()
     database = BehaviorDatabase(tmp_path / "behavior", config=config, initialize=True)
@@ -523,6 +626,38 @@ def test_retry_enhancement_only_retries_retryable_failure(tmp_path) -> None:
         asyncio.run(service.retry_enhancement(record.evidence_record_id, "missing"))
 
 
+def test_retry_result_reaggregates_other_enhancement_failures(tmp_path) -> None:
+    config = BehaviorConfig()
+    database = BehaviorDatabase(tmp_path / "behavior", config=config, initialize=True)
+    evidence_ledger, record = asyncio.run(
+        ingest_record(database, free_text_input(), config=config)
+    )
+    first = FakeModelNormalizer(
+        error=ClaimModelTransportError("first failed"),
+        name="first_model",
+    )
+    second = FakeModelNormalizer(
+        error=ClaimModelTransportError("second failed"),
+        name="second_model",
+    )
+    _, service = normalization_service(
+        tmp_path,
+        database,
+        evidence_ledger,
+        config,
+        first,
+        second,
+    )
+    initial = asyncio.run(service.normalize(record.evidence_record_id))
+    assert len(initial.degradations) == 2
+    first.error = None
+    first.proposals = (state_proposal(),)
+    retried = asyncio.run(service.retry_enhancement(record.evidence_record_id, first.name))
+    assert retried.status is ClaimNormalizationResultStatus.CORE_COMMITTED_ENHANCEMENT_PENDING
+    assert len(retried.enhancement_receipts) == 1
+    assert tuple(item.normalizer_name for item in retried.degradations) == (second.name,)
+
+
 def test_retry_enhancement_never_runs_missing_core(tmp_path) -> None:
     config = BehaviorConfig()
     database = BehaviorDatabase(tmp_path / "behavior", config=config, initialize=True)
@@ -540,7 +675,7 @@ def test_retry_enhancement_never_runs_missing_core(tmp_path) -> None:
     plan = service.planner.plan(record)
     assert claim_ledger.read_receipt(service._core_identity(record, plan)) is None
     assert claim_ledger.read_latest_attempt(
-        service._route_identity(record, plan, plan.enhancement_routes[0])
+        service.route_executor.identity(record, plan, plan.enhancement_routes[0]).value
     ) is None
     assert model.calls == 0
 
@@ -586,6 +721,36 @@ def test_compatibility_policy_forbids_utterance_environment_tool_action_and_cove
     ).allowed
 
 
+def test_free_text_user_role_matrix_is_explicit_and_not_system_open() -> None:
+    policy = ClaimCompatibilityPolicy()
+    for kind in (
+        ClaimKind.TOOL_CALL,
+        ClaimKind.TOOL_RESULT,
+        ClaimKind.COVERAGE,
+        ClaimKind.ENVIRONMENT_CHANGE,
+        ClaimKind.ACTION,
+    ):
+        assert not policy.evaluate(
+            record_kind=BehaviorRecordKind.FREE_TEXT_SEMANTIC,
+            subject_role=BehaviorRole.USER,
+            actor_role=BehaviorRole.USER,
+            normalizer_kind="MODEL",
+            claim_kind=kind,
+        ).allowed
+    assert policy.evaluate(
+        record_kind=BehaviorRecordKind.FREE_TEXT_SEMANTIC,
+        subject_role=BehaviorRole.USER,
+        actor_role=BehaviorRole.USER,
+        normalizer_kind="MODEL",
+        claim_kind=ClaimKind.STATE_ASSERTION,
+    ).allowed
+
+
+def test_processing_identity_cannot_be_constructed_from_caller_digest() -> None:
+    with pytest.raises(TypeError):
+        ProcessingIdentity("0" * 64)
+
+
 def test_claim_identity_summary_fingerprint_confidence_and_alternative_namespace() -> None:
     first_input = free_text_input()
     second_input = replace(
@@ -594,30 +759,27 @@ def test_claim_identity_summary_fingerprint_confidence_and_alternative_namespace
     )
     record1 = direct_record(first_input)
     record2 = direct_record(second_input)
-    binder = ClaimBinder(config=BehaviorConfig().normalization)
     normalizer = FakeModelNormalizer()
     proposal1 = replace(state_proposal(summary="one"), local_alternative_group_id="a")
     proposal2 = replace(state_proposal(summary="two"), local_alternative_group_id="a")
-    claim1 = binder.bind(record1, proposal1, normalizer_fingerprint=normalizer.fingerprint.digest, normalizer_kind=normalizer.kind, derivation_class=DerivationClass.MODEL, created_at=BASE_TIME)
-    claim1_summary = binder.bind(record1, proposal2, normalizer_fingerprint=normalizer.fingerprint.digest, normalizer_kind=normalizer.kind, derivation_class=DerivationClass.MODEL, created_at=BASE_TIME + timedelta(seconds=1))
-    claim2 = binder.bind(record2, proposal1, normalizer_fingerprint=normalizer.fingerprint.digest, normalizer_kind=normalizer.kind, derivation_class=DerivationClass.MODEL, created_at=BASE_TIME)
+    claim1 = create_claim(record1, proposal1, normalizer)
+    claim1_summary = create_claim(
+        record1,
+        proposal2,
+        normalizer,
+        created_at=BASE_TIME + timedelta(seconds=1),
+    )
+    claim2 = create_claim(record2, proposal1, normalizer)
     assert claim1.claim_id == claim1_summary.claim_id
     assert claim1.content_digest != claim1_summary.content_digest
     assert claim1.semantic_fingerprint == claim2.semantic_fingerprint
     assert claim1.claim_id != claim2.claim_id
     assert claim1.alternative_group_key != claim2.alternative_group_key
     other_normalizer = FakeModelNormalizer(name="other_model")
-    other_claim = binder.bind(
-        record1,
-        proposal1,
-        normalizer_fingerprint=other_normalizer.fingerprint.digest,
-        normalizer_kind=other_normalizer.kind,
-        derivation_class=DerivationClass.MODEL,
-        created_at=BASE_TIME,
-    )
+    other_claim = create_claim(record1, proposal1, other_normalizer)
     assert claim1.alternative_group_key != other_claim.alternative_group_key
     confidence_changed = replace(proposal1, normalizer_confidence=0.2)
-    claim3 = binder.bind(record1, confidence_changed, normalizer_fingerprint=normalizer.fingerprint.digest, normalizer_kind=normalizer.kind, derivation_class=DerivationClass.MODEL, created_at=BASE_TIME)
+    claim3 = create_claim(record1, confidence_changed, normalizer)
     assert claim3.semantic_fingerprint == claim1.semantic_fingerprint
 
 
@@ -639,12 +801,10 @@ def test_all_source_trust_classes_map_mechanically_to_epistemic(trust, expected)
     record = replace(direct_record(semantic_input()), source_trust=trust)
     normalizer = BuiltinDeterministicClaimNormalizer()
     proposal = asyncio.run(normalizer.normalize(record))[0]
-    claim = ClaimBinder(config=BehaviorConfig().normalization).bind(
+    claim = ClaimFactory().create(
         record,
         proposal,
-        normalizer_fingerprint=normalizer.fingerprint.digest,
-        normalizer_kind=normalizer.kind,
-        derivation_class=DerivationClass.DETERMINISTIC,
+        route_for(normalizer, NormalizationLane.CORE),
         created_at=BASE_TIME,
     )
     assert claim.source_epistemic_class is expected
@@ -667,13 +827,13 @@ def test_compatibility_digest_propagates_to_identity_receipt_and_claim(tmp_path)
     claim = claim_ledger.read_claim(receipt.claim_ids[0])
     plan = service.planner.plan(record)
     assert claim is not None
-    assert receipt.compatibility_policy_digest == service.binder.compatibility.digest
-    assert claim.compatibility_policy_digest == service.binder.compatibility.digest
-    assert receipt.processing_identity == service._route_identity(
+    assert receipt.compatibility_policy_digest == service.route_executor.claim_factory.compatibility.digest
+    assert claim.compatibility_policy_digest == service.route_executor.claim_factory.compatibility.digest
+    assert receipt.processing_identity == service.route_executor.identity(
         record,
         plan,
         plan.enhancement_routes[0],
-    )
+    ).value
 
 
 def test_proposal_semantic_payload_rejects_system_bound_fields_recursively() -> None:
@@ -687,20 +847,14 @@ def test_proposal_semantic_payload_rejects_system_bound_fields_recursively() -> 
         "claim_sequence",
         "content_digest",
     ):
-        with pytest.raises(ValueError, match="reserved"):
-            replace(state_proposal(), semantic_payload={"nested": {field: "forbidden"}})
+        with pytest.raises(BehaviorClaimSchemaError, match="strict validation"):
+            ClaimProposalParser(BehaviorConfig().normalization).validate_batch(
+                (replace(state_proposal(), semantic_payload={"nested": {field: "forbidden"}}),)
+            )
     normalizer = FakeModelNormalizer()
     record = direct_record(free_text_input())
-    claim = ClaimBinder(config=BehaviorConfig().normalization).bind(
-        record,
-        state_proposal(),
-        normalizer_fingerprint=normalizer.fingerprint.digest,
-        normalizer_kind=normalizer.kind,
-        derivation_class=DerivationClass.MODEL,
-        created_at=BASE_TIME,
-    )
-    with pytest.raises(ValueError, match="reserved"):
-        replace(claim, semantic_payload={"nested": {"created_at": "forged"}})
+    claim = create_claim(record, state_proposal(), normalizer)
+    assert claim.semantic_payload == {"value": True}
 
 
 def test_concurrent_same_processing_calls_model_once(tmp_path) -> None:

@@ -1,9 +1,16 @@
 """已经确认的新架构边界不得被兼容层或反向依赖破坏。"""
 
 import ast
+import inspect
 from pathlib import Path
+from typing import get_type_hints
 
 import pytest
+
+from behavior.claim.normalizer import StructuredModelClaimNormalizer
+from behavior.claim.proposal import ClaimProposalParser
+from behavior.config import ClaimNormalizationConfig
+from ModelClient import StructuredChatClient
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_ROOTS = (
@@ -11,6 +18,7 @@ PRODUCTION_ROOTS = (
     "Runtime",
     "ModelClient",
     "pre",
+    "conversation",
     "memory",
     "behavior",
     "infrastructure",
@@ -147,21 +155,55 @@ def test_behavior_and_memory_keep_strict_peer_dependency_boundaries() -> None:
     assert integration_violations == []
 
 
+def test_conversation_source_and_projection_do_not_depend_on_memory_or_behavior() -> None:
+    violations = [
+        str(path.relative_to(REPOSITORY_ROOT))
+        for path in (REPOSITORY_ROOT / "conversation").rglob("*.py")
+        if imported_roots(path) & {"memory", "behavior", "Runtime", "Config", "integrations"}
+    ]
+    assert violations == []
+
+
+def test_behavior_projection_reads_only_source_envelope_batch() -> None:
+    projection_path = REPOSITORY_ROOT / "conversation" / "projection" / "behavior.py"
+    imported = imported_roots(projection_path)
+    source = projection_path.read_text(encoding="utf-8")
+    assert imported.isdisjoint({"memory", "behavior", "Runtime", "Config"})
+    assert "envelope.batch.messages" in source
+    assert "ConversationMessageChunker" not in source
+    assert "ConversationSegment" not in source
+    assert "ConversationSummary" not in source
+    assert "MemoryEditor" not in source
+
+
+def test_memory_conversation_consumer_wraps_the_single_existing_enqueuer_chain() -> None:
+    consumer_source = (
+        REPOSITORY_ROOT / "memory" / "workflow" / "conversation_consumer.py"
+    ).read_text(encoding="utf-8")
+    assert "self.enqueuer.append" in consumer_source
+    assert "self.enqueuer.enqueue_ready_segments" in consumer_source
+    assert "ConversationToolResultReducer(" not in consumer_source
+    assert "ConversationMessageChunker(" not in consumer_source
+
+
 def test_behavior_has_no_identity_partition_model() -> None:
-    disallowed_partition_terms = (
-        "owner_ref",
-        "owner_binding",
-        "owner_identity",
-        "user_id",
-        "tenant_id",
-        "account_id",
-    )
+    disallowed_partition_fields = {
+        "owner_ref", "owner_binding", "owner_identity", "owner_identity_digest",
+        "user_id", "tenant_id", "account_id",
+    }
     violations = []
     for path in (REPOSITORY_ROOT / "behavior").rglob("*.py"):
-        source = path.read_text(encoding="utf-8")
-        for term in disallowed_partition_terms:
-            if term in source:
-                violations.append(f"{path.relative_to(REPOSITORY_ROOT)}: {term}")
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                names = {node.target.id}
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                names = {argument.arg for argument in (*node.args.posonlyargs, *node.args.args,
+                                                        *node.args.kwonlyargs)}
+            else:
+                continue
+            for name in names & disallowed_partition_fields:
+                violations.append(f"{path.relative_to(REPOSITORY_ROOT)}: {name}")
     assert violations == []
 
 
@@ -301,8 +343,9 @@ def test_behavior_claim_proposal_keeps_system_fields_out_of_model_contract() -> 
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
     }
     assert names.isdisjoint(system_fields)
-    assert "ClaimNormalizationConfig()" not in proposal_source
-    assert '"additionalProperties": False' in proposal_source
+    parameter = inspect.signature(ClaimProposalParser).parameters["config"]
+    assert parameter.default is inspect.Parameter.empty
+    assert ClaimProposalParser(ClaimNormalizationConfig()).json_schema()["additionalProperties"] is False
 
 
 def test_behavior_sqlite_has_two_sequences_foreign_keys_and_atomic_receipt_members() -> None:
@@ -325,32 +368,22 @@ def test_behavior_sqlite_has_two_sequences_foreign_keys_and_atomic_receipt_membe
     assert "behavior_first_layer_v1" in schema_source
 
 
-def test_behavior_model_client_and_processing_lock_boundaries_are_mechanical() -> None:
-    normalizer_source = (REPOSITORY_ROOT / "behavior" / "claim" / "normalizer.py").read_text(
-        encoding="utf-8"
-    )
-    runtime_source = (REPOSITORY_ROOT / "Runtime" / "components.py").read_text(encoding="utf-8")
-    service_source = (REPOSITORY_ROOT / "behavior" / "claim" / "service.py").read_text(
-        encoding="utf-8"
-    )
-    assert "model_client: StructuredChatClient" in normalizer_source
-    assert 'getattr(normalizer, "model_client", None)' in runtime_source
-    assert "isinstance(normalizer, StructuredModelClaimNormalizer)" not in runtime_source
-    assert "async with self.processing_lock.acquire(identity)" in service_source
-    service_tree = ast.parse(service_source)
-    normalize_route = next(
-        node
-        for node in ast.walk(service_tree)
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_normalize_route"
-    )
+def test_behavior_model_repository_and_processing_lock_dependencies() -> None:
+    route_path = REPOSITORY_ROOT / "behavior" / "claim" / "route_executor.py"
+    repository_path = REPOSITORY_ROOT / "behavior" / "persistence" / "claim.py"
+    assembly_path = REPOSITORY_ROOT / "Runtime" / "assembly.py"
+    assert get_type_hints(StructuredModelClaimNormalizer.__init__)["model_client"] is StructuredChatClient
+    assert "ModelClient" not in imported_roots(repository_path)
+    route_tree = ast.parse(route_path.read_text(encoding="utf-8"))
     assert any(
-        isinstance(node, ast.Await)
-        and isinstance(node.value, ast.Call)
-        and isinstance(node.value.func, ast.Attribute)
-        and node.value.func.attr == "normalize"
-        for node in ast.walk(normalize_route)
+        isinstance(node, ast.ClassDef) and node.name == "NormalizationRouteExecutor"
+        for node in route_tree.body
     )
-    assert "publish_route(attempt, claims, receipt)" in service_source
+    assembly_tree = ast.parse(assembly_path.read_text(encoding="utf-8"))
+    assert not any(
+        isinstance(node, ast.ClassDef) and "ProcessingLock" in node.name
+        for node in assembly_tree.body
+    )
 
 
 def test_behavior_content_safety_and_full_digest_code_paths_remain_distinct() -> None:

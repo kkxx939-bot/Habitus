@@ -63,6 +63,3 @@ class BehaviorEvidenceLedger(Protocol):
     ) -> EvidencePage: ...
 
     def read_ingress_receipt(self, delivery_id: str) -> BehaviorEvidenceIngressReceipt | None: ...
-
-
-__all__ = ["BehaviorEvidenceLedger", "BehaviorEvidenceLedgerEntry"]

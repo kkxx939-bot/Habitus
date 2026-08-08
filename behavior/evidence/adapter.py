@@ -43,6 +43,3 @@ class BehaviorSemanticAdapter(Protocol):
         self,
         payload: object,
     ) -> BehaviorSemanticInput | BehaviorSemanticInputBatch: ...
-
-
-__all__ = ["BehaviorSemanticAdapter", "BehaviorSemanticInput", "BehaviorSemanticInputBatch"]

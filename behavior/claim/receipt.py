@@ -16,7 +16,6 @@ from behavior._validation import (
     strict_utc,
     utc_text,
 )
-from behavior.claim.model import CLAIM_PIPELINE_VERSION, CLAIM_SCHEMA_VERSION
 from behavior.claim.planner import NormalizationLane
 from foundation.integrity import canonical_digest
 
@@ -43,40 +42,6 @@ class ReceiptStatus(str, Enum):
     COMPLETED = "COMPLETED"
     ABSTAINED = "ABSTAINED"
     NO_CORE_REQUIRED = "NO_CORE_REQUIRED"
-
-
-def processing_identity(
-    *,
-    evidence_record_digest: str,
-    lane: NormalizationLane,
-    normalizer_fingerprint: str,
-    planner_policy_digest: str,
-    compatibility_policy_digest: str,
-    binding_policy_digest: str,
-    confidence_policy_digest: str,
-) -> str:
-    return canonical_digest(
-        {
-            "binding_policy_digest": sha256_digest(binding_policy_digest, "binding_policy_digest"),
-            "claim_schema_version": CLAIM_SCHEMA_VERSION,
-            "compatibility_policy_digest": sha256_digest(
-                compatibility_policy_digest,
-                "compatibility_policy_digest",
-            ),
-            "confidence_policy_digest": sha256_digest(
-                confidence_policy_digest,
-                "confidence_policy_digest",
-            ),
-            "evidence_record_digest": sha256_digest(
-                evidence_record_digest,
-                "evidence_record_digest",
-            ),
-            "lane": NormalizationLane(lane).value,
-            "normalizer_fingerprint": sha256_digest(normalizer_fingerprint, "normalizer_fingerprint"),
-            "pipeline_version": CLAIM_PIPELINE_VERSION,
-            "planner_policy_digest": sha256_digest(planner_policy_digest, "planner_policy_digest"),
-        }
-    )
 
 
 @dataclass(frozen=True)
@@ -295,11 +260,3 @@ def normalization_receipt_to_dict(value: ClaimNormalizationReceipt) -> dict[str,
         "publication_recorded_at": utc_text(value.publication_recorded_at),
         "content_digest": value.content_digest,
     }
-
-
-__all__ = [
-    "AttemptStatus",
-    "ClaimNormalizationAttempt",
-    "ClaimNormalizationReceipt",
-    "ReceiptStatus",
-]

@@ -5,9 +5,12 @@ from datetime import timedelta
 
 import pytest
 
+from behavior.config import BehaviorConfig
+from behavior.errors import BehaviorEvidenceSchemaError
 from behavior.evidence import (
     ActionEventPayload,
     ActivitySegmentPayload,
+    AdapterOutputContract,
     BehaviorAdapterCapability,
     BehaviorModality,
     BehaviorOriginKind,
@@ -45,9 +48,11 @@ from behavior.evidence import (
     ToolResultStatus,
     UtteranceSegmentPayload,
 )
-from behavior.evidence.content import content_from_dict, content_to_dict, validate_record_roles
+from behavior.evidence.content import content_from_dict, content_to_dict
 from behavior.evidence.payloads import payload_from_dict
+from behavior.evidence.policy import EvidenceBatchClockRejection, EvidencePolicy
 from behavior.evidence.provenance import descriptor_from_dict, descriptor_to_dict
+from behavior.evidence.specs import RECORD_SPECS, record_spec
 from tests.unit.behavior.conftest import BASE_TIME, digest, source_descriptor
 
 
@@ -82,6 +87,30 @@ def content(
     )
 
 
+def validate_content(value: BehaviorSemanticContent) -> None:
+    source = source_descriptor()
+    capability = BehaviorAdapterCapability(
+        (
+            AdapterOutputContract(
+                source.origin_kind,
+                value.record_kind,
+                value.modality,
+                value.subject_role,
+                value.actor_role,
+                BehaviorSourceTrust.MODEL_INFERRED,
+            ),
+        ),
+        BehaviorTimeMode.BACKFILL,
+        1,
+    )
+    EvidencePolicy(BehaviorConfig().evidence).validate_batch(
+        (BehaviorSemanticInput(value, source),),
+        capability,
+        producer_digest=digest("producer"),
+        now=BASE_TIME,
+    )
+
+
 @pytest.mark.parametrize(
     ("kind", "payload", "subject", "actor", "modality"),
     [
@@ -109,8 +138,10 @@ def test_every_record_kind_has_one_strict_payload_and_canonical_round_trip(
         if kind is not BehaviorRecordKind.FREE_TEXT_SEMANTIC
         else StateAssertionPayload("x", 1, {})
     )
-    with pytest.raises(TypeError):
-        content(kind, wrong_payload, subject=subject, actor=actor, modality=modality)
+    with pytest.raises(BehaviorEvidenceSchemaError):
+        validate_content(
+            content(kind, wrong_payload, subject=subject, actor=actor, modality=modality)
+        )
 
 
 def test_source_identity_stream_generation_and_content_digest_are_distinct() -> None:
@@ -171,8 +202,8 @@ def test_evidence_reference_is_external_media_free_utc_and_overlap_checked() -> 
         modality=BehaviorModality.VISION,
         evidence_refs=(reference,),
     ).evidence_refs == (reference,)
-    with pytest.raises(ValueError, match="overlap"):
-        content(
+    with pytest.raises(EvidenceBatchClockRejection, match="clock policy"):
+        validate_content(content(
             BehaviorRecordKind.ACTIVITY_SEGMENT,
             ActivitySegmentPayload("walking", PhaseHint.UNKNOWN, {}),
             subject=BehaviorRole.USER,
@@ -187,7 +218,7 @@ def test_evidence_reference_is_external_media_free_utc_and_overlap_checked() -> 
                     BASE_TIME - timedelta(minutes=59),
                 ),
             ),
-        )
+        ))
     with pytest.raises(ValueError):
         EvidenceReference("data:image/png;base64,AAAA", EvidenceKind.IMAGE_FRAME, digest("x"), BASE_TIME, BASE_TIME)
     with pytest.raises(ValueError):
@@ -212,8 +243,8 @@ def test_evidence_reference_is_external_media_free_utc_and_overlap_checked() -> 
     ],
 )
 def test_role_compatibility_is_mechanical_and_actor_none_is_preserved(kind, payload, subject, actor) -> None:
-    with pytest.raises(ValueError):
-        content(kind, payload, subject=subject, actor=actor)
+    with pytest.raises(BehaviorEvidenceSchemaError):
+        validate_content(content(kind, payload, subject=subject, actor=actor))
     state = content(
         BehaviorRecordKind.STATE_ASSERTION,
         StateAssertionPayload("ready", True, {}),
@@ -261,7 +292,7 @@ def test_record_kind_role_matrix_is_exhaustive() -> None:
         if kind is BehaviorRecordKind.STATE_TRANSITION:
             return subject in state_roles and (actor is None or actor in state_roles)
         if kind is BehaviorRecordKind.INTERACTION_SEGMENT:
-            return actor is subject and subject is not BehaviorRole.ROBOT
+            return actor is subject and subject in self_roles and subject is not BehaviorRole.ROBOT
         if kind is BehaviorRecordKind.ACTION_EVENT:
             return subject in action_roles and actor is subject
         if kind is BehaviorRecordKind.TOOL_CALL_EVENT:
@@ -292,10 +323,14 @@ def test_record_kind_role_matrix_is_exhaustive() -> None:
         for subject in BehaviorRole:
             for actor in actors:
                 if expected(kind, subject, actor):
-                    validate_record_roles(kind, subject, actor, payload)
+                    record_spec(kind).role_policy.validate(
+                        content(kind, payload, subject=subject, actor=actor)
+                    )
                 else:
                     with pytest.raises(ValueError):
-                        validate_record_roles(kind, subject, actor, payload)
+                        record_spec(kind).role_policy.validate(
+                            content(kind, payload, subject=subject, actor=actor)
+                        )
 
 
 def test_payload_unknown_fields_strict_types_nonfinite_binary_and_recursion_fail() -> None:
@@ -324,9 +359,8 @@ def test_payload_unknown_fields_strict_types_nonfinite_binary_and_recursion_fail
         "source_trust",
         "content_digest",
         "claim_sequence",
-        "owner_identity",
     ):
-        with pytest.raises(ValueError, match="reserved"):
+        with pytest.raises(ValueError, match="forbidden"):
             StateAssertionPayload("state", {"nested": {reserved: "forbidden"}}, {})
 
     allowed_semantic_names = {
@@ -342,8 +376,8 @@ def test_payload_unknown_fields_strict_types_nonfinite_binary_and_recursion_fail
         subject=BehaviorRole.SYSTEM,
         actor=None,
     )
-    with pytest.raises(ValueError):
-        replace(valid, event_time_end=BASE_TIME - timedelta(microseconds=1))
+    with pytest.raises(EvidenceBatchClockRejection):
+        validate_content(replace(valid, event_time_end=BASE_TIME - timedelta(microseconds=1)))
     with pytest.raises(ValueError):
         replace(valid, event_time_start=BASE_TIME.replace(tzinfo=None))
     with pytest.raises(ValueError):
@@ -365,23 +399,101 @@ def test_semantic_input_has_only_content_and_source_and_capability_binds_trust()
         "causal_refs",
         "projection_ref",
     }
-    capability = BehaviorAdapterCapability(
+    output = AdapterOutputContract(
+        BehaviorOriginKind.DIRECT_AMBIENT_ASR,
+        BehaviorRecordKind.UTTERANCE_SEGMENT,
+        BehaviorModality.AUDIO,
+        BehaviorRole.USER,
+        BehaviorRole.USER,
         BehaviorSourceTrust.USER_EXPLICIT,
+    )
+    capability = BehaviorAdapterCapability(
+        (output,),
         BehaviorTimeMode.LIVE,
-        (BehaviorOriginKind.DIRECT_AMBIENT_ASR,),
-        (BehaviorRecordKind.UTTERANCE_SEGMENT,),
-        (BehaviorModality.AUDIO,),
-        ((BehaviorRole.USER, BehaviorRole.USER),),
         10,
     )
-    assert capability.source_trust is BehaviorSourceTrust.USER_EXPLICIT
+    assert capability.allowed_outputs[0].source_trust is BehaviorSourceTrust.USER_EXPLICIT
     with pytest.raises(ValueError):
-        BehaviorAdapterCapability(
+        AdapterOutputContract(
+            BehaviorOriginKind.DIRECT_AMBIENT_ASR,
+            BehaviorRecordKind.UTTERANCE_SEGMENT,
+            BehaviorModality.AUDIO,
+            BehaviorRole.USER,
+            BehaviorRole.USER,
             BehaviorSourceTrust.MODEL_INFERRED,
+        )
+
+
+def test_adapter_output_contract_does_not_form_a_cartesian_product() -> None:
+    vision_activity = AdapterOutputContract(
+        BehaviorOriginKind.DIRECT_PERCEPTION,
+        BehaviorRecordKind.ACTIVITY_SEGMENT,
+        BehaviorModality.VISION,
+        BehaviorRole.USER,
+        BehaviorRole.USER,
+        BehaviorSourceTrust.MODEL_INFERRED,
+    )
+    tool_result = AdapterOutputContract(
+        BehaviorOriginKind.DIRECT_RUNTIME_EVENT,
+        BehaviorRecordKind.TOOL_RESULT_EVENT,
+        BehaviorModality.TOOL,
+        BehaviorRole.TOOL,
+        BehaviorRole.TOOL,
+        BehaviorSourceTrust.DIRECT_SYSTEM_LOG,
+    )
+    capability = BehaviorAdapterCapability(
+        (vision_activity, tool_result),
+        BehaviorTimeMode.LIVE,
+        2,
+    )
+    assert capability.match(
+        origin_kind=vision_activity.origin_kind,
+        record_kind=vision_activity.record_kind,
+        modality=vision_activity.modality,
+        subject_role=vision_activity.subject_role,
+        actor_role=vision_activity.actor_role,
+    ) is vision_activity
+    assert capability.match(
+        origin_kind=vision_activity.origin_kind,
+        record_kind=tool_result.record_kind,
+        modality=tool_result.modality,
+        subject_role=tool_result.subject_role,
+        actor_role=tool_result.actor_role,
+    ) is None
+    with pytest.raises(ValueError, match="duplicates"):
+        BehaviorAdapterCapability(
+            (vision_activity, vision_activity),
             BehaviorTimeMode.LIVE,
-            (BehaviorOriginKind.DIRECT_AMBIENT_ASR,),
-            (BehaviorRecordKind.UTTERANCE_SEGMENT,),
-            (BehaviorModality.AUDIO,),
-            ((BehaviorRole.USER, BehaviorRole.USER),),
-            10,
+            2,
+        )
+
+
+def test_record_specs_are_complete_and_unique() -> None:
+    assert set(RECORD_SPECS) == set(BehaviorRecordKind)
+    assert len(RECORD_SPECS) == len(BehaviorRecordKind)
+    for kind, spec in RECORD_SPECS.items():
+        assert spec.payload_codec.payload_type is type(
+            content_from_dict(
+                content_to_dict(
+                    content(
+                        kind,
+                        {
+                            BehaviorRecordKind.ACTIVITY_SEGMENT: ActivitySegmentPayload("x", PhaseHint.UNKNOWN, {}),
+                            BehaviorRecordKind.UTTERANCE_SEGMENT: UtteranceSegmentPayload("x", None, InteractionMode.UNKNOWN, CommunicationChannel.OTHER),
+                            BehaviorRecordKind.STATE_ASSERTION: StateAssertionPayload("x", 1, {}),
+                            BehaviorRecordKind.STATE_TRANSITION: StateTransitionPayload("x", 1, 2, {}),
+                            BehaviorRecordKind.INTERACTION_SEGMENT: InteractionSegmentPayload("x", BehaviorRole.ROBOT, PhaseHint.UNKNOWN, {}),
+                            BehaviorRecordKind.ACTION_EVENT: ActionEventPayload("x", "UNKNOWN", None, None, None, {}),
+                            BehaviorRecordKind.TOOL_CALL_EVENT: ToolCallPayload("x", "id", digest("x"), None, None),
+                            BehaviorRecordKind.TOOL_RESULT_EVENT: ToolResultPayload("x", "id", ToolResultStatus.UNKNOWN, None, digest("x"), None),
+                            BehaviorRecordKind.ENVIRONMENT_CHANGE: EnvironmentChangePayload("x", 1, 2, {}),
+                            BehaviorRecordKind.COVERAGE_INTERVAL: CoverageIntervalPayload(BehaviorModality.SYSTEM, CoverageStatus.UNKNOWN, None, None),
+                            BehaviorRecordKind.FEEDBACK_EVENT: FeedbackPayload("x", None, FeedbackPolarity.NEUTRAL, None, {}),
+                            BehaviorRecordKind.FREE_TEXT_SEMANTIC: FreeTextSemanticPayload("x", None, ()),
+                        }[kind],
+                        subject=BehaviorRole.SYSTEM,
+                        actor=None,
+                    )
+                )
+            ).payload
         )

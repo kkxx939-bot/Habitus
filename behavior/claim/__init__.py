@@ -1,6 +1,6 @@
 """Behavior Claim 领域边界。"""
 
-from behavior.claim.binder import ClaimBinder
+from behavior.claim.binder import ClaimFactory
 from behavior.claim.compatibility import ClaimCompatibilityPolicy
 from behavior.claim.ledger import BehaviorClaimLedger
 from behavior.claim.model import (
@@ -32,29 +32,12 @@ from behavior.claim.receipt import (
 from behavior.claim.registry import ClaimNormalizerRegistry
 from behavior.claim.service import ClaimNormalizationService
 
-__all__ = [
-    "AttemptStatus",
-    "BehaviorClaim",
-    "BehaviorClaimLedger",
-    "BehaviorClaimLedgerEntry",
-    "BuiltinDeterministicClaimNormalizer",
-    "ClaimBinder",
-    "ClaimCompatibilityPolicy",
-    "ClaimKind",
-    "ClaimNormalizationAttempt",
-    "ClaimNormalizationPlan",
-    "ClaimNormalizationPlanner",
-    "ClaimNormalizationReceipt",
-    "ClaimNormalizationService",
-    "ClaimNormalizerKind",
-    "ClaimNormalizerRegistry",
-    "ClaimSemanticProposal",
-    "DerivationClass",
-    "DeterministicClaimNormalizer",
-    "ModelClaimNormalizer",
-    "NormalizationLane",
-    "NormalizerFingerprint",
-    "ReceiptStatus",
-    "SourceEpistemicClass",
-    "StructuredModelClaimNormalizer",
-]
+__all__ = (
+    "AttemptStatus", "BehaviorClaim", "BehaviorClaimLedger", "BehaviorClaimLedgerEntry",
+    "BuiltinDeterministicClaimNormalizer", "ClaimCompatibilityPolicy", "ClaimFactory", "ClaimKind",
+    "ClaimNormalizationAttempt", "ClaimNormalizationPlan", "ClaimNormalizationPlanner",
+    "ClaimNormalizationReceipt", "ClaimNormalizationService", "ClaimNormalizerKind",
+    "ClaimNormalizerRegistry", "ClaimSemanticProposal", "DerivationClass", "DeterministicClaimNormalizer",
+    "ModelClaimNormalizer", "NormalizationLane", "NormalizerFingerprint", "ReceiptStatus",
+    "SourceEpistemicClass", "StructuredModelClaimNormalizer",
+)

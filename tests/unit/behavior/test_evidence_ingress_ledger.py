@@ -40,7 +40,7 @@ from behavior.evidence import (
     PhaseHint,
 )
 from behavior.evidence.ingress import BehaviorEvidenceIngressService
-from behavior.persistence import BehaviorDatabase, SQLiteBehaviorEvidenceLedger
+from behavior.persistence import BehaviorAuditService, BehaviorDatabase, SQLiteBehaviorEvidenceLedger
 from tests.unit.behavior.conftest import BASE_TIME, FakeAdapter, FakeClock, digest, source_descriptor
 
 
@@ -255,7 +255,7 @@ def test_concurrent_same_delivery_publishes_one_receipt_and_one_evidence(tmp_pat
     assert len(ledger.list_after_sequence(0, 10)) == 1
 
 
-def test_adapter_metadata_cannot_change_during_adaptation(tmp_path) -> None:
+def test_registry_snapshot_ignores_adapter_metadata_mutation(tmp_path) -> None:
     class MutatingAdapter(FakeAdapter):
         async def adapt(self, payload: object):
             del payload
@@ -271,10 +271,11 @@ def test_adapter_metadata_cannot_change_during_adaptation(tmp_path) -> None:
     adapter = MutatingAdapter(semantic_input())
     _, ledger, ingress = service(tmp_path, adapter)
     delivery = digest("mutable-adapter")
-    with pytest.raises(BehaviorAdapterError, match="changed during adaptation"):
-        asyncio.run(ingress.ingest(adapter.name, {}, delivery_id=delivery))
-    assert ledger.list_after_sequence(0, 10) == ()
-    assert ledger.read_ingress_receipt(delivery) is None
+    result = asyncio.run(ingress.ingest(adapter.name, {}, delivery_id=delivery))
+    assert result.receipt.adapter_name == "fake_adapter"
+    assert result.records[0].provenance.adapter_name == "fake_adapter"
+    assert result.records[0].source_trust is BehaviorSourceTrust.MODEL_INFERRED
+    assert len(ledger.list_after_sequence(0, 10)) == 1
 
 
 def test_adapter_receives_digest_bound_canonical_payload_copy(tmp_path) -> None:
@@ -291,13 +292,46 @@ def test_adapter_receives_digest_bound_canonical_payload_copy(tmp_path) -> None:
 
     adapter = CapturingAdapter(semantic_input())
     _, ledger, ingress = service(tmp_path, adapter)
-    raw = {"nested": ["source"]}
+    raw = {
+        "event_id": "vendor-event",
+        "user_id": "upstream-user",
+        "model": "vendor-model",
+        "metadata": {"inline": "data:text/plain;base64,AAAA"},
+        "nested": ["source"],
+    }
     result = asyncio.run(ingress.ingest(adapter.name, raw, delivery_id=digest("canonical-copy")))
 
     assert result.receipt.status is IngressReceiptStatus.COMMITTED
-    assert raw == {"nested": ["source"]}
-    assert adapter.received == {"nested": ["source", "adapter-local"]}
+    assert raw["nested"] == ["source"]
+    assert adapter.received["nested"] == ["source", "adapter-local"]
     assert len(ledger.list_after_sequence(0, 10)) == 1
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"binary": b"not-json"},
+        {"score": float("nan")},
+    ],
+)
+def test_raw_payload_boundary_rejects_non_json_values(raw, tmp_path) -> None:
+    adapter = FakeAdapter(semantic_input())
+    _, ledger, ingress = service(tmp_path, adapter)
+    with pytest.raises(BehaviorEvidenceSchemaError):
+        asyncio.run(ingress.ingest(adapter.name, raw, delivery_id=digest(repr(raw))))
+    assert ledger.list_after_sequence(0, 10) == ()
+
+
+def test_raw_payload_boundary_rejects_recursive_values(tmp_path) -> None:
+    recursive: dict[str, object] = {}
+    recursive["self"] = recursive
+    adapter = FakeAdapter(semantic_input())
+    _, ledger, ingress = service(tmp_path, adapter)
+    with pytest.raises(BehaviorEvidenceSchemaError):
+        asyncio.run(
+            ingress.ingest(adapter.name, recursive, delivery_id=digest("recursive-raw"))
+        )
+    assert ledger.list_after_sequence(0, 10) == ()
 
 
 def test_source_and_stream_identity_conflicts_fail_without_receipt(tmp_path) -> None:
@@ -346,6 +380,28 @@ def test_live_clock_rejection_backfill_history_and_legal_delay(tmp_path) -> None
     assert asyncio.run(
         delayed_ingress.ingest(delayed.name, {}, delivery_id=digest("delayed"))
     ).receipt.status is IngressReceiptStatus.COMMITTED
+
+
+def test_record_duration_is_enforced_by_evidence_policy(tmp_path) -> None:
+    config = BehaviorConfig(
+        evidence=replace(BehaviorConfig().evidence, max_record_duration_seconds=60.0)
+    )
+    value = semantic_input()
+    value = replace(
+        value,
+        content=replace(
+            value.content,
+            event_time_end=value.content.event_time_start + timedelta(seconds=61),
+        ),
+    )
+    adapter = FakeAdapter(value)
+    _, ledger, ingress = service(tmp_path, adapter, config=config)
+    result = asyncio.run(
+        ingress.ingest(adapter.name, {}, delivery_id=digest("record-duration"))
+    )
+    assert result.receipt.status is IngressReceiptStatus.REJECTED
+    assert result.receipt.rejected_item_indexes == (0,)
+    assert ledger.list_after_sequence(0, 10) == ()
 
 
 def test_capacity_rejection_receipt_publishes_no_partial_records(tmp_path) -> None:
@@ -429,6 +485,24 @@ def test_canonical_readback_tamper_schema_permissions_wal_and_legacy_rejection(t
     (legacy_root / "evidence_claims.sqlite3").write_bytes(b"legacy")
     with pytest.raises(LegacyBehaviorStoreError, match="Memory and Conversation"):
         BehaviorDatabase(legacy_root, config=BehaviorConfig()).initialize()
+
+
+def test_evidence_member_tables_are_checked_only_by_deep_audit(tmp_path) -> None:
+    correlation = CorrelationRef("scene", "audit-scene", None)
+    adapter = FakeAdapter(semantic_input(correlation=correlation))
+    database, ledger, ingress = service(tmp_path, adapter)
+    result = asyncio.run(
+        ingress.ingest(adapter.name, {}, delivery_id=digest("member-audit"))
+    )
+    record_id = result.records[0].evidence_record_id
+    with database.connection.write() as connection:
+        connection.execute(
+            "DELETE FROM behavior_evidence_correlations WHERE evidence_record_id=?",
+            (record_id,),
+        )
+    assert ledger.read(record_id) is not None
+    with pytest.raises(BehaviorStoreError, match="correlation members"):
+        BehaviorAuditService(database).deep_check()
 
 
 def test_store_rejects_symlinks_and_detects_schema_or_index_drift(tmp_path) -> None:

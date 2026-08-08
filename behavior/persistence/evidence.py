@@ -18,7 +18,6 @@ from behavior._validation import (
 from behavior.errors import (
     BehaviorEvidenceCapacityError,
     BehaviorEvidenceConflictError,
-    BehaviorStoreError,
 )
 from behavior.evidence.content import BehaviorRecordKind
 from behavior.evidence.ingress import (
@@ -33,7 +32,6 @@ from behavior.persistence.codecs import (
     decode_evidence_record,
     decode_ingress_receipt,
     encode_value,
-    verify_projection,
 )
 from behavior.persistence.database import BehaviorDatabase
 
@@ -124,7 +122,7 @@ class SQLiteBehaviorEvidenceLedger:
                 "SELECT * FROM behavior_evidence_records WHERE evidence_record_id=?",
                 (resolved,),
             ).fetchone()
-            return None if row is None else self._entry(connection, row)
+            return None if row is None else self._entry(row)
 
     def list_after_sequence(self, sequence: int, limit: int) -> tuple[BehaviorEvidenceLedgerEntry, ...]:
         after = non_negative_int(sequence, "evidence_sequence")
@@ -135,7 +133,7 @@ class SQLiteBehaviorEvidenceLedger:
                 "ORDER BY evidence_sequence ASC LIMIT ?",
                 (after, bounded),
             ).fetchall()
-            return tuple(self._entry(connection, row) for row in rows)
+            return tuple(self._entry(row) for row in rows)
 
     def list_by_event_time(
         self,
@@ -305,7 +303,7 @@ class SQLiteBehaviorEvidenceLedger:
             if by_id is not None:
                 rows.append(by_id)
             if rows:
-                existing = self._entry(connection, rows[0]).record
+                existing = self._entry(rows[0]).record
                 if existing.semantic_digest != record.semantic_digest:
                     raise BehaviorEvidenceConflictError("Evidence identity replay changed content")
             else:
@@ -409,76 +407,10 @@ class SQLiteBehaviorEvidenceLedger:
             ),
         )
 
-    def _entry(self, connection: sqlite3.Connection, row: sqlite3.Row) -> BehaviorEvidenceLedgerEntry:
-        record = decode_evidence_record(row["content_json"], row["encoded_digest"])
-        descriptor = record.provenance.descriptor
-        content = record.semantic_content
-        projected = {
-            "evidence_record_id": record.evidence_record_id,
-            "producer_fingerprint": record.provenance.producer_fingerprint.digest,
-            "capability_digest": record.provenance.capability_digest,
-            "source_trust": record.source_trust.value,
-            "origin_kind": descriptor.origin_kind.value,
-            "source_event_namespace": descriptor.source_event_ref.namespace,
-            "source_event_value": descriptor.source_event_ref.value,
-            "source_item_index": descriptor.source_item_index,
-            "stream_namespace": descriptor.stream_ref.namespace,
-            "stream_value": descriptor.stream_ref.value,
-            "stream_generation": descriptor.stream_ref.generation,
-            "source_sequence": descriptor.source_sequence,
-            "record_kind": content.record_kind.value,
-            "subject_role": content.subject_role.value,
-            "actor_role": None if content.actor_role is None else content.actor_role.value,
-            "event_time_start": utc_text(content.event_time_start),
-            "event_time_end": utc_text(content.event_time_end),
-            "ingested_at": utc_text(record.ingested_at),
-            "semantic_digest": record.semantic_digest,
-            "content_digest": record.content_digest,
-        }
-        verify_projection(
-            row,
-            projected,
-            "Evidence indexed column disagrees with canonical content",
-        )
-        self._validate_members(connection, record)
-        return BehaviorEvidenceLedgerEntry(int(row["evidence_sequence"]), record)
-
     @staticmethod
-    def _validate_members(connection: sqlite3.Connection, record: BehaviorEvidenceRecord) -> None:
-        record_id = record.evidence_record_id
-        correlations = connection.execute(
-            "SELECT namespace, value, root_value FROM behavior_evidence_correlations "
-            "WHERE evidence_record_id=? ORDER BY member_order",
-            (record_id,),
-        ).fetchall()
-        expected_correlations = [
-            (item.namespace, item.value, item.root_value)
-            for item in record.provenance.descriptor.correlation_refs
-        ]
-        if [tuple(row) for row in correlations] != expected_correlations:
-            raise BehaviorStoreError("Evidence correlation members disagree with canonical content")
-        causal = connection.execute(
-            "SELECT kind, reference, reference_digest FROM behavior_evidence_causal_refs "
-            "WHERE evidence_record_id=? ORDER BY member_order",
-            (record_id,),
-        ).fetchall()
-        expected_causal = [
-            (item.kind.value, item.reference, item.reference_digest)
-            for item in record.provenance.descriptor.causal_refs
-        ]
-        if [tuple(row) for row in causal] != expected_causal:
-            raise BehaviorStoreError("Evidence causal members disagree with canonical content")
-        parents = connection.execute(
-            "SELECT namespace, value, identity_digest FROM behavior_evidence_parent_sources "
-            "WHERE evidence_record_id=? ORDER BY member_order",
-            (record_id,),
-        ).fetchall()
-        expected_parents = [
-            (item.namespace, item.value, item.identity_digest)
-            for item in record.provenance.descriptor.parent_source_event_refs
-        ]
-        if [tuple(row) for row in parents] != expected_parents:
-            raise BehaviorStoreError("Evidence parent members disagree with canonical content")
+    def _entry(row: sqlite3.Row) -> BehaviorEvidenceLedgerEntry:
+        record = decode_evidence_record(row["content_json"], row["encoded_digest"])
+        return BehaviorEvidenceLedgerEntry(int(row["evidence_sequence"]), record)
 
     def _page(
         self,
@@ -497,20 +429,9 @@ class SQLiteBehaviorEvidenceLedger:
         with self.database.connection.read() as connection:
             after = self._cursor(connection, kind, query, where, parameters, cursor)
             rows = connection.execute(sql, (*parameters, after, bounded + 1)).fetchall()
-            return self._page_result(connection, rows, bounded, kind, query)
-
-    def _page_result(
-        self,
-        connection: sqlite3.Connection,
-        rows: list[sqlite3.Row],
-        limit: int,
-        kind: str,
-        query: Mapping[str, object],
-    ) -> EvidencePage:
-        visible = rows[:limit]
-        entries = tuple(self._entry(connection, row) for row in visible)
+            entries = tuple(self._entry(row) for row in rows[:bounded])
         next_cursor = None
-        if len(rows) > limit and entries:
+        if len(rows) > bounded and entries:
             next_cursor = encode_sequence_cursor(kind, query, entries[-1].sequence)
         return entries, next_cursor
 
@@ -567,22 +488,7 @@ class SQLiteBehaviorEvidenceLedger:
 
     @staticmethod
     def _decode_receipt_row(row: sqlite3.Row) -> BehaviorEvidenceIngressReceipt:
-        receipt = decode_ingress_receipt(row["content_json"], row["encoded_digest"])
-        verify_projection(
-            row,
-            {
-                "delivery_id": receipt.delivery_id,
-                "request_digest": receipt.request_digest,
-                "adapter_name": receipt.adapter_name,
-                "adapter_fingerprint": receipt.adapter_fingerprint,
-                "capability_digest": receipt.capability_digest,
-                "status": receipt.status.value,
-                "recorded_at": utc_text(receipt.recorded_at),
-                "content_digest": receipt.content_digest,
-            },
-            "Evidence Receipt projection disagrees with canonical content",
-        )
-        return receipt
+        return decode_ingress_receipt(row["content_json"], row["encoded_digest"])
 
     def _resolve_receipt_replay(
         self,
@@ -593,6 +499,3 @@ class SQLiteBehaviorEvidenceLedger:
         if receipt.request_digest != request_digest:
             raise BehaviorEvidenceConflictError("delivery identity already belongs to another request")
         return receipt, True
-
-
-__all__ = ["SQLiteBehaviorEvidenceLedger"]

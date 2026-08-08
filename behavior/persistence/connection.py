@@ -151,6 +151,3 @@ class BehaviorSQLiteConnection:
 
     def close(self) -> None:
         """连接按操作关闭；该方法保留显式 Runtime 生命周期对称性。"""
-
-
-__all__ = ["BehaviorSQLiteConnection"]

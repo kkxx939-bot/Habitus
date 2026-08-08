@@ -7,8 +7,8 @@ import pytest
 
 from behavior.claim import ClaimNormalizerKind
 from behavior.evidence import BehaviorSemanticAdapterRegistry
+from infrastructure.store.processing_lock import RenewableProcessingLock
 from Runtime import RuntimeBehavior, RuntimeState, build_runtime
-from Runtime.assembly import _RuntimeProcessingLock
 from tests.integration.test_runtime_assembly import runtime_config, runtime_dependencies
 from tests.unit.behavior.conftest import FakeAdapter, digest
 from tests.unit.behavior.test_evidence_ingress_ledger import semantic_input
@@ -25,7 +25,7 @@ def test_runtime_behavior_uses_shared_model_database_and_initializes_without_wor
     model_names = behavior.claim_normalizers.names(ClaimNormalizerKind.MODEL)
     assert len(model_names) == 1
     assert behavior.claim_normalizers.get(model_names[0]).model_client is behavior.structured_chat
-    assert behavior.claim_normalization.processing_lock is behavior.processing_lock
+    assert behavior.claim_normalization.route_executor.processing_lock is behavior.processing_lock
     assert behavior.claim_normalization.evidence_ledger is behavior.evidence_ledger
     assert behavior.claim_normalization.claim_ledger is behavior.claim_ledger
     assert not config.storage_root.exists()
@@ -99,7 +99,7 @@ def test_runtime_processing_lock_aborts_body_and_releases_when_renewal_fails() -
                 self.exited = True
 
     path_lock = FakePathLock()
-    lock = _RuntimeProcessingLock(path_lock, renewal_interval_seconds=0.01)
+    lock = RenewableProcessingLock(path_lock, renewal_interval_seconds=0.01)
 
     async def run() -> None:
         async with lock.acquire("0" * 64):

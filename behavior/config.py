@@ -33,6 +33,7 @@ class BehaviorEvidenceConfig:
     max_event_time_uncertainty_ms: int = 300_000
     max_future_event_skew_seconds: float = 300.0
     max_live_event_age_seconds: float = 31_536_000.0
+    max_record_duration_seconds: float = 86_400.0
     max_reference_chars: int = 2_048
     max_identifier_chars: int = 256
     max_payload_items: int = 128
@@ -72,6 +73,12 @@ class BehaviorEvidenceConfig:
             "evidence.max_live_event_age_seconds",
             self.max_live_event_age_seconds,
             0.0,
+            315_360_000.0,
+        )
+        _bounded_float(
+            "evidence.max_record_duration_seconds",
+            self.max_record_duration_seconds,
+            0.001,
             315_360_000.0,
         )
 
@@ -159,11 +166,3 @@ class BehaviorConfig:
             raise ValueError("one semantic payload cannot exceed the Store JSON boundary")
         if self.normalization.max_semantic_payload_chars > self.store.max_json_bytes:
             raise ValueError("one Claim semantic payload cannot exceed the Store JSON boundary")
-
-
-__all__ = [
-    "BehaviorConfig",
-    "BehaviorEvidenceConfig",
-    "BehaviorStoreConfig",
-    "ClaimNormalizationConfig",
-]

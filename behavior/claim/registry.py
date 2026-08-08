@@ -35,6 +35,3 @@ class ClaimNormalizerRegistry:
             return tuple(sorted(self._normalizers))
         resolved = ClaimNormalizerKind(kind)
         return tuple(sorted(name for name, item in self._normalizers.items() if item.kind is resolved))
-
-
-__all__ = ["ClaimNormalizerRegistry"]

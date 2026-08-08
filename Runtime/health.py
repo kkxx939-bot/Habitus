@@ -63,6 +63,7 @@ class RuntimeHealthService:
             checks.extend(
                 await asyncio.gather(
                     self._chat_check(),
+                    self._behavior_audit_check(),
                     self._index_consistency_check(
                         "memory_index_consistency",
                         self.components.memory.vector_index,
@@ -191,6 +192,24 @@ class RuntimeHealthService:
             "behavior_store",
             RuntimeHealthStatus.HEALTHY if ready else RuntimeHealthStatus.UNHEALTHY,
             detail,
+        )
+
+    async def _behavior_audit_check(self) -> RuntimeHealthCheck:
+        try:
+            report = await asyncio.to_thread(self.components.behavior.audit.deep_check)
+        except Exception as exc:
+            return RuntimeHealthCheck(
+                "behavior_deep_audit",
+                RuntimeHealthStatus.UNHEALTHY,
+                type(exc).__name__,
+            )
+        return RuntimeHealthCheck(
+            "behavior_deep_audit",
+            RuntimeHealthStatus.HEALTHY,
+            (
+                f"evidence={report.evidence_count};claims={report.claim_count};"
+                f"attempts={report.attempt_count};receipts={report.normalization_receipt_count}"
+            ),
         )
 
     async def _queue_check(self) -> RuntimeHealthCheck:

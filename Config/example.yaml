@@ -406,6 +406,7 @@ behavior:
     max_event_time_uncertainty_ms: 300000
     max_future_event_skew_seconds: 300.0
     max_live_event_age_seconds: 31536000.0
+    max_record_duration_seconds: 86400.0
     max_reference_chars: 2048
     max_identifier_chars: 256
     max_payload_items: 128

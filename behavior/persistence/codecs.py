@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from typing import Any, TypeVar
 
 from behavior._validation import parse_utc, strict_object
+from behavior.claim.binder import ClaimFactory
 from behavior.claim.model import (
     BehaviorClaim,
     DerivationClass,
@@ -26,6 +27,7 @@ from behavior.claim.receipt import (
 )
 from behavior.errors import BehaviorStoreError
 from behavior.evidence.content import BehaviorRole, content_from_dict
+from behavior.evidence.factory import EvidenceFactory
 from behavior.evidence.ingress import (
     BehaviorEvidenceIngressReceipt,
     IngressReceiptStatus,
@@ -67,11 +69,15 @@ def decode_evidence_record(text: str, encoded_digest: str) -> BehaviorEvidenceRe
         }
     )
     data = _decode(text, encoded_digest, expected)
-    record = BehaviorEvidenceRecord(
-        semantic_content=content_from_dict(data["semantic_content"]),
+    record = EvidenceFactory.restore(
+        content=content_from_dict(data["semantic_content"]),
         provenance=provenance_from_dict(data["provenance"]),
-        source_trust=BehaviorSourceTrust(data["source_trust"]),
+        trust=BehaviorSourceTrust(data["source_trust"]),
         ingested_at=parse_utc(data["ingested_at"], "evidence_record.ingested_at"),
+        evidence_record_id=data["evidence_record_id"],
+        semantic_digest=data["semantic_digest"],
+        content_digest=data["content_digest"],
+        schema_version=data["schema_version"],
     )
     _assert_equal(record_to_dict(record), data, "Evidence record")
     return record
@@ -146,7 +152,7 @@ def decode_claim(text: str, encoded_digest: str) -> BehaviorClaim:
         }
     )
     data = _decode(text, encoded_digest, expected)
-    claim = BehaviorClaim(
+    claim = ClaimFactory.restore(BehaviorClaim(
         evidence_record_id=data["evidence_record_id"],
         evidence_record_digest=data["evidence_record_digest"],
         subject_role=BehaviorRole(data["subject_role"]),
@@ -172,8 +178,12 @@ def decode_claim(text: str, encoded_digest: str) -> BehaviorClaim:
         compatibility_policy_digest=data["compatibility_policy_digest"],
         binding_policy_digest=data["binding_policy_digest"],
         confidence_policy_digest=data["confidence_policy_digest"],
+        semantic_fingerprint=data["semantic_fingerprint"],
+        claim_id=data["claim_id"],
         created_at=parse_utc(data["created_at"], "claim.created_at"),
-    )
+        content_digest=data["content_digest"],
+        schema_version=data["schema_version"],
+    ))
     _assert_equal(claim_to_dict(claim), data, "Claim")
     return claim
 
@@ -302,14 +312,3 @@ def _array(value: object, field_name: str) -> list[Any] | tuple[Any, ...]:
     if not isinstance(value, list | tuple):
         raise BehaviorStoreError(f"{field_name} is not an array")
     return value
-
-
-__all__ = [
-    "decode_attempt",
-    "decode_claim",
-    "decode_evidence_record",
-    "decode_ingress_receipt",
-    "decode_normalization_receipt",
-    "encode_value",
-    "verify_projection",
-]

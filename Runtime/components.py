@@ -9,17 +9,24 @@ from typing import cast
 from behavior.claim import (
     ClaimNormalizationPlanner,
     ClaimNormalizationService,
-    ClaimNormalizerKind,
     ClaimNormalizerRegistry,
 )
 from behavior.claim.ledger import BehaviorClaimLedger
-from behavior.claim.service import ProcessingLock
+from behavior.claim.route_executor import ProcessingLock
 from behavior.evidence import (
     BehaviorEvidenceIngressService,
     BehaviorEvidenceLedger,
     BehaviorSemanticAdapterRegistry,
 )
-from behavior.persistence import BehaviorDatabase
+from behavior.persistence import BehaviorAuditService, BehaviorDatabase
+from conversation import (
+    ConversationBehaviorProjectionConsumer,
+    ConversationBehaviorProjectionStore,
+    ConversationSourceCoordinator,
+    ConversationSourceReceiptStore,
+    ConversationSourceRecovery,
+    ConversationSourceStore,
+)
 from foundation.observability import MetricRegistry, Observer
 from infrastructure.observability import ManagedObservability
 from infrastructure.store.contracts import PathLock
@@ -44,6 +51,7 @@ from memory.workflow import (
     ConversationLifecycleManager,
     ConversationMemoryEnqueuer,
     MemoryChangeReceiptStore,
+    MemoryConversationConsumer,
     MemoryJobRunner,
     MemoryJobStore,
 )
@@ -147,9 +155,10 @@ class RuntimeModels:
 
 @dataclass(frozen=True)
 class RuntimeBehavior:
-    """Behavior 第一层完成组装后的显式组件。"""
+    """Behavior 第一层完成组装后的被动组件容器。"""
 
     database: BehaviorDatabase
+    audit: BehaviorAuditService
     evidence_adapters: BehaviorSemanticAdapterRegistry
     evidence_ledger: BehaviorEvidenceLedger
     evidence_ingress: BehaviorEvidenceIngressService
@@ -160,37 +169,17 @@ class RuntimeBehavior:
     structured_chat: StructuredChatClient
     processing_lock: ProcessingLock
 
-    def __post_init__(self) -> None:
-        if self.evidence_ingress.ledger is not self.evidence_ledger:
-            raise ValueError("Behavior ingress must use the shared Evidence Ledger")
-        if self.evidence_ingress.adapters is not self.evidence_adapters:
-            raise ValueError("Behavior ingress service must use the injected Adapter Registry")
-        if self.claim_normalization.evidence_ledger is not self.evidence_ledger:
-            raise ValueError("Claim normalization must use the shared Evidence Ledger")
-        if self.claim_normalization.claim_ledger is not self.claim_ledger:
-            raise ValueError("Claim normalization must use the shared Claim Ledger")
-        if self.claim_normalization.normalizers is not self.claim_normalizers:
-            raise ValueError("Claim normalization must use the shared Normalizer Registry")
-        if self.claim_normalization.planner is not self.claim_planner:
-            raise ValueError("Claim normalization must use the shared Planner")
-        if self.claim_normalization.processing_lock is not self.processing_lock:
-            raise ValueError("Claim normalization must use the injected processing lock")
-        if self.evidence_ingress.config is not self.database.config:
-            raise ValueError("Behavior ingress must use the database configuration")
-        for name in self.claim_normalizers.names():
-            normalizer = self.claim_normalizers.get(name)
-            if normalizer.kind is ClaimNormalizerKind.MODEL:
-                model_client = getattr(normalizer, "model_client", None)
-                if model_client is not self.structured_chat:
-                    raise ValueError("Behavior model Normalizer must use the shared StructuredChatClient")
-                if getattr(normalizer, "config", None) != self.database.config.normalization:
-                    raise ValueError("Behavior model Normalizer must use the shared normalization config")
-
 
 @dataclass(frozen=True)
 class RuntimeConversation:
-    """Conversation 原文、切段与摘要服务。"""
+    """Conversation Source、原文、独立投影、切段与摘要服务。"""
 
+    sources: ConversationSourceStore
+    source_receipts: ConversationSourceReceiptStore
+    behavior_projections: ConversationBehaviorProjectionStore
+    behavior_projection_consumer: ConversationBehaviorProjectionConsumer
+    source_coordinator: ConversationSourceCoordinator
+    source_recovery: ConversationSourceRecovery
     journal: ConversationMessageJournal
     retention: ConversationRetentionPlanner
     boundary_scorer: ConversationSemanticBoundaryScorer
@@ -201,6 +190,18 @@ class RuntimeConversation:
     summary_expander: ConversationSummaryExpander
 
     def __post_init__(self) -> None:
+        if not isinstance(self.sources, ConversationSourceStore):
+            raise TypeError("sources must be ConversationSourceStore")
+        if not isinstance(self.source_receipts, ConversationSourceReceiptStore):
+            raise TypeError("source_receipts must be ConversationSourceReceiptStore")
+        if not isinstance(self.behavior_projections, ConversationBehaviorProjectionStore):
+            raise TypeError("behavior_projections must be ConversationBehaviorProjectionStore")
+        if not isinstance(self.behavior_projection_consumer, ConversationBehaviorProjectionConsumer):
+            raise TypeError("behavior_projection_consumer must be ConversationBehaviorProjectionConsumer")
+        if not isinstance(self.source_coordinator, ConversationSourceCoordinator):
+            raise TypeError("source_coordinator must be ConversationSourceCoordinator")
+        if not isinstance(self.source_recovery, ConversationSourceRecovery):
+            raise TypeError("source_recovery must be ConversationSourceRecovery")
         if not isinstance(self.journal, ConversationMessageJournal):
             raise TypeError("journal must be ConversationMessageJournal")
         if not isinstance(self.retention, ConversationRetentionPlanner):
@@ -237,6 +238,23 @@ class RuntimeConversation:
             raise ValueError("Conversation must share one Summary use store")
         if self.summary_expander.segment_store is not self.summaries.store:
             raise ValueError("Conversation must share one Summary source expander")
+        if not (
+            self.sources.root
+            == self.source_receipts.root
+            == self.behavior_projections.root
+            == self.journal.layout.root
+        ):
+            raise ValueError("Conversation Source, Projection and Journal must share one root")
+        if self.behavior_projection_consumer.store is not self.behavior_projections:
+            raise ValueError("Behavior Projection Consumer must use the shared outbox")
+        if self.source_coordinator.sources is not self.sources:
+            raise ValueError("Source Coordinator must use the shared Source Store")
+        if self.source_coordinator.receipts is not self.source_receipts:
+            raise ValueError("Source Coordinator must use the shared Source Receipt Store")
+        if self.source_coordinator.behavior_projection_consumer is not self.behavior_projection_consumer:
+            raise ValueError("Source Coordinator must use the shared Behavior Projection Consumer")
+        if self.source_recovery.coordinator is not self.source_coordinator:
+            raise ValueError("Source Recovery must use the shared Source Coordinator")
 
 
 @dataclass(frozen=True)
@@ -286,6 +304,7 @@ class RuntimeWorkflow:
     jobs: MemoryJobStore
     receipts: MemoryChangeReceiptStore
     enqueuer: ConversationMemoryEnqueuer
+    conversation_consumer: MemoryConversationConsumer
     lifecycle: ConversationLifecycleManager
     runner: MemoryJobRunner
     worker: MemoryWorker
@@ -298,6 +317,8 @@ class RuntimeWorkflow:
             raise TypeError("receipts must be MemoryChangeReceiptStore")
         if not isinstance(self.enqueuer, ConversationMemoryEnqueuer):
             raise TypeError("enqueuer must be ConversationMemoryEnqueuer")
+        if not isinstance(self.conversation_consumer, MemoryConversationConsumer):
+            raise TypeError("conversation_consumer must be MemoryConversationConsumer")
         if not isinstance(self.lifecycle, ConversationLifecycleManager):
             raise TypeError("lifecycle must be ConversationLifecycleManager")
         if not isinstance(self.runner, MemoryJobRunner):
@@ -308,6 +329,8 @@ class RuntimeWorkflow:
             raise TypeError("lifecycle_worker must be LifecycleWorker")
         if self.enqueuer.jobs is not self.jobs or self.runner.store is not self.jobs:
             raise ValueError("memory workflow must share one job store")
+        if self.conversation_consumer.enqueuer is not self.enqueuer:
+            raise ValueError("memory workflow must share one Conversation enqueuer")
         if self.lifecycle.jobs is not self.jobs or self.lifecycle.receipts is not self.receipts:
             raise ValueError("conversation lifecycle must share workflow stores")
         if (
@@ -351,6 +374,8 @@ class RuntimeComponents:
             raise TypeError("workflow must be RuntimeWorkflow")
         if self.workflow.enqueuer.conversations is not self.conversation.journal:
             raise ValueError("workflow enqueuer must use the shared conversation journal")
+        if self.conversation.source_coordinator.memory_consumer is not self.workflow.conversation_consumer:
+            raise ValueError("Source Coordinator must use the shared Memory Conversation Consumer")
         if self.workflow.runner.executor.editor is not self.memory.editor:
             raise ValueError("workflow runner must use the shared memory editor")
         if self.workflow.runner.committed_finalizer.vector_index is not self.memory.vector_index:

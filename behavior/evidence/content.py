@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
@@ -19,14 +19,7 @@ from behavior._validation import (
     typed_tuple,
     utc_text,
 )
-from behavior.evidence.payloads import (
-    BehaviorPayload,
-    CoverageIntervalPayload,
-    InteractionSegmentPayload,
-    payload_from_dict,
-    payload_to_dict,
-    payload_type_for,
-)
+from behavior.evidence.payloads import BehaviorPayload
 from behavior.evidence.refs import EvidenceKind, EvidenceReference
 
 SEMANTIC_CONTENT_SCHEMA_VERSION = "behavior_semantic_content_v1"
@@ -83,76 +76,7 @@ class BehaviorRecordKind(str, Enum):
     FREE_TEXT_SEMANTIC = "FREE_TEXT_SEMANTIC"
 
 
-_SELF_ROLES = frozenset({BehaviorRole.USER, BehaviorRole.AGENT, BehaviorRole.ROBOT})
-_STATE_SUBJECTS = frozenset(
-    {
-        BehaviorRole.USER,
-        BehaviorRole.AGENT,
-        BehaviorRole.ROBOT,
-        BehaviorRole.TOOL,
-        BehaviorRole.ENVIRONMENT,
-        BehaviorRole.SYSTEM,
-    }
-)
-
-
-def validate_record_roles(
-    record_kind: BehaviorRecordKind,
-    subject_role: BehaviorRole,
-    actor_role: BehaviorRole | None,
-    payload: BehaviorPayload,
-) -> None:
-    kind = BehaviorRecordKind(record_kind)
-    subject = BehaviorRole(subject_role)
-    actor = None if actor_role is None else BehaviorRole(actor_role)
-    if kind in {BehaviorRecordKind.ACTIVITY_SEGMENT, BehaviorRecordKind.UTTERANCE_SEGMENT}:
-        if subject not in _SELF_ROLES or actor is not subject:
-            raise ValueError(f"{kind.value} requires matching USER, AGENT, or ROBOT roles")
-    elif kind is BehaviorRecordKind.STATE_ASSERTION:
-        if subject not in _STATE_SUBJECTS or actor is not None:
-            raise ValueError("STATE_ASSERTION requires a supported subject and actor=None")
-    elif kind is BehaviorRecordKind.STATE_TRANSITION:
-        if subject not in _STATE_SUBJECTS or actor not in _STATE_SUBJECTS | {None}:
-            raise ValueError("STATE_TRANSITION role pair is not supported")
-    elif kind is BehaviorRecordKind.INTERACTION_SEGMENT:
-        if not isinstance(payload, InteractionSegmentPayload):
-            raise TypeError("INTERACTION_SEGMENT requires InteractionSegmentPayload")
-        if actor is None or actor is not subject or subject is payload.counterparty_role:
-            raise ValueError("INTERACTION_SEGMENT requires actor=subject and a distinct counterparty")
-    elif kind is BehaviorRecordKind.ACTION_EVENT:
-        allowed = {BehaviorRole.USER, BehaviorRole.AGENT, BehaviorRole.ROBOT, BehaviorRole.SYSTEM}
-        if subject not in allowed or actor is not subject:
-            raise ValueError("ACTION_EVENT requires a supported matching role pair")
-    elif kind is BehaviorRecordKind.TOOL_CALL_EVENT:
-        if subject is not BehaviorRole.TOOL or actor not in {
-            BehaviorRole.AGENT,
-            BehaviorRole.ROBOT,
-            BehaviorRole.SYSTEM,
-        }:
-            raise ValueError("TOOL_CALL_EVENT requires subject=TOOL and a runtime actor")
-    elif kind is BehaviorRecordKind.TOOL_RESULT_EVENT:
-        if subject is not BehaviorRole.TOOL or actor is not BehaviorRole.TOOL:
-            raise ValueError("TOOL_RESULT_EVENT requires TOOL/TOOL")
-    elif kind is BehaviorRecordKind.ENVIRONMENT_CHANGE:
-        if subject is not BehaviorRole.ENVIRONMENT or actor not in {
-            None,
-            BehaviorRole.ENVIRONMENT,
-            BehaviorRole.SYSTEM,
-            BehaviorRole.TOOL,
-        }:
-            raise ValueError("ENVIRONMENT_CHANGE role pair is not supported")
-    elif kind is BehaviorRecordKind.COVERAGE_INTERVAL:
-        if subject is not BehaviorRole.SYSTEM or actor is not BehaviorRole.SYSTEM:
-            raise ValueError("COVERAGE_INTERVAL requires SYSTEM/SYSTEM")
-    elif kind is BehaviorRecordKind.FEEDBACK_EVENT:
-        if (subject, actor) not in {
-            (BehaviorRole.USER, BehaviorRole.USER),
-            (BehaviorRole.SYSTEM, BehaviorRole.SYSTEM),
-        }:
-            raise ValueError("FEEDBACK_EVENT role pair is not supported")
-
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BehaviorSemanticContent:
     record_kind: BehaviorRecordKind
     subject_role: BehaviorRole
@@ -180,28 +104,16 @@ class BehaviorSemanticContent:
         modality = BehaviorModality(self.modality)
         start = strict_utc(self.event_time_start, "semantic_content.event_time_start")
         end = strict_utc(self.event_time_end, "semantic_content.event_time_end")
-        if end < start:
-            raise ValueError("semantic content end cannot precede start")
         uncertainty = non_negative_int(
             self.event_time_uncertainty_ms,
             "semantic_content.event_time_uncertainty_ms",
         )
-        if not isinstance(self.payload, payload_type_for(kind)):
-            raise TypeError(f"{kind.value} has the wrong payload type")
-        validate_record_roles(kind, subject, actor, self.payload)
         evidence_refs = typed_tuple(
             self.evidence_refs,
             "semantic_content.evidence_refs",
             EvidenceReference,
             maximum_items=10_000,
         )
-        expanded_start = start - timedelta(milliseconds=uncertainty)
-        expanded_end = end + timedelta(milliseconds=uncertainty)
-        for reference in evidence_refs:
-            if reference.event_time_end < expanded_start or reference.event_time_start > expanded_end:
-                raise ValueError("EvidenceReference time does not overlap semantic time uncertainty")
-        if isinstance(self.payload, CoverageIntervalPayload) and self.payload.modality is not modality:
-            raise ValueError("coverage payload modality must match semantic modality")
         if self.schema_version != SEMANTIC_CONTENT_SCHEMA_VERSION:
             raise ValueError("unsupported semantic content schema version")
         object.__setattr__(self, "record_kind", kind)
@@ -229,11 +141,14 @@ class BehaviorSemanticContent:
             "entity_refs",
             identifier_tuple(self.entity_refs, "semantic_content.entity_refs", maximum_items=10_000),
         )
+        object.__setattr__(self, "evidence_refs", evidence_refs)
         object.__setattr__(self, "source_confidence", finite_score(self.source_confidence, "source_confidence"))
         object.__setattr__(self, "integrity", EvidenceIntegrity(self.integrity))
 
 
 def content_to_dict(content: BehaviorSemanticContent) -> dict[str, Any]:
+    from behavior.evidence.specs import payload_codec
+
     return {
         "record_kind": content.record_kind.value,
         "subject_role": content.subject_role.value,
@@ -248,7 +163,7 @@ def content_to_dict(content: BehaviorSemanticContent) -> dict[str, Any]:
         "location_ref": content.location_ref,
         "object_refs": content.object_refs,
         "entity_refs": content.entity_refs,
-        "payload": payload_to_dict(content.payload),
+        "payload": payload_codec(content.payload).encode(content.payload),
         "evidence_refs": tuple(_evidence_reference_to_dict(reference) for reference in content.evidence_refs),
         "source_confidence": content.source_confidence,
         "integrity": content.integrity.value,
@@ -257,6 +172,8 @@ def content_to_dict(content: BehaviorSemanticContent) -> dict[str, Any]:
 
 
 def content_from_dict(value: object) -> BehaviorSemanticContent:
+    from behavior.evidence.specs import record_spec
+
     fields = frozenset(
         {
             "record_kind",
@@ -298,7 +215,7 @@ def content_from_dict(value: object) -> BehaviorSemanticContent:
         location_ref=data["location_ref"],
         object_refs=tuple(object_refs),
         entity_refs=tuple(entity_refs),
-        payload=payload_from_dict(kind, data["payload"]),
+        payload=record_spec(kind).payload_codec.decode(data["payload"]),
         evidence_refs=tuple(_evidence_reference_from_dict(item) for item in evidence_values),
         source_confidence=data["source_confidence"],
         integrity=EvidenceIntegrity(data["integrity"]),
@@ -349,16 +266,3 @@ def _evidence_reference_from_dict(value: object) -> EvidenceReference:
         size_bytes=data["size_bytes"],
         source_system_ref=data["source_system_ref"],
     )
-
-
-__all__ = [
-    "BehaviorModality",
-    "BehaviorRecordKind",
-    "BehaviorRole",
-    "BehaviorSemanticContent",
-    "ClockSyncStatus",
-    "EvidenceIntegrity",
-    "content_from_dict",
-    "content_to_dict",
-    "validate_record_roles",
-]

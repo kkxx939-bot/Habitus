@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import TYPE_CHECKING, Any, TypeAlias
 
@@ -19,7 +19,6 @@ from behavior._validation import (
     sha256_digest,
     strict_object,
 )
-from behavior.config import BehaviorEvidenceConfig
 
 if TYPE_CHECKING:
     from behavior.evidence.content import BehaviorModality, BehaviorRecordKind, BehaviorRole
@@ -27,6 +26,35 @@ if TYPE_CHECKING:
 _ABSOLUTE_CHARS = 1_000_000
 _ABSOLUTE_ITEMS = 10_000
 _ABSOLUTE_DEPTH = 32
+_SEMANTIC_SYSTEM_FIELDS = frozenset(
+    {
+        "claim_id",
+        "claim_kind",
+        "claim_sequence",
+        "content_digest",
+        "evidence_record_id",
+        "evidence_sequence",
+        "normalizer_fingerprint",
+        "processing_identity",
+        "producer_fingerprint",
+        "capability_digest",
+        "source_trust",
+        "semantic_digest",
+        "policy_digest",
+        "event_id",
+        "episode_id",
+        "pattern_id",
+        "prediction_id",
+        "storage_metadata",
+        "owner_ref",
+        "owner_binding",
+        "owner_identity",
+        "owner_identity_digest",
+        "user_id",
+        "tenant_id",
+        "account_id",
+    }
+)
 
 
 class PhaseHint(str, Enum):
@@ -77,6 +105,7 @@ def _attributes(value: object, field_name: str) -> Mapping[str, Any]:
         maximum_chars=_ABSOLUTE_CHARS,
         maximum_items=_ABSOLUTE_ITEMS,
         maximum_depth=_ABSOLUTE_DEPTH,
+        forbidden_keys=_SEMANTIC_SYSTEM_FIELDS,
     )
 
 
@@ -87,6 +116,7 @@ def _value(value: object, field_name: str) -> Any:
         maximum_chars=_ABSOLUTE_CHARS,
         maximum_items=_ABSOLUTE_ITEMS,
         maximum_depth=_ABSOLUTE_DEPTH,
+        forbidden_keys=_SEMANTIC_SYSTEM_FIELDS,
     )
 
 
@@ -312,255 +342,50 @@ BehaviorPayload: TypeAlias = (
 )
 
 
-@dataclass(frozen=True)
-class _PayloadContract:
+PayloadDecoder = Callable[[object], object]
+
+
+@dataclass(frozen=True, slots=True)
+class PayloadCodec:
     payload_type: type[Any]
-    fields: frozenset[str]
+    decoders: tuple[tuple[str, PayloadDecoder], ...] = ()
+    identifier_fields: frozenset[str] = frozenset()
+    reference_fields: frozenset[str] = frozenset()
+    text_fields: frozenset[str] = frozenset()
+
+    def encode(self, payload: BehaviorPayload) -> dict[str, Any]:
+        if not isinstance(payload, self.payload_type):
+            raise TypeError("payload does not match its registered codec")
+        return {
+            item.name: _encode_value(getattr(payload, item.name))
+            for item in fields(self.payload_type)
+        }
+
+    def decode(self, value: object) -> BehaviorPayload:
+        field_names = frozenset(item.name for item in fields(self.payload_type))
+        data = strict_object(value, "payload", field_names)
+        converters = dict(self.decoders)
+        arguments = {
+            name: converters[name](item) if name in converters else item
+            for name, item in data.items()
+        }
+        return self.payload_type(**arguments)
 
 
-_PAYLOAD_CONTRACTS = {
-    "ACTIVITY_SEGMENT": _PayloadContract(
-        ActivitySegmentPayload,
-        frozenset({"activity", "phase_hint", "attributes"}),
-    ),
-    "UTTERANCE_SEGMENT": _PayloadContract(
-        UtteranceSegmentPayload,
-        frozenset({"text", "language", "interaction_mode", "communication_channel"}),
-    ),
-    "STATE_ASSERTION": _PayloadContract(
-        StateAssertionPayload,
-        frozenset({"state_name", "value", "attributes"}),
-    ),
-    "STATE_TRANSITION": _PayloadContract(
-        StateTransitionPayload,
-        frozenset({"state_name", "before", "after", "attributes"}),
-    ),
-    "INTERACTION_SEGMENT": _PayloadContract(
-        InteractionSegmentPayload,
-        frozenset({"interaction_type", "counterparty_role", "phase_hint", "attributes"}),
-    ),
-    "ACTION_EVENT": _PayloadContract(
-        ActionEventPayload,
-        frozenset({"action_name", "phase", "result", "capability_ref", "target_ref", "attributes"}),
-    ),
-    "TOOL_CALL_EVENT": _PayloadContract(
-        ToolCallPayload,
-        frozenset({"tool_name", "tool_call_id", "arguments_digest", "arguments_summary", "capability_ref"}),
-    ),
-    "TOOL_RESULT_EVENT": _PayloadContract(
-        ToolResultPayload,
-        frozenset({"tool_name", "tool_call_id", "status", "result_ref", "result_digest", "result_summary"}),
-    ),
-    "ENVIRONMENT_CHANGE": _PayloadContract(
-        EnvironmentChangePayload,
-        frozenset({"predicate", "before", "after", "attributes"}),
-    ),
-    "COVERAGE_INTERVAL": _PayloadContract(
-        CoverageIntervalPayload,
-        frozenset({"modality", "coverage_status", "coverage_scope_ref", "reason"}),
-    ),
-    "FEEDBACK_EVENT": _PayloadContract(
-        FeedbackPayload,
-        frozenset({"feedback_kind", "target_ref", "polarity", "explicit_text_ref", "attributes"}),
-    ),
-    "FREE_TEXT_SEMANTIC": _PayloadContract(
-        FreeTextSemanticPayload,
-        frozenset({"text", "language", "labels"}),
-    ),
-}
-
-
-def payload_type_for(record_kind: BehaviorRecordKind) -> type[Any]:
-    from behavior.evidence.content import BehaviorRecordKind
-
-    return _PAYLOAD_CONTRACTS[BehaviorRecordKind(record_kind).value].payload_type
-
-
-def payload_to_dict(payload: BehaviorPayload) -> dict[str, Any]:
-    if isinstance(payload, ActivitySegmentPayload):
-        return {"activity": payload.activity, "phase_hint": payload.phase_hint.value, "attributes": payload.attributes}
-    if isinstance(payload, UtteranceSegmentPayload):
-        return {
-            "text": payload.text,
-            "language": payload.language,
-            "interaction_mode": payload.interaction_mode.value,
-            "communication_channel": payload.communication_channel.value,
-        }
-    if isinstance(payload, StateAssertionPayload):
-        return {"state_name": payload.state_name, "value": payload.value, "attributes": payload.attributes}
-    if isinstance(payload, StateTransitionPayload):
-        return {
-            "state_name": payload.state_name,
-            "before": payload.before,
-            "after": payload.after,
-            "attributes": payload.attributes,
-        }
-    if isinstance(payload, InteractionSegmentPayload):
-        return {
-            "interaction_type": payload.interaction_type,
-            "counterparty_role": payload.counterparty_role.value,
-            "phase_hint": payload.phase_hint.value,
-            "attributes": payload.attributes,
-        }
-    if isinstance(payload, ActionEventPayload):
-        return {
-            "action_name": payload.action_name,
-            "phase": payload.phase,
-            "result": payload.result,
-            "capability_ref": payload.capability_ref,
-            "target_ref": payload.target_ref,
-            "attributes": payload.attributes,
-        }
-    if isinstance(payload, ToolCallPayload):
-        return {
-            "tool_name": payload.tool_name,
-            "tool_call_id": payload.tool_call_id,
-            "arguments_digest": payload.arguments_digest,
-            "arguments_summary": payload.arguments_summary,
-            "capability_ref": payload.capability_ref,
-        }
-    if isinstance(payload, ToolResultPayload):
-        return {
-            "tool_name": payload.tool_name,
-            "tool_call_id": payload.tool_call_id,
-            "status": payload.status.value,
-            "result_ref": payload.result_ref,
-            "result_digest": payload.result_digest,
-            "result_summary": payload.result_summary,
-        }
-    if isinstance(payload, EnvironmentChangePayload):
-        return {"predicate": payload.predicate, "before": payload.before, "after": payload.after, "attributes": payload.attributes}
-    if isinstance(payload, CoverageIntervalPayload):
-        return {
-            "modality": payload.modality.value,
-            "coverage_status": payload.coverage_status.value,
-            "coverage_scope_ref": payload.coverage_scope_ref,
-            "reason": payload.reason,
-        }
-    if isinstance(payload, FeedbackPayload):
-        return {
-            "feedback_kind": payload.feedback_kind,
-            "target_ref": payload.target_ref,
-            "polarity": payload.polarity.value,
-            "explicit_text_ref": payload.explicit_text_ref,
-            "attributes": payload.attributes,
-        }
-    if isinstance(payload, FreeTextSemanticPayload):
-        return {"text": payload.text, "language": payload.language, "labels": payload.labels}
-    raise TypeError("unsupported Behavior payload")
+def _encode_value(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Mapping):
+        return {key: _encode_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_encode_value(item) for item in value)
+    return value
 
 
 def payload_from_dict(
     record_kind: BehaviorRecordKind,
     value: object,
 ) -> BehaviorPayload:
-    from behavior.evidence.content import BehaviorModality, BehaviorRecordKind, BehaviorRole
+    from behavior.evidence.specs import record_spec
 
-    kind = BehaviorRecordKind(record_kind)
-    data = strict_object(value, "payload", _PAYLOAD_CONTRACTS[kind.value].fields)
-    if kind is BehaviorRecordKind.ACTIVITY_SEGMENT:
-        return ActivitySegmentPayload(data["activity"], PhaseHint(data["phase_hint"]), data["attributes"])
-    if kind is BehaviorRecordKind.UTTERANCE_SEGMENT:
-        return UtteranceSegmentPayload(
-            data["text"],
-            data["language"],
-            InteractionMode(data["interaction_mode"]),
-            CommunicationChannel(data["communication_channel"]),
-        )
-    if kind is BehaviorRecordKind.STATE_ASSERTION:
-        return StateAssertionPayload(data["state_name"], data["value"], data["attributes"])
-    if kind is BehaviorRecordKind.STATE_TRANSITION:
-        return StateTransitionPayload(data["state_name"], data["before"], data["after"], data["attributes"])
-    if kind is BehaviorRecordKind.INTERACTION_SEGMENT:
-        return InteractionSegmentPayload(
-            data["interaction_type"],
-            BehaviorRole(data["counterparty_role"]),
-            PhaseHint(data["phase_hint"]),
-            data["attributes"],
-        )
-    if kind is BehaviorRecordKind.ACTION_EVENT:
-        return ActionEventPayload(
-            data["action_name"],
-            data["phase"],
-            data["result"],
-            data["capability_ref"],
-            data["target_ref"],
-            data["attributes"],
-        )
-    if kind is BehaviorRecordKind.TOOL_CALL_EVENT:
-        return ToolCallPayload(
-            data["tool_name"],
-            data["tool_call_id"],
-            data["arguments_digest"],
-            data["arguments_summary"],
-            data["capability_ref"],
-        )
-    if kind is BehaviorRecordKind.TOOL_RESULT_EVENT:
-        return ToolResultPayload(
-            data["tool_name"],
-            data["tool_call_id"],
-            ToolResultStatus(data["status"]),
-            data["result_ref"],
-            data["result_digest"],
-            data["result_summary"],
-        )
-    if kind is BehaviorRecordKind.ENVIRONMENT_CHANGE:
-        return EnvironmentChangePayload(data["predicate"], data["before"], data["after"], data["attributes"])
-    if kind is BehaviorRecordKind.COVERAGE_INTERVAL:
-        return CoverageIntervalPayload(
-            BehaviorModality(data["modality"]),
-            CoverageStatus(data["coverage_status"]),
-            data["coverage_scope_ref"],
-            data["reason"],
-        )
-    if kind is BehaviorRecordKind.FEEDBACK_EVENT:
-        return FeedbackPayload(
-            data["feedback_kind"],
-            data["target_ref"],
-            FeedbackPolarity(data["polarity"]),
-            data["explicit_text_ref"],
-            data["attributes"],
-        )
-    return FreeTextSemanticPayload(data["text"], data["language"], tuple(data["labels"]))
-
-
-def validate_payload_capacity(payload: BehaviorPayload, config: BehaviorEvidenceConfig) -> None:
-    snapshot = payload_to_dict(payload)
-    json_value_snapshot(
-        snapshot,
-        "payload",
-        maximum_chars=config.max_payload_chars,
-        maximum_items=config.max_payload_items,
-        maximum_depth=config.max_payload_depth,
-    )
-    for name in ("text", "arguments_summary", "result_summary", "reason"):
-        value = snapshot.get(name)
-        if isinstance(value, str) and len(value) > config.max_text_chars:
-            raise ValueError(f"payload.{name} exceeds the configured text boundary")
-
-
-__all__ = [
-    "ActionEventPayload",
-    "ActivitySegmentPayload",
-    "BehaviorPayload",
-    "CommunicationChannel",
-    "CoverageIntervalPayload",
-    "CoverageStatus",
-    "EnvironmentChangePayload",
-    "FeedbackPayload",
-    "FeedbackPolarity",
-    "FreeTextSemanticPayload",
-    "InteractionMode",
-    "InteractionSegmentPayload",
-    "PhaseHint",
-    "StateAssertionPayload",
-    "StateTransitionPayload",
-    "ToolCallPayload",
-    "ToolResultPayload",
-    "ToolResultStatus",
-    "UtteranceSegmentPayload",
-    "payload_from_dict",
-    "payload_to_dict",
-    "payload_type_for",
-    "validate_payload_capacity",
-]
+    return record_spec(record_kind).payload_codec.decode(value)

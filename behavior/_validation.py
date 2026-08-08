@@ -23,84 +23,6 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _REFERENCE_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _MAX_SIGNED_SQLITE_INTEGER = 9_223_372_036_854_775_807
 _EMAIL_LIKE = re.compile(r"(?:^|[^A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}(?:$|[^A-Za-z0-9.\-])")
-_RESERVED_SEMANTIC_KEYS = frozenset(
-    {
-        "claim_id",
-        "claim_kind",
-        "claim_sequence",
-        "content_digest",
-        "epistemic_class",
-        "encoded_digest",
-        "derivation_class",
-        "evidence_record_id",
-        "evidence_sequence",
-        "ingested_at",
-        "normalizer_fingerprint",
-        "processing_identity",
-        "producer_fingerprint",
-        "capability_digest",
-        "source_trust",
-        "semantic_digest",
-        "policy_digest",
-        "compatibility_policy_digest",
-        "binding_policy_digest",
-        "confidence_policy_digest",
-        "event_id",
-        "episode_id",
-        "pattern_id",
-        "prediction_id",
-        "storage_metadata",
-        "attempt_id",
-    }
-)
-_FORBIDDEN_PARTITION_KEYS = frozenset(
-    {
-        "own" + "er_ref",
-        "own" + "er_binding",
-        "own" + "er_identity",
-        "own" + "er_identity_digest",
-        "us" + "er_id",
-        "ten" + "ant_id",
-        "acc" + "ount_id",
-        "resol" + "ver_fingerprint",
-        "resolution_" + "evidence_digest",
-    }
-)
-_RESERVED_CLAIM_SYSTEM_KEYS = _RESERVED_SEMANTIC_KEYS | frozenset(
-    {
-        "actor_role",
-        "alternative_group_key",
-        "attempt_id",
-        "binding_policy_digest",
-        "capability_digest",
-        "claim_sequence",
-        "compatibility_policy_digest",
-        "confidence_policy_digest",
-        "content_digest",
-        "created_at",
-        "derivation_class",
-        "effective_confidence",
-        "encoded_digest",
-        "evidence_record_digest",
-        "evidence_record_id",
-        "evidence_sequence",
-        "ingested_at",
-        "normalizer_fingerprint",
-        "processing_identity",
-        "producer_fingerprint",
-        "semantic_digest",
-        "semantic_fingerprint",
-        "source_confidence",
-        "source_epistemic_class",
-        "source_trust",
-        "subject_role",
-        "time_end",
-        "time_start",
-        "time_uncertainty_ms",
-    }
-)
-
-
 def strict_utc(value: object, field_name: str) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None:
         raise ValueError(f"{field_name} must be a timezone-aware UTC datetime")
@@ -216,22 +138,16 @@ def sha256_digest(value: object, field_name: str) -> str:
 
 
 def non_negative_int(value: object, field_name: str) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not 0 <= value <= _MAX_SIGNED_SQLITE_INTEGER
-    ):
-        raise ValueError(f"{field_name} must be a bounded non-negative integer")
-    return value
+    return _bounded_int(value, field_name, minimum=0, label="non-negative")
 
 
 def positive_int(value: object, field_name: str) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not 0 < value <= _MAX_SIGNED_SQLITE_INTEGER
-    ):
-        raise ValueError(f"{field_name} must be a bounded positive integer")
+    return _bounded_int(value, field_name, minimum=1, label="positive")
+
+
+def _bounded_int(value: object, field_name: str, *, minimum: int, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= _MAX_SIGNED_SQLITE_INTEGER:
+        raise ValueError(f"{field_name} must be a bounded {label} integer")
     return value
 
 
@@ -305,23 +221,15 @@ def json_snapshot(
     maximum_chars: int,
     maximum_items: int = 128,
     maximum_depth: int = 12,
-    reserved_keys: frozenset[str] = _RESERVED_SEMANTIC_KEYS,
+    forbidden_keys: frozenset[str] = frozenset(),
+    reject_inline_data: bool = True,
 ) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError(f"{field_name} must be an object")
-    normalized = _json_value(
-        value,
-        field_name,
-        active=set(),
-        depth=0,
-        maximum_items=maximum_items,
-        maximum_depth=maximum_depth,
-        reserved_keys=reserved_keys,
-    )
+    normalized = _snapshot(value, field_name, maximum_chars, maximum_items, maximum_depth,
+                           forbidden_keys, reject_inline_data)
     if not isinstance(normalized, dict):
         raise TypeError(f"{field_name} must be an object")
-    if len(canonical_json(normalized)) > maximum_chars:
-        raise ValueError(f"{field_name} exceeds its canonical JSON boundary")
     return _freeze(normalized)
 
 
@@ -332,19 +240,22 @@ def json_value_snapshot(
     maximum_chars: int,
     maximum_items: int = 128,
     maximum_depth: int = 12,
+    forbidden_keys: frozenset[str] = frozenset(),
+    reject_inline_data: bool = True,
 ) -> Any:
-    normalized = _json_value(
-        value,
-        field_name,
-        active=set(),
-        depth=0,
-        maximum_items=maximum_items,
-        maximum_depth=maximum_depth,
-        reserved_keys=_RESERVED_SEMANTIC_KEYS,
-    )
+    normalized = _snapshot(value, field_name, maximum_chars, maximum_items, maximum_depth,
+                           forbidden_keys, reject_inline_data)
+    return _freeze(normalized)
+
+
+def _snapshot(value: object, field_name: str, maximum_chars: int, maximum_items: int,
+              maximum_depth: int, forbidden_keys: frozenset[str], reject_inline_data: bool) -> Any:
+    normalized = _json_value(value, field_name, active=set(), depth=0, maximum_items=maximum_items,
+                             maximum_depth=maximum_depth, forbidden_keys=forbidden_keys,
+                             reject_inline_data=reject_inline_data)
     if len(canonical_json(normalized)) > maximum_chars:
         raise ValueError(f"{field_name} exceeds its canonical JSON boundary")
-    return _freeze(normalized)
+    return normalized
 
 
 def _json_value(
@@ -355,7 +266,8 @@ def _json_value(
     depth: int,
     maximum_items: int,
     maximum_depth: int,
-    reserved_keys: frozenset[str],
+    forbidden_keys: frozenset[str],
+    reject_inline_data: bool,
 ) -> Any:
     if depth > maximum_depth:
         raise ValueError(f"{field_name} exceeds its nesting boundary")
@@ -364,7 +276,11 @@ def _json_value(
     if isinstance(value, str):
         text = bounded_text(value, field_name, maximum=1_000_000, allow_empty=True)
         folded = text.casefold()
-        if folded.startswith("data:") or folded.startswith("base64:") or ";base64," in folded:
+        if reject_inline_data and (
+            folded.startswith("data:")
+            or folded.startswith("base64:")
+            or ";base64," in folded
+        ):
             raise TypeError(f"{field_name} cannot contain inline or base64 data")
         return text
     if isinstance(value, float):
@@ -386,8 +302,8 @@ def _json_value(
                 if not isinstance(key, str) or not key or len(key) > 128:
                     raise TypeError(f"{field_name} must contain bounded string keys")
                 folded_key = key.casefold()
-                if folded_key in reserved_keys or folded_key in _FORBIDDEN_PARTITION_KEYS:
-                    raise ValueError(f"{field_name} contains a reserved system semantic field")
+                if folded_key in forbidden_keys:
+                    raise ValueError(f"{field_name} contains a forbidden field")
                 if key in result:
                     raise ValueError(f"{field_name} contains duplicate keys")
                 result[key] = _json_value(
@@ -397,7 +313,8 @@ def _json_value(
                     depth=depth + 1,
                     maximum_items=maximum_items,
                     maximum_depth=maximum_depth,
-                    reserved_keys=reserved_keys,
+                    forbidden_keys=forbidden_keys,
+                    reject_inline_data=reject_inline_data,
                 )
             return {key: result[key] for key in sorted(result)}
         finally:
@@ -418,31 +335,14 @@ def _json_value(
                     depth=depth + 1,
                     maximum_items=maximum_items,
                     maximum_depth=maximum_depth,
-                    reserved_keys=reserved_keys,
+                    forbidden_keys=forbidden_keys,
+                    reject_inline_data=reject_inline_data,
                 )
                 for index, item in enumerate(value)
             ]
         finally:
             active.remove(marker)
     raise TypeError(f"{field_name} contains unsupported type {type(value).__name__}")
-
-
-def claim_semantic_json_snapshot(
-    value: object,
-    field_name: str,
-    *,
-    maximum_chars: int,
-    maximum_items: int = 128,
-    maximum_depth: int = 12,
-) -> Mapping[str, Any]:
-    return json_snapshot(
-        value,
-        field_name,
-        maximum_chars=maximum_chars,
-        maximum_items=maximum_items,
-        maximum_depth=maximum_depth,
-        reserved_keys=_RESERVED_CLAIM_SYSTEM_KEYS,
-    )
 
 
 def _freeze(value: Any) -> Any:
@@ -507,31 +407,3 @@ def decode_sequence_cursor(
     if data.get("kind") != kind or data.get("query_digest") != canonical_digest(query):
         raise ValueError(f"cursor does not belong to this {subject} query")
     return non_negative_int(data.get("sequence"), "cursor.sequence")
-
-
-__all__ = [
-    "bounded_text",
-    "decode_cursor",
-    "decode_sequence_cursor",
-    "encode_cursor",
-    "encode_sequence_cursor",
-    "enum_tuple",
-    "external_reference",
-    "finite_score",
-    "fingerprint_fields",
-    "identifier",
-    "identifier_tuple",
-    "json_snapshot",
-    "json_value_snapshot",
-    "non_negative_int",
-    "optional_bounded_text",
-    "optional_identifier",
-    "parse_utc",
-    "pii_safe_identifier",
-    "positive_int",
-    "sha256_digest",
-    "strict_object",
-    "strict_utc",
-    "typed_tuple",
-    "utc_text",
-]

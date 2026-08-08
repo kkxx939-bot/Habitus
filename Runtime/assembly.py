@@ -3,23 +3,41 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import Mapping
 
 from behavior.claim import (
     BuiltinDeterministicClaimNormalizer,
-    ClaimBinder,
+    ClaimFactory,
     ClaimNormalizationPlanner,
     ClaimNormalizationService,
     ClaimNormalizerRegistry,
     StructuredModelClaimNormalizer,
 )
+from behavior.claim.proposal import ClaimProposalParser
+from behavior.claim.publication import ClaimPublicationFactory
+from behavior.claim.route_executor import NormalizationRouteExecutor
 from behavior.evidence import BehaviorEvidenceIngressService, BehaviorSemanticAdapterRegistry
-from behavior.persistence import BehaviorDatabase, SQLiteBehaviorClaimLedger, SQLiteBehaviorEvidenceLedger
+from behavior.evidence.ingress import SystemClock
+from behavior.persistence import (
+    BehaviorAuditService,
+    BehaviorDatabase,
+    SQLiteBehaviorClaimLedger,
+    SQLiteBehaviorEvidenceLedger,
+)
 from Config import M2BOSConfig
+from conversation import (
+    ConversationBehaviorProjectionConsumer,
+    ConversationBehaviorProjectionStore,
+    ConversationBehaviorProjector,
+    ConversationSourceCoordinator,
+    ConversationSourceReceiptStore,
+    ConversationSourceRecovery,
+    ConversationSourceStore,
+)
 from foundation.observability import CompositeObserver, MetricRegistry, Observer
 from infrastructure.observability import ManagedObservability
 from infrastructure.store.contracts import PathLock
+from infrastructure.store.processing_lock import RenewableProcessingLock
 from infrastructure.store.sqlite import SQLiteLockStore
 from infrastructure.vector import VectorStoreFactory, VectorStoreRequirements
 from infrastructure.vector.adapters import register_builtin_vector_adapters
@@ -74,6 +92,7 @@ from memory.workflow import (
     ConversationLifecycleManager,
     ConversationMemoryEnqueuer,
     MemoryChangeReceiptStore,
+    MemoryConversationConsumer,
     MemoryJobRunner,
     MemoryJobStore,
 )
@@ -91,80 +110,6 @@ from Runtime.components import (
 from Runtime.lifecycle import LifecycleWorker
 from Runtime.runtime import Runtime
 from Runtime.worker import MemoryWorker
-
-
-class _RuntimeProcessingLock:
-    """把耐久 PathLock 适配为可跨模型 await 持有并续约的异步处理租约。"""
-
-    def __init__(
-        self,
-        path_lock: PathLock,
-        *,
-        renewal_interval_seconds: float = 60.0,
-    ) -> None:
-        self.path_lock = path_lock
-        if renewal_interval_seconds <= 0:
-            raise ValueError("renewal_interval_seconds must be positive")
-        self.renewal_interval_seconds = renewal_interval_seconds
-
-    @asynccontextmanager
-    async def acquire(self, processing_identity: str) -> AsyncIterator[object]:
-        context = self.path_lock.acquire(
-            "behavior-processing:" + processing_identity,
-            ttl_seconds=300,
-            wait_timeout_seconds=30.0,
-            retry_delay_seconds=0.02,
-        )
-        guard = await asyncio.to_thread(context.__enter__)
-        owner_task = asyncio.current_task()
-        if owner_task is None:
-            await asyncio.to_thread(context.__exit__, None, None, None)
-            raise RuntimeError("Behavior processing lock requires an active asyncio Task")
-        renewal_error: BaseException | None = None
-
-        async def renew() -> None:
-            nonlocal renewal_error
-            try:
-                while True:
-                    await asyncio.sleep(self.renewal_interval_seconds)
-                    await asyncio.to_thread(guard.checkpoint)
-            except asyncio.CancelledError:
-                raise
-            except BaseException as exc:
-                renewal_error = exc
-                owner_task.cancel()
-
-        renewal = asyncio.create_task(renew())
-        body_error: BaseException | None = None
-        try:
-            yield guard
-            if renewal_error is not None:
-                raise RuntimeError("Behavior processing lease renewal failed") from renewal_error
-        except asyncio.CancelledError as exc:
-            if renewal_error is not None:
-                lease_failure = RuntimeError("Behavior processing lease renewal failed")
-                body_error = lease_failure
-                raise lease_failure from renewal_error
-            body_error = exc
-            raise
-        except BaseException as exc:
-            body_error = exc
-            raise
-        finally:
-            renewal.cancel()
-            try:
-                await renewal
-            except BaseException as exc:
-                if not isinstance(exc, asyncio.CancelledError) and renewal_error is None:
-                    renewal_error = exc
-            try:
-                await asyncio.to_thread(context.__exit__, None, None, None)
-            except Exception as exc:
-                if body_error is None:
-                    raise
-                raise body_error from exc
-            if body_error is None and renewal_error is not None:
-                raise RuntimeError("Behavior processing lease renewal failed") from renewal_error
 
 
 def build_runtime(
@@ -348,16 +293,27 @@ def build_runtime(
         behavior_normalizers,
         config.behavior.normalization,
     )
-    behavior_binder = ClaimBinder(config=config.behavior.normalization)
-    behavior_processing_lock = _RuntimeProcessingLock(resolved_lock)
+    behavior_claim_factory = ClaimFactory()
+    behavior_processing_lock = RenewableProcessingLock(resolved_lock)
+    behavior_route_executor = NormalizationRouteExecutor(
+        ledger=behavior_claim_ledger,
+        normalizers=behavior_normalizers,
+        proposal_parser=ClaimProposalParser(config.behavior.normalization),
+        claim_factory=behavior_claim_factory,
+        publication_factory=ClaimPublicationFactory(
+            compatibility_policy_digest=behavior_claim_factory.compatibility.digest,
+            binding_policy_digest=behavior_claim_factory.binding.digest,
+            confidence_policy_digest=behavior_claim_factory.confidence.digest,
+        ),
+        processing_lock=behavior_processing_lock,
+        clock=SystemClock(),
+        observer=operation_observer,
+    )
     behavior_normalization = ClaimNormalizationService(
         behavior_evidence_ledger,
         behavior_claim_ledger,
-        behavior_normalizers,
         behavior_planner,
-        behavior_binder,
-        behavior_processing_lock,
-        observer=operation_observer,
+        behavior_route_executor,
     )
     extraction_loop = MemoryExtractionLoop(
         client=structured_chat,
@@ -574,6 +530,39 @@ def build_runtime(
         jobs,
         retention_planner=retention,
     )
+    source_store = ConversationSourceStore(
+        config.conversation_root,
+        max_entries=conversation_config.journal.max_conversation_tree_entries,
+        max_file_bytes=conversation_config.journal.max_file_bytes,
+    )
+    source_receipts = ConversationSourceReceiptStore(
+        config.conversation_root,
+        max_file_bytes=conversation_config.journal.max_ingress_receipt_bytes,
+    )
+    behavior_projection_store = ConversationBehaviorProjectionStore(
+        config.conversation_root,
+        max_file_bytes=conversation_config.journal.max_file_bytes,
+    )
+    memory_conversation_consumer = MemoryConversationConsumer(
+        enqueuer,
+        conversations,
+        boundary_scorer,
+    )
+    behavior_projection_consumer = ConversationBehaviorProjectionConsumer(
+        ConversationBehaviorProjector(),
+        behavior_projection_store,
+    )
+    source_coordinator = ConversationSourceCoordinator(
+        source_store,
+        source_receipts,
+        memory_conversation_consumer,
+        behavior_projection_consumer,
+    )
+    source_recovery = ConversationSourceRecovery(
+        source_store,
+        source_receipts,
+        source_coordinator,
+    )
     runner = MemoryJobRunner(
         jobs,
         conversations,
@@ -615,6 +604,12 @@ def build_runtime(
             reranker=reranker,
         ),
         conversation=RuntimeConversation(
+            sources=source_store,
+            source_receipts=source_receipts,
+            behavior_projections=behavior_projection_store,
+            behavior_projection_consumer=behavior_projection_consumer,
+            source_coordinator=source_coordinator,
+            source_recovery=source_recovery,
             journal=conversations,
             retention=retention,
             boundary_scorer=boundary_scorer,
@@ -634,6 +629,7 @@ def build_runtime(
         ),
         behavior=RuntimeBehavior(
             database=behavior_database,
+            audit=BehaviorAuditService(behavior_database),
             evidence_adapters=resolved_behavior_adapters,
             evidence_ledger=behavior_evidence_ledger,
             evidence_ingress=behavior_ingress_service,
@@ -648,6 +644,7 @@ def build_runtime(
             jobs=jobs,
             receipts=receipts,
             enqueuer=enqueuer,
+            conversation_consumer=memory_conversation_consumer,
             lifecycle=conversation_lifecycle,
             runner=runner,
             worker=worker,
