@@ -5,39 +5,22 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 
-from behavior.claim import (
-    BuiltinDeterministicClaimNormalizer,
-    ClaimFactory,
-    ClaimNormalizationPlanner,
-    ClaimNormalizationService,
-    ClaimNormalizerRegistry,
-    StructuredModelClaimNormalizer,
-)
-from behavior.claim.proposal import ClaimProposalParser
-from behavior.claim.publication import ClaimPublicationFactory
-from behavior.claim.route_executor import NormalizationRouteExecutor
-from behavior.evidence import BehaviorEvidenceIngressService, BehaviorSemanticAdapterRegistry
-from behavior.evidence.ingress import SystemClock
-from behavior.persistence import (
-    BehaviorAuditService,
-    BehaviorDatabase,
-    SQLiteBehaviorClaimLedger,
-    SQLiteBehaviorEvidenceLedger,
-)
 from Config import M2BOSConfig
 from conversation import (
     ConversationBehaviorProjectionConsumer,
     ConversationBehaviorProjectionStore,
     ConversationBehaviorProjector,
+    ConversationConsumerDelivery,
+    ConversationConsumerExecutionFence,
+    ConversationConsumerOutcomeStore,
+    ConversationConsumerStateInspector,
     ConversationSourceCoordinator,
-    ConversationSourceReceiptStore,
     ConversationSourceRecovery,
     ConversationSourceStore,
 )
 from foundation.observability import CompositeObserver, MetricRegistry, Observer
 from infrastructure.observability import ManagedObservability
 from infrastructure.store.contracts import PathLock
-from infrastructure.store.processing_lock import RenewableProcessingLock
 from infrastructure.store.sqlite import SQLiteLockStore
 from infrastructure.vector import VectorStoreFactory, VectorStoreRequirements
 from infrastructure.vector.adapters import register_builtin_vector_adapters
@@ -93,13 +76,13 @@ from memory.workflow import (
     ConversationMemoryEnqueuer,
     MemoryChangeReceiptStore,
     MemoryConversationConsumer,
+    MemoryConversationOutputStore,
     MemoryJobRunner,
     MemoryJobStore,
 )
 from ModelClient import ProviderFactory, StructuredChatClient
 from pre.conversation import ConversationAdapterRegistry
 from Runtime.components import (
-    RuntimeBehavior,
     RuntimeComponents,
     RuntimeConversation,
     RuntimeInfrastructure,
@@ -118,7 +101,6 @@ def build_runtime(
     providers: ProviderFactory | None = None,
     vector_stores: VectorStoreFactory | None = None,
     conversation_adapters: ConversationAdapterRegistry | None = None,
-    behavior_adapters: BehaviorSemanticAdapterRegistry | None = None,
     path_lock: PathLock | None = None,
     observer: Observer | None = None,
 ) -> Runtime:
@@ -134,10 +116,6 @@ def build_runtime(
         conversation_adapters, ConversationAdapterRegistry
     ):
         raise TypeError("conversation_adapters must be ConversationAdapterRegistry or None")
-    if behavior_adapters is not None and not isinstance(
-        behavior_adapters, BehaviorSemanticAdapterRegistry
-    ):
-        raise TypeError("behavior_adapters must be BehaviorSemanticAdapterRegistry or None")
     if path_lock is not None and not isinstance(path_lock, PathLock):
         raise TypeError("path_lock must be PathLock or None")
     if observer is not None and not callable(getattr(observer, "record", None)):
@@ -266,54 +244,6 @@ def build_runtime(
         chat,
         allow_json_repair=model_config.structured_output.allow_json_repair,
         validation_retries=model_config.structured_output.validation_retries,
-    )
-    behavior_database = BehaviorDatabase(
-        config.behavior_root,
-        config=config.behavior,
-        initialize=False,
-    )
-    behavior_evidence_ledger = SQLiteBehaviorEvidenceLedger(behavior_database)
-    behavior_claim_ledger = SQLiteBehaviorClaimLedger(behavior_database)
-    resolved_behavior_adapters = behavior_adapters or BehaviorSemanticAdapterRegistry()
-    behavior_ingress_service = BehaviorEvidenceIngressService(
-        behavior_evidence_ledger,
-        resolved_behavior_adapters,
-        config=config.behavior,
-        observer=operation_observer,
-    )
-    behavior_normalizers = ClaimNormalizerRegistry()
-    behavior_normalizers.register(BuiltinDeterministicClaimNormalizer())
-    behavior_normalizers.register(
-        StructuredModelClaimNormalizer(
-            structured_chat,
-            config=config.behavior.normalization,
-        )
-    )
-    behavior_planner = ClaimNormalizationPlanner(
-        behavior_normalizers,
-        config.behavior.normalization,
-    )
-    behavior_claim_factory = ClaimFactory()
-    behavior_processing_lock = RenewableProcessingLock(resolved_lock)
-    behavior_route_executor = NormalizationRouteExecutor(
-        ledger=behavior_claim_ledger,
-        normalizers=behavior_normalizers,
-        proposal_parser=ClaimProposalParser(config.behavior.normalization),
-        claim_factory=behavior_claim_factory,
-        publication_factory=ClaimPublicationFactory(
-            compatibility_policy_digest=behavior_claim_factory.compatibility.digest,
-            binding_policy_digest=behavior_claim_factory.binding.digest,
-            confidence_policy_digest=behavior_claim_factory.confidence.digest,
-        ),
-        processing_lock=behavior_processing_lock,
-        clock=SystemClock(),
-        observer=operation_observer,
-    )
-    behavior_normalization = ClaimNormalizationService(
-        behavior_evidence_ledger,
-        behavior_claim_ledger,
-        behavior_planner,
-        behavior_route_executor,
     )
     extraction_loop = MemoryExtractionLoop(
         client=structured_chat,
@@ -530,38 +460,58 @@ def build_runtime(
         jobs,
         retention_planner=retention,
     )
+    source_config = conversation_config.source
+    projection_config = conversation_config.behavior_projection
     source_store = ConversationSourceStore(
         config.conversation_root,
-        max_entries=conversation_config.journal.max_conversation_tree_entries,
-        max_file_bytes=conversation_config.journal.max_file_bytes,
+        max_files=source_config.max_source_files,
+        max_file_bytes=source_config.max_envelope_bytes,
     )
-    source_receipts = ConversationSourceReceiptStore(
+    source_outcomes = ConversationConsumerOutcomeStore(
         config.conversation_root,
-        max_file_bytes=conversation_config.journal.max_ingress_receipt_bytes,
+        max_file_bytes=source_config.max_outcome_bytes,
+    )
+    memory_output_store = MemoryConversationOutputStore(
+        config.conversation_root,
+        max_files_per_source=source_config.max_output_files_per_consumer,
+        max_file_bytes=source_config.max_memory_output_bytes,
     )
     behavior_projection_store = ConversationBehaviorProjectionStore(
         config.conversation_root,
-        max_file_bytes=conversation_config.journal.max_file_bytes,
+        max_files_per_source=source_config.max_output_files_per_consumer,
+        max_file_bytes=projection_config.max_projection_output_bytes,
+        max_items=projection_config.max_projection_items,
     )
     memory_conversation_consumer = MemoryConversationConsumer(
         enqueuer,
         conversations,
         boundary_scorer,
+        memory_output_store,
     )
     behavior_projection_consumer = ConversationBehaviorProjectionConsumer(
         ConversationBehaviorProjector(),
         behavior_projection_store,
     )
-    source_coordinator = ConversationSourceCoordinator(
+    source_inspector = ConversationConsumerStateInspector(source_outcomes)
+    source_fence = ConversationConsumerExecutionFence(
+        resolved_lock,
+        ttl_seconds=source_config.execution_lock_ttl_seconds,
+        heartbeat_interval_seconds=source_config.execution_lock_heartbeat_seconds,
+        wait_seconds=source_config.execution_lock_wait_seconds,
+    )
+    source_delivery = ConversationConsumerDelivery(
         source_store,
-        source_receipts,
+        source_outcomes,
+        source_inspector,
+        source_fence,
         memory_conversation_consumer,
         behavior_projection_consumer,
     )
+    source_coordinator = ConversationSourceCoordinator(source_store, source_delivery)
     source_recovery = ConversationSourceRecovery(
         source_store,
-        source_receipts,
-        source_coordinator,
+        source_delivery,
+        batch_size=source_config.recovery_batch_size,
     )
     runner = MemoryJobRunner(
         jobs,
@@ -605,9 +555,13 @@ def build_runtime(
         ),
         conversation=RuntimeConversation(
             sources=source_store,
-            source_receipts=source_receipts,
+            source_outcomes=source_outcomes,
+            memory_outputs=memory_output_store,
             behavior_projections=behavior_projection_store,
             behavior_projection_consumer=behavior_projection_consumer,
+            source_inspector=source_inspector,
+            source_fence=source_fence,
+            source_delivery=source_delivery,
             source_coordinator=source_coordinator,
             source_recovery=source_recovery,
             journal=conversations,
@@ -626,19 +580,6 @@ def build_runtime(
             semantic_refresher=semantic_refresher,
             vector_index=vector_index,
             lifecycle=memory_lifecycle,
-        ),
-        behavior=RuntimeBehavior(
-            database=behavior_database,
-            audit=BehaviorAuditService(behavior_database),
-            evidence_adapters=resolved_behavior_adapters,
-            evidence_ledger=behavior_evidence_ledger,
-            evidence_ingress=behavior_ingress_service,
-            claim_ledger=behavior_claim_ledger,
-            claim_normalizers=behavior_normalizers,
-            claim_planner=behavior_planner,
-            claim_normalization=behavior_normalization,
-            structured_chat=structured_chat,
-            processing_lock=behavior_processing_lock,
         ),
         workflow=RuntimeWorkflow(
             jobs=jobs,

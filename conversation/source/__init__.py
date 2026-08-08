@@ -1,14 +1,20 @@
-"""不可变 Conversation Source、回执、分发和恢复。"""
+"""不可变 Conversation Source、Output、Outcome、执行栅栏与恢复。"""
 
 from conversation.source.coordinator import (
-    AsyncioConversationConsumerDispatcher,
-    ConversationConsumerCall,
-    ConversationConsumerDispatcher,
-    ConversationConsumerDispatchOutcome,
-    ConversationConsumerExecution,
-    ConversationEnvelopeConsumer,
     ConversationSourceCoordinator,
-    ConversationSourceDispatchResult,
+    ConversationSourceDispatchHandle,
+    ConversationSourcePendingDelivery,
+)
+from conversation.source.delivery import (
+    ConversationConsumerDelivery,
+    ConversationConsumerEnsureResult,
+    ConversationMemoryPredecessorBrokenError,
+    ConversationMemoryPredecessorPendingError,
+)
+from conversation.source.fence import (
+    ConversationConsumerExecutionFence,
+    ConversationConsumerExecutionLease,
+    ConversationConsumerLeaseLostError,
 )
 from conversation.source.model import (
     ConversationSourceEnvelope,
@@ -16,34 +22,58 @@ from conversation.source.model import (
     conversation_source_request_digest,
 )
 from conversation.source.receipt import (
-    ConversationConsumerReceipt,
-    ConversationConsumerReceiptState,
+    ConsumerOutputRef,
+    ConversationConsumerOutcome,
+    ConversationConsumerOutcomeState,
+    ConversationConsumerOutcomeStore,
+    ConversationConsumerRunDisposition,
+    ConversationConsumerRunResult,
     ConversationSourceConsumer,
-    ConversationSourceReceiptStore,
+    conversation_consumer_output_id,
 )
 from conversation.source.recovery import (
     ConversationSourceRecovery,
     ConversationSourceRecoveryEntry,
+    ConversationSourceRecoveryResult,
+)
+from conversation.source.state import (
+    ConversationConsumerBrokenOutcomeError,
+    ConversationConsumerCorruptionError,
+    ConversationConsumerDeliveryState,
+    ConversationConsumerState,
+    ConversationConsumerStateInspector,
 )
 from conversation.source.store import ConversationSourceStore
 
 __all__ = [
-    "AsyncioConversationConsumerDispatcher",
-    "ConversationConsumerExecution",
-    "ConversationEnvelopeConsumer",
-    "ConversationConsumerCall",
-    "ConversationConsumerDispatchOutcome",
-    "ConversationConsumerDispatcher",
-    "ConversationConsumerReceipt",
-    "ConversationConsumerReceiptState",
+    "ConsumerOutputRef",
+    "ConversationConsumerBrokenOutcomeError",
+    "ConversationConsumerCorruptionError",
+    "ConversationConsumerDelivery",
+    "ConversationConsumerDeliveryState",
+    "ConversationConsumerEnsureResult",
+    "ConversationConsumerExecutionFence",
+    "ConversationConsumerExecutionLease",
+    "ConversationConsumerLeaseLostError",
+    "ConversationConsumerOutcome",
+    "ConversationConsumerOutcomeState",
+    "ConversationConsumerOutcomeStore",
+    "ConversationConsumerRunDisposition",
+    "ConversationConsumerRunResult",
+    "ConversationConsumerState",
+    "ConversationConsumerStateInspector",
+    "ConversationMemoryPredecessorBrokenError",
+    "ConversationMemoryPredecessorPendingError",
     "ConversationSourceConsumer",
     "ConversationSourceCoordinator",
-    "ConversationSourceDispatchResult",
+    "ConversationSourceDispatchHandle",
     "ConversationSourceEnvelope",
     "ConversationSourceError",
-    "ConversationSourceReceiptStore",
+    "ConversationSourcePendingDelivery",
     "ConversationSourceRecovery",
     "ConversationSourceRecoveryEntry",
+    "ConversationSourceRecoveryResult",
     "ConversationSourceStore",
+    "conversation_consumer_output_id",
     "conversation_source_request_digest",
 ]

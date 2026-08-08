@@ -1,334 +1,259 @@
-"""Conversation Source 并发重放与部分恢复的回归测试。"""
-
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timezone
-from pathlib import Path
 
 import pytest
 
-from conversation import (
-    ConversationBehaviorProjectionConsumer,
-    ConversationBehaviorProjectionStore,
-    ConversationBehaviorProjector,
-    ConversationConsumerExecution,
-    ConversationConsumerReceiptState,
+from conversation.projection import ConversationBehaviorProjectionConsumer, ConversationBehaviorProjector
+from conversation.source import (
+    ConversationConsumerDelivery,
+    ConversationConsumerExecutionFence,
+    ConversationConsumerLeaseLostError,
+    ConversationConsumerStateInspector,
+    ConversationMemoryPredecessorBrokenError,
+    ConversationMemoryPredecessorPendingError,
     ConversationSourceConsumer,
     ConversationSourceCoordinator,
-    ConversationSourceEnvelope,
-    ConversationSourceReceiptStore,
-    ConversationSourceRecovery,
-    ConversationSourceStore,
-    conversation_source_request_digest,
 )
-from foundation.integrity import canonical_digest
-from infrastructure.store.contracts import PathLock
+from infrastructure.store.contracts import LockToken, PathLock
 from infrastructure.store.locks import ProcessLocalLockStore
-from memory.conversation import (
-    ConversationAddress,
-    ConversationMessageJournal,
-    ConversationRetentionPlanner,
-    ConversationSegmentationConfig,
-    ConversationSemanticBoundaryScorer,
+from tests.unit.conversation.source_v2_helpers import (
+    NOW,
+    FakeMemoryConsumer,
+    WrappedBehaviorConsumer,
+    delivery,
+    source,
+    stores,
 )
-from memory.workflow import ConversationMemoryEnqueuer, MemoryConversationConsumer, MemoryJobStore
-from ModelClient import EmbeddingVector
-from pre.conversation import ConversationBatch
-from tests.helpers import closed_turn
-
-STARTED_ON = date(2026, 8, 8)
 
 
-def _envelope(*, after_turn: bool = False) -> ConversationSourceEnvelope:
-    batch = ConversationBatch(
-        "source-concurrency",
-        (
-            *closed_turn(prompt="first request"),
-            *closed_turn(start_sequence=2, prompt="second request"),
-        ),
-    )
-    request_digest = conversation_source_request_digest(
-        conversation_id=batch.conversation_id,
-        started_on=STARTED_ON,
-        protocol="normalized",
-        batch=batch,
-        after_turn=after_turn,
-        omit_tool_call_ids=frozenset(),
-    )
-    return ConversationSourceEnvelope.create(
-        conversation_id=batch.conversation_id,
-        started_on=STARTED_ON,
-        protocol="normalized",
-        batch=batch,
-        after_turn=after_turn,
-        omit_tool_call_ids=frozenset(),
-        delivery_id=request_digest,
-        request_digest=request_digest,
-        created_at=datetime(2026, 8, 8, 1, 0, tzinfo=timezone.utc),
-    )
+class CountingLockStore(ProcessLocalLockStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.renewals = 0
+
+    def renew(self, token: LockToken, ttl_seconds: int = 30) -> None:
+        self.renewals += 1
+        super().renew(token, ttl_seconds=ttl_seconds)
 
 
-class _DeterministicEmbedder:
-    async def embed_documents(self, texts: tuple[str, ...]) -> tuple[EmbeddingVector, ...]:
-        return tuple(EmbeddingVector((1.0, 0.0)) for _ in texts)
+class FailingRenewLockStore(ProcessLocalLockStore):
+    def renew(self, token: LockToken, ttl_seconds: int = 30) -> None:
+        raise TimeoutError("lease renewal failed")
 
 
-class _BarrierMemoryConsumer:
-    """让两个 Coordinator 都在 Memory Receipt 缺失时进入真实 Consumer。"""
-
-    consumer = ConversationSourceConsumer.MEMORY
-
-    def __init__(self, inner: MemoryConversationConsumer) -> None:
-        self.inner = inner
-        self.arrivals = 0
-        self.both_arrived = asyncio.Event()
-
-    async def consume(self, envelope: ConversationSourceEnvelope) -> ConversationConsumerExecution:
-        self.arrivals += 1
-        if self.arrivals == 2:
-            self.both_arrived.set()
-        await self.both_arrived.wait()
-        return await self.inner.consume(envelope)
-
-    async def completed(self, envelope: ConversationSourceEnvelope, receipt: object) -> object:
-        return await self.inner.completed(envelope, receipt)  # type: ignore[arg-type]
-
-
-class _SuccessfulConsumer:
-    def __init__(self, consumer: ConversationSourceConsumer) -> None:
-        self.consumer = consumer
-        self.consume_count = 0
-
-    async def consume(self, envelope: ConversationSourceEnvelope) -> ConversationConsumerExecution:
-        self.consume_count += 1
-        result = {"consumer": self.consumer.value, "source_id": envelope.source_id}
-        return ConversationConsumerExecution(
-            ConversationConsumerReceiptState.SUCCEEDED,
-            result,
-            canonical_digest({"result": result}),
-            canonical_digest(result),
-        )
-
-    async def completed(self, envelope: ConversationSourceEnvelope, _receipt: object) -> object:
-        return {"consumer": self.consumer.value, "source_id": envelope.source_id, "restored": True}
-
-
-class _FailingConsumer(_SuccessfulConsumer):
-    async def consume(self, envelope: ConversationSourceEnvelope) -> ConversationConsumerExecution:
-        self.consume_count += 1
-        raise RuntimeError(f"{self.consumer.value} failed for {envelope.source_id}")
-
-
-class _BlockingCompletedConsumer(_SuccessfulConsumer):
-    def __init__(self, consumer: ConversationSourceConsumer, release: asyncio.Event) -> None:
-        super().__init__(consumer)
-        self.release = release
-        self.completed_started = asyncio.Event()
-
-    async def consume(self, _envelope: ConversationSourceEnvelope) -> ConversationConsumerExecution:
-        raise AssertionError("terminal consumer must not be consumed again")
-
-    async def completed(self, envelope: ConversationSourceEnvelope, _receipt: object) -> object:
-        self.completed_started.set()
-        await self.release.wait()
-        return {"consumer": self.consumer.value, "source_id": envelope.source_id, "restored": True}
-
-
-class _SignalingConsumer(_SuccessfulConsumer):
-    def __init__(self, consumer: ConversationSourceConsumer, finished: asyncio.Event) -> None:
-        super().__init__(consumer)
-        self.finished = finished
-
-    async def consume(self, envelope: ConversationSourceEnvelope) -> ConversationConsumerExecution:
-        result = await super().consume(envelope)
-        self.finished.set()
-        return result
-
-
-def _stores(
-    root: Path,
-) -> tuple[ConversationSourceStore, ConversationSourceReceiptStore]:
-    return (
-        ConversationSourceStore(root, max_entries=100, max_file_bytes=2_000_000),
-        ConversationSourceReceiptStore(root, max_file_bytes=100_000),
-    )
-
-
-def test_same_source_concurrent_dispatch_is_idempotent_across_real_memory_consumer(tmp_path: Path) -> None:
+def test_same_source_consumer_concurrency_executes_only_once_with_lock_inside_recheck(tmp_path) -> None:
     async def scenario() -> None:
-        conversation_root = tmp_path / "conversation"
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        service, memory, _behavior = delivery(tmp_path)
+        memory.entered = entered
+        memory.release = release
+        source_value = service.sources.put(source())
+
+        first = asyncio.create_task(
+            service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
+        )
+        await entered.wait()
+        second = asyncio.create_task(
+            service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
+        )
+        await asyncio.sleep(0.05)
+        assert memory.calls == 1
+        release.set()
+        first_result, second_result = await asyncio.gather(first, second)
+        assert memory.calls == 1
+        assert first_result.outcome == second_result.outcome
+
+    asyncio.run(scenario())
+
+
+def test_different_processor_fingerprints_share_one_execution_lock_and_first_outcome_wins(tmp_path) -> None:
+    async def scenario() -> None:
+        sources, outcomes, memory_outputs, projection_outputs = stores(tmp_path)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        first_memory = FakeMemoryConsumer(
+            memory_outputs,
+            fingerprint_seed="processor-old",
+            entered=entered,
+            release=release,
+        )
+        second_memory = FakeMemoryConsumer(memory_outputs, fingerprint_seed="processor-new")
+        behavior = WrappedBehaviorConsumer(
+            ConversationBehaviorProjectionConsumer(
+                ConversationBehaviorProjector(clock=lambda: NOW),
+                projection_outputs,
+            )
+        )
         path_lock = PathLock(ProcessLocalLockStore())
-        journal = ConversationMessageJournal(conversation_root, path_lock)
-        jobs = MemoryJobStore(tmp_path / "workflow", path_lock, memory_root=tmp_path / "memory")
-        planner = ConversationRetentionPlanner(
-            ConversationSegmentationConfig(
-                commit_token_threshold=1,
-                keep_recent_turn_count=1,
-                retained_message_token_budget=100,
-                max_segment_tokens=100,
-                max_live_messages=1_000,
-                max_live_bytes=1_000_000,
-                max_segment_messages=1_000,
-                max_segment_bytes=1_000_000,
-            ),
-            token_estimator=lambda item: len(item.content) if isinstance(item.content, str) else 1,
-        )
-        real_memory = MemoryConversationConsumer(
-            ConversationMemoryEnqueuer(journal, jobs, planner),
-            journal,
-            ConversationSemanticBoundaryScorer(
-                _DeterministicEmbedder(),
-                embedding_fingerprint="deterministic-v1",
-                max_unit_chars=256,
-            ),
-        )
-        memory = _BarrierMemoryConsumer(real_memory)
-        sources, receipts = _stores(conversation_root)
-        projection_store = ConversationBehaviorProjectionStore(
-            conversation_root,
-            max_file_bytes=2_000_000,
-        )
-        behavior = ConversationBehaviorProjectionConsumer(
-            ConversationBehaviorProjector(),
-            projection_store,
-        )
-        first = ConversationSourceCoordinator(sources, receipts, memory, behavior)
-        second = ConversationSourceCoordinator(sources, receipts, memory, behavior)
-        envelope = _envelope(after_turn=True)
+        inspector = ConversationConsumerStateInspector(outcomes)
 
-        first_result, second_result = await asyncio.gather(
-            first.dispatch(envelope),
-            second.dispatch(envelope),
-        )
+        def make_service(memory: FakeMemoryConsumer) -> ConversationConsumerDelivery:
+            return ConversationConsumerDelivery(
+                sources,
+                outcomes,
+                inspector,
+                ConversationConsumerExecutionFence(
+                    path_lock,
+                    ttl_seconds=3,
+                    heartbeat_interval_seconds=0.05,
+                    wait_seconds=2.0,
+                ),
+                memory,
+                behavior,
+                clock=lambda: NOW,
+            )
 
-        assert memory.arrivals == 2
-        assert first_result.memory_error is None
-        assert second_result.memory_error is None
-        address = ConversationAddress(envelope.conversation_id, envelope.started_on)
-        history = journal.list_history(address)
-        live = journal.read_live(address)
-        persisted_messages = tuple(message for segment in history for message in segment.messages) + (
-            () if live is None else live.messages
+        first_service = make_service(first_memory)
+        second_service = make_service(second_memory)
+        source_value = sources.put(source())
+        first = asyncio.create_task(
+            first_service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
         )
-        assert len(persisted_messages) == len(envelope.batch.messages)
-        persisted_jobs = jobs.list_for_conversation(address)
-        assert persisted_jobs
-        assert len({job.source_identity for job in persisted_jobs}) == len(persisted_jobs)
-        memory_receipt = receipts.read(envelope.source_id, ConversationSourceConsumer.MEMORY)
-        projection_receipt = receipts.read(
-            envelope.source_id,
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+        await entered.wait()
+        second = asyncio.create_task(
+            second_service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
         )
-        assert memory_receipt is not None
-        assert projection_receipt is not None
-        assert projection_receipt.result_id is not None
-        assert projection_store.read(projection_receipt.result_id) is not None
-        assert len(tuple(projection_store.projection_root.glob("*.json"))) == 1
+        await asyncio.sleep(0.05)
+        assert second_memory.calls == 0
+        release.set()
+        left, right = await asyncio.gather(first, second)
+        assert left.outcome == right.outcome
+        assert left.outcome.processor_fingerprint == first_memory.processor_fingerprint
+        assert second_memory.calls == 0
 
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize(
-    "terminal_consumer",
-    [
-        ConversationSourceConsumer.MEMORY,
-        ConversationSourceConsumer.BEHAVIOR_PROJECTION,
-    ],
-)
-def test_partial_recovery_does_not_wait_for_terminal_consumer_restoration(
-    tmp_path: Path,
-    terminal_consumer: ConversationSourceConsumer,
-) -> None:
+def test_execution_fence_heartbeats_all_held_memory_leases(tmp_path) -> None:
     async def scenario() -> None:
-        sources, receipts = _stores(tmp_path)
-        envelope = _envelope()
-        missing_consumer = (
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION
-            if terminal_consumer is ConversationSourceConsumer.MEMORY
-            else ConversationSourceConsumer.MEMORY
+        lock_store = CountingLockStore()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        service, memory, _behavior = delivery(
+            tmp_path,
+            path_lock=PathLock(lock_store),
         )
-        initial = {
-            terminal_consumer: _SuccessfulConsumer(terminal_consumer),
-            missing_consumer: _FailingConsumer(missing_consumer),
-        }
-        first = ConversationSourceCoordinator(
-            sources,
-            receipts,
-            initial[ConversationSourceConsumer.MEMORY],
-            initial[ConversationSourceConsumer.BEHAVIOR_PROJECTION],
+        memory.entered = entered
+        memory.release = release
+        source_value = service.sources.put(source())
+        running = asyncio.create_task(
+            service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
         )
-        await first.dispatch(envelope)
-        assert receipts.read(envelope.source_id, terminal_consumer) is not None
-        assert receipts.read(envelope.source_id, missing_consumer) is None
-
-        release_terminal = asyncio.Event()
-        missing_finished = asyncio.Event()
-        recovered = {
-            terminal_consumer: _BlockingCompletedConsumer(terminal_consumer, release_terminal),
-            missing_consumer: _SignalingConsumer(missing_consumer, missing_finished),
-        }
-        coordinator = ConversationSourceCoordinator(
-            sources,
-            receipts,
-            recovered[ConversationSourceConsumer.MEMORY],
-            recovered[ConversationSourceConsumer.BEHAVIOR_PROJECTION],
-        )
-        recovery = ConversationSourceRecovery(sources, receipts, coordinator)
-        running = asyncio.create_task(recovery.recover_pending())
-        blocking = recovered[terminal_consumer]
-        assert isinstance(blocking, _BlockingCompletedConsumer)
-        await asyncio.wait_for(blocking.completed_started.wait(), timeout=1.0)
-        try:
-            await asyncio.wait_for(missing_finished.wait(), timeout=0.2)
-            missing_completed_before_release = True
-        except TimeoutError:
-            missing_completed_before_release = False
-        finally:
-            release_terminal.set()
-        results = await running
-
-        assert missing_completed_before_release
-        assert len(results) == 1
-        assert receipts.read(envelope.source_id, missing_consumer) is not None
-        assert results[0].memory_error is None
-        assert results[0].behavior_projection_error is None
+        await entered.wait()
+        await asyncio.sleep(0.16)
+        assert lock_store.renewals >= 4  # Memory 顺序锁和 Consumer 锁均持续续租。
+        release.set()
+        await running
 
     asyncio.run(scenario())
 
 
-def test_blocked_behavior_consumer_does_not_delay_memory_receipt(tmp_path: Path) -> None:
+def test_heartbeat_loss_prevents_output_and_outcome_publication(tmp_path) -> None:
     async def scenario() -> None:
-        sources, receipts = _stores(tmp_path)
-        envelope = _envelope()
-        memory_finished = asyncio.Event()
-        behavior_started = asyncio.Event()
-        release_behavior = asyncio.Event()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        service, memory, _behavior = delivery(
+            tmp_path,
+            path_lock=PathLock(FailingRenewLockStore()),
+        )
+        service.fence.wait_seconds = 0.0
+        memory.entered = entered
+        memory.release = release
+        source_value = service.sources.put(source())
+        running = asyncio.create_task(
+            service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
+        )
+        await entered.wait()
+        await asyncio.sleep(0.1)
+        release.set()
+        with pytest.raises(ConversationConsumerLeaseLostError):
+            await running
+        assert memory.output_store.list(source_value) == ()
+        assert service.outcomes.read(source_value.source_id, ConversationSourceConsumer.MEMORY) is None
 
-        class BlockingBehavior(_SuccessfulConsumer):
-            async def consume(self, value: ConversationSourceEnvelope) -> ConversationConsumerExecution:
-                behavior_started.set()
-                await release_behavior.wait()
-                return await super().consume(value)
+    asyncio.run(scenario())
 
-        memory = _SignalingConsumer(ConversationSourceConsumer.MEMORY, memory_finished)
-        behavior = BlockingBehavior(ConversationSourceConsumer.BEHAVIOR_PROJECTION)
-        coordinator = ConversationSourceCoordinator(sources, receipts, memory, behavior)
-        running = asyncio.create_task(coordinator.dispatch(envelope))
 
-        await asyncio.wait_for(behavior_started.wait(), timeout=1.0)
-        await asyncio.wait_for(memory_finished.wait(), timeout=1.0)
-        assert not running.done()
-        assert receipts.read(envelope.source_id, ConversationSourceConsumer.MEMORY) is not None
-        assert receipts.read(envelope.source_id, ConversationSourceConsumer.BEHAVIOR_PROJECTION) is None
-        release_behavior.set()
-        result = await running
+def test_cancelled_api_waiter_does_not_cancel_underlying_memory_consumer(tmp_path) -> None:
+    async def scenario() -> None:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        service, memory, _behavior = delivery(tmp_path)
+        memory.entered = entered
+        memory.release = release
+        coordinator = ConversationSourceCoordinator(service.sources, service)
+        handle = coordinator.start(source())
+        waiter = asyncio.create_task(handle.wait_memory())
+        await entered.wait()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert not handle.memory_task.cancelled()
+        assert not handle.memory_task.done()
+        release.set()
+        restored = await handle.wait_memory()
+        assert restored.append.next_sequence == 1
 
-        assert result.memory_error is None
-        assert result.behavior_projection_error is None
-        assert receipts.read(
-            envelope.source_id,
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
-        ) is not None
+    asyncio.run(scenario())
+
+
+def test_behavior_failure_does_not_delay_or_rollback_memory(tmp_path) -> None:
+    async def scenario() -> None:
+        service, _memory, behavior = delivery(tmp_path)
+        behavior.fail = RuntimeError("projection failed")
+        coordinator = ConversationSourceCoordinator(service.sources, service)
+        handle = coordinator.start(source())
+        memory = await asyncio.wait_for(handle.wait_memory(), timeout=1.0)
+        assert memory.append.next_sequence == 1
+        with pytest.raises(RuntimeError, match="projection failed"):
+            await handle.wait_behavior_projection()
+        assert service.restore_terminal(handle.envelope, ConversationSourceConsumer.MEMORY) == memory
+
+    asyncio.run(scenario())
+
+
+def test_blocked_memory_does_not_prevent_behavior_projection_completion(tmp_path) -> None:
+    async def scenario() -> None:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        service, memory, _behavior = delivery(tmp_path)
+        memory.entered = entered
+        memory.release = release
+        coordinator = ConversationSourceCoordinator(service.sources, service)
+        handle = coordinator.start(source())
+        await entered.wait()
+        projected = await asyncio.wait_for(handle.wait_behavior_projection(), timeout=1.0)
+        assert projected is not None
+        assert not handle.memory_task.done()
+        release.set()
+        await handle.wait_memory()
+
+    asyncio.run(scenario())
+
+
+def test_newer_memory_source_fails_fast_when_predecessor_is_pending_or_broken(tmp_path) -> None:
+    async def scenario() -> None:
+        service, _memory, _behavior = delivery(tmp_path)
+        first = service.sources.put(source(sequence=0, delivery_seed="first"))
+        second = service.sources.put(source(sequence=1, delivery_seed="second"))
+        with pytest.raises(ConversationMemoryPredecessorPendingError):
+            await service.ensure_outcome(second, ConversationSourceConsumer.MEMORY)
+
+        await service.ensure_outcome(first, ConversationSourceConsumer.MEMORY)
+        state = service.inspect(first, ConversationSourceConsumer.MEMORY)
+        assert state.outcome is not None and state.outcome.output_ref is not None
+        output_path = (
+            tmp_path
+            / "source"
+            / "outputs"
+            / first.source_id
+            / "memory"
+            / f"{state.outcome.output_ref.output_id}.json"
+        )
+        output_path.unlink()
+        with pytest.raises(ConversationMemoryPredecessorBrokenError):
+            await service.ensure_outcome(second, ConversationSourceConsumer.MEMORY)
 
     asyncio.run(scenario())

@@ -52,7 +52,6 @@ class RuntimeHealthService:
         checks = [
             self._runtime_check(runtime_state),
             self._lifecycle_storage_check(runtime_state),
-            self._behavior_store_check(runtime_state),
             self._memory_worker_check(),
             self._lifecycle_check(),
             self._observability_check(),
@@ -63,7 +62,6 @@ class RuntimeHealthService:
             checks.extend(
                 await asyncio.gather(
                     self._chat_check(),
-                    self._behavior_audit_check(),
                     self._index_consistency_check(
                         "memory_index_consistency",
                         self.components.memory.vector_index,
@@ -160,57 +158,6 @@ class RuntimeHealthService:
         status, detail = manager.health()
         resolved = RuntimeHealthStatus.HEALTHY if status == "healthy" else RuntimeHealthStatus.DEGRADED
         return RuntimeHealthCheck("observability", resolved, detail, critical=False)
-
-    def _behavior_store_check(self, runtime_state: str) -> RuntimeHealthCheck:
-        if runtime_state == "created":
-            return RuntimeHealthCheck(
-                "behavior_store",
-                RuntimeHealthStatus.DEGRADED,
-                "not_initialized",
-            )
-        ready, detail = self.components.behavior.database.readiness()
-        if ready:
-            try:
-                snapshot = self.components.behavior.database.health_snapshot()
-                detail = ";".join(
-                    (
-                        f"schema={snapshot['schema_version']}",
-                        f"evidence={snapshot['evidence_count']}",
-                        f"claims={snapshot['claim_count']}",
-                        f"attempts={snapshot['attempt_count']}",
-                        f"receipts={snapshot['receipt_count']}",
-                        f"database_size_warning={str(snapshot['database_size_warning']).lower()}",
-                    )
-                )
-            except Exception as exc:
-                return RuntimeHealthCheck(
-                    "behavior_store",
-                    RuntimeHealthStatus.UNHEALTHY,
-                    type(exc).__name__,
-                )
-        return RuntimeHealthCheck(
-            "behavior_store",
-            RuntimeHealthStatus.HEALTHY if ready else RuntimeHealthStatus.UNHEALTHY,
-            detail,
-        )
-
-    async def _behavior_audit_check(self) -> RuntimeHealthCheck:
-        try:
-            report = await asyncio.to_thread(self.components.behavior.audit.deep_check)
-        except Exception as exc:
-            return RuntimeHealthCheck(
-                "behavior_deep_audit",
-                RuntimeHealthStatus.UNHEALTHY,
-                type(exc).__name__,
-            )
-        return RuntimeHealthCheck(
-            "behavior_deep_audit",
-            RuntimeHealthStatus.HEALTHY,
-            (
-                f"evidence={report.evidence_count};claims={report.claim_count};"
-                f"attempts={report.attempt_count};receipts={report.normalization_receipt_count}"
-            ),
-        )
 
     async def _queue_check(self) -> RuntimeHealthCheck:
         try:

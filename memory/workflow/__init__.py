@@ -1,6 +1,7 @@
 """长期记忆主链的跨领域编排入口。"""
 
 from memory.workflow.conversation_consumer import MemoryConversationConsumer
+from memory.workflow.conversation_output import MemoryConversationOutput, MemoryConversationOutputStore
 from memory.workflow.ingest import (
     ConversationMemoryEnqueuer,
     ConversationMemoryFlushResult,
@@ -56,6 +57,8 @@ __all__ = [
     "MemoryChangeSource",
     "MemoryIdentityChange",
     "MemoryConversationConsumer",
+    "MemoryConversationOutput",
+    "MemoryConversationOutputStore",
     "MemoryJob",
     "MemoryJobAbandonment",
     "MemoryJobBlockedError",

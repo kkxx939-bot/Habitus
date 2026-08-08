@@ -11,33 +11,41 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from conversation.source.coordinator import ConversationConsumerExecution
-from conversation.source.model import ConversationSourceEnvelope, ConversationSourceError
+from conversation.source.fence import ConversationConsumerExecutionLease
+from conversation.source.model import ConversationSourceEnvelope, ConversationSourceError, require_sha256
 from conversation.source.receipt import (
-    ConversationConsumerReceipt,
-    ConversationConsumerReceiptState,
+    ConsumerOutputRef,
+    ConversationConsumerRunDisposition,
+    ConversationConsumerRunResult,
     ConversationSourceConsumer,
+    conversation_consumer_output_id,
 )
 from foundation.integrity import canonical_digest, canonical_json, canonicalize, immutable_snapshot
-from infrastructure.store.filesystem import ImmutableArtifactConflictError, atomic_create_bytes, read_regular_bytes
+from infrastructure.store.filesystem import (
+    DurablePathIntegrityError,
+    ImmutableArtifactConflictError,
+    atomic_create_bytes,
+    atomic_temporary_destination,
+    list_real_directory,
+    read_regular_bytes,
+)
 from pre.conversation import ConversationMessage, ConversationMessageRole
 from pre.conversation.messages.model import conversation_datetime
 
+# TODO(conversation-source): 修改 _project_message 映射或 payload 摘要语义时，必须同步提升
+# Projector 版本；该版本当前由人工维护。
 CONVERSATION_BEHAVIOR_PROJECTOR_VERSION = "conversation_behavior_projector_v1"
-_BATCH_SCHEMA = "conversation_behavior_projection_batch_v1"
+BEHAVIOR_PROJECTION_OUTPUT_SCHEMA_VERSION = "conversation_behavior_projection_output_v2"
+BEHAVIOR_PROJECTION_OUTPUT_KIND = "conversation_behavior_projection"
+_PROJECTION_ID_SCHEMA = "conversation_behavior_projection_identity_v1"
 _ITEM_SCHEMA = "conversation_behavior_projection_item_v1"
+_OUTPUT_FILE = re.compile(r"^(?P<output_id>[0-9a-f]{64})\.json$")
 
 
 class ConversationBehaviorProjectionKind(str, Enum):
     USER_CONVERSATION_INPUT = "user_conversation_input"
     AGENT_TOOL_CALL = "agent_tool_call"
     TOOL_EXECUTION_RESULT = "tool_execution_result"
-
-
-def _sha256(value: object, label: str) -> str:
-    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
-        raise ConversationSourceError(f"{label} must be lowercase SHA-256 text")
-    return value
 
 
 @dataclass(frozen=True)
@@ -51,19 +59,18 @@ class ConversationBehaviorProjectionItem:
     payload: Any
 
     def __post_init__(self) -> None:
-        _sha256(self.projection_item_id, "projection_item_id")
-        _sha256(self.source_id, "projection item source_id")
+        require_sha256(self.projection_item_id, "projection_item_id")
+        require_sha256(self.source_id, "projection item source_id")
         if not isinstance(self.source_message_id, str) or not self.source_message_id:
             raise ConversationSourceError("source_message_id must be non-empty text")
-        _sha256(self.source_message_digest, "source_message_digest")
+        require_sha256(self.source_message_digest, "source_message_digest")
         object.__setattr__(self, "occurred_at", conversation_datetime(self.occurred_at, "occurred_at"))
         try:
             object.__setattr__(self, "projection_kind", ConversationBehaviorProjectionKind(self.projection_kind))
         except ValueError as exc:
             raise ConversationSourceError("projection_kind is invalid") from exc
         object.__setattr__(self, "payload", immutable_snapshot(canonicalize(self.payload)))
-        expected = canonical_digest(self._identity_payload())
-        if self.projection_item_id != expected:
+        if self.projection_item_id != canonical_digest(self._identity_payload()):
             raise ConversationSourceError("projection_item_id does not match item content")
 
     @classmethod
@@ -75,7 +82,7 @@ class ConversationBehaviorProjectionItem:
         projection_kind: ConversationBehaviorProjectionKind,
         payload: Any,
     ) -> ConversationBehaviorProjectionItem:
-        _sha256(source_id, "source_id")
+        require_sha256(source_id, "source_id")
         source_message_digest = canonical_digest(message.to_dict())
         identity = {
             "schema_version": _ITEM_SCHEMA,
@@ -97,16 +104,17 @@ class ConversationBehaviorProjectionItem:
         )
 
     def _identity_payload(self) -> dict[str, Any]:
-        payload = {
-            "schema_version": _ITEM_SCHEMA,
-            "source_id": self.source_id,
-            "source_message_id": self.source_message_id,
-            "source_message_digest": self.source_message_digest,
-            "occurred_at": self.occurred_at,
-            "projection_kind": self.projection_kind.value,
-            "payload": canonicalize(self.payload),
-        }
-        return canonicalize(payload)
+        return canonicalize(
+            {
+                "schema_version": _ITEM_SCHEMA,
+                "source_id": self.source_id,
+                "source_message_id": self.source_message_id,
+                "source_message_digest": self.source_message_digest,
+                "occurred_at": self.occurred_at,
+                "projection_kind": self.projection_kind.value,
+                "payload": canonicalize(self.payload),
+            }
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return canonicalize(
@@ -124,13 +132,8 @@ class ConversationBehaviorProjectionItem:
 
     @classmethod
     def from_dict(
-        cls,
-        value: object,
-        *,
-        source_id: str,
+        cls, value: object, *, source_id: str
     ) -> ConversationBehaviorProjectionItem:
-        if not isinstance(value, Mapping):
-            raise ConversationSourceError("projection item must be an object")
         expected = {
             "schema_version",
             "projection_item_id",
@@ -141,13 +144,12 @@ class ConversationBehaviorProjectionItem:
             "projection_kind",
             "payload",
         }
-        if set(value) != expected or value.get("schema_version") != _ITEM_SCHEMA:
+        if not isinstance(value, Mapping) or set(value) != expected or value.get("schema_version") != _ITEM_SCHEMA:
             raise ConversationSourceError("projection item schema is invalid")
         try:
             kind = ConversationBehaviorProjectionKind(value["projection_kind"])
         except (TypeError, ValueError) as exc:
             raise ConversationSourceError("projection item kind is invalid") from exc
-        _sha256(source_id, "source_id")
         item = cls(
             projection_item_id=value["projection_item_id"],
             source_id=value["source_id"],
@@ -164,117 +166,178 @@ class ConversationBehaviorProjectionItem:
 
 @dataclass(frozen=True)
 class ConversationBehaviorProjectionBatch:
+    output_id: str
     projection_id: str
     source_id: str
-    source_digest: str
+    source_payload_digest: str
+    consumer: ConversationSourceConsumer
+    processor_fingerprint: str
     projector_version: str
     items: tuple[ConversationBehaviorProjectionItem, ...]
-    created_at: datetime
-    content_digest: str
+    recorded_at: datetime
+    output_record_digest: str
 
     def __post_init__(self) -> None:
-        _sha256(self.projection_id, "projection_id")
-        _sha256(self.source_id, "projection source_id")
-        _sha256(self.source_digest, "projection source_digest")
+        for label, value in (
+            ("projection output_id", self.output_id),
+            ("projection_id", self.projection_id),
+            ("projection source_id", self.source_id),
+            ("projection source_payload_digest", self.source_payload_digest),
+            ("projection processor_fingerprint", self.processor_fingerprint),
+            ("projection output_record_digest", self.output_record_digest),
+        ):
+            require_sha256(value, label)
+        object.__setattr__(self, "consumer", ConversationSourceConsumer(self.consumer))
+        if self.consumer is not ConversationSourceConsumer.BEHAVIOR_PROJECTION:
+            raise ConversationSourceError("projection output has the wrong consumer")
         if not isinstance(self.projector_version, str) or not self.projector_version:
             raise ConversationSourceError("projector_version must be non-empty text")
         if not isinstance(self.items, tuple) or not self.items:
-            raise ConversationSourceError("projection batch must contain items")
+            raise ConversationSourceError("projection output must contain items")
         if any(not isinstance(item, ConversationBehaviorProjectionItem) for item in self.items):
             raise TypeError("projection items must be ConversationBehaviorProjectionItem values")
         if any(item.source_id != self.source_id for item in self.items):
-            raise ConversationSourceError("projection batch contains an item from another source")
+            raise ConversationSourceError("projection output contains an item from another source")
         if len({item.projection_item_id for item in self.items}) != len(self.items):
             raise ConversationSourceError("projection item IDs must be unique")
-        object.__setattr__(self, "created_at", conversation_datetime(self.created_at, "created_at"))
-        _sha256(self.content_digest, "projection content_digest")
-        if self.projection_id != canonical_digest(self._identity_payload()):
+        object.__setattr__(self, "recorded_at", conversation_datetime(self.recorded_at, "recorded_at"))
+        if self.output_id != conversation_consumer_output_id(
+            source_id=self.source_id,
+            source_payload_digest=self.source_payload_digest,
+            consumer=self.consumer,
+            processor_fingerprint=self.processor_fingerprint,
+            output_schema_version=BEHAVIOR_PROJECTION_OUTPUT_SCHEMA_VERSION,
+        ):
+            raise ConversationSourceError("projection output_id does not match output identity")
+        if self.projection_id != canonical_digest(self._projection_identity_payload()):
             raise ConversationSourceError("projection_id does not match projection content")
-        if self.content_digest != canonical_digest(self._content_payload()):
-            raise ConversationSourceError("projection content_digest does not match content")
+        if self.output_record_digest != canonical_digest(self._record_without_digest()):
+            raise ConversationSourceError("projection output_record_digest does not match output record")
 
     @classmethod
     def create(
         cls,
         *,
-        source_id: str,
-        source_digest: str,
+        source: ConversationSourceEnvelope,
+        processor_fingerprint: str,
         projector_version: str,
         items: tuple[ConversationBehaviorProjectionItem, ...],
-        created_at: datetime,
+        recorded_at: datetime,
     ) -> ConversationBehaviorProjectionBatch:
-        identity = {
-            "schema_version": _BATCH_SCHEMA,
-            "source_id": source_id,
-            "source_digest": source_digest,
-            "projector_version": projector_version,
-            "items": [item.to_dict() for item in items],
-        }
+        output_id = conversation_consumer_output_id(
+            source_id=source.source_id,
+            source_payload_digest=source.source_payload_digest,
+            consumer=ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+            processor_fingerprint=processor_fingerprint,
+            output_schema_version=BEHAVIOR_PROJECTION_OUTPUT_SCHEMA_VERSION,
+        )
+        identity = canonicalize(
+            {
+                "schema_version": _PROJECTION_ID_SCHEMA,
+                "source_id": source.source_id,
+                "source_payload_digest": source.source_payload_digest,
+                "projector_version": projector_version,
+                "items": [item.to_dict() for item in items],
+            }
+        )
         projection_id = canonical_digest(identity)
-        content = {**identity, "projection_id": projection_id}
+        record = canonicalize(
+            {
+                "schema_version": BEHAVIOR_PROJECTION_OUTPUT_SCHEMA_VERSION,
+                "output_id": output_id,
+                "projection_id": projection_id,
+                "source_id": source.source_id,
+                "source_payload_digest": source.source_payload_digest,
+                "consumer": ConversationSourceConsumer.BEHAVIOR_PROJECTION.value,
+                "processor_fingerprint": processor_fingerprint,
+                "projector_version": projector_version,
+                "items": [item.to_dict() for item in items],
+                "recorded_at": conversation_datetime(recorded_at, "recorded_at"),
+            }
+        )
         return cls(
+            output_id=output_id,
             projection_id=projection_id,
-            source_id=source_id,
-            source_digest=source_digest,
+            source_id=source.source_id,
+            source_payload_digest=source.source_payload_digest,
+            consumer=ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+            processor_fingerprint=processor_fingerprint,
             projector_version=projector_version,
             items=items,
-            created_at=created_at,
-            content_digest=canonical_digest(content),
+            recorded_at=recorded_at,
+            output_record_digest=canonical_digest(record),
         )
 
-    def _identity_payload(self) -> dict[str, Any]:
+    def _projection_identity_payload(self) -> dict[str, Any]:
         return canonicalize(
             {
-                "schema_version": _BATCH_SCHEMA,
+                "schema_version": _PROJECTION_ID_SCHEMA,
                 "source_id": self.source_id,
-                "source_digest": self.source_digest,
+                "source_payload_digest": self.source_payload_digest,
                 "projector_version": self.projector_version,
                 "items": [item.to_dict() for item in self.items],
             }
         )
 
-    def _content_payload(self) -> dict[str, Any]:
-        return canonicalize({**self._identity_payload(), "projection_id": self.projection_id})
-
-    def to_dict(self) -> dict[str, Any]:
+    def _record_without_digest(self) -> dict[str, Any]:
         return canonicalize(
             {
-                **self._content_payload(),
-                "created_at": self.created_at,
-                "content_digest": self.content_digest,
+                "schema_version": BEHAVIOR_PROJECTION_OUTPUT_SCHEMA_VERSION,
+                "output_id": self.output_id,
+                "projection_id": self.projection_id,
+                "source_id": self.source_id,
+                "source_payload_digest": self.source_payload_digest,
+                "consumer": self.consumer.value,
+                "processor_fingerprint": self.processor_fingerprint,
+                "projector_version": self.projector_version,
+                "items": [item.to_dict() for item in self.items],
+                "recorded_at": self.recorded_at,
             }
         )
 
+    def to_dict(self) -> dict[str, Any]:
+        return canonicalize({**self._record_without_digest(), "output_record_digest": self.output_record_digest})
+
     @classmethod
     def from_dict(cls, value: object) -> ConversationBehaviorProjectionBatch:
-        if not isinstance(value, Mapping):
-            raise ConversationSourceError("projection batch must be an object")
         expected = {
             "schema_version",
+            "output_id",
             "projection_id",
             "source_id",
-            "source_digest",
+            "source_payload_digest",
+            "consumer",
+            "processor_fingerprint",
             "projector_version",
             "items",
-            "created_at",
-            "content_digest",
+            "recorded_at",
+            "output_record_digest",
         }
-        if set(value) != expected or value.get("schema_version") != _BATCH_SCHEMA:
-            raise ConversationSourceError("projection batch schema is invalid")
+        if not isinstance(value, Mapping) or set(value) != expected:
+            raise ConversationSourceError("projection output schema is invalid")
+        if value.get("schema_version") != BEHAVIOR_PROJECTION_OUTPUT_SCHEMA_VERSION:
+            raise ConversationSourceError("projection output schema version is invalid")
         raw_items = value["items"]
         if not isinstance(raw_items, list):
-            raise ConversationSourceError("projection batch items must be a list")
+            raise ConversationSourceError("projection output items must be a list")
+        try:
+            consumer = ConversationSourceConsumer(value["consumer"])
+        except (TypeError, ValueError) as exc:
+            raise ConversationSourceError("projection output consumer is invalid") from exc
         return cls(
+            output_id=value["output_id"],
             projection_id=value["projection_id"],
             source_id=value["source_id"],
-            source_digest=value["source_digest"],
+            source_payload_digest=value["source_payload_digest"],
+            consumer=consumer,
+            processor_fingerprint=value["processor_fingerprint"],
             projector_version=value["projector_version"],
             items=tuple(
                 ConversationBehaviorProjectionItem.from_dict(item, source_id=value["source_id"])
                 for item in raw_items
             ),
-            created_at=conversation_datetime(value["created_at"], "created_at"),
-            content_digest=value["content_digest"],
+            recorded_at=conversation_datetime(value["recorded_at"], "recorded_at"),
+            output_record_digest=value["output_record_digest"],
         )
 
 
@@ -284,6 +347,19 @@ class ConversationBehaviorProjector:
     def __init__(self, *, clock: Callable[[], datetime] | None = None) -> None:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.projector_version = CONVERSATION_BEHAVIOR_PROJECTOR_VERSION
+        self.processor_fingerprint = canonical_digest(
+            {
+                "schema_version": "conversation_behavior_processor_fingerprint_v1",
+                "projector_version": self.projector_version,
+                "output_schema_version": BEHAVIOR_PROJECTION_OUTPUT_SCHEMA_VERSION,
+                "mappings": {
+                    "prompt": ConversationBehaviorProjectionKind.USER_CONVERSATION_INPUT.value,
+                    "tool_call": ConversationBehaviorProjectionKind.AGENT_TOOL_CALL.value,
+                    "tool_result": ConversationBehaviorProjectionKind.TOOL_EXECUTION_RESULT.value,
+                    "completion": "skip",
+                },
+            }
+        )
 
     def project(self, envelope: ConversationSourceEnvelope) -> ConversationBehaviorProjectionBatch | None:
         if not isinstance(envelope, ConversationSourceEnvelope):
@@ -296,18 +372,17 @@ class ConversationBehaviorProjector:
         if not items:
             return None
         return ConversationBehaviorProjectionBatch.create(
-            source_id=envelope.source_id,
-            source_digest=envelope.content_digest,
+            source=envelope,
+            processor_fingerprint=self.processor_fingerprint,
             projector_version=self.projector_version,
             items=items,
-            created_at=self.clock(),
+            recorded_at=self.clock(),
         )
 
     def _project_message(
-        self,
-        source_id: str,
-        message: ConversationMessage,
+        self, source_id: str, message: ConversationMessage
     ) -> ConversationBehaviorProjectionItem | None:
+        # TODO(conversation-source): 修改此映射时，同步提升 CONVERSATION_BEHAVIOR_PROJECTOR_VERSION。
         if message.role is ConversationMessageRole.COMPLETION:
             return None
         if message.role is ConversationMessageRole.PROMPT:
@@ -343,55 +418,133 @@ class ConversationBehaviorProjector:
 
 
 class ConversationBehaviorProjectionStore:
-    """独立于旧 Behavior Evidence/Claim 的不可变文件 Outbox。"""
+    """统一 Output 路径中的不可变 Behavior Projection Outbox。"""
 
-    def __init__(self, conversation_root: str | Path, *, max_file_bytes: int) -> None:
+    consumer = ConversationSourceConsumer.BEHAVIOR_PROJECTION
+
+    def __init__(
+        self,
+        conversation_root: str | Path,
+        *,
+        max_files_per_source: int,
+        max_file_bytes: int,
+        max_items: int,
+    ) -> None:
         self.root = Path(conversation_root).expanduser().resolve(strict=False)
-        if isinstance(max_file_bytes, bool) or not isinstance(max_file_bytes, int) or max_file_bytes <= 0:
-            raise ValueError("max_file_bytes must be a positive integer")
+        for name, value in (
+            ("max_files_per_source", max_files_per_source),
+            ("max_file_bytes", max_file_bytes),
+            ("max_items", max_items),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        self.max_files_per_source = max_files_per_source
         self.max_file_bytes = max_file_bytes
-        self.projection_root = self.root / "projections" / "behavior"
+        self.max_items = max_items
 
-    def put(self, batch: ConversationBehaviorProjectionBatch) -> ConversationBehaviorProjectionBatch:
+    def expected_output_id(self, source: ConversationSourceEnvelope, processor_fingerprint: str) -> str:
+        return conversation_consumer_output_id(
+            source_id=source.source_id,
+            source_payload_digest=source.source_payload_digest,
+            consumer=self.consumer,
+            processor_fingerprint=processor_fingerprint,
+            output_schema_version=BEHAVIOR_PROJECTION_OUTPUT_SCHEMA_VERSION,
+        )
+
+    def put(
+        self,
+        source: ConversationSourceEnvelope,
+        batch: ConversationBehaviorProjectionBatch,
+    ) -> ConversationBehaviorProjectionBatch:
         if not isinstance(batch, ConversationBehaviorProjectionBatch):
             raise TypeError("batch must be ConversationBehaviorProjectionBatch")
-        encoded = self._encode(batch)
+        if batch.source_id != source.source_id or batch.source_payload_digest != source.source_payload_digest:
+            raise ConversationSourceError("projection output belongs to another source")
         try:
-            atomic_create_bytes(self._path(batch.projection_id), encoded, artifact_root=self.root)
+            atomic_create_bytes(
+                self._path(batch.source_id, batch.output_id), self._encode(batch), artifact_root=self.root
+            )
         except ImmutableArtifactConflictError as exc:
-            try:
-                current = self.read(batch.projection_id)
-            except Exception:
-                raise ConversationSourceError("projection identity collides with an unreadable artifact") from exc
-            if current is None or current.content_digest != batch.content_digest:
-                raise ConversationSourceError("projection_id conflicts with different projection content") from exc
+            current = self.read(source, batch.output_id)
+            if current is None or current.output_record_digest != batch.output_record_digest:
+                raise ConversationSourceError("projection output conflicts with different content") from exc
             return current
-        stored = self.read(batch.projection_id)
-        if stored is None or stored.content_digest != batch.content_digest:
-            raise ConversationSourceError("projection batch was not durably read back")
+        stored = self.read(source, batch.output_id)
+        if stored is None or stored.output_record_digest != batch.output_record_digest:
+            raise ConversationSourceError("projection output was not durably read back")
         return stored
 
-    def read(self, projection_id: str) -> ConversationBehaviorProjectionBatch | None:
-        path = self._path(projection_id)
+    def read(
+        self, source: ConversationSourceEnvelope, output_id: str
+    ) -> ConversationBehaviorProjectionBatch | None:
+        require_sha256(output_id, "output_id")
         try:
-            encoded = read_regular_bytes(path, artifact_root=self.root, max_bytes=self.max_file_bytes)
+            encoded = read_regular_bytes(
+                self._path(source.source_id, output_id), artifact_root=self.root, max_bytes=self.max_file_bytes
+            )
         except FileNotFoundError:
             return None
         try:
             batch = ConversationBehaviorProjectionBatch.from_dict(json.loads(encoded))
         except (UnicodeDecodeError, json.JSONDecodeError, ConversationSourceError) as exc:
-            raise ConversationSourceError("behavior projection is corrupt") from exc
+            raise ConversationSourceError("behavior projection output is corrupt") from exc
         if encoded != self._encode(batch):
-            raise ConversationSourceError("behavior projection is not canonically encoded")
-        if batch.projection_id != projection_id:
-            raise ConversationSourceError("projection filename does not match projection_id")
+            raise ConversationSourceError("behavior projection output is not canonically encoded")
+        if batch.output_id != output_id:
+            raise ConversationSourceError("projection output path does not match output_id")
+        if batch.source_id != source.source_id or batch.source_payload_digest != source.source_payload_digest:
+            raise ConversationSourceError("projection output belongs to another source")
         return batch
 
-    def _path(self, projection_id: str) -> Path:
-        _sha256(projection_id, "projection_id")
-        return self.projection_root / f"{projection_id}.json"
+    def list(self, source: ConversationSourceEnvelope) -> tuple[ConversationBehaviorProjectionBatch, ...]:
+        try:
+            entries = list_real_directory(
+                self._directory(source.source_id),
+                artifact_root=self.root,
+                max_entries=self.max_files_per_source,
+            )
+        except DurablePathIntegrityError as exc:
+            raise ConversationSourceError("projection output directory is invalid or exceeds its bound") from exc
+        outputs: list[ConversationBehaviorProjectionBatch] = []
+        for entry in entries:
+            temporary = atomic_temporary_destination(entry.name)
+            if entry.is_file() and temporary is not None and _OUTPUT_FILE.fullmatch(temporary) is not None:
+                continue
+            match = _OUTPUT_FILE.fullmatch(entry.name)
+            if not entry.is_file() or match is None:
+                raise ConversationSourceError("projection output directory contains an unsupported entry")
+            output = self.read(source, match.group("output_id"))
+            if output is None:
+                raise ConversationSourceError("projection output disappeared during enumeration")
+            outputs.append(output)
+        return tuple(sorted(outputs, key=lambda item: item.output_id))
+
+    def ref(self, output: object) -> ConsumerOutputRef:
+        if not isinstance(output, ConversationBehaviorProjectionBatch):
+            raise ConversationSourceError("projection store received another output type")
+        return ConsumerOutputRef(
+            output_kind=BEHAVIOR_PROJECTION_OUTPUT_KIND,
+            output_id=output.output_id,
+            output_record_digest=output.output_record_digest,
+            processor_fingerprint=output.processor_fingerprint,
+        )
+
+    def restore(self, output: object) -> ConversationBehaviorProjectionBatch:
+        if not isinstance(output, ConversationBehaviorProjectionBatch):
+            raise ConversationSourceError("projection store received another output type")
+        return output
+
+    def _directory(self, source_id: str) -> Path:
+        require_sha256(source_id, "source_id")
+        return self.root / "source" / "outputs" / source_id / self.consumer.value
+
+    def _path(self, source_id: str, output_id: str) -> Path:
+        require_sha256(output_id, "output_id")
+        return self._directory(source_id) / f"{output_id}.json"
 
     def _encode(self, batch: ConversationBehaviorProjectionBatch) -> bytes:
+        if len(batch.items) > self.max_items:
+            raise ConversationSourceError("behavior projection exceeds its configured item bound")
         encoded = (canonical_json(batch.to_dict()) + "\n").encode("utf-8")
         if len(encoded) > self.max_file_bytes:
             raise ConversationSourceError("behavior projection exceeds its configured file bound")
@@ -408,37 +561,38 @@ class ConversationBehaviorProjectionConsumer:
     ) -> None:
         self.projector = projector
         self.store = store
+        self.output_store = store
+        self.processor_fingerprint = projector.processor_fingerprint
 
-    async def consume(self, envelope: ConversationSourceEnvelope) -> ConversationConsumerExecution:
-        projected = self.projector.project(envelope)
-        if projected is None:
-            return ConversationConsumerExecution(
-                ConversationConsumerReceiptState.SKIPPED,
-                None,
-                None,
-                None,
-            )
-        stored = self.store.put(projected)
-        return ConversationConsumerExecution(
-            ConversationConsumerReceiptState.SUCCEEDED,
-            stored,
-            stored.projection_id,
-            stored.content_digest,
-        )
-
-    async def completed(
+    async def execute(
         self,
         envelope: ConversationSourceEnvelope,
-        receipt: ConversationConsumerReceipt,
-    ) -> ConversationBehaviorProjectionBatch | None:
-        if receipt.state is ConversationConsumerReceiptState.SKIPPED:
-            return None
-        assert receipt.result_id is not None
-        stored = self.store.read(receipt.result_id)
-        if stored is None:
-            raise ConversationSourceError("successful projection receipt points to missing outbox data")
-        if stored.source_id != envelope.source_id or stored.source_digest != envelope.content_digest:
-            raise ConversationSourceError("successful projection receipt points to another source")
-        if stored.content_digest != receipt.result_digest:
-            raise ConversationSourceError("projection receipt digest differs from outbox data")
-        return stored
+        lease: ConversationConsumerExecutionLease,
+    ) -> ConversationConsumerRunResult:
+        projected = self.projector.project(envelope)
+        if projected is None:
+            return ConversationConsumerRunResult(
+                disposition=ConversationConsumerRunDisposition.SKIPPED,
+                output_ref=None,
+                skip_reason="NO_ELIGIBLE_MESSAGES",
+                runtime_result=None,
+            )
+        stored = await lease.run_fenced(lambda: self.store.put(envelope, projected))
+        return ConversationConsumerRunResult(
+            disposition=ConversationConsumerRunDisposition.OUTPUT_WRITTEN,
+            output_ref=self.store.ref(stored),
+            skip_reason=None,
+            runtime_result=stored,
+        )
+
+
+__all__ = [
+    "BEHAVIOR_PROJECTION_OUTPUT_SCHEMA_VERSION",
+    "CONVERSATION_BEHAVIOR_PROJECTOR_VERSION",
+    "ConversationBehaviorProjectionBatch",
+    "ConversationBehaviorProjectionConsumer",
+    "ConversationBehaviorProjectionItem",
+    "ConversationBehaviorProjectionKind",
+    "ConversationBehaviorProjectionStore",
+    "ConversationBehaviorProjector",
+]

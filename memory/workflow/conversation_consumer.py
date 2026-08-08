@@ -1,30 +1,36 @@
-"""把现有 ConversationMemoryEnqueuer 包装为 SourceEnvelope Consumer。"""
+"""把现有 ConversationMemoryEnqueuer 包装为耐久 Source Consumer。"""
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
+from dataclasses import asdict
+from datetime import datetime, timezone
 
 from conversation.source import (
-    ConversationConsumerExecution,
-    ConversationConsumerReceipt,
-    ConversationConsumerReceiptState,
+    ConversationConsumerRunDisposition,
+    ConversationConsumerRunResult,
     ConversationSourceConsumer,
     ConversationSourceEnvelope,
-    ConversationSourceError,
-    conversation_source_request_digest,
 )
+from conversation.source.fence import ConversationConsumerExecutionLease
 from foundation.integrity import canonical_digest
 from memory.conversation import (
     ConversationAddress,
-    ConversationAppendResult,
-    ConversationAppendStatus,
-    ConversationIngressError,
     ConversationIngressRequest,
-    ConversationIngressState,
     ConversationMessageJournal,
     ConversationSemanticBoundaryScorer,
 )
+from memory.workflow.conversation_output import (
+    MEMORY_CONVERSATION_OUTPUT_SCHEMA_VERSION,
+    MemoryConversationOutput,
+    MemoryConversationOutputStore,
+)
 from memory.workflow.ingest import ConversationMemoryEnqueuer, ConversationMemoryIngestResult
+
+# TODO(conversation-source): Reducer、Chunker、Retention 或边界评分语义变化时，必须同步提升本版本
+# 以及 fingerprint 中对应的组件版本；这些版本当前由人工维护。
+MEMORY_CONVERSATION_PROCESSOR_SCHEMA_VERSION = "memory_conversation_processor_v1"
 
 
 class MemoryConversationConsumer:
@@ -37,14 +43,43 @@ class MemoryConversationConsumer:
         enqueuer: ConversationMemoryEnqueuer,
         journal: ConversationMessageJournal,
         boundary_scorer: ConversationSemanticBoundaryScorer,
+        output_store: MemoryConversationOutputStore,
+        *,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         if enqueuer.conversations is not journal:
             raise ValueError("Memory Conversation Consumer must share the enqueuer journal")
+        if not isinstance(output_store, MemoryConversationOutputStore):
+            raise TypeError("output_store must be MemoryConversationOutputStore")
         self.enqueuer = enqueuer
         self.journal = journal
         self.boundary_scorer = boundary_scorer
+        self.output_store = output_store
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        # 显式版本与确定性配置共同形成契约；不依赖 callable repr 或进程地址。
+        # TODO(conversation-source): 下列组件版本必须与各算法入口处的版本提示成对更新。
+        self.processor_fingerprint = canonical_digest(
+            {
+                "schema_version": MEMORY_CONVERSATION_PROCESSOR_SCHEMA_VERSION,
+                "output_schema_version": MEMORY_CONVERSATION_OUTPUT_SCHEMA_VERSION,
+                "tool_result_reducer_version": "conversation_tool_result_reducer_v1",
+                "text_chunker_version": "conversation_message_chunker_v1",
+                "retention_planner_version": "conversation_retention_planner_v1",
+                "segmentation_config": asdict(enqueuer.retention_planner.config),
+                "message_chunker_max_tokens": enqueuer.message_chunker.max_message_tokens,
+                "semantic_boundary": {
+                    "version": "conversation_semantic_boundary_scorer_v1",
+                    "embedding_fingerprint": boundary_scorer.embedding_fingerprint,
+                    "max_unit_chars": boundary_scorer.max_unit_chars,
+                },
+            }
+        )
 
-    async def consume(self, envelope: ConversationSourceEnvelope) -> ConversationConsumerExecution:
+    async def execute(
+        self,
+        envelope: ConversationSourceEnvelope,
+        lease: ConversationConsumerExecutionLease,
+    ) -> ConversationConsumerRunResult:
         if not isinstance(envelope, ConversationSourceEnvelope):
             raise TypeError("envelope must be ConversationSourceEnvelope")
         address = ConversationAddress(envelope.conversation_id, envelope.started_on)
@@ -72,94 +107,20 @@ class MemoryConversationConsumer:
             flush=False,
             boundary_hints=boundary_hints,
         )
-        result = ConversationMemoryIngestResult(appended, jobs, retention)
-        return ConversationConsumerExecution(
-            state=ConversationConsumerReceiptState.SUCCEEDED,
-            result=result,
-            result_id=self.result_id(envelope.source_id),
-            result_digest=self.result_digest(envelope),
+        ingest = ConversationMemoryIngestResult(appended, jobs, retention)
+        output = MemoryConversationOutput.create(
+            source=envelope,
+            processor_fingerprint=self.processor_fingerprint,
+            ingest_result=ingest,
+            recorded_at=self.clock(),
+        )
+        stored = await lease.run_fenced(lambda: self.output_store.put(envelope, output))
+        return ConversationConsumerRunResult(
+            disposition=ConversationConsumerRunDisposition.OUTPUT_WRITTEN,
+            output_ref=self.output_store.ref(stored),
+            skip_reason=None,
+            runtime_result=ingest,
         )
 
-    async def completed(
-        self,
-        envelope: ConversationSourceEnvelope,
-        receipt: ConversationConsumerReceipt,
-    ) -> ConversationMemoryIngestResult:
-        """不重跑终态 Consumer，只从当前 Journal 恢复兼容的只读返回值。"""
 
-        if receipt.state is not ConversationConsumerReceiptState.SUCCEEDED:
-            raise ConversationSourceError("Memory Consumer cannot have a SKIPPED receipt")
-        if receipt.result_id != self.result_id(envelope.source_id):
-            raise ConversationSourceError("Memory Consumer receipt has the wrong result identity")
-        if receipt.result_digest != self.result_digest(envelope):
-            raise ConversationSourceError("Memory Consumer receipt has the wrong terminal digest")
-        address = ConversationAddress(envelope.conversation_id, envelope.started_on)
-        live, next_sequence, retention = await asyncio.gather(
-            asyncio.to_thread(self.journal.read_live, address),
-            asyncio.to_thread(self._replay_next_sequence, envelope, address),
-            asyncio.to_thread(
-                self.enqueuer.preview_retention,
-                address,
-                # 终态 Source 不得把旧 after_turn 边界重新施加到后来追加的 live 状态。
-                after_turn=False,
-            ),
-        )
-        append = ConversationAppendResult(
-            status=ConversationAppendStatus.UNCHANGED,
-            appended_count=0,
-            live=live,
-            next_sequence=next_sequence,
-        )
-        return ConversationMemoryIngestResult(append=append, jobs=(), retention=retention)
-
-    @staticmethod
-    def result_id(source_id: str) -> str:
-        return canonical_digest(
-            {
-                "schema_version": "memory_conversation_consumer_result_v1",
-                "source_id": source_id,
-            }
-        )
-
-    @staticmethod
-    def result_digest(envelope: ConversationSourceEnvelope) -> str:
-        """摘要绑定确定性的 Source 终态，不绑定 CREATED/UNCHANGED 观察结果。"""
-
-        return canonical_digest(
-            {
-                "schema_version": "memory_conversation_consumer_terminal_v1",
-                "source_id": envelope.source_id,
-                "source_digest": envelope.content_digest,
-            }
-        )
-
-    def _replay_next_sequence(
-        self,
-        envelope: ConversationSourceEnvelope,
-        address: ConversationAddress,
-    ) -> int:
-        implicit_digest = conversation_source_request_digest(
-            conversation_id=envelope.conversation_id,
-            started_on=envelope.started_on,
-            protocol=envelope.protocol,
-            batch=envelope.batch,
-            after_turn=envelope.after_turn,
-            omit_tool_call_ids=envelope.omit_tool_call_ids,
-        )
-        if envelope.delivery_id == implicit_digest and envelope.request_digest == implicit_digest:
-            return self.journal.next_sequence(address)
-        try:
-            ingress = self.journal.ingress_receipts.read(address, envelope.delivery_id)
-        except ConversationIngressError as exc:
-            raise ConversationSourceError("Memory Consumer ingress receipt cannot be read") from exc
-        if (
-            ingress is None
-            or ingress.state is not ConversationIngressState.COMMITTED
-            or ingress.request_digest != envelope.request_digest
-            or ingress.next_sequence is None
-        ):
-            raise ConversationSourceError("Memory Consumer terminal receipt has no matching committed ingress")
-        return ingress.next_sequence
-
-
-__all__ = ["MemoryConversationConsumer"]
+__all__ = ["MEMORY_CONVERSATION_PROCESSOR_SCHEMA_VERSION", "MemoryConversationConsumer"]

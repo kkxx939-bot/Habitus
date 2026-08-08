@@ -18,6 +18,77 @@ from memory.conversation import (
 
 
 @dataclass(frozen=True)
+class ConversationSourceConfig:
+    """Source、Output、Outcome、Recovery 与执行租约的独立容量边界。"""
+
+    max_envelope_bytes: int = 16 * 1024 * 1024
+    max_source_files: int = 100_000
+    max_output_files_per_consumer: int = 4
+    max_outcome_bytes: int = 64 * 1024
+    max_memory_output_bytes: int = 32 * 1024 * 1024
+    recovery_batch_size: int = 100
+    execution_lock_ttl_seconds: int = 300
+    execution_lock_heartbeat_seconds: float = 60.0
+    execution_lock_wait_seconds: float = 30.0
+    shutdown_timeout_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        for integer_name, integer_value, integer_maximum in (
+            ("max_envelope_bytes", self.max_envelope_bytes, 256 * 1024 * 1024),
+            ("max_source_files", self.max_source_files, 10_000_000),
+            ("max_output_files_per_consumer", self.max_output_files_per_consumer, 1_000),
+            ("max_outcome_bytes", self.max_outcome_bytes, 16 * 1024 * 1024),
+            ("max_memory_output_bytes", self.max_memory_output_bytes, 512 * 1024 * 1024),
+            ("recovery_batch_size", self.recovery_batch_size, 100_000),
+            ("execution_lock_ttl_seconds", self.execution_lock_ttl_seconds, 86_400),
+        ):
+            _bounded_int(
+                integer_value,
+                f"conversation source {integer_name}",
+                minimum=1,
+                maximum=integer_maximum,
+            )
+        for number_name, number_value, number_maximum in (
+            ("execution_lock_heartbeat_seconds", self.execution_lock_heartbeat_seconds, 28_800.0),
+            ("execution_lock_wait_seconds", self.execution_lock_wait_seconds, 86_400.0),
+            ("shutdown_timeout_seconds", self.shutdown_timeout_seconds, 3_600.0),
+        ):
+            if (
+                isinstance(number_value, bool)
+                or not isinstance(number_value, int | float)
+                or not 0 < float(number_value) <= number_maximum
+            ):
+                raise ValueError(
+                    f"conversation source {number_name} must be greater than zero "
+                    f"and at most {number_maximum:g}"
+                )
+        if self.execution_lock_heartbeat_seconds > self.execution_lock_ttl_seconds / 3:
+            raise ValueError("conversation source heartbeat interval must be at most one third of lock TTL")
+
+
+@dataclass(frozen=True)
+class ConversationBehaviorProjectionConfig:
+    """Behavior Projection Output 的独立容量边界。"""
+
+    max_projection_output_bytes: int = 16 * 1024 * 1024
+    max_projection_items: int = 100_000
+
+    def __post_init__(self) -> None:
+        _bounded_int(
+            self.max_projection_output_bytes,
+            "conversation behavior projection max_projection_output_bytes",
+            minimum=1,
+            maximum=256 * 1024 * 1024,
+        )
+        _bounded_int(
+            self.max_projection_items,
+            "conversation behavior projection max_projection_items",
+            minimum=1,
+            maximum=10_000_000,
+        )
+
+
+@dataclass(frozen=True)
 class ConversationLifecycleConfig:
     """Conversation 原文释放和两阶段 Summary 压缩的统一生命周期配置。"""
 
@@ -94,6 +165,10 @@ class ConversationConfig:
     """Conversation journal、切段、摘要和生命周期配置分组。"""
 
     journal: ConversationJournalConfig = field(default_factory=ConversationJournalConfig)
+    source: ConversationSourceConfig = field(default_factory=ConversationSourceConfig)
+    behavior_projection: ConversationBehaviorProjectionConfig = field(
+        default_factory=ConversationBehaviorProjectionConfig
+    )
     segmentation: ConversationSegmentationConfig = field(default_factory=ConversationSegmentationConfig)
     summary: ConversationSummaryConfig = field(default_factory=ConversationSummaryConfig)
     summary_vector_store: VectorStoreConfig = field(
@@ -107,6 +182,12 @@ class ConversationConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.journal, ConversationJournalConfig):
             raise TypeError("conversation.journal must be ConversationJournalConfig")
+        if not isinstance(self.source, ConversationSourceConfig):
+            raise TypeError("conversation.source must be ConversationSourceConfig")
+        if not isinstance(self.behavior_projection, ConversationBehaviorProjectionConfig):
+            raise TypeError(
+                "conversation.behavior_projection must be ConversationBehaviorProjectionConfig"
+            )
         if not isinstance(self.segmentation, ConversationSegmentationConfig):
             raise TypeError("conversation.segmentation must be ConversationSegmentationConfig")
         if not isinstance(self.summary, ConversationSummaryConfig):
@@ -141,6 +222,16 @@ class ConversationConfig:
                 ConversationJournalConfig,
                 data.get("journal", {}),
                 "config.conversation.journal",
+            ),
+            source=construct_config(
+                ConversationSourceConfig,
+                data.get("source", {}),
+                "config.conversation.source",
+            ),
+            behavior_projection=construct_config(
+                ConversationBehaviorProjectionConfig,
+                data.get("behavior_projection", {}),
+                "config.conversation.behavior_projection",
             ),
             segmentation=construct_config(
                 ConversationSegmentationConfig,
@@ -238,10 +329,12 @@ def _summary_vector_store_config(value: object) -> VectorStoreConfig:
 
 
 __all__ = [
+    "ConversationBehaviorProjectionConfig",
     "ConversationConfig",
     "ConversationLifecycleConfig",
     "ConversationRangeSummaryCompactionConfig",
     "ConversationSegmentSummaryCompactionConfig",
+    "ConversationSourceConfig",
     "ConversationSummaryCompactionConfig",
     "ConversationSummaryVectorIndexConfig",
 ]

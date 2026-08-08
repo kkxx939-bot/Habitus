@@ -8,8 +8,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from behavior.config import BehaviorConfig
-from Config.behavior import behavior_config_from_mapping
 from Config.conversation import ConversationConfig
 from Config.credentials import CredentialRegistry
 from Config.http import HTTPAPIConfig
@@ -33,7 +31,6 @@ class M2BOSConfig:
     credentials: CredentialRegistry = field(repr=False)
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
-    behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     http: HTTPAPIConfig = field(default_factory=HTTPAPIConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
@@ -47,7 +44,6 @@ class M2BOSConfig:
             ("observability", self.observability, ObservabilityConfig),
             ("conversation", self.conversation, ConversationConfig),
             ("memory", self.memory, MemoryConfig),
-            ("behavior", self.behavior, BehaviorConfig),
             ("workflow", self.workflow, WorkflowConfig),
         )
         for name, value, expected_type in expected:
@@ -57,7 +53,7 @@ class M2BOSConfig:
 
     @property
     def storage_root(self) -> Path:
-        """返回 Conversation、Memory、Behavior 和 Workflow 的共同根目录。"""
+        """返回 Conversation、Memory 和 Workflow 的共同根目录。"""
 
         return Path(self.storage.root)
 
@@ -72,12 +68,6 @@ class M2BOSConfig:
         """返回 Conversation messages/summaries 的共同根目录。"""
 
         return self.storage_root / "conversation"
-
-    @property
-    def behavior_root(self) -> Path:
-        """返回 Evidence & Claim Layer 的独立耐久根目录。"""
-
-        return self.storage_root / "behavior"
 
     @property
     def workflow_root(self) -> Path:
@@ -106,7 +96,6 @@ class M2BOSConfig:
             observability=ObservabilityConfig.from_mapping(data.get("observability", {})),
             conversation=ConversationConfig.from_mapping(data.get("conversation", {})),
             memory=MemoryConfig.from_mapping(data.get("memory", {})),
-            behavior=behavior_config_from_mapping(data.get("behavior", {})),
             workflow=WorkflowConfig.from_mapping(data.get("workflow", {})),
         )
 
@@ -145,15 +134,7 @@ class M2BOSConfig:
         models = self.models
         workflow = self.workflow
         conversation = self.conversation
-        behavior = self.behavior
         segmentation = conversation.segmentation
-
-        if (
-            behavior.normalization.max_model_input_tokens
-            + behavior.normalization.max_model_output_tokens
-            > models.chat.context_window_tokens
-        ):
-            raise ConfigError("behavior Claim model budgets exceed models.chat.context_window_tokens")
 
         if memory.document.max_encoded_bytes > memory.snapshot.max_item_bytes:
             raise ConfigError("memory.document.max_encoded_bytes cannot exceed memory.snapshot.max_item_bytes")

@@ -25,7 +25,6 @@ def test_example_yaml_declares_a_complete_cross_domain_configuration(tmp_path) -
     assert config.memory_root == config.storage_root / "memory"
     assert config.conversation_root == config.storage_root / "conversation"
     assert config.workflow_root == config.storage_root / "workflow"
-    assert config.behavior_root == config.storage_root / "behavior"
     assert config.memory.recall_lifecycle.enabled
     assert config.memory.recall_lifecycle.ranking_alpha == 0.2
     assert config.memory.recall_lifecycle.profile_half_life_days == 180.0
@@ -115,6 +114,14 @@ def test_yaml_loader_rejects_duplicate_keys_unknown_fields_and_typo_with_suggest
     payload = valid_mapping(tmp_path)
     payload["memroy"] = payload.pop("memory")
     with pytest.raises(ConfigError, match="did you mean 'config.memory'"):
+        M2BOSConfig.from_mapping(payload)
+
+
+def test_retired_behavior_yaml_group_is_rejected_as_unknown(tmp_path) -> None:
+    payload = valid_mapping(tmp_path)
+    payload["behavior"] = {}
+
+    with pytest.raises(ConfigError, match=r"unknown config field 'config\.behavior'"):
         M2BOSConfig.from_mapping(payload)
 
 

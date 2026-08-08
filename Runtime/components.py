@@ -6,24 +6,14 @@ from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import cast
 
-from behavior.claim import (
-    ClaimNormalizationPlanner,
-    ClaimNormalizationService,
-    ClaimNormalizerRegistry,
-)
-from behavior.claim.ledger import BehaviorClaimLedger
-from behavior.claim.route_executor import ProcessingLock
-from behavior.evidence import (
-    BehaviorEvidenceIngressService,
-    BehaviorEvidenceLedger,
-    BehaviorSemanticAdapterRegistry,
-)
-from behavior.persistence import BehaviorAuditService, BehaviorDatabase
 from conversation import (
     ConversationBehaviorProjectionConsumer,
     ConversationBehaviorProjectionStore,
+    ConversationConsumerDelivery,
+    ConversationConsumerExecutionFence,
+    ConversationConsumerOutcomeStore,
+    ConversationConsumerStateInspector,
     ConversationSourceCoordinator,
-    ConversationSourceReceiptStore,
     ConversationSourceRecovery,
     ConversationSourceStore,
 )
@@ -52,6 +42,7 @@ from memory.workflow import (
     ConversationMemoryEnqueuer,
     MemoryChangeReceiptStore,
     MemoryConversationConsumer,
+    MemoryConversationOutputStore,
     MemoryJobRunner,
     MemoryJobStore,
 )
@@ -154,30 +145,17 @@ class RuntimeModels:
 
 
 @dataclass(frozen=True)
-class RuntimeBehavior:
-    """Behavior 第一层完成组装后的被动组件容器。"""
-
-    database: BehaviorDatabase
-    audit: BehaviorAuditService
-    evidence_adapters: BehaviorSemanticAdapterRegistry
-    evidence_ledger: BehaviorEvidenceLedger
-    evidence_ingress: BehaviorEvidenceIngressService
-    claim_ledger: BehaviorClaimLedger
-    claim_normalizers: ClaimNormalizerRegistry
-    claim_planner: ClaimNormalizationPlanner
-    claim_normalization: ClaimNormalizationService
-    structured_chat: StructuredChatClient
-    processing_lock: ProcessingLock
-
-
-@dataclass(frozen=True)
 class RuntimeConversation:
     """Conversation Source、原文、独立投影、切段与摘要服务。"""
 
     sources: ConversationSourceStore
-    source_receipts: ConversationSourceReceiptStore
+    source_outcomes: ConversationConsumerOutcomeStore
+    memory_outputs: MemoryConversationOutputStore
     behavior_projections: ConversationBehaviorProjectionStore
     behavior_projection_consumer: ConversationBehaviorProjectionConsumer
+    source_inspector: ConversationConsumerStateInspector
+    source_fence: ConversationConsumerExecutionFence
+    source_delivery: ConversationConsumerDelivery
     source_coordinator: ConversationSourceCoordinator
     source_recovery: ConversationSourceRecovery
     journal: ConversationMessageJournal
@@ -192,12 +170,20 @@ class RuntimeConversation:
     def __post_init__(self) -> None:
         if not isinstance(self.sources, ConversationSourceStore):
             raise TypeError("sources must be ConversationSourceStore")
-        if not isinstance(self.source_receipts, ConversationSourceReceiptStore):
-            raise TypeError("source_receipts must be ConversationSourceReceiptStore")
+        if not isinstance(self.source_outcomes, ConversationConsumerOutcomeStore):
+            raise TypeError("source_outcomes must be ConversationConsumerOutcomeStore")
+        if not isinstance(self.memory_outputs, MemoryConversationOutputStore):
+            raise TypeError("memory_outputs must be MemoryConversationOutputStore")
         if not isinstance(self.behavior_projections, ConversationBehaviorProjectionStore):
             raise TypeError("behavior_projections must be ConversationBehaviorProjectionStore")
         if not isinstance(self.behavior_projection_consumer, ConversationBehaviorProjectionConsumer):
             raise TypeError("behavior_projection_consumer must be ConversationBehaviorProjectionConsumer")
+        if not isinstance(self.source_inspector, ConversationConsumerStateInspector):
+            raise TypeError("source_inspector must be ConversationConsumerStateInspector")
+        if not isinstance(self.source_fence, ConversationConsumerExecutionFence):
+            raise TypeError("source_fence must be ConversationConsumerExecutionFence")
+        if not isinstance(self.source_delivery, ConversationConsumerDelivery):
+            raise TypeError("source_delivery must be ConversationConsumerDelivery")
         if not isinstance(self.source_coordinator, ConversationSourceCoordinator):
             raise TypeError("source_coordinator must be ConversationSourceCoordinator")
         if not isinstance(self.source_recovery, ConversationSourceRecovery):
@@ -240,7 +226,8 @@ class RuntimeConversation:
             raise ValueError("Conversation must share one Summary source expander")
         if not (
             self.sources.root
-            == self.source_receipts.root
+            == self.source_outcomes.root
+            == self.memory_outputs.root
             == self.behavior_projections.root
             == self.journal.layout.root
         ):
@@ -249,12 +236,10 @@ class RuntimeConversation:
             raise ValueError("Behavior Projection Consumer must use the shared outbox")
         if self.source_coordinator.sources is not self.sources:
             raise ValueError("Source Coordinator must use the shared Source Store")
-        if self.source_coordinator.receipts is not self.source_receipts:
-            raise ValueError("Source Coordinator must use the shared Source Receipt Store")
-        if self.source_coordinator.behavior_projection_consumer is not self.behavior_projection_consumer:
-            raise ValueError("Source Coordinator must use the shared Behavior Projection Consumer")
-        if self.source_recovery.coordinator is not self.source_coordinator:
-            raise ValueError("Source Recovery must use the shared Source Coordinator")
+        if self.source_coordinator.delivery is not self.source_delivery:
+            raise ValueError("Source Coordinator must use the shared delivery service")
+        if self.source_recovery.delivery is not self.source_delivery:
+            raise ValueError("Source Recovery must use the shared delivery service")
 
 
 @dataclass(frozen=True)
@@ -356,7 +341,6 @@ class RuntimeComponents:
     models: RuntimeModels
     conversation: RuntimeConversation
     memory: RuntimeMemory
-    behavior: RuntimeBehavior
     workflow: RuntimeWorkflow
 
     def __post_init__(self) -> None:
@@ -368,13 +352,11 @@ class RuntimeComponents:
             raise TypeError("conversation must be RuntimeConversation")
         if not isinstance(self.memory, RuntimeMemory):
             raise TypeError("memory must be RuntimeMemory")
-        if not isinstance(self.behavior, RuntimeBehavior):
-            raise TypeError("behavior must be RuntimeBehavior")
         if not isinstance(self.workflow, RuntimeWorkflow):
             raise TypeError("workflow must be RuntimeWorkflow")
         if self.workflow.enqueuer.conversations is not self.conversation.journal:
             raise ValueError("workflow enqueuer must use the shared conversation journal")
-        if self.conversation.source_coordinator.memory_consumer is not self.workflow.conversation_consumer:
+        if self.conversation.source_delivery.memory_consumer is not self.workflow.conversation_consumer:
             raise ValueError("Source Coordinator must use the shared Memory Conversation Consumer")
         if self.workflow.runner.executor.editor is not self.memory.editor:
             raise ValueError("workflow runner must use the shared memory editor")
@@ -392,14 +374,11 @@ class RuntimeComponents:
             raise ValueError("memory search and editor must share one semantic search engine")
         if self.workflow.jobs.path_lock is not self.infrastructure.path_lock:
             raise ValueError("workflow and Runtime must share one path lock")
-        if self.behavior.structured_chat is not self.models.structured_chat:
-            raise ValueError("Behavior must use RuntimeModels.shared structured chat client")
 
 
 __all__ = [
     "RuntimeComponents",
     "RuntimeConversation",
-    "RuntimeBehavior",
     "RuntimeInfrastructure",
     "RuntimeMemory",
     "RuntimeModels",

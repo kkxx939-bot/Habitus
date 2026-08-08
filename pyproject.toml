@@ -68,7 +68,6 @@ include = [
     "pre*",
     "conversation*",
     "memory*",
-    "behavior*",
     "infrastructure*",
     "foundation*",
     "integrations*",
@@ -98,7 +97,7 @@ warn_redundant_casts = true
 [tool.pyright]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
-include = ["Config", "Runtime", "ModelClient", "pre", "conversation", "memory", "behavior", "infrastructure", "foundation", "integrations", "benchmark"]
+include = ["Config", "Runtime", "ModelClient", "pre", "conversation", "memory", "infrastructure", "foundation", "integrations", "benchmark"]
 reportUnsupportedDunderAll = false
 
 [tool.pytest.ini_options]
@@ -110,7 +109,7 @@ addopts = "-ra --strict-config --strict-markers"
 
 [tool.coverage.run]
 branch = true
-source = ["Config", "Runtime", "ModelClient", "pre", "conversation", "memory", "behavior", "infrastructure", "foundation", "integrations"]
+source = ["Config", "Runtime", "ModelClient", "pre", "conversation", "memory", "infrastructure", "foundation", "integrations"]
 omit = ["tests/*"]
 
 [tool.coverage.report]

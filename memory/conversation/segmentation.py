@@ -95,6 +95,8 @@ class ConversationBoundaryHints:
         return None
 
 
+# TODO(conversation-source): 修改此评分算法语义时，必须同步提升
+# memory/workflow/conversation_consumer.py 中 semantic_boundary.version。
 class ConversationSemanticBoundaryScorer:
     """用相邻安全单元的向量距离辅助选点，失败时返回结构化降级结果。"""
 
@@ -176,6 +178,8 @@ class ConversationSemanticBoundaryScorer:
         return value[:head] + value[-tail:]
 
 
+# TODO(conversation-source): 修改此拆分算法语义时，必须同步提升
+# memory/workflow/conversation_consumer.py 中 text_chunker_version。
 class ConversationMessageChunker:
     """在写入 live 前把单条超长文本拆成可重组的物理消息。"""
 

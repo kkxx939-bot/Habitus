@@ -43,16 +43,12 @@ def test_lifecycle_cycle_separates_success_and_failure_within_selected_batch() -
 
 def test_runtime_initialization_requires_absolute_root_and_stable_recovery_ids(tmp_path: Path) -> None:
     memory_root = (tmp_path / "memory").resolve()
-    behavior_root = (tmp_path / "behavior").resolve()
-    result = RuntimeInitialization(memory_root, behavior_root, ("a" * 32,))
+    result = RuntimeInitialization(memory_root, ("a" * 32,))
     assert result.memory_root == memory_root
-    assert result.behavior_root == behavior_root
     with pytest.raises(ValueError, match="absolute"):
-        RuntimeInitialization(Path("relative"), behavior_root, ())
-    with pytest.raises(ValueError, match="absolute"):
-        RuntimeInitialization(memory_root, Path("relative"), ())
+        RuntimeInitialization(Path("relative"), ())
     with pytest.raises(TypeError, match="non-empty"):
-        RuntimeInitialization(memory_root, behavior_root, ("",))
+        RuntimeInitialization(memory_root, ("",))
 
 
 def test_failed_job_retry_result_requires_same_source_and_reset_retry_state(tmp_path: Path) -> None:

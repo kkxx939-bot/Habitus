@@ -1,258 +1,267 @@
-"""Conversation Source 重构不得改变既有 Ingress 幂等和返回值契约。"""
-
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timezone
-from pathlib import Path
+import json
 
 import pytest
 
-from conversation import (
-    ConversationBehaviorProjectionConsumer,
-    ConversationBehaviorProjectionStore,
-    ConversationBehaviorProjector,
-    ConversationSourceCoordinator,
-    ConversationSourceEnvelope,
-    ConversationSourceReceiptStore,
-    ConversationSourceStore,
-    conversation_source_request_digest,
+from conversation.projection import (
+    ConversationBehaviorProjectionBatch,
+    ConversationBehaviorProjectionItem,
+    ConversationBehaviorProjectionKind,
 )
-from foundation.integrity import canonical_digest
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.conversation import (
-    ConversationAddress,
-    ConversationIngressRequest,
-    ConversationMessageJournal,
-    ConversationRetentionPlanner,
-    ConversationSegmentationConfig,
-    ConversationSemanticBoundaryScorer,
-    ConversationWriteConflictError,
+from conversation.source import (
+    ConversationConsumerCorruptionError,
+    ConversationConsumerDeliveryState,
+    ConversationConsumerOutcomeState,
+    ConversationSourceConsumer,
+    ConversationSourceRecovery,
 )
-from memory.workflow import (
-    ConversationMemoryEnqueuer,
-    ConversationMemoryIngestResult,
-    MemoryConversationConsumer,
-    MemoryJobStore,
-)
-from ModelClient import EmbeddingVector
-from pre.conversation import ConversationBatch
-from tests.helpers import closed_turn
-
-STARTED_ON = date(2026, 8, 8)
-CREATED_AT = datetime(2026, 8, 8, 1, 0, tzinfo=timezone.utc)
+from memory.workflow import MemoryConversationOutput
+from pre.conversation import ConversationMessageRole
+from tests.unit.conversation.source_v2_helpers import NOW, FakeMemoryConsumer, delivery, ingest_result, source
 
 
-def _legacy_runtime_request_digest(
-    *,
-    address: ConversationAddress,
-    protocol: str,
-    batch: ConversationBatch,
-    after_turn: bool,
-    omit_tool_call_ids: frozenset[str],
-) -> str:
-    """逐字段保留 Source 重构前 Runtime 使用的公开投递摘要公式。"""
-
-    return canonical_digest(
-        {
-            "conversation_id": address.conversation_id,
-            "started_on": address.started_on,
-            "protocol": protocol,
-            "batch": batch.to_dict(),
-            "after_turn": after_turn,
-            "omit_tool_call_ids": omit_tool_call_ids,
-        }
-    )
+async def _write_orphan_memory_output(service, consumer, source_value):
+    async with service.fence.acquire(source_value, ConversationSourceConsumer.MEMORY) as lease:
+        return await consumer.execute(source_value, lease)
 
 
-def _envelope(
-    batch: ConversationBatch,
-    *,
-    delivery_id: str,
-    after_turn: bool,
-) -> ConversationSourceEnvelope:
-    request_digest = conversation_source_request_digest(
-        conversation_id=batch.conversation_id,
-        started_on=STARTED_ON,
-        protocol="normalized",
-        batch=batch,
-        after_turn=after_turn,
-        omit_tool_call_ids=frozenset(),
-    )
-    return ConversationSourceEnvelope.create(
-        conversation_id=batch.conversation_id,
-        started_on=STARTED_ON,
-        protocol="normalized",
-        batch=batch,
-        after_turn=after_turn,
-        omit_tool_call_ids=frozenset(),
-        delivery_id=delivery_id,
-        request_digest=request_digest,
-        created_at=CREATED_AT,
-    )
-
-
-class _DeterministicEmbedder:
-    async def embed_documents(self, texts: tuple[str, ...]) -> tuple[EmbeddingVector, ...]:
-        return tuple(EmbeddingVector((1.0, 0.0)) for _ in texts)
-
-
-def test_source_request_digest_preserves_existing_runtime_formula() -> None:
-    address = ConversationAddress("source-digest-compatibility", STARTED_ON)
-    batch = ConversationBatch(address.conversation_id, closed_turn())
-    omitted = frozenset({"call-2", "call-1"})
-    legacy = _legacy_runtime_request_digest(
-        address=address,
-        protocol="openai_chat_completions",
-        batch=batch,
-        after_turn=True,
-        omit_tool_call_ids=omitted,
-    )
-
-    current = conversation_source_request_digest(
-        conversation_id=address.conversation_id,
-        started_on=address.started_on,
-        protocol="openai_chat_completions",
-        batch=batch,
-        after_turn=True,
-        omit_tool_call_ids=omitted,
-    )
-
-    assert current == legacy, (
-        "显式 delivery_id 的 request_digest 是既有耐久 Ingress 身份，"
-        "Source 重构不得通过新增摘要字段改变它"
-    )
-
-
-def test_existing_durable_ingress_receipt_replays_after_source_upgrade(tmp_path: Path) -> None:
-    path_lock = PathLock(ProcessLocalLockStore())
-    journal = ConversationMessageJournal(tmp_path / "conversation", path_lock)
-    enqueuer = ConversationMemoryEnqueuer(
-        journal,
-        MemoryJobStore(tmp_path / "workflow", path_lock, memory_root=tmp_path / "memory"),
-    )
-    address = ConversationAddress("durable-ingress-upgrade", STARTED_ON)
-    batch = ConversationBatch(address.conversation_id, closed_turn())
-    delivery_id = "a" * 64
-    legacy_digest = _legacy_runtime_request_digest(
-        address=address,
-        protocol="openai_chat_completions",
-        batch=batch,
-        after_turn=False,
-        omit_tool_call_ids=frozenset(),
-    )
-    first = enqueuer.append(
-        address,
-        batch,
-        ingress=ConversationIngressRequest(delivery_id, legacy_digest),
-    )
-    upgraded_digest = conversation_source_request_digest(
-        conversation_id=address.conversation_id,
-        started_on=address.started_on,
-        protocol="openai_chat_completions",
-        batch=batch,
-        after_turn=False,
-        omit_tool_call_ids=frozenset(),
-    )
-
-    try:
-        replayed = enqueuer.append(
-            address,
-            batch,
-            ingress=ConversationIngressRequest(delivery_id, upgraded_digest),
-        )
-    except ConversationWriteConflictError:
-        pytest.fail(
-            "同一显式 delivery_id 和同一 Conversation 请求在 Source 升级后必须继续命中旧耐久 Receipt，"
-            "不能变成永久写入冲突"
-        )
-
-    assert replayed.status.value == "unchanged"
-    assert replayed.next_sequence == first.next_sequence == 2
-
-
-def test_terminal_source_replay_keeps_ingress_next_sequence_without_reapplying_after_turn(
-    tmp_path: Path,
-) -> None:
-    path_lock = PathLock(ProcessLocalLockStore())
-    conversation_root = tmp_path / "conversation"
-    journal = ConversationMessageJournal(conversation_root, path_lock)
-    jobs = MemoryJobStore(tmp_path / "workflow", path_lock, memory_root=tmp_path / "memory")
-    planner = ConversationRetentionPlanner(
-        ConversationSegmentationConfig(
-            commit_token_threshold=1,
-            keep_recent_turn_count=1,
-            retained_message_token_budget=1_000,
-            max_live_messages=100,
-            max_live_bytes=1_000_000,
-            max_segment_messages=100,
-            max_segment_bytes=1_000_000,
-            max_segment_tokens=1_000,
-        )
-    )
-    enqueuer = ConversationMemoryEnqueuer(journal, jobs, planner)
-    memory = MemoryConversationConsumer(
-        enqueuer,
-        journal,
-        ConversationSemanticBoundaryScorer(
-            _DeterministicEmbedder(),
-            embedding_fingerprint="deterministic-v1",
-            max_unit_chars=256,
-        ),
-    )
-    source_store = ConversationSourceStore(
-        conversation_root,
-        max_entries=100,
-        max_file_bytes=2_000_000,
-    )
-    receipts = ConversationSourceReceiptStore(conversation_root, max_file_bytes=100_000)
-    projection_store = ConversationBehaviorProjectionStore(
-        conversation_root,
-        max_file_bytes=2_000_000,
-    )
-    coordinator = ConversationSourceCoordinator(
-        source_store,
-        receipts,
-        memory,
-        ConversationBehaviorProjectionConsumer(
-            ConversationBehaviorProjector(),
-            projection_store,
-        ),
-    )
-    address = ConversationAddress("source-replay-compatibility", STARTED_ON)
-    source_a = _envelope(
-        ConversationBatch(address.conversation_id, closed_turn()),
-        delivery_id="a" * 64,
-        after_turn=True,
-    )
-    source_b = _envelope(
-        ConversationBatch(address.conversation_id, closed_turn(start_sequence=2, prompt="第二轮")),
-        delivery_id="b" * 64,
-        after_turn=False,
-    )
-
+def test_recovery_adopts_memory_output_without_rerunning_consumer(tmp_path) -> None:
     async def scenario() -> None:
-        first = await coordinator.dispatch(source_a)
-        assert isinstance(first.memory_result, ConversationMemoryIngestResult)
-        assert first.memory_result.append.next_sequence == 2
-        assert first.memory_result.jobs == ()
-        second = await coordinator.dispatch(source_b)
-        assert isinstance(second.memory_result, ConversationMemoryIngestResult)
-        assert second.memory_result.append.next_sequence == 4
-        live_before = journal.read_live(address)
-        history_before = journal.list_history(address)
+        service, memory, _behavior = delivery(tmp_path)
+        source_value = service.sources.put(source())
+        await _write_orphan_memory_output(service, memory, source_value)
+        assert memory.calls == 1
+        assert service.inspect(
+            source_value,
+            ConversationSourceConsumer.MEMORY,
+        ).state is ConversationConsumerDeliveryState.OUTPUT_READY
 
-        replayed = await coordinator.dispatch(source_a)
+        recovery = ConversationSourceRecovery(service.sources, service, batch_size=10)
+        results = await recovery.recover_pending()
+        memory_results = [item for item in results if item.consumer is ConversationSourceConsumer.MEMORY]
+        assert len(memory_results) == 1 and memory_results[0].error is None
+        assert memory.calls == 1
+        assert service.inspect(
+            source_value,
+            ConversationSourceConsumer.MEMORY,
+        ).state is ConversationConsumerDeliveryState.COMMITTED
 
-        assert isinstance(replayed.memory_result, ConversationMemoryIngestResult)
-        assert journal.read_live(address) == live_before
-        assert journal.list_history(address) == history_before == ()
-        assert replayed.memory_result.jobs == ()
-        assert replayed.memory_result.append.next_sequence == 2, (
-            "终态 Source A 的重放必须返回 A 的耐久 Ingress Receipt 所绑定的 next_sequence；"
-            "不能用追加 Source B 后的当前 cursor 伪造 A 的原始 ConversationAppendResult"
+    asyncio.run(scenario())
+
+
+def test_unique_old_processor_output_is_adopted_after_upgrade(tmp_path) -> None:
+    async def scenario() -> None:
+        service, old_memory, behavior = delivery(tmp_path)
+        source_value = service.sources.put(source())
+        await _write_orphan_memory_output(service, old_memory, source_value)
+
+        new_memory = FakeMemoryConsumer(
+            old_memory.output_store,
+            fingerprint_seed="upgraded-memory-processor",
         )
-        assert journal.next_sequence(address) == 4
+        upgraded = type(service)(
+            service.sources,
+            service.outcomes,
+            service.inspector,
+            service.fence,
+            new_memory,
+            behavior,
+            clock=lambda: NOW,
+        )
+        ensured = await upgraded.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
+        assert new_memory.calls == 0
+        assert ensured.outcome.processor_fingerprint == old_memory.processor_fingerprint
+
+    asyncio.run(scenario())
+
+
+def test_recovery_adopts_projection_output_without_duplicate_projection(tmp_path) -> None:
+    async def scenario() -> None:
+        service, _memory, behavior = delivery(tmp_path)
+        source_value = service.sources.put(source())
+        async with service.fence.acquire(
+            source_value,
+            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+        ) as lease:
+            await behavior.execute(source_value, lease)
+        assert behavior.calls == 1
+        assert service.inspect(
+            source_value,
+            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+        ).state is ConversationConsumerDeliveryState.OUTPUT_READY
+        recovery = ConversationSourceRecovery(service.sources, service, batch_size=10)
+        await recovery.recover_pending()
+        assert behavior.calls == 1
+        assert service.inspect(
+            source_value,
+            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+        ).state is ConversationConsumerDeliveryState.COMMITTED
+
+    asyncio.run(scenario())
+
+
+def test_multiple_orphan_outputs_are_ambiguous_and_fail_closed(tmp_path) -> None:
+    async def scenario() -> None:
+        service, memory, _behavior = delivery(tmp_path)
+        source_value = service.sources.put(source())
+        first = MemoryConversationOutput.create(
+            source=source_value,
+            processor_fingerprint=memory.processor_fingerprint,
+            ingest_result=ingest_result(source_value),
+            recorded_at=NOW,
+        )
+        second_consumer = FakeMemoryConsumer(memory.output_store, fingerprint_seed="second-processor")
+        second = MemoryConversationOutput.create(
+            source=source_value,
+            processor_fingerprint=second_consumer.processor_fingerprint,
+            ingest_result=ingest_result(source_value),
+            recorded_at=NOW,
+        )
+        memory.output_store.put(source_value, first)
+        memory.output_store.put(source_value, second)
+        assert service.inspect(
+            source_value,
+            ConversationSourceConsumer.MEMORY,
+        ).state is ConversationConsumerDeliveryState.CORRUPTED
+        with pytest.raises(ConversationConsumerCorruptionError, match="multiple orphan"):
+            await service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
+
+    asyncio.run(scenario())
+
+
+def test_committed_outcome_with_missing_output_is_broken_and_not_recreated(tmp_path) -> None:
+    async def scenario() -> None:
+        service, memory, _behavior = delivery(tmp_path)
+        source_value = service.sources.put(source())
+        ensured = await service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
+        assert ensured.outcome.output_ref is not None
+        path = (
+            tmp_path
+            / "source"
+            / "outputs"
+            / source_value.source_id
+            / "memory"
+            / f"{ensured.outcome.output_ref.output_id}.json"
+        )
+        path.unlink()
+        state = service.inspect(source_value, ConversationSourceConsumer.MEMORY)
+        assert state.state is ConversationConsumerDeliveryState.BROKEN_OUTCOME
+        calls = memory.calls
+        recovery = ConversationSourceRecovery(service.sources, service, batch_size=10)
+        result = next(
+            item
+            for item in await recovery.recover_pending()
+            if item.consumer is ConversationSourceConsumer.MEMORY
+        )
+        assert result.error is not None
+        assert memory.calls == calls
+
+    asyncio.run(scenario())
+
+
+def test_output_record_digest_mismatch_is_corrupted_and_not_overwritten(tmp_path) -> None:
+    async def scenario() -> None:
+        service, _memory, _behavior = delivery(tmp_path)
+        source_value = service.sources.put(source())
+        ensured = await service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
+        assert ensured.outcome.output_ref is not None
+        path = (
+            tmp_path
+            / "source"
+            / "outputs"
+            / source_value.source_id
+            / "memory"
+            / f"{ensured.outcome.output_ref.output_id}.json"
+        )
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["output_record_digest"] = "0" * 64
+        path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        assert service.inspect(
+            source_value,
+            ConversationSourceConsumer.MEMORY,
+        ).state is ConversationConsumerDeliveryState.CORRUPTED
+        before = path.read_bytes()
+        with pytest.raises(ConversationConsumerCorruptionError):
+            await service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
+        assert path.read_bytes() == before
+
+    asyncio.run(scenario())
+
+
+def test_outcome_record_digest_mismatch_is_corrupted(tmp_path) -> None:
+    async def scenario() -> None:
+        service, _memory, _behavior = delivery(tmp_path)
+        source_value = service.sources.put(source())
+        await service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
+        path = tmp_path / "source" / "outcomes" / source_value.source_id / "memory.json"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["outcome_record_digest"] = "0" * 64
+        path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        assert service.inspect(
+            source_value,
+            ConversationSourceConsumer.MEMORY,
+        ).state is ConversationConsumerDeliveryState.CORRUPTED
+
+    asyncio.run(scenario())
+
+
+def test_skipped_outcome_with_projection_output_is_corrupted(tmp_path) -> None:
+    async def scenario() -> None:
+        service, _memory, behavior = delivery(tmp_path)
+        source_value = service.sources.put(source(role=ConversationMessageRole.COMPLETION))
+        skipped = await service.ensure_outcome(
+            source_value,
+            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+        )
+        assert skipped.outcome.state is ConversationConsumerOutcomeState.SKIPPED
+        item = ConversationBehaviorProjectionItem.create(
+            source_id=source_value.source_id,
+            message=source_value.batch.messages[0],
+            projection_kind=ConversationBehaviorProjectionKind.USER_CONVERSATION_INPUT,
+            payload={"content": "forced-invalid-output"},
+        )
+        output = ConversationBehaviorProjectionBatch.create(
+            source=source_value,
+            processor_fingerprint=behavior.processor_fingerprint,
+            projector_version=behavior.inner.projector.projector_version,
+            items=(item,),
+            recorded_at=NOW,
+        )
+        behavior.output_store.put(source_value, output)
+        assert service.inspect(
+            source_value,
+            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+        ).state is ConversationConsumerDeliveryState.CORRUPTED
+
+    asyncio.run(scenario())
+
+
+def test_recovery_only_runs_missing_behavior_when_memory_is_committed(tmp_path) -> None:
+    async def scenario() -> None:
+        service, memory, behavior = delivery(tmp_path)
+        source_value = service.sources.put(source())
+        await service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
+        memory_calls = memory.calls
+        recovery = ConversationSourceRecovery(service.sources, service, batch_size=10)
+        results = await recovery.recover_pending()
+        assert [item.consumer for item in results] == [ConversationSourceConsumer.BEHAVIOR_PROJECTION]
+        assert behavior.calls == 1
+        assert memory.calls == memory_calls
+
+    asyncio.run(scenario())
+
+
+def test_first_memory_output_replay_is_not_changed_by_later_source(tmp_path) -> None:
+    async def scenario() -> None:
+        service, _memory, _behavior = delivery(tmp_path)
+        first = service.sources.put(source(sequence=0, delivery_seed="first"))
+        initial = await service.ensure_outcome(first, ConversationSourceConsumer.MEMORY)
+        assert initial.outcome.state is ConversationConsumerOutcomeState.COMMITTED
+        first_result = service.restore_terminal(first, ConversationSourceConsumer.MEMORY)
+        second = service.sources.put(source(sequence=1, delivery_seed="second"))
+        await service.ensure_outcome(second, ConversationSourceConsumer.MEMORY)
+        assert service.restore_terminal(first, ConversationSourceConsumer.MEMORY) == first_result
 
     asyncio.run(scenario())

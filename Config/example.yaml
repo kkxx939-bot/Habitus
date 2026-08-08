@@ -124,6 +124,22 @@ conversation:
     lock_wait_timeout_seconds: 5.0
     lock_retry_delay_seconds: 0.01
 
+  source:
+    max_envelope_bytes: 16777216
+    max_source_files: 100000
+    max_output_files_per_consumer: 4
+    max_outcome_bytes: 65536
+    max_memory_output_bytes: 33554432
+    recovery_batch_size: 100
+    execution_lock_ttl_seconds: 300
+    execution_lock_heartbeat_seconds: 60.0
+    execution_lock_wait_seconds: 30.0
+    shutdown_timeout_seconds: 30.0
+
+  behavior_projection:
+    max_projection_output_bytes: 16777216
+    max_projection_items: 100000
+
   segmentation:
     commit_token_threshold: 12000
     keep_recent_turn_count: 3
@@ -391,48 +407,6 @@ memory:
     max_abstract_chars: 800
     lock_ttl_seconds: 120
     stale_retries: 1
-
-behavior:
-  evidence:
-    max_evidence_refs: 32
-    max_correlation_refs: 32
-    max_causal_refs: 32
-    max_parent_source_refs: 32
-    max_object_refs: 64
-    max_entity_refs: 64
-    max_payload_chars: 32768
-    max_text_chars: 16384
-    max_batch_size: 256
-    max_event_time_uncertainty_ms: 300000
-    max_future_event_skew_seconds: 300.0
-    max_live_event_age_seconds: 31536000.0
-    max_record_duration_seconds: 86400.0
-    max_reference_chars: 2048
-    max_identifier_chars: 256
-    max_payload_items: 128
-    max_payload_depth: 12
-    max_query_limit: 500
-  normalization:
-    max_claims_per_record: 16
-    max_enhancement_normalizers_per_record: 8
-    max_model_input_chars: 49152
-    max_model_input_tokens: 16384
-    max_model_output_tokens: 4096
-    max_semantic_payload_chars: 32768
-    max_human_summary_chars: 2048
-    max_alternative_group_size: 16
-    normalize_user_utterances: false
-    max_query_limit: 500
-  store:
-    sqlite_timeout_seconds: 5.0
-    max_json_bytes: 16777216
-    max_evidence_records: 1000000
-    max_ingress_receipts: 1000000
-    max_claims: 1000000
-    max_normalization_attempts: 1000000
-    max_normalization_receipts: 1000000
-    max_database_bytes: 8589934592
-    max_query_limit: 500
 
 workflow:
   jobs:

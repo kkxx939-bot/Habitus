@@ -1,16 +1,9 @@
 """已经确认的新架构边界不得被兼容层或反向依赖破坏。"""
 
 import ast
-import inspect
 from pathlib import Path
-from typing import get_type_hints
 
 import pytest
-
-from behavior.claim.normalizer import StructuredModelClaimNormalizer
-from behavior.claim.proposal import ClaimProposalParser
-from behavior.config import ClaimNormalizationConfig
-from ModelClient import StructuredChatClient
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_ROOTS = (
@@ -20,7 +13,6 @@ PRODUCTION_ROOTS = (
     "pre",
     "conversation",
     "memory",
-    "behavior",
     "infrastructure",
     "foundation",
 )
@@ -69,7 +61,7 @@ def test_retired_memory_contracts_and_uri_schemes_do_not_reappear() -> None:
 
 @pytest.mark.parametrize(
     "package",
-    ("ModelClient", "pre", "memory", "behavior", "infrastructure", "foundation"),
+    ("ModelClient", "pre", "memory", "infrastructure", "foundation"),
 )
 def test_domain_packages_never_import_top_level_runtime(package: str) -> None:
     violations = [
@@ -134,25 +126,60 @@ def test_memory_schema_contains_exactly_the_six_confirmed_l2_kinds() -> None:
     }
 
 
-def test_behavior_and_memory_keep_strict_peer_dependency_boundaries() -> None:
-    behavior_violations = [
+def test_retired_behavior_first_layer_is_absent_from_production() -> None:
+    assert not (REPOSITORY_ROOT / "behavior").exists()
+    assert not (REPOSITORY_ROOT / "Config" / "behavior.py").exists()
+    assert not (REPOSITORY_ROOT / "infrastructure" / "store" / "processing_lock.py").exists()
+    violations = [
         str(path.relative_to(REPOSITORY_ROOT))
-        for path in (REPOSITORY_ROOT / "behavior").rglob("*.py")
-        if imported_roots(path) & {"memory", "integrations", "Runtime", "Config"}
-    ]
-    memory_violations = [
-        str(path.relative_to(REPOSITORY_ROOT))
-        for path in (REPOSITORY_ROOT / "memory").rglob("*.py")
+        for path in production_files()
         if "behavior" in imported_roots(path)
     ]
-    integration_violations = [
-        str(path.relative_to(REPOSITORY_ROOT))
-        for path in (REPOSITORY_ROOT / "integrations").rglob("*.py")
-        if "behavior" in imported_roots(path)
+    assert violations == []
+
+    assembly_tree = ast.parse(
+        (REPOSITORY_ROOT / "Runtime" / "assembly.py").read_text(encoding="utf-8")
+    )
+    build_runtime = next(
+        node
+        for node in assembly_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "build_runtime"
+    )
+    build_runtime_parameters = {
+        argument.arg
+        for argument in (*build_runtime.args.posonlyargs, *build_runtime.args.args, *build_runtime.args.kwonlyargs)
+    }
+    assert "behavior_adapters" not in build_runtime_parameters
+
+    runtime_tree = ast.parse(
+        (REPOSITORY_ROOT / "Runtime" / "runtime.py").read_text(encoding="utf-8")
+    )
+    runtime_class = next(
+        node
+        for node in runtime_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "Runtime"
+    )
+    runtime_methods = {
+        node.name
+        for node in runtime_class.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert runtime_methods.isdisjoint(
+        {
+            "ingest_behavior_semantic",
+            "normalize_behavior_evidence",
+            "retry_behavior_enhancement",
+        }
+    )
+
+    retired_storage_markers = {"behavior.sqlite3", "evidence_claims.sqlite3"}
+    storage_violations = [
+        f"{path.relative_to(REPOSITORY_ROOT)}: {marker}"
+        for path in production_files()
+        for marker in retired_storage_markers
+        if marker in path.read_text(encoding="utf-8")
     ]
-    assert behavior_violations == []
-    assert memory_violations == []
-    assert integration_violations == []
+    assert storage_violations == []
 
 
 def test_conversation_source_and_projection_do_not_depend_on_memory_or_behavior() -> None:
@@ -186,28 +213,7 @@ def test_memory_conversation_consumer_wraps_the_single_existing_enqueuer_chain()
     assert "ConversationMessageChunker(" not in consumer_source
 
 
-def test_behavior_has_no_identity_partition_model() -> None:
-    disallowed_partition_fields = {
-        "owner_ref", "owner_binding", "owner_identity", "owner_identity_digest",
-        "user_id", "tenant_id", "account_id",
-    }
-    violations = []
-    for path in (REPOSITORY_ROOT / "behavior").rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-                names = {node.target.id}
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                names = {argument.arg for argument in (*node.args.posonlyargs, *node.args.args,
-                                                        *node.args.kwonlyargs)}
-            else:
-                continue
-            for name in names & disallowed_partition_fields:
-                violations.append(f"{path.relative_to(REPOSITORY_ROOT)}: {name}")
-    assert violations == []
-
-
-def test_behavior_does_not_extend_memory_kind() -> None:
+def test_retired_behavior_does_not_extend_memory_kind() -> None:
     source = (REPOSITORY_ROOT / "memory" / "model.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     memory_kind = next(
@@ -229,200 +235,3 @@ def test_behavior_does_not_extend_memory_kind() -> None:
     )
     assert "behaviors" not in memory_tree_source
     assert not (REPOSITORY_ROOT / "memory" / "schema" / "definitions" / "behavior.yaml").exists()
-
-
-def test_behavior_old_first_layer_contracts_are_removed() -> None:
-    retired = (
-        "ConfirmedOwnerBinding",
-        "OwnerScopedSemanticRecord",
-        "SemanticRecordInput",
-        "SemanticEvidenceBundle",
-        "SemanticEvidenceBundleAssembler",
-        "EvidenceBundleState",
-        "EvidenceManifest",
-        "EvidenceWatermark",
-        "allowed_lateness",
-        "LATE_REJECTED",
-        "ClaimAdmissionPolicy",
-        "ClaimAdmissionDecision",
-        "ClaimBatch",
-        "ClaimProcessingLane",
-        "ClaimProcessingReceipt",
-        "ClaimPipelineService",
-        "ClaimNormalizationRouter",
-        "EvidenceService",
-        "SQLiteBehaviorEvidenceClaimStore",
-        "EvidenceWindow",
-    )
-    violations = []
-    for path in (REPOSITORY_ROOT / "behavior").rglob("*.py"):
-        source = path.read_text(encoding="utf-8")
-        for symbol in retired:
-            if symbol in source:
-                violations.append(f"{path.relative_to(REPOSITORY_ROOT)}: {symbol}")
-    assert violations == []
-    assert not (REPOSITORY_ROOT / "behavior" / "owner.py").exists()
-    assert not (REPOSITORY_ROOT / "behavior" / "ingress").exists()
-    behavior_source = "\n".join(
-        path.read_text(encoding="utf-8") for path in (REPOSITORY_ROOT / "behavior").rglob("*.py")
-    )
-    assert "evidence_claims.sqlite3" not in behavior_source
-
-
-def test_behavior_has_no_raw_media_or_later_layer_implementation() -> None:
-    forbidden = (
-        "CAMERA_FRAME",
-        "AUDIO_CLIP",
-        "EventCandidate",
-        "CanonicalEvent",
-        "EventResolver",
-        "EventRelationGraph",
-        "EventTree",
-        "Episode",
-        "BehaviorHypothesis",
-        "Opportunity",
-        "BehaviorCase",
-        "BehaviorPattern",
-        "Prediction",
-        "ActionPolicy",
-        "PolicyGate",
-        "AgentActionDirective",
-        "MemoryBehaviorRouter",
-        "ConversationBehaviorProjector",
-        "ProjectionWorker",
-        "ProjectionJob",
-    )
-    violations = []
-    for path in (REPOSITORY_ROOT / "behavior").rglob("*.py"):
-        source = path.read_text(encoding="utf-8")
-        for symbol in forbidden:
-            if symbol in source:
-                violations.append(f"{path.relative_to(REPOSITORY_ROOT)}: {symbol}")
-    assert violations == []
-
-
-def test_behavior_production_has_no_placeholder_or_suppression_escape_hatches() -> None:
-    forbidden = ("NotImplementedError", "# noqa", "# type: ignore")
-    violations = []
-    for path in (REPOSITORY_ROOT / "behavior").rglob("*.py"):
-        source = path.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        if any(isinstance(node, ast.Pass) for node in ast.walk(tree)):
-            violations.append(f"{path.relative_to(REPOSITORY_ROOT)}: pass")
-        for marker in forbidden:
-            if marker in source:
-                violations.append(f"{path.relative_to(REPOSITORY_ROOT)}: {marker}")
-    assert violations == []
-
-
-def test_behavior_claim_proposal_keeps_system_fields_out_of_model_contract() -> None:
-    proposal_source = (REPOSITORY_ROOT / "behavior" / "claim" / "proposal.py").read_text(
-        encoding="utf-8"
-    )
-    proposal_tree = ast.parse(proposal_source)
-    system_fields = {
-        "subject_role",
-        "actor_role",
-        "time_start",
-        "time_end",
-        "source_epistemic_class",
-        "derivation_class",
-        "evidence_record_id",
-        "source_trust",
-        "compatibility_policy_digest",
-        "claim_id",
-        "created_at",
-    }
-    proposal = next(
-        node for node in proposal_tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "ClaimSemanticProposal"
-    )
-    names = {
-        node.target.id
-        for node in proposal.body
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
-    }
-    assert names.isdisjoint(system_fields)
-    parameter = inspect.signature(ClaimProposalParser).parameters["config"]
-    assert parameter.default is inspect.Parameter.empty
-    assert ClaimProposalParser(ClaimNormalizationConfig()).json_schema()["additionalProperties"] is False
-
-
-def test_behavior_sqlite_has_two_sequences_foreign_keys_and_atomic_receipt_members() -> None:
-    model_source = (REPOSITORY_ROOT / "behavior" / "claim" / "model.py").read_text(encoding="utf-8")
-    schema_source = (REPOSITORY_ROOT / "behavior" / "persistence" / "schema.py").read_text(
-        encoding="utf-8"
-    )
-    model_tree = ast.parse(model_source)
-    claim = next(node for node in model_tree.body if isinstance(node, ast.ClassDef) and node.name == "BehaviorClaim")
-    claim_fields = {
-        target.id
-        for node in claim.body
-        if isinstance(node, ast.AnnAssign) and isinstance((target := node.target), ast.Name)
-    }
-    assert "event_id" not in claim_fields
-    assert "claim_sequence INTEGER PRIMARY KEY AUTOINCREMENT" in schema_source
-    assert "evidence_sequence INTEGER PRIMARY KEY AUTOINCREMENT" in schema_source
-    assert "CREATE TABLE claim_receipt_members" in schema_source
-    assert "FOREIGN KEY (evidence_record_id) REFERENCES behavior_evidence_records" in schema_source
-    assert "behavior_first_layer_v1" in schema_source
-
-
-def test_behavior_model_repository_and_processing_lock_dependencies() -> None:
-    route_path = REPOSITORY_ROOT / "behavior" / "claim" / "route_executor.py"
-    repository_path = REPOSITORY_ROOT / "behavior" / "persistence" / "claim.py"
-    assembly_path = REPOSITORY_ROOT / "Runtime" / "assembly.py"
-    assert get_type_hints(StructuredModelClaimNormalizer.__init__)["model_client"] is StructuredChatClient
-    assert "ModelClient" not in imported_roots(repository_path)
-    route_tree = ast.parse(route_path.read_text(encoding="utf-8"))
-    assert any(
-        isinstance(node, ast.ClassDef) and node.name == "NormalizationRouteExecutor"
-        for node in route_tree.body
-    )
-    assembly_tree = ast.parse(assembly_path.read_text(encoding="utf-8"))
-    assert not any(
-        isinstance(node, ast.ClassDef) and "ProcessingLock" in node.name
-        for node in assembly_tree.body
-    )
-
-
-def test_behavior_content_safety_and_full_digest_code_paths_remain_distinct() -> None:
-    structured_source = (REPOSITORY_ROOT / "ModelClient" / "structured.py").read_text(encoding="utf-8")
-    behavior_sources = "\n".join(
-        path.read_text(encoding="utf-8") for path in (REPOSITORY_ROOT / "behavior").rglob("*.py")
-    )
-    assert 'finish_reason in {"content_filter", "safety"}' in structured_source
-    assert "raise ModelContentSafetyError" in structured_source
-    assert "content_digest=semantic_digest" not in behavior_sources
-    assert "content_digest = semantic_digest" not in behavior_sources
-
-
-def test_behavior_public_api_does_not_export_sqlite_or_private_policies() -> None:
-    namespace: dict[str, object] = {}
-    source = (REPOSITORY_ROOT / "behavior" / "__init__.py").read_text(encoding="utf-8")
-    exec(compile(source, "behavior/__init__.py", "exec"), namespace)
-    exported = set(namespace["__all__"])
-    assert not {
-        "BehaviorDatabase",
-        "BehaviorSQLiteConnection",
-        "SQLiteBehaviorEvidenceLedger",
-        "SQLiteBehaviorClaimLedger",
-        "ClaimCompatibilityPolicy",
-        "ClaimBinder",
-    } & exported
-
-
-def test_behavior_ledgers_expose_no_business_update_or_delete() -> None:
-    evidence_source = (REPOSITORY_ROOT / "behavior" / "evidence" / "ledger.py").read_text(encoding="utf-8")
-    claim_source = (REPOSITORY_ROOT / "behavior" / "claim" / "ledger.py").read_text(encoding="utf-8")
-    for source in (evidence_source, claim_source):
-        tree = ast.parse(source)
-        methods = {
-            node.name
-            for item in tree.body
-            if isinstance(item, ast.ClassDef)
-            for node in item.body
-            if isinstance(node, ast.FunctionDef)
-        }
-        assert "update" not in methods
-        assert "delete" not in methods

@@ -9,14 +9,15 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
-from behavior.claim.service import ClaimNormalizationResult
-from behavior.evidence.ingress import BehaviorEvidenceIngressResult
 from Config import M2BOSConfig
 from conversation import (
-    ConversationSourceDispatchResult,
+    ConversationSourceConsumer,
     ConversationSourceEnvelope,
+    ConversationSourcePendingDelivery,
+    ConversationSourceRecoveryResult,
     conversation_source_request_digest,
 )
+from conversation.source.delivery import ConversationConsumerEnsureResult
 from foundation.observability import (
     ObservabilitySnapshot,
     ObservationEvent,
@@ -66,6 +67,7 @@ class RuntimeState(str, Enum):
     CREATED = "created"
     READY = "ready"
     RUNNING = "running"
+    CLOSING = "closing"
     CLOSED = "closed"
 
 
@@ -77,19 +79,36 @@ class RuntimeInitializationError(RuntimeError):
     """Runtime 的共同存储根无法安全初始化。"""
 
 
+class RuntimeShutdownTimeoutError(TimeoutError):
+    """Runtime 有界关闭时仍有 Source Consumer 未完成。"""
+
+    def __init__(
+        self,
+        timeout_seconds: float,
+        pending_deliveries: tuple[ConversationSourcePendingDelivery, ...],
+    ) -> None:
+        self.timeout_seconds = timeout_seconds
+        self.pending_deliveries = pending_deliveries
+        pending = ", ".join(
+            f"{item.source_id}:{item.consumer.value}" for item in pending_deliveries
+        )
+        super().__init__(
+            "runtime close timed out after "
+            f"{timeout_seconds} seconds; pending Conversation Source consumers: "
+            f"{pending or 'unknown'}"
+        )
+
+
 @dataclass(frozen=True)
 class RuntimeInitialization:
     """一次成功初始化的可审计结果。"""
 
     memory_root: Path
-    behavior_root: Path
     recovered_transaction_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if not isinstance(self.memory_root, Path) or not self.memory_root.is_absolute():
             raise ValueError("memory_root must be an absolute Path")
-        if not isinstance(self.behavior_root, Path) or not self.behavior_root.is_absolute():
-            raise ValueError("behavior_root must be an absolute Path")
         if not isinstance(self.recovered_transaction_ids, tuple) or any(
             not isinstance(identifier, str) or not identifier for identifier in self.recovered_transaction_ids
         ):
@@ -195,8 +214,6 @@ class Runtime:
             raise TypeError("conversation_adapters must be ConversationAdapterRegistry or None")
         if components.memory.tree.root != config.memory_root:
             raise ValueError("runtime components are bound to another memory root")
-        if components.behavior.database.root != config.behavior_root:
-            raise ValueError("runtime components are bound to another behavior root")
         if components.conversation.journal.layout.root != config.conversation_root:
             raise ValueError("runtime components are bound to another conversation root")
         if components.workflow.jobs.root != config.workflow_root:
@@ -229,15 +246,14 @@ class Runtime:
         """初始化树；无任务时恢复孤儿事务，有任务时留给租约持有者恢复。"""
 
         started = time.monotonic()
-        if self._state is RuntimeState.CLOSED:
-            raise RuntimeStateError("closed runtime cannot be initialized")
+        if self._state in {RuntimeState.CLOSING, RuntimeState.CLOSED}:
+            raise RuntimeStateError(f"{self._state.value} runtime cannot be initialized")
         if self._initialization is not None:
             return self._initialization
         try:
             self._ensure_storage_root()
             self.components.infrastructure.initialize()
             memory_root = self.components.memory.tree.initialize()
-            self.components.behavior.database.initialize()
             self.components.workflow.jobs.initialize()
             self.components.memory.lifecycle.initialize()
             self.components.conversation.summary_use.initialize()
@@ -250,7 +266,6 @@ class Runtime:
             )
             initialization = RuntimeInitialization(
                 memory_root=memory_root,
-                behavior_root=self.components.behavior.database.root,
                 recovered_transaction_ids=recovered,
             )
             self._initialization = initialization
@@ -273,49 +288,12 @@ class Runtime:
         )
         return initialization
 
-    async def ingest_behavior_semantic(
-        self,
-        adapter_name: str,
-        payload: object,
-        delivery_id: str,
-    ) -> BehaviorEvidenceIngressResult:
-        """通过已注册强类型 Adapter 原子写入 Evidence；不自动规范化 Claim。"""
-
-        self._require_initialized("Behavior Evidence ingest")
-        return await self.components.behavior.evidence_ingress.ingest(
-            adapter_name,
-            payload,
-            delivery_id=delivery_id,
-        )
-
-    async def normalize_behavior_evidence(
-        self,
-        evidence_record_id: str,
-    ) -> ClaimNormalizationResult:
-        """独立处理一条已落盘 Evidence 的 Core 与可选 Enhancement。"""
-
-        self._require_initialized("Behavior Claim normalization")
-        return await self.components.behavior.claim_normalization.normalize(evidence_record_id)
-
-    async def retry_behavior_enhancement(
-        self,
-        evidence_record_id: str,
-        normalizer_name: str,
-    ) -> ClaimNormalizationResult:
-        """只重试指定 Evidence 的指定 Enhancement 路由。"""
-
-        self._require_initialized("Behavior Enhancement retry")
-        return await self.components.behavior.claim_normalization.retry_enhancement(
-            evidence_record_id,
-            normalizer_name,
-        )
-
     async def start(self) -> None:
         """完成初始化后依次启动 Job Worker 和生命周期维护 Worker。"""
 
         started = time.monotonic()
-        if self._state is RuntimeState.CLOSED:
-            raise RuntimeStateError("closed runtime cannot be started")
+        if self._state in {RuntimeState.CLOSING, RuntimeState.CLOSED}:
+            raise RuntimeStateError(f"{self._state.value} runtime cannot be started")
         try:
             self.initialize()
             if self._state is RuntimeState.RUNNING:
@@ -324,7 +302,12 @@ class Runtime:
             await self.components.conversation.summary_vector_index.ensure_ready()
             source_recoveries = await self.components.conversation.source_recovery.recover_pending()
             memory_recovery_error = next(
-                (result.memory_error for result in source_recoveries if result.memory_error is not None),
+                (
+                    result.error
+                    for result in source_recoveries
+                    if result.consumer is ConversationSourceConsumer.MEMORY
+                    and result.error is not None
+                ),
                 None,
             )
             if memory_recovery_error is not None:
@@ -361,15 +344,20 @@ class Runtime:
 
         if self._state is RuntimeState.CLOSED:
             return
+        if self._state is RuntimeState.CLOSING:
+            raise RuntimeStateError("closing runtime cannot be stopped")
         if self._state is RuntimeState.CREATED:
             return
         try:
             await self.components.workflow.lifecycle_worker.stop()
         finally:
             try:
-                await self.components.workflow.worker.stop()
+                await self.components.conversation.source_coordinator.wait_for_idle(
+                    self.config.conversation.source.shutdown_timeout_seconds
+                )
             finally:
-                self._state = RuntimeState.READY
+                await self.components.workflow.worker.stop()
+        self._state = RuntimeState.READY
 
     async def run_next(self) -> MemoryJobRunResult:
         """只在初始化完成后委托领域 Runner 处理最早的一项 Job。"""
@@ -411,24 +399,29 @@ class Runtime:
             omit_tool_call_ids=omit_tool_call_ids,
             delivery_id=delivery_id,
             request_digest=request_digest,
-            created_at=datetime.now(timezone.utc),
+            recorded_at=datetime.now(timezone.utc),
         )
         started = time.monotonic()
-        dispatched = await self.components.conversation.source_coordinator.dispatch(envelope)
-        if dispatched.behavior_projection_error is not None:
-            self._observe(
-                "conversation",
-                "behavior_projection",
-                ObservationStatus.DEGRADED,
-                started,
-                {
-                    "error_type": type(dispatched.behavior_projection_error).__name__,
-                    "source_id": dispatched.envelope.source_id,
-                },
-            )
-        if dispatched.memory_error is not None:
-            raise dispatched.memory_error
-        result = dispatched.memory_result
+        handle = self.components.conversation.source_coordinator.start(envelope)
+
+        def observe_behavior(task: asyncio.Task[ConversationConsumerEnsureResult]) -> None:
+            if task.cancelled():
+                return
+            error = task.exception()
+            if error is not None:
+                self._observe(
+                    "conversation",
+                    "behavior_projection",
+                    ObservationStatus.DEGRADED,
+                    started,
+                    {
+                        "error_type": type(error).__name__,
+                        "source_id": handle.envelope.source_id,
+                    },
+                )
+
+        handle.behavior_projection_task.add_done_callback(observe_behavior)
+        result = await handle.wait_memory()
         if not isinstance(result, ConversationMemoryIngestResult):
             raise RuntimeError("Memory Conversation Consumer completed without an ingest result")
         if result.jobs and self._state is RuntimeState.RUNNING:
@@ -485,17 +478,22 @@ class Runtime:
 
         return self._conversation_adapters.protocols()
 
-    async def recover_conversation_sources(self) -> tuple[ConversationSourceDispatchResult, ...]:
-        """只补跑缺少终态 Receipt 的 Source Consumer。"""
+    async def recover_conversation_sources(self) -> tuple[ConversationSourceRecoveryResult, ...]:
+        """只处理非终态 Source Consumer，并保留两条交付链的隔离。"""
 
         self._require_initialized("conversation source recovery")
         results = await self.components.conversation.source_recovery.recover_pending()
-        if self._state is RuntimeState.RUNNING and any(
-            isinstance(result.memory_result, ConversationMemoryIngestResult)
-            and bool(result.memory_result.jobs)
-            for result in results
-        ):
-            self.components.workflow.worker.wake()
+        if self._state is RuntimeState.RUNNING:
+            for recovered in results:
+                if recovered.consumer is not ConversationSourceConsumer.MEMORY or recovered.error is not None:
+                    continue
+                restored = self.components.conversation.source_delivery.restore_terminal(
+                    recovered.envelope,
+                    ConversationSourceConsumer.MEMORY,
+                )
+                if isinstance(restored, ConversationMemoryIngestResult) and restored.jobs:
+                    self.components.workflow.worker.wake()
+                    break
         return results
 
     async def flush_conversation(
@@ -878,31 +876,39 @@ class Runtime:
         return self.components.infrastructure.observability.prometheus_text()
 
     async def close(self) -> None:
-        """先停止生命周期维护，再停止 Job Worker 并关闭 Runtime。"""
+        """有界排空 Consumer；超时显式失败且不取消底层耐久交付。"""
 
         if self._state is RuntimeState.CLOSED:
             return
+        previous_state = self._state
+        self._state = RuntimeState.CLOSING
+        if previous_state is not RuntimeState.CREATED:
+            try:
+                await self.components.workflow.lifecycle_worker.stop()
+            finally:
+                await self.components.workflow.worker.stop()
+        timeout_seconds = self.config.conversation.source.shutdown_timeout_seconds
+        idle = await self.components.conversation.source_coordinator.wait_for_idle(timeout_seconds)
+        if not idle:
+            pending = self.components.conversation.source_coordinator.pending_deliveries
+            if pending or not await self.components.conversation.source_coordinator.wait_for_idle(0):
+                raise RuntimeShutdownTimeoutError(timeout_seconds, pending)
+        await self._close_resources()
+        self._state = RuntimeState.CLOSED
+
+    async def _close_resources(self) -> None:
         try:
-            if self._state is not RuntimeState.CREATED:
-                try:
-                    await self.components.workflow.lifecycle_worker.stop()
-                finally:
-                    await self.components.workflow.worker.stop()
+            await self.components.conversation.summary_vector_index.close()
         finally:
             try:
-                await self.components.conversation.summary_vector_index.close()
+                await self.components.memory.vector_index.close()
             finally:
                 try:
-                    await self.components.memory.vector_index.close()
+                    await self.components.models.aclose()
                 finally:
-                    try:
-                        await self.components.models.aclose()
-                    finally:
-                        self.components.behavior.database.close()
-                        manager = self.components.infrastructure.managed_observability
-                        if manager is not None:
-                            manager.close()
-                        self._state = RuntimeState.CLOSED
+                    manager = self.components.infrastructure.managed_observability
+                    if manager is not None:
+                        manager.close()
 
     async def __aenter__(self) -> Runtime:
         await self.start()
@@ -985,6 +991,7 @@ __all__ = [
     "Runtime",
     "RuntimeInitialization",
     "RuntimeInitializationError",
+    "RuntimeShutdownTimeoutError",
     "RuntimeState",
     "RuntimeStateError",
 ]

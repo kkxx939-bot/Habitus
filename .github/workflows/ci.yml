@@ -8,7 +8,7 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     env:
-      M2BOS_PYTHON_PATHS: Config Runtime ModelClient pre memory behavior infrastructure foundation integrations benchmark
+      M2BOS_PYTHON_PATHS: Config Runtime ModelClient pre conversation memory infrastructure foundation integrations benchmark
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -53,7 +53,7 @@ jobs:
       - name: Build wheel with service and plugin assets
         run: |
           python -m build --wheel
-          python -c 'import zipfile,glob; p=glob.glob("dist/*.whl")[0]; names=zipfile.ZipFile(p).namelist(); assert "behavior/evidence/record.py" in names; assert "behavior/claim/model.py" in names; assert any(n.endswith("share/m2bos/plugins/install-memory-plugin.mjs") for n in names); assert any(n.endswith("share/m2bos/plugins/harnesses.mjs") for n in names)'
+          python -c 'import zipfile,glob; p=glob.glob("dist/*.whl")[0]; names=zipfile.ZipFile(p).namelist(); assert not any(n.startswith("behavior/") for n in names); assert "Config/behavior.py" not in names; assert "infrastructure/store/processing_lock.py" not in names; assert "conversation/projection/behavior.py" in names; assert any(n.endswith("share/m2bos/plugins/install-memory-plugin.mjs") for n in names); assert any(n.endswith("share/m2bos/plugins/harnesses.mjs") for n in names)'
       - name: Install wheel and execute packaged plugin lifecycle
         run: |
           smoke_venv="$RUNNER_TEMP/m2bos-wheel-smoke"
