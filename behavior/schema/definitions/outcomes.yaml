@@ -1,0 +1,11 @@
+behavior_type: outcome
+description: >-
+  一个文件镜像对应 Event 的日期和名称，保存该 Event 或其 Action 后续产生的多个真实结果、反馈和纠正；
+  结果自己的 occurred_at 表示实际发生时间。
+path_template: behaviors/outcomes/{event_date:%Y}/{event_date:%m}/{event_date:%d}/{event_name}--{event_started_at:%Y%m%dT%H%M%S%f%z}.md
+operation_mode: append_only
+fields:
+  - {name: event_date, type: date, role: address, required: true, merge: immutable, description: 目标 Event 的地址日期。}
+  - {name: event_name, type: string, role: address, required: true, merge: immutable, description: 与目标 Event 相同的规范名称。}
+  - {name: event_uri, type: string, role: address, required: true, merge: immutable, description: 被反馈 Event 的完整 behavior URI，Outcome 从它镜像时间戳地址身份。}
+  - {name: outcomes, type: outcome_list, role: content, required: true, merge: append, description: 追加真实 Outcome，并按 occurred_at 与 outcome_id 形成规范顺序。}

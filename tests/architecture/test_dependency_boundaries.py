@@ -10,6 +10,7 @@ PRODUCTION_ROOTS = (
     "Config",
     "Runtime",
     "ModelClient",
+    "behavior",
     "pre",
     "conversation",
     "memory",
@@ -23,6 +24,10 @@ RETIRED_NAMES = (
     "SessionArchive",
     "ActionPolicy",
     "ContextURI",
+    "EvidenceLedger",
+    "ClaimLedger",
+    "RecordSpec",
+    "route_executor",
     "memoryos://",
     "viking://",
 )
@@ -61,7 +66,7 @@ def test_retired_memory_contracts_and_uri_schemes_do_not_reappear() -> None:
 
 @pytest.mark.parametrize(
     "package",
-    ("ModelClient", "pre", "memory", "infrastructure", "foundation"),
+    ("ModelClient", "behavior", "pre", "memory", "infrastructure", "foundation"),
 )
 def test_domain_packages_never_import_top_level_runtime(package: str) -> None:
     violations = [
@@ -126,16 +131,35 @@ def test_memory_schema_contains_exactly_the_six_confirmed_l2_kinds() -> None:
     }
 
 
-def test_retired_behavior_first_layer_is_absent_from_production() -> None:
-    assert not (REPOSITORY_ROOT / "behavior").exists()
+def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
+    behavior_root = REPOSITORY_ROOT / "behavior"
+    assert behavior_root.is_dir()
     assert not (REPOSITORY_ROOT / "Config" / "behavior.py").exists()
     assert not (REPOSITORY_ROOT / "infrastructure" / "store" / "processing_lock.py").exists()
-    violations = [
+
+    reverse_dependency_violations = [
         str(path.relative_to(REPOSITORY_ROOT))
         for path in production_files()
-        if "behavior" in imported_roots(path)
+        if path.relative_to(REPOSITORY_ROOT).parts[0] != "behavior"
+        and "behavior" in imported_roots(path)
     ]
-    assert violations == []
+    assert reverse_dependency_violations == []
+
+    behavior_dependency_violations = [
+        str(path.relative_to(REPOSITORY_ROOT))
+        for path in behavior_root.rglob("*.py")
+        if imported_roots(path)
+        & {
+            "Config",
+            "ModelClient",
+            "Runtime",
+            "conversation",
+            "integrations",
+            "memory",
+            "pre",
+        }
+    ]
+    assert behavior_dependency_violations == []
 
     assembly_tree = ast.parse(
         (REPOSITORY_ROOT / "Runtime" / "assembly.py").read_text(encoding="utf-8")

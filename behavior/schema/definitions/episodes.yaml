@@ -1,0 +1,26 @@
+behavior_type: episode
+description: >-
+  一个文件保存一个已经结束的真实长行为过程，通过有序 Event URI、阶段和转移表达复杂任务轨迹，
+  为后续预测树提供历史样本；不得保存行为概率、Routine、Pattern 或预测动作。
+path_template: episodes/{episode_date:%Y}/{episode_date:%m}/{episode_date:%d}/{episode_name}--{started_at:%Y%m%dT%H%M%S%f%z}.md
+operation_mode: add_only
+fields:
+  - {name: episode_date, type: date, role: address, required: true, merge: immutable, description: Episode 开始时对应的本地日历日期。}
+  - {name: episode_name, type: string, role: address, required: true, merge: immutable, description: 不含日期的具体长过程名称。}
+  - {name: started_at, type: datetime, role: address, required: true, merge: immutable, description: 长过程开始时间，必须带本地 UTC offset，并与 episode_date 共同形成系统地址身份。}
+  - {name: ended_at, type: datetime, role: content, required: true, merge: immutable, description: 长过程结束时间，必须带时区。}
+  - {name: participants, type: string_list, role: content, required: true, merge: immutable, description: 参与该长过程的主体。}
+  - {name: goal, type: optional_string, role: content, required: true, merge: immutable, description: 有证据支持的长过程目标。}
+  - {name: semantic_summary, type: string, role: content, required: true, merge: immutable, description: 跨 Event 的完整长语义。}
+  - {name: status, type: string, role: content, required: true, merge: immutable, description: completed、failed、cancelled 或 partial。}
+  - {name: closure_reason, type: optional_string, role: content, required: true, merge: immutable, description: Episode 结束原因。}
+  - {name: ordered_event_uris, type: uri_list, role: content, required: true, merge: immutable, description: 按真实过程顺序保存的唯一 Event URI。}
+  - {name: phases, type: phase_list, role: content, required: true, merge: immutable, description: 对任务主线 Event 的有序长语义阶段提取；每个阶段保存独立置信度。}
+  - {name: unphased_events, type: unphased_event_list, role: content, required: true, merge: immutable, description: 未进入 Phase 的上下文、并行、中断或不确定 Event 及明确原因。}
+  - {name: transitions, type: transition_list, role: content, required: true, merge: immutable, description: Event 之间有证据支持的中断、恢复、因果或使能关系。}
+  - {name: key_turning_points, type: string_list, role: content, required: true, merge: immutable, description: 影响任务走向的关键真实变化。}
+  - {name: outcome_uris, type: uri_list, role: content, required: true, merge: immutable, description: 该长过程引用的 Event Outcome 文档。}
+  - {name: outcome_snapshots, type: outcome_snapshot_list, role: system, required: true, merge: immutable, description: 系统在 Episode 创建时绑定的 Outcome revision 与规范 L2 SHA-256 摘要。}
+  - {name: evidence_refs, type: string_list, role: content, required: true, merge: immutable, description: 支撑 Episode 长语义的证据引用。}
+  - {name: evidence_coverage, type: number, role: content, required: true, merge: immutable, description: 被证据覆盖的过程比例，范围 0 到 1。}
+  - {name: confidence, type: number, role: content, required: true, merge: immutable, description: Episode 融合置信度，范围 0 到 1。}

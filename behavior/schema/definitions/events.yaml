@@ -1,0 +1,26 @@
+# TODO(BHV-FUSION-003): Event Fusion 模块负责证据冲突、准入阈值、时间窗口融合和同一事件去重。
+behavior_type: event
+description: >-
+  一个文件保存一次已经融合完成的真实原子行为事件；原始帧、ASR 片段、未发生推测和多个独立任务
+  不得直接成为 Event。event_name 只作为语义身份候选，最终 URI 由系统校验和解析。
+path_template: behaviors/events/{event_date:%Y}/{event_date:%m}/{event_date:%d}/{event_name}--{started_at:%Y%m%dT%H%M%S%f%z}.md
+operation_mode: add_only
+fields:
+  - {name: event_date, type: date, role: address, required: true, merge: immutable, description: 事件实际发生的本地日历日期。}
+  - {name: event_name, type: string, role: address, required: true, merge: immutable, description: 不含日期的具体原子事件名称。}
+  - {name: started_at, type: datetime, role: address, required: true, merge: immutable, description: 事件开始时间，必须带本地 UTC offset，并与 event_date 共同形成系统地址身份。}
+  - {name: ended_at, type: optional_datetime, role: content, required: true, merge: immutable, description: 事件结束时间；无法确定时为 null。}
+  - {name: participants, type: string_list, role: content, required: true, merge: immutable, description: 明确参与该事件的人或主体。}
+  - {name: semantic_summary, type: string, role: content, required: true, merge: immutable, description: 脱离来源后仍可理解的完整事件语义。}
+  - {name: semantic_facts, type: string_list, role: content, required: true, merge: immutable, description: 事件融合确认的具体事实。}
+  - {name: trigger, type: optional_string, role: content, required: true, merge: immutable, description: 有证据支持的直接触发因素。}
+  - {name: goal, type: optional_string, role: content, required: true, merge: immutable, description: 有证据支持的行为目标。}
+  - {name: constraints, type: string_list, role: content, required: true, merge: immutable, description: 明确影响行为的约束。}
+  - {name: actions, type: action_list, role: content, required: true, merge: immutable, description: 按真实发生顺序排列的 Action。}
+  - {name: status, type: string, role: content, required: true, merge: immutable, description: 事件最终状态。}
+  - {name: closure_reason, type: optional_string, role: content, required: true, merge: immutable, description: 事件结束、失败、中断或取消原因。}
+  - {name: evidence_refs, type: string_list, role: content, required: true, merge: immutable, description: 支持事件事实的证据引用。}
+  - {name: source_refs, type: string_list, role: content, required: true, merge: immutable, description: 事件融合使用的稳定来源引用。}
+  - {name: fusion_version, type: string, role: content, required: true, merge: immutable, description: 生成该融合事件的实现版本。}
+  - {name: confidence, type: number, role: content, required: true, merge: immutable, description: 整体融合置信度，范围 0 到 1。}
+  - {name: conflicts, type: string_list, role: content, required: true, merge: immutable, description: 未被静默抹平的证据冲突。}
