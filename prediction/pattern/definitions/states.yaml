@@ -1,0 +1,18 @@
+pattern_type: state
+description: 一个由事实样本支持的可检索情境状态模式。
+path_template: patterns/states/{shard}/{state_key}.md
+operation_mode: add_only
+fields:
+  - state_key
+  - logical_state_key
+  - pattern_generation
+  - identity_material
+  - semantic_summary
+  - state_level
+  - predicates
+  - active_goals
+  - constraints
+  - support_count
+  - sample_refs
+  - statistics
+  - projection_version

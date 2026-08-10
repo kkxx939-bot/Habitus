@@ -9,6 +9,8 @@ fields:
   - {name: event_date, type: date, role: address, required: true, merge: immutable, description: 事件实际发生的本地日历日期。}
   - {name: event_name, type: string, role: address, required: true, merge: immutable, description: 不含日期的具体原子事件名称。}
   - {name: started_at, type: datetime, role: address, required: true, merge: immutable, description: 事件开始时间，必须带本地 UTC offset，并与 event_date 共同形成系统地址身份。}
+  - {name: onset_semantics, type: string, role: content, required: true, merge: immutable, description: Event 首次被识别时已有证据支持的行为语义；不得使用事后总结。}
+  - {name: onset_available_at, type: datetime, role: content, required: true, merge: immutable, description: onset_semantics 对下游首次可用的时间，不能早于 started_at。}
   - {name: ended_at, type: optional_datetime, role: content, required: true, merge: immutable, description: 事件结束时间；无法确定时为 null。}
   - {name: participants, type: string_list, role: content, required: true, merge: immutable, description: 明确参与该事件的人或主体。}
   - {name: semantic_summary, type: string, role: content, required: true, merge: immutable, description: 脱离来源后仍可理解的完整事件语义。}
@@ -16,7 +18,7 @@ fields:
   - {name: trigger, type: optional_string, role: content, required: true, merge: immutable, description: 有证据支持的直接触发因素。}
   - {name: goal, type: optional_string, role: content, required: true, merge: immutable, description: 有证据支持的行为目标。}
   - {name: constraints, type: string_list, role: content, required: true, merge: immutable, description: 明确影响行为的约束。}
-  - {name: actions, type: action_list, role: content, required: true, merge: immutable, description: 按真实发生顺序排列的 Action。}
+  - {name: actions, type: action_list, role: content, required: true, merge: immutable, description: 按真实发生顺序排列的 Action；每个 Action 必须记录其语义身份的 available_at。}
   - {name: status, type: string, role: content, required: true, merge: immutable, description: 事件最终状态。}
   - {name: closure_reason, type: optional_string, role: content, required: true, merge: immutable, description: 事件结束、失败、中断或取消原因。}
   - {name: evidence_refs, type: string_list, role: content, required: true, merge: immutable, description: 支持事件事实的证据引用。}

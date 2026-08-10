@@ -11,6 +11,7 @@ PRODUCTION_ROOTS = (
     "Runtime",
     "ModelClient",
     "behavior",
+    "prediction",
     "pre",
     "conversation",
     "memory",
@@ -54,6 +55,16 @@ def imported_roots(path: Path) -> set[str]:
     return roots
 
 
+def imported_modules(path: Path) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+    return modules
+
+
 def test_retired_memory_contracts_and_uri_schemes_do_not_reappear() -> None:
     violations = []
     for path in production_files():
@@ -66,7 +77,7 @@ def test_retired_memory_contracts_and_uri_schemes_do_not_reappear() -> None:
 
 @pytest.mark.parametrize(
     "package",
-    ("ModelClient", "behavior", "pre", "memory", "infrastructure", "foundation"),
+    ("ModelClient", "behavior", "prediction", "pre", "memory", "infrastructure", "foundation"),
 )
 def test_domain_packages_never_import_top_level_runtime(package: str) -> None:
     violations = [
@@ -141,6 +152,7 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
         str(path.relative_to(REPOSITORY_ROOT))
         for path in production_files()
         if path.relative_to(REPOSITORY_ROOT).parts[0] != "behavior"
+        and path.relative_to(REPOSITORY_ROOT).parts[:2] != ("prediction", "projection")
         and "behavior" in imported_roots(path)
     ]
     assert reverse_dependency_violations == []
@@ -204,6 +216,51 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
         if marker in path.read_text(encoding="utf-8")
     ]
     assert storage_violations == []
+
+
+def test_prediction_tree_has_one_explicit_behavior_projection_package() -> None:
+    prediction_root = REPOSITORY_ROOT / "prediction"
+    assert prediction_root.is_dir()
+
+    behavior_importers = {
+        path.relative_to(REPOSITORY_ROOT)
+        for path in prediction_root.rglob("*.py")
+        if "behavior" in imported_roots(path)
+    }
+    outside_projection = {path for path in behavior_importers if path.parent != Path("prediction/projection")}
+    assert outside_projection == set()
+    assert Path("prediction/projection/_behavior_source.py") in behavior_importers
+    assert Path("prediction/projection/behavior.py") in behavior_importers
+
+    projection_importers = [
+        path.relative_to(REPOSITORY_ROOT)
+        for path in prediction_root.rglob("*.py")
+        if path.parent != prediction_root / "projection" and "prediction.projection" in imported_modules(path)
+    ]
+    assert projection_importers == []
+
+    forbidden_prediction_dependencies = {
+        "Config",
+        "ModelClient",
+        "Runtime",
+        "conversation",
+        "integrations",
+        "memory",
+        "pre",
+    }
+    prediction_dependency_violations = [
+        str(path.relative_to(REPOSITORY_ROOT))
+        for path in prediction_root.rglob("*.py")
+        if imported_roots(path) & forbidden_prediction_dependencies
+    ]
+    assert prediction_dependency_violations == []
+
+    behavior_reverse_violations = [
+        str(path.relative_to(REPOSITORY_ROOT))
+        for path in (REPOSITORY_ROOT / "behavior").rglob("*.py")
+        if "prediction" in imported_roots(path)
+    ]
+    assert behavior_reverse_violations == []
 
 
 def test_conversation_source_and_projection_do_not_depend_on_memory_or_behavior() -> None:

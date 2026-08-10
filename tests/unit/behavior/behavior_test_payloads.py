@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from behavior.model import BehaviorAddress
@@ -19,6 +19,8 @@ def event_payload(
         "event_date": date(2026, 8, 8),
         "event_name": name,
         "started_at": datetime(2026, 8, 8, 10, minute, tzinfo=timezone.utc),
+        "onset_semantics": name,
+        "onset_available_at": datetime(2026, 8, 8, 10, minute, tzinfo=timezone.utc),
         "ended_at": datetime(2026, 8, 8, 10, minute + 2, tzinfo=timezone.utc),
         "participants": ["主人"],
         "semantic_summary": f"{name}。",
@@ -38,6 +40,7 @@ def event_payload(
                 "parameters": {"mode": "cool"},
                 "started_at": None,
                 "ended_at": None,
+                "available_at": datetime(2026, 8, 8, 10, minute, tzinfo=timezone.utc),
                 "status": "completed",
                 "knowledge_state": "observed",
                 "evidence_refs": ["frame:0001"],
@@ -141,6 +144,10 @@ def episode_storage_payload(
     target_outcome_uri: str,
 ) -> dict[str, Any]:
     payload = deepcopy(episode_payload(first_event_uri, second_event_uri, target_outcome_uri))
+    for phase in payload["phases"]:
+        starts = tuple(BehaviorURI.parse(uri).to_address().started_at for uri in phase["event_uris"])
+        phase["started_at"] = min(starts)
+        phase["ended_at"] = max(start + timedelta(minutes=2) for start in starts)
     payload["outcome_snapshots"] = [
         {
             "uri": target_outcome_uri,

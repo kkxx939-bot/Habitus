@@ -52,6 +52,45 @@ class BehaviorLevel(int, Enum):
         return None
 
 
+BEHAVIORS_SEGMENT = "behaviors"
+EVENTS_SEGMENT = "events"
+OUTCOMES_SEGMENT = "outcomes"
+EPISODES_SEGMENT = "episodes"
+
+_KIND_DIRECTORY_PREFIXES: dict[BehaviorKind, tuple[str, ...]] = {
+    BehaviorKind.EVENT: (BEHAVIORS_SEGMENT, EVENTS_SEGMENT),
+    BehaviorKind.OUTCOME: (BEHAVIORS_SEGMENT, OUTCOMES_SEGMENT),
+    BehaviorKind.EPISODE: (EPISODES_SEGMENT,),
+}
+
+
+def kind_directory_prefix(kind: BehaviorKind) -> tuple[str, ...]:
+    """返回该文档类型的固定目录前缀；这里是行为树路径结构的唯一真相来源。"""
+
+    return _KIND_DIRECTORY_PREFIXES[BehaviorKind(kind)]
+
+
+def kind_for_directory_prefix(segments: tuple[str, ...]) -> BehaviorKind | None:
+    """把路径开头映射回文档类型；没有任何前缀匹配时返回 None。"""
+
+    for kind, prefix in _KIND_DIRECTORY_PREFIXES.items():
+        if segments[: len(prefix)] == prefix:
+            return kind
+    return None
+
+
+def behavior_static_directories() -> tuple[tuple[str, ...], ...]:
+    """初始化必须存在的固定目录；父目录一定排在子目录之前。"""
+
+    directories: list[tuple[str, ...]] = []
+    for prefix in _KIND_DIRECTORY_PREFIXES.values():
+        for depth in range(1, len(prefix) + 1):
+            candidate = prefix[:depth]
+            if candidate not in directories:
+                directories.append(candidate)
+    return tuple(sorted(directories, key=lambda parts: (len(parts), parts)))
+
+
 def semantic_name(value: object, field_name: str) -> str:
     """校验可读语义名称，同时生成路径身份所需的稳定输入。"""
 
@@ -241,15 +280,11 @@ class BehaviorDirectory:
     def _validate(cls, parts: tuple[str, ...]) -> None:
         if not parts:
             return
-        if parts == ("behaviors",):
+        kind = kind_for_directory_prefix(parts)
+        if kind is not None:
+            cls._validate_dated_branch(parts, prefix_length=len(kind_directory_prefix(kind)))
             return
-        if parts[0] == "behaviors":
-            if len(parts) < 2 or parts[1] not in {"events", "outcomes"}:
-                raise ValueError("behavior directory is outside the confirmed behaviors tree")
-            cls._validate_dated_branch(parts, prefix_length=2)
-            return
-        if parts[0] == "episodes":
-            cls._validate_dated_branch(parts, prefix_length=1)
+        if parts in behavior_static_directories():
             return
         raise ValueError("behavior directory is outside the confirmed tree")
 
@@ -279,7 +314,7 @@ class BehaviorDirectory:
 
     @classmethod
     def behaviors(cls) -> BehaviorDirectory:
-        return cls(("behaviors",))
+        return cls((BEHAVIORS_SEGMENT,))
 
     @classmethod
     def events(
@@ -288,7 +323,7 @@ class BehaviorDirectory:
         month: int | None = None,
         day: int | None = None,
     ) -> BehaviorDirectory:
-        return cls._dated(("behaviors", "events"), year, month, day)
+        return cls._dated(kind_directory_prefix(BehaviorKind.EVENT), year, month, day)
 
     @classmethod
     def outcomes(
@@ -297,7 +332,7 @@ class BehaviorDirectory:
         month: int | None = None,
         day: int | None = None,
     ) -> BehaviorDirectory:
-        return cls._dated(("behaviors", "outcomes"), year, month, day)
+        return cls._dated(kind_directory_prefix(BehaviorKind.OUTCOME), year, month, day)
 
     @classmethod
     def episodes(
@@ -306,7 +341,7 @@ class BehaviorDirectory:
         month: int | None = None,
         day: int | None = None,
     ) -> BehaviorDirectory:
-        return cls._dated(("episodes",), year, month, day)
+        return cls._dated(kind_directory_prefix(BehaviorKind.EPISODE), year, month, day)
 
     @classmethod
     def _dated(
@@ -342,12 +377,12 @@ class BehaviorDirectory:
         if not isinstance(address, BehaviorAddress):
             raise TypeError("address must be a BehaviorAddress")
         occurred_on = address.occurred_on
-        factory = {
-            BehaviorKind.EVENT: cls.events,
-            BehaviorKind.OUTCOME: cls.outcomes,
-            BehaviorKind.EPISODE: cls.episodes,
-        }[address.kind]
-        return factory(occurred_on.year, occurred_on.month, occurred_on.day)
+        return cls._dated(
+            kind_directory_prefix(address.kind),
+            occurred_on.year,
+            occurred_on.month,
+            occurred_on.day,
+        )
 
     def parent(self) -> BehaviorDirectory | None:
         if not self.parts:
@@ -364,12 +399,19 @@ class BehaviorDirectory:
 
 
 __all__ = [
+    "BEHAVIORS_SEGMENT",
+    "EPISODES_SEGMENT",
+    "EVENTS_SEGMENT",
+    "OUTCOMES_SEGMENT",
     "BehaviorAddress",
     "BehaviorDirectory",
     "BehaviorKind",
     "BehaviorLevel",
     "behavior_identity_name",
     "behavior_local_timestamp",
+    "behavior_static_directories",
     "is_ascii_digits",
+    "kind_directory_prefix",
+    "kind_for_directory_prefix",
     "split_behavior_identity",
 ]

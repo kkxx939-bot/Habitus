@@ -15,7 +15,7 @@ fields:
   - {name: status, type: string, role: content, required: true, merge: immutable, description: completed、failed、cancelled 或 partial。}
   - {name: closure_reason, type: optional_string, role: content, required: true, merge: immutable, description: Episode 结束原因。}
   - {name: ordered_event_uris, type: uri_list, role: content, required: true, merge: immutable, description: 按真实过程顺序保存的唯一 Event URI。}
-  - {name: phases, type: phase_list, role: content, required: true, merge: immutable, description: 对任务主线 Event 的有序长语义阶段提取；每个阶段保存独立置信度。}
+  - {name: phases, type: phase_list, role: content, required: true, merge: immutable, description: 对任务主线 Event 的有序长语义阶段提取；每个阶段保存独立置信度，started_at 与 ended_at 由系统根据所引用 Event 派生。}
   - {name: unphased_events, type: unphased_event_list, role: content, required: true, merge: immutable, description: 未进入 Phase 的上下文、并行、中断或不确定 Event 及明确原因。}
   - {name: transitions, type: transition_list, role: content, required: true, merge: immutable, description: Event 之间有证据支持的中断、恢复、因果或使能关系。}
   - {name: key_turning_points, type: string_list, role: content, required: true, merge: immutable, description: 影响任务走向的关键真实变化。}

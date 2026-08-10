@@ -69,6 +69,7 @@ include = [
     "conversation*",
     "memory*",
     "behavior*",
+    "prediction*",
     "infrastructure*",
     "foundation*",
     "integrations*",
@@ -80,6 +81,8 @@ include = [
 "benchmark" = ["README.md", "datasets/*.json", "policies/*.json"]
 "memory.schema.definitions" = ["*.yaml"]
 "behavior.schema.definitions" = ["*.yaml"]
+"prediction.schema.definitions" = ["*.yaml"]
+"prediction.pattern.definitions" = ["*.yaml"]
 
 [tool.ruff]
 line-length = 120
@@ -99,7 +102,7 @@ warn_redundant_casts = true
 [tool.pyright]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
-include = ["Config", "Runtime", "ModelClient", "pre", "conversation", "memory", "behavior", "infrastructure", "foundation", "integrations", "benchmark"]
+include = ["Config", "Runtime", "ModelClient", "pre", "conversation", "memory", "behavior", "prediction", "infrastructure", "foundation", "integrations", "benchmark"]
 reportUnsupportedDunderAll = false
 
 [tool.pytest.ini_options]
@@ -111,7 +114,7 @@ addopts = "-ra --strict-config --strict-markers"
 
 [tool.coverage.run]
 branch = true
-source = ["Config", "Runtime", "ModelClient", "pre", "conversation", "memory", "behavior", "infrastructure", "foundation", "integrations"]
+source = ["Config", "Runtime", "ModelClient", "pre", "conversation", "memory", "behavior", "prediction", "infrastructure", "foundation", "integrations"]
 omit = ["tests/*"]
 
 [tool.coverage.report]

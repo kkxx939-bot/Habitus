@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any, NoReturn, Protocol
+from typing import Any, NoReturn
 
 from behavior.document.link import BehaviorStoredLink, parse_stored_links
 from behavior.document.model import BehaviorDocument, BehaviorDocumentMetadata
 from behavior.model import BehaviorAddress, BehaviorKind
-from behavior.schema.model import BehaviorSchemaMaterialization
+from behavior.schema import BehaviorSchemaRegistry
 from foundation.integrity import canonicalize
 
 _MARKER = "\n<!-- M2BOS_BEHAVIOR_FIELDS\n"
@@ -30,21 +30,16 @@ class BehaviorDocumentIntegrityError(ValueError):
     """行为 L2 的正文、结构字段和物理地址不一致。"""
 
 
-class _BehaviorSchemaRegistry(Protocol):
-    def materialize(
-        self,
-        kind: BehaviorKind | str,
-        payload: Mapping[str, Any],
-    ) -> BehaviorSchemaMaterialization: ...
-
-
 class BehaviorDocumentCodec:
-    """使用同一个 Schema 构造地址、正文和末尾结构字段。"""
+    """使用同一个 Schema 构造地址、正文和末尾结构字段。
 
-    def __init__(self, registry: _BehaviorSchemaRegistry) -> None:
-        required = ("materialize",)
-        if any(not callable(getattr(registry, name, None)) for name in required):
-            raise TypeError("registry must implement the behavior Schema registry contract")
+    Schema 注册表不是可替换的策略：它强制 path_template 必须逐字等于代码里的
+    规范路径，本身就是行为树的领域单例不变量，因此这里直接依赖具体类型。
+    """
+
+    def __init__(self, registry: BehaviorSchemaRegistry) -> None:
+        if not isinstance(registry, BehaviorSchemaRegistry):
+            raise TypeError("registry must be a BehaviorSchemaRegistry")
         self.registry = registry
 
     def build(
@@ -95,6 +90,8 @@ class BehaviorDocumentCodec:
             "links": [link.to_dict() for link in canonical.links],
             "backlinks": [link.to_dict() for link in canonical.backlinks],
         }
+        # 结构字段保存在 HTML 注释里，正文中任意 `--` 都会提前闭合该注释；
+        # 统一转义成 JSON 的 -，decode 时由 json.loads 原样还原，往返仍然逐字节一致。
         metadata_json = json.dumps(
             metadata,
             ensure_ascii=False,

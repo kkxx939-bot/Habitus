@@ -3,14 +3,38 @@
 from __future__ import annotations
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
 from infrastructure.store.contracts import LockLostError
 from infrastructure.store.sqlite import SQLiteLockStore
 from infrastructure.store.sqlite.lock_store import SQLiteLockStoreConfig
+
+
+def test_two_lazy_instances_initialize_one_new_database_concurrently(tmp_path) -> None:
+    path = tmp_path / "concurrent-initialize.sqlite3"
+    stores = (
+        SQLiteLockStore(path, owner="worker-a", initialize=False),
+        SQLiteLockStore(path, owner="worker-b", initialize=False),
+    )
+    barrier = Barrier(2)
+
+    def initialize(store: SQLiteLockStore) -> None:
+        barrier.wait()
+        store.initialize()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = tuple(executor.submit(initialize, store) for store in stores)
+        for future in futures:
+            future.result()
+
+    assert all(store.initialized for store in stores)
+    token = stores[0].acquire("shared-key")
+    stores[0].release(token)
 
 
 def test_sqlite_lock_persists_exclusion_across_independent_store_instances(tmp_path: Path) -> None:

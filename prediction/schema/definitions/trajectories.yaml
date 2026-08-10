@@ -1,0 +1,18 @@
+prediction_type: trajectory
+description: 一个不可变的 Episode Phase 前缀到后续主线、并行、中断和终止的长轨迹样本。
+path_template: samples/trajectories/{sample_date:%Y}/{sample_date:%m}/{sample_date:%d}/{shard}/{materialization_id}.md
+operation_mode: add_only
+fields:
+  - {name: sample_date, type: date, role: address, required: true, description: 样本锚点的本地日期。}
+  - {name: logical_sample_id, type: sample_id, role: address, required: true, description: 同一预测问题跨投影版本保持稳定的 SHA-256 身份。}
+  - {name: materialization_id, type: sample_id, role: address, required: true, description: 逻辑样本与投影合同版本共同派生的物化身份。}
+  - {name: prediction_scope, type: scope, role: content, required: true, description: 本样本预测的主体、层级、领域和模式。}
+  - {name: anchor, type: anchor, role: content, required: true, description: Episode Phase 序列中严格的预测切点。}
+  - {name: input, type: input, role: content, required: true, description: 锚点前可用的观测、行为前缀与已知决策空间。}
+  - {name: label, type: trajectory_label, role: content, required: true, description: 后续主线、事件、并行支线、中断、恢复、转移和终止。}
+  - {name: supervision, type: supervision, role: content, required: true, description: 标签观测窗口与客观截断状态；训练准入由具体数据集构建器计算。}
+  - {name: lineage, type: lineage, role: content, required: true, description: 同一真实 Episode 的分组与来源系谱。}
+  - {name: identity_material, type: identity_material, role: system, required: true, description: 可重新计算逻辑身份的规范 Episode、Phase 前缀和目标材料。}
+  - {name: materialization_context, type: identity_material, role: system, required: true, description: 区分同一逻辑问题的来源快照版本；普通样本为空对象。}
+  - {name: provenance, type: provenance, role: system, required: true, description: 来源版本摘要与确定性投影器身份。}
+  - {name: quality, type: quality, role: content, required: true, description: 样本证据和上下文完整性质量。}

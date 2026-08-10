@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import uuid
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from math import isfinite
@@ -178,7 +178,7 @@ class SQLiteLockStore:
         self.initialize()
         now = datetime.now(timezone.utc)
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 row = conn.execute(
                     "SELECT token, fence, expires_at FROM locks WHERE lock_key = ?",
                     (token.lock_key,),
@@ -272,7 +272,7 @@ class SQLiteLockStore:
 
         self.initialize()
         now = datetime.now(timezone.utc)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             rows = connection.execute("SELECT expires_at, created_at FROM locks WHERE token != ''").fetchall()
         ages: list[float] = []
         for row in rows:
@@ -297,19 +297,26 @@ class SQLiteLockStore:
         return conn
 
     def _init_db(self) -> None:
-        with self._connect() as conn:
-            existing = conn.execute("SELECT type FROM sqlite_master WHERE name = 'locks'").fetchone()
-            if existing is None:
-                self._create_lock_table(conn)
-            elif str(existing["type"]) != "table":
-                raise RuntimeError("unsupported LockStore layout; reset the greenfield runtime")
-            self._require_exact_lock_layout(conn)
+        with closing(self._connect()) as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                existing = conn.execute("SELECT type FROM sqlite_master WHERE name = 'locks'").fetchone()
+                if existing is None:
+                    self._create_lock_table(conn)
+                elif str(existing["type"]) != "table":
+                    raise RuntimeError("unsupported LockStore layout; reset the greenfield runtime")
+                self._require_exact_lock_layout(conn)
+                conn.commit()
+            except Exception:
+                if conn.in_transaction:
+                    conn.rollback()
+                raise
 
     @staticmethod
     def _create_lock_table(conn: sqlite3.Connection) -> None:
         conn.execute(
             """
-            CREATE TABLE locks (
+            CREATE TABLE IF NOT EXISTS locks (
               lock_key TEXT PRIMARY KEY,
               token TEXT NOT NULL,
               expires_at TEXT NOT NULL,

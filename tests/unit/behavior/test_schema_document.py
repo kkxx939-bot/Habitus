@@ -39,6 +39,19 @@ def test_event_schema_rejects_unknown_fields_and_broken_action_order() -> None:
     with pytest.raises(BehaviorSchemaError, match="contiguous"):
         registry.validate(BehaviorKind.EVENT, broken)
 
+    early_onset = event_payload()
+    early_onset["onset_available_at"] = early_onset["started_at"] - timedelta(seconds=1)
+    with pytest.raises(BehaviorSchemaError, match="onset_available_at"):
+        registry.validate(BehaviorKind.EVENT, early_onset)
+
+    early_action_identity = event_payload()
+    early_action_identity["actions"][0]["started_at"] = early_action_identity["started_at"]
+    early_action_identity["actions"][0]["available_at"] = (
+        early_action_identity["started_at"] - timedelta(seconds=1)
+    )
+    with pytest.raises(BehaviorSchemaError, match="available_at"):
+        registry.validate(BehaviorKind.EVENT, early_action_identity)
+
 
 def test_outcome_schema_requires_exact_mirrored_event_uri() -> None:
     registry = BehaviorSchemaRegistry.load_default()
@@ -62,12 +75,19 @@ def test_episode_schema_validates_event_order_phases_and_transitions() -> None:
         episode_storage_payload(first, second, outcome),
     )
     assert normalized["ordered_event_uris"] == (first, second)
+    assert normalized["phases"][0]["started_at"] == datetime(2026, 8, 8, 10, 30, tzinfo=timezone.utc)
+    assert normalized["phases"][0]["ended_at"] == datetime(2026, 8, 8, 10, 32, tzinfo=timezone.utc)
 
     reversed_transition = episode_storage_payload(first, second, outcome)
     reversed_transition["transitions"][0]["from_event_uri"] = second
     reversed_transition["transitions"][0]["to_event_uri"] = first
     with pytest.raises(BehaviorSchemaError, match="real Event order"):
         registry.validate(BehaviorKind.EPISODE, reversed_transition)
+
+    reversed_phase_time = episode_storage_payload(first, second, outcome)
+    reversed_phase_time["phases"][0]["ended_at"] = datetime(2026, 8, 8, 10, 29, tzinfo=timezone.utc)
+    with pytest.raises(BehaviorSchemaError, match="cannot precede"):
+        registry.validate(BehaviorKind.EPISODE, reversed_phase_time)
 
 
 def test_document_codec_round_trip_and_tamper_rejection() -> None:
@@ -129,6 +149,7 @@ def test_event_schema_rejects_action_times_outside_or_reversed_within_event() ->
     outside = event_payload()
     outside["actions"][0]["started_at"] = outside["ended_at"] + timedelta(minutes=1)
     outside["actions"][0]["ended_at"] = outside["ended_at"] + timedelta(minutes=2)
+    outside["actions"][0]["available_at"] = outside["actions"][0]["started_at"]
     with pytest.raises(BehaviorSchemaError, match="Event time window"):
         registry.validate(BehaviorKind.EVENT, outside)
 
@@ -136,6 +157,7 @@ def test_event_schema_rejects_action_times_outside_or_reversed_within_event() ->
     first = reversed_actions["actions"][0]
     first["started_at"] = datetime(2026, 8, 8, 10, 31, tzinfo=timezone.utc)
     first["ended_at"] = datetime(2026, 8, 8, 10, 31, 30, tzinfo=timezone.utc)
+    first["available_at"] = first["started_at"]
     second = deepcopy(first)
     second.update(
         {
@@ -143,6 +165,7 @@ def test_event_schema_rejects_action_times_outside_or_reversed_within_event() ->
             "sequence": 2,
             "started_at": datetime(2026, 8, 8, 10, 30, tzinfo=timezone.utc),
             "ended_at": datetime(2026, 8, 8, 10, 30, 30, tzinfo=timezone.utc),
+            "available_at": datetime(2026, 8, 8, 10, 30, tzinfo=timezone.utc),
         }
     )
     reversed_actions["actions"].append(second)
@@ -242,6 +265,8 @@ def test_behavior_time_preserves_local_offset_and_requires_matching_local_date()
     payload["event_date"] = "2026-08-09"
     payload["started_at"] = "2026-08-09T00:30:00.000000+08:00"
     payload["ended_at"] = "2026-08-09T00:32:00.000000+08:00"
+    payload["onset_available_at"] = payload["started_at"]
+    payload["actions"][0]["available_at"] = payload["started_at"]
 
     materialized = registry.materialize(BehaviorKind.EVENT, payload)
 

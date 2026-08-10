@@ -21,6 +21,7 @@ from behavior import (
     BehaviorTreeIntegrityError,
     BehaviorURI,
 )
+from behavior.editor.writer import _LeaseHeartbeat
 from infrastructure.store.locks.process_local import ProcessLocalLockStore
 
 
@@ -144,7 +145,35 @@ def test_episode_publishes_only_after_all_referenced_l2_documents_exist(tmp_path
     assert episode.fields["outcome_snapshots"][0]["uri"] == outcome_uri
     assert episode.fields["outcome_snapshots"][0]["revision"] == 1
     assert len(episode.fields["outcome_snapshots"][0]["digest"]) == 64
+    assert episode.fields["phases"][0]["started_at"] == "2026-08-08T10:30:00.000000+00:00"
+    assert episode.fields["phases"][0]["ended_at"] == "2026-08-08T10:32:00.000000+00:00"
+    assert episode.fields["phases"][1]["started_at"] == "2026-08-08T10:40:00.000000+00:00"
+    assert episode.fields["phases"][1]["ended_at"] == "2026-08-08T10:42:00.000000+00:00"
     assert tree.read(episode.address) == episode
+
+
+def test_episode_phase_times_are_system_owned_and_preserve_unknown_event_end(tmp_path) -> None:
+    _tree, writer = _writer(tmp_path)
+    open_ended_payload = event_payload("open-ended", minute=30)
+    open_ended_payload["ended_at"] = None
+    first = writer.publish(BehaviorKind.EVENT, open_ended_payload)
+    second = writer.publish(BehaviorKind.EVENT, event_payload("second", minute=40))
+    first_uri = str(BehaviorURI.from_address(first.address))
+    second_uri = str(BehaviorURI.from_address(second.address))
+    outcome_data = outcome_payload(first_uri, "open-ended")
+    outcome = writer.publish(BehaviorKind.OUTCOME, outcome_data)
+    payload = episode_payload(first_uri, second_uri, str(BehaviorURI.from_address(outcome.address)))
+
+    episode = writer.publish(BehaviorKind.EPISODE, payload)
+
+    assert episode.fields["phases"][0]["started_at"] == "2026-08-08T10:30:00.000000+00:00"
+    assert episode.fields["phases"][0]["ended_at"] is None
+
+    caller_supplied = episode_payload(first_uri, second_uri, str(BehaviorURI.from_address(outcome.address)))
+    caller_supplied["phases"][0]["started_at"] = datetime(2026, 8, 8, 10, 30, tzinfo=timezone.utc)
+    caller_supplied["phases"][0]["ended_at"] = None
+    with pytest.raises(ValueError, match="system-owned"):
+        writer.publish(BehaviorKind.EPISODE, caller_supplied)
 
 
 def test_episode_rejects_missing_event_reference(tmp_path) -> None:
@@ -190,6 +219,7 @@ def test_outcome_rejects_result_before_target_event_or_action(tmp_path) -> None:
     action_timed_payload = event_payload("action-timed", minute=40)
     action_timed_payload["actions"][0]["started_at"] = datetime(2026, 8, 8, 10, 41, tzinfo=timezone.utc)
     action_timed_payload["actions"][0]["ended_at"] = datetime(2026, 8, 8, 10, 42, tzinfo=timezone.utc)
+    action_timed_payload["actions"][0]["available_at"] = action_timed_payload["actions"][0]["started_at"]
     action_timed = writer.publish(BehaviorKind.EVENT, action_timed_payload)
     action_outcome = outcome_payload(str(BehaviorURI.from_address(action_timed.address)), "action-timed")
     action_outcome["outcomes"][0]["occurred_at"] = datetime(2026, 8, 8, 10, 40, 30, tzinfo=timezone.utc)
@@ -445,3 +475,25 @@ def test_episode_tracks_latest_outcome_and_preserves_creation_snapshot(tmp_path)
     assert tree.read(episode.address).fields["outcome_snapshots"][0] == frozen
     assert revision_three.metadata.revision == tree.read(outcome.address).metadata.revision == 3
     assert BehaviorSnapshotReader(tree).read(target_outcome_uri).source_digest != frozen["digest"]
+
+
+def test_lease_heartbeat_renews_only_after_its_interval_and_ignores_empty_guards() -> None:
+    class _CountingGuard:
+        def __init__(self) -> None:
+            self.renewals = 0
+
+        def checkpoint(self) -> None:
+            self.renewals += 1
+
+    _LeaseHeartbeat((), ttl_seconds=30).beat()
+
+    guards = (_CountingGuard(), _CountingGuard())
+    heartbeat = _LeaseHeartbeat(guards, ttl_seconds=30)
+    for _ in range(64):
+        heartbeat.beat()
+    assert [guard.renewals for guard in guards] == [0, 0]
+
+    heartbeat._last_renewed -= 11.0
+    heartbeat.beat()
+    heartbeat.beat()
+    assert [guard.renewals for guard in guards] == [1, 1]

@@ -13,7 +13,16 @@ from behavior.document import (
     BehaviorDocumentIntegrityError,
     BehaviorDocumentLimitError,
 )
-from behavior.model import BehaviorAddress, BehaviorDirectory, BehaviorKind, BehaviorLevel, is_ascii_digits
+from behavior.model import (
+    BehaviorAddress,
+    BehaviorDirectory,
+    BehaviorKind,
+    BehaviorLevel,
+    behavior_static_directories,
+    is_ascii_digits,
+    kind_directory_prefix,
+)
+from behavior.schema import BehaviorSchemaRegistry
 from behavior.tree.config import BehaviorTreeConfig
 from behavior.uri import BehaviorURI, BehaviorURINodeType
 from foundation.ids import canonical_path_identity
@@ -43,12 +52,7 @@ class BehaviorTreeConflictError(RuntimeError):
 class BehaviorTree:
     """安全持久化规范 L2 文档和可重建目录语义层。"""
 
-    _STATIC_DIRECTORIES = (
-        ("behaviors",),
-        ("behaviors", "events"),
-        ("behaviors", "outcomes"),
-        ("episodes",),
-    )
+    _STATIC_DIRECTORIES = behavior_static_directories()
 
     def __init__(
         self,
@@ -63,8 +67,6 @@ class BehaviorTree:
             raise BehaviorTreeIntegrityError("behavior tree root cannot be a symbolic link")
         self.root = requested.resolve(strict=False)
         if document_codec is None:
-            from behavior.schema import BehaviorSchemaRegistry
-
             document_codec = BehaviorDocumentCodec(BehaviorSchemaRegistry.load_default())
         if not isinstance(document_codec, BehaviorDocumentCodec):
             raise TypeError("document_codec must be a BehaviorDocumentCodec")
@@ -79,6 +81,12 @@ class BehaviorTree:
     @property
     def document_codec(self) -> BehaviorDocumentCodec:
         return self._document_codec
+
+    @property
+    def registry(self) -> BehaviorSchemaRegistry:
+        """树与其写入方必须共用同一个 Schema 注册表，这里是唯一的取用入口。"""
+
+        return self._document_codec.registry
 
     def initialize(self) -> Path:
         self._ensure_directory(self.root)
@@ -193,6 +201,10 @@ class BehaviorTree:
     ) -> tuple[Path, Path]:
         """写入可重建 L1/L0；失败补齐和有界重试由后续 Behavior 语义刷新 Job 编排。"""
 
+        # TODO(BHV-SEMANTIC-004): L0/L1 当前只有写入原语，没有生成器、刷新器和读者。
+        # 已确认的定位是服务 Event Fusion：融合新 Event 时需要「最近发生了什么」的有界上下文，
+        # 用于判定新事件、已有事件延续还是重复。Prediction 投影只读 L2，不消费本派生层。
+        # 生成策略、刷新触发和配置边界必须等 BHV-FUSION-003 的批次单位和 Event 粒度确定后再设计。
         if not isinstance(abstract, str) or not isinstance(overview, str):
             raise TypeError("behavior semantic layers must be strings")
         if not abstract.strip() or not overview.strip():
@@ -272,11 +284,7 @@ class BehaviorTree:
         return tuple(BehaviorKind).index(address.kind), cls._relative_path(address).as_posix()
 
     def _iter_kind(self, kind: BehaviorKind) -> Iterator[BehaviorAddress]:
-        root = {
-            BehaviorKind.EVENT: self.root / "behaviors" / "events",
-            BehaviorKind.OUTCOME: self.root / "behaviors" / "outcomes",
-            BehaviorKind.EPISODE: self.root / "episodes",
-        }[kind]
+        root = self.root.joinpath(*kind_directory_prefix(kind))
         for year_path in self._directories(root):
             if len(year_path.name) != 4 or not is_ascii_digits(year_path.name):
                 raise BehaviorTreeIntegrityError("behavior year directory must use YYYY")
@@ -316,6 +324,14 @@ class BehaviorTree:
         return self._existing_relative_path(relative, leaf_is_file=True)
 
     def _existing_relative_path(self, relative: Path, *, leaf_is_file: bool) -> Path:
+        """逐级把逻辑路径解析到真实物理条目，把大小写和 Unicode 别名当作冲突而非新建。
+
+        大小写不敏感文件系统会让 ``Alpha.md`` 和 ``alpha.md`` 指向同一个文件，
+        因此每一级都按 ``canonical_path_identity`` 匹配而不是按字面名匹配：
+        命中多个物理条目说明树里已经存在同一身份的别名，必须拒绝而不是任选其一；
+        没有命中则原样拼出尚未创建的剩余路径，交给调用方去创建。
+        """
+
         current = self.root
         parts = relative.parts
         for index, part in enumerate(parts):

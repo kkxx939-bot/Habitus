@@ -6,7 +6,14 @@ from datetime import date
 from enum import Enum
 from urllib.parse import unquote
 
-from behavior.model import BehaviorAddress, BehaviorDirectory, BehaviorKind, BehaviorLevel, is_ascii_digits
+from behavior.model import (
+    BehaviorAddress,
+    BehaviorDirectory,
+    BehaviorLevel,
+    is_ascii_digits,
+    kind_directory_prefix,
+    kind_for_directory_prefix,
+)
 
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 _UNRESERVED_ASCII = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
@@ -243,17 +250,13 @@ def _canonical_segments(
 
 def _address_segments(address: BehaviorAddress) -> tuple[str, ...]:
     occurred_on = address.occurred_on
-    dated = (
+    return (
+        *kind_directory_prefix(address.kind),
         f"{occurred_on.year:04d}",
         f"{occurred_on.month:02d}",
         f"{occurred_on.day:02d}",
         f"{address.identity_name}.md",
     )
-    if address.kind is BehaviorKind.EVENT:
-        return ("behaviors", "events", *dated)
-    if address.kind is BehaviorKind.OUTCOME:
-        return ("behaviors", "outcomes", *dated)
-    return ("episodes", *dated)
 
 
 def _directory(segments: tuple[str, ...]) -> BehaviorDirectory | None:
@@ -264,23 +267,22 @@ def _directory(segments: tuple[str, ...]) -> BehaviorDirectory | None:
 
 
 def _address(segments: tuple[str, ...]) -> BehaviorAddress | None:
+    """L2 路径固定为「类型前缀 + YYYY/MM/DD + 叶文件」，长度不符即不是文档地址。"""
+
+    kind = kind_for_directory_prefix(segments)
+    if kind is None:
+        return None
+    depth = len(kind_directory_prefix(kind))
+    if len(segments) != depth + 4:
+        return None
     try:
-        if len(segments) == 6 and segments[:2] in {
-            ("behaviors", "events"),
-            ("behaviors", "outcomes"),
-        }:
-            occurred_on = _date(segments[2:5])
-            kind = BehaviorKind.EVENT if segments[1] == "events" else BehaviorKind.OUTCOME
-            return BehaviorAddress.from_identity(kind, occurred_on, _markdown_stem(segments[5]))
-        if len(segments) == 5 and segments[0] == "episodes":
-            return BehaviorAddress.from_identity(
-                BehaviorKind.EPISODE,
-                _date(segments[1:4]),
-                _markdown_stem(segments[4]),
-            )
+        return BehaviorAddress.from_identity(
+            kind,
+            _date(segments[depth : depth + 3]),
+            _markdown_stem(segments[depth + 3]),
+        )
     except (TypeError, ValueError):
         return None
-    return None
 
 
 def _date(parts: tuple[str, ...]) -> date:

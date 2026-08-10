@@ -1,0 +1,19 @@
+pattern_type: branch
+description: 一个 StatePattern 下可发生的行为分支及其 Outcome 分布。
+path_template: patterns/branches/{shard}/{state_key}/{branch_key}.md
+operation_mode: add_only
+fields:
+  - state_key
+  - branch_key
+  - logical_branch_key
+  - pattern_generation
+  - identity_material
+  - target_kind
+  - behavior
+  - conditions
+  - support_count
+  - conditional_probability
+  - confidence
+  - sample_refs
+  - outcomes
+  - projection_version
