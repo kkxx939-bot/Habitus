@@ -14,7 +14,7 @@ from foundation.integrity import canonical_digest, canonicalize, immutable_snaps
 from prediction.context import PredictionContext
 from prediction.model import PredictionKind, PredictionTargetLevel, prediction_sample_id
 
-_RUN_CONTRACT = "prediction-run-v1"
+_RUN_CONTRACT = "prediction-run-v2"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -190,7 +190,9 @@ class PredictionRun:
     source_bindings: tuple[PredictionRunSourceBinding, ...]
     candidates: tuple[PredictionCandidate, ...]
     abstention_reason: PredictionAbstentionReason | None
-    signal_provenance: str | None = None
+    memory_provenance: str | None = None
+    advisor_adjustment: Mapping[str, float] | None = None
+    excluded_branch_keys: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         prediction_sample_id(self.run_id)
@@ -257,12 +259,27 @@ class PredictionRun:
         object.__setattr__(self, "abstention_reason", abstention)
         if bool(candidates) == (abstention is not None):
             raise ValueError("prediction run requires candidates or one abstention reason, but not both")
-        if self.signal_provenance is not None:
+        if self.memory_provenance is not None:
             object.__setattr__(
                 self,
-                "signal_provenance",
-                _sha256(self.signal_provenance, "prediction run signal provenance"),
+                "memory_provenance",
+                _sha256(self.memory_provenance, "prediction run memory provenance"),
             )
+        if self.advisor_adjustment is not None:
+            object.__setattr__(
+                self,
+                "advisor_adjustment",
+                immutable_snapshot(
+                    _advisor_adjustment(self.advisor_adjustment)
+                ),
+            )
+        excluded = tuple(self.excluded_branch_keys)
+        if any(not isinstance(item, str) for item in excluded):
+            raise ValueError("prediction run excluded branch keys must be text")
+        normalized_excluded = tuple(sorted({prediction_sample_id(item) for item in excluded}))
+        if normalized_excluded != excluded:
+            raise ValueError("prediction run excluded branch keys must be sorted and unique")
+        object.__setattr__(self, "excluded_branch_keys", normalized_excluded)
         expected_run_id = canonical_digest({"contract": _RUN_CONTRACT, **self._identity_fields()})
         if self.run_id != expected_run_id:
             raise ValueError("prediction run ID does not match its immutable content")
@@ -285,7 +302,9 @@ class PredictionRun:
         candidates: Sequence[PredictionCandidate] = (),
         abstention_reason: PredictionAbstentionReason | str | None = None,
         pattern_bindings: Sequence[PredictionRunPatternBinding] = (),
-        signal_provenance: str | None = None,
+        memory_provenance: str | None = None,
+        advisor_adjustment: Mapping[str, float] | None = None,
+        excluded_branch_keys: Sequence[str] = (),
     ) -> PredictionRun:
         if not isinstance(context, PredictionContext):
             raise TypeError("prediction run context must be PredictionContext")
@@ -311,8 +330,14 @@ class PredictionRun:
         )
         normalized_provenance = (
             None
-            if signal_provenance is None
-            else _sha256(signal_provenance, "prediction run signal provenance")
+            if memory_provenance is None
+            else _sha256(memory_provenance, "prediction run memory provenance")
+        )
+        normalized_adjustment = (
+            None if advisor_adjustment is None else _advisor_adjustment(advisor_adjustment)
+        )
+        normalized_excluded = tuple(
+            sorted({prediction_sample_id(str(item)) for item in excluded_branch_keys})
         )
         context_digest = canonical_digest(context_fields)
         identity = _identity_fields(
@@ -327,7 +352,9 @@ class PredictionRun:
             source_bindings=normalized_bindings,
             candidates=normalized_candidates,
             abstention_reason=normalized_abstention,
-            signal_provenance=normalized_provenance,
+            memory_provenance=normalized_provenance,
+            advisor_adjustment=normalized_adjustment,
+            excluded_branch_keys=normalized_excluded,
         )
         run_id = canonical_digest({"contract": _RUN_CONTRACT, **identity})
         return cls(
@@ -343,7 +370,9 @@ class PredictionRun:
             source_bindings=normalized_bindings,
             candidates=normalized_candidates,
             abstention_reason=normalized_abstention,
-            signal_provenance=normalized_provenance,
+            memory_provenance=normalized_provenance,
+            advisor_adjustment=normalized_adjustment,
+            excluded_branch_keys=normalized_excluded,
         )
 
     def _identity_fields(self) -> dict[str, Any]:
@@ -359,7 +388,9 @@ class PredictionRun:
             source_bindings=self.source_bindings,
             candidates=self.candidates,
             abstention_reason=self.abstention_reason,
-            signal_provenance=self.signal_provenance,
+            memory_provenance=self.memory_provenance,
+            advisor_adjustment=self.advisor_adjustment,
+            excluded_branch_keys=self.excluded_branch_keys,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -381,7 +412,9 @@ class PredictionRun:
             "source_bindings",
             "candidates",
             "abstention_reason",
-            "signal_provenance",
+            "memory_provenance",
+            "advisor_adjustment",
+            "excluded_branch_keys",
         }
         payload = _exact_mapping(value, expected, "prediction run")
         if payload["schema"] != _RUN_CONTRACT:
@@ -408,7 +441,11 @@ class PredictionRun:
                 for item in _sequence(payload["candidates"], "prediction run candidates")
             ),
             abstention_reason=payload["abstention_reason"],
-            signal_provenance=payload["signal_provenance"],
+            memory_provenance=payload["memory_provenance"],
+            advisor_adjustment=payload["advisor_adjustment"],
+            excluded_branch_keys=tuple(
+                _sequence(payload["excluded_branch_keys"], "prediction run excluded branch keys")
+            ),
         )
 
 
@@ -444,7 +481,9 @@ def _identity_fields(
     source_bindings: Sequence[PredictionRunSourceBinding],
     candidates: Sequence[PredictionCandidate],
     abstention_reason: PredictionAbstentionReason | None,
-    signal_provenance: str | None,
+    memory_provenance: str | None,
+    advisor_adjustment: Mapping[str, float] | None,
+    excluded_branch_keys: Sequence[str],
 ) -> dict[str, Any]:
     value = canonicalize(
         {
@@ -459,11 +498,25 @@ def _identity_fields(
             "source_bindings": [item.to_dict() for item in source_bindings],
             "candidates": [item.to_dict() for item in candidates],
             "abstention_reason": None if abstention_reason is None else abstention_reason.value,
-            "signal_provenance": signal_provenance,
+            "memory_provenance": memory_provenance,
+            "advisor_adjustment": advisor_adjustment,
+            "excluded_branch_keys": list(excluded_branch_keys),
         }
     )
     assert isinstance(value, dict)
     return value
+
+
+def _advisor_adjustment(value: Mapping[str, float]) -> dict[str, float]:
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError("prediction run advisor adjustment must be a non-empty mapping")
+    normalized: dict[str, float] = {}
+    for key in sorted(value):
+        weight = value[key]
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not 0 <= float(weight) <= 1:
+            raise ValueError("prediction run advisor weights must be within [0, 1]")
+        normalized[prediction_sample_id(str(key))] = float(weight)
+    return normalized
 
 
 def _datetime(value: object, label: str) -> datetime:

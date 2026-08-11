@@ -13,17 +13,17 @@ class PredictionPredictorError(ValueError):
 
 @dataclass(frozen=True)
 class PredictionDecisionConfig:
-    """执行判决的代价门槛与记忆调整强度。
+    """执行判决的代价门槛与顾问调整强度。
 
     执行错误行为的代价远高于漏预测，因此门槛全部偏保守：top-1 校准概率、
     对 top-2 的边际、状态经验数和负向结果风险必须同时通过才允许执行。
-    ``memory_boost`` 控制记忆信号在分支之间重分配概率质量的最大幅度，
-    信号只搬移质量，不创造质量。
+    ``advisor_boost`` 控制在线顾问权重在候选之间重分配概率质量的最大
+    幅度，权重只搬移质量，不创造质量。
 
     TODO(PRED-TUNING-001): 当前全部默认门槛与增益是保守初值。真实样本
     可用后，执行门槛按各 domain 的代价比 p* = C_wrong/(C_wrong+U_correct)
     结合回测的覆盖率–精确率曲线定档（每个 domain 一个配置实例），
-    memory_boost / advisor_boost 与旁路阈值同样以回测增量定值。
+    advisor_boost 与建议档门槛同样以回测增量定值。
     """
 
     min_coverage_score: float = 0.5
@@ -31,10 +31,7 @@ class PredictionDecisionConfig:
     execute_margin: float = 0.15
     min_execute_support: int = 3
     max_negative_outcome_probability: float = 0.2
-    memory_boost: float = 0.3
     advisor_boost: float = 0.5
-    routine_bypass_probability: float = 0.75
-    routine_bypass_confidence: float = 0.6
     max_candidates: int = 3
     temporal_bucket_hours: int = 3
     temporal_utc_offset_minutes: int = 0
@@ -57,24 +54,10 @@ class PredictionDecisionConfig:
             "max_negative_outcome_probability",
             _unit(self.max_negative_outcome_probability, "max_negative_outcome_probability"),
         )
-        boost = _finite(self.memory_boost, "memory_boost")
-        if boost < 0:
-            raise PredictionPredictorError("memory_boost must be at least zero")
-        object.__setattr__(self, "memory_boost", boost)
         advisor_boost = _finite(self.advisor_boost, "advisor_boost")
         if advisor_boost < 0:
             raise PredictionPredictorError("advisor_boost must be at least zero")
         object.__setattr__(self, "advisor_boost", advisor_boost)
-        object.__setattr__(
-            self,
-            "routine_bypass_probability",
-            _unit(self.routine_bypass_probability, "routine_bypass_probability"),
-        )
-        object.__setattr__(
-            self,
-            "routine_bypass_confidence",
-            _unit(self.routine_bypass_confidence, "routine_bypass_confidence"),
-        )
         object.__setattr__(self, "max_candidates", _positive_int(self.max_candidates, "max_candidates"))
         hours = _positive_int(self.temporal_bucket_hours, "temporal_bucket_hours")
         if hours >= 24 or 24 % hours != 0:
@@ -95,10 +78,7 @@ class PredictionDecisionConfig:
             "execute_margin": self.execute_margin,
             "min_execute_support": self.min_execute_support,
             "max_negative_outcome_probability": self.max_negative_outcome_probability,
-            "memory_boost": self.memory_boost,
             "advisor_boost": self.advisor_boost,
-            "routine_bypass_probability": self.routine_bypass_probability,
-            "routine_bypass_confidence": self.routine_bypass_confidence,
             "max_candidates": self.max_candidates,
             "temporal_bucket_hours": self.temporal_bucket_hours,
             "temporal_utc_offset_minutes": self.temporal_utc_offset_minutes,

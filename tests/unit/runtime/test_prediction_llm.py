@@ -12,6 +12,7 @@ from ModelClient import (
     ChatClient,
     ChatModelConfig,
     ModelResponse,
+    ModelTransportError,
     PreparedChatRequest,
     ProviderCapabilities,
     ProviderConfig,
@@ -30,7 +31,7 @@ from prediction.learning.keys import logical_state_key, sequence_state_identity
 from prediction.predictor import PatternGraphPredictor, PredictionDecisionConfig
 from Runtime.prediction_llm import (
     PatternGraphLLMAdvisor,
-    derive_stance_table,
+    PredictionConstraintChecker,
     distill_behavior_prior,
     predict_with_advice,
 )
@@ -165,20 +166,130 @@ def test_advisor_digest_binds_the_model_route() -> None:
     assert first.advisor_digest == PatternGraphLLMAdvisor(_client(model="deepseek-chat")).advisor_digest
 
 
-def test_stance_table_derivation_and_bridge_consumption() -> None:
-    client = _client(
-        '{"stances": [{"text": "回家先开空调", "stance": "support"},'
-        ' {"text": "除非下雨否则每天浇水", "stance": "support"}]}'
+
+def test_advisor_receives_memory_context_and_checker_reviews_candidates(tmp_path) -> None:
+    documents = (
+        _transition("mc-a"),
+        _transition("mc-b"),
+        _transition("mc-c", label=_WATER),
+        _transition("mc-d", label=_WATER),
+    )
+    tree = PredictionTree(tmp_path / "prediction")
+    PredictionPublisher(tree).publish(documents)
+    patterns = PredictionPatternLearner().learn(documents, learned_at=LEARNED_AT)
+    PredictionPatternGenerationPublisher(tree).publish(patterns)
+    graph = PredictionPatternGraph(tree)
+    context = PredictionContext.from_document(_transition("mc-query"))
+    config = PredictionDecisionConfig(
+        execute_probability_threshold=0.25,
+        execute_margin=0.05,
+        min_execute_support=2,
+    )
+    probe = PatternGraphPredictor(graph, config=config)
+    baseline = probe.predict(
+        context, predicted_at=LEARNED_AT, horizon_seconds=3600, source_bindings=_BINDINGS
+    )
+    water_key = next(
+        str(item.payload["branch_key"])
+        for item in baseline.run.candidates
+        if item.semantics == "倒一杯水"
     )
 
-    table = asyncio.run(
-        derive_stance_table(client, ("回家先开空调", "除非下雨否则每天浇水"))
+    advisor = PatternGraphLLMAdvisor(
+        _client(f'{{"preferences": [{{"branch_key": "{water_key}", "weight": 1.0}}]}}')
+    )
+    predictor = PatternGraphPredictor(graph, config=config, advisor_digest=advisor.advisor_digest)
+    decision = asyncio.run(
+        predict_with_advice(
+            predictor,
+            advisor,
+            context,
+            predicted_at=LEARNED_AT,
+            horizon_seconds=3600,
+            source_bindings=_BINDINGS,
+            memory_context=("未完成事项「给家人倒水」(状态 open)",),
+        )
+    )
+    assert decision.run.candidates[0].semantics == "倒一杯水"
+    provider = advisor.client.client.provider
+    assert isinstance(provider, QueueProvider)
+    provider_request = provider.requests[0]
+    assert any(
+        "未完成事项「给家人倒水」" in message.content for message in provider_request.messages
     )
 
-    assert table.lookup("回家先开空调") == "support"
-    assert table.lookup("除非下雨否则每天浇水") == "support"
-    assert table.lookup("没解析过的条目") is None
-    assert table.version != type(table)().version
+    ac_key = next(
+        str(item.payload["branch_key"])
+        for item in baseline.run.candidates
+        if item.semantics == "打开空调"
+    )
+    checker = PredictionConstraintChecker(
+        _client(
+            f'{{"verdicts": [{{"branch_key": "{ac_key}", "allowed": false,'
+            f' "reason": "晚间不开空调"}},'
+            f' {{"branch_key": "{water_key}", "allowed": true, "reason": "无冲突"}}]}}'
+        )
+    )
+    verdicts = asyncio.run(
+        checker.review(baseline.run, memory_context=("晚上尽量不开空调",))
+    )
+    assert verdicts[ac_key]["allowed"] is False
+    assert verdicts[water_key]["allowed"] is True
+    assert asyncio.run(
+        checker.review(baseline.run, memory_context=())
+    ) == {}
+
+
+def test_risk_blocked_decisions_never_consult_the_advisor(tmp_path) -> None:
+    from tests.unit.prediction.test_pattern_learning import _consequence
+
+    transitions = (
+        *(_transition(f"riskadv-{index}") for index in range(7)),
+        *(_transition(f"riskadv-w{index}", label=_WATER) for index in range(6)),
+    )
+    consequences = tuple(
+        _consequence(
+            f"riskadv-{index}",
+            outcome_type="correction",
+            valence="negative",
+            outcome_semantics="用户随即关闭了空调",
+            delay_seconds=30.0,
+        )
+        for index in range(3)
+    )
+    tree = PredictionTree(tmp_path / "prediction")
+    PredictionPublisher(tree).publish(transitions)
+    patterns = PredictionPatternLearner().learn(
+        transitions, learned_at=LEARNED_AT, consequences=consequences
+    )
+    PredictionPatternGenerationPublisher(tree).publish(patterns)
+    graph = PredictionPatternGraph(tree)
+    context = PredictionContext.from_document(_transition("riskadv-query"))
+    silent_advisor = PatternGraphLLMAdvisor(_client())
+    predictor = PatternGraphPredictor(
+        graph,
+        config=PredictionDecisionConfig(
+            execute_probability_threshold=0.3,
+            execute_margin=0.08,
+            min_execute_support=2,
+        ),
+        advisor_digest=silent_advisor.advisor_digest,
+    )
+
+    decision = asyncio.run(
+        predict_with_advice(
+            predictor,
+            silent_advisor,
+            context,
+            predicted_at=LEARNED_AT,
+            horizon_seconds=3600,
+            source_bindings=_BINDINGS,
+        )
+    )
+
+    assert not decision.execute
+    assert "negative_outcome_risk" in decision.blocked_gates
+    assert "margin_below_threshold" in decision.blocked_gates
 
 
 def test_predict_with_advice_gates_the_llm_and_reorders_uncertain_ties(tmp_path) -> None:
@@ -254,3 +365,63 @@ def test_predict_with_advice_gates_the_llm_and_reorders_uncertain_ties(tmp_path)
         )
     )
     assert confident.execute
+
+
+def test_advisor_unavailability_falls_back_to_the_unadvised_decision(tmp_path) -> None:
+    documents = (
+        _transition("adv-down-a"),
+        _transition("adv-down-b"),
+        _transition("adv-down-c", label=_WATER),
+        _transition("adv-down-d", label=_WATER),
+    )
+    tree = PredictionTree(tmp_path / "prediction")
+    PredictionPublisher(tree).publish(documents)
+    patterns = PredictionPatternLearner().learn(documents, learned_at=LEARNED_AT)
+    PredictionPatternGenerationPublisher(tree).publish(patterns)
+    graph = PredictionPatternGraph(tree)
+    context = PredictionContext.from_document(_transition("adv-down-query"))
+    config = PredictionDecisionConfig(
+        execute_probability_threshold=0.25,
+        execute_margin=0.05,
+        min_execute_support=2,
+    )
+
+    provider = QueueProvider([])
+
+    def _raise(request: PreparedChatRequest) -> ModelResponse:
+        raise ModelTransportError("provider down")
+
+    provider.complete = _raise  # type: ignore[method-assign]
+    broken = StructuredChatClient(
+        ChatClient(
+            ChatModelConfig(
+                ProviderConfig(
+                    provider="test-provider",
+                    adapter="test-adapter",
+                    model="test-model",
+                    max_retries=0,
+                ),
+                structured_output_mode="json_schema",
+            ),
+            provider,
+        )
+    )
+    advisor = PatternGraphLLMAdvisor(broken)
+    predictor = PatternGraphPredictor(
+        graph, config=config, advisor_digest=advisor.advisor_digest
+    )
+
+    decision = asyncio.run(
+        predict_with_advice(
+            predictor,
+            advisor,
+            context,
+            predicted_at=LEARNED_AT,
+            horizon_seconds=3600,
+            source_bindings=_BINDINGS,
+        )
+    )
+
+    assert not decision.execute
+    assert "margin_below_threshold" in decision.blocked_gates
+    assert decision.run.advisor_adjustment is None

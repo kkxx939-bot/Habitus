@@ -136,6 +136,31 @@ def test_backtest_matches_time_of_day_states_before_the_root() -> None:
     assert dict(report.top_k_hit_rates)[1] == 1.0
 
 
+def test_backtest_scores_only_the_sample_target_level() -> None:
+    documents = (
+        *(
+            _transition(f"lvl-term-{index}", terminal=True, cutoff_offset_minutes=index)
+            for index in range(5)
+        ),
+        *(
+            _transition(f"lvl-act-{index}", cutoff_offset_minutes=10 + index)
+            for index in range(3)
+        ),
+        _transition("lvl-hold", cutoff_offset_minutes=40),
+    )
+
+    report = backtest(
+        documents,
+        learned_at=LEARNED_AT,
+        config=PredictionEvaluationConfig(train_fraction=0.89),
+    )
+
+    assert report.holdout_count == 1
+    assert report.labeled_count == 1
+    assert report.escape_rate == 0.0
+    assert dict(report.top_k_hit_rates)[1] == 1.0
+
+
 def test_entropy_report_separates_root_and_context_ceilings() -> None:
     documents = (
         _transition("ent-a"),

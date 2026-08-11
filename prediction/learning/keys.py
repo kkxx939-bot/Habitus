@@ -18,15 +18,26 @@ TEMPORAL_FAMILY = "temporal"
 _LOGICAL_STATE_CONTRACT = "prediction-logical-state-pattern-v1"
 
 
+def select_last_step(steps: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    """选出历史里的最后一步；这里是"刚发生的行为"的唯一裁定规则。
+
+    检索查询与状态匹配必须描述同一步，否则并列步会让两侧各选各的。
+    """
+
+    if not steps:
+        return None
+    return max(steps, key=_step_order)
+
+
 def previous_step_key(
     steps: Sequence[Mapping[str, Any]],
     vocabulary: PredictionBehaviorVocabulary,
 ) -> dict[str, Any] | None:
     """从已完成历史步骤派生上一步的规范上下文键；无历史时返回 None。"""
 
-    if not steps:
+    last = select_last_step(steps)
+    if last is None:
         return None
-    last = max(steps, key=_step_order)
     base_type = last["behavior_type"] if last["behavior_type"] is not None else last["semantics"]
     return {
         "behavior_type": vocabulary.canonical_token(base_type, "history behavior_type"),
@@ -86,6 +97,16 @@ def temporal_state_identity(level: str, domain: str, bucket: str) -> dict[str, A
         "target_domain": domain,
         "hour_bucket": bucket,
     }
+
+
+def target_kind_for_level(target_level: str) -> str:
+    """预测目标层级到分支 target_kind 的唯一映射(terminal→termination)。
+
+    学习器物化、预测器过滤与回测记分必须用同一映射,否则 terminal 层
+    查询会因键域不匹配恒空过滤、以 LOW_CONFIDENCE 掩盖缺陷。
+    """
+
+    return "termination" if target_level == "terminal" else target_level
 
 
 def label_branch_identity(
@@ -151,7 +172,9 @@ __all__ = [
     "label_branch_identity",
     "logical_state_key",
     "previous_step_key",
+    "select_last_step",
     "sequence_state_identity",
+    "target_kind_for_level",
     "temporal_bucket",
     "temporal_state_identity",
     "treatment_branch_identity",

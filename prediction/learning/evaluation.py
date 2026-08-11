@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from prediction.learning.keys import (
     logical_state_key,
     previous_step_key,
     sequence_state_identity,
+    target_kind_for_level,
     temporal_bucket,
     temporal_state_identity,
 )
@@ -107,6 +109,7 @@ class _SampleView:
 
     level: str
     domain: str
+    target_kind: str
     context: dict[str, Any] | None
     label_key: str | None
     cutoff: datetime
@@ -198,9 +201,13 @@ def fit_probability_calibration(
 ) -> PredictionProbabilityCalibration:
     """在时间切分的留出段上拟合分支概率的等渗校准映射。
 
-    校准对来自留出段每条有标签样本所匹配状态的全部分支：(分支概率,
-    该分支是否就是真实下一步)。拟合与其后应用共用同一条学习与匹配链，
-    保证校准的是线上真正会输出的那个概率。
+    三段协议防泄漏：只取时间上前 ``train_fraction`` 的训练窗口，再在
+    窗口内部按同比切成"内层训练段 / 校准段"——学习在内层训练段、校准
+    对采自校准段。最终留出段（后 1−train_fraction）校准从未见过，
+    ``backtest(calibration=...)`` 在其上报告的 ECE 与覆盖率曲线才是
+    真实的外推校准质量；在拟合数据上自评的等渗 ECE 必然接近零，
+    会把执行门槛定得系统性过松。校准对来自校准段每条有标签样本所
+    匹配状态的全部分支：(分支概率, 该分支是否就是真实下一步)。
     """
 
     resolved_config = config or PredictionEvaluationConfig()
@@ -209,7 +216,8 @@ def fit_probability_calibration(
     resolved_learner = learner or PredictionPatternLearner()
     if not isinstance(resolved_learner, PredictionPatternLearner):
         raise PredictionLearningError("learner must be PredictionPatternLearner")
-    train, holdout = temporal_split(samples, train_fraction=resolved_config.train_fraction)
+    window, _unseen = temporal_split(samples, train_fraction=resolved_config.train_fraction)
+    train, holdout = temporal_split(window, train_fraction=resolved_config.train_fraction)
     patterns = resolved_learner.learn(train, learned_at=learned_at)
     distributions = _distribution_index(patterns)
     outcomes: list[tuple[float, bool]] = []
@@ -219,6 +227,8 @@ def fit_probability_calibration(
             continue
         view = _sample_view(document, resolved_learner)
         distribution = _matched_distribution(distributions, view, resolved_learner)
+        if distribution:
+            distribution = _level_filtered(distribution, view.target_kind)
         if not distribution:
             continue
         outcomes.extend(
@@ -269,6 +279,8 @@ def backtest(
             continue
         view = _sample_view(document, resolved_learner)
         distribution = _matched_distribution(distributions, view, resolved_learner)
+        if distribution:
+            distribution = _level_filtered(distribution, view.target_kind)
         if not distribution:
             unmatched_count += 1
             continue
@@ -339,9 +351,11 @@ def _sample_view(document: PredictionDocument, learner: PredictionPatternLearner
     label_key = (
         canonical_json(label_branch_identity(fields["label"], learner.vocabulary)) if labeled else None
     )
+    target_level = str(fields["prediction_scope"]["target_level"])
     return _SampleView(
         level=level,
         domain=domain,
+        target_kind=target_kind_for_level(target_level),
         context=context,
         label_key=label_key,
         cutoff=datetime.fromisoformat(str(fields["anchor"]["cutoff_at"]).replace("Z", "+00:00")),
@@ -398,6 +412,23 @@ def _matched_distribution(
     if matched is None:
         return root
     return _with_inherited_mass(matched, root)
+
+
+def _level_filtered(
+    distribution: Mapping[str, float],
+    target_kind: str,
+) -> dict[str, float]:
+    """镜像线上判决的 target_level 过滤：只对样本目标层级的分支记分。
+
+    混层分布里的 termination 分支线上永远不会成为 next_step 候选，
+    让它参与 top-k/log-loss 会把指标测偏到非服务路径上。
+    """
+
+    return {
+        key: probability
+        for key, probability in distribution.items()
+        if json.loads(key)["target_kind"] == target_kind
+    }
 
 
 def _with_inherited_mass(

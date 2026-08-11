@@ -75,22 +75,27 @@ class PredictionProbabilityCalibration:
     ) -> PredictionProbabilityCalibration:
         """用 PAV 从 (预测概率, 是否命中) 对拟合单调校准映射。
 
-        相邻违反单调性的块被合并为加权均值，结果是经验准确率对预测概率的
-        最优单调拟合；同概率的块合并为一个支点。空输入返回恒等映射。
+        同概率的对先预聚合为单块再跑 PAV——真实数据里大量精确重复的
+        经验概率会让重复求和产生 ulp 级漂移，导致支点非单调而崩溃；
+        预聚合消除该来源，末端再做一次单调夹取吸收残余浮点噪声。
+        相邻违反单调性的块合并为加权均值，结果是经验准确率对预测概率
+        的最优单调拟合。空输入返回恒等映射。
         """
 
-        pairs = sorted(
-            (
-                (_unit(probability, "outcome probability"), 1.0 if hit else 0.0)
-                for probability, hit in outcomes
-            ),
-            key=lambda item: item[0],
-        )
-        if not pairs:
+        aggregated: dict[float, list[float]] = {}
+        total_pairs = 0
+        for probability, hit in outcomes:
+            key = _unit(probability, "outcome probability")
+            bucket = aggregated.setdefault(key, [0.0, 0.0])
+            bucket[0] += 1.0 if hit else 0.0
+            bucket[1] += 1.0
+            total_pairs += 1
+        if not aggregated:
             return cls()
         blocks: list[list[float]] = []
-        for probability, hit in pairs:
-            blocks.append([probability, hit, 1.0])
+        for probability in sorted(aggregated):
+            hits, weight = aggregated[probability]
+            blocks.append([probability * weight, hits, weight])
             while len(blocks) > 1 and blocks[-2][1] / blocks[-2][2] > blocks[-1][1] / blocks[-1][2]:
                 last = blocks.pop()
                 blocks[-1][0] += last[0]
@@ -102,10 +107,13 @@ class PredictionProbabilityCalibration:
             bucket = merged.setdefault(x, [0.0, 0.0])
             bucket[0] += total_hit
             bucket[1] += weight
-        points = tuple(
-            (x, merged[x][0] / merged[x][1]) for x in sorted(merged)
-        )
-        return cls(points=points, sample_count=len(pairs))
+        points: list[tuple[float, float]] = []
+        previous = 0.0
+        for x in sorted(merged):
+            value = max(previous, min(1.0, merged[x][0] / merged[x][1]))
+            points.append((x, value))
+            previous = value
+        return cls(points=tuple(points), sample_count=total_pairs)
 
 
 def _unit(value: object, label: str) -> float:

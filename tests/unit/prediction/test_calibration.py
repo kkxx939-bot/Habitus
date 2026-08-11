@@ -61,24 +61,93 @@ def test_apply_interpolates_and_identity_when_empty() -> None:
         PredictionProbabilityCalibration(points=((0.2, 0.5), (0.8, 0.1)))
 
 
-def test_fitted_calibration_shrinks_overconfident_probabilities() -> None:
+def test_pav_survives_massive_duplicate_probabilities() -> None:
+    outcomes = []
+    for value, hits, total in ((1 / 3, 9, 28), (2 / 3, 20, 28), (0.9999991267577347, 27, 28)):
+        outcomes.extend((value, index < hits) for index in range(total))
+
+    calibration = PredictionProbabilityCalibration.from_outcomes(outcomes)
+
+    assert calibration.sample_count == 84
+    values = [y for _x, y in calibration.points]
+    assert values == sorted(values)
+
+
+def test_calibration_runs_before_reallocation_and_ties_break_by_raw_probability(tmp_path) -> None:
     documents = (
+        *(_transition(f"order-{index}") for index in range(3)),
+        *(_transition(f"order-w{index}", label=_WATER) for index in range(2)),
+    )
+    tree = PredictionTree(tmp_path / "prediction")
+    PredictionPublisher(tree).publish(documents)
+    patterns = PredictionPatternLearner().learn(documents, learned_at=LEARNED_AT)
+    PredictionPatternGenerationPublisher(tree).publish(patterns)
+    graph = PredictionPatternGraph(tree)
+    context = PredictionContext.from_document(_transition("order-query"))
+    config = PredictionDecisionConfig(
+        execute_probability_threshold=0.3,
+        execute_margin=0.05,
+        min_execute_support=2,
+    )
+    shrink = PredictionProbabilityCalibration(points=((0.2, 0.2), (0.8, 0.5)))
+    flat = PredictionProbabilityCalibration(points=((0.05, 0.45), (0.95, 0.45)))
+
+    def _run(calibration, weights=None):
+        predictor = PatternGraphPredictor(
+            graph,
+            config=config,
+            calibration=calibration,
+            advisor_digest="a" * 64 if weights is not None else None,
+        )
+        return predictor.predict(
+            context,
+            predicted_at=LEARNED_AT,
+            horizon_seconds=3600,
+            source_bindings=_BINDINGS,
+            advisor_weights=weights,
+        ).run
+
+    plain = _run(shrink)
+    water_key = next(
+        str(item.payload["branch_key"]) for item in plain.candidates if item.semantics == "倒一杯水"
+    )
+    advised = _run(shrink, weights={water_key: 1.0})
+    plain_total = sum(item.probability for item in plain.candidates)
+    advised_total = sum(item.probability for item in advised.candidates)
+    assert advised_total == pytest.approx(plain_total)
+
+    flat_run = _run(flat)
+    raw_order = [item.semantics for item in _run(None).candidates]
+    assert [item.semantics for item in flat_run.candidates] == raw_order
+
+
+def test_calibration_is_fitted_without_seeing_the_final_holdout() -> None:
+    shared = (
         *(
             _transition(f"cal-{index}", cutoff_offset_minutes=index)
-            for index in range(4)
+            for index in range(6)
         ),
+    )
+    documents = (
+        *shared,
         _transition("cal-hold-a", cutoff_offset_minutes=30),
         _transition("cal-hold-b", label=_WATER, cutoff_offset_minutes=31),
+    )
+    flipped_holdout = (
+        *shared,
+        _transition("cal-hold-c", label=_WATER, cutoff_offset_minutes=30),
+        _transition("cal-hold-d", label=_WATER, cutoff_offset_minutes=31),
     )
 
     calibration = fit_probability_calibration(documents, learned_at=LEARNED_AT)
     assert calibration.sample_count > 0
+    assert calibration.version == fit_probability_calibration(
+        flipped_holdout, learned_at=LEARNED_AT
+    ).version
 
-    raw = backtest(documents, learned_at=LEARNED_AT)
     calibrated = backtest(documents, learned_at=LEARNED_AT, calibration=calibration)
-    assert raw.expected_calibration_error is not None
     assert calibrated.expected_calibration_error is not None
-    assert calibrated.expected_calibration_error <= raw.expected_calibration_error
+    assert calibrated.coverage_precision
 
 
 def test_predictor_applies_calibration_to_candidates_and_identity(tmp_path) -> None:

@@ -1,191 +1,198 @@
-"""长期记忆检索结果到行为预测信号的组合根桥接。
+"""长期记忆到行为预测的组合根桥接:检索、上下文供给与审计绑定。
 
-prediction 不得 import memory（架构边界强制），memory 也不应知道 prediction；
-把记忆命中翻译成 ``PredictionMemorySignal`` 的算法因此只能住在组合根一侧。
-本模块是纯函数层：输入是一次记忆检索的完整命中与快照，输出是可注入
-``PatternGraphPredictor.predict`` 的信号与来源绑定，不做检索、不落盘。
+prediction 不得 import memory(架构边界强制),memory 也不应知道 prediction,
+桥接因此住在组合根。本模块只做确定性工作:构造行为条件化的检索查询、
+按相关性过滤命中、把记忆条目整理成交给两个 LLM 位置(不确定时的顾问、
+执行前的约束检查)的原文上下文,并产出可审计的来源绑定与溯源摘要。
+
+这里刻意不做任何语义判断:条目的立场(趋向/回避)、意图与此刻的相关性
+都依赖情境,属于 LLM 在调用现场的裁量;领域代码不用关键词、正则或
+预计算映射表重新解释自然语言。
 """
 
 from __future__ import annotations
 
-import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from dataclasses import field as dataclass_field
 from datetime import datetime
-from types import MappingProxyType
 
 from foundation.integrity import canonical_digest
 from memory.document import MemoryDocument
 from memory.model import MemoryKind
 from memory.retrieval import MemoryMatchedMemory
 from memory.snapshot import MemorySnapshot
-from memory.uri import MemoryURI
 from prediction import PredictionContext, PredictionRunSourceBinding
-from prediction.predictor import PredictionMemorySignal
+from prediction.learning.keys import select_last_step
+
+MAX_MEMORY_CONTEXT_ENTRIES = 24
+_CONTEXT_KINDS = frozenset({MemoryKind.INTENTION, MemoryKind.PREFERENCE, MemoryKind.PROFILE})
+_SENTENCE_SEPARATORS = "。;；!！?？\n"
 
 
-class MemorySignalBridgeError(ValueError):
-    """记忆信号桥接的输入或配置违反合同。"""
+class MemoryBridgeError(ValueError):
+    """记忆桥接的输入或配置违反合同。"""
 
 
 @dataclass(frozen=True)
-class MemorySignalBridgeConfig:
-    """记忆命中折算为信号权重的确定性系数。
+class MemoryBridgeConfig:
+    """上下文供给的确定性边界。
 
-    权重 = 类型先验 × 状态因子 × 检索相关性 × 新鲜度，并截断到 (0, 1]。
-    intention 的先验最高，因为未完成事项是"下一步做什么"最直接的证据；
-    preference 表达选择倾向次之；profile 只提供微弱的稳定先验。
-    ``relevance_threshold`` 是硬性去噪门槛：与当前行为上下文相关性不足的
+    ``relevance_threshold`` 是硬性去噪门槛:与当前行为上下文相关性不足的
     命中直接丢弃而不是向上保底——检索不到相关记忆的行为事件等于不看记忆。
-    ``intention_freshness_tau_days`` 按 last_confirmed_at 的未确认天数做
-    指数衰减——长期未被对话确认的事项不应继续以全权重影响预测。
+    条目数量上限约束交给 LLM 的上下文体积;这里没有任何语义权重系数,
+    条目如何影响判断由 LLM 在情境里裁量。
     """
 
-    intention_prior: float = 1.0
-    preference_prior: float = 0.7
-    profile_prior: float = 0.4
-    blocked_intention_factor: float = 0.5
-    intention_freshness_tau_days: float = 60.0
     relevance_threshold: float = 0.35
     max_bullets_per_document: int = 3
-    max_signals: int = 8
-    persona_preference_weight: float = 0.5
-    persona_profile_weight: float = 0.35
-    max_persona_signals: int = 6
+    max_context_entries: int = 12
 
     def __post_init__(self) -> None:
-        for name in (
-            "intention_prior",
-            "preference_prior",
-            "profile_prior",
-            "blocked_intention_factor",
-            "relevance_threshold",
-            "persona_preference_weight",
-            "persona_profile_weight",
+        threshold = self.relevance_threshold
+        if (
+            isinstance(threshold, bool)
+            or not isinstance(threshold, (int, float))
+            or not 0 <= float(threshold) <= 1
         ):
-            object.__setattr__(self, name, _unit(getattr(self, name), name))
-        object.__setattr__(
-            self,
-            "max_persona_signals",
-            _positive_int(self.max_persona_signals, "max_persona_signals"),
-        )
-
-    def identity_material(self) -> dict[str, float | int]:
-        """返回参与信号溯源摘要的完整系数快照。"""
-
-        return {
-            "intention_prior": self.intention_prior,
-            "preference_prior": self.preference_prior,
-            "profile_prior": self.profile_prior,
-            "blocked_intention_factor": self.blocked_intention_factor,
-            "intention_freshness_tau_days": self.intention_freshness_tau_days,
-            "relevance_threshold": self.relevance_threshold,
-            "max_bullets_per_document": self.max_bullets_per_document,
-            "max_signals": self.max_signals,
-            "persona_preference_weight": self.persona_preference_weight,
-            "persona_profile_weight": self.persona_profile_weight,
-            "max_persona_signals": self.max_persona_signals,
-        }
-        object.__setattr__(
-            self,
-            "intention_freshness_tau_days",
-            _positive_finite(self.intention_freshness_tau_days, "intention_freshness_tau_days"),
-        )
+            raise MemoryBridgeError("relevance_threshold must be between zero and one")
+        object.__setattr__(self, "relevance_threshold", float(threshold))
         object.__setattr__(
             self,
             "max_bullets_per_document",
             _positive_int(self.max_bullets_per_document, "max_bullets_per_document"),
         )
-        object.__setattr__(self, "max_signals", _positive_int(self.max_signals, "max_signals"))
+        entries_cap = _positive_int(self.max_context_entries, "max_context_entries")
+        if entries_cap > MAX_MEMORY_CONTEXT_ENTRIES:
+            raise MemoryBridgeError(
+                "max_context_entries cannot exceed the shared LLM context bound"
+            )
+        object.__setattr__(self, "max_context_entries", entries_cap)
+
+    def identity_material(self) -> dict[str, float | int]:
+        """返回参与溯源摘要的完整配置快照。"""
+
+        return {
+            "relevance_threshold": self.relevance_threshold,
+            "max_bullets_per_document": self.max_bullets_per_document,
+            "max_context_entries": self.max_context_entries,
+        }
 
 
-_SIGNAL_KINDS = {
-    MemoryKind.INTENTION: "intention",
-    MemoryKind.PREFERENCE: "preference",
-    MemoryKind.PROFILE: "profile",
-}
-
-
-def derive_memory_signals(
+def derive_memory_context(
     memories: Sequence[MemoryMatchedMemory],
     *,
     now: datetime,
-    config: MemorySignalBridgeConfig | None = None,
-    stance_table: PredictionStanceTable | None = None,
-) -> tuple[PredictionMemorySignal, ...]:
-    """把一次记忆检索的命中确定性折算为低权重预测信号。
+    config: MemoryBridgeConfig | None = None,
+) -> tuple[str, ...]:
+    """把一次记忆检索的命中整理为交给 LLM 的原文上下文条目。
 
-    记忆是行为预测的补充而不是常开输入：低于 ``relevance_threshold`` 的
-    命中直接丢弃，检索不到相关记忆的行为事件自然产生零信号。只转换
-    intention / preference / profile 三类；entity / tool / event 与
-    completed intention 直接丢弃。intention 取 ``next_step``（最具体的
-    下一步）与 ``intent_name`` 两条语义；preference / profile 按 Markdown
-    bullet 拆分并限量，含否定语义（"不要/避免"类）的条目折算为 oppose
-    信号去压制对应行为，绝不加强。同输入必同输出，信号只提示概率重分配。
+    只收 intention / preference / profile;低于相关性门槛的命中直接丢弃。
+    intention 渲染为带状态与未确认天数的事实句(新鲜度是事实,如何看待
+    这个事实由 LLM 判断);preference / profile 按 bullet 或句子拆分,
+    保持条目粒度。不做立场判定、不做加权——条目影响力由调用现场的
+    LLM 在当前情境里裁量。
     """
 
-    if isinstance(memories, (str, bytes)) or not isinstance(memories, Sequence):
-        raise MemorySignalBridgeError("memories must be a sequence of MemoryMatchedMemory values")
+    resolved = config or MemoryBridgeConfig()
+    if not isinstance(resolved, MemoryBridgeConfig):
+        raise MemoryBridgeError("config must be MemoryBridgeConfig")
     if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
-        raise MemorySignalBridgeError("now must be a timezone-aware datetime")
-    resolved = config or MemorySignalBridgeConfig()
-    if not isinstance(resolved, MemorySignalBridgeConfig):
-        raise MemorySignalBridgeError("config must be MemorySignalBridgeConfig")
-    candidates: list[tuple[float, str, str, str, str]] = []
+        raise MemoryBridgeError("now must be a timezone-aware datetime")
+    if isinstance(memories, (str, bytes)) or not isinstance(memories, Sequence):
+        raise MemoryBridgeError("memories must be a sequence of MemoryMatchedMemory values")
+    entries: list[str] = []
     for match in memories:
         if not isinstance(match, MemoryMatchedMemory):
-            raise MemorySignalBridgeError("memories must contain MemoryMatchedMemory values")
-        signal_kind = _SIGNAL_KINDS.get(match.document.kind)
-        if signal_kind is None:
+            raise MemoryBridgeError("memories must contain MemoryMatchedMemory values")
+        document = match.document
+        if document.kind not in _CONTEXT_KINDS:
             continue
-        score = float(match.hit.score)
-        if score < resolved.relevance_threshold:
+        if float(match.hit.score) < resolved.relevance_threshold:
             continue
-        relevance = min(1.0, max(0.0, score))
-        uri = str(match.uri)
-        if match.document.kind is MemoryKind.INTENTION:
-            weight, texts = _intention_material(match, now, relevance, resolved)
+        if document.kind is MemoryKind.INTENTION:
+            entry = _intention_entry(document, now)
+            if entry is not None:
+                entries.append(entry)
         else:
-            prior = (
-                resolved.preference_prior
-                if match.document.kind is MemoryKind.PREFERENCE
-                else resolved.profile_prior
-            )
-            weight = prior * relevance
-            texts = _bullets(match.document.fields["content"], resolved.max_bullets_per_document)
-        weight = min(1.0, weight)
-        if weight <= 0:
-            continue
-        candidates.extend(
-            (weight, uri, text, signal_kind, _stance(text, match.document.kind, stance_table))
-            for text in texts
-        )
-    best: dict[tuple[str, str], tuple[float, str, str, str, str]] = {}
-    for candidate in sorted(candidates, key=lambda item: (-item[0], item[1], item[2])):
-        key = (candidate[4], " ".join(candidate[2].split()).casefold())
-        if key not in best:
-            best[key] = candidate
-    selected = sorted(best.values(), key=lambda item: (-item[0], item[1], item[2]))
-    return tuple(
-        PredictionMemorySignal(source_uri=uri, kind=kind, semantics=text, weight=weight, stance=stance)
-        for weight, uri, text, kind, stance in selected[: resolved.max_signals]
+            entries.extend(_bullets(document.fields["content"], resolved.max_bullets_per_document))
+    unique = [entry for entry in dict.fromkeys(entries) if entry]
+    return tuple(unique[: resolved.max_context_entries])
+
+
+def persona_context(
+    documents: Sequence[MemoryDocument],
+    *,
+    config: MemoryBridgeConfig | None = None,
+) -> tuple[str, ...]:
+    """把组合根定期直读的画像与稳定偏好整理为常驻上下文条目。
+
+    与逐事件检索的 :func:`derive_memory_context` 互补:这里回答"你是
+    什么人",供顾问在行为数据稀疏时判读、供约束检查识别用户表达过的
+    边界。只接受 profile / preference 两类文档。
+    """
+
+    resolved = config or MemoryBridgeConfig()
+    if not isinstance(resolved, MemoryBridgeConfig):
+        raise MemoryBridgeError("config must be MemoryBridgeConfig")
+    if isinstance(documents, (str, bytes)) or not isinstance(documents, Sequence):
+        raise MemoryBridgeError("documents must be a sequence of MemoryDocument values")
+    entries: list[str] = []
+    for document in documents:
+        if not isinstance(document, MemoryDocument):
+            raise MemoryBridgeError("documents must contain MemoryDocument values")
+        if document.kind not in {MemoryKind.PROFILE, MemoryKind.PREFERENCE}:
+            raise MemoryBridgeError("persona context accepts only profile and preference memory")
+        entries.extend(_bullets(document.fields["content"], resolved.max_bullets_per_document))
+    unique = [entry for entry in dict.fromkeys(entries) if entry]
+    return tuple(unique[: resolved.max_context_entries])
+
+
+def memory_provenance(
+    entries: Sequence[str],
+    *,
+    now: datetime,
+    config: MemoryBridgeConfig | None = None,
+) -> str:
+    """把一次预测实际提供给 LLM 的记忆上下文折算为溯源摘要。
+
+    条目集合、桥配置与整理时刻都影响 LLM 的裁量输入却不在 predictor
+    身份内;本摘要交给 ``PredictionRun.memory_provenance`` 记录,使每次
+    判决可回答"当时给了 LLM 哪些记忆、由哪版配置整理"。
+    """
+
+    if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+        raise MemoryBridgeError("now must be a timezone-aware datetime")
+    resolved = config or MemoryBridgeConfig()
+    if not isinstance(resolved, MemoryBridgeConfig):
+        raise MemoryBridgeError("config must be MemoryBridgeConfig")
+    normalized = []
+    for entry in entries:
+        if not isinstance(entry, str) or not entry.strip():
+            raise MemoryBridgeError("provenance entries must be non-empty text")
+        normalized.append(entry.strip())
+    return canonical_digest(
+        {
+            "contract": "prediction-memory-provenance-v1",
+            "bridge_config": resolved.identity_material(),
+            "entries": normalized,
+            "derived_at": now,
+        }
     )
 
 
 def memory_source_bindings(
     snapshots: Iterable[MemorySnapshot],
 ) -> tuple[PredictionRunSourceBinding, ...]:
-    """把记忆快照折算为 PredictionRun 的来源绑定，按 URI 排序去重。
+    """把记忆快照转成 PredictionRun 的来源绑定,按 URI 排序去重。
 
-    绑定使用快照读取器计算的规范 digest；缺失的记忆不能被绑定，
+    绑定使用快照读取器计算的规范 digest;缺失的记忆不能被绑定,
     同一 URI 出现不同版本快照视为调用方错误而不是静默择一。
     """
 
     bindings: dict[str, PredictionRunSourceBinding] = {}
     for snapshot in snapshots:
         if not snapshot.exists or snapshot.revision is None or snapshot.source_digest is None:
-            raise MemorySignalBridgeError("a missing memory snapshot cannot bind a prediction run")
+            raise MemoryBridgeError("a missing memory snapshot cannot bind a prediction run")
         binding = PredictionRunSourceBinding(
             str(snapshot.identity),
             int(snapshot.revision),
@@ -193,146 +200,27 @@ def memory_source_bindings(
         )
         existing = bindings.get(binding.uri)
         if existing is not None and existing != binding:
-            raise MemorySignalBridgeError("one memory URI resolved to conflicting snapshots")
+            raise MemoryBridgeError("one memory URI resolved to conflicting snapshots")
         bindings[binding.uri] = binding
     return tuple(bindings[uri] for uri in sorted(bindings))
-
-
-def _intention_material(
-    match: MemoryMatchedMemory,
-    now: datetime,
-    relevance: float,
-    config: MemorySignalBridgeConfig,
-) -> tuple[float, tuple[str, ...]]:
-    fields = match.document.fields
-    status = str(fields["status"])
-    if status == "completed":
-        return 0.0, ()
-    factor = config.blocked_intention_factor if status == "blocked" else 1.0
-    last_confirmed_at = match.document.metadata.last_confirmed_at
-    if last_confirmed_at is None:
-        freshness = 1.0
-    else:
-        unconfirmed_days = max(0.0, (now - last_confirmed_at).total_seconds() / 86400.0)
-        freshness = math.exp(-unconfirmed_days / config.intention_freshness_tau_days)
-    texts = tuple(
-        text.strip()
-        for text in (fields.get("next_step"), fields["intent_name"])
-        if isinstance(text, str) and text.strip()
-    )
-    return config.intention_prior * factor * relevance * freshness, texts
-
-
-def derive_persona_signals(
-    documents: Sequence[MemoryDocument],
-    *,
-    config: MemorySignalBridgeConfig | None = None,
-    stance_table: PredictionStanceTable | None = None,
-) -> tuple[PredictionMemorySignal, ...]:
-    """把"你是什么人"折算为常驻低权重的人物先验信号。
-
-    与逐事件检索的 :func:`derive_memory_signals` 不同，人物通道由组合根
-    定期直接读取 ``profile.md`` 与稳定 preferences 生成，不带检索分数、
-    不看当前事件——它表达的是跨事件成立的人物认知，帮助在行为数据
-    稀疏的状态下判读"这样的人下一步更可能做什么"。权重固定为较低的
-    人物系数；预测器侧的置信度缩放与惯例旁路保证：规律行为足够确定时
-    人物先验不产生任何影响。只接受 profile / preference 两类文档。
-    """
-
-    resolved = config or MemorySignalBridgeConfig()
-    if not isinstance(resolved, MemorySignalBridgeConfig):
-        raise MemorySignalBridgeError("config must be MemorySignalBridgeConfig")
-    if isinstance(documents, (str, bytes)) or not isinstance(documents, Sequence):
-        raise MemorySignalBridgeError("documents must be a sequence of MemoryDocument values")
-    candidates: list[tuple[float, str, str, str, str]] = []
-    for document in documents:
-        if not isinstance(document, MemoryDocument):
-            raise MemorySignalBridgeError("documents must contain MemoryDocument values")
-        if document.kind not in {MemoryKind.PROFILE, MemoryKind.PREFERENCE}:
-            raise MemorySignalBridgeError("persona signals accept only profile and preference memory")
-        uri = str(MemoryURI.from_address(document.address))
-        weight = (
-            resolved.persona_preference_weight
-            if document.kind is MemoryKind.PREFERENCE
-            else resolved.persona_profile_weight
-        )
-        signal_kind = _SIGNAL_KINDS[document.kind]
-        for text in _bullets(document.fields["content"], resolved.max_bullets_per_document):
-            candidates.append(
-                (weight, uri, text, signal_kind, _stance(text, document.kind, stance_table))
-            )
-    best: dict[tuple[str, str], tuple[float, str, str, str, str]] = {}
-    for candidate in sorted(candidates, key=lambda item: (-item[0], item[1], item[2])):
-        key = (candidate[4], " ".join(candidate[2].split()).casefold())
-        if key not in best:
-            best[key] = candidate
-    selected = sorted(best.values(), key=lambda item: (-item[0], item[1], item[2]))
-    return tuple(
-        PredictionMemorySignal(source_uri=uri, kind=kind, semantics=text, weight=weight, stance=stance)
-        for weight, uri, text, kind, stance in selected[: resolved.max_persona_signals]
-    )
-
-
-def signal_provenance(
-    signals: Sequence[PredictionMemorySignal],
-    *,
-    now: datetime,
-    config: MemorySignalBridgeConfig | None = None,
-    stance_table: PredictionStanceTable | None = None,
-) -> str:
-    """把一次预测实际使用的信号及其全部生成因素折算为溯源摘要。
-
-    桥配置系数、立场表版本与信号内容都影响最终候选概率却不在 predictor
-    身份内；本摘要交给 ``PredictionRun.signal_provenance`` 记录，使每次
-    判决可回答"当时的记忆信号是什么、由哪版配置和表折算"，记忆参数的
-    定档与错误执行的归因才有依据。
-    """
-
-    if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
-        raise MemorySignalBridgeError("now must be a timezone-aware datetime")
-    resolved = config or MemorySignalBridgeConfig()
-    if not isinstance(resolved, MemorySignalBridgeConfig):
-        raise MemorySignalBridgeError("config must be MemorySignalBridgeConfig")
-    normalized = []
-    for signal in signals:
-        if not isinstance(signal, PredictionMemorySignal):
-            raise MemorySignalBridgeError("signals must contain PredictionMemorySignal values")
-        normalized.append(
-            {
-                "source_uri": signal.source_uri,
-                "kind": signal.kind,
-                "semantics": signal.semantics,
-                "target_refs": list(signal.target_refs),
-                "weight": signal.weight,
-                "stance": signal.stance,
-            }
-        )
-    return canonical_digest(
-        {
-            "contract": "prediction-signal-provenance-v1",
-            "bridge_config": resolved.identity_material(),
-            "stance_table_version": None if stance_table is None else stance_table.version,
-            "signals": normalized,
-            "derived_at": now,
-        }
-    )
 
 
 def memory_query_for_context(context: PredictionContext) -> str:
     """从预测上下文构造行为条件化的记忆检索查询。
 
-    查询由"刚发生的行为 + 涉及对象 + 活跃目标"组成，使检索本身被当前
-    行为事件约束：与此无关的记忆根本不会被召回，等价于该事件不看记忆。
+    查询由"刚发生的行为 + 涉及对象 + 活跃目标"组成,使检索本身被当前
+    行为事件约束:与此无关的记忆根本不会被召回,等价于该事件不看记忆。
+    选步规则与状态匹配共用同一出处。
     """
 
     if not isinstance(context, PredictionContext):
-        raise MemorySignalBridgeError("context must be PredictionContext")
+        raise MemoryBridgeError("context must be PredictionContext")
     parts: list[str] = []
     history = context.input["behavior_history"]
     level = str(context.anchor["anchor_type"])
     steps = history["completed_actions"] if level == "action" else history["completed_events"]
-    if steps:
-        last = max(steps, key=lambda step: (step["sequence"] or 0, step["available_at"] or ""))
+    last = select_last_step(steps)
+    if last is not None:
         parts.append(str(last["semantics"]))
         parts.extend(str(item) for item in last["target_refs"])
     frame = context.input["observation_frame"]
@@ -344,85 +232,32 @@ def memory_query_for_context(context: PredictionContext) -> str:
     return " ".join(unique)
 
 
-_STRONG_OPPOSE_MARKERS = ("不喜欢", "讨厌")
-_OPPOSE_MARKERS = ("不要", "不用", "不得", "不吃", "避免", "禁止")
-_CLAUSE_INITIAL_OPPOSE = ("别", "勿")
-_SUPPORT_CUES = ("喜欢", "记得", "别忘", "希望")
-_CLAUSE_SEPARATORS = "，,。;；!！ "
-_STANCES = frozenset({"support", "oppose"})
-
-
-@dataclass(frozen=True)
-class PredictionStanceTable:
-    """离线 LLM 立场解析产出的条目→立场映射。
-
-    标记词表只能识别表层否定，条件否定与双重否定需要语义理解；解析在
-    离线批处理完成（组合根调用 LLM），本对象只承载版本化的确定性结果。
-    表中缺席的条目回退到标记词表判定。
-    """
-
-    stances: Mapping[str, str] = dataclass_field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.stances, Mapping):
-            raise MemorySignalBridgeError("stance table must be a mapping")
-        normalized: dict[str, str] = {}
-        for raw_text, stance in self.stances.items():
-            if not isinstance(raw_text, str) or not raw_text.strip():
-                raise MemorySignalBridgeError("stance table keys must be non-empty text")
-            if stance not in _STANCES:
-                raise MemorySignalBridgeError("stance table values must be support or oppose")
-            normalized[" ".join(raw_text.split()).casefold()] = stance
-        object.__setattr__(self, "stances", MappingProxyType(dict(sorted(normalized.items()))))
-
-    @property
-    def version(self) -> str:
-        return canonical_digest(
-            {
-                "contract": "prediction-stance-table-v1",
-                "stances": dict(self.stances),
-            }
-        )
-
-    def lookup(self, text: str) -> str | None:
-        return self.stances.get(" ".join(text.split()).casefold())
-
-
-def _stance(text: str, kind: MemoryKind, table: PredictionStanceTable | None = None) -> str:
-    """折算一个条目的立场；intention 恒为支持，表命中优先于标记词表。
-
-    标记词表回退遵循"宁可不压制也不反向压制"：无歧义的厌恶词直接反对；
-    含正向线索（喜欢/记得/别忘/希望）的条目默认支持；多字否定词全句
-    生效，单字"别/勿"只在子句起始生效——避免"特别喜欢""按类别整理"
-    这类复合词被整句子串匹配误判成反对。真正的语义判定属于立场表。
-    """
-
-    if kind is MemoryKind.INTENTION:
-        return "support"
-    if table is not None:
-        resolved = table.lookup(text)
-        if resolved is not None:
-            return resolved
-    if any(marker in text for marker in _STRONG_OPPOSE_MARKERS):
-        return "oppose"
-    if any(cue in text for cue in _SUPPORT_CUES):
-        return "support"
-    if any(marker in text for marker in _OPPOSE_MARKERS):
-        return "oppose"
-    clauses = [clause for clause in _split_clauses(text) if clause]
-    if any(clause.startswith(_CLAUSE_INITIAL_OPPOSE) for clause in clauses):
-        return "oppose"
-    return "support"
-
-
-def _split_clauses(text: str) -> list[str]:
-    clauses = [text]
-    for separator in _CLAUSE_SEPARATORS:
-        clauses = [part for clause in clauses for part in clause.split(separator)]
-    return [clause.strip() for clause in clauses]
+def _intention_entry(document: MemoryDocument, now: datetime) -> str | None:
+    fields = document.fields
+    status = str(fields["status"])
+    if status == "completed":
+        return None
+    name = str(fields["intent_name"])
+    parts = [f"未完成事项「{name}」(状态 {status}"]
+    last_confirmed_at = document.metadata.last_confirmed_at
+    if last_confirmed_at is not None:
+        days = int(max(0.0, (now - last_confirmed_at).total_seconds()) // 86400)
+        if days >= 1:
+            parts.append(f",{days} 天未确认")
+    parts.append(")")
+    next_step = fields.get("next_step")
+    if isinstance(next_step, str) and next_step.strip():
+        parts.append(f";下一步:{next_step.strip()}")
+    return "".join(parts)
 
 
 def _bullets(content: object, limit: int) -> tuple[str, ...]:
+    """按 bullet 拆分条目;散文式无 bullet 内容按句拆分而不是整篇一条。
+
+    整篇作为单条上下文会让 LLM 难以逐条引用与裁量,条目粒度是立场与
+    相关性判断的正确量纲。
+    """
+
     if not isinstance(content, str) or not content.strip():
         return ()
     bullets = [
@@ -431,46 +266,26 @@ def _bullets(content: object, limit: int) -> tuple[str, ...]:
         if line.strip().startswith(("- ", "* ")) and line.strip()[2:].strip()
     ]
     if not bullets:
-        bullets = [content.strip()]
+        sentences = [content]
+        for separator in _SENTENCE_SEPARATORS:
+            sentences = [part for sentence in sentences for part in sentence.split(separator)]
+        bullets = [sentence.strip() for sentence in sentences if sentence.strip()]
     return tuple(bullets[:limit])
-
-
-def _finite(value: object, label: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise MemorySignalBridgeError(f"{label} must be numeric")
-    normalized = float(value)
-    if not math.isfinite(normalized):
-        raise MemorySignalBridgeError(f"{label} must be finite")
-    return normalized
-
-
-def _unit(value: object, label: str) -> float:
-    normalized = _finite(value, label)
-    if not 0 <= normalized <= 1:
-        raise MemorySignalBridgeError(f"{label} must be between zero and one")
-    return normalized
-
-
-def _positive_finite(value: object, label: str) -> float:
-    normalized = _finite(value, label)
-    if normalized <= 0:
-        raise MemorySignalBridgeError(f"{label} must be positive")
-    return normalized
 
 
 def _positive_int(value: object, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise MemorySignalBridgeError(f"{label} must be a positive integer")
+        raise MemoryBridgeError(f"{label} must be a positive integer")
     return value
 
 
 __all__ = [
-    "MemorySignalBridgeConfig",
-    "MemorySignalBridgeError",
-    "PredictionStanceTable",
-    "derive_memory_signals",
-    "derive_persona_signals",
+    "MAX_MEMORY_CONTEXT_ENTRIES",
+    "MemoryBridgeConfig",
+    "MemoryBridgeError",
+    "derive_memory_context",
+    "memory_provenance",
     "memory_query_for_context",
     "memory_source_bindings",
-    "signal_provenance",
+    "persona_context",
 ]

@@ -13,6 +13,7 @@ from prediction.learning.keys import (
     logical_state_key,
     previous_step_key,
     sequence_state_identity,
+    target_kind_for_level,
     temporal_bucket,
     temporal_state_identity,
 )
@@ -22,7 +23,6 @@ from prediction.pattern.document import PredictionPatternDocument
 from prediction.pattern.generation import PredictionPatternGenerationStoreError
 from prediction.pattern.graph import PredictionPatternGraph, PredictionStateExpansion
 from prediction.predictor.config import PredictionDecisionConfig, PredictionPredictorError
-from prediction.predictor.signals import PredictionMemorySignal
 from prediction.run import (
     PredictionAbstentionReason,
     PredictionCandidate,
@@ -66,9 +66,11 @@ class PatternGraphPredictor:
 
     状态匹配不做检索：预测器用与学习器完全相同的词表和上下文键派生
     logical_state_key，先精确命中上下文状态，缺失时回退同层根状态。
-    记忆信号只在候选分支之间做质量守恒的概率重分配，不凭空创造概率；
-    执行判决从代价不对称出发，概率、边际、经验数和负向结果风险四道
-    门槛全部通过才允许执行 top-1，任何弃答或拦截都带受控原因。
+    记忆不再以预折算信号进入本层——它作为原文上下文交给组合根的两个
+    LLM 位置（不确定时的顾问、执行前的约束检查）在情境里裁量；顾问
+    权重只在既有候选间做质量守恒重排，不发明行为、不创造概率。执行
+    判决从代价不对称出发，概率、边际、经验数和负向结果风险四道门
+    全部通过才允许执行 top-1，任何弃答或拦截都带受控原因。
     """
 
     def __init__(
@@ -114,9 +116,9 @@ class PatternGraphPredictor:
         predicted_at: datetime,
         horizon_seconds: float,
         source_bindings: Sequence[PredictionRunSourceBinding],
-        memory_signals: Sequence[PredictionMemorySignal] = (),
         advisor_weights: Mapping[str, float] | None = None,
-        signal_provenance: str | None = None,
+        memory_provenance: str | None = None,
+        excluded_branch_keys: Sequence[str] = (),
     ) -> PredictionDecision:
         """对一个运行时上下文做一次完整预测并冻结为可审计判决。
 
@@ -142,9 +144,7 @@ class PatternGraphPredictor:
                 )
         if context.kind is not PredictionKind.TRANSITION:
             raise PredictionPredictorError("the baseline predictor only serves Transition contexts")
-        signals = tuple(memory_signals)
-        if any(not isinstance(item, PredictionMemorySignal) for item in signals):
-            raise PredictionPredictorError("memory signals must be PredictionMemorySignal values")
+        excluded = frozenset(str(key) for key in excluded_branch_keys)
         level = str(context.anchor["anchor_type"])
         if level not in _SUPPORTED_LEVELS:
             raise PredictionPredictorError("transition anchors must be at action or event level")
@@ -156,6 +156,7 @@ class PatternGraphPredictor:
                 predicted_at=predicted_at,
                 horizon_seconds=horizon_seconds,
                 source_bindings=source_bindings,
+                memory_provenance=memory_provenance,
             )
         history = context.input["behavior_history"]
         steps = history["completed_actions"] if level == "action" else history["completed_events"]
@@ -171,14 +172,16 @@ class PatternGraphPredictor:
                 predicted_at=predicted_at,
                 horizon_seconds=horizon_seconds,
                 source_bindings=source_bindings,
-                signal_provenance=signal_provenance,
+                memory_provenance=memory_provenance,
             )
         pairs, pattern_bindings = self._with_inherited_candidates(level, domain, matched)
         target_level = str(context.prediction_scope["target_level"])
+        target_kind = target_kind_for_level(target_level)
         pairs = tuple(
             (branch, probability)
             for branch, probability in pairs
-            if branch.fields["target_kind"] == target_level
+            if branch.fields["target_kind"] == target_kind
+            and (branch.address.branch_key or "") not in excluded
         )
         if not pairs:
             return self._abstain(
@@ -188,16 +191,16 @@ class PatternGraphPredictor:
                 horizon_seconds=horizon_seconds,
                 source_bindings=source_bindings,
                 pattern_bindings=pattern_bindings,
-                signal_provenance=signal_provenance,
+                memory_provenance=memory_provenance,
+                excluded_branch_keys=tuple(sorted(excluded)),
             )
         branches = tuple(branch for branch, _probability in pairs)
-        probabilities = tuple(probability for _branch, probability in pairs)
-        adjusted = self._memory_adjusted(branches, probabilities, signals)
-        adjusted = self._advisor_adjusted(branches, adjusted, advisor_weights)
-        adjusted = self._calibrated(adjusted)
+        raw_probabilities = tuple(probability for _branch, probability in pairs)
+        calibrated = self._calibrated(raw_probabilities)
+        adjusted = self._advisor_adjusted(branches, calibrated, advisor_weights)
         ordered = sorted(
-            zip(branches, adjusted, strict=True),
-            key=lambda item: (-item[1], item[0].address.branch_key or ""),
+            zip(branches, adjusted, raw_probabilities, strict=True),
+            key=lambda item: (-item[1], -item[2], item[0].address.branch_key or ""),
         )[: self.config.max_candidates]
         candidates = tuple(
             PredictionCandidate(
@@ -213,7 +216,7 @@ class PatternGraphPredictor:
                 },
                 evidence_refs=(str(PredictionURI.from_pattern_address(branch.address)),),
             )
-            for index, (branch, probability) in enumerate(ordered)
+            for index, (branch, probability, _raw) in enumerate(ordered)
         )
         run = PredictionRun.create(
             predicted_at=predicted_at,
@@ -225,7 +228,9 @@ class PatternGraphPredictor:
             source_bindings=source_bindings,
             candidates=candidates,
             pattern_bindings=pattern_bindings,
-            signal_provenance=signal_provenance,
+            memory_provenance=memory_provenance,
+            advisor_adjustment=advisor_weights,
+            excluded_branch_keys=tuple(sorted(excluded)),
         )
         gates = self._blocked_gates(candidates, ordered[0][0])
         return PredictionDecision(run=run, execute=not gates, blocked_gates=gates)
@@ -309,6 +314,11 @@ class PatternGraphPredictor:
         matched 分支身份上的质量，于是 escape = (1 − Σmatched)/(1 − S)。
         合成后总概率仍严格小于一（父层自身留白 × escape 保持未分配），
         边际门因此面对真实的第二名，而不是被截断后的假高边际。
+
+        TODO(PRED-STORE-001): 匹配态与根状态各自独立激活,重学习发布
+        窗口或发布中途崩溃后两者可能出自不同学习批次,escape 还原随之
+        失真。批次原子化与同批断言的完整方案见 ``pattern/publication.py``
+        模块 docstring,随 Runtime 主链接入一并实现。
         """
 
         expansion, binding = matched
@@ -354,47 +364,6 @@ class PatternGraphPredictor:
                         bindings.append(root_binding)
         return tuple(pairs), tuple(bindings)
 
-    def _memory_adjusted(
-        self,
-        branches: Sequence[PredictionPatternDocument],
-        probabilities: tuple[float, ...],
-        signals: Sequence[PredictionMemorySignal],
-    ) -> tuple[float, ...]:
-        """记忆信号的门控概率重分配；记忆是补充证据，不是常开输入。
-
-        行为数据已经高度确定的惯例（top-1 概率与经验置信度同时过线）
-        直接旁路记忆；旁路检查与执行门槛使用同一量纲——有校准时先校准
-        再比较，避免"旁路认为确定、执行门认为不确定"的矛盾。参与时
-        每个分支的调整幅度按其经验置信度缩放——
-        数据充分的分支难以被记忆搬动，数据稀疏的分支才由记忆补充；
-        支持信号乘性加强，反对信号对称压制，最后按原总质量归一，
-        记忆只搬移概率，不创造概率。
-        """
-
-        if not signals or self.config.memory_boost == 0:
-            return probabilities
-        total = sum(probabilities)
-        if total <= 0:
-            return probabilities
-        top_index = max(range(len(probabilities)), key=probabilities.__getitem__)
-        top_probability = probabilities[top_index]
-        if self.calibration is not None:
-            top_probability = self.calibration.apply(top_probability)
-        if (
-            top_probability >= self.config.routine_bypass_probability
-            and float(branches[top_index].fields["confidence"])
-            >= self.config.routine_bypass_confidence
-        ):
-            return probabilities
-        scores: list[float] = []
-        for branch, probability in zip(branches, probabilities, strict=True):
-            support, oppose = self._signal_match(branch, signals)
-            reach = self.config.memory_boost * (1.0 - float(branch.fields["confidence"]))
-            multiplier = (1.0 + reach * support) / (1.0 + reach * oppose)
-            scores.append(probability * multiplier)
-        scale = total / sum(scores)
-        return tuple(score * scale for score in scores)
-
     def _advisor_adjusted(
         self,
         branches: Sequence[PredictionPatternDocument],
@@ -421,10 +390,12 @@ class PatternGraphPredictor:
         return tuple(score * scale for score in scores)
 
     def _calibrated(self, probabilities: tuple[float, ...]) -> tuple[float, ...]:
-        """把等渗校准应用到最终分支概率；映射单调，排序不被打乱。
+        """在任何重分配之前应用等渗校准，保证拟合域与应用域同源。
 
-        校准逐分支独立进行，极端映射可能让总质量越界；越界时整体缩放
-        回到一以内，保证 PredictionRun 的概率闭合契约。
+        映射单调但非严格：PAV 平段会把不同输入坍缩为同值，排序因此以
+        校准前概率作次级破平键，平段内仍按证据强度定序。校准逐分支
+        独立进行，极端映射可能让总质量越界；越界时整体缩放回到一以内，
+        保证 PredictionRun 的概率闭合契约。
         """
 
         if self.calibration is None:
@@ -434,39 +405,6 @@ class PatternGraphPredictor:
         if total > 1.0:
             calibrated = tuple(probability / total for probability in calibrated)
         return calibrated
-
-    def _signal_match(
-        self,
-        branch: PredictionPatternDocument,
-        signals: Sequence[PredictionMemorySignal],
-    ) -> tuple[float, float]:
-        """返回该分支命中的最强支持权重与最强反对权重。"""
-
-        behavior = branch.fields["behavior"]
-        branch_semantics = self.vocabulary.canonical_token(behavior["semantics"], "branch semantics")
-        branch_refs = {
-            self.vocabulary.canonical_token(item, "branch target_ref")
-            for item in behavior["target_refs"]
-        }
-        support = 0.0
-        oppose = 0.0
-        for signal in signals:
-            signal_semantics = self.vocabulary.canonical_token(signal.semantics, "signal semantics")
-            signal_refs = {
-                self.vocabulary.canonical_token(item, "signal target_ref")
-                for item in signal.target_refs
-            }
-            semantics_hit = _contains_either(signal_semantics, branch_semantics)
-            refs_hit = bool(branch_refs & signal_refs) or any(
-                _contains_either(signal_semantics, ref) for ref in branch_refs
-            )
-            if not (semantics_hit or refs_hit):
-                continue
-            if signal.stance == "oppose":
-                oppose = max(oppose, signal.weight)
-            else:
-                support = max(support, signal.weight)
-        return support, oppose
 
     def _blocked_gates(
         self,
@@ -500,7 +438,8 @@ class PatternGraphPredictor:
         horizon_seconds: float,
         source_bindings: Sequence[PredictionRunSourceBinding],
         pattern_bindings: Sequence[PredictionRunPatternBinding] = (),
-        signal_provenance: str | None = None,
+        memory_provenance: str | None = None,
+        excluded_branch_keys: tuple[str, ...] = (),
     ) -> PredictionDecision:
         run = PredictionRun.create(
             predicted_at=predicted_at,
@@ -512,27 +451,14 @@ class PatternGraphPredictor:
             source_bindings=source_bindings,
             abstention_reason=reason,
             pattern_bindings=pattern_bindings,
-            signal_provenance=signal_provenance,
+            memory_provenance=memory_provenance,
+            excluded_branch_keys=excluded_branch_keys,
         )
         return PredictionDecision(
             run=run,
             execute=False,
             blocked_gates=(f"abstained:{reason.value}",),
         )
-
-
-def _contains_either(left: str, right: str) -> bool:
-    """规范化文本的确定性包含匹配。
-
-    记忆信号是自由中文（如"回家后记得倒一杯水"），与行为词表的分支语义
-    （"倒一杯水"）几乎不会逐字相等；较短一侧完整出现在较长一侧即视为命中。
-    单字符不参与包含匹配，避免虚假命中。
-    """
-
-    if left == right:
-        return True
-    shorter, longer = sorted((left, right), key=len)
-    return len(shorter) >= 2 and shorter in longer
 
 
 __all__ = ["PatternGraphPredictor", "PredictionDecision"]
