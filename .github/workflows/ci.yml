@@ -53,7 +53,22 @@ jobs:
       - name: Build wheel with service and plugin assets
         run: |
           python -m build --wheel
-          python -c 'import zipfile,glob; p=glob.glob("dist/*.whl")[0]; names=zipfile.ZipFile(p).namelist(); assert not any(n.startswith("behavior/") for n in names); assert "Config/behavior.py" not in names; assert "infrastructure/store/processing_lock.py" not in names; assert "conversation/projection/behavior.py" in names; assert any(n.endswith("share/m2bos/plugins/install-memory-plugin.mjs") for n in names); assert any(n.endswith("share/m2bos/plugins/harnesses.mjs") for n in names)'
+          python - <<'PY'
+          import glob
+          import zipfile
+
+          wheel_path = glob.glob("dist/*.whl")[0]
+          names = set(zipfile.ZipFile(wheel_path).namelist())
+          assert "behavior/model.py" in names
+          assert "behavior/document/model.py" in names
+          assert "behavior/tree/store.py" in names
+          assert "behavior/schema/definitions/episodes.yaml" in names
+          assert "Config/behavior.py" not in names
+          assert "infrastructure/store/processing_lock.py" not in names
+          assert "conversation/projection/behavior.py" in names
+          assert any(name.endswith("share/m2bos/plugins/install-memory-plugin.mjs") for name in names)
+          assert any(name.endswith("share/m2bos/plugins/harnesses.mjs") for name in names)
+          PY
       - name: Install wheel and execute packaged plugin lifecycle
         run: |
           smoke_venv="$RUNNER_TEMP/m2bos-wheel-smoke"
