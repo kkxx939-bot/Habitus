@@ -295,3 +295,52 @@ def test_deep_doctor_chat_timeout_is_a_real_wall_clock_bound(
 
     assert time.monotonic() - started < 0.15
     assert next(check for check in checks if check.name == "chat_probe").status is DoctorStatus.FAIL
+
+
+def test_repair_source_outputs_refuses_while_a_local_service_owns_the_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """修复会删除耐久文件，因此服务在跑时必须拒绝，而不是并发去动存储。"""
+
+    from integrations.local_service import cli
+    from integrations.local_service.instance_lock import ServiceInstanceLockError
+
+    class StubConfig:
+        storage_root = tmp_path
+
+        @classmethod
+        def from_env(cls, *, environ):
+            return cls()
+
+    class RefusingLock:
+        def __init__(self, path) -> None:
+            self.released = False
+
+        def acquire(self) -> None:
+            raise ServiceInstanceLockError("already owned")
+
+        def release(self) -> None:  # pragma: no cover - 未取得锁时不应被调用
+            self.released = True
+
+    import Config
+    import integrations.local_service.instance_lock as instance_lock
+
+    monkeypatch.setattr(Config, "M2BOSConfig", StubConfig)
+    monkeypatch.setattr(instance_lock, "ServiceInstanceLock", RefusingLock)
+
+    args = cli._parser().parse_args(
+        ["repair-source-outputs", "a" * 64, "--consumer", "memory"]
+    )
+    assert cli._repair_source_outputs(args, {}) == 3
+    assert "stop it before repairing" in capsys.readouterr().err
+
+
+def test_repair_source_outputs_rejects_an_unknown_consumer(tmp_path: Path) -> None:
+    from integrations.local_service import cli
+
+    with pytest.raises(SystemExit):
+        cli._parser().parse_args(
+            ["repair-source-outputs", "a" * 64, "--consumer", "not_a_consumer"]
+        )

@@ -24,6 +24,7 @@ from conversation.source import (
 )
 from conversation.source.fence import ConversationConsumerExecutionLease
 from foundation.integrity import canonical_digest
+from foundation.observability import ObservationEvent, Observer
 from infrastructure.store.contracts import PathLock
 from infrastructure.store.locks import ProcessLocalLockStore
 from memory.conversation import ConversationAppendResult, ConversationAppendStatus, ConversationRetentionPlan
@@ -109,6 +110,7 @@ def ingest_result(source_value: ConversationSourceEnvelope) -> ConversationMemor
 
 class FakeMemoryConsumer:
     consumer = ConversationSourceConsumer.MEMORY
+    ordered_within_conversation = True
 
     def __init__(
         self,
@@ -130,7 +132,7 @@ class FakeMemoryConsumer:
 
     async def execute(
         self,
-        source_value: ConversationSourceEnvelope,
+        envelope: ConversationSourceEnvelope,
         lease: ConversationConsumerExecutionLease,
     ) -> ConversationConsumerRunResult:
         self.calls += 1
@@ -140,14 +142,14 @@ class FakeMemoryConsumer:
             await self.release.wait()
         if self.fail is not None:
             raise self.fail
-        result = ingest_result(source_value)
+        result = ingest_result(envelope)
         output = MemoryConversationOutput.create(
-            source=source_value,
+            source=envelope,
             processor_fingerprint=self.processor_fingerprint,
             ingest_result=result,
             recorded_at=self.clock(),
         )
-        stored = await lease.run_fenced(lambda: self.output_store.put(source_value, output))
+        stored = await lease.run_fenced(lambda: self.output_store.put(envelope, output))
         return ConversationConsumerRunResult(
             disposition=ConversationConsumerRunDisposition.OUTPUT_WRITTEN,
             output_ref=self.output_store.ref(stored),
@@ -158,6 +160,7 @@ class FakeMemoryConsumer:
 
 class WrappedBehaviorConsumer:
     consumer = ConversationSourceConsumer.BEHAVIOR_PROJECTION
+    ordered_within_conversation = False
 
     def __init__(
         self,
@@ -177,7 +180,7 @@ class WrappedBehaviorConsumer:
 
     async def execute(
         self,
-        source_value: ConversationSourceEnvelope,
+        envelope: ConversationSourceEnvelope,
         lease: ConversationConsumerExecutionLease,
     ) -> ConversationConsumerRunResult:
         self.calls += 1
@@ -187,7 +190,7 @@ class WrappedBehaviorConsumer:
             await self.release.wait()
         if self.fail is not None:
             raise self.fail
-        return await self.inner.execute(source_value, lease)
+        return await self.inner.execute(envelope, lease)
 
 
 def stores(root: Path):
@@ -207,18 +210,29 @@ def stores(root: Path):
     return sources, outcomes, memory_outputs, projection_outputs
 
 
+class RecordingObserver:
+    """收集交付层观察事件，供断言使用。"""
+
+    def __init__(self) -> None:
+        self.events: list[ObservationEvent] = []
+
+    def record(self, event: ObservationEvent) -> None:
+        self.events.append(event)
+
+
 def delivery(
     root: Path,
     *,
     memory: FakeMemoryConsumer | None = None,
     behavior: WrappedBehaviorConsumer | None = None,
     path_lock: PathLock | None = None,
+    observer: Observer | None = None,
 ):
     sources, outcomes, memory_outputs, projection_outputs = stores(root)
     memory_consumer = memory or FakeMemoryConsumer(memory_outputs)
     behavior_consumer = behavior or WrappedBehaviorConsumer(
         ConversationBehaviorProjectionConsumer(
-            ConversationBehaviorProjector(clock=lambda: NOW),
+            ConversationBehaviorProjector(),
             projection_outputs,
         )
     )
@@ -234,8 +248,11 @@ def delivery(
         outcomes,
         inspector,
         fence,
-        memory_consumer,
-        behavior_consumer,
+        {
+            ConversationSourceConsumer.MEMORY: memory_consumer,
+            ConversationSourceConsumer.BEHAVIOR_PROJECTION: behavior_consumer,
+        },
         clock=lambda: NOW,
+        observer=observer,
     )
     return service, memory_consumer, behavior_consumer

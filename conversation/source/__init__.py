@@ -8,8 +8,8 @@ from conversation.source.coordinator import (
 from conversation.source.delivery import (
     ConversationConsumerDelivery,
     ConversationConsumerEnsureResult,
-    ConversationMemoryPredecessorBrokenError,
-    ConversationMemoryPredecessorPendingError,
+    ConversationOrderedPredecessorBrokenError,
+    ConversationOrderedPredecessorPendingError,
 )
 from conversation.source.fence import (
     ConversationConsumerExecutionFence,
@@ -35,6 +35,11 @@ from conversation.source.recovery import (
     ConversationSourceRecovery,
     ConversationSourceRecoveryEntry,
     ConversationSourceRecoveryResult,
+)
+from conversation.source.repair import (
+    ConversationSourceOutputRepair,
+    ConversationSourceRepairError,
+    ConversationSourceRepairResult,
 )
 from conversation.source.state import (
     ConversationConsumerBrokenOutcomeError,
@@ -62,12 +67,15 @@ __all__ = [
     "ConversationConsumerRunResult",
     "ConversationConsumerState",
     "ConversationConsumerStateInspector",
-    "ConversationMemoryPredecessorBrokenError",
-    "ConversationMemoryPredecessorPendingError",
+    "ConversationOrderedPredecessorBrokenError",
+    "ConversationOrderedPredecessorPendingError",
     "ConversationSourceConsumer",
     "ConversationSourceCoordinator",
     "ConversationSourceDispatchHandle",
     "ConversationSourceEnvelope",
+    "ConversationSourceOutputRepair",
+    "ConversationSourceRepairError",
+    "ConversationSourceRepairResult",
     "ConversationSourceError",
     "ConversationSourcePendingDelivery",
     "ConversationSourceRecovery",

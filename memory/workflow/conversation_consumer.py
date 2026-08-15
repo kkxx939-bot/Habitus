@@ -37,6 +37,8 @@ class MemoryConversationConsumer:
     """只在本地派生 Batch 上调用既有 Reducer/Chunker/Journal/Retention 主链。"""
 
     consumer = ConversationSourceConsumer.MEMORY
+    # 长期记忆按 memory_sequence 严格串行，同一会话的更早 Source 必须先落终态。
+    ordered_within_conversation = True
 
     def __init__(
         self,

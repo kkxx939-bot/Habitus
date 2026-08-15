@@ -1,0 +1,1499 @@
+{
+  "schema": "behavior_fusion_case_v1",
+  "note": "每一类都配对照组：只量'该标的标了没有'会漏掉滥用，只量'不该标的没标'会漏掉能力被压死。因果这类跨多次观察才成立的规律属于预测层的统计——融合层标出来的要可信，但不追求覆盖率，所以对照组（不该标而没标）是硬期望，而'该标却没标'不写成失败。",
+  "cases": [
+    {
+      "case_id": "fold-repeated-sampling",
+      "category": "folding",
+      "intent": "同一动作被连采八次，措辞略有差异，应折成一件事而不是八件",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人站在水池边"
+          },
+          {
+            "at": 4,
+            "says": "人手上有泡沫"
+          },
+          {
+            "at": 8,
+            "says": "人在搓手"
+          },
+          {
+            "at": 12,
+            "says": "人双手互相摩擦"
+          },
+          {
+            "at": 16,
+            "says": "人在搓手"
+          },
+          {
+            "at": 20,
+            "says": "人手部有泡沫在揉搓"
+          },
+          {
+            "at": 24,
+            "says": "人在冲手"
+          },
+          {
+            "at": 28,
+            "says": "人关水龙头"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            1
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "fold-across-locations",
+      "category": "folding",
+      "intent": "做饭在冰箱、水池、灶台之间移动并操作多种物品，位置变化不构成切分理由",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人打开冰箱取出食材"
+          },
+          {
+            "at": 8,
+            "says": "人走到水池边冲洗蔬菜"
+          },
+          {
+            "at": 16,
+            "says": "人在案板前切菜"
+          },
+          {
+            "at": 24,
+            "says": "人走到灶台前"
+          },
+          {
+            "at": 32,
+            "says": "人将食材倒入锅中"
+          },
+          {
+            "at": 40,
+            "says": "人手持锅铲翻炒"
+          },
+          {
+            "at": 48,
+            "says": "人关闭灶台"
+          },
+          {
+            "at": 56,
+            "says": "人将食物盛入盘中"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "adv-similar-wording-different-goal",
+      "category": "adversarial",
+      "intent": "对抗：措辞高度相似（都在'搓'）但目标完全不同，不该被折成一件事",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人手上有泡沫，在水池边搓手"
+          },
+          {
+            "at": 6,
+            "says": "人在搓手"
+          },
+          {
+            "at": 12,
+            "says": "人关水龙头擦手"
+          },
+          {
+            "at": 120,
+            "says": "人蹲在盆边搓洗一件衣物"
+          },
+          {
+            "at": 126,
+            "says": "人在搓洗衣物"
+          },
+          {
+            "at": 132,
+            "says": "人拧干衣物"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            2,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "adv-same-object-different-purpose",
+      "category": "adversarial",
+      "intent": "对抗：两次都在操作手机，但一次是接电话一次是看内容，目标不同",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人拿起手机放到耳边"
+          },
+          {
+            "at": 6,
+            "says": "人在讲话"
+          },
+          {
+            "at": 12,
+            "says": "人放下手机"
+          },
+          {
+            "at": 180,
+            "says": "人拿起手机注视屏幕"
+          },
+          {
+            "at": 186,
+            "says": "人手指在屏幕上滑动"
+          },
+          {
+            "at": 192,
+            "says": "人放下手机"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            2,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "split-goal-change",
+      "category": "segmentation",
+      "intent": "洗手结束后转向开空调，目标改变必须切开",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人在水池边冲手"
+          },
+          {
+            "at": 6,
+            "says": "人关水龙头甩手"
+          },
+          {
+            "at": 12,
+            "says": "人走向客厅"
+          },
+          {
+            "at": 18,
+            "says": "人拿起空调遥控器"
+          },
+          {
+            "at": 24,
+            "says": "空调指示灯亮起"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            2,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "adv-tool-switching-one-goal",
+      "category": "adversarial",
+      "intent": "对抗：煎蛋过程中频繁换器具（打蛋器、锅铲、盘子），器具变化不是目标变化",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人从冰箱取出鸡蛋"
+          },
+          {
+            "at": 6,
+            "says": "人将鸡蛋磕入碗中"
+          },
+          {
+            "at": 12,
+            "says": "人手持打蛋器搅拌"
+          },
+          {
+            "at": 18,
+            "says": "人将蛋液倒入平底锅"
+          },
+          {
+            "at": 24,
+            "says": "人手持锅铲翻动"
+          },
+          {
+            "at": 30,
+            "says": "人关火"
+          },
+          {
+            "at": 36,
+            "says": "人用锅铲将蛋盛入盘中"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "adv-brief-interruption-same-goal",
+      "category": "adversarial",
+      "intent": "对抗：做饭中途短暂低头看了一眼手机又继续，不构成新的一件事也不算中断",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人在灶台前翻炒"
+          },
+          {
+            "at": 6,
+            "says": "人低头瞥了一眼台面上的手机"
+          },
+          {
+            "at": 12,
+            "says": "人继续翻炒"
+          },
+          {
+            "at": 18,
+            "says": "人关闭灶台"
+          },
+          {
+            "at": 24,
+            "says": "人将食物盛盘"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "goal-unidentifiable-standing",
+      "category": "goal",
+      "intent": "人站在窗边向外看，动作清晰但目标判不出，不该硬编",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人走到窗边"
+          },
+          {
+            "at": 6,
+            "says": "人站在窗前面向窗外"
+          },
+          {
+            "at": 12,
+            "says": "人保持站姿面向窗外"
+          },
+          {
+            "at": 18,
+            "says": "人转身离开窗边"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "adv-ambiguous-fridge",
+      "category": "adversarial",
+      "intent": "对抗：开冰箱后什么都没拿就关上走开，很容易被硬编成'找食物'",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人走到冰箱前"
+          },
+          {
+            "at": 6,
+            "says": "人打开冰箱门"
+          },
+          {
+            "at": 12,
+            "says": "人注视冰箱内部"
+          },
+          {
+            "at": 18,
+            "says": "人关闭冰箱门"
+          },
+          {
+            "at": 24,
+            "says": "人转身走开"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "subjects-handover",
+      "category": "subjects",
+      "intent": "两人先后参与同一次搬运，主体不该只留一个；片段里的称呼必须与 participants 一致",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A抱起纸箱向门口移动",
+            "who": [
+              "成年男性A",
+              "成年女性B"
+            ]
+          },
+          {
+            "at": 6,
+            "says": "成年男性A将纸箱放在地上",
+            "who": [
+              "成年男性A",
+              "成年女性B"
+            ]
+          },
+          {
+            "at": 12,
+            "says": "成年女性B抱起同一个纸箱",
+            "who": [
+              "成年男性A",
+              "成年女性B"
+            ]
+          },
+          {
+            "at": 18,
+            "says": "成年女性B将纸箱搬出门",
+            "who": [
+              "成年男性A",
+              "成年女性B"
+            ]
+          }
+        ]
+      ],
+      "expect": {
+        "subjects_include": {
+          "1": [
+            "成年男性A",
+            "成年女性B"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "subjects-single-among-many",
+      "category": "subjects",
+      "intent": "画面里有两人但只有一人在做这件事，不该把旁观者算成主体",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A坐在沙发上看书，成年女性B站在窗边",
+            "who": [
+              "成年男性A",
+              "成年女性B"
+            ]
+          },
+          {
+            "at": 6,
+            "says": "成年男性A翻动书页，成年女性B保持站姿",
+            "who": [
+              "成年男性A",
+              "成年女性B"
+            ]
+          },
+          {
+            "at": 12,
+            "says": "成年男性A继续看书，成年女性B仍站在窗边",
+            "who": [
+              "成年男性A",
+              "成年女性B"
+            ]
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "concurrent-cook-and-call",
+      "category": "concurrent",
+      "intent": "一边翻炒一边通话，两个目标同时保持进行",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人在灶台前翻炒"
+          },
+          {
+            "at": 6,
+            "says": "人取出手机放到耳边"
+          },
+          {
+            "at": 12,
+            "says": "人一手持手机一手持锅铲"
+          },
+          {
+            "at": 18,
+            "says": "人在讲话，锅内有翻动"
+          },
+          {
+            "at": 24,
+            "says": "人放下手机"
+          },
+          {
+            "at": 30,
+            "says": "人继续翻炒并盛盘"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            2,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "adv-interrupt-not-concurrent",
+      "category": "adversarial",
+      "intent": "对抗：洗手洗到一半接电话并离开水池，这是中断不是并行",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人手上有泡沫在搓"
+          },
+          {
+            "at": 6,
+            "says": "人取出手机放到耳边"
+          },
+          {
+            "at": 12,
+            "says": "人一边讲话一边走离水池"
+          },
+          {
+            "at": 18,
+            "says": "人站在客厅讲话"
+          },
+          {
+            "at": 24,
+            "says": "人仍在讲话"
+          }
+        ]
+      ],
+      "expect": {
+        "forbidden_relations": [
+          "concurrent_with"
+        ]
+      }
+    },
+    {
+      "case_id": "continue-cut-midway",
+      "category": "relation_continues",
+      "intent": "切段把一次擦地拦腰切断，后半段应延续",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人提着水桶和拖把进入房间"
+          },
+          {
+            "at": 6,
+            "says": "人将拖把浸入水桶"
+          },
+          {
+            "at": 12,
+            "says": "人开始拖地"
+          },
+          {
+            "at": 18,
+            "says": "人继续拖地"
+          }
+        ],
+        [
+          {
+            "at": 240,
+            "says": "人仍在拖地"
+          },
+          {
+            "at": 246,
+            "says": "人将拖把再次浸入水桶"
+          },
+          {
+            "at": 252,
+            "says": "人拖完最后一块区域"
+          },
+          {
+            "at": 258,
+            "says": "人提起水桶离开"
+          }
+        ]
+      ],
+      "expect": {
+        "relations": [
+          [
+            2,
+            1,
+            "continues"
+          ]
+        ]
+      }
+    },
+    {
+      "case_id": "adv-same-behavior-twice",
+      "category": "adversarial",
+      "intent": "对抗：早上洗一次手、中午又洗一次，是两次独立的行为不是延续",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人走到水池边"
+          },
+          {
+            "at": 6,
+            "says": "人手上有泡沫在搓"
+          },
+          {
+            "at": 12,
+            "says": "人关水龙头擦手"
+          }
+        ],
+        [
+          {
+            "at": 14400,
+            "says": "人走到水池边"
+          },
+          {
+            "at": 14406,
+            "says": "人手上有泡沫在搓"
+          },
+          {
+            "at": 14412,
+            "says": "人关水龙头擦手"
+          }
+        ]
+      ],
+      "expect": {
+        "forbidden_relations": [
+          "continues"
+        ]
+      }
+    },
+    {
+      "case_id": "adv-resumed-but-different",
+      "category": "adversarial",
+      "intent": "对抗：离开又回到同一位置，但做的是另一件事，不该判成延续",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人在书桌前翻开笔记本电脑"
+          },
+          {
+            "at": 6,
+            "says": "人在键盘上打字"
+          },
+          {
+            "at": 12,
+            "says": "人合上电脑起身离开"
+          }
+        ],
+        [
+          {
+            "at": 600,
+            "says": "人回到书桌前"
+          },
+          {
+            "at": 606,
+            "says": "人从抽屉取出一本纸质书"
+          },
+          {
+            "at": 612,
+            "says": "人坐下翻开书页阅读"
+          }
+        ]
+      ],
+      "expect": {
+        "forbidden_relations": [
+          "continues"
+        ]
+      }
+    },
+    {
+      "case_id": "status-observation-lost",
+      "category": "status",
+      "intent": "人走出画面，之后发生什么不知道，不该断言已完成",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人打开洗衣机门"
+          },
+          {
+            "at": 6,
+            "says": "人将衣物放入滚筒"
+          },
+          {
+            "at": 12,
+            "says": "人转身走向画面外"
+          },
+          {
+            "at": 18,
+            "says": "画面中已无人"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "status-abandoned",
+      "category": "status",
+      "intent": "目标明确、已经开始、然后主动放弃；这才考得到 abandoned",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人抱着一堆衣物走到洗衣机前"
+          },
+          {
+            "at": 6,
+            "says": "人打开洗衣机门"
+          },
+          {
+            "at": 12,
+            "says": "人将两件衣物放入滚筒"
+          },
+          {
+            "at": 18,
+            "says": "人将刚放入的衣物取出"
+          },
+          {
+            "at": 24,
+            "says": "人关上洗衣机门"
+          },
+          {
+            "at": 30,
+            "says": "人抱着衣物走回卧室"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "unreadable-isolated",
+      "category": "unreadable",
+      "intent": "孤立的模糊帧前后都不相干，无从推断，应判为读不懂",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人关水龙头并擦手"
+          },
+          {
+            "at": 240,
+            "says": "画面出现大面积噪点，无法辨认",
+            "knowledge_state": "inferred"
+          },
+          {
+            "at": 246,
+            "says": "画面剧烈晃动",
+            "knowledge_state": "inferred"
+          },
+          {
+            "at": 600,
+            "says": "人坐在沙发上面向电视"
+          }
+        ]
+      ],
+      "expect": {
+        "unreadable_fragments": {
+          "1": [
+            2,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "adv-vague-but-inferable",
+      "category": "adversarial",
+      "intent": "对抗：中间一帧措辞含糊但夹在明确行为之间，可推断，不该整批判成读不懂",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人拿起牙刷"
+          },
+          {
+            "at": 6,
+            "says": "人挤出牙膏"
+          },
+          {
+            "at": 12,
+            "says": "人手部在面部区域反复动作",
+            "knowledge_state": "inferred"
+          },
+          {
+            "at": 18,
+            "says": "人俯身向水池吐出泡沫"
+          },
+          {
+            "at": 24,
+            "says": "人漱口并放回牙刷"
+          }
+        ]
+      ],
+      "expect": {
+        "unreadable_fragments": {
+          "1": []
+        }
+      }
+    },
+    {
+      "case_id": "granularity-coming-home",
+      "category": "granularity",
+      "intent": "回家包含换鞋、洗手、调温几个各自独立的目标，不该吞成一件事",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人开门进入室内"
+          },
+          {
+            "at": 6,
+            "says": "人在玄关弯腰换鞋"
+          },
+          {
+            "at": 12,
+            "says": "人换上室内拖鞋"
+          },
+          {
+            "at": 18,
+            "says": "人走到水池边"
+          },
+          {
+            "at": 24,
+            "says": "人手上有泡沫在搓"
+          },
+          {
+            "at": 30,
+            "says": "人关水龙头擦手"
+          },
+          {
+            "at": 36,
+            "says": "人拿起空调遥控器"
+          },
+          {
+            "at": 42,
+            "says": "空调指示灯亮起"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            3,
+            5
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "granularity-breakfast",
+      "category": "granularity",
+      "intent": "做早餐里煮咖啡与煎蛋是两个能独立成立的目标，不该合成一件",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人将咖啡粉倒入滤杯"
+          },
+          {
+            "at": 8,
+            "says": "人向滤杯注入热水"
+          },
+          {
+            "at": 16,
+            "says": "咖啡滴入杯中"
+          },
+          {
+            "at": 24,
+            "says": "人将平底锅放上灶台"
+          },
+          {
+            "at": 32,
+            "says": "人将鸡蛋磕入锅中"
+          },
+          {
+            "at": 40,
+            "says": "人用锅铲翻动鸡蛋"
+          },
+          {
+            "at": 48,
+            "says": "人将煎蛋盛入盘中"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            2,
+            4
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "adv-many-steps-one-goal",
+      "category": "adversarial",
+      "intent": "对抗：泡面有很多步骤但只有一个目标，不该按步骤拆成多件事",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人拿出一桶方便面"
+          },
+          {
+            "at": 6,
+            "says": "人撕开封盖"
+          },
+          {
+            "at": 12,
+            "says": "人取出调料包"
+          },
+          {
+            "at": 18,
+            "says": "人将调料倒入面中"
+          },
+          {
+            "at": 24,
+            "says": "人提起水壶注入热水"
+          },
+          {
+            "at": 30,
+            "says": "人盖上盖子"
+          },
+          {
+            "at": 36,
+            "says": "人等待"
+          },
+          {
+            "at": 42,
+            "says": "人揭开盖子搅拌"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "causal-aircon-coat",
+      "category": "relation_causal",
+      "intent": "开空调导致室温上升，人随后脱外套（模型稳定标出的一类；不标不算错，标错才算）",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人进入客厅，身穿厚外套"
+          },
+          {
+            "at": 6,
+            "says": "人用手扇风"
+          },
+          {
+            "at": 12,
+            "says": "人拿起空调遥控器"
+          },
+          {
+            "at": 18,
+            "says": "人按下遥控器按钮"
+          },
+          {
+            "at": 24,
+            "says": "空调指示灯亮起，出风口叶片摆动"
+          },
+          {
+            "at": 30,
+            "says": "人放下遥控器"
+          }
+        ],
+        [
+          {
+            "at": 600,
+            "says": "人站起身"
+          },
+          {
+            "at": 606,
+            "says": "人解开外套扣子"
+          },
+          {
+            "at": 612,
+            "says": "人脱下外套"
+          },
+          {
+            "at": 618,
+            "says": "人将外套挂到衣架上"
+          },
+          {
+            "at": 624,
+            "says": "人坐回沙发"
+          }
+        ]
+      ],
+      "expect": {
+        "relations": [
+          [
+            2,
+            1,
+            "results_from"
+          ]
+        ]
+      }
+    },
+    {
+      "case_id": "causal-boil-tea",
+      "category": "relation_causal",
+      "intent": "烧水产生的热水被泡茶直接消费（模型稳定标出的一类；不标不算错，标错才算）",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人拿起水壶接水"
+          },
+          {
+            "at": 6,
+            "says": "人将水壶放到底座上"
+          },
+          {
+            "at": 12,
+            "says": "水壶指示灯亮起"
+          },
+          {
+            "at": 18,
+            "says": "水壶冒出蒸汽"
+          }
+        ],
+        [
+          {
+            "at": 300,
+            "says": "人拿起茶杯"
+          },
+          {
+            "at": 306,
+            "says": "人向杯中放入茶叶"
+          },
+          {
+            "at": 312,
+            "says": "人提起水壶向杯中倒水"
+          },
+          {
+            "at": 318,
+            "says": "人端起茶杯"
+          }
+        ]
+      ],
+      "expect": {
+        "relations": [
+          [
+            2,
+            1,
+            "results_from"
+          ]
+        ]
+      }
+    },
+    {
+      "case_id": "adv-routine-not-causal",
+      "category": "adversarial",
+      "intent": "对抗：刷牙与出门每天都相继发生，习惯性共现不是因果",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人拿起牙刷刷牙"
+          },
+          {
+            "at": 6,
+            "says": "人漱口"
+          },
+          {
+            "at": 12,
+            "says": "人放回牙刷"
+          }
+        ],
+        [
+          {
+            "at": 300,
+            "says": "人走到玄关"
+          },
+          {
+            "at": 306,
+            "says": "人换上外出鞋"
+          },
+          {
+            "at": 312,
+            "says": "人开门离开"
+          }
+        ]
+      ],
+      "expect": {
+        "forbidden_relations": [
+          "results_from"
+        ]
+      }
+    },
+    {
+      "case_id": "adv-coincidence-not-causal",
+      "category": "adversarial",
+      "intent": "对抗：浇花与看电视只是时间相继",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人拿起水壶走向阳台"
+          },
+          {
+            "at": 6,
+            "says": "人给花盆浇水"
+          },
+          {
+            "at": 12,
+            "says": "人放下水壶"
+          }
+        ],
+        [
+          {
+            "at": 300,
+            "says": "人走回客厅"
+          },
+          {
+            "at": 306,
+            "says": "人拿起电视遥控器"
+          },
+          {
+            "at": 312,
+            "says": "电视屏幕亮起"
+          }
+        ]
+      ],
+      "expect": {
+        "forbidden_relations": [
+          "results_from"
+        ]
+      }
+    },
+    {
+      "case_id": "adv-shoes-wash-not-causal",
+      "category": "adversarial",
+      "intent": "对抗：换鞋与洗手相继但无因果",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人在玄关弯腰"
+          },
+          {
+            "at": 6,
+            "says": "人脱下外出鞋"
+          },
+          {
+            "at": 12,
+            "says": "人换上室内拖鞋"
+          }
+        ],
+        [
+          {
+            "at": 240,
+            "says": "人走到水池边"
+          },
+          {
+            "at": 246,
+            "says": "水流出，人手在水下"
+          },
+          {
+            "at": 252,
+            "says": "人关水龙头"
+          }
+        ]
+      ],
+      "expect": {
+        "forbidden_relations": [
+          "results_from"
+        ]
+      }
+    },
+    {
+      "case_id": "noise-contradictory-frames",
+      "category": "adversarial",
+      "intent": "对抗：相邻两帧互相矛盾（有泡沫/无遮挡物），不该因此整批失败",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人手上有泡沫在搓"
+          },
+          {
+            "at": 6,
+            "says": "人手部无遮挡物，未见泡沫"
+          },
+          {
+            "at": 12,
+            "says": "人在冲手"
+          },
+          {
+            "at": 18,
+            "says": "人关水龙头擦手"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "noise-dense-short-frames",
+      "category": "structural",
+      "intent": "高密度采样：每两秒一帧共十六帧，结构必须完整覆盖",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人走向厨房"
+          },
+          {
+            "at": 2,
+            "says": "人进入厨房"
+          },
+          {
+            "at": 4,
+            "says": "人打开橱柜"
+          },
+          {
+            "at": 6,
+            "says": "人取出碗"
+          },
+          {
+            "at": 8,
+            "says": "人关上橱柜"
+          },
+          {
+            "at": 10,
+            "says": "人走向米缸"
+          },
+          {
+            "at": 12,
+            "says": "人打开米缸"
+          },
+          {
+            "at": 14,
+            "says": "人舀出米"
+          },
+          {
+            "at": 16,
+            "says": "人关上米缸"
+          },
+          {
+            "at": 18,
+            "says": "人走向水池"
+          },
+          {
+            "at": 20,
+            "says": "人淘米"
+          },
+          {
+            "at": 22,
+            "says": "人继续淘米"
+          },
+          {
+            "at": 24,
+            "says": "人沥干水"
+          },
+          {
+            "at": 26,
+            "says": "人将米倒入电饭煲"
+          },
+          {
+            "at": 28,
+            "says": "人按下按钮"
+          },
+          {
+            "at": 30,
+            "says": "电饭煲指示灯亮起"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "structural-single-fragment",
+      "category": "structural",
+      "intent": "只有一条片段的极短段，结构仍须完整",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "人坐在沙发上"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            1
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "bystander-not-absorbed",
+      "category": "subjects",
+      "intent": "旁人走过的那一帧不该被塞进主体的行为——直接测那一帧的归属，用判断条数去测是测不准的（条数对了不等于那帧没被吸收）",
+      "primary_subject": "成年男性A",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A拿起刀在案板上切洋葱",
+            "who": [
+              "成年男性A",
+              "成年女性B"
+            ]
+          },
+          {
+            "at": 6,
+            "says": "成年男性A继续切洋葱",
+            "who": [
+              "成年男性A",
+              "成年女性B"
+            ]
+          },
+          {
+            "at": 12,
+            "says": "成年女性B从成年男性A身后走过",
+            "who": [
+              "成年男性A",
+              "成年女性B"
+            ]
+          },
+          {
+            "at": 18,
+            "says": "成年男性A把洋葱刮入锅中",
+            "who": [
+              "成年男性A",
+              "成年女性B"
+            ]
+          },
+          {
+            "at": 24,
+            "says": "成年男性A用锅铲翻炒",
+            "who": [
+              "成年男性A",
+              "成年女性B"
+            ]
+          }
+        ]
+      ],
+      "expect": {
+        "out_of_scope_fragments": {
+          "1": [
+            3
+          ]
+        },
+        "subjects_include": {
+          "1": [
+            "成年男性A"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "narration-fine-grained",
+      "category": "folding",
+      "intent": "真实 narration 粒度极细（take/put/open/close），13 条不该变成 13 条判断；考的是折叠比，不是精确条数——「倒了牛奶再喝掉」切成一件还是两件，按层级判据两种都成立",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "打开冰箱"
+          },
+          {
+            "at": 2,
+            "says": "拿出牛奶"
+          },
+          {
+            "at": 4,
+            "says": "关上冰箱"
+          },
+          {
+            "at": 7,
+            "says": "把牛奶放在台面"
+          },
+          {
+            "at": 9,
+            "says": "打开橱柜"
+          },
+          {
+            "at": 11,
+            "says": "拿出杯子"
+          },
+          {
+            "at": 13,
+            "says": "关上橱柜"
+          },
+          {
+            "at": 15,
+            "says": "拿起牛奶"
+          },
+          {
+            "at": 17,
+            "says": "把牛奶倒进杯子"
+          },
+          {
+            "at": 20,
+            "says": "把牛奶放在台面"
+          },
+          {
+            "at": 22,
+            "says": "拿起杯子"
+          },
+          {
+            "at": 24,
+            "says": "喝"
+          },
+          {
+            "at": 28,
+            "says": "把杯子放进水槽"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            4
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "narration-unresolved-reference",
+      "category": "adversarial",
+      "intent": "对抗：真实 narration 常有指代不明（'放下它''又拿起来'），不该因此判成读不懂",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "拿起刀"
+          },
+          {
+            "at": 5,
+            "says": "切洋葱"
+          },
+          {
+            "at": 10,
+            "says": "放下它"
+          },
+          {
+            "at": 14,
+            "says": "在毛巾上擦手"
+          },
+          {
+            "at": 18,
+            "says": "又拿起来"
+          },
+          {
+            "at": 22,
+            "says": "把洋葱刮进锅里"
+          }
+        ]
+      ],
+      "expect": {
+        "unreadable_fragments": {
+          "1": []
+        }
+      }
+    }
+  ]
+}

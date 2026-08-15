@@ -27,6 +27,8 @@ _LABEL_ATTRIBUTES = frozenset(
         "stage",
         "worker_state",
         "job_status",
+        # Conversation Source Consumer 的取值由枚举封闭，基数恒定。
+        "consumer",
     }
 )
 

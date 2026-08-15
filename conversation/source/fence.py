@@ -77,9 +77,19 @@ class ConversationConsumerExecutionFence:
         self,
         source: ConversationSourceEnvelope,
         consumer: ConversationSourceConsumer,
+        *,
+        conversation_ordered: bool = False,
     ):
+        """按固定顺序取得本次执行需要的锁。
+
+        ``conversation_ordered`` 由调用方从 Consumer 自身声明传入；栅栏不认识
+        任何具体 Consumer，只负责按稳定顺序取锁。
+        """
+
+        if not isinstance(conversation_ordered, bool):
+            raise TypeError("conversation_ordered must be boolean")
         resolved_consumer = ConversationSourceConsumer(consumer)
-        keys = self._keys(source, resolved_consumer)
+        keys = self._keys(source, resolved_consumer, conversation_ordered=conversation_ordered)
         contexts: list[AbstractContextManager[LeaseGuard]] = []
         guards: list[LeaseGuard] = []
         lease: ConversationConsumerExecutionLease | None = None
@@ -133,10 +143,14 @@ class ConversationConsumerExecutionFence:
     def _keys(
         source: ConversationSourceEnvelope,
         consumer: ConversationSourceConsumer,
+        *,
+        conversation_ordered: bool,
     ) -> tuple[str, ...]:
         consumer_key = f"conversation-source-consumer:{source.source_id}:{consumer.value}"
-        if consumer is not ConversationSourceConsumer.MEMORY:
+        if not conversation_ordered:
             return (consumer_key,)
+        # 锁键字面量与摘要载荷保持历史取值：它们不是持久数据，但新旧进程并存时
+        # 一旦不一致就会各取一把不同的锁，顺序保证随之失效。
         address_digest = canonical_digest(
             {
                 "schema_version": "conversation_memory_order_lock_v1",

@@ -136,7 +136,7 @@ def test_behavior_projector_reads_original_source_batch_and_keeps_mapping_rules(
         request_digest=request,
         recorded_at=NOW,
     )
-    projected = ConversationBehaviorProjector(clock=lambda: NOW).project(envelope)
+    projected = ConversationBehaviorProjector().project(envelope)
     assert projected is not None
     assert len(projected.items) == 1
     assert projected.items[0].source_message_id == messages[0].message_id

@@ -23,7 +23,11 @@ from tests.unit.conversation.source_v2_helpers import NOW, FakeMemoryConsumer, d
 
 
 async def _write_orphan_memory_output(service, consumer, source_value):
-    async with service.fence.acquire(source_value, ConversationSourceConsumer.MEMORY) as lease:
+    async with service.fence.acquire(
+        source_value,
+        ConversationSourceConsumer.MEMORY,
+        conversation_ordered=True,
+    ) as lease:
         return await consumer.execute(source_value, lease)
 
 
@@ -66,8 +70,10 @@ def test_unique_old_processor_output_is_adopted_after_upgrade(tmp_path) -> None:
             service.outcomes,
             service.inspector,
             service.fence,
-            new_memory,
-            behavior,
+            {
+                ConversationSourceConsumer.MEMORY: new_memory,
+                ConversationSourceConsumer.BEHAVIOR_PROJECTION: behavior,
+            },
             clock=lambda: NOW,
         )
         ensured = await upgraded.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)

@@ -27,6 +27,7 @@ from infrastructure.store.filesystem import (
     ImmutableArtifactConflictError,
     atomic_create_bytes,
     atomic_temporary_destination,
+    durable_unlink,
     list_real_directory,
     read_regular_bytes,
 )
@@ -455,6 +456,16 @@ class MemoryConversationOutputStore:
         if not isinstance(output, MemoryConversationOutput):
             raise ConversationSourceError("memory output store received another output type")
         return output.ingest_result_snapshot
+
+    def remove(self, source: ConversationSourceEnvelope, output_id: str) -> bool:
+        """删除一个陈旧输出；只供显式人工修复调用，交付路径永不使用。
+
+        修复只在同一来源仍存在另一份、且与当前 Processor 吻合的输出时才允许，
+        因此删除不会导致 Consumer 重新执行，也就不会重放已经落盘的写入副作用。
+        """
+
+        require_sha256(output_id, "output_id")
+        return durable_unlink(self._path(source.source_id, output_id), artifact_root=self.root)
 
     def _directory(self, source_id: str) -> Path:
         require_sha256(source_id, "source_id")

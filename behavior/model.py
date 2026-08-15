@@ -198,6 +198,32 @@ def is_ascii_digits(value: object) -> bool:
     return isinstance(value, str) and value.isascii() and value.isdigit()
 
 
+# TODO(BHV-TREE-TIMEBASE-001): 地址把本地偏移编进身份，与其它两层的时间约定不一致，随行为树
+# 重新设计一并统一。
+# - 现状：全仓库有**三套**约定。观测层存 UTC 加每条记录自己的 ``utc_offset_minutes``，用
+#   ``local_occurred_at`` 还原（``behavior/observation/model.py``）。行为树把偏移编进地址文本
+#   （``洗手--20260814T003000000000+0800``），并要求 ``occurred_on`` 等于本地 ``started_at`` 的日期
+#   （下面那条断言）。预测层存 UTC，再用**配置里的一个全局** ``temporal_utc_offset_minutes`` 换算回
+#   本地时段桶（``prediction/learning/keys.py:77``）。
+# - 具体例子：``foundation.integrity.canonicalize`` 会把 datetime 折成 UTC。东八区本地 00:30 的
+#   Event 折完变成前一天 16:30，``occurred_on`` 还是 14 号而 ``started_at`` 成了 13 号，这条断言当场
+#   拒绝。触发区间是本地 00:00–08:00——睡前洗漱、起夜、早起做饭全在里面，是三分之一的行为，不是边角
+#   情况。目前只有 ``behavior/fusion/jobs`` 这一处耐久边界会让原始 payload 通过，靠它自己的
+#   ``json_safe_payload`` 与 ``StagedEvent`` 的地址重派生挡住。
+# - 影响大小：中。当前没有已知的错误路径（树自己在 ``materialize`` 里就把时间转成了保留偏移的
+#   字符串，``canonicalize`` 拿到的是 str），但约定不统一会在每条新增的耐久路径上重犯同一个坑；而
+#   预测层用单一配置偏移，人跨时区就直接算错时段桶。
+# - 改造方案：地址改成 ``(本地 occurred_on, UTC started_at, utc_offset_minutes)`` 三元组，偏移作为
+#   地址的组成部分参与自校验，目录**仍按本地日历日**——"人的一天"才是行为的自然单位，按 UTC 分目录
+#   会把东八区用户的睡前与起床切到相邻两天里。这样 ``canonicalize`` 全程安全，
+#   ``json_safe_payload`` 与 ``StagedEvent`` 的守卫可以直接删掉，地址还能跨时区按真实时间正确排序
+#   （现在不同偏移的地址按文本排序并不等于按时间排序）。预测层的 ``temporal_utc_offset_minutes``
+#   随之改成从记录取而不是从配置取。
+# - 代价：地址文本与所在目录在观感上不一致（``2026/08/14/洗手--20260813T1630Z``），读树的人会觉得
+#   像 bug，需要在 Schema 描述里写清楚。
+# - 时机：地址方案是行为树的核心设计，与 ``TODO(BHV-EPISODE-002)`` 同批做，不要改两次。
+
+
 @dataclass(frozen=True)
 class BehaviorAddress:
     """唯一映射到一个行为语义 L2 Markdown 文档的地址。"""

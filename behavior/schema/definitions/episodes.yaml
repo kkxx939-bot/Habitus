@@ -1,3 +1,14 @@
+# TODO(BHV-EPISODE-002): Episode 的设计需要在 Event 融合落地后整体重新考虑，当前定义先不动。
+# - 现状：Episode 与 Event 同为 add_only，且 ended_at 必填，因此只能在长过程确实结束后才能发布；
+#   而 Event 融合是准实时的。两者节奏相反，Episode 的生成不该混在事件融合里。
+# - 已确认的职责划分：Event 融合是**观测层的消费者**（观测片段 → Event，跨领域、要调 LLM 理解
+#   原始语义）；Episode 生成是**行为树的自加工**（Event → Episode，输入输出都是树内文档，不碰
+#   观测层）。后者是小得多的问题，因为 Event 已经带有 URI、时间、语义与参与者。
+# - 需要重新考虑的具体问题：长过程何时算结束（"回家"到睡觉还是到出门？ended_at 必填使这条无法
+#   回避）；跨天长过程的地址归属；以及新增的 action_segment 如何以 unphased_events 的 uncertain
+#   角色被纳入——目标未归属的动作段正是要靠 Episode 在更长跨度上认领。
+# - 影响大小：中。不阻塞 Event 融合，但 Episode 不落地则 TrajectorySample 无来源，预测的长轨迹
+#   能力一直空置。
 behavior_type: episode
 description: >-
   一个文件保存一个已经结束的真实长行为过程，通过有序 Event URI、阶段和转移表达复杂任务轨迹，

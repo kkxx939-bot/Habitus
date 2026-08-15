@@ -157,13 +157,15 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
     ]
     assert reverse_dependency_violations == []
 
+    # ``ModelClient`` 不在禁止之列：它是供应商无关的能力契约层，本就供领域模块直接使用，
+    # ``memory`` 的检索、抽取与语义生成同样直接依赖它。behavior 里只有事件融合调用模型，
+    # 观测清洗、确定性派生与行为树写入都不经过它。
     behavior_dependency_violations = [
         str(path.relative_to(REPOSITORY_ROOT))
         for path in behavior_root.rglob("*.py")
         if imported_roots(path)
         & {
             "Config",
-            "ModelClient",
             "Runtime",
             "conversation",
             "integrations",
@@ -172,6 +174,55 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
         }
     ]
     assert behavior_dependency_violations == []
+
+    # 但模型调用必须收敛在融合一层，不得渗进存储、派生或写入路径。
+    model_callers = sorted(
+        str(path.relative_to(REPOSITORY_ROOT))
+        for path in behavior_root.rglob("*.py")
+        if "ModelClient" in imported_roots(path)
+    )
+    assert model_callers == ["behavior/fusion/service.py"]
+
+    # 直接依赖收敛了还不够：只查一跳的话，``derivation → result → service → ModelClient``
+    # 这样的两跳链会完整通过（已用变异测试证伪过一次）。所以这里算**传递闭包**，并且对
+    # ``behavior/fusion/`` 下**除白名单外的每一个模块**成立——按名单列举会漏掉后来新增的模块，
+    # 判断存储就是这么漏掉的。
+    fusion_root = behavior_root / "fusion"
+    fusion_modules = {
+        f"behavior.fusion.{path.relative_to(fusion_root).with_suffix('').as_posix().replace('/', '.')}"
+        .removesuffix(".__init__")
+        : path
+        for path in fusion_root.rglob("*.py")
+        if "__pycache__" not in path.parts
+    }
+    allowed_model_callers = {
+        "behavior.fusion",
+        "behavior.fusion.service",
+        "behavior.fusion.runner",
+    }
+
+    def reaches_model_client(module: str, seen: set[str]) -> bool:
+        if module in seen:
+            return False
+        seen.add(module)
+        path = fusion_modules.get(module)
+        if path is None:
+            return False
+        imported = imported_modules(path)
+        if any(name == "ModelClient" or name.startswith("ModelClient.") for name in imported):
+            return True
+        return any(
+            reaches_model_client(name, seen)
+            for name in imported
+            if name in fusion_modules
+        )
+
+    leaking = sorted(
+        module
+        for module in fusion_modules
+        if module not in allowed_model_callers and reaches_model_client(module, set())
+    )
+    assert leaking == [], f"这些确定性模块传递性地依赖了 ModelClient: {leaking}"
 
     assembly_tree = ast.parse(
         (REPOSITORY_ROOT / "Runtime" / "assembly.py").read_text(encoding="utf-8")
@@ -273,10 +324,18 @@ def test_conversation_source_and_projection_do_not_depend_on_memory_or_behavior(
 
 
 def test_behavior_projection_reads_only_source_envelope_batch() -> None:
-    projection_path = REPOSITORY_ROOT / "conversation" / "projection" / "behavior.py"
-    imported = imported_roots(projection_path)
-    source = projection_path.read_text(encoding="utf-8")
-    assert imported.isdisjoint({"memory", "behavior", "Runtime", "Config"})
+    projection_root = REPOSITORY_ROOT / "conversation" / "projection" / "behavior"
+    modules = sorted(projection_root.glob("*.py"))
+    assert {path.name for path in modules} == {
+        "__init__.py",
+        "consumer.py",
+        "model.py",
+        "projector.py",
+        "store.py",
+    }
+    source = "\n".join(path.read_text(encoding="utf-8") for path in modules)
+    for path in modules:
+        assert imported_roots(path).isdisjoint({"memory", "behavior", "Runtime", "Config"})
     assert "envelope.batch.messages" in source
     assert "ConversationMessageChunker" not in source
     assert "ConversationSegment" not in source

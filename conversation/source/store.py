@@ -6,8 +6,11 @@ import json
 import re
 from pathlib import Path
 
-from conversation.source.model import ConversationSourceEnvelope, ConversationSourceError
-from foundation.integrity import canonical_json
+from conversation.source.model import (
+    ConversationSourceEnvelope,
+    ConversationSourceError,
+    encode_durable_record,
+)
 from infrastructure.store.filesystem import (
     DurablePathIntegrityError,
     ImmutableArtifactConflictError,
@@ -103,10 +106,9 @@ class ConversationSourceStore:
         return self.envelope_root / f"{source_id}.json"
 
     def _encode(self, envelope: ConversationSourceEnvelope) -> bytes:
-        encoded = (canonical_json(envelope.to_dict()) + "\n").encode("utf-8")
-        if len(encoded) > self.max_file_bytes:
-            raise ConversationSourceError("source record exceeds its configured file bound")
-        return encoded
+        return encode_durable_record(
+            envelope.to_dict(), max_bytes=self.max_file_bytes, label="source record"
+        )
 
 
 __all__ = ["ConversationSourceStore"]

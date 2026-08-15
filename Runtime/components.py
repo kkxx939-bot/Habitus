@@ -13,6 +13,7 @@ from conversation import (
     ConversationConsumerExecutionFence,
     ConversationConsumerOutcomeStore,
     ConversationConsumerStateInspector,
+    ConversationSourceConsumer,
     ConversationSourceCoordinator,
     ConversationSourceRecovery,
     ConversationSourceStore,
@@ -234,6 +235,11 @@ class RuntimeConversation:
             raise ValueError("Conversation Source, Projection and Journal must share one root")
         if self.behavior_projection_consumer.store is not self.behavior_projections:
             raise ValueError("Behavior Projection Consumer must use the shared outbox")
+        if (
+            self.source_delivery.consumers[ConversationSourceConsumer.BEHAVIOR_PROJECTION]
+            is not self.behavior_projection_consumer
+        ):
+            raise ValueError("Source delivery must use the shared Behavior Projection Consumer")
         if self.source_coordinator.sources is not self.sources:
             raise ValueError("Source Coordinator must use the shared Source Store")
         if self.source_coordinator.delivery is not self.source_delivery:
@@ -356,7 +362,10 @@ class RuntimeComponents:
             raise TypeError("workflow must be RuntimeWorkflow")
         if self.workflow.enqueuer.conversations is not self.conversation.journal:
             raise ValueError("workflow enqueuer must use the shared conversation journal")
-        if self.conversation.source_delivery.memory_consumer is not self.workflow.conversation_consumer:
+        if (
+            self.conversation.source_delivery.consumers[ConversationSourceConsumer.MEMORY]
+            is not self.workflow.conversation_consumer
+        ):
             raise ValueError("Source Coordinator must use the shared Memory Conversation Consumer")
         if self.workflow.runner.executor.editor is not self.memory.editor:
             raise ValueError("workflow runner must use the shared memory editor")

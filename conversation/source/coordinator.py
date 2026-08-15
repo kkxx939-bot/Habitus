@@ -1,9 +1,11 @@
-"""持久化 Source，并独立启动 Memory 与 Behavior Projection 交付。"""
+"""持久化 Source，并为每个已注册 Consumer 独立启动交付。"""
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from conversation.source.delivery import ConversationConsumerDelivery, ConversationConsumerEnsureResult
 from conversation.source.model import ConversationSourceEnvelope
@@ -14,35 +16,48 @@ from conversation.source.store import ConversationSourceStore
 
 @dataclass(frozen=True)
 class ConversationSourceDispatchHandle:
-    """分离两个 Consumer 的等待与状态检查；等待取消不会传播到底层任务。"""
+    """分离各 Consumer 的等待与状态检查；等待取消不会传播到底层任务。
+
+    ``tasks`` 覆盖全部已注册 Consumer，``wait``/``inspect`` 是通用入口；
+    Memory 与 Behavior Projection 的具名方法只是调用方常用的便捷门面。
+    """
 
     envelope: ConversationSourceEnvelope
     delivery: ConversationConsumerDelivery
-    memory_task: asyncio.Task[ConversationConsumerEnsureResult]
-    behavior_projection_task: asyncio.Task[ConversationConsumerEnsureResult]
+    tasks: Mapping[ConversationSourceConsumer, asyncio.Task[ConversationConsumerEnsureResult]]
+
+    async def wait(self, consumer: ConversationSourceConsumer) -> object | None:
+        """等待某个 Consumer 到达终态，并返回它的耐久 Output（SKIPPED 时为 None）。"""
+
+        resolved = ConversationSourceConsumer(consumer)
+        await asyncio.shield(self.tasks[resolved])
+        return self.delivery.restore_terminal(self.envelope, resolved)
+
+    def inspect(self, consumer: ConversationSourceConsumer) -> ConversationConsumerState:
+        return self.delivery.inspect(self.envelope, ConversationSourceConsumer(consumer))
+
+    @property
+    def memory_task(self) -> asyncio.Task[ConversationConsumerEnsureResult]:
+        return self.tasks[ConversationSourceConsumer.MEMORY]
+
+    @property
+    def behavior_projection_task(self) -> asyncio.Task[ConversationConsumerEnsureResult]:
+        return self.tasks[ConversationSourceConsumer.BEHAVIOR_PROJECTION]
 
     async def wait_memory(self) -> object:
-        await asyncio.shield(self.memory_task)
-        value = self.delivery.restore_terminal(self.envelope, ConversationSourceConsumer.MEMORY)
+        value = await self.wait(ConversationSourceConsumer.MEMORY)
         if value is None:
             raise RuntimeError("Memory Consumer cannot complete as SKIPPED")
         return value
 
     async def wait_behavior_projection(self) -> object | None:
-        await asyncio.shield(self.behavior_projection_task)
-        return self.delivery.restore_terminal(
-            self.envelope,
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
-        )
+        return await self.wait(ConversationSourceConsumer.BEHAVIOR_PROJECTION)
 
     def inspect_memory(self) -> ConversationConsumerState:
-        return self.delivery.inspect(self.envelope, ConversationSourceConsumer.MEMORY)
+        return self.inspect(ConversationSourceConsumer.MEMORY)
 
     def inspect_behavior_projection(self) -> ConversationConsumerState:
-        return self.delivery.inspect(
-            self.envelope,
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
-        )
+        return self.inspect(ConversationSourceConsumer.BEHAVIOR_PROJECTION)
 
 
 @dataclass(frozen=True)
@@ -52,9 +67,12 @@ class ConversationSourcePendingDelivery:
     source_id: str
     consumer: ConversationSourceConsumer
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "consumer", ConversationSourceConsumer(self.consumer))
+
 
 class ConversationSourceCoordinator:
-    """start() 只启动交付；旧 API 可以只等待 Memory。"""
+    """start() 只启动交付；调用方可以只等待自己关心的 Consumer。"""
 
     def __init__(
         self,
@@ -74,27 +92,13 @@ class ConversationSourceCoordinator:
     def start(self, envelope: ConversationSourceEnvelope) -> ConversationSourceDispatchHandle:
         durable = self.sources.put(envelope)
         loop = asyncio.get_running_loop()
-        memory_task = loop.create_task(
-            self.delivery.ensure_outcome(durable, ConversationSourceConsumer.MEMORY)
-        )
-        behavior_task = loop.create_task(
-            self.delivery.ensure_outcome(
-                durable,
-                ConversationSourceConsumer.BEHAVIOR_PROJECTION,
-            )
-        )
-        self._track(memory_task, durable.source_id, ConversationSourceConsumer.MEMORY)
-        self._track(
-            behavior_task,
-            durable.source_id,
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
-        )
-        return ConversationSourceDispatchHandle(
-            durable,
-            self.delivery,
-            memory_task,
-            behavior_task,
-        )
+        tasks: dict[ConversationSourceConsumer, asyncio.Task[ConversationConsumerEnsureResult]] = {}
+        # 按枚举顺序遍历注册表，保证启动顺序确定，且新增 Consumer 不必改这里。
+        for consumer in ConversationSourceConsumer:
+            task = loop.create_task(self.delivery.ensure_outcome(durable, consumer))
+            self._track(task, durable.source_id, consumer)
+            tasks[consumer] = task
+        return ConversationSourceDispatchHandle(durable, self.delivery, MappingProxyType(tasks))
 
     async def wait_for_idle(self, timeout_seconds: float | None) -> bool:
         """有界等待但不取消 Consumer；超时后 Recovery 仍可复用耐久状态。"""
@@ -137,7 +141,9 @@ class ConversationSourceCoordinator:
             self._tasks.discard(done)
             self._task_deliveries.pop(done, None)
             if not done.cancelled():
-                # 显式取出异常，避免后台 Behavior 失败产生未检索异常警告。
+                # 取出异常避免"未检索异常"警告；失败本身由调用方 wait/inspect 观察。
+                # TODO(conversation-source): 后台 Consumer 的失败当前不落任何记录，
+                # 无人 wait 时会静默停摆；可观测方案待与 Behavior 下游一并确定。
                 done.exception()
 
         task.add_done_callback(completed)

@@ -10,8 +10,8 @@ from conversation.source import (
     ConversationConsumerExecutionFence,
     ConversationConsumerLeaseLostError,
     ConversationConsumerStateInspector,
-    ConversationMemoryPredecessorBrokenError,
-    ConversationMemoryPredecessorPendingError,
+    ConversationOrderedPredecessorBrokenError,
+    ConversationOrderedPredecessorPendingError,
     ConversationSourceConsumer,
     ConversationSourceCoordinator,
 )
@@ -82,7 +82,7 @@ def test_different_processor_fingerprints_share_one_execution_lock_and_first_out
         second_memory = FakeMemoryConsumer(memory_outputs, fingerprint_seed="processor-new")
         behavior = WrappedBehaviorConsumer(
             ConversationBehaviorProjectionConsumer(
-                ConversationBehaviorProjector(clock=lambda: NOW),
+                ConversationBehaviorProjector(),
                 projection_outputs,
             )
         )
@@ -100,8 +100,10 @@ def test_different_processor_fingerprints_share_one_execution_lock_and_first_out
                     heartbeat_interval_seconds=0.05,
                     wait_seconds=2.0,
                 ),
-                memory,
-                behavior,
+                {
+                    ConversationSourceConsumer.MEMORY: memory,
+                    ConversationSourceConsumer.BEHAVIOR_PROJECTION: behavior,
+                },
                 clock=lambda: NOW,
             )
 
@@ -238,7 +240,7 @@ def test_newer_memory_source_fails_fast_when_predecessor_is_pending_or_broken(tm
         service, _memory, _behavior = delivery(tmp_path)
         first = service.sources.put(source(sequence=0, delivery_seed="first"))
         second = service.sources.put(source(sequence=1, delivery_seed="second"))
-        with pytest.raises(ConversationMemoryPredecessorPendingError):
+        with pytest.raises(ConversationOrderedPredecessorPendingError):
             await service.ensure_outcome(second, ConversationSourceConsumer.MEMORY)
 
         await service.ensure_outcome(first, ConversationSourceConsumer.MEMORY)
@@ -253,7 +255,7 @@ def test_newer_memory_source_fails_fast_when_predecessor_is_pending_or_broken(tm
             / f"{state.outcome.output_ref.output_id}.json"
         )
         output_path.unlink()
-        with pytest.raises(ConversationMemoryPredecessorBrokenError):
+        with pytest.raises(ConversationOrderedPredecessorBrokenError):
             await service.ensure_outcome(second, ConversationSourceConsumer.MEMORY)
 
     asyncio.run(scenario())

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -13,11 +14,13 @@ from Config import M2BOSConfig
 from conversation import (
     ConversationSourceConsumer,
     ConversationSourceEnvelope,
+    ConversationSourceOutputRepair,
     ConversationSourcePendingDelivery,
     ConversationSourceRecoveryResult,
+    ConversationSourceRepairError,
+    ConversationSourceRepairResult,
     conversation_source_request_digest,
 )
-from conversation.source.delivery import ConversationConsumerEnsureResult
 from foundation.observability import (
     ObservabilitySnapshot,
     ObservationEvent,
@@ -301,6 +304,9 @@ class Runtime:
             await self.components.memory.vector_index.ensure_ready()
             await self.components.conversation.summary_vector_index.ensure_ready()
             source_recoveries = await self.components.conversation.source_recovery.recover_pending()
+            self._publish_source_delivery_gauges(source_recoveries)
+            # 只有 Memory 的失败阻断启动；Behavior 失败不阻断，但它已经由
+            # ConversationConsumerDelivery 记为事件，并计入下面的 gauge，不再被丢弃。
             memory_recovery_error = next(
                 (
                     result.error
@@ -401,26 +407,9 @@ class Runtime:
             request_digest=request_digest,
             recorded_at=datetime.now(timezone.utc),
         )
-        started = time.monotonic()
         handle = self.components.conversation.source_coordinator.start(envelope)
-
-        def observe_behavior(task: asyncio.Task[ConversationConsumerEnsureResult]) -> None:
-            if task.cancelled():
-                return
-            error = task.exception()
-            if error is not None:
-                self._observe(
-                    "conversation",
-                    "behavior_projection",
-                    ObservationStatus.DEGRADED,
-                    started,
-                    {
-                        "error_type": type(error).__name__,
-                        "source_id": handle.envelope.source_id,
-                    },
-                )
-
-        handle.behavior_projection_task.add_done_callback(observe_behavior)
+        # 每个 Consumer 的成败由 ConversationConsumerDelivery 统一观察，覆盖前台、
+        # 启动恢复和显式恢复三条路径；这里不再为单个 Consumer 另挂回调。
         result = await handle.wait_memory()
         if not isinstance(result, ConversationMemoryIngestResult):
             raise RuntimeError("Memory Conversation Consumer completed without an ingest result")
@@ -483,6 +472,7 @@ class Runtime:
 
         self._require_initialized("conversation source recovery")
         results = await self.components.conversation.source_recovery.recover_pending()
+        self._publish_source_delivery_gauges(results)
         if self._state is RuntimeState.RUNNING:
             for recovered in results:
                 if recovered.consumer is not ConversationSourceConsumer.MEMORY or recovered.error is not None:
@@ -495,6 +485,26 @@ class Runtime:
                     self.components.workflow.worker.wake()
                     break
         return results
+
+    def repair_conversation_source_outputs(
+        self,
+        source_id: str,
+        consumer: ConversationSourceConsumer,
+    ) -> ConversationSourceRepairResult:
+        """人工修复同一 Source Consumer 上的多个孤儿 Output。
+
+        与 FAILED Job 的重试入口同形态：正式运维动作只从 Runtime 发起，且必须
+        指名具体来源。交付层保持 fail-closed，不会自动做这件事——出现多个孤儿
+        意味着存储被外力动过，需要人确认过再修。修复后该 Consumer 会在下一次
+        恢复时采用保留下来的那份，不会重新执行。
+        """
+
+        self._require_initialized("conversation source output repair")
+        envelope = self.components.conversation.sources.read(source_id)
+        if envelope is None:
+            raise ConversationSourceRepairError(f"unknown Conversation Source: {source_id}")
+        repair = ConversationSourceOutputRepair(self.components.conversation.source_delivery)
+        return repair.repair(envelope, ConversationSourceConsumer(consumer))
 
     async def flush_conversation(
         self,
@@ -959,6 +969,30 @@ class Runtime:
                 directory.chmod(0o700)
             except OSError:
                 pass
+
+    def _publish_source_delivery_gauges(
+        self,
+        results: Sequence[ConversationSourceRecoveryResult],
+    ) -> None:
+        """把本轮恢复后仍未完成的 Source Consumer 数量发布为 gauge。
+
+        交付失败只在发生的那一刻产生一条事件，而损坏状态不会自愈：事件一旦
+        被漏看，这条来源就再也不会发出任何信号。gauge 表达的是"现在还卡着
+        几条"，每次恢复都会刷新，因此漏看一次不等于永远看不到。
+        """
+
+        registry = self.components.infrastructure.observability
+        for consumer in ConversationSourceConsumer:
+            stuck = sum(
+                1
+                for result in results
+                if result.consumer is consumer and result.error is not None
+            )
+            registry.set_gauge(
+                "conversation_source_delivery_stuck",
+                stuck,
+                labels={"consumer": consumer.value},
+            )
 
     def _observe(
         self,

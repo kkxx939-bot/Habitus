@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
 
-from foundation.integrity import canonical_digest, canonicalize
+from foundation.integrity import canonical_digest, canonical_json, canonicalize
 from pre.conversation import ConversationBatch
 
 SOURCE_SCHEMA_VERSION = "conversation_source_envelope_v2"
@@ -24,6 +24,40 @@ def require_sha256(value: object, label: str) -> str:
     ):
         raise ConversationSourceError(f"{label} must be lowercase SHA-256 text")
     return value
+
+
+def require_record(
+    value: object,
+    *,
+    expected: set[str],
+    label: str,
+    schema_version: str | None = None,
+) -> Mapping[str, Any]:
+    """解码耐久记录前的统一守卫：必须是对象、键集合完全相等、Schema 版本吻合。
+
+    键集合用相等而不是包含关系判断，未知字段和缺失字段一律拒绝；这一条是
+    所有 Source、Outcome 与 Consumer Output 记录共享的严格解码前提，集中在
+    这里可以避免每个 ``from_dict`` 各写一份而逐渐漂移。
+    """
+
+    if not isinstance(value, Mapping) or set(value) != expected:
+        raise ConversationSourceError(f"{label} schema is invalid")
+    if schema_version is not None and value.get("schema_version") != schema_version:
+        raise ConversationSourceError(f"{label} schema version is invalid")
+    return value
+
+
+def encode_durable_record(record: Mapping[str, Any], *, max_bytes: int, label: str) -> bytes:
+    """把一条记录编码成带换行的规范 UTF-8 JSON，并执行统一的文件上限检查。
+
+    读路径会用同一函数重新编码并与磁盘内容逐字节比对，规范编码因此必须只有
+    这一个实现；容量上限由各 Store 从 Config 传入，不在此处设默认值。
+    """
+
+    encoded = (canonical_json(record) + "\n").encode("utf-8")
+    if len(encoded) > max_bytes:
+        raise ConversationSourceError(f"{label} exceeds its configured file bound")
+    return encoded
 
 
 def source_timestamp(value: datetime | str, label: str) -> datetime:
@@ -280,41 +314,42 @@ class ConversationSourceEnvelope:
 
     @classmethod
     def from_dict(cls, value: object) -> ConversationSourceEnvelope:
-        if not isinstance(value, Mapping):
-            raise ConversationSourceError("source envelope must be an object")
-        expected = {
-            "schema_version",
-            "source_id",
-            "conversation_id",
-            "started_on",
-            "protocol",
-            "batch",
-            "after_turn",
-            "omit_tool_call_ids",
-            "delivery_id",
-            "request_digest",
-            "source_payload_digest",
-            "recorded_at",
-            "source_record_digest",
-        }
-        if set(value) != expected or value.get("schema_version") != SOURCE_SCHEMA_VERSION:
-            raise ConversationSourceError("source envelope schema is invalid")
-        batch_value = value["batch"]
+        record = require_record(
+            value,
+            expected={
+                "schema_version",
+                "source_id",
+                "conversation_id",
+                "started_on",
+                "protocol",
+                "batch",
+                "after_turn",
+                "omit_tool_call_ids",
+                "delivery_id",
+                "request_digest",
+                "source_payload_digest",
+                "recorded_at",
+                "source_record_digest",
+            },
+            label="source envelope",
+            schema_version=SOURCE_SCHEMA_VERSION,
+        )
+        batch_value = record["batch"]
         if not isinstance(batch_value, Mapping):
             raise ConversationSourceError("source envelope batch must be an object")
         return cls(
-            source_id=value["source_id"],
-            conversation_id=value["conversation_id"],
-            started_on=_started_on(value["started_on"]),
-            protocol=value["protocol"],
+            source_id=record["source_id"],
+            conversation_id=record["conversation_id"],
+            started_on=_started_on(record["started_on"]),
+            protocol=record["protocol"],
             batch=ConversationBatch.from_dict(batch_value),
-            after_turn=value["after_turn"],
-            omit_tool_call_ids=_omit_tool_call_ids(value["omit_tool_call_ids"]),
-            delivery_id=value["delivery_id"],
-            request_digest=value["request_digest"],
-            source_payload_digest=value["source_payload_digest"],
-            recorded_at=source_timestamp(value["recorded_at"], "recorded_at"),
-            source_record_digest=value["source_record_digest"],
+            after_turn=record["after_turn"],
+            omit_tool_call_ids=_omit_tool_call_ids(record["omit_tool_call_ids"]),
+            delivery_id=record["delivery_id"],
+            request_digest=record["request_digest"],
+            source_payload_digest=record["source_payload_digest"],
+            recorded_at=source_timestamp(record["recorded_at"], "recorded_at"),
+            source_record_digest=record["source_record_digest"],
         )
 
 
@@ -323,6 +358,8 @@ __all__ = [
     "ConversationSourceError",
     "SOURCE_SCHEMA_VERSION",
     "conversation_source_request_digest",
+    "encode_durable_record",
+    "require_record",
     "require_sha256",
     "source_timestamp",
 ]

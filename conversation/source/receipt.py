@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from conversation.source.model import ConversationSourceError, require_sha256, source_timestamp
-from foundation.integrity import canonical_digest, canonical_json, canonicalize
+from conversation.source.model import (
+    ConversationSourceError,
+    encode_durable_record,
+    require_record,
+    require_sha256,
+    source_timestamp,
+)
+from foundation.integrity import canonical_digest, canonicalize
 from infrastructure.store.filesystem import ImmutableArtifactConflictError, atomic_create_bytes, read_regular_bytes
 
 OUTCOME_SCHEMA_VERSION = "conversation_consumer_outcome_v1"
@@ -29,8 +34,13 @@ class ConversationConsumerOutcomeState(str, Enum):
 
 
 class ConversationConsumerRunDisposition(str, Enum):
+    """一次 Consumer 执行的处置；复用既有 Output 不经过这里。
+
+    既有 Output 的复用发生在执行之前——Inspector 判定为 OUTPUT_READY 后，交付层
+    直接采用并建立 Outcome，根本不会调用 Consumer，因此不存在"复用"这种运行处置。
+    """
+
     OUTPUT_WRITTEN = "output_written"
-    OUTPUT_REUSED = "output_reused"
     SKIPPED = "skipped"
 
 
@@ -90,18 +100,21 @@ class ConsumerOutputRef:
 
     @classmethod
     def from_dict(cls, value: object) -> ConsumerOutputRef:
-        if not isinstance(value, Mapping) or set(value) != {
-            "output_kind",
-            "output_id",
-            "output_record_digest",
-            "processor_fingerprint",
-        }:
-            raise ConversationSourceError("consumer output reference schema is invalid")
+        record = require_record(
+            value,
+            expected={
+                "output_kind",
+                "output_id",
+                "output_record_digest",
+                "processor_fingerprint",
+            },
+            label="consumer output reference",
+        )
         return cls(
-            output_kind=value["output_kind"],
-            output_id=value["output_id"],
-            output_record_digest=value["output_record_digest"],
-            processor_fingerprint=value["processor_fingerprint"],
+            output_kind=record["output_kind"],
+            output_id=record["output_id"],
+            output_record_digest=record["output_record_digest"],
+            processor_fingerprint=record["processor_fingerprint"],
         )
 
 
@@ -221,38 +234,39 @@ class ConversationConsumerOutcome:
 
     @classmethod
     def from_dict(cls, value: object) -> ConversationConsumerOutcome:
-        if not isinstance(value, Mapping):
-            raise ConversationSourceError("consumer outcome must be an object")
-        expected = {
-            "schema_version",
-            "source_id",
-            "source_payload_digest",
-            "consumer",
-            "processor_fingerprint",
-            "state",
-            "output_ref",
-            "skip_reason",
-            "completed_at",
-            "outcome_record_digest",
-        }
-        if set(value) != expected or value.get("schema_version") != OUTCOME_SCHEMA_VERSION:
-            raise ConversationSourceError("consumer outcome schema is invalid")
+        record = require_record(
+            value,
+            expected={
+                "schema_version",
+                "source_id",
+                "source_payload_digest",
+                "consumer",
+                "processor_fingerprint",
+                "state",
+                "output_ref",
+                "skip_reason",
+                "completed_at",
+                "outcome_record_digest",
+            },
+            label="consumer outcome",
+            schema_version=OUTCOME_SCHEMA_VERSION,
+        )
         try:
-            consumer = ConversationSourceConsumer(value["consumer"])
-            state = ConversationConsumerOutcomeState(value["state"])
+            consumer = ConversationSourceConsumer(record["consumer"])
+            state = ConversationConsumerOutcomeState(record["state"])
         except (TypeError, ValueError) as exc:
             raise ConversationSourceError("consumer outcome state is invalid") from exc
-        output_ref = None if value["output_ref"] is None else ConsumerOutputRef.from_dict(value["output_ref"])
+        output_ref = None if record["output_ref"] is None else ConsumerOutputRef.from_dict(record["output_ref"])
         return cls(
-            source_id=value["source_id"],
-            source_payload_digest=value["source_payload_digest"],
+            source_id=record["source_id"],
+            source_payload_digest=record["source_payload_digest"],
             consumer=consumer,
-            processor_fingerprint=value["processor_fingerprint"],
+            processor_fingerprint=record["processor_fingerprint"],
             state=state,
             output_ref=output_ref,
-            skip_reason=value["skip_reason"],
-            completed_at=source_timestamp(value["completed_at"], "completed_at"),
-            outcome_record_digest=value["outcome_record_digest"],
+            skip_reason=record["skip_reason"],
+            completed_at=source_timestamp(record["completed_at"], "completed_at"),
+            outcome_record_digest=record["outcome_record_digest"],
         )
 
 
@@ -310,10 +324,9 @@ class ConversationConsumerOutcomeStore:
         return self.outcome_root / source_id / f"{ConversationSourceConsumer(consumer).value}.json"
 
     def _encode(self, outcome: ConversationConsumerOutcome) -> bytes:
-        encoded = (canonical_json(outcome.to_dict()) + "\n").encode("utf-8")
-        if len(encoded) > self.max_file_bytes:
-            raise ConversationSourceError("consumer outcome exceeds its configured file bound")
-        return encoded
+        return encode_durable_record(
+            outcome.to_dict(), max_bytes=self.max_file_bytes, label="consumer outcome"
+        )
 
 
 __all__ = [

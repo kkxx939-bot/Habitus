@@ -12,11 +12,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
 if TYPE_CHECKING:
+    from conversation import ConversationSourceConsumer
     from integrations.local_service.cloud_setup import (
         CloudSetupSelection,
         ProfileSelection,
     )
     from integrations.local_service.setup_registry import SetupField, SetupRegistry
+    from Runtime import Runtime
 
 
 class WizardCancelled(RuntimeError):
@@ -46,6 +48,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
     if args.command == "harnesses":
         _delegate_plugin(["harnesses", "--json"])
+        return
+    if args.command == "repair-source-outputs":
+        code = _repair_source_outputs(args, values)
+        if code:
+            raise SystemExit(code)
         return
     if _maybe_offer_init(args.config, values):
         return
@@ -378,6 +385,112 @@ def _delegate_plugin(arguments: Sequence[str]) -> None:
         raise SystemExit(code)
 
 
+def _repair_source_outputs(args: argparse.Namespace, values: Mapping[str, str]) -> int:
+    """人工修复同一 Source Consumer 上的多个孤儿 Output。
+
+    这是会删除耐久文件的运维动作，因此必须独占 storage root：先取本地服务实例锁，
+    服务正在运行时直接拒绝，避免在交付进行中把文件删掉。``--dry-run`` 只报告将要
+    保留和删除哪些 Output，不改动任何文件。
+    """
+
+    import asyncio
+
+    from Config import ConfigError, M2BOSConfig
+    from conversation import ConversationSourceConsumer, ConversationSourceError
+    from integrations.local_service.adapter_catalog import load_adapter_catalog
+    from integrations.local_service.instance_lock import ServiceInstanceLock, ServiceInstanceLockError
+    from Runtime import build_runtime
+
+    try:
+        config = M2BOSConfig.from_env(environ=values)
+    except (ConfigError, OSError, TypeError, ValueError) as exc:
+        sys.stderr.write(f"m2bOS configuration failed: {exc}\n")
+        return 2
+    try:
+        consumer = ConversationSourceConsumer(args.consumer)
+    except ValueError:
+        sys.stderr.write(f"unknown consumer: {args.consumer}\n")
+        return 2
+
+    lock = ServiceInstanceLock(config.storage_root / "service" / "http.lock")
+    try:
+        lock.acquire()
+    except ServiceInstanceLockError:
+        sys.stderr.write(
+            "another m2bOS local service owns this storage root; stop it before repairing\n"
+        )
+        return 3
+    try:
+        catalog = load_adapter_catalog()
+        runtime = build_runtime(
+            config,
+            providers=catalog.providers,
+            vector_stores=catalog.vector_stores,
+        )
+        try:
+            runtime.initialize()
+            if args.dry_run:
+                return _report_repair_plan(runtime, args.source_id, consumer)
+            result = runtime.repair_conversation_source_outputs(args.source_id, consumer)
+        except ConversationSourceError as exc:
+            sys.stderr.write(f"repair refused: {exc}\n")
+            return 1
+        finally:
+            asyncio.run(runtime.close())
+    finally:
+        lock.release()
+    sys.stdout.write(
+        json.dumps(
+            {
+                "source_id": result.source_id,
+                "consumer": result.consumer.value,
+                "retained_output_id": result.retained_output_id,
+                "removed_output_ids": list(result.removed_output_ids),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    return 0
+
+
+def _report_repair_plan(
+    runtime: Runtime,
+    source_id: str,
+    consumer: ConversationSourceConsumer,
+) -> int:
+    """只读地报告修复会保留和删除什么；任何不满足前提的情况都如实说明。"""
+
+    from conversation import ConversationSourceError
+
+    conversation = runtime.components.conversation
+    envelope = conversation.sources.read(source_id)
+    if envelope is None:
+        raise ConversationSourceError(f"unknown Conversation Source: {source_id}")
+    implementation = conversation.source_delivery.consumers[consumer]
+    outputs = implementation.output_store
+    expected = outputs.expected_output_id(envelope, implementation.processor_fingerprint)
+    present = [outputs.ref(output).output_id for output in outputs.list(envelope)]
+    sys.stdout.write(
+        json.dumps(
+            {
+                "source_id": source_id,
+                "consumer": consumer.value,
+                "outcome_exists": conversation.source_outcomes.read(source_id, consumer) is not None,
+                "present_output_ids": sorted(present),
+                "current_processor_output_id": expected,
+                "would_retain": expected if expected in present else None,
+                "would_remove": sorted(item for item in present if item != expected),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    return 0
+
+
 def _serve(values: Mapping[str, str]) -> None:
     """服务模式才加载可选 HTTP 依赖和重量级组合根。"""
 
@@ -574,6 +687,24 @@ def _parser() -> argparse.ArgumentParser:
     start_group.add_argument("--no-start", dest="start", action="store_false", help="初始化后不启动服务")
     init.set_defaults(start=None)
 
+    repair = subparsers.add_parser(
+        "repair-source-outputs",
+        help="修复同一 Conversation Source Consumer 上的多个孤儿 Output",
+    )
+    repair.add_argument("--config", default=argparse.SUPPRESS, help="配置文件")
+    repair.add_argument("source_id", help="损坏来源的 source_id")
+    repair.add_argument(
+        "--consumer",
+        required=True,
+        choices=("memory", "behavior_projection"),
+        help="要修复的 Consumer",
+    )
+    repair.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只报告将保留和删除哪些 Output，不改动任何文件",
+    )
+
     plugin = subparsers.add_parser("plugin", add_help=False, help="委托 Agent Harness 插件生命周期")
     plugin.add_argument("-h", "--help", dest="plugin_help", action="store_true")
     plugin.add_argument("plugin_arguments", nargs=argparse.REMAINDER)
@@ -586,6 +717,7 @@ def _parser() -> argparse.ArgumentParser:
         deep=False,
         probe_timeout=15.0,
         plugin_help=False,
+        dry_run=False,
     )
     return parser
 

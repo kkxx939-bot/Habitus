@@ -14,6 +14,7 @@ from conversation import (
     ConversationConsumerExecutionFence,
     ConversationConsumerOutcomeStore,
     ConversationConsumerStateInspector,
+    ConversationSourceConsumer,
     ConversationSourceCoordinator,
     ConversationSourceRecovery,
     ConversationSourceStore,
@@ -504,8 +505,11 @@ def build_runtime(
         source_outcomes,
         source_inspector,
         source_fence,
-        memory_conversation_consumer,
-        behavior_projection_consumer,
+        {
+            ConversationSourceConsumer.MEMORY: memory_conversation_consumer,
+            ConversationSourceConsumer.BEHAVIOR_PROJECTION: behavior_projection_consumer,
+        },
+        observer=operation_observer,
     )
     source_coordinator = ConversationSourceCoordinator(source_store, source_delivery)
     source_recovery = ConversationSourceRecovery(

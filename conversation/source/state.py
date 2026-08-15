@@ -48,6 +48,8 @@ class ConversationConsumerOutputStore(Protocol):
 
     def restore(self, output: object) -> object: ...
 
+    def remove(self, source: ConversationSourceEnvelope, output_id: str) -> bool: ...
+
 
 @dataclass(frozen=True)
 class ConversationConsumerState:
