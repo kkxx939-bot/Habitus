@@ -80,11 +80,11 @@ def assemble_judgement_batch(
 
     declared = _judgements(payload["judgements"], config=resolved)
     frames = _frames(payload["frames"], fragment_count=fragment_count, config=resolved)
-    covers, fact_frames = _reduce_coverage(frames, declared)
+    covers, fact_frames, dropped = _reduce_coverage(frames, declared)
 
     built = [
-        _build(number, declared[number], covers[number], fact_frames)
-        for number in sorted(declared, key=lambda no: (covers[no][0], no))
+        _build(number, declared[number], covers[number], fact_frames, dropped)
+        for number in sorted(covers, key=lambda no: (covers[no][0], no))
     ]
     _require_targets_declared(built, context_states=tuple(context_states))
     _require_distinguishable(built)
@@ -223,8 +223,12 @@ def _assignments(
 
 def _reduce_coverage(
     frames: Sequence[Mapping[str, Any]], declared: Mapping[int, Mapping[str, Any]]
-) -> tuple[dict[int, tuple[int, ...]], dict[tuple[int, int], tuple[int, ...]]]:
-    """从逐帧标签归约出每条判断覆盖的片段、以及每个 basis 条目覆盖的片段。"""
+) -> tuple[
+    dict[int, tuple[int, ...]],
+    dict[tuple[int, int], tuple[int, ...]],
+    frozenset[int],
+]:
+    """从逐帧标签归约出每条判断覆盖的片段、每个 basis 条目覆盖的片段，以及被丢弃的判断编号。"""
 
     covers: dict[int, list[int]] = {number: [] for number in declared}
     fact_frames: dict[tuple[int, int], list[int]] = {}
@@ -239,23 +243,27 @@ def _reduce_coverage(
             if basis_no is None:
                 continue
             if basis_no not in judgement["facts"]:
-                raise BehaviorFusionError(
-                    f"frame {frame['no']} references an undeclared basis {basis_no} "
-                    f"of judgement {judgement_no}"
-                )
+                # 又一处两张表之间的记账疏漏：``judgements`` 里只声明了 basis 1、2，``frames``
+                # 里却把某一帧标成了 basis 3。**这一帧归给哪条判断是清楚的**，错的只是子分组，
+                # 所以降级成"归给这条判断、不归任何 basis"，而不是整批拒绝白烧一次调用。
+                # 实测这条在真实模型上是间歇性的（同一输入三次里犯两次），靠提示词根治不了。
+                continue
             fact_frames.setdefault((judgement_no, basis_no), []).append(frame["no"])
-    empty = sorted(number for number, items in covers.items() if not items)
-    if empty:
-        raise BehaviorFusionError(f"judgements cover no fragment: {empty}")
-    for number, judgement in declared.items():
-        unused = sorted(set(judgement["facts"]) - {no for jn, no in fact_frames if jn == number})
-        if unused:
-            raise BehaviorFusionError(
-                f"judgement[{number}] declares basis facts no fragment belongs to: {unused}"
-            )
+    # 声明了却没有任何帧归属的判断、以及没有任何帧归属的 basis 条目，一律**丢弃**而不是整批拒绝。
+    #
+    # 它们是模型的记账疏漏——``judgements`` 与 ``frames`` 是分开写的两段，声明一条却忘了在
+    # frames 里给它任何一帧非常自然，而这类组合式记账正是实测中模型做不好的部分。整批拒绝要
+    # 白烧一次完整调用、吃掉一次重试预算，用尽后整个作业失败退避；而丢弃**不损失任何观测**：
+    # 一条判断若没有任何帧，就没有任何片段以它为归属（有归属的帧会让 covers 非空），basis 同理。
+    #
+    # 每条帧至少有一个归属由 schema 与解析层保证，所以不可能把所有判断都丢光。
+    empty = {number for number, items in covers.items() if not items}
+    covers = {number: items for number, items in covers.items() if number not in empty}
+    fact_frames = {key: items for key, items in fact_frames.items() if key[0] not in empty}
     return (
         {number: tuple(items) for number, items in covers.items()},
         {key: tuple(items) for key, items in fact_frames.items()},
+        frozenset(empty),
     )
 
 
@@ -264,11 +272,15 @@ def _build(
     fields: Mapping[str, Any],
     covers: tuple[int, ...],
     fact_frames: Mapping[tuple[int, int], tuple[int, ...]],
+    dropped: frozenset[int],
 ) -> BehaviorJudgement:
     facts: Mapping[int, str] = fields["facts"]
+    # 只保留真的有帧归属的 basis 条目；声明了却没有任何帧的那些在归约时已被丢弃（见
+    # ``_reduce_coverage``），它们没有任何观测支撑，留着等于把模型的记账疏漏写进产物。
+    grounded = [basis_no for basis_no in facts if (number, basis_no) in fact_frames]
     # basis 条目按它最早覆盖的片段排序——顺序是归约产物，让模型再写一遍只是多一个出错的机会，
     # 而真正同时发生的两条事实其帧本来就交错，"谁在前"没有意义。
-    ordered = sorted(facts, key=lambda basis_no: (fact_frames[(number, basis_no)][0], basis_no))
+    ordered = sorted(grounded, key=lambda basis_no: (fact_frames[(number, basis_no)][0], basis_no))
     claim = BehaviorClaim(
         behavior=fields["behavior"],
         goal=fields["goal"],
@@ -285,7 +297,10 @@ def _build(
         claim=claim,
         status=fields["status"],
         status_basis=fields["status_basis"],
-        relations=fields["relations"],
+        # 指向被丢弃判断的关系一并剪掉：目标已经不存在了，留着就是一条指向空处的连接。
+        relations=tuple(
+            link for link in fields["relations"] if link.target_no not in dropped
+        ),
     )
 
 

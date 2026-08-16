@@ -52,7 +52,10 @@ _RELATION_SCHEMA: dict[str, Any] = {
         "target": {
             "type": ["integer", "null"],
             "minimum": 1,
-            "description": "本次输出里另一条判断的 judgement_no；指向【先前的判断】时填 null。",
+            "description": (
+                "本次输出里**另一条**判断的 judgement_no（不能填自己），"
+                "而且那条判断要读得懂（behavior 非 null）；指向【先前的判断】时填 null。"
+            ),
         },
         "context_target": {
             "type": ["integer", "null"],
@@ -83,7 +86,7 @@ _JUDGEMENT_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": (
                 "谁在做这件事；必须逐字取自它覆盖的片段里出现过的称呼。两个人一起做就都写上，"
-                "不要拼成一个字符串。behavior 为 null 时填 []。"
+                "不要拼成一个字符串，同一个人不要写两遍。behavior 为 null 时填 []。"
             ),
         },
         "behavior": {
@@ -104,14 +107,18 @@ _JUDGEMENT_SCHEMA: dict[str, Any] = {
         "basis": {
             "type": "array",
             "items": _FACT_SCHEMA,
-            "description": "构成这件事的行为事实。**只有 goal 非 null 时才填**，其余情况填 []。",
+            "description": (
+                "构成这件事的行为事实。goal 非 null 时**必须**至少写一条；goal 为 null 时填 []。"
+                "说得出目标却写不出一条事实，说明这个目标是编的。"
+            ),
         },
         "status": {
             "type": ["string", "null"],
             "enum": ["ongoing", "completed", "interrupted", "abandoned", None],
             "description": (
-                "ongoing 还在做；completed 做完了；interrupted 做到一半被打断；"
-                "abandoned 主动放弃。behavior 为 null 时填 null。"
+                "ongoing 还在做；completed 做完了；interrupted 被别的事打断、没回来；"
+                "abandoned 没人打断、自己不做了（衣物放进洗衣机又取出来抱走）。"
+                "behavior 为 null 时填 null。"
             ),
         },
         "status_basis": {
@@ -126,7 +133,7 @@ _JUDGEMENT_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": _RELATION_SCHEMA,
             "description": (
-                "与本次其它判断的关系；独立就填 []。一条判断可以同时有多条关系。"
+                "与别的判断的关系；独立就填 []。一条判断可以同时有多条关系。"
                 "并行只需要在一边声明，系统会自动补上另一边。"
             ),
         },

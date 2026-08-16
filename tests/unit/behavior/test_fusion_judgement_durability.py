@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -23,10 +24,13 @@ from behavior.fusion import (
     receipt_identity,
     segment_identity,
     validate_judgement_batch,
+    without_unresolvable_relations,
 )
 from behavior.fusion.errors import BehaviorFusionError, BehaviorFusionLimitError
+from behavior.fusion.schema import JUDGEMENT_FUSION_JSON_SCHEMA
+from behavior.fusion.store import _JUDGEMENT_KEYS
 from behavior.observation import BehaviorObservation, BehaviorObservationConfig
-from foundation.integrity import canonical_json, canonicalize
+from foundation.integrity import canonical_digest, canonical_json, canonicalize
 from tests.unit.behavior.fusion_wire import SUBJECT, judgement, unreadable, wire
 
 TZ8 = timezone(timedelta(hours=8))
@@ -40,7 +44,13 @@ SOURCE_REFS = ("observation-delivery:abc",)
 PROMPT_VERSION = FUSION_PROMPT_VERSION
 
 
-def fragment(offset: int, semantics: str, *, delay_ms: int = 800) -> BehaviorObservation:
+def fragment(
+    offset: int,
+    semantics: str,
+    *,
+    delay_ms: int = 800,
+    participants: list[str] | None = None,
+) -> BehaviorObservation:
     at = MIDNIGHT + timedelta(seconds=offset)
     return BehaviorObservation.create(
         observer_id="home-a/hall",
@@ -48,7 +58,7 @@ def fragment(offset: int, semantics: str, *, delay_ms: int = 800) -> BehaviorObs
         available_at=at + timedelta(milliseconds=delay_ms),
         modality="vision",
         semantics=semantics,
-        participants=[SUBJECT],
+        participants=participants or [SUBJECT],
         knowledge_state="observed",
         confidence=0.9,
         evidence_refs=[f"cam:{offset}"],
@@ -476,3 +486,134 @@ def test_a_segment_with_no_behaviour_of_the_subject_still_yields_a_receipt() -> 
     )
     assert record.judgement_ids == ()
     assert record.out_of_scope_ratio == 1.0
+
+
+def test_relations_pointing_at_judgements_that_will_not_be_stored_are_pruned() -> None:
+    """个人版只落主体的判断；指向被分流掉的旁人判断的关系必须剪掉。
+
+    并行是**相互**的：提示词要求模型只在一边声明，装配层自动补上另一边。于是主体那条判断上会
+    出现一条指向旁人判断的关系，而旁人那条随后被分流。留着它，不可变存储里就永久躺着一个指向
+    不存在记录的 ``target_id``，而回执只记观测身份、不记被丢掉的判断身份，事后无从还原。
+
+    剪枝不改身份：``judgement_id`` 是不含 relations 的内容摘要。
+    """
+
+    fragments = (
+        fragment(0, "主人在餐桌前吃饭", participants=[SUBJECT]),
+        fragment(5, "主人夹菜", participants=[SUBJECT]),
+        fragment(10, "客人拿起电话通话", participants=["客人B"]),
+    )
+    raw = wire(
+        [
+            judgement(1, behavior="吃饭", goal="吃完这顿饭", summary="在餐桌前吃饭", basis=["进食"]),
+            judgement(
+                2,
+                behavior="打电话",
+                goal="通话",
+                summary="客人在打电话",
+                subjects=["客人B"],
+                basis=["拿起电话"],
+                relations=[("concurrent_with", 1)],
+            ),
+        ],
+        [[(1, 1)], [(1, 1)], [(2, 1)]],
+    )
+    batch = assemble_judgement_batch(raw, fragment_count=len(fragments))
+    derived = derive_judgements(batch, fragments, source_refs=("d1",), judged_at=JUDGED_AT)
+
+    owner = next(item for item in derived if SUBJECT in item.subjects)
+    # 对称闭包确实给主体那条补出了关系，而它的目标不会落盘。
+    assert [kind for kind, _ in owner.relations] == ["concurrent_with"]
+    visible = {item.judgement_id for item in derived if SUBJECT in item.subjects}
+    assert all(target not in visible for _, target in owner.relations)
+
+    pruned = without_unresolvable_relations(owner, visible)
+
+    assert pruned.relations == ()
+    assert pruned.judgement_id == owner.judgement_id
+
+
+def test_pruning_keeps_relations_whose_target_survives() -> None:
+    """只剪不可解析的那些；指向落盘判断或上下文判断的关系原样保留。"""
+
+    fragments = (fragment(0, "洗手", participants=[SUBJECT]),)
+    raw = wire([judgement(1, behavior="洗手", goal="清洁双手", summary="洗手", basis=["冲手"])], [[(1, 1)]])
+    batch = assemble_judgement_batch(raw, fragment_count=1)
+    derived = derive_judgements(batch, fragments, source_refs=("d1",), judged_at=JUDGED_AT)
+    only = derived[0]
+
+    assert without_unresolvable_relations(only, {only.judgement_id}) is only
+
+
+def test_context_is_ordered_by_real_time_not_by_the_local_offset_string(tmp_path) -> None:
+    """上下文按**时刻**排序，不能按 ``started_at`` 的字符串排。
+
+    ``started_at`` 刻意保留本地偏移（人的一天是本地日历日，折 UTC 会把东八区凌晨的行为掉到前
+    一天），所以它的字符串序不是时间序。出行跨时区、或者一次 DST 切换带来的 1 小时偏移变化，
+    就足以让两条判断的先后颠倒——而这个顺序直接决定模型看到的 C1..Cn 编号。
+    """
+
+    store = BehaviorJudgementStore(tmp_path)
+    template = {key: None for key in _JUDGEMENT_KEYS}
+
+    def record(identity: str, started_at: str, ready_at: str) -> dict[str, object]:
+        payload = dict(template)
+        payload.update(
+            {
+                "schema_version": "behavior_judgement_v1",
+                "judgement_id": identity,
+                "judged_at": ready_at,
+                "evidence_ready_at": ready_at,
+                "started_at": started_at,
+                "last_observed_at": started_at,
+                "observation_ids": [f"observation-{identity[:4]}"],
+                "source_refs": ["delivery"],
+                "subjects": [SUBJECT],
+                "behavior": "行为",
+                "goal": None,
+                "summary": "摘要",
+                "basis": [],
+                "status": "completed",
+                "status_basis": "observed",
+                "relations": [],
+                "fusion_version": "v",
+                "prompt_version": "p",
+            }
+        )
+        return payload
+
+    # 东八区的这条真实更早（UTC 16:30），但字符串以 "2026-08-15" 开头，字符串序会把它排到后面。
+    store.put_payload(record("b" * 64, "2026-08-15T00:30:00.000000+08:00", "2026-08-15T00:00:00.000000Z"))
+    store.put_payload(record("a" * 64, "2026-08-14T20:00:00.000000-05:00", "2026-08-15T02:00:00.000000Z"))
+
+    context = store.recent_before(
+        datetime(2026, 8, 15, 3, tzinfo=timezone.utc), limit=8, lookback_seconds=86_400
+    )
+
+    moments = [
+        datetime.fromisoformat(str(item["started_at"])).astimezone(timezone.utc)
+        for item in context
+    ]
+    assert moments == sorted(moments)
+    assert str(context[0]["started_at"]).endswith("+08:00")
+
+
+def test_the_fusion_version_covers_the_schema_not_just_the_prompt() -> None:
+    """改 schema 的字段描述必须改变版本号——否则两批语义不同的判断在数据上分辨不出来。
+
+    schema 不只是形状声明：字段描述里承载着硬契约（goal 非 null 时 basis 必须至少写一条、
+    interrupted 与 abandoned 的区别、关系目标的合法性），实测改这些描述会实打实地改变模型行为。
+    版本一度只覆盖实现与提示词，于是改完描述、模型行为变了，版本却可以一字不动。
+
+    用摘要而不是手写版本号，是为了**不可能忘记**。这条测试守的就是那个自动性。
+    """
+
+    fingerprint = canonical_digest(JUDGEMENT_FUSION_JSON_SCHEMA)[:12]
+    assert f"schema{fingerprint}" in FUSION_VERSION
+    assert FUSION_PROMPT_VERSION in FUSION_VERSION
+
+    # 只改一个字段描述里的一个字，指纹就必须变。
+    altered = deepcopy(JUDGEMENT_FUSION_JSON_SCHEMA)
+    properties = altered["properties"]["judgements"]["items"]["properties"]
+    properties["basis"]["description"] = properties["basis"]["description"] + "。"
+    assert canonical_digest(altered)[:12] != fingerprint

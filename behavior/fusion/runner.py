@@ -31,7 +31,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from behavior.fusion.derivation import derive_judgements, judgement_payload
+from behavior.fusion.derivation import (
+    FUSION_VERSION,
+    derive_judgements,
+    judgement_payload,
+    without_unresolvable_relations,
+)
 from behavior.fusion.errors import BehaviorFusionError
 from behavior.fusion.jobs import (
     BehaviorFusionJob,
@@ -42,6 +47,7 @@ from behavior.fusion.jobs import (
     BehaviorFusionJobStore,
     StagedFusion,
 )
+from behavior.fusion.prompt import FUSION_PROMPT_VERSION
 from behavior.fusion.receipt import BehaviorFusionReceipt, build_fusion_receipt
 from behavior.fusion.receipt_store import BehaviorFusionReceiptStore
 from behavior.fusion.segmentation import BehaviorFusionSegment
@@ -111,6 +117,16 @@ class BehaviorFusionRunner:
         oldest = self.jobs.oldest_uncommitted()
         if oldest is None:
             return None
+        if oldest.fusion_version != FUSION_VERSION or oldest.prompt_version != FUSION_PROMPT_VERSION:
+            # 队列是耐久的，升级重启不会清掉它。版本在排队时就已知，在这里纠正，而不是等到
+            # 调完模型才发现回执身份对不上——那条路要白烧一次调用并把整条串行队列卡死。
+            replacement = self.jobs.retarget(
+                oldest, fusion_version=FUSION_VERSION, prompt_version=FUSION_PROMPT_VERSION
+            )
+            # 改挂后作业换了身份；``None`` 表示当前版本下这段已另有作业，队首要重新取。
+            oldest = replacement if replacement is not None else self.jobs.oldest_uncommitted()
+            if oldest is None:
+                return None
         return self.jobs.claim(oldest, worker_id)
 
     async def execute(
@@ -182,12 +198,16 @@ class BehaviorFusionRunner:
             )
         # 只落属于主体的判断——不属于的会把判断存储淹没，而下游拿它们毫无用处。它们的观测身份
         # 已经记在回执的 ``out_of_scope_observation_ids`` 里，缺失并没有被解释掉。
+        in_scope = tuple(item for item in derived if self.primary_subject in item.subjects)
+        # 落盘之后能被解析的目标只有这两类。指向被分流掉的旁人判断的关系必须在这里剪掉，
+        # 否则不可变存储里会永久留下一个指向不存在记录的 ``target_id``。
+        visible = {item.judgement_id for item in in_scope}
+        visible.update(item["judgement_id"] for item in context)
         staged = StagedFusion(
             receipt=receipt,
             judgements=tuple(
-                judgement_payload(item)
-                for item in derived
-                if self.primary_subject in item.subjects
+                judgement_payload(without_unresolvable_relations(item, visible))
+                for item in in_scope
             ),
         )
         return self.jobs.stage(lease, staged)
@@ -197,6 +217,24 @@ class BehaviorFusionRunner:
 
         截断点是本段**最早观测的可用时刻**：能给模型看的只能是在这段观测进入系统之前就已经成立
         的判断。用更晚的截断点等于把后来才知道的事喂回给更早的一段——那是标签泄漏。
+
+        TODO(BHV-CONTEXT-CUTOFF-001): ``recent_before`` 用**严格小于**截断点，于是
+        ``evidence_ready_at == cutoff`` 的那条判断被排除在外。
+
+        - 具体场景：上游一次投递里的观测若共享同一个 ``available_at``（整批盖一个送达时间戳），
+          而这次投递恰好横跨切段边界，那么前一段那条判断的 ``evidence_ready_at``（= 覆盖观测
+          ``available_at`` 的 max）正好等于后一段的 ``min(available_at)``，于是被严格小于排除。
+          被排除的恰恰是"被切段拦腰切断的前半截"——而"后半段要能指回前半段"是整条严格串行纪律
+          唯一的存在理由。停机后补算时更彻底：全批共享一个 ``available_at``，所有段的上下文都是空。
+        - 影响大小：取决于上游行为。若上游逐条标注送达时刻，这就只是一个理论边界，影响为零。
+        - 改造方案：把 ``recent_before`` 的比较从 ``<`` 改成 ``<=``。取等号不构成泄漏——
+          ``evidence_ready_at == cutoff`` 意味着这条判断的全部证据在本段最早观测可用的**同一时刻**
+          就已齐备，它没有用到本段之后才存在的任何信息。同时补一条测试，构造两条观测共享
+          ``available_at`` 且横跨切段边界的输入。
+        - 为什么先不动：上游观测源尚未适配、甚至尚未开发，字段语义还没对齐（``available_at``
+          到底按投递批次还是按单条标注，现在没有真实样本可查）。按项目纪律，判据要先用真实数据
+          验证再定，不能凭推理改成 ``<=`` 然后用自己写的测试自证。
+        - 时机：上游观测接入、拿到第一批真实交付之后。
         """
 
         cutoff = min(item.available_at for item in segment.fragments)

@@ -14,14 +14,27 @@
 
 ## 指标只覆盖确定性可判的部分
 
-    结构合规    frames 穷尽、编号对齐、装配是否拒绝、重试了几次
-    关系命中    期望的关系出现了没有
+    结构合规    frames 穷尽、编号对齐、装配是否拒绝、结构重试了几次
+    关系命中    期望的关系出现了没有（带段号，段内关系写成 (n, n, kind)）
     关系误标    对照组有没有瞎标（**这一项和命中同等重要**——只看命中会漏掉滥用）
-    主体完整    多人场景丢没丢人
+    状态        不该断言的状态有没有被断言，该出现的状态出现了没有
+    目标        判不出目标时有没有硬编，以及有没有编出 intent 点名的那个幻觉
+    主体        旁观者有没有被算进主体那件事的 subjects
     读不懂      该判为读不懂的帧判了没有，以及有没有牵连其它帧
+    落在范围外  哪些帧读得懂但做的人不是主体
     粒度        判断条数落在期望区间内（粗判，不判语义）
 
 "目标判得准不准""分解合不合理"需要 Judge，不在这里。
+
+## 期望必须直接测 intent 说的那件事
+
+曾经有七条用例的 intent 写着一件事（不该断言已完成、不该硬编目标、不该把旁观者算成主体），
+``expect`` 里却只有判断条数——于是模型犯下 intent 明令禁止的错误，用例照样全绿，而报告还会打印
+``status 2/2``、``goal 1/1``，读起来像这几类都判对了。用条数替代语义检查不是"粗判"，是**没判**。
+
+补上状态/目标/主体三类检查之后，第一次跑就炸出两条一直被盖住的真实缺口（模型把"主动放弃"
+判成"被打断"、以及一条我自己写错的期望）。所以新增用例时：**先问它的 intent 说的是什么，
+再问 expect 里有没有一项在测那个**；只有折叠与粒度这类"条数本身就是被测对象"的才该只写条数。
 """
 
 from __future__ import annotations
@@ -43,11 +56,6 @@ def evaluate(case: FusionCase, run: Mapping[str, Any]) -> dict[str, Any]:
         return _summarise(case, run, checks)
     checks.append({"check": "completed", "passed": True, "detail": None})
 
-    observed = [
-        (relation["to_segment"], relation["kind"])
-        for item in run["segments"]
-        for relation in item["relations"]
-    ]
     observed_full = [
         (item["index"], relation["to_segment"], relation["kind"])
         for item in run["segments"]
@@ -63,13 +71,81 @@ def evaluate(case: FusionCase, run: Mapping[str, Any]) -> dict[str, Any]:
                 "detail": f"期望 段{source} --{kind}--> 段{target}；实际 {observed_full or '无'}",
             }
         )
-    for kind in case.expect.forbidden_relations:
-        used = [item for item in observed if item[1] == kind]
+    for source, target, kind in case.expect.forbidden_relations:
+        used = [item for item in observed_full if item == (source, target, kind)]
         checks.append(
             {
                 "check": "relation_not_abused",
                 "passed": not used,
-                "detail": f"不该出现 {kind}；实际 {used or '无'}",
+                "detail": f"不该出现 段{source} --{kind}--> 段{target}；实际 {observed_full or '无'}",
+            }
+        )
+    for index, forbidden in case.expect.forbidden_status.items():
+        offending = [
+            (item["behavior"], item["status"])
+            for item in segments.get(index, {}).get("judgements", [])
+            if item["status"] in set(forbidden)
+        ]
+        checks.append(
+            {
+                "check": "status_not_overclaimed",
+                "passed": not offending,
+                "detail": f"段{index} 不该出现 status {list(forbidden)}；实际 {offending or '无'}",
+            }
+        )
+    for index, wanted in case.expect.status_present.items():
+        seen = {item["status"] for item in segments.get(index, {}).get("judgements", [])}
+        hit = seen & set(wanted)
+        checks.append(
+            {
+                "check": "status_present",
+                "passed": bool(hit),
+                "detail": f"段{index} 期望出现 status {list(wanted)}；实际 {sorted(x for x in seen if x)}",
+            }
+        )
+    for index in case.expect.goal_absent:
+        invented = [
+            (item["behavior"], item["goal"])
+            for item in segments.get(index, {}).get("judgements", [])
+            if item["goal"] is not None
+        ]
+        checks.append(
+            {
+                "check": "goal_not_invented",
+                "passed": not invented,
+                "detail": f"段{index} 判不出目标就该留空；实际硬编了 {invented or '无'}",
+            }
+        )
+    for index, forbidden in case.expect.forbidden_goals.items():
+        invented = [
+            (item["behavior"], item["goal"])
+            for item in segments.get(index, {}).get("judgements", [])
+            if item["goal"] and any(word in item["goal"] for word in forbidden)
+        ]
+        checks.append(
+            {
+                "check": "goal_not_hallucinated",
+                "passed": not invented,
+                "detail": f"段{index} 不该编出 {list(forbidden)} 这类目标；实际 {invented or '无'}",
+            }
+        )
+    for index, excluded in case.expect.subjects_exclude.items():
+        # 只看含主体的那些判断：旁观者自己那条判断是合法的，不该因为它存在就判红。
+        present = {
+            name
+            for item in segments.get(index, {}).get("judgements", [])
+            if case.primary_subject in item["subjects"]
+            for name in item["subjects"]
+        } & set(excluded)
+        checks.append(
+            {
+                "check": "subjects_not_overreached",
+                "passed": not present,
+                "detail": (
+                    f"段{index} 把 {sorted(present)} 一起写进了主体那件事的 subjects"
+                    if present
+                    else None
+                ),
             }
         )
     for index, expected in case.expect.subjects_include.items():
@@ -125,6 +201,10 @@ def _summarise(case: FusionCase, run: Mapping[str, Any], checks: Sequence[Mappin
         "passed": passed == len(checks),
         "checks": list(checks),
         "model_calls": sum(item["model_calls"] for item in run["segments"]),
+        # 段数就是"一次成功需要的最少调用次数"；超出的部分全是结构不合法后的重试。
+        "structural_retries": sum(
+            max(0, item["model_calls"] - 1) for item in run["segments"]
+        ),
         "elapsed_seconds": run["elapsed_seconds"],
     }
 
@@ -186,6 +266,10 @@ def aggregate(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "probe_runs": len(probes),
         "probe_passed": sum(1 for item in probes if item["passed"]),
         "model_calls": sum(item["model_calls"] for item in results),
+        "structural_retries": sum(item["structural_retries"] for item in results),
+        "retried_cases": sorted(
+            {item["case_id"] for item in results if item["structural_retries"]}
+        ),
         # 同一用例多次运行结果不一致，本身就是一个要盯的信号——比平均通过率更能暴露问题。
         # 稳定失败与抖动分开：前者改了能验证，后者说明产出不可预期，两者的处理方式完全不同。
         "stable_failures": [
@@ -219,6 +303,14 @@ def render_markdown(summary: Mapping[str, Any]) -> str:
         f"模型调用共 {summary['model_calls']} 次"
     )
     lines.append(f"\n平均一致率 {summary['mean_agreement']}（1.0 = 每次结果都相同，无论对错）")
+    if summary["structural_retries"]:
+        lines.append(
+            f"\n**结构重试 {summary['structural_retries']} 次**"
+            f"（模型第一次没吐出合法结构，被 schema 打回重来）："
+            f"{', '.join(summary['retried_cases'])}"
+        )
+    else:
+        lines.append("\n结构重试 0 次——每次调用都一次吐出合法结构。")
     if summary["stable_failures"]:
         lines.append(f"\n**稳定失败**（有确定缺口，改了能验证）：{', '.join(summary['stable_failures'])}")
     if summary["flaky_cases"]:

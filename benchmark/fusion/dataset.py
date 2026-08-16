@@ -33,6 +33,7 @@ from typing import Any
 FUSION_CASE_SCHEMA = "behavior_fusion_case_v1"
 
 _RELATION_KINDS = frozenset({"continues", "supersedes", "concurrent_with", "results_from"})
+_STATUS_VALUES = frozenset({"ongoing", "completed", "interrupted", "abandoned"})
 
 
 class FusionBenchmarkError(ValueError):
@@ -60,10 +61,28 @@ class FusionFragment:
 class FusionExpectation:
     """一个用例的确定性期望。字段一律可选——只写这个用例真正想考的那一条。"""
 
-    # 期望出现的跨段关系：(来源段序号, 目标段序号, 关系类型)，段序号从 1 开始。
+    # 期望出现的关系：(来源段序号, 目标段序号, 关系类型)，段序号从 1 开始。
+    # 段内关系写成 (n, n, kind)——"一边翻炒一边通话"这类并行发生在同一段里。
     relations: tuple[tuple[int, int, str], ...] = ()
-    # 不该出现的关系类型；对照组靠它抓"瞎标"。
-    forbidden_relations: tuple[str, ...] = ()
+    # 不该出现的关系，与 ``relations`` 同形。**必须带段号**：只按类型禁止会让一次段内的合法
+    # 延续把跨段对照组染红，红绿与它要抓的滥用就没有对应关系了。
+    forbidden_relations: tuple[tuple[int, int, str], ...] = ()
+    # 某段里**不该出现**的 status 取值。"人走出画面"这类用例要考的是"不许断言已完成"，
+    # 用判断条数考不到——条数对了不等于没瞎标 completed。
+    forbidden_status: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
+    # 某段里**至少有一条判断**要带上的 status 取值。
+    status_present: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
+    # 这些段里任何判断都不该带 goal——目标判不出时硬编一个，产出的是假事实。
+    # 只用于目标**确实无从判断**的场景（人站在窗边张望）。若场景本身有一个贴着观测的目标
+    # （开冰箱→查看冰箱内物品），要求"必须留空"就是在替现实规定行为该长什么样，不属于本层能立的法。
+    goal_absent: tuple[int, ...] = ()
+    # 某段里不该出现的目标（子串匹配）。用来抓 intent 点名的那个**具体幻觉**——"开冰箱看一眼"
+    # 判成"找食物"是编造，判成"查看冰箱内物品"不是。子串匹配会漏（换个说法就抓不到），但它只会
+    # 漏报不会误报，比用判断条数去糊弄要诚实。
+    forbidden_goals: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
+    # **含主体的那些判断**的 subjects 里不该出现的人。旁观者可以有自己的判断（那条会被分流），
+    # 但不该被一起写进主体那件事的 subjects——那等于把一件与他无关的事算成他的行为。
+    subjects_exclude: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
     # 期望某一段的 subjects 至少包含这些人。
     subjects_include: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
     # 期望某一段产出的判断条数落在这个区间——粗判粒度，不判语义。
@@ -75,12 +94,14 @@ class FusionExpectation:
     out_of_scope_fragments: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        for _, _, kind in self.relations:
+        for _, _, kind in tuple(self.relations) + tuple(self.forbidden_relations):
             if kind not in _RELATION_KINDS:
                 raise FusionBenchmarkError(f"unknown relation kind: {kind}")
-        for kind in self.forbidden_relations:
-            if kind not in _RELATION_KINDS:
-                raise FusionBenchmarkError(f"unknown relation kind: {kind}")
+        for mapping in (self.forbidden_status, self.status_present):
+            for values in mapping.values():
+                for value in values:
+                    if value not in _STATUS_VALUES:
+                        raise FusionBenchmarkError(f"unknown status: {value}")
 
     @property
     def is_empty(self) -> bool:
@@ -91,6 +112,11 @@ class FusionExpectation:
             or self.judgement_count
             or self.unreadable_fragments
             or self.out_of_scope_fragments
+            or self.forbidden_status
+            or self.status_present
+            or self.goal_absent
+            or self.forbidden_goals
+            or self.subjects_exclude
         )
 
 
@@ -147,7 +173,26 @@ def _case(value: Any) -> FusionCase:
         ),
         expect=FusionExpectation(
             relations=tuple(tuple(item) for item in expect.get("relations", ())),
-            forbidden_relations=tuple(expect.get("forbidden_relations", ())),
+            forbidden_relations=tuple(
+                tuple(item) for item in expect.get("forbidden_relations", ())
+            ),
+            forbidden_status={
+                int(key): tuple(item)
+                for key, item in expect.get("forbidden_status", {}).items()
+            },
+            status_present={
+                int(key): tuple(item)
+                for key, item in expect.get("status_present", {}).items()
+            },
+            goal_absent=tuple(expect.get("goal_absent", ())),
+            forbidden_goals={
+                int(key): tuple(item)
+                for key, item in expect.get("forbidden_goals", {}).items()
+            },
+            subjects_exclude={
+                int(key): tuple(item)
+                for key, item in expect.get("subjects_exclude", {}).items()
+            },
             subjects_include={
                 int(key): tuple(item) for key, item in expect.get("subjects_include", {}).items()
             },

@@ -206,7 +206,16 @@ async def run_case(
                         "to_behavior": _behavior_of(target, by_id, context),
                     }
                 )
-        record.unreadable_fragments.sort()
+        # 一帧若同时被某条可读判断认领，它已经被读懂了，不该计入——与生产侧
+        # ``receipt.py`` / ``BehaviorJudgementBatch.unreadable_fragment_count`` 必须同口径，
+        # 否则评测是在拿一个上线后根本不会被算出来的量做判定。
+        readable = {
+            positions[observation_id]
+            for item in derived
+            if item.behavior is not None
+            for observation_id in item.observation_ids
+        }
+        record.unreadable_fragments = sorted(set(record.unreadable_fragments) - readable)
         # 被主体的判断覆盖的帧就不算"落在主体之外"——旁人帧若被吸收进去，这里会空，正是要抓的。
         tracked = {
             positions[observation_id]

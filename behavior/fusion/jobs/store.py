@@ -53,6 +53,17 @@ _STATE_SCHEMA = "behavior_fusion_job_sequence_state_v1"
 _STATE_FILE = "state.json"
 
 
+def _is_job_filename(name: str) -> bool:
+    """作业文件恒为 ``<64 位十六进制>.json``——与 ``_path`` 的构造规则同源。"""
+
+    stem, _, suffix = name.rpartition(".")
+    return (
+        suffix == "json"
+        and len(stem) == 64
+        and all(character in "0123456789abcdef" for character in stem)
+    )
+
+
 @dataclass(frozen=True)
 class _SequenceState:
     """作业被清理之后仍然永久保留的序号高水位。"""
@@ -145,6 +156,73 @@ class BehaviorFusionJobStore:
             )
             atomic_create_bytes(self._path(job_id), self._encode(job), artifact_root=self.root)
             return job
+
+    def retarget(
+        self,
+        job: BehaviorFusionJob,
+        *,
+        fusion_version: str,
+        prompt_version: str,
+    ) -> BehaviorFusionJob | None:
+        """把一条尚未到检查点的作业改挂到当前版本身份下，**保留它的队列位置**。
+
+        作业身份在排队时由片段与版本钉死，而队列是耐久的——改一次提示词再重启（升级本来就
+        是停服务、重装、再跑），盘上那批作业记的还是旧版本。执行方要等到"回执身份与作业身份
+        不符"才发现，而那一步在**调完模型之后**：一次白烧的调用、退避重试若干次、最后 FAILED
+        卡住整条串行队列，`retry_failed` 重开后照样再来一轮。版本在排队时就是已知的，所以在
+        认领之前纠正过来，一次调用都不用浪费。
+
+        已经到检查点（``staged`` 非空）的作业不动：它的判断是在旧版本下真做出来的，按它自己的
+        版本提交才诚实。持有活跃租约的也不动，交给 ``claim`` 去报"被占用"。
+
+        返回改挂后的作业；若当前版本下这段已经另有作业，则删掉这条残留并返回 ``None``，由调用
+        方重新取队首。
+        """
+
+        self._require_job(job)
+        with self._queue_fence():
+            current = self._try_read(self._path(job.job_id))
+            if current is None or current.staged is not None:
+                return current
+            now = self._timestamp()
+            if (
+                current.status is BehaviorFusionJobStatus.RUNNING
+                and current.lease_expires_at is not None
+                and current.lease_expires_at > now
+            ):
+                return current
+            if (
+                current.fusion_version == fusion_version
+                and current.prompt_version == prompt_version
+            ):
+                return current
+            replacement_id = receipt_identity(current.segment_digest, fusion_version, prompt_version)
+            existing = self._try_read(self._path(replacement_id))
+            # 先删旧再写新。反过来会在崩溃窗口里留下两条共用同一 ``fusion_sequence`` 的记录，
+            # 而 ``_read_all`` 见到重复序号会整库硬失败——那正是这次修复要消灭的那类永久卡死。
+            # 崩在中间只会让这段回到"没排过队"，由入队扫描重建。
+            self._path(current.job_id).unlink(missing_ok=True)
+            if existing is not None:
+                return None
+            replacement = replace(
+                current,
+                job_id=replacement_id,
+                fusion_version=fusion_version,
+                prompt_version=prompt_version,
+                status=BehaviorFusionJobStatus.QUEUED,
+                attempts=0,
+                claim_id=None,
+                claim_generation=0,
+                worker_id=None,
+                lease_expires_at=None,
+                next_attempt_at=None,
+                last_error=None,
+                updated_at=now,
+            )
+            atomic_create_bytes(
+                self._path(replacement_id), self._encode(replacement), artifact_root=self.root
+            )
+            return replacement
 
     def initialize(self) -> int:
         with self._queue_fence():
@@ -510,8 +588,12 @@ class BehaviorFusionJobStore:
             if temporary is not None:
                 # 原子替换的中间文件；它属于本存储，跳过而不是当成损坏。
                 continue
-            if child.is_symlink() or not child.is_file() or child.suffix != ".json":
-                raise BehaviorFusionJobError("fusion jobs directory contains an unsupported entry")
+            if child.is_symlink() or not child.is_file() or not _is_job_filename(child.name):
+                # 不符合本存储命名规则的条目一定不是本存储写的（``.DS_Store``、同步副本、
+                # 顺手放的笔记）。为它们整库硬失败，等于让一次偶发污染永久瘫痪**整条**流水线：
+                # 排队、认领、结算、可观测性全都要枚举这个目录。判断与回执两个兄弟存储早就是
+                # 跳过的，这里必须同口径。名字合规但内容损坏的仍然照旧硬失败——那才是我们的东西。
+                continue
             jobs.append(self._read(child))
         jobs.sort(key=lambda item: item.fusion_sequence)
         sequences = tuple(item.fusion_sequence for item in jobs)

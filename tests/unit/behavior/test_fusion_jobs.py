@@ -16,6 +16,7 @@ from behavior.fusion import (
     BehaviorFusionEnqueuer,
     BehaviorFusionJobBlockedError,
     BehaviorFusionJobConfig,
+    BehaviorFusionJobError,
     BehaviorFusionJobStatus,
     BehaviorFusionJobStore,
     BehaviorFusionReceiptStore,
@@ -647,3 +648,83 @@ def test_the_context_cutoff_never_shows_a_judgement_from_the_future(tmp_path) ->
     # 而在它之后的段看得见。
     later = (fragment(3_000, "后来的观测"),)
     assert len(harness.runner._context(BehaviorFusionSegment(later, ("d2",)))) == 1
+
+    # 【关键】一段**横跨**那条判断成立时刻的观测：最早的一条在它之前进入系统，最晚的一条在它
+    # 之后。截断点取 min 还是取 max，只有这种输入能分辨——上面两段无论取哪个都得到同样的答案，
+    # 于是这条测试曾经守不住任何东西（把 min 改成 max，全套 8873 条一条不红）。
+    #
+    # 取 max 就是泄漏：这一段最早那条观测流进来的时候，那条判断还不存在，模型当时不可能看见它。
+    straddling = (fragment(-600, "跨越判断成立时刻的第一条"), fragment(3_000, "同一段里更晚的一条"))
+    assert harness.runner._context(BehaviorFusionSegment(straddling, ("d3",))) == ()
+
+
+def test_a_prompt_change_does_not_poison_the_jobs_already_queued(tmp_path) -> None:
+    """升级会停服务、重装、再跑——但**队列是耐久的**，重启不会清掉盘上那批作业。
+
+    作业身份在排队时由片段与版本钉死。旧版本的作业留到重启之后，执行方要等到"回执身份与
+    作业身份不符"才发现，而那一步在调完模型之后：白烧一次调用、退避重试到 FAILED、卡死整条
+    串行队列，而 ``retry_failed`` 重开后还会再烧一轮。版本在排队时就是已知的，必须在认领之前
+    纠正。
+    """
+
+    harness = Harness(tmp_path, [single_event_wire(len(FRAGMENTS))])
+    harness.deliver(FRAGMENTS, "d1")
+    stale = harness.jobs.enqueue(
+        segment_digest=SEGMENT_DIGEST,
+        observation_ids=OBSERVATION_IDS,
+        source_refs=("observation-delivery:d1",),
+        fusion_version=FUSION_VERSION,
+        prompt_version="behavior_judgement_prompt_v0",
+    )
+
+    lease = harness.runner.claim("worker-1")
+
+    assert lease is not None
+    assert lease.job.prompt_version == FUSION_PROMPT_VERSION
+    # 队列位置必须保住：改挂后排到队尾，后面的段就会先于它融合，跨窗口指回随之失效。
+    assert lease.job.fusion_sequence == stale.fusion_sequence
+    assert harness.jobs.try_read(stale.job_id) is None
+    assert harness.provider.calls == 0  # 纠正发生在调模型之前
+
+
+def test_a_checkpointed_job_keeps_its_own_version(tmp_path) -> None:
+    """已经到检查点的作业不改挂：它的判断是在旧版本下真做出来的，按自己的版本提交才诚实。"""
+
+    harness = Harness(tmp_path, [single_event_wire(len(FRAGMENTS))])
+    harness.deliver(FRAGMENTS, "d1")
+    job = harness.enqueue_job()
+    lease = harness.jobs.claim(job, "worker-1")
+    lease = asyncio.run(harness.runner._fuse_and_stage(lease, judged_at=None))
+    staged_version = lease.job.prompt_version
+
+    unchanged = harness.jobs.retarget(
+        lease.job, fusion_version=FUSION_VERSION, prompt_version="behavior_judgement_prompt_v0"
+    )
+
+    assert unchanged is not None
+    assert unchanged.prompt_version == staged_version
+    assert unchanged.staged is not None
+
+
+def test_a_foreign_file_in_the_jobs_directory_does_not_brick_the_pipeline(tmp_path) -> None:
+    """``.DS_Store`` 这类条目不是本存储写的，为它们整库硬失败等于让一次偶发污染瘫痪整条流水线。
+
+    排队、认领、结算、可观测性都要枚举这个目录。判断与回执两个兄弟存储早就是跳过的，这里必须
+    同口径；名字合规但内容损坏的仍然硬失败——那才是我们自己的东西。
+    """
+
+    harness = Harness(tmp_path, [single_event_wire(len(FRAGMENTS))])
+    harness.deliver(FRAGMENTS, "d1")
+    harness.enqueue_job()
+    for junk in (".DS_Store", "notes.txt", "job.json.bak"):
+        (harness.jobs.jobs_root / junk).write_bytes(b"\x00")
+
+    assert harness.jobs.oldest_uncommitted() is not None
+    assert harness.jobs.high_watermark() >= 1
+    assert harness.jobs.covered_observation_ids()
+    assert harness.jobs.observability_snapshot() is not None
+    assert harness.runner.claim("worker-1") is not None
+
+    (harness.jobs.jobs_root / f"{'a' * 64}.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(BehaviorFusionJobError):
+        harness.jobs.oldest_uncommitted()

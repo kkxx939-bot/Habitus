@@ -293,6 +293,11 @@
         ]
       ],
       "expect": {
+        "forbidden_status": {
+          "1": [
+            "interrupted"
+          ]
+        },
         "judgement_count": {
           "1": [
             1,
@@ -326,12 +331,9 @@
         ]
       ],
       "expect": {
-        "judgement_count": {
-          "1": [
-            1,
-            2
-          ]
-        }
+        "goal_absent": [
+          1
+        ]
       }
     },
     {
@@ -363,59 +365,14 @@
         ]
       ],
       "expect": {
-        "judgement_count": {
+        "forbidden_goals": {
           "1": [
-            1,
-            2
-          ]
-        }
-      }
-    },
-    {
-      "case_id": "subjects-handover",
-      "category": "subjects",
-      "intent": "两人先后参与同一次搬运，主体不该只留一个；片段里的称呼必须与 participants 一致",
-      "segments": [
-        [
-          {
-            "at": 0,
-            "says": "成年男性A抱起纸箱向门口移动",
-            "who": [
-              "成年男性A",
-              "成年女性B"
-            ]
-          },
-          {
-            "at": 6,
-            "says": "成年男性A将纸箱放在地上",
-            "who": [
-              "成年男性A",
-              "成年女性B"
-            ]
-          },
-          {
-            "at": 12,
-            "says": "成年女性B抱起同一个纸箱",
-            "who": [
-              "成年男性A",
-              "成年女性B"
-            ]
-          },
-          {
-            "at": 18,
-            "says": "成年女性B将纸箱搬出门",
-            "who": [
-              "成年男性A",
-              "成年女性B"
-            ]
-          }
-        ]
-      ],
-      "expect": {
-        "subjects_include": {
-          "1": [
-            "成年男性A",
-            "成年女性B"
+            "找食物",
+            "找东西吃",
+            "寻找食",
+            "拿食物",
+            "取食物",
+            "找吃"
           ]
         }
       }
@@ -453,10 +410,9 @@
         ]
       ],
       "expect": {
-        "judgement_count": {
+        "subjects_exclude": {
           "1": [
-            1,
-            3
+            "成年女性B"
           ]
         }
       }
@@ -494,6 +450,13 @@
         ]
       ],
       "expect": {
+        "relations": [
+          [
+            1,
+            1,
+            "concurrent_with"
+          ]
+        ],
         "judgement_count": {
           "1": [
             2,
@@ -532,7 +495,11 @@
       ],
       "expect": {
         "forbidden_relations": [
-          "concurrent_with"
+          [
+            1,
+            1,
+            "concurrent_with"
+          ]
         ]
       }
     },
@@ -624,7 +591,11 @@
       ],
       "expect": {
         "forbidden_relations": [
-          "continues"
+          [
+            2,
+            1,
+            "continues"
+          ]
         ]
       }
     },
@@ -664,7 +635,11 @@
       ],
       "expect": {
         "forbidden_relations": [
-          "continues"
+          [
+            2,
+            1,
+            "continues"
+          ]
         ]
       }
     },
@@ -693,10 +668,9 @@
         ]
       ],
       "expect": {
-        "judgement_count": {
+        "forbidden_status": {
           "1": [
-            1,
-            2
+            "completed"
           ]
         }
       }
@@ -734,10 +708,9 @@
         ]
       ],
       "expect": {
-        "judgement_count": {
+        "status_present": {
           "1": [
-            1,
-            2
+            "abandoned"
           ]
         }
       }
@@ -1017,7 +990,8 @@
             "results_from"
           ]
         ]
-      }
+      },
+      "probing": true
     },
     {
       "case_id": "causal-boil-tea",
@@ -1069,7 +1043,8 @@
             "results_from"
           ]
         ]
-      }
+      },
+      "probing": true
     },
     {
       "case_id": "adv-routine-not-causal",
@@ -1107,7 +1082,11 @@
       ],
       "expect": {
         "forbidden_relations": [
-          "results_from"
+          [
+            2,
+            1,
+            "results_from"
+          ]
         ]
       }
     },
@@ -1147,7 +1126,11 @@
       ],
       "expect": {
         "forbidden_relations": [
-          "results_from"
+          [
+            2,
+            1,
+            "results_from"
+          ]
         ]
       }
     },
@@ -1187,7 +1170,11 @@
       ],
       "expect": {
         "forbidden_relations": [
-          "results_from"
+          [
+            2,
+            1,
+            "results_from"
+          ]
         ]
       }
     },

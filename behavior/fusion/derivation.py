@@ -29,12 +29,19 @@
 ``judgement_id`` 由"它说了什么、依据哪些观测、什么时候"派生，**不含 relation**。因为并行是
 互指的：甲指乙、乙指甲，若关系进身份就成了循环依赖，谁也算不出来。关系是判断之间的连接，
 不属于一条判断自身的身份。
+
+也**不含 source_refs**：它是"这些观测由哪几次交付送来的"，属于溯源而不是内容。同一批观测被重复
+投递两次，得到的应当是同一条判断，而不是两条。代价是身份的输入是 payload 的真子集——理论上
+同内容、同 ``judged_at``、不同来源的两条会算出同一个身份却有不同的字节，写第二份时被存储的撞车
+检查硬失败。实测构造不出正常路径：同一段观测的 ``source_refs`` 由切段一次定死，而不同批次必然
+有不同的 ``judged_at``、身份本来就不同。所以这里保持现状，但把前提写下来——真要出现，说明有人
+绕过了排队层用同一个时间戳重放了不同来源的同一段观测。
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -47,14 +54,24 @@ from behavior.fusion.judgement import (
     JudgementStatusBasis,
 )
 from behavior.fusion.prompt import FUSION_PROMPT_VERSION
+from behavior.fusion.schema import JUDGEMENT_FUSION_JSON_SCHEMA
 from behavior.observation import BehaviorObservation
 from foundation.integrity import canonical_digest
 
 FUSION_IMPLEMENTATION_VERSION = "behavior_judgement_fusion_v1"
 
-# 产物的语义同时取决于派生实现与提示词，任一变化都会改变输出语义，因此版本必须同时覆盖两者；
-# 只记实现版本会让提示词改动在数据上不可分辨。
-FUSION_VERSION = f"{FUSION_IMPLEMENTATION_VERSION}+{FUSION_PROMPT_VERSION}"
+# 产物的语义取决于**送给模型的全部东西**加上派生实现，任一变化都会改变输出语义，所以版本必须
+# 同时覆盖三者：实现、提示词、以及 **schema**。
+#
+# schema 不是形状声明而已——字段描述里承载着硬契约（"goal 非 null 时 basis 必须至少写一条"、
+# interrupted 与 abandoned 的区别），实测改这些描述会实打实地改变模型行为。而它一度不在版本里：
+# 改完描述、模型行为变了，版本却可以一字不动，两批语义不同的判断在数据上就分辨不出来。
+#
+# 用摘要而不是手写一个版本号，是为了**不可能忘记**：改了描述版本自动就变。代价是每次改 schema
+# 都会让排队中的作业身份漂移，而那条路径已经由 ``BehaviorFusionJobStore.retarget`` 在认领之前
+# 无损纠正。
+_SCHEMA_FINGERPRINT = canonical_digest(JUDGEMENT_FUSION_JSON_SCHEMA)[:12]
+FUSION_VERSION = f"{FUSION_IMPLEMENTATION_VERSION}+{FUSION_PROMPT_VERSION}+schema{_SCHEMA_FINGERPRINT}"
 
 _IDENTITY_SCHEMA = "behavior_judgement_identity_v1"
 
@@ -114,6 +131,13 @@ def derive_judgements(
     调用前必须先执行 ``validate_judgement_batch``：这里假定引用完整、顺序正确，只做确定性绑定，
     不重复语义校验。``source_refs`` 是本次融合读取的来源身份，无法从片段自身推出，属于系统在模型
     输出之外绑定的事实。
+
+    **前提：``fragments`` 里不能有重复的观测身份。** 帧号在这里被换成观测身份，而
+    ``assembly._require_distinguishable`` 是按帧号判两条判断相不相同的；映射一旦不是单射，两条
+    内容相同、帧号不同的判断就会算出同一个 ``judgement_id`` 并在内容寻址的存储里静默合并。
+    这个前提由结构保证而不是由检查保证：``segment_observations`` 与 ``BehaviorFusionRunner._fragments``
+    都用 ``observation_id`` 作字典键收集片段，重复根本构造不出来。写在这里是为了将来新增调用方
+    时知道它存在——不写成运行时检查，是因为那等于为一个不存在的调用方付代价。
     """
 
     if not isinstance(batch, BehaviorJudgementBatch):
@@ -215,6 +239,27 @@ def _derive(
         fusion_version=FUSION_VERSION,
         prompt_version=FUSION_PROMPT_VERSION,
     )
+
+
+def without_unresolvable_relations(
+    judgement: DurableJudgement, visible_ids: Collection[str]
+) -> DurableJudgement:
+    """剪掉指向"不会落盘的判断"的关系。
+
+    个人版只跟踪主体一个人，旁人的判断不落盘。而并行关系是**相互**的：模型按提示词只在一边
+    声明，装配层会自动补上另一边——于是主体那条判断上会出现一条指向旁人判断的关系，随后旁人
+    那条被分流掉。留着它，不可变存储里就永久躺着一个指向不存在记录的 ``target_id``；旁人在做
+    什么本来就不在范围内，所以剪掉不损失任何我们要的东西。
+
+    ``judgement_id`` 是**不含 relations** 的内容摘要（并行相互指向会让身份循环依赖），所以剪枝
+    不会改变身份，也就不会与已经落盘的同一条判断冲突。
+    """
+
+    visible = set(visible_ids)
+    kept = tuple(link for link in judgement.relations if link[1] in visible)
+    if len(kept) == len(judgement.relations):
+        return judgement
+    return replace(judgement, relations=kept)
 
 
 def _target_identity(

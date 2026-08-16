@@ -175,7 +175,12 @@ class BehaviorJudgementStore:
             if earliest <= _parse_instant(record["evidence_ready_at"]) < cutoff
         ]
         tail = selected[-limit:]
-        return tuple(sorted(tail, key=lambda item: (item["started_at"], item["judgement_id"])))
+        # 按**时刻**排，不能按 ``started_at`` 的字符串排：它刻意保留本地偏移，所以字符串序不是
+        # 时间序。跨时区（出行）或 DST 切换时，1 小时的偏移变化就足以让两条判断的先后颠倒，
+        # 而这个顺序直接决定模型看到的 C1..Cn 编号。
+        return tuple(
+            sorted(tail, key=lambda item: (_parse_instant(item["started_at"]), item["judgement_id"]))
+        )
 
     def _required_read(self, judgement_id: str) -> dict[str, Any]:
         record = self.read(judgement_id)

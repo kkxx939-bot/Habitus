@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -10,6 +11,8 @@ import pytest
 from behavior.fusion import (
     BehaviorFusionConfig,
     JudgementRelation,
+    JudgementStatus,
+    JudgementStatusBasis,
     assemble_judgement_batch,
     fusion_json_schema,
     render_context_judgements,
@@ -18,6 +21,7 @@ from behavior.fusion import (
     validate_judgement_batch,
 )
 from behavior.fusion.errors import BehaviorFusionError, BehaviorFusionLimitError
+from behavior.fusion.judgement import BehaviorClaim, BehaviorFact, BehaviorJudgement
 from behavior.fusion.prompt import FUSION_SYSTEM_PROMPT as FUSION_SYSTEM_PROMPT_TEXT
 from behavior.fusion.schema import JUDGEMENT_FUSION_JSON_SCHEMA
 from behavior.observation import BehaviorObservation, BehaviorObservationConfig
@@ -265,27 +269,63 @@ def test_frames_cannot_reference_an_undeclared_judgement() -> None:
         assemble(raw)
 
 
-def test_frames_cannot_reference_an_undeclared_basis() -> None:
+def test_a_frame_pointing_at_an_undeclared_basis_falls_back_to_the_judgement() -> None:
+    """``frames`` 标了一个 ``judgements`` 里不存在的 basis 编号——降级，不要整批拒绝。
+
+    这是两张表之间的记账疏漏：判断里只声明了 basis 1、2，frames 里却标成 basis 3。**这一帧
+    归给哪条判断是清楚的**，错的只是子分组，所以把它按"归给这条判断、不归任何 basis"处理。
+    实测这条在真实模型上是间歇性的（同一输入三次里犯两次），属于组合式记账而不是语义判断，
+    靠提示词根治不了；整批拒绝的代价是白烧一次完整调用并吃掉一次重试预算。
+    """
+
     raw = body()
     raw["frames"][0]["assignments"] = [{"judgement_no": 1, "basis_no": 9}]
-    with pytest.raises(BehaviorFusionError, match="undeclared basis 9"):
-        assemble(raw)
+
+    batch = assemble(raw)
+
+    first = next(item for item in batch.judgements if item.judgement_no == 1)
+    assert 1 in first.covers  # 帧仍然归给这条判断
+    assert all(1 not in fact.fragment_nos for fact in first.claim.basis)  # 但不进任何 basis
+    validate_judgement_batch(batch, FRAGMENTS)
 
 
-def test_a_declared_basis_no_fragment_belongs_to_is_rejected() -> None:
-    """声明了事实却没有任何帧支撑它，等于凭空多出一段行为。"""
+def test_a_declared_basis_no_fragment_belongs_to_is_dropped() -> None:
+    """声明了事实却没有任何帧支撑它——丢掉那一条，不要整批拒绝。
+
+    ``judgements`` 与 ``frames`` 是分开写的两段，多声明一条 basis 却忘了在 frames 里给它任何
+    一帧，是模型的记账疏漏而不是语义错误。整批拒绝要白烧一次完整调用并吃掉一次重试预算；
+    而丢掉它不损失任何观测——没有任何帧以它为归属。
+    """
 
     raw = body()
     raw["judgements"][0]["basis"].append({"basis_no": 3, "semantics": "并不存在的事实"})
-    with pytest.raises(BehaviorFusionError, match="no fragment belongs to"):
-        assemble(raw)
+
+    batch = assemble(raw)
+
+    assert "并不存在的事实" not in [
+        fact.semantics for item in batch.judgements for fact in item.claim.basis
+    ]
+    validate_judgement_batch(batch, FRAGMENTS)
 
 
-def test_a_judgement_covering_nothing_is_rejected() -> None:
+def test_a_judgement_covering_nothing_is_dropped() -> None:
+    """一条判断若没有任何帧归属，它就没有任何观测支撑——丢掉，指向它的关系一并剪掉。"""
+
     raw = body()
     raw["judgements"].append(judgement(4, behavior="幽灵行为", goal="无", basis=["无"]))
-    with pytest.raises(BehaviorFusionError, match="cover no fragment"):
-        assemble(raw)
+    raw["judgements"][0]["relations"] = [
+        {"kind": "concurrent_with", "target": 4, "context_target": None}
+    ]
+
+    batch = assemble(raw)
+
+    assert 4 not in [item.judgement_no for item in batch.judgements]
+    assert "幽灵行为" not in [item.claim.behavior for item in batch.judgements]
+    # 关系的目标已经不存在，留着就是一条指向空处的连接。
+    assert all(
+        link.target_no != 4 for item in batch.judgements for link in item.relations
+    )
+    validate_judgement_batch(batch, FRAGMENTS)
 
 
 def test_the_subject_must_appear_in_the_covered_fragments() -> None:
@@ -528,25 +568,38 @@ def test_the_prompt_never_names_a_relation_the_code_does_not_have() -> None:
 
 
 def test_the_prompt_explains_every_hard_required_field_before_the_examples() -> None:
-    """字段必须在**说明部分**讲过，不能只在示例里出现过一次。
+    """字段必须在**说明部分**讲过，而且枚举的每个取值都要写出来。
 
-    只查"整篇提示词里有没有这个词"是没有区分力的——``subject=家庭成员A`` 出现在示例里就
-    算命中，而 A1 的本质恰恰是说明部分只字未提、模型只能靠猜。
+    这条测试守的是本项目栽过两次的那道缝：要求只存在于代码里。一次是 status 的合法取值提示词
+    根本没写，一次是 subject/summary 被代码强制必填、示例里却连出现都没出现。
+
+    只查"字段名在不在指引里"是**没有区分力**的：曾经把 3962 字的指引整段换成一行关键词罗列，
+    三层递减、折叠判据、status 与 status_basis 的区分、continues 的限制全部消失，这条测试
+    照样全绿。所以这里改成两件事一起查——
+
+      1. 每个枚举的**全部取值**都必须出现在指引里，取值直接从代码里的枚举取，
+         这样代码新增一个取值而提示词没跟上时，这条测试会红。
+      2. 每个枚举字段都必须有自己的**说明小节**，光在别处被提一嘴不算。
     """
 
     guidance, separator, _examples = FUSION_SYSTEM_PROMPT_TEXT.partition("## 示例一")
     assert separator, "提示词的示例分界标题变了，这条测试需要同步更新"
-    for field in (
-        "subject",
-        "summary",
-        "behavior",
-        "goal",
-        "basis",
-        "status",
-        "status_basis",
-        "relations",
+
+    for field in ("subject", "summary", "behavior", "goal", "basis", "status", "relations"):
+        assert field in guidance, f"指引部分没有讲 {field}"
+
+    for heading, enum in (
+        ("## status：", JudgementStatus),
+        ("## status_basis：", JudgementStatusBasis),
+        ("## relations：", JudgementRelation),
+        ("## basis：", None),
     ):
-        assert field in guidance, field
+        assert heading in guidance, f"指引部分缺少 {heading} 小节"
+        if enum is None:
+            continue
+        section = guidance.split(heading, 1)[1].split("\n## ", 1)[0]
+        missing = [member.value for member in enum if member.value not in section]
+        assert not missing, f"{heading} 小节没有写出这些取值：{missing}"
 
 
 def test_an_unreadable_judgement_cannot_be_a_relation_target() -> None:
@@ -701,3 +754,166 @@ def test_supersedes_may_point_at_a_finished_judgement() -> None:
         [[(1, 1)], [(1, 1)], [(2, 1)], [(2, 1)], [(2, 1)]],
     )
     assert len(checked(raw).judgements) == 2
+
+
+# --- 纵深防御：这些守卫从装配层走不到，但改坏了必须有人知道 ---------------------------------
+#
+# 它们此前全部没有测试。用变异测试逐条打靶时，把 ``_require_ordering`` / ``_require_known_fragments``
+# 整个关掉、把 basis 越界与重复关系的检查删掉、允许同一帧重复归给同一判断——8873 条测试一条不红。
+# 纵深防御没人守着，就等于没有。
+
+
+def _batch(judgements, frames, count):
+    return assemble_judgement_batch(wire(judgements, frames), fragment_count=count)
+
+
+def test_validation_rejects_judgements_out_of_order() -> None:
+    """判断必须按最早覆盖片段排列；顺序错乱会让下游按顺序做的每一次归约跟着错。"""
+
+    batch = _batch(
+        [judgement(1, behavior="洗手", goal="清洁双手", basis=["冲手"]), judgement(2, behavior="打哈欠")],
+        [[(1, 1)], [(2, None)]],
+        2,
+    )
+    fragments = [fragment(0, "人在洗手"), fragment(4, "人打哈欠")]
+    validate_judgement_batch(batch, fragments)  # 正序通过
+
+    scrambled = replace(batch, judgements=tuple(reversed(batch.judgements)))
+    with pytest.raises(BehaviorFusionError, match="ordered by their earliest fragment"):
+        validate_judgement_batch(scrambled, fragments)
+
+
+def test_validation_rejects_references_to_fragments_outside_the_segment() -> None:
+    """引用必须落在本批片段编号内——编造出来的语义会在这里现形。"""
+
+    batch = _batch([judgement(1, behavior="洗手", goal="清洁双手", basis=["冲手"])], [[(1, 1)], [(1, 1)]], 2)
+    fragments = [fragment(0, "人在洗手"), fragment(4, "人在冲手")]
+    validate_judgement_batch(batch, fragments)
+
+    # 只给一条片段，而判断覆盖了两条：多出来的那条不属于本段。
+    with pytest.raises(BehaviorFusionError, match="outside this segment"):
+        validate_judgement_batch(batch, fragments[:1])
+
+
+def test_a_basis_cannot_reference_a_fragment_its_judgement_does_not_cover() -> None:
+    """basis 的证据必须在这条判断自己覆盖的帧里——这是我们产物是否自洽，不是在规定现实。
+
+    装配层从 ``frames`` 反推 ``covers``，所以走装配这条路永远违反不了它；这条守卫是纯粹的
+    纵深防御，只能直接构造对象来打。它守的是"别的构造路径（归约层、迁移脚本）绕过装配时，
+    自相矛盾的判断不能悄悄成立"。
+    """
+
+    with pytest.raises(BehaviorFusionError, match="does not cover"):
+        BehaviorJudgement(
+            judgement_no=1,
+            covers=(1,),
+            subjects=(SUBJECT,),
+            claim=BehaviorClaim(
+                behavior="洗手",
+                goal="清洁双手",
+                summary="洗了手",
+                basis=(BehaviorFact(semantics="冲手", fragment_nos=(1, 2)),),
+            ),
+            status=JudgementStatus.COMPLETED,
+            status_basis=JudgementStatusBasis.OBSERVED,
+            relations=(),
+        )
+
+
+def test_a_judgement_cannot_declare_the_same_relation_twice() -> None:
+    """同一条关系写两遍是我们自己的产物内部重复，不是现实的形状。"""
+
+    with pytest.raises(BehaviorFusionError, match="same relation twice"):
+        _batch(
+            [
+                judgement(1, behavior="吃饭", goal="吃完这顿饭", basis=["进食"]),
+                judgement(
+                    2,
+                    behavior="看手机",
+                    goal="查看内容",
+                    basis=["看屏幕"],
+                    relations=[("concurrent_with", 1), ("concurrent_with", 1)],
+                ),
+            ],
+            [[(1, 1)], [(2, 1)]],
+            2,
+        )
+
+
+def test_a_fragment_cannot_be_assigned_to_the_same_judgement_twice() -> None:
+    """一帧可以属于多条判断（并行的交界帧），但不能在同一条判断里重复出现。"""
+
+    with pytest.raises(BehaviorFusionError):
+        _batch(
+            [judgement(1, behavior="洗手", goal="清洁双手", basis=["冲手", "擦干"])],
+            [[(1, 1), (1, 2), (1, 1)]],
+            1,
+        )
+
+
+def test_a_completed_context_judgement_is_marked_as_not_continuable() -> None:
+    """已经做完的先前判断，在 C 行上就标出来"不能被 continues 指"。
+
+    约束必须贴在它作用的那一行上。提示词正文里本来就有一整段讲这条规则，模型仍然 **5/5**
+    先写 ``continues`` 指向一条 completed 的判断、被守卫打回，每次多烧两次模型调用（早上洗一次
+    手、中午又洗一次，模型把第二次当成第一次的后半段）。把同一句话加长写进示例要点，仍然 5/5
+    无改善；改成在 C 行上就地标注之后，这条用例的结构重试归零，而真该延续的正例不受影响。
+
+    这条测试守的是那个标注本身——它一旦被"清理"掉，退化不会有任何别的地方报错。
+    """
+
+    def rendered(status: str) -> str:
+        return render_context_judgements(
+            (
+                {
+                    "started_at": (NOW - timedelta(minutes=20)).isoformat(),
+                    "behavior": "洗手",
+                    "goal": "清洁双手",
+                    "status": status,
+                    "status_basis": "observed",
+                },
+            ),
+            NOW,
+        )
+
+    assert "不能被 continues 指" in rendered("completed")
+    # 还没做完的那些是合法的延续目标，不能一起标上——那会把真正的跨窗口延续压死。
+    for status in ("ongoing", "interrupted", "abandoned"):
+        assert "不能被 continues 指" not in rendered(status)
+
+
+def test_every_hard_failure_the_model_can_trigger_is_stated_where_it_fills_the_field() -> None:
+    """代码强制的东西必须讲给模型，而且要讲在**它填这个字段的地方**——schema 的字段描述里。
+
+    这个项目栽过三次同一条缝：``status`` 的合法取值只在代码里；``subject``/``summary`` 被强制
+    必填而示例里根本没出现过；``basis`` 写成"只有 goal 非 null 时才填"——那是**必要条件**的说法，
+    读起来像"允许不填"，而代码当成充要，等于把话说反了。
+
+    为什么放 schema 而不是加进系统提示词：实测把这几条契约写进提示词正文（净增 65 字），
+    ``status-abandoned`` 从 8/8 掉到 5/8（同样本量头对头），而写进 schema 描述**不占提示词空间**，
+    又紧挨着模型填值的位置。这是"三种落点效力递增"那条经验的直接应用。
+    """
+
+    properties = JUDGEMENT_FUSION_JSON_SCHEMA["properties"]["judgements"]["items"]["properties"]
+
+    basis = properties["basis"]["description"]
+    assert "必须" in basis, basis
+    assert "只有" not in basis, "别写成必要条件的说法，那读起来像'允许不填'"
+
+    # 目标的合法性贴在 ``target`` 字段上，**不能**贴在 relations 数组的描述里：那里是模型决定
+    # "要不要发关系"的位置，摆一句限制性从句会把发关系这件事本身一起压住——实测把它写在数组
+    # 描述上，`concurrent-cook-and-call` 从 8/8 掉到 7/8（两次全量里更是 3/3 掉到 1/3），
+    # 而模型漏标的正是它本来判得出的那条并行。
+    target = JUDGEMENT_FUSION_JSON_SCHEMA["properties"]["judgements"]["items"]["properties"][
+        "relations"
+    ]["items"]["properties"]["target"]["description"]
+    assert "另一条" in target and "读得懂" in target, target
+    relations = properties["relations"]["description"]
+    assert "但" not in relations, "别在'要不要发关系'的位置上摆限制性从句"
+
+    assert "两遍" in properties["subjects"]["description"]
+
+    # interrupted 与 abandoned 的区别在"有没有别的事打断"，不在"做没做完"。这两档的措辞必须与
+    # 提示词一致；schema 留着旧的模糊说法，等于在模型填值的位置给一个更弱的定义。
+    status = properties["status"]["description"]
+    assert "被别的事打断" in status and "没人打断" in status, status

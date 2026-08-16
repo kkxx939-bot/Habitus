@@ -24,6 +24,7 @@ from behavior.fusion.derivation import (
     DurableJudgement,
     derive_judgements,
     judgement_payload,
+    without_unresolvable_relations,
 )
 from behavior.fusion.enqueue import (
     DEFAULT_QUIET_PERIOD_SECONDS,
@@ -124,6 +125,7 @@ __all__ = [
     "derive_judgements",
     "fusion_json_schema",
     "judgement_payload",
+    "without_unresolvable_relations",
     "receipt_identity",
     "render_context_judgements",
     "render_fragments",

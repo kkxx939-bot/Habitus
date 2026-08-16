@@ -117,7 +117,11 @@ def _cut_point(fragments: Sequence[BehaviorObservation], config: BehaviorFusionC
     best_gap = -1.0
     for index in range(search_start, limit + 1):
         gap = (fragments[index].occurred_at - fragments[index - 1].occurred_at).total_seconds()
-        if gap > best_gap:
+        # 平局取**最靠后**的那个切点。上游定频抽帧，间隔天生全等，于是"挑最大空白"退化成一次
+        # 全平局；用严格 ``>`` 会让切点固定落在搜索窗最前端，而不是回退到硬上限：均匀采样下
+        # 每段恒定少切一个搜索窗的量，`limit` 小于窗口宽度时更会塌成"每段一条观测"——那正是
+        # ``enqueue`` 文档里被当成灾难的那个形态。没有可选空白时就该切在硬上限。
+        if gap >= best_gap:
             best_gap = gap
             best_index = index
     return best_index
