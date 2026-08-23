@@ -1,10 +1,10 @@
-# m2bOS 启动时只读取一次该结构；用户副本可在 credentials 中保存真实密钥。
+# Habitus 启动时只读取一次该结构；用户副本可在 credentials 中保存真实密钥。
 storage:
-  root: ~/.m2bos
+  root: ~/.habitus
   sqlite_lock:
     timeout_seconds: 5.0
 
-# 真实凭据只写入 ~/.m2bos/config.yaml；该文件及备份必须保持 0600。
+# 真实凭据只写入 ~/.habitus/config.yaml；该文件及备份必须保持 0600。
 # 空值可用于生成模板，但 Doctor 和 Runtime 会拒绝被引用的空秘密。
 credentials:
   deepseek:
@@ -25,7 +25,7 @@ http:
 observability:
   metrics:
     enabled: true
-    namespace: m2bos
+    namespace: habitus
     max_recent_events: 512
     duration_buckets_seconds: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0]
   logging:
@@ -35,7 +35,7 @@ observability:
     enabled: false
     endpoint: http://127.0.0.1:4318
     protocol: http
-    service_name: m2bos
+    service_name: habitus
     insecure: true
     credential_ref: ""
     export_interval_seconds: 10.0
@@ -430,3 +430,13 @@ workflow:
     poll_interval_seconds: 0.2
     heartbeat_interval_seconds: 10.0
     shutdown_timeout_seconds: 30.0
+
+# 行为管线（观测 → 融合 → 归约 → 行为树）。缺省未启用；填入被跟踪主体的稳定标识即启用，
+# Runtime 会组装行为组件并启动融合/归约两个常驻 Worker。窗口数值留空时取代码内唯一出处。
+# behavior:
+#   primary_subject: "家庭成员A"
+#   context_limit: 8
+#   context_lookback_seconds: 3600
+#   reduction_sweep_interval_seconds: 300
+#   fusion_poll_interval_seconds: 5
+#   worker_shutdown_timeout_seconds: 30

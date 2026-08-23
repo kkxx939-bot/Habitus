@@ -12,14 +12,13 @@ from behavior.schema.model import (
     BehaviorFieldRole,
     BehaviorFieldSchema,
     BehaviorFieldType,
-    BehaviorMergeStrategy,
     BehaviorOperationMode,
     BehaviorSchemaError,
     BehaviorTypeSchema,
 )
 
 _TYPE_KEYS = {"behavior_type", "description", "path_template", "operation_mode", "fields"}
-_FIELD_KEYS = {"name", "type", "role", "required", "merge", "description"}
+_FIELD_KEYS = {"name", "type", "role", "required", "description"}
 
 
 def load_schema(source: str, filename: str) -> BehaviorTypeSchema:
@@ -52,7 +51,6 @@ def _load_field(raw_field: Any, filename: str) -> BehaviorFieldSchema:
         field_type=BehaviorFieldType(text(field["type"], "field type")),
         role=BehaviorFieldRole(text(field["role"], "field role")),
         required=field["required"],
-        merge_strategy=BehaviorMergeStrategy(text(field["merge"], "field merge")),
         description=text(field["description"], "field description"),
     )
 

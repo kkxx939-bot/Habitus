@@ -45,7 +45,7 @@ REQUIRED_NATIVE_SCENARIOS = (
 
 
 def benchmark_suite_matrix() -> tuple[Mapping[str, object], ...]:
-    """返回与 OpenViking 对标后的适用边界和 m2bOS 增补项。"""
+    """返回与 OpenViking 对标后的适用边界和 Habitus 增补项。"""
 
     return (
         _suite(
@@ -62,11 +62,11 @@ def benchmark_suite_matrix() -> tuple[Mapping[str, object], ...]:
         _suite("memory_semantic_evolution", "implemented", "仓库 native 数据覆盖六类节点、更新删除合并和关系"),
         _suite("failure_recovery", "implemented", "连续增加瞬态 VectorStore 故障直到正式 Job 重试预算耗尽"),
         _suite("boundary_aggregation", "implemented", "显式预算、独立运行 median/MAD、并发和规模双边界判定"),
-        _suite("resource_rag", "not_applicable", "Resource 已退出当前 m2bOS 主链"),
+        _suite("resource_rag", "not_applicable", "Resource 已退出当前 Habitus 主链"),
         _suite("grep_bm25", "not_applicable", "当前记忆检索没有 grep/BM25 公共能力"),
-        _suite("skillsbench", "not_applicable", "Skill 已退出当前 m2bOS 主链"),
+        _suite("skillsbench", "not_applicable", "Skill 已退出当前 Habitus 主链"),
         _suite("tau2_agent_trajectory", "not_applicable", "Agent/trajectory 不属于当前仓库能力"),
-        _suite("cuvs_local_index", "not_applicable", "m2bOS 只支持远程 VectorStore Adapter"),
+        _suite("cuvs_local_index", "not_applicable", "Habitus 只支持远程 VectorStore Adapter"),
     )
 
 
@@ -93,7 +93,7 @@ def audit_dataset_coverage(dataset: BenchmarkDataset) -> Mapping[str, object]:
             scenarios.update(question_scenarios)
     missing = tuple(name for name in REQUIRED_NATIVE_SCENARIOS if scenarios[name] == 0)
     return {
-        "schema_version": "m2bos_benchmark_coverage_v2",
+        "schema_version": "habitus_benchmark_coverage_v2",
         "openviking_reference_revision": OPENVIKING_REFERENCE_REVISION,
         "public_protocol": {
             "retrieval_limit": OPENVIKING_PUBLIC_RETRIEVAL_LIMIT,

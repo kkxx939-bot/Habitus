@@ -70,18 +70,18 @@ class BehaviorObservationAdapterRegistry:
     @classmethod
     def load_default(cls) -> BehaviorObservationAdapterRegistry:
         registry = cls()
-        registry.register(M2BOSBehaviorObservationAdapter())
+        registry.register(HabitusBehaviorObservationAdapter())
         return registry
 
 
-class M2BOSBehaviorObservationAdapter:
-    """m2bOS 自有的规范观测协议；上游 agent 直接按它组装载荷。
+class HabitusBehaviorObservationAdapter:
+    """Habitus 自有的规范观测协议；上游 agent 直接按它组装载荷。
 
     尚未出现需要迁就的厂商格式，因此第一个协议就是规范形状本身。将来接入形状不同的
     上游时新增适配器，不要把它们的差异塞进这里。
     """
 
-    protocol = "m2bos_behavior_observation_v1"
+    protocol = "habitus_behavior_observation_v1"
 
     def adapt(
         self,
@@ -158,5 +158,5 @@ def _require_keys(payload: Mapping[str, Any], expected: set[str], label: str) ->
 __all__ = [
     "BehaviorObservationAdapter",
     "BehaviorObservationAdapterRegistry",
-    "M2BOSBehaviorObservationAdapter",
+    "HabitusBehaviorObservationAdapter",
 ]

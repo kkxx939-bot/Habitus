@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from behavior.fusion.derivation import FUSION_VERSION, DurableJudgement
+from behavior.fusion.derivation import FUSION_VERSION, DurableJudgement, persistable_judgements
 from behavior.fusion.errors import BehaviorFusionError
 from behavior.observation import BehaviorObservation
 from foundation.integrity import canonical_digest, canonicalize
@@ -233,8 +233,9 @@ def build_fusion_receipt(
 ) -> BehaviorFusionReceipt:
     """从一次融合的产物合成回执。
 
-    ``judgements`` 传**全部**判断（含不属于主体的那些）：只有含主体的进 ``judgement_ids``，
-    其余只留观测身份。缺失必须记录——直接丢弃的话，事后没人知道这段里有多少帧属于别人。
+    ``judgements`` 传**全部**判断（含不属于主体的那些）：主体的行为与没读懂的观测段进
+    ``judgement_ids``（与落盘同一口径，见 ``persistable_judgements``），旁人的只留观测身份。
+    缺失必须记录——直接丢弃的话，事后没人知道这段里有多少帧属于别人。
     """
 
     if isinstance(judgements, (str, bytes)) or not isinstance(judgements, Sequence):
@@ -243,7 +244,7 @@ def build_fusion_receipt(
         raise TypeError("judgements must contain DurableJudgement values")
     segment_digest = segment_identity(fragments)
     covered = {item.observation_id for item in fragments}
-    in_scope = tuple(item for item in judgements if primary_subject in item.subjects)
+    in_scope = persistable_judgements(judgements, primary_subject)
     # 与 ``BehaviorJudgementBatch.unreadable_fragment_count`` 必须同一个口径：一条观测若同时
     # 被某条可读判断认领，它已经被读懂了，不该计入。两处口径不一致时，落盘的这一份会永久偏高
     # 且改不了——而它正是"上游语义退化"的告警依据。
@@ -259,8 +260,14 @@ def build_fusion_receipt(
         if not judgement.is_readable
         for observation_id in judgement.observation_ids
     } - readable
+    # tracked 只算**主体的可读判断**认领的观测：in_scope 自 v3 起含没读懂判断，若把它们的
+    # 观测也算作"已跟踪"，一条同时被旁人可读判断与没读懂判断认领的帧会从 out_of_scope 里
+    # 消失——它明明读懂了、且不属于主体。两个比例各自的语义必须干净。
     tracked = {
-        observation_id for judgement in in_scope for observation_id in judgement.observation_ids
+        observation_id
+        for judgement in in_scope
+        if judgement.is_readable
+        for observation_id in judgement.observation_ids
     }
     out_of_scope = {
         observation_id

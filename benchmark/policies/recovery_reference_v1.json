@@ -1,5 +1,5 @@
 {
-  "schema_version": "m2bos_boundary_policy_v1",
+  "schema_version": "habitus_boundary_policy_v1",
   "policy_id": "recovery-reference-v1-not-production-sla",
   "max_error_rate": 0,
   "max_p95_ms": 120000,

@@ -42,12 +42,11 @@ class BehaviorDocumentConfig:
         if len(payload) > self.max_encoded_bytes:
             raise BehaviorDocumentLimitError("behavior semantic layer exceeds its configured byte limit")
 
-    def validate_relations(self, *, links: int, backlinks: int) -> None:
-        for name, value in {"links": links, "backlinks": backlinks}.items():
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(f"behavior document {name} count must be a non-negative integer")
-            if value > self.max_relations_per_document:
-                raise BehaviorDocumentLimitError(f"behavior document {name} exceeds its configured relation limit")
+    def validate_relations(self, *, links: int) -> None:
+        if isinstance(links, bool) or not isinstance(links, int) or links < 0:
+            raise ValueError("behavior document links count must be a non-negative integer")
+        if links > self.max_relations_per_document:
+            raise BehaviorDocumentLimitError("behavior document links exceeds its configured relation limit")
 
 
 __all__ = ["BehaviorDocumentConfig", "BehaviorDocumentLimitError"]

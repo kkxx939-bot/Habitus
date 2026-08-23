@@ -5,8 +5,8 @@ import { fileURLToPath } from "node:url";
 const PLUGINS = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCE = join(PLUGINS, "memory-plugin-shared", "lib");
 const TARGETS = [
-  join(PLUGINS, "m2bos-memory", "scripts", "shared"),
-  join(PLUGINS, "m2bos-memory-claude-code", "scripts", "shared"),
+  join(PLUGINS, "habitus-memory", "scripts", "shared"),
+  join(PLUGINS, "habitus-memory-claude-code", "scripts", "shared"),
 ];
 const HEADER = "// GENERATED FROM plugins/memory-plugin-shared/lib. DO NOT EDIT.\n";
 

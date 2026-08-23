@@ -14,6 +14,7 @@ from behavior.document import (
     BehaviorDocumentLimitError,
 )
 from behavior.model import (
+    KINDS_REGISTRY_FILENAME,
     BehaviorAddress,
     BehaviorDirectory,
     BehaviorKind,
@@ -118,27 +119,11 @@ class BehaviorTree:
             return self.path_for(parsed.to_address())
         if parsed.node_type is BehaviorURINodeType.DIRECTORY:
             return self.directory_path(parsed.to_directory())
+        if parsed.node_type is BehaviorURINodeType.REGISTRY:
+            # 词表是树根的单文件节点；读写走 BehaviorKindStore，这里只负责路径解析。
+            return self.root / KINDS_REGISTRY_FILENAME
         directory, level = parsed.to_layer()
         return self.layer_path(directory, level)
-
-    def write(self, document: BehaviorDocument) -> BehaviorDocument:
-        """受信任低层原语；普通领域调用方必须经 Writer/事务写入 L2。"""
-
-        if not isinstance(document, BehaviorDocument):
-            raise TypeError("document must be a BehaviorDocument")
-        encoded = self._document_codec.encode(document).encode("utf-8")
-        self.document_config.validate_body(document.markdown_body)
-        self.document_config.validate_relations(
-            links=len(document.links),
-            backlinks=len(document.backlinks),
-        )
-        self.document_config.validate_encoded(encoded)
-        self.initialize()
-        path = self._existing_document_path(document.address)
-        self._ensure_directory(path.parent)
-        self._require_child_capacity(path.parent, (path.name,))
-        self._atomic_write(path, encoded)
-        return document
 
     def create(self, document: BehaviorDocument) -> BehaviorDocument:
         """原子创建 add-only L2；目标已绑定到不同内容时拒绝覆盖。"""
@@ -147,10 +132,7 @@ class BehaviorTree:
             raise TypeError("document must be a BehaviorDocument")
         encoded = self._document_codec.encode(document).encode("utf-8")
         self.document_config.validate_body(document.markdown_body)
-        self.document_config.validate_relations(
-            links=len(document.links),
-            backlinks=len(document.backlinks),
-        )
+        self.document_config.validate_relations(links=len(document.links))
         self.document_config.validate_encoded(encoded)
         self.initialize()
         path = self._existing_document_path(document.address)
@@ -173,10 +155,7 @@ class BehaviorTree:
         try:
             document = self._document_codec.decode(raw, expected_address=address)
             self.document_config.validate_body(document.markdown_body)
-            self.document_config.validate_relations(
-                links=len(document.links),
-                backlinks=len(document.backlinks),
-            )
+            self.document_config.validate_relations(links=len(document.links))
             return document
         except (BehaviorDocumentIntegrityError, BehaviorDocumentLimitError) as exc:
             raise BehaviorTreeIntegrityError("behavior L2 document failed integrity validation") from exc
@@ -201,10 +180,14 @@ class BehaviorTree:
     ) -> tuple[Path, Path]:
         """写入可重建 L1/L0；失败补齐和有界重试由后续 Behavior 语义刷新 Job 编排。"""
 
-        # TODO(BHV-SEMANTIC-004): L0/L1 当前只有写入原语，没有生成器、刷新器和读者。
-        # 已确认的定位是服务 Event Fusion：融合新 Event 时需要「最近发生了什么」的有界上下文，
-        # 用于判定新事件、已有事件延续还是重复。Prediction 投影只读 L2，不消费本派生层。
-        # 生成策略、刷新触发和配置边界必须等 BHV-FUSION-003 的批次单位和 Event 粒度确定后再设计。
+        # L0/L1 已由 ``behavior/semantic/`` 生成与刷新（BHV-SEMANTIC-004 关闭）：日/月/年目录
+        # 的可读摘要（"这一天他做了什么"），同日空白如实并入当日叙述；归约 sweep 落盘后在同一把
+        # 锁内刷新，来源 digest 未变零模型调用。消费者是人与记忆/语义层。
+        # 语义关联层的设计输入（用户点名）：gap 节点的时长可能被**低估**——跨批同微秒起点的
+        # 没读懂段撞已落盘节点时按 by-reference 记账（归约消费账本有全账，树上节点 add-only
+        # 改不了，见 behavior/reduction/runner.py 的 gap 落盘一节）。语义关联/摘要消费空白段时
+        # 要么接受这个低估（场景极罕见），要么定一条读消费账本核对时长的通道——在语义关联层
+        # 设计时裁定，不许无意识地把树上的 ended_at 当成空白的确切终点。
         if not isinstance(abstract, str) or not isinstance(overview, str):
             raise TypeError("behavior semantic layers must be strings")
         if not abstract.strip() or not overview.strip():
@@ -281,7 +264,16 @@ class BehaviorTree:
 
     @classmethod
     def _address_order_key(cls, address: BehaviorAddress) -> tuple[int, str]:
-        return tuple(BehaviorKind).index(address.kind), cls._relative_path(address).as_posix()
+        # 游标序必须与枚举产出序同一口径：枚举按叶名的 canonical 身份（NFC+casefold）排序
+        # （见 _markdown_names），而 identity_name 里的时间戳 'T' 未折叠——字面序与折叠序在
+        # 特定命名下会反转，分页边界附近的条目会被静默漏掉或重复产出（评审构造过反例）。
+        relative = cls._relative_path(address)
+        stem = relative.name.removesuffix(".md")
+        folded_leaf = canonical_path_identity(stem, "behavior document name")
+        return (
+            tuple(BehaviorKind).index(address.kind),
+            relative.with_name(f"{folded_leaf}.md").as_posix(),
+        )
 
     def _iter_kind(self, kind: BehaviorKind) -> Iterator[BehaviorAddress]:
         root = self.root.joinpath(*kind_directory_prefix(kind))

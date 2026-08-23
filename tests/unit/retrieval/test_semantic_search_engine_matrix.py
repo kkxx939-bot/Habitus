@@ -317,7 +317,7 @@ def test_hierarchical_search_starts_from_each_requested_root() -> None:
     preferences = MemoryURI.from_directory(MemoryDirectory.preferences())
     entities = MemoryURI.from_directory(MemoryDirectory.entities())
     preference = detail_match("回答风格", 0.8)
-    entity = detail_match("m2bOS", 0.7, kind=MemoryKind.ENTITY)
+    entity = detail_match("Habitus", 0.7, kind=MemoryKind.ENTITY)
     index = ScriptedIndex(
         searches=[(), ()],
         children={str(preferences): (preference,), str(entities): (entity,)},
@@ -333,7 +333,7 @@ def test_directory_match_queues_nested_directory_and_propagates_parent_score() -
     root = MemoryURI.from_directory(MemoryDirectory.entities())
     category = MemoryDirectory.entities("项目")
     category_layer = layer_match(category, MemoryLevel.ABSTRACT, 0.9)
-    target = detail_match("m2bOS", 0.5, kind=MemoryKind.ENTITY)
+    target = detail_match("Habitus", 0.5, kind=MemoryKind.ENTITY)
     index = ScriptedIndex(
         searches=[(), (category_layer,)],
         children={str(root): (), str(MemoryURI.from_directory(category)): (target,)},

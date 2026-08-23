@@ -33,18 +33,18 @@ def test_http_config_rejects_remote_binding_and_removed_auth_fields() -> None:
     assert HTTPAPIConfig(host="127.0.0.9").host == "127.0.0.9"
     assert HTTPAPIConfig(host="::1").host == "::1"
     assert HTTPAPIConfig(host="localhost").host == "localhost"
-    for host in ("0.0.0.0", "192.168.1.10", "m2bos.example.com"):
+    for host in ("0.0.0.0", "192.168.1.10", "habitus.example.com"):
         with pytest.raises(ValueError, match="loopback"):
             HTTPAPIConfig(host=host)
     with pytest.raises(Exception, match="api_key_env"):
-        HTTPAPIConfig.from_mapping({"api_key_env": "M2BOS_HTTP_API_KEY"})
+        HTTPAPIConfig.from_mapping({"api_key_env": "HABITUS_HTTP_API_KEY"})
 
 
 def test_factory_uses_one_config_and_creates_storage_scoped_instance_lock(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    environ = {"M2BOS_CONFIG_FILE": "/tmp/m2bos.yaml"}
+    environ = {"HABITUS_CONFIG_FILE": "/tmp/habitus.yaml"}
     config = SimpleNamespace(
         http=HTTPAPIConfig(),
         storage_root=tmp_path,
@@ -56,7 +56,7 @@ def test_factory_uses_one_config_and_creates_storage_scoped_instance_lock(
     build = Mock(return_value=runtime)
     create = Mock(return_value=app)
     configure = Mock()
-    monkeypatch.setattr(Config.M2BOSConfig, "from_env", from_env)
+    monkeypatch.setattr(Config.HabitusConfig, "from_env", from_env)
     monkeypatch.setattr(Runtime, "build_runtime", build)
     monkeypatch.setattr(app_module, "create_http_app", create)
     monkeypatch.setattr(observability, "configure_json_logging", configure)
@@ -89,7 +89,7 @@ def test_process_entrypoint_preflights_then_binds_configured_listener(
     app = object()
     run = Mock()
     preflight = Mock()
-    monkeypatch.setattr(Config.M2BOSConfig, "from_env", Mock(return_value=config))
+    monkeypatch.setattr(Config.HabitusConfig, "from_env", Mock(return_value=config))
     monkeypatch.setattr(doctor_module, "run_startup_preflight", preflight)
     monkeypatch.setattr(Runtime, "build_runtime", Mock(return_value=runtime))
     monkeypatch.setattr(app_module, "create_http_app", Mock(return_value=app))
@@ -111,7 +111,7 @@ def test_doctor_subcommand_uses_the_same_config_and_never_builds_runtime(
     local_cli.main(["doctor", "--config", "/tmp/doctor.yaml", "--json", "--skip-port"])
 
     values = doctor.call_args.kwargs["environ"]
-    assert values["M2BOS_CONFIG_FILE"] == "/tmp/doctor.yaml"
+    assert values["HABITUS_CONFIG_FILE"] == "/tmp/doctor.yaml"
     doctor.assert_called_once_with(
         environ=values,
         check_port=False,

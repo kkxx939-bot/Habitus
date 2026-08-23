@@ -51,7 +51,7 @@ def envelope(
 ) -> BehaviorObservationEnvelope:
     return BehaviorObservationEnvelope.create(
         observer_id=OBSERVER,
-        protocol="m2bos_behavior_observation_v1",
+        protocol="habitus_behavior_observation_v1",
         batch=BehaviorObservationBatch(observer_id=OBSERVER, observations=observations),
         delivery_id=canonical_digest(seed),
         # 交付时刻必须不早于批内每条语义的可用时刻，否则观测层直接拒收。

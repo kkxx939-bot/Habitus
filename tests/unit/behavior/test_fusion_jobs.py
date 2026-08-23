@@ -84,7 +84,7 @@ def envelope(
 ) -> BehaviorObservationEnvelope:
     return BehaviorObservationEnvelope.create(
         observer_id=OBSERVER,
-        protocol="m2bos_behavior_observation_v1",
+        protocol="habitus_behavior_observation_v1",
         batch=BehaviorObservationBatch(observer_id=OBSERVER, observations=observations),
         delivery_id=canonical_digest(seed),
         recorded_at=recorded_at or (NOW + timedelta(minutes=10)),
@@ -728,3 +728,41 @@ def test_a_foreign_file_in_the_jobs_directory_does_not_brick_the_pipeline(tmp_pa
     (harness.jobs.jobs_root / f"{'a' * 64}.json").write_text("{not json", encoding="utf-8")
     with pytest.raises(BehaviorFusionJobError):
         harness.jobs.oldest_uncommitted()
+
+
+def test_cancelled_execution_settles_the_lease_before_propagating(tmp_path) -> None:
+    """停机超时取消：租约按可重试失败结算再传播取消——否则作业停留 RUNNING+租约，
+    重启后先 Blocked 等租约过期、再被计一次 attempt，反复部署能把队首烧成永久 FAILED。"""
+
+    import asyncio
+
+    harness = Harness(tmp_path, [single_event_wire()])
+    harness.deliver(FRAGMENTS, "d1")
+    harness.enqueue_job()
+    lease = harness.runner.claim("worker-cancel")
+    assert lease is not None
+
+    class _HangingFuser:
+        async def fuse(self, *args, **kwargs):
+            await asyncio.sleep(3600)
+
+    harness.runner.fuser = _HangingFuser()  # type: ignore[assignment]
+
+    async def scenario() -> None:
+        task = asyncio.ensure_future(harness.runner.execute(lease))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with __import__("pytest").raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    job = harness.jobs.oldest_uncommitted()
+    assert job is not None
+    assert job.claim_id is None or job.status.value != "running"  # 租约已结算，不再是活跃持有
+    assert job.attempts == 1
+    assert job.last_error is not None and "cancelled" in job.last_error
+    # 结算成可重试：退避后可再次认领，不需要等 300 秒租约过期
+    harness.now = harness.now + timedelta(hours=1)
+    relaimed = harness.runner.claim("worker-2")
+    assert relaimed is not None

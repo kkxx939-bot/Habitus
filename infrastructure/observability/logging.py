@@ -34,7 +34,7 @@ _STANDARD_LOG_FIELDS = frozenset(logging.makeLogRecord({}).__dict__)
 class StructuredLogObserver:
     """把有界观察事件写成结构化日志，不展开业务输入或输出。"""
 
-    def __init__(self, *, enabled: bool = True, logger_name: str = "m2bos.observability") -> None:
+    def __init__(self, *, enabled: bool = True, logger_name: str = "habitus.observability") -> None:
         if not isinstance(enabled, bool):
             raise TypeError("enabled must be boolean")
         self.enabled = enabled
@@ -61,7 +61,7 @@ class StructuredLogObserver:
         }
         payload.update(_safe_attributes(event.attributes))
         payload.update(_context_fields(event))
-        self.logger.log(level, "m2bos observation", extra={"observation": payload})
+        self.logger.log(level, "habitus observation", extra={"observation": payload})
 
 
 class JSONLogFormatter(logging.Formatter):
@@ -106,12 +106,12 @@ def configure_json_logging(*, level: str = "INFO") -> None:
         raise ValueError("level must be a standard logging level")
     root = logging.getLogger()
     handler = next(
-        (item for item in root.handlers if getattr(item, "_m2bos_json_handler", False)),
+        (item for item in root.handlers if getattr(item, "_habitus_json_handler", False)),
         None,
     )
     if handler is None:
         handler = logging.StreamHandler(sys.stderr)
-        handler._m2bos_json_handler = True  # type: ignore[attr-defined]
+        handler._habitus_json_handler = True  # type: ignore[attr-defined]
         root.addHandler(handler)
     handler.setFormatter(JSONLogFormatter())
     root.setLevel(numeric_level)

@@ -17,8 +17,8 @@
 ## 行为时间保留本地偏移
 
 ``started_at`` / ``last_observed_at`` 取所覆盖观测的 ``local_occurred_at``，**带本地偏移**。
-不能折 UTC：人的一天是本地日历日，东八区凌晨的行为折成 UTC 会掉到前一天，归约层按"天"做的
-任何聚合都会错。``foundation.integrity.canonicalize`` 会折 UTC，所以这些字段的序列化必须单独
+不能折 UTC：行为的时间事实是它**实际发生的本地时刻**——树按本地日期分目录、时间预测树按本地
+钟面计数，东八区凌晨的行为折成 UTC 会掉到前一天、错一个钟面槽位。``foundation.integrity.canonicalize`` 会折 UTC，所以这些字段的序列化必须单独
 处理（见 ``store.py``）。
 
 注意 ``last_observed_at`` 是"**最后一条支持它的观测**发生在什么时候"，不是"行为在什么时候
@@ -58,7 +58,10 @@ from behavior.fusion.schema import JUDGEMENT_FUSION_JSON_SCHEMA
 from behavior.observation import BehaviorObservation
 from foundation.integrity import canonical_digest
 
-FUSION_IMPLEMENTATION_VERSION = "behavior_judgement_fusion_v1"
+# v2：同一主体同刻开始的同名行为只接受一条判断（判重守卫）——之前的数据里可能存在这类重复。
+# v3：behavior=空（没读懂）的判断也进判断存储（此前只留回执信号）——归约层要把它物化成 gap
+#     节点，v2 及更早的存储里没有这批记录。
+FUSION_IMPLEMENTATION_VERSION = "behavior_judgement_fusion_v3"
 
 # 产物的语义取决于**送给模型的全部东西**加上派生实现，任一变化都会改变输出语义，所以版本必须
 # 同时覆盖三者：实现、提示词、以及 **schema**。
@@ -295,7 +298,7 @@ def _evidence_ready_at(observations: Sequence[BehaviorObservation]) -> datetime:
 
 
 def _earliest_local(observations: Sequence[BehaviorObservation]) -> datetime:
-    """最早发生时刻，按其自身的本地偏移还原——人的一天是本地日历日，不能折 UTC。"""
+    """最早发生时刻，按其自身的本地偏移还原——树按实际发生的本地时刻定日期，不能折 UTC。"""
 
     return min(observations, key=lambda item: item.occurred_at).local_occurred_at
 
@@ -317,6 +320,22 @@ def _refs(values: Sequence[str]) -> tuple[str, ...]:
         if normalized not in resolved:
             resolved.append(normalized)
     return tuple(resolved)
+
+
+def persistable_judgements(
+    judgements: Sequence[DurableJudgement], primary_subject: str
+) -> tuple[DurableJudgement, ...]:
+    """哪些判断进判断存储：主体的行为 + 没读懂的观测段。
+
+    旁人的可读判断分流（会淹没判断存储，下游对它们毫无用处，观测身份已留在回执）；
+    behavior=空的判断不属于任何人——它是"主体的观测轨道上这段没读懂"，归约层要把它物化成
+    gap 节点，必须落盘。回执与落盘共用本函数：两处各算一遍会让 StagedFusion 的
+    "staged 判断 == 回执 judgement_ids" 校验静默失效。
+    """
+
+    return tuple(
+        item for item in judgements if not item.is_readable or primary_subject in item.subjects
+    )
 
 
 def judgement_payload(judgement: DurableJudgement) -> dict[str, Any]:
@@ -365,4 +384,5 @@ __all__ = [
     "DurableJudgement",
     "derive_judgements",
     "judgement_payload",
+    "persistable_judgements",
 ]

@@ -23,7 +23,7 @@ from benchmark.isolation import isolated_config, require_empty_directory
 from benchmark.metrics import latency_distribution
 from benchmark.model import BenchmarkDataset, BenchmarkMessage, BenchmarkSample, BenchmarkSession
 from benchmark.runner import conversation_batch
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from memory.conversation import ConversationAddress
 from memory.workflow import ConversationLifecycleMaintenanceResult
 from pre.conversation import ConversationRangeSummaryStage
@@ -35,7 +35,7 @@ class LifecycleBoundaryBenchmark:
 
     def __init__(
         self,
-        config: M2BOSConfig,
+        config: HabitusConfig,
         dataset: BenchmarkDataset,
         *,
         profile: BoundaryProfile,
@@ -45,7 +45,7 @@ class LifecycleBoundaryBenchmark:
         age_days: int = 400,
         max_cycles: int = 10_000,
     ) -> None:
-        if not isinstance(config, M2BOSConfig) or not isinstance(dataset, BenchmarkDataset):
+        if not isinstance(config, HabitusConfig) or not isinstance(dataset, BenchmarkDataset):
             raise TypeError("lifecycle boundary benchmark requires config and dataset")
         if len(dataset.samples) != 1:
             raise ValueError("lifecycle boundary benchmark requires exactly one selected sample")
@@ -174,7 +174,7 @@ class LifecycleBoundaryBenchmark:
                 "storage_growth_bytes": max(0, storage_after - storage_before),
             }
             return {
-                "schema_version": "m2bos_boundary_point_v1",
+                "schema_version": "habitus_boundary_point_v1",
                 "lane": "lifecycle",
                 "scenario": "production_policy_maintenance",
                 "scale_name": "conversation_sessions",

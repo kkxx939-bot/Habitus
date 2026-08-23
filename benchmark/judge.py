@@ -86,9 +86,9 @@ class BenchmarkJudge:
                     max_output_tokens=1_500,
                 ),
                 model_class=JudgeDecision,
-                name="m2bos_benchmark_judge_v2",
+                name="habitus_benchmark_judge_v2",
                 context=ChatCallContext(
-                    prompt_version=f"m2bos_benchmark_judge_v2:{self.policy.value}",
+                    prompt_version=f"habitus_benchmark_judge_v2:{self.policy.value}",
                     metadata={
                         "dataset": answer.dataset,
                         "sample_id": answer.sample_id,

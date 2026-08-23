@@ -1,4 +1,4 @@
-"""m2bOS 原生数据集协议，支持真实工具调用和任意记忆场景。"""
+"""Habitus 原生数据集协议，支持真实工具调用和任意记忆场景。"""
 
 from __future__ import annotations
 
@@ -40,15 +40,15 @@ def load_native(
     selected = _selected_indices(len(raw_samples), sample_indices)
     samples = tuple(_sample(raw_samples[index], index, question_limit) for index in selected)
     return BenchmarkDataset(
-        name=BenchmarkDatasetName.M2BOS,
+        name=BenchmarkDatasetName.HABITUS,
         source_path=str(Path(path).expanduser().resolve()),
         samples=samples,
     )
 
 
 def _sample(raw: object, index: int, question_limit: int | None) -> BenchmarkSample:
-    item = object_value(raw, f"m2bos[{index}]")
-    source_id = text_value(item.get("sample_id", f"sample_{index}"), "m2bOS sample_id")
+    item = object_value(raw, f"habitus[{index}]")
+    source_id = text_value(item.get("sample_id", f"sample_{index}"), "Habitus sample_id")
     sample_id = f"sample-{index:05d}-{safe_identifier(source_id, fallback='sample')[:80]}"
     sessions_raw = list_value(item.get("sessions"), f"{sample_id}.sessions")
     fallback = datetime(2000, 1, 1, tzinfo=timezone.utc)
@@ -63,7 +63,7 @@ def _sample(raw: object, index: int, question_limit: int | None) -> BenchmarkSam
         messages_raw = list_value(session.get("messages"), f"{sample_id}.sessions[{session_index}].messages")
         messages: list[BenchmarkMessage] = []
         for message_index, raw_message in enumerate(messages_raw):
-            message = object_value(raw_message, "m2bOS benchmark message")
+            message = object_value(raw_message, "Habitus benchmark message")
             role = _message_role(message.get("role"))
             occurred_at = parse_time(
                 message.get("occurred_at"),
@@ -93,13 +93,13 @@ def _sample(raw: object, index: int, question_limit: int | None) -> BenchmarkSam
     questions_raw = list_value(item.get("questions"), f"{sample_id}.questions")
     questions: list[BenchmarkQuestion] = []
     for question_index, raw_question in enumerate(questions_raw):
-        question = object_value(raw_question, "m2bOS benchmark question")
+        question = object_value(raw_question, "Habitus benchmark question")
         questions.append(
             BenchmarkQuestion(
                 question_id=f"q{question_index:04d}",
-                question=text_value(question.get("question"), "m2bOS question"),
-                reference_answer=text_value(question.get("answer"), "m2bOS answer"),
-                question_type=text_value(question.get("question_type", "custom"), "m2bOS question_type"),
+                question=text_value(question.get("question"), "Habitus question"),
+                reference_answer=text_value(question.get("answer"), "Habitus answer"),
+                question_type=text_value(question.get("question_type", "custom"), "Habitus question_type"),
                 question_time=(
                     parse_time(question["question_time"], _TIME_FORMATS, fallback=sessions[-1].started_at)
                     if "question_time" in question
@@ -132,9 +132,9 @@ def _optional_text(value: object) -> str | None:
 
 
 def _message_role(value: object) -> BenchmarkMessageRole:
-    role = text_value(value, "m2bOS message role")
+    role = text_value(value, "Habitus message role")
     if role not in {"prompt", "completion", "tool_call", "tool_result"}:
-        raise ValueError("unsupported m2bOS benchmark message role")
+        raise ValueError("unsupported Habitus benchmark message role")
     return cast(BenchmarkMessageRole, role)
 
 
@@ -143,7 +143,7 @@ def _tool_status(value: object) -> BenchmarkToolStatus | None:
     if status is None:
         return None
     if status not in {"completed", "error", "cancelled"}:
-        raise ValueError("unsupported m2bOS benchmark tool status")
+        raise ValueError("unsupported Habitus benchmark tool status")
     return cast(BenchmarkToolStatus, status)
 
 
@@ -151,7 +151,7 @@ def _selected_indices(size: int, requested: tuple[int, ...]) -> tuple[int, ...]:
     if not requested:
         return tuple(range(size))
     if len(set(requested)) != len(requested) or any(index < 0 or index >= size for index in requested):
-        raise ValueError("m2bOS sample indices must be unique and in range")
+        raise ValueError("Habitus sample indices must be unique and in range")
     return requested
 
 

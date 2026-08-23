@@ -11,7 +11,7 @@ from types import TracebackType
 try:
     import fcntl
 except ImportError as exc:  # pragma: no cover - 当前正式目标为 macOS/Linux
-    raise RuntimeError("m2bOS local service requires POSIX file locking") from exc
+    raise RuntimeError("Habitus local service requires POSIX file locking") from exc
 
 
 class ServiceInstanceLockError(RuntimeError):
@@ -47,10 +47,10 @@ class ServiceInstanceLock:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             os.close(descriptor)
-            raise ServiceInstanceLockError("another m2bOS local service already owns this storage root") from exc
+            raise ServiceInstanceLockError("another Habitus local service already owns this storage root") from exc
         try:
             payload = {
-                "schema_version": "m2bos_local_service_lock_v1",
+                "schema_version": "habitus_local_service_lock_v1",
                 "pid": os.getpid(),
                 "hostname": socket.gethostname(),
             }

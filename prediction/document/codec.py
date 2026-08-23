@@ -11,7 +11,7 @@ from prediction.document.model import PredictionDocument
 from prediction.model import PredictionAddress, PredictionKind
 from prediction.schema import PredictionSchemaRegistry
 
-_MARKER = "\n<!-- M2BOS_PREDICTION_FIELDS\n"
+_MARKER = "\n<!-- HABITUS_PREDICTION_FIELDS\n"
 _FOOTER = "\n-->\n"
 _METADATA_KEYS = {"prediction_type", "fields"}
 
@@ -71,7 +71,7 @@ class PredictionDocumentCodec:
             raise TypeError("expected_address must be a PredictionAddress")
         if raw.count(_MARKER) != 1 or not raw.endswith(_FOOTER):
             raise PredictionDocumentIntegrityError(
-                "prediction document must contain one terminal M2BOS_PREDICTION_FIELDS comment"
+                "prediction document must contain one terminal HABITUS_PREDICTION_FIELDS comment"
             )
         markdown_body, _separator, metadata_with_footer = raw.partition(_MARKER)
         metadata_source = metadata_with_footer[: -len(_FOOTER)]

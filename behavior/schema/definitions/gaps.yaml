@@ -1,0 +1,15 @@
+behavior_type: gap
+description: >-
+  一段观测空白，与行为共享同一条时间轴（缺失必须记录、不能解释）。类型二分：没读懂
+  （融合给出 behavior 为空的判断）与未观测（上游覆盖信号，契约尚未接入，接入前树里
+  自然没有该类节点、曝光分母自然数满全部时段）。
+path_template: gaps/{occurred_on:%Y}/{occurred_on:%m}/{occurred_on:%d}/{gap_kind}--{started_at:%Y%m%dT%H%M%S%f%z}.md
+operation_mode: add_only
+fields:
+  - {name: occurred_on, type: date, role: address, required: true, description: 空白开始的本地日历日期。}
+  - {name: gap_kind, type: gap_kind, role: address, required: true, description: 空白类型，没读懂或未观测；作为地址叶名的语义名。}
+  - {name: started_at, type: datetime, role: address, required: true, description: 空白开始时刻，本地时间带整分钟偏移。}
+  - {name: ended_at, type: datetime, role: numeric, required: true, description: 空白结束时刻；必须晚于开始。}
+  - {name: judgement_ids, type: sha256_list, role: system, required: true, description: 没读懂空白必须携带来源判断身份；未观测空白允许为空、随上游契约补齐。}
+  - {name: observation_ids, type: sha256_list, role: system, required: true, description: 没读懂空白覆盖的观测身份；未观测空白允许为空。}
+  - {name: reduction_version, type: string, role: system, required: true, description: 归约写入层的实现版本。}

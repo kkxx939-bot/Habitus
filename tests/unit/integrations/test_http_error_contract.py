@@ -31,7 +31,7 @@ def test_openapi_error_responses_publish_the_shared_schema_codes_and_headers() -
     without_unavailable = documented_error_responses(exclude_statuses=frozenset({503}))
 
     assert responses[409]["model"] is ErrorResponse
-    assert responses[409]["description"] == "m2bOS error: ABORTED, CONFLICT"
+    assert responses[409]["description"] == "Habitus error: ABORTED, CONFLICT"
     assert set(responses[409]["headers"]) == {"Retry-After", "X-Request-ID"}
     assert 401 not in responses
     assert 403 not in responses

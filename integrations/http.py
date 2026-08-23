@@ -50,7 +50,7 @@ class RuntimeHTTPHandlers:
         """返回插件和 SDK 建立连接前可验证的稳定服务能力。"""
 
         try:
-            service_version = importlib.metadata.version("m2bos")
+            service_version = importlib.metadata.version("habitus")
         except importlib.metadata.PackageNotFoundError:
             service_version = "0.1.0"
         return {

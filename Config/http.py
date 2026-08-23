@@ -1,4 +1,4 @@
-"""m2bOS 单用户本地 HTTP 服务配置。"""
+"""Habitus 单用户本地 HTTP 服务配置。"""
 
 from __future__ import annotations
 

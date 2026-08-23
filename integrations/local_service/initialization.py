@@ -1,4 +1,4 @@
-"""单用户 m2bOS 配置的安全初始化原语。"""
+"""单用户 Habitus 配置的安全初始化原语。"""
 
 from __future__ import annotations
 
@@ -12,12 +12,12 @@ from pathlib import Path
 
 import yaml
 
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from Config.loader import load_config_object, strict_object
 from infrastructure.store.filesystem.durable_io.atomic_file import atomic_replace_bytes
 
-DEFAULT_CONFIG_PATH = Path("~/.m2bos/config.yaml")
-DEFAULT_PLUGIN_CONNECTION_PATH = Path("~/.m2bos/agent-plugin/connection.json")
+DEFAULT_CONFIG_PATH = Path("~/.habitus/config.yaml")
+DEFAULT_PLUGIN_CONNECTION_PATH = Path("~/.habitus/agent-plugin/connection.json")
 _MAX_INITIALIZED_CONFIG_BYTES = 1024 * 1024
 
 
@@ -46,13 +46,13 @@ def resolve_config_path(
     if explicit is not None:
         selected = explicit
     else:
-        configured = values.get("M2BOS_CONFIG_FILE")
+        configured = values.get("HABITUS_CONFIG_FILE")
         selected = configured if isinstance(configured, str) and configured.strip() else DEFAULT_CONFIG_PATH
     path = Path(selected).expanduser().absolute()
     if path.suffix.casefold() != ".yaml":
-        raise ValueError("m2bOS config path must use the .yaml suffix")
+        raise ValueError("Habitus config path must use the .yaml suffix")
     if path.parent == Path(path.anchor):
-        raise ValueError("m2bOS config must be stored in a dedicated child directory")
+        raise ValueError("Habitus config must be stored in a dedicated child directory")
     return path
 
 
@@ -63,7 +63,7 @@ def resolve_plugin_connection_path(
     """解析 Hook 的持久连接投影；显式 state root 优先于单用户默认目录。"""
 
     values = os.environ if environ is None else environ
-    configured = values.get("M2BOS_PLUGIN_STATE_DIR")
+    configured = values.get("HABITUS_PLUGIN_STATE_DIR")
     if isinstance(configured, str) and configured.strip():
         state_root = Path(configured).expanduser().absolute()
         if state_root == Path(state_root.anchor):
@@ -87,7 +87,7 @@ def initialize_config(
     if existing is not None and not force:
         if stat.S_IMODE(path.stat().st_mode) & 0o077:
             atomic_replace_bytes(path, existing, artifact_root=path.parent)
-        M2BOSConfig.from_file(path)
+        HabitusConfig.from_file(path)
         return ConfigInitializationResult(path=path, created=False, backup_path=None)
 
     encoded = _validated_template(source)
@@ -96,7 +96,7 @@ def initialize_config(
         backup_path = path.with_name(f"{path.stem}.bak{path.suffix}")
         atomic_replace_bytes(backup_path, existing, artifact_root=path.parent)
     atomic_replace_bytes(path, encoded, artifact_root=path.parent)
-    M2BOSConfig.from_file(path)
+    HabitusConfig.from_file(path)
     return ConfigInitializationResult(path=path, created=True, backup_path=backup_path)
 
 
@@ -110,10 +110,10 @@ def initialize_config_from_mapping(
 
     if not isinstance(payload, Mapping):
         raise TypeError("config payload must be an object")
-    M2BOSConfig.from_mapping(payload)
+    HabitusConfig.from_mapping(payload)
     encoded = yaml.safe_dump(dict(payload), allow_unicode=True, sort_keys=False).encode("utf-8")
     if len(encoded) > _MAX_INITIALIZED_CONFIG_BYTES:
-        raise ValueError("m2bOS config exceeds the one-megabyte limit")
+        raise ValueError("Habitus config exceeds the one-megabyte limit")
     return _initialize_encoded(resolve_config_path(destination), encoded, force=force)
 
 
@@ -130,15 +130,15 @@ def load_initialization_mapping(source: Path | None = None) -> dict[str, object]
             encoded = template.read_bytes()
             payload = load_config_object(template)
     if not encoded:
-        raise ValueError("m2bOS config cannot be empty")
-    M2BOSConfig.from_mapping(payload)
+        raise ValueError("Habitus config cannot be empty")
+    HabitusConfig.from_mapping(payload)
     return payload
 
 
 def missing_credential_fields(path: Path) -> tuple[CredentialField, ...]:
     """返回当前运行链实际引用但尚未填写的秘密字段。"""
 
-    config = M2BOSConfig.from_file(path)
+    config = HabitusConfig.from_file(path)
     from integrations.local_service.adapter_catalog import load_adapter_catalog
 
     required = {
@@ -162,7 +162,7 @@ def missing_credential_fields(path: Path) -> tuple[CredentialField, ...]:
 def configure_credentials(
     path: Path,
     values: Mapping[str, Mapping[str, str]],
-) -> M2BOSConfig:
+) -> HabitusConfig:
     """只更新已经声明的秘密字段，并以 0600 原子替换统一 YAML。"""
 
     if not isinstance(values, Mapping):
@@ -192,21 +192,21 @@ def configure_credentials(
             current[raw_field_name] = secret
         registry[raw_reference] = current
     payload["credentials"] = registry
-    config = M2BOSConfig.from_mapping(payload)
+    config = HabitusConfig.from_mapping(payload)
     encoded = yaml.safe_dump(payload, allow_unicode=True, sort_keys=False).encode("utf-8")
     atomic_replace_bytes(path, encoded, artifact_root=path.parent)
-    M2BOSConfig.from_file(path)
+    HabitusConfig.from_file(path)
     return config
 
 
 def write_plugin_connection(
-    config: M2BOSConfig,
+    config: HabitusConfig,
     destination: Path | None = None,
 ) -> Path:
     """把 YAML 中的本地监听地址投影成插件可读取的无秘密派生配置。"""
 
-    if not isinstance(config, M2BOSConfig):
-        raise TypeError("config must be M2BOSConfig")
+    if not isinstance(config, HabitusConfig):
+        raise TypeError("config must be HabitusConfig")
     path = (
         Path(destination).expanduser().absolute()
         if destination is not None
@@ -229,11 +229,11 @@ def _validated_template(source: Path | None) -> bytes:
     if source is not None:
         template = Path(source).expanduser().absolute()
         encoded = _read_required_regular_file(template)
-        M2BOSConfig.from_file(template)
+        HabitusConfig.from_file(template)
         return encoded
     resource = resources.files("Config").joinpath("example.yaml")
     with resources.as_file(resource) as template:
-        M2BOSConfig.from_file(template)
+        HabitusConfig.from_file(template)
         return template.read_bytes()
 
 
@@ -249,14 +249,14 @@ def _initialize_encoded(
     if existing is not None and not force:
         if stat.S_IMODE(path.stat().st_mode) & 0o077:
             atomic_replace_bytes(path, existing, artifact_root=path.parent)
-        M2BOSConfig.from_file(path)
+        HabitusConfig.from_file(path)
         return ConfigInitializationResult(path=path, created=False, backup_path=None)
     backup_path = None
     if existing is not None:
         backup_path = path.with_name(f"{path.stem}.bak{path.suffix}")
         atomic_replace_bytes(backup_path, existing, artifact_root=path.parent)
     atomic_replace_bytes(path, encoded, artifact_root=path.parent)
-    M2BOSConfig.from_file(path)
+    HabitusConfig.from_file(path)
     return ConfigInitializationResult(path=path, created=True, backup_path=backup_path)
 
 
@@ -285,7 +285,7 @@ def _read_required_regular_file(path: Path) -> bytes:
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
-            raise ValueError("m2bOS config must be a regular file")
+            raise ValueError("Habitus config must be a regular file")
         chunks: list[bytes] = []
         while True:
             chunk = os.read(descriptor, 1024 * 1024)

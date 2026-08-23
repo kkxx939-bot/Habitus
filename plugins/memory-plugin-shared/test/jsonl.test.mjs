@@ -12,7 +12,7 @@ function completed(records) {
 }
 
 async function root(t) {
-  const value = await mkdtemp(join(tmpdir(), "m2bos-jsonl-test-"));
+  const value = await mkdtemp(join(tmpdir(), "habitus-jsonl-test-"));
   t.after(() => rm(value, { recursive: true, force: true }));
   return value;
 }

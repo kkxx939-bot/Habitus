@@ -343,8 +343,8 @@ def create_http_app(
                     instance_lock.release()
 
     app = FastAPI(
-        title="m2bOS Memory API",
-        description="m2bOS Runtime 的单用户本地记忆服务",
+        title="Habitus Memory API",
+        description="Habitus Runtime 的单用户本地记忆服务",
         version="1.0.0",
         lifespan=lifespan,
     )

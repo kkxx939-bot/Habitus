@@ -11,7 +11,7 @@ import {
   listPendingSessions,
   releaseOutboxItem,
 } from "./outbox.mjs";
-import { M2BOSServiceClient } from "./service-client.mjs";
+import { HabitusServiceClient } from "./service-client.mjs";
 import { requireInjectionReceipt } from "./injection-receipt.mjs";
 import { readState, withSessionLock, writeState } from "./state-store.mjs";
 
@@ -28,13 +28,13 @@ function occurredAt(input) {
 export class PluginCore {
   constructor(config, { service } = {}) {
     this.config = config;
-    this.service = service || new M2BOSServiceClient(config);
+    this.service = service || new HabitusServiceClient(config);
   }
 
   async sessionStart(adapterValue, input) {
     const adapter = requireHostAdapter(adapterValue);
     const compatibility = await this.#compatible(adapter);
-    if (!compatibility.ok) throw new Error(`m2bOS service unavailable: ${compatibility.error || "capabilities failed"}`);
+    if (!compatibility.ok) throw new Error(`Habitus service unavailable: ${compatibility.error || "capabilities failed"}`);
     return this.#locked(adapter, input, (state) => state);
   }
 
@@ -247,11 +247,11 @@ export class PluginCore {
 }
 
 function requireCompatibleService(capabilities, protocol) {
-  if (capabilities?.api_version !== "1.0") throw new Error(`unsupported m2bOS API version: ${capabilities?.api_version}`);
+  if (capabilities?.api_version !== "1.0") throw new Error(`unsupported Habitus API version: ${capabilities?.api_version}`);
   if (!Array.isArray(capabilities.protocols) || !capabilities.protocols.includes(protocol)) {
-    throw new Error(`m2bOS service does not support protocol: ${protocol}`);
+    throw new Error(`Habitus service does not support protocol: ${protocol}`);
   }
   const features = new Set(Array.isArray(capabilities.features) ? capabilities.features : []);
   const missing = REQUIRED_FEATURES.filter((feature) => !features.has(feature));
-  if (missing.length > 0) throw new Error(`m2bOS service is missing features: ${missing.join(", ")}`);
+  if (missing.length > 0) throw new Error(`Habitus service is missing features: ${missing.join(", ")}`);
 }

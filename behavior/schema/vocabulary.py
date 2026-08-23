@@ -1,44 +1,31 @@
-"""行为语义树受控词表；枚举取值属于不可配置的代码不变量。"""
+"""行为语义树受控词表；枚举取值属于不可配置的代码不变量。
+
+旧的任务态词表（completed/failed/cancelled、outcome_type/valence、action 子字段等）随
+``TODO(BHV-TREE-REBUILD-001)`` 整体退役——那是 coding agent 的领域模型，人的行为不 ``failed``
+也不产生 ``human_response``。新词表逐字沿用融合层的判断词表：写入层零发明，状态从链尾判断
+原样搬运。
+"""
 
 from __future__ import annotations
 
 import re
 
-RECORD_ID = re.compile(r"^[a-z][a-z0-9_-]{0,127}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
-EVENT_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted", "partial"})
-ACTION_STATUSES = frozenset({"observed", "completed", "failed", "cancelled", "interrupted"})
-KNOWLEDGE_STATES = frozenset({"observed", "reported", "inferred", "corrected"})
-OUTCOME_TYPES = frozenset(
-    {
-        "state_change",
-        "task_result",
-        "human_response",
-        "human_feedback",
-        "correction",
-        "delayed_effect",
-        "safety_result",
-    }
-)
-OUTCOME_TARGET_TYPES = frozenset({"event", "action"})
-OUTCOME_VALENCES = frozenset({"positive", "neutral", "negative", "mixed", "not_applicable"})
-EPISODE_STATUSES = frozenset({"completed", "failed", "cancelled", "partial"})
-PHASE_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted", "partial"})
-UNPHASED_EVENT_ROLES = frozenset({"contextual", "parallel", "interruption", "uncertain"})
-TRANSITION_TYPES = frozenset({"precedes", "enables", "causes", "interrupts", "resumes", "completes", "fails"})
+# 这次行为怎么结束的；与 behavior.fusion.judgement.JudgementStatus 逐字一致。
+OCCURRENCE_STATUSES = frozenset({"ongoing", "completed", "interrupted", "abandoned"})
+
+# 上面那个结论怎么知道的；``interrupted``（确实没做完）与 ``observation_lost``（不知道）
+# 之分是删失纪律的根，混了曝光统计就错。
+STATUS_BASES = frozenset({"observed", "inferred", "observation_lost"})
+
+# 观测空白的两种类型：没读懂（融合给出 behavior 为空的判断）、未观测（上游覆盖信号，
+# 契约尚未接入，见 TODO(BHV-TREE-REBUILD-001) 上游缺口一节）。
+GAP_KINDS = frozenset({"没读懂", "未观测"})
 
 __all__ = [
-    "ACTION_STATUSES",
-    "EPISODE_STATUSES",
-    "EVENT_STATUSES",
-    "KNOWLEDGE_STATES",
-    "OUTCOME_TARGET_TYPES",
-    "OUTCOME_TYPES",
-    "OUTCOME_VALENCES",
-    "PHASE_STATUSES",
-    "RECORD_ID",
+    "GAP_KINDS",
+    "OCCURRENCE_STATUSES",
     "SHA256",
-    "TRANSITION_TYPES",
-    "UNPHASED_EVENT_ROLES",
+    "STATUS_BASES",
 ]

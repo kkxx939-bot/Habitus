@@ -7,7 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from integrations.local_service.setup_registry import (
     SetupCapability,
     SetupProfile,
@@ -75,7 +75,7 @@ def selection_from_mapping(
 
     if not isinstance(payload, Mapping):
         raise TypeError("setup payload must be an object")
-    config = M2BOSConfig.from_mapping(payload)
+    config = HabitusConfig.from_mapping(payload)
     resolved = registry or build_builtin_setup_registry()
     models = _mapping(payload, "models")
     rerank_value = models.get("rerank")
@@ -124,13 +124,13 @@ def selection_from_mapping(
 
 
 def selection_from_config(
-    config: M2BOSConfig,
+    config: HabitusConfig,
     registry: SetupRegistry | None = None,
 ) -> CloudSetupSelection:
     """兼容类型化调用者；向导应优先使用无损 YAML 映射入口。"""
 
-    if not isinstance(config, M2BOSConfig):
-        raise TypeError("config must be M2BOSConfig")
+    if not isinstance(config, HabitusConfig):
+        raise TypeError("config must be HabitusConfig")
     return selection_from_mapping(_config_mapping(config), registry)
 
 
@@ -145,7 +145,7 @@ def apply_cloud_selection(
         raise TypeError("cloud setup payload must be an object")
     if not isinstance(selection, CloudSetupSelection):
         raise TypeError("selection must be CloudSetupSelection")
-    current_config = M2BOSConfig.from_mapping(payload)
+    current_config = HabitusConfig.from_mapping(payload)
     resolved = registry or build_builtin_setup_registry()
     result = deepcopy(dict(payload))
     models = _section(result, "models")
@@ -219,7 +219,7 @@ def apply_cloud_selection(
         documents.append(("rerank", rerank))
     required = resolved.required_credentials_for_documents(tuple(documents))
     result["credentials"] = _additive_credentials(result, required)
-    config = M2BOSConfig.from_mapping(result)
+    config = HabitusConfig.from_mapping(result)
     resolved.validate(config)
     return result
 
@@ -334,7 +334,7 @@ def _normalized_route_document(
     return result
 
 
-def _config_mapping(config: M2BOSConfig) -> dict[str, object]:
+def _config_mapping(config: HabitusConfig) -> dict[str, object]:
     """只服务类型化旧调用者；保留全部公开运行字段。"""
 
     from dataclasses import fields, is_dataclass

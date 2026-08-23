@@ -1,4 +1,4 @@
-"""把数据集完整会话送入真实 m2bOS Runtime 并执行记忆问答。"""
+"""把数据集完整会话送入真实 Habitus Runtime 并执行记忆问答。"""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from benchmark.model import (
 )
 from benchmark.prompts import answer_prompt
 from benchmark.protocol import OPENVIKING_REFERENCE_REVISION
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from memory.conversation import ConversationAddress
 from memory.intention import MemoryIntentionRecallScope
 from memory.model import MemoryKind
@@ -49,7 +49,7 @@ class BenchmarkRunner:
 
     def __init__(
         self,
-        config: M2BOSConfig,
+        config: HabitusConfig,
         dataset: BenchmarkDataset,
         *,
         output_directory: str | Path,
@@ -59,8 +59,8 @@ class BenchmarkRunner:
         question_concurrency: int = 8,
         resume: bool = False,
     ) -> None:
-        if not isinstance(config, M2BOSConfig):
-            raise TypeError("benchmark config must be M2BOSConfig")
+        if not isinstance(config, HabitusConfig):
+            raise TypeError("benchmark config must be HabitusConfig")
         if not isinstance(dataset, BenchmarkDataset):
             raise TypeError("benchmark dataset must be BenchmarkDataset")
         if not 1 <= top_k <= config.memory.search_service.max_limit:
@@ -109,7 +109,7 @@ class BenchmarkRunner:
         _write_json(
             self.manifest_path,
             {
-                "schema_version": "m2bos_benchmark_run_v2",
+                "schema_version": "habitus_benchmark_run_v2",
                 "status": "running",
                 "started_at": started_at,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -126,7 +126,7 @@ class BenchmarkRunner:
             _write_json(
                 self.manifest_path,
                 {
-                    "schema_version": "m2bos_benchmark_run_v2",
+                    "schema_version": "habitus_benchmark_run_v2",
                     "status": "failed",
                     "started_at": started_at,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -138,7 +138,7 @@ class BenchmarkRunner:
         _write_json(
             self.manifest_path,
             {
-                "schema_version": "m2bos_benchmark_run_v2",
+                "schema_version": "habitus_benchmark_run_v2",
                 "status": "completed",
                 "started_at": started_at,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -296,7 +296,7 @@ class BenchmarkRunner:
         for memory_address in addresses:
             kinds[memory_address.kind.value] = kinds.get(memory_address.kind.value, 0) + 1
         ingest_record: dict[str, object] = {
-            "schema_version": "m2bos_benchmark_ingest_v1",
+            "schema_version": "habitus_benchmark_ingest_v1",
             "dataset": self.dataset.name.value,
             "sample_id": sample.sample_id,
             "source_id": sample.source_id,
@@ -374,7 +374,7 @@ class BenchmarkRunner:
                     max_output_tokens=2_000,
                 ),
                 context=ChatCallContext(
-                    prompt_version="m2bos_benchmark_answer_v2",
+                    prompt_version="habitus_benchmark_answer_v2",
                     metadata={
                         "dataset": self.dataset.name.value,
                         "sample_id": sample.sample_id,

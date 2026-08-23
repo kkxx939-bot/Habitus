@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from Config import HTTPAPIConfig
 from foundation.observability import ObservationEvent
 from integrations.http_api import app as app_module
-from integrations.sdk import ConversationRef, M2BOSHTTPClient
+from integrations.sdk import ConversationRef, HabitusHTTPClient
 from Runtime import Runtime
 
 UTC = timezone.utc
@@ -187,7 +187,7 @@ class CapabilityHandlers:
 
     async def metrics(self) -> tuple[str, str]:
         self.calls.append(("metrics", None))
-        return "m2bos_operations_total 3\n", "text/plain; version=0.0.4; charset=utf-8"
+        return "habitus_operations_total 3\n", "text/plain; version=0.0.4; charset=utf-8"
 
 
 def _health(*, ready: bool) -> dict[str, object]:
@@ -317,7 +317,7 @@ def test_http_client_implements_the_same_agent_memory_port(monkeypatch: pytest.M
     async def scenario() -> None:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport) as raw_client:
-            client = M2BOSHTTPClient(
+            client = HabitusHTTPClient(
                 "http://127.0.0.1",
                 transport=DelegatingHTTPTransport(raw_client),
             )
@@ -359,7 +359,7 @@ def test_http_client_implements_the_same_agent_memory_port(monkeypatch: pytest.M
 
 def test_unauthenticated_sdk_rejects_a_non_loopback_service_url() -> None:
     with pytest.raises(ValueError, match="loopback"):
-        M2BOSHTTPClient("http://192.168.1.20:8787")
+        HabitusHTTPClient("http://192.168.1.20:8787")
 
 
 @pytest.mark.parametrize(
@@ -375,11 +375,11 @@ def test_unauthenticated_sdk_rejects_a_non_loopback_service_url() -> None:
 )
 def test_unauthenticated_sdk_accepts_only_a_loopback_origin(base_url: str) -> None:
     with pytest.raises(ValueError):
-        M2BOSHTTPClient(base_url)
+        HabitusHTTPClient(base_url)
 
 
 def test_sdk_rejects_an_invalid_delivery_identity_before_network_io() -> None:
-    client = M2BOSHTTPClient("http://127.0.0.1:8787")
+    client = HabitusHTTPClient("http://127.0.0.1:8787")
 
     async def scenario() -> None:
         with pytest.raises(ValueError, match="delivery_id"):
@@ -430,7 +430,7 @@ def test_operations_and_metrics_are_available_on_the_loopback_service(monkeypatc
     assert audit.status_code == 200
     assert audit.json()["result"]["events"][0]["operation"] == "retry_job"
     assert metrics.status_code == 200
-    assert metrics.text == "m2bos_operations_total 3\n"
+    assert metrics.text == "habitus_operations_total 3\n"
     retry_call = next(value for name, value in handlers.calls if name == "retry_failed_job")
     assert isinstance(retry_call, dict) and retry_call["expected_version"] == "a" * 64
 

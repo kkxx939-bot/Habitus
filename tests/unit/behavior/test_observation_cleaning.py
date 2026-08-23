@@ -22,7 +22,7 @@ from foundation.integrity import canonical_digest
 TZ8 = timezone(timedelta(hours=8))
 NOW = datetime(2026, 8, 13, 20, 0, 0, tzinfo=TZ8)
 CONFIG = BehaviorObservationConfig()
-PROTOCOL = "m2bos_behavior_observation_v1"
+PROTOCOL = "habitus_behavior_observation_v1"
 OBSERVER = "home-a/hall"
 
 

@@ -39,7 +39,7 @@ def test_each_schema_validates_fields_builds_address_and_renders_human_markdown(
 
     assert address.kind is kind
     assert markdown.endswith("\n")
-    assert "M2BOS_MEMORY_FIELDS" not in markdown
+    assert "HABITUS_MEMORY_FIELDS" not in markdown
 
 
 @pytest.mark.parametrize("kind", tuple(MemoryKind))
@@ -61,12 +61,12 @@ def test_profile_and_preference_require_content_but_do_not_share_address_fields(
 
 def test_entity_details_are_optional_and_absent_section_is_not_fabricated() -> None:
     registry = MemorySchemaRegistry.load_default()
-    fields = {"category": "项目", "name": "m2bOS", "summary": "m2bOS 是记忆系统。"}
+    fields = {"category": "项目", "name": "Habitus", "summary": "Habitus 是记忆系统。"}
     normalized = registry.validate(MemoryKind.ENTITY, fields)
     markdown = registry.render_markdown(MemoryKind.ENTITY, normalized)
 
     assert "details" not in normalized
-    assert "m2bOS 是记忆系统" in markdown
+    assert "Habitus 是记忆系统" in markdown
 
 
 def test_tool_requires_real_name_shape_and_at_least_one_non_empty_knowledge_field() -> None:
@@ -116,7 +116,7 @@ def test_codec_round_trip_is_canonical_for_every_memory_kind(kind: MemoryKind) -
     restored = codec.decode(raw, expected_address=original.address)
 
     assert restored == original
-    assert raw.count("M2BOS_MEMORY_FIELDS") == 1
+    assert raw.count("HABITUS_MEMORY_FIELDS") == 1
     assert raw.endswith("-->\n")
 
 

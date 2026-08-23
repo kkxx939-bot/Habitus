@@ -1,4 +1,4 @@
-"""m2bOS 数据集记忆基准的一级命令入口。"""
+"""Habitus 数据集记忆基准的一级命令入口。"""
 
 from __future__ import annotations
 
@@ -34,13 +34,13 @@ from benchmark.runner import BenchmarkRunner
 from benchmark.runtime_boundary import RuntimeBoundaryBenchmark
 from benchmark.vector import VectorBenchmarkRunner, load_vector_dataset
 from benchmark.vector_boundary import VectorBoundaryBenchmark
-from Config import M2BOSConfig
+from Config import HabitusConfig
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m benchmark",
-        description="Dataset-driven m2bOS long-term memory benchmark",
+        description="Dataset-driven Habitus long-term memory benchmark",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = commands.add_parser("run", help="导入完整会话并执行真实记忆检索和回答")
     _dataset_arguments(run)
-    run.add_argument("--config", type=Path, required=True, help="m2bOS 完整运行配置")
+    run.add_argument("--config", type=Path, required=True, help="Habitus 完整运行配置")
     run.add_argument("--output", type=Path, required=True, help="结果目录")
     run.add_argument("--work", type=Path, required=True, help="隔离的样本存储目录")
     run.add_argument("--top-k", type=int, default=OPENVIKING_PUBLIC_RETRIEVAL_LIMIT)
@@ -122,7 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     boundary_vector = commands.add_parser("boundary-vector", help="测量 VectorStore 规模与并发边界")
     _boundary_run_arguments(boundary_vector, conversation_scale=False, write_fraction=False)
-    boundary_vector.add_argument("--input", type=Path, required=True, help="m2bos_vector_benchmark_v1 JSON")
+    boundary_vector.add_argument("--input", type=Path, required=True, help="habitus_vector_benchmark_v1 JSON")
     boundary_vector.add_argument("--config", type=Path, required=True)
     boundary_vector.add_argument("--work", type=Path, required=True)
     boundary_vector.add_argument("--top-k", type=int, default=10)
@@ -190,7 +190,7 @@ def build_parser() -> argparse.ArgumentParser:
     recovery.add_argument("--work", type=Path, required=True)
 
     vector = commands.add_parser("vector", help="执行真实 VectorStore 质量与性能基准")
-    vector.add_argument("--input", type=Path, required=True, help="m2bos_vector_benchmark_v1 JSON")
+    vector.add_argument("--input", type=Path, required=True, help="habitus_vector_benchmark_v1 JSON")
     vector.add_argument("--config", type=Path, required=True)
     vector.add_argument("--output", type=Path, required=True)
     vector.add_argument("--work", type=Path, required=True)
@@ -294,7 +294,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "boundary-vector":
             result = asyncio.run(
                 VectorBoundaryBenchmark(
-                    M2BOSConfig.from_file(args.config),
+                    HabitusConfig.from_file(args.config),
                     load_vector_dataset(args.input),
                     profile=_boundary_profile(args),
                     policy=BoundaryPolicy.from_file(args.policy),
@@ -311,7 +311,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "vector":
             result = asyncio.run(
                 VectorBenchmarkRunner(
-                    M2BOSConfig.from_file(args.config),
+                    HabitusConfig.from_file(args.config),
                     load_vector_dataset(args.input),
                     output_directory=args.output,
                     work_directory=args.work,
@@ -329,7 +329,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "boundary-runtime":
             result = asyncio.run(
                 RuntimeBoundaryBenchmark(
-                    M2BOSConfig.from_file(args.config),
+                    HabitusConfig.from_file(args.config),
                     dataset,
                     profile=_boundary_profile(args),
                     policy=BoundaryPolicy.from_file(args.policy),
@@ -362,7 +362,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "boundary-lifecycle":
             result = asyncio.run(
                 LifecycleBoundaryBenchmark(
-                    M2BOSConfig.from_file(args.config),
+                    HabitusConfig.from_file(args.config),
                     dataset,
                     profile=_boundary_profile(args),
                     policy=BoundaryPolicy.from_file(args.policy),
@@ -377,7 +377,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "boundary-recovery":
             result = asyncio.run(
                 RecoveryBoundaryBenchmark(
-                    M2BOSConfig.from_file(args.config),
+                    HabitusConfig.from_file(args.config),
                     dataset,
                     profile=_boundary_profile(args),
                     policy=BoundaryPolicy.from_file(args.policy),
@@ -401,7 +401,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     answers_path=args.answers,
                     output_path=args.output,
                     dataset=dataset,
-                    judge_config=M2BOSConfig.from_file(args.config),
+                    judge_config=HabitusConfig.from_file(args.config),
                     concurrency=args.concurrency,
                     include_evidence=args.with_evidence,
                     judge_policy=BenchmarkJudgePolicy(args.judge_policy),
@@ -413,7 +413,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "load":
             result = asyncio.run(
                 RuntimeLoadBenchmark(
-                    M2BOSConfig.from_file(args.config),
+                    HabitusConfig.from_file(args.config),
                     dataset,
                     output_directory=args.output,
                     work_directory=args.work,
@@ -429,7 +429,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "lifecycle":
             result = asyncio.run(
                 LifecycleBenchmark(
-                    M2BOSConfig.from_file(args.config),
+                    HabitusConfig.from_file(args.config),
                     dataset,
                     output_directory=args.output,
                     work_directory=args.work,
@@ -443,7 +443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "recovery":
             result = asyncio.run(
                 RecoveryBenchmark(
-                    M2BOSConfig.from_file(args.config),
+                    HabitusConfig.from_file(args.config),
                     dataset,
                     output_directory=args.output,
                     work_directory=args.work,
@@ -460,7 +460,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 async def _run(args: argparse.Namespace, dataset: BenchmarkDataset) -> int:
     output = args.output.expanduser().resolve()
     runner = BenchmarkRunner(
-        M2BOSConfig.from_file(args.config),
+        HabitusConfig.from_file(args.config),
         dataset,
         output_directory=output,
         work_directory=args.work,
@@ -477,7 +477,7 @@ async def _run(args: argparse.Namespace, dataset: BenchmarkDataset) -> int:
             answers_path=runner.answers_path,
             output_path=selected_judge_path,
             dataset=dataset,
-            judge_config=M2BOSConfig.from_file(args.judge_config),
+            judge_config=HabitusConfig.from_file(args.judge_config),
             concurrency=args.judge_concurrency,
             include_evidence=args.judge_with_evidence,
             judge_policy=BenchmarkJudgePolicy(args.judge_policy),

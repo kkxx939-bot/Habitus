@@ -28,6 +28,19 @@ from prediction.learning.keys import (
     temporal_state_identity,
 )
 from prediction.learning.learner import PredictionPatternLearner
+
+# TODO(PRED-LOSS-002): 规律性度量与预测评估共用的 loss 形式尚未确定，当前一律用 log-loss。
+# - 现状：log-loss 是暂定值，选它只因为它最标准、单位是 bits、可以和 Song 等人用熵度量人类行为
+#   可预测性的结果直接对照。它没有针对本项目的特点验证过。
+# - 具体顾虑：一是**长尾惩罚**——时间槽框架下正例极稀（某行为一年 300 次对上三万多个槽），
+#   log-loss 会被海量负例主导，罕见但重要的行为（吃药）可能被淹没；二是**表达不了时间维**——
+#   提醒场景真正在意的是"猜对了做什么但时机差半小时等于没用"，而 log-loss 只评类别不评时刻。
+# - 候选替代：按正例加权的 log-loss；Brier score；对时钟锚定行为改用时刻误差与当日发生与否的
+#   联合指标（CASAS 那一支工作用的 Joint Success@T 就是这个形状，只是用在时长上）。
+# - 影响大小：中。度量的**相对排序**对 loss 形式不敏感（分层看的是行为之间的差距），所以它不影响
+#   "可预测性是否分层"这个结论；但它影响**门槛定档**和**候选入选**，因为那两处看的是绝对值。
+# - 时机：真实数据上跑出第一批分层结果之后。届时若发现长尾行为被系统性压低、或时间维确实无法用
+#   现有指标表达，再逐项替换。在此之前不要为了"更合理"提前改。
 from prediction.model import PredictionKind, PredictionPatternKind
 from prediction.pattern.document import PredictionPatternDocument
 

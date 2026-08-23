@@ -1,4 +1,4 @@
-"""m2bOS 长期记忆域。"""
+"""Habitus 长期记忆域。"""
 
 from memory.document import (
     MemoryDocument,

@@ -1,4 +1,4 @@
-"""按索引容量比例和并发阶梯寻找 m2bOS VectorStore 边界。"""
+"""按索引容量比例和并发阶梯寻找 Habitus VectorStore 边界。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from benchmark.vector import (
     VectorBenchmarkDocument,
     VectorBenchmarkRunner,
 )
-from Config import M2BOSConfig
+from Config import HabitusConfig
 
 
 class VectorBoundaryBenchmark:
@@ -29,7 +29,7 @@ class VectorBoundaryBenchmark:
 
     def __init__(
         self,
-        config: M2BOSConfig,
+        config: HabitusConfig,
         dataset: VectorBenchmarkDataset,
         *,
         profile: BoundaryProfile,
@@ -41,7 +41,7 @@ class VectorBoundaryBenchmark:
         delete_fraction: float = 0.05,
         maximum_documents: int | None = None,
     ) -> None:
-        if not isinstance(config, M2BOSConfig) or not isinstance(dataset, VectorBenchmarkDataset):
+        if not isinstance(config, HabitusConfig) or not isinstance(dataset, VectorBenchmarkDataset):
             raise TypeError("vector boundary benchmark requires config and vector dataset")
         if not isinstance(profile, BoundaryProfile) or not isinstance(policy, BoundaryPolicy):
             raise TypeError("vector boundary benchmark requires a profile and policy")
@@ -223,7 +223,7 @@ def _point(
         ),
     }
     return {
-        "schema_version": "m2bos_boundary_point_v1",
+        "schema_version": "habitus_boundary_point_v1",
         "lane": "vector",
         "scenario": "filtered_search_after_full_publish",
         "scale_name": "vector_documents",

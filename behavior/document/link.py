@@ -11,17 +11,14 @@ from behavior.uri import BehaviorURI
 
 
 class BehaviorLinkType(str, Enum):
-    RELATED_TO = "related_to"
-    BELONGS_TO = "belongs_to"
-    CAUSED_BY = "caused_by"
-    CONTINUES = "continues"
-    INTERRUPTS = "interrupts"
-    RESUMES = "resumes"
-    CORRECTS = "corrects"
+    """occurrence 之间仅有的两种前向关系；add-only 下只存前向、读侧取对称闭包。
 
-    @property
-    def is_symmetric(self) -> bool:
-        return self is BehaviorLinkType.RELATED_TO
+    方向纪律沿融合层：``concurrent_with`` 由后封口的一条指向先封口的一条（语义对称，
+    存储单向）；``results_from`` 由结果指回原因（结果本来就晚于原因）。
+    """
+
+    CONCURRENT_WITH = "concurrent_with"
+    RESULTS_FROM = "results_from"
 
 
 @dataclass(frozen=True)
@@ -44,14 +41,8 @@ class BehaviorStoredLink:
             link_type = BehaviorLinkType(self.link_type)
         except ValueError as exc:
             raise ValueError("behavior link contains an unsupported link_type") from exc
-        from_uri = self.from_uri
-        to_uri = self.to_uri
-        if from_uri == to_uri:
+        if self.from_uri == self.to_uri:
             raise ValueError("behavior link cannot reference the same URI twice")
-        if link_type.is_symmetric and str(to_uri) < str(from_uri):
-            from_uri, to_uri = to_uri, from_uri
-        object.__setattr__(self, "from_uri", from_uri)
-        object.__setattr__(self, "to_uri", to_uri)
         object.__setattr__(self, "link_type", link_type)
 
     @property

@@ -14,7 +14,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from infrastructure.vector import VectorStoreState
 from integrations.http_api.app import create_http_app
 from integrations.local_service import (
@@ -37,7 +37,7 @@ def _config(
     port: int = 8787,
     credentials: bool = False,
     filled: bool = False,
-) -> M2BOSConfig:
+) -> HabitusConfig:
     payload = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
     payload["http"]["port"] = port
@@ -52,7 +52,7 @@ def _config(
         payload["credentials"]["dashscope"]["api_key"] = "dashscope-secret"
         payload["credentials"]["vikingdb"]["access_key"] = "viking-access"
         payload["credentials"]["vikingdb"]["secret_key"] = "viking-secret"
-    return M2BOSConfig.from_mapping(payload)
+    return HabitusConfig.from_mapping(payload)
 
 
 def _runtime() -> Runtime:
@@ -74,7 +74,7 @@ def test_instance_lock_is_private_exclusive_and_reusable(tmp_path: Path) -> None
     try:
         assert first.acquired is True
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
-        assert '"schema_version":"m2bos_local_service_lock_v1"' in path.read_text(encoding="utf-8")
+        assert '"schema_version":"habitus_local_service_lock_v1"' in path.read_text(encoding="utf-8")
         with pytest.raises(ServiceInstanceLockError, match="already owns"):
             second.acquire()
     finally:
@@ -112,7 +112,7 @@ def test_doctor_reports_empty_yaml_credentials_without_a_service_api_key(tmp_pat
     assert "credentials.ark.api_key" in credentials.detail
     assert "credentials.dashscope.api_key" in credentials.detail
     assert "credentials.vikingdb.access_key" in credentials.detail
-    assert "M2BOS_HTTP" not in credentials.detail
+    assert "HABITUS_HTTP" not in credentials.detail
 
 
 def test_doctor_detects_a_listener_collision_without_starting_runtime(tmp_path: Path) -> None:
@@ -156,7 +156,7 @@ def test_doctor_resolves_conditional_adapter_dependencies_from_registry(
         target["route"]["credential_ref"] = ""
         target["options"].update({"auth_mode": "api_key", "schema_mode": "precreated"})
     checked.clear()
-    run_doctor(M2BOSConfig.from_mapping(payload), check_port=False)
+    run_doctor(HabitusConfig.from_mapping(payload), check_port=False)
 
     assert "volcengine" not in checked
 
@@ -167,7 +167,7 @@ def test_doctor_reports_unregistered_adapter_without_raising(tmp_path: Path) -> 
     payload["models"]["chat"]["route"].update(
         {"adapter": "future_chat", "credential_ref": ""}
     )
-    config = M2BOSConfig.from_mapping(payload)
+    config = HabitusConfig.from_mapping(payload)
 
     report = run_doctor(config, check_port=False)
 
@@ -181,7 +181,7 @@ def test_doctor_fails_adapter_capacity_before_remote_probe(tmp_path: Path) -> No
     payload = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
     payload["models"]["embedding"]["dimension"] = 65_536
-    config = M2BOSConfig.from_mapping(payload)
+    config = HabitusConfig.from_mapping(payload)
 
     report = run_doctor(config, check_port=False)
 
@@ -196,7 +196,7 @@ def test_doctor_requires_private_permissions_for_the_secret_bearing_yaml(tmp_pat
     path.chmod(0o644)
 
     exposed = run_doctor_from_env(
-        environ={"M2BOS_CONFIG_FILE": str(path)},
+        environ={"HABITUS_CONFIG_FILE": str(path)},
         check_port=False,
     )
     permissions = next(check for check in exposed.checks if check.name == "config_permissions")
@@ -204,7 +204,7 @@ def test_doctor_requires_private_permissions_for_the_secret_bearing_yaml(tmp_pat
 
     path.chmod(0o600)
     private = run_doctor_from_env(
-        environ={"M2BOS_CONFIG_FILE": str(path)},
+        environ={"HABITUS_CONFIG_FILE": str(path)},
         check_port=False,
     )
     permissions = next(check for check in private.checks if check.name == "config_permissions")
@@ -327,7 +327,7 @@ def test_repair_source_outputs_refuses_while_a_local_service_owns_the_root(
     import Config
     import integrations.local_service.instance_lock as instance_lock
 
-    monkeypatch.setattr(Config, "M2BOSConfig", StubConfig)
+    monkeypatch.setattr(Config, "HabitusConfig", StubConfig)
     monkeypatch.setattr(instance_lock, "ServiceInstanceLock", RefusingLock)
 
     args = cli._parser().parse_args(

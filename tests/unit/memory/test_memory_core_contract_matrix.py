@@ -450,7 +450,7 @@ def test_next_revision_is_monotonic_and_refreshes_confirmation_only_on_request(r
 @pytest.mark.parametrize(
     ("left", "right"),
     [
-        (MemoryAddress.preference("回答风格"), MemoryAddress.entity("项目", "m2bOS")),
+        (MemoryAddress.preference("回答风格"), MemoryAddress.entity("项目", "Habitus")),
         (MemoryAddress.tool("workspace.inspect"), MemoryAddress.event(date(2026, 7, 28), "检查项目")),
         (MemoryAddress.intention("完成重构"), MemoryAddress.profile()),
     ],
@@ -596,7 +596,7 @@ def test_codec_canonical_round_trip_for_every_kind_and_revision(kind: MemoryKind
 
 
 def _replace_metadata(raw: str, transform: object) -> str:
-    marker = "\n<!-- M2BOS_MEMORY_FIELDS\n"
+    marker = "\n<!-- HABITUS_MEMORY_FIELDS\n"
     body, metadata_source = raw.split(marker, 1)
     metadata = json.loads(metadata_source[: -len("\n-->\n")])
     transform(metadata)  # type: ignore[operator]
@@ -674,7 +674,7 @@ def test_codec_rejects_duplicate_json_keys_even_when_values_match() -> None:
 @pytest.mark.parametrize(
     "transform",
     [
-        lambda raw: raw.replace("\n<!-- M2BOS_MEMORY_FIELDS\n", "", 1),
+        lambda raw: raw.replace("\n<!-- HABITUS_MEMORY_FIELDS\n", "", 1),
         lambda raw: raw + raw,
         lambda raw: raw[: -len("\n-->\n")],
         lambda raw: raw.replace("\n-->\n", "\n-- >\n"),

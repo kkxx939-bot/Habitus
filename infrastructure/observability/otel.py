@@ -78,8 +78,8 @@ class OpenTelemetryBackend:
             export_interval_millis=int(float(self.config.export_interval_seconds) * 1000),
         )
         self._meter_provider = MeterProvider(resource=resource, metric_readers=(reader,))
-        self._tracer = self._tracer_provider.get_tracer("m2bos")
-        self._meter = self._meter_provider.get_meter("m2bos")
+        self._tracer = self._tracer_provider.get_tracer("habitus")
+        self._meter = self._meter_provider.get_meter("habitus")
         self._initialized = True
 
     def record(self, event: ObservationEvent) -> None:
@@ -119,7 +119,7 @@ class OpenTelemetryBackend:
             yield
             return
         safe = {
-            f"m2bos.{key}": value
+            f"habitus.{key}": value
             for key, value in (attributes or {}).items()
             if isinstance(value, str | int | float | bool) and len(key) <= 64
         }
@@ -139,7 +139,7 @@ class OpenTelemetryBackend:
             except BaseException as exc:
                 from opentelemetry.trace import Status, StatusCode
 
-                span.set_attribute("m2bos.error_type", type(exc).__name__)
+                span.set_attribute("habitus.error_type", type(exc).__name__)
                 span.set_status(Status(StatusCode.ERROR))
                 raise
 
@@ -163,26 +163,26 @@ class OpenTelemetryBackend:
         if instrument is not None:
             return instrument
         if kind == "counter":
-            instrument = self._meter.create_counter(f"m2bos.{name}")
+            instrument = self._meter.create_counter(f"habitus.{name}")
         elif kind == "gauge":
-            instrument = self._meter.create_gauge(f"m2bos.{name}")
+            instrument = self._meter.create_gauge(f"habitus.{name}")
         else:
-            instrument = self._meter.create_histogram(f"m2bos.{name}", unit="s")
+            instrument = self._meter.create_histogram(f"habitus.{name}", unit="s")
         self._instruments[key] = instrument
         return instrument
 
 
 def _trace_attributes(event: ObservationEvent) -> dict[str, str | int | float | bool]:
     result: dict[str, str | int | float | bool] = {
-        "m2bos.category": event.category,
-        "m2bos.operation": event.operation,
-        "m2bos.status": event.status.value,
-        "m2bos.duration_seconds": event.duration_seconds,
+        "habitus.category": event.category,
+        "habitus.operation": event.operation,
+        "habitus.status": event.status.value,
+        "habitus.duration_seconds": event.duration_seconds,
     }
     for name in ("request_id", "memory_sequence", "transaction_id", "worker_id", "attempt"):
         value = getattr(event.context, name)
         if value is not None:
-            result[f"m2bos.{name}"] = value
+            result[f"habitus.{name}"] = value
     for key, value in event.attributes.items():
         if key in {
             "provider",
@@ -197,7 +197,7 @@ def _trace_attributes(event: ObservationEvent) -> dict[str, str | int | float | 
             "stage",
             "job_status",
         }:
-            result[f"m2bos.{key}"] = value
+            result[f"habitus.{key}"] = value
     return result
 
 

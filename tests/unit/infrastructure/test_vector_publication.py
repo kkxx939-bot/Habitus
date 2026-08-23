@@ -231,7 +231,7 @@ def test_building_claim_without_published_state_never_looks_like_empty_index() -
     async def scenario() -> None:
         backend = MemoryBackend()
         backend.metadata["claim"] = {
-            "format": "m2bos_vector_publication_v1",
+            "format": "habitus_vector_publication_v1",
             "building": True,
         }
         store = published(backend)
@@ -335,7 +335,7 @@ def test_reads_retry_when_publication_changes_during_backend_read(operation: str
 
 def test_corrupt_publication_metadata_is_rejected_during_initialization() -> None:
     backend = MemoryBackend()
-    backend.metadata["claim"] = {"format": "m2bos_vector_publication_v1", "building": False}
+    backend.metadata["claim"] = {"format": "habitus_vector_publication_v1", "building": False}
     with pytest.raises(VectorStoreIntegrityError, match="ready without state"):
         asyncio.run(published(backend).initialize())
 

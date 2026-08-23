@@ -63,7 +63,7 @@ def test_schema_materializes_strong_values_into_canonical_immutable_document() -
     assert decoded == document
     assert document.fields["sample_date"] == "2026-08-08"
     assert document.fields["anchor"]["cutoff_at"] == "2026-08-08T10:30:00.000000Z"
-    assert "M2BOS_PREDICTION_FIELDS" in encoded
+    assert "HABITUS_PREDICTION_FIELDS" in encoded
     assert "室内温度为 29 摄氏度" in document.markdown_body
 
 

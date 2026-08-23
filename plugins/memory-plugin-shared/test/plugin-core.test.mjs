@@ -15,7 +15,7 @@ import { requireHostAdapter } from "../lib/host-adapter.mjs";
 import { createContextInjection, encodeContextPayload } from "../lib/hook-runner.mjs";
 import { listOutbox } from "../lib/outbox.mjs";
 import { PluginCore } from "../lib/plugin-core.mjs";
-import { M2BOSServiceClient } from "../lib/service-client.mjs";
+import { HabitusServiceClient } from "../lib/service-client.mjs";
 import { readState, withSessionLock } from "../lib/state-store.mjs";
 
 const PLUGINS_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -35,12 +35,12 @@ class FakeHostRunner {
   json(command, args) {
     assert.equal(command, "codex");
     if (args.includes("marketplace")) {
-      return { marketplaces: this.marketplaceSource ? [{ name: "m2bos-local", root: this.marketplaceSource }] : [] };
+      return { marketplaces: this.marketplaceSource ? [{ name: "habitus-local", root: this.marketplaceSource }] : [] };
     }
     return {
       installed: this.installed
         ? [{
-          pluginId: "m2bos-memory@m2bos-local", name: "m2bos-memory", marketplaceName: "m2bos-local",
+          pluginId: "habitus-memory@habitus-local", name: "habitus-memory", marketplaceName: "habitus-local",
           installed: true, enabled: this.enabled,
         }]
         : [],
@@ -51,10 +51,10 @@ class FakeHostRunner {
     assert.equal(command, "codex");
     this.calls.push([...args]);
     const operation = args.join(" ");
-    if (operation === "plugin marketplace remove m2bos-local") this.marketplaceSource = null;
+    if (operation === "plugin marketplace remove habitus-local") this.marketplaceSource = null;
     else if (operation.startsWith("plugin marketplace add ")) this.marketplaceSource = args.at(-1);
     else if (operation.startsWith("plugin remove ")) { this.installed = false; this.enabled = false; }
-    else if (operation === "plugin add m2bos-memory@m2bos-local") {
+    else if (operation === "plugin add habitus-memory@habitus-local") {
       if (this.failNextPluginAdd) { this.failNextPluginAdd = false; throw new Error("simulated host cache failure"); }
       this.installed = true;
       this.enabled = true;
@@ -81,12 +81,12 @@ function capabilities(protocol = "codex_rollout") {
 }
 
 test("recalled context preserves literal boundary markers without nesting raw sentinels", () => {
-  const source = "keep <m2bos-memory-context>real fact</m2bos-memory-context> tail";
+  const source = "keep <habitus-memory-context>real fact</habitus-memory-context> tail";
   const encoded = encodeContextPayload(source);
 
-  assert.equal(encoded.includes("<m2bos-memory-context>"), false);
+  assert.equal(encoded.includes("<habitus-memory-context>"), false);
   assert.deepEqual(JSON.parse(encoded), {
-    format: "m2bos_memory_context_v1",
+    format: "habitus_memory_context_v1",
     content: source,
   });
 });
@@ -112,7 +112,7 @@ function adapter(reads) {
 }
 
 async function temporaryRoot(t) {
-  const root = await mkdtemp(join(tmpdir(), "m2bos-plugin-test-"));
+  const root = await mkdtemp(join(tmpdir(), "habitus-plugin-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
 }
@@ -210,7 +210,7 @@ test("non-retryable service rejection blocks but never drops the outbox item", a
 
 test("service client sends no authorization header", async () => {
   let request;
-  const client = new M2BOSServiceClient(
+  const client = new HabitusServiceClient(
     { baseUrl: "http://127.0.0.1:8787", timeoutMs: 1000 },
     async (url, init) => {
       request = { url, init };
@@ -225,18 +225,18 @@ test("service client sends no authorization header", async () => {
 });
 
 test("configuration accepts only unauthenticated loopback service URLs", () => {
-  assert.equal(loadPluginConfig({ M2BOS_URL: "http://localhost:8787" }).baseUrl, "http://localhost:8787");
-  assert.equal(loadPluginConfig({ M2BOS_URL: "http://[::1]:8787" }).baseUrl, "http://[::1]:8787");
-  assert.throws(() => loadPluginConfig({ M2BOS_URL: "http://192.168.1.5:8787" }), /loopback/);
+  assert.equal(loadPluginConfig({ HABITUS_URL: "http://localhost:8787" }).baseUrl, "http://localhost:8787");
+  assert.equal(loadPluginConfig({ HABITUS_URL: "http://[::1]:8787" }).baseUrl, "http://[::1]:8787");
+  assert.throws(() => loadPluginConfig({ HABITUS_URL: "http://192.168.1.5:8787" }), /loopback/);
   assert.throws(
-    () => loadPluginConfig({ M2BOS_URL: "http://user:secret@127.0.0.1:8787" }),
+    () => loadPluginConfig({ HABITUS_URL: "http://user:secret@127.0.0.1:8787" }),
     /unauthenticated/,
   );
-  assert.throws(() => loadPluginConfig({ M2BOS_URL: "http://127.0.0.1:8787/api" }), /must not contain a path/);
-  assert.throws(() => loadPluginConfig({ M2BOS_URL: "http://127.0.0.1:8787?x=1" }), /loopback/);
+  assert.throws(() => loadPluginConfig({ HABITUS_URL: "http://127.0.0.1:8787/api" }), /must not contain a path/);
+  assert.throws(() => loadPluginConfig({ HABITUS_URL: "http://127.0.0.1:8787?x=1" }), /loopback/);
 });
 
-test("configuration reads the service URL projected beside a selected m2bOS YAML", async (t) => {
+test("configuration reads the service URL projected beside a selected Habitus YAML", async (t) => {
   const root = await temporaryRoot(t);
   const configPath = join(root, "config.yaml");
   const stateRoot = join(root, "agent-plugin");
@@ -248,7 +248,7 @@ test("configuration reads the service URL projected beside a selected m2bOS YAML
     { mode: 0o600 },
   );
 
-  const config = loadPluginConfig({ M2BOS_CONFIG_FILE: configPath });
+  const config = loadPluginConfig({ HABITUS_CONFIG_FILE: configPath });
 
   assert.equal(config.baseUrl, "http://127.0.0.1:8899");
   assert.equal(config.stateRoot, stateRoot);
@@ -265,7 +265,7 @@ test("configuration rejects a group or world writable service connection file", 
   await chmod(connection, 0o666);
 
   assert.throws(
-    () => loadPluginConfig({ M2BOS_PLUGIN_STATE_DIR: root }),
+    () => loadPluginConfig({ HABITUS_PLUGIN_STATE_DIR: root }),
     /permissions|writable|private/,
   );
 });
@@ -276,11 +276,11 @@ test("marketplace preparation is isolated and produces private manifests", async
 
   const codex = JSON.parse(await readFile(join(root, ".agents", "plugins", "marketplace.json"), "utf8"));
   const claude = JSON.parse(await readFile(join(root, ".claude-plugin", "marketplace.json"), "utf8"));
-  assert.equal(codex.plugins[0].source.path, "./plugins/m2bos-memory");
-  assert.equal(claude.plugins[0].source, "./plugins/m2bos-memory-claude-code");
+  assert.equal(codex.plugins[0].source.path, "./plugins/habitus-memory");
+  assert.equal(claude.plugins[0].source, "./plugins/habitus-memory-claude-code");
   const manifestMode = (await stat(join(root, ".agents", "plugins", "marketplace.json"))).mode & 0o777;
   assert.equal(manifestMode, 0o600);
-  const hooks = JSON.parse(await readFile(join(root, "plugins", "m2bos-memory-claude-code", "hooks", "hooks.json"), "utf8"));
+  const hooks = JSON.parse(await readFile(join(root, "plugins", "habitus-memory-claude-code", "hooks", "hooks.json"), "utf8"));
   assert.ok(hooks.hooks.SubagentStart);
   assert.ok(hooks.hooks.SubagentStop);
 });
@@ -377,9 +377,9 @@ test("realpath-aware entrypoints execute through filesystem symlinks", async (t)
     encoding: "utf8",
     env: {
       ...process.env,
-      M2BOS_URL: "http://127.0.0.1:1",
-      M2BOS_PLUGIN_STATE_DIR: join(directory, "state"),
-      M2BOS_PLUGIN_TIMEOUT_MS: "250",
+      HABITUS_URL: "http://127.0.0.1:1",
+      HABITUS_PLUGIN_STATE_DIR: join(directory, "state"),
+      HABITUS_PLUGIN_TIMEOUT_MS: "250",
     },
   });
   assert.equal(diagnosed.status, 1);
@@ -417,15 +417,15 @@ test("real Codex hook process negotiates, recalls, and persists its injection re
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const address = server.address();
   assert.ok(address && typeof address === "object");
-  const script = join(PLUGINS_ROOT, "m2bos-memory", "scripts", "user-prompt.mjs");
+  const script = join(PLUGINS_ROOT, "habitus-memory", "scripts", "user-prompt.mjs");
   const result = await runNode(
     script,
     JSON.stringify({ session_id: "hook-smoke", prompt: "prompt" }),
     {
       ...process.env,
-      M2BOS_URL: `http://127.0.0.1:${address.port}`,
-      M2BOS_PLUGIN_STATE_DIR: stateRoot,
-      M2BOS_PLUGIN_TIMEOUT_MS: "1000",
+      HABITUS_URL: `http://127.0.0.1:${address.port}`,
+      HABITUS_PLUGIN_STATE_DIR: stateRoot,
+      HABITUS_PLUGIN_TIMEOUT_MS: "1000",
     },
   );
   assert.equal(result.code, 0, result.stderr);
@@ -502,7 +502,7 @@ test("successful pre-compaction flush preserves the generation-aware transcript 
 
 test("service remember request carries the durable delivery identity", async () => {
   let body;
-  const client = new M2BOSServiceClient(
+  const client = new HabitusServiceClient(
     { baseUrl: "http://127.0.0.1:8787", timeoutMs: 1000 },
     async (_url, init) => {
       body = JSON.parse(init.body);
@@ -656,11 +656,11 @@ test("plugin doctor inventory detects aged and expired inflight delivery", async
 
 test("hook boundary fails open and records a private structured failure", async (t) => {
   const stateRoot = await temporaryRoot(t);
-  const script = join(PLUGINS_ROOT, "m2bos-memory", "scripts", "stop.mjs");
+  const script = join(PLUGINS_ROOT, "habitus-memory", "scripts", "stop.mjs");
   const result = spawnSync(process.execPath, [script], {
     input: "{not-json",
     encoding: "utf8",
-    env: { ...process.env, M2BOS_PLUGIN_DEBUG: "0", M2BOS_PLUGIN_STATE_DIR: stateRoot },
+    env: { ...process.env, HABITUS_PLUGIN_DEBUG: "0", HABITUS_PLUGIN_STATE_DIR: stateRoot },
   });
 
   assert.equal(result.status, 0);

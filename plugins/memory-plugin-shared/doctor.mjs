@@ -12,7 +12,7 @@ import {
   PLUGIN_NAME,
 } from "../harnesses.mjs";
 import { loadPluginConfig } from "./lib/config.mjs";
-import { M2BOSServiceClient } from "./lib/service-client.mjs";
+import { HabitusServiceClient } from "./lib/service-client.mjs";
 import { readState, sessionKey } from "./lib/state-store.mjs";
 
 const REQUIRED_FEATURES = ["conversation_cursor", "flush", "recall", "remember", "remember_idempotency_v1"];
@@ -23,7 +23,7 @@ const MAX_PENDING_AGE_MS = 24 * 60 * 60 * 1000;
 export async function runPluginDoctor(
   config = loadPluginConfig(),
   {
-    service = new M2BOSServiceClient(config),
+    service = new HabitusServiceClient(config),
     registry = HARNESS_REGISTRY,
     protocols = registry.list().map((definition) => definition.protocol),
     inspectHarnesses = harnessRegistrationChecks,
@@ -165,7 +165,7 @@ function inspectHarness(definition) {
     return {
       name: `harness_${definition.id}`,
       status: registered ? "pass" : "warn",
-      detail: registered ? "m2bOS plugin is registered" : "m2bOS plugin is not registered",
+      detail: registered ? "Habitus plugin is registered" : "Habitus plugin is not registered",
     };
   } catch {
     return {

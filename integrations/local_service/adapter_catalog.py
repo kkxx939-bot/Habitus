@@ -8,7 +8,7 @@ from functools import lru_cache
 from importlib import metadata
 from typing import cast
 
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from infrastructure.vector import VectorBackendBuilder, VectorStoreFactory
 from infrastructure.vector.adapters import register_builtin_vector_adapters
 from ModelClient import ModelCapability, ProviderBuilder, ProviderFactory
@@ -21,7 +21,7 @@ from .setup_registry import (
     build_builtin_setup_registry,
 )
 
-_ENTRY_POINT_GROUP = "m2bos.adapter_packages"
+_ENTRY_POINT_GROUP = "habitus.adapter_packages"
 
 
 @dataclass(frozen=True)
@@ -74,9 +74,9 @@ class AdapterCatalog:
         for profile in profiles:
             self.setup.register_profile(profile)
 
-    def validate(self, config: M2BOSConfig) -> None:
-        if not isinstance(config, M2BOSConfig):
-            raise TypeError("config must be M2BOSConfig")
+    def validate(self, config: HabitusConfig) -> None:
+        if not isinstance(config, HabitusConfig):
+            raise TypeError("config must be HabitusConfig")
         self.setup.validate(config)
         for capability, adapter in self.setup.configured_adapters(config):
             if capability == "vector":

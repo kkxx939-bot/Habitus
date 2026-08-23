@@ -25,7 +25,7 @@ from benchmark.isolation import isolated_config, require_empty_directory
 from benchmark.metrics import evidence_recall, latency_distribution
 from benchmark.model import BenchmarkDataset, BenchmarkQuestion, BenchmarkSample
 from benchmark.runner import conversation_batch
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from memory.conversation import ConversationAddress
 from pre.conversation import ConversationBatch
 from Runtime import Runtime, build_runtime
@@ -36,7 +36,7 @@ class RuntimeBoundaryBenchmark:
 
     def __init__(
         self,
-        config: M2BOSConfig,
+        config: HabitusConfig,
         dataset: BenchmarkDataset,
         *,
         profile: BoundaryProfile,
@@ -46,7 +46,7 @@ class RuntimeBoundaryBenchmark:
         top_k: int = 10,
         drain_timeout_seconds: float = 1_800.0,
     ) -> None:
-        if not isinstance(config, M2BOSConfig) or not isinstance(dataset, BenchmarkDataset):
+        if not isinstance(config, HabitusConfig) or not isinstance(dataset, BenchmarkDataset):
             raise TypeError("runtime boundary benchmark requires config and dataset")
         if len(dataset.samples) != 1:
             raise ValueError("runtime boundary benchmark requires exactly one selected sample")
@@ -180,7 +180,7 @@ class RuntimeBoundaryBenchmark:
             )
             addresses = runtime.components.memory.tree.list_addresses(limit=10_000)
             return {
-                "schema_version": "m2bos_boundary_point_v1",
+                "schema_version": "habitus_boundary_point_v1",
                 "lane": "runtime",
                 "scenario": "recall" if write_fraction == 0 else "mixed",
                 "scale_name": "baseline_conversations",

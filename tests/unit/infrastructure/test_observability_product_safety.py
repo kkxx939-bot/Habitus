@@ -75,7 +75,7 @@ def test_audit_store_records_only_security_and_operations_with_safe_fields(tmp_p
 def test_json_logging_redacts_secrets_and_posix_paths_but_keeps_correlation() -> None:
     formatter = JSONLogFormatter()
     record = logging.LogRecord(
-        name="m2bos.test",
+        name="habitus.test",
         level=logging.ERROR,
         pathname=__file__,
         lineno=1,
@@ -124,7 +124,7 @@ def test_json_logging_redacts_secrets_and_posix_paths_but_keeps_correlation() ->
 def test_json_logging_redacts_cross_platform_absolute_paths(path: str) -> None:
     formatter = JSONLogFormatter()
     record = logging.LogRecord(
-        name="m2bos.test",
+        name="habitus.test",
         level=logging.ERROR,
         pathname=__file__,
         lineno=1,

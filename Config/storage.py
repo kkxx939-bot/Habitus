@@ -1,4 +1,4 @@
-"""m2bOS 耐久数据共同根目录配置。"""
+"""Habitus 耐久数据共同根目录配置。"""
 
 from __future__ import annotations
 

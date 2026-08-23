@@ -255,7 +255,7 @@ class LifecycleWorker:
         self._state = LifecycleWorkerState.RUNNING
         self._loop_task = asyncio.create_task(
             self._run_loop(),
-            name=f"m2bos-lifecycle-worker:{self.worker_id}",
+            name=f"habitus-lifecycle-worker:{self.worker_id}",
         )
         await asyncio.sleep(0)
 
@@ -356,7 +356,7 @@ class LifecycleWorker:
 
         execution = asyncio.create_task(
             self._maintain_batch(token, started_at),
-            name=f"m2bos-lifecycle-cycle:{self.worker_id}",
+            name=f"habitus-lifecycle-cycle:{self.worker_id}",
         )
         self._active_cycle = execution
         heartbeat_stop = threading.Event()
@@ -369,7 +369,7 @@ class LifecycleWorker:
                 heartbeat_stop,
                 loop,
             ),
-            name=f"m2bos-lifecycle-heartbeat:{self.worker_id}",
+            name=f"habitus-lifecycle-heartbeat:{self.worker_id}",
         )
         body_error: BaseException | None = None
         try:

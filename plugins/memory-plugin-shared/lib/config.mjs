@@ -25,9 +25,9 @@ function requireLoopbackURL(value) {
     || parsed.search
     || parsed.hash
   ) {
-    throw new Error("M2BOS_URL must be an unauthenticated loopback HTTP URL");
+    throw new Error("HABITUS_URL must be an unauthenticated loopback HTTP URL");
   }
-  if (!/^\/*$/.test(parsed.pathname)) throw new Error("M2BOS_URL must not contain a path");
+  if (!/^\/*$/.test(parsed.pathname)) throw new Error("HABITUS_URL must not contain a path");
   parsed.pathname = "";
   return parsed.toString().replace(/\/$/, "");
 }
@@ -62,16 +62,16 @@ function connectionURL(stateRoot) {
 }
 
 export function loadPluginConfig(env = process.env) {
-  const selectedConfig = env.M2BOS_CONFIG_FILE
-    ? join(dirname(resolve(env.M2BOS_CONFIG_FILE)), "agent-plugin")
-    : join(homedir(), ".m2bos", "agent-plugin");
-  const stateRoot = resolve(env.M2BOS_PLUGIN_STATE_DIR || selectedConfig);
+  const selectedConfig = env.HABITUS_CONFIG_FILE
+    ? join(dirname(resolve(env.HABITUS_CONFIG_FILE)), "agent-plugin")
+    : join(homedir(), ".habitus", "agent-plugin");
+  const stateRoot = resolve(env.HABITUS_PLUGIN_STATE_DIR || selectedConfig);
   return Object.freeze({
-    enabled: booleanValue(env.M2BOS_MEMORY_ENABLED, true),
-    baseUrl: requireLoopbackURL(env.M2BOS_URL || connectionURL(stateRoot) || "http://127.0.0.1:8787"),
+    enabled: booleanValue(env.HABITUS_MEMORY_ENABLED, true),
+    baseUrl: requireLoopbackURL(env.HABITUS_URL || connectionURL(stateRoot) || "http://127.0.0.1:8787"),
     stateRoot,
-    timeoutMs: integerValue(env.M2BOS_PLUGIN_TIMEOUT_MS, 15_000, 250, 120_000),
-    maxTranscriptBytes: integerValue(env.M2BOS_PLUGIN_MAX_TRANSCRIPT_BYTES, 64 * 1024 * 1024, 1024, 256 * 1024 * 1024),
-    debug: booleanValue(env.M2BOS_PLUGIN_DEBUG, false),
+    timeoutMs: integerValue(env.HABITUS_PLUGIN_TIMEOUT_MS, 15_000, 250, 120_000),
+    maxTranscriptBytes: integerValue(env.HABITUS_PLUGIN_MAX_TRANSCRIPT_BYTES, 64 * 1024 * 1024, 1024, 256 * 1024 * 1024),
+    debug: booleanValue(env.HABITUS_PLUGIN_DEBUG, false),
   });
 }

@@ -335,6 +335,104 @@ def test_the_subject_must_appear_in_the_covered_fragments() -> None:
         validate_judgement_batch(assemble(raw), FRAGMENTS)
 
 
+def duplicated_wash(*, second_relations: list[tuple[str, int]] | None = None) -> dict[str, Any]:
+    """两条「洗手」共享最早一帧——同一主体、同一时刻开始的同名行为被声明成两条。"""
+
+    return wire(
+        [
+            judgement(1, behavior="洗手", goal="清洁双手", basis=["打开水龙头冲手"]),
+            judgement(
+                2,
+                behavior="洗手",
+                goal="清洁双手",
+                basis=["打肥皂搓手"],
+                relations=second_relations,
+            ),
+            judgement(3, behavior="打哈欠"),
+            unreadable(4),
+        ],
+        [[(1, 1), (2, 1)], [(1, 1)], [(2, 1)], [(3, None)], [(4, None)]],
+    )
+
+
+def test_the_same_behaviour_cannot_start_twice_at_the_same_moment() -> None:
+    """判重只在融合层解决（用户裁定）：同一件事被看成两条，反馈重试让模型自己合并。"""
+
+    with pytest.raises(BehaviorFusionError, match="one behaviour seen twice"):
+        checked(duplicated_wash())
+
+
+def test_concurrency_does_not_excuse_a_duplicated_start() -> None:
+    """标成并行也不行——同一个人不可能在同一瞬间把同一件事开始两次。"""
+
+    with pytest.raises(BehaviorFusionError, match="one behaviour seen twice"):
+        checked(duplicated_wash(second_relations=[("concurrent_with", 1)]))
+
+
+def test_supersedes_excuses_a_duplicated_start() -> None:
+    """修正链上的两条不是重复：supersedes 归约时只留一条，不存在两个同址产物。"""
+
+    checked(duplicated_wash(second_relations=[("supersedes", 1)]))
+
+
+def test_the_same_behaviour_at_a_later_moment_is_a_new_event() -> None:
+    """同名但开始时刻不同——再做一次是新的一件事，照常接受。"""
+
+    raw = wire(
+        [
+            judgement(1, behavior="洗手", goal="清洁双手", basis=["打开水龙头冲手"]),
+            judgement(2, behavior="洗手", goal="清洁双手", basis=["再次冲洗双手"]),
+            judgement(3, behavior="打哈欠"),
+            unreadable(4),
+        ],
+        [[(1, 1)], [(1, 1)], [(2, 1)], [(3, None)], [(4, None)]],
+    )
+    checked(raw)
+
+
+def test_two_people_may_start_the_same_behaviour_at_the_same_moment() -> None:
+    """主体不同就是两件事：旁人同刻做同名的事照常另起一条，不触发判重。"""
+
+    shared = [
+        fragment(0, "两人走到水池边", participants=[SUBJECT, "家庭成员B"]),
+        fragment(4, "家庭成员A在搓手"),
+        fragment(8, "家庭成员B在旁边冲手", participants=["家庭成员B"]),
+    ]
+    raw = wire(
+        [
+            judgement(1, behavior="洗手", goal="清洁双手", basis=["走到水池边搓手"]),
+            judgement(
+                2,
+                behavior="洗手",
+                goal="清洁双手",
+                subjects=["家庭成员B"],
+                basis=["走到水池边冲手"],
+            ),
+        ],
+        [[(1, 1), (2, 1)], [(1, 1)], [(2, 1)]],
+    )
+    checked(raw, fragments=shared)
+
+
+def test_two_fragments_at_the_same_second_still_count_as_the_same_start() -> None:
+    """判重比的是最早观测的时刻，不是"共享同一帧"——两条不同片段同秒到达也算同一时刻。"""
+
+    same_second = [
+        fragment(0, "人在水池边搓手"),
+        fragment(0, "水声，人在冲洗"),
+        fragment(4, "人关水龙头"),
+    ]
+    raw = wire(
+        [
+            judgement(1, behavior="洗手", goal="清洁双手", basis=["搓手"]),
+            judgement(2, behavior="洗手", goal="清洁双手", basis=["冲洗"]),
+        ],
+        [[(1, 1)], [(2, 1)], [(1, 1), (2, 1)]],
+    )
+    with pytest.raises(BehaviorFusionError, match="one behaviour seen twice"):
+        checked(raw, fragments=same_second)
+
+
 # --- 刻意不管的：现实的形状 --------------------------------------------------------------
 
 
@@ -917,3 +1015,21 @@ def test_every_hard_failure_the_model_can_trigger_is_stated_where_it_fills_the_f
     # 提示词一致；schema 留着旧的模糊说法，等于在模型填值的位置给一个更弱的定义。
     status = properties["status"]["description"]
     assert "被别的事打断" in status and "没人打断" in status, status
+
+
+def test_a_behaviour_name_unusable_as_an_address_is_rejected_with_feedback() -> None:
+    """behavior 名将来就是树地址：坏名字在这里打回让模型换说法，而不是封口后卡死归约。
+
+    空白类脏名（首尾空格、内嵌换行）由装配层的文本归一顺手清洗掉，不必烧重试；这里拒的是
+    清洗救不回来的：路径不安全字符、保留后缀、超出地址字节预算（含消歧后缀预留）。
+    """
+
+    for bad in ("a/b", "洗手.md", "洗" * 60):
+        raw = body()
+        raw["judgements"][0]["behavior"] = bad
+        with pytest.raises(BehaviorFusionError, match="tree address"):
+            assemble(raw)
+
+    cleansed = body()
+    cleansed["judgements"][0]["behavior"] = " 洗\n手"
+    assert assemble(cleansed).judgements[0].claim.behavior == "洗 手"

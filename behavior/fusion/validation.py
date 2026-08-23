@@ -8,6 +8,7 @@
       引用的片段编号必须落在本段范围内
       每个主体都必须在它覆盖的片段里出现过
       关系必须指向本批已声明的判断
+      同一主体、同一时刻开始的同名行为只能声明一条判断（同一件事被记了两遍）
 
     现实形状——违反了只说明现实不长我们想的那样，不该写成硬失败
       一帧只能属于一条判断        （并行时现实就是属于两边）
@@ -26,7 +27,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 
 from behavior.fusion.errors import BehaviorFusionError
-from behavior.fusion.judgement import BehaviorJudgementBatch
+from behavior.fusion.judgement import BehaviorJudgementBatch, JudgementRelation
 from behavior.observation import BehaviorObservation
 
 
@@ -49,6 +50,7 @@ def validate_judgement_batch(
 
     _require_known_fragments(batch, by_no)
     _require_subject_present(batch, by_no)
+    _require_one_judgement_per_start(batch, by_no)
     _require_ordering(batch)
 
 
@@ -88,11 +90,67 @@ def _require_subject_present(
             )
 
 
+def _require_one_judgement_per_start(
+    batch: BehaviorJudgementBatch, by_no: Mapping[int, BehaviorObservation]
+) -> None:
+    """同一主体、同一时刻开始的同名行为必须是同一条判断——判重只在这一层解决。
+
+    "同一时刻"取覆盖片段里最早的 ``occurred_at``，正是归约后行为树地址的 ``started_at``。
+    两条这样的判断各自声称自己就是那件事，却互不相认——这是产物的内部矛盾，不是现实的形状：
+    同一个人不可能在同一瞬间把同一件事**开始两次**，那只是同一件事被看了两遍。下游对此一律
+    不再判断（写入层的序号后缀只是防卡死的保命阀，预测树与语义层拿到什么算什么），所以重复
+    只能在这里、由模型合并掉。
+
+    延续/修正链上的两条不算矛盾：continues 归约时并成同一条 occurrence，supersedes 只留一条。
+    机械合并不做——挑谁的 goal/summary 存活是发明语义；抛错走反馈重试，让模型自己折叠。
+    """
+
+    linked: dict[int, set[int]] = {}
+    for item in batch.judgements:
+        for link in item.relations:
+            if link.target_no is None or link.kind not in (
+                JudgementRelation.CONTINUES,
+                JudgementRelation.SUPERSEDES,
+            ):
+                continue
+            linked.setdefault(item.judgement_no, set()).add(link.target_no)
+            linked.setdefault(link.target_no, set()).add(item.judgement_no)
+
+    component: dict[int, int] = {}
+    for item in batch.judgements:
+        if item.judgement_no in component:
+            continue
+        component[item.judgement_no] = item.judgement_no
+        stack = [item.judgement_no]
+        while stack:
+            for neighbour in linked.get(stack.pop(), ()):
+                if neighbour not in component:
+                    component[neighbour] = item.judgement_no
+                    stack.append(neighbour)
+
+    seen: dict[tuple[frozenset[str], str | None, object], int] = {}
+    for item in batch.judgements:
+        if not item.claim.is_readable:
+            continue
+        started_at = min(by_no[no].occurred_at for no in item.covers)
+        key = (frozenset(item.subjects), item.claim.behavior, started_at)
+        earlier = seen.get(key)
+        if earlier is None:
+            seen[key] = item.judgement_no
+        elif component[earlier] != component[item.judgement_no]:
+            raise BehaviorFusionError(
+                f"judgement[{item.judgement_no}] and judgement[{earlier}] both describe "
+                f"'{item.claim.behavior}' starting at the same moment: that is one behaviour "
+                f"seen twice — merge them into one judgement, or use supersedes if one "
+                f"corrects the other"
+            )
+
+
 def _require_ordering(batch: BehaviorJudgementBatch) -> None:
     """判断按最早覆盖片段排列；并行时"时间顺序"因此有确定含义。
 
     这是装配层的归约产物，在这里复核一次是纵深防御——顺序一旦错乱，下游按顺序做的任何归约
-    （提取结果、聚合成长期事件）都会跟着错。
+    （合并延续链、物化 occurrence）都会跟着错。
     """
 
     earliest = [item.earliest_fragment_no for item in batch.judgements]

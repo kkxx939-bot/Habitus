@@ -14,7 +14,7 @@ from benchmark.isolation import isolated_config, require_empty_directory
 from benchmark.metrics import latency_distribution
 from benchmark.model import BenchmarkDataset
 from benchmark.runner import BenchmarkRunError, conversation_batch
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from memory.conversation import ConversationAddress
 from pre.conversation import ConversationRangeSummaryStage
 from Runtime import Runtime, build_runtime
@@ -25,7 +25,7 @@ class LifecycleBenchmark:
 
     def __init__(
         self,
-        config: M2BOSConfig,
+        config: HabitusConfig,
         dataset: BenchmarkDataset,
         *,
         output_directory: str | Path,
@@ -34,7 +34,7 @@ class LifecycleBenchmark:
         max_cycles: int = 100,
         stage_source_count: int = 2,
     ) -> None:
-        if not isinstance(config, M2BOSConfig) or not isinstance(dataset, BenchmarkDataset):
+        if not isinstance(config, HabitusConfig) or not isinstance(dataset, BenchmarkDataset):
             raise TypeError("lifecycle benchmark requires config and dataset")
         if len(dataset.samples) != 1:
             raise ValueError("lifecycle benchmark requires exactly one selected sample")
@@ -135,7 +135,7 @@ class LifecycleBenchmark:
             after = _snapshot(runtime, address)
             after_bytes = _tree_bytes(runtime.config.storage_root)
             summary: dict[str, object] = {
-                "schema_version": "m2bos_lifecycle_benchmark_v1",
+                "schema_version": "habitus_lifecycle_benchmark_v1",
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "dataset": self.dataset.name.value,
                 "sample_id": self.sample.sample_id,
@@ -197,7 +197,7 @@ def _tree_bytes(root: Path) -> int:
     return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
 
 
-def _lifecycle_benchmark_config(config: M2BOSConfig, source_count: int) -> M2BOSConfig:
+def _lifecycle_benchmark_config(config: HabitusConfig, source_count: int) -> HabitusConfig:
     """缩短阶段门槛但保留同一生产执行器，使一次基准可覆盖 Range 与 Archive。"""
 
     compaction = config.conversation.lifecycle.summary_compaction

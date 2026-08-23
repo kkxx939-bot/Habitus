@@ -39,7 +39,7 @@ def candidate(
 ) -> MemoryRecallCandidate:
     fields = {
         MemoryKind.PREFERENCE: {"topic": f"回答风格-{suffix}", "content": "- 偏好简洁回答"},
-        MemoryKind.ENTITY: {"category": "项目", "name": f"m2bOS-{suffix}", "summary": "记忆系统。"},
+        MemoryKind.ENTITY: {"category": "项目", "name": f"Habitus-{suffix}", "summary": "记忆系统。"},
     }.get(kind)
     item = document(kind, fields=fields, revision=revision, timestamp=updated_at)
     return MemoryRecallCandidate(

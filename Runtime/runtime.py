@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
-from Config import M2BOSConfig
+from behavior.observation import BehaviorObservationEnvelope
+from Config import HabitusConfig
 from conversation import (
     ConversationSourceConsumer,
     ConversationSourceEnvelope,
@@ -57,6 +58,7 @@ from pre.conversation import (
     ConversationBatch,
     ConversationSegment,
 )
+from Runtime.behavior import deliver_observations as _deliver_behavior_observations
 from Runtime.components import RuntimeComponents
 from Runtime.consistency import MemoryConsistencyService, MemoryConsistencySnapshot
 from Runtime.health import RuntimeHealthReport, RuntimeHealthService
@@ -202,13 +204,13 @@ class Runtime:
 
     def __init__(
         self,
-        config: M2BOSConfig,
+        config: HabitusConfig,
         components: RuntimeComponents,
         *,
         conversation_adapters: ConversationAdapterRegistry | None = None,
     ) -> None:
-        if not isinstance(config, M2BOSConfig):
-            raise TypeError("config must be M2BOSConfig")
+        if not isinstance(config, HabitusConfig):
+            raise TypeError("config must be HabitusConfig")
         if not isinstance(components, RuntimeComponents):
             raise TypeError("components must be RuntimeComponents")
         if conversation_adapters is not None and not isinstance(
@@ -261,6 +263,13 @@ class Runtime:
             self.components.memory.lifecycle.initialize()
             self.components.conversation.summary_use.initialize()
             self.components.workflow.lifecycle.retirement_store.initialize()
+            if self.components.behavior is not None:
+                # 行为树静态目录 + 融合作业序号状态；均幂等，重复初始化零写入。
+                # 此处失败**允许**阻断整个 Runtime（对"行为失败不阻断"哲学的边界取舍）：
+                # 同一 storage root 下建不了目录，几乎必然意味着记忆侧同样不可用；
+                # 静默跳过反而会让 RUNNING 状态掩盖一个坏掉的存储根。
+                self.components.behavior.tree.initialize()
+                self.components.behavior.jobs.initialize()
             oldest_job = self.components.workflow.jobs.oldest_uncommitted()
             recovered = (
                 self.components.workflow.runner.transaction_recovery.recover_pending()
@@ -327,6 +336,20 @@ class Runtime:
                 finally:
                     await self.components.workflow.worker.stop()
                 raise
+            # 行为管线（可选启用）：启动失败不阻断 Runtime——沿既有"Behavior 失败不阻断"
+            # 哲学，失败经观测记录，行为侧下次启动自愈（存储都是耐久幂等的）。
+            if self.components.behavior is not None:
+                try:
+                    await self.components.behavior.fusion_worker.start()
+                    await self.components.behavior.reduction_worker.start()
+                except Exception as exc:  # noqa: BLE001 - 行为侧失败不阻断记忆主链
+                    self._observe(
+                        "runtime",
+                        "behavior_start",
+                        ObservationStatus.FAILURE,
+                        started,
+                        {"error_type": type(exc).__name__},
+                    )
             self._state = RuntimeState.RUNNING
         except BaseException as exc:
             self._observe(
@@ -354,6 +377,7 @@ class Runtime:
             raise RuntimeStateError("closing runtime cannot be stopped")
         if self._state is RuntimeState.CREATED:
             return
+        await self._stop_behavior_workers()
         try:
             await self.components.workflow.lifecycle_worker.stop()
         finally:
@@ -364,6 +388,42 @@ class Runtime:
             finally:
                 await self.components.workflow.worker.stop()
         self._state = RuntimeState.READY
+
+    async def deliver_behavior_observations(self, envelope: BehaviorObservationEnvelope) -> str:
+        """云侧行为 agent 的观测投递正门：入库并唤醒融合循环，返回交付身份。
+
+        投递按内容身份幂等（同一批观测同内容重复投递无害，同身份异内容 fail-closed）；
+        行为侧未启用（``behavior.primary_subject`` 未配置）时明确拒绝，而不是静默丢弃。
+        耐久落盘（双 fsync + 读回校验）下沉线程，与 Runtime 其余同步存储调用同一形态。
+        """
+
+        self._require_initialized("behavior observation delivery")
+        behavior = self.components.behavior
+        if behavior is None:
+            raise RuntimeStateError(
+                "behavior pipeline is not configured; set behavior.primary_subject"
+            )
+        return await asyncio.to_thread(_deliver_behavior_observations, behavior, envelope)
+
+    async def _stop_behavior_workers(self) -> None:
+        """停行为侧两个循环；失败不阻断记忆主链的停机（与启动侧同一哲学）。"""
+
+        behavior = self.components.behavior
+        if behavior is None:
+            return
+        try:
+            try:
+                await behavior.reduction_worker.stop()
+            finally:
+                await behavior.fusion_worker.stop()
+        except Exception as exc:  # noqa: BLE001 - 行为侧停机失败不阻断主链
+            self._observe(
+                "runtime",
+                "behavior_stop",
+                ObservationStatus.FAILURE,
+                time.monotonic(),
+                {"error_type": type(exc).__name__},
+            )
 
     async def run_next(self) -> MemoryJobRunResult:
         """只在初始化完成后委托领域 Runner 处理最早的一项 Job。"""
@@ -893,6 +953,9 @@ class Runtime:
         previous_state = self._state
         self._state = RuntimeState.CLOSING
         if previous_state is not RuntimeState.CREATED:
+            # 行为 Worker 与主链 Worker 对称停机：``async with`` 的退出走的是 close 不是
+            # stop——漏掉这里会让融合/归约循环带着已关闭的模型客户端继续跑（评审实测泄漏）。
+            await self._stop_behavior_workers()
             try:
                 await self.components.workflow.lifecycle_worker.stop()
             finally:

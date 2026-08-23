@@ -46,7 +46,7 @@ def build_openai_compatible_rerank_provider(
 
 
 def register_builtin_adapters(factory: ProviderFactory) -> None:
-    """注册 m2bOS 当前内置的协议适配器，不执行任何外部调用。"""
+    """注册 Habitus 当前内置的协议适配器，不执行任何外部调用。"""
 
     if not isinstance(factory, ProviderFactory):
         raise TypeError("factory must be a ProviderFactory")

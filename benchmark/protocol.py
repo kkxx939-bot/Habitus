@@ -28,7 +28,7 @@ def resolve_judge_policy(
 
     dataset_name = BenchmarkDatasetName(dataset)
     policy = BenchmarkJudgePolicy(requested)
-    if policy is BenchmarkJudgePolicy.OPENVIKING_DEFAULT and dataset_name is BenchmarkDatasetName.M2BOS:
+    if policy is BenchmarkJudgePolicy.OPENVIKING_DEFAULT and dataset_name is BenchmarkDatasetName.HABITUS:
         raise ValueError("openviking-default judge policy is only defined for LoCoMo and LongMemEval")
     if policy is not BenchmarkJudgePolicy.DATASET_DEFAULT:
         return policy

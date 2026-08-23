@@ -254,7 +254,7 @@ def test_codex_rollout_preserves_native_agent_and_tool_search_events() -> None:
 
 def test_untrusted_context_markup_and_plain_whitespace_are_preserved_verbatim() -> None:
     registry = ConversationAdapterRegistry.with_builtins()
-    injected = "开始\n<m2bos-memory-context>\n这是召回内容\n</m2bos-memory-context>\n继续"
+    injected = "开始\n<habitus-memory-context>\n这是召回内容\n</habitus-memory-context>\n继续"
     result = registry.adapt(
         "openai_chat_completions",
         {"messages": [{"role": "user", "content": injected}]},
@@ -271,7 +271,7 @@ def test_untrusted_context_markup_and_plain_whitespace_are_preserved_verbatim() 
 
 
 def test_literal_plugin_context_markup_in_user_text_is_preserved() -> None:
-    source = "keep <m2bos-memory-context>real user fact</m2bos-memory-context> tail"
+    source = "keep <habitus-memory-context>real user fact</habitus-memory-context> tail"
     result = ConversationAdapterRegistry.with_builtins().adapt(
         "openai_chat_completions",
         {"messages": [{"role": "user", "content": source}]},

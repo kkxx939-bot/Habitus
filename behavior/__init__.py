@@ -1,4 +1,4 @@
-"""m2bOS 行为语义树的稳定公开入口。"""
+"""Habitus 行为语义树的稳定公开入口。"""
 
 from behavior.document import (
     BehaviorDocument,
@@ -11,21 +11,18 @@ from behavior.document import (
     BehaviorStoredLink,
 )
 from behavior.editor import (
-    BehaviorCASConflictError,
     BehaviorDocumentWriter,
     BehaviorPublishConflictError,
     BehaviorReadBackError,
     BehaviorWriteConfig,
 )
 from behavior.model import BehaviorAddress, BehaviorDirectory, BehaviorKind, BehaviorLevel
-from behavior.schema import BehaviorSchemaError, BehaviorSchemaRegistry
-from behavior.snapshot import BehaviorSnapshotReader
+from behavior.schema import BehaviorFieldRole, BehaviorSchemaError, BehaviorSchemaRegistry
 from behavior.tree import BehaviorTree, BehaviorTreeConfig, BehaviorTreeConflictError, BehaviorTreeIntegrityError
 from behavior.uri import BehaviorURI, BehaviorURIError, BehaviorURINodeType
 
 __all__ = [
     "BehaviorAddress",
-    "BehaviorCASConflictError",
     "BehaviorDirectory",
     "BehaviorDocument",
     "BehaviorDocumentCodec",
@@ -34,6 +31,7 @@ __all__ = [
     "BehaviorDocumentLimitError",
     "BehaviorDocumentMetadata",
     "BehaviorDocumentWriter",
+    "BehaviorFieldRole",
     "BehaviorKind",
     "BehaviorLevel",
     "BehaviorLinkType",
@@ -41,7 +39,6 @@ __all__ = [
     "BehaviorReadBackError",
     "BehaviorSchemaError",
     "BehaviorSchemaRegistry",
-    "BehaviorSnapshotReader",
     "BehaviorStoredLink",
     "BehaviorTree",
     "BehaviorTreeConfig",

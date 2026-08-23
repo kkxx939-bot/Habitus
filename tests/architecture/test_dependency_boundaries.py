@@ -19,6 +19,10 @@ PRODUCTION_ROOTS = (
     "foundation",
 )
 RETIRED_NAMES = (
+    "BehaviorSnapshotReader",
+    "BehaviorCASConflictError",
+    "BehaviorMergeStrategy",
+    "append_outcomes",
     "EvidenceSlice",
     "MemoryEditSource",
     "MemoryEditBatch",
@@ -145,14 +149,20 @@ def test_memory_schema_contains_exactly_the_six_confirmed_l2_kinds() -> None:
 def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
     behavior_root = REPOSITORY_ROOT / "behavior"
     assert behavior_root.is_dir()
-    assert not (REPOSITORY_ROOT / "Config" / "behavior.py").exists()
+    # Config/behavior.py 曾随旧第一层设计退役；BHV-RUNTIME-001 以**纯标量配置组**的身份重建
+    # 它。守卫从"不得存在"改为口径检查：它不得 import behavior——上下文窗口等数值默认的唯一
+    # 出处仍在 behavior/fusion/config.py，由组合根解析注入，配置层只有标量。
+    assert "behavior" not in imported_roots(REPOSITORY_ROOT / "Config" / "behavior.py")
     assert not (REPOSITORY_ROOT / "infrastructure" / "store" / "processing_lock.py").exists()
 
+    # BHV-RUNTIME-001 接线后，**只有 Runtime**（组合根，跨域组装的唯一合法位置，与 memory
+    # 同理）允许 import behavior；其余包对 behavior 的反向依赖仍然禁止——Config 也不例外
+    # （BehaviorConfig 是纯标量组，不 import behavior，上下文窗口默认值仍由组合根从
+    # behavior/fusion/config.py 的唯一出处解析）。
     reverse_dependency_violations = [
         str(path.relative_to(REPOSITORY_ROOT))
         for path in production_files()
-        if path.relative_to(REPOSITORY_ROOT).parts[0] != "behavior"
-        and path.relative_to(REPOSITORY_ROOT).parts[:2] != ("prediction", "projection")
+        if path.relative_to(REPOSITORY_ROOT).parts[0] not in {"behavior", "Runtime"}
         and "behavior" in imported_roots(path)
     ]
     assert reverse_dependency_violations == []
@@ -175,13 +185,19 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
     ]
     assert behavior_dependency_violations == []
 
-    # 但模型调用必须收敛在融合一层，不得渗进存储、派生或写入路径。
+    # 模型调用收敛在两处受控触点：融合判断（语义生成）与 kinds 归一（身份归属——
+    # 写入层唯一的 LLM 触点，只对齐名字不发明判断，见 TODO(BHV-TREE-REBUILD-001)）。
+    # 存储、派生与落盘路径仍不得渗入。
     model_callers = sorted(
         str(path.relative_to(REPOSITORY_ROOT))
         for path in behavior_root.rglob("*.py")
         if "ModelClient" in imported_roots(path)
     )
-    assert model_callers == ["behavior/fusion/service.py"]
+    assert model_callers == [
+        "behavior/fusion/service.py",
+        "behavior/kinds/resolver.py",
+        "behavior/semantic/generator.py",
+    ]
 
     # 直接依赖收敛了还不够：只查一跳的话，``derivation → result → service → ModelClient``
     # 这样的两跳链会完整通过（已用变异测试证伪过一次）。所以这里算**传递闭包**，并且对
@@ -269,7 +285,76 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
     assert storage_violations == []
 
 
-def test_prediction_tree_has_one_explicit_behavior_projection_package() -> None:
+def test_reduction_modules_reach_the_model_only_through_the_runner() -> None:
+    """归约层唯一的 LLM 触点是 runner 里的 kinds 归一；纯函数模块连传递依赖都不许有。
+
+    与融合层同一形状的传递闭包守卫：只查一跳会放过 ``chains → runner → resolver →
+    ModelClient`` 这类多跳链；闭包图必须跨到 kinds 与 fusion，否则经它们中转的泄漏不可见。
+    """
+
+    behavior_root = REPOSITORY_ROOT / "behavior"
+    graph: dict[str, Path] = {}
+    # 图必须纳入 semantic：runner → semantic.refresher → semantic.generator → ModelClient
+    # 是真实两跳链，图外的中转会让泄漏不可见（"判断存储就是这么漏掉的"的同构盲区）。
+    for package in ("reduction", "kinds", "fusion", "semantic"):
+        package_root = behavior_root / package
+        for path in package_root.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            module = (
+                f"behavior.{package}."
+                f"{path.relative_to(package_root).with_suffix('').as_posix().replace('/', '.')}"
+            ).removesuffix(".__init__")
+            graph[module] = path
+
+    def reaches_model_client(module: str, seen: set[str]) -> bool:
+        if module in seen:
+            return False
+        seen.add(module)
+        path = graph.get(module)
+        if path is None:
+            return False
+        imported = imported_modules(path)
+        if any(name == "ModelClient" or name.startswith("ModelClient.") for name in imported):
+            return True
+        return any(
+            reaches_model_client(name, seen) for name in imported if name in graph
+        )
+
+    allowed = {"behavior.reduction", "behavior.reduction.runner"}
+    leaking = sorted(
+        module
+        for module in graph
+        if module.startswith("behavior.reduction")
+        and module not in allowed
+        and reaches_model_client(module, set())
+    )
+    assert leaking == [], f"这些归约确定性模块传递性地依赖了 ModelClient: {leaking}"
+
+    # semantic 包自身的确定性模块（model/config/refresher 的纯逻辑面）同样不许直接碰模型；
+    # refresher 经 generator 协议触达是设计路径，generator 与包 __init__ 是仅有的白名单。
+    semantic_allowed = {
+        "behavior.semantic",
+        "behavior.semantic.generator",
+        "behavior.semantic.refresher",
+    }
+    semantic_leaking = sorted(
+        module
+        for module in graph
+        if module.startswith("behavior.semantic")
+        and module not in semantic_allowed
+        and reaches_model_client(module, set())
+    )
+    assert semantic_leaking == [], f"这些语义层确定性模块传递性地依赖了 ModelClient: {semantic_leaking}"
+
+
+def test_prediction_tree_does_not_depend_on_behavior_yet() -> None:
+    """旧 Behavior→Prediction 投影包随行为树重建整体退役（TODO(BHV-TREE-REBUILD-001)）。
+
+    新的时间预测树落地前，prediction 不得依赖 behavior；届时唯一的读取入口再以显式包恢复，
+    并恢复"只有该包可 import behavior"的边界断言。
+    """
+
     prediction_root = REPOSITORY_ROOT / "prediction"
     assert prediction_root.is_dir()
 
@@ -278,17 +363,7 @@ def test_prediction_tree_has_one_explicit_behavior_projection_package() -> None:
         for path in prediction_root.rglob("*.py")
         if "behavior" in imported_roots(path)
     }
-    outside_projection = {path for path in behavior_importers if path.parent != Path("prediction/projection")}
-    assert outside_projection == set()
-    assert Path("prediction/projection/_behavior_source.py") in behavior_importers
-    assert Path("prediction/projection/behavior.py") in behavior_importers
-
-    projection_importers = [
-        path.relative_to(REPOSITORY_ROOT)
-        for path in prediction_root.rglob("*.py")
-        if path.parent != prediction_root / "projection" and "prediction.projection" in imported_modules(path)
-    ]
-    assert projection_importers == []
+    assert behavior_importers == set()
 
     forbidden_prediction_dependencies = {
         "Config",

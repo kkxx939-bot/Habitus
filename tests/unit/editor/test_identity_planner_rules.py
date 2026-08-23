@@ -262,7 +262,7 @@ def test_replace_fields_remove_absent_optional_values_while_patch_fields_preserv
         MemoryKind.ENTITY,
         fields={
             "category": "项目",
-            "name": "m2bOS",
+            "name": "Habitus",
             "summary": "一个记忆系统。",
             "details": "## 状态\n- 正在重构",
         },
@@ -270,7 +270,7 @@ def test_replace_fields_remove_absent_optional_values_while_patch_fields_preserv
     entity_candidate = MemoryCandidate(
         1,
         MemoryKind.ENTITY,
-        {"category": "项目", "name": "m2bOS", "summary": "一个长期记忆系统。"},
+        {"category": "项目", "name": "Habitus", "summary": "一个长期记忆系统。"},
     )
     entity_match = MemoryNodeMatch(
         entity_candidate,

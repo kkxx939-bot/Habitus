@@ -10,7 +10,7 @@ from pathlib import Path
 
 import yaml
 
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from infrastructure.store.contracts import PathLock
 from infrastructure.store.locks import ProcessLocalLockStore
 from infrastructure.vector import VectorStoreFactory, VectorStoreMatch, VectorStoreState
@@ -36,7 +36,7 @@ from tests.model_helpers import prepare_chat_request
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
-def runtime_config(tmp_path: Path, *, max_attempts: int = 3) -> M2BOSConfig:
+def runtime_config(tmp_path: Path, *, max_attempts: int = 3) -> HabitusConfig:
     payload = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
     payload["models"]["chat"]["route"].update(
@@ -65,7 +65,7 @@ def runtime_config(tmp_path: Path, *, max_attempts: int = 3) -> M2BOSConfig:
         credential_ref="",
     )
     payload["workflow"]["jobs"]["max_attempts"] = max_attempts
-    return M2BOSConfig.from_mapping(payload)
+    return HabitusConfig.from_mapping(payload)
 
 
 @dataclass

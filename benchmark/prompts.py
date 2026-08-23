@@ -7,7 +7,7 @@ from benchmark.protocol import BenchmarkJudgePolicy
 
 
 def answer_prompt(dataset: str | BenchmarkDatasetName, question: BenchmarkQuestion, context: str) -> str:
-    """按数据集语义构造回答提示词，同时保持 m2bOS 上下文来源不变。"""
+    """按数据集语义构造回答提示词，同时保持 Habitus 上下文来源不变。"""
 
     dataset_name = BenchmarkDatasetName(dataset)
     reference_time = question.question_time.date().isoformat() if question.question_time else "unknown"
@@ -41,8 +41,8 @@ def judge_prompt(
 
     if not isinstance(policy, BenchmarkJudgePolicy):
         policy = BenchmarkJudgePolicy(policy)
-    if policy is BenchmarkJudgePolicy.OPENVIKING_DEFAULT and record.dataset == BenchmarkDatasetName.M2BOS.value:
-        raise ValueError("openviking-default judge policy is not defined for the m2bOS native dataset")
+    if policy is BenchmarkJudgePolicy.OPENVIKING_DEFAULT and record.dataset == BenchmarkDatasetName.HABITUS.value:
+        raise ValueError("openviking-default judge policy is not defined for the Habitus native dataset")
     reference_answer = _reference_answer(record)
     evidence = ""
     if evidence_texts:

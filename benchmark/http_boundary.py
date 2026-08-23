@@ -1,4 +1,4 @@
-"""从外部 HTTP 调用方视角测量 m2bOS 远程服务边界。"""
+"""从外部 HTTP 调用方视角测量 Habitus 远程服务边界。"""
 
 from __future__ import annotations
 
@@ -166,7 +166,7 @@ class HTTPBoundaryBenchmark:
 async def _require_ready(client: httpx.AsyncClient) -> None:
     response = await client.get("/ready")
     if response.status_code != 200:
-        raise RuntimeError(f"m2bOS HTTP readiness returned {response.status_code}")
+        raise RuntimeError(f"Habitus HTTP readiness returned {response.status_code}")
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -448,7 +448,7 @@ def _point(
     queue_depths = [_number(item.get("depth"), "HTTP queue depth") for item in successful_queue_samples]
     queue_ages = [_number(item.get("oldest_age_seconds"), "HTTP queue age") for item in successful_queue_samples]
     return {
-        "schema_version": "m2bos_boundary_point_v1",
+        "schema_version": "habitus_boundary_point_v1",
         "lane": "http",
         "scenario": "recall" if write_fraction == 0 else "mixed",
         "scale_name": "server_existing_state",
@@ -547,7 +547,7 @@ def _success_result(response: httpx.Response) -> Mapping[str, object]:
     response.raise_for_status()
     value = response.json()
     if not isinstance(value, Mapping) or not isinstance(value.get("result"), Mapping):
-        raise ValueError("m2bOS HTTP success response has an invalid envelope")
+        raise ValueError("Habitus HTTP success response has an invalid envelope")
     return value["result"]
 
 

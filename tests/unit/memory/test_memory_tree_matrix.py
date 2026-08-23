@@ -18,7 +18,7 @@ from tests.helpers import BASE_TIME, codec, document, memory_fields
 ADDRESSES = (
     MemoryAddress.profile(),
     MemoryAddress.preference("回答风格"),
-    MemoryAddress.entity("项目", "m2bOS"),
+    MemoryAddress.entity("项目", "Habitus"),
     MemoryAddress.tool("workspace.inspect"),
     MemoryAddress.event(date(2026, 7, 28), "确认方案"),
     MemoryAddress.intention("完成重构"),
@@ -70,7 +70,7 @@ def test_tree_constructor_rejects_symbolic_link_root(tmp_path: Path) -> None:
     [
         (MemoryAddress.profile(), "profile.md"),
         (MemoryAddress.preference("回答风格"), "preferences/回答风格.md"),
-        (MemoryAddress.entity("项目", "m2bOS"), "entities/项目/m2bos.md"),
+        (MemoryAddress.entity("项目", "Habitus"), "entities/项目/habitus.md"),
         (MemoryAddress.tool("workspace.inspect"), "tools/workspace.inspect.md"),
         (MemoryAddress.event(date(1, 1, 1), "开始"), "events/0001/01/01/开始.md"),
         (MemoryAddress.event(date(9999, 12, 31), "结束"), "events/9999/12/31/结束.md"),

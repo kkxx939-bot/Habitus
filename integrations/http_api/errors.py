@@ -1,4 +1,4 @@
-"""把 m2bOS 边界异常转换为稳定、可观测且不泄密的 HTTP 契约。"""
+"""把 Habitus 边界异常转换为稳定、可观测且不泄密的 HTTP 契约。"""
 
 from __future__ import annotations
 
@@ -215,7 +215,7 @@ def _wrapped_dependency_spec(exc: BaseException) -> HTTPErrorSpec | None:
 
 
 def map_exception(exc: Exception) -> HTTPErrorSpec:
-    """只按 m2bOS 的真实异常类型映射，不根据错误文本猜测业务语义。"""
+    """只按 Habitus 的真实异常类型映射，不根据错误文本猜测业务语义。"""
 
     if isinstance(exc, HTTPMemoryJobNotFoundError):
         return HTTPErrorSpec(HTTPErrorCode.NOT_FOUND, str(exc), False)
@@ -331,7 +331,7 @@ def documented_error_responses(
     return {
         status_code: {
             "model": ErrorResponse,
-            "description": f"m2bOS error: {', '.join(sorted(codes))}",
+            "description": f"Habitus error: {', '.join(sorted(codes))}",
             "headers": {
                 "X-Request-ID": {
                     "description": "Request correlation identity",

@@ -86,7 +86,7 @@ async function stageMarketplace(root, sourceRoot, registry) {
       );
     }
     await writeFile(
-      join(staging, ".m2bos-install.json"),
+      join(staging, ".habitus-install.json"),
       `${JSON.stringify({
         schemaVersion: INSTALL_SCHEMA,
         marketplace: MARKETPLACE_NAME,
@@ -270,7 +270,7 @@ function selectedHarnesses(values, registry) {
 
 async function marketplaceStatus(root) {
   try {
-    const marker = JSON.parse(await readFile(join(root, ".m2bos-install.json"), "utf8"));
+    const marker = JSON.parse(await readFile(join(root, ".habitus-install.json"), "utf8"));
     if (marker.schemaVersion !== INSTALL_SCHEMA || marker.marketplace !== MARKETPLACE_NAME) throw new Error("invalid marker");
     return { prepared: true, sourceDigest: marker.sourceDigest, preparedAt: marker.preparedAt };
   } catch (error) {
@@ -395,7 +395,7 @@ export function parseArgs(argv) {
   const options = {
     action,
     harnesses: [],
-    root: join(homedir(), ".m2bos", "plugin-marketplace"),
+    root: join(homedir(), ".habitus", "plugin-marketplace"),
     prepareOnly: false,
     json: false,
   };
@@ -428,7 +428,7 @@ if (await isMainModule()) {
     const options = parseArgs(process.argv.slice(2));
     if (options.help) {
       process.stdout.write(
-        "usage: m2bos-plugin [install|status|update|remove|harnesses] "
+        "usage: habitus-plugin [install|status|update|remove|harnesses] "
         + "[--harness ID|--host ID] [--root PATH] [--prepare-only] [--json]\n",
       );
       process.exitCode = 0;
@@ -437,10 +437,10 @@ if (await isMainModule()) {
     if (options.json || ["status", "harnesses"].includes(options.action)) {
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     }
-    else process.stdout.write(`m2bOS plugin ${options.action} completed at ${result.root}\n`);
+    else process.stdout.write(`Habitus plugin ${options.action} completed at ${result.root}\n`);
     }
   } catch (error) {
-    process.stderr.write(`m2bOS plugin lifecycle failed: ${error?.message || error}\n`);
+    process.stderr.write(`Habitus plugin lifecycle failed: ${error?.message || error}\n`);
     process.exitCode = 1;
   }
 }

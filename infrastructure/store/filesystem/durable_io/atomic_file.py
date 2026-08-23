@@ -311,7 +311,7 @@ def ensure_real_directory(path: Path, *, artifact_root: str | Path) -> None:
     """以逐级目录描述符创建并确认一个可信根内目录。"""
 
     candidate = require_safe_artifact_path(artifact_root, path, label="durable directory")
-    descriptor = _open_control_parent(candidate / ".m2bos-directory-anchor", artifact_root)
+    descriptor = _open_control_parent(candidate / ".habitus-directory-anchor", artifact_root)
     os.close(descriptor)
 
 

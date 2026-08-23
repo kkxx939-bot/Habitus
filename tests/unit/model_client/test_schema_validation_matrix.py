@@ -200,9 +200,9 @@ def test_fallback_rejects_external_unresolved_or_non_object_refs(
 @pytest.mark.parametrize(
     "value",
     [
-        {"name": "m2bOS"},
-        {"name": "m2bOS", "count": 1},
-        {"name": "m2bOS", "labels": {"stable": True}},
+        {"name": "Habitus"},
+        {"name": "Habitus", "count": 1},
+        {"name": "Habitus", "labels": {"stable": True}},
     ],
 )
 def test_fallback_accepts_object_properties_and_typed_additional_properties(

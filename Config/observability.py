@@ -18,7 +18,7 @@ class ObservabilityMetricsConfig:
     """无外部依赖的进程内指标边界。"""
 
     enabled: bool = True
-    namespace: str = "m2bos"
+    namespace: str = "habitus"
     max_recent_events: int = 512
     duration_buckets_seconds: tuple[float, ...] = (
         0.005,
@@ -92,7 +92,7 @@ class ObservabilityTracingConfig:
     enabled: bool = False
     endpoint: str = "http://127.0.0.1:4318"
     protocol: str = "http"
-    service_name: str = "m2bos"
+    service_name: str = "habitus"
     insecure: bool = True
     credential_ref: str = ""
     export_interval_seconds: float = 10.0

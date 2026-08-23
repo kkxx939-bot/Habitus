@@ -9,7 +9,7 @@ import { sessionKey, withSessionLock } from "../lib/state-store.mjs";
 test(
   "a live session lock cannot be stolen solely because its mtime is old",
   async (t) => {
-    const root = await mkdtemp(join(tmpdir(), "m2bos-plugin-lock-test-"));
+    const root = await mkdtemp(join(tmpdir(), "habitus-plugin-lock-test-"));
     t.after(() => rm(root, { recursive: true, force: true }));
     let active = 0;
     let maximumActive = 0;
@@ -56,7 +56,7 @@ test(
 );
 
 test("a stale lock is recoverable when its pid was reused by another process", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "m2bos-plugin-lock-reuse-test-"));
+  const root = await mkdtemp(join(tmpdir(), "habitus-plugin-lock-reuse-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const directory = join(root, "sessions", "test-host");
   const lock = join(directory, `${sessionKey("test-host", "session")}.lock`);

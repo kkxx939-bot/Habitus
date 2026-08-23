@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 def create_app_from_env(*, environ: Mapping[str, str] | None = None):  # noqa: ANN201
     """从唯一配置构造应用，并执行与命令入口相同的启动预检。"""
 
-    from Config import M2BOSConfig
+    from Config import HabitusConfig
     from infrastructure.observability import configure_json_logging
     from integrations.http_api.app import create_http_app
     from integrations.local_service.doctor import run_startup_preflight
@@ -17,7 +17,7 @@ def create_app_from_env(*, environ: Mapping[str, str] | None = None):  # noqa: A
     from Runtime import build_runtime
 
     values = os.environ if environ is None else environ
-    config = M2BOSConfig.from_env(environ=values)
+    config = HabitusConfig.from_env(environ=values)
     if config.observability.logging.enabled:
         configure_json_logging(level=config.observability.logging.level)
     run_startup_preflight(config, environ=values)

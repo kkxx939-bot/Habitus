@@ -13,7 +13,7 @@ from pathlib import Path
 from benchmark.isolation import isolated_config, require_empty_directory
 from benchmark.model import BenchmarkDataset
 from benchmark.runner import BenchmarkRunError, conversation_batch
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from infrastructure.vector import (
     VectorStore,
     VectorStoreBusyError,
@@ -137,13 +137,13 @@ class RecoveryBenchmark:
 
     def __init__(
         self,
-        config: M2BOSConfig,
+        config: HabitusConfig,
         dataset: BenchmarkDataset,
         *,
         output_directory: str | Path,
         work_directory: str | Path,
     ) -> None:
-        if not isinstance(config, M2BOSConfig) or not isinstance(dataset, BenchmarkDataset):
+        if not isinstance(config, HabitusConfig) or not isinstance(dataset, BenchmarkDataset):
             raise TypeError("recovery benchmark requires config and dataset")
         if len(dataset.samples) != 1:
             raise ValueError("recovery benchmark requires exactly one selected sample")
@@ -209,7 +209,7 @@ class RecoveryBenchmark:
                 raise BenchmarkRunError("recovered vector checkpoint does not match the MemoryJob sequence")
             elapsed_ms = (time.perf_counter() - started) * 1_000
             summary: dict[str, object] = {
-                "schema_version": "m2bos_recovery_benchmark_v1",
+                "schema_version": "habitus_recovery_benchmark_v1",
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "dataset": self.dataset.name.value,
                 "sample_id": self.sample.sample_id,

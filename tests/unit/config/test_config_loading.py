@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from Config import ConfigError, M2BOSConfig
+from Config import ConfigError, HabitusConfig
 from Config.loader import load_config_object, required_field, strict_fields, strict_object
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -20,7 +20,7 @@ def valid_mapping(tmp_path: Path) -> dict[str, object]:
 
 
 def test_example_yaml_declares_a_complete_cross_domain_configuration(tmp_path) -> None:
-    config = M2BOSConfig.from_mapping(valid_mapping(tmp_path))
+    config = HabitusConfig.from_mapping(valid_mapping(tmp_path))
     assert config.storage_root == (tmp_path / "data").resolve()
     assert config.memory_root == config.storage_root / "memory"
     assert config.conversation_root == config.storage_root / "conversation"
@@ -40,14 +40,14 @@ def test_example_yaml_declares_a_complete_cross_domain_configuration(tmp_path) -
 
 def test_from_file_and_from_env_use_only_the_single_yaml_entrypoint(tmp_path) -> None:
     payload = valid_mapping(tmp_path)
-    path = tmp_path / "m2bos.yaml"
+    path = tmp_path / "habitus.yaml"
     path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
-    direct = M2BOSConfig.from_file(path)
-    from_env = M2BOSConfig.from_env(environ={"M2BOS_CONFIG_FILE": str(path)})
+    direct = HabitusConfig.from_file(path)
+    from_env = HabitusConfig.from_env(environ={"HABITUS_CONFIG_FILE": str(path)})
     assert from_env == direct
     with pytest.raises(ConfigError, match="missing"):
-        M2BOSConfig.from_env(environ={})
+        HabitusConfig.from_env(environ={})
 
 
 def test_named_credentials_support_multiple_vendors_without_leaking_repr(tmp_path) -> None:
@@ -58,7 +58,7 @@ def test_named_credentials_support_multiple_vendors_without_leaking_repr(tmp_pat
     payload["credentials"]["vikingdb"]["access_key"] = "viking-access"
     payload["credentials"]["vikingdb"]["secret_key"] = "viking-secret"
 
-    config = M2BOSConfig.from_mapping(payload)
+    config = HabitusConfig.from_mapping(payload)
 
     assert config.models.chat.route.credential_ref == "deepseek"
     assert config.models.embedding.route.credential_ref == "ark"
@@ -76,33 +76,33 @@ def test_named_credentials_support_multiple_vendors_without_leaking_repr(tmp_pat
 def test_secret_bearing_yaml_requires_private_file_permissions(tmp_path) -> None:
     payload = valid_mapping(tmp_path)
     payload["credentials"]["deepseek"]["api_key"] = "private-secret"
-    path = tmp_path / "m2bos.yaml"
+    path = tmp_path / "habitus.yaml"
     path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
     path.chmod(0o644)
 
     with pytest.raises(ConfigError, match="group or other"):
-        M2BOSConfig.from_file(path)
+        HabitusConfig.from_file(path)
 
     path.chmod(0o600)
-    assert M2BOSConfig.from_file(path).credentials.resolve("deepseek")["api_key"] == "private-secret"
+    assert HabitusConfig.from_file(path).credentials.resolve("deepseek")["api_key"] == "private-secret"
 
 
 def test_credential_registry_rejects_missing_references_and_unsafe_values_without_owning_adapter_fields(tmp_path) -> None:
     payload = valid_mapping(tmp_path)
     payload["models"]["chat"]["route"]["credential_ref"] = "missing-provider"
     with pytest.raises(ConfigError, match="does not exist"):
-        M2BOSConfig.from_mapping(payload)
+        HabitusConfig.from_mapping(payload)
 
     payload = valid_mapping(tmp_path)
     payload["credentials"]["deepseek"].pop("api_key")
     payload["credentials"]["deepseek"]["token"] = "secret"
-    config = M2BOSConfig.from_mapping(payload)
+    config = HabitusConfig.from_mapping(payload)
     assert dict(config.credentials.resolve("deepseek")) == {"token": "secret"}
 
     payload = valid_mapping(tmp_path)
     payload["credentials"]["deepseek"]["api_key"] = " secret "
     with pytest.raises(ValueError, match="surrounding whitespace"):
-        M2BOSConfig.from_mapping(payload)
+        HabitusConfig.from_mapping(payload)
 
 
 def test_yaml_loader_rejects_duplicate_keys_unknown_fields_and_typo_with_suggestion(tmp_path) -> None:
@@ -114,15 +114,26 @@ def test_yaml_loader_rejects_duplicate_keys_unknown_fields_and_typo_with_suggest
     payload = valid_mapping(tmp_path)
     payload["memroy"] = payload.pop("memory")
     with pytest.raises(ConfigError, match="did you mean 'config.memory'"):
-        M2BOSConfig.from_mapping(payload)
+        HabitusConfig.from_mapping(payload)
 
 
-def test_retired_behavior_yaml_group_is_rejected_as_unknown(tmp_path) -> None:
+def test_behavior_group_is_optional_and_disabled_until_a_subject_is_named(tmp_path) -> None:
+    """behavior 组随 BHV-RUNTIME-001 回归为纯标量配置：缺省=行为侧未启用（上游感知未接入的
+    合法状态），填入 primary_subject 才启用；未知字段照旧拒绝。"""
+
     payload = valid_mapping(tmp_path)
-    payload["behavior"] = {}
+    config = HabitusConfig.from_mapping(payload)
+    assert config.behavior.enabled is False
 
-    with pytest.raises(ConfigError, match=r"unknown config field 'config\.behavior'"):
-        M2BOSConfig.from_mapping(payload)
+    payload["behavior"] = {"primary_subject": "家庭成员A", "reduction_sweep_interval_seconds": 300}
+    enabled = HabitusConfig.from_mapping(payload)
+    assert enabled.behavior.enabled is True
+    assert enabled.behavior.primary_subject == "家庭成员A"
+    assert enabled.behavior_root == enabled.storage_root / "behavior"
+
+    payload["behavior"] = {"unknown_knob": 1}
+    with pytest.raises(ConfigError, match="unknown config field"):
+        HabitusConfig.from_mapping(payload)
 
 
 def test_yaml_parse_errors_never_echo_secret_source_lines(tmp_path) -> None:
@@ -221,7 +232,7 @@ def test_cross_domain_capacity_mismatches_fail_before_runtime_assembly(tmp_path,
     payload = deepcopy(valid_mapping(tmp_path))
     mutator(payload)
     with pytest.raises(ConfigError, match=message):
-        M2BOSConfig.from_mapping(payload)
+        HabitusConfig.from_mapping(payload)
 
 
 def test_rerank_limits_are_checked_only_when_a_real_route_is_configured(tmp_path) -> None:
@@ -239,4 +250,27 @@ def test_rerank_limits_are_checked_only_when_a_real_route_is_configured(tmp_path
         "max_document_chars": 16000,
     }
     with pytest.raises(ConfigError, match="max_rerank_candidates"):
-        M2BOSConfig.from_mapping(payload)
+        HabitusConfig.from_mapping(payload)
+
+
+def test_behavior_config_enforces_its_scalar_bounds() -> None:
+    """行为组的手写边界校验逐条钉死：bool 拒收、上下界、5 分钟默认值（用户裁定的落点）。"""
+
+    from Config.behavior import BehaviorConfig
+
+    assert BehaviorConfig().reduction_sweep_interval_seconds == 300.0  # 用户裁定的 5 分钟
+    assert BehaviorConfig().context_lookback_seconds is None  # 不复制唯一出处的数值
+
+    for kwargs, match in (
+        ({"context_limit": 0}, "context_limit"),
+        ({"context_limit": True}, "context_limit"),
+        ({"context_lookback_seconds": 59}, "context_lookback_seconds"),
+        ({"context_lookback_seconds": 90_000}, "context_lookback_seconds"),
+        ({"fusion_poll_interval_seconds": 0.5}, "fusion_poll_interval_seconds"),
+        ({"reduction_sweep_interval_seconds": 0.5}, "reduction_sweep_interval_seconds"),
+        ({"worker_shutdown_timeout_seconds": 0}, "worker_shutdown_timeout_seconds"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            BehaviorConfig(**kwargs)
+    with pytest.raises(TypeError):
+        BehaviorConfig(primary_subject=123)  # type: ignore[arg-type]

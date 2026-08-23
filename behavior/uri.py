@@ -7,6 +7,7 @@ from enum import Enum
 from urllib.parse import unquote
 
 from behavior.model import (
+    KINDS_REGISTRY_FILENAME,
     BehaviorAddress,
     BehaviorDirectory,
     BehaviorLevel,
@@ -27,6 +28,9 @@ class BehaviorURINodeType(str, Enum):
     DIRECTORY = "directory"
     DOCUMENT = "document"
     LAYER = "layer"
+    # 树根的单文件词表（behavior://kinds.md）：不是 L2 文档（自有格式与 CAS），是地址空间里
+    # 唯一的登记表节点，性质同 memory 树 profile.md 单文件直读。
+    REGISTRY = "registry"
 
 
 class BehaviorURI:
@@ -94,6 +98,12 @@ class BehaviorURI:
             raise TypeError("directory must be a BehaviorDirectory")
         normalized = BehaviorLevel(level)
         return cls._from_segments((*directory.identity_parts, normalized.sidecar_filename))
+
+    @classmethod
+    def kinds(cls) -> BehaviorURI:
+        """树根单文件词表的 URI（behavior://kinds.md）。"""
+
+        return cls._from_segments((KINDS_REGISTRY_FILENAME,))
 
     @classmethod
     def build(cls, *path_parts: str) -> BehaviorURI:
@@ -164,6 +174,8 @@ class BehaviorURI:
         if self._node_type is BehaviorURINodeType.DOCUMENT:
             assert self._address is not None
             return BehaviorDirectory.for_address(self._address)
+        if self._node_type is BehaviorURINodeType.REGISTRY:
+            return BehaviorDirectory.root()
         assert self._directory is not None
         return self._directory
 
@@ -218,6 +230,8 @@ class BehaviorURI:
 def _classify(
     segments: tuple[str, ...],
 ) -> tuple[BehaviorURINodeType, BehaviorAddress | None, BehaviorDirectory | None, BehaviorLevel | None]:
+    if segments == (KINDS_REGISTRY_FILENAME,):
+        return BehaviorURINodeType.REGISTRY, None, None, None
     directory = _directory(segments)
     if directory is not None:
         return BehaviorURINodeType.DIRECTORY, None, directory, None
@@ -244,6 +258,8 @@ def _canonical_segments(
     if node_type is BehaviorURINodeType.LAYER:
         assert directory is not None and level is not None
         return (*directory.identity_parts, level.sidecar_filename)
+    if node_type is BehaviorURINodeType.REGISTRY:
+        return (KINDS_REGISTRY_FILENAME,)
     assert address is not None
     return _address_segments(address)
 

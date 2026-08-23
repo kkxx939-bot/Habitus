@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from integrations.local_service import adapter_catalog as catalog_module
 from integrations.local_service.adapter_catalog import (
     build_adapter_catalog,
@@ -86,7 +86,7 @@ def test_one_adapter_package_registration_is_shared_by_setup_doctor_and_runtime(
     payload["credentials"]["ark"]["api_key"] = "embedding-secret"
     payload["credentials"]["vikingdb"]["access_key"] = "vector-access"
     payload["credentials"]["vikingdb"]["secret_key"] = "vector-secret"
-    config = M2BOSConfig.from_mapping(payload)
+    config = HabitusConfig.from_mapping(payload)
 
     catalog.validate(config)
     report = run_doctor(config, check_port=False, catalog=catalog)
@@ -124,7 +124,7 @@ def test_installed_adapter_entry_points_are_discovered_only_once_per_process(
 
     class EntryPoints(tuple):
         def select(self, *, group: str):
-            assert group == "m2bos.adapter_packages"
+            assert group == "habitus.adapter_packages"
             return self
 
     load_adapter_catalog.cache_clear()

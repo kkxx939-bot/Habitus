@@ -1,4 +1,4 @@
-# m2bOS Memory Benchmark
+# Habitus Memory Benchmark
 
 这是项目一级目录中的数据集驱动长期记忆基准，不是 pytest 测试集。
 
@@ -7,12 +7,12 @@
 - 本轮边界方法对照版本：本地 OpenViking `291e9c580ffb71c3a17304fd0ebf175a144118c3`。
 - 公开 QA 默认使用 Top-10 和 4000 字符回答内容预算；超预算时整块跳过 Memory、关系节点或 Summary，不截断正文。
 - LoCoMo、LongMemEval 使用各自的回答语义规则；Judge 默认复现 OpenViking 的宽松口径，也可显式切换严格口径。
-- m2bOS 原生数据默认使用严格 Judge，因为 OpenViking 没有六类树、关系迁移、Summary fallback 等对应金标准。
+- Habitus 原生数据默认使用严格 Judge，因为 OpenViking 没有六类树、关系迁移、Summary fallback 等对应金标准。
 
 ```text
 公开数据集完整 Sessions
         ↓
-m2bOS Conversation
+Habitus Conversation
         ↓
 MemoryJob → Summary / Memory Editor → MemoryTree → VectorStore
         ↓
@@ -29,7 +29,7 @@ Answer Model
 
 - `locomo`：读取官方 `locomo10.json`。保留 Session 顺序、角色、时间、QA category 和 evidence。与 OpenViking 一样默认排除 category 5，只有 `--include-adversarial` 才纳入。
 - `longmemeval`：读取官方 LongMemEval JSON。每个问题保留自己的 haystack sessions、session dates、question type、question date 和参考答案。
-- `m2bos`：原生扩展协议，用于真实 `prompt/completion/tool_call/tool_result` 数据。它只描述自然会话和 QA，不声明 CREATE、UPDATE、DELETE 等内部预期操作。
+- `habitus`：原生扩展协议，用于真实 `prompt/completion/tool_call/tool_result` 数据。它只描述自然会话和 QA，不声明 CREATE、UPDATE、DELETE 等内部预期操作。
 
 仓库不复制第三方数据集；命令直接读取用户取得的官方 JSON。
 
@@ -116,7 +116,7 @@ python -m benchmark report \
 
 公开数据集没有 Memory URI 金标准，因此本基准不会伪造 URI Precision/Recall。最终质量指标与 OpenViking 同类基准一样，以数据集 QA 的独立 Judge 准确率为主。
 
-## m2bOS 原生数据协议
+## Habitus 原生数据协议
 
 根节点是样本数组：
 
@@ -164,16 +164,16 @@ python -m benchmark report \
 
 ```bash
 python -m benchmark coverage \
-  --dataset m2bos \
-  --input benchmark/datasets/m2bos_core_v1.json \
+  --dataset habitus \
+  --input benchmark/datasets/habitus_core_v1.json \
   --strict
 ```
 
-该命令同时输出 OpenViking 对照 revision、公开 QA 协议和 suite matrix。`--strict` 检查的是数据是否实际覆盖 28 类 m2bOS 记忆场景，不会因为代码中存在某个分支就冒充已覆盖。
+该命令同时输出 OpenViking 对照 revision、公开 QA 协议和 suite matrix。`--strict` 检查的是数据是否实际覆盖 28 类 Habitus 记忆场景，不会因为代码中存在某个分支就冒充已覆盖。
 
 ## 6. 产品边界矩阵
 
-`boundary-*` 才用于回答“m2bOS 在什么规模、并发和故障压力下越过产品预算”。它不是 pytest，也不使用 fake Runtime：
+`boundary-*` 才用于回答“Habitus 在什么规模、并发和故障压力下越过产品预算”。它不是 pytest，也不使用 fake Runtime：
 
 - `smoke`：验证真实链路可执行，不形成容量承诺；
 - `standard`：多规模、多并发、多读写比例，三次独立压力点；
@@ -190,8 +190,8 @@ Runtime、VectorStore、生命周期和恢复边界分别运行：
 
 ```bash
 python -m benchmark boundary-runtime \
-  --dataset m2bos \
-  --input benchmark/datasets/m2bos_core_v1.json \
+  --dataset habitus \
+  --input benchmark/datasets/habitus_core_v1.json \
   --config /path/to/config.yaml \
   --policy benchmark/policies/runtime_reference_v1.json \
   --output /path/to/empty/runtime-result \
@@ -207,8 +207,8 @@ python -m benchmark boundary-vector \
   --profile standard
 
 python -m benchmark boundary-lifecycle \
-  --dataset m2bos \
-  --input benchmark/datasets/m2bos_core_v1.json \
+  --dataset habitus \
+  --input benchmark/datasets/habitus_core_v1.json \
   --sample 0 \
   --config /path/to/config.yaml \
   --policy benchmark/policies/lifecycle_reference_v1.json \
@@ -217,8 +217,8 @@ python -m benchmark boundary-lifecycle \
   --profile standard
 
 python -m benchmark boundary-recovery \
-  --dataset m2bos \
-  --input benchmark/datasets/m2bos_core_v1.json \
+  --dataset habitus \
+  --input benchmark/datasets/habitus_core_v1.json \
   --sample 0 \
   --config /path/to/config.yaml \
   --policy benchmark/policies/recovery_reference_v1.json \
@@ -230,9 +230,9 @@ python -m benchmark boundary-recovery \
 HTTP 边界从外部调用方执行。写入默认禁止；开启后会产生真实持久数据。`--server-identity` 必须是不可变的代码 SHA 与配置版本组合，防止把不同部署误聚合：
 
 ```bash
-M2BOS_HTTP_API_KEY=... python -m benchmark boundary-http \
-  --dataset m2bos \
-  --input benchmark/datasets/m2bos_core_v1.json \
+HABITUS_HTTP_API_KEY=... python -m benchmark boundary-http \
+  --dataset habitus \
+  --input benchmark/datasets/habitus_core_v1.json \
   --server-url https://memory.example.com \
   --server-identity fab23d0-config-v3 \
   --policy benchmark/policies/http_reference_v1.json \
@@ -254,12 +254,12 @@ python -m benchmark boundary-aggregate \
 
 ## 7. 单点 SearchService 与写入诊断
 
-对应 OpenViking 的 Session contention / 检索性能维度，但调用的是 m2bOS 的真实 Runtime：
+对应 OpenViking 的 Session contention / 检索性能维度，但调用的是 Habitus 的真实 Runtime：
 
 ```bash
 python -m benchmark load \
-  --dataset m2bos \
-  --input benchmark/datasets/m2bos_core_v1.json \
+  --dataset habitus \
+  --input benchmark/datasets/habitus_core_v1.json \
   --config /path/to/config.yaml \
   --output benchmark/results/load \
   --work /path/to/empty/load-work \
@@ -285,21 +285,21 @@ python -m benchmark vector \
 
 它通过正式 Embedder 和可配置 VectorStore Adapter 执行全量发布、目录过滤检索、Recall/Precision/NDCG、QPS、p50/p95/p99、增量更新删除及最终可见性检查。仓库自带的 12 文档数据仅用于低成本 smoke；性能结论必须换用具有真实相关性标注的大规模数据集。
 
-OpenViking 的 `cuvs` 是本地索引专项，而 m2bOS 当前只允许远程 VectorStore，因此不会伪造一个本地 cuVS 对标。OpenViking `vectordb_perf` 的预计算向量和 read-only/write-only 运维模式也不等同于 m2bOS 的端到端 Embedder + VectorStore 基准；两者应分别报告，不能把数字放在同一列直接比较。
+OpenViking 的 `cuvs` 是本地索引专项，而 Habitus 当前只允许远程 VectorStore，因此不会伪造一个本地 cuVS 对标。OpenViking `vectordb_perf` 的预计算向量和 read-only/write-only 运维模式也不等同于 Habitus 的端到端 Embedder + VectorStore 基准；两者应分别报告，不能把数字放在同一列直接比较。
 
 ## 9. 单点生命周期与故障恢复诊断
 
 ```bash
 python -m benchmark lifecycle \
-  --dataset m2bos \
-  --input benchmark/datasets/m2bos_core_v1.json \
+  --dataset habitus \
+  --input benchmark/datasets/habitus_core_v1.json \
   --config /path/to/config.yaml \
   --output benchmark/results/lifecycle \
   --work /path/to/empty/lifecycle-work
 
 python -m benchmark recovery \
-  --dataset m2bos \
-  --input benchmark/datasets/m2bos_core_v1.json \
+  --dataset habitus \
+  --input benchmark/datasets/habitus_core_v1.json \
   --config /path/to/config.yaml \
   --output benchmark/results/recovery \
   --work /path/to/empty/recovery-work
@@ -310,5 +310,5 @@ python -m benchmark recovery \
 ## 对齐边界
 
 - 已直接对齐：LoCoMo、LongMemEval 的样本隔离、默认排除 LoCoMo category 5、Top-10、4000 字符回答预算、Answer/Judge、分类准确率、耗时和 Token。
-- m2bOS 增补：六类记忆树、工具结果、Intention 状态、Links/Backlinks、Summary fallback、生命周期和 Job 恢复。
-- 不适用：OpenViking Resource RAG、SkillsBench、TAU2 Agent trajectory、grep/BM25 和本地 cuVS；这些能力不在当前 m2bOS 主链中，不能为了“数量对齐”伪造实现。
+- Habitus 增补：六类记忆树、工具结果、Intention 状态、Links/Backlinks、Summary fallback、生命周期和 Job 恢复。
+- 不适用：OpenViking Resource RAG、SkillsBench、TAU2 Agent trajectory、grep/BM25 和本地 cuVS；这些能力不在当前 Habitus 主链中，不能为了“数量对齐”伪造实现。

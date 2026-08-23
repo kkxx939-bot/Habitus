@@ -14,7 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from Config import ConfigError, M2BOSConfig
+from Config import ConfigError, HabitusConfig
 
 if TYPE_CHECKING:
     from integrations.local_service.adapter_catalog import AdapterCatalog
@@ -58,15 +58,15 @@ class StartupPreflightError(RuntimeError):
 
 
 def run_doctor(
-    config: M2BOSConfig,
+    config: HabitusConfig,
     *,
     check_port: bool = True,
     deep: bool = False,
     probe_timeout_seconds: float = 15.0,
     catalog: AdapterCatalog | None = None,
 ) -> DoctorReport:
-    if not isinstance(config, M2BOSConfig):
-        raise TypeError("config must be M2BOSConfig")
+    if not isinstance(config, HabitusConfig):
+        raise TypeError("config must be HabitusConfig")
     if not isinstance(deep, bool):
         raise TypeError("deep must be boolean")
     if (
@@ -116,7 +116,7 @@ def run_doctor_from_env(
     if not isinstance(values, Mapping):
         raise TypeError("environ must be a string mapping")
     try:
-        config = M2BOSConfig.from_env(environ=values)
+        config = HabitusConfig.from_env(environ=values)
     except (ConfigError, OSError, TypeError, ValueError) as exc:
         detail = str(exc).strip() or "configuration could not be loaded"
         return DoctorReport((DoctorCheck("config", DoctorStatus.FAIL, detail),))
@@ -131,7 +131,7 @@ def run_doctor_from_env(
 
 
 def run_startup_preflight(
-    config: M2BOSConfig,
+    config: HabitusConfig,
     *,
     environ: Mapping[str, str] | None = None,
     catalog: AdapterCatalog | None = None,
@@ -171,7 +171,7 @@ def _python_dependency_check(module: str) -> DoctorCheck:
 
 
 def _dependency_checks(
-    config: M2BOSConfig,
+    config: HabitusConfig,
     catalog: AdapterCatalog,
 ) -> tuple[DoctorCheck, ...]:
     try:
@@ -183,7 +183,7 @@ def _dependency_checks(
 
 
 def _adapter_configuration_check(
-    config: M2BOSConfig,
+    config: HabitusConfig,
     catalog: AdapterCatalog,
 ) -> DoctorCheck:
     try:
@@ -222,7 +222,7 @@ def _node_check() -> DoctorCheck:
     return DoctorCheck("node", DoctorStatus.PASS, f"{executable}; version={version}")
 
 
-def _ingress_capacity_check(config: M2BOSConfig) -> DoctorCheck:
+def _ingress_capacity_check(config: HabitusConfig) -> DoctorCheck:
     request_bytes = config.http.max_request_bytes
     journal_bytes = config.conversation.journal.max_file_bytes
     if request_bytes > journal_bytes:
@@ -239,7 +239,7 @@ def _ingress_capacity_check(config: M2BOSConfig) -> DoctorCheck:
 
 
 def _deep_checks(
-    config: M2BOSConfig,
+    config: HabitusConfig,
     *,
     timeout_seconds: float,
     catalog: AdapterCatalog | None = None,
@@ -291,7 +291,7 @@ def _deep_checks(
                 results.append(DoctorCheck("chat_probe", DoctorStatus.FAIL, type(exc).__name__))
             try:
                 vector = await asyncio.wait_for(
-                    runtime.components.models.embedder.embed_query("m2bOS doctor probe"),
+                    runtime.components.models.embedder.embed_query("Habitus doctor probe"),
                     timeout=timeout_seconds,
                 )
                 results.append(
@@ -314,7 +314,7 @@ def _deep_checks(
                             DoctorCheck(
                                 name,
                                 DoctorStatus.WARN,
-                                "control plane is reachable; collection has no m2bOS publication yet",
+                                "control plane is reachable; collection has no Habitus publication yet",
                             )
                         )
                     elif not state.ready:
@@ -357,7 +357,7 @@ def _deep_checks(
     return checks
 
 
-def _credential_check(config: M2BOSConfig, catalog: AdapterCatalog) -> DoctorCheck:
+def _credential_check(config: HabitusConfig, catalog: AdapterCatalog) -> DoctorCheck:
     try:
         required = {
             (reference, field)
@@ -385,9 +385,9 @@ def _credential_check(config: M2BOSConfig, catalog: AdapterCatalog) -> DoctorChe
 
 
 def _config_file_security(environ: Mapping[str, str]) -> DoctorCheck:
-    raw_path = environ.get("M2BOS_CONFIG_FILE")
+    raw_path = environ.get("HABITUS_CONFIG_FILE")
     if not isinstance(raw_path, str) or not raw_path.strip():
-        return DoctorCheck("config_permissions", DoctorStatus.FAIL, "M2BOS_CONFIG_FILE is missing")
+        return DoctorCheck("config_permissions", DoctorStatus.FAIL, "HABITUS_CONFIG_FILE is missing")
     path = Path(raw_path).expanduser().absolute()
     try:
         mode = path.stat().st_mode & 0o777

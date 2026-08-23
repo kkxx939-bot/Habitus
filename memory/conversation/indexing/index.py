@@ -38,7 +38,7 @@ from ModelClient import Embedder, EmbeddingVector, Reranker
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = "m2bos_conversation_summary_vector_v1"
+_SCHEMA_VERSION = "habitus_conversation_summary_vector_v1"
 _SUMMARY_KIND = "conversation_summary"
 _SUMMARY_LEVEL = 2
 

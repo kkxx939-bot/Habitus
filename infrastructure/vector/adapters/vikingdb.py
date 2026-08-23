@@ -29,8 +29,8 @@ from ModelClient import EmbeddingVector
 
 _POINT_NAMESPACE = uuid.UUID("1bd3197e-6322-5ed2-b4c1-f583cf35fec5")
 _RECORD_TYPE_MEMORY = "memory"
-_RECORD_TYPE_METADATA = "m2bos_metadata"
-_DESCRIPTION = "m2bOS rebuildable memory vector index"
+_RECORD_TYPE_METADATA = "habitus_metadata"
+_DESCRIPTION = "Habitus rebuildable memory vector index"
 _TEXT_FIELD_BYTE_LIMIT = 1024 * 1024
 _BatchItem = TypeVar("_BatchItem")
 _FILTERABLE_FIELDS = {
@@ -847,7 +847,7 @@ def _record_from_item(item: Mapping[str, object], *, scope: str) -> VectorStoreR
     if not isinstance(fields, Mapping):
         raise VectorStoreIntegrityError("VikingDB record is missing its fields object")
     if fields.get("record_type") != _RECORD_TYPE_MEMORY:
-        raise VectorStoreIntegrityError("VikingDB result is not an m2bOS memory record")
+        raise VectorStoreIntegrityError("VikingDB result is not an Habitus memory record")
     raw_attributes = fields.get("attributes_json")
     if not isinstance(raw_attributes, str):
         raise VectorStoreIntegrityError("VikingDB record has no attributes_json")

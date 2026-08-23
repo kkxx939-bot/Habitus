@@ -23,7 +23,7 @@ from benchmark.metrics import latency_distribution
 from benchmark.model import BenchmarkDataset
 from benchmark.reliability import TransientFailureVectorStore
 from benchmark.runner import conversation_batch
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from memory.conversation import ConversationAddress
 from memory.workflow import MemoryJobExecutionError, MemoryJobStatus
 from Runtime import build_runtime
@@ -34,7 +34,7 @@ class RecoveryBoundaryBenchmark:
 
     def __init__(
         self,
-        config: M2BOSConfig,
+        config: HabitusConfig,
         dataset: BenchmarkDataset,
         *,
         profile: BoundaryProfile,
@@ -43,7 +43,7 @@ class RecoveryBoundaryBenchmark:
         work_directory: str | Path,
         fault_counts: Sequence[int] | None = None,
     ) -> None:
-        if not isinstance(config, M2BOSConfig) or not isinstance(dataset, BenchmarkDataset):
+        if not isinstance(config, HabitusConfig) or not isinstance(dataset, BenchmarkDataset):
             raise TypeError("recovery boundary benchmark requires config and dataset")
         if len(dataset.samples) != 1:
             raise ValueError("recovery boundary benchmark requires exactly one selected sample")
@@ -179,7 +179,7 @@ class RecoveryBoundaryBenchmark:
                 "drain_seconds": elapsed,
             }
             return {
-                "schema_version": "m2bos_boundary_point_v1",
+                "schema_version": "habitus_boundary_point_v1",
                 "lane": "recovery",
                 "scenario": "consecutive_vector_apply_failures",
                 "scale_name": "consecutive_failures",

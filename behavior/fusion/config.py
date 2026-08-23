@@ -3,13 +3,26 @@
 这些是纯运维参数：只回答"一次融合最多接受多少"，不回答"这组动作算不算一件事"。
 后者是判据，属于不可配置的代码与提示词不变量。
 
-TODO(BHV-FUSION-003): 与 ``behavior/observation/config.py`` 同样尚未接入唯一的 ``Config/``
-边界；behavior 接入 Runtime 组合根（``TODO(BHV-RUNTIME-001)``）时一并纳入并改为必填。
+TODO(BHV-FUSION-003·余项): 窗口参数已随 BHV-RUNTIME-001 经 ``Config.behavior`` 注入（见下方
+常量注释）；本 dataclass 的**容量类边界**仍是代码侧默认、未并入 ``Config/`` 边界——留待与
+BHV-LIFECYCLE-001 的存储生命周期改造同批（届时保留期/容量要一起进配置）。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+# 融合取"先前的判断"上下文的窗口：最多几条、往回看多久。lookback 同时定义了归约层的封口视界
+# ——一条判断的 evidence_ready_at 老出该窗口后，任何未来融合都不可能再引用（continues/supersedes）
+# 它，链因此机械闭合。两处必须是同一个数：各写一个会让"融合还能续"与"归约已封口"静默分叉，
+# 所以归约层只准从这里 import，不准自带默认值。
+# 1 小时是用户裁定（原 6 小时"事件粒度太粗"）：行为被打断后的真实恢复间隔是分钟级，隔更久回来
+# 按融合自身纪律就是新的一件事；窗口越短，行为进树的延迟也越短（封口要等出窗）。
+FUSION_CONTEXT_LIMIT = 8
+FUSION_CONTEXT_LOOKBACK_SECONDS = 3_600.0
+# BHV-RUNTIME-001 已闭合窗口注入：组合根（Runtime/behavior.py）把 Config.behavior 解析出的
+# **同一份** lookback/limit 喂给融合与归约两处，配置层不复制默认值（缺省 None → 取此处）。
+# BHV-FUSION-003 余项：容量类边界（本 dataclass）仍是代码侧默认，未并入 Config 边界。
 
 
 @dataclass(frozen=True)
@@ -53,4 +66,8 @@ class BehaviorFusionConfig:
                 raise ValueError(f"{name} must be a positive integer")
 
 
-__all__ = ["BehaviorFusionConfig"]
+__all__ = [
+    "FUSION_CONTEXT_LIMIT",
+    "FUSION_CONTEXT_LOOKBACK_SECONDS",
+    "BehaviorFusionConfig",
+]

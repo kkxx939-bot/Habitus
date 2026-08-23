@@ -1,4 +1,4 @@
-"""供外部 Agent 连接本地 m2bOS HTTP 服务的异步客户端。"""
+"""供外部 Agent 连接本地 Habitus HTTP 服务的异步客户端。"""
 
 from __future__ import annotations
 
@@ -44,8 +44,8 @@ class AsyncHTTPTransport(Protocol):
     ) -> httpx.Response: ...
 
 
-class M2BOSServiceError(RuntimeError):
-    """m2bOS 服务返回了稳定的公开错误。"""
+class HabitusServiceError(RuntimeError):
+    """Habitus 服务返回了稳定的公开错误。"""
 
     def __init__(
         self,
@@ -63,11 +63,11 @@ class M2BOSServiceError(RuntimeError):
         self.status_code = status_code
 
 
-class M2BOSServiceTransportError(ConnectionError):
-    """尚未收到 m2bOS 服务响应的网络或协议错误。"""
+class HabitusServiceTransportError(ConnectionError):
+    """尚未收到 Habitus 服务响应的网络或协议错误。"""
 
 
-class M2BOSHTTPClient:
+class HabitusHTTPClient:
     """实现 AgentMemoryPort，不依赖 Runtime、memory 或具体 Agent SDK。"""
 
     def __init__(
@@ -87,9 +87,9 @@ class M2BOSHTTPClient:
         except ValueError as exc:
             raise ValueError("base_url contains an invalid port") from exc
         if parsed.hostname is None or not _is_loopback_host(parsed.hostname):
-            raise ValueError("unauthenticated m2bOS base_url must use a loopback host")
+            raise ValueError("unauthenticated Habitus base_url must use a loopback host")
         if parsed.username or parsed.password:
-            raise ValueError("unauthenticated m2bOS base_url cannot contain user information")
+            raise ValueError("unauthenticated Habitus base_url cannot contain user information")
         if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
             raise ValueError("base_url must be a loopback origin without path, parameters, query, or fragment")
         if (
@@ -105,7 +105,7 @@ class M2BOSHTTPClient:
         self._transport = transport if transport is not None else cast(AsyncHTTPTransport, owned)
         self._owned_transport = owned
 
-    async def __aenter__(self) -> M2BOSHTTPClient:
+    async def __aenter__(self) -> HabitusHTTPClient:
         return self
 
     async def __aexit__(self, *_exc_info: object) -> None:
@@ -229,23 +229,23 @@ class M2BOSHTTPClient:
                 params=params,
             )
         except httpx.RequestError as exc:
-            raise M2BOSServiceTransportError("m2bOS service request did not receive a response") from exc
+            raise HabitusServiceTransportError("Habitus service request did not receive a response") from exc
         try:
             payload = response.json()
         except ValueError as exc:
-            raise M2BOSServiceTransportError("m2bOS service returned invalid JSON") from exc
+            raise HabitusServiceTransportError("Habitus service returned invalid JSON") from exc
         try:
             envelope = require_mapping(payload, "response")
         except ValueError as exc:
-            raise M2BOSServiceTransportError("m2bOS service returned an invalid response") from exc
+            raise HabitusServiceTransportError("Habitus service returned an invalid response") from exc
         request_id_value = envelope.get("request_id")
         request_id = request_id_value if isinstance(request_id_value, str) and request_id_value else None
         if response.is_error or envelope.get("status") == "error":
             try:
                 error = require_mapping(envelope.get("error"), "error")
             except ValueError as exc:
-                raise M2BOSServiceTransportError("m2bOS service returned an invalid error") from exc
-            raise M2BOSServiceError(
+                raise HabitusServiceTransportError("Habitus service returned an invalid error") from exc
+            raise HabitusServiceError(
                 self._error_text(error.get("message"), "error.message"),
                 code=self._error_text(error.get("code"), "error.code"),
                 retryable=self._error_boolean(error.get("retryable"), "error.retryable"),
@@ -253,11 +253,11 @@ class M2BOSHTTPClient:
                 status_code=response.status_code,
             )
         if envelope.get("status") != "ok":
-            raise M2BOSServiceTransportError("m2BOS service returned an unknown response envelope")
+            raise HabitusServiceTransportError("m2BOS service returned an unknown response envelope")
         try:
             return require_mapping(envelope.get("result"), "result")
         except ValueError as exc:
-            raise M2BOSServiceTransportError("m2BOS service returned an invalid result") from exc
+            raise HabitusServiceTransportError("m2BOS service returned an invalid result") from exc
 
     @staticmethod
     def _decode(
@@ -267,18 +267,18 @@ class M2BOSHTTPClient:
         try:
             return decoder(value)
         except (TypeError, ValueError) as exc:
-            raise M2BOSServiceTransportError("m2bOS service result violates its wire contract") from exc
+            raise HabitusServiceTransportError("Habitus service result violates its wire contract") from exc
 
     @staticmethod
     def _error_text(value: object, label: str) -> str:
         if not isinstance(value, str) or not value:
-            raise M2BOSServiceTransportError(f"m2BOS service returned an invalid {label}")
+            raise HabitusServiceTransportError(f"m2BOS service returned an invalid {label}")
         return value
 
     @staticmethod
     def _error_boolean(value: object, label: str) -> bool:
         if not isinstance(value, bool):
-            raise M2BOSServiceTransportError(f"m2BOS service returned an invalid {label}")
+            raise HabitusServiceTransportError(f"m2BOS service returned an invalid {label}")
         return value
 
 
@@ -303,7 +303,7 @@ def _require_delivery_id(value: str | None) -> None:
 
 __all__ = [
     "AsyncHTTPTransport",
-    "M2BOSHTTPClient",
-    "M2BOSServiceError",
-    "M2BOSServiceTransportError",
+    "HabitusHTTPClient",
+    "HabitusServiceError",
+    "HabitusServiceTransportError",
 ]

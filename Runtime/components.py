@@ -54,6 +54,7 @@ from ModelClient import (
     Reranker,
     StructuredChatClient,
 )
+from Runtime.behavior import BehaviorRuntimeComponents
 from Runtime.lifecycle import LifecycleWorker
 from Runtime.worker import MemoryWorker
 
@@ -348,6 +349,8 @@ class RuntimeComponents:
     conversation: RuntimeConversation
     memory: RuntimeMemory
     workflow: RuntimeWorkflow
+    # 行为管线（观测→融合→归约→行为树）；primary_subject 未配置时为 None（行为侧未启用）。
+    behavior: BehaviorRuntimeComponents | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.infrastructure, RuntimeInfrastructure):
@@ -360,6 +363,8 @@ class RuntimeComponents:
             raise TypeError("memory must be RuntimeMemory")
         if not isinstance(self.workflow, RuntimeWorkflow):
             raise TypeError("workflow must be RuntimeWorkflow")
+        if self.behavior is not None and not isinstance(self.behavior, BehaviorRuntimeComponents):
+            raise TypeError("behavior must be BehaviorRuntimeComponents or None")
         if self.workflow.enqueuer.conversations is not self.conversation.journal:
             raise ValueError("workflow enqueuer must use the shared conversation journal")
         if (

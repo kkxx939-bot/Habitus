@@ -4,7 +4,7 @@ import { loadPluginConfig } from "./config.mjs";
 import { writeOperationLog } from "./operation-log.mjs";
 import { PluginCore } from "./plugin-core.mjs";
 
-const INJECTION_END = "</m2bos-memory-context>";
+const INJECTION_END = "</habitus-memory-context>";
 
 async function readInput() {
   const chunks = [];
@@ -24,7 +24,7 @@ function detach(raw, config, adapter, input, action) {
     const child = spawn(process.execPath, [process.argv[1]], {
       detached: true,
       stdio: ["pipe", "ignore", "ignore"],
-      env: { ...process.env, M2BOS_HOOK_WORKER: "1" },
+      env: { ...process.env, HABITUS_HOOK_WORKER: "1" },
     });
     child.on("error", (error) => {
       void writeOperationLog(config, adapter, input, {
@@ -51,14 +51,14 @@ function write(value) {
 
 export function encodeContextPayload(value) {
   return JSON.stringify({
-    format: "m2bos_memory_context_v1",
+    format: "habitus_memory_context_v1",
     content: String(value),
   }).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e");
 }
 
 export function createContextInjection(value, nonce = randomBytes(16).toString("hex")) {
   if (!/^[0-9a-f]{32}$/.test(nonce)) throw new Error("injection nonce is invalid");
-  const injection = `<m2bos-memory-context receipt="${nonce}">\n${encodeContextPayload(value)}\n${INJECTION_END}`;
+  const injection = `<habitus-memory-context receipt="${nonce}">\n${encodeContextPayload(value)}\n${INJECTION_END}`;
   return Object.freeze({
     injection,
     receipt: Object.freeze({ nonce, digest: createHash("sha256").update(injection).digest("hex") }),
@@ -91,7 +91,7 @@ export async function runHook(action, adapter) {
       return;
     }
     if (["session-start", "subagent-start"].includes(action)) {
-      if (process.env.M2BOS_HOOK_WORKER === "1") {
+      if (process.env.HABITUS_HOOK_WORKER === "1") {
         const recovered = await core.recoverPending(adapter, input);
         if (recovered?.retryable) await writeOperationLog(config, adapter, input, {
           hook: action, stage: "recover", status: "pending", retryable: true,
@@ -104,7 +104,7 @@ export async function runHook(action, adapter) {
       return;
     }
     if (action === "stop") {
-      if (process.env.M2BOS_HOOK_WORKER === "1") {
+      if (process.env.HABITUS_HOOK_WORKER === "1") {
         const drained = await core.drain(adapter, input);
         if (drained?.pending || drained?.blocked) await writeOperationLog(config, adapter, input, {
           hook: action,
@@ -121,7 +121,7 @@ export async function runHook(action, adapter) {
       return;
     }
     if (["session-end", "subagent-stop"].includes(action)) {
-      if (process.env.M2BOS_HOOK_WORKER === "1") {
+      if (process.env.HABITUS_HOOK_WORKER === "1") {
         const flushed = await core.flush(adapter, input);
         if (!flushed?.ok) await writeOperationLog(config, adapter, input, {
           hook: action, stage: "flush", status: "pending", retryable: true,
@@ -146,13 +146,13 @@ export async function runHook(action, adapter) {
   } catch (error) {
     if (config) await writeOperationLog(config, adapter, input, {
       hook: action,
-      stage: process.env.M2BOS_HOOK_WORKER === "1" ? "worker" : "hook",
+      stage: process.env.HABITUS_HOOK_WORKER === "1" ? "worker" : "hook",
       status: "error",
       retryable: true,
       error,
     });
-    if (["1", "true", "yes", "on"].includes(String(process.env.M2BOS_PLUGIN_DEBUG || "").toLowerCase())) {
-      process.stderr.write(`[m2bos-memory] ${error?.stack || error}\n`);
+    if (["1", "true", "yes", "on"].includes(String(process.env.HABITUS_PLUGIN_DEBUG || "").toLowerCase())) {
+      process.stderr.write(`[habitus-memory] ${error?.stack || error}\n`);
     }
     write(adapter.successOutput(action));
   }

@@ -313,7 +313,7 @@ def test_every_memory_kind_renders_all_present_fields_and_no_system_metadata(kin
     for value in payload.values():
         rendered = value.isoformat() if isinstance(value, date) else str(value)
         assert rendered in markdown
-    for forbidden in ("revision", "created_at", "updated_at", "M2BOS_MEMORY_FIELDS"):
+    for forbidden in ("revision", "created_at", "updated_at", "HABITUS_MEMORY_FIELDS"):
         assert forbidden not in markdown
 
 

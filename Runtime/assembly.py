@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from conversation import (
     ConversationBehaviorProjectionConsumer,
     ConversationBehaviorProjectionStore,
@@ -83,6 +83,7 @@ from memory.workflow import (
 )
 from ModelClient import ProviderFactory, StructuredChatClient
 from pre.conversation import ConversationAdapterRegistry
+from Runtime.behavior import build_behavior_components
 from Runtime.components import (
     RuntimeComponents,
     RuntimeConversation,
@@ -97,7 +98,7 @@ from Runtime.worker import MemoryWorker
 
 
 def build_runtime(
-    config: M2BOSConfig,
+    config: HabitusConfig,
     *,
     providers: ProviderFactory | None = None,
     vector_stores: VectorStoreFactory | None = None,
@@ -107,8 +108,8 @@ def build_runtime(
 ) -> Runtime:
     """无存储写入、无模型请求地完成一次显式依赖组装。"""
 
-    if not isinstance(config, M2BOSConfig):
-        raise TypeError("config must be M2BOSConfig")
+    if not isinstance(config, HabitusConfig):
+        raise TypeError("config must be HabitusConfig")
     if providers is not None and not isinstance(providers, ProviderFactory):
         raise TypeError("providers must be ProviderFactory or None")
     if vector_stores is not None and not isinstance(vector_stores, VectorStoreFactory):
@@ -542,6 +543,13 @@ def build_runtime(
         observer=operation_observer,
     )
 
+    behavior_components = build_behavior_components(
+        config,
+        structured_chat=structured_chat,
+        lock_store=resolved_lock.lock_store,
+        path_lock=resolved_lock,
+        observer=operation_observer,
+    )
     components = RuntimeComponents(
         infrastructure=RuntimeInfrastructure(
             path_lock=resolved_lock,
@@ -595,6 +603,7 @@ def build_runtime(
             worker=worker,
             lifecycle_worker=lifecycle_worker,
         ),
+        behavior=behavior_components,
     )
     return Runtime(config, components, conversation_adapters=conversation_adapters)
 
@@ -609,7 +618,7 @@ def _builtin_provider_factory() -> ProviderFactory:
     return providers
 
 
-def _model_credentials(config: M2BOSConfig, reference: str) -> Mapping[str, str]:
+def _model_credentials(config: HabitusConfig, reference: str) -> Mapping[str, str]:
     return config.credentials.resolve(reference)
 
 

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from infrastructure.store.contracts import PathLock
 from infrastructure.store.locks import ProcessLocalLockStore
 from infrastructure.vector import VectorStoreFactory
@@ -187,7 +187,7 @@ def runtime_dependencies() -> tuple[ProviderFactory, VectorStoreFactory]:
     return providers, vectors
 
 
-def runtime_config(tmp_path: Path, *, with_credentials: bool = False) -> M2BOSConfig:
+def runtime_config(tmp_path: Path, *, with_credentials: bool = False) -> HabitusConfig:
     payload = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
     payload["models"]["chat"]["route"].update(
@@ -222,7 +222,7 @@ def runtime_config(tmp_path: Path, *, with_credentials: bool = False) -> M2BOSCo
         payload["credentials"]["dashscope"]["api_key"] = "dashscope-secret"
         payload["credentials"]["vikingdb"]["access_key"] = "viking-access"
         payload["credentials"]["vikingdb"]["secret_key"] = "viking-secret"
-    return M2BOSConfig.from_mapping(payload)
+    return HabitusConfig.from_mapping(payload)
 
 
 def test_assembly_resolves_each_provider_and_database_credential_by_reference(tmp_path: Path) -> None:
@@ -540,7 +540,7 @@ def test_runtime_public_conversation_interface_returns_pending_consistency_handl
         )
         report = await runtime.health()
         assert report.status.value in {"healthy", "degraded"}
-        assert "m2bos_" in runtime.prometheus_metrics()
+        assert "habitus_" in runtime.prometheus_metrics()
         http = RuntimeHTTPHandlers(runtime)
         capabilities = http.capabilities()
         assert capabilities["api_version"] == "1.0"

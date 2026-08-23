@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-const END_MARKER = "</m2bos-memory-context>";
+const END_MARKER = "</habitus-memory-context>";
 const NONCE = /^[0-9a-f]{32}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 
@@ -28,7 +28,7 @@ function stripText(value, receipts) {
       }
       continue;
     }
-    const startMarker = `<m2bos-memory-context receipt="${receipt.nonce}">`;
+    const startMarker = `<habitus-memory-context receipt="${receipt.nonce}">`;
     let offset = 0;
     while (offset < result.length) {
       const start = result.indexOf(startMarker, offset);

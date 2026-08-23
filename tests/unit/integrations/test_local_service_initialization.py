@@ -11,7 +11,7 @@ from unittest.mock import Mock
 import pytest
 import yaml
 
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from integrations.local_service import cli, plugin_cli
 from integrations.local_service import initialization as initialization_module
 from integrations.local_service.cloud_setup import (
@@ -48,7 +48,7 @@ def _isolate_default_plugin_connection(
     monkeypatch.setattr(
         initialization_module,
         "DEFAULT_PLUGIN_CONNECTION_PATH",
-        tmp_path / "default-home" / ".m2bos" / "agent-plugin" / "connection.json",
+        tmp_path / "default-home" / ".habitus" / "agent-plugin" / "connection.json",
     )
 
 
@@ -56,8 +56,8 @@ def test_config_path_resolution_has_one_explicit_environment_default_chain(tmp_p
     configured = tmp_path / "environment" / "config.yaml"
     explicit = tmp_path / "explicit" / "config.yaml"
 
-    assert resolve_config_path(explicit, environ={"M2BOS_CONFIG_FILE": str(configured)}) == explicit
-    assert resolve_config_path(None, environ={"M2BOS_CONFIG_FILE": str(configured)}) == configured
+    assert resolve_config_path(explicit, environ={"HABITUS_CONFIG_FILE": str(configured)}) == explicit
+    assert resolve_config_path(None, environ={"HABITUS_CONFIG_FILE": str(configured)}) == configured
     assert resolve_config_path(None, environ={}).name == "config.yaml"
 
     with pytest.raises(ValueError, match="yaml"):
@@ -70,22 +70,22 @@ def test_plugin_connection_path_honors_an_explicit_isolated_state_root(
     state_root = tmp_path / "plugin-state"
 
     assert resolve_plugin_connection_path(
-        environ={"M2BOS_PLUGIN_STATE_DIR": str(state_root)}
+        environ={"HABITUS_PLUGIN_STATE_DIR": str(state_root)}
     ) == state_root / "connection.json"
 
 
 def test_cli_always_binds_the_default_yaml_without_requiring_an_export(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("M2BOS_CONFIG_FILE", raising=False)
+    monkeypatch.delenv("HABITUS_CONFIG_FILE", raising=False)
 
     values = cli._environment(None)
 
-    assert values["M2BOS_CONFIG_FILE"] == str(Path("~/.m2bos/config.yaml").expanduser().absolute())
+    assert values["HABITUS_CONFIG_FILE"] == str(Path("~/.habitus/config.yaml").expanduser().absolute())
 
 
 def test_initializer_writes_private_valid_config_without_overwriting_by_default(tmp_path: Path) -> None:
-    destination = tmp_path / "config" / "m2bos.yaml"
+    destination = tmp_path / "config" / "habitus.yaml"
 
     created = initialize_config(destination, source=EXAMPLE_CONFIG)
     destination.chmod(0o644)
@@ -95,20 +95,20 @@ def test_initializer_writes_private_valid_config_without_overwriting_by_default(
     assert replayed.created is False
     assert created.backup_path is None
     assert stat.S_IMODE(destination.stat().st_mode) == 0o600
-    assert M2BOSConfig.from_file(destination).http.port == 8787
+    assert HabitusConfig.from_file(destination).http.port == 8787
 
 
 def test_force_initialization_preserves_previous_config_in_private_backup(tmp_path: Path) -> None:
-    destination = tmp_path / "config" / "m2bos.yaml"
+    destination = tmp_path / "config" / "habitus.yaml"
     original = EXAMPLE_CONFIG.read_bytes()
     initialize_config(destination, source=EXAMPLE_CONFIG)
     destination.write_bytes(original.replace(b"port: 8787", b"port: 8799", 1))
 
     result = initialize_config(destination, source=EXAMPLE_CONFIG, force=True)
 
-    assert result.backup_path == destination.with_name("m2bos.bak.yaml")
+    assert result.backup_path == destination.with_name("habitus.bak.yaml")
     assert result.backup_path.read_bytes() != destination.read_bytes()
-    assert M2BOSConfig.from_file(result.backup_path).http.port == 8799
+    assert HabitusConfig.from_file(result.backup_path).http.port == 8799
     assert stat.S_IMODE(result.backup_path.stat().st_mode) == 0o600
 
 
@@ -128,7 +128,7 @@ def test_default_cloud_setup_generates_a_strict_config_without_placeholder_reran
         default_cloud_selection(),
     )
 
-    config = M2BOSConfig.from_mapping(payload)
+    config = HabitusConfig.from_mapping(payload)
 
     assert config.models.chat.route.provider == "deepseek"
     assert config.models.embedding.route.adapter == "ark_multimodal"
@@ -175,8 +175,8 @@ def test_cloud_setup_applies_custom_routes_and_shared_vikingdb_resources(
             "vector.vikingdb.managed",
             {
                 "region": "cn-shanghai",
-                "project_name": "m2bos-project",
-                "index_name": "m2bos-index",
+                "project_name": "habitus-project",
+                "index_name": "habitus-index",
                 "memory_collection": "memory-main",
                 "summary_collection": "summary-main",
             },
@@ -185,7 +185,7 @@ def test_cloud_setup_applies_custom_routes_and_shared_vikingdb_resources(
     payload = apply_cloud_selection(load_initialization_mapping(), selection)
 
     result = initialize_config_from_mapping(destination, payload)
-    config = M2BOSConfig.from_file(destination)
+    config = HabitusConfig.from_file(destination)
 
     assert result.created is True
     assert config.models.chat.route.provider == "custom-chat"
@@ -213,7 +213,7 @@ def test_cloud_setup_preserves_an_unselected_nonempty_credential() -> None:
     payload["credentials"]["dashscope"]["api_key"] = "existing-rerank-secret"  # type: ignore[index]
 
     configured = apply_cloud_selection(payload, default_cloud_selection())
-    config = M2BOSConfig.from_mapping(configured)
+    config = HabitusConfig.from_mapping(configured)
 
     assert config.models.rerank is None
     assert config.credentials.resolve("dashscope")["api_key"] == "existing-rerank-secret"
@@ -343,7 +343,7 @@ def test_cloud_setup_supports_precreated_vikingdb_with_api_key() -> None:
     )
 
     payload = apply_cloud_selection(load_initialization_mapping(), selection)
-    config = M2BOSConfig.from_mapping(payload)
+    config = HabitusConfig.from_mapping(payload)
 
     assert config.memory.vector_store.options["auth_mode"] == "api_key"
     assert config.conversation.summary_vector_store.options["schema_mode"] == "precreated"
@@ -373,7 +373,7 @@ def test_precreated_vikingdb_configuration_constructs_the_runtime_without_mixed_
     payload["credentials"]["ark"]["api_key"] = "embedding"  # type: ignore[index]
     payload["credentials"]["vikingdb_api_key"]["api_key"] = "vector"  # type: ignore[index]
 
-    runtime = build_runtime(M2BOSConfig.from_mapping(payload))
+    runtime = build_runtime(HabitusConfig.from_mapping(payload))
 
     assert runtime.components.memory.vector_index.store is not None
 
@@ -384,7 +384,7 @@ def test_setup_round_trip_uses_normalized_route_identity_and_credential_referenc
     payload["models"]["chat"]["route"]["credential_ref"] = " DeepSeek "  # type: ignore[index]
 
     configured = apply_cloud_selection(payload, selection_from_mapping(payload))
-    config = M2BOSConfig.from_mapping(configured)
+    config = HabitusConfig.from_mapping(configured)
 
     assert config.models.chat.route.adapter == "openai_compatible_chat"
     assert config.models.chat.route.credential_ref == "deepseek"
@@ -547,7 +547,7 @@ def test_cloud_wizard_cancellation_returns_no_configuration(
 
 
 def test_initializer_updates_multiple_named_credentials_in_the_same_private_yaml(tmp_path: Path) -> None:
-    destination = tmp_path / "config" / "m2bos.yaml"
+    destination = tmp_path / "config" / "habitus.yaml"
     initialize_config(destination, source=EXAMPLE_CONFIG)
 
     assert {(item.reference, item.field) for item in missing_credential_fields(destination)} == {
@@ -579,7 +579,7 @@ def test_initializer_updates_multiple_named_credentials_in_the_same_private_yaml
 def test_credential_updates_follow_the_same_normalized_name_rules_as_config_loading(
     tmp_path: Path,
 ) -> None:
-    destination = tmp_path / "config" / "m2bos.yaml"
+    destination = tmp_path / "config" / "habitus.yaml"
     payload = yaml.safe_load(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
     payload["credentials"][" DeepSeek "] = payload["credentials"].pop("deepseek")
     payload["credentials"][" DeepSeek "][" API_KEY "] = payload["credentials"][
@@ -605,7 +605,7 @@ def test_interactive_initializer_prompts_each_missing_credential_without_echoing
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    destination = tmp_path / "config" / "m2bos.yaml"
+    destination = tmp_path / "config" / "habitus.yaml"
     initialize_config(destination, source=EXAMPLE_CONFIG)
     secrets = {
         "ark.api_key": "ark-secret",
@@ -619,7 +619,7 @@ def test_interactive_initializer_prompts_each_missing_credential_without_echoing
 
     cli._configure_missing_credentials(destination)
 
-    config = M2BOSConfig.from_file(destination)
+    config = HabitusConfig.from_file(destination)
     assert config.credentials.resolve("ark")["api_key"] == "ark-secret"
     assert missing_credential_fields(destination) == ()
     output = capsys.readouterr().out
@@ -631,7 +631,7 @@ def test_noninteractive_init_can_install_multiple_harnesses_without_knowing_thei
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    destination = tmp_path / "config" / "m2bos.yaml"
+    destination = tmp_path / "config" / "habitus.yaml"
     delegated = Mock()
     monkeypatch.setattr(cli, "_delegate_plugin", delegated)
 
@@ -674,7 +674,7 @@ def test_noninteractive_default_init_uses_valid_cloud_defaults_without_placehold
         ]
     )
 
-    assert M2BOSConfig.from_file(destination).models.rerank is None
+    assert HabitusConfig.from_file(destination).models.rerank is None
     connection = destination.parent / "agent-plugin" / "connection.json"
     assert '"base_url": "http://127.0.0.1:8787"' in connection.read_text(encoding="utf-8")
 
@@ -684,7 +684,7 @@ def test_custom_config_init_persists_plugin_connection_in_the_default_state_root
     tmp_path: Path,
 ) -> None:
     destination = tmp_path / "custom" / "config.yaml"
-    default_connection = tmp_path / "home" / ".m2bos" / "agent-plugin" / "connection.json"
+    default_connection = tmp_path / "home" / ".habitus" / "agent-plugin" / "connection.json"
     monkeypatch.setattr(
         initialization_module,
         "DEFAULT_PLUGIN_CONNECTION_PATH",
@@ -737,7 +737,7 @@ def test_missing_config_offer_handles_eof_without_leaking_wizard_exception(
 
 def test_plugin_assets_can_be_found_in_a_pip_target_scheme(tmp_path: Path) -> None:
     target = tmp_path / "target"
-    plugin_root = target / "share" / "m2bos" / "plugins"
+    plugin_root = target / "share" / "habitus" / "plugins"
     plugin_root.mkdir(parents=True)
     (plugin_root / "install-memory-plugin.mjs").write_text("// installed\n", encoding="utf-8")
 
@@ -752,7 +752,7 @@ def test_plugin_assets_can_be_found_in_a_pip_target_scheme(tmp_path: Path) -> No
 def test_plugin_connection_projection_uses_the_configured_loopback_port(tmp_path: Path) -> None:
     payload = load_initialization_mapping()
     payload["http"]["port"] = 8899  # type: ignore[index]
-    config = M2BOSConfig.from_mapping(payload)
+    config = HabitusConfig.from_mapping(payload)
 
     path = write_plugin_connection(config, tmp_path / "agent-plugin" / "connection.json")
 
@@ -799,7 +799,7 @@ def test_interactive_init_uses_cloud_wizard_before_prompting_selected_credential
         ]
     )
 
-    config = M2BOSConfig.from_file(destination)
+    config = HabitusConfig.from_file(destination)
     assert config.models.rerank is None
     prompt.assert_called_once()
     credentials.assert_called_once_with(destination)
@@ -831,16 +831,16 @@ def test_interactive_cloud_update_preserves_existing_config_in_backup(
     )
 
     backup = destination.with_name("config.bak.yaml")
-    assert M2BOSConfig.from_file(destination).http.port == 8799
-    assert M2BOSConfig.from_file(destination).models.rerank is None
-    assert M2BOSConfig.from_file(backup).models.rerank is not None
+    assert HabitusConfig.from_file(destination).http.port == 8799
+    assert HabitusConfig.from_file(destination).models.rerank is None
+    assert HabitusConfig.from_file(backup).models.rerank is not None
 
 
 def test_init_execs_the_single_server_entrypoint_when_start_is_requested(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    destination = tmp_path / "config" / "m2bos.yaml"
+    destination = tmp_path / "config" / "habitus.yaml"
     execute = Mock()
     monkeypatch.setattr(cli, "_exec_serve", execute)
 
@@ -864,7 +864,7 @@ def test_missing_config_offer_delegates_to_init_only_in_an_interactive_terminal(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    destination = tmp_path / "missing" / "m2bos.yaml"
+    destination = tmp_path / "missing" / "habitus.yaml"
     initialize = Mock(return_value=0)
     monkeypatch.setattr(cli, "_interactive", Mock(return_value=True))
     monkeypatch.setattr(cli, "_confirm", Mock(return_value=True))
@@ -880,7 +880,7 @@ def test_missing_config_offer_delegates_to_init_only_in_an_interactive_terminal(
 def test_exec_serve_replaces_process_with_module_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:
     replace = Mock()
     monkeypatch.setattr(os, "execv", replace)
-    config = Path("/tmp/m2bos-test/config.yaml")
+    config = Path("/tmp/habitus-test/config.yaml")
 
     cli._exec_serve(config)
 

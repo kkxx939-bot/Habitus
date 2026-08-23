@@ -13,7 +13,7 @@ from behavior.model import BehaviorAddress, BehaviorKind
 from behavior.schema import BehaviorSchemaRegistry
 from foundation.integrity import canonicalize
 
-_MARKER = "\n<!-- M2BOS_BEHAVIOR_FIELDS\n"
+_MARKER = "\n<!-- HABITUS_BEHAVIOR_FIELDS\n"
 _FOOTER = "\n-->\n"
 _METADATA_KEYS = {
     "behavior_type",
@@ -22,7 +22,6 @@ _METADATA_KEYS = {
     "updated_at",
     "fields",
     "links",
-    "backlinks",
 }
 
 
@@ -49,7 +48,6 @@ class BehaviorDocumentCodec:
         *,
         metadata: BehaviorDocumentMetadata,
         links: tuple[BehaviorStoredLink, ...] = (),
-        backlinks: tuple[BehaviorStoredLink, ...] = (),
     ) -> BehaviorDocument:
         if not isinstance(metadata, BehaviorDocumentMetadata):
             raise TypeError("metadata must be BehaviorDocumentMetadata")
@@ -64,7 +62,6 @@ class BehaviorDocumentCodec:
             fields=materialized.storage_fields,
             markdown_body=materialized.markdown_body,
             links=links,
-            backlinks=backlinks,
         )
 
     def encode(self, document: BehaviorDocument) -> str:
@@ -75,7 +72,6 @@ class BehaviorDocumentCodec:
             document.fields,
             metadata=document.metadata,
             links=document.links,
-            backlinks=document.backlinks,
         )
         if canonical.address != document.address:
             raise BehaviorDocumentIntegrityError("behavior document address is not canonical")
@@ -88,7 +84,6 @@ class BehaviorDocumentCodec:
             "updated_at": self._timestamp(canonical.metadata.updated_at),
             "fields": canonicalize(canonical.fields),
             "links": [link.to_dict() for link in canonical.links],
-            "backlinks": [link.to_dict() for link in canonical.backlinks],
         }
         # 结构字段保存在 HTML 注释里，正文中任意 `--` 都会提前闭合该注释；
         # 统一转义成 JSON 的 -，decode 时由 json.loads 原样还原，往返仍然逐字节一致。
@@ -108,7 +103,7 @@ class BehaviorDocumentCodec:
             raise TypeError("expected_address must be a BehaviorAddress")
         if raw.count(_MARKER) != 1 or not raw.endswith(_FOOTER):
             raise BehaviorDocumentIntegrityError(
-                "behavior document must contain one terminal M2BOS_BEHAVIOR_FIELDS comment"
+                "behavior document must contain one terminal HABITUS_BEHAVIOR_FIELDS comment"
             )
         markdown_body, _separator, metadata_with_footer = raw.partition(_MARKER)
         metadata_source = metadata_with_footer[: -len(_FOOTER)]
@@ -138,7 +133,6 @@ class BehaviorDocumentCodec:
                     updated_at=self._parse_timestamp(metadata["updated_at"], "updated_at"),
                 ),
                 links=parse_stored_links(metadata["links"], label="behavior document links"),
-                backlinks=parse_stored_links(metadata["backlinks"], label="behavior document backlinks"),
             )
         except (TypeError, ValueError) as exc:
             raise BehaviorDocumentIntegrityError("behavior document fields do not satisfy their Schema") from exc

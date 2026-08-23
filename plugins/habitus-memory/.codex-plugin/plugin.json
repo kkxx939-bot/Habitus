@@ -1,0 +1,24 @@
+{
+  "name": "habitus-memory",
+  "version": "0.1.0",
+  "description": "Single-user local semantic memory for Codex, powered by Habitus.",
+  "author": {
+    "name": "Habitus"
+  },
+  "license": "Apache-2.0",
+  "keywords": ["memory", "habitus", "codex", "local-first"],
+  "interface": {
+    "displayName": "Habitus Memory",
+    "shortDescription": "Local long-term memory for Codex.",
+    "longDescription": "Captures completed Codex turns into the local Habitus service, recalls bounded memory before prompts, and flushes safely before compaction.",
+    "developerName": "Habitus",
+    "category": "Productivity",
+    "capabilities": [
+      "Automatic memory recall before prompts",
+      "Durable incremental conversation capture",
+      "Pre-compaction memory flush",
+      "Offline outbox with exact replay"
+    ],
+    "defaultPrompt": ["Recall relevant local memory for this task."]
+  }
+}

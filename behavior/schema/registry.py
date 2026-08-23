@@ -1,4 +1,4 @@
-"""三类 L2 文档共用的唯一 Schema 注册表和规范物化入口。"""
+"""两类 L2 文档共用的唯一 Schema 注册表和规范物化入口。"""
 
 from __future__ import annotations
 
@@ -17,13 +17,11 @@ from behavior.schema.model import (
 )
 from behavior.schema.renderers import render_markdown
 from behavior.schema.validators import validate_payload
-from behavior.uri import BehaviorURI
 from foundation.integrity import canonical_json, canonicalize
 
 _SCHEMA_FILES = {
-    BehaviorKind.EVENT: "events.yaml",
-    BehaviorKind.OUTCOME: "outcomes.yaml",
-    BehaviorKind.EPISODE: "episodes.yaml",
+    BehaviorKind.OCCURRENCE: "occurrences.yaml",
+    BehaviorKind.GAP: "gaps.yaml",
 }
 
 
@@ -35,7 +33,7 @@ def _behavior_kind(value: BehaviorKind | str) -> BehaviorKind:
 
 
 class BehaviorSchemaRegistry:
-    """三类 L2 文档共用的唯一 Schema 注册表和规范渲染入口。"""
+    """两类 L2 文档共用的唯一 Schema 注册表和规范渲染入口。"""
 
     def __init__(self, schemas: tuple[BehaviorTypeSchema, ...]) -> None:
         by_kind: dict[BehaviorKind, BehaviorTypeSchema] = {}
@@ -112,22 +110,15 @@ class BehaviorSchemaRegistry:
     def _address_for_validated(kind: BehaviorKind, normalized: Mapping[str, Any]) -> BehaviorAddress:
         """只接受本注册表已经规范化完成的领域字段。"""
 
-        if kind is BehaviorKind.EVENT:
-            return BehaviorAddress.event(
-                normalized["event_date"],
-                normalized["event_name"],
+        if kind is BehaviorKind.OCCURRENCE:
+            return BehaviorAddress.occurrence(
+                normalized["occurred_on"],
+                normalized["name"],
                 normalized["started_at"],
             )
-        if kind is BehaviorKind.OUTCOME:
-            event_address = BehaviorURI.parse(normalized["event_uri"]).to_address()
-            return BehaviorAddress.outcome(
-                event_address.occurred_on,
-                event_address.name,
-                event_address.started_at,
-            )
-        return BehaviorAddress.episode(
-            normalized["episode_date"],
-            normalized["episode_name"],
+        return BehaviorAddress.gap(
+            normalized["occurred_on"],
+            normalized["gap_kind"],
             normalized["started_at"],
         )
 

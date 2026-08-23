@@ -1,4 +1,4 @@
-"""m2bOS 记忆主链的顶层组合入口。"""
+"""Habitus 记忆主链的顶层组合入口。"""
 
 from Runtime.assembly import build_runtime
 from Runtime.components import (

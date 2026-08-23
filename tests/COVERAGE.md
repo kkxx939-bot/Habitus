@@ -1,4 +1,4 @@
-# m2bOS 新记忆链测试覆盖矩阵
+# Habitus 新记忆链测试覆盖矩阵
 
 本目录只针对当前 `Conversation -> MemoryJob -> Memory Editor -> MemoryTree -> Semantic/Vector -> SearchService`
 主链编写测试，不恢复任何旧记忆接口或旧测试资产。每项先以领域不变量为测试依据，再覆盖正向、拒绝、幂等、边界和组合场景。

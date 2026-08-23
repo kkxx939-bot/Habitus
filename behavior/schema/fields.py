@@ -1,4 +1,9 @@
-"""按声明的字段类型把原始载荷规范化为强类型领域值。"""
+"""按声明的字段类型把原始载荷规范化为强类型领域值。
+
+时间纪律（用户裁定）：occurrence 上**全部时间统一为本地时间 + 显式偏移**，``available_at``
+也不例外——带偏移的本地时间就是完整瞬时，混用两种约定才是"取错时间"的事故源。UTC 归一保持在
+观测/判断层的入口，不进树；时序比较一律先解析为瞬时。
+"""
 
 from __future__ import annotations
 
@@ -9,19 +14,11 @@ from typing import Any
 from behavior.model import behavior_local_timestamp
 from behavior.schema.model import BehaviorFieldSchema, BehaviorFieldType, BehaviorSchemaError
 from behavior.schema.vocabulary import (
-    ACTION_STATUSES,
-    KNOWLEDGE_STATES,
-    OUTCOME_TARGET_TYPES,
-    OUTCOME_TYPES,
-    OUTCOME_VALENCES,
-    PHASE_STATUSES,
-    RECORD_ID,
+    GAP_KINDS,
+    OCCURRENCE_STATUSES,
     SHA256,
-    TRANSITION_TYPES,
-    UNPHASED_EVENT_ROLES,
+    STATUS_BASES,
 )
-from behavior.uri import BehaviorURI
-from foundation.integrity import canonical_json, canonicalize
 
 
 def strict_mapping(value: Any, label: str) -> dict[str, Any]:
@@ -68,6 +65,8 @@ def date_value(value: Any, label: str) -> date:
 
 
 def datetime_value(value: Any, label: str) -> datetime:
+    """带整分钟本地偏移的时刻；序列化保留偏移，不折 UTC。"""
+
     parsed = value
     if isinstance(value, str):
         try:
@@ -77,22 +76,13 @@ def datetime_value(value: Any, label: str) -> datetime:
     try:
         return behavior_local_timestamp(parsed, label)
     except (TypeError, ValueError) as exc:
-        raise BehaviorSchemaError(f"{label} must include a whole-minute UTC offset") from exc
+        raise BehaviorSchemaError(str(exc)) from exc
 
 
-def optional_datetime(value: Any, label: str) -> datetime | None:
-    if value is None:
-        return None
-    return datetime_value(value, label)
-
-
-def confidence(value: Any, label: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise BehaviorSchemaError(f"{label} must be numeric")
-    normalized = float(value)
-    if not 0.0 <= normalized <= 1.0:
-        raise BehaviorSchemaError(f"{label} must be between zero and one")
-    return normalized
+def boolean(value: Any, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise BehaviorSchemaError(f"{label} must be a boolean")
+    return value
 
 
 def _sequence(value: Any, label: str) -> tuple[Any, ...]:
@@ -108,220 +98,61 @@ def string_tuple(value: Any, label: str) -> tuple[str, ...]:
     return values
 
 
-def record_id(value: Any, label: str) -> str:
-    resolved = text(value, label)
-    if not RECORD_ID.fullmatch(resolved):
-        raise BehaviorSchemaError(f"{label} must be a stable lowercase record identifier")
-    return resolved
+def sha256_tuple(value: Any, label: str) -> tuple[str, ...]:
+    values: list[str] = []
+    for item in _sequence(value, label):
+        if not isinstance(item, str) or not SHA256.fullmatch(item):
+            raise BehaviorSchemaError(f"{label} must contain lowercase SHA-256 text")
+        values.append(item)
+    if len(values) != len(set(values)):
+        raise BehaviorSchemaError(f"{label} must not contain duplicates")
+    return tuple(values)
 
 
-def positive_integer(value: Any, label: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise BehaviorSchemaError(f"{label} must be a positive integer")
-    return value
-
-
-def enum(value: Any, allowed: frozenset[str], label: str) -> str:
+def _enum(value: Any, allowed: frozenset[str], label: str) -> str:
     resolved = text(value, label)
     if resolved not in allowed:
         raise BehaviorSchemaError(f"{label} must be one of {sorted(allowed)}")
     return resolved
 
 
-def uri_tuple(value: Any, label: str) -> tuple[str, ...]:
-    uris = tuple(str(BehaviorURI.parse(text(item, f"{label} item"))) for item in _sequence(value, label))
-    if len(uris) != len(set(uris)):
-        raise BehaviorSchemaError(f"{label} must not contain duplicate URIs")
-    return uris
+def occurrence_status(value: Any, label: str) -> str:
+    return _enum(value, OCCURRENCE_STATUSES, label)
 
 
-def actions(value: Any, label: str) -> tuple[dict[str, Any], ...]:
-    expected = {
-        "action_id",
-        "sequence",
-        "actor",
-        "action_type",
-        "semantics",
-        "target_refs",
-        "method",
-        "parameters",
-        "started_at",
-        "ended_at",
-        "available_at",
-        "status",
-        "knowledge_state",
-        "evidence_refs",
-    }
+def status_basis(value: Any, label: str) -> str:
+    return _enum(value, STATUS_BASES, label)
+
+
+def gap_kind(value: Any, label: str) -> str:
+    return _enum(value, GAP_KINDS, label)
+
+
+def basis_steps(value: Any, label: str) -> tuple[dict[str, Any], ...]:
+    """构成一件事的行为事实步骤；每步的时间在写入时从观测物化（观测之后会释放）。"""
+
+    expected = {"semantics", "observation_ids", "started_at", "ended_at", "available_at"}
     resolved: list[dict[str, Any]] = []
     for index, item in enumerate(_sequence(value, label), start=1):
         payload = strict_mapping(item, f"{label}[{index}]")
         require_keys(payload, expected, f"{label}[{index}]")
-        parameters = strict_mapping(payload["parameters"], f"{label}[{index}].parameters")
-        normalized_parameters = canonicalize(parameters)
-        try:
-            canonical_json(normalized_parameters).encode("utf-8")
-        except UnicodeEncodeError as exc:
-            raise BehaviorSchemaError("action parameters must be canonical UTF-8 JSON") from exc
-        started_at = optional_datetime(payload["started_at"], "action started_at")
-        ended_at = optional_datetime(payload["ended_at"], "action ended_at")
-        available_at = datetime_value(payload["available_at"], "action available_at")
-        if started_at is not None and ended_at is not None and ended_at < started_at:
-            raise BehaviorSchemaError("action ended_at cannot precede started_at")
-        if started_at is not None and available_at < started_at:
-            raise BehaviorSchemaError("action available_at cannot precede started_at")
+        observation_ids = sha256_tuple(
+            payload["observation_ids"], f"{label}[{index}].observation_ids"
+        )
+        if not observation_ids:
+            raise BehaviorSchemaError(f"{label}[{index}] must reference at least one observation")
+        started_at = datetime_value(payload["started_at"], f"{label}[{index}].started_at")
+        ended_at = datetime_value(payload["ended_at"], f"{label}[{index}].ended_at")
+        available_at = datetime_value(payload["available_at"], f"{label}[{index}].available_at")
+        if ended_at < started_at:
+            raise BehaviorSchemaError(f"{label}[{index}] ended_at cannot precede started_at")
         resolved.append(
             {
-                "action_id": record_id(payload["action_id"], "action_id"),
-                "sequence": positive_integer(payload["sequence"], "action sequence"),
-                "actor": text(payload["actor"], "action actor"),
-                "action_type": text(payload["action_type"], "action type"),
-                "semantics": text(payload["semantics"], "action semantics"),
-                "target_refs": string_tuple(payload["target_refs"], "action target_refs"),
-                "method": optional_text(payload["method"], "action method"),
-                "parameters": normalized_parameters,
+                "semantics": text(payload["semantics"], f"{label}[{index}].semantics"),
+                "observation_ids": observation_ids,
                 "started_at": started_at,
                 "ended_at": ended_at,
                 "available_at": available_at,
-                "status": enum(payload["status"], ACTION_STATUSES, "action status"),
-                "knowledge_state": enum(payload["knowledge_state"], KNOWLEDGE_STATES, "action knowledge_state"),
-                "evidence_refs": string_tuple(payload["evidence_refs"], "action evidence_refs"),
-            }
-        )
-    return tuple(resolved)
-
-
-def outcomes(value: Any, label: str) -> tuple[dict[str, Any], ...]:
-    expected = {
-        "outcome_id",
-        "occurred_at",
-        "outcome_type",
-        "target_type",
-        "target_action_id",
-        "semantics",
-        "valence",
-        "knowledge_state",
-        "confidence",
-        "evidence_refs",
-    }
-    resolved: list[dict[str, Any]] = []
-    for index, item in enumerate(_sequence(value, label), start=1):
-        payload = strict_mapping(item, f"{label}[{index}]")
-        require_keys(payload, expected, f"{label}[{index}]")
-        target_type = enum(payload["target_type"], OUTCOME_TARGET_TYPES, "outcome target_type")
-        target_action_id = (
-            None
-            if payload["target_action_id"] is None
-            else record_id(payload["target_action_id"], "outcome target_action_id")
-        )
-        if (target_type == "action") != (target_action_id is not None):
-            raise BehaviorSchemaError("action Outcome requires target_action_id; Event Outcome forbids it")
-        resolved.append(
-            {
-                "outcome_id": record_id(payload["outcome_id"], "outcome_id"),
-                "occurred_at": datetime_value(payload["occurred_at"], "outcome occurred_at"),
-                "outcome_type": enum(payload["outcome_type"], OUTCOME_TYPES, "outcome type"),
-                "target_type": target_type,
-                "target_action_id": target_action_id,
-                "semantics": text(payload["semantics"], "outcome semantics"),
-                "valence": enum(payload["valence"], OUTCOME_VALENCES, "outcome valence"),
-                "knowledge_state": enum(payload["knowledge_state"], KNOWLEDGE_STATES, "outcome knowledge_state"),
-                "confidence": confidence(payload["confidence"], "outcome confidence"),
-                "evidence_refs": string_tuple(payload["evidence_refs"], "outcome evidence_refs"),
-            }
-        )
-    return tuple(resolved)
-
-
-def phases(value: Any, label: str) -> tuple[dict[str, Any], ...]:
-    expected = {
-        "phase_id",
-        "sequence",
-        "semantics",
-        "status",
-        "event_uris",
-        "started_at",
-        "ended_at",
-        "confidence",
-    }
-    resolved: list[dict[str, Any]] = []
-    for index, item in enumerate(_sequence(value, label), start=1):
-        payload = strict_mapping(item, f"{label}[{index}]")
-        require_keys(payload, expected, f"{label}[{index}]")
-        event_uris = uri_tuple(payload["event_uris"], "phase event_uris")
-        if not event_uris:
-            raise BehaviorSchemaError("episode Phase must contain at least one Event")
-        resolved.append(
-            {
-                "phase_id": record_id(payload["phase_id"], "phase_id"),
-                "sequence": positive_integer(payload["sequence"], "phase sequence"),
-                "semantics": text(payload["semantics"], "phase semantics"),
-                "status": enum(payload["status"], PHASE_STATUSES, "phase status"),
-                "event_uris": event_uris,
-                "started_at": datetime_value(payload["started_at"], "phase started_at"),
-                "ended_at": optional_datetime(payload["ended_at"], "phase ended_at"),
-                "confidence": confidence(payload["confidence"], "phase confidence"),
-            }
-        )
-    return tuple(resolved)
-
-
-def unphased_events(value: Any, label: str) -> tuple[dict[str, str], ...]:
-    expected = {"event_uri", "role", "reason"}
-    resolved: list[dict[str, str]] = []
-    for index, item in enumerate(_sequence(value, label), start=1):
-        payload = strict_mapping(item, f"{label}[{index}]")
-        require_keys(payload, expected, f"{label}[{index}]")
-        resolved.append(
-            {
-                "event_uri": str(BehaviorURI.parse(text(payload["event_uri"], "unphased event_uri"))),
-                "role": enum(payload["role"], UNPHASED_EVENT_ROLES, "unphased Event role"),
-                "reason": text(payload["reason"], "unphased Event reason"),
-            }
-        )
-    uris = tuple(item["event_uri"] for item in resolved)
-    if len(uris) != len(set(uris)):
-        raise BehaviorSchemaError("episode unphased Events must not contain duplicates")
-    return tuple(resolved)
-
-
-def outcome_snapshots(value: Any, label: str) -> tuple[dict[str, Any], ...]:
-    expected = {"uri", "revision", "digest"}
-    resolved: list[dict[str, Any]] = []
-    for index, item in enumerate(_sequence(value, label), start=1):
-        payload = strict_mapping(item, f"{label}[{index}]")
-        require_keys(payload, expected, f"{label}[{index}]")
-        revision = positive_integer(payload["revision"], "Outcome snapshot revision")
-        digest = text(payload["digest"], "Outcome snapshot digest")
-        if not SHA256.fullmatch(digest):
-            raise BehaviorSchemaError("Outcome snapshot digest must be a lowercase SHA-256 hex digest")
-        resolved.append(
-            {
-                "uri": str(BehaviorURI.parse(text(payload["uri"], "Outcome snapshot URI"))),
-                "revision": revision,
-                "digest": digest,
-            }
-        )
-    uris = tuple(snapshot["uri"] for snapshot in resolved)
-    if len(uris) != len(set(uris)):
-        raise BehaviorSchemaError("Outcome snapshots must not contain duplicate URIs")
-    return tuple(resolved)
-
-
-def transitions(value: Any, label: str) -> tuple[dict[str, str], ...]:
-    expected = {"from_event_uri", "to_event_uri", "relation"}
-    resolved: list[dict[str, str]] = []
-    for index, item in enumerate(_sequence(value, label), start=1):
-        payload = strict_mapping(item, f"{label}[{index}]")
-        require_keys(payload, expected, f"{label}[{index}]")
-        source = str(BehaviorURI.parse(text(payload["from_event_uri"], "transition from_event_uri")))
-        target = str(BehaviorURI.parse(text(payload["to_event_uri"], "transition to_event_uri")))
-        if source == target:
-            raise BehaviorSchemaError("episode transition cannot reference one Event twice")
-        resolved.append(
-            {
-                "from_event_uri": source,
-                "to_event_uri": target,
-                "relation": enum(payload["relation"], TRANSITION_TYPES, "transition relation"),
             }
         )
     return tuple(resolved)
@@ -332,16 +163,13 @@ _VALIDATORS: dict[BehaviorFieldType, Callable[[Any, str], Any]] = {
     BehaviorFieldType.OPTIONAL_STRING: optional_text,
     BehaviorFieldType.DATE: date_value,
     BehaviorFieldType.DATETIME: datetime_value,
-    BehaviorFieldType.OPTIONAL_DATETIME: optional_datetime,
-    BehaviorFieldType.NUMBER: confidence,
+    BehaviorFieldType.BOOLEAN: boolean,
     BehaviorFieldType.STRING_LIST: string_tuple,
-    BehaviorFieldType.ACTION_LIST: actions,
-    BehaviorFieldType.OUTCOME_LIST: outcomes,
-    BehaviorFieldType.URI_LIST: uri_tuple,
-    BehaviorFieldType.PHASE_LIST: phases,
-    BehaviorFieldType.UNPHASED_EVENT_LIST: unphased_events,
-    BehaviorFieldType.OUTCOME_SNAPSHOT_LIST: outcome_snapshots,
-    BehaviorFieldType.TRANSITION_LIST: transitions,
+    BehaviorFieldType.SHA256_LIST: sha256_tuple,
+    BehaviorFieldType.OCCURRENCE_STATUS: occurrence_status,
+    BehaviorFieldType.STATUS_BASIS: status_basis,
+    BehaviorFieldType.GAP_KIND: gap_kind,
+    BehaviorFieldType.BASIS_LIST: basis_steps,
 }
 
 

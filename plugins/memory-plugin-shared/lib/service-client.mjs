@@ -2,7 +2,7 @@ function retryableStatus(status) {
   return !status || status === 408 || status === 429 || status >= 500;
 }
 
-export class M2BOSServiceClient {
+export class HabitusServiceClient {
   constructor(config, fetchImpl = globalThis.fetch) {
     if (typeof fetchImpl !== "function") throw new TypeError("fetch implementation is required");
     this.config = config;

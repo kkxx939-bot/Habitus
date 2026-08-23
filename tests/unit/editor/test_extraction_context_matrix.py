@@ -84,7 +84,7 @@ def related_documents(*, consistent: bool = True):
     )
     target_base = document(
         MemoryKind.ENTITY,
-        fields={"category": "项目", "name": "m2bOS", "summary": "用户正在重构的记忆系统。"},
+        fields={"category": "项目", "name": "Habitus", "summary": "用户正在重构的记忆系统。"},
     )
     relation = MemoryStoredLink(
         MemoryURI.from_address(source_base.address),

@@ -153,8 +153,8 @@ def test_initialized_backend_projects_metrics_and_safe_trace_event(monkeypatch: 
     assert all(len(instrument.values) == 3 for instrument in meter.created.values())
     assert current_span.events[0][0] == "http.request"
     trace_attributes = current_span.events[0][1]
-    assert trace_attributes["m2bos.request_id"] == "otel-request"
-    assert trace_attributes["m2bos.memory_sequence"] == 3
+    assert trace_attributes["habitus.request_id"] == "otel-request"
+    assert trace_attributes["habitus.memory_sequence"] == 3
     assert "content" not in trace_attributes
     assert len(current_span.statuses) == 1
     assert current_span.statuses[0].status_code == "error"  # type: ignore[attr-defined]
@@ -175,8 +175,8 @@ def test_span_keeps_bounded_attributes_and_marks_error_type() -> None:
             raise ValueError("boom")
 
     assert tracer.calls[0]["name"] == "memory.commit"
-    assert tracer.calls[0]["attributes"] == {"m2bos.stage": "l2_commit"}
-    assert tracer.span.attributes == {"m2bos.error_type": "ValueError"}
+    assert tracer.calls[0]["attributes"] == {"habitus.stage": "l2_commit"}
+    assert tracer.span.attributes == {"habitus.error_type": "ValueError"}
     assert len(tracer.span.statuses) == 1
 
 

@@ -1,4 +1,4 @@
-"""m2bOS Runtime 的可选 FastAPI 传输适配器。"""
+"""Habitus Runtime 的可选 FastAPI 传输适配器。"""
 
 from __future__ import annotations
 

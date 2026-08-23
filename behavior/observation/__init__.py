@@ -7,7 +7,7 @@
 from behavior.observation.adapters import (
     BehaviorObservationAdapter,
     BehaviorObservationAdapterRegistry,
-    M2BOSBehaviorObservationAdapter,
+    HabitusBehaviorObservationAdapter,
 )
 from behavior.observation.config import BehaviorObservationConfig
 from behavior.observation.errors import (
@@ -35,5 +35,5 @@ __all__ = [
     "BehaviorObservationModality",
     "BehaviorObservationProtocolError",
     "BehaviorObservationStore",
-    "M2BOSBehaviorObservationAdapter",
+    "HabitusBehaviorObservationAdapter",
 ]

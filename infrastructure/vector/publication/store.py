@@ -24,7 +24,7 @@ from infrastructure.vector.model import (
 )
 from ModelClient import EmbeddingVector
 
-_PUBLICATION_FORMAT = "m2bos_vector_publication_v1"
+_PUBLICATION_FORMAT = "habitus_vector_publication_v1"
 _STATE_METADATA = "state"
 _CLAIM_METADATA = "claim"
 _SHARED_LOCKS_GUARD = threading.Lock()

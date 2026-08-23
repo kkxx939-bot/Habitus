@@ -44,16 +44,6 @@ class BehaviorDocumentMetadata:
         normalized = utc_timestamp(timestamp, "timestamp")
         return cls(revision=1, created_at=normalized, updated_at=normalized)
 
-    def next_revision(self, timestamp: datetime) -> BehaviorDocumentMetadata:
-        normalized = utc_timestamp(timestamp, "timestamp")
-        if normalized < self.updated_at:
-            raise ValueError("next behavior revision timestamp cannot move backwards")
-        return BehaviorDocumentMetadata(
-            revision=self.revision + 1,
-            created_at=self.created_at,
-            updated_at=normalized,
-        )
-
 
 @dataclass(frozen=True)
 class BehaviorDocument:
@@ -65,7 +55,6 @@ class BehaviorDocument:
     fields: Mapping[str, Any]
     markdown_body: str
     links: tuple[BehaviorStoredLink, ...] = ()
-    backlinks: tuple[BehaviorStoredLink, ...] = ()
 
     def __post_init__(self) -> None:
         kind = BehaviorKind(self.kind)
@@ -82,14 +71,10 @@ class BehaviorDocument:
         if not self.markdown_body.endswith("\n"):
             raise ValueError("behavior document Markdown body must end with a newline")
         links = normalize_stored_links(self.links, label="behavior document links")
-        backlinks = normalize_stored_links(self.backlinks, label="behavior document backlinks")
         uri = BehaviorURI.from_address(self.address)
         if any(link.from_uri != uri for link in links):
             raise ValueError("behavior document forward link has the wrong source URI")
-        if any(link.to_uri != uri for link in backlinks):
-            raise ValueError("behavior document backlink has the wrong target URI")
         object.__setattr__(self, "links", links)
-        object.__setattr__(self, "backlinks", backlinks)
 
 
 __all__ = ["BehaviorDocument", "BehaviorDocumentMetadata", "utc_timestamp"]

@@ -1,4 +1,4 @@
-"""m2bOS 产品边界矩阵、预算判定与独立运行聚合。"""
+"""Habitus 产品边界矩阵、预算判定与独立运行聚合。"""
 
 from __future__ import annotations
 
@@ -202,7 +202,7 @@ class BoundaryPolicy:
     plateau_gain_fraction: float = 0.05
     knee_latency_multiplier: float = 2.0
 
-    SCHEMA_VERSION = "m2bos_boundary_policy_v1"
+    SCHEMA_VERSION = "habitus_boundary_policy_v1"
 
     def __post_init__(self) -> None:
         if (
@@ -353,7 +353,7 @@ def aggregate_boundary_points(
 
     boundaries = _boundaries(aggregated, policy)
     return {
-        "schema_version": "m2bos_boundary_aggregate_v1",
+        "schema_version": "habitus_boundary_aggregate_v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "policy": policy.to_dict(),
         "point_count": len(points),
@@ -378,7 +378,7 @@ def write_boundary_outputs(
     output.mkdir(parents=True, exist_ok=True)
     aggregate = aggregate_boundary_points(points, policy=policy)
     document: dict[str, object] = {
-        "schema_version": "m2bos_boundary_run_v1",
+        "schema_version": "habitus_boundary_run_v1",
         "lane": lane,
         "profile": profile.to_dict(),
         "metadata": dict(metadata),
@@ -404,7 +404,7 @@ def aggregate_boundary_runs(
     documents = [_read_json_object(Path(path), label="boundary run") for path in paths]
     reference = documents[0]
     for document in documents:
-        if document.get("schema_version") != "m2bos_boundary_run_v1":
+        if document.get("schema_version") != "habitus_boundary_run_v1":
             raise BoundaryBenchmarkError("unsupported boundary run schema_version")
         if document.get("lane") != reference.get("lane") or document.get("profile") != reference.get("profile"):
             raise BoundaryBenchmarkError("boundary runs use different lanes or profiles")
@@ -413,7 +413,7 @@ def aggregate_boundary_runs(
     points = [point for document in documents for point in _object_array(document.get("points"), "boundary points")]
     aggregate = aggregate_boundary_points(points, policy=policy)
     result: dict[str, object] = {
-        "schema_version": "m2bos_boundary_multi_run_v1",
+        "schema_version": "habitus_boundary_multi_run_v1",
         "lane": reference["lane"],
         "profile": reference["profile"],
         "source_runs": [str(Path(path).expanduser().resolve()) for path in paths],
@@ -641,7 +641,7 @@ def _markdown_report(document: Mapping[str, object]) -> str:
     boundaries = _object_array(aggregate.get("boundaries"), "boundary summaries")
     points = _object_array(aggregate.get("points"), "aggregated points")
     lines = [
-        "# m2bOS 产品边界报告",
+        "# Habitus 产品边界报告",
         "",
         f"- Lane: `{document.get('lane', 'multi')}`",
         f"- Raw points: `{aggregate.get('point_count', 0)}`",
@@ -717,7 +717,7 @@ def _number_or_none(value: object) -> float | None:
 def _validate_boundary_point(point: Mapping[str, object]) -> None:
     if not isinstance(point, Mapping):
         raise BoundaryBenchmarkError("boundary point must be an object")
-    if point.get("schema_version") != "m2bos_boundary_point_v1":
+    if point.get("schema_version") != "habitus_boundary_point_v1":
         raise BoundaryBenchmarkError("unsupported boundary point schema_version")
     missing = set(_GROUP_FIELDS) - set(point)
     if missing:

@@ -1,4 +1,4 @@
-"""严格读取 m2bOS 的单一 YAML 配置文件。"""
+"""严格读取 Habitus 的单一 YAML 配置文件。"""
 
 from __future__ import annotations
 

@@ -35,7 +35,7 @@ def build_report(
             raise BenchmarkRunError("judge results do not cover exactly the answer records")
 
     summary: dict[str, object] = {
-        "schema_version": "m2bos_benchmark_report_v2",
+        "schema_version": "habitus_benchmark_report_v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "dataset": answers[0].dataset if answers else "",
         "sample_count": len({item.sample_id for item in answers}),
@@ -208,7 +208,7 @@ def _markdown(summary: Mapping[str, object]) -> str:
     accuracy = quality.get("accuracy")
     accuracy_text = "not graded" if accuracy is None else f"{float(accuracy):.2%}"
     lines = [
-        "# m2bOS Memory Benchmark",
+        "# Habitus Memory Benchmark",
         "",
         f"- Dataset: `{summary['dataset']}`",
         f"- Samples: {summary['sample_count']}",

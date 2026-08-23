@@ -1,125 +1,87 @@
-"""把已经校验完成的领域字段确定性渲染为人类可读的 L2 正文。"""
+"""把已经校验完成的领域字段确定性渲染为人类可读的 L2 正文。
+
+正文只呈现语义面与一行数字面摘要；system（溯源）角色不进正文，只存在于末尾结构块。
+守卫测试保证每个非 system 字段都出现在渲染结果里——防止将来加字段忘了进正文。
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
 from behavior.model import BehaviorKind
 
+_STATUS_TEXT = {
+    "ongoing": "还在进行",
+    "completed": "做完了",
+    "interrupted": "被打断",
+    "abandoned": "放弃了",
+}
+_BASIS_TEXT = {
+    "observed": "看到了",
+    "inferred": "推断的",
+    "observation_lost": "之后没看到",
+}
+
 
 def render_markdown(kind: BehaviorKind, payload: Mapping[str, Any]) -> str:
     """同一份字段永远渲染出同一段正文；正文是字段的确定性函数。"""
 
-    if kind is BehaviorKind.EVENT:
-        return _render_event(payload)
-    if kind is BehaviorKind.OUTCOME:
-        return _render_outcome(payload)
-    return _render_episode(payload)
+    if kind is BehaviorKind.OCCURRENCE:
+        return _render_occurrence(payload)
+    return _render_gap(payload)
 
 
-def _render_event(payload: Mapping[str, Any]) -> str:
+def _render_occurrence(payload: Mapping[str, Any]) -> str:
+    status_text = _STATUS_TEXT[payload["status"]]
+    basis_text = _BASIS_TEXT[payload["status_basis"]]
     lines = [
-        f"# {payload['event_name']}",
+        f"# {payload['name']}",
         "",
-        f"**Date:** {payload['event_date'].isoformat()}",
-        f"**Time:** {_time_range(payload['started_at'], payload['ended_at'])}",
-        f"**Onset available:** {payload['onset_available_at'].isoformat()}",
-        f"**Status:** {payload['status']}",
-        "",
-        "## Onset",
-        str(payload["onset_semantics"]),
-        "",
-        "## Summary",
-        str(payload["semantic_summary"]),
+        f"**时间** {_local(payload['started_at'])} — 最后所见 {_local(payload['last_observed_at'])}",
+        f"**类型** {payload['kind_token']} · **结束** {status_text}（{basis_text}）",
+        f"**首次可知** {_local(payload['onset_available_at'])}"
+        + ("　·　此前被提醒过" if payload["reminded"] else ""),
     ]
-    _append_bullets(lines, "Facts", payload["semantic_facts"])
-    _append_optional(lines, "Trigger", payload["trigger"])
-    _append_optional(lines, "Goal", payload["goal"])
-    _append_bullets(lines, "Constraints", payload["constraints"])
-    _append_bullets(lines, "Participants", payload["participants"])
-    lines.extend(["", "## Actions"])
-    for action in payload["actions"]:
-        lines.append(
-            f"{action['sequence']}. **{action['actor']} · {action['action_type']}** — "
-            f"{action['semantics']} ({action['status']})"
-        )
-    _append_optional(lines, "Closure", payload["closure_reason"])
-    _append_bullets(lines, "Conflicts", payload["conflicts"])
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def _render_outcome(payload: Mapping[str, Any]) -> str:
-    lines = [
-        f"# {payload['event_name']} — Outcomes",
-        "",
-        f"**Event:** {payload['event_uri']}",
-        "",
-        "## Results",
-    ]
-    for outcome in payload["outcomes"]:
-        target = outcome["target_type"]
-        if outcome["target_action_id"] is not None:
-            target = f"{target}:{outcome['target_action_id']}"
-        lines.append(
-            f"- **{outcome['occurred_at'].isoformat()} · {outcome['outcome_type']} · {target}** — "
-            f"{outcome['semantics']} ({outcome['valence']})"
-        )
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def _render_episode(payload: Mapping[str, Any]) -> str:
-    lines = [
-        f"# {payload['episode_name']}",
-        "",
-        f"**Time:** {_time_range(payload['started_at'], payload['ended_at'])}",
-        f"**Status:** {payload['status']}",
-        "",
-        "## Summary",
-        str(payload["semantic_summary"]),
-    ]
-    _append_optional(lines, "Goal", payload["goal"])
-    _append_bullets(lines, "Participants", payload["participants"])
-    lines.extend(["", "## Event Timeline"])
-    lines.extend(f"{index}. {uri}" for index, uri in enumerate(payload["ordered_event_uris"], start=1))
-    if payload["phases"]:
-        lines.extend(["", "## Phases"])
-        for phase in payload["phases"]:
+    if payload["original_name"] is not None:
+        lines.append(f"**原始名** {payload['original_name']}　·　撞车消歧的重复记录，统计不计入")
+    if payload["goal"] is not None:
+        lines.append(f"**目标** {payload['goal']}")
+    if payload["place"] is not None:
+        lines.append(f"**地点** {payload['place']}")
+    lines.extend(["", str(payload["summary"])])
+    lines.extend(["", f"**主体** {'、'.join(payload['subjects'])}"])
+    if payload["basis"]:
+        lines.extend(["", "## 步骤"])
+        for index, step in enumerate(payload["basis"], start=1):
             lines.append(
-                f"{phase['sequence']}. **{phase['semantics']}** "
-                f"({phase['status']}, {_time_range(phase['started_at'], phase['ended_at'])}, "
-                f"confidence={phase['confidence']:.3f})"
+                f"{index}. {step['semantics']}"
+                f"（{_local_time(step['started_at'])}–{_local_time(step['ended_at'])}，"
+                f"可知于 {_local_time(step['available_at'])}）"
             )
-            lines.extend(f"   - {uri}" for uri in phase["event_uris"])
-    if payload["unphased_events"]:
-        lines.extend(["", "## Unphased Events"])
-        for event in payload["unphased_events"]:
-            lines.append(f"- {event['event_uri']} [{event['role']}] — {event['reason']}")
-    if payload["transitions"]:
-        lines.extend(["", "## Transitions"])
-        for transition in payload["transitions"]:
-            lines.append(f"- {transition['from_event_uri']} --{transition['relation']}--> {transition['to_event_uri']}")
-    _append_bullets(lines, "Key Turning Points", payload["key_turning_points"])
-    _append_bullets(lines, "Outcomes", payload["outcome_uris"])
-    _append_optional(lines, "Closure", payload["closure_reason"])
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _append_optional(lines: list[str], title: str, value: Any) -> None:
-    if value is not None:
-        lines.extend(["", f"## {title}", str(value)])
+def _render_gap(payload: Mapping[str, Any]) -> str:
+    lines = [
+        f"# {payload['gap_kind']}",
+        "",
+        f"**时段** {_local(payload['started_at'])} — {_local(payload['ended_at'])}",
+        "",
+        "这段时间我们不知道发生了什么。"
+        if payload["gap_kind"] == "未观测"
+        else "这段时间观测到了内容，但没能读懂。",
+    ]
+    return "\n".join(lines).rstrip() + "\n"
 
 
-def _append_bullets(lines: list[str], title: str, values: Sequence[Any]) -> None:
-    if values:
-        lines.extend(["", f"## {title}"])
-        lines.extend(f"- {value}" for value in values)
+def _local(value: datetime) -> str:
+    return value.isoformat(timespec="seconds")
 
 
-def _time_range(started_at: datetime, ended_at: datetime | None) -> str:
-    end = "unknown" if ended_at is None else ended_at.isoformat()
-    return f"{started_at.isoformat()} — {end}"
+def _local_time(value: datetime) -> str:
+    return value.strftime("%H:%M:%S")
 
 
 __all__ = ["render_markdown"]

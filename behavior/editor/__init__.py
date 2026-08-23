@@ -1,7 +1,6 @@
-"""行为语义 L2 的受控发布与 Outcome 追加入口。"""
+"""行为语义 L2 的唯一受控发布入口（纯 add-only）。"""
 
 from behavior.editor.writer import (
-    BehaviorCASConflictError,
     BehaviorDocumentWriter,
     BehaviorPublishConflictError,
     BehaviorReadBackError,
@@ -9,7 +8,6 @@ from behavior.editor.writer import (
 )
 
 __all__ = [
-    "BehaviorCASConflictError",
     "BehaviorDocumentWriter",
     "BehaviorPublishConflictError",
     "BehaviorReadBackError",

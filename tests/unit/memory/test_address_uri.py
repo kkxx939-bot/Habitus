@@ -13,7 +13,7 @@ from memory.uri import MemoryURI, MemoryURIError, MemoryURINodeType
     [
         (MemoryAddress.profile(), "memory://profile.md"),
         (MemoryAddress.preference("回答风格"), "memory://preferences/回答风格.md"),
-        (MemoryAddress.entity("项目", "m2bOS"), "memory://entities/项目/m2bos.md"),
+        (MemoryAddress.entity("项目", "Habitus"), "memory://entities/项目/habitus.md"),
         (MemoryAddress.tool("workspace.inspect"), "memory://tools/workspace.inspect.md"),
         (MemoryAddress.event(date(2026, 7, 1), "确认记忆树"), "memory://events/2026/07/01/确认记忆树.md"),
         (MemoryAddress.intention("完成重构"), "memory://intentions/完成重构.md"),
@@ -97,5 +97,5 @@ def test_uri_join_requires_directory_and_prefix_matches_complete_segments() -> N
     assert preferences.join("回答风格.md") == "memory://preferences/回答风格.md"
     with pytest.raises(MemoryURIError, match="directory"):
         preferences.join("回答风格.md").join("child")
-    assert MemoryURI("memory://entities/项目/m2bOS.md").matches_prefix("memory://entities/项目")
-    assert not MemoryURI("memory://entities/项目甲/m2bOS.md").matches_prefix("memory://entities/项目")
+    assert MemoryURI("memory://entities/项目/Habitus.md").matches_prefix("memory://entities/项目")
+    assert not MemoryURI("memory://entities/项目甲/Habitus.md").matches_prefix("memory://entities/项目")

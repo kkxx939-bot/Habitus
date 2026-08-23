@@ -14,7 +14,7 @@ from benchmark.isolation import isolated_config, require_empty_directory
 from benchmark.metrics import latency_distribution
 from benchmark.model import BenchmarkDataset, BenchmarkQuestion, BenchmarkSample, BenchmarkSession
 from benchmark.runner import BenchmarkRunError, conversation_batch
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from memory.conversation import ConversationAddress
 from memory.workflow import MemoryJobStatus
 from pre.conversation import ConversationBatch
@@ -26,7 +26,7 @@ class RuntimeLoadBenchmark:
 
     def __init__(
         self,
-        config: M2BOSConfig,
+        config: HabitusConfig,
         dataset: BenchmarkDataset,
         *,
         output_directory: str | Path,
@@ -37,7 +37,7 @@ class RuntimeLoadBenchmark:
         top_k: int = 10,
         drain_timeout_seconds: float = 1_800.0,
     ) -> None:
-        if not isinstance(config, M2BOSConfig) or not isinstance(dataset, BenchmarkDataset):
+        if not isinstance(config, HabitusConfig) or not isinstance(dataset, BenchmarkDataset):
             raise TypeError("runtime load benchmark requires config and dataset")
         if len(dataset.samples) != 1:
             raise ValueError("runtime load benchmark requires exactly one selected sample")
@@ -116,7 +116,7 @@ class RuntimeLoadBenchmark:
             jobs = runtime.components.workflow.jobs.high_watermark()
             memories = runtime.components.memory.tree.list_addresses(limit=10_000)
             summary: dict[str, object] = {
-                "schema_version": "m2bos_runtime_load_benchmark_v1",
+                "schema_version": "habitus_runtime_load_benchmark_v1",
                 "started_at": started_at,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "dataset": self.dataset.name.value,

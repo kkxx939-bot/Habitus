@@ -1,5 +1,6 @@
-"""m2bOS 唯一外部配置入口。"""
+"""Habitus 唯一外部配置入口。"""
 
+from Config.behavior import BehaviorConfig
 from Config.conversation import (
     ConversationBehaviorProjectionConfig,
     ConversationConfig,
@@ -21,13 +22,14 @@ from Config.observability import (
     ObservabilityMetricsConfig,
     ObservabilityTracingConfig,
 )
-from Config.root import M2BOSConfig
+from Config.root import HabitusConfig
 from Config.storage import StorageConfig
 from Config.workflow import MemoryWorkflowLifecycleConfig, WorkerConfig, WorkflowConfig
 from memory.intention import MemoryIntentionReviewConfig
 from memory.retrieval import MemoryRecallLifecycleConfig, MemorySearchServiceConfig
 
 __all__ = [
+    "BehaviorConfig",
     "ConfigError",
     "CredentialRegistry",
     "ConversationBehaviorProjectionConfig",
@@ -38,7 +40,7 @@ __all__ = [
     "ConversationSourceConfig",
     "ConversationSummaryCompactionConfig",
     "HTTPAPIConfig",
-    "M2BOSConfig",
+    "HabitusConfig",
     "MemoryConfig",
     "MemoryIntentionReviewConfig",
     "MemoryRecallLifecycleConfig",

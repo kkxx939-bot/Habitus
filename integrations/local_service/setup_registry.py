@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal
 
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from infrastructure.vector import VectorStoreConfig, VectorStoreRequirements
 from infrastructure.vector.adapters.vikingdb_config import VikingDBVectorStoreConfig
 from ModelClient import CapabilityConfig
@@ -144,7 +144,7 @@ class SetupProfile:
 
 CredentialFieldsResolver = Callable[[Mapping[str, object]], tuple[str, ...]]
 DependencyResolver = Callable[[Mapping[str, object]], tuple[str, ...]]
-ConfigurationValidator = Callable[[M2BOSConfig], None]
+ConfigurationValidator = Callable[[HabitusConfig], None]
 
 
 @dataclass(frozen=True)
@@ -223,10 +223,10 @@ class SetupRegistry:
 
     def configured_adapters(
         self,
-        config: M2BOSConfig,
+        config: HabitusConfig,
     ) -> tuple[tuple[SetupCapability, str], ...]:
-        if not isinstance(config, M2BOSConfig):
-            raise TypeError("config must be M2BOSConfig")
+        if not isinstance(config, HabitusConfig):
+            raise TypeError("config must be HabitusConfig")
         return tuple(
             (capability, str(_mapping_at(document, "route").get("adapter", "")))
             for capability, document in _active_adapter_documents(config)
@@ -252,7 +252,7 @@ class SetupRegistry:
             )
         return preferred[0]
 
-    def required_credentials(self, config: M2BOSConfig) -> dict[str, set[str]]:
+    def required_credentials(self, config: HabitusConfig) -> dict[str, set[str]]:
         required: dict[str, set[str]] = {}
         for capability, document in _active_adapter_documents(config):
             self._add_required_credentials(required, capability, document)
@@ -284,7 +284,7 @@ class SetupRegistry:
                 registration.credential_fields(document)
             )
 
-    def dependency_modules(self, config: M2BOSConfig) -> tuple[str, ...]:
+    def dependency_modules(self, config: HabitusConfig) -> tuple[str, ...]:
         modules = {"fastapi", "uvicorn", "json_repair", "jsonschema"}
         for capability, document in _active_adapter_documents(config):
             route = _mapping_at(document, "route")
@@ -292,7 +292,7 @@ class SetupRegistry:
             modules.update(registration.dependency_modules(document))
         return tuple(sorted(modules))
 
-    def validate(self, config: M2BOSConfig) -> None:
+    def validate(self, config: HabitusConfig) -> None:
         """确认配置引用的 Adapter 已注册，并运行其无网络、无写入校验。"""
 
         seen: set[tuple[SetupCapability, str]] = set()
@@ -702,7 +702,7 @@ def _vikingdb_dependencies(document: Mapping[str, object]) -> tuple[str, ...]:
     return ("volcengine",) if _mapping_at(document, "options").get("auth_mode") == "ak_sk" else ()
 
 
-def _validate_vikingdb(config: M2BOSConfig) -> None:
+def _validate_vikingdb(config: HabitusConfig) -> None:
     pairs = (
         (
             config.memory.vector_store,
@@ -728,7 +728,7 @@ def _validate_vikingdb(config: M2BOSConfig) -> None:
         adapter_config.validate_requirements(requirements, vector.route)
 
 def _active_adapter_documents(
-    config: M2BOSConfig,
+    config: HabitusConfig,
 ) -> tuple[tuple[SetupCapability, Mapping[str, object]], ...]:
     documents: list[tuple[SetupCapability, Mapping[str, object]]] = [
         ("chat", _model_document(config.models.chat)),

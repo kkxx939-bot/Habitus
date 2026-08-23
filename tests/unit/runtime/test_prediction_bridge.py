@@ -56,7 +56,7 @@ def test_memory_context_renders_entries_without_semantic_judgement() -> None:
     assert "未完成事项「完成记忆系统重构」(状态 open,45 天未确认);下一步:补齐测试体系" in entries
     assert "未完成事项「整理相册」(状态 waiting,45 天未确认)" in entries
     assert "偏好简洁直接的回答" in entries
-    assert all("m2bOS" not in entry for entry in entries)
+    assert all("Habitus" not in entry for entry in entries)
 
 
 def test_memory_context_drops_low_relevance_and_completed_items() -> None:

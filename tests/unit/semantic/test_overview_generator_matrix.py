@@ -124,7 +124,7 @@ DIRECTORIES = (
     "entries",
     [
         (entry(),),
-        (entry("m2bOS.md", content="项目记忆"), entry("OpenViking.md", content="参考项目")),
+        (entry("Habitus.md", content="项目记忆"), entry("OpenViking.md", content="参考项目")),
         (entry("项目", MemorySemanticEntryKind.DIRECTORY, "项目实体目录"),),
         (
             entry("profile.md", content="用户背景"),

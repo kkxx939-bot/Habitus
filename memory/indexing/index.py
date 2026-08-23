@@ -29,7 +29,7 @@ from memory.tree import MemoryTree
 from memory.uri import MemoryURI, MemoryURINodeType
 from ModelClient import Embedder, EmbeddingVector
 
-_SCHEMA_VERSION = "m2bos_memory_vector_v2"
+_SCHEMA_VERSION = "habitus_memory_vector_v2"
 
 
 class PersistentMemoryVectorIndex:

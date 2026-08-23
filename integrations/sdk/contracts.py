@@ -16,7 +16,7 @@ def _clean_text(value: str, label: str) -> str:
 
 @dataclass(frozen=True)
 class ConversationRef:
-    """SDK 层稳定会话身份，不依赖 m2bOS 内部存储地址类型。"""
+    """SDK 层稳定会话身份，不依赖 Habitus 内部存储地址类型。"""
 
     conversation_id: str
     started_on: date

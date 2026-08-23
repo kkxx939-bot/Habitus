@@ -6,30 +6,30 @@ import hashlib
 from dataclasses import replace
 from pathlib import Path
 
-from Config import M2BOSConfig
+from Config import HabitusConfig
 
 
 def isolated_config(
-    config: M2BOSConfig,
+    config: HabitusConfig,
     *,
     storage_root: str | Path,
     collection_scope: str,
-) -> M2BOSConfig:
+) -> HabitusConfig:
     """保持模型和运维参数不变，只替换存储根与两个远程集合。"""
 
-    if not isinstance(config, M2BOSConfig):
-        raise TypeError("config must be M2BOSConfig")
+    if not isinstance(config, HabitusConfig):
+        raise TypeError("config must be HabitusConfig")
     root = Path(storage_root).expanduser().resolve()
     if not isinstance(collection_scope, str) or not collection_scope.strip():
         raise ValueError("collection_scope must be non-empty text")
     scope = hashlib.sha256(collection_scope.strip().encode("utf-8")).hexdigest()[:20]
     memory_store = replace(
         config.memory.vector_store,
-        collection=f"m2bos-benchmark-{scope}-memory",
+        collection=f"habitus-benchmark-{scope}-memory",
     )
     summary_store = replace(
         config.conversation.summary_vector_store,
-        collection=f"m2bos-benchmark-{scope}-summary",
+        collection=f"habitus-benchmark-{scope}-summary",
     )
     return replace(
         config,

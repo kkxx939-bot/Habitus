@@ -14,7 +14,7 @@ from benchmark.judge import BenchmarkJudge
 from benchmark.model import BenchmarkAnswerRecord, BenchmarkDataset, BenchmarkJudgeRecord
 from benchmark.protocol import BenchmarkJudgePolicy, resolve_judge_policy
 from benchmark.runner import BenchmarkRunError, load_answer_records
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from ModelClient import ProviderFactory, StructuredChatClient
 from ModelClient.adapters import register_builtin_adapters
 
@@ -24,7 +24,7 @@ async def judge_answers(
     answers_path: str | Path,
     output_path: str | Path,
     dataset: BenchmarkDataset,
-    judge_config: M2BOSConfig,
+    judge_config: HabitusConfig,
     concurrency: int = 16,
     include_evidence: bool = False,
     judge_policy: BenchmarkJudgePolicy = BenchmarkJudgePolicy.DATASET_DEFAULT,
@@ -73,7 +73,7 @@ async def judge_answers(
     _write_json(
         manifest_path,
         {
-            "schema_version": "m2bos_benchmark_judge_run_v2",
+            "schema_version": "habitus_benchmark_judge_run_v2",
             "status": "running",
             "started_at": started_at,
             "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -114,7 +114,7 @@ async def judge_answers(
     _write_json(
         manifest_path,
         {
-            "schema_version": "m2bos_benchmark_judge_run_v2",
+            "schema_version": "habitus_benchmark_judge_run_v2",
             "status": "completed",
             "started_at": started_at,
             "updated_at": datetime.now(timezone.utc).isoformat(),

@@ -1,4 +1,4 @@
-"""LongMemEval 官方 JSON 到 m2bOS 记忆基准模型的 Adapter。"""
+"""LongMemEval 官方 JSON 到 Habitus 记忆基准模型的 Adapter。"""
 
 from __future__ import annotations
 

@@ -189,7 +189,7 @@ class VikingDBRestClient:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "m2bOS/0.1.0",
+            "User-Agent": "Habitus/0.1.0",
             **self.route.extra_headers,
         }
         if self.config.auth_mode == "api_key":
@@ -227,7 +227,7 @@ class VikingDBRestClient:
         except ImportError as exc:
             raise VectorStoreError(
                 "vikingdb ak_sk authentication requires the 'volcengine' package; "
-                "install the m2bos[vikingdb] extra"
+                "install the habitus[vikingdb] extra"
             ) from exc
         parsed = urlsplit(origin)
         request = Request()

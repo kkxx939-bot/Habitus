@@ -1,6 +1,6 @@
 {
-  "schema_version": "m2bos_vector_benchmark_v1",
-  "name": "m2bos-vector-core-v1",
+  "schema_version": "habitus_vector_benchmark_v1",
+  "name": "habitus-vector-core-v1",
   "documents": [
     {"id": "profile-occupation", "content": "林航是一名自由视频剪辑师，长期使用 DaVinci Resolve。", "scope": "memory://profile.md"},
     {"id": "preference-language", "content": "用户偏好简洁中文回答，代码问题先给结论。", "scope": "memory://preferences/"},

@@ -8,7 +8,7 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     env:
-      M2BOS_PYTHON_PATHS: Config Runtime ModelClient pre conversation memory infrastructure foundation integrations benchmark
+      HABITUS_PYTHON_PATHS: Config Runtime ModelClient pre conversation memory infrastructure foundation integrations benchmark
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -26,30 +26,30 @@ jobs:
         working-directory: plugins
         run: |
           npm run sync
-          git diff --exit-code -- m2bos-memory/scripts/shared m2bos-memory-claude-code/scripts/shared
+          git diff --exit-code -- habitus-memory/scripts/shared habitus-memory-claude-code/scripts/shared
           npm test
       - name: Compile
-        run: python -m compileall -q $M2BOS_PYTHON_PATHS
+        run: python -m compileall -q $HABITUS_PYTHON_PATHS
       - name: Lint
-        run: ruff check $M2BOS_PYTHON_PATHS
+        run: ruff check $HABITUS_PYTHON_PATHS
       - name: Type check
         run: |
-          mypy $M2BOS_PYTHON_PATHS
-          pyright $M2BOS_PYTHON_PATHS
+          mypy $HABITUS_PYTHON_PATHS
+          pyright $HABITUS_PYTHON_PATHS
       - name: Full deterministic test suite with branch coverage
         run: |
           python -m coverage run --branch -m pytest -q
           python -m coverage report
       - name: Verify unified bootstrap and secure non-interactive init
         run: |
-          init_root="$RUNNER_TEMP/m2bos-init"
-          m2bos --help
-          m2bos-server init --help
-          m2bos init --config "$init_root/config.yaml" --from-config Config/example.yaml --non-interactive --skip-doctor --no-start
+          init_root="$RUNNER_TEMP/habitus-init"
+          habitus --help
+          habitus-server init --help
+          habitus init --config "$init_root/config.yaml" --from-config Config/example.yaml --non-interactive --skip-doctor --no-start
           test -f "$init_root/config.yaml"
           test "$(stat -c '%a' "$init_root/config.yaml")" = "600"
-          M2BOS_CI_CONFIG_PATH="$init_root/config.yaml" python -c 'import os; from Config import M2BOSConfig; c=M2BOSConfig.from_file(os.environ["M2BOS_CI_CONFIG_PATH"]); assert c.models.chat.route.credential_ref == "deepseek"; assert c.models.embedding.route.credential_ref == "ark"; assert c.models.rerank.route.credential_ref == "dashscope"; assert c.memory.vector_store.route.credential_ref == "vikingdb"'
-          m2bos harnesses
+          HABITUS_CI_CONFIG_PATH="$init_root/config.yaml" python -c 'import os; from Config import HabitusConfig; c=HabitusConfig.from_file(os.environ["HABITUS_CI_CONFIG_PATH"]); assert c.models.chat.route.credential_ref == "deepseek"; assert c.models.embedding.route.credential_ref == "ark"; assert c.models.rerank.route.credential_ref == "dashscope"; assert c.memory.vector_store.route.credential_ref == "vikingdb"'
+          habitus harnesses
       - name: Build wheel with service and plugin assets
         run: |
           python -m build --wheel
@@ -66,24 +66,24 @@ jobs:
           assert "Config/behavior.py" not in names
           assert "infrastructure/store/processing_lock.py" not in names
           assert "conversation/projection/behavior.py" in names
-          assert any(name.endswith("share/m2bos/plugins/install-memory-plugin.mjs") for name in names)
-          assert any(name.endswith("share/m2bos/plugins/harnesses.mjs") for name in names)
+          assert any(name.endswith("share/habitus/plugins/install-memory-plugin.mjs") for name in names)
+          assert any(name.endswith("share/habitus/plugins/harnesses.mjs") for name in names)
           PY
       - name: Install wheel and execute packaged plugin lifecycle
         run: |
-          smoke_venv="$RUNNER_TEMP/m2bos-wheel-smoke"
-          marketplace_root="$RUNNER_TEMP/m2bos-marketplace"
-          doctor_output="$RUNNER_TEMP/m2bos-plugin-doctor.json"
+          smoke_venv="$RUNNER_TEMP/habitus-wheel-smoke"
+          marketplace_root="$RUNNER_TEMP/habitus-marketplace"
+          doctor_output="$RUNNER_TEMP/habitus-plugin-doctor.json"
           python -m venv "$smoke_venv"
           "$smoke_venv/bin/pip" install --no-deps dist/*.whl
-          "$smoke_venv/bin/m2bos" --help
-          "$smoke_venv/bin/m2bos-server" init --help
-          "$smoke_venv/bin/m2bos-plugin" harnesses --json
-          "$smoke_venv/bin/m2bos-plugin" install --prepare-only --root "$marketplace_root" --json
-          "$smoke_venv/bin/m2bos-plugin" update --prepare-only --root "$marketplace_root" --json
-          "$smoke_venv/bin/m2bos-plugin" status --root "$marketplace_root" --json
+          "$smoke_venv/bin/habitus" --help
+          "$smoke_venv/bin/habitus-server" init --help
+          "$smoke_venv/bin/habitus-plugin" harnesses --json
+          "$smoke_venv/bin/habitus-plugin" install --prepare-only --root "$marketplace_root" --json
+          "$smoke_venv/bin/habitus-plugin" update --prepare-only --root "$marketplace_root" --json
+          "$smoke_venv/bin/habitus-plugin" status --root "$marketplace_root" --json
           set +e
-          M2BOS_URL=http://127.0.0.1:1 M2BOS_PLUGIN_TIMEOUT_MS=250 "$smoke_venv/bin/m2bos-plugin" doctor > "$doctor_output"
+          HABITUS_URL=http://127.0.0.1:1 HABITUS_PLUGIN_TIMEOUT_MS=250 "$smoke_venv/bin/habitus-plugin" doctor > "$doctor_output"
           doctor_status=$?
           set -e
           test "$doctor_status" -eq 1

@@ -1,6 +1,6 @@
 """云侧行为 agent 送入的规范行为观测；清洗层的唯一数据契约。
 
-上游的 VLM 与 ASR 位于 m2bOS 之外，它们先把感知结果变成行为语义，再由 agent 送进来；
+上游的 VLM 与 ASR 位于 Habitus 之外，它们先把感知结果变成行为语义，再由 agent 送进来；
 本层永远不接触原始帧、音频或识别片段，只保存对它们的引用。
 
 ## 本层做什么、不做什么
@@ -25,11 +25,11 @@
 
 ## 两条明确不做的事
 
-以下两项曾被提出并否决，理由都是 m2bOS 与上游的职责边界；再次提出前请先确认该边界已改变。
+以下两项曾被提出并否决，理由都是 Habitus 与上游的职责边界；再次提出前请先确认该边界已改变。
 
-1. **不记录上游模型版本。** 云侧 VLM/ASR 换代会让语义分布迁移，但上游换不换模型不是 m2bOS
-   的问题——m2bOS 负责处理记忆与行为，不管理上游版本。这与 coding agent 那条 lane 的混版
-   契约不矛盾：那里的 ``projector_version`` 记录的是 m2bOS **自己的**投影实现版本。
+1. **不记录上游模型版本。** 云侧 VLM/ASR 换代会让语义分布迁移，但上游换不换模型不是 Habitus
+   的问题——Habitus 负责处理记忆与行为，不管理上游版本。这与 coding agent 那条 lane 的混版
+   契约不矛盾：那里的 ``projector_version`` 记录的是 Habitus **自己的**投影实现版本。
 2. **观测不携带时段。** 观测只有 ``occurred_at`` 一个时间点，不设 ``ended_at``。事件的时间
    跨度需要 LLM 在事件融合时判断；让观测携带时间范围，等于让上游提前替融合层切定事件边界。
 
@@ -41,8 +41,8 @@
 不存在，任何下游都不可能拿它做决策。
 
 这个延迟只有上游知道，因此它是**必填**字段，缺失即拒绝，绝不用 ``occurred_at`` 顶替：整条
-预测链的防标签泄漏都建立在它上面（``prediction/projection/_anchors.py`` 的每个预测切点都以
-它为 cutoff，并按它过滤"切点时刻哪些前序步骤可见"）。把它填成观测时间，模型就会学到它在线上
+预测链的防标签泄漏都建立在它上面（预测侧的每个切点都以它为可见性 cutoff——落进行为树后
+即 occurrence 的 ``onset_available_at`` 与 basis 各步的 ``available_at``）。把它填成观测时间，模型就会学到它在线上
 永远拿不到的信息，而这种失真在离线指标上完全看不出来。
 
 注意本层只能拦住"字段缺失"这一种误用；``available_at == occurred_at`` 是合法的零延迟取值，
@@ -59,7 +59,7 @@
    却被判为相等。任何用 ``ZoneInfo`` 把 epoch 转本地时间的上游桥接层都会自然产出这种值，于是
    ``available_at`` 早于 ``occurred_at`` 的核心不变量会被静默绕过。全部先归一到 UTC 再比较，
    这条缝就不存在。
-2. **本地日历日必须可还原。** 行为树地址要求 ``event_date`` 是事件发生地的**本地**日历日期，
+2. **本地日历日必须可还原。** 行为树地址要求 ``occurred_on`` 是行为发生地的**本地**日历日期，
    而规范序列化会把 datetime 一律折成 UTC。若不单独保存偏移，东八区凌晨的观测回读后会落到
    前一天，融合层再也无法还原正确日期。``local_occurred_at`` 提供确定性的还原。
 """
@@ -74,7 +74,6 @@ from typing import Any
 
 from behavior.observation.config import BehaviorObservationConfig
 from behavior.observation.errors import BehaviorObservationError, BehaviorObservationLimitError
-from behavior.schema.vocabulary import KNOWLEDGE_STATES
 from foundation.integrity import canonical_digest, canonicalize
 
 OBSERVATION_SCHEMA_VERSION = "behavior_observation_v1"
@@ -82,9 +81,10 @@ BATCH_SCHEMA_VERSION = "behavior_observation_batch_v1"
 ENVELOPE_SCHEMA_VERSION = "behavior_observation_envelope_v1"
 _ENVELOPE_IDENTITY_SCHEMA = "behavior_observation_envelope_identity_v1"
 
-# 观测只能记录被直接感知、被主体自述或由上游推断的事实；``corrected`` 属于 Outcome 的
-# 事后修正语义，不能出现在一条原始观测上。
-OBSERVATION_KNOWLEDGE_STATES = frozenset(KNOWLEDGE_STATES - {"corrected"})
+# 观测只能记录被直接感知、被主体自述或由上游推断的事实。这组词表归观测契约自己所有
+#（旧行为树词表随 TODO(BHV-TREE-REBUILD-001) 退役后，这里是它唯一的定义处）；事后修正
+# 语义不属于一条原始观测。
+OBSERVATION_KNOWLEDGE_STATES = frozenset({"observed", "reported", "inferred"})
 
 _MAX_UTC_OFFSET_MINUTES = 24 * 60
 

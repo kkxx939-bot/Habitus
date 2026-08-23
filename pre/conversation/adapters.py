@@ -1,4 +1,4 @@
-"""把主流 Agent/模型协议转换为 m2bOS 的严格 Conversation 事实。"""
+"""把主流 Agent/模型协议转换为 Habitus 的严格 Conversation 事实。"""
 
 from __future__ import annotations
 

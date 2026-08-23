@@ -11,7 +11,7 @@ from behavior.fusion import BehaviorFusionConfig
 from benchmark.fusion.dataset import load_cases
 from benchmark.fusion.report import aggregate, evaluate, render_markdown
 from benchmark.fusion.runner import run_case
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from ModelClient import StructuredChatClient
 from ModelClient.adapters import register_builtin_adapters
 from ModelClient.factory import ProviderFactory
@@ -22,7 +22,7 @@ _DEFAULT_CASES = Path(__file__).with_name("cases.json")
 def _client(config_path: Path, *, retries: int) -> StructuredChatClient:
     """用项目唯一的配置边界构造真实模型客户端——评测不接受 scripted/fake。"""
 
-    config = M2BOSConfig.from_file(config_path)
+    config = HabitusConfig.from_file(config_path)
     route = config.models.chat.route
     factory = ProviderFactory()
     register_builtin_adapters(factory)
@@ -80,7 +80,7 @@ def main() -> int:
         prog="python -m benchmark.fusion",
         description="行为融合的确定性评测：真实模型调用，对照组抓滥用",
     )
-    parser.add_argument("--config", type=Path, required=True, help="m2bOS 完整运行配置")
+    parser.add_argument("--config", type=Path, required=True, help="Habitus 完整运行配置")
     parser.add_argument("--output", type=Path, required=True, help="结果目录")
     parser.add_argument("--cases", type=Path, default=_DEFAULT_CASES)
     parser.add_argument("--attempts", type=int, default=3, help="每个用例跑几次；不稳定本身是信号")

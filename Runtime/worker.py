@@ -114,7 +114,7 @@ class MemoryWorker:
         self._state = MemoryWorkerState.RUNNING
         self._loop_task = asyncio.create_task(
             self._run_loop(),
-            name=f"m2bos-memory-worker:{self.worker_id}",
+            name=f"habitus-memory-worker:{self.worker_id}",
         )
         await asyncio.sleep(0)
 
@@ -269,13 +269,13 @@ class MemoryWorker:
     async def _execute_claim(self, claim: MemoryJobClaim) -> MemoryJobRunResult:
         execution = asyncio.create_task(
             self.runner.run_claimed(claim),
-            name=(f"m2bos-memory-job:{claim.lease.job.memory_sequence}:{claim.lease.claim_generation}"),
+            name=(f"habitus-memory-job:{claim.lease.job.memory_sequence}:{claim.lease.claim_generation}"),
         )
         self._active_execution = execution
         heartbeat_stop = asyncio.Event()
         heartbeat = asyncio.create_task(
             self._heartbeat(claim.lease, execution, heartbeat_stop),
-            name=(f"m2bos-memory-heartbeat:{claim.lease.job.memory_sequence}:{claim.lease.claim_generation}"),
+            name=(f"habitus-memory-heartbeat:{claim.lease.job.memory_sequence}:{claim.lease.claim_generation}"),
         )
         try:
             done, _pending = await asyncio.wait(

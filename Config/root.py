@@ -1,4 +1,4 @@
-"""m2bOS 唯一外部配置根与跨领域校验。"""
+"""Habitus 唯一外部配置根与跨领域校验。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from Config.behavior import BehaviorConfig
 from Config.conversation import ConversationConfig
 from Config.credentials import CredentialRegistry
 from Config.http import HTTPAPIConfig
@@ -23,14 +24,15 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
-class M2BOSConfig:
-    """以一棵严格分组配置树描述完整 m2bOS 记忆主链。"""
+class HabitusConfig:
+    """以一棵严格分组配置树描述完整 Habitus 记忆主链。"""
 
     storage: StorageConfig
     models: ModelConfig
     credentials: CredentialRegistry = field(repr=False)
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     http: HTTPAPIConfig = field(default_factory=HTTPAPIConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
@@ -44,6 +46,7 @@ class M2BOSConfig:
             ("observability", self.observability, ObservabilityConfig),
             ("conversation", self.conversation, ConversationConfig),
             ("memory", self.memory, MemoryConfig),
+            ("behavior", self.behavior, BehaviorConfig),
             ("workflow", self.workflow, WorkflowConfig),
         )
         for name, value, expected_type in expected:
@@ -70,6 +73,12 @@ class M2BOSConfig:
         return self.storage_root / "conversation"
 
     @property
+    def behavior_root(self) -> Path:
+        """返回行为管线（观测/判断/回执/作业/行为树/归约账本）的共同根目录。"""
+
+        return self.storage_root / "behavior"
+
+    @property
     def workflow_root(self) -> Path:
         """返回 Job、Receipt 和事务日志的树外工作目录。"""
 
@@ -82,7 +91,7 @@ class M2BOSConfig:
         return self.workflow_root / "transactions"
 
     @classmethod
-    def from_mapping(cls, value: object) -> M2BOSConfig:
+    def from_mapping(cls, value: object) -> HabitusConfig:
         """从一个严格对象创建全部配置；未知字段立即失败。"""
 
         data = group_fields(cls, value, "config")
@@ -96,12 +105,13 @@ class M2BOSConfig:
             observability=ObservabilityConfig.from_mapping(data.get("observability", {})),
             conversation=ConversationConfig.from_mapping(data.get("conversation", {})),
             memory=MemoryConfig.from_mapping(data.get("memory", {})),
+            behavior=BehaviorConfig.from_mapping(data.get("behavior", {})),
             workflow=WorkflowConfig.from_mapping(data.get("workflow", {})),
         )
 
     @classmethod
-    def from_file(cls, path: str | Path) -> M2BOSConfig:
-        """从单一有界 YAML 文件加载全部 m2bOS 配置。"""
+    def from_file(cls, path: str | Path) -> HabitusConfig:
+        """从单一有界 YAML 文件加载全部 Habitus 配置。"""
 
         resolved = Path(path).expanduser().absolute()
         config = cls.from_mapping(load_config_object(resolved))
@@ -114,8 +124,8 @@ class M2BOSConfig:
         cls,
         *,
         environ: Mapping[str, str] | None = None,
-        config_path_env: str = "M2BOS_CONFIG_FILE",
-    ) -> M2BOSConfig:
+        config_path_env: str = "HABITUS_CONFIG_FILE",
+    ) -> HabitusConfig:
         """环境只选择统一 YAML 文件；全部运行配置和秘密值都来自该文件。"""
 
         values = os.environ if environ is None else environ
@@ -323,4 +333,4 @@ class M2BOSConfig:
                 self.credentials.resolve(reference)
 
 
-__all__ = ["M2BOSConfig"]
+__all__ = ["HabitusConfig"]

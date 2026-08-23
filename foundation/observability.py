@@ -63,7 +63,7 @@ class ObservationContext:
 
 
 _CURRENT_CONTEXT: ContextVar[ObservationContext | None] = ContextVar(
-    "m2bos_observation_context",
+    "habitus_observation_context",
     default=None,
 )
 
@@ -332,7 +332,7 @@ class MetricRegistry:
         self,
         *,
         max_recent_events: int = 256,
-        namespace: str = "m2bos",
+        namespace: str = "habitus",
         duration_buckets: tuple[float, ...] = _DEFAULT_DURATION_BUCKETS,
         enabled: bool = True,
     ) -> None:
@@ -437,7 +437,7 @@ class MetricRegistry:
             counter_names = sorted({name for name, _labels in self._counters})
             for name in counter_names:
                 full_name = f"{prefix}_{_metric_name(name)}"
-                lines.extend((f"# HELP {full_name} m2bOS bounded observation counter.", f"# TYPE {full_name} counter"))
+                lines.extend((f"# HELP {full_name} Habitus bounded observation counter.", f"# TYPE {full_name} counter"))
                 for (metric_name, labels), value in sorted(self._counters.items()):
                     if metric_name == name:
                         lines.append(f"{full_name}{_render_labels(labels)} {_format_number(value)}")
@@ -445,7 +445,7 @@ class MetricRegistry:
             histogram_names = sorted({name for name, _labels in self._histograms})
             for name in histogram_names:
                 full_name = f"{prefix}_{_metric_name(name)}"
-                lines.extend((f"# HELP {full_name} m2bOS bounded operation duration.", f"# TYPE {full_name} histogram"))
+                lines.extend((f"# HELP {full_name} Habitus bounded operation duration.", f"# TYPE {full_name} histogram"))
                 for (metric_name, labels), (counts, total, count) in sorted(self._histograms.items()):
                     if metric_name != name:
                         continue
@@ -459,7 +459,7 @@ class MetricRegistry:
             gauge_names = sorted({name for name, _labels in self._gauges})
             for name in gauge_names:
                 full_name = f"{prefix}_{_metric_name(name)}"
-                lines.extend((f"# HELP {full_name} m2bOS current bounded state.", f"# TYPE {full_name} gauge"))
+                lines.extend((f"# HELP {full_name} Habitus current bounded state.", f"# TYPE {full_name} gauge"))
                 for (metric_name, labels), value in sorted(self._gauges.items()):
                     if metric_name == name:
                         lines.append(f"{full_name}{_render_labels(labels)} {_format_number(value)}")

@@ -1,4 +1,4 @@
-"""m2bOS 预测树第一层的稳定公开入口。"""
+"""Habitus 预测树第一层的稳定公开入口。"""
 
 from prediction.context import PredictionContext
 from prediction.document import (

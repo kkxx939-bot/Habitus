@@ -56,6 +56,7 @@ class RuntimeHealthService:
             self._lifecycle_check(),
             self._observability_check(),
         ]
+        checks.extend(self._behavior_checks(runtime_state))
         checks.append(await self._queue_check())
         checks.extend(await asyncio.gather(self._vector_check("memory_vector", self.components.memory.vector_index.store), self._vector_check("summary_vector", self.components.conversation.summary_vector_index.store)))
         if deep:
@@ -89,6 +90,51 @@ class RuntimeHealthService:
             status = RuntimeHealthStatus.HEALTHY
         ready = runtime_state in {"ready", "running"} and not critical_unhealthy and not critical_degraded
         return RuntimeHealthReport(status, ready, datetime.now(timezone.utc), tuple(checks))
+
+    def _behavior_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:
+        """行为管线的健康面；**non-critical**——行为失败不阻断记忆主链的既定哲学在健康面同样成立。
+
+        未启用时如实报 disabled（healthy）；启用后暴露两条循环的存活与最近错误——否则
+        "启动失败不阻断"+"循环异常只进 last_error"的组合等于死活无人知（评审点名）。
+        """
+
+        behavior = self.components.behavior
+        if behavior is None:
+            return [
+                RuntimeHealthCheck(
+                    "behavior", RuntimeHealthStatus.HEALTHY, "disabled", critical=False
+                )
+            ]
+        checks: list[RuntimeHealthCheck] = []
+        for name, worker in (
+            ("behavior_fusion_worker", behavior.fusion_worker),
+            ("behavior_reduction_worker", behavior.reduction_worker),
+        ):
+            if worker.last_error is not None:
+                checks.append(
+                    RuntimeHealthCheck(
+                        name,
+                        RuntimeHealthStatus.DEGRADED,
+                        f"last_error:{type(worker.last_error).__name__}",
+                        critical=False,
+                    )
+                )
+            elif runtime_state == "running" and not worker.running:
+                checks.append(
+                    RuntimeHealthCheck(
+                        name, RuntimeHealthStatus.UNHEALTHY, "loop_not_running", critical=False
+                    )
+                )
+            else:
+                checks.append(
+                    RuntimeHealthCheck(
+                        name,
+                        RuntimeHealthStatus.HEALTHY,
+                        "running" if worker.running else "stopped",
+                        critical=False,
+                    )
+                )
+        return checks
 
     @staticmethod
     def _runtime_check(state: str) -> RuntimeHealthCheck:

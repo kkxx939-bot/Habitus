@@ -2,9 +2,9 @@
 
 from integrations.sdk.client import (
     AsyncHTTPTransport,
-    M2BOSHTTPClient,
-    M2BOSServiceError,
-    M2BOSServiceTransportError,
+    HabitusHTTPClient,
+    HabitusServiceError,
+    HabitusServiceTransportError,
 )
 from integrations.sdk.contracts import (
     AgentFlushResult,
@@ -45,9 +45,9 @@ __all__ = [
     "AgentSessionCloseResult",
     "AsyncHTTPTransport",
     "ConversationRef",
-    "M2BOSHTTPClient",
-    "M2BOSServiceError",
-    "M2BOSServiceTransportError",
+    "HabitusHTTPClient",
+    "HabitusServiceError",
+    "HabitusServiceTransportError",
     "PreparedAgentTurn",
     "ServiceCapabilities",
 ]

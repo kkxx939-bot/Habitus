@@ -124,7 +124,7 @@ def test_judged_at_is_recorded_because_it_cannot_be_derived() -> None:
 
 
 def test_behavior_time_keeps_its_local_offset() -> None:
-    """人的一天是本地日历日；折 UTC 会把东八区凌晨的行为掉到前一天。"""
+    """行为的时间事实是实际发生的本地时刻；折 UTC 会把东八区凌晨的行为掉到前一天。"""
 
     washing = derived()[0]
     assert FRAGMENTS[0].occurred_at.isoformat() == "2026-08-13T16:30:00+00:00"
@@ -272,9 +272,11 @@ def test_the_receipt_records_disposition_without_copying_content() -> None:
     """判断自己有耐久记录，所以回执回到它本来该是的样子——一份处置清单。"""
 
     record = receipt()
-    # 只有属于主体的判断进 judgement_ids；读不懂的那条只留观测身份。
+    # 主体的判断与没读懂的观测段进 judgement_ids（后者归约层要物化成 gap）；旁人的只留观测身份。
     assert record.judgement_ids == tuple(
-        item.judgement_id for item in derived() if SUBJECT in item.subjects
+        item.judgement_id
+        for item in derived()
+        if not item.is_readable or SUBJECT in item.subjects
     )
     assert record.unreadable_observation_ids == (FRAGMENTS[5].observation_id,)
     assert record.unreadable_ratio == pytest.approx(1 / 6)
@@ -442,7 +444,8 @@ def test_the_receipt_separates_other_peoples_behaviour_from_unreadable_frames() 
         validation_attempts=1,
         primary_subject=SUBJECT,
     )
-    assert len(record.judgement_ids) == 1
+    # 主体那条 + 没读懂那条进 judgement_ids；旁人（客人）那条只留观测身份。
+    assert len(record.judgement_ids) == 2
     assert record.out_of_scope_observation_ids == (fragments[3].observation_id,)
     assert record.unreadable_observation_ids == (fragments[4].observation_id,)
     assert record.out_of_scope_ratio == pytest.approx(0.2)
@@ -548,8 +551,8 @@ def test_pruning_keeps_relations_whose_target_survives() -> None:
 def test_context_is_ordered_by_real_time_not_by_the_local_offset_string(tmp_path) -> None:
     """上下文按**时刻**排序，不能按 ``started_at`` 的字符串排。
 
-    ``started_at`` 刻意保留本地偏移（人的一天是本地日历日，折 UTC 会把东八区凌晨的行为掉到前
-    一天），所以它的字符串序不是时间序。出行跨时区、或者一次 DST 切换带来的 1 小时偏移变化，
+    ``started_at`` 刻意保留本地偏移（时间事实是实际发生的本地时刻，折 UTC 会把东八区凌晨的
+    行为掉到前一天），所以它的字符串序不是时间序。出行跨时区、或者一次 DST 切换带来的 1 小时偏移变化，
     就足以让两条判断的先后颠倒——而这个顺序直接决定模型看到的 C1..Cn 编号。
     """
 
@@ -617,3 +620,44 @@ def test_the_fusion_version_covers_the_schema_not_just_the_prompt() -> None:
     properties = altered["properties"]["judgements"]["items"]["properties"]
     properties["basis"]["description"] = properties["basis"]["description"] + "。"
     assert canonical_digest(altered)[:12] != fingerprint
+
+
+def test_a_frame_shared_by_a_guest_and_an_unreadable_judgement_stays_out_of_scope() -> None:
+    """tracked 只算主体可读判断的观测：v3 把没读懂判断并入 in_scope 后，这条口径不许跟着漂。"""
+
+    guest = "客人C"
+    shared = BehaviorObservation.create(
+        observer_id="home-a/hall",
+        occurred_at=MIDNIGHT + timedelta(seconds=12),
+        available_at=MIDNIGHT + timedelta(seconds=13),
+        modality="vision",
+        semantics="客人走过，画面另一半模糊",
+        participants=[SUBJECT, guest],
+        knowledge_state="observed",
+        confidence=0.9,
+        evidence_refs=["cam:12"],
+        config=OBSERVATION_CONFIG,
+    )
+    fragments = [fragment(0, "主体在洗手"), shared]
+    raw = wire(
+        [
+            judgement(1, behavior="洗手", goal="清洁双手", basis=["冲洗双手"]),
+            judgement(2, behavior="走过", subjects=[guest]),
+            unreadable(3),
+        ],
+        [[(1, 1)], [(2, None), (3, None)]],  # 同一帧：旁人可读判断 + 没读懂判断都认领
+    )
+    batch = assemble_judgement_batch(raw, fragment_count=len(fragments))
+    validate_judgement_batch(batch, fragments)
+    items = derive_judgements(batch, fragments, source_refs=SOURCE_REFS, judged_at=JUDGED_AT)
+    record = build_fusion_receipt(
+        items,
+        fragments,
+        source_refs=SOURCE_REFS,
+        prompt_version=PROMPT_VERSION,
+        validation_attempts=1,
+        primary_subject=SUBJECT,
+    )
+    # 这一帧被旁人读懂了、且不属于主体——必须留在 out_of_scope；同时它已被读懂，不计 unreadable。
+    assert record.out_of_scope_observation_ids == (shared.observation_id,)
+    assert record.unreadable_observation_ids == ()

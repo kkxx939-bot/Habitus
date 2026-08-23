@@ -11,7 +11,7 @@ from foundation.integrity import canonicalize, immutable_snapshot
 from prediction.model import PredictionPatternAddress, PredictionPatternKind
 from prediction.pattern.schema import PredictionPatternSchemaRegistry
 
-_MARKER = "\n<!-- M2BOS_PREDICTION_PATTERN_FIELDS\n"
+_MARKER = "\n<!-- HABITUS_PREDICTION_PATTERN_FIELDS\n"
 _FOOTER = "\n-->\n"
 
 

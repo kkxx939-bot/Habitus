@@ -1,4 +1,4 @@
-"""单用户 m2bOS 的轻量初始化、本地服务和插件启动入口。"""
+"""单用户 Habitus 的轻量初始化、本地服务和插件启动入口。"""
 
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ def _doctor(args: argparse.Namespace, values: Mapping[str, str]) -> int:
 
 
 def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
-    from Config import M2BOSConfig
+    from Config import HabitusConfig
     from integrations.local_service.adapter_catalog import load_adapter_catalog
     from integrations.local_service.cloud_setup import (
         apply_cloud_selection,
@@ -115,7 +115,7 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
             )
             selection = _prompt_cloud_setup(defaults, catalog.setup)
             if selection is None:
-                sys.stdout.write("m2bOS cloud setup cancelled.\n")
+                sys.stdout.write("Habitus cloud setup cancelled.\n")
                 return 0
             configured = apply_cloud_selection(payload, selection, catalog.setup)
             result = initialize_config_from_mapping(
@@ -137,20 +137,20 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
         else:
             result = initialize_config(destination, source=source, force=args.force)
     except WizardCancelled:
-        sys.stdout.write("m2bOS setup cancelled before configuration was written.\n")
+        sys.stdout.write("Habitus setup cancelled before configuration was written.\n")
         return 0
     except (OSError, TypeError, ValueError) as exc:
-        raise SystemExit(f"m2bOS initialization failed: {exc}") from exc
-    values["M2BOS_CONFIG_FILE"] = str(result.path)
+        raise SystemExit(f"Habitus initialization failed: {exc}") from exc
+    values["HABITUS_CONFIG_FILE"] = str(result.path)
     try:
-        config = M2BOSConfig.from_file(result.path)
+        config = HabitusConfig.from_file(result.path)
         adjacent_connection = result.path.parent / "agent-plugin" / "connection.json"
         write_plugin_connection(config, adjacent_connection)
         default_connection = resolve_plugin_connection_path(environ=values)
         if default_connection != adjacent_connection:
             write_plugin_connection(config, default_connection)
     except (OSError, TypeError, ValueError) as exc:
-        raise SystemExit(f"m2bOS plugin connection initialization failed: {exc}") from exc
+        raise SystemExit(f"Habitus plugin connection initialization failed: {exc}") from exc
     state = (
         "updated"
         if result.backup_path is not None
@@ -158,7 +158,7 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
         if result.created
         else "using existing"
     )
-    sys.stdout.write(f"m2bOS config {state}: {result.path}\n")
+    sys.stdout.write(f"Habitus config {state}: {result.path}\n")
     if result.backup_path is not None:
         sys.stdout.write(f"Previous config backup: {result.backup_path}\n")
 
@@ -181,7 +181,7 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
     if args.all_harnesses:
         harnesses = ["all"]
     elif not harnesses and interactive and _confirm_after_write(
-        "Install m2bOS memory plugins for detected Agent Harnesses?",
+        "Install Habitus memory plugins for detected Agent Harnesses?",
         default=False,
     ):
         harnesses = ["all"]
@@ -193,17 +193,17 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
 
     start = args.start
     if start is None and interactive and doctor_ok is not False:
-        start = _confirm_after_write("Start the m2bOS server now?", default=False)
+        start = _confirm_after_write("Start the Habitus server now?", default=False)
     if start:
         if doctor_ok is False:
-            sys.stderr.write("m2bOS server was not started because Doctor reported failures.\n")
+            sys.stderr.write("Habitus server was not started because Doctor reported failures.\n")
             return 1
         _exec_serve(result.path)
     if doctor_ok is False:
         return 1
     sys.stdout.write(
-        f"Next: m2bos-server --config {result.path}\n"
-        "Agent plugins: m2bos plugin install --harness <id>\n"
+        f"Next: habitus-server --config {result.path}\n"
+        "Agent plugins: habitus plugin install --harness <id>\n"
     )
     return 0
 
@@ -338,7 +338,7 @@ def _configure_missing_credentials(path: Path) -> None:
     try:
         configure_credentials(path, updates)
     except (OSError, TypeError, ValueError) as exc:
-        raise SystemExit(f"m2bOS credential configuration failed: {exc}") from exc
+        raise SystemExit(f"Habitus credential configuration failed: {exc}") from exc
     count = sum(len(fields) for fields in updates.values())
     sys.stdout.write(f"Configured {count} credential fields in {path}\n")
 
@@ -349,12 +349,12 @@ def _maybe_offer_init(explicit: str | None, values: dict[str, str]) -> bool:
     path = resolve_config_path(explicit, environ=values)
     if path.exists() or not _interactive(sys.stdin, sys.stdout):
         return False
-    sys.stdout.write(f"No m2bOS configuration found at {path}.\n")
+    sys.stdout.write(f"No Habitus configuration found at {path}.\n")
     try:
         if not _confirm("Run interactive setup now?", default=True):
             return False
     except WizardCancelled:
-        sys.stdout.write("m2bOS setup offer cancelled.\n")
+        sys.stdout.write("Habitus setup offer cancelled.\n")
         return False
     init_args = argparse.Namespace(
         config=str(path),
@@ -395,16 +395,16 @@ def _repair_source_outputs(args: argparse.Namespace, values: Mapping[str, str]) 
 
     import asyncio
 
-    from Config import ConfigError, M2BOSConfig
+    from Config import ConfigError, HabitusConfig
     from conversation import ConversationSourceConsumer, ConversationSourceError
     from integrations.local_service.adapter_catalog import load_adapter_catalog
     from integrations.local_service.instance_lock import ServiceInstanceLock, ServiceInstanceLockError
     from Runtime import build_runtime
 
     try:
-        config = M2BOSConfig.from_env(environ=values)
+        config = HabitusConfig.from_env(environ=values)
     except (ConfigError, OSError, TypeError, ValueError) as exc:
-        sys.stderr.write(f"m2bOS configuration failed: {exc}\n")
+        sys.stderr.write(f"Habitus configuration failed: {exc}\n")
         return 2
     try:
         consumer = ConversationSourceConsumer(args.consumer)
@@ -417,7 +417,7 @@ def _repair_source_outputs(args: argparse.Namespace, values: Mapping[str, str]) 
         lock.acquire()
     except ServiceInstanceLockError:
         sys.stderr.write(
-            "another m2bOS local service owns this storage root; stop it before repairing\n"
+            "another Habitus local service owns this storage root; stop it before repairing\n"
         )
         return 3
     try:
@@ -494,7 +494,7 @@ def _report_repair_plan(
 def _serve(values: Mapping[str, str]) -> None:
     """服务模式才加载可选 HTTP 依赖和重量级组合根。"""
 
-    from Config import ConfigError, M2BOSConfig
+    from Config import ConfigError, HabitusConfig
     from infrastructure.observability import configure_json_logging
     from integrations.http_api.app import create_http_app
     from integrations.local_service.adapter_catalog import load_adapter_catalog
@@ -505,12 +505,12 @@ def _serve(values: Mapping[str, str]) -> None:
     try:
         import uvicorn
     except ImportError as exc:
-        raise SystemExit("m2bos-server requires the 'http' optional dependencies") from exc
+        raise SystemExit("habitus-server requires the 'http' optional dependencies") from exc
 
     try:
-        config = M2BOSConfig.from_env(environ=values)
+        config = HabitusConfig.from_env(environ=values)
     except (ConfigError, OSError, TypeError, ValueError) as exc:
-        raise SystemExit(f"m2bOS configuration failed: {exc}") from exc
+        raise SystemExit(f"Habitus configuration failed: {exc}") from exc
     if config.observability.logging.enabled:
         configure_json_logging(level=config.observability.logging.level)
     catalog = load_adapter_catalog()
@@ -545,9 +545,9 @@ def _exec_serve(path: Path) -> None:
 def _environment(config_path: str | None) -> dict[str, str]:
     values = dict(os.environ)
     if config_path is not None:
-        values["M2BOS_CONFIG_FILE"] = str(Path(config_path).expanduser().absolute())
-    elif not values.get("M2BOS_CONFIG_FILE", "").strip():
-        values["M2BOS_CONFIG_FILE"] = str(Path("~/.m2bos/config.yaml").expanduser().absolute())
+        values["HABITUS_CONFIG_FILE"] = str(Path(config_path).expanduser().absolute())
+    elif not values.get("HABITUS_CONFIG_FILE", "").strip():
+        values["HABITUS_CONFIG_FILE"] = str(Path("~/.habitus/config.yaml").expanduser().absolute())
     return values
 
 
@@ -655,8 +655,8 @@ def _write_doctor(report: object, output: TextIO) -> None:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="m2bos")
-    parser.add_argument("--config", help="覆盖 M2BOS_CONFIG_FILE 指向的配置文件")
+    parser = argparse.ArgumentParser(prog="habitus")
+    parser.add_argument("--config", help="覆盖 HABITUS_CONFIG_FILE 指向的配置文件")
     subparsers = parser.add_subparsers(dest="command")
 
     serve = subparsers.add_parser("serve", help="启动本地 HTTP 服务")

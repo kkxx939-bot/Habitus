@@ -1,5 +1,5 @@
 {
-  "name": "m2bos-agent-plugins",
+  "name": "habitus-agent-plugins",
   "private": true,
   "type": "module",
   "scripts": {

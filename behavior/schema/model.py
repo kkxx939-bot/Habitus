@@ -1,4 +1,10 @@
-"""行为语义树的声明式 Schema 模型。"""
+"""行为语义树的声明式 Schema 模型。
+
+字段按**面**声明角色（``TODO(BHV-TREE-REBUILD-001)`` 的双面设计）：``address`` 构成身份，
+``numeric`` 是数字面（时间预测树夜批读，机器类型白名单、全部必填），``semantic`` 是语义面
+（语义关联读，允许可空与自由文本），``system`` 是溯源（不渲染进正文）。分组的唯一权威在
+schema 声明——物理 JSON 块保持扁平，数据不重复承载分组信息。
+"""
 
 from __future__ import annotations
 
@@ -13,18 +19,18 @@ from behavior.model import BehaviorAddress, BehaviorKind
 
 _FIELD_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _CANONICAL_PATHS = {
-    BehaviorKind.EVENT: (
-        "behaviors/events/{event_date:%Y}/{event_date:%m}/{event_date:%d}/"
-        "{event_name}--{started_at:%Y%m%dT%H%M%S%f%z}.md"
+    BehaviorKind.OCCURRENCE: (
+        "occurrences/{occurred_on:%Y}/{occurred_on:%m}/{occurred_on:%d}/"
+        "{name}--{started_at:%Y%m%dT%H%M%S%f%z}.md"
     ),
-    BehaviorKind.OUTCOME: (
-        "behaviors/outcomes/{event_date:%Y}/{event_date:%m}/{event_date:%d}/"
-        "{event_name}--{event_started_at:%Y%m%dT%H%M%S%f%z}.md"
+    BehaviorKind.GAP: (
+        "gaps/{occurred_on:%Y}/{occurred_on:%m}/{occurred_on:%d}/"
+        "{gap_kind}--{started_at:%Y%m%dT%H%M%S%f%z}.md"
     ),
-    BehaviorKind.EPISODE: (
-        "episodes/{episode_date:%Y}/{episode_date:%m}/{episode_date:%d}/"
-        "{episode_name}--{started_at:%Y%m%dT%H%M%S%f%z}.md"
-    ),
+}
+_EXPECTED_ADDRESS_NAMES = {
+    BehaviorKind.OCCURRENCE: ("occurred_on", "name", "started_at"),
+    BehaviorKind.GAP: ("occurred_on", "gap_kind", "started_at"),
 }
 
 
@@ -37,32 +43,38 @@ class BehaviorFieldType(str, Enum):
     OPTIONAL_STRING = "optional_string"
     DATE = "date"
     DATETIME = "datetime"
-    OPTIONAL_DATETIME = "optional_datetime"
-    NUMBER = "number"
+    BOOLEAN = "boolean"
     STRING_LIST = "string_list"
-    ACTION_LIST = "action_list"
-    OUTCOME_LIST = "outcome_list"
-    URI_LIST = "uri_list"
-    PHASE_LIST = "phase_list"
-    UNPHASED_EVENT_LIST = "unphased_event_list"
-    OUTCOME_SNAPSHOT_LIST = "outcome_snapshot_list"
-    TRANSITION_LIST = "transition_list"
+    SHA256_LIST = "sha256_list"
+    OCCURRENCE_STATUS = "occurrence_status"
+    STATUS_BASIS = "status_basis"
+    GAP_KIND = "gap_kind"
+    BASIS_LIST = "basis_list"
 
 
 class BehaviorFieldRole(str, Enum):
     ADDRESS = "address"
-    CONTENT = "content"
+    NUMERIC = "numeric"
+    SEMANTIC = "semantic"
     SYSTEM = "system"
 
 
-class BehaviorMergeStrategy(str, Enum):
-    IMMUTABLE = "immutable"
-    APPEND = "append"
+# 数字面只准机器类型：无可空、无自由复合结构——它是给夜批逐字段扫的。
+_NUMERIC_FIELD_TYPES = frozenset(
+    {
+        BehaviorFieldType.STRING,
+        BehaviorFieldType.DATETIME,
+        BehaviorFieldType.BOOLEAN,
+        BehaviorFieldType.OCCURRENCE_STATUS,
+        BehaviorFieldType.STATUS_BASIS,
+    }
+)
 
 
 class BehaviorOperationMode(str, Enum):
+    """整棵树纯 add-only；追加/修改模式随 Outcome 通道一并退役。"""
+
     ADD_ONLY = "add_only"
-    APPEND_ONLY = "append_only"
 
 
 @dataclass(frozen=True)
@@ -71,7 +83,6 @@ class BehaviorFieldSchema:
     field_type: BehaviorFieldType
     role: BehaviorFieldRole
     required: bool
-    merge_strategy: BehaviorMergeStrategy
     description: str
 
     def __post_init__(self) -> None:
@@ -79,15 +90,25 @@ class BehaviorFieldSchema:
             raise BehaviorSchemaError("behavior schema field name must use lowercase snake_case")
         object.__setattr__(self, "field_type", BehaviorFieldType(self.field_type))
         object.__setattr__(self, "role", BehaviorFieldRole(self.role))
-        object.__setattr__(self, "merge_strategy", BehaviorMergeStrategy(self.merge_strategy))
         if not isinstance(self.required, bool):
             raise BehaviorSchemaError("behavior schema field required must be boolean")
         if not isinstance(self.description, str) or not self.description.strip():
             raise BehaviorSchemaError("behavior schema field description must be non-empty")
-        if self.role in {BehaviorFieldRole.ADDRESS, BehaviorFieldRole.SYSTEM} and (
-            not self.required or self.merge_strategy is not BehaviorMergeStrategy.IMMUTABLE
+        if self.role in {
+            BehaviorFieldRole.ADDRESS,
+            BehaviorFieldRole.NUMERIC,
+            BehaviorFieldRole.SYSTEM,
+        } and not self.required:
+            raise BehaviorSchemaError(
+                "behavior address, numeric and system fields must be required"
+            )
+        if (
+            self.role is BehaviorFieldRole.NUMERIC
+            and self.field_type not in _NUMERIC_FIELD_TYPES
         ):
-            raise BehaviorSchemaError("behavior address and system fields must be required and immutable")
+            raise BehaviorSchemaError(
+                f"behavior numeric field {self.name} must use a machine-typed field type"
+            )
 
 
 @dataclass(frozen=True)
@@ -106,31 +127,30 @@ class BehaviorTypeSchema:
         if not isinstance(self.description, str) or not self.description.strip():
             raise BehaviorSchemaError("behavior type description must be non-empty")
         if self.path_template != _CANONICAL_PATHS[kind]:
-            raise BehaviorSchemaError(f"{kind.value} schema path does not match the confirmed behavior tree")
+            raise BehaviorSchemaError(
+                f"{kind.value} schema path does not match the confirmed behavior tree"
+            )
         path = PurePosixPath(self.path_template)
         if path.is_absolute() or ".." in path.parts or path.suffix != ".md":
             raise BehaviorSchemaError("behavior schema path template is unsafe")
         names = tuple(field.name for field in self.fields)
         if not names or len(names) != len(set(names)):
             raise BehaviorSchemaError("behavior schema fields must be non-empty and unique")
-        if not any(field.role is BehaviorFieldRole.CONTENT for field in self.fields):
-            raise BehaviorSchemaError("behavior schema must declare content fields")
-        address_names = tuple(field.name for field in self.fields if field.role is BehaviorFieldRole.ADDRESS)
-        expected_address_names = {
-            BehaviorKind.EVENT: ("event_date", "event_name", "started_at"),
-            BehaviorKind.OUTCOME: ("event_date", "event_name", "event_uri"),
-            BehaviorKind.EPISODE: ("episode_date", "episode_name", "started_at"),
-        }[kind]
-        if address_names != expected_address_names:
+        address_names = tuple(
+            field.name for field in self.fields if field.role is BehaviorFieldRole.ADDRESS
+        )
+        if address_names != _EXPECTED_ADDRESS_NAMES[kind]:
             raise BehaviorSchemaError("behavior schema address fields do not match its path")
-        if self.operation_mode is BehaviorOperationMode.ADD_ONLY and any(
-            field.merge_strategy is BehaviorMergeStrategy.APPEND for field in self.fields
-        ):
-            raise BehaviorSchemaError("add-only behavior schema cannot contain append fields")
 
     @property
     def field_map(self) -> dict[str, BehaviorFieldSchema]:
         return {field.name: field for field in self.fields}
+
+    def fields_of(self, role: BehaviorFieldRole) -> tuple[BehaviorFieldSchema, ...]:
+        """按面取字段——消费者据此选择自己的读集，加字段不改读取代码。"""
+
+        resolved = BehaviorFieldRole(role)
+        return tuple(field for field in self.fields if field.role is resolved)
 
 
 @dataclass(frozen=True)
@@ -146,7 +166,6 @@ __all__ = [
     "BehaviorFieldRole",
     "BehaviorFieldSchema",
     "BehaviorFieldType",
-    "BehaviorMergeStrategy",
     "BehaviorOperationMode",
     "BehaviorSchemaError",
     "BehaviorSchemaMaterialization",

@@ -1,6 +1,6 @@
-# m2bOS
+# Habitus
 
-m2bOS is currently undergoing a full memory-architecture refactor.
+Habitus is currently undergoing a full memory-architecture refactor.
 
 ## Current state
 

@@ -46,7 +46,7 @@ class SQLiteLockStore:
     def __init__(
         self,
         path: str | Path,
-        owner: str = "m2bos",
+        owner: str = "habitus",
         *,
         config: SQLiteLockStoreConfig | None = None,
         initialize: bool = True,

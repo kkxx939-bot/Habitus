@@ -5,8 +5,8 @@
  * Harness 的条件分支。新增 Harness 时增加一个描述及其插件目录即可。
  */
 
-export const MARKETPLACE_NAME = "m2bos-local";
-export const PLUGIN_NAME = "m2bos-memory";
+export const MARKETPLACE_NAME = "habitus-local";
+export const PLUGIN_NAME = "habitus-memory";
 export const PLUGIN_ID = `${PLUGIN_NAME}@${MARKETPLACE_NAME}`;
 
 const DEFINITIONS = [
@@ -16,7 +16,7 @@ const DEFINITIONS = [
     displayName: "OpenAI Codex",
     command: "codex",
     protocol: "codex_rollout",
-    pluginDirectory: "m2bos-memory",
+    pluginDirectory: "habitus-memory",
     pluginManifest: ".codex-plugin/plugin.json",
     hooksManifest: "hooks/hooks.json",
     requiredHooks: ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact", "SessionEnd"],
@@ -29,10 +29,10 @@ const DEFINITIONS = [
       path: ".agents/plugins/marketplace.json",
       document: {
         name: MARKETPLACE_NAME,
-        interface: { displayName: "m2bOS Local" },
+        interface: { displayName: "Habitus Local" },
         plugins: [{
           name: PLUGIN_NAME,
-          source: { source: "local", path: "./plugins/m2bos-memory" },
+          source: { source: "local", path: "./plugins/habitus-memory" },
           policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
           category: "Productivity",
         }],
@@ -52,7 +52,7 @@ const DEFINITIONS = [
     displayName: "Claude Code",
     command: "claude",
     protocol: "claude_code",
-    pluginDirectory: "m2bos-memory-claude-code",
+    pluginDirectory: "habitus-memory-claude-code",
     pluginManifest: ".claude-plugin/plugin.json",
     hooksManifest: "hooks/hooks.json",
     requiredHooks: [
@@ -75,12 +75,12 @@ const DEFINITIONS = [
       path: ".claude-plugin/marketplace.json",
       document: {
         name: MARKETPLACE_NAME,
-        description: "Local m2bOS plugins for Claude Code.",
-        owner: { name: "m2bOS" },
+        description: "Local Habitus plugins for Claude Code.",
+        owner: { name: "Habitus" },
         plugins: [{
           name: PLUGIN_NAME,
           description: "Single-user local semantic memory for Claude Code.",
-          source: "./plugins/m2bos-memory-claude-code",
+          source: "./plugins/habitus-memory-claude-code",
           category: "productivity",
         }],
       },

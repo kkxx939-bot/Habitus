@@ -1,0 +1,28 @@
+behavior_type: occurrence
+description: >-
+  一次被观测到的行为（有目标的事件与无目标的动作段共用一类，靠 goal 空非空区分）。
+  字段按面分角色：numeric 供时间预测树夜批读取，semantic 供语义关联读取（判断存储会释放，
+  语义面必须自足），system 是溯源、不渲染进正文。全部时间为本地时间加显式偏移。
+path_template: occurrences/{occurred_on:%Y}/{occurred_on:%m}/{occurred_on:%d}/{name}--{started_at:%Y%m%dT%H%M%S%f%z}.md
+operation_mode: add_only
+fields:
+  - {name: occurred_on, type: date, role: address, required: true, description: 行为实际发生时刻的本地日历日期，即目录；"属于哪一天"的语义归属不在本层。}
+  - {name: name, type: string, role: address, required: true, description: 原始行为名（融合层原话，链头首条未被替换判断的 behavior 字段），永不随词表重归一改变。}
+  - {name: started_at, type: datetime, role: address, required: true, description: 开始时刻，本地时间带整分钟偏移，与 occurred_on 共同构成地址身份并自校验。}
+  - {name: kind_token, type: string, role: numeric, required: true, description: 归一后的类型 token，来自 kinds 词表；一切按类统计的键，归错可改词表重打、不动地址。}
+  - {name: status, type: occurrence_status, role: numeric, required: true, description: 这次行为怎么结束的，逐字取自链尾判断，写入层零发明。}
+  - {name: status_basis, type: status_basis, role: numeric, required: true, description: 状态怎么知道的；interrupted 与 observation_lost 之分是删失纪律的根。}
+  - {name: last_observed_at, type: datetime, role: numeric, required: true, description: 最后一条支持观测的时刻（不是结束时刻，结束经常不可知）。}
+  - {name: onset_available_at, type: datetime, role: numeric, required: true, description: 链头判断的证据齐备时刻——防标签泄漏的首个切点。}
+  - {name: reminded, type: boolean, role: numeric, required: true, description: 开始前窗口内有没有被系统提醒过；被提醒的发生不进自然率。}
+  - {name: goal, type: optional_string, role: semantic, required: true, description: 有意识的目标；为空即动作段，动作段照常进树以保住曝光分母。}
+  - {name: summary, type: string, role: semantic, required: true, description: 脱离观测也读得懂的一句话；链跨多段时按序确定性拼接。}
+  - {name: subjects, type: string_list, role: semantic, required: true, description: 谁做的，多值；共同行动的人都写上。}
+  - {name: place, type: optional_string, role: semantic, required: true, description: 发生地点；上游契约尚未提供时为空。}
+  - {name: original_name, type: optional_string, role: semantic, required: true, description: 撞车消歧时的原始行为名，仅后缀消歧的记录非空。非空即已知消歧重复——预测树计数与语义层摘要/统计一律机械跳过本记录；消费者若确需引用本记录（如链接目标），行为名以此字段为准而不是带后缀的地址名。}
+  - {name: basis, type: basis_list, role: semantic, required: true, description: 构成这件事的行为事实步骤，每步带观测身份与写入时物化的时间；goal 为空时必须为空数组。}
+  - {name: judgement_ids, type: sha256_list, role: system, required: true, description: 本次归约消费的判断身份；判断存储的释放门槛依据。}
+  - {name: observation_ids, type: sha256_list, role: system, required: true, description: 全部支撑观测的内容身份。}
+  - {name: source_refs, type: sha256_list, role: system, required: true, description: 观测交付的来源身份。}
+  - {name: fusion_version, type: string, role: system, required: true, description: 产出判断的融合链路版本。}
+  - {name: reduction_version, type: string, role: system, required: true, description: 归约写入层的实现版本。}

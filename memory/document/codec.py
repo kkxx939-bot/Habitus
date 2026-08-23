@@ -12,7 +12,7 @@ from memory.document.link import MemoryStoredLink, parse_stored_links
 from memory.document.model import MemoryDocument, MemoryDocumentMetadata
 from memory.model import MemoryAddress, MemoryKind
 
-_MARKER = "\n<!-- M2BOS_MEMORY_FIELDS\n"
+_MARKER = "\n<!-- HABITUS_MEMORY_FIELDS\n"
 _FOOTER = "\n-->\n"
 _METADATA_KEYS = {
     "memory_type",
@@ -134,7 +134,7 @@ class MemoryDocumentCodec:
         if not isinstance(expected_address, MemoryAddress):
             raise TypeError("expected_address must be a MemoryAddress")
         if raw.count(_MARKER) != 1 or not raw.endswith(_FOOTER):
-            raise MemoryDocumentIntegrityError("memory document must contain one terminal M2BOS_MEMORY_FIELDS comment")
+            raise MemoryDocumentIntegrityError("memory document must contain one terminal HABITUS_MEMORY_FIELDS comment")
         markdown_body, _separator, metadata_with_footer = raw.partition(_MARKER)
         metadata_source = metadata_with_footer[: -len(_FOOTER)]
         try:

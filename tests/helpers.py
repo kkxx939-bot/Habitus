@@ -133,7 +133,7 @@ def memory_fields(kind: MemoryKind) -> dict[str, object]:
     return {
         MemoryKind.PROFILE: {"content": "- 用户是视频创作者"},
         MemoryKind.PREFERENCE: {"topic": "回答风格", "content": "- 偏好简洁直接的回答"},
-        MemoryKind.ENTITY: {"category": "项目", "name": "m2bOS", "summary": "m2bOS 是用户正在重构的记忆系统。"},
+        MemoryKind.ENTITY: {"category": "项目", "name": "Habitus", "summary": "Habitus 是用户正在重构的记忆系统。"},
         MemoryKind.TOOL: {"tool_name": "workspace.inspect", "verification": "返回工作区状态后检查退出状态。"},
         MemoryKind.EVENT: {"event_date": date(2026, 7, 1), "event_name": "确认记忆树", "summary": "用户确认了六类长期记忆树。"},
         MemoryKind.INTENTION: {"intent_name": "完成记忆系统重构", "status": "open", "next_step": "补齐测试体系"},

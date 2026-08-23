@@ -93,7 +93,7 @@ class PredictionPublicationJournal:
     def _encode(record: PredictionPublicationRecord) -> bytes:
         value = canonicalize(
             {
-                "schema": "m2bos-prediction-publication-v1",
+                "schema": "habitus-prediction-publication-v1",
                 "job_id": record.job_id,
                 "documents": [{"uri": uri, "digest": digest} for uri, digest in record.documents],
                 "state": record.state.value,
@@ -105,7 +105,7 @@ class PredictionPublicationJournal:
     def _decode(value: Any, *, expected_job_id: str) -> PredictionPublicationRecord:
         if not isinstance(value, Mapping) or set(value) != {"schema", "job_id", "documents", "state"}:
             raise PredictionPublicationJournalError("prediction publication journal has an invalid shape")
-        if value["schema"] != "m2bos-prediction-publication-v1" or value["job_id"] != expected_job_id:
+        if value["schema"] != "habitus-prediction-publication-v1" or value["job_id"] != expected_job_id:
             raise PredictionPublicationJournalError("prediction publication journal identity is invalid")
         documents_value = value["documents"]
         if not isinstance(documents_value, list):

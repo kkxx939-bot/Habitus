@@ -1,0 +1,39 @@
+"""行为类型词表：跨次身份登记（模型只选不造，身份归属在写入侧）。"""
+
+from behavior.kinds.config import BehaviorKindConfig
+from behavior.kinds.model import (
+    BehaviorKindError,
+    BehaviorKindLimitError,
+    BehaviorKindRegistry,
+)
+from behavior.kinds.resolver import (
+    KIND_PROMPT_VERSION,
+    KIND_SYSTEM_PROMPT,
+    BehaviorKindResolution,
+    BehaviorKindResolver,
+    kind_match_schema,
+)
+from behavior.kinds.store import (
+    KINDS_SCHEMA_VERSION,
+    BehaviorKindConflictError,
+    BehaviorKindSnapshot,
+    BehaviorKindStore,
+    BehaviorKindStoreError,
+)
+
+__all__ = [
+    "KINDS_SCHEMA_VERSION",
+    "KIND_PROMPT_VERSION",
+    "KIND_SYSTEM_PROMPT",
+    "BehaviorKindConfig",
+    "BehaviorKindConflictError",
+    "BehaviorKindError",
+    "BehaviorKindLimitError",
+    "BehaviorKindRegistry",
+    "BehaviorKindResolution",
+    "BehaviorKindResolver",
+    "BehaviorKindSnapshot",
+    "BehaviorKindStore",
+    "BehaviorKindStoreError",
+    "kind_match_schema",
+]

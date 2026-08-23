@@ -15,9 +15,9 @@
 
 ## 融合不碰行为树
 
-本层只产出判断。判断到行为树文档（事件、结果、长期事件）的归约是**另一层**的事，它需要事后才有
-的信息（开空调的结果要等室温变化，长期事件要看完整段），节奏与融合相反。把它塞进融合，融合就
-永远完不了。
+本层只产出判断。判断到行为树文档（occurrence 与 gap）的归约是**另一层**的事：链要等老出引用
+窗口才封口（延续、修正、结果都可能在窗口内到达），节奏与融合相反。把它塞进融合，融合就永远
+完不了。
 
 ## 认领与执行分离
 
@@ -26,15 +26,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from behavior.fusion.config import FUSION_CONTEXT_LIMIT, FUSION_CONTEXT_LOOKBACK_SECONDS
 from behavior.fusion.derivation import (
     FUSION_VERSION,
     derive_judgements,
     judgement_payload,
+    persistable_judgements,
     without_unresolvable_relations,
 )
 from behavior.fusion.errors import BehaviorFusionError
@@ -84,8 +88,8 @@ class BehaviorFusionRunner:
         receipts: BehaviorFusionReceiptStore,
         *,
         primary_subject: str,
-        context_limit: int = 8,
-        context_lookback_seconds: float = 21_600.0,
+        context_limit: int = FUSION_CONTEXT_LIMIT,
+        context_lookback_seconds: float = FUSION_CONTEXT_LOOKBACK_SECONDS,
     ) -> None:
         for value, expected in (
             (jobs, BehaviorFusionJobStore),
@@ -150,6 +154,13 @@ class BehaviorFusionRunner:
             committed = self.jobs.commit(lease)
         except (BehaviorFusionJobBlockedError, BehaviorFusionJobNotReadyError):
             raise
+        except asyncio.CancelledError:
+            # 优雅停机超时取消：把租约按可重试失败结算后再传播取消——否则作业停留
+            # RUNNING+租约，重启后先 Blocked 等租约过期、再按"worker died"烧一次 attempt，
+            # 反复部署能把队首烧成永久 FAILED（评审推演）。
+            with suppress(Exception):
+                self.jobs.fail(lease, RuntimeError("fusion execution cancelled"), retryable=True)
+            raise
         except Exception as exc:
             self.jobs.fail(lease, exc, retryable=_is_retryable(exc))
             raise
@@ -196,9 +207,10 @@ class BehaviorFusionRunner:
                 "fusion produced a receipt identity that does not match its job; "
                 "the fusion or prompt version changed after this job was enqueued"
             )
-        # 只落属于主体的判断——不属于的会把判断存储淹没，而下游拿它们毫无用处。它们的观测身份
-        # 已经记在回执的 ``out_of_scope_observation_ids`` 里，缺失并没有被解释掉。
-        in_scope = tuple(item for item in derived if self.primary_subject in item.subjects)
+        # 落主体的判断与没读懂的观测段（后者归约层要物化成 gap 节点）；旁人的可读判断分流，
+        # 其观测身份已记在回执的 ``out_of_scope_observation_ids`` 里，缺失并没有被解释掉。
+        # 口径必须与回执共用同一个函数，否则 StagedFusion 的一致性校验会拦下整批。
+        in_scope = persistable_judgements(derived, self.primary_subject)
         # 落盘之后能被解析的目标只有这两类。指向被分流掉的旁人判断的关系必须在这里剪掉，
         # 否则不可变存储里会永久留下一个指向不存在记录的 ``target_id``。
         visible = {item.judgement_id for item in in_scope}
@@ -284,7 +296,7 @@ class BehaviorFusionRunner:
 def _is_retryable(error: BaseException) -> bool:
     """契约违约不因重试而改变，只有环境性失败值得退避重来。"""
 
-    return not isinstance(error, (TypeError, BehaviorFusionJobError))
+    return not isinstance(error, TypeError | BehaviorFusionJobError)
 
 
 __all__ = ["BehaviorFusionRunResult", "BehaviorFusionRunner"]

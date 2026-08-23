@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from behavior.fusion.errors import BehaviorFusionError
+from behavior.model import MAX_BEHAVIOR_NAME_UTF8_BYTES, semantic_name
 
 
 class JudgementStatus(str, Enum):
@@ -152,6 +153,18 @@ class BehaviorClaim:
             if self.goal is not None or self.summary is not None or self.basis:
                 raise BehaviorFusionError("an unreadable claim must not carry goal, summary or basis")
             return
+        # behavior 名将来就是行为树的地址身份；不合格的名字若放行落盘，会在归约封口后才炸、
+        # 且无自愈路径（正确性不依赖模型：在这里打回，模型换个说法重试即可）。
+        try:
+            semantic_name(self.behavior, "behavior")
+        except (TypeError, ValueError) as exc:
+            raise BehaviorFusionError(
+                f"behavior name is not usable as a tree address ({exc}); rephrase it"
+            ) from exc
+        if len(self.behavior.encode("utf-8")) > MAX_BEHAVIOR_NAME_UTF8_BYTES:
+            raise BehaviorFusionError(
+                "behavior name is too long for a tree address; describe the behaviour in fewer words"
+            )
         if self.summary is None:
             raise BehaviorFusionError("a readable claim must carry a summary")
         if self.goal is None and self.basis:

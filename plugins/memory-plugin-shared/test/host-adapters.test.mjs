@@ -4,14 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { hostAdapter as claude } from "../../m2bos-memory-claude-code/scripts/host-adapter.mjs";
-import { hostAdapter as codex } from "../../m2bos-memory/scripts/host-adapter.mjs";
+import { hostAdapter as claude } from "../../habitus-memory-claude-code/scripts/host-adapter.mjs";
+import { hostAdapter as codex } from "../../habitus-memory/scripts/host-adapter.mjs";
 import { createContextInjection } from "../lib/hook-runner.mjs";
 
 const FIXTURES = join(new URL("./fixtures", import.meta.url).pathname);
 
 async function transcript(t, records) {
-  const directory = await mkdtemp(join(tmpdir(), "m2bos-host-adapter-test-"));
+  const directory = await mkdtemp(join(tmpdir(), "habitus-host-adapter-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const path = join(directory, "transcript.jsonl");
   await writeFile(path, records.map((value) => JSON.stringify(value)).join("\n") + "\n");
@@ -147,7 +147,7 @@ test("nonce marker with a modified body is preserved", async (t) => {
 
 test("literal context marker without an injection receipt remains user content", async (t) => {
   const path = await transcript(t, [
-    { type: "response_item", payload: { type: "message", role: "user", content: "literal <m2bos-memory-context> fact" } },
+    { type: "response_item", payload: { type: "message", role: "user", content: "literal <habitus-memory-context> fact" } },
     { type: "response_item", payload: { type: "message", role: "assistant", content: "done" } },
   ]);
   const delta = await codex.readTranscriptDelta({ transcript_path: path }, null, config, []);

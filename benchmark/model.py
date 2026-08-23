@@ -23,7 +23,7 @@ class BenchmarkDatasetName(str, Enum):
 
     LOCOMO = "locomo"
     LONGMEMEVAL = "longmemeval"
-    M2BOS = "m2bos"
+    HABITUS = "habitus"
 
 
 def _text(value: object, label: str, *, maximum: int = 2_000_000) -> str:
@@ -90,7 +90,7 @@ class BenchmarkMessage:
 
 @dataclass(frozen=True)
 class BenchmarkSession:
-    """按原始时间顺序导入 m2bOS 的一个完整会话。"""
+    """按原始时间顺序导入 Habitus 的一个完整会话。"""
 
     session_id: str
     started_at: datetime
@@ -271,7 +271,7 @@ class BenchmarkAnswerRecord:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_version": "m2bos_benchmark_answer_v2",
+            "schema_version": "habitus_benchmark_answer_v2",
             **self.__dict__,
             "retrieved_uris": list(self.retrieved_uris),
             "related_uris": list(self.related_uris),
@@ -302,7 +302,7 @@ class BenchmarkJudgeRecord:
     def to_dict(self) -> dict[str, object]:
         return {
             **self.answer.to_dict(),
-            "schema_version": "m2bos_benchmark_judge_v2",
+            "schema_version": "habitus_benchmark_judge_v2",
             "verdict": self.verdict,
             "judge_reasoning": self.reasoning,
             "judge_input_tokens": self.judge_input_tokens,

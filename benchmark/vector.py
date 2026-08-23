@@ -18,7 +18,7 @@ from pathlib import Path
 
 from benchmark.isolation import isolated_config, require_empty_directory
 from benchmark.metrics import latency_distribution
-from Config import M2BOSConfig
+from Config import HabitusConfig
 from infrastructure.vector import (
     VectorStore,
     VectorStoreFilter,
@@ -120,7 +120,7 @@ def load_vector_dataset(path: str | Path) -> VectorBenchmarkDataset:
     root = _mapping(raw, "vector dataset")
     if set(root) != {"schema_version", "name", "documents", "queries"}:
         raise VectorBenchmarkError("vector dataset contains missing or unknown top-level fields")
-    if root["schema_version"] != "m2bos_vector_benchmark_v1":
+    if root["schema_version"] != "habitus_vector_benchmark_v1":
         raise VectorBenchmarkError("unsupported vector benchmark schema_version")
     documents = tuple(_document(value, index) for index, value in enumerate(_array(root["documents"], "documents")))
     queries = tuple(_query(value, index) for index, value in enumerate(_array(root["queries"], "queries")))
@@ -134,11 +134,11 @@ def load_vector_dataset(path: str | Path) -> VectorBenchmarkDataset:
 
 
 class VectorBenchmarkRunner:
-    """通过 m2bOS 正式 Embedder 与 VectorStore 协议执行完整远程基准。"""
+    """通过 Habitus 正式 Embedder 与 VectorStore 协议执行完整远程基准。"""
 
     def __init__(
         self,
-        config: M2BOSConfig,
+        config: HabitusConfig,
         dataset: VectorBenchmarkDataset,
         *,
         output_directory: str | Path,
@@ -152,8 +152,8 @@ class VectorBenchmarkRunner:
         phase_seconds: float | None = None,
         concurrency_levels: Sequence[int] | None = None,
     ) -> None:
-        if not isinstance(config, M2BOSConfig):
-            raise TypeError("config must be M2BOSConfig")
+        if not isinstance(config, HabitusConfig):
+            raise TypeError("config must be HabitusConfig")
         if not isinstance(dataset, VectorBenchmarkDataset):
             raise TypeError("dataset must be VectorBenchmarkDataset")
         if not 1 <= top_k <= config.memory.vector_index.max_search_hits:
@@ -231,7 +231,7 @@ class VectorBenchmarkRunner:
             build_started = time.perf_counter()
             state = await store.replace_all(
                 records,
-                schema_version="m2bos_vector_benchmark_v1",
+                schema_version="habitus_vector_benchmark_v1",
                 embedding_fingerprint=_embedding_fingerprint(self.config),
                 dimension=self.config.models.embedding.dimension,
                 checkpoint=1,
@@ -259,7 +259,7 @@ class VectorBenchmarkRunner:
             mutation = await self._mutate(store, state, records, embedder)
             primary_search = search_points[0]
             result: dict[str, object] = {
-                "schema_version": "m2bos_vector_benchmark_result_v1",
+                "schema_version": "habitus_vector_benchmark_result_v1",
                 "started_at": started_at,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "dataset": self.dataset.name,
@@ -556,12 +556,12 @@ def _fraction_count(size: int, fraction: float) -> int:
     return max(1, math.floor(size * fraction))
 
 
-def _embedding_fingerprint(config: M2BOSConfig) -> str:
+def _embedding_fingerprint(config: HabitusConfig) -> str:
     route = config.models.embedding.route
     return f"benchmark:{route.provider}:{route.adapter}:{route.model}:{config.models.embedding.dimension}"
 
 
-def _embedding_identity(config: M2BOSConfig) -> Mapping[str, object]:
+def _embedding_identity(config: HabitusConfig) -> Mapping[str, object]:
     route = config.models.embedding.route
     return {
         "provider": route.provider,

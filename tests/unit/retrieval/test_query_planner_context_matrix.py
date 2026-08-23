@@ -82,7 +82,7 @@ def structured(provider: RecordingPlannerProvider) -> StructuredChatClient:
 
 def context(
     *,
-    summary_context: str = "用户正在重构 m2bOS 记忆系统。",
+    summary_context: str = "用户正在重构 Habitus 记忆系统。",
     recent_messages=None,
 ) -> ConversationSearchContext:
     return ConversationSearchContext(
@@ -253,8 +253,8 @@ def test_plan_requires_text_target_context(invalid: object) -> None:
 @pytest.mark.parametrize(
     "queries",
     [
-        (("m2bOS 当前记忆树", "查找项目结构", 2),),
-        (("用户偏好的回答风格", "查找偏好", 1), ("m2bOS 当前状态", "查找项目", 2)),
+        (("Habitus 当前记忆树", "查找项目结构", 2),),
+        (("用户偏好的回答风格", "查找偏好", 1), ("Habitus 当前状态", "查找项目", 2)),
         (("第一项", "意图一", 3), ("第二项", "意图二", 1), ("第三项", "意图三", 2)),
     ],
 )

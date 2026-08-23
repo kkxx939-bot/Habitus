@@ -17,17 +17,17 @@ def run(argv: Sequence[str] | None = None) -> int:
     command = arguments.pop(0) if arguments else "install"
     if command in {"-h", "--help"}:
         sys.stdout.write(
-            "usage: m2bos-plugin [install|status|update|remove|doctor|harnesses] "
+            "usage: habitus-plugin [install|status|update|remove|doctor|harnesses] "
             "[--harness ID|--host ID] [--root PATH] [--prepare-only] [--json]\n"
         )
         return 0
     if command not in {"doctor", "harnesses", "install", "status", "update", "remove"}:
         raise ValueError(
-            "usage: m2bos-plugin [install|status|update|remove|doctor|harnesses] [options]"
+            "usage: habitus-plugin [install|status|update|remove|doctor|harnesses] [options]"
         )
     node = shutil.which("node")
     if node is None:
-        raise RuntimeError("m2bos-plugin requires Node.js")
+        raise RuntimeError("habitus-plugin requires Node.js")
     root = _plugin_root()
     script = root / ("memory-plugin-shared/doctor.mjs" if command == "doctor" else "install-memory-plugin.mjs")
     delegated = arguments if command == "doctor" else [command, *arguments]
@@ -51,20 +51,20 @@ def _plugin_root(
     source_root = Path(__file__).resolve().parents[2] / "plugins" if source is None else source
     candidates = [source_root]
     try:
-        package = distribution("m2bos")
+        package = distribution("habitus")
     except PackageNotFoundError:
         package = None
     if package is not None:
         for item in package.files or ():
             normalized = str(item).replace("\\", "/")
-            if normalized.endswith("share/m2bos/plugins/install-memory-plugin.mjs"):
+            if normalized.endswith("share/habitus/plugins/install-memory-plugin.mjs"):
                 candidates.append(Path(str(package.locate_file(item))).resolve().parent)
     for entry in sys.path if search_paths is None else search_paths:
-        candidates.append(Path(entry).resolve() / "share" / "m2bos" / "plugins")
+        candidates.append(Path(entry).resolve() / "share" / "habitus" / "plugins")
     for candidate in candidates:
         if (candidate / "install-memory-plugin.mjs").is_file():
             return candidate
-    raise SystemExit("m2bOS plugin assets are not installed")
+    raise SystemExit("Habitus plugin assets are not installed")
 
 
 __all__ = ["main", "run"]
