@@ -95,11 +95,11 @@ def evaluate(case: FusionCase, run: Mapping[str, Any]) -> dict[str, Any]:
         )
     for index, wanted in case.expect.status_present.items():
         seen = {item["status"] for item in segments.get(index, {}).get("judgements", [])}
-        hit = seen & set(wanted)
+        status_hit = seen & set(wanted)
         checks.append(
             {
                 "check": "status_present",
-                "passed": bool(hit),
+                "passed": bool(status_hit),
                 "detail": f"段{index} 期望出现 status {list(wanted)}；实际 {sorted(x for x in seen if x)}",
             }
         )
@@ -169,22 +169,27 @@ def evaluate(case: FusionCase, run: Mapping[str, Any]) -> dict[str, Any]:
                 "detail": f"段{index} 产出 {count} 条，期望 {low}–{high}",
             }
         )
-    for index, expected in case.expect.unreadable_fragments.items():
-        actual = tuple(segments.get(index, {}).get("unreadable_fragments", ()))
+    for index, expected_unreadable in case.expect.unreadable_fragments.items():
+        actual_unreadable = tuple(segments.get(index, {}).get("unreadable_fragments", ()))
         checks.append(
             {
                 "check": "unreadable",
-                "passed": set(expected) == set(actual),
-                "detail": f"段{index} 期望读不懂 {list(expected)}，实际 {list(actual)}",
+                "passed": set(expected_unreadable) == set(actual_unreadable),
+                "detail": (
+                    f"段{index} 期望读不懂 {list(expected_unreadable)}，实际 {list(actual_unreadable)}"
+                ),
             }
         )
-    for index, expected in case.expect.out_of_scope_fragments.items():
-        actual = tuple(segments.get(index, {}).get("out_of_scope_fragments", ()))
+    for index, expected_out_of_scope in case.expect.out_of_scope_fragments.items():
+        actual_out_of_scope = tuple(segments.get(index, {}).get("out_of_scope_fragments", ()))
         checks.append(
             {
                 "check": "out_of_scope",
-                "passed": set(expected) == set(actual),
-                "detail": f"段{index} 期望不属于主体的帧 {list(expected)}，实际 {list(actual)}",
+                "passed": set(expected_out_of_scope) == set(actual_out_of_scope),
+                "detail": (
+                    f"段{index} 期望不属于主体的帧 {list(expected_out_of_scope)}，"
+                    f"实际 {list(actual_out_of_scope)}"
+                ),
             }
         )
     return _summarise(case, run, checks)

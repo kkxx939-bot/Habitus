@@ -10,11 +10,12 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 
 from behavior.fusion import (
     BehaviorFusionConfig,
     BehaviorFusionSegment,
+    BehaviorJudgementBatch,
     assemble_judgement_batch,
     derive_judgements,
     fusion_json_schema,
@@ -151,7 +152,7 @@ async def run_case(
             record.failed = f"{type(exc).__name__}: {exc}"
             run.segments.append(record)
             break
-        batch = response.value
+        batch = cast(BehaviorJudgementBatch, response.value)
         record.model_calls = response.validation_attempts
         try:
             validate_judgement_batch(batch, segment.fragments)
@@ -245,8 +246,8 @@ async def run_case(
 
 def _assembler(
     fragment_count: int, context_states: tuple[str | None, ...], config: BehaviorFusionConfig
-) -> Callable[[object], Any]:
-    def assemble(parsed: object) -> Any:
+) -> Callable[[object], BehaviorJudgementBatch]:
+    def assemble(parsed: object) -> BehaviorJudgementBatch:
         return assemble_judgement_batch(
             parsed,
             fragment_count=fragment_count,
