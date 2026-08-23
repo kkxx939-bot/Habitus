@@ -62,10 +62,12 @@ jobs:
           assert "behavior/model.py" in names
           assert "behavior/document/model.py" in names
           assert "behavior/tree/store.py" in names
-          assert "behavior/schema/definitions/episodes.yaml" in names
-          assert "Config/behavior.py" not in names
+          assert "behavior/schema/definitions/occurrences.yaml" in names
+          assert "behavior/schema/definitions/gaps.yaml" in names
+          assert "Config/behavior.py" in names
           assert "infrastructure/store/processing_lock.py" not in names
-          assert "conversation/projection/behavior.py" in names
+          assert "conversation/projection/behavior/projector.py" in names
+          assert "conversation/projection/behavior/store.py" in names
           assert any(name.endswith("share/habitus/plugins/install-memory-plugin.mjs") for name in names)
           assert any(name.endswith("share/habitus/plugins/harnesses.mjs") for name in names)
           PY
