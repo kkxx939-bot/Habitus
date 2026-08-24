@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
+from typing import Any
 
 from Config.loader import ConfigError, construct_config
 
@@ -88,8 +89,13 @@ class PredictionConfig:
                 + ", ".join(missing)
             )
 
-    def tree_parameters(self) -> dict[str, float | int]:
-        """按 ``PredictionTreeConfig`` 的字段名交出十三个值；未启用时调用即错。"""
+    def tree_parameters(self) -> dict[str, Any]:
+        """按 ``PredictionTreeConfig`` 的字段名交出十三个值；未启用时调用即错。
+
+        标注成 ``Any`` 而不是 ``float | int``：这十三个值是异构的（槽宽是 int、半衰期是
+        float），拿一个联合类型去 ``**`` 展开，类型检查器只会按最宽的那个成员去匹配每一个
+        形参。真正的类型与范围校验在 ``PredictionTreeConfig`` 的构造里，那里才是唯一出处。
+        """
 
         if not self.enabled:
             raise ConfigError("config.prediction is disabled and carries no tree parameters")

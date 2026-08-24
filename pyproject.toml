@@ -81,8 +81,6 @@ include = [
 "benchmark" = ["README.md", "datasets/*.json", "policies/*.json"]
 "memory.schema.definitions" = ["*.yaml"]
 "behavior.schema.definitions" = ["*.yaml"]
-"prediction.schema.definitions" = ["*.yaml"]
-"prediction.pattern.definitions" = ["*.yaml"]
 
 [tool.ruff]
 line-length = 120

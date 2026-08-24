@@ -75,9 +75,9 @@ def decode(payload: Mapping[str, Any]) -> PredictionTree:
     # 槽宽先取出来：下面每个槽位键都要用它校验上界，否则损坏的 payload 里一个 "0/9999"
     # 能解码成功并混进树，之后每次查询都查不到、也看不出为什么。
     slot_minutes = payload.get("slot_minutes")
-    total = slot_count(slot_minutes) if isinstance(slot_minutes, int) else None
-    if total is None:
+    if not isinstance(slot_minutes, int) or isinstance(slot_minutes, bool):
         raise PredictionTreeError("prediction tree payload has an invalid slot width")
+    total = slot_count(slot_minutes)
     try:
         return PredictionTree(
             built_at=_moment(payload["built_at"]),

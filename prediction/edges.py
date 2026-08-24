@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 from bisect import bisect_left
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -97,7 +97,7 @@ def pair(
         current = actions[index]
         weight = decay_weight(float((reference - current.day).days), config.decay_half_life_days)
         deadline = current.started_at.timestamp() + window
-        partners = concurrent_partners.get(index, frozenset())
+        partners: AbstractSet[int] = concurrent_partners.get(index, frozenset())
         successor: ObservedAction | None = None
         for follower_position in range(position + 1, len(ordered)):
             follower_index = ordered[follower_position]
