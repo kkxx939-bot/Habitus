@@ -93,6 +93,7 @@ from Runtime.components import (
     RuntimeWorkflow,
 )
 from Runtime.lifecycle import LifecycleWorker
+from Runtime.prediction import build_prediction_components
 from Runtime.runtime import Runtime
 from Runtime.worker import MemoryWorker
 
@@ -550,6 +551,15 @@ def build_runtime(
         path_lock=resolved_lock,
         observer=operation_observer,
     )
+    # behavior 关着而 prediction 开着的组合已经在配置层被硬拒（见 HabitusConfig 的跨域校验），
+    # 所以这里 behavior_components 为 None 时 prediction 必然也没开，直接跳过即可。
+    prediction_components = (
+        None
+        if behavior_components is None
+        else build_prediction_components(
+            config, behavior_tree=behavior_components.tree, observer=operation_observer
+        )
+    )
     components = RuntimeComponents(
         infrastructure=RuntimeInfrastructure(
             path_lock=resolved_lock,
@@ -604,6 +614,7 @@ def build_runtime(
             lifecycle_worker=lifecycle_worker,
         ),
         behavior=behavior_components,
+        prediction=prediction_components,
     )
     return Runtime(config, components, conversation_adapters=conversation_adapters)
 

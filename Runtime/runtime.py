@@ -350,6 +350,18 @@ class Runtime:
                         started,
                         {"error_type": type(exc).__name__},
                     )
+            # 预测夜批同一哲学：它只读行为树、只写自己的存储，起不来不影响任何在线路径。
+            if self.components.prediction is not None:
+                try:
+                    await self.components.prediction.worker.start()
+                except Exception as exc:  # noqa: BLE001 - 预测侧失败不阻断记忆主链
+                    self._observe(
+                        "runtime",
+                        "prediction_start",
+                        ObservationStatus.FAILURE,
+                        started,
+                        {"error_type": type(exc).__name__},
+                    )
             self._state = RuntimeState.RUNNING
         except BaseException as exc:
             self._observe(
@@ -377,7 +389,7 @@ class Runtime:
             raise RuntimeStateError("closing runtime cannot be stopped")
         if self._state is RuntimeState.CREATED:
             return
-        await self._stop_behavior_workers()
+        await self._stop_background_workers()
         try:
             await self.components.workflow.lifecycle_worker.stop()
         finally:
@@ -405,9 +417,25 @@ class Runtime:
             )
         return await asyncio.to_thread(_deliver_behavior_observations, behavior, envelope)
 
-    async def _stop_behavior_workers(self) -> None:
-        """停行为侧两个循环；失败不阻断记忆主链的停机（与启动侧同一哲学）。"""
+    async def _stop_background_workers(self) -> None:
+        """停行为侧两个循环与预测夜批；失败不阻断记忆主链的停机（与启动侧同一哲学）。
 
+        名字不叫 behavior：启动侧是分开的两块，停机侧合成一个函数是为了保证顺序（预测先停，
+        它读的行为树才停），但既然管着两个域，就不该顶着一个域的名字。
+        """
+
+        prediction = self.components.prediction
+        if prediction is not None:
+            try:
+                await prediction.worker.stop()
+            except Exception as exc:  # noqa: BLE001 - 预测侧停机失败不阻断主链
+                self._observe(
+                    "runtime",
+                    "prediction_stop",
+                    ObservationStatus.FAILURE,
+                    time.monotonic(),
+                    {"error_type": type(exc).__name__},
+                )
         behavior = self.components.behavior
         if behavior is None:
             return
@@ -955,7 +983,7 @@ class Runtime:
         if previous_state is not RuntimeState.CREATED:
             # 行为 Worker 与主链 Worker 对称停机：``async with`` 的退出走的是 close 不是
             # stop——漏掉这里会让融合/归约循环带着已关闭的模型客户端继续跑（评审实测泄漏）。
-            await self._stop_behavior_workers()
+            await self._stop_background_workers()
             try:
                 await self.components.workflow.lifecycle_worker.stop()
             finally:

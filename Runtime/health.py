@@ -8,8 +8,11 @@ from datetime import datetime, timezone
 from enum import Enum
 
 from memory.workflow import MemoryJobStatus
+from prediction.errors import PredictionTreeStoreError
 from Runtime.components import RuntimeComponents
 from Runtime.lifecycle import LifecycleWorkerState
+from Runtime.prediction import PredictionRuntimeComponents
+from Runtime.resident import ResidentWorker
 from Runtime.worker import MemoryWorkerState
 
 
@@ -57,6 +60,7 @@ class RuntimeHealthService:
             self._observability_check(),
         ]
         checks.extend(self._behavior_checks(runtime_state))
+        checks.extend(self._prediction_checks(runtime_state))
         checks.append(await self._queue_check())
         checks.extend(await asyncio.gather(self._vector_check("memory_vector", self.components.memory.vector_index.store), self._vector_check("summary_vector", self.components.conversation.summary_vector_index.store)))
         if deep:
@@ -105,11 +109,74 @@ class RuntimeHealthService:
                     "behavior", RuntimeHealthStatus.HEALTHY, "disabled", critical=False
                 )
             ]
+        return self._worker_checks(
+            runtime_state,
+            (
+                ("behavior_fusion_worker", behavior.fusion_worker),
+                ("behavior_reduction_worker", behavior.reduction_worker),
+            ),
+        )
+
+    def _prediction_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:
+        """预测夜批的健康面；同样 non-critical。
+
+        夜批循环死掉不会让任何请求出错——它只是让树停在昨天的数据上，而这**恰恰是最难
+        自己发现的故障**：读侧照常返回数字，只是那些数字越来越旧。所以循环存活必须上健康面。
+        """
+
+        prediction = self.components.prediction
+        if prediction is None:
+            return [
+                RuntimeHealthCheck(
+                    "prediction", RuntimeHealthStatus.HEALTHY, "disabled", critical=False
+                )
+            ]
+        checks = self._worker_checks(
+            runtime_state, (("prediction_rebuild_worker", prediction.worker),)
+        )
+        checks.append(self._prediction_freshness_check(prediction))
+        return checks
+
+    @staticmethod
+    def _prediction_freshness_check(prediction: PredictionRuntimeComponents) -> RuntimeHealthCheck:
+        """树有多旧。循环活着不等于树在更新——这正是上面那段 docstring 说最难自己发现的故障。
+
+        容忍两个重建周期：一拍没赶上是正常抖动，连着两拍没出新代就说明重建实际没在产出
+        （行为树空、发布被拒、每拍都抛在同一个地方）。还没发布过任何一代不算故障：
+        行为侧刚接入、第一夜还没到的时候就是这个状态。
+        """
+
+        try:
+            published = prediction.store.active()
+        except PredictionTreeStoreError as exc:
+            return RuntimeHealthCheck(
+                "prediction_tree", RuntimeHealthStatus.UNHEALTHY, f"unreadable:{type(exc).__name__}", critical=False
+            )
+        if published is None:
+            return RuntimeHealthCheck(
+                "prediction_tree", RuntimeHealthStatus.HEALTHY, "never_published", critical=False
+            )
+        age = (datetime.now(timezone.utc) - published.published_at).total_seconds()
+        tolerance = 2.0 * prediction.tree_config.rebuild_interval_seconds
+        if age > tolerance:
+            return RuntimeHealthCheck(
+                "prediction_tree",
+                RuntimeHealthStatus.DEGRADED,
+                f"stale:{int(age)}s",
+                critical=False,
+            )
+        return RuntimeHealthCheck(
+            "prediction_tree", RuntimeHealthStatus.HEALTHY, f"age:{int(age)}s", critical=False
+        )
+
+    @staticmethod
+    def _worker_checks(
+        runtime_state: str, workers: tuple[tuple[str, ResidentWorker], ...]
+    ) -> list[RuntimeHealthCheck]:
+        """一组常驻循环的存活面：出过错报 degraded，该转不转报 unhealthy。"""
+
         checks: list[RuntimeHealthCheck] = []
-        for name, worker in (
-            ("behavior_fusion_worker", behavior.fusion_worker),
-            ("behavior_reduction_worker", behavior.reduction_worker),
-        ):
+        for name, worker in workers:
             if worker.last_error is not None:
                 checks.append(
                     RuntimeHealthCheck(

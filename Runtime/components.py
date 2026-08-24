@@ -56,6 +56,7 @@ from ModelClient import (
 )
 from Runtime.behavior import BehaviorRuntimeComponents
 from Runtime.lifecycle import LifecycleWorker
+from Runtime.prediction import PredictionRuntimeComponents
 from Runtime.worker import MemoryWorker
 
 
@@ -351,6 +352,8 @@ class RuntimeComponents:
     workflow: RuntimeWorkflow
     # 行为管线（观测→融合→归约→行为树）；primary_subject 未配置时为 None（行为侧未启用）。
     behavior: BehaviorRuntimeComponents | None = None
+    # 时间预测树夜批；prediction.enabled 为假时为 None。它读行为树，所以行为侧未启用时也必然为 None。
+    prediction: PredictionRuntimeComponents | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.infrastructure, RuntimeInfrastructure):
@@ -365,6 +368,14 @@ class RuntimeComponents:
             raise TypeError("workflow must be RuntimeWorkflow")
         if self.behavior is not None and not isinstance(self.behavior, BehaviorRuntimeComponents):
             raise TypeError("behavior must be BehaviorRuntimeComponents or None")
+        if self.prediction is not None:
+            if not isinstance(self.prediction, PredictionRuntimeComponents):
+                raise TypeError("prediction must be PredictionRuntimeComponents or None")
+            if self.behavior is None:
+                raise ValueError("prediction rebuilds from the behaviour tree; behaviour must be enabled")
+            # 实例同一性：夜批必须读**这个** Runtime 写入的那棵行为树，不是另开一个同路径的实例。
+            if self.prediction.rebuilder.behavior_tree is not self.behavior.tree:
+                raise ValueError("prediction must rebuild from the assembled behaviour tree")
         if self.workflow.enqueuer.conversations is not self.conversation.journal:
             raise ValueError("workflow enqueuer must use the shared conversation journal")
         if (

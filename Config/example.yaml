@@ -440,3 +440,26 @@ workflow:
 #   reduction_sweep_interval_seconds: 300
 #   fusion_poll_interval_seconds: 5
 #   worker_shutdown_timeout_seconds: 30
+
+# 时间预测树的夜批。缺省未启用；置 enabled: true 即启用，Runtime 会在行为侧也启用时组装
+# 重建 Worker（这棵树读的就是行为树，行为侧没开就没有输入）。
+#
+# 下面十三个值**全部是启动档，没有一个有数据依据**（见 prediction/config.py 的
+# TODO(PRED-TUNING-001)）。它们要用 prediction/evaluation.py 的留出回测在我们自己的数据上
+# 逐项定档，判据以校准为主。在第一批真实 occurrence 出来之前，不要为了"看起来更合理"提前改。
+# prediction:
+#   enabled: true
+#   slot_minutes: 15                 # 待定档：min(提醒精度目标, 链内相邻间隔低分位)
+#   decay_half_life_days: 60         # 待定档：行为分布的稳定期长度
+#   recent_half_life_days: 14        # 待定档：多快认出习惯变化而不被单周波动骗到；必须短于上一行
+#   pool_half_width: 2               # 待定档：同一习惯的日间时间抖动（单位是槽）
+#   shrink_slot_to_pool: 5           # 待定档：留出集上最小化对数损失
+#   shrink_pool_to_weekday: 5        # 待定档：同上
+#   shrink_weekday_to_all_day: 5     # 待定档：同上
+#   laplace_epsilon: 0.5             # 待定档：边的目标份额平滑
+#   transition_window_seconds: 1800  # 待定档：链内/链间间隔的双峰谷底（最依赖真实数据）
+#   shrink_edge: 5                   # 待定档：留出集上最小化对数损失
+#   recurrence_window_days: 90       # 待定档：超过多久算"重新开始"而不是"复发"
+#   rebuild_interval_seconds: 86400  # 运维数：一天重建一次
+#   published_generations: 7         # 运维数：留七代，够回看一周
+#   worker_shutdown_timeout_seconds: 30

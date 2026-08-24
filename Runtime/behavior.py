@@ -48,15 +48,11 @@ from behavior.reduction import (
 from behavior.semantic import BehaviorSemanticRefresher, LLMBehaviorOverviewGenerator
 from behavior.tree import BehaviorTree
 from Config import HabitusConfig
-from foundation.observability import (
-    NullObserver,
-    ObservationEvent,
-    ObservationStatus,
-    Observer,
-)
+from foundation.observability import ObservationStatus, Observer
 from infrastructure.store.contracts.lock import LockStore
 from infrastructure.store.contracts.path_lock import PathLock
 from ModelClient import StructuredChatClient
+from Runtime.resident import ResidentWorker
 
 
 @dataclass(frozen=True)
@@ -129,83 +125,7 @@ class BehaviorRuntimeComponents:
             )
 
 
-class _BehaviorWorkerBase:
-    """两个行为 Worker 共用的循环骨架：启停、唤醒、可观测事件。"""
-
-    _task_name = "habitus-behavior-worker"
-
-    def __init__(
-        self, *, shutdown_timeout_seconds: float, observer: Observer | None
-    ) -> None:
-        self.shutdown_timeout_seconds = float(shutdown_timeout_seconds)
-        self.observer: Observer = observer if observer is not None else NullObserver()
-        self._stop_requested = asyncio.Event()
-        self._wake_event = asyncio.Event()
-        self._loop_task: asyncio.Task[None] | None = None
-        self.last_error: BaseException | None = None
-
-    @property
-    def running(self) -> bool:
-        return self._loop_task is not None and not self._loop_task.done()
-
-    async def start(self) -> None:
-        if self.running:
-            return
-        self._stop_requested.clear()
-        self._wake_event.clear()
-        self.last_error = None
-        self._loop_task = asyncio.create_task(self._run_loop(), name=self._task_name)
-        await asyncio.sleep(0)
-
-    async def stop(self) -> None:
-        task = self._loop_task
-        if task is None or task.done():
-            return
-        self._stop_requested.set()
-        self._wake_event.set()
-        try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=self.shutdown_timeout_seconds)
-        except asyncio.TimeoutError:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-
-    def wake(self) -> None:
-        self._wake_event.set()
-
-    async def _wait(self, timeout: float) -> None:
-        self._wake_event.clear()
-        with suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(self._wake_event.wait(), timeout=timeout)
-
-    def _observe(
-        self,
-        operation: str,
-        status: ObservationStatus,
-        attributes: dict[str, str | int | float | bool],
-        *,
-        started: float | None = None,
-    ) -> None:
-        try:
-            self.observer.record(
-                ObservationEvent(
-                    category="behavior",
-                    operation=operation,
-                    status=status,
-                    duration_seconds=(
-                        0.0 if started is None else max(0.0, time.monotonic() - started)
-                    ),
-                    attributes=attributes,
-                )
-            )
-        except Exception:  # noqa: BLE001 - 观测失败不许影响业务循环
-            pass
-
-    async def _run_loop(self) -> None:  # pragma: no cover - 子类实现
-        raise NotImplementedError
-
-
-class BehaviorFusionWorker(_BehaviorWorkerBase):
+class BehaviorFusionWorker(ResidentWorker):
     """驱动融合队列的常驻循环：扫描入队 → 认领 → 心跳护租约 → 执行。
 
     单条作业的失败由融合 runner 在租约内结算（重试/退避/FAILED 封锁都耐久在作业存储里）；
@@ -215,6 +135,7 @@ class BehaviorFusionWorker(_BehaviorWorkerBase):
     """
 
     _task_name = "habitus-behavior-fusion"
+    _observation_category = "behavior"
 
     def __init__(
         self,
@@ -287,12 +208,14 @@ class BehaviorFusionWorker(_BehaviorWorkerBase):
                     started=started,
                 )
                 worked = False
+            else:
+                self._succeeded()
             if worked:
                 continue
             await self._wait(self.poll_interval_seconds)
 
 
-class BehaviorReductionWorker(_BehaviorWorkerBase):
+class BehaviorReductionWorker(ResidentWorker):
     """归约 sweep 的常驻节拍（用户裁定 5 分钟一轮）；正确性全在 runner，这里只管节奏。
 
     sweep 内部的同步 IO 会短暂占用事件循环——量级受 BHV-LIFECYCLE-001 的全量扫描欠账支配，
@@ -300,6 +223,7 @@ class BehaviorReductionWorker(_BehaviorWorkerBase):
     """
 
     _task_name = "habitus-behavior-reduction"
+    _observation_category = "behavior"
 
     def __init__(
         self,
@@ -333,6 +257,8 @@ class BehaviorReductionWorker(_BehaviorWorkerBase):
                     {"error_type": type(exc).__name__},
                     started=started,
                 )
+            else:
+                self._succeeded()
             await self._wait(self.interval_seconds)
 
 

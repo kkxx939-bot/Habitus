@@ -158,11 +158,14 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
     # BHV-RUNTIME-001 接线后，**只有 Runtime**（组合根，跨域组装的唯一合法位置，与 memory
     # 同理）允许 import behavior；其余包对 behavior 的反向依赖仍然禁止——Config 也不例外
     # （BehaviorConfig 是纯标量组，不 import behavior，上下文窗口默认值仍由组合根从
-    # behavior/fusion/config.py 的唯一出处解析）。
+    # behavior/fusion/config.py 的唯一出处解析）。唯一的例外是时间预测树的读取入口
+    # ``prediction/source.py``：整棵树每夜从行为树重建，那是设计路径而不是泄漏，
+    # 收在单个模块里由 test_prediction_reads_the_behaviour_tree_through_exactly_one_module 守住。
     reverse_dependency_violations = [
         str(path.relative_to(REPOSITORY_ROOT))
         for path in production_files()
         if path.relative_to(REPOSITORY_ROOT).parts[0] not in {"behavior", "Runtime"}
+        and path.relative_to(REPOSITORY_ROOT).as_posix() != "prediction/source.py"
         and "behavior" in imported_roots(path)
     ]
     assert reverse_dependency_violations == []
@@ -348,45 +351,81 @@ def test_reduction_modules_reach_the_model_only_through_the_runner() -> None:
     assert semantic_leaking == [], f"这些语义层确定性模块传递性地依赖了 ModelClient: {semantic_leaking}"
 
 
-def test_prediction_tree_does_not_depend_on_behavior_yet() -> None:
-    """旧 Behavior→Prediction 投影包随行为树重建整体退役（TODO(BHV-TREE-REBUILD-001)）。
+def _prediction_module_graph() -> dict[str, Path]:
+    prediction_root = REPOSITORY_ROOT / "prediction"
+    graph: dict[str, Path] = {}
+    for path in prediction_root.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        relative = path.relative_to(prediction_root).with_suffix("").as_posix().replace("/", ".")
+        graph[f"prediction.{relative}".removesuffix(".__init__")] = path
+    return graph
 
-    新的时间预测树落地前，prediction 不得依赖 behavior；届时唯一的读取入口再以显式包恢复，
-    并恢复"只有该包可 import behavior"的边界断言。
+
+def _prediction_modules_reaching(root: str) -> set[str]:
+    """本包内**传递性**触达某个外部根包的模块集合。
+
+    只查一跳不够：``builder → source → behavior`` 这条转发链下，写着 import 的只有 source，
+    但任何 import builder 的人都会把 behavior 拖进来（真实发生过：门面 import builder，
+    于是 ``import prediction`` 拉进 21 个 behavior 模块，而一跳检查全绿）。
     """
 
-    prediction_root = REPOSITORY_ROOT / "prediction"
-    assert prediction_root.is_dir()
+    graph = _prediction_module_graph()
+    cache: dict[str, bool] = {}
 
-    behavior_importers = {
-        path.relative_to(REPOSITORY_ROOT)
-        for path in prediction_root.rglob("*.py")
-        if "behavior" in imported_roots(path)
-    }
-    assert behavior_importers == set()
+    def reaches(module: str, stack: set[str]) -> bool:
+        if module in cache:
+            return cache[module]
+        if module in stack:
+            return False
+        stack.add(module)
+        imported = imported_modules(graph[module])
+        result = any(name == root or name.startswith(f"{root}.") for name in imported) or any(
+            reaches(name, stack) for name in imported if name in graph
+        )
+        stack.discard(module)
+        cache[module] = result
+        return result
 
-    forbidden_prediction_dependencies = {
-        "Config",
-        "ModelClient",
-        "Runtime",
-        "conversation",
-        "integrations",
-        "memory",
-        "pre",
-    }
-    prediction_dependency_violations = [
-        str(path.relative_to(REPOSITORY_ROOT))
-        for path in prediction_root.rglob("*.py")
-        if imported_roots(path) & forbidden_prediction_dependencies
-    ]
-    assert prediction_dependency_violations == []
+    return {module for module in graph if reaches(module, set())}
 
-    behavior_reverse_violations = [
+
+def test_prediction_reads_the_behaviour_tree_through_exactly_one_module() -> None:
+    """时间预测树只有一个模块**传递性**触达行为树：``prediction.source``。
+
+    整棵树每夜从行为树重建，所以这条依赖是设计路径而不是泄漏；但它必须收在一个模块里，
+    其余模块保持零依赖的纯计算，才能让估计器的正确性在纯函数层穷举验证
+    （见 ``TODO(PRED-TREE-001)``）。查传递闭包而不是"谁写了 import"：共享一个住在
+    source 里的数据类型就足以让全包连坐，而字面检查看不见。
+    """
+
+    assert (REPOSITORY_ROOT / "prediction").is_dir()
+    assert _prediction_modules_reaching("behavior") == {"prediction.source"}
+
+
+def test_prediction_stays_out_of_the_semantic_and_composition_layers() -> None:
+    """本层零语义、零 LLM：模型编排与记忆桥接一律住在组合根。
+
+    ``prediction`` 不得触达 ``memory``（两者的桥接是组合根的事），也不得触达 ``ModelClient``
+    （在线只有组合根那两个受控调用点）。见 ``TODO(PRED-DOWNSTREAM-001)`` 的"组合根的两条边界"。
+
+    查的是**传递闭包**：一跳检查放不过经 source 或 builder 中转的链路。
+    """
+
+    forbidden = ("Config", "ModelClient", "Runtime", "conversation", "integrations", "memory", "pre")
+    reachable = {root: sorted(_prediction_modules_reaching(root)) for root in forbidden}
+    assert {root: modules for root, modules in reachable.items() if modules} == {}
+
+
+def test_behaviour_never_depends_on_prediction() -> None:
+    """依赖是单向的：行为树不知道有人在统计它，否则预测的聚合键会反过来决定行为树的字段。"""
+
+    violations = [
         str(path.relative_to(REPOSITORY_ROOT))
         for path in (REPOSITORY_ROOT / "behavior").rglob("*.py")
         if "prediction" in imported_roots(path)
     ]
-    assert behavior_reverse_violations == []
+    assert violations == []
 
 
 def test_conversation_source_and_projection_do_not_depend_on_memory_or_behavior() -> None:

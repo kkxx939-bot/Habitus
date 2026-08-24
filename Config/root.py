@@ -16,6 +16,7 @@ from Config.loader import ConfigError, group_fields, load_config_object, require
 from Config.memory import MemoryConfig
 from Config.models import ModelConfig
 from Config.observability import ObservabilityConfig
+from Config.prediction import PredictionConfig
 from Config.storage import StorageConfig
 from Config.workflow import WorkflowConfig
 
@@ -33,6 +34,7 @@ class HabitusConfig:
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
+    prediction: PredictionConfig = field(default_factory=PredictionConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     http: HTTPAPIConfig = field(default_factory=HTTPAPIConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
@@ -47,6 +49,7 @@ class HabitusConfig:
             ("conversation", self.conversation, ConversationConfig),
             ("memory", self.memory, MemoryConfig),
             ("behavior", self.behavior, BehaviorConfig),
+            ("prediction", self.prediction, PredictionConfig),
             ("workflow", self.workflow, WorkflowConfig),
         )
         for name, value, expected_type in expected:
@@ -79,6 +82,12 @@ class HabitusConfig:
         return self.storage_root / "behavior"
 
     @property
+    def prediction_root(self) -> Path:
+        """返回已发布预测树各代的根目录；与行为树同级、互不覆盖。"""
+
+        return self.storage_root / "prediction"
+
+    @property
     def workflow_root(self) -> Path:
         """返回 Job、Receipt 和事务日志的树外工作目录。"""
 
@@ -106,6 +115,7 @@ class HabitusConfig:
             conversation=ConversationConfig.from_mapping(data.get("conversation", {})),
             memory=MemoryConfig.from_mapping(data.get("memory", {})),
             behavior=BehaviorConfig.from_mapping(data.get("behavior", {})),
+            prediction=PredictionConfig.from_mapping(data.get("prediction", {})),
             workflow=WorkflowConfig.from_mapping(data.get("workflow", {})),
         )
 
@@ -140,6 +150,14 @@ class HabitusConfig:
 
     def _validate_cross_domain_limits(self) -> None:
         self._validate_credential_references()
+        # 预测树每夜从行为树重建，行为侧没开就没有输入。这是**配置自相矛盾**（我们自己的两组
+        # 配置互相打架），不是现实世界的形状，所以硬拒。放过去的下场是：启动一切正常、健康面
+        # 报 prediction disabled、什么都没发生、无处可查——用户只是忘了填 primary_subject。
+        if self.prediction.enabled and not self.behavior.enabled:
+            raise ConfigError(
+                "config.prediction is enabled but config.behavior.primary_subject is empty; "
+                "the prediction tree rebuilds from the behaviour tree and has no input without it"
+            )
         memory = self.memory
         models = self.models
         workflow = self.workflow
