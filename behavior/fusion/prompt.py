@@ -282,7 +282,6 @@ frames：
   no=4 [(1,2)]  no=5 [(1,2)]  no=6 [(1,2)]
   no=7 [(2,null)]
   no=8 [(1,3)]  no=9 [(1,3)]
-  no=10 [(3,null)]
   no=11 [(4,null)]
   no=12 [(5,1)]  no=13 [(5,1)]
 
@@ -339,6 +338,48 @@ frames：
   #7 起身走开——判不出他去做什么，goal 留空。
   空白之后 #8 #9 带有明确的延续证据（坐回餐桌继续吃），所以用 continues 指回第 1 条；
   如果回来之后做的是别的事，relations 就留空。
+
+## 示例三：转写、途中小动作与边做边聊
+
+本次跟踪的主体：成年女性A
+
+输入片段：
+  #1 (+0s)  成年女性A打开冰箱拿出鸡蛋
+  #2 (+6s)  成年女性A把鸡蛋磕进碗里
+  #3 (+9s) [audio/reported] 少年B：妈，今晚吃什么？
+  #4 (+12s)  成年女性A把蛋壳扔进垃圾桶
+  #5 (+15s) [audio/reported] 成年女性A：煎蛋饼，再炒个青菜。
+  #6 (+20s)  成年女性A打开水龙头冲洗双手并擦干
+  #7 (+26s) [audio/reported] 少年B：那我作业写完能看会儿电视吗？
+  #8 (+31s) [audio/reported] 成年女性A：写完先给我检查。
+  #9 (+36s)  成年女性A搅打碗里的鸡蛋
+
+
+judgements：
+  1  subjects=[成年女性A]  behavior=做晚饭  goal=准备晚饭  summary=一边和孩子说话一边准备晚饭
+     status=ongoing  status_basis=observation_lost  relations=[]
+     basis: 1「取出鸡蛋磕进碗里，蛋壳扔进垃圾桶」 2「中途冲洗双手擦干」 3「搅打蛋液」
+  2  subjects=[成年女性A、少年B]  behavior=与少年B交谈  goal=null
+     summary=做饭时回答孩子晚饭吃什么、写完作业能不能看电视
+     status=completed  status_basis=observed
+     relations=[{concurrent_with, 1}]  basis=[]
+
+frames：
+  no=1 [(1,1)]  no=2 [(1,1)]
+  no=3 [(2,null)]
+  no=4 [(1,1)]
+  no=5 [(2,null)]
+  no=6 [(1,2)]
+  no=7 [(2,null)]  no=8 [(2,null)]
+  no=9 [(1,3)]
+
+要点：
+  [audio/reported] 的转写行与画面行是同一条时间线上的观测，同等参与判断。
+  #4 扔蛋壳、#6 中途洗手是做饭的**服务性动作**，归进 basis，不另立判断——
+      与示例一"回家后洗手"不同：那次洗手自成目标，这次只是做饭途中的一步。
+  四句对话跨了两个话题（晚饭、看电视），仍是**一次交谈**，折成一条，不按话题切开。
+  边做饭边聊天是并行的两件事，concurrent_with 在一边声明即可。
+  孩子的问话是这场交谈的一部分，subjects 两个都写；他**单独**做的事才另起判断。
 """
 
 

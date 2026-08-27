@@ -1481,6 +1481,2365 @@
           "1": []
         }
       }
+    },
+    {
+      "case_id": "audio-vision-one-event",
+      "category": "audio",
+      "intent": "画面描述与转写说的是同一件事（在做晚饭），必须折成一条判断；两个模态各出一条就是把一件事数成了两件",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A站在灶台前打开抽油烟机"
+          },
+          {
+            "at": 6,
+            "says": "我在做晚饭",
+            "knowledge_state": "reported",
+            "modality": "audio"
+          },
+          {
+            "at": 12,
+            "says": "锅内冒出热气，成年男性A在翻炒"
+          },
+          {
+            "at": 20,
+            "says": "成年男性A把菜盛入盘中"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            1
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "audio-vision-concurrent",
+      "category": "audio",
+      "intent": "对照组：画面在做饭、转写是在通话，两件并行的事；不能因为来自同一段观测就折成一件",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A在灶台前翻炒"
+          },
+          {
+            "at": 6,
+            "says": "喂，周末那个安排我这边没问题",
+            "knowledge_state": "reported",
+            "modality": "audio"
+          },
+          {
+            "at": 12,
+            "says": "成年男性A一手持锅铲，另一只手拿着手机贴在耳边"
+          },
+          {
+            "at": 20,
+            "says": "行，那就这么定了，先这样",
+            "knowledge_state": "reported",
+            "modality": "audio"
+          },
+          {
+            "at": 26,
+            "says": "成年男性A放下手机，继续翻炒并盛盘"
+          }
+        ]
+      ],
+      "expect": {
+        "relations": [
+          [
+            1,
+            1,
+            "concurrent_with"
+          ]
+        ],
+        "judgement_count": {
+          "1": [
+            2,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "audio-only-offscreen",
+      "category": "audio",
+      "intent": "人走出画面后只剩转写：这段不是观测空白，应当判出一件事，而不是判成读不懂",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A走出画面"
+          },
+          {
+            "at": 8,
+            "says": "喂你好，我家热水器不出热水了，想报修一下",
+            "knowledge_state": "reported",
+            "modality": "audio"
+          },
+          {
+            "at": 40,
+            "says": "型号我看一下，在机器侧面贴着",
+            "knowledge_state": "reported",
+            "modality": "audio"
+          },
+          {
+            "at": 70,
+            "says": "好的，那就明天上午，麻烦了",
+            "knowledge_state": "reported",
+            "modality": "audio"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        },
+        "unreadable_fragments": {
+          "1": []
+        }
+      }
+    },
+    {
+      "case_id": "audio-no-vision-at-all",
+      "category": "audio",
+      "intent": "完全没有画面、只有转写的一通电话，应当折成一件事而不是一句一条",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "喂，妈，是我",
+            "knowledge_state": "reported",
+            "modality": "audio"
+          },
+          {
+            "at": 9,
+            "says": "我这边都挺好的，你别担心",
+            "knowledge_state": "reported",
+            "modality": "audio"
+          },
+          {
+            "at": 25,
+            "says": "下个月放假我就回去看你",
+            "knowledge_state": "reported",
+            "modality": "audio"
+          },
+          {
+            "at": 48,
+            "says": "行，那我先挂了啊",
+            "knowledge_state": "reported",
+            "modality": "audio"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            1
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "audio-reported-past-behavior",
+      "category": "audio",
+      "intent": "转写自述刚从健身房回来：真正要看的是'健身'这件已发生的事有没有被判出来，还是被降级进了回家的 summary",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A推门进屋，背着一个运动包"
+          },
+          {
+            "at": 6,
+            "says": "我刚从健身房回来，今天练得有点狠",
+            "knowledge_state": "reported",
+            "modality": "audio"
+          },
+          {
+            "at": 14,
+            "says": "成年男性A把运动包放到地上"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "audio-future-plan-not-an-event",
+      "category": "audio",
+      "intent": "对照组：转写里说的是今晚的打算，还没发生，不该被判成一件已经发生的行为",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A坐在沙发上翻看手机"
+          },
+          {
+            "at": 10,
+            "says": "今晚我出去跟朋友吃饭，不用等我了",
+            "knowledge_state": "reported",
+            "modality": "audio"
+          },
+          {
+            "at": 20,
+            "says": "成年男性A继续翻看手机"
+          }
+        ]
+      ],
+      "expect": {
+        "forbidden_goals": {
+          "1": [
+            "聚餐",
+            "吃饭",
+            "赴约"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "audio-bystander-speech",
+      "category": "audio",
+      "intent": "对照组：转写出自家里另一个人（上游已分离说话人），那一帧不属于主体，不该被塞进主体的判断",
+      "probing": true,
+      "primary_subject": "成年男性A",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A在书桌前用电脑",
+            "who": [
+              "成年男性A",
+              "成年女性B"
+            ]
+          },
+          {
+            "at": 8,
+            "says": "孩子们过来吃饭了",
+            "who": [
+              "成年女性B"
+            ],
+            "knowledge_state": "reported",
+            "modality": "audio"
+          },
+          {
+            "at": 16,
+            "says": "成年男性A继续用电脑",
+            "who": [
+              "成年男性A",
+              "成年女性B"
+            ]
+          }
+        ]
+      ],
+      "expect": {
+        "out_of_scope_fragments": {
+          "1": [
+            2
+          ]
+        },
+        "subjects_exclude": {
+          "1": [
+            "成年女性B"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "audio-statement-is-not-a-behavior",
+      "category": "audio",
+      "intent": "对照组：转写里在转述医嘱（每天要吃三次药），是陈述一条约束，不是此刻在吃药，不该判出服药这件事",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A坐在餐桌旁"
+          },
+          {
+            "at": 8,
+            "says": "医生说我这个得每天吃三次药，饭后吃",
+            "knowledge_state": "reported",
+            "modality": "audio"
+          },
+          {
+            "at": 16,
+            "says": "成年男性A起身走向厨房"
+          }
+        ]
+      ],
+      "expect": {
+        "forbidden_goals": {
+          "1": [
+            "吃药",
+            "服药",
+            "用药"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "audio-dialogue-turn-taking",
+      "category": "audio",
+      "intent": "纯转写的家人轮替对话（商量周末安排）：该折成一件事而不是一句一条；B 的话怎么归属先看模型怎么做",
+      "probing": true,
+      "primary_subject": "成年男性A",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "周末要不要带孩子去动物园",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性A"
+            ]
+          },
+          {
+            "at": 6,
+            "says": "周六上午吧，下午人太多",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性B"
+            ]
+          },
+          {
+            "at": 12,
+            "says": "那我提前把票订了",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性A"
+            ]
+          },
+          {
+            "at": 18,
+            "says": "记得带水壶",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性B"
+            ]
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            3
+          ]
+        },
+        "subjects_include": {
+          "1": [
+            "成年男性A"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "audio-one-sided-arrangement",
+      "category": "audio",
+      "intent": "纯转写的单侧通话：约定的是下周复诊，此刻的行为只有接电话，不该把约定内容判成正在发生的就诊",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "好的王医生",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 5,
+            "says": "下周二上午九点复诊是吧，我记下了",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 12,
+            "says": "好，谢谢您，再见",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            1
+          ]
+        },
+        "forbidden_goals": {
+          "1": [
+            "复诊",
+            "就诊",
+            "看病"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "audio-long-gap-same-call",
+      "category": "audio",
+      "intent": "纯转写的通话被静默隔开两三分钟：仍是同一件事，不该按停顿切成三条",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "喂，张哥，那个合同的事",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 150,
+            "says": "对，第三条我觉得得改一下",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 320,
+            "says": "行，那就周五碰一下，先这样",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "audio-hearsay-about-subject",
+      "category": "audio",
+      "intent": "只听得到旁人在谈论主体（你爸在书房加班）：主体本人完全没被观测到，看模型会不会凭转述给主体立一条行为",
+      "probing": true,
+      "primary_subject": "成年男性A",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "你爸在书房加班呢，先别去吵他",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性B"
+            ]
+          },
+          {
+            "at": 15,
+            "says": "晚饭给他留一份",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性B"
+            ]
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "audio-goal-from-speech",
+      "category": "audio",
+      "intent": "画面是收拾行李，转写补上了为什么（明早的飞机）：看 goal 会不会吸收转写的信息，仍应是一件事",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A打开行李箱放在床上"
+          },
+          {
+            "at": 6,
+            "says": "明天一早的飞机，今晚得把东西收拾好",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 14,
+            "says": "成年男性A把衣物叠好放进行李箱"
+          },
+          {
+            "at": 22,
+            "says": "成年男性A拉上行李箱拉链"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "audio-utterance-inside-cooking",
+      "category": "audio",
+      "intent": "做饭途中尝了一口说有点咸：一句评价是做饭内部的操作，不该单独成条",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A在灶台前翻炒"
+          },
+          {
+            "at": 8,
+            "says": "成年男性A掀开锅盖尝了一口"
+          },
+          {
+            "at": 12,
+            "says": "嗯，有点咸了",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 18,
+            "says": "成年男性A往锅里加了些水"
+          },
+          {
+            "at": 26,
+            "says": "成年男性A继续翻炒"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            1
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "audio-vision-abandon",
+      "category": "audio",
+      "intent": "转写宣告放弃（算了点外卖吧）、画面印证收起食材：做饭该判 abandoned，点外卖另起一条",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A在灶台前洗菜切菜"
+          },
+          {
+            "at": 10,
+            "says": "算了，不做了，点个外卖吧",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 18,
+            "says": "成年男性A把切好的食材放回冰箱"
+          },
+          {
+            "at": 24,
+            "says": "成年男性A拿起手机在点单"
+          }
+        ]
+      ],
+      "expect": {
+        "status_present": {
+          "1": [
+            "abandoned"
+          ]
+        },
+        "judgement_count": {
+          "1": [
+            2,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "audio-self-talk-trigger",
+      "category": "audio",
+      "intent": "自言自语（火还没关）揭示了紧接着的行为的起因：看这句话被归进哪一条、有没有被当成独立事件",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A坐在沙发上看电视"
+          },
+          {
+            "at": 8,
+            "says": "哎呀，火还没关",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 12,
+            "says": "成年男性A起身快步走向厨房"
+          },
+          {
+            "at": 18,
+            "says": "成年男性A在灶台前关火"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            2,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "audio-past-state-not-behavior",
+      "category": "audio",
+      "intent": "对照组：吃早餐时自述昨晚没睡好——过去的状态不是此刻的行为，不该编出睡觉这件事",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A坐在餐桌前吃早餐"
+          },
+          {
+            "at": 8,
+            "says": "昨晚没睡好，脑袋昏昏的",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 16,
+            "says": "成年男性A继续吃早餐"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        },
+        "forbidden_goals": {
+          "1": [
+            "睡觉",
+            "入睡",
+            "补觉"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "audio-request-to-family",
+      "category": "audio",
+      "intent": "主体请求家人收衣服：请求本身是主体的行为，被请求者去收衣服那一帧不属于主体",
+      "probing": true,
+      "primary_subject": "成年男性A",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "帮我把阳台的衣服收一下，我手上都是面粉",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性A"
+            ]
+          },
+          {
+            "at": 8,
+            "says": "成年男性A双手沾满面粉在案板前揉面",
+            "who": [
+              "成年男性A"
+            ]
+          },
+          {
+            "at": 16,
+            "says": "成年女性B走向阳台收衣服",
+            "who": [
+              "成年男性A",
+              "成年女性B"
+            ]
+          }
+        ]
+      ],
+      "expect": {
+        "out_of_scope_fragments": {
+          "1": [
+            3
+          ]
+        },
+        "subjects_include": {
+          "1": [
+            "成年男性A"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "real-epic-scrambled-eggs",
+      "category": "realdata",
+      "intent": "EPIC-KITCHENS 真实做蛋序列：30 条微动作（含中途洗手、开冷冻室看一眼）应折成一两件事，而不是被真实采样密度切碎",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 5,
+            "says": "打开冰箱"
+          },
+          {
+            "at": 8,
+            "says": "从冰箱拿出鸡蛋盒"
+          },
+          {
+            "at": 9,
+            "says": "关上冰箱"
+          },
+          {
+            "at": 11,
+            "says": "打开鸡蛋盒"
+          },
+          {
+            "at": 16,
+            "says": "放下鸡蛋盒"
+          },
+          {
+            "at": 17,
+            "says": "打开橱柜门"
+          },
+          {
+            "at": 20,
+            "says": "拿出盘子放到台面上"
+          },
+          {
+            "at": 22,
+            "says": "拿出叉子"
+          },
+          {
+            "at": 23,
+            "says": "关上橱柜门"
+          },
+          {
+            "at": 25,
+            "says": "拿起一个鸡蛋"
+          },
+          {
+            "at": 29,
+            "says": "把鸡蛋磕开"
+          },
+          {
+            "at": 31,
+            "says": "掰开蛋壳倒进碗里"
+          },
+          {
+            "at": 38,
+            "says": "拿起另一个鸡蛋"
+          },
+          {
+            "at": 41,
+            "says": "磕开倒进碗里"
+          },
+          {
+            "at": 47,
+            "says": "打开水龙头"
+          },
+          {
+            "at": 48,
+            "says": "冲洗双手"
+          },
+          {
+            "at": 50,
+            "says": "关上水龙头"
+          },
+          {
+            "at": 52,
+            "says": "擦干手"
+          },
+          {
+            "at": 54,
+            "says": "拿起空鸡蛋盒"
+          },
+          {
+            "at": 57,
+            "says": "把鸡蛋盒扔进垃圾桶"
+          },
+          {
+            "at": 60,
+            "says": "拿起叉子"
+          },
+          {
+            "at": 62,
+            "says": "搅打碗里的鸡蛋"
+          },
+          {
+            "at": 67,
+            "says": "打开冷冻室看了一眼"
+          },
+          {
+            "at": 71,
+            "says": "关上冷冻室"
+          },
+          {
+            "at": 72,
+            "says": "打开冰箱"
+          },
+          {
+            "at": 73,
+            "says": "拿出芝士"
+          },
+          {
+            "at": 75,
+            "says": "关上冰箱"
+          },
+          {
+            "at": 77,
+            "says": "继续搅蛋"
+          },
+          {
+            "at": 85,
+            "says": "继续搅蛋"
+          },
+          {
+            "at": 91,
+            "says": "继续搅蛋"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "real-epic-wash-glasses",
+      "category": "realdata",
+      "intent": "EPIC-KITCHENS 真实洗杯序列：五只杯子重复同样的动作循环，是一件洗餐具，不是五件",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "试了试水温"
+          },
+          {
+            "at": 3,
+            "says": "试了试水温"
+          },
+          {
+            "at": 7,
+            "says": "把塞子塞进水槽"
+          },
+          {
+            "at": 10,
+            "says": "往水槽里倒洗涤剂"
+          },
+          {
+            "at": 17,
+            "says": "拿起一只酒杯"
+          },
+          {
+            "at": 21,
+            "says": "清洗酒杯"
+          },
+          {
+            "at": 31,
+            "says": "把酒杯放到一边"
+          },
+          {
+            "at": 33,
+            "says": "拿起一只酒杯"
+          },
+          {
+            "at": 35,
+            "says": "清洗酒杯"
+          },
+          {
+            "at": 41,
+            "says": "冲净酒杯"
+          },
+          {
+            "at": 45,
+            "says": "把酒杯放到一边"
+          },
+          {
+            "at": 48,
+            "says": "拿起一只酒杯"
+          },
+          {
+            "at": 50,
+            "says": "清洗酒杯"
+          },
+          {
+            "at": 55,
+            "says": "冲净酒杯"
+          },
+          {
+            "at": 59,
+            "says": "把酒杯放到一边"
+          },
+          {
+            "at": 61,
+            "says": "拿起一只酒杯"
+          },
+          {
+            "at": 63,
+            "says": "冲净酒杯"
+          },
+          {
+            "at": 70,
+            "says": "把酒杯放到一边"
+          },
+          {
+            "at": 72,
+            "says": "拿起一只酒杯"
+          },
+          {
+            "at": 74,
+            "says": "清洗酒杯"
+          },
+          {
+            "at": 76,
+            "says": "冲净酒杯"
+          },
+          {
+            "at": 79,
+            "says": "把酒杯放到一边"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "real-dialog-leftovers",
+      "category": "realdata",
+      "intent": "XDailyDialog 真实母子对话（问冰箱里有什么吃的）：纯转写轮替，该折成一次交谈；主体是妈妈",
+      "probing": true,
+      "primary_subject": "成年女性A",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "妈妈，冰箱里有什么我可以在晚饭前吃的吗？",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "少年B"
+            ]
+          },
+          {
+            "at": 7,
+            "says": "有一些昨晚吃剩的比萨饼。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 14,
+            "says": "还有什么我能帮你的吗？",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "少年B"
+            ]
+          },
+          {
+            "at": 20,
+            "says": "嗯，我想可能有前几天吃剩的千层面。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 27,
+            "says": "我还有别的选择吗？",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "少年B"
+            ]
+          },
+          {
+            "at": 33,
+            "says": "冰箱里可能还剩下一些生日蛋糕。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 40,
+            "says": "冰箱里的东西都是剩菜吗？我讨厌剩菜！",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "少年B"
+            ]
+          },
+          {
+            "at": 47,
+            "says": "你可以洗蔬菜，切鸡肉，那我就可以来做晚饭！",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            3
+          ]
+        },
+        "subjects_include": {
+          "1": [
+            "成年女性A"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "real-dialog-third-party-news",
+      "category": "realdata",
+      "intent": "XDailyDialog 真实夫妻对话：内容全是不在场的第三方（鲍比、伊芙琳）的事——不能给不在场的人立行为，行为只有'夫妻在交谈'",
+      "probing": true,
+      "primary_subject": "成年女性A",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "亲爱的，我有消息告诉你。鲍比和他的妻子伊芙琳很快就要生孩子了。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 9,
+            "says": "真的吗？我以为他妻子不能生孩子。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性B"
+            ]
+          },
+          {
+            "at": 16,
+            "says": "其实他们在等我生日的时候生孩子。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 24,
+            "says": "哦，太巧了！我打赌鲍比一定很高兴。他喜欢孩子，总是想要自己的孩子。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性B"
+            ]
+          },
+          {
+            "at": 35,
+            "says": "其实，他们对即将出生的孩子都感到很兴奋。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 44,
+            "says": "是男孩还是女孩？",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性B"
+            ]
+          },
+          {
+            "at": 50,
+            "says": "还不知道。因为伊芙琳怀孕才三个月。但她已经开始休产假了。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        },
+        "subjects_exclude": {
+          "1": [
+            "鲍比",
+            "伊芙琳"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "real-mixed-cook-while-chatting",
+      "category": "realdata",
+      "intent": "真实做蛋动作 × 真实母子对话交织：妈妈一边备餐一边回答孩子——备餐与交谈是并行的两件事，孩子的话不属于主体",
+      "probing": true,
+      "primary_subject": "成年女性A",
+      "segments": [
+        [
+          {
+            "at": 5,
+            "says": "打开冰箱",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 8,
+            "says": "从冰箱拿出鸡蛋盒",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 10,
+            "says": "妈妈，冰箱里有什么我可以在晚饭前吃的吗？",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "少年B"
+            ]
+          },
+          {
+            "at": 11,
+            "says": "打开鸡蛋盒",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 15,
+            "says": "有一些昨晚吃剩的比萨饼。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 20,
+            "says": "拿出盘子放到台面上",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 25,
+            "says": "拿起一个鸡蛋磕开倒进碗里",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 28,
+            "says": "我还有别的选择吗？",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "少年B"
+            ]
+          },
+          {
+            "at": 33,
+            "says": "冰箱里可能还剩下一些生日蛋糕。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 38,
+            "says": "拿起另一个鸡蛋磕开倒进碗里",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 42,
+            "says": "冰箱里的东西都是剩菜吗？我讨厌剩菜！",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "少年B"
+            ]
+          },
+          {
+            "at": 47,
+            "says": "你可以洗蔬菜，切鸡肉，那我就可以来做晚饭！",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 52,
+            "says": "拿起叉子搅打碗里的鸡蛋",
+            "who": [
+              "成年女性A"
+            ]
+          }
+        ]
+      ],
+      "expect": {
+        "relations": [
+          [
+            1,
+            1,
+            "concurrent_with"
+          ]
+        ],
+        "judgement_count": {
+          "1": [
+            2,
+            4
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "real-epic-mid-task-detour",
+      "category": "realdata",
+      "intent": "EPIC 真实片段：搅蛋途中开冷冻室看了一眼又关上——目标未变的小岔路不该把做蛋切成两件",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "拿起叉子"
+          },
+          {
+            "at": 2,
+            "says": "搅打碗里的鸡蛋"
+          },
+          {
+            "at": 7,
+            "says": "打开冷冻室看了一眼"
+          },
+          {
+            "at": 11,
+            "says": "关上冷冻室"
+          },
+          {
+            "at": 12,
+            "says": "打开冰箱"
+          },
+          {
+            "at": 13,
+            "says": "拿出芝士"
+          },
+          {
+            "at": 15,
+            "says": "关上冰箱"
+          },
+          {
+            "at": 17,
+            "says": "继续搅蛋"
+          },
+          {
+            "at": 25,
+            "says": "继续搅蛋"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "real-epic-tidy-kitchen-long",
+      "category": "realdata",
+      "intent": "EPIC 真实收纳序列：38 条微动作全部服务于'收拾厨房'一个目标——测碎裂是否随长度恶化（做蛋 30 帧已碎成 5-6 条）",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 5,
+            "says": "放下手机"
+          },
+          {
+            "at": 10,
+            "says": "拿起一个纸盒"
+          },
+          {
+            "at": 12,
+            "says": "把纸盒放进冰箱"
+          },
+          {
+            "at": 17,
+            "says": "关上冰箱门"
+          },
+          {
+            "at": 21,
+            "says": "拿起水壶"
+          },
+          {
+            "at": 22,
+            "says": "把水壶放进橱柜"
+          },
+          {
+            "at": 27,
+            "says": "拿起搅拌机"
+          },
+          {
+            "at": 28,
+            "says": "把搅拌机放进橱柜"
+          },
+          {
+            "at": 32,
+            "says": "拿起一个碗"
+          },
+          {
+            "at": 36,
+            "says": "把几个碗摞起来"
+          },
+          {
+            "at": 38,
+            "says": "把碗放进橱柜"
+          },
+          {
+            "at": 43,
+            "says": "又把一个碗放进橱柜"
+          },
+          {
+            "at": 46,
+            "says": "关上橱柜门"
+          },
+          {
+            "at": 49,
+            "says": "拿起手套"
+          },
+          {
+            "at": 51,
+            "says": "戴上手套"
+          },
+          {
+            "at": 57,
+            "says": "拿起一个碗"
+          },
+          {
+            "at": 60,
+            "says": "把碗放进橱柜"
+          },
+          {
+            "at": 62,
+            "says": "又拿起一个碗放进橱柜"
+          },
+          {
+            "at": 67,
+            "says": "拿起搅拌机刀片"
+          },
+          {
+            "at": 69,
+            "says": "把刀片放进橱柜"
+          },
+          {
+            "at": 72,
+            "says": "把玻璃杯放到一边"
+          },
+          {
+            "at": 76,
+            "says": "拿起盘子"
+          },
+          {
+            "at": 81,
+            "says": "把盘子放进橱柜"
+          },
+          {
+            "at": 85,
+            "says": "拿起一个碗放进橱柜"
+          },
+          {
+            "at": 93,
+            "says": "拿起咖啡壶盖"
+          },
+          {
+            "at": 96,
+            "says": "拿起咖啡壶"
+          },
+          {
+            "at": 97,
+            "says": "把盖子盖到咖啡壶上"
+          },
+          {
+            "at": 99,
+            "says": "把咖啡壶放到一边"
+          },
+          {
+            "at": 102,
+            "says": "拿起案板"
+          },
+          {
+            "at": 103,
+            "says": "把案板收好"
+          },
+          {
+            "at": 108,
+            "says": "拿起烤盘"
+          },
+          {
+            "at": 110,
+            "says": "把烤盘放进橱柜"
+          },
+          {
+            "at": 119,
+            "says": "拿起擦丝器和烤盘"
+          },
+          {
+            "at": 123,
+            "says": "放进橱柜"
+          },
+          {
+            "at": 148,
+            "says": "拿起刀具收好"
+          },
+          {
+            "at": 161,
+            "says": "把几把刀放进抽屉"
+          },
+          {
+            "at": 166,
+            "says": "把叉子放进抽屉"
+          },
+          {
+            "at": 167,
+            "says": "关上抽屉"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "real-epic-oven-detour-two-tasks",
+      "category": "realdata",
+      "intent": "过折对照组：洗餐具途中真的去开了烤箱（预热是可提醒的另一件事）——教折叠之后这条不能被折没",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "把塞子塞进水槽"
+          },
+          {
+            "at": 3,
+            "says": "往水槽里倒洗涤剂"
+          },
+          {
+            "at": 10,
+            "says": "拿起一只酒杯"
+          },
+          {
+            "at": 15,
+            "says": "清洗酒杯"
+          },
+          {
+            "at": 24,
+            "says": "把酒杯放到一边"
+          },
+          {
+            "at": 26,
+            "says": "拿起一只酒杯"
+          },
+          {
+            "at": 28,
+            "says": "清洗酒杯"
+          },
+          {
+            "at": 35,
+            "says": "冲净酒杯"
+          },
+          {
+            "at": 38,
+            "says": "把酒杯放到一边"
+          },
+          {
+            "at": 41,
+            "says": "拿起一只酒杯"
+          },
+          {
+            "at": 43,
+            "says": "清洗酒杯"
+          },
+          {
+            "at": 48,
+            "says": "冲净酒杯"
+          },
+          {
+            "at": 52,
+            "says": "把酒杯放到一边"
+          },
+          {
+            "at": 65,
+            "says": "清洗最后一只酒杯"
+          },
+          {
+            "at": 69,
+            "says": "冲净后放到一边"
+          },
+          {
+            "at": 83,
+            "says": "脱下手套翻面"
+          },
+          {
+            "at": 87,
+            "says": "走到烤箱前打开烤箱"
+          },
+          {
+            "at": 92,
+            "says": "调节烤箱旋钮"
+          },
+          {
+            "at": 98,
+            "says": "打开烤箱灯"
+          },
+          {
+            "at": 105,
+            "says": "打开厨房门"
+          },
+          {
+            "at": 112,
+            "says": "关上厨房门"
+          },
+          {
+            "at": 115,
+            "says": "又调了一下烤箱"
+          },
+          {
+            "at": 120,
+            "says": "回到水槽前清洗马克杯"
+          },
+          {
+            "at": 126,
+            "says": "继续洗马克杯"
+          },
+          {
+            "at": 132,
+            "says": "把马克杯放到一边"
+          },
+          {
+            "at": 137,
+            "says": "拿起另一个马克杯清洗"
+          },
+          {
+            "at": 145,
+            "says": "冲净马克杯"
+          },
+          {
+            "at": 150,
+            "says": "把马克杯放到一边"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            2,
+            4
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "real-dialog-tv-latenight",
+      "category": "realdata",
+      "intent": "XDailyDialog 真实晨间对话：自述昨晚看电视到一点没睡——真实对话里的过去自述，不该把睡觉判成此刻的行为",
+      "probing": true,
+      "primary_subject": "成年女性A",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "早上好，你看起来很累。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性B"
+            ]
+          },
+          {
+            "at": 6,
+            "says": "是的，我昨晚几乎没睡。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 12,
+            "says": "你昨天开派对了吗？",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性B"
+            ]
+          },
+          {
+            "at": 18,
+            "says": "不，我只是看了《超女》，而且开始看的时候就已经很晚了。一点钟以后我兴奋得睡不着觉。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 30,
+            "says": "我不喜欢这个节目，因为评委之间的争论太多了。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性B"
+            ]
+          },
+          {
+            "at": 38,
+            "says": "参赛者是不同的。这些女孩的表演风格都很自由。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 46,
+            "says": "你有很多时间看电视吗？",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性B"
+            ]
+          },
+          {
+            "at": 52,
+            "says": "我觉得有不到3个小时。今年我没有看任何娱乐节目。因为节目之间的广告太多了。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        },
+        "forbidden_goals": {
+          "1": [
+            "睡觉",
+            "入睡"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "real-dialog-moving-plans",
+      "category": "realdata",
+      "intent": "XDailyDialog 真实搬家对话：未来安排处理得对（只判'告知/请求'这些言语行为）——真正暴露的是一次连续交谈被按话题切成 4-5 条",
+      "probing": true,
+      "primary_subject": "成年女性A",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "这地方还不错，但你得买些家具。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性B"
+            ]
+          },
+          {
+            "at": 7,
+            "says": "我本来打算去的。我可以从我家带一些来。我父母家还有一些。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 15,
+            "says": "你有床吗？",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性B"
+            ]
+          },
+          {
+            "at": 20,
+            "says": "当然有。在我的老房子里有一个。我父母家还有一个大学用的。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 28,
+            "says": "那很好。你可以把一个放在这个房间里，另一个放在那个房间里。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性B"
+            ]
+          },
+          {
+            "at": 36,
+            "says": "是的，这是个好主意。如果你愿意，可以在我家过夜。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 44,
+            "says": "是啊。对了，我能洗个澡吗？",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性B"
+            ]
+          },
+          {
+            "at": 49,
+            "says": "可以，但这里还没有热水。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 55,
+            "says": "真的？",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性B"
+            ]
+          },
+          {
+            "at": 58,
+            "says": "他们明天早上来通煤气。我的电话到时候应该也能用了。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 66,
+            "says": "你想出去吃晚饭吗？",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性B"
+            ]
+          },
+          {
+            "at": 72,
+            "says": "好啊，反正我明天才能做饭。我们去附近的餐馆吧。我请客。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "real-mixed-wash-while-spouse-talks",
+      "category": "realdata",
+      "intent": "问题2变体：洗杯（真实动作）× 晨间对话（真实转写）交织——洗餐具与交谈并行，换了活动和对话还认不认",
+      "probing": true,
+      "primary_subject": "成年女性A",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "在水槽前清洗马克杯",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 4,
+            "says": "早上好，你看起来很累。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性B"
+            ]
+          },
+          {
+            "at": 9,
+            "says": "是的，我昨晚几乎没睡。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 13,
+            "says": "把马克杯放到一边，拿起另一个清洗",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 18,
+            "says": "你昨天开派对了吗？",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性B"
+            ]
+          },
+          {
+            "at": 24,
+            "says": "不，我只是看电视看得太晚了。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 30,
+            "says": "冲净马克杯放到一边",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 36,
+            "says": "拿起盘子清洗",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 40,
+            "says": "那今天早点睡吧。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年男性B"
+            ]
+          },
+          {
+            "at": 47,
+            "says": "把盘子冲净放进沥水架",
+            "who": [
+              "成年女性A"
+            ]
+          }
+        ]
+      ],
+      "expect": {
+        "relations": [
+          [
+            1,
+            1,
+            "concurrent_with"
+          ]
+        ],
+        "judgement_count": {
+          "1": [
+            2,
+            4
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "real-mixed-call-interrupts-cooking",
+      "category": "realdata",
+      "intent": "做蛋途中来电话，动作停下接听一分钟后恢复搅蛋——是打断后继续，不是放弃；做饭不该被判 abandoned",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "打开冰箱拿出鸡蛋盒"
+          },
+          {
+            "at": 8,
+            "says": "拿起一个鸡蛋磕开倒进碗里"
+          },
+          {
+            "at": 15,
+            "says": "拿起另一个鸡蛋磕开倒进碗里"
+          },
+          {
+            "at": 22,
+            "says": "拿起叉子搅打碗里的鸡蛋"
+          },
+          {
+            "at": 30,
+            "says": "喂？哦张哥，你说。",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 45,
+            "says": "那个文件我发你邮箱了，你收一下。",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 70,
+            "says": "对，密码是我生日。行，先这样啊。",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 85,
+            "says": "放下手机，继续搅打碗里的鸡蛋"
+          },
+          {
+            "at": 95,
+            "says": "把蛋液倒进平底锅"
+          }
+        ]
+      ],
+      "expect": {
+        "forbidden_status": {
+          "1": [
+            "abandoned"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "dirty-homophone-clear-context",
+      "category": "dirty",
+      "intent": "错字但画面语境明确（'我在坐晚饭'+灶台画面）：该照常折进做饭，错字不该催生一件莫名其妙的独立事件",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A站在灶台前翻炒"
+          },
+          {
+            "at": 6,
+            "says": "我在坐晚饭",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 12,
+            "says": "成年男性A把菜盛入盘中"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "dirty-homophone-in-dialogue",
+      "category": "dirty",
+      "intent": "真实对话注入错字（剩菜→圣菜、千层面→千层棉）：交谈折叠不该被错字打散",
+      "probing": true,
+      "primary_subject": "成年女性A",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "妈妈，冰箱里有什么我可以在晚饭前吃的吗？",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "少年B"
+            ]
+          },
+          {
+            "at": 7,
+            "says": "有一些昨晚吃剩的比萨饼。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 14,
+            "says": "还有什么我能帮你的吗？",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "少年B"
+            ]
+          },
+          {
+            "at": 20,
+            "says": "嗯，我想可能有前几天吃剩的千层棉。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 27,
+            "says": "冰箱里的东西都是圣菜吗？我讨厌圣菜！",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "少年B"
+            ]
+          },
+          {
+            "at": 33,
+            "says": "你可以洗蔬菜，切鸡肉，那我就可以来做晚饭！",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            3
+          ]
+        },
+        "subjects_include": {
+          "1": [
+            "成年女性A"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "dirty-split-utterance",
+      "category": "dirty",
+      "intent": "一句话被 ASR 切碎成三帧（'今晚我出去跟/朋友吃饭，不用/等我了'）：是一次说话，不是三件事，更不是已发生的聚餐",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "今晚我出去跟",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 2,
+            "says": "朋友吃饭，不用",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 4,
+            "says": "等我了",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            1
+          ]
+        },
+        "forbidden_status": {
+          "1": [
+            "ongoing"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "dirty-double-emission",
+      "category": "dirty",
+      "intent": "同一句话被 ASR 重复吐出两次（措辞微差）：折成一次说话，不是两次",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A拿起遥控器"
+          },
+          {
+            "at": 3,
+            "says": "把空调调到二十六度吧",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 4,
+            "says": "把空调调到二十六度吧。",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 8,
+            "says": "成年男性A按下遥控器按键，空调提示音响起"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "dirty-speaker-misattribution",
+      "category": "dirty",
+      "intent": "上游把明显是主体的话标给了别人（'我去把火关一下'标给B，画面却是A走向厨房）：不越权改归属、更不能因矛盾整批崩掉",
+      "probing": true,
+      "primary_subject": "成年男性A",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A从沙发上起身",
+            "who": [
+              "成年男性A",
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 4,
+            "says": "我去把火关一下",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 9,
+            "says": "成年男性A走向厨房",
+            "who": [
+              "成年男性A",
+              "成年女性A"
+            ]
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            3
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "dirty-diarization-collapse",
+      "category": "dirty",
+      "intent": "分离塌缩：明显是两个人的对话全被标成主体一人——按上游给的参与者如实处理，不发明一个不在参与者里的人",
+      "probing": true,
+      "primary_subject": "成年女性A",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "妈妈，冰箱里有什么吃的吗？",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 7,
+            "says": "有昨晚剩的比萨饼。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 14,
+            "says": "我讨厌剩菜！",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          },
+          {
+            "at": 20,
+            "says": "那你可以洗蔬菜，我来做晚饭。",
+            "modality": "audio",
+            "knowledge_state": "reported",
+            "who": [
+              "成年女性A"
+            ]
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            2
+          ]
+        },
+        "subjects_include": {
+          "1": [
+            "成年女性A"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "dirty-disfluent-speech",
+      "category": "dirty",
+      "intent": "口语填充（'嗯…那个…就是明天那个事，嗯，回头再说吧'）：没有可提取的具体目标，不该硬编出一个",
+      "probing": true,
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "成年男性A坐在沙发上"
+          },
+          {
+            "at": 5,
+            "says": "嗯…那个…就是明天那个事，嗯，回头再说吧",
+            "modality": "audio",
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 12,
+            "says": "成年男性A继续坐着看电视"
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            3
+          ]
+        },
+        "goal_absent": [
+          1
+        ]
+      }
     }
   ]
 }
