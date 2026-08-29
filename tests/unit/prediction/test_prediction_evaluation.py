@@ -248,3 +248,78 @@ def test_an_empty_holdout_window_fails_loudly() -> None:
         evaluation.backtest(
             data, config=config(), cutoff=FIRST + timedelta(days=30), built_at=BUILT_AT
         )
+
+
+# --- 危险率与累积率的校准仪（PRED-RATES-001 附带条件①）------------------------------------
+
+
+def _tree_and_holdout(actions, *, cutoff):
+    from prediction import builder
+
+    train, holdout = evaluation.split(snapshot(actions), cutoff=cutoff)
+    tree = builder.build(train, config=config(), reference=cutoff, built_at=BUILT_AT)
+    return tree, holdout
+
+
+def test_timing_calibration_rewards_an_accurate_clock() -> None:
+    """每天 07:00 雷打不动：预测的首次时刻中位数就该落在 07:00，覆盖率拉满。"""
+
+    tree, hold = _tree_and_holdout(daily("吃药", 40, hour=7), cutoff=FIRST + timedelta(days=29))
+    report = evaluation.first_occurrence_timing(
+        tree, hold, since=FIRST + timedelta(days=30), through=FIRST + timedelta(days=39)
+    )
+    assert report.samples == 10
+    assert report.skipped == 0
+    assert report.median_abs_error_minutes <= 15
+    assert report.coverage_p10_p90 == 1.0
+
+
+def test_timing_calibration_flags_a_shifted_habit() -> None:
+    """训练段 07:00、留出段挪到 09:00：仪器必须把 120 分钟的偏差叫出来，不能装没看见。"""
+
+    actions = [act("吃药", offset, 7) for offset in range(30)]
+    actions += [act("吃药", offset, 9) for offset in range(30, 40)]
+    tree, hold = _tree_and_holdout(actions, cutoff=FIRST + timedelta(days=29))
+    report = evaluation.first_occurrence_timing(
+        tree, hold, since=FIRST + timedelta(days=30), through=FIRST + timedelta(days=39)
+    )
+    assert report.median_abs_error_minutes >= 90
+    assert report.coverage_p10_p90 <= 0.2
+
+
+def test_timing_calibration_skips_thin_hazard_instead_of_guessing() -> None:
+    """稀疏行为的危险率链撑不起一个分布：如实计入 skipped，不硬评。"""
+
+    actions = list(daily("吃药", 40, hour=7))
+    actions += [act("散步", 0, 15), act("散步", 14, 15), act("散步", 35, 15)]  # 周一，5 个里 2 个
+    tree, hold = _tree_and_holdout(actions, cutoff=FIRST + timedelta(days=29))
+    report = evaluation.first_occurrence_timing(
+        tree, hold, since=FIRST + timedelta(days=30), through=FIRST + timedelta(days=39)
+    )
+    assert report.samples == 10  # 只有吃药可评
+    assert report.skipped == 1  # 散步那天被如实跳过
+
+
+def test_cumulative_calibration_is_sharp_for_a_steady_habit() -> None:
+    """习惯稳定时，累积率说 1.0 的地方实际就是做过了——ECE 应接近零。"""
+
+    tree, hold = _tree_and_holdout(daily("吃药", 40, hour=7), cutoff=FIRST + timedelta(days=29))
+    report = evaluation.cumulative_calibration(
+        tree, hold, since=FIRST + timedelta(days=30), through=FIRST + timedelta(days=39)
+    )
+    assert report.samples > 0
+    assert report.expected_calibration_error < 0.05
+
+
+def test_cumulative_calibration_catches_a_stopped_habit() -> None:
+    """习惯停了：树还说"到这个点通常做完了"，实际全没做——ECE 必须炸出来。
+
+    这正是缺失检测要依赖的那个数失真的形态，仪器抓不到它就没资格给累积率背书。
+    """
+
+    actions = list(daily("吃药", 30, hour=7)) + [act("吃药", 30, 7)]  # 留出段只有第一天还在吃
+    tree, hold = _tree_and_holdout(actions, cutoff=FIRST + timedelta(days=29))
+    report = evaluation.cumulative_calibration(
+        tree, hold, since=FIRST + timedelta(days=31), through=FIRST + timedelta(days=39)
+    )
+    assert report.expected_calibration_error > 0.8

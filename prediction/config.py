@@ -18,6 +18,13 @@
 #   只有 4–5 天，样本量与强度同量级——一个 30/30 的完美习惯只发布成 P≈0.57。排序与 lift 都
 #   还对（有测试守着），但绝对值被压得很低，直接拿 P 去卡阈值会漏掉真习惯。收缩强度、池化
 #   半宽、槽宽三者要一起定，不能单调一个。
+# - **τ×收缩的周期天花板（最根本的观察点）**：全局衰减让周期为 p 天的行为的有效样本数封顶
+#   1/(1−2^(−p/τ))，再经收缩 s 得到概率渐近上限 n/(n+s)。启动档 τ=60、s=5 下：
+#   日频 87→0.95，周频 12.9→0.72，双周 6.7→0.57，月频 3.4→0.40——**越低频越重要的行为
+#   被压得越狠**，与"重要低频（周五去医院）恰是最有价值的预测对象"正好相反。复发间隔已用
+#   独立的 recurrence_half_life_days 解耦（月频行为的间隔样本不再被钟面的 τ 封死）；
+#   钟面侧的 τ 与 s 必须**联合**定档，验收判据：周频 100% 习惯的发布概率不得低于日频
+#   同等习惯的九成。
 # - 时机：behavior 数据链路产出第一批真实 occurrence 之后。在此之前不要为了"更合理"提前改。
 """
 
@@ -51,6 +58,9 @@ class PredictionTreeConfig:
     slot_minutes: int
     decay_half_life_days: float
     recent_half_life_days: float
+    # 复发间隔的独立证据窗：钟面的 τ 管"趋势多快跟上"，复发的 τ 管"多久以前的间隔还作数"，
+    # 两者共用一个值会给低频行为设证据天花板（见 PRED-TUNING-001 的周期天花板表）。
+    recurrence_half_life_days: float
     pool_half_width: int
     shrink_slot_to_pool: float
     shrink_pool_to_weekday: float
@@ -72,6 +82,7 @@ class PredictionTreeConfig:
             raise PredictionTreeError("slot_minutes must be a positive divisor of 1440")
         _positive(self.decay_half_life_days, "decay_half_life_days", maximum=3_650.0)
         _positive(self.recent_half_life_days, "recent_half_life_days", maximum=3_650.0)
+        _positive(self.recurrence_half_life_days, "recurrence_half_life_days", maximum=3_650.0)
         _non_negative_int(self.pool_half_width, "pool_half_width", maximum=48)
         # 池化是环形的，半宽到了半天就开始绕回来重复数同一个槽：有效样本量凭空翻倍，
         # 而收缩强度还是那个数。这是我们自己两个参数的矛盾，硬拒。
@@ -119,6 +130,7 @@ class PredictionTreeConfig:
                 "slot_minutes",
                 "decay_half_life_days",
                 "recent_half_life_days",
+                "recurrence_half_life_days",
                 "pool_half_width",
                 "shrink_slot_to_pool",
                 "shrink_pool_to_weekday",

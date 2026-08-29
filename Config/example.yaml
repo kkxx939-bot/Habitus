@@ -460,6 +460,7 @@ workflow:
 #   transition_window_seconds: 1800  # 待定档：链内/链间间隔的双峰谷底（最依赖真实数据）
 #   shrink_edge: 5                   # 待定档：留出集上最小化对数损失
 #   recurrence_window_days: 90       # 待定档：超过多久算"重新开始"而不是"复发"
+#   recurrence_half_life_days: 365   # 待定档：复发证据窗必须比钟面长——月频行为在 τ=60 下有效样本封顶 3.4 个
 #   rebuild_interval_seconds: 86400  # 运维数：一天重建一次
 #   published_generations: 7         # 运维数：留七代，够回看一周
 #   worker_shutdown_timeout_seconds: 30

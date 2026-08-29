@@ -29,6 +29,7 @@ STARTUP_PARAMETERS = {
     "slot_minutes": 15,
     "decay_half_life_days": 60,
     "recent_half_life_days": 14,
+    "recurrence_half_life_days": 365,
     "pool_half_width": 2,
     "shrink_slot_to_pool": 5,
     "shrink_pool_to_weekday": 5,

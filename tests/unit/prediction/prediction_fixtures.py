@@ -27,6 +27,7 @@ def config(**overrides) -> PredictionTreeConfig:
         slot_minutes=15,
         decay_half_life_days=3_650.0,  # 上限；测试跨度内几乎不衰减，计数可以手算
         recent_half_life_days=14.0,
+        recurrence_half_life_days=3_650.0,  # 同 decay：测试跨度内几乎不衰减，间隔可手算
         pool_half_width=0,  # 默认不池化，收缩链退化成两层，便于逐项验证
         shrink_slot_to_pool=0.001,
         shrink_pool_to_weekday=0.001,
@@ -53,6 +54,7 @@ def production_config(**overrides) -> PredictionTreeConfig:
         slot_minutes=15,
         decay_half_life_days=60.0,
         recent_half_life_days=14.0,
+        recurrence_half_life_days=365.0,
         pool_half_width=2,
         shrink_slot_to_pool=5.0,
         shrink_pool_to_weekday=5.0,

@@ -22,6 +22,7 @@ TREE_PARAMETERS = (
     "slot_minutes",
     "decay_half_life_days",
     "recent_half_life_days",
+    "recurrence_half_life_days",
     "pool_half_width",
     "shrink_slot_to_pool",
     "shrink_pool_to_weekday",
@@ -45,6 +46,7 @@ class PredictionConfig:
     slot_minutes: int | None = None
     decay_half_life_days: float | None = None
     recent_half_life_days: float | None = None
+    recurrence_half_life_days: float | None = None
     pool_half_width: int | None = None
     shrink_slot_to_pool: float | None = None
     shrink_pool_to_weekday: float | None = None

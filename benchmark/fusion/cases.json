@@ -990,8 +990,7 @@
             "results_from"
           ]
         ]
-      },
-      "probing": true
+      }
     },
     {
       "case_id": "causal-boil-tea",
@@ -1043,8 +1042,7 @@
             "results_from"
           ]
         ]
-      },
-      "probing": true
+      }
     },
     {
       "case_id": "adv-routine-not-causal",
@@ -1486,7 +1484,6 @@
       "case_id": "audio-vision-one-event",
       "category": "audio",
       "intent": "画面描述与转写说的是同一件事（在做晚饭），必须折成一条判断；两个模态各出一条就是把一件事数成了两件",
-      "probing": true,
       "segments": [
         [
           {
@@ -1571,7 +1568,6 @@
       "case_id": "audio-only-offscreen",
       "category": "audio",
       "intent": "人走出画面后只剩转写：这段不是观测空白，应当判出一件事，而不是判成读不懂",
-      "probing": true,
       "segments": [
         [
           {
@@ -1614,7 +1610,6 @@
       "case_id": "audio-no-vision-at-all",
       "category": "audio",
       "intent": "完全没有画面、只有转写的一通电话，应当折成一件事而不是一句一条",
-      "probing": true,
       "segments": [
         [
           {
@@ -1656,7 +1651,6 @@
       "case_id": "audio-reported-past-behavior",
       "category": "audio",
       "intent": "转写自述刚从健身房回来：真正要看的是'健身'这件已发生的事有没有被判出来，还是被降级进了回家的 summary",
-      "probing": true,
       "segments": [
         [
           {
@@ -1688,7 +1682,6 @@
       "case_id": "audio-future-plan-not-an-event",
       "category": "audio",
       "intent": "对照组：转写里说的是今晚的打算，还没发生，不该被判成一件已经发生的行为",
-      "probing": true,
       "segments": [
         [
           {
@@ -1721,7 +1714,6 @@
       "case_id": "audio-bystander-speech",
       "category": "audio",
       "intent": "对照组：转写出自家里另一个人（上游已分离说话人），那一帧不属于主体，不该被塞进主体的判断",
-      "probing": true,
       "primary_subject": "成年男性A",
       "segments": [
         [
@@ -1769,7 +1761,6 @@
       "case_id": "audio-statement-is-not-a-behavior",
       "category": "audio",
       "intent": "对照组：转写里在转述医嘱（每天要吃三次药），是陈述一条约束，不是此刻在吃药，不该判出服药这件事",
-      "probing": true,
       "segments": [
         [
           {
@@ -1802,7 +1793,6 @@
       "case_id": "audio-dialogue-turn-taking",
       "category": "audio",
       "intent": "纯转写的家人轮替对话（商量周末安排）：该折成一件事而不是一句一条；B 的话怎么归属先看模型怎么做",
-      "probing": true,
       "primary_subject": "成年男性A",
       "segments": [
         [
@@ -1862,7 +1852,6 @@
       "case_id": "audio-one-sided-arrangement",
       "category": "audio",
       "intent": "纯转写的单侧通话：约定的是下周复诊，此刻的行为只有接电话，不该把约定内容判成正在发生的就诊",
-      "probing": true,
       "segments": [
         [
           {
@@ -1905,7 +1894,6 @@
       "case_id": "audio-long-gap-same-call",
       "category": "audio",
       "intent": "纯转写的通话被静默隔开两三分钟：仍是同一件事，不该按停顿切成三条",
-      "probing": true,
       "segments": [
         [
           {
@@ -1941,7 +1929,6 @@
       "case_id": "audio-hearsay-about-subject",
       "category": "audio",
       "intent": "只听得到旁人在谈论主体（你爸在书房加班）：主体本人完全没被观测到，看模型会不会凭转述给主体立一条行为",
-      "probing": true,
       "primary_subject": "成年男性A",
       "segments": [
         [
@@ -1978,7 +1965,6 @@
       "case_id": "audio-goal-from-speech",
       "category": "audio",
       "intent": "画面是收拾行李，转写补上了为什么（明早的飞机）：看 goal 会不会吸收转写的信息，仍应是一件事",
-      "probing": true,
       "segments": [
         [
           {
@@ -2014,7 +2000,6 @@
       "case_id": "audio-utterance-inside-cooking",
       "category": "audio",
       "intent": "做饭途中尝了一口说有点咸：一句评价是做饭内部的操作，不该单独成条",
-      "probing": true,
       "segments": [
         [
           {
@@ -2095,7 +2080,6 @@
       "case_id": "audio-self-talk-trigger",
       "category": "audio",
       "intent": "自言自语（火还没关）揭示了紧接着的行为的起因：看这句话被归进哪一条、有没有被当成独立事件",
-      "probing": true,
       "segments": [
         [
           {
@@ -2131,7 +2115,6 @@
       "case_id": "audio-past-state-not-behavior",
       "category": "audio",
       "intent": "对照组：吃早餐时自述昨晚没睡好——过去的状态不是此刻的行为，不该编出睡觉这件事",
-      "probing": true,
       "segments": [
         [
           {
@@ -2355,7 +2338,6 @@
       "case_id": "real-epic-wash-glasses",
       "category": "realdata",
       "intent": "EPIC-KITCHENS 真实洗杯序列：五只杯子重复同样的动作循环，是一件洗餐具，不是五件",
-      "probing": true,
       "segments": [
         [
           {
@@ -2461,7 +2443,6 @@
       "case_id": "real-dialog-leftovers",
       "category": "realdata",
       "intent": "XDailyDialog 真实母子对话（问冰箱里有什么吃的）：纯转写轮替，该折成一次交谈；主体是妈妈",
-      "probing": true,
       "primary_subject": "成年女性A",
       "segments": [
         [
@@ -2557,7 +2538,6 @@
       "case_id": "real-dialog-third-party-news",
       "category": "realdata",
       "intent": "XDailyDialog 真实夫妻对话：内容全是不在场的第三方（鲍比、伊芙琳）的事——不能给不在场的人立行为，行为只有'夫妻在交谈'",
-      "probing": true,
       "primary_subject": "成年女性A",
       "segments": [
         [
@@ -2645,7 +2625,6 @@
       "case_id": "real-mixed-cook-while-chatting",
       "category": "realdata",
       "intent": "真实做蛋动作 × 真实母子对话交织：妈妈一边备餐一边回答孩子——备餐与交谈是并行的两件事，孩子的话不属于主体",
-      "probing": true,
       "primary_subject": "成年女性A",
       "segments": [
         [
@@ -2774,7 +2753,6 @@
       "case_id": "real-epic-mid-task-detour",
       "category": "realdata",
       "intent": "EPIC 真实片段：搅蛋途中开冷冻室看了一眼又关上——目标未变的小岔路不该把做蛋切成两件",
-      "probing": true,
       "segments": [
         [
           {
@@ -2828,7 +2806,6 @@
       "case_id": "real-epic-tidy-kitchen-long",
       "category": "realdata",
       "intent": "EPIC 真实收纳序列：38 条微动作全部服务于'收拾厨房'一个目标——测碎裂是否随长度恶化（做蛋 30 帧已碎成 5-6 条）",
-      "probing": true,
       "segments": [
         [
           {
@@ -3128,7 +3105,6 @@
       "case_id": "real-dialog-tv-latenight",
       "category": "realdata",
       "intent": "XDailyDialog 真实晨间对话：自述昨晚看电视到一点没睡——真实对话里的过去自述，不该把睡觉判成此刻的行为",
-      "probing": true,
       "primary_subject": "成年女性A",
       "segments": [
         [
@@ -3225,7 +3201,6 @@
       "case_id": "real-dialog-moving-plans",
       "category": "realdata",
       "intent": "XDailyDialog 真实搬家对话：未来安排处理得对（只判'告知/请求'这些言语行为）——真正暴露的是一次连续交谈被按话题切成 4-5 条",
-      "probing": true,
       "primary_subject": "成年女性A",
       "segments": [
         [
@@ -3352,7 +3327,6 @@
       "case_id": "real-mixed-wash-while-spouse-talks",
       "category": "realdata",
       "intent": "问题2变体：洗杯（真实动作）× 晨间对话（真实转写）交织——洗餐具与交谈并行，换了活动和对话还认不认",
-      "probing": true,
       "primary_subject": "成年女性A",
       "segments": [
         [
@@ -3458,7 +3432,6 @@
       "case_id": "real-mixed-call-interrupts-cooking",
       "category": "realdata",
       "intent": "做蛋途中来电话，动作停下接听一分钟后恢复搅蛋——是打断后继续，不是放弃；做饭不该被判 abandoned",
-      "probing": true,
       "segments": [
         [
           {
@@ -3517,7 +3490,6 @@
       "case_id": "dirty-homophone-clear-context",
       "category": "dirty",
       "intent": "错字但画面语境明确（'我在坐晚饭'+灶台画面）：该照常折进做饭，错字不该催生一件莫名其妙的独立事件",
-      "probing": true,
       "segments": [
         [
           {
@@ -3549,7 +3521,6 @@
       "case_id": "dirty-homophone-in-dialogue",
       "category": "dirty",
       "intent": "真实对话注入错字（剩菜→圣菜、千层面→千层棉）：交谈折叠不该被错字打散",
-      "probing": true,
       "primary_subject": "成年女性A",
       "segments": [
         [
@@ -3627,7 +3598,6 @@
       "case_id": "dirty-split-utterance",
       "category": "dirty",
       "intent": "一句话被 ASR 切碎成三帧（'今晚我出去跟/朋友吃饭，不用/等我了'）：是一次说话，不是三件事，更不是已发生的聚餐",
-      "probing": true,
       "segments": [
         [
           {
@@ -3668,7 +3638,6 @@
       "case_id": "dirty-double-emission",
       "category": "dirty",
       "intent": "同一句话被 ASR 重复吐出两次（措辞微差）：折成一次说话，不是两次",
-      "probing": true,
       "segments": [
         [
           {
@@ -3706,7 +3675,6 @@
       "case_id": "dirty-speaker-misattribution",
       "category": "dirty",
       "intent": "上游把明显是主体的话标给了别人（'我去把火关一下'标给B，画面却是A走向厨房）：不越权改归属、更不能因矛盾整批崩掉",
-      "probing": true,
       "primary_subject": "成年男性A",
       "segments": [
         [
@@ -3750,7 +3718,6 @@
       "case_id": "dirty-diarization-collapse",
       "category": "dirty",
       "intent": "分离塌缩：明显是两个人的对话全被标成主体一人——按上游给的参与者如实处理，不发明一个不在参与者里的人",
-      "probing": true,
       "primary_subject": "成年女性A",
       "segments": [
         [
@@ -3810,7 +3777,6 @@
       "case_id": "dirty-disfluent-speech",
       "category": "dirty",
       "intent": "口语填充（'嗯…那个…就是明天那个事，嗯，回头再说吧'）：没有可提取的具体目标，不该硬编出一个",
-      "probing": true,
       "segments": [
         [
           {

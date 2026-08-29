@@ -14,6 +14,11 @@
   观测质量。
 
 置换检验也在这里，同样是离线回归工具：它回答"周几效应是不是真的"，不是每夜都要跑的东西。
+
+未裁定的候选工具（用户提出，具体逻辑待讨论）：**反向马尔可夫计算或许适合放在回测里**——
+离线回测天然"双锚都在"（未来已知），可以做遮蔽实验：在留出段人为挖 gap，用前向-后向桥接
+推断被遮蔽的行为，与真值对比，并与"纯时刻先验"基线头对头。这正是"序列信息是否超越钟面"
+的测量仪：若桥接赢不过时刻先验，生产侧就永远不需要它。生产路径已裁定不加反向算法。
 """
 
 from __future__ import annotations
@@ -247,6 +252,155 @@ def samples(
     return collected
 
 
+@dataclass(frozen=True)
+class TimingCalibration:
+    """危险率时刻分布的校准结果（PRED-RATES-001 附带条件①的前一半）。
+
+    ``skipped`` 是"发布的危险率不足以构成像样分布"而放弃评估的 (日, 动作) 数——
+    如实说"没法评"，比硬评诚实。
+    """
+
+    samples: int
+    skipped: int
+    median_abs_error_minutes: float
+    coverage_p10_p90: float
+
+
+@dataclass(frozen=True)
+class CumulativeCalibration:
+    """累积率"该完成线"的校准结果（PRED-RATES-001 附带条件①的后一半）。"""
+
+    samples: int
+    expected_calibration_error: float
+    bins: tuple[CalibrationBin, ...]
+
+
+def first_occurrence_timing(
+    tree: PredictionTree,
+    holdout: BehaviorSnapshot,
+    *,
+    since: date,
+    through: date,
+    min_mass: float = 0.5,
+) -> TimingCalibration:
+    """校准危险率的"预计时刻"：P(第 t 槽才第一次发生) = h(t)·Π_{s<t}(1−h(s))。
+
+    只评**实际发生了**的 (日, 动作)：归一化后的链是"发生条件下几点"的分布，
+    拿没发生的天评它是问错问题。缺失格的危险率按 0 计（树上没有"首次落在这"的证据）；
+    链总质量低于 ``min_mass`` 的跳过并计入 ``skipped``。
+    """
+
+    slots = MINUTES_PER_DAY // tree.slot_minutes
+    firsts = _first_slots(tree, holdout, since=since, through=through)
+    errors: list[float] = []
+    covered = 0
+    skipped = 0
+    for (day, action), actual in sorted(firsts.items()):
+        weekday = day.weekday()
+        distribution: list[float] = []
+        mass = 0.0
+        survive = 1.0
+        for slot_index in range(slots):
+            cell = tree.nodes.get((SlotKey(weekday=weekday, slot=slot_index), action))
+            hazard = cell.hazard if cell is not None else 0.0
+            probability = survive * hazard
+            distribution.append(probability)
+            mass += probability
+            survive *= 1.0 - hazard
+        if mass < min_mass:
+            skipped += 1
+            continue
+        p10 = p50 = p90 = slots - 1
+        accumulated = 0.0
+        seen10 = seen50 = False
+        for slot_index, probability in enumerate(distribution):
+            accumulated += probability / mass
+            if not seen10 and accumulated >= 0.1:
+                p10, seen10 = slot_index, True
+            if not seen50 and accumulated >= 0.5:
+                p50, seen50 = slot_index, True
+            if accumulated >= 0.9:
+                p90 = slot_index
+                break
+        errors.append(abs(p50 - actual) * tree.slot_minutes)
+        if p10 <= actual <= p90:
+            covered += 1
+    if not errors:
+        raise PredictionTreeError("no (day, action) pair was evaluable for timing calibration")
+    ordered = sorted(errors)
+    middle = len(ordered) // 2
+    median = ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
+    return TimingCalibration(
+        samples=len(errors),
+        skipped=skipped,
+        median_abs_error_minutes=median,
+        coverage_p10_p90=covered / len(errors),
+    )
+
+
+def cumulative_calibration(
+    tree: PredictionTree,
+    holdout: BehaviorSnapshot,
+    *,
+    since: date,
+    through: date,
+    bins: int = 10,
+) -> CumulativeCalibration:
+    """校准累积率："到这个槽为止通常做过了"说 0.9 的地方，留出段里是不是真有九成的天已做过。
+
+    只评树上**发布了**的格子——含只有 ``earlier_days`` 的格子，它们正是累积率的主要载体。
+    留出段的观测空白会让"实际做过没有"读偏低（做了没看见），沿用 covered≡1 的既定退化假设，
+    定档时对带 gap 的留出段保持警惕。
+    """
+
+    slots = MINUTES_PER_DAY // tree.slot_minutes
+    firsts = _first_slots(tree, holdout, since=since, through=through)
+    pairs: list[tuple[float, bool]] = []
+    day = since
+    while day <= through:
+        weekday = day.weekday()
+        for slot_index in range(slots):
+            key = SlotKey(weekday=weekday, slot=slot_index)
+            for action in tree.actions:
+                cell = tree.nodes.get((key, action))
+                if cell is None:
+                    continue
+                actual_first = firsts.get((day, action))
+                pairs.append(
+                    (cell.cumulative, actual_first is not None and actual_first <= slot_index)
+                )
+        day += timedelta(days=1)
+    if not pairs:
+        raise PredictionTreeError("the holdout window yields no cumulative calibration pairs")
+    return CumulativeCalibration(
+        samples=len(pairs),
+        expected_calibration_error=_expected_calibration_error(pairs, bins),
+        bins=calibration(pairs, bins=bins),
+    )
+
+
+def _first_slots(
+    tree: PredictionTree,
+    holdout: BehaviorSnapshot,
+    *,
+    since: date,
+    through: date,
+) -> dict[tuple[date, str], int]:
+    """窗口内每个 (日, 动作) 的实际首次发生槽位。"""
+
+    if since > through:
+        raise PredictionTreeError("the holdout window ends before it starts")
+    firsts: dict[tuple[date, str], int] = {}
+    for item in holdout.actions:
+        if item.day < since or item.day > through:
+            continue
+        slot = SlotKey.of(item.started_at, slot_minutes=tree.slot_minutes).slot
+        key = (item.day, item.action)
+        if key not in firsts or slot < firsts[key]:
+            firsts[key] = slot
+    return firsts
+
+
 def calibration(
     pairs: Sequence[tuple[float, bool]], *, bins: int = 10
 ) -> tuple[CalibrationBin, ...]:
@@ -403,9 +557,13 @@ def _expected_calibration_error(pairs: Sequence[tuple[float, bool]], bins: int) 
 __all__ = [
     "BacktestReport",
     "CalibrationBin",
+    "CumulativeCalibration",
+    "TimingCalibration",
     "apply",
     "backtest",
     "calibration",
+    "cumulative_calibration",
+    "first_occurrence_timing",
     "isotonic",
     "permutation_test",
     "samples",
