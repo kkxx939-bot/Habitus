@@ -29,6 +29,7 @@ from behavior.fusion.coverage import BehaviorCoverageIndex
 from behavior.fusion.receipt_store import BehaviorFusionReceiptStore
 from behavior.fusion.store import BehaviorJudgementStore
 from behavior.kinds.model import BehaviorKindRegistry
+from behavior.kinds.rebuild import BehaviorKindRebuildReport, rebuild_registry
 from behavior.kinds.resolver import BehaviorKindRequest, BehaviorKindResolver
 from behavior.kinds.store import BehaviorKindStore
 from behavior.kinds.vectors import (
@@ -334,6 +335,22 @@ class BehaviorReductionRunner:
             return BehaviorKindMergeReport(
                 source=source, target=target, restamped=restamped, days=tuple(sorted(days)),
                 signals=(*signals, *notes),
+            )
+
+    async def rebuild_kinds(self) -> BehaviorKindRebuildReport:
+        """按树重建词表（补齐 + 账重算 + 向量补算，零模型调用）；持 sweep 锁，与归约互斥。"""
+
+        try:
+            acquired = self._path_lock.acquire(self._sweep_lock_key, ttl_seconds=_SWEEP_LOCK_TTL_SECONDS)
+        except TimeoutError as exc:
+            raise BehaviorReductionBusyError(str(exc)) from exc
+        with acquired:
+            return await rebuild_registry(
+                self.tree,
+                self.kind_store,
+                now=self._now(),
+                vectors=self.kind_vectors,
+                embedder=self.kind_resolver.embedder,
             )
 
     def _clear_checkpoint(self, guard: LeaseGuard) -> None:

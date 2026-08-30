@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
+from behavior.kinds.rebuild import BehaviorKindRebuildReport
 from behavior.observation import BehaviorObservationEnvelope
+from behavior.reduction import BehaviorKindMergeReport
 from Config import HabitusConfig
 from conversation import (
     ConversationSourceConsumer,
@@ -58,7 +60,10 @@ from pre.conversation import (
     ConversationBatch,
     ConversationSegment,
 )
+from Runtime.behavior import BehaviorRuntimeComponents
 from Runtime.behavior import deliver_observations as _deliver_behavior_observations
+from Runtime.behavior import merge_behavior_kinds as _merge_behavior_kinds
+from Runtime.behavior import rebuild_behavior_kinds as _rebuild_behavior_kinds
 from Runtime.components import RuntimeComponents
 from Runtime.consistency import MemoryConsistencyService, MemoryConsistencySnapshot
 from Runtime.health import RuntimeHealthReport, RuntimeHealthService
@@ -416,6 +421,26 @@ class Runtime:
                 "behavior pipeline is not configured; set behavior.primary_subject"
             )
         return await asyncio.to_thread(_deliver_behavior_observations, behavior, envelope)
+
+    async def merge_behavior_kinds(self, source: str, target: str) -> BehaviorKindMergeReport:
+        """词表合并正门：``source`` 并入 ``target``，树上旧 token 重打（离线整理判定之后调用）。"""
+
+        self._require_initialized("behavior kind merge")
+        behavior = self._require_behavior()
+        return await _merge_behavior_kinds(behavior, source, target, observer=self.components.infrastructure.observer)
+
+    async def rebuild_behavior_kinds(self) -> BehaviorKindRebuildReport:
+        """词表重建正门：按树补齐 + 账重算 + 向量补算（零模型调用）。"""
+
+        self._require_initialized("behavior kind rebuild")
+        behavior = self._require_behavior()
+        return await _rebuild_behavior_kinds(behavior, observer=self.components.infrastructure.observer)
+
+    def _require_behavior(self) -> BehaviorRuntimeComponents:
+        behavior = self.components.behavior
+        if behavior is None:
+            raise RuntimeStateError("behavior pipeline is not configured; set behavior.primary_subject")
+        return behavior
 
     async def _stop_background_workers(self) -> None:
         """停行为侧两个循环与预测夜批；失败不阻断记忆主链的停机（与启动侧同一哲学）。

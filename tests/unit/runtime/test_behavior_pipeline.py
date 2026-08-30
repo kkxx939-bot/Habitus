@@ -472,3 +472,28 @@ def test_reduction_worker_treats_lock_busy_as_a_skip_not_a_failure() -> None:
     asyncio.run(scenario())
     assert worker.runner.calls >= 1  # type: ignore[attr-defined]
     assert worker.last_error is None  # 让路不是故障
+
+
+def test_kind_merge_and_rebuild_are_exposed_through_the_access_layer(tmp_path) -> None:
+    """词表运维动作从接入层暴露（与观测投递同一正门形态），不让调用方伸手进归约 runner。"""
+
+    providers, vectors = runtime_dependencies()
+    runtime = build_runtime(
+        behavior_enabled_config(tmp_path),
+        providers=providers,
+        vector_stores=vectors,
+        path_lock=PathLock(ProcessLocalLockStore()),
+    )
+    runtime.initialize()
+    rebuilt = asyncio.run(runtime.rebuild_behavior_kinds())
+    assert rebuilt.occurrences == 0 and rebuilt.kinds == 0
+    merged = asyncio.run(runtime.merge_behavior_kinds("洗手", "清洁双手"))
+    assert merged.restamped == 0 and merged.days == ()
+    # 行为侧未启用时同样明确拒绝
+    dark = build_runtime(
+        runtime_config(tmp_path / "dark"), providers=providers, vector_stores=vectors,
+        path_lock=PathLock(ProcessLocalLockStore()),
+    )
+    dark.initialize()
+    with pytest.raises(RuntimeStateError, match="behavior pipeline is not configured"):
+        asyncio.run(dark.rebuild_behavior_kinds())

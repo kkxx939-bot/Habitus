@@ -44,11 +44,13 @@ from behavior.fusion.config import (
 from behavior.fusion.coverage import BehaviorCoverageIndex
 from behavior.fusion.enqueue import DEFAULT_QUIET_PERIOD_SECONDS
 from behavior.kinds.config import BehaviorKindConfig
+from behavior.kinds.rebuild import BehaviorKindRebuildReport
 from behavior.kinds.resolver import BehaviorKindResolver
 from behavior.kinds.store import BehaviorKindStore
 from behavior.kinds.vectors import BehaviorKindVectorStore
 from behavior.observation import BehaviorObservationEnvelope, BehaviorObservationStore
 from behavior.reduction import (
+    BehaviorKindMergeReport,
     BehaviorReductionBusyError,
     BehaviorReductionLedger,
     BehaviorReductionRunner,
@@ -56,7 +58,7 @@ from behavior.reduction import (
 from behavior.semantic import BehaviorSemanticRefresher, LLMBehaviorOverviewGenerator
 from behavior.tree import BehaviorTree
 from Config import HabitusConfig
-from foundation.observability import ObservationStatus, Observer
+from foundation.observability import ObservationEvent, ObservationStatus, Observer
 from infrastructure.store.contracts.lock import LockStore
 from infrastructure.store.contracts.path_lock import PathLock
 from ModelClient import StructuredChatClient
@@ -432,10 +434,76 @@ def deliver_observations(
     return stored.source_id
 
 
+async def merge_behavior_kinds(
+    components: BehaviorRuntimeComponents,
+    source: str,
+    target: str,
+    *,
+    observer: Observer | None = None,
+) -> BehaviorKindMergeReport:
+    """词表合并的正门（BHV-KINDS-002 方案⑤的执行动作）：``source`` 并入 ``target``，树上旧 token 重打。
+
+    判定由离线整理交模型做，这里只执行已定的合并。持 sweep 锁，归约 Worker 在此期间让路
+    （lock_busy 跳拍）；重跑幂等。
+    """
+
+    started = time.monotonic()
+    report = await components.reduction_runner.merge_kinds(source, target)
+    _record(
+        observer,
+        "behavior_kind_merge",
+        {"source": source, "target": target, "restamped": report.restamped, "days": len(report.days)},
+        started,
+    )
+    return report
+
+
+async def rebuild_behavior_kinds(
+    components: BehaviorRuntimeComponents, *, observer: Observer | None = None
+) -> BehaviorKindRebuildReport:
+    """词表重建的正门：按树补齐 + 账重算 + 向量补算，零模型调用；v1 词表迁移与账自愈走这里。"""
+
+    started = time.monotonic()
+    report = await components.reduction_runner.rebuild_kinds()
+    _record(
+        observer,
+        "behavior_kind_rebuild",
+        {"occurrences": report.occurrences, "kinds": report.kinds, "signals": len(report.signals)},
+        started,
+    )
+    return report
+
+
+def _record(
+    observer: Observer | None,
+    operation: str,
+    attributes: dict[str, str | int | float | bool],
+    started: float,
+) -> None:
+    """可观测事件与 Worker 同一形态（``ResidentWorker._observe``）；观测失败不影响业务。"""
+
+    if observer is None:
+        return
+    try:
+        observer.record(
+            ObservationEvent(
+                category="behavior",
+                operation=operation,
+                status=ObservationStatus.SUCCESS,
+                duration_seconds=max(0.0, time.monotonic() - started),
+                attributes=attributes,
+            )
+        )
+    except Exception:  # noqa: BLE001 - 观测失败不许影响运维动作
+        pass
+
+
 __all__ = [
     "BehaviorFusionWorker",
     "BehaviorReductionWorker",
     "BehaviorRuntimeComponents",
     "build_behavior_components",
     "deliver_observations",
+    "merge_behavior_kinds",
+    "rebuild_behavior_kinds",
 ]
