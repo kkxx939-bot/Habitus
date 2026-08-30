@@ -100,7 +100,7 @@ COMMITTED 即 discard；判断与交付在链发布、账本写完之后由归�
 （frames 填 []：看到了、看懂了、不构成任何事——不是 gap、不是没读懂，树上不写，曝光分母照算，
 占比作为信号 ``fusion_unowned`` 报出）；goal 退回可读字段，"goal 空则 basis 空"的不变量取消；
 "实际规律不规律"留给预测层。完整裁定与文献旁证见 ``judgement.py`` 模块头。
-**现状**：提示词 v15→v17、schema 的 frames.assignments 去掉 minItems、``BehaviorJudgementBatch``
+**现状**：提示词 v15→v18、schema 的 frames.assignments 去掉 minItems、``BehaviorJudgementBatch``
 带 ``unowned_fragment_nos``、回执带 ``unowned_observation_ids``/``unowned_ratio``。benchmark 加
 ``unowned_fragments`` / ``behaviors_present`` / ``forbidden_behaviors`` / ``subject_free_fragments``
 期望与"可提醒单位保留率"，补 6 条用例（EgoLife 真实粒度 ×2、喝水/锁门无目标单位、压制守卫、
@@ -126,8 +126,12 @@ COMMITTED 即 discard；判断与交付在链发布、账本写完之后由归�
   ⑤ v17 残留的 8 条姿态判断全在 11:37–11:42 连续三段，机制是**上下文先例**而非内容：这三段与
   种子段（11:37:09，12 条）孤立重跑 3/3、5/5 全干净（姿态帧无归属）；DAY1 里是 11:35–11:36 两条
   边缘判断（"观看大家收拾东西""走动"）进了 C 行，下一段照先例立"转身"并 continues，"姿态模式"
-  延续到 v17 那句"不延续"生效为止（v16 下同类链延续 25 分钟）。C 行是参照不是模板——若要再收，
-  改的是先前判断的渲染或提示词对 C 行的措辞，仍须对照实测。
+  延续到 v17 那句"不延续"生效为止（v16 下同类链延续 25 分钟）。C 行是参照不是模板——**v18**
+  按模块头"贴在模型正在看的对象上"把这句贴到【先前的判断】块头（``render_context_judgements``），
+  不再加正文。对照（用户裁定只跑对应数据、不跑全量）：11:35:20–11:42:05 原样切 5 段带上下文链
+  3/3 干净（种子"观看大家收拾东西"在 C 行里，后段零姿态条）；相关 4 条用例（两条并行、真实讨论、
+  压制守卫）×3 全过。提示词到此封版（用户裁定）：残留躲不掉的部分不再靠提示词追，后续若要
+  "不进树"，闸门放在 kinds 归一（kind 标"非单位"、归约不发布），与 BHV-KINDS-002 同批。
 
 ── 同一轮实测顺带撞到的其他问题（不属于融合本层，先登记在此，修时各归各处）────────────
 - 观测投递：同一批内两条内容完全相同的观测（同一秒同一句，ASR 重复吐出——benchmark 里

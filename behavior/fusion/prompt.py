@@ -80,7 +80,7 @@ from typing import Any
 from behavior.fusion.errors import BehaviorFusionError
 from behavior.observation import BehaviorObservation
 
-FUSION_PROMPT_VERSION = "behavior_judgement_prompt_v17"
+FUSION_PROMPT_VERSION = "behavior_judgement_prompt_v18"
 
 FUSION_SYSTEM_PROMPT = """\
 你在为一套行为记忆系统做行为融合。
@@ -481,7 +481,13 @@ def render_context_judgements(
         return "（无）"
     if not isinstance(segment_started_at, datetime) or segment_started_at.utcoffset() is None:
         raise TypeError("segment_started_at must be a timezone-aware datetime")
-    lines: list[str] = []
+    # 贴在 C 行块的头上而不是正文里（见模块头"三种落点"）：DAY1 v17 实测，残留的姿态判断全部来自
+    # 上下文先例——先前段里一条"走动/转身"进了 C 行，下一段就照样立条并延续，孤立重跑同一段则
+    # 全部干净。C 行是延续/修正的参照，不是产出的模板。
+    lines: list[str] = [
+        "（只用来判 continues / supersedes；不是本段产出的模板——其中若有坐着、转头、点头这类"
+        "姿态条目，本段这类帧照旧填 []，不要立条也不要延续）"
+    ]
     for index, record in enumerate(records, start=1):
         started_at = datetime.fromisoformat(str(record["started_at"]))
         ago = int((segment_started_at - started_at).total_seconds())

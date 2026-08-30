@@ -606,7 +606,10 @@ def test_context_judgements_render_with_their_own_reference_numbers() -> None:
         ),
         NOW,
     )
-    assert rendered.startswith("C1  1200秒前开始：洗手，目标：清洁双手，completed/observed")
+    head, first = rendered.split("\n", 1)
+    # 头一行是贴在 C 行块上的约束（参照不是模板），C 行从第二行起。
+    assert head.startswith("（只用来判 continues / supersedes")
+    assert first.startswith("C1  1200秒前开始：洗手，目标：清洁双手，completed/observed")
     assert "2026" not in rendered
 
 
