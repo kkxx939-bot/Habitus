@@ -386,3 +386,12 @@ def test_store_round_trip_and_tampering_detection(tmp_path) -> None:
     inner["batch"]["observations"][0]["semantics"] = "有人离开玄关"
     with pytest.raises(BehaviorObservationError):
         BehaviorObservationEnvelope.from_dict(inner, config=CONFIG)
+
+
+def test_a_duplicated_observation_in_one_batch_is_deduplicated_not_rejected() -> None:
+    """同一批里两条内容完全相同的观测（ASR 重复吐出）只保留一条；此前整批拒收。"""
+
+    raw = raw_observation()
+    batch = adapt(raw, dict(raw), raw_observation(semantics="人在洗手"))
+    assert len(batch.observations) == 2
+    assert len({item.observation_id for item in batch.observations}) == 2

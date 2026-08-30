@@ -22,5 +22,11 @@ class BehaviorFusionResult:
     prompt_version: str
     validation_attempts: int
 
+    @property
+    def degradations(self) -> tuple[str, ...]:
+        """装配层的降级记录（去重、剔名、丢边、goal 置空）；信号不是语义，供回执与可观测面板。"""
+
+        return self.batch.degradations
+
 
 __all__ = ["BehaviorFusionResult"]

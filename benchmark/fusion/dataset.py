@@ -92,6 +92,20 @@ class FusionExpectation:
     # 期望**不属于主体**的片段编号。与"读不懂"是两回事：那些帧读得懂，只是做的人不是我们跟踪的。
     # 用条数去测旁人有没有被吸收是测不准的——条数对了不等于那一帧没被塞进主体的判断。
     out_of_scope_fragments: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
+    # 期望**无归属**的片段编号：读得懂、但不构成任何事也不是任何事的步骤（无意识小动作、过渡帧）。
+    # 与"读不懂""旁人"三者口径各自干净。写成期望是为了两头都抓：该无归属的没无归属（噪声进了事件）、
+    # 不该无归属的被扔进去了（压制产出）。
+    unowned_fragments: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
+    # 期望**至少**这些片段无归属（子集匹配）。用在"这段可以判 0 条也可以判 1 条"两种产出都站得住的
+    # 真实切片上：扶眼镜、摸脸这些帧无论如何都不该进任何事，但旁边的"点头""看着大家"归给一条
+    # "开会"还是也无归属，两种都对——全集精确匹配会把合法的另一种判红。
+    unowned_include: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
+    # 期望这些片段**不在主体的任何判断里**——无归属或旁人的都算。旁人走过那一帧，模型判成
+    # "旁人的一条判断"（会被分流）或直接无归属都对，要抓的只是"没被塞进主体那件事"。
+    not_owned_by_subject: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
+    # 期望某段里**至少判出**的行为（子串匹配 behavior）：允许模型不产出之后，"可提醒的单位有没有被
+    # 一起扔掉"必须单独考，总条数降了不等于对了。
+    behaviors_present: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for _, _, kind in tuple(self.relations) + tuple(self.forbidden_relations):
@@ -112,6 +126,10 @@ class FusionExpectation:
             or self.judgement_count
             or self.unreadable_fragments
             or self.out_of_scope_fragments
+            or self.unowned_fragments
+            or self.unowned_include
+            or self.not_owned_by_subject
+            or self.behaviors_present
             or self.forbidden_status
             or self.status_present
             or self.goal_absent
@@ -168,46 +186,29 @@ def _case(value: Any) -> FusionCase:
         intent=value["intent"],
         probing=bool(value.get("probing", False)),
         primary_subject=value.get("primary_subject"),
-        segments=tuple(
-            tuple(_fragment(item) for item in segment) for segment in value["segments"]
-        ),
+        segments=tuple(tuple(_fragment(item) for item in segment) for segment in value["segments"]),
         expect=FusionExpectation(
             relations=tuple(tuple(item) for item in expect.get("relations", ())),
-            forbidden_relations=tuple(
-                tuple(item) for item in expect.get("forbidden_relations", ())
-            ),
-            forbidden_status={
-                int(key): tuple(item)
-                for key, item in expect.get("forbidden_status", {}).items()
-            },
-            status_present={
-                int(key): tuple(item)
-                for key, item in expect.get("status_present", {}).items()
-            },
+            forbidden_relations=tuple(tuple(item) for item in expect.get("forbidden_relations", ())),
+            forbidden_status={int(key): tuple(item) for key, item in expect.get("forbidden_status", {}).items()},
+            status_present={int(key): tuple(item) for key, item in expect.get("status_present", {}).items()},
             goal_absent=tuple(expect.get("goal_absent", ())),
-            forbidden_goals={
-                int(key): tuple(item)
-                for key, item in expect.get("forbidden_goals", {}).items()
-            },
-            subjects_exclude={
-                int(key): tuple(item)
-                for key, item in expect.get("subjects_exclude", {}).items()
-            },
-            subjects_include={
-                int(key): tuple(item) for key, item in expect.get("subjects_include", {}).items()
-            },
-            judgement_count={
-                int(key): (item[0], item[1])
-                for key, item in expect.get("judgement_count", {}).items()
-            },
+            forbidden_goals={int(key): tuple(item) for key, item in expect.get("forbidden_goals", {}).items()},
+            subjects_exclude={int(key): tuple(item) for key, item in expect.get("subjects_exclude", {}).items()},
+            subjects_include={int(key): tuple(item) for key, item in expect.get("subjects_include", {}).items()},
+            judgement_count={int(key): (item[0], item[1]) for key, item in expect.get("judgement_count", {}).items()},
             unreadable_fragments={
-                int(key): tuple(item)
-                for key, item in expect.get("unreadable_fragments", {}).items()
+                int(key): tuple(item) for key, item in expect.get("unreadable_fragments", {}).items()
             },
             out_of_scope_fragments={
-                int(key): tuple(item)
-                for key, item in expect.get("out_of_scope_fragments", {}).items()
+                int(key): tuple(item) for key, item in expect.get("out_of_scope_fragments", {}).items()
             },
+            unowned_fragments={int(key): tuple(item) for key, item in expect.get("unowned_fragments", {}).items()},
+            unowned_include={int(key): tuple(item) for key, item in expect.get("unowned_include", {}).items()},
+            not_owned_by_subject={
+                int(key): tuple(item) for key, item in expect.get("not_owned_by_subject", {}).items()
+            },
+            behaviors_present={int(key): tuple(item) for key, item in expect.get("behaviors_present", {}).items()},
         ),
     )
 

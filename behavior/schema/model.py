@@ -46,6 +46,8 @@ class BehaviorFieldType(str, Enum):
     BOOLEAN = "boolean"
     STRING_LIST = "string_list"
     SHA256_LIST = "sha256_list"
+    SHA256 = "sha256"
+    OPTIONAL_SHA256 = "optional_sha256"
     OCCURRENCE_STATUS = "occurrence_status"
     STATUS_BASIS = "status_basis"
     GAP_KIND = "gap_kind"

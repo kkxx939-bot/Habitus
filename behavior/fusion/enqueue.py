@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from behavior.fusion.config import BehaviorFusionConfig
+from behavior.fusion.coverage import BehaviorCoverageIndex
 from behavior.fusion.derivation import FUSION_VERSION
 from behavior.fusion.jobs import BehaviorFusionJob, BehaviorFusionJobStore
 from behavior.fusion.prompt import FUSION_PROMPT_VERSION
@@ -60,6 +61,7 @@ class BehaviorFusionEnqueuer:
         receipts: BehaviorFusionReceiptStore,
         *,
         config: BehaviorFusionConfig | None = None,
+        coverage: BehaviorCoverageIndex | None = None,
         quiet_period_seconds: float = DEFAULT_QUIET_PERIOD_SECONDS,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -82,6 +84,9 @@ class BehaviorFusionEnqueuer:
         self.jobs = jobs
         self.receipts = receipts
         self.config = resolved
+        if coverage is not None and not isinstance(coverage, BehaviorCoverageIndex):
+            raise TypeError("coverage must be BehaviorCoverageIndex")
+        self.coverage = coverage or BehaviorCoverageIndex(observations.root)
         self.quiet_period = timedelta(seconds=float(quiet_period_seconds))
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
@@ -95,11 +100,8 @@ class BehaviorFusionEnqueuer:
 
     def _scan(self) -> BehaviorFusionEnqueueResult:
         covered = set(self.jobs.covered_observation_ids(fenced=False))
-        covered.update(
-            observation_id
-            for receipt in self.receipts.list()
-            for observation_id in receipt.observation_ids
-        )
+        # 已融合的观测由覆盖索引回答（有窗口、按日过期），不再全量枚举回执目录。
+        covered.update(self.coverage.covered_observation_ids(self._timestamp()))
         envelopes = self.observations.list()
         if not envelopes:
             return BehaviorFusionEnqueueResult((), 0)

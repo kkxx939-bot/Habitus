@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 from behavior.fusion.config import BehaviorFusionConfig
@@ -24,13 +25,17 @@ from infrastructure.store.filesystem import (
     ImmutableArtifactConflictError,
     atomic_create_bytes,
     atomic_temporary_destination,
+    durable_unlink,
     list_real_directory,
     read_regular_bytes,
 )
 
 _RECEIPT_FILE = re.compile(r"^(?P<receipt_id>[0-9a-f]{64})\.json$")
 
-# TODO(BHV-LIFECYCLE-001): 回执与观测存储共用同一个生命周期缺口——``list()`` 是全量扁平枚举，
+# BHV-LIFECYCLE-001（回执部分已落地，2026-08-30）：覆盖信息移到 ``behavior/fusion/coverage.py``
+# （按日分区、窗口过期），入队与封口不再枚举本目录；回执本身只服务作业期幂等，由归约按同一窗口
+# ``expire``。下面的原始记录保留作历史：
+# 回执与观测存储共用同一个生命周期缺口——``list()`` 是全量扁平枚举，
 # 越过 ``max_receipt_files`` 即永久抛错，而 ``put`` 仍然一直成功。按每分钟一次融合计算，默认
 # 上限约 69 天后枚举必然失效。**而重写之后它已经进了排队的关键路径**（``enqueue`` 每次扫描都要
 # 全量解码回执），所以越界不再只是审计问题，是整条融合流水线停摆。改造随生命周期一并做：按本地
@@ -111,6 +116,22 @@ class BehaviorFusionReceiptStore:
             receipt_ids.append(match.group("receipt_id"))
         receipts = tuple(self._required_read(receipt_id) for receipt_id in sorted(receipt_ids))
         return tuple(sorted(receipts, key=lambda item: (item.judged_at, item.receipt_id)))
+
+    def discard(self, receipt_id: str) -> bool:
+        """删除一份回执；不存在时幂等返回 ``False``。"""
+
+        return durable_unlink(self._path(receipt_id), artifact_root=self.root)
+
+    def expire(self, before: datetime) -> int:
+        """删掉 ``judged_at`` 早于 ``before`` 的回执；覆盖信息另有索引，回执本身只服务作业期幂等。"""
+
+        if not isinstance(before, datetime) or before.utcoffset() is None:
+            raise TypeError("before must be a timezone-aware datetime")
+        removed = 0
+        for receipt in self.list():
+            if receipt.judged_at < before and self.discard(receipt.receipt_id):
+                removed += 1
+        return removed
 
     def _existing(
         self, receipt_id: str, conflict: ImmutableArtifactConflictError

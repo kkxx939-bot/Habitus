@@ -27,7 +27,7 @@ from behavior.fusion.errors import BehaviorFusionError
 from behavior.observation import BehaviorObservation
 from foundation.integrity import canonical_digest, canonicalize
 
-RECEIPT_SCHEMA_VERSION = "behavior_fusion_receipt_v3"
+RECEIPT_SCHEMA_VERSION = "behavior_fusion_receipt_v4"
 _RECEIPT_IDENTITY_SCHEMA = "behavior_fusion_receipt_identity_v1"
 
 _RECEIPT_KEYS = {
@@ -43,6 +43,7 @@ _RECEIPT_KEYS = {
     "judgement_ids",
     "unreadable_observation_ids",
     "out_of_scope_observation_ids",
+    "unowned_observation_ids",
     "record_digest",
 }
 
@@ -95,6 +96,9 @@ class BehaviorFusionReceipt:
     # 读得懂、但做这件事的不是我们跟踪的那个人。与"读不懂"必须分开：路人多不等于上游在退化，
     # 混进同一个比例会让上游质量信号失真。
     out_of_scope_observation_ids: tuple[str, ...]
+    # 读得懂、不属于任何判断的观测（无意识小动作、过渡帧）："看到了、不构成任何事"。它是
+    # "允许模型不产出"的出口，占比要作为信号——与"没读懂""旁人"三者口径各自干净。
+    unowned_observation_ids: tuple[str, ...]
     record_digest: str
 
     def __post_init__(self) -> None:
@@ -112,6 +116,7 @@ class BehaviorFusionReceipt:
             (self.judgement_ids, "judgement_ids"),
             (self.unreadable_observation_ids, "unreadable_observation_ids"),
             (self.out_of_scope_observation_ids, "out_of_scope_observation_ids"),
+            (self.unowned_observation_ids, "unowned_observation_ids"),
         ):
             for item in group:
                 _sha256(item, f"{label} item")
@@ -125,6 +130,8 @@ class BehaviorFusionReceipt:
             raise BehaviorFusionError("receipt reports unreadable observations outside its segment")
         if not set(self.out_of_scope_observation_ids) <= covered:
             raise BehaviorFusionError("receipt reports out-of-scope observations outside its segment")
+        if not set(self.unowned_observation_ids) <= covered:
+            raise BehaviorFusionError("receipt reports unowned observations outside its segment")
         if self.record_digest != canonical_digest(_record(self._values())):
             raise BehaviorFusionError("record_digest does not match the receipt record")
 
@@ -141,6 +148,7 @@ class BehaviorFusionReceipt:
             "judgement_ids": self.judgement_ids,
             "unreadable_observation_ids": self.unreadable_observation_ids,
             "out_of_scope_observation_ids": self.out_of_scope_observation_ids,
+            "unowned_observation_ids": self.unowned_observation_ids,
         }
 
     @property
@@ -154,6 +162,12 @@ class BehaviorFusionReceipt:
         """读不懂的观测占比；这个数上升即上游语义在退化。"""
 
         return len(self.unreadable_observation_ids) / len(self.observation_ids)
+
+    @property
+    def unowned_ratio(self) -> float:
+        """无归属观测占比——"允许不产出"的出口用得多不多，是压制产出的告警依据。"""
+
+        return len(self.unowned_observation_ids) / len(self.observation_ids)
 
     def to_dict(self) -> dict[str, Any]:
         payload = canonicalize({**_record(self._values()), "record_digest": self.record_digest})
@@ -184,6 +198,9 @@ class BehaviorFusionReceipt:
             ),
             out_of_scope_observation_ids=_texts(
                 value["out_of_scope_observation_ids"], "out_of_scope_observation_ids"
+            ),
+            unowned_observation_ids=_texts(
+                value["unowned_observation_ids"], "unowned_observation_ids"
             ),
             record_digest=_sha256(value["record_digest"], "record_digest"),
         )
@@ -278,6 +295,9 @@ def build_fusion_receipt(
     outside = sorted((unreadable | out_of_scope) - covered)
     if outside:
         raise BehaviorFusionError(f"judgements report observations outside this segment: {outside}")
+    # 无归属 = 本段观测里没有任何判断（主体的、旁人的、没读懂的）认领的那些。
+    claimed = {observation_id for judgement in judgements for observation_id in judgement.observation_ids}
+    unowned = covered - claimed
     values: dict[str, Any] = {
         "receipt_id": receipt_identity(segment_digest, FUSION_VERSION, prompt_version),
         "segment_digest": segment_digest,
@@ -292,6 +312,7 @@ def build_fusion_receipt(
         "judgement_ids": tuple(item.judgement_id for item in in_scope),
         "unreadable_observation_ids": tuple(sorted(unreadable)),
         "out_of_scope_observation_ids": tuple(sorted(out_of_scope)),
+        "unowned_observation_ids": tuple(sorted(unowned)),
     }
     return BehaviorFusionReceipt(**values, record_digest=canonical_digest(_record(values)))
 
@@ -317,6 +338,7 @@ def _record(values: Mapping[str, Any]) -> dict[str, Any]:
             "judgement_ids": list(values["judgement_ids"]),
             "unreadable_observation_ids": list(values["unreadable_observation_ids"]),
             "out_of_scope_observation_ids": list(values["out_of_scope_observation_ids"]),
+            "unowned_observation_ids": list(values["unowned_observation_ids"]),
         }
     )
     assert isinstance(payload, dict)

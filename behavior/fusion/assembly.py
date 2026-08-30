@@ -66,8 +66,20 @@ def assemble_judgement_batch(
     fragment_count: int,
     context_states: Sequence[str | None] = (),
     config: BehaviorFusionConfig | None = None,
+    participants_by_no: Mapping[int, Sequence[str]] | None = None,
 ) -> BehaviorJudgementBatch:
-    """把线格式装配成判断批次；结构性错误在这里以精确坐标失败。"""
+    """把线格式装配成判断批次；结构性错误在这里以精确坐标失败。
+
+    ``participants_by_no`` 是各片段（按 ``1..N``）的参与者；给了它，主体不在覆盖片段里出现的
+    判断在这里降级（剔名或整条降为没读懂），而不是等到校验层整批拒绝。
+
+    ## 记账疏漏一律降级、留信号，不整批拒
+
+    真实日尺度数据实测（BHV-REALDATA-001）：同帧重复归属、主体不在场、``continues`` 指向已完成的
+    先前判断、goal 的 basis 全无帧归属，一周合计上千次；每次整批拒绝都要白烧三次模型调用再退避，
+    而串行队列里一个段反复失败就封死一整天。这四类都是模型两张表之间的记账疏漏或判断习惯，
+    不是语义不可用——降级后产物仍然自洽（校验层的断言照跑），损失以 ``degradations`` 逐条留痕。
+    """
 
     resolved = config or BehaviorFusionConfig()
     if not isinstance(resolved, BehaviorFusionConfig):
@@ -76,19 +88,37 @@ def assemble_judgement_batch(
         raise BehaviorFusionError("fragment_count must be a positive integer")
     if isinstance(context_states, (str, bytes)) or not isinstance(context_states, Sequence):
         raise BehaviorFusionError("context_states must be a sequence")
+    if participants_by_no is not None and not isinstance(participants_by_no, Mapping):
+        raise BehaviorFusionError("participants_by_no must be a mapping")
     payload = _mapping(value, _BATCH_KEYS, "fusion output")
+    notes: list[str] = []
 
     declared = _judgements(payload["judgements"], config=resolved)
-    frames = _frames(payload["frames"], fragment_count=fragment_count, config=resolved)
+    frames = _frames(payload["frames"], fragment_count=fragment_count, config=resolved, notes=notes)
     covers, fact_frames, dropped = _reduce_coverage(frames, declared)
+    # 全部帧都无归属、一条判断也没有是合法产出：一段只有晃身体、扶眼镜、点头的观测里确实没有
+    # 一件能提醒的事。曾经在这里硬失败要求"至少声明一条"，真实切片上模型被打回后只会把整段
+    # 改判成"读不懂"——读得懂却不构成事，正是无归属要表达的。
 
     built = [
-        _build(number, declared[number], covers[number], fact_frames, dropped)
+        _build(
+            number,
+            declared[number],
+            covers[number],
+            fact_frames,
+            dropped,
+            participants_by_no=participants_by_no,
+            notes=notes,
+        )
         for number in sorted(covers, key=lambda no: (covers[no][0], no))
     ]
-    _require_targets_declared(built, context_states=tuple(context_states))
+    built = _require_targets_declared(built, context_states=tuple(context_states), notes=notes)
     _require_distinguishable(built)
-    return BehaviorJudgementBatch(_close_concurrency(built))
+    owned = {no for item in built for no in item.covers}
+    unowned = tuple(no for no in range(1, fragment_count + 1) if no not in owned)
+    return BehaviorJudgementBatch(
+        _close_concurrency(built), degradations=tuple(notes), unowned_fragment_nos=unowned
+    )
 
 
 # --- 线格式解析 -----------------------------------------------------------------------
@@ -104,8 +134,7 @@ def _judgements(value: object, *, config: BehaviorFusionConfig) -> dict[int, dic
         if number in declared:
             raise BehaviorFusionError(f"{label}.judgement_no is declared more than once: {number}")
         declared[number] = _judgement_fields(payload, label, config=config)
-    if not declared:
-        raise BehaviorFusionError("judgements must declare at least one judgement")
+    # 零判断合法：这段里没有一件能提醒的事时，判断为空、全部帧填 []（见 assemble_judgement_batch）。
     return declared
 
 
@@ -173,7 +202,7 @@ def _facts(value: object, label: str, *, config: BehaviorFusionConfig) -> dict[i
 
 
 def _frames(
-    value: object, *, fragment_count: int, config: BehaviorFusionConfig
+    value: object, *, fragment_count: int, config: BehaviorFusionConfig, notes: list[str]
 ) -> tuple[dict[str, Any], ...]:
     """逐帧归属表；穷尽性在这里由**形状**保证，而不是事后校验。"""
 
@@ -190,18 +219,17 @@ def _frames(
         number = _positive_int(payload["no"], f"{label}.no")
         if number != index:
             raise BehaviorFusionError(f"{label}.no must be {index}, got {number}")
-        assignments = _assignments(payload["assignments"], label, config=config)
+        assignments = _assignments(payload["assignments"], label, config=config, notes=notes)
         frames.append({"no": number, "assignments": assignments})
     return tuple(frames)
 
 
 def _assignments(
-    value: object, label: str, *, config: BehaviorFusionConfig
+    value: object, label: str, *, config: BehaviorFusionConfig, notes: list[str]
 ) -> tuple[tuple[int, int | None], ...]:
     raw = _array(value, f"{label}.assignments", max_items=config.max_judgements)
-    if not raw:
-        # 每一帧都必须有交代：读不懂的帧归给一条 behavior 为空的判断，而不是空着。
-        raise BehaviorFusionError(f"{label}.assignments must not be empty")
+    # 空列表是显式声明："看到了、看懂了、不构成任何事"（无意识小动作、过渡帧）。行必须存在
+    # ——穷尽性靠行数保证；无归属是声明不是省略。
     resolved: list[tuple[int, int | None]] = []
     for index, item in enumerate(raw):
         item_label = f"{label}.assignments[{index}]"
@@ -211,9 +239,11 @@ def _assignments(
         if basis_no is not None:
             basis_no = _positive_int(basis_no, f"{item_label}.basis_no")
         if any(existing == judgement_no for existing, _ in resolved):
-            raise BehaviorFusionError(
-                f"{item_label} assigns this fragment to judgement {judgement_no} twice"
-            )
+            # 一帧属于两条**不同**判断是现实（并行的交界帧）；一帧在同一条判断里出现两次在现实里
+            # 没有对应物，只是模型把 judgement_no 写了两遍（或给了两个 basis）。取先写的那个：
+            # 一帧在一条判断里只归一个步骤，信息损失可忽略；整批拒则白烧一次调用。
+            notes.append(f"duplicate_assignment {label} judgement={judgement_no}")
+            continue
         resolved.append((judgement_no, basis_no))
     return tuple(resolved)
 
@@ -256,7 +286,6 @@ def _reduce_coverage(
     # 白烧一次完整调用、吃掉一次重试预算，用尽后整个作业失败退避；而丢弃**不损失任何观测**：
     # 一条判断若没有任何帧，就没有任何片段以它为归属（有归属的帧会让 covers 非空），basis 同理。
     #
-    # 每条帧至少有一个归属由 schema 与解析层保证，所以不可能把所有判断都丢光。
     empty = {number for number, items in covers.items() if not items}
     covers = {number: items for number, items in covers.items() if number not in empty}
     fact_frames = {key: items for key, items in fact_frames.items() if key[0] not in empty}
@@ -273,6 +302,9 @@ def _build(
     covers: tuple[int, ...],
     fact_frames: Mapping[tuple[int, int], tuple[int, ...]],
     dropped: frozenset[int],
+    *,
+    participants_by_no: Mapping[int, Sequence[str]] | None,
+    notes: list[str],
 ) -> BehaviorJudgement:
     facts: Mapping[int, str] = fields["facts"]
     # 只保留真的有帧归属的 basis 条目；声明了却没有任何帧的那些在归约时已被丢弃（见
@@ -281,10 +313,41 @@ def _build(
     # basis 条目按它最早覆盖的片段排序——顺序是归约产物，让模型再写一遍只是多一个出错的机会，
     # 而真正同时发生的两条事实其帧本来就交错，"谁在前"没有意义。
     ordered = sorted(grounded, key=lambda basis_no: (fact_frames[(number, basis_no)][0], basis_no))
+    behavior = fields["behavior"]
+    goal = fields["goal"]
+    summary = fields["summary"]
+    subjects = fields["subjects"]
+    status = fields["status"]
+    status_basis = fields["status_basis"]
+    relations = tuple(link for link in fields["relations"] if link.target_no not in dropped)
+    if behavior is not None and participants_by_no is not None:
+        available = {
+            participant
+            for fragment_no in covers
+            for participant in participants_by_no.get(fragment_no, ())
+        }
+        present = tuple(subject for subject in subjects if subject in available)
+        absent = [subject for subject in subjects if subject not in available]
+        if absent and present:
+            # 模型从"她 / 大家 / 众人"推出了在场的人，而观测的 participants 里没有——只剔掉观测
+            # 撑不住的名字，判断本身保留。
+            notes.append(f"subject_absent judgement={number} dropped={absent}")
+            subjects = present
+        elif absent:
+            # 没有一个主体是观测里出现过的：这条判断说的是观测里没有的人，不能作为可读判断落盘，
+            # 但它覆盖的观测也不能丢——整条降为"没读懂"，与融合层"不能融合的也要留下"同构。
+            # 它的 subjects/status/relations 随之清空（没读懂段不携带这些），指向它的关系由
+            # ``_require_targets_declared`` 剪掉。
+            notes.append(f"subject_absent judgement={number} dropped={absent} unreadable")
+            behavior = goal = summary = None
+            subjects = ()
+            status = status_basis = None
+            relations = ()
+            ordered = []
     claim = BehaviorClaim(
-        behavior=fields["behavior"],
-        goal=fields["goal"],
-        summary=fields["summary"],
+        behavior=behavior,
+        goal=goal,
+        summary=summary,
         basis=tuple(
             BehaviorFact(semantics=facts[basis_no], fragment_nos=fact_frames[(number, basis_no)])
             for basis_no in ordered
@@ -293,22 +356,42 @@ def _build(
     return BehaviorJudgement(
         judgement_no=number,
         covers=covers,
-        subjects=fields["subjects"],
+        subjects=subjects,
         claim=claim,
-        status=fields["status"],
-        status_basis=fields["status_basis"],
+        status=status,
+        status_basis=status_basis,
         # 指向被丢弃判断的关系一并剪掉：目标已经不存在了，留着就是一条指向空处的连接。
-        relations=tuple(
-            link for link in fields["relations"] if link.target_no not in dropped
-        ),
+        relations=relations,
     )
 
 
 def _require_targets_declared(
-    judgements: Sequence[BehaviorJudgement], *, context_states: tuple[str | None, ...]
-) -> None:
+    judgements: Sequence[BehaviorJudgement],
+    *,
+    context_states: tuple[str | None, ...],
+    notes: list[str],
+) -> list[BehaviorJudgement]:
+    """关系目标必须存在且可读；``continues`` 指向已完成的目标则**剪掉这条边**并留信号。
+
+    返回剪边之后的判断列表（判断本身不动）。剪边而不是整批拒：真实数据一周 172 次，模型看行为
+    相似度不看状态（早上洗过手、中午再洗标成延续），贴在 C 行上的约束压不住；剪掉之后本段判断
+    按独立的新一次行为落树、先前那条不动——只删一条自相矛盾的关系，不发明任何事实（改成
+    supersedes 是替模型说它没说的话；并入已完成的链会让链无限滚长）。
+    """
+
     known = {item.judgement_no: item for item in judgements}
+    # 装配期被降为没读懂的判断（主体全不在场）：指向它的关系一律剪掉——它已不是一个行为。
+    degraded_unreadable = {
+        item.judgement_no
+        for item in judgements
+        if not item.claim.is_readable and any(
+            note.startswith(f"subject_absent judgement={item.judgement_no} ") and note.endswith("unreadable")
+            for note in notes
+        )
+    }
+    rebuilt: list[BehaviorJudgement] = []
     for item in judgements:
+        kept: list[JudgementLink] = []
         for link in item.relations:
             if link.context_no is not None:
                 if link.context_no > len(context_states):
@@ -316,24 +399,26 @@ def _require_targets_declared(
                         f"judgement[{item.judgement_no}] relates to context judgement "
                         f"C{link.context_no}, but only {len(context_states)} were shown"
                     )
-                _require_continuable(
-                    item, link, context_states[link.context_no - 1], f"C{link.context_no}"
-                )
+                if not _continuable(link, context_states[link.context_no - 1]):
+                    notes.append(
+                        f"continues_completed judgement={item.judgement_no} target=C{link.context_no}"
+                    )
+                    continue
+                kept.append(link)
                 continue
             assert link.target_no is not None  # 恰好一个非空，上面已经排除 context 分支
             target = known.get(link.target_no)
-            if target is not None:
-                _require_continuable(
-                    item,
-                    link,
-                    None if target.status is None else target.status.value,
-                    f"judgement[{link.target_no}]",
-                )
             if target is None:
                 raise BehaviorFusionError(
                     f"judgement[{item.judgement_no}] relates to an undeclared judgement: "
                     f"{link.target_no}"
                 )
+            if link.target_no in degraded_unreadable:
+                notes.append(
+                    f"relation_dropped judgement={item.judgement_no} target={link.target_no} "
+                    f"kind={link.kind.value} (target degraded to unreadable)"
+                )
+                continue
             if not target.claim.is_readable:
                 # 没读懂的那段不是一个行为，谈不上与它延续、并行或被它修正。在这里以可定位的
                 # 坐标拒绝，而不是等到对称补齐时由系统自己造出一条非法关系再炸——那样反馈给
@@ -342,6 +427,17 @@ def _require_targets_declared(
                     f"judgement[{item.judgement_no}] relates to judgement[{link.target_no}], "
                     f"which is unreadable"
                 )
+            if not _continuable(link, None if target.status is None else target.status.value):
+                # 同批内的 continues 不剪：判重规则（validation._require_one_judgement_per_start）
+                # 正是靠这条边把"同一件事被看成两条"认作一条、由归约并链；剪掉它反而让两条同名
+                # 同刻判断互不相认、撞成硬拒（WP1 首次真实对照实测）。保留、留信号，归约按 continues
+                # 并链，尾部状态定结局——模型明说这是同一件事，同批内并起来是最安全的解释。
+                notes.append(
+                    f"continues_completed judgement={item.judgement_no} target={link.target_no} kept"
+                )
+            kept.append(link)
+        rebuilt.append(item if len(kept) == len(item.relations) else replace(item, relations=tuple(kept)))
+    return rebuilt
 
 
 def _require_distinguishable(judgements: Sequence[BehaviorJudgement]) -> None:
@@ -374,24 +470,18 @@ def _require_distinguishable(judgements: Sequence[BehaviorJudgement]) -> None:
         seen[key] = item.judgement_no
 
 
-def _require_continuable(
-    item: BehaviorJudgement, link: JudgementLink, target_status: str | None, label: str
-) -> None:
+def _continuable(link: JudgementLink, target_status: str | None) -> bool:
     """一件已经完成的事没有"后半段"。
 
-    甲说自己已完成、乙说自己是甲的延续，这是我们自己两条产物之间的矛盾，不是现实的形状。而且
-    有明确的替代表达：如果先前那条判错了（以为完成其实没完），用 ``supersedes`` 修正它。
+    甲说自己已完成、乙说自己是甲的延续，这是我们自己两条产物之间的矛盾，不是现实的形状。
+    模型若认为先前那条判错了（以为完成其实没完），正确表达是 ``supersedes``；它没这么说，
+    我们就只剪掉这条矛盾的边（见 ``_require_targets_declared``），不替它改口。
 
     实测这条会被触发：早上洗一次手、四小时后又洗一次，模型三次全部标成 continues——时间跨度
-    没能阻止它，判断主要看行为相似度。
+    没能阻止它，判断主要看行为相似度；真实日尺度数据一周 172 次。
     """
 
-    if link.kind is not JudgementRelation.CONTINUES or target_status != "completed":
-        return
-    raise BehaviorFusionError(
-        f"judgement[{item.judgement_no}] continues {label}, which is already completed; "
-        f"a finished behaviour has no second half — use supersedes if the earlier judgement was wrong"
-    )
+    return link.kind is not JudgementRelation.CONTINUES or target_status != "completed"
 
 
 def _close_concurrency(judgements: Sequence[BehaviorJudgement]) -> tuple[BehaviorJudgement, ...]:

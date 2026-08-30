@@ -72,7 +72,11 @@ def _require_known_fragments(
 def _require_subject_present(
     batch: BehaviorJudgementBatch, by_no: Mapping[int, BehaviorObservation]
 ) -> None:
-    """每个主体都必须在它覆盖的片段里出现过——否则这条判断说的是观测里没有的人。"""
+    """每个主体都必须在它覆盖的片段里出现过——否则这条判断说的是观测里没有的人。
+
+    装配层拿到 ``participants_by_no`` 时已在那里降级（剔名 / 整条降为没读懂），这里是后置断言：
+    经装配的批次不该再触发；直接构造的批次或未给 participants 的装配仍由它把关。
+    """
 
     for judgement in batch.judgements:
         if not judgement.subjects:

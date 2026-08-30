@@ -15,14 +15,12 @@ fields:
   - {name: last_observed_at, type: datetime, role: numeric, required: true, description: 最后一条支持观测的时刻（不是结束时刻，结束经常不可知）。}
   - {name: onset_available_at, type: datetime, role: numeric, required: true, description: 链头判断的证据齐备时刻——防标签泄漏的首个切点。}
   - {name: reminded, type: boolean, role: numeric, required: true, description: 开始前窗口内有没有被系统提醒过；被提醒的发生不进自然率。}
-  - {name: goal, type: optional_string, role: semantic, required: true, description: 有意识的目标；为空即动作段，动作段照常进树以保住曝光分母。}
+  - {name: goal, type: optional_string, role: semantic, required: true, description: 有意识的目标；说不出目标的单位（锁门、喝水）为空，照样是一条行为。}
   - {name: summary, type: string, role: semantic, required: true, description: 脱离观测也读得懂的一句话；链跨多段时按序确定性拼接。}
   - {name: subjects, type: string_list, role: semantic, required: true, description: 谁做的，多值；共同行动的人都写上。}
   - {name: place, type: optional_string, role: semantic, required: true, description: 发生地点；上游契约尚未提供时为空。}
   - {name: original_name, type: optional_string, role: semantic, required: true, description: 撞车消歧时的原始行为名，仅后缀消歧的记录非空。非空即已知消歧重复——预测树计数与语义层摘要/统计一律机械跳过本记录；消费者若确需引用本记录（如链接目标），行为名以此字段为准而不是带后缀的地址名。}
-  - {name: basis, type: basis_list, role: semantic, required: true, description: 构成这件事的行为事实步骤，每步带观测身份与写入时物化的时间；goal 为空时必须为空数组。}
-  - {name: judgement_ids, type: sha256_list, role: system, required: true, description: 本次归约消费的判断身份；判断存储的释放门槛依据。}
-  - {name: observation_ids, type: sha256_list, role: system, required: true, description: 全部支撑观测的内容身份。}
-  - {name: source_refs, type: sha256_list, role: system, required: true, description: 观测交付的来源身份。}
+  - {name: basis, type: basis_list, role: semantic, required: true, description: 构成这件事的步骤，每步带写入时物化的起止与可知时刻；与 goal 空非空互不约束。}
+  - {name: chain_digest, type: sha256, role: system, required: true, description: 产生本条的归约链身份（消费账本条目）；原料在发布后即释放，逐条 id 只会是死引用，故溯源只留这一个身份。}
   - {name: fusion_version, type: string, role: system, required: true, description: 产出判断的融合链路版本。}
   - {name: reduction_version, type: string, role: system, required: true, description: 归约写入层的实现版本。}

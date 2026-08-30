@@ -54,8 +54,7 @@ async def _run(args: argparse.Namespace) -> int:
         for attempt in range(1, args.attempts + 1):
             for case in cases:
                 run = await run_case(
-                    case, client, attempt=attempt,
-                    primary_subject=case.primary_subject or '', config=config
+                    case, client, attempt=attempt, primary_subject=case.primary_subject or "", config=config
                 )
                 payload = run.to_dict()
                 handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
@@ -85,9 +84,7 @@ def main() -> int:
     parser.add_argument("--cases", type=Path, default=_DEFAULT_CASES)
     parser.add_argument("--attempts", type=int, default=3, help="每个用例跑几次；不稳定本身是信号")
     parser.add_argument("--category", action="append", help="只跑某些类别，可重复")
-    parser.add_argument(
-        "--case-id", action="append", help="只跑某几条用例，可重复；排查抖动时把次数加大"
-    )
+    parser.add_argument("--case-id", action="append", help="只跑某几条用例，可重复；排查抖动时把次数加大")
     parser.add_argument("--validation-retries", type=int, default=2)
     return asyncio.run(_run(parser.parse_args()))
 

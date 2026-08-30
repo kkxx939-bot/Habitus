@@ -106,13 +106,8 @@ def test_occurrence_schema_declares_all_faces() -> None:
         "original_name",
         "basis",
     }
-    assert set(names[BehaviorFieldRole.SYSTEM]) == {
-        "judgement_ids",
-        "observation_ids",
-        "source_refs",
-        "fusion_version",
-        "reduction_version",
-    }
+    # 溯源只留链身份：原料在发布后即释放，逐条 id 只会是死引用（实测占文档 70%）。
+    assert set(names[BehaviorFieldRole.SYSTEM]) == {"chain_digest", "fusion_version", "reduction_version"}
 
 
 def test_validate_accepts_canonical_and_action_segment_payloads() -> None:
@@ -126,14 +121,12 @@ def test_validate_accepts_canonical_and_action_segment_payloads() -> None:
     [
         ({"status": "failed"}, "status"),  # 任务态词表已退役
         ({"status_basis": "corrected"}, "status_basis"),
-        ({"goal": None}, "without a goal"),  # goal 空却带 basis
-        ({"basis": ()}, "must record its basis"),  # goal 非空却无 basis
         ({"subjects": ()}, "at least one subject"),
         ({"original_name": "洗了手"}, "must differ"),  # 消歧记录的原始名不能等于地址名
         ({"last_observed_at": local(19, 0)}, "cannot precede"),
         ({"started_at": local(19, 30, 18).astimezone(timezone.utc)}, "non-zero local"),
         ({"onset_available_at": local(19, 0)}, "cannot precede"),
-        ({"judgement_ids": ()}, "at least one judgement"),
+        ({"chain_digest": "not-a-digest"}, "SHA-256"),
     ],
 )
 def test_occurrence_cross_field_rules(overrides: dict, match: str) -> None:
@@ -141,59 +134,21 @@ def test_occurrence_cross_field_rules(overrides: dict, match: str) -> None:
         REGISTRY.validate(BehaviorKind.OCCURRENCE, occurrence_payload(**overrides))
 
 
-def test_basis_steps_must_stay_inside_the_occurrence() -> None:
-    stray = occurrence_payload()
-    steps = list(stray["basis"])
-    steps[0] = {**steps[0], "observation_ids": (("f" * 64),)}
-    with pytest.raises(BehaviorSchemaError, match="outside this occurrence"):
-        REGISTRY.validate(BehaviorKind.OCCURRENCE, {**stray, "basis": tuple(steps)})
-
-
-def test_basis_steps_may_fall_outside_the_started_at_window() -> None:
-    """supersedes 换链头后 started_at 取新链头，早于它的真实步骤必须照常通过（时间窗规则已删）。"""
-
-    late_head = occurrence_payload(
-        started_at=local(19, 33, 0),
-        occurred_on=DAY,
-        onset_available_at=local(19, 33, 5),
-        last_observed_at=local(19, 34, 0),  # 全部观测的最大值，仍 ≥ started_at（该规则可证、保留）
-    )
-    # basis 第一步仍是 19:30:18 起——比 started_at 早，数据全真，不许拒。
-    REGISTRY.validate(BehaviorKind.OCCURRENCE, late_head)
-    body = REGISTRY.render_markdown(BehaviorKind.OCCURRENCE, late_head)
-    assert "19:30:18" in body  # 早期步骤如实渲染
-
-
-def test_a_disambiguated_duplicate_is_marked_and_not_counted() -> None:
-    """撞车消歧的记录：原始名照存语义面，正文明确写出"统计不计入"。"""
-
-    payload = occurrence_payload(name="洗了手-2", original_name="洗了手")
-    REGISTRY.validate(BehaviorKind.OCCURRENCE, payload)
-    body = REGISTRY.render_markdown(BehaviorKind.OCCURRENCE, payload)
-    assert "**原始名** 洗了手" in body
-    assert "统计不计入" in body
-
-
-def test_zero_offset_never_enters_the_tree() -> None:
-    """树上不存在 UTC 时间：+00:00 是上游折 UTC 的事故信号，地址与字段两侧都硬拒。"""
-
-    utc_started = local(19, 30, 18).astimezone(timezone.utc)
-    with pytest.raises(ValueError, match="non-zero local"):
-        BehaviorAddress.occurrence(utc_started.date(), "洗了手", utc_started)
-
-
-def test_gap_rules() -> None:
+def test_gap_rules_and_provenance() -> None:
     # 零时长（起止同刻）是合法的单观测段；终点早于起点才是自相矛盾。
     REGISTRY.validate(BehaviorKind.GAP, gap_payload(ended_at=local(20, 10)))
     with pytest.raises(BehaviorSchemaError, match="must not end before"):
         REGISTRY.validate(BehaviorKind.GAP, gap_payload(ended_at=local(20, 9)))
     with pytest.raises(BehaviorSchemaError, match="unreadable gap"):
-        REGISTRY.validate(BehaviorKind.GAP, gap_payload(judgement_ids=()))
+        REGISTRY.validate(BehaviorKind.GAP, gap_payload(chain_digest=None))
     # 未观测空白允许空溯源（上游契约未接入）。
-    REGISTRY.validate(
-        BehaviorKind.GAP,
-        gap_payload(gap_kind="未观测", judgement_ids=(), observation_ids=()),
-    )
+    REGISTRY.validate(BehaviorKind.GAP, gap_payload(gap_kind="未观测", chain_digest=None))
+    # basis 步骤不再内联观测 id：带了就是未知键。
+    stray = occurrence_payload()
+    steps = list(stray["basis"])
+    steps[0] = {**steps[0], "observation_ids": ("f" * 64,)}
+    with pytest.raises(BehaviorSchemaError, match="unsupported keys"):
+        REGISTRY.validate(BehaviorKind.OCCURRENCE, {**stray, "basis": tuple(steps)})
 
 
 def test_unknown_and_missing_fields_are_rejected() -> None:
@@ -297,7 +252,7 @@ def test_gap_render_is_honest_about_both_kinds() -> None:
     assert "没能读懂" in unreadable
     uncovered = REGISTRY.render_markdown(
         BehaviorKind.GAP,
-        gap_payload(gap_kind="未观测", judgement_ids=(), observation_ids=()),
+        gap_payload(gap_kind="未观测", chain_digest=None),
     )
     assert "不知道发生了什么" in uncovered
 

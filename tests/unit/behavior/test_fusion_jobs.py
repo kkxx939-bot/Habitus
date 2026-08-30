@@ -387,12 +387,14 @@ def test_sliding_window_deliveries_do_not_silently_drop_new_observations(harness
 
 
 def test_committed_observations_are_not_reenqueued_after_the_job_is_discarded(harness) -> None:
-    """判断不进行为树，所以"处理过没有"只能靠作业与回执判断。"""
+    """作业提交即清（队列记录里没有产物）；"处理过没有"由覆盖索引回答，不靠作业文件。"""
 
     harness.deliver(FRAGMENTS, "d1")
     harness.enqueuer.enqueue_ready()
     result = harness.run_once()
-    assert harness.jobs.discard_committed(result.job) is True
+    # runner 在提交的同一步已经把作业清掉：再清一次是幂等的 False，目录里不再有它。
+    assert harness.jobs.discard_committed(result.job) is False
+    assert harness.jobs.try_read(result.job.job_id) is None
     assert harness.enqueuer.enqueue_ready().count == 0
 
 
@@ -766,3 +768,66 @@ def test_cancelled_execution_settles_the_lease_before_propagating(tmp_path) -> N
     harness.now = harness.now + timedelta(hours=1)
     relaimed = harness.runner.claim("worker-2")
     assert relaimed is not None
+
+
+class _TruncatingProvider(ScriptedProvider):
+    """模型输出被 length 截断：同一段重试还会截断，结构化客户端最终抛 truncated。"""
+
+    async def complete_async(self, request: PreparedChatRequest) -> ModelResponse:
+        self.calls += 1
+        return ModelResponse(content="{\"judgements\": [", model=self.model, provider=self.provider_name, finish_reason="length")
+
+
+def test_a_truncated_segment_is_recorded_as_an_unreadable_gap_instead_of_blocking(tmp_path) -> None:
+    """输出截断是确定性的（512/160/100 条的段实测都撞过），原样重试只会把串行队列封死。
+
+    降级：整段记成一条没读懂判断——时间轴上留下"观测到了但没读懂"的空白，覆盖索引照记、
+    队列照走、留信号。
+    """
+
+    harness = Harness(tmp_path, [])
+    provider = _TruncatingProvider([])
+    config = ChatModelConfig(
+        route=ProviderConfig(
+            provider="fake",
+            adapter="openai_compatible_chat",
+            model="fake-1",
+            base_url="https://example.invalid",
+            credential_ref="FAKE_KEY",
+        ),
+        context_window_tokens=128_000,
+        max_output_tokens=8_000,
+        structured_output_mode="json_schema",
+    )
+    harness.runner.fuser = BehaviorJudgementFuser(
+        StructuredChatClient(ChatClient(config, provider), validation_retries=1)
+    )
+    harness.deliver(FRAGMENTS, "d1")
+    harness.enqueuer.enqueue_ready()
+    result = harness.run_once()
+    assert result.fused is True
+    assert result.degradations == ("segment_truncated fragments=3 recorded as unreadable",)
+    (record,) = harness.judgements.list()
+    assert record["behavior"] is None  # 一条没读懂判断覆盖整段
+    assert set(record["observation_ids"]) == {item.observation_id for item in FRAGMENTS}
+    # 覆盖索引记住了这段：重投不会再融合一次
+    assert harness.enqueuer.enqueue_ready().count == 0
+    assert harness.jobs.oldest_uncommitted() is None
+
+
+def test_a_segment_with_no_judgement_still_commits_a_receipt_that_covers_it(tmp_path) -> None:
+    """零判断的段照样结账：回执覆盖全部观测并把它们记为无归属，作业提交，观测不会被重新入队。"""
+
+    from tests.unit.behavior.fusion_wire import wire
+
+    harness = Harness(tmp_path, [wire([], [[]] * len(FRAGMENTS))])
+    harness.deliver(FRAGMENTS, "d1")
+    harness.enqueue_job()
+    result = harness.run_once()
+    assert result.job.status is BehaviorFusionJobStatus.COMMITTED
+    assert result.judgement_ids == ()
+    receipt = harness.receipts.read(result.receipt.receipt_id)
+    assert receipt is not None
+    assert set(receipt.unowned_observation_ids) == set(receipt.observation_ids)
+    assert receipt.unowned_ratio == 1.0
+    assert harness.jobs.oldest_uncommitted() is None

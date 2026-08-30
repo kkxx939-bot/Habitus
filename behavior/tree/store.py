@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from behavior.document import (
@@ -159,6 +159,43 @@ class BehaviorTree:
             return document
         except (BehaviorDocumentIntegrityError, BehaviorDocumentLimitError) as exc:
             raise BehaviorTreeIntegrityError("behavior L2 document failed integrity validation") from exc
+
+    def read_day(self, kind: BehaviorKind, occurred_on: date) -> tuple[BehaviorDocument, ...]:
+        """一次性读出某天某类的全部文档；目录只解析、只枚举一次。
+
+        逐篇 ``read`` 每次都沿路径逐级做身份校验，其中日目录那一级会重新枚举整个目录——
+        一天 2,074 篇就是 2,074 × 2,074 次条目扫描（实测 13.6 ms/篇、一天 28 秒），读一天的
+        成本随篇数平方增长。预测树夜批与语义关联都是按天整块读，走这里。
+        """
+
+        resolved_kind = BehaviorKind(kind)
+        if isinstance(occurred_on, datetime) or not isinstance(occurred_on, date):
+            raise TypeError("occurred_on must be a date without a time")
+        directory = BehaviorDirectory._dated(
+            kind_directory_prefix(resolved_kind), occurred_on.year, occurred_on.month, occurred_on.day
+        )
+        physical = self._existing_relative_path(Path(*directory.identity_parts), leaf_is_file=False)
+        if not physical.is_dir():
+            return ()
+        documents: list[BehaviorDocument] = []
+        for stem in self._markdown_names(physical):
+            name = f"{stem}.md"
+            try:
+                address = BehaviorAddress.from_identity(resolved_kind, occurred_on, stem)
+            except (TypeError, ValueError) as exc:
+                raise BehaviorTreeIntegrityError("behavior leaf contains an invalid timestamp identity") from exc
+            raw = self._read_utf8(
+                physical / name, label="behavior document", max_bytes=self.document_config.max_encoded_bytes
+            )
+            try:
+                document = self._document_codec.decode(raw, expected_address=address)
+                self.document_config.validate_body(document.markdown_body)
+                self.document_config.validate_relations(links=len(document.links))
+            except (BehaviorDocumentIntegrityError, BehaviorDocumentLimitError) as exc:
+                raise BehaviorTreeIntegrityError("behavior L2 document failed integrity validation") from exc
+            documents.append(document)
+        documents.sort(key=lambda item: (item.address.started_at, item.address.identity_name))
+        return tuple(documents)
 
     def exists(self, address: BehaviorAddress) -> bool:
         if not isinstance(address, BehaviorAddress):

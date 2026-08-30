@@ -17,15 +17,18 @@ import hashlib
 import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from behavior.document import BehaviorDocumentMetadata
+from behavior.document.config import BehaviorDocumentLimitError
 from behavior.document.link import BehaviorLinkType, BehaviorStoredLink
 from behavior.editor.writer import BehaviorDocumentWriter
 from behavior.fusion.config import FUSION_CONTEXT_LOOKBACK_SECONDS
+from behavior.fusion.coverage import BehaviorCoverageIndex
 from behavior.fusion.receipt_store import BehaviorFusionReceiptStore
 from behavior.fusion.store import BehaviorJudgementStore
+from behavior.kinds.model import BehaviorKindLimitError
 from behavior.kinds.resolver import BehaviorKindResolver
 from behavior.kinds.store import BehaviorKindStore
 from behavior.model import BehaviorAddress, BehaviorKind
@@ -93,6 +96,7 @@ class BehaviorReductionRunner:
         semantic_refresher: BehaviorSemanticRefresher | None = None,
         clock: Callable[[], datetime] | None = None,
         context_lookback_seconds: float = FUSION_CONTEXT_LOOKBACK_SECONDS,
+        coverage: BehaviorCoverageIndex | None = None,
     ) -> None:
         """``context_lookback_seconds`` 必须与融合 runner 实际使用的值一致（同一配置源）——
         融合"还能续"与归约"已封口"是同一个窗口的两面，各配一个数会静默分叉。"""
@@ -134,6 +138,9 @@ class BehaviorReductionRunner:
         self.semantic_refresher = semantic_refresher
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.context_lookback_seconds = float(context_lookback_seconds)
+        if coverage is not None and not isinstance(coverage, BehaviorCoverageIndex):
+            raise TypeError("coverage must be BehaviorCoverageIndex")
+        self.coverage = coverage or BehaviorCoverageIndex(observations.root)
         self._checkpoint_path = ledger.root / _CHECKPOINT_NAME
         self._path_lock = PathLock(lock_store)
         digest = hashlib.sha256(str(tree.root).encode("utf-8")).hexdigest()[:24]
@@ -166,6 +173,7 @@ class BehaviorReductionRunner:
     async def _run_locked(self, guard: LeaseGuard) -> BehaviorReductionReport:
         replayed, replayed_days = self._replay_checkpoint(guard)
         now = self._now()
+        self._expire(now)
         consumed = self.ledger.consumed_judgement_ids()
         records = []
         quarantined: list[str] = []
@@ -203,7 +211,9 @@ class BehaviorReductionRunner:
         # 缩批后必须重新做批内引用闭合——否则宿主/目标被砍掉的链会带着悬空依赖落盘。
         active_indexes, active_gaps = ready_indexes, ready_gaps
         while True:
-            documents, dropped = await self._stage(assembly, active_indexes, active_gaps, now)
+            documents, dropped = await self._stage(
+                assembly, active_indexes, active_gaps, now, guard=guard
+            )
             checkpoint = {
                 "reduction_version": REDUCTION_VERSION,
                 "staged_at": now.isoformat(timespec="microseconds"),
@@ -267,6 +277,8 @@ class BehaviorReductionRunner:
         ready_indexes: tuple[int, ...],
         ready_gaps: tuple[ReducibleJudgement, ...],
         now: datetime,
+        *,
+        guard: LeaseGuard | None = None,
     ) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
         """物化本轮全部文档；返回值即检查点内容（JSON 可序列化、逐字节确定）。"""
 
@@ -320,7 +332,10 @@ class BehaviorReductionRunner:
         # kinds 归一只对命名幸存的链做（写入层唯一的 LLM 触点）——坏名字的链已隔离，
         # 不许它在 resolver 处把整轮吞掉。
         tokens = await self._resolve_kind_tokens(
-            (str(assembly.chains[index].head.behavior) for index in naming), now
+            (str(assembly.chains[index].head.behavior) for index in naming),
+            now,
+            guard=guard,
+            dropped=dropped,
         )
         sources = {
             ref
@@ -359,7 +374,7 @@ class BehaviorReductionRunner:
                 )
                 documents.append({"kind": "ledger-only", "payload": None, "links": [], "ledger": entry})
                 continue
-            payload = self._merged_gap_payload(group)
+            payload = self._merged_gap_payload(group, chain_digest=str(entry["chain_digest"]))
             documents.append(
                 {"kind": BehaviorKind.GAP.value, "payload": payload, "links": [], "ledger": entry}
             )
@@ -435,37 +450,66 @@ class BehaviorReductionRunner:
         documents = self._publishable(documents, now, dropped)
         return documents, tuple(dropped)
 
-    async def _resolve_kind_tokens(self, names: Iterable[str], now: datetime) -> dict[str, str]:
-        """kinds 归一——写入层唯一的 LLM 触点；词表更新在 stage 之前 CAS 落盘。
+    async def _resolve_kind_tokens(
+        self,
+        names: Iterable[str],
+        now: datetime,
+        *,
+        guard: LeaseGuard | None = None,
+        dropped: list[str] | None = None,
+    ) -> dict[str, str]:
+        """kinds 归一——写入层唯一的 LLM 触点；词表按批 CAS 落盘（瞬态重试在 resolver 内）。
 
         崩溃重试时先前已记入词表的名字走确定性快路径（``token_for``），所以"先落词表、再落
-        检查点"的顺序保证重试不漂移。
+        检查点"的顺序保证重试不漂移。七天真实数据实测：一次 sweep 近三千个不同名字≈两小时
+        串行调用，词表若只在循环结束后落盘一次，中途一次断连就全部作废（BHV-REALDATA-001）——
+        所以每 ``_KIND_PERSIST_EVERY`` 个名字落一次、并顺手续 sweep 租约。词表撞顶不再让整轮
+        失败：超限的名字暂以原始名作 token 并留信号（词表在微动作粒度下不收敛是折叠问题的症状）。
         """
 
         snapshot = self.kind_store.read()
         registry = snapshot.registry
+        revision = snapshot.revision
         tokens: dict[str, str] = {}
+        since_persist = 0
         for name in sorted(set(names)):
-            resolution = await self.kind_resolver.resolve(name, registry)
+            resolution = None
+            try:
+                # 瞬态错误的有界重试在 resolver 内（它是允许接触模型客户端的一层）
+                resolution = await self.kind_resolver.resolve(name, registry)
+            except BehaviorKindLimitError:
+                resolution = None
+            if resolution is None:
+                # 词表容量撞顶：超限名字暂以原始名作 token，语义面不丢、统计可事后重打
+                # （occurrence 永远保留原始名）。留信号，不让一轮归约整个失败。
+                tokens[name] = name
+                if dropped is not None:
+                    dropped.append(f"kind registry full: {name!r} kept as its own token")
+                continue
             registry = resolution.registry
             tokens[name] = resolution.token
+            since_persist += 1
+            if since_persist >= _KIND_PERSIST_EVERY and registry is not snapshot.registry:
+                self.kind_store.replace(registry, expected_revision=revision, timestamp=now)
+                snapshot = self.kind_store.read()
+                registry = snapshot.registry
+                revision = snapshot.revision
+                since_persist = 0
+                if guard is not None:
+                    guard.checkpoint()
         if registry is not snapshot.registry:
-            self.kind_store.replace(registry, expected_revision=snapshot.revision, timestamp=now)
+            self.kind_store.replace(registry, expected_revision=revision, timestamp=now)
         return tokens
 
     @staticmethod
-    def _merged_gap_payload(group: list[ReducibleJudgement]) -> dict[str, Any]:
-        """同地址空白段的机械合并：起点同刻（合并前提）、终点取最大、溯源取并集。"""
+    def _merged_gap_payload(group: list[ReducibleJudgement], *, chain_digest: str) -> dict[str, Any]:
+        """同地址空白段的机械合并：起点同刻（合并前提）、终点取最大；溯源只留账本条目身份。"""
 
         first = min(group, key=lambda item: item.judgement_id)
-        payload = gap_payload(first)
+        payload = gap_payload(first, chain_digest=chain_digest)
         if len(group) > 1:
             ended = max((item.last_observed_at for item in group), key=_as_instant)
             payload["ended_at"] = ended.isoformat(timespec="microseconds")
-            payload["judgement_ids"] = sorted(item.judgement_id for item in group)
-            payload["observation_ids"] = sorted(
-                {oid for item in group for oid in item.observation_ids}
-            )
         return payload
 
     # ── 落盘：stage 之后只有确定性动作 ────────────────────────────────────────────────
@@ -539,6 +583,61 @@ class BehaviorReductionRunner:
                 links = tuple((str(link[0]), str(link[1])) for link in item.get("links", ()))
                 writer.publish(kind, item["payload"], links=links)
             self.ledger.append(BehaviorReductionEntry.from_mapping(item["ledger"]))
+        # 树写完、账本写完，原料才释放（顺序是崩溃安全的依据：重放路径重新走到这里再补删）。
+        self._release(documents, guard)
+
+    # ── 释放：原料被消费后即删，真正的数据只在树上 ─────────────────────────────────────
+
+    def _release(self, documents: list[Any], guard: LeaseGuard) -> None:
+        """删掉本批已发布链消费的判断，以及不再被任何判断引用、且全部观测已融合的交付。
+
+        判断在发布后零读者（融合上下文只回看未封口的窗口，归约只读未消费的）；观测最后一次被读
+        是 stage 物化 basis。删除幂等，重放路径可任意次进入。被隔离（quarantined）的判断仍引用
+        着它的交付，那份交付就留着——可见、不丢，等人处置。
+        """
+
+        judgement_ids: set[str] = set()
+        source_refs: set[str] = set()
+        for item in documents:
+            if not isinstance(item, Mapping):
+                continue
+            ledger = item.get("ledger")
+            if isinstance(ledger, Mapping):
+                judgement_ids.update(str(value) for value in ledger.get("judgement_ids", ()))
+            payload = item.get("payload")
+            if isinstance(payload, Mapping):
+                source_refs.update(str(value) for value in payload.get("source_refs", ()))
+        for index, judgement_id in enumerate(sorted(judgement_ids)):
+            if index % 200 == 0:
+                guard.checkpoint()
+            record = self.judgements.read(judgement_id)
+            if record is not None:
+                source_refs.update(str(value) for value in record.get("source_refs", ()))
+            self.judgements.discard(judgement_id)
+        if not source_refs:
+            return
+        # 释放交付的条件：它的每条观测都有覆盖记录（已融合），且没有任何仍在存储里的判断引用它。
+        still_referenced: set[str] = set()
+        for raw in self.judgements.list():
+            still_referenced.update(str(value) for value in raw.get("observation_ids", ()))
+        covered = self.coverage.covered_observation_ids(self._now())
+        for index, source_ref in enumerate(sorted(source_refs)):
+            if index % 200 == 0:
+                guard.checkpoint()
+            envelope = self.observations.read(source_ref)
+            if envelope is None:
+                continue
+            ids = {observation.observation_id for observation in envelope.batch.observations}
+            if ids <= covered and not (ids & still_referenced):
+                self.observations.discard(source_ref)
+
+    def _expire(self, now: datetime) -> None:
+        """回执、覆盖索引、消费账本按同一个窗口整块过期；窗口 = 上游最大补发跨度。"""
+
+        before = now - timedelta(days=self.coverage.window_days)
+        self.coverage.expire(now)
+        self.receipts.expire(before)
+        self.ledger.expire(before)
 
     # ── 机械读取 ─────────────────────────────────────────────────────────────────────
 
@@ -558,9 +657,7 @@ class BehaviorReductionRunner:
         "已释放的观测都已有回执覆盖"，否则旧观测会被误判为未融合、把封口视界永远拖在过去。
         """
 
-        covered: set[str] = set()
-        for receipt in self.receipts.list():
-            covered.update(receipt.observation_ids)
+        covered = self.coverage.covered_observation_ids(self._now())
         pending: datetime | None = None
         for envelope in self.observations.list():
             for observation in envelope.batch.observations:
@@ -611,13 +708,32 @@ class BehaviorReductionRunner:
                         raise BehaviorReductionError(
                             f"link target does not exist anywhere: {link.to_uri}"
                         )
-                self.tree.document_codec.build(
-                    BehaviorKind(item["kind"]),
-                    item["payload"],
-                    metadata=metadata,
-                    links=stored_links,
-                )
-            except (BehaviorReductionError, BehaviorSchemaError, TypeError, ValueError) as exc:
+                try:
+                    self.tree.document_codec.build(
+                        BehaviorKind(item["kind"]),
+                        item["payload"],
+                        metadata=metadata,
+                        links=stored_links,
+                    )
+                except BehaviorDocumentLimitError:
+                    # 最后一道保险：去掉死引用之后仍超限（要两千步以上的链）——截断 basis 中段、
+                    # 留信号继续发布，不让一个文档打掉整轮。goal/summary/起止/状态/links 不动，
+                    # 它们才是下游真正读的东西；丢的只是步骤明细的中段，首尾与总步数保留。
+                    truncated = _truncate_basis(item["payload"])
+                    if truncated is None:
+                        raise
+                    dropped.append(
+                        f"document {uri} truncated: basis {len(item['payload']['basis'])} steps "
+                        f"-> {len(truncated['basis'])} (document exceeded its byte bound)"
+                    )
+                    item["payload"] = truncated
+                    self.tree.document_codec.build(
+                        BehaviorKind(item["kind"]),
+                        truncated,
+                        metadata=metadata,
+                        links=stored_links,
+                    )
+            except (BehaviorReductionError, BehaviorSchemaError, BehaviorDocumentLimitError, TypeError, ValueError) as exc:
                 failed_uris.add(uri)
                 dropped.append(f"document {uri} skipped: fails validation before stage ({exc})")
                 continue
@@ -640,6 +756,22 @@ class BehaviorReductionRunner:
 
 def _as_instant(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
+
+
+_KIND_PERSIST_EVERY = 25
+_TRUNCATED_HEAD = 20
+_TRUNCATED_TAIL = 5
+
+
+def _truncate_basis(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """保留 basis 首尾各若干步；已经不可再截时返回 None。"""
+
+    basis = list(payload.get("basis", ()))
+    if len(basis) <= _TRUNCATED_HEAD + _TRUNCATED_TAIL:
+        return None
+    trimmed = dict(payload)
+    trimmed["basis"] = basis[:_TRUNCATED_HEAD] + basis[-_TRUNCATED_TAIL:]
+    return trimmed
 
 
 def _document_days(documents: list) -> set[date]:

@@ -14,10 +14,161 @@
 判断到行为树文档（occurrence 与观测空白 gap）的归约属于**另一层**：链要等老出引用窗口才
 封口（后续的延续、修正、结果都可能在窗口内到达），节奏与融合相反。把它塞进融合，融合就永远
 完不了。
+
+TODO(BHV-REALDATA-001): 首次用真实日/周尺度数据（EgoLife A1_JAKE 七天：第一人称字幕每 2s
+一条抽样到 ≥5s、转写带说话人、每天 11–23 点、单天约 4700 条观测）走完 观测→融合→归约 后暴露的
+一批缺口。全部是实测撞出来的，不是推理；在 benchmark 那 70 条秒级用例上一个都不触发。按
+"处置方式 → 容量 → 校验 → 队列 → 语义层"分组，每条带方案、影响与实例。实验期用驱动脚本里的
+猴子补丁绕过（不进仓库），正式修法待用户裁定。
+
+── 处置方式：记账疏漏一律整批拒，实测应降级 ──【已落地 WP1，2026-08-30】────────────────
+以下四条校验本身都对（我们自己产物的自洽），错在处置：整批拒绝→让模型重来 3 次→退避 60/120/240s
+再来。真实数据上它们高频触发，一个段反复失败就把**严格串行**的队列封死一整天。prompt.py 模块头
+自己写的纪律是"记账疏漏在装配层降级、不整批拒"，这四条没照做。
+**现状**：四条均已在 ``assembly`` 降级并以 ``BehaviorJudgementBatch.degradations`` 留痕
+（去重取首条；剔掉不在场主体、全不在场则整条降为没读懂并剪掉指向它的关系；``continues`` 指向
+已完成目标的边剪掉；goal 的 basis 全无帧归属则 goal 置空），``validation`` 保留为后置断言，
+worker 把计数记进 ``fusion_degradations`` 可观测事件；回执字段与版本升级留到容量一组一起做。
+验证：单元测试按四类失败形状各造一份；真实对照（EgoLife DAY1、真实装配代码、无补丁）：
+368 段 **0 次硬拒**，1421 条判断（与补丁版 1422 一致），信号 subject_absent 12 /
+continues_completed 57 / goal_dropped 1 / duplicate_assignment 1。对照中撞出并修掉一条连锁：
+同批内的 continues 边不能剪——判重规则靠它把"同一件事被看成两条"认作一条，剪掉反而撞成
+硬拒；现只剪指向先前上下文（C 行）的那种，同批内保留并留 "kept" 信号。
+另记：同一份 DAY1 观测这次切出 368 段、上周是 198 段（切段器在尾部找最大空白下刀，结果对
+入队时机敏感）——段边界不确定意味着融合产物不可逐字重放，属于第 6 条容量/切段一组。
+- 同一帧内重复指向同一条判断（assembly._assignments "assigns … twice"）：一天里 2 个段连续
+  3 次触发。方案：装配前按 judgement_no 去重、保留首条并计数。
+- subjects 不在覆盖片段的 participants 里（validation._require_subject_present）：模型会从
+  "她 / 大家 / 众人"推出在场者；一天 10 次。方案：剔掉不在场的名字（至少留一个）并计数；
+  同时上游契约要求视觉片段的 participants 列出画面里看到的所有人、转写片段包含佩戴者/听者——
+  只列说话人时"Jake 与 X 交谈"必然过不了。
+- continues 指向已 completed 的先前判断（assembly._require_continuable）：七天里四天各自反复
+  触发，退避后重试仍失败。方案：把这条边改写为无关系（或按提示词建议改成 supersedes）并计数，
+  不整批拒；prompt.py 已记录把约束贴在 C 行上仍压不住。
+- goal 非空但 basis 为空（judgement.BehaviorClaim 不变量）：这是一次**连锁**——装配层
+  _reduce_coverage 先把没有帧归属的 basis 条目丢掉（合理降级），丢空后 goal 还在，claim 不变量
+  随即硬拒。方案：_reduce_coverage 丢空 basis 时同步把 goal 置空（"少说"降级）并计数。
+
+── 容量：段容量与模型输出预算不匹配 ──【已落地 WP3，2026-08-30】───────────────────────
+**现状**：段容量进 ``Config.behavior.max_fragments_per_segment``（默认 60），切段与融合共用同一份
+BehaviorFusionConfig；输出截断不再原样重试——整段降为一条没读懂判断（时间轴上留下"观测到了但
+没读懂"的空白、覆盖索引照记、队列照走、留 ``segment_truncated`` 信号）；example.yaml 的 chat
+路由 timeout 300s、max_output_tokens 8192。溯源只留 ``chain_digest``（原料发布即释放，逐条 id
+只会是死引用，实测占文档 70%），basis 步骤不再内联 observation_ids，Markdown 正文只渲染首尾
+步骤；单文档仍超限时截断 basis 中段留信号而不是整轮失败。kinds 归一每 25 个名字 CAS 落盘一次并
+续 sweep 租约、瞬态错误有界重试、词表撞顶时超限名字暂以原始名作 token 留信号。树新增
+``read_day``（目录只解析一次），预测树夜批按天整块读。未做：kinds 批量归一（改提示词，随词表方案）。
+- BehaviorFusionConfig.max_fragments_per_segment=512 / max_segment_span_seconds=1800 下，
+  逐帧归属表按片段数线性增长、判断本体按判断条数增长，deepseek-chat 8192 输出上限（也是它的
+  硬上限）下 **512、160、100 条的段都实测截断**（对话密集段判断多），60 条才稳。而截断的段重试
+  还是同样大小、必然再截断，最终把队列封死。方案：段容量按输出预算反推（当前档位 ≈60），且
+  截断失败时应**重切成更小的段**而不是原样重试；容量类参数并入 Config（BHV-FUSION-003 余项）。
+- example.yaml 的 chat timeout_seconds=30 对日尺度段不够（第一次就 ReadTimeout）；
+  max_output_tokens=null 走厂商默认 4096，更早截断。方案：行为侧路由单独给 timeout≥300s、
+  max_output_tokens 取模型上限。
+
+── 队列：周尺度下吞吐塌掉 ──【生命周期部分已落地 WP2，2026-08-30】──────────────────────
+**现状**：原料"消费即释放"（用户裁定：真正的数据只在行为树上，不做基于保留期的堆积）——作业
+COMMITTED 即 discard；判断与交付在链发布、账本写完之后由归约同轮删除（``reduction/runner._release``）；
+"处理过没有"改由覆盖索引回答（``behavior/fusion/coverage.py``，按 judged_at 日分区、窗口 =
+上游最大补发跨度、整目录过期，``Config.behavior.coverage_window_days``），回执与消费账本按同一窗口
+过期；投递口对同身份观测去重不再整批拒收。热区因此只剩未封口的最近一个窗口，第 8 条的全量扫描
+不再需要分区。"当日实况"契约改为已封口读树、未封口读判断存储（prediction/model.py、behavior/model.py
+已改）。未做：按自然断点并行（先量释放后的单作业耗时再定）。
+- 融合循环每拍 enqueue_ready 全量扫描观测存储（8.5 万条）+ 作业存储 claim/stage/commit 各全量
+  解析一次（2690 个作业文件、每个带 60 个观测 id）：单作业从 10s 涨到 **62–120s**，一周要
+  45–90 小时。方案：BHV-LIFECYCLE-001——观测/作业按时间分区；COMMITTED 作业即时
+  discard_committed（方法已有、运行时无人调用）；入队扫描按水位增量。实验期用"120 个作业的
+  滑动窗口 + 即时清理"压回 8–13s。
+- 串行队列的语义必要性只有 1 小时回看窗口：跨夜没有观测，按天并行融合再合并归约与串行结果
+  逐字相同（三个存储都是内容哈希平面文件）。方案：队列按"回看窗口内无观测"的自然断点分片
+  并行，或至少按日分片。
+- 失败作业退避 60→120→240→… 后仍失败会 FAILED 封锁整条队列；worker 硬崩留下的 300s 租约
+  让重启后先空等 5 分钟。方案：截断/校验类失败按上文降级或重切后不再计入 attempts。
+
+── 语义层：真实密度下断链 ─────────────────────────────────────────────────────────
+- 一天 947 条 occurrence（微动作粒度，见 BHV-FUSION 折叠问题）超过 BehaviorSemanticConfig
+  .max_direct_entries，日概览生成直接失败（"behavior snapshot exceeds its direct entry bound"）。
+  方案：先解决折叠粒度；日概览对超限目录应分片生成或按小时目录再分一层，而不是整天放弃。
+- 覆盖信号未接入时一天 4 小时真实无观测记为 0 条 gap，"没读懂"也是 0（模型对微动作从不说
+  读不懂）——已知退化，但意味着曝光分母在真实数据上系统性偏大。
+
+── 折叠粒度（最大的语义问题，另立 TODO 前先在此登记）──────────────────────────────
+- 真实 VLM 级叙述（"向后仰""点头""转头""扶眼镜"）下，融合把一个微动作折成一条 occurrence：
+  单天 947 条、goal 为空 85%、中位持续时长 0 秒、results_from 全天 1 条；对话部分折得像样
+  （有 goal、有时长、多主体）。提示词是在 benchmark 的动作级片段上调的，没见过这种粒度；
+  60 条一段（≈5 分钟）也封住了折叠上限（跨段 continues 是工作的）。修法要拿这批数据做对照
+  实验定，不能拍：候选有提示词加"服务性微动作归入 basis"的示例、融合前一层确定性微动作聚合、
+  或段容量与折叠层级的重新分配。
+
+── 同一轮实测顺带撞到的其他问题（不属于融合本层，先登记在此，修时各归各处）────────────
+- 观测投递：同一批内两条内容完全相同的观测（同一秒同一句，ASR 重复吐出——benchmark 里
+  dirty-double-emission 正是这种脏数据）被观测存储以 "observation IDs must be unique within
+  a batch" 整批拒收。上游真会这样发；方案：投递口对同身份观测确定性去重（保留一条、来源都记），
+  而不是拒收整个交付。
+- kinds 归一（behavior/kinds）：benchmark 70 条上已出现实质归错——「与医生通话」吞掉了
+  打电话/接电话/接打电话（给母亲打电话、谈合同、做饭时接电话全成了"与医生通话"，8 条），
+  「坐在沙发上」吞掉看电视/开电视；反向 做饭/做晚饭/煮饭/准备食材/洗菜切菜 各自独立。它是
+  预测树与一切按类统计的聚合键，归错即统计错。方案：解析提示词按纪律用真实词表实测调优
+  （TODO(BHV-KINDS) 调优项），并给"别名吸收"加保守约束（别名不得比正名更泛）。
+- results_from 无读者：融合按"看得清才标"产出的因果边写进树的 links 后，prediction/source.py
+  只读 concurrent_with，语义层也不读——最可信的一类关联产出即丢弃。真实数据上 5/5 全对但
+  单天只有 1 条，覆盖率不能指望它做主力。方案：语义关联层读它；不要为提高覆盖率调提示词。
+- goal 字段承载力：真实产出里 goal 基本是行为名的同义复述（洗手→清洁双手、点外卖→点外卖），
+  "晚饭未解决"这类留下的状态从不出现在 goal 里，而散落在 status（洗菜切菜 abandoned）、
+  summary 自由文本（"决定不做饭，改为点外卖"）和日叙事里。设计语义关联时不能把 goal 当状态载体。
+- 预测树无反向引用：source.read 把 occurrence 压成 (kind_token, started_at, day)，节点/边键
+  上没有任何 occurrence URI；从候选回到"由哪几次发生统计出来"只能全树扫描。方案：重建时随代
+  发布溯源旁册（格子/边 → URI 列表），零语义、与代钉死。
+- 融合跨窗口引用只回看 1 小时：「三天前挂号 → 今天去医院」这种跨日因果在结构上永远产不出，
+  跨日语义支撑没有生产者——这是设计边界不是 bug，登记以免语义关联层误以为能从树上读到。
+- 模型偶发漏写 schema 必填字段（'basis' is a required property）：json_schema 校验拒后重试
+  即过，不需处置，仅记录频次以便与厂商结构化输出模式对照。
+- kinds 归一的调用形状（behavior/reduction/runner._resolve_kind_tokens）：一次 sweep 里对
+  **每个不同的行为名各调一次模型、严格串行**，词表只在整个循环结束后 CAS 落盘一次。七天合并
+  归约实测：3061 个不同名字 ≈ 3061 次调用（≈2 小时），中途一次网络断连让整个 sweep 抛出、
+  几千次调用全部作废重来（首次归约就这样崩了）。方案：① 词表按批增量落盘（每 N 个名字一次
+  CAS），已归一的名字走 token_for 快路径，重试不重复调用；② 单次调用对 ModelTransportError/
+  ModelResponseError 有界重试，不让一次瞬态错误打掉整轮 sweep；③ 把"一个名字一次调用"改成
+  批量归一（一次给模型一批候选名与当前词表），调用数降一到两个数量级——这一条会改变提示词，
+  须按纪律实测。
+- kinds 词表容量（behavior/kinds/config.BehaviorKindConfig.max_kinds=500）在一周真实数据上
+  撞顶：归一到第 1000 个名字时词表已有 498 个 kind（新建率约 50%，别名吸收率低），随后
+  BehaviorKindLimitError 让整轮归约失败。500 这个数建立在"一个人的行为类型天然收敛"的假设上，
+  而在当前微动作折叠粒度下（转头/点头/扶眼镜各成一类）它不收敛——这是折叠问题的另一个量化
+  证据，不是单纯调大容量能解决的；但容量撞顶不该让归约整轮失败，应降级为"超限名字暂用原始名
+  作 token + 信号"，并把容量并入 Config。
+- 归约 sweep 锁（behavior/reduction/runner._SWEEP_LOCK_TTL_SECONDS=600）只在阶段边界
+  ``guard.checkpoint()`` 续约，而 kinds 归一整段（实测 45 分钟）与万条文档的发布各自在一个
+  阶段里——七天合并归约实测 LockLostError，整轮作废。方案：长循环内按名字/文档计数周期性
+  checkpoint（如每 25 个），或把 kinds 归一移出锁内（词表有自己的 CAS）。
+- 单文档容量（behavior/document/config.BehaviorDocumentConfig.max_encoded_bytes=512KB）在
+  七天合并归约的发布阶段被撞破（BehaviorDocumentLimitError）：一条跨小时的长链把成千上万个
+  observation_ids/judgement_ids 与几百步 basis 全塞进一个 occurrence。两层原因都要查：
+  ① 溯源 id 全量内联到 L2 文档不可伸缩，应改为引用（按链/回执存一份、文档只存链身份）；
+  ② 长链本身可能是"continues 指向已 completed"降级放行后把多次行为并成一条造成的，落地前
+  要拿这批数据量一下最长链的构成。任一情况下发布阶段不应因单个超限文档让整轮 sweep 失败，
+  应降级（截断溯源列表留信号）并继续。
+- **数据膨胀**（七天实测，单人）：观测 37MB、判断 47MB（11,534 条，从不释放——
+  BHV-LIFECYCLE-001）、回执 14MB、行为树 43MB（9,270 条 occurrence，单文档中位 1.5KB、
+  均值 2.5KB、最大 535KB，溯源 id 内联占普通文档约 15%）、归约目录 56MB（staged 检查点
+  20MB + 消费账本）——**约 200MB/周，线性外推 ≈10GB/年、48 万条 occurrence/年**。而全部设计
+  假设是"单人一年万条"（prediction/model.py："单人一年万条 occurrence 毫秒级"），差 **48 倍**：
+  预测树每夜全量重建要读并解析 48 万个 Markdown+JSON 文档；入队/作业/封口的全量扫描（第 8 条）
+  按同样倍数恶化；观测存储 max_files=100,000 按今晚密度（8.5 万条/周）**两周即满**；日目录
+  max_children_per_directory=10,000 在 2,074 条/天的日子下一年内未必触顶，但 L1 概览
+  已经在 900 条/天时失败。根因仍是第 17 条折叠粒度（每天 50–85 条真实行为被 1000+ 条微动作
+  淹没），但即便粒度修好，观测与判断层的原始数据量不变，生命周期（释放/分区/归档）与溯源
+  改引用是独立必须做的：① 观测/判断在被归约消费并出封口窗口后按保留期释放或归档到冷区；
+  ② occurrence 只存链身份，溯源 id 列表落到旁侧账本；③ 全量扫描改按日期分区。
+- 生产 worker 之外的驱动（脚本、运维手动跑）若不续租，长调用/网络重试超过 300s 就丢租约、
+  作业被重新认领并计一次 attempts；worker 自带心跳没这个问题。运维脚本一律复用
+  BehaviorFusionWorker._execute_with_heartbeat，不要裸调 runner.execute。
 """
 
 from behavior.fusion.assembly import assemble_judgement_batch
 from behavior.fusion.config import BehaviorFusionConfig
+from behavior.fusion.coverage import BehaviorCoverageIndex
 from behavior.fusion.derivation import (
     FUSION_IMPLEMENTATION_VERSION,
     FUSION_VERSION,
@@ -113,6 +264,7 @@ __all__ = [
     "BehaviorFusionSegment",
     "BehaviorJudgement",
     "BehaviorJudgementBatch",
+    "BehaviorCoverageIndex",
     "BehaviorJudgementStore",
     "DurableFact",
     "DurableJudgement",

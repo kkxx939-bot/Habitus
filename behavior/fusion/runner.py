@@ -34,6 +34,7 @@ from datetime import datetime
 from typing import Any
 
 from behavior.fusion.config import FUSION_CONTEXT_LIMIT, FUSION_CONTEXT_LOOKBACK_SECONDS
+from behavior.fusion.coverage import BehaviorCoverageIndex
 from behavior.fusion.derivation import (
     FUSION_VERSION,
     derive_judgements,
@@ -41,7 +42,7 @@ from behavior.fusion.derivation import (
     persistable_judgements,
     without_unresolvable_relations,
 )
-from behavior.fusion.errors import BehaviorFusionError
+from behavior.fusion.errors import BehaviorFusionError, BehaviorFusionTruncatedError
 from behavior.fusion.jobs import (
     BehaviorFusionJob,
     BehaviorFusionJobBlockedError,
@@ -51,9 +52,11 @@ from behavior.fusion.jobs import (
     BehaviorFusionJobStore,
     StagedFusion,
 )
+from behavior.fusion.judgement import BehaviorClaim, BehaviorJudgement, BehaviorJudgementBatch
 from behavior.fusion.prompt import FUSION_PROMPT_VERSION
 from behavior.fusion.receipt import BehaviorFusionReceipt, build_fusion_receipt
 from behavior.fusion.receipt_store import BehaviorFusionReceiptStore
+from behavior.fusion.result import BehaviorFusionResult
 from behavior.fusion.segmentation import BehaviorFusionSegment
 from behavior.fusion.service import BehaviorJudgementFuser
 from behavior.fusion.store import BehaviorJudgementStore
@@ -68,6 +71,8 @@ class BehaviorFusionRunResult:
     receipt: BehaviorFusionReceipt
     judgement_ids: tuple[str, ...]
     fused: bool
+    # 装配层对模型记账疏漏的降级记录；只在本次真的调了模型时非空（重放没有新的降级）。
+    degradations: tuple[str, ...] = ()
 
     @property
     def replayed(self) -> bool:
@@ -90,6 +95,7 @@ class BehaviorFusionRunner:
         primary_subject: str,
         context_limit: int = FUSION_CONTEXT_LIMIT,
         context_lookback_seconds: float = FUSION_CONTEXT_LOOKBACK_SECONDS,
+        coverage: BehaviorCoverageIndex | None = None,
     ) -> None:
         for value, expected in (
             (jobs, BehaviorFusionJobStore),
@@ -105,6 +111,10 @@ class BehaviorFusionRunner:
         self.fuser = fuser
         self.judgements = judgements
         self.receipts = receipts
+        if coverage is not None and not isinstance(coverage, BehaviorCoverageIndex):
+            raise TypeError("coverage must be BehaviorCoverageIndex")
+        # 覆盖索引与回执同一步写：入队去重与归约封口读它，不再全量枚举回执目录。
+        self.coverage = coverage or BehaviorCoverageIndex(observations.root)
         # 个人版：画面里出现别人是常态，但只跟踪主体。谁是主体是**配置事实**，上游保证
         # ``participants`` 用的是跨批次稳定的标识，所以这里逐字比对即可。
         if not isinstance(primary_subject, str) or not primary_subject.strip():
@@ -114,6 +124,7 @@ class BehaviorFusionRunner:
         # 融合就不可重放。
         self.context_limit = context_limit
         self.context_lookback_seconds = context_lookback_seconds
+        self._last_degradations: tuple[str, ...] = ()
 
     def claim(self, worker_id: str) -> BehaviorFusionJobLease | None:
         """认领最早未完成的作业；队列空返回 None，被阻塞则抛出。"""
@@ -152,6 +163,8 @@ class BehaviorFusionRunner:
                 raise BehaviorFusionJobError("fusion job reached persistence without a checkpoint")
             self._persist(staged)
             committed = self.jobs.commit(lease)
+            # 作业里没有产物，只是队列记录：提交即清，作业目录不堆积（BHV-REALDATA-001 第 9 条）。
+            self.jobs.discard_committed(committed)
         except (BehaviorFusionJobBlockedError, BehaviorFusionJobNotReadyError):
             raise
         except asyncio.CancelledError:
@@ -169,6 +182,7 @@ class BehaviorFusionRunner:
             receipt=staged.receipt,
             judgement_ids=tuple(staged.receipt.judgement_ids),
             fused=fused,
+            degradations=self._last_degradations if fused else (),
         )
 
     async def _fuse_and_stage(
@@ -180,9 +194,16 @@ class BehaviorFusionRunner:
         job = lease.job
         segment = BehaviorFusionSegment(self._fragments(job), tuple(job.source_refs))
         context = self._context(segment)
-        result = await self.fuser.fuse(
-            segment, primary_subject=self.primary_subject, context_judgements=context
-        )
+        try:
+            result = await self.fuser.fuse(
+                segment, primary_subject=self.primary_subject, context_judgements=context
+            )
+        except BehaviorFusionTruncatedError:
+            # 输出截断是确定性的：同一段重试还会截断，最终 FAILED 封死串行队列（实测 512/160/100
+            # 条的段都撞过）。按"不能融合的也要留下"降级：整段记成一条没读懂判断——时间轴上如实
+            # 留下"这段观测到了但没读懂"的空白，覆盖索引照记、队列照走；留信号供容量调参。
+            result = _truncated_segment_result(segment)
+        self._last_degradations = result.degradations
         stamped = judged_at or self.jobs.clock()
         derived = derive_judgements(
             result.batch,
@@ -291,6 +312,30 @@ class BehaviorFusionRunner:
         stored = self.receipts.put(staged.receipt)
         if stored.judgement_ids != staged.receipt.judgement_ids:  # pragma: no cover - 上面已拦
             raise BehaviorFusionError("stored receipt does not describe the judgements just written")
+        # 覆盖记录必须早于任何观测释放（封口视界靠"未被覆盖的观测"定）；写在回执之后、提交之前。
+        self.coverage.record(stored)
+
+
+def _truncated_segment_result(segment: BehaviorFusionSegment) -> BehaviorFusionResult:
+    """把整段降为一条没读懂判断；语义面全空，只有覆盖范围——这是空白不是行为。"""
+
+    covers = tuple(range(1, len(segment.fragments) + 1))
+    judgement = BehaviorJudgement(
+        judgement_no=1,
+        covers=covers,
+        subjects=(),
+        claim=BehaviorClaim(behavior=None, goal=None, summary=None, basis=()),
+        status=None,
+        status_basis=None,
+        relations=(),
+    )
+    batch = BehaviorJudgementBatch(
+        (judgement,),
+        degradations=(f"segment_truncated fragments={len(segment.fragments)} recorded as unreadable",),
+    )
+    return BehaviorFusionResult(
+        segment=segment, batch=batch, prompt_version=FUSION_PROMPT_VERSION, validation_attempts=1
+    )
 
 
 def _is_retryable(error: BaseException) -> bool:

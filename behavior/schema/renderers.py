@@ -33,6 +33,10 @@ def render_markdown(kind: BehaviorKind, payload: Mapping[str, Any]) -> str:
     return _render_gap(payload)
 
 
+_RENDERED_STEPS_HEAD = 20
+_RENDERED_STEPS_TAIL = 5
+
+
 def _render_occurrence(payload: Mapping[str, Any]) -> str:
     status_text = _STATUS_TEXT[payload["status"]]
     basis_text = _BASIS_TEXT[payload["status_basis"]]
@@ -53,8 +57,21 @@ def _render_occurrence(payload: Mapping[str, Any]) -> str:
     lines.extend(["", str(payload["summary"])])
     lines.extend(["", f"**主体** {'、'.join(payload['subjects'])}"])
     if payload["basis"]:
-        lines.extend(["", "## 步骤"])
-        for index, step in enumerate(payload["basis"], start=1):
+        steps = payload["basis"]
+        lines.extend(["", f"## 步骤（共 {len(steps)} 步）"])
+        # 正文只是字段的可读投影，字段才是真相：长链（实测 283 步）只渲染首尾，中间留计数，
+        # 不再把每一步复制一遍撑大文档。
+        shown = (
+            list(enumerate(steps, start=1))
+            if len(steps) <= _RENDERED_STEPS_HEAD + _RENDERED_STEPS_TAIL
+            else [*list(enumerate(steps, start=1))[:_RENDERED_STEPS_HEAD], None,
+                  *list(enumerate(steps, start=1))[-_RENDERED_STEPS_TAIL:]]
+        )
+        for item in shown:
+            if item is None:
+                lines.append(f"…（省略 {len(steps) - _RENDERED_STEPS_HEAD - _RENDERED_STEPS_TAIL} 步）")
+                continue
+            index, step = item
             lines.append(
                 f"{index}. {step['semantics']}"
                 f"（{_local_time(step['started_at'])}–{_local_time(step['ended_at'])}，"

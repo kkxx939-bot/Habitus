@@ -53,7 +53,8 @@ models:
       model: deepseek-chat
       base_url: https://api.deepseek.com
       credential_ref: deepseek
-      timeout_seconds: 30.0
+      # 行为融合一段几十条片段要模型输出整张逐帧归属表，30s 对日尺度数据第一次就超时（实测）。
+      timeout_seconds: 300.0
       max_retries: 2
       retry_base_delay_seconds: 0.5
       retry_max_delay_seconds: 30.0
@@ -62,7 +63,8 @@ models:
       extra_headers: {}
       extra_body: {}
     context_window_tokens: 64000
-    max_output_tokens: null
+    # 留空走厂商默认 4096，行为融合的逐帧归属表会更早被截断；取 deepseek-chat 的上限。
+    max_output_tokens: 8192
     structured_output_mode: json_object
     reasoning: false
 

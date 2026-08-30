@@ -6,8 +6,9 @@
 穷尽性因此是**输出的形状**，不是事后数一遍——实测证明模型做不了"把 N 个编号无重无漏地分组"这
 类组合记账，但逐行回答"这一帧属于谁"没有问题。
 
-一行可以有多个归属（并行时边界帧本来就同时属于两边），也**必须**至少有一个：读不懂的帧归给一条
-``behavior`` 为空的判断，这样"不能融合的也要留下"不需要另一套结构。
+一行可以有多个归属（并行时边界帧本来就同时属于两边），也可以**没有**归属：无意识的小动作与
+过渡帧"看到了、看懂了、不构成任何事"，填 ``[]``——树上什么都不写，曝光照常算在看。读不懂的帧
+仍归给一条 ``behavior`` 为空的判断，这样"不能融合的也要留下"不需要另一套结构。
 
 ## 归属直接落到 basis 一级
 
@@ -96,8 +97,8 @@ _JUDGEMENT_SCHEMA: dict[str, Any] = {
         "goal": {
             "type": ["string", "null"],
             "description": (
-                "主体自己会说的那个目标，如「清洁双手」。判不出目标就填 null"
-                "——那表示这只是一个动作，不是一件有目标的事。"
+                "主体自己会说的那个目标，如「清洁双手」。判不出就填 null，不要硬编——"
+                "goal 为 null 不影响这是一件事（锁门、喝水、吃药常常说不出目标却都是要记的行为）。"
             ),
         },
         "summary": {
@@ -108,10 +109,9 @@ _JUDGEMENT_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": _FACT_SCHEMA,
             "description": (
-                "构成这件事的行为事实。goal 非 null 时**必须**至少写一条；goal 为 null 时填 []。"
-                "说得出目标却写不出一条事实，说明这个目标是编的。"
-                "做这件事途中的服务性小动作（中途洗手、扔掉包装、脱下手套、开关门）也归在这里"
-                "——它们服务于这个目标，不是独立的一件事。"
+                "构成这件事的步骤，折叠后的说法。拿起、放下、走到桌前、瞥一眼手机、中途洗手、"
+                "扔掉包装这些动作若是这件事的一步，全部归在这里——它们不是独立的一件事。"
+                "说不出目标的单位（锁门、喝水）同样可以写步骤；分不出步骤就填 []。"
             ),
         },
         "status": {
@@ -165,8 +165,11 @@ _FRAME_SCHEMA: dict[str, Any] = {
         "assignments": {
             "type": "array",
             "items": _ASSIGNMENT_SCHEMA,
-            "minItems": 1,
-            "description": "这一帧属于哪些判断。并行时可以有多个；一帧都不能空着。",
+            "description": (
+                "这一帧属于哪些判断。并行时可以有多个。"
+                "无意识的小动作、两件事之间的过渡帧（既不是前一件的步骤也不是后一件的）填 []——"
+                "看到了、看懂了、不构成任何事。读不懂的帧不填 []，归给一条 behavior 为 null 的判断。"
+            ),
         },
     },
 }
@@ -176,7 +179,8 @@ JUDGEMENT_FUSION_JSON_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["judgements", "frames"],
     "properties": {
-        "judgements": {"type": "array", "items": _JUDGEMENT_SCHEMA, "minItems": 1},
+        # 可以为空：一段里没有一件能提醒的事时，judgements 为 []、每一帧的 assignments 为 []。
+        "judgements": {"type": "array", "items": _JUDGEMENT_SCHEMA},
         "frames": {
             "type": "array",
             "items": _FRAME_SCHEMA,

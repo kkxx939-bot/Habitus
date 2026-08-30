@@ -96,14 +96,21 @@ def read(tree: BehaviorTree) -> BehaviorSnapshot:
 
 
 def _documents(tree: BehaviorTree, kind: BehaviorKind) -> Iterator[BehaviorDocument]:
+    """按天整块读：逐篇 ``read`` 会让每天的目录被重复枚举、成本随篇数平方增长（实测一周 90 秒）。"""
+
+    days: list[date] = []
     cursor: BehaviorAddress | None = None
     while True:
         page = tree.list_addresses(kind, limit=_PAGE_LIMIT, after=cursor)
         for address in page:
-            yield tree.read(address)
+            if not days or days[-1] != address.occurred_on:
+                if address.occurred_on not in days:
+                    days.append(address.occurred_on)
         if len(page) < _PAGE_LIMIT:
-            return
+            break
         cursor = page[-1]
+    for day in sorted(set(days)):
+        yield from tree.read_day(kind, day)
 
 
 def _unordered(left: int, right: int) -> tuple[int, int]:

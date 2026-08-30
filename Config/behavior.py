@@ -30,6 +30,12 @@ class BehaviorConfig:
     reduction_sweep_interval_seconds: float = 300.0
     fusion_poll_interval_seconds: float = 5.0
     worker_shutdown_timeout_seconds: float = 30.0
+    # 融合覆盖索引 / 回执 / 消费账本的过期窗口（天）：等于上游可能补发多久以前的观测。
+    # 上游契约未定前取 7 天；它只影响"重投去重"，不影响树上的数据。
+    coverage_window_days: int = 7
+    # 一次融合最多接受的片段数。逐帧归属表按片段数线性增长、判断本体按判断数增长；在 8k 输出
+    # 预算下 512/160/100 条的段实测都会截断，60 条才稳（BHV-REALDATA-001 第 6 条）。
+    max_fragments_per_segment: int = 60
 
     def __post_init__(self) -> None:
         if not isinstance(self.primary_subject, str):
@@ -48,6 +54,18 @@ class BehaviorConfig:
             raise ValueError(
                 "behavior.context_lookback_seconds must be between 60 and 86400"
             )
+        if (
+            isinstance(self.coverage_window_days, bool)
+            or not isinstance(self.coverage_window_days, int)
+            or not 1 <= self.coverage_window_days <= 365
+        ):
+            raise ValueError("behavior.coverage_window_days must be between 1 and 365")
+        if (
+            isinstance(self.max_fragments_per_segment, bool)
+            or not isinstance(self.max_fragments_per_segment, int)
+            or not 1 <= self.max_fragments_per_segment <= 4096
+        ):
+            raise ValueError("behavior.max_fragments_per_segment must be between 1 and 4096")
         for name, value, minimum, maximum in (
             ("reduction_sweep_interval_seconds", self.reduction_sweep_interval_seconds, 1.0, 3_600.0),
             ("fusion_poll_interval_seconds", self.fusion_poll_interval_seconds, 1.0, 600.0),

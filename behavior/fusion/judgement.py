@@ -11,23 +11,25 @@
 后来的判断**不修改**先前的判断，只是新增一条指向它。旧判断永远原样保留——因为"我们当时是怎么
 判断的"必须可复原，否则防标签泄漏就没有真相可依。
 
-## 三层递减由两个字段决定，不是三种结构
+## 一条判断 = 一个可提醒或可代劳的行为单位
 
-    behavior 有 + goal 有   →  一个目标行为事件      「洗手 / 清洁双手」
-    behavior 有 + goal 空   →  一个动作              「打哈欠」
-    behavior 空             →  这段观测没读懂        （只剩 covers）
+融合的产物单位不是"任何可命名的动作"，而是**在原则上能对主体说"该做 X 了"、或替他做 X 的那种
+行为**（吃饭、交谈、给人充电、洗餐具、锁门、喝水、吃药）。这是行为事件在本系统里的操作化判据
+（用户裁定，2026-08-30，依据 EgoLife 七天真实数据：按"任何动作"产出时一天 900–2000 条、85% 是
+转头点头扶眼镜）。"实际规律不规律"是跨多次观察的统计，留给预测层；这里只判单位性。
 
-没有三套并列的类型，也就没有"三者之间如何互斥"这类校验——那正是历史上被真实数据推翻的那一批。
-不确定性一律靠**少说**来表达：融不成就退一层，读不懂就整条留空，而不是照常产出再挂一个置信度或
-矛盾清单说明它不太可靠。
+    behavior 有               →  一个行为单位；goal 可有可无，basis 可有可无
+    behavior 空               →  这段观测没读懂        （只剩 covers）
+    帧不属于任何判断           →  看到了、看懂了、不构成任何事（无意识小动作、过渡帧）
 
-## ``basis`` 只在有目标时存在
+``goal`` 是语义面的可读字段，不再决定"算不算一条"；``basis`` 是构成这件事的步骤，有目标的事
+通常写得出步骤，说不出目标的单位（锁门、喝水）同样可以有步骤。两者的空非空都不是校验对象——
+那些是现实的形状。不确定性一律靠**少说**来表达：融不成就退一层，读不懂就整条留空。
 
-这不是为了省事划的线，是活动理论的层级本身决定的：``goal`` 非空意味着这条判断处在"有意识的
-目标"那一层，它由若干条件驱动的操作构成，必须写出来——归约层要靠它判断行为有没有达成。而
-``goal`` 为空的判断**本身就在操作那一层**，里面没有东西可再分解。
+## ``basis`` 的条目不是判断
 
-``basis`` 的条目不是判断：它们没有身份、没有状态、没有关系、没有主体，只有一层，不能再往下。
+它们没有身份、没有状态、没有关系、没有主体，只有一层，不能再往下。拿起、放下、走到桌前、
+瞥一眼手机这些"改变了世界"的动作若只是某件事的一步，就在这里，不单独成条。
 
 ## 主体是多值
 
@@ -167,11 +169,8 @@ class BehaviorClaim:
             )
         if self.summary is None:
             raise BehaviorFusionError("a readable claim must carry a summary")
-        if self.goal is None and self.basis:
-            # 没有目标的判断本身就在操作那一层，里面没有东西可分解。
-            raise BehaviorFusionError("a claim without a goal must not decompose into basis facts")
-        if self.goal is not None and not self.basis:
-            raise BehaviorFusionError("a goal-directed claim must record the facts that constitute it")
+        # goal 与 basis 的空非空互不约束：锁门、喝水说不出目标却有步骤；一次交谈有目标却未必
+        # 分得出步骤。它们描述的是现实的形状，不是我们产物的自洽。
 
     @property
     def is_readable(self) -> bool:
@@ -245,13 +244,32 @@ class BehaviorJudgement:
 
 @dataclass(frozen=True)
 class BehaviorJudgementBatch:
-    """一次融合产出的全部判断，按最早覆盖片段排序。"""
+    """一次融合产出的全部判断，按最早覆盖片段排序。
+
+    ``degradations`` 是装配层对模型记账疏漏做的降级记录（去重、剔名、丢边、goal 置空），每条
+    带可定位的坐标。它们是信号不是语义：不进判断本体、不进树，只供回执/可观测面板统计——
+    真实数据实测（BHV-REALDATA-001）这类疏漏一周上千次，整批拒绝会把串行队列封死。
+    """
 
     judgements: tuple[BehaviorJudgement, ...]
+    degradations: tuple[str, ...] = ()
+    # 读得懂却不属于任何判断的片段编号（无意识小动作、过渡帧）：树上不写任何东西，曝光分母
+    # 照常算这段在观测。它是"允许模型不产出"的出口，所以占比要作为信号报出来。
+    unowned_fragment_nos: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.judgements:
-            raise BehaviorFusionError("a fusion must produce at least one judgement")
+        # 零判断合法：没有一件能提醒的事时全部帧无归属（unowned_fragment_nos 非空）。
+        if not self.judgements and not self.unowned_fragment_nos:
+            raise BehaviorFusionError("a fusion must produce at least one judgement or leave frames unowned")
+        if not isinstance(self.unowned_fragment_nos, tuple) or any(
+            isinstance(item, bool) or not isinstance(item, int) or item <= 0
+            for item in self.unowned_fragment_nos
+        ):
+            raise BehaviorFusionError("unowned_fragment_nos must be a tuple of positive integers")
+        if not isinstance(self.degradations, tuple) or any(
+            not isinstance(item, str) or not item for item in self.degradations
+        ):
+            raise BehaviorFusionError("degradations must be a tuple of non-empty strings")
 
     @property
     def readable(self) -> tuple[BehaviorJudgement, ...]:

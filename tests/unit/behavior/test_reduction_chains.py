@@ -265,7 +265,7 @@ def test_occurrence_payload_takes_identity_from_head_and_ending_from_tail() -> N
     assert payload["occurred_on"] == "2026-08-16"
     assert payload["goal"] == "清洁双手"  # 链内非空 goal 去重拼接；一致时就是那一个
     assert payload["summary"] == "在水池边洗手；冲水擦干结束"
-    assert payload["judgement_ids"] == [record_id("head"), record_id("tail")]
+    assert payload["chain_digest"] == build_chain().chain_digest  # 溯源只留链身份（原料发布即释放）
     assert payload["reminded"] is False and payload["place"] is None
 
 
@@ -307,10 +307,10 @@ def test_subjects_merge_across_the_chain_in_first_seen_order() -> None:
 
 def test_gap_payload_is_verbatim_and_zero_duration_is_legal() -> None:
     record = parse_judgement_record(unreadable_record())
-    payload = gap_payload(record)
+    payload = gap_payload(record, chain_digest="a" * 64)
     assert payload["gap_kind"] == "没读懂"
     assert payload["started_at"] == payload["ended_at"]  # 单观测段：起止同刻，是事实不是矛盾
-    assert payload["judgement_ids"] == [record_id("blur")]
+    assert payload["chain_digest"] == "a" * 64
 
 
 def test_a_superseded_members_cross_edges_are_dropped_with_a_signal() -> None:

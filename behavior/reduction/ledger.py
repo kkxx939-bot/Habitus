@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from behavior.reduction.errors import BehaviorReductionError
@@ -22,6 +23,7 @@ from infrastructure.store.filesystem import (
     DurablePathIntegrityError,
     ImmutableArtifactConflictError,
     atomic_create_bytes,
+    durable_unlink,
     read_regular_bytes,
 )
 
@@ -143,6 +145,26 @@ class BehaviorReductionLedger:
                 )
             entries.append(entry)
         return tuple(entries)
+
+    def expire(self, before: datetime) -> int:
+        """删掉 ``staged_at`` 早于 ``before`` 的消费记录。
+
+        账本三个用途都只在封口窗口附近有效：幂等重放看当轮检查点；释放门槛在判断被 discard 后
+        自然成立；链接解析只指向回看窗口内的目标。窗口之外的条目只是堆积。
+        """
+
+        if not isinstance(before, datetime) or before.utcoffset() is None:
+            raise TypeError("before must be a timezone-aware datetime")
+        removed = 0
+        for entry in self.load():
+            staged_at = datetime.fromisoformat(entry.staged_at)
+            if staged_at.utcoffset() is None:
+                continue
+            if staged_at < before and durable_unlink(
+                self._entries_dir / f"{entry.chain_digest}.json", artifact_root=self.root
+            ):
+                removed += 1
+        return removed
 
     def consumed_judgement_ids(self) -> frozenset[str]:
         return frozenset(

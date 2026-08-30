@@ -141,17 +141,11 @@ def evaluate(case: FusionCase, run: Mapping[str, Any]) -> dict[str, Any]:
             {
                 "check": "subjects_not_overreached",
                 "passed": not present,
-                "detail": (
-                    f"段{index} 把 {sorted(present)} 一起写进了主体那件事的 subjects"
-                    if present
-                    else None
-                ),
+                "detail": (f"段{index} 把 {sorted(present)} 一起写进了主体那件事的 subjects" if present else None),
             }
         )
     for index, expected in case.expect.subjects_include.items():
-        actual = {
-            name for item in segments.get(index, {}).get("judgements", []) for name in item["subjects"]
-        }
+        actual = {name for item in segments.get(index, {}).get("judgements", []) for name in item["subjects"]}
         missing = sorted(set(expected) - actual)
         checks.append(
             {
@@ -175,9 +169,7 @@ def evaluate(case: FusionCase, run: Mapping[str, Any]) -> dict[str, Any]:
             {
                 "check": "unreadable",
                 "passed": set(expected_unreadable) == set(actual_unreadable),
-                "detail": (
-                    f"段{index} 期望读不懂 {list(expected_unreadable)}，实际 {list(actual_unreadable)}"
-                ),
+                "detail": (f"段{index} 期望读不懂 {list(expected_unreadable)}，实际 {list(actual_unreadable)}"),
             }
         )
     for index, expected_out_of_scope in case.expect.out_of_scope_fragments.items():
@@ -187,9 +179,58 @@ def evaluate(case: FusionCase, run: Mapping[str, Any]) -> dict[str, Any]:
                 "check": "out_of_scope",
                 "passed": set(expected_out_of_scope) == set(actual_out_of_scope),
                 "detail": (
-                    f"段{index} 期望不属于主体的帧 {list(expected_out_of_scope)}，"
-                    f"实际 {list(actual_out_of_scope)}"
+                    f"段{index} 期望不属于主体的帧 {list(expected_out_of_scope)}，实际 {list(actual_out_of_scope)}"
                 ),
+            }
+        )
+    for index, expected_unowned in case.expect.unowned_fragments.items():
+        actual_unowned = tuple(segments.get(index, {}).get("unowned_fragments", ()))
+        checks.append(
+            {
+                "check": "unowned",
+                "passed": set(expected_unowned) == set(actual_unowned),
+                "detail": (f"段{index} 期望无归属的帧 {list(expected_unowned)}，实际 {list(actual_unowned)}"),
+            }
+        )
+    for index, expected_subset in case.expect.unowned_include.items():
+        actual_unowned = set(segments.get(index, {}).get("unowned_fragments", ()))
+        missing = [no for no in expected_subset if no not in actual_unowned]
+        checks.append(
+            {
+                "check": "unowned_include",
+                "passed": not missing,
+                "detail": (
+                    f"段{index} 这些帧该无归属却进了事件 {missing}"
+                    if missing
+                    else f"段{index} 帧 {list(expected_subset)} 均无归属"
+                ),
+            }
+        )
+    for index, expected_free in case.expect.not_owned_by_subject.items():
+        segment = segments.get(index, {})
+        free = set(segment.get("unowned_fragments", ())) | set(segment.get("out_of_scope_fragments", ()))
+        absorbed = [no for no in expected_free if no not in free]
+        checks.append(
+            {
+                "check": "not_owned_by_subject",
+                "passed": not absorbed,
+                "detail": (
+                    f"段{index} 这些帧被塞进了主体的判断 {absorbed}"
+                    if absorbed
+                    else f"段{index} 帧 {list(expected_free)} 都不在主体的判断里"
+                ),
+            }
+        )
+    for index, expected_behaviors in case.expect.behaviors_present.items():
+        actual_behaviors = [str(item.get("behavior") or "") for item in segments.get(index, {}).get("judgements", ())]
+        absent_behaviors = [
+            wanted for wanted in expected_behaviors if not any(wanted in name for name in actual_behaviors)
+        ]
+        checks.append(
+            {
+                "check": "behaviors_present",
+                "passed": not absent_behaviors,
+                "detail": f"段{index} 期望判出 {list(expected_behaviors)}，缺 {absent_behaviors}，实际 {actual_behaviors}",
             }
         )
     return _summarise(case, run, checks)
@@ -207,11 +248,17 @@ def _summarise(case: FusionCase, run: Mapping[str, Any], checks: Sequence[Mappin
         "checks": list(checks),
         "model_calls": sum(item["model_calls"] for item in run["segments"]),
         # 段数就是"一次成功需要的最少调用次数"；超出的部分全是结构不合法后的重试。
-        "structural_retries": sum(
-            max(0, item["model_calls"] - 1) for item in run["segments"]
-        ),
+        "structural_retries": sum(max(0, item["model_calls"] - 1) for item in run["segments"]),
         "elapsed_seconds": run["elapsed_seconds"],
+        "unowned_fragments_total": sum(len(item.get("unowned_fragments", ())) for item in run["segments"]),
+        "fragment_total": sum(int(item.get("fragment_count", 0) or 0) for item in run["segments"]),
     }
+
+
+def _unowned_ratio(results: Sequence[Mapping[str, Any]]) -> float | None:
+    unowned = sum(int(item.get("unowned_fragments_total", 0) or 0) for item in results)
+    fragments = sum(int(item.get("fragment_total", 0) or 0) for item in results)
+    return None if fragments == 0 else round(unowned / fragments, 3)
 
 
 def aggregate(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -236,15 +283,8 @@ def aggregate(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 "stable": wins in (0, total),
                 # 一致率：最一致的那个结果占多少。1.0 表示每次都一样（无论对错）。
                 "agreement": max(wins, total - wins) / total,
-                "verdict": (
-                    "pass" if wins == total else ("flaky" if wins else "fail")
-                ),
-                "failures": [
-                    check["detail"]
-                    for item in runs
-                    for check in item["checks"]
-                    if not check["passed"]
-                ],
+                "verdict": ("pass" if wins == total else ("flaky" if wins else "fail")),
+                "failures": [check["detail"] for item in runs for check in item["checks"] if not check["passed"]],
             }
         )
 
@@ -268,25 +308,17 @@ def aggregate(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return {
         "total_runs": len(regression),
         "passed_runs": sum(1 for item in regression if item["passed"]),
+        # 无归属帧占比（全部段合计）："允许不产出"用得多不多，单独看通过率会被"全部无归属"骗过
+        "unowned_ratio": _unowned_ratio(results),
         "probe_runs": len(probes),
         "probe_passed": sum(1 for item in probes if item["passed"]),
         "model_calls": sum(item["model_calls"] for item in results),
         "structural_retries": sum(item["structural_retries"] for item in results),
-        "retried_cases": sorted(
-            {item["case_id"] for item in results if item["structural_retries"]}
-        ),
+        "retried_cases": sorted({item["case_id"] for item in results if item["structural_retries"]}),
         # 同一用例多次运行结果不一致，本身就是一个要盯的信号——比平均通过率更能暴露问题。
         # 稳定失败与抖动分开：前者改了能验证，后者说明产出不可预期，两者的处理方式完全不同。
-        "stable_failures": [
-            item["case_id"]
-            for item in cases
-            if item["verdict"] == "fail" and not item["probing"]
-        ],
-        "flaky_cases": [
-            item["case_id"]
-            for item in cases
-            if item["verdict"] == "flaky" and not item["probing"]
-        ],
+        "stable_failures": [item["case_id"] for item in cases if item["verdict"] == "fail" and not item["probing"]],
+        "flaky_cases": [item["case_id"] for item in cases if item["verdict"] == "flaky" and not item["probing"]],
         "mean_agreement": (
             round(
                 sum(item["agreement"] for item in cases if not item["probing"])
@@ -333,9 +365,7 @@ def render_markdown(summary: Mapping[str, Any]) -> str:
         lines += ["", title, ""]
         for item in selected:
             mark = {"pass": "✓", "flaky": "~", "fail": "✗"}[item["verdict"]]
-            lines.append(
-                f"- {mark} `{item['case_id']}` ({item['passed']}/{item['attempts']}) — {item['intent']}"
-            )
+            lines.append(f"- {mark} `{item['case_id']}` ({item['passed']}/{item['attempts']}) — {item['intent']}")
             for detail in dict.fromkeys(item["failures"]):
                 if detail:
                     lines.append(f"    - {detail}")
