@@ -748,8 +748,8 @@ def test_a_link_target_skipped_after_naming_defers_the_source(tmp_path) -> None:
     assert second.published_documents == 0
 
 
-def test_failed_semantic_refresh_leaves_the_checkpoint_for_healing(tmp_path) -> None:
-    """刷新失败降级为带日期的信号；检查点保留到刷新成功——崩溃/故障后的摘要缺口靠重放自愈。"""
+def test_failed_semantic_refresh_is_retried_from_the_pending_set(tmp_path) -> None:
+    """刷新失败降级为带日期的信号；那一天留在待刷新集合里，下轮补刷；检查点不被扣住。"""
 
     from behavior.semantic import BehaviorSemanticRefresher
     from tests.unit.behavior.test_semantic_layers import ScriptedOverviewGenerator
@@ -774,18 +774,23 @@ def test_failed_semantic_refresh_leaves_the_checkpoint_for_healing(tmp_path) -> 
 
     assert report.published_occurrences == 1  # 归约不被刷新失败阻塞
     assert any("semantic refresh failed for [2026-08-16]" in n for n in report.dropped_edges)
-    assert (tmp_path / "reduction" / "staged.json").exists()  # 检查点留作自愈依据
+    # 检查点发布完即清（不再被刷新失败扣住——那会让 merge 之后的重放撞出永久冲突）；
+    # 待刷新的日子记在独立的小文件里，下轮逐日重试。
+    assert not (tmp_path / "reduction" / "staged.json").exists()
+    import json as _json
+
+    assert _json.loads((tmp_path / "reduction" / "refresh_pending.json").read_text()) == ["2026-08-16"]
 
     generator.fail = False
     second = asyncio.run(harness.runner.run_once())
 
-    assert second.replayed_documents == 1  # 幂等重放 + 补刷
+    assert second.replayed_documents == 0  # 没有检查点可重放；补刷来自待刷新集合
     from behavior.model import BehaviorDirectory, BehaviorLevel
 
     assert harness.tree.layer_exists(
         BehaviorDirectory.occurrences(2026, 8, 16), BehaviorLevel.OVERVIEW
     )
-    assert not (tmp_path / "reduction" / "staged.json").exists()
+    assert not (tmp_path / "reduction" / "refresh_pending.json").exists()
 
 
 def test_run_once_works_with_the_production_sqlite_lock_store(tmp_path) -> None:
@@ -1007,3 +1012,110 @@ def test_merge_kinds_folds_the_vocabulary_and_restamps_the_tree(tmp_path) -> Non
     # 重跑幂等：词表里已无 source、树上已无旧 token
     again = asyncio.run(harness.runner.merge_kinds("洗手", "清洁双手"))
     assert again.restamped == 0
+
+
+# ── 生命周期闭合（三方审计根因 1–4）────────────────────────────────────────────────
+
+
+def test_kind_hits_survive_a_crash_between_ledger_append_and_hit_recording(tmp_path) -> None:
+    """账本已落、命中未记时崩溃：重放后命中仍记且只记一次（幂等键是检查点，不是账本条目）。"""
+
+    class _CrashOnce(type(Harness(tmp_path / "probe").runner)):  # type: ignore[misc]
+        crashed = False
+
+        def _record_kind_hits(self, hits, staged_at, now):  # noqa: ANN001
+            if not type(self).crashed:
+                type(self).crashed = True
+                raise RuntimeError("crash after ledger, before hits")
+            return super()._record_kind_hits(hits, staged_at, now)
+
+    harness = Harness(tmp_path)
+    harness.runner.__class__ = _CrashOnce
+    source = harness.deliver(OBS_A, OBS_B, OBS_C)
+    seed_wash_chain(harness, source)
+    with pytest.raises(RuntimeError, match="crash after ledger"):
+        asyncio.run(harness.runner.run_once())
+    assert (tmp_path / "reduction" / "staged.json").exists()  # 检查点还在，下轮重放
+    report = asyncio.run(harness.runner.run_once())
+    assert report.replayed_documents == 1
+    entry = harness.kind_store.read().registry.entry_of("洗手")
+    assert entry.hit_days == (at(18).date(),) and entry.hit_count == 1
+    assert asyncio.run(harness.runner.run_once()).replayed_documents == 0
+    assert harness.kind_store.read().registry.entry_of("洗手").hit_count == 1  # 再跑不重记
+
+
+def test_merge_and_rebuild_refuse_while_a_checkpoint_is_pending(tmp_path) -> None:
+    """运维动作不许压在悬挂的检查点上（重打 token 后重放会撞永久冲突）。"""
+
+    from behavior.reduction import BehaviorReductionBusyError
+
+    harness = Harness(tmp_path)
+    (tmp_path / "reduction").mkdir(exist_ok=True)
+    (tmp_path / "reduction" / "staged.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(BehaviorReductionBusyError, match="checkpoint is pending"):
+        asyncio.run(harness.runner.merge_kinds("洗手", "清洁双手"))
+    with pytest.raises(BehaviorReductionBusyError, match="checkpoint is pending"):
+        asyncio.run(harness.runner.rebuild_kinds())
+
+
+def test_an_address_already_on_the_tree_is_disambiguated_without_a_ledger_entry(tmp_path) -> None:
+    """账本按窗口过期、树不会：树上已有同址文档时照样消歧成 -2，而不是 publish 硬冲突卡死检查点。"""
+
+    from behavior import BehaviorDocumentWriter
+    from tests.unit.behavior.tree_payloads import local, occurrence_payload
+
+    harness = Harness(tmp_path)
+    writer = BehaviorDocumentWriter(harness.tree, ProcessLocalLockStore(), clock=lambda: local(23, 0))
+    writer.publish(
+        BehaviorKind.OCCURRENCE,
+        occurrence_payload(name="洗手", occurred_on=at(18).date(), started_at=at(18), last_observed_at=at(40)),
+    )
+    source = harness.deliver(OBS_A, OBS_B, OBS_C)
+    seed_wash_chain(harness, source)
+    report = asyncio.run(harness.runner.run_once())
+    assert report.published_occurrences == 1
+    names = sorted(document.fields["name"] for document in harness.tree.iter_documents(BehaviorKind.OCCURRENCE))
+    assert names == ["洗手", "洗手-2"]
+    assert not (tmp_path / "reduction" / "staged.json").exists()
+
+
+def test_stale_unfused_observations_do_not_pin_the_frontier(tmp_path) -> None:
+    """送达早于覆盖窗口的未融合观测（被隔离判断引用的交付）不再把封口视界钉在过去，只留信号。"""
+
+    from tests.unit.behavior.reduction_fixtures import observation
+
+    harness = Harness(tmp_path)
+    stale = observation(-10 * 86_400, "十天前的旧观测")
+    harness.deliver(stale, seed="stale", fused=False)
+    source = harness.deliver(OBS_A, OBS_B, OBS_C)
+    seed_wash_chain(harness, source)
+    report = asyncio.run(harness.runner.run_once())
+    assert report.published_occurrences == 1  # 视界没被旧观测拖住
+    assert any("stale_observations 1" in note for note in report.dropped_edges)
+
+
+def test_covered_deliveries_without_judgements_are_released(tmp_path) -> None:
+    """全段旁人/无归属、或重复投递的交付：有回执覆盖、无判断引用 → 一轮 sweep 后释放，不等 7 天重入队。"""
+
+    harness = Harness(tmp_path)
+    orphan = harness.deliver(OBS_A, seed="orphan", fused=True)  # 回执覆盖但没有任何判断
+    assert harness.observations.read(orphan) is not None
+    asyncio.run(harness.runner.run_once())
+    assert harness.observations.read(orphan) is None
+
+
+def test_data_clock_is_clamped_to_the_wall_clock(tmp_path) -> None:
+    """一条 2099 的坏时间戳不能把词表删空：过期时钟钳在墙钟当日之内。"""
+
+    from datetime import date, timedelta
+
+    from behavior.kinds import BehaviorKindEntry
+
+    harness = Harness(tmp_path, known_kinds=())
+    recent = BehaviorKindEntry(token="打球", label="打球").with_hit(harness.now.date() - timedelta(days=10))
+    harness.kind_store.replace(BehaviorKindRegistry({"打球": recent, "洗手": ()}), expected_revision=0, timestamp=harness.now)
+    harness.runner._kind_signals = []
+    harness.runner._record_kind_hits([("洗手", date(2099, 1, 1))], "cp-1", harness.now)
+    registry = harness.kind_store.read().registry
+    assert "打球" in registry.tokens  # 若按 2099 判，它早该被删
+    assert registry.entry_of("洗手").hit_days == (date(2099, 1, 1),)

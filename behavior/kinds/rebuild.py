@@ -81,6 +81,8 @@ async def rebuild_registry(
     for document in tree.iter_documents(BehaviorKind.OCCURRENCE):
         occurrences += 1
         fields = document.fields
+        if fields.get("original_name") is not None:
+            continue  # 撞车消歧记录 = 已知重复：预测树、语义层、命中账一律不计（死规则②）
         token = str(fields.get("kind_token") or "")
         name = str(fields.get("original_name") or fields.get("name") or "")
         if not token:

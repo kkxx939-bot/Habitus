@@ -39,7 +39,7 @@ from infrastructure.store.filesystem import (
 KINDS_SCHEMA_VERSION = "behavior_kinds_v2"
 _MARKER = "\n<!-- HABITUS_BEHAVIOR_KINDS\n"
 _FOOTER = "\n-->\n"
-_METADATA_KEYS = {"schema_version", "revision", "updated_at", "kinds"}
+_METADATA_KEYS = {"schema_version", "revision", "updated_at", "kinds", "hits_applied_at"}
 _ENTRY_KEYS = {"token", "label", "aliases", "created_on", "hit_days", "hit_days_total", "hit_count", "review_reason"}
 
 
@@ -58,6 +58,9 @@ class BehaviorKindSnapshot:
     registry: BehaviorKindRegistry
     revision: int
     updated_at: datetime | None
+    # 命中账已应用到哪个归约检查点（``staged_at``）：同一检查点只记一次账，重放跳过——幂等键是
+    # 检查点而不是账本条目（账本逐条追加、账在末尾落，中间崩溃会让"首次"判断失真）。
+    hits_applied_at: str | None = None
 
 
 class BehaviorKindStore:
@@ -90,8 +93,12 @@ class BehaviorKindStore:
         *,
         expected_revision: int,
         timestamp: datetime,
+        hits_applied_at: str | None = None,
     ) -> BehaviorKindSnapshot:
-        """CAS 替换整份词表；修改语义由不可变 Registry 表达，这里只负责耐久。"""
+        """CAS 替换整份词表；修改语义由不可变 Registry 表达，这里只负责耐久。
+
+        ``hits_applied_at`` 随词表一起耐久（调用方要保留旧值就把它传回来）。
+        """
 
         if not isinstance(registry, BehaviorKindRegistry):
             raise TypeError("registry must be BehaviorKindRegistry")
@@ -113,7 +120,9 @@ class BehaviorKindStore:
                 f"found {current.revision}"
             )
         updated_at = timestamp.astimezone(timezone.utc)
-        snapshot = BehaviorKindSnapshot(registry, expected_revision + 1, updated_at)
+        if hits_applied_at is not None and (not isinstance(hits_applied_at, str) or not hits_applied_at):
+            raise BehaviorKindError("hits_applied_at must be non-empty text or None")
+        snapshot = BehaviorKindSnapshot(registry, expected_revision + 1, updated_at, hits_applied_at)
         encoded = self._encode(snapshot)
         if len(encoded) > self.config.max_encoded_bytes:
             raise BehaviorKindLimitError("behavior kind registry exceeds its encoded byte bound")
@@ -157,6 +166,7 @@ class BehaviorKindStore:
             "kinds": [
                 _entry_payload(snapshot.registry.entry_of(token)) for token in snapshot.registry.tokens
             ],
+            "hits_applied_at": snapshot.hits_applied_at,
         }
         rendered = json.dumps(
             metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -175,10 +185,12 @@ class BehaviorKindStore:
             metadata = json.loads(tail[: -len(_FOOTER)])
         except (json.JSONDecodeError, RecursionError) as exc:
             raise BehaviorKindStoreError("behavior kind registry metadata is corrupt") from exc
-        if not isinstance(metadata, dict) or set(metadata) != _METADATA_KEYS:
+        if not isinstance(metadata, dict):
             raise BehaviorKindStoreError("behavior kind registry metadata shape is invalid")
-        if metadata["schema_version"] != KINDS_SCHEMA_VERSION:
+        if metadata.get("schema_version") != KINDS_SCHEMA_VERSION:
             raise BehaviorKindStoreError("behavior kind registry schema version is unsupported")
+        if set(metadata) != _METADATA_KEYS:
+            raise BehaviorKindStoreError("behavior kind registry metadata shape is invalid")
         revision = metadata["revision"]
         if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
             raise BehaviorKindStoreError("behavior kind registry revision must be positive")
@@ -205,7 +217,10 @@ class BehaviorKindStore:
         except BehaviorKindError as exc:
             raise BehaviorKindStoreError("behavior kind registry content is invalid") from exc
         self._require_bounds(registry)
-        snapshot = BehaviorKindSnapshot(registry, revision, updated_at)
+        applied = metadata["hits_applied_at"]
+        if applied is not None and (not isinstance(applied, str) or not applied):
+            raise BehaviorKindStoreError("behavior kind registry hits_applied_at must be text or null")
+        snapshot = BehaviorKindSnapshot(registry, revision, updated_at, applied)
         if self._encode(snapshot) != encoded:
             raise BehaviorKindStoreError("behavior kind registry is not canonically encoded")
         return snapshot

@@ -289,7 +289,7 @@ def is_ascii_digits(value: object) -> bool:
 # - links 在文档**信封层**（用户裁定，沿 memory 树同一机制：links 是文档间的结构关系，与
 #   created_at 同级的元数据，不是本篇的语义内容）：**只有前向**，concurrent_with / results_from
 #   → 先前 occurrence URI；add-only 下不维护 backlinks，读侧取对称闭包——沿融合层同一纪律。
-# - 溯源（system 角色，不渲染进正文）：judgement_ids / observation_ids / source_refs /
+# - 溯源（system 角色，不渲染进正文）：chain_digest（WP3 起只留链身份；逐条 id 随原料释放即成死引用）/
 #   fusion_version / reduction_version。
 # - 旧 schema 整体退役：confidence、conflicts、trigger、constraints、closure_reason、actions 的
 #   全部 14 个子字段（actor/method/parameters/target_refs/…）——无源或 coding-agent 词表；
@@ -358,7 +358,7 @@ def is_ascii_digits(value: object) -> bool:
 #   等预测算法与两级执行模型（提醒确认→稳定后直接执行）落地后再定形态；届时若预测层需要回写，
 #   必须重审单一写入口纪律，不得旁路。
 # - L0/L1 生成器已落地（遗留调优子项：提示词须按纪律实测调优，见 behavior/semantic/generator.py）；
-#   生命周期（BHV-LIFECYCLE-001，判断释放改双消费者门槛）；
+#   生命周期（BHV-LIFECYCLE-001，判断释放为单门槛：发布即删）；
 #   夜批傍晚滞后的取舍；覆盖信号收件箱形态（随上游契约）。
 # - 实施顺序建议：schema 角色扩展 + occurrences/gaps yaml + 新词表（一个提交）→ 写入层（staged +
 #   五条死规则）→ kinds 并入地址空间 → 旧三类 schema 与镜像机制退役。

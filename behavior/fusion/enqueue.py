@@ -99,12 +99,21 @@ class BehaviorFusionEnqueuer:
             return self._scan()
 
     def _scan(self) -> BehaviorFusionEnqueueResult:
+        now = self._timestamp()
         covered = set(self.jobs.covered_observation_ids(fenced=False))
         # 已融合的观测由覆盖索引回答（有窗口、按日过期），不再全量枚举回执目录。
-        covered.update(self.coverage.covered_observation_ids(self._timestamp()))
+        covered.update(self.coverage.covered_observation_ids(now))
         envelopes = self.observations.list()
         if not envelopes:
             return BehaviorFusionEnqueueResult((), 0)
+        # 送达早于覆盖窗口的观测一律不再入队：它们的覆盖记录可能已按窗口过期，再融合一次只会
+        # 产出第二套判断（BHV-REALDATA-001 审计：覆盖过期 → 重入队 → 重复 occurrence）。按契约窗口
+        # 之外不再有补发，仍留在存储里的只可能是被隔离判断引用的交付——留给运维，不重跑模型。
+        stale_before = now - timedelta(days=self.coverage.window_days)
+        for envelope in envelopes:
+            for observation in envelope.batch.observations:
+                if observation.available_at < stale_before:
+                    covered.add(observation.observation_id)
         segments = segment_observations(envelopes, config=self.config, exclude=covered)
         if not segments:
             return BehaviorFusionEnqueueResult((), 0)
