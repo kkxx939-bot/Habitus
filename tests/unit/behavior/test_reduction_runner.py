@@ -836,7 +836,7 @@ def test_a_full_kind_registry_degrades_to_the_raw_name_instead_of_failing_the_sw
     assert report.published_occurrences == 1
     document = harness.tree.read(harness.tree.list_addresses(BehaviorKind.OCCURRENCE)[0])
     assert document.fields["kind_token"] == "洗手"  # 原始名暂作 token，事后可重打
-    assert any("kind registry full" in note for note in report.dropped_edges)
+    assert any("kind_registry_full" in note for note in report.dropped_edges)
 
 
 def test_reduction_records_hits_by_behaviour_day_and_expires_stale_kinds(tmp_path) -> None:

@@ -43,11 +43,12 @@ from behavior.kinds.vectors import (
     nearest_kinds,
 )
 from behavior.model import semantic_name
+from foundation.ids import canonical_path_identity
 from ModelClient import ChatMessage, ChatRequest, StructuredChatClient
-from ModelClient.contracts import ModelResponseError, ModelTransportError
+from ModelClient.contracts import ModelResponseError, ModelStructuredOutputError, ModelTransportError
 from ModelClient.embedding import Embedder
 
-KIND_PROMPT_VERSION = "behavior_kind_prompt_v2"
+KIND_PROMPT_VERSION = "behavior_kind_prompt_v3"
 
 KIND_SYSTEM_PROMPT = """\
 你在为一套行为记忆系统维护「行为类型词表」：让同一件事的不同说法落到同一个类型上，按类的统计
@@ -56,16 +57,18 @@ KIND_SYSTEM_PROMPT = """\
 会给你一批**待归类的名字**（来自行为观测的原话，可能附一句它所在判断的摘要作证据），以及
 每个名字各自的**候选类型**（编号 K…，每行是这一类的可读名和几个例子）。对每个名字判断：
 
-- 它说的事和某个候选**是不是同一件事**——换了措辞、说得更具体或更笼统、带上了对象、对方、
-  地点、话题、方向，都还是同一件事：「与Shure交谈」「参与讨论」「闲聊」都是「交谈」；
-  「吃披萨」「吃夜宵」都是「吃饭」；「给Katrina充电」「拔下充电宝」都是「给设备充电」。
-  是 → match 填那个候选的编号，逐字复制。
+- 它说的事和某个候选**是不是同一件事**。判据是**提醒句测试**：如果要提醒他做这件事，提醒的
+  话是不是同一句。"该和人聊聊了"——「与Shure交谈」「参与讨论」「闲聊」是同一件事；
+  "该吃饭了"——「吃披萨」「吃夜宵」是同一件事；对方是谁、在哪里、聊什么、朝哪个方向，通常
+  不改变提醒句。是 → match 填那个候选的编号，逐字复制。
+- 对象**决定了这件事是什么**时，就不是同一件：「吃药」不是「吃饭」，「查看手机」不是
+  「查看后备箱」，「找笔」不是「找手套」，「洗手」不是「洗碗」，「上楼」不是「下楼」，
+  「写白板」不是「擦白板」。只是动词相同、发生在相近场合，不算同一类。
+- 候选里已经有一类的可读名和你要给这个名字的类型名相同（比如候选 K3 的可读名是「交谈」，
+  而你判断这个名字就是一次交谈），那就是同一类：填 K3，不要再新建。
 - 同一批里若两个名字其实是一件事而候选里没有，后一个的 match 填前一个名字的编号（N…）。
-- 都不是，或拿不准 → match 填 null，并给 label：这一类的可读名，写**那件事本身**，不带对象、
-  对方、方向、话题（「交谈」而不是「与Shure交谈」，「吃饭」而不是「吃披萨」）。
-
-只是发生在相近场合、用了相近动词的不同行为不算同一类：「洗手」与「洗碗」是两类，「上楼」与
-「下楼」是两类，「拿起」与「放下」是两类。
+- 都不是，或拿不准 → match 填 null，并给 label：这一类的可读名，写**那件事本身**，不带对方、
+  地点、话题、方向（「交谈」而不是「与Shure交谈」，「吃饭」而不是「吃披萨」）。
 
 【重要】宁可 null，不要勉强合并。错误的合并会把两类行为的统计搅在一起，比暂时多出一个类型
 更糟——多出的类型以后还能并回去，搅在一起的统计分不开。
@@ -74,29 +77,35 @@ KIND_SYSTEM_PROMPT = """\
 
 @dataclass(frozen=True)
 class BehaviorKindRequest:
-    """一个待归属的名字：``day`` 是它发生的行为日（记命中用），``evidence`` 是给模型看的证据。"""
+    """一个待归属的名字：``days`` 是它发生过的行为日（每一天各记一次命中），``evidence`` 是给模型看的证据。
+
+    同一轮归约常含多天数据（积压、重放）；同名多天的请求由调用方聚合成一条，天数不能丢。
+    """
 
     name: str
-    day: date | None = None
+    days: tuple[date, ...] = ()
     evidence: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", semantic_name(self.name, "behavior kind name"))
-        if self.day is not None and not isinstance(self.day, date):
-            raise TypeError("day must be a date")
+        if isinstance(self.days, str) or not isinstance(self.days, Sequence) or any(
+            not isinstance(day, date) for day in self.days
+        ):
+            raise TypeError("days must be a sequence of dates")
+        object.__setattr__(self, "days", tuple(sorted(set(self.days))))
         if self.evidence is not None and not isinstance(self.evidence, str):
             raise TypeError("evidence must be text")
 
+    @property
+    def identity(self) -> str:
+        return canonical_path_identity(self.name, "behavior kind name")
 
-@dataclass(frozen=True)
-class BehaviorKindResolution:
-    """单个名字的归属结果（``resolve`` 的返回；保留给只处理一个名字的调用方）。"""
+    def merged_with(self, other: BehaviorKindRequest) -> BehaviorKindRequest:
+        """同身份的两条请求合并：天数并集，证据取先给出的。"""
 
-    token: str
-    registry: BehaviorKindRegistry
-    created: bool
-    model_called: bool
-    validation_attempts: int
+        return BehaviorKindRequest(
+            name=self.name, days=(*self.days, *other.days), evidence=self.evidence or other.evidence
+        )
 
 
 @dataclass(frozen=True)
@@ -169,21 +178,6 @@ class BehaviorKindResolver:
         self.config = resolved
         self.embedder = embedder
 
-    # ── 单名入口（兼容只处理一个名字的调用方）─────────────────────────────────────
-
-    async def resolve(self, name: object, registry: BehaviorKindRegistry) -> BehaviorKindResolution:
-        """归属一个名字（不记命中日）；已知名字零模型调用。"""
-
-        request = BehaviorKindRequest(name=semantic_name(name, "behavior kind name"))
-        batch = await self.resolve_many((request,), registry)
-        return BehaviorKindResolution(
-            token=batch.tokens[request.name],
-            registry=batch.registry,
-            created=request.name in batch.created,
-            model_called=batch.model_calls > 0,
-            validation_attempts=batch.model_calls,
-        )
-
     # ── 批量入口 ─────────────────────────────────────────────────────────────────
 
     async def resolve_many(
@@ -202,18 +196,30 @@ class BehaviorKindResolver:
         signals: list[str] = []
         model_calls = 0
 
-        # 同名去重（保留最早给出的证据），已知名字走快路径并记命中。
-        unknown: dict[str, BehaviorKindRequest] = {}
+        # 按规范身份去重（「Wash」「wash」是同一个名字）：同身份的请求合并天数，各拼写都拿到同一 token。
+        merged: dict[str, BehaviorKindRequest] = {}
+        spellings: dict[str, list[str]] = {}
         for request in requests:
             if not isinstance(request, BehaviorKindRequest):
                 raise TypeError("requests must contain BehaviorKindRequest values")
-            if request.name in tokens or request.name in unknown:
-                continue
+            key = request.identity
+            merged[key] = merged[key].merged_with(request) if key in merged else request
+            spellings.setdefault(key, [])
+            if request.name not in spellings[key]:
+                spellings[key].append(request.name)
+
+        def settle_all(key: str, token: str) -> None:
+            for spelling in spellings[key]:
+                tokens[spelling] = token
+
+        # 已知名字走快路径，只记命中。
+        unknown: dict[str, BehaviorKindRequest] = {}
+        for key, request in merged.items():
             known = registry.token_for(request.name)
             if known is not None:
-                tokens[request.name] = known
-                if request.day is not None:
-                    registry = registry.with_hit(known, request.day)
+                settle_all(key, known)
+                for day in request.days:
+                    registry = registry.with_hit(known, day)
                 continue
             unknown[request.name] = request
         if not unknown:
@@ -224,7 +230,7 @@ class BehaviorKindResolver:
             request = next(iter(unknown.values()))
             registry = self._create(registry, request, label=None)
             created.append(request.name)
-            tokens[request.name] = request.name
+            settle_all(request.identity, request.name)
             return BehaviorKindBatchResolution(tokens, registry, vectors, tuple(created), 0, ())
 
         # 向量：给未知名字算，顺带补齐词表里缺向量的 token/label（旁册是派生物）。
@@ -237,7 +243,7 @@ class BehaviorKindResolver:
                 if missing:
                     vectors = vectors.with_vectors({name: embedded[name] for name in missing})
             except (ModelTransportError, ModelResponseError) as exc:
-                signals.append(f"embedding_fallback literal: {exc}")
+                signals.append(f"kind_embedding_fallback literal: {exc}")
                 query_vectors = {}
 
         pending = list(unknown.values())
@@ -246,8 +252,10 @@ class BehaviorKindResolver:
             outcome = await self._judge_chunk(chunk, registry, vectors, query_vectors, signals)
             model_calls += outcome.model_calls
             registry, vectors = self._apply(
-                chunk, outcome.matches, outcome.labels, registry, vectors, query_vectors, tokens, created
+                chunk, outcome.matches, outcome.labels, registry, vectors, query_vectors, tokens, created, signals
             )
+            for request in chunk:
+                settle_all(request.identity, tokens[request.name])
         # 新 kind 的 label 也进向量索引（候选检索按 token/label 取最大相似度）。
         if self.embedder is not None and vectors is not None and created:
             labels = [registry.label_of(name) for name in created]
@@ -256,7 +264,7 @@ class BehaviorKindResolver:
                 try:
                     vectors = vectors.with_vectors(await self._embed(fresh))
                 except (ModelTransportError, ModelResponseError) as exc:
-                    signals.append(f"embedding_fallback labels: {exc}")
+                    signals.append(f"kind_embedding_fallback labels: {exc}")
         return BehaviorKindBatchResolution(
             tokens, registry, vectors, tuple(created), model_calls, tuple(signals)
         )
@@ -285,14 +293,14 @@ class BehaviorKindResolver:
         for _ in range(self.config.validation_rounds + 1):
             if not remaining:
                 break
-            if registry.kind_count == 0 and len(remaining) == 1:
-                # 只剩一个名字且没有候选：无可比对，直接新建（同批其余已判完）。
-                matches[remaining[0].name] = None
-                labels[remaining[0].name] = None
-                remaining = []
-                break
             calls += 1
-            parsed = await self._call(remaining, candidates, registry)
+            try:
+                parsed = await self._call(remaining, candidates, registry)
+            except ModelStructuredOutputError as exc:
+                # 整批级违约（结构层重试也没吐出合法形状）：算作本轮全部违约，进入下一轮重问；
+                # 轮次耗尽后在下面当新建——不让一轮归约失败。
+                signals.append(f"kind_validation_rejected {sorted(r.name for r in remaining)}: {exc}")
+                continue
             accepted, rejected = self._split(parsed, remaining, candidates)
             for name, (match, label) in accepted.items():
                 matches[name] = match
@@ -461,11 +469,19 @@ class BehaviorKindResolver:
         query_vectors: Mapping[str, tuple[float, ...]],
         tokens: dict[str, str],
         created: list[str],
+        signals: list[str],
     ) -> tuple[BehaviorKindRegistry, BehaviorKindVectorIndex | None]:
-        """把判定落进词表：先落 null/候选命中的，再落指向同批名字的（目标已有 token）。"""
+        """把判定落进词表：先落 null/候选命中的，再落指向同批名字的（目标已有 token）。
+
+        **同 label 即同类**：模型对一个名字给出 label「交谈」，就是它的语义结论——词表里已有 label
+        为「交谈」的 kind（或同批里刚建的）就归入它，不另建。这不是代码替模型判语义，是对模型自己
+        结论的一致性执行；否则「与Tasha交谈」「与Lucia交谈」会各自成 kind 而 label 全是「交谈」
+        （DAY1 v18 实测）。容量撞顶只降级撞顶的那个名字（原始名作 token、留信号），同批其它判定照落。
+        """
 
         by_name = {request.name: request for request in chunk}
         settled: dict[str, str] = {}
+        registry_box = [registry]
 
         def settle(name: str) -> str:
             if name in settled:
@@ -473,18 +489,17 @@ class BehaviorKindResolver:
             request = by_name[name]
             target = matches[name]
             if target is None:
-                token = self._create_token(registry_box, request, labels[name], created)
+                token = self._create_or_join(registry_box, request, labels[name], created, signals)
             elif target in by_name:
                 token = settle(target)
-                registry_box[0] = self._alias(registry_box[0], token, request)
+                registry_box[0] = self._alias_or_keep(registry_box[0], token, request, signals)
             else:
                 token = target
-                registry_box[0] = self._alias(registry_box[0], token, request)
+                registry_box[0] = self._alias_or_keep(registry_box[0], token, request, signals)
             settled[name] = token
             tokens[name] = token
             return token
 
-        registry_box = [registry]
         for request in chunk:
             settle(request.name)
         registry = registry_box[0]
@@ -494,30 +509,59 @@ class BehaviorKindResolver:
                 vectors = vectors.with_vectors(fresh)
         return registry, vectors
 
-    def _create_token(
+    def _create_or_join(
         self,
         registry_box: list[BehaviorKindRegistry],
         request: BehaviorKindRequest,
         label: str | None,
         created: list[str],
+        signals: list[str],
     ) -> str:
-        registry_box[0] = self._create(registry_box[0], request, label=label)
+        registry = registry_box[0]
+        if label is not None:
+            owner = registry.token_for_label(label)
+            if owner is not None:
+                # 模型说"这是一次 X"，而词表里已有 X：归入，不另建。
+                registry_box[0] = self._alias_or_keep(registry, owner, request, signals)
+                return owner
+        if registry.kind_count >= self.config.max_kinds:
+            signals.append(f"kind_registry_full {request.name!r} kept as its own token")
+            return request.name
+        registry_box[0] = registry.with_new_kind(request.name, label=label)
+        for day in request.days:
+            registry_box[0] = registry_box[0].with_hit(request.name, day)
         created.append(request.name)
         return request.name
+
+    def _alias_or_keep(
+        self,
+        registry: BehaviorKindRegistry,
+        token: str,
+        request: BehaviorKindRequest,
+        signals: list[str],
+    ) -> BehaviorKindRegistry:
+        """把名字并入 token 作别名并记命中；token 已不在词表（同批撞顶降级）或别名撞顶时只记信号。"""
+
+        if registry.token_for(token) is None:
+            signals.append(f"kind_alias_unrecorded {request.name!r} -> {token!r} (token not registered)")
+            return registry
+        if len(registry.aliases_of(token)) >= self.config.max_aliases_per_kind:
+            signals.append(f"kind_alias_capacity_full {request.name!r} -> {token!r} kept unrecorded")
+            return registry
+        registry = registry.with_alias(token, request.name)
+        for day in request.days:
+            registry = registry.with_hit(token, day)
+        return registry
 
     def _create(
         self, registry: BehaviorKindRegistry, request: BehaviorKindRequest, *, label: str | None
     ) -> BehaviorKindRegistry:
         if registry.kind_count >= self.config.max_kinds:
             raise BehaviorKindLimitError("behavior kind registry has no remaining kind capacity")
-        return registry.with_new_kind(request.name, label=label, day=request.day)
-
-    def _alias(
-        self, registry: BehaviorKindRegistry, token: str, request: BehaviorKindRequest
-    ) -> BehaviorKindRegistry:
-        if len(registry.aliases_of(token)) >= self.config.max_aliases_per_kind:
-            raise BehaviorKindLimitError(f"behavior kind has no remaining alias capacity: {token}")
-        return registry.with_alias(token, request.name, day=request.day)
+        registry = registry.with_new_kind(request.name, label=label)
+        for day in request.days:
+            registry = registry.with_hit(request.name, day)
+        return registry
 
     async def _embed(self, names: Sequence[str]) -> dict[str, tuple[float, ...]]:
         assert self.embedder is not None
@@ -565,7 +609,6 @@ __all__ = [
     "KIND_SYSTEM_PROMPT",
     "BehaviorKindBatchResolution",
     "BehaviorKindRequest",
-    "BehaviorKindResolution",
     "BehaviorKindResolver",
     "kind_match_schema",
 ]

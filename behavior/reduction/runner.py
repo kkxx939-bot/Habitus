@@ -484,16 +484,17 @@ class BehaviorReductionRunner:
         requests: dict[str, BehaviorKindRequest] = {}
         latest_day: date | None = None
         for head in heads:
-            name = str(head.behavior)
-            day = head.started_at.date()
-            latest_day = day if latest_day is None or day > latest_day else latest_day
-            if name not in requests:
-                requests[name] = BehaviorKindRequest(name=name, day=day, evidence=head.summary)
+            request = BehaviorKindRequest(
+                name=str(head.behavior), days=(head.started_at.date(),), evidence=head.summary
+            )
+            latest_day = max(latest_day, request.days[0]) if latest_day is not None else request.days[0]
+            key = request.identity  # 同身份的名字（大小写/规范化差异）合成一条，天数并集
+            requests[key] = requests[key].merged_with(request) if key in requests else request
 
         snapshot = self.kind_store.read()
         registry = snapshot.registry
         revision = snapshot.revision
-        vectors = self._read_kind_vectors(signals)
+        vectors, vectors_dirty = self._read_kind_vectors(signals)
         vectors_before = vectors
         tokens: dict[str, str] = {}
 
@@ -513,7 +514,7 @@ class BehaviorReductionRunner:
                 # （occurrence 永远保留原始名）。留信号，不让一轮归约整个失败。
                 for item in chunk:
                     tokens[item.name] = item.name
-                    signals.append(f"kind registry full: {item.name!r} kept as its own token ({exc})")
+                    signals.append(f"kind_registry_full {item.name!r} kept as its own token ({exc})")
                 continue
             registry, vectors = result.registry, result.vectors
             tokens.update(result.tokens)
@@ -525,8 +526,14 @@ class BehaviorReductionRunner:
                 guard.checkpoint()
 
         if latest_day is not None:
-            expired = registry.expired(
-                on=latest_day, base_days=config.base_days, gap_multiplier=config.gap_multiplier
+            # 本轮命中过的 token 不参与过期：一轮里混有回填的旧日期时，刚记的账不能被本轮时钟立刻删掉。
+            hit_now = set(tokens.values())
+            expired = tuple(
+                token
+                for token in registry.expired(
+                    on=latest_day, base_days=config.base_days, gap_multiplier=config.gap_multiplier
+                )
+                if token not in hit_now
             )
             for token in expired:
                 entry = registry.entry_of(token)
@@ -534,15 +541,16 @@ class BehaviorReductionRunner:
                     f"kind_expired {token!r} last hit {entry.last_hit_day} "
                     f"(hit_days={entry.hit_days_total}, max_gap={entry.max_gap_days})"
                 )
-                if vectors is not None:
-                    vectors = vectors.without((entry.token, entry.label))
                 registry = registry.without(token)
+            if expired and vectors is not None:
+                # 旁册按名字键、条目间可能同名：按"谁还在用"收，不按 (token, label) 直删。
+                vectors = vectors.retain(registry.names_in_use())
         registry, revision = self._persist_kinds(registry, revision, now)
-        if vectors is not None and vectors is not vectors_before and self.kind_vectors is not None:
+        if vectors is not None and (vectors_dirty or vectors is not vectors_before) and self.kind_vectors is not None:
             try:
                 self.kind_vectors.replace(vectors)
             except BehaviorKindVectorError as exc:
-                signals.append(f"kind_vectors_not_persisted: {exc}")
+                signals.append(f"kind_vectors_not_persisted {exc}")
         return tokens
 
     def _persist_kinds(
@@ -556,16 +564,16 @@ class BehaviorReductionRunner:
         written = self.kind_store.replace(registry, expected_revision=revision, timestamp=now)
         return written.registry, written.revision
 
-    def _read_kind_vectors(self, signals: list[str]) -> BehaviorKindVectorIndex | None:
-        """向量旁册是派生物：读不了就按空索引走（候选退字面重合），留信号，不阻塞归约。"""
+    def _read_kind_vectors(self, signals: list[str]) -> tuple[BehaviorKindVectorIndex | None, bool]:
+        """向量旁册是派生物：读不了就按空索引走并标脏（本轮结束必重写），留信号，不阻塞归约。"""
 
         if self.kind_vectors is None:
-            return None
+            return None, False
         try:
-            return self.kind_vectors.read()
+            return self.kind_vectors.read(), False
         except BehaviorKindVectorError as exc:
-            signals.append(f"kind_vectors_unreadable: {exc}; rebuilding from empty")
-            return self.kind_vectors.empty()
+            signals.append(f"kind_vectors_unreadable {exc}; rebuilding from empty")
+            return self.kind_vectors.empty(), True
 
     @staticmethod
     def _merged_gap_payload(group: list[ReducibleJudgement], *, chain_digest: str) -> dict[str, Any]:

@@ -21,7 +21,8 @@ class BehaviorKindConfig:
 
     max_kinds: int = 10_000
     max_aliases_per_kind: int = 200
-    max_encoded_bytes: int = 8 * 1024 * 1024
+    # 一条带满 64 个命中日的条目约 1KB；上限要盖住 max_kinds 条满账条目（评审实测 10,000 条≈10MB）。
+    max_encoded_bytes: int = 16 * 1024 * 1024
     batch_size: int = 10
     vector_candidates: int = 30
     frequent_candidates: int = 20

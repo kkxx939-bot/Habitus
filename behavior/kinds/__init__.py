@@ -8,12 +8,12 @@ from behavior.kinds.model import (
     BehaviorKindLimitError,
     BehaviorKindRegistry,
 )
+from behavior.kinds.rebuild import BehaviorKindRebuildReport, rebuild_registry
 from behavior.kinds.resolver import (
     KIND_PROMPT_VERSION,
     KIND_SYSTEM_PROMPT,
     BehaviorKindBatchResolution,
     BehaviorKindRequest,
-    BehaviorKindResolution,
     BehaviorKindResolver,
     kind_match_schema,
 )
@@ -37,6 +37,7 @@ __all__ = [
     "KINDS_VECTORS_FILENAME",
     "BehaviorKindBatchResolution",
     "BehaviorKindEntry",
+    "BehaviorKindRebuildReport",
     "BehaviorKindRequest",
     "BehaviorKindVectorError",
     "BehaviorKindVectorIndex",
@@ -48,10 +49,10 @@ __all__ = [
     "BehaviorKindError",
     "BehaviorKindLimitError",
     "BehaviorKindRegistry",
-    "BehaviorKindResolution",
     "BehaviorKindResolver",
     "BehaviorKindSnapshot",
     "BehaviorKindStore",
     "BehaviorKindStoreError",
     "kind_match_schema",
+    "rebuild_registry",
 ]

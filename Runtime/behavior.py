@@ -364,9 +364,13 @@ def build_behavior_components(
     # 词表参数从唯一的 Config 边界进来；embedder 只做候选召回（BHV-KINDS-002），没有它就退字面重合。
     kind_config = BehaviorKindConfig(**behavior_config.kinds_overrides())
     kind_store = BehaviorKindStore(tree.root, config=kind_config)
+    # 旁册的身份键只从配置取（provider/model/dimension 一处出处）；换任一项旁册作废重算——它是派生物。
+    embedding = config.models.embedding
     kind_vectors = (
         BehaviorKindVectorStore(
-            tree.root, model=embedder.model, dimension=config.models.embedding.dimension
+            tree.root,
+            model=f"{embedding.route.provider}/{embedding.route.model}",
+            dimension=embedding.dimension,
         )
         if embedder is not None
         else None

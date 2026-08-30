@@ -49,6 +49,11 @@ TODO(BHV-KINDS-002): 词表在真实数据上的膨胀与归一形状——方�
 【验证】DAY1 v18 融合产物重放归约直接建词表（≈24 次归一调用），看归类与 label；七天数据零调用
 模拟存活期；抽 100 对人工标注做归错率基准。
 【不做】自动重要性判断、非单位闸门、merged_into 读侧解析、预测树改动。
+【落地状态】①②③④⑥ 已落地（``rebuild.py`` 做补齐 + 账按树重算 + 向量补算，零模型调用；合并原语
+``merged`` 已有）；⑤ 离线整理工具（成对交模型判"是否同一件事"+ 树上重打 token）未做，另立。
+三位评审确认项（命中账窗口外晚到日、合并共有日双计、label 撞名误删向量、容量不自洽、同身份名字撞库、
+结构性校验耗尽逃逸、同名多天只记一天、撞顶丢整批、本轮时钟误删本轮命中、旁册损坏永不重写）均已修，
+见 tests/unit/behavior/test_kinds.py 与 test_reduction_runner.py。
 """
 
 from __future__ import annotations
@@ -141,18 +146,25 @@ class BehaviorKindEntry:
         return max((later - earlier).days for earlier, later in zip(self.hit_days, self.hit_days[1:], strict=False))
 
     def with_hit(self, day: date) -> BehaviorKindEntry:
-        """记一次命中：同一天多次只算一天；晚到的日子插入重排；超过保留数丢最早的。"""
+        """记一次命中：同一天多次只算一天；晚到的日子插入重排；超过保留数丢最早的。
+
+        窗口已满且晚到日早于窗口最早日时，那一天是否已计过不可辨——只加次数、不加天数（宁少勿重）。
+        ``created_on`` 是**首见行为日**：晚到的更早一天会把它往前推。
+        """
 
         hit_day = _day(day, "behavior kind hit day")
+        created = hit_day if self.created_on is None or hit_day < self.created_on else self.created_on
         if hit_day in self.hit_days:
-            return replace(self, hit_count=self.hit_count + 1)
+            return replace(self, hit_count=self.hit_count + 1, created_on=created)
+        if len(self.hit_days) >= HIT_DAYS_KEPT and hit_day < self.hit_days[0]:
+            return replace(self, hit_count=self.hit_count + 1, created_on=created)
         days = tuple(sorted((*self.hit_days, hit_day)))[-HIT_DAYS_KEPT:]
         return replace(
             self,
             hit_days=days,
             hit_days_total=self.hit_days_total + 1,
             hit_count=self.hit_count + 1,
-            created_on=self.created_on if self.created_on is not None else hit_day,
+            created_on=created,
         )
 
     def expires_after(self, *, base_days: int, gap_multiplier: int) -> date | None:
@@ -190,6 +202,7 @@ class BehaviorKindRegistry:
     # ``__post_init__`` 统一规范化成条目，所以类型上只声明条目。
     entries: Mapping[str, BehaviorKindEntry] = field(default_factory=dict)
     _index: Mapping[str, str] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _labels: Mapping[str, str] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.entries, Mapping):
@@ -207,6 +220,17 @@ class BehaviorKindRegistry:
                         f"behavior kind name collides with an existing entry: {name}"
                     )
                 index[identity] = token
+        # label 也在条目间唯一：模型说"这是一次交谈"，词表里就只能有一个「交谈」；label 若与
+        # 别的条目的名字同身份，说明这两条本该是一类（归一时按 label 归并）。
+        labels: dict[str, str] = {}
+        for token, entry in normalized.items():
+            identity = canonical_path_identity(entry.label, "behavior kind label")
+            owner = index.get(identity)
+            if (owner is not None and owner != token) or (identity in labels and labels[identity] != token):
+                raise BehaviorKindError(
+                    f"behavior kind label collides with another entry: {entry.label}"
+                )
+            labels[identity] = token
         ordered = {
             token: normalized[token]
             for token in sorted(
@@ -215,6 +239,7 @@ class BehaviorKindRegistry:
         }
         object.__setattr__(self, "entries", MappingProxyType(ordered))
         object.__setattr__(self, "_index", MappingProxyType(index))
+        object.__setattr__(self, "_labels", MappingProxyType(labels))
 
     # ── 读 ─────────────────────────────────────────────────────────────────────────
 
@@ -248,6 +273,19 @@ class BehaviorKindRegistry:
             semantic_name(name, "behavior kind name"), "behavior kind name"
         )
         return self._index.get(identity)
+
+    def token_for_label(self, label: object) -> str | None:
+        """哪个条目的 label（或名字）与这个可读名同身份；没有返回 None。"""
+
+        identity = canonical_path_identity(
+            semantic_name(label, "behavior kind label"), "behavior kind label"
+        )
+        return self._labels.get(identity) or self._index.get(identity)
+
+    def names_in_use(self) -> frozenset[str]:
+        """全部条目的 token / label / 别名——向量旁册只保留这些名字。"""
+
+        return frozenset(name for entry in self.entries.values() for name in (*entry.names, entry.label))
 
     def most_hit(self, limit: int) -> tuple[str, ...]:
         """命中天数最多的 token（并列按 token 身份序）。"""
@@ -320,6 +358,7 @@ class BehaviorKindRegistry:
         if src == dst:
             raise BehaviorKindError("cannot merge a behavior kind into itself")
         a, b = self.entries[src], self.entries[dst]
+        shared = set(a.hit_days) & set(b.hit_days)
         days = tuple(sorted(set(a.hit_days) | set(b.hit_days)))[-HIT_DAYS_KEPT:]
         created = min((d for d in (a.created_on, b.created_on) if d is not None), default=None)
         merged = replace(
@@ -327,7 +366,8 @@ class BehaviorKindRegistry:
             aliases=(*b.aliases, a.token, *a.aliases),
             created_on=created,
             hit_days=days,
-            hit_days_total=a.hit_days_total + b.hit_days_total,
+            # 两边窗口内共有的日子只算一天；窗口外的重叠不可知，是近似
+            hit_days_total=a.hit_days_total + b.hit_days_total - len(shared),
             hit_count=a.hit_count + b.hit_count,
         )
         remaining = {key: value for key, value in self.entries.items() if key != src}

@@ -16,7 +16,7 @@ import base64
 import json
 import math
 import struct
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from operator import mul
 from pathlib import Path
@@ -79,15 +79,20 @@ class BehaviorKindVectorIndex:
         object.__setattr__(self, "vectors", MappingProxyType(cleaned))
 
     def with_vectors(self, values: Mapping[str, Sequence[float]]) -> BehaviorKindVectorIndex:
+        """写入即按落盘精度（float16）保存：同一进程内与重启读回的候选排序一致。"""
+
         merged = dict(self.vectors)
         for name, vector in values.items():
-            merged[name] = normalized(vector)
+            merged[name] = _unpack(_pack(normalized(vector)), self.dimension)
         return BehaviorKindVectorIndex(self.model, self.dimension, merged)
 
-    def without(self, names: Sequence[str]) -> BehaviorKindVectorIndex:
-        dropped = set(names)
+    def retain(self, names: Iterable[str]) -> BehaviorKindVectorIndex:
+        """只保留仍被词表引用的名字——旁册按名字键，删条目时不能按 (token, label) 直删
+        （别的条目可能同名），而要按"谁还在用"来收。"""
+
+        keep = set(names)
         return BehaviorKindVectorIndex(
-            self.model, self.dimension, {k: v for k, v in self.vectors.items() if k not in dropped}
+            self.model, self.dimension, {k: v for k, v in self.vectors.items() if k in keep}
         )
 
     def has(self, name: str) -> bool:
