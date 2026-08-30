@@ -219,6 +219,19 @@ def evaluate(case: FusionCase, run: Mapping[str, Any]) -> dict[str, Any]:
                 "detail": f"段{index} 期望不进主体判断的帧 {list(expected_free)}，被吸收的 {absorbed}",
             }
         )
+    for index, forbidden in case.expect.forbidden_behaviors.items():
+        actual_names = [
+            str(item.get("behavior") or "")
+            for item in segments.get(index, {}).get("judgements", ())
+        ]
+        leaked = [name for name in actual_names if any(bad in name for bad in forbidden)]
+        checks.append(
+            {
+                "check": "behaviors_forbidden",
+                "passed": not leaked,
+                "detail": f"段{index} 不该出现的行为被判出：{leaked}；实际 {actual_names}",
+            }
+        )
     for index, expected_behaviors in case.expect.behaviors_present.items():
         actual_behaviors = [
             str(item.get("behavior") or "")

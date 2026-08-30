@@ -103,6 +103,9 @@ class FusionExpectation:
     # 判成读不懂都没有把它塞进主体的行为——三种都对，只有"进了主体的判断"才是错。比 out_of_scope
     # 宽：那条要求分流成旁人的判断，而 WP4 之后"不是主体的事也不是主体的步骤"的正解是无归属。
     subject_free_fragments: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
+    # 某段里**不得出现**的行为名（子串匹配 behavior）：只动身体的姿态（坐着、看着大家、转头）不是
+    # 可提醒的单位，判出来就是折叠没做到——behaviors_present 的反面，两头一起抓。
+    forbidden_behaviors: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for _, _, kind in tuple(self.relations) + tuple(self.forbidden_relations):
@@ -126,6 +129,7 @@ class FusionExpectation:
             or self.unowned_fragments
             or self.behaviors_present
             or self.subject_free_fragments
+            or self.forbidden_behaviors
             or self.forbidden_status
             or self.status_present
             or self.goal_absent
@@ -231,6 +235,9 @@ def _case(value: Any) -> FusionCase:
             subject_free_fragments={
                 int(key): tuple(item)
                 for key, item in expect.get("subject_free_fragments", {}).items()
+            },
+            forbidden_behaviors={
+                int(key): tuple(item) for key, item in expect.get("forbidden_behaviors", {}).items()
             },
         ),
     )

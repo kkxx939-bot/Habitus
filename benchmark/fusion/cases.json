@@ -4168,6 +4168,1170 @@
           ]
         }
       }
+    },
+    {
+      "case_id": "real-egolife-discussion-posture-frames",
+      "category": "realdata",
+      "probing": true,
+      "primary_subject": "Jake",
+      "intent": "EgoLife DAY1 11:56–12:00 真实两段（133 条：转写为主，视觉全是听讨论时的姿态——看着大家、转头、点头、坐在原地、俯身）：单位只有一次多人讨论；姿态帧要么归进讨论要么无归属，不得立成'坐着''看着大家'。v16 首跑实测：讨论期间的姿态被立成 坐着×10 / 看着大家×8，且一旦进了上下文就被后续段 continues 下去",
+      "segments": [
+        [
+          {
+            "at": 0,
+            "says": "Shure：不如跳舞",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 4,
+            "says": "Shure：捋一下时间线吧",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 4,
+            "says": "Jake把手放下把腿放到凳子下面",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 6,
+            "says": "Lucia：可是跳舞的话戴眼镜会掉耶",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 9,
+            "says": "Jake看着大家",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 9,
+            "says": "Lucia：哈哈哈",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 10,
+            "says": "Shure：还戴眼镜那时候",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 12,
+            "says": "Shure：那我们可以挑点简单的",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 14,
+            "says": "Shure：蘑菇蘑菇哎",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 15,
+            "says": "Jake看着Alice拿起花说话",
+            "who": [
+              "Jake",
+              "Alice"
+            ]
+          },
+          {
+            "at": 16,
+            "says": "Lucia：我们可以跳抖音上的那种",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 16,
+            "says": "Jake：哈哈哈哈",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 18,
+            "says": "Shure：哈哈哈",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 21,
+            "says": "Shure：这个听我说",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 22,
+            "says": "向右转头",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 22,
+            "says": "Shure：谢谢你对对对",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 23,
+            "says": "Lucia：对对对抖音上就大家都可以一起挑",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 26,
+            "says": "Lucia：就是排的时间也会短一些对吧",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 29,
+            "says": "Lucia：也没有什么比较大的动作",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 29,
+            "says": "Jake：对",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 30,
+            "says": "Jake向左转头向右转头",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 30,
+            "says": "Lucia：戴眼镜也不影响",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 34,
+            "says": "Shure：哎",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 37,
+            "says": "Shure：捋下时间线",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 38,
+            "says": "Tasha：可拍满100个硬币",
+            "who": [
+              "Tasha",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 38,
+            "says": "Jake看见Tasha",
+            "who": [
+              "Jake",
+              "Tasha"
+            ]
+          },
+          {
+            "at": 39,
+            "says": "Tasha：哈哈哈啊",
+            "who": [
+              "Tasha",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 40,
+            "says": "Jake：啊   买",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 41,
+            "says": "Tasha：我只是觉得应该买实体硬币",
+            "who": [
+              "Tasha",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 43,
+            "says": "Jake：哦 可以买 采购",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 44,
+            "says": "Katrina：哦哦不对",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 44,
+            "says": "Jake向后仰",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 45,
+            "says": "Katrina：拍卖之前首先要他们讲故事",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 48,
+            "says": "Katrina：才能获得那个币",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 50,
+            "says": "Jake：对对对就是这个时间",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 51,
+            "says": "Jake：可能就得放一个半小时了对",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 51,
+            "says": "Jake向左转头",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 55,
+            "says": "Jake：就就你们昨天的那个活动",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 57,
+            "says": "Jake：也也两个小时了",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 58,
+            "says": "继续看着大家向右转头",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 58,
+            "says": "Shure：也不用讲那么长",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 59,
+            "says": "Shure：就讲一个小故事",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 61,
+            "says": "Shure：一个每个人5分钟那种大概",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 64,
+            "says": "Jake：哦  可以啊",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 64,
+            "says": "Jake看着大家Jake继续点头",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 66,
+            "says": "Shure：或者时间成本控制不好的话",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 69,
+            "says": "Shure：就以其他形式获得币",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 70,
+            "says": "继续看着大家Jake看着ShureJake向右转头",
+            "who": [
+              "Jake",
+              "Shure"
+            ]
+          },
+          {
+            "at": 70,
+            "says": "Shure：但是这个活动的核心是那个拍卖过程",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 74,
+            "says": "Shure：但是这个货币怎么获得",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 75,
+            "says": "Jake向左转头Jake看着Shure",
+            "who": [
+              "Jake",
+              "Shure"
+            ]
+          },
+          {
+            "at": 76,
+            "says": "Shure：可以再进一步上去",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 79,
+            "says": "Jake：嗯嗯",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 79,
+            "says": "Shure：对拍卖过程这个是要保留的",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 81,
+            "says": "Shure：大概像9个人的话每个人5分钟",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 82,
+            "says": "Jake歪头Jake看着大家Jake向右转头",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 84,
+            "says": "Shure：5945一个小时吧",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 86,
+            "says": "Shure：就按一个小时算的",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 89,
+            "says": "看着大家Jake继续坐在原地",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 92,
+            "says": "Lucia：路上给大家发一些币",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 93,
+            "says": "Lucia：然后通过摇骰子让大家玩一会",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 95,
+            "says": "Jake看着大家坐在原地Jake点头",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 97,
+            "says": "Katrina：啊可以设置一些游戏",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 97,
+            "says": "Jake：嗯对对对",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 100,
+            "says": "Jake左左转头",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 100,
+            "says": "Jake：哈哈哈整点游戏可以",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          }
+        ],
+        [
+          {
+            "at": 103,
+            "says": "Shure：我们门门口再来一个",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 106,
+            "says": "Lucia：哈哈哈没有没有开个玩笑",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 106,
+            "says": "Jake：哈哈哈",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 107,
+            "says": "Lucia：可以可以可以",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 108,
+            "says": "Jake笑Jake操作手机",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 108,
+            "says": "Lucia：确实啊",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 110,
+            "says": "Lucia：这个听起来有点",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 112,
+            "says": "Lucia：哈哈哈一会发鸡蛋一会摇骰子",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 114,
+            "says": "Jake：然后",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 114,
+            "says": "两手放在凳子上Jake向前俯身",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 116,
+            "says": "Jake：哈哈哈据点是吧",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 118,
+            "says": "Jake：哈哈哈据点是吧",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 119,
+            "says": "Shure：一锅端了小心这",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 123,
+            "says": "Tasha：进来玩玩嘛进来就可以获得10个币",
+            "who": [
+              "Tasha",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 123,
+            "says": "Jake向左转头",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 130,
+            "says": "Shure：哈哈",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 131,
+            "says": "向左转头",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 132,
+            "says": "Katrina：但是一一进来就让",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 134,
+            "says": "Katrina：就是刚开始肯定要获得货币",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 136,
+            "says": "Katrina：但是你获得货币",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 137,
+            "says": "Katrina：是要他们通过讲故事的方式",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 139,
+            "says": "Jake向左转头",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 139,
+            "says": "Katrina：但是他们一进来可能还没那么熟",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 141,
+            "says": "Katrina：就要让他们在众人面前讲故事干什么",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 144,
+            "says": "Katrina：那就自我介绍",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 145,
+            "says": "Tasha：会冷场可以获得一个币啊",
+            "who": [
+              "Tasha",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 145,
+            "says": "头Jake向右点",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 145,
+            "says": "Jake：昂",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 146,
+            "says": "Lucia：自我介绍可以获得",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 147,
+            "says": "Katrina：对啊自我介绍可以获得",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 149,
+            "says": "Jake：自我介绍获得或者",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 150,
+            "says": "Alice：第一个给5个",
+            "who": [
+              "Alice",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 151,
+            "says": "Jake左右晃头",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 151,
+            "says": "Alice：第二个给仨",
+            "who": [
+              "Alice",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 154,
+            "says": "Katrina：奖惩机制",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 156,
+            "says": "Jake：或者我们其实在这个屋子里面",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 158,
+            "says": "Jake：可以藏点东西",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 159,
+            "says": "Jake看着ShureJake向右转头",
+            "who": [
+              "Jake",
+              "Shure"
+            ]
+          },
+          {
+            "at": 159,
+            "says": "Jake：然后啊",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 160,
+            "says": "Lucia：像复活节的那种寻彩蛋游戏一样",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 161,
+            "says": "Jake：对对对",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 164,
+            "says": "看着大家又转头",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 165,
+            "says": "Jake：藏点币",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 166,
+            "says": "Shure：藏币也行",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 169,
+            "says": "Jake向左转头",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 170,
+            "says": "Katrina：就是刚开始自我介绍获得币",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 172,
+            "says": "Katrina：然后玩玩点小游戏赢赢了的币",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 175,
+            "says": "Shure：对就比如说一些问答什么的",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 175,
+            "says": "Jake向右转头",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 177,
+            "says": "Shure：野生动物拼图那个",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 178,
+            "says": "Lucia：哎问答的话反正是世界地球日",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 180,
+            "says": "Lucia：对可以",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 181,
+            "says": "Lucia：知识问答知识问答",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 183,
+            "says": "Shure：知识问答得币",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 185,
+            "says": "Shure：对对对好",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 185,
+            "says": "Jake坐在原地",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 186,
+            "says": "Shure：我想起来了",
+            "who": [
+              "Shure",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 186,
+            "says": "Tasha：好世界地球日是哪一天",
+            "who": [
+              "Tasha",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 187,
+            "says": "Katrina：先要把那个",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 188,
+            "says": "Lucia：二十几来着",
+            "who": [
+              "Lucia",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 190,
+            "says": "Katrina：先要把这个钱给让他们得到",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 190,
+            "says": "Jake笑Jake看着大家向前俯身",
+            "who": [
+              "Jake"
+            ]
+          },
+          {
+            "at": 190,
+            "says": "Jake：二十二我把我把二十一来搞",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 193,
+            "says": "Katrina：然后再开始推销",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 194,
+            "says": "Jake：因为是星期天",
+            "who": [
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 195,
+            "says": "Katrina：推销我们的产品",
+            "who": [
+              "Katrina",
+              "Jake"
+            ],
+            "knowledge_state": "reported"
+          },
+          {
+            "at": 195,
+            "says": "Jake继续前后晃动身体看着大家",
+            "who": [
+              "Jake"
+            ]
+          }
+        ]
+      ],
+      "expect": {
+        "judgement_count": {
+          "1": [
+            1,
+            3
+          ],
+          "2": [
+            1,
+            3
+          ]
+        },
+        "forbidden_behaviors": {
+          "1": [
+            "坐着",
+            "坐在",
+            "看着大家",
+            "转头",
+            "点头",
+            "俯身",
+            "看着Shure",
+            "看着Alice"
+          ],
+          "2": [
+            "坐着",
+            "坐在",
+            "看着大家",
+            "转头",
+            "点头",
+            "俯身",
+            "看着Shure",
+            "看着Alice"
+          ]
+        }
+      }
     }
   ]
 }
