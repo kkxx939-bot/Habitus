@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -28,7 +28,7 @@ from behavior.fusion.config import FUSION_CONTEXT_LOOKBACK_SECONDS
 from behavior.fusion.coverage import BehaviorCoverageIndex
 from behavior.fusion.receipt_store import BehaviorFusionReceiptStore
 from behavior.fusion.store import BehaviorJudgementStore
-from behavior.kinds.model import BehaviorKindLimitError, BehaviorKindRegistry
+from behavior.kinds.model import BehaviorKindRegistry
 from behavior.kinds.resolver import BehaviorKindRequest, BehaviorKindResolver
 from behavior.kinds.store import BehaviorKindStore
 from behavior.kinds.vectors import (
@@ -78,6 +78,9 @@ class BehaviorReductionReport:
     published_gaps: int
     chains_pending: int
     dropped_edges: tuple[str, ...]
+    # 词表侧的事件与信号（新建/命中/过期/降级），与归约本身的丢边、隔离分开列——面板数"异常"时
+    # 不把"新建了一个 kind"这种正常事件数进去。
+    kind_signals: tuple[str, ...] = ()
 
     @property
     def published_documents(self) -> int:
@@ -180,6 +183,7 @@ class BehaviorReductionRunner:
             return await self._run_locked(guard)
 
     async def _run_locked(self, guard: LeaseGuard) -> BehaviorReductionReport:
+        self._kind_signals: list[str] = []
         replayed, replayed_days = self._replay_checkpoint(guard)
         now = self._now()
         self._expire(now)
@@ -214,6 +218,7 @@ class BehaviorReductionRunner:
                 published_gaps=0,
                 chains_pending=len(assembly.chains),
                 dropped_edges=(*assembly.dropped_edges, *quarantined, *refresh_notes),
+                kind_signals=tuple(self._kind_signals),
             )
 
         # 检查点字节上界的确定性缩批：超限时按封口顺序留前一半重来（留下的下一轮自然处理），
@@ -272,6 +277,7 @@ class BehaviorReductionRunner:
             # skip/defer/缩批留下的链仍未消费，一并计入 pending——报告不许把它们说成已处理。
             chains_pending=len(assembly.chains) - published_occurrences,
             dropped_edges=(*assembly.dropped_edges, *quarantined, *dropped, *refresh_notes),
+            kind_signals=tuple(self._kind_signals),
         )
 
     def _clear_checkpoint(self, guard: LeaseGuard) -> None:
@@ -341,10 +347,7 @@ class BehaviorReductionRunner:
         # kinds 归一只对命名幸存的链做（写入层唯一的 LLM 触点）——坏名字的链已隔离，
         # 不许它在 resolver 处把整轮吞掉。
         tokens = await self._resolve_kind_tokens(
-            (assembly.chains[index].head for index in naming),
-            now,
-            guard=guard,
-            dropped=dropped,
+            (assembly.chains[index].head for index in naming), now, guard=guard
         )
         sources = {
             ref
@@ -464,94 +467,77 @@ class BehaviorReductionRunner:
         heads: Iterable[ReducibleJudgement],
         now: datetime,
         *,
-        guard: LeaseGuard | None = None,
-        dropped: list[str] | None = None,
+        guard: LeaseGuard | None,
     ) -> dict[str, str]:
-        """kinds 归一——写入层唯一的 LLM 触点；按批 CAS 落盘，到期条目随本轮删除。
+        """kinds 归一——写入层唯一的 LLM 触点；按批 CAS 落盘并续租。只定"名字 → token"，不记账。
 
-        每条链头给出三样：名字、证据（判断的 summary，给模型看"做的是什么"）、行为日（``started_at``
-        所在的本地日历日，命中账按它记，不按归约时刻）。已知名字走确定性快路径只记命中；未知名字
-        按 ``batch_size`` 一批交 resolver（embedding 候选 + 模型判"是不是同一件事"）。每批落一次词表
-        并续 sweep 租约——崩溃重试时先前已记入词表的名字走快路径，"先落词表、再落检查点"的顺序保证
-        重试不漂移。词表撞顶不让整轮失败：超限名字暂以原始名作 token 并留信号。
-
-        过期用**数据时钟**（本轮最新的行为日）而不是墙钟：停机一个月不会把词表删光。到期条目删除
-        只动词表与向量旁册，树上的 occurrence 原样保留（BHV-KINDS-002）。
+        每条链头给出名字与证据（判断的 summary）。已知名字走确定性快路径；未知名字由 resolver 按批
+        判定（embedding 候选 + 模型判"是不是同一件事"），每批落一次词表——崩溃重试时先前已记入词表
+        的名字走快路径，"先落词表、再落检查点"的顺序保证重试不漂移。命中账在发布时记
+        （``_record_kind_hits``），与树上的 occurrence 一一对应。
         """
 
-        signals = dropped if dropped is not None else []
-        config = self.kind_resolver.config
-        requests: dict[str, BehaviorKindRequest] = {}
-        latest_day: date | None = None
-        for head in heads:
-            request = BehaviorKindRequest(
-                name=str(head.behavior), days=(head.started_at.date(),), evidence=head.summary
-            )
-            latest_day = max(latest_day, request.days[0]) if latest_day is not None else request.days[0]
-            key = request.identity  # 同身份的名字（大小写/规范化差异）合成一条，天数并集
-            requests[key] = requests[key].merged_with(request) if key in requests else request
-
+        signals = self._kind_signals
+        requests = [
+            BehaviorKindRequest(name=str(head.behavior), evidence=head.summary) for head in heads
+        ]
         snapshot = self.kind_store.read()
-        registry = snapshot.registry
-        revision = snapshot.revision
+        registry, revision = snapshot.registry, snapshot.revision
         vectors, vectors_dirty = self._read_kind_vectors(signals)
         vectors_before = vectors
         tokens: dict[str, str] = {}
-
-        known = [item for item in requests.values() if registry.token_for(item.name) is not None]
-        unknown = [item for item in requests.values() if registry.token_for(item.name) is None]
-        if known:
-            # 零调用：只记命中账。
-            result = await self.kind_resolver.resolve_many(known, registry, vectors=vectors)
-            registry, vectors = result.registry, result.vectors
-            tokens.update(result.tokens)
-        for start in range(0, len(unknown), config.batch_size):
-            chunk = unknown[start : start + config.batch_size]
-            try:
-                result = await self.kind_resolver.resolve_many(chunk, registry, vectors=vectors)
-            except BehaviorKindLimitError as exc:
-                # 词表容量撞顶：这一批的名字暂以原始名作 token，语义面不丢、统计可事后重打
-                # （occurrence 永远保留原始名）。留信号，不让一轮归约整个失败。
-                for item in chunk:
-                    tokens[item.name] = item.name
-                    signals.append(f"kind_registry_full {item.name!r} kept as its own token ({exc})")
-                continue
-            registry, vectors = result.registry, result.vectors
-            tokens.update(result.tokens)
-            signals.extend(result.signals)
-            for name in result.created:
-                signals.append(f"kind_created {name!r} label={registry.label_of(name)!r}")
+        async for batch in self.kind_resolver.resolve_batches(requests, registry, vectors=vectors):
+            tokens.update(batch.tokens)
+            signals.extend(batch.signals)
+            for name in batch.created:
+                signals.append(f"kind_created {name!r} label={batch.registry.label_of(name)!r}")
+            registry, vectors = batch.registry, batch.vectors
             registry, revision = self._persist_kinds(registry, revision, now)
             if guard is not None:
                 guard.checkpoint()
-
-        if latest_day is not None:
-            # 本轮命中过的 token 不参与过期：一轮里混有回填的旧日期时，刚记的账不能被本轮时钟立刻删掉。
-            hit_now = set(tokens.values())
-            expired = tuple(
-                token
-                for token in registry.expired(
-                    on=latest_day, base_days=config.base_days, gap_multiplier=config.gap_multiplier
-                )
-                if token not in hit_now
-            )
-            for token in expired:
-                entry = registry.entry_of(token)
-                signals.append(
-                    f"kind_expired {token!r} last hit {entry.last_hit_day} "
-                    f"(hit_days={entry.hit_days_total}, max_gap={entry.max_gap_days})"
-                )
-                registry = registry.without(token)
-            if expired and vectors is not None:
-                # 旁册按名字键、条目间可能同名：按"谁还在用"收，不按 (token, label) 直删。
-                vectors = vectors.retain(registry.names_in_use())
-        registry, revision = self._persist_kinds(registry, revision, now)
-        if vectors is not None and (vectors_dirty or vectors is not vectors_before) and self.kind_vectors is not None:
-            try:
-                self.kind_vectors.replace(vectors)
-            except BehaviorKindVectorError as exc:
-                signals.append(f"kind_vectors_not_persisted {exc}")
+        self._persist_kind_vectors(vectors, vectors_before, vectors_dirty, signals)
         return tokens
+
+    def _record_kind_hits(self, hits: Sequence[tuple[str, date]], now: datetime) -> None:
+        """发布时记命中账（只对首次记账的链调用，故幂等），随后按数据时钟删到期条目。
+
+        数据时钟 = 本批最新的行为日，不用墙钟：停机一个月不会把词表删光。本批命中过的 token 不参与
+        过期——一批里混有回填的旧日期时，刚记的账不能被本批时钟立刻删掉。删除只动词表与向量旁册，
+        树上 occurrence 不动。
+        """
+
+        if not hits:
+            return
+        signals = self._kind_signals
+        config = self.kind_resolver.config
+        snapshot = self.kind_store.read()
+        registry, revision = snapshot.registry, snapshot.revision
+        for token, day in hits:
+            if registry.token_for(token) is None:
+                # 归一之后、发布之前词表被重建或该 token 已过期：树上的 token 是真相，补登记。
+                registry = registry.with_new_kind(token)
+                signals.append(f"kind_reregistered {token!r} (missing at publish time)")
+            registry = registry.with_hit(token, day)
+        clock = max(day for _, day in hits)
+        hit_now = {token for token, _ in hits}
+        expired = tuple(
+            token
+            for token in registry.expired(on=clock, base_days=config.base_days, gap_multiplier=config.gap_multiplier)
+            if token not in hit_now
+        )
+        for token in expired:
+            entry = registry.entry_of(token)
+            signals.append(
+                f"kind_expired {token!r} last hit {entry.last_hit_day} "
+                f"(hit_days={entry.hit_days_total}, max_gap={entry.max_gap_days})"
+            )
+            registry = registry.without(token)
+        registry, revision = self._persist_kinds(registry, revision, now)
+        if expired and self.kind_vectors is not None:
+            vectors, dirty = self._read_kind_vectors(signals)
+            assert vectors is not None
+            # 旁册按名字键、条目间可能同名：按"谁还在用"收，不按 (token, label) 直删。
+            self._persist_kind_vectors(vectors.retain(registry.names_in_use()), vectors, dirty, signals)
 
     def _persist_kinds(
         self, registry: BehaviorKindRegistry, revision: int, now: datetime
@@ -574,6 +560,20 @@ class BehaviorReductionRunner:
         except BehaviorKindVectorError as exc:
             signals.append(f"kind_vectors_unreadable {exc}; rebuilding from empty")
             return self.kind_vectors.empty(), True
+
+    def _persist_kind_vectors(
+        self,
+        vectors: BehaviorKindVectorIndex | None,
+        before: BehaviorKindVectorIndex | None,
+        dirty: bool,
+        signals: list[str],
+    ) -> None:
+        if vectors is None or self.kind_vectors is None or not (dirty or vectors is not before):
+            return
+        try:
+            self.kind_vectors.replace(vectors)
+        except BehaviorKindVectorError as exc:
+            signals.append(f"kind_vectors_not_persisted {exc}")
 
     @staticmethod
     def _merged_gap_payload(group: list[ReducibleJudgement], *, chain_digest: str) -> dict[str, Any]:
@@ -647,16 +647,24 @@ class BehaviorReductionRunner:
         if not isinstance(documents, list):
             raise BehaviorReductionError("reduction checkpoint is missing documents")
         writer = BehaviorDocumentWriter(self.tree, self.lock_store, clock=lambda: staged_at)
+        hits: list[tuple[str, date]] = []
         for index, item in enumerate(documents):
             if index % 50 == 0:
                 guard.checkpoint()
             if not isinstance(item, Mapping):
                 raise BehaviorReductionError("reduction checkpoint document must be a mapping")
+            entry = BehaviorReductionEntry.from_mapping(item["ledger"])
+            first_time = not self.ledger.has(entry.chain_digest)
             if item["kind"] != "ledger-only":
                 kind = BehaviorKind(item["kind"])
                 links = tuple((str(link[0]), str(link[1])) for link in item.get("links", ()))
                 writer.publish(kind, item["payload"], links=links)
-            self.ledger.append(BehaviorReductionEntry.from_mapping(item["ledger"]))
+                if first_time and kind is BehaviorKind.OCCURRENCE:
+                    payload = item["payload"]
+                    hits.append((str(payload["kind_token"]), date.fromisoformat(str(payload["occurred_on"]))))
+            self.ledger.append(entry)
+        # 命中账与树上的 occurrence 一一对应：账本里已有的链（重放）不再记——幂等。
+        self._record_kind_hits(hits, staged_at)
         # 树写完、账本写完，原料才释放（顺序是崩溃安全的依据：重放路径重新走到这里再补删）。
         self._release(documents, guard)
 

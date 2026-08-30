@@ -267,12 +267,15 @@ class BehaviorKindRegistry:
         return self.entry_of(token).label
 
     def token_for(self, name: object) -> str | None:
-        """按规范身份查这个名字属于哪一类；未登记返回 None。O(1)。"""
+        """按规范身份查这个名字属于哪一类（token / 别名 / label 任一命中）；未登记返回 None。O(1)。
+
+        名字和某个 kind 的可读名一模一样，就是那个 kind（用户裁定）——零调用直接归入。
+        """
 
         identity = canonical_path_identity(
             semantic_name(name, "behavior kind name"), "behavior kind name"
         )
-        return self._index.get(identity)
+        return self._index.get(identity) or self._labels.get(identity)
 
     def token_for_label(self, label: object) -> str | None:
         """哪个条目的 label（或名字）与这个可读名同身份；没有返回 None。"""

@@ -115,6 +115,11 @@ class BehaviorReductionLedger:
                 f"existing record"
             ) from exc
 
+    def has(self, chain_digest: str) -> bool:
+        """这条链是否已记账——发布时记命中账的幂等依据（重放同一检查点不重复记）。"""
+
+        return (self._entries_dir / f"{chain_digest}.json").is_file()
+
     def load(self) -> tuple[BehaviorReductionEntry, ...]:
         """读全部消费记录，按链身份排序（确定性）。"""
 

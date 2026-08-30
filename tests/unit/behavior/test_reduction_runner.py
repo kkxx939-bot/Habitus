@@ -817,14 +817,18 @@ def test_run_once_works_with_the_production_sqlite_lock_store(tmp_path) -> None:
 
 
 class _FullRegistryResolver(BehaviorKindResolver):
-    """词表已满：任何未知名字都撞 BehaviorKindLimitError（已知名字照走快路径）。"""
+    """词表已满：未知名字降级为原始名作 token 并留信号（与 resolver 的撞顶路径同形）。"""
 
-    async def resolve_many(self, requests, registry, *, vectors=None):  # type: ignore[override]
-        from behavior.kinds.model import BehaviorKindLimitError
+    async def resolve_batches(self, requests, registry, *, vectors=None):  # type: ignore[override]
+        from behavior.kinds.resolver import BehaviorKindBatchResolution
 
-        if any(registry.token_for(item.name) is None for item in requests):
-            raise BehaviorKindLimitError("behavior kind registry has no remaining kind capacity")
-        return await super().resolve_many(requests, registry, vectors=vectors)
+        tokens = {item.name: registry.token_for(item.name) or item.name for item in requests}
+        signals = tuple(
+            f"kind_registry_full {item.name!r} kept as its own token"
+            for item in requests
+            if registry.token_for(item.name) is None
+        )
+        yield BehaviorKindBatchResolution(tokens, registry, vectors, (), 0, signals)
 
 
 def test_a_full_kind_registry_degrades_to_the_raw_name_instead_of_failing_the_sweep(tmp_path) -> None:
@@ -836,7 +840,7 @@ def test_a_full_kind_registry_degrades_to_the_raw_name_instead_of_failing_the_sw
     assert report.published_occurrences == 1
     document = harness.tree.read(harness.tree.list_addresses(BehaviorKind.OCCURRENCE)[0])
     assert document.fields["kind_token"] == "洗手"  # 原始名暂作 token，事后可重打
-    assert any("kind_registry_full" in note for note in report.dropped_edges)
+    assert any("kind_registry_full" in note for note in report.kind_signals)
 
 
 def test_reduction_records_hits_by_behaviour_day_and_expires_stale_kinds(tmp_path) -> None:
@@ -863,4 +867,26 @@ def test_reduction_records_hits_by_behaviour_day_and_expires_stale_kinds(tmp_pat
     assert registry.entry_of("洗手").hit_days == (behaviour_day,)
     assert "卷账单" not in registry.tokens  # 40 天没再命中 > 基础期 30 天
     assert "打球" in registry.tokens  # 10 天前命中过，还在存活期内
-    assert any("kind_expired '卷账单'" in note for note in report.dropped_edges)
+    assert any("kind_expired '卷账单'" in note for note in report.kind_signals)
+    assert not any(note.startswith("kind_") for note in report.dropped_edges)  # 词表信号单独列
+
+
+def test_kind_hits_are_recorded_at_publish_and_replay_is_idempotent(tmp_path) -> None:
+    """命中账在发布时记（与树上 occurrence 一一对应）；重放同一检查点不重复记。"""
+
+    class _KeepCheckpoint(type(Harness(tmp_path / "probe").runner)):  # type: ignore[misc]
+        def _clear_checkpoint(self, guard):  # noqa: ANN001 - 与父类签名一致
+            return None  # 假装"语义刷新前崩溃"，让下一轮重放同一检查点
+
+    harness = Harness(tmp_path)
+    harness.runner.__class__ = _KeepCheckpoint
+    source = harness.deliver(OBS_A, OBS_B, OBS_C)
+    seed_wash_chain(harness, source)
+    first = asyncio.run(harness.runner.run_once())
+    assert first.published_occurrences == 1
+    entry = harness.kind_store.read().registry.entry_of("洗手")
+    assert entry.hit_days == (at(18).date(),) and entry.hit_count == 1
+    second = asyncio.run(harness.runner.run_once())  # 重放检查点：树、账本、命中账都不变
+    assert second.replayed_documents >= 1 and second.published_occurrences == 0
+    entry = harness.kind_store.read().registry.entry_of("洗手")
+    assert entry.hit_days == (at(18).date(),) and entry.hit_count == 1

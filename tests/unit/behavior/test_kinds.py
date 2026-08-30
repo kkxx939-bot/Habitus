@@ -384,14 +384,14 @@ def test_resolver_known_name_skips_the_model() -> None:
     assert batch.registry is registry
 
 
-def test_resolver_records_a_hit_on_the_fast_path() -> None:
+def test_resolver_label_is_an_exact_hit_without_the_model() -> None:
+    """名字和某个 kind 的可读名一模一样，就是那个 kind：零调用（用户裁定）。"""
+
     resolver, provider = build_resolver([])
-    registry = BehaviorKindRegistry({"洗手": ("洗了手",)})
-    batch = asyncio.run(
-        resolver.resolve_many((BehaviorKindRequest("洗了手", days=(D1,)), BehaviorKindRequest("洗手", days=(D2,))), registry)
-    )
-    assert provider.calls == 0 and batch.tokens == {"洗了手": "洗手", "洗手": "洗手"}
-    assert batch.registry.entry_of("洗手").hit_days == (D1, D2)
+    registry = BehaviorKindRegistry({"与Tasha交谈": BehaviorKindEntry(token="与Tasha交谈", label="交谈")})
+    batch = asyncio.run(resolver.resolve_many((BehaviorKindRequest("交谈"),), registry))
+    assert provider.calls == 0 and batch.tokens == {"交谈": "与Tasha交谈"}
+    assert batch.registry is registry  # 精确命中不改词表；命中账在发布时记
 
 
 def test_resolver_bootstraps_empty_registry_without_model() -> None:
@@ -406,12 +406,11 @@ def test_resolver_reuses_candidate_verbatim_as_alias_and_records_hit() -> None:
     resolver, provider = build_resolver([items(("N1", "K1", None))])
     registry = BehaviorKindRegistry({"洗手": (), "做饭": ()})
     batch = asyncio.run(
-        resolver.resolve_many((BehaviorKindRequest("清洁双手", days=(D1,), evidence="在水池边搓手"),), registry)
+        resolver.resolve_many((BehaviorKindRequest("清洁双手", evidence="在水池边搓手"),), registry)
     )
     assert batch.tokens == {"清洁双手": "洗手"} and not batch.created
     assert batch.model_calls == 1 and provider.calls == 1
     assert batch.registry.aliases_of("洗手") == ("清洁双手",)
-    assert batch.registry.entry_of("洗手").hit_days == (D1,)
     prompt = provider.prompts[0]
     assert "【候选类型】" in prompt and "K1  洗手" in prompt and "K2  做饭" in prompt
     assert "N1  清洁双手  候选：K1、K2  证据：在水池边搓手" in prompt
@@ -420,7 +419,7 @@ def test_resolver_reuses_candidate_verbatim_as_alias_and_records_hit() -> None:
 def test_resolver_null_match_creates_new_kind_with_the_model_label() -> None:
     resolver, provider = build_resolver([items(("N1", None, "做饭"))])
     registry = BehaviorKindRegistry({"洗手": ()})
-    batch = asyncio.run(resolver.resolve_many((BehaviorKindRequest("做晚饭", days=(D1,)),), registry))
+    batch = asyncio.run(resolver.resolve_many((BehaviorKindRequest("做晚饭"),), registry))
     assert batch.tokens == {"做晚饭": "做晚饭"} and batch.created == ("做晚饭",)
     assert batch.registry.tokens == ("做晚饭", "洗手")
     assert batch.registry.label_of("做晚饭") == "做饭"  # token 是原话，label 是模型给的可读名
@@ -434,7 +433,7 @@ def test_resolver_lets_batch_names_point_at_each_other() -> None:
     registry = BehaviorKindRegistry({"洗手": ()})
     batch = asyncio.run(
         resolver.resolve_many(
-            (BehaviorKindRequest("与Alice交流", days=(D1,)), BehaviorKindRequest("与Katrina交流", days=(D1,))),
+            (BehaviorKindRequest("与Alice交流"), BehaviorKindRequest("与Katrina交流")),
             registry,
         )
     )
@@ -458,7 +457,7 @@ def test_resolver_reasks_only_the_offending_names() -> None:
     registry = BehaviorKindRegistry({"洗手": ()})
     batch = asyncio.run(
         resolver.resolve_many(
-            (BehaviorKindRequest("清洁双手", days=(D1,)), BehaviorKindRequest("出门走走", days=(D1,))), registry
+            (BehaviorKindRequest("清洁双手"), BehaviorKindRequest("出门走走")), registry
         )
     )
     assert batch.tokens == {"清洁双手": "洗手", "出门走走": "出门走走"}
@@ -472,7 +471,7 @@ def test_resolver_exhausted_reasks_fall_back_to_a_new_kind() -> None:
         [items(("N1", None, None))], config=BehaviorKindConfig(validation_rounds=1)
     )
     registry = BehaviorKindRegistry({"洗手": ()})
-    batch = asyncio.run(resolver.resolve_many((BehaviorKindRequest("擦桌子", days=(D1,)),), registry))
+    batch = asyncio.run(resolver.resolve_many((BehaviorKindRequest("擦桌子"),), registry))
     assert batch.tokens == {"擦桌子": "擦桌子"} and batch.created == ("擦桌子",)
     assert batch.registry.label_of("擦桌子") == "擦桌子"
     assert provider.calls == 2
@@ -486,7 +485,7 @@ def test_resolver_structural_failure_degrades_to_a_new_kind_instead_of_failing()
         [{"match": "洗手"}], config=BehaviorKindConfig(validation_rounds=1)  # 旧形状：结构层拒绝
     )
     registry = BehaviorKindRegistry({"洗手": ()})
-    batch = asyncio.run(resolver.resolve_many((BehaviorKindRequest("清洁双手", days=(D1,)),), registry))
+    batch = asyncio.run(resolver.resolve_many((BehaviorKindRequest("清洁双手"),), registry))
     assert batch.tokens == {"清洁双手": "清洁双手"} and batch.created == ("清洁双手",)
     assert provider.calls == 4  # 两轮 × 结构层各重试一次
     assert any("kind_validation_exhausted" in note for note in batch.signals)
@@ -501,7 +500,7 @@ def test_resolver_full_registry_degrades_only_the_overflowing_name() -> None:
     registry = BehaviorKindRegistry({"洗手": ()})
     batch = asyncio.run(
         resolver.resolve_many(
-            (BehaviorKindRequest("清洁双手", days=(D1,)), BehaviorKindRequest("做晚饭", days=(D1,))), registry
+            (BehaviorKindRequest("清洁双手"), BehaviorKindRequest("做晚饭")), registry
         )
     )
     assert batch.tokens == {"清洁双手": "洗手", "做晚饭": "做晚饭"} and batch.created == ()
@@ -519,7 +518,7 @@ def test_resolver_uses_embeddings_for_candidates_and_fills_the_index() -> None:
     registry = BehaviorKindRegistry({"洗手": (), "看电视": ()})
     batch = asyncio.run(
         resolver.resolve_many(
-            (BehaviorKindRequest("洗了手", days=(D1,)),), registry, vectors=BehaviorKindVectorIndex("fake-embed", FakeEmbedder.DIMENSION)
+            (BehaviorKindRequest("洗了手"),), registry, vectors=BehaviorKindVectorIndex("fake-embed", FakeEmbedder.DIMENSION)
         )
     )
     assert batch.tokens == {"洗了手": "洗手"}
@@ -599,6 +598,30 @@ def test_resolver_retries_a_transient_error_then_resolves() -> None:
     assert provider.calls == 1 and provider.failed_once is True
 
 
+def test_resolve_batches_yields_fast_path_first_then_each_model_batch() -> None:
+    """runner 逐批落盘的依据：第一批零调用（快路径），之后每 batch_size 个未知名字一批。"""
+
+    resolver, provider = build_resolver(
+        [items(("N1", None, "做饭")), items(("N1", None, "散步"))], config=BehaviorKindConfig(batch_size=1)
+    )
+    registry = BehaviorKindRegistry({"洗手": ()})
+
+    async def collect():
+        return [
+            batch
+            async for batch in resolver.resolve_batches(
+                (BehaviorKindRequest("洗手"), BehaviorKindRequest("做晚饭"), BehaviorKindRequest("出门走走")),
+                registry,
+            )
+        ]
+
+    batches = asyncio.run(collect())
+    assert [b.model_calls for b in batches] == [0, 1, 1]
+    assert batches[0].tokens == {"洗手": "洗手"} and batches[0].registry is registry
+    assert batches[1].created == ("做晚饭",) and batches[2].created == ("出门走走",)
+    assert batches[2].registry.kind_count == 3
+
+
 def test_resolver_joins_a_new_name_to_the_kind_with_the_same_label() -> None:
     """模型说"这是一次交谈"而词表里已有 label「交谈」的 kind：归入它，不另建（DAY1 实测拆成 4 个的解）。"""
 
@@ -606,12 +629,11 @@ def test_resolver_joins_a_new_name_to_the_kind_with_the_same_label() -> None:
     registry = BehaviorKindRegistry({"与Tasha交谈": BehaviorKindEntry(token="与Tasha交谈", label="交谈")})
     batch = asyncio.run(
         resolver.resolve_many(
-            (BehaviorKindRequest("与Lucia交谈", days=(D1,)), BehaviorKindRequest("与Alice交谈", days=(D2,))), registry
+            (BehaviorKindRequest("与Lucia交谈"), BehaviorKindRequest("与Alice交谈")), registry
         )
     )
     assert batch.tokens == {"与Lucia交谈": "与Tasha交谈", "与Alice交谈": "与Tasha交谈"} and batch.created == ()
     assert set(batch.registry.aliases_of("与Tasha交谈")) == {"与Lucia交谈", "与Alice交谈"}
-    assert batch.registry.entry_of("与Tasha交谈").hit_days == (D1, D2)
     assert provider.calls == 1
 
 
@@ -622,11 +644,10 @@ def test_resolver_merges_same_identity_names_and_records_every_day() -> None:
     registry = BehaviorKindRegistry({"洗手": ()})
     batch = asyncio.run(
         resolver.resolve_many(
-            (BehaviorKindRequest("Wash", days=(D1,)), BehaviorKindRequest("wash", days=(D2,))), registry
+            (BehaviorKindRequest("Wash"), BehaviorKindRequest("wash")), registry
         )
     )
     assert batch.tokens == {"Wash": "Wash", "wash": "Wash"} and batch.created == ("Wash",)
-    assert batch.registry.entry_of("Wash").hit_days == (D1, D2)
     assert provider.calls == 1
 
 
