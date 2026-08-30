@@ -13,19 +13,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
-from behavior.document.model import BehaviorDocument
 from behavior.kinds.model import BehaviorKindEntry, BehaviorKindError, BehaviorKindRegistry
 from behavior.kinds.store import BehaviorKindStore, BehaviorKindStoreError
 from behavior.kinds.vectors import BehaviorKindVectorStore, names_missing_vectors
 from behavior.model import BehaviorKind
 from behavior.tree import BehaviorTree
-
-_PAGE = 10_000
 
 
 class _Vector(Protocol):
@@ -81,7 +78,7 @@ async def rebuild_registry(
     registry = BehaviorKindRegistry(entries)
     occurrences = 0
     aliases_added = 0
-    for document in _occurrences(tree):
+    for document in tree.iter_documents(BehaviorKind.OCCURRENCE):
         occurrences += 1
         fields = document.fields
         token = str(fields.get("kind_token") or "")
@@ -121,19 +118,6 @@ async def rebuild_registry(
         vectors_added=vectors_added,
         signals=tuple(signals),
     )
-
-
-def _occurrences(tree: BehaviorTree) -> Iterator[BehaviorDocument]:
-    after = None
-    while True:
-        page = tree.list_addresses(BehaviorKind.OCCURRENCE, limit=_PAGE, after=after)
-        if not page:
-            return
-        for address in page:
-            yield tree.read(address)
-        after = page[-1]
-        if len(page) < _PAGE:
-            return
 
 
 __all__ = ["BehaviorKindRebuildReport", "rebuild_registry"]

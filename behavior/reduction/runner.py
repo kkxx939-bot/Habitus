@@ -87,6 +87,17 @@ class BehaviorReductionReport:
         return self.published_occurrences + self.published_gaps
 
 
+@dataclass(frozen=True)
+class BehaviorKindMergeReport:
+    """一次词表合并 + 树上重打的可观测结果。"""
+
+    source: str
+    target: str
+    restamped: int
+    days: tuple[date, ...]
+    signals: tuple[str, ...]
+
+
 class BehaviorReductionRunner:
     """归约写入层；同一 behavior-root 的写入方必须共享 LockStore。"""
 
@@ -279,6 +290,51 @@ class BehaviorReductionRunner:
             dropped_edges=(*assembly.dropped_edges, *quarantined, *dropped, *refresh_notes),
             kind_signals=tuple(self._kind_signals),
         )
+
+    async def merge_kinds(self, source: str, target: str) -> BehaviorKindMergeReport:
+        """把词表里的 ``source`` 并入 ``target``，并把树上 ``source`` 的 occurrence 重打为 ``target``。
+
+        这是方案⑤"合并道"的落地动作（判定由离线整理交模型做，这里只执行已定的合并）：持 sweep 锁
+        （与归约互斥，词表与树在同一把锁下改）；先词表 ``merged`` 落盘，再全量扫树逐条 restamp
+        ——两步都幂等（重跑时词表里已无 source、树上已无旧 token），中途崩溃重跑即可补完。
+        受影响的日目录概览随后刷新（正文含类型，digest 必变）。预测树不用改，下次夜批读树即得。
+        """
+
+        try:
+            acquired = self._path_lock.acquire(self._sweep_lock_key, ttl_seconds=_SWEEP_LOCK_TTL_SECONDS)
+        except TimeoutError as exc:
+            raise BehaviorReductionBusyError(str(exc)) from exc
+        with acquired as guard:
+            now = self._now()
+            signals: list[str] = []
+            snapshot = self.kind_store.read()
+            registry = snapshot.registry
+            # 按"source 是否仍是 token"判幂等：并过之后它只是 target 的别名，token_for 会命中但不该再并。
+            if source in registry.tokens and target not in registry.tokens:
+                raise BehaviorReductionError(f"merge target is not a registered kind: {target!r}")
+            if source in registry.tokens:
+                registry = registry.merged(source, target)
+                self.kind_store.replace(registry, expected_revision=snapshot.revision, timestamp=now)
+                signals.append(f"kind_merged {source!r} -> {target!r}")
+                vectors, dirty = self._read_kind_vectors(signals)
+                if vectors is not None:
+                    self._persist_kind_vectors(vectors.retain(registry.names_in_use()), vectors, dirty, signals)
+            writer = BehaviorDocumentWriter(self.tree, self.lock_store, clock=lambda: now)
+            restamped = 0
+            days: set[date] = set()
+            for index, document in enumerate(self.tree.iter_documents(BehaviorKind.OCCURRENCE)):
+                if index % 200 == 0:
+                    guard.checkpoint()
+                if document.fields.get("kind_token") != source:
+                    continue
+                writer.restamp_kind_token(document.address, target)
+                restamped += 1
+                days.add(document.address.occurred_on)
+            notes = await self._refresh_semantics(days)
+            return BehaviorKindMergeReport(
+                source=source, target=target, restamped=restamped, days=tuple(sorted(days)),
+                signals=(*signals, *notes),
+            )
 
     def _clear_checkpoint(self, guard: LeaseGuard) -> None:
         with guard.fenced():

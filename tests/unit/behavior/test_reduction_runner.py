@@ -925,3 +925,85 @@ def test_reduction_without_chains_does_not_expire_anything(tmp_path) -> None:
     report = asyncio.run(harness.runner.run_once())
     assert report.published_documents == 0
     assert "卷账单" in harness.kind_store.read().registry.tokens  # 没有数据时钟就不判过期
+
+
+def test_tree_replace_only_allows_the_kind_token_to_change(tmp_path) -> None:
+    """树是 add-only 的；replace 是唯一改写通道，且只为 kind_token 重打而开。"""
+
+    from dataclasses import replace as dc_replace
+
+    from behavior import BehaviorDocumentWriter, BehaviorTree, BehaviorTreeConflictError
+    from tests.unit.behavior.tree_payloads import local, occurrence_payload
+
+    tree = BehaviorTree(tmp_path / "tree")
+    writer = BehaviorDocumentWriter(tree, ProcessLocalLockStore(), clock=lambda: local(23, 0))
+    published = writer.publish(BehaviorKind.OCCURRENCE, occurrence_payload())
+    bumped = dc_replace(published.metadata, revision=2)
+    # 改 kind_token：允许
+    ok = tree.document_codec.build(
+        published.kind, {**published.fields, "kind_token": "清洁双手"}, metadata=bumped, links=published.links
+    )
+    tree.replace(ok)
+    assert tree.read(published.address).fields["kind_token"] == "清洁双手"
+    # 改别的字段：拒绝
+    bad = tree.document_codec.build(
+        published.kind, {**published.fields, "kind_token": "清洁双手", "summary": "改了正文"}, metadata=dc_replace(bumped, revision=3), links=()
+    )
+    with pytest.raises(BehaviorTreeConflictError, match="only change kind_token"):
+        tree.replace(bad)
+    # 修订号不连续：拒绝
+    stale = tree.document_codec.build(
+        published.kind, {**published.fields, "kind_token": "洗手"}, metadata=published.metadata, links=published.links
+    )
+    with pytest.raises(BehaviorTreeConflictError, match="revision"):
+        tree.replace(stale)
+
+
+def test_writer_restamp_is_idempotent_and_bumps_revision(tmp_path) -> None:
+    from behavior import BehaviorDocumentWriter, BehaviorTree
+    from tests.unit.behavior.tree_payloads import local, occurrence_payload
+
+    tree = BehaviorTree(tmp_path / "tree")
+    writer = BehaviorDocumentWriter(tree, ProcessLocalLockStore(), clock=lambda: local(23, 0))
+    published = writer.publish(BehaviorKind.OCCURRENCE, occurrence_payload())
+    restamped = writer.restamp_kind_token(published.address, "清洁双手")
+    assert restamped.fields["kind_token"] == "清洁双手" and restamped.metadata.revision == 2
+    assert restamped.fields["name"] == published.fields["name"] and restamped.links == published.links
+    again = writer.restamp_kind_token(published.address, "清洁双手")  # 同值：不动
+    assert again.metadata.revision == 2
+    assert tree.read(published.address) == restamped
+
+
+def test_merge_kinds_folds_the_vocabulary_and_restamps_the_tree(tmp_path) -> None:
+    """合并道的落地动作：词表 merged + 树上旧 token 全部重打；预测源随后读到同一个 token。"""
+
+    from behavior.kinds import BehaviorKindEntry
+    from prediction.source import read as read_snapshot
+
+    harness = Harness(tmp_path, known_kinds=())
+    harness.kind_store.replace(
+        BehaviorKindRegistry(
+            {
+                "洗手": BehaviorKindEntry(token="洗手", label="洗手"),
+                "清洁双手": BehaviorKindEntry(token="清洁双手", label="清洁双手"),
+            }
+        ),
+        expected_revision=0,
+        timestamp=harness.now,
+    )
+    source = harness.deliver(OBS_A, OBS_B, OBS_C)
+    seed_wash_chain(harness, source)  # 链头名「洗手」→ token 洗手
+    assert asyncio.run(harness.runner.run_once()).published_occurrences == 1
+    report = asyncio.run(harness.runner.merge_kinds("洗手", "清洁双手"))
+    assert report.restamped == 1 and report.days == (at(18).date(),)
+    assert any("kind_merged" in note for note in report.signals)
+    registry = harness.kind_store.read().registry
+    assert registry.tokens == ("清洁双手",) and registry.token_for("洗手") == "清洁双手"
+    assert registry.entry_of("清洁双手").hit_days == (at(18).date(),)  # 账并过去了
+    document = harness.tree.read(harness.tree.list_addresses(BehaviorKind.OCCURRENCE)[0])
+    assert document.fields["kind_token"] == "清洁双手" and document.fields["name"] == "洗手"
+    assert document.metadata.revision == 2
+    assert {item.action for item in read_snapshot(harness.tree).actions} == {"清洁双手"}
+    # 重跑幂等：词表里已无 source、树上已无旧 token
+    again = asyncio.run(harness.runner.merge_kinds("洗手", "清洁双手"))
+    assert again.restamped == 0
