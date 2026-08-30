@@ -80,7 +80,7 @@ from typing import Any
 from behavior.fusion.errors import BehaviorFusionError
 from behavior.observation import BehaviorObservation
 
-FUSION_PROMPT_VERSION = "behavior_judgement_prompt_v16"
+FUSION_PROMPT_VERSION = "behavior_judgement_prompt_v17"
 
 FUSION_SYSTEM_PROMPT = """\
 你在为一套行为记忆系统做行为融合。
@@ -128,6 +128,8 @@ user 消息开头会给出**本次跟踪的主体**。画面里出现别人是�
            写进那件事的 basis，不单独立条。
   **无意识的小动作与过渡**——转头、点头、扶眼镜、挠鼻子、坐着、张望、两件事之间的走动：
            不属于任何事，也不是任何事的步骤。这些帧在 frames 里填 []。
+           坐着听人说话、看着大家、歪头、晃动身体这类讨论中的姿态也在此列：填 []，不要立成
+           「坐着」「看着大家」；先前的判断里若有这样的条目，也不要用 continues 延续它。
 
 层级判据——**提醒句测试**：如果要提醒他，你会说哪一句？
   "该做早餐了"说得通、"该磕鸡蛋了""该取芝士了"说不通  → 做早餐是一件事，磕鸡蛋、取芝士是它的步骤

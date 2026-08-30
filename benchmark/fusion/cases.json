@@ -1713,7 +1713,7 @@
     {
       "case_id": "audio-bystander-speech",
       "category": "audio",
-      "intent": "对照组：转写出自家里另一个人（上游已分离说话人），那一帧不属于主体，不该被塞进主体的判断",
+      "intent": "对照组：转写出自家里另一个人（上游已分离说话人），那一帧不属于主体，不该被塞进主体的判断——分流成旁人的判断或判无归属都对（WP4 后多为无归属）",
       "primary_subject": "成年男性A",
       "segments": [
         [
@@ -1745,7 +1745,7 @@
         ]
       ],
       "expect": {
-        "out_of_scope_fragments": {
+        "subject_free_fragments": {
           "1": [
             2
           ]
