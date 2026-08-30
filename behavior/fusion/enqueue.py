@@ -106,14 +106,8 @@ class BehaviorFusionEnqueuer:
         envelopes = self.observations.list()
         if not envelopes:
             return BehaviorFusionEnqueueResult((), 0)
-        # 送达早于覆盖窗口的观测一律不再入队：它们的覆盖记录可能已按窗口过期，再融合一次只会
-        # 产出第二套判断（BHV-REALDATA-001 审计：覆盖过期 → 重入队 → 重复 occurrence）。按契约窗口
-        # 之外不再有补发，仍留在存储里的只可能是被隔离判断引用的交付——留给运维，不重跑模型。
-        stale_before = now - timedelta(days=self.coverage.window_days)
-        for envelope in envelopes:
-            for observation in envelope.batch.observations:
-                if observation.available_at < stale_before:
-                    covered.add(observation.observation_id)
+        # 覆盖记录在其交付仍在存储里时不会过期（``coverage.expire(retain=…)``），所以"处理过没有"
+        # 在这里可以完全由覆盖索引回答；从未融合的观测无论多旧都照常入队——下游停机再久也不丢数据。
         segments = segment_observations(envelopes, config=self.config, exclude=covered)
         if not segments:
             return BehaviorFusionEnqueueResult((), 0)

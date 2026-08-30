@@ -58,10 +58,12 @@ async def rebuild_registry(
     """按树重建词表并落盘；返回报告。旧词表可读则保留其 label/别名，账一律重算。"""
 
     signals: list[str] = []
+    marker: str | None = None
     try:
         snapshot = store.read()
         base = snapshot.registry
         revision = snapshot.revision
+        marker = snapshot.hits_applied_checkpoint  # 归约的幂等标记原样透传：重建不是一次发布
     except BehaviorKindStoreError as exc:
         # v1 或损坏：从空建；旧文件的修订号读不出，按"不存在"CAS——文件仍在则 replace 会因修订号冲突失败，
         # 所以先删掉它（派生物，可重建）。
@@ -100,7 +102,7 @@ async def rebuild_registry(
         except BehaviorKindError as exc:
             signals.append(f"kind_rebuild_skipped {token!r}/{name!r}: {exc}")
 
-    written = store.replace(registry, expected_revision=revision, timestamp=now)
+    written = store.replace(registry, expected_revision=revision, timestamp=now, hits_applied_checkpoint=marker)
 
     vectors_added = 0
     if vectors is not None and embedder is not None:

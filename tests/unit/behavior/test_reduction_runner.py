@@ -1047,15 +1047,22 @@ def test_kind_hits_survive_a_crash_between_ledger_append_and_hit_recording(tmp_p
 def test_merge_and_rebuild_refuse_while_a_checkpoint_is_pending(tmp_path) -> None:
     """运维动作不许压在悬挂的检查点上（重打 token 后重放会撞永久冲突）。"""
 
-    from behavior.reduction import BehaviorReductionBusyError
+    import json as _json
+
+    from behavior.reduction import BehaviorReductionBusyError, BehaviorReductionError
 
     harness = Harness(tmp_path)
     (tmp_path / "reduction").mkdir(exist_ok=True)
-    (tmp_path / "reduction" / "staged.json").write_text("{}", encoding="utf-8")
+    staged = tmp_path / "reduction" / "staged.json"
+    staged.write_text(_json.dumps({"staged_at": harness.now.isoformat(), "documents": []}), encoding="utf-8")
     with pytest.raises(BehaviorReductionBusyError, match="checkpoint is pending"):
         asyncio.run(harness.runner.merge_kinds("洗手", "清洁双手"))
     with pytest.raises(BehaviorReductionBusyError, match="checkpoint is pending"):
         asyncio.run(harness.runner.rebuild_kinds())
+    # 损坏的检查点：三条路都堵死是死锁，要给出"手动删除"的指引而不是"先跑 sweep"
+    staged.write_text("garbage", encoding="utf-8")
+    with pytest.raises(BehaviorReductionError, match="delete it manually"):
+        asyncio.run(harness.runner.merge_kinds("洗手", "清洁双手"))
 
 
 def test_an_address_already_on_the_tree_is_disambiguated_without_a_ledger_entry(tmp_path) -> None:
@@ -1077,21 +1084,65 @@ def test_an_address_already_on_the_tree_is_disambiguated_without_a_ledger_entry(
     names = sorted(document.fields["name"] for document in harness.tree.iter_documents(BehaviorKind.OCCURRENCE))
     assert names == ["洗手", "洗手-2"]
     assert not (tmp_path / "reduction" / "staged.json").exists()
+    # 消歧记录 = 已知重复：命中账不计（与 rebuild、预测树同一口径）
+    assert harness.kind_store.read().registry.entry_of("洗手").hit_count == 0
 
 
-def test_stale_unfused_observations_do_not_pin_the_frontier(tmp_path) -> None:
-    """送达早于覆盖窗口的未融合观测（被隔离判断引用的交付）不再把封口视界钉在过去，只留信号。"""
+def test_kind_hits_use_the_checkpoint_content_as_the_idempotence_key(tmp_path) -> None:
+    """冻结时钟下两轮 sweep 的 staged_at 相同：命中账仍按检查点内容各记一次。"""
+
+    harness = Harness(tmp_path)
+    source = harness.deliver(OBS_A, OBS_B, OBS_C)
+    seed_wash_chain(harness, source)
+    assert asyncio.run(harness.runner.run_once()).published_occurrences == 1
+    obs_d, obs_e = observation(70, "第二次走到水池边"), observation(80, "再次搓手")
+    second = harness.deliver(obs_d, obs_e, seed="second")
+    harness.judgements.put_payload(
+        judgement_record(
+            "second-head",
+            behavior="洗手",
+            started_at=at(70),
+            last_observed_at=at(80),
+            evidence_ready_at=at(82),
+            observation_ids=(obs_d.observation_id, obs_e.observation_id),
+            source_refs=(second,),
+            goal="清洁双手",
+            summary="第二次洗手",
+            status="completed",
+            status_basis="observed",
+            basis=(),
+        )
+    )
+    assert asyncio.run(harness.runner.run_once()).published_occurrences == 1
+    assert harness.kind_store.read().registry.entry_of("洗手").hit_count == 2
+
+
+def test_coverage_survives_the_window_while_its_delivery_is_still_stored(tmp_path) -> None:
+    """覆盖记录以观测释放为过期前提：交付还在，"已融合"就还答得出来——不重入队、不拖前沿；
+    释放后下一轮才过期。下游停机再久也不丢数据（不再按送达时间把观测当作已覆盖）。"""
+
+    from datetime import timedelta
+
+    harness = Harness(tmp_path)
+    orphan = harness.deliver(OBS_A, seed="orphan", fused=True)  # 有回执、无判断
+    later = harness.now + timedelta(days=10)
+    ids = {OBS_A.observation_id}
+    harness.runner.coverage.expire(later, retain=frozenset(ids))
+    assert ids <= harness.runner.coverage.covered_observation_ids(harness.now)  # 交付在，覆盖留
+    harness.observations.discard(orphan)
+    harness.runner.coverage.expire(later, retain=frozenset())
+    assert not (ids & harness.runner.coverage.covered_observation_ids(harness.now))  # 释放后才过期
+
+
+def test_an_old_unfused_observation_still_pins_the_frontier(tmp_path) -> None:
+    """从未融合的观测无论多旧都是待融合：它照常拖住封口前沿、照常入队——不按送达时间丢弃。"""
 
     from tests.unit.behavior.reduction_fixtures import observation
 
     harness = Harness(tmp_path)
-    stale = observation(-10 * 86_400, "十天前的旧观测")
-    harness.deliver(stale, seed="stale", fused=False)
-    source = harness.deliver(OBS_A, OBS_B, OBS_C)
-    seed_wash_chain(harness, source)
-    report = asyncio.run(harness.runner.run_once())
-    assert report.published_occurrences == 1  # 视界没被旧观测拖住
-    assert any("stale_observations 1" in note for note in report.dropped_edges)
+    old = observation(-10 * 86_400, "十天前的旧观测")
+    harness.deliver(old, seed="old", fused=False)
+    assert harness.runner._frontier_cutoff() == old.available_at
 
 
 def test_covered_deliveries_without_judgements_are_released(tmp_path) -> None:

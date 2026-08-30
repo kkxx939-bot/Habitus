@@ -87,11 +87,13 @@ def _require_subject_present(
             for participant in by_no[fragment_no].participants
         }
         unknown = sorted(set(judgement.subjects) - available)
-        if unknown:
+        if unknown and len(unknown) < len(judgement.subjects):
             raise BehaviorFusionError(
                 f"judgement[{judgement.judgement_no}] names subjects absent from its fragments: "
                 f"{unknown}"
             )
+        # 主体**全部**不在场：这是"观测里没有的人做的事"，对被跟踪主体而言是旁人之事——回执按
+        # out_of_scope 记、不落盘（装配层已留 subject_absent 信号），不在这里硬拒。
 
 
 def _require_one_judgement_per_start(

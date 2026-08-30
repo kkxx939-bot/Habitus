@@ -8,8 +8,10 @@
 ``profile.md`` 单文件直读）。树的日期枚举只走 occurrences/gaps 前缀，词表与之互不干扰；
 地址叶名不可能与它撞车（semantic_name 拒绝 .md 后缀，gap 叶名是受控枚举）。
 
-格式 ``behavior_kinds_v2``（BHV-KINDS-002）：条目带 label 与命中账。v1 文件（只有正名+别名）
-不做读取兼容——按仓库纪律无双轨；旧根用 ``kinds/rebuild`` 从树上补齐重建。
+格式 ``behavior_kinds_v3``（BHV-KINDS-002）：条目带 label、命中账、复核记号；文件级带
+``hits_applied_checkpoint``——归约写入的系统字段（命中账已应用到哪个检查点的内容摘要），词表语义
+不读它，但它必须与命中账**同一次 CAS** 落盘，否则"账写了、标记没写"的崩溃窗口会重现。
+v1/v2 文件不做读取兼容——按仓库纪律无双轨；旧根用 ``kinds/rebuild`` 从树上补齐重建。
 
 并发说明：写入方只有归约写入层一个，且归约 ``run_once`` 全程持 behavior-root 级 fenced 锁
 （词表 CAS 发生在锁内、stage 之前）；``expected_revision`` CAS 只防误用，不承担并发互斥。
@@ -36,10 +38,10 @@ from infrastructure.store.filesystem import (
     read_regular_bytes,
 )
 
-KINDS_SCHEMA_VERSION = "behavior_kinds_v2"
+KINDS_SCHEMA_VERSION = "behavior_kinds_v3"
 _MARKER = "\n<!-- HABITUS_BEHAVIOR_KINDS\n"
 _FOOTER = "\n-->\n"
-_METADATA_KEYS = {"schema_version", "revision", "updated_at", "kinds", "hits_applied_at"}
+_METADATA_KEYS = {"schema_version", "revision", "updated_at", "kinds", "hits_applied_checkpoint"}
 _ENTRY_KEYS = {"token", "label", "aliases", "created_on", "hit_days", "hit_days_total", "hit_count", "review_reason"}
 
 
@@ -58,9 +60,10 @@ class BehaviorKindSnapshot:
     registry: BehaviorKindRegistry
     revision: int
     updated_at: datetime | None
-    # 命中账已应用到哪个归约检查点（``staged_at``）：同一检查点只记一次账，重放跳过——幂等键是
-    # 检查点而不是账本条目（账本逐条追加、账在末尾落，中间崩溃会让"首次"判断失真）。
-    hits_applied_at: str | None = None
+    # 命中账已应用到哪个归约检查点（检查点内 occurrence 链身份的摘要）：同一检查点只记一次账，
+    # 重放跳过——幂等键是检查点**内容**，不是账本条目（账本逐条追加、账在末尾落，中间崩溃会让
+    # "首次"判断失真），也不是 staged_at（注入/冻结时钟下两个检查点会同值）。
+    hits_applied_checkpoint: str | None = None
 
 
 class BehaviorKindStore:
@@ -93,11 +96,11 @@ class BehaviorKindStore:
         *,
         expected_revision: int,
         timestamp: datetime,
-        hits_applied_at: str | None = None,
+        hits_applied_checkpoint: str | None = None,
     ) -> BehaviorKindSnapshot:
         """CAS 替换整份词表；修改语义由不可变 Registry 表达，这里只负责耐久。
 
-        ``hits_applied_at`` 随词表一起耐久（调用方要保留旧值就把它传回来）。
+        ``hits_applied_checkpoint`` 随词表一起耐久（调用方要保留旧值就把它传回来）。
         """
 
         if not isinstance(registry, BehaviorKindRegistry):
@@ -120,9 +123,9 @@ class BehaviorKindStore:
                 f"found {current.revision}"
             )
         updated_at = timestamp.astimezone(timezone.utc)
-        if hits_applied_at is not None and (not isinstance(hits_applied_at, str) or not hits_applied_at):
-            raise BehaviorKindError("hits_applied_at must be non-empty text or None")
-        snapshot = BehaviorKindSnapshot(registry, expected_revision + 1, updated_at, hits_applied_at)
+        if hits_applied_checkpoint is not None and (not isinstance(hits_applied_checkpoint, str) or not hits_applied_checkpoint):
+            raise BehaviorKindError("hits_applied_checkpoint must be non-empty text or None")
+        snapshot = BehaviorKindSnapshot(registry, expected_revision + 1, updated_at, hits_applied_checkpoint)
         encoded = self._encode(snapshot)
         if len(encoded) > self.config.max_encoded_bytes:
             raise BehaviorKindLimitError("behavior kind registry exceeds its encoded byte bound")
@@ -166,7 +169,7 @@ class BehaviorKindStore:
             "kinds": [
                 _entry_payload(snapshot.registry.entry_of(token)) for token in snapshot.registry.tokens
             ],
-            "hits_applied_at": snapshot.hits_applied_at,
+            "hits_applied_checkpoint": snapshot.hits_applied_checkpoint,
         }
         rendered = json.dumps(
             metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -217,9 +220,9 @@ class BehaviorKindStore:
         except BehaviorKindError as exc:
             raise BehaviorKindStoreError("behavior kind registry content is invalid") from exc
         self._require_bounds(registry)
-        applied = metadata["hits_applied_at"]
+        applied = metadata["hits_applied_checkpoint"]
         if applied is not None and (not isinstance(applied, str) or not applied):
-            raise BehaviorKindStoreError("behavior kind registry hits_applied_at must be text or null")
+            raise BehaviorKindStoreError("behavior kind registry hits_applied_checkpoint must be text or null")
         snapshot = BehaviorKindSnapshot(registry, revision, updated_at, applied)
         if self._encode(snapshot) != encoded:
             raise BehaviorKindStoreError("behavior kind registry is not canonically encoded")

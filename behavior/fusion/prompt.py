@@ -501,7 +501,8 @@ def render_context_judgements(
         # 讲"continues 不能指向 completed"，模型仍然 5/5 全部先写错再被守卫打回（每次多烧两次
         # 调用）；而把同一句话加长写进要点，仍然 5/5 无改善。模型看的是 C 行本身。
         closed = "，已结束（不能被 continues 指）" if status == "completed" else ""
-        lines.append(f"C{index}  {ago}秒前开始：{behavior}{purpose}{state}{closed}")
+        when = f"{ago}秒前开始" if ago >= 0 else f"本段开始后{-ago}秒才开始"
+        lines.append(f"C{index}  {when}：{behavior}{purpose}{state}{closed}")
     return "\n".join(lines)
 
 

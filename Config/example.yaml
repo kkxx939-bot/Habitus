@@ -442,7 +442,7 @@ workflow:
 #   reduction_sweep_interval_seconds: 300
 #   fusion_poll_interval_seconds: 5
 #   worker_shutdown_timeout_seconds: 30
-#   coverage_window_days: 7            # 覆盖索引/回执/账本的过期窗口 = 上游最大补发跨度
+#   coverage_window_days: 7            # 上游最大补发跨度：重投去重判据；覆盖记录/回执/账本的过期期限（覆盖记录在其交付释放前不过期）
 #   max_fragments_per_segment: 60      # 一次融合的段容量；8k 输出预算下实测 60 条才稳
 #   # 行为类型词表（BHV-KINDS-002）；留空取 behavior/kinds/config.py 的默认值
 #   kinds_batch_size: 10               # 一次归一调用判几个未知名字

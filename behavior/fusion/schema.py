@@ -179,7 +179,8 @@ JUDGEMENT_FUSION_JSON_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["judgements", "frames"],
     "properties": {
-        "judgements": {"type": "array", "items": _JUDGEMENT_SCHEMA, "minItems": 1},
+        # 允许空：整段都是无意识小动作/过渡时一条判断都不出（每帧填 []），不逼模型发明。
+        "judgements": {"type": "array", "items": _JUDGEMENT_SCHEMA},
         "frames": {
             "type": "array",
             "items": _FRAME_SCHEMA,

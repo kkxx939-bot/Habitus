@@ -356,20 +356,21 @@ def participants_of(fragments: list[BehaviorObservation]) -> dict[int, tuple[str
     return {index: item.participants for index, item in enumerate(fragments, start=1)}
 
 
-def test_the_subject_must_appear_in_the_covered_fragments() -> None:
-    """校验层的后置断言仍在：不经装配期降级（不给 participants）时，陌生主体被整批拒。"""
+def test_a_partially_absent_subject_list_is_rejected_by_the_validator() -> None:
+    """校验层的后置断言仍在：不经装配期降级（不给 participants）时，一半在场一半陌生的主体被拒。"""
 
     raw = body()
-    raw["judgements"][0]["subjects"] = ["陌生人"]
+    raw["judgements"][0]["subjects"] = ["家庭成员A", "陌生人"]
     with pytest.raises(BehaviorFusionError, match="names subjects absent"):
         validate_judgement_batch(assemble(raw), FRAGMENTS)
 
 
-def test_a_judgement_whose_subjects_are_all_absent_is_degraded_to_unreadable() -> None:
-    """主体没有一个在覆盖片段里出现过：这段观测不能丢，但也不能作为可读判断落盘——整条降为没读懂。
+def test_a_judgement_whose_subjects_are_all_absent_is_out_of_scope() -> None:
+    """主体没有一个在覆盖片段里出现过：这是"观测里没有的人做的事"——对被跟踪主体而言是旁人之事。
 
-    真实数据一周 371 次（模型从"她 / 大家"推出在场者，上游 participants 里没有），整批拒会让
-    同一段反复失败直至封死队列。
+    判断原样保留、回执按 out_of_scope 记它覆盖的观测、不落盘；不再降成"没读懂"（那会在主体的时间轴
+    上凭空多出一段 gap，且与名字在 participants 里的旁人判断口径不一）。真实数据一周 371 次，整批拒
+    会让同一段反复失败直至封死队列。
     """
 
     raw = body()
@@ -377,16 +378,15 @@ def test_a_judgement_whose_subjects_are_all_absent_is_degraded_to_unreadable() -
     batch = assemble_judgement_batch(
         raw, fragment_count=len(FRAGMENTS), participants_by_no=participants_of(FRAGMENTS)
     )
-    validate_judgement_batch(batch, FRAGMENTS)  # 后置断言通过：产物自洽
+    validate_judgement_batch(batch, FRAGMENTS)  # 后置断言放行：全不在场 = 旁人之事
     first = batch.judgements[0]
-    assert not first.claim.is_readable
-    assert first.subjects == () and first.status is None and first.relations == ()
-    assert first.covers == (1, 2, 3)  # 覆盖的观测原样保留，归约层会把它物化成 gap
-    assert batch.degradations == ("subject_absent judgement=1 dropped=['陌生人'] unreadable",)
+    assert first.claim.is_readable and first.subjects == ("陌生人",)
+    assert first.covers == (1, 2, 3)
+    assert batch.degradations == ("subject_absent judgement=1 dropped=['陌生人'] out_of_scope",)
 
 
-def test_relations_pointing_at_a_degraded_judgement_are_pruned() -> None:
-    """指向被降为没读懂的判断的关系一并剪掉——它已不是一个行为，谈不上并行或延续。"""
+def test_relations_pointing_at_an_out_of_scope_judgement_are_pruned() -> None:
+    """指向旁人之事的关系一并剪掉——它不会落盘，留着就是悬空引用。"""
 
     raw = wire(
         [
@@ -402,9 +402,31 @@ def test_relations_pointing_at_a_degraded_judgement_are_pruned() -> None:
     validate_judgement_batch(batch, FRAGMENTS)
     assert batch.judgements[1].relations == ()
     assert batch.degradations == (
-        "subject_absent judgement=1 dropped=['陌生人'] unreadable",
-        "relation_dropped judgement=2 target=1 kind=concurrent_with (target degraded to unreadable)",
+        "subject_absent judgement=1 dropped=['陌生人'] out_of_scope",
+        "relation_dropped judgement=2 target=1 kind=concurrent_with (target is out of scope)",
     )
+
+
+def test_a_segment_with_every_frame_unowned_is_an_empty_batch() -> None:
+    """整段都是无意识小动作/过渡（5 分钟静坐）：每帧填 []、一条判断都不出是合法的——不逼模型发明。"""
+
+    raw = wire([], [[] for _ in FRAGMENTS])
+    batch = assemble_judgement_batch(raw, fragment_count=len(FRAGMENTS))
+    validate_judgement_batch(batch, FRAGMENTS)
+    assert batch.judgements == ()
+    assert batch.unowned_fragment_nos == tuple(range(1, len(FRAGMENTS) + 1))
+
+
+def test_two_unreadable_judgements_over_the_same_frames_are_merged() -> None:
+    """两条内容都为空、覆盖同一帧集的没读懂判断合并为一条并留信号，不再硬拒。"""
+
+    raw = wire(
+        [unreadable(1), unreadable(2)],
+        [[(1, None), (2, None)], [(1, None), (2, None)], [(1, None), (2, None)], [(1, None), (2, None)], [(1, None), (2, None)]],
+    )
+    batch = assemble_judgement_batch(raw, fragment_count=len(FRAGMENTS))
+    assert len(batch.judgements) == 1 and batch.judgements[0].covers == (1, 2, 3, 4, 5)
+    assert any("duplicate_unreadable judgement=2 merged_into=1" in note for note in batch.degradations)
 
 
 def duplicated_wash(*, second_relations: list[tuple[str, int]] | None = None) -> dict[str, Any]:
