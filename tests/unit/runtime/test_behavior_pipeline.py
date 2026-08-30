@@ -216,6 +216,11 @@ def test_enabled_wiring_shares_one_lookback_and_one_chat_client(tmp_path: Path) 
         is runtime.components.models.structured_chat
     )
     assert behavior.kind_store.path == behavior.tree.root / "kinds.md"
+    # 词表向量旁册随 embedder 组装、与词表同根；身份键只从配置取
+    vectors = behavior.reduction_runner.kind_vectors
+    assert vectors is not None and vectors.path == behavior.tree.root / "kinds.vectors.json"
+    assert vectors.dimension == runtime.config.models.embedding.dimension
+    assert behavior.reduction_runner.kind_resolver.embedder is runtime.components.models.embedder
     # 配置层不复制窗口默认值：BehaviorConfig 缺省为 None，由组合根从唯一出处解析
     from Config.behavior import BehaviorConfig
 

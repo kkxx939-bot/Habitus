@@ -515,7 +515,7 @@ class BehaviorReductionRunner:
         for token, day in hits:
             if registry.token_for(token) is None:
                 # 归一之后、发布之前词表被重建或该 token 已过期：树上的 token 是真相，补登记。
-                registry = registry.with_new_kind(token)
+                registry = registry.with_new_kind(token, review_reason="reregistered")
                 signals.append(f"kind_reregistered {token!r} (missing at publish time)")
             registry = registry.with_hit(token, day)
         clock = max(day for _, day in hits)

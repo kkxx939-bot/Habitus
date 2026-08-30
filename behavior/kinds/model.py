@@ -50,7 +50,7 @@ TODO(BHV-KINDS-002): 词表在真实数据上的膨胀与归一形状——方�
 模拟存活期；抽 100 对人工标注做归错率基准。
 【不做】自动重要性判断、非单位闸门、merged_into 读侧解析、预测树改动。
 【落地状态】①②③④⑥ 已落地（``rebuild.py`` 做补齐 + 账按树重算 + 向量补算，零模型调用；合并原语
-``merged`` 已有）；⑤ 离线整理工具（成对交模型判"是否同一件事"+ 树上重打 token）未做，另立。
+``merged`` 已有）；⑤ 离线整理未做，另立；设计已定（用户裁定 2026-08-30）：**两条道**——复核道先处理带 ``review_reason`` 的条目（降级路径建的，从未被模型判过：拿当前词表重新归一一遍）；合并道再对正常条目成对交模型判"是否同一件事"，是则并（词表 ``merged`` + 树上重打 token）。
 三位评审确认项（命中账窗口外晚到日、合并共有日双计、label 撞名误删向量、容量不自洽、同身份名字撞库、
 结构性校验耗尽逃逸、同名多天只记一天、撞顶丢整批、本轮时钟误删本轮命中、旁册损坏永不重写）均已修，
 见 tests/unit/behavior/test_kinds.py 与 test_reduction_runner.py。
@@ -101,6 +101,9 @@ class BehaviorKindEntry:
     hit_days: tuple[date, ...] = ()
     hit_days_total: int = 0
     hit_count: int = 0
+    # 这条不是模型判定来的，而是归一走了降级路径兜底建的（``validation_exhausted`` /
+    # ``reregistered``）：离线整理时先走"复核道"——拿当前词表重新归一一遍——再谈成对合并。
+    review_reason: str | None = None
 
     def __post_init__(self) -> None:
         token = semantic_name(self.token, "behavior kind token")
@@ -124,6 +127,10 @@ class BehaviorKindEntry:
                 raise BehaviorKindError(f"behavior kind {name} must be a non-negative integer")
         if self.hit_days_total < len(days) or self.hit_count < self.hit_days_total:
             raise BehaviorKindError(f"behavior kind hit account is inconsistent: {token}")
+        if self.review_reason is not None and (
+            not isinstance(self.review_reason, str) or not self.review_reason.strip()
+        ):
+            raise BehaviorKindError("behavior kind review_reason must be non-empty text or None")
         object.__setattr__(self, "token", token)
         object.__setattr__(self, "label", label)
         object.__setattr__(self, "aliases", aliases)
@@ -313,13 +320,20 @@ class BehaviorKindRegistry:
     # ── 写（返回新实例）────────────────────────────────────────────────────────────
 
     def with_new_kind(
-        self, name: object, *, label: object | None = None, day: date | None = None
+        self,
+        name: object,
+        *,
+        label: object | None = None,
+        day: date | None = None,
+        review_reason: str | None = None,
     ) -> BehaviorKindRegistry:
         """把一个未登记的名字登记为新类型：token = 名字本身；``day`` 给了就记首次命中。"""
 
         token = semantic_name(name, "behavior kind token")
         entry = BehaviorKindEntry(
-            token=token, label=semantic_name(label, "behavior kind label") if label is not None else token
+            token=token,
+            label=semantic_name(label, "behavior kind label") if label is not None else token,
+            review_reason=review_reason,
         )
         if day is not None:
             entry = entry.with_hit(day)
@@ -344,6 +358,11 @@ class BehaviorKindRegistry:
         return self._replaced(
             resolved, replace(self.entries[resolved], label=semantic_name(label, "behavior kind label"))
         )
+
+    def reviewed(self) -> tuple[str, ...]:
+        """待复核的 token（降级路径建的）。"""
+
+        return tuple(token for token, entry in self.entries.items() if entry.review_reason is not None)
 
     def without(self, token: str) -> BehaviorKindRegistry:
         resolved = self._require_token(token)

@@ -264,7 +264,8 @@ class BehaviorKindResolver:
                     out[spelling] = token
             return out
 
-        # 快路径：token / 别名 / label 精确命中，零调用。
+        # 快路径：token / 别名 / label 精确命中，零调用。旁册缺的向量顺带补齐（派生物自愈；
+        # 没有缺就不调 embedding）。
         known: dict[str, str] = {}
         unknown: list[BehaviorKindRequest] = []
         for request in merged.values():
@@ -273,7 +274,9 @@ class BehaviorKindResolver:
                 known[request.name] = token
             else:
                 unknown.append(request)
-        yield BehaviorKindBatchResolution(settled(known), registry, vectors, (), 0, ())
+        signals: list[str] = []
+        vectors = await self._fill_missing_vectors(registry, vectors, signals)
+        yield BehaviorKindBatchResolution(settled(known), registry, vectors, (), 0, tuple(signals))
         if not unknown:
             return
 
@@ -286,7 +289,9 @@ class BehaviorKindResolver:
             )
             return
 
-        signals: list[str] = []
+        signals = []
+        if self.embedder is None or vectors is None:
+            signals.append(f"kind_candidates_literal {len(unknown)} names (no embedding configured)")
         query_vectors, vectors = await self._query_vectors(unknown, registry, vectors, signals)
         for start in range(0, len(unknown), self.config.batch_size):
             chunk = tuple(unknown[start : start + self.config.batch_size])
@@ -303,6 +308,25 @@ class BehaviorKindResolver:
 
     # ── 向量 ────────────────────────────────────────────────────────────────────
 
+    async def _fill_missing_vectors(
+        self,
+        registry: BehaviorKindRegistry,
+        vectors: BehaviorKindVectorIndex | None,
+        signals: list[str],
+    ) -> BehaviorKindVectorIndex | None:
+        """词表里缺向量的 token/label 补齐（旁册丢失/损坏/换模型后的自愈）；失败留信号。"""
+
+        if self.embedder is None or vectors is None:
+            return vectors
+        missing = names_missing_vectors(registry, vectors)
+        if not missing:
+            return vectors
+        try:
+            return vectors.with_vectors(await self._embed(missing))
+        except (ModelTransportError, ModelResponseError) as exc:
+            signals.append(f"kind_embedding_fallback fill: {exc}")
+            return vectors
+
     async def _query_vectors(
         self,
         unknown: Sequence[BehaviorKindRequest],
@@ -310,18 +334,15 @@ class BehaviorKindResolver:
         vectors: BehaviorKindVectorIndex | None,
         signals: list[str],
     ) -> tuple[dict[str, tuple[float, ...]], BehaviorKindVectorIndex | None]:
-        """给未知名字算向量，顺带补齐词表里缺向量的 token/label；失败退字面并留信号。"""
+        """给未知名字算向量；失败退字面并留信号。"""
 
         if self.embedder is None or vectors is None:
             return {}, vectors
         try:
-            missing = names_missing_vectors(registry, vectors)
-            embedded = await self._embed([*(r.name for r in unknown), *missing])
+            embedded = await self._embed([r.name for r in unknown])
         except (ModelTransportError, ModelResponseError) as exc:
             signals.append(f"kind_embedding_fallback literal: {exc}")
             return {}, vectors
-        if missing:
-            vectors = vectors.with_vectors({name: embedded[name] for name in missing})
         return {r.name: embedded[r.name] for r in unknown}, vectors
 
     async def _index_created(
@@ -557,7 +578,12 @@ class BehaviorKindResolver:
                     signals.append(f"kind_registry_full {request.name!r} kept as its own token")
                     token = request.name
                 else:
-                    state["registry"] = state["registry"].with_new_kind(request.name, label=label)
+                    # label 为 None 只出现在重问耗尽的降级路径：留记号，离线整理先复核它。
+                    state["registry"] = state["registry"].with_new_kind(
+                        request.name,
+                        label=label,
+                        review_reason=None if label is not None else "validation_exhausted",
+                    )
                     created.append(request.name)
                     token = request.name
             else:

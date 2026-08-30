@@ -134,10 +134,12 @@ class BehaviorKindVectorStore:
             raise BehaviorKindVectorError("behavior kind vectors are corrupt") from exc
         if not isinstance(payload, dict) or set(payload) != _KEYS:
             raise BehaviorKindVectorError("behavior kind vectors shape is invalid")
-        if payload["schema_version"] != KINDS_VECTORS_SCHEMA_VERSION:
-            raise BehaviorKindVectorError("behavior kind vectors schema version is unsupported")
-        if payload["model"] != self.model or payload["dimension"] != self.dimension:
-            # 出自另一套 embedding：作废，调用方按空索引补算（旁册是派生物）。
+        if (
+            payload["schema_version"] != KINDS_VECTORS_SCHEMA_VERSION
+            or payload["model"] != self.model
+            or payload["dimension"] != self.dimension
+        ):
+            # 出自另一套 embedding 或旧格式：作废，调用方按空索引补算（旁册是派生物，同一口径）。
             return self.empty()
         raw = payload["vectors"]
         if not isinstance(raw, dict):

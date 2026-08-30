@@ -890,3 +890,38 @@ def test_kind_hits_are_recorded_at_publish_and_replay_is_idempotent(tmp_path) ->
     assert second.replayed_documents >= 1 and second.published_occurrences == 0
     entry = harness.kind_store.read().registry.entry_of("洗手")
     assert entry.hit_days == (at(18).date(),) and entry.hit_count == 1
+
+
+def test_reduction_persists_kind_vectors_and_recovers_a_corrupt_sidecar(tmp_path) -> None:
+    """旁册随本轮写回；损坏时按空重建并留信号，不阻塞归约（BHV-KINDS-002）。"""
+
+    from behavior.kinds import BehaviorKindVectorStore
+    from tests.unit.behavior.test_kinds import FakeEmbedder
+
+    harness = Harness(tmp_path)
+    embedder = FakeEmbedder()
+    harness.runner.kind_resolver = BehaviorKindResolver(build_resolver().client, embedder=embedder)
+    harness.runner.kind_vectors = BehaviorKindVectorStore(
+        tmp_path / "tree", model="fake-embed", dimension=FakeEmbedder.DIMENSION
+    )
+    (tmp_path / "tree").mkdir(exist_ok=True)
+    (tmp_path / "tree" / "kinds.vectors.json").write_text("garbage", encoding="utf-8")
+    source = harness.deliver(OBS_A, OBS_B, OBS_C)
+    seed_wash_chain(harness, source)
+    report = asyncio.run(harness.runner.run_once())
+    assert report.published_occurrences == 1
+    assert any("kind_vectors_unreadable" in note for note in report.kind_signals)
+    assert harness.runner.kind_vectors.read().has("洗手")  # 已重写：词表里的 token 补了向量
+
+
+def test_reduction_without_chains_does_not_expire_anything(tmp_path) -> None:
+    from datetime import timedelta
+
+    from behavior.kinds import BehaviorKindEntry
+
+    harness = Harness(tmp_path, known_kinds=())
+    stale = BehaviorKindEntry(token="卷账单", label="卷账单").with_hit(at(18).date() - timedelta(days=400))
+    harness.kind_store.replace(BehaviorKindRegistry({"卷账单": stale}), expected_revision=0, timestamp=harness.now)
+    report = asyncio.run(harness.runner.run_once())
+    assert report.published_documents == 0
+    assert "卷账单" in harness.kind_store.read().registry.tokens  # 没有数据时钟就不判过期

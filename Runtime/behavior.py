@@ -126,6 +126,9 @@ class BehaviorRuntimeComponents:
                 raise ValueError(f"behavior components must share one {label} instance")
         if self.kind_store.path != self.tree.root / self.kind_store.path.name:
             raise ValueError("behavior kind registry must live at the tree root")
+        vectors = self.reduction_runner.kind_vectors
+        if vectors is not None and vectors.path != self.tree.root / vectors.path.name:
+            raise ValueError("behavior kind vectors must live at the tree root")
         # BHV-FUSION-003 的结构性保障："融合还能续"与"归约已封口"必须是同一个窗口。
         if (
             self.fusion_runner.context_lookback_seconds

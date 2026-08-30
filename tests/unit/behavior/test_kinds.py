@@ -526,7 +526,7 @@ def test_resolver_uses_embeddings_for_candidates_and_fills_the_index() -> None:
     assert "K1  洗手" in provider.prompts[0] and "看电视" not in provider.prompts[0]
     # 词表里缺向量的 token 顺带补齐进旁册
     assert batch.vectors is not None and batch.vectors.has("洗手") and batch.vectors.has("看电视")
-    assert embedder.calls and "洗了手" in embedder.calls[0]
+    assert any("洗了手" in call for call in embedder.calls)
 
 
 def test_registry_coexists_with_the_tree_at_the_same_root(tmp_path) -> None:
@@ -700,3 +700,64 @@ def test_rebuild_replaces_an_unreadable_v1_registry(tmp_path) -> None:
     report = asyncio.run(rebuild_registry(tree, store, now=NOW))
     assert report.kinds == 1 and any("kind_registry_unreadable" in note for note in report.signals)
     assert store.read().registry.token_for("洗了手") == "洗手"
+
+
+def test_review_reason_marks_degraded_entries_and_roundtrips(tmp_path) -> None:
+    """降级路径建的条目留记号（离线整理先复核）；正常判定的没有记号。"""
+
+    resolver, _provider = build_resolver(
+        [items(("N1", None, None))], config=BehaviorKindConfig(validation_rounds=0)
+    )
+    registry = BehaviorKindRegistry({"洗手": ()})
+    batch = asyncio.run(resolver.resolve_many((BehaviorKindRequest("擦桌子"),), registry))
+    assert batch.registry.entry_of("擦桌子").review_reason == "validation_exhausted"
+    assert batch.registry.reviewed() == ("擦桌子",)
+    assert batch.registry.entry_of("洗手").review_reason is None
+    store = BehaviorKindStore(tmp_path)
+    store.replace(batch.registry, expected_revision=0, timestamp=NOW)
+    assert store.read().registry.entry_of("擦桌子").review_reason == "validation_exhausted"
+    assert "（待复核：validation_exhausted）" in (tmp_path / "kinds.md").read_text()
+
+
+def test_resolver_falls_back_to_literal_candidates_when_embedding_fails() -> None:
+    class _BrokenEmbedder(FakeEmbedder):
+        async def embed_documents(self, texts):  # type: ignore[override]
+            from ModelClient.contracts import ModelTransportError
+
+            raise ModelTransportError("embedding down")
+
+    resolver, provider = build_resolver([items(("N1", "K1", None))], embedder=_BrokenEmbedder())
+    registry = BehaviorKindRegistry({"洗手": (), "看电视": ()})
+    batch = asyncio.run(
+        resolver.resolve_many(
+            (BehaviorKindRequest("洗了手"),), registry, vectors=BehaviorKindVectorIndex("fake-embed", FakeEmbedder.DIMENSION)
+        )
+    )
+    assert batch.tokens == {"洗了手": "洗手"}
+    assert any("kind_embedding_fallback" in note for note in batch.signals)
+    assert "K1  洗手" in provider.prompts[0]  # 字面重合把洗手排在前面
+
+
+def test_resolver_without_embedder_signals_literal_candidates() -> None:
+    resolver, _provider = build_resolver([items(("N1", "K1", None))])
+    batch = asyncio.run(resolver.resolve_many((BehaviorKindRequest("洗了手"),), BehaviorKindRegistry({"洗手": ()})))
+    assert any("kind_candidates_literal" in note for note in batch.signals)
+
+
+def test_resolver_alias_capacity_degrades_with_a_signal() -> None:
+    resolver, _provider = build_resolver(
+        [items(("N1", "K1", None))], config=BehaviorKindConfig(max_aliases_per_kind=1)
+    )
+    registry = BehaviorKindRegistry({"洗手": ("洗了手",)})
+    batch = asyncio.run(resolver.resolve_many((BehaviorKindRequest("清洁双手"),), registry))
+    assert batch.tokens == {"清洁双手": "洗手"}  # 归属照旧，只是别名没记上
+    assert batch.registry.aliases_of("洗手") == ("洗了手",)
+    assert any("kind_alias_capacity_full" in note for note in batch.signals)
+
+
+def test_vector_store_treats_an_old_schema_as_empty(tmp_path) -> None:
+    (tmp_path / "kinds.vectors.json").write_text(
+        json.dumps({"schema_version": "behavior_kind_vectors_v0", "model": "m", "dimension": 2, "vectors": {}}),
+        encoding="utf-8",
+    )
+    assert not BehaviorKindVectorStore(tmp_path, model="m", dimension=2).read().vectors

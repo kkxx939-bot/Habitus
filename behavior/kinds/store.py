@@ -40,7 +40,7 @@ KINDS_SCHEMA_VERSION = "behavior_kinds_v2"
 _MARKER = "\n<!-- HABITUS_BEHAVIOR_KINDS\n"
 _FOOTER = "\n-->\n"
 _METADATA_KEYS = {"schema_version", "revision", "updated_at", "kinds"}
-_ENTRY_KEYS = {"token", "label", "aliases", "created_on", "hit_days", "hit_days_total", "hit_count"}
+_ENTRY_KEYS = {"token", "label", "aliases", "created_on", "hit_days", "hit_days_total", "hit_count", "review_reason"}
 
 
 class BehaviorKindStoreError(ValueError):
@@ -144,6 +144,8 @@ class BehaviorKindStore:
                 head += f" ×{entry.hit_count}"
             if entry.last_hit_day is not None:
                 head += f" 最近 {entry.last_hit_day.isoformat()}"
+            if entry.review_reason is not None:
+                head += f"（待复核：{entry.review_reason}）"
             lines.append(f"{head}：{'、'.join(entry.aliases)}" if entry.aliases else head)
         body = "\n".join(lines)
         metadata = {
@@ -218,6 +220,7 @@ def _entry_payload(entry: BehaviorKindEntry) -> dict[str, object]:
         "hit_days": [day.isoformat() for day in entry.hit_days],
         "hit_days_total": entry.hit_days_total,
         "hit_count": entry.hit_count,
+        "review_reason": entry.review_reason,
     }
 
 
@@ -235,6 +238,9 @@ def _entry_from_payload(raw: object) -> BehaviorKindEntry:
     created_raw = raw["created_on"]
     if created_raw is not None and not isinstance(created_raw, str):
         raise BehaviorKindStoreError("behavior kind created_on must be a date or null")
+    review = raw["review_reason"]
+    if review is not None and not isinstance(review, str):
+        raise BehaviorKindStoreError("behavior kind review_reason must be text or null")
     try:
         entry = BehaviorKindEntry(
             token=raw["token"],
@@ -244,6 +250,7 @@ def _entry_from_payload(raw: object) -> BehaviorKindEntry:
             hit_days=tuple(_parse_day(day) for day in hit_days),
             hit_days_total=raw["hit_days_total"],
             hit_count=raw["hit_count"],
+            review_reason=review,
         )
     except (BehaviorKindError, ValueError, TypeError) as exc:
         raise BehaviorKindStoreError("behavior kind entry content is invalid") from exc
