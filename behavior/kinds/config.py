@@ -16,6 +16,10 @@ class BehaviorKindConfig:
     max_kinds: int = 500
     max_aliases_per_kind: int = 64
     max_encoded_bytes: int = 262_144
+    # 单次归一调用对瞬态错误（超时、断连）的有界重试：一次 sweep 近三千次串行调用，一次断连
+    # 不该让整轮作废（BHV-REALDATA-001）。
+    transient_retries: int = 5
+    transient_retry_delay_seconds: float = 5.0
 
     def __post_init__(self) -> None:
         for name, upper in (

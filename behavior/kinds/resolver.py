@@ -20,6 +20,7 @@ vocabulary_builder 的同一教训：错误合并污染条件分布，比不合�
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -32,6 +33,7 @@ from behavior.kinds.model import (
 )
 from behavior.model import semantic_name
 from ModelClient import ChatMessage, ChatRequest, StructuredChatClient
+from ModelClient.contracts import ModelResponseError, ModelTransportError
 
 KIND_PROMPT_VERSION = "behavior_kind_prompt_v1"
 
@@ -121,12 +123,22 @@ class BehaviorKindResolver:
             )
         if registry.kind_count == 0:
             return self._created(resolved_name, registry, model_called=False, attempts=0)
-        response = await self.client.complete_json_async(
-            self._request(resolved_name, registry),
-            schema=kind_match_schema(registry.tokens),
-            name="behavior_kind_match",
-            validator=lambda parsed: self._validated(parsed, registry),
-        )
+        response = None
+        for attempt in range(self.config.transient_retries + 1):
+            try:
+                response = await self.client.complete_json_async(
+                    self._request(resolved_name, registry),
+                    schema=kind_match_schema(registry.tokens),
+                    name="behavior_kind_match",
+                    validator=lambda parsed: self._validated(parsed, registry),
+                )
+                break
+            except (ModelTransportError, ModelResponseError):
+                # 瞬态错误有界重试；契约类错误（结构化输出违约）照常抛出
+                if attempt >= self.config.transient_retries:
+                    raise
+                await asyncio.sleep(self.config.transient_retry_delay_seconds * (attempt + 1))
+        assert response is not None
         match = response.value
         if match is None:
             return self._created(

@@ -101,20 +101,35 @@ def test_the_three_levels_are_two_fields_not_three_structures() -> None:
     assert unreadable_ratio(batch, len(FRAGMENTS)) == pytest.approx(0.2)
 
 
-def test_a_goal_directed_claim_must_record_the_facts_that_constitute_it() -> None:
-    """归约层要靠 basis 判断行为有没有达成；只给原始帧等于让它重判一遍。"""
+def test_a_goal_without_grounded_facts_keeps_the_goal_and_drops_nothing_else() -> None:
+    """goal 与 basis 互不约束：说得出目标却分不出步骤（一次交谈）是现实的形状，不是产物矛盾。"""
 
     raw = wire([judgement(1, behavior="洗手", goal="清洁双手", basis=[])], [[(1, None)]] * 5)
-    with pytest.raises(BehaviorFusionError, match="must record the facts"):
-        assemble(raw)
+    batch = checked(raw)
+    (only,) = batch.judgements
+    assert only.claim.is_readable and only.claim.goal == "清洁双手"
+    assert only.claim.basis == () and batch.degradations == ()
 
 
-def test_a_claim_without_a_goal_must_not_decompose() -> None:
-    """没有目标的判断本身就在操作那一层，里面没有东西可再分解。"""
+def test_declared_but_ungrounded_facts_are_dropped_and_the_goal_survives() -> None:
+    """模型写了两条步骤、frames 里一帧都没分给它们——步骤被丢（记账疏漏），目标不受牵连。"""
 
-    raw = wire([judgement(1, behavior="打哈欠", goal=None, basis=["张嘴"])], [[(1, 1)]] * 5)
-    with pytest.raises(BehaviorFusionError, match="must not decompose"):
-        assemble(raw)
+    raw = wire(
+        [judgement(1, behavior="洗手", goal="清洁双手", basis=["打开水龙头", "冲洗双手"])],
+        [[(1, None)]] * 5,
+    )
+    batch = checked(raw)
+    (only,) = batch.judgements
+    assert only.claim.goal == "清洁双手" and only.claim.basis == ()
+
+
+def test_a_unit_without_a_goal_may_still_have_steps() -> None:
+    """锁门、喝水说不出目标却有步骤：一条 occurrence 是"可提醒或可代劳的单位"，goal 只是可读字段。"""
+
+    raw = wire([judgement(1, behavior="喝水", goal=None, basis=["拿起杯子", "喝水"])], [[(1, 1)], [(1, 1)], [(1, 2)], [(1, 2)], [(1, 2)]])
+    batch = checked(raw)
+    (only,) = batch.judgements
+    assert only.claim.goal is None and [fact.semantics for fact in only.claim.basis] == ["拿起杯子", "喝水"]
 
 
 def test_an_unreadable_judgement_must_stay_empty() -> None:
@@ -143,13 +158,22 @@ def test_frame_rows_must_line_up_with_their_position() -> None:
         assemble(raw)
 
 
-def test_a_frame_cannot_be_left_without_an_owner() -> None:
-    """读不懂的帧要归给一条 behavior 为空的判断，而不是空着——缺失要记录，不能沉默。"""
+def test_a_frame_may_be_left_unowned_and_is_reported() -> None:
+    """无意识小动作、过渡帧填 []：看到了、看懂了、不构成任何事——树上不写，但批次要报出来。
+
+    读不懂的帧仍归给一条 behavior 为空的判断；两者口径各自干净。
+    """
 
     raw = body()
-    raw["frames"][4]["assignments"] = []
-    with pytest.raises(BehaviorFusionError, match="assignments must not be empty"):
-        assemble(raw)
+    raw["frames"][3]["assignments"] = []  # 打哈欠那一帧
+    batch = checked(raw)
+    assert batch.unowned_fragment_nos == (4,)
+    assert [item.claim.behavior for item in batch.judgements] == ["洗手", None]
+    # 行不能少：穷尽性靠行数保证，无归属是声明不是省略
+    short = body()
+    short["frames"] = short["frames"][:-1]
+    with pytest.raises(BehaviorFusionError, match="exactly one row"):
+        assemble(short)
 
 
 def test_the_schema_pins_the_frame_table_to_the_input_length() -> None:
@@ -328,11 +352,59 @@ def test_a_judgement_covering_nothing_is_dropped() -> None:
     validate_judgement_batch(batch, FRAGMENTS)
 
 
+def participants_of(fragments: list[BehaviorObservation]) -> dict[int, tuple[str, ...]]:
+    return {index: item.participants for index, item in enumerate(fragments, start=1)}
+
+
 def test_the_subject_must_appear_in_the_covered_fragments() -> None:
+    """校验层的后置断言仍在：不经装配期降级（不给 participants）时，陌生主体被整批拒。"""
+
     raw = body()
     raw["judgements"][0]["subjects"] = ["陌生人"]
     with pytest.raises(BehaviorFusionError, match="names subjects absent"):
         validate_judgement_batch(assemble(raw), FRAGMENTS)
+
+
+def test_a_judgement_whose_subjects_are_all_absent_is_degraded_to_unreadable() -> None:
+    """主体没有一个在覆盖片段里出现过：这段观测不能丢，但也不能作为可读判断落盘——整条降为没读懂。
+
+    真实数据一周 371 次（模型从"她 / 大家"推出在场者，上游 participants 里没有），整批拒会让
+    同一段反复失败直至封死队列。
+    """
+
+    raw = body()
+    raw["judgements"][0]["subjects"] = ["陌生人"]
+    batch = assemble_judgement_batch(
+        raw, fragment_count=len(FRAGMENTS), participants_by_no=participants_of(FRAGMENTS)
+    )
+    validate_judgement_batch(batch, FRAGMENTS)  # 后置断言通过：产物自洽
+    first = batch.judgements[0]
+    assert not first.claim.is_readable
+    assert first.subjects == () and first.status is None and first.relations == ()
+    assert first.covers == (1, 2, 3)  # 覆盖的观测原样保留，归约层会把它物化成 gap
+    assert batch.degradations == ("subject_absent judgement=1 dropped=['陌生人'] unreadable",)
+
+
+def test_relations_pointing_at_a_degraded_judgement_are_pruned() -> None:
+    """指向被降为没读懂的判断的关系一并剪掉——它已不是一个行为，谈不上并行或延续。"""
+
+    raw = wire(
+        [
+            judgement(1, behavior="洗手", goal="清洁双手", basis=["冲洗"], subjects=["陌生人"]),
+            judgement(2, behavior="打哈欠", relations=[("concurrent_with", 1)]),
+            unreadable(3),
+        ],
+        [[(1, 1)], [(1, 1)], [(1, 1)], [(2, None)], [(3, None)]],
+    )
+    batch = assemble_judgement_batch(
+        raw, fragment_count=len(FRAGMENTS), participants_by_no=participants_of(FRAGMENTS)
+    )
+    validate_judgement_batch(batch, FRAGMENTS)
+    assert batch.judgements[1].relations == ()
+    assert batch.degradations == (
+        "subject_absent judgement=1 dropped=['陌生人'] unreadable",
+        "relation_dropped judgement=2 target=1 kind=concurrent_with (target degraded to unreadable)",
+    )
 
 
 def duplicated_wash(*, second_relations: list[tuple[str, int]] | None = None) -> dict[str, Any]:
@@ -787,6 +859,40 @@ def test_every_named_subject_must_appear_in_the_covered_fragments() -> None:
         validate_judgement_batch(assemble(raw), FRAGMENTS)
 
 
+def test_an_absent_subject_is_dropped_when_another_is_present() -> None:
+    """模型多写了一个观测里没有的人：只剔掉那个名字，判断保留、语义不动。"""
+
+    raw = wire(
+        [judgement(1, behavior="洗手", goal="清洁双手", basis=["冲洗"], subjects=[SUBJECT, "陌生人"])],
+        [[(1, 1)]] * 5,
+    )
+    batch = assemble_judgement_batch(
+        raw, fragment_count=len(FRAGMENTS), participants_by_no=participants_of(FRAGMENTS)
+    )
+    validate_judgement_batch(batch, FRAGMENTS)
+    (only,) = batch.judgements
+    assert only.subjects == (SUBJECT,)
+    assert only.claim.goal == "清洁双手"
+    assert batch.degradations == ("subject_absent judgement=1 dropped=['陌生人']",)
+
+
+def test_a_duplicated_assignment_keeps_the_first_and_leaves_a_signal() -> None:
+    """一帧在同一条判断里出现两次在现实里没有对应物——取先写的，不整批拒。
+
+    一帧属于两条**不同**判断仍然合法（并行的交界帧，见
+    ``test_one_frame_may_belong_to_two_judgements``）。
+    """
+
+    raw = wire(
+        [judgement(1, behavior="洗手", goal="清洁双手", basis=["打开水龙头", "冲洗双手"])],
+        [[(1, 1)], [(1, 1), (1, 2)], [(1, 2)], [(1, 2)], [(1, 2)]],
+    )
+    batch = checked(raw)
+    (only,) = batch.judgements
+    assert [fact.fragment_nos for fact in only.claim.basis] == [(1, 2), (3, 4, 5)]
+    assert batch.degradations == ("duplicate_assignment frames[1] judgement=1",)
+
+
 def test_results_from_points_backwards_like_every_other_relation() -> None:
     """结果指回原因，不是原因指向结果——先前的判断已经落盘且不可变，只有后来的能指回去。"""
 
@@ -830,8 +936,39 @@ def test_continues_cannot_point_at_a_finished_judgement() -> None:
         ],
         [[(1, 1)], [(1, 1)], [(2, 1)], [(2, 1)], [(2, 1)]],
     )
-    with pytest.raises(BehaviorFusionError, match="already completed"):
-        assemble(raw)
+    # 同批内保留这条边、留信号：归约按 continues 并链，尾部状态定结局。剪掉反而会让两条同名
+    # 同刻的判断互不相认、撞上判重硬拒（真实对照实测）。真正要剪的是指向先前上下文的那种。
+    batch = checked(raw)
+    assert [len(item.relations) for item in batch.judgements] == [0, 1]
+    assert batch.degradations == ("continues_completed judgement=2 target=1 kept",)
+
+
+def test_a_behaviour_seen_twice_still_passes_when_the_model_links_the_halves() -> None:
+    """同主体同刻同名的两条判断本是判重硬拒；模型用 continues 把它们连起来就算同一件事——即使
+    被指的那条已写成 completed，这条边也不能被剪掉，否则判重规则失去认亲的依据。"""
+
+    raw = wire(
+        [
+            judgement(1, behavior="看手机", status="completed"),
+            judgement(2, behavior="看手机", relations=[("continues", 1)]),
+        ],
+        [[(1, None), (2, None)], [(1, None)], [(2, None)], [(2, None)], [(2, None)]],
+    )
+    batch = checked(raw)  # 同一最早帧 → 同刻开始；有 continues 边 → 判重放行
+    assert batch.degradations == ("continues_completed judgement=2 target=1 kept",)
+
+
+def test_continues_into_a_finished_context_judgement_is_pruned_the_same_way() -> None:
+    raw = wire(
+        [judgement(1, behavior="洗手", goal="清洁双手", basis=["冲洗"], context_relations=[("continues", 1)])],
+        [[(1, 1)]] * 5,
+    )
+    batch = assemble_judgement_batch(raw, fragment_count=5, context_states=("completed",))
+    assert batch.judgements[0].relations == ()
+    assert batch.degradations == ("continues_completed judgement=1 target=C1",)
+    # 先前那条还没做完时，延续是合法的，不动。
+    intact = assemble_judgement_batch(raw, fragment_count=5, context_states=("ongoing",))
+    assert len(intact.judgements[0].relations) == 1 and intact.degradations == ()
 
 
 def test_supersedes_may_point_at_a_finished_judgement() -> None:
@@ -938,15 +1075,20 @@ def test_a_judgement_cannot_declare_the_same_relation_twice() -> None:
         )
 
 
-def test_a_fragment_cannot_be_assigned_to_the_same_judgement_twice() -> None:
-    """一帧可以属于多条判断（并行的交界帧），但不能在同一条判断里重复出现。"""
+def test_a_fragment_assigned_to_the_same_judgement_twice_keeps_the_first_assignment() -> None:
+    """一帧可以属于多条判断（并行的交界帧），在同一条判断里重复出现则取先写的、留信号。"""
 
-    with pytest.raises(BehaviorFusionError):
-        _batch(
-            [judgement(1, behavior="洗手", goal="清洁双手", basis=["冲手", "擦干"])],
-            [[(1, 1), (1, 2), (1, 1)]],
-            1,
-        )
+    batch = _batch(
+        [judgement(1, behavior="洗手", goal="清洁双手", basis=["冲手", "擦干"])],
+        [[(1, 1), (1, 2), (1, 1)]],
+        1,
+    )
+    (only,) = batch.judgements
+    assert [(fact.semantics, fact.fragment_nos) for fact in only.claim.basis] == [("冲手", (1,))]
+    assert batch.degradations == (
+        "duplicate_assignment frames[0] judgement=1",
+        "duplicate_assignment frames[0] judgement=1",
+    )
 
 
 def test_a_completed_context_judgement_is_marked_as_not_continuable() -> None:
@@ -995,7 +1137,7 @@ def test_every_hard_failure_the_model_can_trigger_is_stated_where_it_fills_the_f
     properties = JUDGEMENT_FUSION_JSON_SCHEMA["properties"]["judgements"]["items"]["properties"]
 
     basis = properties["basis"]["description"]
-    assert "必须" in basis, basis
+    assert "步骤" in basis and "不单独" in basis or "不是独立" in basis, basis
     assert "只有" not in basis, "别写成必要条件的说法，那读起来像'允许不填'"
 
     # 目标的合法性贴在 ``target`` 字段上，**不能**贴在 relations 数组的描述里：那里是模型决定

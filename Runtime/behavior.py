@@ -22,6 +22,7 @@ import asyncio
 import os
 import time
 import uuid
+from collections import Counter
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -35,7 +36,12 @@ from behavior.fusion import (
     BehaviorJudgementFuser,
     BehaviorJudgementStore,
 )
-from behavior.fusion.config import FUSION_CONTEXT_LIMIT, FUSION_CONTEXT_LOOKBACK_SECONDS
+from behavior.fusion.config import (
+    FUSION_CONTEXT_LIMIT,
+    FUSION_CONTEXT_LOOKBACK_SECONDS,
+    BehaviorFusionConfig,
+)
+from behavior.fusion.coverage import BehaviorCoverageIndex
 from behavior.fusion.enqueue import DEFAULT_QUIET_PERIOD_SECONDS
 from behavior.kinds.resolver import BehaviorKindResolver
 from behavior.kinds.store import BehaviorKindStore
@@ -106,6 +112,8 @@ class BehaviorRuntimeComponents:
             (self.reduction_runner.receipts, self.receipts, "reduction receipts"),
             (self.reduction_runner.tree, self.tree, "reduction tree"),
             (self.reduction_runner.kind_store, self.kind_store, "reduction kind store"),
+            (self.enqueuer.coverage, self.fusion_runner.coverage, "coverage index (enqueue/fusion)"),
+            (self.reduction_runner.coverage, self.fusion_runner.coverage, "coverage index (reduction/fusion)"),
             (self.fusion_worker.runner, self.fusion_runner, "fusion worker runner"),
             (self.fusion_worker.enqueuer, self.enqueuer, "fusion worker enqueuer"),
             (self.reduction_worker.runner, self.reduction_runner, "reduction worker runner"),
@@ -187,12 +195,34 @@ class BehaviorFusionWorker(ResidentWorker):
 
         heartbeat = asyncio.create_task(beat(), name=f"{self._task_name}-heartbeat")
         try:
-            await self.runner.execute(lease)
+            result = await self.runner.execute(lease)
         finally:
             stop_beat.set()
             heartbeat.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await heartbeat
+        if result.degradations:
+            # 装配层的降级（去重/剔名/丢边）是信号不是语义：按类计数进可观测面板，
+            # 让"模型记账疏漏的频率"随真实数据可见（BHV-REALDATA-001 的量化依据）。
+            counts = Counter(note.split(" ", 1)[0] for note in result.degradations)
+            self._observe(
+                "fusion_degradations",
+                ObservationStatus.SUCCESS,
+                {"job": result.job.job_id[:12], **{kind: count for kind, count in counts.items()}},
+            )
+        if result.fused:
+            # 无归属占比："允许模型不产出"的出口用得多不多——压制产出的唯一量化告警。
+            receipt = result.receipt
+            self._observe(
+                "fusion_unowned",
+                ObservationStatus.SUCCESS,
+                {
+                    "job": result.job.job_id[:12],
+                    "unowned": len(receipt.unowned_observation_ids),
+                    "observations": len(receipt.observation_ids),
+                    "ratio": round(receipt.unowned_ratio, 3),
+                },
+            )
 
     async def _run_loop(self) -> None:
         while not self._stop_requested.is_set():
@@ -303,17 +333,27 @@ def build_behavior_components(
     observations = BehaviorObservationStore(root)
     judgements = BehaviorJudgementStore(root)
     receipts = BehaviorFusionReceiptStore(root)
+    # 一份覆盖索引三处共用：融合写、入队读、归约读——三者若各自实例化会按不同窗口口径回答
+    # "处理过没有"。
+    coverage = BehaviorCoverageIndex(root, window_days=behavior_config.coverage_window_days)
     jobs = BehaviorFusionJobStore(root, path_lock, clock=clock)
-    enqueuer = BehaviorFusionEnqueuer(observations, jobs, receipts, clock=clock)
+    # 段容量随配置进来，切段与融合两处必须是同一个数（切出 60 条的段、融合却按 512 校验就是分叉）。
+    fusion_config = BehaviorFusionConfig(
+        max_fragments_per_segment=behavior_config.max_fragments_per_segment
+    )
+    enqueuer = BehaviorFusionEnqueuer(
+        observations, jobs, receipts, clock=clock, coverage=coverage, config=fusion_config
+    )
     fusion_runner = BehaviorFusionRunner(
         jobs,
         observations,
-        BehaviorJudgementFuser(structured_chat),
+        BehaviorJudgementFuser(structured_chat, config=fusion_config),
         judgements,
         receipts,
         primary_subject=behavior_config.primary_subject,
         context_limit=context_limit,
         context_lookback_seconds=context_lookback,
+        coverage=coverage,
     )
 
     tree = BehaviorTree(root / "tree")
@@ -332,6 +372,7 @@ def build_behavior_components(
         ),
         clock=clock,
         context_lookback_seconds=context_lookback,
+        coverage=coverage,
     )
     return BehaviorRuntimeComponents(
         observations=observations,

@@ -61,7 +61,7 @@ from foundation.integrity import canonical_digest
 # v2：同一主体同刻开始的同名行为只接受一条判断（判重守卫）——之前的数据里可能存在这类重复。
 # v3：behavior=空（没读懂）的判断也进判断存储（此前只留回执信号）——归约层要把它物化成 gap
 #     节点，v2 及更早的存储里没有这批记录。
-FUSION_IMPLEMENTATION_VERSION = "behavior_judgement_fusion_v3"
+FUSION_IMPLEMENTATION_VERSION = "behavior_judgement_fusion_v4"
 
 # 产物的语义取决于**送给模型的全部东西**加上派生实现，任一变化都会改变输出语义，所以版本必须
 # 同时覆盖三者：实现、提示词、以及 **schema**。

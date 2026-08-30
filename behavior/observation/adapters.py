@@ -97,11 +97,18 @@ class HabitusBehaviorObservationAdapter:
             raise BehaviorObservationProtocolError("observations must be an array")
         if len(raw) > config.max_observations_per_batch:
             raise BehaviorObservationLimitError("observation batch exceeds its configured item limit")
-        observations = tuple(
-            _observation(item, index=index, observer_id=observer_id, config=config)
-            for index, item in enumerate(raw)
-        )
-        return BehaviorObservationBatch(observer_id=observer_id, observations=observations)
+        observations: list[BehaviorObservation] = []
+        seen: set[str] = set()
+        for index, item in enumerate(raw):
+            observation = _observation(item, index=index, observer_id=observer_id, config=config)
+            if observation.observation_id in seen:
+                # 同一批里两条内容完全相同的观测（同一秒同一句——ASR 重复吐出是上游的常态，
+                # benchmark 的 dirty-double-emission 正是它）：观测身份按内容派生，两条本就是
+                # 一条，保留先到的即可。此前整批拒收，等于让一条脏数据废掉整份交付。
+                continue
+            seen.add(observation.observation_id)
+            observations.append(observation)
+        return BehaviorObservationBatch(observer_id=observer_id, observations=tuple(observations))
 
 
 def _observation(

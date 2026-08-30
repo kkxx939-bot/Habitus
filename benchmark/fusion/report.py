@@ -192,6 +192,34 @@ def evaluate(case: FusionCase, run: Mapping[str, Any]) -> dict[str, Any]:
                 ),
             }
         )
+    for index, expected_unowned in case.expect.unowned_fragments.items():
+        actual_unowned = tuple(segments.get(index, {}).get("unowned_fragments", ()))
+        checks.append(
+            {
+                "check": "unowned",
+                "passed": set(expected_unowned) == set(actual_unowned),
+                "detail": (
+                    f"段{index} 期望无归属的帧 {list(expected_unowned)}，实际 {list(actual_unowned)}"
+                ),
+            }
+        )
+    for index, expected_behaviors in case.expect.behaviors_present.items():
+        actual_behaviors = [
+            str(item.get("behavior") or "")
+            for item in segments.get(index, {}).get("judgements", ())
+        ]
+        absent_behaviors = [
+            wanted
+            for wanted in expected_behaviors
+            if not any(wanted in name for name in actual_behaviors)
+        ]
+        checks.append(
+            {
+                "check": "behaviors_present",
+                "passed": not absent_behaviors,
+                "detail": f"段{index} 期望判出 {list(expected_behaviors)}，缺 {absent_behaviors}，实际 {actual_behaviors}",
+            }
+        )
     return _summarise(case, run, checks)
 
 
@@ -211,7 +239,17 @@ def _summarise(case: FusionCase, run: Mapping[str, Any], checks: Sequence[Mappin
             max(0, item["model_calls"] - 1) for item in run["segments"]
         ),
         "elapsed_seconds": run["elapsed_seconds"],
+        "unowned_fragments_total": sum(
+            len(item.get("unowned_fragments", ())) for item in run["segments"]
+        ),
+        "fragment_total": sum(int(item.get("fragment_count", 0) or 0) for item in run["segments"]),
     }
+
+
+def _unowned_ratio(results: Sequence[Mapping[str, Any]]) -> float | None:
+    unowned = sum(int(item.get("unowned_fragments_total", 0) or 0) for item in results)
+    fragments = sum(int(item.get("fragment_total", 0) or 0) for item in results)
+    return None if fragments == 0 else round(unowned / fragments, 3)
 
 
 def aggregate(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -268,6 +306,8 @@ def aggregate(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return {
         "total_runs": len(regression),
         "passed_runs": sum(1 for item in regression if item["passed"]),
+        # 无归属帧占比（全部段合计）："允许不产出"用得多不多，单独看通过率会被"全部无归属"骗过
+        "unowned_ratio": _unowned_ratio(results),
         "probe_runs": len(probes),
         "probe_passed": sum(1 for item in probes if item["passed"]),
         "model_calls": sum(item["model_calls"] for item in results),

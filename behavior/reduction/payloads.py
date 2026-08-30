@@ -71,6 +71,7 @@ def occurrence_payload(
     ]
     distinct_goals = {item.goal: None for item in chain.view if item.goal is not None}
     goal = "；".join(distinct_goals) if distinct_goals else None
+    del consumed  # 溯源只留链身份：原料在发布后即释放，逐条 id 只会是死引用（实测占文档 70%）
     return {
         "occurred_on": head.started_at.date().isoformat(),
         "name": name,
@@ -90,16 +91,17 @@ def occurrence_payload(
         "place": None,
         "original_name": original_name,
         "basis": basis,
-        "judgement_ids": [item.judgement_id for item in consumed],
-        "observation_ids": sorted({oid for item in consumed for oid in item.observation_ids}),
-        "source_refs": sorted({ref for item in consumed for ref in item.source_refs}),
+        "chain_digest": chain.chain_digest,
         "fusion_version": head.fusion_version,
         "reduction_version": REDUCTION_VERSION,
     }
 
 
-def gap_payload(record: ReducibleJudgement) -> dict[str, Any]:
-    """一段没读懂的观测空白；字段逐字来自那条空判断，起止同刻是合法的单观测段。"""
+def gap_payload(record: ReducibleJudgement, *, chain_digest: str) -> dict[str, Any]:
+    """一段没读懂的观测空白；字段逐字来自那条空判断，起止同刻是合法的单观测段。
+
+    ``chain_digest`` 是消费账本里这段空白的条目身份（同刻合并时由合并后的判断集合派生）。
+    """
 
     if record.is_readable:
         raise BehaviorReductionError("a gap payload must be built from an unreadable judgement")
@@ -108,8 +110,7 @@ def gap_payload(record: ReducibleJudgement) -> dict[str, Any]:
         "gap_kind": UNREADABLE_GAP_KIND,
         "started_at": _iso(record.started_at),
         "ended_at": _iso(record.last_observed_at),
-        "judgement_ids": [record.judgement_id],
-        "observation_ids": sorted(set(record.observation_ids)),
+        "chain_digest": chain_digest,
         "reduction_version": REDUCTION_VERSION,
     }
 
@@ -143,7 +144,6 @@ def _basis_step(
     last_offset = timezone(timedelta(minutes=last.utc_offset_minutes))
     return {
         "semantics": semantics,
-        "observation_ids": list(observation_ids),
         "started_at": _iso(first.local_occurred_at),
         "ended_at": _iso(last.local_occurred_at),
         "available_at": _iso(available.astimezone(last_offset)),

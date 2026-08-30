@@ -34,3 +34,4 @@ dist/
 
 # Benchmark 运行产物
 benchmark/results/
+benchmark/data/

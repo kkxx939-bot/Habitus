@@ -15,6 +15,7 @@ from infrastructure.store.filesystem import (
     ImmutableArtifactConflictError,
     atomic_create_bytes,
     atomic_temporary_destination,
+    durable_unlink,
     list_real_directory,
     read_regular_bytes,
 )
@@ -136,6 +137,11 @@ class BehaviorObservationStore:
         return tuple(
             sorted(envelopes, key=lambda item: (item.batch.started_at, item.recorded_at, item.source_id))
         )
+
+    def discard(self, source_id: str) -> bool:
+        """释放一份交付：它的全部观测都已融合且所属判断都已发布到树。不存在时幂等返回 ``False``。"""
+
+        return durable_unlink(self._path(source_id), artifact_root=self.root)
 
     def _required_read(self, source_id: str) -> BehaviorObservationEnvelope:
         envelope = self.read(source_id)

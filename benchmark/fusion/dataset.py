@@ -92,6 +92,13 @@ class FusionExpectation:
     # 期望**不属于主体**的片段编号。与"读不懂"是两回事：那些帧读得懂，只是做的人不是我们跟踪的。
     # 用条数去测旁人有没有被吸收是测不准的——条数对了不等于那一帧没被塞进主体的判断。
     out_of_scope_fragments: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
+    # 期望**无归属**的片段编号：读得懂、但不构成任何事也不是任何事的步骤（无意识小动作、过渡帧）。
+    # 与"读不懂""旁人"三者口径各自干净。写成期望是为了两头都抓：该无归属的没无归属（噪声进了事件）、
+    # 不该无归属的被扔进去了（压制产出）。
+    unowned_fragments: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
+    # 期望某段里**至少判出**的行为（子串匹配 behavior）：允许模型不产出之后，"可提醒的单位有没有被
+    # 一起扔掉"必须单独考，总条数降了不等于对了。
+    behaviors_present: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for _, _, kind in tuple(self.relations) + tuple(self.forbidden_relations):
@@ -112,6 +119,8 @@ class FusionExpectation:
             or self.judgement_count
             or self.unreadable_fragments
             or self.out_of_scope_fragments
+            or self.unowned_fragments
+            or self.behaviors_present
             or self.forbidden_status
             or self.status_present
             or self.goal_absent
@@ -207,6 +216,12 @@ def _case(value: Any) -> FusionCase:
             out_of_scope_fragments={
                 int(key): tuple(item)
                 for key, item in expect.get("out_of_scope_fragments", {}).items()
+            },
+            unowned_fragments={
+                int(key): tuple(item) for key, item in expect.get("unowned_fragments", {}).items()
+            },
+            behaviors_present={
+                int(key): tuple(item) for key, item in expect.get("behaviors_present", {}).items()
             },
         ),
     )

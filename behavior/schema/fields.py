@@ -109,6 +109,18 @@ def sha256_tuple(value: Any, label: str) -> tuple[str, ...]:
     return tuple(values)
 
 
+def sha256_text(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not SHA256.fullmatch(value):
+        raise BehaviorSchemaError(f"{label} must be lowercase SHA-256 text")
+    return value
+
+
+def optional_sha256_text(value: Any, label: str) -> str | None:
+    if value is None:
+        return None
+    return sha256_text(value, label)
+
+
 def _enum(value: Any, allowed: frozenset[str], label: str) -> str:
     resolved = text(value, label)
     if resolved not in allowed:
@@ -131,16 +143,13 @@ def gap_kind(value: Any, label: str) -> str:
 def basis_steps(value: Any, label: str) -> tuple[dict[str, Any], ...]:
     """构成一件事的行为事实步骤；每步的时间在写入时从观测物化（观测之后会释放）。"""
 
-    expected = {"semantics", "observation_ids", "started_at", "ended_at", "available_at"}
+    # 步骤不再内联 observation_ids：原料在发布后即释放，那些 id 只会是死引用（实测占文档 1/3）。
+    # 步骤的起止与可知时刻在写入时已从观测物化，语义面自足。
+    expected = {"semantics", "started_at", "ended_at", "available_at"}
     resolved: list[dict[str, Any]] = []
     for index, item in enumerate(_sequence(value, label), start=1):
         payload = strict_mapping(item, f"{label}[{index}]")
         require_keys(payload, expected, f"{label}[{index}]")
-        observation_ids = sha256_tuple(
-            payload["observation_ids"], f"{label}[{index}].observation_ids"
-        )
-        if not observation_ids:
-            raise BehaviorSchemaError(f"{label}[{index}] must reference at least one observation")
         started_at = datetime_value(payload["started_at"], f"{label}[{index}].started_at")
         ended_at = datetime_value(payload["ended_at"], f"{label}[{index}].ended_at")
         available_at = datetime_value(payload["available_at"], f"{label}[{index}].available_at")
@@ -149,7 +158,6 @@ def basis_steps(value: Any, label: str) -> tuple[dict[str, Any], ...]:
         resolved.append(
             {
                 "semantics": text(payload["semantics"], f"{label}[{index}].semantics"),
-                "observation_ids": observation_ids,
                 "started_at": started_at,
                 "ended_at": ended_at,
                 "available_at": available_at,
@@ -166,6 +174,8 @@ _VALIDATORS: dict[BehaviorFieldType, Callable[[Any, str], Any]] = {
     BehaviorFieldType.BOOLEAN: boolean,
     BehaviorFieldType.STRING_LIST: string_tuple,
     BehaviorFieldType.SHA256_LIST: sha256_tuple,
+    BehaviorFieldType.SHA256: sha256_text,
+    BehaviorFieldType.OPTIONAL_SHA256: optional_sha256_text,
     BehaviorFieldType.OCCURRENCE_STATUS: occurrence_status,
     BehaviorFieldType.STATUS_BASIS: status_basis,
     BehaviorFieldType.GAP_KIND: gap_kind,

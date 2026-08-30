@@ -247,6 +247,11 @@ def test_delivery_to_tree_end_to_end_through_the_runtime(tmp_path: Path) -> None
     assert worked is True
     assert len(behavior.judgements.list()) == 1  # 判断落库
     assert len(behavior.receipts.list()) == 1  # 回执覆盖观测 → 封口前沿放行
+    assert behavior.jobs.oldest_uncommitted() is None  # 作业提交即清
+    observation_ids = {
+        item.observation_id for envelope in behavior.observations.list() for item in envelope.batch.observations
+    }
+    assert observation_ids <= behavior.fusion_runner.coverage.covered_observation_ids(datetime.now(tz=CST))
 
     report = asyncio.run(behavior.reduction_runner.run_once())
 
@@ -256,6 +261,11 @@ def test_delivery_to_tree_end_to_end_through_the_runtime(tmp_path: Path) -> None
     document = behavior.tree.read(addresses[0])
     assert document.fields["kind_token"] == "洗手"
     assert document.fields["status"] == "completed"
+    # 原料消费即释放：判断与交付在发布到树后即删，真正的数据只在树上；覆盖索引仍记得这批观测
+    # 已融合（上游补发时靠它去重）。
+    assert behavior.judgements.list() == ()
+    assert behavior.observations.list() == ()
+    assert observation_ids <= behavior.fusion_runner.coverage.covered_observation_ids(datetime.now(tz=CST))
     # 语义层被垃圾响应打断：降级为信号，不阻塞归约
     assert any("semantic refresh failed" in note for note in report.dropped_edges)
 
@@ -408,8 +418,12 @@ def test_fusion_worker_renews_the_lease_during_slow_execution() -> None:
         def claim(self, worker_id):
             return object()
 
-        async def execute(self, lease) -> None:
+        async def execute(self, lease):
             await asyncio.sleep(2.6)
+            # 与真实 ``BehaviorFusionRunResult`` 同形：worker 执行完会读降级记录做计数。
+            from types import SimpleNamespace
+
+            return SimpleNamespace(degradations=(), fused=False, job=SimpleNamespace(job_id="stub"))
 
     class _EnqueuerStub:
         def enqueue_ready(self) -> None:

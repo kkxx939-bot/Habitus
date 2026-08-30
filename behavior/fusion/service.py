@@ -22,7 +22,7 @@ from typing import Any
 
 from behavior.fusion.assembly import assemble_judgement_batch
 from behavior.fusion.config import BehaviorFusionConfig
-from behavior.fusion.errors import BehaviorFusionError
+from behavior.fusion.errors import BehaviorFusionError, BehaviorFusionTruncatedError
 from behavior.fusion.judgement import BehaviorJudgementBatch
 from behavior.fusion.prompt import (
     FUSION_PROMPT_VERSION,
@@ -36,6 +36,7 @@ from behavior.fusion.schema import fusion_json_schema
 from behavior.fusion.segmentation import BehaviorFusionSegment
 from behavior.fusion.validation import validate_judgement_batch
 from ModelClient import ChatMessage, ChatRequest, StructuredChatClient
+from ModelClient.contracts import ModelStructuredOutputError
 
 
 class BehaviorJudgementFuser:
@@ -67,12 +68,21 @@ class BehaviorJudgementFuser:
         if not isinstance(segment, BehaviorFusionSegment):
             raise TypeError("segment must be BehaviorFusionSegment")
         request = self._request(segment, primary_subject, context_judgements)
-        response = await self.client.complete_json_async(
-            request,
-            schema=fusion_json_schema(len(segment.fragments)),
-            name="behavior_judgement_batch",
-            validator=lambda parsed: self._validated(parsed, segment, context_judgements),
-        )
+        try:
+            response = await self.client.complete_json_async(
+                request,
+                schema=fusion_json_schema(len(segment.fragments)),
+                name="behavior_judgement_batch",
+                validator=lambda parsed: self._validated(parsed, segment, context_judgements),
+            )
+        except ModelStructuredOutputError as exc:
+            if _is_truncation(exc):
+                # 本层是唯一 import ModelClient 的一环：把"输出截断"翻译成领域错误，runner 据此
+                # 降级（整段记为没读懂），不必认识模型客户端的异常谱系。
+                raise BehaviorFusionTruncatedError(
+                    f"model output truncated for a segment of {len(segment.fragments)} fragments"
+                ) from exc
+            raise
         batch = response.value
         if not isinstance(batch, BehaviorJudgementBatch):  # pragma: no cover - 校验器保证类型
             raise BehaviorFusionError("structured output did not produce a judgement batch")
@@ -94,6 +104,12 @@ class BehaviorJudgementFuser:
             fragment_count=len(segment.fragments),
             context_states=tuple(item.get("status") for item in context),
             config=self.config,
+            # 主体是否在场在装配期降级（剔名/降为没读懂），校验层只做后置断言；否则这类记账
+            # 疏漏会走模型重试——真实数据一周 371 次，每次白烧三次调用。
+            participants_by_no={
+                index: fragment.participants
+                for index, fragment in enumerate(segment.fragments, start=1)
+            },
         )
         validate_judgement_batch(batch, segment.fragments)
         return batch
@@ -120,6 +136,17 @@ class BehaviorJudgementFuser:
                 ChatMessage(role="user", content=content),
             )
         )
+
+
+def _is_truncation(error: BaseException) -> bool:
+    """结构化客户端把 length 截断包成 ModelStructuredOutputError，原因在 cause 链里。"""
+
+    current: BaseException | None = error
+    while current is not None:
+        if "truncated" in str(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 __all__ = ["BehaviorJudgementFuser"]

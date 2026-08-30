@@ -15,4 +15,8 @@ class BehaviorFusionLimitError(BehaviorFusionError):
     """融合产物超过显式容量边界。"""
 
 
-__all__ = ["BehaviorFusionError", "BehaviorFusionLimitError"]
+class BehaviorFusionTruncatedError(BehaviorFusionError):
+    """模型输出被长度截断，且重试仍截断——这是段容量与输出预算的错配，不是可重试的环境故障。"""
+
+
+__all__ = ["BehaviorFusionError", "BehaviorFusionLimitError", "BehaviorFusionTruncatedError"]

@@ -10,6 +10,5 @@ fields:
   - {name: gap_kind, type: gap_kind, role: address, required: true, description: 空白类型，没读懂或未观测；作为地址叶名的语义名。}
   - {name: started_at, type: datetime, role: address, required: true, description: 空白开始时刻，本地时间带整分钟偏移。}
   - {name: ended_at, type: datetime, role: numeric, required: true, description: 空白结束时刻；必须晚于开始。}
-  - {name: judgement_ids, type: sha256_list, role: system, required: true, description: 没读懂空白必须携带来源判断身份；未观测空白允许为空、随上游契约补齐。}
-  - {name: observation_ids, type: sha256_list, role: system, required: true, description: 没读懂空白覆盖的观测身份；未观测空白允许为空。}
+  - {name: chain_digest, type: optional_sha256, role: system, required: true, description: 产生本段的归约条目身份；没读懂空白必须携带，未观测空白允许为空、随上游契约补齐。}
   - {name: reduction_version, type: string, role: system, required: true, description: 归约写入层的实现版本。}

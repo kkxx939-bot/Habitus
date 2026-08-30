@@ -1,6 +1,13 @@
-"""行为判断的只创建不可变存储。
+"""行为判断存储：内容身份命名、只创建不覆盖，**归约发布后释放**。
 
 判断按内容身份命名，所以同一条判断重复落盘天然幂等——不需要撞车比对，因为身份就是内容。
+
+## 生命周期：发布即删
+
+判断是原料不是数据——真正的数据只在行为树上。一条判断被归约链发布成 occurrence/gap、消费账本
+写完之后，代码里再没有任何读者（融合上下文只回看封口窗口内的、归约只读未消费的），于是由归约
+在同一轮里 ``discard``。本存储因此只保有**尚未封口的最近一个窗口**，全量枚举本来就该是这个规模；
+"当日实况"的读者已封口部分读树、未封口部分读这里，不得假设这里有全天。
 
 ## 不能走 canonical_json
 
@@ -30,6 +37,7 @@ from infrastructure.store.filesystem import (
     ImmutableArtifactConflictError,
     atomic_create_bytes,
     atomic_temporary_destination,
+    durable_unlink,
     list_real_directory,
     read_regular_bytes,
 )
@@ -62,17 +70,11 @@ _JUDGEMENT_KEYS = frozenset(
 )
 _JUDGEMENT_FILE = re.compile(r"^(?P<judgement_id>[0-9a-f]{64})\.json$")
 
-# TODO(BHV-LIFECYCLE-001): 与观测存储、回执存储同一个生命周期缺口——``list()`` 是全量扁平枚举，
-# 越过 ``max_judgement_files`` 即永久抛错，而写入仍然一直成功。改造随三棵树的生命周期一并做：
-# 按本地日历日分区、提供有界的时间窗读取、设定保留期。判断的释放门槛要比观测更晚：观测可在
-# "已形成判断"后释放，判断必须活到归约层把它变成树内文档之后，且释放门槛是**双消费者**
-# （归约消费账本 + 在线当日实况）。归约层落地后新增的三条输入：
-# ① fusion_v3 起没读懂判断也入库——上游语义退化（unreadable 占比升高）时本存储膨胀更快；
-# ② 归约封口前沿依赖"未被回执覆盖的观测"集合：观测/回执做保留期释放时必须保证"已释放的观测
-#   均有回执覆盖"，否则旧观测被误判为未融合、封口视界被永远拖在过去；
-# ③ 容量悬崖同类项还有两处：kinds 词表 max_kinds/max_aliases 满后每轮归约在 stage 前失败，
-#   树单日目录 max_children 满后在 publish 期失败——到顶即停摆而写入不停，保留期设计要一并覆盖
-#   （kinds 满时可评估"新名字直接当 token 不入词表"的有损降级）。
+# BHV-LIFECYCLE-001（判断部分已落地，2026-08-30）：释放门槛不是保留期而是**消费**——归约发布
+# 后 ``discard``；"当日实况"改为已封口读树、未封口读这里，双消费者门槛随之消失。观测同理在链
+# 发布后释放（``behavior/reduction/runner.py``），"已释放的观测均有覆盖记录"由融合覆盖索引
+# （``behavior/fusion/coverage.py``，写在回执落盘同一步）保证。容量悬崖的其余两处（kinds 词表、
+# 树单日目录）见 ``behavior/fusion/__init__.py`` 的 TODO(BHV-REALDATA-001)。
 
 
 class BehaviorJudgementStore:
@@ -228,6 +230,11 @@ class BehaviorJudgementStore:
         record = self._decode(encoded)
         if record["judgement_id"] != judgement_id:
             raise BehaviorFusionError("judgement record does not carry its own identity")
+
+    def discard(self, judgement_id: str) -> bool:
+        """释放一条已被归约消费的判断；不存在时幂等返回 ``False``。"""
+
+        return durable_unlink(self._path(judgement_id), artifact_root=self.root)
 
     def _path(self, judgement_id: str) -> Path:
         if _JUDGEMENT_FILE.fullmatch(f"{judgement_id}.json") is None:

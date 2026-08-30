@@ -286,3 +286,43 @@ def test_registry_coexists_with_the_tree_at_the_same_root(tmp_path) -> None:
     assert snapshot.revision == 1 and snapshot.registry.token_for("洗手") == "洗手"
     store.replace(snapshot.registry.with_new_kind("做饭"), expected_revision=1, timestamp=now)
     assert store.read().registry.token_for("做饭") == "做饭"
+
+
+class _FlakyThenScriptedProvider(ScriptedProvider):
+    """第一次调用断连，之后按脚本回放：resolver 自己吃掉瞬态错误，归约整轮不因此作废。"""
+
+    def __init__(self, bodies: list[dict[str, Any]]) -> None:
+        super().__init__(bodies)
+        self.failed_once = False
+
+    async def complete_async(self, request: PreparedChatRequest) -> ModelResponse:
+        from ModelClient.contracts import ModelTransportError
+
+        if not self.failed_once:
+            self.failed_once = True
+            raise ModelTransportError("ReadTimeout")
+        return await super().complete_async(request)
+
+
+def test_resolver_retries_a_transient_error_then_resolves() -> None:
+    provider = _FlakyThenScriptedProvider([{"match": None}])
+    model_config = ChatModelConfig(
+        route=ProviderConfig(
+            provider="fake",
+            adapter="openai_compatible_chat",
+            model="fake-1",
+            base_url="https://example.invalid",
+            credential_ref="FAKE_KEY",
+        ),
+        context_window_tokens=128_000,
+        max_output_tokens=8_000,
+        structured_output_mode="json_schema",
+    )
+    resolver = BehaviorKindResolver(
+        StructuredChatClient(ChatClient(model_config, provider), validation_retries=1),
+        config=BehaviorKindConfig(transient_retries=2, transient_retry_delay_seconds=0.0),
+    )
+    registry = BehaviorKindRegistry({"洗手": ()})
+    resolution = asyncio.run(resolver.resolve("擦桌子", registry))
+    assert resolution.created is True and resolution.token == "擦桌子"
+    assert provider.calls == 1 and provider.failed_once is True

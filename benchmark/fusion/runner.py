@@ -45,6 +45,9 @@ class FusionSegmentRun:
     relations: list[dict[str, Any]] = field(default_factory=list)
     unreadable_fragments: list[int] = field(default_factory=list)
     out_of_scope_fragments: list[int] = field(default_factory=list)
+    # 读得懂却不属于任何判断的帧（无意识小动作、过渡）："允许不产出"的出口，占比要能看见。
+    unowned_fragments: list[int] = field(default_factory=list)
+    fragment_count: int = 0
     model_calls: int = 0
     failed: str | None = None
 
@@ -75,6 +78,8 @@ class FusionCaseRun:
                     "relations": item.relations,
                     "unreadable_fragments": item.unreadable_fragments,
                     "out_of_scope_fragments": item.out_of_scope_fragments,
+                    "unowned_fragments": item.unowned_fragments,
+                    "fragment_count": item.fragment_count,
                     "model_calls": item.model_calls,
                     "failed": item.failed,
                 }
@@ -139,7 +144,10 @@ async def run_case(
         )
         # 显式绑定：闭包若捕获循环变量，下一段的值会回头改掉这一段的校验口径。
         assemble = _assembler(
-            len(observations), tuple(item["status"] for item in context), resolved
+            len(observations),
+            tuple(item["status"] for item in context),
+            resolved,
+            {index: item.participants for index, item in enumerate(observations, start=1)},
         )
         try:
             response = await client.complete_json_async(
@@ -154,6 +162,8 @@ async def run_case(
             break
         batch = cast(BehaviorJudgementBatch, response.value)
         record.model_calls = response.validation_attempts
+        record.fragment_count = len(observations)
+        record.unowned_fragments.extend(batch.unowned_fragment_nos)
         try:
             validate_judgement_batch(batch, segment.fragments)
         except Exception as exc:  # pragma: no cover - 装配已保证，纵深防御
@@ -245,7 +255,10 @@ async def run_case(
 
 
 def _assembler(
-    fragment_count: int, context_states: tuple[str | None, ...], config: BehaviorFusionConfig
+    fragment_count: int,
+    context_states: tuple[str | None, ...],
+    config: BehaviorFusionConfig,
+    participants_by_no: dict[int, tuple[str, ...]],
 ) -> Callable[[object], BehaviorJudgementBatch]:
     def assemble(parsed: object) -> BehaviorJudgementBatch:
         return assemble_judgement_batch(
@@ -253,6 +266,7 @@ def _assembler(
             fragment_count=fragment_count,
             context_states=context_states,
             config=config,
+            participants_by_no=participants_by_no,
         )
 
     return assemble

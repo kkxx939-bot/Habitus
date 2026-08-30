@@ -27,6 +27,7 @@ from behavior.observation import (
 )
 from behavior.reduction import BehaviorReductionLedger, BehaviorReductionRunner  # noqa: F401
 from behavior.tree import BehaviorTree
+from behavior.uri import BehaviorURI
 from foundation.integrity import canonical_digest
 from infrastructure.store.contracts import PathLock
 from infrastructure.store.locks import ProcessLocalLockStore
@@ -166,7 +167,7 @@ class Harness:
         )
         self.observations.put(envelope)
         if fused:
-            self.receipts.put(
+            stored = self.receipts.put(
                 build_fusion_receipt(
                     (),
                     tuple(observations_batch),
@@ -177,6 +178,8 @@ class Harness:
                     judged_at=at(600),
                 )
             )
+            # 覆盖信息由索引回答（回执只服务作业期幂等），融合 runner 在落回执的同一步写它。
+            self.runner.coverage.record(stored)
         return envelope.source_id
 
 
@@ -248,7 +251,8 @@ def test_full_pipeline_reduces_a_chain_and_a_gap_into_the_tree(tmp_path) -> None
     assert document.fields["status"] == "completed"
     assert document.fields["summary"] == "在水池边洗手；冲水擦干结束"
     assert document.fields["onset_available_at"] == at(42).isoformat(timespec="microseconds")
-    assert set(document.fields["judgement_ids"]) == {record_id("head"), record_id("tail")}
+    ledger_by_uri = {entry.uri: entry for entry in harness.ledger.load()}
+    assert document.fields["chain_digest"] == ledger_by_uri[str(BehaviorURI.from_address(occurrences[0]))].chain_digest
 
     gap_document = harness.tree.read(gaps[0])
     assert gap_document.fields["started_at"] == gap_document.fields["ended_at"]
@@ -302,15 +306,17 @@ def test_an_unfused_observation_blocks_sealing_despite_the_wall_clock(tmp_path) 
     assert report.chains_pending == 1
 
     # 该观测融合完成（回执覆盖）后，同一墙钟下立即可封。
-    harness.receipts.put(
-        build_fusion_receipt(
-            (),
-            (backlog,),
-            source_refs=("f" * 64,),
-            prompt_version=FUSION_PROMPT_VERSION,
-            validation_attempts=1,
-            primary_subject=SUBJECT,
-            judged_at=at(700),
+    harness.runner.coverage.record(
+        harness.receipts.put(
+            build_fusion_receipt(
+                (),
+                (backlog,),
+                source_refs=("f" * 64,),
+                prompt_version=FUSION_PROMPT_VERSION,
+                validation_attempts=1,
+                primary_subject=SUBJECT,
+                judged_at=at(700),
+            )
         )
     )
     report = asyncio.run(harness.runner.run_once())
@@ -379,7 +385,13 @@ def test_late_chain_links_to_an_already_consumed_target_via_the_ledger(tmp_path)
     source = harness.deliver(OBS_A, OBS_B, OBS_C)
     seed_wash_chain(harness, source)
     asyncio.run(harness.runner.run_once())
+    # 第一轮发布后，这份交付的观测全部已融合且无判断再引用——按"消费即释放"它已被删除。
+    assert harness.observations.read(source) is None
+    assert harness.judgements.list() == ()
 
+    # 晚到的链带着自己的观测与交付（一条观测只会被融合一次，不会被后来的判断复用）。
+    wipe_obs = observation(200, "人在擦桌子")
+    source_wipe = harness.deliver(wipe_obs, seed="delivery-wipe")
     harness.judgements.put_payload(
         judgement_record(
             "wipe",
@@ -387,8 +399,8 @@ def test_late_chain_links_to_an_already_consumed_target_via_the_ledger(tmp_path)
             started_at=at(200),
             last_observed_at=at(230),
             evidence_ready_at=at(232),
-            observation_ids=(OBS_C.observation_id,),
-            source_refs=(source,),
+            observation_ids=(wipe_obs.observation_id,),
+            source_refs=(source_wipe,),
             summary="洗完手顺手擦了桌子",
             relations=(("results_from", record_id("tail")),),
         )
@@ -431,7 +443,9 @@ def test_same_second_gaps_merge_and_cross_batch_collision_consumes_by_reference(
     assert report.published_gaps == 1
     gap = harness.tree.read(harness.tree.list_addresses(BehaviorKind.GAP)[0])
     assert gap.fields["ended_at"] == at(150).isoformat(timespec="microseconds")
-    assert set(gap.fields["judgement_ids"]) == {record_id("blur"), record_id("blur-b")}
+    gap_entry = next(entry for entry in harness.ledger.load() if entry.kind == "gap")
+    assert gap.fields["chain_digest"] == gap_entry.chain_digest
+    assert set(gap_entry.judgement_ids) == {record_id("blur"), record_id("blur-b")}
 
     # 跨批撞已落盘空白：记账指向既有节点，不重复、不丢账、不卡队列。
     blur_c = observation(121, "第三路模糊画面")
@@ -493,7 +507,8 @@ def test_supersedes_view_lands_and_history_is_consumed(tmp_path) -> None:
     addresses = harness.tree.list_addresses(BehaviorKind.OCCURRENCE)
     assert [address.name for address in addresses] == ["洗手"]  # 树存修正后视图
     document = harness.tree.read(addresses[0])
-    assert set(document.fields["judgement_ids"]) == {record_id("vague"), record_id("clear")}
+    entry = next(item for item in harness.ledger.load() if item.chain_digest == document.fields["chain_digest"])
+    assert set(entry.judgement_ids) == {record_id("vague"), record_id("clear")}
     consumed = harness.ledger.consumed_judgement_ids()
     assert record_id("vague") in consumed  # 全史随链消费
 
@@ -504,7 +519,7 @@ def test_a_link_to_a_published_gap_is_dropped_not_published(tmp_path) -> None:
     """指向已落盘 gap 节点的跨批链接必须作废——放行会在检查点之后被 writer 硬拒、永久卡死。"""
 
     harness = Harness(tmp_path, known_kinds=("擦桌子",))
-    source = harness.deliver(OBS_C, OBS_BLUR)
+    source = harness.deliver(OBS_BLUR)
     harness.judgements.put_payload(
         judgement_record(
             "blur",
@@ -516,8 +531,9 @@ def test_a_link_to_a_published_gap_is_dropped_not_published(tmp_path) -> None:
             source_refs=(source,),
         )
     )
-    asyncio.run(harness.runner.run_once())  # gap 落盘并记账
+    asyncio.run(harness.runner.run_once())  # gap 落盘并记账；这份交付随之释放
 
+    source_wipe = harness.deliver(OBS_C, seed="delivery-wipe")
     harness.judgements.put_payload(
         judgement_record(
             "wipe",
@@ -526,7 +542,7 @@ def test_a_link_to_a_published_gap_is_dropped_not_published(tmp_path) -> None:
             last_observed_at=at(230),
             evidence_ready_at=at(232),
             observation_ids=(OBS_C.observation_id,),
-            source_refs=(source,),
+            source_refs=(source_wipe,),
             summary="擦了桌子",
             relations=(("results_from", record_id("blur")),),
         )
@@ -798,3 +814,29 @@ def test_run_once_works_with_the_production_sqlite_lock_store(tmp_path) -> None:
 
     assert report.published_occurrences == 1
     assert len(harness.tree.list_addresses(BehaviorKind.OCCURRENCE)) == 1
+
+
+class _FullRegistryResolver(BehaviorKindResolver):
+    """词表已满：任何新名字都撞 BehaviorKindLimitError。"""
+
+    async def resolve(self, name, registry):  # type: ignore[override]
+        from behavior.kinds.model import BehaviorKindLimitError
+
+        known = registry.token_for(name)
+        if known is not None:
+            from behavior.kinds.resolver import BehaviorKindResolution
+
+            return BehaviorKindResolution(token=known, registry=registry, created=False, model_called=False, validation_attempts=0)
+        raise BehaviorKindLimitError("behavior kind registry has no remaining kind capacity")
+
+
+def test_a_full_kind_registry_degrades_to_the_raw_name_instead_of_failing_the_sweep(tmp_path) -> None:
+    harness = Harness(tmp_path, known_kinds=())
+    harness.runner.kind_resolver = _FullRegistryResolver(build_resolver().client)
+    source = harness.deliver(OBS_A, OBS_B, OBS_C)
+    seed_wash_chain(harness, source)
+    report = asyncio.run(harness.runner.run_once())
+    assert report.published_occurrences == 1
+    document = harness.tree.read(harness.tree.list_addresses(BehaviorKind.OCCURRENCE)[0])
+    assert document.fields["kind_token"] == "洗手"  # 原始名暂作 token，事后可重打
+    assert any("kind registry full" in note for note in report.dropped_edges)

@@ -45,22 +45,18 @@ def occurrence_payload(**overrides: Any) -> dict[str, Any]:
         "basis": (
             {
                 "semantics": "打开水龙头打肥皂搓手",
-                "observation_ids": (OBS_A, OBS_B),
                 "started_at": local(19, 30, 18),
                 "ended_at": local(19, 31, 0),
                 "available_at": local(19, 30, 20),
             },
             {
                 "semantics": "冲水关龙头擦干",
-                "observation_ids": (OBS_C,),
                 "started_at": local(19, 31, 0),
                 "ended_at": local(19, 31, 30),
                 "available_at": local(19, 31, 2),
             },
         ),
-        "judgement_ids": (JUDGEMENT_1,),
-        "observation_ids": (OBS_A, OBS_B, OBS_C),
-        "source_refs": (SOURCE_1,),
+        "chain_digest": JUDGEMENT_1,
         "fusion_version": "behavior_judgement_fusion_v1+prompt_v15+schema0000",
         "reduction_version": "behavior_reduction_v1",
     }
@@ -91,8 +87,7 @@ def gap_payload(**overrides: Any) -> dict[str, Any]:
         "gap_kind": "没读懂",
         "started_at": local(20, 10),
         "ended_at": local(20, 40),
-        "judgement_ids": (JUDGEMENT_1,),
-        "observation_ids": (OBS_A,),
+        "chain_digest": JUDGEMENT_1,
         "reduction_version": "behavior_reduction_v1",
     }
     payload.update(overrides)
