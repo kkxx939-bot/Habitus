@@ -28,9 +28,14 @@ from behavior.fusion.config import FUSION_CONTEXT_LOOKBACK_SECONDS
 from behavior.fusion.coverage import BehaviorCoverageIndex
 from behavior.fusion.receipt_store import BehaviorFusionReceiptStore
 from behavior.fusion.store import BehaviorJudgementStore
-from behavior.kinds.model import BehaviorKindLimitError
-from behavior.kinds.resolver import BehaviorKindResolver
+from behavior.kinds.model import BehaviorKindLimitError, BehaviorKindRegistry
+from behavior.kinds.resolver import BehaviorKindRequest, BehaviorKindResolver
 from behavior.kinds.store import BehaviorKindStore
+from behavior.kinds.vectors import (
+    BehaviorKindVectorError,
+    BehaviorKindVectorIndex,
+    BehaviorKindVectorStore,
+)
 from behavior.model import BehaviorAddress, BehaviorKind
 from behavior.observation import BehaviorObservation, BehaviorObservationStore
 from behavior.reduction.chains import ChainAssembly, assemble_chains
@@ -93,6 +98,7 @@ class BehaviorReductionRunner:
         kind_store: BehaviorKindStore,
         kind_resolver: BehaviorKindResolver,
         ledger: BehaviorReductionLedger,
+        kind_vectors: BehaviorKindVectorStore | None = None,
         semantic_refresher: BehaviorSemanticRefresher | None = None,
         clock: Callable[[], datetime] | None = None,
         context_lookback_seconds: float = FUSION_CONTEXT_LOOKBACK_SECONDS,
@@ -113,6 +119,8 @@ class BehaviorReductionRunner:
             raise TypeError("kind_store must be BehaviorKindStore")
         if not isinstance(kind_resolver, BehaviorKindResolver):
             raise TypeError("kind_resolver must be BehaviorKindResolver")
+        if kind_vectors is not None and not isinstance(kind_vectors, BehaviorKindVectorStore):
+            raise TypeError("kind_vectors must be BehaviorKindVectorStore or None")
         if not isinstance(ledger, BehaviorReductionLedger):
             raise TypeError("ledger must be BehaviorReductionLedger")
         if semantic_refresher is not None and not isinstance(
@@ -134,6 +142,7 @@ class BehaviorReductionRunner:
         self.lock_store = lock_store
         self.kind_store = kind_store
         self.kind_resolver = kind_resolver
+        self.kind_vectors = kind_vectors
         self.ledger = ledger
         self.semantic_refresher = semantic_refresher
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -332,7 +341,7 @@ class BehaviorReductionRunner:
         # kinds 归一只对命名幸存的链做（写入层唯一的 LLM 触点）——坏名字的链已隔离，
         # 不许它在 resolver 处把整轮吞掉。
         tokens = await self._resolve_kind_tokens(
-            (str(assembly.chains[index].head.behavior) for index in naming),
+            (assembly.chains[index].head for index in naming),
             now,
             guard=guard,
             dropped=dropped,
@@ -452,54 +461,111 @@ class BehaviorReductionRunner:
 
     async def _resolve_kind_tokens(
         self,
-        names: Iterable[str],
+        heads: Iterable[ReducibleJudgement],
         now: datetime,
         *,
         guard: LeaseGuard | None = None,
         dropped: list[str] | None = None,
     ) -> dict[str, str]:
-        """kinds 归一——写入层唯一的 LLM 触点；词表按批 CAS 落盘（瞬态重试在 resolver 内）。
+        """kinds 归一——写入层唯一的 LLM 触点；按批 CAS 落盘，到期条目随本轮删除。
 
-        崩溃重试时先前已记入词表的名字走确定性快路径（``token_for``），所以"先落词表、再落
-        检查点"的顺序保证重试不漂移。七天真实数据实测：一次 sweep 近三千个不同名字≈两小时
-        串行调用，词表若只在循环结束后落盘一次，中途一次断连就全部作废（BHV-REALDATA-001）——
-        所以每 ``_KIND_PERSIST_EVERY`` 个名字落一次、并顺手续 sweep 租约。词表撞顶不再让整轮
-        失败：超限的名字暂以原始名作 token 并留信号（词表在微动作粒度下不收敛是折叠问题的症状）。
+        每条链头给出三样：名字、证据（判断的 summary，给模型看"做的是什么"）、行为日（``started_at``
+        所在的本地日历日，命中账按它记，不按归约时刻）。已知名字走确定性快路径只记命中；未知名字
+        按 ``batch_size`` 一批交 resolver（embedding 候选 + 模型判"是不是同一件事"）。每批落一次词表
+        并续 sweep 租约——崩溃重试时先前已记入词表的名字走快路径，"先落词表、再落检查点"的顺序保证
+        重试不漂移。词表撞顶不让整轮失败：超限名字暂以原始名作 token 并留信号。
+
+        过期用**数据时钟**（本轮最新的行为日）而不是墙钟：停机一个月不会把词表删光。到期条目删除
+        只动词表与向量旁册，树上的 occurrence 原样保留（BHV-KINDS-002）。
         """
+
+        signals = dropped if dropped is not None else []
+        config = self.kind_resolver.config
+        requests: dict[str, BehaviorKindRequest] = {}
+        latest_day: date | None = None
+        for head in heads:
+            name = str(head.behavior)
+            day = head.started_at.date()
+            latest_day = day if latest_day is None or day > latest_day else latest_day
+            if name not in requests:
+                requests[name] = BehaviorKindRequest(name=name, day=day, evidence=head.summary)
 
         snapshot = self.kind_store.read()
         registry = snapshot.registry
         revision = snapshot.revision
+        vectors = self._read_kind_vectors(signals)
+        vectors_before = vectors
         tokens: dict[str, str] = {}
-        since_persist = 0
-        for name in sorted(set(names)):
-            resolution = None
+
+        known = [item for item in requests.values() if registry.token_for(item.name) is not None]
+        unknown = [item for item in requests.values() if registry.token_for(item.name) is None]
+        if known:
+            # 零调用：只记命中账。
+            result = await self.kind_resolver.resolve_many(known, registry, vectors=vectors)
+            registry, vectors = result.registry, result.vectors
+            tokens.update(result.tokens)
+        for start in range(0, len(unknown), config.batch_size):
+            chunk = unknown[start : start + config.batch_size]
             try:
-                # 瞬态错误的有界重试在 resolver 内（它是允许接触模型客户端的一层）
-                resolution = await self.kind_resolver.resolve(name, registry)
-            except BehaviorKindLimitError:
-                resolution = None
-            if resolution is None:
-                # 词表容量撞顶：超限名字暂以原始名作 token，语义面不丢、统计可事后重打
+                result = await self.kind_resolver.resolve_many(chunk, registry, vectors=vectors)
+            except BehaviorKindLimitError as exc:
+                # 词表容量撞顶：这一批的名字暂以原始名作 token，语义面不丢、统计可事后重打
                 # （occurrence 永远保留原始名）。留信号，不让一轮归约整个失败。
-                tokens[name] = name
-                if dropped is not None:
-                    dropped.append(f"kind registry full: {name!r} kept as its own token")
+                for item in chunk:
+                    tokens[item.name] = item.name
+                    signals.append(f"kind registry full: {item.name!r} kept as its own token ({exc})")
                 continue
-            registry = resolution.registry
-            tokens[name] = resolution.token
-            since_persist += 1
-            if since_persist >= _KIND_PERSIST_EVERY and registry is not snapshot.registry:
-                self.kind_store.replace(registry, expected_revision=revision, timestamp=now)
-                snapshot = self.kind_store.read()
-                registry = snapshot.registry
-                revision = snapshot.revision
-                since_persist = 0
-                if guard is not None:
-                    guard.checkpoint()
-        if registry is not snapshot.registry:
-            self.kind_store.replace(registry, expected_revision=revision, timestamp=now)
+            registry, vectors = result.registry, result.vectors
+            tokens.update(result.tokens)
+            signals.extend(result.signals)
+            for name in result.created:
+                signals.append(f"kind_created {name!r} label={registry.label_of(name)!r}")
+            registry, revision = self._persist_kinds(registry, revision, now)
+            if guard is not None:
+                guard.checkpoint()
+
+        if latest_day is not None:
+            expired = registry.expired(
+                on=latest_day, base_days=config.base_days, gap_multiplier=config.gap_multiplier
+            )
+            for token in expired:
+                entry = registry.entry_of(token)
+                signals.append(
+                    f"kind_expired {token!r} last hit {entry.last_hit_day} "
+                    f"(hit_days={entry.hit_days_total}, max_gap={entry.max_gap_days})"
+                )
+                if vectors is not None:
+                    vectors = vectors.without((entry.token, entry.label))
+                registry = registry.without(token)
+        registry, revision = self._persist_kinds(registry, revision, now)
+        if vectors is not None and vectors is not vectors_before and self.kind_vectors is not None:
+            try:
+                self.kind_vectors.replace(vectors)
+            except BehaviorKindVectorError as exc:
+                signals.append(f"kind_vectors_not_persisted: {exc}")
         return tokens
+
+    def _persist_kinds(
+        self, registry: BehaviorKindRegistry, revision: int, now: datetime
+    ) -> tuple[BehaviorKindRegistry, int]:
+        """词表变了就 CAS 落盘；返回落盘后的 (registry, revision)。"""
+
+        current = self.kind_store.read()
+        if current.registry == registry:
+            return current.registry, current.revision
+        written = self.kind_store.replace(registry, expected_revision=revision, timestamp=now)
+        return written.registry, written.revision
+
+    def _read_kind_vectors(self, signals: list[str]) -> BehaviorKindVectorIndex | None:
+        """向量旁册是派生物：读不了就按空索引走（候选退字面重合），留信号，不阻塞归约。"""
+
+        if self.kind_vectors is None:
+            return None
+        try:
+            return self.kind_vectors.read()
+        except BehaviorKindVectorError as exc:
+            signals.append(f"kind_vectors_unreadable: {exc}; rebuilding from empty")
+            return self.kind_vectors.empty()
 
     @staticmethod
     def _merged_gap_payload(group: list[ReducibleJudgement], *, chain_digest: str) -> dict[str, Any]:
@@ -758,7 +824,6 @@ def _as_instant(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-_KIND_PERSIST_EVERY = 25
 _TRUNCATED_HEAD = 20
 _TRUNCATED_TAIL = 5
 

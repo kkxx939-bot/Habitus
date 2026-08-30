@@ -817,17 +817,14 @@ def test_run_once_works_with_the_production_sqlite_lock_store(tmp_path) -> None:
 
 
 class _FullRegistryResolver(BehaviorKindResolver):
-    """词表已满：任何新名字都撞 BehaviorKindLimitError。"""
+    """词表已满：任何未知名字都撞 BehaviorKindLimitError（已知名字照走快路径）。"""
 
-    async def resolve(self, name, registry):  # type: ignore[override]
+    async def resolve_many(self, requests, registry, *, vectors=None):  # type: ignore[override]
         from behavior.kinds.model import BehaviorKindLimitError
 
-        known = registry.token_for(name)
-        if known is not None:
-            from behavior.kinds.resolver import BehaviorKindResolution
-
-            return BehaviorKindResolution(token=known, registry=registry, created=False, model_called=False, validation_attempts=0)
-        raise BehaviorKindLimitError("behavior kind registry has no remaining kind capacity")
+        if any(registry.token_for(item.name) is None for item in requests):
+            raise BehaviorKindLimitError("behavior kind registry has no remaining kind capacity")
+        return await super().resolve_many(requests, registry, vectors=vectors)
 
 
 def test_a_full_kind_registry_degrades_to_the_raw_name_instead_of_failing_the_sweep(tmp_path) -> None:
@@ -840,3 +837,30 @@ def test_a_full_kind_registry_degrades_to_the_raw_name_instead_of_failing_the_sw
     document = harness.tree.read(harness.tree.list_addresses(BehaviorKind.OCCURRENCE)[0])
     assert document.fields["kind_token"] == "洗手"  # 原始名暂作 token，事后可重打
     assert any("kind registry full" in note for note in report.dropped_edges)
+
+
+def test_reduction_records_hits_by_behaviour_day_and_expires_stale_kinds(tmp_path) -> None:
+    """命中账按行为日记；到期按数据时钟（本轮最新行为日）删，树上文档不动（BHV-KINDS-002）。"""
+
+    from datetime import timedelta
+
+    from behavior.kinds import BehaviorKindEntry
+
+    harness = Harness(tmp_path, known_kinds=())
+    behaviour_day = at(18).date()
+    stale = BehaviorKindEntry(token="卷账单", label="卷账单").with_hit(behaviour_day - timedelta(days=40))
+    recent = BehaviorKindEntry(token="打球", label="打球").with_hit(behaviour_day - timedelta(days=10))
+    harness.kind_store.replace(
+        BehaviorKindRegistry({"卷账单": stale, "打球": recent, "洗手": ()}),
+        expected_revision=0,
+        timestamp=harness.now,
+    )
+    source = harness.deliver(OBS_A, OBS_B, OBS_C)
+    seed_wash_chain(harness, source)
+    report = asyncio.run(harness.runner.run_once())
+    assert report.published_occurrences == 1
+    registry = harness.kind_store.read().registry
+    assert registry.entry_of("洗手").hit_days == (behaviour_day,)
+    assert "卷账单" not in registry.tokens  # 40 天没再命中 > 基础期 30 天
+    assert "打球" in registry.tokens  # 10 天前命中过，还在存活期内
+    assert any("kind_expired '卷账单'" in note for note in report.dropped_edges)

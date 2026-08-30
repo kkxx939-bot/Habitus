@@ -43,8 +43,10 @@ from behavior.fusion.config import (
 )
 from behavior.fusion.coverage import BehaviorCoverageIndex
 from behavior.fusion.enqueue import DEFAULT_QUIET_PERIOD_SECONDS
+from behavior.kinds.config import BehaviorKindConfig
 from behavior.kinds.resolver import BehaviorKindResolver
 from behavior.kinds.store import BehaviorKindStore
+from behavior.kinds.vectors import BehaviorKindVectorStore
 from behavior.observation import BehaviorObservationEnvelope, BehaviorObservationStore
 from behavior.reduction import (
     BehaviorReductionBusyError,
@@ -58,6 +60,7 @@ from foundation.observability import ObservationStatus, Observer
 from infrastructure.store.contracts.lock import LockStore
 from infrastructure.store.contracts.path_lock import PathLock
 from ModelClient import StructuredChatClient
+from ModelClient.embedding import Embedder
 from Runtime.resident import ResidentWorker
 
 
@@ -300,6 +303,7 @@ def build_behavior_components(
     path_lock: PathLock,
     observer: Observer | None = None,
     clock: Callable[[], datetime] | None = None,
+    embedder: Embedder | None = None,
 ) -> BehaviorRuntimeComponents | None:
     """组装行为管线；``primary_subject`` 未配置时返回 None（行为侧未启用）。
 
@@ -357,7 +361,16 @@ def build_behavior_components(
     )
 
     tree = BehaviorTree(root / "tree")
-    kind_store = BehaviorKindStore(tree.root)
+    # 词表参数从唯一的 Config 边界进来；embedder 只做候选召回（BHV-KINDS-002），没有它就退字面重合。
+    kind_config = BehaviorKindConfig(**behavior_config.kinds_overrides())
+    kind_store = BehaviorKindStore(tree.root, config=kind_config)
+    kind_vectors = (
+        BehaviorKindVectorStore(
+            tree.root, model=embedder.model, dimension=config.models.embedding.dimension
+        )
+        if embedder is not None
+        else None
+    )
     reduction_runner = BehaviorReductionRunner(
         judgements=judgements,
         observations=observations,
@@ -365,7 +378,8 @@ def build_behavior_components(
         tree=tree,
         lock_store=lock_store,
         kind_store=kind_store,
-        kind_resolver=BehaviorKindResolver(structured_chat),
+        kind_resolver=BehaviorKindResolver(structured_chat, config=kind_config, embedder=embedder),
+        kind_vectors=kind_vectors,
         ledger=BehaviorReductionLedger(root / "reduction"),
         semantic_refresher=BehaviorSemanticRefresher(
             tree, LLMBehaviorOverviewGenerator(structured_chat)

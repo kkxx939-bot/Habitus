@@ -2,6 +2,8 @@
 
 from behavior.kinds.config import BehaviorKindConfig
 from behavior.kinds.model import (
+    HIT_DAYS_KEPT,
+    BehaviorKindEntry,
     BehaviorKindError,
     BehaviorKindLimitError,
     BehaviorKindRegistry,
@@ -9,6 +11,8 @@ from behavior.kinds.model import (
 from behavior.kinds.resolver import (
     KIND_PROMPT_VERSION,
     KIND_SYSTEM_PROMPT,
+    BehaviorKindBatchResolution,
+    BehaviorKindRequest,
     BehaviorKindResolution,
     BehaviorKindResolver,
     kind_match_schema,
@@ -20,9 +24,23 @@ from behavior.kinds.store import (
     BehaviorKindStore,
     BehaviorKindStoreError,
 )
+from behavior.kinds.vectors import (
+    KINDS_VECTORS_FILENAME,
+    BehaviorKindVectorError,
+    BehaviorKindVectorIndex,
+    BehaviorKindVectorStore,
+)
 
 __all__ = [
+    "HIT_DAYS_KEPT",
     "KINDS_SCHEMA_VERSION",
+    "KINDS_VECTORS_FILENAME",
+    "BehaviorKindBatchResolution",
+    "BehaviorKindEntry",
+    "BehaviorKindRequest",
+    "BehaviorKindVectorError",
+    "BehaviorKindVectorIndex",
+    "BehaviorKindVectorStore",
     "KIND_PROMPT_VERSION",
     "KIND_SYSTEM_PROMPT",
     "BehaviorKindConfig",
