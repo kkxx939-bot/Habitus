@@ -99,6 +99,10 @@ class FusionExpectation:
     # 期望某段里**至少判出**的行为（子串匹配 behavior）：允许模型不产出之后，"可提醒的单位有没有被
     # 一起扔掉"必须单独考，总条数降了不等于对了。
     behaviors_present: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
+    # 期望**不被含主体的判断覆盖**的片段编号：旁人走过那一帧，模型分流成旁人的判断、判成无归属、
+    # 判成读不懂都没有把它塞进主体的行为——三种都对，只有"进了主体的判断"才是错。比 out_of_scope
+    # 宽：那条要求分流成旁人的判断，而 WP4 之后"不是主体的事也不是主体的步骤"的正解是无归属。
+    subject_free_fragments: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for _, _, kind in tuple(self.relations) + tuple(self.forbidden_relations):
@@ -121,6 +125,7 @@ class FusionExpectation:
             or self.out_of_scope_fragments
             or self.unowned_fragments
             or self.behaviors_present
+            or self.subject_free_fragments
             or self.forbidden_status
             or self.status_present
             or self.goal_absent
@@ -222,6 +227,10 @@ def _case(value: Any) -> FusionCase:
             },
             behaviors_present={
                 int(key): tuple(item) for key, item in expect.get("behaviors_present", {}).items()
+            },
+            subject_free_fragments={
+                int(key): tuple(item)
+                for key, item in expect.get("subject_free_fragments", {}).items()
             },
         ),
     )
