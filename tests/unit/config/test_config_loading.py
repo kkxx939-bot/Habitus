@@ -269,6 +269,9 @@ def test_behavior_config_enforces_its_scalar_bounds() -> None:
         ({"fusion_poll_interval_seconds": 0.5}, "fusion_poll_interval_seconds"),
         ({"reduction_sweep_interval_seconds": 0.5}, "reduction_sweep_interval_seconds"),
         ({"worker_shutdown_timeout_seconds": 0}, "worker_shutdown_timeout_seconds"),
+        ({"reduction_sweep_lock_ttl_seconds": 59}, "reduction_sweep_lock_ttl_seconds"),
+        ({"reduction_sweep_lock_ttl_seconds": 86_401}, "reduction_sweep_lock_ttl_seconds"),
+        ({"reduction_sweep_lock_ttl_seconds": True}, "reduction_sweep_lock_ttl_seconds"),
     ):
         with pytest.raises(ValueError, match=match):
             BehaviorConfig(**kwargs)

@@ -16,6 +16,7 @@ from behavior.reduction.payloads import (
 )
 from behavior.reduction.record import ReducibleJudgement, parse_judgement_record
 from behavior.reduction.runner import (
+    DEFAULT_SWEEP_LOCK_TTL_SECONDS,
     BehaviorKindMergeReport,
     BehaviorReductionReport,
     BehaviorReductionRunner,
@@ -23,6 +24,7 @@ from behavior.reduction.runner import (
 from behavior.reduction.sealing import seal_horizon, sealed_chain_indexes, sealed_gaps
 
 __all__ = [
+    "DEFAULT_SWEEP_LOCK_TTL_SECONDS",
     "BehaviorKindMergeReport",
     "REDUCTION_VERSION",
     "UNREADABLE_GAP_KIND",

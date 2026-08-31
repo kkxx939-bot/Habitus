@@ -50,6 +50,7 @@ from behavior.kinds.store import BehaviorKindStore
 from behavior.kinds.vectors import BehaviorKindVectorStore
 from behavior.observation import BehaviorObservationEnvelope, BehaviorObservationStore
 from behavior.reduction import (
+    DEFAULT_SWEEP_LOCK_TTL_SECONDS,
     BehaviorKindMergeReport,
     BehaviorReductionBusyError,
     BehaviorReductionLedger,
@@ -396,6 +397,11 @@ def build_behavior_components(
         clock=clock,
         context_lookback_seconds=context_lookback,
         coverage=coverage,
+        sweep_lock_ttl_seconds=(
+            behavior_config.reduction_sweep_lock_ttl_seconds
+            if behavior_config.reduction_sweep_lock_ttl_seconds is not None
+            else DEFAULT_SWEEP_LOCK_TTL_SECONDS
+        ),
     )
     return BehaviorRuntimeComponents(
         observations=observations,
