@@ -80,7 +80,7 @@ from typing import Any
 from behavior.fusion.errors import BehaviorFusionError
 from behavior.observation import BehaviorObservation
 
-FUSION_PROMPT_VERSION = "behavior_judgement_prompt_v16"
+FUSION_PROMPT_VERSION = "behavior_judgement_prompt_v18"
 
 FUSION_SYSTEM_PROMPT = """\
 你在为一套行为记忆系统做行为融合。
@@ -128,16 +128,14 @@ user 消息开头会给出**本次跟踪的主体**。画面里出现别人是�
            写进那件事的 basis，不单独立条。
   **无意识的小动作与过渡**——转头、点头、扶眼镜、挠鼻子、坐着、张望、两件事之间的走动：
            不属于任何事，也不是任何事的步骤。这些帧在 frames 里填 []。
+           坐着听人说话、看着大家、歪头、晃动身体这类讨论中的姿态也在此列：填 []，不要立成
+           「坐着」「看着大家」；先前的判断里若有这样的条目，也不要用 continues 延续它。
 
 层级判据——**提醒句测试**：如果要提醒他，你会说哪一句？
   "该做早餐了"说得通、"该磕鸡蛋了""该取芝士了"说不通  → 做早餐是一件事，磕鸡蛋、取芝士是它的步骤
   "该洗手了"说得通、"该打肥皂了"说不通                → 洗手是一件事，打肥皂是步骤
   "该回家了"太粗——进门、换鞋、洗手、开空调各自都能单独提醒 → 拆开
 一段连续操作里换了工具、换了位置、拿了别的东西，**先问提醒句**：提醒句没变，就还是同一件事的步骤。
-
-走动、转身、站着、坐下这类位置和姿态变化**本身不是一件事**（"该移动了"没人会这么提醒）：
-要么是某件事的步骤（走进厨房去插充电器 → 归给充电），要么什么都不属于，填 []。不要编出
-"移动""走动""坐下"这样的判断。
 
 转写里**说到**一件事不等于**正在做**它："医生让我每天吃三次药"是在转述医嘱，此刻的行为是说话，
 不是服药；"今晚点外卖吧"是在商量，不是在点。只有画面或转写显示他此刻在做，才是那件事。
@@ -398,14 +396,13 @@ frames：
   #3 (+6s)  人从橱柜拿出碗
   #4 (+9s)  人把鸡蛋磕进碗里
   #5 (+12s)  人把蛋壳扔进垃圾桶
-  #6 (+13s)  人转身走到水池边
-  #7 (+15s)  人打开水龙头冲手
-  #8 (+18s)  人擦干手
-  #9 (+21s)  人用叉子搅打鸡蛋
-  #10 (+24s)  人扶了一下眼镜
-  #11 (+27s)  人打开冷冻室看了一眼又关上
-  #12 (+30s)  人从冰箱拿出芝士
-  #13 (+33s)  人继续搅打鸡蛋
+  #6 (+15s)  人打开水龙头冲手
+  #7 (+18s)  人擦干手
+  #8 (+21s)  人用叉子搅打鸡蛋
+  #9 (+24s)  人扶了一下眼镜
+  #10 (+27s)  人打开冷冻室看了一眼又关上
+  #11 (+30s)  人从冰箱拿出芝士
+  #12 (+33s)  人继续搅打鸡蛋
 
 
 judgements：
@@ -416,19 +413,18 @@ judgements：
 
 frames：
   no=1 [(1,1)]  no=2 [(1,1)]  no=3 [(1,1)]  no=4 [(1,1)]  no=5 [(1,1)]
-  no=6 [(1,2)]  no=7 [(1,2)]  no=8 [(1,2)]
-  no=9 [(1,3)]
-  no=10 []
-  no=11 [(1,4)]  no=12 [(1,4)]
-  no=13 [(1,3)]
+  no=6 [(1,2)]  no=7 [(1,2)]
+  no=8 [(1,3)]
+  no=9 []
+  no=10 [(1,4)]  no=11 [(1,4)]
+  no=12 [(1,3)]
 
 要点：
-  13 条片段换了冰箱、橱柜、水池、冷冻室四个位置和七八样东西，但提醒句只有一句"该做早餐了"，
+  12 条片段换了冰箱、橱柜、水池、冷冻室四个位置和七八样东西，但提醒句只有一句"该做早餐了"，
       所以是**一件事**，不是"取蛋、洗手、扔蛋壳、看冷冻室、取芝士"五六件。
   中途洗手、扔蛋壳、看一眼冷冻室都是这件事的步骤，进 basis。
-  #6 走到水池边是去洗手的路上：归给洗手那一步，不单独立"移动"。
-  #10 扶眼镜是无意识的小动作：不是步骤，也不是一件事，填 []。
-  #13 又回到搅打，归回 basis 3——basis 的帧不必连续。
+  #9 扶眼镜是无意识的小动作：不是步骤，也不是一件事，填 []。
+  #12 又回到搅打，归回 basis 3——basis 的帧不必连续。
 """
 
 
@@ -485,7 +481,13 @@ def render_context_judgements(
         return "（无）"
     if not isinstance(segment_started_at, datetime) or segment_started_at.utcoffset() is None:
         raise TypeError("segment_started_at must be a timezone-aware datetime")
-    lines: list[str] = []
+    # 贴在 C 行块的头上而不是正文里（见模块头"三种落点"）：DAY1 v17 实测，残留的姿态判断全部来自
+    # 上下文先例——先前段里一条"走动/转身"进了 C 行，下一段就照样立条并延续，孤立重跑同一段则
+    # 全部干净。C 行是延续/修正的参照，不是产出的模板。
+    lines: list[str] = [
+        "（只用来判 continues / supersedes；不是本段产出的模板——其中若有坐着、转头、点头这类"
+        "姿态条目，本段这类帧照旧填 []，不要立条也不要延续）"
+    ]
     for index, record in enumerate(records, start=1):
         started_at = datetime.fromisoformat(str(record["started_at"]))
         ago = int((segment_started_at - started_at).total_seconds())
@@ -499,7 +501,8 @@ def render_context_judgements(
         # 讲"continues 不能指向 completed"，模型仍然 5/5 全部先写错再被守卫打回（每次多烧两次
         # 调用）；而把同一句话加长写进要点，仍然 5/5 无改善。模型看的是 C 行本身。
         closed = "，已结束（不能被 continues 指）" if status == "completed" else ""
-        lines.append(f"C{index}  {ago}秒前开始：{behavior}{purpose}{state}{closed}")
+        when = f"{ago}秒前开始" if ago >= 0 else f"本段开始后{-ago}秒才开始"
+        lines.append(f"C{index}  {when}：{behavior}{purpose}{state}{closed}")
     return "\n".join(lines)
 
 

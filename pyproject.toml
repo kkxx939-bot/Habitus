@@ -100,6 +100,8 @@ warn_redundant_casts = true
 [tool.pyright]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
+# benchmark/data 不进 git（本地数据集与实验脚本，远端 CI 不存在）；本地跑全链时排除。
+exclude = ["benchmark/data"]
 include = ["Config", "Runtime", "ModelClient", "pre", "conversation", "memory", "behavior", "prediction", "infrastructure", "foundation", "integrations", "benchmark"]
 reportUnsupportedDunderAll = false
 

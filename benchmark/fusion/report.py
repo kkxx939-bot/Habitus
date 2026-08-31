@@ -193,32 +193,43 @@ def evaluate(case: FusionCase, run: Mapping[str, Any]) -> dict[str, Any]:
             }
         )
     for index, expected_subset in case.expect.unowned_include.items():
-        actual_unowned = set(segments.get(index, {}).get("unowned_fragments", ()))
-        missing = [no for no in expected_subset if no not in actual_unowned]
+        unowned_now = set(segments.get(index, {}).get("unowned_fragments", ()))
+        missing_unowned = [no for no in expected_subset if no not in unowned_now]
         checks.append(
             {
                 "check": "unowned_include",
-                "passed": not missing,
+                "passed": not missing_unowned,
                 "detail": (
-                    f"段{index} 这些帧该无归属却进了事件 {missing}"
-                    if missing
+                    f"段{index} 这些帧该无归属却进了事件 {missing_unowned}"
+                    if missing_unowned
                     else f"段{index} 帧 {list(expected_subset)} 均无归属"
                 ),
             }
         )
-    for index, expected_free in case.expect.not_owned_by_subject.items():
-        segment = segments.get(index, {})
-        free = set(segment.get("unowned_fragments", ())) | set(segment.get("out_of_scope_fragments", ()))
+    for index, expected_free in case.expect.subject_free_fragments.items():
+        seg = segments.get(index, {})
+        # 三类去向都没把这一帧算成主体的行为；只有既不在其中任何一类、又没被判读不懂的帧才是被吸收了。
+        free = (
+            set(seg.get("out_of_scope_fragments", ()))
+            | set(seg.get("unowned_fragments", ()))
+            | set(seg.get("unreadable_fragments", ()))
+        )
         absorbed = [no for no in expected_free if no not in free]
         checks.append(
             {
-                "check": "not_owned_by_subject",
+                "check": "subject_free",
                 "passed": not absorbed,
-                "detail": (
-                    f"段{index} 这些帧被塞进了主体的判断 {absorbed}"
-                    if absorbed
-                    else f"段{index} 帧 {list(expected_free)} 都不在主体的判断里"
-                ),
+                "detail": f"段{index} 期望不进主体判断的帧 {list(expected_free)}，被吸收的 {absorbed}",
+            }
+        )
+    for index, forbidden in case.expect.forbidden_behaviors.items():
+        actual_names = [str(item.get("behavior") or "") for item in segments.get(index, {}).get("judgements", ())]
+        leaked = [name for name in actual_names if any(bad in name for bad in forbidden)]
+        checks.append(
+            {
+                "check": "behaviors_forbidden",
+                "passed": not leaked,
+                "detail": f"段{index} 不该出现的行为被判出：{leaked}；实际 {actual_names}",
             }
         )
     for index, expected_behaviors in case.expect.behaviors_present.items():
@@ -231,6 +242,10 @@ def evaluate(case: FusionCase, run: Mapping[str, Any]) -> dict[str, Any]:
                 "check": "behaviors_present",
                 "passed": not absent_behaviors,
                 "detail": f"段{index} 期望判出 {list(expected_behaviors)}，缺 {absent_behaviors}，实际 {actual_behaviors}",
+                # 保留率的分子分母：期望的可提醒单位里有几个真的被判出来了。按单位计数而不是按
+                # 用例计数——一段期望三个单位、丢一个，通过率是 0，保留率是 2/3，两者说的不是一件事。
+                "expected_units": len(expected_behaviors),
+                "retained_units": len(expected_behaviors) - len(absent_behaviors),
             }
         )
     return _summarise(case, run, checks)
@@ -253,6 +268,22 @@ def _summarise(case: FusionCase, run: Mapping[str, Any], checks: Sequence[Mappin
         "unowned_fragments_total": sum(len(item.get("unowned_fragments", ())) for item in run["segments"]),
         "fragment_total": sum(int(item.get("fragment_count", 0) or 0) for item in run["segments"]),
     }
+
+
+def _remindable_retention(results: Sequence[Mapping[str, Any]]) -> float | None:
+    """可提醒单位保留率：期望判出的行为单位里实际判出的比例（全部段合计）。
+
+    WP4 允许模型对无意识小动作不产出之后，这是与无归属占比配对看的数字——占比升、保留率不降
+    才是折叠；占比升、保留率跟着掉就是压制过头。没有任何 ``behaviors_present`` 期望时为 None。
+    """
+
+    expected = retained = 0
+    for item in results:
+        for check in item["checks"]:
+            if check["check"] == "behaviors_present":
+                expected += int(check.get("expected_units", 0))
+                retained += int(check.get("retained_units", 0))
+    return None if expected == 0 else round(retained / expected, 3)
 
 
 def _unowned_ratio(results: Sequence[Mapping[str, Any]]) -> float | None:
@@ -310,6 +341,8 @@ def aggregate(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "passed_runs": sum(1 for item in regression if item["passed"]),
         # 无归属帧占比（全部段合计）："允许不产出"用得多不多，单独看通过率会被"全部无归属"骗过
         "unowned_ratio": _unowned_ratio(results),
+        # 与无归属占比配对：允许不产出之后，可提醒的单位有没有被一起扔掉。
+        "remindable_retention": _remindable_retention(results),
         "probe_runs": len(probes),
         "probe_passed": sum(1 for item in probes if item["passed"]),
         "model_calls": sum(item["model_calls"] for item in results),
@@ -340,6 +373,15 @@ def render_markdown(summary: Mapping[str, Any]) -> str:
         f"模型调用共 {summary['model_calls']} 次"
     )
     lines.append(f"\n平均一致率 {summary['mean_agreement']}（1.0 = 每次结果都相同，无论对错）")
+    unowned = summary.get("unowned_ratio")
+    retention = summary.get("remindable_retention")
+    lines.append(
+        "\n无归属帧占比 "
+        + ("—" if unowned is None else f"{unowned:.1%}")
+        + "，可提醒单位保留率 "
+        + ("—（无 behaviors_present 期望）" if retention is None else f"{retention:.1%}")
+        + "（两者配对看：占比升而保留率不降才是折叠，保留率跟着掉是压制过头）"
+    )
     if summary["structural_retries"]:
         lines.append(
             f"\n**结构重试 {summary['structural_retries']} 次**"

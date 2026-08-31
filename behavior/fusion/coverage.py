@@ -104,13 +104,19 @@ class BehaviorCoverageIndex:
 
     # ── 过期 ─────────────────────────────────────────────────────────────────────────
 
-    def expire(self, now: datetime) -> int:
-        """删掉窗口之前的整个日目录；返回删掉的记录数。"""
+    def expire(self, now: datetime, *, retain: frozenset[str] | set[str] = frozenset()) -> int:
+        """删掉窗口之前的覆盖记录；返回删掉的记录数。
+
+        ``retain`` 是**仍在观测存储里**的观测身份：引用到它们的记录不删——交付还在，它的"已融合"
+        就还得答得出来，否则窗口一过它会被当成未融合重新入队、重跑模型、产出第二套判断，并把封口
+        视界钉在过去（BHV-REALDATA-001 审计）。释放（``_release_unreferenced``）之后下一轮再过期。
+        """
 
         start = self._window_start(now)
         removed = 0
         if not self.coverage_root.is_dir():
             return 0
+        keep = set(retain)
         for entry in self._entries(self.coverage_root):
             if not entry.is_dir() or _DAY_DIRECTORY.fullmatch(entry.name) is None:
                 continue
@@ -118,9 +124,12 @@ class BehaviorCoverageIndex:
                 continue
             day_path = self.coverage_root / entry.name
             for item in self._entries(day_path):
-                if item.is_file() and _RECORD_FILE.fullmatch(item.name):
-                    if durable_unlink(day_path / item.name, artifact_root=self.root):
-                        removed += 1
+                if not (item.is_file() and _RECORD_FILE.fullmatch(item.name)):
+                    continue
+                if keep and self._references(day_path / item.name, keep):
+                    continue
+                if durable_unlink(day_path / item.name, artifact_root=self.root):
+                    removed += 1
             try:
                 os.rmdir(day_path)
             except OSError:
@@ -129,6 +138,15 @@ class BehaviorCoverageIndex:
         return removed
 
     # ── 内部 ─────────────────────────────────────────────────────────────────────────
+
+    def _references(self, path: Path, ids: set[str]) -> bool:
+        encoded = read_regular_bytes(path, artifact_root=self.root, max_bytes=_MAX_RECORD_BYTES)
+        try:
+            payload = json.loads(encoded.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise BehaviorFusionError(f"coverage record is not decodable: {path.name}") from exc
+        listed = payload.get("observation_ids")
+        return isinstance(listed, list) and any(item in ids for item in listed)
 
     def _window_start(self, now: datetime) -> date:
         if not isinstance(now, datetime) or now.utcoffset() is None:

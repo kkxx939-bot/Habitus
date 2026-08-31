@@ -8,6 +8,11 @@
 ``profile.md`` 单文件直读）。树的日期枚举只走 occurrences/gaps 前缀，词表与之互不干扰；
 地址叶名不可能与它撞车（semantic_name 拒绝 .md 后缀，gap 叶名是受控枚举）。
 
+格式 ``behavior_kinds_v3``（BHV-KINDS-002）：条目带 label、命中账、复核记号；文件级带
+``hits_applied_checkpoint``——归约写入的系统字段（命中账已应用到哪个检查点的内容摘要），词表语义
+不读它，但它必须与命中账**同一次 CAS** 落盘，否则"账写了、标记没写"的崩溃窗口会重现。
+v1/v2 文件不做读取兼容——按仓库纪律无双轨；旧根用 ``kinds/rebuild`` 从树上补齐重建。
+
 并发说明：写入方只有归约写入层一个，且归约 ``run_once`` 全程持 behavior-root 级 fenced 锁
 （词表 CAS 发生在锁内、stage 之前）；``expected_revision`` CAS 只防误用，不承担并发互斥。
 """
@@ -16,11 +21,16 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from behavior.kinds.config import BehaviorKindConfig
-from behavior.kinds.model import BehaviorKindError, BehaviorKindLimitError, BehaviorKindRegistry
+from behavior.kinds.model import (
+    BehaviorKindEntry,
+    BehaviorKindError,
+    BehaviorKindLimitError,
+    BehaviorKindRegistry,
+)
 from behavior.model import KINDS_REGISTRY_FILENAME
 from infrastructure.store.filesystem import (
     DurablePathIntegrityError,
@@ -28,10 +38,11 @@ from infrastructure.store.filesystem import (
     read_regular_bytes,
 )
 
-KINDS_SCHEMA_VERSION = "behavior_kinds_v1"
+KINDS_SCHEMA_VERSION = "behavior_kinds_v3"
 _MARKER = "\n<!-- HABITUS_BEHAVIOR_KINDS\n"
 _FOOTER = "\n-->\n"
-_METADATA_KEYS = {"schema_version", "revision", "updated_at", "kinds"}
+_METADATA_KEYS = {"schema_version", "revision", "updated_at", "kinds", "hits_applied_checkpoint"}
+_ENTRY_KEYS = {"token", "label", "aliases", "created_on", "hit_days", "hit_days_total", "hit_count", "review_reason"}
 
 
 class BehaviorKindStoreError(ValueError):
@@ -49,6 +60,10 @@ class BehaviorKindSnapshot:
     registry: BehaviorKindRegistry
     revision: int
     updated_at: datetime | None
+    # 命中账已应用到哪个归约检查点（检查点内 occurrence 链身份的摘要）：同一检查点只记一次账，
+    # 重放跳过——幂等键是检查点**内容**，不是账本条目（账本逐条追加、账在末尾落，中间崩溃会让
+    # "首次"判断失真），也不是 staged_at（注入/冻结时钟下两个检查点会同值）。
+    hits_applied_checkpoint: str | None = None
 
 
 class BehaviorKindStore:
@@ -81,8 +96,12 @@ class BehaviorKindStore:
         *,
         expected_revision: int,
         timestamp: datetime,
+        hits_applied_checkpoint: str | None = None,
     ) -> BehaviorKindSnapshot:
-        """CAS 替换整份词表；修改语义由不可变 Registry 表达，这里只负责耐久。"""
+        """CAS 替换整份词表；修改语义由不可变 Registry 表达，这里只负责耐久。
+
+        ``hits_applied_checkpoint`` 随词表一起耐久（调用方要保留旧值就把它传回来）。
+        """
 
         if not isinstance(registry, BehaviorKindRegistry):
             raise TypeError("registry must be BehaviorKindRegistry")
@@ -104,7 +123,9 @@ class BehaviorKindStore:
                 f"found {current.revision}"
             )
         updated_at = timestamp.astimezone(timezone.utc)
-        snapshot = BehaviorKindSnapshot(registry, expected_revision + 1, updated_at)
+        if hits_applied_checkpoint is not None and (not isinstance(hits_applied_checkpoint, str) or not hits_applied_checkpoint):
+            raise BehaviorKindError("hits_applied_checkpoint must be non-empty text or None")
+        snapshot = BehaviorKindSnapshot(registry, expected_revision + 1, updated_at, hits_applied_checkpoint)
         encoded = self._encode(snapshot)
         if len(encoded) > self.config.max_encoded_bytes:
             raise BehaviorKindLimitError("behavior kind registry exceeds its encoded byte bound")
@@ -123,12 +144,21 @@ class BehaviorKindStore:
                     f"behavior kind has more aliases than allowed: {token}"
                 )
 
+    # ── 编码 ──────────────────────────────────────────────────────────────────────
+
     def _encode(self, snapshot: BehaviorKindSnapshot) -> bytes:
         assert snapshot.updated_at is not None
         lines = ["# 行为类型词表", ""]
         for token in snapshot.registry.tokens:
-            aliases = snapshot.registry.aliases_of(token)
-            lines.append(f"- {token}：{'、'.join(aliases)}" if aliases else f"- {token}")
+            entry = snapshot.registry.entry_of(token)
+            head = f"- {entry.label}〔{entry.token}〕"
+            if entry.hit_count:
+                head += f" ×{entry.hit_count}"
+            if entry.last_hit_day is not None:
+                head += f" 最近 {entry.last_hit_day.isoformat()}"
+            if entry.review_reason is not None:
+                head += f"（待复核：{entry.review_reason}）"
+            lines.append(f"{head}：{'、'.join(entry.aliases)}" if entry.aliases else head)
         body = "\n".join(lines)
         metadata = {
             "schema_version": KINDS_SCHEMA_VERSION,
@@ -137,9 +167,9 @@ class BehaviorKindStore:
                 "+00:00", "Z"
             ),
             "kinds": [
-                {"token": token, "aliases": list(snapshot.registry.aliases_of(token))}
-                for token in snapshot.registry.tokens
+                _entry_payload(snapshot.registry.entry_of(token)) for token in snapshot.registry.tokens
             ],
+            "hits_applied_checkpoint": snapshot.hits_applied_checkpoint,
         }
         rendered = json.dumps(
             metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -158,10 +188,12 @@ class BehaviorKindStore:
             metadata = json.loads(tail[: -len(_FOOTER)])
         except (json.JSONDecodeError, RecursionError) as exc:
             raise BehaviorKindStoreError("behavior kind registry metadata is corrupt") from exc
-        if not isinstance(metadata, dict) or set(metadata) != _METADATA_KEYS:
+        if not isinstance(metadata, dict):
             raise BehaviorKindStoreError("behavior kind registry metadata shape is invalid")
-        if metadata["schema_version"] != KINDS_SCHEMA_VERSION:
+        if metadata.get("schema_version") != KINDS_SCHEMA_VERSION:
             raise BehaviorKindStoreError("behavior kind registry schema version is unsupported")
+        if set(metadata) != _METADATA_KEYS:
+            raise BehaviorKindStoreError("behavior kind registry metadata shape is invalid")
         revision = metadata["revision"]
         if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
             raise BehaviorKindStoreError("behavior kind registry revision must be positive")
@@ -174,31 +206,80 @@ class BehaviorKindStore:
             raise BehaviorKindStoreError("behavior kind registry updated_at is invalid") from exc
         if updated_at.utcoffset() != timezone.utc.utcoffset(None):
             raise BehaviorKindStoreError("behavior kind registry updated_at must be UTC")
-        entries = metadata["kinds"]
-        if not isinstance(entries, list):
+        entries_raw = metadata["kinds"]
+        if not isinstance(entries_raw, list):
             raise BehaviorKindStoreError("behavior kind registry kinds must be a list")
-        kinds: dict[str, tuple[str, ...]] = {}
-        for entry in entries:
-            if not isinstance(entry, dict) or set(entry) != {"token", "aliases"}:
-                raise BehaviorKindStoreError("behavior kind entry shape is invalid")
-            aliases = entry["aliases"]
-            if not isinstance(aliases, list) or any(
-                not isinstance(alias, str) for alias in aliases
-            ):
-                raise BehaviorKindStoreError("behavior kind aliases must be a list of text")
-            token = entry["token"]
-            if not isinstance(token, str) or token in kinds:
-                raise BehaviorKindStoreError("behavior kind token is invalid or repeated")
-            kinds[token] = tuple(aliases)
+        entries: dict[str, BehaviorKindEntry] = {}
+        for raw in entries_raw:
+            entry = _entry_from_payload(raw)
+            if entry.token in entries:
+                raise BehaviorKindStoreError("behavior kind token is repeated")
+            entries[entry.token] = entry
         try:
-            registry = BehaviorKindRegistry(kinds)
+            registry = BehaviorKindRegistry(entries)
         except BehaviorKindError as exc:
             raise BehaviorKindStoreError("behavior kind registry content is invalid") from exc
         self._require_bounds(registry)
-        snapshot = BehaviorKindSnapshot(registry, revision, updated_at)
+        applied = metadata["hits_applied_checkpoint"]
+        if applied is not None and (not isinstance(applied, str) or not applied):
+            raise BehaviorKindStoreError("behavior kind registry hits_applied_checkpoint must be text or null")
+        snapshot = BehaviorKindSnapshot(registry, revision, updated_at, applied)
         if self._encode(snapshot) != encoded:
             raise BehaviorKindStoreError("behavior kind registry is not canonically encoded")
         return snapshot
+
+
+def _entry_payload(entry: BehaviorKindEntry) -> dict[str, object]:
+    return {
+        "token": entry.token,
+        "label": entry.label,
+        "aliases": list(entry.aliases),
+        "created_on": None if entry.created_on is None else entry.created_on.isoformat(),
+        "hit_days": [day.isoformat() for day in entry.hit_days],
+        "hit_days_total": entry.hit_days_total,
+        "hit_count": entry.hit_count,
+        "review_reason": entry.review_reason,
+    }
+
+
+def _entry_from_payload(raw: object) -> BehaviorKindEntry:
+    if not isinstance(raw, dict) or set(raw) != _ENTRY_KEYS:
+        raise BehaviorKindStoreError("behavior kind entry shape is invalid")
+    aliases = raw["aliases"]
+    if not isinstance(aliases, list) or any(not isinstance(alias, str) for alias in aliases):
+        raise BehaviorKindStoreError("behavior kind aliases must be a list of text")
+    hit_days = raw["hit_days"]
+    if not isinstance(hit_days, list) or any(not isinstance(day, str) for day in hit_days):
+        raise BehaviorKindStoreError("behavior kind hit_days must be a list of dates")
+    if not isinstance(raw["token"], str) or not isinstance(raw["label"], str):
+        raise BehaviorKindStoreError("behavior kind token and label must be text")
+    created_raw = raw["created_on"]
+    if created_raw is not None and not isinstance(created_raw, str):
+        raise BehaviorKindStoreError("behavior kind created_on must be a date or null")
+    review = raw["review_reason"]
+    if review is not None and not isinstance(review, str):
+        raise BehaviorKindStoreError("behavior kind review_reason must be text or null")
+    try:
+        entry = BehaviorKindEntry(
+            token=raw["token"],
+            label=raw["label"],
+            aliases=tuple(aliases),
+            created_on=None if created_raw is None else _parse_day(created_raw),
+            hit_days=tuple(_parse_day(day) for day in hit_days),
+            hit_days_total=raw["hit_days_total"],
+            hit_count=raw["hit_count"],
+            review_reason=review,
+        )
+    except (BehaviorKindError, ValueError, TypeError) as exc:
+        raise BehaviorKindStoreError("behavior kind entry content is invalid") from exc
+    return entry
+
+
+def _parse_day(value: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise BehaviorKindStoreError("behavior kind day is not an ISO date") from exc
 
 
 __all__ = [

@@ -550,6 +550,7 @@ def build_runtime(
         lock_store=resolved_lock.lock_store,
         path_lock=resolved_lock,
         observer=operation_observer,
+        embedder=embedder,
     )
     # behavior 关着而 prediction 开着的组合已经在配置层被硬拒（见 HabitusConfig 的跨域校验），
     # 所以这里 behavior_components 为 None 时 prediction 必然也没开，直接跳过即可。

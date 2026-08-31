@@ -2,7 +2,7 @@
 
 一物三用：
 1. **幂等重放**——账本条目按链身份 add-only 落盘（字节相同幂等成功），崩溃重试不重复归约；
-2. **释放门槛**——判断存储的生命周期（``TODO(BHV-LIFECYCLE-001)`` 双消费者门槛）以"已被归约
+2. **释放门槛**——判断存储的生命周期（``TODO(BHV-LIFECYCLE-001)``，已改定为单门槛）以"已被归约
    消费"为其中一半依据；
 3. **链接解析**——晚封口的链引用早已落盘的目标时，从这里把判断身份换成树 URI。
 
@@ -114,6 +114,11 @@ class BehaviorReductionLedger:
                 f"reduction ledger entry for chain {entry.chain_digest} conflicts with an "
                 f"existing record"
             ) from exc
+
+    def has(self, chain_digest: str) -> bool:
+        """这条链是否已记账——发布时记命中账的幂等依据（重放同一检查点不重复记）。"""
+
+        return (self._entries_dir / f"{chain_digest}.json").is_file()
 
     def load(self) -> tuple[BehaviorReductionEntry, ...]:
         """读全部消费记录，按链身份排序（确定性）。"""

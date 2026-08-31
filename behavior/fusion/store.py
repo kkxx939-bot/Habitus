@@ -156,16 +156,24 @@ class BehaviorJudgementStore:
         )
 
     def recent_before(
-        self, moment: datetime, *, limit: int, lookback_seconds: float
+        self,
+        moment: datetime,
+        *,
+        limit: int,
+        lookback_seconds: float,
+        judged_before: datetime | None = None,
     ) -> tuple[dict[str, Any], ...]:
-        """取 ``moment`` 之前最近的若干条判断，按行为时间升序返回。
+        """本段之前已经成立的最近 ``limit`` 条判断（按 started_at 升序）。
 
-        截断用 ``evidence_ready_at``（这条判断何时成立）而不是 ``started_at``（行为何时发生）：
-        融合一段观测时能看见的，只能是**在这段观测的证据齐备之前就已经成立**的判断。用行为时间
-        截断会把"后来才知道的事"喂回给更早的那一段，那是标签泄漏。
+        "之前"按**事件时间**判：判断的 ``last_observed_at <= moment``（本段最早观测的发生时刻）。
+        事件时间上晚于本段的判断绝不可见——那是把后来才知道的事喂回给更早的一段（标签泄漏，
+        补发的旧段尤其如此）。不再按送达时刻（``evidence_ready_at``）严格小于截断：真实数据里视觉/
+        转写混合、2 秒抽样，前一段末条的送达常晚于本段首条，按送达截断会系统性丢掉"被切段拦腰
+        切断的前半截"（BHV-REALDATA-001 审计复现）。``judged_before`` 给了再加一道"已落盘"（融合串行，
+        本作业开始前落盘的才算成立）。
 
-        选取必须确定性：按 ``(evidence_ready_at, judgement_id)`` 取尾部，不按相关性排序——否则
-        同一批输入会得到不同上下文，融合就不可重放。
+        回看窗口同样按事件时间：``started_at >= moment - lookback``。选取必须确定性：按
+        ``(last_observed_at, started_at, judgement_id)`` 取尾部——并列时不能退化成按哈希随机抽样。
         """
 
         if not isinstance(moment, datetime) or moment.utcoffset() is None:
@@ -176,13 +184,29 @@ class BehaviorJudgementStore:
             raise BehaviorFusionError("lookback_seconds must be a number")
         if lookback_seconds <= 0:
             raise BehaviorFusionError("lookback_seconds must be positive")
+        if judged_before is not None and (
+            not isinstance(judged_before, datetime) or judged_before.utcoffset() is None
+        ):
+            raise BehaviorFusionError("judged_before must be a timezone-aware datetime")
         cutoff = moment.astimezone(timezone.utc)
         earliest = cutoff - timedelta(seconds=float(lookback_seconds))
-        selected = [
-            record
-            for record in self.list()
-            if earliest <= _parse_instant(record["evidence_ready_at"]) < cutoff
-        ]
+        settled = None if judged_before is None else judged_before.astimezone(timezone.utc)
+
+        def eligible(record: Mapping[str, Any]) -> bool:
+            if _parse_instant(record["last_observed_at"]) > cutoff:
+                return False
+            if _parse_instant(record["started_at"]) < earliest:
+                return False
+            return settled is None or _parse_instant(record["judged_at"]) <= settled
+
+        selected = sorted(
+            (record for record in self.list() if eligible(record)),
+            key=lambda item: (
+                _parse_instant(item["last_observed_at"]),
+                _parse_instant(item["started_at"]),
+                item["judgement_id"],
+            ),
+        )
         tail = selected[-limit:]
         # 按**时刻**排，不能按 ``started_at`` 的字符串排：它刻意保留本地偏移，所以字符串序不是
         # 时间序。跨时区（出行）或 DST 切换时，1 小时的偏移变化就足以让两条判断的先后颠倒，

@@ -15,10 +15,15 @@ from behavior.reduction.payloads import (
     occurrence_payload,
 )
 from behavior.reduction.record import ReducibleJudgement, parse_judgement_record
-from behavior.reduction.runner import BehaviorReductionReport, BehaviorReductionRunner
+from behavior.reduction.runner import (
+    BehaviorKindMergeReport,
+    BehaviorReductionReport,
+    BehaviorReductionRunner,
+)
 from behavior.reduction.sealing import seal_horizon, sealed_chain_indexes, sealed_gaps
 
 __all__ = [
+    "BehaviorKindMergeReport",
     "REDUCTION_VERSION",
     "UNREADABLE_GAP_KIND",
     "BehaviorChain",

@@ -258,9 +258,10 @@ class BehaviorJudgementBatch:
     unowned_fragment_nos: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
-        # 零判断合法：没有一件能提醒的事时全部帧无归属（unowned_fragment_nos 非空）。
-        if not self.judgements and not self.unowned_fragment_nos:
-            raise BehaviorFusionError("a fusion must produce at least one judgement or leave frames unowned")
+        # 空批是合法的：整段都是无意识小动作/过渡（5 分钟静坐）时，模型把每帧填 []、一条判断都不出
+        # ——逼它"至少声明一条"等于逼它发明（WP4 裁定）。回执照记、覆盖照走、树上无痕。
+        if not isinstance(self.judgements, tuple):
+            raise BehaviorFusionError("judgements must be a tuple")
         if not isinstance(self.unowned_fragment_nos, tuple) or any(
             isinstance(item, bool) or not isinstance(item, int) or item <= 0
             for item in self.unowned_fragment_nos

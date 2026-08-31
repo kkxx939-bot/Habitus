@@ -43,10 +43,14 @@ from behavior.fusion.config import (
 )
 from behavior.fusion.coverage import BehaviorCoverageIndex
 from behavior.fusion.enqueue import DEFAULT_QUIET_PERIOD_SECONDS
+from behavior.kinds.config import BehaviorKindConfig
+from behavior.kinds.rebuild import BehaviorKindRebuildReport
 from behavior.kinds.resolver import BehaviorKindResolver
 from behavior.kinds.store import BehaviorKindStore
+from behavior.kinds.vectors import BehaviorKindVectorStore
 from behavior.observation import BehaviorObservationEnvelope, BehaviorObservationStore
 from behavior.reduction import (
+    BehaviorKindMergeReport,
     BehaviorReductionBusyError,
     BehaviorReductionLedger,
     BehaviorReductionRunner,
@@ -54,10 +58,11 @@ from behavior.reduction import (
 from behavior.semantic import BehaviorSemanticRefresher, LLMBehaviorOverviewGenerator
 from behavior.tree import BehaviorTree
 from Config import HabitusConfig
-from foundation.observability import ObservationStatus, Observer
+from foundation.observability import ObservationEvent, ObservationStatus, Observer
 from infrastructure.store.contracts.lock import LockStore
 from infrastructure.store.contracts.path_lock import PathLock
 from ModelClient import StructuredChatClient
+from ModelClient.embedding import Embedder
 from Runtime.resident import ResidentWorker
 
 
@@ -123,6 +128,9 @@ class BehaviorRuntimeComponents:
                 raise ValueError(f"behavior components must share one {label} instance")
         if self.kind_store.path != self.tree.root / self.kind_store.path.name:
             raise ValueError("behavior kind registry must live at the tree root")
+        vectors = self.reduction_runner.kind_vectors
+        if vectors is not None and vectors.path != self.tree.root / vectors.path.name:
+            raise ValueError("behavior kind vectors must live at the tree root")
         # BHV-FUSION-003 的结构性保障："融合还能续"与"归约已封口"必须是同一个窗口。
         if (
             self.fusion_runner.context_lookback_seconds
@@ -300,6 +308,7 @@ def build_behavior_components(
     path_lock: PathLock,
     observer: Observer | None = None,
     clock: Callable[[], datetime] | None = None,
+    embedder: Embedder | None = None,
 ) -> BehaviorRuntimeComponents | None:
     """组装行为管线；``primary_subject`` 未配置时返回 None（行为侧未启用）。
 
@@ -357,7 +366,20 @@ def build_behavior_components(
     )
 
     tree = BehaviorTree(root / "tree")
-    kind_store = BehaviorKindStore(tree.root)
+    # 词表参数从唯一的 Config 边界进来；embedder 只做候选召回（BHV-KINDS-002），没有它就退字面重合。
+    kind_config = BehaviorKindConfig(**behavior_config.kinds_overrides())
+    kind_store = BehaviorKindStore(tree.root, config=kind_config)
+    # 旁册的身份键只从配置取（provider/model/dimension 一处出处）；换任一项旁册作废重算——它是派生物。
+    embedding = config.models.embedding
+    kind_vectors = (
+        BehaviorKindVectorStore(
+            tree.root,
+            model=f"{embedding.route.provider}/{embedding.route.model}",
+            dimension=embedding.dimension,
+        )
+        if embedder is not None
+        else None
+    )
     reduction_runner = BehaviorReductionRunner(
         judgements=judgements,
         observations=observations,
@@ -365,7 +387,8 @@ def build_behavior_components(
         tree=tree,
         lock_store=lock_store,
         kind_store=kind_store,
-        kind_resolver=BehaviorKindResolver(structured_chat),
+        kind_resolver=BehaviorKindResolver(structured_chat, config=kind_config, embedder=embedder),
+        kind_vectors=kind_vectors,
         ledger=BehaviorReductionLedger(root / "reduction"),
         semantic_refresher=BehaviorSemanticRefresher(
             tree, LLMBehaviorOverviewGenerator(structured_chat)
@@ -411,10 +434,76 @@ def deliver_observations(
     return stored.source_id
 
 
+async def merge_behavior_kinds(
+    components: BehaviorRuntimeComponents,
+    source: str,
+    target: str,
+    *,
+    observer: Observer | None = None,
+) -> BehaviorKindMergeReport:
+    """词表合并的正门（BHV-KINDS-002 方案⑤的执行动作）：``source`` 并入 ``target``，树上旧 token 重打。
+
+    判定由离线整理交模型做，这里只执行已定的合并。持 sweep 锁，归约 Worker 在此期间让路
+    （lock_busy 跳拍）；重跑幂等。
+    """
+
+    started = time.monotonic()
+    report = await components.reduction_runner.merge_kinds(source, target)
+    _record(
+        observer,
+        "behavior_kind_merge",
+        {"source": source, "target": target, "restamped": report.restamped, "days": len(report.days)},
+        started,
+    )
+    return report
+
+
+async def rebuild_behavior_kinds(
+    components: BehaviorRuntimeComponents, *, observer: Observer | None = None
+) -> BehaviorKindRebuildReport:
+    """词表重建的正门：按树补齐 + 账重算 + 向量补算，零模型调用；v1 词表迁移与账自愈走这里。"""
+
+    started = time.monotonic()
+    report = await components.reduction_runner.rebuild_kinds()
+    _record(
+        observer,
+        "behavior_kind_rebuild",
+        {"occurrences": report.occurrences, "kinds": report.kinds, "signals": len(report.signals)},
+        started,
+    )
+    return report
+
+
+def _record(
+    observer: Observer | None,
+    operation: str,
+    attributes: dict[str, str | int | float | bool],
+    started: float,
+) -> None:
+    """可观测事件与 Worker 同一形态（``ResidentWorker._observe``）；观测失败不影响业务。"""
+
+    if observer is None:
+        return
+    try:
+        observer.record(
+            ObservationEvent(
+                category="behavior",
+                operation=operation,
+                status=ObservationStatus.SUCCESS,
+                duration_seconds=max(0.0, time.monotonic() - started),
+                attributes=attributes,
+            )
+        )
+    except Exception:  # noqa: BLE001 - 观测失败不许影响运维动作
+        pass
+
+
 __all__ = [
     "BehaviorFusionWorker",
     "BehaviorReductionWorker",
     "BehaviorRuntimeComponents",
     "build_behavior_components",
     "deliver_observations",
+    "merge_behavior_kinds",
+    "rebuild_behavior_kinds",
 ]

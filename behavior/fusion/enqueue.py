@@ -99,12 +99,15 @@ class BehaviorFusionEnqueuer:
             return self._scan()
 
     def _scan(self) -> BehaviorFusionEnqueueResult:
+        now = self._timestamp()
         covered = set(self.jobs.covered_observation_ids(fenced=False))
         # 已融合的观测由覆盖索引回答（有窗口、按日过期），不再全量枚举回执目录。
-        covered.update(self.coverage.covered_observation_ids(self._timestamp()))
+        covered.update(self.coverage.covered_observation_ids(now))
         envelopes = self.observations.list()
         if not envelopes:
             return BehaviorFusionEnqueueResult((), 0)
+        # 覆盖记录在其交付仍在存储里时不会过期（``coverage.expire(retain=…)``），所以"处理过没有"
+        # 在这里可以完全由覆盖索引回答；从未融合的观测无论多旧都照常入队——下游停机再久也不丢数据。
         segments = segment_observations(envelopes, config=self.config, exclude=covered)
         if not segments:
             return BehaviorFusionEnqueueResult((), 0)

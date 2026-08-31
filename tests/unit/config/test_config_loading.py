@@ -274,3 +274,22 @@ def test_behavior_config_enforces_its_scalar_bounds() -> None:
             BehaviorConfig(**kwargs)
     with pytest.raises(TypeError):
         BehaviorConfig(primary_subject=123)  # type: ignore[arg-type]
+
+
+def test_behavior_kinds_fields_are_bounded_and_derived_by_prefix() -> None:
+    """kinds_* 与 behavior/kinds/config.py 的下界一致；覆盖项按前缀派生，不双份维护。"""
+
+    from Config.behavior import BehaviorConfig
+
+    assert BehaviorConfig().kinds_overrides() == {}
+    config = BehaviorConfig(kinds_batch_size=5, kinds_base_days=45, kinds_transient_retry_delay_seconds=1.5)
+    assert config.kinds_overrides() == {"batch_size": 5, "base_days": 45, "transient_retry_delay_seconds": 1.5}
+    for kwargs, match in (
+        ({"kinds_batch_size": 0}, "kinds_batch_size"),
+        ({"kinds_gap_multiplier": 0}, "kinds_gap_multiplier"),
+        ({"kinds_vector_candidates": 501}, "kinds_vector_candidates"),
+        ({"kinds_max_kinds": True}, "kinds_max_kinds"),
+        ({"kinds_transient_retry_delay_seconds": 601}, "kinds_transient_retry_delay_seconds"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            BehaviorConfig(**kwargs)

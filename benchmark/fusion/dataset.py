@@ -96,16 +96,20 @@ class FusionExpectation:
     # 与"读不懂""旁人"三者口径各自干净。写成期望是为了两头都抓：该无归属的没无归属（噪声进了事件）、
     # 不该无归属的被扔进去了（压制产出）。
     unowned_fragments: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
-    # 期望**至少**这些片段无归属（子集匹配）。用在"这段可以判 0 条也可以判 1 条"两种产出都站得住的
-    # 真实切片上：扶眼镜、摸脸这些帧无论如何都不该进任何事，但旁边的"点头""看着大家"归给一条
-    # "开会"还是也无归属，两种都对——全集精确匹配会把合法的另一种判红。
-    unowned_include: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
-    # 期望这些片段**不在主体的任何判断里**——无归属或旁人的都算。旁人走过那一帧，模型判成
-    # "旁人的一条判断"（会被分流）或直接无归属都对，要抓的只是"没被塞进主体那件事"。
-    not_owned_by_subject: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
     # 期望某段里**至少判出**的行为（子串匹配 behavior）：允许模型不产出之后，"可提醒的单位有没有被
     # 一起扔掉"必须单独考，总条数降了不等于对了。
     behaviors_present: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
+    # 期望**不被含主体的判断覆盖**的片段编号：旁人走过那一帧，模型分流成旁人的判断、判成无归属、
+    # 判成读不懂都没有把它塞进主体的行为——三种都对，只有"进了主体的判断"才是错。比 out_of_scope
+    # 宽：那条要求分流成旁人的判断，而 WP4 之后"不是主体的事也不是主体的步骤"的正解是无归属。
+    subject_free_fragments: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
+    # 期望**至少**这些片段无归属（子集匹配）。用在"判 0 条或 1 条都站得住"的真实切片上：
+    # 扶眼镜、摸脸这些帧无论如何都不该进任何事，但旁边的"点头""看着大家"归给一条"听大家说话"
+    # 还是也无归属，两种都对——全集精确匹配会把合法的另一种判红。
+    unowned_include: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
+    # 某段里**不得出现**的行为名（子串匹配 behavior）：只动身体的姿态（坐着、看着大家、转头）不是
+    # 可提醒的单位，判出来就是折叠没做到——behaviors_present 的反面，两头一起抓。
+    forbidden_behaviors: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for _, _, kind in tuple(self.relations) + tuple(self.forbidden_relations):
@@ -127,9 +131,10 @@ class FusionExpectation:
             or self.unreadable_fragments
             or self.out_of_scope_fragments
             or self.unowned_fragments
-            or self.unowned_include
-            or self.not_owned_by_subject
             or self.behaviors_present
+            or self.subject_free_fragments
+            or self.unowned_include
+            or self.forbidden_behaviors
             or self.forbidden_status
             or self.status_present
             or self.goal_absent
@@ -204,11 +209,12 @@ def _case(value: Any) -> FusionCase:
                 int(key): tuple(item) for key, item in expect.get("out_of_scope_fragments", {}).items()
             },
             unowned_fragments={int(key): tuple(item) for key, item in expect.get("unowned_fragments", {}).items()},
-            unowned_include={int(key): tuple(item) for key, item in expect.get("unowned_include", {}).items()},
-            not_owned_by_subject={
-                int(key): tuple(item) for key, item in expect.get("not_owned_by_subject", {}).items()
-            },
             behaviors_present={int(key): tuple(item) for key, item in expect.get("behaviors_present", {}).items()},
+            unowned_include={int(key): tuple(item) for key, item in expect.get("unowned_include", {}).items()},
+            subject_free_fragments={
+                int(key): tuple(item) for key, item in expect.get("subject_free_fragments", {}).items()
+            },
+            forbidden_behaviors={int(key): tuple(item) for key, item in expect.get("forbidden_behaviors", {}).items()},
         ),
     )
 

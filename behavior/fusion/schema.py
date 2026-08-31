@@ -179,7 +179,7 @@ JUDGEMENT_FUSION_JSON_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["judgements", "frames"],
     "properties": {
-        # 可以为空：一段里没有一件能提醒的事时，judgements 为 []、每一帧的 assignments 为 []。
+        # 允许空：整段都是无意识小动作/过渡时一条判断都不出（每帧填 []），不逼模型发明。
         "judgements": {"type": "array", "items": _JUDGEMENT_SCHEMA},
         "frames": {
             "type": "array",

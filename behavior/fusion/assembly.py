@@ -96,9 +96,7 @@ def assemble_judgement_batch(
     declared = _judgements(payload["judgements"], config=resolved)
     frames = _frames(payload["frames"], fragment_count=fragment_count, config=resolved, notes=notes)
     covers, fact_frames, dropped = _reduce_coverage(frames, declared)
-    # 全部帧都无归属、一条判断也没有是合法产出：一段只有晃身体、扶眼镜、点头的观测里确实没有
-    # 一件能提醒的事。曾经在这里硬失败要求"至少声明一条"，真实切片上模型被打回后只会把整段
-    # 改判成"读不懂"——读得懂却不构成事，正是无归属要表达的。
+    # covers 为空 = 整段无归属（每帧都填了 []）：合法的空批——看到了、看懂了、不构成任何事。
 
     built = [
         _build(
@@ -113,6 +111,7 @@ def assemble_judgement_batch(
         for number in sorted(covers, key=lambda no: (covers[no][0], no))
     ]
     built = _require_targets_declared(built, context_states=tuple(context_states), notes=notes)
+    built = _merge_indistinguishable_unreadable(built, notes)
     _require_distinguishable(built)
     owned = {no for item in built for no in item.covers}
     unowned = tuple(no for no in range(1, fragment_count + 1) if no not in owned)
@@ -134,7 +133,6 @@ def _judgements(value: object, *, config: BehaviorFusionConfig) -> dict[int, dic
         if number in declared:
             raise BehaviorFusionError(f"{label}.judgement_no is declared more than once: {number}")
         declared[number] = _judgement_fields(payload, label, config=config)
-    # 零判断合法：这段里没有一件能提醒的事时，判断为空、全部帧填 []（见 assemble_judgement_batch）。
     return declared
 
 
@@ -334,16 +332,11 @@ def _build(
             notes.append(f"subject_absent judgement={number} dropped={absent}")
             subjects = present
         elif absent:
-            # 没有一个主体是观测里出现过的：这条判断说的是观测里没有的人，不能作为可读判断落盘，
-            # 但它覆盖的观测也不能丢——整条降为"没读懂"，与融合层"不能融合的也要留下"同构。
-            # 它的 subjects/status/relations 随之清空（没读懂段不携带这些），指向它的关系由
-            # ``_require_targets_declared`` 剪掉。
-            notes.append(f"subject_absent judgement={number} dropped={absent} unreadable")
-            behavior = goal = summary = None
-            subjects = ()
-            status = status_basis = None
-            relations = ()
-            ordered = []
+            # 没有一个主体是观测里出现过的：这条判断说的是观测里没有的人——对被跟踪的主体来说，
+            # 它就是"旁人的事"（out_of_scope）：判断原样保留、回执按 out_of_scope 记它覆盖的观测、
+            # 不落盘（与名字在 participants 里的旁人判断同一口径；若降成"没读懂"，主体的时间轴上
+            # 会凭空多出一段 gap）。指向它的关系由 ``_require_targets_declared`` 剪掉。
+            notes.append(f"subject_absent judgement={number} dropped={absent} out_of_scope")
     claim = BehaviorClaim(
         behavior=behavior,
         goal=goal,
@@ -380,12 +373,12 @@ def _require_targets_declared(
     """
 
     known = {item.judgement_no: item for item in judgements}
-    # 装配期被降为没读懂的判断（主体全不在场）：指向它的关系一律剪掉——它已不是一个行为。
+    # 装配期被判为旁人之事的判断（主体全不在场）：它不会落盘，指向它的关系一律剪掉。
     degraded_unreadable = {
         item.judgement_no
         for item in judgements
-        if not item.claim.is_readable and any(
-            note.startswith(f"subject_absent judgement={item.judgement_no} ") and note.endswith("unreadable")
+        if any(
+            note.startswith(f"subject_absent judgement={item.judgement_no} ") and note.endswith("out_of_scope")
             for note in notes
         )
     }
@@ -416,7 +409,7 @@ def _require_targets_declared(
             if link.target_no in degraded_unreadable:
                 notes.append(
                     f"relation_dropped judgement={item.judgement_no} target={link.target_no} "
-                    f"kind={link.kind.value} (target degraded to unreadable)"
+                    f"kind={link.kind.value} (target is out of scope)"
                 )
                 continue
             if not target.claim.is_readable:
@@ -438,6 +431,27 @@ def _require_targets_declared(
             kept.append(link)
         rebuilt.append(item if len(kept) == len(item.relations) else replace(item, relations=tuple(kept)))
     return rebuilt
+
+
+def _merge_indistinguishable_unreadable(
+    judgements: Sequence[BehaviorJudgement], notes: list[str]
+) -> list[BehaviorJudgement]:
+    """两条内容都为空（没读懂）且覆盖同一帧集的判断合并为一条——空判断没有语义可区分，硬拒只会
+    让模型重试三次后封死队列；留信号。"""
+
+    merged: list[BehaviorJudgement] = []
+    seen: dict[tuple[int, ...], int] = {}
+    for item in judgements:
+        if item.claim.is_readable:
+            merged.append(item)
+            continue
+        earlier = seen.get(item.covers)
+        if earlier is not None:
+            notes.append(f"duplicate_unreadable judgement={item.judgement_no} merged_into={earlier}")
+            continue
+        seen[item.covers] = item.judgement_no
+        merged.append(item)
+    return merged
 
 
 def _require_distinguishable(judgements: Sequence[BehaviorJudgement]) -> None:

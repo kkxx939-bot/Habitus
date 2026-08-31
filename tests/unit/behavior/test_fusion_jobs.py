@@ -171,12 +171,14 @@ class Harness:
         self.receipts = BehaviorFusionReceiptStore(root)
         self.fuser, self.provider = build_fuser(bodies)
         self.runner = BehaviorFusionRunner(
-            self.jobs, self.observations, self.fuser, self.judgements, self.receipts,
+            self.jobs,
+            self.observations,
+            self.fuser,
+            self.judgements,
+            self.receipts,
             primary_subject=SUBJECT,
         )
-        self.enqueuer = BehaviorFusionEnqueuer(
-            self.observations, self.jobs, self.receipts, clock=lambda: self.now
-        )
+        self.enqueuer = BehaviorFusionEnqueuer(self.observations, self.jobs, self.receipts, clock=lambda: self.now)
 
     def deliver(
         self,
@@ -224,7 +226,7 @@ def test_a_job_runs_from_observations_to_judgements_and_a_receipt(harness) -> No
 
 
 def test_the_job_identity_is_the_receipt_identity(harness) -> None:
-    """"这段观测处理过没有"因此是一次文件存在性判断，不必扫描判断存储反推。"""
+    """ "这段观测处理过没有"因此是一次文件存在性判断，不必扫描判断存储反推。"""
 
     harness.deliver(FRAGMENTS, "d1")
     job = harness.enqueue_job()
@@ -250,9 +252,7 @@ def test_a_crash_after_staging_replays_persistence_without_calling_the_model(har
     harness.enqueue_job()
     lease = harness.runner.claim("worker-1")
     assert lease is not None
-    staged_lease = asyncio.run(
-        harness.runner._fuse_and_stage(lease, judged_at=harness.now)
-    )
+    staged_lease = asyncio.run(harness.runner._fuse_and_stage(lease, judged_at=harness.now))
     assert harness.provider.calls == 1
     assert staged_lease.job.staged is not None
 
@@ -274,9 +274,7 @@ def test_replaying_persistence_is_idempotent(harness) -> None:
     harness.enqueue_job()
     lease = harness.runner.claim("worker-1")
     assert lease is not None
-    staged_lease = asyncio.run(
-        harness.runner._fuse_and_stage(lease, judged_at=harness.now)
-    )
+    staged_lease = asyncio.run(harness.runner._fuse_and_stage(lease, judged_at=harness.now))
     staged = staged_lease.job.staged
     assert staged is not None
     harness.runner._persist(staged)
@@ -291,9 +289,7 @@ def test_a_failure_after_staging_returns_to_staged_not_queued(harness) -> None:
     harness.enqueue_job()
     lease = harness.runner.claim("worker-1")
     assert lease is not None
-    staged_lease = asyncio.run(
-        harness.runner._fuse_and_stage(lease, judged_at=harness.now)
-    )
+    staged_lease = asyncio.run(harness.runner._fuse_and_stage(lease, judged_at=harness.now))
     failed = harness.jobs.fail(staged_lease, RuntimeError("disk full"))
     assert failed.status is BehaviorFusionJobStatus.STAGED
     assert failed.staged is not None
@@ -540,7 +536,7 @@ def test_a_worker_that_never_settles_is_not_reclaimed_forever(tmp_path) -> None:
     )
     current = job
     for _ in range(2):
-        store.claim(current, "worker-1")          # 认领后进程直接消失
+        store.claim(current, "worker-1")  # 认领后进程直接消失
         harness.now = harness.now + timedelta(seconds=120)
         current = store.oldest_uncommitted()
         assert current is not None
@@ -563,9 +559,7 @@ def test_persisting_a_second_fusion_of_the_same_segment_is_refused(tmp_path) -> 
     harness.enqueue_job()
     lease = harness.runner.claim("worker-2")
     assert lease is not None
-    staged = asyncio.run(
-        harness.runner._fuse_and_stage(lease, judged_at=harness.now + timedelta(minutes=5))
-    ).job.staged
+    staged = asyncio.run(harness.runner._fuse_and_stage(lease, judged_at=harness.now + timedelta(minutes=5))).job.staged
     assert staged is not None
     with pytest.raises(BehaviorFusionError, match="already fused into a different"):
         harness.runner._persist(staged)
@@ -626,9 +620,7 @@ def test_a_later_segment_can_continue_a_judgement_from_an_earlier_one(tmp_path) 
     assert "C1" in harness.provider.prompts[1]
     stored = harness.judgements.read(later.judgement_ids[0])
     assert stored is not None
-    assert stored["relations"] == [
-        {"kind": "continues", "target_id": earlier.judgement_ids[0]}
-    ]
+    assert stored["relations"] == [{"kind": "continues", "target_id": earlier.judgement_ids[0]}]
 
 
 def test_the_context_cutoff_never_shows_a_judgement_from_the_future(tmp_path) -> None:
@@ -775,7 +767,9 @@ class _TruncatingProvider(ScriptedProvider):
 
     async def complete_async(self, request: PreparedChatRequest) -> ModelResponse:
         self.calls += 1
-        return ModelResponse(content="{\"judgements\": [", model=self.model, provider=self.provider_name, finish_reason="length")
+        return ModelResponse(
+            content='{"judgements": [', model=self.model, provider=self.provider_name, finish_reason="length"
+        )
 
 
 def test_a_truncated_segment_is_recorded_as_an_unreadable_gap_instead_of_blocking(tmp_path) -> None:
@@ -820,7 +814,7 @@ def test_a_segment_with_no_judgement_still_commits_a_receipt_that_covers_it(tmp_
 
     from tests.unit.behavior.fusion_wire import wire
 
-    harness = Harness(tmp_path, [wire([], [[]] * len(FRAGMENTS))])
+    harness = Harness(tmp_path, [wire([], [[] for _ in FRAGMENTS])])
     harness.deliver(FRAGMENTS, "d1")
     harness.enqueue_job()
     result = harness.run_once()
@@ -829,5 +823,4 @@ def test_a_segment_with_no_judgement_still_commits_a_receipt_that_covers_it(tmp_
     receipt = harness.receipts.read(result.receipt.receipt_id)
     assert receipt is not None
     assert set(receipt.unowned_observation_ids) == set(receipt.observation_ids)
-    assert receipt.unowned_ratio == 1.0
     assert harness.jobs.oldest_uncommitted() is None
