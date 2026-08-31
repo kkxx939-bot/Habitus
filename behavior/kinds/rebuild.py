@@ -86,7 +86,7 @@ async def rebuild_registry(
         if fields.get("original_name") is not None:
             continue  # 撞车消歧记录 = 已知重复：预测树、语义层、命中账一律不计（死规则②）
         token = str(fields.get("kind_token") or "")
-        name = str(fields.get("original_name") or fields.get("name") or "")
+        name = str(fields.get("name") or "")  # 消歧记录整条不参与重建，故此处 name 即原始名
         if not token:
             signals.append(f"kind_rebuild_skipped occurrence without kind_token at {document.address}")
             continue

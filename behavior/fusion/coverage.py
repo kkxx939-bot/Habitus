@@ -80,11 +80,17 @@ class BehaviorCoverageIndex:
 
     # ── 读 ──────────────────────────────────────────────────────────────────────────
 
-    def covered_observation_ids(self, now: datetime) -> frozenset[str]:
-        """窗口内被任何回执覆盖过的观测身份。"""
+    def covered_observation_ids(self, now: datetime | None = None) -> frozenset[str]:
+        """盘上**全部**覆盖记录所覆盖的观测身份。
+
+        读取侧不再设窗口：删除权完全归 ``expire(retain=…)``（它只删"观测已释放"的记录）。两侧都设
+        窗口会形成死锁——记录留得下却读不回，于是交付永远不满足释放条件、覆盖永远读不到，封口前沿
+        钉死、已融合的交付被重新入队（审计 NEW-1 复现）。``expire`` 之后盘上剩下的窗口外记录数 =
+        仍在存储里的交付数，量很小，全量读的代价可以忽略。``now`` 仅为兼容保留，不参与判断。
+        """
 
         covered: set[str] = set()
-        for day_path in self._day_directories(self._window_start(now)):
+        for day_path in self._day_directories(None):
             for entry in self._entries(day_path):
                 match = _RECORD_FILE.fullmatch(entry.name)
                 if not entry.is_file() or match is None:
@@ -140,11 +146,17 @@ class BehaviorCoverageIndex:
     # ── 内部 ─────────────────────────────────────────────────────────────────────────
 
     def _references(self, path: Path, ids: set[str]) -> bool:
-        encoded = read_regular_bytes(path, artifact_root=self.root, max_bytes=_MAX_RECORD_BYTES)
+        """这份记录是否覆盖了仍在存储里的观测。
+
+        解不开的记录当作"什么都没覆盖"→ 照常被删掉（覆盖索引是可重建的派生物，历史记录损坏
+        应当自愈）。硬拒留给 ``covered_observation_ids``：那里读不出来会把已融合误判成未融合。
+        """
+
         try:
+            encoded = read_regular_bytes(path, artifact_root=self.root, max_bytes=_MAX_RECORD_BYTES)
             payload = json.loads(encoded.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise BehaviorFusionError(f"coverage record is not decodable: {path.name}") from exc
+        except (UnicodeDecodeError, json.JSONDecodeError, BehaviorFusionError, OSError):
+            return False
         listed = payload.get("observation_ids")
         return isinstance(listed, list) and any(item in ids for item in listed)
 
@@ -159,13 +171,18 @@ class BehaviorCoverageIndex:
         day = judged_at.astimezone(timezone.utc).date().isoformat()
         return self.coverage_root / day / f"{receipt_id}.json"
 
-    def _day_directories(self, start: date) -> list[Path]:
+    def _day_directories(self, start: date | None) -> list[Path]:
+        """日目录；``start`` 为 None 时不设下界（读取侧全量）。"""
+
         if not self.coverage_root.is_dir():
             return []
         days: list[Path] = []
         for entry in self._entries(self.coverage_root):
-            if entry.is_dir() and _DAY_DIRECTORY.fullmatch(entry.name) and date.fromisoformat(entry.name) >= start:
-                days.append(self.coverage_root / entry.name)
+            if not (entry.is_dir() and _DAY_DIRECTORY.fullmatch(entry.name)):
+                continue
+            if start is not None and date.fromisoformat(entry.name) < start:
+                continue
+            days.append(self.coverage_root / entry.name)
         return sorted(days)
 
     def _entries(self, directory: Path) -> list:

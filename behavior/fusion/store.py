@@ -172,7 +172,9 @@ class BehaviorJudgementStore:
         切断的前半截"（BHV-REALDATA-001 审计复现）。``judged_before`` 给了再加一道"已落盘"（融合串行，
         本作业开始前落盘的才算成立）。
 
-        回看窗口同样按事件时间：``started_at >= moment - lookback``。选取必须确定性：按
+        回看窗口同样按事件时间，且与截断用**同一个字段**：``last_observed_at >= moment - lookback``
+        （"这条判断在过去 lookback 内还有观测"）。不能用 ``started_at`` 作下界——做饭、看电影这类
+        超过 lookback 的长行为，其后续段会看不到自己的前半截、无法 continues（审计 NEW-4 复现）。选取必须确定性：按
         ``(last_observed_at, started_at, judgement_id)`` 取尾部——并列时不能退化成按哈希随机抽样。
         """
 
@@ -195,7 +197,7 @@ class BehaviorJudgementStore:
         def eligible(record: Mapping[str, Any]) -> bool:
             if _parse_instant(record["last_observed_at"]) > cutoff:
                 return False
-            if _parse_instant(record["started_at"]) < earliest:
+            if _parse_instant(record["last_observed_at"]) < earliest:
                 return False
             return settled is None or _parse_instant(record["judged_at"]) <= settled
 

@@ -386,7 +386,13 @@ class BehaviorReductionRunner:
                 self._checkpoint_path, artifact_root=self.ledger.root, max_bytes=_MAX_CHECKPOINT_BYTES
             )
             checkpoint = json.loads(encoded.decode("utf-8"))
-            replayable = isinstance(checkpoint, Mapping) and isinstance(checkpoint.get("documents"), list)
+            # 判据与 ``_publish_checkpoint`` 的必需字段对齐：两者缺一都不可重放，否则"sweep 报缺
+            # staged_at、运维动作却让你先跑 sweep"就是死锁（审计 NEW-6）。
+            replayable = (
+                isinstance(checkpoint, Mapping)
+                and isinstance(checkpoint.get("documents"), list)
+                and _is_instant(checkpoint.get("staged_at"))
+            )
         except Exception:  # noqa: BLE001 - 只为给出准确的运维指引
             replayable = False
         if replayable:
@@ -1014,8 +1020,9 @@ class BehaviorReductionRunner:
         for source_ref in sorted(set(source_refs)):
             envelope = self.observations.read(source_ref)
             if envelope is None:
-                # 交付已不在存储里（运维删除、隔离窗口）：不整轮失败——引用它的链在物化时会因 basis
-                # 找不到观测而按链跳过、留信号；别的链照常发布。
+                # 交付已不在存储里（运维删除、隔离窗口）：不整轮失败。带 basis 的链在物化时会因
+                # "步骤引用的观测已不存在"按链跳过；**没有 basis 的链照常发布**（判断本体自带
+                # summary/goal，不依赖观测），所以这里留信号是唯一的可见痕迹（审计 NEW-8）。
                 self._sweep_signals.append(f"source_delivery_missing {source_ref}")
                 continue
             for observation in envelope.batch.observations:
@@ -1027,15 +1034,32 @@ def _as_instant(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _checkpoint_identity(documents: list[Any]) -> str:
-    """检查点的内容身份：本批 occurrence 链身份的摘要（与 staged_at 无关，冻结时钟下也不撞）。"""
+def _is_instant(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return datetime.fromisoformat(value).utcoffset() is not None
+    except ValueError:
+        return False
 
-    digests = sorted(
-        str(item["ledger"]["chain_digest"])
-        for item in documents
-        if isinstance(item, Mapping) and item.get("kind") == BehaviorKind.OCCURRENCE.value
+
+def _checkpoint_identity(documents: list[Any]) -> str:
+    """检查点的内容身份：本批全部落盘文档的链身份摘要（与 staged_at 无关，冻结时钟下也不撞）。
+
+    occurrence 与 gap 分列——只摘 occurrence 会让两个不同的 gap-only 批算出同一个空摘要，眼下靠
+    ``_record_kind_hits`` 的 ``if not hits: return`` 兜住，但那是隐性依赖（审计 NEW-7）。
+    """
+
+    def digests(kind: BehaviorKind) -> list[str]:
+        return sorted(
+            str(item["ledger"]["chain_digest"])
+            for item in documents
+            if isinstance(item, Mapping) and item.get("kind") == kind.value
+        )
+
+    return canonical_digest(
+        {"occurrences": digests(BehaviorKind.OCCURRENCE), "gaps": digests(BehaviorKind.GAP)}
     )
-    return canonical_digest({"occurrences": digests})
 
 
 _TRUNCATED_HEAD = 20
