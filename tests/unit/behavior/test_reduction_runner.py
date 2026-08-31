@@ -1170,3 +1170,42 @@ def test_data_clock_is_clamped_to_the_wall_clock(tmp_path) -> None:
     registry = harness.kind_store.read().registry
     assert "打球" in registry.tokens  # 若按 2099 判，它早该被删
     assert registry.entry_of("洗手").hit_days == (date(2099, 1, 1),)
+
+
+def test_reduction_recovers_after_downtime_longer_than_the_coverage_window(tmp_path) -> None:
+    """归约停机超过覆盖窗口后照常开工：覆盖记录留得下也**读得回**，前沿不被钉死、交付照常释放。
+
+    读取侧曾同样按窗口过滤，于是"留得下、读不回"形成死锁——停机 > 7 天后 published 0 / pending 1、
+    封口视界永久钉在过去、已融合的交付被重新入队重跑模型（审计 NEW-1，无崩溃即可复现）。
+    """
+
+    from datetime import timedelta
+
+    harness = Harness(tmp_path)
+    source = harness.deliver(OBS_A, OBS_B, OBS_C)
+    seed_wash_chain(harness, source)
+    harness.now = harness.now + timedelta(days=8)  # 归约停机八天后首次开跑
+
+    report = asyncio.run(harness.runner.run_once())
+
+    assert report.published_occurrences == 1 and report.chains_pending == 0
+    assert harness.runner._frontier_cutoff() is None
+    assert harness.observations.list() == ()  # 交付照常释放，不会被重新入队
+
+
+def test_a_published_delivery_is_released_and_never_re_enqueued_after_the_window(tmp_path) -> None:
+    """发布之后再跨过窗口：交付已释放、覆盖记录随之过期，入队扫描不会把它当成未融合重跑。"""
+
+    from datetime import timedelta
+
+    harness = Harness(tmp_path)
+    source = harness.deliver(OBS_A, OBS_B, OBS_C)
+    seed_wash_chain(harness, source)
+    assert asyncio.run(harness.runner.run_once()).published_occurrences == 1
+    assert harness.observations.list() == ()
+
+    harness.now = harness.now + timedelta(days=8)
+    again = asyncio.run(harness.runner.run_once())
+
+    assert again.published_occurrences == 0 and again.chains_pending == 0
+    assert harness.runner._frontier_cutoff() is None

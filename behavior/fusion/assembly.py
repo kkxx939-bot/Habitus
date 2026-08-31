@@ -336,7 +336,12 @@ def _build(
             # 它就是"旁人的事"（out_of_scope）：判断原样保留、回执按 out_of_scope 记它覆盖的观测、
             # 不落盘（与名字在 participants 里的旁人判断同一口径；若降成"没读懂"，主体的时间轴上
             # 会凭空多出一段 gap）。指向它的关系由 ``_require_targets_declared`` 剪掉。
-            notes.append(f"subject_absent judgement={number} dropped={absent} out_of_scope")
+            # 落盘与否由 ``persistable_judgements`` 按 primary_subject 统一判（可穿戴视角里佩戴者
+            # 常不在 participants 里，那种情形仍属主体自己的事、照常落盘）；这里只留信号，不改判断、
+            # 也不剪指向它的关系——剪边会把判重规则的连通分量拆开，同名同刻的两条判断随即硬拒、
+            # 重试三次后封死串行队列（审计 NEW-2 复现）。悬空引用由落盘期的
+            # ``without_unresolvable_relations`` 统一剪掉。
+            notes.append(f"subject_absent judgement={number} dropped={absent} kept")
     claim = BehaviorClaim(
         behavior=behavior,
         goal=goal,
@@ -373,15 +378,6 @@ def _require_targets_declared(
     """
 
     known = {item.judgement_no: item for item in judgements}
-    # 装配期被判为旁人之事的判断（主体全不在场）：它不会落盘，指向它的关系一律剪掉。
-    degraded_unreadable = {
-        item.judgement_no
-        for item in judgements
-        if any(
-            note.startswith(f"subject_absent judgement={item.judgement_no} ") and note.endswith("out_of_scope")
-            for note in notes
-        )
-    }
     rebuilt: list[BehaviorJudgement] = []
     for item in judgements:
         kept: list[JudgementLink] = []
@@ -406,12 +402,6 @@ def _require_targets_declared(
                     f"judgement[{item.judgement_no}] relates to an undeclared judgement: "
                     f"{link.target_no}"
                 )
-            if link.target_no in degraded_unreadable:
-                notes.append(
-                    f"relation_dropped judgement={item.judgement_no} target={link.target_no} "
-                    f"kind={link.kind.value} (target is out of scope)"
-                )
-                continue
             if not target.claim.is_readable:
                 # 没读懂的那段不是一个行为，谈不上与它延续、并行或被它修正。在这里以可定位的
                 # 坐标拒绝，而不是等到对称补齐时由系统自己造出一条非法关系再炸——那样反馈给

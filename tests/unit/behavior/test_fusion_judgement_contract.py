@@ -365,12 +365,12 @@ def test_a_partially_absent_subject_list_is_rejected_by_the_validator() -> None:
         validate_judgement_batch(assemble(raw), FRAGMENTS)
 
 
-def test_a_judgement_whose_subjects_are_all_absent_is_out_of_scope() -> None:
-    """主体没有一个在覆盖片段里出现过：这是"观测里没有的人做的事"——对被跟踪主体而言是旁人之事。
+def test_a_judgement_whose_subjects_are_all_absent_is_kept_with_a_signal() -> None:
+    """主体没有一个在覆盖片段里出现过：判断原样保留、只留信号，落盘与否由下游按 primary_subject 判。
 
-    判断原样保留、回执按 out_of_scope 记它覆盖的观测、不落盘；不再降成"没读懂"（那会在主体的时间轴
-    上凭空多出一段 gap，且与名字在 participants 里的旁人判断口径不一）。真实数据一周 371 次，整批拒
-    会让同一段反复失败直至封死队列。
+    不再降成"没读懂"（那会在主体的时间轴上凭空多出一段 gap，且与名字在 participants 里的旁人判断
+    口径不一）；也不在这里断言它一定是旁人之事——可穿戴视角里佩戴者常不在 participants 里，那种
+    情形仍是主体自己的事、照常落盘（审计 NEW-3）。真实数据一周 371 次，整批拒会封死队列。
     """
 
     raw = body()
@@ -378,15 +378,17 @@ def test_a_judgement_whose_subjects_are_all_absent_is_out_of_scope() -> None:
     batch = assemble_judgement_batch(
         raw, fragment_count=len(FRAGMENTS), participants_by_no=participants_of(FRAGMENTS)
     )
-    validate_judgement_batch(batch, FRAGMENTS)  # 后置断言放行：全不在场 = 旁人之事
+    validate_judgement_batch(batch, FRAGMENTS)  # 后置断言放行：全不在场不再硬拒
     first = batch.judgements[0]
     assert first.claim.is_readable and first.subjects == ("陌生人",)
     assert first.covers == (1, 2, 3)
-    assert batch.degradations == ("subject_absent judgement=1 dropped=['陌生人'] out_of_scope",)
+    assert batch.degradations == ("subject_absent judgement=1 dropped=['陌生人'] kept",)
 
 
-def test_relations_pointing_at_an_out_of_scope_judgement_are_pruned() -> None:
-    """指向旁人之事的关系一并剪掉——它不会落盘，留着就是悬空引用。"""
+def test_relations_to_an_absent_subject_judgement_survive_assembly() -> None:
+    """指向"主体全不在场"判断的关系**不在装配层剪**：剪掉会把判重规则的连通分量拆开，
+    同名同刻的两条判断随即硬拒、重试三次后封死串行队列（审计 NEW-2）。悬空引用由落盘期的
+    ``without_unresolvable_relations`` 统一剪掉。"""
 
     raw = wire(
         [
@@ -400,11 +402,22 @@ def test_relations_pointing_at_an_out_of_scope_judgement_are_pruned() -> None:
         raw, fragment_count=len(FRAGMENTS), participants_by_no=participants_of(FRAGMENTS)
     )
     validate_judgement_batch(batch, FRAGMENTS)
-    assert batch.judgements[1].relations == ()
-    assert batch.degradations == (
-        "subject_absent judgement=1 dropped=['陌生人'] out_of_scope",
-        "relation_dropped judgement=2 target=1 kind=concurrent_with (target is out of scope)",
+    assert [link.target_no for link in batch.judgements[1].relations] == [1]
+    assert batch.degradations == ("subject_absent judgement=1 dropped=['陌生人'] kept",)
+
+
+def test_two_same_start_judgements_survive_when_their_subjects_are_absent() -> None:
+    """同名同刻、由 continues 相连的两条判断，在主体全不在场时也不能被拆开判重（审计 NEW-2 复现）。"""
+
+    raw = duplicated_wash(second_relations=[("continues", 1)])
+    for item in raw["judgements"]:
+        if item["behavior"] is not None:  # 没读懂的那条不带主体
+            item["subjects"] = ["陌生人"]
+    batch = assemble_judgement_batch(
+        raw, fragment_count=len(FRAGMENTS), participants_by_no=participants_of(FRAGMENTS)
     )
+    validate_judgement_batch(batch, FRAGMENTS)  # 不再抛 "both describe … starting at the same moment"
+    assert [link.target_no for link in batch.judgements[1].relations] == [1]
 
 
 def test_a_segment_with_every_frame_unowned_is_an_empty_batch() -> None:
