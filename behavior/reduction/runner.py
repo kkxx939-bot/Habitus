@@ -72,7 +72,10 @@ _CHECKPOINT_NAME = "staged.json"
 # 撞出永久冲突），而是把日子记在这里，每轮 sweep 逐日重试、成功一天清一天。
 _REFRESH_PENDING_NAME = "refresh_pending.json"
 _MAX_REFRESH_PENDING_BYTES = 1_048_576
-_SWEEP_LOCK_TTL_SECONDS = 600
+# sweep 锁的默认租约时长；实际值由 ``Config.behavior.reduction_sweep_lock_ttl_seconds`` 注入。
+# 周尺度回填（万级小文件写入会把 fseventsd 顶到 240% CPU，单篇 publish 可能被文件系统卡住数分钟）
+# 需要更长的租约——那不该靠改代码或猴子补丁，所以它是运维参数而不是常量。
+DEFAULT_SWEEP_LOCK_TTL_SECONDS = 600
 
 
 @dataclass(frozen=True)
@@ -123,6 +126,7 @@ class BehaviorReductionRunner:
         clock: Callable[[], datetime] | None = None,
         context_lookback_seconds: float = FUSION_CONTEXT_LOOKBACK_SECONDS,
         coverage: BehaviorCoverageIndex | None = None,
+        sweep_lock_ttl_seconds: int = DEFAULT_SWEEP_LOCK_TTL_SECONDS,
     ) -> None:
         """``context_lookback_seconds`` 必须与融合 runner 实际使用的值一致（同一配置源）——
         融合"还能续"与归约"已封口"是同一个窗口的两面，各配一个数会静默分叉。"""
@@ -160,6 +164,13 @@ class BehaviorReductionRunner:
         self.receipts = receipts
         self.tree = tree
         self.lock_store = lock_store
+        if (
+            isinstance(sweep_lock_ttl_seconds, bool)
+            or not isinstance(sweep_lock_ttl_seconds, int)
+            or not 60 <= sweep_lock_ttl_seconds <= 86_400
+        ):
+            raise ValueError("sweep_lock_ttl_seconds must be an integer between 60 and 86400")
+        self.sweep_lock_ttl_seconds = sweep_lock_ttl_seconds
         self.kind_store = kind_store
         self.kind_resolver = kind_resolver
         self.kind_vectors = kind_vectors
@@ -190,7 +201,7 @@ class BehaviorReductionRunner:
 
         try:
             acquired = self._path_lock.acquire(
-                self._sweep_lock_key, ttl_seconds=_SWEEP_LOCK_TTL_SECONDS
+                self._sweep_lock_key, ttl_seconds=self.sweep_lock_ttl_seconds
             )
         except TimeoutError as exc:
             # 只有**这里**的超时是"锁被占"；正文里的 TimeoutError（续约失败、文档锁竞争）
@@ -309,7 +320,9 @@ class BehaviorReductionRunner:
         """
 
         try:
-            acquired = self._path_lock.acquire(self._sweep_lock_key, ttl_seconds=_SWEEP_LOCK_TTL_SECONDS)
+            acquired = self._path_lock.acquire(
+                self._sweep_lock_key, ttl_seconds=self.sweep_lock_ttl_seconds
+            )
         except TimeoutError as exc:
             raise BehaviorReductionBusyError(str(exc)) from exc
         with acquired as guard:
@@ -353,7 +366,9 @@ class BehaviorReductionRunner:
         """按树重建词表（补齐 + 账重算 + 向量补算，零模型调用）；持 sweep 锁，与归约互斥。"""
 
         try:
-            acquired = self._path_lock.acquire(self._sweep_lock_key, ttl_seconds=_SWEEP_LOCK_TTL_SECONDS)
+            acquired = self._path_lock.acquire(
+                self._sweep_lock_key, ttl_seconds=self.sweep_lock_ttl_seconds
+            )
         except TimeoutError as exc:
             raise BehaviorReductionBusyError(str(exc)) from exc
         with acquired:
@@ -872,7 +887,9 @@ class BehaviorReductionRunner:
         writer = BehaviorDocumentWriter(self.tree, self.lock_store, clock=lambda: staged_at)
         hits: list[tuple[str, date]] = []
         for index, item in enumerate(documents):
-            if index % 50 == 0:
+            # 每 10 篇续一次：一次续约远比一篇文档的写入便宜，而周尺度下单篇 publish 会被文件系统
+            # 拖到秒级（万级小文件 + fseventsd 放大），间隔太疏时一段慢写就能把租约耗光。
+            if index % 10 == 0:
                 guard.checkpoint()
             if not isinstance(item, Mapping):
                 raise BehaviorReductionError("reduction checkpoint document must be a mapping")

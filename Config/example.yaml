@@ -440,6 +440,7 @@ workflow:
 #   context_limit: 8
 #   context_lookback_seconds: 3600
 #   reduction_sweep_interval_seconds: 300
+#   reduction_sweep_lock_ttl_seconds: 600   # 归约 sweep 的租约时长；周尺度回填可调大（默认 600）
 #   fusion_poll_interval_seconds: 5
 #   worker_shutdown_timeout_seconds: 30
 #   coverage_window_days: 7            # 上游最大补发跨度：重投去重判据；覆盖记录/回执/账本的过期期限（覆盖记录在其交付释放前不过期）

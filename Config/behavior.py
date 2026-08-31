@@ -44,6 +44,9 @@ class BehaviorConfig:
     # 轮询下限 1 秒：每拍都要做一次观测存储的全量扫描（BHV-LIFECYCLE-001 欠账），更密的节拍
     # 只会放大扫描成本。Worker 优雅停止的等待上界也在这里（运维参数不藏 Python 构造器）。
     reduction_sweep_interval_seconds: float = 300.0
+    # 归约 sweep 的租约时长；留空取 behavior/reduction 的默认（600s）。周尺度回填（万级小文件写入把
+    # fseventsd 顶到 240% CPU、单篇 publish 被文件系统拖到秒级）需要更长的租约——运维参数，不是常量。
+    reduction_sweep_lock_ttl_seconds: int | None = None
     fusion_poll_interval_seconds: float = 5.0
     worker_shutdown_timeout_seconds: float = 30.0
     # 融合覆盖索引 / 回执 / 消费账本的过期窗口（天）：等于上游可能补发多久以前的观测。
@@ -110,6 +113,14 @@ class BehaviorConfig:
             isinstance(delay, bool) or not isinstance(delay, int | float) or not 0.0 <= float(delay) <= 600.0
         ):
             raise ValueError("behavior.kinds_transient_retry_delay_seconds must be between 0 and 600")
+        if self.reduction_sweep_lock_ttl_seconds is not None and (
+            isinstance(self.reduction_sweep_lock_ttl_seconds, bool)
+            or not isinstance(self.reduction_sweep_lock_ttl_seconds, int)
+            or not 60 <= self.reduction_sweep_lock_ttl_seconds <= 86_400
+        ):
+            raise ValueError(
+                "behavior.reduction_sweep_lock_ttl_seconds must be an integer between 60 and 86400"
+            )
         for name, value, minimum, maximum in (
             ("reduction_sweep_interval_seconds", self.reduction_sweep_interval_seconds, 1.0, 3_600.0),
             ("fusion_poll_interval_seconds", self.fusion_poll_interval_seconds, 1.0, 600.0),

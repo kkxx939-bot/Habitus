@@ -216,6 +216,10 @@ def test_enabled_wiring_shares_one_lookback_and_one_chat_client(tmp_path: Path) 
         is runtime.components.models.structured_chat
     )
     assert behavior.kind_store.path == behavior.tree.root / "kinds.md"
+    # sweep 锁 TTL 走 Config 边界（周尺度回填要调大它，不该改代码）；留空取领域默认
+    from behavior.reduction import DEFAULT_SWEEP_LOCK_TTL_SECONDS
+
+    assert behavior.reduction_runner.sweep_lock_ttl_seconds == DEFAULT_SWEEP_LOCK_TTL_SECONDS
     # 词表向量旁册随 embedder 组装、与词表同根；身份键只从配置取
     vectors = behavior.reduction_runner.kind_vectors
     assert vectors is not None and vectors.path == behavior.tree.root / "kinds.vectors.json"
