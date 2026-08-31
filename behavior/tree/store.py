@@ -210,6 +210,37 @@ class BehaviorTree:
         except (BehaviorDocumentIntegrityError, BehaviorDocumentLimitError) as exc:
             raise BehaviorTreeIntegrityError("behavior L2 document failed integrity validation") from exc
 
+    def list_day_addresses(self, kind: BehaviorKind, occurred_on: date) -> tuple[BehaviorAddress, ...]:
+        """某天某类的全部地址；**目录只枚举一次、不读文档**。
+
+        与 ``read_day`` 同一条理由：逐个 ``exists``/``read`` 都会重新枚举整个日目录（实测 13.6 ms/次、
+        一天 2,074 篇即 2,074² 次条目扫描），所以"这一天有哪些地址已被占用"这类问题必须整天问一次，
+        不能逐条问。归约的撞车消歧与落盘干跑走这里（周尺度实测：逐链 exists 9,270 次 ≈ 133 秒，
+        整天列举全树 9,270 条 ≈ 0.33 秒）。
+        """
+
+        resolved_kind = BehaviorKind(kind)
+        if isinstance(occurred_on, datetime) or not isinstance(occurred_on, date):
+            raise TypeError("occurred_on must be a date without a time")
+        directory = BehaviorDirectory._dated(
+            kind_directory_prefix(resolved_kind), occurred_on.year, occurred_on.month, occurred_on.day
+        )
+        try:
+            physical = self._existing_relative_path(Path(*directory.identity_parts), leaf_is_file=False)
+        except FileNotFoundError:
+            return ()
+        if not physical.is_dir():
+            return ()
+        addresses: list[BehaviorAddress] = []
+        for stem in self._markdown_names(physical):
+            try:
+                addresses.append(BehaviorAddress.from_identity(resolved_kind, occurred_on, stem))
+            except (TypeError, ValueError) as exc:
+                raise BehaviorTreeIntegrityError(
+                    "behavior leaf contains an invalid timestamp identity"
+                ) from exc
+        return tuple(addresses)
+
     def read_day(self, kind: BehaviorKind, occurred_on: date) -> tuple[BehaviorDocument, ...]:
         """一次性读出某天某类的全部文档；目录只解析、只枚举一次。
 
