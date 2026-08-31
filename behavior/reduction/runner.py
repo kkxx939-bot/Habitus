@@ -485,10 +485,16 @@ class BehaviorReductionRunner:
         naming: dict[int, tuple[str, str | None, str]] = {}
         payloads: dict[int, dict[str, Any]] = {}
         skipped_chains: set[int] = set()
-        for index, chain in sorted(
-            ready_chains,
-            key=lambda pair: (pair[1].head.evidence_ready_at, pair[1].head.judgement_id),
+        for position, (index, chain) in enumerate(
+            sorted(
+                ready_chains,
+                key=lambda pair: (pair[1].head.evidence_ready_at, pair[1].head.judgement_id),
+            )
         ):
+            if guard is not None and position % 50 == 0:
+                # 周尺度实测：9,270 条链的命名+物化是一个单阶段长循环，只在阶段边界续约会踩满
+                # 600s 租约 TTL（另一条线的冻结周重放实测）。长循环内按条数周期性续约。
+                guard.checkpoint()
             base = str(chain.head.behavior)
             token = tokens.get(base)
             if token is None:
@@ -559,7 +565,11 @@ class BehaviorReductionRunner:
             )
 
         # occurrence 按 order_key 升序落盘：批内前向边只指向更小的键，目标必然先落。
-        for index, chain in sorted(ready_chains, key=lambda pair: pair[1].order_key):
+        for position, (index, chain) in enumerate(
+            sorted(ready_chains, key=lambda pair: pair[1].order_key)
+        ):
+            if guard is not None and position % 50 == 0:
+                guard.checkpoint()
             if index in skipped_chains:
                 continue
             name, original_name, uri = naming[index]
@@ -615,7 +625,7 @@ class BehaviorReductionRunner:
                     "ledger": entry,
                 }
             )
-        documents = self._publishable(documents, now, dropped)
+        documents = self._publishable(documents, now, dropped, guard)
         return documents, tuple(dropped)
 
     async def _resolve_kind_tokens(
@@ -942,7 +952,11 @@ class BehaviorReductionRunner:
         return pending
 
     def _publishable(
-        self, documents: list[dict[str, Any]], now: datetime, dropped: list[str]
+        self,
+        documents: list[dict[str, Any]],
+        now: datetime,
+        dropped: list[str],
+        guard: LeaseGuard | None = None,
     ) -> list[dict[str, Any]]:
         """stage 末端的干跑校验：落盘期只允许**已验证会成功**的确定性动作。
 
@@ -955,7 +969,9 @@ class BehaviorReductionRunner:
         valid: list[dict[str, Any]] = []
         valid_uris: set[str] = set()
         failed_uris: set[str] = set()
-        for item in documents:
+        for position, item in enumerate(documents):
+            if guard is not None and position % 50 == 0:
+                guard.checkpoint()
             if item["kind"] == "ledger-only":
                 valid.append(item)
                 continue
