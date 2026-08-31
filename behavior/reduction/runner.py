@@ -204,13 +204,19 @@ class BehaviorReductionRunner:
         self._sweep_signals: list[str] = []
         replayed, replayed_days = self._replay_checkpoint(guard)
         now = self._now()
-        self._expire(now)
+        # 以下每一段在周尺度都可能跑很久且**不写任何东西**（另一条线实测：stage 前段静默 16 分钟即把
+        # 600s 租约耗死，续约点再多也救不了已过期的租约）。因此每段边界都续，长循环内部按条数续。
+        guard.checkpoint()
+        self._expire(now, guard)
+        guard.checkpoint()
         # 上一轮没刷成的日子并进来（merge/rebuild 留下的也在这里）
         replayed_days = replayed_days | self._pending_refresh_days()
         consumed = self.ledger.consumed_judgement_ids()
         records = []
         quarantined: list[str] = []
-        for raw in self.judgements.list():
+        for position, raw in enumerate(self.judgements.list()):
+            if position % 500 == 0:
+                guard.checkpoint()
             if raw.get("judgement_id") in consumed:
                 continue
             # 坏记录单条隔离：一条污染不许瘫痪整轮归约（判断存储无删除，整轮失败=永久停摆）。
@@ -220,9 +226,10 @@ class BehaviorReductionRunner:
             except BehaviorReductionError as exc:
                 quarantined.append(f"judgement {raw.get('judgement_id')} quarantined: {exc}")
         assembly = assemble_chains(tuple(records))
+        guard.checkpoint()
         horizon = seal_horizon(
             now=now,
-            frontier_cutoff=self._frontier_cutoff(),
+            frontier_cutoff=self._frontier_cutoff(guard),
             lookback_seconds=self.context_lookback_seconds,
         )
         ready_indexes = sealed_chain_indexes(assembly, horizon)
@@ -453,7 +460,13 @@ class BehaviorReductionRunner:
 
         entries = self.ledger.load()
         ledger_uris = frozenset(entry.uri for entry in entries)
-        occupied = set(ledger_uris)
+        # 占用集合 = 账本地址（可能已按窗口过期）∪ **树上已有地址** ∪ 本批。树是最终真相；但"树上有没有"
+        # 必须按天整体问一次——逐条 ``tree.exists`` 每次都重新枚举整个日目录（周尺度实测 9,270 次
+        # ≈ 133 秒，而整天列举全树只要 0.33 秒），那是周尺度踩满 sweep 锁 TTL 的主因之一。
+        occupied = set(ledger_uris) | self._addresses_on_tree(
+            {chain.head.started_at.date() for _, chain in ready_chains}
+            | {record.started_at.date() for record in ready_gaps}
+        )
         # 跨批链接只能指向 occurrence：gap 节点不可作关系目标（没读懂段无法当并行/因果的
         # 一方），而 writer 只查目标存在不查类型——不在这里过滤，指向 gap 的链接会在检查点
         # 之后才被 writer 硬拒，整条归约永久卡死。
@@ -510,7 +523,7 @@ class BehaviorReductionRunner:
                     observations=observation_index,
                 )
                 candidate, ordinal = base, 1
-                while self._address_taken(chain_address(chain, candidate), occupied):
+                while str(BehaviorURI.from_address(chain_address(chain, candidate))) in occupied:
                     ordinal += 1
                     candidate = f"{base}-{ordinal}"
                 uri = str(BehaviorURI.from_address(chain_address(chain, candidate)))
@@ -553,7 +566,7 @@ class BehaviorReductionRunner:
                 "staged_at": staged_at,
                 "reduction_version": REDUCTION_VERSION,
             }
-            if uri in ledger_uris or self.tree.exists(BehaviorURI.parse(uri).to_address()):
+            if uri in occupied:
                 dropped.append(
                     f"gap at {uri} already published; consuming {judgement_ids} by reference"
                 )
@@ -625,7 +638,7 @@ class BehaviorReductionRunner:
                     "ledger": entry,
                 }
             )
-        documents = self._publishable(documents, now, dropped, guard)
+        documents = self._publishable(documents, now, dropped, guard, frozenset(occupied))
         return documents, tuple(dropped)
 
     async def _resolve_kind_tokens(
@@ -766,10 +779,15 @@ class BehaviorReductionRunner:
         except BehaviorKindVectorError as exc:
             signals.append(f"kind_vectors_not_persisted {exc}")
 
-    def _address_taken(self, address: BehaviorAddress, occupied: set[str]) -> bool:
-        """地址被账本、本批或树上既有文档占用。树是最终真相：账本按窗口过期，树不会。"""
+    def _addresses_on_tree(self, days: set[date]) -> set[str]:
+        """本批涉及的那些天，树上已有的全部 occurrence 与 gap 地址（每天每类只枚举一次目录）。"""
 
-        return str(BehaviorURI.from_address(address)) in occupied or self.tree.exists(address)
+        found: set[str] = set()
+        for day in sorted(days):
+            for kind in (BehaviorKind.OCCURRENCE, BehaviorKind.GAP):
+                for address in self.tree.list_day_addresses(kind, day):
+                    found.add(str(BehaviorURI.from_address(address)))
+        return found
 
     @staticmethod
     def _merged_gap_payload(group: list[ReducibleJudgement], *, chain_digest: str) -> dict[str, Any]:
@@ -898,9 +916,13 @@ class BehaviorReductionRunner:
         交付仍然保留（可见、等人处置），但入队与封口前沿都按覆盖窗口把它们排除在外。
         """
 
+        guard.checkpoint()
         covered = self.coverage.covered_observation_ids(self._now())
+        guard.checkpoint()
         still_referenced: set[str] = set()
-        for raw in self.judgements.list():
+        for position, raw in enumerate(self.judgements.list()):
+            if position % 500 == 0:
+                guard.checkpoint()
             still_referenced.update(str(value) for value in raw.get("observation_ids", ()))
         for index, envelope in enumerate(self.observations.list()):
             if index % 200 == 0:
@@ -909,16 +931,17 @@ class BehaviorReductionRunner:
             if ids <= covered and not (ids & still_referenced):
                 self.observations.discard(envelope.source_id)
 
-    def _expire(self, now: datetime) -> None:
+    def _expire(self, now: datetime, guard: LeaseGuard | None = None) -> None:
         """回执、覆盖索引、消费账本按同一个窗口整块过期；窗口 = 上游最大补发跨度。"""
 
         before = now - timedelta(days=self.coverage.window_days)
         # 覆盖记录只在其观测已释放后才过期：交付还在存储里，它的"已融合"就还得答得出来。
-        stored = frozenset(
-            observation.observation_id
-            for envelope in self.observations.list()
-            for observation in envelope.batch.observations
-        )
+        stored_ids: set[str] = set()
+        for position, envelope in enumerate(self.observations.list()):
+            if guard is not None and position % 200 == 0:
+                guard.checkpoint()
+            stored_ids.update(item.observation_id for item in envelope.batch.observations)
+        stored = frozenset(stored_ids)
         self.coverage.expire(now, retain=stored)
         self.receipts.expire(before)
         self.ledger.expire(before)
@@ -931,7 +954,7 @@ class BehaviorReductionRunner:
             raise BehaviorReductionError("reduction clock must return a timezone-aware datetime")
         return value.astimezone(timezone.utc)
 
-    def _frontier_cutoff(self) -> datetime | None:
+    def _frontier_cutoff(self, guard: LeaseGuard | None = None) -> datetime | None:
         """未来融合段的 cutoff 下界；一切观测都已融合完成时为 None。
 
         判据：**尚未被任何融合回执覆盖的观测**的最早 ``available_at``。排队中、已入队未提交、
@@ -943,7 +966,9 @@ class BehaviorReductionRunner:
 
         covered = self.coverage.covered_observation_ids(self._now())
         pending: datetime | None = None
-        for envelope in self.observations.list():
+        for position, envelope in enumerate(self.observations.list()):
+            if guard is not None and position % 200 == 0:
+                guard.checkpoint()
             for observation in envelope.batch.observations:
                 if observation.observation_id in covered:
                     continue
@@ -957,6 +982,7 @@ class BehaviorReductionRunner:
         now: datetime,
         dropped: list[str],
         guard: LeaseGuard | None = None,
+        on_tree: frozenset[str] = frozenset(),
     ) -> list[dict[str, Any]]:
         """stage 末端的干跑校验：落盘期只允许**已验证会成功**的确定性动作。
 
@@ -992,7 +1018,7 @@ class BehaviorReductionRunner:
                 # 目标存在性双保险：writer 在 publish 期硬拒不存在的目标，而那时检查点已落盘
                 # =永久卡死。目标要么是本批已通过干跑的文档、要么已在树上——都不是就在这里拦。
                 for link in stored_links:
-                    if str(link.to_uri) in valid_uris:
+                    if str(link.to_uri) in valid_uris or str(link.to_uri) in on_tree:
                         continue
                     if not self.tree.exists(link.to_uri.to_address()):
                         raise BehaviorReductionError(
