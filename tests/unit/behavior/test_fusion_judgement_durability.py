@@ -118,9 +118,7 @@ def test_judged_at_is_recorded_because_it_cannot_be_derived() -> None:
     washing = derived()[0]
     assert washing.judged_at == JUDGED_AT.astimezone(timezone.utc)
     assert washing.judged_at > washing.evidence_ready_at
-    assert washing.fusion_lag_seconds == pytest.approx(
-        (JUDGED_AT - FRAGMENTS[1].available_at).total_seconds()
-    )
+    assert washing.fusion_lag_seconds == pytest.approx((JUDGED_AT - FRAGMENTS[1].available_at).total_seconds())
 
 
 def test_behavior_time_keeps_its_local_offset() -> None:
@@ -194,9 +192,7 @@ def test_source_refs_must_be_supplied_by_the_caller() -> None:
 def test_judged_at_must_be_timezone_aware() -> None:
     batch = assemble_judgement_batch(body(), fragment_count=len(FRAGMENTS))
     with pytest.raises(BehaviorFusionError, match="timezone-aware"):
-        derive_judgements(
-            batch, FRAGMENTS, source_refs=SOURCE_REFS, judged_at=datetime(2026, 8, 14, 1, 15)
-        )
+        derive_judgements(batch, FRAGMENTS, source_refs=SOURCE_REFS, judged_at=datetime(2026, 8, 14, 1, 15))
 
 
 # --- 判断存储 ---------------------------------------------------------------------------
@@ -274,9 +270,7 @@ def test_the_receipt_records_disposition_without_copying_content() -> None:
     record = receipt()
     # 主体的判断与没读懂的观测段进 judgement_ids（后者归约层要物化成 gap）；旁人的只留观测身份。
     assert record.judgement_ids == tuple(
-        item.judgement_id
-        for item in derived()
-        if not item.is_readable or SUBJECT in item.subjects
+        item.judgement_id for item in derived() if not item.is_readable or SUBJECT in item.subjects
     )
     assert record.unreadable_observation_ids == (FRAGMENTS[5].observation_id,)
     assert record.unreadable_ratio == pytest.approx(1 / 6)
@@ -381,9 +375,7 @@ def test_the_receipt_uses_the_same_unreadable_criterion_as_the_batch() -> None:
     )
     batch = assemble_judgement_batch(raw, fragment_count=len(FRAGMENTS))
     validate_judgement_batch(batch, FRAGMENTS)
-    items = derive_judgements(
-        batch, FRAGMENTS, source_refs=SOURCE_REFS, judged_at=JUDGED_AT
-    )
+    items = derive_judgements(batch, FRAGMENTS, source_refs=SOURCE_REFS, judged_at=JUDGED_AT)
     record = build_fusion_receipt(
         items,
         FRAGMENTS,
@@ -433,9 +425,7 @@ def test_the_receipt_separates_other_peoples_behaviour_from_unreadable_frames() 
     )
     batch = assemble_judgement_batch(raw, fragment_count=len(fragments))
     validate_judgement_batch(batch, fragments)
-    items = derive_judgements(
-        batch, fragments, source_refs=SOURCE_REFS, judged_at=JUDGED_AT
-    )
+    items = derive_judgements(batch, fragments, source_refs=SOURCE_REFS, judged_at=JUDGED_AT)
     record = build_fusion_receipt(
         items,
         fragments,
@@ -476,9 +466,7 @@ def test_a_segment_with_no_behaviour_of_the_subject_still_yields_a_receipt() -> 
         [[(1, None)]] * 3,
     )
     batch = assemble_judgement_batch(raw, fragment_count=len(fragments))
-    items = derive_judgements(
-        batch, fragments, source_refs=SOURCE_REFS, judged_at=JUDGED_AT
-    )
+    items = derive_judgements(batch, fragments, source_refs=SOURCE_REFS, judged_at=JUDGED_AT)
     record = build_fusion_receipt(
         items,
         fragments,
@@ -589,73 +577,59 @@ def test_context_is_ordered_by_real_time_not_by_the_local_offset_string(tmp_path
     store.put_payload(record("b" * 64, "2026-08-15T00:30:00.000000+08:00", "2026-08-15T00:00:00.000000Z"))
     store.put_payload(record("a" * 64, "2026-08-14T20:00:00.000000-05:00", "2026-08-15T02:00:00.000000Z"))
 
-    context = store.recent_before(
-        datetime(2026, 8, 15, 3, tzinfo=timezone.utc), limit=8, lookback_seconds=86_400
-    )
+    context = store.recent_before(datetime(2026, 8, 15, 3, tzinfo=timezone.utc), limit=8, lookback_seconds=86_400)
 
-    moments = [
-        datetime.fromisoformat(str(item["started_at"])).astimezone(timezone.utc)
-        for item in context
-    ]
+    moments = [datetime.fromisoformat(str(item["started_at"])).astimezone(timezone.utc) for item in context]
     assert moments == sorted(moments)
     assert str(context[0]["started_at"]).endswith("+08:00")
 
 
-def test_a_long_running_judgement_stays_inside_the_lookback_window() -> None:
+def test_a_long_running_judgement_stays_inside_the_lookback_window(tmp_path) -> None:
     """回看下界按 ``last_observed_at``，不按 ``started_at``：做饭、看电影这类超过 lookback 的长行为，
     其后续段必须仍能看到自己的前半截，否则跨窗口 ``continues`` 断链（审计 NEW-4 复现）。"""
 
-    import tempfile
-
     from behavior.fusion.store import BehaviorJudgementStore
 
-    with tempfile.TemporaryDirectory(dir="/Users/gulf/.claude/jobs") as raw_root:
-        store = BehaviorJudgementStore(raw_root)
-        template = {key: None for key in _JUDGEMENT_KEYS}
+    store = BehaviorJudgementStore(str(tmp_path))
+    template = {key: None for key in _JUDGEMENT_KEYS}
 
-        def record(identity: str, started: str, last: str) -> dict[str, object]:
-            payload = dict(template)
-            payload.update(
-                {
-                    "schema_version": "behavior_judgement_v1",
-                    "judgement_id": identity,
-                    "judged_at": last,
-                    "evidence_ready_at": last,
-                    "started_at": started,
-                    "last_observed_at": last,
-                    "observation_ids": [f"observation-{identity[:4]}"],
-                    "source_refs": ["delivery"],
-                    "subjects": [SUBJECT],
-                    "behavior": "行为",
-                    "goal": None,
-                    "summary": "摘要",
-                    "basis": [],
-                    "status": "ongoing",
-                    "status_basis": "observation_lost",
-                    "relations": [],
-                    "fusion_version": "v",
-                    "prompt_version": "p",
-                }
-            )
-            return payload
-
-        cutoff = datetime(2026, 8, 15, 3, tzinfo=timezone.utc)
-        # 做饭：两小时前开始（早于 1 小时回看下界），但最后观测就在本段之前一分钟
-        store.put_payload(
-            record("c" * 64, "2026-08-15T01:00:00.000000Z", "2026-08-15T02:59:00.000000Z")
+    def record(identity: str, started: str, last: str) -> dict[str, object]:
+        payload = dict(template)
+        payload.update(
+            {
+                "schema_version": "behavior_judgement_v1",
+                "judgement_id": identity,
+                "judged_at": last,
+                "evidence_ready_at": last,
+                "started_at": started,
+                "last_observed_at": last,
+                "observation_ids": [f"observation-{identity[:4]}"],
+                "source_refs": ["delivery"],
+                "subjects": [SUBJECT],
+                "behavior": "行为",
+                "goal": None,
+                "summary": "摘要",
+                "basis": [],
+                "status": "ongoing",
+                "status_basis": "observation_lost",
+                "relations": [],
+                "fusion_version": "v",
+                "prompt_version": "p",
+            }
         )
-        # 洗手：完全落在窗口内
-        store.put_payload(
-            record("d" * 64, "2026-08-15T02:50:00.000000Z", "2026-08-15T02:55:00.000000Z")
-        )
-        # 昨天那条：最后观测也早于下界，应当被排除
-        store.put_payload(
-            record("e" * 64, "2026-08-14T01:00:00.000000Z", "2026-08-14T02:00:00.000000Z")
-        )
+        return payload
 
-        context = store.recent_before(cutoff, limit=8, lookback_seconds=3_600)
+    cutoff = datetime(2026, 8, 15, 3, tzinfo=timezone.utc)
+    # 做饭：两小时前开始（早于 1 小时回看下界），但最后观测就在本段之前一分钟
+    store.put_payload(record("c" * 64, "2026-08-15T01:00:00.000000Z", "2026-08-15T02:59:00.000000Z"))
+    # 洗手：完全落在窗口内
+    store.put_payload(record("d" * 64, "2026-08-15T02:50:00.000000Z", "2026-08-15T02:55:00.000000Z"))
+    # 昨天那条：最后观测也早于下界，应当被排除
+    store.put_payload(record("e" * 64, "2026-08-14T01:00:00.000000Z", "2026-08-14T02:00:00.000000Z"))
 
-        assert [str(item["judgement_id"])[0] for item in context] == ["c", "d"]
+    context = store.recent_before(cutoff, limit=8, lookback_seconds=3_600)
+
+    assert [str(item["judgement_id"])[0] for item in context] == ["c", "d"]
 
 
 def test_the_fusion_version_covers_the_schema_not_just_the_prompt() -> None:
