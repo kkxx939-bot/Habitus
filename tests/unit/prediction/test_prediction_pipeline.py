@@ -7,17 +7,24 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
 from behavior import BehaviorDocumentWriter, BehaviorKind, BehaviorLinkType, BehaviorTree, BehaviorURI
+from foundation.integrity import text_digest
 from infrastructure.store.locks import ProcessLocalLockStore
 from prediction import builder, codec, query, source
 from prediction.edges import NO_SUCCESSOR
 from prediction.errors import PredictionTreeError, PredictionTreeStoreError
-from prediction.model import PredictionTree
-from prediction.store import GENERATIONS_DIRECTORY, TREE_FILENAME, PredictionTreeStore
+from prediction.model import PredictionTree, SlotKey
+from prediction.store import (
+    GENERATIONS_DIRECTORY,
+    TREE_FILENAME,
+    PredictionTreeStore,
+    PublishedGeneration,
+)
 from tests.unit.behavior.tree_payloads import gap_payload, occurrence_payload
 from tests.unit.prediction.prediction_fixtures import config
 
@@ -342,7 +349,11 @@ def test_a_crowded_slot_of_one_offs_says_keep_quiet(tmp_path) -> None:
 def test_an_empty_slot_is_all_escape(tmp_path) -> None:
     built = tree_for(tmp_path)
     outlook = query.slot_outlook(built, query.slot_at(built, moment(0, 3)))
-    assert outlook.candidates == ()
+    # 候选来自曲线而不是格子，所以这个动作照样在列——但它如实说"这一格一次都没见过"
+    # （count 0、边际率小到几乎不存在），而两条留白曲线只看真的发生过的格子。
+    assert [item.action for item in outlook.candidates] == ["吃药"]
+    assert outlook.candidates[0].count == 0.0
+    assert outlook.candidates[0].marginal < 1e-6
     assert outlook.escape == 1.0
     assert outlook.irregularity == 1.0
 
@@ -400,31 +411,69 @@ def test_an_unknown_schema_version_is_refused_rather_than_half_parsed(tmp_path) 
         codec.decode(payload)
 
 
-def test_both_gap_kinds_reduce_exposure_the_same_way(tmp_path) -> None:
-    """"没读懂"和"未观测"对"他做了我们能不能看见"是同一件事，扣减必须一样。"""
+def _tree_with_gap(tmp_path, name: str, *, gap_kind: str | None, start, end):
+    """十天每天 07:30 吃药；可选地在第 5 天加一段空白。"""
 
-    snapshots = []
-    for index, gap_kind in enumerate(("没读懂", "未观测")):
-        writer, behavior_tree = writer_for(tmp_path, f"behavior-tree-{index}")
-        for offset in range(10):
-            publish_occurrence(writer, "吃药", moment(offset, 7, 30))
+    writer, behavior_tree = writer_for(tmp_path, name)
+    for offset in range(10):
+        publish_occurrence(writer, "吃药", moment(offset, 7, 30))
+    if gap_kind is not None:
         writer.publish(
             BehaviorKind.GAP,
             gap_payload(
-                occurred_on=moment(5, 7).date(),
+                occurred_on=start.date(),
                 gap_kind=gap_kind,
-                started_at=moment(5, 7),
-                ended_at=moment(5, 8),
+                started_at=start,
+                ended_at=end,
             ),
         )
-        snapshots.append(source.read(behavior_tree))
+    snapshot = source.read(behavior_tree)
+    return snapshot, builder.build(
+        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(9, 23)
+    )
 
-    assert len(snapshots[0].gaps) == len(snapshots[1].gaps) == 1
+
+def test_both_gap_kinds_reduce_exposure_the_same_way(tmp_path) -> None:
+    """没有行为落在里面时，"没读懂"和"未观测"对曝光的扣减必须一样。
+
+    两类空白对"他做了我们能不能看见"是同一件事——差别只在**能不能被一条读出来的行为证伪**
+    （见 ``nodes.reconcile_gaps``），而这条空白落在凌晨、里面一条行为都没有。
+    """
+
     trees = [
-        builder.build(item, config=config(), reference=item.latest_day, built_at=moment(9, 23))
-        for item in snapshots
+        _tree_with_gap(
+            tmp_path, f"behavior-tree-{index}", gap_kind=kind, start=moment(5, 3), end=moment(5, 4)
+        )[1]
+        for index, kind in enumerate(("没读懂", "未观测"))
     ]
     assert trees[0].exposure == trees[1].exposure
+
+
+def test_an_unreadable_gap_is_voided_by_a_behaviour_read_inside_it(tmp_path) -> None:
+    """"没读懂"断言这段读不出行为；真读出了一条，这句断言就被证伪——整段作废。
+
+    这条钉住的是"一份数据一个真相"：作废之后曝光与转移删失读的是**同一份**空白账，而不是
+    曝光把这一槽记满、边那边照旧把它当洞。
+    """
+
+    _, without = _tree_with_gap(tmp_path, "no-gap", gap_kind=None, start=None, end=None)
+    _, voided = _tree_with_gap(
+        tmp_path, "unreadable", gap_kind="没读懂", start=moment(5, 7), end=moment(5, 8)
+    )
+    assert voided.exposure == without.exposure
+
+
+def test_an_unobserved_gap_containing_a_behaviour_is_an_upstream_contradiction(tmp_path) -> None:
+    """"未观测"说没在看，却又读出了一条行为——上游自相矛盾，本层不替它圆场。
+
+    这类空白目前树里没有生产者（覆盖信号契约未接入），所以这是一条前瞻护栏：宁可在这里以
+    一句说得清的话炸掉，也不要悄悄把它当成"看见了"数进分母。
+    """
+
+    with pytest.raises(PredictionTreeError, match="unobserved gap"):
+        _tree_with_gap(
+            tmp_path, "unobserved", gap_kind="未观测", start=moment(5, 7), end=moment(5, 8)
+        )
 
 
 def test_an_occurrence_marked_as_reminded_is_refused(tmp_path) -> None:
@@ -434,3 +483,191 @@ def test_an_occurrence_marked_as_reminded_is_refused(tmp_path) -> None:
     publish_occurrence(writer, "吃药", moment(0, 7, 30), reminded=True)
     with pytest.raises(PredictionTreeError, match="reminded"):
         source.read(behavior_tree)
+
+
+# --- 时间画像与并行的对称闭包（本轮新增） --------------------------------------------------
+
+
+def test_day_outlook_answers_when_and_how_wide(tmp_path) -> None:
+    """"这个行为在周二通常几点、范围多宽"——预测层最基本的问题，此前没有接口回答。
+
+    逐槽累乘 h(t)·Π(1−h(s)) 早先只存在于 evaluation 的离线回测函数里。
+    """
+
+    writer, tree = writer_for(tmp_path)
+    for week in range(10):
+        offset = 1 + 7 * week  # FIRST 是周一，+1 即周二
+        # 早饭的时刻在 07:00 / 07:15 / 07:30 之间浮动——"时间范围"正是要接住这种抖动。
+        publish_occurrence(writer, "吃早饭", moment(offset, 7, (week % 3) * 15))
+
+    snapshot = source.read(tree)
+    built = builder.build(
+        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(70, 23)
+    )
+    outlook = query.day_outlook(built, 1, "吃早饭")
+    assert outlook is not None
+    assert outlook.earliest.slot <= outlook.median.slot <= outlook.latest.slot
+    # 07:00–07:30 这一段：中位落在窗口里，且窗口不是整天
+    assert 7 * 4 - 2 <= outlook.median.slot <= 7 * 4 + 4
+    assert outlook.latest.slot - outlook.earliest.slot < 4 * 4  # 不到四小时宽
+    assert outlook.mass > 0.5  # 周二基本一定会发生
+    assert query.day_outlook(built, 3, "吃早饭") is None  # 周四从没做过 → 没有画像
+
+
+def test_slot_outlook_answers_cumulative_for_actions_that_never_hit_this_cell(tmp_path) -> None:
+    """"到这个点为止今天做了没有"必须覆盖这一格从没发生过的动作——缺失检测正是要问它们。
+
+    并且答案要是**这个周几自己的**：跨周几混读会让"周一早上吃、周二不吃"读成同一个数。
+    """
+
+    writer, tree = writer_for(tmp_path)
+    for offset in range(28):
+        if (FIRST + timedelta(days=offset)).weekday() == 0:  # 只有周一吃
+            publish_occurrence(writer, "吃药", moment(offset, 7, 30))
+        publish_occurrence(writer, "洗手", moment(offset, 12))
+
+    snapshot = source.read(tree)
+    built = builder.build(
+        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(27, 23)
+    )
+    monday_evening = _by_action(query.slot_outlook(built, SlotKey(weekday=0, slot=80)))
+    assert monday_evening["吃药"].count == 0.0  # 晚上从没吃过
+    assert monday_evening["吃药"].cumulative > 0.9  # 但到晚上它今天早就做完了
+    monday_dawn = _by_action(query.slot_outlook(built, SlotKey(weekday=0, slot=20)))
+    assert monday_dawn["吃药"].cumulative == pytest.approx(0.0)  # 凌晨还没做
+    # 周二从来不吃：同一个槽位、不同周几，答案必须不一样
+    assert "吃药" not in _by_action(query.slot_outlook(built, SlotKey(weekday=1, slot=80)))
+
+
+def _by_action(outlook):
+    return {item.action: item for item in outlook.candidates}
+
+
+def test_parallels_read_the_same_evidence_from_either_side(tmp_path) -> None:
+    """并行是对称关系：从哪一边问都该看到同一份证据，而不是被劈开的两半。"""
+
+    writer, tree = writer_for(tmp_path)
+    for offset in range(10):
+        # 一半的日子吃饭先开始，另一半看手机先开始——旧写法会因此落进两个键。
+        if offset % 2 == 0:
+            first = publish_occurrence(writer, "吃饭", moment(offset, 12))
+            publish_occurrence(
+                writer,
+                "看手机",
+                moment(offset, 12, 5),
+                links=((BehaviorLinkType.CONCURRENT_WITH, BehaviorURI.from_address(first.address)),),
+            )
+        else:
+            first = publish_occurrence(writer, "看手机", moment(offset, 12))
+            publish_occurrence(
+                writer,
+                "吃饭",
+                moment(offset, 12, 5),
+                links=((BehaviorLinkType.CONCURRENT_WITH, BehaviorURI.from_address(first.address)),),
+            )
+
+    snapshot = source.read(tree)
+    built = builder.build(
+        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(9, 23)
+    )
+    assert set(built.parallels) == {("吃饭", "看手机")}
+    meal = {item.target: item for item in query.parallels(built, "吃饭")}
+    phone = {item.target: item for item in query.parallels(built, "看手机")}
+    assert meal["看手机"].count == pytest.approx(phone["吃饭"].count)  # 同一份证据
+    assert meal["看手机"].probability == pytest.approx(1.0)  # 吃饭时必然在看手机
+    assert meal["看手机"].lift is None  # 并行没有 lift，不填一个会被误读的 0.0
+
+
+# --- 发布形态的自洽（本轮新增） ------------------------------------------------------------
+
+
+def test_a_previous_schema_version_is_refused_as_a_version_not_as_corruption(tmp_path) -> None:
+    """旧代的字节读不了是**版本不对**，不是存储损坏——报错说错了方向，运维就查错地方。
+
+    磁盘上最多留着 ``published_generations`` 代旧字节，回滚路径全靠这条错误信息分辨。
+    """
+
+    store = PredictionTreeStore(tmp_path / "prediction", retained_generations=2)
+    published = store.publish(tree_for(tmp_path))
+    path = store.root / GENERATIONS_DIRECTORY / published.generation / TREE_FILENAME
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema_version"] = codec.SCHEMA_VERSION - 1
+    raw = json.dumps(payload, ensure_ascii=False)
+    path.write_text(raw, encoding="utf-8")
+    store._activate(  # noqa: SLF001 - 指针要跟着改，否则先撞上摘要校验
+        PublishedGeneration(
+            generation=published.generation,
+            digest=text_digest(raw),
+            config_digest=published.config_digest,
+            published_at=published.published_at,
+        )
+    )
+    with pytest.raises(PredictionTreeStoreError, match="cannot be decoded"):
+        store.load()
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda p: p["curves"][0].__setitem__("marginal", [[0.5, 2.0]]), "clock face"),
+        (lambda p: p["curves"][0].__setitem__("weekday", 99), "below 7"),
+        (lambda p: p["parallel_totals"].clear(), "participation weight"),
+    ],
+)
+def test_a_malformed_payload_is_refused_instead_of_half_parsed(tmp_path, mutate, message) -> None:
+    """槽位键有越界检查，曲线与并行分母也必须有。
+
+    不校验的后果实测过：一条长度 2 的曲线能解码成功，之后每次查询抛**裸 IndexError**——
+    从一个把全部错误归一成 PredictionTreeError 的层里漏出 builtin；并行分母缺了则让
+    ``query.parallels`` 静默算出"证据 1.0、概率 0.0"。
+    """
+
+    payload = codec.encode(_tree_with_parallels(tmp_path))
+    mutate(payload)
+    with pytest.raises(PredictionTreeError, match=message):
+        codec.decode(payload)
+
+
+def test_encoding_round_trips_parallels_and_a_missing_trend(tmp_path) -> None:
+    """往返断言要盖到并行与 ``trend=None``：只有节点和边的树走不到那两段编码。"""
+
+    built = _tree_with_parallels(tmp_path)
+    assert built.parallels and built.parallel_totals
+    assert any(curve.trend is None for curve in built.curves.values())
+    assert codec.decode(codec.encode(built)) == built
+
+
+def _tree_with_parallels(tmp_path) -> PredictionTree:
+    """一棵带并行边、且至少有一条曲线没有趋势的树。"""
+
+    writer, behavior_tree = writer_for(tmp_path, f"parallel-{id(tmp_path)}")
+    for offset in range(6):
+        meal = publish_occurrence(writer, "吃饭", moment(offset, 12))
+        publish_occurrence(
+            writer,
+            "看手机",
+            moment(offset, 12, 5),
+            links=((BehaviorLinkType.CONCURRENT_WITH, BehaviorURI.from_address(meal.address)),),
+        )
+    publish_occurrence(writer, "剪头发", moment(0, 15))  # 只出现一次 → 没有复发证据 → 没有趋势
+    snapshot = source.read(behavior_tree)
+    return builder.build(
+        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(5, 23)
+    )
+
+
+def test_recurrence_status_answers_whether_it_is_overdue(tmp_path) -> None:
+    """四类查询之一，此前全仓零测试。"""
+
+    writer, behavior_tree = writer_for(tmp_path)
+    for offset in range(10):
+        publish_occurrence(writer, "浇花", moment(offset * 3, 9))  # 每三天一次
+    snapshot = source.read(behavior_tree)
+    built = builder.build(
+        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(27, 23)
+    )
+    status = query.recurrence_status(built, "浇花", elapsed_seconds=6 * 86_400)
+    assert status is not None
+    assert status.intervals.p50 == pytest.approx(3 * 86_400, rel=0.1)
+    assert status.overdue == pytest.approx(2.0, rel=0.1)  # 拖了两倍中位间隔
+    assert query.recurrence_status(built, "从没做过的事", elapsed_seconds=1.0) is None

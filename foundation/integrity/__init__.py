@@ -6,10 +6,11 @@ from foundation.integrity.canonical_json import (
     canonicalize,
     immutable_snapshot,
 )
-from foundation.integrity.digest import canonical_digest, text_digest
+from foundation.integrity.digest import bytes_digest, canonical_digest, text_digest
 
 __all__ = [
     "CanonicalSerializationError",
+    "bytes_digest",
     "canonical_digest",
     "canonical_json",
     "canonicalize",

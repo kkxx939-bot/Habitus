@@ -1,12 +1,15 @@
-"""时间预测树的 13 个参数（其中 11 个是估计参数，2 个是运维节奏）。
+"""时间预测树的 14 个参数（其中 12 个是估计参数，2 个是运维节奏）。
 
 **全部必填、不给 Python 默认值**——这是用户裁定的纪律：它们要在我们自己的数据上定档，
 给默认值等于把"没有依据的初值"伪装成"合理缺省"，而且违反"可调运维参数不得藏在构造器里"。
 运行值从 ``Config.prediction``（YAML）注入；``Config/example.yaml`` 里给的是一组明确标注
 "待定档"的启动值。
 
-# TODO(PRED-TUNING-001): 11 个估计参数**全部没有数据依据**，当前值只是能让管线跑起来的启动档
+# TODO(PRED-TUNING-001): 12 个估计参数**全部没有数据依据**，当前值只是能让管线跑起来的启动档
 # （另外两个 rebuild_interval_seconds / published_generations 是运维数，不进 estimation_parameters()）。
+# - **动手之前先读 ``TODO(PRED-EVAL-001)``**（model.py 待定一节）：留出回测这把尺子在当前数据量
+#   （每个周几只有一天）下会奖励过拟合，照着它调会得出"不要收缩"的相反结论。定档要等每个周几
+#   有多天的真实作息数据。
 # - 定档方法（已定）：``prediction/evaluation.py`` 的留出回测——用前 N−k 天建树、在后 k 天上
 #   评估，逐项调参。判据以**校准**为主（预测 P=0.7 的格子实际是不是真的 70% 发生），辅以
 #   log-loss / escape_rate / ECE / 覆盖率-精确率曲线。**任何调整不涨指标不合入。**
@@ -53,7 +56,12 @@ def _non_negative_int(value: object, name: str, *, maximum: int) -> int:
 
 @dataclass(frozen=True)
 class PredictionTreeConfig:
-    """一次重建的全部可调量；构造时全部必填。"""
+    """一次重建的全部可调量；构造时全部必填。
+
+    另有两个**会改变发布数字**、但不需要在数据上定档的形状常量住在 ``nodes``
+    （趋势的周期档位、发布精度），它们随这里的参数一起进发布指纹——见
+    ``nodes.estimation_constants``。
+    """
 
     slot_minutes: int
     decay_half_life_days: float

@@ -10,16 +10,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timezone
 from typing import Any
 
 from prediction.errors import PredictionTreeError
 from prediction.model import (
+    WEEKDAYS,
+    DayCurve,
     EdgeStatistics,
     IntervalQuantiles,
     NodeCounts,
     NodeStatistics,
+    ParallelStatistics,
     PredictionTree,
     RecurrenceStatistics,
     SlotExposure,
@@ -27,7 +30,10 @@ from prediction.model import (
     slot_count,
 )
 
-SCHEMA_VERSION = 1
+# 2：新增密集曲线与并行参与总权重，节点项去掉 trend，并行项换成规范键 + 计数。旧代的字节
+# 与这一版形状不兼容——版本号不升，读侧只会报"payload is malformed"，把"上一版规格"说成
+# "存储损坏"，而磁盘上最多留着 published_generations 代旧字节。
+SCHEMA_VERSION = 2
 
 
 def encode(tree: PredictionTree) -> dict[str, Any]:
@@ -56,8 +62,31 @@ def encode(tree: PredictionTree) -> dict[str, Any]:
             {"slot": _slot(key[0]), "action": key[1], **_node(value)}
             for key, value in sorted(tree.nodes.items(), key=lambda item: (_slot(item[0][0]), item[0][1]))
         ],
+        "curves": [
+            {
+                "weekday": weekday,
+                "action": action,
+                "marginal": _runs(value.marginal),
+                "hazard": _runs(value.hazard),
+                "cumulative": _runs(value.cumulative),
+                "trend": value.trend,
+                "trend_n_eff": value.trend_n_eff,
+            }
+            for (weekday, action), value in sorted(tree.curves.items())
+        ],
+        "weekday_baselines": [
+            {"action": action, "rate": _runs(values)}
+            for action, values in sorted(tree.weekday_baselines.items())
+        ],
         "edges": _edges(tree.edges),
-        "parallels": _edges(tree.parallels),
+        "parallels": [
+            {"left": left, "right": right, "count": value.count}
+            for (left, right), value in sorted(tree.parallels.items())
+        ],
+        "parallel_totals": [
+            {"action": action, "weight": weight}
+            for action, weight in sorted(tree.parallel_totals.items())
+        ],
         "recurrences": [
             {"action": action, "intervals": _intervals(value.intervals)}
             for action, value in sorted(tree.recurrences.items())
@@ -88,8 +117,26 @@ def decode(payload: Mapping[str, Any]) -> PredictionTree:
                 (_key(item["slot"], total), item["action"]): _node_statistics(item)
                 for item in payload["nodes"]
             },
+            curves={
+                (_weekday(item["weekday"]), item["action"]): DayCurve(
+                    marginal=_expand(item["marginal"], total),
+                    hazard=_expand(item["hazard"], total),
+                    cumulative=_expand(item["cumulative"], total),
+                    trend=item["trend"],
+                    trend_n_eff=item["trend_n_eff"],
+                )
+                for item in payload["curves"]
+            },
+            weekday_baselines={
+                item["action"]: _expand(item["rate"], total)
+                for item in payload["weekday_baselines"]
+            },
             edges=_edge_map(payload["edges"], total),
-            parallels=_edge_map(payload["parallels"], total),
+            parallels={
+                (item["left"], item["right"]): ParallelStatistics(count=item["count"])
+                for item in payload["parallels"]
+            },
+            parallel_totals=_parallel_totals(payload),
             recurrences={
                 item["action"]: RecurrenceStatistics(intervals=_quantiles(item["intervals"]))
                 for item in payload["recurrences"]
@@ -105,8 +152,78 @@ def decode(payload: Mapping[str, Any]) -> PredictionTree:
             observed_days=payload["observed_days"],
             censored_transitions=payload["censored_transitions"],
         )
+    except PredictionTreeError:
+        # 已经说清了是哪一处不对（曲线长度、周几范围、并行分母……），别再糊成一句
+        # "payload is malformed"——那正是排查时最没用的一句话。
+        raise
     except (KeyError, TypeError, ValueError) as exc:
         raise PredictionTreeError("prediction tree payload is malformed") from exc
+
+
+def _runs(values: Sequence[float]) -> list[list[float]]:
+    """把一条曲线折成 ``[值, 连续长度]`` 的游程。
+
+    曲线是密集的（每条三条数组 × 槽数），而它们高度重复：真实七天树上 590,400 个值只有
+    76,912 段游程，``cumulative`` 每条中位只有 2 个不同取值。游程编码把 curves 这一节从
+    4.33 MiB 压到 1.17 MiB、整棵树 8.94 → 5.5 MiB 量级，**数值逐位不变**。
+    """
+
+    runs: list[list[float]] = []
+    for value in values:
+        if runs and runs[-1][0] == value:
+            runs[-1][1] += 1.0
+        else:
+            runs.append([value, 1.0])
+    return runs
+
+
+def _expand(runs: Any, total: int) -> tuple[float, ...]:
+    """展开游程；长度必须正好是这棵树的槽数。
+
+    不校验长度的后果实测过：一条长度 2 的曲线能解码成功，之后每次查询抛**裸 IndexError**，
+    从一个把所有错误都归一成 ``PredictionTreeError`` 的层里漏出 builtin。
+    """
+
+    if not isinstance(runs, list):
+        raise PredictionTreeError("a day curve must be encoded as a list of runs")
+    values: list[float] = []
+    for run in runs:
+        if not isinstance(run, list) or len(run) != 2:
+            raise PredictionTreeError("a day curve run must be a [value, length] pair")
+        length = run[1]
+        if isinstance(length, bool) or not isinstance(length, (int, float)) or length < 1:
+            raise PredictionTreeError("a day curve run length must be a positive number")
+        values.extend([float(run[0])] * int(length))
+        if len(values) > total:
+            break
+    if len(values) != total:
+        raise PredictionTreeError("a day curve must cover exactly this tree's clock face")
+    return tuple(values)
+
+
+def _weekday(value: Any) -> int:
+    """曲线键的周几：与 ``SlotKey`` 同一个范围，越界的键永远匹配不上、也看不出为什么。"""
+
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < WEEKDAYS:
+        raise PredictionTreeError("a day curve weekday must be an integer below 7")
+    return value
+
+
+def _parallel_totals(payload: Mapping[str, Any]) -> dict[str, float]:
+    """并行的参与总权重，并校验它真的盖得住每条并行边。
+
+    分母缺了不会报错，只会让 ``query.parallels`` 静默算出"证据 1.0、概率 0.0"——正是并行边
+    不给 lift 想避免的那种"被读成不可能"。
+    """
+
+    totals = {item["action"]: item["weight"] for item in payload["parallel_totals"]}
+    for item in payload["parallels"]:
+        for action in (item["left"], item["right"]):
+            if totals.get(action, 0.0) < item["count"]:
+                raise PredictionTreeError(
+                    "a parallel edge is heavier than its action's participation weight"
+                )
+    return totals
 
 
 def _edges(edges: Mapping[tuple[str, str], EdgeStatistics]) -> list[dict[str, Any]]:
@@ -144,13 +261,7 @@ def _edge_map(items: Any, total: int) -> dict[tuple[str, str], EdgeStatistics]:
 
 def _node(value: NodeStatistics) -> dict[str, Any]:
     return {
-        "marginal": value.marginal,
-        "hazard": value.hazard,
-        "cumulative": value.cumulative,
-        "lift_all_day": value.lift_all_day,
-        "lift_weekday": value.lift_weekday,
         "n_eff": value.n_eff,
-        "trend": value.trend,
         "counts": {
             "occurred_days": value.counts.occurred_days,
             "first_days": value.counts.first_days,
@@ -162,16 +273,7 @@ def _node(value: NodeStatistics) -> dict[str, Any]:
 
 
 def _node_statistics(item: Mapping[str, Any]) -> NodeStatistics:
-    return NodeStatistics(
-        marginal=item["marginal"],
-        hazard=item["hazard"],
-        cumulative=item["cumulative"],
-        lift_all_day=item["lift_all_day"],
-        lift_weekday=item["lift_weekday"],
-        n_eff=item["n_eff"],
-        trend=item["trend"],
-        counts=NodeCounts(**item["counts"]),
-    )
+    return NodeStatistics(n_eff=item["n_eff"], counts=NodeCounts(**item["counts"]))
 
 
 def _intervals(value: IntervalQuantiles | None) -> dict[str, float] | None:

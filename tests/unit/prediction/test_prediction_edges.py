@@ -10,12 +10,13 @@ from prediction.edges import (
     derive,
     derive_parallels,
     pair,
+    parallel_totals,
     quantiles,
     require_ordered,
 )
 from prediction.errors import PredictionTreeError
-from prediction.model import ObservedAction, SlotKey
-from tests.unit.prediction.prediction_fixtures import action, config, gap, reference
+from prediction.model import ObservedAction, ObservedGap, SlotKey
+from tests.unit.prediction.prediction_fixtures import action, at, config, gap, reference
 
 
 def build(actions, gaps=(), concurrent=(), *, days: int, **overrides):
@@ -80,8 +81,39 @@ def test_parallel_actions_do_not_become_fake_transitions() -> None:
     # 并行对没有污染转移：吃饭之后的下一步是洗碗，不是看手机
     assert ("吃饭", "看手机") not in transitions
     assert transitions[("吃饭", "洗碗")].probability > 0.9
-    # 并行本身有预测价值，单独记账而不是丢掉
-    assert parallels[("吃饭", "看手机")].probability == pytest.approx(1.0, abs=0.01)
+    # 并行本身有预测价值，单独记账而不是丢掉。键按动作身份序规范化（"吃饭" < "看手机"），
+    # 与这一对谁先开始无关；条件概率由查询层拿参与口径的分母现算，这里只断言对称的事实。
+    assert parallels[("吃饭", "看手机")].count > 0.0
+    assert parallel_totals(ledger)["吃饭"] == pytest.approx(parallels[("吃饭", "看手机")].count)
+
+
+def test_participation_totals_cover_every_pair_the_action_takes_part_in() -> None:
+    """分母是"A 参与的**全部**并行"——只有一条边时任何写法都恒真，得有第三个动作才测得到。"""
+
+    actions = []
+    concurrent = []
+    for offset in range(6):
+        base = len(actions)
+        actions.append(action("吃饭", offset, 12))
+        actions.append(action("看手机", offset, 12, 1))
+        actions.append(action("听歌", offset, 12, 2))
+        concurrent.append((base, base + 1))  # 吃饭 ∥ 看手机
+        concurrent.append((base, base + 2))  # 吃饭 ∥ 听歌
+        concurrent.append((base + 1, base + 2))  # 看手机 ∥ 听歌
+    cfg, ledger = build(actions, concurrent=concurrent, days=6)
+    parallels = derive_parallels(ledger)
+    totals = parallel_totals(ledger)
+    for name in ("吃饭", "看手机", "听歌"):
+        taken_part_in = sum(
+            item.count for key, item in parallels.items() if name in key
+        )
+        assert totals[name] == pytest.approx(taken_part_in)
+    # 同一个动作自己与自己并行只计一次，否则 Σ P 不等于 1
+    self_paired = [action("交谈", 0, 9), action("交谈", 0, 9, 1)]
+    _cfg, self_ledger = build(self_paired, concurrent=[(0, 1)], days=1)
+    assert parallel_totals(self_ledger)["交谈"] == pytest.approx(
+        derive_parallels(self_ledger)[("交谈", "交谈")].count
+    )
 
 
 def test_transition_window_bounds_what_counts_as_next() -> None:
@@ -176,8 +208,11 @@ def _tree(edges, cfg):
         config_digest="test",
         slot_minutes=cfg.slot_minutes,
         nodes={},
+        curves={},
+        weekday_baselines={},
         edges=edges,
         parallels={},
+        parallel_totals={},
         recurrences={},
         exposure={},
         baselines={},
@@ -245,3 +280,67 @@ def test_unordered_actions_fail_loudly() -> None:
     earlier = action("吃饭", 1, 12)
     with pytest.raises(PredictionTreeError, match="ordered"):
         require_ordered([later, earlier])
+
+
+# --- 删失与空白（本轮修复） ------------------------------------------------------------
+
+
+def test_a_transition_across_an_observation_hole_is_censored_too() -> None:
+    """找到了后继也要查空洞：中间断过档，我们不知道洞里是不是还发生过别的。
+
+    只在"没找到后继"的分支查空洞，等于在观测最差的地方记下最确凿的因果。真实数据实测：
+    新粒度的 DAY1 上 345 对配到后继的里有 23 对是跨着洞记的。
+    """
+
+    actions = [action("出门", 0, 9), action("回家", 0, 9, 40)]
+    holed = pair(
+        actions,
+        [gap(0, 9, 10)],  # 09:00–10:00 没观测，正好盖住这一对之间
+        [],
+        config=config(),
+        reference=reference(0),
+    )
+    assert ("出门", "回家") not in holed.transitions
+    assert holed.censored > 0.0
+
+    clean = pair(actions, [], [], config=config(), reference=reference(0))
+    assert clean.transitions[("出门", "回家")] > 0.0
+    assert clean.censored == 0.0
+
+
+def test_a_zero_width_gap_is_not_a_hole() -> None:
+    """单观测的"没读懂"段起止同刻：曝光那边扣不掉任何东西，删失这边也不能算洞。
+
+    观测模型明文不携带时段，所以零宽度是**忠实记录**而不是坏数据；两个消费者对同一条记录
+    必须给出同一个解读。真实数据实测：DAY1 的 21 段 gap 里 17 段是零宽度。
+    """
+
+    moment = at(0, 9, 30)
+    zero_width = ObservedGap(started_at=moment, ended_at=moment, watched=True)
+    actions = [action("出门", 0, 9), action("回家", 0, 9, 40)]
+    ledger = pair(actions, [zero_width], [], config=config(), reference=reference(0))
+    assert ledger.transitions[("出门", "回家")] > 0.0
+    assert ledger.censored == 0.0
+
+
+def test_parallel_keys_do_not_depend_on_which_one_started_first() -> None:
+    """并行是对称关系，"谁先开始"是每次发生各不相同的偶然，不该决定证据落进哪个键。
+
+    按时间序建键会把同一对行为劈成 ``(A,B)`` 与 ``(B,A)`` 两个键，读侧取对称闭包时后者
+    覆盖前者：真实数据上 425 条并行边里 51 个无序对同时存在正反两键，同一个事实被读成
+    count 0.989 与 6.897、概率 0.855 与 0.005。
+    """
+
+    actions = [
+        action("吃饭", 0, 12),
+        action("看手机", 0, 12, 5),  # 第一天吃饭先开始
+        action("看手机", 1, 12),
+        action("吃饭", 1, 12, 5),  # 第二天看手机先开始
+    ]
+    ledger = pair(
+        actions, [], [(0, 1), (2, 3)], config=config(), reference=reference(1)
+    )
+    assert set(ledger.parallels) == {("吃饭", "看手机")}  # 一个键，不是两个
+    totals = parallel_totals(ledger)
+    assert totals["吃饭"] == pytest.approx(totals["看手机"])
+    assert totals["吃饭"] == pytest.approx(ledger.parallels[("吃饭", "看手机")])

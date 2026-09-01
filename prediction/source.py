@@ -10,9 +10,12 @@
 - 只读不写；
 - ``original_name`` 非空的 occurrence 是撞车消歧的已知重复，**机械跳过**——标记在写入时
   由归约层打好，本层只认标记、自己不做判重（判重只在融合层解决）；
-- 两类 gap（没读懂 / 未观测）同等对待，都进曝光扣减；
-- ``concurrent_with`` 链接原样读出交给配对层分流，不在这里解释它的含义。存储只存前向一条，
-  配对层取的是无序对，所以单向足够（对称闭包在查询层取）。
+- 两类 gap（没读懂 / 未观测）都进曝光扣减，但**证伪能力不同**：本层把 ``gap_kind`` 翻译成
+  ``ObservedGap.watched``（没读懂=在看、未观测=没在看），翻译只在这里做一次，域内不再出现
+  上游的中文词表；两者的分工见 ``nodes.reconcile_gaps``；
+- ``concurrent_with`` 链接原样读出交给配对层分流，不在这里解释它的含义。行为树只存前向一条，
+  本层交上去的是**无序的下标对**，配对层再按动作身份序规范成一个键（``edges._parallel_key``），
+  方向由查询层给出——所以单向足够。
 - ``reminded`` 为真的记录**硬拒**：被提醒之后的发生不属于自然率，而干预账本还没建。
 """
 
@@ -29,12 +32,49 @@ from prediction.model import BehaviorSnapshot, ObservedAction, ObservedGap
 
 _PAGE_LIMIT = 10_000
 
+# TODO(BHV-LIFECYCLE-001·预测读取): 预测夜批读行为树是全量扫描，日集合枚举在文档数超过分页
+# 上限后二次增长。
+# - 现状：``_documents`` 为了拿到"有哪些天"，用 ``list_addresses(kind, limit=10_000, after=…)``
+#   分页枚举**全部叶子**；``BehaviorTree.list_addresses`` 每页都从 ``_iter_kind`` 从头重走、
+#   按游标跳过，总成本随 页数 × 文档数 增长。树上没有"只列日期"的读接口
+#   （``list_day_addresses`` 要求先知道是哪一天）。
+# - 具体场景：实测 9,270 条 occurrence，页大小 10,000（1 页）0.21s、2,000（5 页）1.67s、
+#   1,000（10 页）3.20s。按 WP4 折叠粒度约 400 条/天推算，一年约 146,000 条 = 15 页 →
+#   仅"有哪些天"这一步就约 50 秒，而它的答案只是 365 个日期。``read_day`` 的解码成本是
+#   线性的（9,270 篇 4.59s），不在此列。
+# - 影响大小：中。夜批是离线的，失败会被 worker 吞掉并在健康面报 stale，不影响正确性；
+#   但成本随历史增长，与观测存储 ``list()`` 的枚举上限是同一类欠账。
+# - 改造方案（取其一或都做）：① 行为树增加只读的 ``list_days(kind) -> tuple[date, ...]``，
+#   只枚举 YYYY/MM/DD 目录、不构造叶子地址，``_documents`` 改用它；② 生命周期给行为树定下
+#   保留期之后，夜批只读保留窗内的日期（衰减半衰期 60 天，超过约 2τ 的历史对数字的贡献已
+#   可忽略），全量扫描随之消失。
+# - 时机：**等预测算法定稿之后，与 BHV-LIFECYCLE-001 统一批次做**（用户裁定 2026-09-01）。
+#   生命周期必须三棵树统一设计，不在预测层单独开一个保留期。在此之前夜批一律全量读——
+#   没有统一门槛之前少读任何一天都会静默改变曝光分母。
+
+
+# 上游 ``behavior.schema.vocabulary.GAP_KINDS`` 的两个取值。**刻意不 import 那个 frozenset**：
+# 本层要的是"当时在不在看"这个布尔，不是词表；把翻译钉在这一处，上游改名时这里会以未知取值
+# 硬失败，而不是让一个静默的 False 一路流进曝光分母。
+_GAP_WATCHED = "没读懂"
+_GAP_UNOBSERVED = "未观测"
+
+
+def _watched(value: object) -> bool:
+    """``gap_kind`` → "这段空白期间我们在不在看"。"""
+
+    if value == _GAP_WATCHED:
+        return True
+    if value == _GAP_UNOBSERVED:
+        return False
+    raise PredictionTreeError(f"unknown gap kind: {value!r}")
+
 
 def read(tree: BehaviorTree) -> BehaviorSnapshot:
     """读出全部 occurrence 与 gap。
 
     全量扫描：单人一年的量级（万条上下）在夜批里可以接受，分片重建留给
-    ``TODO(BHV-LIFECYCLE-001)`` 的生命周期方案一起做。
+    ``TODO(BHV-LIFECYCLE-001·预测读取)`` 的生命周期方案一起做。
     """
 
     if not isinstance(tree, BehaviorTree):
@@ -75,6 +115,7 @@ def read(tree: BehaviorTree) -> BehaviorSnapshot:
         ObservedGap(
             started_at=_local(document.fields.get("started_at"), "started_at"),
             ended_at=_local(document.fields.get("ended_at"), "ended_at"),
+            watched=_watched(document.fields.get("gap_kind")),
         )
         for document in _documents(tree, BehaviorKind.GAP)
     )

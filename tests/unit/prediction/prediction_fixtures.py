@@ -7,8 +7,9 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
+from prediction import builder, query
 from prediction.config import PredictionTreeConfig
-from prediction.model import ObservedAction, ObservedGap
+from prediction.model import BehaviorSnapshot, ObservedAction, ObservedGap, PredictionTree, SlotKey
 
 CST = timezone(timedelta(hours=8))
 # 2026-08-03 是周一，便于把"周几"算清楚。
@@ -82,8 +83,16 @@ def action(name: str, day_offset: int, hour: int, minute: int = 0) -> ObservedAc
     return ObservedAction(action=name, started_at=moment, day=moment.date())
 
 
-def gap(day_offset: int, start_hour: int, end_hour: int) -> ObservedGap:
-    return ObservedGap(started_at=at(day_offset, start_hour), ended_at=at(day_offset, end_hour))
+def gap(
+    day_offset: int, start_hour: int, end_hour: int, *, watched: bool = True
+) -> ObservedGap:
+    """默认造「没读懂」那一类（我们在看、只是读不出）——树里目前只有这一类。"""
+
+    return ObservedGap(
+        started_at=at(day_offset, start_hour),
+        ended_at=at(day_offset, end_hour),
+        watched=watched,
+    )
 
 
 def reference(day_offset: int) -> date:
@@ -104,14 +113,52 @@ def weekly(
     return [action(name, weekday + 7 * week, hour, minute) for week in range(weeks)]
 
 
+class Published:
+    """按 ``[(SlotKey, 动作)]`` 读一棵已建好的树——走的就是 ``query`` 组装候选的那条路。
+
+    率与 lift 都住在 (周几, 动作) 的曲线与基线上，格子只留原始账本与这一格的机会数；测试
+    要断言的是**发布出去的答案**，所以这里不重新拼一遍，直接调 ``query.node_at``。
+    """
+
+    def __init__(self, tree: PredictionTree) -> None:
+        self.tree = tree
+
+    def __getitem__(self, key: tuple[SlotKey, str]):
+        candidate = query.node_at(self.tree, key[0], key[1])
+        if candidate is None:
+            raise KeyError(key)
+        return candidate
+
+    def __contains__(self, key: tuple[SlotKey, str]) -> bool:
+        return key in self.tree.nodes
+
+
+def publish(actions, gaps=(), *, config: PredictionTreeConfig, reference_day: date) -> Published:
+    """把一批行为按夜批的真实顺序建成树，再包成按格子读的视图。"""
+
+    ordered = tuple(sorted(actions, key=lambda item: item.started_at))
+    snapshot = BehaviorSnapshot(
+        actions=ordered, gaps=tuple(gaps), concurrent=(), skipped_duplicates=0
+    )
+    tree = builder.build(
+        snapshot,
+        config=config,
+        reference=reference_day,
+        built_at=datetime(2026, 12, 31, tzinfo=timezone.utc),
+    )
+    return Published(tree)
+
+
 __all__ = [
     "CST",
     "FIRST_DAY",
+    "Published",
     "action",
     "at",
     "config",
     "daily",
     "gap",
+    "publish",
     "reference",
     "weekly",
 ]

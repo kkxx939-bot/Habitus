@@ -4,6 +4,12 @@
 （预测 0.7 的格子实际是不是真的 70% 发生），log-loss 与 ECE 是同一件事的两个数字化侧面。
 定档纪律见 ``TODO(PRED-TUNING-001)``：任何调整不涨指标不合入。
 
+**但先读 ``TODO(PRED-EVAL-001)``（在 model.py 的待定一节）**：本模块的两把尺子在"每个周几
+只有一天"这种数据量下**会奖励过拟合**——实测七天树的同集校准里，不做任何收缩的实现拿到 ECE
+恰好 0.0000、时刻中位误差恰好 0.0 分钟，因为它把训练日背了下来；而做了正则化的实现在同一把
+尺子上必然更差。判据要成立，需要每个周几有多天的真实作息数据。在那之前这两个函数只能当
+**回归护栏**（数值变没变），不能当**质量判据**（哪个更好）。
+
 两条方法论教训写进了实现，别绕过去（它们是拿真实数据换来的）：
 
 - **评估集是全部检验槽**，不是"发生过的槽"。只在发生槽上算，高频行为靠自相关就能刷出虚高的
@@ -301,8 +307,7 @@ def first_occurrence_timing(
         mass = 0.0
         survive = 1.0
         for slot_index in range(slots):
-            cell = tree.nodes.get((SlotKey(weekday=weekday, slot=slot_index), action))
-            hazard = cell.hazard if cell is not None else 0.0
+            hazard = query.hazard_at(tree, SlotKey(weekday=weekday, slot=slot_index), action)
             probability = survive * hazard
             distribution.append(probability)
             mass += probability
@@ -348,34 +353,39 @@ def cumulative_calibration(
 ) -> CumulativeCalibration:
     """校准累积率："到这个槽为止通常做过了"说 0.9 的地方，留出段里是不是真有九成的天已做过。
 
-    只评树上**发布了**的格子——含只有 ``earlier_days`` 的格子，它们正是累积率的主要载体。
-    留出段的观测空白会让"实际做过没有"读偏低（做了没看见），沿用 covered≡1 的既定退化假设，
-    定档时对带 gap 的留出段保持警惕。
+    评估集覆盖**整条钟面**：累积率来自 (周几, 动作) 的密集曲线，这个周几做过这个动作就有值，
+    不再受"树上有没有那一格"的影响。留出段的观测空白会让"实际做过没有"读偏低（做了没看见），
+    沿用 covered≡1 的既定退化假设，定档时对带 gap 的留出段保持警惕。
+
+    样本**流式分箱**，不物化成一张 (预测, 实测) 的大表：样本量是 ``留出天数 × 槽数 × 该周几
+    的曲线数``，实测七天树七天留出就有 196,800 条；按一年的树、30 天留出外推约 395 万条、
+    那张表约 480 MiB——而定档正是这 13 个参数唯一的落档手段，跑不动就等于没有。
     """
 
     slots = MINUTES_PER_DAY // tree.slot_minutes
     firsts = _first_slots(tree, holdout, since=since, through=through)
-    pairs: list[tuple[float, bool]] = []
+    tally = _BinTally(bins)
     day = since
     while day <= through:
         weekday = day.weekday()
         for slot_index in range(slots):
             key = SlotKey(weekday=weekday, slot=slot_index)
             for action in tree.actions:
-                cell = tree.nodes.get((key, action))
-                if cell is None:
+                # 累积率取自密集曲线：这个周几做过这个动作就有值，不再受"格子有没有"的影响。
+                if (weekday, action) not in tree.curves:
                     continue
                 actual_first = firsts.get((day, action))
-                pairs.append(
-                    (cell.cumulative, actual_first is not None and actual_first <= slot_index)
+                tally.add(
+                    query.cumulative_at(tree, key, action),
+                    actual_first is not None and actual_first <= slot_index,
                 )
         day += timedelta(days=1)
-    if not pairs:
+    if not tally.samples:
         raise PredictionTreeError("the holdout window yields no cumulative calibration pairs")
     return CumulativeCalibration(
-        samples=len(pairs),
-        expected_calibration_error=_expected_calibration_error(pairs, bins),
-        bins=calibration(pairs, bins=bins),
+        samples=tally.samples,
+        expected_calibration_error=tally.expected_calibration_error(),
+        bins=tally.bins(),
     )
 
 
@@ -399,6 +409,47 @@ def _first_slots(
         if key not in firsts or slot < firsts[key]:
             firsts[key] = slot
     return firsts
+
+
+class _BinTally:
+    """流式分箱累加器：只留每箱的条数与两个和，不留样本本身。
+
+    ``calibration`` / ``_expected_calibration_error`` 那两个按列表算的版本仍然在——回测的
+    其余入口样本量小，物化一张表更直白。这里单独有一份是因为累积率的评估集是整条钟面 ×
+    留出天数 × 曲线数，量级差三个数量级。
+    """
+
+    def __init__(self, bins: int) -> None:
+        if isinstance(bins, bool) or not isinstance(bins, int) or bins < 1:
+            raise PredictionTreeError("bins must be a positive integer")
+        self._bins = bins
+        self._count = [0] * bins
+        self._predicted = [0.0] * bins
+        self._observed = [0] * bins
+        self.samples = 0
+
+    def add(self, predicted: float, actual: bool) -> None:
+        index = min(int(predicted * self._bins), self._bins - 1)
+        self._count[index] += 1
+        self._predicted[index] += predicted
+        self._observed[index] += 1 if actual else 0
+        self.samples += 1
+
+    def bins(self) -> tuple[CalibrationBin, ...]:
+        return tuple(
+            CalibrationBin(
+                lower=index / self._bins,
+                upper=(index + 1) / self._bins,
+                count=self._count[index],
+                predicted=self._predicted[index] / self._count[index],
+                observed=self._observed[index] / self._count[index],
+            )
+            for index in range(self._bins)
+            if self._count[index]
+        )
+
+    def expected_calibration_error(self) -> float:
+        return sum(item.count * item.error for item in self.bins()) / self.samples
 
 
 def calibration(

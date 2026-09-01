@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from foundation.integrity import canonical_json, text_digest
+from foundation.integrity import bytes_digest, canonical_json
 from infrastructure.store.filesystem import (
     DurablePathIntegrityError,
     ImmutableArtifactConflictError,
@@ -36,6 +36,35 @@ GENERATIONS_DIRECTORY = "generations"
 POINTER_FILENAME = "current.json"
 TREE_FILENAME = "tree.json"
 MAX_TREE_BYTES = 64 * 1024 * 1024
+# TODO(PRED-STORE-002): 一代树整棵进出内存，``MAX_TREE_BYTES`` 这个上限的真实含义是读一次
+# 约 0.5 GiB 常驻。
+# - 现状：``publish`` 与 ``load_generation`` 都把整棵树当**一个** JSON 文档处理，中途必须同时
+#   持有字节、文本与解析出的对象图。实测（4.67 MiB 的合成 payload，形状按七天真实树的游程
+#   曲线造，tracemalloc）：读一代峰值 42.5 MiB = **9.1× payload**，其中约 8× 是解析出来的
+#   dict/list/float 对象图本身，常驻到这棵树被丢弃为止。
+# - **已经试过、无效的方向**（记在这里免得有人再试一遍）：把摘要与解析都留在字节上。
+#   ``json.loads`` 原生吃 bytes，但它内部照样解出一份 str，于是 bytes 与 str 同时在场，
+#   峰值反而从 9.12× 升到 10.12×。摘要走字节只在**不解析**的那一步真省——发布时的回读校验
+#   因此从 4.96× 降到 1.00×，但那一步不是 ``publish`` 的峰值（峰值在 ``codec.encode`` +
+#   ``canonical_json`` 那一段）。**峰值只有分片或流式解析能动。**
+# - 具体场景：WP4 折叠粒度（约 350–420 条/天）下一年约 33 MiB，读一次就是约 0.3 GiB；若折叠
+#   粒度回退到 v15 那种"任何可命名的动作"（约 1,300 条/天），195 天就撞满 64 MiB，读一次
+#   约 0.58 GiB。夜批与查询进程同时各持一棵就翻倍。
+# - 影响大小：中。当前真实树才 4.66 MiB（读一次约 42 MiB），离危险还很远；这是随历史增长的
+#   欠账，不是现在的故障。
+# - 改造方案：一代目录内**按周几分片 + 惰性加载**——
+#     generations/<代名>/manifest.json（配置指纹、schema 版本、动作表、每片摘要）
+#                        weekday-0.json … weekday-6.json（曲线与格子，占体积九成）
+#                        edges.json / parallels.json / recurrence.json / baselines.json
+#   指针只存 manifest 的摘要，两阶段发布不变（先写全部分片与 manifest 并逐片回读校验，再翻
+#   指针）。查询模式正好对得上：``query.slot_outlook`` 与 ``marginal_at`` 都只要一个周几那
+#   一片，一次查询加载 1/7；边与复发跨周几，各自单独一片。"一次查询钉住一代"不破——代名含
+#   内容摘要、分片不可覆写，惰性句柄只从这一代目录取片，中途翻指针不影响已打开的句柄。
+# - 代价：``PredictionTree`` 现在是全内存的 dataclass，``query`` 的 17 个函数签名全是
+#   ``(tree, ...)``；惰性化要引入一个懒视图并扫过整个查询层与它的测试。这是本条推迟的主因。
+# - 时机：**等预测算法定稿、真实消费者（语义关联层）接上来之后再做**（用户裁定 2026-09-01）。
+#   到那时才知道查询模式是不是真的按周几取；现在按猜的键分片，等于把一个没验证过的假设
+#   焊进存储格式。生命周期（BHV-LIFECYCLE-001）落地后树本身可能就小一截，届时一并重估。
 MAX_POINTER_BYTES = 4096
 _MAX_GENERATION_ENTRIES = 4096
 
@@ -89,7 +118,7 @@ class PredictionTreeStore:
         payload = canonical_json(codec.encode(tree)).encode("utf-8")
         if len(payload) > MAX_TREE_BYTES:
             raise PredictionTreeStoreError("prediction tree exceeds the publishable size bound")
-        digest = text_digest(payload.decode("utf-8"))
+        digest = bytes_digest(payload)
         generation = self._generation_name(tree, digest)
         self.initialize()
         self._materialize(generation, payload, digest)
@@ -116,7 +145,7 @@ class PredictionTreeStore:
             raise PredictionTreeStoreError("prediction tree generation is already bound") from exc
         except DurablePathIntegrityError as exc:
             raise PredictionTreeStoreError("prediction tree generation cannot be written") from exc
-        if text_digest(self._read(target, MAX_TREE_BYTES).decode("utf-8")) != digest:
+        if bytes_digest(self._read(target, MAX_TREE_BYTES)) != digest:
             raise PredictionTreeStoreError("prediction tree generation failed read-back verification")
 
     def _activate(self, published: PublishedGeneration) -> None:
@@ -168,16 +197,29 @@ class PredictionTreeStore:
     def load_generation(self, generation: str, *, expected_digest: str | None = None) -> PredictionTree:
         path = self._generation_directory(generation) / TREE_FILENAME
         try:
-            raw = self._read(path, MAX_TREE_BYTES).decode("utf-8")
+            raw = self._read(path, MAX_TREE_BYTES)
         except FileNotFoundError as exc:
             raise PredictionTreeStoreError("prediction tree generation is missing") from exc
-        if expected_digest is not None and text_digest(raw) != expected_digest:
+        if expected_digest is not None and bytes_digest(raw) != expected_digest:
             raise PredictionTreeStoreError("prediction tree generation does not match its pointer")
+        # 解码后**立刻放掉字节**再解析。这一步不改变峰值（峰值由解析出的对象图决定，见
+        # TODO(PRED-STORE-002) 的实测），但少一份整棵树大小的临时拷贝；``json.loads`` 直接
+        # 吃 bytes 反而更差——它内部照样解出一份 str，于是 bytes 与 str 同时在场。
+        text = raw.decode("utf-8")
+        del raw
         try:
-            payload = json.loads(raw)
+            payload = json.loads(text)
         except ValueError as exc:
             raise PredictionTreeStoreError("prediction tree generation is not valid JSON") from exc
-        return codec.decode(payload)
+        try:
+            return codec.decode(payload)
+        except PredictionTreeError as exc:
+            # 其余四条错误路径都归一成了本层的类型，这一条不能例外——否则照着
+            # ``except PredictionTreeStoreError`` 写读侧的人，会恰好漏掉最常发生的那条
+            # （旧代的字节形状与当前 schema 不兼容）。
+            raise PredictionTreeStoreError(
+                "prediction tree generation cannot be decoded"
+            ) from exc
 
     def generations(self) -> tuple[str, ...]:
         """已物化的代，按代名升序即时间升序。"""

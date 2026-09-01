@@ -95,7 +95,7 @@ def test_slots_hidden_by_a_gap_do_not_enter_the_evaluation_set() -> None:
 
     data = snapshot(
         daily("吃药", 40, hour=7),
-        [ObservedGap(started_at=at(35, 0), ended_at=at(36, 0))],  # 留出期内整整一天没在看
+        [ObservedGap(started_at=at(35, 0), ended_at=at(36, 0), watched=True)],  # 留出期内整整一天没在看
     )
     pairs = _pairs(data, cutoff=FIRST + timedelta(days=29), through=FIRST + timedelta(days=39))
     assert len(pairs) == 9 * 96
@@ -106,7 +106,7 @@ def test_a_gap_straddling_the_cutoff_is_split_across_both_halves() -> None:
 
     data = snapshot(
         daily("吃药", 40, hour=7),
-        [ObservedGap(started_at=at(29, 23), ended_at=at(30, 9))],  # 跨过截止日
+        [ObservedGap(started_at=at(29, 23), ended_at=at(30, 9), watched=True)],  # 跨过截止日
     )
     train, holdout = evaluation.split(data, cutoff=FIRST + timedelta(days=29))
     assert len(train.gaps) == 1 and len(holdout.gaps) == 1
@@ -315,6 +315,10 @@ def test_cumulative_calibration_catches_a_stopped_habit() -> None:
     """习惯停了：树还说"到这个点通常做完了"，实际全没做——ECE 必须炸出来。
 
     这正是缺失检测要依赖的那个数失真的形态，仪器抓不到它就没资格给累积率背书。
+
+    评估集覆盖**整条钟面**（累积率来自密集曲线）：07:00 之前的槽预测 0、实际也没发生，那些
+    是答对的样本，它们把 ECE 摊薄到 0.71。早先累积率只在"当天首次发生之后"的槽上有格子，
+    答对的那一半根本进不了评估集，ECE 因此虚高——仪器自己被格子的有无带偏了。
     """
 
     actions = list(daily("吃药", 30, hour=7)) + [act("吃药", 30, 7)]  # 留出段只有第一天还在吃
@@ -322,4 +326,8 @@ def test_cumulative_calibration_catches_a_stopped_habit() -> None:
     report = evaluation.cumulative_calibration(
         tree, hold, since=FIRST + timedelta(days=31), through=FIRST + timedelta(days=39)
     )
-    assert report.expected_calibration_error > 0.8
+    assert report.expected_calibration_error > 0.7
+    # 答错的那一箱是"说做完了、其实没做"，样本量远大于答对的那一箱。
+    wrong = [item for item in report.bins if item.predicted > 0.9]
+    assert wrong and wrong[0].observed == pytest.approx(0.0)
+    assert wrong[0].count > report.samples / 2

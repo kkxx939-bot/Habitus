@@ -2,11 +2,25 @@
 
 零 IO 纯函数。三条卫生里的第三条落在本模块：**转移删失**——窗口内观测有空洞时那一对既不算
 转移也不算"什么都没做"，直接扔掉。少了它，观测断档会被误读成"他做完 A 就没再做别的"，
-而 ``P(∅│A)`` 恰恰是提醒逻辑最依赖的那个数。
+而 ``P(∅│A)`` 恰恰是提醒逻辑最依赖的那个数。删失对**两种结局同等适用**：找到了后继也一样
+要查空洞——"起点到后继之间断过档"意味着我们不知道中间是不是还发生过别的，把它记成一条
+实打实的 ``A→B`` 就是在观测最差的地方造因果（真实数据实测：新粒度下 345 对里有 23 对
+是跨着洞记的）。
+
+**零宽度的空白不算洞。** 单条观测的"没读懂"段起止同刻（观测模型明文不携带时段，见
+``behavior/observation/model.py``），它在曝光那边扣不掉任何东西；若在这里却算作洞，同一条
+记录就会被两个消费者读成两回事——那是我们自己产物的自相矛盾，不是现实的形状。
 
 并行必须与转移分开（见 ``TODO(PRED-TREE-001)``）：一边吃饭一边看手机会被"下一个开始"的
 配对逻辑记成"吃饭→看手机，间隔 5 分钟"的假因果，而且把真正的下一步（吃完饭洗碗）挤掉——
 因为配对只取下一个。行为树的 ``concurrent_with`` 已经把这件事判好了，本层照读。
+
+并行边的键按**动作身份序**规范化，不按这一对谁先开始。并行是对称关系，而"谁先开始"是每次
+发生各不相同的偶然事实：按时间序建键会让同一对行为落进 ``(A,B)`` 和 ``(B,A)`` 两个键，证据
+劈成两半，读侧取对称闭包时又把两个键映到同一个目标、后者覆盖前者（真实数据实测：425 条
+并行边里 51 个无序对同时存在正反两键，同一个事实被读成 count 0.989 与 6.897、概率 0.855
+与 0.005）。规范化之后分母也只能是**参与口径**——``P(与 A 同时做 B) = count(A,B) ÷ Σ_x
+count(A,x)``，即"A 参与的全部并行"，而不是"A 恰好排在前面的那些并行"。
 """
 
 from __future__ import annotations
@@ -24,6 +38,7 @@ from prediction.model import (
     IntervalQuantiles,
     ObservedAction,
     ObservedGap,
+    ParallelStatistics,
     SlotKey,
 )
 from prediction.nodes import decay_weight
@@ -89,7 +104,8 @@ def pair(
         if not 0 <= left < len(actions) or not 0 <= right < len(actions):
             raise PredictionTreeError("concurrent pair references an action outside the batch")
         later = max(actions[left].day, actions[right].day)
-        key = (actions[left].action, actions[right].action)
+        # 按动作身份序规范化：谁先开始是每次发生各不相同的偶然，不该决定证据落进哪个键。
+        key = _parallel_key(actions[left].action, actions[right].action)
         parallels[key] = parallels.get(key, 0.0) + decay_weight(
             float((reference - later).days), config.decay_half_life_days
         )
@@ -112,6 +128,13 @@ def pair(
 
         slot_key = SlotKey.of(current.started_at, slot_minutes=config.slot_minutes)
         if successor is not None:
+            if not _window_fully_observed(
+                current.started_at, successor.started_at.timestamp(), gap_starts, gap_ends
+            ):
+                # 起点与后继之间断过档：我们不知道洞里是不是还发生过别的，这一对既不算转移
+                # 也不算无转移。少了这一条，观测最差的那些时段会被记成最确凿的因果。
+                censored += weight
+                continue
             key = (current.action, successor.action)
             transitions[key] = transitions.get(key, 0.0) + weight
             gap_seconds = successor.started_at.timestamp() - current.started_at.timestamp()
@@ -147,28 +170,54 @@ def _tally(
     cell[slot] = cell.get(slot, 0.0) + weight
 
 
+def _parallel_key(left: str, right: str) -> tuple[str, str]:
+    """并行边的规范键：按动作身份排序，与这一对谁先开始无关。"""
+
+    return (left, right) if left <= right else (right, left)
+
+
 def _gap_spans(gaps: Sequence[ObservedGap]) -> tuple[list[float], list[float]]:
     """把空白折成两条按开始时刻排序的平行数组，供二分查询。
 
     逐条线性扫是 O(动作数 × 空白数)，一年万条 occurrence 配上数千段空白就是 10⁷ 次
     aware-datetime 转换——和"毫秒级重建"差几个数量级，而且每次都重算同一批时间戳。
+
+    **零宽度的空白在这里被丢掉**：单观测的"没读懂"段起止同刻，它在曝光那边扣不掉任何东西
+    （``day_coverage`` 对 ``end <= start`` 直接跳过），在这里也就不该算作洞。两个消费者对
+    同一条记录必须给出同一个解读。
     """
 
     ordered = sorted(
-        ((gap.started_at.timestamp(), gap.ended_at.timestamp()) for gap in gaps),
+        (gap.started_at.timestamp(), gap.ended_at.timestamp())
+        for gap in gaps
+        if gap.ended_at > gap.started_at
     )
-    return [start for start, _end in ordered], [end for _start, end in ordered]
+    starts = [start for start, _end in ordered]
+    # 第二条数组存的是**结束时刻的前缀最大值**而不是结束时刻本身：判"窗口内有没有洞"只需要
+    # 问"开始早于窗口右端的那些空白里，最晚的结束时刻有没有越过窗口左端"，前缀最大值让它变成
+    # 一次二分 + 一次比较。存结束时刻本身就得线性扫**有史以来**的全部空白（``any`` 在窗口
+    # 干净时必须扫完），成本随历史二次增长：实测 WP4 粒度下 30 天 0.04s、一年 2.09s、
+    # 两年 7.82s，天数翻倍时间乘 3.7。
+    latest_end: list[float] = []
+    highest = float("-inf")
+    for _start, end in ordered:
+        highest = max(highest, end)
+        latest_end.append(highest)
+    return starts, latest_end
 
 
 def _window_fully_observed(
-    started_at: datetime, deadline: float, starts: Sequence[float], ends: Sequence[float]
+    started_at: datetime, deadline: float, starts: Sequence[float], latest_end: Sequence[float]
 ) -> bool:
-    """窗口 ``[started_at, deadline)`` 内有没有任何一段空白与之相交。"""
+    """窗口 ``[started_at, deadline)`` 内有没有任何一段空白与之相交。
+
+    ``latest_end`` 是结束时刻的前缀最大值（见 ``_gap_spans``），所以"开始早于窗口右端的空白
+    里最晚的那个结束时刻"是 O(1) 取到的，整体一次二分。
+    """
 
     start = started_at.timestamp()
-    # 只有开始时刻早于窗口右端的空白才可能相交；从那里往前找第一个结束时刻越过窗口左端的。
     limit = bisect_left(starts, deadline)
-    return not any(ends[index] > start for index in range(limit))
+    return limit == 0 or latest_end[limit - 1] <= start
 
 
 def derive(ledger: EdgeLedger, *, config: PredictionTreeConfig) -> dict[tuple[str, str], EdgeStatistics]:
@@ -256,23 +305,31 @@ def _target_shares(ledger: EdgeLedger, config: PredictionTreeConfig) -> dict[str
     return {target: (count + epsilon) / denominator for target, count in incoming.items()}
 
 
-def derive_parallels(ledger: EdgeLedger) -> dict[tuple[str, str], EdgeStatistics]:
-    """并行边：``P(与 A 同时做 B)``；它不是转移，不进转移的概率分布。"""
+def derive_parallels(ledger: EdgeLedger) -> dict[tuple[str, str], ParallelStatistics]:
+    """并行边：一对同时发生的行为一起出现的加权次数。
+
+    **只发布对称的事实**。条件概率 ``P(与 A 同时做 B)`` 取决于从哪一边问——分母是"A 参与的
+    全部并行"——所以它由查询层拿 ``parallel_totals`` 现算。存一个方向的概率会让另一个方向
+    没有答案（旧写法就是这样，加上按时间序建键，同一个事实被读成 0.855 与 0.005 两个数）；
+    存两个方向又会随重建漂移。
+    """
+
+    return {key: ParallelStatistics(count=count) for key, count in ledger.parallels.items()}
+
+
+def parallel_totals(ledger: EdgeLedger) -> dict[str, float]:
+    """每个动作**参与**的全部并行权重；这是并行条件概率唯一正确的分母。
+
+    自并行（A ∥ A，同类型的两条 occurrence 重叠）只计一次，于是对任一动作
+    ``Σ_b P(b│a) = 1`` 成立。
+    """
 
     totals: dict[str, float] = {}
-    for (source, _target), count in ledger.parallels.items():
-        totals[source] = totals.get(source, 0.0) + count
-    return {
-        (source, target): EdgeStatistics(
-            count=count,
-            probability=count / totals[source] if totals.get(source) else 0.0,
-            lift=0.0,
-            n_eff=totals.get(source, 0.0),
-            intervals=None,
-            slot_histogram={},
-        )
-        for (source, target), count in ledger.parallels.items()
-    }
+    for (left, right), count in ledger.parallels.items():
+        totals[left] = totals.get(left, 0.0) + count
+        if right != left:
+            totals[right] = totals.get(right, 0.0) + count
+    return totals
 
 
 def quantiles(samples: Sequence[tuple[float, float]]) -> IntervalQuantiles | None:
@@ -318,6 +375,7 @@ __all__ = [
     "derive",
     "derive_parallels",
     "pair",
+    "parallel_totals",
     "quantiles",
     "require_ordered",
 ]

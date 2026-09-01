@@ -29,6 +29,13 @@
 #   一年约 10–20 天可预见地坍塌，还会把周六格的统计弄脏。改造方案：判决层持一张确定性日历表
 #   （法定假日与调休日型），查询时用**实际日型**替换名义周几取键。影响：不做则这些天误报/漏报
 #   齐发且用户可感知（"周六还叫我上班？"）；做了是纯确定性查表，零 LLM 零统计改动。
+# - **不得用 ``trend_n_eff`` 做跨行为门槛（判决层的一条禁令）**：它的单位是"这个行为自己的
+#   证据窗内的加权命中次数"，窗长已经乘过 ``nodes.period_scale``。节奏正好落在档位上的行为
+#   缩放恰好抵消（日频/双周/月频上界都是 12.87），档位没对上的就差出来——三周一次 16.99、
+#   两月一次 6.70、三月一次 4.64。于是"``trend_n_eff >= 5`` 才信这条趋势"这类统一门槛会把
+#   季频行为永久闭嘴，且**不报错、不掉测试**，表现出来只是"每季度一次的事从来不提醒"。
+#   判决层要么按行为节奏分档设门槛，要么让树补发一个无量纲的命中/机会比值再划线（后者等
+#   判决层真的需要时再提，树上不为没有消费者的量提前加字段）。
 # - **日级偏离度（判决层必做；缺失检测的前置闸）**：趋势是格子级的，出差/生病是**日级**反常
 #   ——每个格子各自独立发现"缺失"、各自报警，系统变成整天叫的闹钟。改造方案：判决前先算
 #   一个确定性偏离度（拿累积率扫"到现在该发生的发生了几成"，对比当日实况），超阈值则全天
@@ -72,12 +79,14 @@ from prediction.builder import build, config_digest
 from prediction.config import PredictionTreeConfig
 from prediction.errors import PredictionTreeError, PredictionTreeStoreError
 from prediction.model import (
+    DayCurve,
     EdgeStatistics,
     IntervalQuantiles,
     NodeCounts,
     NodeStatistics,
     ObservedAction,
     ObservedGap,
+    ParallelStatistics,
     PredictionTree,
     RecurrenceStatistics,
     SlotExposure,
@@ -90,12 +99,14 @@ from prediction.store import PredictionTreeStore, PublishedGeneration
 # 需要读行为树的调用方显式 ``from prediction import source``。
 
 __all__ = [
+    "DayCurve",
     "EdgeStatistics",
     "IntervalQuantiles",
     "NodeCounts",
     "NodeStatistics",
     "ObservedAction",
     "ObservedGap",
+    "ParallelStatistics",
     "PredictionTree",
     "PredictionTreeConfig",
     "PredictionTreeError",
