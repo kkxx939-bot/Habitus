@@ -601,61 +601,60 @@ def test_context_is_ordered_by_real_time_not_by_the_local_offset_string(tmp_path
     assert str(context[0]["started_at"]).endswith("+08:00")
 
 
-def test_a_long_running_judgement_stays_inside_the_lookback_window() -> None:
+def test_a_long_running_judgement_stays_inside_the_lookback_window(tmp_path) -> None:
     """回看下界按 ``last_observed_at``，不按 ``started_at``：做饭、看电影这类超过 lookback 的长行为，
     其后续段必须仍能看到自己的前半截，否则跨窗口 ``continues`` 断链（审计 NEW-4 复现）。"""
 
-    import tempfile
 
     from behavior.fusion.store import BehaviorJudgementStore
 
-    with tempfile.TemporaryDirectory(dir="/Users/gulf/.claude/jobs") as raw_root:
-        store = BehaviorJudgementStore(raw_root)
-        template = {key: None for key in _JUDGEMENT_KEYS}
+    # 存储根用 pytest 的 tmp_path：写死本机路径会在 CI 的 Linux runner 上 FileNotFoundError
+    store = BehaviorJudgementStore(tmp_path)
+    template = {key: None for key in _JUDGEMENT_KEYS}
 
-        def record(identity: str, started: str, last: str) -> dict[str, object]:
-            payload = dict(template)
-            payload.update(
-                {
-                    "schema_version": "behavior_judgement_v1",
-                    "judgement_id": identity,
-                    "judged_at": last,
-                    "evidence_ready_at": last,
-                    "started_at": started,
-                    "last_observed_at": last,
-                    "observation_ids": [f"observation-{identity[:4]}"],
-                    "source_refs": ["delivery"],
-                    "subjects": [SUBJECT],
-                    "behavior": "行为",
-                    "goal": None,
-                    "summary": "摘要",
-                    "basis": [],
-                    "status": "ongoing",
-                    "status_basis": "observation_lost",
-                    "relations": [],
-                    "fusion_version": "v",
-                    "prompt_version": "p",
-                }
-            )
-            return payload
-
-        cutoff = datetime(2026, 8, 15, 3, tzinfo=timezone.utc)
-        # 做饭：两小时前开始（早于 1 小时回看下界），但最后观测就在本段之前一分钟
-        store.put_payload(
-            record("c" * 64, "2026-08-15T01:00:00.000000Z", "2026-08-15T02:59:00.000000Z")
+    def record(identity: str, started: str, last: str) -> dict[str, object]:
+        payload = dict(template)
+        payload.update(
+            {
+                "schema_version": "behavior_judgement_v1",
+                "judgement_id": identity,
+                "judged_at": last,
+                "evidence_ready_at": last,
+                "started_at": started,
+                "last_observed_at": last,
+                "observation_ids": [f"observation-{identity[:4]}"],
+                "source_refs": ["delivery"],
+                "subjects": [SUBJECT],
+                "behavior": "行为",
+                "goal": None,
+                "summary": "摘要",
+                "basis": [],
+                "status": "ongoing",
+                "status_basis": "observation_lost",
+                "relations": [],
+                "fusion_version": "v",
+                "prompt_version": "p",
+            }
         )
-        # 洗手：完全落在窗口内
-        store.put_payload(
-            record("d" * 64, "2026-08-15T02:50:00.000000Z", "2026-08-15T02:55:00.000000Z")
-        )
-        # 昨天那条：最后观测也早于下界，应当被排除
-        store.put_payload(
-            record("e" * 64, "2026-08-14T01:00:00.000000Z", "2026-08-14T02:00:00.000000Z")
-        )
+        return payload
 
-        context = store.recent_before(cutoff, limit=8, lookback_seconds=3_600)
+    cutoff = datetime(2026, 8, 15, 3, tzinfo=timezone.utc)
+    # 做饭：两小时前开始（早于 1 小时回看下界），但最后观测就在本段之前一分钟
+    store.put_payload(
+        record("c" * 64, "2026-08-15T01:00:00.000000Z", "2026-08-15T02:59:00.000000Z")
+    )
+    # 洗手：完全落在窗口内
+    store.put_payload(
+        record("d" * 64, "2026-08-15T02:50:00.000000Z", "2026-08-15T02:55:00.000000Z")
+    )
+    # 昨天那条：最后观测也早于下界，应当被排除
+    store.put_payload(
+        record("e" * 64, "2026-08-14T01:00:00.000000Z", "2026-08-14T02:00:00.000000Z")
+    )
 
-        assert [str(item["judgement_id"])[0] for item in context] == ["c", "d"]
+    context = store.recent_before(cutoff, limit=8, lookback_seconds=3_600)
+
+    assert [str(item["judgement_id"])[0] for item in context] == ["c", "d"]
 
 
 def test_the_fusion_version_covers_the_schema_not_just_the_prompt() -> None:
