@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -55,7 +55,7 @@ def test_recorded_observations_are_covered_inside_the_window(tmp_path: Path) -> 
     covered = index.covered_observation_ids(judged + timedelta(days=1))
     assert covered == {first.observation_id, second.observation_id}
     # 记录按 judged_at 的 UTC 日期分目录——过期时整目录删除，不逐条扫描。
-    day = judged.astimezone(timezone.utc).date().isoformat()
+    day = judged.astimezone(UTC).date().isoformat()
     assert (tmp_path / "fusion" / "coverage" / day).is_dir()
 
 
@@ -87,7 +87,7 @@ def test_records_are_read_until_expired_and_expiry_keeps_what_is_still_stored(tm
     assert index.expire(BASE) == 1
     assert index.covered_observation_ids(BASE) == {fresh.observation_id}
     remaining = sorted(path.name for path in (tmp_path / "fusion" / "coverage").iterdir())
-    assert remaining == [BASE.astimezone(timezone.utc).date().isoformat()]
+    assert remaining == [BASE.astimezone(UTC).date().isoformat()]
     assert index.expire(BASE) == 0
 
 
@@ -96,13 +96,13 @@ def test_an_undecodable_record_is_expired_instead_of_blocking_every_sweep(tmp_pa
 
     index = BehaviorCoverageIndex(tmp_path, window_days=7)
     index.record(receipt((observation(0, "旧观测"),), judged_at=BASE - timedelta(days=10)))
-    day = (BASE - timedelta(days=10)).astimezone(timezone.utc).date().isoformat()
+    day = (BASE - timedelta(days=10)).astimezone(UTC).date().isoformat()
     broken = next((tmp_path / "fusion" / "coverage" / day).iterdir())
     broken.write_text("not json", encoding="utf-8")
     assert index.expire(BASE, retain={"仍在存储里的某个观测"}) == 1
     # 但读取侧仍严格：读不出来会把已融合误判成未融合，那必须硬拒
     index.record(receipt((observation(4, "新观测"),), judged_at=BASE))
-    fresh_day = BASE.astimezone(timezone.utc).date().isoformat()
+    fresh_day = BASE.astimezone(UTC).date().isoformat()
     next((tmp_path / "fusion" / "coverage" / fresh_day).iterdir()).write_text("not json", encoding="utf-8")
     with pytest.raises(BehaviorFusionError, match="not decodable"):
         index.covered_observation_ids(BASE)

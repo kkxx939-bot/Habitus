@@ -7,7 +7,7 @@ import json
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from benchmark.isolation import isolated_config, require_empty_directory
@@ -108,7 +108,7 @@ class LifecycleBenchmark:
             before = _snapshot(runtime, address)
             before_bytes = _tree_bytes(runtime.config.storage_root)
             latest = max(message.occurred_at for session in self.sample.sessions for message in session.messages)
-            maintenance_time = latest.astimezone(timezone.utc) + timedelta(days=self.age_days)
+            maintenance_time = latest.astimezone(UTC) + timedelta(days=self.age_days)
             for cycle in range(1, self.max_cycles + 1):
                 started = time.perf_counter()
                 maintenance = await runtime.maintain_conversation(address, now=maintenance_time)
@@ -136,7 +136,7 @@ class LifecycleBenchmark:
             after_bytes = _tree_bytes(runtime.config.storage_root)
             summary: dict[str, object] = {
                 "schema_version": "habitus_lifecycle_benchmark_v1",
-                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "generated_at": datetime.now(UTC).isoformat(),
                 "dataset": self.dataset.name.value,
                 "sample_id": self.sample.sample_id,
                 "session_count": len(self.sample.sessions),

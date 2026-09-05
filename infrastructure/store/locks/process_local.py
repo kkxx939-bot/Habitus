@@ -9,7 +9,7 @@ import threading
 import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from infrastructure.store.contracts.lock import LockLostError, LockStoreSnapshot, LockToken
 
@@ -36,7 +36,7 @@ class ProcessLocalLockStore:
         """获取未被有效租约占用的锁，并返回新的 fencing 令牌。"""
 
         with self._guard:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             existing = self.locks.get(lock_key)
             if existing is not None and existing[2] > now:
                 raise TimeoutError(f"Lock already held: {lock_key}")
@@ -59,7 +59,7 @@ class ProcessLocalLockStore:
             self.locks[token.lock_key] = (
                 token.token,
                 token.fence,
-                datetime.now(timezone.utc) + timedelta(seconds=max(1, ttl_seconds)),
+                datetime.now(UTC) + timedelta(seconds=max(1, ttl_seconds)),
                 self.locks[token.lock_key][3],
             )
         return token
@@ -77,11 +77,11 @@ class ProcessLocalLockStore:
         with self._guard:
             for token in tokens:
                 self._assert_owned_unlocked(token)
-            expires_at = datetime.now(timezone.utc) + timedelta(seconds=max(1, ttl_seconds))
+            expires_at = datetime.now(UTC) + timedelta(seconds=max(1, ttl_seconds))
             for token in tokens:
                 self.locks[token.lock_key] = (token.token, token.fence, expires_at, self.locks[token.lock_key][3])
             yield
-            expires_at = datetime.now(timezone.utc) + timedelta(seconds=max(1, ttl_seconds))
+            expires_at = datetime.now(UTC) + timedelta(seconds=max(1, ttl_seconds))
             for token in tokens:
                 self._assert_identity_unlocked(token)
                 self.locks[token.lock_key] = (token.token, token.fence, expires_at, self.locks[token.lock_key][3])
@@ -97,7 +97,7 @@ class ProcessLocalLockStore:
     def observability_snapshot(self, *, warning_seconds: float) -> LockStoreSnapshot:
         """返回当前有效锁数量和年龄，不暴露任何锁身份。"""
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with self._guard:
             active = [item for item in self.locks.values() if item[2] > now]
             ages = [max(0.0, (now - item[3]).total_seconds()) for item in active]
@@ -110,7 +110,7 @@ class ProcessLocalLockStore:
     def _assert_owned_unlocked(self, token: LockToken) -> None:
         self._assert_identity_unlocked(token)
         current = self.locks[token.lock_key]
-        if current[2] <= datetime.now(timezone.utc):
+        if current[2] <= datetime.now(UTC):
             raise LockLostError(f"Lock lease lost: {token.lock_key}")
 
     def _assert_identity_unlocked(self, token: LockToken) -> None:

@@ -1,11 +1,15 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "habitus"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
+# PEP 639 的 SPDX 写法，需要 setuptools>=77（见 build-system.requires）。
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "gulf" }]
 dependencies = ["PyYAML>=6.0.2,<7", "httpx>=0.28,<1"]
 
 [project.optional-dependencies]
@@ -36,6 +40,15 @@ test = [
     "pytest>=8.3,<9",
     "pytest-cov>=5,<8",
 ]
+# 静态检查与打包工具。这里只声明范围；CI 与本地实际装的精确版本在 requirements.txt 里
+# （由 pip-compile 从本文件生成，见 requirements.txt 头部的命令）。
+dev = [
+    "ruff>=0.16,<0.17",
+    "mypy>=2.3,<3",
+    "pyright>=1.1.411,<1.2",
+    "build>=1.5,<2",
+    "pip-tools>=7.4,<8",
+]
 
 [project.scripts]
 habitus-benchmark = "benchmark.cli:main"
@@ -61,6 +74,9 @@ habitus-plugin = "integrations.local_service.plugin_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
+# benchmark/data 是本地数据集与一次性实验脚本，不进 git；但本地构建时它在磁盘上，
+# 不显式排除就会被打进 wheel，导致本地 wheel 与 CI wheel 内容不一致。
+exclude = ["benchmark.data", "benchmark.data.*"]
 include = [
     "Config*",
     "Runtime*",
@@ -81,24 +97,41 @@ include = [
 "benchmark" = ["README.md", "datasets/*.json", "policies/*.json"]
 "memory.schema.definitions" = ["*.yaml"]
 "behavior.schema.definitions" = ["*.yaml"]
+# benchmark/fusion/__main__.py 用 Path(__file__).with_name("cases.json") 按安装位置读它，
+# 不登记的话从 wheel 装完跑 benchmark 会 FileNotFoundError。
+"benchmark.fusion" = ["cases.json"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-ignore = ["E501"]
+ignore = [
+    "E501",
+    # 升到 Python 3.13 目标后 UP 新报的写法，逐条评估过：
+    # UP017（timezone.utc→UTC）与 UP041（asyncio.TimeoutError→TimeoutError）是安全的机械
+    # 替换，已经改完，不再豁免。
+    # 下面四条属于 PEP 695 的新泛型/类型别名语法与 StrEnum，改法会动到运行时语义
+    # （StrEnum 的 str() 行为、泛型的方差推断），收益只是写法更新，暂不跟进。
+    "UP040",  # 类型别名改用 type 语句
+    "UP042",  # (str, Enum) 改用 StrEnum
+    "UP046",  # 泛型类改用 PEP 695 形参
+    "UP047",  # 泛型函数改用 PEP 695 形参
+]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.13"
 ignore_missing_imports = true
+# benchmark/data 不进 git（本地数据集与实验脚本，远端 CI 不存在）；里面的脚本会 import tests/，
+# 不排除的话本地全链会把测试文件也拖进类型检查。与下方 pyright 的 exclude 保持一致。
+exclude = ["^benchmark/data/"]
 check_untyped_defs = false
 warn_unused_ignores = true
 warn_redundant_casts = true
 
 [tool.pyright]
-pythonVersion = "3.10"
+pythonVersion = "3.13"
 typeCheckingMode = "basic"
 # benchmark/data 不进 git（本地数据集与实验脚本，远端 CI 不存在）；本地跑全链时排除。
 exclude = ["benchmark/data"]

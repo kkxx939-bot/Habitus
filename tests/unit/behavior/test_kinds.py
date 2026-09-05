@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime, timezone
 from typing import Any
 
 import pytest
@@ -38,7 +38,7 @@ from ModelClient import (
 )
 from ModelClient.embedding import EmbeddingVector
 
-NOW = datetime(2026, 8, 22, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 22, 12, 0, 0, tzinfo=UTC)
 D1 = date(2026, 8, 20)
 D2 = date(2026, 8, 22)
 
@@ -532,7 +532,7 @@ def test_resolver_uses_embeddings_for_candidates_and_fills_the_index() -> None:
 def test_registry_coexists_with_the_tree_at_the_same_root(tmp_path) -> None:
     """kinds.md 并入地址空间：与树同根、互不干扰——枚举不见它、词表照常 CAS。"""
 
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from behavior import BehaviorDocumentWriter, BehaviorKind, BehaviorTree
     from infrastructure.store.locks import ProcessLocalLockStore

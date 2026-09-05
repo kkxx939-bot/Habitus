@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from behavior.fusion.errors import BehaviorFusionError
@@ -64,7 +64,7 @@ class BehaviorCoverageIndex:
         payload = {
             "schema_version": COVERAGE_SCHEMA_VERSION,
             "receipt_id": receipt.receipt_id,
-            "judged_at": receipt.judged_at.astimezone(timezone.utc).isoformat(timespec="microseconds"),
+            "judged_at": receipt.judged_at.astimezone(UTC).isoformat(timespec="microseconds"),
             "observation_ids": sorted(set(receipt.observation_ids)),
         }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -163,12 +163,12 @@ class BehaviorCoverageIndex:
     def _window_start(self, now: datetime) -> date:
         if not isinstance(now, datetime) or now.utcoffset() is None:
             raise TypeError("now must be a timezone-aware datetime")
-        return (now.astimezone(timezone.utc) - timedelta(days=self.window_days)).date()
+        return (now.astimezone(UTC) - timedelta(days=self.window_days)).date()
 
     def _path(self, judged_at: datetime, receipt_id: str) -> Path:
         if _RECORD_FILE.fullmatch(f"{receipt_id}.json") is None:
             raise BehaviorFusionError("receipt_id must be lowercase SHA-256 text")
-        day = judged_at.astimezone(timezone.utc).date().isoformat()
+        day = judged_at.astimezone(UTC).date().isoformat()
         return self.coverage_root / day / f"{receipt_id}.json"
 
     def _day_directories(self, start: date | None) -> list[Path]:

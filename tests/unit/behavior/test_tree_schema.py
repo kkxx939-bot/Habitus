@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta, timezone
+from datetime import UTC, timedelta, timezone
 
 import pytest
 
@@ -30,7 +30,7 @@ from tests.unit.behavior.tree_payloads import (
 
 REGISTRY = BehaviorSchemaRegistry.load_default()
 CODEC = BehaviorDocumentCodec(REGISTRY)
-NOW = local(23, 0).astimezone(timezone.utc)
+NOW = local(23, 0).astimezone(UTC)
 
 
 # --- 地址与 URI ------------------------------------------------------------------------
@@ -124,7 +124,7 @@ def test_validate_accepts_canonical_and_action_segment_payloads() -> None:
         ({"subjects": ()}, "at least one subject"),
         ({"original_name": "洗了手"}, "must differ"),  # 消歧记录的原始名不能等于地址名
         ({"last_observed_at": local(19, 0)}, "cannot precede"),
-        ({"started_at": local(19, 30, 18).astimezone(timezone.utc)}, "non-zero local"),
+        ({"started_at": local(19, 30, 18).astimezone(UTC)}, "non-zero local"),
         ({"onset_available_at": local(19, 0)}, "cannot precede"),
         ({"chain_digest": "not-a-digest"}, "SHA-256"),
     ],
@@ -260,7 +260,7 @@ def test_gap_render_is_honest_about_both_kinds() -> None:
 def test_identity_roundtrip_with_separator_in_name_and_negative_offset() -> None:
     """叶名分隔符与名字重合、以及负偏移，都必须无损往返到规范身份。"""
 
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     tricky = BehaviorAddress.occurrence(DAY, "热身--拉伸", local(19, 30, 18))
     restored = BehaviorURI.parse(str(BehaviorURI.from_address(tricky))).to_address()

@@ -7,7 +7,7 @@ import sqlite3
 import threading
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from memory.conversation.indexing.model import ConversationSummaryReference, summary_reference
@@ -496,7 +496,7 @@ class SQLiteConversationSummaryUseStore:
 def _timestamp(value: datetime) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("Summary use timestamp must be timezone-aware datetime")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _format_timestamp(value: datetime) -> str:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -81,15 +81,15 @@ def parse_time(value: object, formats: tuple[str, ...], *, fallback: datetime) -
                     parsed = datetime.strptime(candidate, pattern)
                 except ValueError:
                     continue
-                return parsed.replace(tzinfo=timezone.utc)
+                return parsed.replace(tzinfo=UTC)
         try:
             parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
         except ValueError:
             pass
         else:
-            return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(timezone.utc)
+            return parsed.replace(tzinfo=parsed.tzinfo or UTC).astimezone(UTC)
         raise ValueError(f"unsupported benchmark datetime: {normalized}")
-    return fallback.astimezone(timezone.utc)
+    return fallback.astimezone(UTC)
 
 
 def ordered_times(started_at: datetime, count: int) -> tuple[datetime, ...]:

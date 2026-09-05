@@ -2,7 +2,7 @@
 
 import asyncio
 from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -306,7 +306,7 @@ def test_renew_timeout_after_lease_expiry_becomes_lease_loss(tmp_path: Path) -> 
     original = claimed_job(tmp_path)
     expired_job = replace(
         original.lease.job,
-        lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
     )
     expired_claim = MemoryJobClaim(MemoryJobLease(expired_job))
     store = LeaseStore(renew_error=TimeoutError("late"))
@@ -385,7 +385,7 @@ def test_background_loop_blocks_on_terminal_execution_failure(tmp_path: Path) ->
 @pytest.mark.parametrize(
     "error_factory",
     [
-        lambda: MemoryJobNotReadyError(datetime.now(timezone.utc)),
+        lambda: MemoryJobNotReadyError(datetime.now(UTC)),
         lambda: MemoryJobLeaseLostError("lost"),
         lambda: MemoryJobExecutionError("retrying", job=None),
     ],

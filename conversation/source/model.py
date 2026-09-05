@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 from foundation.integrity import canonical_digest, canonical_json, canonicalize
@@ -72,7 +72,7 @@ def source_timestamp(value: datetime | str, label: str) -> datetime:
         raise ConversationSourceError(f"{label} must be a datetime")
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ConversationSourceError(f"{label} must be timezone-aware")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def _protocol(value: object) -> str:

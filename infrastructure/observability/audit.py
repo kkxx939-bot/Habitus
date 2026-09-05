@@ -7,7 +7,7 @@ import os
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -134,7 +134,7 @@ class AuditStore:
         return tuple(self._record(row) for row in rows)
 
     def _prune(self, connection: sqlite3.Connection, *, now: datetime) -> None:
-        cutoff = (now.astimezone(timezone.utc) - timedelta(days=self.retention_days)).isoformat()
+        cutoff = (now.astimezone(UTC) - timedelta(days=self.retention_days)).isoformat()
         connection.execute("DELETE FROM audit_events WHERE occurred_at < ?", (cutoff,))
         connection.execute(
             """
@@ -163,7 +163,7 @@ class AuditStore:
         }
         return AuditRecord(
             audit_id=str(row["audit_id"]),
-            occurred_at=datetime.fromisoformat(str(row["occurred_at"])).astimezone(timezone.utc),
+            occurred_at=datetime.fromisoformat(str(row["occurred_at"])).astimezone(UTC),
             category=str(row["category"]),
             operation=str(row["operation"]),
             status=str(row["status"]),

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta, timezone
+from datetime import UTC, timedelta
 
 import pytest
 
@@ -160,7 +160,7 @@ def test_cross_midnight_occurrence_lands_on_its_local_day(tmp_path) -> None:
     document = writer.publish(BehaviorKind.OCCURRENCE, small_hours)
     uri = BehaviorURI.from_address(document.address)
     assert uri.segments[1:4] == ("2026", "08", "16")           # 本地日
-    utc_day = document.address.started_at.astimezone(timezone.utc).date()
+    utc_day = document.address.started_at.astimezone(UTC).date()
     assert utc_day.isoformat() == "2026-08-15"                 # UTC 日确实不同 → 输入有判别力
     assert document.address.started_at.utcoffset() == timedelta(hours=8)
 

@@ -7,7 +7,7 @@ import json
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -102,7 +102,7 @@ class MemoryJobStore:
             raise MemoryJobError("memory jobs must be stored outside the L2 memory tree")
         self.path_lock = path_lock
         self.config = config or MemoryJobConfig()
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         digest = hashlib.sha256(str(self.memory_root).encode("utf-8")).hexdigest()
         self.lock_key = f"memory-job-root:{digest}"
 
@@ -954,7 +954,7 @@ class MemoryJobStore:
 
     @staticmethod
     def _format_time(value: datetime) -> str:
-        return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     @staticmethod
     def _format_optional_time(value: datetime | None) -> str | None:
@@ -967,7 +967,7 @@ class MemoryJobStore:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             raise ValueError("memory job timestamp must include a timezone")
-        return parsed.astimezone(timezone.utc)
+        return parsed.astimezone(UTC)
 
     @staticmethod
     def _parse_optional_time(value: object) -> datetime | None:
@@ -979,7 +979,7 @@ class MemoryJobStore:
             raise TypeError("memory job clock must return a datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("memory job clock must return a timezone-aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
 
 __all__ = ["MemoryJobQueueSnapshot", "MemoryJobStore"]

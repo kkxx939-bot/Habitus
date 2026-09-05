@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from behavior.fusion.derivation import FUSION_VERSION, DurableJudgement, persistable_judgements
@@ -66,7 +66,7 @@ def _utc(value: object, label: str) -> datetime:
     if not isinstance(parsed, datetime) or parsed.utcoffset() is None:
         raise BehaviorFusionError(f"{label} must be a timezone-aware datetime")
     try:
-        return parsed.astimezone(timezone.utc)
+        return parsed.astimezone(UTC)
     except (OverflowError, OSError, ValueError) as exc:
         raise BehaviorFusionError(f"{label} is outside the representable time range") from exc
 

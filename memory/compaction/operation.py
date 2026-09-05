@@ -9,7 +9,7 @@ import stat
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -436,7 +436,7 @@ def _require_digest(value: object, label: str) -> None:
 def _timestamp(value: datetime) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("memory lifecycle operation timestamp must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _format_timestamp(value: datetime) -> str:

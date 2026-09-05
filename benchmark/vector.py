@@ -12,7 +12,7 @@ import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
 
@@ -220,7 +220,7 @@ class VectorBenchmarkRunner:
         runtime.initialize()
         store = runtime.components.memory.vector_index.store
         embedder = runtime.components.models.embedder
-        started_at = datetime.now(timezone.utc).isoformat()
+        started_at = datetime.now(UTC).isoformat()
         try:
             await store.initialize()
             previous = await store.state()
@@ -261,7 +261,7 @@ class VectorBenchmarkRunner:
             result: dict[str, object] = {
                 "schema_version": "habitus_vector_benchmark_result_v1",
                 "started_at": started_at,
-                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": datetime.now(UTC).isoformat(),
                 "dataset": self.dataset.name,
                 "dataset_source": self.dataset.source_path,
                 "dataset_sha256": self.dataset.source_sha256,

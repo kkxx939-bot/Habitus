@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from benchmark.datasets.common import (
@@ -55,7 +55,7 @@ def _sample(raw: object, index: int) -> BenchmarkSample:
     raw_sessions = list_value(item.get("haystack_sessions"), f"{sample_id}.haystack_sessions")
     raw_dates = list_value(item.get("haystack_dates", []), f"{sample_id}.haystack_dates")
     raw_ids = list_value(item.get("haystack_session_ids", []), f"{sample_id}.haystack_session_ids")
-    fallback = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    fallback = datetime(2000, 1, 1, tzinfo=UTC)
     sessions: list[BenchmarkSession] = []
     session_evidence: dict[str, str] = {}
     for session_index, raw_session in enumerate(raw_sessions):

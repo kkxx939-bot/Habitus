@@ -6,7 +6,7 @@ import asyncio
 import os
 import time
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from uuid import uuid4
 
@@ -136,7 +136,7 @@ class MemoryWorker:
                 asyncio.shield(task),
                 timeout=self.config.shutdown_timeout_seconds,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
@@ -314,7 +314,7 @@ class MemoryWorker:
                     timeout=self.config.heartbeat_interval_seconds,
                 )
                 return
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 try:
                     current_lease = await asyncio.to_thread(
                         self.runner.store.renew,
@@ -329,7 +329,7 @@ class MemoryWorker:
                     execution.cancel()
                     raise
                 except TimeoutError as exc:
-                    if current_lease.lease_expires_at > datetime.now(timezone.utc):
+                    if current_lease.lease_expires_at > datetime.now(UTC):
                         continue
                     execution.cancel()
                     raise MemoryJobLeaseLostError("memory job lease could not be renewed before expiry") from exc
@@ -338,7 +338,7 @@ class MemoryWorker:
                     raise
 
     async def _wait_until(self, available_at: datetime) -> None:
-        remaining = (available_at.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
+        remaining = (available_at.astimezone(UTC) - datetime.now(UTC)).total_seconds()
         await self._wait(max(self.config.poll_interval_seconds, remaining))
 
     async def _wait(self, delay_seconds: float) -> None:
@@ -347,7 +347,7 @@ class MemoryWorker:
         self._wake_event.clear()
         try:
             await asyncio.wait_for(self._wake_event.wait(), timeout=delay_seconds)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
     def _observe(

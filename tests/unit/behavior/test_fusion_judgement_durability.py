@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -116,7 +116,7 @@ def test_judged_at_is_recorded_because_it_cannot_be_derived() -> None:
     """证据齐备时刻可以从 covers 算出来，判断时刻不行——不记就永远丢了。"""
 
     washing = derived()[0]
-    assert washing.judged_at == JUDGED_AT.astimezone(timezone.utc)
+    assert washing.judged_at == JUDGED_AT.astimezone(UTC)
     assert washing.judged_at > washing.evidence_ready_at
     assert washing.fusion_lag_seconds == pytest.approx((JUDGED_AT - FRAGMENTS[1].available_at).total_seconds())
 
@@ -577,9 +577,9 @@ def test_context_is_ordered_by_real_time_not_by_the_local_offset_string(tmp_path
     store.put_payload(record("b" * 64, "2026-08-15T00:30:00.000000+08:00", "2026-08-15T00:00:00.000000Z"))
     store.put_payload(record("a" * 64, "2026-08-14T20:00:00.000000-05:00", "2026-08-15T02:00:00.000000Z"))
 
-    context = store.recent_before(datetime(2026, 8, 15, 3, tzinfo=timezone.utc), limit=8, lookback_seconds=86_400)
+    context = store.recent_before(datetime(2026, 8, 15, 3, tzinfo=UTC), limit=8, lookback_seconds=86_400)
 
-    moments = [datetime.fromisoformat(str(item["started_at"])).astimezone(timezone.utc) for item in context]
+    moments = [datetime.fromisoformat(str(item["started_at"])).astimezone(UTC) for item in context]
     assert moments == sorted(moments)
     assert str(context[0]["started_at"]).endswith("+08:00")
 
@@ -619,7 +619,7 @@ def test_a_long_running_judgement_stays_inside_the_lookback_window(tmp_path) -> 
         )
         return payload
 
-    cutoff = datetime(2026, 8, 15, 3, tzinfo=timezone.utc)
+    cutoff = datetime(2026, 8, 15, 3, tzinfo=UTC)
     # 做饭：两小时前开始（早于 1 小时回看下界），但最后观测就在本段之前一分钟
     store.put_payload(record("c" * 64, "2026-08-15T01:00:00.000000Z", "2026-08-15T02:59:00.000000Z"))
     # 洗手：完全落在窗口内

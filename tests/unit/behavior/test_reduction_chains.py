@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta, timezone
+from datetime import UTC, timedelta
 from typing import Any
 
 import pytest
@@ -205,11 +205,11 @@ def test_seal_horizon_takes_the_earlier_of_wall_clock_and_queue_frontier() -> No
     now = at(7200)
     lookback = 3_600.0
     unblocked = seal_horizon(now=now, frontier_cutoff=None, lookback_seconds=lookback)
-    assert unblocked == (now - timedelta(seconds=3600)).astimezone(timezone.utc)
+    assert unblocked == (now - timedelta(seconds=3600)).astimezone(UTC)
     # 队列积压的旧段还能引用旧判断——前沿更早时，封口视界必须跟着前沿走。
     frontier = at(300)
     blocked = seal_horizon(now=now, frontier_cutoff=frontier, lookback_seconds=lookback)
-    assert blocked == (frontier - timedelta(seconds=3600)).astimezone(timezone.utc)
+    assert blocked == (frontier - timedelta(seconds=3600)).astimezone(UTC)
 
 
 def test_a_chain_linking_an_unsealed_target_is_deferred_to_the_fixpoint() -> None:
@@ -368,11 +368,10 @@ def test_a_supersedes_cycle_stays_visible_and_unconsumed() -> None:
 def test_zero_offset_records_are_rejected_at_parse_time() -> None:
     """零偏移与树同口径在门口现形，不许走到 stage 最深处才炸。"""
 
-    from datetime import timezone as _tz
 
     bad = wash_head(
-        started_at=at(18).astimezone(_tz.utc),
-        last_observed_at=at(40).astimezone(_tz.utc),
+        started_at=at(18).astimezone(UTC),
+        last_observed_at=at(40).astimezone(UTC),
     )
     with pytest.raises(BehaviorReductionError, match="non-zero local offset"):
         parse(bad)

@@ -8,7 +8,7 @@ import json
 import subprocess
 import time
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from benchmark.context import select_answer_context
@@ -96,7 +96,7 @@ class BenchmarkRunner:
         if not self.resume and (self.answers_path.exists() or self.ingest_path.exists()):
             raise BenchmarkRunError("benchmark output exists; use --resume or a new output directory")
         identity = self._run_identity()
-        started_at = datetime.now(timezone.utc).isoformat()
+        started_at = datetime.now(UTC).isoformat()
         if self.manifest_path.exists():
             previous = _read_object(self.manifest_path)
             if not self.resume:
@@ -112,7 +112,7 @@ class BenchmarkRunner:
                 "schema_version": "habitus_benchmark_run_v2",
                 "status": "running",
                 "started_at": started_at,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(UTC).isoformat(),
                 "identity": identity,
             },
         )
@@ -129,7 +129,7 @@ class BenchmarkRunner:
                     "schema_version": "habitus_benchmark_run_v2",
                     "status": "failed",
                     "started_at": started_at,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": datetime.now(UTC).isoformat(),
                     "identity": identity,
                     "error": f"{type(exc).__name__}: {exc}",
                 },
@@ -141,7 +141,7 @@ class BenchmarkRunner:
                 "schema_version": "habitus_benchmark_run_v2",
                 "status": "completed",
                 "started_at": started_at,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(UTC).isoformat(),
                 "identity": identity,
                 "answer_count": len(completed),
                 "answer_error_count": sum(bool(record.error) for record in completed),
@@ -308,7 +308,7 @@ class BenchmarkRunner:
             "memory_document_count": len(addresses),
             "memory_documents_by_kind": dict(sorted(kinds.items())),
             "ingest_latency_ms": (time.perf_counter() - started) * 1_000,
-            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": datetime.now(UTC).isoformat(),
         }
         _write_json(manifest_path, ingest_record)
         _append_jsonl(self.ingest_path, ingest_record)

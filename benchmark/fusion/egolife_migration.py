@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -103,7 +103,7 @@ def _values_with_unowned(raw: dict[str, Any]) -> dict[str, Any]:
         "validation_attempts": raw["validation_attempts"],
         "judged_at": datetime.fromisoformat(
             raw["judged_at"].replace("Z", "+00:00")
-        ).astimezone(timezone.utc),
+        ).astimezone(UTC),
         "judgement_ids": tuple(raw["judgement_ids"]),
         "unreadable_observation_ids": tuple(raw["unreadable_observation_ids"]),
         "out_of_scope_observation_ids": tuple(raw["out_of_scope_observation_ids"]),

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from enum import Enum
 
 from foundation.ids import same_path_identity
@@ -603,11 +603,11 @@ class MemoryChangeReceipt:
     def _timestamp(value: datetime, label: str) -> datetime:
         if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
             raise ValueError(f"{label} must be timezone-aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     @staticmethod
     def _format_time(value: datetime) -> str:
-        return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     @staticmethod
     def _parse_time(value: object, label: str) -> datetime:
@@ -616,7 +616,7 @@ class MemoryChangeReceipt:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             raise ValueError(f"{label} must include timezone")
-        return parsed.astimezone(timezone.utc)
+        return parsed.astimezone(UTC)
 
 
 __all__ = [

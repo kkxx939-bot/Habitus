@@ -20,7 +20,7 @@ import json
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -101,7 +101,7 @@ class BehaviorFusionJobStore:
         self.state_path = self.jobs_root / _STATE_FILE
         self.path_lock = path_lock
         self.config = config or BehaviorFusionJobConfig()
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.lock_key = f"behavior-fusion-jobs:{self.root}"
         self._fence_depth = 0
 
@@ -571,7 +571,7 @@ class BehaviorFusionJobStore:
         now = self.clock()
         if not isinstance(now, datetime) or now.tzinfo is None:
             raise BehaviorFusionJobError("fusion job clock must return timezone-aware datetimes")
-        return now.astimezone(timezone.utc)
+        return now.astimezone(UTC)
 
     def _read_all(self) -> tuple[BehaviorFusionJob, ...]:
         if not self.jobs_root.exists():

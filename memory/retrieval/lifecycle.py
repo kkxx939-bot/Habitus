@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Protocol
 
@@ -746,7 +746,7 @@ def _utc_timestamp(value: datetime, label: str) -> datetime:
         raise TypeError(f"memory recall lifecycle {label} must be datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"memory recall lifecycle {label} must include a timezone")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _finite_score(value: object, label: str) -> float:

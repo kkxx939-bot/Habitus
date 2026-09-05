@@ -7,7 +7,7 @@ import json
 import subprocess
 import sys
 from collections.abc import Mapping
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -22,7 +22,7 @@ from integrations.http_api import app as app_module
 from integrations.sdk import ConversationRef, HabitusHTTPClient
 from Runtime import Runtime
 
-UTC = timezone.utc
+UTC = UTC
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 

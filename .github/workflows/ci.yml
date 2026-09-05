@@ -7,39 +7,27 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    env:
-      HABITUS_PYTHON_PATHS: Config Runtime ModelClient pre conversation memory behavior prediction infrastructure foundation integrations benchmark
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.13"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
       - name: Install dependencies and tooling
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e '.[model,http,observability,test]'
-          python -m pip install build ruff mypy pyright
+          python -m pip install -r requirements.txt
+          python -m pip install -e . --no-deps
       - name: Verify Agent plugins
         working-directory: plugins
         run: |
           npm run sync
           git diff --exit-code -- habitus-memory/scripts/shared habitus-memory-claude-code/scripts/shared
           npm test
-      - name: Compile
-        run: python -m compileall -q $HABITUS_PYTHON_PATHS
-      - name: Lint
-        run: ruff check $HABITUS_PYTHON_PATHS
-      - name: Type check
-        run: |
-          mypy $HABITUS_PYTHON_PATHS
-          pyright $HABITUS_PYTHON_PATHS
-      - name: Full deterministic test suite with branch coverage
-        run: |
-          python -m coverage run --branch -m pytest -q
-          python -m coverage report
+      - name: Compile, lint, type check and full test suite (scripts/ci.sh)
+        run: bash scripts/ci.sh
       - name: Verify unified bootstrap and secure non-interactive init
         run: |
           init_root="$RUNNER_TEMP/habitus-init"
@@ -50,27 +38,10 @@ jobs:
           test "$(stat -c '%a' "$init_root/config.yaml")" = "600"
           HABITUS_CI_CONFIG_PATH="$init_root/config.yaml" python -c 'import os; from Config import HabitusConfig; c=HabitusConfig.from_file(os.environ["HABITUS_CI_CONFIG_PATH"]); assert c.models.chat.route.credential_ref == "deepseek"; assert c.models.embedding.route.credential_ref == "ark"; assert c.models.rerank.route.credential_ref == "dashscope"; assert c.memory.vector_store.route.credential_ref == "vikingdb"'
           habitus harnesses
-      - name: Build wheel with service and plugin assets
+      - name: Build wheel and verify its contents against pyproject
         run: |
           python -m build --wheel
-          python - <<'PY'
-          import glob
-          import zipfile
-
-          wheel_path = glob.glob("dist/*.whl")[0]
-          names = set(zipfile.ZipFile(wheel_path).namelist())
-          assert "behavior/model.py" in names
-          assert "behavior/document/model.py" in names
-          assert "behavior/tree/store.py" in names
-          assert "behavior/schema/definitions/occurrences.yaml" in names
-          assert "behavior/schema/definitions/gaps.yaml" in names
-          assert "Config/behavior.py" in names
-          assert "infrastructure/store/processing_lock.py" not in names
-          assert "conversation/projection/behavior/projector.py" in names
-          assert "conversation/projection/behavior/store.py" in names
-          assert any(name.endswith("share/habitus/plugins/install-memory-plugin.mjs") for name in names)
-          assert any(name.endswith("share/habitus/plugins/harnesses.mjs") for name in names)
-          PY
+          python scripts/check_wheel.py
       - name: Install wheel and execute packaged plugin lifecycle
         run: |
           smoke_venv="$RUNNER_TEMP/habitus-wheel-smoke"

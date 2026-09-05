@@ -54,7 +54,7 @@ class ResidentWorker:
         self._wake_event.set()
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=self.shutdown_timeout_seconds)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task

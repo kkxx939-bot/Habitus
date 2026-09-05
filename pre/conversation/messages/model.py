@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -56,7 +56,7 @@ def conversation_datetime(value: datetime | str, label: str) -> datetime:
         raise ConversationMessageSchemaError(f"{label} must be a datetime or ISO-8601 string")
     if parsed.tzinfo is None:
         raise ConversationMessageSchemaError(f"{label} must include timezone")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def require_sha256(value: object, label: str) -> str:

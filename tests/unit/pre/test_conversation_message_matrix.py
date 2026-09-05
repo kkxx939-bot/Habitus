@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -20,7 +20,7 @@ from pre.conversation.messages import (
 from pre.conversation.messages.model import conversation_datetime, require_sha256
 from tests.helpers import BASE_TIME, closed_turn, message, tool_turn
 
-UTC = timezone.utc
+UTC = UTC
 
 
 @pytest.mark.parametrize(

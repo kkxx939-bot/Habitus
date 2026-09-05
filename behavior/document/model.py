@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from behavior.document.link import BehaviorStoredLink, normalize_stored_links
@@ -18,7 +18,7 @@ def utc_timestamp(value: datetime, field_name: str) -> datetime:
         raise TypeError(f"behavior document {field_name} must be a datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"behavior document {field_name} must include a timezone")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 @dataclass(frozen=True)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from conversation.source import (
     ConversationConsumerRunDisposition,
@@ -57,7 +57,7 @@ class MemoryConversationConsumer:
         self.journal = journal
         self.boundary_scorer = boundary_scorer
         self.output_store = output_store
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         # 显式版本与确定性配置共同形成契约；不依赖 callable repr 或进程地址。
         # TODO(conversation-source): 下列组件版本必须与各算法入口处的版本提示成对更新。
         self.processor_fingerprint = canonical_digest(

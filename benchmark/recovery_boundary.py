@@ -7,7 +7,7 @@ import hashlib
 import json
 import time
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from benchmark.boundary import (
@@ -151,7 +151,7 @@ class RecoveryBoundaryBenchmark:
                     if exc.job.status is MemoryJobStatus.FAILED:
                         break
                     if exc.job.next_attempt_at is not None:
-                        delay = (exc.job.next_attempt_at - datetime.now(timezone.utc)).total_seconds()
+                        delay = (exc.job.next_attempt_at - datetime.now(UTC)).total_seconds()
                         if delay > 0:
                             await asyncio.sleep(delay)
                     continue

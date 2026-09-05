@@ -19,7 +19,7 @@ import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from behavior.tree import BehaviorTree
 from Config import HabitusConfig
@@ -75,7 +75,7 @@ class PredictionRebuilder:
         self.behavior_tree = behavior_tree
         self.store = store
         self.config = config
-        self._clock = clock if clock is not None else lambda: datetime.now(timezone.utc)
+        self._clock = clock if clock is not None else lambda: datetime.now(UTC)
 
     def run_once(self) -> PublishedGeneration | None:
         """同步跑一趟；行为树还没有可用记录时返回 None。"""

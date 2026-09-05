@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
@@ -63,7 +63,7 @@ async def judge_answers(
         },
         "config_fingerprint": hashlib.sha256(repr(judge_config).encode()).hexdigest(),
     }
-    started_at = datetime.now(timezone.utc).isoformat()
+    started_at = datetime.now(UTC).isoformat()
     if manifest_path.exists():
         previous = _read_object(manifest_path)
         if not resume or previous.get("identity") != identity:
@@ -76,7 +76,7 @@ async def judge_answers(
             "schema_version": "habitus_benchmark_judge_run_v2",
             "status": "running",
             "started_at": started_at,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
             "identity": identity,
         },
     )
@@ -117,7 +117,7 @@ async def judge_answers(
             "schema_version": "habitus_benchmark_judge_run_v2",
             "status": "completed",
             "started_at": started_at,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
             "identity": identity,
             "record_count": len(records),
             "judge_error_count": sum(record.verdict == "judge_error" for record in records),

@@ -8,7 +8,7 @@ import json
 import math
 import time
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
 
@@ -143,7 +143,7 @@ class RuntimeBoundaryBenchmark:
             )
         )
         runtime.initialize()
-        started_at = datetime.now(timezone.utc).isoformat()
+        started_at = datetime.now(UTC).isoformat()
         try:
             await runtime.components.memory.vector_index.rebuild(checkpoint=0)
             await runtime.components.conversation.summary_vector_index.rebuild(checkpoint=0)
@@ -189,7 +189,7 @@ class RuntimeBoundaryBenchmark:
                 "write_fraction": write_fraction,
                 "repetition": repetition,
                 "started_at": started_at,
-                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": datetime.now(UTC).isoformat(),
                 "baseline_ingest_seconds": ingest_seconds,
                 "observed_memory_documents": len(addresses),
                 "drained": drained,

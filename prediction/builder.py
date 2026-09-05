@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from foundation.integrity import canonical_digest
 from prediction import edges, nodes, recurrence
@@ -87,7 +87,7 @@ def build(
         reference=reference,
     )
     return PredictionTree(
-        built_at=built_at.astimezone(timezone.utc),
+        built_at=built_at.astimezone(UTC),
         reference_day=reference,
         config_digest=config_digest(config),
         slot_minutes=config.slot_minutes,

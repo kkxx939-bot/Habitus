@@ -4,7 +4,7 @@ import asyncio
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -264,7 +264,7 @@ def test_sufficient_memory_is_primary_and_prevents_summary_search(tmp_path: Path
 
 
 def test_find_records_only_the_final_model_visible_memory_as_success(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
     preference = document(MemoryKind.PREFERENCE, timestamp=now)
     uri = MemoryURI.from_address(preference.address)
     instance = service(
@@ -284,7 +284,7 @@ def test_find_records_only_the_final_model_visible_memory_as_success(tmp_path: P
 
 
 def test_sufficient_grader_result_records_only_retained_direct_memory_and_keeps_l2(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
     first = document(
         MemoryKind.PREFERENCE,
         fields={"topic": "回答风格-a", "content": "- 偏好简洁回答"},
@@ -329,7 +329,7 @@ def test_sufficient_grader_result_records_only_retained_direct_memory_and_keeps_
 
 
 def test_final_context_exposure_heats_each_retained_direct_memory(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
     first = document(
         MemoryKind.PREFERENCE,
         fields={"topic": "回答长度", "content": "- 偏好简洁回答"},
@@ -373,7 +373,7 @@ def test_final_context_exposure_heats_each_retained_direct_memory(tmp_path: Path
 def test_hot_low_relevance_memory_cannot_bypass_rerank_admission_or_enter_agent_context(
     tmp_path: Path,
 ) -> None:
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
     relevant = document(
         MemoryKind.PREFERENCE,
         fields={"topic": "回答长度", "content": "- 偏好简洁回答"},
@@ -448,7 +448,7 @@ def test_hot_low_relevance_memory_cannot_bypass_rerank_admission_or_enter_agent_
 
 
 def test_insufficient_memory_with_summary_still_records_final_direct_context_use(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
     preference = document(MemoryKind.PREFERENCE, timestamp=now)
     uri = MemoryURI.from_address(preference.address)
     instance = service(
@@ -473,7 +473,7 @@ def test_insufficient_memory_with_summary_still_records_final_direct_context_use
 
 
 def test_rejected_final_context_is_regraded_and_can_trigger_summary_fallback(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
     preference = document(MemoryKind.PREFERENCE, timestamp=now)
     uri = MemoryURI.from_address(preference.address)
     summaries = SummarySearch((summary_match(),))
@@ -570,7 +570,7 @@ class FailingRecallStateStore:
 
 
 def test_lifecycle_read_failure_keeps_semantic_order_and_marks_degradation(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
     preference = document(MemoryKind.PREFERENCE, timestamp=now)
     uri = MemoryURI.from_address(preference.address)
     lifecycle = MemoryRecallLifecycle(FailingRecallStateStore(fail_read=True))
@@ -590,7 +590,7 @@ def test_lifecycle_read_failure_keeps_semantic_order_and_marks_degradation(tmp_p
 
 
 def test_actual_use_write_failure_keeps_detailed_memory_and_marks_degradation(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
     preference = document(MemoryKind.PREFERENCE, timestamp=now)
     uri = MemoryURI.from_address(preference.address)
     lifecycle = MemoryRecallLifecycle(FailingRecallStateStore(fail_write=True))

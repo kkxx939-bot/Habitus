@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -29,7 +29,7 @@ from memory.uri import MemoryURI
 from tests.helpers import codec, document
 from tests.unit.conversation.test_summary_generation import RecordingProvider, structured
 
-NOW = datetime(2026, 8, 3, 8, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 3, 8, 0, tzinfo=UTC)
 
 
 def manager(tmp_path, responses, *, maintenance_config=None):

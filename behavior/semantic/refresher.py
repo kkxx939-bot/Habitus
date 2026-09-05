@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from behavior.model import BehaviorAddress, BehaviorDirectory, BehaviorKind, BehaviorLevel
 from behavior.semantic.config import BehaviorSemanticConfig
@@ -314,7 +314,7 @@ class BehaviorSemanticRefresher:
 
 
 def _instant(value: datetime) -> datetime:
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 __all__ = ["BehaviorSemanticRefreshError", "BehaviorSemanticRefresher"]

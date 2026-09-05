@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from memory.conversation import (
     ConversationAddress,
@@ -190,7 +190,7 @@ class ConversationLifecycleManager:
 
         if not isinstance(address, ConversationAddress):
             raise TypeError("address must be ConversationAddress")
-        current_time = _utc_datetime(now or datetime.now(timezone.utc))
+        current_time = _utc_datetime(now or datetime.now(UTC))
         pending_retirement = self.retirement_store.for_address(address)
         if len(pending_retirement) > 1:
             raise ConversationLifecycleError("one Conversation has multiple retiring Archives")
@@ -562,7 +562,7 @@ def _utc_datetime(value: datetime) -> datetime:
         raise TypeError("lifecycle now must be datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("lifecycle now must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 __all__ = [

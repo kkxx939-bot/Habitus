@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 
 from memory.workflow import MemoryJobStatus
@@ -93,7 +93,7 @@ class RuntimeHealthService:
         else:
             status = RuntimeHealthStatus.HEALTHY
         ready = runtime_state in {"ready", "running"} and not critical_unhealthy and not critical_degraded
-        return RuntimeHealthReport(status, ready, datetime.now(timezone.utc), tuple(checks))
+        return RuntimeHealthReport(status, ready, datetime.now(UTC), tuple(checks))
 
     def _behavior_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:
         """行为管线的健康面；**non-critical**——行为失败不阻断记忆主链的既定哲学在健康面同样成立。
@@ -156,7 +156,7 @@ class RuntimeHealthService:
             return RuntimeHealthCheck(
                 "prediction_tree", RuntimeHealthStatus.HEALTHY, "never_published", critical=False
             )
-        age = (datetime.now(timezone.utc) - published.published_at).total_seconds()
+        age = (datetime.now(UTC) - published.published_at).total_seconds()
         tolerance = 2.0 * prediction.tree_config.rebuild_interval_seconds
         if age > tolerance:
             return RuntimeHealthCheck(

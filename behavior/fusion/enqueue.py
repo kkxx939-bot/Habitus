@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from behavior.fusion.config import BehaviorFusionConfig
 from behavior.fusion.coverage import BehaviorCoverageIndex
@@ -88,7 +88,7 @@ class BehaviorFusionEnqueuer:
             raise TypeError("coverage must be BehaviorCoverageIndex")
         self.coverage = coverage or BehaviorCoverageIndex(observations.root)
         self.quiet_period = timedelta(seconds=float(quiet_period_seconds))
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     def enqueue_ready(self) -> BehaviorFusionEnqueueResult:
         """把已经收尾且尚未被任何作业覆盖的观测登记成作业。"""
@@ -146,7 +146,7 @@ class BehaviorFusionEnqueuer:
         now = self.clock()
         if not isinstance(now, datetime) or now.tzinfo is None:
             raise TypeError("clock must return timezone-aware datetimes")
-        return now.astimezone(timezone.utc)
+        return now.astimezone(UTC)
 
 
 __all__ = [

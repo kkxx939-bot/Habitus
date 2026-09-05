@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from conversation.projection import (
@@ -31,7 +31,7 @@ from memory.conversation import ConversationAppendResult, ConversationAppendStat
 from memory.workflow import ConversationMemoryIngestResult, MemoryConversationOutput, MemoryConversationOutputStore
 from pre.conversation import ConversationBatch, ConversationMessage, ConversationMessageRole
 
-NOW = datetime(2026, 8, 8, 1, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 8, 1, 0, tzinfo=UTC)
 STARTED_ON = date(2026, 8, 8)
 
 

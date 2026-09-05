@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from time import monotonic
 from types import MappingProxyType
 from typing import Protocol
@@ -109,7 +109,7 @@ class ConversationConsumerDelivery:
         self.inspector = inspector
         self.fence = fence
         self.consumers: Mapping[ConversationSourceConsumer, ConversationDurableConsumer] = MappingProxyType(registry)
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         if observer is not None and not callable(getattr(observer, "record", None)):
             raise TypeError("observer must implement record")
         self.observer: Observer = observer or NullObserver()

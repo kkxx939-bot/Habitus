@@ -11,7 +11,7 @@ from bisect import bisect_right
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from enum import Enum
 from uuid import uuid4
 
@@ -277,7 +277,7 @@ class LifecycleWorker:
                 asyncio.shield(task),
                 timeout=self.config.shutdown_timeout_seconds,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
@@ -335,7 +335,7 @@ class LifecycleWorker:
                 self._state = LifecycleWorkerState.STOPPED
 
     async def _run_once(self) -> LifecycleMaintenanceCycleResult:
-        started_at = datetime.now(timezone.utc)
+        started_at = datetime.now(UTC)
         lock_store = self.journal.path_lock.lock_store
         try:
             token = await asyncio.to_thread(
@@ -344,7 +344,7 @@ class LifecycleWorker:
                 self.config.lease_ttl_seconds,
             )
         except TimeoutError:
-            finished_at = datetime.now(timezone.utc)
+            finished_at = datetime.now(UTC)
             return LifecycleMaintenanceCycleResult(
                 lease_acquired=False,
                 started_at=started_at,
@@ -432,7 +432,7 @@ class LifecycleWorker:
         return LifecycleMaintenanceCycleResult(
             lease_acquired=True,
             started_at=started_at,
-            finished_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(UTC),
             selected_addresses=selected,
             maintained_addresses=tuple(maintained),
             failures=tuple(failures),
@@ -500,7 +500,7 @@ class LifecycleWorker:
             return
         try:
             await asyncio.wait_for(self._wake_event.wait(), timeout=delay_seconds)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         finally:
             self._wake_event.clear()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from types import MappingProxyType
 
 import pytest
@@ -385,13 +385,13 @@ def test_uri_is_immutable_hashable_and_compares_only_normalized_identity() -> No
 
 
 @pytest.mark.parametrize("revision", [1, 2, 10, 2**31 - 1])
-@pytest.mark.parametrize("offset", [timezone.utc, timezone(timedelta(hours=8)), timezone(timedelta(hours=-5))])
+@pytest.mark.parametrize("offset", [UTC, timezone(timedelta(hours=8)), timezone(timedelta(hours=-5))])
 def test_document_metadata_normalizes_timezones_and_preserves_revision(revision: int, offset: timezone) -> None:
     created = datetime(2026, 7, 28, 12, tzinfo=offset)
     metadata = MemoryDocumentMetadata(revision, created, created + timedelta(seconds=1), None)
     assert metadata.revision == revision
-    assert metadata.created_at.tzinfo is timezone.utc
-    assert metadata.updated_at.tzinfo is timezone.utc
+    assert metadata.created_at.tzinfo is UTC
+    assert metadata.updated_at.tzinfo is UTC
 
 
 @pytest.mark.parametrize("revision", [0, -1, True, False, 1.0, "1", None])

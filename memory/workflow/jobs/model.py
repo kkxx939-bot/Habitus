@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from enum import Enum
 
 MEMORY_JOB_ERROR_MAX_CHARS = 2_000
@@ -25,7 +25,7 @@ class MemoryJobNotReadyError(MemoryJobBlockedError):
     def __init__(self, available_at: datetime) -> None:
         if not isinstance(available_at, datetime) or available_at.tzinfo is None:
             raise TypeError("available_at must be a timezone-aware datetime")
-        self.available_at = available_at.astimezone(timezone.utc)
+        self.available_at = available_at.astimezone(UTC)
         super().__init__(f"oldest memory job is not ready before {self.available_at.isoformat()}")
 
 
@@ -94,7 +94,7 @@ class MemoryJobAbandonment:
             object.__setattr__(self, name, " ".join(value.split()))
         if not isinstance(self.abandoned_at, datetime) or self.abandoned_at.tzinfo is None:
             raise ValueError("abandoned_at must be timezone-aware")
-        object.__setattr__(self, "abandoned_at", self.abandoned_at.astimezone(timezone.utc))
+        object.__setattr__(self, "abandoned_at", self.abandoned_at.astimezone(UTC))
 
     @classmethod
     def from_failed_job(
@@ -272,7 +272,7 @@ class MemoryJob:
             value = getattr(self, name)
             if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
                 raise ValueError(f"memory job {name} must be timezone-aware")
-            object.__setattr__(self, name, value.astimezone(timezone.utc))
+            object.__setattr__(self, name, value.astimezone(UTC))
         if self.updated_at < self.created_at:
             raise ValueError("memory job updated_at cannot precede created_at")
 
@@ -291,7 +291,7 @@ class MemoryJob:
             return
         if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
             raise ValueError(f"memory job {name} must be timezone-aware")
-        object.__setattr__(self, name, value.astimezone(timezone.utc))
+        object.__setattr__(self, name, value.astimezone(UTC))
 
     @staticmethod
     def valid_worker_id(value: object) -> bool:

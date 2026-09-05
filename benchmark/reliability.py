@@ -7,7 +7,7 @@ import hashlib
 import json
 import time
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from benchmark.isolation import isolated_config, require_empty_directory
@@ -195,7 +195,7 @@ class RecoveryBenchmark:
             if failed_job.status is MemoryJobStatus.FAILED:
                 raise BenchmarkRunError("transient vector failure was incorrectly classified as terminal")
             if failed_job.next_attempt_at is not None:
-                delay = (failed_job.next_attempt_at - datetime.now(timezone.utc)).total_seconds()
+                delay = (failed_job.next_attempt_at - datetime.now(UTC)).total_seconds()
                 if delay > 0:
                     await asyncio.sleep(delay)
 
@@ -210,7 +210,7 @@ class RecoveryBenchmark:
             elapsed_ms = (time.perf_counter() - started) * 1_000
             summary: dict[str, object] = {
                 "schema_version": "habitus_recovery_benchmark_v1",
-                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "generated_at": datetime.now(UTC).isoformat(),
                 "dataset": self.dataset.name.value,
                 "sample_id": self.sample.sample_id,
                 "fault_operation": fault_store.operation,

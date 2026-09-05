@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol
 
 from foundation.integrity import canonical_digest
@@ -37,7 +37,7 @@ class ConversationAdapterContext:
             raise ValueError("start_sequence must be a non-negative integer")
         if not isinstance(self.occurred_at, datetime) or self.occurred_at.tzinfo is None:
             raise ValueError("occurred_at must be timezone-aware")
-        object.__setattr__(self, "occurred_at", self.occurred_at.astimezone(timezone.utc))
+        object.__setattr__(self, "occurred_at", self.occurred_at.astimezone(UTC))
 
 
 @dataclass(frozen=True)
@@ -493,7 +493,7 @@ def _timestamp(value: object, fallback: datetime) -> datetime:
         raise ConversationProtocolError("record timestamp must be ISO-8601 text") from exc
     if parsed.tzinfo is None:
         raise ConversationProtocolError("record timestamp must include timezone")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def _add_anthropic_content(

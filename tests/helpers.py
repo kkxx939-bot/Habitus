@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from infrastructure.editor.snapshot import SnapshotBatch, SnapshotState, VersionedSnapshot
 from memory.document import MemoryDocument, MemoryDocumentCodec, MemoryDocumentMetadata
@@ -17,7 +17,7 @@ from pre.conversation.messages import (
 )
 from pre.conversation.summaries import ConversationSegmentSummary, ConversationSummaryContent
 
-UTC = timezone.utc
+UTC = UTC
 BASE_TIME = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
 
 

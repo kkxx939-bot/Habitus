@@ -68,7 +68,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
@@ -143,7 +143,7 @@ def to_utc(value: datetime, label: str) -> datetime:
     """归一到 UTC；极端年份的偏移换算会溢出，收敛成本模块的契约异常。"""
 
     try:
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
     except (OverflowError, OSError, ValueError) as exc:
         raise BehaviorObservationError(f"{label} is outside the representable time range") from exc
 

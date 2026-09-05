@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Barrier
 
@@ -59,7 +59,7 @@ def test_expired_sqlite_lease_can_be_reclaimed_but_old_token_cannot_renew_or_rel
     path = tmp_path / "locks.sqlite3"
     store = SQLiteLockStore(path)
     old = store.acquire("workflow:sequence", ttl_seconds=30)
-    expired = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
     with sqlite3.connect(path) as connection:
         connection.execute(
             "UPDATE locks SET expires_at = ? WHERE lock_key = ?",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from benchmark.evaluation import load_judge_records
@@ -36,7 +36,7 @@ def build_report(
 
     summary: dict[str, object] = {
         "schema_version": "habitus_benchmark_report_v2",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "dataset": answers[0].dataset if answers else "",
         "sample_count": len({item.sample_id for item in answers}),
         "question_count": len(answers),

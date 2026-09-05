@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from math import isfinite
 from pathlib import Path
 
@@ -93,7 +93,7 @@ class SQLiteLockStore:
 
     def acquire(self, lock_key: str, ttl_seconds: int = 30) -> LockToken:
         self.initialize()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires_at = (now + timedelta(seconds=max(1, ttl_seconds))).isoformat()
         token = uuid.uuid4().hex
         conn = self._connect()
@@ -139,7 +139,7 @@ class SQLiteLockStore:
 
     def renew(self, token: LockToken, ttl_seconds: int = 30) -> LockToken:
         self.initialize()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires_at = (now + timedelta(seconds=max(1, ttl_seconds))).isoformat()
         conn = self._connect()
         try:
@@ -176,7 +176,7 @@ class SQLiteLockStore:
 
     def assert_owned(self, token: LockToken) -> None:
         self.initialize()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         try:
             with closing(self._connect()) as conn:
                 row = conn.execute(
@@ -205,7 +205,7 @@ class SQLiteLockStore:
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             for token in unique.values():
                 row = conn.execute(
                     "SELECT token, fence, expires_at FROM locks WHERE lock_key = ?",
@@ -225,7 +225,7 @@ class SQLiteLockStore:
                     (renewed_until, token.lock_key, token.token, token.fence),
                 )
             yield
-            renewed_until = (datetime.now(timezone.utc) + timedelta(seconds=max(1, ttl_seconds))).isoformat()
+            renewed_until = (datetime.now(UTC) + timedelta(seconds=max(1, ttl_seconds))).isoformat()
             for token in unique.values():
                 conn.execute(
                     "UPDATE locks SET expires_at = ? WHERE lock_key = ? AND token = ? AND fence = ?",
@@ -255,7 +255,7 @@ class SQLiteLockStore:
                 UPDATE locks SET token = '', owner = '', expires_at = ?
                 WHERE lock_key = ? AND token = ? AND fence = ?
                 """,
-                (datetime.now(timezone.utc).isoformat(), token.lock_key, token.token, token.fence),
+                (datetime.now(UTC).isoformat(), token.lock_key, token.token, token.fence),
             )
             conn.commit()
         except sqlite3.OperationalError as exc:
@@ -271,7 +271,7 @@ class SQLiteLockStore:
         """只聚合有效租约和持有时长，不返回锁键、owner 或 token。"""
 
         self.initialize()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with closing(self._connect()) as connection:
             rows = connection.execute("SELECT expires_at, created_at FROM locks WHERE token != ''").fetchall()
         ages: list[float] = []
@@ -283,8 +283,8 @@ class SQLiteLockStore:
             except ValueError:
                 continue
             if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
-            ages.append(max(0.0, (now - created_at.astimezone(timezone.utc)).total_seconds()))
+                created_at = created_at.replace(tzinfo=UTC)
+            ages.append(max(0.0, (now - created_at.astimezone(UTC)).total_seconds()))
         return LockStoreSnapshot(
             active_count=len(ages),
             hanging_count=sum(age >= warning_seconds for age in ages),
@@ -349,8 +349,8 @@ class SQLiteLockStore:
         except ValueError:
             return False
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc) > now
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC) > now
 
     def _is_contention(self, exc: sqlite3.OperationalError) -> bool:
         code = getattr(exc, "sqlite_errorcode", None)

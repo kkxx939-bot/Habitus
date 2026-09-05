@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 from integrations.sdk.contracts import (
@@ -131,7 +131,7 @@ class PreparedAgentTurn:
             raise ValueError("payload_json must use canonical JSON encoding")
         if not isinstance(self.occurred_at, datetime) or self.occurred_at.tzinfo is None:
             raise ValueError("occurred_at must be timezone-aware")
-        object.__setattr__(self, "occurred_at", self.occurred_at.astimezone(timezone.utc))
+        object.__setattr__(self, "occurred_at", self.occurred_at.astimezone(UTC))
         if self.after_turn is not None and not isinstance(self.after_turn, bool):
             raise TypeError("after_turn must be boolean or None")
 

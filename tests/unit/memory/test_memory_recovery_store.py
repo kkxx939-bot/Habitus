@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -18,7 +18,7 @@ def test_recovery_store_round_trips_immutable_detailed_document_and_deletes_term
         fields={"topic": "回答结构", "content": "- 先给结论\n- 保留精确路径和日期"},
     )
     store = MemoryRecoveryStore(tree)
-    saved_at = datetime(2026, 8, 3, 8, 0, tzinfo=timezone.utc)
+    saved_at = datetime(2026, 8, 3, 8, 0, tzinfo=UTC)
 
     first = store.save(item, saved_at=saved_at)
     replay = store.save(item, saved_at=saved_at.replace(hour=9))
@@ -42,7 +42,7 @@ def test_recovery_store_selects_latest_revision_within_one_content_generation(tm
     uri = MemoryURI.from_address(first.address)
     assert first.metadata.created_at == second.metadata.created_at
     store = MemoryRecoveryStore(tree)
-    saved_at = datetime(2026, 8, 3, 8, 0, tzinfo=timezone.utc)
+    saved_at = datetime(2026, 8, 3, 8, 0, tzinfo=UTC)
     store.save(first, saved_at=saved_at)
     store.save(second, saved_at=saved_at)
 

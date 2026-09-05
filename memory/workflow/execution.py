@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from foundation.observability import NullObserver, Observer, observe_operation
 from memory.conversation import ConversationAddress, ConversationMessageJournal
@@ -81,7 +81,7 @@ class MemoryJobExecutor:
         self.change_receipts = change_receipts
         self.jobs = jobs
         self.segment_products = MemorySegmentProductBuilder(summary_service, editor)
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.observer = observer or NullObserver()
 
     async def execute(self, lease: MemoryJobLease) -> MemoryJobCommit:
@@ -137,7 +137,7 @@ class MemoryJobExecutor:
             raise TypeError("memory workflow clock must return datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("memory workflow clock must return timezone-aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
 
 __all__ = ["MemoryJobCommit", "MemoryJobExecutor"]

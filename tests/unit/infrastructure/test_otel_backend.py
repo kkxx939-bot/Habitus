@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import ModuleType
 
 import pytest
@@ -14,7 +14,7 @@ from Config.observability import ObservabilityTracingConfig
 from foundation.observability import ObservationEvent, ObservationStatus, bind_observation_context
 from infrastructure.observability.otel import OpenTelemetryBackend
 
-UTC = timezone.utc
+UTC = UTC
 
 
 class Instrument:

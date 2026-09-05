@@ -7,7 +7,7 @@ import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from foundation.integrity import canonical_json, text_digest
@@ -315,7 +315,7 @@ def _timestamp(value: datetime) -> datetime:
         raise TypeError("memory recovery timestamp must be datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("memory recovery timestamp must include a timezone")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _format_timestamp(value: datetime) -> str:

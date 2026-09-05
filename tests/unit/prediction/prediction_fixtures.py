@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 
 from prediction import builder, query
 from prediction.config import PredictionTreeConfig
@@ -144,7 +144,7 @@ def publish(actions, gaps=(), *, config: PredictionTreeConfig, reference_day: da
         snapshot,
         config=config,
         reference=reference_day,
-        built_at=datetime(2026, 12, 31, tzinfo=timezone.utc),
+        built_at=datetime(2026, 12, 31, tzinfo=UTC),
     )
     return Published(tree)
 

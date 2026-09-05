@@ -6,7 +6,7 @@ import os
 import sqlite3
 import threading
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from memory.retrieval.lifecycle import (
@@ -509,7 +509,7 @@ class SQLiteMemoryRecallLifecycleStore:
             raise TypeError("memory recall lifecycle timestamp must be datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("memory recall lifecycle timestamp must include a timezone")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     @classmethod
     def _optional_timestamp(cls, value: datetime | None) -> str | None:
@@ -517,7 +517,7 @@ class SQLiteMemoryRecallLifecycleStore:
 
     @staticmethod
     def _format_timestamp(value: datetime) -> str:
-        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
     @classmethod
     def _parse_optional_timestamp(cls, value: object) -> datetime | None:
@@ -530,7 +530,7 @@ class SQLiteMemoryRecallLifecycleStore:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             raise ValueError("memory recall lifecycle stored timestamp lacks timezone")
-        return parsed.astimezone(timezone.utc)
+        return parsed.astimezone(UTC)
 
 
 __all__ = ["SQLiteMemoryRecallLifecycleStore"]

@@ -7,7 +7,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 
@@ -102,7 +102,7 @@ class MemoryTransactionJournalRecord:
             value = getattr(self, name)
             if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
                 raise ValueError(f"journal {name} must be timezone-aware")
-            object.__setattr__(self, name, value.astimezone(timezone.utc))
+            object.__setattr__(self, name, value.astimezone(UTC))
         if self.updated_at < self.created_at:
             raise ValueError("journal updated_at cannot precede created_at")
         if not isinstance(self.lock_identities, tuple) or any(
@@ -405,7 +405,7 @@ class MemoryTransactionJournal:
     def _timestamp(value: datetime) -> str:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("journal timestamp must be timezone-aware")
-        return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     @staticmethod
     def _parse_timestamp(value: object) -> datetime:
@@ -417,7 +417,7 @@ class MemoryTransactionJournal:
             raise MemoryTransactionJournalError("journal timestamp is invalid") from exc
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             raise MemoryTransactionJournalError("journal timestamp lacks a timezone")
-        return parsed.astimezone(timezone.utc)
+        return parsed.astimezone(UTC)
 
 
 __all__ = [

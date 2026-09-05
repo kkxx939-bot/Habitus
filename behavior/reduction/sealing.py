@@ -22,7 +22,7 @@ lookback 只准从 ``behavior.fusion.config`` import——融合"还能续"与�
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from behavior.document.link import BehaviorLinkType
 from behavior.reduction.chains import BehaviorChain, ChainAssembly
@@ -44,11 +44,11 @@ def seal_horizon(
         raise BehaviorReductionError("lookback_seconds must be a number")
     if lookback_seconds <= 0:
         raise BehaviorReductionError("lookback_seconds must be positive")
-    horizon = now.astimezone(timezone.utc)
+    horizon = now.astimezone(UTC)
     if frontier_cutoff is not None:
         if not isinstance(frontier_cutoff, datetime) or frontier_cutoff.utcoffset() is None:
             raise BehaviorReductionError("frontier_cutoff must be a timezone-aware datetime")
-        horizon = min(horizon, frontier_cutoff.astimezone(timezone.utc))
+        horizon = min(horizon, frontier_cutoff.astimezone(UTC))
     return horizon - timedelta(seconds=float(lookback_seconds))
 
 

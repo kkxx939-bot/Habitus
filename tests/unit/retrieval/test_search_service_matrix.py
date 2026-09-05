@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -268,7 +268,7 @@ def test_search_clock_must_return_timezone_aware_datetime(tmp_path: Path, clock_
 def test_timezone_clock_is_normalized_for_active_intention_review(tmp_path: Path) -> None:
     intention = document(MemoryKind.INTENTION)
     uri = MemoryURI.from_address(intention.address)
-    now = datetime(2026, 7, 10, 16, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 10, 16, tzinfo=UTC)
     instance = service(
         tmp_path,
         semantic=SemanticSearch((MemorySearchHit(uri, 0.9),)),
@@ -386,7 +386,7 @@ def test_relation_expansion_respects_per_match_and_total_capacity(
 
 
 def test_successful_search_heats_direct_memory_but_not_relation_neighbor(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
     seed, neighbors = _linked_preferences(1)
     seed_uri = MemoryURI.from_address(seed.address)
     neighbor_uri = MemoryURI.from_address(neighbors[0].address)

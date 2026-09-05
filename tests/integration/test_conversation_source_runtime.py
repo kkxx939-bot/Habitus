@@ -2,7 +2,7 @@
 
 import asyncio
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import MethodType
 
@@ -61,7 +61,7 @@ def test_runtime_start_recovers_durable_source_with_only_missing_outcomes(tmp_pa
             omit_tool_call_ids=frozenset(),
             delivery_id=request_digest,
             request_digest=request_digest,
-            recorded_at=datetime(2026, 8, 7, 1, 0, tzinfo=timezone.utc),
+            recorded_at=datetime(2026, 8, 7, 1, 0, tzinfo=UTC),
         )
         runtime.components.conversation.sources.put(envelope)
         assert tuple(entry.consumer for entry in runtime.components.conversation.source_recovery.pending()) == (

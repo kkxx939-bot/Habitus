@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -190,9 +190,9 @@ class BehaviorJudgementStore:
             not isinstance(judged_before, datetime) or judged_before.utcoffset() is None
         ):
             raise BehaviorFusionError("judged_before must be a timezone-aware datetime")
-        cutoff = moment.astimezone(timezone.utc)
+        cutoff = moment.astimezone(UTC)
         earliest = cutoff - timedelta(seconds=float(lookback_seconds))
-        settled = None if judged_before is None else judged_before.astimezone(timezone.utc)
+        settled = None if judged_before is None else judged_before.astimezone(UTC)
 
         def eligible(record: Mapping[str, Any]) -> bool:
             if _parse_instant(record["last_observed_at"]) > cutoff:

@@ -7,7 +7,7 @@ import math
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol
 
 from foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
@@ -202,7 +202,7 @@ class SearchService:
         self.cold_probe_expander = cold_probe_expander
         self.summary_fallback_expander = summary_fallback_expander
         self.summary_use_recorder = summary_use_recorder
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.observer = observer or NullObserver()
 
     async def find(
@@ -911,7 +911,7 @@ class SearchService:
             raise TypeError("memory search clock must return datetime")
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:
             raise ValueError("memory search clock must return a timezone-aware datetime")
-        return timestamp.astimezone(timezone.utc)
+        return timestamp.astimezone(UTC)
 
     @staticmethod
     def _require_reciprocal(

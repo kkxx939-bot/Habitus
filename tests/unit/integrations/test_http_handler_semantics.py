@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -26,7 +26,7 @@ from Runtime import (
     Runtime,
 )
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _runtime(*, adapted_after_turn: bool) -> Runtime:

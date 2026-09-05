@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 
 from memory.document import MemoryDocument
@@ -115,7 +115,7 @@ def _utc_timestamp(value: datetime, label: str) -> datetime:
         raise TypeError(f"{label} must be a datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{label} must include a timezone")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 __all__ = [

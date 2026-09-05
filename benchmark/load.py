@@ -7,7 +7,7 @@ import hashlib
 import json
 import time
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from benchmark.isolation import isolated_config, require_empty_directory
@@ -83,7 +83,7 @@ class RuntimeLoadBenchmark:
         )
         runtime.initialize()
         events: list[dict[str, object]] = []
-        started_at = datetime.now(timezone.utc).isoformat()
+        started_at = datetime.now(UTC).isoformat()
         try:
             await runtime.components.memory.vector_index.rebuild(checkpoint=0)
             await runtime.components.conversation.summary_vector_index.rebuild(checkpoint=0)
@@ -118,7 +118,7 @@ class RuntimeLoadBenchmark:
             summary: dict[str, object] = {
                 "schema_version": "habitus_runtime_load_benchmark_v1",
                 "started_at": started_at,
-                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": datetime.now(UTC).isoformat(),
                 "dataset": self.dataset.name.value,
                 "sample_id": self.sample.sample_id,
                 "search_operations_per_phase": self.search_operations,

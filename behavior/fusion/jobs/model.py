@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
 
@@ -61,7 +61,7 @@ class BehaviorFusionJobNotReadyError(BehaviorFusionJobBlockedError):
     def __init__(self, available_at: datetime) -> None:
         if not isinstance(available_at, datetime) or available_at.tzinfo is None:
             raise TypeError("available_at must be a timezone-aware datetime")
-        self.available_at = available_at.astimezone(timezone.utc)
+        self.available_at = available_at.astimezone(UTC)
         super().__init__(f"oldest fusion job is not ready before {self.available_at.isoformat()}")
 
 
@@ -208,7 +208,7 @@ class BehaviorFusionJob:
                 continue
             if not isinstance(value, datetime) or value.tzinfo is None:
                 raise BehaviorFusionJobError(f"{name} must be timezone-aware")
-            object.__setattr__(self, name, value.astimezone(timezone.utc))
+            object.__setattr__(self, name, value.astimezone(UTC))
         if self.created_at is None or self.updated_at is None:
             raise BehaviorFusionJobError("created_at and updated_at are required")
         if self.last_error is not None:
@@ -372,7 +372,7 @@ class BehaviorFusionQueueSnapshot:
 def _timestamp(value: datetime | None) -> str | None:
     if value is None:
         return None
-    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _parse_timestamp(value: object, label: str) -> datetime | None:
@@ -385,7 +385,7 @@ def _required_timestamp(value: object, label: str) -> datetime:
     if isinstance(value, datetime):
         if value.tzinfo is None:
             raise BehaviorFusionJobError(f"{label} must be timezone-aware")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
     if not isinstance(value, str):
         raise BehaviorFusionJobError(f"{label} must be an ISO-8601 timestamp")
     try:
@@ -394,7 +394,7 @@ def _required_timestamp(value: object, label: str) -> datetime:
         raise BehaviorFusionJobError(f"{label} must be an ISO-8601 timestamp") from exc
     if parsed.tzinfo is None:
         raise BehaviorFusionJobError(f"{label} must be timezone-aware")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def lease_deadline(now: datetime, config: BehaviorFusionJobConfig) -> datetime:

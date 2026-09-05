@@ -134,11 +134,7 @@ def build_adapter_catalog(
 def load_adapter_catalog() -> AdapterCatalog:
     """发现已安装发行包的 entry point，并在当前进程只组合一次。"""
 
-    discovered = metadata.entry_points()
-    if hasattr(discovered, "select"):
-        entries = tuple(discovered.select(group=_ENTRY_POINT_GROUP))
-    else:  # pragma: no cover - Python 3.10 的旧 importlib.metadata 兼容形态
-        entries = tuple(discovered.get(_ENTRY_POINT_GROUP, ()))
+    entries = tuple(metadata.entry_points().select(group=_ENTRY_POINT_GROUP))
     registrars: list[AdapterRegistrar] = []
     for entry in sorted(entries, key=lambda item: (item.name, item.value)):
         loaded = entry.load()

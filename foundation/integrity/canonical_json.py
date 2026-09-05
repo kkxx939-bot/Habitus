@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from enum import Enum
 from types import MappingProxyType
 from typing import Any
@@ -27,8 +27,8 @@ def canonicalize(value: Any) -> Any:
     if isinstance(value, Enum):
         return canonicalize(value.value)
     if isinstance(value, datetime):
-        resolved = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-        return resolved.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        resolved = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return resolved.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, Mapping):

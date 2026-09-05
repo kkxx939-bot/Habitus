@@ -1,6 +1,6 @@
 """核心标识和规范摘要的不变量测试。"""
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from enum import Enum
 
 import pytest
@@ -57,7 +57,7 @@ def test_canonical_json_normalizes_mapping_order_dates_enums_and_sets() -> None:
 
     value = {
         "z": {3, 1, 2},
-        "time": datetime(2026, 7, 1, 16, tzinfo=timezone.utc),
+        "time": datetime(2026, 7, 1, 16, tzinfo=UTC),
         "date": date(2026, 7, 1),
         "choice": Choice.A,
     }

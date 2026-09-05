@@ -4,7 +4,7 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -26,7 +26,7 @@ from memory.retrieval import (
 from memory.uri import MemoryURI
 from tests.helpers import document
 
-NOW = datetime(2026, 7, 31, 8, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 31, 8, 0, tzinfo=UTC)
 
 
 def candidate(

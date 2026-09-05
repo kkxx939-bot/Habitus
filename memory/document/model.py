@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any
 
@@ -18,7 +18,7 @@ def _utc_timestamp(value: datetime, field_name: str) -> datetime:
         raise TypeError(f"memory document {field_name} must be a datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"memory document {field_name} must include a timezone")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 @dataclass(frozen=True)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
 
 from prediction import query, recurrence
@@ -198,12 +200,12 @@ def _by_target(candidates):
 def _tree(edges, cfg):
     """把一批边包成一棵最小的树——联合查询的生产路径在 query 上，测试就该走那条。"""
 
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from prediction.model import PredictionTree
 
     return PredictionTree(
-        built_at=datetime(2026, 8, 16, tzinfo=timezone.utc),
+        built_at=datetime(2026, 8, 16, tzinfo=UTC),
         reference_day=reference(0),
         config_digest="test",
         slot_minutes=cfg.slot_minutes,

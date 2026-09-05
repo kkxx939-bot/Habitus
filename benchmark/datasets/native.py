@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -51,7 +51,7 @@ def _sample(raw: object, index: int, question_limit: int | None) -> BenchmarkSam
     source_id = text_value(item.get("sample_id", f"sample_{index}"), "Habitus sample_id")
     sample_id = f"sample-{index:05d}-{safe_identifier(source_id, fallback='sample')[:80]}"
     sessions_raw = list_value(item.get("sessions"), f"{sample_id}.sessions")
-    fallback = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    fallback = datetime(2000, 1, 1, tzinfo=UTC)
     sessions: list[BenchmarkSession] = []
     for session_index, raw_session in enumerate(sessions_raw):
         session = object_value(raw_session, f"{sample_id}.sessions[{session_index}]")

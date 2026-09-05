@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from behavior.kinds.config import BehaviorKindConfig
@@ -122,7 +122,7 @@ class BehaviorKindStore:
                 f"behavior kind registry revision changed: expected {expected_revision}, "
                 f"found {current.revision}"
             )
-        updated_at = timestamp.astimezone(timezone.utc)
+        updated_at = timestamp.astimezone(UTC)
         if hits_applied_checkpoint is not None and (not isinstance(hits_applied_checkpoint, str) or not hits_applied_checkpoint):
             raise BehaviorKindError("hits_applied_checkpoint must be non-empty text or None")
         snapshot = BehaviorKindSnapshot(registry, expected_revision + 1, updated_at, hits_applied_checkpoint)
@@ -204,7 +204,7 @@ class BehaviorKindStore:
             updated_at = datetime.fromisoformat(raw_updated.replace("Z", "+00:00"))
         except ValueError as exc:
             raise BehaviorKindStoreError("behavior kind registry updated_at is invalid") from exc
-        if updated_at.utcoffset() != timezone.utc.utcoffset(None):
+        if updated_at.utcoffset() != UTC.utcoffset(None):
             raise BehaviorKindStoreError("behavior kind registry updated_at must be UTC")
         entries_raw = metadata["kinds"]
         if not isinstance(entries_raw, list):

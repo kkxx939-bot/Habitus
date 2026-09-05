@@ -7,7 +7,7 @@ import os
 import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from foundation.ids import same_path_identity
 from foundation.integrity import canonical_json
@@ -250,7 +250,7 @@ class ConversationSummaryGenerator:
             raise TypeError("clock must be callable")
         self.client = client
         self.config = config or ConversationSummaryConfig()
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     async def generate(self, segment: ConversationSegment) -> ConversationSegmentSummary:
         """完整读取 Segment；输入过大时明确失败，绝不截断原文。"""
@@ -330,7 +330,7 @@ class ConversationSummaryGenerator:
             raise TypeError("summary clock must return datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("summary clock must return timezone-aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
 
 class ConversationSummaryService:

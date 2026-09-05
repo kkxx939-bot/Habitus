@@ -17,7 +17,7 @@ import hashlib
 import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -176,7 +176,7 @@ class BehaviorReductionRunner:
         self.kind_vectors = kind_vectors
         self.ledger = ledger
         self.semantic_refresher = semantic_refresher
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.context_lookback_seconds = float(context_lookback_seconds)
         if coverage is not None and not isinstance(coverage, BehaviorCoverageIndex):
             raise TypeError("coverage must be BehaviorCoverageIndex")
@@ -727,7 +727,7 @@ class BehaviorReductionRunner:
                 owner = token
             registry = registry.with_hit(owner, day)
             hit_now.add(owner)
-        clock = min(max(day for _, day in hits), now.astimezone(timezone.utc).date())
+        clock = min(max(day for _, day in hits), now.astimezone(UTC).date())
         expired = tuple(
             token
             for token in registry.expired(on=clock, base_days=config.base_days, gap_multiplier=config.gap_multiplier)
@@ -969,7 +969,7 @@ class BehaviorReductionRunner:
         value = self.clock()
         if not isinstance(value, datetime) or value.utcoffset() is None:
             raise BehaviorReductionError("reduction clock must return a timezone-aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     def _frontier_cutoff(self, guard: LeaseGuard | None = None) -> datetime | None:
         """未来融合段的 cutoff 下界；一切观测都已融合完成时为 None。
@@ -1090,7 +1090,7 @@ class BehaviorReductionRunner:
 
 
 def _as_instant(value: datetime) -> datetime:
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _is_instant(value: object) -> bool:

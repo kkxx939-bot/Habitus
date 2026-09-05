@@ -11,7 +11,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Protocol
 
@@ -110,7 +110,7 @@ class ObservationEvent:
     status: ObservationStatus
     duration_seconds: float
     attributes: Mapping[str, str | int | float | bool] = field(default_factory=dict)
-    occurred_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     context: ObservationContext = field(default_factory=current_observation_context)
 
     def __post_init__(self) -> None:
@@ -145,7 +145,7 @@ class ObservationEvent:
         object.__setattr__(self, "attributes", attributes)
         if not isinstance(self.occurred_at, datetime) or self.occurred_at.tzinfo is None:
             raise ValueError("occurred_at must be timezone-aware")
-        object.__setattr__(self, "occurred_at", self.occurred_at.astimezone(timezone.utc))
+        object.__setattr__(self, "occurred_at", self.occurred_at.astimezone(UTC))
         if not isinstance(self.context, ObservationContext):
             raise TypeError("context must be ObservationContext")
 

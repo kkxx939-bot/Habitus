@@ -8,7 +8,7 @@ import os
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 
@@ -356,7 +356,7 @@ def _require_digest(value: object) -> None:
 def _timestamp(value: datetime) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("summary retirement timestamp must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _format_timestamp(value: datetime) -> str:

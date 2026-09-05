@@ -1,6 +1,6 @@
 """外部 Conversation 协议转换的角色、工具配对和拒绝场景。"""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -14,7 +14,7 @@ from pre.conversation import (
 
 
 def context() -> ConversationAdapterContext:
-    return ConversationAdapterContext("conversation-1", 10, datetime(2026, 7, 28, tzinfo=timezone.utc))
+    return ConversationAdapterContext("conversation-1", 10, datetime(2026, 7, 28, tzinfo=UTC))
 
 
 def test_openai_chat_preserves_text_tools_and_ignores_system_metadata() -> None:

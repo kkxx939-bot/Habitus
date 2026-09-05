@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 from behavior.observation import BehaviorObservation, BehaviorObservationConfig
@@ -25,7 +25,7 @@ def at(seconds: int) -> datetime:
 
 
 def _instant(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _local(value: datetime) -> str:

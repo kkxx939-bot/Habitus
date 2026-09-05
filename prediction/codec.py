@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 from prediction.errors import PredictionTreeError
@@ -306,7 +306,7 @@ def _key(text: Any, total: int) -> SlotKey:
 def _moment(text: Any) -> datetime:
     if not isinstance(text, str):
         raise PredictionTreeError("built_at must be text")
-    return datetime.fromisoformat(text).astimezone(timezone.utc)
+    return datetime.fromisoformat(text).astimezone(UTC)
 
 
 __all__ = ["SCHEMA_VERSION", "decode", "encode"]

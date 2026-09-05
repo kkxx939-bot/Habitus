@@ -13,7 +13,7 @@ import sys
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, fields, is_dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, cast
@@ -354,7 +354,7 @@ def aggregate_boundary_points(
     boundaries = _boundaries(aggregated, policy)
     return {
         "schema_version": "habitus_boundary_aggregate_v1",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "policy": policy.to_dict(),
         "point_count": len(points),
         "aggregated_point_count": len(aggregated),
@@ -434,7 +434,7 @@ def environment_metadata(repo_root: str | Path, *, config_digest: str, dataset_d
     revision = _git(root, "rev-parse", "HEAD")
     dirty = bool(_git(root, "status", "--porcelain"))
     return {
-        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "captured_at": datetime.now(UTC).isoformat(),
         "git_revision": revision,
         "git_dirty": dirty,
         "config_digest": config_digest,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -107,7 +107,7 @@ def test_dst_fold_cannot_bypass_the_available_at_invariant() -> None:
     new_york = ZoneInfo("America/New_York")
     later = datetime(2026, 11, 1, 1, 30, tzinfo=new_york, fold=1)
     earlier = datetime(2026, 11, 1, 1, 30, tzinfo=new_york, fold=0)
-    assert earlier.astimezone(timezone.utc) < later.astimezone(timezone.utc)
+    assert earlier.astimezone(UTC) < later.astimezone(UTC)
     assert not (earlier < later)  # 墙钟比较看不出先后，这正是缺陷的来源
 
     with pytest.raises(BehaviorObservationError):
@@ -166,8 +166,8 @@ def test_direct_construction_normalizes_types_and_rejects_illegal_content() -> N
 
     fields: dict[str, object] = {
         "observer_id": OBSERVER,
-        "occurred_at": NOW.astimezone(timezone.utc),
-        "available_at": NOW.astimezone(timezone.utc),
+        "occurred_at": NOW.astimezone(UTC),
+        "available_at": NOW.astimezone(UTC),
         "utc_offset_minutes": 480,
         "modality": "vision",
         "semantics": "有人开门",
@@ -185,7 +185,7 @@ def test_direct_construction_normalizes_types_and_rejects_illegal_content() -> N
         {"knowledge_state": "corrected"},
         {"confidence": 7.5},
         {"modality": "thermal"},
-        {"available_at": (NOW - timedelta(hours=1)).astimezone(timezone.utc)},
+        {"available_at": (NOW - timedelta(hours=1)).astimezone(UTC)},
     ):
         broken = {**fields, **illegal}
         with pytest.raises(BehaviorObservationError):

@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 from behavior.model import BehaviorAddress
@@ -151,7 +151,7 @@ def _basis_step(
 
 
 def _as_instant(value: datetime) -> datetime:
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 __all__ = [

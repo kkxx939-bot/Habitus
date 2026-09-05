@@ -8,7 +8,7 @@ import stat
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
 from foundation.ids import canonical_path_identity, same_path_identity
@@ -530,7 +530,7 @@ class ConversationRangeSummaryGenerator:
         self.client = client
         self.summary_config = summary_config or ConversationSummaryConfig()
         self.compaction_config = compaction_config or ConversationSummaryCompactionConfig()
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     async def generate(self, plan: ConversationSummaryCompactionPlan) -> ConversationRangeSummary:
         if not isinstance(plan, ConversationSummaryCompactionPlan):
@@ -666,7 +666,7 @@ class ConversationSummaryCompactor:
     ) -> ConversationSummaryCompactionResult:
         """优先压缩已成熟 Range；每次至多调用一次模型且不物理删除任何来源。"""
 
-        current_time = _utc_datetime(now or datetime.now(timezone.utc), "summary compaction now")
+        current_time = _utc_datetime(now or datetime.now(UTC), "summary compaction now")
         if not self.config.enabled:
             return ConversationSummaryCompactionResult(None, False, "summary compaction is disabled")
         plan = self._plan_under_lock(address, current_time)
@@ -785,7 +785,7 @@ def _utc_datetime(value: datetime, label: str) -> datetime:
         raise TypeError(f"{label} must be a datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{label} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _bounded_integer(name: str, value: object, *, minimum: int, maximum: int) -> None:

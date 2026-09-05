@@ -6,7 +6,7 @@ import asyncio
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 
@@ -518,7 +518,7 @@ class Runtime:
             omit_tool_call_ids=omit_tool_call_ids,
             delivery_id=delivery_id,
             request_digest=request_digest,
-            recorded_at=datetime.now(timezone.utc),
+            recorded_at=datetime.now(UTC),
         )
         handle = self.components.conversation.source_coordinator.start(envelope)
         # 每个 Consumer 的成败由 ConversationConsumerDelivery 统一观察，覆盖前台、
@@ -881,7 +881,7 @@ class Runtime:
             raise TypeError("summary_references must contain ConversationSummaryReference values")
         if len({reference.identity for reference in summary_references}) != len(summary_references):
             raise ValueError("summary_references must be unique")
-        timestamp = used_at or datetime.now(timezone.utc)
+        timestamp = used_at or datetime.now(UTC)
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:
             raise ValueError("used_at must be timezone-aware")
         if parsed_uris:

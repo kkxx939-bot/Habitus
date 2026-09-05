@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from foundation.integrity import canonical_json
 from infrastructure.store.contracts import PathLock
@@ -223,7 +223,7 @@ class MemoryLifecycleScanStore:
 def _timestamp(value: datetime) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("memory lifecycle scan timestamp must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _format_timestamp(value: datetime) -> str:

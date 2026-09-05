@@ -18,7 +18,7 @@ import hashlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -96,7 +96,7 @@ class BehaviorDocumentWriter:
         if config is not None and not isinstance(config, BehaviorWriteConfig):
             raise TypeError("config must be BehaviorWriteConfig")
         self.tree = tree
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.config = config or BehaviorWriteConfig()
         self._path_lock = PathLock(lock_store)
         self._keyspace = BehaviorDocumentLockKeyspace(tree.root)
@@ -222,7 +222,7 @@ class BehaviorDocumentWriter:
         value = self.clock()
         if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("behavior writer clock must return a timezone-aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
 
 __all__ = [

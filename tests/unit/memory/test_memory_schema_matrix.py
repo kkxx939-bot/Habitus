@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -246,7 +246,7 @@ def test_date_memory_fields_accept_date_or_iso_string(kind: MemoryKind, field: s
 
 
 @pytest.mark.parametrize(("kind", "field"), DATE_FIELDS)
-@pytest.mark.parametrize("invalid", [datetime(2026, 7, 1, tzinfo=timezone.utc), "2026/07/01", "", 1, True, None])
+@pytest.mark.parametrize("invalid", [datetime(2026, 7, 1, tzinfo=UTC), "2026/07/01", "", 1, True, None])
 def test_date_memory_fields_reject_datetime_invalid_string_and_non_date(
     kind: MemoryKind,
     field: str,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from benchmark.datasets.common import (
@@ -67,7 +67,7 @@ def _sample(
     )
     if not session_keys:
         raise ValueError(f"LoCoMo sample {index} contains no sessions")
-    fallback = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    fallback = datetime(2000, 1, 1, tzinfo=UTC)
     sessions: list[BenchmarkSession] = []
     evidence_lookup: dict[str, str] = {}
     for position, key in enumerate(session_keys, start=1):

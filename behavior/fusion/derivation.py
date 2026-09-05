@@ -42,7 +42,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from behavior.fusion.errors import BehaviorFusionError
@@ -368,7 +368,7 @@ def judgement_payload(judgement: DurableJudgement) -> dict[str, Any]:
 def _instant(value: datetime) -> str:
     """一个时刻，归一到 UTC——"我们什么时候知道的"没有本地日历含义。"""
 
-    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _local(value: datetime) -> str:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from types import MappingProxyType
 from typing import Any
@@ -466,7 +466,7 @@ class MemoryCommitTransaction:
         self.path_lock = path_lock
         self.journal = journal
         self.config = config or MemoryCommitConfig()
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.transaction_id_factory = transaction_id_factory or (lambda: uuid4().hex)
         self.lock_keys = MemoryDocumentLockKeyspace(tree.root)
         self.tree.bind_visibility_journal(journal)
@@ -816,7 +816,7 @@ class MemoryCommitTransaction:
             raise TypeError("memory commit clock must return a datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("memory commit clock must return a timezone-aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
 
 __all__ = [

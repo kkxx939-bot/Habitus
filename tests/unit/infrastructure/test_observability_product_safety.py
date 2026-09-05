@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -16,7 +16,7 @@ from foundation.observability import (
 )
 from infrastructure.observability import AuditStore, JSONLogFormatter, ManagedObservability
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _event(

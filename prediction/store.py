@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from foundation.integrity import bytes_digest, canonical_json
@@ -126,7 +126,7 @@ class PredictionTreeStore:
             generation=generation,
             digest=digest,
             config_digest=tree.config_digest,
-            published_at=tree.built_at.astimezone(timezone.utc),
+            published_at=tree.built_at.astimezone(UTC),
         )
         self._activate(published)
         self._prune(keep=generation)
@@ -180,7 +180,7 @@ class PredictionTreeStore:
                 generation=raw["generation"],
                 digest=raw["digest"],
                 config_digest=raw["config_digest"],
-                published_at=datetime.fromisoformat(raw["published_at"]).astimezone(timezone.utc),
+                published_at=datetime.fromisoformat(raw["published_at"]).astimezone(UTC),
             )
         except (KeyError, TypeError, ValueError) as exc:
             # json.loads 也在这里面：损坏的字节必须统一成本层的错误，不能漏出 JSONDecodeError。
@@ -274,7 +274,7 @@ class PredictionTreeStore:
         名字上挂着 ``Z`` 却不是 UTC，字典序就不再等于时间序，留代会删错。
         """
 
-        stamp = tree.built_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+        stamp = tree.built_at.astimezone(UTC).strftime("%Y%m%dT%H%M%S%f")
         return f"{stamp}Z-{digest[:12]}"
 
     def _generation_directory(self, generation: str) -> Path:
