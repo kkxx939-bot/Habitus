@@ -14,12 +14,12 @@ from fastapi.testclient import TestClient
 from starlette.middleware.exceptions import ExceptionMiddleware
 from starlette.responses import StreamingResponse
 
-from foundation.observability import ObservationEvent, ObservationStatus, SpanController
-from integrations.http_api.errors import install_exception_handlers, unhandled_error
-from integrations.http_api.observation import HTTPObservationMiddleware
-from integrations.http_api.request_id import REQUEST_ID_HEADER, RequestIDMiddleware, current_request_id
-from memory.conversation import ConversationWriteConflictError
-from ModelClient import ModelRateLimitError
+from habitus.foundation.observability import ObservationEvent, ObservationStatus, SpanController
+from habitus.integrations.http_api.errors import install_exception_handlers, unhandled_error
+from habitus.integrations.http_api.observation import HTTPObservationMiddleware
+from habitus.integrations.http_api.request_id import REQUEST_ID_HEADER, RequestIDMiddleware, current_request_id
+from habitus.memory.conversation import ConversationWriteConflictError
+from habitus.model_client import ModelRateLimitError
 
 _SERVER_REQUEST_ID = re.compile(r"^[0-9a-f]{32}$")
 

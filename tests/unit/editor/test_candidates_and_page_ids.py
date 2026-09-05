@@ -3,15 +3,15 @@
 
 import pytest
 
-from infrastructure.editor.snapshot import SnapshotBatch
-from memory.editor import (
+from habitus.infrastructure.editor.snapshot import SnapshotBatch
+from habitus.memory.editor import (
     MemoryCandidateBatch,
     MemoryCandidateError,
     MemoryPageIdError,
     MemoryPageIdMap,
 )
-from memory.model import MemoryKind
-from pre.conversation import (
+from habitus.memory.model import MemoryKind
+from habitus.pre.conversation import (
     ConversationMessageRole,
     ConversationSegment,
     ConversationToolResultContentMode,

@@ -3,17 +3,17 @@
 from datetime import date
 from pathlib import Path
 
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.conversation import (
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.conversation import (
     ConversationAddress,
     ConversationMessageJournal,
     ConversationRetentionPlanner,
     ConversationSegmentationConfig,
 )
-from memory.workflow import ConversationMemoryEnqueuer
-from memory.workflow.jobs import MemoryJobStatus, MemoryJobStore
-from pre.conversation import ConversationBatch
+from habitus.memory.workflow import ConversationMemoryEnqueuer
+from habitus.memory.workflow.jobs import MemoryJobStatus, MemoryJobStore
+from habitus.pre.conversation import ConversationBatch
 from tests.helpers import closed_turn
 
 

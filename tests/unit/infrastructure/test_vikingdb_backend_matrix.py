@@ -6,16 +6,16 @@ import asyncio
 
 import pytest
 
-from infrastructure.vector import (
+from habitus.infrastructure.vector import (
     VectorStoreFilter,
     VectorStoreIntegrityError,
     VectorStoreRouteConfig,
 )
-from infrastructure.vector.adapters import vikingdb as protocol
-from infrastructure.vector.adapters.vikingdb import VikingDBBackend
-from infrastructure.vector.adapters.vikingdb_client import VikingDBRestClient
-from infrastructure.vector.adapters.vikingdb_config import VikingDBVectorStoreConfig
-from ModelClient import EmbeddingVector
+from habitus.infrastructure.vector.adapters import vikingdb as protocol
+from habitus.infrastructure.vector.adapters.vikingdb import VikingDBBackend
+from habitus.infrastructure.vector.adapters.vikingdb_client import VikingDBRestClient
+from habitus.infrastructure.vector.adapters.vikingdb_config import VikingDBVectorStoreConfig
+from habitus.model_client import EmbeddingVector
 from tests.unit.infrastructure.test_vikingdb_protocol import record, search_item
 
 

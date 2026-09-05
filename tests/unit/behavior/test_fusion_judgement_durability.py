@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from behavior.fusion import (
+from habitus.behavior.fusion import (
     FUSION_PROMPT_VERSION,
     FUSION_VERSION,
     BehaviorFusionConfig,
@@ -26,11 +26,11 @@ from behavior.fusion import (
     validate_judgement_batch,
     without_unresolvable_relations,
 )
-from behavior.fusion.errors import BehaviorFusionError, BehaviorFusionLimitError
-from behavior.fusion.schema import JUDGEMENT_FUSION_JSON_SCHEMA
-from behavior.fusion.store import _JUDGEMENT_KEYS
-from behavior.observation import BehaviorObservation, BehaviorObservationConfig
-from foundation.integrity import canonical_digest, canonical_json, canonicalize
+from habitus.behavior.fusion.errors import BehaviorFusionError, BehaviorFusionLimitError
+from habitus.behavior.fusion.schema import JUDGEMENT_FUSION_JSON_SCHEMA
+from habitus.behavior.fusion.store import _JUDGEMENT_KEYS
+from habitus.behavior.observation import BehaviorObservation, BehaviorObservationConfig
+from habitus.foundation.integrity import canonical_digest, canonical_json, canonicalize
 from tests.unit.behavior.fusion_wire import SUBJECT, judgement, unreadable, wire
 
 TZ8 = timezone(timedelta(hours=8))
@@ -354,7 +354,7 @@ def test_identical_replays_are_absorbed_below_the_store_not_by_it(tmp_path) -> N
     文件名同样的字节。本层自己的撞车逻辑由伪造记录那条测试覆盖（同身份、不同内容）。
     """
 
-    from infrastructure.store.filesystem import atomic_create_bytes
+    from habitus.infrastructure.store.filesystem import atomic_create_bytes
 
     path = tmp_path / "probe.json"
     assert atomic_create_bytes(path, b"same\n", artifact_root=tmp_path) is True
@@ -364,7 +364,7 @@ def test_identical_replays_are_absorbed_below_the_store_not_by_it(tmp_path) -> N
 def test_the_receipt_uses_the_same_unreadable_criterion_as_the_batch() -> None:
     """两处口径不一致时，落盘的那一份会永久偏高且改不了——而它正是告警依据。"""
 
-    from behavior.fusion import unreadable_ratio
+    from habitus.behavior.fusion import unreadable_ratio
 
     raw = wire(
         [
@@ -588,7 +588,7 @@ def test_a_long_running_judgement_stays_inside_the_lookback_window(tmp_path) -> 
     """回看下界按 ``last_observed_at``，不按 ``started_at``：做饭、看电影这类超过 lookback 的长行为，
     其后续段必须仍能看到自己的前半截，否则跨窗口 ``continues`` 断链（审计 NEW-4 复现）。"""
 
-    from behavior.fusion.store import BehaviorJudgementStore
+    from habitus.behavior.fusion.store import BehaviorJudgementStore
 
     store = BehaviorJudgementStore(str(tmp_path))
     template = {key: None for key in _JUDGEMENT_KEYS}

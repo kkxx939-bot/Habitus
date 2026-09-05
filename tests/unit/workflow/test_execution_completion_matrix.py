@@ -9,19 +9,19 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.conversation import ConversationAddress
-from memory.editor import MemoryTransactionJournalState
-from memory.model import MemoryKind
-from memory.retrieval import MemoryRecallTarget
-from memory.uri import MemoryURI
-from memory.workflow import MemoryChangeReceiptState, MemoryChangeSource, MemoryJobError, MemoryJobStatus
-from memory.workflow.completion import MemoryCommittedJobFinalizer, MemoryJobCompletion
-from memory.workflow.execution import MemoryJobCommit, MemoryJobExecutor
-from memory.workflow.planning import MemorySegmentProductBuilder, MemorySegmentProducts
-from pre.conversation import ConversationBatch
-from Runtime import build_runtime
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.conversation import ConversationAddress
+from habitus.memory.editor import MemoryTransactionJournalState
+from habitus.memory.model import MemoryKind
+from habitus.memory.retrieval import MemoryRecallTarget
+from habitus.memory.uri import MemoryURI
+from habitus.memory.workflow import MemoryChangeReceiptState, MemoryChangeSource, MemoryJobError, MemoryJobStatus
+from habitus.memory.workflow.completion import MemoryCommittedJobFinalizer, MemoryJobCompletion
+from habitus.memory.workflow.execution import MemoryJobCommit, MemoryJobExecutor
+from habitus.memory.workflow.planning import MemorySegmentProductBuilder, MemorySegmentProducts
+from habitus.pre.conversation import ConversationBatch
+from habitus.runtime import build_runtime
 from tests.helpers import BASE_TIME, closed_turn, document, segment, segment_summary
 from tests.integration.test_change_receipt_chain import editor_plan
 from tests.integration.test_memory_job_full_chain import dependencies, runtime_config

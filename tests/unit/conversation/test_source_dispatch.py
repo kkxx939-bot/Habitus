@@ -6,11 +6,11 @@ from datetime import timedelta
 
 import pytest
 
-from conversation.projection import (
+from habitus.conversation.projection import (
     ConversationBehaviorProjectionKind,
     ConversationBehaviorProjector,
 )
-from conversation.source import (
+from habitus.conversation.source import (
     ConversationConsumerDeliveryState,
     ConversationConsumerOutcomeState,
     ConversationSourceConsumer,
@@ -18,14 +18,14 @@ from conversation.source import (
     ConversationSourceEnvelope,
     ConversationSourceError,
 )
-from foundation.integrity import canonical_digest
-from memory.workflow import (
+from habitus.foundation.integrity import canonical_digest
+from habitus.memory.workflow import (
     ConversationMemoryIngestResult,
     MemoryConversationOutput,
     MemoryJob,
     MemoryJobStatus,
 )
-from pre.conversation import ConversationBatch, ConversationMessageRole
+from habitus.pre.conversation import ConversationBatch, ConversationMessageRole
 from tests.unit.conversation.source_v2_helpers import NOW, delivery, ingest_result, message, source, stores
 
 

@@ -8,8 +8,8 @@ from dataclasses import asdict, replace
 
 import pytest
 
-from foundation.integrity import canonical_json
-from ModelClient import (
+from habitus.foundation.integrity import canonical_json
+from habitus.model_client import (
     ChatCallContext,
     ChatClient,
     ChatMessage,

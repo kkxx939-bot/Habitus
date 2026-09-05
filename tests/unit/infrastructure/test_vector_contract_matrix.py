@@ -8,7 +8,7 @@ from dataclasses import replace
 
 import pytest
 
-from infrastructure.vector import (
+from habitus.infrastructure.vector import (
     VectorPublicationSnapshot,
     VectorStoreConfig,
     VectorStoreFilter,
@@ -18,13 +18,13 @@ from infrastructure.vector import (
     VectorStoreRouteConfig,
     VectorStoreState,
 )
-from infrastructure.vector.adapters.vikingdb_config import (
+from habitus.infrastructure.vector.adapters.vikingdb_config import (
     VikingDBVectorStoreConfig,
     bounded_retry_after,
     credential_template_names,
     render_credential_template,
 )
-from ModelClient import EmbeddingVector
+from habitus.model_client import EmbeddingVector
 
 
 def _record(**overrides: object) -> VectorStoreRecord:

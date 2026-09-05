@@ -11,16 +11,16 @@ from unittest.mock import Mock
 import pytest
 import yaml
 
-from Config import HabitusConfig
-from integrations.local_service import cli, plugin_cli
-from integrations.local_service import initialization as initialization_module
-from integrations.local_service.cloud_setup import (
+from habitus.config import HabitusConfig
+from habitus.integrations.local_service import cli, plugin_cli
+from habitus.integrations.local_service import initialization as initialization_module
+from habitus.integrations.local_service.cloud_setup import (
     ProfileSelection,
     apply_cloud_selection,
     default_cloud_selection,
     selection_from_mapping,
 )
-from integrations.local_service.initialization import (
+from habitus.integrations.local_service.initialization import (
     configure_credentials,
     initialize_config,
     initialize_config_from_mapping,
@@ -30,14 +30,14 @@ from integrations.local_service.initialization import (
     resolve_plugin_connection_path,
     write_plugin_connection,
 )
-from integrations.local_service.setup_registry import (
+from habitus.integrations.local_service.setup_registry import (
     SetupProfile,
     build_builtin_setup_registry,
 )
-from Runtime import build_runtime
+from habitus.runtime import build_runtime
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-EXAMPLE_CONFIG = REPOSITORY_ROOT / "Config" / "example.yaml"
+EXAMPLE_CONFIG = REPOSITORY_ROOT / "habitus" / "config" / "example.yaml"
 
 
 @pytest.fixture(autouse=True)
@@ -889,7 +889,7 @@ def test_exec_serve_replaces_process_with_module_bootstrap(monkeypatch: pytest.M
     assert arguments == [
         cli.sys.executable,
         "-m",
-        "integrations.local_service.cli",
+        "habitus.integrations.local_service.cli",
         "serve",
         "--config",
         str(config),

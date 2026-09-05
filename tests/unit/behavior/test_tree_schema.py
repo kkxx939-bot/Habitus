@@ -6,7 +6,7 @@ from datetime import UTC, timedelta, timezone
 
 import pytest
 
-from behavior import (
+from habitus.behavior import (
     BehaviorAddress,
     BehaviorDirectory,
     BehaviorDocumentCodec,
@@ -17,8 +17,8 @@ from behavior import (
     BehaviorURI,
     BehaviorURIError,
 )
-from behavior.document import BehaviorDocumentMetadata
-from behavior.model import behavior_static_directories
+from habitus.behavior.document import BehaviorDocumentMetadata
+from habitus.behavior.model import behavior_static_directories
 from tests.unit.behavior.tree_payloads import (
     DAY,
     OBS_A,
@@ -179,7 +179,7 @@ def test_codec_roundtrip_preserves_local_offsets() -> None:
 def _expected_render_fragments(field, payload) -> list[str]:
     """按字段类型给出"渲染结果里必须出现"的片段；新类型未登记时直接失败，逼守卫同步扩展。"""
 
-    from behavior.schema.model import BehaviorFieldType as T
+    from habitus.behavior.schema.model import BehaviorFieldType as T
 
     value = payload[field.name]
     if field.field_type in (T.STRING, T.OPTIONAL_STRING, T.GAP_KIND):
@@ -191,11 +191,11 @@ def _expected_render_fragments(field, payload) -> list[str]:
     if field.field_type is T.STRING_LIST:
         return list(value)
     if field.field_type is T.OCCURRENCE_STATUS:
-        from behavior.schema.renderers import _STATUS_TEXT
+        from habitus.behavior.schema.renderers import _STATUS_TEXT
 
         return [_STATUS_TEXT[value]]
     if field.field_type is T.STATUS_BASIS:
-        from behavior.schema.renderers import _BASIS_TEXT
+        from habitus.behavior.schema.renderers import _BASIS_TEXT
 
         return [_BASIS_TEXT[value]]
     if field.field_type is T.BASIS_LIST:
@@ -280,7 +280,7 @@ def test_identity_roundtrip_with_separator_in_name_and_negative_offset() -> None
 def test_kinds_registry_lives_in_the_address_space() -> None:
     """behavior://kinds.md：树根唯一的登记表节点——可解析、可往返、不冒充文档。"""
 
-    from behavior.uri import BehaviorURINodeType
+    from habitus.behavior.uri import BehaviorURINodeType
 
     uri = BehaviorURI.kinds()
     assert str(uri) == "behavior://kinds.md"
@@ -296,7 +296,7 @@ def test_kinds_registry_lives_in_the_address_space() -> None:
 
 
 def test_registry_path_resolves_to_the_tree_root_file(tmp_path) -> None:
-    from behavior import BehaviorTree
+    from habitus.behavior import BehaviorTree
 
     tree = BehaviorTree(tmp_path / "behavior-tree")
     assert tree.path_for_uri("behavior://kinds.md") == tree.root / "kinds.md"
@@ -310,8 +310,8 @@ def test_pagination_cursor_order_matches_enumeration_order(tmp_path) -> None:
     from datetime import timedelta as _td
     from datetime import timezone as _tz
 
-    from behavior import BehaviorDocumentWriter, BehaviorTree
-    from infrastructure.store.locks import ProcessLocalLockStore
+    from habitus.behavior import BehaviorDocumentWriter, BehaviorTree
+    from habitus.infrastructure.store.locks import ProcessLocalLockStore
 
     cst = _tz(_td(hours=8))
     tree = BehaviorTree(tmp_path / "behavior-tree")

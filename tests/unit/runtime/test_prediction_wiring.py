@@ -9,16 +9,16 @@ from pathlib import Path
 import pytest
 import yaml
 
-from behavior import BehaviorDocumentWriter
-from behavior.model import BehaviorKind
-from behavior.tree import BehaviorTree
-from Config import HabitusConfig
-from Config.loader import ConfigError
-from Config.prediction import PredictionConfig
-from infrastructure.store.locks import ProcessLocalLockStore
-from prediction.config import PredictionTreeConfig
-from prediction.errors import PredictionTreeError
-from Runtime.prediction import build_prediction_components
+from habitus.behavior import BehaviorDocumentWriter
+from habitus.behavior.model import BehaviorKind
+from habitus.behavior.tree import BehaviorTree
+from habitus.config import HabitusConfig
+from habitus.config.loader import ConfigError
+from habitus.config.prediction import PredictionConfig
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.prediction.config import PredictionTreeConfig
+from habitus.prediction.errors import PredictionTreeError
+from habitus.runtime.prediction import build_prediction_components
 from tests.integration.test_runtime_assembly import REPOSITORY_ROOT
 from tests.unit.behavior.tree_payloads import occurrence_payload
 from tests.unit.runtime.test_behavior_pipeline import SUBJECT, behavior_enabled_config
@@ -46,7 +46,7 @@ STARTUP_PARAMETERS = {
 def prediction_enabled_config(tmp_path: Path) -> HabitusConfig:
     """在行为侧已启用的 fake 路由配置之上，再把预测夜批的十三个启动档填进去。"""
 
-    raw = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
+    raw = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     raw["storage"]["root"] = str(tmp_path / "data")
     for route, adapter in (
         (raw["models"]["chat"]["route"], "fake_chat"),

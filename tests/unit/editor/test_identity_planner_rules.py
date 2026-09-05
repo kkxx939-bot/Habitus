@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from infrastructure.editor.snapshot import SnapshotBatch
-from memory.document import MemoryLinkType
-from memory.editor import (
+from habitus.infrastructure.editor.snapshot import SnapshotBatch
+from habitus.memory.document import MemoryLinkType
+from habitus.memory.editor import (
     MemoryCandidate,
     MemoryCandidateBatch,
     MemoryIdentityPlanner,
@@ -21,15 +21,15 @@ from memory.editor import (
     MemoryRelationAction,
     MemoryRelationCandidate,
 )
-from memory.editor.extraction import (
+from habitus.memory.editor.extraction import (
     MemoryExtractionResult,
     MemoryRetrievalAction,
     MemoryRetrievalDecision,
     MemoryRetrievalStatus,
 )
-from memory.editor.mutation import MemoryFieldMerger, MemoryNodeMatch, MemoryNodeMatchStatus
-from memory.model import MemoryKind
-from memory.uri import MemoryURI
+from habitus.memory.editor.mutation import MemoryFieldMerger, MemoryNodeMatch, MemoryNodeMatchStatus
+from habitus.memory.model import MemoryKind
+from habitus.memory.uri import MemoryURI
 from tests.helpers import document, memory_snapshot, snapshot_batch
 
 

@@ -4,10 +4,10 @@ from datetime import UTC, datetime
 
 import pytest
 
-from memory.compaction import MemoryRecoveryError, MemoryRecoveryStore
-from memory.model import MemoryKind
-from memory.tree import MemoryTree
-from memory.uri import MemoryURI
+from habitus.memory.compaction import MemoryRecoveryError, MemoryRecoveryStore
+from habitus.memory.model import MemoryKind
+from habitus.memory.tree import MemoryTree
+from habitus.memory.uri import MemoryURI
 from tests.helpers import document
 
 

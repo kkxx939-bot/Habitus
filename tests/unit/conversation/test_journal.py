@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.store.contracts.path_lock import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.conversation import (
+from habitus.infrastructure.store.contracts.path_lock import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.conversation import (
     ConversationAddress,
     ConversationAppendStatus,
     ConversationIngressError,
@@ -19,8 +19,8 @@ from memory.conversation import (
     ConversationSealStatus,
     ConversationWriteConflictError,
 )
-from memory.conversation import messages as conversation_messages
-from pre.conversation import ConversationBatch
+from habitus.memory.conversation import messages as conversation_messages
+from habitus.pre.conversation import ConversationBatch
 from tests.helpers import closed_turn
 
 

@@ -16,11 +16,11 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from Config import HTTPAPIConfig
-from foundation.observability import ObservationEvent
-from integrations.http_api import app as app_module
-from integrations.sdk import ConversationRef, HabitusHTTPClient
-from Runtime import Runtime
+from habitus.config import HTTPAPIConfig
+from habitus.foundation.observability import ObservationEvent
+from habitus.integrations.http_api import app as app_module
+from habitus.integrations.sdk import ConversationRef, HabitusHTTPClient
+from habitus.runtime import Runtime
 
 UTC = UTC
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -398,8 +398,8 @@ def test_sdk_rejects_an_invalid_delivery_identity_before_network_io() -> None:
 
 def test_sdk_import_does_not_load_runtime_or_memory_packages() -> None:
     script = (
-        "import json, sys; import integrations.sdk; "
-        "print(json.dumps({'runtime': 'Runtime' in sys.modules, 'memory': 'memory' in sys.modules}))"
+        "import json, sys; import habitus.integrations.sdk; "
+        "print(json.dumps({'runtime': 'habitus.runtime' in sys.modules, 'memory': 'habitus.memory' in sys.modules}))"
     )
     completed = subprocess.run(
         [sys.executable, "-c", script],

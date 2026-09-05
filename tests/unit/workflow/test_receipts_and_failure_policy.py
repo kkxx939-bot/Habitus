@@ -6,21 +6,21 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from infrastructure.vector import (
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.infrastructure.vector import (
     VectorStoreBusyError,
     VectorStoreConflictError,
     VectorStoreIntegrityError,
 )
-from memory.conversation import ConversationAddress
-from memory.editor.extraction import MemoryExtractionCapacityError
-from memory.editor.transaction import MemoryCommitConflictError
-from memory.model import MemoryKind
-from memory.uri import MemoryURI
-from memory.workflow.failure import memory_job_failure_is_retryable
-from memory.workflow.jobs import MemoryJobConfig, MemoryJobError, MemoryJobLeaseLostError, MemoryJobStore
-from memory.workflow.receipt import (
+from habitus.memory.conversation import ConversationAddress
+from habitus.memory.editor.extraction import MemoryExtractionCapacityError
+from habitus.memory.editor.transaction import MemoryCommitConflictError
+from habitus.memory.model import MemoryKind
+from habitus.memory.uri import MemoryURI
+from habitus.memory.workflow.failure import memory_job_failure_is_retryable
+from habitus.memory.workflow.jobs import MemoryJobConfig, MemoryJobError, MemoryJobLeaseLostError, MemoryJobStore
+from habitus.memory.workflow.receipt import (
     MemoryChangeReceipt,
     MemoryChangeReceiptError,
     MemoryChangeReceiptState,
@@ -30,8 +30,8 @@ from memory.workflow.receipt import (
     MemoryNodeChangeAction,
     MemoryPreparedNodeChange,
 )
-from ModelClient import ModelResponseError, ModelTransportError
-from Runtime.consistency import MemoryConsistencyService, MemoryConsistencyState
+from habitus.model_client import ModelResponseError, ModelTransportError
+from habitus.runtime.consistency import MemoryConsistencyService, MemoryConsistencyState
 from tests.helpers import BASE_TIME, closed_turn, codec, document, segment
 
 

@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.conversation import ConversationAddress
-from memory.workflow import MemoryJobStatus
-from memory.workflow.jobs import MemoryJobStore
-from Runtime import (
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.conversation import ConversationAddress
+from habitus.memory.workflow import MemoryJobStatus
+from habitus.memory.workflow.jobs import MemoryJobStore
+from habitus.runtime import (
     LifecycleMaintenanceCycleResult,
     LifecycleMaintenanceFailure,
     MemoryJobRetryResult,

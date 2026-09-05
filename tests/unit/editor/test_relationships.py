@@ -2,9 +2,9 @@
 
 import pytest
 
-from infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
-from memory.document import MemoryLinkType, MemoryStoredLink
-from memory.editor import (
+from habitus.infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
+from habitus.memory.document import MemoryLinkType, MemoryStoredLink
+from habitus.memory.editor import (
     MemoryCandidateBatch,
     MemoryFinalIdentity,
     MemoryFinalIdentityMap,
@@ -17,8 +17,8 @@ from memory.editor import (
     MemoryRelationResolver,
     MemoryResolvedRelation,
 )
-from memory.model import MemoryKind
-from memory.uri import MemoryURI
+from habitus.memory.model import MemoryKind
+from habitus.memory.uri import MemoryURI
 from tests.helpers import codec, document, memory_snapshot
 
 

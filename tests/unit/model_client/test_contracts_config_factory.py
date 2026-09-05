@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from ModelClient import (
+from habitus.model_client import (
     ChatMessage,
     ChatModelConfig,
     ChatRequest,
@@ -26,7 +26,7 @@ from ModelClient import (
     ToolCall,
     ToolDefinition,
 )
-from ModelClient.adapters import (
+from habitus.model_client.adapters import (
     ArkMultimodalEmbeddingProvider,
     OpenAICompatibleChatProvider,
     OpenAICompatibleRerankProvider,

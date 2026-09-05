@@ -9,8 +9,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
-from behavior.observation import BehaviorObservation, BehaviorObservationConfig
-from foundation.integrity import canonical_digest
+from habitus.behavior.observation import BehaviorObservation, BehaviorObservationConfig
+from habitus.foundation.integrity import canonical_digest
 
 CST = timezone(timedelta(hours=8))
 BASE = datetime(2026, 8, 16, 19, 30, 0, tzinfo=CST)

@@ -4,18 +4,18 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 
-from infrastructure.editor.snapshot import SnapshotBatch, SnapshotState, VersionedSnapshot
-from memory.document import MemoryDocument, MemoryDocumentCodec, MemoryDocumentMetadata
-from memory.model import MemoryKind
-from memory.schema import MemorySchemaRegistry
-from pre.conversation.messages import (
+from habitus.infrastructure.editor.snapshot import SnapshotBatch, SnapshotState, VersionedSnapshot
+from habitus.memory.document import MemoryDocument, MemoryDocumentCodec, MemoryDocumentMetadata
+from habitus.memory.model import MemoryKind
+from habitus.memory.schema import MemorySchemaRegistry
+from habitus.pre.conversation.messages import (
     ConversationMessage,
     ConversationMessageRole,
     ConversationSegment,
     ConversationToolResultContentMode,
     ConversationToolResultStatus,
 )
-from pre.conversation.summaries import ConversationSegmentSummary, ConversationSummaryContent
+from habitus.pre.conversation.summaries import ConversationSegmentSummary, ConversationSummaryContent
 
 UTC = UTC
 BASE_TIME = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
@@ -160,7 +160,7 @@ def document(
 def memory_snapshot(value: MemoryDocument) -> VersionedSnapshot[MemoryDocument]:
     """为已校验文档构造完整旧记忆快照。"""
 
-    from memory.uri import MemoryURI
+    from habitus.memory.uri import MemoryURI
 
     return VersionedSnapshot(
         identity=str(MemoryURI.from_address(value.address)),

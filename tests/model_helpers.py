@@ -1,6 +1,6 @@
 """ModelClient 测试替身共享的最小请求准备器。"""
 
-from ModelClient import ChatRequest, PreparedChatRequest
+from habitus.model_client import ChatRequest, PreparedChatRequest
 
 
 def prepare_chat_request(request: ChatRequest, *, stream: bool) -> PreparedChatRequest:

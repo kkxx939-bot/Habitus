@@ -11,15 +11,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from memory.conversation import ConversationAddress
-from memory.retrieval import MemorySearchError, MemorySearchServiceConfig
-from memory.retrieval.context import (
+from habitus.memory.conversation import ConversationAddress
+from habitus.memory.retrieval import MemorySearchError, MemorySearchServiceConfig
+from habitus.memory.retrieval.context import (
     ConversationSearchContext,
     ConversationSearchContextReader,
     render_recent_messages,
 )
-from memory.retrieval.planner import MemorySearchQueryPlanner
-from ModelClient import (
+from habitus.memory.retrieval.planner import MemorySearchQueryPlanner
+from habitus.model_client import (
     ChatClient,
     ChatModelConfig,
     ModelResponse,
@@ -28,7 +28,7 @@ from ModelClient import (
     ProviderConfig,
     StructuredChatClient,
 )
-from pre.conversation import ConversationBatch, ConversationMessageRole
+from habitus.pre.conversation import ConversationBatch, ConversationMessageRole
 from tests.helpers import closed_turn, message, tool_turn
 from tests.model_helpers import prepare_chat_request
 from tests.unit.runtime.test_lifecycle_worker import manager

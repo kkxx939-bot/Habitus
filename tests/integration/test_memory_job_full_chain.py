@@ -10,26 +10,26 @@ from pathlib import Path
 
 import yaml
 
-from Config import HabitusConfig
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from infrastructure.vector import VectorStoreFactory, VectorStoreMatch, VectorStoreState
-from memory.conversation import ConversationAddress
-from memory.editor import MemoryTransactionJournalState
-from memory.workflow import (
+from habitus.config import HabitusConfig
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.infrastructure.vector import VectorStoreFactory, VectorStoreMatch, VectorStoreState
+from habitus.memory.conversation import ConversationAddress
+from habitus.memory.editor import MemoryTransactionJournalState
+from habitus.memory.workflow import (
     MemoryChangeReceiptState,
     MemoryChangeSource,
     MemoryJobExecutionError,
     MemoryJobStatus,
 )
-from ModelClient import (
+from habitus.model_client import (
     EmbeddingVector,
     ModelResponse,
     ProviderCapabilities,
     ProviderFactory,
 )
-from pre.conversation import ConversationBatch
-from Runtime import build_runtime
+from habitus.pre.conversation import ConversationBatch
+from habitus.runtime import build_runtime
 from tests.helpers import BASE_TIME, closed_turn, summary_content
 from tests.model_helpers import prepare_chat_request
 
@@ -37,7 +37,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 def runtime_config(tmp_path: Path, *, max_attempts: int = 3) -> HabitusConfig:
-    payload = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
+    payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
     payload["models"]["chat"]["route"].update(
         provider="fake",

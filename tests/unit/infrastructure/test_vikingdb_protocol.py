@@ -10,7 +10,7 @@ from collections.abc import Callable
 import httpx
 import pytest
 
-from infrastructure.vector import (
+from habitus.infrastructure.vector import (
     VectorStoreBusyError,
     VectorStoreConflictError,
     VectorStoreError,
@@ -19,14 +19,14 @@ from infrastructure.vector import (
     VectorStoreRecord,
     VectorStoreRouteConfig,
 )
-from infrastructure.vector.adapters import vikingdb as protocol
-from infrastructure.vector.adapters.vikingdb import VikingDBBackend
-from infrastructure.vector.adapters.vikingdb_client import (
+from habitus.infrastructure.vector.adapters import vikingdb as protocol
+from habitus.infrastructure.vector.adapters.vikingdb import VikingDBBackend
+from habitus.infrastructure.vector.adapters.vikingdb_client import (
     VikingDBNotFoundError,
     VikingDBRestClient,
 )
-from infrastructure.vector.adapters.vikingdb_config import VikingDBVectorStoreConfig
-from ModelClient import EmbeddingVector
+from habitus.infrastructure.vector.adapters.vikingdb_config import VikingDBVectorStoreConfig
+from habitus.model_client import EmbeddingVector
 
 
 def route(**overrides: object) -> VectorStoreRouteConfig:

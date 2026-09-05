@@ -9,9 +9,9 @@ from typing import Any
 
 import pytest
 
-from behavior import BehaviorDocumentWriter, BehaviorKind, BehaviorTree
-from behavior.model import BehaviorDirectory, BehaviorLevel
-from behavior.semantic import (
+from habitus.behavior import BehaviorDocumentWriter, BehaviorKind, BehaviorTree
+from habitus.behavior.model import BehaviorDirectory, BehaviorLevel
+from habitus.behavior.semantic import (
     BehaviorDirectorySnapshot,
     BehaviorSemanticEntry,
     BehaviorSemanticEntryKind,
@@ -19,8 +19,8 @@ from behavior.semantic import (
     BehaviorSemanticRefreshStatus,
     LLMBehaviorOverviewGenerator,
 )
-from infrastructure.store.locks import ProcessLocalLockStore
-from ModelClient import (
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.model_client import (
     ChatClient,
     ChatModelConfig,
     ChatRequest,

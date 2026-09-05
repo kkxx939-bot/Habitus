@@ -14,19 +14,19 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from Config import HabitusConfig
-from infrastructure.vector import VectorStoreState
-from integrations.http_api.app import create_http_app
-from integrations.local_service import (
+from habitus.config import HabitusConfig
+from habitus.infrastructure.vector import VectorStoreState
+from habitus.integrations.http_api.app import create_http_app
+from habitus.integrations.local_service import (
     DoctorStatus,
     ServiceInstanceLock,
     ServiceInstanceLockError,
     run_doctor,
     run_doctor_from_env,
 )
-from integrations.local_service import doctor as doctor_module
-from ModelClient import EmbeddingVector
-from Runtime import Runtime
+from habitus.integrations.local_service import doctor as doctor_module
+from habitus.model_client import EmbeddingVector
+from habitus.runtime import Runtime
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
@@ -38,7 +38,7 @@ def _config(
     credentials: bool = False,
     filled: bool = False,
 ) -> HabitusConfig:
-    payload = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
+    payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
     payload["http"]["port"] = port
     if not credentials:
@@ -149,7 +149,7 @@ def test_doctor_resolves_conditional_adapter_dependencies_from_registry(
     run_doctor(managed, check_port=False)
     assert "volcengine" in checked
 
-    payload = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
+    payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "api-key")
     for group, name in (("memory", "vector_store"), ("conversation", "summary_vector_store")):
         target = payload[group][name]
@@ -162,7 +162,7 @@ def test_doctor_resolves_conditional_adapter_dependencies_from_registry(
 
 
 def test_doctor_reports_unregistered_adapter_without_raising(tmp_path: Path) -> None:
-    payload = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
+    payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
     payload["models"]["chat"]["route"].update(
         {"adapter": "future_chat", "credential_ref": ""}
@@ -178,7 +178,7 @@ def test_doctor_reports_unregistered_adapter_without_raising(tmp_path: Path) -> 
 
 
 def test_doctor_fails_adapter_capacity_before_remote_probe(tmp_path: Path) -> None:
-    payload = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
+    payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
     payload["models"]["embedding"]["dimension"] = 65_536
     config = HabitusConfig.from_mapping(payload)
@@ -192,7 +192,7 @@ def test_doctor_fails_adapter_capacity_before_remote_probe(tmp_path: Path) -> No
 
 def test_doctor_requires_private_permissions_for_the_secret_bearing_yaml(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
-    path.write_bytes((REPOSITORY_ROOT / "Config" / "example.yaml").read_bytes())
+    path.write_bytes((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_bytes())
     path.chmod(0o644)
 
     exposed = run_doctor_from_env(
@@ -253,7 +253,7 @@ def test_deep_doctor_does_not_report_an_unready_vector_publication_as_pass(
         ),
         close=AsyncMock(),
     )
-    monkeypatch.setattr("Runtime.build_runtime", Mock(return_value=runtime))
+    monkeypatch.setattr("habitus.runtime.build_runtime", Mock(return_value=runtime))
 
     checks = doctor_module._deep_checks(_config(tmp_path), timeout_seconds=0.5)
 
@@ -288,7 +288,7 @@ def test_deep_doctor_chat_timeout_is_a_real_wall_clock_bound(
         ),
         close=AsyncMock(),
     )
-    monkeypatch.setattr("Runtime.build_runtime", Mock(return_value=runtime))
+    monkeypatch.setattr("habitus.runtime.build_runtime", Mock(return_value=runtime))
     started = time.monotonic()
 
     checks = doctor_module._deep_checks(_config(tmp_path), timeout_seconds=0.01)
@@ -304,8 +304,8 @@ def test_repair_source_outputs_refuses_while_a_local_service_owns_the_root(
 ) -> None:
     """修复会删除耐久文件，因此服务在跑时必须拒绝，而不是并发去动存储。"""
 
-    from integrations.local_service import cli
-    from integrations.local_service.instance_lock import ServiceInstanceLockError
+    from habitus.integrations.local_service import cli
+    from habitus.integrations.local_service.instance_lock import ServiceInstanceLockError
 
     class StubConfig:
         storage_root = tmp_path
@@ -324,8 +324,8 @@ def test_repair_source_outputs_refuses_while_a_local_service_owns_the_root(
         def release(self) -> None:  # pragma: no cover - 未取得锁时不应被调用
             self.released = True
 
-    import Config
-    import integrations.local_service.instance_lock as instance_lock
+    import habitus.config as Config
+    import habitus.integrations.local_service.instance_lock as instance_lock
 
     monkeypatch.setattr(Config, "HabitusConfig", StubConfig)
     monkeypatch.setattr(instance_lock, "ServiceInstanceLock", RefusingLock)
@@ -338,7 +338,7 @@ def test_repair_source_outputs_refuses_while_a_local_service_owns_the_root(
 
 
 def test_repair_source_outputs_rejects_an_unknown_consumer(tmp_path: Path) -> None:
-    from integrations.local_service import cli
+    from habitus.integrations.local_service import cli
 
     with pytest.raises(SystemExit):
         cli._parser().parse_args(

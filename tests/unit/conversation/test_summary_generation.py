@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from memory.conversation import (
+from habitus.memory.conversation import (
     ConversationAddress,
     ConversationJournalConfig,
     ConversationRangeSummaryGenerator,
@@ -24,8 +24,8 @@ from memory.conversation import (
     ConversationSummaryService,
     ConversationSummaryStore,
 )
-from memory.conversation.layout import ConversationLayout
-from ModelClient import (
+from habitus.memory.conversation.layout import ConversationLayout
+from habitus.model_client import (
     ChatClient,
     ChatModelConfig,
     ModelResponse,
@@ -33,7 +33,7 @@ from ModelClient import (
     ProviderConfig,
     StructuredChatClient,
 )
-from pre.conversation import ConversationMessageRole, ConversationRangeSummaryStage
+from habitus.pre.conversation import ConversationMessageRole, ConversationRangeSummaryStage
 from tests.helpers import BASE_TIME, closed_turn, message, segment, segment_summary, summary_content
 from tests.model_helpers import prepare_chat_request
 

@@ -7,12 +7,12 @@ from pathlib import Path
 
 import pytest
 
-import infrastructure.store.filesystem.durable_io.atomic_file as atomic_file_module
-from memory.document import MemoryDocumentConfig, MemoryDocumentMetadata
-from memory.editor import MemoryDocumentLockKeyspace
-from memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
-from memory.tree import MemoryTree, MemoryTreeConfig, MemoryTreeIntegrityError
-from memory.uri import MemoryURI
+import habitus.infrastructure.store.filesystem.durable_io.atomic_file as atomic_file_module
+from habitus.memory.document import MemoryDocumentConfig, MemoryDocumentMetadata
+from habitus.memory.editor import MemoryDocumentLockKeyspace
+from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
+from habitus.memory.tree import MemoryTree, MemoryTreeConfig, MemoryTreeIntegrityError
+from habitus.memory.uri import MemoryURI
 from tests.helpers import BASE_TIME, codec, document, memory_fields
 
 ADDRESSES = (

@@ -8,8 +8,8 @@ from dataclasses import replace
 
 import pytest
 
-from infrastructure.vector import VectorStoreFilter, VectorStoreIntegrityError
-from infrastructure.vector.adapters import vikingdb as protocol
+from habitus.infrastructure.vector import VectorStoreFilter, VectorStoreIntegrityError
+from habitus.infrastructure.vector.adapters import vikingdb as protocol
 from tests.unit.infrastructure.test_vikingdb_protocol import record, search_item
 
 

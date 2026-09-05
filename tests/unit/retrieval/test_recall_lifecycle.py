@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from memory.model import MemoryKind
-from memory.retrieval import (
+from habitus.memory.model import MemoryKind
+from habitus.memory.retrieval import (
     MemoryRecallCandidate,
     MemoryRecallLifecycle,
     MemoryRecallLifecycleConfig,
@@ -23,7 +23,7 @@ from memory.retrieval import (
     memory_hotness,
     memory_temperature,
 )
-from memory.uri import MemoryURI
+from habitus.memory.uri import MemoryURI
 from tests.helpers import document
 
 NOW = datetime(2026, 7, 31, 8, 0, tzinfo=UTC)

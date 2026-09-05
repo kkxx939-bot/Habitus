@@ -4,7 +4,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from memory.conversation import (
+from habitus.memory.conversation import (
     ConversationAddress,
     ConversationLayout,
     ConversationRangeSummaryStore,
@@ -13,8 +13,8 @@ from memory.conversation import (
     ConversationSummaryExpansionError,
     ConversationSummaryStore,
 )
-from memory.conversation.indexing import ConversationSummaryMatch, summary_reference
-from pre.conversation import (
+from habitus.memory.conversation.indexing import ConversationSummaryMatch, summary_reference
+from habitus.pre.conversation import (
     ConversationRangeSummary,
     ConversationRangeSummaryStage,
     ConversationSummarySourceRef,

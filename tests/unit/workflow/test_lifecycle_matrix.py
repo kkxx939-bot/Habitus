@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from memory.conversation import ConversationAddress
-from memory.editor import MemoryTransactionJournalState
-from memory.workflow import (
+from habitus.memory.conversation import ConversationAddress
+from habitus.memory.editor import MemoryTransactionJournalState
+from habitus.memory.workflow import (
     ConversationLifecycleError,
     ConversationLifecycleMaintenanceResult,
     ConversationLifecycleManager,

@@ -6,7 +6,7 @@ from datetime import UTC, timedelta
 
 import pytest
 
-from behavior import (
+from habitus.behavior import (
     BehaviorDocumentWriter,
     BehaviorKind,
     BehaviorLinkType,
@@ -14,7 +14,7 @@ from behavior import (
     BehaviorTree,
     BehaviorURI,
 )
-from infrastructure.store.locks import ProcessLocalLockStore
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from tests.unit.behavior.tree_payloads import (
     action_segment_payload,
     gap_payload,
@@ -171,7 +171,7 @@ def test_directory_capacity_holds_under_concurrent_publishes(tmp_path) -> None:
     import threading
     import time
 
-    from behavior import BehaviorTreeConfig, BehaviorTreeIntegrityError
+    from habitus.behavior import BehaviorTreeConfig, BehaviorTreeIntegrityError
 
     tree = BehaviorTree(
         tmp_path / "behavior-tree",

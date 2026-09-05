@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from conversation.projection import ConversationBehaviorProjectionStore, ConversationBehaviorProjector
-from conversation.source import ConversationSourceError
+from habitus.conversation.projection import ConversationBehaviorProjectionStore, ConversationBehaviorProjector
+from habitus.conversation.source import ConversationSourceError
 from tests.unit.conversation.source_v2_helpers import source
 
 

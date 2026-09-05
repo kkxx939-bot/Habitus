@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.conversation import (
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.conversation import (
     ConversationAddress,
     ConversationMessageJournal,
     ConversationRangeSummaryGenerator,
@@ -19,16 +19,16 @@ from memory.conversation import (
     PersistentConversationSummaryVectorIndex,
     SQLiteConversationSummaryUseStore,
 )
-from memory.conversation.indexing import summary_reference
-from memory.editor import MemoryTransactionJournal
-from memory.retrieval import ConversationSearchContextReader
-from memory.workflow import (
+from habitus.memory.conversation.indexing import summary_reference
+from habitus.memory.editor import MemoryTransactionJournal
+from habitus.memory.retrieval import ConversationSearchContextReader
+from habitus.memory.workflow import (
     ConversationLifecycleManager,
     MemoryChangeReceiptStore,
     MemoryJobStore,
     MemoryWorkflowLifecycleConfig,
 )
-from pre.conversation import (
+from habitus.pre.conversation import (
     ConversationBatch,
     ConversationRangeSummary,
     ConversationRangeSummaryStage,

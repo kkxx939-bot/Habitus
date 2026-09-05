@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from memory.conversation import (
+from habitus.memory.conversation import (
     ConversationAddress,
     ConversationJournalConfig,
     ConversationLayout,
@@ -17,7 +17,7 @@ from memory.conversation import (
     ConversationSummaryFrontier,
     ConversationSummaryStore,
 )
-from pre.conversation import ConversationRangeSummaryStage
+from habitus.pre.conversation import ConversationRangeSummaryStage
 from tests.helpers import BASE_TIME, closed_turn, segment, segment_summary
 
 
@@ -141,7 +141,7 @@ def test_compaction_frontier_and_plan_reject_overlap_gap_and_cross_conversation(
     gapped = segment_summary(
         segment(segment_id="000000000004-000000000005", messages=closed_turn(start_sequence=4))
     )
-    from memory.conversation import ConversationSummaryCompactionPlan
+    from habitus.memory.conversation import ConversationSummaryCompactionPlan
 
     with pytest.raises(ValueError, match="contiguous"):
         ConversationSummaryCompactionPlan(

@@ -33,10 +33,10 @@ jobs:
           init_root="$RUNNER_TEMP/habitus-init"
           habitus --help
           habitus-server init --help
-          habitus init --config "$init_root/config.yaml" --from-config Config/example.yaml --non-interactive --skip-doctor --no-start
+          habitus init --config "$init_root/config.yaml" --from-config habitus/config/example.yaml --non-interactive --skip-doctor --no-start
           test -f "$init_root/config.yaml"
           test "$(stat -c '%a' "$init_root/config.yaml")" = "600"
-          HABITUS_CI_CONFIG_PATH="$init_root/config.yaml" python -c 'import os; from Config import HabitusConfig; c=HabitusConfig.from_file(os.environ["HABITUS_CI_CONFIG_PATH"]); assert c.models.chat.route.credential_ref == "deepseek"; assert c.models.embedding.route.credential_ref == "ark"; assert c.models.rerank.route.credential_ref == "dashscope"; assert c.memory.vector_store.route.credential_ref == "vikingdb"'
+          HABITUS_CI_CONFIG_PATH="$init_root/config.yaml" python -c 'import os; from habitus.config import HabitusConfig; c=HabitusConfig.from_file(os.environ["HABITUS_CI_CONFIG_PATH"]); assert c.models.chat.route.credential_ref == "deepseek"; assert c.models.embedding.route.credential_ref == "ark"; assert c.models.rerank.route.credential_ref == "dashscope"; assert c.memory.vector_store.route.credential_ref == "vikingdb"'
           habitus harnesses
       - name: Build wheel and verify its contents against pyproject
         run: |

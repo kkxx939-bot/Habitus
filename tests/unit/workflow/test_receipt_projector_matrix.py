@@ -8,20 +8,20 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.editor.transaction import MemoryCommitTransaction
-from memory.editor.transaction_log import (
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.editor.transaction import MemoryCommitTransaction
+from habitus.memory.editor.transaction_log import (
     MemoryTransactionJournal,
     MemoryTransactionJournalEntry,
     MemoryTransactionJournalRecord,
     MemoryTransactionJournalState,
 )
-from memory.model import MemoryKind
-from memory.snapshot import MemorySnapshotReader
-from memory.tree import MemoryTree
-from memory.uri import MemoryURI
-from memory.workflow.receipt import (
+from habitus.memory.model import MemoryKind
+from habitus.memory.snapshot import MemorySnapshotReader
+from habitus.memory.tree import MemoryTree
+from habitus.memory.uri import MemoryURI
+from habitus.memory.workflow.receipt import (
     MemoryChangeReceiptError,
     MemoryChangeReceiptProjector,
     MemoryChangeReceiptState,

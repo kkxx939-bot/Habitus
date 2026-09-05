@@ -18,7 +18,7 @@ if [[ -z "${VIRTUAL_ENV:-}" && -x .venv/bin/python ]]; then
     PATH="$PWD/.venv/bin:$PATH"
 fi
 
-PATHS=(Config Runtime ModelClient pre conversation memory behavior prediction infrastructure foundation integrations benchmark)
+PATHS=(habitus)
 
 step() { printf '\n== %s ==\n' "$1"; }
 

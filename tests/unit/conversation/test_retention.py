@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from memory.conversation import (
+from habitus.memory.conversation import (
     ConversationBoundaryHints,
     ConversationMessageChunker,
     ConversationRetentionError,
@@ -13,7 +13,7 @@ from memory.conversation import (
     ConversationSemanticBoundary,
     ConversationToolResultReducer,
 )
-from pre.conversation import (
+from habitus.pre.conversation import (
     ConversationBatch,
     ConversationMessageRole,
     ConversationToolResultContentMode,

@@ -2,8 +2,8 @@
 
 import pytest
 
-from memory.model import MemoryKind
-from memory.retrieval import (
+from habitus.memory.model import MemoryKind
+from habitus.memory.retrieval import (
     MemoryContextAssembler,
     MemoryMatchedMemory,
     MemoryQueryPlanContent,
@@ -13,8 +13,8 @@ from memory.retrieval import (
     MemoryTemperature,
     MemoryTypedQuery,
 )
-from memory.retrieval.context import render_recent_messages
-from memory.uri import MemoryURI
+from habitus.memory.retrieval.context import render_recent_messages
+from habitus.memory.uri import MemoryURI
 from tests.helpers import document, tool_turn
 
 

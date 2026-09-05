@@ -9,7 +9,7 @@ import math
 import httpx
 import pytest
 
-from ModelClient import (
+from habitus.model_client import (
     ChatCallContext,
     ChatClient,
     ChatMessage,
@@ -26,9 +26,9 @@ from ModelClient import (
     ToolCall,
     ToolDefinition,
 )
-from ModelClient.adapters.ark_multimodal import ArkMultimodalEmbeddingProvider
-from ModelClient.adapters.openai_compatible_chat import OpenAICompatibleChatProvider
-from ModelClient.adapters.openai_compatible_rerank import OpenAICompatibleRerankProvider
+from habitus.model_client.adapters.ark_multimodal import ArkMultimodalEmbeddingProvider
+from habitus.model_client.adapters.openai_compatible_chat import OpenAICompatibleChatProvider
+from habitus.model_client.adapters.openai_compatible_rerank import OpenAICompatibleRerankProvider
 
 
 def chat_config(**overrides: object) -> ChatModelConfig:

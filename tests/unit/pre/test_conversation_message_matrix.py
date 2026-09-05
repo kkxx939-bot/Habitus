@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from pre.conversation.messages import (
+from habitus.pre.conversation.messages import (
     ConversationBatch,
     ConversationMessage,
     ConversationMessageRole,
@@ -17,7 +17,7 @@ from pre.conversation.messages import (
     ConversationToolResultContentMode,
     ConversationToolResultStatus,
 )
-from pre.conversation.messages.model import conversation_datetime, require_sha256
+from habitus.pre.conversation.messages.model import conversation_datetime, require_sha256
 from tests.helpers import BASE_TIME, closed_turn, message, tool_turn
 
 UTC = UTC

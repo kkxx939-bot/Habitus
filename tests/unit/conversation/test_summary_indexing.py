@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from infrastructure.vector import VectorStoreMatch, VectorStoreState
-from memory.conversation import (
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.infrastructure.vector import VectorStoreMatch, VectorStoreState
+from habitus.memory.conversation import (
     ConversationAddress,
     ConversationMessageJournal,
     ConversationRangeSummaryGenerator,
@@ -19,15 +19,15 @@ from memory.conversation import (
     ConversationSummaryCompactor,
     ConversationSummaryStore,
 )
-from memory.conversation.indexing import (
+from habitus.memory.conversation.indexing import (
     ConversationSummaryIndexError,
     ConversationSummaryVectorIndexConfig,
     PersistentConversationSummaryVectorIndex,
     conversation_summary_embedding_fingerprint,
 )
-from memory.conversation.indexing.model import summary_reference
-from ModelClient import EmbeddingVector
-from pre.conversation import ConversationBatch
+from habitus.memory.conversation.indexing.model import summary_reference
+from habitus.model_client import EmbeddingVector
+from habitus.pre.conversation import ConversationBatch
 from tests.helpers import closed_turn, segment, segment_summary
 from tests.unit.retrieval.test_search_service import structured
 

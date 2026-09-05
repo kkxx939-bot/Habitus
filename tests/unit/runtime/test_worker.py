@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from Config import WorkerConfig
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.conversation import ConversationAddress
-from memory.workflow import (
+from habitus.config import WorkerConfig
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.conversation import ConversationAddress
+from habitus.memory.workflow import (
     MemoryJobBlockedError,
     MemoryJobClaim,
     MemoryJobExecutionError,
@@ -21,8 +21,8 @@ from memory.workflow import (
     MemoryJobRunner,
     MemoryJobRunResult,
 )
-from memory.workflow.jobs import MemoryJobConfig, MemoryJobStore
-from Runtime import MemoryWorker, MemoryWorkerState, MemoryWorkerStateError
+from habitus.memory.workflow.jobs import MemoryJobConfig, MemoryJobStore
+from habitus.runtime import MemoryWorker, MemoryWorkerState, MemoryWorkerStateError
 from tests.helpers import segment
 
 

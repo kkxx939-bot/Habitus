@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 
-from memory.conversation import ConversationSemanticBoundaryScorer
-from pre.conversation import ConversationBatch
+from habitus.memory.conversation import ConversationSemanticBoundaryScorer
+from habitus.pre.conversation import ConversationBatch
 from tests.helpers import closed_turn
 
 

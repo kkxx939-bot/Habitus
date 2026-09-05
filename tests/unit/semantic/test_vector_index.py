@@ -7,17 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.vector import VectorStoreMatch, VectorStoreState
-from memory.indexing import (
+from habitus.infrastructure.vector import VectorStoreMatch, VectorStoreState
+from habitus.memory.indexing import (
     MemoryVectorIndexError,
     PersistentMemoryVectorIndex,
     memory_embedding_fingerprint,
 )
-from memory.intention import MemoryIntentionRecallScope
-from memory.model import MemoryKind, MemoryLevel
-from memory.tree import MemoryTree
-from memory.uri import MemoryURI
-from ModelClient import EmbeddingVector
+from habitus.memory.intention import MemoryIntentionRecallScope
+from habitus.memory.model import MemoryKind, MemoryLevel
+from habitus.memory.tree import MemoryTree
+from habitus.memory.uri import MemoryURI
+from habitus.model_client import EmbeddingVector
 from tests.helpers import document
 
 

@@ -5,8 +5,8 @@ from enum import Enum
 
 import pytest
 
-from foundation.ids import require_safe_path_segment
-from foundation.integrity import (
+from habitus.foundation.ids import require_safe_path_segment
+from habitus.foundation.integrity import (
     CanonicalSerializationError,
     canonical_digest,
     canonical_json,

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from ModelClient import (
+from habitus.model_client import (
     ChatClient,
     ChatModelConfig,
     ChatRequest,
@@ -19,7 +19,7 @@ from ModelClient import (
     parse_json_response,
     validate_json_schema,
 )
-from ModelClient.schema_validation import JSONSchemaValidationError
+from habitus.model_client.schema_validation import JSONSchemaValidationError
 from tests.model_helpers import prepare_chat_request
 
 SCHEMA = {

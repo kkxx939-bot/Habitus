@@ -7,8 +7,8 @@ from types import MappingProxyType
 
 import pytest
 
-from memory.document import MemoryLinkType
-from memory.editor.candidate import (
+from habitus.memory.document import MemoryLinkType
+from habitus.memory.editor.candidate import (
     MemoryCandidate,
     MemoryCandidateBatch,
     MemoryCandidateError,
@@ -18,15 +18,15 @@ from memory.editor.candidate import (
     MemoryRelationAction,
     MemoryRelationCandidate,
 )
-from memory.editor.page_id import (
+from habitus.memory.editor.page_id import (
     MemoryPageIdError,
     MemoryPageIdMap,
     validate_new_page_id,
     validate_page_id,
     validate_unique_page_ids,
 )
-from memory.model import MemoryAddress, MemoryKind
-from memory.uri import MemoryURI, MemoryURIError
+from habitus.memory.model import MemoryAddress, MemoryKind
+from habitus.memory.uri import MemoryURI, MemoryURIError
 from tests.helpers import document, memory_fields, snapshot_batch
 
 FIELD_FOR_KIND = {

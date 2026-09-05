@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 
 import pytest
 
-import pre.conversation.summaries.model as summary_model
-from pre.conversation.summaries import (
+import habitus.pre.conversation.summaries.model as summary_model
+from habitus.pre.conversation.summaries import (
     ConversationRangeSummary,
     ConversationRangeSummaryStage,
     ConversationSegmentSummary,

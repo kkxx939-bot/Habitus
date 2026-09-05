@@ -5,12 +5,12 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from conversation.projection import (
+from habitus.conversation.projection import (
     ConversationBehaviorProjectionConsumer,
     ConversationBehaviorProjectionStore,
     ConversationBehaviorProjector,
 )
-from conversation.source import (
+from habitus.conversation.source import (
     ConversationConsumerDelivery,
     ConversationConsumerExecutionFence,
     ConversationConsumerOutcomeStore,
@@ -22,14 +22,18 @@ from conversation.source import (
     ConversationSourceStore,
     conversation_source_request_digest,
 )
-from conversation.source.fence import ConversationConsumerExecutionLease
-from foundation.integrity import canonical_digest
-from foundation.observability import ObservationEvent, Observer
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.conversation import ConversationAppendResult, ConversationAppendStatus, ConversationRetentionPlan
-from memory.workflow import ConversationMemoryIngestResult, MemoryConversationOutput, MemoryConversationOutputStore
-from pre.conversation import ConversationBatch, ConversationMessage, ConversationMessageRole
+from habitus.conversation.source.fence import ConversationConsumerExecutionLease
+from habitus.foundation.integrity import canonical_digest
+from habitus.foundation.observability import ObservationEvent, Observer
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.conversation import ConversationAppendResult, ConversationAppendStatus, ConversationRetentionPlan
+from habitus.memory.workflow import (
+    ConversationMemoryIngestResult,
+    MemoryConversationOutput,
+    MemoryConversationOutputStore,
+)
+from habitus.pre.conversation import ConversationBatch, ConversationMessage, ConversationMessageRole
 
 NOW = datetime(2026, 8, 8, 1, 0, tzinfo=UTC)
 STARTED_ON = date(2026, 8, 8)

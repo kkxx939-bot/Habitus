@@ -3,19 +3,19 @@
 from types import SimpleNamespace
 from typing import cast
 
-from infrastructure.store.contracts.lock import LockLostError
-from integrations.http import HTTPMemoryJobConflictError, HTTPMemoryJobNotFoundError
-from integrations.http_api.app import create_http_app
-from integrations.http_api.errors import (
+from habitus.infrastructure.store.contracts.lock import LockLostError
+from habitus.integrations.http import HTTPMemoryJobConflictError, HTTPMemoryJobNotFoundError
+from habitus.integrations.http_api.app import create_http_app
+from habitus.integrations.http_api.errors import (
     ERROR_CODE_TO_HTTP_STATUS,
     documented_error_responses,
     map_exception,
 )
-from integrations.http_api.schemas import ErrorResponse, HTTPErrorCode
-from memory.conversation import ConversationJournalError, ConversationWriteConflictError
-from memory.retrieval import MemorySearchError
-from ModelClient import ModelRateLimitError, ModelTransportError
-from Runtime import MemoryConsistencySnapshot, MemoryConsistencyTimeoutError, Runtime, RuntimeStateError
+from habitus.integrations.http_api.schemas import ErrorResponse, HTTPErrorCode
+from habitus.memory.conversation import ConversationJournalError, ConversationWriteConflictError
+from habitus.memory.retrieval import MemorySearchError
+from habitus.model_client import ModelRateLimitError, ModelTransportError
+from habitus.runtime import MemoryConsistencySnapshot, MemoryConsistencyTimeoutError, Runtime, RuntimeStateError
 
 
 def test_every_public_error_code_has_one_central_http_status() -> None:

@@ -34,7 +34,7 @@ def fail(message: str, items: list[str] | None = None) -> None:
 
 
 def tracked_files() -> list[Path]:
-    """版本库里的文件清单。用 git 而不是遍历磁盘，天然排除 benchmark/data 这类
+    """版本库里的文件清单。用 git 而不是遍历磁盘，天然排除 habitus/benchmark/data 这类
     被 gitignore 的本地数据集——它们不进 git，CI 上也不存在。"""
     out = subprocess.run(
         ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True, text=True

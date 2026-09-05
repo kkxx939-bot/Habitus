@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from integrations.http import HTTPMemoryJobConflictError, RuntimeHTTPHandlers
-from integrations.sdk import (
+from habitus.integrations.http import HTTPMemoryJobConflictError, RuntimeHTTPHandlers
+from habitus.integrations.sdk import (
     AgentFlushResult,
     AgentHookSession,
     AgentMemoryHooks,
@@ -19,8 +19,8 @@ from integrations.sdk import (
     ConversationRef,
     PreparedAgentTurn,
 )
-from memory.workflow import MemoryJob, MemoryJobStatus
-from Runtime import (
+from habitus.memory.workflow import MemoryJob, MemoryJobStatus
+from habitus.runtime import (
     MemoryConsistencySnapshot,
     MemoryConsistencyState,
     Runtime,

@@ -8,8 +8,8 @@ from collections.abc import Mapping
 
 import pytest
 
-import ModelClient.schema_validation as schema_validation
-from ModelClient.schema_validation import JSONSchemaValidationError, validate_json_schema
+import habitus.model_client.schema_validation as schema_validation
+from habitus.model_client.schema_validation import JSONSchemaValidationError, validate_json_schema
 
 
 @pytest.fixture

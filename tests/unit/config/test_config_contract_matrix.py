@@ -6,7 +6,7 @@ from dataclasses import fields, is_dataclass, replace
 
 import pytest
 
-from Config import (
+from habitus.config import (
     ConversationConfig,
     ConversationLifecycleConfig,
     MemoryConfig,
@@ -17,11 +17,18 @@ from Config import (
     WorkerConfig,
     WorkflowConfig,
 )
-from Config.loader import ConfigError, construct_config, group_fields, required_field, strict_fields, strict_object
-from infrastructure.editor.snapshot import SnapshotReadConfig
-from infrastructure.store.sqlite import SQLiteLockStoreConfig
-from infrastructure.vector import VectorStoreConfig, VectorStoreRouteConfig
-from memory.conversation import (
+from habitus.config.loader import (
+    ConfigError,
+    construct_config,
+    group_fields,
+    required_field,
+    strict_fields,
+    strict_object,
+)
+from habitus.infrastructure.editor.snapshot import SnapshotReadConfig
+from habitus.infrastructure.store.sqlite import SQLiteLockStoreConfig
+from habitus.infrastructure.vector import VectorStoreConfig, VectorStoreRouteConfig
+from habitus.memory.conversation import (
     ConversationJournalConfig,
     ConversationRangeSummaryCompactionConfig,
     ConversationSegmentationConfig,
@@ -30,17 +37,17 @@ from memory.conversation import (
     ConversationSummaryConfig,
     ConversationSummaryVectorIndexConfig,
 )
-from memory.document import MemoryDocumentConfig
-from memory.editor import (
+from habitus.memory.document import MemoryDocumentConfig
+from habitus.memory.editor import (
     MemoryCommitConfig,
     MemoryExtractionConfig,
     MemoryRetrievalConfig,
     MemoryTransactionJournalConfig,
 )
-from memory.indexing import MemoryVectorIndexConfig
-from memory.semantic import MemorySemanticConfig
-from memory.tree import MemoryTreeConfig
-from memory.workflow import (
+from habitus.memory.indexing import MemoryVectorIndexConfig
+from habitus.memory.semantic import MemorySemanticConfig
+from habitus.memory.tree import MemoryTreeConfig
+from habitus.memory.workflow import (
     MemoryChangeReceiptStoreConfig,
     MemoryJobConfig,
     MemoryWorkflowLifecycleConfig,

@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from behavior.reduction import (
+from habitus.behavior.reduction import (
     BehaviorReductionError,
     ReducibleJudgement,
     assemble_chains,

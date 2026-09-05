@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from Config import ConversationLifecycleConfig
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.conversation import (
+from habitus.config import ConversationLifecycleConfig
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.conversation import (
     ConversationAddress,
     ConversationMessageJournal,
     ConversationRangeSummaryGenerator,
@@ -20,14 +20,14 @@ from memory.conversation import (
     ConversationSummaryStore,
     PersistentConversationSummaryVectorIndex,
 )
-from memory.editor import MemoryTransactionJournal
-from memory.workflow import (
+from habitus.memory.editor import MemoryTransactionJournal
+from habitus.memory.workflow import (
     ConversationLifecycleManager,
     MemoryChangeReceiptStore,
     MemoryJobStore,
 )
-from pre.conversation import ConversationBatch
-from Runtime import LifecycleWorker, LifecycleWorkerState, LifecycleWorkerStateError
+from habitus.pre.conversation import ConversationBatch
+from habitus.runtime import LifecycleWorker, LifecycleWorkerState, LifecycleWorkerStateError
 from tests.helpers import closed_turn, codec
 from tests.unit.conversation.test_summary_indexing import Embedder, VectorStore
 from tests.unit.retrieval.test_search_service import structured

@@ -4,14 +4,14 @@ import asyncio
 
 import pytest
 
-from conversation.source import (
+from habitus.conversation.source import (
     ConversationConsumerDeliveryState,
     ConversationOrderedPredecessorPendingError,
     ConversationSourceConsumer,
     ConversationSourceOutputRepair,
     ConversationSourceRepairError,
 )
-from foundation.observability import ObservationStatus
+from habitus.foundation.observability import ObservationStatus
 from tests.unit.conversation.source_v2_helpers import (
     FakeMemoryConsumer,
     RecordingObserver,

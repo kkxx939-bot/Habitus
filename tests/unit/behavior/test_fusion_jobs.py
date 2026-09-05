@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from behavior.fusion import (
+from habitus.behavior.fusion import (
     FUSION_PROMPT_VERSION,
     FUSION_VERSION,
     BehaviorFusionEnqueuer,
@@ -26,17 +26,17 @@ from behavior.fusion import (
     BehaviorJudgementStore,
     segment_identity,
 )
-from behavior.observation import (
+from habitus.behavior.observation import (
     BehaviorObservation,
     BehaviorObservationBatch,
     BehaviorObservationConfig,
     BehaviorObservationEnvelope,
     BehaviorObservationStore,
 )
-from foundation.integrity import canonical_digest
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from ModelClient import (
+from habitus.foundation.integrity import canonical_digest
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.model_client import (
     ChatClient,
     ChatModelConfig,
     ChatRequest,
@@ -548,7 +548,7 @@ def test_a_worker_that_never_settles_is_not_reclaimed_forever(tmp_path) -> None:
 def test_persisting_a_second_fusion_of_the_same_segment_is_refused(tmp_path) -> None:
     """回执撞车时复用先到的那份，所以第二批判断会成为没有任何回执指向的孤儿。"""
 
-    from behavior.fusion.errors import BehaviorFusionError
+    from habitus.behavior.fusion.errors import BehaviorFusionError
 
     harness = Harness(tmp_path, [single_event_wire(len(FRAGMENTS))])
     harness.deliver(FRAGMENTS, "d1")

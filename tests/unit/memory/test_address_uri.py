@@ -4,8 +4,8 @@ from datetime import date
 
 import pytest
 
-from memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
-from memory.uri import MemoryURI, MemoryURIError, MemoryURINodeType
+from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
+from habitus.memory.uri import MemoryURI, MemoryURIError, MemoryURINodeType
 
 
 @pytest.mark.parametrize(

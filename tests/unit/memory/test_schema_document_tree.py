@@ -5,7 +5,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from memory.document import (
+from habitus.memory.document import (
     MemoryDocumentCodec,
     MemoryDocumentConfig,
     MemoryDocumentIntegrityError,
@@ -14,10 +14,10 @@ from memory.document import (
     MemoryLinkType,
     MemoryStoredLink,
 )
-from memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
-from memory.schema import MemorySchemaError, MemorySchemaRegistry
-from memory.tree import MemoryTree, MemoryTreeConfig, MemoryTreeIntegrityError
-from memory.uri import MemoryURI
+from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
+from habitus.memory.schema import MemorySchemaError, MemorySchemaRegistry
+from habitus.memory.tree import MemoryTree, MemoryTreeConfig, MemoryTreeIntegrityError
+from habitus.memory.uri import MemoryURI
 from tests.helpers import BASE_TIME, document, memory_fields
 
 

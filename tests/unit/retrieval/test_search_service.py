@@ -9,10 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.compaction import MemoryContextUseResult
-from memory.conversation import (
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.compaction import MemoryContextUseResult
+from habitus.memory.conversation import (
     ConversationAddress,
     ConversationMessageJournal,
     ConversationRangeSummaryGenerator,
@@ -20,11 +20,11 @@ from memory.conversation import (
     ConversationSummaryCompactor,
     ConversationSummaryStore,
 )
-from memory.conversation.indexing import ConversationSummaryMatch
-from memory.conversation.indexing.model import summary_reference
-from memory.intention import MemoryIntentionRecallScope
-from memory.model import MemoryDirectory, MemoryKind, MemoryLevel
-from memory.retrieval import (
+from habitus.memory.conversation.indexing import ConversationSummaryMatch
+from habitus.memory.conversation.indexing.model import summary_reference
+from habitus.memory.intention import MemoryIntentionRecallScope
+from habitus.memory.model import MemoryDirectory, MemoryKind, MemoryLevel
+from habitus.memory.retrieval import (
     ConversationSearchContextReader,
     MemoryContextAssembler,
     MemoryQueryResult,
@@ -44,10 +44,10 @@ from memory.retrieval import (
     SearchService,
     SQLiteMemoryRecallLifecycleStore,
 )
-from memory.snapshot import MemorySnapshotReader
-from memory.tree import MemoryTree
-from memory.uri import MemoryURI
-from ModelClient import (
+from habitus.memory.snapshot import MemorySnapshotReader
+from habitus.memory.tree import MemoryTree
+from habitus.memory.uri import MemoryURI
+from habitus.model_client import (
     ChatClient,
     ChatModelConfig,
     EmbeddingVector,

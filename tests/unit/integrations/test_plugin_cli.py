@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from integrations.local_service import plugin_cli
+from habitus.integrations.local_service import plugin_cli
 
 
 @pytest.mark.parametrize("command", ["harnesses", "install", "status", "update", "remove"])

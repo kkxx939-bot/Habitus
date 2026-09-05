@@ -4,8 +4,8 @@ import asyncio
 
 import pytest
 
-from conversation.projection import ConversationBehaviorProjectionConsumer, ConversationBehaviorProjector
-from conversation.source import (
+from habitus.conversation.projection import ConversationBehaviorProjectionConsumer, ConversationBehaviorProjector
+from habitus.conversation.source import (
     ConversationConsumerDelivery,
     ConversationConsumerExecutionFence,
     ConversationConsumerLeaseLostError,
@@ -15,8 +15,8 @@ from conversation.source import (
     ConversationSourceConsumer,
     ConversationSourceCoordinator,
 )
-from infrastructure.store.contracts import LockToken, PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
+from habitus.infrastructure.store.contracts import LockToken, PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from tests.unit.conversation.source_v2_helpers import (
     NOW,
     FakeMemoryConsumer,

@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.document import MemoryLinkType
-from memory.editor import (
+from habitus.infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.document import MemoryLinkType
+from habitus.memory.editor import (
     MemoryCandidate,
     MemoryCandidateBatch,
     MemoryEditorPlan,
@@ -26,19 +26,19 @@ from memory.editor import (
     MemoryRelationReadSet,
     MemoryRelationResolver,
 )
-from memory.editor.extraction import (
+from habitus.memory.editor.extraction import (
     MemoryExtractionResult,
     MemoryRetrievalAction,
     MemoryRetrievalDecision,
     MemoryRetrievalStatus,
 )
-from memory.editor.transaction import MemoryCommitPlan, MemoryCommitTransaction
-from memory.editor.transaction_log import MemoryTransactionJournal
-from memory.model import MemoryKind
-from memory.snapshot import MemorySnapshotReader
-from memory.tree import MemoryTree
-from memory.uri import MemoryURI
-from memory.workflow.receipt import (
+from habitus.memory.editor.transaction import MemoryCommitPlan, MemoryCommitTransaction
+from habitus.memory.editor.transaction_log import MemoryTransactionJournal
+from habitus.memory.model import MemoryKind
+from habitus.memory.snapshot import MemorySnapshotReader
+from habitus.memory.tree import MemoryTree
+from habitus.memory.uri import MemoryURI
+from habitus.memory.workflow.receipt import (
     MemoryChangeReceiptError,
     MemoryChangeReceiptState,
     MemoryChangeReceiptStore,

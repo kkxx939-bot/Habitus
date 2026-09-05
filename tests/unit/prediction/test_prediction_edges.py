@@ -6,8 +6,8 @@ from datetime import UTC
 
 import pytest
 
-from prediction import query, recurrence
-from prediction.edges import (
+from habitus.prediction import query, recurrence
+from habitus.prediction.edges import (
     NO_SUCCESSOR,
     derive,
     derive_parallels,
@@ -16,8 +16,8 @@ from prediction.edges import (
     quantiles,
     require_ordered,
 )
-from prediction.errors import PredictionTreeError
-from prediction.model import ObservedAction, ObservedGap, SlotKey
+from habitus.prediction.errors import PredictionTreeError
+from habitus.prediction.model import ObservedAction, ObservedGap, SlotKey
 from tests.unit.prediction.prediction_fixtures import action, at, config, gap, reference
 
 
@@ -202,7 +202,7 @@ def _tree(edges, cfg):
 
     from datetime import datetime
 
-    from prediction.model import PredictionTree
+    from habitus.prediction.model import PredictionTree
 
     return PredictionTree(
         built_at=datetime(2026, 8, 16, tzinfo=UTC),

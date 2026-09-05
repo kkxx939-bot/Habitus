@@ -9,17 +9,17 @@ from types import MappingProxyType
 
 import pytest
 
-from memory.document import (
+from habitus.memory.document import (
     MemoryDocumentCodec,
     MemoryDocumentIntegrityError,
     MemoryDocumentMetadata,
     MemoryLinkType,
     MemoryStoredLink,
 )
-from memory.document.link import normalize_stored_links, parse_stored_links
-from memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
-from memory.schema import MemorySchemaRegistry
-from memory.uri import MemoryURI, MemoryURIError, MemoryURINodeType
+from habitus.memory.document.link import normalize_stored_links, parse_stored_links
+from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
+from habitus.memory.schema import MemorySchemaRegistry
+from habitus.memory.uri import MemoryURI, MemoryURIError, MemoryURINodeType
 from tests.helpers import BASE_TIME, document, memory_fields
 
 REGISTRY = MemorySchemaRegistry.load_default()

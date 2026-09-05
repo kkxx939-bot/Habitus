@@ -2,7 +2,7 @@
 
 import pytest
 
-from memory.editor import (
+from habitus.memory.editor import (
     ConversationSegmentQueryBuilder,
     MemoryExtractionConfig,
     MemoryRetrievalAction,
@@ -12,7 +12,7 @@ from memory.editor import (
     MemoryRetrievalObservation,
     MemoryRetrievalStatus,
 )
-from pre.conversation import ConversationMessageRole, ConversationSegment
+from habitus.pre.conversation import ConversationMessageRole, ConversationSegment
 from tests.helpers import message, tool_turn
 
 

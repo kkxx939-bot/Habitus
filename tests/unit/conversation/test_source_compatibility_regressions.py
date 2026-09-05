@@ -5,20 +5,20 @@ import json
 
 import pytest
 
-from conversation.projection import (
+from habitus.conversation.projection import (
     ConversationBehaviorProjectionBatch,
     ConversationBehaviorProjectionItem,
     ConversationBehaviorProjectionKind,
 )
-from conversation.source import (
+from habitus.conversation.source import (
     ConversationConsumerCorruptionError,
     ConversationConsumerDeliveryState,
     ConversationConsumerOutcomeState,
     ConversationSourceConsumer,
     ConversationSourceRecovery,
 )
-from memory.workflow import MemoryConversationOutput
-from pre.conversation import ConversationMessageRole
+from habitus.memory.workflow import MemoryConversationOutput
+from habitus.pre.conversation import ConversationMessageRole
 from tests.unit.conversation.source_v2_helpers import NOW, FakeMemoryConsumer, delivery, ingest_result, source
 
 

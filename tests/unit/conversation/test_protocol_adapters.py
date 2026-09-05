@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from pre.conversation import (
+from habitus.pre.conversation import (
     ConversationAdapterContext,
     ConversationAdapterRegistry,
     ConversationMessageRole,

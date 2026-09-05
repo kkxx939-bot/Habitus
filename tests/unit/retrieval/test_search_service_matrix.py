@@ -9,10 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from memory.document import MemoryLinkType, MemoryStoredLink
-from memory.intention import MemoryIntentionRecallScope
-from memory.model import MemoryDirectory, MemoryKind
-from memory.retrieval import (
+from habitus.memory.document import MemoryLinkType, MemoryStoredLink
+from habitus.memory.intention import MemoryIntentionRecallScope
+from habitus.memory.model import MemoryDirectory, MemoryKind
+from habitus.memory.retrieval import (
     MemoryContextAssembler,
     MemoryRetrievalGrader,
     MemorySearchError,
@@ -21,9 +21,9 @@ from memory.retrieval import (
     MemorySearchServiceConfig,
     SearchService,
 )
-from memory.snapshot import MemorySnapshotReader
-from memory.tree import MemoryTree
-from memory.uri import MemoryURI
+from habitus.memory.snapshot import MemorySnapshotReader
+from habitus.memory.tree import MemoryTree
+from habitus.memory.uri import MemoryURI
 from tests.helpers import codec, document
 from tests.unit.retrieval.test_search_service import (
     SemanticSearch,

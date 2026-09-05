@@ -9,20 +9,20 @@ from types import SimpleNamespace
 
 import pytest
 
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.conversation import ConversationAddress, ConversationMessageJournal
-from memory.editor import MemoryEditor
-from memory.workflow import (
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.conversation import ConversationAddress, ConversationMessageJournal
+from habitus.memory.editor import MemoryEditor
+from habitus.memory.workflow import (
     MemoryJobClaim,
     MemoryJobExecutionError,
     MemoryJobLeaseLostError,
     MemoryJobRunner,
 )
-from memory.workflow.jobs import MemoryJobStatus, MemoryJobStore
-from memory.workflow.planning import MemorySegmentProductBuilder
-from memory.workflow.recovery import MemoryStagedJobRecovery
-from pre.conversation import ConversationBatch
+from habitus.memory.workflow.jobs import MemoryJobStatus, MemoryJobStore
+from habitus.memory.workflow.planning import MemorySegmentProductBuilder
+from habitus.memory.workflow.recovery import MemoryStagedJobRecovery
+from habitus.pre.conversation import ConversationBatch
 from tests.helpers import closed_turn, segment, segment_summary
 from tests.integration.test_change_receipt_chain import editor_plan
 

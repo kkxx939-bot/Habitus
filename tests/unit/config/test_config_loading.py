@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from Config import ConfigError, HabitusConfig
-from Config.loader import load_config_object, required_field, strict_fields, strict_object
+from habitus.config import ConfigError, HabitusConfig
+from habitus.config.loader import load_config_object, required_field, strict_fields, strict_object
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-EXAMPLE_CONFIG = REPOSITORY_ROOT / "Config" / "example.yaml"
+EXAMPLE_CONFIG = REPOSITORY_ROOT / "habitus" / "config" / "example.yaml"
 
 
 def valid_mapping(tmp_path: Path) -> dict[str, object]:
@@ -256,7 +256,7 @@ def test_rerank_limits_are_checked_only_when_a_real_route_is_configured(tmp_path
 def test_behavior_config_enforces_its_scalar_bounds() -> None:
     """行为组的手写边界校验逐条钉死：bool 拒收、上下界、5 分钟默认值（用户裁定的落点）。"""
 
-    from Config.behavior import BehaviorConfig
+    from habitus.config.behavior import BehaviorConfig
 
     assert BehaviorConfig().reduction_sweep_interval_seconds == 300.0  # 用户裁定的 5 分钟
     assert BehaviorConfig().context_lookback_seconds is None  # 不复制唯一出处的数值
@@ -282,7 +282,7 @@ def test_behavior_config_enforces_its_scalar_bounds() -> None:
 def test_behavior_kinds_fields_are_bounded_and_derived_by_prefix() -> None:
     """kinds_* 与 behavior/kinds/config.py 的下界一致；覆盖项按前缀派生，不双份维护。"""
 
-    from Config.behavior import BehaviorConfig
+    from habitus.config.behavior import BehaviorConfig
 
     assert BehaviorConfig().kinds_overrides() == {}
     config = BehaviorConfig(kinds_batch_size=5, kinds_base_days=45, kinds_transient_retry_delay_seconds=1.5)

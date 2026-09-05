@@ -5,10 +5,10 @@ import hashlib
 
 import pytest
 
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from infrastructure.store.sqlite import SQLiteLockStore
-from infrastructure.vector import (
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.infrastructure.store.sqlite import SQLiteLockStore
+from habitus.infrastructure.vector import (
     PublishedVectorStore,
     VectorStoreConfig,
     VectorStoreError,
@@ -20,13 +20,13 @@ from infrastructure.vector import (
     VectorStoreRouteConfig,
     VectorStoreUnsupportedTopologyError,
 )
-from infrastructure.vector.adapters import register_builtin_vector_adapters
-from infrastructure.vector.adapters.vikingdb_config import (
+from habitus.infrastructure.vector.adapters import register_builtin_vector_adapters
+from habitus.infrastructure.vector.adapters.vikingdb_config import (
     VikingDBVectorStoreConfig,
     bounded_retry_after,
     render_credential_template,
 )
-from ModelClient import EmbeddingVector
+from habitus.model_client import EmbeddingVector
 
 
 def record(identity: str = "memory://profile", *, kind: str = "profile") -> VectorStoreRecord:

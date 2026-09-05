@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.editor.snapshot import SnapshotBatch, SnapshotReadConfig, VersionedSnapshot
-from memory.document import MemoryLinkType, MemoryStoredLink
-from memory.editor import (
+from habitus.infrastructure.editor.snapshot import SnapshotBatch, SnapshotReadConfig, VersionedSnapshot
+from habitus.memory.document import MemoryLinkType, MemoryStoredLink
+from habitus.memory.editor import (
     MemoryExtractionConfig,
     MemoryExtractionContext,
     MemoryExtractionError,
@@ -19,12 +19,12 @@ from memory.editor import (
     MemoryRetrievalDecision,
     MemoryRetrievalStatus,
 )
-from memory.intention import MemoryIntentionRecallScope
-from memory.model import MemoryAddress, MemoryDirectory, MemoryKind
-from memory.retrieval import MemorySearchHit
-from memory.snapshot import MemorySnapshotReader
-from memory.tree import MemoryTree
-from memory.uri import MemoryURI
+from habitus.memory.intention import MemoryIntentionRecallScope
+from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind
+from habitus.memory.retrieval import MemorySearchHit
+from habitus.memory.snapshot import MemorySnapshotReader
+from habitus.memory.tree import MemoryTree
+from habitus.memory.uri import MemoryURI
 from tests.helpers import codec, document
 
 

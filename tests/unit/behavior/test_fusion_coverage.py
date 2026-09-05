@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from behavior.fusion.coverage import BehaviorCoverageIndex
-from behavior.fusion.errors import BehaviorFusionError
-from behavior.fusion.prompt import FUSION_PROMPT_VERSION
-from behavior.fusion.receipt import build_fusion_receipt
-from behavior.observation import BehaviorObservation, BehaviorObservationConfig
+from habitus.behavior.fusion.coverage import BehaviorCoverageIndex
+from habitus.behavior.fusion.errors import BehaviorFusionError
+from habitus.behavior.fusion.prompt import FUSION_PROMPT_VERSION
+from habitus.behavior.fusion.receipt import build_fusion_receipt
+from habitus.behavior.observation import BehaviorObservation, BehaviorObservationConfig
 
 SUBJECT = "家庭成员A"
 TZ8 = timezone(timedelta(hours=8))

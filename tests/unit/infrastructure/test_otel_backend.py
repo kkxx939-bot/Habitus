@@ -10,9 +10,9 @@ from types import ModuleType
 
 import pytest
 
-from Config.observability import ObservabilityTracingConfig
-from foundation.observability import ObservationEvent, ObservationStatus, bind_observation_context
-from infrastructure.observability.otel import OpenTelemetryBackend
+from habitus.config.observability import ObservabilityTracingConfig
+from habitus.foundation.observability import ObservationEvent, ObservationStatus, bind_observation_context
+from habitus.infrastructure.observability.otel import OpenTelemetryBackend
 
 UTC = UTC
 

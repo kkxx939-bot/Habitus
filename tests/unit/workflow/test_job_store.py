@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.store.contracts.path_lock import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.conversation import ConversationAddress
-from memory.workflow.jobs import (
+from habitus.infrastructure.store.contracts.path_lock import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.conversation import ConversationAddress
+from habitus.memory.workflow.jobs import (
     MemoryJobBlockedError,
     MemoryJobConfig,
     MemoryJobError,

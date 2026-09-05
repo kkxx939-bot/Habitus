@@ -8,24 +8,24 @@ from types import SimpleNamespace
 
 import pytest
 
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.conversation import ConversationAddress, ConversationMessageJournal
-from memory.editor import (
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.conversation import ConversationAddress, ConversationMessageJournal
+from habitus.memory.editor import (
     MemoryCommitTransaction,
     MemoryTransactionJournal,
     MemoryTransactionJournalError,
     MemoryTransactionJournalState,
 )
-from memory.snapshot import MemorySnapshotReader
-from memory.tree import MemoryTree
-from memory.workflow import (
+from habitus.memory.snapshot import MemorySnapshotReader
+from habitus.memory.tree import MemoryTree
+from habitus.memory.workflow import (
     MemoryJobExecutionError,
     MemoryJobNotReadyError,
     MemoryJobStore,
 )
-from memory.workflow.receipt import MemoryChangeReceiptState, MemoryChangeReceiptStore, MemoryChangeSource
-from memory.workflow.recovery import MemoryJobTransactionRecovery, MemoryStagedJobRecovery
+from habitus.memory.workflow.receipt import MemoryChangeReceiptState, MemoryChangeReceiptStore, MemoryChangeSource
+from habitus.memory.workflow.recovery import MemoryJobTransactionRecovery, MemoryStagedJobRecovery
 from tests.helpers import BASE_TIME, codec, segment
 
 

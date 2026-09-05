@@ -5,7 +5,7 @@ from datetime import timedelta
 
 import pytest
 
-from memory.intention import (
+from habitus.memory.intention import (
     MemoryIntentionRecallScope,
     MemoryIntentionReviewConfig,
     MemoryIntentionReviewer,
@@ -14,7 +14,7 @@ from memory.intention import (
     intention_matches_scope,
     memory_index_kind,
 )
-from memory.model import MemoryKind
+from habitus.memory.model import MemoryKind
 from tests.helpers import BASE_TIME, document
 
 

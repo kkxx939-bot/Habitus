@@ -10,10 +10,10 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from prediction import evaluation
-from prediction.errors import PredictionTreeError
-from prediction.model import ObservedAction, ObservedGap
-from prediction.source import BehaviorSnapshot
+from habitus.prediction import evaluation
+from habitus.prediction.errors import PredictionTreeError
+from habitus.prediction.model import ObservedAction, ObservedGap
+from habitus.prediction.source import BehaviorSnapshot
 from tests.unit.prediction.prediction_fixtures import config
 
 CST = timezone(timedelta(hours=8))
@@ -118,7 +118,7 @@ def test_a_gap_straddling_the_cutoff_is_split_across_both_halves() -> None:
 
 
 def _pairs(data, *, cutoff, through):
-    from prediction import builder
+    from habitus.prediction import builder
 
     cfg = config()
     train, holdout = evaluation.split(data, cutoff=cutoff)
@@ -254,7 +254,7 @@ def test_an_empty_holdout_window_fails_loudly() -> None:
 
 
 def _tree_and_holdout(actions, *, cutoff):
-    from prediction import builder
+    from habitus.prediction import builder
 
     train, holdout = evaluation.split(snapshot(actions), cutoff=cutoff)
     tree = builder.build(train, config=config(), reference=cutoff, built_at=BUILT_AT)

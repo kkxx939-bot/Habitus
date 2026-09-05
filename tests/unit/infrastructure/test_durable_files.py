@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-import infrastructure.store.filesystem.durable_io.atomic_file as atomic_file_module
-from infrastructure.store.filesystem.durable_io.atomic_file import (
+import habitus.infrastructure.store.filesystem.durable_io.atomic_file as atomic_file_module
+from habitus.infrastructure.store.filesystem.durable_io.atomic_file import (
     ImmutableArtifactConflictError,
     atomic_create_bytes,
     atomic_replace_bytes,
@@ -13,7 +13,7 @@ from infrastructure.store.filesystem.durable_io.atomic_file import (
     durable_unlink,
     read_regular_bytes,
 )
-from infrastructure.store.filesystem.path_safety import (
+from habitus.infrastructure.store.filesystem.path_safety import (
     DurablePathIntegrityError,
     require_safe_artifact_path,
     validate_authoritative_tree,

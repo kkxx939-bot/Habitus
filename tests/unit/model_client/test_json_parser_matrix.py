@@ -8,8 +8,8 @@ import math
 
 import pytest
 
-import ModelClient.json_parser as json_parser
-from ModelClient.json_parser import ParsedJSON, parse_json_response
+import habitus.model_client.json_parser as json_parser
+from habitus.model_client.json_parser import ParsedJSON, parse_json_response
 
 
 @pytest.mark.parametrize(

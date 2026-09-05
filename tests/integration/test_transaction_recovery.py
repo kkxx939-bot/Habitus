@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.editor import (
+from habitus.infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.editor import (
     MemoryCandidate,
     MemoryCandidateBatch,
     MemoryFinalIdentity,
@@ -21,19 +21,19 @@ from memory.editor import (
     MemoryRelationPlanner,
     MemoryRelationReadSet,
 )
-from memory.editor.transaction import (
+from habitus.memory.editor.transaction import (
     MemoryCommitPlan,
     MemoryCommitRecoveryError,
     MemoryCommitTransaction,
 )
-from memory.editor.transaction_log import (
+from habitus.memory.editor.transaction_log import (
     MemoryTransactionJournal,
     MemoryTransactionJournalState,
 )
-from memory.model import MemoryKind
-from memory.snapshot import MemorySnapshotReader
-from memory.tree import MemoryTree
-from memory.uri import MemoryURI
+from habitus.memory.model import MemoryKind
+from habitus.memory.snapshot import MemorySnapshotReader
+from habitus.memory.tree import MemoryTree
+from habitus.memory.uri import MemoryURI
 from tests.helpers import BASE_TIME, codec, document, memory_fields
 
 

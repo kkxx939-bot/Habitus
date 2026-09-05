@@ -6,9 +6,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.compaction import (
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.compaction import (
     MemoryFieldCompactor,
     MemoryLifecycleCommitter,
     MemoryLifecycleMaintenanceConfig,
@@ -16,16 +16,16 @@ from memory.compaction import (
     MemoryLifecycleOperationPhase,
     MemoryRecoveryStore,
 )
-from memory.editor import MemoryCommitTransaction, MemoryTransactionJournal
-from memory.model import MemoryKind
-from memory.retrieval import (
+from habitus.memory.editor import MemoryCommitTransaction, MemoryTransactionJournal
+from habitus.memory.model import MemoryKind
+from habitus.memory.retrieval import (
     MemoryRecallLifecycle,
     MemoryRecallLifecycleConfig,
     SQLiteMemoryRecallLifecycleStore,
 )
-from memory.snapshot import MemorySnapshotReader
-from memory.tree import MemoryTree
-from memory.uri import MemoryURI
+from habitus.memory.snapshot import MemorySnapshotReader
+from habitus.memory.tree import MemoryTree
+from habitus.memory.uri import MemoryURI
 from tests.helpers import codec, document
 from tests.unit.conversation.test_summary_generation import RecordingProvider, structured
 

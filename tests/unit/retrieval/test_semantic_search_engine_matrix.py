@@ -8,16 +8,16 @@ from collections.abc import Sequence
 
 import pytest
 
-from memory.indexing import MemoryVectorMatch
-from memory.intention import MemoryIntentionRecallScope
-from memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
-from memory.retrieval.search import (
+from habitus.memory.indexing import MemoryVectorMatch
+from habitus.memory.intention import MemoryIntentionRecallScope
+from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
+from habitus.memory.retrieval.search import (
     MemorySearchMode,
     MemorySemanticSearchConfig,
     MemorySemanticSearchEngine,
 )
-from memory.uri import MemoryURI
-from ModelClient import EmbeddingVector
+from habitus.memory.uri import MemoryURI
+from habitus.model_client import EmbeddingVector
 
 
 class RecordingEmbedder:

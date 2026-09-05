@@ -7,14 +7,14 @@ from datetime import timedelta
 
 import pytest
 
-from memory.document import MemoryLinkType, MemoryStoredLink
-from memory.intention import (
+from habitus.memory.document import MemoryLinkType, MemoryStoredLink
+from habitus.memory.intention import (
     MemoryIntentionRecallScope,
     MemoryIntentionReview,
     MemoryIntentionReviewer,
 )
-from memory.model import MemoryAddress, MemoryDirectory, MemoryKind
-from memory.retrieval import (
+from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind
+from habitus.memory.retrieval import (
     MemoryMatchedMemory,
     MemoryQueryPlan,
     MemoryQueryPlanContent,
@@ -27,7 +27,7 @@ from memory.retrieval import (
     MemorySearchServiceConfig,
     MemoryTypedQuery,
 )
-from memory.uri import MemoryURI
+from habitus.memory.uri import MemoryURI
 from tests.helpers import BASE_TIME, document
 
 INTEGER_CONFIG_FIELDS = tuple(

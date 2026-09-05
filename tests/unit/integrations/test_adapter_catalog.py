@@ -6,19 +6,19 @@ from pathlib import Path
 
 import yaml
 
-from Config import HabitusConfig
-from integrations.local_service import adapter_catalog as catalog_module
-from integrations.local_service.adapter_catalog import (
+from habitus.config import HabitusConfig
+from habitus.integrations.local_service import adapter_catalog as catalog_module
+from habitus.integrations.local_service.adapter_catalog import (
     build_adapter_catalog,
     load_adapter_catalog,
 )
-from integrations.local_service.doctor import DoctorStatus, run_doctor
-from integrations.local_service.setup_registry import (
+from habitus.integrations.local_service.doctor import DoctorStatus, run_doctor
+from habitus.integrations.local_service.setup_registry import (
     AdapterProductRegistration,
     SetupProfile,
 )
-from ModelClient import ProviderBuildContext
-from Runtime import build_runtime
+from habitus.model_client import ProviderBuildContext
+from habitus.runtime import build_runtime
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
@@ -70,7 +70,7 @@ def test_one_adapter_package_registration_is_shared_by_setup_doctor_and_runtime(
 
     catalog = build_adapter_catalog(registrars=(register,))
     payload = yaml.safe_load(
-        (REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8")
+        (REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8")
     )
     payload["storage"]["root"] = str(tmp_path / "data")
     payload["models"]["rerank"]["route"].update(

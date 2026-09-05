@@ -10,9 +10,9 @@ from threading import Barrier
 
 import pytest
 
-from infrastructure.store.contracts import LockLostError
-from infrastructure.store.sqlite import SQLiteLockStore
-from infrastructure.store.sqlite.lock_store import SQLiteLockStoreConfig
+from habitus.infrastructure.store.contracts import LockLostError
+from habitus.infrastructure.store.sqlite import SQLiteLockStore
+from habitus.infrastructure.store.sqlite.lock_store import SQLiteLockStoreConfig
 
 
 def test_two_lazy_instances_initialize_one_new_database_concurrently(tmp_path) -> None:

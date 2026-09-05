@@ -8,7 +8,7 @@ from types import MappingProxyType
 
 import pytest
 
-from ModelClient import (
+from habitus.model_client import (
     ChatCallContext,
     ChatMessage,
     ChatModelConfig,

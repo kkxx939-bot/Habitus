@@ -12,26 +12,26 @@ from typing import Any
 
 import pytest
 
-from behavior.fusion import FUSION_PROMPT_VERSION
-from behavior.fusion.receipt import build_fusion_receipt
-from behavior.fusion.receipt_store import BehaviorFusionReceiptStore
-from behavior.fusion.store import BehaviorJudgementStore
-from behavior.kinds.model import BehaviorKindRegistry
-from behavior.kinds.resolver import BehaviorKindResolver
-from behavior.kinds.store import BehaviorKindStore
-from behavior.model import BehaviorKind
-from behavior.observation import (
+from habitus.behavior.fusion import FUSION_PROMPT_VERSION
+from habitus.behavior.fusion.receipt import build_fusion_receipt
+from habitus.behavior.fusion.receipt_store import BehaviorFusionReceiptStore
+from habitus.behavior.fusion.store import BehaviorJudgementStore
+from habitus.behavior.kinds.model import BehaviorKindRegistry
+from habitus.behavior.kinds.resolver import BehaviorKindResolver
+from habitus.behavior.kinds.store import BehaviorKindStore
+from habitus.behavior.model import BehaviorKind
+from habitus.behavior.observation import (
     BehaviorObservationBatch,
     BehaviorObservationEnvelope,
     BehaviorObservationStore,
 )
-from behavior.reduction import BehaviorReductionLedger, BehaviorReductionRunner  # noqa: F401
-from behavior.tree import BehaviorTree
-from behavior.uri import BehaviorURI
-from foundation.integrity import canonical_digest
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from ModelClient import (
+from habitus.behavior.reduction import BehaviorReductionLedger, BehaviorReductionRunner  # noqa: F401
+from habitus.behavior.tree import BehaviorTree
+from habitus.behavior.uri import BehaviorURI
+from habitus.foundation.integrity import canonical_digest
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.model_client import (
     ChatClient,
     ChatModelConfig,
     ChatRequest,
@@ -641,7 +641,7 @@ def test_an_invalid_payload_is_dropped_before_the_checkpoint(tmp_path) -> None:
 def test_the_checkpoint_byte_bound_fails_before_stage(tmp_path, monkeypatch) -> None:
     """检查点写入与重放共用同一上界：超限在 stage 前失败，可重试，不留读不回的检查点。"""
 
-    import behavior.reduction.runner as runner_module
+    import habitus.behavior.reduction.runner as runner_module
 
     harness = Harness(tmp_path)
     source = harness.deliver(OBS_A, OBS_B, OBS_C)
@@ -674,8 +674,8 @@ def test_concurrent_sweeps_are_serialised_by_the_root_lock(tmp_path) -> None:
 def test_sweep_refreshes_day_summaries_after_publishing(tmp_path) -> None:
     """归约落盘后在同一把 sweep 锁内刷新 L0/L1；树没变的下一轮零模型调用。"""
 
-    from behavior.model import BehaviorDirectory, BehaviorLevel
-    from behavior.semantic import BehaviorSemanticRefresher
+    from habitus.behavior.model import BehaviorDirectory, BehaviorLevel
+    from habitus.behavior.semantic import BehaviorSemanticRefresher
     from tests.unit.behavior.test_semantic_layers import ScriptedOverviewGenerator
 
     generator = ScriptedOverviewGenerator()
@@ -751,7 +751,7 @@ def test_a_link_target_skipped_after_naming_defers_the_source(tmp_path) -> None:
 def test_failed_semantic_refresh_is_retried_from_the_pending_set(tmp_path) -> None:
     """刷新失败降级为带日期的信号；那一天留在待刷新集合里，下轮补刷；检查点不被扣住。"""
 
-    from behavior.semantic import BehaviorSemanticRefresher
+    from habitus.behavior.semantic import BehaviorSemanticRefresher
     from tests.unit.behavior.test_semantic_layers import ScriptedOverviewGenerator
 
     class FlakyGenerator(ScriptedOverviewGenerator):
@@ -785,7 +785,7 @@ def test_failed_semantic_refresh_is_retried_from_the_pending_set(tmp_path) -> No
     second = asyncio.run(harness.runner.run_once())
 
     assert second.replayed_documents == 0  # 没有检查点可重放；补刷来自待刷新集合
-    from behavior.model import BehaviorDirectory, BehaviorLevel
+    from habitus.behavior.model import BehaviorDirectory, BehaviorLevel
 
     assert harness.tree.layer_exists(
         BehaviorDirectory.occurrences(2026, 8, 16), BehaviorLevel.OVERVIEW
@@ -797,7 +797,7 @@ def test_run_once_works_with_the_production_sqlite_lock_store(tmp_path) -> None:
     """接缝测试：生产锁实现（SQLite）下整轮 sweep 必须能跑通——租约互斥 + 短围栏，
     不许出现"sweep 事务压住 writer 文档锁"的自死锁（评审在旧实现下实测过每轮必败）。"""
 
-    from infrastructure.store.sqlite.lock_store import SQLiteLockStore
+    from habitus.infrastructure.store.sqlite.lock_store import SQLiteLockStore
 
     lock_store = SQLiteLockStore(tmp_path / "locks.sqlite3")
     harness = Harness(tmp_path)
@@ -825,7 +825,7 @@ class _FullRegistryResolver(BehaviorKindResolver):
     """词表已满：未知名字降级为原始名作 token 并留信号（与 resolver 的撞顶路径同形）。"""
 
     async def resolve_batches(self, requests, registry, *, vectors=None):  # type: ignore[override]
-        from behavior.kinds.resolver import BehaviorKindBatchResolution
+        from habitus.behavior.kinds.resolver import BehaviorKindBatchResolution
 
         tokens = {item.name: registry.token_for(item.name) or item.name for item in requests}
         signals = tuple(
@@ -853,7 +853,7 @@ def test_reduction_records_hits_by_behaviour_day_and_expires_stale_kinds(tmp_pat
 
     from datetime import timedelta
 
-    from behavior.kinds import BehaviorKindEntry
+    from habitus.behavior.kinds import BehaviorKindEntry
 
     harness = Harness(tmp_path, known_kinds=())
     behaviour_day = at(18).date()
@@ -900,7 +900,7 @@ def test_kind_hits_are_recorded_at_publish_and_replay_is_idempotent(tmp_path) ->
 def test_reduction_persists_kind_vectors_and_recovers_a_corrupt_sidecar(tmp_path) -> None:
     """旁册随本轮写回；损坏时按空重建并留信号，不阻塞归约（BHV-KINDS-002）。"""
 
-    from behavior.kinds import BehaviorKindVectorStore
+    from habitus.behavior.kinds import BehaviorKindVectorStore
     from tests.unit.behavior.test_kinds import FakeEmbedder
 
     harness = Harness(tmp_path)
@@ -922,7 +922,7 @@ def test_reduction_persists_kind_vectors_and_recovers_a_corrupt_sidecar(tmp_path
 def test_reduction_without_chains_does_not_expire_anything(tmp_path) -> None:
     from datetime import timedelta
 
-    from behavior.kinds import BehaviorKindEntry
+    from habitus.behavior.kinds import BehaviorKindEntry
 
     harness = Harness(tmp_path, known_kinds=())
     stale = BehaviorKindEntry(token="卷账单", label="卷账单").with_hit(at(18).date() - timedelta(days=400))
@@ -937,7 +937,7 @@ def test_tree_replace_only_allows_the_kind_token_to_change(tmp_path) -> None:
 
     from dataclasses import replace as dc_replace
 
-    from behavior import BehaviorDocumentWriter, BehaviorTree, BehaviorTreeConflictError
+    from habitus.behavior import BehaviorDocumentWriter, BehaviorTree, BehaviorTreeConflictError
     from tests.unit.behavior.tree_payloads import local, occurrence_payload
 
     tree = BehaviorTree(tmp_path / "tree")
@@ -965,7 +965,7 @@ def test_tree_replace_only_allows_the_kind_token_to_change(tmp_path) -> None:
 
 
 def test_writer_restamp_is_idempotent_and_bumps_revision(tmp_path) -> None:
-    from behavior import BehaviorDocumentWriter, BehaviorTree
+    from habitus.behavior import BehaviorDocumentWriter, BehaviorTree
     from tests.unit.behavior.tree_payloads import local, occurrence_payload
 
     tree = BehaviorTree(tmp_path / "tree")
@@ -982,8 +982,8 @@ def test_writer_restamp_is_idempotent_and_bumps_revision(tmp_path) -> None:
 def test_merge_kinds_folds_the_vocabulary_and_restamps_the_tree(tmp_path) -> None:
     """合并道的落地动作：词表 merged + 树上旧 token 全部重打；预测源随后读到同一个 token。"""
 
-    from behavior.kinds import BehaviorKindEntry
-    from prediction.source import read as read_snapshot
+    from habitus.behavior.kinds import BehaviorKindEntry
+    from habitus.prediction.source import read as read_snapshot
 
     harness = Harness(tmp_path, known_kinds=())
     harness.kind_store.replace(
@@ -1049,7 +1049,7 @@ def test_merge_and_rebuild_refuse_while_a_checkpoint_is_pending(tmp_path) -> Non
 
     import json as _json
 
-    from behavior.reduction import BehaviorReductionBusyError, BehaviorReductionError
+    from habitus.behavior.reduction import BehaviorReductionBusyError, BehaviorReductionError
 
     harness = Harness(tmp_path)
     (tmp_path / "reduction").mkdir(exist_ok=True)
@@ -1068,7 +1068,7 @@ def test_merge_and_rebuild_refuse_while_a_checkpoint_is_pending(tmp_path) -> Non
 def test_an_address_already_on_the_tree_is_disambiguated_without_a_ledger_entry(tmp_path) -> None:
     """账本按窗口过期、树不会：树上已有同址文档时照样消歧成 -2，而不是 publish 硬冲突卡死检查点。"""
 
-    from behavior import BehaviorDocumentWriter
+    from habitus.behavior import BehaviorDocumentWriter
     from tests.unit.behavior.tree_payloads import local, occurrence_payload
 
     harness = Harness(tmp_path)
@@ -1160,7 +1160,7 @@ def test_data_clock_is_clamped_to_the_wall_clock(tmp_path) -> None:
 
     from datetime import date, timedelta
 
-    from behavior.kinds import BehaviorKindEntry
+    from habitus.behavior.kinds import BehaviorKindEntry
 
     harness = Harness(tmp_path, known_kinds=())
     recent = BehaviorKindEntry(token="打球", label="打球").with_hit(harness.now.date() - timedelta(days=10))

@@ -4,7 +4,7 @@ from datetime import datetime
 
 import pytest
 
-from pre.conversation.messages import (
+from habitus.pre.conversation.messages import (
     ConversationBatch,
     ConversationMessage,
     ConversationMessageRole,

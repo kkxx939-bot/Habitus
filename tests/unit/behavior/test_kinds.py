@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from behavior.kinds import (
+from habitus.behavior.kinds import (
     HIT_DAYS_KEPT,
     BehaviorKindConfig,
     BehaviorKindConflictError,
@@ -25,8 +25,8 @@ from behavior.kinds import (
     BehaviorKindVectorIndex,
     BehaviorKindVectorStore,
 )
-from behavior.kinds.vectors import literal_kinds, nearest_kinds
-from ModelClient import (
+from habitus.behavior.kinds.vectors import literal_kinds, nearest_kinds
+from habitus.model_client import (
     ChatClient,
     ChatModelConfig,
     ChatRequest,
@@ -36,7 +36,7 @@ from ModelClient import (
     ProviderConfig,
     StructuredChatClient,
 )
-from ModelClient.embedding import EmbeddingVector
+from habitus.model_client.embedding import EmbeddingVector
 
 NOW = datetime(2026, 8, 22, 12, 0, 0, tzinfo=UTC)
 D1 = date(2026, 8, 20)
@@ -534,8 +534,8 @@ def test_registry_coexists_with_the_tree_at_the_same_root(tmp_path) -> None:
 
     from datetime import datetime, timedelta
 
-    from behavior import BehaviorDocumentWriter, BehaviorKind, BehaviorTree
-    from infrastructure.store.locks import ProcessLocalLockStore
+    from habitus.behavior import BehaviorDocumentWriter, BehaviorKind, BehaviorTree
+    from habitus.infrastructure.store.locks import ProcessLocalLockStore
     from tests.unit.behavior.tree_payloads import local, occurrence_payload
 
     tree = BehaviorTree(tmp_path / "behavior-tree")
@@ -566,7 +566,7 @@ class _FlakyThenScriptedProvider(ScriptedProvider):
         self.failed_once = False
 
     async def complete_async(self, request: PreparedChatRequest) -> ModelResponse:
-        from ModelClient.contracts import ModelTransportError
+        from habitus.model_client.contracts import ModelTransportError
 
         if not self.failed_once:
             self.failed_once = True
@@ -656,9 +656,9 @@ def test_rebuild_registers_tree_tokens_and_recomputes_accounts(tmp_path) -> None
 
     from datetime import timedelta
 
-    from behavior import BehaviorDocumentWriter, BehaviorKind, BehaviorTree
-    from behavior.kinds import rebuild_registry
-    from infrastructure.store.locks import ProcessLocalLockStore
+    from habitus.behavior import BehaviorDocumentWriter, BehaviorKind, BehaviorTree
+    from habitus.behavior.kinds import rebuild_registry
+    from habitus.infrastructure.store.locks import ProcessLocalLockStore
     from tests.unit.behavior.tree_payloads import DAY, local, occurrence_payload
 
     tree = BehaviorTree(tmp_path / "tree")
@@ -687,9 +687,9 @@ def test_rebuild_registers_tree_tokens_and_recomputes_accounts(tmp_path) -> None
 
 
 def test_rebuild_replaces_an_unreadable_v1_registry(tmp_path) -> None:
-    from behavior import BehaviorDocumentWriter, BehaviorKind, BehaviorTree
-    from behavior.kinds import rebuild_registry
-    from infrastructure.store.locks import ProcessLocalLockStore
+    from habitus.behavior import BehaviorDocumentWriter, BehaviorKind, BehaviorTree
+    from habitus.behavior.kinds import rebuild_registry
+    from habitus.infrastructure.store.locks import ProcessLocalLockStore
     from tests.unit.behavior.tree_payloads import local, occurrence_payload
 
     tree = BehaviorTree(tmp_path / "tree")
@@ -722,7 +722,7 @@ def test_review_reason_marks_degraded_entries_and_roundtrips(tmp_path) -> None:
 def test_resolver_falls_back_to_literal_candidates_when_embedding_fails() -> None:
     class _BrokenEmbedder(FakeEmbedder):
         async def embed_documents(self, texts):  # type: ignore[override]
-            from ModelClient.contracts import ModelTransportError
+            from habitus.model_client.contracts import ModelTransportError
 
             raise ModelTransportError("embedding down")
 

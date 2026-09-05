@@ -9,15 +9,15 @@ from unittest.mock import ANY, Mock
 
 import pytest
 
-import Config
-import Runtime
-from Config import HTTPAPIConfig
-from infrastructure import observability
-from integrations.http_api import app as app_module
-from integrations.http_api import bootstrap
-from integrations.local_service import ServiceInstanceLock
-from integrations.local_service import cli as local_cli
-from integrations.local_service import doctor as doctor_module
+import habitus.config as Config
+import habitus.runtime as Runtime
+from habitus.config import HTTPAPIConfig
+from habitus.infrastructure import observability
+from habitus.integrations.http_api import app as app_module
+from habitus.integrations.http_api import bootstrap
+from habitus.integrations.local_service import ServiceInstanceLock
+from habitus.integrations.local_service import cli as local_cli
+from habitus.integrations.local_service import doctor as doctor_module
 
 
 class _DoctorReport:

@@ -12,14 +12,14 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from behavior import BehaviorDocumentWriter, BehaviorKind, BehaviorLinkType, BehaviorTree, BehaviorURI
-from foundation.integrity import text_digest
-from infrastructure.store.locks import ProcessLocalLockStore
-from prediction import builder, codec, query, source
-from prediction.edges import NO_SUCCESSOR
-from prediction.errors import PredictionTreeError, PredictionTreeStoreError
-from prediction.model import PredictionTree, SlotKey
-from prediction.store import (
+from habitus.behavior import BehaviorDocumentWriter, BehaviorKind, BehaviorLinkType, BehaviorTree, BehaviorURI
+from habitus.foundation.integrity import text_digest
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.prediction import builder, codec, query, source
+from habitus.prediction.edges import NO_SUCCESSOR
+from habitus.prediction.errors import PredictionTreeError, PredictionTreeStoreError
+from habitus.prediction.model import PredictionTree, SlotKey
+from habitus.prediction.store import (
     GENERATIONS_DIRECTORY,
     TREE_FILENAME,
     PredictionTreeStore,
@@ -364,7 +364,7 @@ def test_an_empty_slot_is_all_escape(tmp_path) -> None:
 def test_config_digest_covers_estimation_parameters_only(tmp_path) -> None:
     """改运维节奏不该让已发布的树看起来"出自另一套统计"；改估计参数必须。"""
 
-    from prediction.config import PredictionTreeConfig
+    from habitus.prediction.config import PredictionTreeConfig
 
     base = config()
     same = {
@@ -395,7 +395,7 @@ def test_a_query_is_pinned_to_one_generation(tmp_path) -> None:
 def test_a_tree_larger_than_the_bound_is_refused(tmp_path, monkeypatch) -> None:
     """超限拒绝发布，而不是写出一个读不回来的代。"""
 
-    from prediction import store as store_module
+    from habitus.prediction import store as store_module
 
     store = PredictionTreeStore(tmp_path / "prediction", retained_generations=2)
     monkeypatch.setattr(store_module, "MAX_TREE_BYTES", 16)

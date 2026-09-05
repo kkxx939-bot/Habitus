@@ -11,10 +11,10 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from prediction import nodes
-from prediction.errors import PredictionTreeError
-from prediction.model import ObservedGap, SlotKey
-from prediction.nodes import (
+from habitus.prediction import nodes
+from habitus.prediction.errors import PredictionTreeError
+from habitus.prediction.model import ObservedGap, SlotKey
+from habitus.prediction.nodes import (
     accumulate,
     completion_curves,
     day_coverage,
@@ -24,7 +24,7 @@ from prediction.nodes import (
     pool_indexes,
     pooled_trends,
 )
-from prediction.recurrence import derive as derive_recurrence
+from habitus.prediction.recurrence import derive as derive_recurrence
 from tests.unit.prediction.prediction_fixtures import (
     action,
     at,
@@ -109,7 +109,7 @@ def test_gaps_reduce_exposure_and_lift_the_rate() -> None:
 def test_a_gap_spanning_midnight_is_split_across_both_days() -> None:
     """跨日空白必须按天切开，否则次日那半段被整段丢掉、曝光虚高。"""
 
-    from prediction.model import ObservedGap
+    from habitus.prediction.model import ObservedGap
     from tests.unit.prediction.prediction_fixtures import at
 
     crossing = ObservedGap(started_at=at(0, 23), ended_at=at(1, 1), watched=True)
@@ -360,7 +360,7 @@ def test_slot_mapping_is_local_wall_clock() -> None:
     from datetime import timedelta as _td
     from datetime import timezone as _tz
 
-    from prediction.model import SlotKey as _SlotKey
+    from habitus.prediction.model import SlotKey as _SlotKey
     from tests.unit.prediction.prediction_fixtures import at
 
     east = at(0, 7, 30)  # 07:30+08:00 → 第 30 槽
@@ -382,7 +382,7 @@ def test_daylight_saving_day_maps_by_wall_clock_not_by_elapsed_time() -> None:
     真按 92/100 记账要给曝光引入日历时区依赖，代价远大于收益。
     """
 
-    from prediction.model import ObservedAction
+    from habitus.prediction.model import ObservedAction
 
     new_york = ZoneInfo("America/New_York")
     spring_forward = datetime(2026, 3, 8, 3, 5, tzinfo=new_york)  # 跳表后的第一个小时
@@ -401,7 +401,7 @@ def test_daylight_saving_day_maps_by_wall_clock_not_by_elapsed_time() -> None:
 def test_the_repeated_autumn_hour_still_counts_as_one_day() -> None:
     """秋季回拨那天 01:00–02:00 走两遍；同槽同日封顶 1 让 P 依然是概率。"""
 
-    from prediction.model import ObservedAction
+    from habitus.prediction.model import ObservedAction
 
     new_york = ZoneInfo("America/New_York")
     day = date(2026, 11, 1)
@@ -457,7 +457,7 @@ def test_borrowing_starts_from_the_weakest_assumption() -> None:
 def _marginal_with_reversed_shrinkage(ledger, cfg, key) -> float:
     """把收缩链的前两层调换之后重算同一个格子——只在本测试里存在的对照组。"""
 
-    from prediction import nodes
+    from habitus.prediction import nodes
 
     slot_key, action = key
     pool = pool_indexes(slot_key.slot, cfg.pool_half_width, cfg.slots_per_day)

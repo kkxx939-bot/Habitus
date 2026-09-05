@@ -5,7 +5,7 @@ from datetime import timedelta
 
 import pytest
 
-from pre.conversation.summaries import (
+from habitus.pre.conversation.summaries import (
     ConversationRangeSummary,
     ConversationRangeSummaryStage,
     ConversationSegmentSummary,

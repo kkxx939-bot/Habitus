@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from memory.editor import (
+from habitus.memory.editor import (
     MemoryEditor,
     MemoryExtractionConfig,
     MemoryExtractionError,
@@ -15,11 +15,11 @@ from memory.editor import (
     MemoryRelatedRetriever,
     MemoryRetrievalIncompleteError,
 )
-from memory.model import MemoryKind
-from memory.schema import MemorySchemaRegistry
-from memory.snapshot import MemorySnapshotReader
-from memory.tree import MemoryTree
-from ModelClient import (
+from habitus.memory.model import MemoryKind
+from habitus.memory.schema import MemorySchemaRegistry
+from habitus.memory.snapshot import MemorySnapshotReader
+from habitus.memory.tree import MemoryTree
+from habitus.model_client import (
     ChatClient,
     ChatModelConfig,
     ModelResponse,

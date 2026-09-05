@@ -8,17 +8,17 @@ from types import MethodType
 
 import pytest
 
-from conversation import (
+from habitus.conversation import (
     ConversationConsumerDeliveryState,
     ConversationSourceConsumer,
     ConversationSourceEnvelope,
     conversation_source_request_digest,
 )
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.conversation import ConversationAddress
-from pre.conversation import ConversationBatch
-from Runtime import RuntimeShutdownTimeoutError, RuntimeState, build_runtime
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.conversation import ConversationAddress
+from habitus.pre.conversation import ConversationBatch
+from habitus.runtime import RuntimeShutdownTimeoutError, RuntimeState, build_runtime
 from tests.helpers import closed_turn
 from tests.integration.test_runtime_assembly import runtime_config, runtime_dependencies
 

@@ -7,15 +7,15 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from memory.model import MemoryDirectory
-from memory.semantic import MemorySemanticConfig
-from memory.semantic.generator import LLMMemoryOverviewGenerator
-from memory.semantic.model import (
+from habitus.memory.model import MemoryDirectory
+from habitus.memory.semantic import MemorySemanticConfig
+from habitus.memory.semantic.generator import LLMMemoryOverviewGenerator
+from habitus.memory.semantic.model import (
     MemoryDirectorySnapshot,
     MemorySemanticEntry,
     MemorySemanticEntryKind,
 )
-from ModelClient import (
+from habitus.model_client import (
     ChatClient,
     ChatModelConfig,
     ModelResponse,

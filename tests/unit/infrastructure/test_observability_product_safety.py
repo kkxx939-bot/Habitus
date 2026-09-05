@@ -8,13 +8,13 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from Config.observability import ObservabilityConfig, ObservabilityTracingConfig
-from foundation.observability import (
+from habitus.config.observability import ObservabilityConfig, ObservabilityTracingConfig
+from habitus.foundation.observability import (
     ObservationEvent,
     ObservationStatus,
     bind_observation_context,
 )
-from infrastructure.observability import AuditStore, JSONLogFormatter, ManagedObservability
+from habitus.infrastructure.observability import AuditStore, JSONLogFormatter, ManagedObservability
 
 UTC = UTC
 

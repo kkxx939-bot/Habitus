@@ -7,9 +7,9 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-import memory.schema.registry as registry_module
-from memory.model import MemoryAddress, MemoryKind
-from memory.schema import (
+import habitus.memory.schema.registry as registry_module
+from habitus.memory.model import MemoryAddress, MemoryKind
+from habitus.memory.schema import (
     MemoryFieldRole,
     MemoryFieldSchema,
     MemoryFieldType,
@@ -19,7 +19,7 @@ from memory.schema import (
     MemorySchemaRegistry,
     MemoryTypeSchema,
 )
-from memory.schema.model import _template_fields
+from habitus.memory.schema.model import _template_fields
 from tests.helpers import memory_fields
 
 REGISTRY = MemorySchemaRegistry.load_default()

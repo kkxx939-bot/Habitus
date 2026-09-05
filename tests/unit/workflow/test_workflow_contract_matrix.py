@@ -7,11 +7,11 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
-from memory.document import MemoryLinkType, MemoryStoredLink
-from memory.editor import MemoryIdentityProposalBasis, MemoryNodeDisposition
-from memory.model import MemoryAddress, MemoryKind
-from memory.uri import MemoryURI
-from memory.workflow.jobs import (
+from habitus.memory.document import MemoryLinkType, MemoryStoredLink
+from habitus.memory.editor import MemoryIdentityProposalBasis, MemoryNodeDisposition
+from habitus.memory.model import MemoryAddress, MemoryKind
+from habitus.memory.uri import MemoryURI
+from habitus.memory.workflow.jobs import (
     MemoryJob,
     MemoryJobConfig,
     MemoryJobExecutionError,
@@ -19,8 +19,8 @@ from memory.workflow.jobs import (
     MemoryJobNotReadyError,
     MemoryJobStatus,
 )
-from memory.workflow.jobs.model import MEMORY_JOB_ERROR_MAX_CHARS
-from memory.workflow.receipt import (
+from habitus.memory.workflow.jobs.model import MEMORY_JOB_ERROR_MAX_CHARS
+from habitus.memory.workflow.receipt import (
     MemoryChangeReceipt,
     MemoryChangeReceiptError,
     MemoryChangeReceiptState,

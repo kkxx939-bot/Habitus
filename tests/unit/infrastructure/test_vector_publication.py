@@ -7,10 +7,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from infrastructure.store.sqlite import SQLiteLockStore
-from infrastructure.vector import (
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.infrastructure.store.sqlite import SQLiteLockStore
+from habitus.infrastructure.vector import (
     PublishedVectorStore,
     VectorStoreBusyError,
     VectorStoreConflictError,
@@ -20,7 +20,7 @@ from infrastructure.vector import (
     VectorStoreRecord,
     VectorStoreUnsupportedTopologyError,
 )
-from ModelClient import EmbeddingVector
+from habitus.model_client import EmbeddingVector
 
 PUBLICATION_LOCK = PathLock(ProcessLocalLockStore())
 

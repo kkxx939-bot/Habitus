@@ -14,16 +14,16 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from behavior.fusion.config import BehaviorFusionConfig
-from behavior.fusion.errors import BehaviorFusionError
-from behavior.fusion.segmentation import BehaviorFusionSegment, segment_observations
-from behavior.observation import (
+from habitus.behavior.fusion.config import BehaviorFusionConfig
+from habitus.behavior.fusion.errors import BehaviorFusionError
+from habitus.behavior.fusion.segmentation import BehaviorFusionSegment, segment_observations
+from habitus.behavior.observation import (
     BehaviorObservation,
     BehaviorObservationBatch,
     BehaviorObservationConfig,
     BehaviorObservationEnvelope,
 )
-from foundation.integrity import canonical_digest
+from habitus.foundation.integrity import canonical_digest
 
 NOW = datetime(2026, 8, 15, 12, 0, tzinfo=timezone(timedelta(hours=8)))
 OBSERVER = "home-a/hall"

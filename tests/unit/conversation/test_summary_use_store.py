@@ -4,12 +4,12 @@ from datetime import timedelta
 
 import pytest
 
-from memory.conversation import (
+from habitus.memory.conversation import (
     ConversationAddress,
     ConversationSummaryUseError,
     SQLiteConversationSummaryUseStore,
 )
-from memory.conversation.indexing import summary_reference
+from habitus.memory.conversation.indexing import summary_reference
 from tests.helpers import BASE_TIME, segment, segment_summary
 
 

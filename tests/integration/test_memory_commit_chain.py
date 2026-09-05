@@ -5,11 +5,11 @@ from threading import Event, Thread
 
 import pytest
 
-from infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from memory.document import MemoryLinkType
-from memory.editor import (
+from habitus.infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.document import MemoryLinkType
+from habitus.memory.editor import (
     MemoryCandidate,
     MemoryCandidateBatch,
     MemoryFinalIdentityMap,
@@ -22,18 +22,18 @@ from memory.editor import (
     MemoryRelationReadSet,
     MemoryRelationResolver,
 )
-from memory.editor.transaction import (
+from habitus.memory.editor.transaction import (
     MemoryCommitConflictError,
     MemoryCommitPlan,
     MemoryCommitStatus,
     MemoryCommitTransaction,
 )
-from memory.editor.transaction_log import MemoryTransactionJournal
-from memory.indexing import MemoryIndexSourceReader, MemoryVectorIndexConfig
-from memory.model import MemoryKind
-from memory.snapshot import MemorySnapshotReader
-from memory.tree import MemoryTree, MemoryTreeConsistencyError
-from memory.uri import MemoryURI
+from habitus.memory.editor.transaction_log import MemoryTransactionJournal
+from habitus.memory.indexing import MemoryIndexSourceReader, MemoryVectorIndexConfig
+from habitus.memory.model import MemoryKind
+from habitus.memory.snapshot import MemorySnapshotReader
+from habitus.memory.tree import MemoryTree, MemoryTreeConsistencyError
+from habitus.memory.uri import MemoryURI
 from tests.helpers import BASE_TIME, codec, memory_fields
 
 

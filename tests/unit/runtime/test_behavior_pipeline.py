@@ -10,21 +10,21 @@ from pathlib import Path
 import pytest
 import yaml
 
-from behavior.fusion.config import FUSION_CONTEXT_LOOKBACK_SECONDS
-from behavior.model import BehaviorKind
-from behavior.observation import (
+from habitus.behavior.fusion.config import FUSION_CONTEXT_LOOKBACK_SECONDS
+from habitus.behavior.model import BehaviorKind
+from habitus.behavior.observation import (
     BehaviorObservation,
     BehaviorObservationBatch,
     BehaviorObservationConfig,
     BehaviorObservationEnvelope,
 )
-from foundation.integrity import canonical_digest
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from infrastructure.vector import VectorStoreFactory
-from ModelClient import ModelResponse, ProviderCapabilities, ProviderFactory
-from Runtime import build_runtime
-from Runtime.runtime import RuntimeStateError
+from habitus.foundation.integrity import canonical_digest
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.infrastructure.vector import VectorStoreFactory
+from habitus.model_client import ModelResponse, ProviderCapabilities, ProviderFactory
+from habitus.runtime import build_runtime
+from habitus.runtime.runtime import RuntimeStateError
 from tests.integration.test_runtime_assembly import (
     REPOSITORY_ROOT,
     FakeEmbeddingProvider,
@@ -43,7 +43,7 @@ OBSERVATION_CONFIG = BehaviorObservationConfig()
 def behavior_enabled_config(tmp_path: Path):
     """在既有 fake 路由配置之上启用行为侧（窗口取唯一出处默认值 1 小时）。"""
 
-    raw = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
+    raw = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     raw["storage"]["root"] = str(tmp_path / "data")
     raw["models"]["chat"]["route"].update(provider="fake", adapter="fake_chat", credential_ref="")
     raw["models"]["embedding"]["route"].update(
@@ -59,7 +59,7 @@ def behavior_enabled_config(tmp_path: Path):
         provider="fake", adapter="fake_vector", credential_ref=""
     )
     raw["behavior"] = {"primary_subject": SUBJECT}
-    from Config import HabitusConfig
+    from habitus.config import HabitusConfig
 
     return HabitusConfig.from_mapping(raw)
 
@@ -217,7 +217,7 @@ def test_enabled_wiring_shares_one_lookback_and_one_chat_client(tmp_path: Path) 
     )
     assert behavior.kind_store.path == behavior.tree.root / "kinds.md"
     # sweep 锁 TTL 走 Config 边界（周尺度回填要调大它，不该改代码）；留空取领域默认
-    from behavior.reduction import DEFAULT_SWEEP_LOCK_TTL_SECONDS
+    from habitus.behavior.reduction import DEFAULT_SWEEP_LOCK_TTL_SECONDS
 
     assert behavior.reduction_runner.sweep_lock_ttl_seconds == DEFAULT_SWEEP_LOCK_TTL_SECONDS
     # 词表向量旁册随 embedder 组装、与词表同根；身份键只从配置取
@@ -226,7 +226,7 @@ def test_enabled_wiring_shares_one_lookback_and_one_chat_client(tmp_path: Path) 
     assert vectors.dimension == runtime.config.models.embedding.dimension
     assert behavior.reduction_runner.kind_resolver.embedder is runtime.components.models.embedder
     # 配置层不复制窗口默认值：BehaviorConfig 缺省为 None，由组合根从唯一出处解析
-    from Config.behavior import BehaviorConfig
+    from habitus.config.behavior import BehaviorConfig
 
     assert BehaviorConfig().context_lookback_seconds is None
     assert FUSION_CONTEXT_LOOKBACK_SECONDS == 3_600.0
@@ -391,7 +391,7 @@ def test_component_group_rejects_foreign_instances_and_split_windows(tmp_path: P
 
     from dataclasses import replace
 
-    from behavior.fusion.store import BehaviorJudgementStore
+    from habitus.behavior.fusion.store import BehaviorJudgementStore
 
     providers, vectors = scripted_dependencies([FUSION_BODY])
     runtime = build_runtime(
@@ -438,7 +438,7 @@ def test_fusion_worker_renews_the_lease_during_slow_execution() -> None:
         def enqueue_ready(self) -> None:
             return None
 
-    from Runtime.behavior import BehaviorFusionWorker
+    from habitus.runtime.behavior import BehaviorFusionWorker
 
     worker = BehaviorFusionWorker(
         _EnqueuerStub(),  # type: ignore[arg-type]
@@ -451,8 +451,8 @@ def test_fusion_worker_renews_the_lease_during_slow_execution() -> None:
 
 
 def test_reduction_worker_treats_lock_busy_as_a_skip_not_a_failure() -> None:
-    from behavior.reduction import BehaviorReductionBusyError
-    from Runtime.behavior import BehaviorReductionWorker
+    from habitus.behavior.reduction import BehaviorReductionBusyError
+    from habitus.runtime.behavior import BehaviorReductionWorker
 
     class _BusyRunner:
         def __init__(self) -> None:

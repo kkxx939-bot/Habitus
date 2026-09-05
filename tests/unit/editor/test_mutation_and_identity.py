@@ -3,8 +3,8 @@
 
 import pytest
 
-from infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
-from memory.editor import (
+from habitus.infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
+from habitus.memory.editor import (
     MemoryCandidate,
     MemoryCandidateBatch,
     MemoryFieldMergeError,
@@ -18,8 +18,8 @@ from memory.editor import (
     MemoryNodeDisposition,
     MemoryPageIdMap,
 )
-from memory.model import MemoryKind
-from memory.uri import MemoryURI
+from habitus.memory.model import MemoryKind
+from habitus.memory.uri import MemoryURI
 from tests.helpers import document, memory_fields, memory_snapshot
 
 

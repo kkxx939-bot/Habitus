@@ -51,11 +51,11 @@ dev = [
 ]
 
 [project.scripts]
-habitus-benchmark = "benchmark.cli:main"
-habitus = "integrations.local_service.cli:main"
-habitus-server = "integrations.local_service.cli:main"
-habitus-http = "integrations.local_service.cli:main"
-habitus-plugin = "integrations.local_service.plugin_cli:main"
+habitus-benchmark = "habitus.benchmark.cli:main"
+habitus = "habitus.integrations.local_service.cli:main"
+habitus-server = "habitus.integrations.local_service.cli:main"
+habitus-http = "habitus.integrations.local_service.cli:main"
+habitus-plugin = "habitus.integrations.local_service.plugin_cli:main"
 
 [tool.setuptools.data-files]
 "share/habitus/plugins" = ["plugins/harnesses.mjs", "plugins/install-memory-plugin.mjs", "plugins/package.json"]
@@ -74,32 +74,19 @@ habitus-plugin = "integrations.local_service.plugin_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-# benchmark/data 是本地数据集与一次性实验脚本，不进 git；但本地构建时它在磁盘上，
+# habitus/benchmark/data 是本地数据集与一次性实验脚本，不进 git；但本地构建时它在磁盘上，
 # 不显式排除就会被打进 wheel，导致本地 wheel 与 CI wheel 内容不一致。
-exclude = ["benchmark.data", "benchmark.data.*"]
-include = [
-    "Config*",
-    "Runtime*",
-    "ModelClient*",
-    "pre*",
-    "conversation*",
-    "memory*",
-    "behavior*",
-    "prediction*",
-    "infrastructure*",
-    "foundation*",
-    "integrations*",
-    "benchmark*",
-]
+exclude = ["habitus.benchmark.data", "habitus.benchmark.data.*"]
+include = ["habitus*"]
 
 [tool.setuptools.package-data]
-"Config" = ["*.yaml"]
-"benchmark" = ["README.md", "datasets/*.json", "policies/*.json"]
-"memory.schema.definitions" = ["*.yaml"]
-"behavior.schema.definitions" = ["*.yaml"]
+"habitus.config" = ["*.yaml"]
+"habitus.benchmark" = ["README.md", "datasets/*.json", "policies/*.json"]
+"habitus.memory.schema.definitions" = ["*.yaml"]
+"habitus.behavior.schema.definitions" = ["*.yaml"]
 # benchmark/fusion/__main__.py 用 Path(__file__).with_name("cases.json") 按安装位置读它，
 # 不登记的话从 wheel 装完跑 benchmark 会 FileNotFoundError。
-"benchmark.fusion" = ["cases.json"]
+"habitus.benchmark.fusion" = ["cases.json"]
 
 [tool.ruff]
 line-length = 120
@@ -123,9 +110,9 @@ ignore = [
 [tool.mypy]
 python_version = "3.13"
 ignore_missing_imports = true
-# benchmark/data 不进 git（本地数据集与实验脚本，远端 CI 不存在）；里面的脚本会 import tests/，
+# habitus/benchmark/data 不进 git（本地数据集与实验脚本，远端 CI 不存在）；里面的脚本会 import tests/，
 # 不排除的话本地全链会把测试文件也拖进类型检查。与下方 pyright 的 exclude 保持一致。
-exclude = ["^benchmark/data/"]
+exclude = ["^habitus/benchmark/data/"]
 check_untyped_defs = false
 warn_unused_ignores = true
 warn_redundant_casts = true
@@ -133,9 +120,9 @@ warn_redundant_casts = true
 [tool.pyright]
 pythonVersion = "3.13"
 typeCheckingMode = "basic"
-# benchmark/data 不进 git（本地数据集与实验脚本，远端 CI 不存在）；本地跑全链时排除。
-exclude = ["benchmark/data"]
-include = ["Config", "Runtime", "ModelClient", "pre", "conversation", "memory", "behavior", "prediction", "infrastructure", "foundation", "integrations", "benchmark"]
+# habitus/benchmark/data 不进 git（本地数据集与实验脚本，远端 CI 不存在）；本地跑全链时排除。
+exclude = ["habitus/benchmark/data"]
+include = ["habitus"]
 reportUnsupportedDunderAll = false
 
 [tool.pytest.ini_options]
@@ -147,8 +134,8 @@ addopts = "-ra --strict-config --strict-markers"
 
 [tool.coverage.run]
 branch = true
-source = ["Config", "Runtime", "ModelClient", "pre", "conversation", "memory", "behavior", "prediction", "infrastructure", "foundation", "integrations"]
-omit = ["tests/*"]
+source = ["habitus"]
+omit = ["tests/*", "habitus/benchmark/*"]
 
 [tool.coverage.report]
 precision = 2

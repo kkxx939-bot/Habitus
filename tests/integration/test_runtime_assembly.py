@@ -11,25 +11,25 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from Config import HabitusConfig
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from infrastructure.vector import VectorStoreFactory
-from integrations.agent import AgentMemoryGateway
-from integrations.http import RuntimeHTTPHandlers
-from integrations.sdk import AgentMemoryHooks, PreparedAgentTurn
-from memory.conversation import ConversationAddress
-from memory.model import MemoryKind
-from memory.retrieval import MemoryRetrievalSufficiency, SQLiteMemoryRecallLifecycleStore
-from memory.uri import MemoryURI
-from ModelClient import (
+from habitus.config import HabitusConfig
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.infrastructure.vector import VectorStoreFactory
+from habitus.integrations.agent import AgentMemoryGateway
+from habitus.integrations.http import RuntimeHTTPHandlers
+from habitus.integrations.sdk import AgentMemoryHooks, PreparedAgentTurn
+from habitus.memory.conversation import ConversationAddress
+from habitus.memory.model import MemoryKind
+from habitus.memory.retrieval import MemoryRetrievalSufficiency, SQLiteMemoryRecallLifecycleStore
+from habitus.memory.uri import MemoryURI
+from habitus.model_client import (
     EmbeddingVector,
     ModelResponse,
     ProviderCapabilities,
     ProviderFactory,
 )
-from pre.conversation import ConversationAdapterRegistry
-from Runtime import (
+from habitus.pre.conversation import ConversationAdapterRegistry
+from habitus.runtime import (
     LifecycleWorkerState,
     MemoryWorkerState,
     RuntimeState,
@@ -188,7 +188,7 @@ def runtime_dependencies() -> tuple[ProviderFactory, VectorStoreFactory]:
 
 
 def runtime_config(tmp_path: Path, *, with_credentials: bool = False) -> HabitusConfig:
-    payload = yaml.safe_load((REPOSITORY_ROOT / "Config" / "example.yaml").read_text(encoding="utf-8"))
+    payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
     payload["models"]["chat"]["route"].update(
         provider="fake",

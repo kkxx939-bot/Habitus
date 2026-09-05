@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from behavior.fusion import (
+from habitus.behavior.fusion import (
     BehaviorFusionConfig,
     JudgementRelation,
     JudgementStatus,
@@ -20,11 +20,11 @@ from behavior.fusion import (
     unreadable_ratio,
     validate_judgement_batch,
 )
-from behavior.fusion.errors import BehaviorFusionError, BehaviorFusionLimitError
-from behavior.fusion.judgement import BehaviorClaim, BehaviorFact, BehaviorJudgement
-from behavior.fusion.prompt import FUSION_SYSTEM_PROMPT as FUSION_SYSTEM_PROMPT_TEXT
-from behavior.fusion.schema import JUDGEMENT_FUSION_JSON_SCHEMA
-from behavior.observation import BehaviorObservation, BehaviorObservationConfig
+from habitus.behavior.fusion.errors import BehaviorFusionError, BehaviorFusionLimitError
+from habitus.behavior.fusion.judgement import BehaviorClaim, BehaviorFact, BehaviorJudgement
+from habitus.behavior.fusion.prompt import FUSION_SYSTEM_PROMPT as FUSION_SYSTEM_PROMPT_TEXT
+from habitus.behavior.fusion.schema import JUDGEMENT_FUSION_JSON_SCHEMA
+from habitus.behavior.observation import BehaviorObservation, BehaviorObservationConfig
 from tests.unit.behavior.fusion_wire import SUBJECT, judgement, unreadable, wire
 
 TZ8 = timezone(timedelta(hours=8))
@@ -768,7 +768,7 @@ def test_the_prompt_examples_are_accepted_by_the_assembly_layer() -> None:
 def test_the_prompt_never_names_a_relation_the_code_does_not_have() -> None:
     """"independent"曾经写在示例的要点里，而代码里根本没有这个取值。"""
 
-    from behavior.fusion.prompt import FUSION_SYSTEM_PROMPT
+    from habitus.behavior.fusion.prompt import FUSION_SYSTEM_PROMPT
 
     assert "independent" not in FUSION_SYSTEM_PROMPT
     for member in JudgementRelation:

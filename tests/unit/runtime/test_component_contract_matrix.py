@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.store.contracts import PathLock
-from infrastructure.store.locks import ProcessLocalLockStore
-from Runtime import build_runtime
-from Runtime.components import (
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.runtime import build_runtime
+from habitus.runtime.components import (
     RuntimeComponents,
     RuntimeConversation,
     RuntimeInfrastructure,

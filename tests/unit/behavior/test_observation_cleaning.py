@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from behavior.observation import (
+from habitus.behavior.observation import (
     BehaviorObservation,
     BehaviorObservationAdapterRegistry,
     BehaviorObservationBatch,
@@ -16,8 +16,8 @@ from behavior.observation import (
     BehaviorObservationProtocolError,
     BehaviorObservationStore,
 )
-from behavior.observation.model import _identity
-from foundation.integrity import canonical_digest
+from habitus.behavior.observation.model import _identity
+from habitus.foundation.integrity import canonical_digest
 
 TZ8 = timezone(timedelta(hours=8))
 NOW = datetime(2026, 8, 13, 20, 0, 0, tzinfo=TZ8)

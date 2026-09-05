@@ -7,9 +7,9 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta, timezone
 
-from prediction import builder, query
-from prediction.config import PredictionTreeConfig
-from prediction.model import BehaviorSnapshot, ObservedAction, ObservedGap, PredictionTree, SlotKey
+from habitus.prediction import builder, query
+from habitus.prediction.config import PredictionTreeConfig
+from habitus.prediction.model import BehaviorSnapshot, ObservedAction, ObservedGap, PredictionTree, SlotKey
 
 CST = timezone(timedelta(hours=8))
 # 2026-08-03 是周一，便于把"周几"算清楚。
@@ -19,7 +19,7 @@ FIRST_DAY = date(2026, 8, 3)
 def config(**overrides) -> PredictionTreeConfig:
     """一组便于手算的参数：收缩几乎关掉，好让计数与曝光的比值能直接对上。
 
-    **它不是生产档**。真实启动档在 ``Config/example.yaml``（收缩强度 5、ε=0.5），两者的
+    **它不是生产档**。真实启动档在 ``habitus/config/example.yaml``（收缩强度 5、ε=0.5），两者的
     收缩强度差 5000 倍，所以这组参数下跑绿并不代表收缩链本身被验证过——收缩相关的行为
     一律用 ``production_config()``。
     """
@@ -45,7 +45,7 @@ def config(**overrides) -> PredictionTreeConfig:
 
 
 def production_config(**overrides) -> PredictionTreeConfig:
-    """与 ``Config/example.yaml`` 的启动档一致的参数。
+    """与 ``habitus/config/example.yaml`` 的启动档一致的参数。
 
     收缩链、池化、lift 这些"参数一变行为就变"的东西必须在这组数值下验证：用几乎关掉收缩的
     夹具去测收缩，等于什么都没测（变异测试实证：把收缩顺序整个倒过来，全部单测照样全绿）。

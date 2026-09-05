@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import httpx
 import pytest
 
-from ModelClient import (
+from habitus.model_client import (
     ChatClient,
     ChatMessage,
     ChatModelConfig,
@@ -29,9 +29,9 @@ from ModelClient import (
     ToolCall,
     ToolDefinition,
 )
-from ModelClient.adapters.ark_multimodal import ArkMultimodalEmbeddingProvider
-from ModelClient.adapters.openai_compatible_chat import OpenAICompatibleChatProvider
-from ModelClient.retry import normalize_provider_error, retry_delay
+from habitus.model_client.adapters.ark_multimodal import ArkMultimodalEmbeddingProvider
+from habitus.model_client.adapters.openai_compatible_chat import OpenAICompatibleChatProvider
+from habitus.model_client.retry import normalize_provider_error, retry_delay
 from tests.model_helpers import prepare_chat_request
 
 
