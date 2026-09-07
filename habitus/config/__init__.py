@@ -23,6 +23,7 @@ from habitus.config.observability import (
     ObservabilityTracingConfig,
 )
 from habitus.config.root import HabitusConfig
+from habitus.config.scene import SceneConfig
 from habitus.config.storage import StorageConfig
 from habitus.config.workflow import MemoryWorkflowLifecycleConfig, WorkerConfig, WorkflowConfig
 from habitus.memory.intention import MemoryIntentionReviewConfig
@@ -49,6 +50,7 @@ __all__ = [
     "ModelConfig",
     "ObservabilityAuditConfig",
     "ObservabilityConfig",
+    "SceneConfig",
     "ObservabilityLoggingConfig",
     "ObservabilityMetricsConfig",
     "ObservabilityTracingConfig",

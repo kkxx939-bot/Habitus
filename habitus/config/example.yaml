@@ -482,3 +482,26 @@ workflow:
 #   rebuild_interval_seconds: 86400  # 运维数：一天重建一次
 #   published_generations: 7         # 运维数：留七代，够回看一周
 #   worker_shutdown_timeout_seconds: 30
+
+# 语义关联层（情景树）。缺省未启用；置 enabled: true 即启用（行为侧必须也启用）。各层按固定顺序处理
+# 已定稿的历史：归约把一天定稿（那天的链都已落树、封口视界已过那天的本地结束）→ 情景阶段对那天归组
+# 一次 → 预测树重建。预测侧启用时情景阶段排在预测重建之前、同一拍；否则按 refresh_interval_seconds
+# 自己起一拍。归组后不因补发重算；改提示词版本或指定某几天重算走 refresh_scene_days 正门。
+# 产物按天多代发布到 storage.root/scene/tree，进度在 storage.root/scene/refresh（refresh_pending.json
+# 待刷新日、blocked.json 封锁日、checkpoints/ 未发布的归组结果）。归组调用可达 2–8 分钟，
+# models.chat 的 timeout_seconds 要盖得住。
+#
+# 数值全部是启动档：回看天数与待用前提的过期期限最终由生命周期算法按 needs 边的滞后分布定档；
+# 行为数上限是 DAY1（348 条）在实验模型上的实测，换生产模型要重验。
+# scene:
+#   enabled: true
+#   lookback_days: 7                 # 参照边界：先前的事与"上一次"回看几天
+#   pending_expiry_days: 90          # 待用前提多久未兑现视为过期（用户裁定初值）；needs 边可指到这么远的前提
+#   max_occurrences_per_call: 400    # 一天的行为数上限；超过即封锁该日并留信号（第一期不切块）
+#   max_prompt_chars: 200000         # 单次归组提示词字符上限（保护闸；数值要按生产模型的窗口重定）
+#   retained_generations: 3          # 每天保留几代情景文档（下界 2）
+#   transient_retries: 1             # 归组调用对传输层瞬态错的有界重试（路由层另有一层）
+#   transient_retry_delay_seconds: 5
+#   max_attempts_per_input: 3        # 同一输入连续失败几次后封锁那一天（输入变了自动解封）
+#   max_model_calls_per_run: 4       # 一次夜批最多几次归组调用，其余留待下次
+#   refresh_interval_seconds: 86400  # 预测侧未启用时情景阶段自己的节拍

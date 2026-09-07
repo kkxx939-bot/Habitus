@@ -632,10 +632,110 @@ class BehaviorSnapshot:
         return max(days) if days else None
 
 
+@dataclass(frozen=True, slots=True)
+class ObservedScene:
+    """情景树上的一件"事"：标签、起止、所在日与逻辑 URI。本层只当标签是字符串。"""
+
+    label: str
+    started_at: datetime
+    ended_at: datetime
+    day: date
+    uri: str
+
+    def __post_init__(self) -> None:
+        for text_name, text_value in (("label", self.label), ("uri", self.uri)):
+            if not isinstance(text_value, str) or not text_value:
+                raise PredictionTreeError(f"scene {text_name} must be non-empty text")
+        for time_name, time_value in (("started_at", self.started_at), ("ended_at", self.ended_at)):
+            if not isinstance(time_value, datetime) or time_value.utcoffset() is None:
+                raise PredictionTreeError(f"scene {time_name} must be a timezone-aware datetime")
+        if self.ended_at < self.started_at:
+            raise PredictionTreeError("a scene must not end before it starts")
+        if not isinstance(self.day, date):
+            raise PredictionTreeError("scene day must be a date")
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedSceneMember:
+    """情景的一个成员：所属情景下标、行为 kind_token、角色、相对情景开始的偏移秒数。"""
+
+    scene_index: int
+    action: str
+    role: str
+    offset_seconds: float
+
+    def __post_init__(self) -> None:
+        if isinstance(self.scene_index, bool) or not isinstance(self.scene_index, int) or self.scene_index < 0:
+            raise PredictionTreeError("scene member scene_index must be a non-negative integer")
+        for name, value in (("action", self.action), ("role", self.role)):
+            if not isinstance(value, str) or not value:
+                raise PredictionTreeError(f"scene member {name} must be non-empty text")
+        if isinstance(self.offset_seconds, bool) or not isinstance(self.offset_seconds, int | float):
+            raise PredictionTreeError("scene member offset_seconds must be a number")
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedSceneRelation:
+    """情景对更早对象的一条边（needs / results_from），目标是 occurrence 或情景的 URI。"""
+
+    kind: str
+    from_uri: str
+    to_uri: str
+    lag_seconds: float
+
+    def __post_init__(self) -> None:
+        for name, value in (("kind", self.kind), ("from_uri", self.from_uri), ("to_uri", self.to_uri)):
+            if not isinstance(value, str) or not value:
+                raise PredictionTreeError(f"scene relation {name} must be non-empty text")
+        if isinstance(self.lag_seconds, bool) or not isinstance(self.lag_seconds, int | float) or self.lag_seconds < 0:
+            raise PredictionTreeError("scene relation lag_seconds must be a non-negative number")
+
+
+@dataclass(frozen=True)
+class SceneSnapshot:
+    """一次从情景树读出的全部实例；``scenes`` 按 ``started_at`` 升序，成员下标指向它。
+
+    第一期只定形状不做计数：情景层与跨层边是否进预测树由回测决定。
+    ``unresolved_members`` 只作可观测量。
+    """
+
+    scenes: tuple[ObservedScene, ...]
+    members: tuple[ObservedSceneMember, ...]
+    relations: tuple[ObservedSceneRelation, ...]
+    # 情景树处理过的全部日子（含零情景日）：零情景日在 ``scenes`` 里没有痕迹，覆盖只能从这里读。
+    covered_days: tuple[date, ...]
+    unresolved_members: int
+    skipped_duplicates: int
+    # 目标情景已不在其日当前一代（那一天被重建、后续日尚未级联重算）的边：读侧丢弃，只计数。
+    dangling_relations: int = 0
+
+    def __post_init__(self) -> None:
+        for member in self.members:
+            if member.scene_index >= len(self.scenes):
+                raise PredictionTreeError("scene member references a scene outside the snapshot")
+        for previous, following in zip(self.scenes, self.scenes[1:], strict=False):
+            if following.started_at < previous.started_at:
+                raise PredictionTreeError("scenes must be ordered by started_at")
+        if any(not isinstance(day, date) for day in self.covered_days):
+            raise PredictionTreeError("covered_days must contain dates")
+        for name in ("unresolved_members", "skipped_duplicates"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise PredictionTreeError(f"{name} must be a non-negative integer")
+
+    @property
+    def latest_covered_day(self) -> date | None:
+        return max(self.covered_days) if self.covered_days else None
+
+
 __all__ = [
     "MINUTES_PER_DAY",
     "WEEKDAYS",
     "BehaviorSnapshot",
+    "ObservedScene",
+    "ObservedSceneMember",
+    "ObservedSceneRelation",
+    "SceneSnapshot",
     "DayCurve",
     "EdgeStatistics",
     "IntervalQuantiles",

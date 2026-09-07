@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
@@ -124,22 +124,45 @@ class PredictionRebuildWorker(ResidentWorker):
         interval_seconds: float,
         shutdown_timeout_seconds: float,
         observer: Observer | None = None,
+        before_rebuild: Callable[[], Awaitable[object]] | None = None,
     ) -> None:
+        """``before_rebuild`` 是夜批里排在重建之前的阶段（组合根注入，本模块不知道它是什么——
+        现状是语义关联层对定稿日的归组）：派生树按固定先后顺序处理已定稿的历史，预测树读的
+        是它跑完之后的情景树。该阶段失败只记观测事件，不阻断重建。"""
+
         super().__init__(shutdown_timeout_seconds=shutdown_timeout_seconds, observer=observer)
+        if before_rebuild is not None and not callable(before_rebuild):
+            raise TypeError("before_rebuild must be an async callable or None")
         self.rebuilder = rebuilder
         self.interval_seconds = float(interval_seconds)
+        self.before_rebuild = before_rebuild
 
     async def run_once(self) -> PublishedGeneration | None:
-        """手动触发一次全量重建（运维与测试用）。"""
+        """手动触发一次夜批：前置阶段 → 全量重建（运维与测试用）。"""
 
         if self.running:
             raise RuntimeError("manual run_once cannot race the resident worker loop")
+        await self._run_before_rebuild()
         return await asyncio.to_thread(self.rebuilder.run_once)
+
+    async def _run_before_rebuild(self) -> None:
+        if self.before_rebuild is None:
+            return
+        started = time.monotonic()
+        try:
+            await self.before_rebuild()
+        except Exception as exc:  # noqa: BLE001 - 前置阶段失败不阻断重建，只留观测
+            self._observe(
+                "nightly_stage", ObservationStatus.FAILURE, {"error_type": type(exc).__name__}, started=started
+            )
+        else:
+            self._observe("nightly_stage", ObservationStatus.SUCCESS, {}, started=started)
 
     async def _run_loop(self) -> None:
         while not self._stop_requested.is_set():
             started = time.monotonic()
             try:
+                await self._run_before_rebuild()
                 published = await asyncio.to_thread(self.rebuilder.run_once)
             except Exception as exc:  # noqa: BLE001 - 常驻循环必须活过基础设施抖动
                 self.last_error = exc
@@ -166,6 +189,7 @@ def build_prediction_components(
     behavior_tree: BehaviorTree,
     observer: Observer | None = None,
     clock: Callable[[], datetime] | None = None,
+    before_rebuild: Callable[[], Awaitable[object]] | None = None,
 ) -> PredictionRuntimeComponents | None:
     """组装预测夜批；未启用时返回 None。
 
@@ -186,6 +210,7 @@ def build_prediction_components(
         interval_seconds=tree_config.rebuild_interval_seconds,
         shutdown_timeout_seconds=prediction_config.worker_shutdown_timeout_seconds,
         observer=observer,
+        before_rebuild=before_rebuild,
     )
     return PredictionRuntimeComponents(
         tree_config=tree_config, store=store, rebuilder=rebuilder, worker=worker

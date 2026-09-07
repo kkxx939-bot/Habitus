@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import date
 from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Any
 
@@ -699,6 +701,35 @@ def test_sweep_refreshes_day_summaries_after_publishing(tmp_path) -> None:
     second = asyncio.run(harness.runner.run_once())
     assert second.published_documents == 0
     assert len(generator.snapshots) == calls  # 树没变——digest 短路，零模型调用
+
+
+def test_a_day_is_closed_only_after_its_chains_seal_and_its_local_day_ends(tmp_path) -> None:
+    """定稿日是派生层（情景树、预测树）处理历史的前提：树变了的日子先记为开放，链都封口且封口视界
+    过了那天的本地结束才记为定稿；之后的补发不改变这个事实。"""
+
+    harness = Harness(tmp_path)
+    source = harness.deliver(OBS_A, OBS_B, OBS_C)
+    seed_wash_chain(harness, source)
+
+    report = asyncio.run(harness.runner.run_once())
+
+    assert report.published_occurrences == 1
+    assert harness.runner.closed_days() == ()  # 21:30 CST：那天还没结束
+    assert not harness.runner.is_day_closed(date(2026, 8, 16))
+
+    harness.now = at(6 * 3600)  # 次日 01:30 CST，封口视界 00:30 已过 16 日本地结束
+    asyncio.run(harness.runner.run_once())
+
+    assert harness.runner.closed_days() == (date(2026, 8, 16),)
+    assert harness.runner.is_day_closed(date(2026, 8, 16))
+    closure = json.loads((tmp_path / "reduction" / "day_closure.json").read_text())
+    assert closure["open"] == [] and list(closure["closed"]) == ["2026-08-16"]
+
+    # 定稿后再来一条同一天的链：照常落树，定稿事实不变
+    later = harness.deliver(OBS_A, OBS_B, OBS_C, seed="late")
+    seed_wash_chain(harness, later)
+    asyncio.run(harness.runner.run_once())
+    assert harness.runner.closed_days() == (date(2026, 8, 16),)
 
 
 def test_a_link_target_skipped_after_naming_defers_the_source(tmp_path) -> None:

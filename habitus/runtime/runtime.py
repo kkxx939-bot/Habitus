@@ -347,6 +347,8 @@ class Runtime:
                 try:
                     await self.components.behavior.fusion_worker.start()
                     await self.components.behavior.reduction_worker.start()
+                    if self.components.behavior.scene_worker is not None:
+                        await self.components.behavior.scene_worker.start()
                 except Exception as exc:  # noqa: BLE001 - 行为侧失败不阻断记忆主链
                     self._observe(
                         "runtime",
@@ -466,9 +468,13 @@ class Runtime:
             return
         try:
             try:
-                await behavior.reduction_worker.stop()
+                if behavior.scene_worker is not None:
+                    await behavior.scene_worker.stop()
             finally:
-                await behavior.fusion_worker.stop()
+                try:
+                    await behavior.reduction_worker.stop()
+                finally:
+                    await behavior.fusion_worker.stop()
         except Exception as exc:  # noqa: BLE001 - 行为侧停机失败不阻断主链
             self._observe(
                 "runtime",

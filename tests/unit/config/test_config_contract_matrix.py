@@ -25,6 +25,7 @@ from habitus.config.loader import (
     strict_fields,
     strict_object,
 )
+from habitus.config.scene import SceneConfig
 from habitus.infrastructure.editor.snapshot import SnapshotReadConfig
 from habitus.infrastructure.store.sqlite import SQLiteLockStoreConfig
 from habitus.infrastructure.vector import VectorStoreConfig, VectorStoreRouteConfig
@@ -54,6 +55,7 @@ from habitus.memory.workflow import (
 )
 
 CONFIG_INSTANCES = (
+    SceneConfig(),
     ConversationLifecycleConfig(),
     ConversationConfig(),
     MemoryConfig(),

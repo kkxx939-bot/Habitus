@@ -12,6 +12,7 @@ PRODUCTION_ROOTS = (
     "runtime",
     "model_client",
     "behavior",
+    "scene",
     "prediction",
     "pre",
     "conversation",
@@ -91,7 +92,7 @@ def test_retired_memory_contracts_and_uri_schemes_do_not_reappear() -> None:
 
 @pytest.mark.parametrize(
     "package",
-    ("model_client", "behavior", "prediction", "pre", "memory", "infrastructure", "foundation"),
+    ("model_client", "behavior", "scene", "prediction", "pre", "memory", "infrastructure", "foundation"),
 )
 def test_domain_packages_never_import_top_level_runtime(package: str) -> None:
     violations = [
@@ -171,11 +172,13 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
     # behavior/fusion/config.py 的唯一出处解析）。唯一的例外是时间预测树的读取入口
     # ``prediction/source.py``：整棵树每夜从行为树重建，那是设计路径而不是泄漏，
     # 收在单个模块里由 test_prediction_reads_the_behaviour_tree_through_exactly_one_module 守住。
+    # ``scene``（语义关联层）是行为树的解释层，从行为树派生，允许 import behavior；
+    # ``prediction/scene_source.py`` 是预测树读情景树的唯一入口（同 source.py 之于行为树）。
     reverse_dependency_violations = [
         str(path.relative_to(REPOSITORY_ROOT))
         for path in production_files()
-        if path.relative_to(SRC).parts[0] not in {"behavior", "runtime"}
-        and path.relative_to(SRC).as_posix() != "prediction/source.py"
+        if path.relative_to(SRC).parts[0] not in {"behavior", "runtime", "scene"}
+        and path.relative_to(SRC).as_posix() not in {"prediction/source.py", "prediction/scene_source.py"}
         and "behavior" in imported_roots(path)
     ]
     assert reverse_dependency_violations == []
@@ -410,7 +413,12 @@ def test_prediction_reads_the_behaviour_tree_through_exactly_one_module() -> Non
     """
 
     assert (SRC / "prediction").is_dir()
-    assert _prediction_modules_reaching("habitus.behavior") == {"habitus.prediction.source"}
+    assert _prediction_modules_reaching("habitus.behavior") == {
+        "habitus.prediction.source",
+        "habitus.prediction.scene_source",
+    }
+    # 情景树同理：只有 scene_source 一个模块传递性触达 scene。
+    assert _prediction_modules_reaching("habitus.scene") == {"habitus.prediction.scene_source"}
 
 
 def test_prediction_stays_out_of_the_semantic_and_composition_layers() -> None:
@@ -441,9 +449,52 @@ def test_behaviour_never_depends_on_prediction() -> None:
     violations = [
         str(path.relative_to(REPOSITORY_ROOT))
         for path in (SRC / "behavior").rglob("*.py")
-        if "prediction" in imported_roots(path)
+        if imported_roots(path) & {"prediction", "scene"}
     ]
     assert violations == []
+
+
+def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
+    """语义关联层只读行为树、只用基础设施与模型契约；不知道预测树、记忆树与组合根。
+
+    ``scene`` 从行为树派生（可 import behavior），将来归组与脚本经 ModelClient 调模型；但它
+    不得触达 prediction（依赖单向：预测树经 scene_source 读它）、memory（人物层桥接住组合根）、
+    config / runtime / conversation / integrations / pre。
+    """
+
+    scene_root = SRC / "scene"
+    assert scene_root.is_dir()
+    violations = [
+        str(path.relative_to(REPOSITORY_ROOT))
+        for path in scene_root.rglob("*.py")
+        if imported_roots(path)
+        & {"prediction", "memory", "config", "runtime", "conversation", "integrations", "pre"}
+    ]
+    assert violations == []
+    # 模型触点只有归组这一处（提示词渲染 + 服务）：清单、刷新器、存储、投影都不得碰模型。
+    model_callers = sorted(
+        str(path.relative_to(SRC))
+        for path in scene_root.rglob("*.py")
+        if "model_client" in imported_roots(path)
+    )
+    assert model_callers == ["scene/grouping/prompt.py", "scene/grouping/service.py"]
+    # 只读行为树：只许经 behavior 的模型/URI/树/文档入口读，不得触达写侧（编辑器、归约、融合、
+    # 词表、观测、语义层）——"行为树一个字不动"要由边界保证，不靠自觉。
+    behavior_write_side = {
+        "habitus.behavior.editor",
+        "habitus.behavior.reduction",
+        "habitus.behavior.fusion",
+        "habitus.behavior.kinds",
+        "habitus.behavior.observation",
+        "habitus.behavior.semantic",
+    }
+    write_side_violations = sorted(
+        f"{path.relative_to(SRC)}: {module}"
+        for path in scene_root.rglob("*.py")
+        for module in imported_modules(path)
+        if any(module == root or module.startswith(f"{root}.") for root in behavior_write_side)
+    )
+    assert write_side_violations == []
 
 
 def test_conversation_source_and_projection_do_not_depend_on_memory_or_behavior() -> None:

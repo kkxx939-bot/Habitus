@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 from collections.abc import Mapping
 
 from habitus.config import HabitusConfig
@@ -83,7 +84,7 @@ from habitus.memory.workflow import (
 )
 from habitus.model_client import ProviderFactory, StructuredChatClient
 from habitus.pre.conversation import ConversationAdapterRegistry
-from habitus.runtime.behavior import build_behavior_components
+from habitus.runtime.behavior import build_behavior_components, refresh_scene_stage
 from habitus.runtime.components import (
     RuntimeComponents,
     RuntimeConversation,
@@ -554,11 +555,19 @@ def build_runtime(
     )
     # behavior 关着而 prediction 开着的组合已经在配置层被硬拒（见 HabitusConfig 的跨域校验），
     # 所以这里 behavior_components 为 None 时 prediction 必然也没开，直接跳过即可。
+    # 夜批顺序：情景阶段（对定稿日归组一次）排在预测重建之前——预测树读的是情景树跑完之后的样子。
     prediction_components = (
         None
         if behavior_components is None
         else build_prediction_components(
-            config, behavior_tree=behavior_components.tree, observer=operation_observer
+            config,
+            behavior_tree=behavior_components.tree,
+            observer=operation_observer,
+            before_rebuild=(
+                None
+                if behavior_components.scene_refresher is None
+                else functools.partial(refresh_scene_stage, behavior_components, observer=operation_observer)
+            ),
         )
     )
     components = RuntimeComponents(

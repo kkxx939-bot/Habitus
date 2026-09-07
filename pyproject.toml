@@ -84,6 +84,7 @@ include = ["habitus*"]
 "habitus.benchmark" = ["README.md", "datasets/*.json", "policies/*.json"]
 "habitus.memory.schema.definitions" = ["*.yaml"]
 "habitus.behavior.schema.definitions" = ["*.yaml"]
+"habitus.scene.schema.definitions" = ["*.yaml"]
 # benchmark/fusion/__main__.py 用 Path(__file__).with_name("cases.json") 按安装位置读它，
 # 不登记的话从 wheel 装完跑 benchmark 会 FileNotFoundError。
 "habitus.benchmark.fusion" = ["cases.json"]
@@ -145,5 +146,6 @@ skip_covered = false
 exclude_also = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",
-    '\.\.\.',
+    # 只排除整行是 ``...`` 的桩；裸的 '\.\.\.' 会连签名里含 tuple[X, ...] 的整个函数体一起排除（评审实测全仓库约 15% 语句被静默排除）
+    '^\s*\.\.\.\s*$',
 ]

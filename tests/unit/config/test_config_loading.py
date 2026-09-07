@@ -296,3 +296,33 @@ def test_behavior_kinds_fields_are_bounded_and_derived_by_prefix() -> None:
     ):
         with pytest.raises(ValueError, match=match):
             BehaviorConfig(**kwargs)
+
+
+def test_scene_config_enforces_its_scalar_bounds_and_default_root(tmp_path) -> None:
+    from habitus.config.scene import SceneConfig
+
+    config = HabitusConfig.from_mapping(valid_mapping(tmp_path))
+    assert config.scene.enabled is False
+    assert config.scene_root == config.storage_root / "scene"
+    loaded = SceneConfig.from_mapping({"enabled": True, "lookback_days": 3, "pending_expiry_days": 60})
+    assert (loaded.lookback_days, loaded.pending_expiry_days, loaded.retained_generations) == (3, 60, 3)
+    for field_name, bad in (
+        ("lookback_days", 0),
+        ("lookback_days", 91),
+        ("pending_expiry_days", True),
+        ("max_occurrences_per_call", 0),
+        ("max_prompt_chars", 10),
+        ("retained_generations", 101),
+        ("retained_generations", 1),
+        ("transient_retries", -1),
+        ("max_attempts_per_input", 0),
+        ("max_model_calls_per_run", 0),
+        ("refresh_interval_seconds", 10),
+        ("transient_retry_delay_seconds", 601),
+    ):
+        with pytest.raises(ConfigError, match=f"scene.{field_name}"):
+            SceneConfig.from_mapping({field_name: bad})
+    with pytest.raises(ConfigError, match="scene.enabled"):
+        SceneConfig.from_mapping({"enabled": "yes"})
+    with pytest.raises(ConfigError, match="unknown"):
+        SceneConfig.from_mapping({"lookback": 3})

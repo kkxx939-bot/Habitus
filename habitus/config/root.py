@@ -17,6 +17,7 @@ from habitus.config.memory import MemoryConfig
 from habitus.config.models import ModelConfig
 from habitus.config.observability import ObservabilityConfig
 from habitus.config.prediction import PredictionConfig
+from habitus.config.scene import SceneConfig
 from habitus.config.storage import StorageConfig
 from habitus.config.workflow import WorkflowConfig
 
@@ -35,6 +36,7 @@ class HabitusConfig:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
     prediction: PredictionConfig = field(default_factory=PredictionConfig)
+    scene: SceneConfig = field(default_factory=SceneConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     http: HTTPAPIConfig = field(default_factory=HTTPAPIConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
@@ -50,6 +52,7 @@ class HabitusConfig:
             ("memory", self.memory, MemoryConfig),
             ("behavior", self.behavior, BehaviorConfig),
             ("prediction", self.prediction, PredictionConfig),
+            ("scene", self.scene, SceneConfig),
             ("workflow", self.workflow, WorkflowConfig),
         )
         for name, value, expected_type in expected:
@@ -80,6 +83,12 @@ class HabitusConfig:
         """返回行为管线（观测/判断/回执/作业/行为树/归约账本）的共同根目录。"""
 
         return self.storage_root / "behavior"
+
+    @property
+    def scene_root(self) -> Path:
+        """语义关联层（情景树与刷新进度）的根；与行为树、预测树并列，是行为树的派生物。"""
+
+        return self.storage_root / "scene"
 
     @property
     def prediction_root(self) -> Path:
@@ -116,6 +125,7 @@ class HabitusConfig:
             memory=MemoryConfig.from_mapping(data.get("memory", {})),
             behavior=BehaviorConfig.from_mapping(data.get("behavior", {})),
             prediction=PredictionConfig.from_mapping(data.get("prediction", {})),
+            scene=SceneConfig.from_mapping(data.get("scene", {})),
             workflow=WorkflowConfig.from_mapping(data.get("workflow", {})),
         )
 
@@ -157,6 +167,12 @@ class HabitusConfig:
             raise ConfigError(
                 "config.prediction is enabled but config.behavior.primary_subject is empty; "
                 "the prediction tree rebuilds from the behaviour tree and has no input without it"
+            )
+        # 情景树同样从行为树派生（每封口日一次归组），行为侧没开就没有输入——同一类配置自相矛盾。
+        if self.scene.enabled and not self.behavior.enabled:
+            raise ConfigError(
+                "config.scene is enabled but config.behavior.primary_subject is empty; "
+                "scene grouping reads sealed days of the behaviour tree and has no input without it"
             )
         memory = self.memory
         models = self.models

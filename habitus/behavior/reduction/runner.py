@@ -72,6 +72,9 @@ _CHECKPOINT_NAME = "staged.json"
 # 撞出永久冲突），而是把日子记在这里，每轮 sweep 逐日重试、成功一天清一天。
 _REFRESH_PENDING_NAME = "refresh_pending.json"
 _MAX_REFRESH_PENDING_BYTES = 1_048_576
+# 定稿日账：派生层（情景树、预测树）只处理这里记为 closed 的日子；open 是树变了但还没定稿的日子。
+_DAY_CLOSURE_NAME = "day_closure.json"
+_MAX_DAY_CLOSURE_BYTES = 4_194_304
 # sweep 锁的默认租约时长；实际值由 ``Config.behavior.reduction_sweep_lock_ttl_seconds`` 注入。
 # 周尺度回填（万级小文件写入会把 fseventsd 顶到 240% CPU，单篇 publish 可能被文件系统卡住数分钟）
 # 需要更长的租约——那不该靠改代码或猴子补丁，所以它是运维参数而不是常量。
@@ -245,9 +248,10 @@ class BehaviorReductionRunner:
         )
         ready_indexes = sealed_chain_indexes(assembly, horizon)
         ready_gaps = sealed_gaps(assembly.gaps, horizon)
+        unsealed_days = _unsealed_days(assembly, ready_indexes, ready_gaps)
         guard.checkpoint()
         if not ready_indexes and not ready_gaps:
-            refresh_notes = await self._finish_sweep(replayed_days, guard)
+            refresh_notes = await self._finish_sweep(replayed_days, guard, unsealed_days=unsealed_days, horizon=horizon)
             return BehaviorReductionReport(
                 replayed_documents=replayed,
                 published_occurrences=0,
@@ -296,7 +300,9 @@ class BehaviorReductionRunner:
             atomic_replace_bytes(self._checkpoint_path, encoded, artifact_root=self.ledger.root)
         self._publish_checkpoint(checkpoint, guard)
         guard.checkpoint()
-        refresh_notes = await self._finish_sweep(replayed_days | _document_days(documents), guard)
+        refresh_notes = await self._finish_sweep(
+            replayed_days | _document_days(documents), guard, unsealed_days=unsealed_days, horizon=horizon
+        )
         published_occurrences = sum(
             1 for item in documents if item["kind"] == BehaviorKind.OCCURRENCE.value
         )
@@ -381,18 +387,100 @@ class BehaviorReductionRunner:
                 embedder=self.kind_resolver.embedder,
             )
 
-    async def _finish_sweep(self, days: set[date], guard: LeaseGuard) -> tuple[str, ...]:
+    async def _finish_sweep(
+        self,
+        days: set[date],
+        guard: LeaseGuard,
+        *,
+        unsealed_days: frozenset[date] = frozenset(),
+        horizon: datetime | None = None,
+    ) -> tuple[str, ...]:
         """一轮的收尾，两条返回路径共用，顺序即崩溃安全的依据：
 
         受影响日先耐久进待刷新集合 → 清检查点（发布完成即清，不再被刷新失败扣住——那会让 merge
-        之后的重放撞出永久冲突）→ 逐日刷新（失败留在集合里下轮重试）→ 释放无人引用的交付。
+        之后的重放撞出永久冲突）→ 逐日刷新（失败留在集合里下轮重试）→ 定稿日记账 → 释放无人引用的交付。
         """
 
         self._write_pending_refresh_days(self._pending_refresh_days() | days, guard)
         self._clear_checkpoint(guard)
         notes = await self._refresh_semantics(days, guard)
+        self._close_days(days, guard, unsealed_days=unsealed_days, horizon=horizon)
         self._release_unreferenced(guard)
         return notes
+
+    # ── 定稿日：派生层（情景树、预测树）只处理已定稿的历史 ────────────────────────────
+
+    def closed_days(self) -> tuple[date, ...]:
+        """已定稿的本地日历日（升序）：那一天的链都已落树、且封口视界已过那天的本地结束。"""
+
+        return tuple(sorted(self._day_closure()["closed"]))
+
+    def is_day_closed(self, day: date) -> bool:
+        return day in self._day_closure()["closed"]
+
+    def _close_days(
+        self, days: set[date], guard: LeaseGuard, *, unsealed_days: frozenset[date], horizon: datetime | None
+    ) -> None:
+        """树变了的日子先记为"开放"，之后每轮核对：没有未封口的链头落在那天、且封口视界已过那天在其
+        本地偏移下的结束时刻，才记为定稿。定稿是事实，之后到达的补发照常进树、不改变这个事实；
+        派生层只在定稿之后处理那一天一次。"""
+
+        closure = self._day_closure()
+        open_days = closure["open"] | {day for day in days if day not in closure["closed"]}
+        if horizon is not None:
+            for day in sorted(open_days):
+                if day in unsealed_days:
+                    continue
+                end_of_day = self._local_end_of_day(day)
+                if end_of_day is not None and horizon.astimezone(UTC) >= end_of_day:
+                    closure["closed"][day] = self._now().isoformat(timespec="seconds")
+                    open_days.discard(day)
+        closure["open"] = open_days
+        self._write_day_closure(closure, guard)
+
+    def _local_end_of_day(self, day: date) -> datetime | None:
+        """那一天在其记录所用本地偏移下的结束瞬时（多个偏移取最晚）；没有记录时为 None。"""
+
+        latest: datetime | None = None
+        for kind in (BehaviorKind.OCCURRENCE, BehaviorKind.GAP):
+            for document in self.tree.read_day(kind, day):
+                offset = document.address.started_at.utcoffset()
+                if offset is None:
+                    continue
+                candidate = datetime.combine(day + timedelta(days=1), datetime.min.time()).replace(tzinfo=UTC) - offset
+                if latest is None or candidate > latest:
+                    latest = candidate
+        return latest
+
+    @property
+    def _day_closure_path(self) -> Path:
+        return self.ledger.root / _DAY_CLOSURE_NAME
+
+    def _day_closure(self) -> dict[str, Any]:
+        try:
+            encoded = read_regular_bytes(
+                self._day_closure_path, artifact_root=self.ledger.root, max_bytes=_MAX_DAY_CLOSURE_BYTES
+            )
+        except FileNotFoundError:
+            return {"open": set(), "closed": {}}
+        try:
+            raw = json.loads(encoded.decode("utf-8"))
+            return {
+                "open": {date.fromisoformat(item) for item in raw["open"]},
+                "closed": {date.fromisoformat(key): str(value) for key, value in raw["closed"].items()},
+            }
+        except (UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+            raise BehaviorReductionError("reduction day_closure file is not decodable") from exc
+
+    def _write_day_closure(self, closure: Mapping[str, Any], guard: LeaseGuard) -> None:
+        body = {
+            "open": sorted(day.isoformat() for day in closure["open"]),
+            "closed": {day.isoformat(): value for day, value in sorted(closure["closed"].items())},
+        }
+        with guard.fenced():
+            atomic_replace_bytes(
+                self._day_closure_path, json.dumps(body, sort_keys=True).encode("utf-8"), artifact_root=self.ledger.root
+            )
 
     def _clear_checkpoint(self, guard: LeaseGuard) -> None:
         with guard.fenced():
@@ -1134,6 +1222,18 @@ def _truncate_basis(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     trimmed = dict(payload)
     trimmed["basis"] = basis[:_TRUNCATED_HEAD] + basis[-_TRUNCATED_TAIL:]
     return trimmed
+
+
+def _unsealed_days(
+    assembly: ChainAssembly, ready_indexes: Sequence[int], ready_gaps: Sequence[ReducibleJudgement]
+) -> frozenset[date]:
+    """仍有未封口链头（或未封口空白段）落在哪些本地日历日：派生层不该归组还会长的日子。"""
+
+    ready = set(ready_indexes)
+    ready_gap_ids = {item.judgement_id for item in ready_gaps}
+    days = {chain.head.started_at.date() for index, chain in enumerate(assembly.chains) if index not in ready}
+    days |= {item.started_at.date() for item in assembly.gaps if item.judgement_id not in ready_gap_ids}
+    return frozenset(days)
 
 
 def _document_days(documents: list) -> set[date]:
