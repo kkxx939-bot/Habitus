@@ -17,6 +17,7 @@ from habitus.config import (
     WorkerConfig,
     WorkflowConfig,
 )
+from habitus.config.foresight import ForesightConfig
 from habitus.config.loader import (
     ConfigError,
     construct_config,
@@ -25,6 +26,7 @@ from habitus.config.loader import (
     strict_fields,
     strict_object,
 )
+from habitus.config.locale import LocaleConfig
 from habitus.config.scene import SceneConfig
 from habitus.infrastructure.editor.snapshot import SnapshotReadConfig
 from habitus.infrastructure.store.sqlite import SQLiteLockStoreConfig
@@ -56,6 +58,8 @@ from habitus.memory.workflow import (
 
 CONFIG_INSTANCES = (
     SceneConfig(),
+    ForesightConfig(),
+    LocaleConfig(),
     ConversationLifecycleConfig(),
     ConversationConfig(),
     MemoryConfig(),

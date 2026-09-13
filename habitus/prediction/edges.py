@@ -28,7 +28,7 @@ from __future__ import annotations
 from bisect import bisect_left
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 
 from habitus.prediction.config import PredictionTreeConfig
@@ -48,7 +48,11 @@ NO_SUCCESSOR = "∅"
 
 @dataclass(frozen=True)
 class EdgeLedger:
-    """配对结果的原始账本。``censored`` 只用于可观测性，不参与任何概率。"""
+    """配对结果的原始账本。``censored`` 只用于可观测性，不参与任何概率。
+
+    ``days`` 是每条边（含 ``→ ∅``）的出处：源那条行为发生在哪些日子。与计数同一行记，删失的
+    那些对两边都不记。语义关联层按这批日子去反查"那天这一步之后接的是什么"。
+    """
 
     transitions: dict[tuple[str, str], float]
     no_successor: dict[str, float]
@@ -56,6 +60,7 @@ class EdgeLedger:
     intervals: dict[tuple[str, str], list[tuple[float, float]]]
     slot_histogram: dict[tuple[str, str], dict[SlotKey, float]]
     censored: float
+    days: dict[tuple[str, str], set[date]] = field(default_factory=dict)
 
 
 def pair(
@@ -95,6 +100,7 @@ def pair(
     parallels: dict[tuple[str, str], float] = {}
     intervals: dict[tuple[str, str], list[tuple[float, float]]] = {}
     slot_histogram: dict[tuple[str, str], dict[SlotKey, float]] = {}
+    days: dict[tuple[str, str], set[date]] = {}
     censored = 0.0
 
     # 并行边直接从行为树声明的对里数，**不经过后继搜索**：并行不是"下一件事"，
@@ -137,6 +143,7 @@ def pair(
                 continue
             key = (current.action, successor.action)
             transitions[key] = transitions.get(key, 0.0) + weight
+            days.setdefault(key, set()).add(current.day)
             gap_seconds = successor.started_at.timestamp() - current.started_at.timestamp()
             intervals.setdefault(key, []).append((gap_seconds, weight))
             _tally(slot_histogram, key, slot_key, weight)
@@ -144,6 +151,7 @@ def pair(
 
         if _window_fully_observed(current.started_at, deadline, gap_starts, gap_ends):
             no_successor[current.action] = no_successor.get(current.action, 0.0) + weight
+            days.setdefault((current.action, NO_SUCCESSOR), set()).add(current.day)
             # ∅ 也上直方图：联合查询的分母是"该槽内 source 的未删失次数"，
             # 少了这一半，"这个槽做完 A 通常就收工"会被算成"这个槽做完 A 必然接着做 B"。
             _tally(slot_histogram, (current.action, NO_SUCCESSOR), slot_key, weight)
@@ -157,6 +165,7 @@ def pair(
         intervals=intervals,
         slot_histogram=slot_histogram,
         censored=censored,
+        days=days,
     )
 
 
@@ -251,6 +260,7 @@ def derive(ledger: EdgeLedger, *, config: PredictionTreeConfig) -> dict[tuple[st
             config=config,
             intervals=quantiles(ledger.intervals.get((source, target), ())),
             histogram=ledger.slot_histogram.get((source, target), {}),
+            days=ledger.days[(source, target)],
         )
     for source, count in ledger.no_successor.items():
         statistics[(source, NO_SUCCESSOR)] = _edge(
@@ -261,6 +271,7 @@ def derive(ledger: EdgeLedger, *, config: PredictionTreeConfig) -> dict[tuple[st
             # ∅ 不是一个动作，没有"下一件事什么时候开始"可言。
             intervals=None,
             histogram=ledger.slot_histogram.get((source, NO_SUCCESSOR), {}),
+            days=ledger.days[(source, NO_SUCCESSOR)],
         )
     return statistics
 
@@ -273,6 +284,7 @@ def _edge(
     config: PredictionTreeConfig,
     intervals: IntervalQuantiles | None,
     histogram: Mapping[SlotKey, float],
+    days: AbstractSet[date],
 ) -> EdgeStatistics:
     probability = (count + config.shrink_edge * share) / (opportunities + config.shrink_edge)
     return EdgeStatistics(
@@ -282,6 +294,7 @@ def _edge(
         n_eff=opportunities,
         intervals=intervals,
         slot_histogram=dict(histogram),
+        days=tuple(sorted(days)),
     )
 
 

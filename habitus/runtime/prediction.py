@@ -20,6 +20,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from zoneinfo import ZoneInfo
 
 from habitus.behavior.tree import BehaviorTree
 from habitus.config import HabitusConfig
@@ -64,6 +65,7 @@ class PredictionRebuilder:
         store: PredictionTreeStore,
         *,
         config: PredictionTreeConfig,
+        zone: ZoneInfo,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(behavior_tree, BehaviorTree):
@@ -72,9 +74,12 @@ class PredictionRebuilder:
             raise TypeError("store must be a PredictionTreeStore")
         if not isinstance(config, PredictionTreeConfig):
             raise TypeError("config must be a PredictionTreeConfig")
+        if not isinstance(zone, ZoneInfo):
+            raise TypeError("zone must be a ZoneInfo")
         self.behavior_tree = behavior_tree
         self.store = store
         self.config = config
+        self.zone = zone
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
 
     def run_once(self) -> PublishedGeneration | None:
@@ -100,11 +105,14 @@ class PredictionRebuilder:
 
         取最后一条记录那天，停记一个月之后算出来的还是一个月前的热度——衰减就白做了。
         整棵树都没有记录时没有基准日可言，返回 None。
+
+        "今天"按**主体所在地**算（``config.locale.timezone``），不看进程默认时区：基准日错一天，
+        整棵树的衰减权重就整体挪一天，而每个数字看起来都还是对的。
         """
 
         if latest_day is None:
             return None
-        return max(latest_day, self._clock().astimezone().date())
+        return max(latest_day, self._clock().astimezone(self.zone).date())
 
 
 class PredictionRebuildWorker(ResidentWorker):
@@ -204,7 +212,9 @@ def build_prediction_components(
     store = PredictionTreeStore(
         config.prediction_root, retained_generations=tree_config.published_generations
     )
-    rebuilder = PredictionRebuilder(behavior_tree, store, config=tree_config, clock=clock)
+    rebuilder = PredictionRebuilder(
+        behavior_tree, store, config=tree_config, zone=config.locale.zone(), clock=clock
+    )
     worker = PredictionRebuildWorker(
         rebuilder,
         interval_seconds=tree_config.rebuild_interval_seconds,

@@ -1,5 +1,6 @@
 """唯一 YAML 配置入口、严格类型和跨领域容量约束测试。"""
 
+import dataclasses
 from copy import deepcopy
 from pathlib import Path
 
@@ -326,3 +327,56 @@ def test_scene_config_enforces_its_scalar_bounds_and_default_root(tmp_path) -> N
         SceneConfig.from_mapping({"enabled": "yes"})
     with pytest.raises(ConfigError, match="unknown"):
         SceneConfig.from_mapping({"lookback": 3})
+
+
+def test_locale_is_one_group_shared_by_the_scene_and_foresight_layers(tmp_path) -> None:
+    """时区与当地日历只有一份：情景读侧标日型、预测层造此刻时钟，两处分别配会对不上。"""
+
+    from habitus.config.locale import LocaleConfig
+
+    config = HabitusConfig.from_mapping(valid_mapping(tmp_path))
+    assert config.locale.timezone == "Asia/Shanghai" and config.locale.region == "CN"
+    assert str(config.locale.zone()) == "Asia/Shanghai"
+    assert config.locale.calendar_path is None  # 没有日历数据 = 日型恒为空，显式的零修正
+    for field_name, bad in (("timezone", "Nowhere/Nothing"), ("timezone", " "), ("region", "cn"), ("region", "CHN")):
+        with pytest.raises(ConfigError, match=f"locale.{field_name}"):
+            LocaleConfig.from_mapping({field_name: bad})
+    # 数据格式还没定：给了路径直接拒，不静默忽略——静默忽略会让人以为调休已经生效。
+    with pytest.raises(ConfigError, match="not supported yet"):
+        LocaleConfig.from_mapping({"calendar_path": "/tmp/cn-2026.json"})
+    with pytest.raises(ConfigError, match="unknown"):
+        LocaleConfig.from_mapping({"zone": "UTC"})
+
+
+def test_foresight_only_carries_protective_limits_and_needs_both_derived_trees(tmp_path) -> None:
+    """预测层这一组只有保护闸——窗口宽度住在 prediction 那边，两处不各配一份。
+
+    启用它却没启用两棵派生树是**配置自相矛盾**：数字取自预测树、与之对应的历史取自情景树，
+    缺一边就装配不出证据。放过去的下场是启动一切正常、什么都没发生、无处可查。
+    """
+
+    from habitus.config.foresight import ForesightConfig
+
+    config = HabitusConfig.from_mapping(valid_mapping(tmp_path))
+    assert config.foresight.enabled is False
+    assert [field.name for field in dataclasses.fields(ForesightConfig)] == [
+        "enabled",
+        "max_days_per_layer",
+        "max_similar_scenes",
+        "max_pack_chars",
+    ]
+    for field_name, bad in (
+        ("max_days_per_layer", 0),
+        ("max_similar_scenes", 201),
+        ("max_pack_chars", 10),
+        ("max_pack_chars", True),
+    ):
+        with pytest.raises(ConfigError, match=f"foresight.{field_name}"):
+            ForesightConfig.from_mapping({field_name: bad})
+    with pytest.raises(ConfigError, match="unknown"):
+        ForesightConfig.from_mapping({"pool_half_width": 3})
+
+    mapping = valid_mapping(tmp_path)
+    mapping["foresight"] = {"enabled": True}
+    with pytest.raises(ConfigError, match="config.foresight is enabled"):
+        HabitusConfig.from_mapping(mapping)

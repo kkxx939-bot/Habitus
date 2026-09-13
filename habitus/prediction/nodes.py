@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 from habitus.prediction.config import PredictionTreeConfig
@@ -106,12 +106,18 @@ def decay_weight(age_days: float, half_life_days: float) -> float:
 
 @dataclass(frozen=True)
 class NodeLedger:
-    """一次扫描得到的全部原始账本：格子计数 + 槽位曝光 + 动作全天基线。"""
+    """一次扫描得到的全部原始账本：格子计数 + 槽位曝光 + 动作全天基线 + 计数的出处。
+
+    ``cell_days`` 与 ``counts`` 出自同一次记账：一个格子的 ``occurred_days`` 是它这批日子的
+    衰减加权和。只记"真的在这一槽起过头"的日子——``earlier_days`` 记到的那些格子当天在更早
+    的槽发生，这一格没有发生，所以不进出处。
+    """
 
     counts: Mapping[tuple[SlotKey, str], NodeCounts]
     exposure: Mapping[SlotKey, SlotExposure]
     actions: tuple[str, ...]
     observed_days: int
+    cell_days: Mapping[tuple[SlotKey, str], tuple[date, ...]] = field(default_factory=dict)
 
 
 def accumulate(
@@ -135,6 +141,7 @@ def accumulate(
     slots = config.slots_per_day
 
     counts: dict[tuple[SlotKey, str], NodeCounts] = {}
+    cell_days: dict[tuple[SlotKey, str], list[date]] = {}
     exposure: dict[SlotKey, SlotExposure] = {}
     # 覆盖只由空白决定，**没有任何特判**：occurrence 与空白的重叠已经在 ``reconcile_gaps``
     # 一处消解掉了（调用方是 ``builder``，它把同一份账同时交给本模块与 ``edges``）。
@@ -159,6 +166,7 @@ def accumulate(
         for action, occurrences in per_day.get(day, {}).items():
             _accumulate_action(
                 counts,
+                cell_days,
                 day=day,
                 action=action,
                 slots_hit=occurrences,
@@ -172,11 +180,14 @@ def accumulate(
         exposure=exposure,
         actions=tuple(sorted({action for _, action in counts})),
         observed_days=len(days),
+        # ``days`` 是升序遍历的，每天对一个格子最多进来一次，所以这里天然升序且不重复。
+        cell_days={key: tuple(value) for key, value in cell_days.items()},
     )
 
 
 def _accumulate_action(
     counts: dict[tuple[SlotKey, str], NodeCounts],
+    cell_days: dict[tuple[SlotKey, str], list[date]],
     *,
     day: date,
     action: str,
@@ -190,6 +201,10 @@ def _accumulate_action(
 
     同日同槽封顶 1（``occurred_days``），但原始次数照留；首次那个槽单独记 ``first_days``，
     其后的每个槽记 ``earlier_days``——这两个让危险率与累积率无需跨槽累乘即可得到。
+
+    **出处与计数在同一行记**（``cell_days``）：哪几天喂了这个格子，下游要按那几天去取当时的
+    语义背景。只记命中的槽；``earlier_days`` 那个循环不记——它说的是"当天更早已经做过"，
+    那一格本身并没有发生，把它记进出处会让语义侧去取一段根本没发生的历史。
 
     **全部计数与曝光共用同一个度量** ``m = 衰减权重 × 覆盖比例``：一天对一个格子贡献多少
     证据，只有这一个答案。早先分子按整份权重记、分母按覆盖比例记，覆盖 0.78 的槽里发生一次
@@ -212,6 +227,7 @@ def _accumulate_action(
                 "the upstream coverage signal contradicts the behaviour tree"
             )
         key = (SlotKey(weekday=weekday, slot=slot_index), action)
+        cell_days.setdefault(key, []).append(day)
         counts[key] = counts.get(key, NodeCounts()).plus(
             occurred_days=long_weight * covered,
             raw_occurrences=long_weight * covered * repetitions,
@@ -298,7 +314,9 @@ def derive_all(
                 if counts is None or exposure is None or counts.occurred_days <= 0.0:
                     continue
                 cells[(key, action)] = NodeStatistics(
-                    n_eff=exposure.observed_days, counts=counts
+                    n_eff=exposure.observed_days,
+                    counts=counts,
+                    days=ledger.cell_days[(key, action)],
                 )
             cumulative = completion.get((weekday, action))
             if cumulative is None or len(cumulative) != slots:
@@ -705,8 +723,12 @@ class _Baselines:
 def _all_day_rates(ledger: NodeLedger, *, config: PredictionTreeConfig) -> _Baselines:
     """收缩链的顶层与 lift 的分母。
 
-    ``per_slot_cross_weekday`` 是"同一时刻跨全部周几"的率——它既是 ``lift_周几`` 的分母
-    （回答"周二比随便哪天特别多少"），也是收缩链倒数第二层的先验。
+    ``per_slot_cross_weekday`` 是"同一时刻跨全部周几"的率，按**精确槽**归并、带 Laplace 平滑。
+    它是 ``lift_周几`` 的分母（回答"周二比随便哪天特别多少"），**不是收缩链的任何一层**——
+    链上第三层在 ``_dense_chain`` 里现算，是 ``Σ_w pooled_top[w][slot] / Σ_w pooled_bottom[w][slot]``
+    （含 ±池宽邻域、不平滑），本函数的返回值从来没有传进 ``_dense_chain``。这里原先写着"也是
+    收缩链倒数第二层的先验"，是错的：读侧照着那句话去拆四层，会把周规律的证据抹掉一个池宽的
+    量级（12 周每周一 19:00 的合成数据上，邻域/跨周几的倍数从 7.00 掉到 1.35）。
     """
 
     epsilon = config.laplace_epsilon

@@ -716,3 +716,64 @@ def test_the_neighbourhood_is_centred_on_where_the_behaviour_actually_happens() 
     trend, evidence = _trend_of(workouts, days=7 * 16, cfg=production_config())
     assert trend == pytest.approx(1.0, abs=0.05)
     assert evidence > 5.0
+
+
+# --- 出处：这个数字是哪几天攒出来的 -----------------------------------------------------
+
+
+def test_a_cell_names_the_days_it_was_counted_from() -> None:
+    """格子必须说得出自己是哪几天来的——语义关联层按这批日子去取当时的上下文。
+
+    让下游拿"全部覆盖日 + 槽过滤"自己重推一遍是不行的：同一批上游记录会被读成两种事实，
+    而且推不出树知道、语义侧看不见的那部分（树读整棵行为树，语义树只归组过一部分日子）。
+    """
+
+    workouts = weekly("打球", weeks=4, weekday=0, hour=19)
+    cfg = config()
+    ledger = accumulate(workouts, [], config=cfg, reference=reference(7 * 4 - 1))
+    key = (SlotKey(weekday=0, slot=76), "打球")  # 周一 19:00–19:15
+    assert ledger.counts[key].occurred_days > 0.0
+    assert ledger.cell_days[key] == tuple(reference(7 * week) for week in range(4))
+
+
+def test_provenance_only_lists_days_the_cell_itself_happened() -> None:
+    """``earlier_days`` 记到的格子不进出处：那说的是"当天更早已经做过"，这一格并没有发生。
+
+    记进去的话，语义侧会拿着"这天这一格发生过"的假设去取一段根本不存在的历史。
+    """
+
+    cfg = config()
+    ledger = accumulate(daily("吃药", days=3, hour=7), [], config=cfg, reference=reference(2))
+    happened = (SlotKey(weekday=0, slot=28), "吃药")  # 周一 07:00
+    later = (SlotKey(weekday=0, slot=60), "吃药")  # 同一天 15:00，只有 earlier_days
+    assert ledger.counts[later].earlier_days > 0.0
+    assert ledger.counts[later].occurred_days == 0.0
+    assert ledger.cell_days[happened] == (reference(0),)
+    assert later not in ledger.cell_days
+
+
+def test_the_same_slot_twice_in_one_day_is_one_day_of_provenance() -> None:
+    """同日同槽封顶 1 的记账口径，出处也跟着按天去重；强度仍在 ``raw_occurrences`` 里。"""
+
+    twice = [action("洗手", 0, 12, 1), action("洗手", 0, 12, 9)]
+    cfg = config()
+    ledger = accumulate(twice, [], config=cfg, reference=reference(0))
+    key = (SlotKey(weekday=0, slot=48), "洗手")
+    assert ledger.counts[key].raw_occurrences == pytest.approx(2.0)
+    assert ledger.cell_days[key] == (reference(0),)
+
+
+def test_provenance_and_counts_come_from_one_ledger_entry() -> None:
+    """出处与计数同出一次记账：衰减加权的天数不可能超过日子本身的条数。
+
+    这条在生产档（真衰减、真收缩）下查，因为它守的正是"记账漏了一边"这种失真。
+    """
+
+    cfg = production_config()
+    tree = publish(daily("写日报", days=30, hour=21), config=cfg, reference_day=reference(29)).tree
+    checked = 0
+    for (slot_key, name), statistics in tree.nodes.items():
+        assert statistics.days, f"{name} at {slot_key} 没有出处"
+        assert statistics.counts.occurred_days <= len(statistics.days) + 1e-9
+        checked += 1
+    assert checked > 0

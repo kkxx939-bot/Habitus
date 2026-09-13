@@ -1,4 +1,7 @@
-"""以独立 SQLite 状态保存 L2 记忆的实际使用和冷记忆生命周期事实。"""
+"""以独立 SQLite 状态保存 L2 记忆的实际使用和冷记忆生命周期事实。
+
+插件化交付下这个 SQLite 文件的去向见 ``runtime/assembly.py`` 的 ``TODO(PLUGIN-NO-SQLITE-001)``。
+"""
 
 from __future__ import annotations
 

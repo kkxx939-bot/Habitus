@@ -1,4 +1,7 @@
-"""使用独立 SQLite 文件提供跨进程路径锁。"""
+"""使用独立 SQLite 文件提供跨进程路径锁。
+
+插件化交付下锁库是否保留 SQLite 见 ``runtime/assembly.py`` 的 ``TODO(PLUGIN-NO-SQLITE-001)``。
+"""
 
 from __future__ import annotations
 

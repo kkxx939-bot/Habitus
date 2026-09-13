@@ -55,6 +55,7 @@ from habitus.model_client import (
     StructuredChatClient,
 )
 from habitus.runtime.behavior import BehaviorRuntimeComponents
+from habitus.runtime.foresight import ForesightRuntimeComponents
 from habitus.runtime.lifecycle import LifecycleWorker
 from habitus.runtime.prediction import PredictionRuntimeComponents
 from habitus.runtime.worker import MemoryWorker
@@ -354,6 +355,8 @@ class RuntimeComponents:
     behavior: BehaviorRuntimeComponents | None = None
     # 时间预测树夜批；prediction.enabled 为假时为 None。它读行为树，所以行为侧未启用时也必然为 None。
     prediction: PredictionRuntimeComponents | None = None
+    # 预测层的证据装配；foresight.enabled 为假时为 None。它读两棵派生树，所以上面两个为 None 时也必然为 None。
+    foresight: ForesightRuntimeComponents | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.infrastructure, RuntimeInfrastructure):
@@ -376,6 +379,20 @@ class RuntimeComponents:
             # 实例同一性：夜批必须读**这个** Runtime 写入的那棵行为树，不是另开一个同路径的实例。
             if self.prediction.rebuilder.behavior_tree is not self.behavior.tree:
                 raise ValueError("prediction must rebuild from the assembled behaviour tree")
+        if self.foresight is not None:
+            if not isinstance(self.foresight, ForesightRuntimeComponents):
+                raise TypeError("foresight must be ForesightRuntimeComponents or None")
+            if self.behavior is None or self.prediction is None or self.behavior.scene_tree is None:
+                raise ValueError("foresight reads both derived trees; prediction and scene must be enabled")
+            # 实例同一性：装配器必须读**这个** Runtime 的那三份存储，否则证据里的数字与背景
+            # 可能来自另一个同路径的实例，而且看不出来。
+            assembler = self.foresight.assembler
+            if assembler.behavior_tree is not self.behavior.tree:
+                raise ValueError("foresight must read the assembled behaviour tree")
+            if assembler.scene_tree is not self.behavior.scene_tree:
+                raise ValueError("foresight must read the assembled scene tree")
+            if assembler.store is not self.prediction.store:
+                raise ValueError("foresight must read the assembled prediction store")
         if self.workflow.enqueuer.conversations is not self.conversation.journal:
             raise ValueError("workflow enqueuer must use the shared conversation journal")
         if (

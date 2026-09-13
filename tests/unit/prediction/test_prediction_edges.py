@@ -346,3 +346,129 @@ def test_parallel_keys_do_not_depend_on_which_one_started_first() -> None:
     totals = parallel_totals(ledger)
     assert totals["吃饭"] == pytest.approx(totals["看手机"])
     assert totals["吃饭"] == pytest.approx(ledger.parallels[("吃饭", "看手机")])
+
+
+# --- 出处：这条边是哪几天看见的 ---------------------------------------------------------
+
+
+def test_an_edge_names_the_days_it_was_seen() -> None:
+    """转移边与 ``→ ∅`` 都要带上源那条行为发生的日子，语义层据此反查那天接着做了什么。"""
+
+    actions = []
+    for offset in range(5):
+        actions.append(action("洗手", offset, 12))
+        if offset < 3:
+            actions.append(action("吃饭", offset, 12, 5))
+    cfg, ledger = build(actions, days=5)
+    stats = derive(ledger, config=cfg)
+    assert stats[("洗手", "吃饭")].days == tuple(reference(offset) for offset in range(3))
+    assert stats[("洗手", NO_SUCCESSOR)].days == tuple(reference(offset) for offset in (3, 4))
+
+
+def test_a_censored_pair_leaves_no_provenance() -> None:
+    """删失的那一对既不算转移也不算"什么都没做"，出处里同样不能留下这一天。
+
+    留下了，语义侧就会去取一段我们**承认自己没看清**的历史，还以为它是一条实打实的证据。
+    """
+
+    actions = [action("洗手", offset, 12) for offset in range(4)]
+    cfg, ledger = build(actions, [gap(2, 12, 14)], days=4)
+    stats = derive(ledger, config=cfg)
+    assert ledger.censored > 0.0
+    assert reference(2) not in stats[("洗手", NO_SUCCESSOR)].days
+
+
+def test_twice_in_one_day_is_two_counts_but_one_day() -> None:
+    """边按次记、出处按天去重，所以 ``count`` 可以大于 ``len(days)``——两者不同量纲。"""
+
+    actions = [action("吃药", 0, 8), action("喝水", 0, 8, 5), action("吃药", 0, 20), action("喝水", 0, 20, 5)]
+    cfg, ledger = build(actions, days=1)
+    edge = derive(ledger, config=cfg)[("吃药", "喝水")]
+    assert edge.count == pytest.approx(2.0)
+    assert edge.days == (reference(0),)
+
+
+# --- 邻域联合格子 -----------------------------------------------------------------------
+
+
+def _pooled_tree(cfg, ledger):
+    """把一批边包成树，再补上曲线要用的最小骨架（联合查询只读 edges 与 slot_minutes）。"""
+
+    return _tree(derive(ledger, config=cfg), cfg)
+
+
+def test_the_joint_cell_can_be_spread_over_the_neighbourhood(tmp_path) -> None:
+    """15 分钟一格上单格的联合样本很容易是空的，于是"上一步→下一步"频繁掉进 lift 近似。
+
+    摊到 ±k 槽之后，分子与分母必须摊在**同一批**格子上、并且都含 ∅——少了 ∅ 那一半，
+    "这个槽做完 A 通常就收工"会被算成"必然接着做 B"。
+    """
+
+    actions = []
+    for week in range(6):
+        # 直方图的键是 (周几, 槽)，所以现场按周递增落在同一个周几上；分钟数让它在 12:00 前后
+        # 飘 20 分钟：单格只罩得住四次，邻域才罩得住六次。
+        minute = 10 * (week % 3)
+        actions.append(action("洗手", 7 * week, 12, minute))
+        if week < 4:
+            actions.append(action("吃饭", 7 * week, 12, minute + 5))
+    cfg, ledger = build(actions, days=7 * 6)
+    tree = _pooled_tree(cfg, ledger)
+    centre = SlotKey(weekday=reference(0).weekday(), slot=48)  # 12:00–12:15
+
+    single = _by_target(query.successors(tree, "洗手", slot=centre))
+    pooled = _by_target(query.successors(tree, "洗手", slot=centre, half_width=2))
+    assert pooled["吃饭"].count > single["吃饭"].count  # 邻域罩进更多次
+    assert pooled["吃饭"].n_eff > single["吃饭"].n_eff
+    # 分母含 ∅：一个源的全部目标（含 ∅）在同一批格子上求和，所以概率加起来正好是 1。
+    assert sum(item.probability for item in pooled.values()) == pytest.approx(1.0)
+    assert NO_SUCCESSOR in pooled
+
+
+def test_half_width_zero_is_exactly_the_old_single_cell_behaviour(tmp_path) -> None:
+    """默认值必须与改动前逐位相同，否则这个参数就不是"加了一条路"，而是改了所有既有调用。"""
+
+    actions = []
+    for week in range(5):
+        actions.append(action("洗手", 7 * week, 12))
+        if week < 3:
+            actions.append(action("吃饭", 7 * week, 12, 5))
+    cfg, ledger = build(actions, days=7 * 5)
+    tree = _pooled_tree(cfg, ledger)
+    centre = SlotKey(weekday=reference(0).weekday(), slot=48)
+    assert query.successors(tree, "洗手", slot=centre) == query.successors(
+        tree, "洗手", slot=centre, half_width=0
+    )
+    assert query.successors(tree, "洗手") == query.successors(tree, "洗手", half_width=0)
+
+
+def test_a_neighbourhood_without_a_slot_is_refused(tmp_path) -> None:
+    """没有槽就没有"邻域"可言。静默忽略会让调用方以为自己按邻域查过了。"""
+
+    cfg, ledger = build([action("洗手", 0, 12)], days=1)
+    tree = _pooled_tree(cfg, ledger)
+    with pytest.raises(PredictionTreeError, match="needs a slot"):
+        query.successors(tree, "洗手", half_width=2)
+    for bad in (-1, True, 1.0):
+        with pytest.raises(PredictionTreeError, match="half_width"):
+            query.successors(tree, "洗手", slot=SlotKey(weekday=0, slot=48), half_width=bad)
+
+
+def test_a_window_wider_than_the_clock_face_is_refused(tmp_path) -> None:
+    """宽过整圈的环形窗口会把同一个格子数两遍；这条硬拒要与节点池化那边一字不差地一致。"""
+
+    cfg, ledger = build([action("洗手", 0, 12)], days=1)
+    tree = _pooled_tree(cfg, ledger)
+    with pytest.raises(PredictionTreeError, match="count slots twice"):
+        query.neighbourhood(tree, SlotKey(weekday=0, slot=48), 48)
+    assert len(query.neighbourhood(tree, SlotKey(weekday=0, slot=48), 47)) == 95
+
+
+def test_the_neighbourhood_wraps_inside_one_weekday_only(tmp_path) -> None:
+    """周一 23:50 的邻域含周一 00:05，不含周二 00:05——与节点池化逐行做窗口和同一个语义。"""
+
+    cfg, ledger = build([action("洗手", 0, 12)], days=1)
+    tree = _pooled_tree(cfg, ledger)
+    keys = query.neighbourhood(tree, SlotKey(weekday=0, slot=95), 2)
+    assert {key.weekday for key in keys} == {0}
+    assert sorted(key.slot for key in keys) == [0, 1, 93, 94, 95]

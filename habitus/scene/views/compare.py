@@ -81,6 +81,21 @@ def _prior_steps(now: ContextView, history: tuple[ContextView, ...]) -> SlotComp
     return _row("prior_steps", tuple(sorted(kinds)), hits)
 
 
+def _preceding(now: ContextView, history: tuple[ContextView, ...]) -> SlotComparison:
+    """紧邻上一条（预测树转移边的口径：转移窗口内时间上紧邻的那条，不论属于哪件事）。
+
+    与"此前步骤"分开比：后者是同一件事里更早的成员，前者是钟面上挨着的那条——"吃完饭就去打球"的
+    转移证据只在这一槽对得上。三态里"确认没有"（∅）是可比的值：历史上做这件事之前常常什么都没做，
+    今天也什么都没做，就是对上；"删失"与"没算"是缺信息。"""
+
+    value = None if now.preceding is None else now.preceding.value
+    comparable = [(view, view.preceding.value) for view in history if view.preceding is not None and view.preceding.value is not None]
+    if value is None or not comparable:
+        return SlotComparison("preceding", Verdict.UNKNOWN, () if value is None else (value,), (), ())
+    hits = [(view, {value} if seen == value else set()) for view, seen in comparable]
+    return _row("preceding", (value,), hits)
+
+
 def _preconditions(now: ContextView, history: tuple[ContextView, ...]) -> SlotComparison:
     """历史前提今天成立了没有：前提落到的 kind 对（今日已发生的 kind ∪ 待用清单产生方的 kind），或文本对
     待用清单。没有可比形式（target_kinds 为空）的历史前提不计入；全都不可比即缺信息。"""
@@ -194,6 +209,7 @@ def _uris(views: Iterable[ContextView]) -> tuple[str, ...]:
 _ROW_BUILDERS = {
     "scene": _scene,
     "prior_steps": _prior_steps,
+    "preceding": _preceding,
     "preconditions": _preconditions,
     "causes": _causes,
     "last_time": _last_time,

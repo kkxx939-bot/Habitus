@@ -11,8 +11,10 @@ from pathlib import Path
 from habitus.config.behavior import BehaviorConfig
 from habitus.config.conversation import ConversationConfig
 from habitus.config.credentials import CredentialRegistry
+from habitus.config.foresight import ForesightConfig
 from habitus.config.http import HTTPAPIConfig
 from habitus.config.loader import ConfigError, group_fields, load_config_object, required_field
+from habitus.config.locale import LocaleConfig
 from habitus.config.memory import MemoryConfig
 from habitus.config.models import ModelConfig
 from habitus.config.observability import ObservabilityConfig
@@ -37,6 +39,9 @@ class HabitusConfig:
     behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
     prediction: PredictionConfig = field(default_factory=PredictionConfig)
     scene: SceneConfig = field(default_factory=SceneConfig)
+    foresight: ForesightConfig = field(default_factory=ForesightConfig)
+    # 主体所在地：情景读侧标日型、预测层造"此刻"时钟，两处必须同一个地方，所以单独一组。
+    locale: LocaleConfig = field(default_factory=LocaleConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     http: HTTPAPIConfig = field(default_factory=HTTPAPIConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
@@ -53,6 +58,8 @@ class HabitusConfig:
             ("behavior", self.behavior, BehaviorConfig),
             ("prediction", self.prediction, PredictionConfig),
             ("scene", self.scene, SceneConfig),
+            ("foresight", self.foresight, ForesightConfig),
+            ("locale", self.locale, LocaleConfig),
             ("workflow", self.workflow, WorkflowConfig),
         )
         for name, value, expected_type in expected:
@@ -126,6 +133,8 @@ class HabitusConfig:
             behavior=BehaviorConfig.from_mapping(data.get("behavior", {})),
             prediction=PredictionConfig.from_mapping(data.get("prediction", {})),
             scene=SceneConfig.from_mapping(data.get("scene", {})),
+            foresight=ForesightConfig.from_mapping(data.get("foresight", {})),
+            locale=LocaleConfig.from_mapping(data.get("locale", {})),
             workflow=WorkflowConfig.from_mapping(data.get("workflow", {})),
         )
 
@@ -173,6 +182,14 @@ class HabitusConfig:
             raise ConfigError(
                 "config.scene is enabled but config.behavior.primary_subject is empty; "
                 "scene grouping reads sealed days of the behaviour tree and has no input without it"
+            )
+        # 预测层站在两棵派生树之上：数字取自预测树、背景取自情景树，缺哪一边都装配不出证据。
+        # 同一类配置自相矛盾，硬拒。
+        if self.foresight.enabled and not (self.prediction.enabled and self.scene.enabled):
+            raise ConfigError(
+                "config.foresight is enabled but config.prediction or config.scene is not; "
+                "the foresight layer reads its numbers from the prediction tree and the matching "
+                "history from the scene tree, and has nothing to assemble without both"
             )
         memory = self.memory
         models = self.models

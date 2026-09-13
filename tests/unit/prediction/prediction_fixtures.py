@@ -56,7 +56,7 @@ def production_config(**overrides) -> PredictionTreeConfig:
         decay_half_life_days=60.0,
         recent_half_life_days=14.0,
         recurrence_half_life_days=365.0,
-        pool_half_width=2,
+        pool_half_width=3,
         shrink_slot_to_pool=5.0,
         shrink_pool_to_weekday=5.0,
         shrink_weekday_to_all_day=5.0,

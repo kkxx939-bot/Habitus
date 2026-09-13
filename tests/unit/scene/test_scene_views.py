@@ -1,4 +1,4 @@
-"""上下文视图：历史投影的九个槽位、钟面邻域筛选、此刻视图、逐槽三值表。全部机械、零 LLM。"""
+"""上下文视图：历史投影的槽位、钟面邻域筛选、此刻视图、逐槽三值表，以及按预测树维度对齐的字段、聚合画像与相似情景反查。全部机械、零 LLM。"""
 
 from __future__ import annotations
 
@@ -14,18 +14,24 @@ from habitus.scene.grouping import DraftRelation, GroupingAssembly, SceneDraft
 from habitus.scene.model import SceneLinkType, SceneRole
 from habitus.scene.views import (
     COMPARED_SLOTS,
+    NO_NEIGHBOUR,
     ActionRef,
     ContextView,
     DayIndexCache,
+    Neighbour,
+    ObservationGap,
     SceneRef,
     Verdict,
     compare,
     context_view,
     history_contexts,
+    history_profile,
     now_context,
     render_table,
+    similar_scenes,
 )
-from tests.unit.behavior.tree_payloads import occurrence_payload
+from habitus.scene.views.now import gaps_until
+from tests.unit.behavior.tree_payloads import gap_payload, occurrence_payload
 from tests.unit.scene.fixtures import DAY1, DAY2, DAY3, SUBJECT, Site, at, publish, scripted_by_day
 
 DAY4 = DAY3 + timedelta(days=1)
@@ -262,13 +268,15 @@ def test_now_context_spans_midnight_and_rejects_history_from_the_future(tmp_path
     assert {row.verdict for row in empty.rows} == {Verdict.UNKNOWN}
 
 
-def test_cache_keeps_only_covered_days_and_reads_today_fresh(tmp_path) -> None:
+def test_cache_reads_each_day_once_per_query_and_checks_coverage_by_pointer(tmp_path) -> None:
     site, _ = grouped_site(tmp_path)
     cache = cache_for(site)
     assert cache.day(DAY1) is cache.day(DAY1)  # 已归组：缓存
     first = cache.day(DAY4)
     publish(site.behavior_tree, DAY4, "看手机", 9, 0)
-    assert cache.day(DAY4) is not first and len(cache.day(DAY4).occurrences) == 1  # 未归组：每次重读
+    assert cache.day(DAY4) is first and len(cache.day(DAY4).occurrences) == 0  # 一次查询里今天也只读一次
+    assert len(cache_for(site).day(DAY4).occurrences) == 1  # 新查询新缓存才看到新发布
+    assert cache.covered(DAY1) and not cache.covered(DAY4) and not cache_for(site).covered(DAY4)  # 只看指针，不解码
     with pytest.raises(ValueError):
         DayIndexCache(site.behavior_tree, site.scene_tree, subject=" ")
 
@@ -282,3 +290,317 @@ def test_view_model_guards(tmp_path) -> None:
     with pytest.raises(ValueError):
         now_context("x", now=at(date(2026, 8, 15), 1, 0).replace(tzinfo=None), cache=cache_for(site), window_days=7, pending_expiry_days=30)
 
+
+
+# ── 按预测树维度对齐的字段与投影（2026-09-12）──────────────────────────────────────────────
+
+
+def test_projection_exposes_first_of_day_next_steps_and_transition_neighbours(tmp_path) -> None:
+    """``first_of_day`` 与树的 first_days 同口径；``next_steps`` 与 ``prior_steps`` 同口径（同一件事里的成员）；
+    ``preceding`` / ``following`` 是转移窗口内时间上紧邻的那条，只在给了窗口时才算，三态。"""
+
+    site, uris = grouped_site(tmp_path)
+    cache = cache_for(site)
+
+    plain = context_view(uris["wash"], cache, window_days=7)
+    assert plain.preceding is None and plain.following is None  # 没给窗口：不算，不是"没有"
+    assert plain.first_of_day is True and [step.kind_token for step in plain.next_steps] == ["看手机"]
+
+    wash = context_view(uris["wash"], cache, window_days=7, transition_window_seconds=3600)
+    assert wash.preceding == Neighbour(ActionRef(uris["discuss"], "商量晚餐", "交谈"))  # 19:12 → 19:43，31 分钟
+    assert wash.following == Neighbour(ActionRef(uris["phone2"], "看手机", "看手机"))  # 19:43 → 20:15，32 分钟
+    tight = context_view(uris["wash"], cache, window_days=7, transition_window_seconds=1800)
+    assert tight.preceding == Neighbour(None) and tight.preceding.absent and tight.preceding.value == NO_NEIGHBOUR  # 半小时内确认没有
+    assert tight.following == Neighbour(None)
+    discuss = context_view(uris["discuss"], cache, window_days=7, transition_window_seconds=3600)
+    assert discuss.preceding == Neighbour(None) and discuss.following is not None and discuss.following.value == "洗菜"
+    assert discuss.prior_steps == () and [step.kind_token for step in discuss.next_steps] == ["洗菜", "看手机"]
+    # 20:15 看手机之后 20:30–20:50 有观测空白：一小时窗内没找到下一条，且窗口没看全 → 删失
+    phone = context_view(uris["phone2"], cache, window_days=7, transition_window_seconds=3600)
+    assert phone.following == Neighbour(None, censored=True) and phone.following.value is None and not phone.following.absent
+    with pytest.raises(ValueError):
+        context_view(uris["wash"], cache, window_days=7, transition_window_seconds=0)
+    with pytest.raises(ValueError, match="one day"):
+        history_contexts("洗菜", cache, days=(DAY2,), window_days=7, transition_window_seconds=86_401)
+    with pytest.raises(ValueError):
+        Neighbour(ActionRef(uris["wash"], "洗菜", "洗菜"), censored=True)
+
+
+def test_second_occurrence_of_the_day_is_not_first_and_a_hole_between_neighbours_censors_them(tmp_path) -> None:
+    site, uris = grouped_site(tmp_path)
+    second = publish(site.behavior_tree, DAY2, "洗菜", 20, 20)  # 20:15 看手机之后 5 分钟，同 kind 第二次
+    site.refresh(DAY2, force=True)
+    cache = cache_for(site)
+
+    views = history_contexts("洗菜", cache, days=(DAY2,), window_days=7, transition_window_seconds=3600)
+    assert [(view.occurrence_uri, view.first_of_day) for view in views] == [(uris["wash"], True), (second, False)]
+    later = views[1]
+    assert later.preceding == Neighbour(ActionRef(uris["phone2"], "看手机", "看手机"))
+    # 20:20 之后一小时内没有下一条，而 20:30–20:50 是空白：找不到 + 窗口有洞 → 删失
+    assert later.following == Neighbour(None, censored=True)
+    # 中间有洞时找到了也删：把空白挪到 20:16–20:19，看手机 → 第二次洗菜 之间断档
+    holed = Site(tmp_path / "holed", now=at(DAY3, 12, 0))
+    a = publish(holed.behavior_tree, DAY2, "看手机", 20, 15)
+    b = publish(holed.behavior_tree, DAY2, "洗菜", 20, 20)
+    writer = BehaviorDocumentWriter(holed.behavior_tree, ProcessLocalLockStore(), clock=lambda: at(DAY3, 12, 0))
+    writer.publish(BehaviorKind.GAP, gap_payload(occurred_on=DAY2, started_at=at(DAY2, 20, 16), ended_at=at(DAY2, 20, 19), gap_kind="未观测"))
+    holed_cache = cache_for(holed)
+    assert context_view(a, holed_cache, window_days=7, transition_window_seconds=3600).following == Neighbour(None, censored=True)
+    assert context_view(b, holed_cache, window_days=7, transition_window_seconds=3600).preceding == Neighbour(None, censored=True)
+
+
+def test_neighbours_follow_the_total_order_skip_partners_and_cross_midnight(tmp_path) -> None:
+    site = Site(tmp_path, now=at(DAY4, 12, 0))
+    brush = publish(site.behavior_tree, DAY2, "刷牙", 23, 55)
+    wash_face = publish(site.behavior_tree, DAY3, "洗脸", 0, 3, links=(("concurrent_with", brush),))
+    bed = publish(site.behavior_tree, DAY3, "上床", 0, 10)
+    twin_a = publish(site.behavior_tree, DAY3, "喝水", 0, 30)
+    twin_b = publish(site.behavior_tree, DAY3, "关灯", 0, 30)  # 同一时刻的两条
+    cache = cache_for(site)
+    window = dict(window_days=7, transition_window_seconds=3600)
+
+    brush_view = context_view(brush, cache, **window)
+    assert brush_view.following == Neighbour(ActionRef(bed, "上床", "上床"))  # 跳过并行伙伴，跨午夜
+    face_view = context_view(wash_face, cache, **window)
+    assert face_view.preceding == Neighbour(None) and face_view.following == Neighbour(ActionRef(bed, "上床", "上床"))
+    assert [item.uri for item in face_view.concurrent] == [brush]  # 前一天被指向的并行伙伴也进对称闭包
+    bed_view = context_view(bed, cache, **window)
+    assert bed_view.preceding == Neighbour(ActionRef(wash_face, "洗脸", "洗脸"))
+    # 同刻两条按 (瞬时, URI) 的全序只有一个方向：靠前的那条把靠后的当下一条，反之不然
+    first, second = sorted((twin_a, twin_b))
+    first_view, second_view = context_view(first, cache, **window), context_view(second, cache, **window)
+    assert first_view.following is not None and first_view.following.action is not None and first_view.following.action.uri == second
+    assert second_view.preceding is not None and second_view.preceding.action is not None and second_view.preceding.action.uri == first
+    assert first_view.preceding == Neighbour(ActionRef(bed, "上床", "上床"))
+    assert second_view.following == Neighbour(None)
+
+
+def test_now_context_exposes_preceding_and_todays_gaps_and_compare_has_a_preceding_row(tmp_path) -> None:
+    site, uris = grouped_site(tmp_path)
+    publish(site.behavior_tree, DAY4, "商量晚餐", 19, 5, kind="交谈")
+    phone_now = publish(site.behavior_tree, DAY4, "看手机", 19, 20, status="ongoing")
+    writer = BehaviorDocumentWriter(site.behavior_tree, ProcessLocalLockStore(), clock=lambda: at(DAY4, 20, 0))
+    writer.publish(BehaviorKind.GAP, gap_payload(occurred_on=DAY3, started_at=at(DAY3, 23, 30), ended_at=at(DAY4, 0, 45)))
+    writer.publish(BehaviorKind.GAP, gap_payload(occurred_on=DAY4, started_at=at(DAY4, 19, 0), ended_at=at(DAY4, 19, 4)))
+    writer.publish(BehaviorKind.GAP, gap_payload(occurred_on=DAY4, started_at=at(DAY4, 19, 24), ended_at=at(DAY4, 19, 40)))
+    writer.publish(BehaviorKind.GAP, gap_payload(occurred_on=DAY4, started_at=at(DAY4, 19, 50), ended_at=at(DAY4, 19, 55)))
+    cache = cache_for(site)
+    history = history_contexts("洗菜", cache, days=(DAY1, DAY2), window_days=7, transition_window_seconds=3600)
+
+    now = now_context("洗菜", now=at(DAY4, 19, 26), cache=cache, window_days=7, pending_expiry_days=30, transition_window_seconds=1800)
+
+    # 正在进行的看手机已判入"同时在做"，不能再当紧邻上一条；上一条是 19:05 的交谈，中间 19:24 起有空白 → 删失
+    assert [item.uri for item in now.concurrent] == [phone_now]
+    assert now.preceding == Neighbour(None, censored=True)
+    assert [(gap.started_at.strftime("%d %H:%M"), gap.ended_at.strftime("%H:%M"), gap.kind) for gap in now.gaps] == [
+        ("18 00:00", "00:45", "没读懂"),  # 昨晚开始、跨午夜的空白裁到今天 00:00–00:45
+        ("18 19:00", "19:04", "没读懂"),
+        ("18 19:24", "19:26", "没读懂"),  # 跨过此刻：截到此刻
+    ]  # 19:50 的空白还没到，不算；昨天那一半只在删失检查里用，不在今天的视图上
+    assert now.gaps[0].started_at == at(DAY4, 0, 0)
+    assert "preceding" in COMPARED_SLOTS
+    assert compare(now, history).row("preceding").verdict == Verdict.UNKNOWN  # 此刻删失：缺信息
+
+    clear = now_context("洗菜", now=at(DAY4, 19, 23), cache=cache, window_days=7, pending_expiry_days=30, transition_window_seconds=1800)
+    assert clear.preceding is not None and clear.preceding.value == "交谈"
+    row = compare(clear, history).row("preceding")
+    assert row.verdict == Verdict.MATCHED and row.now == ("交谈",) and row.matched == ("交谈",) and row.evidence == (uris["wash"],)
+    absent = now_context("洗菜", now=at(DAY4, 19, 23), cache=cache, window_days=7, pending_expiry_days=30, transition_window_seconds=60)
+    assert absent.preceding == Neighbour(None)  # 一分钟内没有、也没有洞：确认没有
+    assert compare(absent, history).row("preceding").verdict == Verdict.UNMATCHED
+    plain = now_context("洗菜", now=at(DAY4, 19, 23), cache=cache, window_days=7, pending_expiry_days=30)
+    assert plain.preceding is None
+    assert "| 紧邻上一条 | 对上 | 交谈 | 交谈 |" in render_table(compare(clear, history))
+    with pytest.raises(ValueError):
+        now_context("洗菜", now=at(DAY4, 19, 26), cache=cache, window_days=7, pending_expiry_days=30, transition_window_seconds=0)
+
+
+def test_absent_neighbours_compare_as_a_value(tmp_path) -> None:
+    """历史上做这件事之前确认什么都没做（∅），今天也什么都没做：对上——∅ 是树上的一条边，不是缺信息。"""
+
+    site, uris = grouped_site(tmp_path)
+    cache = cache_for(site)
+    history = history_contexts("交谈", cache, days=(DAY2,), window_days=7, transition_window_seconds=1800)
+    assert history[0].preceding == Neighbour(None)  # DAY2 19:12 商量晚餐之前半小时没有别的
+    publish(site.behavior_tree, DAY4, "看手机", 18, 0)
+    now = now_context("交谈", now=at(DAY4, 19, 0), cache=cache_for(site), window_days=7, pending_expiry_days=30, transition_window_seconds=1800)
+    row = compare(now, history).row("preceding")
+    assert now.preceding == Neighbour(None) and row.verdict == Verdict.MATCHED and row.matched == (NO_NEIGHBOUR,)
+
+
+def test_gaps_until_clips_to_now_and_drops_future_gaps() -> None:
+    gaps = (
+        ObservationGap(at(DAY4, 9, 0), at(DAY4, 9, 30), "没读懂"),
+        ObservationGap(at(DAY4, 10, 0), at(DAY4, 11, 0), "未观测"),
+        ObservationGap(at(DAY4, 12, 0), at(DAY4, 12, 30), "没读懂"),
+    )
+    clipped = gaps_until(gaps, at(DAY4, 10, 20))
+    assert [(gap.ended_at.strftime("%H:%M"), gap.kind) for gap in clipped] == [("09:30", "没读懂"), ("10:20", "未观测")]
+    with pytest.raises(ValueError):
+        ObservationGap(at(DAY4, 9, 0), at(DAY4, 8, 0), "没读懂")
+    with pytest.raises(ValueError):
+        ObservationGap(at(DAY4, 9, 0), at(DAY4, 9, 5), "")
+
+
+def test_day_index_gaps_follow_the_tree_denominator_rules(tmp_path) -> None:
+    """零宽丢弃；"没读懂"段里读出了行为的开始就整段作废（我们在看，只是没读懂）。"""
+
+    site, uris = grouped_site(tmp_path)  # DAY2 有 20:30–20:50 的"没读懂"空白，里面没有行为
+    writer = BehaviorDocumentWriter(site.behavior_tree, ProcessLocalLockStore(), clock=lambda: at(DAY3, 12, 0))
+    writer.publish(BehaviorKind.GAP, gap_payload(occurred_on=DAY2, started_at=at(DAY2, 19, 40), ended_at=at(DAY2, 19, 50)))  # 洗菜 19:43 在里面 → 作废
+    writer.publish(BehaviorKind.GAP, gap_payload(occurred_on=DAY2, started_at=at(DAY2, 21, 0), ended_at=at(DAY2, 21, 0)))  # 零宽
+    writer.publish(BehaviorKind.GAP, gap_payload(occurred_on=DAY2, started_at=at(DAY2, 21, 10), ended_at=at(DAY2, 21, 20), gap_kind="未观测"))
+    gaps = cache_for(site).day(DAY2).gaps
+    assert [(gap.started_at.strftime("%H:%M"), gap.kind) for gap in gaps] == [("20:30", "没读懂"), ("21:10", "未观测")]
+    # 未知词表在写入时就被 schema 挡住（gap_kind 枚举），读侧的硬失败是第二道闸，写不进去所以这里不构造
+
+
+def test_history_profile_aggregates_by_slot_with_day_capped_time_counts(tmp_path) -> None:
+    site, uris = grouped_site(tmp_path)
+    cache = cache_for(site)
+    views = history_contexts("看手机", cache, days=(DAY1, DAY2), window_days=7, transition_window_seconds=3600)
+
+    profile = history_profile("看手机", views, covered_days=2)
+
+    assert profile.occurrences == 2 and profile.days == 2 and profile.covered_days == 2 and profile.span == (DAY1, DAY2)
+    assert profile.first_of_day == 2 and not profile.empty
+    assert profile.by_weekday == ((5, 1), (6, 1)) and profile.by_hour == ((20, 1), (21, 1))
+    assert profile.scenes == (("准备晚饭", 1),) and profile.roles == (("essential", 1),)  # DAY1 那次未归组
+    assert profile.prior_steps == (("交谈", 1), ("洗菜", 1)) and profile.next_steps == ()
+    assert profile.preceding == ((NO_NEIGHBOUR, 1), ("洗菜", 1))  # DAY1 21:00 那次一小时内没有上一条也没有洞 → ∅ 也是一个值
+    assert profile.following == ((NO_NEIGHBOUR, 1),)  # DAY1 21:00 之后确认没有；DAY2 20:15 之后有空白 → 删失不计
+    assert profile.preconditions == (("买菜", 1),) and profile.causes == (("买菜", 1),)  # 准备晚饭 needs / results_from 采购
+    assert profile.concurrent == () and profile.subjects == ()
+    # 周几 / 小时按不同日子封顶：同一天再看三次手机，周日仍只算 1
+    for minute in (0, 20, 40):
+        publish(site.behavior_tree, DAY2, "看手机", 21, minute)
+    site.refresh(DAY2, force=True)
+    more = history_profile("看手机", history_contexts("看手机", cache_for(site), days=(DAY1, DAY2), window_days=7))
+    assert more.occurrences == 5 and more.days == 2 and more.by_weekday == ((5, 1), (6, 1)) and more.by_hour == ((20, 1), (21, 2))
+    assert more.first_of_day == 2 and more.covered_days is None
+    empty = history_profile("看手机", ())
+    assert empty.empty and empty.span is None and empty.days == 0 and empty.by_weekday == ()
+    with pytest.raises(ValueError):
+        history_profile("洗菜", views)
+    with pytest.raises(ValueError):
+        history_profile("看手机", views, covered_days=-1)
+    with pytest.raises(TypeError):
+        history_profile("看手机", (object(),))  # type: ignore[arg-type]
+
+
+def test_similar_scenes_reverse_lookup_orders_by_overlap_then_recency_and_only_counts_steps(tmp_path) -> None:
+    site = Site(tmp_path, now=at(DAY3, 12, 0))
+    site.seed()
+    # DAY2 的看手机归成 irrelevant：它不参与重叠，也不出现在"接下来"
+    original = site.grouper.group
+
+    async def group(payload):
+        assembly = await original(payload)
+        if payload.day != DAY2:
+            return assembly
+        dinner = assembly.scenes[0]
+        by_name = {row.name: row.no for row in payload.occurrences}
+        members = tuple((no, SceneRole.IRRELEVANT if no == by_name["看手机"] else role) for no, role in dinner.members)
+        return GroupingAssembly((SceneDraft(dinner.label, members, relations=dinner.relations),), (), ())
+
+    site.grouper.group = group  # type: ignore[method-assign]
+    assert site.refresh(DAY1, DAY2).published == (DAY1, DAY2)
+    cache = cache_for(site)
+    days = (DAY1, DAY2, DAY3)
+
+    dinner_only = similar_scenes(cache, days=days, kinds=frozenset({"交谈"}), limit=5)
+    assert [item.label for item in dinner_only] == ["准备晚饭"]
+    scene = dinner_only[0]
+    assert scene.day == DAY2 and scene.overlap == ("交谈",)
+    assert [(member.action.kind_token, member.role) for member in scene.members] == [("交谈", "essential"), ("洗菜", "essential"), ("看手机", "irrelevant")]
+    assert [member.action.kind_token for member in scene.following] == ["洗菜"]  # 最后一个重叠步骤之后的步骤，irrelevant 不算
+    assert similar_scenes(cache, days=days, kinds=frozenset({"看手机"}), limit=5) == ()  # irrelevant 成员不触发重叠
+
+    both = similar_scenes(cache, days=days, kinds=frozenset({"买菜", "交谈"}), limit=5)
+    assert [(item.label, item.overlap) for item in both] == [("准备晚饭", ("交谈",)), ("去超市采购", ("买菜",))]  # 重叠数相同：新近优先
+    assert both[1].following == ()  # 采购只有一步，重叠成员之后没有别的
+    assert [item.label for item in similar_scenes(cache, days=days, kinds=frozenset({"买菜", "交谈"}), limit=1)] == ["准备晚饭"]
+    assert similar_scenes(cache, days=days, kinds=frozenset(), limit=5) == ()
+    assert similar_scenes(cache, days=days, kinds=frozenset({"不存在"}), limit=5) == ()
+    with pytest.raises(ValueError):
+        similar_scenes(cache, days=days, kinds=frozenset({"交谈"}), limit=0)
+    with pytest.raises(TypeError):
+        similar_scenes(cache, days=days, kinds={"交谈"}, limit=5)  # type: ignore[arg-type]
+
+
+def test_slot_filter_validates_the_clock_face(tmp_path) -> None:
+    site, _ = grouped_site(tmp_path)
+    cache = cache_for(site)
+    with pytest.raises(ValueError, match="divisor"):
+        history_contexts("看手机", cache, days=(DAY1,), window_days=7, slot_minutes=7, slot_index=0)
+    with pytest.raises(ValueError, match="clock face"):
+        history_contexts("看手机", cache, days=(DAY1,), window_days=7, slot_minutes=15, slot_index=96)
+
+
+# --- 当地日历：这一天在当地是什么日子 ---------------------------------------------------
+
+
+class ScriptedCalendar:
+    """只对指定的几天说话，并记下自己被问了几次。"""
+
+    def __init__(self, notes: dict[date, str | None]) -> None:
+        self.notes = notes
+        self.asked: list[date] = []
+
+    def describe(self, day: date) -> str | None:
+        self.asked.append(day)
+        return self.notes.get(day)
+
+
+def test_the_day_type_reaches_every_view_the_prediction_tree_has_a_dimension_for(tmp_path) -> None:
+    """日型要跟着三个历史维度一起给出来，否则"上次补班日这个时段他做了什么"问不出来。
+
+    它是摆在判断者面前的一个事实，**不参与筛选与排序**——今天像周几由判断者自己判，系统不替
+    他把补班的周六改按周一去查树。
+    """
+
+    site, uris = grouped_site(tmp_path)
+    calendar = ScriptedCalendar({DAY2: "补班日，按周一上班"})
+    cache = DayIndexCache(site.behavior_tree, site.scene_tree, subject=SUBJECT, calendar=calendar)
+
+    view = context_view(uris["wash"], cache=cache, window_days=30)
+    assert view.day_note == "补班日，按周一上班"
+    assert context_view(uris["buy"], cache=cache, window_days=30).day_note is None  # DAY1 是普通日子
+    scenes = similar_scenes(cache, days=(DAY1, DAY2), kinds=frozenset({"交谈"}), limit=5)
+    assert [(item.day, item.day_note) for item in scenes] == [(DAY2, "补班日，按周一上班")]
+    now = now_context("买菜", now=at(DAY2, 21, 0), cache=cache, window_days=30, pending_expiry_days=30)
+    assert now.day_note == "补班日，按周一上班"
+
+
+def test_without_calendar_data_the_day_type_is_explicitly_empty(tmp_path) -> None:
+    """没有日历数据时视图上恒为空——那正是我们此刻能说的全部，不是漏了一个字段。"""
+
+    site, uris = grouped_site(tmp_path)
+    assert context_view(uris["wash"], cache=cache_for(site), window_days=30).day_note is None
+
+
+def test_a_blank_note_is_no_note_and_a_non_text_note_is_refused(tmp_path) -> None:
+    """空白的注记当作没话说；返回非文本是插进来的日历自己坏了，当场报出来而不是往视图里塞。"""
+
+    site, uris = grouped_site(tmp_path)
+    blank = DayIndexCache(site.behavior_tree, site.scene_tree, subject=SUBJECT, calendar=ScriptedCalendar({DAY2: "   "}))
+    assert context_view(uris["wash"], cache=blank, window_days=30).day_note is None
+    broken = DayIndexCache(site.behavior_tree, site.scene_tree, subject=SUBJECT, calendar=ScriptedCalendar({DAY2: 7}))  # type: ignore[dict-item]
+    with pytest.raises(TypeError):
+        context_view(uris["wash"], cache=broken, window_days=30)
+
+
+def test_the_calendar_is_asked_once_per_day_per_query(tmp_path) -> None:
+    """日历跟着索引走同一套缓存语义：一次查询里一天只问一次，换查询才重新问。
+
+    读时算是为了永远跟上更新后的调休表；但"一次查询内部"仍要是同一个答案，不然同一次判断里
+    两个维度可能拿到不同的日型。
+    """
+
+    site, _ = grouped_site(tmp_path)
+    calendar = ScriptedCalendar({DAY2: "补班日"})
+    cache = DayIndexCache(site.behavior_tree, site.scene_tree, subject=SUBJECT, calendar=calendar)
+    cache.day(DAY2)
+    cache.day(DAY2)
+    cache.day(DAY1)
+    assert calendar.asked == [DAY2, DAY1]

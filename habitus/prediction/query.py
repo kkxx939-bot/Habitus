@@ -36,7 +36,9 @@ from habitus.prediction.model import (
     NodeStatistics,
     PredictionTree,
     SlotKey,
+    slot_count,
 )
+from habitus.prediction.nodes import pool_indexes
 from habitus.prediction.recurrence import overdue_ratio
 
 
@@ -282,27 +284,105 @@ def _quantile_slot(distribution: Sequence[float], mass: float, fraction: float) 
 
 
 def successors(
-    tree: PredictionTree, source: str, *, slot: SlotKey | None = None
+    tree: PredictionTree, source: str, *, slot: SlotKey | None = None, half_width: int = 0
 ) -> tuple[EdgeCandidate, ...]:
     """做完 ``source`` 接着做什么。
 
-    给了 ``slot`` 就按组合契约走：先查该槽的联合格子（无独立性假设），格子空了才退回
-    ``P(b│a) × lift_全天(b @ 槽)`` 的近似并截断到 1。这里刻意**不**再乘 ``lift_周几``——
-    格子键已含周几，``lift_全天`` 里已经包着这份提升，再乘一遍就是重复计入。
+    给了 ``slot`` 就按组合契约走：先查**该槽或其邻域**的联合格子（无独立性假设），格子空了
+    才退回 ``P(b│a) × lift_全天(b @ 槽)`` 的近似并截断到 1。这里刻意**不**再乘 ``lift_周几``
+    ——格子键已含周几，``lift_全天`` 里已经包着这份提升，再乘一遍就是重复计入。
+
+    ``half_width`` 把联合格子摊到 ±N 个槽上，与节点那边的池化同一个口径（同一个
+    ``pool_indexes``，钟面**环形**且在同一个周几内绕：周一 23:50 的邻域含周一 00:05）。
+    默认 0 即只看这一格，与不带这个参数时逐位相同。
+
+    **为什么需要它**：15 分钟一格上单格的联合样本很容易是空的，于是"上一步 → 下一步"频繁
+    掉进 lift 近似分支；而行为侧与节点侧都是按 ±池宽的邻域看的，只有这里是单格，同一个转移
+    在两处口径不一致。分子分母必须摊在**同一批**格子上、并且都含 ∅——少了 ∅ 那一半，
+    "这个槽做完 A 通常就收工"会被算成"必然接着做 B"。
     """
 
     _require_tree(tree)
+    if slot is None:
+        _require_half_width(half_width)
+        if half_width:
+            # 没有槽就没有"邻域"可言。静默忽略会让调用方以为自己按邻域查过了。
+            raise PredictionTreeError("half_width needs a slot to be centred on")
+        keys: tuple[SlotKey, ...] = ()
+    else:
+        keys = neighbourhood(tree, slot, half_width)
     outgoing = _outgoing(tree.edges, source)
     # 联合查询的分母对该源的每个目标都是同一个，算一次就够。
-    opportunities = (
-        0.0
-        if slot is None
-        else sum(item.slot_histogram.get(slot, 0.0) for item in outgoing.values())
+    opportunities = sum(
+        item.slot_histogram.get(key, 0.0) for item in outgoing.values() for key in keys
     )
     return tuple(
-        _successor(tree, target, outgoing[target], slot, opportunities)
+        _successor(tree, target, outgoing[target], slot, keys, opportunities)
         for target in sorted(outgoing)
     )
+
+
+# TODO(PRED-JOINT-001): 联合边查询的三处口径问题（2026-09-12 三方审查发现，尚无消费者，故延后）。
+#
+# 1. **``approximate`` 是布尔，装不下邻域这条路**。契约说 ``approximate=False`` 表示"该槽有联合
+#    样本、这是实测值"。加了邻域之后它变成"±k 槽内的某处有样本"，而这个分支给的是**完全不
+#    平滑的裸比值**。实测：某个动作只在 41 天前的一个周一 19:00 发生过一次、其后跟了 B，在
+#    19:30 问 successors —— ``half_width=0/1`` 老实说 ``approximate=True``（lift 近似），
+#    ``half_width=2`` 把窗口摊到那一格之后改口说 ``approximate=False``、``probability=1.0``，
+#    而证据仍然只有 ``n_eff=0.39`` 的一次观测。下游若只看 ``approximate``（契约并没要求它同时
+#    看 n_eff），"做完 A 必然接着做 B"就会以实测的身份放行。
+#    改造：把 ``approximate`` 换成三态（单格实测 / 邻域实测 / lift 近似），或另加一个"摊在几格
+#    上"的伴随字段。影响：EdgeCandidate 的字段与全部读它的地方；现在只有测试在读。
+# 2. **槽内概率不收缩，与不带槽时的口径不同**。``_successor`` 的 ``hits / opportunities`` 一点
+#    收缩都没有，而不带 ``slot`` 时返回的是 ``edges._edge`` 已经收缩过的 ``statistics.probability``。
+#    同一条边实测：``successors(tree, "A")`` → 0.1846，``successors(tree, "A", slot=…, half_width=2)``
+#    → 1.0000。两个数都叫 probability，没有任何字段说明口径变了。
+#    改造：槽内也走一次 ``_shrink``，先验取 ``statistics.probability``。影响：会改变已发布读侧的
+#    数值，需要在真实数据上对照后再定。
+# 3. **lift 拿裸比值除已收缩率**。``_successor`` 里 lift 的分子未平滑、分母已平滑（∅ 那一半的
+#    口径是对的，已验证）。实测一条真实份额 0.5、``shrink_edge=2.0`` 的边：lift 报 2.074 而不是
+#    2.000，虚高 3.7%；边越稀、shrink_edge 越大虚高越多。第 2 条修好之后这条自然消失。
+#
+# TODO(PRED-LIFT-002): ``_candidate`` 的 ``lift_weekday`` 在"该动作最早发生槽之后"的每个槽上都
+# 有一个结构性伪影。``_all_day_rates`` 遍历 ``ledger.counts``，其中含只有 ``earlier_days`` 的格子
+# （``_accumulate_action`` 为"当天更早已经做过"在其后每个槽都留了一笔账），这些格子给
+# ``per_slot_occurred`` 建了键、值为 0，于是 ``weekday_baselines`` 在那些槽上是 ``eps/(E+eps)``
+# 而不是 0。后果：同一件现实（"七个周几都没在这个时刻做过"）在钟面上被分成两种显示——实测
+# 每周一 19:00 打球 12 周，slot 12（03:00）的 lift_weekday 是 0（``_lift`` 对 baseline≤0 给 0，
+# 正是它自己在并行边那里批评过的"会被读成低到不可能"），slot 90（22:30）是 9.47e-16。
+# 改造：``per_slot_occurred`` 建键时跳过 ``occurred_days == 0`` 的格子，或让 ``_lift`` 对
+# "分母是纯先验"的情形返回 None。影响：只动 lift_weekday 这一个读侧数字，不动任何率。
+# 四层拆解已经不受它影响（跨周几层改成从 ``nodes`` 现算的链上第三层之后就绕开了它）。
+
+
+def neighbourhood(tree: PredictionTree, slot: SlotKey, half_width: int) -> tuple[SlotKey, ...]:
+    """以 ``slot`` 为中心的 ±``half_width`` 个格子，**同一个周几内环形**（周一 23:50 的邻域含
+    周一 00:05，不是周二 00:05——节点那边的池化就是按周几逐行做环形窗口和的）。
+
+    这是"邻域是哪几格"的**唯一**出处：联合边查询与上层的四层拆解都从这里拿，否则两处会各写
+    一份环形取模，静默分叉的那天没人看得出来。``half_width`` 为 0 即只有这一格。
+    """
+
+    _require_tree(tree)
+    if not isinstance(slot, SlotKey):
+        raise PredictionTreeError("slot must be a SlotKey")
+    _require_half_width(half_width)
+    slots = slot_count(tree.slot_minutes)
+    if 2 * half_width >= slots:
+        # 与节点池化同一条硬拒（见 nodes._circular_window_sums）：宽过整圈的环形窗口会把
+        # 同一个格子数两遍，两处口径必须一致。
+        raise PredictionTreeError(
+            "a circular pooling window wider than the clock face would count slots twice"
+        )
+    return tuple(
+        SlotKey(weekday=slot.weekday, slot=index)
+        for index in pool_indexes(slot.slot, half_width, slots)
+    )
+
+
+def _require_half_width(value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise PredictionTreeError("half_width must be a non-negative integer")
 
 
 def parallels(tree: PredictionTree, action: str) -> tuple[EdgeCandidate, ...]:
@@ -361,9 +441,10 @@ def _successor(
     target: str,
     statistics: EdgeStatistics,
     slot: SlotKey | None,
+    keys: Sequence[SlotKey],
     opportunities: float,
 ) -> EdgeCandidate:
-    """一条边在给定槽位下的答案；伴随值随概率一起换口径。"""
+    """一条边在给定槽位（或其邻域）下的答案；伴随值随概率一起换口径。"""
 
     if slot is None or opportunities <= 0.0:
         if slot is not None and target != NO_SUCCESSOR:
@@ -385,10 +466,14 @@ def _successor(
             n_eff=statistics.n_eff,
             count=statistics.count,
             intervals=statistics.intervals,
-            approximate=False,
+            # 给了槽却落到这里，只剩 ∅ 这一种可能（非 ∅ 目标上面已经走了 lift 近似）。
+            # 这时给出的是**全时段**的概率与伴随值，不是这一格的——必须标成近似，否则
+            # "这个槽做完 A 之后一半时候就收工了，实测、n_eff≈16"会冒充槽内实测，而这一格
+            # 的槽内证据其实是零。
+            approximate=slot is not None,
         )
 
-    hits = statistics.slot_histogram.get(slot, 0.0)
+    hits = sum(statistics.slot_histogram.get(key, 0.0) for key in keys)
     probability = hits / opportunities
     return EdgeCandidate(
         target=target,
@@ -524,6 +609,7 @@ __all__ = [
     "day_outlook",
     "hazard_at",
     "marginal_at",
+    "neighbourhood",
     "node_at",
     "parallels",
     "recurrence_status",

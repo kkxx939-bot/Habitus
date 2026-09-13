@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date
 from collections.abc import AsyncIterator, Iterator, Mapping
+from datetime import date
 from typing import Any
 
 import pytest

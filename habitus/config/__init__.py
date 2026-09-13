@@ -11,8 +11,10 @@ from habitus.config.conversation import (
     ConversationSummaryCompactionConfig,
 )
 from habitus.config.credentials import CredentialRegistry
+from habitus.config.foresight import ForesightConfig
 from habitus.config.http import HTTPAPIConfig
 from habitus.config.loader import ConfigError
+from habitus.config.locale import LocaleConfig
 from habitus.config.memory import MemoryConfig
 from habitus.config.models import ModelConfig, StructuredOutputConfig
 from habitus.config.observability import (
@@ -50,6 +52,8 @@ __all__ = [
     "ModelConfig",
     "ObservabilityAuditConfig",
     "ObservabilityConfig",
+    "ForesightConfig",
+    "LocaleConfig",
     "SceneConfig",
     "ObservabilityLoggingConfig",
     "ObservabilityMetricsConfig",

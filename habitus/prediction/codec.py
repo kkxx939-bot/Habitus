@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from habitus.prediction.errors import PredictionTreeError
@@ -33,7 +33,10 @@ from habitus.prediction.model import (
 # 2：新增密集曲线与并行参与总权重，节点项去掉 trend，并行项换成规范键 + 计数。旧代的字节
 # 与这一版形状不兼容——版本号不升，读侧只会报"payload is malformed"，把"上一版规格"说成
 # "存储损坏"，而磁盘上最多留着 published_generations 代旧字节。
-SCHEMA_VERSION = 2
+# 3：节点与边补上**出处日**（这个数字是哪几天攒出来的）。旧代没有这一节，而模型层现在硬性
+# 要求每个格子、每条边都说得出自己的日子，照旧读会在构造时抛"published without the days"
+# ——那句话指向的是磁盘上的旧字节，不是代码的错，所以这里升版号让它直接报成版本不认识。
+SCHEMA_VERSION = 3
 
 
 def encode(tree: PredictionTree) -> dict[str, Any]:
@@ -59,7 +62,7 @@ def encode(tree: PredictionTree) -> dict[str, Any]:
             for action, rate in sorted(tree.baselines.items())
         ],
         "nodes": [
-            {"slot": _slot(key[0]), "action": key[1], **_node(value)}
+            {"slot": _slot(key[0]), "action": key[1], **_node(value, tree.reference_day)}
             for key, value in sorted(tree.nodes.items(), key=lambda item: (_slot(item[0][0]), item[0][1]))
         ],
         "curves": [
@@ -78,7 +81,7 @@ def encode(tree: PredictionTree) -> dict[str, Any]:
             {"action": action, "rate": _runs(values)}
             for action, values in sorted(tree.weekday_baselines.items())
         ],
-        "edges": _edges(tree.edges),
+        "edges": _edges(tree.edges, tree.reference_day),
         "parallels": [
             {"left": left, "right": right, "count": value.count}
             for (left, right), value in sorted(tree.parallels.items())
@@ -108,13 +111,18 @@ def decode(payload: Mapping[str, Any]) -> PredictionTree:
         raise PredictionTreeError("prediction tree payload has an invalid slot width")
     total = slot_count(slot_minutes)
     try:
+        # 出处日按"距基准日多少天"存，所以基准日要先取出来；观测跨度给出它的合法范围。
+        reference_day = date.fromisoformat(payload["reference_day"])
+        span = payload["observed_days"]
+        if isinstance(span, bool) or not isinstance(span, int) or span < 0:
+            raise PredictionTreeError("prediction tree payload has an invalid observed span")
         return PredictionTree(
             built_at=_moment(payload["built_at"]),
-            reference_day=date.fromisoformat(payload["reference_day"]),
+            reference_day=reference_day,
             config_digest=payload["config_digest"],
             slot_minutes=slot_minutes,
             nodes={
-                (_key(item["slot"], total), item["action"]): _node_statistics(item)
+                (_key(item["slot"], total), item["action"]): _node_statistics(item, reference_day, span)
                 for item in payload["nodes"]
             },
             curves={
@@ -131,7 +139,7 @@ def decode(payload: Mapping[str, Any]) -> PredictionTree:
                 item["action"]: _expand(item["rate"], total)
                 for item in payload["weekday_baselines"]
             },
-            edges=_edge_map(payload["edges"], total),
+            edges=_edge_map(payload["edges"], total, reference_day, span),
             parallels={
                 (item["left"], item["right"]): ParallelStatistics(count=item["count"])
                 for item in payload["parallels"]
@@ -226,7 +234,7 @@ def _parallel_totals(payload: Mapping[str, Any]) -> dict[str, float]:
     return totals
 
 
-def _edges(edges: Mapping[tuple[str, str], EdgeStatistics]) -> list[dict[str, Any]]:
+def _edges(edges: Mapping[tuple[str, str], EdgeStatistics], reference: date) -> list[dict[str, Any]]:
     return [
         {
             "source": source,
@@ -240,12 +248,13 @@ def _edges(edges: Mapping[tuple[str, str], EdgeStatistics]) -> list[dict[str, An
                 {"slot": _slot(slot), "weight": weight}
                 for slot, weight in sorted(value.slot_histogram.items(), key=lambda item: _slot(item[0]))
             ],
+            "days": _offsets(value.days, reference),
         }
         for (source, target), value in sorted(edges.items())
     ]
 
 
-def _edge_map(items: Any, total: int) -> dict[tuple[str, str], EdgeStatistics]:
+def _edge_map(items: Any, total: int, reference: date, span: int) -> dict[tuple[str, str], EdgeStatistics]:
     return {
         (item["source"], item["target"]): EdgeStatistics(
             count=item["count"],
@@ -254,14 +263,16 @@ def _edge_map(items: Any, total: int) -> dict[tuple[str, str], EdgeStatistics]:
             n_eff=item["n_eff"],
             intervals=_quantiles(item["intervals"]) if item["intervals"] is not None else None,
             slot_histogram={_key(cell["slot"], total): cell["weight"] for cell in item["slot_histogram"]},
+            days=_dates(item["days"], reference, span),
         )
         for item in items
     }
 
 
-def _node(value: NodeStatistics) -> dict[str, Any]:
+def _node(value: NodeStatistics, reference: date) -> dict[str, Any]:
     return {
         "n_eff": value.n_eff,
+        "days": _offsets(value.days, reference),
         "counts": {
             "occurred_days": value.counts.occurred_days,
             "first_days": value.counts.first_days,
@@ -272,8 +283,47 @@ def _node(value: NodeStatistics) -> dict[str, Any]:
     }
 
 
-def _node_statistics(item: Mapping[str, Any]) -> NodeStatistics:
-    return NodeStatistics(n_eff=item["n_eff"], counts=NodeCounts(**item["counts"]))
+def _node_statistics(item: Mapping[str, Any], reference: date, span: int) -> NodeStatistics:
+    return NodeStatistics(
+        n_eff=item["n_eff"], counts=NodeCounts(**item["counts"]), days=_dates(item["days"], reference, span)
+    )
+
+
+def _offsets(days: Sequence[date], reference: date) -> list[int]:
+    """出处日按"距基准日多少天"编码。
+
+    日期一条 ISO 字符串占 12 字节，偏移量占 1–4 字节。出处日的条目数与 occurrence 条数同量级
+    （WP4 粒度一年十几万条），按字符串存要给整棵树加一两 MiB，而它现在总共才 4.66 MiB、
+    读一次峰值约九倍（见 ``store`` 里 PRED-STORE-002 的实测）。基准日随树一起发布，换算是
+    精确的整数运算，不引入任何浮点或时区语义。
+    """
+
+    return [(reference - day).days for day in days]
+
+
+def _dates(raw: Any, reference: date, span: int) -> tuple[date, ...]:
+    """还原出处日；顺序原样保留，升序与不重复由 ``PredictionTree`` 自己再查一遍。
+
+    偏移量必须落在 ``[0, span)`` 内，这是**我们自己产出的东西是否自洽**：账本的日集合就是
+    ``_calendar_days`` 从最早记录到基准日的那 ``observed_days`` 个连续日历日，所以任何出处日
+    都不会晚于基准日、也不会早于跨度的第一天。不查这个范围有两种下场，都实测过：
+    ``offset = 999999999`` 让 ``date - timedelta`` 抛 **``OverflowError``**，它继承自
+    ``ArithmeticError``，本函数的 ``except (KeyError, TypeError, ValueError)`` 与存储层的
+    ``except PredictionTreeError`` 两层都接不住，一个 builtin 直接漏给夜批；``offset = 700000``
+    则解出公元 0124 年的日期，升序与上界两道校验都放行，整棵树干干净净地加载，然后读侧把
+    公元 0124 年当作"这一格的出处"交给语义层。
+    """
+
+    if not isinstance(raw, list):
+        raise PredictionTreeError("provenance days must be a list of day offsets")
+    days: list[date] = []
+    for offset in raw:
+        if isinstance(offset, bool) or not isinstance(offset, int):
+            raise PredictionTreeError("a provenance day offset must be a whole number of days")
+        if not 0 <= offset < max(span, 1):
+            raise PredictionTreeError("a provenance day offset falls outside this tree's observed span")
+        days.append(reference - timedelta(days=offset))
+    return tuple(days)
 
 
 def _intervals(value: IntervalQuantiles | None) -> dict[str, float] | None:

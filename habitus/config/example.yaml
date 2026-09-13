@@ -470,7 +470,9 @@ workflow:
 #   slot_minutes: 15                 # 待定档：min(提醒精度目标, 链内相邻间隔低分位)
 #   decay_half_life_days: 60         # 待定档：行为分布的稳定期长度
 #   recent_half_life_days: 14        # 待定档：多快认出习惯变化而不被单周波动骗到；必须短于上一行
-#   pool_half_width: 2               # 待定档：同一习惯的日间时间抖动（单位是槽）
+#   pool_half_width: 3               # 待定档：同一习惯的日间时间抖动（单位是槽）。
+#                                    #   ±3 槽 = ±45 分钟。预测层的「窗口」就是它，不另配一份——
+#                                    #   配两份会让证据包里的数字与背景取自不同的时间范围。
 #   shrink_slot_to_pool: 5           # 待定档：留出集上最小化对数损失
 #   shrink_pool_to_weekday: 5        # 待定档：同上
 #   shrink_weekday_to_all_day: 5     # 待定档：同上
@@ -505,3 +507,25 @@ workflow:
 #   max_attempts_per_input: 3        # 同一输入连续失败几次后封锁那一天（输入变了自动解封）
 #   max_model_calls_per_run: 4       # 一次夜批最多几次归组调用，其余留待下次
 #   refresh_interval_seconds: 86400  # 预测侧未启用时情景阶段自己的节拍
+
+# 主体所在地。时区与当地日历**两层共用**：情景树读侧用它标每一天的日型（补班、节假日），预测层用它
+# 造"此刻"的时钟与本地日界。分别配两份迟早对不上，所以单独一组，由组合根分发。
+# 这一组没有 enabled：不启用任何上层时它也无害，启用了就必须是对的。
+# locale:
+#   timezone: Asia/Shanghai          # IANA 名字；决定"今天是哪一天""此刻在哪个槽"
+#   region: CN                       # 当地日历数据的地区码（两位大写）
+#   calendar_path: null              # 当地日历数据文件。**目前只接受 null**：数据格式还没定，
+#                                    #   给了路径直接拒——静默忽略会让人以为调休已经生效。
+#                                    #   null 时日型恒为空，这是显式的零修正，不是降级。
+
+# 预测层。缺省未启用；置 enabled: true 即启用（预测树与情景树必须都已启用——数字取自前者、
+# 与之对应的历史背景取自后者，缺一边就装配不出证据）。
+#
+# 这一组**只有保护闸**，没有算法参数：窗口宽度就是 prediction.pool_half_width，转移窗就是
+# prediction.transition_window_seconds，两边不各配一份。下面三个数防的是上下文被撑爆与一次
+# 查询把整棵树扫穿，全部是启动档、要在真实数据上重定——重定的是数值，不是"要不要有这个闸"。
+# foresight:
+#   enabled: true
+#   max_days_per_layer: 40           # 四层里每层最多摊开多少天的历史；截掉的更早日子会如实报出条数
+#   max_similar_scenes: 8            # 相似情景反查最多带回几件事
+#   max_pack_chars: 60000            # 渲染后的证据包字符上限；超了按"先砍相似情景、再砍逐条实例"裁

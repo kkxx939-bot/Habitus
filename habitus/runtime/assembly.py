@@ -1,4 +1,49 @@
-"""在仓库最外层组装完整记忆主链。"""
+"""在仓库最外层组装完整记忆主链。
+
+## TODO(PLUGIN-NO-SQLITE-001)：插件化交付下三处 SQLite 文件的去向（用户 2026-09-11 要求登记；怎么处理、怎么改逻辑由他决定）
+
+**背景与裁定**：项目以插件形式交付（``plugins/habitus-memory*``：宿主 hooks 是短命 Node 进程，背后是本地
+Python 运行时）。用户裁定：插件不该在本地建数据库表；各层权威数据只能是文件树（行为树/情景树/预测树/
+记忆树，按天目录 + 原子替换 + 回读核对），"表"只允许是读时在内存里投影出来的形状。JS 侧
+``plugins/memory-plugin-shared/lib``（state-store / atomic-file / operation-log）已经按这条走原子 JSON/JSONL。
+
+**现状**：Python 侧仍有三处 SQLite，文件全在 ``config.workflow_root`` 下，都由本模块装配：
+
+1. ``memory_recall_lifecycle.sqlite3`` —— ``memory/retrieval/lifecycle_store.py`` 的
+   ``SQLiteMemoryRecallLifecycleStore``，表 ``memory_recall_lifecycle``，主键 uri。一行 = 一篇 L2 记忆的
+   使用/冷热/退休事实（useful_recall_count、last_useful_recall_at、cold2_probe_count、compacted_at、
+   retire_candidate_at、retired_at、version）。写入方是 ``memory/compaction/lifecycle.py``
+   （record_use / mark_retire_candidate / mark_retired），检索排名经 ``read_many`` 读。
+   ``config.memory.recall_lifecycle.enabled`` 可整体关掉。
+2. ``conversation_summary_use.sqlite3`` —— ``memory/conversation/access.py`` 的
+   ``SQLiteConversationSummaryUseStore``，表 ``conversation_summary_use``，主键 identity
+   （started_on / conversation_id / stage / summary_id）。一行 = 一份 Summary 的实际使用回执与
+   退休候选/退休中状态。写入方是 Summary 压缩器与检索服务的 use recorder；Summary 文件仍是内容真相源。
+3. ``locks.sqlite3`` / ``memory_vector_locks.sqlite3`` / ``summary_vector_locks.sqlite3`` ——
+   ``infrastructure/store/sqlite/lock_store.py`` 的 ``SQLiteLockStore``，表 ``locks``
+   （lock_key、token、expires_at、owner、created_at、fence）。这是跨进程租约锁：**行为归约 runner、
+   行为写入器、情景刷新器、记忆提交事务全靠它**。``infrastructure/store/locks/process_local.py`` 是
+   进程内实现，不跨进程。
+
+**性质区分**：1、2 是派生状态（从使用回执可重建，丢了只是冷热判断退回默认）；3 是协调机制
+（不存数据，但跨进程 fence 必须正确）。改造时两类分开定。
+
+**候选方案（供决定，未裁定）**：
+
+- A. 1、2 改成与 ``scene/refresh/progress.py`` 同形态的原子 JSON 文件：按 uri / identity 分片成小文件
+  （每篇一份），version 的 CAS 用"读 → 比 version → 原子替换"实现，写入前持 PathLock。调用契约
+  （Protocol / 构造器注入）不变，只换 store 实现与本模块的装配；要补损坏降级与并发写测试。
+- B. 3 改成文件锁：``O_EXCL`` 创建租约文件（token、expires_at、fence 写在文件里），过期抢占；fence 单调性
+  靠一个 counter 文件原子替换。acquire / renew / fenced / release 语义不变，但崩溃后过期抢占与时钟
+  偏差要专门测。或者保留 SQLite 只作锁（它不存数据），由用户裁定"锁文件算不算建表"。
+- C. 全部保留，只把三个 .sqlite3 移到插件的状态目录并声明"可删除重建"。改动最小，但与裁定相悖。
+
+**具体场景**：hook 每次触发起一个短命进程写回执；两个 hook 并发写同一篇记忆的使用计数（方案 A 靠
+PathLock + version CAS）；用户把数据目录放在 iCloud/Dropbox（SQLite 单文件被部分同步易损坏，小文件安全）。
+
+**影响面**：不动记忆树/行为树/情景树的 schema 与写入逻辑；只换三个存储实现与本模块的装配；
+``tests/unit`` 里对应 store 的测试与 ``tests/architecture`` 的边界登记要跟着改。
+"""
 
 from __future__ import annotations
 
@@ -93,6 +138,7 @@ from habitus.runtime.components import (
     RuntimeModels,
     RuntimeWorkflow,
 )
+from habitus.runtime.foresight import build_foresight_components
 from habitus.runtime.lifecycle import LifecycleWorker
 from habitus.runtime.prediction import build_prediction_components
 from habitus.runtime.runtime import Runtime
@@ -570,6 +616,17 @@ def build_runtime(
             ),
         )
     )
+    # 预测层站在两棵派生树之上，所以排在它们之后组装；任一未启用时 build 自己返回 None。
+    foresight_components = (
+        None
+        if behavior_components is None or prediction_components is None
+        else build_foresight_components(
+            config,
+            behavior_tree=behavior_components.tree,
+            scene_tree=behavior_components.scene_tree,
+            store=prediction_components.store,
+        )
+    )
     components = RuntimeComponents(
         infrastructure=RuntimeInfrastructure(
             path_lock=resolved_lock,
@@ -625,6 +682,7 @@ def build_runtime(
         ),
         behavior=behavior_components,
         prediction=prediction_components,
+        foresight=foresight_components,
     )
     return Runtime(config, components, conversation_adapters=conversation_adapters)
 

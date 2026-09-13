@@ -7,9 +7,12 @@
 - M2（本包现状）：归组提示词/schema/装配校验（``grouping``）、定稿日刷新器（``refresh``，由组合根
   排在预测夜批之前）、检查点、读时派生的待用前提清单（``ledger``）。
 - M3（本包现状）：上下文视图投影（``views``：context_view / history_contexts）、此刻视图 now_context、
-  逐槽三值表 compare。读时计算、零 LLM。
+  逐槽三值表 compare、全历史聚合画像 history_profile、相似情景反查 similar_scenes；视图上的
+  first_of_day / preceding / following / next_steps / gaps 按预测树算候选的维度对齐（2026-09-12）。
+  读时计算、零 LLM。
 """
 
+from habitus.scene.calendar import DayTypeCalendar, NominalCalendar
 from habitus.scene.document import (
     SceneDocument,
     SceneDocumentCodec,
@@ -44,15 +47,22 @@ from habitus.scene.views import (
     ComparisonTable,
     ContextView,
     DayIndexCache,
+    HistoryProfile,
     LastTime,
+    Neighbour,
+    ObservationGap,
     Precondition,
+    SceneMember,
     SceneRef,
+    SimilarScene,
     SlotComparison,
     Verdict,
     compare,
     context_view,
     history_contexts,
+    history_profile,
     now_context,
+    similar_scenes,
 )
 
 __all__ = [
@@ -60,9 +70,18 @@ __all__ = [
     "ComparisonTable",
     "ContextView",
     "DayIndexCache",
+    "DayTypeCalendar",
+    "NominalCalendar",
     "LastTime",
     "Precondition",
     "SceneRef",
+    "HistoryProfile",
+    "Neighbour",
+    "ObservationGap",
+    "SceneMember",
+    "SimilarScene",
+    "history_profile",
+    "similar_scenes",
     "SlotComparison",
     "Verdict",
     "LLMSceneGrouper",

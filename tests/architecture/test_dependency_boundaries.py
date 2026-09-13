@@ -14,6 +14,7 @@ PRODUCTION_ROOTS = (
     "behavior",
     "scene",
     "prediction",
+    "foresight",
     "pre",
     "conversation",
     "memory",
@@ -495,6 +496,58 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
         if any(module == root or module.startswith(f"{root}.") for root in behavior_write_side)
     )
     assert write_side_violations == []
+
+
+def test_foresight_only_reads_the_derived_trees() -> None:
+    """预测层读派生树、不写任何树，也不认识组合根、记忆与配置。
+
+    ``foresight`` 站在 prediction 与 scene 之上：它可以读两棵派生树（数字与背景各取一半），
+    但**不得**触达 behavior（行为树只有观测→融合→归约那一个写入口，而读它是 prediction 与
+    scene 的职责，不该再多一个消费者）、memory（人物层桥接住组合根）、runtime / config /
+    conversation / integrations / pre。反向依赖同样禁止：下层永远不知道预测层存在。
+    """
+
+    root = SRC / "foresight"
+    assert root.is_dir()
+    violations = [
+        str(path.relative_to(REPOSITORY_ROOT))
+        for path in root.rglob("*.py")
+        if imported_roots(path)
+        & {"behavior", "memory", "config", "runtime", "conversation", "integrations", "pre", "infrastructure"}
+    ]
+    assert violations == []
+    # ``infrastructure`` 也在禁止之列：本包只读两棵派生树给出的对象，自己不开文件、不拿锁、
+    # 不碰向量库——"只读派生树"这句话要是允许它直接落盘，就等于没说。
+    # 现阶段零模型：证据装配是纯函数，判断那一段还没写。
+    assert [path for path in root.rglob("*.py") if "model_client" in imported_roots(path)] == []
+    # 认识情景树的只有取背景的 context 与编排的 assemble；**数字那一侧对 scene 零知识**——
+    # 出处日从预测树来、不从情景树按覆盖日重推，这条要由边界钉着，不靠自觉。清单是穷举的：
+    # 新文件要碰 scene 必须先改这一行，改的时候就得想清楚它属于哪一侧。
+    scene_readers = sorted(
+        str(path.relative_to(SRC)) for path in root.rglob("*.py") if "scene" in imported_roots(path)
+    )
+    assert scene_readers == ["foresight/assemble.py", "foresight/context.py", "foresight/render.py"]
+    assert "scene" not in imported_roots(root / "numbers.py")
+    assert "scene" not in imported_roots(root / "model.py")
+    upstream = [
+        str(path.relative_to(REPOSITORY_ROOT))
+        for name in ("behavior", "scene", "prediction", "memory")
+        for path in (SRC / name).rglob("*.py")
+        if "foresight" in imported_roots(path)
+    ]
+    assert upstream == []
+
+
+def test_the_calendar_only_knows_about_dates() -> None:
+    """当地日历是一个只认日期的可插拔零件：它不认识树、不认识视图，也不认识自己所在的包。
+
+    钉住这条，是因为"这一天在当地是什么日子"一旦开始读行为树或情景树，它就不再是可替换的
+    数据源，而变成又一个要跟着树一起重算的派生物。
+    """
+
+    calendar = SRC / "scene" / "calendar.py"
+    assert calendar.is_file()
+    assert imported_modules(calendar) == {"__future__", "datetime", "typing"}
 
 
 def test_conversation_source_and_projection_do_not_depend_on_memory_or_behavior() -> None:

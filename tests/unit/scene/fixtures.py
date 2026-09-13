@@ -30,8 +30,18 @@ def at(day: date, hour: int, minute: int) -> datetime:
     return datetime(day.year, day.month, day.day, hour, minute, tzinfo=CST)
 
 
-def publish(tree: BehaviorTree, day: date, name: str, hour: int, minute: int, *, kind: str | None = None, **overrides: Any) -> str:
-    """往行为树发布一条 occurrence，返回它的 URI。"""
+def publish(
+    tree: BehaviorTree,
+    day: date,
+    name: str,
+    hour: int,
+    minute: int,
+    *,
+    kind: str | None = None,
+    links: tuple[tuple[str, str], ...] = (),
+    **overrides: Any,
+) -> str:
+    """往行为树发布一条 occurrence（可带前向 links），返回它的 URI。"""
 
     started = at(day, hour, minute)
     writer = BehaviorDocumentWriter(tree, ProcessLocalLockStore(), clock=lambda: started + timedelta(hours=3))
@@ -46,7 +56,7 @@ def publish(tree: BehaviorTree, day: date, name: str, hour: int, minute: int, *,
         goal=None,
         **overrides,
     )
-    document = writer.publish(BehaviorKind.OCCURRENCE, payload)
+    document = writer.publish(BehaviorKind.OCCURRENCE, payload, links=links)
     return str(BehaviorURI.from_address(document.address))
 
 

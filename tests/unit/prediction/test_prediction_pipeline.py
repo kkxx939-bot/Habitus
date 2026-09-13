@@ -241,6 +241,29 @@ def test_encoding_round_trips_exactly(tmp_path) -> None:
     assert codec.decode(codec.encode(built)) == built
 
 
+def test_provenance_days_are_local_days_and_survive_publication(tmp_path) -> None:
+    """出处日走完"行为树 → 快照 → 建树 → 编解码"整条路之后仍是**本地**日。
+
+    这是本文件里那条偏移陷阱的另一面：折成 UTC 的话，早上 07:30 的那条会被记成前一天，
+    语义关联层照着这批日子去取上下文就会整体错开一天，而每个数字看起来都还是对的。
+    """
+
+    built = tree_for(tmp_path)
+    key = (SlotKey(weekday=FIRST.weekday(), slot=30), "吃药")  # 07:30–07:45
+    expected = tuple(FIRST + timedelta(days=7 * week) for week in range(3))
+    assert built.nodes[key].days == expected
+    assert codec.decode(codec.encode(built)).nodes[key].days == expected
+
+
+def test_provenance_offsets_are_whole_days(tmp_path) -> None:
+    """出处日在字节上是"距基准日多少天"的整数；给个小数就是损坏，不能"尽力解析"。"""
+
+    payload = codec.encode(tree_for(tmp_path))
+    payload["nodes"][0]["days"] = [0.5]
+    with pytest.raises(PredictionTreeError, match="whole number of days"):
+        codec.decode(payload)
+
+
 # --- 组合契约 ---------------------------------------------------------------------------
 
 

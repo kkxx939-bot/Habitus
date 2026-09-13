@@ -401,10 +401,19 @@ class NodeStatistics:
 
     趋势也不在这里——它是 (周几, 动作) 的属性而不是格子的属性（见 ``DayCurve.trend``）：
     单个 (周几, 槽) 一个月只有 4–5 次机会，在这个样本量上算出来的"上升下降"是噪声。
+
+    ``days`` 是这一格的**出处**：这个动作真的在这一槽起过头的那些日子，升序且不重复。它与
+    ``counts.occurred_days`` 出自 ``accumulate`` 的同一次记账——计数是那些日子的衰减加权和，
+    所以恒有 ``occurred_days ≤ len(days)``（每天最多贡献 1 × 覆盖比例）。语义关联层按这批
+    日子去取当时的上下文；少了它，下游只能拿"全部覆盖日 + 槽过滤"自己重推一遍，同一批上游
+    记录就有了两种解读，而且推不出树知道、语义侧看不见的那部分（树读整棵行为树，语义树只
+    归组过一部分日子）。``earlier_days`` 那些日子**不在**这里：它们当天在更早的槽发生，
+    这一格并没有发生。
     """
 
     n_eff: float
     counts: NodeCounts
+    days: tuple[date, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -478,7 +487,13 @@ class IntervalQuantiles:
 
 @dataclass(frozen=True, slots=True)
 class EdgeStatistics:
-    """一条边的发布成品。``slot_histogram`` 支持无独立假设的联合查询。"""
+    """一条边的发布成品。``slot_histogram`` 支持无独立假设的联合查询。
+
+    ``days`` 是这条边的**出处**：源那条行为发生在哪些日子（升序不重复，``∅`` 边同样有——
+    "那天做完 A 就收工了"也是一条有日子的事实）。被删失的那些对既不进计数也不进这里。
+    与 ``count`` 同出一次记账，但**两者不同量纲**：计数按次记（一天吃两次药就是两条
+    ``吃药 → ∅``），天数按天去重，所以 ``count`` 可以大于 ``len(days)``。
+    """
 
     count: float
     probability: float
@@ -486,6 +501,7 @@ class EdgeStatistics:
     n_eff: float
     intervals: IntervalQuantiles | None
     slot_histogram: dict[SlotKey, float] = field(default_factory=dict)
+    days: tuple[date, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -564,6 +580,32 @@ class PredictionTree:
         for action, baseline in self.weekday_baselines.items():
             if len(baseline) != slots:
                 raise PredictionTreeError(f"weekday baseline for {action} does not cover this clock face")
+        # 出处与计数必须出自同一次记账。这两条查的是**我们自己的产物是否自洽**：一个声称
+        # "发生过 occurred_days 天"的格子必须说得出是哪几天，而且那些日子的加权和不可能超过
+        # 天数本身。
+        # **这个上界是单向的**，只抓"日子记少了"：多记的日子只会让分母变大、离上界更远，
+        # 所以"把 earlier_days 也记进出处"这种错它照样全绿。每天各自的权重在发布后已经不可
+        # 复原，所以这里查不出来；"只记真的起过头的那些天"这条由 nodes 的记账位置与单测守。
+        for (slot_key, action), statistics in self.nodes.items():
+            label = f"node {action} at {slot_key}"
+            _provenance(statistics.days, label)
+            # 格子的计数**按天封顶**（同日同槽只记一次，权重 = 衰减 × 覆盖比例 ≤ 1），
+            # 所以加权和不可能超过天数。容差只留给浮点累加，不留给口径不一致。
+            if statistics.counts.occurred_days > len(statistics.days) + 1e-9 * len(statistics.days):
+                raise PredictionTreeError(f"{label} weighs more than the days it came from")
+        for (source, target), edge in self.edges.items():
+            # 边只查非空与有序：它的计数**按次**不按天（一天吃两次药就有两条 ``→ ∅``），
+            # 没有"每天至多一份"的上界可查。
+            _provenance(edge.days, f"edge {source}→{target}")
+
+
+def _provenance(days: tuple[date, ...], label: str) -> None:
+    """出处日的自洽校验：发布出去的东西必须说得出自己是哪几天来的，且那几天升序不重复。"""
+
+    if not days:
+        raise PredictionTreeError(f"{label} was published without the days it came from")
+    if any(later <= earlier for earlier, later in zip(days, days[1:], strict=False)):
+        raise PredictionTreeError(f"{label} lists its days out of order or twice")
 
 
 @dataclass(frozen=True, slots=True)

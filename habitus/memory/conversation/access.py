@@ -1,4 +1,7 @@
-"""Summary 的实际使用保护与终态退休候选状态，不参与召回排名。"""
+"""Summary 的实际使用保护与终态退休候选状态，不参与召回排名。
+
+插件化交付下这个 SQLite 文件的去向见 ``runtime/assembly.py`` 的 ``TODO(PLUGIN-NO-SQLITE-001)``。
+"""
 
 from __future__ import annotations
 
