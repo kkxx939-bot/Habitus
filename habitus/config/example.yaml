@@ -485,28 +485,31 @@ workflow:
 #   published_generations: 7         # 运维数：留七代，够回看一周
 #   worker_shutdown_timeout_seconds: 30
 
-# 语义关联层（情景树）。缺省未启用；置 enabled: true 即启用（行为侧必须也启用）。各层按固定顺序处理
-# 已定稿的历史：归约把一天定稿（那天的链都已落树、封口视界已过那天的本地结束）→ 情景阶段对那天归组
-# 一次 → 预测树重建。预测侧启用时情景阶段排在预测重建之前、同一拍；否则按 refresh_interval_seconds
-# 自己起一拍。归组后不因补发重算；改提示词版本或指定某几天重算走 refresh_scene_days 正门。
-# 产物按天多代发布到 storage.root/scene/tree，进度在 storage.root/scene/refresh（refresh_pending.json
-# 待刷新日、blocked.json 封锁日、checkpoints/ 未发布的归组结果）。归组调用可达 2–8 分钟，
-# models.chat 的 timeout_seconds 要盖得住。
+# 语义关联层。缺省未启用；置 enabled: true 即启用（行为侧必须也启用）。按天归组与它的刷新器已经
+# 删掉（2026-09-13）：归组产出的"事"是个冗余的中间容器，被按候选累积的规律级关联取代。
 #
-# 数值全部是启动档：回看天数与待用前提的过期期限最终由生命周期算法按 needs 边的滞后分布定档；
-# 行为数上限是 DAY1（348 条）在实验模型上的实测，换生产模型要重验。
+# 顺序与旧归组**相反**：归约把一天定稿 → 预测树重建 → 关联按格子线性推进（它的待办来自树上的
+# 出处日）。产物按候选发布到 storage.root/scene/regularity，进度在 storage.root/scene/association
+# （blocked.json 封锁记账、checkpoints/ 未落盘的产物）。
+#
+# 读侧（证据背景）还指着旧的按天情景树，而那棵树已经没有写入方——启用 foresight 目前只会拿到
+# 恒空的语义背景。读侧改写到规律级是下一步。
+#
+# 接线后的顺序与归组相反：归约把一天定稿 → 预测树重建 → 关联按格子线性推进（它的待办来自树上的
+# 出处日）。届时会新增每批目标数等几项。
 # scene:
 #   enabled: true
-#   lookback_days: 7                 # 参照边界：先前的事与"上一次"回看几天
-#   pending_expiry_days: 90          # 待用前提多久未兑现视为过期（用户裁定初值）；needs 边可指到这么远的前提
-#   max_occurrences_per_call: 400    # 一天的行为数上限；超过即封锁该日并留信号（第一期不切块）
-#   max_prompt_chars: 200000         # 单次归组提示词字符上限（保护闸；数值要按生产模型的窗口重定）
-#   retained_generations: 3          # 每天保留几代情景文档（下界 2）
-#   transient_retries: 1             # 归组调用对传输层瞬态错的有界重试（路由层另有一层）
+#   max_prompt_chars: 200000         # 单次提示词字符上限（保护闸；数值要按生产模型的窗口重定）
+#   transient_retries: 1             # 对传输层瞬态错的有界重试（路由层另有一层）
 #   transient_retry_delay_seconds: 5
-#   max_attempts_per_input: 3        # 同一输入连续失败几次后封锁那一天（输入变了自动解封）
-#   max_model_calls_per_run: 4       # 一次夜批最多几次归组调用，其余留待下次
-#   refresh_interval_seconds: 86400  # 预测侧未启用时情景阶段自己的节拍
+#   max_attempts_per_input: 3        # 同一输入连续失败几次后封锁它（换关联版本自动作废）
+#   max_model_calls_per_run: 40      # 一轮最多几次模型调用——**吞吐的真天花板**，小于每天
+#                                    新增的 (候选, 日期) 数就永远追不平；要与下面的任务上限同量级
+#   max_targets_per_call: 12         # 一次调用最多问这个候选那天的几次发生（拍的，要按真实分布重定）
+#   association_per_candidate: 2     # 每个候选一轮最多取几件（各自取最早的）
+#   association_max_tasks_per_run: 40  # 整轮的任务总上限
+#   max_cause_rows: 12               # 一次调用摊开几行前因候选（渲染预算，截断留信号）
+#   max_pending_rows: 8              # 一次调用摊开几条未兑现前提（同上）
 
 # 主体所在地。时区与当地日历**两层共用**：情景树读侧用它标每一天的日型（补班、节假日），预测层用它
 # 造"此刻"的时钟与本地日界。分别配两份迟早对不上，所以单独一组，由组合根分发。
@@ -526,6 +529,6 @@ workflow:
 # 查询把整棵树扫穿，全部是启动档、要在真实数据上重定——重定的是数值，不是"要不要有这个闸"。
 # foresight:
 #   enabled: true
+#   window_days: 30                  # 取历史背景往回看多少天（保护闸，不是行为的复发窗）
 #   max_days_per_layer: 40           # 四层里每层最多摊开多少天的历史；截掉的更早日子会如实报出条数
-#   max_similar_scenes: 8            # 相似情景反查最多带回几件事
-#   max_pack_chars: 60000            # 渲染后的证据包字符上限；超了按"先砍相似情景、再砍逐条实例"裁
+#   max_pack_chars: 60000            # 渲染后的证据包字符上限；超了从最远的那一层往近处砍

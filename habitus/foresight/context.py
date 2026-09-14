@@ -2,7 +2,7 @@
 
 树的四层各由一批不同的日子攒成，背景就必须跟着各自那批走——拿"全部覆盖日 + 槽过滤"给所有层
 配同一份历史，等于让判断者看着邻域的数字读全天的背景。日子从树来（``foresight.numbers``），
-本模块只负责按层去问情景树，并且把**槽过滤**也对齐到那一层实际的算法：
+本模块只负责按层去问行为树，并且把**槽过滤**也对齐到那一层实际的算法：
 
 ===============  ====================  ==============================================
 层                日子                  槽过滤
@@ -54,16 +54,18 @@ def layer_background(
 ) -> LayerBackground:
     """按 ``layer`` 自己的出处日取这一层的历史上下文，最近的 ``max_days`` 天优先。
 
-    只问归组过的日子（``layer.grouped``）；没归组的那几天已经在 ``layer.ungrouped`` 里如实
-    摆着，不在这里再默默丢一次。
+    **不按"关联完成了没有"筛日子。**这里取的上下文全部来自行为树（此前几步、紧邻的上下条、
+    观测空白、日型），语义层做没做过它一点都不影响。按 ``layer.associated`` 筛的话，关联夜批
+    还没推进到的日子会连行为侧背景一起被扔掉——那些背景本来零成本可得，而判断者两头都少：
+    数字说有 8 天，背景只给 6 天，另外 2 天什么都没有。关联进度由 ``layer.unassociated``
+    如实摆出来，与背景取到几天是两件事。
     """
 
     if not isinstance(layer, Layer):
         raise ForesightError("layer must be a Layer")
     if isinstance(max_days, bool) or not isinstance(max_days, int) or max_days <= 0:
         raise ForesightError("max_days must be a positive integer")
-    available = layer.grouped
-    days = available[-max_days:]
+    days = layer.days[-max_days:]
     minutes, index, width = _slot_filter(layer, slot_minutes=slot_minutes, slot_index=slot_index, half_width=half_width)
     views = history_contexts(
         kind_token,
@@ -75,7 +77,7 @@ def layer_background(
         slot_half_width=width,
         transition_window_seconds=transition_window_seconds,
     )
-    return LayerBackground(layer=layer, views=views, dropped_days=len(available) - len(days))
+    return LayerBackground(layer=layer, views=views, dropped_days=len(layer.days) - len(days))
 
 
 def _slot_filter(

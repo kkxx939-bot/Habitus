@@ -115,6 +115,17 @@ class PredictionRebuilder:
         return max(latest_day, self._clock().astimezone(self.zone).date())
 
 
+def _stage_attributes(outcome: object) -> dict[str, str | int | float | bool]:
+    """把后置阶段的结果摊平成观测属性。不认识的结果就只说"跑过了"，不猜。"""
+
+    counts = ("associated", "open", "skipped", "deferred", "failed", "blocked", "signals")
+    if not all(hasattr(outcome, name) for name in counts):
+        return {}
+    attributes: dict[str, str | int | float | bool] = {name: len(getattr(outcome, name)) for name in counts}
+    attributes["model_calls"] = int(getattr(outcome, "model_calls", 0))
+    return attributes
+
+
 class PredictionRebuildWorker(ResidentWorker):
     """重建节拍。正确性全在 rebuilder，这里只管节奏与"循环别死"。
 
@@ -132,46 +143,58 @@ class PredictionRebuildWorker(ResidentWorker):
         interval_seconds: float,
         shutdown_timeout_seconds: float,
         observer: Observer | None = None,
-        before_rebuild: Callable[[], Awaitable[object]] | None = None,
+        after_rebuild: Callable[[], Awaitable[object]] | None = None,
     ) -> None:
-        """``before_rebuild`` 是夜批里排在重建之前的阶段（组合根注入，本模块不知道它是什么——
-        现状是语义关联层对定稿日的归组）：派生树按固定先后顺序处理已定稿的历史，预测树读的
-        是它跑完之后的情景树。该阶段失败只记观测事件，不阻断重建。"""
+        """``after_rebuild`` 是夜批里排在重建**之后**的阶段（组合根注入，本模块不知道它是什么
+        ——现状是语义关联层按格子推进的关联）。
+
+        顺序与旧的按天归组相反，因为待办来自树：归组的输入是已定稿的那一天，所以排在重建之前；
+        关联的输入是**树上的出处日**，必须等这一代树落地之后才算得出来。该阶段失败只记观测
+        事件，不阻断下一轮重建——派生层不做级联。
+        """
 
         super().__init__(shutdown_timeout_seconds=shutdown_timeout_seconds, observer=observer)
-        if before_rebuild is not None and not callable(before_rebuild):
-            raise TypeError("before_rebuild must be an async callable or None")
+        if after_rebuild is not None and not callable(after_rebuild):
+            raise TypeError("after_rebuild must be an async callable or None")
         self.rebuilder = rebuilder
         self.interval_seconds = float(interval_seconds)
-        self.before_rebuild = before_rebuild
+        self.after_rebuild = after_rebuild
 
     async def run_once(self) -> PublishedGeneration | None:
-        """手动触发一次夜批：前置阶段 → 全量重建（运维与测试用）。"""
+        """手动触发一次夜批：全量重建 → 后置阶段（运维与测试用）。"""
 
         if self.running:
             raise RuntimeError("manual run_once cannot race the resident worker loop")
-        await self._run_before_rebuild()
-        return await asyncio.to_thread(self.rebuilder.run_once)
+        published = await asyncio.to_thread(self.rebuilder.run_once)
+        await self._run_after_rebuild()
+        return published
 
-    async def _run_before_rebuild(self) -> None:
-        if self.before_rebuild is None:
+    async def _run_after_rebuild(self) -> None:
+        """后置阶段失败不阻断重建（派生层不做级联），但**必须留下可查的痕迹**。
+
+        返回值要摊进观测属性：一夜 100% 失败而事件写着 SUCCESS、属性为空，运维就只能靠猜。
+        失败还要设 ``last_error``，否则健康检查会一直报这个 worker 健康。
+        """
+
+        if self.after_rebuild is None:
             return
         started = time.monotonic()
         try:
-            await self.before_rebuild()
-        except Exception as exc:  # noqa: BLE001 - 前置阶段失败不阻断重建，只留观测
+            outcome = await self.after_rebuild()
+        except Exception as exc:  # noqa: BLE001 - 后置阶段失败不阻断重建，只留观测
+            self.last_error = exc
             self._observe(
                 "nightly_stage", ObservationStatus.FAILURE, {"error_type": type(exc).__name__}, started=started
             )
         else:
-            self._observe("nightly_stage", ObservationStatus.SUCCESS, {}, started=started)
+            self._observe("nightly_stage", ObservationStatus.SUCCESS, _stage_attributes(outcome), started=started)
 
     async def _run_loop(self) -> None:
         while not self._stop_requested.is_set():
             started = time.monotonic()
             try:
-                await self._run_before_rebuild()
                 published = await asyncio.to_thread(self.rebuilder.run_once)
+                await self._run_after_rebuild()
             except Exception as exc:  # noqa: BLE001 - 常驻循环必须活过基础设施抖动
                 self.last_error = exc
                 self._observe(
@@ -197,7 +220,7 @@ def build_prediction_components(
     behavior_tree: BehaviorTree,
     observer: Observer | None = None,
     clock: Callable[[], datetime] | None = None,
-    before_rebuild: Callable[[], Awaitable[object]] | None = None,
+    after_rebuild: Callable[[], Awaitable[object]] | None = None,
 ) -> PredictionRuntimeComponents | None:
     """组装预测夜批；未启用时返回 None。
 
@@ -220,7 +243,7 @@ def build_prediction_components(
         interval_seconds=tree_config.rebuild_interval_seconds,
         shutdown_timeout_seconds=prediction_config.worker_shutdown_timeout_seconds,
         observer=observer,
-        before_rebuild=before_rebuild,
+        after_rebuild=after_rebuild,
     )
     return PredictionRuntimeComponents(
         tree_config=tree_config, store=store, rebuilder=rebuilder, worker=worker

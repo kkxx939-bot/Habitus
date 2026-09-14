@@ -48,8 +48,7 @@ PathLock + version CAS）；用户把数据目录放在 iCloud/Dropbox（SQLite 
 from __future__ import annotations
 
 import asyncio
-import functools
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 
 from habitus.config import HabitusConfig
 from habitus.conversation import (
@@ -129,7 +128,7 @@ from habitus.memory.workflow import (
 )
 from habitus.model_client import ProviderFactory, StructuredChatClient
 from habitus.pre.conversation import ConversationAdapterRegistry
-from habitus.runtime.behavior import build_behavior_components, refresh_scene_stage
+from habitus.runtime.behavior import BehaviorRuntimeComponents, build_behavior_components
 from habitus.runtime.components import (
     RuntimeComponents,
     RuntimeConversation,
@@ -140,9 +139,41 @@ from habitus.runtime.components import (
 )
 from habitus.runtime.foresight import build_foresight_components
 from habitus.runtime.lifecycle import LifecycleWorker
-from habitus.runtime.prediction import build_prediction_components
+from habitus.runtime.prediction import PredictionRuntimeComponents, build_prediction_components
 from habitus.runtime.runtime import Runtime
 from habitus.runtime.worker import MemoryWorker
+from habitus.scene.backlog import CauseFacts, backlog
+
+
+def _association_stage(
+    behavior: BehaviorRuntimeComponents, prediction: PredictionRuntimeComponents, config: HabitusConfig
+) -> Callable[[], Awaitable[object]] | None:
+    """夜批里排在重建之后的那一拍：算待办 → 折出前因事实 → 按格子线性推进。
+
+    **待办与前因事实都在这里算**，不在刷新器里：读预测树的模块只有 ``scene/backlog.py`` 一个
+    （架构测试钉死），而组合根是唯一同时认识两棵树的地方。刷新器因此完全不认识 ``PredictionTree``
+    ——"语义层不重算数字"由类型保证，不靠自觉。
+    """
+
+    refresher = behavior.association_refresher
+    if refresher is None:
+        return None
+
+    async def run() -> object:
+        tree = await asyncio.to_thread(prediction.store.load)
+        if tree is None:
+            return None
+        tasks = await asyncio.to_thread(
+            backlog,
+            tree,
+            refresher.associated_days,
+            per_candidate=config.scene.association_per_candidate,
+            limit=config.scene.association_max_tasks_per_run,
+            blocked=refresher.progress,
+        )
+        return await refresher.refresh(tasks, causes=CauseFacts(tree))
+
+    return run
 
 
 def build_runtime(
@@ -601,7 +632,8 @@ def build_runtime(
     )
     # behavior 关着而 prediction 开着的组合已经在配置层被硬拒（见 HabitusConfig 的跨域校验），
     # 所以这里 behavior_components 为 None 时 prediction 必然也没开，直接跳过即可。
-    # 夜批顺序：情景阶段（对定稿日归组一次）排在预测重建之前——预测树读的是情景树跑完之后的样子。
+    # 夜批顺序：归约把一天定稿 → 预测树重建 → 语义关联。关联排在重建**之后**（与已删的按天归组
+    # 相反），因为它的待办是树上的出处日，必须等这一代树落地才算得出来。
     prediction_components = (
         None
         if behavior_components is None
@@ -609,13 +641,13 @@ def build_runtime(
             config,
             behavior_tree=behavior_components.tree,
             observer=operation_observer,
-            before_rebuild=(
-                None
-                if behavior_components.scene_refresher is None
-                else functools.partial(refresh_scene_stage, behavior_components, observer=operation_observer)
-            ),
+            after_rebuild=None,
         )
     )
+    if prediction_components is not None and behavior_components is not None:
+        prediction_components.worker.after_rebuild = _association_stage(
+            behavior_components, prediction_components, config
+        )
     # 预测层站在两棵派生树之上，所以排在它们之后组装；任一未启用时 build 自己返回 None。
     foresight_components = (
         None
@@ -623,7 +655,11 @@ def build_runtime(
         else build_foresight_components(
             config,
             behavior_tree=behavior_components.tree,
-            scene_tree=behavior_components.scene_tree,
+            associated=(
+                None
+                if behavior_components.association_refresher is None
+                else behavior_components.association_refresher.associated_days.days_for
+            ),
             store=prediction_components.store,
         )
     )

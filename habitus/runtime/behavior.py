@@ -24,10 +24,10 @@ import os
 import time
 import uuid
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 
 from habitus.behavior.fusion import (
     BehaviorFusionEnqueuer,
@@ -66,9 +66,14 @@ from habitus.infrastructure.store.contracts.path_lock import PathLock
 from habitus.model_client import StructuredChatClient
 from habitus.model_client.embedding import Embedder
 from habitus.runtime.resident import ResidentWorker
-from habitus.scene import SceneTree, SceneTreeConfig
-from habitus.scene.grouping import LLMSceneGrouper, SceneGroupingConfig
-from habitus.scene.refresh import SceneRefreshConfig, SceneRefresher, SceneRefreshReport
+from habitus.scene import (
+    AssociationConfig,
+    AssociationRefreshConfig,
+    AssociationRefresher,
+    LLMAssociator,
+    NominalCalendar,
+)
+from habitus.scene.regularity import RegularityTree
 
 
 @dataclass(frozen=True)
@@ -91,11 +96,11 @@ class BehaviorRuntimeComponents:
     reduction_runner: BehaviorReductionRunner
     fusion_worker: BehaviorFusionWorker
     reduction_worker: BehaviorReductionWorker
-    # 语义关联层（情景树）可选：``config.scene.enabled`` 关着时全为 None。情景阶段由组合根排在预测
-    # 夜批之前；预测侧未启用时才由 ``scene_worker`` 自己起一拍。
-    scene_tree: SceneTree | None = None
-    scene_refresher: SceneRefresher | None = None
-    scene_worker: SceneRefreshWorker | None = None
+    # 语义关联层可选：``config.scene.enabled`` 关着时全为 None。``regularity_tree`` 是按候选累积
+    # 的规律级（产物），``association_refresher`` 是夜批编排——它排在**预测树重建之后**，因为
+    # 待办来自树上的出处日。
+    regularity_tree: RegularityTree | None = None
+    association_refresher: AssociationRefresher | None = None
 
     def __post_init__(self) -> None:
         expected = (
@@ -149,23 +154,17 @@ class BehaviorRuntimeComponents:
             raise ValueError(
                 "fusion and reduction must share one context lookback window"
             )
-        if (self.scene_tree is None) != (self.scene_refresher is None):
-            raise ValueError("scene tree and scene refresher must be enabled together")
-        if self.scene_refresher is not None:
-            assert self.scene_tree is not None
-            if not isinstance(self.scene_tree, SceneTree) or not isinstance(self.scene_refresher, SceneRefresher):
-                raise TypeError("scene components must be SceneTree and SceneRefresher")
-            if self.scene_refresher.scene_tree is not self.scene_tree:
-                raise ValueError("behavior components must share one scene tree instance")
-            if self.scene_refresher.behavior_tree is not self.tree:
-                raise ValueError("scene refresher must read the same behaviour tree instance")
-        if self.scene_worker is not None:
-            if not isinstance(self.scene_worker, SceneRefreshWorker):
-                raise TypeError("scene_worker must be SceneRefreshWorker")
-            if self.scene_refresher is None or self.scene_worker.refresher is not self.scene_refresher:
-                raise ValueError("scene worker must drive the assembled scene refresher")
-            if self.scene_worker.runner is not self.reduction_runner:
-                raise ValueError("scene worker must read closed days from the assembled reduction runner")
+        if (self.regularity_tree is None) != (self.association_refresher is None):
+            raise ValueError("the regularity tree and its refresher must be enabled together")
+        if self.association_refresher is not None:
+            if not isinstance(self.regularity_tree, RegularityTree) or not isinstance(
+                self.association_refresher, AssociationRefresher
+            ):
+                raise TypeError("association components must be RegularityTree and AssociationRefresher")
+            if self.association_refresher.regularity_tree is not self.regularity_tree:
+                raise ValueError("behavior components must share one regularity tree instance")
+            if self.association_refresher.behavior_tree is not self.tree:
+                raise ValueError("the association refresher must read the same behaviour tree instance")
 
 
 class BehaviorFusionWorker(ResidentWorker):
@@ -327,64 +326,6 @@ class BehaviorReductionWorker(ResidentWorker):
             await self._wait(self.interval_seconds)
 
 
-class SceneRefreshWorker(ResidentWorker):
-    """情景阶段自己的夜批节拍——只在预测侧未启用时使用（否则情景阶段排在预测重建之前、同一拍）。
-    正确性全在刷新器；这里只管节奏与"循环别死"。"""
-
-    _task_name = "habitus-scene-refresh"
-    _observation_category = "scene"
-
-    def __init__(
-        self,
-        runner: BehaviorReductionRunner,
-        refresher: SceneRefresher,
-        *,
-        interval_seconds: float,
-        shutdown_timeout_seconds: float,
-        observer: Observer | None = None,
-    ) -> None:
-        super().__init__(shutdown_timeout_seconds=shutdown_timeout_seconds, observer=observer)
-        self.runner = runner
-        self.refresher = refresher
-        self.interval_seconds = float(interval_seconds)
-
-    async def run_once(self) -> SceneRefreshReport:
-        if self.running:
-            raise RuntimeError("manual run_once cannot race the resident worker loop")
-        return await _refresh_closed_days(self.runner, self.refresher)
-
-    async def _run_loop(self) -> None:
-        while not self._stop_requested.is_set():
-            started = time.monotonic()
-            try:
-                report = await _refresh_closed_days(self.runner, self.refresher)
-            except Exception as exc:  # noqa: BLE001 - 常驻循环必须活过基础设施抖动
-                self.last_error = exc
-                self._observe("scene_refresh", ObservationStatus.FAILURE, {"error_type": type(exc).__name__}, started=started)
-            else:
-                self._succeeded()
-                self._observe("scene_refresh", ObservationStatus.SUCCESS, _report_attributes(report), started=started)
-            await self._wait(self.interval_seconds)
-
-
-async def _refresh_closed_days(runner: BehaviorReductionRunner, refresher: SceneRefresher) -> SceneRefreshReport:
-    """情景阶段的一拍：归约已定稿、情景树还没有当前版本一代的日子，各归组一次。"""
-
-    closed = await asyncio.to_thread(runner.closed_days)
-    return await refresher.refresh_days(refresher.stale_days(closed))
-
-
-def _report_attributes(report: SceneRefreshReport) -> dict[str, str | int | float | bool]:
-    return {
-        "published": len(report.published),
-        "unchanged": len(report.unchanged),
-        "deferred": len(report.deferred),
-        "failed": len(report.failed),
-        "blocked": len(report.blocked),
-        "model_calls": report.model_calls,
-    }
-
-
 def build_behavior_components(
     config: HabitusConfig,
     *,
@@ -465,36 +406,33 @@ def build_behavior_components(
         if embedder is not None
         else None
     )
-    scene_tree: SceneTree | None = None
-    scene_refresher: SceneRefresher | None = None
+    regularity_tree: RegularityTree | None = None
+    association_refresher: AssociationRefresher | None = None
     if config.scene.enabled:
         scene_config = config.scene
-        scene_root = config.scene_root
-        scene_tree = SceneTree(
-            scene_root / "tree", tree_config=SceneTreeConfig(retained_generations=scene_config.retained_generations)
-        )
-        scene_refresher = SceneRefresher(
+        regularity_tree = RegularityTree(config.scene_root / "regularity")
+        association_refresher = AssociationRefresher(
             behavior_tree=tree,
-            scene_tree=scene_tree,
-            grouper=LLMSceneGrouper(
+            regularity_tree=regularity_tree,
+            associator=LLMAssociator(
                 structured_chat,
-                config=SceneGroupingConfig(
-                    max_occurrences_per_call=scene_config.max_occurrences_per_call,
+                config=AssociationConfig(
+                    max_targets_per_call=scene_config.max_targets_per_call,
                     max_prompt_chars=scene_config.max_prompt_chars,
                     transient_retries=scene_config.transient_retries,
                     transient_retry_delay_seconds=scene_config.transient_retry_delay_seconds,
                 ),
             ),
-            subject=behavior_config.primary_subject,
-            progress_root=scene_root / "refresh",
+            progress_root=config.scene_root / "association",
             lock_store=lock_store,
-            config=SceneRefreshConfig(
-                lookback_days=scene_config.lookback_days,
-                pending_expiry_days=scene_config.pending_expiry_days,
+            calendar=NominalCalendar(),
+            config=AssociationRefreshConfig(
                 max_attempts_per_input=scene_config.max_attempts_per_input,
                 max_model_calls_per_run=scene_config.max_model_calls_per_run,
             ),
             clock=clock,
+            max_cause_rows=scene_config.max_cause_rows,
+            max_pending_rows=scene_config.max_pending_rows,
         )
     reduction_runner = BehaviorReductionRunner(
         judgements=judgements,
@@ -541,20 +479,8 @@ def build_behavior_components(
             shutdown_timeout_seconds=behavior_config.worker_shutdown_timeout_seconds,
             observer=observer,
         ),
-        scene_tree=scene_tree,
-        scene_refresher=scene_refresher,
-        # 预测侧启用时情景阶段由预测夜批在重建之前调用（见 assembly）；否则自己起一拍。
-        scene_worker=(
-            SceneRefreshWorker(
-                reduction_runner,
-                scene_refresher,
-                interval_seconds=config.scene.refresh_interval_seconds,
-                shutdown_timeout_seconds=behavior_config.worker_shutdown_timeout_seconds,
-                observer=observer,
-            )
-            if scene_refresher is not None and not config.prediction.enabled
-            else None
-        ),
+        regularity_tree=regularity_tree,
+        association_refresher=association_refresher,
     )
 
 
@@ -609,39 +535,6 @@ async def rebuild_behavior_kinds(
     return report
 
 
-async def refresh_scene_stage(
-    components: BehaviorRuntimeComponents, *, observer: Observer | None = None
-) -> SceneRefreshReport:
-    """夜批里的情景阶段：归约已定稿、情景树还没有当前版本一代的日子各归组一次。预测夜批在重建之前调它。"""
-
-    if components.scene_refresher is None:
-        raise ValueError("scene is not enabled in this runtime")
-    started = time.monotonic()
-    report = await _refresh_closed_days(components.reduction_runner, components.scene_refresher)
-    _record(observer, "scene_refresh", _report_attributes(report), started)
-    return report
-
-
-async def refresh_scene_days(
-    components: BehaviorRuntimeComponents,
-    days: Iterable[date] | None = None,
-    *,
-    observer: Observer | None = None,
-) -> SceneRefreshReport:
-    """情景树的运维正门：``days`` 为空即回填（与夜批同一工作集：已定稿、没有当前版本一代的日子）；
-    指定日子则强制重算（改了提示词版本、或人工要求）——定稿后的重算只从这里发生。"""
-
-    if components.scene_refresher is None:
-        raise ValueError("scene is not enabled in this runtime")
-    if days is None:
-        return await refresh_scene_stage(components, observer=observer)
-    started = time.monotonic()
-    targets = tuple(days)
-    report = await components.scene_refresher.refresh_days(targets, force=True)
-    _record(observer, "scene_refresh", {"requested": len(targets), **_report_attributes(report)}, started)
-    return report
-
-
 def _record(
     observer: Observer | None,
     operation: str,
@@ -673,8 +566,5 @@ __all__ = [
     "build_behavior_components",
     "deliver_observations",
     "merge_behavior_kinds",
-    "SceneRefreshWorker",
     "rebuild_behavior_kinds",
-    "refresh_scene_days",
-    "refresh_scene_stage",
 ]

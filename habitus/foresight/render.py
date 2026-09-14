@@ -6,7 +6,7 @@
 两条呈现纪律：
 
 - **数字连着它的出处**。每一层写成"3/4（3 天）"而不是"0.75"：判断者要能看出这个数薄不薄。
-- **没说的要说出来**。没有背景的日子（情景树还没归组）与被保护闸截掉的日子都单独写一行；
+- **没说的要说出来**。还没关联完成的日子与被保护闸截掉的日子都单独写一行；
   不写的话，"给你看的这几条"会被读成"一共就这几条"。
 
 保护闸按**从远到近**砍：先砍全天层的逐条实例，再跨周几、邻域，最后才是本槽——离此刻越远的
@@ -18,7 +18,7 @@ from __future__ import annotations
 from habitus.foresight.assemble import CandidateEvidence
 from habitus.foresight.context import LayerBackground
 from habitus.foresight.errors import ForesightError
-from habitus.scene.views import ActionRef, ContextView, Neighbour, SceneRef
+from habitus.scene.views import ActionRef, ContextView, Neighbour
 
 # 砍的次序：离此刻最远的先砍。
 _TRIM_ORDER = ("all_day", "cross_weekday", "pool", "slot")
@@ -71,7 +71,7 @@ def _table(evidence: CandidateEvidence) -> list[str]:
                 value = f"{layer.hits:.2f}/{layer.exposure:.2f} = {layer.value:.3f}"
         else:
             value = f"{layer.value:.4f}"
-        missing = f"{len(layer.ungrouped)} 天" if layer.ungrouped else "—"
+        missing = f"{len(layer.unassociated)} 天" if layer.unassociated else "—"
         if not layer.days and layer.value > 0.0:
             # 真实数据上常见：这一层一天都没发生过，率却不是 0——那是收缩链的 Laplace 先验
             # 在说话。不标出来的话，一个 0.04 会被当成"别的周几这个点会做"的实测结论。
@@ -86,8 +86,8 @@ def _layer(item: LayerBackground, shown: int, year: int) -> list[str]:
         return [f"### {layer.label} · 没有出处日", "（这一层一天都没发生过，没有历史可看）"]
     lines = [f"### {layer.label} · 这 {len(layer.days)} 天当时的情形"]
     notes = []
-    if layer.ungrouped:
-        notes.append(f"{len(layer.ungrouped)} 天有数、语义层还没归组，没有背景可看")
+    if layer.unassociated:
+        notes.append(f"{len(layer.unassociated)} 天有数、语义层还没关联，没有那句上下文")
     if item.dropped_days:
         notes.append(f"更早的 {item.dropped_days} 天没有展开")
     trimmed = len(item.views) - shown
@@ -113,14 +113,6 @@ def _view(view: ContextView, year: int) -> str:
         parts.append(f"紧邻上一条：{_neighbour(view.preceding)}")
     if view.following is not None:
         parts.append(f"紧邻下一条：{_neighbour(view.following)}")
-    if view.scene is not None:
-        parts.append(f"所属：{view.scene.label}" + (f"（{view.role}）" if view.role else ""))
-    if view.prior_steps:
-        parts.append("此前：" + "、".join(step.name for step in view.prior_steps))
-    if view.next_steps:
-        parts.append("之后：" + "、".join(step.name for step in view.next_steps))
-    if view.preconditions:
-        parts.append("前提：" + "、".join(item.text for item in view.preconditions))
     if view.causes:
         # 起因是语义边（results_from），与"此前"不是一回事：一个说因果，一个只说先后。
         parts.append("起因：" + "、".join(_label(item) for item in view.causes))
@@ -135,8 +127,8 @@ def _view(view: ContextView, year: int) -> str:
     return " ｜ ".join(parts)
 
 
-def _label(item: ActionRef | SceneRef) -> str:
-    return item.name if isinstance(item, ActionRef) else item.label
+def _label(item: ActionRef) -> str:
+    return item.name
 
 
 def _neighbour(neighbour: Neighbour) -> str:

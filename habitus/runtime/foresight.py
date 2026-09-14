@@ -1,6 +1,6 @@
 """预测层在组合根的组装。
 
-预测层站在两棵派生树之上：数字取自预测树的一代，与之对应的历史背景取自情景树。本模块负责
+预测层站在两棵派生树之上：数字取自预测树的一代，与之对应的历史背景取自行为树的读时投影。本模块负责
 把它们接起来，并且**把三件只有组合根知道的事定死**：
 
 1. **钉住一代**。每次装配从 ``store.load()` 取当前一代并核对它的 ``config_digest`` 与现行配置
@@ -25,11 +25,11 @@ from zoneinfo import ZoneInfo
 from habitus.behavior.tree import BehaviorTree
 from habitus.config import HabitusConfig
 from habitus.foresight import CellIndex, ForesightError
-from habitus.foresight.assemble import CandidateEvidence, candidates_evidence, moment_at
+from habitus.foresight.assemble import AssociatedDays, CandidateEvidence, candidates_evidence, moment_at
 from habitus.prediction import builder
 from habitus.prediction.config import PredictionTreeConfig
 from habitus.prediction.store import PredictionTreeStore
-from habitus.scene import DayTypeCalendar, NominalCalendar, SceneTree
+from habitus.scene import DayTypeCalendar, NominalCalendar
 from habitus.scene.views import DayIndexCache
 
 
@@ -47,7 +47,7 @@ class EvidenceAssembler:
         self,
         *,
         behavior_tree: BehaviorTree,
-        scene_tree: SceneTree,
+        associated: AssociatedDays,
         store: PredictionTreeStore,
         subject: str,
         zone: ZoneInfo,
@@ -61,8 +61,8 @@ class EvidenceAssembler:
     ) -> None:
         if not isinstance(behavior_tree, BehaviorTree):
             raise TypeError("behavior_tree must be a BehaviorTree")
-        if not isinstance(scene_tree, SceneTree):
-            raise TypeError("scene_tree must be a SceneTree")
+        if not callable(associated):
+            raise TypeError("associated must answer which days a candidate has been associated on")
         if not isinstance(store, PredictionTreeStore):
             raise TypeError("store must be a PredictionTreeStore")
         if not isinstance(subject, str) or not subject.strip():
@@ -77,7 +77,7 @@ class EvidenceAssembler:
         if not isinstance(expected_digest, str) or not expected_digest:
             raise ValueError("expected_digest must be non-empty text")
         self.behavior_tree = behavior_tree
-        self.scene_tree = scene_tree
+        self.associated = associated
         self.store = store
         self.subject = subject
         self.zone = zone
@@ -108,15 +108,14 @@ class EvidenceAssembler:
                 "parameters; wait for the nightly rebuild instead of mixing two sets of statistics"
             )
         at = (now if now is not None else self._clock()).astimezone(self.zone)
-        cache = DayIndexCache(
-            self.behavior_tree, self.scene_tree, subject=self.subject, calendar=self.calendar
-        )
+        cache = DayIndexCache(self.behavior_tree, subject=self.subject, calendar=self.calendar)
         moment = moment_at(at, slot_minutes=tree.slot_minutes, day_note=cache.day(at.date()).day_note)
         return candidates_evidence(
             CellIndex.of(tree),
             kind_tokens,
             moment,
             cache,
+            associated=self.associated,
             half_width=self.half_width,
             window_days=self.window_days,
             transition_window_seconds=self.transition_window_seconds,
@@ -128,7 +127,7 @@ def build_foresight_components(
     config: HabitusConfig,
     *,
     behavior_tree: BehaviorTree,
-    scene_tree: SceneTree | None,
+    associated: AssociatedDays | None,
     store: PredictionTreeStore | None,
     clock: Callable[[], datetime] | None = None,
 ) -> ForesightRuntimeComponents | None:
@@ -140,12 +139,12 @@ def build_foresight_components(
 
     if not config.foresight.enabled:
         return None
-    if scene_tree is None or store is None:
+    if associated is None or store is None:
         return None
     tree_config = PredictionTreeConfig(**config.prediction.tree_parameters())
     assembler = EvidenceAssembler(
         behavior_tree=behavior_tree,
-        scene_tree=scene_tree,
+        associated=associated,
         store=store,
         subject=config.behavior.primary_subject,
         zone=config.locale.zone(),
@@ -155,7 +154,7 @@ def build_foresight_components(
         # 窗口就是树的池化邻域与转移窗，不另配一份——配两份会让数字与背景取自不同的范围。
         half_width=tree_config.pool_half_width,
         transition_window_seconds=tree_config.transition_window_seconds,
-        window_days=config.scene.lookback_days,
+        window_days=config.foresight.window_days,
         max_days_per_layer=config.foresight.max_days_per_layer,
         clock=clock,
     )

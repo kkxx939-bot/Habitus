@@ -16,8 +16,8 @@ from typing import Any
 from habitus.config.loader import construct_config
 
 _INT_BOUNDS = (
+    ("window_days", 1, 3_650),
     ("max_days_per_layer", 1, 3_650),
-    ("max_similar_scenes", 1, 200),
     ("max_pack_chars", 1_000, 4_000_000),
 )
 
@@ -27,11 +27,13 @@ class ForesightConfig:
     """预测层是否启用，以及一次装配的几道保护闸。"""
 
     enabled: bool = False
+    # 取历史背景往回看多少天。原先借的是 ``scene.lookback_days``（按天归组的参照窗），归组删掉之后
+    # 它回到真正的使用者这边。它**不是**"某个行为的相邻两次隔多久"那种窗——那由出处日决定、
+    # 本来就没有窗；这里只是"一次装配最多摊开多久的历史"这道闸。
+    window_days: int = 30
     # 四层里每一层最多摊开多少天的历史背景；截掉的更早日子会以 dropped_days 如实报出。
     max_days_per_layer: int = 40
-    # 相似情景反查最多带回几件事。
-    max_similar_scenes: int = 8
-    # 渲染后的证据包字符上限；超了按"先砍相似情景、再砍逐条实例、画像不砍"的次序裁。
+    # 渲染后的证据包字符上限；超了按"从最远的那一层往近处砍"的次序裁（all_day → cross_weekday → pool → slot）。
     max_pack_chars: int = 60_000
 
     def __post_init__(self) -> None:

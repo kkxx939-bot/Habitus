@@ -305,20 +305,29 @@ def test_scene_config_enforces_its_scalar_bounds_and_default_root(tmp_path) -> N
     config = HabitusConfig.from_mapping(valid_mapping(tmp_path))
     assert config.scene.enabled is False
     assert config.scene_root == config.storage_root / "scene"
-    loaded = SceneConfig.from_mapping({"enabled": True, "lookback_days": 3, "pending_expiry_days": 60})
-    assert (loaded.lookback_days, loaded.pending_expiry_days, loaded.retained_generations) == (3, 60, 3)
+    loaded = SceneConfig.from_mapping({"enabled": True, "max_targets_per_call": 5})
+    assert (loaded.enabled, loaded.max_targets_per_call, loaded.max_attempts_per_input) == (True, 5, 3)
+    # 日历窗与过期期限已经删掉：前者把周频行为卡在边界上，后者是"到期没到期"这个属于预测层的判断。
+    for gone in (
+        "lookback_days",
+        "pending_expiry_days",
+        "max_occurrences_per_call",
+        "retained_generations",
+        "refresh_interval_seconds",
+    ):
+        with pytest.raises(ConfigError, match="unknown"):
+            SceneConfig.from_mapping({gone: 3})
     for field_name, bad in (
-        ("lookback_days", 0),
-        ("lookback_days", 91),
-        ("pending_expiry_days", True),
-        ("max_occurrences_per_call", 0),
         ("max_prompt_chars", 10),
-        ("retained_generations", 101),
-        ("retained_generations", 1),
         ("transient_retries", -1),
         ("max_attempts_per_input", 0),
         ("max_model_calls_per_run", 0),
-        ("refresh_interval_seconds", 10),
+        ("max_targets_per_call", 0),
+        ("max_targets_per_call", 501),
+        ("association_per_candidate", 0),
+        ("association_max_tasks_per_run", 0),
+        ("max_cause_rows", 0),
+        ("max_pending_rows", 0),
         ("transient_retry_delay_seconds", 601),
     ):
         with pytest.raises(ConfigError, match=f"scene.{field_name}"):
@@ -326,7 +335,7 @@ def test_scene_config_enforces_its_scalar_bounds_and_default_root(tmp_path) -> N
     with pytest.raises(ConfigError, match="scene.enabled"):
         SceneConfig.from_mapping({"enabled": "yes"})
     with pytest.raises(ConfigError, match="unknown"):
-        SceneConfig.from_mapping({"lookback": 3})
+        SceneConfig.from_mapping({"retained": 3})
 
 
 def test_locale_is_one_group_shared_by_the_scene_and_foresight_layers(tmp_path) -> None:
@@ -349,7 +358,10 @@ def test_locale_is_one_group_shared_by_the_scene_and_foresight_layers(tmp_path) 
 
 
 def test_foresight_only_carries_protective_limits_and_needs_both_derived_trees(tmp_path) -> None:
-    """预测层这一组只有保护闸——窗口宽度住在 prediction 那边，两处不各配一份。
+    """预测层这一组只有保护闸——邻域与转移窗住在 prediction 那边，两处不各配一份。
+
+    ``window_days`` 是"一次装配最多摊开多久的历史"这道闸，原先借的是 ``scene.lookback_days``；
+    归组删掉之后它回到真正的使用者这边，不再跨组借。
 
     启用它却没启用两棵派生树是**配置自相矛盾**：数字取自预测树、与之对应的历史取自情景树，
     缺一边就装配不出证据。放过去的下场是启动一切正常、什么都没发生、无处可查。
@@ -361,13 +373,13 @@ def test_foresight_only_carries_protective_limits_and_needs_both_derived_trees(t
     assert config.foresight.enabled is False
     assert [field.name for field in dataclasses.fields(ForesightConfig)] == [
         "enabled",
+        "window_days",
         "max_days_per_layer",
-        "max_similar_scenes",
         "max_pack_chars",
     ]
     for field_name, bad in (
+        ("window_days", 0),
         ("max_days_per_layer", 0),
-        ("max_similar_scenes", 201),
         ("max_pack_chars", 10),
         ("max_pack_chars", True),
     ):

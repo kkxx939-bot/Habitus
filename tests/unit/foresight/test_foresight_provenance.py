@@ -13,9 +13,7 @@ import pytest
 from habitus.foresight import CellIndex, ForesightError, Layer, layer_background, provenance
 from habitus.prediction.model import SlotKey
 from habitus.prediction.query import neighbourhood
-from tests.unit.foresight.fixtures import Ground, at, slot_of
-
-MONDAY = date(2026, 8, 3)
+from tests.unit.foresight.fixtures import MONDAY, Ground, at, slot_of
 
 
 def days(*offsets: int) -> tuple[date, ...]:
@@ -49,7 +47,7 @@ def test_each_layer_carries_exactly_the_days_its_own_number_came_from(tmp_path) 
     tree = ground_with_a_weekly_habit(tmp_path).tree()
     cells = CellIndex.of(tree)
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
-    layers = provenance(cells, "打球", slot, half_width=2, grouped=lambda day: True)
+    layers = provenance(cells, "打球", slot, half_width=2, associated_on=lambda day: True)
 
     assert layers.slot.days == days(0, 7, 14)  # 就是这一格
     assert layers.pool.days == days(0, 7, 14, 21)  # 加上 19:30 那次
@@ -70,7 +68,7 @@ def test_the_three_chain_layers_expose_the_raw_ledger_and_all_day_does_not(tmp_p
     tree = ground_with_a_weekly_habit(tmp_path).tree()
     cells = CellIndex.of(tree)
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
-    layers = provenance(cells, "打球", slot, half_width=2, grouped=lambda day: True)
+    layers = provenance(cells, "打球", slot, half_width=2, associated_on=lambda day: True)
 
     cell = tree.nodes[(slot, "打球")]
     assert layers.slot.hits == pytest.approx(cell.counts.occurred_days)
@@ -96,7 +94,7 @@ def test_the_cross_weekday_layer_is_the_shrinkage_chains_third_layer(tmp_path) -
 
     tree = ground_with_a_weekly_habit(tmp_path).tree()
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
-    layers = provenance(CellIndex.of(tree), "打球", slot, half_width=2, grouped=lambda day: True)
+    layers = provenance(CellIndex.of(tree), "打球", slot, half_width=2, associated_on=lambda day: True)
     pool = neighbourhood(tree, slot, 2)
     expected_top = sum(
         tree.nodes[(SlotKey(weekday=weekday, slot=key.slot), "打球")].counts.occurred_days
@@ -127,16 +125,16 @@ def test_the_neighbourhood_wraps_inside_one_weekday(tmp_path) -> None:
     ground.record(MONDAY + timedelta(days=1), "夜宵", 0, 5, kind="夜宵")  # 周二凌晨
     cells = CellIndex.of(ground.tree())
     late = SlotKey(weekday=0, slot=slot_of(23, 45))
-    layers = provenance(cells, "夜宵", late, half_width=2, grouped=lambda day: True)
+    layers = provenance(cells, "夜宵", late, half_width=2, associated_on=lambda day: True)
     assert layers.slot.days == days(0)
     assert layers.pool.days == days(0, 7)  # 绕过午夜，但仍在周一那一行
     assert days(1)[0] not in layers.pool.days
 
 
-def test_days_with_numbers_but_no_scene_are_named_not_dropped(tmp_path) -> None:
-    """出处日里情景树没归组的那几天要明说"有数、没背景"。
+def test_days_with_numbers_but_no_association_are_named_not_dropped(tmp_path) -> None:
+    """出处日里语义层没关联的那几天要明说"有数、没背景"。
 
-    树读整棵行为树，语义侧只看得到已归组的日子。不说出来，判断者就分不清"这个数字只有两天"
+    树读整棵行为树，语义侧只看得到已关联的日子。不说出来，判断者就分不清"这个数字只有两天"
     和"有三天、其中一天没背景"——后者该让他更相信这个规律，不是更不相信。
     """
 
@@ -144,12 +142,11 @@ def test_days_with_numbers_but_no_scene_are_named_not_dropped(tmp_path) -> None:
     cells = CellIndex.of(ground.tree())
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
     missing = {MONDAY + timedelta(days=14)}
-    layers = provenance(cells, "打球", slot, half_width=2, grouped=lambda day: day not in missing)
+    layers = provenance(cells, "打球", slot, half_width=2, associated_on=lambda day: day not in missing)
 
     assert layers.slot.days == days(0, 7, 14)
-    assert layers.slot.ungrouped == days(14)
-    assert layers.slot.grouped == days(0, 7)
-    assert layers.ungrouped == days(14)  # 四层合起来，去重
+    assert layers.slot.unassociated == days(14)
+    assert layers.unassociated == days(14)  # 四层合起来，去重
 
 
 def test_a_candidate_that_never_hit_this_cell_has_an_empty_slot_layer(tmp_path) -> None:
@@ -158,7 +155,7 @@ def test_a_candidate_that_never_hit_this_cell_has_an_empty_slot_layer(tmp_path) 
     tree = ground_with_a_weekly_habit(tmp_path).tree()
     cells = CellIndex.of(tree)
     layers = provenance(
-        cells, "打球", SlotKey(weekday=0, slot=slot_of(3, 0)), half_width=2, grouped=lambda day: True
+        cells, "打球", SlotKey(weekday=0, slot=slot_of(3, 0)), half_width=2, associated_on=lambda day: True
     )
     assert layers.slot.days == () and layers.slot.hits == 0.0 and layers.slot.value == 0.0
     assert layers.pool.days == ()
@@ -170,15 +167,15 @@ def test_layer_guards(tmp_path) -> None:
     cells = CellIndex.of(tree)
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
     with pytest.raises(ForesightError):
-        provenance(cells, "", slot, half_width=2, grouped=lambda day: True)
+        provenance(cells, "", slot, half_width=2, associated_on=lambda day: True)
     with pytest.raises(ForesightError):
-        provenance(cells, "打球", slot, half_width=2, grouped=None)  # type: ignore[arg-type]
+        provenance(cells, "打球", slot, half_width=2, associated_on=None)  # type: ignore[arg-type]
     with pytest.raises(ForesightError):
-        Layer(name="不认识的层", value=0.0, days=(), ungrouped=())
+        Layer(name="不认识的层", value=0.0, days=(), unassociated=())
     with pytest.raises(ForesightError):
-        Layer(name="slot", value=0.0, days=days(0, 0), ungrouped=())
+        Layer(name="slot", value=0.0, days=days(0, 0), unassociated=())
     with pytest.raises(ForesightError):
-        Layer(name="slot", value=0.0, days=days(0), ungrouped=days(7))
+        Layer(name="slot", value=0.0, days=days(0), unassociated=days(7))
 
 
 # --- 语义侧：每层按自己的日子取背景 -----------------------------------------------------
@@ -199,11 +196,11 @@ def test_each_layer_reads_its_own_days_with_its_own_slot_filter(tmp_path) -> Non
     ground.record(MONDAY + timedelta(days=2), "打球", 19, 0, kind="打球")  # 周三同一时刻
     ground.record(MONDAY + timedelta(days=14), "打球", 8, 0, kind="打球")  # 同周几、离得很远的槽
     grouped_days = (MONDAY, MONDAY + timedelta(days=2), MONDAY + timedelta(days=7), MONDAY + timedelta(days=14))
-    ground.group(*grouped_days)
+    associated = ground.associated(*grouped_days)
     cells = CellIndex.of(ground.tree())
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
     cache = ground.cache()
-    layers = provenance(cells, "打球", slot, half_width=3, grouped=cache.covered)
+    layers = provenance(cells, "打球", slot, half_width=3, associated_on=associated("打球").__contains__)
 
     def background(layer):
         return layer_background(
@@ -241,11 +238,11 @@ def test_the_protective_limit_says_how_many_days_it_left_out(tmp_path) -> None:
     ground = Ground(tmp_path, now=at(MONDAY + timedelta(days=30), 12, 0))
     for week in range(4):
         ground.record(MONDAY + timedelta(days=7 * week), "打球", 19, 0, kind="打球")
-    ground.group(*(MONDAY + timedelta(days=7 * week) for week in range(4)))
+    associated = ground.associated(*(MONDAY + timedelta(days=7 * week) for week in range(4)))
     cells = CellIndex.of(ground.tree())
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
     cache = ground.cache()
-    layers = provenance(cells, "打球", slot, half_width=2, grouped=cache.covered)
+    layers = provenance(cells, "打球", slot, half_width=2, associated_on=associated("打球").__contains__)
     background = layer_background(
         layers.slot,
         "打球",

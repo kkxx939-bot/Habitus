@@ -20,6 +20,10 @@
 #    ``dict[str, ContextView]`` 记忆即可同时消掉两个倍数。
 #
 # TODO(FORESIGHT-PACK-001): 两个配置项还没有消费者，一个事实还没进包。
+# - **背景侧目前恒空**：``layer_background`` 经 ``scene.views`` 读的是按天情景树，而它的写入方
+#   （按天归组）已经删掉（2026-09-13），新的规律级还没有读侧。四层数字照常，语义背景一条都取不到，
+#   而且不会报错——只会在 ``Provenance.unassociated`` 里如实摆着"全部出处日都没有背景"。读侧改写到
+#   规律级是下一步。
 # - ``foresight.max_pack_chars`` 与 ``max_similar_scenes`` 已声明、已进 example.yaml，但生产代码
 #   一处都没读：``render_candidate`` 目前只有测试在调。等证据包（多候选 + 相似情景）成形时接上。
 # - ``render_candidate`` 的 ``max_chars`` 是**尽力而为**：四层的数字与出处一个都不砍，所以四个
@@ -29,7 +33,13 @@
 #   （链的产物）、``hazard``、``cumulative``、两个 lift、``trend`` 一个都没进去。判断者看得到推导、
 #   看不到结论。等 ``CandidateNumbers`` 那一块时一并补上。
 
-from habitus.foresight.assemble import CandidateEvidence, candidate_evidence, candidates_evidence, moment_at
+from habitus.foresight.assemble import (
+    AssociatedDays,
+    CandidateEvidence,
+    candidate_evidence,
+    candidates_evidence,
+    moment_at,
+)
 from habitus.foresight.context import LayerBackground, layer_background
 from habitus.foresight.errors import ForesightError
 from habitus.foresight.model import LAYER_LABELS, LAYER_NAMES, Layer, Moment, Provenance
@@ -39,6 +49,7 @@ from habitus.foresight.render import render_candidate
 __all__ = [
     "LAYER_LABELS",
     "LAYER_NAMES",
+    "AssociatedDays",
     "CandidateEvidence",
     "CellIndex",
     "ForesightError",

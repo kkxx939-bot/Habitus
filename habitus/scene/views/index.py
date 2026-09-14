@@ -16,10 +16,6 @@ from habitus.behavior.schema.vocabulary import GAP_KINDS
 from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.uri import BehaviorURI
 from habitus.scene.calendar import DayTypeCalendar, NominalCalendar
-from habitus.scene.document import SceneDocument
-from habitus.scene.ledger import PendingItem, pending_before
-from habitus.scene.tree import SceneTree
-from habitus.scene.uri import SceneURI
 from habitus.scene.views.model import ActionRef, ObservationGap
 
 _WATCHED_GAP_KIND = "没读懂"
@@ -36,7 +32,7 @@ class DayIndex:
     """
 
     def __init__(
-        self, behavior_tree: BehaviorTree, scene_tree: SceneTree, day: date, *, subject: str, day_note: str | None = None
+        self, behavior_tree: BehaviorTree, day: date, *, subject: str, day_note: str | None = None
     ) -> None:
         self.day = day
         self.subject = subject
@@ -52,15 +48,6 @@ class DayIndex:
             sorted(self.occurrences, key=lambda uri: (self.occurrences[uri].address.started_at.astimezone(UTC), uri))
         )
         self.gaps: tuple[ObservationGap, ...] = self._read_gaps(behavior_tree)
-        self.covered = scene_tree.day_state(day) is not None
-        self.scenes: dict[str, SceneDocument] = {}
-        self.scene_of: dict[str, str] = {}
-        if self.covered:
-            for scene in scene_tree.read_day(day):
-                scene_uri = str(SceneURI.from_address(scene.address))
-                self.scenes[scene_uri] = scene
-                for member in scene.fields["members"]:
-                    self.scene_of[str(member["uri"])] = scene_uri
         # 行为树的短程关系（只存前向、目标可能在相邻的一天）：按类型分开留原始目标 URI，投影时经 cache
         # 解析并对 concurrent_with 取对称闭包
         self.concurrent_targets: dict[str, tuple[str, ...]] = {}
@@ -111,41 +98,38 @@ def _clamp_to_day(started_at: datetime, ended_at: datetime, day: date) -> tuple[
 
 
 class DayIndexCache:
-    """一次查询里同一天只读一次；``covered`` 只看情景树的指针，不解码整天。
+    """一次查询里同一天只读一次。
 
     ``calendar`` 决定每一天的 ``day_note``（见 ``scene.calendar``）；不给就是名义日历，
     即"没有当地日历数据"这个显式的零修正。
+
+    这里原来还答"这一天归过组没有"。那是按天归组的概念，归组删掉之后它换成了"这个候选这一天
+    关联完成了没有"，由组合根从规律级树取事实注入（见 ``foresight.assemble.AssociatedDays``）
+    ——按候选比按天准一级：同一天可能这个候选做完了、那个还没做。
     """
 
     def __init__(
         self,
         behavior_tree: BehaviorTree,
-        scene_tree: SceneTree,
         *,
         subject: str,
         calendar: DayTypeCalendar | None = None,
     ) -> None:
         if not isinstance(behavior_tree, BehaviorTree):
             raise TypeError("behavior_tree must be a BehaviorTree")
-        if not isinstance(scene_tree, SceneTree):
-            raise TypeError("scene_tree must be a SceneTree")
         if not isinstance(subject, str) or not subject.strip():
             raise ValueError("subject must be non-empty text")
         self.behavior_tree = behavior_tree
-        self.scene_tree = scene_tree
         self.subject = subject
         self.calendar: DayTypeCalendar = NominalCalendar() if calendar is None else calendar
         self._days: dict[date, DayIndex] = {}
-        self._covered: dict[date, bool] = {}
-        self._pending: dict[tuple[date, int], tuple[PendingItem, ...]] = {}
 
     def day(self, day: date) -> DayIndex:
         cached = self._days.get(day)
         if cached is None:
             cached = self._days[day] = DayIndex(
-                self.behavior_tree, self.scene_tree, day, subject=self.subject, day_note=self._note(day)
+                self.behavior_tree, day, subject=self.subject, day_note=self._note(day)
             )
-            self._covered[day] = cached.covered
         return cached
 
     def _note(self, day: date) -> str | None:
@@ -158,28 +142,8 @@ class DayIndexCache:
             raise TypeError("a calendar note must be text or None")
         return note.strip() or None
 
-    def covered(self, day: date) -> bool:
-        """那一天有没有当前一代的情景文档——只读指针，给"要不要为这一天解码整棵行为树"把关。
 
-        **答案也只取一次**：指针查询要读文件、解 JSON，而上层会为每个候选的每一层把它问一遍
-        （四层加起来可达数百天）。不记住的话，一次装配就是上万次指针读盘；而且同一次查询里
-        同一天先后两次得到不同答案，会让"数字说有几天没背景"和"背景真取到几天"对不上。
-        """
 
-        if day not in self._covered:
-            cached = self._days.get(day)
-            self._covered[day] = (
-                cached.covered if cached is not None else self.scene_tree.day_state(day) is not None
-            )
-        return self._covered[day]
-
-    def pending(self, today: date, expiry_days: int) -> tuple[PendingItem, ...]:
-        """今天开始前未兑现的待用前提；与候选无关，一次查询里只算一次。"""
-
-        key = (today, expiry_days)
-        if key not in self._pending:
-            self._pending[key] = pending_before(self.scene_tree, today, expiry_days=expiry_days)
-        return self._pending[key]
 
 
 __all__ = ["DayIndex", "DayIndexCache"]

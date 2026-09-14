@@ -173,13 +173,12 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
     # behavior/fusion/config.py 的唯一出处解析）。唯一的例外是时间预测树的读取入口
     # ``prediction/source.py``：整棵树每夜从行为树重建，那是设计路径而不是泄漏，
     # 收在单个模块里由 test_prediction_reads_the_behaviour_tree_through_exactly_one_module 守住。
-    # ``scene``（语义关联层）是行为树的解释层，从行为树派生，允许 import behavior；
-    # ``prediction/scene_source.py`` 是预测树读情景树的唯一入口（同 source.py 之于行为树）。
+    # ``scene``（语义关联层）是行为树的解释层，从行为树派生，允许 import behavior。
     reverse_dependency_violations = [
         str(path.relative_to(REPOSITORY_ROOT))
         for path in production_files()
         if path.relative_to(SRC).parts[0] not in {"behavior", "runtime", "scene"}
-        and path.relative_to(SRC).as_posix() not in {"prediction/source.py", "prediction/scene_source.py"}
+        and path.relative_to(SRC).as_posix() != "prediction/source.py"
         and "behavior" in imported_roots(path)
     ]
     assert reverse_dependency_violations == []
@@ -414,12 +413,11 @@ def test_prediction_reads_the_behaviour_tree_through_exactly_one_module() -> Non
     """
 
     assert (SRC / "prediction").is_dir()
-    assert _prediction_modules_reaching("habitus.behavior") == {
-        "habitus.prediction.source",
-        "habitus.prediction.scene_source",
-    }
-    # 情景树同理：只有 scene_source 一个模块传递性触达 scene。
-    assert _prediction_modules_reaching("habitus.scene") == {"habitus.prediction.scene_source"}
+    assert _prediction_modules_reaching("habitus.behavior") == {"habitus.prediction.source"}
+    # **依赖方向已反转**（2026-09-13）：语义关联层改成"为预测树算出的候选服务"之后，是 scene
+    # 读 prediction（``scene/backlog.py`` 拿树上的出处日算待关联清单），不再是 prediction 读
+    # scene。原来的 ``prediction/scene_source.py`` 已删——它零调用方，留着只会让两个包互指。
+    assert _prediction_modules_reaching("habitus.scene") == set()
 
 
 def test_prediction_stays_out_of_the_semantic_and_composition_layers() -> None:
@@ -458,9 +456,12 @@ def test_behaviour_never_depends_on_prediction() -> None:
 def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
     """语义关联层只读行为树、只用基础设施与模型契约；不知道预测树、记忆树与组合根。
 
-    ``scene`` 从行为树派生（可 import behavior），将来归组与脚本经 ModelClient 调模型；但它
-    不得触达 prediction（依赖单向：预测树经 scene_source 读它）、memory（人物层桥接住组合根）、
-    config / runtime / conversation / integrations / pre。
+    ``scene`` 从行为树派生（可 import behavior），关联经 ModelClient 调模型；它**可以读
+    prediction**——语义关联是为预测树算出的候选服务的，待关联清单就从树上的出处日来
+    （``scene/backlog.py``）。方向是单向的：prediction 不得 import scene（那条由
+    ``test_prediction_reads_the_behaviour_tree_through_exactly_one_module`` 守着）。
+    scene 仍然不得触达 memory（人物层桥接住组合根）、config / runtime / conversation /
+    integrations / pre。
     """
 
     scene_root = SRC / "scene"
@@ -469,16 +470,68 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
         str(path.relative_to(REPOSITORY_ROOT))
         for path in scene_root.rglob("*.py")
         if imported_roots(path)
-        & {"prediction", "memory", "config", "runtime", "conversation", "integrations", "pre"}
+        & {"memory", "config", "runtime", "conversation", "integrations", "pre"}
     ]
     assert violations == []
-    # 模型触点只有归组这一处（提示词渲染 + 服务）：清单、刷新器、存储、投影都不得碰模型。
+    # 读 prediction 的只允许待关联清单这一个模块：清单之外的地方拿到树，就会开始在语义层
+    # 重算数字或做判断——那是预测层的活。
+    prediction_readers = sorted(
+        str(path.relative_to(SRC)) for path in scene_root.rglob("*.py") if "prediction" in imported_roots(path)
+    )
+    assert prediction_readers == ["scene/backlog.py"]
+    # 地址层（含规律级的 kinds 地址）只认名字与时刻：不依赖预测树，也不依赖 scene 包里任何
+    # 别的模块——它要被存储、URI、读侧、关联四处共用，任何一边的改动都不该把它拽着走。
+    assert imported_roots(scene_root / "model.py") & {"prediction", "scene"} == set()
+    # 模型触点只有关联这一处（提示词渲染 + 服务）。按天归组那一处已经随整个包删掉（2026-09-13）。
+    # 清单、存储、投影都不得碰模型——它们一碰，语义层就会开始自己做判断。
     model_callers = sorted(
         str(path.relative_to(SRC))
         for path in scene_root.rglob("*.py")
         if "model_client" in imported_roots(path)
     )
-    assert model_callers == ["scene/grouping/prompt.py", "scene/grouping/service.py"]
+    assert model_callers == ["scene/association/prompt.py", "scene/association/service.py"]
+    # 关联包分成两半，**面向模型的那半用白名单钉死**：输入/产出形状、schema、提示词、装配校验
+    # 只许认那份共用的文本清洗、模型契约与基础设施。它一旦能 import 存储或行为树，"草稿只用编号、
+    # 不碰 URI、不落盘"这条立身之本就只剩自觉了。另一半（编排：前提投影、输入装配、进度、刷新器）
+    # 要读树，按 scene 包整体的规矩走即可。
+    association_root = scene_root / "association"
+    model_facing = ("model.py", "schema.py", "prompt.py", "assembly.py", "service.py")
+    allowed_prefixes = ("habitus.scene.association", "habitus.scene.text", "habitus.model_client", "habitus.foundation")
+    leaked = sorted(
+        f"{path.relative_to(SRC)}: {module}"
+        for path in association_root.rglob("*.py")
+        if path.name in model_facing
+        for module in imported_modules(path)
+        if module.startswith("habitus.") and not module.startswith(allowed_prefixes)
+    )
+    assert leaked == []
+    # 编排那半也用**正面白名单**，不用黑名单：黑名单每加一个新包就要记得补一条，而且挡不住
+    # ``habitus.scene.document`` 里按天那半（``model`` / ``codec`` / ``config``，都是"事"的形状）
+    # 与 schema 注册表——规律级明确声明不走注册表，这条纪律不能只靠自觉。
+    orchestration_allowed = (
+        "habitus.scene.association",
+        "habitus.scene.regularity",
+        "habitus.scene.backlog",
+        "habitus.scene.calendar",
+        "habitus.scene.model",
+        "habitus.scene.uri",
+        "habitus.scene.text",
+    )
+    stale = sorted(
+        f"{path.relative_to(SRC)}: {module}"
+        for path in association_root.rglob("*.py")
+        for module in imported_modules(path)
+        if module.startswith("habitus.scene.") and not module.startswith(orchestration_allowed)
+    )
+    assert stale == []
+    # 反方向同样要钉：scene 里认识关联包的只有包根这一处，第 4 步的编排接线会显式加进来。
+    association_readers = sorted(
+        str(path.relative_to(SRC))
+        for path in scene_root.rglob("*.py")
+        if path.parent != association_root
+        and any(module.startswith("habitus.scene.association") for module in imported_modules(path))
+    )
+    assert association_readers == ["scene/__init__.py"]
     # 只读行为树：只许经 behavior 的模型/URI/树/文档入口读，不得触达写侧（编辑器、归约、融合、
     # 词表、观测、语义层）——"行为树一个字不动"要由边界保证，不靠自觉。
     behavior_write_side = {
@@ -611,3 +664,30 @@ def test_retired_behavior_does_not_extend_memory_kind() -> None:
     )
     assert "behaviors" not in memory_tree_source
     assert not (SRC / "memory" / "schema" / "definitions" / "behavior.yaml").exists()
+
+
+def test_every_package_entry_exports_only_things_that_exist() -> None:
+    """``__all__`` 是这一层对外说"我给什么"。名字取不到就是幻觉 API。
+
+    删掉一批实现之后最容易漏的就是它——``from habitus.scene import *`` 会当场抛 AttributeError，
+    而按 ``__all__`` 生成文档或做 re-export 的工具会拿到一份并不存在的清单。ruff 的 F822 对包
+    初始化文件默认豁免，pyright 的同名检查又看不穿 ``__getattr__`` 懒加载（``integrations`` 那
+    两个包就是），所以这条只能按**运行时**判：``hasattr`` 会走 ``__getattr__``，懒加载照样过。
+    """
+
+    import importlib
+
+    broken: list[str] = []
+    for name in (
+        "habitus.scene",
+        "habitus.scene.association",
+        "habitus.scene.regularity",
+        "habitus.scene.views",
+        "habitus.foresight",
+        "habitus.prediction",
+        "habitus.integrations.http_api",
+        "habitus.integrations.local_service",
+    ):
+        module = importlib.import_module(name)
+        broken.extend(f"{name}.{item}" for item in getattr(module, "__all__", ()) if not hasattr(module, item))
+    assert broken == []

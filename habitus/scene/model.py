@@ -1,18 +1,11 @@
-"""语义关联树（情景树）共享的节点、地址与目录值对象。
+"""语义关联层的地址与受控枚举。
 
-情景树是行为树的**解释层**：每封口日一次 LLM 归组，把当天的 occurrence 归到若干"事"（情景）
-之下，并给出情景对更早行为/情景的 needs / results_from 边。它从行为树派生、按天整体重建、
-可推倒重来；行为树一个字不动。
+两套地址并存了一段时间；按天归组那一套已经删掉（2026-09-13）。现在这里只有**规律级**：
+``AssociationAddress``（哪个候选、哪一天、哪条行为、几点开始）与它的目录 ``KindDirectory``。
 
-设计定稿见桌面《语义关联层实现方案 v1》（2026-09-06）。三条不变的纪律：
-
-- **判断按事、表达按行为**：LLM 只判"哪几条是一件事、这件事依赖什么、留下什么"；每条行为的
-  上下文视图由此机械投影（M3）。
-- **occurrence 是原子**：本树只归组、只连边，不切分、不合并、不改写任何一条行为。
-- **不存任何计数**：次数与权重归时间预测树；本树只存实例与解释。
-
-地址身份沿行为树同一套规则（``behavior.model`` 的语义名与叶名函数直接复用）：叶名 =
-``{label}--{started_at}``，label 是归组给出的原话标签（第一期不归一）。
+身份纪律与行为树、记忆树同一套：人写法 ``compare=False``，真正的身份是 NFC + casefold 之后的
+那一份；叶名带上行为原名，因为同一 kind、同一时刻、不同名字的两条 occurrence 在行为树上完全
+合法，只用时刻会让它们互相覆盖。
 """
 
 from __future__ import annotations
@@ -22,32 +15,18 @@ from datetime import date, datetime
 from enum import Enum
 
 from habitus.behavior.model import (
-    MAX_BEHAVIOR_NAME_UTF8_BYTES,
     behavior_identity_name,
     behavior_local_timestamp,
     is_ascii_digits,
     semantic_name,
     split_behavior_identity,
 )
-
-SCENES_SEGMENT = "scenes"
+from habitus.foundation.ids import canonical_path_identity
 
 # 与行为名同一字节预算（同一套叶名规则）。情景**没有**撞车消歧后缀：同一天里两个情景同标签且
 # 首成员同一微秒开始，就是同一件事——归组校验（M2）在落盘前把它们合并；到了存储层仍撞车即冲突。
-MAX_SCENE_LABEL_UTF8_BYTES = MAX_BEHAVIOR_NAME_UTF8_BYTES
 
 
-class SceneRole(str, Enum):
-    """一条 occurrence 在所属情景里的角色（借 Ego4D Goal-Step 的三档）。
-
-    ``ESSENTIAL`` 这件事必需的一步；``OPTIONAL`` 相关但可有可无；``IRRELEVANT`` 发生在这件事
-    期间、与它无关（做饭时看了会儿手机）——仍归进情景，记录"那段时间他在做什么事的期间发生了
-    这条"，但投影"此前步骤"时不计。
-    """
-
-    ESSENTIAL = "essential"
-    OPTIONAL = "optional"
-    IRRELEVANT = "irrelevant"
 
 
 class SceneLinkType(str, Enum):
@@ -62,154 +41,226 @@ class SceneLinkType(str, Enum):
     RESULTS_FROM = "results_from"
 
 
-def scene_label(value: object, field_name: str) -> str:
-    """校验情景标签：可作地址叶名的语义名，且留出消歧后缀的字节余量。"""
-
-    name = semantic_name(value, field_name)
-    if len(name.encode("utf-8")) > MAX_SCENE_LABEL_UTF8_BYTES:
-        raise ValueError(f"{field_name} exceeds the scene label byte budget")
-    return name
 
 
-def scene_static_directories() -> tuple[tuple[str, ...], ...]:
-    """初始化必须存在的固定目录。"""
 
-    return ((SCENES_SEGMENT,),)
+
+
+
+
+
+# ── 规律级：按候选行为归档的那片区域 ──────────────────────────────────────────────────
+#
+# 语义关联是为预测树算出的候选服务的，所以归档的主键是 ``kind_token`` 而不是日历日——按天归档
+# 会把同一个候选的历次发生散在几百个日子里，读侧要还原"这个候选历次分别因为什么"就得扫全树。
+#
+#     kinds/<kind_token>/
+#         .abstract.md                     L0 一句话：这个行为通常因为什么发生
+#         .overview.md                     L1 几种情境（各自覆盖哪些日期）+ 由来
+#         2026/06/10/<时刻>.md              L2 这一次的上下文与前因
+#
+# 地址住在这里而不是 ``regularity`` 包里：``uri`` 要同时认两种文档形态，而 ``regularity`` 的
+# 文档层反过来要用 ``uri``——地址与地址放在一起，这条环就不存在。
+
+KINDS_SEGMENT = "kinds"
+
+
+class RegularityLevel(int, Enum):
+    """规律级的语义层；与行为树、记忆树同一套约定。"""
+
+    ABSTRACT = 0
+    OVERVIEW = 1
+    DETAIL = 2
+
+    @property
+    def sidecar_filename(self) -> str:
+        if self is RegularityLevel.ABSTRACT:
+            return ".abstract.md"
+        if self is RegularityLevel.OVERVIEW:
+            return ".overview.md"
+        raise ValueError("L2 uses an AssociationAddress instead of a semantic sidecar")
+
+    @classmethod
+    def from_sidecar_filename(cls, filename: object) -> RegularityLevel | None:
+        if filename == ".abstract.md":
+            return cls.ABSTRACT
+        if filename == ".overview.md":
+            return cls.OVERVIEW
+        return None
+
+
+def regularity_static_directories() -> tuple[tuple[str, ...], ...]:
+    return ((KINDS_SEGMENT,),)
+
+
+def _kind_identity(kind_token: object) -> str:
+    """候选落到文件系统的目录名：规范身份（NFC + casefold），不是人写法。"""
+
+    return canonical_path_identity(semantic_name(kind_token, "regularity kind token"), "regularity kind token")
 
 
 @dataclass(frozen=True)
-class SceneAddress:
-    """唯一映射到一个情景 L2 文档的逻辑地址（不含物理代目录）。"""
+class AssociationAddress:
+    """一次发生的关联记录：哪个候选、哪一天、哪条行为、几点开始。
 
+    身份与 ``SceneAddress`` / ``BehaviorAddress`` / ``MemoryAddress` 同一套做法，不是另起一套：
+
+    - ``kind_token`` 与 ``name`` 是**人写法**，比较时不看（``compare=False``）；真正的身份是
+      ``canonical_path_identity``（NFC + casefold）之后的那两个。``semantic_name`` 只**校验**
+      归一后的形式合法，**返回的是原名**——直接拿它当目录名，``Gym`` 与 ``gym`` 在大小写不敏感
+      的文件系统上就是同一个文件，而两个地址却不相等：一个候选会把另一个的记录物理覆盖，
+      幸存的那条对两边都读不出来。
+    - 叶名是 ``behavior_identity_name(name, started_at)``，**带上行为的原始名**。只用时刻不行：
+      同一个 kind、同一时刻、不同名字的两条 occurrence 在行为树上完全合法（撞车消歧按名字分），
+      只用时刻会让它们互相覆盖。
+
+    ``started_at`` 就是行为树上那条 occurrence 的开始时刻；``occurred_on`` 必须等于它的本地日期
+    （与行为树同一条契约），否则目录与内容会说两个日子。
+    """
+
+    kind_token: str = field(compare=False)
     occurred_on: date
-    label: str = field(compare=False)
+    name: str = field(compare=False)
     started_at: datetime = field(compare=False)
+    _identity_kind: str = field(init=False, repr=False, compare=True)
     _identity_name: str = field(init=False, repr=False, compare=True)
 
     def __post_init__(self) -> None:
+        kind_token = semantic_name(self.kind_token, "regularity kind token")
         if isinstance(self.occurred_on, datetime) or not isinstance(self.occurred_on, date):
-            raise TypeError("scene address occurred_on must be a date without a time")
-        label = scene_label(self.label, "scene label")
-        started_at = behavior_local_timestamp(self.started_at, "scene started_at")
+            raise TypeError("regularity address occurred_on must be a date without a time")
+        name = semantic_name(self.name, "regularity behaviour name")
+        started_at = behavior_local_timestamp(self.started_at, "regularity started_at")
         if self.occurred_on != started_at.date():
-            raise ValueError("scene address date must match the local started_at date")
-        object.__setattr__(self, "label", label)
+            raise ValueError("regularity address date must match the local started_at date")
+        object.__setattr__(self, "kind_token", kind_token)
+        object.__setattr__(self, "name", name)
         object.__setattr__(self, "started_at", started_at)
-        object.__setattr__(self, "_identity_name", behavior_identity_name(label, started_at, "scene label"))
+        object.__setattr__(self, "_identity_kind", canonical_path_identity(kind_token, "regularity kind token"))
+        object.__setattr__(
+            self, "_identity_name", behavior_identity_name(name, started_at, "regularity behaviour name")
+        )
+
+    @property
+    def identity_kind(self) -> str:
+        """落到文件系统的候选目录名。"""
+
+        return self._identity_kind
 
     @property
     def identity_name(self) -> str:
+        """落到文件系统的叶名（不含 ``.md``）。"""
+
         return self._identity_name
 
     @classmethod
-    def from_identity(cls, occurred_on: date, identity_name: str) -> SceneAddress:
-        """从叶名恢复地址；还原到的是**规范身份**（NFC + casefold），标签原话在文档 ``label`` 字段里。"""
+    def from_identity(cls, kind_token: str, occurred_on: date, identity_name: str) -> AssociationAddress:
+        """从叶名还原。
 
-        label, started_at = split_behavior_identity(identity_name, "scene label")
-        return cls(occurred_on, label, started_at)
+        走行为树那套 ``split_behavior_identity``——它比自己写的解析严格：非规范的时间戳
+        （``+0060``、``+0099``、阿拉伯数字）会被拒，而不是被"修复"成另一个文件名。
+        """
+
+        name, started_at = split_behavior_identity(identity_name, "regularity behaviour name")
+        return cls(kind_token, occurred_on, name, started_at)
 
 
 @dataclass(frozen=True)
-class SceneDirectory:
-    """严格限定于情景树的逻辑目录：根、``scenes``、``scenes/YYYY[/MM[/DD]]``。"""
+class KindDirectory:
+    """``kinds`` 之下的目录：候选，以及它下面按年 / 月 / 日分的片。
 
-    parts: tuple[str, ...] = field(default=(), compare=False)
-    _identity_parts: tuple[str, ...] = field(init=False, repr=False, default=())
+    分片只为"按出处日直接定位"服务：预测层拿到四层出处日之后，要读的就是那几天，不该为此扫遍
+    这个候选的全部历史。
+    """
+
+    parts: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.parts, str) or not isinstance(self.parts, tuple):
-            raise TypeError("scene directory parts must be a tuple of strings")
-        parts = tuple(self.parts)
-        object.__setattr__(self, "parts", parts)
-        self._validate(parts)
-        object.__setattr__(self, "_identity_parts", parts)
-
-    @property
-    def identity_parts(self) -> tuple[str, ...]:
-        return self._identity_parts
+            raise TypeError("regularity directory parts must be a tuple of strings")
+        self._validate(self.parts)
 
     @staticmethod
     def _validate(parts: tuple[str, ...]) -> None:
         if not parts:
             return
-        if parts[0] != SCENES_SEGMENT:
-            raise ValueError("scene directory is outside the confirmed tree")
-        values = parts[1:]
-        if len(values) > 3:
-            raise ValueError("scene dated directory is deeper than day level")
-        for value, width, label in zip(values, (4, 2, 2), ("year", "month", "day"), strict=False):
+        if parts[0] != KINDS_SEGMENT:
+            raise ValueError("regularity directory is outside the confirmed tree")
+        if len(parts) == 1:
+            return
+        # 目录名必须**已经是**规范身份：路径上出现 ``Gym`` 而不是 ``gym``，说明有人绕过了
+        # ``for_kind`` 直接拼路径，那一刻大小写不敏感的文件系统上就已经埋了一次覆盖。
+        if _kind_identity(parts[1]) != parts[1]:
+            raise ValueError("regularity kind directory must use the canonical kind identity")
+        dated = parts[2:]
+        if len(dated) > 3:
+            raise ValueError("regularity dated directory is deeper than day level")
+        for value, width, label in zip(dated, (4, 2, 2), ("year", "month", "day"), strict=False):
             if not isinstance(value, str) or len(value) != width or not is_ascii_digits(value):
-                raise ValueError(f"scene {label} directory has an invalid format")
-        if values and not 1 <= int(values[0]) <= 9999:
-            raise ValueError("scene year directory is outside the calendar range")
-        if len(values) >= 2 and not 1 <= int(values[1]) <= 12:
-            raise ValueError("scene month directory is outside the calendar range")
-        if len(values) == 3:
+                raise ValueError(f"regularity {label} directory has an invalid format")
+        if dated and not 1 <= int(dated[0]) <= 9999:
+            raise ValueError("regularity year directory is outside the calendar range")
+        if len(dated) >= 2 and not 1 <= int(dated[1]) <= 12:
+            raise ValueError("regularity month directory is outside the calendar range")
+        if len(dated) == 3:
             try:
-                date(int(values[0]), int(values[1]), int(values[2]))
+                date(int(dated[0]), int(dated[1]), int(dated[2]))
             except ValueError as exc:
-                raise ValueError("scene day directory is not a valid calendar date") from exc
+                raise ValueError("regularity day directory is not a valid calendar date") from exc
 
     @classmethod
-    def root(cls) -> SceneDirectory:
+    def root(cls) -> KindDirectory:
         return cls()
 
     @classmethod
-    def scenes(cls, year: int | None = None, month: int | None = None, day: int | None = None) -> SceneDirectory:
-        if year is None:
-            if month is not None or day is not None:
-                raise ValueError("scene month or day requires a year")
-            return cls((SCENES_SEGMENT,))
-        if isinstance(year, bool) or not isinstance(year, int):
-            raise TypeError("scene directory year must be an integer")
-        parts = [SCENES_SEGMENT, f"{year:04d}"]
-        if month is None:
-            if day is not None:
-                raise ValueError("scene day requires a month")
-            return cls(tuple(parts))
-        if isinstance(month, bool) or not isinstance(month, int):
-            raise TypeError("scene directory month must be an integer")
-        parts.append(f"{month:02d}")
-        if day is None:
-            return cls(tuple(parts))
-        if isinstance(day, bool) or not isinstance(day, int):
-            raise TypeError("scene directory day must be an integer")
-        parts.append(f"{day:02d}")
-        return cls(tuple(parts))
+    def kinds(cls) -> KindDirectory:
+        return cls((KINDS_SEGMENT,))
 
     @classmethod
-    def for_day(cls, occurred_on: date) -> SceneDirectory:
+    def for_kind(cls, kind_token: str) -> KindDirectory:
+        return cls((KINDS_SEGMENT, _kind_identity(kind_token)))
+
+    @classmethod
+    def for_day(cls, kind_token: str, occurred_on: date) -> KindDirectory:
         if isinstance(occurred_on, datetime) or not isinstance(occurred_on, date):
             raise TypeError("occurred_on must be a date without a time")
-        return cls.scenes(occurred_on.year, occurred_on.month, occurred_on.day)
+        return cls(
+            (
+                KINDS_SEGMENT,
+                _kind_identity(kind_token),
+                f"{occurred_on.year:04d}",
+                f"{occurred_on.month:02d}",
+                f"{occurred_on.day:02d}",
+            )
+        )
 
     @classmethod
-    def for_address(cls, address: SceneAddress) -> SceneDirectory:
-        if not isinstance(address, SceneAddress):
-            raise TypeError("address must be a SceneAddress")
-        return cls.for_day(address.occurred_on)
+    def for_address(cls, address: AssociationAddress) -> KindDirectory:
+        if not isinstance(address, AssociationAddress):
+            raise TypeError("address must be an AssociationAddress")
+        return cls.for_day(address.kind_token, address.occurred_on)
+
+    @property
+    def kind_token(self) -> str | None:
+        return self.parts[1] if len(self.parts) >= 2 else None
 
     def day(self) -> date | None:
-        """日目录对应的日历日；不是日目录返回 None。"""
-
-        if len(self.parts) != 4:
+        if len(self.parts) != 5:
             return None
-        return date(int(self.parts[1]), int(self.parts[2]), int(self.parts[3]))
+        return date(int(self.parts[2]), int(self.parts[3]), int(self.parts[4]))
 
-    def parent(self) -> SceneDirectory | None:
+    def parent(self) -> KindDirectory | None:
         if not self.parts:
             return None
-        return SceneDirectory(self.parts[:-1])
+        return KindDirectory(self.parts[:-1])
 
 
 __all__ = [
-    "MAX_SCENE_LABEL_UTF8_BYTES",
-    "SCENES_SEGMENT",
+    "regularity_static_directories",
+    "RegularityLevel",
+    "KindDirectory",
+    "AssociationAddress",
+    "KINDS_SEGMENT",
     "is_ascii_digits",
-    "SceneAddress",
-    "SceneDirectory",
     "SceneLinkType",
-    "SceneRole",
-    "scene_label",
-    "scene_static_directories",
 ]

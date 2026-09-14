@@ -2,7 +2,7 @@
 
 本模块只 import ``datetime``。带着情景视图的产物（``LayerBackground``、``CandidateEvidence``）
 住在 ``context`` 与 ``assemble``，因为它们引用 ``scene.views`` 的类型——让数字这一侧也认识
-情景树，"出处从树来、不从情景树重推"这条就没有边界钉着了。
+读侧，"出处从预测树来、不从别处重推"这条就没有边界钉着了。
 """
 
 from __future__ import annotations
@@ -39,26 +39,26 @@ class Layer:
       日子——"他那天没做"的那些天不在 ``days`` 里。
 
     ``days`` 是这一层的出处，直接来自树上的 ``cell_days``，**不由本层按覆盖日重推**——树读
-    整棵行为树、按覆盖扣、按衰减加权，重推会得到另一份事实。``ungrouped`` 是这批日子里情景树
-    还没归组的那几天：它们有数、没背景，必须明说，否则判断者分不清"这个数字只有 6 天"和
+    整棵行为树、按覆盖扣、按衰减加权，重推会得到另一份事实。``unassociated`` 是这批日子里语义层
+    还没关联完成的那几天：它们有数、没背景，必须明说，否则判断者分不清"这个数字只有 6 天"和
     "有 8 天、其中 2 天没背景"。
     """
 
     name: str
     value: float
     days: tuple[date, ...]
-    ungrouped: tuple[date, ...]
+    unassociated: tuple[date, ...]
     hits: float | None = None
     exposure: float | None = None
 
     def __post_init__(self) -> None:
         if self.name not in LAYER_NAMES:
             raise ForesightError(f"unknown shrinkage layer: {self.name!r}")
-        for label, series in (("days", self.days), ("ungrouped", self.ungrouped)):
+        for label, series in (("days", self.days), ("unassociated", self.unassociated)):
             if any(later <= earlier for earlier, later in zip(series, series[1:], strict=False)):
                 raise ForesightError(f"layer {self.name} lists its {label} out of order or twice")
-        if not set(self.ungrouped) <= set(self.days):
-            raise ForesightError(f"layer {self.name} counts ungrouped days it did not come from")
+        if not set(self.unassociated) <= set(self.days):
+            raise ForesightError(f"layer {self.name} counts unassociated days it did not come from")
         # 裸账本要么两个都给、要么都不给：只给一半的话，"分子分母摆出来让人自己掂量"这件事
         # 就做了一半，而读的人无从知道缺的是哪一半。
         if (self.hits is None) != (self.exposure is None):
@@ -73,11 +73,8 @@ class Layer:
     def label(self) -> str:
         return LAYER_LABELS[self.name]
 
-    @property
-    def grouped(self) -> tuple[date, ...]:
-        """语义侧真取得到背景的那批日子——每一层就按它去取上下文。"""
 
-        missing = set(self.ungrouped)
+        missing = set(self.unassociated)
         return tuple(day for day in self.days if day not in missing)
 
 
@@ -98,10 +95,10 @@ class Provenance:
         return iter((self.slot, self.pool, self.cross_weekday, self.all_day))
 
     @property
-    def ungrouped(self) -> tuple[date, ...]:
+    def unassociated(self) -> tuple[date, ...]:
         """四层合起来有数、却没有语义背景的日子（升序去重）。"""
 
-        return tuple(sorted({day for layer in self for day in layer.ungrouped}))
+        return tuple(sorted({day for layer in self for day in layer.unassociated}))
 
 
 @dataclass(frozen=True)

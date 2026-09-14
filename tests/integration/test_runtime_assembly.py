@@ -38,6 +38,7 @@ from habitus.runtime import (
 )
 from tests.helpers import BASE_TIME
 from tests.model_helpers import prepare_chat_request
+from tests.unit.runtime.fixtures import STARTUP_PARAMETERS
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
@@ -651,3 +652,57 @@ def test_runtime_memory_search_facades_use_the_real_search_service_and_lifecycle
         await runtime.close()
 
     asyncio.run(scenario())
+
+
+def _fully_enabled_runtime(tmp_path: Path):  # type: ignore[no-untyped-def]
+    payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
+    payload["storage"]["root"] = str(tmp_path / "data")
+    for route, adapter in (
+        (payload["models"]["chat"]["route"], "fake_chat"),
+        (payload["models"]["embedding"]["route"], "fake_embedding"),
+        (payload["models"]["rerank"]["route"], "fake_rerank"),
+        (payload["memory"]["vector_store"]["route"], "fake_vector"),
+        (payload["conversation"]["summary_vector_store"]["route"], "fake_vector"),
+    ):
+        route.update(provider="fake", adapter=adapter, credential_ref="")
+    payload["behavior"] = {"primary_subject": "家庭成员A"}
+    payload["prediction"] = dict(STARTUP_PARAMETERS)
+    payload["scene"] = {"enabled": True}
+    payload["foresight"] = {"enabled": True}
+    config = HabitusConfig.from_mapping(payload)
+    providers, vectors = runtime_dependencies()
+    return build_runtime(
+        config, providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())
+    )
+
+
+def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path: Path) -> None:
+    """四组全开走一遍组合根。
+
+    这条路径此前**零覆盖**：语义层与预测层的接线测试都直接调各自的 build，从不经过
+    ``build_runtime``，于是一处恒不成立的实例同一性校验让生产配置起不来，而 634 条相关测试全绿。
+    """
+
+    runtime = _fully_enabled_runtime(tmp_path)
+    behavior = runtime.components.behavior
+    prediction = runtime.components.prediction
+    assert behavior is not None and prediction is not None
+    # 语义层的三件：规律级树、刷新器、以及**真的挂在重建之后**的那一拍。
+    assert behavior.regularity_tree is not None and behavior.association_refresher is not None
+    assert prediction.worker.after_rebuild is not None
+    # 预测层的事实源读的是这个 Runtime 的那棵规律级树，而不是另一个同路径的实例。
+    foresight = runtime.components.foresight
+    assert foresight is not None
+    assert foresight.assembler.associated.__self__.tree is behavior.regularity_tree  # type: ignore[attr-defined]
+
+
+def test_an_enabled_semantic_layer_that_is_not_attached_to_the_nightly_batch_is_refused(tmp_path: Path) -> None:
+    """接线漏了的话，进程照常启动、health 全绿、关联一夜都不会跑，而配置里还开着——无处可查。"""
+
+    runtime = _fully_enabled_runtime(tmp_path)
+    components = runtime.components
+    assert components.prediction is not None
+    components.prediction.worker.after_rebuild = None
+
+    with pytest.raises(ValueError, match="attached to the nightly rebuild"):
+        replace(components)

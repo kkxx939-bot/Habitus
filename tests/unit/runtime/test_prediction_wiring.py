@@ -21,26 +21,10 @@ from habitus.prediction.errors import PredictionTreeError
 from habitus.runtime.prediction import build_prediction_components
 from tests.integration.test_runtime_assembly import REPOSITORY_ROOT
 from tests.unit.behavior.tree_payloads import occurrence_payload
+from tests.unit.runtime.fixtures import STARTUP_PARAMETERS
 from tests.unit.runtime.test_behavior_pipeline import SUBJECT, behavior_enabled_config
 
 CST = timezone(timedelta(hours=8))
-STARTUP_PARAMETERS = {
-    "enabled": True,
-    "slot_minutes": 15,
-    "decay_half_life_days": 60,
-    "recent_half_life_days": 14,
-    "recurrence_half_life_days": 365,
-    "pool_half_width": 3,
-    "shrink_slot_to_pool": 5,
-    "shrink_pool_to_weekday": 5,
-    "shrink_weekday_to_all_day": 5,
-    "laplace_epsilon": 0.5,
-    "transition_window_seconds": 1800,
-    "shrink_edge": 5,
-    "recurrence_window_days": 90,
-    "rebuild_interval_seconds": 86400,
-    "published_generations": 7,
-}
 
 
 def prediction_enabled_config(tmp_path: Path) -> HabitusConfig:
@@ -149,3 +133,114 @@ def _publish_occurrences(tree: BehaviorTree, *, days: int) -> None:
                 goal=None,
             ),
         )
+
+
+def test_the_nightly_stage_runs_after_the_rebuild_and_sees_the_new_generation() -> None:
+    """顺序与已删的按天归组相反：关联的待办是树上的出处日，必须等这一代树落地才算得出来。"""
+
+    from habitus.runtime.prediction import PredictionRebuildWorker
+
+    order: list[str] = []
+
+    class _Rebuilder:
+        def run_once(self) -> str:
+            order.append("rebuild")
+            return "generation"
+
+    async def stage() -> None:
+        order.append("association")
+
+    worker = PredictionRebuildWorker(
+        _Rebuilder(),  # type: ignore[arg-type]
+        interval_seconds=60.0,
+        shutdown_timeout_seconds=1.0,
+        after_rebuild=stage,
+    )
+
+    assert asyncio.run(worker.run_once()) == "generation"
+    assert order == ["rebuild", "association"]
+
+
+def test_a_failing_nightly_stage_does_not_block_the_rebuild() -> None:
+    """派生层不做级联：关联那一拍失败只留观测，下一轮重建照常。"""
+
+    from habitus.runtime.prediction import PredictionRebuildWorker
+
+    rebuilt: list[str] = []
+
+    class _Rebuilder:
+        def run_once(self) -> str:
+            rebuilt.append("once")
+            return "generation"
+
+    async def stage() -> None:
+        raise RuntimeError("association is down")
+
+    worker = PredictionRebuildWorker(
+        _Rebuilder(),  # type: ignore[arg-type]
+        interval_seconds=60.0,
+        shutdown_timeout_seconds=1.0,
+        after_rebuild=stage,
+    )
+
+    assert asyncio.run(worker.run_once()) == "generation"
+    assert rebuilt == ["once"]
+
+
+def test_the_nightly_stage_result_reaches_the_observation_event() -> None:
+    """一夜全败而事件写着 SUCCESS、属性为空的话，运维只能靠猜。"""
+
+    from habitus.foundation.observability import Observer
+    from habitus.runtime.prediction import PredictionRebuildWorker
+    from habitus.scene import AssociationRefreshReport
+
+    seen: list[object] = []
+
+    class _Observer(Observer):
+        def record(self, observation) -> None:  # type: ignore[no-untyped-def]
+            seen.append(observation)
+
+    class _Rebuilder:
+        def run_once(self) -> str:
+            return "generation"
+
+    async def stage() -> AssociationRefreshReport:
+        return AssociationRefreshReport(
+            associated=("a/2026-09-04",), failed=("b/2026-09-04", "c/2026-09-04"), signals=("x",), model_calls=3
+        )
+
+    worker = PredictionRebuildWorker(
+        _Rebuilder(),  # type: ignore[arg-type]
+        interval_seconds=60.0,
+        shutdown_timeout_seconds=1.0,
+        observer=_Observer(),
+        after_rebuild=stage,
+    )
+    asyncio.run(worker.run_once())
+
+    (event,) = [item for item in seen if getattr(item, "operation", "") == "nightly_stage"]
+    assert event.attributes["associated"] == 1 and event.attributes["failed"] == 2
+    assert event.attributes["model_calls"] == 3 and event.attributes["signals"] == 1
+
+
+def test_a_failing_nightly_stage_is_remembered_by_the_worker() -> None:
+    """不设 last_error 的话，健康检查会一直说这个 worker 健康，哪怕关联每夜都抛。"""
+
+    from habitus.runtime.prediction import PredictionRebuildWorker
+
+    class _Rebuilder:
+        def run_once(self) -> str:
+            return "generation"
+
+    async def stage() -> None:
+        raise RuntimeError("association is down")
+
+    worker = PredictionRebuildWorker(
+        _Rebuilder(),  # type: ignore[arg-type]
+        interval_seconds=60.0,
+        shutdown_timeout_seconds=1.0,
+        after_rebuild=stage,
+    )
+    asyncio.run(worker.run_once())
+
+    assert isinstance(worker.last_error, RuntimeError)

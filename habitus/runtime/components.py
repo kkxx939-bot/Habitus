@@ -379,18 +379,26 @@ class RuntimeComponents:
             # 实例同一性：夜批必须读**这个** Runtime 写入的那棵行为树，不是另开一个同路径的实例。
             if self.prediction.rebuilder.behavior_tree is not self.behavior.tree:
                 raise ValueError("prediction must rebuild from the assembled behaviour tree")
+        if self.behavior is not None and self.behavior.association_refresher is not None:
+            # 接线漏了的话，进程照常启动、health 全绿、关联一夜都不会跑，而配置里还开着——无处可查。
+            if self.prediction is None or self.prediction.worker.after_rebuild is None:
+                raise ValueError("the association stage must be attached to the nightly rebuild")
         if self.foresight is not None:
             if not isinstance(self.foresight, ForesightRuntimeComponents):
                 raise TypeError("foresight must be ForesightRuntimeComponents or None")
-            if self.behavior is None or self.prediction is None or self.behavior.scene_tree is None:
+            if self.behavior is None or self.prediction is None or self.behavior.regularity_tree is None:
                 raise ValueError("foresight reads both derived trees; prediction and scene must be enabled")
             # 实例同一性：装配器必须读**这个** Runtime 的那三份存储，否则证据里的数字与背景
             # 可能来自另一个同路径的实例，而且看不出来。
             assembler = self.foresight.assembler
             if assembler.behavior_tree is not self.behavior.tree:
                 raise ValueError("foresight must read the assembled behaviour tree")
-            if assembler.scene_tree is not self.behavior.scene_tree:
-                raise ValueError("foresight must read the assembled scene tree")
+            # 事实源必须读**这个** Runtime 的规律级树：换一棵同路径的实例，数字与背景就会来自
+            # 两批不同的日子，而且看不出来。比的是那个事实源背后的树，不是绑定方法——绑定方法
+            # 每取一次都是新对象，拿它做同一性校验的结果是恒不相等、把唯一正确的那条也挡掉。
+            source = getattr(assembler.associated, "__self__", None)
+            if self.behavior.regularity_tree is None or getattr(source, "tree", None) is not self.behavior.regularity_tree:
+                raise ValueError("foresight must read the assembled regularity tree")
             if assembler.store is not self.prediction.store:
                 raise ValueError("foresight must read the assembled prediction store")
         if self.workflow.enqueuer.conversations is not self.conversation.journal:

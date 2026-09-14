@@ -17,20 +17,15 @@ from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 
 from habitus.behavior.uri import BehaviorURI
-from habitus.scene.model import SceneLinkType, SceneRole
-from habitus.scene.uri import SceneURI
 from habitus.scene.views.index import DayIndex, DayIndexCache
 from habitus.scene.views.model import (
     ActionRef,
     ContextView,
     LastTime,
     Neighbour,
-    Precondition,
-    SceneRef,
     transition_window,
 )
 
-_MEMBER_ROLES = frozenset({SceneRole.ESSENTIAL.value, SceneRole.OPTIONAL.value})
 _Span = tuple[datetime, datetime]
 
 
@@ -64,8 +59,11 @@ def history_contexts(
     slot_half_width: int = 0,
     transition_window_seconds: float | None = None,
 ) -> tuple[ContextView, ...]:
-    """候选 kind 在给定日子里的历史视图，按时间升序。只取情景树覆盖过的日子（没覆盖的那天不是历史
-    视图，是"语义层还没处理"），覆盖与否先看指针，不为没覆盖的日子解码行为树。给了 ``slot_minutes``
+    """候选 kind 在给定日子里的历史视图，按时间升序。
+
+    **不再按"语义层处理过没有"筛日子**：那是按天归组的概念，而语义层现在按候选累积，"这个候选
+    这一天关联完成了没有"由上游（``foresight`` 的 ``ungrouped``）如实报出，不在这里悄悄少取。
+    给了 ``slot_minutes``
     与 ``slot_index`` 就只取钟面邻域内的：槽的口径与预测树同一公式（``minute_of_day // slot_minutes``，
     环形距离 ≤ ``slot_half_width``）。不给槽就是该 kind 的全部历史——聚合画像（``profile``）吃的就是这一份。"""
 
@@ -75,8 +73,6 @@ def history_contexts(
     window = transition_window(transition_window_seconds)
     views: list[ContextView] = []
     for day in sorted(set(days)):
-        if not cache.covered(day):
-            continue
         index = cache.day(day)
         for uri in index.ordered:
             document = index.occurrences[uri]
@@ -108,14 +104,17 @@ def _slots_per_day(slot_minutes: int | None, slot_index: int | None, slot_half_w
 
 
 def _project(uri: str, index: DayIndex, cache: DayIndexCache, *, window_days: int, window: float | None) -> ContextView:
-    """装配一条视图：情景侧的事实、行为树侧的事实、树维度的三个事实各自算好再拼。"""
+    """装配一条视图：行为树侧的事实与树维度的三个事实各自算好再拼。
+
+    情景侧（所在的事、角色、事里更早成员留下的前提）已经删掉——那是按天归组的产物。规律级的
+    上下文按行为 URI 取记录，是读侧改写要接的那一半，还没有接上。
+    """
 
     document = index.occurrences[uri]
     fields = document.fields
     kind_token = str(fields["kind_token"])
     started = document.address.started_at
-    facts = _scene_facts(uri, index, cache, started)
-    causes = list(facts.causes)
+    causes: list[ActionRef] = []
     for cause_uri in index.results_from_targets.get(uri, ()):
         resolved = resolve_target(cause_uri, cache)
         if isinstance(resolved, ActionRef):
@@ -130,11 +129,6 @@ def _project(uri: str, index: DayIndex, cache: DayIndexCache, *, window_days: in
         at=started,
         occurrence_uri=uri,
         name=str(fields["name"]),
-        covered=index.covered,
-        scene=facts.scene,
-        role=facts.role,
-        prior_steps=facts.prior,
-        preconditions=facts.preconditions,
         causes=tuple(causes),
         last_time=last_time(kind_token, before=started, cache=cache, window_days=window_days),
         concurrent=partners,
@@ -143,65 +137,8 @@ def _project(uri: str, index: DayIndex, cache: DayIndexCache, *, window_days: in
         first_of_day=first_of_day(uri, index),
         preceding=preceding,
         following=following,
-        next_steps=facts.later,
         day_note=index.day_note,
     )
-
-
-class _SceneFacts:
-    """一条行为从它所在的事继承到的东西。irrelevant 成员只有 ``scene`` 与 ``role``。"""
-
-    __slots__ = ("causes", "later", "preconditions", "prior", "role", "scene")
-
-    def __init__(self) -> None:
-        self.scene: SceneRef | None = None
-        self.role: str | None = None
-        self.prior: tuple[ActionRef, ...] = ()
-        self.later: tuple[ActionRef, ...] = ()
-        self.preconditions: tuple[Precondition, ...] = ()
-        self.causes: tuple[ActionRef | SceneRef, ...] = ()
-
-
-def _scene_facts(uri: str, index: DayIndex, cache: DayIndexCache, started: datetime) -> _SceneFacts:
-    facts = _SceneFacts()
-    scene_uri = index.scene_of.get(uri)
-    if scene_uri is None:
-        return facts
-    scene_document = index.scenes[scene_uri]
-    facts.scene = SceneRef(uri=scene_uri, label=scene_document.address.label)
-    members = list(scene_document.fields["members"])
-    facts.role = next((str(member["role"]) for member in members if member["uri"] == uri), None)
-    if facts.role == SceneRole.IRRELEVANT.value:
-        return facts
-    own = started.astimezone(UTC)
-    pending_by_producer: dict[str, list[str]] = {}
-    for item in scene_document.fields["pending_effects"]:
-        pending_by_producer.setdefault(str(item["producer_uri"]), []).append(str(item["text"]))
-    prior: list[ActionRef] = []
-    later: list[ActionRef] = []
-    preconditions: list[Precondition] = []
-    for member in members:
-        member_uri = str(member["uri"])
-        if member_uri == uri or member_uri not in index.occurrences:
-            continue
-        is_earlier = index.occurrences[member_uri].address.started_at.astimezone(UTC) < own
-        if member["role"] in _MEMBER_ROLES:
-            (prior if is_earlier else later).append(index.ref(member_uri))
-        if is_earlier:
-            for text in pending_by_producer.get(member_uri, ()):
-                preconditions.append(Precondition("pending", text, member_uri, (index.ref(member_uri).kind_token,)))
-    causes: list[ActionRef | SceneRef] = []
-    for link in scene_document.links:
-        target = resolve_target(str(link.to_uri), cache)
-        if target is None:
-            continue
-        if link.link_type is SceneLinkType.NEEDS:
-            preconditions.append(_needs_precondition(target))
-        elif link.link_type is SceneLinkType.RESULTS_FROM:
-            causes.append(target)
-    facts.prior, facts.later = tuple(prior), tuple(later)
-    facts.preconditions, facts.causes = tuple(preconditions), tuple(causes)
-    return facts
 
 
 def first_of_day(uri: str, index: DayIndex) -> bool:
@@ -321,30 +258,18 @@ def last_time(kind_token: str, *, before: datetime, cache: DayIndexCache, window
                 continue
             if document.address.started_at.astimezone(UTC) >= before.astimezone(UTC):
                 continue
-            scene_uri = index.scene_of.get(uri)
-            scene = None if scene_uri is None else SceneRef(uri=scene_uri, label=index.scenes[scene_uri].address.label)
-            return LastTime(uri=uri, days_ago=(today - day).days, scene=scene)
+            return LastTime(uri=uri, days_ago=(today - day).days)
     return None
 
 
-def _needs_precondition(target: ActionRef | SceneRef) -> Precondition:
-    if isinstance(target, ActionRef):
-        return Precondition("needs", target.name, target.uri, (target.kind_token,))
-    return Precondition("needs", target.label, target.uri, target.kinds)
 
+def resolve_target(target_uri: str, cache: DayIndexCache) -> ActionRef | None:
+    """边的目标：行为树上的那条行为；解析不到即悬空，少说一点。
 
-def resolve_target(target_uri: str, cache: DayIndexCache) -> ActionRef | SceneRef | None:
-    """边的目标：行为（当前树上）或情景（当前一代，落到 kind 上）；解析不到即悬空，少说一点。"""
+    原来还接 ``scene://`` 的目标（按天归组的"事"）。那种目标已经不存在——规律级的边指的都是
+    行为，因为"事"这个中间容器整个删掉了。
+    """
 
-    if target_uri.startswith("scene://"):
-        day = SceneURI.parse(target_uri).to_address().occurred_on
-        index = cache.day(day)
-        scene = index.scenes.get(target_uri)
-        if scene is None:
-            return None
-        producers = [str(item["producer_uri"]) for item in scene.fields["pending_effects"]]
-        kinds = tuple(dict.fromkeys(index.ref(uri).kind_token for uri in producers if uri in index.occurrences))
-        return SceneRef(uri=target_uri, label=scene.address.label, kinds=kinds)
     day = BehaviorURI.parse(target_uri).to_address().occurred_on
     index = cache.day(day)
     return index.ref(target_uri) if target_uri in index.occurrences else None

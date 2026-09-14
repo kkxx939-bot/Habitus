@@ -181,15 +181,15 @@ class HabitusConfig:
         if self.scene.enabled and not self.behavior.enabled:
             raise ConfigError(
                 "config.scene is enabled but config.behavior.primary_subject is empty; "
-                "scene grouping reads sealed days of the behaviour tree and has no input without it"
+                "the semantic layer reads sealed days of the behaviour tree and has no input without it"
             )
         # 预测层站在两棵派生树之上：数字取自预测树、背景取自情景树，缺哪一边都装配不出证据。
         # 同一类配置自相矛盾，硬拒。
         if self.foresight.enabled and not (self.prediction.enabled and self.scene.enabled):
             raise ConfigError(
                 "config.foresight is enabled but config.prediction or config.scene is not; "
-                "the foresight layer reads its numbers from the prediction tree and the matching "
-                "history from the scene tree, and has nothing to assemble without both"
+                "the foresight layer reads its numbers from the prediction tree and "
+                "the matching history from the semantic layer, and has nothing to assemble without both"
             )
         memory = self.memory
         models = self.models

@@ -15,15 +15,14 @@ from habitus.behavior.model import BehaviorKind
 from habitus.behavior.tree import BehaviorTree
 from habitus.config import HabitusConfig
 from habitus.config.loader import ConfigError
-from habitus.foresight import ForesightError
+from habitus.foresight import AssociatedDays, ForesightError
 from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.runtime.foresight import build_foresight_components
 from habitus.runtime.prediction import build_prediction_components
-from habitus.scene import SceneTree
 from tests.integration.test_runtime_assembly import REPOSITORY_ROOT
 from tests.unit.behavior.tree_payloads import occurrence_payload
+from tests.unit.runtime.fixtures import STARTUP_PARAMETERS
 from tests.unit.runtime.test_behavior_pipeline import SUBJECT
-from tests.unit.runtime.test_prediction_wiring import STARTUP_PARAMETERS
 
 CST = timezone(timedelta(hours=8))
 FIRST = datetime(2026, 8, 3, tzinfo=CST)  # 周一
@@ -50,8 +49,8 @@ def raw_config(tmp_path: Path, *, scene: bool = True, foresight: bool = True, **
     return raw
 
 
-def trees(config: HabitusConfig, *, weeks: int = 4) -> tuple[BehaviorTree, SceneTree]:
-    """一棵有"每周一晚上打球"的行为树，外加一棵（尚未归组的）情景树。"""
+def trees(config: HabitusConfig, *, weeks: int = 4) -> tuple[BehaviorTree, AssociatedDays]:
+    """一棵有"每周一晚上打球"的行为树，外加一棵（尚未关联的）语义层。"""
 
     behavior_tree = BehaviorTree(config.behavior_root / "tree")
     writer = BehaviorDocumentWriter(
@@ -72,19 +71,20 @@ def trees(config: HabitusConfig, *, weeks: int = 4) -> tuple[BehaviorTree, Scene
                 goal=None,
             ),
         )
-    return behavior_tree, SceneTree(config.scene_root / "tree")
+    # 语义层的事实源：这个候选哪几天关联完成了。读侧还没接上规律级，所以现在恒空。
+    return behavior_tree, lambda _kind: frozenset()
 
 
 def assembled(tmp_path: Path, *, now: datetime = EVENING):
     """走完真实顺序：行为树 → 发布一代预测树 → 组装预测层。"""
 
     config = HabitusConfig.from_mapping(raw_config(tmp_path))
-    behavior_tree, scene_tree = trees(config)
+    behavior_tree, associated = trees(config)
     prediction = build_prediction_components(config, behavior_tree=behavior_tree, clock=lambda: now)
     assert prediction is not None
     asyncio.run(prediction.worker.run_once())
     components = build_foresight_components(
-        config, behavior_tree=behavior_tree, scene_tree=scene_tree, store=prediction.store, clock=lambda: now
+        config, behavior_tree=behavior_tree, associated=associated, store=prediction.store, clock=lambda: now
     )
     assert components is not None
     return config, components
@@ -92,15 +92,15 @@ def assembled(tmp_path: Path, *, now: datetime = EVENING):
 
 def test_foresight_is_absent_until_it_is_switched_on(tmp_path) -> None:
     config = HabitusConfig.from_mapping(raw_config(tmp_path, foresight=False))
-    behavior_tree, scene_tree = trees(config)
+    behavior_tree, associated = trees(config)
     assert config.foresight.enabled is False
     assert build_foresight_components(
-        config, behavior_tree=behavior_tree, scene_tree=scene_tree, store=None
+        config, behavior_tree=behavior_tree, associated=associated, store=None
     ) is None
 
 
-def test_enabling_foresight_without_the_scene_tree_is_refused(tmp_path) -> None:
-    """配置自相矛盾要在启动时炸：数字取自预测树、与之对应的历史取自情景树，缺一边装配不出证据。
+def test_enabling_foresight_without_the_semantic_layer_is_refused(tmp_path) -> None:
+    """配置自相矛盾要在启动时炸：数字取自预测树、与之对应的历史取自语义层，缺一边装配不出证据。
 
     放过去的下场是启动一切正常、健康面报 foresight 已启用、什么都没发生、无处可查。
     """
@@ -120,7 +120,7 @@ def test_the_window_has_one_source_the_prediction_tree(tmp_path) -> None:
     assert assembler.half_width == config.prediction.pool_half_width == 3
     assert assembler.transition_window_seconds == config.prediction.transition_window_seconds
     assert assembler.max_days_per_layer == config.foresight.max_days_per_layer
-    assert assembler.window_days == config.scene.lookback_days
+    assert assembler.window_days == config.foresight.window_days
 
 
 def test_the_moment_lands_on_the_clock_face_in_the_subject_timezone(tmp_path) -> None:
@@ -134,9 +134,13 @@ def test_the_moment_lands_on_the_clock_face_in_the_subject_timezone(tmp_path) ->
     assert (moment.weekday, moment.slot) == (0, 76)  # 周一 19:00–19:15
     assert moment.day_note is None  # 没有当地日历数据时是显式的空，不是漏了字段
     assert [item.layer.name for item in evidence[0].layers] == ["slot", "pool", "cross_weekday", "all_day"]
-    # 情景树一天都没归组：四层都"有数、没背景"，如实说出来而不是让背景默默空着。
-    assert evidence[0].ungrouped == evidence[0].layers[3].layer.days
-    assert all(item.views == () for item in evidence[0].layers)
+    # 语义层一天都没关联，但**背景照样是满的**：那些上下文来自行为树，语义层做没做过不影响。
+    # 没关联的日子由 unassociated 如实摆出来，与"背景取到几天"是两件事——按它筛日子的话，
+    # 关联还没推进到的那些天会连行为侧背景一起被扔掉，判断者两头都少。
+    assert evidence[0].unassociated == evidence[0].layers[3].layer.days
+    assert any(item.views for item in evidence[0].layers)
+    (slot_layer,) = [item for item in evidence[0].layers if item.layer.name == "slot"]
+    assert [view.at.date() for view in slot_layer.views] == list(slot_layer.layer.days)
 
 
 def test_a_generation_built_with_other_parameters_is_refused(tmp_path) -> None:
@@ -152,11 +156,11 @@ def test_without_a_published_generation_it_says_so_instead_of_answering_zero(tmp
     """"还没算过"与"什么都不会发生"必须分得清——后者会让上层安心闭嘴。"""
 
     config = HabitusConfig.from_mapping(raw_config(tmp_path))
-    behavior_tree, scene_tree = trees(config)
+    behavior_tree, associated = trees(config)
     prediction = build_prediction_components(config, behavior_tree=behavior_tree)
     assert prediction is not None
     components = build_foresight_components(
-        config, behavior_tree=behavior_tree, scene_tree=scene_tree, store=prediction.store
+        config, behavior_tree=behavior_tree, associated=associated, store=prediction.store
     )
     assert components is not None
     with pytest.raises(ForesightError, match="no prediction generation"):

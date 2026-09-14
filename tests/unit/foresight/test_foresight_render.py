@@ -8,8 +8,7 @@ import pytest
 
 from habitus.foresight import CellIndex, ForesightError, Layer, LayerBackground, render_candidate
 from habitus.foresight.assemble import CandidateEvidence, candidate_evidence, moment_at
-from tests.unit.foresight.fixtures import Ground, at
-from tests.unit.foresight.test_foresight_provenance import MONDAY
+from tests.unit.foresight.fixtures import MONDAY, Ground, at
 
 NOW = MONDAY + timedelta(days=28)
 
@@ -17,7 +16,7 @@ NOW = MONDAY + timedelta(days=28)
 def evidence_for(tmp_path, *, name: str = "site", gap: bool = False, max_days: int = 40):
     """三个周一都在 19:00 打球；第三周之前先喝了水，第二周之前断过档。
 
-    每次新建现场都用自己的目录：同一棵行为树发两遍同一批 occurrence 会造出重复，而已归组的
+    每次新建现场都用自己的目录：同一棵行为树发两遍同一批 occurrence 会造出重复，而已关联的
     日子再 refresh 一次什么都不会发布。
     """
 
@@ -31,13 +30,14 @@ def evidence_for(tmp_path, *, name: str = "site", gap: bool = False, max_days: i
         # （行为树与预测树同一条规则），那样就测不到删失了。
         ground.gap(MONDAY + timedelta(days=7), 18, 0, 18, 50)
     days = [MONDAY + timedelta(days=7 * week) for week in range(3)]
-    ground.group(*days)
+    associated = ground.associated(*days)
     moment = moment_at(at(NOW, 19, 5), slot_minutes=15)
     return candidate_evidence(
         CellIndex.of(ground.tree()),
         "打球",
         moment,
         ground.cache(),
+        associated=associated,
         half_width=3,
         window_days=30,
         transition_window_seconds=7_200.0,
@@ -65,12 +65,18 @@ def test_a_slot_that_was_never_observed_is_not_a_measured_zero(tmp_path) -> None
 
     ground = Ground(tmp_path / "unobserved", now=at(MONDAY + timedelta(days=2), 23, 0))
     ground.record(MONDAY, "打球", 19, 0, kind="打球")
-    ground.group(MONDAY)
     # 观测跨度只有周一到周三，周五那一整列一次都没看过。
     friday = moment_at(at(MONDAY + timedelta(days=4), 19, 5), slot_minutes=15)
     evidence = candidate_evidence(
-        CellIndex.of(ground.tree()), "打球", friday, ground.cache(),
-        half_width=3, window_days=30, transition_window_seconds=7_200.0, max_days_per_layer=40,
+        CellIndex.of(ground.tree()),
+        "打球",
+        friday,
+        ground.cache(),
+        associated=ground.associated(MONDAY),
+        half_width=3,
+        window_days=30,
+        transition_window_seconds=7_200.0,
+        max_days_per_layer=40,
     )
     assert evidence.layers[0].layer.exposure == 0.0
     text = render_candidate(evidence)
@@ -79,12 +85,12 @@ def test_a_slot_that_was_never_observed_is_not_a_measured_zero(tmp_path) -> None
 
 
 def test_what_is_missing_is_said_out_loud(tmp_path) -> None:
-    """没归组的日子与被保护闸截掉的日子都要写出来，否则"给你看的这几条"会被读成"一共这几条"。"""
+    """没关联的日子与被保护闸截掉的日子都要写出来，否则"给你看的这几条"会被读成"一共这几条"。"""
 
     text = render_candidate(evidence_for(tmp_path, name="capped", max_days=1))
     assert "更早的 2 天没有展开" in text
     full = render_candidate(evidence_for(tmp_path, name="full"))
-    assert "还没归组" not in full  # 这个现场三天都归了组，就不该无中生有地报缺
+    assert "还没关联" not in full  # 这个现场三天都归了组，就不该无中生有地报缺
 
 
 def test_the_three_valued_neighbour_is_told_as_it_is(tmp_path) -> None:
@@ -129,7 +135,7 @@ def test_a_rate_with_no_days_behind_it_is_marked_as_prior_only(tmp_path) -> None
         layers=(
             *evidence.layers[:3],
             LayerBackground(
-                layer=Layer(name="all_day", value=0.0425, days=(), ungrouped=()), views=(), dropped_days=0
+                layer=Layer(name="all_day", value=0.0425, days=(), unassociated=()), views=(), dropped_days=0
             ),
         ),
     )

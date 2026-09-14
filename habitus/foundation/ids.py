@@ -48,6 +48,26 @@ def canonical_path_identity(value: object, field_name: str) -> str:
     return require_safe_path_segment(normalized, field_name)
 
 
+def canonical_text_identity(value: object, field_name: str) -> str:
+    """把一句**自由文本**归一成可比较的身份：NFC + casefold + 折叠空白。
+
+    与 ``canonical_path_identity`` 的区别是**用途**，不是强弱：那一个是给会变成目录名的东西用的，
+    所以要拒 ``/ \\ : < > " | ? *``、拒以空格或句点结尾、拒 Windows 保留名。一句人话里出现这些
+    再正常不过（"冰箱里有菜/水果"、"明天 9:00 要复诊"、"灯泡买好了."），拿那一个去校验，等于让
+    模型写出一句普通的话就把流程卡死。
+
+    这个函数对任何非空文本都**有返回值**，不抛——它的调用方是"两句话是不是同一句"这种比较，
+    不是"这个名字能不能当目录"。空白折叠是必要的：同一句话被重新渲染时多一个空格不该变成另一条。
+    """
+
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be text")
+    folded = unicodedata.normalize("NFC", " ".join(value.split()).casefold())
+    if not folded:
+        raise ValueError(f"{field_name} must contain something other than whitespace")
+    return folded
+
+
 def same_path_identity(left: object, right: object, field_name: str) -> bool:
     return canonical_path_identity(left, field_name) == canonical_path_identity(
         right,
@@ -57,6 +77,7 @@ def same_path_identity(left: object, right: object, field_name: str) -> bool:
 
 __all__ = [
     "canonical_path_identity",
+    "canonical_text_identity",
     "require_safe_path_segment",
     "same_path_identity",
 ]

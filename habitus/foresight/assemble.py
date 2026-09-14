@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -19,6 +19,9 @@ from habitus.foresight.model import LAYER_NAMES, Moment
 from habitus.foresight.numbers import CellIndex, provenance
 from habitus.prediction.model import SlotKey
 from habitus.scene.views import DayIndexCache
+
+#: "这个候选哪几天关联完成了"。由组合根注入——本层不认识规律级树，只认这个事实。
+AssociatedDays = Callable[[str], frozenset[date]]
 
 
 @dataclass(frozen=True)
@@ -40,10 +43,10 @@ class CandidateEvidence:
             raise ForesightError("candidate evidence must carry all four layers in order")
 
     @property
-    def ungrouped(self) -> tuple[date, ...]:
+    def unassociated(self) -> tuple[date, ...]:
         """四层合起来有数、却没有语义背景的日子。"""
 
-        return tuple(sorted({day for item in self.layers for day in item.layer.ungrouped}))
+        return tuple(sorted({day for item in self.layers for day in item.layer.unassociated}))
 
 
 def moment_at(at: datetime, *, slot_minutes: int, day_note: str | None = None) -> Moment:
@@ -61,6 +64,7 @@ def candidate_evidence(
     moment: Moment,
     cache: DayIndexCache,
     *,
+    associated: AssociatedDays,
     half_width: int,
     window_days: int,
     transition_window_seconds: float,
@@ -68,12 +72,14 @@ def candidate_evidence(
 ) -> CandidateEvidence:
     """一个候选的四层数字 + 四层背景。
 
-    ``cache.covered`` 同时充当"这天归组了没有"的谓词与取背景的入口，所以数字那边算出的
-    ``ungrouped`` 与背景那边真取到的日子必然一致——两处用两个判据是这一整套最容易出的错。
+    ``associated`` 回答"这个候选这一天关联完成了没有"。它比旧的"这一天归过组"准一级：语义层
+    现在按候选累积，同一天可能这个候选做完了、那个还没做。数字那边算出的 ``unassociated`` 与背景
+    那边真取到的日子必须来自同一个判据——两处用两个判据是这一整套最容易出的错。
     """
 
     slot = SlotKey(weekday=moment.weekday, slot=moment.slot)
-    layers = provenance(cells, kind_token, slot, half_width=half_width, grouped=cache.covered)
+    done = associated(kind_token)
+    layers = provenance(cells, kind_token, slot, half_width=half_width, associated_on=done.__contains__)
     backgrounds = tuple(
         layer_background(
             layer,
@@ -97,6 +103,7 @@ def candidates_evidence(
     moment: Moment,
     cache: DayIndexCache,
     *,
+    associated: AssociatedDays,
     half_width: int,
     window_days: int,
     transition_window_seconds: float,
@@ -113,6 +120,7 @@ def candidates_evidence(
             kind_token,
             moment,
             cache,
+            associated=associated,
             half_width=half_width,
             window_days=window_days,
             transition_window_seconds=transition_window_seconds,
@@ -122,4 +130,4 @@ def candidates_evidence(
     )
 
 
-__all__ = ["CandidateEvidence", "candidate_evidence", "candidates_evidence", "moment_at"]
+__all__ = ["AssociatedDays", "CandidateEvidence", "candidate_evidence", "candidates_evidence", "moment_at"]

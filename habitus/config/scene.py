@@ -16,38 +16,57 @@ from typing import Any
 from habitus.config.loader import construct_config
 
 _INT_BOUNDS = (
-    ("lookback_days", 1, 90),
-    ("pending_expiry_days", 1, 3_650),
-    ("max_occurrences_per_call", 1, 5_000),
     ("max_prompt_chars", 1_000, 4_000_000),
-    ("retained_generations", 2, 100),
     ("transient_retries", 0, 20),
     ("max_attempts_per_input", 1, 100),
     ("max_model_calls_per_run", 1, 1_000),
+    ("max_targets_per_call", 1, 500),
+    ("association_per_candidate", 1, 100),
+    ("association_max_tasks_per_run", 1, 10_000),
+    ("max_cause_rows", 1, 200),
+    ("max_pending_rows", 1, 200),
 )
 
 
 @dataclass(frozen=True)
 class SceneConfig:
-    """情景归组是否启用，以及参照边界、调用边界与留代数。"""
+    """语义关联层是否启用，以及调用边界与各项预算。
+
+    按天归组那一套的配置已经全部删掉：``lookback_days`` / ``pending_expiry_days`` 是日历窗口与
+    过期判断（周频行为的相邻两次正好卡在 7 天边界上，而"到期没到期"是预测层的判断）；
+    ``max_occurrences_per_call`` 是按天的单位；``retained_generations`` 是按天情景文档的留代数，
+    随日情景树一起删（规律级按候选累积、只增不改，没有"代"这个概念）。
+
+    这里的数值分两类。**运维数**（一轮做几件、每个候选几件、一次调用几个目标）决定一夜的模型
+    开销与哪个候选会被饿死，必须可调。**渲染预算**（前因几行、未兑现前提几行）与
+    ``max_prompt_chars`` 是同一个预算的两端，分居两处会出现"字符没超但信息已砍光"或者反过来，
+    所以也放在这一组。至于提示词内部的渲染细节（摘要截断、情形日期几个）留在领域对象里——改它
+    要跑真实模型对照，不该让人在 yaml 里拧。
+    """
 
     enabled: bool = False
-    # 参照边界：先前的事与"上一次"回看几天；待用前提多久未兑现视为过期（用户裁定初值 90 天）。
-    lookback_days: int = 7
-    pending_expiry_days: int = 90
-    # 单次调用边界：DAY1（348 条）实测一次调用可完成；超过即跳过该日并留信号（第一期不切块）。
-    max_occurrences_per_call: int = 400
     max_prompt_chars: int = 200_000
-    # 每天保留几代情景文档（供回看与对照；下界 2，翻指针后立刻删旧代会撞读侧）。
-    retained_generations: int = 3
     # 传输层瞬态错误的有界重试（路由层自己还有一层，这里保持很小）。
     transient_retries: int = 1
     transient_retry_delay_seconds: float = 5.0
-    # 同一输入连续失败几次后封锁那一天（输入变了自动解封）；一轮 sweep 内最多几次归组调用。
+    # 同一输入连续失败几次后封锁它（换关联版本自动作废）。
     max_attempts_per_input: int = 3
-    max_model_calls_per_run: int = 4
-    # 预测侧未启用时情景阶段自己的夜批节拍；预测侧启用时情景阶段排在预测重建之前、同一拍。
-    refresh_interval_seconds: float = 86_400.0
+    # 一轮最多几次模型调用。**这是吞吐的真天花板**：一次调用推进一个 (候选, 日期)，所以它小于
+    # 每天新增的 (候选, 日期) 数时，语义层就永远追不平行为树，而且那几次总是给最老的日子——
+    # 判断者看到的背景会越来越旧。它要与下面的任务上限一起定，两个数错配等于白排队。
+    # 注意它的单位是"每一轮"而不是"每一夜"：进程重启会立刻跑一拍。
+    max_model_calls_per_run: int = 40
+    # 一次调用最多问这个候选那天的几次发生。**这个数是拍的**：它的单位是"一个候选一天发生几次"，
+    # 与旧归组那个"一整天的行为数"不是一回事，而候选恰恰是高频习惯行为。要在真实预测树上按
+    # "每候选每天发生次数分布"重定；超限的那一批会被封锁一轮。
+    max_targets_per_call: int = 12
+    # 每个候选一轮最多取几件（各自取最早的），以及整轮的总上限。两级预算：候选内部必须升序，
+    # 候选之间不必，而全局截断会饿死新候选。
+    association_per_candidate: int = 2
+    association_max_tasks_per_run: int = 40  # 与 max_model_calls_per_run 同量级，否则多排的白排
+    # 渲染预算：一次调用摊开几行前因候选、几条未兑现前提。截断都会留信号，不是失效判断。
+    max_cause_rows: int = 12
+    max_pending_rows: int = 8
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -59,9 +78,6 @@ class SceneConfig:
         delay = self.transient_retry_delay_seconds
         if isinstance(delay, bool) or not isinstance(delay, int | float) or not 0.0 <= float(delay) <= 600.0:
             raise ValueError("scene.transient_retry_delay_seconds must be between 0 and 600")
-        interval = self.refresh_interval_seconds
-        if isinstance(interval, bool) or not isinstance(interval, int | float) or not 60.0 <= float(interval) <= 604_800.0:
-            raise ValueError("scene.refresh_interval_seconds must be between 60 and 604800")
 
     @classmethod
     def from_mapping(cls, value: Any) -> SceneConfig:
