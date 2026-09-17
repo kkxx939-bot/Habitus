@@ -447,6 +447,23 @@ def test_blocking_is_scoped_to_the_version_that_could_not_answer(tmp_path) -> No
     assert ground.refresher.progress.days_for("打球") == frozenset()
 
 
+def test_a_kind_with_capital_letters_is_still_found_on_its_day(tmp_path) -> None:
+    """键按规范身份（casefold）比，但读树要用人写法：拿 ``gym`` 去比 occurrence 上的 ``Gym`` 一条都对不上，
+    这个候选就会每晚被判成"那天没发生"，永远关联不上（2026-09-16 在 54 天真实数据上实测：vLLM、Tagent 全军覆没）。"""
+
+    ground = Ground(tmp_path)
+    ground.record(FRIDAY, "去 Gym 练腿", 19, kind="Gym")
+    ground.record(FRIDAY + timedelta(days=7), "去 Gym 练背", 19, kind="Gym")
+    tasks = [task for task in ground.tasks() if task.kind_token == "Gym"]
+    assert tasks, "the backlog hands the token out in its human form"
+
+    report = asyncio.run(ground.refresher.refresh(tuple(tasks), causes=CauseFacts(ground.tree())))
+
+    assert report.skipped == () and report.model_calls == len(tasks)
+    assert set(report.associated) == {f"gym/{task.day.isoformat()}" for task in tasks}
+    assert ground.regularity_tree.days_for("Gym", version=ground.associator.version) == {task.day for task in tasks}
+
+
 def test_a_candidate_spelled_differently_is_the_same_task(tmp_path) -> None:
     """人写法不参与相等——否则失败次数永远停在 1，``clear_failure`` 永远 pop 不中。"""
 

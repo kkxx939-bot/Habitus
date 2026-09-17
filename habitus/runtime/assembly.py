@@ -655,12 +655,20 @@ def build_runtime(
         else build_foresight_components(
             config,
             behavior_tree=behavior_components.tree,
+            regularity_tree=behavior_components.regularity_tree,
+            # 事实源本身传过去（不是它的绑定方法）：它既答"哪几天关联完成了"，也说按哪个版本算的。
             associated=(
                 None
                 if behavior_components.association_refresher is None
-                else behavior_components.association_refresher.associated_days.days_for
+                else behavior_components.association_refresher.associated_days
             ),
             store=prediction_components.store,
+            # 未封口的那一截从这个 Runtime 的判断存储读，按归约自己的口径（消费账本）与词表。
+            judgements=behavior_components.judgements,
+            ledger=behavior_components.reduction_runner.ledger,
+            kinds=behavior_components.kind_store,
+            structured_chat=structured_chat,
+            observer=operation_observer,
         )
     )
     components = RuntimeComponents(

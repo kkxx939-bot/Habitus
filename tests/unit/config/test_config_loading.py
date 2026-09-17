@@ -360,8 +360,8 @@ def test_locale_is_one_group_shared_by_the_scene_and_foresight_layers(tmp_path) 
 def test_foresight_only_carries_protective_limits_and_needs_both_derived_trees(tmp_path) -> None:
     """预测层这一组只有保护闸——邻域与转移窗住在 prediction 那边，两处不各配一份。
 
-    ``window_days`` 是"一次装配最多摊开多久的历史"这道闸，原先借的是 ``scene.lookback_days``；
-    归组删掉之后它回到真正的使用者这边，不再跨组借。
+    ``window_days`` 是卡上"上一次"往回看多少天，原先借的是 ``scene.lookback_days``；归组删掉之后
+    它回到真正的使用者这边，不再跨组借。取历史卡不按日历窗，那道闸是 ``max_days_per_layer``。
 
     启用它却没启用两棵派生树是**配置自相矛盾**：数字取自预测树、与之对应的历史取自情景树，
     缺一边就装配不出证据。放过去的下场是启动一切正常、什么都没发生、无处可查。
@@ -375,13 +375,17 @@ def test_foresight_only_carries_protective_limits_and_needs_both_derived_trees(t
         "enabled",
         "window_days",
         "max_days_per_layer",
-        "max_pack_chars",
+        "judge_transient_retries",
+        "judge_transient_retry_delay_seconds",
+        "worker_shutdown_timeout_seconds",
     ]
     for field_name, bad in (
         ("window_days", 0),
         ("max_days_per_layer", 0),
-        ("max_pack_chars", 10),
-        ("max_pack_chars", True),
+        ("max_days_per_layer", True),
+        ("judge_transient_retries", -1),
+        ("judge_transient_retry_delay_seconds", -1.0),
+        ("worker_shutdown_timeout_seconds", 0),
     ):
         with pytest.raises(ConfigError, match=f"foresight.{field_name}"):
             ForesightConfig.from_mapping({field_name: bad})

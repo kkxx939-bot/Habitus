@@ -61,6 +61,7 @@ class RuntimeHealthService:
         ]
         checks.extend(self._behavior_checks(runtime_state))
         checks.extend(self._prediction_checks(runtime_state))
+        checks.extend(self._foresight_checks(runtime_state))
         checks.append(await self._queue_check())
         checks.extend(await asyncio.gather(self._vector_check("memory_vector", self.components.memory.vector_index.store), self._vector_check("summary_vector", self.components.conversation.summary_vector_index.store)))
         if deep:
@@ -136,6 +137,14 @@ class RuntimeHealthService:
         )
         checks.append(self._prediction_freshness_check(prediction))
         return checks
+
+    def _foresight_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:
+        """预测层每槽一拍的循环；同样 non-critical。它死掉不会让任何请求出错——只是不再有判断。"""
+
+        foresight = self.components.foresight
+        if foresight is None:
+            return [RuntimeHealthCheck("foresight", RuntimeHealthStatus.HEALTHY, "disabled", critical=False)]
+        return self._worker_checks(runtime_state, (("foresight_judge_worker", foresight.worker),))
 
     @staticmethod
     def _prediction_freshness_check(prediction: PredictionRuntimeComponents) -> RuntimeHealthCheck:

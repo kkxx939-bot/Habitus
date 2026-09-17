@@ -31,7 +31,7 @@ from habitus.scene.association.model import AssociationAssembly, AssociationInpu
 from habitus.scene.association.premises import Premise, PremiseTable
 from habitus.scene.association.progress import AssociationProgress, Checkpoint, TaskKey
 from habitus.scene.association.service import AssociationLimitError, Associator
-from habitus.scene.backlog import AssociatedDays, AssociationTask, CauseFacts
+from habitus.scene.backlog import AssociationLedger, AssociationTask, CauseFacts
 from habitus.scene.calendar import DayTypeCalendar, NominalCalendar
 from habitus.scene.regularity.document import AssociationDocument
 from habitus.scene.regularity.overview import Overview
@@ -142,8 +142,8 @@ class AssociationRefresher:
         self._lock_key = f"association:{hashlib.sha256(str(regularity_tree.root).encode('utf-8')).hexdigest()[:24]}"
 
     @property
-    def associated_days(self) -> AssociatedDays:
-        """给 ``backlog`` 用的"已关联完成"事实源，**带上当前版本**。
+    def associated_days(self) -> AssociationLedger:
+        """给 ``backlog`` 与预测层用的"已关联完成"事实源，**带上当前版本**。
 
         直接把 ``RegularityTree`` 递过去会漏掉版本这一维：换了提示词版本要全量重做，而不带版本
         的完成标记仍然算"做完了"。让调用方自己记得传版本是靠自觉，这里由类型给出。
@@ -217,13 +217,15 @@ class AssociationRefresher:
         budget = _Budget(self.config.max_model_calls_per_run)
         for task in tasks:
             guard.checkpoint()
+            # 键只管身份（规范化、casefold），读树与装输入要用**人写法**的 token：行为树的 occurrence 上写的
+            # 是人写法，拿规范身份去比一条都对不上，带大写字母的候选（vLLM、Tagent）会每晚被判成"那天没发生"。
             key = TaskKey(task.kind_token, task.day)
             try:
                 outcome, notes = await self._one(
-                    key, guard, premises=premises, causes=causes, budget=budget, force=force
+                    key, task.kind_token, guard, premises=premises, causes=causes, budget=budget, force=force
                 )
             except Exception as exc:  # noqa: BLE001 - 一件失败不许拖垮整轮
-                outcome, notes = self._on_failure(key, exc, premises=premises, causes=causes)
+                outcome, notes = self._on_failure(key, task.kind_token, exc, premises=premises, causes=causes)
             signals.extend(f"[{key.identity}] {note}" for note in notes)
             outcomes[outcome].append(key.identity)
         return AssociationRefreshReport(
@@ -240,6 +242,7 @@ class AssociationRefresher:
     async def _one(
         self,
         key: TaskKey,
+        kind_token: str,
         guard: LeaseGuard,
         *,
         premises: PremiseTable,
@@ -256,7 +259,7 @@ class AssociationRefresher:
             # 不再进待办，检查点就永远没人清得掉了（单个上限 16 MiB）。
             self.progress.clear_checkpoint(key)
             return "skipped", ("already associated",)
-        payload = await asyncio.to_thread(self._input, key, premises=premises, causes=causes)
+        payload = await asyncio.to_thread(self._input, kind_token, key.day, premises=premises, causes=causes)
         if payload is None:
             return "skipped", ("this candidate did not occur on that day",)
         digest = self._source_digest(payload)
@@ -346,10 +349,10 @@ class AssociationRefresher:
         return Checkpoint(records=tuple(records), unanswered=tuple(sorted(unanswered))), notes
 
     def _on_failure(
-        self, key: TaskKey, exc: Exception, *, premises: PremiseTable, causes: CauseFacts
+        self, key: TaskKey, kind_token: str, exc: Exception, *, premises: PremiseTable, causes: CauseFacts
     ) -> tuple[str, tuple[str, ...]]:
         try:
-            payload = self._input(key, premises=premises, causes=causes)
+            payload = self._input(kind_token, key.day, premises=premises, causes=causes)
             digest = "" if payload is None else self._source_digest(payload)
         except Exception:  # noqa: BLE001 - 记账本身不许再抛
             digest = ""
@@ -372,10 +375,12 @@ class AssociationRefresher:
         notes.append(f"blocked: {reason}")
         return "blocked", tuple(notes)
 
-    def _input(self, key: TaskKey, *, premises: PremiseTable, causes: CauseFacts) -> AssociationInput | None:
+    def _input(
+        self, kind_token: str, day: date, *, premises: PremiseTable, causes: CauseFacts
+    ) -> AssociationInput | None:
         return self.input_builder(
-            key.kind_token,
-            key.day,
+            kind_token,
+            day,
             behavior_tree=self.behavior_tree,
             regularity_tree=self.regularity_tree,
             premises=premises,
@@ -454,6 +459,12 @@ class _CompletedDays:
     def __init__(self, tree: RegularityTree, associator: Associator) -> None:
         self.tree = tree
         self._associator = associator
+
+    @property
+    def version(self) -> str:
+        """回答"已关联"用的那把尺子。读记录的人按同一个版本读，两边才对得上。"""
+
+        return self._associator.version
 
     def days_for(self, kind_token: str) -> frozenset[date]:
         # 版本**每次现问**，不在构造时定死：这个对象要长期活着（组合根拿它做实例同一性校验），

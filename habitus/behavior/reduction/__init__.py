@@ -14,6 +14,7 @@ from habitus.behavior.reduction.payloads import (
     gap_payload,
     occurrence_payload,
 )
+from habitus.behavior.reduction.pending import PendingJudgements, pending_judgements
 from habitus.behavior.reduction.record import ReducibleJudgement, parse_judgement_record
 from habitus.behavior.reduction.runner import (
     DEFAULT_SWEEP_LOCK_TTL_SECONDS,
@@ -36,8 +37,10 @@ __all__ = [
     "BehaviorReductionReport",
     "BehaviorReductionRunner",
     "ChainAssembly",
+    "PendingJudgements",
     "ReducibleJudgement",
     "assemble_chains",
+    "pending_judgements",
     "chain_address",
     "gap_payload",
     "occurrence_payload",

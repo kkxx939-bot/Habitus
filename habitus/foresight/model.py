@@ -1,7 +1,7 @@
-"""预测层的产物类型里**不带语义背景**的那些：层、四层拆解、此刻。
+"""预测层的产物类型里**不带语义背景**的那些：层、四层拆解、树发布的数、此刻、未封口的判断。
 
-本模块只 import ``datetime``。带着情景视图的产物（``LayerBackground``、``CandidateEvidence``）
-住在 ``context`` 与 ``assemble``，因为它们引用 ``scene.views`` 的类型——让数字这一侧也认识
+本模块对 scene 零知识。带着视图与序列的产物（``HistoryCard``、``CandidateBackground``、``CandidateEvidence``）
+住在 ``cards`` / ``context`` / ``assemble``，因为它们引用 ``scene.views`` 的类型——让数字这一侧也认识
 读侧，"出处从预测树来、不从别处重推"这条就没有边界钉着了。
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Protocol
 
 from habitus.foresight.errors import ForesightError
 
@@ -74,10 +75,6 @@ class Layer:
         return LAYER_LABELS[self.name]
 
 
-        missing = set(self.unassociated)
-        return tuple(day for day in self.days if day not in missing)
-
-
 @dataclass(frozen=True)
 class Provenance:
     """一个候选在这一刻的四层拆解：每层的数字连着它自己的那批日子。
@@ -124,4 +121,101 @@ class Moment:
         return self.at.date()
 
 
-__all__ = ["LAYER_LABELS", "LAYER_NAMES", "Layer", "Moment", "Provenance"]
+@dataclass(frozen=True)
+class RecurrenceNumbers:
+    """这件事隔多久做一次：树上的间隔分位数（秒），以及今天已做过时"距上次占中位数几成"。
+
+    ``overdue`` 只在今天已经做过一次时才有意义（elapsed 从今天最后一次起算）；今天还没做就是 None，
+    只带分位数——不用昨天那次去算，"该来没来"是判断者结合累积率看的事。
+    """
+
+    p10: float
+    p50: float
+    p90: float
+    sample_count: float
+    overdue: float | None
+
+
+@dataclass(frozen=True)
+class CandidateNumbers:
+    """树**真正发布**的那些数：收缩链的产物与伴随值。四层拆解给的是推导，这里是结论。
+
+    全部逐字取自 ``prediction.query``，一个不重算：``marginal`` / ``hazard`` / ``cumulative`` 是这个
+    周几这一槽的曲线值；两个 lift 的分母分别是全天基线与 ``weekday_baselines``；``count`` 与 ``n_eff``
+    是这一格的计数与机会；``trend`` 是（周几，行为）的近期率÷长期率，``trend_n_eff`` 是它的证据量。
+    """
+
+    marginal: float
+    hazard: float
+    cumulative: float
+    lift_all_day: float
+    lift_weekday: float
+    count: float
+    n_eff: float
+    trend: float | None
+    trend_n_eff: float
+    recurrence: RecurrenceNumbers | None
+    done_today: int
+
+    def __post_init__(self) -> None:
+        if isinstance(self.done_today, bool) or not isinstance(self.done_today, int) or self.done_today < 0:
+            raise ForesightError("done_today must be a non-negative integer")
+
+
+@dataclass(frozen=True)
+class UnsealedRow:
+    """还没归约到行为树上的一条判断：最近一小时的链在判断存储里，此刻场景要把它们补上。
+
+    ``name`` 为 None 是融合"没读懂"的那种判断——它在树上会成为一段观测空白，此刻场景把它当空白记；
+    读得懂的行为名经词表落到 kind，落不到就 ``kind_token`` 为 None，带原名进场景并标"未归类"。
+    没有 URI——它还不是树上的 occurrence，也不能被判断引用为依据。
+    """
+
+    name: str | None
+    kind_token: str | None
+    started_at: datetime
+    last_observed_at: datetime
+    summary: str | None
+
+    def __post_init__(self) -> None:
+        if self.name is not None and (not isinstance(self.name, str) or not self.name):
+            raise ForesightError("unsealed row name must be non-empty text or None")
+        if self.name is None and self.kind_token is not None:
+            raise ForesightError("an unreadable unsealed row cannot carry a kind")
+        for label in ("started_at", "last_observed_at"):
+            value = getattr(self, label)
+            if not isinstance(value, datetime) or value.utcoffset() is None:
+                raise ForesightError(f"unsealed row {label} must be a timezone-aware datetime")
+        if self.last_observed_at < self.started_at:
+            raise ForesightError("an unsealed row cannot be last seen before it started")
+
+    @property
+    def readable(self) -> bool:
+        return self.name is not None
+
+
+class UnsealedReader(Protocol):
+    """"这段时间里有哪些还没封口的判断"。生产实现读判断存储，住组合根；本包只认这个契约。"""
+
+    def rows(self, *, since: datetime, until: datetime) -> tuple[UnsealedRow, ...]: ...
+
+
+class NoUnsealed:
+    """没有判断存储可读时的显式空实现（脚本、离线重放）：明说"最近一小时没补"，不是漏了。"""
+
+    def rows(self, *, since: datetime, until: datetime) -> tuple[UnsealedRow, ...]:
+        return ()
+
+
+__all__ = [
+    "LAYER_LABELS",
+    "LAYER_NAMES",
+    "CandidateNumbers",
+    "Layer",
+    "Moment",
+    "NoUnsealed",
+    "Provenance",
+    "RecurrenceNumbers",
+    "UnsealedReader",
+    "UnsealedRow",
+]

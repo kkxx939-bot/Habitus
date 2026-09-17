@@ -155,3 +155,29 @@ def test_a_view_carries_the_day_note_even_when_there_is_no_calendar(tmp_path) ->
     view: ContextView = context_view(uri, cache_for(ground), window_days=7)
 
     assert view.day_note is None
+
+
+def test_a_gap_that_spans_several_days_is_seen_from_its_middle_days(tmp_path) -> None:
+    """空白文档只落在起始日目录；出差三天的"未观测"从第二天读起必须还在，否则第二天会被读成
+    "整天都在看、什么都没发生"，紧邻上下条也会把删失说成 ∅。"""
+
+    from datetime import timedelta
+
+    from habitus.behavior import BehaviorDocumentWriter
+    from habitus.behavior.model import BehaviorKind
+    from habitus.infrastructure.store.locks import ProcessLocalLockStore
+
+    ground = site(tmp_path)
+    writer = BehaviorDocumentWriter(ground.behavior_tree, ProcessLocalLockStore(), clock=lambda: at(DAY2, 23, 0))
+    writer.publish(
+        BehaviorKind.GAP,
+        gap_payload(
+            occurred_on=DAY1 - timedelta(days=2),
+            started_at=at(DAY1 - timedelta(days=2), 8, 0),
+            ended_at=at(DAY2, 20, 0),
+            gap_kind="未观测",
+        ),
+    )
+    middle = cache_for(ground).day(DAY1)
+    assert [(gap.started_at.hour, gap.ended_at.hour, gap.kind) for gap in middle.gaps] == [(0, 0, "未观测")]
+    assert middle.gaps[0].ended_at == at(DAY1 + timedelta(days=1), 0, 0)

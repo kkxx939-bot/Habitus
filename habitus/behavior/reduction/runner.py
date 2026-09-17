@@ -40,7 +40,7 @@ from habitus.behavior.kinds.vectors import (
 )
 from habitus.behavior.model import BehaviorAddress, BehaviorKind
 from habitus.behavior.observation import BehaviorObservation, BehaviorObservationStore
-from habitus.behavior.reduction.chains import ChainAssembly, assemble_chains
+from habitus.behavior.reduction.chains import ChainAssembly
 from habitus.behavior.reduction.errors import BehaviorReductionBusyError, BehaviorReductionError
 from habitus.behavior.reduction.ledger import BehaviorReductionEntry, BehaviorReductionLedger
 from habitus.behavior.reduction.payloads import (
@@ -50,7 +50,8 @@ from habitus.behavior.reduction.payloads import (
     gap_payload,
     occurrence_payload,
 )
-from habitus.behavior.reduction.record import ReducibleJudgement, parse_judgement_record
+from habitus.behavior.reduction.pending import pending_judgements
+from habitus.behavior.reduction.record import ReducibleJudgement
 from habitus.behavior.reduction.sealing import (
     closed_under_links,
     seal_horizon,
@@ -225,21 +226,10 @@ class BehaviorReductionRunner:
         guard.checkpoint()
         # 上一轮没刷成的日子并进来（merge/rebuild 留下的也在这里）
         replayed_days = replayed_days | self._pending_refresh_days()
-        consumed = self.ledger.consumed_judgement_ids()
-        records = []
-        quarantined: list[str] = []
-        for position, raw in enumerate(self.judgements.list()):
-            if position % 500 == 0:
-                guard.checkpoint()
-            if raw.get("judgement_id") in consumed:
-                continue
-            # 坏记录单条隔离：一条污染不许瘫痪整轮归约（判断存储无删除，整轮失败=永久停摆）。
-            # 隔离的记录不被消费，每轮都会再次报出——持续可见，等人处置。
-            try:
-                records.append(parse_judgement_record(raw))
-            except BehaviorReductionError as exc:
-                quarantined.append(f"judgement {raw.get('judgement_id')} quarantined: {exc}")
-        assembly = assemble_chains(tuple(records))
+        # "哪些判断还没归约"只有一种答法（``pending``），此刻场景的未封口读口也用它。
+        pending = pending_judgements(self.judgements, self.ledger, checkpoint=guard.checkpoint)
+        quarantined = list(pending.quarantined)
+        assembly = pending.assembly
         guard.checkpoint()
         horizon = seal_horizon(
             now=now,

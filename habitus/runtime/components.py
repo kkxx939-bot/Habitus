@@ -388,19 +388,9 @@ class RuntimeComponents:
                 raise TypeError("foresight must be ForesightRuntimeComponents or None")
             if self.behavior is None or self.prediction is None or self.behavior.regularity_tree is None:
                 raise ValueError("foresight reads both derived trees; prediction and scene must be enabled")
-            # 实例同一性：装配器必须读**这个** Runtime 的那三份存储，否则证据里的数字与背景
-            # 可能来自另一个同路径的实例，而且看不出来。
-            assembler = self.foresight.assembler
-            if assembler.behavior_tree is not self.behavior.tree:
-                raise ValueError("foresight must read the assembled behaviour tree")
-            # 事实源必须读**这个** Runtime 的规律级树：换一棵同路径的实例，数字与背景就会来自
-            # 两批不同的日子，而且看不出来。比的是那个事实源背后的树，不是绑定方法——绑定方法
-            # 每取一次都是新对象，拿它做同一性校验的结果是恒不相等、把唯一正确的那条也挡掉。
-            source = getattr(assembler.associated, "__self__", None)
-            if self.behavior.regularity_tree is None or getattr(source, "tree", None) is not self.behavior.regularity_tree:
-                raise ValueError("foresight must read the assembled regularity tree")
-            if assembler.store is not self.prediction.store:
-                raise ValueError("foresight must read the assembled prediction store")
+            self.foresight.assert_attached_to(
+                behavior=self.behavior, prediction=self.prediction, structured_chat=self.models.structured_chat
+            )
         if self.workflow.enqueuer.conversations is not self.conversation.journal:
             raise ValueError("workflow enqueuer must use the shared conversation journal")
         if (

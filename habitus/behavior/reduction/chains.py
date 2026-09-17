@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from habitus.behavior.reduction.errors import BehaviorReductionError
 from habitus.behavior.reduction.record import ReducibleJudgement
@@ -48,6 +48,12 @@ class BehaviorChain:
     @property
     def tail(self) -> ReducibleJudgement:
         return self.view[-1]
+
+    @property
+    def last_observed_at(self) -> datetime:
+        """这条链最后被看到的时刻：视图里最晚的 ``last_observed_at``（occurrence 上写的就是它）。"""
+
+        return max((item.last_observed_at for item in self.view), key=lambda value: value.astimezone(UTC))
 
     @property
     def consumed(self) -> tuple[ReducibleJudgement, ...]:

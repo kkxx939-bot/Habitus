@@ -34,7 +34,7 @@ class Associator(Protocol):
 
 @dataclass(frozen=True)
 class AssociationConfig:
-    max_targets_per_call: int = 12
+    max_targets_per_call: int = 40
     max_prompt_chars: int = 200_000
     transient_retries: int = 1
     transient_retry_delay_seconds: float = 5.0

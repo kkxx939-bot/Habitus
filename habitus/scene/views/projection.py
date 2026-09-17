@@ -17,6 +17,8 @@ from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 
 from habitus.behavior.uri import BehaviorURI
+from habitus.scene.views.clock import slot_index as slot_of
+from habitus.scene.views.clock import slots_per_day
 from habitus.scene.views.index import DayIndex, DayIndexCache
 from habitus.scene.views.model import (
     ActionRef,
@@ -62,10 +64,9 @@ def history_contexts(
     """候选 kind 在给定日子里的历史视图，按时间升序。
 
     **不再按"语义层处理过没有"筛日子**：那是按天归组的概念，而语义层现在按候选累积，"这个候选
-    这一天关联完成了没有"由上游（``foresight`` 的 ``ungrouped``）如实报出，不在这里悄悄少取。
-    给了 ``slot_minutes``
-    与 ``slot_index`` 就只取钟面邻域内的：槽的口径与预测树同一公式（``minute_of_day // slot_minutes``，
-    环形距离 ≤ ``slot_half_width``）。不给槽就是该 kind 的全部历史——聚合画像（``profile``）吃的就是这一份。"""
+    这一天关联完成了没有"由上游（``foresight`` 的 ``unassociated``）如实报出，不在这里悄悄少取。
+    给了 ``slot_minutes`` 与 ``slot_index`` 就只取钟面邻域内的：槽的口径与预测树同一公式（``views.clock``，
+    环形距离 ≤ ``slot_half_width``）。不给槽就是该 kind 的全部历史（全天那一层吃的就是这一份）。"""
 
     if not isinstance(kind_token, str) or not kind_token:
         raise ValueError("kind_token must be non-empty text")
@@ -79,8 +80,7 @@ def history_contexts(
             if str(document.fields["kind_token"]) != kind_token:
                 continue
             if slot_minutes is not None and slot_index is not None and slots_per_day is not None:
-                started = document.address.started_at
-                own = (started.hour * 60 + started.minute) // slot_minutes
+                own = slot_of(document.address.started_at, slot_minutes=slot_minutes)
                 distance = abs(own - slot_index)
                 if min(distance, slots_per_day - distance) > slot_half_width:
                     continue
@@ -95,9 +95,7 @@ def _slots_per_day(slot_minutes: int | None, slot_index: int | None, slot_half_w
         raise ValueError("slot_half_width must be a non-negative integer")
     if slot_minutes is None or slot_index is None:
         return None
-    if isinstance(slot_minutes, bool) or not isinstance(slot_minutes, int) or slot_minutes <= 0 or 1440 % slot_minutes:
-        raise ValueError("slot_minutes must be a positive divisor of 1440")
-    slots = 1440 // slot_minutes
+    slots = slots_per_day(slot_minutes)
     if isinstance(slot_index, bool) or not isinstance(slot_index, int) or not 0 <= slot_index < slots:
         raise ValueError("slot_index must be an integer within the clock face")
     return slots
@@ -107,7 +105,7 @@ def _project(uri: str, index: DayIndex, cache: DayIndexCache, *, window_days: in
     """装配一条视图：行为树侧的事实与树维度的三个事实各自算好再拼。
 
     情景侧（所在的事、角色、事里更早成员留下的前提）已经删掉——那是按天归组的产物。规律级的
-    上下文按行为 URI 取记录，是读侧改写要接的那一半，还没有接上。
+    上下文按行为 URI 取记录，读口在 ``views.gloss``，由上层贴到卡上，不在视图里。
     """
 
     document = index.occurrences[uri]

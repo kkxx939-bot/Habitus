@@ -30,10 +30,52 @@ from dataclasses import dataclass
 from datetime import date
 
 from habitus.foresight.errors import ForesightError
-from habitus.foresight.model import Layer, Provenance
+from habitus.foresight.model import CandidateNumbers, Layer, Provenance, RecurrenceNumbers
 from habitus.prediction.errors import PredictionTreeError
 from habitus.prediction.model import WEEKDAYS, NodeStatistics, PredictionTree, SlotKey, slot_count
-from habitus.prediction.query import neighbourhood
+from habitus.prediction.query import neighbourhood, node_at, recurrence_status
+
+
+def candidate_numbers(
+    tree: PredictionTree, slot: SlotKey, action: str, *, done_today: int, elapsed_seconds: float | None
+) -> CandidateNumbers:
+    """树发布的率与伴随值，逐字取自 ``prediction.query``，一个不重算。
+
+    ``elapsed_seconds`` 是从今天这件事最后一次开始到此刻的秒数；今天没做过传 None，复发只带分位数。
+    """
+
+    if not isinstance(tree, PredictionTree):
+        raise ForesightError("tree must be a PredictionTree")
+    candidate = node_at(tree, slot, action)
+    if candidate is None:
+        raise ForesightError(f"{action!r} has no curve on weekday {slot.weekday}; it is not a candidate there")
+    if elapsed_seconds is not None and (isinstance(elapsed_seconds, bool) or elapsed_seconds < 0.0):
+        raise ForesightError("elapsed_seconds must be a non-negative number or None")
+    curve = tree.curves[(slot.weekday, action)]
+    status = recurrence_status(tree, action, elapsed_seconds=elapsed_seconds or 0.0)
+    recurrence = None
+    if status is not None:
+        intervals = status.intervals
+        recurrence = RecurrenceNumbers(
+            p10=intervals.p10,
+            p50=intervals.p50,
+            p90=intervals.p90,
+            sample_count=intervals.sample_count,
+            overdue=status.overdue if elapsed_seconds is not None else None,
+        )
+    return CandidateNumbers(
+        marginal=candidate.marginal,
+        hazard=candidate.hazard,
+        cumulative=candidate.cumulative,
+        lift_all_day=candidate.lift_all_day,
+        lift_weekday=candidate.lift_weekday,
+        count=candidate.count,
+        n_eff=candidate.n_eff,
+        trend=candidate.trend,
+        trend_n_eff=curve.trend_n_eff,
+        recurrence=recurrence,
+        done_today=done_today,
+    )
 
 
 @dataclass(frozen=True)
@@ -166,4 +208,4 @@ def _unassociated(days: tuple[date, ...], associated_on: Callable[[date], bool])
     return tuple(day for day in days if not associated_on(day))
 
 
-__all__ = ["CellIndex", "provenance"]
+__all__ = ["CellIndex", "candidate_numbers", "provenance"]

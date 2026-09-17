@@ -6,8 +6,7 @@
 时间在不在看）、``day_note``（当地日历对这一天的说法）。缺什么就是空，不推测、不打分。
 
 原来还有"所在的事"、角色、事里更早成员留下的前提——那是按天归组的产物，已随日情景树删掉。
-规律级的上下文（一句"当时是什么情况"、两类边、情境、前提）按行为 URI 取记录就有，是读侧改写
-要接的那一半。
+规律级的上下文（一句"当时是什么情况"、两类边、情境、前提）按行为 URI 取记录，读口在 ``gloss``。
 """
 
 from __future__ import annotations
@@ -19,8 +18,6 @@ from datetime import date, datetime
 # 窗口超过一天会静默截断，所以在这里同样硬拒。
 MAX_TRANSITION_WINDOW_SECONDS = 86_400.0
 
-# 转移边的"无后继"哨兵，与预测树 ``edges.NO_SUCCESSOR`` 同字——对比表与画像把"确认没有"当一个可比的值。
-
 
 @dataclass(frozen=True)
 class ActionRef:
@@ -29,6 +26,29 @@ class ActionRef:
     uri: str
     name: str
     kind_token: str
+
+
+@dataclass(frozen=True)
+class FlowRow:
+    """时间轴上的一条原子行为：够判断者认出它是什么、几点开始、最后所见几点、说了什么。
+
+    ``day_count`` 是这个 kind **在这一行自己那天**全天发生的次数——"与某人交谈(100)"一眼就看得出是底噪。
+    跨日的行各带各天的数，不借别的天的。
+    """
+
+    uri: str
+    name: str
+    kind_token: str
+    at: datetime
+    last_observed_at: datetime
+    summary: str
+    day_count: int
+
+    def __post_init__(self) -> None:
+        if self.last_observed_at < self.at:
+            raise ValueError("a flow row cannot be last seen before it started")
+        if isinstance(self.day_count, bool) or not isinstance(self.day_count, int) or self.day_count < 1:
+            raise ValueError("a flow row's own kind occurred at least once that day")
 
 
 @dataclass(frozen=True)
@@ -143,39 +163,11 @@ def transition_window(value: float | None) -> float | None:
     return float(value)
 
 
-SLOT_NAMES: tuple[str, ...] = (
-    "time",
-    "scene",
-    "prior_steps",
-    "preceding",
-    "causes",
-    "last_time",
-    "concurrent",
-    "subjects",
-    "fact",
-)
-
-# 对比表只比语义槽与树维度的对齐槽：时间（周几/槽位）是预测树的键，不在这里复述。
-COMPARED_SLOTS: tuple[str, ...] = tuple(name for name in SLOT_NAMES if name != "time")
-
-SLOT_LABELS: dict[str, str] = {
-    "time": "时间",
-    "scene": "所在的事",
-    "prior_steps": "此前步骤",
-    "preceding": "紧邻上一条",
-    "preconditions": "前提",
-    "causes": "起因",
-    "last_time": "上一次",
-    "concurrent": "同时在做",
-    "subjects": "和谁",
-    "fact": "本条事实",
-}
-
-
 __all__ = [
     "MAX_TRANSITION_WINDOW_SECONDS",
     "ActionRef",
     "ContextView",
+    "FlowRow",
     "LastTime",
     "Neighbour",
     "ObservationGap",

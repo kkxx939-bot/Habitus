@@ -27,8 +27,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from habitus.foundation.ids import canonical_text_identity
+from habitus.foundation.text import clean_line
 from habitus.scene.association.model import AssociationAssembly, AssociationDraft, AssociationInput
-from habitus.scene.text import clean_line
 
 #: ``consumed_by`` 与前提正文的字节上界，以及一次发生最多铺几条前提。
 #: 这三道约束的是"我们自己存不存得下、渲不渲染得出"，不是现实该长什么样——记录整体有
@@ -255,11 +255,12 @@ __all__ = [
 # TODO(ASSOC-001): 跑真实数据之前还要定的两件事（2026-09-14 更新：接线已完成，``left`` 的落点、
 # 超限进 blocked、重放正门 ``AssociationRefresher.reset`` 都已经做完）。
 #
-# 1. **``max_targets_per_call`` 的数值**。现在的 12 是拍的，而且单位与归组的 400 不是一回事
-#    （那是一整天的行为数，这是一个候选一天发生几次）。预测树算出来的候选恰恰是高频习惯行为，
-#    「操作手机」「使用电脑」一天几十次，会天天触发 ``AssociationLimitError`` 并被封锁一轮。
-#    闸要留（保护闸不因数值不合适就去掉），数值必须在真实预测树上按"每候选每天发生次数分布"
-#    重定，脚本走桌面实验目录、不进仓库。
+# 1. **``max_targets_per_call`` 的数值**（2026-09-14 已按真实分布定为 40）。原来的 12 是拍的，
+#    而且单位与归组的 400 不是一回事（那是一整天的行为数，这是一个候选一天发生几次）。桌面
+#    「Habitus语义树实验/关联探针」在 DAY1 上量出的分布：108 个候选里 105 个一天 ≤6 次，其余
+#    14 / 35 / 100 次；12 会把这三个当天全部封锁。40 只挡住一天 100 次的"与某人交谈"那一类词表
+#    噪声 token（100 个目标一次调用探针跑通但要 236 秒，输出恰好 100 条的 schema 越长越易截断）。
+#    闸留着、不切块（同一天的几次要一起看），数值等自采数据再定。
 # 2. **"一条前提只能被一次发生用掉"这条约束散在三处各说一遍**：``_draft`` 里的 ``unspent``、
 #    提示词正文、schema 的 ``consumed`` 描述。要改成"一条前提可以服务多次"（办了健身卡 → 健身
 #    很多次）时，三处都得改，而改提示词按纪律要跑真实模型对照。应当收到一处——按一个显式参数

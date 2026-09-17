@@ -10,7 +10,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from habitus.foresight import CellIndex, ForesightError, Layer, layer_background, provenance
+from habitus.foresight import CellIndex, ForesightError, Layer, candidate_background, provenance
 from habitus.prediction.model import SlotKey
 from habitus.prediction.query import neighbourhood
 from tests.unit.foresight.fixtures import MONDAY, Ground, at, slot_of
@@ -181,83 +181,66 @@ def test_layer_guards(tmp_path) -> None:
 # --- 语义侧：每层按自己的日子取背景 -----------------------------------------------------
 
 
-def test_each_layer_reads_its_own_days_with_its_own_slot_filter(tmp_path) -> None:
-    """**四层各取各的**：本槽单格、邻域 ±k、跨周几 ±k 但跨七个周几、全天不过滤时刻。
+def background_for(ground: Ground, layers, *, half_width: int, max_days: int = 10):
+    return candidate_background(
+        layers,
+        "打球",
+        ground.cache(),
+        glosses={},
+        slot_minutes=15,
+        slot_index=slot_of(19, 0),
+        half_width=half_width,
+        window_days=30,
+        transition_window_seconds=7_200.0,
+        max_days_per_layer=max_days,
+    )
 
-    这四条必须能互相区分开。现场刻意让每一条多罩进一条别的层罩不到的历史：19:30 那次只有
-    邻域及以上看得见、周三那次只有跨周几及以上看得见、早上八点那次只有全天看得见。少了任何
-    一条，把跨周几的半宽写成 0、或把邻域的写成 0，测试都照样全绿——背景就会比它要解释的
-    数字宽一截或窄一截，而没人看得出来。
+
+def test_each_card_lands_in_the_innermost_layer_that_reads_it(tmp_path) -> None:
+    """**四层各取各的、同一次发生只一张卡**：本槽单格、邻域 ±k、跨周几 ±k 但跨七个周几、全天不过滤。
+
+    现场刻意让每一层多罩进一条别的层罩不到的历史：周一 19:30 那次只有邻域及以上看得见、周三 19:30
+    那次只有跨周几及以上看得见（它不在本槽上，跨周几层的半宽写成 0 就取不到）、早上八点那次只有
+    全天看得见。四层互相包含，19:00 那次四层都取得到，卡却只有一张、标本槽。
     """
 
     ground = Ground(tmp_path, now=at(MONDAY + timedelta(days=30), 12, 0))
     ground.record(MONDAY, "打球", 19, 0, kind="打球")
     ground.record(MONDAY + timedelta(days=7), "打球", 19, 30, kind="打球")  # 同周几、在 ±3 邻域里
-    ground.record(MONDAY + timedelta(days=2), "打球", 19, 0, kind="打球")  # 周三同一时刻
+    ground.record(MONDAY + timedelta(days=2), "打球", 19, 30, kind="打球")  # 周三、在 ±3 邻域里但不在本槽
     ground.record(MONDAY + timedelta(days=14), "打球", 8, 0, kind="打球")  # 同周几、离得很远的槽
-    grouped_days = (MONDAY, MONDAY + timedelta(days=2), MONDAY + timedelta(days=7), MONDAY + timedelta(days=14))
-    associated = ground.associated(*grouped_days)
     cells = CellIndex.of(ground.tree())
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
-    cache = ground.cache()
-    layers = provenance(cells, "打球", slot, half_width=3, associated_on=associated("打球").__contains__)
+    layers = provenance(cells, "打球", slot, half_width=3, associated_on=lambda day: True)
 
-    def background(layer):
-        return layer_background(
-            layer,
-            "打球",
-            cache,
-            slot_minutes=15,
-            slot_index=slot.slot,
-            half_width=3,
-            window_days=30,
-            transition_window_seconds=7_200.0,
-            max_days=10,
-        )
+    background = background_for(ground, layers, half_width=3)
 
-    def shown(layer):
-        return sorted((view.day, view.at.hour, view.at.minute) for view in background(layer).views)
+    def shown(name: str):
+        return sorted((card.at.date(), card.at.hour, card.at.minute) for card in background.in_layer(name))
 
-    monday_evening = (MONDAY, 19, 0)
-    monday_half_past = (MONDAY + timedelta(days=7), 19, 30)
-    wednesday_evening = (MONDAY + timedelta(days=2), 19, 0)
-    monday_morning = (MONDAY + timedelta(days=14), 8, 0)
-
-    assert shown(layers.slot) == [monday_evening]
-    assert shown(layers.pool) == sorted([monday_evening, monday_half_past])
-    assert shown(layers.cross_weekday) == sorted([monday_evening, wednesday_evening, monday_half_past])
-    assert shown(layers.all_day) == sorted(
-        [monday_evening, wednesday_evening, monday_half_past, monday_morning]
-    )
-    assert background(layers.slot).dropped_days == 0
+    assert shown("slot") == [(MONDAY, 19, 0)]
+    assert shown("pool") == [(MONDAY + timedelta(days=7), 19, 30)]
+    assert shown("cross_weekday") == [(MONDAY + timedelta(days=2), 19, 30)]  # 半宽写成 0 就取不到它
+    assert shown("all_day") == [(MONDAY + timedelta(days=14), 8, 0)]
+    assert len(background.cards) == 4
+    assert [card.at for card in background.cards] == sorted(card.at for card in background.cards)
+    assert background.dropped_days == {"slot": 0, "pool": 0, "cross_weekday": 0, "all_day": 0}
 
 
-def test_the_protective_limit_says_how_many_days_it_left_out(tmp_path) -> None:
-    """保护闸截掉更早的日子时要报出来，否则"给你看的这几天"会被读成"一共就这几天"。"""
+def test_the_protective_limit_says_what_it_left_out(tmp_path) -> None:
+    """截掉更早的日子要报出来，否则"给你看的这几张"会被读成"一共就这几张"。"""
 
     ground = Ground(tmp_path, now=at(MONDAY + timedelta(days=30), 12, 0))
     for week in range(4):
         ground.record(MONDAY + timedelta(days=7 * week), "打球", 19, 0, kind="打球")
-    associated = ground.associated(*(MONDAY + timedelta(days=7 * week) for week in range(4)))
+    ground.record(MONDAY + timedelta(days=2), "打球", 19, 0, kind="打球")  # 周三，跨周几层
     cells = CellIndex.of(ground.tree())
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
-    cache = ground.cache()
-    layers = provenance(cells, "打球", slot, half_width=2, associated_on=associated("打球").__contains__)
-    background = layer_background(
-        layers.slot,
-        "打球",
-        cache,
-        slot_minutes=15,
-        slot_index=slot.slot,
-        half_width=2,
-        window_days=30,
-        transition_window_seconds=7_200.0,
-        max_days=2,
-    )
-    assert background.dropped_days == 2
-    assert [view.day for view in background.views] == list(days(14, 21))  # 留最近的两天
-    with pytest.raises(ForesightError):
-        layer_background(
-            layers.slot, "打球", cache, slot_minutes=15, slot_index=slot.slot, half_width=2,
-            window_days=30, transition_window_seconds=7_200.0, max_days=0,
-        )
+    layers = provenance(cells, "打球", slot, half_width=2, associated_on=lambda day: True)
+
+    by_days = background_for(ground, layers, half_width=2, max_days=2)
+    assert by_days.dropped_days["slot"] == 2 and by_days.dropped_days["all_day"] == 3
+    assert [card.at.date() for card in by_days.in_layer("slot")] == list(days(14, 21))  # 留最近的两天
+
+    with pytest.raises(ForesightError, match="positive integer"):
+        background_for(ground, layers, half_width=2, max_days=0)

@@ -690,10 +690,48 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     # 语义层的三件：规律级树、刷新器、以及**真的挂在重建之后**的那一拍。
     assert behavior.regularity_tree is not None and behavior.association_refresher is not None
     assert prediction.worker.after_rebuild is not None
-    # 预测层的事实源读的是这个 Runtime 的那棵规律级树，而不是另一个同路径的实例。
+    # 预测层的事实源读的是这个 Runtime 的那棵规律级树，而不是另一个同路径的实例；判"已关联"与读记录
+    # 用的是这个 Runtime 关联器的版本。
     foresight = runtime.components.foresight
     assert foresight is not None
-    assert foresight.assembler.associated.__self__.tree is behavior.regularity_tree  # type: ignore[attr-defined]
+    assert foresight.assembler.associated.tree is behavior.regularity_tree  # type: ignore[attr-defined]
+    assert foresight.assembler.associated.version == behavior.association_refresher.associator.version
+    assert foresight.assembler.regularity_tree is behavior.regularity_tree
+    # 判断走这个 Runtime 的结构化客户端；未封口的那一截读这个 Runtime 的判断存储、消费账本与词表；
+    # 节奏用树的槽宽。
+    assert foresight.runner.judge.client is runtime.components.models.structured_chat  # type: ignore[attr-defined]
+    unsealed = foresight.assembler.unsealed
+    assert unsealed.judgements is behavior.judgements  # type: ignore[attr-defined]
+    assert unsealed.ledger is behavior.reduction_runner.ledger  # type: ignore[attr-defined]
+    assert unsealed.kinds is behavior.kind_store  # type: ignore[attr-defined]
+    assert foresight.worker.slot_minutes == prediction.tree_config.slot_minutes
+    # 窗口只有一处出处：换一个邻域宽度的装配器接不上这棵树。
+    from habitus.runtime.foresight import ForesightRuntimeComponents
+
+    foresight.assembler.half_width = prediction.tree_config.pool_half_width + 1
+    with pytest.raises(ValueError, match="neighbourhood width"):
+        ForesightRuntimeComponents(
+            assembler=foresight.assembler, runner=foresight.runner, worker=foresight.worker
+        ).assert_attached_to(behavior=behavior, prediction=prediction, structured_chat=runtime.components.models.structured_chat)
+    foresight.assembler.half_width = prediction.tree_config.pool_half_width
+
+
+def test_the_foresight_worker_starts_and_stops_with_the_runtime(tmp_path: Path) -> None:
+    """每槽一拍的循环随 Runtime 起停；还没有一代预测树时第一拍失败只留 last_error，不阻断启动。"""
+
+    import asyncio
+
+    runtime = _fully_enabled_runtime(tmp_path)
+    foresight = runtime.components.foresight
+    assert foresight is not None
+
+    async def scenario() -> None:
+        await runtime.start()
+        assert foresight.worker.running
+        await runtime.stop()
+        assert not foresight.worker.running
+
+    asyncio.run(scenario())
 
 
 def test_an_enabled_semantic_layer_that_is_not_attached_to_the_nightly_batch_is_refused(tmp_path: Path) -> None:

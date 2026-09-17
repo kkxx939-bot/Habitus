@@ -492,8 +492,8 @@ workflow:
 # 出处日）。产物按候选发布到 storage.root/scene/regularity，进度在 storage.root/scene/association
 # （blocked.json 封锁记账、checkpoints/ 未落盘的产物）。
 #
-# 读侧（证据背景）还指着旧的按天情景树，而那棵树已经没有写入方——启用 foresight 目前只会拿到
-# 恒空的语义背景。读侧改写到规律级是下一步。
+# 读侧（预测层的历史卡与情形）经 scene.views 读规律级树：关联记录按候选、按版本取，没关联的日子在包里
+# 如实标出。
 #
 # 接线后的顺序与归组相反：归约把一天定稿 → 预测树重建 → 关联按格子线性推进（它的待办来自树上的
 # 出处日）。届时会新增每批目标数等几项。
@@ -505,7 +505,10 @@ workflow:
 #   max_attempts_per_input: 3        # 同一输入连续失败几次后封锁它（换关联版本自动作废）
 #   max_model_calls_per_run: 40      # 一轮最多几次模型调用——**吞吐的真天花板**，小于每天
 #                                    新增的 (候选, 日期) 数就永远追不平；要与下面的任务上限同量级
-#   max_targets_per_call: 12         # 一次调用最多问这个候选那天的几次发生（拍的，要按真实分布重定）
+#   max_targets_per_call: 40         # 一次调用最多问这个候选那天的几次发生。2026-09-14 按 DAY1 真实分布
+#                                    定（108 个候选：105 个 ≤6 次、其余 14 / 35 / 100 次）；40 只挡住
+#                                    一天 100 次的"与某人交谈"那一类词表噪声 token。超限不切块（同一天
+#                                    的几次要一起看），该批封锁并留信号
 #   association_per_candidate: 2     # 每个候选一轮最多取几件（各自取最早的）
 #   association_max_tasks_per_run: 40  # 整轮的任务总上限
 #   max_cause_rows: 12               # 一次调用摊开几行前因候选（渲染预算，截断留信号）
@@ -529,6 +532,8 @@ workflow:
 # 查询把整棵树扫穿，全部是启动档、要在真实数据上重定——重定的是数值，不是"要不要有这个闸"。
 # foresight:
 #   enabled: true
-#   window_days: 30                  # 取历史背景往回看多少天（保护闸，不是行为的复发窗）
+#   window_days: 30                  # 卡上"上一次"往回看多少天；不是取历史卡的窗（卡按出处日取）
 #   max_days_per_layer: 40           # 四层里每层最多摊开多少天的历史；截掉的更早日子会如实报出条数
-#   max_pack_chars: 60000            # 渲染后的证据包字符上限；超了从最远的那一层往近处砍
+#   judge_transient_retries: 1       # 判断服务对传输层瞬态错的有界重试（路由层另有一层）
+#   judge_transient_retry_delay_seconds: 5.0
+#   worker_shutdown_timeout_seconds: 30   # 每槽一拍的判断 worker；节奏本身取树的 slot_minutes，不另配

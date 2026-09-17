@@ -479,11 +479,32 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
         str(path.relative_to(SRC)) for path in scene_root.rglob("*.py") if "prediction" in imported_roots(path)
     )
     assert prediction_readers == ["scene/backlog.py"]
+    # 读侧里认识规律树的只有 ``views/gloss.py`` 这一个读口（2026-09-15）：投影、邻域序列、索引都只读
+    # 行为树。规律树的记录是模型写的判断，让它渗进投影，"视图全是观测事实"这句话就不成立了。
+    views_root = scene_root / "views"
+    regularity_readers = sorted(
+        str(path.relative_to(SRC))
+        for path in views_root.rglob("*.py")
+        if any(module.startswith("habitus.scene.regularity") for module in imported_modules(path))
+    )
+    assert regularity_readers == ["scene/views/gloss.py"]
+    # 两条绕路也堵上：从包根 ``habitus.scene`` 拿 ``RegularityTree``（包根再导出了它），或者从
+    # ``views.gloss`` 转手拿。views 里除 ``__init__`` 外不得 import 包根或 ``views`` 包根，也不得
+    # import ``views.gloss``——读规律树的东西只能经 ``gloss`` 出去给上层，不能倒灌回投影。
+    detours = sorted(
+        f"{path.relative_to(SRC)}: {module}"
+        for path in views_root.rglob("*.py")
+        if path.name != "__init__.py"
+        for module in imported_modules(path)
+        if module in {"habitus.scene", "habitus.scene.views", "habitus.scene.views.gloss"}
+    )
+    assert detours == []
     # 地址层（含规律级的 kinds 地址）只认名字与时刻：不依赖预测树，也不依赖 scene 包里任何
     # 别的模块——它要被存储、URI、读侧、关联四处共用，任何一边的改动都不该把它拽着走。
     assert imported_roots(scene_root / "model.py") & {"prediction", "scene"} == set()
     # 模型触点只有关联这一处（提示词渲染 + 服务）。按天归组那一处已经随整个包删掉（2026-09-13）。
     # 清单、存储、投影都不得碰模型——它们一碰，语义层就会开始自己做判断。
+    # 文本清洗 ``clean_line`` 已上提到 ``foundation.text``（预测层的判断装配也用它），scene 里不再有 text 模块。
     model_callers = sorted(
         str(path.relative_to(SRC))
         for path in scene_root.rglob("*.py")
@@ -496,7 +517,7 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
     # 要读树，按 scene 包整体的规矩走即可。
     association_root = scene_root / "association"
     model_facing = ("model.py", "schema.py", "prompt.py", "assembly.py", "service.py")
-    allowed_prefixes = ("habitus.scene.association", "habitus.scene.text", "habitus.model_client", "habitus.foundation")
+    allowed_prefixes = ("habitus.scene.association", "habitus.model_client", "habitus.foundation")
     leaked = sorted(
         f"{path.relative_to(SRC)}: {module}"
         for path in association_root.rglob("*.py")
@@ -515,7 +536,6 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
         "habitus.scene.calendar",
         "habitus.scene.model",
         "habitus.scene.uri",
-        "habitus.scene.text",
     )
     stale = sorted(
         f"{path.relative_to(SRC)}: {module}"
@@ -571,17 +591,66 @@ def test_foresight_only_reads_the_derived_trees() -> None:
     assert violations == []
     # ``infrastructure`` 也在禁止之列：本包只读两棵派生树给出的对象，自己不开文件、不拿锁、
     # 不碰向量库——"只读派生树"这句话要是允许它直接落盘，就等于没说。
-    # 现阶段零模型：证据装配是纯函数，判断那一段还没写。
-    assert [path for path in root.rglob("*.py") if "model_client" in imported_roots(path)] == []
+    # 模型触点只有判断这一处（提示词渲染 + 服务），客户端从构造器注入。证据装配、渲染、判断的产物
+    # 形状、schema 与装配校验都不得碰模型——它们一碰，"证据是纯函数装出来的"就只剩自觉了。
+    model_callers = sorted(str(path.relative_to(SRC)) for path in root.rglob("*.py") if "model_client" in imported_roots(path))
+    assert model_callers == ["foresight/judge/prompt.py", "foresight/judge/service.py"]
+    # 直接依赖收敛了还不够，算传递闭包：包里除判断包的入口、提示词、服务之外，任何模块都不得经
+    # 两跳够到模型客户端（融合包那条已经用变异测试证伪过一次"只查一跳"）。
+    foresight_modules = {
+        f"habitus.foresight.{path.relative_to(root).with_suffix('').as_posix().replace('/', '.')}".removesuffix(".__init__"): path
+        for path in root.rglob("*.py")
+        if "__pycache__" not in path.parts
+    }
+    allowed_model_callers = {
+        "habitus.foresight.judge",
+        "habitus.foresight.judge.prompt",
+        "habitus.foresight.judge.service",
+    }
+
+    def reaches_model_client(module: str, seen: set[str]) -> bool:
+        if module in seen:
+            return False
+        seen.add(module)
+        path = foresight_modules.get(module)
+        if path is None:
+            return False
+        imported = imported_modules(path)
+        if any(name == "habitus.model_client" or name.startswith("habitus.model_client.") for name in imported):
+            return True
+        return any(reaches_model_client(name, seen) for name in imported if name in foresight_modules)
+
+    leaking = sorted(
+        module for module in foresight_modules if module not in allowed_model_callers and reaches_model_client(module, set())
+    )
+    assert leaking == [], f"这些确定性模块传递性地依赖了 ModelClient: {leaking}"
     # 认识情景树的只有取背景的 context 与编排的 assemble；**数字那一侧对 scene 零知识**——
     # 出处日从预测树来、不从情景树按覆盖日重推，这条要由边界钉着，不靠自觉。清单是穷举的：
     # 新文件要碰 scene 必须先改这一行，改的时候就得想清楚它属于哪一侧。
     scene_readers = sorted(
         str(path.relative_to(SRC)) for path in root.rglob("*.py") if "scene" in imported_roots(path)
     )
-    assert scene_readers == ["foresight/assemble.py", "foresight/context.py", "foresight/render.py"]
+    assert scene_readers == [
+        "foresight/assemble.py",
+        "foresight/cards.py",
+        "foresight/context.py",
+        "foresight/render.py",
+    ]
+    # 而且只经读口进：``habitus.scene.views``（或包根）。``scene.regularity`` / ``scene.association`` /
+    # ``scene.backlog`` 都不许直接碰——后者读预测树，前两者是存储与写侧，绕过读口就等于在预测层里
+    # 重新长出一条读规律树的路。
+    beyond_the_views = sorted(
+        f"{path.relative_to(SRC)}: {module}"
+        for path in root.rglob("*.py")
+        for module in imported_modules(path)
+        if module.startswith("habitus.scene") and module not in {"habitus.scene", "habitus.scene.views"}
+    )
+    assert beyond_the_views == []
     assert "scene" not in imported_roots(root / "numbers.py")
     assert "scene" not in imported_roots(root / "model.py")
+    # 判断的产物形状对 scene 零知识：``basis`` 里只有 URI 字符串，不带视图、不带序列。
+    assert "scene" not in imported_roots(root / "judge" / "model.py")
+    assert "scene" not in imported_roots(root / "judge" / "schema.py")
     upstream = [
         str(path.relative_to(REPOSITORY_ROOT))
         for name in ("behavior", "scene", "prediction", "memory")
@@ -589,6 +658,44 @@ def test_foresight_only_reads_the_derived_trees() -> None:
         if "foresight" in imported_roots(path)
     ]
     assert upstream == []
+    # 组合根伸进行为侧写侧内部（融合存储、归约）的只有三处：行为管线的组装、预测层的组装（拿三份存储的类型）、
+    # 未封口那座桥。桥只许拿"哪些判断还没归约"这一个事实（``reduction.pending``）与账本、词表，不许自己
+    # 并链、解析记录——那是在组合根里重抄归约的算法。
+    runtime_root = SRC / "runtime"
+    inside_behavior = sorted(
+        str(path.relative_to(SRC))
+        for path in runtime_root.rglob("*.py")
+        if any(
+            module.startswith(("habitus.behavior.reduction.", "habitus.behavior.fusion."))
+            for module in imported_modules(path)
+        )
+    )
+    assert inside_behavior == ["runtime/behavior.py", "runtime/foresight.py", "runtime/unsealed.py"]
+    bridge_imports = {
+        module for module in imported_modules(runtime_root / "unsealed.py") if module.startswith("habitus.behavior")
+    }
+    assert bridge_imports <= {
+        "habitus.behavior.fusion.store",
+        "habitus.behavior.kinds.model",
+        "habitus.behavior.kinds.store",
+        "habitus.behavior.reduction.ledger",
+        "habitus.behavior.reduction.pending",
+    }
+
+
+def test_foundation_depends_on_no_other_package() -> None:
+    """``foundation`` 是各层共用的底：它一旦 import 任何领域包，那个包就成了所有人的传递依赖。
+
+    ``foundation.text`` 现在被关联与判断两个面向模型的装配层共用，这条要钉住。
+    """
+
+    violations = sorted(
+        f"{path.relative_to(SRC)}: {module}"
+        for path in (SRC / "foundation").rglob("*.py")
+        for module in imported_modules(path)
+        if module.startswith("habitus.") and not module.startswith("habitus.foundation")
+    )
+    assert violations == []
 
 
 def test_the_calendar_only_knows_about_dates() -> None:
@@ -684,6 +791,7 @@ def test_every_package_entry_exports_only_things_that_exist() -> None:
         "habitus.scene.regularity",
         "habitus.scene.views",
         "habitus.foresight",
+        "habitus.foresight.judge",
         "habitus.prediction",
         "habitus.integrations.http_api",
         "habitus.integrations.local_service",

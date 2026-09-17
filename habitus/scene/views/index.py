@@ -1,4 +1,4 @@
-"""按日读一次、多次查：一天的 occurrence、它们的短程关系、所属的事、观测空白、未兑现的待用前提。
+"""按日读一次、多次查：一天的 occurrence（按行）、它们的短程关系、观测空白。
 
 一个 ``DayIndexCache`` 只服务**一次查询**：在它的生命周期里同一天只读一次，不论那天有没有归组——
 "今天必须新鲜"靠每次查询新建缓存保证，"历史不会变"靠已归组的日子本来就不再改保证。跨查询复用
@@ -7,7 +7,10 @@
 
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
+from types import MappingProxyType
 
 from habitus.behavior.document import BehaviorDocument
 from habitus.behavior.document.link import BehaviorLinkType
@@ -16,9 +19,12 @@ from habitus.behavior.schema.vocabulary import GAP_KINDS
 from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.uri import BehaviorURI
 from habitus.scene.calendar import DayTypeCalendar, NominalCalendar
-from habitus.scene.views.model import ActionRef, ObservationGap
+from habitus.scene.views.model import ActionRef, FlowRow, ObservationGap
 
 _WATCHED_GAP_KIND = "没读懂"
+#: 空白文档只落在**起始日**目录，而一段"未观测"可以横跨好几天（出差一周）。读某一天的空白时往前
+#: 回看这么多天的起始目录，把延续到本日的裁进来；比这更长的空白从它中间那些天看不见。
+GAP_LOOKBACK_DAYS = 31
 
 
 class DayIndex:
@@ -26,9 +32,13 @@ class DayIndex:
 
     ``day_note`` 是当地日历对这一天的说法，读时算、不落盘（见 ``scene.calendar``）。
 
-    ``gaps`` 是落在这一天里的观测空白，与预测树的曝光分母同两步归一化：前一天开始、跨午夜延续到
-    这一天的空白也读进来并裁到本日（树的 ``group_gaps_by_day``）；零宽度的丢弃、"没读懂"段里若读出了
-    一条行为的开始则整段作废（树的 ``reconcile_gaps``——我们在看、只是没读懂，读出来了就证伪了）。
+    ``gaps`` 是落在这一天里的观测空白，与预测树的曝光分母同两步归一化：更早开始、延续到这一天的
+    空白也读进来并裁到本日（树的 ``group_gaps_by_day``；回看 ``GAP_LOOKBACK_DAYS`` 天的起始目录）；
+    零宽度的丢弃、"没读懂"段里若读出了一条行为的开始则整段作废（树的 ``reconcile_gaps``——我们在看、
+    只是没读懂，读出来了就证伪了）。
+
+    ``rows`` 是这一天的全部行按时刻排成的 ``FlowRow``：读侧要"一条行为是什么、几点、说了什么"都从这里取，
+    行为文档的字段名不出本模块。
     """
 
     def __init__(
@@ -47,6 +57,10 @@ class DayIndex:
         self.ordered: tuple[str, ...] = tuple(
             sorted(self.occurrences, key=lambda uri: (self.occurrences[uri].address.started_at.astimezone(UTC), uri))
         )
+        counts = Counter(str(self.occurrences[uri].fields["kind_token"]) for uri in self.ordered)
+        self.rows: tuple[FlowRow, ...] = tuple(self._row(uri, counts) for uri in self.ordered)
+        self.by_uri: Mapping[str, FlowRow] = MappingProxyType({row.uri: row for row in self.rows})
+        self.kind_counts: Mapping[str, int] = MappingProxyType(dict(sorted(counts.items())))
         self.gaps: tuple[ObservationGap, ...] = self._read_gaps(behavior_tree)
         # 行为树的短程关系（只存前向、目标可能在相邻的一天）：按类型分开留原始目标 URI，投影时经 cache
         # 解析并对 concurrent_with 取对称闭包
@@ -62,6 +76,20 @@ class DayIndex:
         document = self.occurrences[uri]
         return ActionRef(uri=uri, name=str(document.fields["name"]), kind_token=str(document.fields["kind_token"]))
 
+    def _row(self, uri: str, counts: Mapping[str, int]) -> FlowRow:
+        document = self.occurrences[uri]
+        fields = document.fields
+        kind_token = str(fields["kind_token"])
+        return FlowRow(
+            uri=uri,
+            name=str(fields["name"]),
+            kind_token=kind_token,
+            at=document.address.started_at,
+            last_observed_at=datetime.fromisoformat(str(fields["last_observed_at"])),
+            summary=str(fields["summary"]),
+            day_count=counts[kind_token],
+        )
+
     def others(self, uri: str) -> tuple[str, ...]:
         """"和谁"：subjects 里主体之外的人（主体总在里面，留着它这一槽就永远对上）。"""
 
@@ -70,8 +98,8 @@ class DayIndex:
     def _read_gaps(self, behavior_tree: BehaviorTree) -> tuple[ObservationGap, ...]:
         starts = sorted(self.occurrences[uri].address.started_at.astimezone(UTC) for uri in self.ordered)
         clipped: list[ObservationGap] = []
-        for source_day in (self.day - timedelta(days=1), self.day):
-            for document in behavior_tree.read_day(BehaviorKind.GAP, source_day):
+        for offset in range(GAP_LOOKBACK_DAYS, -1, -1):
+            for document in behavior_tree.read_day(BehaviorKind.GAP, self.day - timedelta(days=offset)):
                 kind = str(document.fields["gap_kind"])
                 if kind not in GAP_KINDS:
                     raise ValueError(f"unknown gap kind on the behaviour tree: {kind!r}")
@@ -146,4 +174,4 @@ class DayIndexCache:
 
 
 
-__all__ = ["DayIndex", "DayIndexCache"]
+__all__ = ["GAP_LOOKBACK_DAYS", "DayIndex", "DayIndexCache"]

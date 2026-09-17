@@ -1,48 +1,48 @@
-"""证据的 Markdown 渲染：数字连着出处、没说的说出来、保护闸从远到近砍。"""
+"""证据的 Markdown 渲染：数字连着出处、没说的说出来、卡分三段、保护闸从远到近砍。"""
 
 from __future__ import annotations
 
 from datetime import timedelta
 
-import pytest
-
-from habitus.foresight import CellIndex, ForesightError, Layer, LayerBackground, render_candidate
-from habitus.foresight.assemble import CandidateEvidence, candidate_evidence, moment_at
+from habitus.foresight import CandidateEvidence, CandidateNumbers, Layer, Provenance, render_candidate
+from habitus.foresight.assemble import _empty_background
+from habitus.foresight.render import render_moment
 from tests.unit.foresight.fixtures import MONDAY, Ground, at
 
 NOW = MONDAY + timedelta(days=28)
+PRIOR_ONLY = CandidateNumbers(
+    marginal=0.04,
+    hazard=0.0,
+    cumulative=0.0,
+    lift_all_day=1.0,
+    lift_weekday=0.0,
+    count=0.0,
+    n_eff=0.0,
+    trend=None,
+    trend_n_eff=0.0,
+    recurrence=None,
+    done_today=0,
+)
 
 
-def evidence_for(tmp_path, *, name: str = "site", gap: bool = False, max_days: int = 40):
-    """三个周一都在 19:00 打球；第三周之前先喝了水，第二周之前断过档。
+def evidence_for(tmp_path, *, name: str = "site", gap: bool = False, max_days: int = 40) -> CandidateEvidence:
+    """三个周一都在 19:00 打球一小时；第一周之后洗澡、第三周之前先喝了水，第二周之前断过档；三周都关联了。
 
-    每次新建现场都用自己的目录：同一棵行为树发两遍同一批 occurrence 会造出重复，而已关联的
-    日子再 refresh 一次什么都不会发布。
+    每次新建现场都用自己的目录：同一棵行为树发两遍同一批 occurrence 会造出重复。
     """
 
     ground = Ground(tmp_path / name, now=at(NOW, 23, 0))
     for week in range(3):
-        ground.record(MONDAY + timedelta(days=7 * week), "打球", 19, 0, kind="打球")
+        uri = ground.record(MONDAY + timedelta(days=7 * week), "打球", 19, 0, kind="打球", lasts_minutes=60)
+        ground.associate(uri, kind="打球", context=f"第 {week + 1} 周的周一晚上去打的", situation="周一晚上自己去")
     ground.record(MONDAY, "洗澡", 20, 10, kind="洗澡")
     ground.record(MONDAY + timedelta(days=14), "喝水", 18, 50, kind="喝水")
     if gap:
         # 空白段里**不能**有任何行为的起点：「没读懂」段被段内读出的行为证伪之后整段作废
         # （行为树与预测树同一条规则），那样就测不到删失了。
         ground.gap(MONDAY + timedelta(days=7), 18, 0, 18, 50)
-    days = [MONDAY + timedelta(days=7 * week) for week in range(3)]
-    associated = ground.associated(*days)
-    moment = moment_at(at(NOW, 19, 5), slot_minutes=15)
-    return candidate_evidence(
-        CellIndex.of(ground.tree()),
-        "打球",
-        moment,
-        ground.cache(),
-        associated=associated,
-        half_width=3,
-        window_days=30,
-        transition_window_seconds=7_200.0,
-        max_days_per_layer=max_days,
-    )
+    pack = ground.pack(at(NOW, 19, 5), max_days=max_days)
+    return next(item for item in pack.candidates if item.kind_token == "打球")
 
 
 def test_the_table_shows_the_raw_ratio_for_the_three_chain_layers(tmp_path) -> None:
@@ -53,7 +53,13 @@ def test_the_table_shows_the_raw_ratio_for_the_three_chain_layers(tmp_path) -> N
     lines = {line.split("|")[1].strip(): line for line in text.splitlines() if line.startswith("| ")}
     assert "=" in lines["邻域"] and "=" in lines["跨周几"]
     assert "=" not in lines["全天"]
-    assert "此刻：" in text and "周一 19:05（第 76 槽）" in text
+
+
+def test_the_moment_line_names_the_slot_and_the_calendar(tmp_path) -> None:
+    ground = Ground(tmp_path, now=at(NOW, 23, 0))
+    ground.record(MONDAY, "打球", 19, 0, kind="打球")
+    moment = ground.pack(at(NOW, 19, 5)).moment
+    assert render_moment(moment) == "此刻：2026-08-31 周一 19:05（第 76 槽）"
 
 
 def test_a_slot_that_was_never_observed_is_not_a_measured_zero(tmp_path) -> None:
@@ -65,32 +71,49 @@ def test_a_slot_that_was_never_observed_is_not_a_measured_zero(tmp_path) -> None
 
     ground = Ground(tmp_path / "unobserved", now=at(MONDAY + timedelta(days=2), 23, 0))
     ground.record(MONDAY, "打球", 19, 0, kind="打球")
-    # 观测跨度只有周一到周三，周五那一整列一次都没看过。
-    friday = moment_at(at(MONDAY + timedelta(days=4), 19, 5), slot_minutes=15)
-    evidence = candidate_evidence(
-        CellIndex.of(ground.tree()),
-        "打球",
-        friday,
-        ground.cache(),
-        associated=ground.associated(MONDAY),
-        half_width=3,
-        window_days=30,
-        transition_window_seconds=7_200.0,
-        max_days_per_layer=40,
+    # 观测跨度只有周一到周三，周五那一整列一次都没看过；周五没有曲线，打球不是候选，直接造证据。
+    friday_pack = ground.pack(at(MONDAY + timedelta(days=4), 19, 5))
+    assert friday_pack.candidates == ()
+    from habitus.foresight import CellIndex, provenance
+    from habitus.prediction.model import SlotKey
+
+    layers = provenance(CellIndex.of(ground.tree()), "打球", SlotKey(weekday=4, slot=76), half_width=3, associated_on=lambda _day: True)
+    evidence = CandidateEvidence(
+        kind_token="打球", numbers=PRIOR_ONLY, provenance=layers, expanded=False, background=_empty_background()
     )
-    assert evidence.layers[0].layer.exposure == 0.0
+    assert layers.slot.exposure == 0.0
     text = render_candidate(evidence)
     assert "| 本槽 | 从没看过这一格 |" in text
-    assert "0.000" not in text.split("### ")[0]  # 表里没有任何冒充实测的零
+    assert not any("0.000" in line for line in text.splitlines() if line.startswith("| "))  # 表里没有冒充实测的零
+    assert "只列名字与数字" in text
+
+
+def test_cards_are_told_in_three_parts_with_their_gloss(tmp_path) -> None:
+    text = render_candidate(evidence_for(tmp_path))
+    assert "### 历史 · 3 次发生，每次一张卡（按 # 编号引用）" in text
+    assert "- #1 2026-08-03 周一 19:00–20:00 打球 〔本槽〕（周一晚上自己去）" in text
+    assert "  之前：（无）" in text and "  之后：20:10 洗澡(1)" in text
+    assert "  之前：18:50 喝水(1)" in text
+    assert "  关联：第 1 周的周一晚上去打的" in text
+    assert "### 情形" in text and "本周几出现过：周一晚上自己去（3 天）" in text
 
 
 def test_what_is_missing_is_said_out_loud(tmp_path) -> None:
-    """没关联的日子与被保护闸截掉的日子都要写出来，否则"给你看的这几条"会被读成"一共这几条"。"""
+    """没关联的日子与被保护闸截掉的日子都要写出来，否则"给你看的这几条"会被读成"一共就这几条"。"""
 
     text = render_candidate(evidence_for(tmp_path, name="capped", max_days=1))
-    assert "更早的 2 天没有展开" in text
+    assert "更早的日子没有展开（本槽 2、邻域 2、跨周几 2、全天 2 天）" in text
     full = render_candidate(evidence_for(tmp_path, name="full"))
-    assert "还没关联" not in full  # 这个现场三天都归了组，就不该无中生有地报缺
+    assert "还没关联" not in full  # 这个现场三天都关联了，就不该无中生有地报缺
+
+
+def test_an_unassociated_day_is_named_on_its_card(tmp_path) -> None:
+    ground = Ground(tmp_path, now=at(NOW, 23, 0))
+    ground.record(MONDAY, "打球", 19, 0, kind="打球")
+    (candidate,) = ground.pack(at(NOW, 19, 5)).expanded
+    text = render_candidate(candidate)
+    assert "1 天有数、语义层还没关联" in text
+    assert "  关联：那天还没关联" in text
 
 
 def test_the_three_valued_neighbour_is_told_as_it_is(tmp_path) -> None:
@@ -102,43 +125,30 @@ def test_the_three_valued_neighbour_is_told_as_it_is(tmp_path) -> None:
     assert "紧邻下一条：洗澡" in text
 
 
-def test_the_protective_limit_trims_from_the_far_layers_first(tmp_path) -> None:
-    """从全天往本槽砍：离此刻越远的层，少看几条损失越小；四层的数字与出处一个都不砍。"""
+def test_every_card_is_rendered_no_matter_which_layer(tmp_path) -> None:
+    """不按字数砍（2026-09-16 定）：包里有什么就渲什么，四层的卡都在。"""
 
-    evidence = evidence_for(tmp_path)
-    full = render_candidate(evidence)
-    cap = len(full) // 2
-    trimmed = render_candidate(evidence, max_chars=cap)
-    # 断言必须对着 max_chars，不是对着完整文本：只查"没变长"的话，砍序写错、甚至只砍一层，
-    # 测试照样全绿（变异实证）。
-    assert len(trimmed) <= cap
-    assert "| 本槽 |" in trimmed and "| 全天 |" in trimmed  # 表永远在
-    assert "因篇幅未展开" in trimmed
-    head = trimmed.index("### 本槽")
-    assert trimmed.count("- 08-", head, trimmed.index("### 邻域")) > 0  # 本槽最后才砍
-    with pytest.raises(ForesightError):
-        render_candidate(evidence, max_chars=0)
+    ground = Ground(tmp_path, now=at(NOW, 23, 0))
+    for week in range(3):
+        ground.record(MONDAY + timedelta(days=7 * week), "打球", 19, 0, kind="打球")
+    ground.record(MONDAY + timedelta(days=9), "打球", 8, 0, kind="打球")  # 周三早上，全天层
+    (evidence,) = ground.pack(at(NOW, 19, 5)).expanded
+    text = render_candidate(evidence)
+    assert "〔全天〕" in text and "〔本槽〕" in text
 
 
-def test_a_rate_with_no_days_behind_it_is_marked_as_prior_only(tmp_path) -> None:
-    """率不为零但一天都没发生过，说的只能是平滑用的先验，不是实测。
+def test_a_rate_with_no_days_behind_it_is_marked_as_prior_only() -> None:
+    """一层一天都没发生过、率却不是 0，那是 Laplace 先验在说话；不标出来会被当成实测结论。"""
 
-    链上三层改成裸比值之后，这种组合在正常数据上已经到不了了（分子为零则比值为零）——这条
-    是**护栏**：只要还有任何一层给的是已发布的平滑率，它就可能出现，而一个 0.04 冒充实测的
-    代价太大。所以直接构造那个形状来钉住渲染规则本身。
-    """
-
-    evidence = evidence_for(tmp_path, name="prior")
-    forged = CandidateEvidence(
-        kind_token=evidence.kind_token,
-        moment=evidence.moment,
-        layers=(
-            *evidence.layers[:3],
-            LayerBackground(
-                layer=Layer(name="all_day", value=0.0425, days=(), unassociated=()), views=(), dropped_days=0
-            ),
-        ),
+    empty = Layer(name="slot", value=0.0, days=(), unassociated=(), hits=0.0, exposure=4.0)
+    layers = Provenance(
+        slot=empty,
+        pool=Layer(name="pool", value=0.0, days=(), unassociated=(), hits=0.0, exposure=20.0),
+        cross_weekday=Layer(name="cross_weekday", value=0.0, days=(), unassociated=(), hits=0.0, exposure=140.0),
+        all_day=Layer(name="all_day", value=0.04, days=(), unassociated=()),
     )
-    text = render_candidate(forged)
-    assert "0.0425（只有先验，没有证据）" in text
-    assert "没有出处日" in text and "这一层一天都没发生过，没有历史可看" in text
+    text = render_candidate(
+        CandidateEvidence(kind_token="吃药", numbers=PRIOR_ONLY, provenance=layers, expanded=False, background=_empty_background())
+    )
+    assert "| 全天 | 0.0400（只有先验，没有证据） | 0 天 | — |" in text
+    assert "复发：没有间隔样本 · 今天还没做" in text

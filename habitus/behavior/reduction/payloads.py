@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from habitus.behavior.model import BehaviorAddress
@@ -60,7 +60,7 @@ def occurrence_payload(
     summaries = [member.summary for member in chain.view]
     if any(item is None for item in summaries):
         raise BehaviorReductionError("an occurrence chain must be built from readable judgements")
-    last_observed = max((item.last_observed_at for item in chain.view), key=_as_instant)
+    last_observed = chain.last_observed_at
     # "何时可知"存储为 UTC；进树换算成链头行为时刻的本地偏移——occurrence 上只有一种时间约定。
     onset = head.evidence_ready_at.astimezone(head.started_at.tzinfo)
     consumed = chain.consumed
@@ -148,10 +148,6 @@ def _basis_step(
         "ended_at": _iso(last.local_occurred_at),
         "available_at": _iso(available.astimezone(last_offset)),
     }
-
-
-def _as_instant(value: datetime) -> datetime:
-    return value.astimezone(UTC)
 
 
 __all__ = [

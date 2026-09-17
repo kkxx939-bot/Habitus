@@ -84,6 +84,13 @@ class AssociatedDays(Protocol):
     def days_for(self, kind_token: str) -> frozenset[date]: ...
 
 
+class AssociationLedger(AssociatedDays, Protocol):
+    """``AssociatedDays`` 加上"按哪个版本算的"：读关联记录的人按同一个版本读，两边才对得上。"""
+
+    @property
+    def version(self) -> str: ...
+
+
 class BlockedDays(Protocol):
     """哪些日期这一轮不要再取了。按候选问，返回日期集合。
 
@@ -228,4 +235,13 @@ class CauseFacts:
         return tuple(sorted(seen.values(), key=lambda fact: fact.order))
 
 
-__all__ = ["AssociatedDays", "AssociationTask", "BlockedDays", "CauseFact", "CauseFacts", "backlog", "slot_order"]
+__all__ = [
+    "AssociatedDays",
+    "AssociationLedger",
+    "AssociationTask",
+    "BlockedDays",
+    "CauseFact",
+    "CauseFacts",
+    "backlog",
+    "slot_order",
+]
