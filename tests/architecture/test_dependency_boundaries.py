@@ -634,6 +634,7 @@ def test_foresight_only_reads_the_derived_trees() -> None:
         "foresight/assemble.py",
         "foresight/cards.py",
         "foresight/context.py",
+        "foresight/ledger/settle.py",
         "foresight/render.py",
     ]
     # 而且只经读口进：``habitus.scene.views``（或包根）。``scene.regularity`` / ``scene.association`` /
@@ -651,6 +652,16 @@ def test_foresight_only_reads_the_derived_trees() -> None:
     # 判断的产物形状对 scene 零知识：``basis`` 里只有 URI 字符串，不带视图、不带序列。
     assert "scene" not in imported_roots(root / "judge" / "model.py")
     assert "scene" not in imported_roots(root / "judge" / "schema.py")
+    # 账本的形状与编解码同样对 scene 零知识；落盘只在组合根的 ``runtime/foresight_ledger.py``——
+    # foresight 整包不许 import infrastructure（上面已钉），这里再钉"写 foresight_root 的只有它一个"。
+    for name in ("model.py", "codec.py", "gate.py", "claims.py"):
+        assert "scene" not in imported_roots(root / "ledger" / name)
+    ledger_writers = sorted(
+        str(path.relative_to(SRC))
+        for path in (SRC / "runtime").rglob("*.py")
+        if "habitus.foresight.ledger" in imported_modules(path) and "infrastructure" in imported_roots(path)
+    )
+    assert ledger_writers == ["runtime/foresight_ledger.py"]
     upstream = [
         str(path.relative_to(REPOSITORY_ROOT))
         for name in ("behavior", "scene", "prediction", "memory")
@@ -681,6 +692,18 @@ def test_foresight_only_reads_the_derived_trees() -> None:
         "habitus.behavior.reduction.ledger",
         "habitus.behavior.reduction.pending",
     }
+
+
+def test_the_facts_door_only_knows_about_time() -> None:
+    """外部条件的事实门是一个只认时刻的可替换接缝：它不认识树、不认识视图，也不认识自己所在的包。
+
+    与 ``calendar`` 同一条纪律：一旦某个提供者从门里读行为树或预测树，条件就不再是"外面的事实"，
+    而变成又一个要跟着树一起重算的派生物——而它会被冻结进承诺，事后分不清哪个是哪个。
+    """
+
+    facts = SRC / "scene" / "facts.py"
+    assert facts.is_file()
+    assert imported_modules(facts) == {"__future__", "collections.abc", "dataclasses", "datetime", "typing"}
 
 
 def test_foundation_depends_on_no_other_package() -> None:
@@ -792,6 +815,7 @@ def test_every_package_entry_exports_only_things_that_exist() -> None:
         "habitus.scene.views",
         "habitus.foresight",
         "habitus.foresight.judge",
+        "habitus.foresight.ledger",
         "habitus.prediction",
         "habitus.integrations.http_api",
         "habitus.integrations.local_service",

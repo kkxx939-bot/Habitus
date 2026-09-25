@@ -17,7 +17,8 @@ L0（一句话）。范围由预测树的出处日决定，不设日历窗口—
 - ``regularity``  产物与存储：记录、L1/L0、受控前向边、完成标记。
 - ``views``  读侧：行为侧的投影（紧邻的上下条、起因、上一次、观测空白、日型……）、槽位邻域序列，
   以及规律级的读口 ``gloss``（按候选取关联记录与情形列表，``views`` 里唯一读规律树的模块）。
-- ``calendar`` / ``model`` / ``uri``  日型接缝、地址与受控枚举、URI。（文本清洗 ``clean_line`` 在
+- ``calendar`` / ``facts`` / ``model`` / ``uri``  日型接缝、外部条件的事实门（一刻一组受控键值，
+  给预测层的承诺与将来的关联用）、地址与受控枚举、URI。（文本清洗 ``clean_line`` 在
   ``foundation.text``，关联与预测层的装配共用。）
 
 按天归组与整棵日情景树已经在 2026-09-13/14 删掉：归组产出的"事"是个冗余的中间容器，而项目
@@ -47,6 +48,16 @@ from habitus.scene.backlog import (
     backlog,
 )
 from habitus.scene.calendar import DayTypeCalendar, NominalCalendar
+from habitus.scene.facts import (
+    FACT_KINDS,
+    CompositeFacts,
+    Conditions,
+    FactKey,
+    FactProvider,
+    NoFacts,
+    conditions_of,
+    require_local,
+)
 from habitus.scene.model import AssociationAddress, KindDirectory, RegularityLevel, SceneLinkType
 from habitus.scene.regularity import AssociationDocument, RegularityTree, RegularityTreeError
 from habitus.scene.regularity.link import SceneStoredLink, parse_link_target
@@ -70,6 +81,14 @@ from habitus.scene.views import (
 )
 
 __all__ = [
+    "conditions_of",
+    "NoFacts",
+    "FactProvider",
+    "Conditions",
+    "CompositeFacts",
+    "FACT_KINDS",
+    "FactKey",
+    "require_local",
     "ASSOCIATION_VERSION",
     "ActionRef",
     "AssociatedDays",

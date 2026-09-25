@@ -18,7 +18,10 @@
 
 节奏：``ForesightWorker`` 每个槽一拍（对齐到槽边界，槽宽就是树的 ``slot_minutes``），每拍经
 ``JudgementRunner`` 装配 → 判断。同一槽内此刻场景没变（``NowScene.fingerprint`` 相同）就复用上一次的
-判断，不再调模型。本轮判断**只返回与记录**（观测事件 + ``runner.last``），不落盘、不结算、不开口。
+判断，不再调模型。每拍新判断里**带时窗的「会」**落成承诺（``foresight.ledger``），那天定稿之后由
+``SettlementStage`` 对着行为树结算——账本是真值，**本轮仍不提醒、不代劳**（提醒通道还没有）。承诺上还记下
+说那句话时事实门给的外部条件（``scene.facts``：答了什么、问了哪些键、谁的口径），它是 loss 的证据，
+本轮只记不用；现在还没有任何真实的条件源，所以那三样是空的。
 本模块不碰 memory。
 """
 
@@ -26,9 +29,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 from habitus.behavior.fusion.store import BehaviorJudgementStore
@@ -38,6 +41,7 @@ from habitus.behavior.tree import BehaviorTree
 from habitus.config import HabitusConfig
 from habitus.foresight import EvidencePack, ForesightError, NoUnsealed, UnsealedReader, assemble, moment_at
 from habitus.foresight.judge import Judge, JudgeConfig, Judgement, LLMJudge
+from habitus.foresight.ledger import Claim, claims_from
 from habitus.foundation.observability import ObservationStatus, Observer
 from habitus.model_client import StructuredChatClient
 from habitus.prediction import builder
@@ -46,10 +50,12 @@ from habitus.prediction.errors import PredictionTreeStoreError
 from habitus.prediction.model import PredictionTree
 from habitus.prediction.store import PredictionTreeStore, PublishedGeneration
 from habitus.runtime.behavior import BehaviorRuntimeComponents
+from habitus.runtime.foresight_ledger import ForesightLedgerStore
+from habitus.runtime.foresight_settlement import SettlementStage
 from habitus.runtime.prediction import PredictionRuntimeComponents
 from habitus.runtime.resident import ResidentWorker
 from habitus.runtime.unsealed import UnsealedFromJudgements
-from habitus.scene import AssociationLedger, DayTypeCalendar, NominalCalendar
+from habitus.scene import AssociationLedger, DayTypeCalendar, FactProvider, NoFacts, NominalCalendar, conditions_of
 from habitus.scene.regularity import RegularityTree
 from habitus.scene.views import DayIndexCache, association_glosses, situations_of
 
@@ -61,6 +67,7 @@ class ForesightRuntimeComponents:
     assembler: EvidenceAssembler
     runner: JudgementRunner
     worker: ForesightWorker
+    settlement: SettlementStage
 
     def __post_init__(self) -> None:
         if self.runner.assembler is not self.assembler:
@@ -69,6 +76,10 @@ class ForesightRuntimeComponents:
             raise ValueError("the foresight worker must drive the assembled runner")
         if self.worker.zone is not self.assembler.zone:
             raise ValueError("the foresight worker must tick in the assembler's time zone")
+        if self.settlement.ledger is not self.runner.ledger:
+            raise ValueError("the runner and the settlement stage must use the same ledger")
+        if self.settlement.assembler is not self.assembler:
+            raise ValueError("the settlement stage must read the assembled behaviour tree")
 
     def assert_attached_to(
         self,
@@ -230,11 +241,12 @@ class EvidenceAssembler:
 
 @dataclass(frozen=True)
 class JudgementRun:
-    """一拍的结果：读的那一包、判断、以及这次是不是复用了上一拍（没调模型）。"""
+    """一拍的结果：读的那一包、判断、这次是不是复用了上一拍（没调模型）、这一拍新落盘的承诺。"""
 
     pack: EvidencePack
     judgement: Judgement
     reused: bool
+    claims: tuple[Claim, ...] = ()
 
 
 class JudgementRunner:
@@ -247,14 +259,27 @@ class JudgementRunner:
     """
 
     def __init__(
-        self, assembler: EvidenceAssembler, judge: Judge, *, clock: Callable[[], datetime] | None = None
+        self,
+        assembler: EvidenceAssembler,
+        judge: Judge,
+        *,
+        ledger: ForesightLedgerStore | None = None,
+        facts: FactProvider | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(assembler, EvidenceAssembler):
             raise TypeError("assembler must be an EvidenceAssembler")
         if not callable(getattr(judge, "judge", None)) or not isinstance(getattr(judge, "version", None), str):
             raise TypeError("judge must implement Judge")
+        if ledger is not None and not isinstance(ledger, ForesightLedgerStore):
+            raise TypeError("ledger must be a ForesightLedgerStore or None")
+        if facts is not None and not isinstance(facts, FactProvider):
+            raise TypeError("facts must implement FactProvider")
         self.assembler = assembler
         self.judge = judge
+        self.ledger = ledger
+        # 说这话那一刻的外部条件；没有提供者就是显式的"一个条件都没有"，承诺照记、只是 conditions 为空。
+        self.facts: FactProvider = facts if facts is not None else NoFacts()
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
         self.last: JudgementRun | None = None
         self._last_key: tuple[object, ...] | None = None
@@ -267,10 +292,43 @@ class JudgementRunner:
         if previous is not None and key == self._last_key:
             run = JudgementRun(pack=pack, judgement=previous.judgement, reused=True)
         else:
-            run = JudgementRun(pack=pack, judgement=await self.judge.judge(pack), reused=False)
+            judgement = await self.judge.judge(pack)
+            claims = await asyncio.to_thread(self._record, pack, judgement)
+            run = JudgementRun(pack=pack, judgement=judgement, reused=False, claims=claims)
         self.last = run
         self._last_key = key
         return run
+
+    def _conditions(self, pack: EvidencePack) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...], str]:
+        """问事实门要此刻的条件。**源坏了不许拖垮这一拍**：模型已经答过了，条件只是记在旁边的东西，
+        答不出就记成"什么都没问到、口径 unavailable"——那本身就是可读的事实，比丢掉整条承诺好。
+
+        时刻用 ``pack.moment.at``：它是装配时换算过的**主体本地时刻**，也正是判断者看到的那一刻。
+        """
+
+        facts = self.facts
+        try:
+            return conditions_of(facts.at(pack.moment.at)), tuple(key.name for key in facts.keys()), facts.version
+        except Exception:  # noqa: BLE001 - 条件是旁证，源坏了记成"没问到"，不吞掉这一拍
+            return (), (), "unavailable"
+
+    def _record(self, pack: EvidencePack, judgement: Judgement) -> tuple[Claim, ...]:
+        """新判断落账：抽承诺（对着那天已有的未结算承诺去重）、写盘。没有账本就什么都不记。"""
+
+        if self.ledger is None:
+            return ()
+        conditions, keys, version = self._conditions(pack)
+        claims = claims_from(
+            pack,
+            judgement,
+            open_claims=self.ledger.unsettled_claims(pack.moment.day),
+            conditions=conditions,
+            condition_keys=keys,
+            facts_version=version,
+        )
+        for claim in claims:
+            self.ledger.record_claim(claim)
+        return claims
 
 
 def _reuse_key(pack: EvidencePack) -> tuple[object, ...]:
@@ -360,6 +418,7 @@ def _run_attributes(run: JudgementRun) -> dict[str, str | int | float | bool]:
         "expected": len(judgement.expected),
         "day_state": judgement.day_state or "未答",
         "signals": len(judgement.signals),
+        "claims": len(run.claims),
     }
 
 
@@ -376,6 +435,8 @@ def build_foresight_components(
     ledger: BehaviorReductionLedger | None = None,
     kinds: BehaviorKindStore | None = None,
     unsealed: UnsealedReader | None = None,
+    facts: FactProvider | None = None,
+    closed_days: Callable[[], Iterable[date]] | None = None,
     observer: Observer | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> ForesightRuntimeComponents | None:
@@ -415,7 +476,22 @@ def build_foresight_components(
         unsealed=resolved_unsealed,
         clock=clock,
     )
-    runner = JudgementRunner(assembler, resolved_judge, clock=clock)
+    ledger_store = ForesightLedgerStore(config.foresight_root)
+    runner = JudgementRunner(
+        assembler,
+        resolved_judge,
+        ledger=ledger_store,
+        facts=_facts(facts),
+        clock=clock,
+    )
+    settlement = SettlementStage(
+        ledger_store,
+        assembler,
+        # 定稿日只有归约说了算；没接上时结算什么都不做，而不是拿别的口径凑一个。
+        closed_days=closed_days if closed_days is not None else tuple,
+        observer=observer,
+        clock=clock,
+    )
     worker = ForesightWorker(
         runner,
         # 节奏就是树的槽宽：一槽一拍，与"此刻在哪个槽"用同一个数。
@@ -425,7 +501,7 @@ def build_foresight_components(
         observer=observer,
         clock=clock,
     )
-    return ForesightRuntimeComponents(assembler=assembler, runner=runner, worker=worker)
+    return ForesightRuntimeComponents(assembler=assembler, runner=runner, worker=worker, settlement=settlement)
 
 
 def _judge(
@@ -474,6 +550,14 @@ def _unsealed(
             "reading unsealed judgements needs the judgement store, the reduction ledger and the kind store"
         )
     return UnsealedFromJudgements(judgements, ledger, kinds)
+
+
+def _facts(facts: FactProvider | None) -> FactProvider:
+    """外部条件的提供者。**现在没有任何真实源**，所以缺省是显式的空实现——与 ``_calendar`` 退到名义日历同一条
+    纪律：不拿一个没有数据源的合成键去充数（那会让第一版 loss 的数字看起来稳定，实际什么都没量到）。
+    """
+
+    return facts if facts is not None else NoFacts()
 
 
 def _calendar(config: HabitusConfig) -> DayTypeCalendar:

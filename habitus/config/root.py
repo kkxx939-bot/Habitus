@@ -104,6 +104,12 @@ class HabitusConfig:
         return self.storage_root / "prediction"
 
     @property
+    def foresight_root(self) -> Path:
+        """预测层的结算账本根（承诺与结算）；派生物，与三棵树并列。"""
+
+        return self.storage_root / "foresight"
+
+    @property
     def workflow_root(self) -> Path:
         """返回 Job、Receipt 和事务日志的树外工作目录。"""
 

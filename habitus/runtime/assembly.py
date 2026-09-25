@@ -137,7 +137,7 @@ from habitus.runtime.components import (
     RuntimeModels,
     RuntimeWorkflow,
 )
-from habitus.runtime.foresight import build_foresight_components
+from habitus.runtime.foresight import SettlementStage, build_foresight_components
 from habitus.runtime.lifecycle import LifecycleWorker
 from habitus.runtime.prediction import PredictionRuntimeComponents, build_prediction_components
 from habitus.runtime.runtime import Runtime
@@ -172,6 +172,29 @@ def _association_stage(
             blocked=refresher.progress,
         )
         return await refresher.refresh(tasks, causes=CauseFacts(tree))
+
+    return run
+
+
+def _nightly_stages(
+    settlement: SettlementStage | None, association: Callable[[], Awaitable[object]] | None
+) -> Callable[[], Awaitable[object]] | None:
+    """重建之后的两拍串成一个钩子：先结算、后关联。任一缺席就只跑另一拍。
+
+    结算的失败在这里吞掉（它自己已经记了观测事件）：一个读不出来的账本文件不该让关联整夜不跑。
+    关联的失败仍然往上抛，由 worker 的 ``_run_after_rebuild`` 记账——那是既有行为，不改。
+    """
+
+    if settlement is None and association is None:
+        return None
+
+    async def run() -> object:
+        if settlement is not None:
+            try:
+                await asyncio.to_thread(settlement.run_once)
+            except Exception:  # noqa: BLE001 - 结算自己已观测；不许拖着关联
+                pass
+        return None if association is None else await association()
 
     return run
 
@@ -644,10 +667,6 @@ def build_runtime(
             after_rebuild=None,
         )
     )
-    if prediction_components is not None and behavior_components is not None:
-        prediction_components.worker.after_rebuild = _association_stage(
-            behavior_components, prediction_components, config
-        )
     # 预测层站在两棵派生树之上，所以排在它们之后组装；任一未启用时 build 自己返回 None。
     foresight_components = (
         None
@@ -663,6 +682,8 @@ def build_runtime(
                 else behavior_components.association_refresher.associated_days
             ),
             store=prediction_components.store,
+            # "那天定稿了"只有归约说了算（链都落树、封口视界已过那天的本地结束），结算按它来。
+            closed_days=behavior_components.reduction_runner.closed_days,
             # 未封口的那一截从这个 Runtime 的判断存储读，按归约自己的口径（消费账本）与词表。
             judgements=behavior_components.judgements,
             ledger=behavior_components.reduction_runner.ledger,
@@ -671,6 +692,13 @@ def build_runtime(
             observer=operation_observer,
         )
     )
+    if prediction_components is not None and behavior_components is not None:
+        # 夜批的顺序：树重建 → 结算承诺（对着归约已定稿的日子）→ 关联。结算只读账本与行为树，关联要读
+        # 这一代树的出处日；结算失败自己留观测、被这里吞掉，不许拖着关联一夜不跑。
+        prediction_components.worker.after_rebuild = _nightly_stages(
+            None if foresight_components is None else foresight_components.settlement,
+            _association_stage(behavior_components, prediction_components, config),
+        )
     components = RuntimeComponents(
         infrastructure=RuntimeInfrastructure(
             path_lock=resolved_lock,

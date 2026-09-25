@@ -96,7 +96,9 @@ def scripted_judge() -> ScriptedJudge:
     return ScriptedJudge(script)
 
 
-def assembled(tmp_path: Path, *, now: datetime = EVENING, judge: ScriptedJudge | None = None):
+def assembled(
+    tmp_path: Path, *, now: datetime = EVENING, judge: ScriptedJudge | None = None, closed_days=None, facts=None
+):
     """走完真实顺序：行为树 → 发布一代预测树 → 组装预测层（判断者是脚本化的）。"""
 
     config = HabitusConfig.from_mapping(raw_config(tmp_path))
@@ -111,6 +113,8 @@ def assembled(tmp_path: Path, *, now: datetime = EVENING, judge: ScriptedJudge |
         associated=associated,
         store=prediction.store,
         judge=judge if judge is not None else scripted_judge(),
+        closed_days=closed_days,
+        facts=facts,
         clock=lambda: now,
     )
     assert components is not None

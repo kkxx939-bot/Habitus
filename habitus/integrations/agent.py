@@ -1,4 +1,56 @@
-"""把 Runtime 适配为 Agent 生命周期可依赖的稳定记忆能力口。"""
+"""把 Runtime 适配为 Agent 生命周期可依赖的稳定记忆能力口。
+
+## TODO(AGENT-CONTEXT-001)：把记忆接进 Agent 上下文管理（借鉴 OpenViking；用户 2026-09-23 要求登记，实现时机由他定）
+
+**问题**：memory 现在只做"存 + 召回注入"，不防 Agent 上下文爆炸。插件 hooks
+（``plugins/memory-plugin-shared/lib/hook-runner.mjs``）里：``UserPromptSubmit`` 调 ``recall`` 往上下文里
+**加**内容（``MemorySearchServiceConfig.max_context_chars=120000`` 字符上限）；``Stop``/``SessionEnd`` 只抄走
+transcript；``PreCompact`` 只是先 ``flush`` 封段，压缩仍由宿主自己做；``SessionStart`` 不注入任何东西。
+``ConversationRetentionPlanner``（保留 3 轮 / 12000 token）与段摘要 → Range → Archive 压的都是 Habitus
+自己的 ``live.jsonl`` 副本，不是 Agent 的 prompt；压缩产物只在 ``SearchService.search()`` 判定长期记忆
+不足时当 Summary 兜底用。本类对外只有 remember / recall / flush / record_use，没有"按预算给出会话上下文"
+的能力。
+
+**参考（OpenViking ``volcengine/OpenViking`` main，2026-09-23 核对）**：存储这一半 Habitus 已移植（retention
+默认值一致、归档摘要、L0/L1/L2），缺的是"把压缩结果送回上下文"的另一半。OpenViking 有三种接法：
+
+1. **服务端组装 + 宿主替换**（OpenClaw ContextEngine）：``Session.get_session_context(token_budget=128000)``
+   返回"最新归档 overview + 按预算裁剪的活跃消息"（``GET /sessions/{id}/context``）；
+   ``examples/openclaw-plugin/context-engine.ts`` 的 ``assemble`` 用它**替换**宿主 messages 并记
+   ``tokensSaved``，``afterTurn`` 触发 commit，``compact`` 接管压缩。
+2. **Agent 自管上下文窗口**（``examples/pi-experimental-context-management``，提交 ``bf8c5e9d``，仿 Codex
+   ``context_management`` 实验模式，不做 LLM 摘要式压缩）：给模型 ``new_context(reason, notes, next_steps?)`` /
+   ``get_context_remaining`` / ``history``（list_windows / list_items / read_item / search_contents）三个工具；
+   ``new_context`` 同步分支 → 写交接笔记 → ``commit(keepRecentCount=0)`` 归档本窗口 → 服务端生成 7 节
+   Working Memory；之后宿主的 context hook 把每次请求改写成"窗口头 + 新窗口消息"，旧内容按 id 回查原文；
+   剩余不足时软/硬提醒各一次，兜底退回宿主压缩。设计说明见该目录 ``CONTEXT-WINDOW.md``。
+3. **只能用 hooks 的宿主**（``examples/claude-code-memory-plugin``）：``PreCompact`` 只 commit，
+   ``session-start.mjs`` 在 ``source`` 为 ``compact`` / ``resume`` 时把归档经 ``additionalContext`` 注入——
+   是宿主压缩后的补全，不是压缩本身。
+
+**Habitus 已有的数据**：``ConversationSummaryCompactor.frontier(address).active``（按序号不重叠的 Segment /
+Range / Archive 摘要，字段 overview / chronology / corrections / ending_state / open_threads）、
+``ConversationMessageJournal.read_live``（未封段消息）、``history/*.jsonl``（原文，直到 Archive 退役释放）、
+``PersistentConversationSummaryVectorIndex``（摘要检索）。
+
+**候选方案（未裁定）**：
+
+- A. 对应 1：Runtime 加"按 token 预算组装会话上下文"——最新摘要 + live 消息，超预算按回合裁剪；本类与
+  HTTP 各加一个出口；插件在宿主提供消息改写能力时用它替换 messages。
+- B. 对应 2：加窗口工具（切窗口 = 强制封段 + 生成交接摘要；history 工具按 segment_id + sequence 回查
+  ``history/*.jsonl``，退役后回落到摘要）；插件在宿主 context hook 里改写请求。
+- C. 对应 3（改动最小、Claude Code 可立即用）：``SessionStart`` 在 ``source`` 为 compact / resume 时注入最近
+  frontier 摘要，``PreCompact`` 维持现状。
+
+**前置核对**：A、B 都要求宿主能改写发给模型的消息列表。Claude Code 的 hooks 不能改写历史，只能走 C；
+Codex 插件（``plugins/habitus-memory``）的宿主能力未核对。先确认目标宿主，再选方案。
+
+**具体场景**：长编码会话写到 150k token，宿主自动压缩后丢了早先的纠正（"不要用 SQLite"）——C 能在压缩后
+把 corrections 补回来；A/B 能在压缩发生前就只给模型"摘要 + 最近几轮"，并在需要时按 id 取回原话。
+
+**影响面**：不动记忆树、六类 schema、Editor 与检索链；新增 Runtime/本类/HTTP 的出口与插件 hook 逻辑；B 还要
+为 history 回查定义与 Archive 退役（``ConversationLifecycleManager._retire_archive_chain`` 释放原文）的关系。
+"""
 
 from __future__ import annotations
 
