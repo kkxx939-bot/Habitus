@@ -1,12 +1,14 @@
 """历史卡与此刻场景：判断者要比的两样东西，同一种材料。
 
 一张历史卡是候选的**一次发生**：那次发生前后 ±k 槽内的原子行为序列（之前、这次、之后），加行为树
-投影出来的视图（起因、并行、上一次、和谁、紧邻上下条），加语义树对那次的关联记录（当时是什么情况、
-属于哪种情形、前因、用掉与留下的前提）。此刻场景是同一种材料的前半截：今天到此刻、当前槽 ±k 内已经
-发生的原子行为，加还没封口的判断、今天的观测空白、今天已经做过什么。
+投影出来的视图（起因、并行、上一次、和谁、紧邻上下条）。此刻场景是同一种材料的前半截：今天到此刻、
+当前槽 ±k 内已经发生的原子行为，加还没封口的判断、今天的观测空白、今天已经做过什么。
 
 本模块认识 scene（序列与视图从那里来），对预测树零知识——卡属于哪一层由 ``context`` 标，数字在
 ``numbers``。行为文档的字段名不出 scene：这里只用 ``DayIndex.rows`` 给的 ``FlowRow``。
+
+旧语义树的关联记录（``gloss``）曾贴在卡上，随语义树重构一起摘掉（2026-09-26）；新语义树的产物
+按《语义树重构》方案接回来时，卡的形状再变。
 """
 
 from __future__ import annotations
@@ -21,7 +23,6 @@ from habitus.foresight.errors import ForesightError
 from habitus.foresight.model import LAYER_NAMES, Moment, UnsealedRow
 from habitus.foundation.integrity import canonical_digest
 from habitus.scene.views import (
-    AssociationGloss,
     ContextView,
     DayIndexCache,
     FlowRow,
@@ -38,9 +39,7 @@ _UNREADABLE_GAP_KIND = "没读懂"
 class HistoryCard:
     """候选的一次历史发生。``layer`` 是它落在的最内层（本槽 ⊂ 邻域 ⊂ 跨周几 ⊂ 全天）。
 
-    ``flow[own_index]`` 就是这次；之前的行在它前面，之后的行在它后面。``gloss`` 为 None 有两种情形，
-    由 ``day_associated`` 分开：那天关联还没做完（有数、没背景），或做完了但这一次没有留下记录。
-    有记录就一定是已关联的那天——两边用的是同一个版本，不允许一张卡自相矛盾。
+    ``flow[own_index]`` 就是这次；之前的行在它前面，之后的行在它后面。
     """
 
     layer: str
@@ -49,18 +48,12 @@ class HistoryCard:
     flow: tuple[FlowRow, ...]
     own_index: int
     view: ContextView
-    gloss: AssociationGloss | None
-    day_associated: bool
 
     def __post_init__(self) -> None:
         if self.layer not in LAYER_NAMES:
             raise ForesightError(f"unknown shrinkage layer: {self.layer!r}")
         if not 0 <= self.own_index < len(self.flow) or self.flow[self.own_index].uri != self.uri:
             raise ForesightError("a history card must find its own occurrence inside its flow")
-        if self.gloss is not None and self.gloss.occurrence_uri != self.uri:
-            raise ForesightError("a history card's gloss must describe its own occurrence")
-        if self.gloss is not None and not self.day_associated:
-            raise ForesightError("a history card cannot carry a gloss for a day that is not associated")
 
     @property
     def own(self) -> FlowRow:
@@ -129,32 +122,14 @@ class NowScene:
         return (self.moment.at.astimezone(UTC) - last.astimezone(UTC)).total_seconds()
 
 
-def history_card(
-    view: ContextView,
-    layer: str,
-    cache: DayIndexCache,
-    *,
-    gloss: AssociationGloss | None,
-    day_associated: bool,
-    slot_minutes: int,
-    half_width: int,
-) -> HistoryCard:
-    """把一条投影视图铺成一张卡：补上它前后 ±k 槽的序列与那次的关联记录。"""
+def history_card(view: ContextView, layer: str, cache: DayIndexCache, *, slot_minutes: int, half_width: int) -> HistoryCard:
+    """把一条投影视图铺成一张卡：补上它前后 ±k 槽的序列。"""
 
     if view.occurrence_uri is None:
         raise ForesightError("a history card needs a view of a real occurrence")
     flow = slot_neighbourhood(view.occurrence_uri, cache, slot_minutes=slot_minutes, half_width=half_width)
     own_index = next(index for index, row in enumerate(flow) if row.uri == view.occurrence_uri)
-    return HistoryCard(
-        layer=layer,
-        uri=view.occurrence_uri,
-        at=view.at,
-        flow=flow,
-        own_index=own_index,
-        view=view,
-        gloss=gloss,
-        day_associated=day_associated,
-    )
+    return HistoryCard(layer=layer, uri=view.occurrence_uri, at=view.at, flow=flow, own_index=own_index, view=view)
 
 
 def now_scene(

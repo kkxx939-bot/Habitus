@@ -66,14 +66,6 @@ from habitus.infrastructure.store.contracts.path_lock import PathLock
 from habitus.model_client import StructuredChatClient
 from habitus.model_client.embedding import Embedder
 from habitus.runtime.resident import ResidentWorker
-from habitus.scene import (
-    AssociationConfig,
-    AssociationRefreshConfig,
-    AssociationRefresher,
-    LLMAssociator,
-    NominalCalendar,
-)
-from habitus.scene.regularity import RegularityTree
 
 
 @dataclass(frozen=True)
@@ -96,11 +88,6 @@ class BehaviorRuntimeComponents:
     reduction_runner: BehaviorReductionRunner
     fusion_worker: BehaviorFusionWorker
     reduction_worker: BehaviorReductionWorker
-    # 语义关联层可选：``config.scene.enabled`` 关着时全为 None。``regularity_tree`` 是按候选累积
-    # 的规律级（产物），``association_refresher`` 是夜批编排——它排在**预测树重建之后**，因为
-    # 待办来自树上的出处日。
-    regularity_tree: RegularityTree | None = None
-    association_refresher: AssociationRefresher | None = None
 
     def __post_init__(self) -> None:
         expected = (
@@ -154,17 +141,6 @@ class BehaviorRuntimeComponents:
             raise ValueError(
                 "fusion and reduction must share one context lookback window"
             )
-        if (self.regularity_tree is None) != (self.association_refresher is None):
-            raise ValueError("the regularity tree and its refresher must be enabled together")
-        if self.association_refresher is not None:
-            if not isinstance(self.regularity_tree, RegularityTree) or not isinstance(
-                self.association_refresher, AssociationRefresher
-            ):
-                raise TypeError("association components must be RegularityTree and AssociationRefresher")
-            if self.association_refresher.regularity_tree is not self.regularity_tree:
-                raise ValueError("behavior components must share one regularity tree instance")
-            if self.association_refresher.behavior_tree is not self.tree:
-                raise ValueError("the association refresher must read the same behaviour tree instance")
 
 
 class BehaviorFusionWorker(ResidentWorker):
@@ -406,34 +382,6 @@ def build_behavior_components(
         if embedder is not None
         else None
     )
-    regularity_tree: RegularityTree | None = None
-    association_refresher: AssociationRefresher | None = None
-    if config.scene.enabled:
-        scene_config = config.scene
-        regularity_tree = RegularityTree(config.scene_root / "regularity")
-        association_refresher = AssociationRefresher(
-            behavior_tree=tree,
-            regularity_tree=regularity_tree,
-            associator=LLMAssociator(
-                structured_chat,
-                config=AssociationConfig(
-                    max_targets_per_call=scene_config.max_targets_per_call,
-                    max_prompt_chars=scene_config.max_prompt_chars,
-                    transient_retries=scene_config.transient_retries,
-                    transient_retry_delay_seconds=scene_config.transient_retry_delay_seconds,
-                ),
-            ),
-            progress_root=config.scene_root / "association",
-            lock_store=lock_store,
-            calendar=NominalCalendar(),
-            config=AssociationRefreshConfig(
-                max_attempts_per_input=scene_config.max_attempts_per_input,
-                max_model_calls_per_run=scene_config.max_model_calls_per_run,
-            ),
-            clock=clock,
-            max_cause_rows=scene_config.max_cause_rows,
-            max_pending_rows=scene_config.max_pending_rows,
-        )
     reduction_runner = BehaviorReductionRunner(
         judgements=judgements,
         observations=observations,
@@ -479,8 +427,6 @@ def build_behavior_components(
             shutdown_timeout_seconds=behavior_config.worker_shutdown_timeout_seconds,
             observer=observer,
         ),
-        regularity_tree=regularity_tree,
-        association_refresher=association_refresher,
     )
 
 

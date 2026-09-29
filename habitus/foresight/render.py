@@ -6,8 +6,7 @@
 三条呈现纪律：
 
 - **数字连着它的出处**。每一层写成"3/4（3 天）"而不是"0.75"：判断者要能看出这个数薄不薄。
-- **没说的要说出来**。还没关联完成的日子、被保护闸截掉的日子与卡都单独写一行；
-  不写的话，"给你看的这几条"会被读成"一共就这几条"。
+- **没说的要说出来**。被保护闸截掉的日子与卡单独写一行；不写的话，"给你看的这几条"会被读成"一共就这几条"。
 - **卡上之前、这次、之后三段分开**。判断者比的是"之前"那段像不像此刻，"之后"那段是接下来会是什么。
 - **卡有编号**。每个候选的卡各自从 #1 编，判断者的 ``basis`` 引用的就是这个编号；装配层按同一序换回 URI。
 
@@ -21,7 +20,7 @@ from datetime import UTC, datetime
 from habitus.foresight.assemble import CandidateEvidence, EvidencePack
 from habitus.foresight.cards import HistoryCard, NowScene
 from habitus.foresight.model import LAYER_LABELS, CandidateNumbers, Moment
-from habitus.scene.views import ActionRef, ContextView, FlowRow, Neighbour, ObservationGap, Situation
+from habitus.scene.views import ActionRef, ContextView, FlowRow, Neighbour, ObservationGap
 
 _WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
@@ -89,21 +88,18 @@ def _gap(gap: ObservationGap, *, unsealed: bool) -> str:
 
 
 def _candidate_lines(evidence: CandidateEvidence) -> list[str]:
-    """一个候选一节：先数字（四层表、发布的率），再卡，再情形。先候选、再上下文（2026-09-16 定）。"""
+    """一个候选一节：先数字（四层表、发布的率），再卡。先候选、再上下文（2026-09-16 定）。"""
 
     lines = [f"## {evidence.kind_token}", "", *_table(evidence), *_numbers(evidence.numbers)]
     if not evidence.expanded:
         lines.extend(["", "（这个时段附近没发生过，只列名字与数字）"])
         return lines
     lines.extend(["", *_cards(evidence)])
-    situations = _situations(evidence)
-    if situations:
-        lines.extend(["", *situations])
     return lines
 
 
 def _table(evidence: CandidateEvidence) -> list[str]:
-    rows = ["| 层 | 数 | 出处 | 没背景 |", "| --- | --- | --- | --- |"]
+    rows = ["| 层 | 数 | 出处 |", "| --- | --- | --- |"]
     for layer in evidence.provenance:
         if layer.hits is not None and layer.exposure is not None:
             if layer.exposure <= 0.0:
@@ -116,12 +112,11 @@ def _table(evidence: CandidateEvidence) -> list[str]:
                 value = f"{layer.hits:.2f}/{layer.exposure:.2f} = {layer.value:.3f}"
         else:
             value = f"{layer.value:.4f}"
-        missing = f"{len(layer.unassociated)} 天" if layer.unassociated else "—"
         if not layer.days and layer.value > 0.0:
             # 真实数据上常见：这一层一天都没发生过，率却不是 0——那是收缩链的 Laplace 先验
             # 在说话。不标出来的话，一个 0.04 会被当成"别的周几这个点会做"的实测结论。
             value = f"{value}（只有先验，没有证据）"
-        rows.append(f"| {layer.label} | {value} | {len(layer.days)} 天 | {missing} |")
+        rows.append(f"| {layer.label} | {value} | {len(layer.days)} 天 |")
     return rows
 
 
@@ -155,9 +150,6 @@ def _cards(evidence: CandidateEvidence) -> list[str]:
     total = len(background.cards)
     lines = [f"### 历史 · {total} 次发生，每次一张卡（按 # 编号引用）"]
     notes = []
-    unassociated = evidence.unassociated
-    if unassociated:
-        notes.append(f"{len(unassociated)} 天有数、语义层还没关联，那几天的卡没有关联记录")
     if any(background.dropped_days.values()):
         detail = "、".join(
             f"{LAYER_LABELS[name]} {count}" for name, count in background.dropped_days.items() if count
@@ -176,8 +168,6 @@ def _cards(evidence: CandidateEvidence) -> list[str]:
 def _card(card: HistoryCard, number: int) -> list[str]:
     own = card.own
     head = f"- #{number} {_stamp(card.at)}–{own.last_observed_at:%H:%M} {own.name} 〔{LAYER_LABELS[card.layer]}〕"
-    if card.gloss is not None and card.gloss.situation is not None:
-        head += f"（{card.gloss.situation}）"
     bits = _view_bits(card.view)
     if bits:
         head += " ｜ " + " ｜ ".join(bits)
@@ -185,38 +175,7 @@ def _card(card: HistoryCard, number: int) -> list[str]:
         head,
         "  之前：" + (" ｜ ".join(_row(row) for row in card.before) if card.before else "（无）"),
         "  之后：" + (" ｜ ".join(_row(row) for row in card.after) if card.after else "（无）"),
-        "  关联：" + _gloss(card),
     ]
-
-
-def _gloss(card: HistoryCard) -> str:
-    if card.gloss is None:
-        return "那天还没关联" if not card.day_associated else "那天关联了，这一次没有记录"
-    gloss = card.gloss
-    parts = [gloss.context]
-    if gloss.causes:
-        parts.append("前因：" + "、".join(name for _uri, name in gloss.causes))
-    if gloss.consumed:
-        parts.append("用掉：" + "、".join(text for _producer, text in gloss.consumed))
-    if gloss.left:
-        parts.append("留下：" + "、".join(f"{text}（在等：{waits}）" for text, waits in gloss.left))
-    return " ｜ ".join(parts)
-
-
-def _situations(evidence: CandidateEvidence) -> list[str]:
-    here, elsewhere = evidence.situations_here, evidence.situations_elsewhere
-    if not here and not elsewhere:
-        return []
-    lines = ["### 情形"]
-    if here:
-        lines.append("本周几出现过：" + "；".join(_situation(item) for item in here))
-    if elsewhere:
-        lines.append("只在其他周几出现过：" + "；".join(_situation(item) for item in elsewhere))
-    return lines
-
-
-def _situation(item: Situation) -> str:
-    return f"{item.text}（{len(item.days)} 天）"
 
 
 def _row(row: FlowRow) -> str:

@@ -1,6 +1,6 @@
 """历史卡与此刻场景：同一种材料的两头。
 
-卡：前后 ±k 槽的序列分成之前 / 这次 / 之后，关联记录按 URI 贴上，那天没关联就明说。
+卡：前后 ±k 槽的序列分成之前 / 这次 / 之后。
 此刻：到此刻为止的序列，未封口的补进来、与已封口的不重、窗外的不要；今天做过什么全天计。
 """
 
@@ -28,24 +28,15 @@ def unsealed_row(name: str | None, started, *, kind: str | None, lasts_minutes: 
 
 
 def weekly_ground(tmp_path) -> Ground:
-    """三个周一 19:00 打球（一个半小时）；每次之前收拾球包、之后洗澡；第一周有关联记录。"""
+    """三个周一 19:00 打球（一个半小时）；每次之前收拾球包、之后洗澡。"""
 
     ground = Ground(tmp_path, now=at(NOW, 23, 0))
     for week in range(3):
         day = MONDAY + timedelta(days=7 * week)
-        pack = ground.record(day, "收拾球包", 18, 40, kind="收拾球包")
-        play = ground.record(day, "打球", 19, 0, kind="打球", lasts_minutes=90)
+        ground.record(day, "收拾球包", 18, 40, kind="收拾球包")
+        ground.record(day, "打球", 19, 0, kind="打球", lasts_minutes=90)
         ground.record(day, "洗澡", 20, 50, kind="洗澡")
         ground.record(day, "开电脑", 21, 40, kind="开电脑")  # 20:30 + 3 槽 = 21:15 之后，不在卡里
-        if week == 0:
-            ground.associate(
-                play,
-                kind="打球",
-                context="周一晚上收拾好球包去打的",
-                situation="周一下班后自己去",
-                causes=(pack,),
-                left=(("球拍胶皮该换了", "买胶皮"),),
-            )
     return ground
 
 
@@ -63,30 +54,16 @@ def test_a_card_splits_the_flow_into_before_this_and_after(tmp_path) -> None:
     assert first.layer == "slot"
 
 
-def test_the_gloss_is_glued_by_occurrence_and_missing_days_say_so(tmp_path) -> None:
-    ground = weekly_ground(tmp_path)
-    candidate = next(item for item in ground.pack(at(NOW, 19, 5)).expanded if item.kind_token == "打球")
-    first, second, _third = candidate.background.cards
-    assert first.day_associated and first.gloss is not None
-    assert first.gloss.context == "周一晚上收拾好球包去打的"
-    assert first.gloss.causes == ((first.before[0].uri, "收拾球包"),)
-    assert first.gloss.left == (("球拍胶皮该换了", "买胶皮"),)
-    assert not second.day_associated and second.gloss is None
-    assert candidate.unassociated == (MONDAY + timedelta(days=7), MONDAY + timedelta(days=14))
-    assert [item.text for item in candidate.situations_here] == ["周一下班后自己去"]
-    assert candidate.situations_elsewhere == ()
-
-
 def test_a_card_must_find_itself_in_its_flow(tmp_path) -> None:
     ground = weekly_ground(tmp_path)
     cache = ground.cache()
     play = ground.record(NOW, "打球", 19, 0, kind="打球")
     view = context_view(play, cache, window_days=30)
-    card = history_card(view, "slot", cache, gloss=None, day_associated=False, slot_minutes=15, half_width=2)
+    card = history_card(view, "slot", cache, slot_minutes=15, half_width=2)
     assert card.uri == play and card.before == () and card.after == ()
     assert card.own.day_count == 1 and card.own.last_observed_at == at(NOW, 19, 10)
     with pytest.raises(ForesightError, match="unknown shrinkage layer"):
-        history_card(view, "somewhere", cache, gloss=None, day_associated=False, slot_minutes=15, half_width=2)
+        history_card(view, "somewhere", cache, slot_minutes=15, half_width=2)
 
 
 def test_the_now_scene_stops_at_this_moment_and_folds_in_the_unsealed(tmp_path) -> None:
@@ -179,39 +156,11 @@ def test_a_pack_keeps_its_candidates_sorted_and_its_now_at_its_own_moment(tmp_pa
         )
 
 
-def test_a_gloss_is_glued_on_whichever_layer_the_card_lands_in(tmp_path) -> None:
-    """关联记录按 occurrence 贴，不只贴本槽层：周三 19:30 那次落在跨周几层，它的记录也要在卡上。"""
+def test_a_card_on_another_weekday_lands_in_the_cross_weekday_layer(tmp_path) -> None:
+    """周三 19:30 那次落在跨周几层：卡按四层的出处日取，标它落在的最内层。"""
 
     ground = weekly_ground(tmp_path)
     wednesday = ground.record(MONDAY + timedelta(days=2), "打球", 19, 30, kind="打球", lasts_minutes=90)
-    ground.associate(wednesday, kind="打球", context="周三临时去的", situation="临时起意")
     candidate = next(item for item in ground.pack(at(NOW, 19, 5)).expanded if item.kind_token == "打球")
     card = next(card for card in candidate.background.cards if card.uri == wednesday)
-    assert card.layer == "cross_weekday" and card.day_associated
-    assert card.gloss is not None and card.gloss.context == "周三临时去的"
-    assert [item.text for item in candidate.situations_elsewhere] == ["临时起意"]
-
-
-def test_a_record_read_under_another_version_is_refused_not_glued(tmp_path) -> None:
-    """数字那边说这天没关联、记录那边却有：两边不是同一个版本，硬拒，不出一张自相矛盾的卡。"""
-
-    from habitus.foresight import assemble, moment_at
-    from habitus.scene.views import association_glosses, situations_of
-
-    ground = weekly_ground(tmp_path)
-    tree = ground.tree()
-    with pytest.raises(ForesightError, match="disagree on the association version"):
-        assemble(
-            tree,
-            moment_at(at(NOW, 19, 5), slot_minutes=tree.slot_minutes),
-            ground.cache(),
-            generation="g",
-            unsealed=(),
-            glosses_for=lambda kind, days: association_glosses(ground.regularity, kind, days, version=None),
-            situations_for=lambda kind, weekday: situations_of(ground.regularity, kind, weekday=weekday),
-            associated=lambda _kind: frozenset(),  # 按"另一个版本"看，一天都没关联
-            half_width=3,
-            window_days=30,
-            transition_window_seconds=7_200.0,
-            max_days_per_layer=40,
-        )
+    assert card.layer == "cross_weekday"

@@ -148,7 +148,7 @@ def test_the_nightly_stage_runs_after_the_rebuild_and_sees_the_new_generation() 
             return "generation"
 
     async def stage() -> None:
-        order.append("association")
+        order.append("nightly_stage")
 
     worker = PredictionRebuildWorker(
         _Rebuilder(),  # type: ignore[arg-type]
@@ -158,7 +158,7 @@ def test_the_nightly_stage_runs_after_the_rebuild_and_sees_the_new_generation() 
     )
 
     assert asyncio.run(worker.run_once()) == "generation"
-    assert order == ["rebuild", "association"]
+    assert order == ["rebuild", "nightly_stage"]
 
 
 def test_a_failing_nightly_stage_does_not_block_the_rebuild() -> None:
@@ -174,7 +174,7 @@ def test_a_failing_nightly_stage_does_not_block_the_rebuild() -> None:
             return "generation"
 
     async def stage() -> None:
-        raise RuntimeError("association is down")
+        raise RuntimeError("the nightly stage is down")
 
     worker = PredictionRebuildWorker(
         _Rebuilder(),  # type: ignore[arg-type]
@@ -190,9 +190,23 @@ def test_a_failing_nightly_stage_does_not_block_the_rebuild() -> None:
 def test_the_nightly_stage_result_reaches_the_observation_event() -> None:
     """一夜全败而事件写着 SUCCESS、属性为空的话，运维只能靠猜。"""
 
+    from dataclasses import dataclass
+
     from habitus.foundation.observability import Observer
     from habitus.runtime.prediction import PredictionRebuildWorker
-    from habitus.scene import AssociationRefreshReport
+
+    @dataclass(frozen=True)
+    class StageReport:
+        """一个带计数字段的阶段结果（形状与旧关联刷新器的报告相同，新语义树各拍接进来时再对齐字段）。"""
+
+        associated: tuple[str, ...] = ()
+        open: tuple[str, ...] = ()
+        skipped: tuple[str, ...] = ()
+        deferred: tuple[str, ...] = ()
+        failed: tuple[str, ...] = ()
+        blocked: tuple[str, ...] = ()
+        signals: tuple[str, ...] = ()
+        model_calls: int = 0
 
     seen: list[object] = []
 
@@ -204,8 +218,8 @@ def test_the_nightly_stage_result_reaches_the_observation_event() -> None:
         def run_once(self) -> str:
             return "generation"
 
-    async def stage() -> AssociationRefreshReport:
-        return AssociationRefreshReport(
+    async def stage() -> StageReport:
+        return StageReport(
             associated=("a/2026-09-04",), failed=("b/2026-09-04", "c/2026-09-04"), signals=("x",), model_calls=3
         )
 
@@ -233,7 +247,7 @@ def test_a_failing_nightly_stage_is_remembered_by_the_worker() -> None:
             return "generation"
 
     async def stage() -> None:
-        raise RuntimeError("association is down")
+        raise RuntimeError("the nightly stage is down")
 
     worker = PredictionRebuildWorker(
         _Rebuilder(),  # type: ignore[arg-type]

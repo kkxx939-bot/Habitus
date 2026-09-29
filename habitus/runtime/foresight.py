@@ -1,8 +1,8 @@
 """预测层在组合根的组装。
 
-预测层站在两棵派生树之上：数字取自预测树的一代，历史卡取自行为树的读时投影加规律树的关联记录，
-此刻场景取自行为树的今天加判断存储里还没封口的最近一段。本模块负责把它们接起来，并且**把四件只有
-组合根知道的事定死**：
+预测层站在派生树之上：数字取自预测树的一代，历史卡取自行为树的读时投影，此刻场景取自行为树的今天加
+判断存储里还没封口的最近一段。（旧语义树的关联记录随重构摘掉，2026-09-26；新语义树的产物按《语义树重构》
+方案接回来。）本模块负责把它们接起来，并且**把三件只有组合根知道的事定死**：
 
 1. **钉住一代**。每次装配从指针取当前一代并核对它的 ``config_digest`` 与现行配置一致——参数变了就是
    另一套统计，混读出来的数字互不一致而且看不出来。不一致时硬拒，等夜批按新参数重建。
@@ -10,8 +10,6 @@
    此刻在哪个槽"都从它的本地时分算，错一个时区就整体错一天。传 naive 的时刻进来同样硬拒。
 3. **一次查询一份缓存**。``DayIndexCache`` 的契约是"在它的生命周期里同一天只读一次"，所以每次
    装配新建一个；跨次复用会读到过期的今天。
-4. **关联记录与"已关联"用同一把尺子**。两边都从同一个事实源（``AssociationLedger``）取版本：它既回答
-   "这个候选哪几天关联完成了"，也说"按哪个版本算的"，没有第二个旋钮。
 
 未封口的判断经 ``UnsealedReader`` 注入；生产实现是 ``runtime.unsealed.UnsealedFromJudgements``（判断存储 +
 消费账本 + 词表），没注入时用显式的空实现，明说"最近一小时没补"。
@@ -55,9 +53,8 @@ from habitus.runtime.foresight_settlement import SettlementStage
 from habitus.runtime.prediction import PredictionRuntimeComponents
 from habitus.runtime.resident import ResidentWorker
 from habitus.runtime.unsealed import UnsealedFromJudgements
-from habitus.scene import AssociationLedger, DayTypeCalendar, FactProvider, NoFacts, NominalCalendar, conditions_of
-from habitus.scene.regularity import RegularityTree
-from habitus.scene.views import DayIndexCache, association_glosses, situations_of
+from habitus.scene import DayTypeCalendar, FactProvider, NoFacts, NominalCalendar, conditions_of
+from habitus.scene.views import DayIndexCache
 
 
 @dataclass(frozen=True)
@@ -97,13 +94,6 @@ class ForesightRuntimeComponents:
         assembler = self.assembler
         if assembler.behavior_tree is not behavior.tree:
             raise ValueError("foresight must read the assembled behaviour tree")
-        if behavior.regularity_tree is None or assembler.regularity_tree is not behavior.regularity_tree:
-            raise ValueError("foresight must read association records from the assembled regularity tree")
-        if getattr(assembler.associated, "tree", None) is not behavior.regularity_tree:
-            raise ValueError("foresight must read the assembled regularity tree")
-        refresher = behavior.association_refresher
-        if refresher is None or assembler.associated.version != refresher.associator.version:
-            raise ValueError("foresight must judge association by the assembled associator's version")
         if assembler.store is not prediction.store:
             raise ValueError("foresight must read the assembled prediction store")
         unsealed = assembler.unsealed
@@ -136,8 +126,6 @@ class EvidenceAssembler:
         self,
         *,
         behavior_tree: BehaviorTree,
-        regularity_tree: RegularityTree,
-        associated: AssociationLedger,
         store: PredictionTreeStore,
         subject: str,
         zone: ZoneInfo,
@@ -152,12 +140,6 @@ class EvidenceAssembler:
     ) -> None:
         if not isinstance(behavior_tree, BehaviorTree):
             raise TypeError("behavior_tree must be a BehaviorTree")
-        if not isinstance(regularity_tree, RegularityTree):
-            raise TypeError("regularity_tree must be a RegularityTree")
-        if not callable(getattr(associated, "days_for", None)) or not isinstance(
-            getattr(associated, "version", None), str
-        ):
-            raise TypeError("associated must answer days_for(kind) and carry the association version")
         if not isinstance(store, PredictionTreeStore):
             raise TypeError("store must be a PredictionTreeStore")
         if not isinstance(subject, str) or not subject.strip():
@@ -174,8 +156,6 @@ class EvidenceAssembler:
         if unsealed is not None and not callable(getattr(unsealed, "rows", None)):
             raise TypeError("unsealed must implement UnsealedReader")
         self.behavior_tree = behavior_tree
-        self.regularity_tree = regularity_tree
-        self.associated = associated
         self.store = store
         self.subject = subject
         self.zone = zone
@@ -210,16 +190,12 @@ class EvidenceAssembler:
         cache = DayIndexCache(self.behavior_tree, subject=self.subject, calendar=self.calendar)
         moment = moment_at(at, slot_minutes=tree.slot_minutes, day_note=cache.day(at.date()).day_note)
         # 未封口从今天零点读到此刻：窗口内的进流，更早的只计入"今天做过"（与树上今天的行同一口径）。
-        version = self.associated.version
         return assemble(
             tree,
             moment,
             cache,
             generation=published.generation,
             unsealed=self.unsealed.rows(since=at.replace(hour=0, minute=0, second=0, microsecond=0), until=at),
-            glosses_for=lambda kind, days: association_glosses(self.regularity_tree, kind, days, version=version),
-            situations_for=lambda kind, weekday: situations_of(self.regularity_tree, kind, weekday=weekday),
-            associated=self.associated.days_for,
             half_width=self.half_width,
             window_days=self.window_days,
             transition_window_seconds=self.transition_window_seconds,
@@ -252,8 +228,8 @@ class JudgementRun:
 class JudgementRunner:
     """一拍：装配 → 判断。同一槽内此刻场景没变就复用上一次的判断。
 
-    复用的判据是 ``(一代, 日期, 槽, 场景指纹, 各候选的卡数与未关联日)`` 相同：同一代同一槽候选集合不变，
-    场景指纹不含此刻的时分——钟在走不算场景在变；夜批关联在槽中间做完了（卡上多了记录）算材料变了。
+    复用的判据是 ``(一代, 日期, 槽, 场景指纹, 各候选的卡数)`` 相同：同一代同一槽候选集合不变，
+    场景指纹不含此刻的时分——钟在走不算场景在变。
     ``last`` 是最近一拍，供健康面与后续步骤读；复用时 ``last.judgement.moment`` 是上一次判断那一刻，
     ``last.pack.moment`` 才是这一拍的此刻。
     """
@@ -337,7 +313,7 @@ def _reuse_key(pack: EvidencePack) -> tuple[object, ...]:
         pack.moment.day.isoformat(),
         pack.moment.slot,
         pack.now.fingerprint,
-        tuple((item.kind_token, len(item.background.cards), item.unassociated) for item in pack.expanded),
+        tuple((item.kind_token, len(item.background.cards)) for item in pack.expanded),
     )
 
 
@@ -426,8 +402,6 @@ def build_foresight_components(
     config: HabitusConfig,
     *,
     behavior_tree: BehaviorTree,
-    regularity_tree: RegularityTree | None,
-    associated: AssociationLedger | None,
     store: PredictionTreeStore | None,
     judge: Judge | None = None,
     structured_chat: StructuredChatClient | None = None,
@@ -442,7 +416,7 @@ def build_foresight_components(
 ) -> ForesightRuntimeComponents | None:
     """组装预测层；未启用时返回 None。
 
-    两棵派生树缺任何一棵都返回 None 而不是半个装配器：跨域校验已经在配置层拒过这种组合，
+    预测树没发布过就返回 None 而不是半个装配器：跨域校验已经在配置层拒过这种组合，
     这里是第二道——组合根拿到的部件本来就可能因为上游未启用而是 None。
 
     判断者二选一：注入一个 ``judge``（测试、DAY1 脚本），或给 ``structured_chat`` 由这里装
@@ -452,7 +426,7 @@ def build_foresight_components(
 
     if not config.foresight.enabled:
         return None
-    if regularity_tree is None or associated is None or store is None:
+    if store is None:
         return None
     resolved_judge = _judge(config, judge=judge, structured_chat=structured_chat, clock=clock)
     resolved_unsealed = _unsealed(unsealed=unsealed, judgements=judgements, ledger=ledger, kinds=kinds)
@@ -460,8 +434,6 @@ def build_foresight_components(
     zone = config.locale.zone()
     assembler = EvidenceAssembler(
         behavior_tree=behavior_tree,
-        regularity_tree=regularity_tree,
-        associated=associated,
         store=store,
         subject=config.behavior.primary_subject,
         zone=zone,

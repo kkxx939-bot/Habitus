@@ -16,9 +16,6 @@
 四层互相包含（本槽 ⊂ 邻域 ⊂ 跨周几 ⊂ 全天），同一次发生会被四层都取到。卡**只建一张**，标它落在的
 最内层——判断者不该把 09-09 那次打球当四次；四层表照旧按层给计数与出处日，那是 ``numbers`` 的事，
 这里一个数不动。
-
-**不按"关联完成了没有"筛日子。**卡上的序列与视图来自行为树，语义层做没做过它一点都不影响；关联进度
-由 ``day_associated`` 与 ``Provenance.unassociated`` 如实摆出来，与取到几张卡是两件事。
 """
 
 from __future__ import annotations
@@ -31,7 +28,7 @@ from types import MappingProxyType
 from habitus.foresight.cards import HistoryCard, history_card
 from habitus.foresight.errors import ForesightError
 from habitus.foresight.model import LAYER_NAMES, Layer, Provenance
-from habitus.scene.views import AssociationGloss, DayIndexCache, history_contexts
+from habitus.scene.views import DayIndexCache, history_contexts
 
 
 @dataclass(frozen=True)
@@ -61,7 +58,6 @@ def candidate_background(
     kind_token: str,
     cache: DayIndexCache,
     *,
-    glosses: Mapping[str, AssociationGloss],
     slot_minutes: int,
     slot_index: int,
     half_width: int,
@@ -75,7 +71,6 @@ def candidate_background(
         raise ForesightError("provenance must be a Provenance")
     if isinstance(max_days_per_layer, bool) or not isinstance(max_days_per_layer, int) or max_days_per_layer <= 0:
         raise ForesightError("max_days_per_layer must be a positive integer")
-    unassociated = set(provenance.unassociated)
     cards: dict[str, HistoryCard] = {}
     dropped: dict[str, int] = {}
     for layer in provenance:
@@ -95,24 +90,7 @@ def candidate_background(
             uri = view.occurrence_uri
             if uri is None or uri in cards:
                 continue
-            day_associated = view.day not in unassociated
-            gloss = glosses.get(uri)
-            if gloss is not None and not day_associated:
-                # 数字那边说这天没关联、记录那边却有：两边读的不是同一个版本。硬拒，不让判断者拿到
-                # 一张"表说没背景、卡上贴着背景"的自相矛盾的卡。
-                raise ForesightError(
-                    f"{kind_token!r} on {view.day} has an association record but is not counted as associated; "
-                    "the glosses and the associated-days source disagree on the association version"
-                )
-            cards[uri] = history_card(
-                view,
-                layer.name,
-                cache,
-                gloss=gloss,
-                day_associated=day_associated,
-                slot_minutes=slot_minutes,
-                half_width=half_width,
-            )
+            cards[uri] = history_card(view, layer.name, cache, slot_minutes=slot_minutes, half_width=half_width)
     ordered = tuple(sorted(cards.values(), key=lambda card: (card.at.astimezone(UTC), card.uri)))
     return CandidateBackground(cards=ordered, dropped_days=MappingProxyType(dropped))
 

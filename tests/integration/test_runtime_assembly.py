@@ -687,16 +687,11 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     behavior = runtime.components.behavior
     prediction = runtime.components.prediction
     assert behavior is not None and prediction is not None
-    # 语义层的三件：规律级树、刷新器、以及**真的挂在重建之后**的那一拍。
-    assert behavior.regularity_tree is not None and behavior.association_refresher is not None
+    # 夜批钩子**真的挂在重建之后**（结算那一拍；新语义树的各拍随后面几刀接进同一个钩子）。
     assert prediction.worker.after_rebuild is not None
-    # 预测层的事实源读的是这个 Runtime 的那棵规律级树，而不是另一个同路径的实例；判"已关联"与读记录
-    # 用的是这个 Runtime 关联器的版本。
     foresight = runtime.components.foresight
     assert foresight is not None
-    assert foresight.assembler.associated.tree is behavior.regularity_tree  # type: ignore[attr-defined]
-    assert foresight.assembler.associated.version == behavior.association_refresher.associator.version
-    assert foresight.assembler.regularity_tree is behavior.regularity_tree
+    assert foresight.assembler.behavior_tree is behavior.tree
     # 判断走这个 Runtime 的结构化客户端；未封口的那一截读这个 Runtime 的判断存储、消费账本与词表；
     # 节奏用树的槽宽。
     assert foresight.runner.judge.client is runtime.components.models.structured_chat  # type: ignore[attr-defined]
@@ -705,7 +700,7 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     assert unsealed.ledger is behavior.reduction_runner.ledger  # type: ignore[attr-defined]
     assert unsealed.kinds is behavior.kind_store  # type: ignore[attr-defined]
     assert foresight.worker.slot_minutes == prediction.tree_config.slot_minutes
-    # 账本在 storage.root/foresight；结算认的是归约的定稿日；夜批钩子先结算再关联（同一个 after_rebuild）。
+    # 账本在 storage.root/foresight；结算认的是归约的定稿日；夜批钩子里结算排在最前（同一个 after_rebuild）。
     assert foresight.runner.ledger is not None and foresight.runner.ledger.root == runtime.config.foresight_root
     assert foresight.settlement.ledger is foresight.runner.ledger
     assert foresight.settlement.closed_days == behavior.reduction_runner.closed_days
@@ -744,8 +739,8 @@ def test_the_foresight_worker_starts_and_stops_with_the_runtime(tmp_path: Path) 
     asyncio.run(scenario())
 
 
-def test_an_enabled_semantic_layer_that_is_not_attached_to_the_nightly_batch_is_refused(tmp_path: Path) -> None:
-    """接线漏了的话，进程照常启动、health 全绿、关联一夜都不会跑，而配置里还开着——无处可查。"""
+def test_an_enabled_foresight_layer_that_is_not_attached_to_the_nightly_batch_is_refused(tmp_path: Path) -> None:
+    """接线漏了的话，进程照常启动、health 全绿、结算与新语义树的各拍一夜都不会跑，而配置里还开着——无处可查。"""
 
     runtime = _fully_enabled_runtime(tmp_path)
     components = runtime.components

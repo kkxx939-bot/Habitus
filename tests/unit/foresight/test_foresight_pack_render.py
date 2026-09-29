@@ -17,10 +17,8 @@ def ground_for(tmp_path) -> Ground:
     for week in range(4):
         day = MONDAY + timedelta(days=7 * week)
         ground.record(day, "收拾球包", 18, 40, kind="收拾球包")
-        play = ground.record(day, "打球", 19, 0, kind="打球", lasts_minutes=60)
+        ground.record(day, "打球", 19, 0, kind="打球", lasts_minutes=60)
         ground.record(day, "吃早饭", 8, 0, kind="吃早饭")
-        if week < 2:
-            ground.associate(play, kind="打球", context=f"第 {week + 1} 周", situation="周一下班后自己去")
     ground.record(MONDAY + timedelta(days=2), "打球", 19, 0, kind="打球")  # 周三，跨周几层
     ground.gap(NOW, 12, 0, 13, 0)
     return ground

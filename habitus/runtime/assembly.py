@@ -128,7 +128,7 @@ from habitus.memory.workflow import (
 )
 from habitus.model_client import ProviderFactory, StructuredChatClient
 from habitus.pre.conversation import ConversationAdapterRegistry
-from habitus.runtime.behavior import BehaviorRuntimeComponents, build_behavior_components
+from habitus.runtime.behavior import build_behavior_components
 from habitus.runtime.components import (
     RuntimeComponents,
     RuntimeConversation,
@@ -139,62 +139,31 @@ from habitus.runtime.components import (
 )
 from habitus.runtime.foresight import SettlementStage, build_foresight_components
 from habitus.runtime.lifecycle import LifecycleWorker
-from habitus.runtime.prediction import PredictionRuntimeComponents, build_prediction_components
+from habitus.runtime.prediction import build_prediction_components
 from habitus.runtime.runtime import Runtime
 from habitus.runtime.worker import MemoryWorker
-from habitus.scene.backlog import CauseFacts, backlog
-
-
-def _association_stage(
-    behavior: BehaviorRuntimeComponents, prediction: PredictionRuntimeComponents, config: HabitusConfig
-) -> Callable[[], Awaitable[object]] | None:
-    """夜批里排在重建之后的那一拍：算待办 → 折出前因事实 → 按格子线性推进。
-
-    **待办与前因事实都在这里算**，不在刷新器里：读预测树的模块只有 ``scene/backlog.py`` 一个
-    （架构测试钉死），而组合根是唯一同时认识两棵树的地方。刷新器因此完全不认识 ``PredictionTree``
-    ——"语义层不重算数字"由类型保证，不靠自觉。
-    """
-
-    refresher = behavior.association_refresher
-    if refresher is None:
-        return None
-
-    async def run() -> object:
-        tree = await asyncio.to_thread(prediction.store.load)
-        if tree is None:
-            return None
-        tasks = await asyncio.to_thread(
-            backlog,
-            tree,
-            refresher.associated_days,
-            per_candidate=config.scene.association_per_candidate,
-            limit=config.scene.association_max_tasks_per_run,
-            blocked=refresher.progress,
-        )
-        return await refresher.refresh(tasks, causes=CauseFacts(tree))
-
-    return run
 
 
 def _nightly_stages(
-    settlement: SettlementStage | None, association: Callable[[], Awaitable[object]] | None
+    settlement: SettlementStage | None, following: Callable[[], Awaitable[object]] | None
 ) -> Callable[[], Awaitable[object]] | None:
-    """重建之后的两拍串成一个钩子：先结算、后关联。任一缺席就只跑另一拍。
+    """重建之后的几拍串成一个钩子：先结算、后跟其余的（新语义树的映射 → 开承诺 → 结算 → 投影，按
+    《语义树重构》的线性顺序，随后面几刀接进 ``following``）。任一缺席就只跑另一拍。
 
-    结算的失败在这里吞掉（它自己已经记了观测事件）：一个读不出来的账本文件不该让关联整夜不跑。
-    关联的失败仍然往上抛，由 worker 的 ``_run_after_rebuild`` 记账——那是既有行为，不改。
+    结算的失败在这里吞掉（它自己已经记了观测事件）：一个读不出来的账本文件不该让后面整夜不跑。
+    后面那一拍的失败仍然往上抛，由 worker 的 ``_run_after_rebuild`` 记账——那是既有行为，不改。
     """
 
-    if settlement is None and association is None:
+    if settlement is None and following is None:
         return None
 
     async def run() -> object:
         if settlement is not None:
             try:
                 await asyncio.to_thread(settlement.run_once)
-            except Exception:  # noqa: BLE001 - 结算自己已观测；不许拖着关联
+            except Exception:  # noqa: BLE001 - 结算自己已观测；不许拖着后面的
                 pass
-        return None if association is None else await association()
+        return None if following is None else await following()
 
     return run
 
@@ -655,8 +624,7 @@ def build_runtime(
     )
     # behavior 关着而 prediction 开着的组合已经在配置层被硬拒（见 HabitusConfig 的跨域校验），
     # 所以这里 behavior_components 为 None 时 prediction 必然也没开，直接跳过即可。
-    # 夜批顺序：归约把一天定稿 → 预测树重建 → 语义关联。关联排在重建**之后**（与已删的按天归组
-    # 相反），因为它的待办是树上的出处日，必须等这一代树落地才算得出来。
+    # 夜批顺序：归约把一天定稿 → 预测树重建 → 结算 →（新语义树各拍，后面几刀接上）。
     prediction_components = (
         None
         if behavior_components is None
@@ -674,13 +642,6 @@ def build_runtime(
         else build_foresight_components(
             config,
             behavior_tree=behavior_components.tree,
-            regularity_tree=behavior_components.regularity_tree,
-            # 事实源本身传过去（不是它的绑定方法）：它既答"哪几天关联完成了"，也说按哪个版本算的。
-            associated=(
-                None
-                if behavior_components.association_refresher is None
-                else behavior_components.association_refresher.associated_days
-            ),
             store=prediction_components.store,
             # "那天定稿了"只有归约说了算（链都落树、封口视界已过那天的本地结束），结算按它来。
             closed_days=behavior_components.reduction_runner.closed_days,
@@ -693,11 +654,11 @@ def build_runtime(
         )
     )
     if prediction_components is not None and behavior_components is not None:
-        # 夜批的顺序：树重建 → 结算承诺（对着归约已定稿的日子）→ 关联。结算只读账本与行为树，关联要读
-        # 这一代树的出处日；结算失败自己留观测、被这里吞掉，不许拖着关联一夜不跑。
+        # 夜批的顺序：树重建 → 结算承诺（对着归约已定稿的日子）→ 新语义树的各拍（后面几刀接进第二个参数）。
+        # 结算只读账本与行为树；它失败自己留观测、被这里吞掉，不许拖着后面一夜不跑。
         prediction_components.worker.after_rebuild = _nightly_stages(
             None if foresight_components is None else foresight_components.settlement,
-            _association_stage(behavior_components, prediction_components, config),
+            None,
         )
     components = RuntimeComponents(
         infrastructure=RuntimeInfrastructure(

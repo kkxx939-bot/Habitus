@@ -379,15 +379,15 @@ class RuntimeComponents:
             # 实例同一性：夜批必须读**这个** Runtime 写入的那棵行为树，不是另开一个同路径的实例。
             if self.prediction.rebuilder.behavior_tree is not self.behavior.tree:
                 raise ValueError("prediction must rebuild from the assembled behaviour tree")
-        if self.behavior is not None and self.behavior.association_refresher is not None:
-            # 接线漏了的话，进程照常启动、health 全绿、关联一夜都不会跑，而配置里还开着——无处可查。
-            if self.prediction is None or self.prediction.worker.after_rebuild is None:
-                raise ValueError("the association stage must be attached to the nightly rebuild")
         if self.foresight is not None:
             if not isinstance(self.foresight, ForesightRuntimeComponents):
                 raise TypeError("foresight must be ForesightRuntimeComponents or None")
-            if self.behavior is None or self.prediction is None or self.behavior.regularity_tree is None:
-                raise ValueError("foresight reads both derived trees; prediction and scene must be enabled")
+            if self.behavior is None or self.prediction is None:
+                raise ValueError("foresight reads the derived trees; behaviour and prediction must be enabled")
+            # 接线漏了的话，进程照常启动、health 全绿、结算（以及后面接进同一个钩子的新语义树各拍）一夜都不会跑，
+            # 而配置里还开着——无处可查。
+            if self.prediction.worker.after_rebuild is None:
+                raise ValueError("the settlement stage must be attached to the nightly rebuild")
             self.foresight.assert_attached_to(
                 behavior=self.behavior, prediction=self.prediction, structured_chat=self.models.structured_chat
             )

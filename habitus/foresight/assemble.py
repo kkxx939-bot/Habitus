@@ -8,15 +8,14 @@
 周三不是候选。候选的**入场**不按"大于 N 次"：本槽、邻域、跨周几三层里至少一层有出处日（在这个时段
 附近真发生过）的候选摊开卡，只有全天层有出处的只列名字与数字。一次算不算数，判断者对着数字自己判。
 
-纯函数：不读时钟、不碰存储、不调模型。此刻是谁、树钉哪一代、缓存怎么建、未封口从哪读、规律树怎么读，
-全部由组合根注入。
+纯函数：不读时钟、不碰存储、不调模型。此刻是谁、树钉哪一代、缓存怎么建、未封口从哪读，全部由组合根注入。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 from types import MappingProxyType
 
 from habitus.foresight.cards import NowScene, now_scene
@@ -26,22 +25,14 @@ from habitus.foresight.model import LAYER_NAMES, CandidateNumbers, Moment, Prove
 from habitus.foresight.numbers import CellIndex, candidate_numbers, provenance
 from habitus.prediction.model import PredictionTree, SlotKey
 from habitus.prediction.query import slot_outlook
-from habitus.scene.views import AssociationGloss, DayIndexCache, Situation
-
-#: "这个候选哪几天关联完成了"。由组合根注入——本层不认识规律树的存储，只认这个事实。
-AssociatedDays = Callable[[str], frozenset[date]]
-#: "这个候选在这些日子的关联记录"，键是 occurrence URI。
-GlossesFor = Callable[[str, Iterable[date]], Mapping[str, AssociationGloss]]
-#: "这个候选的情形列表"，按周几分成（本周几出现过的，其他周几的）。
-SituationsFor = Callable[[str, int], tuple[tuple[Situation, ...], tuple[Situation, ...]]]
+from habitus.scene.views import DayIndexCache
 
 
 @dataclass(frozen=True)
 class CandidateEvidence:
-    """一个候选在这一刻的证据：树发布的数、四层拆解、历史卡、情形列表。
+    """一个候选在这一刻的证据：树发布的数、四层拆解、历史卡。
 
-    ``expanded`` 为 False 的候选只有数字（这个时段附近从没发生过，只列名）；它的 ``background`` 是空的，
-    情形也不取。
+    ``expanded`` 为 False 的候选只有数字（这个时段附近从没发生过，只列名）；它的 ``background`` 是空的。
     """
 
     kind_token: str
@@ -49,20 +40,12 @@ class CandidateEvidence:
     provenance: Provenance
     expanded: bool
     background: CandidateBackground
-    situations_here: tuple[Situation, ...] = ()
-    situations_elsewhere: tuple[Situation, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind_token, str) or not self.kind_token:
             raise ForesightError("candidate kind_token must be non-empty text")
-        if not self.expanded and (self.background.cards or self.situations_here or self.situations_elsewhere):
-            raise ForesightError("a candidate that is only named must not carry cards or situations")
-
-    @property
-    def unassociated(self) -> tuple[date, ...]:
-        """四层合起来有数、却没有语义背景的日子。"""
-
-        return self.provenance.unassociated
+        if not self.expanded and self.background.cards:
+            raise ForesightError("a candidate that is only named must not carry cards")
 
 
 @dataclass(frozen=True)
@@ -119,19 +102,12 @@ def assemble(
     *,
     generation: str,
     unsealed: Sequence[UnsealedRow],
-    glosses_for: GlossesFor,
-    situations_for: SituationsFor,
-    associated: AssociatedDays,
     half_width: int,
     window_days: int,
     transition_window_seconds: float,
     max_days_per_layer: int,
 ) -> EvidencePack:
-    """这一刻的证据包。
-
-    ``associated`` 回答"这个候选这一天关联完成了没有"；``glosses_for`` 按同一把尺子读记录。数字那边算出的
-    ``unassociated`` 与卡上贴到的记录必须来自同一个判据——两处用两个判据是这一整套最容易出的错。
-    """
+    """这一刻的证据包。"""
 
     if not isinstance(tree, PredictionTree):
         raise ForesightError("tree must be a PredictionTree")
@@ -146,9 +122,6 @@ def assemble(
             moment,
             cache,
             scene,
-            glosses_for=glosses_for,
-            situations_for=situations_for,
-            associated=associated,
             half_width=half_width,
             window_days=window_days,
             transition_window_seconds=transition_window_seconds,
@@ -174,15 +147,12 @@ def _candidate(
     cache: DayIndexCache,
     scene: NowScene,
     *,
-    glosses_for: GlossesFor,
-    situations_for: SituationsFor,
-    associated: AssociatedDays,
     half_width: int,
     window_days: int,
     transition_window_seconds: float,
     max_days_per_layer: int,
 ) -> CandidateEvidence:
-    """一个候选：树发布的数、四层拆解，摊开的再配历史卡与情形。"""
+    """一个候选：树发布的数、四层拆解，摊开的再配历史卡。"""
 
     tree = cells.tree
     numbers = candidate_numbers(
@@ -192,8 +162,7 @@ def _candidate(
         done_today=scene.done_today.get(kind_token, 0),
         elapsed_seconds=scene.elapsed_seconds(kind_token),
     )
-    done = associated(kind_token)
-    layers = provenance(cells, kind_token, slot, half_width=half_width, associated_on=done.__contains__)
+    layers = provenance(cells, kind_token, slot, half_width=half_width)
     if not any(layer.days for layer in (layers.slot, layers.pool, layers.cross_weekday)):
         return CandidateEvidence(
             kind_token=kind_token, numbers=numbers, provenance=layers, expanded=False, background=_empty_background()
@@ -202,7 +171,6 @@ def _candidate(
         layers,
         kind_token,
         cache,
-        glosses=glosses_for(kind_token, layers.all_day.days),
         slot_minutes=tree.slot_minutes,
         slot_index=moment.slot,
         half_width=half_width,
@@ -210,15 +178,8 @@ def _candidate(
         transition_window_seconds=transition_window_seconds,
         max_days_per_layer=max_days_per_layer,
     )
-    here, elsewhere = situations_for(kind_token, moment.weekday)
     return CandidateEvidence(
-        kind_token=kind_token,
-        numbers=numbers,
-        provenance=layers,
-        expanded=True,
-        background=background,
-        situations_here=here,
-        situations_elsewhere=elsewhere,
+        kind_token=kind_token, numbers=numbers, provenance=layers, expanded=True, background=background
     )
 
 
@@ -226,12 +187,4 @@ def _empty_background() -> CandidateBackground:
     return CandidateBackground(cards=(), dropped_days=MappingProxyType(dict.fromkeys(LAYER_NAMES, 0)))
 
 
-__all__ = [
-    "AssociatedDays",
-    "CandidateEvidence",
-    "EvidencePack",
-    "GlossesFor",
-    "SituationsFor",
-    "assemble",
-    "moment_at",
-]
+__all__ = ["CandidateEvidence", "EvidencePack", "assemble", "moment_at"]

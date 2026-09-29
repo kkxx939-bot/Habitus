@@ -32,9 +32,7 @@ def ground_for(tmp_path) -> Ground:
     for week in range(4):
         day = MONDAY + timedelta(days=7 * week)
         ground.record(day, "收拾球包", 18, 40, kind="收拾球包")
-        play = ground.record(day, "打球", 19, 0, kind="打球", lasts_minutes=60)
-        if week < 2:
-            ground.associate(play, kind="打球", context=f"第 {week + 1} 周", situation="周一下班后自己去")
+        ground.record(day, "打球", 19, 0, kind="打球", lasts_minutes=60)
     return ground
 
 
@@ -70,7 +68,7 @@ def test_only_promises_with_a_window_and_a_cited_card_enter_the_ledger(tmp_path)
     )
     assert [(c.kind_token, c.window, c.slot, c.slot_minutes) for c in claims] == [("打球", (76, 78), 76, 15)]
     (claim,) = claims
-    assert claim.situations == ("周一下班后自己去",)  # 两张卡同一情形，按规范身份去重
+    assert claim.situations == ()  # 旧语义树的情形已删；新树的概念命中接回来前，承诺不分情形
     assert claim.basis == (cards[0].uri, cards[1].uri) and claim.numbers is play.numbers
     assert claim.generation == pack.generation and claim.judge_version == "test-judge" and claim.conditions == ()
     assert claims_from(pack, judgement_at(pack, verdict("打球", "说不准", None, (cards[0].uri,)))) == ()

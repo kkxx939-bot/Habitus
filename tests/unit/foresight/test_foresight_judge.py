@@ -25,7 +25,7 @@ from habitus.foresight.judge import (
 from habitus.foresight.render import render_pack
 from habitus.model_client import ChatClient, ModelTransportError, StructuredChatClient
 from tests.unit.foresight.fixtures import MONDAY, Ground, ScriptedJudge, at
-from tests.unit.scene.association_payloads import ScriptedProvider, model_config, recording_client
+from tests.unit.foresight.scripted_model import ScriptedProvider, model_config, recording_client
 
 NOW = MONDAY + timedelta(days=28)
 JUDGED_AT = datetime(2026, 8, 31, 11, 5, tzinfo=UTC)
@@ -38,11 +38,9 @@ def ground_for(tmp_path) -> Ground:
     for week in range(4):
         day = MONDAY + timedelta(days=7 * week)
         ground.record(day, "收拾球包", 18, 40, kind="收拾球包")
-        play = ground.record(day, "打球", 19, 0, kind="打球", lasts_minutes=60)
+        ground.record(day, "打球", 19, 0, kind="打球", lasts_minutes=60)
         ground.record(day, "洗澡", 20, 10, kind="洗澡")
         ground.record(day, "吃早饭", 8, 0, kind="吃早饭")
-        if week < 2:
-            ground.associate(play, kind="打球", context=f"第 {week + 1} 周", situation="周一下班后自己去")
     return ground
 
 

@@ -20,12 +20,12 @@
   周规律，后者只剩 1.35 倍，恰好把"每周二打球"这类规律抹平成"这个时段大家都忙"。
 - 全天：该动作全部格子的并集。
 
-零 IO、零模型：输入是钉住的一代树与一个"这天关联完成了没有"的谓词，输出是纯数据。
+零 IO、零模型：输入是钉住的一代树，输出是纯数据。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 
@@ -108,28 +108,14 @@ class CellIndex:
         return self.by_action.get(action, ())
 
 
-def provenance(
-    cells: CellIndex,
-    action: str,
-    slot: SlotKey,
-    *,
-    half_width: int,
-    associated_on: Callable[[date], bool],
-) -> Provenance:
-    """一个候选在 ``slot`` 上的四层拆解。
-
-    ``associated_on(day)`` 回答"语义层把这一天关联完成了没有"——没关联的日子有数字、没有那句
-    ``Layer.unassociated`` 如实说出来，而不是让它在取背景时悄悄少掉几条。这个谓词由调用方注入
-    （生产实现是规律级的完成标记），所以本模块不认识语义层的存储。
-    """
+def provenance(cells: CellIndex, action: str, slot: SlotKey, *, half_width: int) -> Provenance:
+    """一个候选在 ``slot`` 上的四层拆解。"""
 
     tree = cells.tree
     if not isinstance(action, str) or not action:
         raise ForesightError("action must be non-empty text")
     if not isinstance(slot, SlotKey):
         raise ForesightError("slot must be a SlotKey")
-    if not callable(associated_on):
-        raise ForesightError("associated_on must be a predicate on dates")
     # ``SlotKey`` 自己不查槽的上界，而 ``pool_indexes`` 会静默取模——槽 500 会安静地落到
     # 槽 18–22 那个**不相干的邻域**上，然后在读曲线时崩在一个看不出原因的 IndexError。
     if not 0 <= slot.slot < slot_count(tree.slot_minutes):
@@ -143,18 +129,14 @@ def provenance(
     across = tuple(SlotKey(weekday=weekday, slot=key.slot) for weekday in range(WEEKDAYS) for key in pool)
     whole_day = tuple(key for key, _statistics in cells.cells(action))
     return Provenance(
-        slot=_counted(cells, action, (slot,), name="slot", associated_on=associated_on),
-        pool=_counted(cells, action, pool, name="pool", associated_on=associated_on),
-        cross_weekday=_counted(cells, action, across, name="cross_weekday", associated_on=associated_on),
-        all_day=_published(
-            cells, action, whole_day, name="all_day", value=tree.baselines.get(action, 0.0), associated_on=associated_on
-        ),
+        slot=_counted(cells, action, (slot,), name="slot"),
+        pool=_counted(cells, action, pool, name="pool"),
+        cross_weekday=_counted(cells, action, across, name="cross_weekday"),
+        all_day=_published(cells, action, whole_day, name="all_day", value=tree.baselines.get(action, 0.0)),
     )
 
 
-def _counted(
-    cells: CellIndex, action: str, keys: tuple[SlotKey, ...], *, name: str, associated_on: Callable[[date], bool]
-) -> Layer:
+def _counted(cells: CellIndex, action: str, keys: tuple[SlotKey, ...], *, name: str) -> Layer:
     """有裸账本的那两层：分子分母都摊在同一批格子上，比值不收缩、不平滑。"""
 
     tree = cells.tree
@@ -167,30 +149,19 @@ def _counted(
         seen = tree.exposure.get(key)
         if seen is not None:
             exposure += seen.observed_days
-    days = _days(tree, action, keys)
     return Layer(
         name=name,
         value=hits / exposure if exposure > 0.0 else 0.0,
-        days=days,
-        unassociated=_unassociated(days, associated_on),
+        days=_days(tree, action, keys),
         hits=hits,
         exposure=exposure,
     )
 
 
-def _published(
-    cells: CellIndex,
-    action: str,
-    keys: tuple[SlotKey, ...],
-    *,
-    name: str,
-    value: float,
-    associated_on: Callable[[date], bool],
-) -> Layer:
+def _published(cells: CellIndex, action: str, keys: tuple[SlotKey, ...], *, name: str, value: float) -> Layer:
     """只发布了率的那两层：树上就没有对应的裸账本，所以 hits / exposure 留空而不是编一个。"""
 
-    days = _days(cells.tree, action, keys)
-    return Layer(name=name, value=value, days=days, unassociated=_unassociated(days, associated_on))
+    return Layer(name=name, value=value, days=_days(cells.tree, action, keys))
 
 
 def _days(tree: PredictionTree, action: str, keys: tuple[SlotKey, ...]) -> tuple[date, ...]:
@@ -202,10 +173,6 @@ def _days(tree: PredictionTree, action: str, keys: tuple[SlotKey, ...]) -> tuple
         if statistics is not None:
             collected.update(statistics.days)
     return tuple(sorted(collected))
-
-
-def _unassociated(days: tuple[date, ...], associated_on: Callable[[date], bool]) -> tuple[date, ...]:
-    return tuple(day for day in days if not associated_on(day))
 
 
 __all__ = ["CellIndex", "candidate_numbers", "provenance"]

@@ -1,7 +1,7 @@
-"""预测层测试的现场：一棵真实的行为树同时喂出**预测树**与**规律树**，两边是同一批 occurrence。
+"""预测层测试的现场：一棵真实的行为树喂出预测树，卡的序列与视图从同一棵行为树读。
 
-四层出处的全部意义就是"数字与背景来自同一批日子"，所以夹具不能一边造假树一边造假记录——
-两棵派生树必须从同一棵行为树来，与夜批的真实顺序一致（行为树封口 → 预测树重建 → 关联）。
+四层出处的全部意义就是"数字与背景来自同一批日子"，所以夹具不能一边造假树一边造假卡——
+预测树必须从行为树来，与夜批的真实顺序一致（行为树封口 → 预测树重建）。
 """
 
 from __future__ import annotations
@@ -12,16 +12,15 @@ from pathlib import Path
 
 from habitus.behavior import BehaviorDocumentWriter
 from habitus.behavior.model import BehaviorKind
-from habitus.foresight import AssociatedDays, EvidencePack, UnsealedRow, assemble, moment_at
+from habitus.foresight import EvidencePack, UnsealedRow, assemble, moment_at
 from habitus.foresight.judge import Judgement
 from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.prediction import builder, source
 from habitus.prediction.config import PredictionTreeConfig
 from habitus.prediction.model import PredictionTree
-from habitus.scene.regularity import RegularityTree
-from habitus.scene.views import DayIndexCache, association_glosses, situations_of
+from habitus.scene.views import DayIndexCache
 from tests.unit.behavior.tree_payloads import gap_payload
-from tests.unit.scene.fixtures import ASSOCIATION_VERSION, SUBJECT, Site, associate, at, publish, regularity_tree
+from tests.unit.scene.fixtures import SUBJECT, Site, at, publish
 
 SLOT_MINUTES = 15
 
@@ -54,11 +53,10 @@ def slot_of(hour: int, minute: int = 0) -> int:
 
 
 class Ground:
-    """一棵行为树 + 由它派生的规律树与预测树。"""
+    """一棵行为树 + 由它派生的预测树。"""
 
     def __init__(self, tmp_path: Path, *, now: datetime) -> None:
         self.site = Site(tmp_path, now=now)
-        self.regularity = regularity_tree(tmp_path)
 
     def record(
         self, day: date, name: str, hour: int, minute: int = 0, *, kind: str | None = None, lasts_minutes: int = 10
@@ -82,41 +80,6 @@ class Ground:
                 gap_kind=kind,
             ),
         )
-
-    def associate(
-        self,
-        uri: str,
-        *,
-        kind: str,
-        context: str,
-        situation: str | None = None,
-        causes: tuple[str, ...] = (),
-        consumed: tuple[tuple[str, str], ...] = (),
-        left: tuple[tuple[str, str], ...] = (),
-    ) -> None:
-        """往规律树写这次发生的关联记录，并给那一天打完成标记。"""
-
-        associate(
-            self.regularity,
-            uri,
-            kind=kind,
-            context=context,
-            situation=situation,
-            causes=causes,
-            consumed=consumed,
-            left=left,
-        )
-
-    def associated(self, *days: date) -> AssociatedDays:
-        """脚本化的事实源：不管规律树上有什么，直接说这几天关联完成了。"""
-
-        done = frozenset(days)
-        return lambda _kind: done
-
-    def associated_days(self) -> AssociatedDays:
-        """真实的事实源：规律树上有完成标记的日子（按当前关联版本）。"""
-
-        return Ledger(self.regularity, ASSOCIATION_VERSION).days_for
 
     def tree(self, **overrides) -> PredictionTree:
         snapshot = source.read(self.site.behavior_tree)
@@ -142,7 +105,7 @@ class Ground:
         max_days: int = 40,
         tree: PredictionTree | None = None,
     ) -> EvidencePack:
-        """走真实读口装一包：规律树上的记录按关联版本读，与 associated_days 同一把尺子。"""
+        """走真实读口装一包。"""
 
         resolved = tree if tree is not None else self.tree()
         moment = moment_at(now, slot_minutes=resolved.slot_minutes)
@@ -152,25 +115,11 @@ class Ground:
             self.cache(),
             generation="test-generation",
             unsealed=unsealed,
-            glosses_for=lambda kind, days: association_glosses(self.regularity, kind, days, version=ASSOCIATION_VERSION),
-            situations_for=lambda kind, weekday: situations_of(self.regularity, kind, weekday=weekday),
-            associated=self.associated_days(),
             half_width=half_width,
             window_days=window_days,
             transition_window_seconds=7_200.0,
             max_days_per_layer=max_days,
         )
-
-
-class Ledger:
-    """规律树上的完成标记按版本读——与刷新器的 ``associated_days`` 同形状（``AssociationLedger``）。"""
-
-    def __init__(self, tree: RegularityTree, version: str) -> None:
-        self.tree = tree
-        self.version = version
-
-    def days_for(self, kind_token: str) -> frozenset[date]:
-        return self.tree.days_for(kind_token, version=self.version)
 
 
 class ScriptedJudge:
@@ -202,4 +151,4 @@ class ScriptedJudge:
 #: 各现场共用的锚点周一。现场常量属于夹具模块，不能挂在某个测试文件上让别人去 import。
 MONDAY = date(2026, 8, 3)
 
-__all__ = ["MONDAY", "SLOT_MINUTES", "Ground", "Ledger", "ScriptedJudge", "at", "config", "slot_of"]
+__all__ = ["MONDAY", "SLOT_MINUTES", "Ground", "ScriptedJudge", "at", "config", "slot_of"]

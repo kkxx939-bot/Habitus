@@ -21,11 +21,9 @@ from habitus.foundation.observability import ObservationEvent
 from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.runtime.foresight import ForesightWorker, build_foresight_components
 from habitus.runtime.prediction import build_prediction_components
-from habitus.scene import AssociationLedger
-from habitus.scene.regularity import RegularityTree
 from tests.integration.test_runtime_assembly import REPOSITORY_ROOT
 from tests.unit.behavior.tree_payloads import occurrence_payload
-from tests.unit.foresight.fixtures import Ledger, ScriptedJudge
+from tests.unit.foresight.fixtures import ScriptedJudge
 from tests.unit.runtime.fixtures import STARTUP_PARAMETERS
 from tests.unit.runtime.test_behavior_pipeline import SUBJECT
 
@@ -54,8 +52,8 @@ def raw_config(tmp_path: Path, *, scene: bool = True, foresight: bool = True, **
     return raw
 
 
-def trees(config: HabitusConfig, *, weeks: int = 4) -> tuple[BehaviorTree, RegularityTree, AssociationLedger]:
-    """一棵有"每周一晚上打球"的行为树，外加一棵（尚未关联的）规律树与按版本读它的事实源。"""
+def tree(config: HabitusConfig, *, weeks: int = 4) -> BehaviorTree:
+    """一棵有"每周一晚上打球"的行为树。"""
 
     behavior_tree = BehaviorTree(config.behavior_root / "tree")
     writer = BehaviorDocumentWriter(
@@ -76,9 +74,7 @@ def trees(config: HabitusConfig, *, weeks: int = 4) -> tuple[BehaviorTree, Regul
                 goal=None,
             ),
         )
-    regularity_tree = RegularityTree(config.scene_root / "regularity")
-    regularity_tree.initialize()
-    return behavior_tree, regularity_tree, Ledger(regularity_tree, "test_association_v1")
+    return behavior_tree
 
 
 def scripted_judge() -> ScriptedJudge:
@@ -102,15 +98,13 @@ def assembled(
     """走完真实顺序：行为树 → 发布一代预测树 → 组装预测层（判断者是脚本化的）。"""
 
     config = HabitusConfig.from_mapping(raw_config(tmp_path))
-    behavior_tree, regularity_tree, associated = trees(config)
+    behavior_tree = tree(config)
     prediction = build_prediction_components(config, behavior_tree=behavior_tree, clock=lambda: now)
     assert prediction is not None
     asyncio.run(prediction.worker.run_once())
     components = build_foresight_components(
         config,
         behavior_tree=behavior_tree,
-        regularity_tree=regularity_tree,
-        associated=associated,
         store=prediction.store,
         judge=judge if judge is not None else scripted_judge(),
         closed_days=closed_days,
@@ -123,14 +117,12 @@ def assembled(
 
 def test_foresight_is_absent_until_it_is_switched_on(tmp_path) -> None:
     config = HabitusConfig.from_mapping(raw_config(tmp_path, foresight=False))
-    behavior_tree, regularity_tree, associated = trees(config)
+    behavior_tree = tree(config)
     assert config.foresight.enabled is False
     assert (
         build_foresight_components(
             config,
             behavior_tree=behavior_tree,
-            regularity_tree=regularity_tree,
-            associated=associated,
             store=None,
             judge=scripted_judge(),
         )
@@ -142,17 +134,11 @@ def test_an_enabled_foresight_layer_must_have_a_judge(tmp_path) -> None:
     """判断者二选一（注入的 judge 或结构化客户端）；两个都不给不是"暂时不判"，是接线漏了。"""
 
     config = HabitusConfig.from_mapping(raw_config(tmp_path))
-    behavior_tree, regularity_tree, associated = trees(config)
+    behavior_tree = tree(config)
     prediction = build_prediction_components(config, behavior_tree=behavior_tree)
     assert prediction is not None
     with pytest.raises(ValueError, match="needs a judge"):
-        build_foresight_components(
-            config,
-            behavior_tree=behavior_tree,
-            regularity_tree=regularity_tree,
-            associated=associated,
-            store=prediction.store,
-        )
+        build_foresight_components(config, behavior_tree=behavior_tree, store=prediction.store)
 
 
 def test_enabling_foresight_without_the_semantic_layer_is_refused(tmp_path) -> None:
@@ -191,12 +177,9 @@ def test_the_moment_lands_on_the_clock_face_in_the_subject_timezone(tmp_path) ->
     assert pack.generation and pack.now.moment == moment
     (candidate,) = pack.expanded
     assert candidate.kind_token == "打球"
-    # 规律树一天都没关联，但**卡照样是满的**：序列与视图来自行为树，语义层做没做过不影响。
-    # 没关联的日子由 unassociated 如实摆出来，卡上关联那一栏说"那天还没关联"。
-    assert candidate.unassociated == candidate.provenance.all_day.days
+    # 卡的序列与视图来自行为树，每张卡对应本槽层的一个出处日。
     cards = candidate.background.cards
     assert [card.at.date() for card in cards] == list(candidate.provenance.slot.days)
-    assert all(card.gloss is None and not card.day_associated for card in cards)
     # 今天 19:00 那次已经在树上，此刻 19:05 的场景里有它；没注入判断存储时未封口明说没补，不是漏了。
     assert [row.name for row in pack.now.flow] == ["打球"] and pack.now.unsealed == ()
     assert pack.now.done_today == {"打球": 1}
@@ -215,16 +198,11 @@ def test_without_a_published_generation_it_says_so_instead_of_answering_zero(tmp
     """"还没算过"与"什么都不会发生"必须分得清——后者会让上层安心闭嘴。"""
 
     config = HabitusConfig.from_mapping(raw_config(tmp_path))
-    behavior_tree, regularity_tree, associated = trees(config)
+    behavior_tree = tree(config)
     prediction = build_prediction_components(config, behavior_tree=behavior_tree)
     assert prediction is not None
     components = build_foresight_components(
-        config,
-        behavior_tree=behavior_tree,
-        regularity_tree=regularity_tree,
-        associated=associated,
-        store=prediction.store,
-        judge=scripted_judge(),
+        config, behavior_tree=behavior_tree, store=prediction.store, judge=scripted_judge()
     )
     assert components is not None
     with pytest.raises(ForesightError, match="no prediction generation"):
@@ -308,10 +286,10 @@ def test_the_builder_refuses_two_sources_for_the_same_part(tmp_path) -> None:
     """判断者与未封口读口都是二选一：两个都给不是"多一份保险"，是接线错误。"""
 
     config = HabitusConfig.from_mapping(raw_config(tmp_path))
-    behavior_tree, regularity_tree, associated = trees(config)
+    behavior_tree = tree(config)
     prediction = build_prediction_components(config, behavior_tree=behavior_tree)
     assert prediction is not None
-    common = dict(behavior_tree=behavior_tree, regularity_tree=regularity_tree, associated=associated, store=prediction.store)
+    common = dict(behavior_tree=behavior_tree, store=prediction.store)
     with pytest.raises(ValueError, match="not both"):
         build_foresight_components(config, judge=scripted_judge(), structured_chat=object(), **common)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="not both"):
@@ -343,37 +321,3 @@ def test_a_naive_now_is_refused_instead_of_being_read_in_the_process_time_zone(t
     _config, components = assembled(tmp_path)
     with pytest.raises(ForesightError, match="timezone-aware"):
         components.assembler.assemble(now=EVENING.replace(tzinfo=None))
-
-
-def test_records_are_read_with_the_same_version_the_ledger_judges_by(tmp_path) -> None:
-    """规律树上按 v1 关联了周一那次：事实源按 v1 读 → 卡上有记录；事实源按 v2 读 → 那天没关联、卡上没记录。
-    两边只有一个版本旋钮，不可能一边有一边没有。"""
-
-    from tests.unit.scene.fixtures import associate
-
-    config = HabitusConfig.from_mapping(raw_config(tmp_path))
-    behavior_tree, regularity_tree, _ledger = trees(config)
-    first = "behavior://occurrences/2026/08/03/打球--20260803T190000000000%2B0800.md"
-    associate(regularity_tree, first, kind="打球", context="第一周", version="v1")
-    prediction = build_prediction_components(config, behavior_tree=behavior_tree, clock=lambda: EVENING)
-    assert prediction is not None
-    asyncio.run(prediction.worker.run_once())
-
-    def pack_with(version: str):
-        components = build_foresight_components(
-            config,
-            behavior_tree=behavior_tree,
-            regularity_tree=regularity_tree,
-            associated=Ledger(regularity_tree, version),
-            store=prediction.store,
-            judge=scripted_judge(),
-            clock=lambda: EVENING,
-        )
-        assert components is not None
-        return components.assembler.assemble(now=EVENING)
-
-    (v1,) = pack_with("v1").expanded
-    (v2,) = pack_with("v2").expanded
-    assert v1.background.cards[0].gloss is not None and v1.background.cards[0].day_associated
-    assert v2.background.cards[0].gloss is None and not v2.background.cards[0].day_associated
-    assert v1.unassociated != v2.unassociated

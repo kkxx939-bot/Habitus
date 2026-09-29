@@ -6,7 +6,7 @@
 去重按时窗**有交集**：判断者每槽重判，同一次即将发生会在连续几槽反复出现，一次命中不能记成十条；
 而判断者改口说另一段（晚上那次）时窗不相交，那是另一条承诺。
 
-情形从引用的卡的关联记录取，按规范身份去重；卡没关联时为空，账记在 (行为, "") 上。
+情形暂为空（旧语义树已删），账记在 (行为, "") 上。
 纯函数：不读时钟、不落盘。复用的一拍由调用方跳过——那不是新的话。
 """
 
@@ -17,7 +17,6 @@ from collections.abc import Iterable
 from habitus.foresight.assemble import CandidateEvidence, EvidencePack
 from habitus.foresight.judge.model import CandidateVerdict, Judgement
 from habitus.foresight.ledger.model import Claim, Conditions
-from habitus.foundation.ids import canonical_text_identity
 from habitus.foundation.integrity import canonical_digest
 
 
@@ -65,13 +64,9 @@ def _claim(
     facts_version: str,
 ) -> Claim:
     assert verdict.window is not None
-    cards = {card.uri: card for card in evidence.background.cards}
+    # 旧语义树的「情形」随重构摘掉（2026-09-26）：承诺暂时不分情形，账都记在 (行为, "") 上；新语义树
+    # 的概念命中接回来时，这里按概念分家。
     situations: dict[str, str] = {}
-    for uri in verdict.basis:
-        card = cards.get(uri)
-        text = None if card is None or card.gloss is None else card.gloss.situation
-        if text:
-            situations.setdefault(canonical_text_identity(text, "situation text"), text)
     day = pack.moment.day
     identity = canonical_digest(
         {

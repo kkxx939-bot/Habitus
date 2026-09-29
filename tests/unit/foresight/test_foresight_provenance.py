@@ -47,7 +47,7 @@ def test_each_layer_carries_exactly_the_days_its_own_number_came_from(tmp_path) 
     tree = ground_with_a_weekly_habit(tmp_path).tree()
     cells = CellIndex.of(tree)
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
-    layers = provenance(cells, "打球", slot, half_width=2, associated_on=lambda day: True)
+    layers = provenance(cells, "打球", slot, half_width=2)
 
     assert layers.slot.days == days(0, 7, 14)  # 就是这一格
     assert layers.pool.days == days(0, 7, 14, 21)  # 加上 19:30 那次
@@ -68,7 +68,7 @@ def test_the_three_chain_layers_expose_the_raw_ledger_and_all_day_does_not(tmp_p
     tree = ground_with_a_weekly_habit(tmp_path).tree()
     cells = CellIndex.of(tree)
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
-    layers = provenance(cells, "打球", slot, half_width=2, associated_on=lambda day: True)
+    layers = provenance(cells, "打球", slot, half_width=2)
 
     cell = tree.nodes[(slot, "打球")]
     assert layers.slot.hits == pytest.approx(cell.counts.occurred_days)
@@ -94,7 +94,7 @@ def test_the_cross_weekday_layer_is_the_shrinkage_chains_third_layer(tmp_path) -
 
     tree = ground_with_a_weekly_habit(tmp_path).tree()
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
-    layers = provenance(CellIndex.of(tree), "打球", slot, half_width=2, associated_on=lambda day: True)
+    layers = provenance(CellIndex.of(tree), "打球", slot, half_width=2)
     pool = neighbourhood(tree, slot, 2)
     expected_top = sum(
         tree.nodes[(SlotKey(weekday=weekday, slot=key.slot), "打球")].counts.occurred_days
@@ -125,28 +125,10 @@ def test_the_neighbourhood_wraps_inside_one_weekday(tmp_path) -> None:
     ground.record(MONDAY + timedelta(days=1), "夜宵", 0, 5, kind="夜宵")  # 周二凌晨
     cells = CellIndex.of(ground.tree())
     late = SlotKey(weekday=0, slot=slot_of(23, 45))
-    layers = provenance(cells, "夜宵", late, half_width=2, associated_on=lambda day: True)
+    layers = provenance(cells, "夜宵", late, half_width=2)
     assert layers.slot.days == days(0)
     assert layers.pool.days == days(0, 7)  # 绕过午夜，但仍在周一那一行
     assert days(1)[0] not in layers.pool.days
-
-
-def test_days_with_numbers_but_no_association_are_named_not_dropped(tmp_path) -> None:
-    """出处日里语义层没关联的那几天要明说"有数、没背景"。
-
-    树读整棵行为树，语义侧只看得到已关联的日子。不说出来，判断者就分不清"这个数字只有两天"
-    和"有三天、其中一天没背景"——后者该让他更相信这个规律，不是更不相信。
-    """
-
-    ground = ground_with_a_weekly_habit(tmp_path)
-    cells = CellIndex.of(ground.tree())
-    slot = SlotKey(weekday=0, slot=slot_of(19, 0))
-    missing = {MONDAY + timedelta(days=14)}
-    layers = provenance(cells, "打球", slot, half_width=2, associated_on=lambda day: day not in missing)
-
-    assert layers.slot.days == days(0, 7, 14)
-    assert layers.slot.unassociated == days(14)
-    assert layers.unassociated == days(14)  # 四层合起来，去重
 
 
 def test_a_candidate_that_never_hit_this_cell_has_an_empty_slot_layer(tmp_path) -> None:
@@ -155,7 +137,7 @@ def test_a_candidate_that_never_hit_this_cell_has_an_empty_slot_layer(tmp_path) 
     tree = ground_with_a_weekly_habit(tmp_path).tree()
     cells = CellIndex.of(tree)
     layers = provenance(
-        cells, "打球", SlotKey(weekday=0, slot=slot_of(3, 0)), half_width=2, associated_on=lambda day: True
+        cells, "打球", SlotKey(weekday=0, slot=slot_of(3, 0)), half_width=2
     )
     assert layers.slot.days == () and layers.slot.hits == 0.0 and layers.slot.value == 0.0
     assert layers.pool.days == ()
@@ -167,15 +149,13 @@ def test_layer_guards(tmp_path) -> None:
     cells = CellIndex.of(tree)
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
     with pytest.raises(ForesightError):
-        provenance(cells, "", slot, half_width=2, associated_on=lambda day: True)
+        provenance(cells, "", slot, half_width=2)
     with pytest.raises(ForesightError):
-        provenance(cells, "打球", slot, half_width=2, associated_on=None)  # type: ignore[arg-type]
+        Layer(name="不认识的层", value=0.0, days=())
     with pytest.raises(ForesightError):
-        Layer(name="不认识的层", value=0.0, days=(), unassociated=())
+        Layer(name="slot", value=0.0, days=days(0, 0))
     with pytest.raises(ForesightError):
-        Layer(name="slot", value=0.0, days=days(0, 0), unassociated=())
-    with pytest.raises(ForesightError):
-        Layer(name="slot", value=0.0, days=days(0), unassociated=days(7))
+        Layer(name="slot", value=0.0, days=days(0), hits=1.0)  # 裸账本要么两个都给要么都不给
 
 
 # --- 语义侧：每层按自己的日子取背景 -----------------------------------------------------
@@ -186,7 +166,6 @@ def background_for(ground: Ground, layers, *, half_width: int, max_days: int = 1
         layers,
         "打球",
         ground.cache(),
-        glosses={},
         slot_minutes=15,
         slot_index=slot_of(19, 0),
         half_width=half_width,
@@ -211,7 +190,7 @@ def test_each_card_lands_in_the_innermost_layer_that_reads_it(tmp_path) -> None:
     ground.record(MONDAY + timedelta(days=14), "打球", 8, 0, kind="打球")  # 同周几、离得很远的槽
     cells = CellIndex.of(ground.tree())
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
-    layers = provenance(cells, "打球", slot, half_width=3, associated_on=lambda day: True)
+    layers = provenance(cells, "打球", slot, half_width=3)
 
     background = background_for(ground, layers, half_width=3)
 
@@ -236,7 +215,7 @@ def test_the_protective_limit_says_what_it_left_out(tmp_path) -> None:
     ground.record(MONDAY + timedelta(days=2), "打球", 19, 0, kind="打球")  # 周三，跨周几层
     cells = CellIndex.of(ground.tree())
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
-    layers = provenance(cells, "打球", slot, half_width=2, associated_on=lambda day: True)
+    layers = provenance(cells, "打球", slot, half_width=2)
 
     by_days = background_for(ground, layers, half_width=2, max_days=2)
     assert by_days.dropped_days["slot"] == 2 and by_days.dropped_days["all_day"] == 3

@@ -12,19 +12,17 @@ embedding 实验（BHV-KINDS-002，豆包 1024 维、七天 2,956 个名字）�
 
 from __future__ import annotations
 
-import base64
 import json
-import math
-import struct
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from operator import mul
 from pathlib import Path
 from types import MappingProxyType
 
 from habitus.behavior.kinds.model import BehaviorKindRegistry
 from habitus.behavior.model import semantic_name
 from habitus.foundation.ids import canonical_path_identity
+from habitus.foundation.vectors import VectorCodecError, cosine, normalized, pack_float16
+from habitus.foundation.vectors import unpack_float16 as _unpack_float16
 from habitus.infrastructure.store.filesystem import (
     DurablePathIntegrityError,
     atomic_replace_bytes,
@@ -38,21 +36,6 @@ _KEYS = {"schema_version", "model", "dimension", "vectors"}
 
 class BehaviorKindVectorError(ValueError):
     """向量旁册内容与登记约束不一致。"""
-
-
-def normalized(values: Sequence[float]) -> tuple[float, ...]:
-    """单位化；零向量原样返回（余弦为 0）。"""
-
-    norm = math.sqrt(sum(v * v for v in values))
-    if norm == 0.0:
-        return tuple(float(v) for v in values)
-    return tuple(float(v) / norm for v in values)
-
-
-def cosine(a: Sequence[float], b: Sequence[float]) -> float:
-    """两个**已单位化**向量的余弦（点积）。"""
-
-    return sum(map(mul, a, b))
 
 
 @dataclass(frozen=True)
@@ -167,19 +150,16 @@ class BehaviorKindVectorStore:
             raise BehaviorKindVectorError("behavior kind vectors cannot be written safely") from exc
 
 
-def _pack(vector: Sequence[float]) -> str:
-    return base64.b64encode(struct.pack(f"<{len(vector)}e", *vector)).decode("ascii")
+_pack = pack_float16
 
 
 def _unpack(text: object, dimension: int) -> tuple[float, ...]:
-    if not isinstance(text, str):
-        raise BehaviorKindVectorError("behavior kind vector must be base64 text")
+    """编码基元在 ``foundation.vectors``；这里只把它的错误归一成本旁册的错误类型。"""
+
     try:
-        raw = base64.b64decode(text, validate=True)
-        values = struct.unpack(f"<{dimension}e", raw)
-    except (ValueError, struct.error) as exc:
+        return _unpack_float16(text, dimension)
+    except VectorCodecError as exc:
         raise BehaviorKindVectorError("behavior kind vector is not decodable") from exc
-    return tuple(float(v) for v in values)
 
 
 # ── 候选检索（只管召回）───────────────────────────────────────────────────────────

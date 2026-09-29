@@ -300,43 +300,30 @@ def test_behavior_kinds_fields_are_bounded_and_derived_by_prefix() -> None:
             BehaviorConfig(**kwargs)
 
 
-def test_scene_config_enforces_its_scalar_bounds_and_default_root(tmp_path) -> None:
+def test_scene_config_is_only_a_switch_for_now(tmp_path) -> None:
+    """旧语义树的那组旋钮随它删掉（2026-09-26）；新树每支的旋钮在那一支落地时再进来，不预留空转字段。"""
+
     from habitus.config.scene import SceneConfig
 
     config = HabitusConfig.from_mapping(valid_mapping(tmp_path))
     assert config.scene.enabled is False
     assert config.scene_root == config.storage_root / "scene"
-    loaded = SceneConfig.from_mapping({"enabled": True, "max_targets_per_call": 5})
-    assert (loaded.enabled, loaded.max_targets_per_call, loaded.max_attempts_per_input) == (True, 5, 3)
-    # 日历窗与过期期限已经删掉：前者把周频行为卡在边界上，后者是"到期没到期"这个属于预测层的判断。
+    assert SceneConfig.from_mapping({"enabled": True}).enabled is True
     for gone in (
         "lookback_days",
         "pending_expiry_days",
         "max_occurrences_per_call",
         "retained_generations",
         "refresh_interval_seconds",
+        "max_prompt_chars",
+        "max_targets_per_call",
+        "association_per_candidate",
+        "max_cause_rows",
     ):
         with pytest.raises(ConfigError, match="unknown"):
             SceneConfig.from_mapping({gone: 3})
-    for field_name, bad in (
-        ("max_prompt_chars", 10),
-        ("transient_retries", -1),
-        ("max_attempts_per_input", 0),
-        ("max_model_calls_per_run", 0),
-        ("max_targets_per_call", 0),
-        ("max_targets_per_call", 501),
-        ("association_per_candidate", 0),
-        ("association_max_tasks_per_run", 0),
-        ("max_cause_rows", 0),
-        ("max_pending_rows", 0),
-        ("transient_retry_delay_seconds", 601),
-    ):
-        with pytest.raises(ConfigError, match=f"scene.{field_name}"):
-            SceneConfig.from_mapping({field_name: bad})
     with pytest.raises(ConfigError, match="scene.enabled"):
         SceneConfig.from_mapping({"enabled": "yes"})
-    with pytest.raises(ConfigError, match="unknown"):
-        SceneConfig.from_mapping({"retained": 3})
 
 
 def test_locale_is_one_group_shared_by_the_scene_and_foresight_layers(tmp_path) -> None:

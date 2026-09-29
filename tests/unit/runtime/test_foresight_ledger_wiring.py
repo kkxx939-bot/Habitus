@@ -1,4 +1,4 @@
-"""账本接线：判断一拍把承诺写盘（复用的一拍不写），结算只认归约的定稿日，账本损坏不拖着关联。"""
+"""账本接线：判断一拍把承诺写盘（复用的一拍不写），结算只认归约的定稿日，账本损坏不拖着后面那一拍。"""
 
 from __future__ import annotations
 
@@ -100,8 +100,8 @@ def test_settlement_waits_for_the_day_the_reduction_calls_closed(tmp_path) -> No
     assert observer.events[1].attributes["verified"] == 1
 
 
-def test_a_broken_ledger_is_observed_and_does_not_stop_the_association_stage(tmp_path) -> None:
-    """结算失败自己留观测；夜批把它吞掉，关联照常跑——一个读不出来的文件不该让语义层整夜停摆。"""
+def test_a_broken_ledger_is_observed_and_does_not_stop_the_following_stage(tmp_path) -> None:
+    """结算失败自己留观测；夜批把它吞掉，后面那一拍照常跑——一个读不出来的文件不该让后面整夜停摆。"""
 
     from habitus.runtime.assembly import _nightly_stages
 
@@ -114,18 +114,18 @@ def test_a_broken_ledger_is_observed_and_does_not_stop_the_association_stage(tmp
 
     ran: list[str] = []
 
-    async def association() -> str:
-        ran.append("association")
+    async def following() -> str:
+        ran.append("following")
         return "ok"
 
-    hook = _nightly_stages(Broken(), association)
+    hook = _nightly_stages(Broken(), following)
     assert hook is not None
-    assert asyncio.run(hook()) == "ok" and ran == ["association"]
-    # 关联自己的失败仍然往上抛（worker 记账），不被吞。
+    assert asyncio.run(hook()) == "ok" and ran == ["following"]
+    # 后面那一拍自己的失败仍然往上抛（worker 记账），不被吞。
     async def failing() -> object:
-        raise RuntimeError("association broke")
+        raise RuntimeError("following broke")
 
-    with pytest.raises(RuntimeError, match="association broke"):
+    with pytest.raises(RuntimeError, match="following broke"):
         asyncio.run(_nightly_stages(None, failing)())  # type: ignore[misc]
 
 
