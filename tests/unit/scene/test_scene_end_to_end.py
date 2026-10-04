@@ -24,7 +24,6 @@ from habitus.scene.views import (
     profile_view,
     read_relations,
     residue_candidates,
-    standing_intentions,
 )
 from tests.unit.scene.fixtures import DAY1, at
 from tests.unit.scene.ledger_fixtures import (
@@ -37,44 +36,42 @@ from tests.unit.scene.ledger_fixtures import (
     record,
 )
 
-CONFIG = LedgerConfig(snapshot_opportunities=16, censor_after=3)
+CONFIG = LedgerConfig()
 VIEWS = ViewsConfig(min_count=6, min_blocks=3, split_min=3, split_min_blocks=2)
 
 
 def test_the_chain_runs_from_hits_to_materialized_views(tmp_path) -> None:
-    """七h 走一遍：八个晚睡的周五，其中三个早上吃了早饭、五个没吃 → 读出抑制；一条还没结的承诺出现在 intentions。"""
+    """七h 走一遍：八个晚睡的周五，其中三个早上吃了早饭、五个没吃 → 读出抑制。"""
 
     hits = ConceptHitStore(tmp_path / "scene")
     ledger = LedgerStore(tmp_path / "scene")
     days = [DAY1 + timedelta(days=7 * i) for i in range(8)]
     for i, day in enumerate(days):
-        hits.write(record(day, "就寝", 2, 10, ConceptHit("晚睡", "轻"), situations=("周末",) if i % 2 else ()))
+        hits.write(record(day, "就寝", 2, 10, ConceptHit("晚睡", "轻"), situations=("周末",) if i % 2 else (), checked=("周末",)))
         if i in (0, 3, 6):
             hits.write(record(day, "吃了碗面", 7, 30, "早餐"))
-        hits.write(record(day, "起床", 9, 30 + 5 * (i % 4), "起床"))  # 09:30 / 09:35 / 09:40 / 09:45：真实时刻有抖动
+        hits.write(record(day, "起床", 9, 15 + 5 * (i % 4), "起床"))  # 09:15 / 09:20 / 09:25 / 09:30：真实时刻有抖动，都在起床窗（06:40–09:40）里
         hits.write(record(day, "看手机", 21, 0, kind="操作手机"))
     for day in days:
         report = open_claims_for_day(day, hypotheses=(LATE_TO_BREAKFAST, LATE_TO_WAKE), concepts=CONCEPTS, hits=hits, ledger=ledger, opportunities=TableOpportunities(), now=NOW, config=CONFIG)
         assert report.opened == 2
 
-    # 最后一个周五之后一天结算：前七个周五的早餐账都能结（来了 / 等过 3 个看清的机会），第八个还在等。
-    later = at(days[-1] + timedelta(days=1), 12, 0)
+    # 最后一个周五当天上午结算：前七个周五的早餐窗都过完了（来了 / 看清了没来），第八个窗口（当天 06:15–09:15）还没过完。
+    later = at(days[-1], 9, 0)
     reports = settle_due_all((LATE_TO_BREAKFAST, LATE_TO_WAKE), concepts=CONCEPTS, hits=hits, ledger=ledger, coverage=FixedCoverage(1.0), now=later, until=later, config=CONFIG)
     by_identity = {report.hypothesis_identity: report for report in reports}
     assert (by_identity[LATE_TO_BREAKFAST.identity].settled, by_identity[LATE_TO_BREAKFAST.identity].pending) == (7, 1)
-    assert by_identity[LATE_TO_WAKE.identity].settled == 8  # 起床每次都在第 1 次机会上来了
+    assert by_identity[LATE_TO_WAKE.identity].settled == 7  # 起床每次都落在自己那个窗口里；第八个窗口还没过完
     outcomes = [s.outcome for s in ledger.settlements_for(LATE_TO_BREAKFAST.identity)]
-    assert outcomes.count(Outcome.OCCURRED) == 3 and outcomes.count(Outcome.CENSORED) == 4
+    assert outcomes.count(Outcome.OCCURRED) == 3 and outcomes.count(Outcome.ABSENT) == 4
 
-    readings = read_relations((LATE_TO_BREAKFAST, LATE_TO_WAKE), ledger=ledger, concepts=CONCEPTS, config=VIEWS)
+    readings = read_relations((LATE_TO_BREAKFAST, LATE_TO_WAKE), ledger=ledger, concepts=CONCEPTS, config=VIEWS, now=NOW + timedelta(days=365))
     breakfast, wake = readings
     assert breakfast.strength.sufficient and breakfast.strength.p1 == pytest.approx(3 / 7) and breakfast.strength.control == pytest.approx(0.88)
     assert breakfast.strength.interval is not None and breakfast.strength.interval.high < 0 and breakfast.type_reading is not None
     assert breakfast.stability.tested == ("周末",) and breakfast.open_claims == 1
-    assert wake.strength.interval is not None and wake.strength.interval.point == pytest.approx(87.5)  # 中位 09:37:30 − 08:10
+    assert wake.strength.interval is not None and wake.strength.interval.point == pytest.approx(70.0)  # 已结的 7 次：中位 09:20 − 窗口中心 08:10
 
-    intentions = standing_intentions(ledger, {LATE_TO_BREAKFAST.identity: LATE_TO_BREAKFAST, LATE_TO_WAKE.identity: LATE_TO_WAKE}, now=later)
-    assert len(intentions) == 1 and intentions[0].consequent == "早餐" and intentions[0].opportunities_passed == 2
     residue = residue_candidates(hits, days, k=5, d=3, claimed=CONCEPTS.claimed_kinds())
     assert [(c.kind_token, c.occurrences, c.ready) for c in residue] == [("操作手机", 8, True)]
 
@@ -85,7 +82,6 @@ def test_the_chain_runs_from_hits_to_materialized_views(tmp_path) -> None:
         hypotheses=known,
         readings=readings,
         behaviours=behaviour_views(readings, known),
-        intentions=intentions,
         residue=residue,
         profile=profile_view(readings),
         entities=entity_slices(readings, CONCEPTS),
@@ -95,12 +91,11 @@ def test_the_chain_runs_from_hits_to_materialized_views(tmp_path) -> None:
         d=3,
     )
     # 多出三份 behaviours/（晚睡的后果面、早餐与起床的前因面）。
-    assert len(written) == 8 and store.is_complete()
+    assert len(written) == 7 and store.is_complete()  # intentions/ 09-30 删了
     late = (tmp_path / "scene" / "views" / "behaviours" / "晚睡.md").read_text(encoding="utf-8")
     assert "## 它导致了什么（后果）" in late and late.count("- → ") == 2
     text = (tmp_path / "scene" / "views" / "relations" / f"{LATE_TO_BREAKFAST.identity}.md").read_text(encoding="utf-8")
-    assert "实际 43%（3 次到、4 次右删失） vs 本来 88%" in text and "抑制" in text and "未结算：1 条" in text
-    assert "已过 2 次机会" in (tmp_path / "scene" / "views" / "intentions" / "index.md").read_text(encoding="utf-8")
+    assert "实际 43%（3 次到、4 次没来） vs 本来 88%" in text and "抑制" in text and "未结算：1 条" in text
 
 
 def test_half_written_files_are_noise_truncated_records_are_reported_and_views_stay_incomplete(tmp_path) -> None:

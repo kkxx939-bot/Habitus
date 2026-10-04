@@ -67,20 +67,21 @@ def claim(**overrides) -> Claim:
 
 
 def test_opportunity_snapshots_are_ascending_and_index_arrivals() -> None:
-    """七h：02:10 的锚，早餐的第 1 次机会是当天 06:15–09:15 那个峰；两峰之间的到来归前一峰。"""
+    """七h：02:10 的锚，早餐的第 1 个窗口是当天 06:15–09:15 那个峰；窗口之间的到来不归任何窗口（2026-10-01 窗口账）。"""
 
     first = SNAPSHOT.at(1)
     assert first is not None and first.at == at(DAY1, 7, 45) and first.span == WindowSpan(at(DAY1, 6, 15), at(DAY1, 9, 15)) and first.probability == 0.88
     assert SNAPSHOT.at(2).at == at(DAY2, 7, 45) and SNAPSHOT.at(4) is None  # type: ignore[union-attr]
-    assert SNAPSHOT.index_of(at(DAY1, 5, 0)) == 1  # 比第一次机会还早也算第一次的
-    assert SNAPSHOT.index_of(at(DAY1, 7, 30)) == 1 and SNAPSHOT.index_of(at(DAY1, 11, 0)) == 1 and SNAPSHOT.index_of(at(DAY2, 8, 0)) == 2
+    assert SNAPSHOT.index_of(at(DAY1, 5, 0)) is None and SNAPSHOT.index_of(at(DAY1, 11, 0)) is None  # 窗口之外
+    assert SNAPSHOT.index_of(at(DAY1, 7, 30)) == 1 and SNAPSHOT.index_of(at(DAY2, 8, 0)) == 2
     assert SNAPSHOT.expected_count(1, 2) == pytest.approx(1.76) and SNAPSHOT.expected_count(2, 3) is None
     with pytest.raises(LedgerError, match="do not overlap"):
         OpportunitySnapshot("gen-1", (opportunity(DAY1, 7, 45, 0.88, 90), opportunity(DAY1, 8, 0, 0.5, 90)))
     with pytest.raises(LedgerError, match="at least one"):
         OpportunitySnapshot("gen-1", ())
-    with pytest.raises(LedgerError, match="\\(0, 1\\]"):
-        opportunity(DAY1, 7, 45, 0.0, 90)
+    with pytest.raises(LedgerError, match="\\[0, 1\\]"):
+        opportunity(DAY1, 7, 45, 1.5, 90)
+    assert opportunity(DAY1, 7, 45, 0.0, 90).probability == 0.0  # 窗口里曲线质量为零是合法的对照；None 才是"没曲线"
     with pytest.raises(LedgerError, match="inside its span"):
         Opportunity(at(DAY1, 12, 0), WindowSpan(at(DAY1, 6, 0), at(DAY1, 9, 0)), 0.5)
     with pytest.raises(LedgerError, match="counts from 1"):
@@ -273,7 +274,7 @@ def test_voiding_settlements_that_read_a_remapped_day_leaves_the_claims_standing
 
 def test_noise_is_cleared_on_the_write_path_and_path_problems_are_not_reported_as_conflicts(tmp_path) -> None:
     """噪音（``.DS_Store`` / 崩溃遗留的 ``.tmp``）读时跳过、**写时**清：读路径清会删掉并发写者正在 link 的临时文件，
-    而 ``standing_intentions`` 是给预测层在线读的。"""
+    而未结算的承诺是给预测层在线读的（直接读账本）。"""
 
     store = LedgerStore(tmp_path / "scene")
     item = claim()
@@ -301,8 +302,8 @@ def test_a_settlement_must_be_one_its_claims_aspect_allows(tmp_path) -> None:
     store.write_claim(item)
     with pytest.raises(LedgerStoreError, match="cannot settle as counted"):
         store.write_settlement(Settlement(item.ref, Outcome.COUNTED, NOW, count=3))
-    with pytest.raises(LedgerStoreError, match="cannot settle as absent"):
-        store.write_settlement(Settlement(item.ref, Outcome.ABSENT, NOW, opportunity_index=1))
+    with pytest.raises(LedgerStoreError, match="cannot settle as observed"):
+        store.write_settlement(Settlement(item.ref, Outcome.OBSERVED, NOW, observed_at=NOW, fulfilling_uri=item.trigger_uri))
     store.write_settlement(Settlement(item.ref, Outcome.CENSORED, NOW, reason="关掉"))
 
 

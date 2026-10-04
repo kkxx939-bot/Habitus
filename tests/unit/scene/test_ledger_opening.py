@@ -39,9 +39,12 @@ def test_a_single_antecedent_opens_one_claim_anchored_at_its_start_with_the_oppo
     assert claim.anchor == at(DAY1, 2, 10)
     assert claim.antecedent_hits == (ConceptHit("晚睡", "轻"),) and claim.antecedent_uris == (late.occurrence_uri,)
     assert claim.situation_snapshot == ("周末",) and claim.hypothesis_fingerprint == LATE_TO_BREAKFAST.fingerprint
-    assert claim.control is not None and len(claim.control.opportunities) == 16 and claim.control.generation == "gen-1"
+    # 账按钟面峰记（2026-10-01）：概率账只要自己那一个窗口的落点——当天 06:15–09:15 的早餐窗，平时概率 88%。
+    assert claim.control is not None and len(claim.control.opportunities) == 1 and claim.control.generation == "gen-1"
     assert claim.control.at(1).at == at(DAY1, 7, 45) and claim.control.at(1).probability == 0.88  # type: ignore[union-attr]  # 七h 第 2 步的 88%
-    assert provider.requests[0].consequent == "早餐" and provider.requests[0].anchor == claim.anchor and provider.requests[0].count == 16
+    assert claim.situations_checked == ("周末",)  # 裁定八 ①：判过哪些情境跟着承诺走
+    request = provider.requests[0]
+    assert (request.consequent, request.anchor, request.count, request.window) == ("早餐", claim.anchor, 1, LATE_TO_BREAKFAST.consequent_window)
 
     # 幂等：重跑同一天不重开，也不比对内容（快照事后不改）。
     report = open_claims_for_day(DAY1, hypotheses=(LATE_TO_BREAKFAST,), concepts=CONCEPTS, hits=hits, ledger=ledger, opportunities=TableOpportunities({}), now=NOW)
@@ -95,22 +98,26 @@ def test_ancestor_concepts_match_through_read_time_aggregation(tmp_path) -> None
     assert report.opened == 1
     (claim,) = ledger.claims_for(EXERCISE_TO_COFFEE.identity)
     assert claim.antecedent_hits == (ConceptHit("运动"),) and claim.control is not None
-    assert [item.at for item in claim.control.opportunities[:4]] == [at(DAY1, 20, 0), at(DAY2, 8, 30), at(DAY2, 14, 0), at(DAY2, 20, 0)]
-    assert claim.control.expected_count(1, 3) == pytest.approx(0.3 + 0.5 + 0.4)
+    # 次数账：从假设自己的峰（#1 = 08:30）在锚之后的第一次落地起，按咖啡的三个峰轮 horizon=3 个窗口。
+    assert [item.at for item in claim.control.opportunities] == [at(DAY2, 8, 30), at(DAY2, 14, 0), at(DAY2, 20, 0)]
+    assert claim.control.expected_count(1, 3) == pytest.approx(0.5 + 0.4 + 0.3)
 
 
-def test_two_triggers_awaiting_the_same_opportunity_collapse_to_one_claim(tmp_path) -> None:
-    """同一晚两条「晚睡」记录（02:10 与 03:00）等的都是同一个早餐机会 → 只开一条；隔天的另开。"""
+def test_every_trigger_opens_its_own_claim_and_reruns_are_idempotent(tmp_path) -> None:
+    """二-6（2026-09-30）：每一次前因都独立开账——同一晚两条「晚睡」记录（02:10 与 03:00）各开一条，不再因为
+    "等的是同一顿早饭"就吞掉第二条（那是读侧按块算样本数的事）。去重只剩"同一触发不开两次"。"""
 
     hits, ledger = stores(tmp_path)
     hits.write(record(DAY1, "就寝", 2, 10, ConceptHit("晚睡", "轻")))
     hits.write(record(DAY1, "又醒了再睡", 3, 0, ConceptHit("晚睡", "轻")))
-    hits.write(record(DAY2, "就寝", 1, 0, ConceptHit("晚睡", "轻")))  # 隔天：下一个早餐机会是另一个
+    hits.write(record(DAY2, "就寝", 1, 0, ConceptHit("晚睡", "轻")))
     report = open_claims_for_day(DAY1, hypotheses=(LATE_TO_BREAKFAST,), concepts=CONCEPTS, hits=hits, ledger=ledger, opportunities=TableOpportunities(), now=NOW)
-    assert (report.opened, report.overlapping) == (1, 1)
+    assert (report.opened, report.already_open) == (2, 0)
+    again = open_claims_for_day(DAY1, hypotheses=(LATE_TO_BREAKFAST,), concepts=CONCEPTS, hits=hits, ledger=ledger, opportunities=TableOpportunities(), now=NOW)
+    assert (again.opened, again.already_open) == (0, 2)
     report = open_claims_for_day(DAY2, hypotheses=(LATE_TO_BREAKFAST,), concepts=CONCEPTS, hits=hits, ledger=ledger, opportunities=TableOpportunities(), now=NOW)
-    assert (report.opened, report.overlapping) == (1, 0)
-    assert [claim.anchor for claim in ledger.claims_for(LATE_TO_BREAKFAST.identity)] == [at(DAY1, 2, 10), at(DAY2, 1, 0)]
+    assert report.opened == 1
+    assert [claim.anchor for claim in ledger.claims_for(LATE_TO_BREAKFAST.identity)] == [at(DAY1, 2, 10), at(DAY1, 3, 0), at(DAY2, 1, 0)]
 
 
 def test_a_claim_opens_without_control_when_the_tree_has_nothing_and_skips_unknown_concepts(tmp_path) -> None:
@@ -137,11 +144,11 @@ def test_hypotheses_whose_concepts_are_gone_are_reported_not_silently_skipped(tm
 
 
 def test_ledger_config_guards_its_numbers() -> None:
-    with pytest.raises(ValueError, match="censor_after cannot exceed"):
-        LedgerConfig(snapshot_opportunities=4, censor_after=10)
+    with pytest.raises(ValueError, match="gathering_hours"):
+        LedgerConfig(gathering_hours=0)
     with pytest.raises(ValueError, match="opportunity_coverage"):
         LedgerConfig(opportunity_coverage=0.0)
-    assert LedgerConfig().snapshot_opportunities == 16 and LedgerConfig().censor_after == 10
+    assert LedgerConfig().gathering_hours == 24.0 and LedgerConfig().opportunity_coverage == 0.5
     assert Antecedent("晚睡").identity == "晚睡"
 
 
@@ -154,6 +161,8 @@ def test_one_unusable_snapshot_does_not_abort_the_whole_night(tmp_path) -> None:
     from habitus.scene.ledger import Opportunity, OpportunityRequest, OpportunitySnapshot, WindowSpan
 
     class StaleOpportunities:
+        slack_minutes = 0
+
         def opportunities(self, request: OpportunityRequest) -> OpportunitySnapshot:
             centre = request.anchor - timedelta(hours=3)
             return OpportunitySnapshot("gen-1", (Opportunity(centre, WindowSpan(centre - timedelta(minutes=30), centre + timedelta(minutes=30)), 0.5),))
@@ -168,13 +177,13 @@ def test_one_unusable_snapshot_does_not_abort_the_whole_night(tmp_path) -> None:
 
 
 def test_the_snapshot_is_long_enough_for_what_the_hypothesis_measures(tmp_path) -> None:
-    """时刻/次数量第 k 次机会时，要的机会数不能少于 k（少了那条账永远结不了，评审 B5）。"""
+    """次数账要 ``horizon`` 个窗口，一个都不能少（少了那条账永远结不了，评审 B5）；峰号决定从哪个窗口起数。"""
 
     hits, ledger = stores(tmp_path)
     hits.write(record(DAY1, "就寝", 2, 10, ConceptHit("晚睡", "轻")))
-    far = hypothesis("晚睡", consequent="咖啡", aspect=EXERCISE_TO_COFFEE.aspect, direction=EXERCISE_TO_COFFEE.direction, type_prior=None, expected_at=12, horizon=5, note="x")
+    far = hypothesis("晚睡", consequent="咖啡", aspect=EXERCISE_TO_COFFEE.aspect, direction=EXERCISE_TO_COFFEE.direction, type_prior=None, consequent_peak=3, horizon=5, note="x")
     provider = TableOpportunities()
-    open_claims_for_day(DAY1, hypotheses=(far,), concepts=CONCEPTS, hits=hits, ledger=ledger, opportunities=provider, now=NOW, config=LedgerConfig(snapshot_opportunities=8, censor_after=8))
-    assert provider.requests[-1].count == 16  # max(8, 12 + 5 − 1)
+    open_claims_for_day(DAY1, hypotheses=(far,), concepts=CONCEPTS, hits=hits, ledger=ledger, opportunities=provider, now=NOW)
+    assert provider.requests[-1].count == 5 and provider.requests[-1].window.ordinal == 3
     (claim,) = ledger.claims_for(far.identity)
-    assert claim.control is not None and claim.control.at(16) is not None
+    assert claim.control is not None and claim.control.at(5) is not None and claim.control.at(1).at == at(DAY1, 20, 0)  # type: ignore[union-attr]

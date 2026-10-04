@@ -198,6 +198,10 @@ def _trace_attributes(event: ObservationEvent) -> dict[str, str | int | float | 
             "job_status",
         }:
             result[f"habitus.{key}"] = value
+        elif event.category == "behavior" and (not isinstance(value, str) or key == "job"):
+            # 行为管线的属性全是各步骤自己算出的计数、时长与布尔，不含观测语义；放行数值面，
+            # 文本只放行作业身份前缀，用户内容即使将来误入属性也进不了 trace。
+            result[f"habitus.{key}"] = value
     return result
 
 

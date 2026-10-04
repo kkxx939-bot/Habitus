@@ -1,20 +1,21 @@
-"""结算：后件到底来没来、落在第几次机会。按方面分三套，不共用逻辑（用户裁定）。
+"""结算：后件到底来没来、落在自己的窗口里没有。按方面分三套，不共用逻辑（用户裁定）。
 
-- **概率 · 节律型**（``expected_at`` 有数）  后件一来就结（``OCCURRED``：落在第几次机会、隔了几小时、之前每个机会
-  过没过 / 看清了没）；没来就数已经过去且看清了的机会，够 ``censor_after`` 个 → 右删失（``CENSORED``）。没有"落空"
-  ——"到现在没来"和"永远不来"是两件事，前者是一条带步数的删失记录。
-- **概率 · 无节律型**（``expected_at is None``，2026-09-27 裁定）  约球→打球、挂号→就诊：后件没节律，**不数机会、
+- **概率 · 节律型**（``consequent_peak`` 有数，2026-10-01 按裁定一改）  一本账只等**自己那个钟面窗口**（承诺上快照的第 1 个
+  落点，含容差）：窗口里后件来了 → ``OCCURRED``；窗口过完、看清了、没来 → ``ABSENT``（"没来"，进分母）；窗口没看清
+  （覆盖不足 / 那段有未决记录）→ ``CENSORED``（不进分母分子）。**窗口之外发生的后件不算到这本账里**——09:40 才吃的早餐对
+  "早餐#1（07:00–08:30）"是没来，它会算进别的峰的账。不再数"第几次机会"、不再按 ``censor_after`` 删失。
+- **概率 · 无节律型**（``consequent_peak is None``，2026-09-27 裁定）  约球→打球、挂号→就诊：后件没节律，**不数机会、
   没有时效**。只有两种结法——后件来了（``OCCURRED``，记 ``latency_hours``），或 ``released_by`` 里的概念在锚之后命中
-  （``RELEASED`` + ``releasing_uri``，前提被作废：再次挂号取代上一次那张号）。没写 ``released_by`` 就一直开着，
-  ``intentions`` 里一直在。兑现是 **FIFO** 的：同一假设的开放承诺按锚序，一个后件 occurrence 只兑现最早那条
+  （``RELEASED`` + ``releasing_uri``，前提被作废：再次挂号取代上一次那张号）。没写 ``released_by`` 就一直开着
+  （收口天数 N 属生命周期，2026-09-30 裁定五）。兑现是 **FIFO** 的：同一假设的开放承诺按锚序，一个后件 occurrence 只兑现最早那条
   （``consumed``）——约球两次、打球一次，不能读成两次都去了（评审 A-3）。
-- **时刻**  只看第 ``expected_at`` 次机会：那次机会上来了记时刻（``OBSERVED``）；那次机会已观测地过了没来 → ``ABSENT``
-  （不是"很晚"，是没有观测值）；那次机会没看清 → ``CENSORED``。
-- **次数**  第 ``expected_at`` 到第 ``expected_at + horizon − 1`` 次机会都过完 → 记计数（0 也是计数）；其中有没看清的 → ``CENSORED``。
+- **时刻**  只看自己那个窗口：窗口里来了记时刻（``OBSERVED``）；窗口已观测地过了没来 → ``ABSENT``
+  （不是"很晚"，是没有观测值）；窗口没看清 → ``CENSORED``。
+- **次数**  快照里 ``horizon`` 个窗口都过完 → 记计数（0 也是计数）；其中有没看清的 → ``CENSORED``。
 
 后件命中的口径与开承诺同一套：``behaviour_hits`` 的行为那一半（含祖先聚合）。后件必须**开始于锚之后**且不是触发那条自己；
-不拿 ``last_observed_at`` 做"不重叠"的判据——那会把观测覆盖重新接进窗边界（09-26 裁定）。一次到来归哪次机会由
-``OpportunitySnapshot.index_of`` 定：已开始的机会数，两峰之间的到来归前一峰。
+不拿 ``last_observed_at`` 做"不重叠"的判据——那会把观测覆盖重新接进窗边界（09-26 裁定）。一次到来归哪个窗口由
+``OpportunitySnapshot.index_of`` 定：落在哪个窗口里就是哪个，窗口之间的不归任何一本账。
 
 **一个机会看清了没**：向注入的覆盖口要它 span 的覆盖比例，低于 ``opportunity_coverage`` 就是没看清；**或者**那段里有
 记录把后件记成了「未决」（映射器判不了：要的材料没给、模型没答成、或判据引用的事件落在观测空白里）——两种都
@@ -30,7 +31,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 
 from habitus.scene.concepts.model import ConceptError, ConceptSet, concept_identity
 from habitus.scene.hypotheses.model import Aspect, Hypothesis
@@ -56,18 +57,42 @@ class SettlementReport:
     pending: int
 
 
-def mapped_until(hits: ConceptHitStore, now: datetime) -> datetime | None:
-    """命中记录可信到哪一刻：最后一个已映射日的**次日零点**（时区取自 ``now``），封顶到 ``now``。
+def mapped_until(hits: ConceptHitStore, now: datetime, *, timezone: tzinfo | None = None, since: date | None = None) -> datetime | None:
+    """命中记录可信到哪一刻：从 ``since``（缺省为最早的已映射日）起**连续**已映射到的最后一天的次日零点，封顶到 ``now``。
 
-    一天都没映射过 → ``None`` = 什么都不可信，一条都不结。夜批可以自己算好传 ``until``；这里是缺省口径，
-    免得调用方忘了这条前置条件（评审 B2：``now`` 用墙钟会越过还没映射的日子，跨午夜的后件就被判成"没来"）。
+    - **连续**：中间漏了一天（那一夜守门抛了、机器关了、模型整夜不可用），可信区就停在漏的那天之前——
+      不然那一天的后件会被当成"看清了、没来"，而结算 add-only 改不掉（评审 B-2 / A-11）。夜批对每个封口日都盖章，
+      行为树那天本来没数据也盖 0 条的章，所以按日历日查连续是对的。
+    - **日界的时区是主体所在的时区**（``timezone``，缺省取 ``now`` 的），不是墙钟的：``now`` 带 UTC 时日界会越过 3 小时，
+      次日凌晨的就寝就成了"没来"（评审 B-2 B）。
+    - 一天都没映射过 → ``None`` = 什么都不可信，一条都不结。夜批可以自己算好传 ``until``；这里是缺省口径。
     """
 
     days = hits.days_done()
     if not days:
         return None
-    boundary = datetime.combine(max(days) + timedelta(days=1), time(0, 0), tzinfo=now.tzinfo)
-    return min(boundary, now)
+    zone = now.tzinfo if timezone is None else timezone
+    start = min(days) if since is None else max(min(days), since)
+    last = start if start in days else None
+    if last is None:
+        return None
+    while last + timedelta(days=1) in days:
+        last += timedelta(days=1)
+    boundary = datetime.combine(last + timedelta(days=1), time(0, 0), tzinfo=zone)
+    return min(boundary, now.astimezone(zone))
+
+
+def missing_days(hits: ConceptHitStore, *, since: date, through: date) -> tuple[date, ...]:
+    """``since`` 到 ``through`` 之间没有盖章的日历日——夜批要把它们报出来，不然可信区悄悄停在那儿、账一条都不结。"""
+
+    days = hits.days_done()
+    found: list[date] = []
+    day = since
+    while day <= through:
+        if day not in days:
+            found.append(day)
+        day += timedelta(days=1)
+    return tuple(found)
 
 
 def consequent_records(claim: Claim, records: Sequence[ConceptHits], concepts: ConceptSet, *, until: datetime) -> tuple[ConceptHits, ...]:
@@ -152,53 +177,40 @@ def passes_until(
 def settle_probability(
     claim: Claim, records: Sequence[ConceptHits], concepts: ConceptSet, *, now: datetime, until: datetime, coverage: CoverageProvider, config: LedgerConfig
 ) -> Settlement | None:
-    """结果不随"哪一晚跑的结算"变：后件在第 k 次机会才来、而它之前已观测地过了 ``censor_after`` 次 → 仍是右删失
-    （夜批要是每晚都跑，早在第 censor_after 次就删失了；隔了三周一次性补跑不能把它改写成"来了"）。
+    """节律型概率账：只看承诺上的第 1 个落点（这条假设自己那个钟面窗口，含容差）。
 
-    后件晚于快照最后一个机会才来（``index_of`` 给不出名次）→ 也记右删失、带全部机会：快照说不出它落在第几次，
-    写一个饱和的假名次会进 KM 的步数。
+    - 窗口里后件来了 → ``OCCURRED``（记时刻、哪条记录、隔了几小时）；
+    - ``until`` 过了窗口末尾、窗口看清了、没来 → ``ABSENT``；
+    - 过了窗口末尾、没看清 → ``CENSORED``；
+    - 还没到窗口末尾、也还没来 → 不结（``None``）。
+    没有快照（无窗口）的账在这里不结——那是无节律型或要不到窗口的，另一套。
     """
 
-    seen = consequent_records(claim, records, concepts, until=until)
     snapshot = claim.control
-    unjudged = unjudged_moments(claim, records)
+    if snapshot is None:
+        return None
+    window = snapshot.opportunities[0]
+    seen = [
+        record
+        for record in consequent_records(claim, records, concepts, until=until)
+        if window.span.contains(record.started_at)
+    ]
     if seen:
         first = seen[0]
-        latency = (first.started_at - claim.anchor).total_seconds() / 3600.0
-        index = None if snapshot is None else snapshot.index_of(first.started_at)
-        beyond_snapshot = snapshot is not None and index is None
-        passes = (
-            ()
-            if snapshot is None
-            else passes_until(snapshot, before_index=None if beyond_snapshot else index, until=until, coverage=coverage, config=config, unjudged=unjudged)
-        )
-        censored_at = _censor_point(passes, config.censor_after)
-        if censored_at is not None:
-            return Settlement(ref=claim.ref, outcome=Outcome.CENSORED, settled_at=now, passes=passes[:censored_at])
-        if beyond_snapshot:
-            return Settlement(
-                ref=claim.ref, outcome=Outcome.CENSORED, settled_at=now, passes=passes, reason="后件晚于快照最后一个机会才到来；这一批机会里它没来"
-            )
         return Settlement(
             ref=claim.ref,
             outcome=Outcome.OCCURRED,
             settled_at=now,
             observed_at=first.started_at,
             fulfilling_uri=first.occurrence_uri,
-            latency_hours=latency,
-            opportunity_index=index,
-            passes=passes,
+            latency_hours=(first.started_at - claim.anchor).total_seconds() / 3600.0,
+            opportunity_index=1,
         )
-    if snapshot is None:
+    if until < window.span.end:
         return None
-    passes = passes_until(snapshot, before_index=None, until=until, coverage=coverage, config=config, unjudged=unjudged)
-    censored_at = _censor_point(passes, config.censor_after)
-    if censored_at is not None:
-        return Settlement(ref=claim.ref, outcome=Outcome.CENSORED, settled_at=now, passes=passes[:censored_at])
-    if until >= snapshot.last_end:
-        # 快照铺到头了、后件一次没来：账不能永远挂着，收成右删失（步数 = 看清了的机会数）。
-        return Settlement(ref=claim.ref, outcome=Outcome.CENSORED, settled_at=now, passes=passes, reason="快照里的机会全过完了，后件一次没来")
-    return None
+    if not observed(window, coverage, config, unjudged=unjudged_moments(claim, records)):
+        return Settlement(ref=claim.ref, outcome=Outcome.CENSORED, settled_at=now, passes=(OpportunityPass(at=window.at, observed=False),), reason="窗口没看清")
+    return Settlement(ref=claim.ref, outcome=Outcome.ABSENT, settled_at=now, opportunity_index=1, passes=(OpportunityPass(at=window.at, observed=True),))
 
 
 def settle_open_ended(
@@ -247,57 +259,41 @@ def settle_open_ended(
     )
 
 
-def _censor_point(passes: Sequence[OpportunityPass], censor_after: int) -> int | None:
-    """第几个 pass 之后满了 ``censor_after`` 个已观测的机会（切片终点）；没满返回 None。"""
-
-    observed_count = 0
-    for position, item in enumerate(passes, start=1):
-        if item.observed:
-            observed_count += 1
-            if observed_count >= censor_after:
-                return position
-    return None
-
-
 def settle_timing(
     claim: Claim, hypothesis: Hypothesis, records: Sequence[ConceptHits], concepts: ConceptSet, *, now: datetime, until: datetime, coverage: CoverageProvider, config: LedgerConfig
 ) -> Settlement | None:
     snapshot = claim.control
-    if snapshot is None or hypothesis.expected_at is None:
+    if snapshot is None or hypothesis.consequent_peak is None:
         return None
-    target = snapshot.at(hypothesis.expected_at)
-    if target is None:
-        # 快照没铺到第 expected_at 次机会（开承诺时要的个数不够）。快照事后不改，等下去也等不出来：
-        # 收成删失并说明原因，别把承诺永久挂在"还没到时候"里。
-        return Settlement(ref=claim.ref, outcome=Outcome.CENSORED, settled_at=now, reason=f"快照只有 {len(snapshot.opportunities)} 个机会，量不到第 {hypothesis.expected_at} 次")
+    target = snapshot.opportunities[0]
     unjudged = unjudged_moments(claim, records)
     for record in consequent_records(claim, records, concepts, until=until):
-        if snapshot.index_of(record.started_at) == hypothesis.expected_at:
+        if target.span.contains(record.started_at):
             return Settlement(
                 ref=claim.ref,
                 outcome=Outcome.OBSERVED,
                 settled_at=now,
                 observed_at=record.started_at,
                 fulfilling_uri=record.occurrence_uri,
-                opportunity_index=hypothesis.expected_at,
+                opportunity_index=1,
             )
-    if not _opportunity_over(snapshot, hypothesis.expected_at, until):
+    if until < target.span.end:
         return None
     if not observed(target, coverage, config, unjudged=unjudged):
         return Settlement(ref=claim.ref, outcome=Outcome.CENSORED, settled_at=now)
-    return Settlement(ref=claim.ref, outcome=Outcome.ABSENT, settled_at=now, opportunity_index=hypothesis.expected_at)
+    return Settlement(ref=claim.ref, outcome=Outcome.ABSENT, settled_at=now, opportunity_index=1)
 
 
 def settle_count(
     claim: Claim, hypothesis: Hypothesis, records: Sequence[ConceptHits], concepts: ConceptSet, *, now: datetime, until: datetime, coverage: CoverageProvider, config: LedgerConfig
 ) -> Settlement | None:
     snapshot = claim.control
-    if snapshot is None or hypothesis.expected_at is None:
+    if snapshot is None or hypothesis.consequent_peak is None:
         return None
-    first, last = hypothesis.expected_at, hypothesis.expected_at + hypothesis.horizon - 1
+    first, last = 1, hypothesis.horizon
     if snapshot.at(last) is None:
-        return Settlement(ref=claim.ref, outcome=Outcome.CENSORED, settled_at=now, reason=f"快照只有 {len(snapshot.opportunities)} 个机会，数不到第 {last} 次")
-    if not _opportunity_over(snapshot, last, until):
+        return Settlement(ref=claim.ref, outcome=Outcome.CENSORED, settled_at=now, reason=f"快照只有 {len(snapshot.opportunities)} 个窗口，数不到第 {last} 个")
+    if until < snapshot.opportunities[last - 1].span.end:
         return None
     window = snapshot.opportunities[first - 1 : last]
     unjudged = unjudged_moments(claim, records)
@@ -309,16 +305,6 @@ def settle_count(
         if index is not None and first <= index <= last:
             count += 1
     return Settlement(ref=claim.ref, outcome=Outcome.COUNTED, settled_at=now, count=count)
-
-
-def _opportunity_over(snapshot: OpportunitySnapshot, index: int, now: datetime) -> bool:
-    """第 ``index`` 次机会算不算过完了：下一次机会已经开始（之后的到来归下一次），或没有下一次而它自己已结束。"""
-
-    following = snapshot.at(index + 1)
-    if following is not None:
-        return now >= following.span.start
-    current = snapshot.at(index)
-    return current is not None and now >= current.span.end
 
 
 def settle_claim(
@@ -471,6 +457,7 @@ __all__ = [
     "close_claim",
     "consequent_records",
     "mapped_until",
+    "missing_days",
     "observed",
     "passes_until",
     "releasing_record",

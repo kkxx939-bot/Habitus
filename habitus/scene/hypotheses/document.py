@@ -14,6 +14,7 @@ from habitus.scene.hypotheses.model import (
     HypothesisError,
     HypothesisOrigin,
     HypothesisSource,
+    PeakWindow,
     TypePrior,
 )
 
@@ -25,7 +26,14 @@ _DIRECTION_LABELS = {
     Aspect.COUNT: {Direction.UP: "↑ 次数增多", Direction.DOWN: "↓ 次数减少"},
 }
 _TYPE_LABELS = {TypePrior.ENABLING: "使能", TypePrior.PROMOTING: "促进", TypePrior.INHIBITING: "抑制"}
-_ORIGIN_LABELS = {HypothesisOrigin.BASELINE: "基准", HypothesisOrigin.NEW_CONCEPT: "为新概念补写"}
+#: 每个来源都要有说法——缺一个就是写盘时 KeyError（2026-09-29 加闭环那两个来源时踩到）。
+#: 用 dict 取值而不是 `.get(…, 默认)`：来源是受控枚举，漏了要当场炸，不该悄悄印成"未知"。
+_ORIGIN_LABELS = {
+    HypothesisOrigin.BASELINE: "基准",
+    HypothesisOrigin.NEW_CONCEPT: "为新概念补写",
+    HypothesisOrigin.MODERATION: "闭环（触点③ 读了两层不一样之后提的；从写入日起攒账、不回填）",
+    HypothesisOrigin.PLACEBO: "安慰剂（前件换成无关行为，量误报率用；不是给人看的读数）",
+}
 
 
 def encode(hypothesis: Hypothesis) -> str:
@@ -39,8 +47,10 @@ def encode(hypothesis: Hypothesis) -> str:
         f"# {hypothesis.label()}",
         "",
         f"方向：{_DIRECTION_LABELS[hypothesis.aspect][hypothesis.direction]}",
-        f"落在：{hypothesis.opportunity_label}（基准的猜测，只用来读）",
+        f"落在：{hypothesis.opportunity_label}",
     ]
+    for name, items in sorted(hypothesis.windows.items()):
+        lines.append(f"峰表 {name}：" + " · ".join(f"#{item.ordinal} {item.label()}" for item in items))
     if hypothesis.is_open_ended:
         # 无节律型才有释放条件；节律型这一行恒为空，印出来只是噪音。
         lines.append(f"释放条件：{' / '.join(hypothesis.released_by) if hypothesis.released_by else '（无，一直立着）'}")
@@ -53,11 +63,15 @@ def encode(hypothesis: Hypothesis) -> str:
     ]
     payload: dict[str, Any] = {
         "record_type": RECORD_TYPE,
-        "antecedents": [{"concept": item.concept, "grade": item.grade} for item in hypothesis.antecedents],
+        "antecedents": [{"concept": item.concept, "grade": item.grade, "peak": item.peak} for item in hypothesis.antecedents],
         "consequent": hypothesis.consequent,
         "aspect": hypothesis.aspect.value,
         "direction": hypothesis.direction.value,
-        "expected_at": hypothesis.expected_at,
+        "consequent_peak": hypothesis.consequent_peak,
+        "windows": {
+            name: [{"ordinal": item.ordinal, "start_minute": item.start_minute, "end_minute": item.end_minute} for item in items]
+            for name, items in sorted(hypothesis.windows.items())
+        },
         "horizon": hypothesis.horizon,
         "released_by": list(hypothesis.released_by),
         "type_prior": None if hypothesis.type_prior is None else hypothesis.type_prior.value,
@@ -80,7 +94,8 @@ def decode(text: str, *, expected_identity: str | None = None) -> Hypothesis:
             consequent=_text(payload, "consequent"),
             aspect=Aspect(payload.get("aspect")),
             direction=Direction(payload.get("direction")),
-            expected_at=_optional_int(payload, "expected_at"),
+            consequent_peak=_optional_int(payload, "consequent_peak"),
+            windows=_windows(payload.get("windows")),
             horizon=_optional_int(payload, "horizon") or 0,
             released_by=tuple(str(item) for item in _list(payload, "released_by")),
             type_prior=None if raw_prior is None else TypePrior(raw_prior),
@@ -122,12 +137,32 @@ def _list(payload: dict[str, Any], key: str) -> list[Any]:
 
 
 def _antecedent(item: object) -> Antecedent:
-    if not isinstance(item, dict) or set(item) != {"concept", "grade"} or not isinstance(item["concept"], str):
-        raise SceneRecordError("an antecedent must be an object with concept and grade")
-    grade = item["grade"]
+    if not isinstance(item, dict) or set(item) != {"concept", "grade", "peak"} or not isinstance(item["concept"], str):
+        raise SceneRecordError("an antecedent must be an object with concept, grade and peak")
+    grade, peak = item["grade"], item["peak"]
     if grade is not None and not isinstance(grade, str):
         raise SceneRecordError("an antecedent grade must be text or null")
-    return Antecedent(concept=item["concept"], grade=grade)
+    if peak is not None and (isinstance(peak, bool) or not isinstance(peak, int)):
+        raise SceneRecordError("an antecedent peak must be an integer or null")
+    return Antecedent(concept=item["concept"], grade=grade, peak=peak)
+
+
+def _windows(value: object) -> dict[str, tuple[PeakWindow, ...]]:
+    if not isinstance(value, dict):
+        raise SceneRecordError("hypothesis field 'windows' must be an object")
+    table: dict[str, tuple[PeakWindow, ...]] = {}
+    for name, items in value.items():
+        if not isinstance(name, str) or not isinstance(items, list):
+            raise SceneRecordError("hypothesis windows map concept names to lists")
+        windows = []
+        for item in items:
+            if not isinstance(item, dict) or set(item) != {"ordinal", "start_minute", "end_minute"}:
+                raise SceneRecordError("a peak window carries ordinal, start_minute and end_minute")
+            if any(isinstance(item[key], bool) or not isinstance(item[key], int) for key in ("ordinal", "start_minute", "end_minute")):
+                raise SceneRecordError("peak window fields must be integers")
+            windows.append(PeakWindow(item["ordinal"], item["start_minute"], item["end_minute"]))
+        table[name] = tuple(windows)
+    return table
 
 
 def _source(item: object) -> HypothesisSource:

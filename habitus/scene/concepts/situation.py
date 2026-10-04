@@ -4,14 +4,17 @@
 「赶工中」到底指什么——所以基准（触点①）在定义情境概念时**顺手写下这条说明**，算法照着算。
 语义还是模型给的（"连续三天写代码到深夜"这个想法），数是算法的（数到底连了几天）。
 
-**初期只有四族**（2026-09-27 裁定"状态类情境初期只有日型/对象/开放承诺/派生"）：
+**初期只有三族**（2026-09-27 裁定"状态类情境初期只有日型/对象/派生"；「开放承诺」那一族 2026-09-30 取消——
+"约了球还没打"把前因（约球）和后果（打球）当成了一个行为的一开一合，而它们是两个行为，只看前者对后者的影响）：
 
 | 族 | 基准 | 例 |
 |---|---|---|
 | 日型 | ``WEEKDAYS`` 名义周几 · ``CALENDAR_NOTE`` 当地日历那句话里含某个词 | 「周末」=(周六,周日) · 「调休日」含"补班" |
 | 对象 | ``SUBJECT`` 同在者里有谁 · ``PLACE`` 地点是哪儿 | 「和家人一起」 · 「在公司」 |
-| 开放承诺 | ``OPEN_CLAIM`` 某个后件还有一条没结的承诺 | 「约了球还没打」 |
-| 派生 | ``STREAK`` 某概念连着几天命中 · ``YESTERDAY`` 昨天命中过 | 「赶工中」 · 「昨晚晚睡」 |
+| 派生 | ``STREAK`` 某概念往前连着几个 24 小时都命中 · ``YESTERDAY`` 之前 24 小时内命中过 | 「赶工中」 · 「昨晚晚睡」 |
+
+派生的"一天"以**这条 occurrence 的开始时刻**为锚往前数 24 小时，不按日历日（B14；评审 A-8 / B-11 / C-8：
+02:10 的晚睡落在今天的目录，按日历日"昨天"会漏掉刚熬完夜的这个早上）。
 
 **没有这条说明的情境概念永远不会命中**，这不是缺陷而是事实：「出差中」这类状态要等事实门
 （``scene/facts.py``）接上真实数据源才有得算，在那之前它进得了概念集、也能被假设引用，只是分不出层。
@@ -44,13 +47,12 @@ class SituationBasis(str, Enum):
     CALENDAR_NOTE = "calendar_note"
     SUBJECT = "subject"
     PLACE = "place"
-    OPEN_CLAIM = "open_claim"
     STREAK = "streak"
     YESTERDAY = "yesterday"
 
     @property
     def needs_concept(self) -> bool:
-        return self in {SituationBasis.OPEN_CLAIM, SituationBasis.STREAK, SituationBasis.YESTERDAY}
+        return self in {SituationBasis.STREAK, SituationBasis.YESTERDAY}
 
     @property
     def needs_value(self) -> bool:
@@ -66,7 +68,7 @@ class SituationBasis(str, Enum):
 @dataclass(frozen=True)
 class SituationRule:
     """一条情境说明。字段按族用：``weekdays`` 只给日型，``value`` 给日历/同在/地点，``concept``（+``grade``、
-    ``days``）给承诺与派生。"""
+    ``days``）给派生。"""
 
     basis: SituationBasis
     weekdays: tuple[int, ...] = ()
@@ -160,11 +162,9 @@ class SituationRule:
         if self.basis is SituationBasis.PLACE:
             return f"地点是「{self.value}」"
         graded = "" if self.grade is None else f"（{self.grade}档）"
-        if self.basis is SituationBasis.OPEN_CLAIM:
-            return f"「{self.concept}」还有一条没结的承诺"
         if self.basis is SituationBasis.STREAK:
-            return f"「{self.concept}」{graded}连着 {self.days} 天命中"
-        return f"昨天命中过「{self.concept}」{graded}"
+            return f"「{self.concept}」{graded}往前连着 {self.days} 个 24 小时都命中"
+        return f"之前 24 小时内命中过「{self.concept}」{graded}"
 
 
 __all__ = ["MAX_STREAK_DAYS", "SituationBasis", "SituationError", "SituationRule"]

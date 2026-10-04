@@ -26,7 +26,7 @@ NOW = datetime(2026, 9, 28, 3, 0, tzinfo=UTC)
 EMPTY = ConceptSet(())
 
 BRIEFS = (
-    KindBrief("修改代码", 98, 40, ("修改代码：把重复的分支合并成一个函数",)),
+    KindBrief("修改代码", 98, 40, ("修改代码：把重复的分支合并成一个函数",), span_days=45),
     KindBrief("审查代码", 26, 20, ("审查代码：读同事的改动并提了两条意见",)),
     KindBrief("排查CI失败原因", 5, 5, ("排查CI失败原因：流水线在打包那一步挂了",)),
     KindBrief("排查性能问题", 4, 4, ()),
@@ -82,7 +82,7 @@ def test_the_three_tiers_and_the_hierarchy_come_out_as_definitions_ready_to_writ
     assert by_name["赶工中"].role is ConceptRole.STATE and "赶工中" not in claims
     # 派生情境带着算法说明：盯谁、连几天；「赶工中」这种算不出的状态不写说明（等事实门）
     streak = by_name["连日写代码"]
-    assert streak.situation is not None and streak.situation.criterion() == "「修改代码」连着 3 天命中"
+    assert streak.situation is not None and streak.situation.criterion() == "「修改代码」往前连着 3 个 24 小时都命中"
     assert by_name["赶工中"].situation is None
     # 「晚睡」不认领任何 kind：它靠数值规则判别人的 occurrence，档跟着规则一起走。
     late = by_name["晚睡"]
@@ -96,8 +96,8 @@ def test_the_tiers_are_computed_from_the_counts_and_the_prompt_carries_the_instr
     assert [brief.tier for brief in BRIEFS[:5]] == [KindTier.LEAF, KindTier.LEAF, KindTier.GROUP, KindTier.GROUP, KindTier.RESIDUE]
     request = build_concept_request(BRIEFS, concept_set(), {"早餐": Rhythm("早餐", (RhythmPeak(1, 420, 510, 0.8),), 7, 24.0)})
     rendered = request.messages[-1].content or ""
-    assert "修改代码：45 天里 98 次、跨 40 天 → 给它一个概念" in rendered
-    assert "排查构建问题：45 天里 1 次、跨 1 天 → 不要定义，留在残差" in rendered
+    assert "修改代码：45 天里 98 次、跨 40 天 → 给它一个概念" in rendered  # 天数来自材料，不再写死（评审 C-16）
+    assert "排查构建问题：1 次、跨 1 天 → 不要定义，留在残差" in rendered
     assert "已经有的概念（不要重写" in rendered and "一天 1 个机会" in rendered
     # kind 名字钉进 enum：模型认领不了材料里没有的名字。
     schema = concept_author_json_schema(BRIEFS)

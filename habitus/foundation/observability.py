@@ -198,37 +198,46 @@ def observe_operation(
     operation: str,
     *,
     attributes: Mapping[str, str | int | float | bool] | None = None,
-) -> Iterator[None]:
-    """记录一个同步或异步代码块；观察失败不改变代码块结果。"""
+) -> Iterator[dict[str, str | int | float | bool]]:
+    """记录一个同步或异步代码块；观察失败不改变代码块结果。
+
+    yield 出的字典供代码块补写只有做完才知道的属性（产出条数等），随事件一起记录。
+    """
 
     started = time.monotonic()
+    collected: dict[str, str | int | float | bool] = dict(attributes or {})
     try:
-        yield
+        yield collected
     except BaseException as exc:
-        failure_attributes = dict(attributes or {})
+        failure_attributes = dict(collected)
         failure_attributes["error_type"] = type(exc).__name__
-        _safe_record(
-            observer,
-            ObservationEvent(
-                category=category,
-                operation=operation,
-                status=ObservationStatus.FAILURE,
-                duration_seconds=max(0.0, time.monotonic() - started),
-                attributes=failure_attributes,
-            ),
-        )
+        _record_outcome(observer, category, operation, ObservationStatus.FAILURE, started, failure_attributes)
         raise
     else:
-        _safe_record(
-            observer,
-            ObservationEvent(
-                category=category,
-                operation=operation,
-                status=ObservationStatus.SUCCESS,
-                duration_seconds=max(0.0, time.monotonic() - started),
-                attributes=dict(attributes or {}),
-            ),
+        _record_outcome(observer, category, operation, ObservationStatus.SUCCESS, started, collected)
+
+
+def _record_outcome(
+    observer: Observer,
+    category: str,
+    operation: str,
+    status: ObservationStatus,
+    started: float,
+    attributes: Mapping[str, str | int | float | bool],
+) -> None:
+    """事件构造也在保护之内：代码块补写的属性越界只丢这条观察，不改变代码块结果。"""
+
+    try:
+        event = ObservationEvent(
+            category=category,
+            operation=operation,
+            status=status,
+            duration_seconds=max(0.0, time.monotonic() - started),
+            attributes=dict(attributes),
         )
+    except (TypeError, ValueError):
+        return
+    _safe_record(observer, event)
 
 
 def _safe_record(observer: Observer, event: ObservationEvent) -> None:
@@ -306,6 +315,8 @@ def project_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:
                 (("operation", _label_value(event.operation)), ("status", event.status.value)),
             )
         )
+    if event.category == "behavior":
+        updates.extend(_behavior_metric_updates(event))
     if event.category == "observability" and event.operation == "snapshot":
         for attribute, metric_name in (
             ("queue_staged", "memory_jobs_staged"),
@@ -315,6 +326,12 @@ def project_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:
             ("queue_committed", "memory_jobs_committed_retained"),
             ("queue_oldest_age_seconds", "memory_job_oldest_age_seconds"),
             ("queue_high_watermark", "memory_job_sequence_high_watermark"),
+            ("behavior_queue_queued", "behavior_fusion_jobs_queued"),
+            ("behavior_queue_running", "behavior_fusion_jobs_running"),
+            ("behavior_queue_staged", "behavior_fusion_jobs_staged"),
+            ("behavior_queue_failed", "behavior_fusion_jobs_failed"),
+            ("behavior_queue_oldest_age_seconds", "behavior_fusion_job_oldest_age_seconds"),
+            ("behavior_queue_high_watermark", "behavior_fusion_job_sequence_high_watermark"),
             ("active_locks", "active_locks"),
             ("hanging_locks", "hanging_locks"),
             ("max_active_lock_age_seconds", "active_lock_max_age_seconds"),
@@ -322,6 +339,54 @@ def project_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:
             value = _non_negative_number(attributes.get(attribute))
             if value is not None:
                 updates.append(MetricUpdate(metric_name, "gauge", value))
+    return tuple(updates)
+
+
+# 行为管线的吞吐与损耗：(operation, attribute, metric)。属性是该步骤自己算出的计数，
+# 布尔属性按 0/1 计（截断降级发生一次记一次）。
+_BEHAVIOR_COUNTERS: tuple[tuple[str, str, str], ...] = (
+    ("observation_delivery", "observations", "behavior_observations_received_total"),
+    ("fusion_enqueue", "enqueued", "behavior_fusion_jobs_enqueued_total"),
+    ("fusion_judge", "judgements", "behavior_judgements_total"),
+    ("fusion_judge", "truncated", "behavior_fusion_truncations_total"),
+    ("fusion_judge", "degradations", "behavior_fusion_degradations_total"),
+    ("fusion_job", "unreadable_observations", "behavior_unreadable_observations_total"),
+    ("fusion_job", "out_of_scope_observations", "behavior_out_of_scope_observations_total"),
+    ("fusion_job", "unowned_observations", "behavior_unowned_observations_total"),
+    ("reduction_publish", "occurrences", "behavior_occurrences_published_total"),
+    ("reduction_publish", "gaps", "behavior_gaps_published_total"),
+    ("kind_resolve", "created", "behavior_kinds_created_total"),
+    ("kind_resolve", "model_calls", "behavior_kind_model_calls_total"),
+    ("semantic_refresh", "failed_days", "behavior_semantic_refresh_failures_total"),
+)
+# 行为管线的时效：小时级的等待放不进操作时长直方图的桶，按最近一次的值记 gauge。
+_BEHAVIOR_GAUGES: tuple[tuple[str, str, str], ...] = (
+    ("fusion_stage", "fusion_lag_seconds_max", "behavior_fusion_lag_seconds"),
+    ("fusion_stage", "evidence_wait_seconds_max", "behavior_fusion_evidence_wait_seconds"),
+    ("reduction_seal", "horizon_lag_seconds", "behavior_seal_horizon_lag_seconds"),
+    ("reduction_seal", "oldest_unsealed_wait_seconds", "behavior_oldest_unsealed_chain_wait_seconds"),
+    ("reduction_seal", "unsealed_chains", "behavior_unsealed_chains"),
+    ("reduction_publish", "end_to_publish_seconds_max", "behavior_end_to_publish_seconds"),
+    ("reduction_publish", "onset_to_publish_seconds_max", "behavior_onset_to_publish_seconds"),
+)
+
+
+def _behavior_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:
+    updates: list[MetricUpdate] = []
+    attributes = event.attributes
+    for operation, attribute, metric_name in _BEHAVIOR_COUNTERS:
+        if event.operation != operation or attribute not in attributes:
+            continue
+        raw = attributes[attribute]
+        value = float(raw) if isinstance(raw, bool) else _non_negative_number(raw)
+        if value:
+            updates.append(MetricUpdate(metric_name, "counter", value))
+    for operation, attribute, metric_name in _BEHAVIOR_GAUGES:
+        if event.operation != operation:
+            continue
+        value = _non_negative_number(attributes.get(attribute))
+        if value is not None:
+            updates.append(MetricUpdate(metric_name, "gauge", value))
     return tuple(updates)
 
 

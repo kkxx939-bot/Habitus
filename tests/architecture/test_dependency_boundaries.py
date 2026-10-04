@@ -520,8 +520,8 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
     旧语义树（关联、规律级、待关联清单、gloss 读口）2026-09-26 整块删掉；新树按《语义树重构》分
     ``concepts / hypotheses / occurrences / ledger / views`` 五支重建。**全部按传递闭包判**：
 
-    - scene 里只有三个模块触达 ``model_client``（基准生成的两个作者 + 映射器；旁册按结构协议注入嵌入器），
-      而且它们都不从包根导出；
+    - scene 里只有四个模块触达 ``model_client``（基准生成的两个作者 + 闭环的触点③ + 映射器；
+      旁册按结构协议注入嵌入器），而且它们都不从包根导出；
     - 没有任何模块触达 prediction——对照期望、常态、复发间隔都由组合根注入的 callable 给；
     - 引用单向：``concepts`` 不引用别支；``hypotheses`` 只引用 ``concepts``（基准要和观测独立，B8）；
       ``occurrences`` 不触达 ``hypotheses`` / ``ledger``（映射者看不到假设与账，七d-7）；四支不触达 ``views``
@@ -541,6 +541,7 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
     assert _scene_modules_reaching(graph, "habitus.model_client") == [
         "habitus.scene.concepts.author",
         "habitus.scene.hypotheses.author",
+        "habitus.scene.hypotheses.closure",
         "habitus.scene.occurrences.mapper",
     ]
     # 读侧只读行为树。views 里除 ``__init__`` 外不得 import 包根或 ``views`` 包根——投影不能倒灌。

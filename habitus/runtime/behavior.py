@@ -23,9 +23,8 @@ import asyncio
 import os
 import time
 import uuid
-from collections import Counter
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import AbstractContextManager, nullcontext, suppress
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -50,6 +49,7 @@ from habitus.behavior.kinds.resolver import BehaviorKindResolver
 from habitus.behavior.kinds.store import BehaviorKindStore
 from habitus.behavior.kinds.vectors import BehaviorKindVectorStore
 from habitus.behavior.observation import BehaviorObservationEnvelope, BehaviorObservationStore
+from habitus.behavior.observation.telemetry import delivery_attributes
 from habitus.behavior.reduction import (
     DEFAULT_SWEEP_LOCK_TTL_SECONDS,
     BehaviorKindMergeReport,
@@ -60,7 +60,15 @@ from habitus.behavior.reduction import (
 from habitus.behavior.semantic import BehaviorSemanticRefresher, LLMBehaviorOverviewGenerator
 from habitus.behavior.tree import BehaviorTree
 from habitus.config import HabitusConfig
-from habitus.foundation.observability import ObservationEvent, ObservationStatus, Observer
+from habitus.foundation.observability import (
+    NullObserver,
+    ObservationEvent,
+    ObservationStatus,
+    Observer,
+    SpanController,
+    bind_observation_context,
+    observe_operation,
+)
 from habitus.infrastructure.store.contracts.lock import LockStore
 from habitus.infrastructure.store.contracts.path_lock import PathLock
 from habitus.model_client import StructuredChatClient
@@ -163,12 +171,14 @@ class BehaviorFusionWorker(ResidentWorker):
         poll_interval_seconds: float,
         shutdown_timeout_seconds: float,
         observer: Observer | None = None,
+        span_controller: SpanController | None = None,
     ) -> None:
         super().__init__(
             shutdown_timeout_seconds=shutdown_timeout_seconds, observer=observer
         )
         self.enqueuer = enqueuer
         self.runner = runner
+        self.span_controller = span_controller
         self.poll_interval_seconds = float(poll_interval_seconds)
         # 进程唯一的 worker 身份：租约接管日志要能区分持有者（对齐 MemoryWorker）。
         self.worker_id = f"habitus-behavior-fusion-{os.getpid()}-{uuid.uuid4().hex[:8]}"
@@ -204,35 +214,19 @@ class BehaviorFusionWorker(ResidentWorker):
                 await asyncio.to_thread(self.runner.jobs.renew, lease)
 
         heartbeat = asyncio.create_task(beat(), name=f"{self._task_name}-heartbeat")
+        # 一个作业一条 trace：作业内各步（上下文、模型判断、成稿、落盘）的事件与模型调用都挂在
+        # 这个根 span 下。降级与无归属的计数由 runner 记在 ``fusion_judge``/``fusion_job`` 上。
         try:
-            result = await self.runner.execute(lease)
+            with (
+                bind_observation_context(worker_id=self.worker_id),
+                _span(self.span_controller, "fusion_job"),
+            ):
+                await self.runner.execute(lease)
         finally:
             stop_beat.set()
             heartbeat.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await heartbeat
-        if result.degradations:
-            # 装配层的降级（去重/剔名/丢边）是信号不是语义：按类计数进可观测面板，
-            # 让"模型记账疏漏的频率"随真实数据可见（BHV-REALDATA-001 的量化依据）。
-            counts = Counter(note.split(" ", 1)[0] for note in result.degradations)
-            self._observe(
-                "fusion_degradations",
-                ObservationStatus.SUCCESS,
-                {"job": result.job.job_id[:12], **{kind: count for kind, count in counts.items()}},
-            )
-        if result.fused:
-            # 无归属占比："允许模型不产出"的出口用得多不多——压制产出的唯一量化告警。
-            receipt = result.receipt
-            self._observe(
-                "fusion_unowned",
-                ObservationStatus.SUCCESS,
-                {
-                    "job": result.job.job_id[:12],
-                    "unowned": len(receipt.unowned_observation_ids),
-                    "observations": len(receipt.observation_ids),
-                    "ratio": round(receipt.unowned_ratio, 3),
-                },
-            )
 
     async def _run_loop(self) -> None:
         while not self._stop_requested.is_set():
@@ -272,18 +266,22 @@ class BehaviorReductionWorker(ResidentWorker):
         interval_seconds: float,
         shutdown_timeout_seconds: float,
         observer: Observer | None = None,
+        span_controller: SpanController | None = None,
     ) -> None:
         super().__init__(
             shutdown_timeout_seconds=shutdown_timeout_seconds, observer=observer
         )
         self.runner = runner
         self.interval_seconds = float(interval_seconds)
+        self.span_controller = span_controller
 
     async def _run_loop(self) -> None:
         while not self._stop_requested.is_set():
             started = time.monotonic()
             try:
-                await self.runner.run_once()
+                # 一轮 sweep 一条 trace：成链、封口、定类型（含模型调用）、发布、摘要刷新都挂在下面。
+                with _span(self.span_controller, "reduction_sweep"):
+                    await self.runner.run_once()
             except BehaviorReductionBusyError:
                 # sweep 锁被另一持有者占用：多实例场景的正常让路，跳过本拍即可。
                 self._observe(
@@ -309,6 +307,7 @@ def build_behavior_components(
     lock_store: LockStore,
     path_lock: PathLock,
     observer: Observer | None = None,
+    span_controller: SpanController | None = None,
     clock: Callable[[], datetime] | None = None,
     embedder: Embedder | None = None,
 ) -> BehaviorRuntimeComponents | None:
@@ -353,7 +352,13 @@ def build_behavior_components(
         max_fragments_per_segment=behavior_config.max_fragments_per_segment
     )
     enqueuer = BehaviorFusionEnqueuer(
-        observations, jobs, receipts, clock=clock, coverage=coverage, config=fusion_config
+        observations,
+        jobs,
+        receipts,
+        clock=clock,
+        coverage=coverage,
+        config=fusion_config,
+        observer=observer,
     )
     fusion_runner = BehaviorFusionRunner(
         jobs,
@@ -365,6 +370,7 @@ def build_behavior_components(
         context_limit=context_limit,
         context_lookback_seconds=context_lookback,
         coverage=coverage,
+        observer=observer,
     )
 
     tree = BehaviorTree(root / "tree")
@@ -403,6 +409,7 @@ def build_behavior_components(
             if behavior_config.reduction_sweep_lock_ttl_seconds is not None
             else DEFAULT_SWEEP_LOCK_TTL_SECONDS
         ),
+        observer=observer,
     )
     return BehaviorRuntimeComponents(
         observations=observations,
@@ -420,25 +427,42 @@ def build_behavior_components(
             poll_interval_seconds=behavior_config.fusion_poll_interval_seconds,
             shutdown_timeout_seconds=behavior_config.worker_shutdown_timeout_seconds,
             observer=observer,
+            span_controller=span_controller,
         ),
         reduction_worker=BehaviorReductionWorker(
             reduction_runner,
             interval_seconds=behavior_config.reduction_sweep_interval_seconds,
             shutdown_timeout_seconds=behavior_config.worker_shutdown_timeout_seconds,
             observer=observer,
+            span_controller=span_controller,
         ),
     )
 
 
 def deliver_observations(
-    components: BehaviorRuntimeComponents, envelope: BehaviorObservationEnvelope
+    components: BehaviorRuntimeComponents,
+    envelope: BehaviorObservationEnvelope,
+    *,
+    observer: Observer | None = None,
 ) -> str:
     """观测投递的正门：入库、唤醒融合循环；返回交付身份（幂等——同身份同内容重复投递无害，
     同身份异内容 fail-closed）。"""
 
-    stored = components.observations.put(envelope)
+    with observe_operation(
+        observer or NullObserver(), "behavior", "observation_delivery"
+    ) as attributes:
+        stored = components.observations.put(envelope)
+        attributes.update(delivery_attributes(envelope, stored))
     components.fusion_worker.wake()
     return stored.source_id
+
+
+def _span(controller: SpanController | None, operation: str) -> AbstractContextManager[None]:
+    """行为 Worker 的根 span；未配置追踪时是空上下文。作业身份等属性由 runner 的事件带上同一个 span。"""
+
+    if controller is None:
+        return nullcontext()
+    return controller.start_span("behavior", operation)
 
 
 async def merge_behavior_kinds(

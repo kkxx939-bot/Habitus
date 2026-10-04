@@ -11,6 +11,9 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
+from datetime import date
 from pathlib import Path
 from typing import ClassVar
 
@@ -21,6 +24,8 @@ from habitus.scene.hypotheses.model import Hypothesis, HypothesisError
 from habitus.scene.storage import SceneStore
 
 HYPOTHESES_SEGMENT = "hypotheses"
+#: 闭环"问过了"的旁册文件名（点开头：不是假设文件，``read_all`` 与 ``consequents`` 只看目录）。
+CLOSURE_ASKED_FILE = ".closure-asked.json"
 MAX_RECORD_BYTES = 64 * 1024
 
 
@@ -64,6 +69,38 @@ class HypothesisStore(SceneStore):
         self.initialize()
         self._atomic_write(path, encode(hypothesis).encode("utf-8"), maximum=MAX_RECORD_BYTES)
         return path
+
+    # ── 闭环问过的事实 ──────────────────────────────────────────────────────
+
+    def closure_asked(self) -> Mapping[str, str]:
+        """闭环已经问过触点③ 的那些"不一样"（事实键 → 问的那天）。
+
+        "不一样"是从读数里现扫的，账没变它每晚都在；不记下来就每晚重问同三条、第 4 条起永远轮不到（评审 A-5 / B-7 / C-10）。
+        它不是假设、不是账，只是一份"问过了"的备忘，所以放在 hypotheses/ 目录下的一个 JSON 旁册里。
+        """
+
+        payload = self._read_bytes(self._asked_path(), MAX_RECORD_BYTES)
+        if payload is None:
+            return {}
+        try:
+            data = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HypothesisStoreError("the closure-asked sidecar is corrupt") from exc
+        if not isinstance(data, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in data.items()):
+            raise HypothesisStoreError("the closure-asked sidecar has the wrong shape")
+        return dict(data)
+
+    def record_closure_asked(self, key: str, day: date) -> None:
+        if not isinstance(key, str) or not key.strip():
+            raise HypothesisStoreError("a closure fact key must be non-empty text")
+        table = dict(self.closure_asked())
+        table[key] = day.isoformat()
+        self.initialize()
+        payload = json.dumps(dict(sorted(table.items())), ensure_ascii=False, indent=1).encode("utf-8")
+        self._atomic_write(self._asked_path(), payload, maximum=MAX_RECORD_BYTES)
+
+    def _asked_path(self) -> Path:
+        return self._inside(Path(HYPOTHESES_SEGMENT) / CLOSURE_ASKED_FILE)
 
     # ── 读 ──────────────────────────────────────────────────────────────────
 

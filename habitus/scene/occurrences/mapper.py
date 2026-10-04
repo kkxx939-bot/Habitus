@@ -56,6 +56,7 @@ from habitus.scene.concepts.model import (
 )
 from habitus.scene.concepts.vectors import ConceptVectorIndex
 from habitus.scene.occurrences.model import ConceptHit, ConceptHits, ConceptHitsError
+from habitus.scene.occurrences.situations import SituationOutcome
 from habitus.scene.occurrences.store import ConceptHitStore
 
 MAPPER_PROMPT_VERSION = "scene_concept_mapper_prompt_v3"
@@ -413,10 +414,6 @@ class ConceptMapper:
 
         return f"{MAPPER_VERSION}+emb:{self.vectors.model}+llm:{self.client.client.model}+concepts:{self.concepts.fingerprint}"
 
-    async def candidates_for(self, facts: OccurrenceFacts) -> tuple[ConceptDefinition, ...]:
-        candidates, _prior = await self._recall(facts)
-        return candidates
-
     async def _recall(self, facts: OccurrenceFacts) -> tuple[tuple[ConceptDefinition, ...], frozenset[str]]:
         """召回：向量 top-K ∪ 这个 kind 以前命中过的（有闸），只在叶子行为概念里；按身份排序，顺序与模型无关。"""
 
@@ -441,11 +438,13 @@ class ConceptMapper:
         document: BehaviorDocument,
         *,
         situation_hits: Sequence[ConceptHit] = (),
+        situations_checked: Sequence[str] = (),
         baseline: Mapping[str, str] | None = None,
         timeline: Sequence[TimelineEntry] = (),
     ) -> ConceptHits:
         facts = OccurrenceFacts.from_document(document)
         situations = self._situations(situation_hits)
+        checked = tuple(dict.fromkeys((*situations_checked, *(hit.concept for hit in situations))))
         snapshot: dict[str, str] = dict(baseline) if baseline else {}
         measures = facts.measures()
         candidates, prior = await self._recall(facts)
@@ -510,6 +509,7 @@ class ConceptMapper:
                 last_observed_at=facts.last_observed_at,
                 hits=tuple(ConceptHit(concept=self.concepts[identity].name, grade=grade) for identity, grade in hits.items()),
                 situation_hits=situations,
+                situations_checked=checked,
                 unresolved=tuple(unresolved),
                 baseline_snapshot=snapshot,
                 mapper=self.version,
@@ -579,6 +579,13 @@ class DayMappingReport:
     duplicates_skipped: int
     stale_removed: int
     unresolved: int
+    #: 盘上原本就有、这次又重新判了一遍的记录数（口径变了、或输入变了）。它加上 ``stale_removed`` 不为零，
+    #: 就说明这一天的命中**变了**——靶它开的承诺与结算已经是脏的，夜批要撤了重开（评审 A-12 / B-5）。
+    rewritten: int = 0
+
+    @property
+    def changed(self) -> bool:
+        return self.rewritten > 0 or self.stale_removed > 0
 
 
 async def map_closed_day(
@@ -588,7 +595,7 @@ async def map_closed_day(
     day: date,
     *,
     now: datetime,
-    situation_for: Callable[[BehaviorDocument], Sequence[ConceptHit]],
+    situation_for: Callable[[BehaviorDocument], SituationOutcome | Sequence[ConceptHit]],
     baseline_for: Callable[[BehaviorDocument], Mapping[str, str]],
     force: bool = False,
 ) -> DayMappingReport:
@@ -617,7 +624,7 @@ async def map_closed_day(
     timeline = tuple(TimelineEntry.from_document(document) for document in documents) + tuple(
         TimelineEntry.from_gap(document) for document in tree.read_day(BehaviorKind.GAP, day)
     )
-    resumed = 0
+    resumed = rewritten = 0
     for document in documents:
         baseline = baseline_for(document)
         if store.exists(document.address):
@@ -625,7 +632,14 @@ async def map_closed_day(
             if existing.mapper == mapper.version and _inputs_unchanged(existing, baseline):
                 resumed += 1
                 continue
-        record = await mapper.map(document, situation_hits=situation_for(document), baseline=baseline, timeline=timeline)
+            rewritten += 1
+        situations = situation_for(document)
+        if isinstance(situations, SituationOutcome):
+            record = await mapper.map(
+                document, situation_hits=situations.hits, situations_checked=situations.checked, baseline=baseline, timeline=timeline
+            )
+        else:
+            record = await mapper.map(document, situation_hits=situations, baseline=baseline, timeline=timeline)
         store.write(record)
     marker = store.complete_day(day, records=len(documents), completed_at=now, mapper=mapper.version)
     return DayMappingReport(
@@ -635,6 +649,7 @@ async def map_closed_day(
         duplicates_skipped=len(all_documents) - len(documents),
         stale_removed=len(removed),
         unresolved=marker.unresolved,
+        rewritten=rewritten,
     )
 
 

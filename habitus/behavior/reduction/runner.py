@@ -58,11 +58,22 @@ from habitus.behavior.reduction.sealing import (
     sealed_chain_indexes,
     sealed_gaps,
 )
+from habitus.behavior.reduction.telemetry import (
+    assembly_attributes,
+    kind_attributes,
+    publish_attributes,
+    refresh_attributes,
+    seal_attributes,
+    stage_attributes,
+)
 from habitus.behavior.schema.model import BehaviorSchemaError
+from habitus.behavior.semantic.model import BehaviorSemanticRefreshResult
 from habitus.behavior.semantic.refresher import BehaviorSemanticRefresher
+from habitus.behavior.telemetry import OBSERVATION_CATEGORY
 from habitus.behavior.tree import BehaviorTree, BehaviorTreeIntegrityError
 from habitus.behavior.uri import BehaviorURI
 from habitus.foundation.integrity import canonical_digest
+from habitus.foundation.observability import NullObserver, Observer, observe_operation
 from habitus.infrastructure.store.contracts.lock import LockStore
 from habitus.infrastructure.store.contracts.path_lock import LeaseGuard, PathLock
 from habitus.infrastructure.store.filesystem import atomic_replace_bytes, read_regular_bytes
@@ -131,6 +142,7 @@ class BehaviorReductionRunner:
         context_lookback_seconds: float = FUSION_CONTEXT_LOOKBACK_SECONDS,
         coverage: BehaviorCoverageIndex | None = None,
         sweep_lock_ttl_seconds: int = DEFAULT_SWEEP_LOCK_TTL_SECONDS,
+        observer: Observer | None = None,
     ) -> None:
         """``context_lookback_seconds`` 必须与融合 runner 实际使用的值一致（同一配置源）——
         融合"还能续"与归约"已封口"是同一个窗口的两面，各配一个数会静默分叉。"""
@@ -189,6 +201,7 @@ class BehaviorReductionRunner:
         self._path_lock = PathLock(lock_store)
         digest = hashlib.sha256(str(tree.root).encode("utf-8")).hexdigest()[:24]
         self._sweep_lock_key = f"behavior-reduction:{digest}"
+        self.observer: Observer = observer or NullObserver()
 
     async def run_once(self) -> BehaviorReductionReport:
         """执行一轮归约；先重放遗留检查点，再归约新封口的链与空白段。
@@ -211,34 +224,64 @@ class BehaviorReductionRunner:
             # 只有**这里**的超时是"锁被占"；正文里的 TimeoutError（续约失败、文档锁竞争）
             # 是真故障，不许被归因成让路。
             raise BehaviorReductionBusyError(str(exc)) from exc
-        with acquired as guard:
-            return await self._run_locked(guard)
+        with (
+            acquired as guard,
+            observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_sweep") as attributes,
+        ):
+            report = await self._run_locked(guard)
+            attributes.update(
+                replayed_documents=report.replayed_documents,
+                published_occurrences=report.published_occurrences,
+                published_gaps=report.published_gaps,
+                chains_pending=report.chains_pending,
+                notes=len(report.dropped_edges),
+                kind_signals=len(report.kind_signals),
+            )
+            return report
 
     async def _run_locked(self, guard: LeaseGuard) -> BehaviorReductionReport:
         self._kind_signals: list[str] = []
         self._sweep_signals: list[str] = []
-        replayed, replayed_days = self._replay_checkpoint(guard)
+        with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_replay") as attributes:
+            replayed, replayed_days = self._replay_checkpoint(guard)
+            attributes.update(replayed_documents=replayed, refresh_days=len(replayed_days))
         now = self._now()
         # 以下每一段在周尺度都可能跑很久且**不写任何东西**（另一条线实测：stage 前段静默 16 分钟即把
         # 600s 租约耗死，续约点再多也救不了已过期的租约）。因此每段边界都续，长循环内部按条数续。
         guard.checkpoint()
-        self._expire(now, guard)
+        with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_expire") as attributes:
+            attributes.update(self._expire(now, guard))
         guard.checkpoint()
         # 上一轮没刷成的日子并进来（merge/rebuild 留下的也在这里）
         replayed_days = replayed_days | self._pending_refresh_days()
         # "哪些判断还没归约"只有一种答法（``pending``），此刻场景的未封口读口也用它。
-        pending = pending_judgements(self.judgements, self.ledger, checkpoint=guard.checkpoint)
+        with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_assemble") as attributes:
+            pending = pending_judgements(self.judgements, self.ledger, checkpoint=guard.checkpoint)
+            attributes.update(assembly_attributes(pending))
         quarantined = list(pending.quarantined)
         assembly = pending.assembly
         guard.checkpoint()
-        horizon = seal_horizon(
-            now=now,
-            frontier_cutoff=self._frontier_cutoff(guard),
-            lookback_seconds=self.context_lookback_seconds,
-        )
-        ready_indexes = sealed_chain_indexes(assembly, horizon)
-        ready_gaps = sealed_gaps(assembly.gaps, horizon)
-        unsealed_days = _unsealed_days(assembly, ready_indexes, ready_gaps)
+        with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_seal") as attributes:
+            frontier_cutoff = self._frontier_cutoff(guard)
+            horizon = seal_horizon(
+                now=now,
+                frontier_cutoff=frontier_cutoff,
+                lookback_seconds=self.context_lookback_seconds,
+            )
+            ready_indexes = sealed_chain_indexes(assembly, horizon)
+            ready_gaps = sealed_gaps(assembly.gaps, horizon)
+            unsealed_days = _unsealed_days(assembly, ready_indexes, ready_gaps)
+            attributes.update(
+                seal_attributes(
+                    assembly,
+                    ready_indexes,
+                    ready_gaps,
+                    now=now,
+                    horizon=horizon,
+                    frontier_cutoff=frontier_cutoff,
+                )
+            )
+            attributes["unsealed_days"] = len(unsealed_days)
         guard.checkpoint()
         if not ready_indexes and not ready_gaps:
             refresh_notes = await self._finish_sweep(replayed_days, guard, unsealed_days=unsealed_days, horizon=horizon)
@@ -253,39 +296,52 @@ class BehaviorReductionRunner:
 
         # 检查点字节上界的确定性缩批：超限时按封口顺序留前一半重来（留下的下一轮自然处理），
         # 缩批后必须重新做批内引用闭合——否则宿主/目标被砍掉的链会带着悬空依赖落盘。
-        active_indexes, active_gaps = ready_indexes, ready_gaps
-        while True:
-            documents, dropped = await self._stage(
-                assembly, active_indexes, active_gaps, now, guard=guard
+        with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_stage") as attributes:
+            shrink_rounds = 0
+            active_indexes, active_gaps = ready_indexes, ready_gaps
+            while True:
+                documents, dropped = await self._stage(
+                    assembly, active_indexes, active_gaps, now, guard=guard
+                )
+                checkpoint = {
+                    "reduction_version": REDUCTION_VERSION,
+                    "staged_at": now.isoformat(timespec="microseconds"),
+                    "refresh_days": sorted(
+                        day.isoformat()
+                        for day in (replayed_days | _document_days(documents))
+                    ),
+                    "documents": documents,
+                }
+                encoded = json.dumps(checkpoint, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                # 写入与重放共用同一上界：写得进读不回的检查点 = 永久卡死（对齐融合层
+                # "作业放得下而回执放不下"的既有教训）。超限发生在 stage 前，缩批可自愈。
+                if len(encoded) <= _MAX_CHECKPOINT_BYTES:
+                    break
+                shrink_rounds += 1
+                total = len(active_indexes) + len(active_gaps)
+                if total <= 1:
+                    raise BehaviorReductionError(
+                        "a single reduction document exceeds the checkpoint byte bound"
+                    )
+                dropped_count = total - max(total // 2, 1)
+                if len(active_gaps) >= dropped_count:
+                    active_gaps = active_gaps[: len(active_gaps) - dropped_count]
+                else:
+                    keep_chains = len(active_indexes) - (dropped_count - len(active_gaps))
+                    active_gaps = ()
+                    active_indexes = closed_under_links(
+                        assembly, set(active_indexes[: max(keep_chains, 0)])
+                    )
+            attributes.update(
+                stage_attributes(
+                    documents,
+                    dropped,
+                    ready_chains=len(ready_indexes),
+                    ready_gaps=len(ready_gaps),
+                    shrink_rounds=shrink_rounds,
+                    checkpoint_bytes=len(encoded),
+                )
             )
-            checkpoint = {
-                "reduction_version": REDUCTION_VERSION,
-                "staged_at": now.isoformat(timespec="microseconds"),
-                "refresh_days": sorted(
-                    day.isoformat()
-                    for day in (replayed_days | _document_days(documents))
-                ),
-                "documents": documents,
-            }
-            encoded = json.dumps(checkpoint, ensure_ascii=False, sort_keys=True).encode("utf-8")
-            # 写入与重放共用同一上界：写得进读不回的检查点 = 永久卡死（对齐融合层
-            # "作业放得下而回执放不下"的既有教训）。超限发生在 stage 前，缩批可自愈。
-            if len(encoded) <= _MAX_CHECKPOINT_BYTES:
-                break
-            total = len(active_indexes) + len(active_gaps)
-            if total <= 1:
-                raise BehaviorReductionError(
-                    "a single reduction document exceeds the checkpoint byte bound"
-                )
-            dropped_count = total - max(total // 2, 1)
-            if len(active_gaps) >= dropped_count:
-                active_gaps = active_gaps[: len(active_gaps) - dropped_count]
-            else:
-                keep_chains = len(active_indexes) - (dropped_count - len(active_gaps))
-                active_gaps = ()
-                active_indexes = closed_under_links(
-                    assembly, set(active_indexes[: max(keep_chains, 0)])
-                )
         with guard.fenced():
             atomic_replace_bytes(self._checkpoint_path, encoded, artifact_root=self.ledger.root)
         self._publish_checkpoint(checkpoint, guard)
@@ -394,8 +450,12 @@ class BehaviorReductionRunner:
         self._write_pending_refresh_days(self._pending_refresh_days() | days, guard)
         self._clear_checkpoint(guard)
         notes = await self._refresh_semantics(days, guard)
-        self._close_days(days, guard, unsealed_days=unsealed_days, horizon=horizon)
-        self._release_unreferenced(guard)
+        with observe_operation(self.observer, OBSERVATION_CATEGORY, "day_close") as attributes:
+            closed, still_open = self._close_days(days, guard, unsealed_days=unsealed_days, horizon=horizon)
+            attributes.update(closed_days=closed, open_days=still_open, unsealed_days=len(unsealed_days))
+        with observe_operation(self.observer, OBSERVATION_CATEGORY, "raw_release") as attributes:
+            released, retained = self._release_unreferenced(guard)
+            attributes.update(envelopes_released=released, envelopes_retained=retained)
         return notes
 
     # ── 定稿日：派生层（情景树、预测树）只处理已定稿的历史 ────────────────────────────
@@ -410,13 +470,14 @@ class BehaviorReductionRunner:
 
     def _close_days(
         self, days: set[date], guard: LeaseGuard, *, unsealed_days: frozenset[date], horizon: datetime | None
-    ) -> None:
+    ) -> tuple[int, int]:
         """树变了的日子先记为"开放"，之后每轮核对：没有未封口的链头落在那天、且封口视界已过那天在其
         本地偏移下的结束时刻，才记为定稿。定稿是事实，之后到达的补发照常进树、不改变这个事实；
         派生层只在定稿之后处理那一天一次。"""
 
         closure = self._day_closure()
         open_days = closure["open"] | {day for day in days if day not in closure["closed"]}
+        closed_now = 0
         if horizon is not None:
             for day in sorted(open_days):
                 if day in unsealed_days:
@@ -425,8 +486,10 @@ class BehaviorReductionRunner:
                 if end_of_day is not None and horizon.astimezone(UTC) >= end_of_day:
                     closure["closed"][day] = self._now().isoformat(timespec="seconds")
                     open_days.discard(day)
+                    closed_now += 1
         closure["open"] = open_days
         self._write_day_closure(closure, guard)
+        return closed_now, len(open_days)
 
     def _local_end_of_day(self, day: date) -> datetime | None:
         """那一天在其记录所用本地偏移下的结束瞬时（多个偏移取最晚）；没有记录时为 None。"""
@@ -749,7 +812,19 @@ class BehaviorReductionRunner:
         （``_record_kind_hits``），与树上的 occurrence 一一对应。
         """
 
+        with observe_operation(self.observer, OBSERVATION_CATEGORY, "kind_resolve") as attributes:
+            return await self._resolve_kind_tokens_observed(heads, now, guard=guard, attributes=attributes)
+
+    async def _resolve_kind_tokens_observed(
+        self,
+        heads: Iterable[ReducibleJudgement],
+        now: datetime,
+        *,
+        guard: LeaseGuard | None,
+        attributes: dict[str, str | int | float | bool],
+    ) -> dict[str, str]:
         signals = self._kind_signals
+        first_signal = len(signals)
         requests: list[BehaviorKindRequest] = []
         for head in heads:
             try:
@@ -762,7 +837,15 @@ class BehaviorReductionRunner:
         vectors, vectors_dirty = self._read_kind_vectors(signals)
         vectors_before = vectors
         tokens: dict[str, str] = {}
+        created = model_calls = batches = 0
+        known: int | None = None
         async for batch in self.kind_resolver.resolve_batches(requests, registry, vectors=vectors):
+            # resolver 的第一批永远是词表快路径（直接命中）；之后调过模型的才算一次按批判定。
+            if known is None:
+                known = len(batch.tokens)
+            batches += 1 if batch.model_calls else 0
+            created += len(batch.created)
+            model_calls += batch.model_calls
             tokens.update(batch.tokens)
             signals.extend(batch.signals)
             for name in batch.created:
@@ -772,6 +855,17 @@ class BehaviorReductionRunner:
             if guard is not None:
                 guard.checkpoint()
         self._persist_kind_vectors(vectors, vectors_before, vectors_dirty, signals)
+        attributes.update(
+            kind_attributes(
+                requests=len(requests),
+                tokens=len(tokens),
+                known=known or 0,
+                created=created,
+                model_calls=model_calls,
+                batches=batches,
+                signals=signals[first_signal:],
+            )
+        )
         return tokens
 
     def _record_kind_hits(self, hits: Sequence[tuple[str, date]], checkpoint_id: str, now: datetime) -> None:
@@ -937,21 +1031,44 @@ class BehaviorReductionRunner:
         if self.semantic_refresher is None:
             self._write_pending_refresh_days(self._pending_refresh_days() - days, guard)
             return ()
-        notes: list[str] = []
-        remaining = self._pending_refresh_days() | days
-        for day in sorted(days):
-            guard.checkpoint()
-            try:
-                await self.semantic_refresher.refresh_days((day,))
-            except Exception as exc:  # noqa: BLE001 - 派生物刷新失败一律降级为信号
-                notes.append(f"semantic refresh failed for [{day.isoformat()}]: {exc}")
-                continue
-            remaining.discard(day)
-        self._write_pending_refresh_days(remaining, guard)
-        return tuple(notes)
+        with observe_operation(self.observer, OBSERVATION_CATEGORY, "semantic_refresh") as attributes:
+            notes: list[str] = []
+            results: list[BehaviorSemanticRefreshResult] = []
+            remaining = self._pending_refresh_days() | days
+            for day in sorted(days):
+                guard.checkpoint()
+                try:
+                    results.extend(await self.semantic_refresher.refresh_days((day,)))
+                except Exception as exc:  # noqa: BLE001 - 派生物刷新失败一律降级为信号
+                    notes.append(f"semantic refresh failed for [{day.isoformat()}]: {exc}")
+                    continue
+                remaining.discard(day)
+            self._write_pending_refresh_days(remaining, guard)
+            attributes.update(
+                refresh_attributes(results, days=len(days), failed_days=len(notes))
+            )
+            attributes["pending_days"] = len(remaining)
+            return tuple(notes)
 
     def _publish_checkpoint(self, checkpoint: Mapping[str, Any], guard: LeaseGuard) -> None:
         """把检查点逐字落盘：同字节幂等，故本函数可任意次重入；逐段续约防租约过期。"""
+
+        with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_publish") as attributes:
+            documents, hits = self._publish_documents(checkpoint, guard)
+            attributes.update(
+                publish_attributes(
+                    [item for item in documents if isinstance(item, Mapping)],
+                    published_at=self._now(),
+                    kind_hits=len(hits),
+                )
+            )
+            # 树写完、账本写完，原料才释放（顺序是崩溃安全的依据：重放路径重新走到这里再补删）。
+            attributes["judgements_released"] = self._release(documents, guard)
+
+    def _publish_documents(
+        self, checkpoint: Mapping[str, Any], guard: LeaseGuard
+    ) -> tuple[list[Any], list[tuple[str, date]]]:
+        """逐篇落盘、记账、记命中；返回文档与命中，供调用方计数与释放。"""
 
         staged_at_raw = checkpoint.get("staged_at")
         if not isinstance(staged_at_raw, str):
@@ -983,12 +1100,11 @@ class BehaviorReductionRunner:
             self.ledger.append(entry)
         # 命中账与树上的 occurrence 一一对应；幂等键是检查点**内容**摘要：同一检查点只记一次。
         self._record_kind_hits(hits, _checkpoint_identity(documents), staged_at)
-        # 树写完、账本写完，原料才释放（顺序是崩溃安全的依据：重放路径重新走到这里再补删）。
-        self._release(documents, guard)
+        return documents, hits
 
     # ── 释放：原料被消费后即删，真正的数据只在树上 ─────────────────────────────────────
 
-    def _release(self, documents: list[Any], guard: LeaseGuard) -> None:
+    def _release(self, documents: list[Any], guard: LeaseGuard) -> int:
         """删掉本批已发布链消费的判断（判断在发布后零读者）；交付的释放见 ``_release_unreferenced``。"""
 
         judgement_ids: set[str] = set()
@@ -1002,8 +1118,9 @@ class BehaviorReductionRunner:
             if index % 200 == 0:
                 guard.checkpoint()
             self.judgements.discard(judgement_id)
+        return len(judgement_ids)
 
-    def _release_unreferenced(self, guard: LeaseGuard) -> None:
+    def _release_unreferenced(self, guard: LeaseGuard) -> tuple[int, int]:
         """每轮释放"全部观测已被回执覆盖、且不再被任何存储中判断引用"的交付——不靠判断反查。
 
         判断反查（旧实现）收不到三类交付：全段无归属/旁人、内容重复投递、崩溃重放时判断已删的；
@@ -1019,14 +1136,19 @@ class BehaviorReductionRunner:
             if position % 500 == 0:
                 guard.checkpoint()
             still_referenced.update(str(value) for value in raw.get("observation_ids", ()))
+        released = retained = 0
         for index, envelope in enumerate(self.observations.list()):
             if index % 200 == 0:
                 guard.checkpoint()
             ids = {observation.observation_id for observation in envelope.batch.observations}
             if ids <= covered and not (ids & still_referenced):
                 self.observations.discard(envelope.source_id)
+                released += 1
+            else:
+                retained += 1
+        return released, retained
 
-    def _expire(self, now: datetime, guard: LeaseGuard | None = None) -> None:
+    def _expire(self, now: datetime, guard: LeaseGuard | None = None) -> dict[str, int]:
         """回执、覆盖索引、消费账本按同一个窗口整块过期；窗口 = 上游最大补发跨度。"""
 
         before = now - timedelta(days=self.coverage.window_days)
@@ -1037,9 +1159,12 @@ class BehaviorReductionRunner:
                 guard.checkpoint()
             stored_ids.update(item.observation_id for item in envelope.batch.observations)
         stored = frozenset(stored_ids)
-        self.coverage.expire(now, retain=stored)
-        self.receipts.expire(before)
-        self.ledger.expire(before)
+        return {
+            "coverage_expired": self.coverage.expire(now, retain=stored),
+            "receipts_expired": self.receipts.expire(before),
+            "ledger_entries_expired": self.ledger.expire(before),
+            "stored_observations": len(stored),
+        }
 
     # ── 机械读取 ─────────────────────────────────────────────────────────────────────
 

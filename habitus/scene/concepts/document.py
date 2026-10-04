@@ -36,6 +36,16 @@ _ORIGIN_LABELS = {ConceptOrigin.BASELINE: "基准", ConceptOrigin.RESIDUE: "残�
 _CONTEXT_LABELS = {ContextScope.OCCURRENCE: "只看这一条", ContextScope.DAY: "要看当天时间线"}
 
 
+def _method_of(definition: ConceptDefinition) -> str:
+    """行为概念：算法按规则判或模型按判据句判；情境概念：算法按情境说明算（模型从不判情境），没有说明就永不命中。"""
+
+    if definition.role.is_situation:
+        return "算法按情境说明算——" + definition.situation.criterion() if definition.situation is not None else "没有情境说明，永不命中（等事实门接数据源）"
+    if definition.rule is not None:
+        return "算法按规则判——" + definition.rule.criterion()
+    return "模型按判据句判"
+
+
 def encode(definition: ConceptDefinition) -> str:
     if not isinstance(definition, ConceptDefinition):
         raise TypeError("definition must be a ConceptDefinition")
@@ -43,7 +53,7 @@ def encode(definition: ConceptDefinition) -> str:
         f"# {definition.name}",
         "",
         f"判据：{definition.definition}",
-        f"判法：{'算法按规则判——' + definition.rule.criterion() if definition.rule is not None else '模型按判据句判'}",
+        f"判法：{_method_of(definition)}",
         f"材料：{_CONTEXT_LABELS[definition.context]}"
         + (f"；常态 {' / '.join(definition.required_baseline_keys)}" if definition.required_baseline_keys else ""),
         f"类别：{_ROLE_LABELS[definition.role]}",

@@ -11,7 +11,7 @@
 
 ``days_with_peaks`` 数的是**逐日**有没有峰（不是平均曲线上的），因为分型问的正是"是不是天天有机会"。
 ``recurrence_hours`` 取这个概念命中过的那些 kind 里**最短**的复发间隔中位数：概念比 kind 粗，任一 kind
-发生它就发生，所以真实间隔不会长于最短那个——这是上界估计，A4 拿它缩放 ``censor_after`` 时按上界更保守。
+发生它就发生，所以真实间隔不会长于最短那个——这是上界估计（将来 A4 拿它缩放 ``censor_after`` 时按上界更保守；那一条还没做）。
 """
 
 from __future__ import annotations
@@ -49,8 +49,10 @@ class TreeRhythms:
         curves = [curve for curve in (merged_marginal(self.tree, weekday, kinds) for weekday in WEEKDAYS) if curve is not None]
         if not curves:
             return Rhythm(concept=concept)
-        days_with_peaks = sum(1 for curve in curves if peaks_of(curve))
-        peaks = peaks_of(_average(curves))[:MAX_RHYTHM_PEAKS]
+        # 七天平均的曲线，"次日"还是它自己：跨午夜的峰接自己的开头即可（每个周几各自的曲线在机会口那边才接真正的次日）
+        average = _average(curves)
+        days_with_peaks = sum(1 for weekday_curve, preceding, following in _with_neighbours(kinds, self.tree) if peaks_of(weekday_curve, following=following, preceding=preceding))
+        peaks = peaks_of(average, following=average, preceding=average)[:MAX_RHYTHM_PEAKS]
         if not peaks or not days_with_peaks:
             return Rhythm(concept=concept, recurrence_hours=self._recurrence_hours(kinds))
         minutes = MINUTES_PER_DAY // len(curves[0])
@@ -76,6 +78,20 @@ class TreeRhythms:
             if kind in self.tree.recurrences and self.tree.recurrences[kind].intervals.p50 > 0
         ]
         return min(medians) if medians else None
+
+
+def _with_neighbours(
+    kinds: Sequence[str], tree: PredictionTree
+) -> tuple[tuple[tuple[float, ...], tuple[float, ...] | None, tuple[float, ...] | None], ...]:
+    """每个周几的曲线配上真正的前一天与次日曲线（周日接周一），给"逐日有没有峰"用。"""
+
+    found = []
+    for weekday in WEEKDAYS:
+        curve = merged_marginal(tree, weekday, kinds)
+        if curve is None:
+            continue
+        found.append((curve, merged_marginal(tree, (weekday - 1) % 7, kinds), merged_marginal(tree, (weekday + 1) % 7, kinds)))
+    return tuple(found)
 
 
 def _average(curves: Sequence[Sequence[float]]) -> tuple[float, ...]:

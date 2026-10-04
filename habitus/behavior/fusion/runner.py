@@ -60,7 +60,20 @@ from habitus.behavior.fusion.result import BehaviorFusionResult
 from habitus.behavior.fusion.segmentation import BehaviorFusionSegment
 from habitus.behavior.fusion.service import BehaviorJudgementFuser
 from habitus.behavior.fusion.store import BehaviorJudgementStore
+from habitus.behavior.fusion.telemetry import (
+    context_attributes,
+    job_attributes,
+    judgement_attributes,
+    staging_attributes,
+)
 from habitus.behavior.observation import BehaviorObservation, BehaviorObservationStore
+from habitus.behavior.telemetry import OBSERVATION_CATEGORY
+from habitus.foundation.observability import (
+    NullObserver,
+    Observer,
+    bind_observation_context,
+    observe_operation,
+)
 
 
 @dataclass(frozen=True)
@@ -96,6 +109,7 @@ class BehaviorFusionRunner:
         context_limit: int = FUSION_CONTEXT_LIMIT,
         context_lookback_seconds: float = FUSION_CONTEXT_LOOKBACK_SECONDS,
         coverage: BehaviorCoverageIndex | None = None,
+        observer: Observer | None = None,
     ) -> None:
         for value, expected in (
             (jobs, BehaviorFusionJobStore),
@@ -125,6 +139,7 @@ class BehaviorFusionRunner:
         self.context_limit = context_limit
         self.context_lookback_seconds = context_lookback_seconds
         self._last_degradations: tuple[str, ...] = ()
+        self.observer: Observer = observer or NullObserver()
 
     def claim(self, worker_id: str) -> BehaviorFusionJobLease | None:
         """认领最早未完成的作业；队列空返回 None，被阻塞则抛出。"""
@@ -135,9 +150,16 @@ class BehaviorFusionRunner:
         if oldest.fusion_version != FUSION_VERSION or oldest.prompt_version != FUSION_PROMPT_VERSION:
             # 队列是耐久的，升级重启不会清掉它。版本在排队时就已知，在这里纠正，而不是等到
             # 调完模型才发现回执身份对不上——那条路要白烧一次调用并把整条串行队列卡死。
-            replacement = self.jobs.retarget(
-                oldest, fusion_version=FUSION_VERSION, prompt_version=FUSION_PROMPT_VERSION
-            )
+            with observe_operation(
+                self.observer,
+                OBSERVATION_CATEGORY,
+                "fusion_job_retarget",
+                attributes={"job": oldest.job_id[:12]},
+            ) as attributes:
+                replacement = self.jobs.retarget(
+                    oldest, fusion_version=FUSION_VERSION, prompt_version=FUSION_PROMPT_VERSION
+                )
+                attributes["superseded"] = replacement is None
             # 改挂后作业换了身份；``None`` 表示当前版本下这段已另有作业，队首要重新取。
             oldest = replacement if replacement is not None else self.jobs.oldest_uncommitted()
             if oldest is None:
@@ -154,6 +176,26 @@ class BehaviorFusionRunner:
 
         if not isinstance(lease, BehaviorFusionJobLease):
             raise TypeError("lease must be BehaviorFusionJobLease")
+        attempt = lease.job.attempts
+        with (
+            bind_observation_context(attempt=attempt),
+            observe_operation(
+                self.observer,
+                OBSERVATION_CATEGORY,
+                "fusion_job",
+                attributes={"job": lease.job.job_id[:12], "attempt": attempt},
+            ) as attributes,
+        ):
+            result = await self._execute(lease, judged_at=judged_at)
+            attributes.update(job_attributes(result.receipt, fused=result.fused, attempt=attempt))
+            return result
+
+    async def _execute(
+        self,
+        lease: BehaviorFusionJobLease,
+        *,
+        judged_at: datetime | None,
+    ) -> BehaviorFusionRunResult:
         try:
             fused = lease.job.needs_fusion
             if fused:
@@ -161,7 +203,10 @@ class BehaviorFusionRunner:
             staged = lease.job.staged
             if staged is None:  # pragma: no cover - stage 成功即非空
                 raise BehaviorFusionJobError("fusion job reached persistence without a checkpoint")
-            self._persist(staged)
+            with observe_operation(self.observer, OBSERVATION_CATEGORY, "fusion_persist") as attributes:
+                self._persist(staged)
+                attributes["judgements"] = len(staged.judgements)
+                attributes["replay"] = not fused
             committed = self.jobs.commit(lease)
             # 作业里没有产物，只是队列记录：提交即清，作业目录不堆积（BHV-REALDATA-001 第 9 条）。
             self.jobs.discard_committed(committed)
@@ -193,16 +238,22 @@ class BehaviorFusionRunner:
     ) -> BehaviorFusionJobLease:
         job = lease.job
         segment = BehaviorFusionSegment(self._fragments(job), tuple(job.source_refs))
-        context = self._context(segment)
-        try:
-            result = await self.fuser.fuse(
-                segment, primary_subject=self.primary_subject, context_judgements=context
-            )
-        except BehaviorFusionTruncatedError:
-            # 输出截断是确定性的：同一段重试还会截断，最终 FAILED 封死串行队列（实测 512/160/100
-            # 条的段都撞过）。按"不能融合的也要留下"降级：整段记成一条没读懂判断——时间轴上如实
-            # 留下"这段观测到了但没读懂"的空白，覆盖索引照记、队列照走；留信号供容量调参。
-            result = _truncated_segment_result(segment)
+        with observe_operation(self.observer, OBSERVATION_CATEGORY, "fusion_context") as attributes:
+            context = self._context(segment)
+            attributes.update(context_attributes(context))
+        with observe_operation(self.observer, OBSERVATION_CATEGORY, "fusion_judge") as attributes:
+            truncated = False
+            try:
+                result = await self.fuser.fuse(
+                    segment, primary_subject=self.primary_subject, context_judgements=context
+                )
+            except BehaviorFusionTruncatedError:
+                # 输出截断是确定性的：同一段重试还会截断，最终 FAILED 封死串行队列（实测 512/160/100
+                # 条的段都撞过）。按"不能融合的也要留下"降级：整段记成一条没读懂判断——时间轴上如实
+                # 留下"这段观测到了但没读懂"的空白，覆盖索引照记、队列照走；留信号供容量调参。
+                truncated = True
+                result = _truncated_segment_result(segment)
+            attributes.update(judgement_attributes(result, truncated=truncated))
         self._last_degradations = result.degradations
         stamped = judged_at or self.jobs.clock()
         derived = derive_judgements(
@@ -236,14 +287,21 @@ class BehaviorFusionRunner:
         # 否则不可变存储里会永久留下一个指向不存在记录的 ``target_id``。
         visible = {item.judgement_id for item in in_scope}
         visible.update(item["judgement_id"] for item in context)
-        staged = StagedFusion(
-            receipt=receipt,
-            judgements=tuple(
-                judgement_payload(without_unresolvable_relations(item, visible))
-                for item in in_scope
-            ),
-        )
-        return self.jobs.stage(lease, staged)
+        with observe_operation(self.observer, OBSERVATION_CATEGORY, "fusion_stage") as attributes:
+            staged = StagedFusion(
+                receipt=receipt,
+                judgements=tuple(
+                    judgement_payload(without_unresolvable_relations(item, visible))
+                    for item in in_scope
+                ),
+            )
+            staged_lease = self.jobs.stage(lease, staged)
+            attributes.update(
+                staging_attributes(
+                    derived, in_scope, staged.judgements, segment.fragments, judged_at=stamped
+                )
+            )
+        return staged_lease
 
     def _context(self, segment: BehaviorFusionSegment) -> tuple[Mapping[str, Any], ...]:
         """取本段之前已经成立的若干条判断，供模型跨窗口指回。

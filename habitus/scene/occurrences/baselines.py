@@ -20,14 +20,19 @@
 
 **钟面时刻取环形中位数**：23:40 与 00:20 的常态是 00:00，不是 12:00。做法是先用单位向量求平均方向定一个参照，
 再取各点相对参照的偏移（落在 ±12 小时内）的中位数，加回参照——对"跨午夜的就寝"这一类才说得通。
+
+**一天多次的行为按峰各算**（2026-10-01，评审 C-15 / R3-26）：三餐的常态时刻取一个中位数是 12:00——谁都不在那个点吃饭。
+有节律的概念把记录先归到它典型一天的峰（``rhythms`` 给的，与账本的窗口同一个定义，含同样的容差），每个峰一份近期 / 历来
+常态；``baseline_for`` 按这条 occurrence 落在哪个峰交那一份，峰外的（``0``）与没节律的概念用不分峰的那一份。
+**样本下限按独立天数**，不按条数：同一天命中三次只算攒了一天。
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import date, timedelta
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, tzinfo
 from types import MappingProxyType
 
 from habitus.scene.concepts.model import (
@@ -38,8 +43,13 @@ from habitus.scene.concepts.model import (
     ConceptSet,
     circular_offset,
     concept_identity,
+    widen_windows,
 )
+from habitus.scene.concepts.rhythm import Rhythm
 from habitus.scene.occurrences.model import ConceptHits
+
+#: 不分峰的那一层的峰号；有节律的概念峰外的记录也归到这里。
+UNSPLIT = 0
 
 #: 近期窗取多少天。14 天 ≈ 两周，够盖住工作日/周末的来回，又不至于把两个月前的作息算进"现在的习惯"。
 #: **待定值**，54 天重放时按"判据翻转率"复核（窗太短会把一次熬夜当成新常态，太长就跟不上漂移）。
@@ -64,6 +74,8 @@ class BaselineDrift:
     overall: float
     samples_recent: int
     samples_overall: int
+    #: 哪个峰的漂移（``UNSPLIT`` = 不分峰那一层）。
+    peak: int = UNSPLIT
 
     @property
     def minutes(self) -> float:
@@ -79,17 +91,19 @@ class BaselineDrift:
         direction = "晚" if self.minutes > 0 else "早"
         if self.statistic is BaselineStatistic.USUAL_DURATION:
             direction = "长" if self.minutes > 0 else "短"
+        where = f"第 {self.peak} 个峰的" if self.peak != UNSPLIT else ""
         return (
-            f"{self.concept}的{self.statistic.quantity}：近期比历来{direction} {abs(self.minutes):.0f} 分钟"
-            f"（近期 {self.samples_recent} 次 / 历来 {self.samples_overall} 次）"
+            f"{self.concept}{where}{self.statistic.quantity}：近期比历来{direction} {abs(self.minutes):.0f} 分钟"
+            f"（近期 {self.samples_recent} 天 / 历来 {self.samples_overall} 天）"
         )
 
 
 @dataclass(frozen=True)
 class BaselineSnapshot:
-    """一天的常态表：``values`` 直接就是 ``baseline_for`` 的返回值（键是 ``BaselineKey.text``）。
+    """一天的常态表：``values`` 是不分峰那一层（键是 ``BaselineKey.text``）；``by_peak`` 是有节律概念按峰各算的那几份，
+    ``values_at(minute)`` 把两层合成 ``baseline_for`` 要交的那一份——落在某个峰里就用那个峰的，否则用不分峰的。
 
-    ``samples`` 记每个键背后几次命中——``missing`` 里是声明过、但样本不够或一次都没命中的键，
+    ``samples`` 记每个键背后几**天**——``missing`` 里是声明过、但样本不够或一次都没命中的键，
     它们**故意不在** ``values`` 里。
     """
 
@@ -98,10 +112,26 @@ class BaselineSnapshot:
     samples: Mapping[str, int]
     missing: tuple[str, ...] = ()
     drifts: tuple[BaselineDrift, ...] = ()
+    #: (概念名, 峰号) → 那个峰的常态表（只含样本够的键）。
+    by_peak: Mapping[tuple[str, int], Mapping[str, str]] = field(default_factory=dict)
+    #: 概念名 → 它的峰（归峰用；含容差已经在 ``peaks`` 的判定里，这里只存形状）。
+    peaks: Mapping[str, Rhythm] = field(default_factory=dict)
+    slack_minutes: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "values", MappingProxyType(dict(self.values)))
         object.__setattr__(self, "samples", MappingProxyType(dict(self.samples)))
+        object.__setattr__(self, "by_peak", MappingProxyType({key: MappingProxyType(dict(table)) for key, table in self.by_peak.items()}))
+        object.__setattr__(self, "peaks", MappingProxyType(dict(self.peaks)))
+
+    def values_at(self, minute_of_day: int) -> Mapping[str, str]:
+        """这一刻该用的常态：每个概念落在哪个峰就用那个峰的那份，峰外 / 没节律的用不分峰的。"""
+
+        merged = dict(self.values)
+        for (concept, peak), table in self.by_peak.items():
+            if peak_of(self.peaks.get(concept), minute_of_day, slack_minutes=self.slack_minutes) == peak:
+                merged.update(table)
+        return MappingProxyType(merged)
 
     @property
     def drifting(self) -> tuple[BaselineDrift, ...]:
@@ -117,6 +147,25 @@ def declared_keys(concepts: ConceptSet) -> tuple[BaselineKey, ...]:
     return tuple(sorted((BaselineKey.parse(text) for text in texts), key=lambda key: key.text))
 
 
+def peak_of(rhythm: Rhythm | None, minute_of_day: int, *, slack_minutes: int = 0) -> int:
+    """钟面上这一刻落在这个概念的第几个峰（含容差）；峰外或没节律 → ``UNSPLIT``。与账本窗口的判定同一套算法。"""
+
+    if rhythm is None:
+        return UNSPLIT
+    spans = widen_windows([(peak.start_minute, peak.end_minute) for peak in rhythm.peaks], slack_minutes)
+    for peak, (start, end) in zip(rhythm.peaks, spans, strict=True):
+        if start <= minute_of_day < end or start <= minute_of_day + MINUTES_PER_DAY < end or start <= minute_of_day - MINUTES_PER_DAY < end:
+            return peak.ordinal
+    return UNSPLIT
+
+
+def local_minute(moment: datetime, timezone: tzinfo | None = None) -> int:
+    """墙钟分钟（0–1439）。常态与窗口都在本地钟面上算。"""
+
+    local = moment if timezone is None else moment.astimezone(timezone)
+    return local.hour * 60 + local.minute
+
+
 def baseline_table(
     records: Iterable[ConceptHits],
     concepts: ConceptSet,
@@ -124,10 +173,14 @@ def baseline_table(
     day: date,
     recent_days: int = RECENT_WINDOW_DAYS,
     min_samples: int = MIN_BASELINE_SAMPLES,
+    rhythms: Mapping[str, Rhythm] | None = None,
+    slack_minutes: int = 0,
+    timezone: tzinfo | None = None,
 ) -> BaselineSnapshot:
     """算出 ``day`` 那天该用的常态表。``records`` 是 ``day`` **之前**的命中记录（含不含都按日期筛）。
 
     沿 parent 链聚合：命中「修改代码」也算「写代码」一次，所以上级概念的常态有样本可算。
+    ``rhythms`` 给了就对有节律的概念按峰各算一份（键是概念名）；``min_samples`` 数的是**独立天数**。
     """
 
     if isinstance(recent_days, bool) or not isinstance(recent_days, int) or recent_days <= 0:
@@ -138,18 +191,33 @@ def baseline_table(
     wanted = {key.concept: concept_identity(key.concept) for key in keys}
     if not keys:
         return BaselineSnapshot(day=day, values={}, samples={})
+    # 声明了近期窗的键，历来窗由算法**自动陪算**（2026-09-27 裁定"判据用近期，历来常态只读漂移"）：
+    # 判据只许比近期，所以没有任何概念会声明 `all`，不陪算的话漂移永远算不出来（评审 B-12 / C-12）。
+    # 陪算出来的只进漂移，**不进 values**——不给映射器、不占材料上限。
+    shadow = tuple(
+        BaselineKey(concept=key.concept, statistic=key.statistic, window=BaselineWindow.ALL)
+        for key in keys
+        if key.window is BaselineWindow.RECENT and BaselineKey(concept=key.concept, statistic=key.statistic, window=BaselineWindow.ALL) not in keys
+    )
     cutoff = day - timedelta(days=recent_days)
-    samples: dict[tuple[str, BaselineWindow], list[tuple[float, float]]] = {}
+    split = {name: rhythm for name, rhythm in (rhythms or {}).items() if name in wanted and rhythm.peaks}
+    samples: dict[tuple[str, BaselineWindow, int], list[tuple[float, float, date]]] = {}
     for record in records:
-        started = record.started_at
+        started = record.started_at if timezone is None else record.started_at.astimezone(timezone)
         if started.date() >= day:
             continue  # 今天不算自己的常态
         windows = (BaselineWindow.ALL,) if started.date() < cutoff else (BaselineWindow.ALL, BaselineWindow.RECENT)
-        point = (float(started.hour * 60 + started.minute), record.duration_minutes)
+        minute = started.hour * 60 + started.minute
+        point = (float(minute), record.duration_minutes, started.date())
         for concept in _concepts_of(record, concepts, wanted):
+            strata = [UNSPLIT]
+            peak = peak_of(split.get(concept), minute, slack_minutes=slack_minutes)
+            if peak != UNSPLIT:
+                strata.append(peak)
             for window in windows:
-                samples.setdefault((concept, window), []).append(point)
-    return _snapshot(keys, samples, day=day, min_samples=min_samples)
+                for stratum in strata:
+                    samples.setdefault((concept, window, stratum), []).append(point)
+    return _snapshot(keys, samples, day=day, min_samples=min_samples, shadow=shadow, rhythms=split, slack_minutes=slack_minutes)
 
 
 def _concepts_of(record: ConceptHits, concepts: ConceptSet, wanted: Mapping[str, str]) -> tuple[str, ...]:
@@ -164,45 +232,70 @@ def _concepts_of(record: ConceptHits, concepts: ConceptSet, wanted: Mapping[str,
 
 def _snapshot(
     keys: Sequence[BaselineKey],
-    samples: Mapping[tuple[str, BaselineWindow], Sequence[tuple[float, float]]],
+    samples: Mapping[tuple[str, BaselineWindow, int], Sequence[tuple[float, float, date]]],
     *,
     day: date,
     min_samples: int,
+    shadow: Sequence[BaselineKey] = (),
+    rhythms: Mapping[str, Rhythm] | None = None,
+    slack_minutes: int = 0,
 ) -> BaselineSnapshot:
     values: dict[str, str] = {}
     counts: dict[str, int] = {}
     missing: list[str] = []
-    medians: dict[tuple[str, BaselineStatistic, BaselineWindow], tuple[float, int]] = {}
+    by_peak: dict[tuple[str, int], dict[str, str]] = {}
+    medians: dict[tuple[str, BaselineStatistic, BaselineWindow, int], tuple[float, int]] = {}
+    strata = {(concept, stratum) for concept, _window, stratum in samples}
     for key in keys:
-        points = samples.get((key.concept, key.window), ())
-        if len(points) < min_samples:
-            missing.append(key.text)
-            continue
-        median = _median_of(points, key.statistic)
-        medians[(key.concept, key.statistic, key.window)] = (median, len(points))
-        values[key.text] = _render(key.statistic, median)
-        counts[key.text] = len(points)
-    return BaselineSnapshot(day=day, values=values, samples=counts, missing=tuple(missing), drifts=_drifts(medians))
+        for stratum in sorted(stratum for concept, stratum in strata if concept == key.concept) or [UNSPLIT]:
+            points = samples.get((key.concept, key.window, stratum), ())
+            days = _days_of(points)
+            if days < min_samples:
+                if stratum == UNSPLIT:
+                    missing.append(key.text)
+                continue
+            median = _median_of(points, key.statistic)
+            medians[(key.concept, key.statistic, key.window, stratum)] = (median, days)
+            if stratum == UNSPLIT:
+                values[key.text] = _render(key.statistic, median)
+                counts[key.text] = days
+            else:
+                by_peak.setdefault((key.concept, stratum), {})[key.text] = _render(key.statistic, median)
+    for key in shadow:
+        # 陪算的历来窗：只为漂移，不落 values、不记 missing（它不是谁要的材料）。
+        for stratum in sorted(stratum for concept, stratum in strata if concept == key.concept):
+            points = samples.get((key.concept, key.window, stratum), ())
+            if _days_of(points) >= min_samples:
+                medians[(key.concept, key.statistic, key.window, stratum)] = (_median_of(points, key.statistic), _days_of(points))
+    return BaselineSnapshot(
+        day=day, values=values, samples=counts, missing=tuple(missing), drifts=_drifts(medians),
+        by_peak=by_peak, peaks=rhythms or {}, slack_minutes=slack_minutes,
+    )
 
 
-def _median_of(points: Sequence[tuple[float, float]], statistic: BaselineStatistic) -> float:
+def _days_of(points: Sequence[tuple[float, float, date]]) -> int:
+    return len({occurred_on for _start, _duration, occurred_on in points})
+
+
+def _median_of(points: Sequence[tuple[float, float, date]], statistic: BaselineStatistic) -> float:
     if statistic is BaselineStatistic.USUAL_START:
-        return _circular_median([start for start, _duration in points])
-    return _median([duration for _start, duration in points])
+        return _circular_median([start for start, _duration, _day in points])
+    return _median([duration for _start, duration, _day in points])
 
 
 def _drifts(
-    medians: Mapping[tuple[str, BaselineStatistic, BaselineWindow], tuple[float, int]],
+    medians: Mapping[tuple[str, BaselineStatistic, BaselineWindow, int], tuple[float, int]],
 ) -> tuple[BaselineDrift, ...]:
-    """两个窗都算出来的才有漂移可说。"""
+    """两个窗都算出来的才有漂移可说；有节律的概念按峰各报（不分峰那一层的漂移对三餐这类是假的，有峰就不报它）。"""
 
     found = []
-    for (concept, statistic, window), (median, count) in sorted(
-        medians.items(), key=lambda item: (item[0][0], item[0][1].value)
+    split = {concept for concept, _statistic, _window, stratum in medians if stratum != UNSPLIT}
+    for (concept, statistic, window, stratum), (median, count) in sorted(
+        medians.items(), key=lambda item: (item[0][0], item[0][1].value, item[0][3])
     ):
-        if window is not BaselineWindow.RECENT:
+        if window is not BaselineWindow.RECENT or (stratum == UNSPLIT and concept in split):
             continue
-        overall = medians.get((concept, statistic, BaselineWindow.ALL))
+        overall = medians.get((concept, statistic, BaselineWindow.ALL, stratum))
         if overall is None:
             continue
         found.append(
@@ -213,6 +306,7 @@ def _drifts(
                 overall=overall[0],
                 samples_recent=count,
                 samples_overall=overall[1],
+                peak=stratum,
             )
         )
     return tuple(found)
@@ -251,6 +345,9 @@ __all__ = [
     "RECENT_WINDOW_DAYS",
     "BaselineDrift",
     "BaselineSnapshot",
+    "UNSPLIT",
     "baseline_table",
     "declared_keys",
+    "local_minute",
+    "peak_of",
 ]

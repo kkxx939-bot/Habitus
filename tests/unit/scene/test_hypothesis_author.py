@@ -10,13 +10,14 @@ import pytest
 from habitus.scene.concepts.rhythm import Rhythm, RhythmPeak
 from habitus.scene.hypotheses.author import (
     MAX_DRAFTS_PER_CONSEQUENT,
+    ExpansionLimits,
     HypothesisAuthor,
     HypothesisAuthorError,
     assemble_hypotheses,
     build_hypothesis_request,
     hypothesis_author_json_schema,
 )
-from habitus.scene.hypotheses.model import Aspect, HypothesisOrigin
+from habitus.scene.hypotheses.model import Antecedent, Aspect, HypothesisOrigin, PeakWindow
 from tests.unit.foresight.scripted_model import recording_client
 from tests.unit.scene.concept_fixtures import concept_set
 
@@ -32,6 +33,8 @@ THREE_PEAKS = Rhythm(
 )
 #: 打球只在周末冒头 → 无节律型（不数机会、没有时效）。
 NO_RHYTHM = Rhythm("打球", (RhythmPeak(1, 900, 990, 0.4),), 2, None)
+#: 前因的节律：晚睡一天一个峰（23:00–01:00）。给了它，前因就按峰分（#1 / #0 峰外）。
+LATE_RHYTHM = Rhythm("晚睡", (RhythmPeak(1, 1380, 1500, 0.6),), 7, 24.0)
 
 def draft(**overrides: object) -> dict[str, object]:
     """一条答复。**每个键都要有**：schema 是严格模式的（`required` 列全部属性），"可选"用 null / [] 表达。"""
@@ -41,7 +44,6 @@ def draft(**overrides: object) -> dict[str, object]:
         "aspect": "probability",
         "direction": "down",
         "type_prior": "inhibiting",
-        "expected_at": 1,
         "released_by": [],
         "split_by": [],
         "why": "前一晚睡得很晚，早上会睡过早餐的时间",
@@ -56,17 +58,34 @@ LATE_TO_BREAKFAST: dict[str, object] = {"hypotheses": [draft()]}
 def test_a_rhythmic_consequent_gets_one_account_per_peak() -> None:
     """一天三个咖啡机会 = 三条假设、三本账：三个峰的本来概率不同（0.55 / 0.40 / 0.30），混一本就读不出东西。"""
 
-    hypotheses, signals = assemble_hypotheses(LATE_TO_BREAKFAST, CONCEPTS, "早餐", THREE_PEAKS, now=NOW)
-    assert [item.expected_at for item in hypotheses] == [1, 2, 3]
+    hypotheses, signals = assemble_hypotheses(LATE_TO_BREAKFAST, CONCEPTS, "早餐", {"早餐": THREE_PEAKS}, now=NOW)
+    assert [item.consequent_peak for item in hypotheses] == [1, 2, 3]
     assert len({item.identity for item in hypotheses}) == 3
-    assert all(item.identity.endswith(f"--probability--{item.expected_at}") for item in hypotheses)
+    assert all(item.identity.endswith(f"--probability--{item.consequent_peak}") for item in hypotheses)
     assert all(item.aspect is Aspect.PROBABILITY and item.horizon == 1 and not item.released_by for item in hypotheses)
+    # 峰表从节律口抄进假设：账要稳定地指着同一个钟面时段，树重建了也不改。
+    assert hypotheses[1].consequent_window == PeakWindow(2, 780, 840) and hypotheses[0].windows == {"早餐": (PeakWindow(1, 420, 510), PeakWindow(2, 780, 840), PeakWindow(3, 1200, 1260))}
     assert any("逐峰各一条" in signal for signal in signals)
-    # 模型的猜只进理由，不定形状。
-    assert "基准猜第 1 次机会" in hypotheses[0].note
+    # 模型没猜形状：理由原样进 note。
+    assert hypotheses[0].note == "前一晚睡得很晚，早上会睡过早餐的时间"
 
-    single, _ = assemble_hypotheses(LATE_TO_BREAKFAST, CONCEPTS, "早餐", ONE_PEAK, now=NOW)
-    assert [item.expected_at for item in single] == [1]
+    single, _ = assemble_hypotheses(LATE_TO_BREAKFAST, CONCEPTS, "早餐", {"早餐": ONE_PEAK}, now=NOW)
+    assert [item.consequent_peak for item in single] == [1]
+
+
+def test_a_rhythmic_antecedent_is_split_by_its_own_peaks_too() -> None:
+    """二-6 后半（2026-09-30）：前因也按钟面峰分——晚睡在它自己的峰上（#1）与峰外（#0）各一本账；多体下每个元素都分。"""
+
+    hypotheses, signals = assemble_hypotheses(LATE_TO_BREAKFAST, CONCEPTS, "早餐", {"早餐": ONE_PEAK, "晚睡": LATE_RHYTHM}, now=NOW)
+    assert sorted(item.identity for item in hypotheses) == ["早餐/晚睡#0@重--probability--1", "早餐/晚睡#1@重--probability--1"]
+    assert all(item.windows["晚睡"] == (PeakWindow(1, 1380, 1500),) for item in hypotheses)
+    # 两个元素都有节律：(2 种晚睡) × (2 种打球) = 4 本；情境元素（出差中）不分。
+    both = {"hypotheses": [draft(antecedents=[{"concept": "晚睡", "grade": None}, {"concept": "打球", "grade": None}, {"concept": "出差中", "grade": None}])]}
+    expanded, _ = assemble_hypotheses(both, CONCEPTS, "早餐", {"早餐": ONE_PEAK, "晚睡": LATE_RHYTHM, "打球": Rhythm("打球", (RhythmPeak(1, 1140, 1200, 0.3),), 7, 24.0)}, now=NOW)
+    assert len(expanded) == 4 and all(any(a.concept == "出差中" and a.peak is None for a in item.antecedents) for item in expanded)
+    # 前因一天的峰超过上限就不分（保护闸，配置化）。
+    capped, notes = assemble_hypotheses(LATE_TO_BREAKFAST, CONCEPTS, "早餐", {"早餐": ONE_PEAK, "晚睡": LATE_RHYTHM}, now=NOW, limits=ExpansionLimits(max_antecedent_peaks=0))
+    assert [item.identity for item in capped] == ["早餐/晚睡@重--probability--1"] and any("不分峰" in note for note in notes)
 
 
 def test_the_count_aspect_takes_one_account_whose_horizon_is_the_whole_day() -> None:
@@ -79,13 +98,12 @@ def test_the_count_aspect_takes_one_account_whose_horizon_is_the_whole_day() -> 
                 aspect="count",
                 direction="up",
                 type_prior="none",
-                expected_at=None,
                 why="困了会多喝几次",
             )
         ]
     }
-    (hypothesis,), _signals = assemble_hypotheses(answer, CONCEPTS, "早餐", THREE_PEAKS, now=NOW)
-    assert hypothesis.expected_at == 1 and hypothesis.horizon == 3 and "说不准" in hypothesis.note
+    (hypothesis,), _signals = assemble_hypotheses(answer, CONCEPTS, "早餐", {"早餐": THREE_PEAKS}, now=NOW)
+    assert hypothesis.consequent_peak == 1 and hypothesis.horizon == 3 and hypothesis.note == "困了会多喝几次"
 
 
 def test_a_consequent_without_a_rhythm_becomes_one_open_ended_account() -> None:
@@ -97,16 +115,14 @@ def test_a_consequent_without_a_rhythm_becomes_one_open_ended_account() -> None:
                 antecedents=[{"concept": "晚睡", "grade": None}],
                 direction="up",
                 type_prior="promoting",
-                expected_at=2,
                 released_by=["早餐"],
                 why="熬夜之后想动一动",
             )
         ]
     }
-    (hypothesis,), signals = assemble_hypotheses(answer, CONCEPTS, "打球", NO_RHYTHM, now=NOW)
-    assert hypothesis.is_open_ended and hypothesis.expected_at is None and hypothesis.released_by == ("早餐",)
-    assert hypothesis.identity.endswith("--probability--open")
-    assert any("树上没节律" in signal for signal in signals)
+    (hypothesis,), _signals = assemble_hypotheses(answer, CONCEPTS, "打球", {"打球": NO_RHYTHM}, now=NOW)
+    assert hypothesis.is_open_ended and hypothesis.consequent_peak is None and hypothesis.released_by == ("早餐",)
+    assert hypothesis.identity.endswith("--probability--open") and hypothesis.windows == {}
 
 
 def test_timing_and_count_are_refused_on_a_consequent_with_no_rhythm() -> None:
@@ -114,27 +130,19 @@ def test_timing_and_count_are_refused_on_a_consequent_with_no_rhythm() -> None:
 
     answer = {"hypotheses": [draft(antecedents=[{"concept": "晚睡", "grade": None}], aspect="timing", direction="up", type_prior="none", why="累了会拖后")]}
     with pytest.raises(ValueError, match="cannot be measured"):
-        assemble_hypotheses(answer, CONCEPTS, "打球", NO_RHYTHM, now=NOW)
-
-
-def test_an_out_of_range_guess_is_reported_but_the_expansion_goes_on() -> None:
-    """A4："模型写的 expected_at 与节律对不上就报出来"——报出来，不丢掉这条假设。"""
-
-    answer = {"hypotheses": [draft(expected_at=9)]}
-    hypotheses, signals = assemble_hypotheses(answer, CONCEPTS, "早餐", ONE_PEAK, now=NOW)
-    assert [item.expected_at for item in hypotheses] == [1]
-    assert any("一天只有 1 个" in signal for signal in signals)
+        assemble_hypotheses(answer, CONCEPTS, "打球", {"打球": NO_RHYTHM}, now=NOW)
 
 
 def test_zero_hypotheses_is_a_legitimate_answer() -> None:
     """安慰剂输入（编出来的无关配对）上它就该一条都不给；这不是失败。"""
 
-    hypotheses, signals = assemble_hypotheses({"hypotheses": []}, CONCEPTS, "早餐", ONE_PEAK, now=NOW)
+    hypotheses, signals = assemble_hypotheses({"hypotheses": []}, CONCEPTS, "早餐", {"早餐": ONE_PEAK}, now=NOW)
     assert hypotheses == () and any("一条都没写" in signal for signal in signals)
 
 
 def test_the_algorithm_caps_its_own_fan_out_instead_of_blaming_the_model() -> None:
-    """一个后件最多 24 本账，而"逐峰各一条"是**算法**的展开——超了就截断并报出来。
+    """一个后件最多 ``max_accounts_per_consequent`` 本账（配置化，默认 36），而"逐峰各一条"是**算法**的展开——超了先合回前因的峰、
+    再截后果峰，并报出来。
 
     探针实测：4 组前因 × 12 个峰 = 48 本 → 老写法整轮拒掉，报错还写"少写几组前因"，
     把算法的展开算到模型头上（模型写 4 组前因本身没错）。
@@ -144,11 +152,15 @@ def test_the_algorithm_caps_its_own_fan_out_instead_of_blaming_the_model() -> No
     sets = ([{"concept": "晚睡", "grade": None}], [{"concept": "打球", "grade": None}], [{"concept": "运动", "grade": None}],
             [{"concept": "晚睡", "grade": None}, {"concept": "出差中", "grade": None}])
     four = {"hypotheses": [draft(antecedents=items) for items in sets]}
-    hypotheses, signals = assemble_hypotheses(four, CONCEPTS, "早餐", many, now=NOW)
-    # 4 组 × 每组最多 24//4=6 次机会 = 24 本，正好压在上限上
+    hypotheses, signals = assemble_hypotheses(four, CONCEPTS, "早餐", {"早餐": many}, now=NOW, limits=ExpansionLimits(max_accounts_per_consequent=24))
+    # 4 组 × 每组最多 24//4=6 个峰 = 24 本，正好压在上限上
     assert len(hypotheses) == 24 and len({item.identity for item in hypotheses}) == 24
-    assert max(item.expected_at or 0 for item in hypotheses) == 6
-    assert any("只建前 6 次" in signal for signal in signals)
+    assert max(item.consequent_peak or 0 for item in hypotheses) == 6
+    assert any("只建前 6 个" in signal for signal in signals)
+    # 前因也有节律时先把前因合回一条（晚睡 #1/#0 × 12 峰 = 24 > 6），再截后果峰。
+    squeezed, notes = assemble_hypotheses(four, CONCEPTS, "早餐", {"早餐": many, "晚睡": LATE_RHYTHM}, now=NOW, limits=ExpansionLimits(max_accounts_per_consequent=24))
+    assert len(squeezed) == 24 and all(a.peak is None for item in squeezed for a in item.antecedents)
+    assert any("晚睡 不分峰" in note for note in notes)
 
 
 def test_enumerating_the_concept_set_is_refused() -> None:
@@ -157,10 +169,10 @@ def test_enumerating_the_concept_set_is_refused() -> None:
     one = draft()
     answer = {"hypotheses": [one] * (MAX_DRAFTS_PER_CONSEQUENT + 1)}
     with pytest.raises(ValueError, match="at most"):
-        assemble_hypotheses(answer, CONCEPTS, "早餐", ONE_PEAK, now=NOW)
+        assemble_hypotheses(answer, CONCEPTS, "早餐", {"早餐": ONE_PEAK}, now=NOW)
     # 两条展开成同一身份（同一前件集合、同一方面）：一本账混两种量，拒。
     with pytest.raises(ValueError, match="share one identity"):
-        assemble_hypotheses({"hypotheses": [one, one]}, CONCEPTS, "早餐", ONE_PEAK, now=NOW)
+        assemble_hypotheses({"hypotheses": [one, one]}, CONCEPTS, "早餐", {"早餐": ONE_PEAK}, now=NOW)
 
 
 def test_a_tautology_or_an_unknown_grade_does_not_pass_the_concept_set() -> None:
@@ -168,10 +180,10 @@ def test_a_tautology_or_an_unknown_grade_does_not_pass_the_concept_set() -> None
 
     answer = {"hypotheses": [draft(antecedents=[{"concept": "打球", "grade": None}], direction="up", type_prior="promoting", why="重言")]}
     with pytest.raises(ValueError, match="ancestor chain"):
-        assemble_hypotheses(answer, CONCEPTS, "运动", ONE_PEAK, now=NOW)
+        assemble_hypotheses(answer, CONCEPTS, "运动", {"运动": ONE_PEAK}, now=NOW)
     wrong_grade = {"hypotheses": [draft(antecedents=[{"concept": "晚睡", "grade": "中"}])]}
     with pytest.raises(ValueError, match="grade"):
-        assemble_hypotheses(wrong_grade, CONCEPTS, "早餐", ONE_PEAK, now=NOW)
+        assemble_hypotheses(wrong_grade, CONCEPTS, "早餐", {"早餐": ONE_PEAK}, now=NOW)
 
 
 def test_the_prompt_and_schema_pin_the_concept_names_and_show_the_rhythm() -> None:

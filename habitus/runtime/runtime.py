@@ -432,7 +432,12 @@ class Runtime:
             raise RuntimeStateError(
                 "behavior pipeline is not configured; set behavior.primary_subject"
             )
-        return await asyncio.to_thread(_deliver_behavior_observations, behavior, envelope)
+        return await asyncio.to_thread(
+            _deliver_behavior_observations,
+            behavior,
+            envelope,
+            observer=self.components.infrastructure.observer,
+        )
 
     async def merge_behavior_kinds(self, source: str, target: str) -> BehaviorKindMergeReport:
         """词表合并正门：``source`` 并入 ``target``，树上旧 token 重打（离线整理判定之后调用）。"""
@@ -957,6 +962,21 @@ class Runtime:
         except Exception as exc:
             status = ObservationStatus.DEGRADED
             attributes["queue_error_type"] = type(exc).__name__
+        behavior = self.components.behavior
+        if behavior is not None:
+            try:
+                behavior_queue = await asyncio.to_thread(behavior.jobs.observability_snapshot)
+                attributes.update(
+                    behavior_queue_staged=behavior_queue.staged,
+                    behavior_queue_queued=behavior_queue.queued,
+                    behavior_queue_running=behavior_queue.running,
+                    behavior_queue_failed=behavior_queue.failed,
+                    behavior_queue_oldest_age_seconds=behavior_queue.oldest_age_seconds,
+                    behavior_queue_high_watermark=behavior_queue.high_watermark,
+                )
+            except Exception as exc:
+                status = ObservationStatus.DEGRADED
+                attributes["behavior_queue_error_type"] = type(exc).__name__
         snapshotter = getattr(self.components.infrastructure.path_lock.lock_store, "observability_snapshot", None)
         if callable(snapshotter):
             try:

@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import cached_property
 from types import MappingProxyType
 
 from habitus.behavior.model import BehaviorAddress, BehaviorKind
@@ -70,6 +71,9 @@ class ConceptHits:
     mapper: str
     mapped_at: datetime
     signals: tuple[str, ...] = ()
+    #: 这条记录**判过**哪些情境概念（含成立的）。没判过（材料不全、情境概念是后来才加的）与判过不成立
+    #: 在盘上要分得开，稳定性分层才知道哪一层该收哪条（2026-09-30 裁定八）。
+    situations_checked: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         try:
@@ -106,9 +110,15 @@ class ConceptHits:
             raise ConceptHitsError("mapped_at must be a timezone-aware datetime")
         object.__setattr__(self, "mapped_at", self.mapped_at.astimezone(UTC))
         object.__setattr__(self, "signals", _signals(self.signals))
+        # 成立的必然判过：没列进 checked 的成立情境补进去（旧记录与只给命中的夹具都走这里）。
+        checked = _names(tuple(dict.fromkeys((*self.situations_checked, *(hit.concept for hit in situations)))), "situations_checked")
+        object.__setattr__(self, "situations_checked", checked)
 
-    @property
+    @cached_property
     def address(self) -> BehaviorAddress:
+        """地址解析一次存着：结算对每条开着的承诺扫窗内全部记录、每次比较都取 ``started_at``，逐次重解析 URI
+        是平方级的活（评审 B-10：一本账第 120 夜解析 50,533 次）。与 ``Claim._anchor`` 同一个做法。"""
+
         return BehaviorURI.parse(self.occurrence_uri).to_address()
 
     @property

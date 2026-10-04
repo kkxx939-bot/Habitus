@@ -34,7 +34,10 @@ from habitus.behavior.fusion.prompt import FUSION_PROMPT_VERSION
 from habitus.behavior.fusion.receipt import segment_identity
 from habitus.behavior.fusion.receipt_store import BehaviorFusionReceiptStore
 from habitus.behavior.fusion.segmentation import BehaviorFusionSegment, segment_observations
+from habitus.behavior.fusion.telemetry import enqueue_attributes
 from habitus.behavior.observation import BehaviorObservationStore
+from habitus.behavior.telemetry import OBSERVATION_CATEGORY
+from habitus.foundation.observability import NullObserver, Observer, observe_operation
 
 DEFAULT_QUIET_PERIOD_SECONDS = 300.0
 
@@ -45,6 +48,11 @@ class BehaviorFusionEnqueueResult:
 
     enqueued: tuple[BehaviorFusionJob, ...]
     withheld_observations: int
+    # 扫描时的规模：覆盖集多大、读了几份交付、切出几段、静默期扣住几段。
+    covered_observations: int = 0
+    envelopes: int = 0
+    segments: int = 0
+    withheld_segments: int = 0
 
     @property
     def count(self) -> int:
@@ -64,6 +72,7 @@ class BehaviorFusionEnqueuer:
         coverage: BehaviorCoverageIndex | None = None,
         quiet_period_seconds: float = DEFAULT_QUIET_PERIOD_SECONDS,
         clock: Callable[[], datetime] | None = None,
+        observer: Observer | None = None,
     ) -> None:
         if not isinstance(observations, BehaviorObservationStore):
             raise TypeError("observations must be BehaviorObservationStore")
@@ -89,14 +98,18 @@ class BehaviorFusionEnqueuer:
         self.coverage = coverage or BehaviorCoverageIndex(observations.root)
         self.quiet_period = timedelta(seconds=float(quiet_period_seconds))
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.observer: Observer = observer or NullObserver()
 
     def enqueue_ready(self) -> BehaviorFusionEnqueueResult:
         """把已经收尾且尚未被任何作业覆盖的观测登记成作业。"""
 
         # 整段扫描圈在同一个栅栏里：读覆盖、读观测、登记三步之间若有别的扫描插进来，两次扫描会
         # 按不同快照切出不同的段，``job_id`` 不同于是幂等失效，同一批观测被融合两次。
-        with self.jobs.scan_fence():
-            return self._scan()
+        with observe_operation(self.observer, OBSERVATION_CATEGORY, "fusion_enqueue") as attributes:
+            with self.jobs.scan_fence():
+                result = self._scan()
+            attributes.update(enqueue_attributes(result))
+            return result
 
     def _scan(self) -> BehaviorFusionEnqueueResult:
         now = self._timestamp()
@@ -105,12 +118,14 @@ class BehaviorFusionEnqueuer:
         covered.update(self.coverage.covered_observation_ids(now))
         envelopes = self.observations.list()
         if not envelopes:
-            return BehaviorFusionEnqueueResult((), 0)
+            return BehaviorFusionEnqueueResult((), 0, covered_observations=len(covered))
         # 覆盖记录在其交付仍在存储里时不会过期（``coverage.expire(retain=…)``），所以"处理过没有"
         # 在这里可以完全由覆盖索引回答；从未融合的观测无论多旧都照常入队——下游停机再久也不丢数据。
         segments = segment_observations(envelopes, config=self.config, exclude=covered)
         if not segments:
-            return BehaviorFusionEnqueueResult((), 0)
+            return BehaviorFusionEnqueueResult(
+                (), 0, covered_observations=len(covered), envelopes=len(envelopes)
+            )
         cutoff = self._timestamp() - self.quiet_period
         # 只取**前缀**而不是逐段过滤：作业严格串行，越过一段未收尾的观测去登记它后面的那段，
         # 会让后一段先融合、先落树，而前一段回来时再也接不上上下文。
@@ -119,7 +134,12 @@ class BehaviorFusionEnqueuer:
             ready += 1
         withheld = sum(len(item.fragments) for item in segments[ready:])
         return BehaviorFusionEnqueueResult(
-            tuple(self._enqueue(item) for item in segments[:ready]), withheld
+            tuple(self._enqueue(item) for item in segments[:ready]),
+            withheld,
+            covered_observations=len(covered),
+            envelopes=len(envelopes),
+            segments=len(segments),
+            withheld_segments=len(segments) - ready,
         )
 
     def _is_settled(self, segment: BehaviorFusionSegment, cutoff: datetime) -> bool:

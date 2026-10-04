@@ -25,7 +25,7 @@ from habitus.scene.ledger.model import (
 )
 from habitus.scene.occurrences.model import ConceptHit
 
-LEDGER_SCHEMA_VERSION = "scene_ledger_v3"
+LEDGER_SCHEMA_VERSION = "scene_ledger_v4"
 
 
 class LedgerSchemaError(ValueError):
@@ -52,6 +52,7 @@ def encode_claim(claim: Claim) -> bytes:
         "antecedent_hits": [{"concept": hit.concept, "grade": hit.grade} for hit in claim.antecedent_hits],
         "antecedent_uris": list(claim.antecedent_uris),
         "situation_snapshot": list(claim.situation_snapshot),
+        "situations_checked": list(claim.situations_checked),
         "control": None
         if claim.control is None
         else {
@@ -78,6 +79,7 @@ def decode_claim(raw: bytes, *, expected: ClaimRef | None = None) -> Claim:
             antecedent_hits=tuple(_hit(item) for item in _list(payload, "antecedent_hits")),
             antecedent_uris=tuple(str(item) for item in _list(payload, "antecedent_uris")),
             situation_snapshot=tuple(str(item) for item in _list(payload, "situation_snapshot")),
+            situations_checked=tuple(str(item) for item in _list(payload, "situations_checked")),
             control=None if control is None else _snapshot(control),
             created_at=_moment(payload, "created_at"),
         )

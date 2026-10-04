@@ -4,10 +4,16 @@
   比），情境元素查触发那条的 ``situation_hits``。
 - **锚 ＝ 集合里最后开始的行为概念的 ``started_at``**（2026-09-26 裁定）。多行为集合里其余元素要在锚之前
   ``gathering_hours`` 内出现过——这个时长是待定值，在重放上定。
-- **去重**：同一假设、两条触发等的是后件的**同一次机会**（前一条承诺的第 1 次机会还没开始，新触发就来了）→ 一条；
-  同一触发同一假设只开一次。没有对照快照的承诺只按触发去重。
-- **对照**：开的那一刻向组合根注入的口要后件在锚之后的前 ``snapshot_opportunities`` 个机会，快照进承诺；要不到就
-  ``control=None`` 照样开（读时算不出强度，但机会本身是事实）。
+- **去重只有一道：同一触发同一假设只开一次**（幂等）。**每一次前因都独立开账**（2026-09-30 二-6，用户原话："不管一天有
+  多少相同的行为，要算都是分开算的，对某个行为的影响无论是前因还是后果都是要分开算的"）——下午两杯咖啡各开一条，
+  周一约球周二又约是两条前提。旧写法"等同一次机会就不开"被去掉了：它把第二次约球吞掉（评审 A-6）、结算后重跑又
+  不幂等（评审 B-4），而且要往回看几天的账。几条承诺等同一个后果时段时，**读侧**按块算样本数（R3-05），不在这里合。
+- **不回填**（2026-09-30 裁定四）：闭环与安慰剂写的假设，只给**写入时刻之后**的触发开账——用来发现它的那批观测
+  不算它的证据；同一夜重跑两遍也不会多开。基准凭常识写、没看过账，可以回看历史。
+- **前因按峰归账**（2026-10-01）：前件带峰号的，触发（或凑齐它的那条记录）的开始时刻要落在那个峰的钟面窗口里
+  （两边各展机会口的容差）；``#0`` 要落在它全部窗口之外。不落在这个峰号上的，不给这条假设开，给同前因另一个峰号的那条开。
+- **对照**：开的那一刻向组合根注入的口要后果峰窗口在锚之后各天的落点（概率一个；次数方面要接下来几个），快照进承诺；
+  那天没曲线对照为空，窗口照样在，账照样开。无节律型（没有窗口）不要对照。
 - **幂等**：承诺已在盘上就跳过，不比内容——事后树重建了对照也不改。
 """
 
@@ -18,9 +24,8 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 
 from habitus.scene.concepts.model import ConceptSet
-from habitus.scene.hypotheses.model import Antecedent, Hypothesis
+from habitus.scene.hypotheses.model import Antecedent, Hypothesis, HypothesisOrigin, peak_index_of
 from habitus.scene.ledger.model import (
-    MAX_SNAPSHOT_OPPORTUNITIES,
     Claim,
     LedgerError,
     OpportunityProvider,
@@ -36,27 +41,17 @@ class LedgerConfig:
     """全部是待定值，在重放上定，这里只是默认。
 
     - ``gathering_hours``  多行为集合的凑齐时长；
-    - ``snapshot_opportunities``  开承诺时向对照口要后件的前几个机会（要够结算数到 ``censor_after`` 次，再加次数方面的地平线）；
-    - ``censor_after``  等过这么多个**已观测**机会后件还没来 → 右删失；
-    - ``opportunity_coverage``  一个机会的 span 覆盖比例低于它就算没看清。
+    - ``opportunity_coverage``  一个窗口的覆盖比例低于它就算没看清。
+
+    "等过几个机会就删失"那个数（``censor_after``）2026-10-01 随账改成按钟面窗口记而删掉：每本账只等自己那一个窗口。
     """
 
     gathering_hours: float = 24.0
-    snapshot_opportunities: int = 16
-    censor_after: int = 10
     opportunity_coverage: float = 0.5
 
     def __post_init__(self) -> None:
         if isinstance(self.gathering_hours, bool) or not isinstance(self.gathering_hours, int | float) or self.gathering_hours <= 0:
             raise ValueError("gathering_hours must be a positive number")
-        for label in ("snapshot_opportunities", "censor_after"):
-            value = getattr(self, label)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ValueError(f"{label} must be a positive integer")
-        if self.snapshot_opportunities > MAX_SNAPSHOT_OPPORTUNITIES:
-            raise ValueError(f"snapshot_opportunities is at most {MAX_SNAPSHOT_OPPORTUNITIES}")
-        if self.censor_after > self.snapshot_opportunities:
-            raise ValueError("censor_after cannot exceed snapshot_opportunities: the settler could never count that many passes")
         if (
             isinstance(self.opportunity_coverage, bool)
             or not isinstance(self.opportunity_coverage, int | float)
@@ -70,6 +65,7 @@ class OpeningReport:
     day: date
     opened: int
     already_open: int
+    #: 恒为 0，留着是为了不改调用方的形状。"等同一次机会就不开"那道去重 2026-09-30 按二-6 去掉了。
     overlapping: int
     without_control: int
     #: 前件或后件引用了已不存在的概念、这一晚开不了账的假设身份。改了概念名而忘了改假设时，这条假设会
@@ -77,6 +73,8 @@ class OpeningReport:
     unmappable: tuple[str, ...] = ()
     #: 机会口给了账本收不下的快照，那些承诺按"没有对照"开了。机会口自己的 bug，要能看见。
     unusable_snapshots: tuple[str, ...] = ()
+    #: 触发早于假设写入时刻、按"不回填"没开的条数（闭环与安慰剂）。
+    backfill_refused: int = 0
 
 
 def behaviour_hits(record: ConceptHits, concepts: ConceptSet) -> Mapping[str, str | None]:
@@ -126,10 +124,9 @@ def open_claims_for_day(
         return OpeningReport(day=day, opened=0, already_open=0, overlapping=0, without_control=0)
     lookback_start = min(record.started_at for record in records) - timedelta(hours=resolved.gathering_hours)
     earlier = hits.read_window(lookback_start, min(record.started_at for record in records))
-    opened = already = overlapping = without_control = 0
+    opened = already = without_control = refused = 0
     unmappable: list[str] = []
     unusable: list[str] = []
-    existing_claims: dict[str, list[Claim]] = {}
     for hypothesis in hypotheses:
         behaviours = tuple(item for item in hypothesis.antecedents if item.identity in concepts and concepts[item.identity].role.is_behavior)
         situations = tuple(item for item in hypothesis.antecedents if item.identity in concepts and concepts[item.identity].role.is_situation)
@@ -139,17 +136,13 @@ def open_claims_for_day(
             unmappable.append(hypothesis.identity)
             continue
         for record in records:
-            gathered = _gather(record, behaviours, situations, earlier + records, concepts, resolved.gathering_hours)
+            gathered = _gather(record, behaviours, situations, earlier + records, concepts, resolved.gathering_hours, hypothesis, opportunities.slack_minutes)
             if gathered is None:
                 continue
+            if not backfills(hypothesis) and record.started_at < hypothesis.created_at:
+                refused += 1
+                continue
             claim_hits, uris = gathered
-            if hypothesis.identity not in existing_claims:
-                # 惰性：只有真的凑齐了才读这条假设的账（一夜几百条假设、多半一条都不开；每条都读整本账是线性涨的）。
-                # 只装**还开着**的：已经兑现的承诺不再"等"任何机会，拿它去挡新触发会让第二次约球永远开不了账（评审 B6）。
-                # 去重只看**当期指纹**的承诺：改过第几次机会/方向之后，旧口径的承诺不该把新口径的机会挡掉。
-                existing_claims[hypothesis.identity] = [
-                    claim for claim in ledger.open_claims(hypothesis.identity) if claim.hypothesis_fingerprint == hypothesis.fingerprint
-                ]
             candidate = Claim(
                 hypothesis_identity=hypothesis.identity,
                 hypothesis_fingerprint=hypothesis.fingerprint,
@@ -158,50 +151,64 @@ def open_claims_for_day(
                 antecedent_hits=claim_hits,
                 antecedent_uris=uris,
                 situation_snapshot=tuple(hit.concept for hit in record.situation_hits),
+                situations_checked=record.situations_checked,
                 control=None,
                 created_at=now,
             )
             if ledger.claim_exists(candidate.ref):
                 already += 1
                 continue
-            if any(_awaits_same_opportunity(other, record.started_at) for other in existing_claims[hypothesis.identity]):
-                overlapping += 1
-                continue
-            # 要够结算数得到的个数：``censor_after`` 个删失步，以及时刻/次数量的那一次（第 expected_at + horizon − 1 个）。
-            # 要少了，那条假设的时刻/次数账永远结不了（评审 B5）。
-            wanted = max(resolved.snapshot_opportunities, (hypothesis.expected_at or 1) + hypothesis.horizon - 1)
-            snapshot = opportunities.opportunities(
-                OpportunityRequest(consequent=hypothesis.consequent_identity, anchor=record.started_at, count=wanted)
-            )
+            window = hypothesis.consequent_window
             try:
+                snapshot = None
+                if window is not None:
+                    # 概率与时刻只看自己那个窗口；次数方面接下来 horizon 个窗口（按后件的整张峰表轮着铺）。
+                    snapshot = opportunities.opportunities(
+                        OpportunityRequest(
+                            consequent=hypothesis.consequent_identity,
+                            anchor=record.started_at,
+                            count=hypothesis.horizon,
+                            window=window,
+                            windows=hypothesis.windows[hypothesis.consequent_identity],
+                        )
+                    )
                 claim = replace(candidate, control=snapshot)
             except LedgerError as exc:
-                # 机会口给了一份账本收不下的快照（第一个机会在锚之前结束、机会重叠……）。当"要不到对照"处理：
-                # 机会本身是事实，照样开；一条坏快照不该把整晚所有假设的承诺都掀掉（十 ④、评审 A-11）。
+                # 机会口给了一份账本收不下的快照（第一个机会在锚之前结束、机会重叠……）——不管它是在机会口里就抛、
+                # 还是装进承诺时才抛。当"要不到对照"处理：机会本身是事实，照样开；一条坏快照不该把整晚所有假设的
+                # 承诺都掀掉（十 ④、评审 A-11；第三批冒烟 10-01 实测塌过一夜）。
                 unusable.append(f"{hypothesis.identity}: {exc}")
                 claim = candidate
             if claim.control is None:
                 without_control += 1
             ledger.write_claim(claim)
-            existing_claims[hypothesis.identity].append(claim)
             opened += 1
     return OpeningReport(
         day=day,
         opened=opened,
         already_open=already,
-        overlapping=overlapping,
+        overlapping=0,
         without_control=without_control,
         unmappable=tuple(sorted(unmappable)),
         unusable_snapshots=tuple(sorted(unusable)),
+        backfill_refused=refused,
     )
 
 
-def _awaits_same_opportunity(existing: Claim, anchor: datetime) -> bool:
-    """已有承诺的第 1 次机会还没开始、新触发就来了 → 两条等的是后件的同一次机会，不再开。没有快照的承诺不参与。"""
+def backfills(hypothesis: Hypothesis) -> bool:
+    """这条假设能不能给写入时刻之前的触发开账。基准凭常识写、没看过账 → 能；闭环与安慰剂读过账 → 不能（裁定四 (b)）。"""
 
-    if existing.control is None:
-        return False
-    return existing.anchor <= anchor < existing.control.opportunities[0].span.start
+    return hypothesis.source.origin not in (HypothesisOrigin.MODERATION, HypothesisOrigin.PLACEBO)
+
+
+def peak_of(hypothesis: Hypothesis, antecedent: Antecedent, moment: datetime, *, slack_minutes: int) -> int:
+    """这条记录落在这个前件的第几个峰（0 = 全部窗口之外）。窗口两边各展容差、不越过与邻峰的中点；跨午夜的窗口把次日凌晨也算进去。"""
+
+    return peak_index_of(hypothesis.antecedent_windows(antecedent), moment.hour * 60 + moment.minute, slack_minutes=slack_minutes)
+
+
+def _matches_peak(hypothesis: Hypothesis, antecedent: Antecedent, record: ConceptHits, slack_minutes: int) -> bool:
+    return antecedent.peak is None or peak_of(hypothesis, antecedent, record.started_at, slack_minutes=slack_minutes) == antecedent.peak
 
 
 def _gather(
@@ -211,14 +218,19 @@ def _gather(
     pool: Sequence[ConceptHits],
     concepts: ConceptSet,
     gathering_hours: float,
+    hypothesis: Hypothesis,
+    slack_minutes: int,
 ) -> tuple[tuple[ConceptHit, ...], tuple[str, ...]] | None:
     """以 ``trigger`` 为锚，前件集合凑齐了吗？凑齐返回 (每个元素怎么命中的, 出了力的 occurrence)。
 
-    触发必须自己命中至少一个行为元素；其余行为元素要在锚之前 ``gathering_hours`` 内的别的记录上命中
-    （取最近的一条）；情境元素全在触发这条的情境栏里。
+    触发必须自己命中至少一个行为元素（**且落在那个元素的峰号上**）；其余行为元素要在锚之前 ``gathering_hours`` 内的
+    别的记录上命中（取最近的一条，同样要落在它的峰号上）；情境元素全在触发这条的情境栏里。
     """
 
-    if not any(matches_antecedent(trigger, item, concepts) for item in behaviours):
+    def hits(record: ConceptHits, item: Antecedent) -> bool:
+        return matches_antecedent(record, item, concepts) and _matches_peak(hypothesis, item, record, slack_minutes)
+
+    if not any(hits(trigger, item) for item in behaviours):
         return None
     for item in situations:
         if not matches_antecedent(trigger, item, concepts):
@@ -227,13 +239,13 @@ def _gather(
     matched: list[ConceptHit] = []
     uris = {trigger.occurrence_uri}
     for item in behaviours:
-        if matches_antecedent(trigger, item, concepts):
+        if hits(trigger, item):
             matched.append(ConceptHit(item.concept, _grade_of(trigger, item, concepts)))
             continue
         earlier = [
             record
             for record in pool
-            if horizon <= record.started_at < trigger.started_at and record.occurrence_uri != trigger.occurrence_uri and matches_antecedent(record, item, concepts)
+            if horizon <= record.started_at < trigger.started_at and record.occurrence_uri != trigger.occurrence_uri and hits(record, item)
         ]
         if not earlier:
             return None
@@ -253,4 +265,4 @@ def _grade_of(record: ConceptHits, antecedent: Antecedent, concepts: ConceptSet)
     return record.graded_situations.get(antecedent.identity)
 
 
-__all__ = ["LedgerConfig", "OpeningReport", "behaviour_hits", "matches_antecedent", "open_claims_for_day"]
+__all__ = ["LedgerConfig", "OpeningReport", "backfills", "behaviour_hits", "matches_antecedent", "open_claims_for_day", "peak_of"]

@@ -12,7 +12,6 @@ from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.hypotheses.model import ASPECT_LABELS, Aspect, Hypothesis, TypePrior
 from habitus.scene.storage import SceneStore
 from habitus.scene.views.behaviours import BehaviourSide, BehaviourView
-from habitus.scene.views.intentions import StandingIntention
 from habitus.scene.views.people import EntitySlice, ProfileView
 from habitus.scene.views.relations import FulfilmentReading, LayerReading, RelationReading, Strength, TypeReading
 from habitus.scene.views.residue import ResidueCandidate
@@ -110,7 +109,14 @@ def render_relation(reading: RelationReading, hypothesis: Hypothesis) -> str:
     if reading.strength.agrees_with_prior is not None:
         lines.append(f"与基准方向：{'一致' if reading.strength.agrees_with_prior else '相反'}")
     # 「显著」与「稳定」是两件事，分开印（用户 09-27）：显著 = 这个数不等于零；稳定 = 换了条件还成不成立。
-    lines.append(f"显著：{'是' if reading.significant else '否'}")
+    if reading.uncalibrated:
+        lines.append("显著：未校准（无节律型没有平时概率可比，攒够就必然\"显著\"；收口规则与双向验证做完前不作数，2026-09-30 裁定五）")
+    else:
+        lines.append(f"显著：{'是' if reading.significant else '否'}")
+    if reading.strength.total_passes:
+        share = reading.strength.skipped_passes / reading.strength.total_passes
+        caveat = "（只剔\"没来\"的机会，来了的从不剔，占比高时实际率偏高）" if share >= 0.1 else ""
+        lines.append(f"没看清而剔掉的机会：{reading.strength.skipped_passes}/{reading.strength.total_passes}（{share:.0%}）{caveat}")
     lines.append(f"稳定性：{_stability(reading)}")
     lines.append(f"未结算：{reading.open_claims} 条")
     if reading.stale_fingerprints:
@@ -131,7 +137,8 @@ def render_relation(reading: RelationReading, hypothesis: Hypothesis) -> str:
         lines += ["", "## 剂量"]
         for dose in reading.dose:
             grades = " · ".join(f"{grade} {_reading(strength)}" for grade, strength in dose.by_grade)
-            lines.append(f"- {dose.concept}：{grades} → {'单调，可信度升一档' if dose.monotonic else '不单调'}")
+            trend = "单调，可信度升一档" if dose.monotonic else ("档不够三个，不谈趋势" if len(dose.by_grade) < 3 else "不单调")
+            lines.append(f"- {dose.concept}：{grades} → {trend}")
         for concept in reading.unordered_dose:
             # 不静默：档跨午夜时阶梯排出来是"凌晨在深夜之前"，那条趋势是假的，所以不出数、说明为什么。
             lines.append(f"- {concept}：档跨午夜（22:00–02:00 这一类），阶梯排不出顺序，这一项不出数")
@@ -159,8 +166,10 @@ def _fulfilment(reading: FulfilmentReading) -> str:
     acc = reading.accumulation
     parts: list[str] = []
     if reading.interval is None or reading.rate is None:
-        short = f"，还差 {acc.short_by_count} 次 / {acc.short_by_blocks} 块" if not acc.sufficient else "，算不出"
-        parts.append(f"还没攒够：{acc.count} 次 · 跨 {acc.blocks} 块（块长 {acc.block_hours / 24:.1f} 天）{short}")
+        if acc.sufficient:
+            parts.append(f"攒够了（{acc.count} 次 · 跨 {acc.blocks} 块）但读不出数：兑现率没有区间")
+        else:
+            parts.append(f"还没攒够：{acc.count} 次 · 跨 {acc.blocks} 块（块长 {acc.block_hours / 24:.1f} 天），还差 {acc.short_by_count} 次 / {acc.short_by_blocks} 块")
     else:
         parts.append(f"{reading.rate:.0%} [{reading.interval.low:.0%}, {reading.interval.high:.0%}] · n={acc.count} · 跨 {acc.blocks} 块")
     parts.append(f"兑现 {reading.fulfilled} · 释放 {reading.released} · 关掉 {reading.closed} · 仍立着 {reading.standing_total}（其中 {reading.standing} 已过对照间隔）")
@@ -176,13 +185,21 @@ def _strength(strength: Strength) -> str:
     acc = strength.accumulation
     tail = f" · 无对照 {strength.without_control}" if strength.without_control else ""
     if strength.interval is None:
-        short = f"，还差 {acc.short_by_count} 次 / {acc.short_by_blocks} 块" if not acc.sufficient else "，算不出"
-        return f"还没攒够：{acc.count} 次 · 跨 {acc.blocks} 块（块长 {acc.block_hours / 24:.1f} 天）{short}{tail}"
+        if acc.sufficient and strength.degenerate_point is not None:
+            # 观测值全相同：区间算不出宽度，但点估计是实打实的（评审 A-14：六次都喝 3 杯不是"还没攒够"）
+            unit = {"minutes": "分", "times": "次"}.get(strength.unit, strength.unit)
+            digits = 1 if strength.unit == "times" else 0
+            return f"{strength.degenerate_point:+.{digits}f} {unit}（{acc.count} 次全相同，区间算不出宽度）· n={acc.count} · 跨 {acc.blocks} 块{tail}"
+        if acc.sufficient:
+            # 过了门槛却没有区间：不是没攒够，是读不出（第 k 次机会没有风险集……），原因印出来（评审 C-14 ②）
+            why = "没有一条承诺带平时概率" if strength.aspect is Aspect.PROBABILITY and strength.p1 is None else "区间算不出宽度"
+            return f"攒够了（{acc.count} 次 · 跨 {acc.blocks} 块）但读不出数：{why}{tail}"
+        return f"还没攒够：{acc.count} 次 · 跨 {acc.blocks} 块（块长 {acc.block_hours / 24:.1f} 天），还差 {acc.short_by_count} 次 / {acc.short_by_blocks} 块{tail}"
     interval = strength.interval
     if strength.aspect is Aspect.PROBABILITY:
-        p1 = "" if strength.p1 is None or strength.control is None else f"实际 {strength.p1:.0%}（{strength.events} 次到、{strength.censored} 次右删失） vs 本来 {strength.control:.0%} → "
-        latency = _latency(strength)
-        return f"{p1}{interval.point * 100:+.0f}pp [{interval.low * 100:+.0f}, {interval.high * 100:+.0f}] · n={acc.count} · 跨 {acc.blocks} 块{_per_step(strength)}{latency}{tail}"
+        p1 = "" if strength.p1 is None or strength.control is None else f"实际 {strength.p1:.0%}（{strength.events} 次到、{strength.absent} 次没来） vs 本来 {strength.control:.0%} → "
+        censored = f" · 没看清 {strength.censored}" if strength.censored else ""
+        return f"{p1}{interval.point * 100:+.0f}pp [{interval.low * 100:+.0f}, {interval.high * 100:+.0f}] · n={acc.count} · 跨 {acc.blocks} 块{censored}{_latency(strength)}{tail}"
     unit = {"minutes": "分", "times": "次"}.get(strength.unit, strength.unit)
     absent = f" · 缺席 {strength.absent}" if strength.absent else ""
     # 次数留一位小数：对照是几个峰的概率之和（0.5+0.4+0.3），"+0.8 次"按整数印成 "+1 次" 就把差额说反了（评审 C-9）。
@@ -203,25 +220,12 @@ def _stability(reading: RelationReading) -> str:
     return f"未测{skipped}"
 
 
-def _per_step(strength: Strength) -> str:
-    """逐次印，不是累积（用户 09-27）：每一次机会“当时还在等几条 / 这一次来了几条”。
-
-    只印第 expected_at 那一格会把“往后推”读成“不发生”：六次里 4 次吃了早餐、2 次推到第二天，
-    单看第 1 格是 33%，逐次看是 2/6 → 2/4 → 0/2。后面几格不能直接归给这条前件，它是定位工具。
-    """
-
-    if not strength.curve:
-        return ""
-    cells = " 、".join(f"第{item.step}次 {item.events}/{item.at_risk}" for item in strength.curve)
-    return f" · 逐次：{cells}"
-
-
 def _latency(strength: Strength) -> str:
-    if strength.median_steps is None and strength.median_hours is None:
+    """来了那些次从锚到后件的中位间隔。"是不做还是往后推"不在这一行答——由同一组前因的几本峰账摆在一起看（behaviours 那一面）。"""
+
+    if strength.median_hours is None:
         return ""
-    steps = "中位没到（S 未降到 0.5）" if strength.median_steps is None else f"中位第 {strength.median_steps} 次机会"
-    hours = "" if strength.median_hours is None else f"，到达者中位 {strength.median_hours:.0f} 小时"
-    return f" · 兑现：{steps}{hours}"
+    return f" · 到达者中位 {strength.median_hours:.0f} 小时"
 
 
 def render_behaviour(view: BehaviourView, concepts: ConceptSet) -> str:
@@ -242,7 +246,8 @@ def render_behaviour(view: BehaviourView, concepts: ConceptSet) -> str:
     if not view.effects:
         lines.append("（基准还没有为它写过假设）")
     for side in view.effects:
-        lines.append(f"- → {side.hypothesis.consequent} · {ASPECT_LABELS[side.hypothesis.aspect]} {side.hypothesis.opportunity_label}   {_reading(side.reading.strength)}")
+        body = _fulfilment(side.reading.fulfilment) if side.reading.fulfilment is not None else _strength(side.reading.strength)
+        lines.append(f"- → {side.hypothesis.consequent} · {ASPECT_LABELS[side.hypothesis.aspect]} {side.hypothesis.opportunity_label}   {body}")
     return "\n".join(lines) + "\n"
 
 
@@ -278,17 +283,6 @@ def _cause_lines(side: BehaviourSide) -> list[str]:
         verdict = "" if a.interval.disjoint_from(b.interval) else "（区间还重叠，看不出）"
         lines.append(f"    ↳ 「{share.situation}」在场 {_compact(a)}／不在场 {_compact(b)} → 额外 {gap:+.0f}{unit}{verdict}")
     return lines
-
-
-def render_intentions(items: Iterable[StandingIntention], *, now: datetime) -> str:
-    lines = [f"# 还立着的前提 · {now.isoformat(timespec='minutes')}", ""]
-    rows = list(items)
-    if not rows:
-        lines.append("（无）")
-    for item in rows:
-        following = "" if item.next_opportunity_at is None else f"（下一次机会 {item.next_opportunity_at.isoformat(timespec='minutes')}）"
-        lines.append(f"- {item.label()}{following} · 自 {item.since.isoformat(timespec='minutes')} · `{item.ref.hypothesis_identity}` {item.ref.day} {item.ref.leaf}")
-    return "\n".join(lines) + "\n"
 
 
 def render_residue(items: Iterable[ResidueCandidate], *, k: int, d: int) -> str:
@@ -330,7 +324,6 @@ def materialize_views(
     hypotheses: Mapping[str, Hypothesis],
     readings: Iterable[RelationReading],
     behaviours: Iterable[BehaviourView],
-    intentions: Iterable[StandingIntention],
     residue: Iterable[ResidueCandidate],
     profile: ProfileView,
     entities: Iterable[EntitySlice],
@@ -347,7 +340,6 @@ def materialize_views(
         files[f"relations/{reading.hypothesis_identity}.md"] = render_relation(reading, hypothesis)
     for view in behaviours:
         files[f"behaviours/{view.concept}.md"] = render_behaviour(view, concepts)
-    files["intentions/index.md"] = render_intentions(intentions, now=now)
     files["residue/index.md"] = render_residue(residue, k=k, d=d)
     files["profile.md"] = render_profile(profile, hypotheses)
     for item in entities:
@@ -363,7 +355,6 @@ __all__ = [
     "materialize_views",
     "render_behaviour",
     "render_entity",
-    "render_intentions",
     "render_profile",
     "render_relation",
     "render_residue",

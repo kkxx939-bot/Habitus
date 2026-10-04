@@ -620,6 +620,7 @@ def build_runtime(
         lock_store=resolved_lock.lock_store,
         path_lock=resolved_lock,
         observer=operation_observer,
+        span_controller=managed_observability,
         embedder=embedder,
     )
     # behavior 关着而 prediction 开着的组合已经在配置层被硬拒（见 HabitusConfig 的跨域校验），

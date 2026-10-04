@@ -1,4 +1,4 @@
-"""④ 结算：按后件的机会走。概率一来就结、等够已观测机会右删失；时刻看第 expected_at 次机会；次数数几次机会；逐机会判没看清。"""
+"""④ 结算：按这本账自己的钟面窗口走（2026-10-01）。概率：窗口里来了 / 过完没来 / 没看清；时刻看同一个窗口；次数数 horizon 个窗口；逐窗口判没看清。"""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ from tests.unit.scene.ledger_fixtures import (
 )
 
 LATE = record(DAY1, "就寝", 2, 10, ConceptHit("晚睡", "轻"), lasts_minutes=7 * 60)  # 被认到 09:10
-CONFIG = LedgerConfig(snapshot_opportunities=16, censor_after=3)
+CONFIG = LedgerConfig()
 
 
 def claim_for(hypothesis, *, control=True) -> Claim:
@@ -51,7 +51,7 @@ def claim_for(hypothesis, *, control=True) -> Claim:
         antecedent_hits=(ConceptHit("晚睡", "轻"),),
         antecedent_uris=(LATE.occurrence_uri,),
         situation_snapshot=(),
-        control=daily_snapshot(hypothesis.consequent, LATE.started_at, 16) if control else None,
+        control=daily_snapshot(hypothesis.consequent, LATE.started_at, hypothesis.horizon) if control else None,
         created_at=NOW,
     )
 
@@ -62,11 +62,11 @@ def settle(claim, hypothesis, records, *, now, coverage=None, config=CONFIG, unt
     return settle_claim(claim, hypothesis, records, CONCEPTS, now=now, until=until or now, coverage=coverage or FixedCoverage(1.0), config=config)
 
 
-# ── 概率 ──────────────────────────────────────────────────────────────────────
+# ── 概率（窗口账，2026-10-01） ────────────────────────────────────────────────────
 
 
-def test_probability_settles_the_moment_the_consequent_arrives_and_says_which_opportunity() -> None:
-    """七h：02:10 晚睡，07:00 吃了碗面——落在第 1 次机会，隔 4.8 小时；「就寝」还被认着（到 09:10）也照样算。"""
+def test_probability_settles_the_moment_the_consequent_arrives_inside_its_window() -> None:
+    """七h：02:10 晚睡，07:00 吃了碗面——落在这本账自己那个早餐窗（06:15–09:15）里，隔 4.8 小时；「就寝」还被认着（到 09:10）也照样算。"""
 
     claim = claim_for(LATE_TO_BREAKFAST)
     breakfast = record(DAY1, "吃了碗面", 7, 0, "早餐")
@@ -74,34 +74,31 @@ def test_probability_settles_the_moment_the_consequent_arrives_and_says_which_op
     assert settlement is not None and settlement.outcome is Outcome.OCCURRED
     assert settlement.observed_at == at(DAY1, 7, 0) and settlement.fulfilling_uri == breakfast.occurrence_uri
     assert settlement.latency_hours == pytest.approx(4.8333, abs=1e-3) and settlement.opportunity_index == 1 and settlement.passes == ()
-    # 第二天才吃 → 落在第 2 次机会，第 1 次机会记成"过了、看清了"。
+    # 第二天才吃：不算进这本账——那是"早餐#1"下一天的事；这本账在窗口过完后读成"没来"。往后推与不做分不分得开，
+    # 由同一前因的几本峰账摆在一起看（behaviours 面），不在一本账里数第几次。
     late_breakfast = record(DAY2, "早饭", 7, 50, "早餐")
     second = settle(claim, LATE_TO_BREAKFAST, (LATE, late_breakfast), now=at(DAY2, 8, 0))
-    assert second is not None and second.opportunity_index == 2 and second.observed_passes == 1 and second.passes[0].at == at(DAY1, 7, 45)
-    # 触发那条自己、锚之前的不算后件。
+    assert second is not None and second.outcome is Outcome.ABSENT and second.opportunity_index == 1 and second.passes[0].at == at(DAY1, 7, 45)
+    # 触发那条自己、锚之前的不算后件；窗口还没过完 → 不结。
     early = record(DAY1, "夜宵", 1, 0, "早餐")
-    assert settle(claim, LATE_TO_BREAKFAST, (LATE, early), now=at(DAY1, 10, 0)) is None
+    assert settle(claim, LATE_TO_BREAKFAST, (LATE, early), now=at(DAY1, 9, 0)) is None
+    assert settle(claim, LATE_TO_BREAKFAST, (LATE, early), now=at(DAY1, 10, 0)).outcome is Outcome.ABSENT  # type: ignore[union-attr]
 
 
-def test_an_opportunity_whose_consequent_the_mapper_could_not_judge_does_not_count(tmp_path) -> None:
-    """评审 A-4 / 用户 09-27「没看到就不算」：后件被映射器记成「未决」的那次机会不算它过了，也不算缺席。
+def test_a_window_whose_consequent_the_mapper_could_not_judge_does_not_count(tmp_path) -> None:
+    """评审 A-4 / 用户 09-27「没看到就不算」：后件被映射器记成「未决」的窗口不算它过了、也不算缺席——没看清（CENSORED）。
 
-    映射侧改成三态之后模型不再答"没有"，但账本这边如果照旧把那次机会算成"后件没来"，假负样本还是进来了——
+    映射侧改成三态之后模型不再答"没有"，但账本这边如果照旧把那个窗口算成"后件没来"，假负样本还是进来了——
     分母不该有它。这里造：DAY1 早餐时段有一条记录把「早餐」列进 unresolved（判不了）。
     """
 
     claim = claim_for(LATE_TO_BREAKFAST)
-    puzzling = record(DAY1, "吃了点东西", 7, 30, kind="吃饭")
-    puzzling = replace(puzzling, unresolved=("早餐",))
-    # 没有那条未决时：DAY1/2/3 三次机会都算过了、都看清了 → 第三次之后右删失。
-    assert settle(claim, LATE_TO_BREAKFAST, (LATE,), now=at(DAY3, 10, 0)).outcome is Outcome.CENSORED  # type: ignore[union-attr]
-    # 有了它：覆盖口照样说"全看见了"，但 DAY1 那次机会不算——还差一次，这一晚不结。
-    assert settle(claim, LATE_TO_BREAKFAST, (LATE, puzzling), now=at(DAY3, 10, 0)) is None
-    censored = settle(claim, LATE_TO_BREAKFAST, (LATE, puzzling), now=at(DAY3, 10, 0) + timedelta(days=1))
-    assert censored is not None and censored.outcome is Outcome.CENSORED
-    assert [item.observed for item in censored.passes] == [False, True, True, True]  # DAY1 那次没看清
-    assert censored.observed_passes == 3  # 生存分析的步数只数看清了的
-    # 时刻方面同理：第 1 次机会（DAY1 早上）没看清 → 删失，不是缺席。
+    puzzling = replace(record(DAY1, "吃了点东西", 7, 30, kind="吃饭"), unresolved=("早餐",))
+    assert settle(claim, LATE_TO_BREAKFAST, (LATE,), now=at(DAY1, 10, 0)).outcome is Outcome.ABSENT  # type: ignore[union-attr]
+    censored = settle(claim, LATE_TO_BREAKFAST, (LATE, puzzling), now=at(DAY1, 10, 0))
+    assert censored is not None and censored.outcome is Outcome.CENSORED and censored.reason == "窗口没看清"
+    assert [item.observed for item in censored.passes] == [False] and censored.observed_passes == 0
+    # 时刻方面同理：窗口没看清 → 删失，不是缺席。
     timing_claim = claim_for(LATE_TO_WAKE)
     wake_unresolved = replace(record(DAY1, "起了一下", 8, 0, kind="起床"), unresolved=("起床",))
     timing = settle(timing_claim, LATE_TO_WAKE, (LATE, wake_unresolved), now=at(DAY2, 12, 0))
@@ -111,28 +108,26 @@ def test_an_opportunity_whose_consequent_the_mapper_could_not_judge_does_not_cou
     assert settle(timing_claim, LATE_TO_WAKE, (LATE, other), now=at(DAY2, 12, 0)).outcome is Outcome.ABSENT  # type: ignore[union-attr]
 
 
-def test_probability_waits_through_opportunities_then_right_censors_after_enough_observed_ones() -> None:
-    """没来就等；过了 3 个**看清了的**机会还没来 → 右删失，带每个机会过没过、看清没。没看清的机会不算它过了。"""
+def test_probability_waits_for_its_window_then_reads_absent_or_censored() -> None:
+    """没来就等到窗口末尾；过了、看清了 → 没来（ABSENT）；过了、没看清 → 删失。每本账只等自己那一个窗口，不数"第几次机会"。"""
 
     claim = claim_for(LATE_TO_BREAKFAST)
-    assert settle(claim, LATE_TO_BREAKFAST, (LATE,), now=at(DAY1, 14, 0)) is None  # 第 1 次机会过了，还差两个
-    assert settle(claim, LATE_TO_BREAKFAST, (LATE,), now=at(DAY3, 8, 0)) is None  # 第 3 次机会（DAY3 早上）还没结束
-    censored = settle(claim, LATE_TO_BREAKFAST, (LATE,), now=at(DAY3, 10, 0))
-    assert censored is not None and censored.outcome is Outcome.CENSORED and censored.observed_passes == 3 and censored.is_right_censored
-    assert [item.at for item in censored.passes] == [at(DAY1, 7, 45), at(DAY2, 7, 45), at(DAY3, 7, 45)]
-    # 第 2 天早餐时段没在看：那次机会"未观测"，只算过了 2 个看清的 → 还等。
-    dark = FixedCoverage(1.0, dark=(WindowSpan(at(DAY2, 6, 0), at(DAY2, 10, 0)),))
-    pending = settle(claim, LATE_TO_BREAKFAST, (LATE,), now=at(DAY3, 10, 0), coverage=dark)
-    assert pending is None
-    passes = passes_until(claim.control, before_index=None, until=at(DAY3, 10, 0), coverage=dark, config=CONFIG)  # type: ignore[arg-type]
-    assert [item.observed for item in passes] == [True, False, True]
+    assert settle(claim, LATE_TO_BREAKFAST, (LATE,), now=at(DAY1, 9, 0)) is None  # 窗口 06:15–09:15 还没过完
+    absent = settle(claim, LATE_TO_BREAKFAST, (LATE,), now=at(DAY1, 9, 15))
+    assert absent is not None and absent.outcome is Outcome.ABSENT and absent.observed_passes == 1 and not absent.is_right_censored
+    assert [item.at for item in absent.passes] == [at(DAY1, 7, 45)]
+    # 早餐时段没在看：没看清 → 删失（右删失），带原因。
+    dark = FixedCoverage(1.0, dark=(WindowSpan(at(DAY1, 6, 0), at(DAY1, 10, 0)),))
+    censored = settle(claim, LATE_TO_BREAKFAST, (LATE,), now=at(DAY1, 10, 0), coverage=dark)
+    assert censored is not None and censored.outcome is Outcome.CENSORED and censored.is_right_censored
+    passes = passes_until(claim.control, before_index=None, until=at(DAY1, 10, 0), coverage=dark, config=CONFIG)  # type: ignore[arg-type]
+    assert [item.observed for item in passes] == [False]
     # 没有快照（树上没这个后件的数）：只能在后件到来时结，等不到就交生命周期。
     blind = claim_for(LATE_TO_BREAKFAST, control=False)
     assert settle(blind, LATE_TO_BREAKFAST, (LATE,), now=at(DAY3, 10, 0)) is None
-    arrived = settle(blind, LATE_TO_BREAKFAST, (LATE, record(DAY1, "面", 7, 0, "早餐")), now=at(DAY1, 8, 0))
-    assert arrived is not None and arrived.outcome is Outcome.OCCURRED and arrived.opportunity_index is None
+    assert settle(blind, LATE_TO_BREAKFAST, (LATE, record(DAY1, "面", 7, 0, "早餐")), now=at(DAY1, 8, 0)) is None  # 没窗口就不知道"落在窗口里"
     closed = close_claim(claim, reason="约了之后一个月没去", now=at(DAY2, 12, 0), coverage=FixedCoverage(1.0), config=CONFIG)
-    assert closed.outcome is Outcome.CENSORED and closed.reason == "约了之后一个月没去" and closed.observed_passes == 2
+    assert closed.outcome is Outcome.CENSORED and closed.reason == "约了之后一个月没去" and closed.observed_passes == 1
 
 
 def test_an_enabling_hypothesis_is_the_same_probability_ledger_read_as_latency() -> None:
@@ -151,7 +146,7 @@ def test_an_enabling_hypothesis_is_the_same_probability_ledger_read_as_latency()
         created_at=NOW,
     )
     ball = record(DAY3, "打球", 19, 0, "打球")
-    settlement = settle(claim, BOOKING_TO_BALL, (booking, ball), now=at(DAY3, 20, 0), config=LedgerConfig(censor_after=10))
+    settlement = settle(claim, BOOKING_TO_BALL, (booking, ball), now=at(DAY3, 20, 0))
     assert settlement is not None and settlement.outcome is Outcome.OCCURRED
     assert settlement.latency_hours == 57.0 and settlement.opportunity_index == 3 and settlement.observed_passes == 2
 
@@ -177,16 +172,16 @@ def booking_claim(hyp, day=DAY1, hour: int = 10) -> tuple[Claim, object]:
 def test_a_open_ended_claim_is_never_censored_by_the_count_of_opportunities() -> None:
     """用户 09-27："很多行为没有机会时效。"挂号→就诊两周才去也要记上——无节律型过多少个机会都不删失。
 
-    对照：同一批机会下的节律型早就右删失了（``censor_after=3``）。
+    对照：节律型的账在自己那个窗口过完就收口了（没来）。
     """
 
     claim, booking = booking_claim(BOOKING_TO_BALL)
-    # 快照 8 个机会（每天 19:00 一个）全部过完、一次没打球：节律型这时是删失，无节律型仍然开着。
+    # 快照 8 个机会（每天 19:00 一个）全部过完、一次没打球：节律型这时早收口了，无节律型仍然开着。
     far = at(DAY1, 10, 0) + timedelta(days=30)
     assert settle(claim, BOOKING_TO_BALL, (booking,), now=far) is None
     rhythmic = claim_for(LATE_TO_BREAKFAST)
-    censored = settle(rhythmic, LATE_TO_BREAKFAST, (LATE,), now=at(DAY1, 10, 0) + timedelta(days=30))
-    assert censored is not None and censored.outcome is Outcome.CENSORED
+    absent = settle(rhythmic, LATE_TO_BREAKFAST, (LATE,), now=at(DAY1, 10, 0) + timedelta(days=30))
+    assert absent is not None and absent.outcome is Outcome.ABSENT
     # 两周后去了 → 照样兑现，记隔了多久。
     ball = record(DAY1 + timedelta(days=13), "打球", 19, 0, "打球")
     settlement = settle(claim, BOOKING_TO_BALL, (booking, ball), now=far)
@@ -241,36 +236,39 @@ def test_one_consequent_occurrence_fulfils_only_the_earliest_open_open_ended(tmp
 # ── 时刻 ──────────────────────────────────────────────────────────────────────
 
 
-def test_timing_reads_the_consequent_at_the_expected_opportunity_or_records_absence() -> None:
-    """七i 一：晚睡→起床、晚睡→就寝（补偿）都看第 1 次机会——02:10 的锚之后第一个就寝机会就是当晚，不再需要 12–36h 那种档。"""
+def test_timing_reads_the_consequent_inside_its_window_or_records_absence() -> None:
+    """七i 一：晚睡→起床、晚睡→就寝（补偿）都看这本账自己那个窗口——02:10 的锚之后第一个就寝窗口就是当晚，不再需要 12–36h 那种档。
+
+    窗口之外的到来不归这本账（容差由机会口展宽窗口来给，不在这里再放宽）。"""
 
     wake_claim = claim_for(LATE_TO_WAKE)
-    wake = record(DAY1, "起床", 9, 40, "起床")  # 峰 06:40–09:40 已过，仍归第 1 次机会（下一次是明早）
+    wake = record(DAY1, "起床", 9, 30, "起床")  # 窗口 06:40–09:40 之内
     observed = settle(wake_claim, LATE_TO_WAKE, (LATE, wake, record(DAY2, "再起", 8, 0, "起床")), now=at(DAY2, 9, 0))
-    assert observed is not None and observed.outcome is Outcome.OBSERVED and observed.observed_at == at(DAY1, 9, 40) and observed.opportunity_index == 1
-    # 第 1 次机会已观测地过了（下一次机会已开始）没起床 → 缺席，不是"很晚"。
-    absent = settle(wake_claim, LATE_TO_WAKE, (LATE,), now=at(DAY2, 7, 0))
+    assert observed is not None and observed.outcome is Outcome.OBSERVED and observed.observed_at == at(DAY1, 9, 30) and observed.opportunity_index == 1
+    # 窗口过完了没起床 → 缺席，不是"很晚"；12:00 才起也是缺席（这个窗口里没有）。
+    absent = settle(wake_claim, LATE_TO_WAKE, (LATE,), now=at(DAY1, 12, 0))
     assert absent is not None and absent.outcome is Outcome.ABSENT and absent.opportunity_index == 1
-    assert settle(wake_claim, LATE_TO_WAKE, (LATE,), now=at(DAY1, 23, 0)) is None  # 下一次机会还没开始，不下结论
+    assert settle(wake_claim, LATE_TO_WAKE, (LATE, record(DAY1, "起床", 12, 0, "起床")), now=at(DAY1, 12, 30)).outcome is Outcome.ABSENT  # type: ignore[union-attr]
+    assert settle(wake_claim, LATE_TO_WAKE, (LATE,), now=at(DAY1, 9, 0)) is None  # 窗口还没过完，不下结论
     # 那次机会没看清 → 删失。
     dark = FixedCoverage(1.0, dark=(WindowSpan(at(DAY1, 7, 0), at(DAY1, 9, 0)),))
     censored = settle(wake_claim, LATE_TO_WAKE, (LATE,), now=at(DAY2, 7, 0), coverage=dark)
     assert censored is not None and censored.outcome is Outcome.CENSORED
 
-    # 补偿就寝：02:10 的锚之后第一个就寝机会就是**当晚** 23:30（锚后 20.5 小时），所以 expected_at=1；
-    # 22:40 睡 = 比常态早 50 分。写成 2 会去量后天晚上（评审 A-9/C-6）。
+    # 补偿就寝：02:10 的锚之后第一个就寝窗口就是**当晚** 23:30（锚后 20.5 小时），所以 consequent_peak=1；
+    # 22:40 睡 = 比常态早 50 分。
     bedtime_claim = claim_for(LATE_TO_BEDTIME)
     tonight = record(DAY1, "就寝", 22, 40, "就寝")
     compensation = settle(bedtime_claim, LATE_TO_BEDTIME, (LATE, tonight), now=at(DAY2, 12, 0))
     assert compensation is not None and compensation.outcome is Outcome.OBSERVED and compensation.observed_at == at(DAY1, 22, 40) and compensation.opportunity_index == 1
-    assert settle(bedtime_claim, LATE_TO_BEDTIME, (LATE,), now=at(DAY1, 12, 0)) is None  # 当晚那次机会还没开始
+    assert settle(bedtime_claim, LATE_TO_BEDTIME, (LATE,), now=at(DAY1, 12, 0)) is None  # 当晚那个窗口还没开始
 
 
 # ── 次数 ──────────────────────────────────────────────────────────────────────
 
 
 def test_count_waits_until_the_horizon_of_opportunities_has_passed() -> None:
-    """运动→咖啡，数接下来 3 个机会：DAY1 19:00 打球后的 20:00（峰 19:15–20:45）、次日 08:30、14:00 三杯的机会。"""
+    """运动→咖啡（账挂在咖啡 #1 上），数接下来 3 个窗口：DAY1 19:00 打球后 #1 的第一次落地是次日 08:30，再轮 14:00、20:00。"""
 
     ball = record(DAY1, "打球", 19, 0, "打球")
     claim = Claim(
@@ -281,17 +279,17 @@ def test_count_waits_until_the_horizon_of_opportunities_has_passed() -> None:
         antecedent_hits=(ConceptHit("运动"),),
         antecedent_uris=(ball.occurrence_uri,),
         situation_snapshot=(),
-        control=daily_snapshot("咖啡", ball.started_at, 16),
+        control=daily_snapshot("咖啡", ball.started_at, 3),
         created_at=NOW,
     )
     coffees = (record(DAY1, "咖啡", 20, 30, "咖啡"), record(DAY2, "咖啡", 8, 0, "咖啡"), record(DAY2, "咖啡", 13, 30, "咖啡"), record(DAY2, "咖啡", 20, 0, "咖啡"))
-    assert settle(claim, EXERCISE_TO_COFFEE, (ball, *coffees), now=at(DAY2, 15, 30)) is None  # 第 4 次机会（20:00）还没开始
-    counted = settle(claim, EXERCISE_TO_COFFEE, (ball, *coffees), now=at(DAY2, 19, 30))
-    assert counted is not None and counted.outcome is Outcome.COUNTED and counted.count == 3  # 20:00 那杯归第 4 次机会，不算
-    zero = settle(claim, EXERCISE_TO_COFFEE, (ball,), now=at(DAY2, 19, 30))
+    assert settle(claim, EXERCISE_TO_COFFEE, (ball, *coffees), now=at(DAY2, 20, 30)) is None  # 第 3 个窗口（20:00，到 20:45）还没过完
+    counted = settle(claim, EXERCISE_TO_COFFEE, (ball, *coffees), now=at(DAY2, 21, 0))
+    assert counted is not None and counted.outcome is Outcome.COUNTED and counted.count == 3  # DAY1 20:30 那杯在第一个窗口之前，不算
+    zero = settle(claim, EXERCISE_TO_COFFEE, (ball,), now=at(DAY2, 21, 0))
     assert zero is not None and zero.count == 0  # 0 也是计数
     dark = FixedCoverage(1.0, dark=(WindowSpan(at(DAY2, 8, 0), at(DAY2, 9, 0)),))
-    assert settle(claim, EXERCISE_TO_COFFEE, (ball, *coffees), now=at(DAY2, 19, 30), coverage=dark).outcome is Outcome.CENSORED  # type: ignore[union-attr]
+    assert settle(claim, EXERCISE_TO_COFFEE, (ball, *coffees), now=at(DAY2, 21, 0), coverage=dark).outcome is Outcome.CENSORED  # type: ignore[union-attr]
 
 
 # ── 整条走 ────────────────────────────────────────────────────────────────────
@@ -308,12 +306,11 @@ def test_settle_due_walks_a_hypothesis_ledger_end_to_end(tmp_path) -> None:
     assert len(ledger.open_claims(LATE_TO_BREAKFAST.identity)) == 2
 
     report = settle_due(LATE_TO_BREAKFAST, concepts=CONCEPTS, hits=hits, ledger=ledger, coverage=FixedCoverage(1.0), now=at(DAY2, 8, 0), until=at(DAY2, 8, 0), config=CONFIG)
-    assert (report.settled, report.pending) == (1, 1)  # 第一条来了；第二条还在等机会
-    late = at(DAY3 + (DAY3 - DAY2), 12, 0)
-    report = settle_due(LATE_TO_BREAKFAST, concepts=CONCEPTS, hits=hits, ledger=ledger, coverage=FixedCoverage(1.0), now=late, until=late, config=CONFIG)
-    assert (report.settled, report.pending) == (1, 0)  # 等过 3 个看清的机会 → 右删失
+    assert (report.settled, report.pending) == (1, 1)  # 第一条来了；第二条的窗口（DAY2 06:15–09:15）还没过完
+    report = settle_due(LATE_TO_BREAKFAST, concepts=CONCEPTS, hits=hits, ledger=ledger, coverage=FixedCoverage(1.0), now=at(DAY2, 12, 0), until=at(DAY2, 12, 0), config=CONFIG)
+    assert (report.settled, report.pending) == (1, 0)  # 窗口过完、看清了、没来
     outcomes = [s.outcome for s in ledger.settlements_for(LATE_TO_BREAKFAST.identity)]
-    assert outcomes == [Outcome.OCCURRED, Outcome.CENSORED]
+    assert outcomes == [Outcome.OCCURRED, Outcome.ABSENT]
     assert settle_due(LATE_TO_BREAKFAST, concepts=CONCEPTS, hits=hits, ledger=ledger, coverage=FixedCoverage(1.0), now=at(DAY3, 0, 0), until=at(DAY3, 0, 0), config=CONFIG).settled == 0
 
 
@@ -336,9 +333,10 @@ def test_a_deleted_consequent_concept_stops_the_account_instead_of_fabricating_c
 
 
 def test_the_first_opportunity_is_the_peak_the_anchor_sits_in() -> None:
-    """就寝 07:00 命中「晚睡·重」（设计稿 十③ 的例子），起床 12:00：当天 06:40–09:40 那个峰就是第 1 次机会。
+    """就寝 07:00 命中「晚睡·重」（设计稿 十③ 的例子），起床 09:30：当天 06:40–09:40 那个窗口就是这本账的窗口。
 
-    按"峰的开始晚于锚"铺会把这个峰丢掉，12:00 的起床被算到次日 08:10 那个峰上 → 时刻差 −1210 分（真值 +230）。
+    按"峰的开始晚于锚"铺会把这个窗口丢掉，起床被算到次日 08:10 那个窗口上 → 时刻差 −1360 分（真值 +80）。
+    12:00 才起则是窗口里没有（ABSENT）：容差由机会口展宽窗口来给，账本不再第二次放宽。
     """
 
     late = record(DAY1, "就寝", 7, 0, ConceptHit("晚睡", "重"))
@@ -355,53 +353,31 @@ def test_the_first_opportunity_is_the_peak_the_anchor_sits_in() -> None:
     )
     first = claim.control.at(1)
     assert first is not None and first.at == at(DAY1, 8, 10) and first.span.start < claim.anchor < first.span.end
-    wake = record(DAY1, "起床", 12, 0, "起床")
+    wake = record(DAY1, "起床", 9, 30, "起床")
     settlement = settle(claim, LATE_TO_WAKE, (late, wake), now=at(DAY2, 12, 0))
     assert settlement is not None and settlement.outcome is Outcome.OBSERVED and settlement.opportunity_index == 1
-    assert (settlement.observed_at - first.at).total_seconds() / 60.0 == 230.0
+    assert (settlement.observed_at - first.at).total_seconds() / 60.0 == 80.0
+    noon = settle(claim, LATE_TO_WAKE, (late, record(DAY1, "起床", 12, 0, "起床")), now=at(DAY2, 12, 0))
+    assert noon is not None and noon.outcome is Outcome.ABSENT
 
 
-def test_an_arrival_past_the_last_opportunity_is_censored_not_given_a_saturated_index() -> None:
-    """快照只铺到第 3 次机会，后件在第 10 次才来：``index_of`` 说不出名次 → 右删失，不写一个饱和的假名次。"""
+def test_a_snapshot_too_short_for_the_horizon_settles_instead_of_hanging_forever() -> None:
+    """次数账要数 horizon 个窗口，而快照只有 2 个：快照事后不改，等下去也等不出来 → 删失带原因，不挂在 pending 里。"""
 
+    ball = record(DAY1, "打球", 19, 0, "打球")
     claim = Claim(
-        hypothesis_identity=LATE_TO_BREAKFAST.identity,
-        hypothesis_fingerprint=LATE_TO_BREAKFAST.fingerprint,
-        aspect=LATE_TO_BREAKFAST.aspect,
-        trigger_uri=LATE.occurrence_uri,
-        antecedent_hits=(ConceptHit("晚睡", "轻"),),
-        antecedent_uris=(LATE.occurrence_uri,),
+        hypothesis_identity=EXERCISE_TO_COFFEE.identity,
+        hypothesis_fingerprint=EXERCISE_TO_COFFEE.fingerprint,
+        aspect=EXERCISE_TO_COFFEE.aspect,
+        trigger_uri=ball.occurrence_uri,
+        antecedent_hits=(ConceptHit("运动"),),
+        antecedent_uris=(ball.occurrence_uri,),
         situation_snapshot=(),
-        control=daily_snapshot("早餐", LATE.started_at, 3),
+        control=daily_snapshot("咖啡", ball.started_at, 2),
         created_at=NOW,
     )
-    assert claim.control is not None and claim.control.index_of(at(DAY1 + timedelta(days=9), 7, 45)) is None
-    far = record(DAY1 + timedelta(days=9), "面", 7, 45, "早餐")
-    settlement = settle(claim, LATE_TO_BREAKFAST, (LATE, far), now=at(DAY1 + timedelta(days=10), 12, 0), config=LedgerConfig(censor_after=10))
-    assert settlement is not None and settlement.outcome is Outcome.CENSORED and settlement.opportunity_index is None
-    assert settlement.reason is not None and "晚于快照" in settlement.reason
-    # 快照铺到头、后件一次没来：也收口成右删失，不永远挂着。
-    empty = settle(claim, LATE_TO_BREAKFAST, (LATE,), now=at(DAY1 + timedelta(days=10), 12, 0), config=LedgerConfig(censor_after=10))
-    assert empty is not None and empty.outcome is Outcome.CENSORED and empty.reason is not None and "全过完了" in empty.reason
-
-
-def test_a_snapshot_too_short_for_the_expected_opportunity_settles_instead_of_hanging_forever() -> None:
-    """时刻/次数量第 k 次机会，而快照只有 2 个：快照事后不改，等下去也等不出来 → 删失带原因，不挂在 pending 里。"""
-
-    late_bedtime = hypothesis("晚睡", consequent="就寝", aspect=LATE_TO_BEDTIME.aspect, direction=LATE_TO_BEDTIME.direction, type_prior=None, expected_at=5, note="x")
-    claim = Claim(
-        hypothesis_identity=late_bedtime.identity,
-        hypothesis_fingerprint=late_bedtime.fingerprint,
-        aspect=late_bedtime.aspect,
-        trigger_uri=LATE.occurrence_uri,
-        antecedent_hits=(ConceptHit("晚睡", "轻"),),
-        antecedent_uris=(LATE.occurrence_uri,),
-        situation_snapshot=(),
-        control=daily_snapshot("就寝", LATE.started_at, 2),
-        created_at=NOW,
-    )
-    settlement = settle(claim, late_bedtime, (LATE,), now=at(DAY1, 12, 0))
-    assert settlement is not None and settlement.outcome is Outcome.CENSORED and settlement.reason is not None and "量不到第 5 次" in settlement.reason
+    settlement = settle(claim, EXERCISE_TO_COFFEE, (ball,), now=at(DAY1, 12, 0))
+    assert settlement is not None and settlement.outcome is Outcome.CENSORED and settlement.reason is not None and "数不到第 3 个" in settlement.reason
 
 
 def test_settling_never_runs_past_the_day_the_hits_are_mapped_to(tmp_path) -> None:
@@ -415,12 +391,14 @@ def test_settling_never_runs_past_the_day_the_hits_are_mapped_to(tmp_path) -> No
     # 一天都没盖章 → 什么都不可信，一条都不结。
     assert mapped_until(hits, at(DAY3, 12, 0)) is None
     assert settle_due(LATE_TO_BREAKFAST, concepts=CONCEPTS, hits=hits, ledger=ledger, coverage=FixedCoverage(1.0), now=at(DAY3, 12, 0), config=CONFIG).settled == 0
-    # 只映射了 DAY1：DAY2 的早餐还没进盘，不能拿 DAY2、DAY3 的机会当"已观测地过了"。
+    # 映射了 DAY1：DAY1 的早餐窗（06:15–09:15）整个在可信范围里 → 可以读成"没来"；跨午夜的窗口要等到次日映射完才行。
     hits.complete_day(DAY1, records=1, completed_at=NOW, mapper=LATE.mapper)
     assert mapped_until(hits, at(DAY3, 12, 0)) == at(DAY2, 0, 0)
-    assert settle_due(LATE_TO_BREAKFAST, concepts=CONCEPTS, hits=hits, ledger=ledger, coverage=FixedCoverage(1.0), now=at(DAY3, 12, 0), config=CONFIG).settled == 0
-    # 映射跟上来了（而且那天确实没吃早饭）→ 才按机会数删失。
-    for day in (DAY2, DAY3):
-        hits.complete_day(day, records=0, completed_at=NOW, mapper=LATE.mapper)
-    report = settle_due(LATE_TO_BREAKFAST, concepts=CONCEPTS, hits=hits, ledger=ledger, coverage=FixedCoverage(1.0), now=at(DAY3 + timedelta(days=1), 12, 0), config=CONFIG)
-    assert report.settled == 1 and ledger.settlements_for(LATE_TO_BREAKFAST.identity)[0].outcome is Outcome.CENSORED
+    report = settle_due(LATE_TO_BREAKFAST, concepts=CONCEPTS, hits=hits, ledger=ledger, coverage=FixedCoverage(1.0), now=at(DAY3, 12, 0), config=CONFIG)
+    assert report.settled == 1 and ledger.settlements_for(LATE_TO_BREAKFAST.identity)[0].outcome is Outcome.ABSENT
+    # 跨午夜的补偿就寝（窗口 22:00–01:00）：DAY1 映射完还不能结，要等 DAY2 也映射完。
+    hits.write(record(DAY2, "就寝", 1, 0, ConceptHit("晚睡", "轻")))
+    open_claims_for_day(DAY1, hypotheses=(LATE_TO_BEDTIME,), concepts=CONCEPTS, hits=hits, ledger=ledger, opportunities=TableOpportunities(), now=NOW, config=CONFIG)
+    assert settle_due(LATE_TO_BEDTIME, concepts=CONCEPTS, hits=hits, ledger=ledger, coverage=FixedCoverage(1.0), now=at(DAY3, 12, 0), config=CONFIG).settled == 0
+    hits.complete_day(DAY2, records=1, completed_at=NOW, mapper=LATE.mapper)
+    assert settle_due(LATE_TO_BEDTIME, concepts=CONCEPTS, hits=hits, ledger=ledger, coverage=FixedCoverage(1.0), now=at(DAY3, 12, 0), config=CONFIG).settled == 1

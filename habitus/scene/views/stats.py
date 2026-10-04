@@ -1,4 +1,4 @@
-"""读时统计的几个基元：Beta 后验区间、确定性 bootstrap 区间（含按块重采样）、Kaplan–Meier、钟面上的环形差。
+"""读时统计的几个基元：Beta 后验区间、确定性按块 bootstrap 区间、Kaplan–Meier。
 
 不依赖 numpy / scipy（项目锁死的依赖里没有）。正则化不完全 Beta 函数用 Lentz 连分式（Numerical Recipes
 的 ``betacf``），分位数用二分。全部确定性：bootstrap 的随机数由调用方给种子，同一本账算两遍是同一个区间。
@@ -18,7 +18,6 @@ from typing import TypeVar
 
 T = TypeVar("T")
 
-MINUTES_PER_DAY = 24 * 60
 _MAX_ITERATIONS = 300
 _EPSILON = 3.0e-14
 _TINY = 1.0e-300
@@ -127,27 +126,6 @@ def mean(values: Sequence[float]) -> float:
     return sum(values) / len(values)
 
 
-def bootstrap_interval(values: Sequence[float], statistic: str, *, seed: str, samples: int = 1000, level: float = 0.90) -> Interval:
-    """确定性 bootstrap：``statistic`` 是 ``median`` 或 ``mean``；种子来自调用方（同一本账同一区间）。"""
-
-    if not values:
-        raise StatsError("bootstrap of nothing")
-    if any(not math.isfinite(value) for value in values):
-        raise StatsError("bootstrap values must be finite")
-    if statistic not in {"median", "mean"}:
-        raise StatsError("statistic is 'median' or 'mean'")
-    fn = median if statistic == "median" else mean
-    point = fn(values)
-    if len(values) == 1:
-        return Interval(point, point, point)
-    generator = random.Random(seed)
-    estimates = sorted(fn(generator.choices(values, k=len(values))) for _ in range(samples))
-    tail = (1.0 - level) / 2.0
-    low = estimates[min(len(estimates) - 1, int(tail * len(estimates)))]
-    high = estimates[min(len(estimates) - 1, int((1.0 - tail) * len(estimates)))]
-    return Interval(point, min(low, point), max(high, point))
-
-
 def block_bootstrap(
     items: Sequence[T],
     blocks: Sequence[int],
@@ -192,67 +170,8 @@ def block_bootstrap(
 
 
 @dataclass(frozen=True)
-class SurvivalStep:
-    """离散生存曲线上的一步：到第 ``step`` 步还在等的有几条、这一步来了几条、过了这一步还没来的比例。"""
-
-    step: int
-    at_risk: int
-    events: int
-    survival: float
-
-
-def kaplan_meier(event_steps: Sequence[int], censored_steps: Sequence[int]) -> tuple[SurvivalStep, ...]:
-    """按"第几次机会"走的 Kaplan–Meier。
-
-    ``event_steps``：每条后件到来的那一步（第 k 次机会 → k，从 1 数）；``censored_steps``：每条右删失的记录已经过完的步数
-    （等了 c 次机会没来 → c，可以是 0）。第 k 步的风险集 = 事件步 ≥ k 的 + 删失步 ≥ k 的。
-    """
-
-    if any(isinstance(k, bool) or not isinstance(k, int) or k < 1 for k in event_steps):
-        raise StatsError("event steps count from 1")
-    if any(isinstance(c, bool) or not isinstance(c, int) or c < 0 for c in censored_steps):
-        raise StatsError("censored steps are non-negative")
-    last = max([*event_steps, *censored_steps], default=0)
-    survival = 1.0
-    curve: list[SurvivalStep] = []
-    for step in range(1, last + 1):
-        at_risk = sum(1 for k in event_steps if k >= step) + sum(1 for c in censored_steps if c >= step)
-        events = sum(1 for k in event_steps if k == step)
-        if at_risk > 0:
-            survival *= 1.0 - events / at_risk
-        curve.append(SurvivalStep(step, at_risk, events, survival))
-    return tuple(curve)
-
-
-def survival_at(curve: Sequence[SurvivalStep], step: int) -> float | None:
-    """S(step)：过了第 ``step`` 步还没来的比例；S(0)=1。
-
-    曲线没走到那一步时：末步的 S 已经是 0（人全到了）→ 之后的 S 也是 0，返回 0 而不是 None——不然"六条全在第 1 步就
-    到了"问第 2 步会读成"算不出"（评审 A-5/C-10）。末步 S>0 而曲线到此为止（没人等到那一步）才是真的不知道 → None。
-    """
-
-    if step <= 0:
-        return 1.0
-    for item in curve:
-        if item.step == step:
-            return item.survival if item.at_risk > 0 else None
-    if curve and step > curve[-1].step and curve[-1].survival == 0.0:
-        return 0.0
-    return None
-
-
-def survival_median(curve: Sequence[SurvivalStep]) -> int | None:
-    """S 第一次降到 0.5 或以下的那一步；没降到就 None（中位没到——不要拿到达者的中位冒充）。"""
-
-    for item in curve:
-        if item.at_risk > 0 and item.survival <= 0.5:
-            return item.step
-    return None
-
-
-@dataclass(frozen=True)
 class EffectiveCounts:
-    """KM 曲线在第 ``step`` 步为止的有效计数：到了几条（事件）、还没来几条（分母里剩下的）。
+    """窗口账的有效计数：到了几条（事件）、看清了没来几条（余数）——按块数折算之后的。
 
     用来给 p1 配一个不会塌成零宽的区间：二值 + 小 n 上百分位 bootstrap 会退化（六条全到 → 每次重采样都给同一个数
     → 区间宽 0 → 必然"显著"，零效应假显著率 p0=0.88 时实测 50.7%）。
@@ -262,17 +181,26 @@ class EffectiveCounts:
     remainder: float
 
 
-def effective_counts(curve: Sequence[SurvivalStep], step: int) -> EffectiveCounts | None:
-    """把 KM 的 1−S(step) 折成一对"等价成败数"：分母取第 1 步的风险集（进过账的条数），成数 = 分母 × (1−S)。"""
+def effective_counts(occurred: int, absent: int, *, blocks: int | None = None) -> EffectiveCounts | None:
+    """把 (到了, 没来) 折成一对"等价成败数"：等价样本数缺省取条数；给了 ``blocks`` 就取**块数与条数里小的那个**。
 
-    survival = survival_at(curve, step)
-    if survival is None or not curve:
+    高频前件一天开很多条承诺、等的是同一个后果窗口（探针：22 条到来背后是 9 次发生），按条数当样本数区间过窄——
+    4 天 × 6 条/天、零效应时误报 32.5%，按块数折算后 6.8%（评审 C-6）。块 bootstrap 知道这件事，Jeffreys 得告诉它。
+    """
+
+    for label, value in (("occurred", occurred), ("absent", absent)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{label} must be a non-negative integer")
+    total = occurred + absent
+    if total <= 0:
         return None
-    at_risk = curve[0].at_risk
-    if at_risk <= 0:
-        return None
-    occurred = at_risk * (1.0 - survival)
-    return EffectiveCounts(events=occurred, remainder=at_risk - occurred)
+    if blocks is not None:
+        if isinstance(blocks, bool) or not isinstance(blocks, int) or blocks < 0:
+            raise ValueError("blocks must be a non-negative integer")
+        if blocks > 0:
+            total = min(total, blocks)
+    events = total * occurred / (occurred + absent)
+    return EffectiveCounts(events=events, remainder=total - events)
 
 
 def jeffreys_interval(events: float, remainder: float, *, level: float = 0.90) -> Interval:
@@ -319,18 +247,13 @@ __all__ = [
     "EffectiveCounts",
     "Interval",
     "StatsError",
-    "SurvivalStep",
     "beta_cdf",
     "beta_quantile",
     "block_bootstrap",
-    "bootstrap_interval",
     "effective_counts",
     "is_monotonic",
     "jeffreys_interval",
-    "kaplan_meier",
     "mean",
     "median",
-    "survival_at",
-    "survival_median",
     "widen",
 ]

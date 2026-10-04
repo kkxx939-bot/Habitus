@@ -62,7 +62,7 @@ from habitus.scene.concepts.model import (
 from habitus.scene.concepts.rhythm import Rhythm
 from habitus.scene.concepts.situation import SituationBasis, SituationError, SituationRule
 
-CONCEPT_AUTHOR_PROMPT_VERSION = "scene_concept_author_prompt_v2"  # v2：2026-09-29 探针后加"跨场合复发"那一条
+CONCEPT_AUTHOR_PROMPT_VERSION = "scene_concept_author_prompt_v4"  # v3：2026-09-29 探针后加 层级必写 / 判据互斥 / 情境别漏；v4：2026-10-01 ≥10 次的 kind 不许与别的 kind 并成一个概念（v3 的"几个 kind 凑一个概念"与校验矛盾，第三批冒烟连续 4 份答复撞上）
 #: 三档的两条线。都是待定值，重放时按真实分布与 lane 各自复核。
 MIN_LEAF_OCCURRENCES = 10
 MIN_GROUPED_OCCURRENCES = 3
@@ -104,6 +104,8 @@ class KindBrief:
     occurrences: int
     days: int
     examples: tuple[str, ...] = ()
+    #: 这批材料覆盖了多少天（探针喂的是 54 天，旧提示词却写死"45 天"——评审 C-16）。``None`` = 不说。
+    span_days: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind_token", clean_line(self.kind_token))
@@ -126,7 +128,8 @@ class KindBrief:
 
     def render(self) -> str:
         examples = "；".join(self.examples) if self.examples else "（没给例子）"
-        return f"- {self.kind_token}：45 天里 {self.occurrences} 次、跨 {self.days} 天 → {self.tier.instruction}｜例：{examples}"
+        span = f"{self.span_days} 天里 " if self.span_days is not None else ""
+        return f"- {self.kind_token}：{span}{self.occurrences} 次、跨 {self.days} 天 → {self.tier.instruction}｜例：{examples}"
 
 
 @dataclass(frozen=True)
@@ -168,10 +171,16 @@ CONCEPT_AUTHOR_SYSTEM_PROMPT = """你在给一个人的行为定义一套概念�
 
 其他规则：
 - 一个 kind 只能被一个概念认领；不要认领材料里没给的名字。
-- 概念可以比 kind **粗**（几个 kind 凑一个概念，或几个概念共一个上级），**不能比 kind 细**——
-  上游把不同的事折进了同一个名字，你也分不开，不要假装分得开。
-- 层级：细的各自一个概念，想要粗的那一层就给它们同一个 parent（上级自己不认领任何 kind）。
-  上级只在"细的几个确实是同一类"时才写，不要为了整齐造上级。
+- 概念可以比 kind **粗**，**不能比 kind 细**——上游把不同的事折进了同一个名字，你也分不开，不要假装分得开。
+  "粗"有两种做法，各管一档：标「和相近的凑成一个概念」的 kind 之间可以几个凑成一个概念；
+  标「给它一个概念」的 kind **只能自己单独是一个叶子概念，不能和任何别的 kind 并进同一个概念**——
+  它和别的概念相近，就给它们一个共同上级，不是并成一个。写错这一条整份答复都收不下。
+- **层级不是可选的**：一组语义相近的概念要挂成层级——细的各自一个叶子概念、上面共一个 parent
+  （上级自己不认领任何 kind）。**不要平铺一堆近义词**。自检：如果两个概念的判据句会对同一条记录都答"是"，
+  它们就该是兄弟 + 一个共同上级（两个都是 3–9 次那一档的才可以并成一个）。
+- **判据句要彼此排他**：同一条记录应当只命中**最贴切的那一个**叶子概念。一条记录能同时算三个概念，
+  说明那三个该有共同上级、或该并成一个——不要靠"都算"来覆盖。（我们会数"一条记录平均命中几个概念"，
+  这个数偏高就说明概念集在互相稀释：本来清楚的因果会被切成几条各自更薄的账。）
 - **行为种类要能跨场合复发**。上游给的名字常常带着当时那个项目/仓库/对象（"为 Tagent 添加 ReAct 支持"、
   "重构 MemoryOS 的 API 目录"），那是**那一次**的说法，不是行为种类。概念要写成换个项目也还成立的那一层
   （"改代码"、"重构目录结构"、"调研实现"）——否则项目一换，这个概念再也不会命中，它的账就永远攒不起来。
@@ -191,11 +200,17 @@ CONCEPT_AUTHOR_SYSTEM_PROMPT = """你在给一个人的行为定义一套概念�
 - weekdays：名义上的周几（0=周一 … 6=周日），例：周末 = [5, 6]。
 - calendar_note：当地日历那句话里含某个词，例：调休日 = "补班"。
 - subject：同在的人里有谁。  · place：地点是哪儿。
-- open_claim：某个行为"该做还没做"（它还有一条没结的承诺），例：约了球还没打 = 盯「打球」。
-- streak：某个概念**连着 N 天**命中（N ≥ 2），例：赶工中 = 「写代码」连着 3 天。
-- yesterday：昨天命中过某个概念（可以指定档），例：昨晚晚睡 = 昨天命中「晚睡」的重档。
+- streak：某个概念**往前连着 N 个 24 小时**都命中（N ≥ 2；以这条行为的开始时刻往前数，不按日历日），
+  例：赶工中 = 「写代码」连着 3 天。
+- yesterday：这条行为开始之前 **24 小时内**命中过某个概念（可以指定档），例：昨晚晚睡 = 之前 24 小时内命中「晚睡」的重档。
+  **判据句要和这条说明说同一件事**：说明只看这条行为之前的事，判据句就不能写"当天及此前"。
 role 填 derived 的**必须**写 situation（派生的定义就是"算法从历史算"）。写不成上面任何一种的状态
-（"出差中""生病中"）就**别写 situation**：我们暂时算不出它，留着以后接数据源，不要编一个凑合的规则。"""
+（"出差中""生病中"）就**别写 situation**：我们暂时算不出它，留着以后接数据源，不要编一个凑合的规则。
+
+**情境概念别漏掉**：因果要分层全靠它（"这条影响只在赶工的时候成立"）。上面那几种里，
+``streak`` 与 ``yesterday`` 只看历史命中，**现在就算得出**——"连着三天改代码到深夜"这类持续状况都可以
+用它们写出来。没有一个情境概念的话，后面所有读数都只能印"没有可分层的情境"。
+反过来，"在做哪个项目""心情如何"这类算不出来的，一个都不要写。"""
 
 
 def concept_author_json_schema(briefs: Sequence[KindBrief]) -> dict[str, Any]:
@@ -248,7 +263,7 @@ def concept_author_json_schema(briefs: Sequence[KindBrief]) -> dict[str, Any]:
             "basis": {"type": "string", "enum": [item.value for item in SituationBasis]},
             "weekdays": {"type": "array", "items": {"type": "integer"}, "description": "日型用：0=周一 … 6=周日；其他族填 []。"},
             "value": {"type": ["string", "null"], "description": "calendar_note / subject / place 要匹配的值。"},
-            "concept": {"type": ["string", "null"], "description": "open_claim / streak / yesterday 盯的那个概念。"},
+            "concept": {"type": ["string", "null"], "description": "streak / yesterday 盯的那个概念。"},
             "grade": {"type": ["string", "null"], "description": "只在某一档才算时填档名。"},
             "days": {"type": ["integer", "null"], "description": "streak 连着几天（≥2）；其他族填 null。"},
         },
@@ -378,6 +393,10 @@ def assemble_concepts(
         for kind in draft.claims:
             claimed[kind] = draft.name
         kept.append(draft)
+    kept, cascaded = _cascade(kept, drafts, existing, dropped)
+    for draft in cascaded:
+        for kind in draft.claims:
+            claimed.pop(kind, None)
     _require_coverage(kept, by_kind, claimed)
     definitions = _definitions(kept, existing, now=now, origin=origin)
     return definitions, {draft.name: draft.claims for draft in kept if draft.claims}, tuple(dropped)
@@ -399,6 +418,60 @@ def _unusable(draft: _Draft, by_kind: Mapping[str, KindBrief], claimed: Mapping[
         total = sum(by_kind[kind].occurrences for kind in draft.claims)
         if total < MIN_LEAF_OCCURRENCES:
             return f"凑出来只有 {total} 次，不到 {MIN_LEAF_OCCURRENCES}"
+    return None
+
+
+def _cascade(
+    kept: Sequence[_Draft], drafts: Sequence[_Draft], existing: ConceptSet, dropped: list[str]
+) -> tuple[list[_Draft], list[_Draft]]:
+    """连带丢弃：引用了被丢概念的（上级、情境说明盯的、常态键的主）也丢，**两条理由都报**。
+
+    模型明明定义了「收尾验收」，是算法按下限把它丢了；盯着它的「收尾期」再报"引用了不存在的概念"就把账算到
+    模型头上、还把整批合格的一起否决（评审 C-11 ③；探针纪律七"算法的展开不许算成模型答错"）。
+    情境概念挂在行为上级下面的同理：丢那一个，说清为什么。
+    """
+
+    gone: dict[str, str] = {}
+    for line in dropped:
+        name = line.removeprefix("dropped: ").split("（", 1)[0]
+        gone[concept_identity(name)] = name
+    alive = list(kept)
+    cascaded: list[_Draft] = []
+    changed = True
+    while changed:
+        changed = False
+        roles = {concept_identity(draft.name): draft.role for draft in alive}
+        for draft in list(alive):
+            reason = _dangling(draft, gone, roles, existing)
+            if reason is None:
+                continue
+            alive.remove(draft)
+            cascaded.append(draft)
+            gone[concept_identity(draft.name)] = draft.name
+            dropped.append(f"dropped: {draft.name}（{reason}）→ 它认领的 {list(draft.claims) or '—'} 退回残差")
+            changed = True
+    return alive, cascaded
+
+
+def _dangling(draft: _Draft, gone: Mapping[str, str], roles: Mapping[str, ConceptRole], existing: ConceptSet) -> str | None:
+    """这个概念是否因为别的概念被丢而立不住；立得住返回 None。"""
+
+    references: list[tuple[str, str]] = []
+    if draft.parent is not None:
+        references.append(("上级", draft.parent))
+    if draft.situation is not None and draft.situation.concept is not None:
+        references.append(("情境说明盯着", draft.situation.concept))
+    for key in _baseline_keys(draft):
+        references.append(("常态键的主", key.concept))
+    for what, name in references:
+        identity = concept_identity(name)
+        if identity in gone:
+            return f"它的{what}「{gone[identity]}」被丢了，连带丢掉"
+    if draft.parent is not None:
+        parent = concept_identity(draft.parent)
+        parent_is_behavior = roles[parent].is_behavior if parent in roles else (existing[parent].role.is_behavior if parent in existing else None)
+        if parent_is_behavior is not None and parent_is_behavior != draft.role.is_behavior:
+            return f"情境概念不能挂在行为概念「{draft.parent}」下面（会让那个行为叶子再也不被映射），反过来也不行"
     return None
 
 

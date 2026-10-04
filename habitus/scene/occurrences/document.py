@@ -21,7 +21,7 @@ def encode(record: ConceptHits) -> str:
         "",
         f"类别：{record.kind_token} · 最后所见 {record.last_observed_at.strftime('%H:%M')}",
         f"命中：{_render_hits(record.hits)}",
-        f"情境：{_render_hits(record.situation_hits)}",
+        f"情境：{_render_hits(record.situation_hits)}（判过 {'、'.join(record.situations_checked) if record.situations_checked else '无'}）",
         f"未决：{' · '.join(record.unresolved) if record.unresolved else '（无）'}",
     ]
     if record.baseline_snapshot:
@@ -36,6 +36,7 @@ def encode(record: ConceptHits) -> str:
         "last_observed_at": record.last_observed_at.isoformat(timespec="microseconds"),
         "hits": [{"concept": hit.concept, "grade": hit.grade} for hit in record.hits],
         "situation_hits": [{"concept": hit.concept, "grade": hit.grade} for hit in record.situation_hits],
+        "situations_checked": list(record.situations_checked),
         "unresolved": list(record.unresolved),
         "baseline_snapshot": dict(record.baseline_snapshot),
         "mapper": record.mapper,
@@ -56,6 +57,7 @@ def decode(text: str, *, expected_uri: str | None = None) -> ConceptHits:
             last_observed_at=datetime.fromisoformat(_text(payload, "last_observed_at")),
             hits=tuple(_hit(item) for item in _list(payload, "hits")),
             situation_hits=tuple(_hit(item) for item in _list(payload, "situation_hits")),
+            situations_checked=tuple(str(item) for item in _list(payload, "situations_checked")),
             unresolved=tuple(str(item) for item in _list(payload, "unresolved")),
             baseline_snapshot=_mapping(payload, "baseline_snapshot"),
             mapper=_text(payload, "mapper"),

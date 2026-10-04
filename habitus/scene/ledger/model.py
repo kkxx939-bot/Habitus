@@ -3,15 +3,15 @@
 账本**只存事实**：什么时候、因为哪条 occurrence、后件本来该在哪几次机会上来、实际落在第几次 / 等过了几次、
 每次机会我们看清了没有。强度、类型、PN/PS 都是读时算的（``views/``），这里一个都不落。
 
-- **窗不按小时量，按后件自己的机会数量**（2026-09-26 裁定）。后件的一个"机会"是它在预测树上的一个常态发生
-  时段（那条 ``marginal`` 曲线的一个峰）：早餐一天一个，三杯咖啡一天三个，各有各的概率、不合成"今天会不会"。
-  "次日 / 后天"离锚多少小时随锚的时辰变，按机会数就不会。
+- **账按钟面峰记**（2026-09-26 裁定"窗按后件的机会数量"，2026-10-01 改成"一本账一个窗口"）。后件的一个"窗口"是
+  它在预测树上的一个常态发生时段（``marginal`` 曲线的一个峰，``PeakWindow``）：早餐一天一个，三杯咖啡一天三个，
+  各有各的账、各有各的平时概率、不合成"今天会不会"。承诺上的快照是**这条假设自己那个窗口在锚之后的第一次落地**
+  （含容差），次数方面再往后铺 ``horizon`` 个窗口；窗口的平时概率 = 落地那天曲线在窗口内的质量（曲线缺就 None，不猜）。
 - **承诺写完不改**。锚 = 触发 occurrence 的 ``started_at``（多前件锚在集合里最后开始的行为概念）；开承诺那一刻
-  向组合根注入的口要后件在锚之后的前若干个机会（账本不读树），快照进承诺，事后树重建了也不改。
-- **结算一套**：后件一来就结（落在第几次机会、隔了几小时、之前每次机会过没过 / 看清了没）；等过了
-  ``censor_after`` 个**已观测**机会还没来 → 右删失，是一条有信息的记录（"等了 5 次都没来"），不是落空；
-  被生命周期关掉也是右删失。有界窗与开放窗不再是两套。
-- **无节律型的账不数机会**（``expected_at=None``，2026-09-27 裁定）：约球→打球、挂号→就诊这类后件没节律，
+  向组合根注入的口要窗口落地（账本不读树），快照进承诺，事后树重建了也不改。
+- **结算一套**：窗口里后件来了 → ``OCCURRED``（隔了几小时）；过了窗口末尾、看清了、没来 → ``ABSENT``；
+  没看清 → ``CENSORED``（右删失）。不再数"第几次机会"。
+- **无节律型的账不数机会**（``consequent_peak=None``，2026-09-27 裁定）：约球→打球、挂号→就诊这类后件没节律，
   承诺只有兑现（后件来了）与**释放**（``released_by`` 的概念命中，``RELEASED`` + ``releasing_uri``）两种结法，
   没有按机会数的删失——"很多行为没有机会时效，一个行为的影响在很后面"。兑现是 **FIFO** 的：同一假设的开放
   承诺按锚序，一个后件 occurrence 只兑现最早那条，不然约球两次、打球一次会读成两次都兑现了。
@@ -35,11 +35,11 @@ from habitus.behavior.model import BehaviorAddress, BehaviorKind
 from habitus.behavior.uri import BehaviorURI, BehaviorURIError, BehaviorURINodeType
 from habitus.foundation.text import clean_line
 from habitus.scene.concepts.model import ConceptError, concept_identity
-from habitus.scene.hypotheses.model import MAX_OPPORTUNITIES, Aspect
+from habitus.scene.hypotheses.model import MAX_OPPORTUNITIES, Aspect, PeakWindow
 from habitus.scene.occurrences.model import ConceptHit
 
 MAX_NOTE_CHARS = 400
-#: 一份快照最多装多少个机会：结算要能数到 ``censor_after`` 次，再加次数方面的地平线；保护闸，不是设计量。
+#: 一份快照最多装多少个窗口落地：次数方面要铺 ``horizon`` 个；保护闸，不是设计量。
 MAX_SNAPSHOT_OPPORTUNITIES = 2 * MAX_OPPORTUNITIES
 
 
@@ -50,7 +50,7 @@ class LedgerError(ValueError):
 class Outcome(str, Enum):
     """结算怎么收的。
 
-    概率：``OCCURRED``（后件来了）｜ ``CENSORED``（等过了足够多次已观测机会没来 / 被生命周期关掉；右删失）
+    概率：``OCCURRED``（窗口里后件来了）｜ ``ABSENT``（窗口看清了、没来）｜ ``CENSORED``（窗口没看清；右删失）
     ｜ ``RELEASED``（**只有无节律型**：``released_by`` 的概念命中，这条前提被后来的事作废了——再次挂号取代
     上一次那张号。既不是兑现也不是"没来"，读兑现率时它在分母不在分子）。
     时刻：``OBSERVED``（那次机会上来了，记时刻）｜ ``ABSENT``（那次机会已观测地过了、没来——不是"很晚"，是没有
@@ -69,7 +69,7 @@ class Outcome(str, Enum):
 #: 每个方面允许哪些结果。存储层是这条不变量唯一的守门人：``Settlement`` 自己不知道 aspect。
 OUTCOMES_BY_ASPECT: Mapping[Aspect, frozenset[Outcome]] = MappingProxyType(
     {
-        Aspect.PROBABILITY: frozenset({Outcome.OCCURRED, Outcome.CENSORED, Outcome.RELEASED}),
+        Aspect.PROBABILITY: frozenset({Outcome.OCCURRED, Outcome.ABSENT, Outcome.CENSORED, Outcome.RELEASED}),
         Aspect.TIMING: frozenset({Outcome.OBSERVED, Outcome.ABSENT, Outcome.CENSORED}),
         Aspect.COUNT: frozenset({Outcome.COUNTED, Outcome.CENSORED}),
     }
@@ -100,15 +100,16 @@ class WindowSpan:
 
 @dataclass(frozen=True)
 class Opportunity:
-    """后件的一次常态发生时段：预测树上 (周几, 后件) 那条 ``marginal`` 曲线的一个峰。
+    """后件的一个**钟面峰窗口**在某一天的落点：假设里写死的峰时段（两边各展容差）落在这一天上。
 
-    ``at`` 峰的中心时刻；``span`` 峰覆盖的槽；``probability`` 峰内至少开始一次的期望（峰内各槽 ``marginal`` 之和，
-    截到 1）。由组合根注入的口从树上算，账本只核对形状。
+    ``at`` 窗口中心；``span`` 窗口（含容差）；``probability`` 那天那个周几的曲线在这一段上的质量（截到 1）——
+    ``None`` = 那个周几没有曲线，**不猜**（二-4："没看过就当没看到"）：窗口还在、账照开，只是没有对照。
+    由组合根注入的口从树上算，账本只核对形状。
     """
 
     at: datetime
     span: WindowSpan
-    probability: float
+    probability: float | None
 
     def __post_init__(self) -> None:
         _aware(self.at, "opportunity at")
@@ -116,11 +117,12 @@ class Opportunity:
             raise LedgerError("opportunity span must be a WindowSpan")
         if not self.span.contains(self.at):
             raise LedgerError("an opportunity's centre lies inside its span")
-        if isinstance(self.probability, bool) or not isinstance(self.probability, int | float) or not math.isfinite(self.probability):
-            raise LedgerError("opportunity probability must be a finite number")
-        if not 0.0 < float(self.probability) <= 1.0:
-            raise LedgerError("opportunity probability lies in (0, 1]")
-        object.__setattr__(self, "probability", float(self.probability))
+        if self.probability is not None:
+            if isinstance(self.probability, bool) or not isinstance(self.probability, int | float) or not math.isfinite(self.probability):
+                raise LedgerError("opportunity probability must be a finite number or None")
+            if not 0.0 <= float(self.probability) <= 1.0:
+                raise LedgerError("opportunity probability lies in [0, 1]")
+            object.__setattr__(self, "probability", float(self.probability))
 
 
 @dataclass(frozen=True)
@@ -158,17 +160,16 @@ class OpportunitySnapshot:
         return self.opportunities[index - 1] if index <= len(self.opportunities) else None
 
     def index_of(self, moment: datetime) -> int | None:
-        """``moment`` 落在第几次机会：已开始的机会数（至少 1——比第一次机会还早也算第一次的）。
+        """``moment`` 落在第几个窗口（从 1 数）；不在任何窗口里 → ``None``。
 
-        两峰之间的到来归前一个峰：09:40 的起床晚于 06:30–09:30 那个峰，仍是"第 1 次机会上起的床，晚了"。
-        **晚于最后一个机会结束**的到来返回 ``None``：快照铺不到那么远，落在第几次机会这件事不知道——记一个饱和的
-        假名次比承认不知道更糟（那是要写进 add-only 记录的事实字段）。
+        账按钟面窗口记（2026-10-01）：窗口之间的到来不归任何一本账——容差已经由机会口把窗口展宽过了
+        （``slack_minutes``），这里不再第二次放宽。
         """
 
-        if moment >= self.opportunities[-1].span.end:
-            return None
-        begun = sum(1 for item in self.opportunities if item.span.start <= moment)
-        return max(1, begun)
+        for index, item in enumerate(self.opportunities, start=1):
+            if item.span.contains(moment):
+                return index
+        return None
 
     @property
     def last_end(self) -> datetime:
@@ -177,24 +178,39 @@ class OpportunitySnapshot:
         return self.opportunities[-1].span.end
 
     def expected_count(self, first: int, horizon: int) -> float | None:
-        """第 ``first`` 到第 ``first + horizon - 1`` 次机会的概率之和（次数方面的对照）；快照不够长返回 None。"""
+        """第 ``first`` 到第 ``first + horizon - 1`` 个窗口的概率之和（次数方面的对照）；快照不够长或有窗口没对照返回 None。"""
 
         items = self.opportunities[first - 1 : first - 1 + horizon]
-        if len(items) < horizon:
+        if len(items) < horizon or any(item.probability is None for item in items):
             return None
-        return sum(item.probability for item in items)
+        return sum(item.probability for item in items if item.probability is not None)
 
 
 @dataclass(frozen=True)
 class OpportunityRequest:
-    """向组合根注入的口要什么：这个后件、从这个锚往后的前 ``count`` 个机会。"""
+    """向组合根注入的口要什么：这个后件、从这个锚往后的前 ``count`` 个**钟面窗口**的落点。
+
+    ``window`` 是假设里写死的峰时段（后果第 k 峰）；第 1 个落点是锚之后第一个还没结束的那一天的该时段，
+    往后逐日铺（次数方面要接下来几个窗口时按后件的整张峰表轮着铺，``windows`` 给全表）。
+    """
 
     consequent: str
     anchor: datetime
     count: int
+    window: PeakWindow
+    windows: tuple[PeakWindow, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.window, PeakWindow):
+            raise LedgerError("an opportunity request names the peak window it asks about")
+        if isinstance(self.count, bool) or not isinstance(self.count, int) or self.count < 1:
+            raise LedgerError("count is a positive integer")
 
 
 class OpportunityProvider(Protocol):
+    #: 窗口两边各展多少分钟的容差（= 预测树的 ``pool_half_width`` × 槽宽；10-01 定复用它）。
+    slack_minutes: int
+
     def opportunities(self, request: OpportunityRequest) -> OpportunitySnapshot | None: ...
 
 
@@ -292,6 +308,10 @@ class Claim:
     situation_snapshot: tuple[str, ...]
     control: OpportunitySnapshot | None
     created_at: datetime
+    #: 开承诺那条记录上**判过**的情境（在场的在 ``situation_snapshot`` 里，不在场的也在这里）。稳定性按情境分层时
+    #: 只收判过它的承诺（2026-09-30 裁定八 ②）：没判过 ≠ 不在场。从命中记录的 ``situations_checked`` 抄来；
+    #: 旧记录没有这一栏时为空，于是那些承诺不进任何一层。
+    situations_checked: tuple[str, ...] = ()
     #: 从 ``trigger_uri`` 算一次就存着（不参与相等与 repr）：读侧问锚问得极密，每次重解析 URI 是读数的主要开销。
     _address: BehaviorAddress = field(init=False, compare=False, repr=False)
     _anchor: datetime = field(init=False, compare=False, repr=False)
@@ -331,6 +351,16 @@ class Claim:
         if len({concept_identity(name) for name in snapshot}) != len(snapshot):
             raise LedgerError("situation_snapshot repeats a concept")
         object.__setattr__(self, "situation_snapshot", tuple(snapshot))
+        checked: list[str] = []
+        for name in self.situations_checked:
+            try:
+                concept_identity(name)
+            except ConceptError as exc:
+                raise LedgerError(f"situations_checked: {exc}") from exc
+            checked.append(name)
+        if len({concept_identity(name) for name in checked}) != len(checked):
+            raise LedgerError("situations_checked repeats a concept")
+        object.__setattr__(self, "situations_checked", tuple(checked))
         if self.control is not None:
             if not isinstance(self.control, OpportunitySnapshot):
                 raise LedgerError("control must be an OpportunitySnapshot or None")

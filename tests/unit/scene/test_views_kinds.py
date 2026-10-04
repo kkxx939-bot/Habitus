@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from habitus.scene.views.kinds import concept_kinds, kinds_by_concept
+import pytest
+
+from habitus.scene.occurrences import ConceptHit
+
+from habitus.scene.views.kinds import concept_kinds, concept_overlap, kinds_by_concept
 from tests.unit.scene.fixtures import DAY1, DAY2
 from tests.unit.scene.ledger_fixtures import CONCEPTS, record
 
@@ -51,3 +55,25 @@ def test_concepts_that_no_longer_exist_are_skipped() -> None:
     records = [record(DAY1, "吃了碗面", 7, 30, "早餐", "咖啡", kind="吃饭")]
     spreads = {item.concept for item in concept_kinds(records, without)}
     assert spreads == {"咖啡"}
+
+
+def test_the_overlap_between_concepts_is_counted_and_names_the_crowded_pairs() -> None:
+    """概念之间重叠了多少：一条 occurrence 平均命中几个**叶子**，以及最常一起命中的那几对。
+
+    2026-09-29 探针实测：16 个平级近义概念（0 个 parent）让平均命中数到 3.6，于是同一次前件命中开出
+    几倍的承诺、清楚的因果被切成几条更薄的账。最常同时命中的那几对就是该合并或该挂同一上级的线索。
+    """
+
+    records = [
+        record(DAY1, "改代码", 10, 0, ConceptHit("晚睡"), ConceptHit("早餐")),
+        record(DAY1, "又改代码", 11, 0, ConceptHit("晚睡"), ConceptHit("早餐")),
+        record(DAY1, "打球", 18, 0, ConceptHit("打球")),
+    ]
+    overlap = concept_overlap(records, CONCEPTS)
+    assert overlap.records == 3 and overlap.hits == 5
+    assert overlap.mean_hits == pytest.approx(5 / 3) and not overlap.diluted  # 1.67 还在 2 以内
+    assert overlap.crowded() == ((("早餐", "晚睡"), 2),)  # 对按身份排序，不按命中顺序
+    assert "平均命中 1.7 个概念" in overlap.render() and "早餐 + 晚睡 共 2 次" in overlap.render()
+    # 平均命中数过高就报"在互相稀释"
+    crowded = [record(DAY1, f"第{i}条", 10 + i, 0, ConceptHit("晚睡"), ConceptHit("早餐"), ConceptHit("打球")) for i in range(3)]
+    assert concept_overlap(crowded, CONCEPTS).diluted

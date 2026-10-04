@@ -1,4 +1,4 @@
-"""⑤ 读时统计基元：Beta 分布函数与分位数（无 scipy）、确定性 bootstrap、环形差、单调性。"""
+"""⑤ 读时统计基元：Beta 分布函数与分位数（无 scipy）、确定性 bootstrap、按块折算的等价计数、单调性。"""
 
 from __future__ import annotations
 
@@ -12,15 +12,11 @@ from habitus.scene.views.stats import (
     beta_cdf,
     beta_quantile,
     block_bootstrap,
-    bootstrap_interval,
     effective_counts,
     is_monotonic,
     jeffreys_interval,
-    kaplan_meier,
     mean,
     median,
-    survival_at,
-    survival_median,
     widen,
 )
 
@@ -44,24 +40,20 @@ def test_beta_quantile_inverts_the_cdf() -> None:
         beta_quantile(1.0, 1, 1)
 
 
-def test_bootstrap_is_deterministic_per_seed_and_degenerates_gracefully() -> None:
+def test_block_bootstrap_is_deterministic_per_seed_and_degenerates_gracefully() -> None:
+    """（``bootstrap_interval`` 已删：生产里只剩按块的那一个，评审 A-15 / C-16。）"""
+
     values = [3.0, 5.0, 4.0, 8.0, 2.0, 6.0]
-    first = bootstrap_interval(values, "median", seed="早餐/晚睡--timing")
-    again = bootstrap_interval(values, "median", seed="早餐/晚睡--timing")
-    assert first == again and first.point == median(values) == 4.5
+    blocks = ["a", "b", "c", "d", "e", "f"]
+    first = block_bootstrap(values, blocks, median, seed="早餐/晚睡--timing")
+    again = block_bootstrap(values, blocks, median, seed="早餐/晚睡--timing")
+    assert first is not None and first == again and first.point == median(values) == 4.5
     assert first.low <= first.point <= first.high
-    # 点估计与种子无关（它算的是原样本），只有区间端点可能随种子动；这组数据上连端点都一样，
-    # 所以这里只断言"确定性"，不断言"不同种子给不同区间"——后者在小样本上本来就不成立。
-    other = bootstrap_interval(values, "median", seed="another")
-    assert other.point == first.point
-    single = bootstrap_interval([7.0], "mean", seed="x")
-    assert (single.point, single.low, single.high) == (7.0, 7.0, 7.0)
-    with pytest.raises(StatsError):
-        bootstrap_interval([], "mean", seed="x")
-    with pytest.raises(StatsError):
-        bootstrap_interval([1.0, math.nan], "mean", seed="x")
-    with pytest.raises(StatsError):
-        bootstrap_interval([1.0], "mode", seed="x")
+    # 点估计与种子无关（它算的是原样本），只有区间端点可能随种子动
+    other = block_bootstrap(values, blocks, median, seed="another")
+    assert other is not None and other.point == first.point
+    single = block_bootstrap([7.0], ["a"], mean, seed="x")
+    assert single is not None and (single.point, single.low, single.high) == (7.0, 7.0, 7.0)
 
 
 def test_intervals_and_monotonicity() -> None:
@@ -70,22 +62,6 @@ def test_intervals_and_monotonicity() -> None:
     with pytest.raises(StatsError):
         Interval(1, 2, 0)
     assert is_monotonic([1, 2, 2, 5]) and is_monotonic([5, 3, 1]) and not is_monotonic([1, 3, 2]) and not is_monotonic([1])
-
-
-def test_kaplan_meier_walks_opportunities_with_right_censoring() -> None:
-    """6 条：第 1 步来了 2 条，4 条等过 3 步没来 → S(1)=4/6；第 2 步 1 条来了（风险集 4）→ S(2)=4/6·3/4=0.5 → 中位第 2 步。"""
-
-    curve = kaplan_meier([1, 1, 2], [3, 3, 3])
-    assert [(s.step, s.at_risk, s.events) for s in curve] == [(1, 6, 2), (2, 4, 1), (3, 3, 0)]
-    assert survival_at(curve, 1) == pytest.approx(4 / 6) and survival_at(curve, 2) == pytest.approx(0.5) and survival_at(curve, 0) == 1.0
-    assert survival_median(curve) == 2 and survival_at(curve, 7) is None
-    # 全部删失、没人到：S 不降，中位没到；删失 0 步的那条从不进风险集。
-    flat = kaplan_meier([], [2, 2, 0])
-    assert survival_median(flat) is None and survival_at(flat, 1) == 1.0
-    with pytest.raises(StatsError):
-        kaplan_meier([0], [])
-    with pytest.raises(StatsError):
-        kaplan_meier([1], [-1])
 
 
 def test_block_bootstrap_resamples_whole_blocks_and_skips_undefined_resamples() -> None:
@@ -105,21 +81,17 @@ def test_block_bootstrap_resamples_whole_blocks_and_skips_undefined_resamples() 
         block_bootstrap([1.0, 2.0], [0], mean, seed="w")
 
 
-def test_survival_past_the_point_everyone_arrived_is_zero_not_unknown() -> None:
-    """全部在第 1 步就到了 → S(2) 是 0（p1=1），不是"算不出"（评审 A-5/C-10：读数会印成"还没攒够"）。"""
-
-    arrived = kaplan_meier([1, 1, 1], [])
-    assert survival_at(arrived, 1) == 0.0 and survival_at(arrived, 2) == 0.0 and survival_at(arrived, 7) == 0.0
-    # 末步 S>0 而曲线到此为止（没人等到那一步）才是真的不知道。
-    waiting = kaplan_meier([1, 2], [3])
-    assert survival_at(waiting, 3) == pytest.approx(1 / 3) and survival_at(waiting, 4) is None
-
-
 def test_jeffreys_gives_a_width_where_a_percentile_bootstrap_collapses() -> None:
     """六条全到：百分位 bootstrap 每次重采样都给同一个数（零宽 → 必然"显著"）；Jeffreys（Beta(6.5, 0.5) 的中央 90%）给 [0.74, 1.0]。"""
 
-    counts = effective_counts(kaplan_meier([1] * 6, []), 1)
+    counts = effective_counts(6, 0)
     assert counts is not None and counts.events == 6.0 and counts.remainder == 0.0
+    # 按块数折算：一天开 6 条、等的是同一个窗口 → 等价样本只有块数那么多（评审 C-6）。
+    folded = effective_counts(4, 2, blocks=3)
+    assert folded is not None and folded.events == pytest.approx(2.0) and folded.remainder == pytest.approx(1.0)
+    assert effective_counts(0, 0) is None
+    with pytest.raises(ValueError):
+        effective_counts(-1, 0)
     rate = jeffreys_interval(counts.events, counts.remainder)
     assert rate.point == 1.0 and rate.low == pytest.approx(0.736, abs=0.01) and rate.high == pytest.approx(1.0, abs=0.01)
     assert rate.width > 0

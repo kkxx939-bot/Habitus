@@ -28,7 +28,7 @@ TODO(BHV-REALDATA-001): 首次用真实日/周尺度数据（EgoLife A1_JAKE 七
 **现状**：四条均已在 ``assembly`` 降级并以 ``BehaviorJudgementBatch.degradations`` 留痕
 （去重取首条；剔掉不在场主体、全不在场则整条降为没读懂并剪掉指向它的关系；``continues`` 指向
 已完成目标的边剪掉；goal 的 basis 全无帧归属则 goal 置空），``validation`` 保留为后置断言，
-worker 把计数记进 ``fusion_degradations`` 可观测事件；回执字段与版本升级留到容量一组一起做。
+runner 把按类计数记进 ``fusion_judge`` 可观测事件的 ``degradation_*`` 属性；回执字段与版本升级留到容量一组一起做。
 验证：单元测试按四类失败形状各造一份；真实对照（EgoLife DAY1、真实装配代码、无补丁）：
 368 段 **0 次硬拒**，1421 条判断（与补丁版 1422 一致），信号 subject_absent 12 /
 continues_completed 57 / goal_dropped 1 / duplicate_assignment 1。对照中撞出并修掉一条连锁：
@@ -98,7 +98,7 @@ COMMITTED 即 discard；判断与交付在链发布、账本写完之后由归�
 代劳，那么这么一些无意识的小动作是不应该进入事件的。"由此：一条判断 = 一个**可提醒或可代劳的
 行为单位**；步骤（拿起、放下、走到桌前）进那件事的 basis；无意识小动作与过渡帧**归属为空**
 （frames 填 []：看到了、看懂了、不构成任何事——不是 gap、不是没读懂，树上不写，曝光分母照算，
-占比作为信号 ``fusion_unowned`` 报出）；goal 退回可读字段，"goal 空则 basis 空"的不变量取消；
+数量随 ``fusion_job`` 可观测事件的 ``unowned_observations`` 报出）；goal 退回可读字段，"goal 空则 basis 空"的不变量取消；
 "实际规律不规律"留给预测层。完整裁定与文献旁证见 ``judgement.py`` 模块头。
 **现状**：提示词 v15→v18、schema 的 frames.assignments 去掉 minItems、``BehaviorJudgementBatch``
 带 ``unowned_fragment_nos``、回执带 ``unowned_observation_ids``/``unowned_ratio``。benchmark 加

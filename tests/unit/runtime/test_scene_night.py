@@ -119,8 +119,9 @@ def nightly(tmp_path, hits: ConceptHitStore, site: Site, *, yes: frozenset[str])
         mapper_for=mapper_for,
         subject=SUBJECT,
         config=SceneNightConfig(
-            ledger=LedgerConfig(snapshot_opportunities=16, censor_after=3),
-            views=ViewsConfig(min_count=3, min_blocks=2, settlement_horizon=3),
+            ledger=LedgerConfig(),
+            views=ViewsConfig(min_count=3, min_blocks=2),
+            placebos=0,  # 其余测试量的是五步本身；安慰剂那条自己打开
         ),
     )
     return run, provider
@@ -192,11 +193,89 @@ def test_the_gate_stops_the_night_when_the_ledger_has_orphan_settlements(tmp_pat
         asyncio.run(run_two.run(TONIGHT + timedelta(days=2), tree=prediction_tree(), now=NOW + timedelta(days=2)))
 
 
-def test_the_gate_stops_the_night_when_the_two_configs_disagree(tmp_path) -> None:
-    """读侧的"等够几次机会"与账本判删失用的必须是同一个数，否则读出来的删失口径是错的。"""
+def test_the_nightly_run_tops_up_placebos_and_keeps_them_out_of_the_views(tmp_path) -> None:
+    """B6 的前半：安慰剂由算法补齐、一样开账，但**不进投影**——它是尺子不是读数。"""
+
+    from habitus.scene.hypotheses.placebo import split_by_origin
 
     site, hits = site_with_three_bedtimes(tmp_path)
-    run, _provider = nightly(tmp_path, hits, site, yes=frozenset())
-    object.__setattr__(run.config, "views", ViewsConfig(min_count=3, min_blocks=2, settlement_horizon=9))
-    with pytest.raises(ValueError, match="settlement_horizon"):
-        asyncio.run(run.run(TONIGHT, tree=prediction_tree(), now=NOW))
+    publish(site.behavior_tree, TONIGHT, "就寝", 2, 10, summary="上床睡觉", kind="睡觉", lasts_minutes=30)
+    publish(site.behavior_tree, TONIGHT, "吃了碗面", 7, 30, summary="坐下吃了碗面", kind="吃饭")
+    run, _provider = nightly(tmp_path, hits, site, yes=frozenset({"就寝/晚睡", "吃了碗面/早餐"}))
+    object.__setattr__(run.config, "placebos", 1)
+
+    report = asyncio.run(run.run(TONIGHT, tree=prediction_tree(), now=NOW))
+    store = HypothesisStore(tmp_path / "scene")
+    real, placebo = split_by_origin({item.identity: item for item in store.read_all()})
+    assert len(placebo) == 1 and len(real) == 1  # 一条真假设配一条安慰剂
+    assert any("新配" in signal for signal in report.signals)
+    # 安慰剂进了账本（它要攒样本），但没进投影
+    assert report.placebo is not None
+    relations = list((tmp_path / "scene" / "views" / "relations").rglob("*.md"))
+    assert len(relations) == report.relations == 1  # 只有真假设那一条
+    assert not any(next(iter(placebo)).split("/")[-1] in path.name for path in relations)
+
+
+def test_the_closure_step_is_skipped_when_no_touchpoint_is_injected(tmp_path) -> None:
+    """闭环要调模型，而重放与离线读数不该被模型可用性卡住：没注入触点③ 就整拍跳过，前五步照跑。"""
+
+    site, hits = site_with_three_bedtimes(tmp_path)
+    publish(site.behavior_tree, TONIGHT, "就寝", 2, 10, summary="上床睡觉", kind="睡觉", lasts_minutes=30)
+    run, _provider = nightly(tmp_path, hits, site, yes=frozenset({"就寝/晚睡"}))
+    report = asyncio.run(run.run(TONIGHT, tree=prediction_tree(), now=NOW))
+    assert report.closure is None and run.closure is None
+    assert "闭环" not in report.summary()
+
+
+def test_r3_03_the_night_reads_relations_at_the_trust_boundary_not_untruncated(tmp_path) -> None:
+    """夜批读数传 ``until``（命中记录可信到哪一刻）：承诺命运未定的要截掉。旧写法没传，对称截断在生产路径上关了三周（评审 A-3/B-3/C-3）。
+
+    这一夜 02:10 晚睡开了承诺、07:30 早餐把它结掉（落在自己那个早餐窗里）。**对称截断**要等窗口过完才收它——不然
+    "来了的当下就进 n、没来的要等窗口过完才进 n"把 p1 系统性读高（第二轮 C-4）。窗口账（2026-10-01）的收口点就是窗口末尾：
+    到 ``until``（次日零点）窗口已过完 → 进 n；在窗口里（08:00）读 → 它进 ``immature``、不进 n。
+    """
+
+    site, hits = site_with_three_bedtimes(tmp_path)
+    publish(site.behavior_tree, TONIGHT, "就寝", 2, 10, summary="上床睡觉", kind="睡觉", lasts_minutes=30)
+    publish(site.behavior_tree, TONIGHT, "吃了碗面", 7, 30, summary="坐下吃了碗面", kind="吃饭")
+    run, _provider = nightly(tmp_path, hits, site, yes=frozenset({"就寝/晚睡", "吃了碗面/早餐"}))
+    seen: dict[str, object] = {}
+    original = run._project
+
+    def spy(*args, **kwargs):  # type: ignore[no-untyped-def]
+        seen.update(kwargs)
+        return original(*args, **kwargs)
+
+    run._project = spy  # type: ignore[method-assign]
+    report = asyncio.run(run.run(TONIGHT, tree=prediction_tree(), now=NOW))
+    # 传给读数的是可信边界（最后一个已映射日的次日零点，主体时区），不是墙钟 NOW
+    assert seen["until"] == at(TONIGHT + timedelta(days=1), 0, 0) and seen["now"] == NOW
+    assert report.opened == 1 and report.settled == 1 and report.pending == 0
+    from habitus.scene.views import read_relations
+
+    (early,) = read_relations((LATE_TO_BREAKFAST,), ledger=run.ledger, concepts=run.concepts.read_all(), config=run.config.views, now=at(TONIGHT, 8, 0))
+    assert early.strength.immature == 1 and early.strength.accumulation.count == 0  # 窗口还没过完：命运未定 → 截掉
+    (reading,) = read_relations((LATE_TO_BREAKFAST,), ledger=run.ledger, concepts=run.concepts.read_all(), config=run.config.views, now=seen["until"])  # type: ignore[arg-type]
+    assert reading.strength.immature == 0 and reading.strength.accumulation.count == 1 and reading.strength.events == 1  # 窗口过完了才进 n
+
+
+def test_r3_18_remapping_a_day_voids_its_ledger_before_reopening(tmp_path) -> None:
+    """概念集变了 → 同一天重映射 → 命中变了 → 那天的承诺与靶那天记录结的账先撤再开（评审 A-12 / B-5）。"""
+
+    site, hits = site_with_three_bedtimes(tmp_path)
+    publish(site.behavior_tree, TONIGHT, "就寝", 2, 10, summary="上床睡觉", kind="睡觉", lasts_minutes=30)
+    publish(site.behavior_tree, TONIGHT, "吃了碗面", 7, 30, summary="坐下吃了碗面", kind="吃饭")
+    run, _provider = nightly(tmp_path, hits, site, yes=frozenset({"就寝/晚睡", "吃了碗面/早餐"}))
+    first = asyncio.run(run.run(TONIGHT, tree=prediction_tree(), now=NOW))
+    assert first.opened == 1 and first.settled == 1
+    assert len(run.ledger.claims_for(LATE_TO_BREAKFAST.identity)) == 1
+    # 口径变了（概念集加一个概念 → 映射器版本变）→ 重跑同一天：模型这次不再判「晚睡」
+    from tests.unit.scene.concept_fixtures import concept
+
+    VECTORS["夜宵：睡前吃东西"] = (0.0, 0.5, 0.5, 0.0)
+    run.concepts.write(concept("夜宵", "睡前吃东西"))
+    run2, _p = nightly(tmp_path, hits, site, yes=frozenset({"吃了碗面/早餐"}))
+    second = asyncio.run(run2.run(TONIGHT, tree=prediction_tree(), now=NOW + timedelta(hours=1)))
+    assert second.mapped == 2 and any(signal.startswith("remap:") for signal in second.signals)
+    # 旧的那条承诺（前件「晚睡」）被撤了，新的命中里没有晚睡 → 一条都不该开
+    assert run2.ledger.claims_for(LATE_TO_BREAKFAST.identity) == () and second.opened == 0

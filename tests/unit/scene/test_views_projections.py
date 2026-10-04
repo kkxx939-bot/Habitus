@@ -1,4 +1,4 @@
-"""⑤ intentions / residue / profile / entities 四个投影与落盘。"""
+"""⑤ residue / profile / entities 三个投影与落盘（intentions/ 2026-09-30 删：前因与后果是两个行为，没结的账不是"前提"）。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from habitus.scene.views import (
     profile_view,
     read_relations,
     residue_candidates,
-    standing_intentions,
 )
 from tests.unit.scene.concept_fixtures import ALL_CONCEPTS, concept
 from tests.unit.scene.fixtures import DAY1, DAY2, DAY3, at
@@ -38,31 +37,6 @@ from tests.unit.scene.ledger_fixtures import (
 
 WITH_A = concept("和A一起", "A 在场", role=ConceptRole.OBJECT)
 CONCEPTS_WITH_A = ConceptSet((*ALL_CONCEPTS, BOOKING, WAKE, COFFEE, BEDTIME, WITH_A))
-
-
-def test_standing_intentions_are_the_unsettled_claims(tmp_path) -> None:
-    ledger = LedgerStore(tmp_path / "scene")
-    for day, settle in ((DAY1, True), (DAY2, False)):
-        trigger = uri_for(day, "约球", 10, 0)
-        claim = Claim(
-            hypothesis_identity=BOOKING_TO_BALL.identity,
-            hypothesis_fingerprint=BOOKING_TO_BALL.fingerprint,
-            aspect=BOOKING_TO_BALL.aspect,
-            trigger_uri=trigger,
-            antecedent_hits=(ConceptHit("约球"),),
-            antecedent_uris=(trigger,),
-            situation_snapshot=(),
-            control=daily_snapshot("打球", at(day, 10, 0), 8),
-            created_at=NOW,
-        )
-        ledger.write_claim(claim)
-        if settle:
-            ledger.write_settlement(Settlement(claim.ref, Outcome.OCCURRED, NOW, observed_at=at(DAY3, 19, 0), fulfilling_uri=uri_for(DAY3, "打球", 19, 0), latency_hours=57.0, opportunity_index=3))
-    hypotheses = {BOOKING_TO_BALL.identity: BOOKING_TO_BALL, LATE_TO_BREAKFAST.identity: LATE_TO_BREAKFAST}
-    (standing,) = standing_intentions(ledger, hypotheses, now=at(DAY3, 10, 0))
-    assert standing.consequent == "打球" and standing.since == at(DAY2, 10, 0) and standing.waited_hours == 24.0
-    assert standing.opportunities_passed == 1 and standing.next_opportunity_at == at(DAY3, 19, 0)  # DAY2 19:00 那次过了，下一次今晚
-    assert standing.label() == "约球 → 等 打球，已等 24.0 小时，已过 1 次机会" and standing.ref.hypothesis_identity == BOOKING_TO_BALL.identity
 
 
 def test_residue_counts_unmapped_kinds_and_says_how_far_from_upgrading(tmp_path) -> None:
@@ -87,8 +61,8 @@ def test_profile_ranks_stable_relations_and_entities_slice_by_object_concepts(tm
     for i in range(12):
         day = DAY1 + timedelta(days=7 * i)  # 一周一次：块长 7 天，12 条跨 12 块
         for hyp, outcome, situations in (
-            (LATE_TO_BREAKFAST, Outcome.CENSORED, ()),
-            (with_a, Outcome.OCCURRED if i < 6 else Outcome.CENSORED, ("和A一起",) if i < 6 else ()),
+            (LATE_TO_BREAKFAST, Outcome.ABSENT, ()),
+            (with_a, Outcome.OCCURRED if i < 6 else Outcome.ABSENT, ("和A一起",) if i < 6 else ()),
         ):
             trigger = uri_for(day, "就寝", 2, 10)
             snapshot = daily_snapshot(hyp.consequent, at(day, 2, 10), 8)
@@ -100,6 +74,7 @@ def test_profile_ranks_stable_relations_and_entities_slice_by_object_concepts(tm
                 antecedent_hits=(ConceptHit("晚睡", "轻"),),
                 antecedent_uris=(trigger,),
                 situation_snapshot=situations,
+                situations_checked=("和A一起",),
                 control=snapshot,
                 created_at=NOW,
             )
@@ -109,10 +84,10 @@ def test_profile_ranks_stable_relations_and_entities_slice_by_object_concepts(tm
             settlement = (
                 Settlement(claim.ref, outcome, NOW, observed_at=first.at, fulfilling_uri=uri_for(day, "x", first.at.hour, first.at.minute), latency_hours=(first.at - at(day, 2, 10)).total_seconds() / 3600, opportunity_index=1)
                 if outcome is Outcome.OCCURRED
-                else Settlement(claim.ref, outcome, NOW, passes=tuple(OpportunityPass(snapshot.at(k).at, True) for k in (1, 2, 3)))  # type: ignore[union-attr]
+                else Settlement(claim.ref, outcome, NOW, opportunity_index=1, passes=(OpportunityPass(first.at, True),))
             )
             ledger.write_settlement(settlement)
-    readings = read_relations((LATE_TO_BREAKFAST, with_a), ledger=ledger, concepts=CONCEPTS_WITH_A, config=ViewsConfig(min_count=6, min_blocks=3, split_min=3))
+    readings = read_relations((LATE_TO_BREAKFAST, with_a), ledger=ledger, concepts=CONCEPTS_WITH_A, config=ViewsConfig(min_count=6, min_blocks=3, split_min=3), now=NOW + timedelta(days=365))
     profile = profile_view(readings, top_n=5)
     assert [r.hypothesis_identity for r in profile.stable_relations] == [LATE_TO_BREAKFAST.identity]  # 另一条被「和A一起」调节，不算未被推翻
     slices = entity_slices(readings, CONCEPTS_WITH_A)
@@ -128,7 +103,6 @@ def test_profile_ranks_stable_relations_and_entities_slice_by_object_concepts(tm
         hypotheses=known,
         readings=readings,
         behaviours=behaviour_views(readings, known),
-        intentions=(),
         residue=(),
         profile=profile,
         entities=slices,
@@ -140,14 +114,14 @@ def test_profile_ranks_stable_relations_and_entities_slice_by_object_concepts(tm
     names = {str(path.relative_to(tmp_path / "scene" / "views")) for path in written}
     assert names == {
         "behaviours/咖啡.md", "behaviours/晚睡.md", "behaviours/早餐.md",
-        "entities/和a一起.md", "intentions/index.md", "profile.md",
+        "entities/和a一起.md", "profile.md",
         f"relations/{LATE_TO_BREAKFAST.identity}.md", f"relations/{with_a.identity}.md", "residue/index.md",
     }
     assert not stale.exists()  # 整个重写：不在集合里的旧文件删掉
     assert store.is_complete() and (tmp_path / "scene" / "views" / ".done.json").exists()
     relation_text = (tmp_path / "scene" / "views" / "relations" / f"{with_a.identity}.md").read_text(encoding="utf-8")
     assert "## 情境" in relation_text and "- 被「和A一起」调节：有 " in relation_text
-    assert "实际 0%（0 次到、12 次右删失） vs 本来 88%" in (tmp_path / "scene" / "views" / "relations" / f"{LATE_TO_BREAKFAST.identity}.md").read_text(encoding="utf-8")
+    assert "实际 0%（0 次到、12 次没来） vs 本来 88%" in (tmp_path / "scene" / "views" / "relations" / f"{LATE_TO_BREAKFAST.identity}.md").read_text(encoding="utf-8")
     # behaviours/：一个行为的两面。「晚睡」是两条假设的前件 → 后果面两行；前因面空（基准没为它写过）。
     late = (tmp_path / "scene" / "views" / "behaviours" / "晚睡.md").read_text(encoding="utf-8")
     assert "## 什么导致它（前因）" in late and "（基准还没有为它写过假设）" in late
@@ -159,6 +133,6 @@ def test_profile_ranks_stable_relations_and_entities_slice_by_object_concepts(tm
     assert "→ 额外 +100pp" in coffee and "看不出" not in coffee
     assert "未被推翻 1 条" in (tmp_path / "scene" / "views" / "profile.md").read_text(encoding="utf-8")
     (tmp_path / "scene" / "views" / "orphan").mkdir()
-    materialize_views(store, hypotheses={}, readings=(), behaviours=(), intentions=(), residue=(), profile=profile_view(()), entities=(), concepts=CONCEPTS_WITH_A, now=NOW, k=5, d=3)
+    materialize_views(store, hypotheses={}, readings=(), behaviours=(), residue=(), profile=profile_view(()), entities=(), concepts=CONCEPTS_WITH_A, now=NOW, k=5, d=3)
     assert not (tmp_path / "scene" / "views" / "orphan").exists() and not (tmp_path / "scene" / "views" / "relations").exists()  # 空目录回收
     assert CONCEPTS is not None

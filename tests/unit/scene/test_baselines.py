@@ -93,6 +93,9 @@ def test_the_drift_between_the_windows_is_a_signal_not_a_criterion() -> None:
     assert drift.minutes == pytest.approx(75.0)  # 近期 01:00 vs 历来 23:45
     assert drift.drifting and "近期比历来晚 75 分钟" in drift.render()
     assert snapshot.drifting == (drift,)
-    # 只有一个窗算得出来时没有漂移可说（不拿"没有对照"当"没漂"）
+    # 只声明了近期窗时，历来窗由算法陪算（R3-16：判据只许比近期，没人会声明 all，不陪算漂移永远算不出）；
+    # 陪算的只进漂移、不进 values，也不记 missing
     one_window = baseline_table(bedtimes((1, 23, 0), (2, 23, 10), (3, 23, 20)), CONCEPTS, day=TODAY)
-    assert one_window.drifts == ()
+    (shadow,) = one_window.drifts
+    assert shadow.concept == "就寝" and shadow.minutes == pytest.approx(0.0) and not shadow.drifting
+    assert all(key.endswith(":recent") for key in one_window.values) and one_window.missing == ()

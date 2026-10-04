@@ -19,7 +19,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -40,7 +40,7 @@ MAX_GRADES = 3
 MINUTES_PER_DAY = 24 * 60
 #: 概念身份、档名会被拼进假设的叶名（``<前件@档+前件>--<方面>``），这三个分隔符不许出现在它们里面，
 #: 否则两条不同的假设能拼出同一个文件名（实测：概念名 ``出差中+晚睡`` 与集合 ``{出差中, 晚睡}``）。
-IDENTITY_SEPARATORS = ("+", "@", "--")
+IDENTITY_SEPARATORS = ("+", "@", "--", "#")
 
 
 class ConceptError(ValueError):
@@ -200,6 +200,30 @@ def parse_baseline_value(measure: GradeMeasure, text: object) -> float | None:
     except ValueError:
         return None
     return number if number >= 0 else None
+
+
+def widen_windows(spans: Sequence[tuple[int, int]], slack_minutes: int) -> tuple[tuple[int, int], ...]:
+    """给一天里按钟面顺序排好、互不重叠的几段时段各加两边的容差，**不越过与邻段的中点**。
+
+    容差是预测树的槽位容差（2026-10-01 用户定复用 ``pool_half_width``）；但两个峰之间只隔 15 分钟时，各展 45 分钟会让
+    两个窗口重叠——一条 09:20 的咖啡就会同时归到 08:30 的峰和 09:30 的峰。所以每段最多展到与前后邻段的中点
+    （最后一段的"后邻"是次日的第一段，第一段的"前邻"是前一天的最后一段；只有一段时邻居就是它自己隔一天）。
+    返回的段可以从负分钟起、或超过 1440（落到前一天 / 次日），与 ``PeakWindow`` 跨午夜的约定一致。
+    """
+
+    if isinstance(slack_minutes, bool) or not isinstance(slack_minutes, int) or slack_minutes < 0:
+        raise ConceptError("slack_minutes must be a non-negative integer")
+    items = [(int(start), int(end)) for start, end in spans]
+    if not items:
+        return ()
+    found: list[tuple[int, int]] = []
+    for index, (start, end) in enumerate(items):
+        previous_end = items[index - 1][1] - (MINUTES_PER_DAY if index == 0 else 0)
+        next_start = items[(index + 1) % len(items)][0] + (MINUTES_PER_DAY if index == len(items) - 1 else 0)
+        lower = max(start - slack_minutes, (previous_end + start) // 2)
+        upper = min(end + slack_minutes, (end + next_start) // 2)
+        found.append((min(lower, start), max(upper, end)))
+    return tuple(found)
 
 
 def circular_offset(observed: float, reference: float) -> float:
@@ -557,6 +581,10 @@ class ConceptSet(Mapping[str, ConceptDefinition]):
             parent = definition.parent_identity
             if parent is not None and parent not in resolved:
                 raise ConceptError(f"concept {definition.name!r} names an unknown parent {definition.parent!r}")
+            if parent is not None and definition.role.is_behavior != resolved[parent].role.is_behavior:
+                # 上下级必须同一种角色。情境概念挂在行为概念下面会把那个行为叶子变成非叶子——映射只判叶子，
+                # 认领了 40 次的「就寝」从此再也不被映射（评审 C-11 ④，探针里真实模型这么写过）。
+                raise ConceptError(f"concept {definition.name!r} and its parent {definition.parent!r} must both be behaviours or both be situations")
             watched = definition.watched_identity
             if watched is not None and watched not in resolved:
                 raise ConceptError(
@@ -726,6 +754,7 @@ __all__ = [
     "SituationError",
     "SituationRule",
     "circular_offset",
+    "widen_windows",
     "concept_identity",
     "parse_baseline_value",
 ]

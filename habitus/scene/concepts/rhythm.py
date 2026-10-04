@@ -48,16 +48,22 @@ class RhythmPeak:
             value = getattr(self, label)
             if isinstance(value, bool) or not isinstance(value, int):
                 raise ConceptError(f"rhythm peak {label} must be an integer minute of day")
-        if not 0 <= self.start_minute < self.end_minute <= MINUTES_PER_DAY:
-            raise ConceptError("a rhythm peak spans an ascending interval inside one day")
+        # 跨午夜的峰（就寝 23:00–01:00）起点在当天、终点过 24:00：终点最多到次日同一刻（评审 A-7 / B-8 / C-7）。
+        if not 0 <= self.start_minute < MINUTES_PER_DAY or not self.start_minute < self.end_minute <= self.start_minute + MINUTES_PER_DAY:
+            raise ConceptError("a rhythm peak starts inside one day and ends within 24 hours of its start")
         if isinstance(self.probability, bool) or not isinstance(self.probability, int | float):
             raise ConceptError("rhythm peak probability must be a number")
         if not 0.0 < self.probability <= 1.0:
             raise ConceptError("rhythm peak probability lies in (0, 1]")
 
     @property
+    def wraps_midnight(self) -> bool:
+        return self.end_minute > MINUTES_PER_DAY
+
+    @property
     def label(self) -> str:
-        return f"{_clock(self.start_minute)}–{_clock(self.end_minute)}"
+        tail = "（次日）" if self.wraps_midnight else ""
+        return f"{_clock(self.start_minute)}–{_clock(self.end_minute)}{tail}"
 
     def render(self) -> str:
         return f"第 {self.ordinal} 次机会 {self.label}，概率 {self.probability:.0%}"
@@ -68,7 +74,8 @@ class Rhythm:
     """一个行为概念的作息：典型一天的那几个峰 + 七个周几里几天有峰 + 复发间隔。
 
     ``peaks`` 空表示树上一个峰都取不到（这个概念从没命中过任何 kind，或它太低频）。
-    ``recurrence_hours`` 是复发间隔的中位数（小时），后面 A4 按它缩放 ``censor_after``；取不到就 None。
+    ``recurrence_hours`` 是复发间隔的中位数（小时）；取不到就 None。**A4"按它缩放 ``censor_after``"还没做**——
+    ``censor_after`` 仍是全局一个数，与生命周期那一份一起定（PENDING R-4）。
     """
 
     concept: str

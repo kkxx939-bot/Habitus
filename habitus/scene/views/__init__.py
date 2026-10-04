@@ -9,7 +9,6 @@
 
 - ``relations``：每条假设的当前读数——累积度门槛、强度（三方面三套，概率账兼给兑现间隔）、类型、上一级指针、稳定性扫、
   剂量、共享证据的调节对照、干预分层。
-- ``intentions``：还立着的前提 ＝ 未结算的承诺。
 - ``residue``：残差候选——没映射到概念的 kind 离升级判据差多少。
 - ``people``：profile（稳定成立的关系）与 entities（按对象类情境分账的切片）。
 - ``materialize``：把读数落成 ``scene/views/`` 下的 Markdown，整个重写、不是权威。
@@ -17,7 +16,6 @@
 
 from habitus.scene.views.behaviours import BehaviourSide, BehaviourView, behaviour_views
 from habitus.scene.views.index import GAP_LOOKBACK_DAYS, DayIndex, DayIndexCache
-from habitus.scene.views.intentions import StandingIntention, standing_intentions
 from habitus.scene.views.kinds import KindSpread, concept_kinds, kinds_by_concept
 from habitus.scene.views.materialize import VIEWS_SEGMENT, ViewsStore, ViewsStoreError, materialize_views
 from habitus.scene.views.model import (
@@ -38,6 +36,7 @@ from habitus.scene.views.relations import (
     EvidenceIndex,
     FallbackReading,
     FulfilmentReading,
+    Influence,
     Moderation,
     RelationReading,
     SharedEvidence,
@@ -49,7 +48,6 @@ from habitus.scene.views.relations import (
     load_account,
     read_relation,
     read_relations,
-    require_aligned,
 )
 from habitus.scene.views.residue import ResidueCandidate, residue_candidates
 from habitus.scene.views.stats import Interval
@@ -78,11 +76,11 @@ __all__ = [
     "ObservationGap",
     "ProfileView",
     "FulfilmentReading",
+    "Influence",
     "RelationReading",
     "ResidueCandidate",
     "SharedEvidence",
     "StabilityReport",
-    "StandingIntention",
     "Strength",
     "TypeReading",
     "TypeReadout",
@@ -101,10 +99,8 @@ __all__ = [
     "concept_kinds",
     "kinds_by_concept",
     "read_relations",
-    "require_aligned",
     "residue_candidates",
     "slot_neighbourhood",
     "slot_neighbourhood_until",
     "slot_window",
-    "standing_intentions",
 ]

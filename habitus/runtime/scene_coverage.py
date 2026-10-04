@@ -28,6 +28,10 @@ from habitus.behavior.model import BehaviorKind
 from habitus.behavior.tree import BehaviorTree
 from habitus.scene.ledger.model import Coverage, ObservedGap, WindowSpan
 
+#: 往前多读几天的空白。空白挂在它**开始**那天的目录下、长度没有上限（相机关一个周末就是一段跨两天的空白），
+#: 只读一天会漏掉跨两天以上的。**待定值**：真正的解法是上游按日界切空白，那之前先多读几天。
+DEFAULT_LOOKBEHIND_DAYS = 3
+
 
 class SceneCoverageError(ValueError):
     """行为树上的空白文档缺字段或自相矛盾——不静默当成"没有空白"（那会把没看清的机会算成看清了）。"""
@@ -40,7 +44,7 @@ class TreeCoverage:
     只读 span 覆盖的那几天会漏掉它。
     """
 
-    def __init__(self, tree: BehaviorTree, *, lookbehind_days: int = 1) -> None:
+    def __init__(self, tree: BehaviorTree, *, lookbehind_days: int = DEFAULT_LOOKBEHIND_DAYS) -> None:
         if not isinstance(tree, BehaviorTree):
             raise TypeError("tree must be a BehaviorTree")
         if isinstance(lookbehind_days, bool) or not isinstance(lookbehind_days, int) or lookbehind_days < 0:
@@ -63,7 +67,9 @@ class TreeCoverage:
 
     def _gaps_around(self, span: WindowSpan) -> tuple[ObservedGap, ...]:
         first = span.start.date() - timedelta(days=self.lookbehind_days)
-        last = span.end.date()
+        # span 是半开区间：以 24:00 结束的机会不该把**次日**读进缓存——那时次日还没封口，白天新出的空白读不到，
+        # 就把没看清的早餐记成"没来"（评审 B-9）。
+        last = (span.end - timedelta(microseconds=1)).date()
         found: list[ObservedGap] = []
         day = first
         while day <= last:
@@ -88,7 +94,7 @@ class TreeCoverage:
         return cached
 
     def forget(self, day: date | None = None) -> None:
-        """丢掉缓存。一天还没封口、或空白刚被重写时调用（夜批处理已封口的历史，正常不需要）。"""
+        """丢掉缓存。夜批**每一夜开头调一次**：同一个对象跨夜用，上一夜读进来的"次日"那时还没封口（评审 B-9）。"""
 
         if day is None:
             self._by_day.clear()
@@ -128,4 +134,4 @@ def _merged(span: WindowSpan, gaps: Sequence[ObservedGap]) -> tuple[tuple[dateti
     return tuple(merged)
 
 
-__all__ = ["SceneCoverageError", "TreeCoverage"]
+__all__ = ["DEFAULT_LOOKBEHIND_DAYS", "SceneCoverageError", "TreeCoverage"]

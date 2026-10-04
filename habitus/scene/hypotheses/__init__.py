@@ -14,6 +14,7 @@ from habitus.scene.hypotheses.model import (
     HypothesisError,
     HypothesisOrigin,
     HypothesisSource,
+    PeakWindow,
     TypePrior,
 )
 from habitus.scene.hypotheses.store import HYPOTHESES_SEGMENT, HypothesisStore, HypothesisStoreError
@@ -30,6 +31,7 @@ __all__ = [
     "HypothesisError",
     "HypothesisOrigin",
     "HypothesisSource",
+    "PeakWindow",
     "HypothesisStore",
     "HypothesisStoreError",
     "TypePrior",
