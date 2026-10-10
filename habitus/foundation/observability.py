@@ -56,9 +56,7 @@ class ObservationContext:
                 raise ValueError(f"{name} must be a bounded normalized identity or None")
         for name in ("memory_sequence", "attempt"):
             value = getattr(self, name)
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int) or value < 0
-            ):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
                 raise ValueError(f"{name} must be a non-negative integer or None")
 
 
@@ -355,8 +353,13 @@ _BEHAVIOR_COUNTERS: tuple[tuple[str, str, str], ...] = (
     ("fusion_job", "unowned_observations", "behavior_unowned_observations_total"),
     ("reduction_publish", "occurrences", "behavior_occurrences_published_total"),
     ("reduction_publish", "gaps", "behavior_gaps_published_total"),
-    ("kind_resolve", "created", "behavior_kinds_created_total"),
-    ("kind_resolve", "model_calls", "behavior_kind_model_calls_total"),
+    ("kind_classify", "classified", "behavior_kind_classified_total"),
+    ("kind_classify", "pending", "behavior_kind_pending_total"),
+    ("kind_classify", "not_events", "behavior_kind_not_events_total"),
+    ("kind_classify", "model_calls", "behavior_kind_model_calls_total"),
+    ("reduction_vocabulary", "model_calls", "behavior_kind_model_calls_total"),
+    ("reduction_vocabulary", "changed_days", "behavior_kind_changed_days_total"),
+    ("reduction_publish", "kind_pending", "behavior_kind_pending_admitted_total"),
     ("semantic_refresh", "failed_days", "behavior_semantic_refresh_failures_total"),
 )
 # 行为管线的时效：小时级的等待放不进操作时长直方图的桶，按最近一次的值记 gauge。
@@ -419,9 +422,7 @@ class MetricRegistry:
         self.enabled = enabled
         self._lock = threading.RLock()
         self._counters: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
-        self._histograms: dict[
-            tuple[str, tuple[tuple[str, str], ...]], tuple[list[int], float, int]
-        ] = {}
+        self._histograms: dict[tuple[str, tuple[tuple[str, str], ...]], tuple[list[int], float, int]] = {}
         self._gauges: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
         self._recent: deque[ObservationEvent] = deque(maxlen=max_recent_events)
 
@@ -470,17 +471,13 @@ class MetricRegistry:
     def snapshot(self) -> ObservabilitySnapshot:
         with self._lock:
             counters = {
-                _snapshot_key(name, labels): int(round(value))
-                for (name, labels), value in self._counters.items()
+                _snapshot_key(name, labels): int(round(value)) for (name, labels), value in self._counters.items()
             }
             durations = {
                 _snapshot_key(name, labels): total
                 for (name, labels), (_counts, total, _count) in self._histograms.items()
             }
-            gauges = {
-                _snapshot_key(name, labels): value
-                for (name, labels), value in self._gauges.items()
-            }
+            gauges = {_snapshot_key(name, labels): value for (name, labels), value in self._gauges.items()}
             histograms = {
                 _snapshot_key(name, labels): tuple(counts)
                 for (name, labels), (counts, _total, _count) in self._histograms.items()
@@ -502,7 +499,9 @@ class MetricRegistry:
             counter_names = sorted({name for name, _labels in self._counters})
             for name in counter_names:
                 full_name = f"{prefix}_{_metric_name(name)}"
-                lines.extend((f"# HELP {full_name} Habitus bounded observation counter.", f"# TYPE {full_name} counter"))
+                lines.extend(
+                    (f"# HELP {full_name} Habitus bounded observation counter.", f"# TYPE {full_name} counter")
+                )
                 for (metric_name, labels), value in sorted(self._counters.items()):
                     if metric_name == name:
                         lines.append(f"{full_name}{_render_labels(labels)} {_format_number(value)}")
@@ -510,14 +509,16 @@ class MetricRegistry:
             histogram_names = sorted({name for name, _labels in self._histograms})
             for name in histogram_names:
                 full_name = f"{prefix}_{_metric_name(name)}"
-                lines.extend((f"# HELP {full_name} Habitus bounded operation duration.", f"# TYPE {full_name} histogram"))
+                lines.extend(
+                    (f"# HELP {full_name} Habitus bounded operation duration.", f"# TYPE {full_name} histogram")
+                )
                 for (metric_name, labels), (counts, total, count) in sorted(self._histograms.items()):
                     if metric_name != name:
                         continue
                     for bucket, bucket_count in zip(self.duration_buckets, counts, strict=True):
                         bucket_labels = labels + (("le", _format_number(bucket)),)
                         lines.append(f"{full_name}_bucket{_render_labels(bucket_labels)} {bucket_count}")
-                    lines.append(f'{full_name}_bucket{_render_labels(labels + (("le", "+Inf"),))} {count}')
+                    lines.append(f"{full_name}_bucket{_render_labels(labels + (('le', '+Inf'),))} {count}")
                     lines.append(f"{full_name}_sum{_render_labels(labels)} {_format_number(total)}")
                     lines.append(f"{full_name}_count{_render_labels(labels)} {count}")
 
@@ -536,9 +537,7 @@ def _selected_labels(
     *names: str,
 ) -> tuple[tuple[str, str], ...]:
     return tuple(
-        (name, _label_value(attributes[name]))
-        for name in names
-        if name in _LABEL_ATTRIBUTES and name in attributes
+        (name, _label_value(attributes[name])) for name in names if name in _LABEL_ATTRIBUTES and name in attributes
     )
 
 

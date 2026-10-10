@@ -363,7 +363,11 @@ class MemoryConversationOutputStore:
         max_file_bytes: int,
     ) -> None:
         self.root = Path(conversation_root).expanduser().resolve(strict=False)
-        if isinstance(max_files_per_source, bool) or not isinstance(max_files_per_source, int) or max_files_per_source <= 0:
+        if (
+            isinstance(max_files_per_source, bool)
+            or not isinstance(max_files_per_source, int)
+            or max_files_per_source <= 0
+        ):
             raise ValueError("max_files_per_source must be a positive integer")
         if isinstance(max_file_bytes, bool) or not isinstance(max_file_bytes, int) or max_file_bytes <= 0:
             raise ValueError("max_file_bytes must be a positive integer")
@@ -389,7 +393,9 @@ class MemoryConversationOutputStore:
         if output.source_id != source.source_id or output.source_payload_digest != source.source_payload_digest:
             raise ConversationSourceError("memory output belongs to another source")
         try:
-            atomic_create_bytes(self._path(output.source_id, output.output_id), self._encode(output), artifact_root=self.root)
+            atomic_create_bytes(
+                self._path(output.source_id, output.output_id), self._encode(output), artifact_root=self.root
+            )
         except ImmutableArtifactConflictError as exc:
             current = self.read(source, output.output_id)
             if current is None or current.output_record_digest != output.output_record_digest:
@@ -423,9 +429,7 @@ class MemoryConversationOutputStore:
     def list(self, source: ConversationSourceEnvelope) -> tuple[MemoryConversationOutput, ...]:
         directory = self._directory(source.source_id)
         try:
-            entries = list_real_directory(
-                directory, artifact_root=self.root, max_entries=self.max_files_per_source
-            )
+            entries = list_real_directory(directory, artifact_root=self.root, max_entries=self.max_files_per_source)
         except DurablePathIntegrityError as exc:
             raise ConversationSourceError("memory output directory is invalid or exceeds its bound") from exc
         outputs: list[MemoryConversationOutput] = []
@@ -480,6 +484,7 @@ class MemoryConversationOutputStore:
         if len(encoded) > self.max_file_bytes:
             raise ConversationSourceError("memory output exceeds its configured file bound")
         return encoded
+
 
 __all__ = [
     "MEMORY_CONVERSATION_OUTPUT_SCHEMA_VERSION",

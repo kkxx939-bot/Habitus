@@ -22,9 +22,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     if command not in {"doctor", "harnesses", "install", "status", "update", "remove"}:
-        raise ValueError(
-            "usage: habitus-plugin [install|status|update|remove|doctor|harnesses] [options]"
-        )
+        raise ValueError("usage: habitus-plugin [install|status|update|remove|doctor|harnesses] [options]")
     node = shutil.which("node")
     if node is None:
         raise RuntimeError("habitus-plugin requires Node.js")

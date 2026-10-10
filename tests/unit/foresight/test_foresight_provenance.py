@@ -14,6 +14,7 @@ from habitus.foresight import CellIndex, ForesightError, Layer, candidate_backgr
 from habitus.prediction.model import SlotKey
 from habitus.prediction.query import neighbourhood
 from tests.unit.foresight.fixtures import MONDAY, Ground, at, slot_of
+from tests.unit.kind_ids import kind_id
 
 
 def days(*offsets: int) -> tuple[date, ...]:
@@ -47,7 +48,7 @@ def test_each_layer_carries_exactly_the_days_its_own_number_came_from(tmp_path) 
     tree = ground_with_a_weekly_habit(tmp_path).tree()
     cells = CellIndex.of(tree)
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
-    layers = provenance(cells, "打球", slot, half_width=2)
+    layers = provenance(cells, kind_id("打球"), slot, half_width=2)
 
     assert layers.slot.days == days(0, 7, 14)  # 就是这一格
     assert layers.pool.days == days(0, 7, 14, 21)  # 加上 19:30 那次
@@ -68,9 +69,9 @@ def test_the_three_chain_layers_expose_the_raw_ledger_and_all_day_does_not(tmp_p
     tree = ground_with_a_weekly_habit(tmp_path).tree()
     cells = CellIndex.of(tree)
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
-    layers = provenance(cells, "打球", slot, half_width=2)
+    layers = provenance(cells, kind_id("打球"), slot, half_width=2)
 
-    cell = tree.nodes[(slot, "打球")]
+    cell = tree.nodes[(slot, kind_id("打球"))]
     assert layers.slot.hits == pytest.approx(cell.counts.occurred_days)
     assert layers.slot.exposure == pytest.approx(tree.exposure[slot].observed_days)
     assert layers.slot.value == pytest.approx(layers.slot.hits / layers.slot.exposure)
@@ -79,7 +80,7 @@ def test_the_three_chain_layers_expose_the_raw_ledger_and_all_day_does_not(tmp_p
     # 跨周几只扩周几：分子分母都比邻域大（多了另外六个周几），窗口宽度不变。
     assert layers.cross_weekday.exposure is not None and layers.cross_weekday.exposure > layers.pool.exposure
     assert layers.all_day.hits is None and layers.all_day.exposure is None
-    assert layers.all_day.value == pytest.approx(tree.baselines["打球"])
+    assert layers.all_day.value == pytest.approx(tree.baselines[kind_id("打球")])
 
 
 def test_the_cross_weekday_layer_is_the_shrinkage_chains_third_layer(tmp_path) -> None:
@@ -94,13 +95,13 @@ def test_the_cross_weekday_layer_is_the_shrinkage_chains_third_layer(tmp_path) -
 
     tree = ground_with_a_weekly_habit(tmp_path).tree()
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
-    layers = provenance(CellIndex.of(tree), "打球", slot, half_width=2)
+    layers = provenance(CellIndex.of(tree), kind_id("打球"), slot, half_width=2)
     pool = neighbourhood(tree, slot, 2)
     expected_top = sum(
-        tree.nodes[(SlotKey(weekday=weekday, slot=key.slot), "打球")].counts.occurred_days
+        tree.nodes[(SlotKey(weekday=weekday, slot=key.slot), kind_id("打球"))].counts.occurred_days
         for weekday in range(7)
         for key in pool
-        if (SlotKey(weekday=weekday, slot=key.slot), "打球") in tree.nodes
+        if (SlotKey(weekday=weekday, slot=key.slot), kind_id("打球")) in tree.nodes
     )
     expected_bottom = sum(
         tree.exposure[SlotKey(weekday=weekday, slot=key.slot)].observed_days
@@ -110,7 +111,7 @@ def test_the_cross_weekday_layer_is_the_shrinkage_chains_third_layer(tmp_path) -
     )
     assert layers.cross_weekday.hits == pytest.approx(expected_top)
     assert layers.cross_weekday.exposure == pytest.approx(expected_bottom)
-    assert layers.cross_weekday.value != pytest.approx(tree.weekday_baselines["打球"][slot.slot])
+    assert layers.cross_weekday.value != pytest.approx(tree.weekday_baselines[kind_id("打球")][slot.slot])
 
 
 def test_the_neighbourhood_wraps_inside_one_weekday(tmp_path) -> None:
@@ -125,7 +126,7 @@ def test_the_neighbourhood_wraps_inside_one_weekday(tmp_path) -> None:
     ground.record(MONDAY + timedelta(days=1), "夜宵", 0, 5, kind="夜宵")  # 周二凌晨
     cells = CellIndex.of(ground.tree())
     late = SlotKey(weekday=0, slot=slot_of(23, 45))
-    layers = provenance(cells, "夜宵", late, half_width=2)
+    layers = provenance(cells, kind_id("夜宵"), late, half_width=2)
     assert layers.slot.days == days(0)
     assert layers.pool.days == days(0, 7)  # 绕过午夜，但仍在周一那一行
     assert days(1)[0] not in layers.pool.days
@@ -136,9 +137,7 @@ def test_a_candidate_that_never_hit_this_cell_has_an_empty_slot_layer(tmp_path) 
 
     tree = ground_with_a_weekly_habit(tmp_path).tree()
     cells = CellIndex.of(tree)
-    layers = provenance(
-        cells, "打球", SlotKey(weekday=0, slot=slot_of(3, 0)), half_width=2
-    )
+    layers = provenance(cells, kind_id("打球"), SlotKey(weekday=0, slot=slot_of(3, 0)), half_width=2)
     assert layers.slot.days == () and layers.slot.hits == 0.0 and layers.slot.value == 0.0
     assert layers.pool.days == ()
     assert layers.all_day.days == days(0, 2, 7, 14, 21, 28)
@@ -164,7 +163,7 @@ def test_layer_guards(tmp_path) -> None:
 def background_for(ground: Ground, layers, *, half_width: int, max_days: int = 10):
     return candidate_background(
         layers,
-        "打球",
+        kind_id("打球"),
         ground.cache(),
         slot_minutes=15,
         slot_index=slot_of(19, 0),
@@ -190,7 +189,7 @@ def test_each_card_lands_in_the_innermost_layer_that_reads_it(tmp_path) -> None:
     ground.record(MONDAY + timedelta(days=14), "打球", 8, 0, kind="打球")  # 同周几、离得很远的槽
     cells = CellIndex.of(ground.tree())
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
-    layers = provenance(cells, "打球", slot, half_width=3)
+    layers = provenance(cells, kind_id("打球"), slot, half_width=3)
 
     background = background_for(ground, layers, half_width=3)
 
@@ -215,7 +214,7 @@ def test_the_protective_limit_says_what_it_left_out(tmp_path) -> None:
     ground.record(MONDAY + timedelta(days=2), "打球", 19, 0, kind="打球")  # 周三，跨周几层
     cells = CellIndex.of(ground.tree())
     slot = SlotKey(weekday=0, slot=slot_of(19, 0))
-    layers = provenance(cells, "打球", slot, half_width=2)
+    layers = provenance(cells, kind_id("打球"), slot, half_width=2)
 
     by_days = background_for(ground, layers, half_width=2, max_days=2)
     assert by_days.dropped_days["slot"] == 2 and by_days.dropped_days["all_day"] == 3

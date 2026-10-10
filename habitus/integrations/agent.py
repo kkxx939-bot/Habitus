@@ -218,9 +218,7 @@ class AgentMemoryGateway:
 
         await self.runtime.record_memory_use(
             memory_uris=memory_uris,
-            summary_references=tuple(
-                ConversationSummaryReference.parse(value) for value in summary_references
-            ),
+            summary_references=tuple(ConversationSummaryReference.parse(value) for value in summary_references),
             used_at=used_at,
         )
 
@@ -238,10 +236,7 @@ class AgentMemoryGateway:
             return ()
         return tuple(
             await asyncio.gather(
-                *(
-                    self.runtime.wait_memory_consistency(job, timeout_seconds=timeout_seconds)
-                    for job in jobs
-                )
+                *(self.runtime.wait_memory_consistency(job, timeout_seconds=timeout_seconds) for job in jobs)
             )
         )
 

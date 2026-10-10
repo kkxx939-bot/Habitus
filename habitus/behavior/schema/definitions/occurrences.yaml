@@ -9,7 +9,7 @@ fields:
   - {name: occurred_on, type: date, role: address, required: true, description: 行为实际发生时刻的本地日历日期，即目录；"属于哪一天"的语义归属不在本层。}
   - {name: name, type: string, role: address, required: true, description: 原始行为名（融合层原话，链头首条未被替换判断的 behavior 字段），永不随词表重归一改变。}
   - {name: started_at, type: datetime, role: address, required: true, description: 开始时刻，本地时间带整分钟偏移，与 occurred_on 共同构成地址身份并自校验。}
-  - {name: kind_token, type: string, role: numeric, required: true, description: 归一后的类型 token，来自 kinds 词表；一切按类统计的键，归错可改词表重打、不动地址。}
+  - {name: kind_token, type: kind_token, role: numeric, required: true, description: 基础词表的类编号或占位标记（s-k0007 / s-待定 / s-非事件）；一切按类统计的键，只能由词表迁移改写、不动地址，不渲染进正文。}
   - {name: status, type: occurrence_status, role: numeric, required: true, description: 这次行为怎么结束的，逐字取自链尾判断，写入层零发明。}
   - {name: status_basis, type: status_basis, role: numeric, required: true, description: 状态怎么知道的；interrupted 与 observation_lost 之分是删失纪律的根。}
   - {name: last_observed_at, type: datetime, role: numeric, required: true, description: 最后一条支持观测的时刻（不是结束时刻，结束经常不可知）。}

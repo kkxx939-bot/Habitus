@@ -34,22 +34,15 @@ class OpenAICompatibleRerankProvider:
         if not isinstance(config, RerankModelConfig):
             raise TypeError("config must be RerankModelConfig")
         if config.route.adapter != "openai_compatible_rerank":
-            raise ModelConfigurationError(
-                "OpenAICompatibleRerankProvider requires adapter='openai_compatible_rerank'"
-            )
+            raise ModelConfigurationError("OpenAICompatibleRerankProvider requires adapter='openai_compatible_rerank'")
         if not config.route.base_url:
-            raise ModelConfigurationError(
-                "openai_compatible_rerank adapter requires an explicit base_url"
-            )
+            raise ModelConfigurationError("openai_compatible_rerank adapter requires an explicit base_url")
         if not isinstance(api_key, str) or not api_key.strip():
-            raise ModelConfigurationError(
-                "openai_compatible_rerank adapter requires an API key"
-            )
+            raise ModelConfigurationError("openai_compatible_rerank adapter requires an API key")
         overlap = _RESERVED_REQUEST_FIELDS & set(config.route.extra_body)
         if overlap:
             raise ModelConfigurationError(
-                "openai_compatible_rerank extra_body cannot override request fields: "
-                f"{sorted(overlap)}"
+                f"openai_compatible_rerank extra_body cannot override request fields: {sorted(overlap)}"
             )
 
         self.config = config
@@ -188,9 +181,7 @@ class OpenAICompatibleRerankProvider:
                 raise ModelResponseError("rerank provider returned a duplicate document index")
             raw_score = item.get("relevance_score")
             if isinstance(raw_score, bool) or not isinstance(raw_score, int | float):
-                raise ModelResponseError(
-                    f"rerank result[{position}] relevance_score must be numeric"
-                )
+                raise ModelResponseError(f"rerank result[{position}] relevance_score must be numeric")
             score = float(raw_score)
             if not math.isfinite(score) or not 0.0 <= score <= 1.0:
                 raise ModelResponseError(

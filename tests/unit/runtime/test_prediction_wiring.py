@@ -21,6 +21,7 @@ from habitus.prediction.errors import PredictionTreeError
 from habitus.runtime.prediction import build_prediction_components
 from tests.integration.test_runtime_assembly import REPOSITORY_ROOT
 from tests.unit.behavior.tree_payloads import occurrence_payload
+from tests.unit.kind_ids import kind_id
 from tests.unit.runtime.fixtures import STARTUP_PARAMETERS
 from tests.unit.runtime.test_behavior_pipeline import SUBJECT, behavior_enabled_config
 
@@ -63,7 +64,7 @@ def test_startup_parameters_survive_into_the_tree_config(tmp_path) -> None:
     components = build_prediction_components(config, behavior_tree=_tree(config))
     assert components is not None
     assert components.tree_config.slot_minutes == 15
-    assert components.tree_config.transition_window_seconds == 1800
+    assert components.tree_config.transition_window_slots == 3
     assert components.store.retained_generations == 7
     assert components.store.root == config.prediction_root
 
@@ -98,7 +99,7 @@ def test_manual_rebuild_publishes_a_generation_from_the_behaviour_tree(tmp_path)
     assert components.store.active() == published
     tree = components.store.load()
     assert tree is not None
-    assert "洗手" in tree.actions
+    assert kind_id("洗手") in tree.actions
 
 
 def test_an_empty_behaviour_tree_publishes_nothing(tmp_path) -> None:
@@ -197,16 +198,13 @@ def test_the_nightly_stage_result_reaches_the_observation_event() -> None:
 
     @dataclass(frozen=True)
     class StageReport:
-        """一个带计数字段的阶段结果（形状与旧关联刷新器的报告相同，新语义树各拍接进来时再对齐字段）。"""
+        """一个阶段结果（形状同夜批报告）：数值原样摊平，元组记条数，不按字段名认。"""
 
-        associated: tuple[str, ...] = ()
-        open: tuple[str, ...] = ()
-        skipped: tuple[str, ...] = ()
-        deferred: tuple[str, ...] = ()
-        failed: tuple[str, ...] = ()
-        blocked: tuple[str, ...] = ()
+        mapped_days: tuple[str, ...] = ()
+        mapped: int = 0
+        backlog: int = 0
+        inconsistent: int = 0
         signals: tuple[str, ...] = ()
-        model_calls: int = 0
 
     seen: list[object] = []
 
@@ -219,9 +217,7 @@ def test_the_nightly_stage_result_reaches_the_observation_event() -> None:
             return "generation"
 
     async def stage() -> StageReport:
-        return StageReport(
-            associated=("a/2026-09-04",), failed=("b/2026-09-04", "c/2026-09-04"), signals=("x",), model_calls=3
-        )
+        return StageReport(mapped_days=("2026-09-03", "2026-09-04"), mapped=7, backlog=12, inconsistent=2, signals=("x",))
 
     worker = PredictionRebuildWorker(
         _Rebuilder(),  # type: ignore[arg-type]
@@ -233,8 +229,8 @@ def test_the_nightly_stage_result_reaches_the_observation_event() -> None:
     asyncio.run(worker.run_once())
 
     (event,) = [item for item in seen if getattr(item, "operation", "") == "nightly_stage"]
-    assert event.attributes["associated"] == 1 and event.attributes["failed"] == 2
-    assert event.attributes["model_calls"] == 3 and event.attributes["signals"] == 1
+    assert event.attributes["mapped_days"] == 2 and event.attributes["mapped"] == 7
+    assert event.attributes["backlog"] == 12 and event.attributes["inconsistent"] == 2 and event.attributes["signals"] == 1
 
 
 def test_a_failing_nightly_stage_is_remembered_by_the_worker() -> None:

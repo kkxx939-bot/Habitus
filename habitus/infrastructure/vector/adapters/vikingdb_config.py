@@ -173,14 +173,9 @@ class VikingDBVectorStoreConfig:
             raise ValueError("memory vector max_records cannot exceed vikingdb max_records")
         if requirements.max_search_hits > self.max_search_hits:
             raise ValueError("memory vector max_search_hits cannot exceed vikingdb max_search_hits")
-        estimated_record_bytes = (
-            requirements.max_record_chars * 4
-            + requirements.dimension * 24
-            + 8_192
-        )
+        estimated_record_bytes = requirements.max_record_chars * 4 + requirements.dimension * 24 + 8_192
         if (
-            max(self.fetch_batch_size, self.search_page_size, self.scan_page_size)
-            * estimated_record_bytes
+            max(self.fetch_batch_size, self.search_page_size, self.scan_page_size) * estimated_record_bytes
             > route.max_response_bytes
         ):
             raise ValueError("vikingdb read page sizes can exceed route.max_response_bytes")

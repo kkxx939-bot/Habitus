@@ -34,9 +34,7 @@ class HTTPObservationMiddleware:
     ) -> None:
         if observer is not None and not callable(getattr(observer, "record", None)):
             raise TypeError("observer must implement record")
-        if span_controller is not None and not callable(
-            getattr(span_controller, "start_span", None)
-        ):
+        if span_controller is not None and not callable(getattr(span_controller, "start_span", None)):
             raise TypeError("span_controller must implement start_span")
         self.app = app
         self.observer = observer or NullObserver()

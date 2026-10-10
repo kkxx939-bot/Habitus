@@ -63,9 +63,7 @@ class ConversationSourceRecovery:
 
     async def recover_pending(self) -> tuple[ConversationSourceRecoveryResult, ...]:
         entries = self.pending()[: self.batch_size]
-        behavior = tuple(
-            entry for entry in entries if entry.consumer is ConversationSourceConsumer.BEHAVIOR_PROJECTION
-        )
+        behavior = tuple(entry for entry in entries if entry.consumer is ConversationSourceConsumer.BEHAVIOR_PROJECTION)
         memory = tuple(
             sorted(
                 (entry for entry in entries if entry.consumer is ConversationSourceConsumer.MEMORY),
@@ -86,9 +84,7 @@ class ConversationSourceRecovery:
             results.extend(await asyncio.gather(*behavior_tasks))
         return tuple(results)
 
-    async def _recover(
-        self, entry: ConversationSourceRecoveryEntry
-    ) -> ConversationSourceRecoveryResult:
+    async def _recover(self, entry: ConversationSourceRecoveryEntry) -> ConversationSourceRecoveryResult:
         if entry.state in {
             ConversationConsumerDeliveryState.BROKEN_OUTCOME,
             ConversationConsumerDeliveryState.CORRUPTED,

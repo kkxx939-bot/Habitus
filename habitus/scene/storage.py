@@ -1,6 +1,6 @@
 """语义树各支存储共用的底座：根校验、容量预检、durable_io 原语的错误归一。
 
-三支（概念、命中、假设）加一本旁册都落在同一个 ``scene`` 根下，守同一套纪律：
+各支（概念、命中，以及接下来的关系表）都落在同一个 ``scene`` 根下，守同一套纪律：
 
 - 根本身是符号链接就拒，不静默跟过去；
 - 路径**只校验、返回未解析的形式**——返回 ``resolve()`` 之后的路径等于替它把符号链接洗白了
@@ -124,7 +124,9 @@ class SceneStore:
     def _directories(self, directory: Path) -> tuple[Path, ...]:
         return tuple(directory / entry.name for entry in self._children(directory) if entry.is_dir())
 
-    def _content_files(self, directory: Path) -> tuple[tuple[DurableDirectoryEntry, ...], tuple[DurableDirectoryEntry, ...]]:
+    def _content_files(
+        self, directory: Path
+    ) -> tuple[tuple[DurableDirectoryEntry, ...], tuple[DurableDirectoryEntry, ...]]:
         """把目录里的文件分成 (记录, 噪音)。噪音 = 点文件与原子写临时文件；子目录在这里报错。"""
 
         records: list[DurableDirectoryEntry] = []

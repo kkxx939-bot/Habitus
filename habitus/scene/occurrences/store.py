@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -73,8 +73,19 @@ class ConceptHitStore(SceneStore):
         self._atomic_write(path, encode(record).encode("utf-8"), maximum=MAX_RECORD_BYTES)
         return path
 
-    def complete_day(self, day: date, *, records: int, completed_at: datetime, mapper: str) -> DayMarker:
-        """把这一天标记为映射完成。**最后一步**：全部记录落盘之后才调。核条数、核口径、汇总命中概念。"""
+    def complete_day(
+        self,
+        day: date,
+        *,
+        records: int,
+        completed_at: datetime,
+        mapper: str,
+        expected: Callable[[str], str] | None = None,
+    ) -> DayMarker:
+        """把这一天标记为映射完成。**最后一步**：全部记录落盘之后才调。核条数、核口径、汇总命中概念。
+
+        ``mapper`` 是整个概念集的口径（记在标记上，概念集一变这一天就认得出要回填）；``expected`` 给出每个类的记录该带的口径
+        （映射器按"挂在这个类上的细分概念"定口径），不给就要求每条都等于 ``mapper``。口径对不上的一条都不许混进完成的一天。"""
 
         if isinstance(records, bool) or not isinstance(records, int) or records < 0:
             raise ValueError("records must be a non-negative integer")
@@ -85,13 +96,23 @@ class ConceptHitStore(SceneStore):
         found = self.read_day(day)
         if len(found) != records:
             raise ConceptHitStoreError(f"day claims {records} concept hit records but {len(found)} are readable")
-        foreign = sorted({item.mapper for item in found} - {mapper})
+        foreign = sorted(
+            {
+                item.mapper
+                for item in found
+                if item.mapper != (mapper if expected is None else expected(item.kind_token))
+            }
+        )
         if foreign:
             raise ConceptHitStoreError(f"day mixes records of another mapper: {foreign}")
         directory = self._day_path(day)
         # 提交前顺手清掉崩溃遗留的临时文件与 .DS_Store 这类噪音：它们计入目录条目上限，没人清就一直堆着。
         self._discard_noise(directory, keep=frozenset({DONE_FILENAME}))
-        concepts = frozenset().union(*(set(item.graded_hits) | set(item.graded_situations) for item in found)) if found else frozenset()
+        concepts = (
+            frozenset().union(*(set(item.graded_hits) | set(item.graded_situations) for item in found))
+            if found
+            else frozenset()
+        )
         marker = DayMarker(
             day=day,
             records=records,
@@ -175,7 +196,7 @@ class ConceptHitStore(SceneStore):
     def read_window(self, start: datetime, end: datetime) -> tuple[ConceptHits, ...]:
         """``started_at`` 落在 [start, end) 的全部记录，按时刻升序。
 
-        把"时刻窗 ↔ 本地日目录"的换算钉在这一层：两侧各多展开一天，再按时刻过滤，账本不用自己拼日子。
+        把"时刻窗 ↔ 本地日目录"的换算钉在这一层：两侧各多展开一天，再按时刻过滤，读方不用自己拼日子。
         """
 
         for label, value in (("start", start), ("end", end)):

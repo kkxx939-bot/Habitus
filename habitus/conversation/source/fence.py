@@ -28,7 +28,9 @@ class ConversationConsumerExecutionLease:
 
     def require_alive(self) -> None:
         if self.heartbeat_error is not None:
-            raise ConversationConsumerLeaseLostError("conversation consumer execution lease was lost") from self.heartbeat_error
+            raise ConversationConsumerLeaseLostError(
+                "conversation consumer execution lease was lost"
+            ) from self.heartbeat_error
 
     async def run_fenced(self, callback: Callable[[], T]) -> T:
         """只在短小同步临界区内 fencing，不跨越异步 Consumer 主体。"""
@@ -131,9 +133,7 @@ class ConversationConsumerExecutionFence:
         try:
             while True:
                 await asyncio.sleep(self.heartbeat_interval_seconds)
-                await asyncio.gather(
-                    *(asyncio.to_thread(guard.checkpoint) for guard in lease.guards)
-                )
+                await asyncio.gather(*(asyncio.to_thread(guard.checkpoint) for guard in lease.guards))
         except asyncio.CancelledError:
             raise
         except BaseException as exc:

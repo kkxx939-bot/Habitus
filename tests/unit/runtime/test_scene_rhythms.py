@@ -1,4 +1,4 @@
-"""节律口：七个周几逐槽平均后取峰、逐日数"哪几天有"、复发间隔取最短的那个 kind。"""
+"""节律口：七个周几逐槽平均后取峰、逐日数"哪几天有"、复发间隔取最短的那个类；给模型看的是类名。"""
 
 from __future__ import annotations
 
@@ -30,8 +30,8 @@ def test_a_behaviour_that_only_shows_up_on_two_weekdays_is_not_rhythmic() -> Non
     assert "按无节律写" in rhythm.render()
 
 
-def test_the_recurrence_median_is_the_shortest_of_its_kinds_and_a_missing_curve_gives_an_empty_rhythm() -> None:
-    """概念比 kind 粗——任一 kind 发生它就发生，所以间隔不长于最短那个（上界估计）。"""
+def test_the_recurrence_median_is_the_shortest_of_its_classes_and_a_missing_curve_gives_an_empty_rhythm() -> None:
+    """汇总概念的任一成员类发生它就发生，所以间隔不长于最短那个（上界估计）。"""
 
     built = with_recurrences(
         tree({(weekday, kind): curve({20: 0.5}) for weekday in range(7) for kind in ("修改代码", "审查代码")}),
@@ -39,7 +39,18 @@ def test_the_recurrence_median_is_the_shortest_of_its_kinds_and_a_missing_curve_
     )
     provider = TreeRhythms(built, {"写代码": ("修改代码", "审查代码"), "就诊": ()})
     assert provider.rhythm_of("写代码").recurrence_hours == pytest.approx(2.0)
-    # 从没命中过任何 kind → 空节律（不是报错）：承诺仍然能以无节律型开着。
+    # 一条曲线都没有 → 空节律（不是报错）：承诺仍然能以无节律型开着。
     empty = provider.rhythm_of("就诊")
     assert empty.peaks == () and empty.days_with_peaks == 0 and not empty.has_rhythm
     assert set(provider.rhythms()) == {"写代码", "就诊"}
+
+
+def test_a_base_concept_is_keyed_by_its_class_id_but_rendered_with_its_class_name() -> None:
+    """基础概念的身份是类编号；节律交给提示词时显示类名（裁定 20：给模型看的一律是名字）。"""
+
+    built = tree({(weekday, "s-k0007"): curve({14: 0.2, 15: 0.5}) for weekday in range(7)})
+    provider = TreeRhythms(built, {"s-k0007": ("s-k0007",), "s-k0008": ()}, {"s-k0007": "早餐", "s-k0008": "就诊"})
+    rhythm = provider.rhythm_of("s-k0007")
+    assert rhythm.concept == "s-k0007" and rhythm.render().startswith("早餐：")
+    assert provider.rhythm_of("s-k0008").render().startswith("就诊：")  # 空节律也用名字
+    assert TreeRhythms(built, {"s-k0007": ("s-k0007",)}).rhythm_of("s-k0007").render().startswith("s-k0007：")

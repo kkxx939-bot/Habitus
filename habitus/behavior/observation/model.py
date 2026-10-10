@@ -82,7 +82,7 @@ ENVELOPE_SCHEMA_VERSION = "behavior_observation_envelope_v1"
 _ENVELOPE_IDENTITY_SCHEMA = "behavior_observation_envelope_identity_v1"
 
 # 观测只能记录被直接感知、被主体自述或由上游推断的事实。这组词表归观测契约自己所有
-#（旧行为树词表随 TODO(BHV-TREE-REBUILD-001) 退役后，这里是它唯一的定义处）；事后修正
+# （旧行为树词表随 TODO(BHV-TREE-REBUILD-001) 退役后，这里是它唯一的定义处）；事后修正
 # 语义不属于一条原始观测。
 OBSERVATION_KNOWLEDGE_STATES = frozenset({"observed", "reported", "inferred"})
 
@@ -97,8 +97,10 @@ class BehaviorObservationModality(str, Enum):
 
 
 def require_sha256(value: object, label: str) -> str:
-    if not isinstance(value, str) or len(value) != 64 or any(
-        character not in "0123456789abcdef" for character in value
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
     ):
         raise BehaviorObservationError(f"{label} must be lowercase SHA-256 text")
     return value
@@ -251,13 +253,9 @@ class BehaviorObservation:
         except ValueError as exc:
             raise BehaviorObservationError("modality is invalid") from exc
         object.__setattr__(self, "semantics", bounded_text(self.semantics, "semantics", max_chars=_UNBOUNDED_TEXT))
-        object.__setattr__(
-            self, "participants", text_tuple(self.participants, "participants", allow_empty=False)
-        )
+        object.__setattr__(self, "participants", text_tuple(self.participants, "participants", allow_empty=False))
         if self.knowledge_state not in OBSERVATION_KNOWLEDGE_STATES:
-            raise BehaviorObservationError(
-                f"knowledge_state must be one of {sorted(OBSERVATION_KNOWLEDGE_STATES)}"
-            )
+            raise BehaviorObservationError(f"knowledge_state must be one of {sorted(OBSERVATION_KNOWLEDGE_STATES)}")
         if isinstance(self.confidence, bool) or not isinstance(self.confidence, (int, float)):
             raise BehaviorObservationError("confidence must be numeric")
         # ``-0.0`` 与 ``0.0`` 数值相等却序列化成不同文本，会让同一条内容得到两个身份。
@@ -265,9 +263,7 @@ class BehaviorObservation:
         if not 0.0 <= normalized_confidence <= 1.0:
             raise BehaviorObservationError("confidence must be between zero and one")
         object.__setattr__(self, "confidence", normalized_confidence)
-        object.__setattr__(
-            self, "evidence_refs", text_tuple(self.evidence_refs, "evidence_refs", allow_empty=False)
-        )
+        object.__setattr__(self, "evidence_refs", text_tuple(self.evidence_refs, "evidence_refs", allow_empty=False))
         if self.observation_id != canonical_digest(self._identity_payload()):
             raise BehaviorObservationError("observation_id does not match observation content")
 
@@ -302,9 +298,7 @@ class BehaviorObservation:
 
         if not isinstance(config, BehaviorObservationConfig):
             raise TypeError("config must be BehaviorObservationConfig")
-        resolved_observer = normalized_identifier(
-            observer_id, "observer_id", max_chars=config.max_identifier_chars
-        )
+        resolved_observer = normalized_identifier(observer_id, "observer_id", max_chars=config.max_identifier_chars)
         # 枚举与数值必须在算摘要之前归一：``canonical_digest`` 遇到非法枚举或 NaN 会抛出
         # 本模块契约之外的异常，调用方的 except 接不住。
         try:
@@ -537,9 +531,7 @@ class BehaviorObservationEnvelope:
             "observer_id",
             normalized_identifier(self.observer_id, "observer_id", max_chars=_UNBOUNDED_IDENTIFIER),
         )
-        object.__setattr__(
-            self, "protocol", normalized_protocol(self.protocol, max_chars=_UNBOUNDED_IDENTIFIER)
-        )
+        object.__setattr__(self, "protocol", normalized_protocol(self.protocol, max_chars=_UNBOUNDED_IDENTIFIER))
         if self.batch.observer_id != self.observer_id:
             raise BehaviorObservationError("batch belongs to another observer")
         recorded_at = to_utc(aware_timestamp(self.recorded_at, "recorded_at"), "recorded_at")
@@ -566,18 +558,14 @@ class BehaviorObservationEnvelope:
             raise TypeError("config must be BehaviorObservationConfig")
         if not isinstance(batch, BehaviorObservationBatch):
             raise TypeError("batch must be BehaviorObservationBatch")
-        resolved_observer = normalized_identifier(
-            observer_id, "observer_id", max_chars=config.max_identifier_chars
-        )
+        resolved_observer = normalized_identifier(observer_id, "observer_id", max_chars=config.max_identifier_chars)
         resolved_protocol = normalized_protocol(protocol, max_chars=config.max_identifier_chars)
         resolved_delivery = require_sha256(delivery_id, "delivery_id")
         resolved_recorded_at = to_utc(aware_timestamp(recorded_at, "recorded_at"), "recorded_at")
         # 语义还没可用就已经被送达，是结构性矛盾而不是时钟抖动；容差由 Config 给出。
         skew = (batch.last_available_at - resolved_recorded_at).total_seconds()
         if skew > config.max_clock_skew_seconds:
-            raise BehaviorObservationError(
-                "observation delivery carries semantics that are not available yet"
-            )
+            raise BehaviorObservationError("observation delivery carries semantics that are not available yet")
         source_id = cls.source_identity(resolved_observer, resolved_delivery)
         payload = _envelope_payload(
             source_id=source_id,
@@ -587,9 +575,7 @@ class BehaviorObservationEnvelope:
             delivery_id=resolved_delivery,
         )
         payload_digest = canonical_digest(payload)
-        record = canonicalize(
-            {**payload, "payload_digest": payload_digest, "recorded_at": resolved_recorded_at}
-        )
+        record = canonicalize({**payload, "payload_digest": payload_digest, "recorded_at": resolved_recorded_at})
         return cls(
             source_id=source_id,
             observer_id=resolved_observer,
@@ -608,9 +594,7 @@ class BehaviorObservationEnvelope:
         return canonical_digest(
             {
                 "schema_version": _ENVELOPE_IDENTITY_SCHEMA,
-                "observer_id": normalized_identifier(
-                    observer_id, "observer_id", max_chars=_UNBOUNDED_IDENTIFIER
-                ),
+                "observer_id": normalized_identifier(observer_id, "observer_id", max_chars=_UNBOUNDED_IDENTIFIER),
                 "delivery_id": require_sha256(delivery_id, "delivery_id"),
             }
         )

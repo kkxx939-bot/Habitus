@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime
 from typing import Any
 
+from habitus.behavior.kinds.ids import KindIdError, lane_of_token
 from habitus.behavior.model import behavior_local_timestamp
 from habitus.behavior.schema.model import BehaviorFieldSchema, BehaviorFieldType, BehaviorSchemaError
 from habitus.behavior.schema.vocabulary import (
@@ -140,6 +141,17 @@ def gap_kind(value: Any, label: str) -> str:
     return _enum(value, GAP_KINDS, label)
 
 
+def kind_token(value: Any, label: str) -> str:
+    """基础词表的类编号或占位标记（裁定 19）；形状由词表定义，树只核对、不解释。"""
+
+    resolved = text(value, label)
+    try:
+        lane_of_token(resolved)
+    except KindIdError as exc:
+        raise BehaviorSchemaError(f"{label} must be a behavior class id or a marker, got {resolved!r}") from exc
+    return resolved
+
+
 def basis_steps(value: Any, label: str) -> tuple[dict[str, Any], ...]:
     """构成一件事的行为事实步骤；每步的时间在写入时从观测物化（观测之后会释放）。"""
 
@@ -179,6 +191,7 @@ _VALIDATORS: dict[BehaviorFieldType, Callable[[Any, str], Any]] = {
     BehaviorFieldType.OCCURRENCE_STATUS: occurrence_status,
     BehaviorFieldType.STATUS_BASIS: status_basis,
     BehaviorFieldType.GAP_KIND: gap_kind,
+    BehaviorFieldType.KIND_TOKEN: kind_token,
     BehaviorFieldType.BASIS_LIST: basis_steps,
 }
 

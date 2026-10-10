@@ -8,6 +8,7 @@ from habitus.foresight import CandidateEvidence, CandidateNumbers, Layer, Proven
 from habitus.foresight.assemble import _empty_background
 from habitus.foresight.render import render_moment
 from tests.unit.foresight.fixtures import MONDAY, Ground, at
+from tests.unit.kind_ids import kind_id
 
 NOW = MONDAY + timedelta(days=28)
 PRIOR_ONLY = CandidateNumbers(
@@ -41,13 +42,13 @@ def evidence_for(tmp_path, *, name: str = "site", gap: bool = False, max_days: i
         # （行为树与预测树同一条规则），那样就测不到删失了。
         ground.gap(MONDAY + timedelta(days=7), 18, 0, 18, 50)
     pack = ground.pack(at(NOW, 19, 5), max_days=max_days)
-    return next(item for item in pack.candidates if item.kind_token == "打球")
+    return next(item for item in pack.candidates if item.kind_token == kind_id("打球"))
 
 
 def test_the_table_shows_the_raw_ratio_for_the_three_chain_layers(tmp_path) -> None:
     """链上三层写成"分子/分母 = 比值"，只有全天是已发布的率——判断者要看出这个数薄不薄。"""
 
-    text = render_candidate(evidence_for(tmp_path))
+    text = _render(evidence_for(tmp_path))
     assert "| 本槽 | 3.00/3.00 = 1.000 | 3 天 |" in text
     lines = {line.split("|")[1].strip(): line for line in text.splitlines() if line.startswith("| ")}
     assert "=" in lines["邻域"] and "=" in lines["跨周几"]
@@ -76,19 +77,23 @@ def test_a_slot_that_was_never_observed_is_not_a_measured_zero(tmp_path) -> None
     from habitus.foresight import CellIndex, provenance
     from habitus.prediction.model import SlotKey
 
-    layers = provenance(CellIndex.of(ground.tree()), "打球", SlotKey(weekday=4, slot=76), half_width=3)
+    layers = provenance(CellIndex.of(ground.tree()), kind_id("打球"), SlotKey(weekday=4, slot=76), half_width=3)
     evidence = CandidateEvidence(
-        kind_token="打球", numbers=PRIOR_ONLY, provenance=layers, expanded=False, background=_empty_background()
+        kind_token=kind_id("打球"),
+        numbers=PRIOR_ONLY,
+        provenance=layers,
+        expanded=False,
+        background=_empty_background(),
     )
     assert layers.slot.exposure == 0.0
-    text = render_candidate(evidence)
+    text = _render(evidence)
     assert "| 本槽 | 从没看过这一格 |" in text
     assert not any("0.000" in line for line in text.splitlines() if line.startswith("| "))  # 表里没有冒充实测的零
     assert "只列名字与数字" in text
 
 
 def test_cards_are_told_in_three_parts(tmp_path) -> None:
-    text = render_candidate(evidence_for(tmp_path))
+    text = _render(evidence_for(tmp_path))
     assert "### 历史 · 3 次发生，每次一张卡（按 # 编号引用）" in text
     assert "- #1 2026-08-03 周一 19:00–20:00 打球 〔本槽〕" in text
     assert "  之前：（无）" in text and "  之后：20:10 洗澡(1)" in text
@@ -98,16 +103,16 @@ def test_cards_are_told_in_three_parts(tmp_path) -> None:
 def test_what_is_missing_is_said_out_loud(tmp_path) -> None:
     """被保护闸截掉的日子要写出来，否则"给你看的这几条"会被读成"一共就这几条"。"""
 
-    text = render_candidate(evidence_for(tmp_path, name="capped", max_days=1))
+    text = _render(evidence_for(tmp_path, name="capped", max_days=1))
     assert "更早的日子没有展开（本槽 2、邻域 2、跨周几 2、全天 2 天）" in text
-    full = render_candidate(evidence_for(tmp_path, name="full"))
+    full = _render(evidence_for(tmp_path, name="full"))
     assert "更早的日子没有展开" not in full  # 没截就不该无中生有地报缺
 
 
 def test_the_three_valued_neighbour_is_told_as_it_is(tmp_path) -> None:
     """删失不能说成 ∅：那是在观测最差的地方下最确凿的结论，树那边专门有一条规则防它。"""
 
-    text = render_candidate(evidence_for(tmp_path, gap=True))
+    text = _render(evidence_for(tmp_path, gap=True))
     assert "紧邻上一条：那段没看清（删失）" in text
     assert "紧邻上一条：没有（∅）" in text  # 另外两天窗口内确实什么都没有
     assert "紧邻下一条：洗澡" in text
@@ -121,7 +126,7 @@ def test_every_card_is_rendered_no_matter_which_layer(tmp_path) -> None:
         ground.record(MONDAY + timedelta(days=7 * week), "打球", 19, 0, kind="打球")
     ground.record(MONDAY + timedelta(days=9), "打球", 8, 0, kind="打球")  # 周三早上，全天层
     (evidence,) = ground.pack(at(NOW, 19, 5)).expanded
-    text = render_candidate(evidence)
+    text = _render(evidence)
     assert "〔全天〕" in text and "〔本槽〕" in text
 
 
@@ -135,8 +140,20 @@ def test_a_rate_with_no_days_behind_it_is_marked_as_prior_only() -> None:
         cross_weekday=Layer(name="cross_weekday", value=0.0, days=(), hits=0.0, exposure=140.0),
         all_day=Layer(name="all_day", value=0.04, days=()),
     )
-    text = render_candidate(
-        CandidateEvidence(kind_token="吃药", numbers=PRIOR_ONLY, provenance=layers, expanded=False, background=_empty_background())
+    text = _render(
+        CandidateEvidence(
+            kind_token=kind_id("吃药"),
+            numbers=PRIOR_ONLY,
+            provenance=layers,
+            expanded=False,
+            background=_empty_background(),
+        )
     )
     assert "| 全天 | 0.0400（只有先验，没有证据） | 0 天 |" in text
     assert "复发：没有间隔样本 · 今天还没做" in text
+
+
+def _render(evidence) -> str:  # type: ignore[no-untyped-def]
+    """单独渲染一个候选：标题就用它的编号（整包渲染时由 ``EvidencePack.title`` 给类名）。"""
+
+    return render_candidate(evidence, title=evidence.kind_token)

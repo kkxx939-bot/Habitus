@@ -101,17 +101,15 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
     interactive = not args.non_interactive and _interactive(sys.stdin, sys.stdout)
     existed = destination.exists()
     try:
-        configure_cloud = interactive and source is None and (
-            not existed
-            or args.force
-            or _confirm("Update cloud provider routes now?", default=False)
+        configure_cloud = (
+            interactive
+            and source is None
+            and (not existed or args.force or _confirm("Update cloud provider routes now?", default=False))
         )
         if configure_cloud:
             payload = load_initialization_mapping(destination if existed else None)
             defaults = (
-                selection_from_mapping(payload, catalog.setup)
-                if existed
-                else default_cloud_selection(catalog.setup)
+                selection_from_mapping(payload, catalog.setup) if existed else default_cloud_selection(catalog.setup)
             )
             selection = _prompt_cloud_setup(defaults, catalog.setup)
             if selection is None:
@@ -151,13 +149,7 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
             write_plugin_connection(config, default_connection)
     except (OSError, TypeError, ValueError) as exc:
         raise SystemExit(f"Habitus plugin connection initialization failed: {exc}") from exc
-    state = (
-        "updated"
-        if result.backup_path is not None
-        else "created"
-        if result.created
-        else "using existing"
-    )
+    state = "updated" if result.backup_path is not None else "created" if result.created else "using existing"
     sys.stdout.write(f"Habitus config {state}: {result.path}\n")
     if result.backup_path is not None:
         sys.stdout.write(f"Previous config backup: {result.backup_path}\n")
@@ -180,9 +172,13 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
     harnesses = list(args.harnesses)
     if args.all_harnesses:
         harnesses = ["all"]
-    elif not harnesses and interactive and _confirm_after_write(
-        "Install Habitus memory plugins for detected Agent Harnesses?",
-        default=False,
+    elif (
+        not harnesses
+        and interactive
+        and _confirm_after_write(
+            "Install Habitus memory plugins for detected Agent Harnesses?",
+            default=False,
+        )
     ):
         harnesses = ["all"]
     if harnesses:
@@ -202,8 +198,7 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
     if doctor_ok is False:
         return 1
     sys.stdout.write(
-        f"Next: habitus-server --config {result.path}\n"
-        "Agent plugins: habitus plugin install --harness <id>\n"
+        f"Next: habitus-server --config {result.path}\nAgent plugins: habitus plugin install --harness <id>\n"
     )
     return 0
 
@@ -219,8 +214,7 @@ def _prompt_cloud_setup(
         raise TypeError("cloud setup defaults must be CloudSetupSelection")
     resolved_registry = registry or build_builtin_setup_registry()
     sys.stdout.write(
-        "\nCloud provider setup\n"
-        "Local Chat, Embedding and Rerank are intentionally not included in this setup.\n"
+        "\nCloud provider setup\nLocal Chat, Embedding and Rerank are intentionally not included in this setup.\n"
     )
     selections = {
         capability: _prompt_registered_profile(
@@ -259,18 +253,14 @@ def _prompt_registered_profile(
         )
         - 1
     ]
-    preserve_existing = (
-        selected.profile_id == default_selection.profile_id
-        and default_selection.preserve_existing
-    )
+    preserve_existing = selected.profile_id == default_selection.profile_id and default_selection.preserve_existing
     defaults = (
         dict(default_selection.values)
         if selected.profile_id == default_selection.profile_id
         else {field.key: field.default for field in selected.fields}
     )
     values = {
-        field.key: _prompt_setup_field(field, defaults.get(field.key, field.default))
-        for field in selected.fields
+        field.key: _prompt_setup_field(field, defaults.get(field.key, field.default)) for field in selected.fields
     }
     return profile_selection(
         selected,
@@ -298,11 +288,7 @@ def _prompt_setup_field(field: SetupField, default: object) -> object:
             raise ValueError(f"setup field default must be an integer: {field.key}")
         return _prompt_positive_int(field.label, default)
     default_index = next(
-        (
-            index
-            for index, choice in enumerate(field.choices, start=1)
-            if choice.value == default
-        ),
+        (index for index, choice in enumerate(field.choices, start=1) if choice.value == default),
         1,
     )
     return field.choices[
@@ -416,9 +402,7 @@ def _repair_source_outputs(args: argparse.Namespace, values: Mapping[str, str]) 
     try:
         lock.acquire()
     except ServiceInstanceLockError:
-        sys.stderr.write(
-            "another Habitus local service owns this storage root; stop it before repairing\n"
-        )
+        sys.stderr.write("another Habitus local service owns this storage root; stop it before repairing\n")
         return 3
     try:
         catalog = load_adapter_catalog()

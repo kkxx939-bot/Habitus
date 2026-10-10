@@ -18,19 +18,33 @@ from habitus.scene.occurrences.situations import (
     hit_events,
     situation_hits,
 )
-from tests.unit.scene.concept_fixtures import concept
+from tests.unit.scene.concept_fixtures import cid, situation
 from tests.unit.scene.fixtures import DAY1, at
-from tests.unit.scene.ledger_fixtures import CONCEPTS, record
+from tests.unit.scene.hit_fixtures import CONCEPTS, record
 
 SATURDAY = DAY1  # 2026-08-15 是周六
 FRIDAY = SATURDAY - timedelta(days=1)
 THURSDAY = SATURDAY - timedelta(days=2)
 
-SWAP_DAY = concept("调休日", "当地日历说这天要补班", role=ConceptRole.DAY_TYPE, situation=SituationRule(B.CALENDAR_NOTE, value="补班"))
-WITH_FAMILY = concept("和家人一起", "这件事是和家人一起做的", role=ConceptRole.OBJECT, situation=SituationRule(B.SUBJECT, value="家人B"))
-AT_OFFICE = concept("在公司", "地点是公司", role=ConceptRole.OBJECT, situation=SituationRule(B.PLACE, value="公司"))
-CRUNCH = concept("赶工中", "往前连着三个 24 小时都在运动", role=ConceptRole.DERIVED, situation=SituationRule(B.STREAK, concept="运动", days=3))
-LAST_NIGHT = concept("昨晚晚睡", "这条行为之前 24 小时内的就寝命中了晚睡重档", role=ConceptRole.DERIVED, situation=SituationRule(B.YESTERDAY, concept="晚睡", grade="重"))
+SWAP_DAY = situation(
+    "调休日", "当地日历说这天要补班", role=ConceptRole.DAY_TYPE, rule=SituationRule(B.CALENDAR_NOTE, value="补班")
+)
+WITH_FAMILY = situation(
+    "和家人一起", "这件事是和家人一起做的", role=ConceptRole.OBJECT, rule=SituationRule(B.SUBJECT, value="家人B")
+)
+AT_OFFICE = situation("在公司", "地点是公司", role=ConceptRole.OBJECT, rule=SituationRule(B.PLACE, value="公司"))
+CRUNCH = situation(
+    "赶工中",
+    "往前连着三个 24 小时都在运动",
+    role=ConceptRole.DERIVED,
+    rule=SituationRule(B.STREAK, concept="运动", days=3),
+)
+LAST_NIGHT = situation(
+    "昨晚晚睡",
+    "这条行为之前 24 小时内的就寝命中了晚睡重档",
+    role=ConceptRole.DERIVED,
+    rule=SituationRule(B.YESTERDAY, concept="晚睡", grade="重"),
+)
 SITUATIONS = ConceptSet((*CONCEPTS.values(), SWAP_DAY, WITH_FAMILY, AT_OFFICE, CRUNCH, LAST_NIGHT))
 BREAKFAST = at(SATURDAY, 7, 30)
 
@@ -52,7 +66,14 @@ def test_the_three_families_each_compute_and_checked_is_a_superset_of_holding() 
     )
     outcome = situation_hits(SITUATIONS, inputs)
     assert names(outcome.hits) == {"周末", "调休日", "和家人一起", "在公司", "昨晚晚睡"}
-    assert set(outcome.checked) == {"周末", "调休日", "和家人一起", "在公司", "昨晚晚睡", "赶工中"}  # 赶工中判过、不成立
+    assert set(outcome.checked) == {
+        "周末",
+        "调休日",
+        "和家人一起",
+        "在公司",
+        "昨晚晚睡",
+        "赶工中",
+    }  # 赶工中判过、不成立
     # 材料给不全 → 那一族**不判**（不当成立、也不当"判过不成立"）：没有日历那句话、没有 moment
     bare = situation_hits(SITUATIONS, SituationInputs(day=FRIDAY))
     assert bare.hits == () and set(bare.checked) == {"周末", "和家人一起", "在公司"}
@@ -62,12 +83,18 @@ def test_yesterday_is_anchored_on_the_occurrence_not_the_calendar_day() -> None:
     """02:10 的晚睡落在**今天**的目录里。刚熬完夜的这个早上要算「昨晚晚睡」，第二天早上不算（评审 A-8 / B-11 / C-8）。"""
 
     late = (HitEvent(at(SATURDAY, 2, 10), "晚睡", "重"),)
-    assert "昨晚晚睡" in names(situation_hits(SITUATIONS, SituationInputs(day=SATURDAY, moment=BREAKFAST, history=late)).hits)
-    next_morning = SituationInputs(day=SATURDAY + timedelta(days=1), moment=at(SATURDAY + timedelta(days=1), 7, 30), history=late)
+    assert "昨晚晚睡" in names(
+        situation_hits(SITUATIONS, SituationInputs(day=SATURDAY, moment=BREAKFAST, history=late)).hits
+    )
+    next_morning = SituationInputs(
+        day=SATURDAY + timedelta(days=1), moment=at(SATURDAY + timedelta(days=1), 7, 30), history=late
+    )
     assert "昨晚晚睡" not in names(situation_hits(SITUATIONS, next_morning).hits)
     # 只是轻档 → 不算（档是剂量，不同档是不同的前件）
     light = (HitEvent(at(SATURDAY, 2, 10), "晚睡", "轻"),)
-    assert "昨晚晚睡" not in names(situation_hits(SITUATIONS, SituationInputs(day=SATURDAY, moment=BREAKFAST, history=light)).hits)
+    assert "昨晚晚睡" not in names(
+        situation_hits(SITUATIONS, SituationInputs(day=SATURDAY, moment=BREAKFAST, history=light)).hits
+    )
 
 
 def test_a_streak_counts_24_hour_slices_backwards_and_needs_every_slice() -> None:
@@ -76,13 +103,21 @@ def test_a_streak_counts_24_hour_slices_backwards_and_needs_every_slice() -> Non
     def history(*hours_before: int) -> tuple[HitEvent, ...]:
         return tuple(HitEvent(BREAKFAST - timedelta(hours=hours), "运动", None) for hours in hours_before)
 
-    assert "赶工中" in names(situation_hits(SITUATIONS, SituationInputs(day=SATURDAY, moment=BREAKFAST, history=history(12, 36, 60))).hits)
+    assert "赶工中" in names(
+        situation_hits(SITUATIONS, SituationInputs(day=SATURDAY, moment=BREAKFAST, history=history(12, 36, 60))).hits
+    )
     # 中间断一格 → 不算连续
-    assert "赶工中" not in names(situation_hits(SITUATIONS, SituationInputs(day=SATURDAY, moment=BREAKFAST, history=history(12, 60, 84))).hits)
+    assert "赶工中" not in names(
+        situation_hits(SITUATIONS, SituationInputs(day=SATURDAY, moment=BREAKFAST, history=history(12, 60, 84))).hits
+    )
     # 这条 occurrence 之后的不算
-    assert "赶工中" not in names(situation_hits(SITUATIONS, SituationInputs(day=SATURDAY, moment=BREAKFAST, history=history(-1, 36, 60))).hits)
+    assert "赶工中" not in names(
+        situation_hits(SITUATIONS, SituationInputs(day=SATURDAY, moment=BREAKFAST, history=history(-1, 36, 60))).hits
+    )
     # 只有两格 → 不算
-    assert "赶工中" not in names(situation_hits(SITUATIONS, SituationInputs(day=SATURDAY, moment=BREAKFAST, history=history(12, 36))).hits)
+    assert "赶工中" not in names(
+        situation_hits(SITUATIONS, SituationInputs(day=SATURDAY, moment=BREAKFAST, history=history(12, 36))).hits
+    )
 
 
 def test_a_situation_concept_without_a_rule_never_hits() -> None:
@@ -93,12 +128,21 @@ def test_a_situation_concept_without_a_rule_never_hits() -> None:
     assert "出差中" not in names(outcome.hits) and "出差中" not in outcome.checked
 
 
-def test_hit_events_carry_grades_and_ancestors() -> None:
-    """派生情境多半盯粗的那一层：命中「打球」要能满足盯着「运动」的那条说明。"""
+def test_hit_events_carry_base_concepts_grades_and_groups() -> None:
+    """基础概念从类编号现读；派生情境多半盯粗的那一层：「打球」那个类的记录要能满足盯着汇总概念「运动」的那条说明。"""
 
-    records = [record(FRIDAY, "打球", 18, 0, ConceptHit("打球")), record(FRIDAY, "就寝", 2, 10, ConceptHit("晚睡", "重"))]
+    records = [
+        record(FRIDAY, "打球", 18, 0, ConceptHit("打球")),
+        record(FRIDAY, "就寝", 2, 10, ConceptHit("晚睡", "重")),
+        record(FRIDAY, "叫不出名的一件事", 9, 0, pending=True),  # 待定没有类：不产生任何命中事件
+    ]
     events = hit_events(records, SITUATIONS)
-    assert {(e.identity, e.grade) for e in events} == {("打球", None), ("运动", None), ("晚睡", "重")}
+    assert {(e.identity, e.grade) for e in events} == {
+        (cid("打球"), None),
+        ("运动", None),
+        (cid("就寝"), None),
+        ("晚睡", "重"),
+    }
     assert all(e.at.tzinfo is not None for e in events)
 
 

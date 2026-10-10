@@ -82,8 +82,7 @@ class ConversationSearchContextReader:
         active = tuple(
             summary
             for summary in frontier.active
-            if self.retirement_filter is None
-            or not self.retirement_filter.hidden(summary_reference(address, summary))
+            if self.retirement_filter is None or not self.retirement_filter.hidden(summary_reference(address, summary))
         )
         summary_context = self._summary_context(active)
         recent_messages = () if live is None else live.messages[-self.config.max_recent_messages :]

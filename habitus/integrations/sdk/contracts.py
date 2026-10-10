@@ -187,7 +187,9 @@ class AgentRecallResult:
             raise TypeError("queries must contain non-empty text")
         if not isinstance(self.context, str):
             raise TypeError("context must be text")
-        if not isinstance(self.memories, tuple) or any(not isinstance(item, AgentRecallMemory) for item in self.memories):
+        if not isinstance(self.memories, tuple) or any(
+            not isinstance(item, AgentRecallMemory) for item in self.memories
+        ):
             raise TypeError("memories must contain AgentRecallMemory values")
         if not isinstance(self.summaries, tuple) or any(
             not isinstance(item, AgentRecallSummary) for item in self.summaries

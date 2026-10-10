@@ -62,9 +62,7 @@ def migrate(behavior_root: str | Path) -> MigrationReport:
     # 会留下一个既不是旧形状也不是新形状的根。冻结数据集是行为层唯一的标准输入集，毁了就没了，
     # 所以指向它本身时直接拒绝——docstring 里那句"只作用于拷贝"要有东西兜着。
     if _FROZEN_DATASET in root.parents or root == _FROZEN_DATASET:
-        raise ValueError(
-            "refusing to migrate the frozen dataset in place; copy the run root first"
-        )
+        raise ValueError("refusing to migrate the frozen dataset in place; copy the run root first")
     store = BehaviorFusionReceiptStore(root)
     paths = sorted((root / "fusion" / "receipts").rglob("*.json"))
     migrated = 0
@@ -73,9 +71,7 @@ def migrate(behavior_root: str | Path) -> MigrationReport:
         if "unowned_observation_ids" in raw:
             continue
         values = _values_with_unowned(raw)
-        receipt = BehaviorFusionReceipt(
-            **values, record_digest=canonical_digest(_record(values))
-        )
+        receipt = BehaviorFusionReceipt(**values, record_digest=canonical_digest(_record(values)))
         # 回执是只创建不覆盖的：先删掉旧字节，再走正门落盘（正门会回读自校验）。
         path.unlink()
         store.put(receipt)
@@ -85,9 +81,7 @@ def migrate(behavior_root: str | Path) -> MigrationReport:
     for receipt in store.list():
         coverage.record(receipt)
         recorded += 1
-    return MigrationReport(
-        receipts_total=len(paths), receipts_migrated=migrated, coverage_records=recorded
-    )
+    return MigrationReport(receipts_total=len(paths), receipts_migrated=migrated, coverage_records=recorded)
 
 
 def _values_with_unowned(raw: dict[str, Any]) -> dict[str, Any]:
@@ -101,9 +95,7 @@ def _values_with_unowned(raw: dict[str, Any]) -> dict[str, Any]:
         "fusion_version": raw["fusion_version"],
         "prompt_version": raw["prompt_version"],
         "validation_attempts": raw["validation_attempts"],
-        "judged_at": datetime.fromisoformat(
-            raw["judged_at"].replace("Z", "+00:00")
-        ).astimezone(UTC),
+        "judged_at": datetime.fromisoformat(raw["judged_at"].replace("Z", "+00:00")).astimezone(UTC),
         "judgement_ids": tuple(raw["judgement_ids"]),
         "unreadable_observation_ids": tuple(raw["unreadable_observation_ids"]),
         "out_of_scope_observation_ids": tuple(raw["out_of_scope_observation_ids"]),

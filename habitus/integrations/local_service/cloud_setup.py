@@ -57,13 +57,9 @@ def default_cloud_selection(
     resolved = registry or build_builtin_setup_registry()
     return CloudSetupSelection(
         chat=_default_selection(resolved.profile("chat", "chat.deepseek")),
-        embedding=_default_selection(
-            resolved.profile("embedding", "embedding.volcengine.ark")
-        ),
+        embedding=_default_selection(resolved.profile("embedding", "embedding.volcengine.ark")),
         rerank=_default_selection(resolved.profile("rerank", "rerank.disabled")),
-        vector=_default_selection(
-            resolved.profile("vector", "vector.vikingdb.managed")
-        ),
+        vector=_default_selection(resolved.profile("vector", "vector.vikingdb.managed")),
     )
 
 
@@ -205,9 +201,7 @@ def apply_cloud_selection(
     memory_vector = _mapping(vector, "memory")
     summary_vector = _mapping(vector, "summary")
     _section(result, "memory")["vector_store"] = deepcopy(dict(memory_vector))
-    _section(result, "conversation")["summary_vector_store"] = deepcopy(
-        dict(summary_vector)
-    )
+    _section(result, "conversation")["summary_vector_store"] = deepcopy(dict(summary_vector))
 
     documents: list[tuple[SetupCapability, Mapping[str, object]]] = [
         ("chat", chat),
@@ -273,15 +267,9 @@ def _apply_profile(
     if selection.preserve_existing:
         current_profile = registry.identify(capability, existing)
         if current_profile.profile_id != profile.profile_id:
-            raise ValueError(
-                "preserve_existing requires the selected profile to match the current configuration"
-            )
+            raise ValueError("preserve_existing requires the selected profile to match the current configuration")
         current_values = profile.values_from(existing)
-        field_keys = frozenset(
-            key
-            for key, value in selection.values.items()
-            if current_values.get(key) != value
-        )
+        field_keys = frozenset(key for key, value in selection.values.items() if current_values.get(key) != value)
     return profile.materialize(
         selection.values,
         base=existing,
@@ -348,10 +336,7 @@ def _config_mapping(config: HabitusConfig) -> dict[str, object]:
         if isinstance(value, tuple):
             return [plain(item) for item in value]
         if is_dataclass(value):
-            return {
-                item.name: plain(getattr(value, item.name))
-                for item in fields(value)
-            }
+            return {item.name: plain(getattr(value, item.name)) for item in fields(value)}
         return value
 
     result = plain(config)

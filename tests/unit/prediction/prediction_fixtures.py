@@ -7,9 +7,19 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta, timezone
 
-from habitus.prediction import builder, query
+from habitus.behavior import BehaviorTree
+from habitus.prediction import builder, query, source
 from habitus.prediction.config import PredictionTreeConfig
-from habitus.prediction.model import BehaviorSnapshot, ObservedAction, ObservedGap, PredictionTree, SlotKey
+from habitus.prediction.model import (
+    BehaviorSnapshot,
+    ObservedAction,
+    ObservedGap,
+    ObservedUnnamed,
+    PredictionTree,
+    SlotKey,
+)
+from habitus.series import EventSeries
+from habitus.series.reader import read_series
 
 CST = timezone(timedelta(hours=8))
 # 2026-08-03 是周一，便于把"周几"算清楚。
@@ -34,7 +44,7 @@ def config(**overrides) -> PredictionTreeConfig:
         shrink_pool_to_weekday=0.001,
         shrink_weekday_to_all_day=0.001,
         laplace_epsilon=0.001,
-        transition_window_seconds=7_200.0,
+        transition_window_slots=8,  # 2 小时
         shrink_edge=0.001,
         recurrence_window_days=90.0,
         rebuild_interval_seconds=86_400.0,
@@ -61,7 +71,7 @@ def production_config(**overrides) -> PredictionTreeConfig:
         shrink_pool_to_weekday=5.0,
         shrink_weekday_to_all_day=5.0,
         laplace_epsilon=0.5,
-        transition_window_seconds=1_800.0,
+        transition_window_slots=3,  # 与 example.yaml 一致：45 分钟
         shrink_edge=5.0,
         recurrence_window_days=90.0,
         rebuild_interval_seconds=86_400.0,
@@ -78,14 +88,19 @@ def at(day_offset: int, hour: int, minute: int = 0, second: int = 0) -> datetime
     return datetime(day.year, day.month, day.day, hour, minute, second, tzinfo=CST)
 
 
-def action(name: str, day_offset: int, hour: int, minute: int = 0) -> ObservedAction:
+def action(name: str, day_offset: int, hour: int, minute: int = 0, *, lane: str = "session") -> ObservedAction:
     moment = at(day_offset, hour, minute)
-    return ObservedAction(action=name, started_at=moment, day=moment.date())
+    return ObservedAction(action=name, started_at=moment, day=moment.date(), lane=lane)
 
 
-def gap(
-    day_offset: int, start_hour: int, end_hour: int, *, watched: bool = True
-) -> ObservedGap:
+def unnamed(day_offset: int, hour: int, minute: int = 0, *, lane: str = "session") -> ObservedUnnamed:
+    """一件叫不出名的事（词表的「待定」）。"""
+
+    moment = at(day_offset, hour, minute)
+    return ObservedUnnamed(started_at=moment, day=moment.date(), lane=lane)
+
+
+def gap(day_offset: int, start_hour: int, end_hour: int, *, watched: bool = True) -> ObservedGap:
     """默认造「没读懂」那一类（我们在看、只是读不出）——树里目前只有这一类。"""
 
     return ObservedGap(
@@ -105,9 +120,7 @@ def daily(name: str, days: int, hour: int, minute: int = 0, *, start: int = 0) -
     return [action(name, start + offset, hour, minute) for offset in range(days)]
 
 
-def weekly(
-    name: str, weeks: int, weekday: int, hour: int, minute: int = 0
-) -> list[ObservedAction]:
+def weekly(name: str, weeks: int, weekday: int, hour: int, minute: int = 0) -> list[ObservedAction]:
     """每周固定某一天做一件事；weekday 0=周一（FIRST_DAY 就是周一）。"""
 
     return [action(name, weekday + 7 * week, hour, minute) for week in range(weeks)]
@@ -137,9 +150,7 @@ def publish(actions, gaps=(), *, config: PredictionTreeConfig, reference_day: da
     """把一批行为按夜批的真实顺序建成树，再包成按格子读的视图。"""
 
     ordered = tuple(sorted(actions, key=lambda item: item.started_at))
-    snapshot = BehaviorSnapshot(
-        actions=ordered, gaps=tuple(gaps), concurrent=(), skipped_duplicates=0
-    )
+    snapshot = BehaviorSnapshot(actions=ordered, unnamed=(), gaps=tuple(gaps), concurrent=(), skipped_duplicates=0)
     tree = builder.build(
         snapshot,
         config=config,
@@ -149,7 +160,22 @@ def publish(actions, gaps=(), *, config: PredictionTreeConfig, reference_day: da
     return Published(tree)
 
 
+def sealed_series(tree: BehaviorTree) -> EventSeries:
+    """测试用：树上全部日子都算已封口的那一晚（截止日 = 最晚那天的次日），衰减基准日就是最晚那天。"""
+
+    everything = read_series(tree, cutoff=date(9999, 1, 1))
+    days = [record.day for record in everything.records] + [gap.ended_at.date() for gap in everything.gaps]
+    latest = max(days) if days else date(2026, 1, 1)
+    return everything.until(latest + timedelta(days=1))
+
+
+def snapshot_from_tree(tree: BehaviorTree) -> BehaviorSnapshot:
+    return source.snapshot_of(sealed_series(tree))
+
+
 __all__ = [
+    "sealed_series",
+    "snapshot_from_tree",
     "CST",
     "FIRST_DAY",
     "Published",

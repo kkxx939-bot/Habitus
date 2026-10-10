@@ -60,9 +60,7 @@ class ConversationSourceStore:
 
     def read(self, source_id: str) -> ConversationSourceEnvelope | None:
         try:
-            encoded = read_regular_bytes(
-                self._path(source_id), artifact_root=self.root, max_bytes=self.max_file_bytes
-            )
+            encoded = read_regular_bytes(self._path(source_id), artifact_root=self.root, max_bytes=self.max_file_bytes)
         except FileNotFoundError:
             return None
         try:
@@ -77,9 +75,7 @@ class ConversationSourceStore:
 
     def list(self) -> tuple[ConversationSourceEnvelope, ...]:
         try:
-            entries = list_real_directory(
-                self.envelope_root, artifact_root=self.root, max_entries=self.max_files
-            )
+            entries = list_real_directory(self.envelope_root, artifact_root=self.root, max_entries=self.max_files)
         except DurablePathIntegrityError as exc:
             raise ConversationSourceError("source envelope directory is invalid or exceeds its bound") from exc
         source_ids: list[str] = []
@@ -106,9 +102,7 @@ class ConversationSourceStore:
         return self.envelope_root / f"{source_id}.json"
 
     def _encode(self, envelope: ConversationSourceEnvelope) -> bytes:
-        return encode_durable_record(
-            envelope.to_dict(), max_bytes=self.max_file_bytes, label="source record"
-        )
+        return encode_durable_record(envelope.to_dict(), max_bytes=self.max_file_bytes, label="source record")
 
 
 __all__ = ["ConversationSourceStore"]

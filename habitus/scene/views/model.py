@@ -6,7 +6,7 @@
 时间在不在看）、``day_note``（当地日历对这一天的说法）。缺什么就是空，不推测、不打分。
 
 原来还有"所在的事"、角色、事里更早成员留下的前提——那是按天归组的产物，已随日情景树删掉；后来的规律级
-记录（``gloss``）也随 2026-09-26 的重构整块删掉。行为之间的关系现在在 ``scene/views/relations``（读账本），
+记录（``gloss``）也随 2026-09-26 的重构整块删掉。行为之间的关系由语义树的关系表提供，
 这里只剩行为树自己的读侧。
 """
 
@@ -149,7 +149,6 @@ class ContextView:
     @property
     def weekday(self) -> int:
         return self.at.weekday()
-
 
 
 def transition_window(value: float | None) -> float | None:

@@ -73,16 +73,14 @@ _JUDGEMENT_FILE = re.compile(r"^(?P<judgement_id>[0-9a-f]{64})\.json$")
 # BHV-LIFECYCLE-001（判断部分已落地，2026-08-30）：释放门槛不是保留期而是**消费**——归约发布
 # 后 ``discard``；"当日实况"改为已封口读树、未封口读这里，双消费者门槛随之消失。观测同理在链
 # 发布后释放（``behavior/reduction/runner.py``），"已释放的观测均有覆盖记录"由融合覆盖索引
-# （``behavior/fusion/coverage.py``，写在回执落盘同一步）保证。容量悬崖的其余两处（kinds 词表、
-# 树单日目录）见 ``behavior/fusion/__init__.py`` 的 TODO(BHV-REALDATA-001)。
+# （``behavior/fusion/coverage.py``，写在回执落盘同一步）保证。树单日目录的容量见
+# ``behavior/fusion/__init__.py`` 的 TODO(BHV-REALDATA-001)。
 
 
 class BehaviorJudgementStore:
     """在 behavior-root 下按 ``judgement_id`` 保存不可变判断。"""
 
-    def __init__(
-        self, behavior_root: str | Path, *, config: BehaviorFusionConfig | None = None
-    ) -> None:
+    def __init__(self, behavior_root: str | Path, *, config: BehaviorFusionConfig | None = None) -> None:
         self.root = Path(behavior_root).expanduser().resolve(strict=False)
         resolved = config or BehaviorFusionConfig()
         if not isinstance(resolved, BehaviorFusionConfig):
@@ -114,9 +112,7 @@ class BehaviorJudgementStore:
         except ImmutableArtifactConflictError as exc:
             existing = self._read_bytes(identity)
             if existing is None or existing != encoded:
-                raise BehaviorFusionError(
-                    "judgement identity collides with different stored content"
-                ) from exc
+                raise BehaviorFusionError("judgement identity collides with different stored content") from exc
 
     def read(self, judgement_id: str) -> dict[str, Any] | None:
         encoded = self._read_bytes(judgement_id)
@@ -135,9 +131,7 @@ class BehaviorJudgementStore:
                 max_entries=self.config.max_judgement_files,
             )
         except DurablePathIntegrityError as exc:
-            raise BehaviorFusionError(
-                "judgement directory is invalid or exceeds its bound"
-            ) from exc
+            raise BehaviorFusionError("judgement directory is invalid or exceeds its bound") from exc
         identities: list[str] = []
         for entry in entries:
             temporary = atomic_temporary_destination(entry.name)
@@ -151,9 +145,7 @@ class BehaviorJudgementStore:
             identities.append(match.group("judgement_id"))
         records = [self._required_read(identity) for identity in sorted(identities)]
         # 排序键的存在性由 ``_decode`` 的形状校验保证，这里不会再抛 KeyError。
-        return tuple(
-            sorted(records, key=lambda item: (item["evidence_ready_at"], item["judgement_id"]))
-        )
+        return tuple(sorted(records, key=lambda item: (item["evidence_ready_at"], item["judgement_id"])))
 
     def recent_before(
         self,
@@ -186,9 +178,7 @@ class BehaviorJudgementStore:
             raise BehaviorFusionError("lookback_seconds must be a number")
         if lookback_seconds <= 0:
             raise BehaviorFusionError("lookback_seconds must be positive")
-        if judged_before is not None and (
-            not isinstance(judged_before, datetime) or judged_before.utcoffset() is None
-        ):
+        if judged_before is not None and (not isinstance(judged_before, datetime) or judged_before.utcoffset() is None):
             raise BehaviorFusionError("judged_before must be a timezone-aware datetime")
         cutoff = moment.astimezone(UTC)
         earliest = cutoff - timedelta(seconds=float(lookback_seconds))
@@ -213,9 +203,7 @@ class BehaviorJudgementStore:
         # 按**时刻**排，不能按 ``started_at`` 的字符串排：它刻意保留本地偏移，所以字符串序不是
         # 时间序。跨时区（出行）或 DST 切换时，1 小时的偏移变化就足以让两条判断的先后颠倒，
         # 而这个顺序直接决定模型看到的 C1..Cn 编号。
-        return tuple(
-            sorted(tail, key=lambda item: (_parse_instant(item["started_at"]), item["judgement_id"]))
-        )
+        return tuple(sorted(tail, key=lambda item: (_parse_instant(item["started_at"]), item["judgement_id"])))
 
     def _required_read(self, judgement_id: str) -> dict[str, Any]:
         record = self.read(judgement_id)
@@ -245,9 +233,7 @@ class BehaviorJudgementStore:
         if set(record) != _JUDGEMENT_KEYS:
             missing = sorted(_JUDGEMENT_KEYS - set(record))
             unknown = sorted(set(record) - _JUDGEMENT_KEYS)
-            raise BehaviorFusionError(
-                f"judgement record shape is invalid: missing={missing} unknown={unknown}"
-            )
+            raise BehaviorFusionError(f"judgement record shape is invalid: missing={missing} unknown={unknown}")
         if self._encode_record(record) != encoded:
             raise BehaviorFusionError("judgement record is not canonically encoded")
         return record
@@ -269,8 +255,7 @@ class BehaviorJudgementStore:
 
     def _encode_record(self, record: dict[str, Any]) -> bytes:
         encoded = (
-            json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-            + "\n"
+            json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
         ).encode("utf-8")
         if len(encoded) > self.config.max_judgement_file_bytes:
             raise BehaviorFusionLimitError("judgement exceeds its configured file bound")

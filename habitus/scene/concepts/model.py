@@ -1,18 +1,23 @@
 """概念定义：语义树的词汇层，一个概念一份。
 
-概念由基准（LLM）写、按残差升级增补；这里只定它长什么样、身份怎么算、一组概念怎样才自洽。
+行为概念跟着基础词表的类走（裁定 20），分三种：
+- **基础概念**：词表里一个行为类原样对应的概念，身份 = 类编号（``s-k0004``），显示名是类名；同步词表时自动生成，不调模型。
+- **细分概念**：源类 + 区别规则——提醒句相同、只是这一次的条件不同（「晚睡」= 睡觉里比近期常态晚两小时以上的）。
+  区别是数值的写成 ``MechanicalRule`` 由算法判；是语义的写成一句区别判据，由模型对着声明的材料答是/否。
+- **汇总概念**：几个类合起来（「写代码」= 修改代码 + 排查问题 + 验证测试），曲线是成员类曲线逐槽相加。
+概念的组成只在一条 lane 内（与预测树的转移只在同 lane 配对一致）。情境概念不挂类。
 
-- **判据分两半**（2026-09-26 裁定）。数值的那一半（"晚于常态两小时以上"）写成 ``MechanicalRule``，由算法算、
-  模型从不碰数字；语义的那一半（"这是入睡"）留在判据句里，由模型答是/否。带规则的概念先算数值，数值不满足
-  就不问模型；满足了才问语义门——一碗 07:00 的面比常态就寝晚 7.5 小时，规则会通过，"它不是入睡"只有模型
-  答得了。写不成数值的概念（"参与一场球类运动"）只有语义那一半。判据句要写到对着材料能答是/否。
+- **细分概念的区别二选一**：数值的（"比近期常态晚两小时以上"）写成 ``MechanicalRule``，只由算法判、不问模型——
+  这条已经是源类（就寝）的记录，"是不是入睡"不用再问；写不成数值的（"改的是前两天刚改过的同一处"）写成区别判据句，
+  由模型对着声明的材料答是/否。模型从不碰数字，算法从不碰语义。区别句要写到对着材料能答是/否。
 - **判据可以引用别的事件**："起床后两小时内的第一次进食"要看当天时间线，概念用 ``context=DAY`` 声明；
   引用"常态"的用 ``baseline_keys`` 声明要哪几个常态值。声明了的材料映射时没给到，那一条**不判**
   （记成未决），不让模型替我们答成 false。
 - **只有行为概念能当后件**，情境概念（状态 / 对象 / 日型 / 派生）只做前件集合的元素。
-- **层级是树不是图**，单一上级。**祖先不参与命中**：映射只判叶子行为概念，「打球」命中了算不算「运动」
-  由读侧沿 parent 链聚合（层级改了不用重算任何命中）。
-- **没有版本**：定义变了就整个重算它的命中和账。
+- **汇总概念不参与命中**：一条记录的基础概念从它的类编号现读，算不算某个汇总概念，由读侧按成员类聚合
+  （成员改了不用重算任何命中）。
+- **显示名不许重**：给模型看的是名字不是编号（裁定 21-1），同一条 lane 能一起出现的概念名字不许重。
+- **没有版本**：定义变了就整个重算它的命中。
 - **档由算法判**：LLM 只答是不是，几档按数值规则机械定。有 ``MechanicalRule`` 的概念，档比的是规则算出的
   那个量（相对常态的偏移就按偏移分档）。
 """
@@ -38,8 +43,8 @@ MAX_BASELINE_KEYS = 8
 MIN_GRADES = 2
 MAX_GRADES = 3
 MINUTES_PER_DAY = 24 * 60
-#: 概念身份、档名会被拼进假设的叶名（``<前件@档+前件>--<方面>``），这三个分隔符不许出现在它们里面，
-#: 否则两条不同的假设能拼出同一个文件名（实测：概念名 ``出差中+晚睡`` 与集合 ``{出差中, 晚睡}``）。
+#: 概念身份、档名会被拼进组合键（前因的集合、带档的前因），这几个分隔符不许出现在它们里面，
+#: 否则两个不同的组合能拼出同一个键（实测：概念名 ``出差中+晚睡`` 与集合 ``{出差中, 晚睡}``）。
 IDENTITY_SEPARATORS = ("+", "@", "--", "#")
 
 
@@ -73,15 +78,26 @@ class ConceptRole(str, Enum):
 
 
 class ConceptOrigin(str, Enum):
-    BASELINE = "baseline"
-    RESIDUE = "residue"
+    """概念从哪来：同步词表自动生成（基础概念），或模型（触点①）写的（细分 / 汇总 / 情境）。"""
+
+    VOCABULARY = "vocabulary"
+    AUTHOR = "author"
+
+
+class ConceptKind(str, Enum):
+    """行为概念与词表类的关系（裁定 20）。情境概念没有这一项。"""
+
+    BASE = "base"
+    REFINEMENT = "refinement"
+    GROUP = "group"
 
 
 class ContextScope(str, Enum):
-    """判据要看多大范围的材料：只看这一条 occurrence，还是要看它所在那一天的时间线。"""
+    """区别判据要看什么材料：只看这一条、它所在那一天的时间线，还是近几天同一个类的记录。"""
 
     OCCURRENCE = "occurrence"
     DAY = "day"
+    RECENT = "recent"
 
 
 class GradeMeasure(str, Enum):
@@ -102,7 +118,9 @@ class BaselineStatistic(str, Enum):
 
     @property
     def measure(self) -> GradeMeasure:
-        return GradeMeasure.START_MINUTE_OF_DAY if self is BaselineStatistic.USUAL_START else GradeMeasure.DURATION_MINUTES
+        return (
+            GradeMeasure.START_MINUTE_OF_DAY if self is BaselineStatistic.USUAL_START else GradeMeasure.DURATION_MINUTES
+        )
 
     @property
     def label(self) -> str:
@@ -117,8 +135,8 @@ class BaselineWindow(str, Enum):
     """常态算的是哪一段历史。**两个窗都要**（2026-09-27 裁定，用户原话"我感觉可能两个都需要"）：
 
     - ``RECENT`` 近期：回答"今天这一条算不算晚睡"——判据比的就是这个（他现在的习惯）；
-    - ``ALL`` 历来：与近期一比就是**漂移**（"他的就寝在往后漂"），那是 profile 的作息骨架信号，
-      也是闭环的第二个触发源；它不当判据，否则半年前的作息会一直压着今天的判定。
+    - ``ALL`` 历来：与近期一比就是**漂移**（"他的就寝在往后漂"），那是 profile 的作息骨架信号；
+      它不当判据，否则半年前的作息会一直压着今天的判定。
 
     两个窗要分成两个键，因为常态值会随每条命中记录落盘（``baseline_snapshot``，可重放的关键）：
     一个键指两种算法，历史就没法重放了。
@@ -241,21 +259,15 @@ def circular_offset(observed: float, reference: float) -> float:
 
 @dataclass(frozen=True)
 class ConceptSource:
-    """概念从哪来。残差升级来的必须记下认领的是哪个 kind（``kind_token``）——残差视图靶这个把已升级的 kind 排除，
-    否则升级前那些 ``hits=[]`` 的记录会让同一个 kind 每晚再报一次"可升级"（新概念不回填历史命中）。"""
+    """概念从哪来；``note`` 记写它的那一版提示词与理由。"""
 
     origin: ConceptOrigin
     note: str | None = None
-    kind_token: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "origin", ConceptOrigin(self.origin))
         if self.note is not None:
             object.__setattr__(self, "note", _single_line(self.note, "concept source note", MAX_NOTE_CHARS))
-        if self.kind_token is not None:
-            object.__setattr__(self, "kind_token", _single_line(self.kind_token, "concept source kind token", MAX_NOTE_CHARS))
-        if (self.origin is ConceptOrigin.RESIDUE) != (self.kind_token is not None):
-            raise ConceptError("a residue-upgraded concept names the kind it claims, and only such a concept does")
 
 
 @dataclass(frozen=True)
@@ -284,11 +296,15 @@ class MechanicalRule:
         if self.relative_to is not None:
             key = BaselineKey.parse(_single_line(self.relative_to, "rule baseline key", MAX_BASELINE_KEY_CHARS))
             if key.statistic.measure is not self.measure:
-                raise ConceptError(f"rule measures {self.measure.value} but its baseline key {key.text!r} is a {key.statistic.value}")
+                raise ConceptError(
+                    f"rule measures {self.measure.value} but its baseline key {key.text!r} is a {key.statistic.value}"
+                )
             if key.window is not BaselineWindow.RECENT:
                 # 2026-09-27 裁定"判据用近期"：拿历来常态当判据，等于让半年前的作息一直压着今天的判定，
                 # 而"近期与历来不一样"这件事本身是漂移信号（profile 的作息骨架），不是判据。
-                raise ConceptError(f"a rule compares against the recent baseline; {key.text!r} names the {key.window.value} window")
+                raise ConceptError(
+                    f"a rule compares against the recent baseline; {key.text!r} names the {key.window.value} window"
+                )
             object.__setattr__(self, "relative_to", key.text)
         elif self.measure is GradeMeasure.START_MINUTE_OF_DAY:
             for value in (self.lower, self.upper):
@@ -384,7 +400,9 @@ def concept_identity(name: object) -> str:
     """概念名的规范身份：与行为树叶名同一套做法（NFC + casefold，拒隐藏名与 ``.md`` 后缀），并拒分隔符。"""
 
     try:
-        return canonical_path_identity(_identity_token(semantic_name(name, "concept name"), "concept name", None), "concept name")
+        return canonical_path_identity(
+            _identity_token(semantic_name(name, "concept name"), "concept name", None), "concept name"
+        )
     except (TypeError, ValueError) as exc:
         raise ConceptError(str(exc)) from exc
 
@@ -404,7 +422,16 @@ class ConceptDefinition:
     role: ConceptRole
     source: ConceptSource
     created_at: datetime
-    parent: str | None = None
+    #: 行为概念与词表类的关系；情境概念为 None。
+    kind: ConceptKind | None = None
+    #: 基础概念：它自己那一个类；细分概念：源类；汇总概念：成员类（≥2）。情境概念为空。
+    classes: tuple[str, ...] = ()
+    #: 行为概念所在的 lane（组成只在一条 lane 内）；情境概念为 None。
+    lane: str | None = None
+    #: 基础概念的显示名（类名）；它的 ``name`` 是类编号，类改名身份不变。
+    title: str | None = None
+    #: 基础概念的类在词表里停用了（被并进别的类）：它不再命中，历史命中留着读。
+    retired: bool = False
     grades: tuple[ConceptGrade, ...] = ()
     rule: MechanicalRule | None = None
     context: ContextScope = ContextScope.OCCURRENCE
@@ -415,77 +442,130 @@ class ConceptDefinition:
 
     def __post_init__(self) -> None:
         identity = concept_identity(self.name)
-        object.__setattr__(self, "definition", _single_line(self.definition, "concept definition", MAX_DEFINITION_CHARS))
+        object.__setattr__(
+            self, "definition", _single_line(self.definition, "concept definition", MAX_DEFINITION_CHARS)
+        )
         object.__setattr__(self, "role", ConceptRole(self.role))
         if not isinstance(self.source, ConceptSource):
             raise ConceptError("concept source must be a ConceptSource")
         if not isinstance(self.created_at, datetime) or self.created_at.utcoffset() is None:
             raise ConceptError("concept created_at must be a timezone-aware datetime")
         object.__setattr__(self, "created_at", self.created_at.astimezone(UTC))
-        if self.parent is not None and concept_identity(self.parent) == identity:
-            raise ConceptError("a concept cannot be its own parent")
         object.__setattr__(self, "context", ContextScope(self.context))
+        self._check_class_link(identity)
         if self.rule is not None and not isinstance(self.rule, MechanicalRule):
             raise ConceptError("rule must be a MechanicalRule")
-        if self.rule is not None and self.context is ContextScope.DAY:
-            raise ConceptError("a mechanical rule is computed from the occurrence alone; it does not take day context")
+        if self.rule is not None and self.context is not ContextScope.OCCURRENCE:
+            raise ConceptError("a mechanical rule is computed from the occurrence alone; it takes no other material")
+        object.__setattr__(self, "baseline_keys", self._checked_baseline_keys())
+        self._check_situation()
+        object.__setattr__(self, "grades", self._checked_grades())
+
+    def _check_class_link(self, identity: str) -> None:
+        """行为概念必须挂类且三种关系各守各的形状；情境概念一样都不挂。"""
+
+        classes = tuple(_single_line(item, "concept class", MAX_NOTE_CHARS) for item in self.classes)
+        object.__setattr__(self, "classes", classes)
+        if self.title is not None:
+            object.__setattr__(self, "title", _single_line(self.title, "concept title", MAX_DEFINITION_CHARS))
+        if not isinstance(self.retired, bool):
+            raise ConceptError("retired must be a boolean")
+        if self.retired and self.kind is not ConceptKind.BASE:
+            raise ConceptError("only a base concept retires with its class")
+        if self.role.is_situation:
+            if self.kind is not None or classes or self.lane is not None or self.title is not None:
+                raise ConceptError("a situation concept is not tied to vocabulary classes")
+            return
+        if self.kind is None:
+            raise ConceptError("a behaviour concept says how it relates to the vocabulary (base / refinement / group)")
+        object.__setattr__(self, "kind", ConceptKind(self.kind))
+        object.__setattr__(self, "lane", _single_line(self.lane, "concept lane", MAX_NOTE_CHARS))
+        if len(set(classes)) != len(classes):
+            raise ConceptError("a concept names each class once")
+        if self.kind is ConceptKind.BASE:
+            if len(classes) != 1 or identity != concept_identity(classes[0]) or self.title is None:
+                raise ConceptError("a base concept is named by its one class id and titled with the class name")
+            if self.rule is not None or self.grades or self.context is not ContextScope.OCCURRENCE:
+                raise ConceptError("a base concept is the class itself; it carries no rule, grade or material")
+        elif self.kind is ConceptKind.REFINEMENT:
+            if len(classes) != 1 or self.title is not None:
+                raise ConceptError("a refinement concept names exactly one source class")
+        else:
+            if len(classes) < 2 or self.title is not None:
+                raise ConceptError("a group concept names at least two member classes")
+            if self.rule is not None or self.grades or self.context is not ContextScope.OCCURRENCE:
+                raise ConceptError("a group concept is never judged; it carries no rule, grade or material")
+
+    def _checked_baseline_keys(self) -> tuple[str, ...]:
         keys = tuple(self.baseline_keys)
         if len(keys) > MAX_BASELINE_KEYS:
             raise ConceptError(f"a concept names at most {MAX_BASELINE_KEYS} baseline keys")
-        cleaned_keys = tuple(BaselineKey.parse(_single_line(key, "baseline key", MAX_BASELINE_KEY_CHARS)).text for key in keys)
-        if len(set(cleaned_keys)) != len(cleaned_keys):
+        cleaned = tuple(
+            BaselineKey.parse(_single_line(key, "baseline key", MAX_BASELINE_KEY_CHARS)).text for key in keys
+        )
+        if len(set(cleaned)) != len(cleaned):
             raise ConceptError("baseline keys must be distinct")
-        if self.rule is not None and self.rule.relative_to is not None and cleaned_keys:
+        if self.rule is not None and self.rule.relative_to is not None and cleaned:
             raise ConceptError("a relative rule already names its baseline key; do not repeat it in baseline_keys")
-        object.__setattr__(self, "baseline_keys", cleaned_keys)
+        return cleaned
+
+    def _check_situation(self) -> None:
         if self.situation is None and self.role is ConceptRole.DERIVED:
             # 派生的定义就是"算法从历史命中算"——没有算法说明的派生概念永远不会命中，它不是派生，是空壳。
             # 其他情境（状态/对象/日型）可以先没有：「出差中」要等事实门接上数据源。
             raise ConceptError("a derived situation concept carries the rule the algorithm computes it by")
-        if self.situation is not None:
-            if not isinstance(self.situation, SituationRule):
-                raise ConceptError("situation must be a SituationRule")
-            if self.role.is_behavior:
-                # 行为概念由映射器判（判据句 + 数值规则），不由"那一刻外面什么样"判。
-                raise ConceptError("only a situation concept carries a situation rule")
-            if self.situation.concept is not None:
-                try:
-                    concept_identity(self.situation.concept)
-                except ConceptError as exc:
-                    raise ConceptError(f"the situation rule of {self.name!r} names an unusable concept: {exc}") from exc
+        if self.situation is None:
+            return
+        if not isinstance(self.situation, SituationRule):
+            raise ConceptError("situation must be a SituationRule")
+        if self.role.is_behavior:
+            # 行为概念由词表的类与映射判，不由"那一刻外面什么样"判。
+            raise ConceptError("only a situation concept carries a situation rule")
+        if self.situation.concept is not None:
+            try:
+                concept_identity(self.situation.concept)
+            except ConceptError as exc:
+                raise ConceptError(f"the situation rule of {self.name!r} names an unusable concept: {exc}") from exc
+
+    def _checked_grades(self) -> tuple[ConceptGrade, ...]:
         grades = tuple(self.grades)
-        if grades:
-            if not MIN_GRADES <= len(grades) <= MAX_GRADES:
-                raise ConceptError(f"a graded concept carries {MIN_GRADES}–{MAX_GRADES} grades")
-            if any(not isinstance(grade, ConceptGrade) for grade in grades):
-                raise ConceptError("grades must be ConceptGrade values")
-            if len({grade.measure for grade in grades}) != 1:
-                raise ConceptError("all grades of one concept must use the same measure")
-            if len({grade.relative for grade in grades}) != 1:
-                raise ConceptError("grades of one concept are all relative or all absolute")
-            if len({canonical_text_identity(grade.name, "grade name") for grade in grades}) != len(grades):
-                raise ConceptError("grade names must be distinct")
-            _require_disjoint(grades)
-            if self.rule is not None:
-                if grades[0].measure is not self.rule.measure:
-                    raise ConceptError("grades must measure the same quantity as the rule")
-                if grades[0].relative != self.rule.is_relative:
-                    raise ConceptError("grades of a relative rule are relative offsets; of an absolute rule, absolute values")
-            elif grades[0].relative:
-                raise ConceptError("relative grades need a relative rule to say what they are relative to")
-        object.__setattr__(self, "grades", grades)
+        if not grades:
+            return grades
+        if not MIN_GRADES <= len(grades) <= MAX_GRADES:
+            raise ConceptError(f"a graded concept carries {MIN_GRADES}–{MAX_GRADES} grades")
+        if any(not isinstance(grade, ConceptGrade) for grade in grades):
+            raise ConceptError("grades must be ConceptGrade values")
+        if len({grade.measure for grade in grades}) != 1:
+            raise ConceptError("all grades of one concept must use the same measure")
+        if len({grade.relative for grade in grades}) != 1:
+            raise ConceptError("grades of one concept are all relative or all absolute")
+        if len({canonical_text_identity(grade.name, "grade name") for grade in grades}) != len(grades):
+            raise ConceptError("grade names must be distinct")
+        _require_disjoint(grades)
+        if self.rule is not None:
+            if grades[0].measure is not self.rule.measure:
+                raise ConceptError("grades must measure the same quantity as the rule")
+            if grades[0].relative != self.rule.is_relative:
+                raise ConceptError(
+                    "grades of a relative rule are relative offsets; of an absolute rule, absolute values"
+                )
+        elif grades[0].relative:
+            raise ConceptError("relative grades need a relative rule to say what they are relative to")
+        return grades
 
     @property
     def identity(self) -> str:
         return concept_identity(self.name)
 
     @property
-    def parent_identity(self) -> str | None:
-        return None if self.parent is None else concept_identity(self.parent)
+    def label(self) -> str:
+        """给人和模型看的名字：基础概念是类名，其余是自己的名字。"""
+
+        return self.title if self.title is not None else self.name
 
     @property
     def watched_identity(self) -> str | None:
-        """情境说明盯着的那个概念的身份（承诺型与派生型才有）。"""
+        """情境说明盯着的那个概念的身份（派生型才有）。"""
 
         if self.situation is None or self.situation.concept is None:
             return None
@@ -494,6 +574,12 @@ class ConceptDefinition:
     @property
     def is_mechanical(self) -> bool:
         return self.rule is not None
+
+    @property
+    def is_judged(self) -> bool:
+        """映射时要不要判：只有细分概念要判（基础概念看编号，汇总概念读时聚合，情境概念算法另算）。"""
+
+        return self.kind is ConceptKind.REFINEMENT
 
     @property
     def required_baseline_keys(self) -> tuple[str, ...]:
@@ -509,16 +595,24 @@ class ConceptDefinition:
 
     @property
     def fingerprint(self) -> str:
-        """判据的内容指纹：会改变"什么算命中"的那些字段。来源与时间不在里面。"""
+        """判据的内容指纹：会改变"什么算命中"的那些字段。来源、时间与显示名不在里面。"""
 
         return canonical_digest(
             {
                 "identity": self.identity,
                 "definition": self.definition,
                 "role": self.role.value,
-                "parent": self.parent_identity,
+                "kind": None if self.kind is None else self.kind.value,
+                "classes": list(self.classes),
+                "lane": self.lane,
                 "grades": [
-                    {"name": g.name, "measure": g.measure.value, "lower": g.lower, "upper": g.upper, "relative": g.relative}
+                    {
+                        "name": g.name,
+                        "measure": g.measure.value,
+                        "lower": g.lower,
+                        "upper": g.upper,
+                        "relative": g.relative,
+                    }
                     for g in self.grades
                 ],
                 "rule": None
@@ -545,7 +639,9 @@ class ConceptDefinition:
             return MechanicalDecision(hit=None, value=None)
         return MechanicalDecision(hit=self.rule.covers(value), value=value)
 
-    def grade_for(self, measures: Mapping[GradeMeasure, float], baseline: Mapping[str, str] | None = None) -> str | None:
+    def grade_for(
+        self, measures: Mapping[GradeMeasure, float], baseline: Mapping[str, str] | None = None
+    ) -> str | None:
         """按数值规则定档；没有档、量缺失或落在所有档之外都返回 None（命中仍算命中，只是不带档）。
 
         有规则的概念比的是规则算出的量（相对规则就是偏移量）。
@@ -567,7 +663,11 @@ class ConceptDefinition:
 
 
 class ConceptSet(Mapping[str, ConceptDefinition]):
-    """一组自洽的概念：身份不重、上级都在、不成环。键是规范身份。"""
+    """一组自洽的概念：身份不重、一个类最多一个基础概念、情境盯的概念都在。键是规范身份。
+
+    层级只有一种：汇总概念 ⊃ 它成员类的基础概念。细分概念不进层级——「晚睡」与「睡觉」是同一条记录的两种说法，
+    「晚睡 → 睡觉」（当晚补觉）量的是另一条记录，不是重言。
+    """
 
     def __init__(self, definitions: Iterable[ConceptDefinition]) -> None:
         resolved: dict[str, ConceptDefinition] = {}
@@ -577,14 +677,10 @@ class ConceptSet(Mapping[str, ConceptDefinition]):
             if definition.identity in resolved:
                 raise ConceptError(f"concept {definition.name!r} appears twice in the set")
             resolved[definition.identity] = definition
-        for definition in resolved.values():
-            parent = definition.parent_identity
-            if parent is not None and parent not in resolved:
-                raise ConceptError(f"concept {definition.name!r} names an unknown parent {definition.parent!r}")
-            if parent is not None and definition.role.is_behavior != resolved[parent].role.is_behavior:
-                # 上下级必须同一种角色。情境概念挂在行为概念下面会把那个行为叶子变成非叶子——映射只判叶子，
-                # 认领了 40 次的「就寝」从此再也不被映射（评审 C-11 ④，探针里真实模型这么写过）。
-                raise ConceptError(f"concept {definition.name!r} and its parent {definition.parent!r} must both be behaviours or both be situations")
+        base: dict[str, str] = {}
+        for identity, definition in resolved.items():
+            if definition.kind is ConceptKind.BASE:
+                base[definition.classes[0]] = identity
             watched = definition.watched_identity
             if watched is not None and watched not in resolved:
                 raise ConceptError(
@@ -592,13 +688,23 @@ class ConceptSet(Mapping[str, ConceptDefinition]):
                     "which is not in the set"
                 )
         self._items: Mapping[str, ConceptDefinition] = MappingProxyType(resolved)
-        children: dict[str, list[str]] = {identity: [] for identity in resolved}
-        for identity, definition in resolved.items():
-            if definition.parent_identity is not None:
-                children[definition.parent_identity].append(identity)
-        self._children: Mapping[str, tuple[str, ...]] = MappingProxyType({k: tuple(v) for k, v in children.items()})
-        for identity in resolved:
-            self.ancestors(identity)  # 成环在这里抛
+        self._base: Mapping[str, str] = MappingProxyType(base)
+        for lane in {item.lane for item in resolved.values() if item.lane is not None}:
+            self._require_unique_labels(lane)
+
+    def _require_unique_labels(self, lane: str) -> None:
+        """给模型看的是名字不是编号（裁定 21-1）：同一条 lane 能一起出现的概念（这条 lane 的 + 不属于任何 lane 的）名字不许重。"""
+
+        seen: dict[str, str] = {}
+        for identity, item in self._items.items():
+            if self.lane_of(identity) not in (lane, None):
+                continue
+            key = canonical_text_identity(item.label, "concept label")
+            if key in seen:
+                raise ConceptError(
+                    f"concepts {seen[key]!r} and {item.name!r} both show as {item.label!r} in lane {lane!r}"
+                )
+            seen[key] = item.name
 
     def __getitem__(self, key: str) -> ConceptDefinition:
         try:
@@ -624,44 +730,104 @@ class ConceptSet(Mapping[str, ConceptDefinition]):
 
     @property
     def fingerprint(self) -> str:
-        """整个概念集的指纹；映射口径带着它，定义一改，已映射的天就能被认出来要重做。"""
+        """要判的概念（细分概念与情境概念）的指纹；映射口径带着它，定义一改，已映射的天就能被认出来要重做。
 
-        return canonical_digest([self._items[identity].fingerprint for identity in sorted(self._items)])[:16]
+        基础概念与汇总概念不判，不进指纹：类改名、汇总改成员都不必重映射。
+        """
+
+        judged = [
+            item.fingerprint
+            for key, item in sorted(self._items.items())
+            if item.kind is not ConceptKind.BASE and item.kind is not ConceptKind.GROUP
+        ]
+        return canonical_digest(judged)[:16]
 
     def behaviors(self) -> tuple[str, ...]:
         return tuple(identity for identity, item in self._items.items() if item.role.is_behavior)
 
-    def behavior_leaves(self) -> tuple[str, ...]:
-        """没有子概念的行为概念——映射只判这些；有子概念的由读侧沿 parent 链聚合。"""
-
-        return tuple(identity for identity in self.behaviors() if not self._children[identity])
-
     def situations(self) -> tuple[str, ...]:
         return tuple(identity for identity, item in self._items.items() if item.role.is_situation)
 
-    def claimed_kinds(self) -> frozenset[str]:
-        """已被残差升级认领的 kind：残差视图不再把它们当候选。"""
+    def base_for(self, class_id: str) -> str | None:
+        """一个类的基础概念的身份；这个类还没有基础概念时为 None。"""
 
-        return frozenset(item.source.kind_token for item in self._items.values() if item.source.kind_token is not None)
+        return self._base.get(class_id)
+
+    def lane_of(self, name: str) -> str | None:
+        """概念属于哪条 lane：行为概念是自己的 lane；派生情境跟它盯的那个概念走（「连续研发中」盯研发实现 → 会话 lane）；
+        日历、对象这类情境不属于任何一条 lane（None，两边都能用）。不在集里的也给 None。"""
+
+        seen: set[str] = set()
+        current = name
+        while current in self and concept_identity(current) not in seen:
+            seen.add(concept_identity(current))
+            item = self[current]
+            if item.role.is_behavior:
+                return item.lane
+            if item.watched_identity is None:
+                return None
+            current = item.watched_identity
+        return None
+
+    def relatable_to(self, consequent: str) -> tuple[str, ...]:
+        """能和这个后件连成一条关系的概念（不含它自己）：同一条 lane 的行为概念与派生情境 + 不属于任何 lane 的情境。
+
+        关系只在一条 lane 内（裁定 20 第 1 条）：两两检验的对从这里取。
+        """
+
+        own = self[consequent].identity
+        lane = self.lane_of(own)
+        return tuple(
+            identity for identity in sorted(self._items) if identity != own and self.lane_of(identity) in (lane, None)
+        )
+
+    def label_of(self, name: str) -> str:
+        """概念 → 给人和模型看的名字；不在集里的原样返回（读侧拿它渲染，概念删了的旧记录照样印得出）。"""
+
+        return self[name].label if name in self else name
+
+    def class_label(self, class_id: str) -> str:
+        """类编号 → 给人和模型看的类名（它的基础概念的显示名）；还没同步到的类原样给编号。"""
+
+        base = self._base.get(class_id)
+        return class_id if base is None else self._items[base].label
+
+    def refinements_on(self, class_id: str) -> tuple[str, ...]:
+        """挂在这个类上的细分概念——映射一条这个类的记录时，只判这些。"""
+
+        return tuple(
+            identity
+            for identity, item in sorted(self._items.items())
+            if item.kind is ConceptKind.REFINEMENT and item.classes[0] == class_id
+        )
+
+    def classes_of(self, name: str) -> tuple[str, ...]:
+        """概念 → 它的曲线由哪几个类组成（桥用）；情境概念为空。"""
+
+        return self[name].classes
 
     def ancestors(self, name: str) -> tuple[str, ...]:
-        """从直接上级到根，按序；走回自己就是环。"""
+        """基础概念的祖先 = 成员里有它那个类的汇总概念；其余概念没有祖先。"""
 
-        start = self[name].identity
-        chain: list[str] = []
-        current = self._items[start].parent_identity
-        while current is not None:
-            if current == start or current in chain:
-                raise ConceptError(f"concept hierarchy has a cycle through {name!r}")
-            chain.append(current)
-            current = self._items[current].parent_identity
-        return tuple(chain)
+        item = self[name]
+        if item.kind is not ConceptKind.BASE:
+            return ()
+        own = item.classes[0]
+        return tuple(
+            identity
+            for identity, other in sorted(self._items.items())
+            if other.kind is ConceptKind.GROUP and own in other.classes
+        )
 
-    def children(self, name: str) -> tuple[str, ...]:
-        return self._children[self[name].identity]
+    def overlaps(self, first: str, second: str) -> bool:
+        """两个行为概念会不会读同一批记录：基础 / 汇总概念的类有交集（「修改代码」与「写代码」）。
 
-    def is_ancestor(self, ancestor: str, descendant: str) -> bool:
-        return self[ancestor].identity in self.ancestors(descendant)
+        这样的两个概念一个当前因、一个当后果是重言，两两检验里机械排除。细分概念不算：「晚睡 → 睡觉」量的是另一条记录（当晚补觉）。
+        """
+
+        a, b = self[first], self[second]
+        pooled = (ConceptKind.BASE, ConceptKind.GROUP)
+        return a.kind in pooled and b.kind in pooled and bool(set(a.classes) & set(b.classes))
 
     def with_ancestors(self, names: Iterable[str]) -> frozenset[str]:
         """读侧聚合：一组命中连同它们全部祖先的身份。"""

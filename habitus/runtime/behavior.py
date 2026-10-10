@@ -26,7 +26,7 @@ import uuid
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext, suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, tzinfo
 
 from habitus.behavior.fusion import (
     BehaviorFusionEnqueuer,
@@ -43,20 +43,24 @@ from habitus.behavior.fusion.config import (
 )
 from habitus.behavior.fusion.coverage import BehaviorCoverageIndex
 from habitus.behavior.fusion.enqueue import DEFAULT_QUIET_PERIOD_SECONDS
+from habitus.behavior.kinds.calls import KindModelCaller
+from habitus.behavior.kinds.classify import DaytimeClassifier
 from habitus.behavior.kinds.config import BehaviorKindConfig
-from habitus.behavior.kinds.rebuild import BehaviorKindRebuildReport
-from habitus.behavior.kinds.resolver import BehaviorKindResolver
+from habitus.behavior.kinds.nightly import NightlyGrower, PendingRecheck
+from habitus.behavior.kinds.revision import AnchorGate, Reviser
 from habitus.behavior.kinds.store import BehaviorKindStore
-from habitus.behavior.kinds.vectors import BehaviorKindVectorStore
 from habitus.behavior.observation import BehaviorObservationEnvelope, BehaviorObservationStore
 from habitus.behavior.observation.telemetry import delivery_attributes
 from habitus.behavior.reduction import (
     DEFAULT_SWEEP_LOCK_TTL_SECONDS,
-    BehaviorKindMergeReport,
     BehaviorReductionBusyError,
     BehaviorReductionLedger,
     BehaviorReductionRunner,
+    VocabularyJobReport,
 )
+from habitus.behavior.reduction.kinds_jobs import VocabularyJobs
+from habitus.behavior.reduction.kinds_migration import KindMigrator
+from habitus.behavior.reduction.kinds_step import KindStamping
 from habitus.behavior.semantic import BehaviorSemanticRefresher, LLMBehaviorOverviewGenerator
 from habitus.behavior.tree import BehaviorTree
 from habitus.config import HabitusConfig
@@ -72,7 +76,6 @@ from habitus.foundation.observability import (
 from habitus.infrastructure.store.contracts.lock import LockStore
 from habitus.infrastructure.store.contracts.path_lock import PathLock
 from habitus.model_client import StructuredChatClient
-from habitus.model_client.embedding import Embedder
 from habitus.runtime.resident import ResidentWorker
 
 
@@ -126,7 +129,7 @@ class BehaviorRuntimeComponents:
             (self.reduction_runner.observations, self.observations, "reduction observations"),
             (self.reduction_runner.receipts, self.receipts, "reduction receipts"),
             (self.reduction_runner.tree, self.tree, "reduction tree"),
-            (self.reduction_runner.kind_store, self.kind_store, "reduction kind store"),
+            (self.reduction_runner.kinds.store, self.kind_store, "reduction kind store"),
             (self.enqueuer.coverage, self.fusion_runner.coverage, "coverage index (enqueue/fusion)"),
             (self.reduction_runner.coverage, self.fusion_runner.coverage, "coverage index (reduction/fusion)"),
             (self.fusion_worker.runner, self.fusion_runner, "fusion worker runner"),
@@ -136,19 +139,11 @@ class BehaviorRuntimeComponents:
         for actual, wanted, label in shared:
             if actual is not wanted:
                 raise ValueError(f"behavior components must share one {label} instance")
-        if self.kind_store.path != self.tree.root / self.kind_store.path.name:
-            raise ValueError("behavior kind registry must live at the tree root")
-        vectors = self.reduction_runner.kind_vectors
-        if vectors is not None and vectors.path != self.tree.root / vectors.path.name:
-            raise ValueError("behavior kind vectors must live at the tree root")
+        if self.kind_store.root != self.tree.root:
+            raise ValueError("behavior vocabulary files must live at the tree root")
         # BHV-FUSION-003 的结构性保障："融合还能续"与"归约已封口"必须是同一个窗口。
-        if (
-            self.fusion_runner.context_lookback_seconds
-            != self.reduction_runner.context_lookback_seconds
-        ):
-            raise ValueError(
-                "fusion and reduction must share one context lookback window"
-            )
+        if self.fusion_runner.context_lookback_seconds != self.reduction_runner.context_lookback_seconds:
+            raise ValueError("fusion and reduction must share one context lookback window")
 
 
 class BehaviorFusionWorker(ResidentWorker):
@@ -173,9 +168,7 @@ class BehaviorFusionWorker(ResidentWorker):
         observer: Observer | None = None,
         span_controller: SpanController | None = None,
     ) -> None:
-        super().__init__(
-            shutdown_timeout_seconds=shutdown_timeout_seconds, observer=observer
-        )
+        super().__init__(shutdown_timeout_seconds=shutdown_timeout_seconds, observer=observer)
         self.enqueuer = enqueuer
         self.runner = runner
         self.span_controller = span_controller
@@ -268,9 +261,7 @@ class BehaviorReductionWorker(ResidentWorker):
         observer: Observer | None = None,
         span_controller: SpanController | None = None,
     ) -> None:
-        super().__init__(
-            shutdown_timeout_seconds=shutdown_timeout_seconds, observer=observer
-        )
+        super().__init__(shutdown_timeout_seconds=shutdown_timeout_seconds, observer=observer)
         self.runner = runner
         self.interval_seconds = float(interval_seconds)
         self.span_controller = span_controller
@@ -284,9 +275,7 @@ class BehaviorReductionWorker(ResidentWorker):
                     await self.runner.run_once()
             except BehaviorReductionBusyError:
                 # sweep 锁被另一持有者占用：多实例场景的正常让路，跳过本拍即可。
-                self._observe(
-                    "reduction_sweep", ObservationStatus.SUCCESS, {"skipped": "lock_busy"}
-                )
+                self._observe("reduction_sweep", ObservationStatus.SUCCESS, {"skipped": "lock_busy"})
             except Exception as exc:  # noqa: BLE001 - 常驻循环必须活过基础设施抖动
                 self.last_error = exc
                 self._observe(
@@ -309,7 +298,6 @@ def build_behavior_components(
     observer: Observer | None = None,
     span_controller: SpanController | None = None,
     clock: Callable[[], datetime] | None = None,
-    embedder: Embedder | None = None,
 ) -> BehaviorRuntimeComponents | None:
     """组装行为管线；``primary_subject`` 未配置时返回 None（行为侧未启用）。
 
@@ -321,11 +309,7 @@ def build_behavior_components(
     if not behavior_config.enabled:
         return None
     root = config.behavior_root
-    context_limit = (
-        behavior_config.context_limit
-        if behavior_config.context_limit is not None
-        else FUSION_CONTEXT_LIMIT
-    )
+    context_limit = behavior_config.context_limit if behavior_config.context_limit is not None else FUSION_CONTEXT_LIMIT
     context_lookback = (
         float(behavior_config.context_lookback_seconds)
         if behavior_config.context_lookback_seconds is not None
@@ -348,9 +332,7 @@ def build_behavior_components(
     coverage = BehaviorCoverageIndex(root, window_days=behavior_config.coverage_window_days)
     jobs = BehaviorFusionJobStore(root, path_lock, clock=clock)
     # 段容量随配置进来，切段与融合两处必须是同一个数（切出 60 条的段、融合却按 512 校验就是分叉）。
-    fusion_config = BehaviorFusionConfig(
-        max_fragments_per_segment=behavior_config.max_fragments_per_segment
-    )
+    fusion_config = BehaviorFusionConfig(max_fragments_per_segment=behavior_config.max_fragments_per_segment)
     enqueuer = BehaviorFusionEnqueuer(
         observations,
         jobs,
@@ -374,33 +356,20 @@ def build_behavior_components(
     )
 
     tree = BehaviorTree(root / "tree")
-    # 词表参数从唯一的 Config 边界进来；embedder 只做候选召回（BHV-KINDS-002），没有它就退字面重合。
+    # 词表的门槛从唯一的 Config 边界进来；模型只经 KindModelCaller 一个触点。
     kind_config = BehaviorKindConfig(**behavior_config.kinds_overrides())
     kind_store = BehaviorKindStore(tree.root, config=kind_config)
-    # 旁册的身份键只从配置取（provider/model/dimension 一处出处）；换任一项旁册作废重算——它是派生物。
-    embedding = config.models.embedding
-    kind_vectors = (
-        BehaviorKindVectorStore(
-            tree.root,
-            model=f"{embedding.route.provider}/{embedding.route.model}",
-            dimension=embedding.dimension,
-        )
-        if embedder is not None
-        else None
-    )
+    kinds, vocabulary_jobs = _vocabulary(tree, lock_store, kind_store, structured_chat, config.locale.zone())
     reduction_runner = BehaviorReductionRunner(
         judgements=judgements,
         observations=observations,
         receipts=receipts,
         tree=tree,
         lock_store=lock_store,
-        kind_store=kind_store,
-        kind_resolver=BehaviorKindResolver(structured_chat, config=kind_config, embedder=embedder),
-        kind_vectors=kind_vectors,
+        kinds=kinds,
+        vocabulary_jobs=vocabulary_jobs,
         ledger=BehaviorReductionLedger(root / "reduction"),
-        semantic_refresher=BehaviorSemanticRefresher(
-            tree, LLMBehaviorOverviewGenerator(structured_chat)
-        ),
+        semantic_refresher=BehaviorSemanticRefresher(tree, LLMBehaviorOverviewGenerator(structured_chat)),
         clock=clock,
         context_lookback_seconds=context_lookback,
         coverage=coverage,
@@ -448,9 +417,7 @@ def deliver_observations(
     """观测投递的正门：入库、唤醒融合循环；返回交付身份（幂等——同身份同内容重复投递无害，
     同身份异内容 fail-closed）。"""
 
-    with observe_operation(
-        observer or NullObserver(), "behavior", "observation_delivery"
-    ) as attributes:
+    with observe_operation(observer or NullObserver(), "behavior", "observation_delivery") as attributes:
         stored = components.observations.put(envelope)
         attributes.update(delivery_attributes(envelope, stored))
     components.fusion_worker.wake()
@@ -465,41 +432,53 @@ def _span(controller: SpanController | None, operation: str) -> AbstractContextM
     return controller.start_span("behavior", operation)
 
 
-async def merge_behavior_kinds(
+def _vocabulary(
+    tree: BehaviorTree,
+    lock_store: LockStore,
+    store: BehaviorKindStore,
+    structured_chat: StructuredChatClient,
+    zone: tzinfo,
+) -> tuple[KindStamping, VocabularyJobs]:
+    """词表的两块：归约里的白天归类，与三件整理活（定期拆改的放行只靠用户自己的数据，裁定 17）。"""
+
+    caller = KindModelCaller(structured_chat, config=store.config)
+    classifier = DaytimeClassifier(caller)
+    stamping = KindStamping(store, classifier, lane=store.config.default_lane)
+    jobs = VocabularyJobs(
+        tree=tree,
+        stamping=stamping,
+        migrator=KindMigrator(tree, lock_store, store),
+        grower=NightlyGrower(caller, PendingRecheck(classifier)),
+        reviser=Reviser(caller, AnchorGate(classifier)),
+        zone=zone,
+    )
+    return stamping, jobs
+
+
+async def run_vocabulary_job(
     components: BehaviorRuntimeComponents,
-    source: str,
-    target: str,
+    job: str,
     *,
     observer: Observer | None = None,
-) -> BehaviorKindMergeReport:
-    """词表合并的正门（BHV-KINDS-002 方案⑤的执行动作）：``source`` 并入 ``target``，树上旧 token 重打。
+) -> VocabularyJobReport:
+    """词表整理活的运维正门：``grow``（立刻每晚新增）、``revise``（立刻定期拆改）。
 
-    判定由离线整理交模型做，这里只执行已定的合并。持 sweep 锁，归约 Worker 在此期间让路
-    （lock_busy 跳拍）；重跑幂等。
+    持 sweep 锁，归约 Worker 在此期间让路（lock_busy 跳拍）。
     """
 
+    runner = components.reduction_runner
+    jobs = {
+        "grow": runner.grow_vocabulary,
+        "revise": runner.revise_vocabulary,
+    }
+    if job not in jobs:
+        raise ValueError(f"unknown vocabulary job: {job!r}")
     started = time.monotonic()
-    report = await components.reduction_runner.merge_kinds(source, target)
+    report = await jobs[job]()
     _record(
         observer,
-        "behavior_kind_merge",
-        {"source": source, "target": target, "restamped": report.restamped, "days": len(report.days)},
-        started,
-    )
-    return report
-
-
-async def rebuild_behavior_kinds(
-    components: BehaviorRuntimeComponents, *, observer: Observer | None = None
-) -> BehaviorKindRebuildReport:
-    """词表重建的正门：按树补齐 + 账重算 + 向量补算，零模型调用；v1 词表迁移与账自愈走这里。"""
-
-    started = time.monotonic()
-    report = await components.reduction_runner.rebuild_kinds()
-    _record(
-        observer,
-        "behavior_kind_rebuild",
-        {"occurrences": report.occurrences, "kinds": report.kinds, "signals": len(report.signals)},
+        f"behavior_vocabulary_{job}",
+        {"days": len(report.days), "model_calls": report.model_calls, "signals": len(report.signals)},
         started,
     )
     return report
@@ -535,6 +514,5 @@ __all__ = [
     "BehaviorRuntimeComponents",
     "build_behavior_components",
     "deliver_observations",
-    "merge_behavior_kinds",
-    "rebuild_behavior_kinds",
+    "run_vocabulary_job",
 ]

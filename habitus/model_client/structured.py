@@ -106,8 +106,7 @@ class StructuredChatClient:
                     prepared = self._correction_request(prepared, response, exc)
         assert last_error is not None
         raise ModelStructuredOutputError(
-            f"model failed {last_error.phase} validation after "
-            f"{self.validation_retries + 1} attempt(s)"
+            f"model failed {last_error.phase} validation after {self.validation_retries + 1} attempt(s)"
         ) from last_error
 
     async def complete_json_async(
@@ -136,8 +135,7 @@ class StructuredChatClient:
                     prepared = self._correction_request(prepared, response, exc)
         assert last_error is not None
         raise ModelStructuredOutputError(
-            f"model failed {last_error.phase} validation after "
-            f"{self.validation_retries + 1} attempt(s)"
+            f"model failed {last_error.phase} validation after {self.validation_retries + 1} attempt(s)"
         ) from last_error
 
     def complete_model(

@@ -321,17 +321,11 @@ class ChatClient:
             raise ModelResponseError("provider returned an invalid prepared chat request")
         if prepared.request != normalized or prepared.stream is not stream:
             raise ModelResponseError("provider prepared a request for another logical call")
-        if (
-            prepared.estimated_input_tokens + prepared.reserved_output_tokens
-            > self.config.context_window_tokens
-        ):
+        if prepared.estimated_input_tokens + prepared.reserved_output_tokens > self.config.context_window_tokens:
             raise ModelInputTooLargeError(
                 "estimated chat input and reserved output exceed the configured context window"
             )
-        if (
-            context.input_token_limit is not None
-            and prepared.estimated_input_tokens > context.input_token_limit
-        ):
+        if context.input_token_limit is not None and prepared.estimated_input_tokens > context.input_token_limit:
             raise ModelInputTooLargeError("estimated chat input exceeds the call-specific input-token limit")
         return prepared
 

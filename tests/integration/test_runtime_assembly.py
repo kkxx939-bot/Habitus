@@ -692,13 +692,13 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     foresight = runtime.components.foresight
     assert foresight is not None
     assert foresight.assembler.behavior_tree is behavior.tree
-    # 判断走这个 Runtime 的结构化客户端；未封口的那一截读这个 Runtime 的判断存储、消费账本与词表；
+    # 判断走这个 Runtime 的结构化客户端；未封口的那一截读这个 Runtime 的判断存储、消费账本，用归约自己的白天归类；
     # 节奏用树的槽宽。
     assert foresight.runner.judge.client is runtime.components.models.structured_chat  # type: ignore[attr-defined]
     unsealed = foresight.assembler.unsealed
     assert unsealed.judgements is behavior.judgements  # type: ignore[attr-defined]
     assert unsealed.ledger is behavior.reduction_runner.ledger  # type: ignore[attr-defined]
-    assert unsealed.kinds is behavior.kind_store  # type: ignore[attr-defined]
+    assert unsealed.stamping is behavior.reduction_runner.kinds  # type: ignore[attr-defined]
     assert foresight.worker.slot_minutes == prediction.tree_config.slot_minutes
     # 账本在 storage.root/foresight；结算认的是归约的定稿日；夜批钩子里结算排在最前（同一个 after_rebuild）。
     assert foresight.runner.ledger is not None and foresight.runner.ledger.root == runtime.config.foresight_root

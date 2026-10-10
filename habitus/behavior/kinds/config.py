@@ -1,60 +1,94 @@
-"""行为类型词表的运维参数：容量边界、归一批形状、存活期。
+"""词表的全部门槛与运维参数（裁定 6：门槛做成配置，不写死）。
 
-数值由 ``Config.behavior`` 的 ``kinds_*`` 字段经组合根注入（``Runtime/behavior.py``）；这里的默认值
-是代码内唯一出处，YAML 留空即取之。
+数值由 ``Config.behavior`` 的 ``kinds_*`` 字段经组合根注入（``runtime/behavior.py``）；这里的默认值是代码内
+唯一出处，YAML 留空即取之。下面标"待定档"的数值是起步值，要等真实数据（待定池的复现分布、锚点被拉走的实测比例）重定。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from habitus.behavior.kinds.ids import Lane
+
+_INTEGER_BOUNDS: tuple[tuple[str, int, int], ...] = (
+    ("batch_size", 1, 100),
+    ("validation_rounds", 0, 10),
+    ("transient_retries", 0, 20),
+    ("max_encoded_bytes", 1, 256 * 1024 * 1024),
+    ("max_examples", 1, 10),
+    ("recurrence_min_count", 1, 1_000),
+    ("recurrence_min_days", 1, 365),
+    ("max_pending", 1, 1_000_000),
+    ("nightly_hour", 0, 23),
+    ("revision_weekday", 0, 6),
+    ("revision_hour", 0, 23),
+    ("merge_evidence_runs", 1, 20),
+    ("cooldown_days", 0, 365),
+    ("max_changes_per_revision", 1, 100),
+    ("lane_candidate_cap", 1, 10_000),
+    ("anchors_per_class", 1, 100),
+    ("revision_samples_per_class", 1, 100),
+    ("checkpoint_every", 1, 100_000),
+    ("prompt_max_steps", 0, 200),
+    ("sample_max_steps", 0, 200),
+)
+
 
 @dataclass(frozen=True)
 class BehaviorKindConfig:
-    """词表的运维边界。
+    """词表的门槛与运维边界（标"待定档"的是起步值，等真实数据重定）。
 
-    - 容量：WP4 之后一天约二百多个不同名字、大多跨天重复，一年量级几千条；上限只是防失控的护栏。
-    - 归一批形状：一次调用判几个名字、给每个名字多少候选（向量最近邻 ∪ 高频）。
-    - 存活期：``last_hit_day + max(base_days, gap_multiplier × max_gap_days)``——一次性名字基础期
-      后删，周期行为按自己量出来的间隔续命（周频→≥21 天、月频→90、季频→270）。
+    - 归类调用：一次判几条、结构不对重问几轮、瞬态错误重试几次。
+    - 每晚新增：每天几点（本地时间）；待定池里一组至少几条、跨几天才建类（待定档）；待定池上限是保护闸。
+    - 定期拆改（裁定 17）：每周几、几点；放行 = 证据规则（拆分两边各至少 ``recurrence_min_count`` 条、跨
+      ``recurrence_min_days`` 天，提醒句不同；合并要在 ``merge_evidence_runs`` 个不同周期里都被提出）+ 锚点自检
+      （每个没动过的类取 ``anchors_per_class`` 个站得稳的锚点，新清单下被拉走的比例不超过 ``max_anchor_pull``）；
+      改过的类冷却几天；一次最多改几处；每类给模型看几条原话。
+    - 候选：同 lane 在用类超过上限时报警（保护闸，见 ``classify``）。
+    - 提示索引：给当日实况用的"原话 → 编号"回看多少天。
+    - 续约间隔：扫树、重打树时每处理多少条续一次 sweep 租约。
+    - 给模型看的步骤：归类与待定池每条最多列几步；拆改时每条抽样原话最多列几步（抽样多，列得短）。
     """
 
-    max_kinds: int = 10_000
-    max_aliases_per_kind: int = 200
-    # 一条带满 64 个命中日的条目约 1KB；上限要盖住 max_kinds 条满账条目（评审实测 10,000 条≈10MB）。
-    max_encoded_bytes: int = 16 * 1024 * 1024
+    default_lane: Lane = Lane.SESSION
     batch_size: int = 10
-    vector_candidates: int = 30
-    frequent_candidates: int = 20
-    literal_candidates: int = 30
-    base_days: int = 30
-    gap_multiplier: int = 3
-    # 批量判定里违约名字的重问轮数（每轮只重问违约的那些）；耗尽后当 null 新建并留信号。
     validation_rounds: int = 2
-    # 单次归一调用对瞬态错误（超时、断连）的有界重试：一次 sweep 几十次调用，一次断连不该让整轮作废。
     transient_retries: int = 5
     transient_retry_delay_seconds: float = 5.0
+    max_encoded_bytes: int = 16 * 1024 * 1024
+    max_examples: int = 3
+    recurrence_min_count: int = 3
+    recurrence_min_days: int = 3
+    max_pending: int = 5_000
+    nightly_hour: int = 2
+    revision_weekday: int = 2
+    revision_hour: int = 3
+    max_anchor_pull: float = 0.02
+    merge_evidence_runs: int = 2
+    cooldown_days: int = 14
+    max_changes_per_revision: int = 3
+    lane_candidate_cap: int = 80
+    anchors_per_class: int = 8
+    revision_samples_per_class: int = 8
+    checkpoint_every: int = 200
+    prompt_max_steps: int = 12
+    sample_max_steps: int = 4
 
     def __post_init__(self) -> None:
-        for name, lower, upper in (
-            ("max_kinds", 1, 1_000_000),
-            ("max_aliases_per_kind", 1, 100_000),
-            ("max_encoded_bytes", 1, 256 * 1024 * 1024),
-            ("batch_size", 1, 100),
-            ("vector_candidates", 0, 500),
-            ("frequent_candidates", 0, 500),
-            ("literal_candidates", 0, 500),
-            ("base_days", 1, 3_650),
-            ("gap_multiplier", 1, 100),
-            ("validation_rounds", 0, 10),
-        ):
+        object.__setattr__(self, "default_lane", Lane(self.default_lane))
+        for name, lower, upper in _INTEGER_BOUNDS:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or not lower <= value <= upper:
                 raise ValueError(f"{name} must be an integer between {lower} and {upper}")
-        if isinstance(self.transient_retries, bool) or not isinstance(self.transient_retries, int) or not 0 <= self.transient_retries <= 20:
-            raise ValueError("transient_retries must be an integer between 0 and 20")
-        if isinstance(self.transient_retry_delay_seconds, bool) or not isinstance(self.transient_retry_delay_seconds, int | float) or not 0.0 <= float(self.transient_retry_delay_seconds) <= 600.0:
-            raise ValueError("transient_retry_delay_seconds must be between 0 and 600")
+        _require_number("transient_retry_delay_seconds", self.transient_retry_delay_seconds, 0.0, 600.0)
+        _require_number("max_anchor_pull", self.max_anchor_pull, 0.0, 1.0)
+        if self.recurrence_min_days > self.recurrence_min_count:
+            raise ValueError("recurrence_min_days cannot exceed recurrence_min_count")
+
+
+def _require_number(name: str, value: object, lower: float, upper: float) -> None:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not lower <= float(value) <= upper:
+        raise ValueError(f"{name} must be between {lower} and {upper}")
 
 
 __all__ = ["BehaviorKindConfig"]

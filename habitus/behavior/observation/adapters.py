@@ -59,9 +59,7 @@ class BehaviorObservationAdapterRegistry:
         normalized = protocol.strip().lower()
         adapter = self._adapters.get(normalized)
         if adapter is None:
-            raise BehaviorObservationProtocolError(
-                f"unsupported behavior observation protocol: {normalized}"
-            )
+            raise BehaviorObservationProtocolError(f"unsupported behavior observation protocol: {normalized}")
         return adapter.adapt(payload, observer_id=observer_id, config=config)
 
     def protocols(self) -> tuple[str, ...]:

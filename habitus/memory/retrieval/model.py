@@ -160,8 +160,7 @@ class MemoryRetrievalAssessment:
         object.__setattr__(self, "decision", MemoryRetrievalSufficiency(self.decision))
         object.__setattr__(self, "reason", _bounded_text(self.reason, "retrieval assessment reason", 10_000))
         if not isinstance(self.missing_information, tuple) or any(
-            not isinstance(item, str) or not item.strip() or item != item.strip()
-            for item in self.missing_information
+            not isinstance(item, str) or not item.strip() or item != item.strip() for item in self.missing_information
         ):
             raise ValueError("retrieval assessment missing_information contains invalid text")
         if len(set(self.missing_information)) != len(self.missing_information):
@@ -517,9 +516,7 @@ class MemorySearchResult:
         object.__setattr__(self, "kinds", normalized_kinds)
         scope = MemoryIntentionRecallScope(self.intention_scope)
         object.__setattr__(self, "intention_scope", scope)
-        if scope is MemoryIntentionRecallScope.COMPLETED and normalized_kinds != (
-            MemoryKind.INTENTION,
-        ):
+        if scope is MemoryIntentionRecallScope.COMPLETED and normalized_kinds != (MemoryKind.INTENTION,):
             raise ValueError("completed Intention search must target only Intention memory")
         if not isinstance(self.plan, MemoryQueryPlan) or self.plan.original_query != self.query:
             raise ValueError("search result query plan does not match the original query")

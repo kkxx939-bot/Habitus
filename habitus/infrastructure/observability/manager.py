@@ -36,11 +36,7 @@ class ManagedObservability:
             if config.audit.enabled
             else None
         )
-        self.otel = (
-            OpenTelemetryBackend(config.tracing, headers=tracing_headers)
-            if config.tracing.enabled
-            else None
-        )
+        self.otel = OpenTelemetryBackend(config.tracing, headers=tracing_headers) if config.tracing.enabled else None
         self._initialized = False
         self._degraded_reason: str | None = None
 

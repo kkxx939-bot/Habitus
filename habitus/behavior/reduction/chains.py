@@ -73,9 +73,7 @@ class BehaviorChain:
     def chain_digest(self) -> str:
         """链身份：消费的判断身份集合的内容摘要；消费账本以它为键。"""
 
-        return canonical_digest(
-            {"judgement_ids": sorted(item.judgement_id for item in self.consumed)}
-        )
+        return canonical_digest({"judgement_ids": sorted(item.judgement_id for item in self.consumed)})
 
     @property
     def order_key(self) -> tuple[datetime, str]:
@@ -139,9 +137,7 @@ def _replacements(
             if kind != _SUPERSEDES:
                 continue
             if target_id not in by_id:
-                dropped.append(
-                    f"supersedes from {record.judgement_id} dropped: target {target_id} is not reducible"
-                )
+                dropped.append(f"supersedes from {record.judgement_id} dropped: target {target_id} is not reducible")
                 continue
             current = winners.get(target_id)
             if current is None or (record.evidence_ready_at, record.judgement_id) > (
@@ -190,9 +186,7 @@ def assemble_chains(records: Sequence[ReducibleJudgement]) -> ChainAssembly:
     # 没读懂段：被 supersedes 认领的（后来读懂了）并入替换者链的全史、随链消费——只从 gaps
     # 里排除是不够的：替换关系随链消费后就从待归约集合里消失，下一轮它会被错当成无主空白。
     absorbed_ids = {target for target in replaced if not by_id[target].is_readable}
-    gaps = tuple(
-        item for item in ordered if not item.is_readable and item.judgement_id not in absorbed_ids
-    )
+    gaps = tuple(item for item in ordered if not item.is_readable and item.judgement_id not in absorbed_ids)
     absorbed = tuple(by_id[target] for target in sorted(absorbed_ids))
 
     # 并查集：continues 结构边（穿透替换）把可读判断并成链；被替换的可读判断把自己的
@@ -225,19 +219,13 @@ def assemble_chains(records: Sequence[ReducibleJudgement]) -> ChainAssembly:
                 continue
             target = _follow(replaced, target_id)
             if target not in by_id:
-                dropped.append(
-                    f"continues from {record.judgement_id} dropped: target {target_id} is not reducible"
-                )
+                dropped.append(f"continues from {record.judgement_id} dropped: target {target_id} is not reducible")
                 continue
             if not by_id[target].is_readable:
-                dropped.append(
-                    f"continues from {record.judgement_id} dropped: target {target_id} is unreadable"
-                )
+                dropped.append(f"continues from {record.judgement_id} dropped: target {target_id} is unreadable")
                 continue
             if owner == target:
-                dropped.append(
-                    f"continues from {record.judgement_id} dropped: it resolves to its own chain"
-                )
+                dropped.append(f"continues from {record.judgement_id} dropped: it resolves to its own chain")
                 continue
             union(owner, target)
 
@@ -249,9 +237,7 @@ def assemble_chains(records: Sequence[ReducibleJudgement]) -> ChainAssembly:
     # min、不重新排队——位置是链的结构，时间只是它自带的内容；否则时间修正会让链头易主、行为
     # 改名（评审抓过：min() 会让"改早"方向静默换头）。改早产生的"延续早于事件开始"倒挂由下方
     # 矛盾隔离接住，与改晚方向同一处置——两个方向都是同一类产物内部矛盾。
-    effective_key: dict[str, tuple[datetime, str]] = {
-        item.judgement_id: item.order_key for item in members
-    }
+    effective_key: dict[str, tuple[datetime, str]] = {item.judgement_id: item.order_key for item in members}
     inherited: dict[str, tuple[datetime, str]] = {}
     for target_id in sorted(replaced, key=lambda tid: by_id[tid].order_key):
         final = _follow(replaced, target_id)
@@ -271,20 +257,14 @@ def assemble_chains(records: Sequence[ReducibleJudgement]) -> ChainAssembly:
         else:
             # 只可能是 supersedes 成环（合法产物推不出环）：这些判断本轮不被任何链消费，
             # 每轮重扫都会再次报出——内部矛盾必须持续可见，不许静默吞掉。
-            dropped.append(
-                f"supersedes chain for {target_id} is cyclic; its judgements stay unconsumed"
-            )
+            dropped.append(f"supersedes chain for {target_id} is cyclic; its judgements stay unconsumed")
             stranded.add(target_id)
 
     chains: list[BehaviorChain] = []
     quarantined: set[str] = set(stranded)
     for root in sorted(groups):
-        view = tuple(
-            sorted(groups[root], key=lambda item: effective_key[item.judgement_id])
-        )
-        superseded = tuple(
-            sorted(superseded_by_root.get(root, ()), key=lambda item: item.order_key)
-        )
+        view = tuple(sorted(groups[root], key=lambda item: effective_key[item.judgement_id]))
+        superseded = tuple(sorted(superseded_by_root.get(root, ()), key=lambda item: item.order_key))
         # 矛盾链不进树（用户裁定）：修正把开始时间改到与链的位置结构倒挂——一件事的延续不可能
         # 早于它自己的开始，改晚链头、改早中段都是同一类产物内部矛盾（同 supersedes 成环）。
         # 不消费、不落树、每轮留信号，持续可见等处置。
@@ -317,14 +297,11 @@ def assemble_chains(records: Sequence[ReducibleJudgement]) -> ChainAssembly:
                 if target_index is None:
                     if target_id in gap_ids:
                         dropped.append(
-                            f"{kind} from {member.judgement_id} dropped: "
-                            f"target {target_id} is an unreadable stretch"
+                            f"{kind} from {member.judgement_id} dropped: target {target_id} is an unreadable stretch"
                         )
                     continue
                 if target_index == index:
-                    dropped.append(
-                        f"{kind} from {member.judgement_id} dropped: it points into its own chain"
-                    )
+                    dropped.append(f"{kind} from {member.judgement_id} dropped: it points into its own chain")
                 elif kind == "concurrent_with":
                     # 对称关系：统一挂到更晚的链上指回更早的链——模型声明在哪一边都不丢。
                     late, early = (
@@ -337,17 +314,13 @@ def assemble_chains(records: Sequence[ReducibleJudgement]) -> ChainAssembly:
                     forward[index][(kind, target_index)] = None
                 else:
                     dropped.append(
-                        f"{kind} from {member.judgement_id} dropped: "
-                        f"a result cannot point at a chain that starts later"
+                        f"{kind} from {member.judgement_id} dropped: a result cannot point at a chain that starts later"
                     )
         # 被替换判断的跨链边随判断本身作废——机械丢弃必须留信号。
         for member in chain.superseded:
             for kind, _target_id in member.relations:
                 if kind in _CROSS_KINDS:
-                    dropped.append(
-                        f"{kind} from superseded {member.judgement_id} dropped: "
-                        f"its judgement was replaced"
-                    )
+                    dropped.append(f"{kind} from superseded {member.judgement_id} dropped: its judgement was replaced")
 
     return ChainAssembly(
         chains=tuple(chains),

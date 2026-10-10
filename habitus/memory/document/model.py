@@ -36,9 +36,7 @@ class MemoryDocumentMetadata:
         created_at = _utc_timestamp(self.created_at, "created_at")
         updated_at = _utc_timestamp(self.updated_at, "updated_at")
         last_confirmed_at = (
-            None
-            if self.last_confirmed_at is None
-            else _utc_timestamp(self.last_confirmed_at, "last_confirmed_at")
+            None if self.last_confirmed_at is None else _utc_timestamp(self.last_confirmed_at, "last_confirmed_at")
         )
         if updated_at < created_at:
             raise ValueError("memory document updated_at cannot precede created_at")

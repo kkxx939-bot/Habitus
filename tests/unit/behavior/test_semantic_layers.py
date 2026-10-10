@@ -111,7 +111,12 @@ def test_unchanged_directories_cost_zero_model_calls(tmp_path) -> None:
 
     assert len(generator.snapshots) == first_calls  # 零新调用
     assert all(
-        r.status in {BehaviorSemanticRefreshStatus.UNCHANGED, BehaviorSemanticRefreshStatus.MISSING, BehaviorSemanticRefreshStatus.EMPTY}
+        r.status
+        in {
+            BehaviorSemanticRefreshStatus.UNCHANGED,
+            BehaviorSemanticRefreshStatus.MISSING,
+            BehaviorSemanticRefreshStatus.EMPTY,
+        }
         for r in results
     )
 
@@ -321,7 +326,7 @@ def test_cross_month_days_roll_up_into_both_months_and_the_year(tmp_path) -> Non
             basis=(),
             goal=None,
             name="晨跑",
-            kind_token="晨跑",
+            kind_token="s-k0003",
             summary="出门晨跑",
         ),
     )
@@ -330,10 +335,6 @@ def test_cross_month_days_roll_up_into_both_months_and_the_year(tmp_path) -> Non
     asyncio.run(refresher.refresh_days([DAY, _date(2026, 9, 2)]))
 
     for parts in ((2026, 8), (2026, 9), (2026,)):
-        assert tree.layer_exists(
-            BehaviorDirectory.occurrences(*parts), BehaviorLevel.OVERVIEW
-        )
-    year_snapshot = next(
-        s for s in generator.snapshots if s.directory == BehaviorDirectory.occurrences(2026)
-    )
+        assert tree.layer_exists(BehaviorDirectory.occurrences(*parts), BehaviorLevel.OVERVIEW)
+    year_snapshot = next(s for s in generator.snapshots if s.directory == BehaviorDirectory.occurrences(2026))
     assert [entry.name for entry in year_snapshot.entries] == ["08", "09"]

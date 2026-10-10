@@ -157,7 +157,7 @@ def marginal_at(tree: PredictionTree, slot: SlotKey, action: str) -> float:
 
 
 def hazard_at(tree: PredictionTree, slot: SlotKey, action: str) -> float:
-    """"如果到现在还没做，这个槽会做"的概率；时刻分布逐槽累乘用的就是它。
+    """ "如果到现在还没做，这个槽会做"的概率；时刻分布逐槽累乘用的就是它。
 
     与 ``marginal_at`` 同一条纪律：整条钟面上都有值。曲线缺失（这个周几从没做过）时给 0——
     没有任何"首次落在这个周几"的证据，编一个数出来没有依据。
@@ -213,16 +213,8 @@ def slot_outlook(tree: PredictionTree, slot: SlotKey) -> SlotOutlook:
     _require_tree(tree)
     if not isinstance(slot, SlotKey):
         raise PredictionTreeError("slot must be a SlotKey")
-    cells = {
-        action: statistics
-        for (key, action), statistics in tree.nodes.items()
-        if key == slot
-    }
-    curves = {
-        action: curve
-        for (weekday, action), curve in tree.curves.items()
-        if weekday == slot.weekday
-    }
+    cells = {action: statistics for (key, action), statistics in tree.nodes.items() if key == slot}
+    curves = {action: curve for (weekday, action), curve in tree.curves.items() if weekday == slot.weekday}
     exposure = tree.exposure.get(slot)
     opportunities = exposure.observed_days if exposure is not None else 0.0
     return SlotOutlook(
@@ -313,13 +305,8 @@ def successors(
         keys = neighbourhood(tree, slot, half_width)
     outgoing = _outgoing(tree.edges, source)
     # 联合查询的分母对该源的每个目标都是同一个，算一次就够。
-    opportunities = sum(
-        item.slot_histogram.get(key, 0.0) for item in outgoing.values() for key in keys
-    )
-    return tuple(
-        _successor(tree, target, outgoing[target], slot, keys, opportunities)
-        for target in sorted(outgoing)
-    )
+    opportunities = sum(item.slot_histogram.get(key, 0.0) for item in outgoing.values() for key in keys)
+    return tuple(_successor(tree, target, outgoing[target], slot, keys, opportunities) for target in sorted(outgoing))
 
 
 # TODO(PRED-JOINT-001): 联合边查询的三处口径问题（2026-09-12 三方审查发现，尚无消费者，故延后）。
@@ -371,13 +358,8 @@ def neighbourhood(tree: PredictionTree, slot: SlotKey, half_width: int) -> tuple
     if 2 * half_width >= slots:
         # 与节点池化同一条硬拒（见 nodes._circular_window_sums）：宽过整圈的环形窗口会把
         # 同一个格子数两遍，两处口径必须一致。
-        raise PredictionTreeError(
-            "a circular pooling window wider than the clock face would count slots twice"
-        )
-    return tuple(
-        SlotKey(weekday=slot.weekday, slot=index)
-        for index in pool_indexes(slot.slot, half_width, slots)
-    )
+        raise PredictionTreeError("a circular pooling window wider than the clock face would count slots twice")
+    return tuple(SlotKey(weekday=slot.weekday, slot=index) for index in pool_indexes(slot.slot, half_width, slots))
 
 
 def _require_half_width(value: int) -> None:
@@ -417,9 +399,7 @@ def parallels(tree: PredictionTree, action: str) -> tuple[EdgeCandidate, ...]:
     )
 
 
-def recurrence_status(
-    tree: PredictionTree, action: str, *, elapsed_seconds: float
-) -> RecurrenceStatus | None:
+def recurrence_status(tree: PredictionTree, action: str, *, elapsed_seconds: float) -> RecurrenceStatus | None:
     """距上次 ``action`` 已经过了这么久，该做了没有。没有间隔样本时返回 None。"""
 
     _require_tree(tree)
@@ -488,14 +468,8 @@ def _successor(
     )
 
 
-def _outgoing(
-    edges: Mapping[tuple[str, str], EdgeStatistics], source: str
-) -> dict[str, EdgeStatistics]:
-    return {
-        target: statistics
-        for (edge_source, target), statistics in edges.items()
-        if edge_source == source
-    }
+def _outgoing(edges: Mapping[tuple[str, str], EdgeStatistics], source: str) -> dict[str, EdgeStatistics]:
+    return {target: statistics for (edge_source, target), statistics in edges.items() if edge_source == source}
 
 
 def _node_lift(tree: PredictionTree, action: str, slot: SlotKey) -> float:
@@ -534,9 +508,7 @@ def _candidate(
         hazard=curve.hazard[slot.slot],
         cumulative=curve.cumulative[slot.slot],
         lift_all_day=_lift(marginal, tree.baselines.get(action, 0.0)),
-        lift_weekday=_lift(
-            marginal, weekday_baseline[slot.slot] if weekday_baseline is not None else 0.0
-        ),
+        lift_weekday=_lift(marginal, weekday_baseline[slot.slot] if weekday_baseline is not None else 0.0),
         n_eff=cell.n_eff if cell is not None else opportunities,
         trend=curve.trend,
         count=cell.counts.occurred_days if cell is not None else 0.0,
@@ -587,11 +559,7 @@ def _seen(cells: Mapping[str, NodeStatistics]) -> list[float]:
     把它们算进留白会凭空拉低熵、也会稀释逃逸质量（实测把"两个候选五五开"的 1.0 压成 0.63）。
     """
 
-    return [
-        statistics.counts.occurred_days
-        for statistics in cells.values()
-        if statistics.counts.occurred_days > 0.0
-    ]
+    return [statistics.counts.occurred_days for statistics in cells.values() if statistics.counts.occurred_days > 0.0]
 
 
 def _require_tree(tree: PredictionTree) -> None:

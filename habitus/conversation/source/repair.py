@@ -66,18 +66,12 @@ class ConversationSourceOutputRepair:
         implementation = self.delivery.consumers[resolved]
         outputs = implementation.output_store
         if self.delivery.outcomes.read(source.source_id, resolved) is not None:
-            raise ConversationSourceRepairError(
-                "repair only applies before a durable outcome exists"
-            )
+            raise ConversationSourceRepairError("repair only applies before a durable outcome exists")
         existing = outputs.list(source)
         if len(existing) < 2:
-            raise ConversationSourceRepairError(
-                "repair requires more than one orphan output"
-            )
+            raise ConversationSourceRepairError("repair requires more than one orphan output")
         expected = outputs.expected_output_id(source, implementation.processor_fingerprint)
-        retained = tuple(
-            output for output in existing if outputs.ref(output).output_id == expected
-        )
+        retained = tuple(output for output in existing if outputs.ref(output).output_id == expected)
         if len(retained) != 1:
             raise ConversationSourceRepairError(
                 "no orphan output matches the current processor fingerprint; "

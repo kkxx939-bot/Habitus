@@ -457,9 +457,7 @@ class SQLiteMemoryRecallLifecycleStore:
         return parsed
 
     def _targets(self, values: tuple[MemoryRecallTarget, ...]) -> tuple[MemoryRecallTarget, ...]:
-        if not isinstance(values, tuple) or any(
-            not isinstance(value, MemoryRecallTarget) for value in values
-        ):
+        if not isinstance(values, tuple) or any(not isinstance(value, MemoryRecallTarget) for value in values):
             raise TypeError("memory recall lifecycle targets must be a tuple")
         if len(values) > self.config.max_batch_size:
             raise ValueError("memory recall lifecycle targets exceed max_batch_size")

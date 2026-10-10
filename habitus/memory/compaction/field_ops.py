@@ -35,9 +35,7 @@ class SemanticFieldOperation:
         except ValueError as exc:
             raise SemanticFieldOperationError("semantic field operation kind is unsupported") from exc
         object.__setattr__(self, "operation", operation)
-        if self.content is not None and (
-            not isinstance(self.content, str) or not self.content.strip()
-        ):
+        if self.content is not None and (not isinstance(self.content, str) or not self.content.strip()):
             raise SemanticFieldOperationError("semantic field update content must be non-empty text")
         if not isinstance(self.items, tuple) or any(
             not isinstance(item, str) or not item.strip() for item in self.items
@@ -214,9 +212,7 @@ def merge_semantic_fields(
         raise TypeError("semantic field source must be a mapping with string keys")
     if not isinstance(operations, SemanticFieldOperationBatch):
         raise TypeError("operations must be a SemanticFieldOperationBatch")
-    if not isinstance(policies, tuple) or any(
-        not isinstance(policy, SemanticFieldMergePolicy) for policy in policies
-    ):
+    if not isinstance(policies, tuple) or any(not isinstance(policy, SemanticFieldMergePolicy) for policy in policies):
         raise TypeError("policies must contain SemanticFieldMergePolicy values")
     policy_by_field = {policy.field: policy for policy in policies}
     if len(policy_by_field) != len(policies):

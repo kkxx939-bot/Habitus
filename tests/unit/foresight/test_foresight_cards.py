@@ -13,6 +13,7 @@ import pytest
 from habitus.foresight import EvidencePack, ForesightError, UnsealedRow, history_card
 from habitus.scene.views import context_view
 from tests.unit.foresight.fixtures import MONDAY, Ground, at
+from tests.unit.kind_ids import kind_id
 
 NOW = MONDAY + timedelta(days=28)
 
@@ -43,8 +44,10 @@ def weekly_ground(tmp_path) -> Ground:
 def test_a_card_splits_the_flow_into_before_this_and_after(tmp_path) -> None:
     ground = weekly_ground(tmp_path)
     pack = ground.pack(at(NOW, 19, 5))
-    assert [item.kind_token for item in pack.expanded] == ["打球", "收拾球包"]  # 18:40 在 ±3 槽里，洗澡不在
-    candidate = next(item for item in pack.expanded if item.kind_token == "打球")
+    assert [item.kind_token for item in pack.expanded] == sorted(
+        [kind_id("打球"), kind_id("收拾球包")]
+    )  # 18:40 在 ±3 槽里，洗澡不在
+    candidate = next(item for item in pack.expanded if item.kind_token == kind_id("打球"))
     cards = candidate.background.cards
     assert [card.at.date() for card in cards] == [MONDAY + timedelta(days=7 * week) for week in range(3)]
     first = cards[0]
@@ -75,20 +78,20 @@ def test_the_now_scene_stops_at_this_moment_and_folds_in_the_unsealed(tmp_path) 
     ground.record(NOW, "吃早饭", 8, 0, kind="吃早饭")
     ground.record(NOW, "打游戏", 19, 30, kind="打游戏")  # 此刻之后，不在
     unsealed = (
-        unsealed_row("出门", at(NOW, 18, 55), kind="出门"),
-        unsealed_row("收拾球包", at(NOW, 18, 40), kind="收拾球包"),
+        unsealed_row("出门", at(NOW, 18, 55), kind=kind_id("出门")),
+        unsealed_row("收拾球包", at(NOW, 18, 40), kind=kind_id("收拾球包")),
         unsealed_row("换衣服", at(NOW, 18, 0), kind=None),
         unsealed_row(None, at(NOW, 18, 45), kind=None, lasts_minutes=3),  # 没读懂的一段，在窗内
-        unsealed_row("喝水", at(NOW, 9, 0), kind="喝水"),  # 今天早上、还没归约：不进流，但"今天做过"要有它
+        unsealed_row("喝水", at(NOW, 9, 0), kind=kind_id("喝水")),  # 今天早上、还没归约：不进流，但"今天做过"要有它
         unsealed_row(None, at(NOW, 9, 30), kind=None, lasts_minutes=5),  # 早上没读懂的一段：今天的空白
-        unsealed_row("散步", at(NOW - timedelta(days=1), 9, 0), kind="散步"),  # 昨天的：不是今天
+        unsealed_row("散步", at(NOW - timedelta(days=1), 9, 0), kind=kind_id("散步")),  # 昨天的：不是今天
     )
     pack = ground.pack(at(NOW, 19, 5), unsealed=unsealed)
     now = pack.now
     assert now.since == at(NOW, 18, 15)
     assert [row.name for row in now.flow] == ["收拾球包"]
     assert [row.name for row in now.unsealed] == ["出门"]
-    assert now.done_today == {"出门": 1, "吃早饭": 1, "喝水": 1, "收拾球包": 1}
+    assert now.done_today == {kind_id("出门"): 1, kind_id("吃早饭"): 1, kind_id("喝水"): 1, kind_id("收拾球包"): 1}
     assert now.gaps == ()
     assert [(gap.started_at, gap.ended_at, gap.kind) for gap in now.unsealed_gaps] == [
         (at(NOW, 9, 30), at(NOW, 9, 35), "没读懂"),
@@ -103,8 +106,15 @@ def test_the_now_scene_fingerprint_follows_the_scene_not_the_clock(tmp_path) -> 
     ground.record(NOW, "收拾球包", 18, 40, kind="收拾球包")
     base = ground.pack(at(NOW, 19, 5)).now.fingerprint
     assert ground.pack(at(NOW, 19, 12)).now.fingerprint == base
-    assert ground.pack(at(NOW, 19, 5), unsealed=(unsealed_row("出门", at(NOW, 18, 55), kind="出门"),)).now.fingerprint != base
-    assert ground.pack(at(NOW, 19, 5), unsealed=(unsealed_row(None, at(NOW, 18, 45), kind=None),)).now.fingerprint != base
+    assert (
+        ground.pack(
+            at(NOW, 19, 5), unsealed=(unsealed_row("出门", at(NOW, 18, 55), kind=kind_id("出门")),)
+        ).now.fingerprint
+        != base
+    )
+    assert (
+        ground.pack(at(NOW, 19, 5), unsealed=(unsealed_row(None, at(NOW, 18, 45), kind=None),)).now.fingerprint != base
+    )
     ground.gap(NOW, 12, 0, 13, 0)
     assert ground.pack(at(NOW, 19, 5)).now.fingerprint != base
 
@@ -125,9 +135,11 @@ def test_candidates_enter_by_evidence_near_this_slot_not_by_a_count(tmp_path) ->
     for week in range(3):
         ground.record(MONDAY + timedelta(days=7 * week), "吃早饭", 8, 0, kind="吃早饭")
     pack = ground.pack(at(NOW, 19, 5))
-    assert [item.kind_token for item in pack.candidates] == ["吃早饭", "开电脑", "打球", "收拾球包", "洗澡"]
-    assert [item.kind_token for item in pack.expanded] == ["打球", "收拾球包"]
-    breakfast = next(item for item in pack.named_only if item.kind_token == "吃早饭")
+    assert [item.kind_token for item in pack.candidates] == sorted(
+        [kind_id("吃早饭"), kind_id("开电脑"), kind_id("打球"), kind_id("收拾球包"), kind_id("洗澡")]
+    )
+    assert [item.kind_token for item in pack.expanded] == sorted([kind_id("打球"), kind_id("收拾球包")])
+    breakfast = next(item for item in pack.named_only if item.kind_token == kind_id("吃早饭"))
     assert breakfast.background.cards == () and breakfast.provenance.all_day.days != ()
     assert pack.generation == "test-generation" and pack.config_digest == ground.tree().config_digest
 
@@ -143,6 +155,7 @@ def test_a_pack_keeps_its_candidates_sorted_and_its_now_at_its_own_moment(tmp_pa
             moment=pack.moment,
             now=pack.now,
             candidates=tuple(reversed(pack.candidates)),
+            labels=pack.labels,
         )
     other = ground.pack(at(NOW, 20, 5))
     with pytest.raises(ForesightError, match="own moment"):
@@ -153,6 +166,7 @@ def test_a_pack_keeps_its_candidates_sorted_and_its_now_at_its_own_moment(tmp_pa
             moment=pack.moment,
             now=other.now,
             candidates=pack.candidates,
+            labels=pack.labels,
         )
 
 
@@ -161,6 +175,6 @@ def test_a_card_on_another_weekday_lands_in_the_cross_weekday_layer(tmp_path) ->
 
     ground = weekly_ground(tmp_path)
     wednesday = ground.record(MONDAY + timedelta(days=2), "打球", 19, 30, kind="打球", lasts_minutes=90)
-    candidate = next(item for item in ground.pack(at(NOW, 19, 5)).expanded if item.kind_token == "打球")
+    candidate = next(item for item in ground.pack(at(NOW, 19, 5)).expanded if item.kind_token == kind_id("打球"))
     card = next(card for card in candidate.background.cards if card.uri == wednesday)
     assert card.layer == "cross_weekday"

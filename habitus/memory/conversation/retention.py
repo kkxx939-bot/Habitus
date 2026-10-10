@@ -174,8 +174,7 @@ class ConversationRetentionPlan:
         ):
             raise ValueError("boundary_kind must be non-empty text or None")
         if self.embedding_fingerprint is not None and (
-            not isinstance(self.embedding_fingerprint, str)
-            or not self.embedding_fingerprint.strip()
+            not isinstance(self.embedding_fingerprint, str) or not self.embedding_fingerprint.strip()
         ):
             raise ValueError("embedding_fingerprint must be non-empty text or None")
         if not isinstance(self.chunker_version, str) or not self.chunker_version.strip():
@@ -221,10 +220,7 @@ class ConversationRetentionPlanner:
     ) -> ConversationRetentionPlan:
         """在完整轮次已闭合后选择连续、安全且不超过硬上限的语义前缀。"""
 
-        if any(
-            not isinstance(value, bool)
-            for value in (after_turn, flush, drain_pending, leading_continuation)
-        ):
+        if any(not isinstance(value, bool) for value in (after_turn, flush, drain_pending, leading_continuation)):
             raise TypeError("retention control flags must be boolean")
         if drain_pending and (not after_turn or flush):
             raise ValueError("drain_pending is only valid while completing one afterTurn commit")
@@ -296,9 +292,7 @@ class ConversationRetentionPlanner:
             boundary_hints=boundary_hints,
         )
         retained = messages[len(archived) :]
-        embedding_fingerprint = (
-            boundary_hints.embedding_fingerprint if boundary_hints is not None else None
-        )
+        embedding_fingerprint = boundary_hints.embedding_fingerprint if boundary_hints is not None else None
         return ConversationRetentionPlan(
             through_sequence=archived[-1].sequence,
             archive_messages=archived,
@@ -388,9 +382,7 @@ class ConversationRetentionPlanner:
 
         safe_sequences = set(self._safe_boundaries(messages))
         candidates: list[tuple[float, int, str]] = []
-        minimum_tokens = int(
-            self.config.max_segment_tokens * self.config.semantic_boundary_min_ratio
-        )
+        minimum_tokens = int(self.config.max_segment_tokens * self.config.semantic_boundary_min_ratio)
         for index, message in enumerate(messages):
             if message.sequence not in safe_sequences:
                 continue
@@ -413,14 +405,8 @@ class ConversationRetentionPlanner:
             candidates.append((score, index, boundary_kind))
 
         if not candidates:
-            raise ConversationRetentionError(
-                "one atomic tool exchange exceeds the configured segment bound"
-            )
-        preferred = [
-            item
-            for item in candidates
-            if self._tokens(messages[: item[1] + 1]) >= minimum_tokens
-        ]
+            raise ConversationRetentionError("one atomic tool exchange exceeds the configured segment bound")
+        preferred = [item for item in candidates if self._tokens(messages[: item[1] + 1]) >= minimum_tokens]
         selected = max(preferred or candidates, key=lambda item: (item[0], item[1]))
         return messages[: selected[1] + 1], selected[2]
 
@@ -458,10 +444,7 @@ class ConversationRetentionPlanner:
     def _turns(messages: tuple[ConversationMessage, ...]) -> tuple[ConversationTurn, ...]:
         grouped: list[list[ConversationMessage]] = []
         for message in messages:
-            if (
-                message.role is ConversationMessageRole.PROMPT
-                and not message.is_logical_continuation
-            ) or not grouped:
+            if (message.role is ConversationMessageRole.PROMPT and not message.is_logical_continuation) or not grouped:
                 grouped.append([message])
             else:
                 grouped[-1].append(message)
@@ -521,10 +504,7 @@ class ConversationRetentionPlanner:
                 message.role is ConversationMessageRole.COMPLETION
                 and message.completes_logical_message
                 and following is not None
-                and not (
-                    following.role is ConversationMessageRole.PROMPT
-                    and not following.is_logical_continuation
-                )
+                and not (following.role is ConversationMessageRole.PROMPT and not following.is_logical_continuation)
             ):
                 # 中间 completion 后仍有同轮工具步骤时不在此切割，确保 Segment
                 # 仅凭首尾角色就能确定 starts/ends_mid_turn。
@@ -544,10 +524,7 @@ class ConversationRetentionPlanner:
             and current.completes_logical_message
             and (
                 following is None
-                or (
-                    following.role is ConversationMessageRole.PROMPT
-                    and not following.is_logical_continuation
-                )
+                or (following.role is ConversationMessageRole.PROMPT and not following.is_logical_continuation)
             )
         ):
             return "turn"
@@ -615,11 +592,7 @@ class ConversationToolResultReducer:
         digest = hashlib.sha256(encoded).hexdigest()
         if message.content_mode is not ConversationToolResultContentMode.INLINE:
             return message
-        if (
-            not force_omit
-            and not force_summarize
-            and size <= self.config.max_inline_tool_result_bytes
-        ):
+        if not force_omit and not force_summarize and size <= self.config.max_inline_tool_result_bytes:
             return message
 
         if force_omit:

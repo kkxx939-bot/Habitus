@@ -23,7 +23,8 @@ from habitus.runtime.foresight import ForesightWorker, build_foresight_component
 from habitus.runtime.prediction import build_prediction_components
 from tests.integration.test_runtime_assembly import REPOSITORY_ROOT
 from tests.unit.behavior.tree_payloads import occurrence_payload
-from tests.unit.foresight.fixtures import ScriptedJudge
+from tests.unit.foresight.fixtures import ScriptedJudge, settled, unchanged
+from tests.unit.kind_ids import kind_id, kind_names
 from tests.unit.runtime.fixtures import STARTUP_PARAMETERS
 from tests.unit.runtime.test_behavior_pipeline import SUBJECT
 
@@ -66,7 +67,7 @@ def tree(config: HabitusConfig, *, weeks: int = 4) -> BehaviorTree:
             occurrence_payload(
                 occurred_on=started.date(),
                 name="打球",
-                kind_token="打球",
+                kind_token=kind_id("打球"),
                 started_at=started,
                 last_observed_at=started + timedelta(minutes=60),
                 onset_available_at=started + timedelta(seconds=2),
@@ -104,6 +105,9 @@ def assembled(
     asyncio.run(prediction.worker.run_once())
     components = build_foresight_components(
         config,
+        class_labels=kind_names,
+        current_classes=unchanged,
+        vocabulary_migrating=settled,
         behavior_tree=behavior_tree,
         store=prediction.store,
         judge=judge if judge is not None else scripted_judge(),
@@ -122,6 +126,9 @@ def test_foresight_is_absent_until_it_is_switched_on(tmp_path) -> None:
     assert (
         build_foresight_components(
             config,
+            class_labels=kind_names,
+            current_classes=unchanged,
+            vocabulary_migrating=settled,
             behavior_tree=behavior_tree,
             store=None,
             judge=scripted_judge(),
@@ -138,7 +145,14 @@ def test_an_enabled_foresight_layer_must_have_a_judge(tmp_path) -> None:
     prediction = build_prediction_components(config, behavior_tree=behavior_tree)
     assert prediction is not None
     with pytest.raises(ValueError, match="needs a judge"):
-        build_foresight_components(config, behavior_tree=behavior_tree, store=prediction.store)
+        build_foresight_components(
+            config,
+            behavior_tree=behavior_tree,
+            store=prediction.store,
+            class_labels=kind_names,
+            current_classes=unchanged,
+            vocabulary_migrating=settled,
+        )
 
 
 def test_enabling_foresight_without_the_semantic_layer_is_refused(tmp_path) -> None:
@@ -160,7 +174,10 @@ def test_the_window_has_one_source_the_prediction_tree(tmp_path) -> None:
     config, components = assembled(tmp_path)
     assembler = components.assembler
     assert assembler.half_width == config.prediction.pool_half_width == 3
-    assert assembler.transition_window_seconds == config.prediction.transition_window_seconds
+    assert (
+        assembler.transition_window_seconds
+        == config.prediction.transition_window_slots * config.prediction.slot_minutes * 60
+    )
     assert assembler.max_days_per_layer == config.foresight.max_days_per_layer
     assert assembler.window_days == config.foresight.window_days
 
@@ -176,13 +193,13 @@ def test_the_moment_lands_on_the_clock_face_in_the_subject_timezone(tmp_path) ->
     assert moment.day_note is None  # 没有当地日历数据时是显式的空，不是漏了字段
     assert pack.generation and pack.now.moment == moment
     (candidate,) = pack.expanded
-    assert candidate.kind_token == "打球"
+    assert candidate.kind_token == kind_id("打球")
     # 卡的序列与视图来自行为树，每张卡对应本槽层的一个出处日。
     cards = candidate.background.cards
     assert [card.at.date() for card in cards] == list(candidate.provenance.slot.days)
     # 今天 19:00 那次已经在树上，此刻 19:05 的场景里有它；没注入判断存储时未封口明说没补，不是漏了。
     assert [row.name for row in pack.now.flow] == ["打球"] and pack.now.unsealed == ()
-    assert pack.now.done_today == {"打球": 1}
+    assert pack.now.done_today == {kind_id("打球"): 1}
 
 
 def test_a_generation_built_with_other_parameters_is_refused(tmp_path) -> None:
@@ -195,14 +212,20 @@ def test_a_generation_built_with_other_parameters_is_refused(tmp_path) -> None:
 
 
 def test_without_a_published_generation_it_says_so_instead_of_answering_zero(tmp_path) -> None:
-    """"还没算过"与"什么都不会发生"必须分得清——后者会让上层安心闭嘴。"""
+    """ "还没算过"与"什么都不会发生"必须分得清——后者会让上层安心闭嘴。"""
 
     config = HabitusConfig.from_mapping(raw_config(tmp_path))
     behavior_tree = tree(config)
     prediction = build_prediction_components(config, behavior_tree=behavior_tree)
     assert prediction is not None
     components = build_foresight_components(
-        config, behavior_tree=behavior_tree, store=prediction.store, judge=scripted_judge()
+        config,
+        class_labels=kind_names,
+        current_classes=unchanged,
+        vocabulary_migrating=settled,
+        behavior_tree=behavior_tree,
+        store=prediction.store,
+        judge=scripted_judge(),
     )
     assert components is not None
     with pytest.raises(ForesightError, match="no prediction generation"):
@@ -230,6 +253,9 @@ class _Rows:
     def __init__(self, *rows: UnsealedRow) -> None:
         self._rows = rows
 
+    async def prepare(self, *, until: datetime) -> None:
+        return None
+
     def rows(self, *, since: datetime, until: datetime) -> tuple[UnsealedRow, ...]:
         return self._rows
 
@@ -249,7 +275,13 @@ def test_the_same_slot_with_an_unchanged_scene_reuses_the_judgement(tmp_path) ->
     assert runner.last is again
     # 判断存储里多了一条未封口的行：场景变了，重新判。
     components.assembler.unsealed = _Rows(
-        UnsealedRow(name="换鞋", kind_token=None, started_at=EVENING + timedelta(minutes=1), last_observed_at=EVENING + timedelta(minutes=3), summary="换了鞋")
+        UnsealedRow(
+            name="换鞋",
+            kind_token=None,
+            started_at=EVENING + timedelta(minutes=1),
+            last_observed_at=EVENING + timedelta(minutes=3),
+            summary="换了鞋",
+        )
     )
     changed = asyncio.run(runner.run_once(now=EVENING + timedelta(minutes=4)))
     assert not changed.reused and len(judge.packs) == 2
@@ -289,7 +321,13 @@ def test_the_builder_refuses_two_sources_for_the_same_part(tmp_path) -> None:
     behavior_tree = tree(config)
     prediction = build_prediction_components(config, behavior_tree=behavior_tree)
     assert prediction is not None
-    common = dict(behavior_tree=behavior_tree, store=prediction.store)
+    common = dict(
+        behavior_tree=behavior_tree,
+        store=prediction.store,
+        class_labels=kind_names,
+        current_classes=unchanged,
+        vocabulary_migrating=settled,
+    )
     with pytest.raises(ValueError, match="not both"):
         build_foresight_components(config, judge=scripted_judge(), structured_chat=object(), **common)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="not both"):

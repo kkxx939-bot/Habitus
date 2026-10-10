@@ -9,6 +9,7 @@ import yaml
 
 from habitus.config import ConfigError, HabitusConfig
 from habitus.config.loader import load_config_object, required_field, strict_fields, strict_object
+from tests.unit.runtime.fixtures import STARTUP_PARAMETERS
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE_CONFIG = REPOSITORY_ROOT / "habitus" / "config" / "example.yaml"
@@ -282,26 +283,35 @@ def test_behavior_config_enforces_its_scalar_bounds() -> None:
 
 
 def test_behavior_kinds_fields_are_bounded_and_derived_by_prefix() -> None:
-    """kinds_* 与 behavior/kinds/config.py 的下界一致；覆盖项按前缀派生，不双份维护。"""
+    """kinds_* 与 behavior/kinds/config.py 的字段一一对应、下界一致；覆盖项按前缀派生，不双份维护。"""
 
+    from dataclasses import fields
+
+    from habitus.behavior.kinds.config import BehaviorKindConfig
     from habitus.config.behavior import BehaviorConfig
 
     assert BehaviorConfig().kinds_overrides() == {}
-    config = BehaviorConfig(kinds_batch_size=5, kinds_base_days=45, kinds_transient_retry_delay_seconds=1.5)
-    assert config.kinds_overrides() == {"batch_size": 5, "base_days": 45, "transient_retry_delay_seconds": 1.5}
+    domain = {field.name for field in fields(BehaviorKindConfig)}
+    exposed = {field.name.removeprefix("kinds_") for field in fields(BehaviorConfig) if field.name.startswith("kinds_")}
+    assert exposed == domain  # 每个门槛都能从配置调（裁定 6），而且不多出领域里没有的字段
+    config = BehaviorConfig(kinds_batch_size=5, kinds_nightly_hour=4, kinds_max_anchor_pull=0.05, kinds_default_lane="physical")
+    overrides = config.kinds_overrides()
+    assert overrides == {"batch_size": 5, "nightly_hour": 4, "max_anchor_pull": 0.05, "default_lane": "physical"}
+    assert BehaviorKindConfig(**overrides).default_lane.value == "physical"
     for kwargs, match in (
         ({"kinds_batch_size": 0}, "kinds_batch_size"),
-        ({"kinds_gap_multiplier": 0}, "kinds_gap_multiplier"),
-        ({"kinds_vector_candidates": 501}, "kinds_vector_candidates"),
-        ({"kinds_max_kinds": True}, "kinds_max_kinds"),
+        ({"kinds_revision_weekday": 7}, "kinds_revision_weekday"),
+        ({"kinds_recurrence_min_count": True}, "kinds_recurrence_min_count"),
         ({"kinds_transient_retry_delay_seconds": 601}, "kinds_transient_retry_delay_seconds"),
+        ({"kinds_max_anchor_pull": 1.5}, "kinds_max_anchor_pull"),
+        ({"kinds_default_lane": "chat"}, "kinds_default_lane"),
     ):
         with pytest.raises(ValueError, match=match):
             BehaviorConfig(**kwargs)
 
 
-def test_scene_config_is_only_a_switch_for_now(tmp_path) -> None:
-    """旧语义树的那组旋钮随它删掉（2026-09-26）；新树每支的旋钮在那一支落地时再进来，不预留空转字段。"""
+def test_scene_config_is_a_switch_plus_the_relation_thresholds(tmp_path) -> None:
+    """旧语义树的那组旋钮随它删掉（2026-09-26）；新树只有开关与关系检验的统计门槛（裁定 26）。"""
 
     from habitus.config.scene import SceneConfig
 
@@ -324,6 +334,37 @@ def test_scene_config_is_only_a_switch_for_now(tmp_path) -> None:
             SceneConfig.from_mapping({gone: 3})
     with pytest.raises(ConfigError, match="scene.enabled"):
         SceneConfig.from_mapping({"enabled": "yes"})
+
+
+def test_relation_thresholds_come_from_config_and_the_clock_from_the_prediction_tree(tmp_path) -> None:
+    """写了的门槛覆盖默认值、没写的用默认值；槽宽、转移窗口、久别重来只认预测树那一组（语义树不另配）。"""
+
+    from habitus.config.scene import SceneConfig
+    from habitus.runtime.scene_night import relation_config
+    from habitus.scene.relations import RelationThresholds
+
+    scene = SceneConfig.from_mapping({"enabled": True, "relations": {"fdr": 0.2, "forward_min_antecedents": 3}})
+    assert scene.relations.overrides() == {"fdr": 0.2, "forward_min_antecedents": 3}
+    mapping = valid_mapping(tmp_path)
+    mapping["prediction"] = dict(STARTUP_PARAMETERS)
+    mapping["behavior"] = {"primary_subject": "用户"}
+    mapping["scene"] = {"enabled": True, "relations": {"fdr": 0.2, "forward_min_antecedents": 3}}
+    config = HabitusConfig.from_mapping(mapping)
+    built = relation_config(config)
+    assert built.thresholds == RelationThresholds(fdr=0.2, forward_min_antecedents=3)
+    assert (built.slot_minutes, built.transition_window_slots, built.recurrence_window_days) == (
+        config.prediction.slot_minutes,
+        config.prediction.transition_window_slots,
+        config.prediction.recurrence_window_days,
+    )
+    for bad, match in (
+        ({"fdr": 1.0}, "fdr"),
+        ({"min_relative_lift": -0.1}, "min_relative_lift"),
+        ({"maintenance_blocks": 0}, "maintenance_blocks"),
+        ({"slot_minutes": 15}, "unknown"),  # 时间的数不在这一组
+    ):
+        with pytest.raises(ConfigError, match=match):
+            SceneConfig.from_mapping({"relations": bad})
 
 
 def test_locale_is_one_group_shared_by_the_scene_and_foresight_layers(tmp_path) -> None:
@@ -384,3 +425,23 @@ def test_foresight_only_carries_protective_limits_and_needs_both_derived_trees(t
     mapping["foresight"] = {"enabled": True}
     with pytest.raises(ConfigError, match="config.foresight is enabled"):
         HabitusConfig.from_mapping(mapping)
+
+
+def test_behavior_kinds_bounds_match_the_domain_bounds() -> None:
+    """配置层不 import behavior，上下界只能各写一份——用测试钉住两份一致。"""
+
+    from habitus.behavior.kinds.config import _INTEGER_BOUNDS
+    from habitus.config.behavior import _KINDS_INT_BOUNDS
+
+    assert {(f"kinds_{name}", low, high) for name, low, high in _INTEGER_BOUNDS} == set(_KINDS_INT_BOUNDS)
+
+
+def test_the_scene_relations_group_lists_every_relation_threshold() -> None:
+    """配置组与 ``RelationThresholds`` 两边各列一份字段：钉住一致，给门槛加一项而忘了加进配置就报红（第四轮评审 E17）。"""
+
+    from habitus.config.scene import SceneRelationsConfig
+    from habitus.scene.relations import RelationThresholds
+
+    assert {item.name for item in dataclasses.fields(SceneRelationsConfig)} == {
+        item.name for item in dataclasses.fields(RelationThresholds)
+    }

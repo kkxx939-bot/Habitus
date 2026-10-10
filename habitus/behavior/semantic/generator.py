@@ -29,7 +29,7 @@ class BehaviorOverviewGenerator(Protocol):
     """把一个受控目录快照转换成覆盖全部直接子项的 L1。
 
     与 memory 生成器的刻意分叉：这里是 **async**——调用方是归约 runner 的异步 sweep，
-    行为侧模型触点（kinds resolver）也全部走 complete_json_async。"""
+    行为侧其他模型触点（事件融合、词表归类）也全部走 complete_json_async。"""
 
     async def generate(self, snapshot: BehaviorDirectorySnapshot) -> str: ...
 
@@ -93,8 +93,7 @@ class LLMBehaviorOverviewGenerator:
 
     def _prompt(self, snapshot: BehaviorDirectorySnapshot) -> str:
         entries = [
-            {"name": entry.name, "kind": entry.kind.value, "content": entry.content}
-            for entry in snapshot.entries
+            {"name": entry.name, "kind": entry.kind.value, "content": entry.content} for entry in snapshot.entries
         ]
         payload = json.dumps(
             {"directory": "/".join(snapshot.directory.identity_parts), "entries": entries},
@@ -142,9 +141,7 @@ class LLMBehaviorOverviewGenerator:
             },
         }
 
-    def _validator(
-        self, snapshot: BehaviorDirectorySnapshot
-    ) -> Callable[[object], _OverviewDraft]:
+    def _validator(self, snapshot: BehaviorDirectorySnapshot) -> Callable[[object], _OverviewDraft]:
         def validate(parsed: object) -> _OverviewDraft:
             if not isinstance(parsed, Mapping):
                 raise ValueError("overview draft must be an object")
@@ -156,9 +153,7 @@ class LLMBehaviorOverviewGenerator:
                 if not isinstance(raw, Mapping):
                     raise ValueError("overview draft entry must be an object")
                 if raw.get("name") != expected.name or raw.get("kind") != expected.kind.value:
-                    raise ValueError(
-                        "overview draft entries must keep the input names, kinds and order"
-                    )
+                    raise ValueError("overview draft entries must keep the input names, kinds and order")
                 drafts.append(
                     _OverviewEntryDraft(
                         name=expected.name,
@@ -166,9 +161,7 @@ class LLMBehaviorOverviewGenerator:
                         summary=str(raw.get("summary", "")),
                     )
                 )
-            return _OverviewDraft(
-                narrative=str(parsed.get("narrative", "")), entries=tuple(drafts)
-            )
+            return _OverviewDraft(narrative=str(parsed.get("narrative", "")), entries=tuple(drafts))
 
         return validate
 

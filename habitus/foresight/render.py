@@ -18,30 +18,37 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from habitus.foresight.assemble import CandidateEvidence, EvidencePack
-from habitus.foresight.cards import HistoryCard, NowScene
+from habitus.foresight.cards import HistoryCard
 from habitus.foresight.model import LAYER_LABELS, CandidateNumbers, Moment
 from habitus.scene.views import ActionRef, ContextView, FlowRow, Neighbour, ObservationGap
 
 _WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 
-def render_candidate(evidence: CandidateEvidence) -> str:
-    """一个候选的完整证据。"""
+def render_candidate(evidence: CandidateEvidence, *, title: str) -> str:
+    """一个候选的完整证据；``title`` 是这一节的标题（类名，见 ``EvidencePack.title``）。"""
 
-    return "\n".join(_candidate_lines(evidence))
+    return "\n".join(_candidate_lines(evidence, title))
 
 
 def render_pack(pack: EvidencePack) -> str:
     """整包：此刻场景在前，摊开的候选各一节（每节数字在前、卡在后），只列名的候选收在最后一节。"""
 
-    lines = [f"# 证据包 · 一代 {pack.generation}", "", render_moment(pack.moment), _clock_face(pack), "", *_now(pack.now)]
+    lines = [
+        f"# 证据包 · 一代 {pack.generation}",
+        "",
+        render_moment(pack.moment),
+        _clock_face(pack),
+        "",
+        *_now(pack),
+    ]
     for item in pack.expanded:
-        lines.extend(["", *_candidate_lines(item)])
+        lines.extend(["", *_candidate_lines(item, pack.title(item.kind_token))])
     named = pack.named_only
     if named:
         lines.extend(["", "## 只列名的候选（这个时段附近没发生过）"])
         lines.extend(
-            f"- {item.kind_token}：边际 {item.numbers.marginal:.3f} · 全天 {item.provenance.all_day.value:.4f}"
+            f"- {pack.title(item.kind_token)}：边际 {item.numbers.marginal:.3f} · 全天 {item.provenance.all_day.value:.4f}"
             f" · 出处 {len(item.provenance.all_day.days)} 天"
             for item in named
         )
@@ -49,7 +56,7 @@ def render_pack(pack: EvidencePack) -> str:
 
 
 def render_moment(moment: Moment) -> str:
-    """"此刻"那一行：日期、周几、时分、槽号，有当地日历就带上。"""
+    """ "此刻"那一行：日期、周几、时分、槽号，有当地日历就带上。"""
 
     at = moment.at
     head = f"此刻：{at:%Y-%m-%d} {_WEEKDAYS[moment.weekday]} {at:%H:%M}（第 {moment.slot} 槽）"
@@ -62,9 +69,10 @@ def _clock_face(pack: EvidencePack) -> str:
     return f"钟面：槽宽 {pack.slot_minutes} 分钟，一天 {pack.slots_per_day} 槽，第 0 槽从 00:00 起"
 
 
-def _now(scene: NowScene) -> list[str]:
-    """此刻场景：已封口与未封口的行合成一条时间线，按时刻排；空白两类都列。"""
+def _now(pack: EvidencePack) -> list[str]:
+    """此刻场景：已封口与未封口的行合成一条时间线，按时刻排；空白两类都列。"今天做过"按类名列。"""
 
+    scene = pack.now
     lines = [f"## 此刻场景（{scene.since:%H:%M}–{scene.moment.at:%H:%M}）"]
     timeline: list[tuple[datetime, str]] = [(row.at, _row(row)) for row in scene.flow]
     for row in scene.unsealed:
@@ -74,7 +82,12 @@ def _now(scene: NowScene) -> list[str]:
     lines.append("到此刻已发生：" + (" ｜ ".join(text for _at, text in timeline) if timeline else "（无）"))
     counts = scene.done_today
     lines.append(
-        "今天做过：" + (" · ".join(f"{kind} {count}" for kind, count in counts.items()) if counts else "（无）")
+        "今天做过："
+        + (
+            " · ".join(f"{pack.labels.get(kind, kind)} {count}" for kind, count in counts.items())
+            if counts
+            else "（无）"
+        )
     )
     gaps = [(gap, False) for gap in scene.gaps] + [(gap, True) for gap in scene.unsealed_gaps]
     if gaps:
@@ -87,10 +100,10 @@ def _gap(gap: ObservationGap, *, unsealed: bool) -> str:
     return f"{text}（未封口）" if unsealed else text
 
 
-def _candidate_lines(evidence: CandidateEvidence) -> list[str]:
-    """一个候选一节：先数字（四层表、发布的率），再卡。先候选、再上下文（2026-09-16 定）。"""
+def _candidate_lines(evidence: CandidateEvidence, title: str) -> list[str]:
+    """一个候选一节：先数字（四层表、发布的率），再卡。先候选、再上下文（2026-09-16 定）。标题是类名。"""
 
-    lines = [f"## {evidence.kind_token}", "", *_table(evidence), *_numbers(evidence.numbers)]
+    lines = [f"## {title}", "", *_table(evidence), *_numbers(evidence.numbers), *_relations(evidence)]
     if not evidence.expanded:
         lines.extend(["", "（这个时段附近没发生过，只列名字与数字）"])
         return lines
@@ -141,6 +154,27 @@ def _numbers(numbers: CandidateNumbers) -> list[str]:
     ]
 
 
+def _relations(evidence: CandidateEvidence) -> list[str]:
+    """此刻在场的已成立关系：只摆语义树算好的读数，中性说法（"之后出现的比例"），不说"带出来"。"""
+
+    if not evidence.relations:
+        return []
+    night = evidence.relations[0].as_of
+    title = "### 已成立的关系（前因此刻在场" + (f"；语义树第 {night} 晚的关系表）" if night is not None else "）")
+    lines = ["", title]
+    for note in evidence.relations:
+        spread = (
+            ""
+            if note.interval is None
+            else f"，差 {note.interval[0] * 100:+.0f} 到 {note.interval[1] * 100:+.0f} 个百分点"
+        )
+        lines.append(
+            f"- {note.antecedent} 之后（{note.span}）出现这一类的比例 {note.treated_rate:.0%}（{note.antecedents} 次），"
+            f"对照（{note.control}）{note.control_rate:.0%}{spread}；此刻：{note.antecedent} {_stamp(note.seen_at)} 做完"
+        )
+    return lines
+
+
 def _days(seconds: float) -> str:
     return f"{seconds / 86_400.0:.1f}"
 
@@ -151,9 +185,7 @@ def _cards(evidence: CandidateEvidence) -> list[str]:
     lines = [f"### 历史 · {total} 次发生，每次一张卡（按 # 编号引用）"]
     notes = []
     if any(background.dropped_days.values()):
-        detail = "、".join(
-            f"{LAYER_LABELS[name]} {count}" for name, count in background.dropped_days.items() if count
-        )
+        detail = "、".join(f"{LAYER_LABELS[name]} {count}" for name, count in background.dropped_days.items() if count)
         notes.append(f"更早的日子没有展开（{detail} 天）")
     if notes:
         lines.append(f"（{'；'.join(notes)}）")

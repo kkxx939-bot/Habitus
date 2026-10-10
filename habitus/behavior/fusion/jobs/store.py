@@ -57,11 +57,7 @@ def _is_job_filename(name: str) -> bool:
     """作业文件恒为 ``<64 位十六进制>.json``——与 ``_path`` 的构造规则同源。"""
 
     stem, _, suffix = name.rpartition(".")
-    return (
-        suffix == "json"
-        and len(stem) == 64
-        and all(character in "0123456789abcdef" for character in stem)
-    )
+    return suffix == "json" and len(stem) == 64 and all(character in "0123456789abcdef" for character in stem)
 
 
 @dataclass(frozen=True)
@@ -191,10 +187,7 @@ class BehaviorFusionJobStore:
                 and current.lease_expires_at > now
             ):
                 return current
-            if (
-                current.fusion_version == fusion_version
-                and current.prompt_version == prompt_version
-            ):
+            if current.fusion_version == fusion_version and current.prompt_version == prompt_version:
                 return current
             replacement_id = receipt_identity(current.segment_digest, fusion_version, prompt_version)
             existing = self._try_read(self._path(replacement_id))
@@ -219,9 +212,7 @@ class BehaviorFusionJobStore:
                 last_error=None,
                 updated_at=now,
             )
-            atomic_create_bytes(
-                self._path(replacement_id), self._encode(replacement), artifact_root=self.root
-            )
+            atomic_create_bytes(self._path(replacement_id), self._encode(replacement), artifact_root=self.root)
             return replacement
 
     def initialize(self) -> int:
@@ -257,13 +248,9 @@ class BehaviorFusionJobStore:
         """所有仍保留的作业已经覆盖的观测；排队时据此跳过已处理的片段。"""
 
         if not fenced:
-            return frozenset(
-                observation_id for job in self._read_all() for observation_id in job.observation_ids
-            )
+            return frozenset(observation_id for job in self._read_all() for observation_id in job.observation_ids)
         with self._queue_fence():
-            return frozenset(
-                observation_id for job in self._read_all() for observation_id in job.observation_ids
-            )
+            return frozenset(observation_id for job in self._read_all() for observation_id in job.observation_ids)
 
     def observability_snapshot(self) -> BehaviorFusionQueueSnapshot:
         with self._queue_fence():
@@ -326,10 +313,7 @@ class BehaviorFusionJobStore:
                 if current.lease_expires_at > now:
                     raise BehaviorFusionJobBlockedError("oldest fusion job is held by an active worker lease")
                 previous = current.worker_id or "unknown"
-                reclaimed = (
-                    f"worker lease expired; reclaimed from {previous} "
-                    f"generation {current.claim_generation}"
-                )
+                reclaimed = f"worker lease expired; reclaimed from {previous} generation {current.claim_generation}"
                 last_error: str | None = reclaimed[:FUSION_JOB_ERROR_MAX_CHARS]
             else:
                 if current.next_attempt_at is not None and current.next_attempt_at > now:
@@ -411,9 +395,7 @@ class BehaviorFusionJobStore:
         if not isinstance(retryable, bool):
             raise TypeError("retryable must be boolean")
         message = " ".join(str(error).split()) or type(error).__name__
-        return self._finish(
-            lease, committed=False, error=message[:FUSION_JOB_ERROR_MAX_CHARS], retryable=retryable
-        )
+        return self._finish(lease, committed=False, error=message[:FUSION_JOB_ERROR_MAX_CHARS], retryable=retryable)
 
     def retry_failed(self, job: BehaviorFusionJob) -> BehaviorFusionJob:
         """人工处置后重新开放最早的 FAILED 作业。"""
@@ -504,9 +486,7 @@ class BehaviorFusionJobStore:
     def _resume_status(job: BehaviorFusionJob) -> BehaviorFusionJobStatus:
         return BehaviorFusionJobStatus.QUEUED if job.needs_fusion else BehaviorFusionJobStatus.STAGED
 
-    def _current_lease_job(
-        self, lease: BehaviorFusionJobLease, *, now: datetime
-    ) -> BehaviorFusionJob:
+    def _current_lease_job(self, lease: BehaviorFusionJobLease, *, now: datetime) -> BehaviorFusionJob:
         current = self._oldest_required(lease.job)
         if (
             current.status is not BehaviorFusionJobStatus.RUNNING
@@ -603,9 +583,7 @@ class BehaviorFusionJobStore:
 
     def _load_or_initialize_state(self, jobs: tuple[BehaviorFusionJob, ...]) -> _SequenceState:
         try:
-            encoded = read_regular_bytes(
-                self.state_path, artifact_root=self.root, max_bytes=self.config.max_file_bytes
-            )
+            encoded = read_regular_bytes(self.state_path, artifact_root=self.root, max_bytes=self.config.max_file_bytes)
         except FileNotFoundError:
             initial = _SequenceState(max((job.fusion_sequence for job in jobs), default=0))
             atomic_create_bytes(self.state_path, self._encode_state(initial), artifact_root=self.root)
@@ -645,9 +623,7 @@ class BehaviorFusionJobStore:
 
     def _read(self, path: Path) -> BehaviorFusionJob:
         try:
-            raw = json.loads(
-                read_regular_bytes(path, artifact_root=self.root, max_bytes=self.config.max_file_bytes)
-            )
+            raw = json.loads(read_regular_bytes(path, artifact_root=self.root, max_bytes=self.config.max_file_bytes))
             return BehaviorFusionJob.from_dict(raw)
         except Exception as exc:
             if isinstance(exc, BehaviorFusionJobError):
@@ -666,8 +642,10 @@ class BehaviorFusionJobStore:
         atomic_replace_bytes(self._path(job.job_id), self._encode(job), artifact_root=self.root)
 
     def _path(self, job_id: str) -> Path:
-        if not isinstance(job_id, str) or len(job_id) != 64 or any(
-            character not in "0123456789abcdef" for character in job_id
+        if (
+            not isinstance(job_id, str)
+            or len(job_id) != 64
+            or any(character not in "0123456789abcdef" for character in job_id)
         ):
             raise BehaviorFusionJobError("job_id must be lowercase SHA-256 text")
         return self.jobs_root / f"{job_id}.json"
@@ -677,8 +655,7 @@ class BehaviorFusionJobStore:
         # ``last_observed_at`` 折成 UTC，东八区凌晨的行为就掉到前一天，归约层按"人的一天"做的
         # 聚合会全错。这里用固定的键序 + 保留偏移的时间文本自行序列化。
         encoded = (
-            json.dumps(job.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-            + "\n"
+            json.dumps(job.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
         ).encode("utf-8")
         if len(encoded) > self.config.max_file_bytes:
             raise BehaviorFusionJobError("fusion job exceeds its configured file bound")

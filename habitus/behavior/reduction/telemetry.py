@@ -74,25 +74,23 @@ def seal_attributes(
 def kind_attributes(
     *,
     requests: int,
-    tokens: int,
-    known: int,
-    created: int,
+    classified: int,
+    pending: int,
+    not_events: int,
     model_calls: int,
-    batches: int,
     signals: Iterable[str],
 ) -> Attributes:
-    """定类型：多少名字直接命中词表、多少按批交给模型判、判出多少新类型；信号按首词计。
+    """白天归类：多少条链交去归类、归进在用类 / 进待定 / 判为非事件各多少；信号按首词计。
 
-    ``batches`` 只数按批判定的批次（词表快路径不算）；``model_calls`` 含校验不过后的重问。
+    ``model_calls`` 含结构不对之后的重问。
     """
 
     attributes: Attributes = {
-        "names": requests,
-        "resolved": tokens,
-        "known": known,
-        "created": created,
+        "chains": requests,
+        "classified": classified,
+        "pending": pending,
+        "not_events": not_events,
         "model_calls": model_calls,
-        "batches": batches,
     }
     attributes.update(count_notes_by_leading_token(signals, prefix="signal_"))
     return attributes
@@ -133,7 +131,9 @@ def stage_attributes(
     return attributes
 
 
-def publish_attributes(documents: Sequence[Mapping[str, Any]], *, published_at: datetime, kind_hits: int) -> Attributes:
+def publish_attributes(
+    documents: Sequence[Mapping[str, Any]], *, published_at: datetime, kind_pending: int
+) -> Attributes:
     """落盘：文档数与上树时效。
 
     ``end_to_publish`` 从行为最后一次被看到算起，``onset_to_publish`` 从系统第一次能知道它开始了
@@ -146,7 +146,7 @@ def publish_attributes(documents: Sequence[Mapping[str, Any]], *, published_at: 
         "occurrences": kinds.get(BehaviorKind.OCCURRENCE.value, 0),
         "gaps": kinds.get(BehaviorKind.GAP.value, 0),
         "gaps_by_reference": kinds.get(_LEDGER_ONLY, 0),
-        "kind_hits": kind_hits,
+        "kind_pending": kind_pending,
     }
     occurrences = [item["payload"] for item in documents if item.get("kind") == BehaviorKind.OCCURRENCE.value]
     if occurrences:

@@ -1,8 +1,7 @@
 """预测层在组合根的组装。
 
 预测层站在派生树之上：数字取自预测树的一代，历史卡取自行为树的读时投影，此刻场景取自行为树的今天加
-判断存储里还没封口的最近一段。（旧语义树的关联记录随重构摘掉，2026-09-26；新语义树的产物按《语义树重构》
-方案接回来。）本模块负责把它们接起来，并且**把三件只有组合根知道的事定死**：
+判断存储里还没封口的最近一段，已成立的关系取自语义树每条 lane 最近一晚的关系表（``SceneRelations``）。本模块负责把它们接起来，并且**把三件只有组合根知道的事定死**：
 
 1. **钉住一代**。每次装配从指针取当前一代并核对它的 ``config_digest`` 与现行配置一致——参数变了就是
    另一套统计，混读出来的数字互不一致而且看不出来。不一致时硬拒，等夜批按新参数重建。
@@ -12,7 +11,7 @@
    装配新建一个；跨次复用会读到过期的今天。
 
 未封口的判断经 ``UnsealedReader`` 注入；生产实现是 ``runtime.unsealed.UnsealedFromJudgements``（判断存储 +
-消费账本 + 词表），没注入时用显式的空实现，明说"最近一小时没补"。
+消费账本 + 归约的白天归类），没注入时用显式的空实现，明说"最近一小时没补"。
 
 节奏：``ForesightWorker`` 每个槽一拍（对齐到槽边界，槽宽就是树的 ``slot_minutes``），每拍经
 ``JudgementRunner`` 装配 → 判断。同一槽内此刻场景没变（``NowScene.fingerprint`` 相同）就复用上一次的
@@ -27,17 +26,29 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 from habitus.behavior.fusion.store import BehaviorJudgementStore
-from habitus.behavior.kinds.store import BehaviorKindStore
+from habitus.behavior.reduction.kinds_step import KindStamping
 from habitus.behavior.reduction.ledger import BehaviorReductionLedger
 from habitus.behavior.tree import BehaviorTree
 from habitus.config import HabitusConfig
-from habitus.foresight import EvidencePack, ForesightError, NoUnsealed, UnsealedReader, assemble, moment_at
+from habitus.foresight import (
+    EvidencePack,
+    ForesightError,
+    Moment,
+    NoUnsealed,
+    RelationNote,
+    RelationTable,
+    UnsealedReader,
+    UnsealedRow,
+    assemble,
+    moment_at,
+    present_relations,
+)
 from habitus.foresight.judge import Judge, JudgeConfig, Judgement, LLMJudge
 from habitus.foresight.ledger import Claim, claims_from
 from habitus.foundation.observability import ObservationStatus, Observer
@@ -52,9 +63,15 @@ from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_settlement import SettlementStage
 from habitus.runtime.prediction import PredictionRuntimeComponents
 from habitus.runtime.resident import ResidentWorker
+from habitus.runtime.scene_night import relation_config
+from habitus.runtime.scene_relations import SceneRelations
 from habitus.runtime.unsealed import UnsealedFromJudgements
 from habitus.scene import DayTypeCalendar, FactProvider, NoFacts, NominalCalendar, conditions_of
+from habitus.scene.concepts import ConceptStore
+from habitus.scene.relations import RelationThresholds
+from habitus.scene.relations.store import RelationStore
 from habitus.scene.views import DayIndexCache
+from habitus.series.reader import admitted
 
 
 @dataclass(frozen=True)
@@ -101,8 +118,8 @@ class ForesightRuntimeComponents:
             raise ValueError("foresight must read unsealed judgements from the assembled judgement store")
         if getattr(unsealed, "ledger", None) is not behavior.reduction_runner.ledger:
             raise ValueError("foresight must read the assembled reduction ledger")
-        if getattr(unsealed, "kinds", None) is not behavior.kind_store:
-            raise ValueError("foresight must read the assembled kind store")
+        if getattr(unsealed, "stamping", None) is not behavior.reduction_runner.kinds:
+            raise ValueError("foresight must classify unsealed chains with the reduction's own daytime classifier")
         if getattr(self.runner.judge, "client", None) is not structured_chat:
             raise ValueError("foresight must judge through the assembled structured chat client")
         # 窗口只有一处出处：邻域宽度、转移窗、指纹、槽宽、时区都是那棵树与那个 Runtime 的。
@@ -135,7 +152,10 @@ class EvidenceAssembler:
         window_days: int,
         transition_window_seconds: float,
         max_days_per_layer: int,
+        class_labels: Callable[[], Mapping[str, str]],
         unsealed: UnsealedReader | None = None,
+        relations: Callable[[], RelationTable] | None = None,
+        relation_minimum: int = RelationThresholds().forward_min_antecedents,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(behavior_tree, BehaviorTree):
@@ -155,7 +175,12 @@ class EvidenceAssembler:
             raise ValueError("expected_digest must be non-empty text")
         if unsealed is not None and not callable(getattr(unsealed, "rows", None)):
             raise TypeError("unsealed must implement UnsealedReader")
+        if not callable(class_labels):
+            raise TypeError("class_labels must be a callable returning class id -> class name")
+        if relations is not None and not callable(relations):
+            raise TypeError("relations must be a callable returning the relation table and its concepts")
         self.behavior_tree = behavior_tree
+        self.class_labels = class_labels
         self.store = store
         self.subject = subject
         self.zone = zone
@@ -166,6 +191,10 @@ class EvidenceAssembler:
         self.transition_window_seconds = transition_window_seconds
         self.max_days_per_layer = max_days_per_layer
         self.unsealed: UnsealedReader = NoUnsealed() if unsealed is None else unsealed
+        # 语义树的关系表：没接时证据里没有「已成立的关系」那一节（不是"没有关系"，是没读）。
+        self.relations = relations
+        # 摆关系读数的最少次数 = 前向验证的门槛（组合根从 config.scene.relations 换算，与夜批同一个出处）
+        self.relation_minimum = relation_minimum
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
 
     def assemble(self, *, now: datetime | None = None) -> EvidencePack:
@@ -187,19 +216,47 @@ class EvidenceAssembler:
                 "now must be a timezone-aware datetime; a naive value would be read in the process time zone"
             )
         at = given.astimezone(self.zone)
-        cache = DayIndexCache(self.behavior_tree, subject=self.subject, calendar=self.calendar)
+        cache = DayIndexCache(self.behavior_tree, subject=self.subject, admits=admitted, calendar=self.calendar)
         moment = moment_at(at, slot_minutes=tree.slot_minutes, day_note=cache.day(at.date()).day_note)
         # 未封口从今天零点读到此刻：窗口内的进流，更早的只计入"今天做过"（与树上今天的行同一口径）。
+        unsealed = self.unsealed.rows(since=at.replace(hour=0, minute=0, second=0, microsecond=0), until=at)
         return assemble(
             tree,
             moment,
             cache,
             generation=published.generation,
-            unsealed=self.unsealed.rows(since=at.replace(hour=0, minute=0, second=0, microsecond=0), until=at),
+            unsealed=unsealed,
             half_width=self.half_width,
             window_days=self.window_days,
             transition_window_seconds=self.transition_window_seconds,
             max_days_per_layer=self.max_days_per_layer,
+            # 每次装配现读：词表每晚可能新增类、改名。
+            labels=self.class_labels(),
+            relations=self._present(moment, cache, unsealed, slot_minutes=tree.slot_minutes),
+        )
+
+    def _present(
+        self, moment: Moment, cache: DayIndexCache, unsealed: Sequence[UnsealedRow], *, slot_minutes: int
+    ) -> Mapping[str, tuple[RelationNote, ...]] | None:
+        if self.relations is None:
+            return None
+        try:
+            table = self.relations()
+        except ValueError as exc:
+            # 关系表或概念集损坏：硬拒，与读不了一代树同一个口径——缺一节证据而不报，判断者会以为"没有关系"。
+            raise ForesightError(f"the semantic-tree relations cannot be read: {exc}") from exc
+        # 同一条链的窗口就是树的转移窗（关系检验与预测树用同一个数），按槽算，与检验同一把尺
+        slot_seconds = 60 * slot_minutes
+        return present_relations(
+            table.relations,
+            table.concepts,
+            moment,
+            cache,
+            unsealed,
+            slot_minutes=slot_minutes,
+            window_slots=round(self.transition_window_seconds / slot_seconds),
+            minimum_antecedents=self.relation_minimum,
+            as_of=table.night,
         )
 
     def _pinned_generation(self) -> tuple[PublishedGeneration, PredictionTree]:
@@ -262,6 +319,8 @@ class JudgementRunner:
 
     async def run_once(self, *, now: datetime | None = None) -> JudgementRun:
         at = now if now is not None else self._clock()
+        # 未封口的链先归类（要调模型，所以在装配之前异步做）；装配时只读归好的
+        await self.assembler.unsealed.prepare(until=at)
         pack = await asyncio.to_thread(self.assembler.assemble, now=at)
         key = _reuse_key(pack)
         previous = self.last
@@ -403,14 +462,18 @@ def build_foresight_components(
     *,
     behavior_tree: BehaviorTree,
     store: PredictionTreeStore | None,
+    class_labels: Callable[[], Mapping[str, str]],
+    current_classes: Callable[[str], Sequence[str]],
+    vocabulary_migrating: Callable[[], bool],
     judge: Judge | None = None,
     structured_chat: StructuredChatClient | None = None,
     judgements: BehaviorJudgementStore | None = None,
     ledger: BehaviorReductionLedger | None = None,
-    kinds: BehaviorKindStore | None = None,
+    stamping: KindStamping | None = None,
     unsealed: UnsealedReader | None = None,
     facts: FactProvider | None = None,
     closed_days: Callable[[], Iterable[date]] | None = None,
+    relations: Callable[[], RelationTable] | None = None,
     observer: Observer | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> ForesightRuntimeComponents | None:
@@ -420,7 +483,7 @@ def build_foresight_components(
     这里是第二道——组合根拿到的部件本来就可能因为上游未启用而是 None。
 
     判断者二选一：注入一个 ``judge``（测试、DAY1 脚本），或给 ``structured_chat`` 由这里装
-    ``LLMJudge``。未封口的读法同理：给判断存储 + 消费账本 + 词表三份就装生产实现，或直接注入
+    ``LLMJudge``。未封口的读法同理：给判断存储 + 消费账本 + 白天归类三份就装生产实现，或直接注入
     一个 ``unsealed``；都不给就是显式的空实现。
     """
 
@@ -429,7 +492,7 @@ def build_foresight_components(
     if store is None:
         return None
     resolved_judge = _judge(config, judge=judge, structured_chat=structured_chat, clock=clock)
-    resolved_unsealed = _unsealed(unsealed=unsealed, judgements=judgements, ledger=ledger, kinds=kinds)
+    resolved_unsealed = _unsealed(unsealed=unsealed, judgements=judgements, ledger=ledger, stamping=stamping)
     tree_config = PredictionTreeConfig(**config.prediction.tree_parameters())
     zone = config.locale.zone()
     assembler = EvidenceAssembler(
@@ -445,7 +508,13 @@ def build_foresight_components(
         transition_window_seconds=tree_config.transition_window_seconds,
         window_days=config.foresight.window_days,
         max_days_per_layer=config.foresight.max_days_per_layer,
+        class_labels=class_labels,
         unsealed=resolved_unsealed,
+        # 语义树的关系表：缺省读本 Runtime 语义树根下的（夜批还没跑过就是空表，那一节不出现）。
+        relations=relations
+        if relations is not None
+        else SceneRelations(RelationStore(config.scene_root), ConceptStore(config.scene_root)),
+        relation_minimum=relation_config(config).thresholds.forward_min_antecedents,
         clock=clock,
     )
     ledger_store = ForesightLedgerStore(config.foresight_root)
@@ -461,6 +530,9 @@ def build_foresight_components(
         assembler,
         # 定稿日只有归约说了算；没接上时结算什么都不做，而不是拿别的口径凑一个。
         closed_days=closed_days if closed_days is not None else tuple,
+        # 承诺记的是说话时的类编号；结算按"这个编号现在对应哪些编号"认（词表拆改之后照样对得上）
+        current=current_classes,
+        migrating=vocabulary_migrating,
         observer=observer,
         clock=clock,
     )
@@ -506,22 +578,22 @@ def _unsealed(
     unsealed: UnsealedReader | None,
     judgements: BehaviorJudgementStore | None,
     ledger: BehaviorReductionLedger | None,
-    kinds: BehaviorKindStore | None,
+    stamping: KindStamping | None,
 ) -> UnsealedReader | None:
     """注入一个读口，或给三份存储装生产实现；都不给返回 None（装配器用显式的空实现）。"""
 
-    stores = (judgements, ledger, kinds)
+    stores = (judgements, ledger, stamping)
     if unsealed is not None and any(item is not None for item in stores):
-        raise ValueError("pass either an explicit unsealed reader or the judgement/ledger/kind stores, not both")
+        raise ValueError("pass either an explicit unsealed reader or the judgement/ledger/classifier sources, not both")
     if unsealed is not None:
         return unsealed
     if all(item is None for item in stores):
         return None
-    if judgements is None or ledger is None or kinds is None:
+    if judgements is None or ledger is None or stamping is None:
         raise ValueError(
-            "reading unsealed judgements needs the judgement store, the reduction ledger and the kind store"
+            "reading unsealed judgements needs the judgement store, the reduction ledger and the daytime classifier"
         )
-    return UnsealedFromJudgements(judgements, ledger, kinds)
+    return UnsealedFromJudgements(judgements, ledger, stamping)
 
 
 def _facts(facts: FactProvider | None) -> FactProvider:

@@ -46,8 +46,7 @@ def claims_from(
         if evidence is None:
             continue
         if any(
-            claim.kind_token == verdict.kind_token and claim.overlaps(verdict.window)
-            for claim in (*standing, *claims)
+            claim.kind_token == verdict.kind_token and claim.overlaps(verdict.window) for claim in (*standing, *claims)
         ):
             continue
         claims.append(_claim(pack, judgement, verdict, evidence, conditions, condition_keys, facts_version))
@@ -95,6 +94,8 @@ def _claim(
         basis=verdict.basis,
         situations=tuple(situations.values()),
         numbers=evidence.numbers,
+        relations=tuple(note.key for note in evidence.relations),
+        relation_sources=tuple(note.source for note in evidence.relations),
         conditions=conditions,
         condition_keys=condition_keys,
         facts_version=facts_version,

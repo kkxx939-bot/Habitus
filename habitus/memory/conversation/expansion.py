@@ -75,9 +75,7 @@ class ConversationSummaryExpander:
     def _walk(self, address, parent: ConversationRangeSummary, seen, reads):
         for reference in parent.source_refs:
             if reads[0] >= self.max_source_reads:
-                raise ConversationSummaryExpansionError(
-                    "Summary expansion exceeds max_source_reads"
-                )
+                raise ConversationSummaryExpansionError("Summary expansion exceeds max_source_reads")
             key = (reference.kind.value, reference.summary_id)
             if key in seen:
                 raise ConversationSummaryExpansionError("Summary source graph contains a cycle or duplicate")

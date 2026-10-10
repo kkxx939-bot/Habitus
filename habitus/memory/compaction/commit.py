@@ -68,7 +68,11 @@ class MemoryLifecycleCommitter:
         if candidate.address != source.address:
             raise ValueError("lifecycle field replacement cannot change memory identity")
         changed_fields = tuple(
-            sorted(name for name in set(source.fields) | set(candidate.fields) if source.fields.get(name) != candidate.fields.get(name))
+            sorted(
+                name
+                for name in set(source.fields) | set(candidate.fields)
+                if source.fields.get(name) != candidate.fields.get(name)
+            )
         )
         if not changed_fields:
             raise ValueError("lifecycle field replacement requires changed business fields")
@@ -86,9 +90,7 @@ class MemoryLifecycleCommitter:
                 ),
             ),
         )
-        identities = MemoryFinalIdentityMap(
-            (MemoryFinalIdentity(1, MemoryNodeDisposition.UPDATE, parsed, parsed),)
-        )
+        identities = MemoryFinalIdentityMap((MemoryFinalIdentity(1, MemoryNodeDisposition.UPDATE, parsed, parsed),))
         relation_plan = _empty_relation_plan()
         result = self.transaction.commit(MemoryCommitPlan.build(mutation_plan, identities, relation_plan))
         current = self.snapshot_reader.read(parsed)
@@ -110,9 +112,7 @@ class MemoryLifecycleCommitter:
             MemoryMutationReadSet(known, _empty_batch()),
             (),
         )
-        identities = MemoryFinalIdentityMap(
-            (MemoryFinalIdentity(1, MemoryNodeDisposition.DELETE, parsed, None),)
-        )
+        identities = MemoryFinalIdentityMap((MemoryFinalIdentity(1, MemoryNodeDisposition.DELETE, parsed, None),))
         relation_read_set = self.relation_loader.load(known, identities, ())
         relation_plan = self.relation_planner.plan(identities, (), relation_read_set)
         return self.transaction.commit(MemoryCommitPlan.build(mutation_plan, identities, relation_plan))

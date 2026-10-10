@@ -82,7 +82,7 @@ class LLMJudge:
         if not isinstance(pack, EvidencePack):
             raise TypeError("pack must be an EvidencePack")
         request = build_request(render_pack(pack))
-        schema = judge_json_schema([item.kind_token for item in pack.expanded])
+        schema = judge_json_schema([pack.title(item.kind_token) for item in pack.expanded])
         judged_at = self._clock()
         response = None
         for attempt in range(self.config.transient_retries + 1):

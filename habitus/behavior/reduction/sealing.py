@@ -60,11 +60,7 @@ def sealed_chain_indexes(assembly: ChainAssembly, horizon: datetime) -> tuple[in
     的边不在这里出现（那些判断已不在待归约集合中）。
     """
 
-    sealed = {
-        index
-        for index, chain in enumerate(assembly.chains)
-        if _sealed(chain, horizon)
-    }
+    sealed = {index for index, chain in enumerate(assembly.chains) if _sealed(chain, horizon)}
     return closed_under_links(assembly, sealed)
 
 
@@ -88,9 +84,7 @@ def closed_under_links(assembly: ChainAssembly, candidates: set[int]) -> tuple[i
     while changed:
         changed = False
         for index in tuple(kept):
-            targets_ready = all(
-                target in kept for _kind, target in assembly.cross_links_of(index)
-            )
+            targets_ready = all(target in kept for _kind, target in assembly.cross_links_of(index))
             hosts_ready = all(host in kept for host in concurrent_hosts.get(index, ()))
             if not (targets_ready and hosts_ready):
                 kept.discard(index)
@@ -98,9 +92,7 @@ def closed_under_links(assembly: ChainAssembly, candidates: set[int]) -> tuple[i
     return tuple(sorted(kept))
 
 
-def sealed_gaps(
-    gaps: Sequence[ReducibleJudgement], horizon: datetime
-) -> tuple[ReducibleJudgement, ...]:
+def sealed_gaps(gaps: Sequence[ReducibleJudgement], horizon: datetime) -> tuple[ReducibleJudgement, ...]:
     """已封口的没读懂段：出窗前它仍可能被 supersedes 认领（后来读懂了），必须等。"""
 
     return tuple(

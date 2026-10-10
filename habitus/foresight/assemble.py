@@ -13,8 +13,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime
 from types import MappingProxyType
 
@@ -23,6 +23,7 @@ from habitus.foresight.context import CandidateBackground, candidate_background
 from habitus.foresight.errors import ForesightError
 from habitus.foresight.model import LAYER_NAMES, CandidateNumbers, Moment, Provenance, UnsealedRow
 from habitus.foresight.numbers import CellIndex, candidate_numbers, provenance
+from habitus.foresight.relations import RelationNote
 from habitus.prediction.model import PredictionTree, SlotKey
 from habitus.prediction.query import slot_outlook
 from habitus.scene.views import DayIndexCache
@@ -40,6 +41,8 @@ class CandidateEvidence:
     provenance: Provenance
     expanded: bool
     background: CandidateBackground
+    #: 此刻在场的已成立关系（语义树的，``foresight.relations``）；没有就是空。
+    relations: tuple[RelationNote, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind_token, str) or not self.kind_token:
@@ -58,8 +61,11 @@ class EvidencePack:
     moment: Moment
     now: NowScene
     candidates: tuple[CandidateEvidence, ...]
+    #: 类编号 → 类名（组合根从词表读）。给模型看的标题、"今天做过"一律用类名，编号只作机器身份（第二轮评审 C7）。
+    labels: Mapping[str, str]
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "labels", MappingProxyType(dict(self.labels)))
         for name in ("generation", "config_digest"):
             if not isinstance(getattr(self, name), str) or not getattr(self, name):
                 raise ForesightError(f"evidence pack {name} must be non-empty text")
@@ -85,6 +91,20 @@ class EvidencePack:
     def named_only(self) -> tuple[CandidateEvidence, ...]:
         return tuple(item for item in self.candidates if not item.expanded)
 
+    def title(self, kind_token: str) -> str:
+        """给模型看的名字：类名；两个候选同名（两条 lane 各有一个「调研」）时带上编号区分；词表里没有的原样给编号。"""
+
+        name = self.labels.get(kind_token)
+        if name is None:
+            return kind_token
+        twins = [item.kind_token for item in self.candidates if self.labels.get(item.kind_token) == name]
+        return name if len(twins) <= 1 else f"{name}（{kind_token}）"
+
+    def kind_of(self, title: str) -> str | None:
+        """模型照抄的标题 → 候选的编号；不是任何候选的标题时为 None。"""
+
+        return next((item.kind_token for item in self.candidates if self.title(item.kind_token) == title), None)
+
 
 def moment_at(at: datetime, *, slot_minutes: int, day_note: str | None = None) -> Moment:
     """把一个**主体本地时刻**落到钟面上。槽与周几走树的映射，不另写一份。"""
@@ -106,8 +126,11 @@ def assemble(
     window_days: int,
     transition_window_seconds: float,
     max_days_per_layer: int,
+    labels: Mapping[str, str],
+    relations: Mapping[str, tuple[RelationNote, ...]] | None = None,
 ) -> EvidencePack:
-    """这一刻的证据包。"""
+    """这一刻的证据包。``labels`` 是类编号 → 类名（组合根从词表读）；``relations`` 是候选 → 此刻在场的已成立关系
+    （组合根用 ``foresight.relations.present_relations`` 从语义树的关系表算好交进来；没接语义树就是空）。"""
 
     if not isinstance(tree, PredictionTree):
         raise ForesightError("tree must be a PredictionTree")
@@ -129,6 +152,8 @@ def assemble(
         )
         for candidate in slot_outlook(tree, slot).candidates
     )
+    notes = relations or {}
+    candidates = tuple(replace(item, relations=notes.get(item.kind_token, ())) for item in candidates)
     return EvidencePack(
         generation=generation,
         config_digest=tree.config_digest,
@@ -136,6 +161,7 @@ def assemble(
         moment=moment,
         now=scene,
         candidates=tuple(sorted(candidates, key=lambda item: item.kind_token)),
+        labels=labels,
     )
 
 

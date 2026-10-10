@@ -47,9 +47,7 @@ def derive(
                 continue
             # 用**独立的**复发证据窗，不用钟面的 τ：月频行为在 τ=60 下有效间隔样本
             # 封顶 3.4 个，分位数永远在噪声里——复发本来就是为低频行为设的，证据窗必须更长。
-            weight = decay_weight(
-                float((reference - following.day).days), config.recurrence_half_life_days
-            )
+            weight = decay_weight(float((reference - following.day).days), config.recurrence_half_life_days)
             samples.append((interval, weight))
         computed = quantiles(samples)
         if computed is not None:

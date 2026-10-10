@@ -7,8 +7,8 @@
 **源是这个概念自己的命中历史，不是预测树**。两处理由：
 
 1. 要**两个窗**（近期 / 历来，2026-09-27 裁定），而一棵树是按一套配置在一段历史上建出来的，给不出两个窗；
-2. 常态是**按概念**问的（「就寝」的常态时刻），而树的键是 kind；概念跨哪几个 kind 由命中记录说，
-   那就直接在命中记录上算，省掉一次转译。时长更是只有命中记录有（树上没有时长这个量）。
+2. 常态是**按概念**问的（「就寝」的常态时刻、「晚睡」那几次的常态），细分概念在树上没有自己的曲线，
+   那就直接在命中记录上算。时长更是只有命中记录有（树上没有时长这个量）。
 
 命中记录本来就带着 ``started_at``（URI 里）与 ``last_observed_at``，所以这一层不读行为树。
 
@@ -22,7 +22,7 @@
 再取各点相对参照的偏移（落在 ±12 小时内）的中位数，加回参照——对"跨午夜的就寝"这一类才说得通。
 
 **一天多次的行为按峰各算**（2026-10-01，评审 C-15 / R3-26）：三餐的常态时刻取一个中位数是 12:00——谁都不在那个点吃饭。
-有节律的概念把记录先归到它典型一天的峰（``rhythms`` 给的，与账本的窗口同一个定义，含同样的容差），每个峰一份近期 / 历来
+有节律的概念把记录先归到它典型一天的峰（``rhythms`` 给的，含预测树池化的容差），每个峰一份近期 / 历来
 常态；``baseline_for`` 按这条 occurrence 落在哪个峰交那一份，峰外的（``0``）与没节律的概念用不分峰的那一份。
 **样本下限按独立天数**，不按条数：同一天命中三次只算攒了一天。
 """
@@ -64,8 +64,7 @@ DRIFT_MINUTES = 60
 class BaselineDrift:
     """一个概念的一种统计在两个窗上的差：近期 − 历来（时刻按环形差，分钟）。
 
-    这是**信号**，不是判据（判据只比近期）：它回答"他的就寝在往后漂，漂了多少"，进 profile 的作息骨架，
-    并且是闭环的第二个触发源（漂了就去问触点③ "什么导致的"）。
+    这是**信号**，不是判据（判据只比近期）：它回答"他的就寝在往后漂，漂了多少"，进 profile 的作息骨架。
     """
 
     concept: str
@@ -121,7 +120,11 @@ class BaselineSnapshot:
     def __post_init__(self) -> None:
         object.__setattr__(self, "values", MappingProxyType(dict(self.values)))
         object.__setattr__(self, "samples", MappingProxyType(dict(self.samples)))
-        object.__setattr__(self, "by_peak", MappingProxyType({key: MappingProxyType(dict(table)) for key, table in self.by_peak.items()}))
+        object.__setattr__(
+            self,
+            "by_peak",
+            MappingProxyType({key: MappingProxyType(dict(table)) for key, table in self.by_peak.items()}),
+        )
         object.__setattr__(self, "peaks", MappingProxyType(dict(self.peaks)))
 
     def values_at(self, minute_of_day: int) -> Mapping[str, str]:
@@ -148,13 +151,17 @@ def declared_keys(concepts: ConceptSet) -> tuple[BaselineKey, ...]:
 
 
 def peak_of(rhythm: Rhythm | None, minute_of_day: int, *, slack_minutes: int = 0) -> int:
-    """钟面上这一刻落在这个概念的第几个峰（含容差）；峰外或没节律 → ``UNSPLIT``。与账本窗口的判定同一套算法。"""
+    """钟面上这一刻落在这个概念的第几个峰（含容差）；峰外或没节律 → ``UNSPLIT``。"""
 
     if rhythm is None:
         return UNSPLIT
     spans = widen_windows([(peak.start_minute, peak.end_minute) for peak in rhythm.peaks], slack_minutes)
     for peak, (start, end) in zip(rhythm.peaks, spans, strict=True):
-        if start <= minute_of_day < end or start <= minute_of_day + MINUTES_PER_DAY < end or start <= minute_of_day - MINUTES_PER_DAY < end:
+        if (
+            start <= minute_of_day < end
+            or start <= minute_of_day + MINUTES_PER_DAY < end
+            or start <= minute_of_day - MINUTES_PER_DAY < end
+        ):
             return peak.ordinal
     return UNSPLIT
 
@@ -179,7 +186,7 @@ def baseline_table(
 ) -> BaselineSnapshot:
     """算出 ``day`` 那天该用的常态表。``records`` 是 ``day`` **之前**的命中记录（含不含都按日期筛）。
 
-    沿 parent 链聚合：命中「修改代码」也算「写代码」一次，所以上级概念的常态有样本可算。
+    记录的基础概念从类编号现读，并按成员类聚合到汇总概念：「修改代码」的一条也算「写代码」一次，所以汇总概念的常态有样本可算。
     ``rhythms`` 给了就对有节律的概念按峰各算一份（键是概念名）；``min_samples`` 数的是**独立天数**。
     """
 
@@ -197,7 +204,8 @@ def baseline_table(
     shadow = tuple(
         BaselineKey(concept=key.concept, statistic=key.statistic, window=BaselineWindow.ALL)
         for key in keys
-        if key.window is BaselineWindow.RECENT and BaselineKey(concept=key.concept, statistic=key.statistic, window=BaselineWindow.ALL) not in keys
+        if key.window is BaselineWindow.RECENT
+        and BaselineKey(concept=key.concept, statistic=key.statistic, window=BaselineWindow.ALL) not in keys
     )
     cutoff = day - timedelta(days=recent_days)
     split = {name: rhythm for name, rhythm in (rhythms or {}).items() if name in wanted and rhythm.peaks}
@@ -217,13 +225,15 @@ def baseline_table(
             for window in windows:
                 for stratum in strata:
                     samples.setdefault((concept, window, stratum), []).append(point)
-    return _snapshot(keys, samples, day=day, min_samples=min_samples, shadow=shadow, rhythms=split, slack_minutes=slack_minutes)
+    return _snapshot(
+        keys, samples, day=day, min_samples=min_samples, shadow=shadow, rhythms=split, slack_minutes=slack_minutes
+    )
 
 
 def _concepts_of(record: ConceptHits, concepts: ConceptSet, wanted: Mapping[str, str]) -> tuple[str, ...]:
-    """这条记录该记到哪些被声明过的概念名下：命中的叶子 + 它们的祖先，取交集。"""
+    """这条记录该记到哪些被声明过的概念名下：基础概念 + 细分概念 + 它们所在的汇总概念，取交集。"""
 
-    names = [hit.concept for hit in record.hits if hit.concept in concepts]
+    names = [identity for identity in record.graded_hits if identity in concepts]
     if not names:
         return ()
     closed = concepts.with_ancestors(names)
@@ -266,10 +276,19 @@ def _snapshot(
         for stratum in sorted(stratum for concept, stratum in strata if concept == key.concept):
             points = samples.get((key.concept, key.window, stratum), ())
             if _days_of(points) >= min_samples:
-                medians[(key.concept, key.statistic, key.window, stratum)] = (_median_of(points, key.statistic), _days_of(points))
+                medians[(key.concept, key.statistic, key.window, stratum)] = (
+                    _median_of(points, key.statistic),
+                    _days_of(points),
+                )
     return BaselineSnapshot(
-        day=day, values=values, samples=counts, missing=tuple(missing), drifts=_drifts(medians),
-        by_peak=by_peak, peaks=rhythms or {}, slack_minutes=slack_minutes,
+        day=day,
+        values=values,
+        samples=counts,
+        missing=tuple(missing),
+        drifts=_drifts(medians),
+        by_peak=by_peak,
+        peaks=rhythms or {},
+        slack_minutes=slack_minutes,
     )
 
 

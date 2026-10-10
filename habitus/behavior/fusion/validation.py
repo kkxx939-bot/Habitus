@@ -54,9 +54,7 @@ def validate_judgement_batch(
     _require_ordering(batch)
 
 
-def _require_known_fragments(
-    batch: BehaviorJudgementBatch, by_no: Mapping[int, BehaviorObservation]
-) -> None:
+def _require_known_fragments(batch: BehaviorJudgementBatch, by_no: Mapping[int, BehaviorObservation]) -> None:
     """任何引用都必须落在本批片段编号内；编造语义会在这里现形。"""
 
     referenced: set[int] = set()
@@ -69,9 +67,7 @@ def _require_known_fragments(
         raise BehaviorFusionError(f"judgements reference fragments outside this segment: {unknown}")
 
 
-def _require_subject_present(
-    batch: BehaviorJudgementBatch, by_no: Mapping[int, BehaviorObservation]
-) -> None:
+def _require_subject_present(batch: BehaviorJudgementBatch, by_no: Mapping[int, BehaviorObservation]) -> None:
     """每个主体都必须在它覆盖的片段里出现过——否则这条判断说的是观测里没有的人。
 
     装配层拿到 ``participants_by_no`` 时已在那里降级（剔名 / 整条降为没读懂），这里是后置断言：
@@ -81,24 +77,17 @@ def _require_subject_present(
     for judgement in batch.judgements:
         if not judgement.subjects:
             continue
-        available = {
-            participant
-            for fragment_no in judgement.covers
-            for participant in by_no[fragment_no].participants
-        }
+        available = {participant for fragment_no in judgement.covers for participant in by_no[fragment_no].participants}
         unknown = sorted(set(judgement.subjects) - available)
         if unknown and len(unknown) < len(judgement.subjects):
             raise BehaviorFusionError(
-                f"judgement[{judgement.judgement_no}] names subjects absent from its fragments: "
-                f"{unknown}"
+                f"judgement[{judgement.judgement_no}] names subjects absent from its fragments: {unknown}"
             )
         # 主体**全部**不在场：这是"观测里没有的人做的事"，对被跟踪主体而言是旁人之事——回执按
         # out_of_scope 记、不落盘（装配层已留 subject_absent 信号），不在这里硬拒。
 
 
-def _require_one_judgement_per_start(
-    batch: BehaviorJudgementBatch, by_no: Mapping[int, BehaviorObservation]
-) -> None:
+def _require_one_judgement_per_start(batch: BehaviorJudgementBatch, by_no: Mapping[int, BehaviorObservation]) -> None:
     """同一主体、同一时刻开始的同名行为必须是同一条判断——判重只在这一层解决。
 
     "同一时刻"取覆盖片段里最早的 ``occurred_at``，正是归约后行为树地址的 ``started_at``。

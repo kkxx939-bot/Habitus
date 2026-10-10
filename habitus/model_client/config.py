@@ -95,6 +95,7 @@ class ProviderConfig:
             raise ValueError(f"model extra_body cannot override route identity: {sorted(reserved)}")
         object.__setattr__(self, "extra_body", extra_body)
 
+
 @dataclass(frozen=True)
 class ChatModelConfig:
     """对话生成能力配置；供应商专用字段只能放入 route.extra_body。"""
@@ -124,15 +125,14 @@ class ChatModelConfig:
             if self.max_output_tokens >= self.context_window_tokens:
                 raise ValueError("chat max_output_tokens must be below context_window_tokens")
         if self.structured_output_mode not in {"none", "json_object", "json_schema"}:
-            raise ValueError(
-                "chat structured_output_mode must be none, json_object or json_schema"
-            )
+            raise ValueError("chat structured_output_mode must be none, json_object or json_schema")
         if not isinstance(self.reasoning, bool):
             raise TypeError("chat reasoning must be boolean")
 
     @property
     def capability(self) -> Literal["chat"]:
         return "chat"
+
 
 @dataclass(frozen=True)
 class EmbeddingModelConfig:
@@ -168,6 +168,7 @@ class EmbeddingModelConfig:
     @property
     def capability(self) -> Literal["embedding"]:
         return "embedding"
+
 
 @dataclass(frozen=True)
 class RerankModelConfig:

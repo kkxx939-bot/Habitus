@@ -61,7 +61,7 @@ def _assemble(parsed: object, pack: EvidencePack, *, judged_at: datetime, versio
         raise JudgeAssemblyError("judgement output must carry a verdicts array")
     expanded = {item.kind_token: item for item in pack.expanded}
     signals = _Signals()
-    entries = _entries_by_kind(raw, expanded, signals)
+    entries = _entries_by_kind(raw, pack, expanded, signals)
     if expanded and not entries:
         raise JudgeAssemblyError("judgement output says nothing about any candidate in the pack")
     verdicts = []
@@ -88,18 +88,19 @@ def _assemble(parsed: object, pack: EvidencePack, *, judged_at: datetime, versio
 
 
 def _entries_by_kind(
-    raw: list[Any], expanded: Mapping[str, CandidateEvidence], signals: _Signals
+    raw: list[Any], pack: EvidencePack, expanded: Mapping[str, CandidateEvidence], signals: _Signals
 ) -> dict[str, Mapping[str, Any]]:
-    """每个摊开的候选至多一条：不认识的名字丢、重复的丢后来的。"""
+    """每个摊开的候选至多一条：模型照抄的是标题（类名），换回编号；不认识的名字丢、重复的丢后来的。"""
 
     entries: dict[str, Mapping[str, Any]] = {}
     for item in raw:
         if not isinstance(item, Mapping):
             signals.add("verdict_dropped: malformed entry")
             continue
-        kind = item.get("kind_token")
-        if not isinstance(kind, str) or kind not in expanded:
-            signals.add(f"verdict_dropped: {kind!r} is not an expanded candidate in this pack")
+        title = item.get("kind_token")
+        kind = pack.kind_of(title) if isinstance(title, str) else None
+        if kind is None or kind not in expanded:
+            signals.add(f"verdict_dropped: {title!r} is not an expanded candidate in this pack")
             continue
         if kind in entries:
             signals.add(f"verdict_dropped: {kind} appears more than once")

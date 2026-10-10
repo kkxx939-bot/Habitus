@@ -3,7 +3,7 @@
 预测侧是可选启用的：``config.prediction.enabled`` 为假时组合根完全跳过本模块。启用后接成的
 是一条极短的链——
 
-    行为树（已封口）→ 快照 → 整棵重建 → 两阶段发布 → 清理老代
+    行为树 → 第 N 晚的事件序列（只含 N 之前、已封口的日子）→ 快照 → 整棵重建 → 两阶段发布 → 清理老代
 
 **全程零 LLM、零语义**：本模块不接 ``StructuredChatClient``，也不碰 memory；预测算法与执行层
 （含那两个受控的在线模型调用点）都在本层之外，见 ``TODO(PRED-DOWNSTREAM-001)``。
@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
@@ -29,6 +29,8 @@ from habitus.prediction import builder, source
 from habitus.prediction.config import PredictionTreeConfig
 from habitus.prediction.store import PredictionTreeStore, PublishedGeneration
 from habitus.runtime.resident import ResidentWorker
+from habitus.series import EventSeries
+from habitus.series.reader import read_series
 
 
 @dataclass(frozen=True)
@@ -52,9 +54,12 @@ class PredictionRuntimeComponents:
 
 
 class PredictionRebuilder:
-    """一次全量重建：读行为树 → 建树 → 发布。
+    """一次全量重建：读第 N 晚的事件序列 → 建树 → 发布。
 
-    没有增量路径，也不打算有：重建成本低，而增量会让口径漂移（kinds 词表变了就要用新口径
+    **防前视**（语义树新方案第四节）：第 N 晚（N = 主体所在地的"今天"）只用 N 之前的日子建树，衰减的基准日是
+    N 的前一天（最后一个封口的日子）。今天还没过完，算进来就是把"今天剩下的时段什么都没做"当成了观测。
+
+    没有增量路径，也不打算有：重建成本低，而增量会让口径漂移（词表变了就要用新口径
     重数历史）。行为树上一条 occurrence 都没有时不发布——发布一棵空树只会让读侧把"还没有
     数据"误当成"什么都不会发生"。
     """
@@ -83,46 +88,44 @@ class PredictionRebuilder:
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
 
     def run_once(self) -> PublishedGeneration | None:
-        """同步跑一趟；行为树还没有可用记录时返回 None。"""
+        """同步跑一趟：读今晚的序列再建树。行为树还没有可用记录时返回 None。"""
 
-        snapshot = source.read(self.behavior_tree)
-        if not snapshot.actions:
-            # 只有观测空白、一条 occurrence 都没有，是上游刚接入时的正常状态。
-            # 这时候发布出去的是一棵没有任何动作的树，读侧对任何动作都会拿到 0.0 ——
-            # 正好把"还没有数据"说成"什么都不会发生"。守门必须看 actions 而不是 latest_day
-            # （后者把 gap 的日期也算进去了）。
-            return None
-        reference = self._reference(snapshot.latest_day)
-        if reference is None:
-            return None
-        tree = builder.build(
-            snapshot, config=self.config, reference=reference, built_at=self._clock()
-        )
-        return self.store.publish(tree)
+        return self.build_from(read_series(self.behavior_tree, cutoff=self.tonight()))
 
-    def _reference(self, latest_day: date | None) -> date | None:
-        """衰减的基准日取"今天"，而不是最后一条记录那天。
+    def tonight(self) -> date:
+        """第几晚：主体所在地的"今天"（``config.locale.timezone``），不看进程默认时区——差一天，
+        整棵树的衰减权重就整体挪一天，而每个数字看起来都还是对的。"""
 
-        取最后一条记录那天，停记一个月之后算出来的还是一个月前的热度——衰减就白做了。
-        整棵树都没有记录时没有基准日可言，返回 None。
+        return self._clock().astimezone(self.zone).date()
 
-        "今天"按**主体所在地**算（``config.locale.timezone``），不看进程默认时区：基准日错一天，
-        整棵树的衰减权重就整体挪一天，而每个数字看起来都还是对的。
+    def build_from(self, series: EventSeries) -> PublishedGeneration | None:
+        """用一份已经读好的序列建树发布（回放、回测按日截一份序列交进来，不重读行为树）。
+
+        衰减的基准日取截止日前一天，而不是最后一条记录那天：取后者的话停记一个月之后算出来的还是一个月前的热度。
         """
 
-        if latest_day is None:
+        snapshot = source.snapshot_of(series)
+        if not snapshot.actions:
+            # 只有观测空白、一条 occurrence 都没有，是上游刚接入时的正常状态。发布出去的是一棵没有任何动作的树，
+            # 读侧对任何动作都会拿到 0.0——正好把"还没有数据"说成"什么都不会发生"。
             return None
-        return max(latest_day, self._clock().astimezone(self.zone).date())
+        tree = builder.build(snapshot, config=self.config, reference=series.last_day, built_at=self._clock())
+        return self.store.publish(tree)
 
 
 def _stage_attributes(outcome: object) -> dict[str, str | int | float | bool]:
-    """把后置阶段的结果摊平成观测属性。不认识的结果就只说"跑过了"，不猜。"""
+    """把后置阶段的结果（一个 dataclass：结算报告、夜批报告……）摊平成观测属性：数值原样，列表 / 元组记条数。
+    不按字段名认（以前认的是旧语义树的字段，新夜批报告挂上去就只剩一句"跑过了"；第四轮评审 E10）。不是 dataclass 的不猜。"""
 
-    counts = ("associated", "open", "skipped", "deferred", "failed", "blocked", "signals")
-    if not all(hasattr(outcome, name) for name in counts):
+    if not is_dataclass(outcome) or isinstance(outcome, type):
         return {}
-    attributes: dict[str, str | int | float | bool] = {name: len(getattr(outcome, name)) for name in counts}
-    attributes["model_calls"] = int(getattr(outcome, "model_calls", 0))
+    attributes: dict[str, str | int | float | bool] = {}
+    for item in fields(outcome):
+        value = getattr(outcome, item.name)
+        if isinstance(value, bool | int | float):
+            attributes[item.name] = value
+        elif isinstance(value, tuple | list):
+            attributes[item.name] = len(value)
     return attributes
 
 
@@ -146,7 +149,7 @@ class PredictionRebuildWorker(ResidentWorker):
         after_rebuild: Callable[[], Awaitable[object]] | None = None,
     ) -> None:
         """``after_rebuild`` 是夜批里排在重建**之后**的阶段（组合根注入，本模块不知道它是什么
-        ——现状是承诺结算；新语义树的映射 → 开承诺 → 结算 → 投影随后面几刀接进同一个钩子）。
+        ——现状是承诺结算；新语义树的夜批（``runtime.nightly.Nightly``）在第 11 步接常驻 worker 时接进来）。
 
         排在重建之后，因为后面几拍要向这一代树要对照期望，必须等树落地。该阶段失败只记观测
         事件，不阻断下一轮重建——派生层不做级联。
@@ -231,12 +234,8 @@ def build_prediction_components(
     if not prediction_config.enabled:
         return None
     tree_config = PredictionTreeConfig(**prediction_config.tree_parameters())
-    store = PredictionTreeStore(
-        config.prediction_root, retained_generations=tree_config.published_generations
-    )
-    rebuilder = PredictionRebuilder(
-        behavior_tree, store, config=tree_config, zone=config.locale.zone(), clock=clock
-    )
+    store = PredictionTreeStore(config.prediction_root, retained_generations=tree_config.published_generations)
+    rebuilder = PredictionRebuilder(behavior_tree, store, config=tree_config, zone=config.locale.zone(), clock=clock)
     worker = PredictionRebuildWorker(
         rebuilder,
         interval_seconds=tree_config.rebuild_interval_seconds,
@@ -244,9 +243,7 @@ def build_prediction_components(
         observer=observer,
         after_rebuild=after_rebuild,
     )
-    return PredictionRuntimeComponents(
-        tree_config=tree_config, store=store, rebuilder=rebuilder, worker=worker
-    )
+    return PredictionRuntimeComponents(tree_config=tree_config, store=store, rebuilder=rebuilder, worker=worker)
 
 
 __all__ = [

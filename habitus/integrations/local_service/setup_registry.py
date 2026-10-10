@@ -60,9 +60,7 @@ class SetupField:
         if self.kind not in {"text", "required_text"} and self.forbidden_fragments:
             raise ValueError("only text setup fields may reject placeholder fragments")
         if self.kind == "positive_int" and (
-            isinstance(self.default, bool)
-            or not isinstance(self.default, int)
-            or self.default <= 0
+            isinstance(self.default, bool) or not isinstance(self.default, int) or self.default <= 0
         ):
             raise ValueError("positive integer setup field requires a positive default")
 
@@ -188,9 +186,7 @@ class SetupRegistry:
             raise TypeError("registration must be AdapterProductRegistration")
         key = (registration.capability, registration.adapter)
         if key in self._adapters:
-            raise ValueError(
-                f"setup adapter is already registered: {registration.capability}/{registration.adapter}"
-            )
+            raise ValueError(f"setup adapter is already registered: {registration.capability}/{registration.adapter}")
         self._adapters[key] = registration
 
     def profiles(
@@ -213,13 +209,7 @@ class SetupRegistry:
             raise ValueError(f"setup profile is not registered: {capability}/{profile_id}") from exc
 
     def registered_adapters(self, capability: SetupCapability) -> tuple[str, ...]:
-        return tuple(
-            sorted(
-                adapter
-                for (item_capability, adapter) in self._adapters
-                if item_capability == capability
-            )
-        )
+        return tuple(sorted(adapter for (item_capability, adapter) in self._adapters if item_capability == capability))
 
     def configured_adapters(
         self,
@@ -234,22 +224,16 @@ class SetupRegistry:
 
     def identify(self, capability: SetupCapability, document: Mapping[str, object]) -> SetupProfile:
         matches = tuple(
-            profile
-            for profile in self.profiles(capability, include_unselectable=True)
-            if profile.matches(document)
+            profile for profile in self.profiles(capability, include_unselectable=True) if profile.matches(document)
         )
         if not matches:
             adapter = _read_path(document, "route.adapter", missing="")
-            raise ValueError(
-                f"no setup profile is registered for {capability} adapter/configuration: {adapter}"
-            )
+            raise ValueError(f"no setup profile is registered for {capability} adapter/configuration: {adapter}")
         specificity = max(len(profile.match) for profile in matches)
         preferred = tuple(profile for profile in matches if len(profile.match) == specificity)
         if len(preferred) != 1:
             identifiers = ", ".join(sorted(profile.profile_id for profile in preferred))
-            raise ValueError(
-                f"ambiguous setup profiles for {capability}: {identifiers}"
-            )
+            raise ValueError(f"ambiguous setup profiles for {capability}: {identifiers}")
         return preferred[0]
 
     def required_credentials(self, config: HabitusConfig) -> dict[str, set[str]]:
@@ -280,9 +264,7 @@ class SetupRegistry:
         adapter = str(route.get("adapter", ""))
         registration = self._adapter(capability, adapter)
         if reference:
-            required.setdefault(reference, set()).update(
-                registration.credential_fields(document)
-            )
+            required.setdefault(reference, set()).update(registration.credential_fields(document))
 
     def dependency_modules(self, config: HabitusConfig) -> tuple[str, ...]:
         modules = {"fastapi", "uvicorn", "json_repair", "jsonschema"}
@@ -313,9 +295,7 @@ class SetupRegistry:
         try:
             return self._adapters[(capability, adapter)]
         except KeyError as exc:
-            raise ValueError(
-                f"product adapter is not registered: {capability}/{adapter}"
-            ) from exc
+            raise ValueError(f"product adapter is not registered: {capability}/{adapter}") from exc
 
 
 _MISSING = object()
@@ -356,9 +336,7 @@ def build_builtin_setup_registry() -> SetupRegistry:
 
 
 def _builtin_profiles() -> tuple[SetupProfile, ...]:
-    qwen_instruction = (
-        "Given a web search query, retrieve relevant passages that answer the query."
-    )
+    qwen_instruction = "Given a web search query, retrieve relevant passages that answer the query."
     return (
         SetupProfile(
             "chat.deepseek",
@@ -664,7 +642,12 @@ def _vikingdb_profile(
                 "conversation_summaries",
             ),
         ),
-        replace_paths=("memory.options", "summary.options", "memory.route.extra_headers", "summary.route.extra_headers"),
+        replace_paths=(
+            "memory.options",
+            "summary.options",
+            "memory.route.extra_headers",
+            "summary.route.extra_headers",
+        ),
     )
 
 
@@ -726,6 +709,7 @@ def _validate_vikingdb(config: HabitusConfig) -> None:
     for vector, requirements in pairs:
         adapter_config = VikingDBVectorStoreConfig.from_mapping(vector.options)
         adapter_config.validate_requirements(requirements, vector.route)
+
 
 def _active_adapter_documents(
     config: HabitusConfig,

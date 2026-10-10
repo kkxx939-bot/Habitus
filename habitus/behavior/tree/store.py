@@ -163,13 +163,15 @@ class BehaviorTree:
             if current.fields.get(name) != document.fields.get(name)
         }
         if changed - {"kind_token"}:
-            raise BehaviorTreeConflictError(
-                f"behavior L2 replace may only change kind_token, not {sorted(changed)}"
-            )
+            raise BehaviorTreeConflictError(f"behavior L2 replace may only change kind_token, not {sorted(changed)}")
         if current.links != document.links:
             raise BehaviorTreeConflictError("behavior L2 replace cannot change links")
         meta, prior = document.metadata, current.metadata
-        if meta.revision != prior.revision + 1 or meta.created_at != prior.created_at or meta.updated_at < prior.updated_at:
+        if (
+            meta.revision != prior.revision + 1
+            or meta.created_at != prior.created_at
+            or meta.updated_at < prior.updated_at
+        ):
             raise BehaviorTreeConflictError("behavior L2 replace must advance the revision in place")
         encoded = self._document_codec.encode(document).encode("utf-8")
         self.document_config.validate_body(document.markdown_body)
@@ -236,9 +238,7 @@ class BehaviorTree:
             try:
                 addresses.append(BehaviorAddress.from_identity(resolved_kind, occurred_on, stem))
             except (TypeError, ValueError) as exc:
-                raise BehaviorTreeIntegrityError(
-                    "behavior leaf contains an invalid timestamp identity"
-                ) from exc
+                raise BehaviorTreeIntegrityError("behavior leaf contains an invalid timestamp identity") from exc
         return tuple(addresses)
 
     def read_day(self, kind: BehaviorKind, occurred_on: date) -> tuple[BehaviorDocument, ...]:

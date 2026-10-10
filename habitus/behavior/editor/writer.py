@@ -147,8 +147,8 @@ class BehaviorDocumentWriter:
         """把一条 occurrence 的 ``kind_token`` 改成 ``token``：与发布同一条通道（同一 codec、同一把
         文档锁、同样的读回校验），只是走 ``tree.replace`` 而不是 ``create``。
 
-        用途只有一个：词表把两类并成一类之后，树上旧 token 的 occurrence 重打为新 token（原始名、
-        地址、链接、语义面全部不动）。正文渲染含类型，所以这一天的概览 digest 会变、下次刷新重生成。
+        用途只有一个：词表迁移（每晚新增、拆分、合并）把树上 occurrence 重打为新编号（原始名、
+        地址、链接、语义面全部不动）。正文不含编号（裁定 19），所以这一天的概览 digest 不变、不触发摘要重写。
         """
 
         uri = BehaviorURI.from_address(address)
@@ -164,9 +164,7 @@ class BehaviorDocumentWriter:
                 revision=current.metadata.revision + 1,
                 updated_at=max(self._timestamp(), current.metadata.updated_at),
             )
-            document = self.tree.document_codec.build(
-                current.kind, payload, metadata=metadata, links=current.links
-            )
+            document = self.tree.document_codec.build(current.kind, payload, metadata=metadata, links=current.links)
             try:
                 self.tree.replace(document)
             except BehaviorTreeConflictError as exc:
@@ -203,9 +201,7 @@ class BehaviorDocumentWriter:
         keys = tuple(sorted({self._keyspace.key(uri) for uri in uris}))
         with ExitStack() as stack:
             guards = tuple(
-                stack.enter_context(
-                    self._path_lock.acquire(key, ttl_seconds=self.config.lock_ttl_seconds)
-                )
+                stack.enter_context(self._path_lock.acquire(key, ttl_seconds=self.config.lock_ttl_seconds))
                 for key in keys
             )
             with self._path_lock.fenced(guards):

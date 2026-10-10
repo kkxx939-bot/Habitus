@@ -9,13 +9,18 @@ from habitus.scene.concepts import ConceptRole, ConceptSet
 from habitus.scene.concepts.situation import SituationBasis as B
 from habitus.scene.concepts.situation import SituationRule
 from habitus.scene.occurrences import ConceptHit, ConceptHitStore
-from tests.unit.scene.concept_fixtures import BEDTIME_KEY, concept
+from tests.unit.scene.concept_fixtures import BEDTIME_KEY, situation
 from tests.unit.scene.fixtures import CST, DAY1, SUBJECT, Site, at, publish
-from tests.unit.scene.ledger_fixtures import CONCEPTS, MAPPER, record
+from tests.unit.scene.hit_fixtures import CONCEPTS, MAPPER, record
 
 SATURDAY = DAY1  # 2026-08-15，周六
-LAST_NIGHT = concept("昨晚晚睡", "这条行为之前 24 小时内的就寝命中了晚睡", role=ConceptRole.DERIVED, situation=SituationRule(B.YESTERDAY, concept="晚睡"))
-AT_OFFICE = concept("在公司", "地点是公司", role=ConceptRole.OBJECT, situation=SituationRule(B.PLACE, value="公司"))
+LAST_NIGHT = situation(
+    "昨晚晚睡",
+    "这条行为之前 24 小时内的就寝命中了晚睡",
+    role=ConceptRole.DERIVED,
+    rule=SituationRule(B.YESTERDAY, concept="晚睡"),
+)
+AT_OFFICE = situation("在公司", "地点是公司", role=ConceptRole.OBJECT, rule=SituationRule(B.PLACE, value="公司"))
 CONCEPT_SET = ConceptSet((*CONCEPTS.values(), LAST_NIGHT, AT_OFFICE))
 
 
@@ -36,7 +41,9 @@ def test_the_two_callables_are_built_from_real_material(tmp_path) -> None:
         def describe(self, day):
             return "补班日，按周一上班" if day == SATURDAY else None
 
-    context = SceneDayContext(SATURDAY, concepts=CONCEPT_SET, hits=hits, calendar=Calendar(), timezone=CST, subject=SUBJECT)
+    context = SceneDayContext(
+        SATURDAY, concepts=CONCEPT_SET, hits=hits, calendar=Calendar(), timezone=CST, subject=SUBJECT
+    )
     uri = publish(site.behavior_tree, SATURDAY, "写代码", 10, 0, place="公司")
     document = site.behavior_tree.read(_address(uri))
     outcome = context.situation_for(document)

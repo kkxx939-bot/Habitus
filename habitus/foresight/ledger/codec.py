@@ -10,7 +10,7 @@ from habitus.foresight.errors import ForesightError
 from habitus.foresight.ledger.model import Claim, Settlement
 from habitus.foresight.model import CandidateNumbers, RecurrenceNumbers
 
-LEDGER_SCHEMA_VERSION = "foresight_ledger_v2"
+LEDGER_SCHEMA_VERSION = "foresight_ledger_v4"
 
 
 def encode_claim(claim: Claim) -> dict[str, Any]:
@@ -29,6 +29,8 @@ def encode_claim(claim: Claim) -> dict[str, Any]:
         "judge_version": claim.judge_version,
         "basis": list(claim.basis),
         "situations": list(claim.situations),
+        "relations": list(claim.relations),
+        "relation_sources": list(claim.relation_sources),
         "numbers": {
             "marginal": numbers.marginal,
             "hazard": numbers.hazard,
@@ -74,6 +76,8 @@ def decode_claim(raw: Mapping[str, Any]) -> Claim:
             judge_version=str(raw["judge_version"]),
             basis=tuple(str(item) for item in raw["basis"]),
             situations=tuple(str(item) for item in raw["situations"]),
+            relations=tuple(str(item) for item in raw["relations"]),
+            relation_sources=tuple(str(item) for item in raw["relation_sources"]),
             numbers=CandidateNumbers(
                 marginal=float(numbers["marginal"]),
                 hazard=float(numbers["hazard"]),

@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from tests.unit.kind_ids import kind_id
+
 CST = timezone(timedelta(hours=8))
 DAY = date(2026, 8, 16)
 
@@ -31,7 +33,7 @@ def occurrence_payload(**overrides: Any) -> dict[str, Any]:
         "occurred_on": DAY,
         "name": "洗了手",
         "started_at": local(19, 30, 18),
-        "kind_token": "洗手",
+        "kind_token": kind_id("洗手"),
         "status": "completed",
         "status_basis": "observed",
         "last_observed_at": local(19, 31, 30),
@@ -69,7 +71,7 @@ def action_segment_payload(**overrides: Any) -> dict[str, Any]:
 
     payload = occurrence_payload(
         name="起身走开",
-        kind_token="起身走开",
+        kind_token=kind_id("起身走开"),
         goal=None,
         basis=(),
         summary="放下筷子起身走向画面外",

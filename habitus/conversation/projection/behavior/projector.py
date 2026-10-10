@@ -156,8 +156,7 @@ class ConversationBehaviorProjector:
                 "projector_version": self.projector_version,
                 "output_schema_version": BEHAVIOR_PROJECTION_OUTPUT_SCHEMA_VERSION,
                 "mappings": {
-                    role.value: projection.fingerprint_value
-                    for role, projection in _ROLE_PROJECTIONS.items()
+                    role.value: projection.fingerprint_value for role, projection in _ROLE_PROJECTIONS.items()
                 },
             }
         )

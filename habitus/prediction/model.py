@@ -56,9 +56,8 @@
 #   ≈ 2 × 词表大小，词表按真实数据拟出的 Heaps 律随 occurrence 数增长。WP4 粒度（约 350–420
 #   条/天）下一年约 33 MiB、撞 64 MiB 上限在两年半左右；若折叠粒度回退到 v15 那种"任何可命名
 #   的动作"（约 1,300 条/天），一年就是 96 MiB、**195 天**撞墙。粒度一旦回退，这里省下的余量
-#   当场吃光。另注意：kinds 词表有存活期与 max_kinds 护栏，**预测树的动作集合不受它们约束**
-#   ——夜批读的是树上历史 occurrence 的 kind_token，删词表条目不删 occurrence，所以它是
-#   "历史上出现过的全部 token 的并集"，单调不减。
+#   当场吃光。另注意：预测树的动作集合就是树上 occurrence 现有的类编号；词表的合并、拆分经迁移改写
+#   历史条目的编号，所以动作集合跟着词表的当前版本走（裁定 15、18）。
 # - **每个数字必带伴随值，因为概率自己会骗人**（同为 P=0.10：看电视@20:00 是 lift≈1.2 的底噪、
 #   吃药@07:00 是 lift≈78 的真峰、只见过 1 次的是不可信的巧合）：
 #     n_eff  这一格自己的衰减加权有效**机会**数（不是该动作总样本）。注意它只回答"分母可不可信"，
@@ -145,7 +144,7 @@
 #   于是春季那天有 4 个不存在的槽被记成"在看但没发生"——一年一次、只影响 4 个槽的分母，
 #   已知并接受；真按 92/100 记账要给曝光引入日历时区依赖，代价远大于收益。
 # - 单人一年万条 occurrence 毫秒级；**每夜整棵重建，不做增量**——重建成本低，而增量会让口径漂移
-#   （kinds 词表变了要用新口径重数历史）。副作用：**树的数值不保证跨夜连续**，上层不得假设
+#   （词表变了要用新口径重数历史）。副作用：**树的数值不保证跨夜连续**，上层不得假设
 #   "昨天 0.8 今天还是 0.8"。
 #
 # ── 记账口径（评审实测修正，改动这几条之前先重跑对应测试）─────────────────────────────
@@ -195,8 +194,8 @@
 # - 当日实况**不来自本层**，由上层两段拼接（2026-08-30 随原料"消费即释放"改定，用户裁定）：
 #   已封口的部分读**行为树**（occurrence 上就有 kind_token / started_at / status），尚未封口的
 #   最近一个回看窗口读判断存储——判断在发布到树后即被删除，判断存储里**没有全天**。未封口
-#   部分需要用 `behavior://kinds.md` 的 `token_for` 纯查表把原始名换成 kind_token 才能与树对齐；
-#   查不到即新名字，树上本来也没有它的统计，跳过。**这条链路零 LLM。**
+#   部分用归约同一个白天归类现场归类（`runtime/unsealed.py`，按链缓存）才能与树对齐；还没归上的标未归类、
+#   不进统计。这条链路要调模型（只在预测层每拍、出现新的未封口链时；本层仍零 LLM）。
 # - 风险集（"今天还没发生的"）由上层拿累积率对比当日实况自行构造，本层不持有当日状态。
 #
 # ── 日循环 ───────────────────────────────────────────────────────────────────────────
@@ -260,7 +259,7 @@
 #     ECE 0.0067–0.0112，整条管线在多周真实作息数据上确实学到了东西。
 #   - **这批数字的界限**：CASAS 是传感器标注的活动，粒度不是我们"可提醒/可代劳"的行为事件，
 #     所以它只回答"哪个估计量在多周真实作息上更稳"这个统计问题，**不作为任何参数的定稿依据**
-#     （尤其 slot_minutes / transition_window_seconds / pool_half_width 直接依赖我们自己的
+#     （尤其 slot_minutes / transition_window_slots / pool_half_width 直接依赖我们自己的
 #     行为粒度，在 CASAS 上调出来的值搬过来就是错的）。
 #   - **为什么当时没实现**：缺的不是数据处理量，是**判据**（见下一条）——判据现在有了。剩下的
 #     顾虑只有一条：下游消费者（预测算法的查询契约）还不存在，它到底问树要什么形状的答案，
@@ -465,9 +464,7 @@ class DayCurve:
         previous = 0.0
         for value in self.cumulative:
             if not 0.0 <= value <= 1.0 or value < previous:
-                raise PredictionTreeError(
-                    "cumulative must be a non-decreasing distribution function within [0, 1]"
-                )
+                raise PredictionTreeError("cumulative must be a non-decreasing distribution function within [0, 1]")
             previous = value
 
 
@@ -610,27 +607,54 @@ def _provenance(days: tuple[date, ...], label: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class ObservedAction:
-    """喂给估计器的一条已归一化的行为记录。"""
+    """喂给估计器的一条已归一化的行为记录：``action`` 是基础词表的类编号，``lane`` 是它所属的那条 lane。
+
+    lane 只用来决定"下一件"在哪条序列里找（裁定 18）：两条 lane 各是一条先后顺序，跨 lane 的关联归语义树。
+    """
 
     action: str
     started_at: datetime
     day: date
+    lane: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.action, str) or not self.action:
             raise PredictionTreeError("action must be non-empty text")
-        if not isinstance(self.started_at, datetime) or self.started_at.utcoffset() is None:
-            raise PredictionTreeError("started_at must be a timezone-aware datetime")
+        _require_moment(self.started_at, self.lane)
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedUnnamed:
+    """一件发生了、但还叫不出名的事（词表的「待定」）。
+
+    它不是候选、没有曲线，也不当转移的起点；它只在先后顺序里占一个位：别的行为的"下一件"是它时，
+    那条转移记为没看全，而不是跳过它把更后面的事当成下一件（裁定 18）。转正后它在行为树上改写成类编号，
+    下一轮重建时自动成为普通的 ``ObservedAction``。
+    """
+
+    started_at: datetime
+    day: date
+    lane: str
+
+    def __post_init__(self) -> None:
+        _require_moment(self.started_at, self.lane)
+
+
+def _require_moment(started_at: object, lane: object) -> None:
+    if not isinstance(started_at, datetime) or started_at.utcoffset() is None:
+        raise PredictionTreeError("started_at must be a timezone-aware datetime")
+    if not isinstance(lane, str) or not lane:
+        raise PredictionTreeError("lane must be non-empty text")
 
 
 @dataclass(frozen=True, slots=True)
 class ObservedGap:
     """一段观测空白；两类 gap 都扣减曝光，但**能不能被一条行为证伪**不同。
 
-    ``watched`` 是上游 ``gap_kind`` 在本层的唯一投影（翻译只在 ``source`` 一处做）：
+    ``watched`` 是上游 ``gap_kind`` 在本层的唯一投影（翻译只在事件序列的读取 ``series.reader`` 一处做）：
 
     - 「没读懂」→ ``True``：我们**在看**，只是融合读不出语义。这样一段里若真读出了一条
-      行为，那句"读不懂"就被证伪了——见 ``nodes.reconcile_gaps``。
+      行为，那句"读不懂"就被证伪了——见 ``series.model.disproves``。
     - 「未观测」→ ``False``：我们**没在看**。里面不可能读出行为；真出现了那是上游的矛盾
       数据，本层不替它圆场。
 
@@ -656,19 +680,25 @@ class BehaviorSnapshot:
     """一次重建的输入快照。
 
     ``actions`` 按 ``started_at`` 升序（估计器的前置条件），``concurrent`` 里的下标指向
-    排序**之后**的位置。``skipped_duplicates`` 只作可观测量，不参与任何计算。
+    排序**之后**的位置。``unnamed`` 是叫不出名的事（按 ``started_at`` 升序），只供配对层占位。
+    ``skipped_duplicates`` 只作可观测量，不参与任何计算。
+
+    ``cutoff`` 是事件序列的截止日（第 N 晚 = N，只含 N 之前的数据）：转移窗口跨过"第 N 天开始"那一刻的，
+    后面发生了什么没看到，配对层记删失、不记"没有后继"。离线回测自己拼的快照可以不给（``None``）。
     """
 
     actions: tuple[ObservedAction, ...]
+    unnamed: tuple[ObservedUnnamed, ...]
     gaps: tuple[ObservedGap, ...]
     concurrent: tuple[tuple[int, int], ...]
     skipped_duplicates: int
+    cutoff: date | None = None
 
     @property
     def latest_day(self) -> date | None:
         """快照里最晚的一天；调用方据此选夜批的基准日。"""
 
-        days = [item.day for item in self.actions]
+        days = [item.day for item in self.actions] + [item.day for item in self.unnamed]
         # 跨日的空白算到它**结束**那天：一段停到今天早上的空白说明今天也在观测范围里。
         days.extend(gap.ended_at.date() for gap in self.gaps)
         return max(days) if days else None
@@ -685,6 +715,7 @@ __all__ = [
     "NodeStatistics",
     "ObservedAction",
     "ObservedGap",
+    "ObservedUnnamed",
     "ParallelStatistics",
     "PredictionTree",
     "RecurrenceStatistics",

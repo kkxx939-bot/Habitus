@@ -160,21 +160,13 @@ class SearchService:
             raise TypeError("intention_reviewer must be MemoryIntentionReviewer")
         if clock is not None and not callable(clock):
             raise TypeError("clock must be callable")
-        if cold_probe_expander is not None and not callable(
-            getattr(cold_probe_expander, "expand_for_probe", None)
-        ):
+        if cold_probe_expander is not None and not callable(getattr(cold_probe_expander, "expand_for_probe", None)):
             raise TypeError("cold_probe_expander must implement expand_for_probe")
-        if cold_probe_expander is not None and not callable(
-            getattr(cold_probe_expander, "record_context_use", None)
-        ):
+        if cold_probe_expander is not None and not callable(getattr(cold_probe_expander, "record_context_use", None)):
             raise TypeError("cold_probe_expander must implement record_context_use")
-        if summary_fallback_expander is not None and not callable(
-            getattr(summary_fallback_expander, "expand", None)
-        ):
+        if summary_fallback_expander is not None and not callable(getattr(summary_fallback_expander, "expand", None)):
             raise TypeError("summary_fallback_expander must implement expand")
-        if summary_use_recorder is not None and not callable(
-            getattr(summary_use_recorder, "record_use", None)
-        ):
+        if summary_use_recorder is not None and not callable(getattr(summary_use_recorder, "record_use", None)):
             raise TypeError("summary_use_recorder must implement record_use")
         resolved_config = config or MemorySearchServiceConfig()
         resolved_assembler = assembler or MemoryContextAssembler(config=resolved_config)
@@ -476,8 +468,7 @@ class SearchService:
                     "result_count": len(result.memories) + len(result.summary_fallbacks),
                     "degradation_count": len(result.degradations),
                     "hot_memories": sum(
-                        memory.hit.lifecycle_temperature is not None
-                        and memory.hit.lifecycle_temperature.value == "hot"
+                        memory.hit.lifecycle_temperature is not None and memory.hit.lifecycle_temperature.value == "hot"
                         for memory in result.memories
                     ),
                     "warm_memories": sum(
@@ -520,9 +511,7 @@ class SearchService:
         values = tuple(raw)
         if any(not isinstance(item, ConversationSummaryMatch) for item in values):
             raise MemorySearchError("Summary fallback search returned an invalid match")
-        expected = tuple(
-            sorted(values, key=lambda item: (-item.score, item.reference.identity))
-        )
+        expected = tuple(sorted(values, key=lambda item: (-item.score, item.reference.identity)))
         if values != expected or len({item.reference.identity for item in values}) != len(values):
             raise MemorySearchError("Summary fallback matches must be unique and relevance-sorted")
         if self.summary_fallback_expander is None:
@@ -690,10 +679,7 @@ class SearchService:
         expanded: list[MemoryMatchedMemory] = []
         for memory in memories:
             document = memory.document
-            if (
-                memory.hit.lifecycle_temperature is not None
-                and memory.hit.lifecycle_temperature.value == "cold_2"
-            ):
+            if memory.hit.lifecycle_temperature is not None and memory.hit.lifecycle_temperature.value == "cold_2":
                 document = self.cold_probe_expander.expand_for_probe(document)
             expanded.append(replace(memory, document=document))
         return tuple(expanded)
@@ -708,19 +694,14 @@ class SearchService:
     ):
         """只让最终模型可见的主记忆升温；失败或过期目标从 Context 中剔除。"""
 
-        retained_targets = tuple(
-            targets[memory.uri]
-            for memory in assembly.memories
-            if memory.uri in targets
-        )
+        retained_targets = tuple(targets[memory.uri] for memory in assembly.memories if memory.uri in targets)
         if not retained_targets:
             return assembly
         if self.cold_probe_expander is None:
             cold = {
                 memory.uri
                 for memory in assembly.memories
-                if memory.hit.lifecycle_temperature is not None
-                and memory.hit.lifecycle_temperature.value == "cold_2"
+                if memory.hit.lifecycle_temperature is not None and memory.hit.lifecycle_temperature.value == "cold_2"
             }
             safe_targets = tuple(target for target in retained_targets if target.uri not in cold)
             try:

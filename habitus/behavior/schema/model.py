@@ -20,12 +20,10 @@ from habitus.behavior.model import BehaviorAddress, BehaviorKind
 _FIELD_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _CANONICAL_PATHS = {
     BehaviorKind.OCCURRENCE: (
-        "occurrences/{occurred_on:%Y}/{occurred_on:%m}/{occurred_on:%d}/"
-        "{name}--{started_at:%Y%m%dT%H%M%S%f%z}.md"
+        "occurrences/{occurred_on:%Y}/{occurred_on:%m}/{occurred_on:%d}/{name}--{started_at:%Y%m%dT%H%M%S%f%z}.md"
     ),
     BehaviorKind.GAP: (
-        "gaps/{occurred_on:%Y}/{occurred_on:%m}/{occurred_on:%d}/"
-        "{gap_kind}--{started_at:%Y%m%dT%H%M%S%f%z}.md"
+        "gaps/{occurred_on:%Y}/{occurred_on:%m}/{occurred_on:%d}/{gap_kind}--{started_at:%Y%m%dT%H%M%S%f%z}.md"
     ),
 }
 _EXPECTED_ADDRESS_NAMES = {
@@ -51,6 +49,7 @@ class BehaviorFieldType(str, Enum):
     OCCURRENCE_STATUS = "occurrence_status"
     STATUS_BASIS = "status_basis"
     GAP_KIND = "gap_kind"
+    KIND_TOKEN = "kind_token"
     BASIS_LIST = "basis_list"
 
 
@@ -69,6 +68,7 @@ _NUMERIC_FIELD_TYPES = frozenset(
         BehaviorFieldType.BOOLEAN,
         BehaviorFieldType.OCCURRENCE_STATUS,
         BehaviorFieldType.STATUS_BASIS,
+        BehaviorFieldType.KIND_TOKEN,
     }
 )
 
@@ -96,21 +96,18 @@ class BehaviorFieldSchema:
             raise BehaviorSchemaError("behavior schema field required must be boolean")
         if not isinstance(self.description, str) or not self.description.strip():
             raise BehaviorSchemaError("behavior schema field description must be non-empty")
-        if self.role in {
-            BehaviorFieldRole.ADDRESS,
-            BehaviorFieldRole.NUMERIC,
-            BehaviorFieldRole.SYSTEM,
-        } and not self.required:
-            raise BehaviorSchemaError(
-                "behavior address, numeric and system fields must be required"
-            )
         if (
-            self.role is BehaviorFieldRole.NUMERIC
-            and self.field_type not in _NUMERIC_FIELD_TYPES
+            self.role
+            in {
+                BehaviorFieldRole.ADDRESS,
+                BehaviorFieldRole.NUMERIC,
+                BehaviorFieldRole.SYSTEM,
+            }
+            and not self.required
         ):
-            raise BehaviorSchemaError(
-                f"behavior numeric field {self.name} must use a machine-typed field type"
-            )
+            raise BehaviorSchemaError("behavior address, numeric and system fields must be required")
+        if self.role is BehaviorFieldRole.NUMERIC and self.field_type not in _NUMERIC_FIELD_TYPES:
+            raise BehaviorSchemaError(f"behavior numeric field {self.name} must use a machine-typed field type")
 
 
 @dataclass(frozen=True)
@@ -129,18 +126,14 @@ class BehaviorTypeSchema:
         if not isinstance(self.description, str) or not self.description.strip():
             raise BehaviorSchemaError("behavior type description must be non-empty")
         if self.path_template != _CANONICAL_PATHS[kind]:
-            raise BehaviorSchemaError(
-                f"{kind.value} schema path does not match the confirmed behavior tree"
-            )
+            raise BehaviorSchemaError(f"{kind.value} schema path does not match the confirmed behavior tree")
         path = PurePosixPath(self.path_template)
         if path.is_absolute() or ".." in path.parts or path.suffix != ".md":
             raise BehaviorSchemaError("behavior schema path template is unsafe")
         names = tuple(field.name for field in self.fields)
         if not names or len(names) != len(set(names)):
             raise BehaviorSchemaError("behavior schema fields must be non-empty and unique")
-        address_names = tuple(
-            field.name for field in self.fields if field.role is BehaviorFieldRole.ADDRESS
-        )
+        address_names = tuple(field.name for field in self.fields if field.role is BehaviorFieldRole.ADDRESS)
         if address_names != _EXPECTED_ADDRESS_NAMES[kind]:
             raise BehaviorSchemaError("behavior schema address fields do not match its path")
 

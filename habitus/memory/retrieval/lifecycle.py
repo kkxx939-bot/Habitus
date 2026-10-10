@@ -475,10 +475,7 @@ class MemoryRecallLifecycle:
                 )
                 for candidate in values
             )
-        states = {
-            state.uri: state
-            for state in self.store.read_many(tuple(candidate.uri for candidate in values))
-        }
+        states = {state.uri: state for state in self.store.read_many(tuple(candidate.uri for candidate in values))}
         rankings: list[MemoryRecallRanking] = []
         for candidate in values:
             state = states.get(candidate.uri)
@@ -545,26 +542,20 @@ class MemoryRecallLifecycle:
             return ranked[:limit]
         semantic_top = tuple(
             sorted(
-                (
-                    item
-                    for item in ranked
-                    if item.state.retired_at is None
-                ),
+                (item for item in ranked if item.state.retired_at is None),
                 key=lambda item: (-item.candidate.semantic_score, str(item.candidate.uri)),
             )
         )[:limit]
         probe_candidates = tuple(
             item
             for item in semantic_top
-            if item.temperature is MemoryTemperature.COLD_2
-            and self._probe_eligible(item.state, current)
+            if item.temperature is MemoryTemperature.COLD_2 and self._probe_eligible(item.state, current)
         )[: self.config.max_cold2_probes_per_search]
         selected_probe_uris = {item.candidate.uri for item in probe_candidates}
         normal = tuple(
             item
             for item in ranked
-            if item.state.retired_at is None
-            and item.temperature is not MemoryTemperature.COLD_2
+            if item.state.retired_at is None and item.temperature is not MemoryTemperature.COLD_2
         )[: max(0, limit - len(probe_candidates))]
         return tuple(
             sorted(
@@ -690,9 +681,7 @@ class MemoryRecallLifecycle:
         self,
         values: tuple[MemoryRecallCandidate, ...],
     ) -> tuple[MemoryRecallCandidate, ...]:
-        if not isinstance(values, tuple) or any(
-            not isinstance(value, MemoryRecallCandidate) for value in values
-        ):
+        if not isinstance(values, tuple) or any(not isinstance(value, MemoryRecallCandidate) for value in values):
             raise TypeError("memory recall lifecycle candidates must be a tuple")
         if len(values) > self.config.max_batch_size:
             raise ValueError("memory recall lifecycle candidates exceed max_batch_size")
@@ -704,9 +693,7 @@ class MemoryRecallLifecycle:
         self,
         values: tuple[MemoryRecallTarget, ...],
     ) -> tuple[MemoryRecallTarget, ...]:
-        if not isinstance(values, tuple) or any(
-            not isinstance(value, MemoryRecallTarget) for value in values
-        ):
+        if not isinstance(values, tuple) or any(not isinstance(value, MemoryRecallTarget) for value in values):
             raise TypeError("memory recall lifecycle targets must be a tuple")
         if len(values) > self.config.max_batch_size:
             raise ValueError("memory recall lifecycle targets exceed max_batch_size")

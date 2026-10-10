@@ -1,6 +1,6 @@
 """归约写入层的编排：扫描 → 组链 → 封口 → 定格（stage）→ 确定性落盘 → 消费账本。
 
-抄融合 ``StagedFusion`` 的检查点形状（死规则⑤）：kind 归一、时间戳这些会随时间漂移的输入全部
+抄融合 ``StagedFusion`` 的检查点形状（死规则⑤）：白天归类、时间戳这些会随时间漂移的输入全部
 发生在 stage 之前；stage 之后只有确定性落盘——检查点里存的就是将要落盘的最终 payload（时间已是
 ISO 字符串）与文档时间戳，崩溃重试逐字节重放，落盘器的同字节幂等保证不撞车。
 
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -29,19 +29,12 @@ from habitus.behavior.fusion.config import FUSION_CONTEXT_LOOKBACK_SECONDS
 from habitus.behavior.fusion.coverage import BehaviorCoverageIndex
 from habitus.behavior.fusion.receipt_store import BehaviorFusionReceiptStore
 from habitus.behavior.fusion.store import BehaviorJudgementStore
-from habitus.behavior.kinds.model import BehaviorKindRegistry
-from habitus.behavior.kinds.rebuild import BehaviorKindRebuildReport, rebuild_registry
-from habitus.behavior.kinds.resolver import BehaviorKindRequest, BehaviorKindResolver
-from habitus.behavior.kinds.store import BehaviorKindStore
-from habitus.behavior.kinds.vectors import (
-    BehaviorKindVectorError,
-    BehaviorKindVectorIndex,
-    BehaviorKindVectorStore,
-)
 from habitus.behavior.model import BehaviorAddress, BehaviorKind
 from habitus.behavior.observation import BehaviorObservation, BehaviorObservationStore
-from habitus.behavior.reduction.chains import ChainAssembly
+from habitus.behavior.reduction.chains import BehaviorChain, ChainAssembly
 from habitus.behavior.reduction.errors import BehaviorReductionBusyError, BehaviorReductionError
+from habitus.behavior.reduction.kinds_jobs import JobsOutcome, VocabularyJobs
+from habitus.behavior.reduction.kinds_step import KindStamping, KindStamps
 from habitus.behavior.reduction.ledger import BehaviorReductionEntry, BehaviorReductionLedger
 from habitus.behavior.reduction.payloads import (
     REDUCTION_VERSION,
@@ -112,13 +105,11 @@ class BehaviorReductionReport:
 
 
 @dataclass(frozen=True)
-class BehaviorKindMergeReport:
-    """一次词表合并 + 树上重打的可观测结果。"""
+class VocabularyJobReport:
+    """一次词表整理活（每晚新增 / 定期拆改）的可观测结果。"""
 
-    source: str
-    target: str
-    restamped: int
     days: tuple[date, ...]
+    model_calls: int
     signals: tuple[str, ...]
 
 
@@ -133,10 +124,9 @@ class BehaviorReductionRunner:
         receipts: BehaviorFusionReceiptStore,
         tree: BehaviorTree,
         lock_store: LockStore,
-        kind_store: BehaviorKindStore,
-        kind_resolver: BehaviorKindResolver,
+        kinds: KindStamping,
+        vocabulary_jobs: VocabularyJobs,
         ledger: BehaviorReductionLedger,
-        kind_vectors: BehaviorKindVectorStore | None = None,
         semantic_refresher: BehaviorSemanticRefresher | None = None,
         clock: Callable[[], datetime] | None = None,
         context_lookback_seconds: float = FUSION_CONTEXT_LOOKBACK_SECONDS,
@@ -155,17 +145,13 @@ class BehaviorReductionRunner:
             raise TypeError("receipts must be BehaviorFusionReceiptStore")
         if not isinstance(tree, BehaviorTree):
             raise TypeError("tree must be BehaviorTree")
-        if not isinstance(kind_store, BehaviorKindStore):
-            raise TypeError("kind_store must be BehaviorKindStore")
-        if not isinstance(kind_resolver, BehaviorKindResolver):
-            raise TypeError("kind_resolver must be BehaviorKindResolver")
-        if kind_vectors is not None and not isinstance(kind_vectors, BehaviorKindVectorStore):
-            raise TypeError("kind_vectors must be BehaviorKindVectorStore or None")
+        if not isinstance(kinds, KindStamping):
+            raise TypeError("kinds must be KindStamping")
+        if not isinstance(vocabulary_jobs, VocabularyJobs):
+            raise TypeError("vocabulary_jobs must be VocabularyJobs")
         if not isinstance(ledger, BehaviorReductionLedger):
             raise TypeError("ledger must be BehaviorReductionLedger")
-        if semantic_refresher is not None and not isinstance(
-            semantic_refresher, BehaviorSemanticRefresher
-        ):
+        if semantic_refresher is not None and not isinstance(semantic_refresher, BehaviorSemanticRefresher):
             raise TypeError("semantic_refresher must be BehaviorSemanticRefresher or None")
         if clock is not None and not callable(clock):
             raise TypeError("clock must be callable")
@@ -187,9 +173,8 @@ class BehaviorReductionRunner:
         ):
             raise ValueError("sweep_lock_ttl_seconds must be an integer between 60 and 86400")
         self.sweep_lock_ttl_seconds = sweep_lock_ttl_seconds
-        self.kind_store = kind_store
-        self.kind_resolver = kind_resolver
-        self.kind_vectors = kind_vectors
+        self.kinds = kinds
+        self.vocabulary_jobs = vocabulary_jobs
         self.ledger = ledger
         self.semantic_refresher = semantic_refresher
         self.clock = clock or (lambda: datetime.now(UTC))
@@ -217,9 +202,7 @@ class BehaviorReductionRunner:
         """
 
         try:
-            acquired = self._path_lock.acquire(
-                self._sweep_lock_key, ttl_seconds=self.sweep_lock_ttl_seconds
-            )
+            acquired = self._path_lock.acquire(self._sweep_lock_key, ttl_seconds=self.sweep_lock_ttl_seconds)
         except TimeoutError as exc:
             # 只有**这里**的超时是"锁被占"；正文里的 TimeoutError（续约失败、文档锁竞争）
             # 是真故障，不许被归因成让路。
@@ -245,14 +228,30 @@ class BehaviorReductionRunner:
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_replay") as attributes:
             replayed, replayed_days = self._replay_checkpoint(guard)
             attributes.update(replayed_documents=replayed, refresh_days=len(replayed_days))
+        if replayed_days or self._checkpoint_path.exists():
+            # 重放已全部落树：先把那些日子记进待刷新集合，再立刻清检查点——之后的词表整理活可能重打这些条目，
+            # 检查点若还留着，下一轮重放就会与树上内容冲突而永久卡住。
+            self._write_pending_refresh_days(self._pending_refresh_days() | replayed_days, guard)
+            self._clear_checkpoint(guard)
         now = self._now()
         # 以下每一段在周尺度都可能跑很久且**不写任何东西**（另一条线实测：stage 前段静默 16 分钟即把
         # 600s 租约耗死，续约点再多也救不了已过期的租约）。因此每段边界都续，长循环内部按条数续。
         guard.checkpoint()
+        # 词表的整理活排在检查点重放之后、本轮归类之前：先续做没做完的迁移，再跑到点的每晚新增 / 定期拆改，
+        # 本轮新封口的链就按改过的清单归类；改过的日子并进本轮刷新。
+        with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_vocabulary") as attributes:
+            jobs = self._resume_migration(guard) + await self.vocabulary_jobs.run_due(now, checkpoint=guard.checkpoint)
+            self._kind_signals.extend(jobs.signals)
+            attributes.update(changed_days=len(jobs.days), model_calls=jobs.model_calls)
+        if jobs.days:
+            # 改过 kind_token 的日子立刻落盘：之后这一轮任何一步失败，概览都还会被刷新。
+            self._write_pending_refresh_days(self._pending_refresh_days() | jobs.days, guard)
+        replayed_days = replayed_days | jobs.days
+        guard.checkpoint()
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_expire") as attributes:
             attributes.update(self._expire(now, guard))
         guard.checkpoint()
-        # 上一轮没刷成的日子并进来（merge/rebuild 留下的也在这里）
+        # 上一轮没刷成的日子并进来（词表整理活改过 kind_token 的日子也在这里）
         replayed_days = replayed_days | self._pending_refresh_days()
         # "哪些判断还没归约"只有一种答法（``pending``），此刻场景的未封口读口也用它。
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_assemble") as attributes:
@@ -299,17 +298,14 @@ class BehaviorReductionRunner:
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_stage") as attributes:
             shrink_rounds = 0
             active_indexes, active_gaps = ready_indexes, ready_gaps
+            # 归类只做一次：缩批只是少发布几条链，复用同一份结果（不重复调模型、结论也不会变）。
+            stamps = await self._classify_chains([assembly.chains[index] for index in ready_indexes], guard=guard)
             while True:
-                documents, dropped = await self._stage(
-                    assembly, active_indexes, active_gaps, now, guard=guard
-                )
+                documents, dropped = await self._stage(assembly, active_indexes, active_gaps, now, stamps, guard=guard)
                 checkpoint = {
                     "reduction_version": REDUCTION_VERSION,
                     "staged_at": now.isoformat(timespec="microseconds"),
-                    "refresh_days": sorted(
-                        day.isoformat()
-                        for day in (replayed_days | _document_days(documents))
-                    ),
+                    "refresh_days": sorted(day.isoformat() for day in (replayed_days | _document_days(documents))),
                     "documents": documents,
                 }
                 encoded = json.dumps(checkpoint, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -320,18 +316,14 @@ class BehaviorReductionRunner:
                 shrink_rounds += 1
                 total = len(active_indexes) + len(active_gaps)
                 if total <= 1:
-                    raise BehaviorReductionError(
-                        "a single reduction document exceeds the checkpoint byte bound"
-                    )
+                    raise BehaviorReductionError("a single reduction document exceeds the checkpoint byte bound")
                 dropped_count = total - max(total // 2, 1)
                 if len(active_gaps) >= dropped_count:
                     active_gaps = active_gaps[: len(active_gaps) - dropped_count]
                 else:
                     keep_chains = len(active_indexes) - (dropped_count - len(active_gaps))
                     active_gaps = ()
-                    active_indexes = closed_under_links(
-                        assembly, set(active_indexes[: max(keep_chains, 0)])
-                    )
+                    active_indexes = closed_under_links(assembly, set(active_indexes[: max(keep_chains, 0)]))
             attributes.update(
                 stage_attributes(
                     documents,
@@ -349,9 +341,7 @@ class BehaviorReductionRunner:
         refresh_notes = await self._finish_sweep(
             replayed_days | _document_days(documents), guard, unsealed_days=unsealed_days, horizon=horizon
         )
-        published_occurrences = sum(
-            1 for item in documents if item["kind"] == BehaviorKind.OCCURRENCE.value
-        )
+        published_occurrences = sum(1 for item in documents if item["kind"] == BehaviorKind.OCCURRENCE.value)
         return BehaviorReductionReport(
             replayed_documents=replayed,
             published_occurrences=published_occurrences,
@@ -362,76 +352,37 @@ class BehaviorReductionRunner:
             kind_signals=tuple(self._kind_signals),
         )
 
-    async def merge_kinds(self, source: str, target: str) -> BehaviorKindMergeReport:
-        """把词表里的 ``source`` 并入 ``target``，并把树上 ``source`` 的 occurrence 重打为 ``target``。
+    async def grow_vocabulary(self) -> VocabularyJobReport:
+        """立刻跑一次每晚新增（运维与实验用；常规路径是 sweep 里到点自动跑）。"""
 
-        这是方案⑤"合并道"的落地动作（判定由离线整理交模型做，这里只执行已定的合并）：持 sweep 锁
-        （与归约互斥，词表与树在同一把锁下改）；先词表 ``merged`` 落盘，再全量扫树逐条 restamp
-        ——两步都幂等（重跑时词表里已无 source、树上已无旧 token），中途崩溃重跑即可补完。
-        受影响的日目录概览随后刷新（正文含类型，digest 必变）。预测树不用改，下次夜批读树即得。
-        """
+        return await self._vocabulary_job(self.vocabulary_jobs.grow)
+
+    async def revise_vocabulary(self) -> VocabularyJobReport:
+        """立刻跑一次定期拆改（运维与实验用；常规路径是 sweep 里到点自动跑）。"""
+
+        return await self._vocabulary_job(self.vocabulary_jobs.revise)
+
+    async def _vocabulary_job(self, job: Callable[..., Awaitable[JobsOutcome]]) -> VocabularyJobReport:
+        """词表整理活持 sweep 锁（与发布互斥）；先续做没做完的迁移，改过的日子刷新语义面。"""
 
         try:
-            acquired = self._path_lock.acquire(
-                self._sweep_lock_key, ttl_seconds=self.sweep_lock_ttl_seconds
-            )
+            acquired = self._path_lock.acquire(self._sweep_lock_key, ttl_seconds=self.sweep_lock_ttl_seconds)
         except TimeoutError as exc:
             raise BehaviorReductionBusyError(str(exc)) from exc
         with acquired as guard:
-            self._require_no_checkpoint("merge_kinds")
-            now = self._now()
-            signals: list[str] = []
-            snapshot = self.kind_store.read()
-            registry = snapshot.registry
-            # 按"source 是否仍是 token"判幂等：并过之后它只是 target 的别名，token_for 会命中但不该再并。
-            if source in registry.tokens and target not in registry.tokens:
-                raise BehaviorReductionError(f"merge target is not a registered kind: {target!r}")
-            if source in registry.tokens:
-                registry = registry.merged(source, target)
-                self.kind_store.replace(
-                    registry, expected_revision=snapshot.revision, timestamp=now,
-                    hits_applied_checkpoint=snapshot.hits_applied_checkpoint,
-                )
-                signals.append(f"kind_merged {source!r} -> {target!r}")
-                vectors, dirty = self._read_kind_vectors(signals)
-                if vectors is not None:
-                    self._persist_kind_vectors(vectors.retain(registry.names_in_use()), vectors, dirty, signals)
-            writer = BehaviorDocumentWriter(self.tree, self.lock_store, clock=lambda: now)
-            restamped = 0
-            days: set[date] = set()
-            for index, document in enumerate(self.tree.iter_documents(BehaviorKind.OCCURRENCE)):
-                if index % 200 == 0:
-                    guard.checkpoint()
-                if document.fields.get("kind_token") != source:
-                    continue
-                writer.restamp_kind_token(document.address, target)
-                restamped += 1
-                days.add(document.address.occurred_on)
-            self._write_pending_refresh_days(self._pending_refresh_days() | days, guard)
-            notes = await self._refresh_semantics(days, guard)
-            return BehaviorKindMergeReport(
-                source=source, target=target, restamped=restamped, days=tuple(sorted(days)),
-                signals=(*signals, *notes),
+            self._require_no_checkpoint("vocabulary job")
+            outcome = self._resume_migration(guard) + await job(self._now(), checkpoint=guard.checkpoint)
+            self._write_pending_refresh_days(self._pending_refresh_days() | outcome.days, guard)
+            notes = await self._refresh_semantics(set(outcome.days), guard)
+            return VocabularyJobReport(
+                days=tuple(sorted(outcome.days)), model_calls=outcome.model_calls, signals=(*outcome.signals, *notes)
             )
 
-    async def rebuild_kinds(self) -> BehaviorKindRebuildReport:
-        """按树重建词表（补齐 + 账重算 + 向量补算，零模型调用）；持 sweep 锁，与归约互斥。"""
-
-        try:
-            acquired = self._path_lock.acquire(
-                self._sweep_lock_key, ttl_seconds=self.sweep_lock_ttl_seconds
-            )
-        except TimeoutError as exc:
-            raise BehaviorReductionBusyError(str(exc)) from exc
-        with acquired:
-            self._require_no_checkpoint("rebuild_kinds")
-            return await rebuild_registry(
-                self.tree,
-                self.kind_store,
-                now=self._now(),
-                vectors=self.kind_vectors,
-                embedder=self.kind_resolver.embedder,
-            )
+    def _resume_migration(self, guard: LeaseGuard) -> JobsOutcome:
+        resumed = self.vocabulary_jobs.migrator.resume(checkpoint=guard.checkpoint)
+        if resumed is None:
+            return JobsOutcome()
+        return JobsOutcome(resumed.days, 0, (f"kind_migration_resumed v{resumed.version}", *resumed.signals))
 
     async def _finish_sweep(
         self,
@@ -605,6 +556,7 @@ class BehaviorReductionRunner:
         ready_indexes: tuple[int, ...],
         ready_gaps: tuple[ReducibleJudgement, ...],
         now: datetime,
+        stamps: KindStamps,
         *,
         guard: LeaseGuard | None = None,
     ) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
@@ -640,10 +592,7 @@ class BehaviorReductionRunner:
         }
         batch_gap_ids = {item.judgement_id for item in assembly.gaps}
 
-        # kinds 归一先于命名（只用链头名字，不依赖地址）——写入层唯一的 LLM 触点。
-        tokens = await self._resolve_kind_tokens(
-            (chain.head for _, chain in ready_chains), now, guard=guard
-        )
+        # 归类结果由调用方先算好（按链身份给，不依赖地址），这里只取用。
         sources = {ref for _, chain in ready_chains for item in chain.consumed for ref in item.source_refs}
         observation_index = self._observation_index(sources) if sources else {}
 
@@ -665,7 +614,7 @@ class BehaviorReductionRunner:
                 # 600s 租约 TTL（另一条线的冻结周重放实测）。长循环内按条数周期性续约。
                 guard.checkpoint()
             base = str(chain.head.behavior)
-            token = tokens.get(base)
+            token = stamps.tokens.get(chain.chain_digest)
             if token is None:
                 skipped_chains.add(index)
                 dropped.append(f"chain {chain.chain_digest} skipped: behavior name is not addressable")
@@ -707,9 +656,7 @@ class BehaviorReductionRunner:
         # 空白事实已在树上有代表，不重复、不丢账、不卡队列。
         merged_gaps: dict[str, list[ReducibleJudgement]] = {}
         for record in ready_gaps:
-            address = BehaviorAddress.gap(
-                record.started_at.date(), UNREADABLE_GAP_KIND, record.started_at
-            )
+            address = BehaviorAddress.gap(record.started_at.date(), UNREADABLE_GAP_KIND, record.started_at)
             merged_gaps.setdefault(str(BehaviorURI.from_address(address)), []).append(record)
         for uri in sorted(merged_gaps):
             group = merged_gaps[uri]
@@ -723,20 +670,14 @@ class BehaviorReductionRunner:
                 "reduction_version": REDUCTION_VERSION,
             }
             if uri in occupied:
-                dropped.append(
-                    f"gap at {uri} already published; consuming {judgement_ids} by reference"
-                )
+                dropped.append(f"gap at {uri} already published; consuming {judgement_ids} by reference")
                 documents.append({"kind": "ledger-only", "payload": None, "links": [], "ledger": entry})
                 continue
             payload = self._merged_gap_payload(group, chain_digest=str(entry["chain_digest"]))
-            documents.append(
-                {"kind": BehaviorKind.GAP.value, "payload": payload, "links": [], "ledger": entry}
-            )
+            documents.append({"kind": BehaviorKind.GAP.value, "payload": payload, "links": [], "ledger": entry})
 
         # occurrence 按 order_key 升序落盘：批内前向边只指向更小的键，目标必然先落。
-        for position, (index, chain) in enumerate(
-            sorted(ready_chains, key=lambda pair: pair[1].order_key)
-        ):
+        for position, (index, chain) in enumerate(sorted(ready_chains, key=lambda pair: pair[1].order_key)):
             if guard is not None and position % 50 == 0:
                 guard.checkpoint()
             if index in skipped_chains:
@@ -752,9 +693,7 @@ class BehaviorReductionRunner:
                 # 重放永败、整条归约卡死）。目标 order_key 更小、必先于本链处理，故此时可知。
                 if target is None or target_index in skipped_chains:
                     deferred_by_skip = True
-                    dropped.append(
-                        f"chain {chain.chain_digest} deferred: its link target was skipped"
-                    )
+                    dropped.append(f"chain {chain.chain_digest} deferred: its link target was skipped")
                     break
                 links.append([kind, target[2]])
             if deferred_by_skip:
@@ -773,9 +712,7 @@ class BehaviorReductionRunner:
                         reason = "target belongs to a quarantined chain"
                     else:
                         reason = "target is neither reducible nor consumed"
-                    dropped.append(
-                        f"{kind} from chain {chain.chain_digest} dropped: {reason} ({target_id})"
-                    )
+                    dropped.append(f"{kind} from chain {chain.chain_digest} dropped: {reason} ({target_id})")
                 elif [kind, target_uri] not in links:
                     links.append([kind, target_uri])
             entry = {
@@ -786,185 +723,47 @@ class BehaviorReductionRunner:
                 "staged_at": staged_at,
                 "reduction_version": REDUCTION_VERSION,
             }
-            documents.append(
-                {
-                    "kind": BehaviorKind.OCCURRENCE.value,
-                    "payload": payload,
-                    "links": links,
-                    "ledger": entry,
-                }
-            )
+            item: dict[str, Any] = {
+                "kind": BehaviorKind.OCCURRENCE.value,
+                "payload": payload,
+                "links": links,
+                "ledger": entry,
+            }
+            note = stamps.pending.get(chain.chain_digest)
+            if note is not None:
+                # 待定条目发布后进待定池要用这两样；随文档一起定格，重放时原样再用一次（按地址幂等）。
+                item["kind_pending"] = note.to_mapping()
+            documents.append(item)
         documents = self._publishable(documents, now, dropped, guard, frozenset(occupied))
         return documents, tuple(dropped)
 
-    async def _resolve_kind_tokens(
-        self,
-        heads: Iterable[ReducibleJudgement],
-        now: datetime,
-        *,
-        guard: LeaseGuard | None,
-    ) -> dict[str, str]:
-        """kinds 归一——写入层唯一的 LLM 触点；按批 CAS 落盘并续租。只定"名字 → token"，不记账。
+    async def _classify_chains(self, chains: Sequence[BehaviorChain], *, guard: LeaseGuard) -> KindStamps:
+        """白天归类——写入层唯一的 LLM 触点。只定"链 → kind_token"，不改词表（白天不建类）。
 
-        每条链头给出名字与证据（判断的 summary）。已知名字走确定性快路径；未知名字由 resolver 按批
-        判定（embedding 候选 + 模型判"是不是同一件事"），每批落一次词表——崩溃重试时先前已记入词表
-        的名字走快路径，"先落词表、再落检查点"的顺序保证重试不漂移。命中账在发布时记
-        （``_record_kind_hits``），与树上的 occurrence 一一对应。
+        结果随检查点定格：崩溃重放走检查点里的 token，不再问模型。
         """
 
-        with observe_operation(self.observer, OBSERVATION_CATEGORY, "kind_resolve") as attributes:
-            return await self._resolve_kind_tokens_observed(heads, now, guard=guard, attributes=attributes)
-
-    async def _resolve_kind_tokens_observed(
-        self,
-        heads: Iterable[ReducibleJudgement],
-        now: datetime,
-        *,
-        guard: LeaseGuard | None,
-        attributes: dict[str, str | int | float | bool],
-    ) -> dict[str, str]:
-        signals = self._kind_signals
-        first_signal = len(signals)
-        requests: list[BehaviorKindRequest] = []
-        for head in heads:
-            try:
-                requests.append(BehaviorKindRequest(name=str(head.behavior), evidence=head.summary))
-            except (TypeError, ValueError):
-                # 绕过融合守卫写入的坏名字：不进归一，命名阶段按链隔离并留信号（tokens 里没有它）。
-                continue
-        snapshot = self.kind_store.read()
-        registry, revision = snapshot.registry, snapshot.revision
-        vectors, vectors_dirty = self._read_kind_vectors(signals)
-        vectors_before = vectors
-        tokens: dict[str, str] = {}
-        created = model_calls = batches = 0
-        known: int | None = None
-        async for batch in self.kind_resolver.resolve_batches(requests, registry, vectors=vectors):
-            # resolver 的第一批永远是词表快路径（直接命中）；之后调过模型的才算一次按批判定。
-            if known is None:
-                known = len(batch.tokens)
-            batches += 1 if batch.model_calls else 0
-            created += len(batch.created)
-            model_calls += batch.model_calls
-            tokens.update(batch.tokens)
-            signals.extend(batch.signals)
-            for name in batch.created:
-                signals.append(f"kind_created {name!r} label={batch.registry.label_of(name)!r}")
-            registry, vectors = batch.registry, batch.vectors
-            registry, revision = self._persist_kinds(registry, revision, now)
-            if guard is not None:
-                guard.checkpoint()
-        self._persist_kind_vectors(vectors, vectors_before, vectors_dirty, signals)
-        attributes.update(
-            kind_attributes(
-                requests=len(requests),
-                tokens=len(tokens),
-                known=known or 0,
-                created=created,
-                model_calls=model_calls,
-                batches=batches,
-                signals=signals[first_signal:],
+        with observe_operation(self.observer, OBSERVATION_CATEGORY, "kind_classify") as attributes:
+            stamps = await self.kinds.classify(chains, checkpoint=guard.checkpoint)
+            self._kind_signals.extend(stamps.signals)
+            attributes.update(
+                kind_attributes(
+                    requests=stamps.requests,
+                    classified=stamps.classified,
+                    pending=len(stamps.pending),
+                    not_events=stamps.not_events,
+                    model_calls=stamps.model_calls,
+                    signals=stamps.signals,
+                )
             )
-        )
-        return tokens
+            return stamps
 
-    def _record_kind_hits(self, hits: Sequence[tuple[str, date]], checkpoint_id: str, now: datetime) -> None:
-        """发布时记命中账；幂等键是检查点内容摘要：词表记着"已应用到哪个检查点"，重放同一检查点跳过。
+    def _record_pending(self, documents: Sequence[Any]) -> int:
+        """发布后把待定条目放进待定池（按 occurrence 地址幂等；池满只留信号，不抛错）。"""
 
-        账的 owner 按 ``token_for`` 找（树上的 token 可能已被 merge 成别名）；找不到就补登记（留复核记号）；
-        词表满了只留信号。随后按数据时钟删到期条目：数据时钟 = 本批最新行为日，且钳在墙钟当日之内
-        （一条 2099 的坏时间戳不能把词表删空）；本批命中过的 token 不参与过期。删除只动词表与向量旁册，
-        树上 occurrence 不动。
-        """
-
-        if not hits:
-            return
-        signals = self._kind_signals
-        config = self.kind_resolver.config
-        snapshot = self.kind_store.read()
-        if snapshot.hits_applied_checkpoint == checkpoint_id:
-            signals.append(f"kind_hits_skipped checkpoint {checkpoint_id[:12]} already applied")
-            return
-        registry, revision = snapshot.registry, snapshot.revision
-        hit_now: set[str] = set()
-        for token, day in hits:
-            owner = registry.token_for(token)
-            if owner is None:
-                if registry.kind_count >= config.max_kinds:
-                    signals.append(f"kind_registry_full {token!r} hit not recorded (missing at publish time)")
-                    continue
-                # 归一之后、发布之前词表被重建或该 token 已过期：树上的 token 是真相，补登记。
-                registry = registry.with_new_kind(token, review_reason="reregistered")
-                signals.append(f"kind_reregistered {token!r} (missing at publish time)")
-                owner = token
-            registry = registry.with_hit(owner, day)
-            hit_now.add(owner)
-        clock = min(max(day for _, day in hits), now.astimezone(UTC).date())
-        expired = tuple(
-            token
-            for token in registry.expired(on=clock, base_days=config.base_days, gap_multiplier=config.gap_multiplier)
-            if token not in hit_now
-        )
-        for token in expired:
-            entry = registry.entry_of(token)
-            signals.append(
-                f"kind_expired {token!r} last hit {entry.last_hit_day} "
-                f"(hit_days={entry.hit_days_total}, max_gap={entry.max_gap_days})"
-            )
-            registry = registry.without(token)
-        registry, revision = self._persist_kinds(registry, revision, now, hits_applied_checkpoint=checkpoint_id)
-        if expired and self.kind_vectors is not None:
-            vectors, dirty = self._read_kind_vectors(signals)
-            assert vectors is not None
-            # 旁册按名字键、条目间可能同名：按"谁还在用"收，不按 (token, label) 直删。
-            self._persist_kind_vectors(vectors.retain(registry.names_in_use()), vectors, dirty, signals)
-
-    def _persist_kinds(
-        self,
-        registry: BehaviorKindRegistry,
-        revision: int,
-        now: datetime,
-        *,
-        hits_applied_checkpoint: str | None = None,
-    ) -> tuple[BehaviorKindRegistry, int]:
-        """词表变了（或要更新已应用检查点标记）就 CAS 落盘；返回落盘后的 (registry, revision)。
-
-        不传 ``hits_applied_checkpoint`` 时保留旧标记——归一路径落盘不能把发布路径的幂等键抹掉。
-        """
-
-        current = self.kind_store.read()
-        marker = current.hits_applied_checkpoint if hits_applied_checkpoint is None else hits_applied_checkpoint
-        if current.registry == registry and marker == current.hits_applied_checkpoint:
-            return current.registry, current.revision
-        written = self.kind_store.replace(
-            registry, expected_revision=revision, timestamp=now, hits_applied_checkpoint=marker
-        )
-        return written.registry, written.revision
-
-    def _read_kind_vectors(self, signals: list[str]) -> tuple[BehaviorKindVectorIndex | None, bool]:
-        """向量旁册是派生物：读不了就按空索引走并标脏（本轮结束必重写），留信号，不阻塞归约。"""
-
-        if self.kind_vectors is None:
-            return None, False
-        try:
-            return self.kind_vectors.read(), False
-        except BehaviorKindVectorError as exc:
-            signals.append(f"kind_vectors_unreadable {exc}; rebuilding from empty")
-            return self.kind_vectors.empty(), True
-
-    def _persist_kind_vectors(
-        self,
-        vectors: BehaviorKindVectorIndex | None,
-        before: BehaviorKindVectorIndex | None,
-        dirty: bool,
-        signals: list[str],
-    ) -> None:
-        if vectors is None or self.kind_vectors is None or not (dirty or vectors is not before):
-            return
-        try:
-            self.kind_vectors.replace(vectors)
-        except BehaviorKindVectorError as exc:
-            signals.append(f"kind_vectors_not_persisted {exc}")
+        admission = self.kinds.record_published(documents)
+        self._kind_signals.extend(admission.signals())
+        return admission.added
 
     def _addresses_on_tree(self, days: set[date]) -> set[str]:
         """本批涉及的那些天，树上已有的全部 occurrence 与 gap 地址（每天每类只枚举一次目录）。"""
@@ -1012,11 +811,7 @@ class BehaviorReductionRunner:
         raw_days = checkpoint.get("refresh_days")
         if isinstance(raw_days, list):
             days |= {date.fromisoformat(str(item)) for item in raw_days}
-        replayed = sum(
-            1
-            for item in documents
-            if isinstance(item, Mapping) and item.get("kind") != "ledger-only"
-        )
+        replayed = sum(1 for item in documents if isinstance(item, Mapping) and item.get("kind") != "ledger-only")
         return replayed, days
 
     async def _refresh_semantics(self, days: set[date], guard: LeaseGuard) -> tuple[str, ...]:
@@ -1044,9 +839,7 @@ class BehaviorReductionRunner:
                     continue
                 remaining.discard(day)
             self._write_pending_refresh_days(remaining, guard)
-            attributes.update(
-                refresh_attributes(results, days=len(days), failed_days=len(notes))
-            )
+            attributes.update(refresh_attributes(results, days=len(days), failed_days=len(notes)))
             attributes["pending_days"] = len(remaining)
             return tuple(notes)
 
@@ -1054,21 +847,20 @@ class BehaviorReductionRunner:
         """把检查点逐字落盘：同字节幂等，故本函数可任意次重入；逐段续约防租约过期。"""
 
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_publish") as attributes:
-            documents, hits = self._publish_documents(checkpoint, guard)
+            documents = self._publish_documents(checkpoint, guard)
+            pending_added = self._record_pending(documents)
             attributes.update(
                 publish_attributes(
                     [item for item in documents if isinstance(item, Mapping)],
                     published_at=self._now(),
-                    kind_hits=len(hits),
+                    kind_pending=pending_added,
                 )
             )
             # 树写完、账本写完，原料才释放（顺序是崩溃安全的依据：重放路径重新走到这里再补删）。
             attributes["judgements_released"] = self._release(documents, guard)
 
-    def _publish_documents(
-        self, checkpoint: Mapping[str, Any], guard: LeaseGuard
-    ) -> tuple[list[Any], list[tuple[str, date]]]:
-        """逐篇落盘、记账、记命中；返回文档与命中，供调用方计数与释放。"""
+    def _publish_documents(self, checkpoint: Mapping[str, Any], guard: LeaseGuard) -> list[Any]:
+        """逐篇落盘、记账；返回文档，供调用方记待定、计数与释放。"""
 
         staged_at_raw = checkpoint.get("staged_at")
         if not isinstance(staged_at_raw, str):
@@ -1080,7 +872,6 @@ class BehaviorReductionRunner:
         if not isinstance(documents, list):
             raise BehaviorReductionError("reduction checkpoint is missing documents")
         writer = BehaviorDocumentWriter(self.tree, self.lock_store, clock=lambda: staged_at)
-        hits: list[tuple[str, date]] = []
         for index, item in enumerate(documents):
             # 每 10 篇续一次：一次续约远比一篇文档的写入便宜，而周尺度下单篇 publish 会被文件系统
             # 拖到秒级（万级小文件 + fseventsd 放大），间隔太疏时一段慢写就能把租约耗光。
@@ -1093,14 +884,8 @@ class BehaviorReductionRunner:
                 kind = BehaviorKind(item["kind"])
                 links = tuple((str(link[0]), str(link[1])) for link in item.get("links", ()))
                 writer.publish(kind, item["payload"], links=links)
-                if kind is BehaviorKind.OCCURRENCE and item["payload"].get("original_name") is None:
-                    # 撞车消歧记录（original_name 非空）= 已知重复：预测树、语义层、命中账一律不计。
-                    payload = item["payload"]
-                    hits.append((str(payload["kind_token"]), date.fromisoformat(str(payload["occurred_on"]))))
             self.ledger.append(entry)
-        # 命中账与树上的 occurrence 一一对应；幂等键是检查点**内容**摘要：同一检查点只记一次。
-        self._record_kind_hits(hits, _checkpoint_identity(documents), staged_at)
-        return documents, hits
+        return documents
 
     # ── 释放：原料被消费后即删，真正的数据只在树上 ─────────────────────────────────────
 
@@ -1241,9 +1026,7 @@ class BehaviorReductionRunner:
                     if str(link.to_uri) in valid_uris or str(link.to_uri) in on_tree:
                         continue
                     if not self.tree.exists(link.to_uri.to_address()):
-                        raise BehaviorReductionError(
-                            f"link target does not exist anywhere: {link.to_uri}"
-                        )
+                        raise BehaviorReductionError(f"link target does not exist anywhere: {link.to_uri}")
                 try:
                     self.tree.document_codec.build(
                         BehaviorKind(item["kind"]),
@@ -1269,7 +1052,13 @@ class BehaviorReductionRunner:
                         metadata=metadata,
                         links=stored_links,
                     )
-            except (BehaviorReductionError, BehaviorSchemaError, BehaviorDocumentLimitError, TypeError, ValueError) as exc:
+            except (
+                BehaviorReductionError,
+                BehaviorSchemaError,
+                BehaviorDocumentLimitError,
+                TypeError,
+                ValueError,
+            ) as exc:
                 failed_uris.add(uri)
                 dropped.append(f"document {uri} skipped: fails validation before stage ({exc})")
                 continue
@@ -1303,25 +1092,6 @@ def _is_instant(value: object) -> bool:
         return datetime.fromisoformat(value).utcoffset() is not None
     except ValueError:
         return False
-
-
-def _checkpoint_identity(documents: list[Any]) -> str:
-    """检查点的内容身份：本批全部落盘文档的链身份摘要（与 staged_at 无关，冻结时钟下也不撞）。
-
-    occurrence 与 gap 分列——只摘 occurrence 会让两个不同的 gap-only 批算出同一个空摘要，眼下靠
-    ``_record_kind_hits`` 的 ``if not hits: return`` 兜住，但那是隐性依赖（审计 NEW-7）。
-    """
-
-    def digests(kind: BehaviorKind) -> list[str]:
-        return sorted(
-            str(item["ledger"]["chain_digest"])
-            for item in documents
-            if isinstance(item, Mapping) and item.get("kind") == kind.value
-        )
-
-    return canonical_digest(
-        {"occurrences": digests(BehaviorKind.OCCURRENCE), "gaps": digests(BehaviorKind.GAP)}
-    )
 
 
 _TRUNCATED_HEAD = 20

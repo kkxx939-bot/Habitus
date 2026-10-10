@@ -19,8 +19,10 @@ class ConversationSourceError(ValueError):
 
 
 def require_sha256(value: object, label: str) -> str:
-    if not isinstance(value, str) or len(value) != 64 or any(
-        character not in "0123456789abcdef" for character in value
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
     ):
         raise ConversationSourceError(f"{label} must be lowercase SHA-256 text")
     return value
@@ -256,9 +258,7 @@ class ConversationSourceEnvelope:
             request_digest=resolved_request,
         )
         payload_digest = canonical_digest(payload)
-        record = canonicalize(
-            {**payload, "source_payload_digest": payload_digest, "recorded_at": resolved_recorded_at}
-        )
+        record = canonicalize({**payload, "source_payload_digest": payload_digest, "recorded_at": resolved_recorded_at})
         return cls(
             source_id=source_id,
             conversation_id=conversation_id,

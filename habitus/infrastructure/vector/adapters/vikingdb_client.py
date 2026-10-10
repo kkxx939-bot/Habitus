@@ -47,8 +47,7 @@ class VikingDBRestClient:
         if not isinstance(config, VikingDBVectorStoreConfig):
             raise TypeError("config must be VikingDBVectorStoreConfig")
         if not isinstance(credentials, Mapping) or any(
-            not isinstance(name, str) or not isinstance(value, str)
-            for name, value in credentials.items()
+            not isinstance(name, str) or not isinstance(value, str) for name, value in credentials.items()
         ):
             raise TypeError("vikingdb credentials must be a string mapping")
         self.route = route
@@ -56,9 +55,7 @@ class VikingDBRestClient:
         self._credentials = dict(credentials)
         self.data_url = config.data_url(route)
         self.console_url = config.resolved_console_url() if config.auth_mode == "ak_sk" else self.data_url
-        if {name.casefold() for name in route.extra_headers} & {
-            name.casefold() for name in config.credential_headers
-        }:
+        if {name.casefold() for name in route.extra_headers} & {name.casefold() for name in config.credential_headers}:
             raise VectorStoreError("vikingdb credential headers cannot override route.extra_headers")
         self._validate_credentials()
         self._client = httpx.AsyncClient(
@@ -226,8 +223,7 @@ class VikingDBRestClient:
             from volcengine.Credentials import Credentials  # pyright: ignore[reportMissingImports]
         except ImportError as exc:
             raise VectorStoreError(
-                "vikingdb ak_sk authentication requires the 'volcengine' package; "
-                "install the habitus[vikingdb] extra"
+                "vikingdb ak_sk authentication requires the 'volcengine' package; install the habitus[vikingdb] extra"
             ) from exc
         parsed = urlsplit(origin)
         request = Request()
@@ -276,9 +272,7 @@ class VikingDBRestClient:
         try:
             decoded = json.loads(payload)
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise VectorStoreIntegrityError(
-                f"vikingdb returned invalid JSON for {method.upper()} {path}"
-            ) from exc
+            raise VectorStoreIntegrityError(f"vikingdb returned invalid JSON for {method.upper()} {path}") from exc
         if not isinstance(decoded, dict):
             raise VectorStoreIntegrityError("vikingdb response root must be an object")
         return cast(dict[str, object], decoded)
@@ -294,9 +288,7 @@ class VikingDBRestClient:
 
     def _validate_credentials(self) -> None:
         invalid = sorted(
-            name
-            for name, value in self._credentials.items()
-            if not name or not value or value != value.strip()
+            name for name, value in self._credentials.items() if not name or not value or value != value.strip()
         )
         if invalid:
             raise VectorStoreError(f"vikingdb route contains invalid credential values: {invalid}")

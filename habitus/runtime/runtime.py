@@ -10,9 +10,8 @@ from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 
-from habitus.behavior.kinds.rebuild import BehaviorKindRebuildReport
 from habitus.behavior.observation import BehaviorObservationEnvelope
-from habitus.behavior.reduction import BehaviorKindMergeReport
+from habitus.behavior.reduction import VocabularyJobReport
 from habitus.config import HabitusConfig
 from habitus.conversation import (
     ConversationSourceConsumer,
@@ -62,8 +61,7 @@ from habitus.pre.conversation import (
 )
 from habitus.runtime.behavior import BehaviorRuntimeComponents
 from habitus.runtime.behavior import deliver_observations as _deliver_behavior_observations
-from habitus.runtime.behavior import merge_behavior_kinds as _merge_behavior_kinds
-from habitus.runtime.behavior import rebuild_behavior_kinds as _rebuild_behavior_kinds
+from habitus.runtime.behavior import run_vocabulary_job as _run_vocabulary_job
 from habitus.runtime.components import RuntimeComponents
 from habitus.runtime.consistency import MemoryConsistencyService, MemoryConsistencySnapshot
 from habitus.runtime.health import RuntimeHealthReport, RuntimeHealthService
@@ -99,9 +97,7 @@ class RuntimeShutdownTimeoutError(TimeoutError):
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.pending_deliveries = pending_deliveries
-        pending = ", ".join(
-            f"{item.source_id}:{item.consumer.value}" for item in pending_deliveries
-        )
+        pending = ", ".join(f"{item.source_id}:{item.consumer.value}" for item in pending_deliveries)
         super().__init__(
             "runtime close timed out after "
             f"{timeout_seconds} seconds; pending Conversation Source consumers: "
@@ -134,13 +130,10 @@ class MemoryUseReceipt:
     used_at: datetime
 
     def __post_init__(self) -> None:
-        if not isinstance(self.memory_uris, tuple) or any(
-            not isinstance(uri, MemoryURI) for uri in self.memory_uris
-        ):
+        if not isinstance(self.memory_uris, tuple) or any(not isinstance(uri, MemoryURI) for uri in self.memory_uris):
             raise TypeError("memory_uris must contain MemoryURI values")
         if not isinstance(self.summary_references, tuple) or any(
-            not isinstance(reference, ConversationSummaryReference)
-            for reference in self.summary_references
+            not isinstance(reference, ConversationSummaryReference) for reference in self.summary_references
         ):
             raise TypeError("summary_references must contain ConversationSummaryReference values")
         if self.used_at.tzinfo is None or self.used_at.utcoffset() is None:
@@ -218,9 +211,7 @@ class Runtime:
             raise TypeError("config must be HabitusConfig")
         if not isinstance(components, RuntimeComponents):
             raise TypeError("components must be RuntimeComponents")
-        if conversation_adapters is not None and not isinstance(
-            conversation_adapters, ConversationAdapterRegistry
-        ):
+        if conversation_adapters is not None and not isinstance(conversation_adapters, ConversationAdapterRegistry):
             raise TypeError("conversation_adapters must be ConversationAdapterRegistry or None")
         if components.memory.tree.root != config.memory_root:
             raise ValueError("runtime components are bound to another memory root")
@@ -238,9 +229,7 @@ class Runtime:
             observer=components.infrastructure.observer,
         )
         self._conversation_adapters = (
-            conversation_adapters
-            if conversation_adapters is not None
-            else ConversationAdapterRegistry.with_builtins()
+            conversation_adapters if conversation_adapters is not None else ConversationAdapterRegistry.with_builtins()
         )
         self._health = RuntimeHealthService(components)
 
@@ -277,9 +266,7 @@ class Runtime:
                 self.components.behavior.jobs.initialize()
             oldest_job = self.components.workflow.jobs.oldest_uncommitted()
             recovered = (
-                self.components.workflow.runner.transaction_recovery.recover_pending()
-                if oldest_job is None
-                else ()
+                self.components.workflow.runner.transaction_recovery.recover_pending() if oldest_job is None else ()
             )
             initialization = RuntimeInitialization(
                 memory_root=memory_root,
@@ -325,8 +312,7 @@ class Runtime:
                 (
                     result.error
                     for result in source_recoveries
-                    if result.consumer is ConversationSourceConsumer.MEMORY
-                    and result.error is not None
+                    if result.consumer is ConversationSourceConsumer.MEMORY and result.error is not None
                 ),
                 None,
             )
@@ -429,9 +415,7 @@ class Runtime:
         self._require_initialized("behavior observation delivery")
         behavior = self.components.behavior
         if behavior is None:
-            raise RuntimeStateError(
-                "behavior pipeline is not configured; set behavior.primary_subject"
-            )
+            raise RuntimeStateError("behavior pipeline is not configured; set behavior.primary_subject")
         return await asyncio.to_thread(
             _deliver_behavior_observations,
             behavior,
@@ -439,19 +423,12 @@ class Runtime:
             observer=self.components.infrastructure.observer,
         )
 
-    async def merge_behavior_kinds(self, source: str, target: str) -> BehaviorKindMergeReport:
-        """词表合并正门：``source`` 并入 ``target``，树上旧 token 重打（离线整理判定之后调用）。"""
+    async def run_vocabulary_job(self, job: str) -> VocabularyJobReport:
+        """词表整理活正门：``grow`` 立刻每晚新增、``revise`` 立刻定期拆改。"""
 
-        self._require_initialized("behavior kind merge")
+        self._require_initialized("behavior vocabulary job")
         behavior = self._require_behavior()
-        return await _merge_behavior_kinds(behavior, source, target, observer=self.components.infrastructure.observer)
-
-    async def rebuild_behavior_kinds(self) -> BehaviorKindRebuildReport:
-        """词表重建正门：按树补齐 + 账重算 + 向量补算（零模型调用）。"""
-
-        self._require_initialized("behavior kind rebuild")
-        behavior = self._require_behavior()
-        return await _rebuild_behavior_kinds(behavior, observer=self.components.infrastructure.observer)
+        return await _run_vocabulary_job(behavior, job, observer=self.components.infrastructure.observer)
 
     def _require_behavior(self) -> BehaviorRuntimeComponents:
         behavior = self.components.behavior
@@ -905,8 +882,7 @@ class Runtime:
         if len(parsed_uris) != len(set(parsed_uris)):
             raise ValueError("memory_uris must be unique")
         if not isinstance(summary_references, tuple) or any(
-            not isinstance(reference, ConversationSummaryReference)
-            for reference in summary_references
+            not isinstance(reference, ConversationSummaryReference) for reference in summary_references
         ):
             raise TypeError("summary_references must contain ConversationSummaryReference values")
         if len({reference.identity for reference in summary_references}) != len(summary_references):
@@ -1144,11 +1120,7 @@ class Runtime:
 
         registry = self.components.infrastructure.observability
         for consumer in ConversationSourceConsumer:
-            stuck = sum(
-                1
-                for result in results
-                if result.consumer is consumer and result.error is not None
-            )
+            stuck = sum(1 for result in results if result.consumer is consumer and result.error is not None)
             registry.set_gauge(
                 "conversation_source_delivery_stuck",
                 stuck,

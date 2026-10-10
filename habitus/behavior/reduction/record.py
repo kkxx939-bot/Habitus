@@ -70,9 +70,7 @@ def _local(record: Mapping[str, Any], key: str) -> datetime:
         raise BehaviorReductionError(f"judgement record field {key} is not a timestamp") from exc
     offset = parsed.utcoffset()
     if offset is None or not offset:
-        raise BehaviorReductionError(
-            f"judgement record field {key} must carry a non-zero local offset"
-        )
+        raise BehaviorReductionError(f"judgement record field {key} must carry a non-zero local offset")
     return parsed
 
 
@@ -152,14 +150,9 @@ def parse_judgement_record(record: Mapping[str, Any]) -> ReducibleJudgement:
     # 融合层不变量在门口复核：可读判断必带摘要/状态/主体。缺了说明存储被绕写，
     # 快失败优于让 "None" 之类的字面值一路走进树的正文。
     if resolved.is_readable and (
-        resolved.summary is None
-        or resolved.status is None
-        or resolved.status_basis is None
-        or not resolved.subjects
+        resolved.summary is None or resolved.status is None or resolved.status_basis is None or not resolved.subjects
     ):
-        raise BehaviorReductionError(
-            "a readable judgement record must carry summary, status and subjects"
-        )
+        raise BehaviorReductionError("a readable judgement record must carry summary, status and subjects")
     return resolved
 
 

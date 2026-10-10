@@ -119,11 +119,7 @@ class ConversationSourceCoordinator:
 
         return tuple(
             sorted(
-                (
-                    delivery
-                    for task, delivery in self._task_deliveries.items()
-                    if not task.done()
-                ),
+                (delivery for task, delivery in self._task_deliveries.items() if not task.done()),
                 key=lambda item: (item.source_id, item.consumer.value),
             )
         )

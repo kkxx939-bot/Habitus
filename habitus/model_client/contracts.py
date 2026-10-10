@@ -221,9 +221,7 @@ class PreparedChatRequest:
             or not isinstance(self.reserved_output_tokens, int)
             or self.reserved_output_tokens < 0
         ):
-            raise ValueError(
-                "prepared chat request reserved_output_tokens must be a non-negative integer"
-            )
+            raise ValueError("prepared chat request reserved_output_tokens must be a non-negative integer")
         if not isinstance(self.stream, bool):
             raise TypeError("prepared chat request stream must be boolean")
 
@@ -351,15 +349,9 @@ class ModelStreamEvent:
             "usage": {"usage"},
             "done": {"finish_reason"},
         }[self.kind]
-        unexpected = sorted(
-            name
-            for name in payload_fields - expected_fields
-            if getattr(self, name) is not None
-        )
+        unexpected = sorted(name for name in payload_fields - expected_fields if getattr(self, name) is not None)
         if unexpected:
-            raise ValueError(
-                f"stream event {self.kind} contains payload for another kind: {unexpected}"
-            )
+            raise ValueError(f"stream event {self.kind} contains payload for another kind: {unexpected}")
         if self.kind == "content_delta":
             if not isinstance(self.content_delta, str) or self.content_delta == "":
                 raise ValueError("content_delta events require non-empty text")
@@ -377,10 +369,7 @@ class ModelStreamEvent:
                 value = getattr(self, name)
                 if value is not None and (not isinstance(value, str) or value == ""):
                     raise ValueError(f"{name} must be non-empty text when provided")
-            if all(
-                value is None
-                for value in (self.tool_call_id, self.tool_name, self.tool_arguments_delta)
-            ):
+            if all(value is None for value in (self.tool_call_id, self.tool_name, self.tool_arguments_delta)):
                 raise ValueError("tool_call_delta events require at least one tool field")
         elif self.kind == "usage":
             if not isinstance(self.usage, TokenUsage):
@@ -404,9 +393,7 @@ class ProviderCapabilities:
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"provider capability {name} must be boolean")
         if self.structured_output_mode not in {"none", "json_object", "json_schema"}:
-            raise ValueError(
-                "provider structured_output_mode must be none, json_object or json_schema"
-            )
+            raise ValueError("provider structured_output_mode must be none, json_object or json_schema")
 
 
 class ChatProvider(Protocol):
@@ -416,6 +403,7 @@ class ChatProvider(Protocol):
     model: str
     is_remote: bool
     capabilities: ProviderCapabilities
+
     def prepare(self, request: ChatRequest, *, stream: bool) -> PreparedChatRequest: ...
 
     def complete(self, request: PreparedChatRequest) -> ModelResponse: ...

@@ -209,9 +209,7 @@ class RuntimeConversation:
             self.summary_vector_index,
             PersistentConversationSummaryVectorIndex,
         ):
-            raise TypeError(
-                "summary_vector_index must be PersistentConversationSummaryVectorIndex"
-            )
+            raise TypeError("summary_vector_index must be PersistentConversationSummaryVectorIndex")
         if not isinstance(self.summary_use, SQLiteConversationSummaryUseStore):
             raise TypeError("summary_use must be SQLiteConversationSummaryUseStore")
         if not isinstance(self.summary_expander, ConversationSummaryExpander):
@@ -327,10 +325,7 @@ class RuntimeWorkflow:
             raise ValueError("memory workflow must share one Conversation enqueuer")
         if self.lifecycle.jobs is not self.jobs or self.lifecycle.receipts is not self.receipts:
             raise ValueError("conversation lifecycle must share workflow stores")
-        if (
-            self.lifecycle.summary_vector_index
-            is not self.runner.committed_finalizer.summary_vector_index
-        ):
+        if self.lifecycle.summary_vector_index is not self.runner.committed_finalizer.summary_vector_index:
             raise ValueError("workflow must share one Summary vector index")
         if self.runner.transaction_recovery.change_receipts is not self.receipts:
             raise ValueError("memory workflow must share one receipt store")

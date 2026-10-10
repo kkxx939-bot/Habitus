@@ -184,9 +184,7 @@ class MemoryLifecycleOperationStore:
         }.items():
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-        canonical = (tree.root.parent / "workflow" / "lifecycle" / "l2_operations").resolve(
-            strict=False
-        )
+        canonical = (tree.root.parent / "workflow" / "lifecycle" / "l2_operations").resolve(strict=False)
         resolved = canonical if root is None else Path(root).expanduser().resolve(strict=False)
         if resolved != canonical:
             raise ValueError("memory lifecycle operations must use the canonical workflow root")
@@ -246,9 +244,7 @@ class MemoryLifecycleOperationStore:
                     and current.planned_fields == operation.planned_fields
                 ):
                     return current
-                raise MemoryLifecycleOperationError(
-                    "another unfinished lifecycle operation already owns this memory"
-                )
+                raise MemoryLifecycleOperationError("another unfinished lifecycle operation already owns this memory")
             self._write(operation)
             return self.read(uri)
 

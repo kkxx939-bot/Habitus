@@ -10,11 +10,13 @@ import pytest
 from habitus.foresight import ForesightError
 from habitus.foresight.judge import CandidateVerdict, Judgement
 from habitus.foresight.ledger import verified_counts
+from tests.unit.foresight.fixtures import unchanged
 from habitus.foundation.observability import ObservationEvent
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_settlement import SettlementStage
 from habitus.scene import FactKey
 from tests.unit.foresight.fixtures import ScriptedJudge
+from tests.unit.kind_ids import kind_id
 from tests.unit.runtime.test_foresight_wiring import EVENING, assembled, scripted_judge
 
 #: 现场里每个周一 19:00 打球；说话要在那之前，19:00 才落在承诺的时窗（第 76 槽）里。
@@ -32,9 +34,14 @@ class Recorder:
 def promising_judge(pack) -> ScriptedJudge:
     """对着真实的包造一个判「打球 会 76–77」的判断者：引用第一张卡。"""
 
-    play = next(item for item in pack.expanded if item.kind_token == "打球")
+    play = next(item for item in pack.expanded if item.kind_token == kind_id("打球"))
     verdict = CandidateVerdict(
-        kind_token="打球", verdict="会", window=(76, 77), next=(), basis=(play.background.cards[0].uri,), note="像"
+        kind_token=kind_id("打球"),
+        verdict="会",
+        window=(76, 77),
+        next=(),
+        basis=(play.background.cards[0].uri,),
+        note="像",
     )
     script = Judgement(
         judged_at=SPOKEN.astimezone(UTC),
@@ -53,9 +60,7 @@ def wired(tmp_path, *, closed_days=tuple, facts=None):
 
     _config, probe = assembled(tmp_path / "probe", judge=scripted_judge())
     pack = probe.assembler.assemble(now=SPOKEN)
-    config, components = assembled(
-        tmp_path / "real", judge=promising_judge(pack), closed_days=closed_days, facts=facts
-    )
+    config, components = assembled(tmp_path / "real", judge=promising_judge(pack), closed_days=closed_days, facts=facts)
     return config, components
 
 
@@ -65,9 +70,13 @@ def test_a_new_judgement_writes_its_promises_and_a_reused_one_does_not(tmp_path)
     assert isinstance(ledger, ForesightLedgerStore) and ledger.root == config.foresight_root
 
     first = asyncio.run(components.runner.run_once(now=SPOKEN))
-    assert not first.reused and [c.kind_token for c in first.claims] == ["打球"]
+    assert not first.reused and [c.kind_token for c in first.claims] == [kind_id("打球")]
     # 还没有任何真实的条件源：默认是显式的空实现，承诺照记、三样都是空的。
-    assert (first.claims[0].conditions, first.claims[0].condition_keys, first.claims[0].facts_version) == ((), (), "none")
+    assert (first.claims[0].conditions, first.claims[0].condition_keys, first.claims[0].facts_version) == (
+        (),
+        (),
+        "none",
+    )
     assert [c.claim_id for c in ledger.claims_on(SPOKEN.date())] == [first.claims[0].claim_id]
     again = asyncio.run(components.runner.run_once(now=SPOKEN + timedelta(minutes=2)))
     assert again.reused and again.claims == () and len(ledger.claims_on(SPOKEN.date())) == 1
@@ -93,10 +102,12 @@ def test_settlement_waits_for_the_day_the_reduction_calls_closed(tmp_path) -> No
     assert (report.settled, report.verified, report.pending_days) == (1, 1, ())
     (item,) = components.runner.ledger.settlements_on(day)
     assert item.verified and item.claim_id == run.claims[0].claim_id
-    assert verified_counts(components.runner.ledger.settlements()) == {("打球", ""): 1}
+    assert verified_counts(components.runner.ledger.settlements(), current=unchanged) == {(kind_id("打球"), ""): 1}
     # 再结一次什么都不做；两拍都记了观测。
     assert components.settlement.run_once().settled == 0
-    assert [(e.category, e.operation, e.status.value) for e in observer.events] == [("foresight", "settlement", "success")] * 3
+    assert [(e.category, e.operation, e.status.value) for e in observer.events] == [
+        ("foresight", "settlement", "success")
+    ] * 3
     assert observer.events[1].attributes["verified"] == 1
 
 
@@ -121,6 +132,7 @@ def test_a_broken_ledger_is_observed_and_does_not_stop_the_following_stage(tmp_p
     hook = _nightly_stages(Broken(), following)
     assert hook is not None
     assert asyncio.run(hook()) == "ok" and ran == ["following"]
+
     # 后面那一拍自己的失败仍然往上抛（worker 记账），不被吞。
     async def failing() -> object:
         raise RuntimeError("following broke")
@@ -152,10 +164,29 @@ def test_an_injected_source_reaches_the_claim_and_a_broken_one_does_not_cost_the
     _config, components = wired(tmp_path / "ok", facts=Weather())
     run = asyncio.run(components.runner.run_once(now=SPOKEN))
     (claim,) = run.claims
-    assert (claim.conditions, claim.condition_keys, claim.facts_version) == ((("天气.天象", "晴"),), ("天气.天象",), "weather_v1")
+    assert (claim.conditions, claim.condition_keys, claim.facts_version) == (
+        (("天气.天象", "晴"),),
+        ("天气.天象",),
+        "weather_v1",
+    )
 
     _config, broken = wired(tmp_path / "down", facts=Down())
     run = asyncio.run(broken.runner.run_once(now=SPOKEN))
     (claim,) = run.claims
     assert (claim.conditions, claim.condition_keys, claim.facts_version) == ((), (), "unavailable")
     assert broken.runner.last is not None and len(broken.runner.ledger.claims_on(SPOKEN.date())) == 1
+
+
+def test_settlement_waits_while_the_vocabulary_is_migrating(tmp_path) -> None:
+    """词表迁移做到一半（树上的行改了一部分）：这一轮不结算，留到迁移做完——结算只做一次，对错了就是负样本（E3）。"""
+
+    day = SPOKEN.date()
+    _config, components = wired(tmp_path, closed_days=lambda: (day,))
+    run = asyncio.run(components.runner.run_once(now=SPOKEN))
+    migrating = [True]
+    components.settlement.migrating = lambda: migrating[0]
+    report = components.settlement.run_once()
+    assert (report.settled, report.pending_days) == (0, (day,))
+    assert components.runner.ledger.unsettled_claims(day) == run.claims
+    migrating[0] = False
+    assert components.settlement.run_once().settled == 1

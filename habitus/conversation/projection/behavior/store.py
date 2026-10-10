@@ -96,9 +96,7 @@ class ConversationBehaviorProjectionStore:
             raise ConversationSourceError("projection output was not durably read back")
         return stored
 
-    def read(
-        self, source: ConversationSourceEnvelope, output_id: str
-    ) -> ConversationBehaviorProjectionBatch | None:
+    def read(self, source: ConversationSourceEnvelope, output_id: str) -> ConversationBehaviorProjectionBatch | None:
         require_sha256(output_id, "output_id")
         try:
             encoded = read_regular_bytes(
@@ -177,9 +175,7 @@ class ConversationBehaviorProjectionStore:
     def _encode(self, batch: ConversationBehaviorProjectionBatch) -> bytes:
         if len(batch.items) > self.max_items:
             raise ConversationSourceError("behavior projection exceeds its configured item bound")
-        return encode_durable_record(
-            batch.to_dict(), max_bytes=self.max_file_bytes, label="behavior projection"
-        )
+        return encode_durable_record(batch.to_dict(), max_bytes=self.max_file_bytes, label="behavior projection")
 
 
 __all__ = ["ConversationBehaviorProjectionStore"]

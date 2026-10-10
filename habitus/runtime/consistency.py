@@ -35,9 +35,7 @@ class MemoryConsistencyTimeoutError(TimeoutError):
 
     def __init__(self, snapshot: MemoryConsistencySnapshot) -> None:
         self.snapshot = snapshot
-        super().__init__(
-            f"memory job {snapshot.requested_job.memory_sequence} did not settle before timeout"
-        )
+        super().__init__(f"memory job {snapshot.requested_job.memory_sequence} did not settle before timeout")
 
 
 @dataclass(frozen=True)
@@ -92,20 +90,14 @@ class MemoryConsistencyService:
         source = MemoryChangeSource.from_job(requested_job)
         receipt = self.receipts.try_read(source)
         abandonment = self.jobs.try_read_abandonment(requested_job)
-        receipt_committed = (
-            receipt is not None and receipt.state is MemoryChangeReceiptState.COMMITTED
-        )
+        receipt_committed = receipt is not None and receipt.state is MemoryChangeReceiptState.COMMITTED
         if current is not None:
             if current.status is MemoryJobStatus.FAILED:
                 state = MemoryConsistencyState.FAILED
             elif current.status is MemoryJobStatus.COMMITTED:
                 # Receipt 只证明 L2 事务已提交；Job 终态还要求 Summary、L0/L1 和
                 # 远程向量投影全部完成。两者必须同时成立才能对外宣告最终一致。
-                state = (
-                    MemoryConsistencyState.COMMITTED
-                    if receipt_committed
-                    else MemoryConsistencyState.UNKNOWN
-                )
+                state = MemoryConsistencyState.COMMITTED if receipt_committed else MemoryConsistencyState.UNKNOWN
             else:
                 state = MemoryConsistencyState.PENDING
         elif abandonment is not None:

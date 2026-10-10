@@ -78,9 +78,7 @@ def judgement_record(
         "behavior": behavior,
         "goal": None if unreadable else goal,
         "summary": None if unreadable else (summary or f"{behavior}的摘要"),
-        "basis": [
-            {"semantics": semantics, "observation_ids": list(ids)} for semantics, ids in basis
-        ],
+        "basis": [{"semantics": semantics, "observation_ids": list(ids)} for semantics, ids in basis],
         "status": None if unreadable else status,
         "status_basis": None if unreadable else status_basis,
         "relations": [{"kind": kind, "target_id": target} for kind, target in relations],

@@ -458,9 +458,7 @@ class MemoryTree:
     ) -> tuple[MemoryAddress, ...]:
         """按固定类型顺序和路径字典序，从可选游标之后有界枚举。"""
 
-        return self._read_visible(
-            lambda: self._list_addresses_physical(kind, limit=limit, after=after)
-        )
+        return self._read_visible(lambda: self._list_addresses_physical(kind, limit=limit, after=after))
 
     def _list_addresses_physical(
         self,

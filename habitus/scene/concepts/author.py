@@ -1,37 +1,27 @@
-"""触点①：把行为树上那一批散名字（kind）写成一组可判的概念定义。
+"""触点①：在基础词表的类之上写细分概念、汇总概念与情境概念（裁定 20）。
 
-语义树的输入是概念，而上游给的是 kind——上游按自己的粒度切的名字（实测 45 天 83 个 kind / 603 条
-occurrence，其中 44 个 kind 只出现 1–2 次、合起来只占 5%）。这一口把那批名字翻成"能对着一条
-occurrence 答是/否"的判据句，映射器再拿它去判。
+基础概念不在这里写：词表里每个类同步时自动生成一个基础概念（身份 = 类编号），不调模型。
+这一口只写三样：
 
-**粒度三档**（2026-09-28 裁定，写进提示词）：
+1. **细分概念** = 一个源类 + 一句区别：提醒句与源类相同，只是这一次的条件不同（「晚睡」= 睡觉里比近期常态
+   晚两小时以上的；「返工」= 修改代码里改的是前两天刚改过的同一处）。区别是数值的写成规则由算法判；
+   是语义的写成一句区别判据，并声明判它要什么材料（这一条 / 当天时间线 / 近几天同类记录）。
+   **提醒句不同的不是细分概念**——那是词表里该有的类（早饭不是吃饭的细分，它就是一个类）。
+2. **汇总概念** = 同一条 lane 里几个类放在一起说得通（「写代码」= 修改代码 + 排查问题 + 验证测试）。
+   模型只答"放一起说得通吗"，曲线由成员类相加，不判、不命中。
+3. **情境概念** = 当时的状况（周几、日历、同在的人、地点、连续 N 天、24 小时内），算法照说明算。
 
-1. ``≥10`` 次 → 给它一个叶子概念，自己一本账；
-2. ``3–9`` 次 → 不单独定义，找语义相近的几个**凑成一个概念**（合计凑到 ≥10）；
-3. ``1–2`` 次 → 不定义，留在残差，等残差升级判据自己捞。
+模型看到的是类名、判据、例子，**不看次数**（裁定七：按次数定粒度太死板）。
 
-10 是待定值（实测 ≥10 次的 15 个 kind 盖住 72% 的 occurrence；n=10 能抓到 75% 的真效应、n=3 只抓到 55%），
-重放时按真实分布复核，而且**要按 lane 各自量**（这批是 coding agent lane，生活侧密度不同）。
+**单个概念不合格就丢那一个，不否决整批**：形状不对、跨 lane 汇总、引用了不存在的概念——丢那一个并说清理由，
+引用它的连带丢；整批否决只留给答复本身不成形（交结构层重试）。
 
-**概念可以比 kind 粗，不能比 kind 细**：上游把很多不同的事折进一个 kind 时语义分辨率就钉在那儿了，
-概念层级救不回来（那要改上游的折叠，属事件融合那条线）。往粗的上限不是样本数而是"这个概念当后件时
-说不出一条说得通的前因"——那就是定宽了，该拆。
-
-**模型写什么、算法写什么**：模型写名字、判据句、角色、层级、认领哪几个 kind，以及"和常态比多少"
-这种**定义层面**的数值规则；算法核对（覆盖、认领不重、上级存在、不成环、规则引用的常态键有主），
-并且**每一条 occurrence 的数值仍由算法算**（``ConceptDefinition.decide``），模型永不碰。
-
-**失败不写半批**：模型这一次没答成（传输、配额、结构两轮都不成形）或答复过不了核对，整批一个都不写、
-留信号；那些 kind 留在残差里，下一次再问。半批写进去的后果是概念集指纹变了、全部命中要重算，
-而缺的那几个 kind 又得再来一轮。
-
-⚠ 提示词与 schema 是**草稿**：措辞要用真实模型跑对照再定（本机 codex `gpt-5.6-terra` 为主，
-回退 Claude Code 的 sonnet）。调用那一层是实验脚本，不在仓库里。
+⚠ 提示词与 schema 是**草稿**：措辞要用真实模型跑对照再定（本机 codex 为主，回退 Claude Code 的 sonnet）。
+调用那一层是实验脚本，不在仓库里。
 """
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -41,8 +31,9 @@ from typing import Any, cast
 
 from habitus.foundation.integrity import canonical_digest
 from habitus.foundation.text import clean_line
-from habitus.model_client import ChatMessage, ChatRequest, ModelClientError, ModelTransportError, StructuredChatClient
+from habitus.model_client import ChatMessage, ChatRequest, StructuredChatClient
 from habitus.scene.concepts.model import (
+    BASELINE_KEY_SEPARATOR,
     MAX_DEFINITION_CHARS,
     MAX_GRADES,
     MIN_GRADES,
@@ -50,6 +41,7 @@ from habitus.scene.concepts.model import (
     ConceptDefinition,
     ConceptError,
     ConceptGrade,
+    ConceptKind,
     ConceptOrigin,
     ConceptRole,
     ConceptSet,
@@ -61,176 +53,131 @@ from habitus.scene.concepts.model import (
 )
 from habitus.scene.concepts.rhythm import Rhythm
 from habitus.scene.concepts.situation import SituationBasis, SituationError, SituationRule
+from habitus.scene.llm import Failed, ask
 
-CONCEPT_AUTHOR_PROMPT_VERSION = "scene_concept_author_prompt_v4"  # v3：2026-09-29 探针后加 层级必写 / 判据互斥 / 情境别漏；v4：2026-10-01 ≥10 次的 kind 不许与别的 kind 并成一个概念（v3 的"几个 kind 凑一个概念"与校验矛盾，第三批冒烟连续 4 份答复撞上）
-#: 三档的两条线。都是待定值，重放时按真实分布与 lane 各自复核。
-MIN_LEAF_OCCURRENCES = 10
-MIN_GROUPED_OCCURRENCES = 3
-#: 一批最多写多少个概念。一次写几十个的话核对不过来、也说明 kind 清单没先筛过（保护闸）。
+CONCEPT_AUTHOR_PROMPT_VERSION = "scene_concept_author_prompt_v5"
+#: 一批最多写多少个概念（保护闸）。
 MAX_CONCEPTS_PER_BATCH = 40
-MAX_EXAMPLES_PER_KIND = 5
-#: 空的节律表 / 空的认领表；冻结的默认值不能是可变字典。
+MAX_EXAMPLES_PER_CLASS = 5
+#: 空的节律表；冻结的默认值不能是可变字典。
 NO_RHYTHMS: Mapping[str, Rhythm] = MappingProxyType({})
-_NO_CLAIMS: Mapping[str, tuple[str, ...]] = MappingProxyType({})
 
 
 class ConceptAuthorError(ValueError):
-    """概念作者的输入自相矛盾（例如同一个 kind 给了两份摘要）。"""
-
-
-class KindTier(str, Enum):
-    """一个 kind 该怎么处置，由次数定，算法算，不问模型。"""
-
-    LEAF = "leaf"
-    GROUP = "group"
-    RESIDUE = "residue"
-
-    @property
-    def instruction(self) -> str:
-        if self is KindTier.LEAF:
-            return "给它一个概念"
-        return "和相近的凑成一个概念" if self is KindTier.GROUP else "不要定义，留在残差"
+    """概念作者的输入自相矛盾（例如同一个类给了两份材料）。"""
 
 
 @dataclass(frozen=True)
-class KindBrief:
-    """一个 kind 交给模型看的全部材料：名字、次数、跨几天、几条真例子。
+class ClassBrief:
+    """一个词表类交给模型看的材料：类名、判据、lane、几条真例子（编号只给程序用，不给模型看，裁定 21-1）。
 
-    例子是**真的** occurrence 的一行说法（名字 + 概要），由调用方从行为树取——模型凭名字联想会把
-    「清理无用代码」写成"打扫"。``days`` 用来分辨"3 次挤在同一天"和"3 周各一次"。
+    例子是**真的** occurrence 的一行说法（名字 + 概要），由调用方从行为树取——模型只看类名会凭联想写区别。
     """
 
-    kind_token: str
-    occurrences: int
-    days: int
+    class_id: str
+    name: str
+    criterion: str
+    lane: str
     examples: tuple[str, ...] = ()
-    #: 这批材料覆盖了多少天（探针喂的是 54 天，旧提示词却写死"45 天"——评审 C-16）。``None`` = 不说。
-    span_days: int | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "kind_token", clean_line(self.kind_token))
-        if not self.kind_token:
-            raise ConceptAuthorError("a kind brief needs a kind token")
-        for label in ("occurrences", "days"):
-            value = getattr(self, label)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ConceptAuthorError(f"kind brief {label} must be a positive integer")
-        if self.days > self.occurrences:
-            raise ConceptAuthorError("a kind cannot span more days than it has occurrences")
+        for label in ("class_id", "name", "criterion", "lane"):
+            value = clean_line(getattr(self, label))
+            if not value:
+                raise ConceptAuthorError(f"a class brief needs a {label}")
+            object.__setattr__(self, label, value)
         examples = tuple(clean_line(item) for item in self.examples if clean_line(item))
-        object.__setattr__(self, "examples", examples[:MAX_EXAMPLES_PER_KIND])
+        object.__setattr__(self, "examples", examples[:MAX_EXAMPLES_PER_CLASS])
 
-    @property
-    def tier(self) -> KindTier:
-        if self.occurrences >= MIN_LEAF_OCCURRENCES:
-            return KindTier.LEAF
-        return KindTier.GROUP if self.occurrences >= MIN_GROUPED_OCCURRENCES else KindTier.RESIDUE
+    def render(self, label: str) -> str:
+        """``label`` 是给模型看的名字（一般就是类名；两条 lane 有同名类时带上 lane）。"""
 
-    def render(self) -> str:
         examples = "；".join(self.examples) if self.examples else "（没给例子）"
-        span = f"{self.span_days} 天里 " if self.span_days is not None else ""
-        return f"- {self.kind_token}：{span}{self.occurrences} 次、跨 {self.days} 天 → {self.tier.instruction}｜例：{examples}"
+        lane = "" if label.endswith(f"（{self.lane}）") else f"（{self.lane}）"
+        return f"- {label}{lane}：{self.criterion}｜例：{examples}"
+
+
+def class_labels(briefs: Sequence[ClassBrief]) -> Mapping[str, str]:
+    """给模型看的类名 → 类编号。同名的类（只会出现在不同 lane）带上 lane 区分。同一个类给两份材料是调用方的错。"""
+
+    if len({brief.class_id for brief in briefs}) != len(briefs):
+        raise ConceptAuthorError("class briefs must name each class once")
+
+    counts: dict[str, int] = {}
+    for brief in briefs:
+        counts[brief.name] = counts.get(brief.name, 0) + 1
+    return MappingProxyType(
+        {
+            (brief.name if counts[brief.name] == 1 else f"{brief.name}（{brief.lane}）"): brief.class_id
+            for brief in briefs
+        }
+    )
 
 
 @dataclass(frozen=True)
 class ConceptProposal:
-    """一批提案：写成的定义 + 每个概念认领了哪几个 kind + 留痕。
-
-    ``definitions`` 空 = 这一批一个都没写（模型失败或核对没过）；调用方据此**什么都不落盘**。
-    ``claims`` 不进概念文件（``ConceptSource`` 只在残差升级那一支记 ``kind_token``），它是给人看的
-    核对材料：认领关系在盘上由命中记录反推（``views.kinds.concept_kinds``）。
-    """
+    """一批提案：写成的定义 + 留痕。``definitions`` 空 = 这一批一个都没写；调用方据此**什么都不落盘**。"""
 
     definitions: tuple[ConceptDefinition, ...] = ()
-    claims: Mapping[str, tuple[str, ...]] = _NO_CLAIMS
     signals: tuple[str, ...] = ()
-    #: 被丢掉的概念与理由（它们认领的 kind 退回残差）。不静默：下一轮还要靠它知道为什么少了一个概念。
+    #: 被丢掉的概念与理由。不静默：下一轮还要靠它知道为什么少了一个概念。
     dropped: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "claims", MappingProxyType(dict(self.claims)))
+    #: 模型答成了没有（答成了、一个都没写也算答成）。没答成的调用方下一回再问。
+    answered: bool = True
 
     @property
     def wrote_nothing(self) -> bool:
         return not self.definitions
 
 
-CONCEPT_AUTHOR_SYSTEM_PROMPT = """你在给一个人的行为定义一套概念，供后面逐条判定使用。
+CONCEPT_AUTHOR_SYSTEM_PROMPT = """你在一个人的行为词表之上定义概念，供后面找因果关系用。
 
-材料是上游切好的行为名字（kind），每个带出现次数、跨了几天、几条真实例子，可能还带它的作息节律。
-你要输出一组概念，每个概念一句**判据句**。
+材料是词表里的行为类：类名、判据、属于哪条 lane（session 会话 / physical 物理）、几条真实例子，
+可能还带它的作息节律；以及已经有的概念。每个类已经自动有一个同名的基础概念，**不要再为类本身写概念**。
+你只写下面三种：
 
-判据句的要求：对着一条具体的行为记录（名字、概要、目标、步骤、开始时刻、历时、同在的人、地点）
-能答"是"或"不是"。写"这是一次为了修复缺陷而改动代码的行为"，不要写"与编程有关的活动"。
-
-粒度按材料里标好的处置来，不要自己改：
-- 标「给它一个概念」的：单独一个概念，认领它自己。
-- 标「和相近的凑成一个概念」的：几个语义相近的合成一个概念，一起认领（例：排查 CI 失败 + 排查性能问题 +
-  排查设备故障 → 一个概念「排查问题」）。凑不出相近的就别勉强，留着不认领。
-- 标「不要定义，留在残差」的：一个都不要认领，在 skipped 里说一句为什么。
+1. 细分概念（role = behavior，kind = refinement，classes 填一个源类）：
+   这个类里**提醒的话不变、只是这一次的条件不同**的那一部分。例：
+   - 「晚睡」= 睡觉里开始时刻比近期常态晚 120 分钟以上的 —— 写成 rule（数值由算法算），definition 写一句人读的说明；
+   - 「返工」= 修改代码里改的是前两天刚改过的同一处 —— 写不成数值，definition 写成对着材料能答是/否的
+     **区别**（不要重复"这是修改代码"，那已经确定了），context 填 recent（要看近几天同类的记录）。
+   要看当天前后发生了什么的，context 填 day；只看这一条本身的，填 occurrence。写了 rule 的 context 必须是 occurrence。
+   **提醒的话不一样的不是细分**：早饭和吃饭提醒的话不同（"该吃早饭了"），那是词表里该有的类，不要写成细分概念。
+2. 汇总概念（role = behavior，kind = group，classes 填两个以上成员类）：
+   几个类放在一起说得通、一起看有意义（例：「写代码」= 修改代码 + 排查问题 + 验证测试）。
+   成员类必须在**同一条 lane**；汇总概念不写 rule、grades，context 填 occurrence，definition 写一句它们共同是什么。
+3. 情境概念（role 填 state / object / day_type / derived，kind 填 null，classes 填 []）：当时的状况，不是一件事。
 
 其他规则：
-- 一个 kind 只能被一个概念认领；不要认领材料里没给的名字。
-- 概念可以比 kind **粗**，**不能比 kind 细**——上游把不同的事折进了同一个名字，你也分不开，不要假装分得开。
-  "粗"有两种做法，各管一档：标「和相近的凑成一个概念」的 kind 之间可以几个凑成一个概念；
-  标「给它一个概念」的 kind **只能自己单独是一个叶子概念，不能和任何别的 kind 并进同一个概念**——
-  它和别的概念相近，就给它们一个共同上级，不是并成一个。写错这一条整份答复都收不下。
-- **层级不是可选的**：一组语义相近的概念要挂成层级——细的各自一个叶子概念、上面共一个 parent
-  （上级自己不认领任何 kind）。**不要平铺一堆近义词**。自检：如果两个概念的判据句会对同一条记录都答"是"，
-  它们就该是兄弟 + 一个共同上级（两个都是 3–9 次那一档的才可以并成一个）。
-- **判据句要彼此排他**：同一条记录应当只命中**最贴切的那一个**叶子概念。一条记录能同时算三个概念，
-  说明那三个该有共同上级、或该并成一个——不要靠"都算"来覆盖。（我们会数"一条记录平均命中几个概念"，
-  这个数偏高就说明概念集在互相稀释：本来清楚的因果会被切成几条各自更薄的账。）
-- **行为种类要能跨场合复发**。上游给的名字常常带着当时那个项目/仓库/对象（"为 Tagent 添加 ReAct 支持"、
-  "重构 MemoryOS 的 API 目录"），那是**那一次**的说法，不是行为种类。概念要写成换个项目也还成立的那一层
-  （"改代码"、"重构目录结构"、"调研实现"）——否则项目一换，这个概念再也不会命中，它的账就永远攒不起来。
-  项目、仓库、工具、人这些"跟谁/在哪"属**情境**（role 填 object），不要写进行为概念的名字或判据里。
-- **持续状况不是行为**："出差中""赶工中""生病中"这类持续的状态写成情境概念（role 填 state / object /
-  day_type），它们不认领 kind。行为概念（role = behavior）只能来自上游给的 kind。
-- 数值：你可以写一条"和常态比"的规则（例：入睡时刻比常态就寝晚 120 分钟以上），那是**定义**；
-  每一条记录的数值由算法算，你不要算、也不要在判据句里写具体某一天的数字。
-  写了规则才能写档（2–3 档，按同一个量切开、不重叠）。
-- 判据要看当天前后发生了什么的（"起床后的第一次进食"），context 填 day；要用到某个行为的常态值的，
-  在 baseline_keys 里写成 `<概念>:usual_start:recent` 或 `<概念>:usual_duration:recent`（三段：谁的、
-  哪种统计、哪个窗）。窗一律填 `recent`（他近期的习惯）——`all`（历来常态）只用来读"他在漂移"，
-  不能当判据。
-- 已经有的概念不要重写，也不要改名；新概念的名字不能和已有的重名。
+- 只写说得通、以后用得上的；不要为了凑数把每个类都细分一遍。
+- 数值：rule 是**定义**（"比常态晚 120 分钟以上"），每一条记录的数值由算法算，你不要算。
+  写了 rule 才能写档（2–3 档，按同一个量切开、不重叠）。
+- 要用到常态值的，在 baseline_keys（或 rule 的 relative_to）里写成 `<谁>:usual_start:recent` 或
+  `<谁>:usual_duration:recent`；`<谁>` 是类名（例 睡觉）或一个细分概念的名字。窗一律填 `recent`。
+- 已经有的概念不要重写、不要重名。
 
 情境概念还要写一条 situation —— 算法照它算，所以只能用下面这几种说法之一：
 - weekdays：名义上的周几（0=周一 … 6=周日），例：周末 = [5, 6]。
 - calendar_note：当地日历那句话里含某个词，例：调休日 = "补班"。
 - subject：同在的人里有谁。  · place：地点是哪儿。
-- streak：某个概念**往前连着 N 个 24 小时**都命中（N ≥ 2；以这条行为的开始时刻往前数，不按日历日），
-  例：赶工中 = 「写代码」连着 3 天。
+- streak：某个概念（类名或概念名）**往前连着 N 个 24 小时**都命中（N ≥ 2），例：赶工中 = 「写代码」连着 3 天。
 - yesterday：这条行为开始之前 **24 小时内**命中过某个概念（可以指定档），例：昨晚晚睡 = 之前 24 小时内命中「晚睡」的重档。
-  **判据句要和这条说明说同一件事**：说明只看这条行为之前的事，判据句就不能写"当天及此前"。
-role 填 derived 的**必须**写 situation（派生的定义就是"算法从历史算"）。写不成上面任何一种的状态
-（"出差中""生病中"）就**别写 situation**：我们暂时算不出它，留着以后接数据源，不要编一个凑合的规则。
-
-**情境概念别漏掉**：因果要分层全靠它（"这条影响只在赶工的时候成立"）。上面那几种里，
-``streak`` 与 ``yesterday`` 只看历史命中，**现在就算得出**——"连着三天改代码到深夜"这类持续状况都可以
-用它们写出来。没有一个情境概念的话，后面所有读数都只能印"没有可分层的情境"。
-反过来，"在做哪个项目""心情如何"这类算不出来的，一个都不要写。"""
+role 填 derived 的**必须**写 situation。写不成上面任何一种的状态（"出差中""生病中"）就别写 situation，
+我们暂时算不出它；"在做哪个项目""心情如何"这类算不出来的，一个都不要写。"""
 
 
-def concept_author_json_schema(briefs: Sequence[KindBrief]) -> dict[str, Any]:
-    """kind 名字钉进 enum：模型认领不了材料里没有的名字，也编不出新 kind。
+def concept_author_json_schema(briefs: Sequence[ClassBrief]) -> dict[str, Any]:
+    """类名钉进 enum：模型引用不了材料里没有的类（答复里的类名由 ``assemble_concepts`` 换回编号）。
 
-    **写成严格模式吃得下的形状**（2026-09-29 探针实测）：本机 codex 的 ``--output-schema`` 与
-    OpenAI 的 structured outputs 都要求 ``required`` 列出 ``properties`` 里的**每一个**键，
-    并且不认 ``minItems`` / ``maxItems`` / ``maxLength`` / ``minimum`` 这类边界关键字。
-    不这么写，真实后端会直接拒（探针第一轮就是这么连挂三次、回退到另一个后端的）。
-
-    所以分工是：**schema 只管"有哪些字段、取值属于哪个集合"，边界与条数一律由 validator 管**
-    （它本来就在管：条数、长度、区间都在 ``assemble_concepts`` 与 ``ConceptDefinition`` 里）。
-    可选的字段用"可为 null / 可为空表"表达，不靠"不出现在 required 里"表达。
+    **写成严格模式吃得下的形状**（2026-09-29 探针实测）：``required`` 列出 ``properties`` 里的每一个键，
+    不用 ``minItems`` / ``maxItems`` / ``maxLength`` 这类边界关键字；边界与条数一律由 validator 管。
     """
 
-    tokens = [brief.kind_token for brief in briefs]
-    if not tokens:
-        raise ConceptAuthorError("the concept author schema needs at least one kind brief")
-    if len(set(tokens)) != len(tokens):
-        raise ConceptAuthorError("kind briefs must name each kind once")
+    ids = list(class_labels(briefs))
+    if not ids:
+        raise ConceptAuthorError("the concept author schema needs at least one class brief")
+    if len(set(ids)) != len(ids):
+        raise ConceptAuthorError("class briefs must name each class once")
     rule = {
         "type": ["object", "null"],
         "additionalProperties": False,
@@ -261,7 +208,11 @@ def concept_author_json_schema(briefs: Sequence[KindBrief]) -> dict[str, Any]:
         "required": ["basis", "weekdays", "value", "concept", "grade", "days"],
         "properties": {
             "basis": {"type": "string", "enum": [item.value for item in SituationBasis]},
-            "weekdays": {"type": "array", "items": {"type": "integer"}, "description": "日型用：0=周一 … 6=周日；其他族填 []。"},
+            "weekdays": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": "日型用：0=周一 … 6=周日；其他族填 []。",
+            },
             "value": {"type": ["string", "null"], "description": "calendar_note / subject / place 要匹配的值。"},
             "concept": {"type": ["string", "null"], "description": "streak / yesterday 盯的那个概念。"},
             "grade": {"type": ["string", "null"], "description": "只在某一档才算时填档名。"},
@@ -271,65 +222,88 @@ def concept_author_json_schema(briefs: Sequence[KindBrief]) -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["concepts", "skipped"],
+        "required": ["concepts"],
         "properties": {
             "concepts": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["name", "definition", "role", "parent", "claims", "context", "baseline_keys", "rule", "grades", "situation", "why"],
+                    "required": [
+                        "name",
+                        "definition",
+                        "role",
+                        "kind",
+                        "classes",
+                        "context",
+                        "baseline_keys",
+                        "rule",
+                        "grades",
+                        "situation",
+                        "why",
+                    ],
                     "properties": {
                         "name": {"type": "string", "description": "概念的名字，短、像个名词。"},
-                        "definition": {"type": "string", "description": f"判据句：对着一条记录能答是/否，{MAX_DEFINITION_CHARS} 字以内。"},
+                        "definition": {
+                            "type": "string",
+                            "description": f"细分概念写区别（对着材料能答是/否），汇总与情境写一句它是什么；{MAX_DEFINITION_CHARS} 字以内。",
+                        },
                         "role": {"type": "string", "enum": [item.value for item in ConceptRole]},
-                        "parent": {"type": ["string", "null"], "description": "上级概念的名字；没有就填 null。"},
-                        "claims": {"type": "array", "items": {"type": "string", "enum": tokens}, "description": "这个概念认领的 kind；情境概念填 []。"},
+                        "kind": {
+                            "type": ["string", "null"],
+                            "enum": [ConceptKind.REFINEMENT.value, ConceptKind.GROUP.value, None],
+                            "description": "行为概念填 refinement（细分）或 group（汇总）；情境概念填 null。",
+                        },
+                        "classes": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": ids},
+                            "description": "细分概念填一个源类；汇总概念填两个以上同 lane 的成员类；情境概念填 []。",
+                        },
                         "context": {"type": "string", "enum": [item.value for item in ContextScope]},
                         "baseline_keys": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "判据句要用到的常态值，形如 就寝:usual_start:recent（三段：概念、统计、窗；窗填 recent）；不用就填 []。",
+                            "description": "区别要用到的常态值，形如 p-k0015:usual_start:recent；不用就填 []。",
                         },
                         "rule": rule,
-                        "grades": {"type": "array", "items": grade, "description": f"只有写了 rule 才能写档；写就写 {MIN_GRADES}–{MAX_GRADES} 档，按同一个量切开、不重叠；不写填 []。"},
+                        "grades": {
+                            "type": "array",
+                            "items": grade,
+                            "description": f"只有写了 rule 才能写档；写就写 {MIN_GRADES}–{MAX_GRADES} 档；不写填 []。",
+                        },
                         "situation": situation,
-                        "why": {"type": "string", "description": "一句话：为什么这么切。"},
+                        "why": {"type": "string", "description": "一句话：为什么要这个概念。"},
                     },
                 },
-                "description": f"最多 {MAX_CONCEPTS_PER_BATCH} 个；一个都不该定义时给 []。",
-            },
-            "skipped": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["kind", "why"],
-                    "properties": {"kind": {"type": "string", "enum": tokens}, "why": {"type": "string"}},
-                },
-                "description": "没有认领的 kind 与理由；没有就填 []。",
+                "description": f"最多 {MAX_CONCEPTS_PER_BATCH} 个；没有值得写的就给 []。",
             },
         },
     }
 
 
-CONCEPT_AUTHOR_SCHEMA_FINGERPRINT = canonical_digest(concept_author_json_schema((KindBrief("样例", 1, 1),)))[:12]
-CONCEPT_AUTHOR_VERSION = f"{CONCEPT_AUTHOR_PROMPT_VERSION}+schema{CONCEPT_AUTHOR_SCHEMA_FINGERPRINT}"
+CONCEPT_AUTHOR_SCHEMA_FINGERPRINT = canonical_digest(
+    concept_author_json_schema((ClassBrief("s-k0001", "样例", "样例判据", "session"),))
+)[:12]
+#: 提示词正文的指纹进版本：正文改了而忘了手动升版本号，缓存 / 续跑也不会拿旧答案冒充新提示词的答案（第四轮评审 E15）。
+PROMPT_FINGERPRINT = canonical_digest({"prompt": CONCEPT_AUTHOR_SYSTEM_PROMPT})[:8]
+CONCEPT_AUTHOR_VERSION = f"{CONCEPT_AUTHOR_PROMPT_VERSION}+prompt{PROMPT_FINGERPRINT}+schema{CONCEPT_AUTHOR_SCHEMA_FINGERPRINT}"
 
 
 def build_concept_request(
-    briefs: Sequence[KindBrief],
+    briefs: Sequence[ClassBrief],
     existing: ConceptSet,
     rhythms: Mapping[str, Rhythm] = NO_RHYTHMS,
 ) -> ChatRequest:
-    """材料三段：要处置的 kind、已有的概念（不要重写）、相关行为的节律。"""
+    """材料三段：词表的类、已有的概念（不要重写）、相关类的作息。全部显示名字，编号只作引用。"""
 
     if not briefs:
-        raise ConceptAuthorError("a concept authoring request needs at least one kind brief")
-    sections = ["## 上游给的行为名字", *(brief.render() for brief in briefs)]
-    if len(existing):
-        sections += ["", "## 已经有的概念（不要重写、不要重名，可以当 parent）"]
-        sections += [f"- {existing[identity].name}（{existing[identity].role.value}）：{existing[identity].definition}" for identity in sorted(existing)]
+        raise ConceptAuthorError("a concept authoring request needs at least one class brief")
+    labels = {class_id: label for label, class_id in class_labels(briefs).items()}
+    sections = ["## 词表里的行为类", *(brief.render(labels[brief.class_id]) for brief in briefs)]
+    authored = [identity for identity in sorted(existing) if existing[identity].kind is not ConceptKind.BASE]
+    if authored:
+        sections += ["", "## 已经有的概念（不要重写、不要重名）"]
+        sections += [_render_existing(existing, identity) for identity in authored]
     lines = [rhythm.render() for rhythm in rhythms.values() if rhythm.peaks]
     if lines:
         sections += ["", "## 这些行为平常的作息（一天几次、几点）", *(f"- {line}" for line in lines)]
@@ -341,6 +315,13 @@ def build_concept_request(
     )
 
 
+def _render_existing(existing: ConceptSet, identity: str) -> str:
+    item = existing[identity]
+    classes = "、".join(existing.class_label(class_id) for class_id in item.classes)
+    kind = item.kind.value if item.kind is not None else item.role.value
+    return f"- {item.label}（{kind}{'：' + classes if classes else ''}）：{item.definition}"
+
+
 @dataclass(frozen=True)
 class _Draft:
     """模型答复里的一条，已按形状核对过、还没变成 ``ConceptDefinition``。"""
@@ -348,8 +329,8 @@ class _Draft:
     name: str
     definition: str
     role: ConceptRole
-    parent: str | None
-    claims: tuple[str, ...]
+    kind: ConceptKind | None
+    classes: tuple[str, ...]
     context: ContextScope
     baseline_keys: tuple[str, ...]
     rule: MechanicalRule | None
@@ -360,181 +341,144 @@ class _Draft:
 
 def assemble_concepts(
     parsed: object,
-    briefs: Sequence[KindBrief],
+    briefs: Sequence[ClassBrief],
     existing: ConceptSet,
     *,
     now: datetime,
-    origin: ConceptOrigin = ConceptOrigin.BASELINE,
-) -> tuple[tuple[ConceptDefinition, ...], Mapping[str, tuple[str, ...]], tuple[str, ...]]:
-    """核对成一组能落盘的定义；返回 (定义, 认领, 丢掉了什么)。
+) -> tuple[tuple[ConceptDefinition, ...], tuple[str, ...]]:
+    """核对成一组能落盘的定义；返回 (定义, 丢掉了什么)。
 
-    **单个概念不合格就丢那一个，不否决整批**（2026-09-29 探针实测的教训）：真实模型一次写 25 个概念，
-    其中一个把两个 kind 凑成 8 次（差 2 次不到 10）——按"整批否决"的老写法，另外 24 个合格的概念连同
-    那一次调用全废。丢掉的那个概念认领的 kind 退回残差，这正是残差的定义（"攒够了再升级"），
-    而"够不够样本"本来就该算法算、不该让模型负责。
-
-    **仍然整批否决的只有整体不自洽**：答复不成形、``≥10`` 次的 kind 没有独占概念（那是真的丢语义，
-    要模型重答）、概念集本身构不成（上级不存在、成环、与已有重名）。
+    答复不成形（形状、重名）整份交结构层重试；单个概念立不住（跨 lane 汇总、与已有重名、规则不自洽、
+    引用了不存在的概念）丢那一个并说清理由，引用它的连带丢。
     """
 
     drafts = _drafts(parsed, briefs)
-    if not drafts:
-        return (), {}, ()
-    by_kind = {brief.kind_token: brief for brief in briefs}
-    kept: list[_Draft] = []
+    lanes = {brief.class_id: brief.lane for brief in briefs}
+    built: dict[str, ConceptDefinition] = {}
     dropped: list[str] = []
-    claimed: dict[str, str] = {}
-    parents = {concept_identity(draft.parent) for draft in drafts if draft.parent is not None}
     for draft in drafts:
-        reason = _unusable(draft, by_kind, claimed, parents)
-        if reason is not None:
-            dropped.append(f"dropped: {draft.name}（{reason}）→ 它认领的 {list(draft.claims) or '—'} 退回残差")
-            continue
-        for kind in draft.claims:
-            claimed[kind] = draft.name
-        kept.append(draft)
-    kept, cascaded = _cascade(kept, drafts, existing, dropped)
-    for draft in cascaded:
-        for kind in draft.claims:
-            claimed.pop(kind, None)
-    _require_coverage(kept, by_kind, claimed)
-    definitions = _definitions(kept, existing, now=now, origin=origin)
-    return definitions, {draft.name: draft.claims for draft in kept if draft.claims}, tuple(dropped)
+        definition, reason = _build(draft, lanes, existing, now=now)
+        if definition is None:
+            dropped.append(f"dropped: {draft.name}（{reason}）")
+        else:
+            built[definition.identity] = definition
+    kept = _cascade(built, existing, dropped)
+    try:
+        ConceptSet([*(existing[identity] for identity in sorted(existing)), *kept])
+    except ConceptError as exc:
+        raise ValueError(f"the proposed concepts do not form a consistent set: {exc}") from exc
+    return tuple(kept), tuple(dropped)
 
 
-def _unusable(draft: _Draft, by_kind: Mapping[str, KindBrief], claimed: Mapping[str, str], parents: frozenset[str] | set[str]) -> str | None:
-    """这一个概念为什么不能用；能用就返回 None。"""
+def _build(
+    draft: _Draft, lanes: Mapping[str, str], existing: ConceptSet, *, now: datetime
+) -> tuple[ConceptDefinition | None, str]:
+    """一个草稿变成定义；立不住就返回 (None, 理由)。"""
 
-    for kind in draft.claims:
-        if kind in claimed:
-            return f"{kind} 已经被 {claimed[kind]} 认领了"
-    if not draft.role.is_behavior and draft.claims:
-        return "情境概念不认领 kind"
-    if draft.role.is_behavior and not draft.claims and draft.rule is None and concept_identity(draft.name) not in parents:
-        # 行为概念有三条命中路径：认领 kind、带数值规则、或它是上级。三条都没有就永远不会被命中。
-        return "既不认领 kind、又没有数值规则、也不是谁的上级，永远不会命中"
-    leaves = [kind for kind in draft.claims if by_kind[kind].tier is KindTier.LEAF]
-    if not leaves and draft.claims:
-        total = sum(by_kind[kind].occurrences for kind in draft.claims)
-        if total < MIN_LEAF_OCCURRENCES:
-            return f"凑出来只有 {total} 次，不到 {MIN_LEAF_OCCURRENCES}"
-    return None
+    if concept_identity(draft.name) in existing or draft.name in {item.label for item in existing.values()}:
+        return None, "已经有同名概念（含与类名同名）"
+    lane = None
+    if draft.role.is_behavior:
+        members = {lanes[item] for item in draft.classes}
+        if len(members) > 1:
+            return None, f"成员类跨了 lane（{sorted(members)}），汇总只在一条 lane 内"
+        lane = members.pop() if members else None
+    note = f"{CONCEPT_AUTHOR_VERSION}｜{draft.why}" if draft.why else CONCEPT_AUTHOR_VERSION
+    try:
+        return (
+            ConceptDefinition(
+                name=draft.name,
+                definition=draft.definition,
+                role=draft.role,
+                source=ConceptSource(origin=ConceptOrigin.AUTHOR, note=note[:400]),
+                created_at=now,
+                kind=draft.kind,
+                classes=draft.classes,
+                lane=lane,
+                grades=draft.grades,
+                rule=draft.rule,
+                context=draft.context,
+                baseline_keys=draft.baseline_keys,
+                situation=draft.situation,
+            ),
+            "",
+        )
+    except ConceptError as exc:
+        return None, str(exc)
 
 
 def _cascade(
-    kept: Sequence[_Draft], drafts: Sequence[_Draft], existing: ConceptSet, dropped: list[str]
-) -> tuple[list[_Draft], list[_Draft]]:
-    """连带丢弃：引用了被丢概念的（上级、情境说明盯的、常态键的主）也丢，**两条理由都报**。
+    built: Mapping[str, ConceptDefinition], existing: ConceptSet, dropped: list[str]
+) -> list[ConceptDefinition]:
+    """连带丢弃：情境说明盯的、常态键的主不在（已有 ∪ 留下的）里的，丢掉并说清是因为谁。"""
 
-    模型明明定义了「收尾验收」，是算法按下限把它丢了；盯着它的「收尾期」再报"引用了不存在的概念"就把账算到
-    模型头上、还把整批合格的一起否决（评审 C-11 ③；探针纪律七"算法的展开不许算成模型答错"）。
-    情境概念挂在行为上级下面的同理：丢那一个，说清为什么。
-    """
-
-    gone: dict[str, str] = {}
-    for line in dropped:
-        name = line.removeprefix("dropped: ").split("（", 1)[0]
-        gone[concept_identity(name)] = name
-    alive = list(kept)
-    cascaded: list[_Draft] = []
+    alive = dict(built)
     changed = True
     while changed:
         changed = False
-        roles = {concept_identity(draft.name): draft.role for draft in alive}
-        for draft in list(alive):
-            reason = _dangling(draft, gone, roles, existing)
-            if reason is None:
-                continue
-            alive.remove(draft)
-            cascaded.append(draft)
-            gone[concept_identity(draft.name)] = draft.name
-            dropped.append(f"dropped: {draft.name}（{reason}）→ 它认领的 {list(draft.claims) or '—'} 退回残差")
-            changed = True
-    return alive, cascaded
-
-
-def _dangling(draft: _Draft, gone: Mapping[str, str], roles: Mapping[str, ConceptRole], existing: ConceptSet) -> str | None:
-    """这个概念是否因为别的概念被丢而立不住；立得住返回 None。"""
-
-    references: list[tuple[str, str]] = []
-    if draft.parent is not None:
-        references.append(("上级", draft.parent))
-    if draft.situation is not None and draft.situation.concept is not None:
-        references.append(("情境说明盯着", draft.situation.concept))
-    for key in _baseline_keys(draft):
-        references.append(("常态键的主", key.concept))
-    for what, name in references:
-        identity = concept_identity(name)
-        if identity in gone:
-            return f"它的{what}「{gone[identity]}」被丢了，连带丢掉"
-    if draft.parent is not None:
-        parent = concept_identity(draft.parent)
-        parent_is_behavior = roles[parent].is_behavior if parent in roles else (existing[parent].role.is_behavior if parent in existing else None)
-        if parent_is_behavior is not None and parent_is_behavior != draft.role.is_behavior:
-            return f"情境概念不能挂在行为概念「{draft.parent}」下面（会让那个行为叶子再也不被映射），反过来也不行"
-    return None
-
-
-def _require_coverage(drafts: Sequence[_Draft], by_kind: Mapping[str, KindBrief], claimed: Mapping[str, str]) -> None:
-    """留下来的这些必须满足**整体性**的两条，不满足就整批重答（2026-09-28 裁定的三档）。
-
-    1. ``≥10`` 次的 kind 必须有主，而且**自己一个概念**——把 98 次的「修改代码」和 26 次的「审查代码」
-       并成一个就把语义丢了（用户 2026-09-28 纠正的正是这一点）；要粗的那一层靠 ``parent``。
-    2. 一个概念不能既认领 ``≥10`` 次的 kind、又捎上别的（同上：那是并组）。
-
-    "凑出来不到 10 次"不在这里——那条按单个概念丢掉、kind 退残差（见 ``_unusable``）。
-    """
-
-    missing = [token for token, brief in by_kind.items() if brief.tier is KindTier.LEAF and token not in claimed]
-    if missing:
-        raise ValueError(f"these kinds occur at least {MIN_LEAF_OCCURRENCES} times and each needs a concept of its own: {missing}")
-    for draft in drafts:
-        leaves = [kind for kind in draft.claims if by_kind[kind].tier is KindTier.LEAF]
-        if leaves and len(draft.claims) > 1:
-            raise ValueError(
-                f"concept {draft.name!r} claims {leaves} (at least {MIN_LEAF_OCCURRENCES} occurrences each) together with "
-                f"{[kind for kind in draft.claims if kind not in leaves]}; give each such kind its own concept and group them under a parent"
+        for identity, item in list(alive.items()):
+            missing = next(
+                (
+                    name
+                    for name in _references(item)
+                    if concept_identity(name) not in existing and concept_identity(name) not in alive
+                ),
+                None,
             )
+            if missing is None:
+                continue
+            del alive[identity]
+            dropped.append(f"dropped: {item.name}（引用的「{missing}」不是已有或这批留下的概念）")
+            changed = True
+    return list(alive.values())
 
 
-def _drafts(parsed: object, briefs: Sequence[KindBrief]) -> tuple[_Draft, ...]:
+def _references(item: ConceptDefinition) -> tuple[str, ...]:
+    names = [BaselineKey.parse(key).concept for key in item.required_baseline_keys]
+    if item.situation is not None and item.situation.concept is not None:
+        names.append(item.situation.concept)
+    return tuple(names)
+
+
+def _drafts(parsed: object, briefs: Sequence[ClassBrief]) -> tuple[_Draft, ...]:
     if not isinstance(parsed, Mapping):
         raise ValueError("concept author output must be an object")
     entries = parsed.get("concepts")
     if not isinstance(entries, list):
         raise ValueError("concept author output must carry a concepts list")
-    if not entries:
-        # 空答复是合法的一种答复（"这批一个都不该定义"）；调用方据此什么都不写。
-        return ()
-    tokens = {brief.kind_token for brief in briefs}
-    drafts = tuple(_draft(entry, tokens) for entry in entries)
+    if len(entries) > MAX_CONCEPTS_PER_BATCH:
+        raise ValueError(f"write at most {MAX_CONCEPTS_PER_BATCH} concepts in one batch")
+    drafts = tuple(_draft(entry, class_labels(briefs)) for entry in entries)
     identities = [concept_identity(draft.name) for draft in drafts]
     if len(set(identities)) != len(identities):
         raise ValueError("two proposed concepts share one name")
     return drafts
 
 
-def _draft(entry: object, tokens: frozenset[str] | set[str]) -> _Draft:
+def _draft(entry: object, labels: Mapping[str, str]) -> _Draft:
+    """一条答复 → 草稿。模型写的是类名，这里换回类编号：成员类、常态键的"谁"、情境说明盯的概念、规则比的常态键。"""
+
     if not isinstance(entry, Mapping):
         raise ValueError("each proposed concept must be an object")
-    claims = _list(entry.get("claims"), "claims")
-    if any(item not in tokens for item in claims):
-        raise ValueError(f"concept claims must name the given kinds, got {claims!r}")
-    if len(set(claims)) != len(claims):
-        raise ValueError("a concept claims each kind once")
-    keys = _list(entry.get("baseline_keys"), "baseline_keys")
-    rule = _rule(entry.get("rule"))
+    classes = _list(entry.get("classes"), "classes")
+    if any(item not in labels for item in classes):
+        raise ValueError(f"concept classes must name the given classes, got {classes!r}")
+    keys = [
+        _owned_key(_text(key, "baseline key"), labels) for key in _list(entry.get("baseline_keys"), "baseline_keys")
+    ]
+    rule = _rule(entry.get("rule"), labels)
+    kind = entry.get("kind")
     return _Draft(
         name=_text(entry.get("name"), "concept name"),
         definition=_text(entry.get("definition"), "concept definition"),
         role=_enum(ConceptRole, entry.get("role"), "role"),
-        parent=None if entry.get("parent") in (None, "") else _text(entry.get("parent"), "parent"),
-        claims=tuple(str(item) for item in claims),
+        kind=None if kind in (None, "") else _enum(ConceptKind, kind, "kind"),
+        classes=tuple(labels[item] for item in classes),
         context=_enum(ContextScope, entry.get("context") or ContextScope.OCCURRENCE.value, "context"),
-        baseline_keys=tuple(_text(key, "baseline key") for key in keys),
+        baseline_keys=tuple(keys),
         rule=rule,
         grades=_grades(_list(entry.get("grades"), "grades"), rule),
-        situation=_situation(entry.get("situation")),
+        situation=_situation(entry.get("situation"), labels),
         why=clean_line(entry.get("why")) or None,
     )
 
@@ -549,7 +493,7 @@ def _list(value: object, label: str) -> list[Any]:
     return list(value)
 
 
-def _rule(raw: object) -> MechanicalRule | None:
+def _rule(raw: object, labels: Mapping[str, str]) -> MechanicalRule | None:
     if raw is None:
         return None
     if not isinstance(raw, Mapping):
@@ -560,7 +504,7 @@ def _rule(raw: object) -> MechanicalRule | None:
             measure=_enum(GradeMeasure, raw.get("measure"), "rule measure"),
             lower=_optional_int(raw.get("lower_minutes"), "rule lower_minutes"),
             upper=_optional_int(raw.get("upper_minutes"), "rule upper_minutes"),
-            relative_to=None if relative in (None, "") else _text(relative, "rule relative_to"),
+            relative_to=None if relative in (None, "") else _owned_key(_text(relative, "rule relative_to"), labels),
         )
     except ConceptError as exc:
         raise ValueError(f"rule is not usable: {exc}") from exc
@@ -577,8 +521,12 @@ def _grades(raw: Sequence[Any], rule: MechanicalRule | None) -> tuple[ConceptGra
             ConceptGrade(
                 name=_text(item.get("name") if isinstance(item, Mapping) else None, "grade name"),
                 measure=rule.measure,
-                lower=_required_int(item.get("lower_minutes") if isinstance(item, Mapping) else None, "grade lower_minutes"),
-                upper=_required_int(item.get("upper_minutes") if isinstance(item, Mapping) else None, "grade upper_minutes"),
+                lower=_required_int(
+                    item.get("lower_minutes") if isinstance(item, Mapping) else None, "grade lower_minutes"
+                ),
+                upper=_required_int(
+                    item.get("upper_minutes") if isinstance(item, Mapping) else None, "grade upper_minutes"
+                ),
                 relative=rule.is_relative,
             )
             for item in raw
@@ -587,7 +535,18 @@ def _grades(raw: Sequence[Any], rule: MechanicalRule | None) -> tuple[ConceptGra
         raise ValueError(f"grades are not usable: {exc}") from exc
 
 
-def _situation(raw: object) -> SituationRule | None:
+def _resolved(text: str, labels: Mapping[str, str]) -> str:
+    return labels.get(text, text)
+
+
+def _owned_key(text: str, labels: Mapping[str, str]) -> str:
+    """常态键 ``<谁>:<统计>:<窗>`` 里的"谁"是类名时换成类编号（基础概念的身份）；细分概念的名字原样。"""
+
+    owner, separator, rest = text.partition(BASELINE_KEY_SEPARATOR)
+    return f"{labels.get(owner, owner)}{separator}{rest}"
+
+
+def _situation(raw: object, labels: Mapping[str, str]) -> SituationRule | None:
     if raw is None:
         return None
     if not isinstance(raw, Mapping):
@@ -601,88 +560,14 @@ def _situation(raw: object) -> SituationRule | None:
             basis=_enum(SituationBasis, raw.get("basis"), "situation basis"),
             weekdays=tuple(weekdays),
             value=None if raw.get("value") in (None, "") else _text(raw.get("value"), "situation value"),
-            concept=None if raw.get("concept") in (None, "") else _text(raw.get("concept"), "situation concept"),
+            concept=None
+            if raw.get("concept") in (None, "")
+            else _resolved(_text(raw.get("concept"), "situation concept"), labels),
             grade=None if raw.get("grade") in (None, "") else _text(raw.get("grade"), "situation grade"),
             days=1 if days is None else _required_int(days, "situation days"),
         )
     except SituationError as exc:
         raise ValueError(f"situation is not computable: {exc}") from exc
-
-
-def _definitions(
-    drafts: Sequence[_Draft],
-    existing: ConceptSet,
-    *,
-    now: datetime,
-    origin: ConceptOrigin,
-) -> tuple[ConceptDefinition, ...]:
-    """变成 ``ConceptDefinition``、核对常态键有主，最后整组构造一次 ``ConceptSet``（上级与环在那里抛）。"""
-
-    names = {concept_identity(draft.name): draft.name for draft in drafts}
-    for identity, name in names.items():
-        if identity in existing:
-            raise ValueError(f"concept {name!r} already exists; do not rewrite it")
-    built: list[ConceptDefinition] = []
-    for draft in drafts:
-        watched = draft.situation.concept if draft.situation is not None else None
-        if watched is not None and concept_identity(watched) not in existing and concept_identity(watched) not in names:
-            raise ValueError(f"the situation rule of {draft.name!r} watches {watched!r}, which is not a concept here")
-        for key in _baseline_keys(draft):
-            owner = concept_identity(key.concept)
-            if owner not in existing and owner not in names:
-                raise ValueError(f"concept {draft.name!r} names a baseline of {key.concept!r}, which is not a concept here")
-        note = f"{CONCEPT_AUTHOR_VERSION}｜{draft.why}" if draft.why else CONCEPT_AUTHOR_VERSION
-        kind_token = draft.claims[0] if origin is ConceptOrigin.RESIDUE and draft.claims else None
-        if origin is ConceptOrigin.RESIDUE and len(draft.claims) > 1:
-            raise ValueError(f"a residue upgrade claims one kind; {draft.name!r} claims {list(draft.claims)}")
-        try:
-            built.append(
-                ConceptDefinition(
-                    name=draft.name,
-                    definition=draft.definition,
-                    role=draft.role,
-                    source=ConceptSource(origin=origin, note=note[:400], kind_token=kind_token),
-                    created_at=now,
-                    parent=draft.parent,
-                    grades=draft.grades,
-                    rule=draft.rule,
-                    context=draft.context,
-                    baseline_keys=draft.baseline_keys,
-                    situation=draft.situation,
-                )
-            )
-        except ConceptError as exc:
-            raise ValueError(f"concept {draft.name!r} is not usable: {exc}") from exc
-    try:
-        ConceptSet([*(existing[identity] for identity in sorted(existing)), *built])
-    except ConceptError as exc:
-        raise ValueError(f"the proposed concepts do not form a consistent set: {exc}") from exc
-    return _parents_first(built)
-
-
-def _baseline_keys(draft: _Draft) -> tuple[BaselineKey, ...]:
-    texts = list(draft.baseline_keys)
-    if draft.rule is not None and draft.rule.relative_to is not None:
-        texts.append(draft.rule.relative_to)
-    try:
-        return tuple(BaselineKey.parse(text) for text in texts)
-    except ConceptError as exc:
-        raise ValueError(f"concept {draft.name!r} names an unusable baseline key: {exc}") from exc
-
-
-def _parents_first(definitions: Sequence[ConceptDefinition]) -> tuple[ConceptDefinition, ...]:
-    """``ConceptStore.write`` 要求上级先落盘，所以这里就把顺序排好，调用方按序写。"""
-
-    remaining = list(definitions)
-    ordered: list[ConceptDefinition] = []
-    while remaining:
-        pending = {item.identity for item in remaining}
-        ready = [item for item in remaining if item.parent_identity is None or item.parent_identity not in pending]
-        if not ready:  # pragma: no cover - ConceptSet 已经拒了环
-            raise ValueError("the proposed hierarchy has a cycle")
-        ordered.extend(ready)
-        remaining = [item for item in remaining if item not in ready]
-    return tuple(ordered)
 
 
 @dataclass(frozen=True)
@@ -693,7 +578,11 @@ class AuthorConfig:
     transient_retry_delay_seconds: float = 5.0
 
     def __post_init__(self) -> None:
-        if isinstance(self.transient_retries, bool) or not isinstance(self.transient_retries, int) or self.transient_retries < 0:
+        if (
+            isinstance(self.transient_retries, bool)
+            or not isinstance(self.transient_retries, int)
+            or self.transient_retries < 0
+        ):
             raise ValueError("transient_retries must be a non-negative integer")
         if (
             isinstance(self.transient_retry_delay_seconds, bool)
@@ -704,7 +593,7 @@ class AuthorConfig:
 
 
 class ConceptAuthor:
-    """触点①。一次一批 kind，失败就整批不写。"""
+    """触点①。一次一批类，失败就整批不写。"""
 
     def __init__(
         self,
@@ -728,62 +617,35 @@ class ConceptAuthor:
 
     async def propose(
         self,
-        briefs: Sequence[KindBrief],
+        briefs: Sequence[ClassBrief],
         existing: ConceptSet,
         rhythms: Mapping[str, Rhythm] = NO_RHYTHMS,
-        *,
-        origin: ConceptOrigin = ConceptOrigin.BASELINE,
     ) -> ConceptProposal:
         if not isinstance(existing, ConceptSet):
             raise TypeError("existing must be a ConceptSet")
         askable = tuple(briefs)
-        if not any(brief.tier is not KindTier.RESIDUE for brief in askable):
-            # 全是一两次的长尾：凑不出一个够 10 次的概念，一个调用都不必花。
-            return ConceptProposal(signals=(f"skipped: 全部 {len(askable)} 个 kind 都不到 {MIN_GROUPED_OCCURRENCES} 次，留在残差",))
         request = build_concept_request(askable, existing, rhythms)
         schema = concept_author_json_schema(askable)
         now = self._clock()
-        for attempt in range(self.config.transient_retries + 1):
-            try:
-                response = await self.client.complete_json_async(
-                    request,
-                    schema=schema,
-                    name="scene_concept_authoring",
-                    validator=lambda parsed: assemble_concepts(parsed, askable, existing, now=now, origin=origin),
-                )
-            except ModelTransportError:
-                if attempt >= self.config.transient_retries:
-                    return ConceptProposal(signals=("model: transport failed; 这一批不写，kind 留在残差",))
-                await asyncio.sleep(self.config.transient_retry_delay_seconds * (attempt + 1))
-                continue
-            except ModelClientError as exc:
-                # 结构两轮都没成形、或核对没过：整批不写，下一次再问。
-                return ConceptProposal(signals=(_failure(exc),))
-            definitions, claims, dropped = cast(
-                "tuple[tuple[ConceptDefinition, ...], Mapping[str, tuple[str, ...]], tuple[str, ...]]", response.value
-            )
-            signals = [f"author: {self.version}"]
-            if not definitions:
-                signals.append("author: 模型说这批一个都不该定义，什么都不写")
-            if response.validation_attempts > 1:
-                signals.append(f"structured: answered on attempt {response.validation_attempts}")
-            if response.parse_mode != "strict":
-                signals.append(f"structured: json parsed via {response.parse_mode}")
-            signals.extend(dropped)
-            return ConceptProposal(definitions=definitions, claims=claims, signals=tuple(signals), dropped=dropped)
-        raise AssertionError("unreachable")  # pragma: no cover
-
-
-def _failure(exc: ModelClientError) -> str:
-    """失败信号要说出**哪条规则不过**。
-
-    结构层把 validator 的报错挂在 ``__cause__`` 上，只报 "model failed domain validation after 2 attempts"
-    的话，看日志的人既不知道是形状不对还是核对不过，也不知道该改提示词的哪一句——探针第二轮就卡在这里。
-    """
-
-    cause = exc.__cause__
-    detail = f"；{clean_line(str(cause))[:220]}" if cause is not None else ""
-    return f"model: {type(exc).__name__}: {clean_line(str(exc))[:120]}{detail}"
+        answer = await ask(
+            self.client,
+            request,
+            schema=schema,
+            name="scene_concept_authoring",
+            validator=lambda parsed: assemble_concepts(parsed, askable, existing, now=now),
+            retries=self.config.transient_retries,
+            delay_seconds=self.config.transient_retry_delay_seconds,
+        )
+        if isinstance(answer, Failed):
+            # 传输、结构或核对没过：整批不写，下一次再问。
+            return ConceptProposal(signals=(answer.signal,), answered=False)
+        definitions, dropped = cast("tuple[tuple[ConceptDefinition, ...], tuple[str, ...]]", answer.value)
+        signals = [f"author: {self.version}"]
+        if not definitions:
+            signals.append("author: 这一批没有写成的概念，什么都不写")
+        signals.extend(answer.notes)
+        signals.extend(dropped)
+        return ConceptProposal(definitions=definitions, signals=tuple(signals), dropped=dropped)
 
 
 def _text(value: object, label: str) -> str:
@@ -815,16 +677,14 @@ __all__ = [
     "CONCEPT_AUTHOR_SYSTEM_PROMPT",
     "CONCEPT_AUTHOR_VERSION",
     "MAX_CONCEPTS_PER_BATCH",
-    "MIN_GROUPED_OCCURRENCES",
-    "MIN_LEAF_OCCURRENCES",
     "NO_RHYTHMS",
     "AuthorConfig",
+    "ClassBrief",
     "ConceptAuthor",
     "ConceptAuthorError",
     "ConceptProposal",
-    "KindBrief",
-    "KindTier",
     "assemble_concepts",
+    "class_labels",
     "build_concept_request",
     "concept_author_json_schema",
 ]

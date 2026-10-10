@@ -153,9 +153,7 @@ def derive_judgements(
         raise BehaviorFusionError("source_refs must not be empty")
 
     # 两遍：先算身份（身份不含关系，所以没有循环），再把关系指向具体的身份。
-    identities = {
-        item.judgement_no: _identity(item, by_no, judged_at=judged_at) for item in batch.judgements
-    }
+    identities = {item.judgement_no: _identity(item, by_no, judged_at=judged_at) for item in batch.judgements}
     context = tuple(context_ids)
     return tuple(
         _derive(
@@ -235,18 +233,13 @@ def _derive(
         ),
         status=judgement.status,
         status_basis=judgement.status_basis,
-        relations=tuple(
-            (link.kind.value, _target_identity(link, identities, context))
-            for link in judgement.relations
-        ),
+        relations=tuple((link.kind.value, _target_identity(link, identities, context)) for link in judgement.relations),
         fusion_version=FUSION_VERSION,
         prompt_version=FUSION_PROMPT_VERSION,
     )
 
 
-def without_unresolvable_relations(
-    judgement: DurableJudgement, visible_ids: Collection[str]
-) -> DurableJudgement:
+def without_unresolvable_relations(judgement: DurableJudgement, visible_ids: Collection[str]) -> DurableJudgement:
     """剪掉指向"不会落盘的判断"的关系。
 
     个人版只跟踪主体一个人，旁人的判断不落盘。而并行关系是**相互**的：模型按提示词只在一边
@@ -265,16 +258,13 @@ def without_unresolvable_relations(
     return replace(judgement, relations=kept)
 
 
-def _target_identity(
-    link: JudgementLink, identities: Mapping[int, str], context: tuple[str, ...]
-) -> str:
+def _target_identity(link: JudgementLink, identities: Mapping[int, str], context: tuple[str, ...]) -> str:
     """把关系的临时目标换成耐久身份；本批与上下文两个来源在这里合流。"""
 
     if link.context_no is not None:
         if link.context_no > len(context):
             raise BehaviorFusionError(
-                f"relation references context judgement C{link.context_no}, "
-                f"but only {len(context)} were supplied"
+                f"relation references context judgement C{link.context_no}, but only {len(context)} were supplied"
             )
         return context[link.context_no - 1]
     assert link.target_no is not None
@@ -333,9 +323,7 @@ def persistable_judgements(
     "staged 判断 == 回执 judgement_ids" 校验静默失效。
     """
 
-    return tuple(
-        item for item in judgements if not item.is_readable or primary_subject in item.subjects
-    )
+    return tuple(item for item in judgements if not item.is_readable or primary_subject in item.subjects)
 
 
 def judgement_payload(judgement: DurableJudgement) -> dict[str, Any]:
@@ -354,8 +342,7 @@ def judgement_payload(judgement: DurableJudgement) -> dict[str, Any]:
         "goal": judgement.goal,
         "summary": judgement.summary,
         "basis": [
-            {"semantics": fact.semantics, "observation_ids": list(fact.observation_ids)}
-            for fact in judgement.basis
+            {"semantics": fact.semantics, "observation_ids": list(fact.observation_ids)} for fact in judgement.basis
         ],
         "status": None if judgement.status is None else judgement.status.value,
         "status_basis": None if judgement.status_basis is None else judgement.status_basis.value,

@@ -78,7 +78,9 @@ class ForesightLedgerStore:
     # ── 目录与字节 ──────────────────────────────────────────────────────────
 
     def _create(self, root: Path, day: date, identity: str, payload: dict[str, object]) -> bool:
-        encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
         path = self._day_dir(root, day) / f"{identity}.json"
         try:
             return atomic_create_bytes(path, encoded, artifact_root=self.root)

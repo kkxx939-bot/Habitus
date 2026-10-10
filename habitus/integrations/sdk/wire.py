@@ -66,14 +66,8 @@ def encode_recall(value: AgentRecallResult) -> dict[str, object]:
             }
             for item in value.memories
         ],
-        "summaries": [
-            {"reference": item.reference, "score": item.score}
-            for item in value.summaries
-        ],
-        "degradations": [
-            {"stage": item.stage, "error_type": item.error_type}
-            for item in value.degradations
-        ],
+        "summaries": [{"reference": item.reference, "score": item.score} for item in value.summaries],
+        "degradations": [{"stage": item.stage, "error_type": item.error_type} for item in value.degradations],
         "budget_exhausted": value.budget_exhausted,
     }
 

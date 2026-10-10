@@ -110,10 +110,7 @@ class MemoryFieldCompactor:
                     if field.role is MemoryFieldRole.ADDRESS
                 },
                 "content_fields": source_fields,
-                "field_rules": {
-                    field.name: field.description
-                    for field in content_fields
-                },
+                "field_rules": {field.name: field.description for field in content_fields},
             }
         )
         if len(payload) > self.config.max_input_chars:
@@ -153,9 +150,7 @@ class MemoryFieldCompactor:
         except (TypeError, ValueError) as exc:
             raise MemoryFieldCompactionError("L2 semantic field operations failed server validation") from exc
         changed = tuple(
-            field.name
-            for field in content_fields
-            if validated.get(field.name) != document.fields.get(field.name)
+            field.name for field in content_fields if validated.get(field.name) != document.fields.get(field.name)
         )
         if changed and _content_size(validated, content_fields) >= _content_size(document.fields, content_fields):
             raise MemoryFieldCompactionError("L2 semantic compaction did not reduce business content")

@@ -74,7 +74,9 @@ class PredictionTreeConfig:
     shrink_pool_to_weekday: float
     shrink_weekday_to_all_day: float
     laplace_epsilon: float
-    transition_window_seconds: float
+    #: 转移窗口（"同一条链"）有多少槽。单位是槽、与池化邻域 ``pool_half_width`` 同一把尺，但键分开（用户 10-07：
+    #: 「不如和池化时间一样3个槽位，到时候配置也好配置一些」）；语义树的"同一条链"跨度段读的也是它。
+    transition_window_slots: int
     shrink_edge: float
     recurrence_window_days: float
     rebuild_interval_seconds: float
@@ -107,7 +109,9 @@ class PredictionTreeConfig:
         ):
             _positive(getattr(self, name), name, maximum=10_000.0)
         _positive(self.laplace_epsilon, "laplace_epsilon", maximum=100.0)
-        _positive(self.transition_window_seconds, "transition_window_seconds", maximum=86_400.0)
+        _non_negative_int(self.transition_window_slots, "transition_window_slots", maximum=self.slots_per_day)
+        if self.transition_window_slots < 1:
+            raise PredictionTreeError("transition_window_slots must be at least one slot")
         _positive(self.recurrence_window_days, "recurrence_window_days", maximum=3_650.0)
         _positive(self.rebuild_interval_seconds, "rebuild_interval_seconds", maximum=604_800.0)
         _non_negative_int(self.published_generations, "published_generations", maximum=365)
@@ -123,6 +127,12 @@ class PredictionTreeConfig:
     @property
     def slots_per_day(self) -> int:
         return MINUTES_PER_DAY // self.slot_minutes
+
+    @property
+    def transition_window_seconds(self) -> float:
+        """转移窗口折成秒：配对按开始时刻的秒差算。"""
+
+        return float(self.transition_window_slots * self.slot_minutes * 60)
 
     def estimation_parameters(self) -> dict[str, float | int]:
         """只含**会改变数字**的参数；发布指纹以此为准。
@@ -144,7 +154,7 @@ class PredictionTreeConfig:
                 "shrink_pool_to_weekday",
                 "shrink_weekday_to_all_day",
                 "laplace_epsilon",
-                "transition_window_seconds",
+                "transition_window_slots",
                 "shrink_edge",
                 "recurrence_window_days",
             )

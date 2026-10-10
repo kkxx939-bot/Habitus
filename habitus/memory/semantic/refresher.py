@@ -240,9 +240,7 @@ class MemorySemanticRefresher:
                 deleted = self.tree.delete_layers(directory)
                 return MemorySemanticRefreshResult(
                     directory=directory,
-                    status=(
-                        MemorySemanticRefreshStatus.DELETED if deleted else MemorySemanticRefreshStatus.UNCHANGED
-                    ),
+                    status=(MemorySemanticRefreshStatus.DELETED if deleted else MemorySemanticRefreshStatus.UNCHANGED),
                     source_digest=snapshot.digest,
                 )
         if stale:

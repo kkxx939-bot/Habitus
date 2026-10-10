@@ -67,7 +67,13 @@ class SceneDayContext:
             (record for past in history_days(concepts, day) if past < day for record in hits.read_day(past)), concepts
         )
         self.baselines: BaselineSnapshot = baseline_table(
-            _before(hits, day), concepts, day=day, recent_days=recent_days, rhythms=rhythms, slack_minutes=slack_minutes, timezone=timezone
+            _before(hits, day),
+            concepts,
+            day=day,
+            recent_days=recent_days,
+            rhythms=rhythms,
+            slack_minutes=slack_minutes,
+            timezone=timezone,
         )
 
     def situation_for(self, document: BehaviorDocument) -> SituationOutcome:
@@ -78,7 +84,9 @@ class SceneDayContext:
         moment = document.address.started_at
         history = self.history
         if self.reads_today:
-            today = hit_events((record for record in self.hits.read_day(self.day) if record.started_at < moment), self.concepts)
+            today = hit_events(
+                (record for record in self.hits.read_day(self.day) if record.started_at < moment), self.concepts
+            )
             history = tuple(sorted((*history, *today), key=lambda item: (item.at.timestamp(), item.identity)))
         return situation_hits(
             self.concepts,

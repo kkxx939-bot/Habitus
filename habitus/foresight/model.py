@@ -88,7 +88,7 @@ class Provenance:
 
 @dataclass(frozen=True)
 class Moment:
-    """"此刻"在钟面上的位置，外加当地日历对今天的说法。
+    """ "此刻"在钟面上的位置，外加当地日历对今天的说法。
 
     契约：``at`` 必须是**主体的本地时刻**（与行为树上 occurrence 同一偏移）。今天是哪一天、
     此刻在哪个槽，全部从它的本地时分算——传 UTC 进来会读错一天、也会读错槽。``slot`` 与
@@ -183,13 +183,21 @@ class UnsealedRow:
 
 
 class UnsealedReader(Protocol):
-    """"这段时间里有哪些还没封口的判断"。生产实现读判断存储，住组合根；本包只认这个契约。"""
+    """ "这段时间里有哪些还没封口的判断"。生产实现读判断存储，住组合根；本包只认这个契约。
+
+    ``prepare`` 每拍装配之前调一次（异步：生产实现要给新出现的链归类，那要调模型）；``rows`` 在装配时同步读。
+    """
+
+    async def prepare(self, *, until: datetime) -> None: ...
 
     def rows(self, *, since: datetime, until: datetime) -> tuple[UnsealedRow, ...]: ...
 
 
 class NoUnsealed:
     """没有判断存储可读时的显式空实现（脚本、离线重放）：明说"最近一小时没补"，不是漏了。"""
+
+    async def prepare(self, *, until: datetime) -> None:
+        return None
 
     def rows(self, *, since: datetime, until: datetime) -> tuple[UnsealedRow, ...]:
         return ()

@@ -445,19 +445,30 @@ workflow:
 #   worker_shutdown_timeout_seconds: 30
 #   coverage_window_days: 7            # 上游最大补发跨度：重投去重判据；覆盖记录/回执/账本的过期期限（覆盖记录在其交付释放前不过期）
 #   max_fragments_per_segment: 60      # 一次融合的段容量；8k 输出预算下实测 60 条才稳
-#   # 行为类型词表（BHV-KINDS-002）；留空取 behavior/kinds/config.py 的默认值
-#   kinds_batch_size: 10               # 一次归一调用判几个未知名字
-#   kinds_vector_candidates: 30        # 每个名字的候选：embedding 最近邻取几个
-#   kinds_frequent_candidates: 20      # 再并上命中天数最多的几个
-#   kinds_base_days: 30                # 存活期基础天数：一次性名字这么久没再命中就删
-#   kinds_gap_multiplier: 3            # 周期行为按 自己最长命中间隔 × 倍数 续命
-#   kinds_literal_candidates: 30       # embedding 不可用时字面重合取几个候选
-#   kinds_validation_rounds: 2         # 违约名字的重问轮数（每轮只重问违约的）
-#   kinds_max_kinds: 10000             # 词表条目上限（护栏）
-#   kinds_max_aliases_per_kind: 200    # 每类别名上限（护栏）
-#   kinds_max_encoded_bytes: 16777216  # kinds.md 字节上限；一条满账条目≈1KB，要盖住 max_kinds 条
-#   kinds_transient_retries: 5         # 归一调用对超时/断连的有界重试
+#   # 基础词表（裁定 6：门槛全部是配置）；留空取 behavior/kinds/config.py 的默认值。标"待定档"的要等真实数据重定
+#   kinds_default_lane: session        # 融合还没产出 source_lane 前，归类请求用哪条 lane（session / physical）
+#   kinds_batch_size: 10               # 白天归类一次调用判几条
+#   kinds_validation_rounds: 2         # 没答好的条目重问几轮（每轮只问没答好的），用尽当「待定」
+#   kinds_transient_retries: 5         # 模型调用对超时/断连的有界重试
 #   kinds_transient_retry_delay_seconds: 5
+#   kinds_max_encoded_bytes: 16777216  # 词表各文件（清单、变更日志、待定池……）的字节上限
+#   kinds_max_examples: 3              # 每类最多几条代表例子
+#   kinds_recurrence_min_count: 3      # 每晚新增：一组待定至少几条才建类（待定档）
+#   kinds_recurrence_min_days: 3       # 每晚新增：且至少跨几天（待定档）
+#   kinds_max_pending: 5000            # 待定池上限（保护闸）
+#   kinds_nightly_hour: 2              # 每晚新增在本地几点之后跑
+#   kinds_revision_weekday: 2          # 定期拆改在每周几（0=周一，2=周三）
+#   kinds_revision_hour: 3             # 定期拆改在本地几点之后跑
+#   kinds_merge_evidence_runs: 2       # 合并要在连续几个拆改周期里都被提出才算有证据（裁定 17）
+#   kinds_cooldown_days: 14            # 改过的类冷却几天（待定档）
+#   kinds_max_changes_per_revision: 3  # 一次拆改最多改几处（待定档）
+#   kinds_lane_candidate_cap: 80       # 同 lane 在用类超过这个数就报警（保护闸；以后接回向量召回）
+#   kinds_anchors_per_class: 8         # 定期拆改锚点自检：每个没动过的类取几个锚点（裁定 17）
+#   kinds_max_anchor_pull: 0.02        # 锚点自检：新清单下被拉走的锚点最多占几成（裁定 17）
+#   kinds_revision_samples_per_class: 8  # 拆改时每类给模型看几条原话
+#   kinds_checkpoint_every: 200        # 扫树、重打树时每处理多少条续一次 sweep 租约
+#   kinds_prompt_max_steps: 12         # 归类与待定池给模型看的每条最多列几步
+#   kinds_sample_max_steps: 4          # 定期拆改抽样原话每条最多列几步
 
 # 时间预测树的夜批。缺省未启用；置 enabled: true 即启用，Runtime 会在行为侧也启用时组装
 # 重建 Worker（这棵树读的就是行为树，行为侧没开就没有输入）。
@@ -477,7 +488,8 @@ workflow:
 #   shrink_pool_to_weekday: 5        # 待定档：同上
 #   shrink_weekday_to_all_day: 5     # 待定档：同上
 #   laplace_epsilon: 0.5             # 待定档：边的目标份额平滑
-#   transition_window_seconds: 1800  # 待定档：链内/链间间隔的双峰谷底（最依赖真实数据）
+#   transition_window_slots: 3       # 转移窗口（同一条链）几槽：3 槽 = 45 分钟，与池化邻域同一把尺、键分开；
+#                                    #   语义树的"同一条链"跨度段也读它。真实数据上链内 / 链间间隔还没有明显的谷底，跑数后再校
 #   shrink_edge: 5                   # 待定档：留出集上最小化对数损失
 #   recurrence_window_days: 90       # 待定档：超过多久算"重新开始"而不是"复发"
 #   recurrence_half_life_days: 365   # 待定档：复发证据窗必须比钟面长——月频行为在 τ=60 下有效样本封顶 3.4 个
@@ -486,11 +498,27 @@ workflow:
 #   worker_shutdown_timeout_seconds: 30
 
 # 语义关联层。缺省未启用；置 enabled: true 即启用（行为侧必须也启用）。
-# 旧语义树（按候选累积的关联记录）2026-09-26 整块删掉，按《语义树重构》方案按功能分支重建：
-# concepts / hypotheses / occurrences / ledger 四支落盘，views 只做投影。每一支的旋钮在那一支落地时
-# 再进这一组，数值一律先在重放上定；现在只有开关。
+# relations 是关系检验的统计门槛（裁定 26）：每一项都可以不写，不写就是下面注释里的默认值（用户 10-07 定的起点，
+# 跑真实数据后再校）。和时间有关的三个数（槽宽、转移窗口、久别重来）只认 prediction 那一组，这里不另配。
 # scene:
 #   enabled: true
+#   relations:
+#     fdr: 0.10                        # 第 1 道：当晚检验族的假发现率
+#     forward_min_antecedents: 5       # 前向验证：发现之后新数据里至少攒够几次独立的前因才验
+#     forward_alpha: 0.05              # 前向验证的单侧显著性
+#     forward_power: 0.80              # 要攒几次按功效定：真关系有这么大把握过关（按发现时效应区间离 0 近的一端算）
+#     forward_max_antecedents: 40      #   ……至多攒这么多次
+#     min_absolute_lift: 0.05          # 第 3 道"影响够大"：差值区间下限的绝对差
+#     min_relative_lift: 0.20          #   ……与相对差（两样都要够）
+#     maintenance_blocks: 8            # 维持检验：每攒满这么多块新数据判一次，连续两段都说没了才失效
+#     heterogeneity_alpha: 0.05        # 第 2 道：各块效应异质性的显著性
+#     interval_level: 0.95             # 差值区间的置信度
+#     bootstrap_rounds: 400            #   ……按块重抽样的次数
+#     exact_strata_limit: 400          # 有信息的层不超过这么多时 p 值精确算，超过用正态近似
+#     first_seen_min_days: 14          # 长跨度"新类第一次出现"：记录开始后至少过这么多天
+#     first_seen_min_blocks: 3         #   ……并且至少这么多个这一类自己的块长
+#     moderation_min_antecedents: 40   # 调节条件只在独立样本至少这么多的前因上开检验
+#     max_blind_share: 0.5             # 后果是细分概念时，"判不了"的窗口超过这一成就不进检验族
 
 # 主体所在地。时区与当地日历**两层共用**：情景树读侧用它标每一天的日型（补班、节假日），预测层用它
 # 造"此刻"的时钟与本地日界。分别配两份迟早对不上，所以单独一组，由组合根分发。
@@ -506,7 +534,7 @@ workflow:
 # 与之对应的历史背景取自后者，缺一边就装配不出证据）。
 #
 # 这一组**只有保护闸**，没有算法参数：窗口宽度就是 prediction.pool_half_width，转移窗就是
-# prediction.transition_window_seconds，两边不各配一份。下面三个数防的是上下文被撑爆与一次
+# prediction.transition_window_slots，两边不各配一份。下面三个数防的是上下文被撑爆与一次
 # 查询把整棵树扫穿，全部是启动档、要在真实数据上重定——重定的是数值，不是"要不要有这个闸"。
 # foresight:
 #   enabled: true

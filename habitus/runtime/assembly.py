@@ -50,6 +50,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 
+from habitus.behavior.kinds.reader import VocabularyReader
 from habitus.config import HabitusConfig
 from habitus.conversation import (
     ConversationBehaviorProjectionConsumer,
@@ -147,8 +148,8 @@ from habitus.runtime.worker import MemoryWorker
 def _nightly_stages(
     settlement: SettlementStage | None, following: Callable[[], Awaitable[object]] | None
 ) -> Callable[[], Awaitable[object]] | None:
-    """重建之后的几拍串成一个钩子：先结算、后跟其余的（新语义树的映射 → 开承诺 → 结算 → 投影，按
-    《语义树重构》的线性顺序，随后面几刀接进 ``following``）。任一缺席就只跑另一拍。
+    """重建之后的几拍串成一个钩子：先结算、后跟其余的（新语义树的夜批 ``runtime.nightly.Nightly`` 在第 11 步接常驻
+    worker 时接进 ``following``）。任一缺席就只跑另一拍。
 
     结算的失败在这里吞掉（它自己已经记了观测事件）：一个读不出来的账本文件不该让后面整夜不跑。
     后面那一拍的失败仍然往上抛，由 worker 的 ``_run_after_rebuild`` 记账——那是既有行为，不改。
@@ -185,9 +186,7 @@ def build_runtime(
         raise TypeError("providers must be ProviderFactory or None")
     if vector_stores is not None and not isinstance(vector_stores, VectorStoreFactory):
         raise TypeError("vector_stores must be VectorStoreFactory or None")
-    if conversation_adapters is not None and not isinstance(
-        conversation_adapters, ConversationAdapterRegistry
-    ):
+    if conversation_adapters is not None and not isinstance(conversation_adapters, ConversationAdapterRegistry):
         raise TypeError("conversation_adapters must be ConversationAdapterRegistry or None")
     if path_lock is not None and not isinstance(path_lock, PathLock):
         raise TypeError("path_lock must be PathLock or None")
@@ -410,10 +409,7 @@ def build_runtime(
         range_summary_store,
         max_source_reads=(
             conversation_config.lifecycle.summary_compaction.range_to_archive.max_source_count
-            * (
-                1
-                + conversation_config.lifecycle.summary_compaction.segment_to_range.max_source_count
-            )
+            * (1 + conversation_config.lifecycle.summary_compaction.segment_to_range.max_source_count)
         ),
     )
     summary_vector_store = resolved_vector_stores.create(
@@ -424,9 +420,7 @@ def build_runtime(
             max_search_hits=conversation_config.summary_vector_index.max_search_hits,
             max_record_chars=conversation_config.summary_vector_index.max_record_chars,
         ),
-        credentials=config.credentials.resolve(
-            conversation_config.summary_vector_store.route.credential_ref
-        ),
+        credentials=config.credentials.resolve(conversation_config.summary_vector_store.route.credential_ref),
         path_lock=summary_vector_lock,
     )
     summary_vector_index = PersistentConversationSummaryVectorIndex(
@@ -621,7 +615,6 @@ def build_runtime(
         path_lock=resolved_lock,
         observer=operation_observer,
         span_controller=managed_observability,
-        embedder=embedder,
     )
     # behavior 关着而 prediction 开着的组合已经在配置层被硬拒（见 HabitusConfig 的跨域校验），
     # 所以这里 behavior_components 为 None 时 prediction 必然也没开，直接跳过即可。
@@ -644,18 +637,24 @@ def build_runtime(
             config,
             behavior_tree=behavior_components.tree,
             store=prediction_components.store,
+            # 预测层给模型看的标题用类名：编号 → 类名从词表现读（预测层自己不认识词表包）。
+            class_labels=VocabularyReader(behavior_components.kind_store).class_names,
+            # 承诺上的类编号到结算时可能已被拆改：按"现在对应哪些编号"结算（同一份词表）
+            current_classes=VocabularyReader(behavior_components.kind_store).current_ids,
+            # 词表迁移做到一半时不结算（有未完成的迁移计划就是在迁移）
+            vocabulary_migrating=lambda: behavior_components.kind_store.read_migration() is not None,
             # "那天定稿了"只有归约说了算（链都落树、封口视界已过那天的本地结束），结算按它来。
             closed_days=behavior_components.reduction_runner.closed_days,
-            # 未封口的那一截从这个 Runtime 的判断存储读，按归约自己的口径（消费账本）与词表。
+            # 未封口的那一截从这个 Runtime 的判断存储读，按归约自己的口径（消费账本）与它的白天归类。
             judgements=behavior_components.judgements,
             ledger=behavior_components.reduction_runner.ledger,
-            kinds=behavior_components.kind_store,
+            stamping=behavior_components.reduction_runner.kinds,
             structured_chat=structured_chat,
             observer=operation_observer,
         )
     )
     if prediction_components is not None and behavior_components is not None:
-        # 夜批的顺序：树重建 → 结算承诺（对着归约已定稿的日子）→ 新语义树的各拍（后面几刀接进第二个参数）。
+        # 夜批的顺序：树重建 → 结算承诺（对着归约已定稿的日子）→ 新语义树的夜批（第 11 步接进第二个参数）。
         # 结算只读账本与行为树；它失败自己留观测、被这里吞掉，不许拖着后面一夜不跑。
         prediction_components.worker.after_rebuild = _nightly_stages(
             None if foresight_components is None else foresight_components.settlement,

@@ -16,7 +16,7 @@ from typing import Any
 
 from habitus.config.loader import ConfigError, construct_config
 
-INTEGER_PARAMETERS = ("slot_minutes", "pool_half_width", "published_generations")
+INTEGER_PARAMETERS = ("slot_minutes", "pool_half_width", "transition_window_slots", "published_generations")
 
 TREE_PARAMETERS = (
     "slot_minutes",
@@ -28,7 +28,7 @@ TREE_PARAMETERS = (
     "shrink_pool_to_weekday",
     "shrink_weekday_to_all_day",
     "laplace_epsilon",
-    "transition_window_seconds",
+    "transition_window_slots",
     "shrink_edge",
     "recurrence_window_days",
     "rebuild_interval_seconds",
@@ -52,7 +52,7 @@ class PredictionConfig:
     shrink_pool_to_weekday: float | None = None
     shrink_weekday_to_all_day: float | None = None
     laplace_epsilon: float | None = None
-    transition_window_seconds: float | None = None
+    transition_window_slots: int | None = None
     shrink_edge: float | None = None
     recurrence_window_days: float | None = None
     rebuild_interval_seconds: float | None = None
@@ -66,9 +66,7 @@ class PredictionConfig:
             or not isinstance(self.worker_shutdown_timeout_seconds, int | float)
             or not 1.0 <= float(self.worker_shutdown_timeout_seconds) <= 3_600.0
         ):
-            raise ValueError(
-                "prediction.worker_shutdown_timeout_seconds must be between 1 and 3600"
-            )
+            raise ValueError("prediction.worker_shutdown_timeout_seconds must be between 1 and 3600")
         for field in fields(self):
             if field.name in {"enabled", "worker_shutdown_timeout_seconds"}:
                 continue
@@ -86,10 +84,7 @@ class PredictionConfig:
             return
         missing = [name for name in TREE_PARAMETERS if getattr(self, name) is None]
         if missing:
-            raise ConfigError(
-                "config.prediction is enabled but leaves these parameters unset: "
-                + ", ".join(missing)
-            )
+            raise ConfigError("config.prediction is enabled but leaves these parameters unset: " + ", ".join(missing))
 
     def tree_parameters(self) -> dict[str, Any]:
         """按 ``PredictionTreeConfig`` 的字段名交出十三个值；未启用时调用即错。

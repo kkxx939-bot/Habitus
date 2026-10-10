@@ -26,6 +26,7 @@ from habitus.foresight.render import render_pack
 from habitus.model_client import ChatClient, ModelTransportError, StructuredChatClient
 from tests.unit.foresight.fixtures import MONDAY, Ground, ScriptedJudge, at
 from tests.unit.foresight.scripted_model import ScriptedProvider, model_config, recording_client
+from tests.unit.kind_ids import kind_id, kind_names
 
 NOW = MONDAY + timedelta(days=28)
 JUDGED_AT = datetime(2026, 8, 31, 11, 5, tzinfo=UTC)
@@ -49,8 +50,10 @@ def pack_for(tmp_path) -> EvidencePack:
 
 
 def verdict(kind: str, **overrides: object) -> dict[str, object]:
+    """模型照抄的是那一节的标题（类名），不是编号。"""
+
     row: dict[str, object] = {
-        "kind_token": kind,
+        "kind_token": kind_names().get(kind, kind),
         "verdict": "会",
         "window": {"from_slot": 76, "to_slot": 78},
         "next": ["洗澡"],
@@ -66,80 +69,93 @@ def output(*verdicts: dict[str, object], day_state: str = "正常", day_note: st
 
 
 def good_output() -> dict[str, object]:
-    return output(verdict("打球"), verdict("收拾球包", verdict="不会", window=None, next=[], basis=[1]))
+    return output(
+        verdict(kind_id("打球")), verdict(kind_id("收拾球包"), verdict="不会", window=None, next=[], basis=[1])
+    )
 
 
 def test_schema_pins_one_verdict_per_expanded_candidate_by_name() -> None:
-    schema = judge_json_schema(("打球", "收拾球包"))
+    schema = judge_json_schema((kind_id("打球"), kind_id("收拾球包")))
     verdicts = schema["properties"]["verdicts"]
     assert (verdicts["minItems"], verdicts["maxItems"]) == (2, 2)
-    assert verdicts["items"]["properties"]["kind_token"]["enum"] == ["打球", "收拾球包"]
+    assert verdicts["items"]["properties"]["kind_token"]["enum"] == [kind_id("打球"), kind_id("收拾球包")]
     assert "enum" not in JUDGE_JSON_SCHEMA["properties"]["verdicts"]["items"]["properties"]["kind_token"]
     # 没有摊开的候选时条数钉成 0，enum 不能为空所以不设。
     empty = judge_json_schema(())["properties"]["verdicts"]
     assert (empty["minItems"], empty["maxItems"]) == (0, 0)
     assert "enum" not in empty["items"]["properties"]["kind_token"]
     with pytest.raises(ValueError):
-        judge_json_schema(("打球", "打球"))
+        judge_json_schema((kind_id("打球"), kind_id("打球")))
     assert JUDGE_VERSION == f"{JUDGE_PROMPT_VERSION}+schema{SCHEMA_FINGERPRINT}+{ASSEMBLY_VERSION}"
 
 
 def test_a_clean_answer_maps_card_numbers_back_to_uris(tmp_path) -> None:
     pack = pack_for(tmp_path)
-    assert [item.kind_token for item in pack.expanded] == ["打球", "收拾球包"]
-    play = pack.expanded[0]
+    assert [item.kind_token for item in pack.expanded] == sorted([kind_id("打球"), kind_id("收拾球包")])
+    play = next(item for item in pack.expanded if item.kind_token == kind_id("打球"))
     judgement = assemble_judgement(good_output(), pack, judged_at=JUDGED_AT, version=JUDGE_VERSION)
 
     assert judgement.signals == ()
     assert judgement.judge_version == JUDGE_VERSION
     assert (judgement.generation, judgement.moment) == (pack.generation, pack.moment)
     assert (judgement.day_state, judgement.day_note) == ("正常", None)
-    first = judgement.verdict_for("打球")
+    first = judgement.verdict_for(kind_id("打球"))
     assert first is not None
     assert first.basis == (play.background.cards[0].uri, play.background.cards[1].uri)
     assert first.window == (76, 78) and first.next == ("洗澡",) and first.note == "此刻像 #1、#2 之前"
     assert judgement.expected == (first,)
-    second = judgement.verdict_for("收拾球包")
+    second = judgement.verdict_for(kind_id("收拾球包"))
     assert second is not None and second.verdict == "不会" and second.window is None
-    assert second.basis == (pack.expanded[1].background.cards[0].uri,)
+    assert second.basis == (
+        next(item for item in pack.expanded if item.kind_token == kind_id("收拾球包")).background.cards[0].uri,
+    )
 
 
 def test_unknown_and_repeated_candidates_are_dropped_and_unanswered_ones_become_undecided(tmp_path) -> None:
     pack = pack_for(tmp_path)
     judgement = assemble_judgement(
-        output(verdict("打球"), verdict("打球", verdict="不会", window=None), verdict("跳舞"), "nonsense"),
+        output(
+            verdict(kind_id("打球")),
+            verdict(kind_id("打球"), verdict="不会", window=None),
+            verdict(kind_id("跳舞")),
+            "nonsense",
+        ),
         pack,
         judged_at=JUDGED_AT,
         version=JUDGE_VERSION,
     )
-    assert [item.kind_token for item in judgement.verdicts] == ["打球", "收拾球包"]
-    play = judgement.verdict_for("打球")
+    assert [item.kind_token for item in judgement.verdicts] == sorted([kind_id("打球"), kind_id("收拾球包")])
+    play = judgement.verdict_for(kind_id("打球"))
     assert play is not None and play.verdict == "会"
-    left = judgement.verdict_for("收拾球包")
-    assert left == CandidateVerdict(kind_token="收拾球包", verdict="说不准", window=None, next=(), basis=(), note="")
-    assert "verdict_dropped: 打球 appears more than once" in judgement.signals
+    left = judgement.verdict_for(kind_id("收拾球包"))
+    assert left == CandidateVerdict(
+        kind_token=kind_id("收拾球包"), verdict="说不准", window=None, next=(), basis=(), note=""
+    )
+    assert f"verdict_dropped: {kind_id('打球')} appears more than once" in judgement.signals
     assert "verdict_dropped: '跳舞' is not an expanded candidate in this pack" in judgement.signals
     assert "verdict_dropped: malformed entry" in judgement.signals
-    assert "unanswered: 收拾球包 got no verdict; recorded as 说不准" in judgement.signals
+    assert f"unanswered: {kind_id('收拾球包')} got no verdict; recorded as 说不准" in judgement.signals
 
 
 def test_a_yes_without_cards_becomes_undecided_and_unknown_cards_are_dropped(tmp_path) -> None:
     pack = pack_for(tmp_path)
     judgement = assemble_judgement(
-        output(verdict("打球", basis=[]), verdict("收拾球包", basis=[1, 99, 1, "x"], next=[])),
+        output(verdict(kind_id("打球"), basis=[]), verdict(kind_id("收拾球包"), basis=[1, 99, 1, "x"], next=[])),
         pack,
         judged_at=JUDGED_AT,
         version=JUDGE_VERSION,
     )
-    play = judgement.verdict_for("打球")
+    play = judgement.verdict_for(kind_id("打球"))
     assert play is not None and play.verdict == "说不准" and play.basis == () and play.next == ()
-    assert "verdict_degraded: 打球 says 会 but cites no card; recorded as 说不准" in judgement.signals
-    left = judgement.verdict_for("收拾球包")
+    assert f"verdict_degraded: {kind_id('打球')} says 会 but cites no card; recorded as 说不准" in judgement.signals
+    left = judgement.verdict_for(kind_id("收拾球包"))
     assert left is not None and left.verdict == "会"
-    assert left.basis == (pack.expanded[1].background.cards[0].uri,)
-    assert "basis_dropped: 收拾球包 cites card 99, which is not in this pack" in judgement.signals
-    assert "basis_dropped: 收拾球包 repeats card #1" in judgement.signals
-    assert "basis_dropped: 收拾球包 cites card 'x', which is not in this pack" in judgement.signals
+    assert left.basis == (
+        next(item for item in pack.expanded if item.kind_token == kind_id("收拾球包")).background.cards[0].uri,
+    )
+    assert f"basis_dropped: {kind_id('收拾球包')} cites card 99, which is not in this pack" in judgement.signals
+    assert f"basis_dropped: {kind_id('收拾球包')} repeats card #1" in judgement.signals
+    assert f"basis_dropped: {kind_id('收拾球包')} cites card 'x', which is not in this pack" in judgement.signals
 
 
 def test_next_steps_must_follow_a_cited_card(tmp_path) -> None:
@@ -147,17 +163,22 @@ def test_next_steps_must_follow_a_cited_card(tmp_path) -> None:
 
     pack = pack_for(tmp_path)
     judgement = assemble_judgement(
-        output(verdict("打球", next=["洗澡", "跳舞", "洗澡"]), verdict("收拾球包", basis=[1], next=["洗澡", "打球"])),
+        output(
+            verdict(kind_id("打球"), next=["洗澡", "跳舞", "洗澡"]),
+            verdict(kind_id("收拾球包"), basis=[1], next=["洗澡", "打球"]),
+        ),
         pack,
         judged_at=JUDGED_AT,
         version=JUDGE_VERSION,
     )
-    play = judgement.verdict_for("打球")
+    play = judgement.verdict_for(kind_id("打球"))
     assert play is not None and play.next == ("洗澡",)
-    left = judgement.verdict_for("收拾球包")
+    left = judgement.verdict_for(kind_id("收拾球包"))
     assert left is not None and left.next == ("打球",)
-    assert "next_dropped: 打球 names '跳舞', which follows none of the cited cards" in judgement.signals
-    assert "next_dropped: 收拾球包 names '洗澡', which follows none of the cited cards" in judgement.signals
+    assert f"next_dropped: {kind_id('打球')} names '跳舞', which follows none of the cited cards" in judgement.signals
+    assert (
+        f"next_dropped: {kind_id('收拾球包')} names '洗澡', which follows none of the cited cards" in judgement.signals
+    )
 
 
 def test_windows_must_fit_today_and_not_end_before_now(tmp_path) -> None:
@@ -170,65 +191,98 @@ def test_windows_must_fit_today_and_not_end_before_now(tmp_path) -> None:
         "shape": [76, 78],
     }
     for label, window in cases.items():
-        judgement = assemble_judgement(output(verdict("打球", window=window), verdict("收拾球包", basis=[1])), pack, judged_at=JUDGED_AT, version=JUDGE_VERSION)
-        play = judgement.verdict_for("打球")
+        judgement = assemble_judgement(
+            output(verdict(kind_id("打球"), window=window), verdict(kind_id("收拾球包"), basis=[1])),
+            pack,
+            judged_at=JUDGED_AT,
+            version=JUDGE_VERSION,
+        )
+        play = judgement.verdict_for(kind_id("打球"))
         assert play is not None and play.verdict == "会" and play.window is None, label
-        assert any(note.startswith("window_dropped: 打球") for note in judgement.signals), label
+        assert any(note.startswith(f"window_dropped: {kind_id('打球')}") for note in judgement.signals), label
     # 起槽早于此刻的截到此刻：时窗只说从此刻起的事，此刻之前那一截没意义，但止槽仍是有效信息。
-    judgement = assemble_judgement(output(verdict("打球", window={"from_slot": 60, "to_slot": 78}), verdict("收拾球包", basis=[1])), pack, judged_at=JUDGED_AT, version=JUDGE_VERSION)
-    play = judgement.verdict_for("打球")
-    assert play is not None and play.window == (76, 78)
-    assert any(note.startswith("window_clamped: 打球") for note in judgement.signals)
-    # 到此刻所在的槽为止仍算未来；「不会」不带时窗。
     judgement = assemble_judgement(
-        output(verdict("打球", window={"from_slot": 76, "to_slot": 76}), verdict("收拾球包", verdict="不会", basis=[1])),
+        output(
+            verdict(kind_id("打球"), window={"from_slot": 60, "to_slot": 78}), verdict(kind_id("收拾球包"), basis=[1])
+        ),
         pack,
         judged_at=JUDGED_AT,
         version=JUDGE_VERSION,
     )
-    play = judgement.verdict_for("打球")
+    play = judgement.verdict_for(kind_id("打球"))
+    assert play is not None and play.window == (76, 78)
+    assert any(note.startswith(f"window_clamped: {kind_id('打球')}") for note in judgement.signals)
+    # 到此刻所在的槽为止仍算未来；「不会」不带时窗。
+    judgement = assemble_judgement(
+        output(
+            verdict(kind_id("打球"), window={"from_slot": 76, "to_slot": 76}),
+            verdict(kind_id("收拾球包"), verdict="不会", basis=[1]),
+        ),
+        pack,
+        judged_at=JUDGED_AT,
+        version=JUDGE_VERSION,
+    )
+    play = judgement.verdict_for(kind_id("打球"))
     assert play is not None and play.window == (76, 76)
-    left = judgement.verdict_for("收拾球包")
+    left = judgement.verdict_for(kind_id("收拾球包"))
     assert left is not None and left.window is None
-    assert "window_dropped: 收拾球包 is judged 不会 yet carries a window" in judgement.signals
+    assert f"window_dropped: {kind_id('收拾球包')} is judged 不会 yet carries a window" in judgement.signals
 
 
 def test_unknown_verdicts_and_day_states_degrade_and_notes_are_cleaned(tmp_path) -> None:
     pack = pack_for(tmp_path)
     judgement = assemble_judgement(
-        output(verdict("打球", verdict="maybe"), verdict("收拾球包", basis=[1], note="  会​的 "), day_state="odd", day_note=" \t"),
+        output(
+            verdict(kind_id("打球"), verdict="maybe"),
+            verdict(kind_id("收拾球包"), basis=[1], note="  会​的 "),
+            day_state="odd",
+            day_note=" \t",
+        ),
         pack,
         judged_at=JUDGED_AT,
         version=JUDGE_VERSION,
     )
-    play = judgement.verdict_for("打球")
+    play = judgement.verdict_for(kind_id("打球"))
     assert play is not None and play.verdict == "说不准" and play.window == (76, 78)  # 说不准也可以带时窗
-    left = judgement.verdict_for("收拾球包")
+    left = judgement.verdict_for(kind_id("收拾球包"))
     assert left is not None and left.note == "会 的"
     # "没答"记 None，不写成"正常"——那是在替模型断言今天没事。
     assert (judgement.day_state, judgement.day_note) == (None, None)
-    assert "verdict_degraded: 打球 says 'maybe'; recorded as 说不准" in judgement.signals
+    assert f"verdict_degraded: {kind_id('打球')} says 'maybe'; recorded as 说不准" in judgement.signals
     assert "day_state_dropped: 'odd' is not a day state; recorded as not answered" in judgement.signals
-    abnormal = assemble_judgement(good_output() | {"day_state": "反常", "day_note": "往常这时已经收拾了球包"}, pack, judged_at=JUDGED_AT, version=JUDGE_VERSION)
+    abnormal = assemble_judgement(
+        good_output() | {"day_state": "反常", "day_note": "往常这时已经收拾了球包"},
+        pack,
+        judged_at=JUDGED_AT,
+        version=JUDGE_VERSION,
+    )
     assert (abnormal.day_state, abnormal.day_note) == ("反常", "往常这时已经收拾了球包")
 
 
 def test_non_array_references_and_integer_valued_floats_are_handled_not_crashed(tmp_path) -> None:
     pack = pack_for(tmp_path)
     judgement = assemble_judgement(
-        output(verdict("打球", basis="1", next="洗澡"), verdict("收拾球包", basis=[1.0], window={"from_slot": 76.0, "to_slot": 77.0}, next=[])),
+        output(
+            verdict(kind_id("打球"), basis="1", next="洗澡"),
+            verdict(kind_id("收拾球包"), basis=[1.0], window={"from_slot": 76.0, "to_slot": 77.0}, next=[]),
+        ),
         pack,
         judged_at=JUDGED_AT,
         version=JUDGE_VERSION,
     )
-    play = judgement.verdict_for("打球")
+    play = judgement.verdict_for(kind_id("打球"))
     assert play is not None and play.verdict == "说不准" and play.basis == () and play.next == ()
-    assert "basis_dropped: 打球 basis is not an array" in judgement.signals
-    assert "next_dropped: 打球 next is not an array" in judgement.signals
-    left = judgement.verdict_for("收拾球包")
-    assert left is not None and left.basis == (pack.expanded[1].background.cards[0].uri,) and left.window == (76, 77)
-    assert "index_coerced: 收拾球包 basis arrived as 1.0" in judgement.signals
-    assert "index_coerced: 收拾球包 window from_slot arrived as 76.0" in judgement.signals
+    assert f"basis_dropped: {kind_id('打球')} basis is not an array" in judgement.signals
+    assert f"next_dropped: {kind_id('打球')} next is not an array" in judgement.signals
+    left = judgement.verdict_for(kind_id("收拾球包"))
+    assert (
+        left is not None
+        and left.basis
+        == (next(item for item in pack.expanded if item.kind_token == kind_id("收拾球包")).background.cards[0].uri,)
+        and left.window == (76, 77)
+    )
+    assert f"index_coerced: {kind_id('收拾球包')} basis arrived as 1.0" in judgement.signals
+    assert f"index_coerced: {kind_id('收拾球包')} window from_slot arrived as 76.0" in judgement.signals
 
 
 def test_an_answer_that_is_not_about_this_pack_is_rejected_outright(tmp_path) -> None:
@@ -238,7 +292,7 @@ def test_an_answer_that_is_not_about_this_pack_is_rejected_outright(tmp_path) ->
     with pytest.raises(JudgeAssemblyError):
         assemble_judgement({"verdicts": "none"}, pack, judged_at=JUDGED_AT, version=JUDGE_VERSION)
     with pytest.raises(JudgeAssemblyError):
-        assemble_judgement(output(verdict("跳舞")), pack, judged_at=JUDGED_AT, version=JUDGE_VERSION)
+        assemble_judgement(output(verdict(kind_id("跳舞"))), pack, judged_at=JUDGED_AT, version=JUDGE_VERSION)
     # 产物类型的自洽错误也归成装配错误（让结构层纠正重问），不漏成 ForesightError 让整拍失败。
     with pytest.raises(JudgeAssemblyError, match="does not assemble"):
         assemble_judgement(good_output(), pack, judged_at=datetime(2026, 8, 31, 11, 5), version=JUDGE_VERSION)
@@ -246,13 +300,13 @@ def test_an_answer_that_is_not_about_this_pack_is_rejected_outright(tmp_path) ->
 
 def test_the_verdict_shape_refuses_self_contradiction() -> None:
     with pytest.raises(Exception, match="cite at least one card"):
-        CandidateVerdict(kind_token="打球", verdict="会", window=None, next=(), basis=(), note="")
+        CandidateVerdict(kind_token=kind_id("打球"), verdict="会", window=None, next=(), basis=(), note="")
     with pytest.raises(Exception, match="has no window"):
-        CandidateVerdict(kind_token="打球", verdict="不会", window=(1, 2), next=(), basis=(), note="")
+        CandidateVerdict(kind_token=kind_id("打球"), verdict="不会", window=(1, 2), next=(), basis=(), note="")
     with pytest.raises(Exception, match="only come from cited cards"):
-        CandidateVerdict(kind_token="打球", verdict="说不准", window=None, next=("洗澡",), basis=(), note="")
+        CandidateVerdict(kind_token=kind_id("打球"), verdict="说不准", window=None, next=("洗澡",), basis=(), note="")
     with pytest.raises(Exception, match="end before it starts"):
-        CandidateVerdict(kind_token="打球", verdict="会", window=(5, 4), next=(), basis=("u",), note="")
+        CandidateVerdict(kind_token=kind_id("打球"), verdict="会", window=(5, 4), next=(), basis=("u",), note="")
 
 
 def test_the_llm_judge_asks_once_with_the_pinned_schema_and_the_rendered_pack(tmp_path) -> None:
@@ -266,11 +320,16 @@ def test_the_llm_judge_asks_once_with_the_pinned_schema_and_the_rendered_pack(tm
     assert provider.calls == 1 and client.names == ["foresight_judgement"]
     pinned = client.schemas[0]["properties"]["verdicts"]
     assert (pinned["minItems"], pinned["maxItems"]) == (2, 2)
-    assert pinned["items"]["properties"]["kind_token"]["enum"] == ["打球", "收拾球包"]
+    # 选项是标题（类名），按候选的编号顺序排；答复由装配换回编号。
+    order = sorted([kind_id("打球"), kind_id("收拾球包")])
+    assert pinned["items"]["properties"]["kind_token"]["enum"] == [kind_names()[kind] for kind in order]
     assert provider.prompts[-1] == render_pack(pack)
     assert "- #1 " in provider.prompts[-1] and "钟面：槽宽 15 分钟" in provider.prompts[-1]
     assert judgement.judged_at == JUDGED_AT
-    assert [item.verdict for item in judgement.verdicts] == ["会", "不会"]
+    assert {item.kind_token: item.verdict for item in judgement.verdicts} == {
+        kind_id("打球"): "会",
+        kind_id("收拾球包"): "不会",
+    }
 
 
 def test_a_pack_with_nothing_expanded_is_still_asked_about_the_day(tmp_path) -> None:
@@ -286,10 +345,10 @@ def test_a_pack_with_nothing_expanded_is_still_asked_about_the_day(tmp_path) -> 
 
 def test_an_unusable_answer_is_corrected_by_the_structured_layer_and_the_judgement_says_so(tmp_path) -> None:
     pack = pack_for(tmp_path)
-    client, provider = recording_client([output(verdict("跳舞")), good_output()])
+    client, provider = recording_client([output(verdict(kind_id("跳舞"))), good_output()])
     judgement = asyncio.run(LLMJudge(client, clock=lambda: JUDGED_AT).judge(pack))
     assert provider.calls == 2
-    assert judgement.expected[0].kind_token == "打球"
+    assert judgement.expected[0].kind_token == kind_id("打球")
     # 第二轮才答对要留在判断的信号里：读判断的人得知道这不是一问就对的答复。
     assert "structured: answered on attempt 2" in judgement.signals
     assert judgement.judge_version == JUDGE_VERSION
@@ -311,7 +370,9 @@ class _FlakyClient(StructuredChatClient):
 
 
 def _flaky(failures: int) -> _FlakyClient:
-    return _FlakyClient(ChatClient(model_config(), ScriptedProvider([good_output()])), validation_retries=1, failures=failures)
+    return _FlakyClient(
+        ChatClient(model_config(), ScriptedProvider([good_output()])), validation_retries=1, failures=failures
+    )
 
 
 def test_transient_errors_are_retried_a_bounded_number_of_times(tmp_path, monkeypatch) -> None:
@@ -323,12 +384,16 @@ def test_transient_errors_are_retried_a_bounded_number_of_times(tmp_path, monkey
 
     monkeypatch.setattr("habitus.foresight.judge.service.asyncio.sleep", nap)
     client = _flaky(1)
-    judge = LLMJudge(client, config=JudgeConfig(transient_retries=1, transient_retry_delay_seconds=2.0), clock=lambda: JUDGED_AT)
-    assert asyncio.run(judge.judge(pack)).expected[0].kind_token == "打球"
+    judge = LLMJudge(
+        client, config=JudgeConfig(transient_retries=1, transient_retry_delay_seconds=2.0), clock=lambda: JUDGED_AT
+    )
+    assert asyncio.run(judge.judge(pack)).expected[0].kind_token == kind_id("打球")
     assert client.attempts == 2 and naps == [2.0]
 
     exhausted = _flaky(5)
-    strict = LLMJudge(exhausted, config=JudgeConfig(transient_retries=1, transient_retry_delay_seconds=0), clock=lambda: JUDGED_AT)
+    strict = LLMJudge(
+        exhausted, config=JudgeConfig(transient_retries=1, transient_retry_delay_seconds=0), clock=lambda: JUDGED_AT
+    )
     with pytest.raises(ModelTransportError):
         asyncio.run(strict.judge(pack))
     assert exhausted.attempts == 2
@@ -336,7 +401,15 @@ def test_transient_errors_are_retried_a_bounded_number_of_times(tmp_path, monkey
 
 def test_the_scripted_judge_replays_its_script_against_each_pack(tmp_path) -> None:
     pack = pack_for(tmp_path)
-    script = Judgement(judged_at=JUDGED_AT, generation="other", moment=pack.moment, verdicts=(), day_state="正常", day_note=None, judge_version="scripted-judge")
+    script = Judgement(
+        judged_at=JUDGED_AT,
+        generation="other",
+        moment=pack.moment,
+        verdicts=(),
+        day_state="正常",
+        day_note=None,
+        judge_version="scripted-judge",
+    )
     judge = ScriptedJudge(script)
     replayed = asyncio.run(judge.judge(pack))
     assert replayed.generation == pack.generation and judge.packs == [pack]
@@ -347,3 +420,15 @@ def test_config_rejects_negative_retries() -> None:
         JudgeConfig(transient_retries=-1)
     with pytest.raises(ValueError):
         JudgeConfig(transient_retry_delay_seconds=-0.5)
+
+
+def test_two_candidates_sharing_a_class_name_are_told_apart_by_their_ids(tmp_path) -> None:
+    """两条 lane 各有一个同名的类：标题带上编号区分，模型照抄标题后仍能换回各自的编号。"""
+
+    from dataclasses import replace
+
+    pack = pack_for(tmp_path)
+    first, second = (item.kind_token for item in pack.expanded)
+    twins = replace(pack, labels={**pack.labels, first: "调研", second: "调研"})
+    assert twins.title(first) == f"调研（{first}）" and twins.kind_of(f"调研（{second}）") == second
+    assert pack.title(first) == kind_names()[first] and pack.kind_of("不存在的名字") is None

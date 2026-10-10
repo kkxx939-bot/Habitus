@@ -357,8 +357,7 @@ class ConversationBehaviorProjectionBatch:
             processor_fingerprint=record["processor_fingerprint"],
             projector_version=record["projector_version"],
             items=tuple(
-                ConversationBehaviorProjectionItem.from_dict(item, source_id=record["source_id"])
-                for item in raw_items
+                ConversationBehaviorProjectionItem.from_dict(item, source_id=record["source_id"]) for item in raw_items
             ),
             recorded_at=conversation_datetime(record["recorded_at"], "recorded_at"),
             output_record_digest=record["output_record_digest"],

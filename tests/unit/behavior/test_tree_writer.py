@@ -21,6 +21,7 @@ from tests.unit.behavior.tree_payloads import (
     local,
     occurrence_payload,
 )
+from tests.unit.kind_ids import kind_id
 
 
 def build_writer(tmp_path) -> tuple[BehaviorDocumentWriter, BehaviorTree]:
@@ -35,7 +36,7 @@ def test_publish_occurrence_and_read_back(tmp_path) -> None:
     assert tree.exists(document.address)
     loaded = tree.read(document.address)
     assert loaded == document
-    assert loaded.fields["kind_token"] == "洗手"
+    assert loaded.fields["kind_token"] == kind_id("洗手")
     assert loaded.fields["started_at"].endswith("+08:00")
     assert loaded.metadata.revision == 1
 
@@ -57,9 +58,7 @@ def test_replay_semantics_three_ways(tmp_path) -> None:
 
     # 维度三：同 payload + 不同 clock → metadata 字节不同 → 冲突。
     # 这钉死了归约层的义务：重试必须复用 stage 时定格的时间戳，不能现取时钟。
-    other_clock = BehaviorDocumentWriter(
-        tree, ProcessLocalLockStore(), clock=lambda: local(23, 30)
-    )
+    other_clock = BehaviorDocumentWriter(tree, ProcessLocalLockStore(), clock=lambda: local(23, 30))
     with pytest.raises(BehaviorPublishConflictError, match="different content"):
         other_clock.publish(BehaviorKind.OCCURRENCE, occurrence_payload())
 
@@ -154,14 +153,14 @@ def test_cross_midnight_occurrence_lands_on_its_local_day(tmp_path) -> None:
         basis=(),
         goal=None,
         name="起夜",
-        kind_token="起夜",
+        kind_token="s-k0004",
         summary="起夜上了个厕所",
     )
     document = writer.publish(BehaviorKind.OCCURRENCE, small_hours)
     uri = BehaviorURI.from_address(document.address)
-    assert uri.segments[1:4] == ("2026", "08", "16")           # 本地日
+    assert uri.segments[1:4] == ("2026", "08", "16")  # 本地日
     utc_day = document.address.started_at.astimezone(UTC).date()
-    assert utc_day.isoformat() == "2026-08-15"                 # UTC 日确实不同 → 输入有判别力
+    assert utc_day.isoformat() == "2026-08-15"  # UTC 日确实不同 → 输入有判别力
     assert document.address.started_at.utcoffset() == timedelta(hours=8)
 
 
@@ -185,9 +184,7 @@ def test_directory_capacity_holds_under_concurrent_publishes(tmp_path) -> None:
 
     def publish(name: str) -> None:
         barrier.wait()
-        payload = occurrence_payload(
-            name=name, kind_token=name, goal=None, basis=(), summary=name
-        )
+        payload = occurrence_payload(name=name, kind_token=kind_id(name), goal=None, basis=(), summary=name)
         # ProcessLocalLockStore 争用即拒（TimeoutError），不排队——按仓库惯例有界重试。
         for _attempt in range(50):
             try:

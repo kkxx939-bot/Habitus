@@ -62,17 +62,9 @@ class ConversationSummaryRetirementManifest:
     def __post_init__(self) -> None:
         if self.archive.reference.stage.value != "archive":
             raise ValueError("retirement manifest archive reference has the wrong stage")
-        if (
-            isinstance(self.start_sequence, bool)
-            or not isinstance(self.start_sequence, int)
-            or self.start_sequence < 0
-        ):
+        if isinstance(self.start_sequence, bool) or not isinstance(self.start_sequence, int) or self.start_sequence < 0:
             raise ValueError("retirement manifest start_sequence must be non-negative")
-        if (
-            isinstance(self.end_sequence, bool)
-            or not isinstance(self.end_sequence, int)
-            or self.end_sequence <= 0
-        ):
+        if isinstance(self.end_sequence, bool) or not isinstance(self.end_sequence, int) or self.end_sequence <= 0:
             raise ValueError("retirement manifest end_sequence must be positive")
         if self.end_sequence < self.start_sequence:
             raise ValueError("retirement manifest sequence range is invalid")
@@ -197,12 +189,10 @@ class ConversationSummaryRetirementStore:
             start_sequence=archive.start_sequence,
             end_sequence=archive.end_sequence,
             ranges=tuple(
-                ConversationSummaryRetirementSource(summary_reference(address, item), item.digest)
-                for item in ranges
+                ConversationSummaryRetirementSource(summary_reference(address, item), item.digest) for item in ranges
             ),
             segments=tuple(
-                ConversationSummaryRetirementSource(summary_reference(address, item), item.digest)
-                for item in segments
+                ConversationSummaryRetirementSource(summary_reference(address, item), item.digest) for item in segments
             ),
             expected_use_version=expected_use_version,
             phase=ConversationSummaryRetirementPhase.RETIRING,

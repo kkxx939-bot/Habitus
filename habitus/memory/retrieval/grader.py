@@ -42,9 +42,7 @@ class MemoryRetrievalGrader:
         if not isinstance(plan, MemoryQueryPlan):
             raise TypeError("plan must be MemoryQueryPlan")
         normalized = self._query(plan.original_query)
-        if not isinstance(memories, tuple) or any(
-            not isinstance(memory, MemoryMatchedMemory) for memory in memories
-        ):
+        if not isinstance(memories, tuple) or any(not isinstance(memory, MemoryMatchedMemory) for memory in memories):
             raise TypeError("memories must contain MemoryMatchedMemory values")
         if not isinstance(memory_context, str):
             raise TypeError("memory_context must be text")
@@ -114,13 +112,13 @@ class MemoryRetrievalGrader:
         if len(assessment.missing_information) > self.config.retrieval_grader_max_missing_items:
             raise ValueError("retrieval grader returned too many missing information items")
         if any(
-            len(item) > self.config.retrieval_grader_max_missing_item_chars
-            for item in assessment.missing_information
+            len(item) > self.config.retrieval_grader_max_missing_item_chars for item in assessment.missing_information
         ):
             raise ValueError("retrieval grader missing information exceeds its configured bound")
-        if assessment.summary_query is not None and len(
-            assessment.summary_query
-        ) > self.config.summary_fallback_max_query_chars:
+        if (
+            assessment.summary_query is not None
+            and len(assessment.summary_query) > self.config.summary_fallback_max_query_chars
+        ):
             raise ValueError("retrieval grader Summary query exceeds its configured bound")
         return assessment
 

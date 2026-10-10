@@ -31,6 +31,8 @@ _SAFE_LOG_FIELDS = frozenset(
     }
 )
 _STANDARD_LOG_FIELDS = frozenset(logging.makeLogRecord({}).__dict__)
+
+
 class StructuredLogObserver:
     """把有界观察事件写成结构化日志，不展开业务输入或输出。"""
 

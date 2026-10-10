@@ -41,7 +41,12 @@ class LocaleConfig:
             ZoneInfo(self.timezone)
         except (ZoneInfoNotFoundError, ValueError) as exc:
             raise ValueError(f"locale.timezone is not a known IANA time zone: {self.timezone!r}") from exc
-        if not isinstance(self.region, str) or len(self.region) != _REGION_LENGTH or not self.region.isalpha() or not self.region.isupper():
+        if (
+            not isinstance(self.region, str)
+            or len(self.region) != _REGION_LENGTH
+            or not self.region.isalpha()
+            or not self.region.isupper()
+        ):
             raise ValueError("locale.region must be a two-letter uppercase region code")
         if self.calendar_path is not None:
             if not isinstance(self.calendar_path, str) or not self.calendar_path.strip():

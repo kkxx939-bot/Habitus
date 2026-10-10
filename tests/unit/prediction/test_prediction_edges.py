@@ -18,14 +18,12 @@ from habitus.prediction.edges import (
 )
 from habitus.prediction.errors import PredictionTreeError
 from habitus.prediction.model import ObservedAction, ObservedGap, SlotKey
-from tests.unit.prediction.prediction_fixtures import action, at, config, gap, reference
+from tests.unit.prediction.prediction_fixtures import action, at, config, gap, reference, unnamed
 
 
 def build(actions, gaps=(), concurrent=(), *, days: int, **overrides):
     cfg = config(**overrides)
-    ledger = pair(
-        list(actions), list(gaps), list(concurrent), config=cfg, reference=reference(days - 1)
-    )
+    ledger = pair(list(actions), list(gaps), list(concurrent), unnamed=(), config=cfg, reference=reference(days - 1))
     return cfg, ledger
 
 
@@ -33,7 +31,7 @@ def build(actions, gaps=(), concurrent=(), *, days: int, **overrides):
 
 
 def test_no_successor_is_a_first_class_outcome() -> None:
-    """"洗完手之后什么都没做"必须进分母——它正是提醒逻辑最依赖的那个数。"""
+    """ "洗完手之后什么都没做"必须进分母——它正是提醒逻辑最依赖的那个数。"""
 
     actions = []
     for offset in range(10):
@@ -45,9 +43,7 @@ def test_no_successor_is_a_first_class_outcome() -> None:
 
     assert stats[("洗手", "吃饭")].probability == pytest.approx(0.6, abs=0.01)
     assert stats[("洗手", NO_SUCCESSOR)].probability == pytest.approx(0.4, abs=0.01)
-    total = sum(
-        item.probability for (source, _target), item in stats.items() if source == "洗手"
-    )
+    total = sum(item.probability for (source, _target), item in stats.items() if source == "洗手")
     assert total == pytest.approx(1.0, abs=0.02)  # 归一：含弃权的多分类
 
 
@@ -106,26 +102,34 @@ def test_participation_totals_cover_every_pair_the_action_takes_part_in() -> Non
     parallels = derive_parallels(ledger)
     totals = parallel_totals(ledger)
     for name in ("吃饭", "看手机", "听歌"):
-        taken_part_in = sum(
-            item.count for key, item in parallels.items() if name in key
-        )
+        taken_part_in = sum(item.count for key, item in parallels.items() if name in key)
         assert totals[name] == pytest.approx(taken_part_in)
     # 同一个动作自己与自己并行只计一次，否则 Σ P 不等于 1
     self_paired = [action("交谈", 0, 9), action("交谈", 0, 9, 1)]
     _cfg, self_ledger = build(self_paired, concurrent=[(0, 1)], days=1)
-    assert parallel_totals(self_ledger)["交谈"] == pytest.approx(
-        derive_parallels(self_ledger)[("交谈", "交谈")].count
-    )
+    assert parallel_totals(self_ledger)["交谈"] == pytest.approx(derive_parallels(self_ledger)[("交谈", "交谈")].count)
 
 
 def test_transition_window_bounds_what_counts_as_next() -> None:
     """超出窗口的后继不算"接下来"，那一次记为"什么都没做"。"""
 
     actions = [action("洗手", 0, 12), action("吃饭", 0, 15)]  # 隔了 3 小时
-    cfg, ledger = build(actions, days=1, transition_window_seconds=3_600.0)
+    cfg, ledger = build(actions, days=1, transition_window_slots=4)  # 1 小时
     stats = derive(ledger, config=cfg)
     assert ("洗手", "吃饭") not in stats
     assert stats[("洗手", NO_SUCCESSOR)].count == pytest.approx(1.0, rel=0.01)
+
+
+def test_a_window_crossing_the_cutoff_is_censored_not_a_no_successor() -> None:
+    """第 N 晚只看到 N 之前：23:30 的洗手窗口（2 小时）跨过了第 N 天开始那一刻，后面没看到——记删失，不记"什么都没做"。
+    同一条在下一晚（截止日后移一天、后继仍没有）就是真的"什么都没做"。"""
+
+    actions = [action("洗手", 0, 23, 30)]
+    cfg = config()
+    tonight = pair(actions, [], [], unnamed=(), config=cfg, reference=reference(0), cutoff=reference(1))
+    assert tonight.censored == pytest.approx(1.0, rel=0.01) and "洗手" not in tonight.no_successor
+    later = pair(actions, [], [], unnamed=(), config=cfg, reference=reference(1), cutoff=reference(2))
+    assert later.censored == 0.0 and later.no_successor["洗手"] == pytest.approx(1.0, rel=0.01)
 
 
 def test_edge_lift_uses_the_same_denominator_convention_on_both_sides() -> None:
@@ -185,9 +189,10 @@ def test_a_real_action_named_like_the_sentinel_is_refused() -> None:
     moment = action("洗手", 0, 12).started_at
     with pytest.raises(PredictionTreeError, match="reserved"):
         pair(
-            [ObservedAction(action=NO_SUCCESSOR, started_at=moment, day=moment.date())],
+            [ObservedAction(action=NO_SUCCESSOR, started_at=moment, day=moment.date(), lane="session")],
             [],
             [],
+            unnamed=(),
             config=config(),
             reference=reference(0),
         )
@@ -299,13 +304,14 @@ def test_a_transition_across_an_observation_hole_is_censored_too() -> None:
         actions,
         [gap(0, 9, 10)],  # 09:00–10:00 没观测，正好盖住这一对之间
         [],
+        unnamed=(),
         config=config(),
         reference=reference(0),
     )
     assert ("出门", "回家") not in holed.transitions
     assert holed.censored > 0.0
 
-    clean = pair(actions, [], [], config=config(), reference=reference(0))
+    clean = pair(actions, [], [], unnamed=(), config=config(), reference=reference(0))
     assert clean.transitions[("出门", "回家")] > 0.0
     assert clean.censored == 0.0
 
@@ -320,7 +326,7 @@ def test_a_zero_width_gap_is_not_a_hole() -> None:
     moment = at(0, 9, 30)
     zero_width = ObservedGap(started_at=moment, ended_at=moment, watched=True)
     actions = [action("出门", 0, 9), action("回家", 0, 9, 40)]
-    ledger = pair(actions, [zero_width], [], config=config(), reference=reference(0))
+    ledger = pair(actions, [zero_width], [], unnamed=(), config=config(), reference=reference(0))
     assert ledger.transitions[("出门", "回家")] > 0.0
     assert ledger.censored == 0.0
 
@@ -339,9 +345,7 @@ def test_parallel_keys_do_not_depend_on_which_one_started_first() -> None:
         action("看手机", 1, 12),
         action("吃饭", 1, 12, 5),  # 第二天看手机先开始
     ]
-    ledger = pair(
-        actions, [], [(0, 1), (2, 3)], config=config(), reference=reference(1)
-    )
+    ledger = pair(actions, [], [(0, 1), (2, 3)], unnamed=(), config=config(), reference=reference(1))
     assert set(ledger.parallels) == {("吃饭", "看手机")}  # 一个键，不是两个
     totals = parallel_totals(ledger)
     assert totals["吃饭"] == pytest.approx(totals["看手机"])
@@ -436,9 +440,7 @@ def test_half_width_zero_is_exactly_the_old_single_cell_behaviour(tmp_path) -> N
     cfg, ledger = build(actions, days=7 * 5)
     tree = _pooled_tree(cfg, ledger)
     centre = SlotKey(weekday=reference(0).weekday(), slot=48)
-    assert query.successors(tree, "洗手", slot=centre) == query.successors(
-        tree, "洗手", slot=centre, half_width=0
-    )
+    assert query.successors(tree, "洗手", slot=centre) == query.successors(tree, "洗手", slot=centre, half_width=0)
     assert query.successors(tree, "洗手") == query.successors(tree, "洗手", half_width=0)
 
 
@@ -472,3 +474,44 @@ def test_the_neighbourhood_wraps_inside_one_weekday_only(tmp_path) -> None:
     keys = query.neighbourhood(tree, SlotKey(weekday=0, slot=95), 2)
     assert {key.weekday for key in keys} == {0}
     assert sorted(key.slot for key in keys) == [0, 1, 93, 94, 95]
+
+
+# --- 词表：lane 与叫不出名的事（裁定 18） -------------------------------------------------------
+
+
+def test_the_next_one_is_looked_for_only_inside_the_same_lane() -> None:
+    """两条 lane 各是一条先后顺序：吃饭之后紧挨着的会话行为不是吃饭的"下一件"，跨 lane 的关联归语义树。"""
+
+    actions = [
+        action("s-k0003", 0, 14, 0),
+        action("p-k0001", 0, 14, 5, lane="physical"),
+        action("s-k0004", 0, 14, 10),
+        action("p-k0002", 0, 14, 20, lane="physical"),
+    ]
+    ledger = pair(actions, [], [], unnamed=(), config=config(), reference=reference(0))
+    assert set(ledger.transitions) == {("s-k0003", "s-k0004"), ("p-k0001", "p-k0002")}
+
+
+def test_an_unnamed_next_one_censors_the_transition_instead_of_being_skipped() -> None:
+    """调研 → 叫不出名的事 → 修改代码：不能凭空记一条「调研 → 修改代码」；那一对记为没看全，待定本身不当起点。"""
+
+    actions = [action("s-k0003", 0, 14, 49), action("s-k0004", 0, 15, 28)]
+    ledger = pair(actions, [], [], unnamed=(unnamed(0, 15, 17),), config=config(), reference=reference(0))
+    assert ("s-k0003", "s-k0004") not in ledger.transitions
+    assert "s-k0003" not in ledger.no_successor
+    assert ledger.censored == pytest.approx(1.0)
+    assert ("s-k0004", NO_SUCCESSOR) in ledger.days  # 修改代码自己照常配对
+
+
+def test_an_unnamed_event_in_the_other_lane_does_not_block_anything() -> None:
+    actions = [action("s-k0003", 0, 14, 49), action("s-k0004", 0, 15, 10)]
+    ledger = pair(
+        actions, [], [], unnamed=(unnamed(0, 15, 0, lane="physical"),), config=config(), reference=reference(0)
+    )
+    assert ("s-k0003", "s-k0004") in ledger.transitions and ledger.censored == 0.0
+
+
+def test_parallels_across_lanes_are_not_counted() -> None:
+    actions = [action("s-k0004", 0, 12), action("p-k0001", 0, 12, 5, lane="physical")]
+    ledger = pair(actions, [], [(0, 1)], unnamed=(), config=config(), reference=reference(0))
+    assert ledger.parallels == {}

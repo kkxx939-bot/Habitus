@@ -107,8 +107,7 @@ class BehaviorJudgementFuser:
             # 主体是否在场在装配期降级（剔名/降为没读懂），校验层只做后置断言；否则这类记账
             # 疏漏会走模型重试——真实数据一周 371 次，每次白烧三次调用。
             participants_by_no={
-                index: fragment.participants
-                for index, fragment in enumerate(segment.fragments, start=1)
+                index: fragment.participants for index, fragment in enumerate(segment.fragments, start=1)
             },
         )
         validate_judgement_batch(batch, segment.fragments)

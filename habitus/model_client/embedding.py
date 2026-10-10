@@ -146,11 +146,7 @@ class EmbeddingClient:
         size = self.config.max_batch_size
         for offset in range(0, len(normalized), size):
             batch = normalized[offset : offset + size]
-            result.extend(
-                await asyncio.gather(
-                    *(self._embed_one(text, is_query=False) for text in batch)
-                )
-            )
+            result.extend(await asyncio.gather(*(self._embed_one(text, is_query=False) for text in batch)))
         return tuple(result)
 
     async def aclose(self) -> None:

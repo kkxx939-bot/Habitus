@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Protocol, runtime_checkable
@@ -23,6 +23,7 @@ from habitus.foundation.observability import NullObserver, ObservationEvent, Obs
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.scene import DayTypeCalendar
 from habitus.scene.views import DayIndexCache
+from habitus.series.reader import admitted
 
 
 @runtime_checkable
@@ -57,6 +58,8 @@ class SettlementStage:
         assembler: BehaviorReadSide,
         *,
         closed_days: Callable[[], Iterable[date]],
+        current: Callable[[str], Sequence[str]],
+        migrating: Callable[[], bool],
         observer: Observer | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -66,9 +69,17 @@ class SettlementStage:
             raise TypeError("assembler must expose the behaviour tree read side")
         if not callable(closed_days):
             raise TypeError("closed_days must be callable")
+        if not callable(current):
+            raise TypeError("current must be a callable from class id to the class ids it maps to now")
         self.ledger = ledger
         self.assembler = assembler
         self.closed_days = closed_days
+        # 编号 → 现在对应哪些在用编号（词表的 ``current_ids``）：承诺记的是说话时的编号，结算时词表可能已拆改
+        self.current = current
+        if not callable(migrating):
+            raise TypeError("migrating must be callable")
+        # 词表迁移做到一半（树上的行改了一部分、新版本还没写）：这一轮不结算，下一轮再来——结算只做一次，对错了就是负样本（E3）
+        self.migrating = migrating
         self.observer: Observer = observer if observer is not None else NullObserver()
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
 
@@ -93,9 +104,15 @@ class SettlementStage:
         return report
 
     def _settle_all(self) -> SettlementReport:
+        if self.migrating():
+            days = tuple(day for day in self.ledger.days_with_claims() if self.ledger.unsettled_claims(day))
+            return SettlementReport(settled=0, verified=0, deviated=0, missed=0, pending_days=days)
         closed = frozenset(self.closed_days())
         cache = DayIndexCache(
-            self.assembler.behavior_tree, subject=self.assembler.subject, calendar=self.assembler.calendar
+            self.assembler.behavior_tree,
+            subject=self.assembler.subject,
+            admits=admitted,
+            calendar=self.assembler.calendar,
         )
         counts = {"验证": 0, "偏离": 0, "落空": 0}
         pending: list[date] = []
@@ -109,7 +126,7 @@ class SettlementStage:
                 continue
             rows = cache.day(day).rows
             for claim in unsettled:
-                item = settle(claim, rows, settled_at=settled_at)
+                item = settle(claim, rows, settled_at=settled_at, current=self.current)
                 self.ledger.record_settlement(item)
                 counts[item.outcome] += 1
         return SettlementReport(
@@ -120,7 +137,9 @@ class SettlementStage:
             pending_days=tuple(pending),
         )
 
-    def _observe(self, status: ObservationStatus, attributes: dict[str, str | int | float | bool], started: float) -> None:
+    def _observe(
+        self, status: ObservationStatus, attributes: dict[str, str | int | float | bool], started: float
+    ) -> None:
         try:
             self.observer.record(
                 ObservationEvent(

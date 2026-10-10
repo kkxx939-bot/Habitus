@@ -4,7 +4,7 @@
 这里是纯计算：给定一天的日历、这条 occurrence 的字段、以及它之前一段时间的命中事件，
 把概念集里**带情境说明**的那些逐条判一遍。
 
-**材料由调用方备好**：历史命中以"事件"传进来（时刻 · 概念身份 · 档，含祖先），本支不读别的存储。
+**材料由调用方备好**：历史命中以"事件"传进来（时刻 · 概念身份 · 档，含汇总概念），本支不读别的存储。
 
 **派生情境按事件数，不按日历日**（B14"窗与机会按事件维度锚定"；2026-09-30 按评审 A-8 / B-11 / C-8 改）：
 02:10 的晚睡落在"今天"的目录里，按日历日取"昨天"会漏掉刚熬完夜的这个早上、却让第二天早上成立。
@@ -32,7 +32,7 @@ DAY_HOURS = 24
 
 @dataclass(frozen=True)
 class HitEvent:
-    """历史里的一次命中：什么时候、哪个概念（身份）、哪一档。祖先以 ``grade=None`` 记。"""
+    """历史里的一次命中：什么时候、哪个概念（身份）、哪一档。汇总概念以 ``grade=None`` 记。"""
 
     at: datetime
     identity: str
@@ -66,15 +66,14 @@ class SituationOutcome:
 
 
 def hit_events(records: Iterable[ConceptHits], concepts: ConceptSet) -> tuple[HitEvent, ...]:
-    """一批命中记录 → 命中事件，**含祖先**（派生情境多半盯着粗的那一层：「赶工中」盯的是「写代码」，命中的是「修改代码」）。"""
+    """一批命中记录 → 命中事件：基础概念（从编号现读）+ 细分概念 + 汇总概念（派生情境多半盯着粗的那一层：
+    「赶工中」盯的是「写代码」，记录上是「修改代码」）。"""
 
     found: list[HitEvent] = []
     for record in records:
-        names = [hit.concept for hit in record.hits if hit.concept in concepts]
-        for hit in record.hits:
-            if hit.concept in concepts:
-                found.append(HitEvent(record.started_at, hit.identity, hit.grade))
-        for ancestor in concepts.with_ancestors(names) - {concepts[name].identity for name in names}:
+        table = {identity: grade for identity, grade in record.graded_hits.items() if identity in concepts}
+        found.extend(HitEvent(record.started_at, identity, grade) for identity, grade in table.items())
+        for ancestor in concepts.with_ancestors(table) - set(table):
             found.append(HitEvent(record.started_at, ancestor, None))
     return tuple(sorted(found, key=lambda item: (item.at.timestamp(), item.identity)))
 
@@ -122,7 +121,9 @@ def _holds(rule: SituationRule, inputs: SituationInputs) -> bool | None:
         return None
     watched = concept_identity(rule.concept)
     if rule.basis is SituationBasis.YESTERDAY:
-        return _hit_within(inputs, watched, rule.grade, since=inputs.moment - timedelta(hours=DAY_HOURS), until=inputs.moment)
+        return _hit_within(
+            inputs, watched, rule.grade, since=inputs.moment - timedelta(hours=DAY_HOURS), until=inputs.moment
+        )
     return all(
         _hit_within(
             inputs,
@@ -139,7 +140,8 @@ def _hit_within(inputs: SituationInputs, watched: str, grade: str | None, *, sin
     """``[since, until)`` 里命中过「watched」（要档的话档也要对）没有。"""
 
     return any(
-        event.identity == watched and (grade is None or event.grade == grade) and since <= event.at < until for event in inputs.history
+        event.identity == watched and (grade is None or event.grade == grade) and since <= event.at < until
+        for event in inputs.history
     )
 
 

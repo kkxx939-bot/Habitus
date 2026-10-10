@@ -47,8 +47,7 @@ class DoctorReport:
         return {
             "ok": self.ok,
             "checks": [
-                {"name": check.name, "status": check.status.value, "detail": check.detail}
-                for check in self.checks
+                {"name": check.name, "status": check.status.value, "detail": check.detail} for check in self.checks
             ],
         }
 
@@ -218,7 +217,9 @@ def _node_check() -> DoctorCheck:
     except ValueError:
         return DoctorCheck("node", DoctorStatus.WARN, f"unrecognized version: {version or 'empty'}")
     if completed.returncode != 0 or major < 18:
-        return DoctorCheck("node", DoctorStatus.WARN, f"Node.js >=18 is required for Agent plugins; found {version or 'unknown'}")
+        return DoctorCheck(
+            "node", DoctorStatus.WARN, f"Node.js >=18 is required for Agent plugins; found {version or 'unknown'}"
+        )
     return DoctorCheck("node", DoctorStatus.PASS, f"{executable}; version={version}")
 
 
@@ -369,10 +370,7 @@ def _credential_check(config: HabitusConfig, catalog: AdapterCatalog) -> DoctorC
         return DoctorCheck("credentials", DoctorStatus.FAIL, detail)
     tracing_reference = config.observability.tracing.credential_ref
     if config.observability.tracing.enabled and tracing_reference:
-        required.update(
-            (tracing_reference, field)
-            for field in config.credentials.resolve(tracing_reference)
-        )
+        required.update((tracing_reference, field) for field in config.credentials.resolve(tracing_reference))
     missing = sorted(
         f"credentials.{reference}.{field}"
         for reference, field in required

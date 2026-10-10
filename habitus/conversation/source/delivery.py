@@ -197,9 +197,7 @@ class ConversationConsumerDelivery:
                 return terminal
             self._raise_unrecoverable(locked_state)
             if ordered:
-                await lease.run_fenced(
-                    lambda: self._require_ordered_predecessors(source, implementation.consumer)
-                )
+                await lease.run_fenced(lambda: self._require_ordered_predecessors(source, implementation.consumer))
             if locked_state.state is ConversationConsumerDeliveryState.OUTPUT_READY:
                 outcome = await lease.run_fenced(
                     lambda: self._create_output_outcome(source, implementation, locked_state)
@@ -207,9 +205,7 @@ class ConversationConsumerDelivery:
                 return ConversationConsumerEnsureResult(outcome, None)
             run = await implementation.execute(source, lease)
             lease.require_alive()
-            outcome = await lease.run_fenced(
-                lambda: self._commit_run(source, implementation, run)
-            )
+            outcome = await lease.run_fenced(lambda: self._commit_run(source, implementation, run))
             return ConversationConsumerEnsureResult(outcome, run.runtime_result)
 
     def inspect(

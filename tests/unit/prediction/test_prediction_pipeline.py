@@ -12,10 +12,17 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from habitus.behavior import BehaviorDocumentWriter, BehaviorKind, BehaviorLinkType, BehaviorTree, BehaviorURI
+from habitus.behavior import (
+    BehaviorDocumentWriter,
+    BehaviorKind,
+    BehaviorLinkType,
+    BehaviorSchemaError,
+    BehaviorTree,
+    BehaviorURI,
+)
 from habitus.foundation.integrity import text_digest
 from habitus.infrastructure.store.locks import ProcessLocalLockStore
-from habitus.prediction import builder, codec, query, source
+from habitus.prediction import builder, codec, query
 from habitus.prediction.edges import NO_SUCCESSOR
 from habitus.prediction.errors import PredictionTreeError, PredictionTreeStoreError
 from habitus.prediction.model import PredictionTree, SlotKey
@@ -26,7 +33,8 @@ from habitus.prediction.store import (
     PublishedGeneration,
 )
 from tests.unit.behavior.tree_payloads import gap_payload, occurrence_payload
-from tests.unit.prediction.prediction_fixtures import config
+from tests.unit.kind_ids import kind_id
+from tests.unit.prediction.prediction_fixtures import config, snapshot_from_tree
 
 CST = timezone(timedelta(hours=8))
 FIRST = date(2026, 6, 1)  # 周一
@@ -47,7 +55,7 @@ def publish_occurrence(writer, name: str, started_at: datetime, *, links=(), **o
     payload = occurrence_payload(
         occurred_on=started_at.date(),
         name=name,
-        kind_token=overrides.pop("kind_token", name),
+        kind_token=kind_id(overrides.pop("kind_token", name)),
         started_at=started_at,
         last_observed_at=started_at + timedelta(minutes=1),
         onset_available_at=started_at + timedelta(seconds=2),
@@ -67,24 +75,50 @@ def test_a_real_behaviour_tree_rebuilds_into_a_queryable_generation(tmp_path) ->
         if (FIRST + timedelta(days=offset)).weekday() == 1:
             publish_occurrence(writer, "打球", moment(offset, 19))
 
-    snapshot = source.read(tree)
+    snapshot = snapshot_from_tree(tree)
     assert len(snapshot.actions) == 70 + 10
     assert snapshot.latest_day == FIRST + timedelta(days=69)
 
     settings = config()
-    built = builder.build(
-        snapshot, config=settings, reference=snapshot.latest_day, built_at=moment(69, 23)
-    )
+    built = builder.build(snapshot, config=settings, reference=snapshot.latest_day, built_at=moment(69, 23))
     morning = query.slot_outlook(built, query.slot_at(built, moment(0, 7, 30)))
-    medicine = next(item for item in morning.candidates if item.action == "吃药")
+    medicine = next(item for item in morning.candidates if item.action == kind_id("吃药"))
     assert medicine.marginal > 0.9
     assert medicine.lift_all_day > 50  # 一天 96 个槽里只占一个 → 真峰
 
     tuesday = query.slot_outlook(built, query.slot_at(built, moment(1, 19)))
-    ball = next(item for item in tuesday.candidates if item.action == "打球")
+    ball = next(item for item in tuesday.candidates if item.action == kind_id("打球"))
     assert ball.marginal > 0.8
     # 日钟面上每周只有 1/7 的天在打球，周维度把它捞了出来
     assert ball.lift_weekday > 3.0
+
+
+def test_the_reader_routes_kind_tokens_by_the_vocabulary(tmp_path) -> None:
+    """裁定 18：类编号带上 lane 成为行为；「待定」成为叫不出名的事；「非事件」丢掉；旧口径 token 硬拒。"""
+
+    writer, tree = writer_for(tmp_path)
+    publish_occurrence(writer, "调研实现", moment(0, 14, 49), kind_token="s-k0003")
+    publish_occurrence(writer, "讨论提示词", moment(0, 15, 17), kind_token="s-待定")
+    publish_occurrence(writer, "搜索文本", moment(0, 15, 20), kind_token="s-非事件")
+    publish_occurrence(writer, "吃饭", moment(0, 15, 25), kind_token="p-k0001")
+
+    snapshot = snapshot_from_tree(tree)
+    assert [(item.action, item.lane) for item in snapshot.actions] == [("s-k0003", "session"), ("p-k0001", "physical")]
+    assert [(item.started_at, item.lane) for item in snapshot.unnamed] == [(moment(0, 15, 17), "session")]
+
+    started = moment(1, 9)
+    legacy = occurrence_payload(
+        occurred_on=started.date(),
+        name="洗手",
+        kind_token="洗手",
+        started_at=started,
+        last_observed_at=started + timedelta(minutes=1),
+        onset_available_at=started + timedelta(seconds=2),
+        basis=(),
+        goal=None,
+    )
+    with pytest.raises(BehaviorSchemaError, match="class id or a marker"):
+        writer.publish(BehaviorKind.OCCURRENCE, legacy)  # 旧口径的 token 上不了树（裁定 19），读入那一道是后备
 
 
 def test_disambiguated_duplicates_never_reach_the_statistics(tmp_path) -> None:
@@ -94,9 +128,9 @@ def test_disambiguated_duplicates_never_reach_the_statistics(tmp_path) -> None:
     publish_occurrence(writer, "洗手", moment(0, 12))
     publish_occurrence(writer, "洗手-2", moment(0, 12), original_name="洗手")
 
-    snapshot = source.read(tree)
+    snapshot = snapshot_from_tree(tree)
     assert snapshot.skipped_duplicates == 1
-    assert [item.action for item in snapshot.actions] == ["洗手"]
+    assert [item.action for item in snapshot.actions] == [kind_id("洗手")]
 
 
 def test_concurrent_links_survive_the_read_and_stay_out_of_transitions(tmp_path) -> None:
@@ -107,21 +141,19 @@ def test_concurrent_links_survive_the_read_and_stay_out_of_transitions(tmp_path)
         meal = publish_occurrence(writer, "吃饭", moment(offset, 18))
         publish_occurrence(
             writer,
-            "看手机",
+            kind_id("看手机"),
             moment(offset, 18, 5),
             links=((BehaviorLinkType.CONCURRENT_WITH, BehaviorURI.from_address(meal.address)),),
         )
         publish_occurrence(writer, "洗碗", moment(offset, 18, 40))
 
-    snapshot = source.read(tree)
+    snapshot = snapshot_from_tree(tree)
     assert len(snapshot.concurrent) == 12
-    built = builder.build(
-        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(11, 23)
-    )
-    targets = {item.target for item in query.successors(built, "吃饭")}
-    assert "看手机" not in targets
-    assert "洗碗" in targets
-    assert "看手机" in {item.target for item in query.parallels(built, "吃饭")}
+    built = builder.build(snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(11, 23))
+    targets = {item.target for item in query.successors(built, kind_id("吃饭"))}
+    assert kind_id("看手机") not in targets
+    assert kind_id("洗碗") in targets
+    assert kind_id("看手机") in {item.target for item in query.parallels(built, kind_id("吃饭"))}
 
 
 def test_gaps_read_from_the_tree_reduce_exposure(tmp_path) -> None:
@@ -140,13 +172,11 @@ def test_gaps_read_from_the_tree_reduce_exposure(tmp_path) -> None:
             ),
         )
 
-    snapshot = source.read(tree)
+    snapshot = snapshot_from_tree(tree)
     assert len(snapshot.gaps) == 14
-    built = builder.build(
-        snapshot, config=config(), reference=date(2026, 6, 28), built_at=moment(27, 23)
-    )
+    built = builder.build(snapshot, config=config(), reference=date(2026, 6, 28), built_at=moment(27, 23))
     outlook = query.slot_outlook(built, query.slot_at(built, moment(0, 7, 30)))
-    medicine = next(item for item in outlook.candidates if item.action == "吃药")
+    medicine = next(item for item in outlook.candidates if item.action == kind_id("吃药"))
     # 后 14 天该时段全被空白盖住，不进分母；概率仍应接近 1 而不是被腰斩。
     assert medicine.marginal > 0.85
 
@@ -156,7 +186,7 @@ def test_local_offset_survives_the_round_trip(tmp_path) -> None:
 
     writer, tree = writer_for(tmp_path)
     publish_occurrence(writer, "吃药", moment(0, 7, 30))
-    action = source.read(tree).actions[0]
+    action = snapshot_from_tree(tree).actions[0]
     assert action.started_at.utcoffset() == timedelta(hours=8)
     assert action.started_at.hour == 7
     assert action.day == FIRST
@@ -171,10 +201,8 @@ def tree_for(tmp_path, *, name: str = "behavior-tree", hour: int = 23) -> Predic
     writer, behavior_tree = writer_for(tmp_path, name)
     for offset in range(20):
         publish_occurrence(writer, "吃药", moment(offset, 7, 30))
-    snapshot = source.read(behavior_tree)
-    return builder.build(
-        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(19, hour)
-    )
+    snapshot = snapshot_from_tree(behavior_tree)
+    return builder.build(snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(19, hour))
 
 
 def test_publish_activates_a_generation_and_load_pins_it(tmp_path) -> None:
@@ -200,7 +228,7 @@ def test_a_corrupted_generation_is_refused_instead_of_served(tmp_path) -> None:
     store = PredictionTreeStore(tmp_path / "prediction", retained_generations=2)
     published = store.publish(tree_for(tmp_path))
     path = store.root / GENERATIONS_DIRECTORY / published.generation / TREE_FILENAME
-    path.write_text(path.read_text(encoding="utf-8").replace("吃药", "吃饭"), encoding="utf-8")
+    path.write_text(path.read_text(encoding="utf-8").replace(kind_id("吃药"), kind_id("吃饭")), encoding="utf-8")
     with pytest.raises(PredictionTreeStoreError, match="does not match its pointer"):
         store.load()
 
@@ -249,7 +277,7 @@ def test_provenance_days_are_local_days_and_survive_publication(tmp_path) -> Non
     """
 
     built = tree_for(tmp_path)
-    key = (SlotKey(weekday=FIRST.weekday(), slot=30), "吃药")  # 07:30–07:45
+    key = (SlotKey(weekday=FIRST.weekday(), slot=30), kind_id("吃药"))  # 07:30–07:45
     expected = tuple(FIRST + timedelta(days=7 * week) for week in range(3))
     assert built.nodes[key].days == expected
     assert codec.decode(codec.encode(built)).nodes[key].days == expected
@@ -279,26 +307,24 @@ def test_joint_cell_beats_the_product_of_two_marginals(tmp_path) -> None:
         else:
             publish_occurrence(writer, "洗碗", moment(offset, 18, 30))
 
-    snapshot = source.read(behavior_tree)
-    built = builder.build(
-        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(69, 23)
-    )
+    snapshot = snapshot_from_tree(behavior_tree)
+    built = builder.build(snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(69, 23))
     tuesday = query.slot_at(built, moment(1, 18))
     thursday = query.slot_at(built, moment(3, 18))
 
-    at_tuesday = {item.target: item for item in query.successors(built, "吃饭", slot=tuesday)}
-    at_thursday = {item.target: item for item in query.successors(built, "吃饭", slot=thursday)}
-    assert at_tuesday["打球"].probability > 0.9
-    assert at_tuesday["打球"].approximate is False
-    assert at_thursday["打球"].probability < 0.1
+    at_tuesday = {item.target: item for item in query.successors(built, kind_id("吃饭"), slot=tuesday)}
+    at_thursday = {item.target: item for item in query.successors(built, kind_id("吃饭"), slot=thursday)}
+    assert at_tuesday[kind_id("打球")].probability > 0.9
+    assert at_tuesday[kind_id("打球")].approximate is False
+    assert at_thursday[kind_id("打球")].probability < 0.1
 
     # 不带槽位的边缘概率把七天混在一起，只有 1/7 上下——它不是"周二打球"的答案。
-    marginal = {item.target: item for item in query.successors(built, "吃饭")}
-    assert marginal["打球"].probability == pytest.approx(1 / 7, abs=0.05)
+    marginal = {item.target: item for item in query.successors(built, kind_id("吃饭"))}
+    assert marginal[kind_id("打球")].probability == pytest.approx(1 / 7, abs=0.05)
 
 
 def test_no_successor_enters_the_joint_denominator(tmp_path) -> None:
-    """"这个点做完 A 通常就收工"必须压低联合概率，否则近似成"必然接着做 B"。
+    """ "这个点做完 A 通常就收工"必须压低联合概率，否则近似成"必然接着做 B"。
 
     十个周一里散步之后只有五次接着洗澡；另外五次什么都没做。如果 ∅ 不进联合的分母，
     这一格就只剩下"洗澡"一个去向，概率会算成 1.0。
@@ -310,13 +336,11 @@ def test_no_successor_enters_the_joint_denominator(tmp_path) -> None:
         if (FIRST + timedelta(days=offset)).weekday() == 0 and (offset // 7) % 2 == 0:
             publish_occurrence(writer, "洗澡", moment(offset, 21, 20))
 
-    snapshot = source.read(behavior_tree)
-    built = builder.build(
-        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(69, 23)
-    )
+    snapshot = snapshot_from_tree(behavior_tree)
+    built = builder.build(snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(69, 23))
     slot = query.slot_at(built, moment(0, 21))  # 周一 21:00
-    outgoing = {item.target: item for item in query.successors(built, "散步", slot=slot)}
-    assert outgoing["洗澡"].probability == pytest.approx(0.5, abs=0.05)
+    outgoing = {item.target: item for item in query.successors(built, kind_id("散步"), slot=slot)}
+    assert outgoing[kind_id("洗澡")].probability == pytest.approx(0.5, abs=0.05)
     assert outgoing[NO_SUCCESSOR].probability == pytest.approx(0.5, abs=0.05)
 
 
@@ -328,14 +352,12 @@ def test_missing_joint_cell_falls_back_to_a_flagged_approximation(tmp_path) -> N
         publish_occurrence(writer, "洗手", moment(offset, 12))
         publish_occurrence(writer, "吃饭", moment(offset, 12, 5))
 
-    snapshot = source.read(behavior_tree)
-    built = builder.build(
-        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(19, 23)
-    )
+    snapshot = snapshot_from_tree(behavior_tree)
+    built = builder.build(snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(19, 23))
     empty_slot = query.slot_at(built, moment(0, 3))
-    outgoing = {item.target: item for item in query.successors(built, "洗手", slot=empty_slot)}
-    assert outgoing["吃饭"].approximate is True
-    assert 0.0 <= outgoing["吃饭"].probability <= 1.0
+    outgoing = {item.target: item for item in query.successors(built, kind_id("洗手"), slot=empty_slot)}
+    assert outgoing[kind_id("吃饭")].approximate is True
+    assert 0.0 <= outgoing[kind_id("吃饭")].probability <= 1.0
 
 
 # --- 留白 -------------------------------------------------------------------------------
@@ -345,10 +367,8 @@ def test_a_single_dominant_habit_leaves_little_room_for_silence(tmp_path) -> Non
     writer, behavior_tree = writer_for(tmp_path)
     for offset in range(30):
         publish_occurrence(writer, "吃药", moment(offset, 7, 30))
-    snapshot = source.read(behavior_tree)
-    built = builder.build(
-        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(29, 23)
-    )
+    snapshot = snapshot_from_tree(behavior_tree)
+    built = builder.build(snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(29, 23))
     outlook = query.slot_outlook(built, query.slot_at(built, moment(0, 7, 30)))
     assert outlook.irregularity == pytest.approx(0.0, abs=1e-9)
     assert outlook.escape < 0.2
@@ -360,10 +380,8 @@ def test_a_crowded_slot_of_one_offs_says_keep_quiet(tmp_path) -> None:
     writer, behavior_tree = writer_for(tmp_path)
     for offset, name in enumerate(["翻书", "浇花", "找钥匙", "擦桌子", "剪指甲"]):
         publish_occurrence(writer, name, moment(offset * 7, 15))
-    snapshot = source.read(behavior_tree)
-    built = builder.build(
-        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(29, 23)
-    )
+    snapshot = snapshot_from_tree(behavior_tree)
+    built = builder.build(snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(29, 23))
     outlook = query.slot_outlook(built, query.slot_at(built, moment(0, 15)))
     assert outlook.irregularity > 0.9
     assert outlook.escape == pytest.approx(1.0, abs=0.01)
@@ -374,7 +392,7 @@ def test_an_empty_slot_is_all_escape(tmp_path) -> None:
     outlook = query.slot_outlook(built, query.slot_at(built, moment(0, 3)))
     # 候选来自曲线而不是格子，所以这个动作照样在列——但它如实说"这一格一次都没见过"
     # （count 0、边际率小到几乎不存在），而两条留白曲线只看真的发生过的格子。
-    assert [item.action for item in outlook.candidates] == ["吃药"]
+    assert [item.action for item in outlook.candidates] == [kind_id("吃药")]
     assert outlook.candidates[0].count == 0.0
     assert outlook.candidates[0].marginal < 1e-6
     assert outlook.escape == 1.0
@@ -450,10 +468,8 @@ def _tree_with_gap(tmp_path, name: str, *, gap_kind: str | None, start, end):
                 ended_at=end,
             ),
         )
-    snapshot = source.read(behavior_tree)
-    return snapshot, builder.build(
-        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(9, 23)
-    )
+    snapshot = snapshot_from_tree(behavior_tree)
+    return snapshot, builder.build(snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(9, 23))
 
 
 def test_both_gap_kinds_reduce_exposure_the_same_way(tmp_path) -> None:
@@ -464,39 +480,33 @@ def test_both_gap_kinds_reduce_exposure_the_same_way(tmp_path) -> None:
     """
 
     trees = [
-        _tree_with_gap(
-            tmp_path, f"behavior-tree-{index}", gap_kind=kind, start=moment(5, 3), end=moment(5, 4)
-        )[1]
+        _tree_with_gap(tmp_path, f"behavior-tree-{index}", gap_kind=kind, start=moment(5, 3), end=moment(5, 4))[1]
         for index, kind in enumerate(("没读懂", "未观测"))
     ]
     assert trees[0].exposure == trees[1].exposure
 
 
 def test_an_unreadable_gap_is_voided_by_a_behaviour_read_inside_it(tmp_path) -> None:
-    """"没读懂"断言这段读不出行为；真读出了一条，这句断言就被证伪——整段作废。
+    """ "没读懂"断言这段读不出行为；真读出了一条，这句断言就被证伪——整段作废。
 
     这条钉住的是"一份数据一个真相"：作废之后曝光与转移删失读的是**同一份**空白账，而不是
     曝光把这一槽记满、边那边照旧把它当洞。
     """
 
     _, without = _tree_with_gap(tmp_path, "no-gap", gap_kind=None, start=None, end=None)
-    _, voided = _tree_with_gap(
-        tmp_path, "unreadable", gap_kind="没读懂", start=moment(5, 7), end=moment(5, 8)
-    )
+    _, voided = _tree_with_gap(tmp_path, "unreadable", gap_kind="没读懂", start=moment(5, 7), end=moment(5, 8))
     assert voided.exposure == without.exposure
 
 
 def test_an_unobserved_gap_containing_a_behaviour_is_an_upstream_contradiction(tmp_path) -> None:
-    """"未观测"说没在看，却又读出了一条行为——上游自相矛盾，本层不替它圆场。
+    """ "未观测"说没在看，却又读出了一条行为——上游自相矛盾，本层不替它圆场。
 
     这类空白目前树里没有生产者（覆盖信号契约未接入），所以这是一条前瞻护栏：宁可在这里以
     一句说得清的话炸掉，也不要悄悄把它当成"看见了"数进分母。
     """
 
     with pytest.raises(PredictionTreeError, match="unobserved gap"):
-        _tree_with_gap(
-            tmp_path, "unobserved", gap_kind="未观测", start=moment(5, 7), end=moment(5, 8)
-        )
+        _tree_with_gap(tmp_path, "unobserved", gap_kind="未观测", start=moment(5, 7), end=moment(5, 8))
 
 
 def test_an_occurrence_marked_as_reminded_is_refused(tmp_path) -> None:
@@ -505,14 +515,14 @@ def test_an_occurrence_marked_as_reminded_is_refused(tmp_path) -> None:
     writer, behavior_tree = writer_for(tmp_path)
     publish_occurrence(writer, "吃药", moment(0, 7, 30), reminded=True)
     with pytest.raises(PredictionTreeError, match="reminded"):
-        source.read(behavior_tree)
+        snapshot_from_tree(behavior_tree)
 
 
 # --- 时间画像与并行的对称闭包（本轮新增） --------------------------------------------------
 
 
 def test_day_outlook_answers_when_and_how_wide(tmp_path) -> None:
-    """"这个行为在周二通常几点、范围多宽"——预测层最基本的问题，此前没有接口回答。
+    """ "这个行为在周二通常几点、范围多宽"——预测层最基本的问题，此前没有接口回答。
 
     逐槽累乘 h(t)·Π(1−h(s)) 早先只存在于 evaluation 的离线回测函数里。
     """
@@ -523,22 +533,20 @@ def test_day_outlook_answers_when_and_how_wide(tmp_path) -> None:
         # 早饭的时刻在 07:00 / 07:15 / 07:30 之间浮动——"时间范围"正是要接住这种抖动。
         publish_occurrence(writer, "吃早饭", moment(offset, 7, (week % 3) * 15))
 
-    snapshot = source.read(tree)
-    built = builder.build(
-        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(70, 23)
-    )
-    outlook = query.day_outlook(built, 1, "吃早饭")
+    snapshot = snapshot_from_tree(tree)
+    built = builder.build(snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(70, 23))
+    outlook = query.day_outlook(built, 1, kind_id("吃早饭"))
     assert outlook is not None
     assert outlook.earliest.slot <= outlook.median.slot <= outlook.latest.slot
     # 07:00–07:30 这一段：中位落在窗口里，且窗口不是整天
     assert 7 * 4 - 2 <= outlook.median.slot <= 7 * 4 + 4
     assert outlook.latest.slot - outlook.earliest.slot < 4 * 4  # 不到四小时宽
     assert outlook.mass > 0.5  # 周二基本一定会发生
-    assert query.day_outlook(built, 3, "吃早饭") is None  # 周四从没做过 → 没有画像
+    assert query.day_outlook(built, 3, kind_id("吃早饭")) is None  # 周四从没做过 → 没有画像
 
 
 def test_slot_outlook_answers_cumulative_for_actions_that_never_hit_this_cell(tmp_path) -> None:
-    """"到这个点为止今天做了没有"必须覆盖这一格从没发生过的动作——缺失检测正是要问它们。
+    """ "到这个点为止今天做了没有"必须覆盖这一格从没发生过的动作——缺失检测正是要问它们。
 
     并且答案要是**这个周几自己的**：跨周几混读会让"周一早上吃、周二不吃"读成同一个数。
     """
@@ -549,17 +557,15 @@ def test_slot_outlook_answers_cumulative_for_actions_that_never_hit_this_cell(tm
             publish_occurrence(writer, "吃药", moment(offset, 7, 30))
         publish_occurrence(writer, "洗手", moment(offset, 12))
 
-    snapshot = source.read(tree)
-    built = builder.build(
-        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(27, 23)
-    )
+    snapshot = snapshot_from_tree(tree)
+    built = builder.build(snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(27, 23))
     monday_evening = _by_action(query.slot_outlook(built, SlotKey(weekday=0, slot=80)))
-    assert monday_evening["吃药"].count == 0.0  # 晚上从没吃过
-    assert monday_evening["吃药"].cumulative > 0.9  # 但到晚上它今天早就做完了
+    assert monday_evening[kind_id("吃药")].count == 0.0  # 晚上从没吃过
+    assert monday_evening[kind_id("吃药")].cumulative > 0.9  # 但到晚上它今天早就做完了
     monday_dawn = _by_action(query.slot_outlook(built, SlotKey(weekday=0, slot=20)))
-    assert monday_dawn["吃药"].cumulative == pytest.approx(0.0)  # 凌晨还没做
+    assert monday_dawn[kind_id("吃药")].cumulative == pytest.approx(0.0)  # 凌晨还没做
     # 周二从来不吃：同一个槽位、不同周几，答案必须不一样
-    assert "吃药" not in _by_action(query.slot_outlook(built, SlotKey(weekday=1, slot=80)))
+    assert kind_id("吃药") not in _by_action(query.slot_outlook(built, SlotKey(weekday=1, slot=80)))
 
 
 def _by_action(outlook):
@@ -576,7 +582,7 @@ def test_parallels_read_the_same_evidence_from_either_side(tmp_path) -> None:
             first = publish_occurrence(writer, "吃饭", moment(offset, 12))
             publish_occurrence(
                 writer,
-                "看手机",
+                kind_id("看手机"),
                 moment(offset, 12, 5),
                 links=((BehaviorLinkType.CONCURRENT_WITH, BehaviorURI.from_address(first.address)),),
             )
@@ -584,21 +590,19 @@ def test_parallels_read_the_same_evidence_from_either_side(tmp_path) -> None:
             first = publish_occurrence(writer, "看手机", moment(offset, 12))
             publish_occurrence(
                 writer,
-                "吃饭",
+                kind_id("吃饭"),
                 moment(offset, 12, 5),
                 links=((BehaviorLinkType.CONCURRENT_WITH, BehaviorURI.from_address(first.address)),),
             )
 
-    snapshot = source.read(tree)
-    built = builder.build(
-        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(9, 23)
-    )
-    assert set(built.parallels) == {("吃饭", "看手机")}
-    meal = {item.target: item for item in query.parallels(built, "吃饭")}
-    phone = {item.target: item for item in query.parallels(built, "看手机")}
-    assert meal["看手机"].count == pytest.approx(phone["吃饭"].count)  # 同一份证据
-    assert meal["看手机"].probability == pytest.approx(1.0)  # 吃饭时必然在看手机
-    assert meal["看手机"].lift is None  # 并行没有 lift，不填一个会被误读的 0.0
+    snapshot = snapshot_from_tree(tree)
+    built = builder.build(snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(9, 23))
+    assert set(built.parallels) == {tuple(sorted((kind_id("吃饭"), kind_id("看手机"))))}
+    meal = {item.target: item for item in query.parallels(built, kind_id("吃饭"))}
+    phone = {item.target: item for item in query.parallels(built, kind_id("看手机"))}
+    assert meal[kind_id("看手机")].count == pytest.approx(phone[kind_id("吃饭")].count)  # 同一份证据
+    assert meal[kind_id("看手机")].probability == pytest.approx(1.0)  # 吃饭时必然在看手机
+    assert meal[kind_id("看手机")].lift is None  # 并行没有 lift，不填一个会被误读的 0.0
 
 
 # --- 发布形态的自洽（本轮新增） ------------------------------------------------------------
@@ -668,15 +672,13 @@ def _tree_with_parallels(tmp_path) -> PredictionTree:
         meal = publish_occurrence(writer, "吃饭", moment(offset, 12))
         publish_occurrence(
             writer,
-            "看手机",
+            kind_id("看手机"),
             moment(offset, 12, 5),
             links=((BehaviorLinkType.CONCURRENT_WITH, BehaviorURI.from_address(meal.address)),),
         )
     publish_occurrence(writer, "剪头发", moment(0, 15))  # 只出现一次 → 没有复发证据 → 没有趋势
-    snapshot = source.read(behavior_tree)
-    return builder.build(
-        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(5, 23)
-    )
+    snapshot = snapshot_from_tree(behavior_tree)
+    return builder.build(snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(5, 23))
 
 
 def test_recurrence_status_answers_whether_it_is_overdue(tmp_path) -> None:
@@ -685,12 +687,10 @@ def test_recurrence_status_answers_whether_it_is_overdue(tmp_path) -> None:
     writer, behavior_tree = writer_for(tmp_path)
     for offset in range(10):
         publish_occurrence(writer, "浇花", moment(offset * 3, 9))  # 每三天一次
-    snapshot = source.read(behavior_tree)
-    built = builder.build(
-        snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(27, 23)
-    )
-    status = query.recurrence_status(built, "浇花", elapsed_seconds=6 * 86_400)
+    snapshot = snapshot_from_tree(behavior_tree)
+    built = builder.build(snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(27, 23))
+    status = query.recurrence_status(built, kind_id("浇花"), elapsed_seconds=6 * 86_400)
     assert status is not None
     assert status.intervals.p50 == pytest.approx(3 * 86_400, rel=0.1)
     assert status.overdue == pytest.approx(2.0, rel=0.1)  # 拖了两倍中位间隔
-    assert query.recurrence_status(built, "从没做过的事", elapsed_seconds=1.0) is None
+    assert query.recurrence_status(built, kind_id("从没做过的事"), elapsed_seconds=1.0) is None

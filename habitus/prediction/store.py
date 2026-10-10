@@ -217,9 +217,7 @@ class PredictionTreeStore:
             # 其余四条错误路径都归一成了本层的类型，这一条不能例外——否则照着
             # ``except PredictionTreeStoreError`` 写读侧的人，会恰好漏掉最常发生的那条
             # （旧代的字节形状与当前 schema 不兼容）。
-            raise PredictionTreeStoreError(
-                "prediction tree generation cannot be decoded"
-            ) from exc
+            raise PredictionTreeStoreError("prediction tree generation cannot be decoded") from exc
 
     def generations(self) -> tuple[str, ...]:
         """已物化的代，按代名升序即时间升序。"""

@@ -32,9 +32,7 @@ NOW = datetime(2026, 8, 14, 20, 0, tzinfo=TZ8)
 OBSERVATION_CONFIG = BehaviorObservationConfig()
 
 
-def fragment(
-    offset: int, semantics: str, *, participants: list[str] | None = None
-) -> BehaviorObservation:
+def fragment(offset: int, semantics: str, *, participants: list[str] | None = None) -> BehaviorObservation:
     at = NOW + timedelta(seconds=offset)
     return BehaviorObservation.create(
         observer_id="home-a/hall",
@@ -126,7 +124,10 @@ def test_declared_but_ungrounded_facts_are_dropped_and_the_goal_survives() -> No
 def test_a_unit_without_a_goal_may_still_have_steps() -> None:
     """锁门、喝水说不出目标却有步骤：一条 occurrence 是"可提醒或可代劳的单位"，goal 只是可读字段。"""
 
-    raw = wire([judgement(1, behavior="喝水", goal=None, basis=["拿起杯子", "喝水"])], [[(1, 1)], [(1, 1)], [(1, 2)], [(1, 2)], [(1, 2)]])
+    raw = wire(
+        [judgement(1, behavior="喝水", goal=None, basis=["拿起杯子", "喝水"])],
+        [[(1, 1)], [(1, 1)], [(1, 2)], [(1, 2)], [(1, 2)]],
+    )
     batch = checked(raw)
     (only,) = batch.judgements
     assert only.claim.goal is None and [fact.semantics for fact in only.claim.basis] == ["拿起杯子", "喝水"]
@@ -236,12 +237,8 @@ def test_concurrency_is_closed_symmetrically_by_the_system() -> None:
     )
     batch = checked(raw)
     eating, phone = batch.judgements
-    assert [(link.kind, link.target_no) for link in phone.relations] == [
-        (JudgementRelation.CONCURRENT_WITH, 1)
-    ]
-    assert [(link.kind, link.target_no) for link in eating.relations] == [
-        (JudgementRelation.CONCURRENT_WITH, 2)
-    ]
+    assert [(link.kind, link.target_no) for link in phone.relations] == [(JudgementRelation.CONCURRENT_WITH, 1)]
+    assert [(link.kind, link.target_no) for link in eating.relations] == [(JudgementRelation.CONCURRENT_WITH, 2)]
 
 
 def test_a_judgement_may_carry_several_relations() -> None:
@@ -326,9 +323,7 @@ def test_a_declared_basis_no_fragment_belongs_to_is_dropped() -> None:
 
     batch = assemble(raw)
 
-    assert "并不存在的事实" not in [
-        fact.semantics for item in batch.judgements for fact in item.claim.basis
-    ]
+    assert "并不存在的事实" not in [fact.semantics for item in batch.judgements for fact in item.claim.basis]
     validate_judgement_batch(batch, FRAGMENTS)
 
 
@@ -337,18 +332,14 @@ def test_a_judgement_covering_nothing_is_dropped() -> None:
 
     raw = body()
     raw["judgements"].append(judgement(4, behavior="幽灵行为", goal="无", basis=["无"]))
-    raw["judgements"][0]["relations"] = [
-        {"kind": "concurrent_with", "target": 4, "context_target": None}
-    ]
+    raw["judgements"][0]["relations"] = [{"kind": "concurrent_with", "target": 4, "context_target": None}]
 
     batch = assemble(raw)
 
     assert 4 not in [item.judgement_no for item in batch.judgements]
     assert "幽灵行为" not in [item.claim.behavior for item in batch.judgements]
     # 关系的目标已经不存在，留着就是一条指向空处的连接。
-    assert all(
-        link.target_no != 4 for item in batch.judgements for link in item.relations
-    )
+    assert all(link.target_no != 4 for item in batch.judgements for link in item.relations)
     validate_judgement_batch(batch, FRAGMENTS)
 
 
@@ -375,9 +366,7 @@ def test_a_judgement_whose_subjects_are_all_absent_is_kept_with_a_signal() -> No
 
     raw = body()
     raw["judgements"][0]["subjects"] = ["陌生人"]
-    batch = assemble_judgement_batch(
-        raw, fragment_count=len(FRAGMENTS), participants_by_no=participants_of(FRAGMENTS)
-    )
+    batch = assemble_judgement_batch(raw, fragment_count=len(FRAGMENTS), participants_by_no=participants_of(FRAGMENTS))
     validate_judgement_batch(batch, FRAGMENTS)  # 后置断言放行：全不在场不再硬拒
     first = batch.judgements[0]
     assert first.claim.is_readable and first.subjects == ("陌生人",)
@@ -398,9 +387,7 @@ def test_relations_to_an_absent_subject_judgement_survive_assembly() -> None:
         ],
         [[(1, 1)], [(1, 1)], [(1, 1)], [(2, None)], [(3, None)]],
     )
-    batch = assemble_judgement_batch(
-        raw, fragment_count=len(FRAGMENTS), participants_by_no=participants_of(FRAGMENTS)
-    )
+    batch = assemble_judgement_batch(raw, fragment_count=len(FRAGMENTS), participants_by_no=participants_of(FRAGMENTS))
     validate_judgement_batch(batch, FRAGMENTS)
     assert [link.target_no for link in batch.judgements[1].relations] == [1]
     assert batch.degradations == ("subject_absent judgement=1 dropped=['陌生人'] kept",)
@@ -413,9 +400,7 @@ def test_two_same_start_judgements_survive_when_their_subjects_are_absent() -> N
     for item in raw["judgements"]:
         if item["behavior"] is not None:  # 没读懂的那条不带主体
             item["subjects"] = ["陌生人"]
-    batch = assemble_judgement_batch(
-        raw, fragment_count=len(FRAGMENTS), participants_by_no=participants_of(FRAGMENTS)
-    )
+    batch = assemble_judgement_batch(raw, fragment_count=len(FRAGMENTS), participants_by_no=participants_of(FRAGMENTS))
     validate_judgement_batch(batch, FRAGMENTS)  # 不再抛 "both describe … starting at the same moment"
     assert [link.target_no for link in batch.judgements[1].relations] == [1]
 
@@ -435,7 +420,13 @@ def test_two_unreadable_judgements_over_the_same_frames_are_merged() -> None:
 
     raw = wire(
         [unreadable(1), unreadable(2)],
-        [[(1, None), (2, None)], [(1, None), (2, None)], [(1, None), (2, None)], [(1, None), (2, None)], [(1, None), (2, None)]],
+        [
+            [(1, None), (2, None)],
+            [(1, None), (2, None)],
+            [(1, None), (2, None)],
+            [(1, None), (2, None)],
+            [(1, None), (2, None)],
+        ],
     )
     batch = assemble_judgement_batch(raw, fragment_count=len(FRAGMENTS))
     assert len(batch.judgements) == 1 and batch.judgements[0].covers == (1, 2, 3, 4, 5)
@@ -602,13 +593,9 @@ def test_enum_values_report_what_is_allowed() -> None:
 
 def test_capacity_bounds_raise_inside_the_fusion_error_family() -> None:
     raw = body()
-    raw["judgements"][0]["basis"] = [
-        {"basis_no": index, "semantics": f"事实{index}"} for index in range(1, 9)
-    ]
+    raw["judgements"][0]["basis"] = [{"basis_no": index, "semantics": f"事实{index}"} for index in range(1, 9)]
     with pytest.raises(BehaviorFusionLimitError):
-        assemble_judgement_batch(
-            raw, fragment_count=len(FRAGMENTS), config=BehaviorFusionConfig(max_basis_facts=4)
-        )
+        assemble_judgement_batch(raw, fragment_count=len(FRAGMENTS), config=BehaviorFusionConfig(max_basis_facts=4))
     assert issubclass(BehaviorFusionLimitError, BehaviorFusionError)
 
 
@@ -692,18 +679,22 @@ def test_the_prompt_examples_are_accepted_by_the_assembly_layer() -> None:
             ),
             judgement(3, behavior="打哈欠", summary="打了一个哈欠"),
             unreadable(4),
-            judgement(
-                5, behavior="开空调", goal="调节室温", summary="打开了空调", basis=["拿起遥控器开机"]
-            ),
+            judgement(5, behavior="开空调", goal="调节室温", summary="打开了空调", basis=["拿起遥控器开机"]),
         ],
         [
-            [(1, 1)], [(1, 1)], [(1, 1)],
-            [(1, 2)], [(1, 2)], [(1, 2)],
+            [(1, 1)],
+            [(1, 1)],
+            [(1, 1)],
+            [(1, 2)],
+            [(1, 2)],
+            [(1, 2)],
             [(2, None)],
-            [(1, 3)], [(1, 3)],
+            [(1, 3)],
+            [(1, 3)],
             [(3, None)],
             [(4, None)],
-            [(5, 1)], [(5, 1)],
+            [(5, 1)],
+            [(5, 1)],
         ],
     )
     fragments = _example_one_fragments()
@@ -752,11 +743,15 @@ def test_the_prompt_examples_are_accepted_by_the_assembly_layer() -> None:
             ),
         ],
         [
-            [(1, 1)], [(1, 1)],
-            [(2, 1)], [(1, 1), (2, 1)], [(2, 1)],
+            [(1, 1)],
+            [(1, 1)],
+            [(2, 1)],
+            [(1, 1), (2, 1)],
+            [(2, 1)],
             [(1, 1)],
             [(3, None)],
-            [(4, 1)], [(4, 1)],
+            [(4, 1)],
+            [(4, 1)],
         ],
     )
     fragments = _example_two_fragments()
@@ -766,7 +761,7 @@ def test_the_prompt_examples_are_accepted_by_the_assembly_layer() -> None:
 
 
 def test_the_prompt_never_names_a_relation_the_code_does_not_have() -> None:
-    """"independent"曾经写在示例的要点里，而代码里根本没有这个取值。"""
+    """ "independent"曾经写在示例的要点里，而代码里根本没有这个取值。"""
 
     from habitus.behavior.fusion.prompt import FUSION_SYSTEM_PROMPT
 
@@ -868,10 +863,7 @@ def test_a_judgement_may_name_several_subjects() -> None:
     单值 subject 撑不住：实测模型一半把两人拼成一个字符串（随后被校验拒绝）、一半只留一个人。
     """
 
-    fragments = [
-        fragment(index * 4, f"两人抬桌子{index}", participants=[SUBJECT, "家庭成员B"])
-        for index in range(5)
-    ]
+    fragments = [fragment(index * 4, f"两人抬桌子{index}", participants=[SUBJECT, "家庭成员B"]) for index in range(5)]
     raw = wire(
         [
             judgement(
@@ -904,9 +896,7 @@ def test_an_absent_subject_is_dropped_when_another_is_present() -> None:
         [judgement(1, behavior="洗手", goal="清洁双手", basis=["冲洗"], subjects=[SUBJECT, "陌生人"])],
         [[(1, 1)]] * 5,
     )
-    batch = assemble_judgement_batch(
-        raw, fragment_count=len(FRAGMENTS), participants_by_no=participants_of(FRAGMENTS)
-    )
+    batch = assemble_judgement_batch(raw, fragment_count=len(FRAGMENTS), participants_by_no=participants_of(FRAGMENTS))
     validate_judgement_batch(batch, FRAGMENTS)
     (only,) = batch.judgements
     assert only.subjects == (SUBJECT,)
@@ -1182,9 +1172,9 @@ def test_every_hard_failure_the_model_can_trigger_is_stated_where_it_fills_the_f
     # "要不要发关系"的位置，摆一句限制性从句会把发关系这件事本身一起压住——实测把它写在数组
     # 描述上，`concurrent-cook-and-call` 从 8/8 掉到 7/8（两次全量里更是 3/3 掉到 1/3），
     # 而模型漏标的正是它本来判得出的那条并行。
-    target = JUDGEMENT_FUSION_JSON_SCHEMA["properties"]["judgements"]["items"]["properties"][
-        "relations"
-    ]["items"]["properties"]["target"]["description"]
+    target = JUDGEMENT_FUSION_JSON_SCHEMA["properties"]["judgements"]["items"]["properties"]["relations"]["items"][
+        "properties"
+    ]["target"]["description"]
     assert "另一条" in target and "读得懂" in target, target
     relations = properties["relations"]["description"]
     assert "但" not in relations, "别在'要不要发关系'的位置上摆限制性从句"

@@ -40,25 +40,19 @@ CST = timezone(timedelta(hours=8))
 OBSERVATION_CONFIG = BehaviorObservationConfig()
 
 
-def behavior_enabled_config(tmp_path: Path):
-    """在既有 fake 路由配置之上启用行为侧（窗口取唯一出处默认值 1 小时）。"""
+def behavior_enabled_config(tmp_path: Path, **behavior: object):
+    """在既有 fake 路由配置之上启用行为侧（窗口取唯一出处默认值 1 小时）；``behavior`` 覆盖行为侧其余字段。"""
 
     raw = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     raw["storage"]["root"] = str(tmp_path / "data")
     raw["models"]["chat"]["route"].update(provider="fake", adapter="fake_chat", credential_ref="")
-    raw["models"]["embedding"]["route"].update(
-        provider="fake", adapter="fake_embedding", credential_ref=""
-    )
-    raw["models"]["rerank"]["route"].update(
-        provider="fake", adapter="fake_rerank", credential_ref=""
-    )
-    raw["memory"]["vector_store"]["route"].update(
-        provider="fake", adapter="fake_vector", credential_ref=""
-    )
+    raw["models"]["embedding"]["route"].update(provider="fake", adapter="fake_embedding", credential_ref="")
+    raw["models"]["rerank"]["route"].update(provider="fake", adapter="fake_rerank", credential_ref="")
+    raw["memory"]["vector_store"]["route"].update(provider="fake", adapter="fake_vector", credential_ref="")
     raw["conversation"]["summary_vector_store"]["route"].update(
         provider="fake", adapter="fake_vector", credential_ref=""
     )
-    raw["behavior"] = {"primary_subject": SUBJECT}
+    raw["behavior"] = {"primary_subject": SUBJECT, **behavior}
     from habitus.config import HabitusConfig
 
     return HabitusConfig.from_mapping(raw)
@@ -113,9 +107,7 @@ def scripted_dependencies(bodies: list[dict]):
     providers.register_adapter(
         "embedding",
         "fake_embedding",
-        lambda context: FakeEmbeddingProvider(
-            context.route.provider, context.route.model, context.config.dimension
-        ),
+        lambda context: FakeEmbeddingProvider(context.route.provider, context.route.model, context.config.dimension),
     )
     providers.register_adapter(
         "rerank",
@@ -206,25 +198,23 @@ def test_enabled_wiring_shares_one_lookback_and_one_chat_client(tmp_path: Path) 
     behavior = runtime.components.behavior
     assert behavior is not None
     assert behavior.fusion_runner.context_lookback_seconds == FUSION_CONTEXT_LOOKBACK_SECONDS
-    assert (
-        behavior.reduction_runner.context_lookback_seconds
-        == behavior.fusion_runner.context_lookback_seconds
-    )
+    assert behavior.reduction_runner.context_lookback_seconds == behavior.fusion_runner.context_lookback_seconds
     assert behavior.fusion_runner.primary_subject == SUBJECT
+    assert behavior.fusion_runner.fuser.client is runtime.components.models.structured_chat
+    assert behavior.kind_store.catalog_path == behavior.tree.root / "kinds.md"
+    # 词表两块（白天归类、整理活）共用组合根的那一份词表存储与那一个结构化客户端
+    assert behavior.reduction_runner.kinds.store is behavior.kind_store
+    assert behavior.reduction_runner.vocabulary_jobs.store is behavior.kind_store
+    assert behavior.reduction_runner.kinds.classifier.caller.client is runtime.components.models.structured_chat
+    # 所有用户都装定期拆改（裁定 17），锚点自检与白天归类共用同一个归类器
     assert (
-        behavior.fusion_runner.fuser.client
-        is runtime.components.models.structured_chat
+        behavior.reduction_runner.vocabulary_jobs.reviser.anchors.classifier
+        is behavior.reduction_runner.kinds.classifier
     )
-    assert behavior.kind_store.path == behavior.tree.root / "kinds.md"
     # sweep 锁 TTL 走 Config 边界（周尺度回填要调大它，不该改代码）；留空取领域默认
     from habitus.behavior.reduction import DEFAULT_SWEEP_LOCK_TTL_SECONDS
 
     assert behavior.reduction_runner.sweep_lock_ttl_seconds == DEFAULT_SWEEP_LOCK_TTL_SECONDS
-    # 词表向量旁册随 embedder 组装、与词表同根；身份键只从配置取
-    vectors = behavior.reduction_runner.kind_vectors
-    assert vectors is not None and vectors.path == behavior.tree.root / "kinds.vectors.json"
-    assert vectors.dimension == runtime.config.models.embedding.dimension
-    assert behavior.reduction_runner.kind_resolver.embedder is runtime.components.models.embedder
     # 配置层不复制窗口默认值：BehaviorConfig 缺省为 None，由组合根从唯一出处解析
     from habitus.config.behavior import BehaviorConfig
 
@@ -238,9 +228,12 @@ def test_delivery_to_tree_end_to_end_through_the_runtime(tmp_path: Path) -> None
     语义层的模型响应故意给垃圾：刷新按设计降级成信号、不阻塞归约——树上必须已有 occurrence。
     """
 
-    providers, vectors = scripted_dependencies([FUSION_BODY])
+    # 第二个回答给白天归类：词表从空开始（裁定 29），物理 lane 还没有类，这一条判成一件事、提议名「洗手」进待定池。
+    # 之后的语义层调用也会拿到它——对语义层是垃圾，按设计降级成信号。
+    classify = {"items": [{"record": "R1", "reason": "在水池边洗手", "choice": "都不是", "proposed": "洗手"}]}
+    providers, vectors = scripted_dependencies([FUSION_BODY, classify])
     runtime = build_runtime(
-        behavior_enabled_config(tmp_path),
+        behavior_enabled_config(tmp_path, kinds_default_lane="physical"),
         providers=providers,
         vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
@@ -268,7 +261,9 @@ def test_delivery_to_tree_end_to_end_through_the_runtime(tmp_path: Path) -> None
     addresses = behavior.tree.list_addresses(BehaviorKind.OCCURRENCE)
     assert [address.name for address in addresses] == ["洗手"]
     document = behavior.tree.read(addresses[0])
-    assert document.fields["kind_token"] == "洗手"
+    assert document.fields["kind_token"] == "p-待定"
+    (pending,) = behavior.kind_store.read_pending().pool.entries.values()
+    assert pending.proposed == "洗手"
     assert document.fields["status"] == "completed"
     # 原料消费即释放：判断与交付在发布到树后即删，真正的数据只在树上；覆盖索引仍记得这批观测
     # 已融合（上游补发时靠它去重）。
@@ -478,7 +473,7 @@ def test_reduction_worker_treats_lock_busy_as_a_skip_not_a_failure() -> None:
     assert worker.last_error is None  # 让路不是故障
 
 
-def test_kind_merge_and_rebuild_are_exposed_through_the_access_layer(tmp_path) -> None:
+def test_vocabulary_jobs_are_exposed_through_the_access_layer(tmp_path) -> None:
     """词表运维动作从接入层暴露（与观测投递同一正门形态），不让调用方伸手进归约 runner。"""
 
     providers, vectors = runtime_dependencies()
@@ -489,15 +484,20 @@ def test_kind_merge_and_rebuild_are_exposed_through_the_access_layer(tmp_path) -
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     runtime.initialize()
-    rebuilt = asyncio.run(runtime.rebuild_behavior_kinds())
-    assert rebuilt.occurrences == 0 and rebuilt.kinds == 0
-    merged = asyncio.run(runtime.merge_behavior_kinds("洗手", "清洁双手"))
-    assert merged.restamped == 0 and merged.days == ()
+    grown = asyncio.run(runtime.run_vocabulary_job("grow"))
+    assert grown.model_calls == 0  # 待定池是空的
+    assert runtime.components.behavior is not None and runtime.components.behavior.kind_store.read().version == 0
+    revised = asyncio.run(runtime.run_vocabulary_job("revise"))
+    assert revised.model_calls == 0 and revised.days == ()  # 词表从空开始（裁定 29）：两条 lane 都还没有类，没什么可拆改
+    with pytest.raises(ValueError, match="unknown vocabulary job"):
+        asyncio.run(runtime.run_vocabulary_job("bootstrap"))
     # 行为侧未启用时同样明确拒绝
     dark = build_runtime(
-        runtime_config(tmp_path / "dark"), providers=providers, vector_stores=vectors,
+        runtime_config(tmp_path / "dark"),
+        providers=providers,
+        vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
     dark.initialize()
     with pytest.raises(RuntimeStateError, match="behavior pipeline is not configured"):
-        asyncio.run(dark.rebuild_behavior_kinds())
+        asyncio.run(dark.run_vocabulary_job("grow"))

@@ -84,11 +84,7 @@ class ProviderFactory:
     def registered_adapters(self, capability: ModelCapability) -> tuple[str, ...]:
         normalized_capability = self._capability(capability)
         return tuple(
-            sorted(
-                adapter
-                for item_capability, adapter in self._builders
-                if item_capability == normalized_capability
-            )
+            sorted(adapter for item_capability, adapter in self._builders if item_capability == normalized_capability)
         )
 
     def create(
@@ -179,9 +175,7 @@ class ProviderFactory:
                 raise ModelConfigurationError("model route received an undeclared credential")
             return ""
         if not value:
-            raise ModelConfigurationError(
-                f"model credential is missing for reference: {route.credential_ref}"
-            )
+            raise ModelConfigurationError(f"model credential is missing for reference: {route.credential_ref}")
         return value
 
     @staticmethod
@@ -195,9 +189,7 @@ class ProviderFactory:
             value = ProviderFactory._credential(route, api_key)
             return {} if not value else {"api_key": value}
         if api_key:
-            raise ModelConfigurationError(
-                "pass either model credentials or the legacy api_key, not both"
-            )
+            raise ModelConfigurationError("pass either model credentials or the legacy api_key, not both")
         if not isinstance(credentials, Mapping):
             raise TypeError("model credentials must be an object")
         resolved = dict(credentials)
@@ -206,9 +198,7 @@ class ProviderFactory:
                 raise ModelConfigurationError("model route received undeclared credentials")
             return {}
         if not any(isinstance(value, str) and value.strip() for value in resolved.values()):
-            raise ModelConfigurationError(
-                f"model credential is missing for reference: {route.credential_ref}"
-            )
+            raise ModelConfigurationError(f"model credential is missing for reference: {route.credential_ref}")
         return resolved
 
     @staticmethod

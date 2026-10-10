@@ -25,6 +25,7 @@ from tests.unit.behavior.reduction_fixtures import (
     observation,
     record_id,
 )
+from tests.unit.kind_ids import kind_id
 
 OBS_A = observation(18, "人走到水池边打开水龙头")
 OBS_B = observation(40, "人打肥皂搓手")
@@ -164,9 +165,7 @@ def test_concurrent_declared_on_the_earlier_side_is_flipped_not_dropped() -> Non
     early_declarer = wash_head(relations=(("concurrent_with", record_id("later")),))
     assembly = assemble_chains([parse(early_declarer), parse(later)])
     later_index = next(
-        index
-        for index, chain in enumerate(assembly.chains)
-        if chain.head.judgement_id == record_id("later")
+        index for index, chain in enumerate(assembly.chains) if chain.head.judgement_id == record_id("later")
     )
     earlier_index = 1 - later_index
     assert assembly.cross_links_of(later_index) == (("concurrent_with", earlier_index),)
@@ -255,7 +254,7 @@ def test_occurrence_payload_takes_identity_from_head_and_ending_from_tail() -> N
         build_chain(),
         name="洗手",
         original_name=None,
-        kind_token="洗手",
+        kind_token=kind_id("洗手"),
         observations=OBS_INDEX,
     )
     assert payload["name"] == "洗手"  # 链头原话；链尾"继续洗手"不参与身份
@@ -271,7 +270,7 @@ def test_occurrence_payload_takes_identity_from_head_and_ending_from_tail() -> N
 
 def test_onset_available_at_converts_evidence_instant_to_the_local_offset() -> None:
     payload = occurrence_payload(
-        build_chain(), name="洗手", original_name=None, kind_token="洗手", observations=OBS_INDEX
+        build_chain(), name="洗手", original_name=None, kind_token=kind_id("洗手"), observations=OBS_INDEX
     )
     # 链头 evidence_ready_at 存储为 UTC；进树换算成链头行为时刻的本地偏移，瞬时不变。
     assert payload["onset_available_at"] == at(42).isoformat(timespec="microseconds")
@@ -280,7 +279,7 @@ def test_onset_available_at_converts_evidence_instant_to_the_local_offset() -> N
 
 def test_basis_step_times_are_materialised_from_observations() -> None:
     payload = occurrence_payload(
-        build_chain(), name="洗手", original_name=None, kind_token="洗手", observations=OBS_INDEX
+        build_chain(), name="洗手", original_name=None, kind_token=kind_id("洗手"), observations=OBS_INDEX
     )
     first, second = payload["basis"]
     assert first["started_at"] == at(18).isoformat(timespec="microseconds")
@@ -291,16 +290,14 @@ def test_basis_step_times_are_materialised_from_observations() -> None:
 
 def test_basis_step_missing_observation_fails_loudly() -> None:
     with pytest.raises(BehaviorReductionError, match="no longer stored"):
-        occurrence_payload(
-            build_chain(), name="洗手", original_name=None, kind_token="洗手", observations={}
-        )
+        occurrence_payload(build_chain(), name="洗手", original_name=None, kind_token=kind_id("洗手"), observations={})
 
 
 def test_subjects_merge_across_the_chain_in_first_seen_order() -> None:
     together = wash_tail(subjects=(SUBJECT, "家庭成员B"))
     assembly = assemble_chains([parse(wash_head()), parse(together)])
     payload = occurrence_payload(
-        assembly.chains[0], name="洗手", original_name=None, kind_token="洗手", observations=OBS_INDEX
+        assembly.chains[0], name="洗手", original_name=None, kind_token=kind_id("洗手"), observations=OBS_INDEX
     )
     assert payload["subjects"] == [SUBJECT, "家庭成员B"]
 
@@ -368,7 +365,6 @@ def test_a_supersedes_cycle_stays_visible_and_unconsumed() -> None:
 def test_zero_offset_records_are_rejected_at_parse_time() -> None:
     """零偏移与树同口径在门口现形，不许走到 stage 最深处才炸。"""
 
-
     bad = wash_head(
         started_at=at(18).astimezone(UTC),
         last_observed_at=at(40).astimezone(UTC),
@@ -384,7 +380,7 @@ def test_divergent_goals_are_all_preserved_in_order() -> None:
     head = wash_head(goal="清洁双手", basis=(("打开水龙头搓手", (OBS_A.observation_id,)),))
     assembly = assemble_chains([parse(head), parse(tail)])
     payload = occurrence_payload(
-        assembly.chains[0], name="洗手", original_name=None, kind_token="洗手", observations=OBS_INDEX
+        assembly.chains[0], name="洗手", original_name=None, kind_token=kind_id("洗手"), observations=OBS_INDEX
     )
     assert payload["goal"] == "清洁双手；准备吃饭"
 

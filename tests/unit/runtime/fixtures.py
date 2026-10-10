@@ -18,7 +18,7 @@ STARTUP_PARAMETERS: dict[str, object] = {
     "shrink_pool_to_weekday": 5,
     "shrink_weekday_to_all_day": 5,
     "laplace_epsilon": 0.5,
-    "transition_window_seconds": 1800,
+    "transition_window_slots": 3,
     "shrink_edge": 5,
     "recurrence_window_days": 90,
     "rebuild_interval_seconds": 86400,

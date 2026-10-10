@@ -13,6 +13,8 @@ from habitus.prediction.model import SlotKey
 from habitus.prediction.nodes import pool_indexes
 from habitus.scene.views import DayIndexCache, slot_neighbourhood, slot_neighbourhood_until, slot_window
 from habitus.scene.views.clock import slot_floor, slot_index
+from habitus.series.reader import admitted
+from tests.unit.kind_ids import kind_id
 from tests.unit.scene.fixtures import DAY1, DAY2, SUBJECT, Site, at, publish
 
 
@@ -21,7 +23,7 @@ def site(tmp_path) -> Site:
 
 
 def cache_for(ground: Site) -> DayIndexCache:
-    return DayIndexCache(ground.behavior_tree, subject=SUBJECT)
+    return DayIndexCache(ground.behavior_tree, subject=SUBJECT, admits=admitted)
 
 
 # ── 槽的起止 ─────────────────────────────────────────────────────────────────
@@ -40,7 +42,12 @@ def test_the_window_covers_exactly_the_trees_pooling_slots() -> None:
 
     moment = at(DAY1, 16, 41)
     start, end = slot_window(moment, slot_minutes=15, half_width=3)
-    covered = sorted({slot_index(start + timedelta(minutes=m), slot_minutes=15) for m in range(int((end - start).total_seconds() // 60))})
+    covered = sorted(
+        {
+            slot_index(start + timedelta(minutes=m), slot_minutes=15)
+            for m in range(int((end - start).total_seconds() // 60))
+        }
+    )
     assert covered == sorted(pool_indexes(SlotKey.of(moment, slot_minutes=15).slot, 3, 96))
 
 
@@ -84,7 +91,7 @@ def test_the_after_part_is_measured_from_the_last_sighting_not_the_start(tmp_pat
 
     assert [row.uri for row in rows] == [early, own, shower]
     assert [row.name for row in rows] == ["收拾球包", "打球", "洗澡"]
-    assert rows[1].kind_token == "打球" and rows[1].at == at(DAY1, 16, 40)
+    assert rows[1].kind_token == kind_id("打球") and rows[1].at == at(DAY1, 16, 40)
 
 
 def test_the_before_part_crosses_midnight_into_the_previous_day(tmp_path) -> None:

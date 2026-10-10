@@ -134,7 +134,9 @@ class MemoryDocumentCodec:
         if not isinstance(expected_address, MemoryAddress):
             raise TypeError("expected_address must be a MemoryAddress")
         if raw.count(_MARKER) != 1 or not raw.endswith(_FOOTER):
-            raise MemoryDocumentIntegrityError("memory document must contain one terminal HABITUS_MEMORY_FIELDS comment")
+            raise MemoryDocumentIntegrityError(
+                "memory document must contain one terminal HABITUS_MEMORY_FIELDS comment"
+            )
         markdown_body, _separator, metadata_with_footer = raw.partition(_MARKER)
         metadata_source = metadata_with_footer[: -len(_FOOTER)]
         try:

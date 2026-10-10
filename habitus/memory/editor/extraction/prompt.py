@@ -194,4 +194,5 @@ class MemoryExtractionPromptBuilder:
             )
         return text
 
+
 __all__ = ["MemoryExtractionPromptBuilder"]

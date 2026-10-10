@@ -46,11 +46,7 @@ class AgentHookSession:
         conversation = ConversationRef(self.conversation_id, self.started_on)
         if not isinstance(self.protocol, str) or not self.protocol or self.protocol != self.protocol.strip().lower():
             raise ValueError("protocol must be non-empty normalized lowercase text")
-        if (
-            isinstance(self.next_sequence, bool)
-            or not isinstance(self.next_sequence, int)
-            or self.next_sequence < 0
-        ):
+        if isinstance(self.next_sequence, bool) or not isinstance(self.next_sequence, int) or self.next_sequence < 0:
             raise ValueError("next_sequence must be a non-negative integer")
         object.__setattr__(self, "conversation_id", conversation.conversation_id)
 
@@ -61,11 +57,7 @@ class AgentHookSession:
     def advance(self, next_sequence: int) -> AgentHookSession:
         """仅在服务确认写入后生成新的不可变游标状态。"""
 
-        if (
-            isinstance(next_sequence, bool)
-            or not isinstance(next_sequence, int)
-            or next_sequence <= self.next_sequence
-        ):
+        if isinstance(next_sequence, bool) or not isinstance(next_sequence, int) or next_sequence <= self.next_sequence:
             raise ValueError("confirmed next_sequence must advance the session cursor")
         return AgentHookSession(
             conversation_id=self.conversation_id,

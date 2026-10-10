@@ -1,8 +1,8 @@
 """预测层：把一刻的证据装成一个包——候选、四层数字、每次发生一张历史卡、此刻场景——给判断用。
 
 本包只读派生树、不写任何树（行为树永远只有观测→融合→归约那一个写入口）。包根这一层零模型：候选与
-四层拆解、发布的率、历史卡（邻域序列 + 视图）、此刻场景、整包的 Markdown 渲染都是纯函数。
-旧语义树的关联记录随重构摘掉（2026-09-26）；新语义树的产物接回来时卡的形状再变。
+四层拆解、发布的率、历史卡（邻域序列 + 视图）、此刻场景、语义树里此刻在场的已成立关系、整包的 Markdown 渲染
+都是纯函数。
 判断（LLM）在子包 ``habitus.foresight.judge``，是本层唯一的模型触点；节奏与存储按实施方案第六步接上。
 """
 
@@ -21,8 +21,9 @@
 # TODO(FORESIGHT-LOSS-001): 下半环的"loss 门控"方案（《Loss 与门控方案》，2026-09-19）**已被《语义树重构》
 # 取代**（2026-09-25 定）：不再做条件相合度的 loss，也不做关联长出 relevant_conditions 那两刀。留下的两样在
 # 新方案里各有位置——
-#   - 账本（``foresight/ledger``：带时窗的「会」落承诺、封口后结算为 验证/偏离/落空）是新方案里"负样本自产"的那本
-#     账，将并入 ``scene/ledger``（假设触发的承诺与判断者的承诺形状相同，来源不同；合不合待跑起来再定）。
+#   - 账本（``foresight/ledger``：带时窗的「会」落承诺、封口后结算为 验证/偏离/落空）是"负样本自产"的那本账，
+#     留在预测层（语义树新方案 ``13`` 五：原始事实归预测层，承诺上记"用了哪几条关系"，语义树经端口读；
+#     可信度按"提醒过 / 没提醒"分两栏，只用没提醒的回写）。语义树自己的假设账本已于 2026-10-07 删掉。
 #   - 事实门（``scene/facts.py``）保留，给概念命中里的情境概念当一个来源。
 # 刻意还没动的：``Claim.situations`` 暂恒为空（旧语义树的情形已删，新树的概念命中接回来时按概念分家）；
 # ``Settlement.reminded / response`` 按新方案改成另一份提醒记录（承诺写完不改），那一刀再动。
@@ -46,6 +47,7 @@ from habitus.foresight.model import (
     UnsealedRow,
 )
 from habitus.foresight.numbers import CellIndex, candidate_numbers, provenance
+from habitus.foresight.relations import RelationNote, RelationTable, present_relations
 from habitus.foresight.render import render_candidate, render_moment, render_pack
 
 __all__ = [
@@ -64,6 +66,8 @@ __all__ = [
     "NowScene",
     "Provenance",
     "RecurrenceNumbers",
+    "RelationNote",
+    "RelationTable",
     "UnsealedReader",
     "UnsealedRow",
     "assemble",
@@ -72,6 +76,7 @@ __all__ = [
     "history_card",
     "moment_at",
     "now_scene",
+    "present_relations",
     "provenance",
     "render_candidate",
     "render_moment",

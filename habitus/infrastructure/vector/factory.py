@@ -31,8 +31,7 @@ class VectorStoreBuildContext:
         if not isinstance(self.requirements, VectorStoreRequirements):
             raise TypeError("vector build requirements must be VectorStoreRequirements")
         if not isinstance(self.credentials, Mapping) or any(
-            not isinstance(key, str) or not isinstance(value, str)
-            for key, value in self.credentials.items()
+            not isinstance(key, str) or not isinstance(value, str) for key, value in self.credentials.items()
         ):
             raise TypeError("vector build credentials must be a string mapping")
         object.__setattr__(self, "credentials", MappingProxyType(dict(self.credentials)))
@@ -169,9 +168,7 @@ class VectorStoreFactory:
                     raise VectorStoreError("vector store credentials cannot contain empty values")
                 resolved[name] = value.strip()
         if config.route.credential_ref and not resolved:
-            raise VectorStoreError(
-                f"vector store credential is missing for reference: {config.route.credential_ref}"
-            )
+            raise VectorStoreError(f"vector store credential is missing for reference: {config.route.credential_ref}")
         if not config.route.credential_ref and resolved:
             raise VectorStoreError("vector store route received undeclared credentials")
         return resolved

@@ -46,9 +46,7 @@ _RECEIPT_FILE = re.compile(r"^(?P<receipt_id>[0-9a-f]{64})\.json$")
 class BehaviorFusionReceiptStore:
     """在 behavior-root 下按 ``receipt_id`` 保存不可变融合回执。"""
 
-    def __init__(
-        self, behavior_root: str | Path, *, config: BehaviorFusionConfig | None = None
-    ) -> None:
+    def __init__(self, behavior_root: str | Path, *, config: BehaviorFusionConfig | None = None) -> None:
         self.root = Path(behavior_root).expanduser().resolve(strict=False)
         resolved = config or BehaviorFusionConfig()
         if not isinstance(resolved, BehaviorFusionConfig):
@@ -100,9 +98,7 @@ class BehaviorFusionReceiptStore:
                 self.receipt_root, artifact_root=self.root, max_entries=self.config.max_receipt_files
             )
         except DurablePathIntegrityError as exc:
-            raise BehaviorFusionError(
-                "fusion receipt directory is invalid or exceeds its bound"
-            ) from exc
+            raise BehaviorFusionError("fusion receipt directory is invalid or exceeds its bound") from exc
         receipt_ids: list[str] = []
         for entry in entries:
             temporary = atomic_temporary_destination(entry.name)
@@ -133,19 +129,13 @@ class BehaviorFusionReceiptStore:
                 removed += 1
         return removed
 
-    def _existing(
-        self, receipt_id: str, conflict: ImmutableArtifactConflictError
-    ) -> BehaviorFusionReceipt:
+    def _existing(self, receipt_id: str, conflict: ImmutableArtifactConflictError) -> BehaviorFusionReceipt:
         try:
             current = self.read(receipt_id)
         except Exception as read_error:
-            raise BehaviorFusionError(
-                "fusion receipt collides with an unreadable artifact"
-            ) from read_error
+            raise BehaviorFusionError("fusion receipt collides with an unreadable artifact") from read_error
         if current is None:
-            raise BehaviorFusionError(
-                "fusion receipt collides with a vanished artifact"
-            ) from conflict
+            raise BehaviorFusionError("fusion receipt collides with a vanished artifact") from conflict
         return current
 
     def _required_read(self, receipt_id: str) -> BehaviorFusionReceipt:
@@ -163,9 +153,7 @@ class BehaviorFusionReceiptStore:
         try:
             restored = BehaviorFusionReceipt.from_dict(json.loads(encoded))
         except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, BehaviorFusionError) as exc:
-            raise BehaviorFusionError(
-                "fusion receipt cannot be read back by its own reader"
-            ) from exc
+            raise BehaviorFusionError("fusion receipt cannot be read back by its own reader") from exc
         if self._encode(restored) != encoded:
             raise BehaviorFusionError("fusion receipt is not canonically encoded")
 

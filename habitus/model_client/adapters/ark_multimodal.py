@@ -37,9 +37,7 @@ class ArkMultimodalEmbeddingProvider:
         if not isinstance(config, EmbeddingModelConfig):
             raise TypeError("config must be EmbeddingModelConfig")
         if config.route.adapter != "ark_multimodal":
-            raise ModelConfigurationError(
-                "ArkMultimodalEmbeddingProvider requires adapter='ark_multimodal'"
-            )
+            raise ModelConfigurationError("ArkMultimodalEmbeddingProvider requires adapter='ark_multimodal'")
         if config.input_mode != "multimodal":
             raise ModelConfigurationError("ark_multimodal adapter requires input_mode='multimodal'")
         if not config.route.base_url:
@@ -184,6 +182,7 @@ class ArkMultimodalEmbeddingProvider:
                 raise ModelConfigurationError(
                     f"ark_multimodal {label} cannot override request fields: {sorted(overlap)}"
                 )
+
 
 class _HTTPStatusError(RuntimeError):
     def __init__(self, message: str, *, status_code: int, retry_after: float | None) -> None:

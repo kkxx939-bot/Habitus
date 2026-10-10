@@ -1,7 +1,7 @@
 """归约写入层：闭合的判断链 → 行为树文档。
 
 行为树唯一的生产入口（观测 → 融合 → **归约** → 落盘），零发明：语义逐字来自判断，唯一的
-LLM 触点是 kinds 归一。见 ``TODO(BHV-TREE-REBUILD-001)`` 与各模块 docstring。
+LLM 触点是词表的白天归类（``kinds_step``）；词表的整理活与落树在 ``kinds_jobs`` / ``kinds_migration``。见 ``TODO(BHV-TREE-REBUILD-001)`` 与各模块 docstring。
 """
 
 from habitus.behavior.reduction.chains import BehaviorChain, ChainAssembly, assemble_chains
@@ -18,15 +18,14 @@ from habitus.behavior.reduction.pending import PendingJudgements, pending_judgem
 from habitus.behavior.reduction.record import ReducibleJudgement, parse_judgement_record
 from habitus.behavior.reduction.runner import (
     DEFAULT_SWEEP_LOCK_TTL_SECONDS,
-    BehaviorKindMergeReport,
     BehaviorReductionReport,
     BehaviorReductionRunner,
+    VocabularyJobReport,
 )
 from habitus.behavior.reduction.sealing import seal_horizon, sealed_chain_indexes, sealed_gaps
 
 __all__ = [
     "DEFAULT_SWEEP_LOCK_TTL_SECONDS",
-    "BehaviorKindMergeReport",
     "REDUCTION_VERSION",
     "UNREADABLE_GAP_KIND",
     "BehaviorChain",
@@ -38,6 +37,7 @@ __all__ = [
     "BehaviorReductionRunner",
     "ChainAssembly",
     "PendingJudgements",
+    "VocabularyJobReport",
     "ReducibleJudgement",
     "assemble_chains",
     "pending_judgements",

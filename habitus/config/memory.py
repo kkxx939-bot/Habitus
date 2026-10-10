@@ -40,9 +40,7 @@ class MemoryConfig:
     search_service: MemorySearchServiceConfig = field(default_factory=MemorySearchServiceConfig)
     recall_lifecycle: MemoryRecallLifecycleConfig = field(default_factory=MemoryRecallLifecycleConfig)
     field_compaction: MemoryFieldCompactionConfig = field(default_factory=MemoryFieldCompactionConfig)
-    lifecycle_maintenance: MemoryLifecycleMaintenanceConfig = field(
-        default_factory=MemoryLifecycleMaintenanceConfig
-    )
+    lifecycle_maintenance: MemoryLifecycleMaintenanceConfig = field(default_factory=MemoryLifecycleMaintenanceConfig)
     retrieval: MemoryRetrievalConfig = field(default_factory=MemoryRetrievalConfig)
     vector_store: VectorStoreConfig = field(default_factory=VectorStoreConfig)
     vector_index: MemoryVectorIndexConfig = field(default_factory=MemoryVectorIndexConfig)

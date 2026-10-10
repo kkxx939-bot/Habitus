@@ -63,7 +63,12 @@ class RuntimeHealthService:
         checks.extend(self._prediction_checks(runtime_state))
         checks.extend(self._foresight_checks(runtime_state))
         checks.append(await self._queue_check())
-        checks.extend(await asyncio.gather(self._vector_check("memory_vector", self.components.memory.vector_index.store), self._vector_check("summary_vector", self.components.conversation.summary_vector_index.store)))
+        checks.extend(
+            await asyncio.gather(
+                self._vector_check("memory_vector", self.components.memory.vector_index.store),
+                self._vector_check("summary_vector", self.components.conversation.summary_vector_index.store),
+            )
+        )
         if deep:
             checks.extend(
                 await asyncio.gather(
@@ -82,9 +87,7 @@ class RuntimeHealthService:
             check.critical and check.status in {RuntimeHealthStatus.UNHEALTHY, RuntimeHealthStatus.CLOSED}
             for check in checks
         )
-        critical_degraded = any(
-            check.critical and check.status is RuntimeHealthStatus.DEGRADED for check in checks
-        )
+        critical_degraded = any(check.critical and check.status is RuntimeHealthStatus.DEGRADED for check in checks)
         if runtime_state == "closed":
             status = RuntimeHealthStatus.CLOSED
         elif critical_unhealthy:
@@ -105,11 +108,7 @@ class RuntimeHealthService:
 
         behavior = self.components.behavior
         if behavior is None:
-            return [
-                RuntimeHealthCheck(
-                    "behavior", RuntimeHealthStatus.HEALTHY, "disabled", critical=False
-                )
-            ]
+            return [RuntimeHealthCheck("behavior", RuntimeHealthStatus.HEALTHY, "disabled", critical=False)]
         return self._worker_checks(
             runtime_state,
             (
@@ -127,14 +126,8 @@ class RuntimeHealthService:
 
         prediction = self.components.prediction
         if prediction is None:
-            return [
-                RuntimeHealthCheck(
-                    "prediction", RuntimeHealthStatus.HEALTHY, "disabled", critical=False
-                )
-            ]
-        checks = self._worker_checks(
-            runtime_state, (("prediction_rebuild_worker", prediction.worker),)
-        )
+            return [RuntimeHealthCheck("prediction", RuntimeHealthStatus.HEALTHY, "disabled", critical=False)]
+        checks = self._worker_checks(runtime_state, (("prediction_rebuild_worker", prediction.worker),))
         checks.append(self._prediction_freshness_check(prediction))
         return checks
 
@@ -162,9 +155,7 @@ class RuntimeHealthService:
                 "prediction_tree", RuntimeHealthStatus.UNHEALTHY, f"unreadable:{type(exc).__name__}", critical=False
             )
         if published is None:
-            return RuntimeHealthCheck(
-                "prediction_tree", RuntimeHealthStatus.HEALTHY, "never_published", critical=False
-            )
+            return RuntimeHealthCheck("prediction_tree", RuntimeHealthStatus.HEALTHY, "never_published", critical=False)
         age = (datetime.now(UTC) - published.published_at).total_seconds()
         tolerance = 2.0 * prediction.tree_config.rebuild_interval_seconds
         if age > tolerance:
@@ -174,14 +165,10 @@ class RuntimeHealthService:
                 f"stale:{int(age)}s",
                 critical=False,
             )
-        return RuntimeHealthCheck(
-            "prediction_tree", RuntimeHealthStatus.HEALTHY, f"age:{int(age)}s", critical=False
-        )
+        return RuntimeHealthCheck("prediction_tree", RuntimeHealthStatus.HEALTHY, f"age:{int(age)}s", critical=False)
 
     @staticmethod
-    def _worker_checks(
-        runtime_state: str, workers: tuple[tuple[str, ResidentWorker], ...]
-    ) -> list[RuntimeHealthCheck]:
+    def _worker_checks(runtime_state: str, workers: tuple[tuple[str, ResidentWorker], ...]) -> list[RuntimeHealthCheck]:
         """一组常驻循环的存活面：出过错报 degraded，该转不转报 unhealthy。"""
 
         checks: list[RuntimeHealthCheck] = []
@@ -197,9 +184,7 @@ class RuntimeHealthService:
                 )
             elif runtime_state == "running" and not worker.running:
                 checks.append(
-                    RuntimeHealthCheck(
-                        name, RuntimeHealthStatus.UNHEALTHY, "loop_not_running", critical=False
-                    )
+                    RuntimeHealthCheck(name, RuntimeHealthStatus.UNHEALTHY, "loop_not_running", critical=False)
                 )
             else:
                 checks.append(
@@ -233,7 +218,9 @@ class RuntimeHealthService:
         if worker.state is LifecycleWorkerState.FAILED:
             return RuntimeHealthCheck("lifecycle_worker", RuntimeHealthStatus.UNHEALTHY, self._error(worker.last_error))
         if worker.last_error is not None:
-            return RuntimeHealthCheck("lifecycle_worker", RuntimeHealthStatus.DEGRADED, self._error(worker.last_error), critical=False)
+            return RuntimeHealthCheck(
+                "lifecycle_worker", RuntimeHealthStatus.DEGRADED, self._error(worker.last_error), critical=False
+            )
         return RuntimeHealthCheck("lifecycle_worker", RuntimeHealthStatus.HEALTHY, worker.state.value, critical=False)
 
     def _lifecycle_storage_check(self, runtime_state: str) -> RuntimeHealthCheck:
@@ -253,9 +240,7 @@ class RuntimeHealthService:
             )
         try:
             pending_l2 = len(self.components.memory.lifecycle.operation_store.pending())
-            pending_summaries = len(
-                self.components.workflow.lifecycle.retirement_store.pending()
-            )
+            pending_summaries = len(self.components.workflow.lifecycle.retirement_store.pending())
         except Exception as exc:
             return RuntimeHealthCheck(
                 "lifecycle_storage",
@@ -293,7 +278,9 @@ class RuntimeHealthService:
             self.components.infrastructure.observability.set_gauge("memory_queue_blocked", 1)
             return RuntimeHealthCheck("memory_queue", RuntimeHealthStatus.DEGRADED, f"failed:{job.memory_sequence}")
         self.components.infrastructure.observability.set_gauge("memory_queue_blocked", 0)
-        return RuntimeHealthCheck("memory_queue", RuntimeHealthStatus.HEALTHY, f"{job.status.value}:{job.memory_sequence}")
+        return RuntimeHealthCheck(
+            "memory_queue", RuntimeHealthStatus.HEALTHY, f"{job.status.value}:{job.memory_sequence}"
+        )
 
     @staticmethod
     async def _vector_check(name: str, store: object) -> RuntimeHealthCheck:
@@ -305,7 +292,9 @@ class RuntimeHealthService:
             return RuntimeHealthCheck(name, RuntimeHealthStatus.DEGRADED, "not_published")
         if not state.ready:
             return RuntimeHealthCheck(name, RuntimeHealthStatus.DEGRADED, "not_ready")
-        return RuntimeHealthCheck(name, RuntimeHealthStatus.HEALTHY, f"generation={state.generation};records={state.record_count}")
+        return RuntimeHealthCheck(
+            name, RuntimeHealthStatus.HEALTHY, f"generation={state.generation};records={state.record_count}"
+        )
 
     async def _chat_check(self) -> RuntimeHealthCheck:
         result = await asyncio.to_thread(self.components.models.chat.health_check)

@@ -101,12 +101,11 @@ def split(snapshot: BehaviorSnapshot, *, cutoff: date) -> tuple[BehaviorSnapshot
         raise PredictionTreeError("snapshot must be a BehaviorSnapshot")
     if not isinstance(cutoff, date):
         raise PredictionTreeError("cutoff must be a date")
-    train_indexes = [
-        index for index, item in enumerate(snapshot.actions) if item.day <= cutoff
-    ]
+    train_indexes = [index for index, item in enumerate(snapshot.actions) if item.day <= cutoff]
     position = {index: rank for rank, index in enumerate(train_indexes)}
     train = BehaviorSnapshot(
         actions=tuple(snapshot.actions[index] for index in train_indexes),
+        unnamed=tuple(item for item in snapshot.unnamed if item.day <= cutoff),
         gaps=_gaps_until(snapshot.gaps, cutoff),
         concurrent=tuple(
             (position[left], position[right])
@@ -117,6 +116,7 @@ def split(snapshot: BehaviorSnapshot, *, cutoff: date) -> tuple[BehaviorSnapshot
     )
     holdout = BehaviorSnapshot(
         actions=tuple(item for item in snapshot.actions if item.day > cutoff),
+        unnamed=tuple(item for item in snapshot.unnamed if item.day > cutoff),
         gaps=_gaps_after(snapshot.gaps, cutoff),
         concurrent=(),
         skipped_duplicates=0,
@@ -125,29 +125,15 @@ def split(snapshot: BehaviorSnapshot, *, cutoff: date) -> tuple[BehaviorSnapshot
 
 
 def _gaps_until(gaps: Sequence[ObservedGap], cutoff: date) -> tuple[ObservedGap, ...]:
-    return tuple(
-        piece
-        for gap in gaps
-        for day, piece in _by_day(gap)
-        if day <= cutoff
-    )
+    return tuple(piece for gap in gaps for day, piece in _by_day(gap) if day <= cutoff)
 
 
 def _gaps_after(gaps: Sequence[ObservedGap], cutoff: date) -> tuple[ObservedGap, ...]:
-    return tuple(
-        piece
-        for gap in gaps
-        for day, piece in _by_day(gap)
-        if day > cutoff
-    )
+    return tuple(piece for gap in gaps for day, piece in _by_day(gap) if day > cutoff)
 
 
 def _by_day(gap: ObservedGap) -> list[tuple[date, ObservedGap]]:
-    return [
-        (day, piece)
-        for day, pieces in nodes.group_gaps_by_day((gap,)).items()
-        for piece in pieces
-    ]
+    return [(day, piece) for day, pieces in nodes.group_gaps_by_day((gap,)).items() for piece in pieces]
 
 
 def backtest(
@@ -452,9 +438,7 @@ class _BinTally:
         return sum(item.count * item.error for item in self.bins()) / self.samples
 
 
-def calibration(
-    pairs: Sequence[tuple[float, bool]], *, bins: int = 10
-) -> tuple[CalibrationBin, ...]:
+def calibration(pairs: Sequence[tuple[float, bool]], *, bins: int = 10) -> tuple[CalibrationBin, ...]:
     """校准曲线：把预测按概率分箱，比"说的"和"发生的"。"""
 
     if isinstance(bins, bool) or not isinstance(bins, int) or bins < 1:
@@ -545,17 +529,13 @@ def permutation_test(
 
     if isinstance(rounds, bool) or not isinstance(rounds, int) or rounds < 1:
         raise PredictionTreeError("rounds must be a positive integer")
-    observed = backtest(
-        snapshot, config=config, cutoff=cutoff, built_at=built_at, through=through
-    ).bits_gained
+    observed = backtest(snapshot, config=config, cutoff=cutoff, built_at=built_at, through=through).bits_gained
     generator = random.Random(seed)
     at_least_as_good = 0
     for _ in range(rounds):
         shuffled = _shuffle_days(snapshot, generator)
         try:
-            permuted = backtest(
-                shuffled, config=config, cutoff=cutoff, built_at=built_at, through=through
-            ).bits_gained
+            permuted = backtest(shuffled, config=config, cutoff=cutoff, built_at=built_at, through=through).bits_gained
         except PredictionTreeError:
             # 置换后切分退化（某一侧空了）。既不能当成"打赢了"也不能悄悄从分母里消失——
             # 后者会系统性压低 p 值、偏向显著。按**保守**方向计入分子。
@@ -577,15 +557,16 @@ def _shuffle_days(snapshot: BehaviorSnapshot, generator: random.Random) -> Behav
                 (
                     ObservedAction(
                         action=item.action,
-                        started_at=item.started_at
-                        + timedelta(days=(remapped[item.day] - item.day).days),
+                        started_at=item.started_at + timedelta(days=(remapped[item.day] - item.day).days),
                         day=remapped[item.day],
+                        lane=item.lane,
                     )
                     for item in snapshot.actions
                 ),
                 key=lambda item: item.started_at,
             )
         ),
+        unnamed=(),  # 置换只用来看周几效应，转移边不参与本检验，占位也就不需要
         gaps=snapshot.gaps,
         concurrent=(),  # 下标已经失效；置换只用来看周几效应，转移边不参与本检验
         skipped_duplicates=0,

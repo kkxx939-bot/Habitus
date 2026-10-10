@@ -1,19 +1,16 @@
-"""节律：一个行为概念在钟面上的作息形状——基准生成两个触点共用的那一样输入。
+"""节律：一个行为概念在钟面上的作息形状。
 
-**它回答四个问题**（写假设时要的就是这四个）：几点、一天几个机会、每个机会多大概率、多久一次。
-一个"机会"就是曲线上的一个峰（形状稿 §1，与账本的 ``Opportunity`` 同一个定义），所以节律与机会口
-读的是同一份东西，只是节律给的是"典型的一天"（七个周几平均），机会口给的是"接下来那几次"。
+**它回答四个问题**：几点、一天几个机会、每个机会多大概率、多久一次。一个"机会"就是曲线上的一个峰，
+节律给的是"典型的一天"（七个周几平均）。
 
-**为什么住在 ``concepts/``**：两个触点都要它——写概念时要看这个 kind 的作息（"一天三次"就不该定成
-一个概念），写假设时要按它分型、按它逐峰各写一条。而引用是单向的：``hypotheses`` 可以引用
-``concepts``，反过来不行（B8：基准要和观测独立）。所以放在两边都够得到的那一支。
+**读它的两处**：触点①写概念时看这个类的作息（"一天三次"就不该定成一个概念）；常态按峰分份
+（``occurrences.baselines``）。两处都够得到 ``concepts/``，所以放在这一支。
 
 **为什么只有协议在这里**：峰来自预测树，而 ``scene`` 不许 import ``prediction``（架构测试按传递闭包
 钉死）。实现住组合根（``runtime/scene_rhythms.py``），这里只定形状。
 
-**分型的判据是节律，不是猜**（2026-09-27 裁定）：树上天天有峰的后件（早餐、就寝）是**节律型**，
-假设写"影响落在第几次机会"；只在一两个周几冒头、或整周都没有峰的（打球、就诊）是**无节律型**，
-不数机会、没有时效。``has_rhythm`` 就是这条线，两个触点和校对算法读同一个属性，不各自判一遍。
+**分型的判据是节律，不是猜**（2026-09-27 裁定）：树上天天有峰的（早餐、就寝）是**节律型**；
+只在一两个周几冒头、或整周都没有峰的（打球、就诊）是**无节律型**。``has_rhythm`` 就是这条线。
 """
 
 from __future__ import annotations
@@ -49,7 +46,10 @@ class RhythmPeak:
             if isinstance(value, bool) or not isinstance(value, int):
                 raise ConceptError(f"rhythm peak {label} must be an integer minute of day")
         # 跨午夜的峰（就寝 23:00–01:00）起点在当天、终点过 24:00：终点最多到次日同一刻（评审 A-7 / B-8 / C-7）。
-        if not 0 <= self.start_minute < MINUTES_PER_DAY or not self.start_minute < self.end_minute <= self.start_minute + MINUTES_PER_DAY:
+        if (
+            not 0 <= self.start_minute < MINUTES_PER_DAY
+            or not self.start_minute < self.end_minute <= self.start_minute + MINUTES_PER_DAY
+        ):
             raise ConceptError("a rhythm peak starts inside one day and ends within 24 hours of its start")
         if isinstance(self.probability, bool) or not isinstance(self.probability, int | float):
             raise ConceptError("rhythm peak probability must be a number")
@@ -73,15 +73,16 @@ class RhythmPeak:
 class Rhythm:
     """一个行为概念的作息：典型一天的那几个峰 + 七个周几里几天有峰 + 复发间隔。
 
-    ``peaks`` 空表示树上一个峰都取不到（这个概念从没命中过任何 kind，或它太低频）。
-    ``recurrence_hours`` 是复发间隔的中位数（小时）；取不到就 None。**A4"按它缩放 ``censor_after``"还没做**——
-    ``censor_after`` 仍是全局一个数，与生命周期那一份一起定（PENDING R-4）。
+    ``peaks`` 空表示树上一个峰都取不到（它的类还没有曲线，或太低频）。
+    ``recurrence_hours`` 是复发间隔的中位数（小时）；取不到就 None。
     """
 
     concept: str
     peaks: tuple[RhythmPeak, ...] = ()
     days_with_peaks: int = 0
     recurrence_hours: float | None = None
+    #: 给模型看的名字（基础概念的 ``concept`` 是类编号，显示用类名）；不给就用 ``concept``。
+    label: str | None = None
 
     def __post_init__(self) -> None:
         concept_identity(self.concept)
@@ -96,7 +97,11 @@ class Rhythm:
             if later.start_minute < earlier.end_minute:
                 raise ConceptError("rhythm peaks must not overlap")
         object.__setattr__(self, "peaks", peaks)
-        if isinstance(self.days_with_peaks, bool) or not isinstance(self.days_with_peaks, int) or not 0 <= self.days_with_peaks <= 7:
+        if (
+            isinstance(self.days_with_peaks, bool)
+            or not isinstance(self.days_with_peaks, int)
+            or not 0 <= self.days_with_peaks <= 7
+        ):
             raise ConceptError("days_with_peaks counts 0–7 weekdays")
         if bool(peaks) != bool(self.days_with_peaks):
             raise ConceptError("a rhythm has peaks on some weekday, or no peaks at all")
@@ -108,7 +113,7 @@ class Rhythm:
 
     @property
     def has_rhythm(self) -> bool:
-        """节律型 / 无节律型的分界线。写假设时按它分型，不由模型猜。"""
+        """节律型 / 无节律型的分界线，由树上的峰判，不由模型猜。"""
 
         return bool(self.peaks) and self.days_with_peaks >= MIN_RHYTHM_DAYS
 
@@ -119,28 +124,19 @@ class Rhythm:
     def render(self) -> str:
         """给提示词的一行。无节律的说清"树上看不出节律"，好让模型知道不必猜第几次机会。"""
 
+        name = self.label or self.concept
         if not self.peaks:
-            return f"{self.concept}：树上取不到峰（太低频或还没命中过），按无节律写"
+            return f"{name}：树上取不到峰（太低频或还没命中过），按无节律写"
         clock = "、".join(peak.render() for peak in self.peaks)
         every = "" if self.recurrence_hours is None else f"，平均每 {self.recurrence_hours:.0f} 小时一次"
         shape = "有节律" if self.has_rhythm else f"只在 {self.days_with_peaks} 个周几有峰，按无节律写"
-        return f"{self.concept}：一天 {self.opportunities_per_day} 个机会（{clock}），7 个周几里 {self.days_with_peaks} 天有它{every}；{shape}"
+        return f"{name}：一天 {self.opportunities_per_day} 个机会（{clock}），7 个周几里 {self.days_with_peaks} 天有它{every}；{shape}"
 
 
 class RhythmProvider(Protocol):
     """组合根注入的节律口。键是行为概念的名字；取不到的概念不在里面（调用方按"无节律"处理）。"""
 
     def rhythms(self) -> Mapping[str, Rhythm]: ...
-
-
-def rhythm_of(rhythms: Mapping[str, Rhythm], concept: str) -> Rhythm:
-    """按概念取节律；没有就给一个空节律（``has_rhythm`` 为假），调用方不必到处判 None。"""
-
-    identity = concept_identity(concept)
-    for name, rhythm in rhythms.items():
-        if concept_identity(name) == identity:
-            return rhythm
-    return Rhythm(concept=concept)
 
 
 def _clock(minute_of_day: int) -> str:
@@ -154,5 +150,4 @@ __all__ = [
     "Rhythm",
     "RhythmPeak",
     "RhythmProvider",
-    "rhythm_of",
 ]

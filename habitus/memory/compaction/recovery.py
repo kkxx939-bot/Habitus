@@ -126,9 +126,7 @@ class MemoryRecoveryStore:
             raise ValueError("memory recovery keeps exactly one active baseline per memory")
         if isinstance(max_file_bytes, bool) or not isinstance(max_file_bytes, int) or max_file_bytes <= 0:
             raise ValueError("max_file_bytes must be a positive integer")
-        canonical = (tree.root.parent / "workflow" / "lifecycle" / "l2_recovery").resolve(
-            strict=False
-        )
+        canonical = (tree.root.parent / "workflow" / "lifecycle" / "l2_recovery").resolve(strict=False)
         resolved = canonical if root is None else Path(root).expanduser().resolve(strict=False)
         if resolved != canonical:
             raise ValueError("memory recovery store must use the canonical sibling workflow root")
@@ -216,10 +214,7 @@ class MemoryRecoveryStore:
         )
         if record is None or not record.active:
             return None
-        if (
-            record.compacted_revision != snapshot.revision
-            or record.compacted_digest != snapshot.source_digest
-        ):
+        if record.compacted_revision != snapshot.revision or record.compacted_digest != snapshot.source_digest:
             return None
         return record
 

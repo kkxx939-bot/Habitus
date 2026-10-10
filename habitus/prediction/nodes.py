@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-from bisect import bisect_left
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -60,42 +59,6 @@ def estimation_constants() -> dict[str, object]:
     }
 
 
-def reconcile_gaps(
-    actions: Sequence[ObservedAction], gaps: Sequence[ObservedGap]
-) -> tuple[ObservedGap, ...]:
-    """消解 occurrence 与空白的重叠，产出**唯一**的一份空白账。
-
-    这里是"一条记录一个解读"的落点。以前没有这一步，同一段空白被两个消费者读成两回事：
-    曝光那边看到这一槽产出过 occurrence 就把覆盖记满（"我们明明看见了"），边那边照旧把它
-    当洞、把那一对转移删失（"这中间可能漏了别的"）。两种读法各自都说得通，但存储与读侧
-    因此有了两份真相，每个新消费者都要重新面对同一道选择题。
-
-    规则按 ``watched`` 二分，两个消费者此后读同一份账：
-
-    - **在看（「没读懂」）**：它断言的正是"这段读不出行为"。这段里若真读出了一条行为的起点，
-      这句断言就被证伪了——**整段作废**。作废是唯一不需要编造宽度的规则：只挖掉"那一瞬"是
-      零测度、等于没挖；挖"可见跨度"要 ``last_observed_at``，而瞬时行为的跨度仍然是零。
-    - **没在看（「未观测」）**：里面不可能读出行为。真出现了，那是上游把"没在看"与"看见了"
-      同时写进了树——本层**不消解**，让它在 ``_accumulate_action`` 以明确的矛盾报出来。
-      这类空白目前树里一条都没有（上游覆盖契约尚未接入），所以这条是前瞻护栏。
-
-    代价说清楚：作废之后，那段时间里可能还有**没读出来**的行为，会被当成"没有"。真实数据上
-    这个代价很小——DAY1 的 21 段空白全是「没读懂」、非零宽度的只有 4 段共 137.8 秒，其中被
-    证伪的 1 段宽 21.9 秒。
-    """
-
-    starts = sorted(action.started_at.timestamp() for action in actions)
-    kept: list[ObservedGap] = []
-    for gap in gaps:
-        if gap.watched:
-            begin = gap.started_at.timestamp()
-            index = bisect_left(starts, begin)
-            if index < len(starts) and starts[index] < gap.ended_at.timestamp():
-                continue
-        kept.append(gap)
-    return tuple(kept)
-
-
 def decay_weight(age_days: float, half_life_days: float) -> float:
     """时间衰减：``half_life_days`` 天前的证据算半份。"""
 
@@ -143,7 +106,7 @@ def accumulate(
     counts: dict[tuple[SlotKey, str], NodeCounts] = {}
     cell_days: dict[tuple[SlotKey, str], list[date]] = {}
     exposure: dict[SlotKey, SlotExposure] = {}
-    # 覆盖只由空白决定，**没有任何特判**：occurrence 与空白的重叠已经在 ``reconcile_gaps``
+    # 覆盖只由空白决定，**没有任何特判**：occurrence 与空白的重叠已经在事件序列里（``series.model.disproves``）
     # 一处消解掉了（调用方是 ``builder``，它把同一份账同时交给本模块与 ``edges``）。
     # 早先这里有一条"这一槽产出过 occurrence 就把覆盖记满"的特判，它有两个副作用：A 的一次
     # 发生会替 B 抹掉同一槽里的洞；而且它掩盖了分子分母的口径不一致（见 ``_accumulate_action``）。
@@ -219,7 +182,7 @@ def _accumulate_action(
         covered = coverage[slot_index]
         if covered <= 0.0:
             # 走到这里说明上游同时断言了"这段没在看"与"这一刻看见了这条行为"。这是**上游的
-            # 矛盾数据**，不是本层该消解的重叠——「没读懂」那一类已经在 ``reconcile_gaps``
+            # 矛盾数据**，不是本层该消解的重叠——「没读懂」那一类已经在事件序列里（``series.model.disproves``）
             # 里被证伪作废，能剩下的只有「未观测」。在这里报出来，比放它进去、再让发布期的
             # "有计数无曝光"以一句不知所云的内部错误炸掉要好。
             raise PredictionTreeError(
@@ -322,9 +285,7 @@ def derive_all(
             if cumulative is None or len(cumulative) != slots:
                 # 两处都从同一批行为出发，键集必须一致；对不上就是装配错了，不能悄悄发一条
                 # 全零的曲线——那会被读侧读成"这个周几从来不做这件事"。
-                raise PredictionTreeError(
-                    f"no completion curve for {action} on weekday {weekday}"
-                )
+                raise PredictionTreeError(f"no completion curve for {action} on weekday {weekday}")
             trend, trend_n_eff = trends.get((weekday, action), (None, 0.0))
             curves[(weekday, action)] = DayCurve(
                 marginal=tuple(marginal[weekday]),
@@ -334,10 +295,7 @@ def derive_all(
                 trend_n_eff=trend_n_eff,
             )
     weekday_baselines = {
-        action: tuple(
-            _published(all_day.per_slot_cross_weekday.get((slot, action), 0.0))
-            for slot in range(slots)
-        )
+        action: tuple(_published(all_day.per_slot_cross_weekday.get((slot, action), 0.0)) for slot in range(slots))
         for action in sorted({action for _weekday, action in pairs})
     }
     return DerivedNodes(cells=cells, curves=curves, weekday_baselines=weekday_baselines)
@@ -406,9 +364,7 @@ def _dense_chain(
         bottom = [list(row) for row in grids.exposure]
         for (weekday, slot), counts in cells.items():
             if grids.observed[weekday][slot]:
-                bottom[weekday][slot] = max(
-                    grids.exposure[weekday][slot] - counts.earlier_days, 0.0
-                )
+                bottom[weekday][slot] = max(grids.exposure[weekday][slot] - counts.earlier_days, 0.0)
         pooled_bottom = [_circular_window_sums(row, config.pool_half_width) for row in bottom]
     else:
         bottom = grids.exposure
@@ -431,11 +387,7 @@ def _dense_chain(
             )
             # 格子与曲线读的是**同一个已舍入的值**，所以两者永远逐位相等。
             grid[weekday][slot] = _published(
-                _probability(
-                    _shrink(
-                        top[weekday][slot], bottom[weekday][slot], pooled, config.shrink_slot_to_pool
-                    )
-                )
+                _probability(_shrink(top[weekday][slot], bottom[weekday][slot], pooled, config.shrink_slot_to_pool))
             )
     return grid
 
@@ -457,9 +409,7 @@ def _circular_window_sums(values: Sequence[float], half_width: int) -> list[floa
         return list(values)
     width = 2 * half_width + 1
     if width > total:
-        raise PredictionTreeError(
-            "a circular pooling window wider than the clock face would count slots twice"
-        )
+        raise PredictionTreeError("a circular pooling window wider than the clock face would count slots twice")
     window = sum(values[(index - half_width) % total] for index in range(width))
     sums = [0.0] * total
     # 滑动的加减残差会让本该为 0 的窗口和落到 -3e-9 这种微小负值上。今天每个消费者都先加
@@ -694,12 +644,10 @@ def _coverage_by_day(
     """每天每槽有多少比例是真的在看；**唯一**的那份口径。
 
     ``accumulate`` 与 ``pooled_trends`` 都从这里取，两处不再各写一遍。入参里的空白必须是
-    ``reconcile_gaps`` 消解过的——本函数只做积分，不解释重叠。
+    事件序列消解过的（``series.model.disproves``）——本函数只做积分，不解释重叠。
     """
 
-    return {
-        day: day_coverage(day, gap_days.get(day, ()), slot_minutes) for day in days
-    }
+    return {day: day_coverage(day, gap_days.get(day, ()), slot_minutes) for day in days}
 
 
 def all_day_marginals(ledger: NodeLedger, *, config: PredictionTreeConfig) -> dict[str, float]:
@@ -747,21 +695,16 @@ def _all_day_rates(ledger: NodeLedger, *, config: PredictionTreeConfig) -> _Base
     for key, item in ledger.exposure.items():
         per_slot_exposure[key.slot] = per_slot_exposure.get(key.slot, 0.0) + item.observed_days
     return _Baselines(
-        marginal={
-            action: (value + epsilon) / (total_exposure + epsilon)
-            for action, value in occurred.items()
-        },
+        marginal={action: (value + epsilon) / (total_exposure + epsilon) for action, value in occurred.items()},
         # 危险率的先验必须和收缩链每一层同口径：分母是**风险集**（还没发生的那部分曝光），
         # 不是总曝光。用总曝光会把先验系统性压低 3–4 倍（行为在一天里越早发生偏差越大），
         # 而危险率的全部用途就是"到现在还没做，这个槽会不会做"。
         hazard={
-            action: (value + epsilon)
-            / (max(total_exposure - earlier.get(action, 0.0), 0.0) + epsilon)
+            action: (value + epsilon) / (max(total_exposure - earlier.get(action, 0.0), 0.0) + epsilon)
             for action, value in first.items()
         },
         per_slot_cross_weekday={
-            (slot, action): (value + epsilon)
-            / (per_slot_exposure.get(slot, 0.0) + epsilon)
+            (slot, action): (value + epsilon) / (per_slot_exposure.get(slot, 0.0) + epsilon)
             for (slot, action), value in per_slot_occurred.items()
         },
     )

@@ -96,8 +96,12 @@ class BehaviorFusionJobConfig:
     max_file_bytes: int = 4_194_304
 
     def __post_init__(self) -> None:
-        for name in ("retry_base_delay_seconds", "retry_max_delay_seconds",
-                     "lock_wait_timeout_seconds", "lock_retry_delay_seconds"):
+        for name in (
+            "retry_base_delay_seconds",
+            "retry_max_delay_seconds",
+            "lock_wait_timeout_seconds",
+            "lock_retry_delay_seconds",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
                 raise ValueError(f"{name} must be a positive number")
@@ -188,9 +192,7 @@ class BehaviorFusionJob:
         for name in ("job_id", "segment_digest"):
             if not _SHA256.fullmatch(str(getattr(self, name))):
                 raise BehaviorFusionJobError(f"{name} must be lowercase SHA-256 text")
-        if not self.observation_ids or any(
-            not _SHA256.fullmatch(item) for item in self.observation_ids
-        ):
+        if not self.observation_ids or any(not _SHA256.fullmatch(item) for item in self.observation_ids):
             raise BehaviorFusionJobError("observation_ids must be non-empty SHA-256 text")
         if not self.source_refs:
             raise BehaviorFusionJobError("a fusion job must record its source deliveries")

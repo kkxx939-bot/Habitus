@@ -368,9 +368,7 @@ class MemoryLifecycleManager:
 
         if not isinstance(uris, tuple):
             raise TypeError("used memory URIs must be a tuple")
-        snapshots = tuple(
-            [await asyncio.to_thread(self.snapshot_reader.read, uri) for uri in uris]
-        )
+        snapshots = tuple([await asyncio.to_thread(self.snapshot_reader.read, uri) for uri in uris])
         targets = tuple(self._target_snapshot(snapshot) for snapshot in snapshots)
         result = await self.record_context_use(targets, used_at=used_at)
         return tuple(self._target(document) for document in result.documents)
@@ -789,11 +787,7 @@ def _timestamp(value: datetime) -> datetime:
 
 
 def _same_snapshot(left: MemorySnapshot, right: MemorySnapshot) -> bool:
-    return (
-        left.state is right.state
-        and left.revision == right.revision
-        and left.source_digest == right.source_digest
-    )
+    return left.state is right.state and left.revision == right.revision and left.source_digest == right.source_digest
 
 
 def _matches_target(snapshot: MemorySnapshot, target: MemoryRecallTarget) -> bool:

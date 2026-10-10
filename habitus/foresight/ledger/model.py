@@ -68,6 +68,12 @@ class Claim:
     conditions: Conditions = ()
     condition_keys: tuple[str, ...] = ()
     facts_version: str = "none"
+    #: 说这话时证据包里摆给判断者看的已成立关系（语义树的关系身份）。原始事实归预测层：将来预测层的反馈按它读回语义树、
+    #: 给关系记"帮上忙没有"（语义树新方案 ``13`` ⑥；反馈等预测层逻辑写好再做，裁定 24）。
+    relations: tuple[str, ...] = ()
+    #: 与 ``relations`` 一一对应：每条关系的前因这一次的出处（已封口记录的 URI，或 ``unsealed:<开始时刻>``）。现场归类与封口归类
+    #: 可能不一样，反馈读回语义树之前要用封口结果复核，读法不一致的不进反馈（第四轮评审 E19）。
+    relation_sources: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for label in ("claim_id", "kind_token", "generation", "judge_version"):
@@ -76,7 +82,11 @@ class Claim:
                 raise ForesightError(f"claim {label} must be non-empty text")
         if isinstance(self.day, datetime) or not isinstance(self.day, date):
             raise ForesightError("claim day must be a date")
-        if isinstance(self.slot_minutes, bool) or not isinstance(self.slot_minutes, int) or not 0 < self.slot_minutes <= 1440:
+        if (
+            isinstance(self.slot_minutes, bool)
+            or not isinstance(self.slot_minutes, int)
+            or not 0 < self.slot_minutes <= 1440
+        ):
             raise ForesightError("claim slot_minutes must be a positive integer of at most 1440")
         slots = 1440 // self.slot_minutes
         start, end = self.window
@@ -90,6 +100,10 @@ class Claim:
         if not self.basis:
             raise ForesightError("a claim must cite at least one card")
         _texts(self.situations, "claim situations")
+        _texts(self.relations, "claim relations")
+        _texts(self.relation_sources, "claim relation sources")
+        if len(self.relation_sources) != len(self.relations):
+            raise ForesightError("claim relation sources must pair up with its relations")
         if not isinstance(self.numbers, CandidateNumbers):
             raise ForesightError("claim numbers must be CandidateNumbers")
         if not isinstance(self.conditions, tuple) or any(

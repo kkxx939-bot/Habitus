@@ -304,9 +304,7 @@ class ConversationConsumerOutcomeStore:
             raise ConversationSourceError("consumer outcome was not durably read back")
         return stored
 
-    def read(
-        self, source_id: str, consumer: ConversationSourceConsumer
-    ) -> ConversationConsumerOutcome | None:
+    def read(self, source_id: str, consumer: ConversationSourceConsumer) -> ConversationConsumerOutcome | None:
         try:
             encoded = read_regular_bytes(
                 self._path(source_id, consumer), artifact_root=self.root, max_bytes=self.max_file_bytes
@@ -328,9 +326,7 @@ class ConversationConsumerOutcomeStore:
         return self.outcome_root / source_id / f"{ConversationSourceConsumer(consumer).value}.json"
 
     def _encode(self, outcome: ConversationConsumerOutcome) -> bytes:
-        return encode_durable_record(
-            outcome.to_dict(), max_bytes=self.max_file_bytes, label="consumer outcome"
-        )
+        return encode_durable_record(outcome.to_dict(), max_bytes=self.max_file_bytes, label="consumer outcome")
 
 
 __all__ = [

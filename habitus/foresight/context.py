@@ -76,7 +76,9 @@ def candidate_background(
     for layer in provenance:
         days = layer.days[-max_days_per_layer:]
         dropped[layer.name] = len(layer.days) - len(days)
-        minutes, index, width = _slot_filter(layer, slot_minutes=slot_minutes, slot_index=slot_index, half_width=half_width)
+        minutes, index, width = _slot_filter(
+            layer, slot_minutes=slot_minutes, slot_index=slot_index, half_width=half_width
+        )
         for view in history_contexts(
             kind_token,
             cache,

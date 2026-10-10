@@ -196,8 +196,7 @@ class ConversationMemoryEnqueuer:
             and state.archived_through_sequence is not None
             and live.start_sequence == state.archived_through_sequence + 1
             and (
-                live.messages[0].role is not ConversationMessageRole.PROMPT
-                or live.messages[0].is_logical_continuation
+                live.messages[0].role is not ConversationMessageRole.PROMPT or live.messages[0].is_logical_continuation
             )
         )
         return self.retention_planner.plan(
@@ -225,8 +224,7 @@ class ConversationMemoryEnqueuer:
             and state.archived_through_sequence is not None
             and live.start_sequence == state.archived_through_sequence + 1
             and (
-                live.messages[0].role is not ConversationMessageRole.PROMPT
-                or live.messages[0].is_logical_continuation
+                live.messages[0].role is not ConversationMessageRole.PROMPT or live.messages[0].is_logical_continuation
             )
         )
         final_plan = self.retention_planner.plan(

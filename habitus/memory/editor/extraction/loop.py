@@ -121,9 +121,7 @@ class MemoryExtractionLoop:
         try:
             candidates.validate_context(segment, old_memories, page_ids)
         except MemoryCandidateError as exc:
-            raise MemoryExtractionPermanentError(
-                "memory candidate batch failed source-context validation"
-            ) from exc
+            raise MemoryExtractionPermanentError("memory candidate batch failed source-context validation") from exc
 
         try:
             mutation_read_set = self.mutation_reader.load(candidates, old_memories)
@@ -133,9 +131,7 @@ class MemoryExtractionLoop:
             MemoryMutationPlanningError,
             MemoryNodeMatchError,
         ) as exc:
-            raise MemoryExtractionPermanentError(
-                "memory candidate batch failed preliminary mutation planning"
-            ) from exc
+            raise MemoryExtractionPermanentError("memory candidate batch failed preliminary mutation planning") from exc
 
         return MemoryExtractionResult(
             conversation_id=segment.conversation_id,
@@ -223,15 +219,12 @@ class MemoryExtractionLoop:
             source_segment_digest=initial.source_segment_digest,
             query=initial.query,
             search_roots=initial.search_roots,
-            search_hits=tuple(
-                hit for hit in initial.search_hits if str(hit.uri) in selected_ids
-            ),
+            search_hits=tuple(hit for hit in initial.search_hits if str(hit.uri) in selected_ids),
             snapshots=SnapshotBatch(
                 snapshots=tuple(sorted(selected, key=lambda snapshot: snapshot.identity)),
                 total_bytes=total_bytes,
             ),
         )
-
 
 
 __all__ = ["MemoryExtractionLoop"]

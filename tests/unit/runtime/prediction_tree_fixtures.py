@@ -19,7 +19,9 @@ def curve(peaks: Mapping[int, float]) -> DayCurve:
     """在指定槽位上放值，其余为 0。"""
 
     marginal = tuple(peaks.get(slot, 0.0) for slot in range(SLOTS))
-    return DayCurve(marginal=marginal, hazard=marginal, cumulative=tuple(0.0 for _ in range(SLOTS)), trend=None, trend_n_eff=0.0)
+    return DayCurve(
+        marginal=marginal, hazard=marginal, cumulative=tuple(0.0 for _ in range(SLOTS)), trend=None, trend_n_eff=0.0
+    )
 
 
 def tree(curves: Mapping[tuple[int, str], DayCurve]) -> PredictionTree:
@@ -49,7 +51,9 @@ def with_recurrences(built: PredictionTree, medians_hours: Mapping[str, float]) 
     return replace(
         built,
         recurrences={
-            kind: RecurrenceStatistics(IntervalQuantiles(p10=hours * 1800.0, p50=hours * 3600.0, p90=hours * 7200.0, sample_count=12.0))
+            kind: RecurrenceStatistics(
+                IntervalQuantiles(p10=hours * 1800.0, p50=hours * 3600.0, p90=hours * 7200.0, sample_count=12.0)
+            )
             for kind, hours in medians_hours.items()
         },
     )

@@ -1,4 +1,4 @@
-"""常态：只算被声明过的键、两个窗、环形中位数、不含当天、样本不够就不给、沿 parent 聚合、漂移是信号。"""
+"""常态：只算被声明过的键、两个窗、环形中位数、不含当天、样本不够就不给、基础概念从类编号读并聚合到汇总概念、漂移是信号。"""
 
 from __future__ import annotations
 
@@ -8,12 +8,14 @@ import pytest
 
 from habitus.scene.concepts import BaselineStatistic, ConceptRole, ConceptSet
 from habitus.scene.occurrences.baselines import baseline_table, declared_keys
-from tests.unit.scene.concept_fixtures import BEDTIME_KEY, BEDTIME_KEY_ALL, concept
+from tests.unit.scene.concept_fixtures import BEDTIME, BEDTIME_KEY, BEDTIME_KEY_ALL, refinement, situation
 from tests.unit.scene.fixtures import DAY1
-from tests.unit.scene.ledger_fixtures import CONCEPTS, record
+from tests.unit.scene.hit_fixtures import CONCEPTS, record
 
 #: 「就寝」的两个窗都声明一遍：近期由 LATE_RULE 声明（判据），历来由一条判据句声明（读漂移）。
-DRIFT_READER = concept("作息漂移", "这个人的就寝时刻在往后移", role=ConceptRole.STATE, baseline_keys=(BEDTIME_KEY_ALL,))
+DRIFT_READER = situation(
+    "作息漂移", "这个人的就寝时刻在往后移", role=ConceptRole.STATE, baseline_keys=(BEDTIME_KEY_ALL,)
+)
 WITH_BOTH_WINDOWS = ConceptSet((*CONCEPTS.values(), DRIFT_READER))
 TODAY = DAY1 + timedelta(days=30)
 
@@ -21,7 +23,9 @@ TODAY = DAY1 + timedelta(days=30)
 def bedtimes(*offsets_and_times: tuple[int, int, int]) -> list:
     """(几天前, 时, 分) → 一条命中「就寝」的记录。"""
 
-    return [record(TODAY - timedelta(days=days), "睡觉", hour, minute, "就寝") for days, hour, minute in offsets_and_times]
+    return [
+        record(TODAY - timedelta(days=days), "睡觉", hour, minute, "就寝") for days, hour, minute in offsets_and_times
+    ]
 
 
 def test_only_declared_keys_are_computed() -> None:
@@ -70,15 +74,19 @@ def test_a_key_with_too_few_samples_is_missing_rather_than_guessed() -> None:
     assert loose.values[BEDTIME_KEY] == "23:15"
 
 
-def test_hits_on_a_child_concept_count_for_its_parent() -> None:
-    """命中「打球」也算「运动」一次——否则上级概念永远攒不出常态（读侧沿 parent 链聚合的同一条规矩）。"""
+def test_a_class_record_counts_for_the_groups_that_contain_its_class() -> None:
+    """「打球」那个类的记录也算汇总概念「运动」一次——否则汇总概念永远攒不出常态（读侧按成员类聚合的同一条规矩）。
+    记录上没存任何命中：基础概念是从类编号现读的。"""
 
-    exercise_duration = concept("长时运动", "一次超过常态时长的运动", baseline_keys=("运动:usual_duration:recent",))
+    exercise_duration = refinement(
+        "长时运动", "这次比运动的常态时长长", "打球", baseline_keys=("运动:usual_duration:recent",)
+    )
     concepts = ConceptSet((*CONCEPTS.values(), exercise_duration))
     records = [
         record(TODAY - timedelta(days=days), "打球", 18, 0, "打球", lasts_minutes=minutes)
         for days, minutes in ((1, 60), (2, 90), (3, 120))
     ]
+    assert all(record.hits == () for record in records)
     snapshot = baseline_table(records, concepts, day=TODAY)
     assert snapshot.values["运动:usual_duration:recent"] == "90"
 
@@ -89,7 +97,7 @@ def test_the_drift_between_the_windows_is_a_signal_not_a_criterion() -> None:
     records = bedtimes((1, 1, 0), (2, 1, 30), (3, 0, 30), (30, 22, 0), (31, 22, 30), (32, 23, 0))
     snapshot = baseline_table(records, WITH_BOTH_WINDOWS, day=TODAY)
     (drift,) = snapshot.drifts
-    assert drift.concept == "就寝" and drift.statistic is BaselineStatistic.USUAL_START
+    assert drift.concept == BEDTIME.name and drift.statistic is BaselineStatistic.USUAL_START
     assert drift.minutes == pytest.approx(75.0)  # 近期 01:00 vs 历来 23:45
     assert drift.drifting and "近期比历来晚 75 分钟" in drift.render()
     assert snapshot.drifting == (drift,)
@@ -97,5 +105,5 @@ def test_the_drift_between_the_windows_is_a_signal_not_a_criterion() -> None:
     # 陪算的只进漂移、不进 values，也不记 missing
     one_window = baseline_table(bedtimes((1, 23, 0), (2, 23, 10), (3, 23, 20)), CONCEPTS, day=TODAY)
     (shadow,) = one_window.drifts
-    assert shadow.concept == "就寝" and shadow.minutes == pytest.approx(0.0) and not shadow.drifting
+    assert shadow.concept == BEDTIME.name and shadow.minutes == pytest.approx(0.0) and not shadow.drifting
     assert all(key.endswith(":recent") for key in one_window.values) and one_window.missing == ()

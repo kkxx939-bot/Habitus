@@ -28,14 +28,12 @@ def at(day_offset: int, hour: int, minute: int = 0) -> datetime:
 
 def snapshot(actions, gaps=()) -> BehaviorSnapshot:
     ordered = tuple(sorted(actions, key=lambda item: item.started_at))
-    return BehaviorSnapshot(
-        actions=ordered, gaps=tuple(gaps), concurrent=(), skipped_duplicates=0
-    )
+    return BehaviorSnapshot(actions=ordered, unnamed=(), gaps=tuple(gaps), concurrent=(), skipped_duplicates=0)
 
 
 def act(name: str, day_offset: int, hour: int, minute: int = 0) -> ObservedAction:
     moment = at(day_offset, hour, minute)
-    return ObservedAction(action=name, started_at=moment, day=moment.date())
+    return ObservedAction(action=name, started_at=moment, day=moment.date(), lane="session")
 
 
 def daily(name: str, days: int, *, hour: int) -> list[ObservedAction]:
@@ -58,7 +56,7 @@ def test_split_drops_parallel_pairs_that_straddle_the_cutoff() -> None:
 
     actions = [act("吃饭", 0, 18), act("看手机", 0, 18, 5), act("吃饭", 9, 18), act("看手机", 9, 18, 5)]
     data = BehaviorSnapshot(
-        actions=tuple(actions), gaps=(), concurrent=((0, 1), (2, 3)), skipped_duplicates=0
+        actions=tuple(actions), unnamed=(), gaps=(), concurrent=((0, 1), (2, 3)), skipped_duplicates=0
     )
     train, holdout = evaluation.split(data, cutoff=FIRST + timedelta(days=4))
     assert train.concurrent == ((0, 1),)
@@ -79,12 +77,10 @@ def test_every_checked_slot_enters_the_evaluation_set_not_only_the_ones_that_fir
 
 
 def test_days_with_no_records_at_all_still_enter_the_evaluation_set() -> None:
-    """"那天什么都没做"是最该被预测到的阴性样本；按"有记录的天"收集会把它整天丢掉。"""
+    """ "那天什么都没做"是最该被预测到的阴性样本；按"有记录的天"收集会把它整天丢掉。"""
 
     actions = daily("吃药", 30, hour=7) + [act("吃药", offset, 7) for offset in (30, 31, 33, 35, 37)]
-    pairs = _pairs(
-        snapshot(actions), cutoff=FIRST + timedelta(days=29), through=FIRST + timedelta(days=39)
-    )
+    pairs = _pairs(snapshot(actions), cutoff=FIRST + timedelta(days=29), through=FIRST + timedelta(days=39))
     assert len(pairs) == 10 * 96  # 不是只有 5 个有记录的日子
     base_rate = sum(1 for _p, actual in pairs if actual) / len(pairs)
     assert base_rate == pytest.approx(5 / 960, rel=0.01)  # 不是 5/480 的两倍虚高
@@ -123,9 +119,7 @@ def _pairs(data, *, cutoff, through):
     cfg = config()
     train, holdout = evaluation.split(data, cutoff=cutoff)
     tree = builder.build(train, config=cfg, reference=cutoff, built_at=BUILT_AT)
-    return evaluation.samples(
-        tree, holdout, config=cfg, since=cutoff + timedelta(days=1), through=through
-    )
+    return evaluation.samples(tree, holdout, config=cfg, since=cutoff + timedelta(days=1), through=through)
 
 
 # --- 成绩单 -------------------------------------------------------------------------------
@@ -214,11 +208,7 @@ def test_isotonic_of_nothing_is_the_identity() -> None:
 def test_permutation_test_finds_a_real_weekly_effect() -> None:
     """每周二打球：打乱"哪天"之后成绩应当明显变差，p 值因此很小。"""
 
-    actions = [
-        act("打球", offset, 19)
-        for offset in range(70)
-        if (FIRST + timedelta(days=offset)).weekday() == 1
-    ]
+    actions = [act("打球", offset, 19) for offset in range(70) if (FIRST + timedelta(days=offset)).weekday() == 1]
     actions.extend(daily("吃药", 70, hour=7))  # 给树一点与周几无关的背景
     p_value = evaluation.permutation_test(
         snapshot(actions),
@@ -233,9 +223,7 @@ def test_permutation_test_finds_a_real_weekly_effect() -> None:
 
 def test_permutation_test_is_deterministic_for_a_given_seed() -> None:
     data = snapshot(daily("吃药", 60, hour=7))
-    kwargs = dict(
-        config=config(), cutoff=FIRST + timedelta(days=49), built_at=BUILT_AT, rounds=5, seed=11
-    )
+    kwargs = dict(config=config(), cutoff=FIRST + timedelta(days=49), built_at=BUILT_AT, rounds=5, seed=11)
     assert evaluation.permutation_test(data, **kwargs) == evaluation.permutation_test(data, **kwargs)
 
 
@@ -245,9 +233,7 @@ def test_permutation_test_is_deterministic_for_a_given_seed() -> None:
 def test_an_empty_holdout_window_fails_loudly() -> None:
     data = snapshot(daily("吃药", 10, hour=7))
     with pytest.raises(PredictionTreeError, match="holdout half"):
-        evaluation.backtest(
-            data, config=config(), cutoff=FIRST + timedelta(days=30), built_at=BUILT_AT
-        )
+        evaluation.backtest(data, config=config(), cutoff=FIRST + timedelta(days=30), built_at=BUILT_AT)
 
 
 # --- 危险率与累积率的校准仪（PRED-RATES-001 附带条件①）------------------------------------

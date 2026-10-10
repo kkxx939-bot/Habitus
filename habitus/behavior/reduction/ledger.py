@@ -58,9 +58,7 @@ class BehaviorReductionEntry:
                 raise BehaviorReductionError(f"ledger entry field {name} must be non-empty text")
         if self.kind not in _KINDS:
             raise BehaviorReductionError("ledger entry kind must be occurrence or gap")
-        if not self.judgement_ids or any(
-            not isinstance(item, str) or not item for item in self.judgement_ids
-        ):
+        if not self.judgement_ids or any(not isinstance(item, str) or not item for item in self.judgement_ids):
             raise BehaviorReductionError("ledger entry must consume at least one judgement")
 
     def to_bytes(self) -> bytes:
@@ -72,9 +70,7 @@ class BehaviorReductionEntry:
             "staged_at": self.staged_at,
             "reduction_version": self.reduction_version,
         }
-        return (
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
-        ).encode("utf-8")
+        return (json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> BehaviorReductionEntry:
@@ -111,14 +107,8 @@ class BehaviorReductionLedger:
             atomic_create_bytes(path, entry.to_bytes(), artifact_root=self.root)
         except (ImmutableArtifactConflictError, DurablePathIntegrityError) as exc:
             raise BehaviorReductionError(
-                f"reduction ledger entry for chain {entry.chain_digest} conflicts with an "
-                f"existing record"
+                f"reduction ledger entry for chain {entry.chain_digest} conflicts with an existing record"
             ) from exc
-
-    def has(self, chain_digest: str) -> bool:
-        """这条链是否已记账——发布时记命中账的幂等依据（重放同一检查点不重复记）。"""
-
-        return (self._entries_dir / f"{chain_digest}.json").is_file()
 
     def load(self) -> tuple[BehaviorReductionEntry, ...]:
         """读全部消费记录，按链身份排序（确定性）。"""
@@ -130,24 +120,16 @@ class BehaviorReductionLedger:
             if not path.name.endswith(".json"):
                 continue
             try:
-                encoded = read_regular_bytes(
-                    path, artifact_root=self.root, max_bytes=_MAX_ENTRY_BYTES
-                )
+                encoded = read_regular_bytes(path, artifact_root=self.root, max_bytes=_MAX_ENTRY_BYTES)
             except FileNotFoundError as exc:
-                raise BehaviorReductionError(
-                    f"reduction ledger entry vanished: {path.name}"
-                ) from exc
+                raise BehaviorReductionError(f"reduction ledger entry vanished: {path.name}") from exc
             try:
                 payload = json.loads(encoded.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise BehaviorReductionError(
-                    f"reduction ledger entry is not decodable: {path.name}"
-                ) from exc
+                raise BehaviorReductionError(f"reduction ledger entry is not decodable: {path.name}") from exc
             entry = BehaviorReductionEntry.from_mapping(payload)
             if f"{entry.chain_digest}.json" != path.name:
-                raise BehaviorReductionError(
-                    f"reduction ledger entry does not match its filename: {path.name}"
-                )
+                raise BehaviorReductionError(f"reduction ledger entry does not match its filename: {path.name}")
             entries.append(entry)
         return tuple(entries)
 
@@ -172,9 +154,7 @@ class BehaviorReductionLedger:
         return removed
 
     def consumed_judgement_ids(self) -> frozenset[str]:
-        return frozenset(
-            judgement_id for entry in self.load() for judgement_id in entry.judgement_ids
-        )
+        return frozenset(judgement_id for entry in self.load() for judgement_id in entry.judgement_ids)
 
 
 __all__ = ["BehaviorReductionEntry", "BehaviorReductionLedger"]

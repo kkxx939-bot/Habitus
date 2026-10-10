@@ -31,15 +31,9 @@ class DurableDirectoryEntry:
         return stat.S_ISDIR(self.mode)
 
 
-_ATOMIC_TEMPORARY_NAME = re.compile(
-    r"^\.(?P<destination>[^/]+)\.(?P<nonce>[0-9a-f]{32})\.tmp$"
-)
+_ATOMIC_TEMPORARY_NAME = re.compile(r"^\.(?P<destination>[^/]+)\.(?P<nonce>[0-9a-f]{32})\.tmp$")
 
-_DIRECTORY_FLAGS = (
-    os.O_RDONLY
-    | getattr(os, "O_DIRECTORY", 0)
-    | getattr(os, "O_NOFOLLOW", 0)
-)
+_DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 
 
 def atomic_temporary_destination(name: str) -> str | None:

@@ -453,11 +453,7 @@ class SQLiteConversationSummaryUseStore:
                 reference.stage.value,
                 reference.summary_id,
                 state.useful_recall_count,
-                (
-                    None
-                    if state.last_useful_recall_at is None
-                    else _format_timestamp(state.last_useful_recall_at)
-                ),
+                (None if state.last_useful_recall_at is None else _format_timestamp(state.last_useful_recall_at)),
                 None if state.retire_candidate_at is None else _format_timestamp(state.retire_candidate_at),
                 None if state.retiring_at is None else _format_timestamp(state.retiring_at),
                 state.version,

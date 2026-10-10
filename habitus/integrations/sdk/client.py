@@ -92,11 +92,7 @@ class HabitusHTTPClient:
             raise ValueError("unauthenticated Habitus base_url cannot contain user information")
         if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
             raise ValueError("base_url must be a loopback origin without path, parameters, query, or fragment")
-        if (
-            isinstance(timeout_seconds, bool)
-            or not isinstance(timeout_seconds, int | float)
-            or timeout_seconds <= 0
-        ):
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int | float) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         if transport is not None and not callable(getattr(transport, "request", None)):
             raise TypeError("transport must implement AsyncHTTPTransport")

@@ -101,8 +101,7 @@ def _slots_per_day(slot_minutes: int | None, slot_index: int | None, slot_half_w
 def _project(uri: str, index: DayIndex, cache: DayIndexCache, *, window_days: int, window: float | None) -> ContextView:
     """装配一条视图：行为树侧的事实与树维度的三个事实各自算好再拼。
 
-    情景侧（所在的事、角色、事里更早成员留下的前提）已经删掉——那是按天归组的产物；规律级记录也随
-    2026-09-26 的重构删掉。行为之间的关系读数在 ``views.relations``，由上层贴到卡上，不在这个视图里。
+    只放行为树侧的事实；行为之间的关系不在这个视图里，由语义树的关系表提供（新方案 ``13``）。
     """
 
     document = index.occurrences[uri]
@@ -118,7 +117,9 @@ def _project(uri: str, index: DayIndex, cache: DayIndexCache, *, window_days: in
     preceding: Neighbour | None = None
     following: Neighbour | None = None
     if window is not None:
-        preceding, following = neighbours(uri, index, cache, window_seconds=window, partners=frozenset(item.uri for item in partners))
+        preceding, following = neighbours(
+            uri, index, cache, window_seconds=window, partners=frozenset(item.uri for item in partners)
+        )
     return ContextView(
         kind_token=kind_token,
         at=started,
@@ -143,7 +144,9 @@ def first_of_day(uri: str, index: DayIndex) -> bool:
     唯一差别在夏令时回拨的那一小时（树按本地时分槽比先后，这里按瞬时），已知并接受。"""
 
     kind_token = str(index.occurrences[uri].fields["kind_token"])
-    first = next(candidate for candidate in index.ordered if str(index.occurrences[candidate].fields["kind_token"]) == kind_token)
+    first = next(
+        candidate for candidate in index.ordered if str(index.occurrences[candidate].fields["kind_token"]) == kind_token
+    )
     return first == uri
 
 
@@ -171,8 +174,17 @@ def neighbours(
     position = next(number for number, (_, candidate) in enumerate(timeline) if candidate == uri)
     own = _instant(index, uri)
     holes = _holes(index, cache)
-    following = _scan(timeline[position + 1 :], own=own, forward=True, window_seconds=window_seconds, partners=partners, holes=holes)
-    preceding = _scan(tuple(reversed(timeline[:position])), own=own, forward=False, window_seconds=window_seconds, partners=partners, holes=holes)
+    following = _scan(
+        timeline[position + 1 :], own=own, forward=True, window_seconds=window_seconds, partners=partners, holes=holes
+    )
+    preceding = _scan(
+        tuple(reversed(timeline[:position])),
+        own=own,
+        forward=False,
+        window_seconds=window_seconds,
+        partners=partners,
+        holes=holes,
+    )
     return preceding, following
 
 
@@ -203,12 +215,19 @@ def _scan(
 
 def _timeline(index: DayIndex, cache: DayIndexCache) -> tuple[tuple[DayIndex, str], ...]:
     days = (cache.day(index.day - timedelta(days=1)), index, cache.day(index.day + timedelta(days=1)))
-    return tuple(sorted(((source, uri) for source in days for uri in source.ordered), key=lambda item: (_instant(item[0], item[1]), item[1])))
+    return tuple(
+        sorted(
+            ((source, uri) for source in days for uri in source.ordered),
+            key=lambda item: (_instant(item[0], item[1]), item[1]),
+        )
+    )
 
 
 def _holes(index: DayIndex, cache: DayIndexCache) -> tuple[_Span, ...]:
     days = (cache.day(index.day - timedelta(days=1)), index, cache.day(index.day + timedelta(days=1)))
-    return tuple((gap.started_at.astimezone(UTC), gap.ended_at.astimezone(UTC)) for source in days for gap in source.gaps)
+    return tuple(
+        (gap.started_at.astimezone(UTC), gap.ended_at.astimezone(UTC)) for source in days for gap in source.gaps
+    )
 
 
 def _has_hole(holes: tuple[_Span, ...], span: _Span) -> bool:
@@ -255,7 +274,6 @@ def last_time(kind_token: str, *, before: datetime, cache: DayIndexCache, window
                 continue
             return LastTime(uri=uri, days_ago=(today - day).days)
     return None
-
 
 
 def resolve_target(target_uri: str, cache: DayIndexCache) -> ActionRef | None:

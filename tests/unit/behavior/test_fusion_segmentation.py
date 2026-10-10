@@ -46,9 +46,7 @@ def observation(offset: float, *, semantics: str | None = None) -> BehaviorObser
     )
 
 
-def envelope(
-    observations: tuple[BehaviorObservation, ...], seed: str
-) -> BehaviorObservationEnvelope:
+def envelope(observations: tuple[BehaviorObservation, ...], seed: str) -> BehaviorObservationEnvelope:
     return BehaviorObservationEnvelope.create(
         observer_id=OBSERVER,
         protocol="habitus_behavior_observation_v1",
@@ -108,9 +106,7 @@ def test_a_real_blank_beats_the_hard_limit() -> None:
     config = BehaviorFusionConfig(max_fragments_per_segment=20, boundary_search_fragments=8)
     fragments = list(uniform(60, 4.0))
     blank_at = 15
-    fragments = fragments[:blank_at] + [
-        observation((index * 4.0) + 300.0) for index in range(blank_at, 60)
-    ]
+    fragments = fragments[:blank_at] + [observation((index * 4.0) + 300.0) for index in range(blank_at, 60)]
     segments = segment_observations([envelope(tuple(fragments), "s1")], config=config)
     assert sizes(segments)[0] == blank_at
 
@@ -125,7 +121,8 @@ def test_the_span_limit_cuts_before_the_capacity_limit() -> None:
 
 def test_the_capacity_limit_cuts_before_the_span_limit() -> None:
     config = BehaviorFusionConfig(
-        max_fragments_per_segment=12, max_segment_span_seconds=100_000,
+        max_fragments_per_segment=12,
+        max_segment_span_seconds=100_000,
         boundary_search_fragments=4,
     )
     segments = segment_observations([envelope(uniform(50, 1.0), "s1")], config=config)
@@ -165,9 +162,7 @@ def test_exclude_drops_processed_observations_without_dropping_their_neighbours(
 
     stream = uniform(6, 5.0)
     processed = {stream[0].observation_id, stream[1].observation_id}
-    segments = segment_observations(
-        [envelope(stream, "s1")], config=BehaviorFusionConfig(), exclude=processed
-    )
+    segments = segment_observations([envelope(stream, "s1")], config=BehaviorFusionConfig(), exclude=processed)
     remaining = [item.observation_id for item in segments[0].fragments]
     assert remaining == [item.observation_id for item in stream[2:]]
 

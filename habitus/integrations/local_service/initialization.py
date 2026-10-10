@@ -149,13 +149,10 @@ def missing_credential_fields(path: Path) -> tuple[CredentialField, ...]:
     tracing_reference = config.observability.tracing.credential_ref
     if config.observability.tracing.enabled and tracing_reference:
         required.update(
-            CredentialField(tracing_reference, field)
-            for field in config.credentials.resolve(tracing_reference)
+            CredentialField(tracing_reference, field) for field in config.credentials.resolve(tracing_reference)
         )
     return tuple(
-        item
-        for item in sorted(required)
-        if not config.credentials.resolve(item.reference).get(item.field, "")
+        item for item in sorted(required) if not config.credentials.resolve(item.reference).get(item.field, "")
     )
 
 
@@ -270,11 +267,7 @@ def _read_existing(path: Path) -> bytes | None:
 def _normalized_key(mapping: Mapping[str, object], requested: str) -> str | None:
     normalized = requested.strip().lower()
     return next(
-        (
-            key
-            for key in mapping
-            if isinstance(key, str) and key.strip().lower() == normalized
-        ),
+        (key for key in mapping if isinstance(key, str) and key.strip().lower() == normalized),
         None,
     )
 

@@ -85,9 +85,7 @@ class AuditStore:
                     )
                     """
                 )
-                connection.execute(
-                    "CREATE INDEX IF NOT EXISTS audit_events_occurred_at ON audit_events(occurred_at)"
-                )
+                connection.execute("CREATE INDEX IF NOT EXISTS audit_events_occurred_at ON audit_events(occurred_at)")
             os.chmod(self.path, 0o600)
             self._initialized = True
 
@@ -95,11 +93,7 @@ class AuditStore:
         if (event.category, event.operation) not in _AUDITED_OPERATIONS:
             return
         self.initialize()
-        attributes = {
-            key: value
-            for key, value in event.attributes.items()
-            if key in _SAFE_ATTRIBUTES
-        }
+        attributes = {key: value for key, value in event.attributes.items() if key in _SAFE_ATTRIBUTES}
         with self._guard, self._connect() as connection:
             connection.execute(
                 """

@@ -34,20 +34,12 @@ def judgement(
         "behavior": behavior,
         "goal": goal,
         "summary": None if unreadable else (summary or f"{behavior}的摘要"),
-        "basis": [
-            {"basis_no": index, "semantics": item} for index, item in enumerate(facts, start=1)
-        ],
+        "basis": [{"basis_no": index, "semantics": item} for index, item in enumerate(facts, start=1)],
         "status": None if unreadable else status,
         "status_basis": None if unreadable else status_basis,
         "relations": [
-            *(
-                {"kind": kind, "target": target, "context_target": None}
-                for kind, target in (relations or [])
-            ),
-            *(
-                {"kind": kind, "target": None, "context_target": target}
-                for kind, target in (context_relations or [])
-            ),
+            *({"kind": kind, "target": target, "context_target": None} for kind, target in (relations or [])),
+            *({"kind": kind, "target": None, "context_target": target} for kind, target in (context_relations or [])),
         ],
     }
 
@@ -64,10 +56,7 @@ def frames(assignment: list[list[tuple[int, int | None]]]) -> list[dict[str, Any
     return [
         {
             "no": index,
-            "assignments": [
-                {"judgement_no": judgement_no, "basis_no": basis_no}
-                for judgement_no, basis_no in items
-            ],
+            "assignments": [{"judgement_no": judgement_no, "basis_no": basis_no} for judgement_no, basis_no in items],
         }
         for index, items in enumerate(assignment, start=1)
     ]

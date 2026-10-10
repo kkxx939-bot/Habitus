@@ -115,9 +115,7 @@ def assemble_judgement_batch(
     _require_distinguishable(built)
     owned = {no for item in built for no in item.covers}
     unowned = tuple(no for no in range(1, fragment_count + 1) if no not in owned)
-    return BehaviorJudgementBatch(
-        _close_concurrency(built), degradations=tuple(notes), unowned_fragment_nos=unowned
-    )
+    return BehaviorJudgementBatch(_close_concurrency(built), degradations=tuple(notes), unowned_fragment_nos=unowned)
 
 
 # --- 线格式解析 -----------------------------------------------------------------------
@@ -136,15 +134,11 @@ def _judgements(value: object, *, config: BehaviorFusionConfig) -> dict[int, dic
     return declared
 
 
-def _judgement_fields(
-    payload: Mapping[str, Any], label: str, *, config: BehaviorFusionConfig
-) -> dict[str, Any]:
+def _judgement_fields(payload: Mapping[str, Any], label: str, *, config: BehaviorFusionConfig) -> dict[str, Any]:
     behavior = _optional_text(payload["behavior"], f"{label}.behavior", max_chars=config.max_name_chars)
     facts = _facts(payload["basis"], label, config=config)
     return {
-        "subjects": _text_tuple(
-            payload["subjects"], f"{label}.subjects", max_chars=config.max_name_chars
-        ),
+        "subjects": _text_tuple(payload["subjects"], f"{label}.subjects", max_chars=config.max_name_chars),
         "behavior": behavior,
         "goal": _optional_text(payload["goal"], f"{label}.goal", max_chars=config.max_text_chars),
         "summary": _optional_text(payload["summary"], f"{label}.summary", max_chars=config.max_text_chars),
@@ -157,9 +151,7 @@ def _judgement_fields(
     }
 
 
-def _relations(
-    value: object, label: str, *, config: BehaviorFusionConfig
-) -> tuple[JudgementLink, ...]:
+def _relations(value: object, label: str, *, config: BehaviorFusionConfig) -> tuple[JudgementLink, ...]:
     raw = _array(value, f"{label}.relations", max_items=config.max_judgements)
     links: list[JudgementLink] = []
     for index, item in enumerate(raw):
@@ -169,17 +161,13 @@ def _relations(
         target = payload["target"]
         context_target = payload["context_target"]
         if (target is None) == (context_target is None):
-            raise BehaviorFusionError(
-                f"{item_label} must name exactly one of target / context_target"
-            )
+            raise BehaviorFusionError(f"{item_label} must name exactly one of target / context_target")
         links.append(
             JudgementLink(
                 kind=kind,
                 target_no=None if target is None else _positive_int(target, f"{item_label}.target"),
                 context_no=(
-                    None
-                    if context_target is None
-                    else _positive_int(context_target, f"{item_label}.context_target")
+                    None if context_target is None else _positive_int(context_target, f"{item_label}.context_target")
                 ),
             )
         )
@@ -207,8 +195,7 @@ def _frames(
     raw = _array(value, "frames", max_items=config.max_fragments_per_segment)
     if len(raw) != fragment_count:
         raise BehaviorFusionError(
-            f"frames must contain exactly one row per input fragment: "
-            f"expected {fragment_count}, got {len(raw)}"
+            f"frames must contain exactly one row per input fragment: expected {fragment_count}, got {len(raw)}"
         )
     frames: list[dict[str, Any]] = []
     for index, item in enumerate(raw, start=1):
@@ -264,9 +251,7 @@ def _reduce_coverage(
         for judgement_no, basis_no in frame["assignments"]:
             judgement = declared.get(judgement_no)
             if judgement is None:
-                raise BehaviorFusionError(
-                    f"frame {frame['no']} references an undeclared judgement: {judgement_no}"
-                )
+                raise BehaviorFusionError(f"frame {frame['no']} references an undeclared judgement: {judgement_no}")
             covers[judgement_no].append(frame["no"])
             if basis_no is None:
                 continue
@@ -319,11 +304,7 @@ def _build(
     status_basis = fields["status_basis"]
     relations = tuple(link for link in fields["relations"] if link.target_no not in dropped)
     if behavior is not None and participants_by_no is not None:
-        available = {
-            participant
-            for fragment_no in covers
-            for participant in participants_by_no.get(fragment_no, ())
-        }
+        available = {participant for fragment_no in covers for participant in participants_by_no.get(fragment_no, ())}
         present = tuple(subject for subject in subjects if subject in available)
         absent = [subject for subject in subjects if subject not in available]
         if absent and present:
@@ -389,9 +370,7 @@ def _require_targets_declared(
                         f"C{link.context_no}, but only {len(context_states)} were shown"
                     )
                 if not _continuable(link, context_states[link.context_no - 1]):
-                    notes.append(
-                        f"continues_completed judgement={item.judgement_no} target=C{link.context_no}"
-                    )
+                    notes.append(f"continues_completed judgement={item.judgement_no} target=C{link.context_no}")
                     continue
                 kept.append(link)
                 continue
@@ -399,25 +378,21 @@ def _require_targets_declared(
             target = known.get(link.target_no)
             if target is None:
                 raise BehaviorFusionError(
-                    f"judgement[{item.judgement_no}] relates to an undeclared judgement: "
-                    f"{link.target_no}"
+                    f"judgement[{item.judgement_no}] relates to an undeclared judgement: {link.target_no}"
                 )
             if not target.claim.is_readable:
                 # 没读懂的那段不是一个行为，谈不上与它延续、并行或被它修正。在这里以可定位的
                 # 坐标拒绝，而不是等到对称补齐时由系统自己造出一条非法关系再炸——那样反馈给
                 # 模型的错误落在它根本没写过的地方，它无从改起。
                 raise BehaviorFusionError(
-                    f"judgement[{item.judgement_no}] relates to judgement[{link.target_no}], "
-                    f"which is unreadable"
+                    f"judgement[{item.judgement_no}] relates to judgement[{link.target_no}], which is unreadable"
                 )
             if not _continuable(link, None if target.status is None else target.status.value):
                 # 同批内的 continues 不剪：判重规则（validation._require_one_judgement_per_start）
                 # 正是靠这条边把"同一件事被看成两条"认作一条、由归约并链；剪掉它反而让两条同名
                 # 同刻判断互不相认、撞成硬拒（WP1 首次真实对照实测）。保留、留信号，归约按 continues
                 # 并链，尾部状态定结局——模型明说这是同一件事，同批内并起来是最安全的解释。
-                notes.append(
-                    f"continues_completed judgement={item.judgement_no} target={link.target_no} kept"
-                )
+                notes.append(f"continues_completed judgement={item.judgement_no} target={link.target_no} kept")
             kept.append(link)
         rebuilt.append(item if len(kept) == len(item.relations) else replace(item, relations=tuple(kept)))
     return rebuilt
@@ -505,14 +480,10 @@ def _close_concurrency(judgements: Sequence[BehaviorJudgement]) -> tuple[Behavio
                 continue
             target = next(other for other in judgements if other.judgement_no == link.target_no)
             declared = any(
-                back.kind is JudgementRelation.CONCURRENT_WITH
-                and back.target_no == item.judgement_no
+                back.kind is JudgementRelation.CONCURRENT_WITH and back.target_no == item.judgement_no
                 for back in target.relations
             )
-            already = any(
-                existing.target_no == item.judgement_no
-                for existing in extra.get(target.judgement_no, ())
-            )
+            already = any(existing.target_no == item.judgement_no for existing in extra.get(target.judgement_no, ()))
             if not declared and not already:
                 extra.setdefault(target.judgement_no, []).append(
                     JudgementLink(

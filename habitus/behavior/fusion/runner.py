@@ -290,16 +290,11 @@ class BehaviorFusionRunner:
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "fusion_stage") as attributes:
             staged = StagedFusion(
                 receipt=receipt,
-                judgements=tuple(
-                    judgement_payload(without_unresolvable_relations(item, visible))
-                    for item in in_scope
-                ),
+                judgements=tuple(judgement_payload(without_unresolvable_relations(item, visible)) for item in in_scope),
             )
             staged_lease = self.jobs.stage(lease, staged)
             attributes.update(
-                staging_attributes(
-                    derived, in_scope, staged.judgements, segment.fragments, judged_at=stamped
-                )
+                staging_attributes(derived, in_scope, staged.judgements, segment.fragments, judged_at=stamped)
             )
         return staged_lease
 
@@ -332,12 +327,8 @@ class BehaviorFusionRunner:
                     found.setdefault(observation.observation_id, observation)
         missing = wanted - set(found)
         if missing:
-            raise BehaviorFusionError(
-                f"fusion job references {len(missing)} observations that are no longer stored"
-            )
-        return tuple(
-            sorted(found.values(), key=lambda item: (item.occurred_at, item.observation_id))
-        )
+            raise BehaviorFusionError(f"fusion job references {len(missing)} observations that are no longer stored")
+        return tuple(sorted(found.values(), key=lambda item: (item.occurred_at, item.observation_id)))
 
     def _persist(self, staged: StagedFusion) -> None:
         """先落判断再落回执：回执指向判断，反过来会让回执一度指向不存在的东西。"""

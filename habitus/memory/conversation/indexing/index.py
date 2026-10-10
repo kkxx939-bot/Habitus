@@ -145,10 +145,7 @@ class PersistentConversationSummaryVectorIndex:
                 known_ids = {reference.identity for reference in self.sources.all_references(address)}
                 known_ids.update(active_by_id)
                 known_ids.update(reference.identity for reference in removed_references)
-                existing = {
-                    record.identity: record
-                    for record in await self.store.read(tuple(sorted(known_ids)))
-                }
+                existing = {record.identity: record for record in await self.store.read(tuple(sorted(known_ids)))}
                 upserts = await self._materialize(active, existing=existing)
                 deletes = tuple(sorted(set(existing) - set(active_by_id)))
                 try:
@@ -160,9 +157,7 @@ class PersistentConversationSummaryVectorIndex:
                         expected_checkpoint=state.checkpoint,
                     )
                     if removed_references:
-                        remaining = await self.store.read(
-                            tuple(reference.identity for reference in removed_references)
-                        )
+                        remaining = await self.store.read(tuple(reference.identity for reference in removed_references))
                         if remaining:
                             raise ConversationSummaryIndexError(
                                 "retiring Summary vector records failed exact deletion verification"
@@ -170,9 +165,7 @@ class PersistentConversationSummaryVectorIndex:
                     return published
                 except VectorStoreConflictError:
                     continue
-            raise ConversationSummaryIndexError(
-                "summary vector state changed repeatedly during synchronization"
-            )
+            raise ConversationSummaryIndexError("summary vector state changed repeatedly during synchronization")
 
     async def rebuild(self, *, checkpoint: int | None = None) -> VectorStoreState:
         """管理入口：从全部 Conversation 的活跃摘要前沿完整重建。"""
@@ -190,9 +183,7 @@ class PersistentConversationSummaryVectorIndex:
 
         state = await self.store.state()
         if not self._state_matches(state):
-            raise ConversationSummaryIndexError(
-                "summary vector index is not ready for consistency audit"
-            )
+            raise ConversationSummaryIndexError("summary vector index is not ready for consistency audit")
         assert state is not None
         expected = {source.identity: source for source in self.sources.walk()}
         indexed = {
@@ -203,9 +194,7 @@ class PersistentConversationSummaryVectorIndex:
             )
         }
         if len(indexed) != state.record_count:
-            raise ConversationSummaryIndexError(
-                "remote Summary vector record count does not match published state"
-            )
+            raise ConversationSummaryIndexError("remote Summary vector record count does not match published state")
         expected_ids = set(expected)
         indexed_ids = set(indexed)
         stale = tuple(
@@ -247,15 +236,11 @@ class PersistentConversationSummaryVectorIndex:
             limit=candidate_limit,
         )
         candidates = self._resolve_matches(raw)
-        candidates = tuple(
-            item for item in candidates if item.vector_score >= self.config.vector_score_threshold
-        )
+        candidates = tuple(item for item in candidates if item.vector_score >= self.config.vector_score_threshold)
         if self.reranker is None or not candidates:
             return candidates[:maximum]
         selected = candidates[: self.config.max_rerank_candidates]
-        documents = tuple(
-            item.content[: self.config.max_rerank_document_chars] for item in selected
-        )
+        documents = tuple(item.content[: self.config.max_rerank_document_chars] for item in selected)
         try:
             scores = await self.reranker.rerank(normalized, documents)
             if not isinstance(scores, tuple) or len(scores) != len(selected):
@@ -409,20 +394,13 @@ class PersistentConversationSummaryVectorIndex:
             seen.add(reference.identity)
             active = active_cache.get(reference.address)
             if active is None:
-                active = {
-                    source.identity: source
-                    for source in self.sources.active(reference.address)
-                }
+                active = {source.identity: source for source in self.sources.active(reference.address)}
                 active_cache[reference.address] = active
             source = active.get(reference.identity)
             if source is None:
-                raise ConversationSummaryIndexError(
-                    "remote Summary match is no longer part of the active frontier"
-                )
+                raise ConversationSummaryIndexError("remote Summary match is no longer part of the active frontier")
             if source.content_digest != value.record.content_digest:
-                raise ConversationSummaryIndexError(
-                    "remote Summary match is stale relative to its truth source"
-                )
+                raise ConversationSummaryIndexError("remote Summary match is stale relative to its truth source")
             matches.append(
                 ConversationSummaryMatch(
                     reference=reference,

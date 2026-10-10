@@ -59,8 +59,7 @@ class ConversationSourceConfig:
                 or not 0 < float(number_value) <= number_maximum
             ):
                 raise ValueError(
-                    f"conversation source {number_name} must be greater than zero "
-                    f"and at most {number_maximum:g}"
+                    f"conversation source {number_name} must be greater than zero and at most {number_maximum:g}"
                 )
         if self.execution_lock_heartbeat_seconds > self.execution_lock_ttl_seconds / 3:
             raise ValueError("conversation source heartbeat interval must be at most one third of lock TTL")
@@ -185,9 +184,7 @@ class ConversationConfig:
         if not isinstance(self.source, ConversationSourceConfig):
             raise TypeError("conversation.source must be ConversationSourceConfig")
         if not isinstance(self.behavior_projection, ConversationBehaviorProjectionConfig):
-            raise TypeError(
-                "conversation.behavior_projection must be ConversationBehaviorProjectionConfig"
-            )
+            raise TypeError("conversation.behavior_projection must be ConversationBehaviorProjectionConfig")
         if not isinstance(self.segmentation, ConversationSegmentationConfig):
             raise TypeError("conversation.segmentation must be ConversationSegmentationConfig")
         if not isinstance(self.summary, ConversationSummaryConfig):
@@ -195,9 +192,7 @@ class ConversationConfig:
         if not isinstance(self.summary_vector_store, VectorStoreConfig):
             raise TypeError("conversation.summary_vector_store must be VectorStoreConfig")
         if not isinstance(self.summary_vector_index, ConversationSummaryVectorIndexConfig):
-            raise TypeError(
-                "conversation.summary_vector_index must be ConversationSummaryVectorIndexConfig"
-            )
+            raise TypeError("conversation.summary_vector_index must be ConversationSummaryVectorIndexConfig")
         if not isinstance(self.lifecycle, ConversationLifecycleConfig):
             raise TypeError("conversation.lifecycle must be ConversationLifecycleConfig")
         for stage in (
@@ -243,9 +238,7 @@ class ConversationConfig:
                 data.get("summary", {}),
                 "config.conversation.summary",
             ),
-            summary_vector_store=_summary_vector_store_config(
-                data.get("summary_vector_store", {})
-            ),
+            summary_vector_store=_summary_vector_store_config(data.get("summary_vector_store", {})),
             summary_vector_index=construct_config(
                 ConversationSummaryVectorIndexConfig,
                 data.get("summary_vector_index", {}),

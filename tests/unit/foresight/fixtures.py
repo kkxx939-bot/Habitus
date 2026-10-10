@@ -6,23 +6,38 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 
 from habitus.behavior import BehaviorDocumentWriter
 from habitus.behavior.model import BehaviorKind
-from habitus.foresight import EvidencePack, UnsealedRow, assemble, moment_at
+from habitus.foresight import EvidencePack, RelationNote, UnsealedRow, assemble, moment_at
 from habitus.foresight.judge import Judgement
 from habitus.infrastructure.store.locks import ProcessLocalLockStore
-from habitus.prediction import builder, source
+from habitus.prediction import builder
 from habitus.prediction.config import PredictionTreeConfig
 from habitus.prediction.model import PredictionTree
 from habitus.scene.views import DayIndexCache
+from habitus.series.reader import admitted
 from tests.unit.behavior.tree_payloads import gap_payload
+from tests.unit.kind_ids import kind_names
+from tests.unit.prediction.prediction_fixtures import snapshot_from_tree
 from tests.unit.scene.fixtures import SUBJECT, Site, at, publish
 
 SLOT_MINUTES = 15
+
+
+def unchanged(token: str) -> tuple[str, ...]:
+    """词表没拆改过：编号现在对应的就是它自己（结算、计数的 ``current``）。"""
+
+    return (token,)
+
+
+def settled() -> bool:
+    """词表没有迁移在进行（结算的 ``migrating``）。"""
+
+    return False
 
 
 def config(**overrides) -> PredictionTreeConfig:
@@ -38,7 +53,7 @@ def config(**overrides) -> PredictionTreeConfig:
         shrink_pool_to_weekday=0.001,
         shrink_weekday_to_all_day=0.001,
         laplace_epsilon=0.001,
-        transition_window_seconds=7_200.0,
+        transition_window_slots=8,
         shrink_edge=0.001,
         recurrence_window_days=90.0,
         rebuild_interval_seconds=86_400.0,
@@ -68,9 +83,7 @@ class Ground:
     ) -> None:
         """一段观测空白：删失与曝光都靠它，没有它测不出"那段没看清"。"""
 
-        writer = BehaviorDocumentWriter(
-            self.site.behavior_tree, ProcessLocalLockStore(), clock=lambda: at(day, 23, 59)
-        )
+        writer = BehaviorDocumentWriter(self.site.behavior_tree, ProcessLocalLockStore(), clock=lambda: at(day, 23, 59))
         writer.publish(
             BehaviorKind.GAP,
             gap_payload(
@@ -82,7 +95,7 @@ class Ground:
         )
 
     def tree(self, **overrides) -> PredictionTree:
-        snapshot = source.read(self.site.behavior_tree)
+        snapshot = snapshot_from_tree(self.site.behavior_tree)
         latest = snapshot.latest_day
         assert latest is not None
         return builder.build(
@@ -93,7 +106,7 @@ class Ground:
         )
 
     def cache(self) -> DayIndexCache:
-        return DayIndexCache(self.site.behavior_tree, subject=SUBJECT)
+        return DayIndexCache(self.site.behavior_tree, subject=SUBJECT, admits=admitted)
 
     def pack(
         self,
@@ -104,6 +117,7 @@ class Ground:
         window_days: int = 30,
         max_days: int = 40,
         tree: PredictionTree | None = None,
+        relations: Mapping[str, tuple[RelationNote, ...]] | None = None,
     ) -> EvidencePack:
         """走真实读口装一包。"""
 
@@ -119,6 +133,8 @@ class Ground:
             window_days=window_days,
             transition_window_seconds=7_200.0,
             max_days_per_layer=max_days,
+            labels=kind_names(),
+            relations=relations,
         )
 
 

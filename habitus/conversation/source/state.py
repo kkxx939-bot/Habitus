@@ -36,9 +36,7 @@ class ConversationConsumerCorruptionError(ConversationSourceError):
 class ConversationConsumerOutputStore(Protocol):
     consumer: ConversationSourceConsumer
 
-    def expected_output_id(
-        self, source: ConversationSourceEnvelope, processor_fingerprint: str
-    ) -> str: ...
+    def expected_output_id(self, source: ConversationSourceEnvelope, processor_fingerprint: str) -> str: ...
 
     def read(self, source: ConversationSourceEnvelope, output_id: str) -> object | None: ...
 
@@ -87,9 +85,7 @@ class ConversationConsumerStateInspector:
         try:
             return self._inspect(source, consumer, processor_fingerprint, outputs)
         except ConversationConsumerBrokenOutcomeError as exc:
-            return ConversationConsumerState(
-                ConversationConsumerDeliveryState.BROKEN_OUTCOME, error=exc
-            )
+            return ConversationConsumerState(ConversationConsumerDeliveryState.BROKEN_OUTCOME, error=exc)
         except ConversationSourceError as exc:
             return ConversationConsumerState(
                 ConversationConsumerDeliveryState.CORRUPTED,
@@ -140,16 +136,12 @@ class ConversationConsumerStateInspector:
             # 当前 Processor 先按确定性 output_id 直读；仅在升级崩溃窗口下采用唯一旧 Output。
             output = current_output if current_output is not None else orphan_output
             outputs.ref(output)
-            return ConversationConsumerState(
-                ConversationConsumerDeliveryState.OUTPUT_READY, output=output
-            )
+            return ConversationConsumerState(ConversationConsumerDeliveryState.OUTPUT_READY, output=output)
         self._validate_outcome_source(source, resolved_consumer, outcome)
         if outcome.state is ConversationConsumerOutcomeState.SKIPPED:
             if all_outputs:
                 raise ConversationConsumerCorruptionError("skipped outcome has a consumer output")
-            return ConversationConsumerState(
-                ConversationConsumerDeliveryState.SKIPPED, outcome=outcome
-            )
+            return ConversationConsumerState(ConversationConsumerDeliveryState.SKIPPED, outcome=outcome)
         assert outcome.output_ref is not None
         output = outputs.read(source, outcome.output_ref.output_id)
         if output is None:

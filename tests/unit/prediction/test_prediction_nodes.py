@@ -56,17 +56,11 @@ def build_curves(actions, gaps=(), *, days: int, cfg=None, **overrides):
     at = reference(days - 1)
     actions = list(actions)
     recurrences = derive_recurrence(actions, config=resolved, reference=at)
-    periods = {
-        name: item.intervals.p50 / 86_400.0 for name, item in recurrences.items()
-    }
+    periods = {name: item.intervals.p50 / 86_400.0 for name, item in recurrences.items()}
     ledger = accumulate(actions, list(gaps), config=resolved, reference=at)
-    trends = pooled_trends(
-        actions, list(gaps), config=resolved, reference=at, periods=periods
-    )
+    trends = pooled_trends(actions, list(gaps), config=resolved, reference=at, periods=periods)
     completion = completion_curves(actions, list(gaps), config=resolved, reference=at)
-    derived = derive_all(
-        ledger, config=resolved, trends=trends, completion=completion
-    )
+    derived = derive_all(ledger, config=resolved, trends=trends, completion=completion)
     return dict(derived.cells), dict(derived.curves)
 
 
@@ -133,10 +127,8 @@ def test_a_partly_covered_day_weighs_less_on_both_sides() -> None:
     hit = action("吃药", 0, 7)  # 07:00，落在槽 28（07:00–07:15）
     # 空白盖住这一槽的后 2/3，且**不含**那条行为的起点 → 不被证伪，照常扣减。
     partial = ObservedGap(started_at=at(0, 7, 5), ended_at=at(0, 7, 15), watched=True)
-    kept = nodes.reconcile_gaps([hit], [partial])
-    assert kept == (partial,)
 
-    cfg, ledger, _stats = build([hit], kept, days=1)
+    cfg, ledger, _stats = build([hit], (partial,), days=1)
     key = SlotKey(weekday=0, slot=28)
     assert ledger.exposure[key].observed_days == pytest.approx(1 / 3, abs=1e-6)
     counts = ledger.counts[(key, "吃药")]
@@ -147,11 +139,10 @@ def test_a_partly_covered_day_weighs_less_on_both_sides() -> None:
 
 
 def test_a_behaviour_read_inside_an_unobserved_gap_is_refused() -> None:
-    """"没在看"与"看见了"同时成立是上游的矛盾；本层报出来，不替它圆场。"""
+    """ "没在看"与"看见了"同时成立是上游的矛盾；本层报出来，不替它圆场。"""
 
     hit = action("吃药", 0, 7)
     blind = ObservedGap(started_at=at(0, 7), ended_at=at(0, 8), watched=False)
-    assert nodes.reconcile_gaps([hit], [blind]) == (blind,)  # 未观测不被证伪
     with pytest.raises(PredictionTreeError, match="unobserved gap"):
         build([hit], [blind], days=1)
 
@@ -180,10 +171,7 @@ def test_a_steady_daily_habit_still_completes() -> None:
     assert curve.cumulative[-1] > 0.9
     # 分布函数的形状：早于最早那次之前没有质量，之后单调爬升到 π。
     assert curve.cumulative[0] == 0.0
-    assert all(
-        later >= earlier
-        for earlier, later in zip(curve.cumulative[:-1], curve.cumulative[1:], strict=True)
-    )
+    assert all(later >= earlier for earlier, later in zip(curve.cumulative[:-1], curve.cumulative[1:], strict=True))
 
 
 # --- 三种率 -------------------------------------------------------------------------------
@@ -326,12 +314,8 @@ def test_decay_lifts_a_habit_that_formed_recently() -> None:
 def test_trend_signals_a_habit_that_is_fading() -> None:
     """长期率还高但近期率已掉——没有这个数，换药停服后会连续误报两个月。"""
 
-    _cells, stopped = build_curves(
-        daily("吃药", 40, hour=7), days=60, decay_half_life_days=60.0
-    )
-    _cells2, continuing = build_curves(
-        daily("吃药", 60, hour=7), days=60, decay_half_life_days=60.0
-    )
+    _cells, stopped = build_curves(daily("吃药", 40, hour=7), days=60, decay_half_life_days=60.0)
+    _cells2, continuing = build_curves(daily("吃药", 60, hour=7), days=60, decay_half_life_days=60.0)
 
     faded = stopped[(0, "吃药")].trend
     steady = continuing[(0, "吃药")].trend
@@ -389,7 +373,7 @@ def test_daylight_saving_day_maps_by_wall_clock_not_by_elapsed_time() -> None:
     assert spring_forward.utcoffset() == timedelta(hours=-4)
 
     ledger = accumulate(
-        [ObservedAction(action="起床", started_at=spring_forward, day=spring_forward.date())],
+        [ObservedAction(action="起床", started_at=spring_forward, day=spring_forward.date(), lane="session")],
         [],
         config=config(),
         reference=spring_forward.date(),
@@ -411,8 +395,8 @@ def test_the_repeated_autumn_hour_still_counts_as_one_day() -> None:
 
     ledger = accumulate(
         [
-            ObservedAction(action="喂猫", started_at=first_pass, day=day),
-            ObservedAction(action="喂猫", started_at=second_pass, day=day),
+            ObservedAction(action="喂猫", started_at=first_pass, day=day, lane="session"),
+            ObservedAction(action="喂猫", started_at=second_pass, day=day, lane="session"),
         ],
         [],
         config=config(),
@@ -529,7 +513,7 @@ def test_a_slot_before_the_first_occurrence_is_estimated_the_same_way_as_one_aft
 
 
 def test_the_hazard_curve_carries_mass_before_the_earliest_time_ever_seen() -> None:
-    """"他今天比以往任何一天都早"不能是概率 0。
+    """ "他今天比以往任何一天都早"不能是概率 0。
 
     早先危险率只在有格子的槽上有值，首次之前的质量恒为 0，于是时刻分布只能向右胖：真实
     数据实测 827 个 (动作,天) 里 821 个预计时刻偏晚、0 个偏早，p10 永远正好等于历史见过的
@@ -662,8 +646,7 @@ def test_the_circular_window_matches_the_naive_neighbourhood_sum() -> None:
         values = [generator.random() * 5.0 for _ in range(total)]
         for half in range(0, (total - 1) // 2 + 1):
             naive = [
-                sum(values[(index + offset) % total] for offset in range(-half, half + 1))
-                for index in range(total)
+                sum(values[(index + offset) % total] for offset in range(-half, half + 1)) for index in range(total)
             ]
             assert nodes._circular_window_sums(values, half) == pytest.approx(naive, abs=1e-12)
 

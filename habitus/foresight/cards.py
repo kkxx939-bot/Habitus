@@ -122,7 +122,9 @@ class NowScene:
         return (self.moment.at.astimezone(UTC) - last.astimezone(UTC)).total_seconds()
 
 
-def history_card(view: ContextView, layer: str, cache: DayIndexCache, *, slot_minutes: int, half_width: int) -> HistoryCard:
+def history_card(
+    view: ContextView, layer: str, cache: DayIndexCache, *, slot_minutes: int, half_width: int
+) -> HistoryCard:
     """把一条投影视图铺成一张卡：补上它前后 ±k 槽的序列。"""
 
     if view.occurrence_uri is None:

@@ -62,8 +62,7 @@ class BehaviorDirectorySnapshot:
             {
                 "directory": list(self.directory.identity_parts),
                 "entries": [
-                    {"name": entry.name, "kind": entry.kind.value, "content": entry.content}
-                    for entry in self.entries
+                    {"name": entry.name, "kind": entry.kind.value, "content": entry.content} for entry in self.entries
                 ],
             }
         )

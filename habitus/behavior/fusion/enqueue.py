@@ -123,9 +123,7 @@ class BehaviorFusionEnqueuer:
         # 在这里可以完全由覆盖索引回答；从未融合的观测无论多旧都照常入队——下游停机再久也不丢数据。
         segments = segment_observations(envelopes, config=self.config, exclude=covered)
         if not segments:
-            return BehaviorFusionEnqueueResult(
-                (), 0, covered_observations=len(covered), envelopes=len(envelopes)
-            )
+            return BehaviorFusionEnqueueResult((), 0, covered_observations=len(covered), envelopes=len(envelopes))
         cutoff = self._timestamp() - self.quiet_period
         # 只取**前缀**而不是逐段过滤：作业严格串行，越过一段未收尾的观测去登记它后面的那段，
         # 会让后一段先融合、先落树，而前一段回来时再也接不上上下文。
@@ -154,9 +152,7 @@ class BehaviorFusionEnqueuer:
     def _enqueue(self, segment: BehaviorFusionSegment) -> BehaviorFusionJob:
         return self.jobs.enqueue(
             segment_digest=segment_identity(segment.fragments),
-            observation_ids=tuple(
-                sorted({item.observation_id for item in segment.fragments})
-            ),
+            observation_ids=tuple(sorted({item.observation_id for item in segment.fragments})),
             source_refs=tuple(segment.source_refs),
             fusion_version=FUSION_VERSION,
             prompt_version=FUSION_PROMPT_VERSION,

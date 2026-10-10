@@ -304,9 +304,7 @@ class MemoryExtractionContext:
             raise MemoryExtractionCapacityError("old-memory context exceeds its item limit")
         if byte_count > self.config.max_old_memory_bytes:
             raise MemoryExtractionCapacityError("old-memory context exceeds its byte limit")
-        token_count = self._total_tokens + sum(
-            estimate_utf8_bytes_tokens(snapshot.size_bytes) for snapshot in pending
-        )
+        token_count = self._total_tokens + sum(estimate_utf8_bytes_tokens(snapshot.size_bytes) for snapshot in pending)
         if token_count > self.config.max_old_memory_tokens:
             raise MemoryExtractionCapacityError("old-memory context exceeds its token limit")
         if found_count > EXISTING_PAGE_ID_MAX:

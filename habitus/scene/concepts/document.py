@@ -14,6 +14,7 @@ from habitus.scene.concepts.model import (
     ConceptDefinition,
     ConceptError,
     ConceptGrade,
+    ConceptKind,
     ConceptOrigin,
     ConceptRole,
     ConceptSource,
@@ -32,33 +33,48 @@ _ROLE_LABELS = {
     ConceptRole.DAY_TYPE: "情境·日型",
     ConceptRole.DERIVED: "情境·派生（算法从历史命中算）",
 }
-_ORIGIN_LABELS = {ConceptOrigin.BASELINE: "基准", ConceptOrigin.RESIDUE: "残差升级"}
-_CONTEXT_LABELS = {ContextScope.OCCURRENCE: "只看这一条", ContextScope.DAY: "要看当天时间线"}
+_ORIGIN_LABELS = {ConceptOrigin.VOCABULARY: "同步词表自动生成", ConceptOrigin.AUTHOR: "模型写"}
+_CONTEXT_LABELS = {
+    ContextScope.OCCURRENCE: "只看这一条",
+    ContextScope.DAY: "要看当天时间线",
+    ContextScope.RECENT: "要看近几天同一个类的记录",
+}
+_KIND_LABELS = {ConceptKind.BASE: "基础概念", ConceptKind.REFINEMENT: "细分概念", ConceptKind.GROUP: "汇总概念"}
 
 
 def _method_of(definition: ConceptDefinition) -> str:
     """行为概念：算法按规则判或模型按判据句判；情境概念：算法按情境说明算（模型从不判情境），没有说明就永不命中。"""
 
     if definition.role.is_situation:
-        return "算法按情境说明算——" + definition.situation.criterion() if definition.situation is not None else "没有情境说明，永不命中（等事实门接数据源）"
+        return (
+            "算法按情境说明算——" + definition.situation.criterion()
+            if definition.situation is not None
+            else "没有情境说明，永不命中（等事实门接数据源）"
+        )
+    if definition.kind is ConceptKind.BASE:
+        return "类已停用，不再命中" if definition.retired else "看记录的类编号（不判）"
+    if definition.kind is ConceptKind.GROUP:
+        return "读时按成员类聚合（不判）"
     if definition.rule is not None:
-        return "算法按规则判——" + definition.rule.criterion()
-    return "模型按判据句判"
+        return "算法按区别规则判——" + definition.rule.criterion()
+    return "模型按区别判据判"
 
 
 def encode(definition: ConceptDefinition) -> str:
     if not isinstance(definition, ConceptDefinition):
         raise TypeError("definition must be a ConceptDefinition")
     lines = [
-        f"# {definition.name}",
+        f"# {definition.label}",
         "",
         f"判据：{definition.definition}",
         f"判法：{_method_of(definition)}",
         f"材料：{_CONTEXT_LABELS[definition.context]}"
         + (f"；常态 {' / '.join(definition.required_baseline_keys)}" if definition.required_baseline_keys else ""),
-        f"类别：{_ROLE_LABELS[definition.role]}",
-        f"上级：{definition.parent if definition.parent is not None else '（无）'}",
+        f"类别：{_ROLE_LABELS[definition.role]}"
+        + ("" if definition.kind is None else f" · {_KIND_LABELS[definition.kind]} · lane {definition.lane}"),
     ]
+    if definition.classes:
+        lines.append(f"类：{' / '.join(definition.classes)}")
     if definition.situation is not None:
         lines.append(f"算法：{definition.situation.criterion()}")
     elif definition.role.is_situation:
@@ -67,8 +83,6 @@ def encode(definition: ConceptDefinition) -> str:
     if definition.grades:
         lines.append("档：" + " · ".join(f"{grade.name} = {grade.criterion()}" for grade in definition.grades))
     source = _ORIGIN_LABELS[definition.source.origin]
-    if definition.source.kind_token is not None:
-        source = f"{source}，认领 kind「{definition.source.kind_token}」"
     if definition.source.note is not None:
         source = f"{source}（{definition.source.note}）"
     lines.append(f"来源：{source}")
@@ -77,7 +91,11 @@ def encode(definition: ConceptDefinition) -> str:
         "name": definition.name,
         "definition": definition.definition,
         "role": definition.role.value,
-        "parent": definition.parent,
+        "kind": None if definition.kind is None else definition.kind.value,
+        "classes": list(definition.classes),
+        "lane": definition.lane,
+        "title": definition.title,
+        "retired": definition.retired,
         "grades": [
             {"name": g.name, "measure": g.measure.value, "lower": g.lower, "upper": g.upper, "relative": g.relative}
             for g in definition.grades
@@ -93,7 +111,10 @@ def encode(definition: ConceptDefinition) -> str:
         "context": definition.context.value,
         "baseline_keys": list(definition.baseline_keys),
         "situation": None if definition.situation is None else definition.situation.payload(),
-        "source": {"origin": definition.source.origin.value, "note": definition.source.note, "kind_token": definition.source.kind_token},
+        "source": {
+            "origin": definition.source.origin.value,
+            "note": definition.source.note,
+        },
         "created_at": definition.created_at,
     }
     return encode_record("\n".join(lines) + "\n", MARKER, payload)
@@ -108,7 +129,11 @@ def decode(text: str, *, expected_identity: str | None = None) -> ConceptDefinit
             name=_text(payload, "name"),
             definition=_text(payload, "definition"),
             role=ConceptRole(payload.get("role")),
-            parent=payload.get("parent"),
+            kind=None if payload.get("kind") is None else ConceptKind(payload.get("kind")),
+            classes=tuple(str(item) for item in _list(payload, "classes")),
+            lane=payload.get("lane"),
+            title=payload.get("title"),
+            retired=_flag(payload, "retired"),
             grades=tuple(_grade(item) for item in _list(payload, "grades")),
             rule=_rule(payload.get("rule")),
             context=ContextScope(payload.get("context")),
@@ -124,6 +149,13 @@ def decode(text: str, *, expected_identity: str | None = None) -> ConceptDefinit
     if encode(definition) != text:
         raise SceneRecordError("concept record body does not match its canonical rendering")
     return definition
+
+
+def _flag(payload: dict[str, Any], key: str) -> bool:
+    value = payload.get(key)
+    if not isinstance(value, bool):
+        raise SceneRecordError(f"concept field {key!r} must be a boolean")
+    return value
 
 
 def _text(payload: dict[str, Any], key: str) -> str:
@@ -151,7 +183,12 @@ def _grade(item: object) -> ConceptGrade:
     if not isinstance(item, dict) or set(item) != {"name", "measure", "lower", "upper", "relative"}:
         raise SceneRecordError("concept grade must be an object with name, measure, lower, upper and relative")
     name, lower, upper, relative = item["name"], item["lower"], item["upper"], item["relative"]
-    if not isinstance(name, str) or not isinstance(lower, int) or not isinstance(upper, int) or not isinstance(relative, bool):
+    if (
+        not isinstance(name, str)
+        or not isinstance(lower, int)
+        or not isinstance(upper, int)
+        or not isinstance(relative, bool)
+    ):
         raise SceneRecordError("concept grade fields have the wrong types")
     return ConceptGrade(name=name, measure=GradeMeasure(item["measure"]), lower=lower, upper=upper, relative=relative)
 
@@ -165,7 +202,10 @@ def _rule(item: object) -> MechanicalRule | None:
     if relative_to is not None and not isinstance(relative_to, str):
         raise SceneRecordError("concept rule relative_to must be text or null")
     return MechanicalRule(
-        measure=GradeMeasure(item["measure"]), lower=_optional_int(item, "lower"), upper=_optional_int(item, "upper"), relative_to=relative_to
+        measure=GradeMeasure(item["measure"]),
+        lower=_optional_int(item, "lower"),
+        upper=_optional_int(item, "upper"),
+        relative_to=relative_to,
     )
 
 
@@ -191,7 +231,7 @@ def _situation(item: object) -> SituationRule | None:
 def _source(item: object) -> ConceptSource:
     if not isinstance(item, dict):
         raise SceneRecordError("concept source must be an object")
-    return ConceptSource(origin=ConceptOrigin(item.get("origin")), note=item.get("note"), kind_token=item.get("kind_token"))
+    return ConceptSource(origin=ConceptOrigin(item.get("origin")), note=item.get("note"))
 
 
 __all__ = ["MARKER", "RECORD_TYPE", "decode", "encode"]

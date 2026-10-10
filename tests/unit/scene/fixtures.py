@@ -16,6 +16,7 @@ from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.uri import BehaviorURI
 from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from tests.unit.behavior.tree_payloads import gap_payload, occurrence_payload
+from tests.unit.kind_ids import kind_id
 
 CST = timezone(timedelta(hours=8))
 DAY1 = date(2026, 8, 15)
@@ -48,7 +49,7 @@ def publish(
     payload = occurrence_payload(
         occurred_on=day,
         name=name,
-        kind_token=kind or name,
+        kind_token=kind_id(kind or name),
         started_at=started,
         last_observed_at=started + timedelta(minutes=lasts_minutes),
         onset_available_at=started + timedelta(seconds=2),

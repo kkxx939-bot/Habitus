@@ -1,58 +1,6 @@
-"""行为类型词表：跨次身份登记（模型只选不造，身份归属在写入侧）。"""
+"""全局基础词表：行为类清单（编号做身份），白天归类、每晚新增、定期拆改（裁定 1–6）。
 
-from habitus.behavior.kinds.config import BehaviorKindConfig
-from habitus.behavior.kinds.model import (
-    HIT_DAYS_KEPT,
-    BehaviorKindEntry,
-    BehaviorKindError,
-    BehaviorKindLimitError,
-    BehaviorKindRegistry,
-)
-from habitus.behavior.kinds.rebuild import BehaviorKindRebuildReport, rebuild_registry
-from habitus.behavior.kinds.resolver import (
-    KIND_PROMPT_VERSION,
-    KIND_SYSTEM_PROMPT,
-    BehaviorKindBatchResolution,
-    BehaviorKindRequest,
-    BehaviorKindResolver,
-    kind_match_schema,
-)
-from habitus.behavior.kinds.store import (
-    KINDS_SCHEMA_VERSION,
-    BehaviorKindConflictError,
-    BehaviorKindSnapshot,
-    BehaviorKindStore,
-    BehaviorKindStoreError,
-)
-from habitus.behavior.kinds.vectors import (
-    KINDS_VECTORS_FILENAME,
-    BehaviorKindVectorError,
-    BehaviorKindVectorIndex,
-    BehaviorKindVectorStore,
-)
-
-__all__ = [
-    "HIT_DAYS_KEPT",
-    "KINDS_SCHEMA_VERSION",
-    "KINDS_VECTORS_FILENAME",
-    "BehaviorKindBatchResolution",
-    "BehaviorKindEntry",
-    "BehaviorKindRebuildReport",
-    "BehaviorKindRequest",
-    "BehaviorKindVectorError",
-    "BehaviorKindVectorIndex",
-    "BehaviorKindVectorStore",
-    "KIND_PROMPT_VERSION",
-    "KIND_SYSTEM_PROMPT",
-    "BehaviorKindConfig",
-    "BehaviorKindConflictError",
-    "BehaviorKindError",
-    "BehaviorKindLimitError",
-    "BehaviorKindRegistry",
-    "BehaviorKindResolver",
-    "BehaviorKindSnapshot",
-    "BehaviorKindStore",
-    "BehaviorKindStoreError",
-    "kind_match_schema",
-    "rebuild_registry",
-]
+包根**不转手任何子模块**：归类、每晚新增、拆改要调模型，而行为树 schema、预测树只需要 ``ids``——
+包根一 import 它们，导入 ``habitus.behavior.kinds.ids`` 就会先把模型客户端拖进来（第二轮评审 C1）。
+一律按子模块路径 import。
+"""

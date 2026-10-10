@@ -317,15 +317,11 @@ def create_http_app(
     infrastructure = getattr(components, "infrastructure", None)
     candidate_observer = getattr(infrastructure, "observer", None)
     observer: Observer = (
-        cast(Observer, candidate_observer)
-        if callable(getattr(candidate_observer, "record", None))
-        else NullObserver()
+        cast(Observer, candidate_observer) if callable(getattr(candidate_observer, "record", None)) else NullObserver()
     )
     candidate_span_controller = getattr(infrastructure, "managed_observability", None)
     span_controller = (
-        candidate_span_controller
-        if callable(getattr(candidate_span_controller, "start_span", None))
-        else None
+        candidate_span_controller if callable(getattr(candidate_span_controller, "start_span", None)) else None
     )
 
     @asynccontextmanager

@@ -109,9 +109,7 @@ class JudgementLink:
 
     def __post_init__(self) -> None:
         if (self.target_no is None) == (self.context_no is None):
-            raise BehaviorFusionError(
-                "a relation must name exactly one target: either target_no or context_no"
-            )
+            raise BehaviorFusionError("a relation must name exactly one target: either target_no or context_no")
         for name in ("target_no", "context_no"):
             value = getattr(self, name)
             if value is not None and value <= 0:
@@ -160,9 +158,7 @@ class BehaviorClaim:
         try:
             semantic_name(self.behavior, "behavior")
         except (TypeError, ValueError) as exc:
-            raise BehaviorFusionError(
-                f"behavior name is not usable as a tree address ({exc}); rephrase it"
-            ) from exc
+            raise BehaviorFusionError(f"behavior name is not usable as a tree address ({exc}); rephrase it") from exc
         if len(self.behavior.encode("utf-8")) > MAX_BEHAVIOR_NAME_UTF8_BYTES:
             raise BehaviorFusionError(
                 "behavior name is too long for a tree address; describe the behaviour in fewer words"
@@ -207,9 +203,7 @@ class BehaviorJudgement:
             raise BehaviorFusionError("a judgement must cover at least one fragment")
         if not self.claim.is_readable:
             if self.subjects or self.status is not None or self.status_basis is not None:
-                raise BehaviorFusionError(
-                    "an unreadable judgement must not carry subjects or a status"
-                )
+                raise BehaviorFusionError("an unreadable judgement must not carry subjects or a status")
             if self.relations:
                 raise BehaviorFusionError("an unreadable judgement cannot relate to another one")
         else:
@@ -263,8 +257,7 @@ class BehaviorJudgementBatch:
         if not isinstance(self.judgements, tuple):
             raise BehaviorFusionError("judgements must be a tuple")
         if not isinstance(self.unowned_fragment_nos, tuple) or any(
-            isinstance(item, bool) or not isinstance(item, int) or item <= 0
-            for item in self.unowned_fragment_nos
+            isinstance(item, bool) or not isinstance(item, int) or item <= 0 for item in self.unowned_fragment_nos
         ):
             raise BehaviorFusionError("unowned_fragment_nos must be a tuple of positive integers")
         if not isinstance(self.degradations, tuple) or any(
@@ -286,9 +279,7 @@ class BehaviorJudgementBatch:
         """
 
         readable = {no for item in self.judgements if item.claim.is_readable for no in item.covers}
-        unreadable = {
-            no for item in self.judgements if not item.claim.is_readable for no in item.covers
-        }
+        unreadable = {no for item in self.judgements if not item.claim.is_readable for no in item.covers}
         return len(unreadable - readable)
 
 

@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from habitus.foresight import ForesightError
+from habitus.foresight import ForesightError, RelationNote
 from habitus.foresight.judge import CandidateVerdict, Judgement
 from habitus.foresight.ledger import (
     LEDGER_SCHEMA_VERSION,
@@ -21,7 +21,9 @@ from habitus.foresight.ledger import (
     verified_count,
     verified_counts,
 )
-from tests.unit.foresight.fixtures import MONDAY, Ground, at
+from habitus.scene.relations import Segment
+from tests.unit.foresight.fixtures import MONDAY, Ground, at, unchanged
+from tests.unit.kind_ids import kind_id
 
 NOW = MONDAY + timedelta(days=28)
 SETTLED_AT = datetime(2026, 9, 1, 3, 0, tzinfo=UTC)
@@ -56,33 +58,33 @@ def test_only_promises_with_a_window_and_a_cited_card_enter_the_ledger(tmp_path)
     """「不会」「说不准」没有可核对的时点；说不出时窗的「会」同样核对不了——三者都不进账。"""
 
     pack = ground_for(tmp_path).pack(at(NOW, 19, 5))
-    play = next(item for item in pack.expanded if item.kind_token == "打球")
+    play = next(item for item in pack.expanded if item.kind_token == kind_id("打球"))
     cards = play.background.cards
     claims = claims_from(
         pack,
         judgement_at(
             pack,
-            verdict("打球", "会", (76, 78), (cards[0].uri, cards[1].uri)),
-            verdict("收拾球包", "不会", None, ()),
+            verdict(kind_id("打球"), "会", (76, 78), (cards[0].uri, cards[1].uri)),
+            verdict(kind_id("收拾球包"), "不会", None, ()),
         ),
     )
-    assert [(c.kind_token, c.window, c.slot, c.slot_minutes) for c in claims] == [("打球", (76, 78), 76, 15)]
+    assert [(c.kind_token, c.window, c.slot, c.slot_minutes) for c in claims] == [(kind_id("打球"), (76, 78), 76, 15)]
     (claim,) = claims
     assert claim.situations == ()  # 旧语义树的情形已删；新树的概念命中接回来前，承诺不分情形
     assert claim.basis == (cards[0].uri, cards[1].uri) and claim.numbers is play.numbers
     assert claim.generation == pack.generation and claim.judge_version == "test-judge" and claim.conditions == ()
-    assert claims_from(pack, judgement_at(pack, verdict("打球", "说不准", None, (cards[0].uri,)))) == ()
-    assert claims_from(pack, judgement_at(pack, verdict("打球", "会", None, (cards[0].uri,)))) == ()
+    assert claims_from(pack, judgement_at(pack, verdict(kind_id("打球"), "说不准", None, (cards[0].uri,)))) == ()
+    assert claims_from(pack, judgement_at(pack, verdict(kind_id("打球"), "会", None, (cards[0].uri,)))) == ()
 
 
 def test_the_conditions_the_asked_keys_and_the_source_version_are_all_stamped(tmp_path) -> None:
     """三样一起存：只看答案分不清"那天这个源离线"与"从来没有这个键"，也分不清是谁按什么口径答的。"""
 
     pack = ground_for(tmp_path).pack(at(NOW, 19, 5))
-    play = next(item for item in pack.expanded if item.kind_token == "打球")
+    play = next(item for item in pack.expanded if item.kind_token == kind_id("打球"))
     (claim,) = claims_from(
         pack,
-        judgement_at(pack, verdict("打球", "会", (76, 78), (play.background.cards[0].uri,))),
+        judgement_at(pack, verdict(kind_id("打球"), "会", (76, 78), (play.background.cards[0].uri,))),
         conditions=(("天气.天象", "晴"),),
         condition_keys=("天气.天象", "天气.温度"),
         facts_version="weather_v1",
@@ -101,47 +103,60 @@ def test_an_abstention_carrying_a_window_does_not_reach_the_ledger(tmp_path) -> 
     """schema 允许「说不准」带时窗（说不出就填 null），账本不能因此炸掉整拍。"""
 
     pack = ground_for(tmp_path).pack(at(NOW, 19, 5))
-    play = next(item for item in pack.expanded if item.kind_token == "打球")
-    assert claims_from(pack, judgement_at(pack, verdict("打球", "说不准", (76, 80), (play.background.cards[0].uri,)))) == ()
+    play = next(item for item in pack.expanded if item.kind_token == kind_id("打球"))
+    assert (
+        claims_from(
+            pack, judgement_at(pack, verdict(kind_id("打球"), "说不准", (76, 80), (play.background.cards[0].uri,)))
+        )
+        == ()
+    )
 
 
 def test_the_same_upcoming_occurrence_is_recorded_once_but_a_later_window_is_its_own_promise(tmp_path) -> None:
     ground = ground_for(tmp_path)
     pack = ground.pack(at(NOW, 19, 5))
-    play = next(item for item in pack.expanded if item.kind_token == "打球")
+    play = next(item for item in pack.expanded if item.kind_token == kind_id("打球"))
     basis = (play.background.cards[0].uri,)
-    (first,) = claims_from(pack, judgement_at(pack, verdict("打球", "会", (76, 78), basis)))
+    (first,) = claims_from(pack, judgement_at(pack, verdict(kind_id("打球"), "会", (76, 78), basis)))
     # 下一槽同样的话、或略微挪动的时窗：与已有的那条相交，说的是同一次，不重记。
     later = ground.pack(at(NOW, 19, 20))
-    assert claims_from(later, judgement_at(later, verdict("打球", "会", (76, 78), basis)), open_claims=(first,)) == ()
-    assert claims_from(later, judgement_at(later, verdict("打球", "会", (77, 79), basis)), open_claims=(first,)) == ()
+    assert (
+        claims_from(later, judgement_at(later, verdict(kind_id("打球"), "会", (76, 78), basis)), open_claims=(first,))
+        == ()
+    )
+    assert (
+        claims_from(later, judgement_at(later, verdict(kind_id("打球"), "会", (77, 79), basis)), open_claims=(first,))
+        == ()
+    )
     # 改口说晚上那次：不相交，是另一条承诺。
-    (second,) = claims_from(later, judgement_at(later, verdict("打球", "会", (84, 86), basis)), open_claims=(first,))
+    (second,) = claims_from(
+        later, judgement_at(later, verdict(kind_id("打球"), "会", (84, 86), basis)), open_claims=(first,)
+    )
     assert second.window == (84, 86) and second.claim_id != first.claim_id
 
 
 def test_settlement_reads_the_first_occurrence_after_the_claim_against_its_own_window(tmp_path) -> None:
     ground = ground_for(tmp_path)
     pack = ground.pack(at(NOW, 18, 50))
-    play = next(item for item in pack.expanded if item.kind_token == "打球")
+    play = next(item for item in pack.expanded if item.kind_token == kind_id("打球"))
     basis = (play.background.cards[0].uri,)
 
     def claim(window: tuple[int, int], *, spoken: datetime | None = None):
         spoken = spoken or at(NOW, 18, 50)
-        judgement = judgement_at(pack, verdict("打球", "会", window, basis), judged_at=spoken.astimezone(UTC))
+        judgement = judgement_at(pack, verdict(kind_id("打球"), "会", window, basis), judged_at=spoken.astimezone(UTC))
         (item,) = claims_from(pack, judgement)
         return item
 
     ground.record(NOW, "打球", 19, 10, kind="打球")  # 第 76 槽
     rows = ground.cache().day(NOW).rows
-    verified = settle(claim((76, 77)), rows, settled_at=SETTLED_AT)
+    verified = settle(claim((76, 77)), rows, settled_at=SETTLED_AT, current=unchanged)
     assert (verified.outcome, verified.slot_offset, verified.verified) == ("验证", None, True)
     assert verified.occurrence_uri and "打球" in verified.occurrence_uri
-    late = settle(claim((74, 75)), rows, settled_at=SETTLED_AT)
+    late = settle(claim((74, 75)), rows, settled_at=SETTLED_AT, current=unchanged)
     assert (late.outcome, late.slot_offset, late.verified) == ("偏离", 1, False)
-    early = settle(claim((78, 80)), rows, settled_at=SETTLED_AT)
+    early = settle(claim((78, 80)), rows, settled_at=SETTLED_AT, current=unchanged)
     assert (early.outcome, early.slot_offset) == ("偏离", -2)  # 早于窗：负数，账本只记事实
-    missed = settle(claim((77, 78), spoken=at(NOW, 19, 20)), rows, settled_at=SETTLED_AT)
+    missed = settle(claim((77, 78), spoken=at(NOW, 19, 20)), rows, settled_at=SETTLED_AT, current=unchanged)
     assert (missed.outcome, missed.occurrence_uri) == ("落空", None)
 
 
@@ -150,11 +165,11 @@ def test_a_claim_is_settled_with_the_slot_width_it_was_made_under(tmp_path) -> N
 
     ground = ground_for(tmp_path)
     pack = ground.pack(at(NOW, 18, 50))
-    play = next(item for item in pack.expanded if item.kind_token == "打球")
-    judgement = judgement_at(pack, verdict("打球", "会", (76, 77), (play.background.cards[0].uri,)))
+    play = next(item for item in pack.expanded if item.kind_token == kind_id("打球"))
+    judgement = judgement_at(pack, verdict(kind_id("打球"), "会", (76, 77), (play.background.cards[0].uri,)))
     (claim,) = claims_from(pack, judgement)
     ground.record(NOW, "打球", 19, 40, kind="打球")  # 15 分钟槽下是第 78 槽，30 分钟槽下是第 39 槽
-    item = settle(claim, ground.cache().day(NOW).rows, settled_at=SETTLED_AT)
+    item = settle(claim, ground.cache().day(NOW).rows, settled_at=SETTLED_AT, current=unchanged)
     assert claim.slot_minutes == 15 and (item.outcome, item.slot_offset) == ("偏离", 1)
 
 
@@ -172,33 +187,112 @@ def test_the_gate_counts_verified_promises_per_kind_and_situation() -> None:
         )
 
     rows = (
-        row("打球", "验证", ("周一下班后自己去",)),
-        row("打球", "验证", ("周一下班后自己去", "和朋友约好")),
-        row("打球", "偏离", ("周一下班后自己去",), offset=2),
-        row("打球", "验证", ()),
-        row("洗澡", "落空", ()),
+        row(kind_id("打球"), "验证", ("周一下班后自己去",)),
+        row(kind_id("打球"), "验证", ("周一下班后自己去", "和朋友约好")),
+        row(kind_id("打球"), "偏离", ("周一下班后自己去",), offset=2),
+        row(kind_id("打球"), "验证", ()),
+        row(kind_id("洗澡"), "落空", ()),
     )
-    assert verified_counts(rows) == {("打球", "周一下班后自己去"): 2, ("打球", "和朋友约好"): 1, ("打球", ""): 1}
-    assert verified_count(rows, "打球", "周一下班后自己去") == 2 and verified_count(rows, "洗澡") == 0
+    assert verified_counts(rows, current=unchanged) == {
+        (kind_id("打球"), "周一下班后自己去"): 2,
+        (kind_id("打球"), "和朋友约好"): 1,
+        (kind_id("打球"), ""): 1,
+    }
+    assert verified_count(rows, kind_id("打球"), "周一下班后自己去", current=unchanged) == 2
+    assert verified_count(rows, kind_id("洗澡"), current=unchanged) == 0
 
 
 def test_records_round_trip_through_the_codec(tmp_path) -> None:
     ground = ground_for(tmp_path)
     pack = ground.pack(at(NOW, 19, 5))
-    play = next(item for item in pack.expanded if item.kind_token == "打球")
-    (claim,) = claims_from(pack, judgement_at(pack, verdict("打球", "会", (76, 78), (play.background.cards[0].uri,))))
+    play = next(item for item in pack.expanded if item.kind_token == kind_id("打球"))
+    (claim,) = claims_from(
+        pack, judgement_at(pack, verdict(kind_id("打球"), "会", (76, 78), (play.background.cards[0].uri,)))
+    )
     assert decode_claim(encode_claim(claim)) == claim
-    item = settle(claim, ground.cache().day(NOW).rows, settled_at=SETTLED_AT)
+    item = settle(claim, ground.cache().day(NOW).rows, settled_at=SETTLED_AT, current=unchanged)
     assert decode_settlement(encode_settlement(item)) == item
     with pytest.raises(ForesightError, match="malformed"):
         decode_claim({"schema_version": LEDGER_SCHEMA_VERSION, "claim_id": "x"})
-    # 旧版本的记录不猜着读：第二刀给承诺加了条件三件套，v1 的文件按 v1 的形状去解只会读出半条。
+    # 旧版本的记录不猜着读：v2 给承诺加了条件三件套，v3 加了用到的关系，v4 加了前因的出处；旧文件按旧形状去解只会读出半条。
     with pytest.raises(ForesightError, match="unknown ledger schema"):
-        decode_claim({**encode_claim(claim), "schema_version": "foresight_ledger_v1"})
+        decode_claim({**encode_claim(claim), "schema_version": "foresight_ledger_v2"})
+
+
+def test_a_claim_keeps_the_relations_its_candidate_carried(tmp_path) -> None:
+    """承诺上记下说这句话时摆给判断者的关系身份：以后预测层的反馈按它读回语义树。"""
+
+    ground = ground_for(tmp_path)
+    pack = ground.pack(at(NOW, 19, 5))
+    play = next(item for item in pack.expanded if item.kind_token == kind_id("打球"))
+    note = RelationNote(
+        key=f"session|{kind_id('收拾球包')}|{kind_id('打球')}|chain",
+        antecedent="收拾球包",
+        segment=Segment.CHAIN,
+        span="同一条链：做完之后 45 分钟内，与转移边重叠",
+        control="同一天别的事做完之后",
+        treated_rate=0.8,
+        control_rate=0.1,
+        interval=(0.4, 0.9),
+        upward=True,
+        antecedents=10,
+        seen_at=at(NOW, 18, 40),
+        source="unsealed:2026-08-31T18:40:00+08:00",
+    )
+    carried = replace(
+        pack,
+        candidates=tuple(
+            replace(item, relations=(note,)) if item.kind_token == play.kind_token else item for item in pack.candidates
+        ),
+    )
+    (claim,) = claims_from(
+        carried, judgement_at(carried, verdict(kind_id("打球"), "会", (76, 78), (play.background.cards[0].uri,)))
+    )
+    assert claim.relations == (note.key,) and claim.relation_sources == (note.source,)
+    assert decode_claim(encode_claim(claim)) == claim
 
 
 def test_the_shapes_refuse_self_contradiction() -> None:
     with pytest.raises(ForesightError, match="exactly when"):
-        Settlement(claim_id="a", kind_token="打球", day=NOW, situations=(), outcome="验证", occurrence_uri=None, slot_offset=None, settled_at=SETTLED_AT)
+        Settlement(
+            claim_id="a",
+            kind_token=kind_id("打球"),
+            day=NOW,
+            situations=(),
+            outcome="验证",
+            occurrence_uri=None,
+            slot_offset=None,
+            settled_at=SETTLED_AT,
+        )
     with pytest.raises(ForesightError, match="slot_offset"):
-        Settlement(claim_id="a", kind_token="打球", day=NOW, situations=(), outcome="验证", occurrence_uri="u", slot_offset=2, settled_at=SETTLED_AT)
+        Settlement(
+            claim_id="a",
+            kind_token=kind_id("打球"),
+            day=NOW,
+            situations=(),
+            outcome="验证",
+            occurrence_uri="u",
+            slot_offset=2,
+            settled_at=SETTLED_AT,
+        )
+
+
+def test_a_claim_follows_its_class_through_a_merge_and_counts_follow_a_split(tmp_path) -> None:
+    """承诺记的是说话时的编号；结算前每周拆改把「收拾球包」并进了「打球」：按"现在对应哪些编号"认，照样对得上。
+    计数同理：拆分之后，一次验证记在每个拆出来的类上（说那句话时它们是同一类）。"""
+
+    ground = ground_for(tmp_path)
+    pack = ground.pack(at(NOW, 18, 30))
+    bag = next(item for item in pack.expanded if item.kind_token == kind_id("收拾球包"))
+    (claim,) = claims_from(
+        pack, judgement_at(pack, verdict(kind_id("收拾球包"), "会", (74, 76), (bag.background.cards[0].uri,)))
+    )
+    ground.record(NOW, "收拾球包", 18, 40, kind="打球")  # 那天的这一条已被重打成「打球」
+    merged = {kind_id("收拾球包"): (kind_id("打球"),)}
+    item = settle(claim, ground.cache().day(NOW).rows, settled_at=SETTLED_AT, current=lambda t: merged.get(t, (t,)))
+    assert item.outcome == "验证"
+    assert settle(claim, ground.cache().day(NOW).rows, settled_at=SETTLED_AT, current=unchanged).outcome == "落空"
+
+    split = {kind_id("收拾球包"): (kind_id("收拾球包"), kind_id("整理装备"))}
+    counts = verified_counts([item], current=lambda t: split.get(t, (t,)))
+    assert counts == {(kind_id("收拾球包"), ""): 1, (kind_id("整理装备"), ""): 1}

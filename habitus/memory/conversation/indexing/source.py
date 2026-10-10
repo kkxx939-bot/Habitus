@@ -59,8 +59,7 @@ class ConversationSummaryIndexSourceReader:
         return tuple(
             self._source(address, summary)
             for summary in summaries
-            if self.retirement_store is None
-            or not self.retirement_store.hidden(summary_reference(address, summary))
+            if self.retirement_store is None or not self.retirement_store.hidden(summary_reference(address, summary))
         )
 
     def all_references(self, address: ConversationAddress) -> tuple[ConversationSummaryReference, ...]:
@@ -69,12 +68,8 @@ class ConversationSummaryIndexSourceReader:
         if not isinstance(address, ConversationAddress):
             raise TypeError("address must be ConversationAddress")
         values: list[ConversationSummary] = [*self.compactor.segment_store.list(address)]
-        values.extend(
-            self.compactor.range_store.list(address, ConversationRangeSummaryStage.RANGE)
-        )
-        values.extend(
-            self.compactor.range_store.list(address, ConversationRangeSummaryStage.ARCHIVE)
-        )
+        values.extend(self.compactor.range_store.list(address, ConversationRangeSummaryStage.RANGE))
+        values.extend(self.compactor.range_store.list(address, ConversationRangeSummaryStage.ARCHIVE))
         if len(values) > self.config.max_records_per_conversation:
             raise ValueError("physical Conversation summaries exceed their index reconciliation bound")
         references = tuple(summary_reference(address, summary) for summary in values)
@@ -102,9 +97,7 @@ class ConversationSummaryIndexSourceReader:
 
         if not isinstance(reference, ConversationSummaryReference):
             raise TypeError("reference must be ConversationSummaryReference")
-        return {source.identity: source for source in self.active(reference.address)}.get(
-            reference.identity
-        )
+        return {source.identity: source for source in self.active(reference.address)}.get(reference.identity)
 
     def _source(
         self,

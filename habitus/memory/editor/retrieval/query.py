@@ -27,9 +27,7 @@ class ConversationSegmentQueryBuilder:
         messages = segment.messages
         rendered = tuple(self._render_message(message) for message in messages)
         prompt_indexes = [
-            index
-            for index, message in enumerate(messages)
-            if message.role is ConversationMessageRole.PROMPT
+            index for index, message in enumerate(messages) if message.role is ConversationMessageRole.PROMPT
         ]
         anchor = prompt_indexes[-1] if prompt_indexes else len(messages) - 1
         selected = {anchor}

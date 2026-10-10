@@ -29,7 +29,7 @@ from bisect import bisect_left
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, time
 
 from habitus.prediction.config import PredictionTreeConfig
 from habitus.prediction.errors import PredictionTreeError
@@ -38,6 +38,7 @@ from habitus.prediction.model import (
     IntervalQuantiles,
     ObservedAction,
     ObservedGap,
+    ObservedUnnamed,
     ParallelStatistics,
     SlotKey,
 )
@@ -68,13 +69,21 @@ def pair(
     gaps: Sequence[ObservedGap],
     concurrent: Sequence[tuple[int, int]],
     *,
+    unnamed: Sequence[ObservedUnnamed],
     config: PredictionTreeConfig,
     reference: date,
+    cutoff: date | None = None,
 ) -> EdgeLedger:
     """把有序的行为流配对成边。
 
     ``concurrent`` 是行为树声明的并行对（按 ``actions`` 的下标），配对时跳过它们并单独记账。
     锚定用**开始时刻**——``ended_at`` 常常不可知（``status_basis = observation_lost``）。
+
+    每条 lane 是一条独立的先后顺序（裁定 18）：后继只在同一 lane 里找，并行只认同一 lane 的两条。
+    ``unnamed``（词表的「待定」）只在顺序里占位：它是某条行为的下一件时，那一对记为删失。
+
+    ``cutoff`` 是事件序列的截止日：窗口跨过"第 ``cutoff`` 天开始"那一刻（按这条行为自己的偏移）还没等到后继的，
+    后面那一截没看到，记删失——不得记成"没有后继"（语义树新方案第四节）。
     """
 
     # concurrent 的下标指向**排序后**的位置（source 存的就是 rank），所以有序是前置条件而不是
@@ -84,89 +93,161 @@ def pair(
     # "无后继"的账覆盖掉同键的真转移边（计数、间隔、直方图一起被换掉），而且悄无声息。
     # 这是"我们自己的产物是否自洽"，硬拒。
     if any(item.action == NO_SUCCESSOR for item in actions):
-        raise PredictionTreeError(
-            f"{NO_SUCCESSOR!r} is reserved for 'no successor' and cannot be an action name"
-        )
-    ordered = sorted(range(len(actions)), key=lambda index: actions[index].started_at)
-    concurrent_pairs = {tuple(sorted(pair_)) for pair_ in concurrent}
-    concurrent_partners: dict[int, set[int]] = {}
+        raise PredictionTreeError(f"{NO_SUCCESSOR!r} is reserved for 'no successor' and cannot be an action name")
+    concurrent_pairs = _same_lane_pairs(actions, concurrent)
+    ledger = _Tally(parallels=_parallels(actions, concurrent_pairs, config=config, reference=reference))
+    partners: dict[int, set[int]] = {}
     for left, right in concurrent_pairs:
-        concurrent_partners.setdefault(left, set()).add(right)
-        concurrent_partners.setdefault(right, set()).add(left)
-    window = config.transition_window_seconds
+        partners.setdefault(left, set()).add(right)
+        partners.setdefault(right, set()).add(left)
     gap_starts, gap_ends = _gap_spans(gaps)
-    transitions: dict[tuple[str, str], float] = {}
-    no_successor: dict[str, float] = {}
-    parallels: dict[tuple[str, str], float] = {}
-    intervals: dict[tuple[str, str], list[tuple[float, float]]] = {}
-    slot_histogram: dict[tuple[str, str], dict[SlotKey, float]] = {}
-    days: dict[tuple[str, str], set[date]] = {}
-    censored = 0.0
+    for timeline in _lane_timelines(actions, unnamed):
+        for position, entry in enumerate(timeline):
+            if entry.index is None:
+                continue  # 叫不出名的事不当转移起点
+            current = actions[entry.index]
+            deadline = current.started_at.timestamp() + config.transition_window_seconds
+            following = _next_in_window(timeline, position, deadline, partners.get(entry.index, frozenset()))
+            weight = decay_weight(float((reference - current.day).days), config.decay_half_life_days)
+            slot_key = SlotKey.of(current.started_at, slot_minutes=config.slot_minutes)
+            if following is None and cutoff is not None and deadline > _boundary(cutoff, current).timestamp():
+                ledger.censored += weight  # 窗口跨过截止日：后面那一截没看到
+            elif following is None:
+                ledger.no_successor_or_censored(current, deadline, slot_key, weight, gap_starts, gap_ends)
+            elif following.index is None or not _window_fully_observed(
+                current.started_at, following.started_at.timestamp(), gap_starts, gap_ends
+            ):
+                # 下一件叫不出名，或起点与后继之间断过档：我们不知道真正的下一件是什么，这一对既不算转移
+                # 也不算无转移。少了这一条，观测最差的那些时段会被记成最确凿的因果。
+                ledger.censored += weight
+            else:
+                ledger.transition(current, actions[following.index], slot_key, weight)
+    return ledger.freeze()
 
-    # 并行边直接从行为树声明的对里数，**不经过后继搜索**：并行不是"下一件事"，
-    # 它既不该受转移窗口约束（长时段重叠很常见），也不该因为中间插进一个真后继而消失。
-    # 旧写法两条都犯了：吃饭 ∥ 看手机、中间插一次倒水，并行关系就凭空不见了。
-    for left, right in sorted(concurrent_pairs):
+
+def _boundary(cutoff: date, action: ObservedAction) -> datetime:
+    """"第 ``cutoff`` 天开始"那一刻，按这条行为自己的偏移（行为树的日期是记录自己的本地日期）。"""
+
+    return datetime.combine(cutoff, time(), tzinfo=action.started_at.tzinfo)
+
+
+@dataclass(frozen=True)
+class _Entry:
+    """一条 lane 的先后顺序里的一个位置：``index`` 指向 ``actions``；``None`` 是叫不出名的事。"""
+
+    started_at: datetime
+    index: int | None
+
+
+def _lane_timelines(
+    actions: Sequence[ObservedAction], unnamed: Sequence[ObservedUnnamed]
+) -> tuple[tuple[_Entry, ...], ...]:
+    by_lane: dict[str, list[_Entry]] = {}
+    for index, action in enumerate(actions):
+        by_lane.setdefault(action.lane, []).append(_Entry(action.started_at, index))
+    for item in unnamed:
+        by_lane.setdefault(item.lane, []).append(_Entry(item.started_at, None))
+    return tuple(
+        tuple(sorted(entries, key=lambda entry: (entry.started_at.timestamp(), entry.index is None, entry.index or 0)))
+        for _lane, entries in sorted(by_lane.items())
+    )
+
+
+def _next_in_window(
+    timeline: Sequence[_Entry], position: int, deadline: float, partners: AbstractSet[int]
+) -> _Entry | None:
+    for entry in timeline[position + 1 :]:
+        if entry.started_at.timestamp() > deadline:
+            return None
+        if entry.index is not None and entry.index in partners:
+            continue  # 同时发生的那一条不是"下一件事"，跳过继续往后找
+        return entry
+    return None
+
+
+def _same_lane_pairs(
+    actions: Sequence[ObservedAction], concurrent: Sequence[tuple[int, int]]
+) -> tuple[tuple[int, int], ...]:
+    found: set[tuple[int, int]] = set()
+    for raw in concurrent:
+        left, right = sorted(raw)
         if not 0 <= left < len(actions) or not 0 <= right < len(actions):
             raise PredictionTreeError("concurrent pair references an action outside the batch")
+        if actions[left].lane == actions[right].lane:
+            found.add((left, right))
+    return tuple(sorted(found))
+
+
+def _parallels(
+    actions: Sequence[ObservedAction],
+    pairs: Sequence[tuple[int, int]],
+    *,
+    config: PredictionTreeConfig,
+    reference: date,
+) -> dict[tuple[str, str], float]:
+    """并行边直接从行为树声明的对里数，**不经过后继搜索**：并行不是"下一件事"，
+    它既不该受转移窗口约束（长时段重叠很常见），也不该因为中间插进一个真后继而消失。"""
+
+    parallels: dict[tuple[str, str], float] = {}
+    for left, right in pairs:
         later = max(actions[left].day, actions[right].day)
         # 按动作身份序规范化：谁先开始是每次发生各不相同的偶然，不该决定证据落进哪个键。
         key = _parallel_key(actions[left].action, actions[right].action)
         parallels[key] = parallels.get(key, 0.0) + decay_weight(
             float((reference - later).days), config.decay_half_life_days
         )
+    return parallels
 
-    for position, index in enumerate(ordered):
-        current = actions[index]
-        weight = decay_weight(float((reference - current.day).days), config.decay_half_life_days)
-        deadline = current.started_at.timestamp() + window
-        partners: AbstractSet[int] = concurrent_partners.get(index, frozenset())
-        successor: ObservedAction | None = None
-        for follower_position in range(position + 1, len(ordered)):
-            follower_index = ordered[follower_position]
-            follower = actions[follower_index]
-            if follower.started_at.timestamp() > deadline:
-                break
-            if follower_index in partners:
-                continue  # 同时发生的那一条不是"下一件事"，跳过继续往后找
-            successor = follower
-            break
 
-        slot_key = SlotKey.of(current.started_at, slot_minutes=config.slot_minutes)
-        if successor is not None:
-            if not _window_fully_observed(
-                current.started_at, successor.started_at.timestamp(), gap_starts, gap_ends
-            ):
-                # 起点与后继之间断过档：我们不知道洞里是不是还发生过别的，这一对既不算转移
-                # 也不算无转移。少了这一条，观测最差的那些时段会被记成最确凿的因果。
-                censored += weight
-                continue
-            key = (current.action, successor.action)
-            transitions[key] = transitions.get(key, 0.0) + weight
-            days.setdefault(key, set()).add(current.day)
-            gap_seconds = successor.started_at.timestamp() - current.started_at.timestamp()
-            intervals.setdefault(key, []).append((gap_seconds, weight))
-            _tally(slot_histogram, key, slot_key, weight)
-            continue
+@dataclass
+class _Tally:
+    """配对过程中的可变账；``freeze`` 交出不可变的 ``EdgeLedger``。"""
 
-        if _window_fully_observed(current.started_at, deadline, gap_starts, gap_ends):
-            no_successor[current.action] = no_successor.get(current.action, 0.0) + weight
-            days.setdefault((current.action, NO_SUCCESSOR), set()).add(current.day)
-            # ∅ 也上直方图：联合查询的分母是"该槽内 source 的未删失次数"，
-            # 少了这一半，"这个槽做完 A 通常就收工"会被算成"这个槽做完 A 必然接着做 B"。
-            _tally(slot_histogram, (current.action, NO_SUCCESSOR), slot_key, weight)
-        else:
+    parallels: dict[tuple[str, str], float]
+    transitions: dict[tuple[str, str], float] = field(default_factory=dict)
+    no_successor: dict[str, float] = field(default_factory=dict)
+    intervals: dict[tuple[str, str], list[tuple[float, float]]] = field(default_factory=dict)
+    slot_histogram: dict[tuple[str, str], dict[SlotKey, float]] = field(default_factory=dict)
+    days: dict[tuple[str, str], set[date]] = field(default_factory=dict)
+    censored: float = 0.0
+
+    def transition(self, current: ObservedAction, successor: ObservedAction, slot_key: SlotKey, weight: float) -> None:
+        key = (current.action, successor.action)
+        self.transitions[key] = self.transitions.get(key, 0.0) + weight
+        self.days.setdefault(key, set()).add(current.day)
+        gap_seconds = successor.started_at.timestamp() - current.started_at.timestamp()
+        self.intervals.setdefault(key, []).append((gap_seconds, weight))
+        _tally(self.slot_histogram, key, slot_key, weight)
+
+    def no_successor_or_censored(
+        self,
+        current: ObservedAction,
+        deadline: float,
+        slot_key: SlotKey,
+        weight: float,
+        gap_starts: Sequence[float],
+        gap_ends: Sequence[float],
+    ) -> None:
+        if not _window_fully_observed(current.started_at, deadline, gap_starts, gap_ends):
             # 删失：窗口内有空洞，我们不知道后来发生了什么——**不得**记成"什么都没做"。
-            censored += weight
-    return EdgeLedger(
-        transitions=transitions,
-        no_successor=no_successor,
-        parallels=parallels,
-        intervals=intervals,
-        slot_histogram=slot_histogram,
-        censored=censored,
-        days=days,
-    )
+            self.censored += weight
+            return
+        self.no_successor[current.action] = self.no_successor.get(current.action, 0.0) + weight
+        self.days.setdefault((current.action, NO_SUCCESSOR), set()).add(current.day)
+        # ∅ 也上直方图：联合查询的分母是"该槽内 source 的未删失次数"，
+        # 少了这一半，"这个槽做完 A 通常就收工"会被算成"这个槽做完 A 必然接着做 B"。
+        _tally(self.slot_histogram, (current.action, NO_SUCCESSOR), slot_key, weight)
+
+    def freeze(self) -> EdgeLedger:
+        return EdgeLedger(
+            transitions=self.transitions,
+            no_successor=self.no_successor,
+            parallels=self.parallels,
+            intervals=self.intervals,
+            slot_histogram=self.slot_histogram,
+            censored=self.censored,
+            days=self.days,
+        )
 
 
 def _tally(
@@ -197,9 +278,7 @@ def _gap_spans(gaps: Sequence[ObservedGap]) -> tuple[list[float], list[float]]:
     """
 
     ordered = sorted(
-        (gap.started_at.timestamp(), gap.ended_at.timestamp())
-        for gap in gaps
-        if gap.ended_at > gap.started_at
+        (gap.started_at.timestamp(), gap.ended_at.timestamp()) for gap in gaps if gap.ended_at > gap.started_at
     )
     starts = [start for start, _end in ordered]
     # 第二条数组存的是**结束时刻的前缀最大值**而不是结束时刻本身：判"窗口内有没有洞"只需要
@@ -362,9 +441,7 @@ def quantiles(samples: Sequence[tuple[float, float]]) -> IntervalQuantiles | Non
     )
 
 
-def _weighted_quantile(
-    ordered: Sequence[tuple[float, float]], total: float, fraction: float
-) -> float:
+def _weighted_quantile(ordered: Sequence[tuple[float, float]], total: float, fraction: float) -> float:
     target = total * fraction
     cumulative = 0.0
     for value, weight in ordered:

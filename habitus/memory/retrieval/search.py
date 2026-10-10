@@ -242,8 +242,7 @@ class MemorySemanticSearchEngine:
             if not isinstance(scores, tuple) or len(scores) != len(matches):
                 raise ValueError("reranker returned an unexpected hierarchy score count")
             return tuple(
-                (match, self._score(score, "hierarchy rerank"))
-                for match, score in zip(matches, scores, strict=True)
+                (match, self._score(score, "hierarchy rerank")) for match, score in zip(matches, scores, strict=True)
             )
         except Exception as exc:
             logger.warning("hierarchy reranker failed; using vector scores", exc_info=exc)

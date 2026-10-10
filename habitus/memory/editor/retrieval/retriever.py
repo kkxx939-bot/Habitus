@@ -84,10 +84,7 @@ class MemoryRelatedRetriever:
         roots: set[MemoryURI] = set()
         for schema in self.schema_registry.all():
             # Event 虽只追加，仍是 Intention 状态判断的必要时间线。
-            if (
-                schema.operation_mode is MemoryOperationMode.ADD_ONLY
-                and schema.kind is not MemoryKind.EVENT
-            ):
+            if schema.operation_mode is MemoryOperationMode.ADD_ONLY and schema.kind is not MemoryKind.EVENT:
                 continue
             if schema.kind is MemoryKind.PROFILE:
                 fixed.add(MemoryURI.from_address(MemoryAddress.profile()))

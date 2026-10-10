@@ -506,19 +506,13 @@ class LifecycleWorker:
             self._wake_event.clear()
 
     def _observe_cycle(self, result: LifecycleMaintenanceCycleResult) -> None:
-        memory_failures = (
-            0
-            if result.memory_maintenance is None
-            else len(result.memory_maintenance.failures)
-        )
+        memory_failures = 0 if result.memory_maintenance is None else len(result.memory_maintenance.failures)
         self.observer.record(
             ObservationEvent(
                 category="lifecycle",
                 operation="maintenance_cycle",
                 status=(
-                    ObservationStatus.DEGRADED
-                    if result.failures or memory_failures
-                    else ObservationStatus.SUCCESS
+                    ObservationStatus.DEGRADED if result.failures or memory_failures else ObservationStatus.SUCCESS
                 ),
                 duration_seconds=max(0.0, (result.finished_at - result.started_at).total_seconds()),
                 attributes={

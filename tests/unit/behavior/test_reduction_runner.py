@@ -1,16 +1,13 @@
 """归约 runner 端到端：真实存储进、真实行为树出。
 
-模型触点（kinds 归一）用预置词表压到零调用——词表命中走确定性快路径，stub 客户端被调用即
-测试失败，这本身就是"写入层唯一 LLM 触点"边界的守卫。
+模型触点（白天归类）用按名字配对的确定性假模型：链头原话与某个类名逐字相同就归那一类，否则进待定。
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Iterator, Mapping
 from datetime import date
-from typing import Any
 
 import pytest
 
@@ -18,9 +15,6 @@ from habitus.behavior.fusion import FUSION_PROMPT_VERSION
 from habitus.behavior.fusion.receipt import build_fusion_receipt
 from habitus.behavior.fusion.receipt_store import BehaviorFusionReceiptStore
 from habitus.behavior.fusion.store import BehaviorJudgementStore
-from habitus.behavior.kinds.model import BehaviorKindRegistry
-from habitus.behavior.kinds.resolver import BehaviorKindResolver
-from habitus.behavior.kinds.store import BehaviorKindStore
 from habitus.behavior.model import BehaviorKind
 from habitus.behavior.observation import (
     BehaviorObservationBatch,
@@ -33,15 +27,7 @@ from habitus.behavior.uri import BehaviorURI
 from habitus.foundation.integrity import canonical_digest
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.locks import ProcessLocalLockStore
-from habitus.model_client import (
-    ChatClient,
-    ChatModelConfig,
-    ChatRequest,
-    PreparedChatRequest,
-    ProviderCapabilities,
-    ProviderConfig,
-    StructuredChatClient,
-)
+from tests.unit.behavior.kinds_fixtures import NameMatchingProvider, kind_components
 from tests.unit.behavior.reduction_fixtures import (
     OBSERVATION_CONFIG,
     OBSERVER,
@@ -51,70 +37,12 @@ from tests.unit.behavior.reduction_fixtures import (
     observation,
     record_id,
 )
+from tests.unit.kind_ids import kind_id
 
 OBS_A = observation(18, "人走到水池边打开水龙头")
 OBS_B = observation(40, "人打肥皂搓手")
 OBS_C = observation(62, "人冲水擦干")
 OBS_BLUR = observation(120, "画面模糊")
-
-
-class _ForbiddenProvider:
-    """kinds 词表命中快路径后模型绝不应被调用；被调用即失败。"""
-
-    provider_name = "fake"
-    model = "fake-1"
-    is_remote = False
-    capabilities = ProviderCapabilities(
-        async_completion=True,
-        streaming=False,
-        tools=False,
-        structured_output_mode="json_schema",
-        reasoning=False,
-    )
-
-    def prepare(self, request: ChatRequest, *, stream: bool) -> PreparedChatRequest:
-        return PreparedChatRequest(
-            request=request,
-            body=b"{}",
-            model_visible_body=b"{}",
-            reserved_output_tokens=1_000,
-            stream=stream,
-        )
-
-    async def complete_async(self, request: PreparedChatRequest) -> Any:
-        raise AssertionError("reduction must not call the model for a known kind name")
-
-    def complete(self, request: PreparedChatRequest) -> Any:  # pragma: no cover
-        raise NotImplementedError
-
-    def stream(self, request: PreparedChatRequest) -> Iterator[Any]:  # pragma: no cover
-        raise NotImplementedError
-
-    def stream_async(self, request: PreparedChatRequest) -> AsyncIterator[Any]:  # pragma: no cover
-        raise NotImplementedError
-
-    def health_check(self) -> Mapping[str, object]:  # pragma: no cover
-        return {}
-
-    async def aclose(self) -> None:  # pragma: no cover
-        return None
-
-
-def build_resolver() -> BehaviorKindResolver:
-    model_config = ChatModelConfig(
-        route=ProviderConfig(
-            provider="fake",
-            adapter="openai_compatible_chat",
-            model="fake-1",
-            base_url="https://example.invalid",
-            credential_ref="FAKE_KEY",
-        ),
-        context_window_tokens=128_000,
-        max_output_tokens=8_000,
-        structured_output_mode="json_schema",
-    )
-    client = StructuredChatClient(ChatClient(model_config, _ForbiddenProvider()), validation_retries=1)
-    return BehaviorKindResolver(client)
 
 
 class Harness:
@@ -131,20 +59,21 @@ class Harness:
         self.judgements = BehaviorJudgementStore(tmp_path / "judgements")
         self.receipts = BehaviorFusionReceiptStore(tmp_path / "receipts")
         self.tree = BehaviorTree(tmp_path / "tree")
-        # kinds 已并入地址空间：词表就在树根（behavior://kinds.md），与树共存
-        self.kind_store = BehaviorKindStore(tmp_path / "tree")
-        if known_kinds:
-            registry = BehaviorKindRegistry({name: () for name in known_kinds})
-            self.kind_store.replace(registry, expected_revision=0, timestamp=self.now)
+        # 词表的文件就在树根，与树共存；known_kinds 写成第 1 版（会话 lane，按顺序编号 s-k0001…）
+        self.lock_store = ProcessLocalLockStore()
+        self.provider = NameMatchingProvider()
+        self.kinds, self.vocabulary_jobs, self.kind_store = kind_components(
+            self.tree, self.lock_store, names=known_kinds, provider=self.provider
+        )
         self.ledger = BehaviorReductionLedger(tmp_path / "reduction")
         self.runner = BehaviorReductionRunner(
             judgements=self.judgements,
             observations=self.observations,
             receipts=self.receipts,
             tree=self.tree,
-            lock_store=ProcessLocalLockStore(),
-            kind_store=self.kind_store,
-            kind_resolver=build_resolver(),
+            lock_store=self.lock_store,
+            kinds=self.kinds,
+            vocabulary_jobs=self.vocabulary_jobs,
             ledger=self.ledger,
             semantic_refresher=semantic_refresher,
             clock=lambda: self.now,
@@ -160,9 +89,7 @@ class Harness:
         envelope = BehaviorObservationEnvelope.create(
             observer_id=OBSERVER,
             protocol="habitus_behavior_observation_v1",
-            batch=BehaviorObservationBatch(
-                observer_id=OBSERVER, observations=tuple(observations_batch)
-            ),
+            batch=BehaviorObservationBatch(observer_id=OBSERVER, observations=tuple(observations_batch)),
             delivery_id=canonical_digest(seed),
             recorded_at=at(600),
             config=OBSERVATION_CONFIG,
@@ -195,7 +122,7 @@ def seed_wash_chain(harness: Harness, source: str) -> None:
             evidence_ready_at=at(42),
             observation_ids=(OBS_A.observation_id, OBS_B.observation_id),
             source_refs=(source,),
-            goal="清洁双手",
+            goal="s-k0002",
             summary="在水池边洗手",
             status="ongoing",
             status_basis="observation_lost",
@@ -211,7 +138,7 @@ def seed_wash_chain(harness: Harness, source: str) -> None:
             evidence_ready_at=at(64),
             observation_ids=(OBS_C.observation_id,),
             source_refs=(source,),
-            goal="清洁双手",
+            goal="s-k0002",
             summary="冲水擦干结束",
             status="completed",
             status_basis="observed",
@@ -249,7 +176,7 @@ def test_full_pipeline_reduces_a_chain_and_a_gap_into_the_tree(tmp_path) -> None
     document = harness.tree.read(occurrences[0])
     assert document.fields["started_at"] == at(18).isoformat(timespec="microseconds")
     assert document.fields["started_at"].endswith("+08:00")
-    assert document.fields["kind_token"] == "洗手"
+    assert document.fields["kind_token"] == "s-k0001"  # known_kinds 的第一类 = 洗手
     assert document.fields["status"] == "completed"
     assert document.fields["summary"] == "在水池边洗手；冲水擦干结束"
     assert document.fields["onset_available_at"] == at(42).isoformat(timespec="microseconds")
@@ -515,8 +442,6 @@ def test_supersedes_view_lands_and_history_is_consumed(tmp_path) -> None:
     assert record_id("vague") in consumed  # 全史随链消费
 
 
-
-
 def test_a_link_to_a_published_gap_is_dropped_not_published(tmp_path) -> None:
     """指向已落盘 gap 节点的跨批链接必须作废——放行会在检查点之后被 writer 硬拒、永久卡死。"""
 
@@ -748,7 +673,7 @@ def test_a_link_target_skipped_after_naming_defers_the_source(tmp_path) -> None:
             evidence_ready_at=at(42),
             observation_ids=(OBS_A.observation_id, "f" * 64),
             source_refs=(source,),
-            goal="清洁双手",
+            goal="s-k0002",
             summary="basis 观测已不在存储",
             basis=(("引用了幽灵观测", ("f" * 64,)),),
         )
@@ -818,9 +743,7 @@ def test_failed_semantic_refresh_is_retried_from_the_pending_set(tmp_path) -> No
     assert second.replayed_documents == 0  # 没有检查点可重放；补刷来自待刷新集合
     from habitus.behavior.model import BehaviorDirectory, BehaviorLevel
 
-    assert harness.tree.layer_exists(
-        BehaviorDirectory.occurrences(2026, 8, 16), BehaviorLevel.OVERVIEW
-    )
+    assert harness.tree.layer_exists(BehaviorDirectory.occurrences(2026, 8, 16), BehaviorLevel.OVERVIEW)
     assert not (tmp_path / "reduction" / "refresh_pending.json").exists()
 
 
@@ -832,14 +755,16 @@ def test_run_once_works_with_the_production_sqlite_lock_store(tmp_path) -> None:
 
     lock_store = SQLiteLockStore(tmp_path / "locks.sqlite3")
     harness = Harness(tmp_path)
+    # 同一棵树上的词表已由 Harness 写好第 1 版；这里只换锁实现（词表的迁移与归约必须共用同一把锁库）。
+    kinds, jobs, _ = kind_components(harness.tree, lock_store, names=(), provider=harness.provider)
     harness.runner = BehaviorReductionRunner(
         judgements=harness.judgements,
         observations=harness.observations,
         receipts=harness.receipts,
         tree=harness.tree,
         lock_store=lock_store,
-        kind_store=harness.kind_store,
-        kind_resolver=build_resolver(),
+        kinds=kinds,
+        vocabulary_jobs=jobs,
         ledger=harness.ledger,
         clock=lambda: harness.now,
     )
@@ -850,117 +775,6 @@ def test_run_once_works_with_the_production_sqlite_lock_store(tmp_path) -> None:
 
     assert report.published_occurrences == 1
     assert len(harness.tree.list_addresses(BehaviorKind.OCCURRENCE)) == 1
-
-
-class _FullRegistryResolver(BehaviorKindResolver):
-    """词表已满：未知名字降级为原始名作 token 并留信号（与 resolver 的撞顶路径同形）。"""
-
-    async def resolve_batches(self, requests, registry, *, vectors=None):  # type: ignore[override]
-        from habitus.behavior.kinds.resolver import BehaviorKindBatchResolution
-
-        tokens = {item.name: registry.token_for(item.name) or item.name for item in requests}
-        signals = tuple(
-            f"kind_registry_full {item.name!r} kept as its own token"
-            for item in requests
-            if registry.token_for(item.name) is None
-        )
-        yield BehaviorKindBatchResolution(tokens, registry, vectors, (), 0, signals)
-
-
-def test_a_full_kind_registry_degrades_to_the_raw_name_instead_of_failing_the_sweep(tmp_path) -> None:
-    harness = Harness(tmp_path, known_kinds=())
-    harness.runner.kind_resolver = _FullRegistryResolver(build_resolver().client)
-    source = harness.deliver(OBS_A, OBS_B, OBS_C)
-    seed_wash_chain(harness, source)
-    report = asyncio.run(harness.runner.run_once())
-    assert report.published_occurrences == 1
-    document = harness.tree.read(harness.tree.list_addresses(BehaviorKind.OCCURRENCE)[0])
-    assert document.fields["kind_token"] == "洗手"  # 原始名暂作 token，事后可重打
-    assert any("kind_registry_full" in note for note in report.kind_signals)
-
-
-def test_reduction_records_hits_by_behaviour_day_and_expires_stale_kinds(tmp_path) -> None:
-    """命中账按行为日记；到期按数据时钟（本轮最新行为日）删，树上文档不动（BHV-KINDS-002）。"""
-
-    from datetime import timedelta
-
-    from habitus.behavior.kinds import BehaviorKindEntry
-
-    harness = Harness(tmp_path, known_kinds=())
-    behaviour_day = at(18).date()
-    stale = BehaviorKindEntry(token="卷账单", label="卷账单").with_hit(behaviour_day - timedelta(days=40))
-    recent = BehaviorKindEntry(token="打球", label="打球").with_hit(behaviour_day - timedelta(days=10))
-    harness.kind_store.replace(
-        BehaviorKindRegistry({"卷账单": stale, "打球": recent, "洗手": ()}),
-        expected_revision=0,
-        timestamp=harness.now,
-    )
-    source = harness.deliver(OBS_A, OBS_B, OBS_C)
-    seed_wash_chain(harness, source)
-    report = asyncio.run(harness.runner.run_once())
-    assert report.published_occurrences == 1
-    registry = harness.kind_store.read().registry
-    assert registry.entry_of("洗手").hit_days == (behaviour_day,)
-    assert "卷账单" not in registry.tokens  # 40 天没再命中 > 基础期 30 天
-    assert "打球" in registry.tokens  # 10 天前命中过，还在存活期内
-    assert any("kind_expired '卷账单'" in note for note in report.kind_signals)
-    assert not any(note.startswith("kind_") for note in report.dropped_edges)  # 词表信号单独列
-
-
-def test_kind_hits_are_recorded_at_publish_and_replay_is_idempotent(tmp_path) -> None:
-    """命中账在发布时记（与树上 occurrence 一一对应）；重放同一检查点不重复记。"""
-
-    class _KeepCheckpoint(type(Harness(tmp_path / "probe").runner)):  # type: ignore[misc]
-        def _clear_checkpoint(self, guard):  # noqa: ANN001 - 与父类签名一致
-            return None  # 假装"语义刷新前崩溃"，让下一轮重放同一检查点
-
-    harness = Harness(tmp_path)
-    harness.runner.__class__ = _KeepCheckpoint
-    source = harness.deliver(OBS_A, OBS_B, OBS_C)
-    seed_wash_chain(harness, source)
-    first = asyncio.run(harness.runner.run_once())
-    assert first.published_occurrences == 1
-    entry = harness.kind_store.read().registry.entry_of("洗手")
-    assert entry.hit_days == (at(18).date(),) and entry.hit_count == 1
-    second = asyncio.run(harness.runner.run_once())  # 重放检查点：树、账本、命中账都不变
-    assert second.replayed_documents >= 1 and second.published_occurrences == 0
-    entry = harness.kind_store.read().registry.entry_of("洗手")
-    assert entry.hit_days == (at(18).date(),) and entry.hit_count == 1
-
-
-def test_reduction_persists_kind_vectors_and_recovers_a_corrupt_sidecar(tmp_path) -> None:
-    """旁册随本轮写回；损坏时按空重建并留信号，不阻塞归约（BHV-KINDS-002）。"""
-
-    from habitus.behavior.kinds import BehaviorKindVectorStore
-    from tests.unit.behavior.test_kinds import FakeEmbedder
-
-    harness = Harness(tmp_path)
-    embedder = FakeEmbedder()
-    harness.runner.kind_resolver = BehaviorKindResolver(build_resolver().client, embedder=embedder)
-    harness.runner.kind_vectors = BehaviorKindVectorStore(
-        tmp_path / "tree", model="fake-embed", dimension=FakeEmbedder.DIMENSION
-    )
-    (tmp_path / "tree").mkdir(exist_ok=True)
-    (tmp_path / "tree" / "kinds.vectors.json").write_text("garbage", encoding="utf-8")
-    source = harness.deliver(OBS_A, OBS_B, OBS_C)
-    seed_wash_chain(harness, source)
-    report = asyncio.run(harness.runner.run_once())
-    assert report.published_occurrences == 1
-    assert any("kind_vectors_unreadable" in note for note in report.kind_signals)
-    assert harness.runner.kind_vectors.read().has("洗手")  # 已重写：词表里的 token 补了向量
-
-
-def test_reduction_without_chains_does_not_expire_anything(tmp_path) -> None:
-    from datetime import timedelta
-
-    from habitus.behavior.kinds import BehaviorKindEntry
-
-    harness = Harness(tmp_path, known_kinds=())
-    stale = BehaviorKindEntry(token="卷账单", label="卷账单").with_hit(at(18).date() - timedelta(days=400))
-    harness.kind_store.replace(BehaviorKindRegistry({"卷账单": stale}), expected_revision=0, timestamp=harness.now)
-    report = asyncio.run(harness.runner.run_once())
-    assert report.published_documents == 0
-    assert "卷账单" in harness.kind_store.read().registry.tokens  # 没有数据时钟就不判过期
 
 
 def test_tree_replace_only_allows_the_kind_token_to_change(tmp_path) -> None:
@@ -977,19 +791,25 @@ def test_tree_replace_only_allows_the_kind_token_to_change(tmp_path) -> None:
     bumped = dc_replace(published.metadata, revision=2)
     # 改 kind_token：允许
     ok = tree.document_codec.build(
-        published.kind, {**published.fields, "kind_token": "清洁双手"}, metadata=bumped, links=published.links
+        published.kind, {**published.fields, "kind_token": "s-k0002"}, metadata=bumped, links=published.links
     )
     tree.replace(ok)
-    assert tree.read(published.address).fields["kind_token"] == "清洁双手"
+    assert tree.read(published.address).fields["kind_token"] == "s-k0002"
     # 改别的字段：拒绝
     bad = tree.document_codec.build(
-        published.kind, {**published.fields, "kind_token": "清洁双手", "summary": "改了正文"}, metadata=dc_replace(bumped, revision=3), links=()
+        published.kind,
+        {**published.fields, "kind_token": "s-k0002", "summary": "改了正文"},
+        metadata=dc_replace(bumped, revision=3),
+        links=(),
     )
     with pytest.raises(BehaviorTreeConflictError, match="only change kind_token"):
         tree.replace(bad)
     # 修订号不连续：拒绝
     stale = tree.document_codec.build(
-        published.kind, {**published.fields, "kind_token": "洗手"}, metadata=published.metadata, links=published.links
+        published.kind,
+        {**published.fields, "kind_token": kind_id("洗手")},
+        metadata=published.metadata,
+        links=published.links,
     )
     with pytest.raises(BehaviorTreeConflictError, match="revision"):
         tree.replace(stale)
@@ -1002,81 +822,16 @@ def test_writer_restamp_is_idempotent_and_bumps_revision(tmp_path) -> None:
     tree = BehaviorTree(tmp_path / "tree")
     writer = BehaviorDocumentWriter(tree, ProcessLocalLockStore(), clock=lambda: local(23, 0))
     published = writer.publish(BehaviorKind.OCCURRENCE, occurrence_payload())
-    restamped = writer.restamp_kind_token(published.address, "清洁双手")
-    assert restamped.fields["kind_token"] == "清洁双手" and restamped.metadata.revision == 2
+    restamped = writer.restamp_kind_token(published.address, "s-k0002")
+    assert restamped.fields["kind_token"] == "s-k0002" and restamped.metadata.revision == 2
     assert restamped.fields["name"] == published.fields["name"] and restamped.links == published.links
-    again = writer.restamp_kind_token(published.address, "清洁双手")  # 同值：不动
+    again = writer.restamp_kind_token(published.address, "s-k0002")  # 同值：不动
     assert again.metadata.revision == 2
     assert tree.read(published.address) == restamped
 
 
-def test_merge_kinds_folds_the_vocabulary_and_restamps_the_tree(tmp_path) -> None:
-    """合并道的落地动作：词表 merged + 树上旧 token 全部重打；预测源随后读到同一个 token。"""
-
-    from habitus.behavior.kinds import BehaviorKindEntry
-    from habitus.prediction.source import read as read_snapshot
-
-    harness = Harness(tmp_path, known_kinds=())
-    harness.kind_store.replace(
-        BehaviorKindRegistry(
-            {
-                "洗手": BehaviorKindEntry(token="洗手", label="洗手"),
-                "清洁双手": BehaviorKindEntry(token="清洁双手", label="清洁双手"),
-            }
-        ),
-        expected_revision=0,
-        timestamp=harness.now,
-    )
-    source = harness.deliver(OBS_A, OBS_B, OBS_C)
-    seed_wash_chain(harness, source)  # 链头名「洗手」→ token 洗手
-    assert asyncio.run(harness.runner.run_once()).published_occurrences == 1
-    report = asyncio.run(harness.runner.merge_kinds("洗手", "清洁双手"))
-    assert report.restamped == 1 and report.days == (at(18).date(),)
-    assert any("kind_merged" in note for note in report.signals)
-    registry = harness.kind_store.read().registry
-    assert registry.tokens == ("清洁双手",) and registry.token_for("洗手") == "清洁双手"
-    assert registry.entry_of("清洁双手").hit_days == (at(18).date(),)  # 账并过去了
-    document = harness.tree.read(harness.tree.list_addresses(BehaviorKind.OCCURRENCE)[0])
-    assert document.fields["kind_token"] == "清洁双手" and document.fields["name"] == "洗手"
-    assert document.metadata.revision == 2
-    assert {item.action for item in read_snapshot(harness.tree).actions} == {"清洁双手"}
-    # 重跑幂等：词表里已无 source、树上已无旧 token
-    again = asyncio.run(harness.runner.merge_kinds("洗手", "清洁双手"))
-    assert again.restamped == 0
-
-
-# ── 生命周期闭合（三方审计根因 1–4）────────────────────────────────────────────────
-
-
-def test_kind_hits_survive_a_crash_between_ledger_append_and_hit_recording(tmp_path) -> None:
-    """账本已落、命中未记时崩溃：重放后命中仍记且只记一次（幂等键是检查点，不是账本条目）。"""
-
-    class _CrashOnce(type(Harness(tmp_path / "probe").runner)):  # type: ignore[misc]
-        crashed = False
-
-        def _record_kind_hits(self, hits, staged_at, now):  # noqa: ANN001
-            if not type(self).crashed:
-                type(self).crashed = True
-                raise RuntimeError("crash after ledger, before hits")
-            return super()._record_kind_hits(hits, staged_at, now)
-
-    harness = Harness(tmp_path)
-    harness.runner.__class__ = _CrashOnce
-    source = harness.deliver(OBS_A, OBS_B, OBS_C)
-    seed_wash_chain(harness, source)
-    with pytest.raises(RuntimeError, match="crash after ledger"):
-        asyncio.run(harness.runner.run_once())
-    assert (tmp_path / "reduction" / "staged.json").exists()  # 检查点还在，下轮重放
-    report = asyncio.run(harness.runner.run_once())
-    assert report.replayed_documents == 1
-    entry = harness.kind_store.read().registry.entry_of("洗手")
-    assert entry.hit_days == (at(18).date(),) and entry.hit_count == 1
-    assert asyncio.run(harness.runner.run_once()).replayed_documents == 0
-    assert harness.kind_store.read().registry.entry_of("洗手").hit_count == 1  # 再跑不重记
-
-
-def test_merge_and_rebuild_refuse_while_a_checkpoint_is_pending(tmp_path) -> None:
-    """运维动作不许压在悬挂的检查点上（重打 token 后重放会撞永久冲突）。"""
+def test_vocabulary_jobs_refuse_while_a_checkpoint_is_pending(tmp_path) -> None:
+    """词表整理活不许压在悬挂的检查点上（重打 token 后重放会撞永久冲突）。"""
 
     import json as _json
 
@@ -1087,13 +842,13 @@ def test_merge_and_rebuild_refuse_while_a_checkpoint_is_pending(tmp_path) -> Non
     staged = tmp_path / "reduction" / "staged.json"
     staged.write_text(_json.dumps({"staged_at": harness.now.isoformat(), "documents": []}), encoding="utf-8")
     with pytest.raises(BehaviorReductionBusyError, match="checkpoint is pending"):
-        asyncio.run(harness.runner.merge_kinds("洗手", "清洁双手"))
+        asyncio.run(harness.runner.grow_vocabulary())
     with pytest.raises(BehaviorReductionBusyError, match="checkpoint is pending"):
-        asyncio.run(harness.runner.rebuild_kinds())
+        asyncio.run(harness.runner.revise_vocabulary())
     # 损坏的检查点：三条路都堵死是死锁，要给出"手动删除"的指引而不是"先跑 sweep"
     staged.write_text("garbage", encoding="utf-8")
     with pytest.raises(BehaviorReductionError, match="delete it manually"):
-        asyncio.run(harness.runner.merge_kinds("洗手", "清洁双手"))
+        asyncio.run(harness.runner.revise_vocabulary())
 
 
 def test_an_address_already_on_the_tree_is_disambiguated_without_a_ledger_entry(tmp_path) -> None:
@@ -1115,37 +870,7 @@ def test_an_address_already_on_the_tree_is_disambiguated_without_a_ledger_entry(
     names = sorted(document.fields["name"] for document in harness.tree.iter_documents(BehaviorKind.OCCURRENCE))
     assert names == ["洗手", "洗手-2"]
     assert not (tmp_path / "reduction" / "staged.json").exists()
-    # 消歧记录 = 已知重复：命中账不计（与 rebuild、预测树同一口径）
-    assert harness.kind_store.read().registry.entry_of("洗手").hit_count == 0
-
-
-def test_kind_hits_use_the_checkpoint_content_as_the_idempotence_key(tmp_path) -> None:
-    """冻结时钟下两轮 sweep 的 staged_at 相同：命中账仍按检查点内容各记一次。"""
-
-    harness = Harness(tmp_path)
-    source = harness.deliver(OBS_A, OBS_B, OBS_C)
-    seed_wash_chain(harness, source)
-    assert asyncio.run(harness.runner.run_once()).published_occurrences == 1
-    obs_d, obs_e = observation(70, "第二次走到水池边"), observation(80, "再次搓手")
-    second = harness.deliver(obs_d, obs_e, seed="second")
-    harness.judgements.put_payload(
-        judgement_record(
-            "second-head",
-            behavior="洗手",
-            started_at=at(70),
-            last_observed_at=at(80),
-            evidence_ready_at=at(82),
-            observation_ids=(obs_d.observation_id, obs_e.observation_id),
-            source_refs=(second,),
-            goal="清洁双手",
-            summary="第二次洗手",
-            status="completed",
-            status_basis="observed",
-            basis=(),
-        )
-    )
-    assert asyncio.run(harness.runner.run_once()).published_occurrences == 1
-    assert harness.kind_store.read().registry.entry_of("洗手").hit_count == 2
+    # 消歧记录 = 已知重复：词表整理与预测树都不计（同一口径）
 
 
 def test_coverage_survives_the_window_while_its_delivery_is_still_stored(tmp_path) -> None:
@@ -1186,23 +911,6 @@ def test_covered_deliveries_without_judgements_are_released(tmp_path) -> None:
     assert harness.observations.read(orphan) is None
 
 
-def test_data_clock_is_clamped_to_the_wall_clock(tmp_path) -> None:
-    """一条 2099 的坏时间戳不能把词表删空：过期时钟钳在墙钟当日之内。"""
-
-    from datetime import date, timedelta
-
-    from habitus.behavior.kinds import BehaviorKindEntry
-
-    harness = Harness(tmp_path, known_kinds=())
-    recent = BehaviorKindEntry(token="打球", label="打球").with_hit(harness.now.date() - timedelta(days=10))
-    harness.kind_store.replace(BehaviorKindRegistry({"打球": recent, "洗手": ()}), expected_revision=0, timestamp=harness.now)
-    harness.runner._kind_signals = []
-    harness.runner._record_kind_hits([("洗手", date(2099, 1, 1))], "cp-1", harness.now)
-    registry = harness.kind_store.read().registry
-    assert "打球" in registry.tokens  # 若按 2099 判，它早该被删
-    assert registry.entry_of("洗手").hit_days == (date(2099, 1, 1),)
-
-
 def test_reduction_recovers_after_downtime_longer_than_the_coverage_window(tmp_path) -> None:
     """归约停机超过覆盖窗口后照常开工：覆盖记录留得下也**读得回**，前沿不被钉死、交付照常释放。
 
@@ -1240,3 +948,64 @@ def test_a_published_delivery_is_released_and_never_re_enqueued_after_the_window
 
     assert again.published_occurrences == 0 and again.chains_pending == 0
     assert harness.runner._frontier_cutoff() is None
+
+
+# ── 词表：白天归类的三种结局落到树与待定池 ───────────────────────────────────────────
+
+
+def test_an_unknown_behaviour_is_published_as_pending_and_enters_the_pool_once(tmp_path) -> None:
+    harness = Harness(tmp_path, known_kinds=("擦桌子",))
+    seed_wash_chain(harness, harness.deliver(OBS_A, OBS_B, OBS_C))
+    report = asyncio.run(harness.runner.run_once())
+    document = harness.tree.read(harness.tree.list_addresses(BehaviorKind.OCCURRENCE)[0])
+    assert document.fields["kind_token"] == "s-待定"
+    pool = harness.kind_store.read_pending().pool
+    (entry,) = pool.entries.values()
+    assert entry.occurrence == str(BehaviorURI.from_address(document.address)) and entry.proposed == "洗手"
+    assert "在水池边洗手" in entry.content and "打开水龙头打肥皂搓手" in entry.content  # 整条链的内容
+    assert any(note.startswith("kind_pending_added 1") for note in report.kind_signals)
+    assert harness.kinds.record_pending(list(pool.entries.values())).added == 0  # 重放同一批不多算
+
+
+def test_a_non_event_is_published_with_the_marker_and_a_signal_for_fusion(tmp_path) -> None:
+    harness = Harness(tmp_path)
+    harness.provider.not_events = frozenset({"洗手"})
+    seed_wash_chain(harness, harness.deliver(OBS_A, OBS_B, OBS_C))
+    report = asyncio.run(harness.runner.run_once())
+    document = harness.tree.read(harness.tree.list_addresses(BehaviorKind.OCCURRENCE)[0])
+    assert document.fields["kind_token"] == "s-非事件"
+    assert any(note.startswith("kind_not_event") for note in report.kind_signals)
+    assert harness.kind_store.read_pending().pool.entries == {}
+
+
+def test_the_first_sweep_on_an_empty_vocabulary_writes_no_classes(tmp_path) -> None:
+    """词表从空开始（裁定 29：没有预置清单）：第一次归约不写任何类；记录照样交白天归类判是不是一件事、给提议名，进待定池，
+    类等每晚新增按复现从池里长出来。"""
+
+    harness = Harness(tmp_path, known_kinds=())
+    seed_wash_chain(harness, harness.deliver(OBS_A, OBS_B, OBS_C))
+    asyncio.run(harness.runner.run_once())
+    assert harness.kind_store.read().version == 0 and not (tmp_path / "tree" / "kinds.md").exists()
+    assert harness.provider.calls == 1 and "还没有类" in harness.provider.prompts[0]
+    (entry,) = harness.kind_store.read_pending().pool.entries.values()
+    assert entry.proposed == "洗手"
+    assert harness.kind_store.read_jobs().nightly_at is not None
+
+
+def test_a_replayed_checkpoint_is_cleared_before_the_vocabulary_jobs_run(tmp_path) -> None:
+    """重放落树之后立刻清检查点：之后的词表整理活可能重打这些条目，检查点留着就会让下一轮重放永久冲突。"""
+
+    harness = Harness(tmp_path)
+    (tmp_path / "reduction").mkdir(exist_ok=True)
+    checkpoint = tmp_path / "reduction" / "staged.json"
+    checkpoint.write_text(json.dumps({"staged_at": harness.now.isoformat(), "documents": []}), encoding="utf-8")
+    seen: list[bool] = []
+    original = harness.vocabulary_jobs.run_due
+
+    async def watching(now, *, checkpoint):  # type: ignore[no-untyped-def]
+        seen.append((tmp_path / "reduction" / "staged.json").exists())
+        return await original(now, checkpoint=checkpoint)
+
+    harness.vocabulary_jobs.run_due = watching  # type: ignore[method-assign]
+    asyncio.run(harness.runner.run_once())
+    assert seen == [False]

@@ -66,12 +66,8 @@ class MemoryMutationPlanner:
                 action = MemoryMutationAction.NOOP
             confirms_intention = match.candidate.confirmed is True
             if match.candidate.kind is MemoryKind.INTENTION:
-                if (
-                    not confirms_intention
-                    and (
-                        action is MemoryMutationAction.CREATE
-                        or match.candidate.page_id not in preservation_targets
-                    )
+                if not confirms_intention and (
+                    action is MemoryMutationAction.CREATE or match.candidate.page_id not in preservation_targets
                 ):
                     raise MemoryMutationPlanningError(
                         "unconfirmed Intention candidate may only preserve an existing same_memory merge target"

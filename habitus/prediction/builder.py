@@ -4,7 +4,7 @@
 它自己不碰 IO（读取在 ``source``、发布在 ``store``），所以夜批的正确性可以在纯函数层穷举验证。
 
 **每夜整棵重建，不做增量**：重建成本低（单人一年万条 occurrence 毫秒级），而增量会让口径漂移
-——kinds 词表变了就要用新口径重数历史。副作用是树的数值不保证跨夜连续，上层不得假设
+——词表变了就要用新口径重数历史。副作用是树的数值不保证跨夜连续，上层不得假设
 "昨天 0.8 今天还是 0.8"（见 ``TODO(PRED-TREE-001)``）。
 """
 
@@ -30,9 +30,7 @@ def config_digest(config: PredictionTreeConfig) -> str:
     保留代数用完，而"一次查询钉住一代"防的正是这种混读。
     """
 
-    return canonical_digest(
-        {**config.estimation_parameters(), **nodes.estimation_constants()}
-    )
+    return canonical_digest({**config.estimation_parameters(), **nodes.estimation_constants()})
 
 
 def build(
@@ -52,19 +50,17 @@ def build(
         raise PredictionTreeError("snapshot must be a BehaviorSnapshot")
     if not isinstance(built_at, datetime) or built_at.utcoffset() is None:
         raise PredictionTreeError("built_at must be a timezone-aware datetime")
+    if snapshot.cutoff is not None and reference >= snapshot.cutoff:
+        # 基准日落在截止日或之后：没封口的日子会被当成"看了一整天、什么都没做"进分母。
+        raise PredictionTreeError("reference must be a sealed day, before the snapshot's cutoff")
 
     # 复发间隔要先算：趋势的两个证据窗按行为**自身的周期**缩放，而周期就是复发的中位间隔。
     # 它只依赖行为流本身、不依赖节点账本，所以提前算没有代价。
     recurrences = recurrence.derive(snapshot.actions, config=config, reference=reference)
-    periods = {
-        action: statistics.intervals.p50 / _SECONDS_PER_DAY
-        for action, statistics in recurrences.items()
-    }
-    # **空白账在这里消解一次，然后同一份交给全部消费者。** 曝光与转移删失问的是不同的问题
-    # （"那一刻在不在看" vs "这段区间干不干净"），但它们必须从**同一份**空白出发——否则同一条
-    # 记录会被读成两回事，而每个新接进来的消费者都要重新面对同一道选择题。规则见
-    # ``nodes.reconcile_gaps``；本函数是唯一的分发点，所以消解只能放在这里。
-    gaps = nodes.reconcile_gaps(snapshot.actions, snapshot.gaps)
+    periods = {action: statistics.intervals.p50 / _SECONDS_PER_DAY for action, statistics in recurrences.items()}
+    # 空白账在事件序列里已经消解过一次（``series.model.disproves``）：曝光与转移删失问的是不同的问题
+    # （"那一刻在不在看" vs "这段区间干不干净"），但它们必须从同一份空白出发，语义树也读同一份。
+    gaps = snapshot.gaps
     ledger = nodes.accumulate(snapshot.actions, gaps, config=config, reference=reference)
     trends = nodes.pooled_trends(
         snapshot.actions,
@@ -73,18 +69,16 @@ def build(
         reference=reference,
         periods=periods,
     )
-    completion = nodes.completion_curves(
-        snapshot.actions, gaps, config=config, reference=reference
-    )
-    derived = nodes.derive_all(
-        ledger, config=config, trends=trends, completion=completion
-    )
+    completion = nodes.completion_curves(snapshot.actions, gaps, config=config, reference=reference)
+    derived = nodes.derive_all(ledger, config=config, trends=trends, completion=completion)
     edge_ledger = edges.pair(
         snapshot.actions,
         gaps,
         snapshot.concurrent,
+        unnamed=snapshot.unnamed,
         config=config,
         reference=reference,
+        cutoff=snapshot.cutoff,
     )
     return PredictionTree(
         built_at=built_at.astimezone(UTC),

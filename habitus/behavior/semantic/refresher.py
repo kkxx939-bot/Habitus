@@ -62,9 +62,7 @@ class BehaviorSemanticRefresher:
         self.generator = generator
         self.config = resolved
 
-    async def refresh_days(
-        self, days: Iterable[date]
-    ) -> tuple[BehaviorSemanticRefreshResult, ...]:
+    async def refresh_days(self, days: Iterable[date]) -> tuple[BehaviorSemanticRefreshResult, ...]:
         """刷新受影响的日目录及其月/年祖先；自下而上，同一目录一轮只刷一次。"""
 
         affected = sorted(set(days))
@@ -85,9 +83,7 @@ class BehaviorSemanticRefresher:
             results.append(
                 await self._refresh_rollup(
                     BehaviorDirectory.occurrences(year, month),
-                    tuple(
-                        BehaviorDirectory.occurrences(d.year, d.month, d.day) for d in occ_days
-                    ),
+                    tuple(BehaviorDirectory.occurrences(d.year, d.month, d.day) for d in occ_days),
                 )
             )
             results.append(
@@ -127,10 +123,7 @@ class BehaviorSemanticRefresher:
         # 当日叙述的输入 = 行为 + 同日空白，按开始瞬时排成一条时间轴（叙述要按时间讲）。
         timeline = sorted(
             (
-                *(
-                    (address, BehaviorSemanticEntryKind.OCCURRENCE)
-                    for address in occurrences.get(day, ())
-                ),
+                *((address, BehaviorSemanticEntryKind.OCCURRENCE) for address in occurrences.get(day, ())),
                 *((address, BehaviorSemanticEntryKind.GAP) for address in gaps.get(day, ())),
             ),
             key=lambda pair: (_instant(pair[0].started_at), pair[0].identity_name),
@@ -138,10 +131,7 @@ class BehaviorSemanticRefresher:
         collected: list[BehaviorSemanticEntry] = []
         for address, kind in timeline:
             document = self.tree.read(address)
-            if (
-                kind is BehaviorSemanticEntryKind.OCCURRENCE
-                and document.fields.get("original_name") is not None
-            ):
+            if kind is BehaviorSemanticEntryKind.OCCURRENCE and document.fields.get("original_name") is not None:
                 # 撞车消歧的重复记录（original_name 非空 = 已知重复）：死规则②裁定语义层
                 # 一律不计入——机械认标记跳过，不让同一行为在当日叙述里出现两遍。
                 continue
@@ -182,9 +172,7 @@ class BehaviorSemanticRefresher:
     ) -> BehaviorSemanticRefreshResult:
         snapshot = BehaviorDirectorySnapshot(directory=directory, entries=entries)
         if self._source_digest(directory) == snapshot.digest:
-            return BehaviorSemanticRefreshResult(
-                directory, BehaviorSemanticRefreshStatus.UNCHANGED, snapshot.digest
-            )
+            return BehaviorSemanticRefreshResult(directory, BehaviorSemanticRefreshStatus.UNCHANGED, snapshot.digest)
         overview = await self.generator.generate(snapshot)
         if not isinstance(overview, str) or not overview.strip():
             raise BehaviorSemanticRefreshError("behavior overview generator returned empty text")
@@ -192,9 +180,7 @@ class BehaviorSemanticRefresher:
 
     # ── gaps 层级：确定性枚举，零模型调用 ─────────────────────────────────────────────
 
-    def _refresh_gap_day(
-        self, day: date, gaps: dict[date, list[BehaviorAddress]]
-    ) -> BehaviorSemanticRefreshResult:
+    def _refresh_gap_day(self, day: date, gaps: dict[date, list[BehaviorAddress]]) -> BehaviorSemanticRefreshResult:
         directory = BehaviorDirectory.gaps(day.year, day.month, day.day)
         if not self.tree.directory_exists(directory):
             return BehaviorSemanticRefreshResult(directory, BehaviorSemanticRefreshStatus.MISSING)
@@ -208,11 +194,7 @@ class BehaviorSemanticRefresher:
         for address in day_gaps:
             fields = self.tree.read(address).fields
             lines.append(f"- {fields['started_at']} — {fields['ended_at']}（{address.name}）")
-        overview = (
-            f"# {day.isoformat()} 观测空白\n\n本日记录 {len(lines)} 段观测空白：\n\n"
-            + "\n".join(lines)
-            + "\n"
-        )
+        overview = f"# {day.isoformat()} 观测空白\n\n本日记录 {len(lines)} 段观测空白：\n\n" + "\n".join(lines) + "\n"
         return self._publish_deterministic(directory, overview)
 
     def _refresh_gap_rollup(
@@ -231,31 +213,21 @@ class BehaviorSemanticRefresher:
         body = "\n".join(f"- {name}：{abstract.strip()}" for name, abstract in rows)
         return self._publish_deterministic(directory, f"# {title} 观测空白\n\n{body}\n")
 
-    def _publish_deterministic(
-        self, directory: BehaviorDirectory, overview: str
-    ) -> BehaviorSemanticRefreshResult:
+    def _publish_deterministic(self, directory: BehaviorDirectory, overview: str) -> BehaviorSemanticRefreshResult:
         digest = canonical_digest({"overview": overview})
         if self._source_digest(directory) == digest:
-            return BehaviorSemanticRefreshResult(
-                directory, BehaviorSemanticRefreshStatus.UNCHANGED, digest
-            )
+            return BehaviorSemanticRefreshResult(directory, BehaviorSemanticRefreshStatus.UNCHANGED, digest)
         return self._write(directory, overview, digest)
 
     # ── 机械件 ───────────────────────────────────────────────────────────────────────
 
-    def _write(
-        self, directory: BehaviorDirectory, overview: str, digest: str
-    ) -> BehaviorSemanticRefreshResult:
+    def _write(self, directory: BehaviorDirectory, overview: str, digest: str) -> BehaviorSemanticRefreshResult:
         normalized = overview.strip() + "\n"
         if len(normalized) > self.config.max_overview_chars:
             raise BehaviorSemanticRefreshError("behavior overview exceeds its configured bound")
         stamped = f"{normalized}\n<!-- habitus-semantic-source: {digest} -->\n"
-        self.tree.write_layers(
-            directory, abstract=self._abstract_from_overview(normalized), overview=stamped
-        )
-        return BehaviorSemanticRefreshResult(
-            directory, BehaviorSemanticRefreshStatus.WRITTEN, digest
-        )
+        self.tree.write_layers(directory, abstract=self._abstract_from_overview(normalized), overview=stamped)
+        return BehaviorSemanticRefreshResult(directory, BehaviorSemanticRefreshStatus.WRITTEN, digest)
 
     def _source_digest(self, directory: BehaviorDirectory) -> str | None:
         """读上次写入的来源 digest：**只认最后一个非空行**。
@@ -267,9 +239,7 @@ class BehaviorSemanticRefresher:
 
         if not self.tree.layer_exists(directory, BehaviorLevel.OVERVIEW):
             return None
-        for line in reversed(
-            self.tree.read_layer(directory, BehaviorLevel.OVERVIEW).splitlines()
-        ):
+        for line in reversed(self.tree.read_layer(directory, BehaviorLevel.OVERVIEW).splitlines()):
             stripped = line.strip()
             if not stripped:
                 continue

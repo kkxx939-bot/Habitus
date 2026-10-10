@@ -66,9 +66,7 @@ class AdapterCatalog:
         self.vector_stores.register_adapter(
             adapter,
             builder,
-            requires_cross_process_publication_fencing=(
-                requires_cross_process_publication_fencing
-            ),
+            requires_cross_process_publication_fencing=(requires_cross_process_publication_fencing),
         )
         self.setup.register_adapter(product)
         for profile in profiles:
@@ -84,9 +82,7 @@ class AdapterCatalog:
             else:
                 registered = self.providers.registered_adapters(capability)
             if adapter not in registered:
-                raise ValueError(
-                    f"runtime adapter is not registered: {capability}/{adapter}"
-                )
+                raise ValueError(f"runtime adapter is not registered: {capability}/{adapter}")
 
     def assert_consistent(self) -> None:
         for capability in ("chat", "embedding", "rerank"):

@@ -23,7 +23,7 @@ _MAX_SEMANTIC_NAME_UTF8_BYTES = _MAX_IDENTITY_NAME_UTF8_BYTES - _IDENTITY_SUFFIX
 # 空间——否则贴着预算上限的合法判断名，一旦触发消歧就会在归约期撑爆地址身份、卡死整条队列。
 MAX_BEHAVIOR_NAME_UTF8_BYTES = _MAX_SEMANTIC_NAME_UTF8_BYTES - 8
 
-# 树根的单文件词表节点（behavior://kinds.md，性质同 memory 树 profile.md 单文件直读）。
+# 基础词表的清单视图放在树根（behavior://kinds.md）；它由 ``behavior/kinds`` 从变更日志生成，树只给它一个地址。
 # 地址叶名不可能与它撞车：semantic_name 拒绝 .md 后缀，gap 叶名是受控枚举。
 KINDS_REGISTRY_FILENAME = "kinds.md"
 
@@ -135,7 +135,9 @@ def behavior_local_timestamp(value: object, field_name: str) -> datetime:
     # 不是"用户住在零时区"，而是上游把时间折成了 UTC 的事故信号（canonicalize 折 UTC 的坑真实
     # 踩过）——放进来会把东八区凌晨的行为错到前一天，硬拒让事故当场现形。
     if not offset:
-        raise ValueError(f"{field_name} must carry a non-zero local UTC offset (a +00:00 stamp here means something upstream folded to UTC)")
+        raise ValueError(
+            f"{field_name} must carry a non-zero local UTC offset (a +00:00 stamp here means something upstream folded to UTC)"
+        )
     return value
 
 
@@ -219,8 +221,8 @@ def is_ascii_digits(value: object) -> bool:
 # TODO(BHV-TREE-REBUILD-001): 行为树按已定稿的新节点设计整体重建；本 TODO 是唯一规格来源。
 # 【状态】树核心（本文件/uri/schema 五件套/两份 yaml/document/writer/kinds）已落地并经三路评审
 # 修正；归约写入层已落地于 ``behavior/reduction/``（五条死规则+staged 检查点+封口扫描+消费账本；
-# 判重守卫落融合校验（fusion_v2）、没读懂判断入库（fusion_v3））；kinds 已并入地址空间
-# （behavior://kinds.md，树根单文件节点）；L0/L1 生成器已落地于 ``behavior/semantic/``
+# 判重守卫落融合校验（fusion_v2）、没读懂判断入库（fusion_v3））；类编号来自全局基础词表
+# （``behavior/kinds``，文件放在树根）；L0/L1 生成器已落地于 ``behavior/semantic/``
 # （日叙述并入同日空白、月/年上卷、digest 短路；结构落地，提示词调优子项遗留——见 generator.py）；
 # Runtime 组合根接线已完成（BHV-RUNTIME-001 关闭：Config.behavior 标量组可选启用、
 # Runtime/behavior.py 组装 + 融合/归约两个常驻 Worker + 观测投递正门 + 健康面，端到端接缝
@@ -228,7 +230,7 @@ def is_ascii_digits(value: object) -> bool:
 # 剩余缺口：① 观测投递的 HTTP 端点未做——云侧行为 agent 够不着进程内方法，随上游契约接入时
 # 与认证/协议一起定（正门已在 ``Runtime.deliver_behavior_observations``）；② BHV-FUSION-003
 # 只闭合了窗口注入一半，容量类配置随 BHV-LIFECYCLE-001 同批；③ 各处点名的实测调优
-# （融合/kinds/语义三处提示词）与生命周期欠账。
+# （融合/词表/语义三处提示词）与生命周期欠账。
 # 【裁定】episodes 零占位维持（用户确认，见下方 BHV-EPISODE-002 的新定位）；links 归信封层
 # （用户确认，沿 memory 树先例）；basis 步骤时间窗校验删除（用户确认，见 validators.py）。
 # 与用户数十轮讨论逐条裁定，吸收并关闭旧 TODO(BHV-TREE-TIMEBASE-001)（其地址时间基问题由下述
@@ -251,9 +253,9 @@ def is_ascii_digits(value: object) -> bool:
 #       occurrences/YYYY/MM/DD/{原始名}--{ts}.md   行为（add-only，双面）
 #       gaps/       YYYY/MM/DD/{类型}--{ts}.md     观测空白（add-only；类型=没读懂|未观测）
 #       episodes/   （代码零占位，用户裁定）        预测闭环成熟后再设计（BHV-EPISODE-002）
-#       kinds.md                                    类型词表（已并入本地址空间：树根单文件节点，
-#                                                   URI behavior://kinds.md（REGISTRY 节点类型）；
-#                                                   性质同 memory profile.md 单文件直读）
+#       kinds.md                                    基础词表的清单视图（URI behavior://kinds.md，REGISTRY
+#                                                   节点类型）；真源是同目录的 kinds.changes.jsonl 变更日志，
+#                                                   读写只经 ``behavior/kinds``，树本身不认识词表
 #     各级日期目录带 .abstract.md/.overview.md（L0/L1 由 behavior/semantic/ 生成与刷新；调优
 #     子项见 generator.py 的 TODO(BHV-SEMANTIC-004·调优)）。
 # - 目录归一：旧 behaviors/events + behaviors/outcomes + episodes 三处 → 上述形状；BehaviorKind
@@ -273,8 +275,9 @@ def is_ascii_digits(value: object) -> bool:
 #   而地址不动）+ started_at（本地+偏移）+ utc_offset_minutes（显式成分，自校验 occurred_on ==
 #   started_at 的本地日；canonicalize 折 UTC 的旧坑由"序列化一律保留偏移的字符串"挡住）。
 # - 数字面（时间预测树夜批读；机器类型白名单、全部必填）：
-#     kind_token         归一 token ← kinds 词表（写入层 LLM 复用/新建；融合层不定身份——提示词
-#                        空间实测极敏感、词表进 FUSION_VERSION 会天天漂、全局状态不进流式判断层）
+#     kind_token         基础词表的类编号（s-k0007 / p-k0003）或占位标记（s-待定 / s-非事件）；schema 只收
+#                        这两种形状（裁定 19）。归约发布前由白天归类给出，之后只能由词表迁移改写
+#                        （``writer.restamp_kind_token``）；不渲染进正文——它是统计用的机器字段
 #     status             ongoing|completed|interrupted|abandoned  ← 链尾判断逐字，零发明
 #     status_basis       observed|inferred|observation_lost       ← 同上；interrupted 与
 #                        observation_lost 之分是删失纪律的根
@@ -296,7 +299,7 @@ def is_ascii_digits(value: object) -> bool:
 #   vocabulary.py 的 EVENT_STATUSES 等任务态词表随之替换为融合层四值/三值。
 # - schema 机制小改：BehaviorFieldRole 加 NUMERIC/SEMANTIC（CONTENT 随 episodes 退出，零占位）；
 #   numeric 角色强制机器类型白名单+必填；system 不渲染；renderer 保持手写但加守卫测试
-#   "每个非 system 字段必须出现在渲染结果里"。
+#   "每个非 system 字段必须出现在渲染结果里"（``kind_token`` 例外：编号不进正文，裁定 19）。
 #
 # ── 写入层（归约；零发明）────────────────────────────────────────────────────────────────
 # - 封口是机械推论不是语义判断：融合的一切跨窗口引用只能指向 recent_before 的上下文
@@ -322,14 +325,14 @@ def is_ascii_digits(value: object) -> bool:
 #   ④ 两个"日"分界：树只认日历日——行为按**实际发生时刻**落目录，没有别的选项：时间预测树
 #     直接按钟面槽位对实际时刻计数，凌晨的行为就该落在凌晨的槽里。"这属于前一晚"式的归属是
 #     语义解释，归语义关联层，树与预测树零处理、不为它建任何结构。
-#   ⑤ staged 幂等（抄融合 StagedFusion 的检查点形状）：kind 归一、reminded 查询这些会随时间漂移
+#   ⑤ staged 幂等（抄融合 StagedFusion 的检查点形状）：白天归类、reminded 查询这些会随时间漂移
 #     的输入全部发生在 stage 之前；stage 之后只有确定性落盘——否则崩溃重试间词表/账本已变，
 #     同地址不同字节，add-only 撞车卡死串行队列。
 # - 其余规则：continues 合并、supersedes 在缓冲内就地替换（全史留在判断存储，树存修正后视图）；
 #   summary/basis/goal 确定性拼接不再调模型（goal 为链内非空值按序去重拼接——用户裁定原封不动
 #   保留，语义关联层要用，不许替模型二选一或置空丢失）；跨链 links 只指向**已封口**目标，目标未封则本链推迟封口
-#   （封口按依赖拓扑排）；kind 归一是写入层唯一的 LLM 触点（对齐名字，不发明判断——与 memory 链
-#   "解析 LLM 产候选、Editor 按 page_id 定身份"同构）；behavior=空的判断不进树，但在释放前转成
+#   （封口按依赖拓扑排）；白天归类是写入层唯一的 LLM 触点（只在已有类里选，选不上标待定）；
+#   behavior=空的判断不进树，但在释放前转成
 #   带起止的"没读懂"gap 节点（语义关联要用：「没发生」与「发生了但没读懂」是两种空白）。
 #
 # ── 日循环边界与上游缺口 ─────────────────────────────────────────────────────────────────
@@ -345,7 +348,6 @@ def is_ascii_digits(value: object) -> bool:
 # - Outcome/amendments 追加通道：封口窗口使晚到引用机械上不可能，取消；结果由结果方 occurrence 的
 #   前向 results_from 表达。
 # - 旁侧账本：被 gap 树节点取代（时间轴统一、纪律同构、退化自动成立）。
-# - kind 归一放融合层：被三条硬约束否决（提示词敏感、版本漂移、全局状态），维持写入层。
 # - 数字面/语义面拆成两类节点：两面是同一事实的投影，拆分复活跨文档事务与镜像地址的全部代价；
 #   分组在 schema 角色层显式化。
 #
@@ -384,9 +386,6 @@ def is_ascii_digits(value: object) -> bool:
 # - L0/L1 生成器已落地（遗留调优子项：提示词须按纪律实测调优，见 behavior/semantic/generator.py）；
 #   生命周期（BHV-LIFECYCLE-001，判断释放为单门槛：发布即删）；
 #   夜批傍晚滞后的取舍；覆盖信号收件箱形态（随上游契约）。
-# - 实施顺序建议：schema 角色扩展 + occurrences/gaps yaml + 新词表（一个提交）→ 写入层（staged +
-#   五条死规则）→ kinds 并入地址空间 → 旧三类 schema 与镜像机制退役。
-# - 观察项：无目标动作段对 kinds 词表的膨胀压力（监控支持度=1 的条目占比）。
 
 
 @dataclass(frozen=True)

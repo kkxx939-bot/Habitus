@@ -57,10 +57,7 @@ def encode(tree: PredictionTree) -> dict[str, Any]:
             {"slot": _slot(key), "observed_days": value.observed_days, "recent_days": value.recent_days}
             for key, value in sorted(tree.exposure.items(), key=lambda item: _slot(item[0]))
         ],
-        "baselines": [
-            {"action": action, "rate": rate}
-            for action, rate in sorted(tree.baselines.items())
-        ],
+        "baselines": [{"action": action, "rate": rate} for action, rate in sorted(tree.baselines.items())],
         "nodes": [
             {"slot": _slot(key[0]), "action": key[1], **_node(value, tree.reference_day)}
             for key, value in sorted(tree.nodes.items(), key=lambda item: (_slot(item[0][0]), item[0][1]))
@@ -78,8 +75,7 @@ def encode(tree: PredictionTree) -> dict[str, Any]:
             for (weekday, action), value in sorted(tree.curves.items())
         ],
         "weekday_baselines": [
-            {"action": action, "rate": _runs(values)}
-            for action, values in sorted(tree.weekday_baselines.items())
+            {"action": action, "rate": _runs(values)} for action, values in sorted(tree.weekday_baselines.items())
         ],
         "edges": _edges(tree.edges, tree.reference_day),
         "parallels": [
@@ -87,8 +83,7 @@ def encode(tree: PredictionTree) -> dict[str, Any]:
             for (left, right), value in sorted(tree.parallels.items())
         ],
         "parallel_totals": [
-            {"action": action, "weight": weight}
-            for action, weight in sorted(tree.parallel_totals.items())
+            {"action": action, "weight": weight} for action, weight in sorted(tree.parallel_totals.items())
         ],
         "recurrences": [
             {"action": action, "intervals": _intervals(value.intervals)}
@@ -135,14 +130,10 @@ def decode(payload: Mapping[str, Any]) -> PredictionTree:
                 )
                 for item in payload["curves"]
             },
-            weekday_baselines={
-                item["action"]: _expand(item["rate"], total)
-                for item in payload["weekday_baselines"]
-            },
+            weekday_baselines={item["action"]: _expand(item["rate"], total) for item in payload["weekday_baselines"]},
             edges=_edge_map(payload["edges"], total, reference_day, span),
             parallels={
-                (item["left"], item["right"]): ParallelStatistics(count=item["count"])
-                for item in payload["parallels"]
+                (item["left"], item["right"]): ParallelStatistics(count=item["count"]) for item in payload["parallels"]
             },
             parallel_totals=_parallel_totals(payload),
             recurrences={
@@ -228,9 +219,7 @@ def _parallel_totals(payload: Mapping[str, Any]) -> dict[str, float]:
     for item in payload["parallels"]:
         for action in (item["left"], item["right"]):
             if totals.get(action, 0.0) < item["count"]:
-                raise PredictionTreeError(
-                    "a parallel edge is heavier than its action's participation weight"
-                )
+                raise PredictionTreeError("a parallel edge is heavier than its action's participation weight")
     return totals
 
 
@@ -333,9 +322,7 @@ def _intervals(value: IntervalQuantiles | None) -> dict[str, float] | None:
 
 
 def _quantiles(item: Mapping[str, Any]) -> IntervalQuantiles:
-    return IntervalQuantiles(
-        p10=item["p10"], p50=item["p50"], p90=item["p90"], sample_count=item["sample_count"]
-    )
+    return IntervalQuantiles(p10=item["p10"], p50=item["p50"], p90=item["p90"], sample_count=item["sample_count"])
 
 
 def _slot(key: SlotKey) -> str:

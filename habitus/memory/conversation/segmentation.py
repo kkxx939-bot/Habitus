@@ -43,11 +43,7 @@ class ConversationSemanticBoundary:
     distance: float
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.after_sequence, bool)
-            or not isinstance(self.after_sequence, int)
-            or self.after_sequence < 0
-        ):
+        if isinstance(self.after_sequence, bool) or not isinstance(self.after_sequence, int) or self.after_sequence < 0:
             raise ValueError("after_sequence must be a non-negative integer")
         if (
             isinstance(self.distance, bool)
@@ -78,13 +74,11 @@ class ConversationBoundaryHints:
         if sequences != tuple(sorted(set(sequences))):
             raise ValueError("semantic boundaries must be unique and ordered")
         if self.embedding_fingerprint is not None and (
-            not isinstance(self.embedding_fingerprint, str)
-            or not self.embedding_fingerprint.strip()
+            not isinstance(self.embedding_fingerprint, str) or not self.embedding_fingerprint.strip()
         ):
             raise ValueError("embedding_fingerprint must be non-empty text or None")
         if self.fallback_reason is not None and (
-            not isinstance(self.fallback_reason, str)
-            or not self.fallback_reason.strip()
+            not isinstance(self.fallback_reason, str) or not self.fallback_reason.strip()
         ):
             raise ValueError("fallback_reason must be non-empty text or None")
 
@@ -111,11 +105,7 @@ class ConversationSemanticBoundaryScorer:
             raise TypeError("embedder must implement embed_documents")
         if not isinstance(embedding_fingerprint, str) or not embedding_fingerprint.strip():
             raise ValueError("embedding_fingerprint must be non-empty text")
-        if (
-            isinstance(max_unit_chars, bool)
-            or not isinstance(max_unit_chars, int)
-            or max_unit_chars < 256
-        ):
+        if isinstance(max_unit_chars, bool) or not isinstance(max_unit_chars, int) or max_unit_chars < 256:
             raise ValueError("max_unit_chars must be at least 256")
         self.embedder = cast(ConversationBoundaryEmbedder, embedder)
         self.embedding_fingerprint = embedding_fingerprint.strip()
@@ -189,11 +179,7 @@ class ConversationMessageChunker:
         max_message_tokens: int,
         token_estimator: Callable[[ConversationMessage], int],
     ) -> None:
-        if (
-            isinstance(max_message_tokens, bool)
-            or not isinstance(max_message_tokens, int)
-            or max_message_tokens <= 0
-        ):
+        if isinstance(max_message_tokens, bool) or not isinstance(max_message_tokens, int) or max_message_tokens <= 0:
             raise ValueError("max_message_tokens must be a positive integer")
         if not callable(token_estimator):
             raise TypeError("token_estimator must be callable")
@@ -215,11 +201,7 @@ class ConversationMessageChunker:
                 split = count > 1
                 message = replace(
                     source,
-                    message_id=(
-                        f"{logical_id}~part-{index + 1}-of-{count}"
-                        if split
-                        else source.message_id
-                    ),
+                    message_id=(f"{logical_id}~part-{index + 1}-of-{count}" if split else source.message_id),
                     sequence=next_sequence,
                     content=content,
                     logical_message_id=logical_id if split else source.logical_message_id,
@@ -337,15 +319,10 @@ def _safe_semantic_units(
             message.role is ConversationMessageRole.COMPLETION
             and message.completes_logical_message
             and following is not None
-            and not (
-                following.role is ConversationMessageRole.PROMPT
-                and not following.is_logical_continuation
-            )
+            and not (following.role is ConversationMessageRole.PROMPT and not following.is_logical_continuation)
         ):
             continue
-        rendered = "\n".join(
-            f"{item.role.value}: {canonical_json(item.content)}" for item in buffered
-        )
+        rendered = "\n".join(f"{item.role.value}: {canonical_json(item.content)}" for item in buffered)
         units.append((message.sequence, rendered))
         buffered = []
     return tuple(units)

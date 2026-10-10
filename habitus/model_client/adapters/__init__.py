@@ -26,9 +26,7 @@ def build_openai_compatible_chat_provider(
 
     config = context.config
     if not isinstance(config, ChatModelConfig):
-        raise ModelConfigurationError(
-            "openai_compatible_chat adapter requires ChatModelConfig"
-        )
+        raise ModelConfigurationError("openai_compatible_chat adapter requires ChatModelConfig")
     return OpenAICompatibleChatProvider(config, api_key=context.api_key)
 
 
@@ -39,9 +37,7 @@ def build_openai_compatible_rerank_provider(
 
     config = context.config
     if not isinstance(config, RerankModelConfig):
-        raise ModelConfigurationError(
-            "openai_compatible_rerank adapter requires RerankModelConfig"
-        )
+        raise ModelConfigurationError("openai_compatible_rerank adapter requires RerankModelConfig")
     return OpenAICompatibleRerankProvider(config, api_key=context.api_key)
 
 

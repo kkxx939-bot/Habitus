@@ -348,9 +348,7 @@ def test_store_refuses_to_persist_bytes_it_cannot_read_back(tmp_path) -> None:
     """写路径若比读路径宽松，毒记录会永久占死身份并让枚举失效；必须在落盘前失败。"""
 
     store = BehaviorObservationStore(tmp_path, config=CONFIG)
-    oversized = BehaviorObservationStore(
-        tmp_path, config=BehaviorObservationConfig(max_observations_per_batch=1)
-    )
+    oversized = BehaviorObservationStore(tmp_path, config=BehaviorObservationConfig(max_observations_per_batch=1))
     batch = adapt(
         raw_observation(),
         raw_observation(

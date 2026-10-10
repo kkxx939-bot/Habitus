@@ -90,9 +90,7 @@ class ResidentWorker:
                     category=self._observation_category,
                     operation=operation,
                     status=status,
-                    duration_seconds=(
-                        0.0 if started is None else max(0.0, time.monotonic() - started)
-                    ),
+                    duration_seconds=(0.0 if started is None else max(0.0, time.monotonic() - started)),
                     attributes=attributes,
                 )
             )

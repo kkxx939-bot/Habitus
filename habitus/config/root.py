@@ -129,9 +129,7 @@ class HabitusConfig:
         return cls(
             storage=StorageConfig.from_mapping(required_field(data, "storage", path="config")),
             models=ModelConfig.from_mapping(required_field(data, "models", path="config")),
-            credentials=CredentialRegistry.from_mapping(
-                required_field(data, "credentials", path="config")
-            ),
+            credentials=CredentialRegistry.from_mapping(required_field(data, "credentials", path="config")),
             http=HTTPAPIConfig.from_mapping(data.get("http", {})),
             observability=ObservabilityConfig.from_mapping(data.get("observability", {})),
             conversation=ConversationConfig.from_mapping(data.get("conversation", {})),
@@ -230,10 +228,7 @@ class HabitusConfig:
         if memory.search_service.max_relation_neighbors_total > memory.snapshot.max_items:
             raise ConfigError("memory.search_service relation expansion cannot exceed memory.snapshot.max_items")
         lifecycle_candidate_limit = memory.search_service.max_limit * memory.search_service.candidate_multiplier
-        if (
-            memory.recall_lifecycle.enabled
-            and lifecycle_candidate_limit > memory.recall_lifecycle.max_batch_size
-        ):
+        if memory.recall_lifecycle.enabled and lifecycle_candidate_limit > memory.recall_lifecycle.max_batch_size:
             raise ConfigError("memory recall lifecycle cannot rank the maximum search candidate batch")
         if memory.search_service.max_context_chars < memory.document.max_markdown_body_chars + 2_048:
             raise ConfigError("memory.search_service.max_context_chars cannot fit one maximum-size memory document")
@@ -250,29 +245,21 @@ class HabitusConfig:
             raise ConfigError("memory.search_service recent messages cannot exceed the live message bound")
         if conversation.summary_vector_store.collection == memory.vector_store.collection:
             raise ConfigError("Memory and Conversation Summary must use different vector collections")
-        if (
-            conversation.summary_vector_index.max_record_chars
-            > models.embedding.max_input_chars
-        ):
+        if conversation.summary_vector_index.max_record_chars > models.embedding.max_input_chars:
             raise ConfigError(
                 "conversation.summary_vector_index.max_record_chars cannot exceed models.embedding.max_input_chars"
             )
         summary_candidate_limit = max(
             conversation.summary_vector_index.min_vector_candidates,
-            memory.search_service.summary_fallback_limit
-            * conversation.summary_vector_index.candidate_multiplier,
+            memory.search_service.summary_fallback_limit * conversation.summary_vector_index.candidate_multiplier,
         )
         if summary_candidate_limit > conversation.summary_vector_index.max_search_hits:
-            raise ConfigError(
-                "Summary fallback vector candidates can exceed its index search bound"
-            )
+            raise ConfigError("Summary fallback vector candidates can exceed its index search bound")
         if (
             conversation.summary_vector_index.max_records_per_conversation
             < conversation.summary.max_files_per_conversation * 3
         ):
-            raise ConfigError(
-                "Summary index per-Conversation bound cannot enumerate all three physical stages"
-            )
+            raise ConfigError("Summary index per-Conversation bound cannot enumerate all three physical stages")
         if memory.extraction.max_old_memory_items > memory.snapshot.max_items:
             raise ConfigError("memory.extraction.max_old_memory_items cannot exceed memory.snapshot.max_items")
         if memory.extraction.max_old_memory_bytes > memory.snapshot.max_total_bytes:
@@ -281,17 +268,10 @@ class HabitusConfig:
             memory.extraction.grader_max_output_tokens,
             memory.extraction.candidate_max_output_tokens,
         )
-        if (
-            memory.extraction.max_input_tokens + maximum_extraction_output
-            > models.chat.context_window_tokens
-        ):
-            raise ConfigError(
-                "memory.extraction input and output budgets exceed models.chat.context_window_tokens"
-            )
+        if memory.extraction.max_input_tokens + maximum_extraction_output > models.chat.context_window_tokens:
+            raise ConfigError("memory.extraction input and output budgets exceed models.chat.context_window_tokens")
         if memory.extraction.max_old_memory_tokens >= memory.extraction.max_input_tokens:
-            raise ConfigError(
-                "memory.extraction.max_old_memory_tokens must leave room for Conversation and prompts"
-            )
+            raise ConfigError("memory.extraction.max_old_memory_tokens must leave room for Conversation and prompts")
         if segmentation.max_inline_tool_result_bytes > segmentation.max_segment_bytes:
             raise ConfigError("conversation.segmentation.max_inline_tool_result_bytes cannot exceed max_segment_bytes")
         if memory.vector_index.max_record_chars > models.embedding.max_input_chars:
@@ -347,27 +327,12 @@ class HabitusConfig:
                 )
             if maximum_query_chars > models.rerank.max_query_chars:
                 raise ConfigError("memory query character limits cannot exceed models.rerank.max_query_chars")
-            if (
-                conversation.summary_vector_index.max_rerank_candidates
-                > models.rerank.max_documents
-            ):
-                raise ConfigError(
-                    "conversation Summary rerank candidates cannot exceed models.rerank.max_documents"
-                )
-            if (
-                conversation.summary_vector_index.max_rerank_document_chars
-                > models.rerank.max_document_chars
-            ):
-                raise ConfigError(
-                    "conversation Summary rerank content cannot exceed models.rerank.max_document_chars"
-                )
-            if (
-                memory.search_service.summary_fallback_limit
-                > conversation.summary_vector_index.max_rerank_candidates
-            ):
-                raise ConfigError(
-                    "Summary fallback limit cannot exceed its rerank candidate bound"
-                )
+            if conversation.summary_vector_index.max_rerank_candidates > models.rerank.max_documents:
+                raise ConfigError("conversation Summary rerank candidates cannot exceed models.rerank.max_documents")
+            if conversation.summary_vector_index.max_rerank_document_chars > models.rerank.max_document_chars:
+                raise ConfigError("conversation Summary rerank content cannot exceed models.rerank.max_document_chars")
+            if memory.search_service.summary_fallback_limit > conversation.summary_vector_index.max_rerank_candidates:
+                raise ConfigError("Summary fallback limit cannot exceed its rerank candidate bound")
 
     def _validate_credential_references(self) -> None:
         model_routes = [
@@ -375,9 +340,7 @@ class HabitusConfig:
             ("config.models.embedding.route", self.models.embedding.route.credential_ref),
         ]
         if self.models.rerank is not None:
-            model_routes.append(
-                ("config.models.rerank.route", self.models.rerank.route.credential_ref)
-            )
+            model_routes.append(("config.models.rerank.route", self.models.rerank.route.credential_ref))
         for _path, reference in model_routes:
             if reference:
                 self.credentials.resolve(reference)

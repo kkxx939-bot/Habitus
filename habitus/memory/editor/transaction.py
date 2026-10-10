@@ -237,9 +237,7 @@ class MemoryCommitPlan:
 
         mutations = {str(mutation.uri): mutation for mutation in self.mutation_plan.mutations}
         relation_updates = {str(update.uri): update for update in self.relation_plan.updates}
-        targets = {str(mutation.uri) for mutation in self.mutation_plan.changed_mutations} | set(
-            relation_updates
-        )
+        targets = {str(mutation.uri) for mutation in self.mutation_plan.changed_mutations} | set(relation_updates)
         retired = {str(uri) for uri in self.retired_uris}
         if targets & retired:
             raise MemoryCommitError("one URI cannot be written and retired in the same commit")
@@ -446,13 +444,9 @@ class MemoryCommitTransaction:
             raise TypeError("journal must be a MemoryTransactionJournal")
         if journal.codec is not tree.document_codec:
             raise ValueError("journal and memory tree must share one document codec")
-        canonical_journal_root = (
-            tree.root.parent / "workflow" / "transactions"
-        ).resolve(strict=False)
+        canonical_journal_root = (tree.root.parent / "workflow" / "transactions").resolve(strict=False)
         if journal.root != canonical_journal_root:
-            raise ValueError(
-                "transaction journal must use the canonical sibling workflow/transactions root"
-            )
+            raise ValueError("transaction journal must use the canonical sibling workflow/transactions root")
         try:
             journal.root.relative_to(tree.root)
         except ValueError:
@@ -509,9 +503,7 @@ class MemoryCommitTransaction:
             )
             with self.path_lock.fenced(guards):
                 if self.journal.pending():
-                    raise MemoryCommitRecoveryError(
-                        "pending memory transaction must be recovered before a new commit"
-                    )
+                    raise MemoryCommitRecoveryError("pending memory transaction must be recovered before a new commit")
                 self._assert_current(plan.read_set)
                 record = self._journal_record(
                     plan,
@@ -674,9 +666,7 @@ class MemoryCommitTransaction:
         )
 
     def _assert_current(self, expected: MemorySnapshotBatch) -> None:
-        current = self.snapshot_reader._read_many_physical(
-            snapshot.identity for snapshot in expected.snapshots
-        )
+        current = self.snapshot_reader._read_many_physical(snapshot.identity for snapshot in expected.snapshots)
         for expected_snapshot in expected.snapshots:
             current_snapshot = current.get(expected_snapshot.identity)
             if current_snapshot is None or not self._same_snapshot(
@@ -690,9 +680,7 @@ class MemoryCommitTransaction:
         plan: MemoryCommitPlan,
         writes: tuple[MemoryCommitWrite, ...],
     ) -> None:
-        current = self.snapshot_reader._read_many_physical(
-            snapshot.identity for snapshot in plan.read_set.snapshots
-        )
+        current = self.snapshot_reader._read_many_physical(snapshot.identity for snapshot in plan.read_set.snapshots)
         expected_after = {str(write.uri): write.after for write in writes}
         retired = {str(uri) for uri in plan.retired_uris}
         for original in plan.read_set.snapshots:

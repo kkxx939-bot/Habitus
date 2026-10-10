@@ -137,9 +137,7 @@ class _Builder:
             tool_name=tool_name,
             tool_status=tool_status,
             content_mode=(
-                ConversationToolResultContentMode.INLINE
-                if role is ConversationMessageRole.TOOL_RESULT
-                else None
+                ConversationToolResultContentMode.INLINE if role is ConversationMessageRole.TOOL_RESULT else None
             ),
         )
         self.messages.append(message)
@@ -318,9 +316,7 @@ class CodexRolloutConversationAdapter:
                     ignored += 1
                     continue
                 activity = {
-                    key: item[key]
-                    for key in ("agent_thread_id", "agent_path", "kind", "occurred_at_ms")
-                    if key in item
+                    key: item[key] for key in ("agent_thread_id", "agent_path", "kind", "occurred_at_ms") if key in item
                 }
                 builder.add(
                     ConversationMessageRole.COMPLETION,
@@ -361,9 +357,7 @@ class CodexRolloutConversationAdapter:
                 )
             elif item_type == "sub_agent_activity":
                 activity = {
-                    key: item[key]
-                    for key in ("agent_thread_id", "agent_path", "kind", "occurred_at_ms")
-                    if key in item
+                    key: item[key] for key in ("agent_thread_id", "agent_path", "kind", "occurred_at_ms") if key in item
                 }
                 builder.add(
                     ConversationMessageRole.COMPLETION,
@@ -373,9 +367,13 @@ class CodexRolloutConversationAdapter:
                 )
             elif item_type in {"function_call", "custom_tool_call", "tool_search_call"}:
                 call_id = _clean_text(item.get("call_id", item.get("id")), "Codex function_call.call_id")
-                name = "tool_search" if item_type == "tool_search_call" else _clean_text(
-                    item.get("name"),
-                    "Codex function_call.name",
+                name = (
+                    "tool_search"
+                    if item_type == "tool_search_call"
+                    else _clean_text(
+                        item.get("name"),
+                        "Codex function_call.name",
+                    )
                 )
                 builder.add(
                     ConversationMessageRole.TOOL_CALL,
@@ -420,7 +418,11 @@ class ClaudeCodeConversationAdapter:
         for index, raw in enumerate(_records(payload, "Claude Code records")):
             record = _mapping(raw, f"records[{index}]")
             record_type = record.get("type")
-            if record_type not in {"user", "assistant"} or record.get("isSidechain") is True or record.get("isMeta") is True:
+            if (
+                record_type not in {"user", "assistant"}
+                or record.get("isSidechain") is True
+                or record.get("isMeta") is True
+            ):
                 ignored += 1
                 continue
             message = _mapping(record.get("message"), "Claude Code message")

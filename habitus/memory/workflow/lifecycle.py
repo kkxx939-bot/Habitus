@@ -202,8 +202,8 @@ class ConversationLifecycleManager:
             )
         else:
             compaction = await self.compactor.compact_once(address, now=current_time)
-        purged, released, deleted_segments, deleted_ranges, deleted_archives = await (
-            self._retire_archive_chain(address, current_time)
+        purged, released, deleted_segments, deleted_ranges, deleted_archives = await self._retire_archive_chain(
+            address, current_time
         )
         await self.summary_vector_index.synchronize(address)
         deleted_jobs = self._delete_expired_committed_jobs(address, current_time)
@@ -319,26 +319,17 @@ class ConversationLifecycleManager:
         if current.phase is ConversationSummaryRetirementPhase.INDEX_REMOVED:
             journal_state = self.journal.read_state(address)
             if journal_state.released_through < current.end_sequence:
-                segment_sources = {
-                    item.reference.summary_id: item.digest for item in current.segments
-                }
+                segment_sources = {item.reference.summary_id: item.digest for item in current.segments}
                 active = tuple(
                     segment
                     for segment in self.journal.list_history(address)
-                    if current.start_sequence <= segment.start_sequence
-                    and segment.end_sequence <= current.end_sequence
+                    if current.start_sequence <= segment.start_sequence and segment.end_sequence <= current.end_sequence
                 )[: self.summary_config.cleanup_batch_size]
                 for segment in active:
                     expected_digest = segment_sources.get(segment.segment_id)
                     summary = self.segment_store.try_read_by_id(address, segment.segment_id)
-                    if (
-                        expected_digest is None
-                        or summary is None
-                        or summary.digest != expected_digest
-                    ):
-                        raise ConversationLifecycleError(
-                            "retiring Archive does not match retained History Segment"
-                        )
+                    if expected_digest is None or summary is None or summary.digest != expected_digest:
+                        raise ConversationLifecycleError("retiring Archive does not match retained History Segment")
                     summary.require_matches_source(segment)
                     if not self._workflow_is_committed(address, segment):
                         return (), (), (), (), ()
@@ -444,9 +435,7 @@ class ConversationLifecycleManager:
                     raise ConversationLifecycleError("Archive Summary source chain repeats one Segment")
                 segment_summary = self.segment_store.try_read_by_id(address, segment_reference.summary_id)
                 if segment_summary is None or segment_summary.digest != segment_reference.digest:
-                    raise ConversationLifecycleError(
-                        "Archive Summary Segment recovery source is missing or changed"
-                    )
+                    raise ConversationLifecycleError("Archive Summary Segment recovery source is missing or changed")
                 seen_segments.add(segment_reference.summary_id)
                 segments.append(segment_summary)
         ordered_ranges = tuple(sorted(ranges, key=lambda item: item.start_sequence))
@@ -556,6 +545,7 @@ class ConversationLifecycleManager:
     def _source_history_is_released(segment_id: str, released_through: int) -> bool:
         _start, end = ConversationLayout.segment_range(segment_id)
         return end <= released_through
+
 
 def _utc_datetime(value: datetime) -> datetime:
     if not isinstance(value, datetime):

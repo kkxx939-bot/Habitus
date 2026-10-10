@@ -28,11 +28,7 @@ class MemoryIndexSource:
             raise TypeError("memory index source directory must be MemoryDirectory")
         if not isinstance(self.content, str) or not self.content.strip():
             raise ValueError("memory index source content must be non-empty")
-        if (
-            not isinstance(self.index_kind, str)
-            or not self.index_kind
-            or self.index_kind != self.index_kind.strip()
-        ):
+        if not isinstance(self.index_kind, str) or not self.index_kind or self.index_kind != self.index_kind.strip():
             raise ValueError("memory index source index_kind must be normalized text")
         if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 0:
             raise ValueError("memory index source revision must be non-negative")

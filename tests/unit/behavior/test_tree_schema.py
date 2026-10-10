@@ -198,6 +198,8 @@ def _expected_render_fragments(field, payload) -> list[str]:
         from habitus.behavior.schema.renderers import _BASIS_TEXT
 
         return [_BASIS_TEXT[value]]
+    if field.field_type is T.KIND_TOKEN:
+        return []  # 类编号不进正文（裁定 19），见 test_the_class_id_stays_out_of_the_body
     if field.field_type is T.BASIS_LIST:
         fragments: list[str] = []
         for step in value:
@@ -228,6 +230,27 @@ def test_render_covers_every_non_system_field(kind, payload_factory) -> None:
             continue
         for fragment in _expected_render_fragments(field, payload):
             assert fragment in body, f"渲染缺失字段 {field.name} 的内容: {fragment}"
+
+
+def test_the_class_id_stays_out_of_the_body() -> None:
+    """裁定 19：编号是统计用的机器字段；正文不写它，词表迁移改写编号时正文不变、摘要不必重写。"""
+
+    first = REGISTRY.render_markdown(BehaviorKind.OCCURRENCE, occurrence_payload(kind_token="s-k0001"))
+    moved = REGISTRY.render_markdown(BehaviorKind.OCCURRENCE, occurrence_payload(kind_token="s-k0002"))
+    assert first == moved and "s-k0001" not in first
+
+
+def test_the_kind_token_must_be_a_class_id_or_a_marker() -> None:
+    """裁定 19：旧口径的 token 在写入时就挡住；类编号与两个占位标记都收。"""
+
+    for token in ("s-k0001", "p-k0003", "s-待定", "s-非事件"):
+        REGISTRY.validate(BehaviorKind.OCCURRENCE, occurrence_payload(kind_token=token))
+    with pytest.raises(BehaviorSchemaError, match="class id or a marker"):
+        REGISTRY.validate(BehaviorKind.OCCURRENCE, occurrence_payload(kind_token="洗手"))
+    # 只收规范写法：序号 0 不是编号（下游解析会崩）；多补的 0 会和 s-k0007 被当成两个类（第二轮评审 P2-5）。
+    for token in ("s-k0000", "s-k00007", "s-k007"):
+        with pytest.raises(BehaviorSchemaError, match="class id or a marker"):
+            REGISTRY.validate(BehaviorKind.OCCURRENCE, occurrence_payload(kind_token=token))
 
 
 def test_render_boolean_fields_change_the_body() -> None:
@@ -324,7 +347,7 @@ def test_pagination_cursor_order_matches_enumeration_order(tmp_path) -> None:
             BehaviorKind.OCCURRENCE,
             occurrence_payload(
                 name=name,
-                kind_token="测试",
+                kind_token="s-k0001",
                 started_at=started,
                 last_observed_at=started + _td(minutes=1),
                 onset_available_at=started + _td(seconds=2),

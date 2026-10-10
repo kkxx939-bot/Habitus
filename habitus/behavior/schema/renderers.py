@@ -1,7 +1,9 @@
 """把已经校验完成的领域字段确定性渲染为人类可读的 L2 正文。
 
 正文只呈现语义面与一行数字面摘要；system（溯源）角色不进正文，只存在于末尾结构块。
-守卫测试保证每个非 system 字段都出现在渲染结果里——防止将来加字段忘了进正文。
+守卫测试保证每个非 system 字段都出现在渲染结果里——防止将来加字段忘了进正文。唯一的例外是
+``kind_token``：它是统计用的类编号，人看不懂、词表迁移还会改写它；正文不写它，迁移就不改正文，
+日 / 月 / 年摘要也就不因此重写（裁定 19）。
 """
 
 from __future__ import annotations
@@ -44,9 +46,8 @@ def _render_occurrence(payload: Mapping[str, Any]) -> str:
         f"# {payload['name']}",
         "",
         f"**时间** {_local(payload['started_at'])} — 最后所见 {_local(payload['last_observed_at'])}",
-        f"**类型** {payload['kind_token']} · **结束** {status_text}（{basis_text}）",
-        f"**首次可知** {_local(payload['onset_available_at'])}"
-        + ("　·　此前被提醒过" if payload["reminded"] else ""),
+        f"**结束** {status_text}（{basis_text}）",
+        f"**首次可知** {_local(payload['onset_available_at'])}" + ("　·　此前被提醒过" if payload["reminded"] else ""),
     ]
     if payload["original_name"] is not None:
         lines.append(f"**原始名** {payload['original_name']}　·　撞车消歧的重复记录，统计不计入")
@@ -64,8 +65,11 @@ def _render_occurrence(payload: Mapping[str, Any]) -> str:
         shown = (
             list(enumerate(steps, start=1))
             if len(steps) <= _RENDERED_STEPS_HEAD + _RENDERED_STEPS_TAIL
-            else [*list(enumerate(steps, start=1))[:_RENDERED_STEPS_HEAD], None,
-                  *list(enumerate(steps, start=1))[-_RENDERED_STEPS_TAIL:]]
+            else [
+                *list(enumerate(steps, start=1))[:_RENDERED_STEPS_HEAD],
+                None,
+                *list(enumerate(steps, start=1))[-_RENDERED_STEPS_TAIL:],
+            ]
         )
         for item in shown:
             if item is None:
@@ -86,9 +90,7 @@ def _render_gap(payload: Mapping[str, Any]) -> str:
         "",
         f"**时段** {_local(payload['started_at'])} — {_local(payload['ended_at'])}",
         "",
-        "这段时间我们不知道发生了什么。"
-        if payload["gap_kind"] == "未观测"
-        else "这段时间观测到了内容，但没能读懂。",
+        "这段时间我们不知道发生了什么。" if payload["gap_kind"] == "未观测" else "这段时间观测到了内容，但没能读懂。",
     ]
     return "\n".join(lines).rstrip() + "\n"
 

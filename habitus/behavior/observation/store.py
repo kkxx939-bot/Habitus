@@ -86,9 +86,7 @@ class BehaviorObservationStore:
                     "observation delivery collides with an unreadable artifact"
                 ) from read_error
             if current is None or current.payload_digest != envelope.payload_digest:
-                raise BehaviorObservationError(
-                    "delivery_id conflicts with a different observation payload"
-                ) from exc
+                raise BehaviorObservationError("delivery_id conflicts with a different observation payload") from exc
             return current
         stored = self.read(envelope.source_id)
         if stored is None or stored.record_digest != envelope.record_digest:
@@ -118,9 +116,7 @@ class BehaviorObservationStore:
                 self.envelope_root, artifact_root=self.root, max_entries=self.config.max_files
             )
         except DurablePathIntegrityError as exc:
-            raise BehaviorObservationError(
-                "observation envelope directory is invalid or exceeds its bound"
-            ) from exc
+            raise BehaviorObservationError("observation envelope directory is invalid or exceeds its bound") from exc
         source_ids: list[str] = []
         for entry in entries:
             temporary = atomic_temporary_destination(entry.name)
@@ -134,9 +130,7 @@ class BehaviorObservationStore:
                 continue
             source_ids.append(match.group("source_id"))
         envelopes = tuple(self._required_read(source_id) for source_id in sorted(source_ids))
-        return tuple(
-            sorted(envelopes, key=lambda item: (item.batch.started_at, item.recorded_at, item.source_id))
-        )
+        return tuple(sorted(envelopes, key=lambda item: (item.batch.started_at, item.recorded_at, item.source_id)))
 
     def discard(self, source_id: str) -> bool:
         """释放一份交付：它的全部观测都已融合且所属判断都已发布到树。不存在时幂等返回 ``False``。"""
@@ -159,9 +153,7 @@ class BehaviorObservationStore:
         try:
             restored = BehaviorObservationEnvelope.from_dict(json.loads(encoded), config=self.config)
         except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, BehaviorObservationError) as exc:
-            raise BehaviorObservationError(
-                "observation delivery cannot be read back by its own reader"
-            ) from exc
+            raise BehaviorObservationError("observation delivery cannot be read back by its own reader") from exc
         if self._encode(restored) != encoded:
             raise BehaviorObservationError("observation delivery is not canonically encoded")
 

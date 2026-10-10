@@ -1,34 +1,31 @@
-"""映射器：把一条 occurrence 判到概念上。语义树在这一刀里唯一的模型触点。
+"""映射器：把一条 occurrence 判到细分概念上。语义树在映射这一步唯一的模型触点。
 
-流程（《语义树重构》③，2026-09-26 按评审修订）：
+流程（裁定 20）：
 
-1. **召回**  occurrence 的名字 + 概要做 embedding，对**叶子**行为概念的定义向量取 top-K，并上这个 kind 以前
-   命中过的概念（有闸）——召回只影响漏，不影响错。祖先概念不参与：命中「打球」算不算「运动」由读侧沿
-   parent 链聚合。
-2. **机械判据**  带 ``MechanicalRule`` 的候选先由算法算数值（"算法控制数值"）：数值不满足就不问模型；
-   满足了再问模型判据句那道语义门——规则说"比常态就寝晚 7.5 小时"对一碗 07:00 的面也成立，
-   "这是不是入睡"只有模型答得了。模型从不碰数字，算法从不碰语义。
-3. **材料核对**  要当天时间线的（``context=DAY``）没给时间线、要常态值的没给常态——那一条记成**未决**，
+1. **基础概念不判**  这条在行为树上的编号就是它的基础概念（``ConceptHits.graded_hits`` 从编号现读）。
+   「非事件」不映射、不留记录；「待定」只记情境（没有类，挂不上细分概念）。
+2. **候选 = 挂在这个类上的细分概念**  不召回、不按名字联想：源类之外的细分概念与这条无关。
+3. **材料核对**  细分概念声明了要什么材料：常态值（``baseline_keys`` / 规则引用的常态）、当天时间线
+   （``context=DAY``）、近几天同类记录（``context=RECENT``）。声明了却没给到 → 那一条记**未决**，
    不让模型替我们答成 false。
-4. **判定**  剩下的候选 LLM 一次一条 occurrence，对每个候选只答是/否；模型这一次没答成（传输、配额、
-   结构两轮都不成形）→ 这些候选记未决、留信号，**不让一条 occurrence 把整天塌掉**，模型层的异常不出本模块。
-5. **定档**  算法按概念定义里的数值规则定档。
-6. **情境**  那一刻成立的情境概念由调用方按算法填进来，这里核对它们是情境概念、档是定义过的。
-7. **留痕**  第几轮答对、JSON 是不是修出来的、与这个 kind 以前的判法有没有翻转，都进 ``signals``。
+4. **数值区别由算法判**  带 ``MechanicalRule`` 的细分概念只由算法判（"晚睡 = 睡觉 + 比近期常态晚 ≥120 分钟"）：
+   这条已经是睡觉，"是不是入睡"不用再问；算法从不碰语义，模型从不碰数字。
+5. **语义区别由模型判**  剩下的一次一条 occurrence 交模型，问"这条已经是〔源类〕，它是否满足〔区别〕"，
+   每个候选只答 yes / no / unknown；模型这一次没答成 → 这些候选记未决、留信号，模型层的异常不出本模块。
+   **每条判两次**，第二次候选倒过来排：两次都 yes 才算命中、都 no 才算没有；答得不一样记未决（``INCONSISTENT``），
+   两边都不计（冒烟实测同输入两遍 7 条里 3 处不同——不判两次，这些翻转会直接进关系检验的计数）。
+6. **定档**  算法按细分概念的数值规则定档。
+7. **情境**  那一刻成立的情境概念由调用方按算法填进来，这里核对它们是情境概念、档是定义过的。
 
-**映射者看不到任何假设、任何账**：输入只有 occurrence 的事实 + 当天时间线 + 候选概念的定义 + 常态值。
-架构测试钉死本包不许（传递性地）触达 ``hypotheses`` / ``ledger``。
-
-**旁册空着不许映射**：构造时核对旁册覆盖了全部叶子行为概念，缺就拒——否则一整天会零调用地映射成
-"零命中"并盖上完成标记，永不重做。
+**映射者看不到任何关系、任何统计**：输入只有 occurrence 的事实 + 声明的材料 + 候选的区别判据 + 常态值。
+架构测试钉死本包只（传递性地）引用 ``concepts``。
 """
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime, timedelta
 from types import MappingProxyType
 from typing import Any, cast
 
@@ -38,55 +35,48 @@ from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.uri import BehaviorURI
 from habitus.foundation.integrity import canonical_digest
 from habitus.foundation.text import clean_line
-from habitus.model_client import (
-    ChatMessage,
-    ChatRequest,
-    Embedder,
-    ModelClientError,
-    ModelTransportError,
-    StructuredChatClient,
-)
+from habitus.model_client import ChatMessage, ChatRequest, StructuredChatClient
 from habitus.scene.concepts.model import (
+    BaselineKey,
     ConceptDefinition,
-    ConceptError,
     ConceptSet,
     ContextScope,
     GradeMeasure,
-    concept_identity,
 )
-from habitus.scene.concepts.vectors import ConceptVectorIndex
-from habitus.scene.occurrences.model import ConceptHit, ConceptHits, ConceptHitsError
+from habitus.scene.llm import Answered, Failed, ask
+from habitus.scene.occurrences.model import ConceptHit, ConceptHits, ConceptHitsError, UnresolvedReason
 from habitus.scene.occurrences.situations import SituationOutcome
 from habitus.scene.occurrences.store import ConceptHitStore
+from habitus.series import EventSeries, SeriesGap, SeriesRecord, SkipReason
 
-MAPPER_PROMPT_VERSION = "scene_concept_mapper_prompt_v3"
+MAPPER_PROMPT_VERSION = "scene_concept_mapper_prompt_v4"
 _WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
-MAPPER_SYSTEM_PROMPT = """你在判断一条被观测到的行为属于哪些概念。
+MAPPER_SYSTEM_PROMPT = """你在判断一条被观测到的行为满足哪些细分条件。
 
-给你的材料：这条行为的事实（名字、一句话概要、目标、步骤、开始时刻、最后所见时刻、同在的人、地点），可能还有
-这个人的常态值，以及它所在那一天的时间线（当某个候选的判据要看前后发生了什么时才给）。然后是若干候选概念，
-每个一句判据句。对每个候选，回答这条行为**是不是**判据句说的那件事：是 → yes，不是 → no，**看不到、判不了 → unknown**。
+这条行为已经归到一个行为类（材料里写明了是哪一类），这一点不用再判。给你的材料：这条行为的事实（名字、
+一句话概要、目标、步骤、开始时刻、最后所见时刻、同在的人、地点），可能还有这个人的常态值、它所在那一天的
+时间线、或近几天同一类的记录（某个候选的区别要看这些时才给）。然后是若干候选细分概念，每个一句区别判据。
+对每个候选，回答这条行为**满不满足**那句区别：满足 → yes，不满足 → no，**看不到、判不了 → unknown**。
 
 规则：
-- 只按判据句判，不按概念名字的联想判；判据句没说到的条件不要自己补。
-- 候选后面写了「数值条件已由算法判定成立」的，那部分**已经算过了，不要再自己算**——只判剩下的语义部分
-  （这条行为到底是不是那件事）。
-- 判据句里提到"常态"、而候选后面**没有**写「数值条件已由算法判定成立」的，才用材料里给出的常态值自己算偏离。
-- 判据句里提到别的事件（"起床后""第一次"）的，到当天时间线里找。时间线上标着「未观测」/「没读懂」的那几段是
+- 只按区别判据判，不按概念名字的联想判；判据没说到的条件不要自己补。
+- 判据里提到"常态"的，用材料里给出的常态值算偏离。
+- 判据里提到别的事件（"起床后""第一次"）的，到当天时间线里找。时间线上标着「未观测」/「没读懂」的那几段是
   **观测空白**：要找的事件本该落在空白里、时间线上又没有 → 答 unknown（看不到，不是没发生）。时间线覆盖到了
   那段、里面确实没有，才答 no。
+- 判据里提到"前几天""刚做过"的，到近几天同类记录里找；没列出的日子就是那几天没有这一类的记录。
 - 材料里没写的事实一律当作不知道；判据只差这一条事实时答 unknown，**不要当成 no**——"没看到"和"没发生"是两件事，
   后者会被当成反面证据。
 - 每个候选恰好答一次，不多不少，也不要新增候选。"""
 
 
 class ConceptMapperError(ValueError):
-    """映射器的输入与概念集或旁册矛盾。"""
+    """映射器的输入与概念集矛盾。"""
 
 
 #: 三态判定。``unknown`` 是"材料里看不到、判不了"（用户 09-27"没看到就不算"）——它不是第三种结果，
-#: 落到现成的 ``unresolved`` 里：不进分母也不进分子。没有它的时候模型只能答 no，而 no 在账本里是反面证据。
+#: 落到现成的 ``unresolved`` 里：不进分母也不进分子。没有它的时候模型只能答 no，而 no 在关系检验里是反面证据。
 VERDICTS = ("yes", "no", "unknown")
 
 
@@ -95,8 +85,7 @@ def mapper_json_schema(candidate_names: Sequence[str]) -> dict[str, Any]:
 
     **严格模式吃得下的形状**（2026-09-29 探针实测）：真实后端（codex 的 ``--output-schema``、
     OpenAI structured outputs）不认 ``minItems`` / ``maxItems``，带着它们会 400。条数由
-    ``assemble_verdicts`` 管——它本来就在管（少了哪个候选、重复了哪个都报），所以 schema 只说
-    "有哪些字段、取值属于哪个集合"。
+    ``assemble_verdicts`` 管，所以 schema 只说"有哪些字段、取值属于哪个集合"。
     """
 
     names = list(candidate_names)
@@ -114,11 +103,11 @@ def mapper_json_schema(candidate_names: Sequence[str]) -> dict[str, Any]:
                     "additionalProperties": False,
                     "required": ["concept", "verdict"],
                     "properties": {
-                        "concept": {"type": "string", "enum": names, "description": "候选概念的名字，照抄。"},
+                        "concept": {"type": "string", "enum": names, "description": "候选细分概念的名字，照抄。"},
                         "verdict": {
                             "type": "string",
                             "enum": list(VERDICTS),
-                            "description": "这条行为是不是这个概念判据句说的那件事：yes / no / unknown（材料看不到，判不了）。",
+                            "description": "这条行为满不满足这个候选的区别判据：yes / no / unknown（材料看不到，判不了）。",
                         },
                     },
                 },
@@ -129,7 +118,13 @@ def mapper_json_schema(candidate_names: Sequence[str]) -> dict[str, Any]:
 
 
 SCHEMA_FINGERPRINT = canonical_digest(mapper_json_schema(("候选",)))[:12]
-MAPPER_VERSION = f"{MAPPER_PROMPT_VERSION}+schema{SCHEMA_FINGERPRINT}"
+#: 判法也是口径的一部分：判一次与判两次得出的命中不是同一种东西，版本跟着变，续跑时旧记录会重判。
+#: 时间线截在这一条最后所见（裁定 27 第 10 条，E6）：给模型看这一条之后的事，细分标签会取决于之后发生了什么，
+#: 而"同一条链""当天剩下的"检验的正是之后——等于把后果放进了前因的材料里。
+JUDGEMENT = "judged-twice+timeline-to-self"
+#: 提示词正文的指纹进版本：正文改了而忘了手动升版本号，缓存 / 续跑也不会拿旧答案冒充新提示词的答案（第四轮评审 E15）。
+PROMPT_FINGERPRINT = canonical_digest({"prompt": MAPPER_SYSTEM_PROMPT})[:8]
+MAPPER_VERSION = f"{MAPPER_PROMPT_VERSION}+prompt{PROMPT_FINGERPRINT}+schema{SCHEMA_FINGERPRINT}+{JUDGEMENT}"
 
 
 @dataclass(frozen=True)
@@ -137,7 +132,7 @@ class TimelineEntry:
     """当天时间线上的一行：给要看前后事件的判据用。``gap`` 为真表示这一行是**观测空白**而不是一件行为。
 
     空白段必须列出来（用户 09-27"没看到就不算"）：不列的话时间线看上去是连续的，模型按"时间线里没有就是没发生"
-    把被空白盖住的早餐答成 no，而 no 在账本里是反面证据——七d-2 的假负样本就是这么从映射口进来的。
+    把被空白盖住的早餐答成 no，而 no 在关系检验里是反面证据——七d-2 的假负样本就是这么从映射口进来的。
     """
 
     uri: str
@@ -148,24 +143,24 @@ class TimelineEntry:
     gap: bool = False
 
     @classmethod
-    def from_document(cls, document: BehaviorDocument) -> TimelineEntry:
-        facts = OccurrenceFacts.from_document(document)
-        return cls(uri=facts.uri, name=facts.name, started_at=facts.started_at, last_observed_at=facts.last_observed_at, summary=facts.summary)
+    def from_record(cls, record: SeriesRecord) -> TimelineEntry:
+        return cls(
+            uri=record.uri,
+            name=record.name,
+            started_at=record.started_at,
+            last_observed_at=record.last_observed_at,
+            summary=record.summary,
+        )
 
     @classmethod
-    def from_gap(cls, document: BehaviorDocument) -> TimelineEntry:
-        """行为树上的一段空白（``gap_kind`` 是「未观测」或「没读懂」）；两者对映射都一样：那段发生了什么不知道。"""
+    def from_gap(cls, gap: SeriesGap) -> TimelineEntry:
+        """一段观测空白（「未观测」或「没读懂」）；两者对映射都一样：那段发生了什么不知道。"""
 
-        if document.address.kind is not BehaviorKind.GAP:
-            raise ConceptMapperError("from_gap needs a gap document")
-        started, ended, kind = (document.fields.get(key) for key in ("started_at", "ended_at", "gap_kind"))
-        if not isinstance(started, str) or not isinstance(ended, str) or not isinstance(kind, str):
-            raise ConceptMapperError("a gap document carries started_at, ended_at and gap_kind")
         return cls(
-            uri=str(BehaviorURI.from_address(document.address)),
-            name=kind,
-            started_at=datetime.fromisoformat(started),
-            last_observed_at=datetime.fromisoformat(ended),
+            uri=gap.uri,
+            name=gap.kind.value,
+            started_at=gap.started_at,
+            last_observed_at=gap.ended_at,
             summary="这段时间没有可用的观测",
             gap=True,
         )
@@ -194,10 +189,14 @@ class OccurrenceFacts:
         started_at = document.address.started_at
         last_observed_at = datetime.fromisoformat(str(fields["last_observed_at"])).astimezone(started_at.tzinfo)
         if last_observed_at < started_at:
-            raise ConceptMapperError("occurrence last_observed_at precedes its start; the behaviour tree is inconsistent")
+            raise ConceptMapperError(
+                "occurrence last_observed_at precedes its start; the behaviour tree is inconsistent"
+            )
         place, goal = fields.get("place"), fields.get("goal")
         steps = tuple(
-            clean_line(step.get("semantics")) for step in fields.get("basis", ()) if isinstance(step, Mapping) and clean_line(step.get("semantics"))
+            clean_line(step.get("semantics"))
+            for step in fields.get("basis", ())
+            if isinstance(step, Mapping) and clean_line(step.get("semantics"))
         )
         return cls(
             uri=str(BehaviorURI.from_address(document.address)),
@@ -224,9 +223,6 @@ class OccurrenceFacts:
             }
         )
 
-    def embedding_query(self) -> str:
-        return f"{self.name}\n{self.summary}"
-
     def render(self, *, subject: str | None = None) -> str:
         others = tuple(item for item in self.subjects if item != subject) if subject else self.subjects
         started = self.started_at
@@ -248,20 +244,24 @@ class OccurrenceFacts:
 
 @dataclass(frozen=True)
 class MapperConfig:
-    """K、以前命中的并集上限、时间线行数上限都是保护闸；数值在重放上定，这里只是默认。"""
+    """时间线行数、近几天记录的天数与行数都是保护闸；数值在重放上定，这里只是默认。"""
 
-    recall_limit: int = 10
-    previous_hits_limit: int = 10
     max_timeline_rows: int = 80
+    recent_days: int = 7
+    max_recent_rows: int = 40
     transient_retries: int = 1
     transient_retry_delay_seconds: float = 5.0
 
     def __post_init__(self) -> None:
-        for label in ("recall_limit", "previous_hits_limit", "max_timeline_rows"):
+        for label in ("max_timeline_rows", "recent_days", "max_recent_rows"):
             value = getattr(self, label)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{label} must be a positive integer")
-        if isinstance(self.transient_retries, bool) or not isinstance(self.transient_retries, int) or self.transient_retries < 0:
+        if (
+            isinstance(self.transient_retries, bool)
+            or not isinstance(self.transient_retries, int)
+            or self.transient_retries < 0
+        ):
             raise ValueError("transient_retries must be a non-negative integer")
         if (
             isinstance(self.transient_retry_delay_seconds, bool)
@@ -271,43 +271,67 @@ class MapperConfig:
             raise ValueError("transient_retry_delay_seconds must be a non-negative number")
 
 
+@dataclass(frozen=True)
+class MappingMaterial:
+    """一条 occurrence 映射时可用的材料。``recent`` 为 None 是"没给"，``()`` 是"给了，近几天没有同类记录"。"""
+
+    baseline: Mapping[str, str] = MappingProxyType({})
+    timeline: Sequence[TimelineEntry] = ()
+    recent: Sequence[TimelineEntry] | None = None
+
+    def has(self, scope: ContextScope) -> bool:
+        if scope is ContextScope.DAY:
+            return bool(self.timeline)
+        if scope is ContextScope.RECENT:
+            return self.recent is not None
+        return True
+
+
 def build_request(
     facts: OccurrenceFacts,
+    source_label: str,
     candidates: Sequence[ConceptDefinition],
-    baseline: Mapping[str, str],
+    material: MappingMaterial,
     *,
     subject: str | None = None,
-    timeline: Sequence[TimelineEntry] = (),
     max_timeline_rows: int = 80,
-    settled: Mapping[str, str] = MappingProxyType({}),
+    max_recent_rows: int = 40,
 ) -> ChatRequest:
-    """``settled``：概念名 → 算法已经判成立的数值条件的人读说法（机械判据那一半，模型不许再算）。"""
+    """``source_label``：这条已经归到的类的名字——问模型的是"已经是它，满不满足区别"。"""
 
     if not candidates:
         raise ConceptMapperError("a mapping request needs at least one candidate")
-    sections = ["## 这条行为", facts.render(subject=subject)]
-    if baseline:
-        sections += ["", "## 这个人的常态", *(f"- {key}：{value}" for key, value in baseline.items())]
-    if any(item.context is ContextScope.DAY for item in candidates):
-        if not timeline:
+    sections = [f"## 这条行为（已归为「{source_label}」）", facts.render(subject=subject)]
+    if material.baseline:
+        sections += ["", "## 这个人的常态", *(f"- {key}：{value}" for key, value in material.baseline.items())]
+    scopes = {item.context for item in candidates}
+    if ContextScope.DAY in scopes:
+        if not material.timeline:
             raise ConceptMapperError("a candidate needs the day timeline but none was given")
-        rows = _render_timeline(facts, timeline, max_timeline_rows)
         heading = "## 当天时间线（按时刻；标【未观测】/【没读懂】的是观测空白，那几段里发生过什么不知道）"
-        sections += ["", heading, *rows]
-    sections += ["", "## 候选概念（每个答 yes / no / unknown）"]
-    for item in candidates:
-        line = f"- {item.name}：{item.definition}"
-        if item.name in settled:
-            # C-8：数值那一半算法已经算过了。不说清楚的话模型会自己再算一遍常态偏移，而它算不准，
-            # 算错就把一个规则已经判成立的候选答成 no。
-            line += f" ← 数值条件已由算法判定成立（{settled[item.name]}）：只判这条行为是不是「{item.name}」说的那件事"
-        sections += [line]
+        sections += ["", heading, *_render_timeline(facts, material.timeline, max_timeline_rows)]
+    if ContextScope.RECENT in scopes:
+        if material.recent is None:
+            raise ConceptMapperError("a candidate needs the recent records of this class but none were given")
+        sections += ["", f"## 近几天「{source_label}」的记录", *_render_recent(material.recent, max_recent_rows)]
+    sections += ["", "## 候选细分概念（每个答 yes / no / unknown）"]
+    sections += [f"- {item.name}：{item.definition}" for item in candidates]
     return ChatRequest(
         messages=(
             ChatMessage(role="system", content=MAPPER_SYSTEM_PROMPT),
             ChatMessage(role="user", content="\n".join(sections)),
         )
     )
+
+
+def _render_recent(rows: Sequence[TimelineEntry], limit: int) -> list[str]:
+    if not rows:
+        return ["（这几天没有）"]
+    ordered = sorted(rows, key=lambda row: (row.started_at.astimezone(UTC), row.uri))[-limit:]
+    return [
+        f"- {row.started_at.strftime('%m-%d %H:%M')}（{_WEEKDAYS[row.started_at.weekday()]}）{row.name}（{row.summary}）"
+        for row in ordered
+    ]
 
 
 def _render_timeline(facts: OccurrenceFacts, timeline: Sequence[TimelineEntry], limit: int) -> list[str]:
@@ -328,11 +352,13 @@ def _render_timeline(facts: OccurrenceFacts, timeline: Sequence[TimelineEntry], 
     return lines
 
 
-def assemble_verdicts(parsed: object, candidates: Sequence[ConceptDefinition]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def assemble_verdicts(
+    parsed: object, candidates: Sequence[ConceptDefinition]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """把模型的答复核对成 (命中的概念身份, 答"看不到"的概念身份)，都按候选顺序。
 
     每个候选恰好一条，否则整份不成形、交结构层重试。``unknown`` 不是"没命中"：它回到 ``unresolved``，
-    账本那边"没看到就不算"（不进分母不进分子）。
+    关系检验那边"没看到就不算"（不进分母不进分子）。
     """
 
     if not isinstance(parsed, Mapping):
@@ -377,12 +403,9 @@ class ConceptMapper:
     def __init__(
         self,
         client: StructuredChatClient,
-        embedder: Embedder,
         concepts: ConceptSet,
-        vectors: ConceptVectorIndex,
         *,
         config: MapperConfig | None = None,
-        previous_hits: Callable[[str], Iterable[str]] | None = None,
         subject: str | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -390,174 +413,185 @@ class ConceptMapper:
             raise TypeError("client must be a StructuredChatClient")
         if not isinstance(concepts, ConceptSet):
             raise TypeError("concepts must be a ConceptSet")
-        if not isinstance(vectors, ConceptVectorIndex):
-            raise TypeError("vectors must be a ConceptVectorIndex")
         resolved = config or MapperConfig()
         if not isinstance(resolved, MapperConfig):
             raise TypeError("config must be MapperConfig")
-        self.leaves = concepts.behavior_leaves()
-        stale = vectors.stale(concepts, among=self.leaves)
-        if stale:
-            raise ConceptMapperError(f"concept vectors are missing or stale for {list(stale)}; refresh the sidecar before mapping")
         self.client = client
-        self.embedder = embedder
         self.concepts = concepts
-        self.vectors = vectors
         self.config = resolved
-        self.previous_hits = previous_hits
         self.subject = subject
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
 
-    @property
-    def version(self) -> str:
-        """出处：提示词 + schema 指纹 + embedding 模型 + 判定模型 + 概念集指纹。任一变了，命中就不是同一口径判的。"""
+    def version_for(self, kind_token: str) -> str:
+        """一条记录的口径：提示词 + 模型 + **挂在它那个类上的**细分概念的指纹。
 
-        return f"{MAPPER_VERSION}+emb:{self.vectors.model}+llm:{self.client.client.model}+concepts:{self.concepts.fingerprint}"
+        概念集里别处变了（别的类多了个细分概念、情境概念改了），这一条的候选没变，就不必再问模型——回填只花在真受影响的记录上
+        （语义树新方案第四节："新增细分概念要把源类全部历史重新映射，走有预算的回填队列"）。情境由算法算，变了就地重算、不问模型。
+        """
 
-    async def _recall(self, facts: OccurrenceFacts) -> tuple[tuple[ConceptDefinition, ...], frozenset[str]]:
-        """召回：向量 top-K ∪ 这个 kind 以前命中过的（有闸），只在叶子行为概念里；按身份排序，顺序与模型无关。"""
+        candidates = [self.concepts[name].fingerprint for name in self.concepts.refinements_on(kind_token)]
+        return f"{MAPPER_VERSION}+llm:{self.client.client.model}+candidates:{canonical_digest(candidates)[:16]}"
 
-        chosen: set[str] = set()
-        prior: set[str] = set()
-        if self.leaves:
-            query = await self.embedder.embed_query(facts.embedding_query())
-            chosen.update(identity for identity, _score in self.vectors.nearest(query.values, limit=self.config.recall_limit, among=self.leaves))
-        if self.previous_hits is not None:
-            for name in self.previous_hits(facts.kind_token):
-                try:
-                    identity = concept_identity(name)
-                except ConceptError:
-                    continue
-                if identity in self.leaves:
-                    prior.add(identity)
-            chosen.update(sorted(prior)[: self.config.previous_hits_limit])
-        return tuple(self.concepts[identity] for identity in sorted(chosen)), frozenset(prior)
+    def day_version(self, kind_tokens: Iterable[str]) -> str:
+        """一天的完成标记的口径：那天出现的各个类各自的口径 + 情境概念的指纹（情境由算法就地重算、不问模型，但变了要回去重算）。
+        别的 lane、别的类改了概念，这一天的口径不变，不被拉回去重做（第四轮评审 E9：以前用整个概念集的指纹，一处变动全部历史
+        都成了"待做"，每晚预算 14 天，历史长了欠账永远还不完）。"""
+
+        classes = sorted({self.version_for(token) for token in kind_tokens})
+        situations = sorted(self.concepts[name].fingerprint for name in self.concepts.situations())
+        return f"{MAPPER_VERSION}+day:{canonical_digest({'classes': classes, 'situations': situations})[:16]}"
+
+    def needs(self, kind_token: str) -> frozenset[ContextScope]:
+        """映射这个类的一条要哪些材料（调用方据此决定读不读近几天的记录）。"""
+
+        return frozenset(self.concepts[name].context for name in self.concepts.refinements_on(kind_token))
 
     async def map(
         self,
         document: BehaviorDocument,
         *,
+        lane: str,
+        classified: bool = True,
         situation_hits: Sequence[ConceptHit] = (),
         situations_checked: Sequence[str] = (),
-        baseline: Mapping[str, str] | None = None,
-        timeline: Sequence[TimelineEntry] = (),
+        material: MappingMaterial | None = None,
     ) -> ConceptHits:
+        """``classified=False`` 是「待定」：只记情境。``lane`` 是这条所在的 lane（调用方从事件序列读）。"""
+
         facts = OccurrenceFacts.from_document(document)
         situations = self._situations(situation_hits)
         checked = tuple(dict.fromkeys((*situations_checked, *(hit.concept for hit in situations))))
-        snapshot: dict[str, str] = dict(baseline) if baseline else {}
-        measures = facts.measures()
-        candidates, prior = await self._recall(facts)
+        given = material or MappingMaterial()
+        snapshot = dict(given.baseline)
+        candidates = (
+            tuple(self.concepts[name] for name in self.concepts.refinements_on(facts.kind_token)) if classified else ()
+        )
         mapped_at = self._clock()
-        hits: dict[str, str | None] = {}
-        unresolved: list[str] = []
-        signals: list[str] = []
-
-        askable: list[ConceptDefinition] = []
-        settled: dict[str, str] = {}
-        for concept in candidates:
-            missing = [key for key in concept.required_baseline_keys if key not in snapshot]
-            if missing:
-                unresolved.append(concept.name)
-                signals.append(f"unresolved: {concept.name} 缺常态 {', '.join(missing)}")
-                continue
-            if concept.is_mechanical:
-                # 数值先判：规则说"不是"就不问模型；规则说"是"再问语义门（这条到底是不是入睡）。
-                # 一条 07:00 的「吃了碗面」比常态就寝晚 7.5 小时，规则会通过——只有模型能说它不是入睡。
-                decision = concept.decide(measures, snapshot)
-                if decision.hit is None:
-                    unresolved.append(concept.name)
-                    signals.append(f"unresolved: {concept.name} 常态值解不出")
-                    continue
-                if not decision.hit:
-                    continue
-                if concept.rule is not None and decision.value is not None:
-                    # 规则已经把数值那一半判成立了；渲染时告诉模型别再算（评审 C-8）。
-                    settled[concept.name] = f"{concept.rule.criterion()}，这一条实际是 {decision.value:+.0f}"
-            if concept.context is ContextScope.DAY and not timeline:
-                unresolved.append(concept.name)
-                signals.append(f"unresolved: {concept.name} 需要当天时间线")
-                continue
-            askable.append(concept)
-
-        if askable:
-            try:
-                (answered, unseen), notes = await self._ask(facts, askable, snapshot, timeline, settled)
-            except ModelClientError as exc:
-                # 模型层的失败不出本模块：这些候选记未决，一条 occurrence 不把整天塌掉。
-                unresolved.extend(concept.name for concept in askable)
-                signals.append(f"model: {type(exc).__name__}: {clean_line(str(exc))[:120]}")
-            else:
-                signals.extend(notes)
-                for concept in askable:
-                    if concept.identity in answered:
-                        hits[concept.identity] = concept.grade_for(measures, snapshot)
-                    elif concept.identity in unseen:
-                        # 模型说"看不到"（判据引用的事件落在观测空白里）→ 现成的未决，不是"没命中"。
-                        unresolved.append(concept.name)
-                        signals.append(f"unresolved: {concept.name} 模型答看不到（材料里判不了）")
-
-        unresolved_identities = {concept_identity(name) for name in unresolved}
-        for concept in candidates:
-            if concept.identity in prior and concept.identity not in hits and concept.identity not in unresolved_identities:
-                signals.append(f"flip: kind {facts.kind_token} 以前命中过 {concept.name}，这次没有")
-
+        verdict = await self._judge(facts, candidates, given)
         try:
             return ConceptHits(
                 occurrence_uri=facts.uri,
                 kind_token=facts.kind_token,
+                classified=classified,
                 last_observed_at=facts.last_observed_at,
-                hits=tuple(ConceptHit(concept=self.concepts[identity].name, grade=grade) for identity, grade in hits.items()),
+                hits=tuple(
+                    ConceptHit(concept=self.concepts[identity].name, grade=grade)
+                    for identity, grade in verdict.hits.items()
+                ),
                 situation_hits=situations,
                 situations_checked=checked,
-                unresolved=tuple(unresolved),
+                unresolved=verdict.unresolved,
                 baseline_snapshot=snapshot,
-                mapper=self.version,
+                mapper=self.version_for(facts.kind_token),
                 mapped_at=mapped_at,
-                signals=tuple(signals),
+                lane=lane,
+                signals=verdict.signals,
+                recent_digest=None if given.recent is None else recent_digest(given.recent),
             )
         except ConceptHitsError as exc:
             raise ConceptMapperError(str(exc)) from exc
+
+    async def _judge(
+        self, facts: OccurrenceFacts, candidates: Sequence[ConceptDefinition], material: MappingMaterial
+    ) -> _Verdict:
+        measures = facts.measures()
+        verdict = _Verdict()
+        askable: list[ConceptDefinition] = []
+        for concept in candidates:
+            missing = [key for key in concept.required_baseline_keys if key not in material.baseline]
+            if missing:
+                verdict.unsure(concept, UnresolvedReason.BASELINE_MISSING, f"缺常态 {', '.join(missing)}")
+            elif concept.is_mechanical:
+                self._decide(concept, measures, material.baseline, verdict)
+            elif not material.has(concept.context):
+                verdict.unsure(concept, *_MISSING_MATERIAL[concept.context])
+            else:
+                askable.append(concept)
+        if askable:
+            await self._ask_model(facts, askable, material, verdict)
+        return verdict
+
+    @staticmethod
+    def _decide(
+        concept: ConceptDefinition,
+        measures: Mapping[GradeMeasure, float],
+        baseline: Mapping[str, str],
+        verdict: _Verdict,
+    ) -> None:
+        """数值区别：这条已经是源类，规则成立就是命中，不再问模型。"""
+
+        decision = concept.decide(measures, baseline)
+        if decision.hit is None:
+            verdict.unsure(concept, UnresolvedReason.BASELINE_UNPARSEABLE, "常态值解不出")
+        elif decision.hit:
+            verdict.hits[concept.identity] = concept.grade_for(measures, baseline)
+
+    async def _ask_model(
+        self,
+        facts: OccurrenceFacts,
+        candidates: Sequence[ConceptDefinition],
+        material: MappingMaterial,
+        verdict: _Verdict,
+    ) -> None:
+        first = await self._ask(facts, candidates, material)
+        second = (
+            await self._ask(facts, tuple(reversed(candidates)), material) if not isinstance(first, Failed) else first
+        )
+        for answer in (first, second):
+            if isinstance(answer, Failed):
+                # 模型层的失败不出本模块：这些候选记未决，一条 occurrence 不把整天塌掉。
+                verdict.unresolved.update((concept.name, UnresolvedReason.MODEL_FAILED) for concept in candidates)
+                verdict.signals += (answer.signal,)
+                return
+        assert isinstance(first, Answered) and isinstance(second, Answered)
+        readings = [
+            _readings(cast("tuple[tuple[str, ...], tuple[str, ...]]", answer.value)) for answer in (first, second)
+        ]
+        verdict.signals += first.notes + second.notes
+        measures = facts.measures()
+        for concept in candidates:
+            once, twice = (reading(concept.identity) for reading in readings)
+            if once != twice:
+                verdict.unsure(concept, UnresolvedReason.INCONSISTENT, f"两次答得不一样（{once} / {twice}）")
+            elif once == "yes":
+                verdict.hits[concept.identity] = concept.grade_for(measures, material.baseline)
+            elif once == "unknown":
+                # 模型说"看不到"（区别引用的事件落在观测空白里）→ 现成的未决，不是"没命中"。
+                verdict.unsure(concept, UnresolvedReason.MODEL_UNSEEN, "模型答看不到（材料里判不了）")
 
     async def _ask(
         self,
         facts: OccurrenceFacts,
         candidates: Sequence[ConceptDefinition],
-        baseline: Mapping[str, str],
-        timeline: Sequence[TimelineEntry],
-        settled: Mapping[str, str],
-    ) -> tuple[tuple[tuple[str, ...], tuple[str, ...]], tuple[str, ...]]:
+        material: MappingMaterial,
+    ) -> Answered | Failed:
         request = build_request(
             facts,
+            self.concepts.class_label(facts.kind_token),
             candidates,
-            baseline,
+            replace(material, baseline=self._shown_baseline(material.baseline)),
             subject=self.subject,
-            timeline=timeline,
             max_timeline_rows=self.config.max_timeline_rows,
-            settled=settled,
+            max_recent_rows=self.config.max_recent_rows,
         )
-        schema = mapper_json_schema([item.name for item in candidates])
-        for attempt in range(self.config.transient_retries + 1):
-            try:
-                response = await self.client.complete_json_async(
-                    request,
-                    schema=schema,
-                    name="scene_concept_mapping",
-                    validator=lambda parsed: assemble_verdicts(parsed, candidates),
-                )
-            except ModelTransportError:
-                # 只重试传输层的瞬态错；答复本身不合格由结构层纠正。
-                if attempt >= self.config.transient_retries:
-                    raise
-                await asyncio.sleep(self.config.transient_retry_delay_seconds * (attempt + 1))
-                continue
-            notes: list[str] = []
-            if response.validation_attempts > 1:
-                notes.append(f"structured: answered on attempt {response.validation_attempts}")
-            if response.parse_mode != "strict":
-                notes.append(f"structured: json parsed via {response.parse_mode}")
-            return cast("tuple[tuple[str, ...], tuple[str, ...]]", response.value), tuple(notes)
-        raise AssertionError("unreachable")  # pragma: no cover
+        return await ask(
+            self.client,
+            request,
+            schema=mapper_json_schema([item.name for item in candidates]),
+            name="scene_concept_mapping",
+            validator=lambda parsed: assemble_verdicts(parsed, candidates),
+            retries=self.config.transient_retries,
+            delay_seconds=self.config.transient_retry_delay_seconds,
+        )
+
+    def _shown_baseline(self, baseline: Mapping[str, str]) -> Mapping[str, str]:
+        """常态表给模型看的样子：键里的概念显示名字（类名），不显示编号（裁定 21-1）。"""
+
+        shown: dict[str, str] = {}
+        for text, value in baseline.items():
+            key = BaselineKey.parse(text)
+            shown[f"{self.concepts.label_of(key.concept)}的{key.window.label}{key.statistic.quantity}"] = value
+        return shown
 
     def _situations(self, hits: Sequence[ConceptHit]) -> tuple[ConceptHit, ...]:
         resolved = tuple(hits)
@@ -571,6 +605,46 @@ class ConceptMapper:
         return resolved
 
 
+def _readings(value: tuple[tuple[str, ...], tuple[str, ...]]) -> Callable[[str], str]:
+    """（命中的, 看不到的）→ 一个候选的读法：yes / unknown / no。"""
+
+    answered, unseen = value
+
+    def reading(identity: str) -> str:
+        return "yes" if identity in answered else "unknown" if identity in unseen else "no"
+
+    return reading
+
+
+_MISSING_MATERIAL = {
+    ContextScope.DAY: (UnresolvedReason.TIMELINE_MISSING, "需要当天时间线"),
+    ContextScope.RECENT: (UnresolvedReason.RECENT_MISSING, "需要近几天同类记录"),
+}
+#: 这几种原因下，再问一遍可能有不同的答案（模型这一次没答成、或当时材料没给到）：续跑时要重问。
+_RETRY_REASONS = frozenset(
+    {UnresolvedReason.MODEL_FAILED, UnresolvedReason.TIMELINE_MISSING, UnresolvedReason.RECENT_MISSING}
+)
+
+
+class _Verdict:
+    """一条 occurrence 的判定累积：命中（身份 → 档）、未决（名字 → 原因）、信号。"""
+
+    def __init__(self) -> None:
+        self.hits: dict[str, str | None] = {}
+        self.unresolved: dict[str, UnresolvedReason] = {}
+        self.signals: tuple[str, ...] = ()
+
+    def unsure(self, concept: ConceptDefinition, reason: UnresolvedReason, note: str) -> None:
+        self.unresolved[concept.name] = reason
+        self.signals += (f"unresolved: {concept.name} {note}",)
+
+
+def recent_digest(rows: Sequence[TimelineEntry]) -> str:
+    """ "近几天同类记录"这份材料的摘要：哪几条（地址）。别的日子被迁移改了编号，这里就会变。"""
+
+    return canonical_digest(sorted(row.uri for row in rows))[:16]
+
+
 @dataclass(frozen=True)
 class DayMappingReport:
     day: date
@@ -579,9 +653,16 @@ class DayMappingReport:
     duplicates_skipped: int
     stale_removed: int
     unresolved: int
-    #: 盘上原本就有、这次又重新判了一遍的记录数（口径变了、或输入变了）。它加上 ``stale_removed`` 不为零，
-    #: 就说明这一天的命中**变了**——靶它开的承诺与结算已经是脏的，夜批要撤了重开（评审 A-12 / B-5）。
+    #: 盘上原本就有、这次又重新判了一遍的记录数（口径变了、编号被迁移改了、或输入变了）。它加上 ``stale_removed``
+    #: 不为零，就说明这一天的命中**变了**——靶它开的承诺与结算已经是脏的，夜批要撤了重开（评审 A-12 / B-5）。
     rewritten: int = 0
+    not_events_skipped: int = 0
+    #: 候选没变、只就地重算了情境的记录数（不问模型）。
+    refreshed: int = 0
+    #: 这一天里有几个（记录, 细分概念）是模型这一次没答成——有就不盖完成章，下一晚回来重问（E10）。
+    model_failed: int = 0
+    #: 有几个是两遍判得不一样——映射器一致性在生产上的读数（`10` 判决线要的就是它）。
+    inconsistent: int = 0
 
     @property
     def changed(self) -> bool:
@@ -595,76 +676,169 @@ async def map_closed_day(
     day: date,
     *,
     now: datetime,
+    series: EventSeries,
     situation_for: Callable[[BehaviorDocument], SituationOutcome | Sequence[ConceptHit]],
     baseline_for: Callable[[BehaviorDocument], Mapping[str, str]],
     force: bool = False,
 ) -> DayMappingReport:
     """把已封口的一天从行为树映射到 ``occurrences/``，最后落完成标记。
 
-    - 撞车消歧的重复（``original_name`` 非空）跳过，与读侧和预测夜批同口径；
+    - **映射哪几条、各是类还是「待定」、属于哪条 lane、当天的空白、近几天的同类记录，全部按事件序列 ``series`` 读**
+      （预测树读的是同一份，读法只写在 ``series.reader``：撞车重复、「非事件」不在序列里）；行为树只用来取这几条的全文；
     - 时间线里**带上这一天的空白段**（gap，未观测 / 没读懂）：不带的话时间线看上去连续，模型按"里面没有就是没发生"
-      把被空白盖住的事件答成"没有"，而那在账本里是反面证据（用户 09-27"没看到就不算"）；
-    - 先撤标记、清掉上轮多出来的叶子，再逐条映射——**续跑**：同口径、且输入没变的记录不重问模型（全判成了的；
-      或只因缺常态而未决、常态表又没变的）；
+      把被空白盖住的事件答成"没有"，而那在关系检验里是反面证据（用户 09-27"没看到就不算"）；
+    - 有细分概念要近几天同类记录时，往前读 ``recent_days`` 天的行为树（只读一次，按编号分组）；
+    - 先清掉上轮多出来的记录，再逐条映射——**续跑**：同口径、编号没变、且输入没变的记录不重问模型；
     - 行为树这一天比盘上少（读不到、或缩水了）时拒绝清掉多出来的记录（多半是根指错或封口日算错），除非 ``force``；
-    - ``situation_for`` / ``baseline_for`` 是必填的：情境与常态是映射的材料，缺了就是空栏和"永假"，
-      要空就显式传 ``lambda _d: ()`` / ``lambda _d: {}``。
+    - 时间线与近几天记录只放**同一条 lane** 的（裁定 21-2：两条 lane 相互独立、不干扰）；观测空白没有 lane，两边都放；
+    - ``situation_for`` / ``baseline_for`` 都必填：情境与常态是映射的材料，要空就显式传 ``lambda _d: ()`` / ``lambda _d: {}``。
     """
 
-    all_documents = tree.read_day(BehaviorKind.OCCURRENCE, day)
-    documents = [document for document in all_documents if document.fields.get("original_name") is None]
+    if day >= series.cutoff:
+        raise ConceptMapperError(f"{day} is not sealed in a series cut at {series.cutoff}")
+    records = {record.uri: record for record in series.on(day)}
+    by_uri = {
+        str(BehaviorURI.from_address(document.address)): document
+        for document in tree.read_day(BehaviorKind.OCCURRENCE, day)
+    }
+    missing = sorted(set(records) - set(by_uri))
+    if missing:
+        raise ConceptMapperError(
+            f"the series holds {len(missing)} occurrences on {day} that the tree does not: {missing[0]}"
+        )
+    documents = [by_uri[uri] for uri in records]
     on_disk = len(store.read_day(day))
     if len(documents) < on_disk and not force:
         # 盘上比树上多：树读不到（根指错 / 封口日算错）或缩水了。静默清掉多出来的再盖章，就是"做完了但内容不对"。
         raise ConceptMapperError(
             f"the behaviour tree shows {len(documents)} occurrences on {day} but the hit store holds {on_disk}; pass force=True to drop the extra records"
         )
-    keep = frozenset(document.address.identity_name for document in documents)
-    removed = store.retain_only(day, keep)
-    timeline = tuple(TimelineEntry.from_document(document) for document in documents) + tuple(
-        TimelineEntry.from_gap(document) for document in tree.read_day(BehaviorKind.GAP, day)
-    )
-    resumed = rewritten = 0
-    for document in documents:
+    removed = store.retain_only(day, frozenset(document.address.identity_name for document in documents))
+    gaps = tuple(TimelineEntry.from_gap(gap) for gap in series.gaps_on(day))
+    timelines = {
+        lane: tuple(TimelineEntry.from_record(item) for item in records.values() if item.lane == lane) + gaps
+        for lane in {item.lane for item in records.values()}
+    }
+    recent = _RecentRecords(series, day, mapper.config.recent_days)
+    resumed = rewritten = refreshed = 0
+    for uri, document in zip(records, documents, strict=True):
+        entry = records[uri]
+        classified = entry.classified
+        token = entry.kind_token
+        lane = entry.lane
         baseline = baseline_for(document)
-        if store.exists(document.address):
-            existing = store.read(document.address)
-            if existing.mapper == mapper.version and _inputs_unchanged(existing, baseline):
-                resumed += 1
-                continue
-            rewritten += 1
+        rows = recent.of(token) if classified and ContextScope.RECENT in mapper.needs(token) else None
         situations = situation_for(document)
         if isinstance(situations, SituationOutcome):
-            record = await mapper.map(
-                document, situation_hits=situations.hits, situations_checked=situations.checked, baseline=baseline, timeline=timeline
-            )
+            hits, checked = situations.hits, situations.checked
         else:
-            record = await mapper.map(document, situation_hits=situations, baseline=baseline, timeline=timeline)
+            hits, checked = tuple(situations), ()
+        if store.exists(document.address):
+            existing = store.read(document.address)
+            if existing.mapper == mapper.version_for(token) and _inputs_unchanged(existing, token, baseline, rows):
+                if _same_situations(existing, hits, checked):
+                    resumed += 1
+                else:
+                    # 候选没变、只是情境概念变了：情境由算法算，就地重算，不问模型
+                    store.write(replace(existing, situation_hits=tuple(hits), situations_checked=tuple(checked)))
+                    refreshed += 1
+                continue
+            rewritten += 1
+        seen_until = records[uri].last_observed_at
+        timeline = tuple(item for item in timelines[lane] if item.started_at <= seen_until)
+        material = MappingMaterial(baseline=baseline, timeline=timeline, recent=rows)
+        record = await mapper.map(
+            document,
+            lane=lane,
+            classified=classified,
+            situation_hits=hits,
+            situations_checked=checked,
+            material=material,
+        )
         store.write(record)
-    marker = store.complete_day(day, records=len(documents), completed_at=now, mapper=mapper.version)
+    reasons = [reason for item in store.read_day(day) for reason in item.unresolved.values()]
+    failed = reasons.count(UnresolvedReason.MODEL_FAILED)
+    inconsistent = reasons.count(UnresolvedReason.INCONSISTENT)
+    if failed:
+        # 模型这一次没答成的不盖章：盖了章这一天就不会再被访问，"没答成"就永远是"看不到"（第四轮评审 E10）
+        return DayMappingReport(
+            day=day,
+            mapped=len(documents) - resumed - refreshed,
+            resumed=resumed,
+            refreshed=refreshed,
+            duplicates_skipped=series.skipped_on(day, SkipReason.DUPLICATE),
+            stale_removed=len(removed),
+            unresolved=len(reasons),
+            rewritten=rewritten,
+            not_events_skipped=series.skipped_on(day, SkipReason.NOT_EVENT),
+            model_failed=failed,
+            inconsistent=inconsistent,
+        )
+    marker = store.complete_day(
+        day,
+        records=len(documents),
+        completed_at=now,
+        mapper=mapper.day_version(str(document.fields["kind_token"]) for document in documents),
+        expected=mapper.version_for,
+    )
     return DayMappingReport(
         day=day,
-        mapped=len(documents) - resumed,
+        mapped=len(documents) - resumed - refreshed,
         resumed=resumed,
-        duplicates_skipped=len(all_documents) - len(documents),
+        refreshed=refreshed,
+        duplicates_skipped=series.skipped_on(day, SkipReason.DUPLICATE),
         stale_removed=len(removed),
         unresolved=marker.unresolved,
         rewritten=rewritten,
+        not_events_skipped=series.skipped_on(day, SkipReason.NOT_EVENT),
+        inconsistent=inconsistent,
     )
 
 
-def _inputs_unchanged(existing: ConceptHits, baseline: Mapping[str, str]) -> bool:
+class _RecentRecords:
+    """``day`` 之前 ``days`` 天序列里的记录，按编号分组；第一次有人要时才分。编号是树上现在的编号（迁移过的就是新编号）。"""
+
+    def __init__(self, series: EventSeries, day: date, days: int) -> None:
+        self._series, self._day, self._days = series, day, days
+        self._by_token: dict[str, list[TimelineEntry]] | None = None
+
+    def of(self, token: str) -> tuple[TimelineEntry, ...]:
+        if self._by_token is None:
+            self._by_token = {}
+            since = self._day - timedelta(days=self._days)
+            for record in self._series.records:
+                if since <= record.day < self._day:
+                    self._by_token.setdefault(record.kind_token, []).append(TimelineEntry.from_record(record))
+        return tuple(self._by_token.get(token, ()))
+
+
+def _same_situations(existing: ConceptHits, hits: Sequence[ConceptHit], checked: Sequence[str]) -> bool:
+    fresh = {(hit.identity, hit.grade) for hit in hits}
+    held = {(hit.identity, hit.grade) for hit in existing.situation_hits}
+    return fresh == held and set(existing.situations_checked) == set(checked) | {hit.concept for hit in hits}
+
+
+def _inputs_unchanged(
+    existing: ConceptHits, token: str, baseline: Mapping[str, str], recent: Sequence[TimelineEntry] | None
+) -> bool:
     """续跑判据是"输入没变"，不是"没有未决"。
 
-    全判成了当然不重问。带未决的记录只在**材料真的换了**时才重问：未决是因为缺常态、而常态表还是那一份 → 再问一遍
-    答案不会变，每晚重问只是烧调用；模型这一次没答成（``model:`` 信号）、或当时没给时间线 → 材料现在有了，要重问。
+    - 编号变了（词表迁移改写了这一条）一律重判：候选是挂在类上的细分概念，类换了候选就换了；
+    - "近几天同类记录"变了（别的日子被迁移改了编号）重判：要它的细分概念答案可能变；
+    - 带未决的：模型这一次没答成、或当时材料没给到 → 重问；因缺常态 / 常态解不出而未决的，常态表变了才重问；
+      模型答"看不到"的，材料没变就不重问（再问一遍答案不会变）。
     """
 
-    if not existing.unresolved:
-        return True
-    if any(signal.startswith("model:") or "需要当天时间线" in signal for signal in existing.signals):
+    if existing.kind_token != token:
         return False
-    return dict(existing.baseline_snapshot) == dict(baseline)
+    if existing.recent_digest != (None if recent is None else recent_digest(recent)):
+        return False
+    reasons = set(existing.unresolved.values())
+    if reasons & _RETRY_REASONS:
+        return False
+    if reasons & {UnresolvedReason.BASELINE_MISSING, UnresolvedReason.BASELINE_UNPARSEABLE}:
+        return dict(existing.baseline_snapshot) == dict(baseline)
+    return True
 
 
 __all__ = [
@@ -672,12 +846,13 @@ __all__ = [
     "MAPPER_SYSTEM_PROMPT",
     "MAPPER_VERSION",
     "SCHEMA_FINGERPRINT",
+    "VERDICTS",
     "ConceptMapper",
     "ConceptMapperError",
     "DayMappingReport",
     "MapperConfig",
+    "MappingMaterial",
     "OccurrenceFacts",
-    "VERDICTS",
     "TimelineEntry",
     "assemble_verdicts",
     "build_request",

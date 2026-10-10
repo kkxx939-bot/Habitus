@@ -9,7 +9,9 @@ from __future__ import annotations
 import pytest
 
 from habitus.scene.views import ContextView, DayIndexCache, Neighbour, context_view, history_contexts
+from habitus.series.reader import admitted
 from tests.unit.behavior.tree_payloads import gap_payload
+from tests.unit.kind_ids import kind_id
 from tests.unit.scene.fixtures import DAY1, DAY2, SUBJECT, Site, at, publish
 
 
@@ -18,7 +20,7 @@ def site(tmp_path) -> Site:
 
 
 def cache_for(ground: Site) -> DayIndexCache:
-    return DayIndexCache(ground.behavior_tree, subject=SUBJECT)
+    return DayIndexCache(ground.behavior_tree, subject=SUBJECT, admits=admitted)
 
 
 def test_only_the_clock_face_neighbourhood_is_taken(tmp_path) -> None:
@@ -32,7 +34,13 @@ def test_only_the_clock_face_neighbourhood_is_taken(tmp_path) -> None:
     publish(ground.behavior_tree, DAY1, "洗菜", 8, 0)  # 槽 32，离槽 80 有 48 格
 
     views = history_contexts(
-        "洗菜", cache_for(ground), days=(DAY1,), window_days=7, slot_minutes=15, slot_index=80, slot_half_width=2
+        kind_id("洗菜"),
+        cache_for(ground),
+        days=(DAY1,),
+        window_days=7,
+        slot_minutes=15,
+        slot_index=80,
+        slot_half_width=2,
     )
 
     assert [view.occurrence_uri for view in views] == [near]
@@ -45,7 +53,13 @@ def test_the_neighbourhood_wraps_around_midnight(tmp_path) -> None:
     late = publish(ground.behavior_tree, DAY1, "洗菜", 23, 55)
 
     views = history_contexts(
-        "洗菜", cache_for(ground), days=(DAY1,), window_days=7, slot_minutes=15, slot_index=0, slot_half_width=1
+        kind_id("洗菜"),
+        cache_for(ground),
+        days=(DAY1,),
+        window_days=7,
+        slot_minutes=15,
+        slot_index=0,
+        slot_half_width=1,
     )
 
     assert [view.occurrence_uri for view in views] == [late]
@@ -65,7 +79,7 @@ def test_a_one_way_concurrent_link_is_seen_from_both_ends(tmp_path) -> None:
 
 
 def test_the_subject_is_dropped_from_who_else_was_there(tmp_path) -> None:
-    """"和谁"是主体之外的人。主体总在 subjects 里，不剔掉的话每一条都会说"和自己"。"""
+    """ "和谁"是主体之外的人。主体总在 subjects 里，不剔掉的话每一条都会说"和自己"。"""
 
     ground = site(tmp_path)
     uri = publish(ground.behavior_tree, DAY1, "商量晚餐", 19, 12, subjects=(SUBJECT, "家庭成员B"))
@@ -74,7 +88,7 @@ def test_the_subject_is_dropped_from_who_else_was_there(tmp_path) -> None:
 
 
 def test_an_unreadable_gap_is_voided_by_a_behaviour_that_started_inside_it(tmp_path) -> None:
-    """"没读懂"的那段里若读出了一条行为的开始，整段作废——我们在看，只是没读懂，读出来了就
+    """ "没读懂"的那段里若读出了一条行为的开始，整段作废——我们在看，只是没读懂，读出来了就
     证伪了。这条直接决定预测树的曝光分母。"""
 
     from habitus.behavior import BehaviorDocumentWriter
@@ -135,7 +149,9 @@ def test_a_context_view_is_refused_for_an_unknown_occurrence(tmp_path) -> None:
     ground = site(tmp_path)
     publish(ground.behavior_tree, DAY1, "洗菜", 19, 43)
     with pytest.raises(KeyError):
-        context_view("behavior://occurrences/2026/08/15/没有--20260815T000000000000%2B0800.md", cache_for(ground), window_days=7)
+        context_view(
+            "behavior://occurrences/2026/08/15/没有--20260815T000000000000%2B0800.md", cache_for(ground), window_days=7
+        )
 
 
 def test_the_day_is_read_once_per_query(tmp_path) -> None:

@@ -73,7 +73,11 @@ class MemoryJobAbandonment:
     SCHEMA_VERSION = "memory_job_abandonment_v1"
 
     def __post_init__(self) -> None:
-        if isinstance(self.memory_sequence, bool) or not isinstance(self.memory_sequence, int) or self.memory_sequence <= 0:
+        if (
+            isinstance(self.memory_sequence, bool)
+            or not isinstance(self.memory_sequence, int)
+            or self.memory_sequence <= 0
+        ):
             raise ValueError("memory_sequence must be a positive integer")
         for name in ("conversation_id", "segment_id"):
             value = getattr(self, name)

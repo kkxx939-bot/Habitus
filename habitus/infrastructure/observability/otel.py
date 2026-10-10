@@ -50,12 +50,8 @@ class OpenTelemetryBackend:
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
         protocol_module = "http" if self.config.protocol == "http" else "grpc"
-        metric_module = import_module(
-            f"opentelemetry.exporter.otlp.proto.{protocol_module}.metric_exporter"
-        )
-        trace_module = import_module(
-            f"opentelemetry.exporter.otlp.proto.{protocol_module}.trace_exporter"
-        )
+        metric_module = import_module(f"opentelemetry.exporter.otlp.proto.{protocol_module}.metric_exporter")
+        trace_module = import_module(f"opentelemetry.exporter.otlp.proto.{protocol_module}.trace_exporter")
         metric_exporter_type: Any = metric_module.OTLPMetricExporter
         span_exporter_type: Any = trace_module.OTLPSpanExporter
 

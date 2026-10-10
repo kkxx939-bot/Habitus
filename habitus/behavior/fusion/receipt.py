@@ -49,8 +49,10 @@ _RECEIPT_KEYS = {
 
 
 def _sha256(value: object, label: str) -> str:
-    if not isinstance(value, str) or len(value) != 64 or any(
-        character not in "0123456789abcdef" for character in value
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
     ):
         raise BehaviorFusionError(f"{label} must be lowercase SHA-256 text")
     return value
@@ -120,9 +122,7 @@ class BehaviorFusionReceipt:
         ):
             for item in group:
                 _sha256(item, f"{label} item")
-        if self.receipt_id != receipt_identity(
-            self.segment_digest, self.fusion_version, self.prompt_version
-        ):
+        if self.receipt_id != receipt_identity(self.segment_digest, self.fusion_version, self.prompt_version):
             raise BehaviorFusionError("receipt_id does not match its segment and versions")
         # 记了别人的账和漏记一样有害：事后审计据此得出的结论会是错的。
         covered = set(self.observation_ids)
@@ -193,15 +193,9 @@ class BehaviorFusionReceipt:
             validation_attempts=attempts,
             judged_at=_utc(value["judged_at"], "judged_at"),
             judgement_ids=_texts(value["judgement_ids"], "judgement_ids"),
-            unreadable_observation_ids=_texts(
-                value["unreadable_observation_ids"], "unreadable_observation_ids"
-            ),
-            out_of_scope_observation_ids=_texts(
-                value["out_of_scope_observation_ids"], "out_of_scope_observation_ids"
-            ),
-            unowned_observation_ids=_texts(
-                value["unowned_observation_ids"], "unowned_observation_ids"
-            ),
+            unreadable_observation_ids=_texts(value["unreadable_observation_ids"], "unreadable_observation_ids"),
+            out_of_scope_observation_ids=_texts(value["out_of_scope_observation_ids"], "out_of_scope_observation_ids"),
+            unowned_observation_ids=_texts(value["unowned_observation_ids"], "unowned_observation_ids"),
             record_digest=_sha256(value["record_digest"], "record_digest"),
         )
 
@@ -306,9 +300,7 @@ def build_fusion_receipt(
         "fusion_version": FUSION_VERSION,
         "prompt_version": prompt_version,
         "validation_attempts": validation_attempts,
-        "judged_at": _utc(
-            judgements[0].judged_at if judgements else _require_moment(judged_at), "judged_at"
-        ),
+        "judged_at": _utc(judgements[0].judged_at if judgements else _require_moment(judged_at), "judged_at"),
         "judgement_ids": tuple(item.judgement_id for item in in_scope),
         "unreadable_observation_ids": tuple(sorted(unreadable)),
         "out_of_scope_observation_ids": tuple(sorted(out_of_scope)),
