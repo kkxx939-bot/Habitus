@@ -63,7 +63,7 @@ class ConversationSourceRecovery:
 
     async def recover_pending(self) -> tuple[ConversationSourceRecoveryResult, ...]:
         entries = self.pending()[: self.batch_size]
-        behavior = tuple(entry for entry in entries if entry.consumer is ConversationSourceConsumer.BEHAVIOR_PROJECTION)
+        behavior = tuple(entry for entry in entries if entry.consumer is ConversationSourceConsumer.BEHAVIOR_SESSION)
         memory = tuple(
             sorted(
                 (entry for entry in entries if entry.consumer is ConversationSourceConsumer.MEMORY),

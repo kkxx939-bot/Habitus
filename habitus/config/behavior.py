@@ -73,6 +73,11 @@ class BehaviorConfig:
     max_fragments_per_segment: int = 60
     # 基础词表（裁定 6：门槛做成配置）：全部可调字段，留空取 ``behavior/kinds/config.py`` 的默认值
     # （默认值只在领域模块）。字段名 = ``kinds_`` + BehaviorKindConfig 的同名字段，组合根按前缀派生注入。
+    # 会话 lane 的保护上限（方案第五节）：留空取 ``behavior/fusion/lanes/session/config.py`` 的默认值。
+    # 字段名 = ``session_`` + SessionLaneConfig 的同名字段，组合根按前缀派生注入。
+    session_max_turn_chars: int | None = None
+    session_max_instruction_chars: int | None = None
+    session_max_steps: int | None = None
     kinds_default_lane: str | None = None
     kinds_batch_size: int | None = None
     kinds_validation_rounds: int | None = None
@@ -124,6 +129,14 @@ class BehaviorConfig:
             or not 1 <= self.max_fragments_per_segment <= 4096
         ):
             raise ValueError("behavior.max_fragments_per_segment must be between 1 and 4096")
+        for name, upper in (
+            ("session_max_turn_chars", 1_000_000),
+            ("session_max_instruction_chars", 1_000_000),
+            ("session_max_steps", 50),
+        ):
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= upper):
+                raise ValueError(f"behavior.{name} must be an integer between 1 and {upper}")
         # 下界与 behavior/kinds/config.py 一致：非法值在配置层就拒，不让它拖到组装期以裸异常爆。
         for name, lower, upper in _KINDS_INT_BOUNDS:
             value = getattr(self, name)
@@ -156,6 +169,15 @@ class BehaviorConfig:
     @property
     def enabled(self) -> bool:
         return bool(self.primary_subject.strip())
+
+    def session_overrides(self) -> dict[str, Any]:
+        """非空的 ``session_*`` 字段 → ``SessionLaneConfig`` 的同名字段。"""
+
+        return {
+            field.name[len("session_") :]: getattr(self, field.name)
+            for field in fields(self)
+            if field.name.startswith("session_") and getattr(self, field.name) is not None
+        }
 
     def kinds_overrides(self) -> dict[str, Any]:
         """非空的 ``kinds_*`` 字段 → ``BehaviorKindConfig`` 的同名字段（按前缀派生，不双份维护）。"""

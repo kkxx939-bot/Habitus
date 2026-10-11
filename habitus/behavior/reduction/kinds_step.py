@@ -8,6 +8,12 @@
   然后进待定池；类由每晚新增从池里按复现长出来。
 
 lane 由组合根给（``kinds_default_lane``）：融合还没产出 ``source_lane``，等它有了改为逐条读字段。
+
+TODO(BHV-SESSION-LANE-001)：lane 改成每条记录上的事实（方案已定，裁定 35；这一轮只改融合，没动归约与行为树）。
+一条数据属于哪条 lane 由上游送进来时带的来源标识认定，在入口写定，随判断带到 occurrence 与空白上；归类按链
+自己的 lane 取候选，``kinds_default_lane`` 删掉。现状：整个部署只能设一个 lane（默认 session）。只跑会话 lane 时
+结果是对的；两条 lane 同时跑时，物理 lane 的记录会被拿去和会话 lane 的类比。会话 lane 的判断现在可以从凭据的
+来源身份（``session/<会话>``）认出来，但行为树上还没有放 lane 的字段。
 """
 
 from __future__ import annotations

@@ -4,7 +4,6 @@ import asyncio
 
 import pytest
 
-from habitus.conversation.projection import ConversationBehaviorProjectionConsumer, ConversationBehaviorProjector
 from habitus.conversation.source import (
     ConversationConsumerDelivery,
     ConversationConsumerExecutionFence,
@@ -19,8 +18,8 @@ from habitus.infrastructure.store.contracts import LockToken, PathLock
 from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from tests.unit.conversation.source_v2_helpers import (
     NOW,
+    FakeBehaviorConsumer,
     FakeMemoryConsumer,
-    WrappedBehaviorConsumer,
     delivery,
     source,
     stores,
@@ -70,7 +69,7 @@ def test_same_source_consumer_concurrency_executes_only_once_with_lock_inside_re
 
 def test_different_processor_fingerprints_share_one_execution_lock_and_first_outcome_wins(tmp_path) -> None:
     async def scenario() -> None:
-        sources, outcomes, memory_outputs, projection_outputs = stores(tmp_path)
+        sources, outcomes, memory_outputs, behavior_outputs = stores(tmp_path)
         entered = asyncio.Event()
         release = asyncio.Event()
         first_memory = FakeMemoryConsumer(
@@ -80,12 +79,7 @@ def test_different_processor_fingerprints_share_one_execution_lock_and_first_out
             release=release,
         )
         second_memory = FakeMemoryConsumer(memory_outputs, fingerprint_seed="processor-new")
-        behavior = WrappedBehaviorConsumer(
-            ConversationBehaviorProjectionConsumer(
-                ConversationBehaviorProjector(),
-                projection_outputs,
-            )
-        )
+        behavior = FakeBehaviorConsumer(behavior_outputs)
         path_lock = PathLock(ProcessLocalLockStore())
         inspector = ConversationConsumerStateInspector(outcomes)
 
@@ -102,7 +96,7 @@ def test_different_processor_fingerprints_share_one_execution_lock_and_first_out
                 ),
                 {
                     ConversationSourceConsumer.MEMORY: memory,
-                    ConversationSourceConsumer.BEHAVIOR_PROJECTION: behavior,
+                    ConversationSourceConsumer.BEHAVIOR_SESSION: behavior,
                 },
                 clock=lambda: NOW,
             )
@@ -210,7 +204,7 @@ def test_behavior_failure_does_not_delay_or_rollback_memory(tmp_path) -> None:
         memory = await asyncio.wait_for(handle.wait_memory(), timeout=1.0)
         assert memory.append.next_sequence == 1
         with pytest.raises(RuntimeError, match="projection failed"):
-            await handle.wait_behavior_projection()
+            await handle.wait_behavior_session()
         assert service.restore_terminal(handle.envelope, ConversationSourceConsumer.MEMORY) == memory
 
     asyncio.run(scenario())
@@ -226,7 +220,7 @@ def test_blocked_memory_does_not_prevent_behavior_projection_completion(tmp_path
         coordinator = ConversationSourceCoordinator(service.sources, service)
         handle = coordinator.start(source())
         await entered.wait()
-        projected = await asyncio.wait_for(handle.wait_behavior_projection(), timeout=1.0)
+        projected = await asyncio.wait_for(handle.wait_behavior_session(), timeout=1.0)
         assert projected is not None
         assert not handle.memory_task.done()
         release.set()

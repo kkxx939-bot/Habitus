@@ -132,15 +132,12 @@ conversation:
     max_output_files_per_consumer: 4
     max_outcome_bytes: 65536
     max_memory_output_bytes: 33554432
+    max_behavior_session_output_bytes: 1048576   # 行为侧会话 lane 的回执（只列各轮时刻，不存内容）
     recovery_batch_size: 100
     execution_lock_ttl_seconds: 300
     execution_lock_heartbeat_seconds: 60.0
     execution_lock_wait_seconds: 30.0
     shutdown_timeout_seconds: 30.0
-
-  behavior_projection:
-    max_projection_output_bytes: 16777216
-    max_projection_items: 100000
 
   segmentation:
     commit_token_threshold: 12000
@@ -445,6 +442,10 @@ workflow:
 #   worker_shutdown_timeout_seconds: 30
 #   coverage_window_days: 7            # 上游最大补发跨度：重投去重判据；覆盖记录/回执/账本的过期期限（覆盖记录在其交付释放前不过期）
 #   max_fragments_per_segment: 60      # 一次融合的段容量；8k 输出预算下实测 60 条才稳
+#   # 会话 lane 的保护上限；留空取 behavior/fusion/lanes/session/config.py 的默认值
+#   session_max_turn_chars: 8000       # 一轮对话给模型的材料总字数上限（超出先削工具调用中段，人的指令最后才削）
+#   session_max_instruction_chars: 4000  # 人的那条指令最多留多少字
+#   session_max_steps: 3               # 每轮写出来的步骤最多几条
 #   # 基础词表（裁定 6：门槛全部是配置）；留空取 behavior/kinds/config.py 的默认值。标"待定档"的要等真实数据重定
 #   kinds_default_lane: session        # 融合还没产出 source_lane 前，归类请求用哪条 lane（session / physical）
 #   kinds_batch_size: 10               # 白天归类一次调用判几条

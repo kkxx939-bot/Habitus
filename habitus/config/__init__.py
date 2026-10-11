@@ -2,7 +2,6 @@
 
 from habitus.config.behavior import BehaviorConfig
 from habitus.config.conversation import (
-    ConversationBehaviorProjectionConfig,
     ConversationConfig,
     ConversationLifecycleConfig,
     ConversationRangeSummaryCompactionConfig,
@@ -35,7 +34,6 @@ __all__ = [
     "BehaviorConfig",
     "ConfigError",
     "CredentialRegistry",
-    "ConversationBehaviorProjectionConfig",
     "ConversationConfig",
     "ConversationLifecycleConfig",
     "ConversationRangeSummaryCompactionConfig",

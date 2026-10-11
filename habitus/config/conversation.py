@@ -26,6 +26,8 @@ class ConversationSourceConfig:
     max_output_files_per_consumer: int = 4
     max_outcome_bytes: int = 64 * 1024
     max_memory_output_bytes: int = 32 * 1024 * 1024
+    # 行为侧会话 lane 的回执：每份源一份，只列各轮的时刻，不存内容。
+    max_behavior_session_output_bytes: int = 1024 * 1024
     recovery_batch_size: int = 100
     execution_lock_ttl_seconds: int = 300
     execution_lock_heartbeat_seconds: float = 60.0
@@ -39,6 +41,7 @@ class ConversationSourceConfig:
             ("max_output_files_per_consumer", self.max_output_files_per_consumer, 1_000),
             ("max_outcome_bytes", self.max_outcome_bytes, 16 * 1024 * 1024),
             ("max_memory_output_bytes", self.max_memory_output_bytes, 512 * 1024 * 1024),
+            ("max_behavior_session_output_bytes", self.max_behavior_session_output_bytes, 64 * 1024 * 1024),
             ("recovery_batch_size", self.recovery_batch_size, 100_000),
             ("execution_lock_ttl_seconds", self.execution_lock_ttl_seconds, 86_400),
         ):
@@ -63,28 +66,6 @@ class ConversationSourceConfig:
                 )
         if self.execution_lock_heartbeat_seconds > self.execution_lock_ttl_seconds / 3:
             raise ValueError("conversation source heartbeat interval must be at most one third of lock TTL")
-
-
-@dataclass(frozen=True)
-class ConversationBehaviorProjectionConfig:
-    """Behavior Projection Output 的独立容量边界。"""
-
-    max_projection_output_bytes: int = 16 * 1024 * 1024
-    max_projection_items: int = 100_000
-
-    def __post_init__(self) -> None:
-        _bounded_int(
-            self.max_projection_output_bytes,
-            "conversation behavior projection max_projection_output_bytes",
-            minimum=1,
-            maximum=256 * 1024 * 1024,
-        )
-        _bounded_int(
-            self.max_projection_items,
-            "conversation behavior projection max_projection_items",
-            minimum=1,
-            maximum=10_000_000,
-        )
 
 
 @dataclass(frozen=True)
@@ -165,9 +146,6 @@ class ConversationConfig:
 
     journal: ConversationJournalConfig = field(default_factory=ConversationJournalConfig)
     source: ConversationSourceConfig = field(default_factory=ConversationSourceConfig)
-    behavior_projection: ConversationBehaviorProjectionConfig = field(
-        default_factory=ConversationBehaviorProjectionConfig
-    )
     segmentation: ConversationSegmentationConfig = field(default_factory=ConversationSegmentationConfig)
     summary: ConversationSummaryConfig = field(default_factory=ConversationSummaryConfig)
     summary_vector_store: VectorStoreConfig = field(
@@ -183,8 +161,6 @@ class ConversationConfig:
             raise TypeError("conversation.journal must be ConversationJournalConfig")
         if not isinstance(self.source, ConversationSourceConfig):
             raise TypeError("conversation.source must be ConversationSourceConfig")
-        if not isinstance(self.behavior_projection, ConversationBehaviorProjectionConfig):
-            raise TypeError("conversation.behavior_projection must be ConversationBehaviorProjectionConfig")
         if not isinstance(self.segmentation, ConversationSegmentationConfig):
             raise TypeError("conversation.segmentation must be ConversationSegmentationConfig")
         if not isinstance(self.summary, ConversationSummaryConfig):
@@ -222,11 +198,6 @@ class ConversationConfig:
                 ConversationSourceConfig,
                 data.get("source", {}),
                 "config.conversation.source",
-            ),
-            behavior_projection=construct_config(
-                ConversationBehaviorProjectionConfig,
-                data.get("behavior_projection", {}),
-                "config.conversation.behavior_projection",
             ),
             segmentation=construct_config(
                 ConversationSegmentationConfig,
@@ -322,7 +293,6 @@ def _summary_vector_store_config(value: object) -> VectorStoreConfig:
 
 
 __all__ = [
-    "ConversationBehaviorProjectionConfig",
     "ConversationConfig",
     "ConversationLifecycleConfig",
     "ConversationRangeSummaryCompactionConfig",

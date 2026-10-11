@@ -53,9 +53,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from habitus.behavior.kinds.reader import VocabularyReader
 from habitus.config import HabitusConfig
 from habitus.conversation import (
-    ConversationBehaviorProjectionConsumer,
-    ConversationBehaviorProjectionStore,
-    ConversationBehaviorProjector,
+    BehaviorSessionOutputStore,
     ConversationConsumerDelivery,
     ConversationConsumerExecutionFence,
     ConversationConsumerOutcomeStore,
@@ -142,6 +140,7 @@ from habitus.runtime.foresight import SettlementStage, build_foresight_component
 from habitus.runtime.lifecycle import LifecycleWorker
 from habitus.runtime.prediction import build_prediction_components
 from habitus.runtime.runtime import Runtime
+from habitus.runtime.session_lane import BehaviorSessionConsumer
 from habitus.runtime.worker import MemoryWorker
 
 
@@ -528,7 +527,6 @@ def build_runtime(
         retention_planner=retention,
     )
     source_config = conversation_config.source
-    projection_config = conversation_config.behavior_projection
     source_store = ConversationSourceStore(
         config.conversation_root,
         max_files=source_config.max_source_files,
@@ -543,11 +541,10 @@ def build_runtime(
         max_files_per_source=source_config.max_output_files_per_consumer,
         max_file_bytes=source_config.max_memory_output_bytes,
     )
-    behavior_projection_store = ConversationBehaviorProjectionStore(
+    behavior_session_outputs = BehaviorSessionOutputStore(
         config.conversation_root,
         max_files_per_source=source_config.max_output_files_per_consumer,
-        max_file_bytes=projection_config.max_projection_output_bytes,
-        max_items=projection_config.max_projection_items,
+        max_file_bytes=source_config.max_behavior_session_output_bytes,
     )
     memory_conversation_consumer = MemoryConversationConsumer(
         enqueuer,
@@ -555,9 +552,19 @@ def build_runtime(
         boundary_scorer,
         memory_output_store,
     )
-    behavior_projection_consumer = ConversationBehaviorProjectionConsumer(
-        ConversationBehaviorProjector(),
-        behavior_projection_store,
+    # 行为组件要先于会话源的交付组装：会话 lane 是会话源的一个消费者，写的是行为侧的判断存储。
+    behavior_components = build_behavior_components(
+        config,
+        structured_chat=structured_chat,
+        lock_store=resolved_lock.lock_store,
+        path_lock=resolved_lock,
+        observer=operation_observer,
+        span_controller=managed_observability,
+    )
+    # 行为侧没启用时消费者仍要注册（交付层要求名单里每一项都有实现），它把每份源落成"跳过"。
+    behavior_session_consumer = BehaviorSessionConsumer(
+        None if behavior_components is None else behavior_components.session_lane,
+        behavior_session_outputs,
     )
     source_inspector = ConversationConsumerStateInspector(source_outcomes)
     source_fence = ConversationConsumerExecutionFence(
@@ -573,7 +580,7 @@ def build_runtime(
         source_fence,
         {
             ConversationSourceConsumer.MEMORY: memory_conversation_consumer,
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION: behavior_projection_consumer,
+            ConversationSourceConsumer.BEHAVIOR_SESSION: behavior_session_consumer,
         },
         observer=operation_observer,
     )
@@ -608,14 +615,6 @@ def build_runtime(
         observer=operation_observer,
     )
 
-    behavior_components = build_behavior_components(
-        config,
-        structured_chat=structured_chat,
-        lock_store=resolved_lock.lock_store,
-        path_lock=resolved_lock,
-        observer=operation_observer,
-        span_controller=managed_observability,
-    )
     # behavior 关着而 prediction 开着的组合已经在配置层被硬拒（见 HabitusConfig 的跨域校验），
     # 所以这里 behavior_components 为 None 时 prediction 必然也没开，直接跳过即可。
     # 夜批顺序：归约把一天定稿 → 预测树重建 → 结算 →（新语义树各拍，后面几刀接上）。
@@ -679,8 +678,8 @@ def build_runtime(
             sources=source_store,
             source_outcomes=source_outcomes,
             memory_outputs=memory_output_store,
-            behavior_projections=behavior_projection_store,
-            behavior_projection_consumer=behavior_projection_consumer,
+            behavior_session_outputs=behavior_session_outputs,
+            behavior_session_consumer=behavior_session_consumer,
             source_inspector=source_inspector,
             source_fence=source_fence,
             source_delivery=source_delivery,

@@ -30,6 +30,7 @@ from habitus.behavior.fusion.config import BehaviorFusionConfig
 from habitus.behavior.fusion.coverage import BehaviorCoverageIndex
 from habitus.behavior.fusion.derivation import FUSION_VERSION
 from habitus.behavior.fusion.jobs import BehaviorFusionJob, BehaviorFusionJobStore
+from habitus.behavior.fusion.lanes.session.protocol import SESSION_PROTOCOL
 from habitus.behavior.fusion.prompt import FUSION_PROMPT_VERSION
 from habitus.behavior.fusion.receipt import segment_identity
 from habitus.behavior.fusion.receipt_store import BehaviorFusionReceiptStore
@@ -116,7 +117,9 @@ class BehaviorFusionEnqueuer:
         covered = set(self.jobs.covered_observation_ids(fenced=False))
         # 已融合的观测由覆盖索引回答（有窗口、按日过期），不再全量枚举回执目录。
         covered.update(self.coverage.covered_observation_ids(now))
-        envelopes = self.observations.list()
+        # 会话 lane 的凭据不是要切段的帧：它们由会话 lane 自己配上判断与回执（fusion/lanes/session），这里见到就跳过。
+        # 不跳的话，凭据落盘与回执落盘之间崩溃留下的那两条会被当成帧切段、交给逐帧提示词。
+        envelopes = [item for item in self.observations.list() if item.protocol != SESSION_PROTOCOL]
         if not envelopes:
             return BehaviorFusionEnqueueResult((), 0, covered_observations=len(covered))
         # 覆盖记录在其交付仍在存储里时不会过期（``coverage.expire(retain=…)``），所以"处理过没有"

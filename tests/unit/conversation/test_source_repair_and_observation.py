@@ -136,13 +136,13 @@ def test_delivery_observes_behavior_failure_that_nobody_awaits(tmp_path) -> None
         with pytest.raises(RuntimeError):
             await service.ensure_outcome(
                 source_value,
-                ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+                ConversationSourceConsumer.BEHAVIOR_SESSION,
             )
         failures = [
             event
             for event in observer.events
             if event.status is ObservationStatus.FAILURE
-            and event.attributes["consumer"] == ConversationSourceConsumer.BEHAVIOR_PROJECTION.value
+            and event.attributes["consumer"] == ConversationSourceConsumer.BEHAVIOR_SESSION.value
         ]
         assert len(failures) == 1
         assert failures[0].attributes["error_type"] == "RuntimeError"

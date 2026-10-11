@@ -250,6 +250,7 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
         if "model_client" in imported_roots(path)
     )
     assert model_callers == [
+        "behavior/fusion/lanes/session/service.py",
         "behavior/fusion/service.py",
         "behavior/kinds/calls.py",
         "behavior/semantic/generator.py",
@@ -271,6 +272,10 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
         "habitus.behavior.fusion",
         "habitus.behavior.fusion.service",
         "habitus.behavior.fusion.runner",
+        # 会话 lane：service 是它的模型触点，lane 把它和写判断串起来，包根转手两者。
+        "habitus.behavior.fusion.lanes.session",
+        "habitus.behavior.fusion.lanes.session.service",
+        "habitus.behavior.fusion.lanes.session.lane",
     }
 
     def reaches_model_client(module: str, seen: set[str]) -> bool:
@@ -882,7 +887,12 @@ def test_foresight_only_reads_the_derived_trees() -> None:
             for module in imported_modules(path)
         )
     )
-    assert inside_behavior == ["runtime/behavior.py", "runtime/foresight.py", "runtime/unsealed.py"]
+    assert inside_behavior == [
+        "runtime/behavior.py",
+        "runtime/foresight.py",
+        "runtime/session_lane.py",
+        "runtime/unsealed.py",
+    ]
     bridge_imports = {
         module for module in imported_modules(runtime_root / "unsealed.py") if module.startswith("habitus.behavior")
     }
@@ -935,33 +945,55 @@ def test_the_calendar_only_knows_about_dates() -> None:
     assert imported_modules(calendar) == {"__future__", "datetime", "typing"}
 
 
-def test_conversation_source_and_projection_do_not_depend_on_memory_or_behavior() -> None:
+def test_conversation_never_depends_on_memory_or_behavior() -> None:
+    """会话源连同各消费者留在它这边的回执，都不认识记忆与行为。"""
+
     violations = [
         str(path.relative_to(REPOSITORY_ROOT))
         for path in (SRC / "conversation").rglob("*.py")
         if imported_roots(path) & {"memory", "behavior", "runtime", "config", "integrations"}
     ]
     assert violations == []
+    # 行为投影已被会话 lane 取代（裁定 31），不许再长回来。
+    assert not (SRC / "conversation" / "projection").exists()
 
 
-def test_behavior_projection_reads_only_source_envelope_batch() -> None:
-    projection_root = SRC / "conversation" / "projection" / "behavior"
-    modules = sorted(projection_root.glob("*.py"))
-    assert {path.name for path in modules} == {
+def test_the_session_lane_meets_the_conversation_source_only_in_the_composition_root() -> None:
+    """会话 lane 住在行为侧、不认识会话源；会话源也不认识它。两边只在 ``runtime/session_lane.py`` 这一座桥上相遇。"""
+
+    lane_root = SRC / "behavior" / "fusion" / "lanes" / "session"
+    assert {path.name for path in lane_root.glob("*.py")} == {
         "__init__.py",
-        "consumer.py",
+        "config.py",
+        "lane.py",
+        "material.py",
         "model.py",
-        "projector.py",
-        "store.py",
+        "prompt.py",
+        "protocol.py",
+        "recorder.py",
+        "redaction.py",
+        "service.py",
     }
-    source = "\n".join(path.read_text(encoding="utf-8") for path in modules)
-    for path in modules:
-        assert imported_roots(path).isdisjoint({"memory", "behavior", "runtime", "config"})
-    assert "envelope.batch.messages" in source
-    assert "ConversationMessageChunker" not in source
-    assert "ConversationSegment" not in source
-    assert "ConversationSummary" not in source
-    assert "MemoryEditor" not in source
+    for path in lane_root.glob("*.py"):
+        assert imported_roots(path).isdisjoint({"conversation", "pre", "memory", "runtime", "config"})
+    # 本条 lane 只有 service 调模型；取材料、抹密钥、校验、写判断都是确定性的。
+    assert sorted(path.name for path in lane_root.glob("*.py") if "model_client" in imported_roots(path)) == [
+        "service.py"
+    ]
+    bridges = sorted(
+        str(path.relative_to(SRC))
+        for path in SRC.rglob("*.py")
+        if "__pycache__" not in path.parts
+        and any(module.startswith("habitus.behavior.fusion.lanes.session") for module in imported_modules(path))
+        and path.relative_to(SRC).parts[0] != "behavior"
+    )
+    assert bridges == ["runtime/behavior.py", "runtime/session_lane.py"]
+    # 逐帧融合只认得会话 lane 的协议名（入队时跳过它的凭据），不碰它的其余部分。
+    assert {
+        module
+        for module in imported_modules(SRC / "behavior" / "fusion" / "enqueue.py")
+        if module.startswith("habitus.behavior.fusion.lanes")
+    } == {"habitus.behavior.fusion.lanes.session.protocol"}
 
 
 def test_memory_conversation_consumer_wraps_the_single_existing_enqueuer_chain() -> None:

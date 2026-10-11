@@ -5,11 +5,7 @@ import json
 
 import pytest
 
-from habitus.conversation.projection import (
-    ConversationBehaviorProjectionBatch,
-    ConversationBehaviorProjectionItem,
-    ConversationBehaviorProjectionKind,
-)
+from habitus.conversation.behavior_session import BehaviorSessionOutput, BehaviorSessionTurnRecord
 from habitus.conversation.source import (
     ConversationConsumerCorruptionError,
     ConversationConsumerDeliveryState,
@@ -72,7 +68,7 @@ def test_unique_old_processor_output_is_adopted_after_upgrade(tmp_path) -> None:
             service.fence,
             {
                 ConversationSourceConsumer.MEMORY: new_memory,
-                ConversationSourceConsumer.BEHAVIOR_PROJECTION: behavior,
+                ConversationSourceConsumer.BEHAVIOR_SESSION: behavior,
             },
             clock=lambda: NOW,
         )
@@ -83,26 +79,26 @@ def test_unique_old_processor_output_is_adopted_after_upgrade(tmp_path) -> None:
     asyncio.run(scenario())
 
 
-def test_recovery_adopts_projection_output_without_duplicate_projection(tmp_path) -> None:
+def test_recovery_adopts_behavior_output_without_running_the_consumer_again(tmp_path) -> None:
     async def scenario() -> None:
         service, _memory, behavior = delivery(tmp_path)
         source_value = service.sources.put(source())
         async with service.fence.acquire(
             source_value,
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+            ConversationSourceConsumer.BEHAVIOR_SESSION,
         ) as lease:
             await behavior.execute(source_value, lease)
         assert behavior.calls == 1
         assert service.inspect(
             source_value,
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+            ConversationSourceConsumer.BEHAVIOR_SESSION,
         ).state is ConversationConsumerDeliveryState.OUTPUT_READY
         recovery = ConversationSourceRecovery(service.sources, service, batch_size=10)
         await recovery.recover_pending()
         assert behavior.calls == 1
         assert service.inspect(
             source_value,
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+            ConversationSourceConsumer.BEHAVIOR_SESSION,
         ).state is ConversationConsumerDeliveryState.COMMITTED
 
     asyncio.run(scenario())
@@ -213,32 +209,29 @@ def test_outcome_record_digest_mismatch_is_corrupted(tmp_path) -> None:
     asyncio.run(scenario())
 
 
-def test_skipped_outcome_with_projection_output_is_corrupted(tmp_path) -> None:
+def test_skipped_outcome_with_behavior_output_is_corrupted(tmp_path) -> None:
     async def scenario() -> None:
         service, _memory, behavior = delivery(tmp_path)
         source_value = service.sources.put(source(role=ConversationMessageRole.COMPLETION))
         skipped = await service.ensure_outcome(
             source_value,
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+            ConversationSourceConsumer.BEHAVIOR_SESSION,
         )
         assert skipped.outcome.state is ConversationConsumerOutcomeState.SKIPPED
-        item = ConversationBehaviorProjectionItem.create(
-            source_id=source_value.source_id,
-            message=source_value.batch.messages[0],
-            projection_kind=ConversationBehaviorProjectionKind.USER_CONVERSATION_INPUT,
-            payload={"content": "forced-invalid-output"},
-        )
-        output = ConversationBehaviorProjectionBatch.create(
+        # 已经落了"跳过"，却又冒出一份回执：两者矛盾，只能判损坏。
+        output = BehaviorSessionOutput.create(
             source=source_value,
             processor_fingerprint=behavior.processor_fingerprint,
-            projector_version=behavior.inner.projector.projector_version,
-            items=(item,),
-            recorded_at=NOW,
+            turns=(
+                BehaviorSessionTurnRecord(
+                    start_sequence=0, end_sequence=0, instructed_at=NOW, completed_at=NOW, recorded=True
+                ),
+            ),
         )
         behavior.output_store.put(source_value, output)
         assert service.inspect(
             source_value,
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+            ConversationSourceConsumer.BEHAVIOR_SESSION,
         ).state is ConversationConsumerDeliveryState.CORRUPTED
 
     asyncio.run(scenario())
@@ -252,7 +245,7 @@ def test_recovery_only_runs_missing_behavior_when_memory_is_committed(tmp_path) 
         memory_calls = memory.calls
         recovery = ConversationSourceRecovery(service.sources, service, batch_size=10)
         results = await recovery.recover_pending()
-        assert [item.consumer for item in results] == [ConversationSourceConsumer.BEHAVIOR_PROJECTION]
+        assert [item.consumer for item in results] == [ConversationSourceConsumer.BEHAVIOR_SESSION]
         assert behavior.calls == 1
         assert memory.calls == memory_calls
 

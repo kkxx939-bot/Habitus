@@ -1,13 +1,9 @@
-"""Conversation 原始来源耐久交付与独立投影。"""
+"""Conversation 原始来源的耐久交付，以及各消费者留在这边的回执。"""
 
-from habitus.conversation.projection import (
-    CONVERSATION_BEHAVIOR_PROJECTOR_VERSION,
-    ConversationBehaviorProjectionBatch,
-    ConversationBehaviorProjectionConsumer,
-    ConversationBehaviorProjectionItem,
-    ConversationBehaviorProjectionKind,
-    ConversationBehaviorProjectionStore,
-    ConversationBehaviorProjector,
+from habitus.conversation.behavior_session import (
+    BehaviorSessionOutput,
+    BehaviorSessionOutputStore,
+    BehaviorSessionTurnRecord,
 )
 from habitus.conversation.source import (
     ConsumerOutputRef,
@@ -42,14 +38,10 @@ from habitus.conversation.source import (
 )
 
 __all__ = [
-    "CONVERSATION_BEHAVIOR_PROJECTOR_VERSION",
+    "BehaviorSessionOutput",
+    "BehaviorSessionOutputStore",
+    "BehaviorSessionTurnRecord",
     "ConsumerOutputRef",
-    "ConversationBehaviorProjectionBatch",
-    "ConversationBehaviorProjectionConsumer",
-    "ConversationBehaviorProjectionItem",
-    "ConversationBehaviorProjectionKind",
-    "ConversationBehaviorProjectionStore",
-    "ConversationBehaviorProjector",
     "ConversationConsumerBrokenOutcomeError",
     "ConversationConsumerCorruptionError",
     "ConversationConsumerDelivery",

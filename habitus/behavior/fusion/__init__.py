@@ -228,6 +228,16 @@ COMMITTED 即 discard；判断与交付在链发布、账本写完之后由归�
 - 生产 worker 之外的驱动（脚本、运维手动跑）若不续租，长调用/网络重试超过 300s 就丢租约、
   作业被重新认领并计一次 attempts；worker 自带心跳没这个问题。运维脚本一律复用
   BehaviorFusionWorker._execute_with_heartbeat，不要裸调 runner.execute。
+
+## 两条 lane
+
+融合按 lane 分开做（裁定 31、35）。会话 lane 在 ``lanes/session``：读一轮对话，写一条"这一轮在做什么"的判断，
+不判续、不合并。本包其余部分（入队、切段、作业、提示词、逐帧归属、装配）是为逐帧观测写的那条管线。
+
+TODO(BHV-SESSION-LANE-001)：逐帧管线的去留没定。物理 lane 的数据源已改为 S12、上游送来的就是处理好的行为数据
+（裁定 35），思路与会话 lane 相同——上游送来一条、融合出一条记录交给词表；但 S12 送来的数据长什么样还没有，
+所以这条管线现在原样留着，没删也没改（只让入队扫描跳过会话 lane 的凭据）。等数据结构定了：新写
+``lanes/physical``，本包里只为逐帧观测服务的切段、跨窗续写、逐帧归属随之删掉。
 """
 
 from habitus.behavior.fusion.assembly import assemble_judgement_batch

@@ -5,10 +5,10 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from habitus.conversation.projection import (
-    ConversationBehaviorProjectionConsumer,
-    ConversationBehaviorProjectionStore,
-    ConversationBehaviorProjector,
+from habitus.conversation.behavior_session import (
+    BehaviorSessionOutput,
+    BehaviorSessionOutputStore,
+    BehaviorSessionTurnRecord,
 )
 from habitus.conversation.source import (
     ConversationConsumerDelivery,
@@ -162,21 +162,46 @@ class FakeMemoryConsumer:
         )
 
 
-class WrappedBehaviorConsumer:
-    consumer = ConversationSourceConsumer.BEHAVIOR_PROJECTION
+def behavior_session_output(
+    source_value: ConversationSourceEnvelope, processor_fingerprint: str
+) -> BehaviorSessionOutput | None:
+    """按"人说的话"给一份源写出回执（一条人说的话算一轮）；没有人说的话就没有回执。"""
+
+    turns = tuple(
+        BehaviorSessionTurnRecord(
+            start_sequence=item.sequence,
+            end_sequence=item.sequence,
+            instructed_at=item.occurred_at,
+            completed_at=item.occurred_at,
+            recorded=True,
+        )
+        for item in source_value.batch.messages
+        if item.role is ConversationMessageRole.PROMPT
+    )
+    if not turns:
+        return None
+    return BehaviorSessionOutput.create(
+        source=source_value, processor_fingerprint=processor_fingerprint, turns=turns
+    )
+
+
+class FakeBehaviorConsumer:
+    """行为侧会话 lane 消费者的替身：不调模型，回执只由这份源决定。真的那个在 ``runtime/session_lane.py``。"""
+
+    consumer = ConversationSourceConsumer.BEHAVIOR_SESSION
     ordered_within_conversation = False
 
     def __init__(
         self,
-        inner: ConversationBehaviorProjectionConsumer,
+        output_store: BehaviorSessionOutputStore,
         *,
+        fingerprint_seed: str = "behavior-session-processor-a",
         entered: asyncio.Event | None = None,
         release: asyncio.Event | None = None,
         fail: BaseException | None = None,
     ) -> None:
-        self.inner = inner
-        self.output_store = inner.output_store
-        self.processor_fingerprint = inner.processor_fingerprint
+        self.output_store = output_store
+        self.processor_fingerprint = canonical_digest(fingerprint_seed)
         self.entered = entered
         self.release = release
         self.fail = fail
@@ -194,7 +219,21 @@ class WrappedBehaviorConsumer:
             await self.release.wait()
         if self.fail is not None:
             raise self.fail
-        return await self.inner.execute(envelope, lease)
+        output = behavior_session_output(envelope, self.processor_fingerprint)
+        if output is None:
+            return ConversationConsumerRunResult(
+                disposition=ConversationConsumerRunDisposition.SKIPPED,
+                output_ref=None,
+                skip_reason="NO_TURNS",
+                runtime_result=None,
+            )
+        stored = await lease.run_fenced(lambda: self.output_store.put(envelope, output))
+        return ConversationConsumerRunResult(
+            disposition=ConversationConsumerRunDisposition.OUTPUT_WRITTEN,
+            output_ref=self.output_store.ref(stored),
+            skip_reason=None,
+            runtime_result=stored,
+        )
 
 
 def stores(root: Path):
@@ -205,13 +244,12 @@ def stores(root: Path):
         max_files_per_source=4,
         max_file_bytes=2_000_000,
     )
-    projection_outputs = ConversationBehaviorProjectionStore(
+    behavior_outputs = BehaviorSessionOutputStore(
         root,
         max_files_per_source=4,
         max_file_bytes=2_000_000,
-        max_items=1_000,
     )
-    return sources, outcomes, memory_outputs, projection_outputs
+    return sources, outcomes, memory_outputs, behavior_outputs
 
 
 class RecordingObserver:
@@ -228,18 +266,13 @@ def delivery(
     root: Path,
     *,
     memory: FakeMemoryConsumer | None = None,
-    behavior: WrappedBehaviorConsumer | None = None,
+    behavior: FakeBehaviorConsumer | None = None,
     path_lock: PathLock | None = None,
     observer: Observer | None = None,
 ):
-    sources, outcomes, memory_outputs, projection_outputs = stores(root)
+    sources, outcomes, memory_outputs, behavior_outputs = stores(root)
     memory_consumer = memory or FakeMemoryConsumer(memory_outputs)
-    behavior_consumer = behavior or WrappedBehaviorConsumer(
-        ConversationBehaviorProjectionConsumer(
-            ConversationBehaviorProjector(),
-            projection_outputs,
-        )
-    )
+    behavior_consumer = behavior or FakeBehaviorConsumer(behavior_outputs)
     inspector = ConversationConsumerStateInspector(outcomes)
     fence = ConversationConsumerExecutionFence(
         path_lock or PathLock(ProcessLocalLockStore()),
@@ -254,7 +287,7 @@ def delivery(
         fence,
         {
             ConversationSourceConsumer.MEMORY: memory_consumer,
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION: behavior_consumer,
+            ConversationSourceConsumer.BEHAVIOR_SESSION: behavior_consumer,
         },
         clock=lambda: NOW,
         observer=observer,

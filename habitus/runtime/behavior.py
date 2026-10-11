@@ -26,7 +26,7 @@ import uuid
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext, suppress
 from dataclasses import dataclass
-from datetime import datetime, tzinfo
+from datetime import UTC, datetime, tzinfo
 
 from habitus.behavior.fusion import (
     BehaviorFusionEnqueuer,
@@ -43,6 +43,12 @@ from habitus.behavior.fusion.config import (
 )
 from habitus.behavior.fusion.coverage import BehaviorCoverageIndex
 from habitus.behavior.fusion.enqueue import DEFAULT_QUIET_PERIOD_SECONDS
+from habitus.behavior.fusion.lanes.session import (
+    SessionLane,
+    SessionLaneConfig,
+    SessionTurnDescriber,
+    SessionTurnRecorder,
+)
 from habitus.behavior.kinds.calls import KindModelCaller
 from habitus.behavior.kinds.classify import DaytimeClassifier
 from habitus.behavior.kinds.config import BehaviorKindConfig
@@ -97,6 +103,7 @@ class BehaviorRuntimeComponents:
     tree: BehaviorTree
     kind_store: BehaviorKindStore
     reduction_runner: BehaviorReductionRunner
+    session_lane: SessionLane
     fusion_worker: BehaviorFusionWorker
     reduction_worker: BehaviorReductionWorker
 
@@ -111,6 +118,7 @@ class BehaviorRuntimeComponents:
             ("tree", self.tree, BehaviorTree),
             ("kind_store", self.kind_store, BehaviorKindStore),
             ("reduction_runner", self.reduction_runner, BehaviorReductionRunner),
+            ("session_lane", self.session_lane, SessionLane),
             ("fusion_worker", self.fusion_worker, BehaviorFusionWorker),
             ("reduction_worker", self.reduction_worker, BehaviorReductionWorker),
         )
@@ -132,6 +140,11 @@ class BehaviorRuntimeComponents:
             (self.reduction_runner.kinds.store, self.kind_store, "reduction kind store"),
             (self.enqueuer.coverage, self.fusion_runner.coverage, "coverage index (enqueue/fusion)"),
             (self.reduction_runner.coverage, self.fusion_runner.coverage, "coverage index (reduction/fusion)"),
+            # 会话 lane 与逐帧融合写的是同一套判断、回执、覆盖索引，归约只读这一套。
+            (self.session_lane.recorder.observations, self.observations, "session lane observations"),
+            (self.session_lane.recorder.judgements, self.judgements, "session lane judgements"),
+            (self.session_lane.recorder.receipts, self.receipts, "session lane receipts"),
+            (self.session_lane.recorder.coverage, self.fusion_runner.coverage, "coverage index (session lane/fusion)"),
             (self.fusion_worker.runner, self.fusion_runner, "fusion worker runner"),
             (self.fusion_worker.enqueuer, self.enqueuer, "fusion worker enqueuer"),
             (self.reduction_worker.runner, self.reduction_runner, "reduction worker runner"),
@@ -380,6 +393,20 @@ def build_behavior_components(
         ),
         observer=observer,
     )
+    zone = config.locale.zone()
+    session_config = SessionLaneConfig(**behavior_config.session_overrides())
+    session_lane = SessionLane(
+        SessionTurnDescriber(structured_chat, zone=zone, config=session_config),
+        SessionTurnRecorder(
+            observations=observations,
+            judgements=judgements,
+            receipts=receipts,
+            coverage=coverage,
+            primary_subject=behavior_config.primary_subject,
+            zone=zone,
+            clock=clock if clock is not None else (lambda: datetime.now(UTC)),
+        ),
+    )
     return BehaviorRuntimeComponents(
         observations=observations,
         judgements=judgements,
@@ -390,6 +417,7 @@ def build_behavior_components(
         tree=tree,
         kind_store=kind_store,
         reduction_runner=reduction_runner,
+        session_lane=session_lane,
         fusion_worker=BehaviorFusionWorker(
             enqueuer,
             fusion_runner,

@@ -7,8 +7,7 @@ from dataclasses import dataclass, field
 from typing import cast
 
 from habitus.conversation import (
-    ConversationBehaviorProjectionConsumer,
-    ConversationBehaviorProjectionStore,
+    BehaviorSessionOutputStore,
     ConversationConsumerDelivery,
     ConversationConsumerExecutionFence,
     ConversationConsumerOutcomeStore,
@@ -58,6 +57,7 @@ from habitus.runtime.behavior import BehaviorRuntimeComponents
 from habitus.runtime.foresight import ForesightRuntimeComponents
 from habitus.runtime.lifecycle import LifecycleWorker
 from habitus.runtime.prediction import PredictionRuntimeComponents
+from habitus.runtime.session_lane import BehaviorSessionConsumer
 from habitus.runtime.worker import MemoryWorker
 
 
@@ -150,13 +150,13 @@ class RuntimeModels:
 
 @dataclass(frozen=True)
 class RuntimeConversation:
-    """Conversation Source、原文、独立投影、切段与摘要服务。"""
+    """Conversation Source、原文、各消费者的回执、切段与摘要服务。"""
 
     sources: ConversationSourceStore
     source_outcomes: ConversationConsumerOutcomeStore
     memory_outputs: MemoryConversationOutputStore
-    behavior_projections: ConversationBehaviorProjectionStore
-    behavior_projection_consumer: ConversationBehaviorProjectionConsumer
+    behavior_session_outputs: BehaviorSessionOutputStore
+    behavior_session_consumer: BehaviorSessionConsumer
     source_inspector: ConversationConsumerStateInspector
     source_fence: ConversationConsumerExecutionFence
     source_delivery: ConversationConsumerDelivery
@@ -178,10 +178,10 @@ class RuntimeConversation:
             raise TypeError("source_outcomes must be ConversationConsumerOutcomeStore")
         if not isinstance(self.memory_outputs, MemoryConversationOutputStore):
             raise TypeError("memory_outputs must be MemoryConversationOutputStore")
-        if not isinstance(self.behavior_projections, ConversationBehaviorProjectionStore):
-            raise TypeError("behavior_projections must be ConversationBehaviorProjectionStore")
-        if not isinstance(self.behavior_projection_consumer, ConversationBehaviorProjectionConsumer):
-            raise TypeError("behavior_projection_consumer must be ConversationBehaviorProjectionConsumer")
+        if not isinstance(self.behavior_session_outputs, BehaviorSessionOutputStore):
+            raise TypeError("behavior_session_outputs must be BehaviorSessionOutputStore")
+        if not isinstance(self.behavior_session_consumer, BehaviorSessionConsumer):
+            raise TypeError("behavior_session_consumer must be BehaviorSessionConsumer")
         if not isinstance(self.source_inspector, ConversationConsumerStateInspector):
             raise TypeError("source_inspector must be ConversationConsumerStateInspector")
         if not isinstance(self.source_fence, ConversationConsumerExecutionFence):
@@ -230,17 +230,17 @@ class RuntimeConversation:
             self.sources.root
             == self.source_outcomes.root
             == self.memory_outputs.root
-            == self.behavior_projections.root
+            == self.behavior_session_outputs.root
             == self.journal.layout.root
         ):
-            raise ValueError("Conversation Source, Projection and Journal must share one root")
-        if self.behavior_projection_consumer.store is not self.behavior_projections:
-            raise ValueError("Behavior Projection Consumer must use the shared outbox")
+            raise ValueError("Conversation Source, consumer outputs and Journal must share one root")
+        if self.behavior_session_consumer.store is not self.behavior_session_outputs:
+            raise ValueError("Behavior session consumer must use the shared receipt store")
         if (
-            self.source_delivery.consumers[ConversationSourceConsumer.BEHAVIOR_PROJECTION]
-            is not self.behavior_projection_consumer
+            self.source_delivery.consumers[ConversationSourceConsumer.BEHAVIOR_SESSION]
+            is not self.behavior_session_consumer
         ):
-            raise ValueError("Source delivery must use the shared Behavior Projection Consumer")
+            raise ValueError("Source delivery must use the shared behavior session consumer")
         if self.source_coordinator.sources is not self.sources:
             raise ValueError("Source Coordinator must use the shared Source Store")
         if self.source_coordinator.delivery is not self.source_delivery:

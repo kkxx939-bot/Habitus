@@ -6,10 +6,6 @@ from datetime import timedelta
 
 import pytest
 
-from habitus.conversation.projection import (
-    ConversationBehaviorProjectionKind,
-    ConversationBehaviorProjector,
-)
 from habitus.conversation.source import (
     ConversationConsumerDeliveryState,
     ConversationConsumerOutcomeState,
@@ -108,42 +104,6 @@ def test_source_read_verifies_full_record_digest(tmp_path) -> None:
         source_store.read(value.source_id)
 
 
-def test_behavior_projector_reads_original_source_batch_and_keeps_mapping_rules() -> None:
-    conversation_id = "behavior-source"
-    messages = (
-        message(0, role=ConversationMessageRole.PROMPT, content="p" * 20_000, conversation_id=conversation_id),
-        message(1, role=ConversationMessageRole.COMPLETION, content="internal", conversation_id=conversation_id),
-    )
-    batch = ConversationBatch(conversation_id, messages)
-    request = canonical_digest(
-        {
-            "conversation_id": conversation_id,
-            "started_on": "2026-08-08",
-            "protocol": "normalized",
-            "batch": batch.to_dict(),
-            "after_turn": False,
-            "omit_tool_call_ids": [],
-        }
-    )
-    envelope = ConversationSourceEnvelope.create(
-        conversation_id=conversation_id,
-        started_on=messages[0].occurred_at.date(),
-        protocol="normalized",
-        batch=batch,
-        after_turn=False,
-        omit_tool_call_ids=frozenset(),
-        delivery_id=canonical_digest("behavior-delivery"),
-        request_digest=request,
-        recorded_at=NOW,
-    )
-    projected = ConversationBehaviorProjector().project(envelope)
-    assert projected is not None
-    assert len(projected.items) == 1
-    assert projected.items[0].source_message_id == messages[0].message_id
-    assert projected.items[0].projection_kind is ConversationBehaviorProjectionKind.USER_CONVERSATION_INPUT
-    assert projected.items[0].payload == {"content": "p" * 20_000}
-
-
 def test_completion_only_source_creates_skipped_outcome_without_output(tmp_path) -> None:
     async def scenario() -> None:
         source_value = source(role=ConversationMessageRole.COMPLETION)
@@ -151,14 +111,14 @@ def test_completion_only_source_creates_skipped_outcome_without_output(tmp_path)
         service.sources.put(source_value)
         ensured = await service.ensure_outcome(
             source_value,
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+            ConversationSourceConsumer.BEHAVIOR_SESSION,
         )
         assert ensured.outcome.state is ConversationConsumerOutcomeState.SKIPPED
-        assert ensured.outcome.skip_reason == "NO_ELIGIBLE_MESSAGES"
+        assert ensured.outcome.skip_reason == "NO_TURNS"
         assert behavior.output_store.list(source_value) == ()
         assert service.inspect(
             source_value,
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+            ConversationSourceConsumer.BEHAVIOR_SESSION,
         ).state is ConversationConsumerDeliveryState.SKIPPED
 
     asyncio.run(scenario())
@@ -178,10 +138,10 @@ def test_coordinator_start_returns_before_blocked_behavior_and_memory_wait_is_in
         memory = await asyncio.wait_for(handle.wait_memory(), timeout=1.0)
         assert memory.append.next_sequence == 1
         await asyncio.wait_for(entered.wait(), timeout=1.0)
-        assert not handle.behavior_projection_task.done()
+        assert not handle.behavior_session_task.done()
         assert handle.inspect_memory().state is ConversationConsumerDeliveryState.COMMITTED
         release.set()
-        projected = await handle.wait_behavior_projection()
+        projected = await handle.wait_behavior_session()
         assert projected is not None
 
     asyncio.run(scenario())

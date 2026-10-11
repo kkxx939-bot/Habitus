@@ -10,6 +10,7 @@ import pytest
 
 from habitus.conversation import (
     ConversationConsumerDeliveryState,
+    ConversationConsumerOutcomeState,
     ConversationSourceConsumer,
     ConversationSourceEnvelope,
     conversation_source_request_digest,
@@ -34,13 +35,12 @@ def test_runtime_start_recovers_durable_source_with_only_missing_outcomes(tmp_pa
         )
         runtime.initialize()
         source_config = runtime.config.conversation.source
-        projection_config = runtime.config.conversation.behavior_projection
         assert runtime.components.conversation.sources.max_file_bytes == source_config.max_envelope_bytes
         assert runtime.components.conversation.source_outcomes.max_file_bytes == source_config.max_outcome_bytes
         assert runtime.components.conversation.memory_outputs.max_file_bytes == source_config.max_memory_output_bytes
         assert (
-            runtime.components.conversation.behavior_projections.max_file_bytes
-            == projection_config.max_projection_output_bytes
+            runtime.components.conversation.behavior_session_outputs.max_file_bytes
+            == source_config.max_behavior_session_output_bytes
         )
         started_on = date(2026, 8, 7)
         batch = ConversationBatch("source-recovery", closed_turn())
@@ -66,7 +66,7 @@ def test_runtime_start_recovers_durable_source_with_only_missing_outcomes(tmp_pa
         runtime.components.conversation.sources.put(envelope)
         assert tuple(entry.consumer for entry in runtime.components.conversation.source_recovery.pending()) == (
             ConversationSourceConsumer.MEMORY,
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+            ConversationSourceConsumer.BEHAVIOR_SESSION,
         )
 
         await runtime.start()
@@ -77,18 +77,16 @@ def test_runtime_start_recovers_durable_source_with_only_missing_outcomes(tmp_pa
             envelope.source_id,
             ConversationSourceConsumer.MEMORY,
         )
-        projection_outcome = runtime.components.conversation.source_outcomes.read(
+        behavior_outcome = runtime.components.conversation.source_outcomes.read(
             envelope.source_id,
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+            ConversationSourceConsumer.BEHAVIOR_SESSION,
         )
         assert memory_outcome is not None
-        assert projection_outcome is not None
-        assert projection_outcome.output_ref is not None
-        projection = runtime.components.conversation.behavior_projections.read(
-            envelope,
-            projection_outcome.output_ref.output_id,
-        )
-        assert projection is not None and projection.source_id == envelope.source_id
+        # 这份配置没有启用行为侧：会话 lane 的消费者照样注册，把这份源落成"跳过"，不留回执。
+        assert behavior_outcome is not None
+        assert behavior_outcome.state is ConversationConsumerOutcomeState.SKIPPED
+        assert behavior_outcome.skip_reason == "BEHAVIOR_DISABLED"
+        assert runtime.components.conversation.behavior_session_outputs.list(envelope) == ()
         await runtime.close()
 
     asyncio.run(scenario())
@@ -104,7 +102,7 @@ def test_runtime_append_returns_after_memory_without_waiting_for_blocked_behavio
             path_lock=PathLock(ProcessLocalLockStore()),
         )
         runtime.initialize()
-        consumer = runtime.components.conversation.behavior_projection_consumer
+        consumer = runtime.components.conversation.behavior_session_consumer
         original = consumer.execute
         entered = asyncio.Event()
         release = asyncio.Event()
@@ -124,7 +122,7 @@ def test_runtime_append_returns_after_memory_without_waiting_for_blocked_behavio
         envelope = runtime.components.conversation.sources.list()[0]
         assert runtime.components.conversation.source_delivery.inspect(
             envelope,
-            ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+            ConversationSourceConsumer.BEHAVIOR_SESSION,
         ).state is ConversationConsumerDeliveryState.PENDING
         release.set()
         assert await runtime.components.conversation.source_coordinator.wait_for_idle(1.0)
@@ -162,12 +160,13 @@ def test_runtime_memory_wait_can_remain_blocked_while_behavior_finishes(tmp_path
             envelope = runtime.components.conversation.sources.list()[0]
             state = runtime.components.conversation.source_delivery.inspect(
                 envelope,
-                ConversationSourceConsumer.BEHAVIOR_PROJECTION,
+                ConversationSourceConsumer.BEHAVIOR_SESSION,
             ).state
-            if state is ConversationConsumerDeliveryState.COMMITTED:
+            # 这份配置没有启用行为侧，会话 lane 的终态是"跳过"；要验的是它不必等记忆那边。
+            if state is ConversationConsumerDeliveryState.SKIPPED:
                 break
             await asyncio.sleep(0.01)
-        assert state is ConversationConsumerDeliveryState.COMMITTED
+        assert state is ConversationConsumerDeliveryState.SKIPPED
         assert not append.done()
         release.set()
         await append
@@ -194,7 +193,7 @@ def test_runtime_close_timeout_is_explicit_and_does_not_cancel_behavior_consumer
             path_lock=PathLock(ProcessLocalLockStore()),
         )
         runtime.initialize()
-        consumer = runtime.components.conversation.behavior_projection_consumer
+        consumer = runtime.components.conversation.behavior_session_consumer
         original = consumer.execute
         entered = asyncio.Event()
         release = asyncio.Event()
@@ -215,7 +214,7 @@ def test_runtime_close_timeout_is_explicit_and_does_not_cancel_behavior_consumer
         assert runtime.state is RuntimeState.CLOSING
         assert tuple(
             (item.source_id, item.consumer) for item in captured.value.pending_deliveries
-        ) == ((envelope.source_id, ConversationSourceConsumer.BEHAVIOR_PROJECTION),)
+        ) == ((envelope.source_id, ConversationSourceConsumer.BEHAVIOR_SESSION),)
         assert runtime.components.conversation.source_coordinator.running_task_count == 1
         release.set()
         assert await runtime.components.conversation.source_coordinator.wait_for_idle(1.0)

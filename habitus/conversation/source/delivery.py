@@ -171,7 +171,7 @@ class ConversationConsumerDelivery:
         #
         # - 本方法的两次耐久写本身就是幂等的：Output 只创建不覆盖且撞车时按内容
         #   摘要复用，Outcome 由第一份固定。因此对于 execute 是来源纯函数的
-        #   Consumer（Behavior 投影就是），锁避免的是重复计算，而不是错误数据。
+        #   Consumer，锁避免的是重复计算，而不是错误数据。
         # - 对 execute 带外部副作用的 Consumer 它仍然承重：Memory 会写 Conversation
         #   journal 并派发 Job，重复执行不是白算一遍那么简单。
         # - 对跨版本并发它始终承重：两个 processor fingerprint 会写出两个不同

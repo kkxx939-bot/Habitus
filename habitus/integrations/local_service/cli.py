@@ -680,7 +680,7 @@ def _parser() -> argparse.ArgumentParser:
     repair.add_argument(
         "--consumer",
         required=True,
-        choices=("memory", "behavior_projection"),
+        choices=("memory", "behavior_session"),
         help="要修复的 Consumer",
     )
     repair.add_argument(

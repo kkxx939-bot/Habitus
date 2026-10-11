@@ -17,6 +17,12 @@
 
 两者取最小、再回退一个 lookback，得到封口视界；``evidence_ready_at`` 早于视界的判断机械闭合。
 lookback 只准从 ``behavior.fusion.config`` import——融合"还能续"与归约"已封口"必须是同一个数。
+
+TODO(BHV-SESSION-LANE-001)：会话 lane 的记录不必等这一个窗口（方案已定，裁定 31；这一轮只改融合，没动归约）。
+会话 lane 一轮一条、不带任何续接关系（``fusion/lanes/session``），"还可能被后面的判断引用"对它不成立，
+所以它的链一送到就可以封口落树。现状：它和逐帧融合的链用同一个视界，要等满 ``lookback_seconds``（默认 1 小时）。
+改法：封口判据按链的来源分——只由会话 lane 凭据（协议 ``habitus_session_turn_v1``）支撑的链不看墙钟窗口。
+影响：只改落树的时刻，不改落树的内容。例：19:55 送到的一轮现在 20:55 才落树，改后 19:55 落树。
 """
 
 from __future__ import annotations

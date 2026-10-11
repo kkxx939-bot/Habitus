@@ -14,7 +14,7 @@ from habitus.behavior.kinds.classify import DaytimeClassifier, OccurrenceContent
 from habitus.behavior.kinds.config import BehaviorKindConfig
 from habitus.behavior.kinds.ids import ClassId, Lane
 from habitus.behavior.kinds.model import BehaviorClass, ClassOrigin, Vocabulary
-from habitus.behavior.kinds.revision import AnchorGate, Member, Reviser, RevisionResult, cooling_classes
+from habitus.behavior.kinds.revision import AnchorGate, Member, Reviser, RevisionResult
 from habitus.behavior.kinds.schedule import JobState, nightly_due, revision_due, revision_period
 from tests.unit.behavior.kinds_fixtures import (
     EDIT,

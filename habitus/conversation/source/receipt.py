@@ -29,7 +29,8 @@ OUTPUT_IDENTITY_SCHEMA = "conversation_consumer_output_identity_v1"
 
 class ConversationSourceConsumer(str, Enum):
     MEMORY = "memory"
-    BEHAVIOR_PROJECTION = "behavior_projection"
+    # 行为侧的会话 lane：把一轮一轮的对话写成行为判断（behavior/fusion/lanes/session）。
+    BEHAVIOR_SESSION = "behavior_session"
 
 
 class ConversationConsumerOutcomeState(str, Enum):
