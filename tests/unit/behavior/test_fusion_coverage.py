@@ -9,7 +9,6 @@ import pytest
 
 from habitus.behavior.fusion.coverage import BehaviorCoverageIndex
 from habitus.behavior.fusion.errors import BehaviorFusionError
-from habitus.behavior.fusion.prompt import FUSION_PROMPT_VERSION
 from habitus.behavior.fusion.receipt import build_fusion_receipt
 from habitus.behavior.observation import BehaviorObservation, BehaviorObservationConfig
 
@@ -40,7 +39,7 @@ def receipt(observations: tuple[BehaviorObservation, ...], *, judged_at: datetim
         (),
         observations,
         source_refs=("a" * 64,),
-        prompt_version=FUSION_PROMPT_VERSION,
+        prompt_version="behavior_test_rule_v1",
         validation_attempts=1,
         primary_subject=SUBJECT,
         judged_at=judged_at,

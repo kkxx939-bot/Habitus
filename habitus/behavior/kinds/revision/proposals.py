@@ -57,14 +57,28 @@ class MergeProposal:
 
 @dataclass(frozen=True)
 class SplitProposal:
+    """拆分不由模型提（v3）：``reviser`` 按分组 + 复现造出来——``new`` 是一次拆出的全部新类（可以几个），
+    ``narrowed`` 是收窄后的原类条目。"""
+
     source: ClassId
     narrowed: Draft
-    new: Draft
+    new: tuple[Draft, ...]
     reason: str
+    #: 分组说"这一组就是词表里已有的某一类"：成员搬过去，不另起新类（第 35 晚重放：查看信息里 14 条其实是「询问知识性问题」，
+    #: 另起同名新类撞名、整处拆分作废）
+    into: tuple[ClassId, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.new, tuple) or not all(isinstance(item, Draft) for item in self.new):
+            raise BehaviorKindError("split drafts must be a tuple of Draft")
+        if not isinstance(self.into, tuple) or not all(isinstance(item, ClassId) for item in self.into):
+            raise BehaviorKindError("split targets must be a tuple of ClassId")
+        if not self.new and not self.into:
+            raise BehaviorKindError("a split names at least one new class draft or an existing class to move into")
 
     @property
     def touched(self) -> frozenset[ClassId]:
-        return frozenset({self.source})
+        return frozenset({self.source, *self.into})
 
 
 @dataclass(frozen=True)
@@ -100,15 +114,13 @@ def _proposal(item: Mapping[str, Any], classes: Mapping[str, BehaviorClass], *, 
         if item["target"] is None or item["target"] == item["class"]:
             raise BehaviorKindError("merge needs a different target class")
         return MergeProposal(source, classes[item["target"]].id, reason)
+    if kind != "revise":
+        raise BehaviorKindError(f"unknown proposal kind {kind!r} (splits are decided by grouping, not proposed)")
     if item["draft"] is None:
-        raise BehaviorKindError(f"{kind} needs a draft")
+        raise BehaviorKindError("revise needs a draft")
     draft = _draft(item["draft"], classes, max_examples=max_examples)
-    if kind == "split":
-        if item["new_class"] is None:
-            raise BehaviorKindError("split needs a new_class")
-        return SplitProposal(source, draft, _draft(item["new_class"], classes, max_examples=max_examples), reason)
     if any(target == NEW for _, target in draft.excludes):
-        raise BehaviorKindError("only a split may point an exclusion at NEW")
+        raise BehaviorKindError("a revise may not point an exclusion at NEW")
     return ReviseProposal(source, draft, reason)
 
 

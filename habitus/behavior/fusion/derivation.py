@@ -53,28 +53,16 @@ from habitus.behavior.fusion.judgement import (
     JudgementStatus,
     JudgementStatusBasis,
 )
-from habitus.behavior.fusion.prompt import FUSION_PROMPT_VERSION
-from habitus.behavior.fusion.schema import JUDGEMENT_FUSION_JSON_SCHEMA
 from habitus.behavior.observation import BehaviorObservation
 from habitus.foundation.integrity import canonical_digest
 
-# v2：同一主体同刻开始的同名行为只接受一条判断（判重守卫）——之前的数据里可能存在这类重复。
-# v3：behavior=空（没读懂）的判断也进判断存储（此前只留回执信号）——归约层要把它物化成 gap
-#     节点，v2 及更早的存储里没有这批记录。
-FUSION_IMPLEMENTATION_VERSION = "behavior_judgement_fusion_v4"
-
-# 产物的语义取决于**送给模型的全部东西**加上派生实现，任一变化都会改变输出语义，所以版本必须
-# 同时覆盖三者：实现、提示词、以及 **schema**。
-#
-# schema 不是形状声明而已——字段描述里承载着硬契约（"goal 非 null 时 basis 必须至少写一条"、
-# interrupted 与 abandoned 的区别），实测改这些描述会实打实地改变模型行为。而它一度不在版本里：
-# 改完描述、模型行为变了，版本却可以一字不动，两批语义不同的判断在数据上就分辨不出来。
-#
-# 用摘要而不是手写一个版本号，是为了**不可能忘记**：改了描述版本自动就变。代价是每次改 schema
-# 都会让排队中的作业身份漂移，而那条路径已经由 ``BehaviorFusionJobStore.retarget`` 在认领之前
-# 无损纠正。
-_SCHEMA_FINGERPRINT = canonical_digest(JUDGEMENT_FUSION_JSON_SCHEMA)[:12]
-FUSION_VERSION = f"{FUSION_IMPLEMENTATION_VERSION}+{FUSION_PROMPT_VERSION}+schema{_SCHEMA_FINGERPRINT}"
+# 派生实现的版本：判断的身份怎么算、记录长什么样。哪条 lane、哪版提示词或转换规则写的，由各条 lane
+# 在派生时给（``fusion_version`` / ``prompt_version``），不在这里。
+# v2：同一主体同刻开始的同名行为只接受一条判断（判重守卫）。
+# v3：behavior=空（没读懂）的判断也进判断存储——归约层要把它物化成 gap 节点。
+# v5：逐帧融合（提示词、输出形状、装配）退役，版本不再含提示词与输出形状的摘要。
+FUSION_IMPLEMENTATION_VERSION = "behavior_judgement_fusion_v5"
+FUSION_VERSION = FUSION_IMPLEMENTATION_VERSION
 
 _IDENTITY_SCHEMA = "behavior_judgement_identity_v1"
 
@@ -127,20 +115,19 @@ def derive_judgements(
     *,
     source_refs: Sequence[str],
     judged_at: datetime,
+    fusion_version: str,
+    prompt_version: str,
     context_ids: Sequence[str] = (),
 ) -> tuple[DurableJudgement, ...]:
     """把一批判断绑定成耐久记录。
 
-    调用前必须先执行 ``validate_judgement_batch``：这里假定引用完整、顺序正确，只做确定性绑定，
-    不重复语义校验。``source_refs`` 是本次融合读取的来源身份，无法从片段自身推出，属于系统在模型
-    输出之外绑定的事实。
+    这里假定判断里的片段编号都落在 ``fragments`` 之内、顺序正确，只做确定性绑定。``source_refs`` 是
+    这些观测由哪几次交付送来的，无法从片段自身推出；``fusion_version`` / ``prompt_version`` 是哪条 lane、
+    哪版提示词或转换规则写的，由调用的那条 lane 给。
 
-    **前提：``fragments`` 里不能有重复的观测身份。** 帧号在这里被换成观测身份，而
-    ``assembly._require_distinguishable`` 是按帧号判两条判断相不相同的；映射一旦不是单射，两条
-    内容相同、帧号不同的判断就会算出同一个 ``judgement_id`` 并在内容寻址的存储里静默合并。
-    这个前提由结构保证而不是由检查保证：``segment_observations`` 与 ``BehaviorFusionRunner._fragments``
-    都用 ``observation_id`` 作字典键收集片段，重复根本构造不出来。写在这里是为了将来新增调用方
-    时知道它存在——不写成运行时检查，是因为那等于为一个不存在的调用方付代价。
+    **前提：``fragments`` 里不能有重复的观测身份。** 片段编号在这里被换成观测身份；映射一旦不是单射，
+    两条内容相同、编号不同的判断就会算出同一个 ``judgement_id`` 并在内容寻址的存储里静默合并。
+    两条 lane 各自的凭据（开始、结束）时刻不同，身份不会重复。
     """
 
     if not isinstance(batch, BehaviorJudgementBatch):
@@ -164,6 +151,8 @@ def derive_judgements(
             judgement_id=identities[item.judgement_no],
             identities=identities,
             context=context,
+            fusion_version=fusion_version,
+            prompt_version=prompt_version,
         )
         for item in batch.judgements
     )
@@ -208,6 +197,8 @@ def _derive(
     judgement_id: str,
     identities: Mapping[int, str],
     context: tuple[str, ...],
+    fusion_version: str,
+    prompt_version: str,
 ) -> DurableJudgement:
     owned = [by_no[no] for no in judgement.covers]
     claim = judgement.claim
@@ -234,8 +225,8 @@ def _derive(
         status=judgement.status,
         status_basis=judgement.status_basis,
         relations=tuple((link.kind.value, _target_identity(link, identities, context)) for link in judgement.relations),
-        fusion_version=FUSION_VERSION,
-        prompt_version=FUSION_PROMPT_VERSION,
+        fusion_version=fusion_version,
+        prompt_version=prompt_version,
     )
 
 

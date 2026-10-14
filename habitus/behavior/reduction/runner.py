@@ -38,8 +38,8 @@ from habitus.behavior.reduction.kinds_step import KindStamping, KindStamps
 from habitus.behavior.reduction.ledger import BehaviorReductionEntry, BehaviorReductionLedger
 from habitus.behavior.reduction.payloads import (
     REDUCTION_VERSION,
-    UNREADABLE_GAP_KIND,
     chain_address,
+    gap_kind_of,
     gap_payload,
     occurrence_payload,
 )
@@ -656,7 +656,7 @@ class BehaviorReductionRunner:
         # 空白事实已在树上有代表，不重复、不丢账、不卡队列。
         merged_gaps: dict[str, list[ReducibleJudgement]] = {}
         for record in ready_gaps:
-            address = BehaviorAddress.gap(record.started_at.date(), UNREADABLE_GAP_KIND, record.started_at)
+            address = BehaviorAddress.gap(record.started_at.date(), gap_kind_of(record), record.started_at)
             merged_gaps.setdefault(str(BehaviorURI.from_address(address)), []).append(record)
         for uri in sorted(merged_gaps):
             group = merged_gaps[uri]

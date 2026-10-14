@@ -253,7 +253,7 @@ def kind_components(
         store.append(VersionRecord(1, NOW, ChangeReason.NIGHTLY, operations), expected_version=0)
     caller = KindModelCaller(client_for(provider), config=resolved)
     classifier = DaytimeClassifier(caller)
-    stamping = KindStamping(store, classifier, lane=resolved.default_lane)
+    stamping = KindStamping(store, classifier, lane=Lane.SESSION)
     jobs = VocabularyJobs(
         tree=tree,
         stamping=stamping,

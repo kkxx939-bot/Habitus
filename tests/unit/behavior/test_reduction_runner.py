@@ -11,7 +11,6 @@ from datetime import date
 
 import pytest
 
-from habitus.behavior.fusion import FUSION_PROMPT_VERSION
 from habitus.behavior.fusion.receipt import build_fusion_receipt
 from habitus.behavior.fusion.receipt_store import BehaviorFusionReceiptStore
 from habitus.behavior.fusion.store import BehaviorJudgementStore
@@ -43,6 +42,9 @@ OBS_A = observation(18, "人走到水池边打开水龙头")
 OBS_B = observation(40, "人打肥皂搓手")
 OBS_C = observation(62, "人冲水擦干")
 OBS_BLUR = observation(120, "画面模糊")
+
+# 版本标签由写判断的那条 lane 给；这里用测试用的。
+FUSION_PROMPT_VERSION = "behavior_test_rule_v1"
 
 
 class Harness:

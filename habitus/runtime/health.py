@@ -111,10 +111,7 @@ class RuntimeHealthService:
             return [RuntimeHealthCheck("behavior", RuntimeHealthStatus.HEALTHY, "disabled", critical=False)]
         return self._worker_checks(
             runtime_state,
-            (
-                ("behavior_fusion_worker", behavior.fusion_worker),
-                ("behavior_reduction_worker", behavior.reduction_worker),
-            ),
+            tuple((f"behavior_reduction_worker_{branch.lane.value}", branch.reduction_worker) for branch in behavior),
         )
 
     def _prediction_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:
@@ -127,8 +124,10 @@ class RuntimeHealthService:
         prediction = self.components.prediction
         if prediction is None:
             return [RuntimeHealthCheck("prediction", RuntimeHealthStatus.HEALTHY, "disabled", critical=False)]
-        checks = self._worker_checks(runtime_state, (("prediction_rebuild_worker", prediction.worker),))
-        checks.append(self._prediction_freshness_check(prediction))
+        checks = self._worker_checks(
+            runtime_state, tuple((f"prediction_rebuild_worker_{lane}", branch.worker) for lane, branch in prediction)
+        )
+        checks.extend(self._prediction_freshness_check(lane, branch) for lane, branch in prediction)
         return checks
 
     def _foresight_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:
@@ -140,7 +139,7 @@ class RuntimeHealthService:
         return self._worker_checks(runtime_state, (("foresight_judge_worker", foresight.worker),))
 
     @staticmethod
-    def _prediction_freshness_check(prediction: PredictionRuntimeComponents) -> RuntimeHealthCheck:
+    def _prediction_freshness_check(lane: str, prediction: PredictionRuntimeComponents) -> RuntimeHealthCheck:
         """树有多旧。循环活着不等于树在更新——这正是上面那段 docstring 说最难自己发现的故障。
 
         容忍两个重建周期：一拍没赶上是正常抖动，连着两拍没出新代就说明重建实际没在产出
@@ -152,20 +151,27 @@ class RuntimeHealthService:
             published = prediction.store.active()
         except PredictionTreeStoreError as exc:
             return RuntimeHealthCheck(
-                "prediction_tree", RuntimeHealthStatus.UNHEALTHY, f"unreadable:{type(exc).__name__}", critical=False
+                f"prediction_tree_{lane}",
+                RuntimeHealthStatus.UNHEALTHY,
+                f"unreadable:{type(exc).__name__}",
+                critical=False,
             )
         if published is None:
-            return RuntimeHealthCheck("prediction_tree", RuntimeHealthStatus.HEALTHY, "never_published", critical=False)
+            return RuntimeHealthCheck(
+                f"prediction_tree_{lane}", RuntimeHealthStatus.HEALTHY, "never_published", critical=False
+            )
         age = (datetime.now(UTC) - published.published_at).total_seconds()
         tolerance = 2.0 * prediction.tree_config.rebuild_interval_seconds
         if age > tolerance:
             return RuntimeHealthCheck(
-                "prediction_tree",
+                f"prediction_tree_{lane}",
                 RuntimeHealthStatus.DEGRADED,
                 f"stale:{int(age)}s",
                 critical=False,
             )
-        return RuntimeHealthCheck("prediction_tree", RuntimeHealthStatus.HEALTHY, f"age:{int(age)}s", critical=False)
+        return RuntimeHealthCheck(
+            f"prediction_tree_{lane}", RuntimeHealthStatus.HEALTHY, f"age:{int(age)}s", critical=False
+        )
 
     @staticmethod
     def _worker_checks(runtime_state: str, workers: tuple[tuple[str, ResidentWorker], ...]) -> list[RuntimeHealthCheck]:

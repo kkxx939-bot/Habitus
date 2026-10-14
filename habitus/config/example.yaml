@@ -430,24 +430,21 @@ workflow:
     heartbeat_interval_seconds: 10.0
     shutdown_timeout_seconds: 30.0
 
-# 行为管线（观测 → 融合 → 归约 → 行为树）。缺省未启用；填入被跟踪主体的稳定标识即启用，
-# Runtime 会组装行为组件并启动融合/归约两个常驻 Worker。窗口数值留空时取代码内唯一出处。
+# 行为管线（两条 lane 的融合 → 归约 → 行为树）。缺省未启用；填入被跟踪主体的稳定标识即启用。
+# 会话、物理两条 lane 各是一整套（存储、归约、行为树、词表、预测树各一支，在 <根>/behavior/<lane>/ 等目录下），
+# 互不相通；下面的设置两支共用同一份数值。窗口数值留空时取代码内唯一出处。
 # behavior:
 #   primary_subject: "家庭成员A"
-#   context_limit: 8
-#   context_lookback_seconds: 3600
+#   context_lookback_seconds: 3600     # 归约的封口视界：证据齐备之后过这么久才封口落树
 #   reduction_sweep_interval_seconds: 300
 #   reduction_sweep_lock_ttl_seconds: 600   # 归约 sweep 的租约时长；周尺度回填可调大（默认 600）
-#   fusion_poll_interval_seconds: 5
 #   worker_shutdown_timeout_seconds: 30
-#   coverage_window_days: 7            # 上游最大补发跨度：重投去重判据；覆盖记录/回执/账本的过期期限（覆盖记录在其交付释放前不过期）
-#   max_fragments_per_segment: 60      # 一次融合的段容量；8k 输出预算下实测 60 条才稳
+#   coverage_window_days: 7            # 重做去重的判据；覆盖记录/回执/账本的过期期限（覆盖记录在其凭据释放前不过期）
 #   # 会话 lane 的保护上限；留空取 behavior/fusion/lanes/session/config.py 的默认值
 #   session_max_turn_chars: 8000       # 一轮对话给模型的材料总字数上限（超出先削工具调用中段，人的指令最后才削）
 #   session_max_instruction_chars: 4000  # 人的那条指令最多留多少字
 #   session_max_steps: 3               # 每轮写出来的步骤最多几条
 #   # 基础词表（裁定 6：门槛全部是配置）；留空取 behavior/kinds/config.py 的默认值。标"待定档"的要等真实数据重定
-#   kinds_default_lane: session        # 融合还没产出 source_lane 前，归类请求用哪条 lane（session / physical）
 #   kinds_batch_size: 10               # 白天归类一次调用判几条
 #   kinds_validation_rounds: 2         # 没答好的条目重问几轮（每轮只问没答好的），用尽当「待定」
 #   kinds_transient_retries: 5         # 模型调用对超时/断连的有界重试
@@ -466,7 +463,10 @@ workflow:
 #   kinds_lane_candidate_cap: 80       # 同 lane 在用类超过这个数就报警（保护闸；以后接回向量召回）
 #   kinds_anchors_per_class: 8         # 定期拆改锚点自检：每个没动过的类取几个锚点（裁定 17）
 #   kinds_max_anchor_pull: 0.02        # 锚点自检：新清单下被拉走的锚点最多占几成（裁定 17）
-#   kinds_revision_samples_per_class: 8  # 拆改时每类给模型看几条原话
+#   kinds_revision_samples_per_class: 8  # 拆改提合并 / 改判据时每类给模型看几条原话
+#   kinds_revision_window_days: 120    # 拆改分组定拆：只看每个类最近多少天的成员（按月做的事要攒够 3 次）
+#   kinds_grouping_min_members: 6      # 成员少于这个数的类不分组（实际门槛至少是两边各 recurrence_min_count 条）
+#   kinds_grouping_batch_size: 60      # 一次分组最多给模型看几条，多了分批、后一批看得见前几批的组
 #   kinds_checkpoint_every: 200        # 扫树、重打树时每处理多少条续一次 sweep 租约
 #   kinds_prompt_max_steps: 12         # 归类与待定池给模型看的每条最多列几步
 #   kinds_sample_max_steps: 4          # 定期拆改抽样原话每条最多列几步

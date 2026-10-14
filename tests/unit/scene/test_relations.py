@@ -225,8 +225,9 @@ def test_the_chi_square_tail_matches_known_values() -> None:
     assert stats._chi2_sf(0.0, 3) == 1.0
 
 
-def test_a_pending_record_in_the_window_makes_the_outcome_unknown() -> None:
-    """讨论方案 10:00 做完、10:20 一件「待定」（叫不出名）、之后没有修改代码：这一次结果未知，不算"后果没来"（E13，裁定 21-3）。"""
+def test_a_pending_record_in_the_window_is_a_thing_that_is_not_the_consequent() -> None:
+    """讨论方案 10:00 做完、10:20 一件「待定」（叫不出名）、之后没有修改代码：这一次是"修改代码没来"。「待定」是发生过的一件事，
+    只是词表还没把它稳定成类（用户 2026-10-12）：它算人在场、算那天一件事做完的时刻（对照时刻），不让任何概念判不了。"""
 
     day = START
     pending = replace(record(day, 10, 20, "调研", number=9), kind_token="s-待定", classified=False)
@@ -234,8 +235,32 @@ def test_a_pending_record_in_the_window_makes_the_outcome_unknown() -> None:
     series = EventSeries(cutoff=day + timedelta(days=1), records=records)
     line = build_timelines(series, CONCEPTS, {}, CONFIG)["session"]
     tests = LaneTests(line, CONCEPTS, CONFIG, series.cutoff)
-    assert tests.strata(key(DISCUSS, CODE)) == ()
-    assert any(slot == line.day_start(day) + 41 for slot in line.unknown[CODE])
+    assert not line.unknown.get(CODE)
+    (stratum,) = tests.strata(key(DISCUSS, CODE))
+    assert stratum.treated == 0
+    # 对照时刻：同一天别的事做完的时刻——调研 9:00、待定 10:20（提交推送 14:00 是当天最后一件，之后没有在场的槽，不能比）
+    assert stratum.controls == 2
+    assert any(uri == pending.uri for _slot, uri in line.ends[day])
+
+
+def test_a_daily_antecedent_at_random_times_still_has_same_slot_controls() -> None:
+    """讨论方案每个工作日都做、时刻随机：别的周同周几同一钟点多半没在讨论，第二道对照有得比；
+    每天 9:00 固定的调研在别的周同一钟点总在做，第二道对照为空 → 这条链样本不够（每天都来的是预测树的基线）。"""
+
+    series = planted()
+    line = build_timelines(series, CONCEPTS, {}, CONFIG)["session"]
+    tests = LaneTests(line, CONCEPTS, CONFIG, series.cutoff)
+    from habitus.scene.relations.spans import Pairing
+
+    second = tests.strata(key(DISCUSS, CODE), pairing=Pairing.SAME_SLOT)
+    assert second and all(item.controls >= 1 for item in second)
+    # 9:00 那条自己成链的（没和随机时刻的调研并成一条）：别的周同周几 9:00 总在调研，没有对照
+    opening = [chain for chain in tests.chains(RESEARCH) if chain.anchor.started_at.hour == 9 and len(chain.uris) == 1]
+    assert opening
+    assert all(
+        tests.controls.stratum(Segment.CHAIN, chain, CODE, antecedent=RESEARCH, pairing=Pairing.SAME_SLOT) is None
+        for chain in opening
+    )
 
 
 def test_a_hit_record_mapped_under_another_class_counts_as_unmapped() -> None:

@@ -241,7 +241,7 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
     ]
     assert behavior_dependency_violations == []
 
-    # 模型调用收敛在受控触点：融合判断（语义生成）、词表（白天归类 / 每晚新增 / 定期拆改都经
+    # 模型调用收敛在受控触点：会话 lane 的描述、词表（白天归类 / 每晚新增 / 定期拆改都经
     # ``kinds/calls.py`` 这一个文件）、行为树语义面生成。
     # 存储、派生与落盘路径仍不得渗入。
     model_callers = sorted(
@@ -251,7 +251,6 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
     )
     assert model_callers == [
         "behavior/fusion/lanes/session/service.py",
-        "behavior/fusion/service.py",
         "behavior/kinds/calls.py",
         "behavior/semantic/generator.py",
     ]
@@ -268,10 +267,8 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
         for path in fusion_root.rglob("*.py")
         if "__pycache__" not in path.parts
     }
+    # 物理 lane 不在名单里：它不调模型，这条闭包检查同时钉住了这一点。
     allowed_model_callers = {
-        "habitus.behavior.fusion",
-        "habitus.behavior.fusion.service",
-        "habitus.behavior.fusion.runner",
         # 会话 lane：service 是它的模型触点，lane 把它和写判断串起来，包根转手两者。
         "habitus.behavior.fusion.lanes.session",
         "habitus.behavior.fusion.lanes.session.service",
@@ -988,12 +985,20 @@ def test_the_session_lane_meets_the_conversation_source_only_in_the_composition_
         and path.relative_to(SRC).parts[0] != "behavior"
     )
     assert bridges == ["runtime/behavior.py", "runtime/session_lane.py"]
-    # 逐帧融合只认得会话 lane 的协议名（入队时跳过它的凭据），不碰它的其余部分。
-    assert {
-        module
-        for module in imported_modules(SRC / "behavior" / "fusion" / "enqueue.py")
-        if module.startswith("habitus.behavior.fusion.lanes")
-    } == {"habitus.behavior.fusion.lanes.session.protocol"}
+    # 两条 lane 共用的那几样（判断、派生、存储、回执、覆盖索引）不认识任何一条 lane。
+    shared = [path for path in (SRC / "behavior" / "fusion").glob("*.py")]
+    assert [
+        str(path.relative_to(SRC))
+        for path in shared
+        if any(module.startswith("habitus.behavior.fusion.lanes") for module in imported_modules(path))
+    ] == []
+    # 两条 lane 互不相认。
+    for lane, other in (("session", "physical"), ("physical", "session")):
+        assert [
+            str(path.relative_to(SRC))
+            for path in (SRC / "behavior" / "fusion" / "lanes" / lane).glob("*.py")
+            if any(module.startswith(f"habitus.behavior.fusion.lanes.{other}") for module in imported_modules(path))
+        ] == []
 
 
 def test_memory_conversation_consumer_wraps_the_single_existing_enqueuer_chain() -> None:

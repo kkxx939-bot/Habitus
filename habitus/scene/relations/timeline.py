@@ -9,6 +9,11 @@
 - **看不到**：映射器对这条记录判过、但答"看不到"（未决），或这条记录还没映射过（它的类上挂着的细分概念全都不知道）。
   窗口里有"看不到"、又没有命中的，这一次的结果算未知，两边都不计（用户 09-27"没看到就不算"）。
 
+**「待定」是发生过的一件事，只是词表还没把它稳定成类**（用户 2026-10-12 裁定）：它算人在场、算那天"一件事做完的时刻"
+（链的对照时刻），对任何概念都是"这件事不是 B"；它不是概念，当不了前因或后果，等词表把它升成类、旧记录迁入新编号后才是。
+以前把它当"可能是任何一个后果"、让那一槽对所有概念都判不了，结果每天半条叫不出名的杂事就让次日与第 2–7 天两段整层丢光
+（合成一年数据：订机票 → 2–7 天内报销 14 次前因可用层 0，因为每一周里都有"怎么洗白鞋"这类待定）。
+
 **人在场**：这条 lane 当天第一条记录开始的槽到最后一条记录最后所见的槽之间，扣掉观测空白盖住的槽（两种空白都扣：
 那段发生了什么不知道）。窗口只量人在场的时间，对照也只取人在场的时刻（``spans``）。人不在的时候什么都不会发生，
 拿来比会让一切都显得"更常见"（第三轮评审：别的日期同钟点 36 对显著 → 同一天人在场的时刻 1 对）。
@@ -90,7 +95,6 @@ def build_timelines(
     lines: dict[str, LaneTimeline] = {}
     spans: dict[tuple[str, date], tuple[int, int]] = {}
     starts: dict[tuple[str, str], list[tuple[int, str]]] = {}
-    pending: dict[str, list[int]] = {}
     for record in series.records:
         line = lines.setdefault(
             record.lane,
@@ -111,9 +115,7 @@ def build_timelines(
         line.ends.setdefault(record.day, []).append((ended, record.uri))
         starts.setdefault((record.lane, record.kind_token), []).append((absolute, record.uri))
         if not record.classified:
-            # 「待定」是叫不出名的一件事：它可能就是任何一个后果，那一槽对所有行为概念都"判不了"（与预测树记删失同一个读法；
-            # 裁定 21-3，第四轮评审 E13）——不能算"后果没来"
-            pending.setdefault(record.lane, []).append(absolute)
+            # 「待定」：已记进人在场与做完时刻；没有概念，不留记号。预测树那边仍把它当"下一件不知道是什么"记删失，两树各算各的
             continue
         found, blind = _concepts_of(record, concepts, hits.get(record.uri))
         mark = Mark(slot=absolute, started_at=record.started_at, uri=record.uri, goal=record.goal, last_slot=ended)
@@ -141,8 +143,6 @@ def build_timelines(
         for identity in concepts.behaviors():
             if concepts.lane_of(identity) == line.lane:
                 line.marks.setdefault(identity, [])
-                if pending.get(line.lane):
-                    line.unknown[identity] = sorted({*line.unknown.get(identity, []), *pending[line.lane]})
     blocked = set(covered)
     for (lane, day), (first, final) in spans.items():
         start = day.toordinal() * per_day

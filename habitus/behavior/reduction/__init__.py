@@ -9,6 +9,7 @@ from habitus.behavior.reduction.errors import BehaviorReductionBusyError, Behavi
 from habitus.behavior.reduction.ledger import BehaviorReductionEntry, BehaviorReductionLedger
 from habitus.behavior.reduction.payloads import (
     REDUCTION_VERSION,
+    UNOBSERVED_GAP_KIND,
     UNREADABLE_GAP_KIND,
     chain_address,
     gap_payload,
@@ -27,6 +28,7 @@ from habitus.behavior.reduction.sealing import seal_horizon, sealed_chain_indexe
 __all__ = [
     "DEFAULT_SWEEP_LOCK_TTL_SECONDS",
     "REDUCTION_VERSION",
+    "UNOBSERVED_GAP_KIND",
     "UNREADABLE_GAP_KIND",
     "BehaviorChain",
     "BehaviorReductionEntry",

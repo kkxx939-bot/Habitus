@@ -10,12 +10,11 @@ import pytest
 from habitus.foresight import ForesightError
 from habitus.foresight.judge import CandidateVerdict, Judgement
 from habitus.foresight.ledger import verified_counts
-from tests.unit.foresight.fixtures import unchanged
 from habitus.foundation.observability import ObservationEvent
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_settlement import SettlementStage
 from habitus.scene import FactKey
-from tests.unit.foresight.fixtures import ScriptedJudge
+from tests.unit.foresight.fixtures import ScriptedJudge, unchanged
 from tests.unit.kind_ids import kind_id
 from tests.unit.runtime.test_foresight_wiring import EVENING, assembled, scripted_judge
 
@@ -67,7 +66,7 @@ def wired(tmp_path, *, closed_days=tuple, facts=None):
 def test_a_new_judgement_writes_its_promises_and_a_reused_one_does_not(tmp_path) -> None:
     config, components = wired(tmp_path)
     ledger = components.runner.ledger
-    assert isinstance(ledger, ForesightLedgerStore) and ledger.root == config.foresight_root
+    assert isinstance(ledger, ForesightLedgerStore) and ledger.root == config.foresight_root / "session"
 
     first = asyncio.run(components.runner.run_once(now=SPOKEN))
     assert not first.reused and [c.kind_token for c in first.claims] == [kind_id("打球")]

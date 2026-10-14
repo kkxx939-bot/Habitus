@@ -31,6 +31,15 @@ from habitus.behavior.reduction.record import ReducibleJudgement
 REDUCTION_VERSION = "behavior_reduction_v1"
 
 UNREADABLE_GAP_KIND = "没读懂"
+UNOBSERVED_GAP_KIND = "未观测"
+# 空判断上写着这个依据的，是上游说"这段时间没在看"（物理 lane 的覆盖时段），不是看了没读懂。
+_UNOBSERVED_BASIS = "unobserved"
+
+
+def gap_kind_of(record: ReducibleJudgement) -> str:
+    """一条空判断落成哪种空白：上游说没在看的是「未观测」，其余是「没读懂」。"""
+
+    return UNOBSERVED_GAP_KIND if record.status_basis == _UNOBSERVED_BASIS else UNREADABLE_GAP_KIND
 
 
 def _iso(value: datetime) -> str:
@@ -98,7 +107,7 @@ def occurrence_payload(
 
 
 def gap_payload(record: ReducibleJudgement, *, chain_digest: str) -> dict[str, Any]:
-    """一段没读懂的观测空白；字段逐字来自那条空判断，起止同刻是合法的单观测段。
+    """一段观测空白（没读懂或未观测）；字段逐字来自那条空判断，起止同刻是合法的单观测段。
 
     ``chain_digest`` 是消费账本里这段空白的条目身份（同刻合并时由合并后的判断集合派生）。
     """
@@ -107,7 +116,7 @@ def gap_payload(record: ReducibleJudgement, *, chain_digest: str) -> dict[str, A
         raise BehaviorReductionError("a gap payload must be built from an unreadable judgement")
     return {
         "occurred_on": record.started_at.date().isoformat(),
-        "gap_kind": UNREADABLE_GAP_KIND,
+        "gap_kind": gap_kind_of(record),
         "started_at": _iso(record.started_at),
         "ended_at": _iso(record.last_observed_at),
         "chain_digest": chain_digest,
@@ -152,8 +161,10 @@ def _basis_step(
 
 __all__ = [
     "REDUCTION_VERSION",
+    "UNOBSERVED_GAP_KIND",
     "UNREADABLE_GAP_KIND",
     "chain_address",
+    "gap_kind_of",
     "gap_payload",
     "occurrence_payload",
 ]

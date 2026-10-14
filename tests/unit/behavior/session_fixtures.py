@@ -19,7 +19,7 @@ from habitus.behavior.fusion.lanes.session import (
 )
 from habitus.behavior.observation import BehaviorObservationStore
 from habitus.model_client import ChatClient, ChatModelConfig, ProviderConfig, StructuredChatClient
-from tests.unit.behavior.test_fusion_jobs import ScriptedProvider
+from tests.unit.behavior.scripted_provider import ScriptedProvider
 
 ZONE = ZoneInfo("Asia/Shanghai")
 START = datetime(2026, 7, 26, 9, 58, tzinfo=UTC)  # 本地 17:58

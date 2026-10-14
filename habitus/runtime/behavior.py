@@ -1,48 +1,38 @@
-"""行为管线在组合根的组装与两个常驻 Worker。
+"""行为管线在组合根的组装与常驻的归约 Worker。
 
-行为侧是可选启用的：``config.behavior.primary_subject`` 留空（上游感知未接入）时组合根完全
-跳过本模块，Runtime 与既有行为零差异。启用后接成的整条链：
+行为侧是可选启用的：``config.behavior.primary_subject`` 留空时组合根完全跳过本模块，Runtime 与既有
+行为零差异。启用后按 lane 各接一整条、互不相通的链（两条 lane 是行为树的两个分支，各在 ``behavior/<lane>/`` 下）：
 
-    观测投递（Runtime 正门）→ 观测存储 → 入队扫描 → 融合作业（严格串行，LLM）
-    → 判断/回执存储 → 归约 sweep（封口 → staged → 行为树 + kinds + L0/L1 → 定稿日记账）
-    → 夜批：情景阶段（对定稿日归组一次，LLM）→ 预测树重建（见 runtime/prediction.py）
+    会话那一支：会话源的交付 → ``runtime/session_lane.py`` 的桥 → 一轮一条判断（LLM 描述）
+    物理那一支：上游的一份交付（Runtime 正门）→ 一段一条判断（不调模型）
+    每一支各自：判断 / 回执存储 → 归约 sweep（封口 → 词表归类 → 行为树 + L0/L1 → 定稿日记账）
+    → 夜批（见 runtime/prediction.py）
 
-模型路由与 memory 共用同一个 structured chat client（用户裁定）；上下文窗口的数值由这里从
-``behavior/fusion/config.py`` 的唯一出处解析后，**同一份**喂给融合与归约两处，并由
-``BehaviorRuntimeComponents.__post_init__`` 结构性钉死（BHV-FUSION-003）。锁沿组合根现状共享
+两支不共用任何存储、词表、归约或 Worker：一支上的记录、空白、词表的类，另一支看不到（裁定 35）。
+
+模型路由与 memory 共用同一个 structured chat client（用户裁定）。锁沿组合根现状共享
 （SQLite 锁库；取舍与观测盲区记录在 ``behavior/reduction/runner.py`` 的 sweep 锁 docstring）。
-
-与 MemoryWorker 的形态分叉（刻意，勿"补齐"）：行为作业的失败结算、重试退避与 FAILED 封锁全部
-耐久在融合作业存储里，归约则是无队列的定拍 sweep——两个 Worker 因此不复刻 MemoryWorker 的
-状态机与 BLOCKED 对外语义，只保留循环存活、租约心跳与可观测事件。
+归约是无队列的定拍 sweep，Worker 只保留循环存活与可观测事件。
 """
 
 from __future__ import annotations
 
-import asyncio
-import os
 import time
-import uuid
-from collections.abc import Callable
-from contextlib import AbstractContextManager, nullcontext, suppress
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, tzinfo
 
-from habitus.behavior.fusion import (
-    BehaviorFusionEnqueuer,
-    BehaviorFusionJobStore,
-    BehaviorFusionReceiptStore,
-    BehaviorFusionRunner,
-    BehaviorJudgementFuser,
-    BehaviorJudgementStore,
-)
-from habitus.behavior.fusion.config import (
-    FUSION_CONTEXT_LIMIT,
-    FUSION_CONTEXT_LOOKBACK_SECONDS,
-    BehaviorFusionConfig,
-)
+from habitus.behavior.fusion import BehaviorFusionReceiptStore, BehaviorJudgementStore
+from habitus.behavior.fusion.config import FUSION_CONTEXT_LOOKBACK_SECONDS
 from habitus.behavior.fusion.coverage import BehaviorCoverageIndex
-from habitus.behavior.fusion.enqueue import DEFAULT_QUIET_PERIOD_SECONDS
+from habitus.behavior.fusion.lanes.physical import (
+    PhysicalLane,
+    PhysicalSegmentLedger,
+    PhysicalSegmentRecorder,
+    UnitOutcome,
+    parse_delivery,
+)
 from habitus.behavior.fusion.lanes.session import (
     SessionLane,
     SessionLaneConfig,
@@ -52,11 +42,11 @@ from habitus.behavior.fusion.lanes.session import (
 from habitus.behavior.kinds.calls import KindModelCaller
 from habitus.behavior.kinds.classify import DaytimeClassifier
 from habitus.behavior.kinds.config import BehaviorKindConfig
+from habitus.behavior.kinds.ids import Lane
 from habitus.behavior.kinds.nightly import NightlyGrower, PendingRecheck
 from habitus.behavior.kinds.revision import AnchorGate, Reviser
 from habitus.behavior.kinds.store import BehaviorKindStore
-from habitus.behavior.observation import BehaviorObservationEnvelope, BehaviorObservationStore
-from habitus.behavior.observation.telemetry import delivery_attributes
+from habitus.behavior.observation import BehaviorObservationStore
 from habitus.behavior.reduction import (
     DEFAULT_SWEEP_LOCK_TTL_SECONDS,
     BehaviorReductionBusyError,
@@ -76,7 +66,6 @@ from habitus.foundation.observability import (
     ObservationStatus,
     Observer,
     SpanController,
-    bind_observation_context,
     observe_operation,
 )
 from habitus.infrastructure.store.contracts.lock import LockStore
@@ -87,66 +76,54 @@ from habitus.runtime.resident import ResidentWorker
 
 @dataclass(frozen=True)
 class BehaviorRuntimeComponents:
-    """行为管线的全部已组装部件。
+    """一条 lane 这一支的全部已组装部件：它自己的存储、融合、归约、行为树与词表。
 
-    ``__post_init__`` 按仓库既有纪律做**实例同一性**校验：融合/归约/Worker 引用的存储必须
-    就是组件字段那一份，两个 runner 的封口窗口必须是同一份数值——这些是"自己产物自洽"类
-    约束，违反只可能是接线错误。
+    ``fusion`` 是这条 lane 的融合前端（会话 lane 或物理 lane），与 ``lane`` 对得上。
+    ``__post_init__`` 按仓库既有纪律做**实例同一性**校验：融合、归约、Worker 引用的存储必须
+    就是组件字段那一份——这些是"自己产物自洽"类约束，违反只可能是接线错误。
     """
+
+    lane: Lane
 
     observations: BehaviorObservationStore
     judgements: BehaviorJudgementStore
     receipts: BehaviorFusionReceiptStore
-    jobs: BehaviorFusionJobStore
-    enqueuer: BehaviorFusionEnqueuer
-    fusion_runner: BehaviorFusionRunner
+    coverage: BehaviorCoverageIndex
     tree: BehaviorTree
     kind_store: BehaviorKindStore
     reduction_runner: BehaviorReductionRunner
-    session_lane: SessionLane
-    fusion_worker: BehaviorFusionWorker
+    fusion: SessionLane | PhysicalLane
     reduction_worker: BehaviorReductionWorker
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "lane", Lane(self.lane))
+        front_end = SessionLane if self.lane is Lane.SESSION else PhysicalLane
         expected = (
             ("observations", self.observations, BehaviorObservationStore),
             ("judgements", self.judgements, BehaviorJudgementStore),
             ("receipts", self.receipts, BehaviorFusionReceiptStore),
-            ("jobs", self.jobs, BehaviorFusionJobStore),
-            ("enqueuer", self.enqueuer, BehaviorFusionEnqueuer),
-            ("fusion_runner", self.fusion_runner, BehaviorFusionRunner),
+            ("coverage", self.coverage, BehaviorCoverageIndex),
             ("tree", self.tree, BehaviorTree),
             ("kind_store", self.kind_store, BehaviorKindStore),
             ("reduction_runner", self.reduction_runner, BehaviorReductionRunner),
-            ("session_lane", self.session_lane, SessionLane),
-            ("fusion_worker", self.fusion_worker, BehaviorFusionWorker),
+            ("fusion", self.fusion, front_end),
             ("reduction_worker", self.reduction_worker, BehaviorReductionWorker),
         )
         for name, value, expected_type in expected:
             if not isinstance(value, expected_type):
                 raise TypeError(f"behavior components {name} must be {expected_type.__name__}")
         shared = (
-            (self.enqueuer.observations, self.observations, "enqueuer observations"),
-            (self.enqueuer.jobs, self.jobs, "enqueuer jobs"),
-            (self.enqueuer.receipts, self.receipts, "enqueuer receipts"),
-            (self.fusion_runner.jobs, self.jobs, "fusion runner jobs"),
-            (self.fusion_runner.observations, self.observations, "fusion runner observations"),
-            (self.fusion_runner.judgements, self.judgements, "fusion runner judgements"),
-            (self.fusion_runner.receipts, self.receipts, "fusion runner receipts"),
             (self.reduction_runner.judgements, self.judgements, "reduction judgements"),
             (self.reduction_runner.observations, self.observations, "reduction observations"),
             (self.reduction_runner.receipts, self.receipts, "reduction receipts"),
             (self.reduction_runner.tree, self.tree, "reduction tree"),
             (self.reduction_runner.kinds.store, self.kind_store, "reduction kind store"),
-            (self.enqueuer.coverage, self.fusion_runner.coverage, "coverage index (enqueue/fusion)"),
-            (self.reduction_runner.coverage, self.fusion_runner.coverage, "coverage index (reduction/fusion)"),
-            # 会话 lane 与逐帧融合写的是同一套判断、回执、覆盖索引，归约只读这一套。
-            (self.session_lane.recorder.observations, self.observations, "session lane observations"),
-            (self.session_lane.recorder.judgements, self.judgements, "session lane judgements"),
-            (self.session_lane.recorder.receipts, self.receipts, "session lane receipts"),
-            (self.session_lane.recorder.coverage, self.fusion_runner.coverage, "coverage index (session lane/fusion)"),
-            (self.fusion_worker.runner, self.fusion_runner, "fusion worker runner"),
-            (self.fusion_worker.enqueuer, self.enqueuer, "fusion worker enqueuer"),
+            (self.reduction_runner.coverage, self.coverage, "coverage index (reduction)"),
+            # 融合写、归约读的是同一套判断、回执、覆盖索引。
+            (self.fusion.recorder.observations, self.observations, "fusion observations"),
+            (self.fusion.recorder.judgements, self.judgements, "fusion judgements"),
+            (self.fusion.recorder.receipts, self.receipts, "fusion receipts"),
+            (self.fusion.recorder.coverage, self.coverage, "coverage index (fusion)"),
             (self.reduction_worker.runner, self.reduction_runner, "reduction worker runner"),
         )
         for actual, wanted, label in shared:
@@ -154,105 +131,68 @@ class BehaviorRuntimeComponents:
                 raise ValueError(f"behavior components must share one {label} instance")
         if self.kind_store.root != self.tree.root:
             raise ValueError("behavior vocabulary files must live at the tree root")
-        # BHV-FUSION-003 的结构性保障："融合还能续"与"归约已封口"必须是同一个窗口。
-        if self.fusion_runner.context_lookback_seconds != self.reduction_runner.context_lookback_seconds:
-            raise ValueError("fusion and reduction must share one context lookback window")
+        if self.reduction_runner.kinds.lane is not self.lane:
+            raise ValueError("a branch classifies into its own lane's vocabulary")
+        # 一支的全部存储在同一个根下（树在它的 ``tree/`` 里）：哪一样指到别处，都是接到了另一支上。
+        root = self.observations.root
+        homes = (
+            ("judgements", self.judgements.root),
+            ("receipts", self.receipts.root),
+            ("coverage", self.coverage.root),
+            ("reduction ledger", self.reduction_runner.ledger.root.parent),
+            ("tree", self.tree.root.parent),
+        )
+        for label, home in homes:
+            if home != root:
+                raise ValueError(f"behavior branch {self.lane.value} keeps its {label} outside its own root")
+        ledger = getattr(self.fusion.recorder, "ledger", None)
+        if ledger is not None and ledger.root != root:
+            raise ValueError(f"behavior branch {self.lane.value} keeps its segment ledger outside its own root")
 
 
-class BehaviorFusionWorker(ResidentWorker):
-    """驱动融合队列的常驻循环：扫描入队 → 认领 → 心跳护租约 → 执行。
+@dataclass(frozen=True)
+class BehaviorBranches:
+    """行为侧的两支：会话一支、物理一支，各是一套完整的 ``BehaviorRuntimeComponents``，不共用任何东西。"""
 
-    单条作业的失败由融合 runner 在租约内结算（重试/退避/FAILED 封锁都耐久在作业存储里）；
-    这里保证三件事：循环本身不死（异常记观测事件 + last_error、退避一拍）、慢模型调用期间
-    租约持续续期（claim/execute 分离正是融合层为此设计的接口）、同步全量扫描不冻结事件循环
-    （下沉 ``asyncio.to_thread``；扫描成本随存储增长的根治在 BHV-LIFECYCLE-001 的时间分区）。
-    """
+    session: BehaviorRuntimeComponents
+    physical: BehaviorRuntimeComponents
 
-    _task_name = "habitus-behavior-fusion"
-    _observation_category = "behavior"
+    def __post_init__(self) -> None:
+        for name, lane in (("session", Lane.SESSION), ("physical", Lane.PHYSICAL)):
+            branch = getattr(self, name)
+            if not isinstance(branch, BehaviorRuntimeComponents) or branch.lane is not lane:
+                raise TypeError(f"behavior branch {name} must be the {lane.value} lane's components")
+        apart = (
+            ("observations", self.session.observations.root, self.physical.observations.root),
+            ("tree", self.session.tree.root, self.physical.tree.root),
+        )
+        for label, left, right in apart:
+            if left == right:
+                raise ValueError(f"the two behavior branches must not share one {label} root")
 
-    def __init__(
-        self,
-        enqueuer: BehaviorFusionEnqueuer,
-        runner: BehaviorFusionRunner,
-        *,
-        poll_interval_seconds: float,
-        shutdown_timeout_seconds: float,
-        observer: Observer | None = None,
-        span_controller: SpanController | None = None,
-    ) -> None:
-        super().__init__(shutdown_timeout_seconds=shutdown_timeout_seconds, observer=observer)
-        self.enqueuer = enqueuer
-        self.runner = runner
-        self.span_controller = span_controller
-        self.poll_interval_seconds = float(poll_interval_seconds)
-        # 进程唯一的 worker 身份：租约接管日志要能区分持有者（对齐 MemoryWorker）。
-        self.worker_id = f"habitus-behavior-fusion-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    def __iter__(self) -> Iterator[BehaviorRuntimeComponents]:
+        return iter((self.session, self.physical))
 
-    async def run_once(self) -> bool:
-        """扫描入队并执行至多一项作业；返回是否有作业被执行（测试与手动驱动用）。"""
+    def of(self, lane: Lane | str) -> BehaviorRuntimeComponents:
+        return self.session if Lane(lane) is Lane.SESSION else self.physical
 
-        if self.running:
-            raise RuntimeError("manual run_once cannot race the resident worker loop")
-        return await self._tick()
+    @property
+    def session_lane(self) -> SessionLane:
+        """会话那一支的融合前端（接成会话源的消费者用）。"""
 
-    async def _tick(self) -> bool:
-        await asyncio.to_thread(self.enqueuer.enqueue_ready)
-        lease = await asyncio.to_thread(self.runner.claim, self.worker_id)
-        if lease is None:
-            return False
-        await self._execute_with_heartbeat(lease)
-        return True
+        lane = self.session.fusion
+        if not isinstance(lane, SessionLane):  # 由 ``BehaviorRuntimeComponents`` 的构造保证；这里只是给类型检查看
+            raise TypeError("the session branch must carry the session lane")
+        return lane
 
-    async def _execute_with_heartbeat(self, lease) -> None:
-        """执行作业并在模型调用期间独立续约——租约 TTL(300s) 小于慢模型调用的可能时长，
-        不续约的下场是评审推演过的：租约被接管、每轮白烧一次模型调用直至队首 FAILED。"""
+    @property
+    def physical_lane(self) -> PhysicalLane:
+        """物理那一支的融合前端（Runtime 的交付正门用）。"""
 
-        interval = max(self.runner.jobs.config.lease_ttl_seconds / 3.0, 1.0)
-        stop_beat = asyncio.Event()
-
-        async def beat() -> None:
-            while not stop_beat.is_set():
-                with suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(stop_beat.wait(), timeout=interval)
-                if stop_beat.is_set():
-                    return
-                await asyncio.to_thread(self.runner.jobs.renew, lease)
-
-        heartbeat = asyncio.create_task(beat(), name=f"{self._task_name}-heartbeat")
-        # 一个作业一条 trace：作业内各步（上下文、模型判断、成稿、落盘）的事件与模型调用都挂在
-        # 这个根 span 下。降级与无归属的计数由 runner 记在 ``fusion_judge``/``fusion_job`` 上。
-        try:
-            with (
-                bind_observation_context(worker_id=self.worker_id),
-                _span(self.span_controller, "fusion_job"),
-            ):
-                await self.runner.execute(lease)
-        finally:
-            stop_beat.set()
-            heartbeat.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await heartbeat
-
-    async def _run_loop(self) -> None:
-        while not self._stop_requested.is_set():
-            started = time.monotonic()
-            try:
-                worked = await self._tick()
-            except Exception as exc:  # noqa: BLE001 - 常驻循环必须活过基础设施抖动
-                self.last_error = exc
-                self._observe(
-                    "fusion_tick",
-                    ObservationStatus.FAILURE,
-                    {"error_type": type(exc).__name__},
-                    started=started,
-                )
-                worked = False
-            else:
-                self._succeeded()
-            if worked:
-                continue
-            await self._wait(self.poll_interval_seconds)
+        lane = self.physical.fusion
+        if not isinstance(lane, PhysicalLane):  # 同上
+            raise TypeError("the physical branch must carry the physical lane")
+        return lane
 
 
 class BehaviorReductionWorker(ResidentWorker):
@@ -302,6 +242,17 @@ class BehaviorReductionWorker(ResidentWorker):
             await self._wait(self.interval_seconds)
 
 
+class _LaneObserver:
+    """给一支发出的观测事件都标上 lane。"""
+
+    def __init__(self, observer: Observer, lane: Lane) -> None:
+        self._observer = observer
+        self._lane = lane.value
+
+    def record(self, event: ObservationEvent) -> None:
+        self._observer.record(replace(event, attributes={**event.attributes, "lane": self._lane}))
+
+
 def build_behavior_components(
     config: HabitusConfig,
     *,
@@ -311,68 +262,63 @@ def build_behavior_components(
     observer: Observer | None = None,
     span_controller: SpanController | None = None,
     clock: Callable[[], datetime] | None = None,
-) -> BehaviorRuntimeComponents | None:
-    """组装行为管线；``primary_subject`` 未配置时返回 None（行为侧未启用）。
+) -> BehaviorBranches | None:
+    """组装行为管线的两支；``primary_subject`` 未配置时返回 None（行为侧未启用）。
 
-    无存储写入、无模型请求——与 ``build_runtime`` 同一纪律。全部存储传**同一个行为根**
-    （各存储按自己的契约派生子路径——传子目录会造成目录二次嵌套与锁键漂移，评审实测过）。
+    无存储写入、无模型请求——与 ``build_runtime`` 同一纪律。
     """
 
-    behavior_config = config.behavior
-    if not behavior_config.enabled:
+    if not config.behavior.enabled:
         return None
-    root = config.behavior_root
-    context_limit = behavior_config.context_limit if behavior_config.context_limit is not None else FUSION_CONTEXT_LIMIT
+
+    def branch(lane: Lane) -> BehaviorRuntimeComponents:
+        return _build_branch(
+            config,
+            lane,
+            structured_chat=structured_chat,
+            lock_store=lock_store,
+            observer=observer,
+            span_controller=span_controller,
+            clock=clock,
+        )
+
+    return BehaviorBranches(session=branch(Lane.SESSION), physical=branch(Lane.PHYSICAL))
+
+
+def _build_branch(
+    config: HabitusConfig,
+    lane: Lane,
+    *,
+    structured_chat: StructuredChatClient,
+    lock_store: LockStore,
+    observer: Observer | None,
+    span_controller: SpanController | None,
+    clock: Callable[[], datetime] | None,
+) -> BehaviorRuntimeComponents:
+    """一条 lane 的那一支。全部存储传**这一支的根**（各存储按自己的契约派生子路径——传子目录会造成
+    目录二次嵌套与锁键漂移，评审实测过）；归约的 sweep 锁按根派生，两支互不相抢。"""
+
+    behavior_config = config.behavior
+    root = config.behavior_root / lane.value
+    # 这一支发出的每条观测事件都带上是哪一支：两支的事件、指标同名，不带就分不出、还会互相盖掉。
+    observer = None if observer is None else _LaneObserver(observer, lane)
     context_lookback = (
         float(behavior_config.context_lookback_seconds)
         if behavior_config.context_lookback_seconds is not None
         else FUSION_CONTEXT_LOOKBACK_SECONDS
     )
-    # 自洽校验：封口视界短于入队静默期时，链总在续篇有机会被融合之前就机械封口——
-    # 每个跨交付的行为必然裂成互不相认的 occurrence。这是我们自己两个参数的矛盾，硬拒。
-    if context_lookback <= DEFAULT_QUIET_PERIOD_SECONDS:
-        raise ValueError(
-            "behavior.context_lookback_seconds must exceed the fusion quiet period "
-            f"({DEFAULT_QUIET_PERIOD_SECONDS:g}s); a shorter window seals every chain "
-            "before its continuation can even be fused"
-        )
 
     observations = BehaviorObservationStore(root)
     judgements = BehaviorJudgementStore(root)
     receipts = BehaviorFusionReceiptStore(root)
-    # 一份覆盖索引三处共用：融合写、入队读、归约读——三者若各自实例化会按不同窗口口径回答
-    # "处理过没有"。
+    # 一份覆盖索引两处共用：融合写、归约读——各自实例化会按不同窗口口径回答"处理过没有"。
     coverage = BehaviorCoverageIndex(root, window_days=behavior_config.coverage_window_days)
-    jobs = BehaviorFusionJobStore(root, path_lock, clock=clock)
-    # 段容量随配置进来，切段与融合两处必须是同一个数（切出 60 条的段、融合却按 512 校验就是分叉）。
-    fusion_config = BehaviorFusionConfig(max_fragments_per_segment=behavior_config.max_fragments_per_segment)
-    enqueuer = BehaviorFusionEnqueuer(
-        observations,
-        jobs,
-        receipts,
-        clock=clock,
-        coverage=coverage,
-        config=fusion_config,
-        observer=observer,
-    )
-    fusion_runner = BehaviorFusionRunner(
-        jobs,
-        observations,
-        BehaviorJudgementFuser(structured_chat, config=fusion_config),
-        judgements,
-        receipts,
-        primary_subject=behavior_config.primary_subject,
-        context_limit=context_limit,
-        context_lookback_seconds=context_lookback,
-        coverage=coverage,
-        observer=observer,
-    )
 
     tree = BehaviorTree(root / "tree")
     # 词表的门槛从唯一的 Config 边界进来；模型只经 KindModelCaller 一个触点。
     kind_config = BehaviorKindConfig(**behavior_config.kinds_overrides())
     kind_store = BehaviorKindStore(tree.root, config=kind_config)
-    kinds, vocabulary_jobs = _vocabulary(tree, lock_store, kind_store, structured_chat, config.locale.zone())
+    kinds, vocabulary_jobs = _vocabulary(tree, lock_store, kind_store, structured_chat, config.locale.zone(), lane)
     reduction_runner = BehaviorReductionRunner(
         judgements=judgements,
         observations=observations,
@@ -394,38 +340,45 @@ def build_behavior_components(
         observer=observer,
     )
     zone = config.locale.zone()
-    session_config = SessionLaneConfig(**behavior_config.session_overrides())
-    session_lane = SessionLane(
-        SessionTurnDescriber(structured_chat, zone=zone, config=session_config),
-        SessionTurnRecorder(
-            observations=observations,
-            judgements=judgements,
-            receipts=receipts,
-            coverage=coverage,
-            primary_subject=behavior_config.primary_subject,
-            zone=zone,
-            clock=clock if clock is not None else (lambda: datetime.now(UTC)),
-        ),
-    )
+    lane_clock = clock if clock is not None else (lambda: datetime.now(UTC))
+    fusion: SessionLane | PhysicalLane
+    if lane is Lane.SESSION:
+        fusion = SessionLane(
+            SessionTurnDescriber(
+                structured_chat, zone=zone, config=SessionLaneConfig(**behavior_config.session_overrides())
+            ),
+            SessionTurnRecorder(
+                observations=observations,
+                judgements=judgements,
+                receipts=receipts,
+                coverage=coverage,
+                primary_subject=behavior_config.primary_subject,
+                zone=zone,
+                clock=lane_clock,
+            ),
+        )
+    else:
+        fusion = PhysicalLane(
+            PhysicalSegmentRecorder(
+                observations=observations,
+                judgements=judgements,
+                receipts=receipts,
+                coverage=coverage,
+                ledger=PhysicalSegmentLedger(root),
+                primary_subject=behavior_config.primary_subject,
+                clock=lane_clock,
+            )
+        )
     return BehaviorRuntimeComponents(
+        lane=lane,
         observations=observations,
         judgements=judgements,
         receipts=receipts,
-        jobs=jobs,
-        enqueuer=enqueuer,
-        fusion_runner=fusion_runner,
+        coverage=coverage,
         tree=tree,
         kind_store=kind_store,
         reduction_runner=reduction_runner,
-        session_lane=session_lane,
-        fusion_worker=BehaviorFusionWorker(
-            enqueuer,
-            fusion_runner,
-            poll_interval_seconds=behavior_config.fusion_poll_interval_seconds,
-            shutdown_timeout_seconds=behavior_config.worker_shutdown_timeout_seconds,
-            observer=observer,
-            span_controller=span_controller,
-        ),
+        fusion=fusion,
         reduction_worker=BehaviorReductionWorker(
             reduction_runner,
             interval_seconds=behavior_config.reduction_sweep_interval_seconds,
@@ -436,20 +389,33 @@ def build_behavior_components(
     )
 
 
-def deliver_observations(
-    components: BehaviorRuntimeComponents,
-    envelope: BehaviorObservationEnvelope,
+def deliver_physical(
+    branches: BehaviorBranches,
+    payload: object,
     *,
     observer: Observer | None = None,
-) -> str:
-    """观测投递的正门：入库、唤醒融合循环；返回交付身份（幂等——同身份同内容重复投递无害，
-    同身份异内容 fail-closed）。"""
+) -> tuple[UnitOutcome, ...]:
+    """物理 lane 的正门：上游的一份交付进来，校验、一段一条写成判断；返回每一段的去向。
 
-    with observe_operation(observer or NullObserver(), "behavior", "observation_delivery") as attributes:
-        stored = components.observations.put(envelope)
-        attributes.update(delivery_attributes(envelope, stored))
-    components.fusion_worker.wake()
-    return stored.source_id
+    不合约定的整份拒收（``PhysicalDeliveryError``）。幂等：同一段再送一遍不重复写，上游改判不收。
+    全是同步的文件读写，调用方放到线程里做。落树由归约的定拍 sweep 接手。
+    """
+
+    with observe_operation(observer or NullObserver(), "behavior", "physical_delivery") as attributes:
+        lane = branches.physical_lane
+        delivery = parse_delivery(payload, config=lane.recorder.config)
+        outcomes = lane.consume(delivery)
+        attributes.update(
+            {
+                "segments": len(delivery.segments),
+                "gaps": len(delivery.gaps),
+                **{
+                    f"units_{name}": sum(1 for item in outcomes if item.disposition.value == name)
+                    for name in sorted({item.disposition.value for item in outcomes})
+                },
+            }
+        )
+    return outcomes
 
 
 def _span(controller: SpanController | None, operation: str) -> AbstractContextManager[None]:
@@ -466,12 +432,13 @@ def _vocabulary(
     store: BehaviorKindStore,
     structured_chat: StructuredChatClient,
     zone: tzinfo,
+    lane: Lane,
 ) -> tuple[KindStamping, VocabularyJobs]:
     """词表的两块：归约里的白天归类，与三件整理活（定期拆改的放行只靠用户自己的数据，裁定 17）。"""
 
     caller = KindModelCaller(structured_chat, config=store.config)
     classifier = DaytimeClassifier(caller)
-    stamping = KindStamping(store, classifier, lane=store.config.default_lane)
+    stamping = KindStamping(store, classifier, lane=lane)
     jobs = VocabularyJobs(
         tree=tree,
         stamping=stamping,
@@ -537,10 +504,11 @@ def _record(
 
 
 __all__ = [
-    "BehaviorFusionWorker",
     "BehaviorReductionWorker",
+    "BehaviorBranches",
     "BehaviorRuntimeComponents",
+    "UnitOutcome",
     "build_behavior_components",
-    "deliver_observations",
+    "deliver_physical",
     "run_vocabulary_job",
 ]

@@ -2,7 +2,7 @@
 
 ```
 每条 lane：
-  前因 A × 后果 B × 四段跨度  →  每个都按层配好对照（spans）
+  前因 A × 后果 B × 四段跨度  →  每个都按层配好对照（spans；同一条链配两道，两道都过才算）
   → 最小可达 p 过不了线的：样本不够（不进检验族、不给区间）
   → 其余做加权 BH（FDR 10%）            第 1 道
   → 过了的：按块看稳不稳                  第 2 道
@@ -32,12 +32,13 @@ from habitus.scene.relations import longspan, stats
 from habitus.scene.relations.conditions import Condition, Template, evaluator, mechanical, parse, split
 from habitus.scene.relations.config import RelationConfig
 from habitus.scene.relations.longspan import Episode
-from habitus.scene.relations.measures import ChainMeasure, Measure
+from habitus.scene.relations.measures import ChainMeasure, Measure, PairedMeasure
 from habitus.scene.relations.spans import (
     MARKER_SEGMENTS,
     SEGMENTS,
     Chain,
     Controls,
+    Pairing,
     Segment,
     Stratum,
     chains_of,
@@ -165,7 +166,7 @@ class LaneTests:
         }
         self._chains: dict[str, tuple[Chain, ...]] = {}
         self._blocks: dict[str, Blocks | None] = {}
-        self._strata: dict[tuple[RelationKey, int | None], tuple[Stratum, ...]] = {}
+        self._strata: dict[tuple[RelationKey, int | None, Pairing], tuple[Stratum, ...]] = {}
         self._episodes: dict[tuple[str, Segment], tuple[Episode, ...]] = {}
         self._proposed: dict[RelationKey, date] = {}
 
@@ -196,10 +197,25 @@ class LaneTests:
                         if comparable(self.concepts, antecedent, consequent)
                     )
         for situation in sorted(self.line.situations):
+            if self._derived_from_history(situation):
+                continue
             if self.episodes(situation, Segment.SITUATION):
                 found.extend(RelationKey(lane, situation, consequent, Segment.SITUATION) for consequent in names)
         found.extend(self._moderated(names))
         return tuple(found)
+
+    def _derived_from_history(self, situation: str) -> bool:
+        """由行为历史派生的情境（「昨日有 X」「连续 X 中」）不当前因，只当调节条件（2026-10-12 用户裁定）。
+
+        它当前因问的问题别处已经在问：「昨日有 X 的日子 Y 多吗」= 次日段的 X → Y，「连续 X 中的日子 Y 多吗」= X 的集中期标志；
+        Y 换成 X 自己就成了同义反复（真实模型盘：昨日有交材料 → 交材料 58.8% 对 0%，候选）。日历来的情境（周末、调休、
+        月初）不从行为算，照旧进情境段。调节条件那条路（``conditions.mechanical`` 的概念模板）不受影响。
+        """
+
+        if situation not in self.concepts:
+            return False
+        rule = self.concepts[situation].situation
+        return rule is not None and rule.basis.reads_history
 
     def _moderated(self, names: list[str]) -> list[RelationKey]:
         found: list[RelationKey] = []
@@ -251,23 +267,37 @@ class LaneTests:
         return self._episodes[cache]
 
     def strata(
-        self, key: RelationKey, *, since: date | None = None, blind_as: int | None = None
+        self,
+        key: RelationKey,
+        *,
+        since: date | None = None,
+        blind_as: int | None = None,
+        pairing: Pairing = Pairing.SAME_DAY,
     ) -> tuple[Stratum, ...]:
         """短跨度关系的全部层（给了 ``since`` 就只要那天及以后的 A：前向验证只看发现之后的新数据）。条件不影响层，只影响分组。
-        ``blind_as`` 给了就把后果"判不了"当成它（上下界检验）。"""
+        ``blind_as`` 给了就把后果"判不了"当成它（上下界检验）；``pairing`` 是同一条链的哪一道对照（别的段只有一种）。"""
 
-        slot = (replace(key, condition=""), blind_as)
+        slot = (replace(key, condition=""), blind_as, pairing)
         if slot not in self._strata:
             controls = self.controls if blind_as is None else self._bounds[blind_as]
             blocks = self.blocks(key.antecedent)
             found: list[Stratum] = []
             for chain in merge_for(key.segment, self.chains(key.antecedent)):
-                item = controls.stratum(key.segment, chain, key.consequent)
+                item = controls.stratum(key.segment, chain, key.consequent, antecedent=key.antecedent, pairing=pairing)
                 if item is not None and blocks is not None:
                     found.append(replace(item, block=blocks.of(chain)))
             self._strata[slot] = tuple(found)
         items = self._strata[slot]
         return items if since is None else tuple(item for item in items if item.chain.day >= since)
+
+    def _chain_measure(self, key: RelationKey, *, since: date | None = None, blind_as: int | None = None) -> Measure:
+        """不带条件的短跨度关系怎么量：同一条链两道对照成对（``PairedMeasure``），别的段一道。"""
+
+        first = ChainMeasure(self.strata(key, since=since, blind_as=blind_as))
+        if key.segment is not Segment.CHAIN:
+            return first
+        second = ChainMeasure(self.strata(key, since=since, blind_as=blind_as, pairing=Pairing.SAME_SLOT))
+        return PairedMeasure(first=first, second=second)
 
     def _bounded_reading(
         self, key: RelationKey, since: date | None, measure: Measure
@@ -277,8 +307,8 @@ class LaneTests:
         「A → 返工」读成「A → 修改代码」又量一遍（第四轮评审人工智能 3：窗口里两条修改代码时读出 97% "返工"）。"""
 
         exact = self.config.thresholds.exact_strata_limit
-        low = ChainMeasure(self.strata(key, since=since, blind_as=0))
-        high = ChainMeasure(self.strata(key, since=since, blind_as=1))
+        low = self._chain_measure(key, since=since, blind_as=0)
+        high = self._chain_measure(key, since=since, blind_as=1)
         if low.units and 1.0 - measure.units / low.units > self.config.thresholds.max_blind_share:
             return None
         found = []
@@ -435,9 +465,12 @@ class LaneTests:
             judge = evaluator(
                 self.line, parse(key.condition), window=self.config.transition_window_slots, notes=self.notes
             )
-            measure = split(ChainMeasure(self.strata(key)), judge, minimum=self.config.thresholds.moderation_min_antecedents)
+            # 带条件的只按第 1 道对照分两组比：两组的钟点偏差一样，分组之间抵掉
+            measure = split(
+                ChainMeasure(self.strata(key)), judge, minimum=self.config.thresholds.moderation_min_antecedents
+            )
         else:
-            measure = ChainMeasure(self.strata(key))
+            measure = self._chain_measure(key)
         return measure if since is None else measure.subset(since=since)
 
     def seed(self, key: RelationKey, purpose: str) -> int:
@@ -551,6 +584,10 @@ def _circular(concepts: ConceptSet, condition: Condition, consequent: str) -> bo
 def _more_needed(measure: Measure, threshold: float) -> int | None:
     """照现在的样子，还要几个全朝一个方向的单位才可能把最小可达 p 压到 ``threshold`` 以下（粗估）。"""
 
+    if isinstance(measure, PairedMeasure):
+        # 两道对照都要过：按更难过的那道估
+        needed = [_more_needed(part, threshold) for part in measure.parts]
+        return None if any(item is None for item in needed) else max(item for item in needed if item is not None)
     if not isinstance(measure, ChainMeasure):
         return None
     informative = [item.null_probability for item in measure.strata if 0.0 < item.null_probability < 1.0]

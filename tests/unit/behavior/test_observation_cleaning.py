@@ -7,13 +7,11 @@ import pytest
 
 from habitus.behavior.observation import (
     BehaviorObservation,
-    BehaviorObservationAdapterRegistry,
     BehaviorObservationBatch,
     BehaviorObservationConfig,
     BehaviorObservationEnvelope,
     BehaviorObservationError,
     BehaviorObservationLimitError,
-    BehaviorObservationProtocolError,
     BehaviorObservationStore,
 )
 from habitus.behavior.observation.model import _identity
@@ -42,12 +40,14 @@ def raw_observation(**overrides: object) -> dict[str, object]:
 
 
 def adapt(*observations: dict[str, object], observer_id: str = OBSERVER) -> BehaviorObservationBatch:
-    registry = BehaviorObservationAdapterRegistry.load_default()
-    return registry.adapt(
-        PROTOCOL,
-        {"observations": list(observations) if observations else [raw_observation()]},
+    """按字段造一批观测（两条 lane 写凭据时走的就是 ``BehaviorObservation.create``）。"""
+
+    return BehaviorObservationBatch(
         observer_id=observer_id,
-        config=CONFIG,
+        observations=tuple(
+            BehaviorObservation.create(observer_id=observer_id, config=CONFIG, **item)  # type: ignore[arg-type]
+            for item in (observations or (raw_observation(),))
+        ),
     )
 
 
@@ -89,8 +89,6 @@ def observation(**overrides: object) -> BehaviorObservation:
 def test_available_at_is_required_and_cannot_precede_occurred_at() -> None:
     """available_at 是防标签泄漏的地基：它只能等于或晚于事情发生的时间。"""
 
-    with pytest.raises(BehaviorObservationProtocolError):
-        adapt({key: value for key, value in raw_observation().items() if key != "available_at"})
     with pytest.raises(BehaviorObservationError):
         adapt(raw_observation(available_at=(NOW - timedelta(milliseconds=1)).isoformat()))
     same_moment = adapt(raw_observation(available_at=NOW.isoformat()))
@@ -204,17 +202,6 @@ def test_cleaning_keeps_low_confidence_observations() -> None:
             observation(confidence=invalid)
 
 
-def test_adapter_rejects_unknown_and_missing_fields() -> None:
-    with pytest.raises(BehaviorObservationProtocolError):
-        adapt({**raw_observation(), "room": "hall"})
-    with pytest.raises(BehaviorObservationProtocolError):
-        adapt({key: value for key, value in raw_observation().items() if key != "semantics"})
-    with pytest.raises(BehaviorObservationProtocolError):
-        BehaviorObservationAdapterRegistry.load_default().adapt(
-            "some_other_agent_v1", {"observations": []}, observer_id=OBSERVER, config=CONFIG
-        )
-
-
 def test_observation_without_a_subject_is_not_a_behavior_observation() -> None:
     """无主体即非行为观测：这是结构判断，不是"看起来没价值"的语义过滤。
 
@@ -271,8 +258,6 @@ def test_capacity_bounds_are_operational_not_semantic() -> None:
         adapt(raw_observation(participants=[f"人{index}" for index in range(CONFIG.max_participants + 1)]))
     with pytest.raises(BehaviorObservationLimitError):
         adapt(raw_observation(evidence_refs=[f"e{index}" for index in range(CONFIG.max_evidence_refs + 1)]))
-    with pytest.raises(BehaviorObservationLimitError):
-        adapt(*[raw_observation() for _ in range(CONFIG.max_observations_per_batch + 1)])
     with pytest.raises(BehaviorObservationError):
         adapt(raw_observation(evidence_refs=[]))
     # 容量错误必须落在观测错误谱系内，否则调小配置就能让既有数据静默漏出上层的兜底。
@@ -386,10 +371,3 @@ def test_store_round_trip_and_tampering_detection(tmp_path) -> None:
         BehaviorObservationEnvelope.from_dict(inner, config=CONFIG)
 
 
-def test_a_duplicated_observation_in_one_batch_is_deduplicated_not_rejected() -> None:
-    """同一批里两条内容完全相同的观测（ASR 重复吐出）只保留一条；此前整批拒收。"""
-
-    raw = raw_observation()
-    batch = adapt(raw, dict(raw), raw_observation(semantics="人在洗手"))
-    assert len(batch.observations) == 2
-    assert len({item.observation_id for item in batch.observations}) == 2

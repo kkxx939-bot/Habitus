@@ -31,6 +31,9 @@ _KINDS_INT_BOUNDS = (
     ("kinds_lane_candidate_cap", 1, 10_000),
     ("kinds_anchors_per_class", 1, 100),
     ("kinds_revision_samples_per_class", 1, 100),
+    ("kinds_revision_window_days", 7, 730),
+    ("kinds_grouping_min_members", 2, 10_000),
+    ("kinds_grouping_batch_size", 2, 500),
     ("kinds_checkpoint_every", 1, 100_000),
     ("kinds_prompt_max_steps", 0, 200),
     ("kinds_sample_max_steps", 0, 200),
@@ -39,38 +42,31 @@ _KINDS_FLOAT_BOUNDS = (
     ("kinds_transient_retry_delay_seconds", 0.0, 600.0),
     ("kinds_max_anchor_pull", 0.0, 1.0),
 )
-_LANES = ("session", "physical")
 
 
 @dataclass(frozen=True)
 class BehaviorConfig:
     """行为侧的产品事实与运行节奏。
 
-    ``primary_subject`` 是这套系统跟踪谁的**产品事实**（融合分流、单主体边界都以它为准）；
-    留空表示行为侧未启用——上游感知（云侧行为 agent）接入前的合法状态，组合根将完全跳过
-    行为组件的组装与 Worker 启动。
+    ``primary_subject`` 是这套系统跟踪谁的**产品事实**（两条 lane 写的判断都记在他名下）；
+    留空表示行为侧未启用，组合根将完全跳过行为组件的组装与 Worker 启动。
     """
 
     primary_subject: str = ""
-    context_limit: int | None = None
+    # 归约的封口视界（秒）：一条判断的证据齐备之后过了这么久才封口落树；留空取 behavior/fusion/config.py 的默认。
     context_lookback_seconds: float | None = None
-    # 归约 sweep 节奏（用户裁定 5 分钟）与融合队列的空转轮询间隔；纯运维数，不影响正确性。
-    # 轮询下限 1 秒：每拍都要做一次观测存储的全量扫描（BHV-LIFECYCLE-001 欠账），更密的节拍
-    # 只会放大扫描成本。Worker 优雅停止的等待上界也在这里（运维参数不藏 Python 构造器）。
+    # 归约 sweep 节奏（用户裁定 5 分钟）；纯运维数，不影响正确性。
+    # Worker 优雅停止的等待上界也在这里（运维参数不藏 Python 构造器）。
     reduction_sweep_interval_seconds: float = 300.0
     # 归约 sweep 的租约时长；留空取 behavior/reduction 的默认（600s）。周尺度回填（万级小文件写入把
     # fseventsd 顶到 240% CPU、单篇 publish 被文件系统拖到秒级）需要更长的租约——运维参数，不是常量。
     reduction_sweep_lock_ttl_seconds: int | None = None
-    fusion_poll_interval_seconds: float = 5.0
     worker_shutdown_timeout_seconds: float = 30.0
-    # 融合覆盖索引 / 回执 / 消费账本的过期窗口（天）：等于上游可能补发多久以前的观测。
-    # 上游契约未定前取 7 天。它是：重投去重的判据、覆盖记录/回执/账本的过期期限。覆盖记录在其交付
-    # 仍在存储里时**不**过期（否则交付会被当成未融合重跑），所以它不限制下游停机时长、不丢数据。
+    # 融合覆盖索引 / 回执 / 消费账本的过期窗口（天）：同一个单位在这么多天之内再送来认得出来。
+    # 它是：重做去重的判据、覆盖记录/回执/账本的过期期限。覆盖记录在其凭据仍在存储里时**不**过期
+    # （否则会被当成没判过重做），所以它不限制下游停机时长、不丢数据。
     # 树上的数据不受它影响（撞车消歧的占用集合以树上既有地址为最终真相，不依赖账本窗口）。
     coverage_window_days: int = 7
-    # 一次融合最多接受的片段数。逐帧归属表按片段数线性增长、判断本体按判断数增长；在 8k 输出
-    # 预算下 512/160/100 条的段实测都会截断，60 条才稳（BHV-REALDATA-001 第 6 条）。
-    max_fragments_per_segment: int = 60
     # 基础词表（裁定 6：门槛做成配置）：全部可调字段，留空取 ``behavior/kinds/config.py`` 的默认值
     # （默认值只在领域模块）。字段名 = ``kinds_`` + BehaviorKindConfig 的同名字段，组合根按前缀派生注入。
     # 会话 lane 的保护上限（方案第五节）：留空取 ``behavior/fusion/lanes/session/config.py`` 的默认值。
@@ -78,7 +74,6 @@ class BehaviorConfig:
     session_max_turn_chars: int | None = None
     session_max_instruction_chars: int | None = None
     session_max_steps: int | None = None
-    kinds_default_lane: str | None = None
     kinds_batch_size: int | None = None
     kinds_validation_rounds: int | None = None
     kinds_transient_retries: int | None = None
@@ -98,6 +93,9 @@ class BehaviorConfig:
     kinds_lane_candidate_cap: int | None = None
     kinds_anchors_per_class: int | None = None
     kinds_revision_samples_per_class: int | None = None
+    kinds_revision_window_days: int | None = None
+    kinds_grouping_min_members: int | None = None
+    kinds_grouping_batch_size: int | None = None
     kinds_checkpoint_every: int | None = None
     kinds_prompt_max_steps: int | None = None
     kinds_sample_max_steps: int | None = None
@@ -105,12 +103,6 @@ class BehaviorConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.primary_subject, str):
             raise TypeError("behavior.primary_subject must be a string")
-        if self.context_limit is not None and (
-            isinstance(self.context_limit, bool)
-            or not isinstance(self.context_limit, int)
-            or not 1 <= self.context_limit <= 64
-        ):
-            raise ValueError("behavior.context_limit must be between 1 and 64")
         if self.context_lookback_seconds is not None and (
             isinstance(self.context_lookback_seconds, bool)
             or not isinstance(self.context_lookback_seconds, int | float)
@@ -123,12 +115,6 @@ class BehaviorConfig:
             or not 1 <= self.coverage_window_days <= 365
         ):
             raise ValueError("behavior.coverage_window_days must be between 1 and 365")
-        if (
-            isinstance(self.max_fragments_per_segment, bool)
-            or not isinstance(self.max_fragments_per_segment, int)
-            or not 1 <= self.max_fragments_per_segment <= 4096
-        ):
-            raise ValueError("behavior.max_fragments_per_segment must be between 1 and 4096")
         for name, upper in (
             ("session_max_turn_chars", 1_000_000),
             ("session_max_instruction_chars", 1_000_000),
@@ -150,8 +136,6 @@ class BehaviorConfig:
                 isinstance(number, bool) or not isinstance(number, int | float) or not low <= float(number) <= high
             ):
                 raise ValueError(f"behavior.{name} must be between {low:g} and {high:g}")
-        if self.kinds_default_lane is not None and self.kinds_default_lane not in _LANES:
-            raise ValueError(f"behavior.kinds_default_lane must be one of {_LANES}")
         if self.reduction_sweep_lock_ttl_seconds is not None and (
             isinstance(self.reduction_sweep_lock_ttl_seconds, bool)
             or not isinstance(self.reduction_sweep_lock_ttl_seconds, int)
@@ -160,7 +144,6 @@ class BehaviorConfig:
             raise ValueError("behavior.reduction_sweep_lock_ttl_seconds must be an integer between 60 and 86400")
         for name, value, minimum, maximum in (
             ("reduction_sweep_interval_seconds", self.reduction_sweep_interval_seconds, 1.0, 3_600.0),
-            ("fusion_poll_interval_seconds", self.fusion_poll_interval_seconds, 1.0, 600.0),
             ("worker_shutdown_timeout_seconds", self.worker_shutdown_timeout_seconds, 1.0, 3_600.0),
         ):
             if isinstance(value, bool) or not isinstance(value, int | float) or not minimum <= float(value) <= maximum:

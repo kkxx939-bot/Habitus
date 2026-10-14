@@ -94,4 +94,63 @@ class ChainMeasure:
         return sum(item.same_event for item in positives) / len(positives) if positives else None
 
 
-__all__ = ["ChainMeasure", "Measure"]
+@dataclass(frozen=True)
+class PairedMeasure:
+    """同一条链的两道对照各量一遍（``spans.Pairing``：同一天别的事做完的时刻；别的周同周几同钟点、当天没做 A），
+    **两道都显著才算**：两侧 p 各取两道里大的，最小可达 p 取大的（任何一道给不出对照，这条关系就样本不够），
+    效应与区间取两道里效应弱的那道（是它卡住了结论），去一块两道都要稳，异质性取更不稳的那道。
+    单位数与块数是 A 的次数——两道量的是同一批 A。"""
+
+    first: ChainMeasure
+    second: ChainMeasure
+
+    @property
+    def units(self) -> int:
+        return self.first.units
+
+    @property
+    def blocks(self) -> int:
+        return self.first.blocks
+
+    @property
+    def parts(self) -> tuple[ChainMeasure, ChainMeasure]:
+        return self.first, self.second
+
+    def weaker(self) -> ChainMeasure:
+        """效应（实验组率减对照率）小的那道。"""
+
+        return min(self.parts, key=lambda part: part.effect().difference)
+
+    def effect(self) -> stats.Effect:
+        return self.weaker().effect()
+
+    def tails(self, *, exact_limit: int) -> tuple[float, float]:
+        first, second = (part.tails(exact_limit=exact_limit) for part in self.parts)
+        return max(first[0], second[0]), max(first[1], second[1])
+
+    def minimum_p(self) -> float:
+        return max(part.minimum_p() for part in self.parts)
+
+    def interval(
+        self, *, level: float, rounds: int, seed: int
+    ) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
+        return self.weaker().interval(level=level, rounds=rounds, seed=seed)
+
+    def heterogeneity(self) -> float | None:
+        found = [value for value in (part.heterogeneity() for part in self.parts) if value is not None]
+        return min(found) if found else None
+
+    def leave_one_out(self, *, upward: bool) -> bool:
+        return all(part.leave_one_out(upward=upward) for part in self.parts)
+
+    def subset(self, *, since: date | None = None, last_blocks: int | None = None) -> PairedMeasure:
+        return PairedMeasure(
+            first=self.first.subset(since=since, last_blocks=last_blocks),
+            second=self.second.subset(since=since, last_blocks=last_blocks),
+        )
+
+    def same_event_share(self) -> float | None:
+        return self.first.same_event_share()
+
+
+__all__ = ["ChainMeasure", "Measure", "PairedMeasure"]

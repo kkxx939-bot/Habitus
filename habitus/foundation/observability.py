@@ -324,33 +324,24 @@ def project_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:
             ("queue_committed", "memory_jobs_committed_retained"),
             ("queue_oldest_age_seconds", "memory_job_oldest_age_seconds"),
             ("queue_high_watermark", "memory_job_sequence_high_watermark"),
-            ("behavior_queue_queued", "behavior_fusion_jobs_queued"),
-            ("behavior_queue_running", "behavior_fusion_jobs_running"),
-            ("behavior_queue_staged", "behavior_fusion_jobs_staged"),
-            ("behavior_queue_failed", "behavior_fusion_jobs_failed"),
-            ("behavior_queue_oldest_age_seconds", "behavior_fusion_job_oldest_age_seconds"),
-            ("behavior_queue_high_watermark", "behavior_fusion_job_sequence_high_watermark"),
             ("active_locks", "active_locks"),
             ("hanging_locks", "hanging_locks"),
             ("max_active_lock_age_seconds", "active_lock_max_age_seconds"),
         ):
             value = _non_negative_number(attributes.get(attribute))
             if value is not None:
-                updates.append(MetricUpdate(metric_name, "gauge", value))
+                updates.append(MetricUpdate(metric_name, "gauge", value, labels))
     return tuple(updates)
 
 
 # 行为管线的吞吐与损耗：(operation, attribute, metric)。属性是该步骤自己算出的计数，
-# 布尔属性按 0/1 计（截断降级发生一次记一次）。
+# 布尔属性按 0/1 计。
 _BEHAVIOR_COUNTERS: tuple[tuple[str, str, str], ...] = (
-    ("observation_delivery", "observations", "behavior_observations_received_total"),
-    ("fusion_enqueue", "enqueued", "behavior_fusion_jobs_enqueued_total"),
-    ("fusion_judge", "judgements", "behavior_judgements_total"),
-    ("fusion_judge", "truncated", "behavior_fusion_truncations_total"),
-    ("fusion_judge", "degradations", "behavior_fusion_degradations_total"),
-    ("fusion_job", "unreadable_observations", "behavior_unreadable_observations_total"),
-    ("fusion_job", "out_of_scope_observations", "behavior_out_of_scope_observations_total"),
-    ("fusion_job", "unowned_observations", "behavior_unowned_observations_total"),
+    ("physical_delivery", "segments", "behavior_physical_segments_received_total"),
+    ("physical_delivery", "gaps", "behavior_physical_gaps_received_total"),
+    ("physical_delivery", "units_recorded", "behavior_physical_units_recorded_total"),
+    ("physical_delivery", "units_revision_rejected", "behavior_physical_revisions_rejected_total"),
+    ("physical_delivery", "units_unusable_name", "behavior_physical_unusable_names_total"),
     ("reduction_publish", "occurrences", "behavior_occurrences_published_total"),
     ("reduction_publish", "gaps", "behavior_gaps_published_total"),
     ("kind_classify", "classified", "behavior_kind_classified_total"),
@@ -364,8 +355,6 @@ _BEHAVIOR_COUNTERS: tuple[tuple[str, str, str], ...] = (
 )
 # 行为管线的时效：小时级的等待放不进操作时长直方图的桶，按最近一次的值记 gauge。
 _BEHAVIOR_GAUGES: tuple[tuple[str, str, str], ...] = (
-    ("fusion_stage", "fusion_lag_seconds_max", "behavior_fusion_lag_seconds"),
-    ("fusion_stage", "evidence_wait_seconds_max", "behavior_fusion_evidence_wait_seconds"),
     ("reduction_seal", "horizon_lag_seconds", "behavior_seal_horizon_lag_seconds"),
     ("reduction_seal", "oldest_unsealed_wait_seconds", "behavior_oldest_unsealed_chain_wait_seconds"),
     ("reduction_seal", "unsealed_chains", "behavior_unsealed_chains"),
@@ -377,13 +366,16 @@ _BEHAVIOR_GAUGES: tuple[tuple[str, str, str], ...] = (
 def _behavior_metric_updates(event: ObservationEvent) -> tuple[MetricUpdate, ...]:
     updates: list[MetricUpdate] = []
     attributes = event.attributes
+    # 行为侧两条 lane 各是一整套、发的事件同名：带了 lane 的按 lane 分开记，否则一支的读数会被另一支盖掉。
+    lane = attributes.get("lane")
+    labels = (("lane", lane),) if isinstance(lane, str) and lane else ()
     for operation, attribute, metric_name in _BEHAVIOR_COUNTERS:
         if event.operation != operation or attribute not in attributes:
             continue
         raw = attributes[attribute]
         value = float(raw) if isinstance(raw, bool) else _non_negative_number(raw)
         if value:
-            updates.append(MetricUpdate(metric_name, "counter", value))
+            updates.append(MetricUpdate(metric_name, "counter", value, labels))
     for operation, attribute, metric_name in _BEHAVIOR_GAUGES:
         if event.operation != operation:
             continue

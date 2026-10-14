@@ -2,7 +2,7 @@
 
 1. 挑锚点：每个没动过的在用类，取最近的 ``anchors_per_class`` 条成员；
 2. 只留站得稳的：用旧清单归两遍，两遍都归回原类的才算锚点（排除模型自己的随机抖动）；
-3. 用新清单重归：被拉走的锚点超过 ``max_anchor_pull`` 这一比例，这次改动作废。
+3. 用新清单重归：被这次改动碰过的类拉走的锚点超过 ``max_anchor_pull`` 这一比例，这次改动作废（跑去「都不是」或别的没动过的类是模型抖动，不算）。
 
 封闭集合重判已经保证别的类里归好的条目不会被移动；锚点防的是"以后"。站得稳的锚点按（词表版本，lane）在一次拆改里只算一次，
 各个提议共用。一个锚点都没有时闸过不了——量不了就不改。
@@ -54,6 +54,8 @@ class AnchorGate:
     ) -> AnchorCheck:
         calls = 0
         candidates = self._recent_members(lane, before, members)
+        # ``before`` 是本轮已采纳改动之后的基线（每采纳一处版本号加一，键随之变）：前一处改动合理接走的锚点在新基线下站不稳、
+        # 不再当锚点，不会记到后面每一处提议的账上（2026-10-13 第 35 晚重放：一个被新切出的类接走的锚点让后面三处拆分全被挡下）
         key = (before.version, lane, tuple(member.occurrence for member in candidates))
         if key not in self._stable:
             self._stable[key], calls = await self._stable_anchors(candidates, before, checkpoint)
@@ -61,7 +63,15 @@ class AnchorGate:
         if not anchors:
             return AnchorCheck(False, 0, 0, calls)
         result = await classify_in_chunks(self.classifier, _requests(anchors), after, checkpoint=checkpoint)
-        pulled = sum(1 for member in anchors if _token(result.verdicts[member.occurrence]) != member.token)
+        # "被拉走" = 被这次改动碰过的类（收窄的原类、新切出的类、合并目标）接走。锚点在新清单下跑去「都不是」或别的没动过的类，
+        # 是模型自己的抖动（第 35 晚四次重放里"提交报销"每次都跑去都不是），与这次改动无关，不算在它账上
+        pulled = sum(
+            1
+            for member in anchors
+            if (token := _token(result.verdicts[member.occurrence])) != member.token
+            and token is not None
+            and ClassId.parse(token) in touched
+        )
         allowed = int(self.config.max_anchor_pull * len(anchors))
         return AnchorCheck(pulled <= allowed, len(anchors), pulled, calls + result.model_calls)
 

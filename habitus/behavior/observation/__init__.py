@@ -1,19 +1,13 @@
-"""云侧行为 agent 送入的观测清洗层：协议归一、校验与不可变落盘。
+"""观测：行为判断所依据的凭据——谁、在什么时刻、看到了什么——的形状与不可变落盘。
 
-本层只做确定性清洗，不做任何语义判断；事件边界、事件时长、多模态证据合并、观测级去重与
-语义字段产出全部属于后续融合层（``TODO(BHV-FUSION-003)``）。
+写它的是融合的两条 lane（``behavior/fusion/lanes``）：每个单位留开始、结束两条凭据，判断的时间由它们派生，
+归约落树时读它们，落树之后释放。本层只做确定性的校验与落盘，不做任何语义判断。
 """
 
-from habitus.behavior.observation.adapters import (
-    BehaviorObservationAdapter,
-    BehaviorObservationAdapterRegistry,
-    HabitusBehaviorObservationAdapter,
-)
 from habitus.behavior.observation.config import BehaviorObservationConfig
 from habitus.behavior.observation.errors import (
     BehaviorObservationError,
     BehaviorObservationLimitError,
-    BehaviorObservationProtocolError,
 )
 from habitus.behavior.observation.model import (
     BehaviorObservation,
@@ -25,15 +19,11 @@ from habitus.behavior.observation.store import BehaviorObservationStore
 
 __all__ = [
     "BehaviorObservation",
-    "BehaviorObservationAdapter",
-    "BehaviorObservationAdapterRegistry",
     "BehaviorObservationBatch",
     "BehaviorObservationConfig",
     "BehaviorObservationEnvelope",
     "BehaviorObservationError",
     "BehaviorObservationLimitError",
     "BehaviorObservationModality",
-    "BehaviorObservationProtocolError",
     "BehaviorObservationStore",
-    "HabitusBehaviorObservationAdapter",
 ]

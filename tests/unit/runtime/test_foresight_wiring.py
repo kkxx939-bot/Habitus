@@ -100,7 +100,9 @@ def assembled(
 
     config = HabitusConfig.from_mapping(raw_config(tmp_path))
     behavior_tree = tree(config)
-    prediction = build_prediction_components(config, behavior_tree=behavior_tree, clock=lambda: now)
+    prediction = build_prediction_components(
+        config, root=config.prediction_root / "session", behavior_tree=behavior_tree, clock=lambda: now
+    )
     assert prediction is not None
     asyncio.run(prediction.worker.run_once())
     components = build_foresight_components(
@@ -142,7 +144,9 @@ def test_an_enabled_foresight_layer_must_have_a_judge(tmp_path) -> None:
 
     config = HabitusConfig.from_mapping(raw_config(tmp_path))
     behavior_tree = tree(config)
-    prediction = build_prediction_components(config, behavior_tree=behavior_tree)
+    prediction = build_prediction_components(
+        config, root=config.prediction_root / "session", behavior_tree=behavior_tree
+    )
     assert prediction is not None
     with pytest.raises(ValueError, match="needs a judge"):
         build_foresight_components(
@@ -216,7 +220,9 @@ def test_without_a_published_generation_it_says_so_instead_of_answering_zero(tmp
 
     config = HabitusConfig.from_mapping(raw_config(tmp_path))
     behavior_tree = tree(config)
-    prediction = build_prediction_components(config, behavior_tree=behavior_tree)
+    prediction = build_prediction_components(
+        config, root=config.prediction_root / "session", behavior_tree=behavior_tree
+    )
     assert prediction is not None
     components = build_foresight_components(
         config,
@@ -319,7 +325,9 @@ def test_the_builder_refuses_two_sources_for_the_same_part(tmp_path) -> None:
 
     config = HabitusConfig.from_mapping(raw_config(tmp_path))
     behavior_tree = tree(config)
-    prediction = build_prediction_components(config, behavior_tree=behavior_tree)
+    prediction = build_prediction_components(
+        config, root=config.prediction_root / "session", behavior_tree=behavior_tree
+    )
     assert prediction is not None
     common = dict(
         behavior_tree=behavior_tree,

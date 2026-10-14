@@ -127,7 +127,7 @@ from habitus.memory.workflow import (
 )
 from habitus.model_client import ProviderFactory, StructuredChatClient
 from habitus.pre.conversation import ConversationAdapterRegistry
-from habitus.runtime.behavior import build_behavior_components
+from habitus.runtime.behavior import BehaviorBranches, build_behavior_components
 from habitus.runtime.components import (
     RuntimeComponents,
     RuntimeConversation,
@@ -138,7 +138,7 @@ from habitus.runtime.components import (
 )
 from habitus.runtime.foresight import SettlementStage, build_foresight_components
 from habitus.runtime.lifecycle import LifecycleWorker
-from habitus.runtime.prediction import build_prediction_components
+from habitus.runtime.prediction import PredictionBranches, build_prediction_components
 from habitus.runtime.runtime import Runtime
 from habitus.runtime.session_lane import BehaviorSessionConsumer
 from habitus.runtime.worker import MemoryWorker
@@ -166,6 +166,27 @@ def _nightly_stages(
         return None if following is None else await following()
 
     return run
+
+
+def _prediction_branches(
+    config: HabitusConfig, behavior: BehaviorBranches, *, observer: Observer | None
+) -> PredictionBranches | None:
+    """预测树的两支；未启用时返回 None。"""
+
+    built = {
+        branch.lane.value: build_prediction_components(
+            config,
+            behavior_tree=branch.tree,
+            root=config.prediction_root / branch.lane.value,
+            observer=observer,
+            after_rebuild=None,
+        )
+        for branch in behavior
+    }
+    session, physical = built["session"], built["physical"]
+    if session is None or physical is None:
+        return None
+    return PredictionBranches(session=session, physical=physical)
 
 
 def build_runtime(
@@ -618,44 +639,45 @@ def build_runtime(
     # behavior 关着而 prediction 开着的组合已经在配置层被硬拒（见 HabitusConfig 的跨域校验），
     # 所以这里 behavior_components 为 None 时 prediction 必然也没开，直接跳过即可。
     # 夜批顺序：归约把一天定稿 → 预测树重建 → 结算 →（新语义树各拍，后面几刀接上）。
+    # 预测树按 lane 各一支：各读自己那一支的行为树、各发布到 ``prediction/<lane>/``。
     prediction_components = (
         None
         if behavior_components is None
-        else build_prediction_components(
-            config,
-            behavior_tree=behavior_components.tree,
-            observer=operation_observer,
-            after_rebuild=None,
-        )
+        else _prediction_branches(config, behavior_components, observer=operation_observer)
     )
-    # 预测层站在两棵派生树之上，所以排在它们之后组装；任一未启用时 build 自己返回 None。
+    # 预测层站在派生树之上，所以排在它们之后组装；任一未启用时 build 自己返回 None。
+    # TODO(BHV-SESSION-LANE-001)：预测层按不按 lane 分还没定（用户 2026-10-11：「这个我还没有考虑好，因为预测层的
+    # 逻辑还没有写好」）。现状：它只接会话那一支（行为树、预测树、词表、定稿日、未封口的判断都取自会话一支），
+    # 物理那一支没有预测层、也不结算。定了之后要么再起一份接物理一支，要么改成同时读两支。
+    session_behavior = None if behavior_components is None else behavior_components.session
+    session_prediction = None if prediction_components is None else prediction_components.session
     foresight_components = (
         None
-        if behavior_components is None or prediction_components is None
+        if session_behavior is None or session_prediction is None
         else build_foresight_components(
             config,
-            behavior_tree=behavior_components.tree,
-            store=prediction_components.store,
+            behavior_tree=session_behavior.tree,
+            store=session_prediction.store,
             # 预测层给模型看的标题用类名：编号 → 类名从词表现读（预测层自己不认识词表包）。
-            class_labels=VocabularyReader(behavior_components.kind_store).class_names,
+            class_labels=VocabularyReader(session_behavior.kind_store).class_names,
             # 承诺上的类编号到结算时可能已被拆改：按"现在对应哪些编号"结算（同一份词表）
-            current_classes=VocabularyReader(behavior_components.kind_store).current_ids,
+            current_classes=VocabularyReader(session_behavior.kind_store).current_ids,
             # 词表迁移做到一半时不结算（有未完成的迁移计划就是在迁移）
-            vocabulary_migrating=lambda: behavior_components.kind_store.read_migration() is not None,
+            vocabulary_migrating=lambda: session_behavior.kind_store.read_migration() is not None,
             # "那天定稿了"只有归约说了算（链都落树、封口视界已过那天的本地结束），结算按它来。
-            closed_days=behavior_components.reduction_runner.closed_days,
+            closed_days=session_behavior.reduction_runner.closed_days,
             # 未封口的那一截从这个 Runtime 的判断存储读，按归约自己的口径（消费账本）与它的白天归类。
-            judgements=behavior_components.judgements,
-            ledger=behavior_components.reduction_runner.ledger,
-            stamping=behavior_components.reduction_runner.kinds,
+            judgements=session_behavior.judgements,
+            ledger=session_behavior.reduction_runner.ledger,
+            stamping=session_behavior.reduction_runner.kinds,
             structured_chat=structured_chat,
             observer=operation_observer,
         )
     )
-    if prediction_components is not None and behavior_components is not None:
+    if session_prediction is not None:
         # 夜批的顺序：树重建 → 结算承诺（对着归约已定稿的日子）→ 新语义树的夜批（第 11 步接进第二个参数）。
-        # 结算只读账本与行为树；它失败自己留观测、被这里吞掉，不许拖着后面一夜不跑。
-        prediction_components.worker.after_rebuild = _nightly_stages(
+        # 结算只读账本与行为树；它失败自己留观测、被这里吞掉，不许拖着后面一夜不跑。只挂在会话那一支上（见上）。
+        session_prediction.worker.after_rebuild = _nightly_stages(
             None if foresight_components is None else foresight_components.settlement,
             None,
         )

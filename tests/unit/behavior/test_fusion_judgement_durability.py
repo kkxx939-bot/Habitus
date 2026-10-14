@@ -3,35 +3,28 @@
 from __future__ import annotations
 
 import json
-from copy import deepcopy
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
 
 from habitus.behavior.fusion import (
-    FUSION_PROMPT_VERSION,
-    FUSION_VERSION,
     BehaviorFusionConfig,
     BehaviorFusionReceipt,
     BehaviorFusionReceiptStore,
     BehaviorJudgementStore,
-    JudgementRelation,
-    assemble_judgement_batch,
     build_fusion_receipt,
     derive_judgements,
     judgement_payload,
     receipt_identity,
     segment_identity,
-    validate_judgement_batch,
     without_unresolvable_relations,
 )
 from habitus.behavior.fusion.errors import BehaviorFusionError, BehaviorFusionLimitError
-from habitus.behavior.fusion.schema import JUDGEMENT_FUSION_JSON_SCHEMA
 from habitus.behavior.fusion.store import _JUDGEMENT_KEYS
 from habitus.behavior.observation import BehaviorObservation, BehaviorObservationConfig
-from habitus.foundation.integrity import canonical_digest, canonical_json, canonicalize
-from tests.unit.behavior.fusion_wire import SUBJECT, judgement, unreadable, wire
+from habitus.foundation.integrity import canonical_json, canonicalize
+from tests.unit.behavior.judgement_builders import SUBJECT, batch_from, judgement, unreadable, wire
 
 TZ8 = timezone(timedelta(hours=8))
 # 东八区凌晨：UTC 落在前一天，专门用来考验本地日历日的保留。
@@ -39,9 +32,9 @@ MIDNIGHT = datetime(2026, 8, 14, 0, 30, tzinfo=TZ8)
 JUDGED_AT = datetime(2026, 8, 14, 1, 15, tzinfo=TZ8)
 OBSERVATION_CONFIG = BehaviorObservationConfig()
 SOURCE_REFS = ("observation-delivery:abc",)
-# 从提示词模块取，而不是写死字面量：这里要证的是"版本由系统写入、不来自模型返回的线格式"，
-# 写死只会让每次改提示词都顺带来改一次测试。
-PROMPT_VERSION = FUSION_PROMPT_VERSION
+# 版本由写判断的那条 lane 给；这里用一组测试用的标签。
+LANE_VERSION = "behavior_test_lane_v1"
+PROMPT_VERSION = "behavior_test_rule_v1"
 
 
 def fragment(
@@ -94,9 +87,15 @@ def body() -> dict[str, Any]:
 
 
 def derived(raw: dict[str, Any] | None = None, *, judged_at: datetime = JUDGED_AT):
-    batch = assemble_judgement_batch(raw or body(), fragment_count=len(FRAGMENTS))
-    validate_judgement_batch(batch, FRAGMENTS)
-    return derive_judgements(batch, FRAGMENTS, source_refs=SOURCE_REFS, judged_at=judged_at)
+    batch = batch_from(raw or body(), fragment_count=len(FRAGMENTS))
+    return derive_judgements(
+        batch,
+        FRAGMENTS,
+        source_refs=SOURCE_REFS,
+        judged_at=judged_at,
+        fusion_version=LANE_VERSION,
+        prompt_version=PROMPT_VERSION,
+    )
 
 
 # --- 两个时间 ---------------------------------------------------------------------------
@@ -140,16 +139,6 @@ def test_canonicalize_would_have_moved_the_behavior_to_the_previous_day() -> Non
 # --- 身份 -------------------------------------------------------------------------------
 
 
-def test_identity_excludes_relations_so_mutual_links_do_not_deadlock() -> None:
-    """并行是互指的；关系若进身份就成了循环依赖，谁也算不出来。"""
-
-    items = derived()
-    washing, yawn = items[0], items[1]
-    assert yawn.relations == ((JudgementRelation.CONCURRENT_WITH.value, washing.judgement_id),)
-    assert washing.relations == ((JudgementRelation.CONCURRENT_WITH.value, yawn.judgement_id),)
-    assert len({item.judgement_id for item in items}) == 3
-
-
 def test_identity_changes_with_the_semantics_it_carries() -> None:
     raw = body()
     raw["judgements"][0]["goal"] = "另一个目标"
@@ -176,7 +165,7 @@ def test_fragment_numbers_become_durable_observation_identities() -> None:
 
 def test_system_bound_fields_are_not_taken_from_the_model() -> None:
     washing = derived()[0]
-    assert washing.fusion_version == FUSION_VERSION
+    assert washing.fusion_version == LANE_VERSION  # 哪条 lane 写的，由那条 lane 给
     assert washing.prompt_version == PROMPT_VERSION
     assert washing.source_refs == SOURCE_REFS
 
@@ -184,15 +173,29 @@ def test_system_bound_fields_are_not_taken_from_the_model() -> None:
 def test_source_refs_must_be_supplied_by_the_caller() -> None:
     """来源身份无法从片段推出，属于系统在模型输出之外绑定的事实。"""
 
-    batch = assemble_judgement_batch(body(), fragment_count=len(FRAGMENTS))
+    batch = batch_from(body(), fragment_count=len(FRAGMENTS))
     with pytest.raises(BehaviorFusionError):
-        derive_judgements(batch, FRAGMENTS, source_refs=[], judged_at=JUDGED_AT)
+        derive_judgements(
+            batch,
+            FRAGMENTS,
+            source_refs=[],
+            judged_at=JUDGED_AT,
+            fusion_version=LANE_VERSION,
+            prompt_version=PROMPT_VERSION,
+        )
 
 
 def test_judged_at_must_be_timezone_aware() -> None:
-    batch = assemble_judgement_batch(body(), fragment_count=len(FRAGMENTS))
+    batch = batch_from(body(), fragment_count=len(FRAGMENTS))
     with pytest.raises(BehaviorFusionError, match="timezone-aware"):
-        derive_judgements(batch, FRAGMENTS, source_refs=SOURCE_REFS, judged_at=datetime(2026, 8, 14, 1, 15))
+        derive_judgements(
+            batch,
+            FRAGMENTS,
+            source_refs=SOURCE_REFS,
+            judged_at=datetime(2026, 8, 14, 1, 15),
+            fusion_version=LANE_VERSION,
+            prompt_version=PROMPT_VERSION,
+        )
 
 
 # --- 判断存储 ---------------------------------------------------------------------------
@@ -361,34 +364,6 @@ def test_identical_replays_are_absorbed_below_the_store_not_by_it(tmp_path) -> N
     assert atomic_create_bytes(path, b"same\n", artifact_root=tmp_path) is False
 
 
-def test_the_receipt_uses_the_same_unreadable_criterion_as_the_batch() -> None:
-    """两处口径不一致时，落盘的那一份会永久偏高且改不了——而它正是告警依据。"""
-
-    from habitus.behavior.fusion import unreadable_ratio
-
-    raw = wire(
-        [
-            judgement(1, behavior="洗手", goal="清洁双手", basis=["冲洗"]),
-            unreadable(2),
-        ],
-        [[(1, 1)], [(1, 1)], [(1, 1)], [(1, 1)], [(1, 1), (2, None)], [(1, 1)]],
-    )
-    batch = assemble_judgement_batch(raw, fragment_count=len(FRAGMENTS))
-    validate_judgement_batch(batch, FRAGMENTS)
-    items = derive_judgements(batch, FRAGMENTS, source_refs=SOURCE_REFS, judged_at=JUDGED_AT)
-    record = build_fusion_receipt(
-        items,
-        FRAGMENTS,
-        source_refs=SOURCE_REFS,
-        prompt_version=PROMPT_VERSION,
-        validation_attempts=1,
-        primary_subject=SUBJECT,
-    )
-    # 第 5 帧同时被「洗手」和一条"没读懂"认领——它已经被读懂了，两处都不该把它计入。
-    assert unreadable_ratio(batch, len(FRAGMENTS)) == record.unreadable_ratio
-    assert record.unreadable_observation_ids == ()
-
-
 def test_the_receipt_separates_other_peoples_behaviour_from_unreadable_frames() -> None:
     """路人多不等于上游在退化——两个信号混进同一个比例就都失真了。
 
@@ -423,9 +398,15 @@ def test_the_receipt_separates_other_peoples_behaviour_from_unreadable_frames() 
         ],
         [[(1, 1)], [(1, 1)], [(1, 1)], [(2, None)], [(3, None)]],
     )
-    batch = assemble_judgement_batch(raw, fragment_count=len(fragments))
-    validate_judgement_batch(batch, fragments)
-    items = derive_judgements(batch, fragments, source_refs=SOURCE_REFS, judged_at=JUDGED_AT)
+    batch = batch_from(raw, fragment_count=len(fragments))
+    items = derive_judgements(
+        batch,
+        fragments,
+        source_refs=SOURCE_REFS,
+        judged_at=JUDGED_AT,
+        fusion_version=LANE_VERSION,
+        prompt_version=PROMPT_VERSION,
+    )
     record = build_fusion_receipt(
         items,
         fragments,
@@ -465,8 +446,15 @@ def test_a_segment_with_no_behaviour_of_the_subject_still_yields_a_receipt() -> 
         [judgement(1, behavior="走动", subjects=[guest])],
         [[(1, None)]] * 3,
     )
-    batch = assemble_judgement_batch(raw, fragment_count=len(fragments))
-    items = derive_judgements(batch, fragments, source_refs=SOURCE_REFS, judged_at=JUDGED_AT)
+    batch = batch_from(raw, fragment_count=len(fragments))
+    items = derive_judgements(
+        batch,
+        fragments,
+        source_refs=SOURCE_REFS,
+        judged_at=JUDGED_AT,
+        fusion_version=LANE_VERSION,
+        prompt_version=PROMPT_VERSION,
+    )
     record = build_fusion_receipt(
         items,
         fragments,
@@ -479,58 +467,20 @@ def test_a_segment_with_no_behaviour_of_the_subject_still_yields_a_receipt() -> 
     assert record.out_of_scope_ratio == 1.0
 
 
-def test_relations_pointing_at_judgements_that_will_not_be_stored_are_pruned() -> None:
-    """个人版只落主体的判断；指向被分流掉的旁人判断的关系必须剪掉。
-
-    并行是**相互**的：提示词要求模型只在一边声明，装配层自动补上另一边。于是主体那条判断上会
-    出现一条指向旁人判断的关系，而旁人那条随后被分流。留着它，不可变存储里就永久躺着一个指向
-    不存在记录的 ``target_id``，而回执只记观测身份、不记被丢掉的判断身份，事后无从还原。
-
-    剪枝不改身份：``judgement_id`` 是不含 relations 的内容摘要。
-    """
-
-    fragments = (
-        fragment(0, "主人在餐桌前吃饭", participants=[SUBJECT]),
-        fragment(5, "主人夹菜", participants=[SUBJECT]),
-        fragment(10, "客人拿起电话通话", participants=["客人B"]),
-    )
-    raw = wire(
-        [
-            judgement(1, behavior="吃饭", goal="吃完这顿饭", summary="在餐桌前吃饭", basis=["进食"]),
-            judgement(
-                2,
-                behavior="打电话",
-                goal="通话",
-                summary="客人在打电话",
-                subjects=["客人B"],
-                basis=["拿起电话"],
-                relations=[("concurrent_with", 1)],
-            ),
-        ],
-        [[(1, 1)], [(1, 1)], [(2, 1)]],
-    )
-    batch = assemble_judgement_batch(raw, fragment_count=len(fragments))
-    derived = derive_judgements(batch, fragments, source_refs=("d1",), judged_at=JUDGED_AT)
-
-    owner = next(item for item in derived if SUBJECT in item.subjects)
-    # 对称闭包确实给主体那条补出了关系，而它的目标不会落盘。
-    assert [kind for kind, _ in owner.relations] == ["concurrent_with"]
-    visible = {item.judgement_id for item in derived if SUBJECT in item.subjects}
-    assert all(target not in visible for _, target in owner.relations)
-
-    pruned = without_unresolvable_relations(owner, visible)
-
-    assert pruned.relations == ()
-    assert pruned.judgement_id == owner.judgement_id
-
-
 def test_pruning_keeps_relations_whose_target_survives() -> None:
     """只剪不可解析的那些；指向落盘判断或上下文判断的关系原样保留。"""
 
     fragments = (fragment(0, "洗手", participants=[SUBJECT]),)
     raw = wire([judgement(1, behavior="洗手", goal="清洁双手", summary="洗手", basis=["冲手"])], [[(1, 1)]])
-    batch = assemble_judgement_batch(raw, fragment_count=1)
-    derived = derive_judgements(batch, fragments, source_refs=("d1",), judged_at=JUDGED_AT)
+    batch = batch_from(raw, fragment_count=1)
+    derived = derive_judgements(
+        batch,
+        fragments,
+        source_refs=("d1",),
+        judged_at=JUDGED_AT,
+        fusion_version=LANE_VERSION,
+        prompt_version=PROMPT_VERSION,
+    )
     only = derived[0]
 
     assert without_unresolvable_relations(only, {only.judgement_id}) is only
@@ -632,27 +582,6 @@ def test_a_long_running_judgement_stays_inside_the_lookback_window(tmp_path) -> 
     assert [str(item["judgement_id"])[0] for item in context] == ["c", "d"]
 
 
-def test_the_fusion_version_covers_the_schema_not_just_the_prompt() -> None:
-    """改 schema 的字段描述必须改变版本号——否则两批语义不同的判断在数据上分辨不出来。
-
-    schema 不只是形状声明：字段描述里承载着硬契约（goal 非 null 时 basis 必须至少写一条、
-    interrupted 与 abandoned 的区别、关系目标的合法性），实测改这些描述会实打实地改变模型行为。
-    版本一度只覆盖实现与提示词，于是改完描述、模型行为变了，版本却可以一字不动。
-
-    用摘要而不是手写版本号，是为了**不可能忘记**。这条测试守的就是那个自动性。
-    """
-
-    fingerprint = canonical_digest(JUDGEMENT_FUSION_JSON_SCHEMA)[:12]
-    assert f"schema{fingerprint}" in FUSION_VERSION
-    assert FUSION_PROMPT_VERSION in FUSION_VERSION
-
-    # 只改一个字段描述里的一个字，指纹就必须变。
-    altered = deepcopy(JUDGEMENT_FUSION_JSON_SCHEMA)
-    properties = altered["properties"]["judgements"]["items"]["properties"]
-    properties["basis"]["description"] = properties["basis"]["description"] + "。"
-    assert canonical_digest(altered)[:12] != fingerprint
-
-
 def test_a_frame_shared_by_a_guest_and_an_unreadable_judgement_stays_out_of_scope() -> None:
     """tracked 只算主体可读判断的观测：v3 把没读懂判断并入 in_scope 后，这条口径不许跟着漂。"""
 
@@ -678,9 +607,15 @@ def test_a_frame_shared_by_a_guest_and_an_unreadable_judgement_stays_out_of_scop
         ],
         [[(1, 1)], [(2, None), (3, None)]],  # 同一帧：旁人可读判断 + 没读懂判断都认领
     )
-    batch = assemble_judgement_batch(raw, fragment_count=len(fragments))
-    validate_judgement_batch(batch, fragments)
-    items = derive_judgements(batch, fragments, source_refs=SOURCE_REFS, judged_at=JUDGED_AT)
+    batch = batch_from(raw, fragment_count=len(fragments))
+    items = derive_judgements(
+        batch,
+        fragments,
+        source_refs=SOURCE_REFS,
+        judged_at=JUDGED_AT,
+        fusion_version=LANE_VERSION,
+        prompt_version=PROMPT_VERSION,
+    )
     record = build_fusion_receipt(
         items,
         fragments,

@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, date, datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from habitus.behavior.tree import BehaviorTree
@@ -51,6 +52,24 @@ class PredictionRuntimeComponents:
             raise ValueError("prediction rebuilder must publish into the assembled store")
         if self.rebuilder.config is not self.tree_config:
             raise ValueError("prediction rebuilder must use the assembled tree parameters")
+
+
+@dataclass(frozen=True)
+class PredictionBranches:
+    """预测树的两支：会话一支、物理一支，各读各自那一支的行为树、各发布到自己的目录，互不相通。"""
+
+    session: PredictionRuntimeComponents
+    physical: PredictionRuntimeComponents
+
+    def __post_init__(self) -> None:
+        for name in ("session", "physical"):
+            if not isinstance(getattr(self, name), PredictionRuntimeComponents):
+                raise TypeError(f"prediction branch {name} must be PredictionRuntimeComponents")
+        if self.session.store is self.physical.store or self.session.store.root == self.physical.store.root:
+            raise ValueError("the two prediction branches must not share one store")
+
+    def __iter__(self) -> Iterator[tuple[str, PredictionRuntimeComponents]]:
+        return iter((("session", self.session), ("physical", self.physical)))
 
 
 class PredictionRebuilder:
@@ -220,11 +239,12 @@ def build_prediction_components(
     config: HabitusConfig,
     *,
     behavior_tree: BehaviorTree,
+    root: Path,
     observer: Observer | None = None,
     clock: Callable[[], datetime] | None = None,
     after_rebuild: Callable[[], Awaitable[object]] | None = None,
 ) -> PredictionRuntimeComponents | None:
-    """组装预测夜批；未启用时返回 None。
+    """组装一支的预测夜批（读 ``behavior_tree``、发布到 ``root``）；未启用时返回 None。
 
     无存储写入、无模型请求——与 ``build_runtime`` 同一纪律。取值范围的校验全部由
     ``PredictionTreeConfig`` 在这里完成，配置层只负责"给没给全"。
@@ -234,7 +254,7 @@ def build_prediction_components(
     if not prediction_config.enabled:
         return None
     tree_config = PredictionTreeConfig(**prediction_config.tree_parameters())
-    store = PredictionTreeStore(config.prediction_root, retained_generations=tree_config.published_generations)
+    store = PredictionTreeStore(root, retained_generations=tree_config.published_generations)
     rebuilder = PredictionRebuilder(behavior_tree, store, config=tree_config, zone=config.locale.zone(), clock=clock)
     worker = PredictionRebuildWorker(
         rebuilder,
@@ -247,6 +267,7 @@ def build_prediction_components(
 
 
 __all__ = [
+    "PredictionBranches",
     "PredictionRebuildWorker",
     "PredictionRebuilder",
     "PredictionRuntimeComponents",

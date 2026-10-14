@@ -53,10 +53,10 @@ from habitus.model_client import (
     Reranker,
     StructuredChatClient,
 )
-from habitus.runtime.behavior import BehaviorRuntimeComponents
+from habitus.runtime.behavior import BehaviorBranches
 from habitus.runtime.foresight import ForesightRuntimeComponents
 from habitus.runtime.lifecycle import LifecycleWorker
-from habitus.runtime.prediction import PredictionRuntimeComponents
+from habitus.runtime.prediction import PredictionBranches
 from habitus.runtime.session_lane import BehaviorSessionConsumer
 from habitus.runtime.worker import MemoryWorker
 
@@ -346,11 +346,11 @@ class RuntimeComponents:
     conversation: RuntimeConversation
     memory: RuntimeMemory
     workflow: RuntimeWorkflow
-    # 行为管线（观测→融合→归约→行为树）；primary_subject 未配置时为 None（行为侧未启用）。
-    behavior: BehaviorRuntimeComponents | None = None
-    # 时间预测树夜批；prediction.enabled 为假时为 None。它读行为树，所以行为侧未启用时也必然为 None。
-    prediction: PredictionRuntimeComponents | None = None
-    # 预测层的证据装配；foresight.enabled 为假时为 None。它读两棵派生树，所以上面两个为 None 时也必然为 None。
+    # 行为管线的两支（会话、物理各一整套：融合→归约→行为树）；primary_subject 未配置时为 None（行为侧未启用）。
+    behavior: BehaviorBranches | None = None
+    # 时间预测树夜批的两支；prediction.enabled 为假时为 None。各读自己那一支的行为树，所以行为侧未启用时也必然为 None。
+    prediction: PredictionBranches | None = None
+    # 预测层的证据装配；foresight.enabled 为假时为 None。它现在只接会话那一支（见 assembly 的 TODO）。
     foresight: ForesightRuntimeComponents | None = None
 
     def __post_init__(self) -> None:
@@ -364,16 +364,18 @@ class RuntimeComponents:
             raise TypeError("memory must be RuntimeMemory")
         if not isinstance(self.workflow, RuntimeWorkflow):
             raise TypeError("workflow must be RuntimeWorkflow")
-        if self.behavior is not None and not isinstance(self.behavior, BehaviorRuntimeComponents):
-            raise TypeError("behavior must be BehaviorRuntimeComponents or None")
+        if self.behavior is not None and not isinstance(self.behavior, BehaviorBranches):
+            raise TypeError("behavior must be BehaviorBranches or None")
         if self.prediction is not None:
-            if not isinstance(self.prediction, PredictionRuntimeComponents):
-                raise TypeError("prediction must be PredictionRuntimeComponents or None")
+            if not isinstance(self.prediction, PredictionBranches):
+                raise TypeError("prediction must be PredictionBranches or None")
             if self.behavior is None:
                 raise ValueError("prediction rebuilds from the behaviour tree; behaviour must be enabled")
-            # 实例同一性：夜批必须读**这个** Runtime 写入的那棵行为树，不是另开一个同路径的实例。
-            if self.prediction.rebuilder.behavior_tree is not self.behavior.tree:
-                raise ValueError("prediction must rebuild from the assembled behaviour tree")
+            # 实例同一性：每一支的夜批必须读**这个** Runtime 写入的、**同一条 lane** 的那棵行为树——
+            # 不是另开一个同路径的实例，更不是另一支的树。
+            for lane, branch in self.prediction:
+                if branch.rebuilder.behavior_tree is not self.behavior.of(lane).tree:
+                    raise ValueError(f"the {lane} prediction branch must rebuild from the {lane} behaviour tree")
         if self.foresight is not None:
             if not isinstance(self.foresight, ForesightRuntimeComponents):
                 raise TypeError("foresight must be ForesightRuntimeComponents or None")
@@ -381,10 +383,12 @@ class RuntimeComponents:
                 raise ValueError("foresight reads the derived trees; behaviour and prediction must be enabled")
             # 接线漏了的话，进程照常启动、health 全绿、结算（以及后面接进同一个钩子的新语义树各拍）一夜都不会跑，
             # 而配置里还开着——无处可查。
-            if self.prediction.worker.after_rebuild is None:
+            if self.prediction.session.worker.after_rebuild is None:
                 raise ValueError("the settlement stage must be attached to the nightly rebuild")
             self.foresight.assert_attached_to(
-                behavior=self.behavior, prediction=self.prediction, structured_chat=self.models.structured_chat
+                behavior=self.behavior.session,
+                prediction=self.prediction.session,
+                structured_chat=self.models.structured_chat,
             )
         if self.workflow.enqueuer.conversations is not self.conversation.journal:
             raise ValueError("workflow enqueuer must use the shared conversation journal")

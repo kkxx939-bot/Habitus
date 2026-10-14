@@ -25,14 +25,24 @@
 - 观测空白不在"人在场"里，自然不算机会。
 
 **对照（病例交叉）**：每次（合并后的）A 是一层；对照取同一层里与 A 同一种时刻、量法与实验组一样。
-零假设下 A 那一刻只是这一层里随便一个时刻，检验在层内比（``stats``）：
+零假设下 A 那一刻只是这一层里随便一个时刻，检验在层内比（``stats``）。对照回答的只有一个问题："那天没做 A 的话，
+同一个时刻 B 来的概率是多少"，所以对照时刻要在"A 做没做"之外的一切方面都与实验组一样：
 
-- **同一条链**：同一天**别的事做完**的时刻（含「待定」那些叫不出名的事），只取各自那一类的链做完的时刻、且做完的那件不是 B 本身——
-  两边都是"刚做完一件不是 B 的事、它那一类暂时不再来、人空出来了"，比的只是接下来做什么；同一天也把"那天在赶项目、所以什么都多"
-  一起扣掉；
-- **当天剩下的**：**别的周、同一个周几**、人在场的日子、**同一个钟点**，各自量到当天结束。不能取同一天的别的钟点：窗口长达几小时，
+- **同一条链**要配两道对照，两道都显著才算（``measures.PairedMeasure``；用户 2026-10-12 裁定）：
+  1. ``Pairing.SAME_DAY``：同一天**别的事做完**的时刻（含「待定」那些叫不出名的事），只取各自那一类的链做完的时刻、且做完的那件不是 B
+     本身——两边都是"刚做完一件不是 B 的事、它那一类暂时不再来、人空出来了"，比的只是接下来做什么；同一天也把"那天在赶项目、
+     所以什么都多"一起扣掉；
+  2. ``Pairing.SAME_SLOT``：**别的周、同一个周几、同一个钟点、那一刻前后 W 槽内没做 A** 的时刻，量同样长的窗口。只有第 1 道时，
+     早七点、中午一点做完的事被拿去比晚九点半做完的事，任何固定在 22:20 的习惯都会被读成 21:15–22:00 之间做完的每件事的后果
+     （合成一年数据实测：成立 9 条里 6 条是这种"定点习惯前后相邻"）；第 2 道问的是"别的周四 21:30 没报名教会，22:20 看明天日程
+     照样来不来"。按时刻排 A 而不按整天排：一件每天都做、但每天时刻不同的 A（随机时刻的讨论方案）在别的日子同一钟点多半没做，
+     照样有对照；每天同一钟点做的 A（07:35 看今天日程）找不到"没做 A 的同钟点"，对照为空、样本不够、不报。
+- **当天剩下的**：**别的周、同一个周几、同一个钟点、当天没做 A**，各自量到当天结束。不能取同一天的别的钟点：窗口长达几小时，
   早晚不同的钟点后面接的本来就不一样（合成数据实测：17:50 固定写文档，"任何事 → 当天剩下的写文档"全部显著为正）；
-- **次日、第 2–7 天**：别的周、同一个周几、人在场的日子。
+- **次日、第 2–7 天**：别的周、同一个周几、当天没做 A、人在场的日子。
+
+**对照里不能有 A**：对照回答"没做 A 会怎样"，一个每周四都做的 A，别的周四多半也做了它，拿那些时刻当对照等于拿实验组比实验组，
+效应被抹平。按槽的段排"那一刻附近有 A"，按天的段排"那天有 A"。每天都来的东西是预测树的基线，语义树只说基线之外的关系。
 
 跨天与当天之后用"同一个周几"（裁定 27 第 2 条）：取同一周别的日子扣不掉周几，会把两件事各自的周节律（周四开会、周五写周报，
 彼此无关）读成关系，而周几 × 钟点本来就是预测树的基线；周与周之间的慢漂移由按块的检验与维持检验兜。
@@ -74,6 +84,13 @@ class Segment(str, Enum):
     @property
     def long(self) -> bool:
         return self not in SEGMENTS
+
+
+class Pairing(str, Enum):
+    """按槽的两段里对照怎么配：同一天别的事做完的时刻，或别的周同周几同钟点、当天没做 A 的日子。"""
+
+    SAME_DAY = "same_day"
+    SAME_SLOT = "same_slot"
 
 
 #: 短跨度的四段（按层配对照）。
@@ -165,16 +182,29 @@ class Controls:
         self._days: dict[tuple[str, Segment, date], int | None] = {}
         self._prefix: dict[tuple[str, date], tuple[list[int], list[int]]] = {}
         self._on_day: dict[tuple[str, date], tuple[tuple[tuple[int, str], ...], frozenset[int]]] = {}
+        self._antecedent_days: dict[str, frozenset[date]] = {}
 
-    def stratum(self, segment: Segment, chain: Chain, consequent: str) -> Stratum | None:
-        """这一次 A 的一层；A 那一刻的结果未知、或同一层里没有可比的对照时刻，返回 None。"""
+    def stratum(
+        self,
+        segment: Segment,
+        chain: Chain,
+        consequent: str,
+        *,
+        antecedent: str,
+        pairing: Pairing = Pairing.SAME_DAY,
+    ) -> Stratum | None:
+        """这一次 A（``antecedent`` 的一条链）的一层；A 那一刻的结果未知、或同一层里没有可比的对照时刻，返回 None。
+
+        ``pairing`` 只对同一条链有意义（第 1 道同一天、第 2 道别的周同钟点）；别的段各只有一种配法。
+        别的周的对照里不能有 A：按槽的段排"那一刻前后 W 槽内有 A"，按天的段与当天剩下的排"那天有 A"。
+        """
 
         if segment.daily:
             treated = self._day(consequent, segment, chain.day)
-            results = self._daily_controls(segment, chain, consequent) if treated is not None else []
+            results = self._daily_controls(chain, consequent, segment, antecedent) if treated is not None else []
         else:
             treated = self._treated_slots(segment, chain, consequent)
-            results = self._slot_controls(segment, chain, consequent) if treated is not None else []
+            results = self._slot_controls(segment, chain, consequent, pairing, antecedent) if treated is not None else []
         defined = [result for result in results if result is not None]
         if treated is None or not defined:
             return None
@@ -201,13 +231,15 @@ class Controls:
         blind = {slot - start for slot in line.unknown.get(consequent, [])}
         return self.blind_as if blind & wanted else 0
 
-    def _slot_controls(self, segment: Segment, chain: Chain, consequent: str) -> list[int | None]:
+    def _slot_controls(
+        self, segment: Segment, chain: Chain, consequent: str, pairing: Pairing, antecedent: str
+    ) -> list[int | None]:
         line, day = self.line, chain.day
         present = line.present.get(day, ())
         start = line.day_start(day)
         own = chain.end - start
         found: list[int | None] = []
-        if segment is Segment.CHAIN:
+        if segment is Segment.CHAIN and pairing is Pairing.SAME_DAY:
             # 同一天别的事做完的时刻（同一槽做完的几件算一个时刻）。做完的那件本身是 B 的不算：它那一类之后暂时不会再来，
             # 对照里的 B 会被压低（实验组的前因不是 B，没有这一层）——两边都得是"一件不是 B 的事做完、它那一类暂时不再来"。
             itself = {uri for _slot, uri in self._day_marks(consequent, day)[0]}
@@ -219,7 +251,17 @@ class Controls:
                 if slot != own and self._fully_present(present, slot):
                     found.append(self._after(consequent, day, slot, excluded=uris))
             return found
-        for other in self._peers(day):
+        if segment is Segment.CHAIN:
+            for other in self._peers(day, frozenset()):
+                # 别的周同周几、同一槽、那一刻前后 W 槽内没做 A：同样长的窗口要整段在场
+                others = line.present.get(other, ())
+                if not self._fully_present(others, own) or self._antecedent_near(antecedent, other, own):
+                    continue
+                first = bisect_left(others, own)
+                other_hits, other_blind = self._prefix_of(consequent, other)
+                found.append(_count(other_hits, other_blind, first, first + self.window, self.blind_as))
+            return found
+        for other in self._peers(day, self._days_with(antecedent)):
             others = line.present.get(other, ())
             if own not in others:
                 continue  # 那天这个钟点人不在：不是可比的时刻
@@ -248,11 +290,30 @@ class Controls:
             self._on_day[key] = (hits, blind)
         return self._on_day[key]
 
-    def _peers(self, day: date) -> tuple[date, ...]:
-        """别的周、同一个周几、人在场的日子。"""
+    def _peers(self, day: date, excluded: frozenset[date]) -> tuple[date, ...]:
+        """别的周、同一个周几、人在场、不在 ``excluded`` 里的日子。"""
 
         return tuple(
-            other for other, slots in self.line.present.items() if slots and other != day and other.weekday() == day.weekday()
+            other
+            for other, slots in self.line.present.items()
+            if slots and other != day and other.weekday() == day.weekday() and other not in excluded
+        )
+
+    def _days_with(self, antecedent: str) -> frozenset[date]:
+        """A 来过的日子。"""
+
+        if antecedent not in self._antecedent_days:
+            self._antecedent_days[antecedent] = frozenset(mark.day for mark in self.line.marks.get(antecedent, []))
+        return self._antecedent_days[antecedent]
+
+    def _antecedent_near(self, antecedent: str, day: date, slot: int) -> bool:
+        """那天 ``slot`` 前后 W 槽内有没有 A（A 占着的那段与 ``[slot − W, slot + W]`` 有交集）。"""
+
+        moment = self.line.day_start(day) + slot
+        return any(
+            mark.slot <= moment + self.window and mark.end >= moment - self.window
+            for mark in self.line.marks.get(antecedent, [])
+            if mark.day == day
         )
 
     def _fully_present(self, present: tuple[int, ...], slot: int) -> bool:
@@ -286,8 +347,8 @@ class Controls:
 
     # ── 后两段：按日子 ─────────────────────────────────────────────────────
 
-    def _daily_controls(self, segment: Segment, chain: Chain, consequent: str) -> list[int | None]:
-        return [self._day(consequent, segment, other) for other in self._peers(chain.day)]
+    def _daily_controls(self, chain: Chain, consequent: str, segment: Segment, antecedent: str) -> list[int | None]:
+        return [self._day(consequent, segment, other) for other in self._peers(chain.day, self._days_with(antecedent))]
 
     def _day(self, consequent: str, segment: Segment, day: date) -> int | None:
         """从 ``day`` 起量的这一段：窗口里人在场的日子有没有 B。伸过截止日、或一天都不在场的，未知。"""
@@ -358,4 +419,14 @@ def _overlapping(segment: Segment, kept: date, later: date) -> bool:
     return (later - kept).days <= 5
 
 
-__all__ = ["MARKER_SEGMENTS", "SEGMENTS", "Chain", "Controls", "Segment", "Stratum", "chains_of", "merge_for"]
+__all__ = [
+    "MARKER_SEGMENTS",
+    "SEGMENTS",
+    "Chain",
+    "Controls",
+    "Pairing",
+    "Segment",
+    "Stratum",
+    "chains_of",
+    "merge_for",
+]

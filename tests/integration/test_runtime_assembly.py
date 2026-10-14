@@ -684,9 +684,13 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     """
 
     runtime = _fully_enabled_runtime(tmp_path)
-    behavior = runtime.components.behavior
-    prediction = runtime.components.prediction
-    assert behavior is not None and prediction is not None
+    branches = runtime.components.behavior
+    predictions = runtime.components.prediction
+    assert branches is not None and predictions is not None
+    # 预测树两支各读自己那一支的行为树；预测层（与结算）现在只接会话那一支。
+    assert predictions.physical.rebuilder.behavior_tree is branches.physical.tree
+    assert predictions.physical.worker.after_rebuild is None
+    behavior, prediction = branches.session, predictions.session
     # 夜批钩子**真的挂在重建之后**（结算那一拍；新语义树的各拍随后面几刀接进同一个钩子）。
     assert prediction.worker.after_rebuild is not None
     foresight = runtime.components.foresight
@@ -701,7 +705,7 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     assert unsealed.stamping is behavior.reduction_runner.kinds  # type: ignore[attr-defined]
     assert foresight.worker.slot_minutes == prediction.tree_config.slot_minutes
     # 账本在 storage.root/foresight；结算认的是归约的定稿日；夜批钩子里结算排在最前（同一个 after_rebuild）。
-    assert foresight.runner.ledger is not None and foresight.runner.ledger.root == runtime.config.foresight_root
+    assert foresight.runner.ledger is not None and foresight.runner.ledger.root == runtime.config.foresight_root / "session"
     assert foresight.settlement.ledger is foresight.runner.ledger
     assert foresight.settlement.closed_days == behavior.reduction_runner.closed_days
     assert prediction.worker.after_rebuild is not None
@@ -745,7 +749,7 @@ def test_an_enabled_foresight_layer_that_is_not_attached_to_the_nightly_batch_is
     runtime = _fully_enabled_runtime(tmp_path)
     components = runtime.components
     assert components.prediction is not None
-    components.prediction.worker.after_rebuild = None
+    components.prediction.session.worker.after_rebuild = None
 
     with pytest.raises(ValueError, match="attached to the nightly rebuild"):
         replace(components)

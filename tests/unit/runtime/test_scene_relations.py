@@ -76,8 +76,8 @@ def test_the_assembled_layer_shows_a_present_relation_from_the_runtime_scene_roo
     """组合根缺省读本 Runtime 语义树根下的关系表：上周一 19:00 打过球，「之后第 2–7 天」那条关系此刻在场。"""
 
     config, components = assembled(tmp_path)
-    ConceptStore(config.scene_root).write(base("打球"))
-    write_night(config.scene_root, EVENING.date(), established(BALL, BALL, Segment.DAYS_2_7))
+    ConceptStore(config.scene_root / "session").write(base("打球"))
+    write_night((config.scene_root / "session"), EVENING.date(), established(BALL, BALL, Segment.DAYS_2_7))
     pack = components.assembler.assemble(now=EVENING)
     (ball,) = [item for item in pack.candidates if item.kind_token == BALL]
     (note,) = ball.relations
@@ -88,11 +88,12 @@ def test_an_unreadable_relation_table_is_refused_not_skipped(tmp_path) -> None:
     """关系表坏了不能悄悄少一节：判断者会把"没读到"当成"没有关系"。"""
 
     config, components = assembled(tmp_path)
-    write_night(config.scene_root, EVENING.date())
-    (config.scene_root / "relations" / "session" / f"{EVENING.date().isoformat()}.json").write_text("{", encoding="utf-8")
+    write_night((config.scene_root / "session"), EVENING.date())
+    ((config.scene_root / "session") / "relations" / "session" / f"{EVENING.date().isoformat()}.json").write_text(
+        "{", encoding="utf-8"
+    )
     with pytest.raises(ForesightError, match="relations cannot be read"):
         components.assembler.assemble(now=EVENING)
-
 
 
 def test_a_rewritten_night_is_read_again(tmp_path) -> None:

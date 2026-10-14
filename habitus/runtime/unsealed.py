@@ -46,7 +46,9 @@ _TRANSIENT = (ModelTransportError, ModelResponseError, ModelQuotaError, ModelAut
 class UnsealedFromJudgements:
     """``UnsealedReader`` 的生产实现：判断存储 + 消费账本 + 归约的白天归类。"""
 
-    def __init__(self, judgements: BehaviorJudgementStore, ledger: BehaviorReductionLedger, stamping: KindStamping) -> None:
+    def __init__(
+        self, judgements: BehaviorJudgementStore, ledger: BehaviorReductionLedger, stamping: KindStamping
+    ) -> None:
         if not isinstance(judgements, BehaviorJudgementStore):
             raise TypeError("judgements must be a BehaviorJudgementStore")
         if not isinstance(ledger, BehaviorReductionLedger):

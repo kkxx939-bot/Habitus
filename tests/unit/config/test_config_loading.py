@@ -265,11 +265,8 @@ def test_behavior_config_enforces_its_scalar_bounds() -> None:
     assert BehaviorConfig().context_lookback_seconds is None  # 不复制唯一出处的数值
 
     for kwargs, match in (
-        ({"context_limit": 0}, "context_limit"),
-        ({"context_limit": True}, "context_limit"),
         ({"context_lookback_seconds": 59}, "context_lookback_seconds"),
         ({"context_lookback_seconds": 90_000}, "context_lookback_seconds"),
-        ({"fusion_poll_interval_seconds": 0.5}, "fusion_poll_interval_seconds"),
         ({"reduction_sweep_interval_seconds": 0.5}, "reduction_sweep_interval_seconds"),
         ({"worker_shutdown_timeout_seconds": 0}, "worker_shutdown_timeout_seconds"),
         ({"reduction_sweep_lock_ttl_seconds": 59}, "reduction_sweep_lock_ttl_seconds"),
@@ -294,17 +291,16 @@ def test_behavior_kinds_fields_are_bounded_and_derived_by_prefix() -> None:
     domain = {field.name for field in fields(BehaviorKindConfig)}
     exposed = {field.name.removeprefix("kinds_") for field in fields(BehaviorConfig) if field.name.startswith("kinds_")}
     assert exposed == domain  # 每个门槛都能从配置调（裁定 6），而且不多出领域里没有的字段
-    config = BehaviorConfig(kinds_batch_size=5, kinds_nightly_hour=4, kinds_max_anchor_pull=0.05, kinds_default_lane="physical")
+    config = BehaviorConfig(kinds_batch_size=5, kinds_nightly_hour=4, kinds_max_anchor_pull=0.05)
     overrides = config.kinds_overrides()
-    assert overrides == {"batch_size": 5, "nightly_hour": 4, "max_anchor_pull": 0.05, "default_lane": "physical"}
-    assert BehaviorKindConfig(**overrides).default_lane.value == "physical"
+    assert overrides == {"batch_size": 5, "nightly_hour": 4, "max_anchor_pull": 0.05}
+    assert BehaviorKindConfig(**overrides).batch_size == 5
     for kwargs, match in (
         ({"kinds_batch_size": 0}, "kinds_batch_size"),
         ({"kinds_revision_weekday": 7}, "kinds_revision_weekday"),
         ({"kinds_recurrence_min_count": True}, "kinds_recurrence_min_count"),
         ({"kinds_transient_retry_delay_seconds": 601}, "kinds_transient_retry_delay_seconds"),
         ({"kinds_max_anchor_pull": 1.5}, "kinds_max_anchor_pull"),
-        ({"kinds_default_lane": "chat"}, "kinds_default_lane"),
     ):
         with pytest.raises(ValueError, match=match):
             BehaviorConfig(**kwargs)

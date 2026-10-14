@@ -1,6 +1,6 @@
 """把一轮的描述写成判断记录（确定性，不调模型）。
 
-一轮一条判断，不带任何续接关系（裁定 32）：落到行为树上也是一轮一条。走与逐帧融合相同的派生、回执、落盘，
+一轮一条判断，不带任何续接关系（裁定 32）：落到行为树上也是一轮一条。派生、回执、落盘与物理 lane 共用，
 之后由同一个归约封口落树。
 
 每一轮留两条凭据观测——人开口的时刻一条、助手做完的时刻一条——只存时刻和指向会话源的引用，不存内容（裁定 33）。
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, tzinfo
 
 from habitus.behavior.fusion.coverage import BehaviorCoverageIndex
@@ -182,11 +182,8 @@ class SessionTurnRecorder:
             (opened, closed),
             source_refs=(envelope.source_id,),
             judged_at=judged_at,
-        )
-        # 身份已按内容派生；这里只把版本标签改成会话 lane 自己的，免得记录上写着逐帧融合的提示词版本。
-        derived = tuple(
-            replace(item, fusion_version=SESSION_FUSION_VERSION, prompt_version=SESSION_PROMPT_VERSION)
-            for item in derived
+            fusion_version=SESSION_FUSION_VERSION,
+            prompt_version=SESSION_PROMPT_VERSION,
         )
         receipt = build_fusion_receipt(
             derived,

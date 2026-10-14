@@ -225,12 +225,11 @@ def is_ascii_digits(value: object) -> bool:
 # （``behavior/kinds``，文件放在树根）；L0/L1 生成器已落地于 ``behavior/semantic/``
 # （日叙述并入同日空白、月/年上卷、digest 短路；结构落地，提示词调优子项遗留——见 generator.py）；
 # Runtime 组合根接线已完成（BHV-RUNTIME-001 关闭：Config.behavior 标量组可选启用、
-# Runtime/behavior.py 组装 + 融合/归约两个常驻 Worker + 观测投递正门 + 健康面，端到端接缝
+# Runtime/behavior.py 组装两条 lane + 归约的常驻 Worker + 健康面，端到端接缝
 # 测试在 tests/unit/runtime/test_behavior_pipeline.py）。**进程内链路**至此全部走完；明确的
-# 剩余缺口：① 观测投递的 HTTP 端点未做——云侧行为 agent 够不着进程内方法，随上游契约接入时
-# 与认证/协议一起定（正门已在 ``Runtime.deliver_behavior_observations``）；② BHV-FUSION-003
-# 只闭合了窗口注入一半，容量类配置随 BHV-LIFECYCLE-001 同批；③ 各处点名的实测调优
-# （融合/词表/语义三处提示词）与生命周期欠账。
+# 剩余缺口：① 物理 lane 交付的 HTTP 端点未做——上游够不着进程内方法，随上游契约接入时
+# 与认证/协议一起定（正门已在 ``Runtime.deliver_physical``）；② 容量类配置随 BHV-LIFECYCLE-001 同批；
+# ③ 各处点名的实测调优（词表/语义提示词）与生命周期欠账。
 # 【裁定】episodes 零占位维持（用户确认，见下方 BHV-EPISODE-002 的新定位）；links 归信封层
 # （用户确认，沿 memory 树先例）；basis 步骤时间窗校验删除（用户确认，见 validators.py）。
 # 与用户数十轮讨论逐条裁定，吸收并关闭旧 TODO(BHV-TREE-TIMEBASE-001)（其地址时间基问题由下述
@@ -302,10 +301,10 @@ def is_ascii_digits(value: object) -> bool:
 #   "每个非 system 字段必须出现在渲染结果里"（``kind_token`` 例外：编号不进正文，裁定 19）。
 #
 # ── 写入层（归约；零发明）────────────────────────────────────────────────────────────────
-# - 封口是机械推论不是语义判断：融合的一切跨窗口引用只能指向 recent_before 的上下文
-#   （FUSION_CONTEXT_LIMIT=8 / FUSION_CONTEXT_LOOKBACK_SECONDS=3600s，用户裁定 1 小时，
-#   唯一出处 behavior/fusion/config.py，归约层只准 import 不准自带数），链尾 evidence_ready_at
-#   老出窗口后任何判断都不可能再引用它 → 链闭合、信息已定、物化。判据须同时对墙钟与融合队列
+# - 封口是机械推论不是语义判断：链尾 evidence_ready_at 老出封口视界
+#   （FUSION_CONTEXT_LOOKBACK_SECONDS=3600s，唯一出处 behavior/fusion/config.py，归约层只准 import
+#   不准自带数）→ 链闭合、信息已定、物化。这个窗口原是逐帧融合"还能指回多久以前"的范围；逐帧融合退役后
+#   两条 lane 的判断互不指向，它只剩"落树之前等多久"（一送到就封口见 TODO(BHV-SESSION-LANE-001)）。判据须同时对墙钟与融合队列
 #   前沿（oldest_uncommitted 段的最早 available_at）出窗——停机补算的积压段 cutoff 是历史时刻，
 #   只看墙钟会把还能被引用的链提前封口。晚到的修正/结果在机械上不存在（取消追加旁路的依据）。
 # - 五条死规则（用户一口气裁定）：

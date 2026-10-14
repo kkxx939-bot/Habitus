@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-from habitus.behavior.fusion import BehaviorFusionEnqueuer, BehaviorFusionJobStore
 from habitus.behavior.fusion.errors import BehaviorFusionError
 from habitus.behavior.fusion.lanes.session import (
     SESSION_PROMPT_VERSION,
@@ -29,8 +28,6 @@ from habitus.behavior.fusion.lanes.session import (
 )
 from habitus.behavior.fusion.lanes.session.material import ANSWER_PREFIX, WAKE_LABEL
 from habitus.behavior.fusion.lanes.session.redaction import REDACTED
-from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.model_client.contracts import ModelStructuredOutputError
 from tests.unit.behavior.session_fixtures import (
     START,
@@ -593,26 +590,3 @@ def test_coverage_is_read_once_for_a_batch_of_turns(tmp_path: Path, monkeypatch:
     asyncio.run(session.consume(turns, before_each=lambda: checks.append(1)))
     assert reads == 1
     assert len(checks) == 4  # 每一轮之前都问一次调用方还该不该接着做
-
-
-# ── 与逐帧融合互不相扰 ───────────────────────────────────────────────────────────────
-
-
-def test_the_frame_pipeline_never_enqueues_session_evidence(tmp_path: Path) -> None:
-    """凭据落盘与回执落盘之间崩溃，会留下两条没被覆盖的凭据；它们不是帧，逐帧融合不许拿去切段。"""
-
-    stores = Stores(tmp_path)
-    recorder = stores.recorder()
-    turn = one_turn(prompt(0, "继续"), reply(1, "拆完了。"))
-    stores.observations.put(recorder._envelope(turn, recorder._evidence(turn)))  # noqa: SLF001 - 模拟崩溃留下的半截
-    assert not recorder.is_recorded(turn)
-
-    enqueuer = BehaviorFusionEnqueuer(
-        stores.observations,
-        BehaviorFusionJobStore(tmp_path, PathLock(ProcessLocalLockStore()), clock=lambda: stores.now),
-        stores.receipts,
-        coverage=stores.coverage,
-        quiet_period_seconds=0,
-        clock=lambda: stores.now,
-    )
-    assert enqueuer.enqueue_ready().count == 0

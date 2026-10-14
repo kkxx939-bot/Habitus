@@ -71,6 +71,9 @@ class JudgementStatusBasis(str, Enum):
     OBSERVED = "observed"
     INFERRED = "inferred"
     OBSERVATION_LOST = "observation_lost"
+    # 只用在 behavior 为空的判断上：这段时间不是"看了没读懂"，而是上游说它**没在看**（没戴、充电、没数据）。
+    # 归约据此把这段落成「未观测」的空白，而不是「没读懂」。
+    UNOBSERVED = "unobserved"
 
 
 class JudgementRelation(str, Enum):
@@ -202,8 +205,10 @@ class BehaviorJudgement:
         if not self.covers:
             raise BehaviorFusionError("a judgement must cover at least one fragment")
         if not self.claim.is_readable:
-            if self.subjects or self.status is not None or self.status_basis is not None:
+            if self.subjects or self.status is not None:
                 raise BehaviorFusionError("an unreadable judgement must not carry subjects or a status")
+            if self.status_basis not in (None, JudgementStatusBasis.UNOBSERVED):
+                raise BehaviorFusionError("a judgement without a behaviour can only say it was unobserved")
             if self.relations:
                 raise BehaviorFusionError("an unreadable judgement cannot relate to another one")
         else:
@@ -213,6 +218,8 @@ class BehaviorJudgement:
                 raise BehaviorFusionError("subjects must not repeat")
             if self.status is None or self.status_basis is None:
                 raise BehaviorFusionError("a readable judgement must carry a status and its basis")
+            if self.status_basis is JudgementStatusBasis.UNOBSERVED:
+                raise BehaviorFusionError("a readable judgement cannot be unobserved")
         seen: set[tuple[str, int | None, int | None]] = set()
         for link in self.relations:
             if link.target_no == self.judgement_no:

@@ -67,8 +67,13 @@ def status_of(state: LaneState, relation: RelationKey) -> Status:
     return next(item.status for item in state.relations if item.key == relation)
 
 
+#: 这几条考"干净路径"的测试用的种子：同一条链配两道对照之后（2026-10-12），默认种子 7 的世界里这条关系在前向验证攒到第 6 次新数据时
+#: p = 0.11 被退回一次、再在新数据上重新发现才成立（引擎按设计同一晚只判一次）；那条"退回再回来"的路径见下面单独一条测试。
+CLEAN_SEED = 17
+
+
 def test_a_real_relation_becomes_a_candidate_then_is_established_after_forward_validation() -> None:
-    nights = nights_of(planted(60), 60)
+    nights = nights_of(planted(60, seed=CLEAN_SEED), 60)
     assert history(nights, PLANTED) == [(Status.TESTED, Status.CANDIDATE), (Status.CANDIDATE, Status.ESTABLISHED)]
     final = nights[-1][0]
     (established,) = final.of(Status.ESTABLISHED)
@@ -84,7 +89,7 @@ def test_a_relation_that_stops_expires_and_does_not_flap_back_on_old_data() -> N
     """埋 25 天后撤掉：成立 → 一段新数据说没了（再看下一段）→ 第二段也说没了才失效；之后只有失效那晚之后的数据算数，
     旧数据里那段强关系不会让它每周"又被发现"一次。"""
 
-    nights = nights_of(planted(80, linked=(0, 25)), 80)
+    nights = nights_of(planted(80, seed=CLEAN_SEED, linked=(0, 25)), 80)
     assert history(nights, PLANTED) == [
         (Status.TESTED, Status.CANDIDATE),
         (Status.CANDIDATE, Status.ESTABLISHED),
@@ -98,12 +103,28 @@ def test_a_relation_that_stops_expires_and_does_not_flap_back_on_old_data() -> N
 
 
 def test_a_candidate_that_does_not_replicate_is_remembered_as_rejected() -> None:
-    nights = nights_of(planted(30, linked=(0, 6)), 30)
+    nights = nights_of(planted(30, seed=CLEAN_SEED, linked=(0, 6)), 30)
     assert history(nights, PLANTED) == [(Status.TESTED, Status.CANDIDATE), (Status.CANDIDATE, Status.REJECTED)]
     rejected = next(item for item in nights[-1][0].relations if item.key == PLANTED)
     assert rejected.rejected_on is not None and rejected.reset_on == rejected.rejected_on
     reason = next(item.reason for _state, moved in nights for item in moved if item.after is Status.REJECTED)
     assert "前向验证没复现" in reason
+
+
+def test_a_rejected_candidate_comes_back_only_on_new_data_and_can_still_be_established() -> None:
+    """种子 7 的世界：发现之后第 6 次新数据 p = 0.11 → 退回；退回那晚之后的新数据上又过第 1 道 → 重新候选（要攒更多次）→ 成立。
+    退回不是终点，但回来只能靠新数据。"""
+
+    nights = nights_of(planted(60, seed=7), 60)
+    assert history(nights, PLANTED) == [
+        (Status.TESTED, Status.CANDIDATE),
+        (Status.CANDIDATE, Status.REJECTED),
+        (Status.REJECTED, Status.CANDIDATE),
+        (Status.CANDIDATE, Status.ESTABLISHED),
+    ]
+    rejected_night = next(state.night for state, moved in nights for item in moved if item.after is Status.REJECTED)
+    final = next(item for item in nights[-1][0].relations if item.key == PLANTED)
+    assert final.status is Status.ESTABLISHED and final.discovered_on is not None and final.discovered_on > rejected_night
 
 
 def test_forward_validation_waits_until_the_new_data_spans_more_than_one_block() -> None:
@@ -135,7 +156,7 @@ def test_nothing_is_established_where_nothing_was_planted(seed: int) -> None:
 
 
 def test_folding_runs_forward_only_and_carries_relations_it_cannot_test() -> None:
-    series = planted(60)
+    series = planted(60, seed=CLEAN_SEED)
     nights = nights_of(series, 30)
     last = nights[-1][0]
     line = build_timelines(series.until(last.night), CONCEPTS, {}, CONFIG)["session"]

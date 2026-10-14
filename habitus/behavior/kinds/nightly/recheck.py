@@ -64,9 +64,7 @@ class PendingRecheck:
         if not requests:
             return RecheckResult({}, frozenset(), 0, tuple(signals))
         result = await classify_in_chunks(self.classifier, requests, vocabulary, checkpoint=checkpoint)
-        assigned = {
-            key: verdict.token for key, verdict in result.verdicts.items() if verdict.outcome is Outcome.CLASS
-        }
+        assigned = {key: verdict.token for key, verdict in result.verdicts.items() if verdict.outcome is Outcome.CLASS}
         # 「都不是」与「不是一件事」都不归已有类：这条本来就在待定池里，白天归类没归进去，就放行去长新类
         released = frozenset(result.verdicts) - frozenset(assigned)
         return RecheckResult(assigned, released, result.model_calls, (*signals, *result.signals))

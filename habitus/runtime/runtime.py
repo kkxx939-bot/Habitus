@@ -10,7 +10,6 @@ from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 
-from habitus.behavior.observation import BehaviorObservationEnvelope
 from habitus.behavior.reduction import VocabularyJobReport
 from habitus.config import HabitusConfig
 from habitus.conversation import (
@@ -59,8 +58,8 @@ from habitus.pre.conversation import (
     ConversationBatch,
     ConversationSegment,
 )
-from habitus.runtime.behavior import BehaviorRuntimeComponents
-from habitus.runtime.behavior import deliver_observations as _deliver_behavior_observations
+from habitus.runtime.behavior import BehaviorBranches, UnitOutcome
+from habitus.runtime.behavior import deliver_physical as _deliver_physical
 from habitus.runtime.behavior import run_vocabulary_job as _run_vocabulary_job
 from habitus.runtime.components import RuntimeComponents
 from habitus.runtime.consistency import MemoryConsistencyService, MemoryConsistencySnapshot
@@ -258,12 +257,12 @@ class Runtime:
             self.components.conversation.summary_use.initialize()
             self.components.workflow.lifecycle.retirement_store.initialize()
             if self.components.behavior is not None:
-                # 行为树静态目录 + 融合作业序号状态；均幂等，重复初始化零写入。
+                # 行为树静态目录；幂等，重复初始化零写入。
                 # 此处失败**允许**阻断整个 Runtime（对"行为失败不阻断"哲学的边界取舍）：
                 # 同一 storage root 下建不了目录，几乎必然意味着记忆侧同样不可用；
                 # 静默跳过反而会让 RUNNING 状态掩盖一个坏掉的存储根。
-                self.components.behavior.tree.initialize()
-                self.components.behavior.jobs.initialize()
+                for branch in self.components.behavior:
+                    branch.tree.initialize()
             oldest_job = self.components.workflow.jobs.oldest_uncommitted()
             recovered = (
                 self.components.workflow.runner.transaction_recovery.recover_pending() if oldest_job is None else ()
@@ -330,29 +329,31 @@ class Runtime:
             # 行为管线（可选启用）：启动失败不阻断 Runtime——沿既有"Behavior 失败不阻断"
             # 哲学，失败经观测记录，行为侧下次启动自愈（存储都是耐久幂等的）。
             if self.components.behavior is not None:
-                try:
-                    await self.components.behavior.fusion_worker.start()
-                    await self.components.behavior.reduction_worker.start()
-                except Exception as exc:  # noqa: BLE001 - 行为侧失败不阻断记忆主链
-                    self._observe(
-                        "runtime",
-                        "behavior_start",
-                        ObservationStatus.FAILURE,
-                        started,
-                        {"error_type": type(exc).__name__},
-                    )
+                # 两支各起各的：一支起不来不连累另一支。
+                for branch in self.components.behavior:
+                    try:
+                        await branch.reduction_worker.start()
+                    except Exception as exc:  # noqa: BLE001 - 行为侧失败不阻断记忆主链
+                        self._observe(
+                            "runtime",
+                            "behavior_start",
+                            ObservationStatus.FAILURE,
+                            started,
+                            {"error_type": type(exc).__name__, "lane": branch.lane.value},
+                        )
             # 预测夜批同一哲学：它只读行为树、只写自己的存储，起不来不影响任何在线路径。
             if self.components.prediction is not None:
-                try:
-                    await self.components.prediction.worker.start()
-                except Exception as exc:  # noqa: BLE001 - 预测侧失败不阻断记忆主链
-                    self._observe(
-                        "runtime",
-                        "prediction_start",
-                        ObservationStatus.FAILURE,
-                        started,
-                        {"error_type": type(exc).__name__},
-                    )
+                for lane, prediction_branch in self.components.prediction:
+                    try:
+                        await prediction_branch.worker.start()
+                    except Exception as exc:  # noqa: BLE001 - 预测侧失败不阻断记忆主链
+                        self._observe(
+                            "runtime",
+                            "prediction_start",
+                            ObservationStatus.FAILURE,
+                            started,
+                            {"error_type": type(exc).__name__, "lane": lane},
+                        )
             # 预测层每槽一拍，只读两棵派生树与判断存储、只调模型，同一哲学。
             if self.components.foresight is not None:
                 try:
@@ -404,33 +405,30 @@ class Runtime:
                 await self.components.workflow.worker.stop()
         self._state = RuntimeState.READY
 
-    async def deliver_behavior_observations(self, envelope: BehaviorObservationEnvelope) -> str:
-        """云侧行为 agent 的观测投递正门：入库并唤醒融合循环，返回交付身份。
+    async def deliver_physical(self, payload: object) -> tuple[UnitOutcome, ...]:
+        """物理 lane 的正门：上游（手表等）的一份交付进来，一段一条写成判断，返回每一段的去向。
 
-        投递按内容身份幂等（同一批观测同内容重复投递无害，同身份异内容 fail-closed）；
-        行为侧未启用（``behavior.primary_subject`` 未配置）时明确拒绝，而不是静默丢弃。
-        耐久落盘（双 fsync + 读回校验）下沉线程，与 Runtime 其余同步存储调用同一形态。
+        交付的形状与对上游的约定见 ``behavior/fusion/lanes/physical``；不合约定的整份拒收。按上游的段编号幂等
+        （同一段再送一遍不重复写，上游改判不收）；行为侧未启用时明确拒绝，而不是静默丢弃。
+        同步的耐久落盘下沉线程，与 Runtime 其余同步存储调用同一形态。会话 lane 不走这里，走会话源的交付。
         """
 
-        self._require_initialized("behavior observation delivery")
-        behavior = self.components.behavior
-        if behavior is None:
-            raise RuntimeStateError("behavior pipeline is not configured; set behavior.primary_subject")
+        self._require_initialized("physical behavior delivery")
         return await asyncio.to_thread(
-            _deliver_behavior_observations,
-            behavior,
-            envelope,
+            _deliver_physical,
+            self._require_behavior(),
+            payload,
             observer=self.components.infrastructure.observer,
         )
 
-    async def run_vocabulary_job(self, job: str) -> VocabularyJobReport:
-        """词表整理活正门：``grow`` 立刻每晚新增、``revise`` 立刻定期拆改。"""
+    async def run_vocabulary_job(self, job: str, *, lane: str) -> VocabularyJobReport:
+        """词表整理活正门：``grow`` 立刻每晚新增、``revise`` 立刻定期拆改。两条 lane 的词表各是各的，``lane`` 说整理哪一支。"""
 
         self._require_initialized("behavior vocabulary job")
-        behavior = self._require_behavior()
-        return await _run_vocabulary_job(behavior, job, observer=self.components.infrastructure.observer)
+        branch = self._require_behavior().of(lane)
+        return await _run_vocabulary_job(branch, job, observer=self.components.infrastructure.observer)
 
-    def _require_behavior(self) -> BehaviorRuntimeComponents:
+    def _require_behavior(self) -> BehaviorBranches:
         behavior = self.components.behavior
         if behavior is None:
             raise RuntimeStateError("behavior pipeline is not configured; set behavior.primary_subject")
@@ -457,33 +455,31 @@ class Runtime:
                     {"error_type": type(exc).__name__},
                 )
         prediction = self.components.prediction
-        if prediction is not None:
+        for lane, prediction_branch in prediction or ():
             try:
-                await prediction.worker.stop()
-            except Exception as exc:  # noqa: BLE001 - 预测侧停机失败不阻断主链
+                await prediction_branch.worker.stop()
+            except Exception as exc:  # noqa: BLE001 - 预测侧停机失败不阻断主链，也不连累另一支
                 self._observe(
                     "runtime",
                     "prediction_stop",
                     ObservationStatus.FAILURE,
                     time.monotonic(),
-                    {"error_type": type(exc).__name__},
+                    {"error_type": type(exc).__name__, "lane": lane},
                 )
         behavior = self.components.behavior
         if behavior is None:
             return
-        try:
+        for branch in behavior:
             try:
-                await behavior.reduction_worker.stop()
-            finally:
-                await behavior.fusion_worker.stop()
-        except Exception as exc:  # noqa: BLE001 - 行为侧停机失败不阻断主链
-            self._observe(
-                "runtime",
-                "behavior_stop",
-                ObservationStatus.FAILURE,
-                time.monotonic(),
-                {"error_type": type(exc).__name__},
-            )
+                await branch.reduction_worker.stop()
+            except Exception as exc:  # noqa: BLE001 - 行为侧停机失败不阻断主链，也不连累另一支
+                self._observe(
+                    "runtime",
+                    "behavior_stop",
+                    ObservationStatus.FAILURE,
+                    time.monotonic(),
+                    {"error_type": type(exc).__name__, "lane": branch.lane.value},
+                )
 
     async def run_next(self) -> MemoryJobRunResult:
         """只在初始化完成后委托领域 Runner 处理最早的一项 Job。"""
@@ -938,21 +934,6 @@ class Runtime:
         except Exception as exc:
             status = ObservationStatus.DEGRADED
             attributes["queue_error_type"] = type(exc).__name__
-        behavior = self.components.behavior
-        if behavior is not None:
-            try:
-                behavior_queue = await asyncio.to_thread(behavior.jobs.observability_snapshot)
-                attributes.update(
-                    behavior_queue_staged=behavior_queue.staged,
-                    behavior_queue_queued=behavior_queue.queued,
-                    behavior_queue_running=behavior_queue.running,
-                    behavior_queue_failed=behavior_queue.failed,
-                    behavior_queue_oldest_age_seconds=behavior_queue.oldest_age_seconds,
-                    behavior_queue_high_watermark=behavior_queue.high_watermark,
-                )
-            except Exception as exc:
-                status = ObservationStatus.DEGRADED
-                attributes["behavior_queue_error_type"] = type(exc).__name__
         snapshotter = getattr(self.components.infrastructure.path_lock.lock_store, "observability_snapshot", None)
         if callable(snapshotter):
             try:

@@ -76,9 +76,7 @@ class NightlyGrower:
                 calls += extra
                 groups += released
                 moves += assigned
-                rechecked |= {
-                    entry.occurrence for group in released for entry in group.members if not entry.rechecked
-                }
+                rechecked |= {entry.occurrence for group in released for entry in group.members if not entry.rechecked}
             draft_vocabulary = vocabulary
             for group in groups:
                 created = self._promote(lane, group, draft_vocabulary, signals)
@@ -123,9 +121,7 @@ class NightlyGrower:
                 if entry.occurrence in result.assigned:
                     target = result.assigned[entry.occurrence]
                     assigned.append(Move(entry.occurrence, pending_token(entry.lane), target))
-            free = tuple(
-                entry for entry in group.members if entry.rechecked or entry.occurrence in result.released
-            )
+            free = tuple(entry for entry in group.members if entry.rechecked or entry.occurrence in result.released)
             if free:
                 released.append(_Group(free, {**group.draft, "existing": None}))
             signals.append(

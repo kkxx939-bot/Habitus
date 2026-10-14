@@ -49,7 +49,10 @@ def prediction_enabled_config(tmp_path: Path) -> HabitusConfig:
 def test_prediction_is_absent_until_it_is_switched_on(tmp_path) -> None:
     config = behavior_enabled_config(tmp_path)
     assert config.prediction.enabled is False
-    assert build_prediction_components(config, behavior_tree=_tree(config)) is None
+    assert (
+        build_prediction_components(config, root=config.prediction_root / "session", behavior_tree=_tree(config))
+        is None
+    )
 
 
 def test_enabled_prediction_requires_every_tree_parameter() -> None:
@@ -61,12 +64,14 @@ def test_startup_parameters_survive_into_the_tree_config(tmp_path) -> None:
     """YAML 里的启动档必须原样落到 PredictionTreeConfig；范围校验在那里做，不在配置层重写一遍。"""
 
     config = prediction_enabled_config(tmp_path)
-    components = build_prediction_components(config, behavior_tree=_tree(config))
+    components = build_prediction_components(
+        config, root=config.prediction_root / "session", behavior_tree=_tree(config)
+    )
     assert components is not None
     assert components.tree_config.slot_minutes == 15
     assert components.tree_config.transition_window_slots == 3
     assert components.store.retained_generations == 7
-    assert components.store.root == config.prediction_root
+    assert components.store.root == config.prediction_root / "session"
 
 
 def test_a_self_contradictory_parameter_set_fails_at_assembly() -> None:
@@ -90,7 +95,10 @@ def test_manual_rebuild_publishes_a_generation_from_the_behaviour_tree(tmp_path)
     # 固定时钟：_calendar_days 的跨度是"最早记录 → 基准日"，跟着真实时间走会让这个测试
     # 随日期漂移（今天绿、半年后越跑越慢）。
     components = build_prediction_components(
-        config, behavior_tree=behavior_tree, clock=lambda: datetime(2026, 8, 16, 23, tzinfo=CST)
+        config,
+        root=config.prediction_root / "session",
+        behavior_tree=behavior_tree,
+        clock=lambda: datetime(2026, 8, 16, 23, tzinfo=CST),
     )
     assert components is not None
 
@@ -108,7 +116,9 @@ def test_an_empty_behaviour_tree_publishes_nothing(tmp_path) -> None:
     config = prediction_enabled_config(tmp_path)
     behavior_tree = _tree(config)
     behavior_tree.initialize()
-    components = build_prediction_components(config, behavior_tree=behavior_tree)
+    components = build_prediction_components(
+        config, root=config.prediction_root / "session", behavior_tree=behavior_tree
+    )
     assert components is not None
     assert asyncio.run(components.worker.run_once()) is None
     assert components.store.active() is None
@@ -217,7 +227,9 @@ def test_the_nightly_stage_result_reaches_the_observation_event() -> None:
             return "generation"
 
     async def stage() -> StageReport:
-        return StageReport(mapped_days=("2026-09-03", "2026-09-04"), mapped=7, backlog=12, inconsistent=2, signals=("x",))
+        return StageReport(
+            mapped_days=("2026-09-03", "2026-09-04"), mapped=7, backlog=12, inconsistent=2, signals=("x",)
+        )
 
     worker = PredictionRebuildWorker(
         _Rebuilder(),  # type: ignore[arg-type]
@@ -230,7 +242,9 @@ def test_the_nightly_stage_result_reaches_the_observation_event() -> None:
 
     (event,) = [item for item in seen if getattr(item, "operation", "") == "nightly_stage"]
     assert event.attributes["mapped_days"] == 2 and event.attributes["mapped"] == 7
-    assert event.attributes["backlog"] == 12 and event.attributes["inconsistent"] == 2 and event.attributes["signals"] == 1
+    assert (
+        event.attributes["backlog"] == 12 and event.attributes["inconsistent"] == 2 and event.attributes["signals"] == 1
+    )
 
 
 def test_a_failing_nightly_stage_is_remembered_by_the_worker() -> None:

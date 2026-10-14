@@ -1,7 +1,10 @@
-"""定期拆改的提示词与 schema：模型看各类占比、跨天复现、抽样原话，只提差分（合并 / 拆分 / 改判据）。
+"""定期拆改的提案提示词与 schema：模型看各类占比、跨天复现、抽样原话，只提合并与改判据。
 
-"同一件事"与白天归类、每晚新增同一条规则，只写规则、不放场景例子（裁定 30）：去掉具体对象 / 主题之后提醒句相同就是同一件事。
+"同一件事"与白天归类、每晚新增同一段文本（``kinds/rules.py``），只写规则、不放场景例子（裁定 30）。
+v3（2026-10-12）：**拆分不再由这里提**——v2 让模型按"去掉对象之后仍不同"判该不该拆，35 晚 4 次提案 0 次拆分
+（`17-词表的问题.md` 第 12 条）；拆分改为 ``grouping`` 对每个类的近期成员分组、``reviser`` 按复现定（`18` 第四节）。
 v2 去掉了"个人习惯可以从通用类里切出来"——没有预置的通用类了（裁定 29），类本来就是这个人自己的。
+``NEW`` 仍保留：收窄的原类的「不含」可以指向本次拆出来的新类（由 ``reviser`` 机械写入，模型不再填）。
 """
 
 from __future__ import annotations
@@ -11,25 +14,23 @@ from typing import Any
 
 from habitus.behavior.kinds.model import BehaviorClass
 from habitus.behavior.kinds.revision.facts import Member
+from habitus.behavior.kinds.rules import ENTRY_FORMAT, RULES_VERSION, SAMENESS_RULE
 
-REVISION_PROMPT_VERSION = "behavior_kind_revision_v2"
+REVISION_PROMPT_VERSION = f"behavior_kind_revision_v3+{RULES_VERSION}"
 NEW = "NEW"
 
-REVISION_SYSTEM_PROMPT = """你在检查一份行为类词表还合不合现状。给你同一条 lane 的全部在用类：判据、提醒句、
+REVISION_SYSTEM_PROMPT = f"""你在检查一份行为类词表还合不合现状。给你同一条 lane 的全部在用类：判据、提醒句、
 不含、这段时间归进来的条数与占比、出现在多少个不同的日子，以及抽样的原话。
 
-判断"同一件事"用提醒句（"该……了"）：先把里面的具体对象、主题、内容、项目名、人名、地点、时间都去掉，只留"在做哪一类事"；
-去掉之后相同就是同一件事。只有去掉某个对象之后就说不清在做什么了，这个对象才算这件事的一部分。
+{SAMENESS_RULE}
 
-只提必要的改动，没有就返回空列表。可以提三种：
-- merge：两类其实是同一件事（按上面的办法比，提醒句相同）。class 填要并掉的那一类，target 填并入的那一类。
-- split：一类里混着提醒句不同的两件事（去掉对象之后仍不同），而且两边都能跨天反复出现。class 填被拆的那一类，
-  draft 写拆完后它自己的条目（收窄的判据），new_class 写拆出来的新类条目。
-- revise：只是措辞不清楚、或缺一条「不含」导致和别的类混。class 填那一类，draft 写改后的条目。
+只提必要的改动，没有就返回空列表。可以提两种：
+- merge：两类按替代检验其实是同一件事。class 填要并掉的那一类，target 填并入的那一类。
+- revise：只是措辞不清楚、或缺一条「不含」导致和别的类混。class 填那一类，draft 按下面写改后的条目。
+拆分不在这里提：一个类里混着几件事，由另一步按记录分组、按复现决定。
 
-条目的写法：name 写去掉具体对象之后的那件事本身，不带具体对象、主题、项目名、人名；criterion 一句判据；reminder 是"该……了"；
-excludes 写容易混进来但不算本类的事，能指出该去哪一类时 goes_to 填那一类的编号（拆分时指向新类填 NEW）；
-examples 从抽样里挑最有代表性的几条原话（条数上限见 schema）。
+{ENTRY_FORMAT}
+excludes 的 goes_to 填词表里那一类的编号，指不出就填 null。
 
 每条改动先在 reason 里写理由（引用抽样里的具体原话）。拿不准就不提——错误的合并比暂时多一类更难挽回。
 """
@@ -100,13 +101,12 @@ def revision_schema(class_ids: Sequence[str], *, max_examples: int) -> dict[str,
                     "type": "object",
                     "properties": {
                         "reason": {"type": "string", "minLength": 1},
-                        "kind": {"enum": ["merge", "split", "revise"]},
+                        "kind": {"enum": ["merge", "revise"]},
                         "class": {"enum": list(class_ids)},
                         "target": {"anyOf": [{"enum": list(class_ids)}, {"type": "null"}]},
-                        "draft": _entry_schema(class_ids, max_examples=max_examples, allow_new=True),
-                        "new_class": _entry_schema(class_ids, max_examples=max_examples, allow_new=False),
+                        "draft": _entry_schema(class_ids, max_examples=max_examples, allow_new=False),
                     },
-                    "required": ["reason", "kind", "class", "target", "draft", "new_class"],
+                    "required": ["reason", "kind", "class", "target", "draft"],
                     "additionalProperties": False,
                 },
             }

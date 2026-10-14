@@ -96,6 +96,8 @@ class BehaviorObservationModality(str, Enum):
     AUDIO = "audio"
     # 会话 lane 的凭据：不是感知出来的观测，只标一轮对话的开始与结束时刻（内容不在这里，见 fusion/lanes/session）。
     SESSION = "session"
+    # 物理 lane 的凭据：上游已经认定好的一段行为（或一段没在看的时间）的开始与结束时刻（见 fusion/lanes/physical）。
+    PHYSICAL = "physical"
 
 
 def require_sha256(value: object, label: str) -> str:

@@ -231,9 +231,10 @@ def test_the_store_round_trips_and_refuses_tampering(tmp_path) -> None:
 
 
 def test_a_relation_that_passes_only_with_its_prior_is_tagged() -> None:
-    """4 个工作日、讨论方案之后一半接修改代码：不加权过不了第 1 道，先验给这一对"很可能"、其余"不太可能"就过了——打"靠先验"。"""
+    """12 个工作日、讨论方案之后一半接修改代码：不加权过不了第 1 道，先验给这一对"很可能"、其余"不太可能"就过了——打"靠先验"。
+    （要跨两周以上：同一条链的第二道对照取别的周同周几同钟点，只有一周的数据没有对照、先验也救不回来。）"""
 
-    series = planted(4, seed=5, follow=0.5)
+    series = planted(12, seed=11, follow=0.5)
     tests = lane_tests(series)
     weights = {
         item: (2.0 if (item.antecedent, item.consequent) == (DISCUSS, CODE) else 0.5)

@@ -7,7 +7,8 @@ from datetime import timedelta
 
 import pytest
 
-from habitus.scene.concepts import ConceptSet
+from habitus.scene.concepts import ConceptRole, ConceptSet
+from habitus.scene.concepts.situation import SituationBasis, SituationRule
 from habitus.scene.relations import LaneTests, RelationKey, Segment, Verdict, build_timelines, examine_night
 from habitus.scene.relations.conditions import (
     Condition,
@@ -275,3 +276,34 @@ def test_a_new_proposed_condition_is_measured_only_after_it_was_proposed() -> No
     assert key not in LaneTests(line, CONCEPTS, CONFIG, series.cutoff).keys()
     late = proposed.measure(key, since=proposed_on)
     assert all(item.chain.day >= proposed_on for item in late.inside + late.outside)  # type: ignore[attr-defined]
+
+
+def test_a_situation_derived_from_behaviour_history_moderates_but_is_not_an_antecedent() -> None:
+    """「昨日有 X」「连续 X 中」是从某个类自己的历史算出来的。当前因只会重复次日段 / 集中期，或对着源类同义反复
+    （真实模型盘 2026-02-09：昨日有交材料 → 交材料 58.8% 对 0%，候选）——2026-10-12 用户裁定它们不进情境段，
+    只留在调节条件那条路上；日历来的情境（调休日）照旧当前因。"""
+
+    yesterday = situation(
+        "昨日有提交推送",
+        "这条行为之前 24 小时内提交推送过",
+        role=ConceptRole.DERIVED,
+        rule=SituationRule(SituationBasis.YESTERDAY, concept=PUSH),
+    )
+    swap_day = situation(
+        "调休日",
+        "当地日历说这天要补班",
+        role=ConceptRole.DAY_TYPE,
+        rule=SituationRule(SituationBasis.CALENDAR_NOTE, value="补班"),
+    )
+    concepts = ConceptSet((*CONCEPTS.values(), yesterday, swap_day))
+    series = planted(80, moderated=True)
+    line = line_of(series, concepts)
+    days = sorted({item.day for item in series.records})
+    for name in (yesterday.identity, swap_day.identity):
+        line.situations[name] = {day: index % 2 == 0 for index, day in enumerate(days)}
+    tests = LaneTests(line, concepts, CONFIG, series.cutoff)
+
+    situation_antecedents = {key.antecedent for key in tests.keys() if key.segment is Segment.SITUATION}
+    assert swap_day.identity in situation_antecedents
+    assert yesterday.identity not in situation_antecedents
+    # 调节条件那条路不在这里考：conditions.mechanical 的概念模板仍把它列为候选条件，按记录上的情境命中判

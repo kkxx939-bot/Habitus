@@ -476,8 +476,12 @@ def build_foresight_components(
     relations: Callable[[], RelationTable] | None = None,
     observer: Observer | None = None,
     clock: Callable[[], datetime] | None = None,
+    branch: str = "session",
 ) -> ForesightRuntimeComponents | None:
     """组装预测层；未启用时返回 None。
+
+    ``branch`` 是它接的那一支（三棵树各有会话、物理两支）：语义树的关系表与它自己的结算账本都取这一支的目录。
+    现在只接会话一支（按不按 lane 分还没定，见组合根的 TODO）。
 
     预测树没发布过就返回 None 而不是半个装配器：跨域校验已经在配置层拒过这种组合，
     这里是第二道——组合根拿到的部件本来就可能因为上游未启用而是 None。
@@ -513,11 +517,11 @@ def build_foresight_components(
         # 语义树的关系表：缺省读本 Runtime 语义树根下的（夜批还没跑过就是空表，那一节不出现）。
         relations=relations
         if relations is not None
-        else SceneRelations(RelationStore(config.scene_root), ConceptStore(config.scene_root)),
+        else SceneRelations(RelationStore(config.scene_root / branch), ConceptStore(config.scene_root / branch)),
         relation_minimum=relation_config(config).thresholds.forward_min_antecedents,
         clock=clock,
     )
-    ledger_store = ForesightLedgerStore(config.foresight_root)
+    ledger_store = ForesightLedgerStore(config.foresight_root / branch)
     runner = JudgementRunner(
         assembler,
         resolved_judge,
