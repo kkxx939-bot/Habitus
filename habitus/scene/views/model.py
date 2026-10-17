@@ -44,6 +44,10 @@ class FlowRow:
     last_observed_at: datetime
     summary: str
     day_count: int
+    #: 这次怎么结束的（行为树 occurrence 的 ``status``：ongoing / completed / interrupted / abandoned）；None = 没读到。
+    status: str | None = None
+    #: 谁发起的（行为树 ``prompted_by``：system / host_agent / self）；没写是 None。
+    prompted_by: str | None = None
 
     def __post_init__(self) -> None:
         if self.last_observed_at < self.at:

@@ -1,9 +1,4 @@
-"""预测层的产物类型里**不带语义背景**的那些：层、四层拆解、树发布的数、此刻、未封口的判断。
-
-本模块对 scene 零知识。带着视图与序列的产物（``HistoryCard``、``CandidateBackground``、``CandidateEvidence``）
-住在 ``cards`` / ``context`` / ``assemble``，因为它们引用 ``scene.views`` 的类型——让数字这一侧也认识
-读侧，"出处从预测树来、不从别处重推"这条就没有边界钉着了。
-"""
+"""预测层里不带语义背景的值对象：此刻、还没封口的判断、"到此刻为止开始过的一件事"。对 scene 零知识。"""
 
 from __future__ import annotations
 
@@ -12,78 +7,6 @@ from datetime import date, datetime
 from typing import Protocol
 
 from habitus.foresight.errors import ForesightError
-
-# 收缩链的四层，从假设最弱的借用开始（与 ``prediction.nodes.derive_all`` 同序）。
-LAYER_NAMES = ("slot", "pool", "cross_weekday", "all_day")
-LAYER_LABELS = {
-    "slot": "本槽",
-    "pool": "邻域",
-    "cross_weekday": "跨周几",
-    "all_day": "全天",
-}
-
-
-@dataclass(frozen=True)
-class Layer:
-    """收缩链上的一层：这一层给出的数、它是哪几天攒出来的。
-
-    ``value`` 在四层上不是同一种东西，这是树的发布形状决定的，不是本层的选择：
-
-    - ``slot`` / ``pool`` / ``cross_weekday``：``hits / exposure`` 的**裸比值**（分子分母都摆在
-      这里），没有收缩、没有平滑——与收缩链在那一层看到的证据逐位一致。判断者要能自己掂量
-      这个数薄不薄，而不是只拿到一个被链揉过、来龙去脉看不见的 0.5。
-      **这两个是衰减加权量**（每天贡献 ``时间衰减 × 覆盖比例`` ≤ 1），不是次数：12 个周一可能
-      写成 5.74/5.74，那不是"5.74 次"。``exposure`` 为 0 表示这一格**根本没看过**（那个周几
-      还没进过观测跨度），不是"看了没发生"。
-    - ``all_day``：树**已发布的率**（含 Laplace 平滑），树上没有对应的裸账本，所以 ``hits`` /
-      ``exposure`` 为 None。注意它的分母是**全部日历日的曝光**，而 ``days`` 只是分子那边的
-      日子——"他那天没做"的那些天不在 ``days`` 里。
-
-    ``days`` 是这一层的出处，直接来自树上的 ``cell_days``，**不由本层按覆盖日重推**——树读
-    整棵行为树、按覆盖扣、按衰减加权，重推会得到另一份事实。
-    """
-
-    name: str
-    value: float
-    days: tuple[date, ...]
-    hits: float | None = None
-    exposure: float | None = None
-
-    def __post_init__(self) -> None:
-        if self.name not in LAYER_NAMES:
-            raise ForesightError(f"unknown shrinkage layer: {self.name!r}")
-        if any(later <= earlier for earlier, later in zip(self.days, self.days[1:], strict=False)):
-            raise ForesightError(f"layer {self.name} lists its days out of order or twice")
-        # 裸账本要么两个都给、要么都不给：只给一半的话，"分子分母摆出来让人自己掂量"这件事
-        # 就做了一半，而读的人无从知道缺的是哪一半。
-        if (self.hits is None) != (self.exposure is None):
-            raise ForesightError(f"layer {self.name} must publish both hits and exposure, or neither")
-        # 给了裸账本，那个比值就必须真的是这两个数算出来的——三个数互相印证正是它们的全部意义。
-        if self.hits is not None and self.exposure is not None:
-            expected = self.hits / self.exposure if self.exposure > 0.0 else 0.0
-            if abs(self.value - expected) > 1e-9 * max(1.0, abs(expected)):
-                raise ForesightError(f"layer {self.name} reports a value its own ledger does not produce")
-
-    @property
-    def label(self) -> str:
-        return LAYER_LABELS[self.name]
-
-
-@dataclass(frozen=True)
-class Provenance:
-    """一个候选在这一刻的四层拆解：每层的数字连着它自己的那批日子。
-
-    判断者据此看到的不是一个光秃秃的概率，而是"本槽 2/4、邻域 6/20、跨周几 0.1、全天 0.05"，
-    并且每一层配的历史背景都恰好来自**算出那个数的那几天**。
-    """
-
-    slot: Layer
-    pool: Layer
-    cross_weekday: Layer
-    all_day: Layer
-
-    def __iter__(self):
-        return iter((self.slot, self.pool, self.cross_weekday, self.all_day))
 
 
 @dataclass(frozen=True)
@@ -99,10 +22,21 @@ class Moment:
     slot: int
     weekday: int
     day_note: str | None = None
+    #: 上一次看的时刻（上一拍）。时窗在那之后才关的，这一拍还算赶上了：拍点晚了一点不让没做的那次机会从账上消失。
+    #: None = 只看此刻。
+    looked_since: datetime | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.at, datetime) or self.at.utcoffset() is None:
             raise ForesightError("moment must be a timezone-aware local datetime")
+        if self.looked_since is not None and (self.looked_since.utcoffset() is None or self.looked_since > self.at):
+            raise ForesightError("looked_since must be a timezone-aware datetime no later than the moment")
+
+    @property
+    def caught_from(self) -> datetime:
+        """时窗终点不早于它的，这一拍还算赶上了。"""
+
+        return self.at if self.looked_since is None else self.looked_since
 
     @property
     def day(self) -> date:
@@ -110,53 +44,11 @@ class Moment:
 
 
 @dataclass(frozen=True)
-class RecurrenceNumbers:
-    """这件事隔多久做一次：树上的间隔分位数（秒），以及今天已做过时"距上次占中位数几成"。
-
-    ``overdue`` 只在今天已经做过一次时才有意义（elapsed 从今天最后一次起算）；今天还没做就是 None，
-    只带分位数——不用昨天那次去算，"该来没来"是判断者结合累积率看的事。
-    """
-
-    p10: float
-    p50: float
-    p90: float
-    sample_count: float
-    overdue: float | None
-
-
-@dataclass(frozen=True)
-class CandidateNumbers:
-    """树**真正发布**的那些数：收缩链的产物与伴随值。四层拆解给的是推导，这里是结论。
-
-    全部逐字取自 ``prediction.query``，一个不重算：``marginal`` / ``hazard`` / ``cumulative`` 是这个
-    周几这一槽的曲线值；两个 lift 的分母分别是全天基线与 ``weekday_baselines``；``count`` 与 ``n_eff``
-    是这一格的计数与机会；``trend`` 是（周几，行为）的近期率÷长期率，``trend_n_eff`` 是它的证据量。
-    """
-
-    marginal: float
-    hazard: float
-    cumulative: float
-    lift_all_day: float
-    lift_weekday: float
-    count: float
-    n_eff: float
-    trend: float | None
-    trend_n_eff: float
-    recurrence: RecurrenceNumbers | None
-    done_today: int
-
-    def __post_init__(self) -> None:
-        if isinstance(self.done_today, bool) or not isinstance(self.done_today, int) or self.done_today < 0:
-            raise ForesightError("done_today must be a non-negative integer")
-
-
-@dataclass(frozen=True)
 class UnsealedRow:
-    """还没归约到行为树上的一条判断：最近一小时的链在判断存储里，此刻场景要把它们补上。
+    """还没归约到行为树上的一条判断：最近一段的链在判断存储里，此刻要把它们补上。
 
-    ``name`` 为 None 是融合"没读懂"的那种判断——它在树上会成为一段观测空白，此刻场景把它当空白记；
-    读得懂的行为名经词表落到 kind，落不到就 ``kind_token`` 为 None，带原名进场景并标"未归类"。
-    没有 URI——它还不是树上的 occurrence，也不能被判断引用为依据。
+    ``name`` 为 None 是融合"没读懂"的那种判断——它在树上会成为一段观测空白；读得懂的行为名经白天归类落到类，
+    落不到就 ``kind_token`` 为 None。没有 URI——它还不是树上的 occurrence。
     """
 
     name: str | None
@@ -182,11 +74,39 @@ class UnsealedRow:
         return self.name is not None
 
 
-class UnsealedReader(Protocol):
-    """ "这段时间里有哪些还没封口的判断"。生产实现读判断存储，住组合根；本包只认这个契约。
+@dataclass(frozen=True)
+class Seen:
+    """最近几天到此刻为止开始过的一件事：已封口的行，或还没封口、现场归上类的判断。``ended_at`` 是最后所见（截到此刻）；
+    ``source`` 是已封口记录的 URI，或 ``unsealed:<开始时刻>``（封口后编号可能变，预期上记它，反馈读回时才分得清）。"""
 
-    ``prepare`` 每拍装配之前调一次（异步：生产实现要给新出现的链归类，那要调模型）；``rows`` 在装配时同步读。
-    """
+    started_at: datetime
+    ended_at: datetime
+    kind_token: str
+    source: str
+    #: 融合给这一次起的名字与一句话概要（模型小包里"今天这次"与"历史那几次"读的就是它们；触发不读）。
+    name: str = ""
+    summary: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not isinstance(self.summary, str):
+            raise ForesightError("seen row name and summary must be text")
+        for label in ("started_at", "ended_at"):
+            value = getattr(self, label)
+            if not isinstance(value, datetime) or value.utcoffset() is None:
+                raise ForesightError(f"seen row {label} must be a timezone-aware datetime")
+        if self.ended_at < self.started_at:
+            raise ForesightError("a seen row cannot end before it started")
+        for label in ("kind_token", "source"):
+            if not isinstance(getattr(self, label), str) or not getattr(self, label):
+                raise ForesightError(f"seen row {label} must be non-empty text")
+
+    @property
+    def day(self) -> date:
+        return self.started_at.date()
+
+
+class UnsealedReader(Protocol):
+    """ "这段时间里有哪些还没封口的判断"。生产实现读判断存储，住组合根；本包只认这个契约。"""
 
     async def prepare(self, *, until: datetime) -> None: ...
 
@@ -194,7 +114,7 @@ class UnsealedReader(Protocol):
 
 
 class NoUnsealed:
-    """没有判断存储可读时的显式空实现（脚本、离线重放）：明说"最近一小时没补"，不是漏了。"""
+    """没有判断存储可读时的显式空实现（脚本、离线重放）：明说"最近一段没补"，不是漏了。"""
 
     async def prepare(self, *, until: datetime) -> None:
         return None
@@ -203,15 +123,4 @@ class NoUnsealed:
         return ()
 
 
-__all__ = [
-    "LAYER_LABELS",
-    "LAYER_NAMES",
-    "CandidateNumbers",
-    "Layer",
-    "Moment",
-    "NoUnsealed",
-    "Provenance",
-    "RecurrenceNumbers",
-    "UnsealedReader",
-    "UnsealedRow",
-]
+__all__ = ["Moment", "NoUnsealed", "Seen", "UnsealedReader", "UnsealedRow"]

@@ -98,6 +98,8 @@ class DayIndex:
             last_observed_at=datetime.fromisoformat(str(fields["last_observed_at"])),
             summary=str(fields["summary"]),
             day_count=counts[kind_token],
+            status=str(fields["status"]),
+            prompted_by=str(fields["prompted_by"]) if fields.get("prompted_by") is not None else None,
         )
 
     def others(self, uri: str) -> tuple[str, ...]:

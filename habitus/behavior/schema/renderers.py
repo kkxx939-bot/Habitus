@@ -39,6 +39,9 @@ _RENDERED_STEPS_HEAD = 20
 _RENDERED_STEPS_TAIL = 5
 
 
+_PROMPTER_TEXT = {"system": "系统提醒了他", "host_agent": "宿主助手先通知了他", "self": "他自己"}
+
+
 def _render_occurrence(payload: Mapping[str, Any]) -> str:
     status_text = _STATUS_TEXT[payload["status"]]
     basis_text = _BASIS_TEXT[payload["status_basis"]]
@@ -55,6 +58,9 @@ def _render_occurrence(payload: Mapping[str, Any]) -> str:
         lines.append(f"**目标** {payload['goal']}")
     if payload["place"] is not None:
         lines.append(f"**地点** {payload['place']}")
+    if payload.get("prompted_by") is not None:
+        prompter = payload["prompted_by"]
+        lines.append(f"**发起** {_PROMPTER_TEXT[prompter]}（{prompter}）")
     lines.extend(["", str(payload["summary"])])
     lines.extend(["", f"**主体** {'、'.join(payload['subjects'])}"])
     if payload["basis"]:

@@ -385,11 +385,7 @@ class RuntimeComponents:
             # 而配置里还开着——无处可查。
             if self.prediction.session.worker.after_rebuild is None:
                 raise ValueError("the settlement stage must be attached to the nightly rebuild")
-            self.foresight.assert_attached_to(
-                behavior=self.behavior.session,
-                prediction=self.prediction.session,
-                structured_chat=self.models.structured_chat,
-            )
+            self.foresight.assert_attached_to(behavior=self.behavior.session)
         if self.workflow.enqueuer.conversations is not self.conversation.journal:
             raise ValueError("workflow enqueuer must use the shared conversation journal")
         if (

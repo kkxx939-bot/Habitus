@@ -61,15 +61,18 @@ def build(
     # 空白账在事件序列里已经消解过一次（``series.model.disproves``）：曝光与转移删失问的是不同的问题
     # （"那一刻在不在看" vs "这段区间干不干净"），但它们必须从同一份空白出发，语义树也读同一份。
     gaps = snapshot.gaps
-    ledger = nodes.accumulate(snapshot.actions, gaps, config=config, reference=reference)
+    # 被提醒之后才做、那天又没有自然发生的：那一天对这一类是不知道，格子与曲线的分子分母都不计（裁定 54）
+    blind = nodes.blind_days(snapshot.actions, snapshot.reminded)
+    ledger = nodes.accumulate(snapshot.actions, gaps, config=config, reference=reference, blind=blind)
     trends = nodes.pooled_trends(
         snapshot.actions,
         gaps,
         config=config,
         reference=reference,
         periods=periods,
+        blind=blind,
     )
-    completion = nodes.completion_curves(snapshot.actions, gaps, config=config, reference=reference)
+    completion = nodes.completion_curves(snapshot.actions, gaps, config=config, reference=reference, blind=blind)
     derived = nodes.derive_all(ledger, config=config, trends=trends, completion=completion)
     edge_ledger = edges.pair(
         snapshot.actions,

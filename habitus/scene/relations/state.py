@@ -193,7 +193,9 @@ def _step(
     if _retired(test.key if test is not None else before.key if before is not None else None, tests):
         # 词表拆改把前因或后果的类停用了：这条关系随之停用（裁定 27 第 9 条）——不是"效应没了"，新类上要从头发现、前向验证
         if before is not None and before.status in (Status.CANDIDATE, Status.ESTABLISHED):
-            return replace(before, status=Status.EXPIRED, expired_on=night, maintenance=None), "概念停用（词表拆改），关系随之停用"
+            return replace(
+                before, status=Status.EXPIRED, expired_on=night, maintenance=None
+            ), "概念停用（词表拆改），关系随之停用"
         if before is not None:
             return before, None
     if test is None:

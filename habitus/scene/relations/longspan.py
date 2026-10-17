@@ -149,7 +149,9 @@ class EpisodeMeasure:
         differences: list[float] = []
         relatives: list[float] = []
         for _ in range(rounds):
-            treated = [table.treated[generator.randrange(len(table.treated))] for table in tables for _ in table.treated]
+            treated = [
+                table.treated[generator.randrange(len(table.treated))] for table in tables for _ in table.treated
+            ]
             controls = [
                 table.controls[generator.randrange(len(table.controls))] for table in tables for _ in table.controls
             ]
@@ -218,7 +220,9 @@ class EpisodeMeasure:
                 continue
             length = len(positions)
             before = [p for p in range(max(0, positions[0] - length), positions[0]) if not inside[p]]
-            after = [p for p in range(positions[-1] + 1, min(len(self.days), positions[-1] + 1 + length)) if not inside[p]]
+            after = [
+                p for p in range(positions[-1] + 1, min(len(self.days), positions[-1] + 1 + length)) if not inside[p]
+            ]
             treated_positions = [p for p in positions if since is None or self.days[p] >= since]
             treated = self._units(treated_positions)
             controls = [*self._units(before), *self._units(after)]
@@ -318,7 +322,7 @@ def measure_of(line: LaneTimeline, consequent: str, found: tuple[Episode, ...]) 
 def _daily_outcome(line: LaneTimeline, consequent: str, day: date) -> int | None:
     """那天 B 来没来；没来而那天有 B 判不了的记录，算不知道。"""
 
-    if any(mark.day == day for mark in line.marks.get(consequent, [])):
+    if any(mark.day == day for mark in line.outcomes(consequent)):
         return 1
     start = line.day_start(day)
     if any(start <= slot < start + line.slots_per_day for slot in line.unknown.get(consequent, [])):

@@ -75,7 +75,11 @@ class RelationThresholds:
         ):
             if not _positive_int(getattr(self, label)):
                 raise RelationConfigError(f"{label} must be a positive integer")
-        if isinstance(self.max_blind_share, bool) or not isinstance(self.max_blind_share, int | float) or not 0.0 < self.max_blind_share <= 1.0:
+        if (
+            isinstance(self.max_blind_share, bool)
+            or not isinstance(self.max_blind_share, int | float)
+            or not 0.0 < self.max_blind_share <= 1.0
+        ):
             raise RelationConfigError("max_blind_share must lie in (0, 1]")
         if self.forward_max_antecedents < self.forward_min_antecedents:
             raise RelationConfigError("forward_max_antecedents must not be below forward_min_antecedents")

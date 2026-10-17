@@ -21,6 +21,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from habitus.behavior.tree import BehaviorTree
@@ -148,11 +149,28 @@ def _stage_attributes(outcome: object) -> dict[str, str | int | float | bool]:
     return attributes
 
 
+class NightOutcomeLike(Protocol):
+    """整晚跑完的结果里本模块只看一样：发布了哪一代（没发布是 None）。"""
+
+    @property
+    def published(self) -> PublishedGeneration | None: ...
+
+
+class NightRunner(Protocol):
+    """ "第 N 晚"整趟（行为树读一次 → 重建预测树 → 语义树 → 机会表）；``runtime.nightly.Nightly`` 就是这个形状。
+    本模块只认协议，不 import 它（它反过来要用这里的 ``PredictionRebuilder``）。"""
+
+    async def run_once(self) -> NightOutcomeLike: ...
+
+
 class PredictionRebuildWorker(ResidentWorker):
     """重建节拍。正确性全在 rebuilder，这里只管节奏与"循环别死"。
 
     重建期间的同步 IO 会占用事件循环，所以整趟下沉到 ``asyncio.to_thread``——一次全量扫描
     的量级受 BHV-LIFECYCLE-001 的欠账支配，比行为侧的 sweep 大得多。
+
+    接上整晚的跑法（``attach_nightly``，语义树新方案第 11 步）之后，一拍不再只是重建：由 ``Nightly`` 读一次行为树、
+    用同一份序列建预测树、跑语义树、算机会表；本模块只拿它发布的那一代记账。``after_rebuild``（结算）照旧排在之后。
     """
 
     _task_name = "habitus-prediction-rebuild"
@@ -180,15 +198,28 @@ class PredictionRebuildWorker(ResidentWorker):
         self.rebuilder = rebuilder
         self.interval_seconds = float(interval_seconds)
         self.after_rebuild = after_rebuild
+        self.nightly: NightRunner | None = None
+
+    def attach_nightly(self, nightly: NightRunner) -> None:
+        """用整晚的跑法代替单独的重建（组合根在语义树装好之后接；语义树没启用时不接，照旧只重建）。"""
+
+        if not hasattr(nightly, "run_once") or not callable(nightly.run_once):
+            raise TypeError("nightly must expose an async run_once()")
+        self.nightly = nightly
 
     async def run_once(self) -> PublishedGeneration | None:
-        """手动触发一次夜批：全量重建 → 后置阶段（运维与测试用）。"""
+        """手动触发一次夜批：全量重建（或整晚）→ 后置阶段（运维与测试用）。"""
 
         if self.running:
             raise RuntimeError("manual run_once cannot race the resident worker loop")
-        published = await asyncio.to_thread(self.rebuilder.run_once)
+        published = await self._rebuild()
         await self._run_after_rebuild()
         return published
+
+    async def _rebuild(self) -> PublishedGeneration | None:
+        if self.nightly is None:
+            return await asyncio.to_thread(self.rebuilder.run_once)
+        return (await self.nightly.run_once()).published
 
     async def _run_after_rebuild(self) -> None:
         """后置阶段失败不阻断重建（派生层不做级联），但**必须留下可查的痕迹**。
@@ -214,7 +245,7 @@ class PredictionRebuildWorker(ResidentWorker):
         while not self._stop_requested.is_set():
             started = time.monotonic()
             try:
-                published = await asyncio.to_thread(self.rebuilder.run_once)
+                published = await self._rebuild()
                 await self._run_after_rebuild()
             except Exception as exc:  # noqa: BLE001 - 常驻循环必须活过基础设施抖动
                 self.last_error = exc
@@ -267,6 +298,8 @@ def build_prediction_components(
 
 
 __all__ = [
+    "NightOutcomeLike",
+    "NightRunner",
     "PredictionBranches",
     "PredictionRebuildWorker",
     "PredictionRebuilder",

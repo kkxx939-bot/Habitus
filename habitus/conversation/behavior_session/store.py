@@ -100,9 +100,7 @@ class BehaviorSessionOutputStore:
                 self._directory(source.source_id), artifact_root=self.root, max_entries=self.max_files_per_source
             )
         except DurablePathIntegrityError as exc:
-            raise ConversationSourceError(
-                "behavior session receipt directory is invalid or exceeds its bound"
-            ) from exc
+            raise ConversationSourceError("behavior session receipt directory is invalid or exceeds its bound") from exc
         outputs: list[BehaviorSessionOutput] = []
         for entry in entries:
             temporary = atomic_temporary_destination(entry.name)

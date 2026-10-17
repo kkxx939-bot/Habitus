@@ -60,8 +60,12 @@ def occurrence_payload(
     original_name: str | None,
     kind_token: str,
     observations: Mapping[str, BehaviorObservation],
+    reminded: bool = False,
+    prompted_by: str | None = None,
 ) -> dict[str, Any]:
-    """一条闭合链的 occurrence payload。``name`` 已含可能的消歧后缀。"""
+    """一条闭合链的 occurrence payload。``name`` 已含可能的消歧后缀；``reminded`` 是调用方在 stage 之前
+    对着预测层账本查好的"开始前有没有被提醒过"（本层对预测层零知识，只收一个布尔）。``prompted_by`` 是谁发起的
+    （裁定 54）；不知道是 None、不写这个字段。系统提醒过的就是 system。"""
 
     head, tail = chain.head, chain.tail
     if head.behavior is None or tail.status is None or tail.status_basis is None:
@@ -90,9 +94,8 @@ def occurrence_payload(
         "status_basis": tail.status_basis,
         "last_observed_at": _iso(last_observed),
         "onset_available_at": _iso(onset),
-        # 干预账本（预测执行层）尚未存在——契约缺口：接入后此处换成"开始前窗口内是否提醒过"
-        # 的账本查询，且必须在 stage 前定格（死规则⑤）。
-        "reminded": False,
+        # 开始前窗口内是否提醒过：由 runner 经组合根注入的端口查预测层账本，在 stage 前定格（死规则⑤）。
+        "reminded": bool(reminded),
         "goal": goal,
         "summary": "；".join(item for item in summaries if item is not None),
         "subjects": _merged_subjects(chain),
@@ -100,6 +103,7 @@ def occurrence_payload(
         "place": None,
         "original_name": original_name,
         "basis": basis,
+        **({"prompted_by": "system" if reminded else prompted_by} if (reminded or prompted_by is not None) else {}),
         "chain_digest": chain.chain_digest,
         "fusion_version": head.fusion_version,
         "reduction_version": REDUCTION_VERSION,

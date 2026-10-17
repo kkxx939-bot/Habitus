@@ -760,3 +760,29 @@ def test_provenance_and_counts_come_from_one_ledger_entry() -> None:
         assert statistics.counts.occurred_days <= len(statistics.days) + 1e-9
         checked += 1
     assert checked > 0
+
+
+def test_days_done_only_after_a_reminder_leave_that_kind_s_denominators_everywhere() -> None:
+    """裁定 54：被提醒了才做、当天没有自然发生的日子对这一类是不知道——格子、全天基线、趋势、累积率的分母都扣掉它，
+    别的类照常把那天当机会。同一天另有自然发生的不算不知道。"""
+
+    pill = "吃药"
+    natural = [item for item in daily(pill, 20, 7) if not 5 <= (item.day - reference(0)).days <= 9]
+    reminded = [item for item in daily(pill, 20, 7) if 5 <= (item.day - reference(0)).days <= 9]
+    others = daily("吃早饭", 20, 8)
+    mixed_day = action(pill, 9, 21)  # 第 9 天晚上另有一次自然的
+    blind = nodes.blind_days([*natural, *others, mixed_day], reminded)
+    assert blind == {pill: frozenset(reference(offset) for offset in range(5, 9))}
+    cfg = config()
+    at = reference(19)
+    ledger = accumulate([*natural, *others, mixed_day], [], config=cfg, reference=at, blind=blind)
+    hidden = sum(item.observed_days for (_key, name), item in ledger.blind.items() if name == pill)
+    assert hidden > 0 and not any(name == "吃早饭" for _key, name in ledger.blind)
+    total = sum(item.observed_days for item in ledger.exposure.values())
+    occurred = sum(item.occurred_days for (_key, name), item in ledger.counts.items() if name == pill)
+    epsilon = cfg.laplace_epsilon
+    assert nodes.all_day_marginals(ledger, config=cfg)[pill] == pytest.approx(
+        (occurred + epsilon) / (total - hidden + epsilon)
+    )
+    cell = (SlotKey(weekday=reference(0).weekday(), slot=28), pill)
+    assert ledger.exposure_of(cell[0], pill).observed_days < ledger.exposure[cell[0]].observed_days  # type: ignore[union-attr]

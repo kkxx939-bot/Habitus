@@ -11,7 +11,7 @@
   「非事件」不进序列，连顺序里也当它不存在；既不是编号也不是占位标记的硬拒；lane 取编号前缀；
 - 观测空白两种都进（``GapKind``），跨过截止时刻的截到那一刻；空白的类型在这里翻译一次，上游改名时以未知取值硬失败；
 - ``concurrent_with`` 链接原样读成无序的 uri 对，只留两端都在序列里的（指向被跳过的一端，那条并行没有两个可用端点）；
-- ``reminded`` 原样带着：被提醒过的发生要不要算进自然率，是消费方的事（预测树现在硬拒，见 ``prediction.source``）。
+- ``reminded`` 原样带着：被提醒过的发生要不要算进自然率，是消费方的事（预测树让它占位不计数，见 ``prediction.source``）。
 
 两条 lane 各是一整套（裁定 35）：行为树、预测树、语义树各有会话、物理两支，各读各的，这里读到的一棵行为树里只有一条
 lane 的记录与空白。序列上的 ``lane`` 字段（取自编号前缀）与下游按 lane 分组的逻辑因此总是只有一组——留着不影响结果，
@@ -30,6 +30,7 @@ from datetime import date, datetime
 
 from habitus.behavior.document import BehaviorDocument, BehaviorLinkType
 from habitus.behavior.kinds.ids import KindIdError, Lane, lane_of_token, not_event_token, pending_token
+from habitus.behavior.schema.vocabulary import PROMPTERS
 from habitus.behavior.tree import BehaviorAddress, BehaviorKind, BehaviorTree
 from habitus.behavior.uri import BehaviorURI
 from habitus.series.model import (
@@ -142,6 +143,7 @@ def _record(document: BehaviorDocument, uri: str, token: str, lane: Lane) -> Ser
         goal=goal if isinstance(goal, str) and goal else None,
         place=place if isinstance(place, str) and place else None,
         subjects=tuple(str(item) for item in subjects if isinstance(item, str) and item),
+        prompted_by=_prompter(fields.get("prompted_by")),
     )
 
 
@@ -189,6 +191,14 @@ def _text(raw: object, field: str) -> str:
     if not isinstance(raw, str) or not raw:
         raise SeriesError(f"{field} must be non-empty text")
     return raw
+
+
+def _prompter(value: object) -> str | None:
+    if value is None:
+        return None
+    if value not in PROMPTERS:
+        raise SeriesError(f"prompted_by must be one of {sorted(PROMPTERS)}")
+    return str(value)
 
 
 def _flag(raw: object) -> bool:

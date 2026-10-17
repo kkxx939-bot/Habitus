@@ -105,9 +105,30 @@ def test_occurrence_schema_declares_all_faces() -> None:
         "place",
         "original_name",
         "basis",
+        "prompted_by",
     }
     # 溯源只留链身份：原料在发布后即释放，逐条 id 只会是死引用（实测占文档 70%）。
     assert set(names[BehaviorFieldRole.SYSTEM]) == {"chain_digest", "fusion_version", "reduction_version"}
+
+
+def test_prompted_by_is_optional_known_values_only_and_agrees_with_reminded() -> None:
+    """谁发起的（裁定 54）：不知道就不写——已写好的记录不带它也照常过校验；写了只能是三种之一，系统发起的就是被提醒过的。"""
+
+    base = occurrence_payload()
+    assert "prompted_by" not in base
+    REGISTRY.validate(BehaviorKind.OCCURRENCE, base)
+    REGISTRY.validate(BehaviorKind.OCCURRENCE, {**base, "prompted_by": "host_agent"})
+    REGISTRY.validate(BehaviorKind.OCCURRENCE, {**base, "reminded": True, "prompted_by": "system"})
+    REGISTRY.validate(BehaviorKind.OCCURRENCE, {**base, "prompted_by": None})  # 显式 null = 不知道，与不写同义
+    for bad in ({**base, "prompted_by": "朋友"}, {**base, "prompted_by": "system"}, {**base, "reminded": True, "prompted_by": "self"}):
+        with pytest.raises(BehaviorSchemaError):
+            REGISTRY.validate(BehaviorKind.OCCURRENCE, bad)
+    # 写了才渲染；不写的旧记录正文一字不变（读回时按正文逐字比对，所以旧树照常能读）
+    with_field = REGISTRY.render_markdown(BehaviorKind.OCCURRENCE, {**base, "prompted_by": "host_agent"})
+    assert "宿主助手先通知了他" in with_field and "发起" not in REGISTRY.render_markdown(BehaviorKind.OCCURRENCE, base)
+    for field in REGISTRY.get(BehaviorKind.OCCURRENCE).fields:
+        if field.name == "prompted_by":
+            assert field.required is False
 
 
 def test_validate_accepts_canonical_and_action_segment_payloads() -> None:
@@ -181,6 +202,8 @@ def _expected_render_fragments(field, payload) -> list[str]:
 
     from habitus.behavior.schema.model import BehaviorFieldType as T
 
+    if not field.required and field.name not in payload:
+        return []  # 可选字段不写就不渲染
     value = payload[field.name]
     if field.field_type in (T.STRING, T.OPTIONAL_STRING, T.GAP_KIND):
         return [value] if value is not None else []

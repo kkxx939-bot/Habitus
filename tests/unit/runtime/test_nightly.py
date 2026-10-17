@@ -77,7 +77,13 @@ def test_both_runs_must_read_the_same_tree(tmp_path) -> None:
     site, run = assembled(tmp_path)
     _other_site, other = assembled(tmp_path / "other")
     with pytest.raises(ValueError, match="same behaviour tree"):
-        Nightly(behavior_tree=site.behavior_tree, prediction=run.prediction, scene=other.scene, closed_days=tuple, vocabulary=steady)
+        Nightly(
+            behavior_tree=site.behavior_tree,
+            prediction=run.prediction,
+            scene=other.scene,
+            closed_days=tuple,
+            vocabulary=steady,
+        )
 
 
 def test_the_night_stops_at_the_last_sealed_day(tmp_path) -> None:

@@ -534,13 +534,20 @@ workflow:
 # 预测层。缺省未启用；置 enabled: true 即启用（预测树与情景树必须都已启用——数字取自前者、
 # 与之对应的历史背景取自后者，缺一边就装配不出证据）。
 #
-# 这一组**只有保护闸**，没有算法参数：窗口宽度就是 prediction.pool_half_width，转移窗就是
-# prediction.transition_window_slots，两边不各配一份。下面三个数防的是上下文被撑爆与一次
-# 查询把整棵树扫穿，全部是启动档、要在真实数据上重定——重定的是数值，不是"要不要有这个闸"。
+# 这一组没有算法参数：时窗来自历史那几次的实际时刻，转移窗就是 prediction.transition_window_slots。
+# 这里只有开关、递法的升降节奏（产品决定，不是统计量）、保护闸；没定的几项先给默认值（裁定 46）。
 # foresight:
 #   enabled: true
-#   window_days: 30                  # 卡上"上一次"往回看多少天；不是取历史卡的窗（卡按出处日取）
-#   max_days_per_layer: 40           # 四层里每层最多摊开多少天的历史；截掉的更早日子会如实报出条数
-#   judge_transient_retries: 1       # 判断服务对传输层瞬态错的有界重试（路由层另有一层）
+#   line_floor: 0.2                  # 线的下限（线 = 1 / (1 + 代价比 × 提醒效果)，每本账一条、在上下限之间波动）
+#   line_ceiling: 0.9                # 线的上限
+#   cost_ratio_unjudged: 0.5         # 没判过代价比时按它（0.5 → 线 0.67）
+#   severity_review_days: 60         # 重轻按账判一次，多少天后重判
+#   shadow_uses_unestablished: true  # 影子预期也用还没成立的候选关系（账早攒；开口仍只用成立的）
+#   daily_reminder_cap: 6            # 每天最多提醒几次（保护闸，常触发说明线该重看）
+#   holdout_rate: 0.1                # 随机扣发比例，估提醒效应的唯一因果手段
+#   holdout_rate_heavy: 0.05         # 漏一次比错提一次代价大（代价比 > 1）的事的扣发比例（不大于上一项）
+#   unit_prior_strength: 8           # 行为单元分层读数里先验的分量上限（没见过的组合贴着更粗那一层；回放后定）
+#   judge_transient_retries: 1       # 模型对传输层瞬态错的有界重试
 #   judge_transient_retry_delay_seconds: 5.0
-#   worker_shutdown_timeout_seconds: 30   # 每槽一拍的判断 worker；节奏本身取树的 slot_minutes，不另配
+#   tick_interval_seconds: 900       # 白天多久一拍（建预期、到时窗的决定说不说；默认一个槽）
+#   worker_shutdown_timeout_seconds: 30

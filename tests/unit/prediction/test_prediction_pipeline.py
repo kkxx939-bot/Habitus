@@ -509,13 +509,48 @@ def test_an_unobserved_gap_containing_a_behaviour_is_an_upstream_contradiction(t
         _tree_with_gap(tmp_path, "unobserved", gap_kind="未观测", start=moment(5, 7), end=moment(5, 8))
 
 
-def test_an_occurrence_marked_as_reminded_is_refused(tmp_path) -> None:
-    """干预账本还没建；把被提醒之后的发生数进自然率，事后无法再分开。"""
+def test_an_occurrence_marked_as_reminded_holds_its_place_but_is_not_counted(tmp_path) -> None:
+    """被提醒之后的发生不进自然率：像「待定」一样只在先后顺序里占位，不成为任何格子的计数。"""
 
     writer, behavior_tree = writer_for(tmp_path)
     publish_occurrence(writer, "吃药", moment(0, 7, 30), reminded=True)
-    with pytest.raises(PredictionTreeError, match="reminded"):
-        snapshot_from_tree(behavior_tree)
+    publish_occurrence(writer, "吃早饭", moment(0, 8, 0))
+    snapshot = snapshot_from_tree(behavior_tree)
+    assert [item.action for item in snapshot.actions] == [kind_id("吃早饭")]
+    assert [item.started_at for item in snapshot.unnamed] == [moment(0, 7, 30)]
+
+
+def test_a_day_done_only_after_a_reminder_is_unknown_not_a_miss(tmp_path) -> None:
+    """裁定 54：被提醒了才做的那天对这一类是"不知道"——分子分母都不计。十个周二吃药，五个是提醒之后才吃的：
+    格子的机会数只剩自然的那五天、率不掉；只扣分子的写法会把率读成一半。同一天另有自然发生的那天照常算。"""
+
+    def built_with(reminded_weeks: set[int], *, natural_too: int | None = None):
+        root = tmp_path / f"r{len(reminded_weeks)}-{natural_too}"
+        writer, behavior_tree = writer_for(root)
+        for week in range(10):
+            offset = 1 + 7 * week
+            publish_occurrence(writer, "吃药", moment(offset, 7, 30), reminded=week in reminded_weeks)
+            if week == natural_too:
+                publish_occurrence(writer, "吃药", moment(offset, 21, 0))
+            publish_occurrence(writer, "吃早饭", moment(offset, 8, 0))
+        snapshot = snapshot_from_tree(behavior_tree)
+        return builder.build(snapshot, config=config(), reference=snapshot.latest_day, built_at=moment(70, 23))
+
+    pill = kind_id("吃药")
+    slot = SlotKey(weekday=1, slot=30)
+    plain, reminded = built_with(set()), built_with({1, 3, 5, 7, 9})
+    assert len(reminded.nodes[(slot, pill)].days) == 5
+    assert reminded.nodes[(slot, pill)].n_eff == pytest.approx(
+        reminded.nodes[(slot, pill)].counts.occurred_days, rel=1e-9
+    )
+    assert reminded.curves[(1, pill)].marginal[30] == pytest.approx(plain.curves[(1, pill)].marginal[30], abs=0.05)
+    assert reminded.curves[(1, pill)].cumulative[-1] > 0.9
+    # 趋势：被提醒的那几周不是"最近少做了"——没做的才是证据，不知道的不是
+    assert reminded.curves[(1, pill)].trend == pytest.approx(plain.curves[(1, pill)].trend, abs=0.05)
+    # 那天晚上另有一次自然的：这一天照常是一次机会、记在晚上那一格
+    mixed = built_with({1}, natural_too=1)
+    assert mixed.nodes[(slot, pill)].n_eff > reminded.nodes[(slot, pill)].n_eff
+    assert (SlotKey(weekday=1, slot=84), pill) in mixed.nodes
 
 
 # --- 时间画像与并行的对称闭包（本轮新增） --------------------------------------------------

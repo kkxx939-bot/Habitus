@@ -253,7 +253,8 @@ class ConditionProposer:
             return ConditionAnswer(signals=(answer.signal,), answered=False)
         assert isinstance(answer, Answered)
         proposals = tuple(
-            replace(item, version=self.version, model=answer.model) for item in cast("tuple[Proposal, ...]", answer.value)
+            replace(item, version=self.version, model=answer.model)
+            for item in cast("tuple[Proposal, ...]", answer.value)
         )
         refused = sum(1 for item in proposals if item.refused is not None)
         return ConditionAnswer(

@@ -113,6 +113,12 @@ class VocabularyJobReport:
     signals: tuple[str, ...]
 
 
+def _never_reminded(kind_token: str, started_at: datetime) -> bool:
+    """没接预测层时的查法：从没提醒过。"""
+
+    return False
+
+
 class BehaviorReductionRunner:
     """归约写入层；同一 behavior-root 的写入方必须共享 LockStore。"""
 
@@ -133,9 +139,14 @@ class BehaviorReductionRunner:
         coverage: BehaviorCoverageIndex | None = None,
         sweep_lock_ttl_seconds: int = DEFAULT_SWEEP_LOCK_TTL_SECONDS,
         observer: Observer | None = None,
+        reminded: Callable[[str, datetime], bool] | None = None,
     ) -> None:
         """``context_lookback_seconds`` 必须与融合 runner 实际使用的值一致（同一配置源）——
-        融合"还能续"与归约"已封口"是同一个窗口的两面，各配一个数会静默分叉。"""
+        融合"还能续"与归约"已封口"是同一个窗口的两面，各配一个数会静默分叉。
+
+        ``reminded(kind_token, started_at)``：这一类在这一刻开始之前有没有被系统提醒过——预测层的账本回答，
+        由组合根注入（本层对预测层零知识）；没接时恒为假。它在物化 payload 时定格（stage 之前），查不出来就整轮失败，
+        不许静默记成没提醒（被提醒的发生混进自然率事后分不开）。"""
 
         if not isinstance(judgements, BehaviorJudgementStore):
             raise TypeError("judgements must be BehaviorJudgementStore")
@@ -187,6 +198,16 @@ class BehaviorReductionRunner:
         digest = hashlib.sha256(str(tree.root).encode("utf-8")).hexdigest()[:24]
         self._sweep_lock_key = f"behavior-reduction:{digest}"
         self.observer: Observer = observer or NullObserver()
+        if reminded is not None and not callable(reminded):
+            raise TypeError("reminded must be callable or None")
+        self.reminded: Callable[[str, datetime], bool] = reminded if reminded is not None else _never_reminded
+
+    def attach_reminder_lookup(self, lookup: Callable[[str, datetime], bool]) -> None:
+        """组合根在预测层装好之后把账本的查法接进来（归约在预测层之前装配，接不进构造函数）。"""
+
+        if not callable(lookup):
+            raise TypeError("lookup must be callable")
+        self.reminded = lookup
 
     async def run_once(self) -> BehaviorReductionReport:
         """执行一轮归约；先重放遗留检查点，再归约新封口的链与空白段。
@@ -619,6 +640,10 @@ class BehaviorReductionRunner:
                 skipped_chains.add(index)
                 dropped.append(f"chain {chain.chain_digest} skipped: behavior name is not addressable")
                 continue
+            reminded = bool(self.reminded(token, chain.head.started_at))
+            # TODO(BHV-PROMPTED-BY-001)：谁发起的（裁定 54）——宿主助手先发了通知（包裹到了、账单到期）他才去做的，要由融合从会话里
+            # 认出来交到这里（``occurrence_payload(prompted_by="host_agent")``）；事件融合按 lane 重做之前不改上游，这里只传系统提醒
+            # （reminded → system），其余不写这个字段。详见 ``待办.md``「行为树"谁发起的"标识由上游产出」。
             try:
                 occurrence_payload(
                     chain,
@@ -626,6 +651,7 @@ class BehaviorReductionRunner:
                     original_name=None,
                     kind_token=token,
                     observations=observation_index,
+                    reminded=reminded,
                 )
                 candidate, ordinal = base, 1
                 while str(BehaviorURI.from_address(chain_address(chain, candidate))) in occupied:
@@ -638,6 +664,7 @@ class BehaviorReductionRunner:
                     original_name=base if ordinal > 1 else None,
                     kind_token=token,
                     observations=observation_index,
+                    reminded=reminded,
                 )
             except BehaviorTreeIntegrityError:
                 raise  # 树本身不可安全检视（别名冲突、符号链接）：整轮失败、可见告警，不当坏名字吞

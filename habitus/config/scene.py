@@ -68,7 +68,9 @@ class SceneRelationsConfig:
             ):
                 raise ValueError(f"scene.relations.{name} must lie in [0, 1)")
         share = self.max_blind_share
-        if share is not None and (isinstance(share, bool) or not isinstance(share, int | float) or not 0.0 < share <= 1.0):
+        if share is not None and (
+            isinstance(share, bool) or not isinstance(share, int | float) or not 0.0 < share <= 1.0
+        ):
             raise ValueError("scene.relations.max_blind_share must lie in (0, 1]")
         for name in _COUNTS:
             value = getattr(self, name)

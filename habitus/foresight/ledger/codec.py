@@ -1,4 +1,4 @@
-"""承诺与结算的 JSON 形状。落盘与读回由组合根做，这里只管编解码——两边用同一份，账本才能重放。"""
+"""账本记录的 JSON 形状（按预期的六种、按账的四种）。落盘与读回由组合根做，这里只管编解码——两边用同一份，账本才能重放。"""
 
 from __future__ import annotations
 
@@ -7,140 +7,412 @@ from datetime import date, datetime
 from typing import Any
 
 from habitus.foresight.errors import ForesightError
-from habitus.foresight.ledger.model import Claim, Settlement
-from habitus.foresight.model import CandidateNumbers, RecurrenceNumbers
+from habitus.foresight.ledger.model import (
+    AccountFact,
+    AccountLevel,
+    AccountSetting,
+    AccountSeverity,
+    Antecedent,
+    Cause,
+    Delivery,
+    Expectation,
+    Omission,
+    Response,
+    Ruling,
+    Settlement,
+)
 
-LEDGER_SCHEMA_VERSION = "foresight_ledger_v4"
+LEDGER_SCHEMA_VERSION = "foresight_ledger_v7"
 
 
-def encode_claim(claim: Claim) -> dict[str, Any]:
-    numbers = claim.numbers
-    recurrence = numbers.recurrence
+def encode_expectation(item: Expectation) -> dict[str, Any]:
+    start, end = item.window
     return {
         "schema_version": LEDGER_SCHEMA_VERSION,
-        "claim_id": claim.claim_id,
-        "kind_token": claim.kind_token,
-        "day": claim.day.isoformat(),
-        "slot": claim.slot,
-        "slot_minutes": claim.slot_minutes,
-        "window": list(claim.window),
-        "judged_at": claim.judged_at.isoformat(),
-        "generation": claim.generation,
-        "judge_version": claim.judge_version,
-        "basis": list(claim.basis),
-        "situations": list(claim.situations),
-        "relations": list(claim.relations),
-        "relation_sources": list(claim.relation_sources),
-        "numbers": {
-            "marginal": numbers.marginal,
-            "hazard": numbers.hazard,
-            "cumulative": numbers.cumulative,
-            "lift_all_day": numbers.lift_all_day,
-            "lift_weekday": numbers.lift_weekday,
-            "count": numbers.count,
-            "n_eff": numbers.n_eff,
-            "trend": numbers.trend,
-            "trend_n_eff": numbers.trend_n_eff,
-            "done_today": numbers.done_today,
-            "recurrence": None
-            if recurrence is None
-            else {
-                "p10": recurrence.p10,
-                "p50": recurrence.p50,
-                "p90": recurrence.p90,
-                "sample_count": recurrence.sample_count,
-                "overdue": recurrence.overdue,
-            },
-        },
-        "conditions": [list(pair) for pair in claim.conditions],
-        "condition_keys": list(claim.condition_keys),
-        "facts_version": claim.facts_version,
+        "record": "expectation",
+        "expectation_id": item.expectation_id,
+        "kind_token": item.kind_token,
+        "day": item.day.isoformat(),
+        "formed_at": item.formed_at.isoformat(),
+        "source": item.source,
+        "trigger": item.trigger,
+        "trigger_instance": item.trigger_instance,
+        "window": [start.isoformat(), end.isoformat()],
+        "deadline": item.deadline.isoformat(),
+        "observed_from": item.observed_from.isoformat(),
+        "basis": list(item.basis),
+        "opportunities": item.opportunities,
+        "hits": item.hits,
+        "antecedents": [
+            {"relation": a.relation, "present": a.present, "upward": a.upward, "source": a.source}
+            for a in item.antecedents
+        ],
+        "level": item.level,
+        "generation": item.generation,
+        "night": item.night.isoformat() if item.night is not None else None,
+        "version": item.version,
+        "implementation": item.implementation,
     }
 
 
-def decode_claim(raw: Mapping[str, Any]) -> Claim:
+def decode_expectation(raw: Mapping[str, Any]) -> Expectation:
+    _check(raw, "expectation")
     try:
-        if raw["schema_version"] != LEDGER_SCHEMA_VERSION:
-            raise ForesightError(f"unknown ledger schema: {raw.get('schema_version')!r}")
-        numbers = raw["numbers"]
-        recurrence = numbers["recurrence"]
-        return Claim(
-            claim_id=str(raw["claim_id"]),
-            kind_token=str(raw["kind_token"]),
-            day=date.fromisoformat(raw["day"]),
-            slot=int(raw["slot"]),
-            slot_minutes=int(raw["slot_minutes"]),
-            window=(int(raw["window"][0]), int(raw["window"][1])),
-            judged_at=datetime.fromisoformat(raw["judged_at"]),
-            generation=str(raw["generation"]),
-            judge_version=str(raw["judge_version"]),
-            basis=tuple(str(item) for item in raw["basis"]),
-            situations=tuple(str(item) for item in raw["situations"]),
-            relations=tuple(str(item) for item in raw["relations"]),
-            relation_sources=tuple(str(item) for item in raw["relation_sources"]),
-            numbers=CandidateNumbers(
-                marginal=float(numbers["marginal"]),
-                hazard=float(numbers["hazard"]),
-                cumulative=float(numbers["cumulative"]),
-                lift_all_day=float(numbers["lift_all_day"]),
-                lift_weekday=float(numbers["lift_weekday"]),
-                count=float(numbers["count"]),
-                n_eff=float(numbers["n_eff"]),
-                trend=None if numbers["trend"] is None else float(numbers["trend"]),
-                trend_n_eff=float(numbers["trend_n_eff"]),
-                recurrence=None
-                if recurrence is None
-                else RecurrenceNumbers(
-                    p10=float(recurrence["p10"]),
-                    p50=float(recurrence["p50"]),
-                    p90=float(recurrence["p90"]),
-                    sample_count=float(recurrence["sample_count"]),
-                    overdue=None if recurrence["overdue"] is None else float(recurrence["overdue"]),
-                ),
-                done_today=int(numbers["done_today"]),
+        window = raw["window"]
+        if not isinstance(window, list) or len(window) != 2:
+            raise ForesightError("expectation window must be a two-item list")
+        antecedents = raw.get("antecedents", [])
+        if not isinstance(antecedents, list):
+            raise ForesightError("expectation antecedents must be a list")
+        return Expectation(
+            expectation_id=_text(raw, "expectation_id"),
+            kind_token=_text(raw, "kind_token"),
+            day=date.fromisoformat(_text(raw, "day")),
+            formed_at=_datetime(raw, "formed_at"),
+            source=_text(raw, "source"),
+            trigger=_text(raw, "trigger"),
+            trigger_instance=_text(raw, "trigger_instance"),
+            window=(datetime.fromisoformat(str(window[0])), datetime.fromisoformat(str(window[1]))),
+            deadline=_datetime(raw, "deadline"),
+            observed_from=_datetime(raw, "observed_from"),
+            basis=_strings(raw, "basis"),
+            opportunities=int(raw["opportunities"]),
+            hits=int(raw["hits"]),
+            antecedents=tuple(
+                Antecedent(
+                    relation=str(entry["relation"]),
+                    present=bool(entry["present"]),
+                    upward=bool(entry["upward"]),
+                    source=str(entry.get("source", "")),
+                )
+                for entry in antecedents
             ),
-            conditions=tuple((str(k), str(v)) for k, v in raw["conditions"]),
-            condition_keys=tuple(str(item) for item in raw["condition_keys"]),
-            facts_version=str(raw["facts_version"]),
+            level=int(raw["level"]),
+            generation=str(raw["generation"]),
+            night=date.fromisoformat(str(raw["night"])) if raw["night"] is not None else None,
+            version=str(raw["version"]),
+            implementation=str(raw["implementation"]),
         )
     except (KeyError, TypeError, ValueError) as exc:
-        raise ForesightError(f"claim record is malformed: {exc}") from exc
+        raise ForesightError(f"expectation record is malformed: {exc}") from exc
+
+
+def encode_delivery(item: Delivery) -> dict[str, Any]:
+    return {
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "record": "delivery",
+        "expectation_id": item.expectation_id,
+        "decided_at": item.decided_at.isoformat(),
+        "level": item.level,
+        "spoken": item.spoken,
+        "reason": item.reason,
+        "p_speak": item.p_speak,
+        "text": item.text,
+        "evidence": list(item.evidence),
+    }
+
+
+def decode_delivery(raw: Mapping[str, Any]) -> Delivery:
+    _check(raw, "delivery")
+    try:
+        return Delivery(
+            expectation_id=_text(raw, "expectation_id"),
+            decided_at=_datetime(raw, "decided_at"),
+            level=int(raw["level"]),
+            spoken=bool(raw["spoken"]),
+            reason=_text(raw, "reason"),
+            p_speak=float(raw["p_speak"]),
+            text=None if raw.get("text") is None else str(raw["text"]),
+            evidence=tuple(str(item) for item in raw.get("evidence", [])),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ForesightError(f"delivery record is malformed: {exc}") from exc
+
+
+def encode_response(item: Response) -> dict[str, Any]:
+    return {
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "record": "response",
+        "expectation_id": item.expectation_id,
+        "responded_at": item.responded_at.isoformat(),
+        "response": item.response,
+        "note": item.note,
+    }
+
+
+def decode_response(raw: Mapping[str, Any]) -> Response:
+    _check(raw, "response")
+    try:
+        return Response(
+            expectation_id=_text(raw, "expectation_id"),
+            responded_at=_datetime(raw, "responded_at"),
+            response=_text(raw, "response"),
+            note=None if raw.get("note") is None else str(raw["note"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ForesightError(f"response record is malformed: {exc}") from exc
 
 
 def encode_settlement(item: Settlement) -> dict[str, Any]:
     return {
         "schema_version": LEDGER_SCHEMA_VERSION,
-        "claim_id": item.claim_id,
+        "record": "settlement",
+        "expectation_id": item.expectation_id,
         "kind_token": item.kind_token,
         "day": item.day.isoformat(),
-        "situations": list(item.situations),
+        "settled_at": item.settled_at.isoformat(),
         "outcome": item.outcome,
         "occurrence_uri": item.occurrence_uri,
-        "slot_offset": item.slot_offset,
-        "settled_at": item.settled_at.isoformat(),
-        "reminded": item.reminded,
-        "response": item.response,
+        "offset_minutes": item.offset_minutes,
     }
 
 
 def decode_settlement(raw: Mapping[str, Any]) -> Settlement:
+    _check(raw, "settlement")
     try:
-        if raw["schema_version"] != LEDGER_SCHEMA_VERSION:
-            raise ForesightError(f"unknown ledger schema: {raw.get('schema_version')!r}")
         return Settlement(
-            claim_id=str(raw["claim_id"]),
-            kind_token=str(raw["kind_token"]),
-            day=date.fromisoformat(raw["day"]),
-            situations=tuple(str(item) for item in raw["situations"]),
-            outcome=str(raw["outcome"]),
-            occurrence_uri=None if raw["occurrence_uri"] is None else str(raw["occurrence_uri"]),
-            slot_offset=None if raw["slot_offset"] is None else int(raw["slot_offset"]),
-            settled_at=datetime.fromisoformat(raw["settled_at"]),
-            reminded=bool(raw["reminded"]),
-            response=None if raw["response"] is None else str(raw["response"]),
+            expectation_id=_text(raw, "expectation_id"),
+            kind_token=_text(raw, "kind_token"),
+            day=date.fromisoformat(_text(raw, "day")),
+            settled_at=_datetime(raw, "settled_at"),
+            outcome=_text(raw, "outcome"),
+            occurrence_uri=None if raw.get("occurrence_uri") is None else str(raw["occurrence_uri"]),
+            offset_minutes=None if raw.get("offset_minutes") is None else int(raw["offset_minutes"]),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ForesightError(f"settlement record is malformed: {exc}") from exc
 
 
-__all__ = ["LEDGER_SCHEMA_VERSION", "decode_claim", "decode_settlement", "encode_claim", "encode_settlement"]
+def encode_ruling(item: Ruling) -> dict[str, Any]:
+    return {
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "record": "ruling",
+        "expectation_id": item.expectation_id,
+        "ruled_at": item.ruled_at.isoformat(),
+        "ruling": item.ruling,
+        "occurrence_uri": item.occurrence_uri,
+        "delay_minutes": item.delay_minutes,
+    }
+
+
+def decode_ruling(raw: Mapping[str, Any]) -> Ruling:
+    _check(raw, "ruling")
+    try:
+        return Ruling(
+            expectation_id=_text(raw, "expectation_id"),
+            ruled_at=_datetime(raw, "ruled_at"),
+            ruling=_text(raw, "ruling"),
+            occurrence_uri=None if raw.get("occurrence_uri") is None else str(raw["occurrence_uri"]),
+            delay_minutes=None if raw.get("delay_minutes") is None else int(raw["delay_minutes"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ForesightError(f"ruling record is malformed: {exc}") from exc
+
+
+def encode_omission(item: Omission) -> dict[str, Any]:
+    return {
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "record": "omission",
+        "occurrence_uri": item.occurrence_uri,
+        "kind_token": item.kind_token,
+        "day": item.day.isoformat(),
+        "noticed_at": item.noticed_at.isoformat(),
+        "had_expectation": item.had_expectation,
+    }
+
+
+def decode_omission(raw: Mapping[str, Any]) -> Omission:
+    _check(raw, "omission")
+    try:
+        return Omission(
+            occurrence_uri=_text(raw, "occurrence_uri"),
+            kind_token=_text(raw, "kind_token"),
+            day=date.fromisoformat(_text(raw, "day")),
+            noticed_at=_datetime(raw, "noticed_at"),
+            had_expectation=bool(raw["had_expectation"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ForesightError(f"omission record is malformed: {exc}") from exc
+
+
+def encode_fact(item: AccountFact) -> dict[str, Any]:
+    return {
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "record": "fact",
+        "account": item.account,
+        "at": item.at.isoformat(),
+        "axis": item.axis,
+        "good": item.good,
+        "strength": item.strength,
+        "kind": item.kind,
+        "expectation_id": item.expectation_id,
+        "origin": item.origin,
+        "offset_minutes": item.offset_minutes,
+        "written_at": None if item.written_at is None else item.written_at.isoformat(),
+        "cause": None if item.cause is None else _encode_cause(item.cause),
+    }
+
+
+def _encode_cause(item: Cause) -> dict[str, Any]:
+    return {
+        "kind": item.kind,
+        "classes": list(item.classes),
+        "uris": list(item.uris),
+        "relation": item.relation,
+        "segment": item.segment,
+        "condition": item.condition,
+        "holds_when": item.holds_when,
+    }
+
+
+def _decode_cause(raw: object) -> Cause | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ValueError("cause must be an object")
+    holds = raw.get("holds_when")
+    return Cause(
+        kind=str(raw["kind"]),
+        classes=tuple(str(item) for item in raw.get("classes", [])),
+        uris=tuple(str(item) for item in raw.get("uris", [])),
+        relation=str(raw.get("relation", "")),
+        segment=str(raw.get("segment", "")),
+        condition=str(raw.get("condition", "")),
+        holds_when=None if holds is None else bool(holds),
+    )
+
+
+def decode_fact(raw: Mapping[str, Any]) -> AccountFact:
+    _check(raw, "fact")
+    try:
+        return AccountFact(
+            account=_text(raw, "account"),
+            at=_datetime(raw, "at"),
+            axis=_text(raw, "axis"),
+            good=bool(raw["good"]),
+            strength=float(raw["strength"]),
+            kind=_text(raw, "kind"),
+            expectation_id=_text(raw, "expectation_id"),
+            origin=_text(raw, "origin"),
+            offset_minutes=None if raw.get("offset_minutes") is None else int(raw["offset_minutes"]),
+            written_at=None if raw.get("written_at") is None else _datetime(raw, "written_at"),
+            cause=_decode_cause(raw.get("cause")),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ForesightError(f"fact record is malformed: {exc}") from exc
+
+
+def encode_severity(item: AccountSeverity) -> dict[str, Any]:
+    return {
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "record": "severity",
+        "account": item.account,
+        "judged_at": item.judged_at.isoformat(),
+        "cost_ratio": item.cost_ratio,
+        "basis": item.basis,
+        "expires_at": item.expires_at.isoformat(),
+        "origin": item.origin,
+    }
+
+
+def decode_severity(raw: Mapping[str, Any]) -> AccountSeverity:
+    _check(raw, "severity")
+    try:
+        return AccountSeverity(
+            account=_text(raw, "account"),
+            judged_at=_datetime(raw, "judged_at"),
+            cost_ratio=float(raw["cost_ratio"]),
+            basis=str(raw.get("basis", "")),
+            expires_at=_datetime(raw, "expires_at"),
+            origin=_text(raw, "origin"),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ForesightError(f"severity record is malformed: {exc}") from exc
+
+
+def encode_setting(item: AccountSetting) -> dict[str, Any]:
+    return {
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "record": "setting",
+        "account": item.account,
+        "at": item.at.isoformat(),
+        "setting": item.setting,
+    }
+
+
+def decode_setting(raw: Mapping[str, Any]) -> AccountSetting:
+    _check(raw, "setting")
+    try:
+        return AccountSetting(account=_text(raw, "account"), at=_datetime(raw, "at"), setting=_text(raw, "setting"))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ForesightError(f"setting record is malformed: {exc}") from exc
+
+
+def encode_level(item: AccountLevel) -> dict[str, Any]:
+    return {
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "record": "level",
+        "account": item.account,
+        "at": item.at.isoformat(),
+        "level": item.level,
+    }
+
+
+def decode_level(raw: Mapping[str, Any]) -> AccountLevel:
+    _check(raw, "level")
+    try:
+        return AccountLevel(account=_text(raw, "account"), at=_datetime(raw, "at"), level=int(raw["level"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ForesightError(f"level record is malformed: {exc}") from exc
+
+
+def _check(raw: Mapping[str, Any], record: str) -> None:
+    if raw.get("schema_version") != LEDGER_SCHEMA_VERSION:
+        raise ForesightError(
+            f"ledger record has schema {raw.get('schema_version')!r}, expected {LEDGER_SCHEMA_VERSION}"
+        )
+    if raw.get("record") != record:
+        raise ForesightError(f"ledger record is a {raw.get('record')!r}, expected {record}")
+
+
+def _text(raw: Mapping[str, Any], key: str) -> str:
+    value = raw[key]
+    if not isinstance(value, str):
+        raise ForesightError(f"{key} must be text")
+    return value
+
+
+def _datetime(raw: Mapping[str, Any], key: str) -> datetime:
+    return datetime.fromisoformat(_text(raw, key))
+
+
+def _strings(raw: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    value = raw[key]
+    if not isinstance(value, list):
+        raise ForesightError(f"{key} must be a list")
+    return tuple(str(item) for item in value)
+
+
+__all__ = [
+    "LEDGER_SCHEMA_VERSION",
+    "decode_delivery",
+    "decode_expectation",
+    "decode_fact",
+    "decode_level",
+    "decode_omission",
+    "decode_response",
+    "decode_ruling",
+    "decode_setting",
+    "decode_settlement",
+    "decode_severity",
+    "encode_delivery",
+    "encode_expectation",
+    "encode_fact",
+    "encode_level",
+    "encode_omission",
+    "encode_response",
+    "encode_ruling",
+    "encode_setting",
+    "encode_settlement",
+    "encode_severity",
+]

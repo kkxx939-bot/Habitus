@@ -81,6 +81,37 @@ class NodeLedger:
     actions: tuple[str, ...]
     observed_days: int
     cell_days: Mapping[tuple[SlotKey, str], tuple[date, ...]] = field(default_factory=dict)
+    #: 某一类在某个 (周几, 槽) 上看不到自然样子的那部分曝光（``blind_days`` 那些日子）：这一类的分母要扣掉它。
+    blind: Mapping[tuple[SlotKey, str], SlotExposure] = field(default_factory=dict)
+
+    def exposure_of(self, key: SlotKey, action: str) -> SlotExposure | None:
+        """这一类在这一格的曝光：公共曝光扣掉这一类看不到自然样子的那几天。"""
+
+        seen = self.exposure.get(key)
+        hidden = self.blind.get((key, action))
+        if seen is None or hidden is None:
+            return seen
+        return SlotExposure(
+            observed_days=max(seen.observed_days - hidden.observed_days, 0.0),
+            recent_days=max(seen.recent_days - hidden.recent_days, 0.0),
+        )
+
+
+def blind_days(
+    actions: Sequence[ObservedAction], reminded: Sequence[ObservedAction]
+) -> dict[str, frozenset[date]]:
+    """类 → 这一类只有被提醒之后的发生、没有自然发生的那些日子（裁定 54）。
+
+    那一天他做了，但是被提醒了才做：不提醒会不会做看不到，所以对这一类是"不知道"——分子不计（它不在 ``actions``
+    里），分母也不计（就是这里）。同一天另有一次自然发生的，那天照常算一次自然的发生，被提醒的那次只是不数。
+    """
+
+    natural = {(item.day, item.action) for item in actions}
+    found: dict[str, set[date]] = {}
+    for item in reminded:
+        if (item.day, item.action) not in natural:
+            found.setdefault(item.action, set()).add(item.day)
+    return {action: frozenset(days) for action, days in found.items()}
 
 
 def accumulate(
@@ -89,8 +120,9 @@ def accumulate(
     *,
     config: PredictionTreeConfig,
     reference: date,
+    blind: Mapping[str, frozenset[date]] | None = None,
 ) -> NodeLedger:
-    """一趟扫描算出计数与曝光。
+    """一趟扫描算出计数与曝光。``blind`` 是 ``blind_days``：那些日子在那一类的曝光里另记一笔、读时扣掉。
 
     曝光按"这一天这个槽有多少比例是真的在看"计，两类空白同等扣减——没在看和没读懂对
     "如果他做了我们能不能看见"是同一件事。
@@ -106,6 +138,11 @@ def accumulate(
     counts: dict[tuple[SlotKey, str], NodeCounts] = {}
     cell_days: dict[tuple[SlotKey, str], list[date]] = {}
     exposure: dict[SlotKey, SlotExposure] = {}
+    hidden: dict[tuple[SlotKey, str], SlotExposure] = {}
+    blind_on: dict[date, list[str]] = {}
+    for action, unseen in (blind or {}).items():
+        for day in unseen:
+            blind_on.setdefault(day, []).append(action)
     # 覆盖只由空白决定，**没有任何特判**：occurrence 与空白的重叠已经在事件序列里（``series.model.disproves``）
     # 一处消解掉了（调用方是 ``builder``，它把同一份账同时交给本模块与 ``edges``）。
     # 早先这里有一条"这一槽产出过 occurrence 就把覆盖记满"的特判，它有两个副作用：A 的一次
@@ -126,6 +163,11 @@ def accumulate(
                 observed_days=long_weight * covered,
                 recent_days=short_weight * covered,
             )
+            for action in blind_on.get(day, ()):
+                hidden[(key, action)] = hidden.get((key, action), SlotExposure()).plus(
+                    observed_days=long_weight * covered,
+                    recent_days=short_weight * covered,
+                )
         for action, occurrences in per_day.get(day, {}).items():
             _accumulate_action(
                 counts,
@@ -145,6 +187,7 @@ def accumulate(
         observed_days=len(days),
         # ``days`` 是升序遍历的，每天对一个格子最多进来一次，所以这里天然升序且不重复。
         cell_days={key: tuple(value) for key, value in cell_days.items()},
+        blind=hidden,
     )
 
 
@@ -268,7 +311,7 @@ def derive_all(
             for slot in range(slots):
                 key = SlotKey(weekday=weekday, slot=slot)
                 counts = ledger.counts.get((key, action))
-                exposure = ledger.exposure.get(key)
+                exposure = ledger.exposure_of(key, action)
                 if counts is not None and (exposure is None or exposure.observed_days <= 0.0):
                     # 到这里只剩"我们自己的账不平"这一种可能：``_accumulate_action`` 对
                     # 覆盖为零的槽直接硬失败，只有 earlier_days 的槽也只记在有覆盖的槽上。
@@ -314,6 +357,21 @@ class _Grids:
     observed: list[list[bool]]
     pooled_exposure: list[list[float]]
     counts: dict[str, dict[tuple[int, int], NodeCounts]]
+    half_width: int
+    #: 类 → 这一类要从曝光里扣掉的那部分（只有被提醒过的类才有）。
+    blind: dict[str, list[list[float]]] = field(default_factory=dict)
+
+    def exposure_for(self, action: str) -> tuple[list[list[float]], list[list[float]]]:
+        """这一类的曝光与它的池化和：没被提醒过的类直接用公共的那份。"""
+
+        hidden = self.blind.get(action)
+        if hidden is None:
+            return self.exposure, self.pooled_exposure
+        own = [
+            [max(seen - unseen, 0.0) for seen, unseen in zip(row, hidden_row, strict=True)]
+            for row, hidden_row in zip(self.exposure, hidden, strict=True)
+        ]
+        return own, [_circular_window_sums(row, self.half_width) for row in own]
 
 
 def _grids(ledger: NodeLedger, *, config: PredictionTreeConfig) -> _Grids:
@@ -326,12 +384,18 @@ def _grids(ledger: NodeLedger, *, config: PredictionTreeConfig) -> _Grids:
     counts: dict[str, dict[tuple[int, int], NodeCounts]] = {}
     for (key, action), tally in ledger.counts.items():
         counts.setdefault(action, {})[(key.weekday, key.slot)] = tally
+    blind: dict[str, list[list[float]]] = {}
+    for (key, action), hidden in ledger.blind.items():
+        grid = blind.setdefault(action, [[0.0] * slots for _ in range(WEEKDAYS)])
+        grid[key.weekday][key.slot] = hidden.observed_days
     half = config.pool_half_width
     return _Grids(
         exposure=exposure,
         observed=observed,
         pooled_exposure=[_circular_window_sums(row, half) for row in exposure],
         counts=counts,
+        half_width=half,
+        blind=blind,
     )
 
 
@@ -353,6 +417,7 @@ def _dense_chain(
 
     slots = config.slots_per_day
     cells = grids.counts.get(action, {})
+    exposure, pooled_exposure = grids.exposure_for(action)
     top = [[0.0] * slots for _ in range(WEEKDAYS)]
     for (weekday, slot), counts in cells.items():
         # 缺曝光记录的槽在分子分母上**一起**跳过——与逐槽写法的 ``if exposure is None: continue``
@@ -361,14 +426,14 @@ def _dense_chain(
             top[weekday][slot] = numerator(counts)
     if risk_adjustment:
         # 危险率的分母是风险集：曝光扣掉"当天更早已经做过"的那部分，逐槽先扣再求和。
-        bottom = [list(row) for row in grids.exposure]
+        bottom = [list(row) for row in exposure]
         for (weekday, slot), counts in cells.items():
             if grids.observed[weekday][slot]:
-                bottom[weekday][slot] = max(grids.exposure[weekday][slot] - counts.earlier_days, 0.0)
+                bottom[weekday][slot] = max(exposure[weekday][slot] - counts.earlier_days, 0.0)
         pooled_bottom = [_circular_window_sums(row, config.pool_half_width) for row in bottom]
     else:
-        bottom = grids.exposure
-        pooled_bottom = grids.pooled_exposure
+        bottom = exposure
+        pooled_bottom = pooled_exposure
     pooled_top = [_circular_window_sums(row, config.pool_half_width) for row in top]
     grid = [[0.0] * slots for _ in range(WEEKDAYS)]
     for slot in range(slots):
@@ -456,6 +521,7 @@ def completion_curves(
     *,
     config: PredictionTreeConfig,
     reference: date,
+    blind: Mapping[str, frozenset[date]] | None = None,
 ) -> dict[tuple[int, str], tuple[float, ...]]:
     """累积率：**两级分解** ``CumP(t) = π · F(t)``，每个 (周几, 动作) 一条。
 
@@ -504,8 +570,11 @@ def completion_curves(
     total = sum(weight.values())
     curves: dict[tuple[int, str], tuple[float, ...]] = {}
     for action in sorted({action for _day, action in first_slot}):
+        # 这一类看不到自然样子的那几天（``blind_days``）不是机会：先验与这个周几的分母都不数它们
+        unseen = (blind or {}).get(action, frozenset())
+        own_total = total - sum(weight[day] for day in unseen if day in weight)
         occurred = [day for day in days if (day, action) in first_slot]
-        prior = sum(weight[day] for day in occurred) / total if total > 0.0 else 0.0
+        prior = sum(weight[day] for day in occurred) / own_total if own_total > 0.0 else 0.0
         cross = [0.0] * slots
         for day in occurred:
             cross[first_slot[(day, action)]] += weight[day]
@@ -514,7 +583,7 @@ def completion_curves(
             own_days = [day for day in weekday_days if (day, action) in first_slot]
             if not own_days:
                 continue
-            seen = sum(weight[day] for day in weekday_days)
+            seen = sum(weight[day] for day in weekday_days if day not in unseen)
             hit = sum(weight[day] for day in own_days)
             chance = (hit + alpha * prior) / (seen + alpha)
             own = [0.0] * slots
@@ -552,6 +621,7 @@ def pooled_trends(
     config: PredictionTreeConfig,
     reference: date,
     periods: Mapping[str, float],
+    blind: Mapping[str, frozenset[date]] | None = None,
 ) -> dict[tuple[int, str], tuple[float | None, float]]:
     """每个 (周几, 动作) 的变化方向与它的证据量。
 
@@ -609,7 +679,10 @@ def pooled_trends(
         short_life = config.recent_half_life_days * scale
         long_life = config.decay_half_life_days * scale
         short_hits = short_seen = long_hits = long_seen = 0.0
+        unseen = (blind or {}).get(action, frozenset())
         for day in days_by_weekday.get(weekday, ()):
+            if day in unseen:
+                continue  # 被提醒了才做、没有自然发生：这一天对这一类不是机会（``blind_days``）
             # 分子是"邻域里有没有发生"（0/1），分母就必须是"邻域里有没有可观测的机会"，
             # 而不是邻域覆盖的平均值——平均值口径下隐含的率能到 1/covered（实测 5.0），
             # 同一个三十周没变过的习惯会因为空洞落在哪而让趋势摆动 24%。
@@ -694,17 +767,30 @@ def _all_day_rates(ledger: NodeLedger, *, config: PredictionTreeConfig) -> _Base
     per_slot_exposure: dict[int, float] = {}
     for key, item in ledger.exposure.items():
         per_slot_exposure[key.slot] = per_slot_exposure.get(key.slot, 0.0) + item.observed_days
+    # 被提醒过的类：它看不到自然样子的那几天从它自己的分母里扣掉（``blind_days``）
+    hidden_total: dict[str, float] = {}
+    hidden_slot: dict[tuple[int, str], float] = {}
+    for (key, action), item in ledger.blind.items():
+        hidden_total[action] = hidden_total.get(action, 0.0) + item.observed_days
+        hidden_slot[(key.slot, action)] = hidden_slot.get((key.slot, action), 0.0) + item.observed_days
+
+    def total_of(action: str) -> float:
+        return max(total_exposure - hidden_total.get(action, 0.0), 0.0)
+
     return _Baselines(
-        marginal={action: (value + epsilon) / (total_exposure + epsilon) for action, value in occurred.items()},
+        marginal={action: (value + epsilon) / (total_of(action) + epsilon) for action, value in occurred.items()},
         # 危险率的先验必须和收缩链每一层同口径：分母是**风险集**（还没发生的那部分曝光），
         # 不是总曝光。用总曝光会把先验系统性压低 3–4 倍（行为在一天里越早发生偏差越大），
         # 而危险率的全部用途就是"到现在还没做，这个槽会不会做"。
         hazard={
-            action: (value + epsilon) / (max(total_exposure - earlier.get(action, 0.0), 0.0) + epsilon)
+            action: (value + epsilon) / (max(total_of(action) - earlier.get(action, 0.0), 0.0) + epsilon)
             for action, value in first.items()
         },
         per_slot_cross_weekday={
-            (slot, action): (value + epsilon) / (per_slot_exposure.get(slot, 0.0) + epsilon)
+            (slot, action): (
+                value + epsilon
+            )
+            / (max(per_slot_exposure.get(slot, 0.0) - hidden_slot.get((slot, action), 0.0), 0.0) + epsilon)
             for (slot, action), value in per_slot_occurred.items()
         },
     )
@@ -842,6 +928,7 @@ __all__ = [
     "estimation_constants",
     "NodeLedger",
     "accumulate",
+    "blind_days",
     "derive_all",
     "period_scale",
     "pooled_trends",

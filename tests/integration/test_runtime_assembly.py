@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from habitus.behavior.tree import BehaviorTree
 from habitus.config import HabitusConfig
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.locks import ProcessLocalLockStore
@@ -695,48 +696,58 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     assert prediction.worker.after_rebuild is not None
     foresight = runtime.components.foresight
     assert foresight is not None
-    assert foresight.assembler.behavior_tree is behavior.tree
-    # 判断走这个 Runtime 的结构化客户端；未封口的那一截读这个 Runtime 的判断存储、消费账本，用归约自己的白天归类；
-    # 节奏用树的槽宽。
-    assert foresight.runner.judge.client is runtime.components.models.structured_chat  # type: ignore[attr-defined]
-    unsealed = foresight.assembler.unsealed
-    assert unsealed.judgements is behavior.judgements  # type: ignore[attr-defined]
-    assert unsealed.ledger is behavior.reduction_runner.ledger  # type: ignore[attr-defined]
-    assert unsealed.stamping is behavior.reduction_runner.kinds  # type: ignore[attr-defined]
-    assert foresight.worker.slot_minutes == prediction.tree_config.slot_minutes
-    # 账本在 storage.root/foresight；结算认的是归约的定稿日；夜批钩子里结算排在最前（同一个 after_rebuild）。
-    assert foresight.runner.ledger is not None and foresight.runner.ledger.root == runtime.config.foresight_root / "session"
-    assert foresight.settlement.ledger is foresight.runner.ledger
+    assert foresight.read_side.behavior_tree is behavior.tree
+    # 账本在 storage.root/foresight/<支>；结算认的是归约的定稿日；夜批钩子里结算排在最前（同一个 after_rebuild）。
+    assert foresight.ledger.root == runtime.config.foresight_root / "session"
+    assert foresight.settlement.ledger is foresight.ledger
     assert foresight.settlement.closed_days == behavior.reduction_runner.closed_days
-    assert prediction.worker.after_rebuild is not None
-    # 窗口只有一处出处：换一个邻域宽度的装配器接不上这棵树。
+    # 机会表与账本同住这一支的目录（``opportunities/<lane>/<晚>.json``）
+    assert foresight.opportunities.root == foresight.ledger.root
+    # 白天那一拍的常驻 worker 接上了：读会话那一支正在服务的预测树、同一本账本，未封口的判断经那座桥读
+    from habitus.runtime.foresight_worker import ForesightWorker
+    from habitus.runtime.unsealed import UnsealedFromJudgements
+
+    assert isinstance(foresight.worker, ForesightWorker)
+    tick = foresight.worker.tick
+    assert tick.ledger is foresight.ledger and tick.opportunities is foresight.opportunities
+    # 整晚的串法接进了预测树那一支的常驻 worker：语义树读同一棵行为树、机会表写进同一本账本旁边（语义树第 11 步）
+    from habitus.runtime.nightly import Nightly
+
+    nightly = prediction.worker.nightly
+    assert isinstance(nightly, Nightly)
+    assert nightly.behavior_tree is behavior.tree and nightly.prediction is prediction.rebuilder
+    assert nightly.scene.behavior_tree is behavior.tree and nightly.scene.relations.root == runtime.config.scene_root
+    assert nightly.foresight is not None and nightly.foresight.store is foresight.opportunities
+    assert nightly.closed_days == behavior.reduction_runner.closed_days
+    assert tick.prediction is prediction.store and tick.read_side is foresight.read_side
+    assert isinstance(tick.unsealed, UnsealedFromJudgements) and tick.unsealed.judgements is behavior.judgements
+    assert tick.delivery is not None and tick.delivery.ledger is foresight.ledger
+    assert foresight.worker.interval_seconds == runtime.config.foresight.tick_interval_seconds
     from habitus.runtime.foresight import ForesightRuntimeComponents
 
-    foresight.assembler.half_width = prediction.tree_config.pool_half_width + 1
-    with pytest.raises(ValueError, match="neighbourhood width"):
+    other = BehaviorTree(tmp_path / "elsewhere")
+    with pytest.raises(ValueError, match="assembled behaviour tree"):
         ForesightRuntimeComponents(
-            assembler=foresight.assembler,
-            runner=foresight.runner,
-            worker=foresight.worker,
+            read_side=replace(foresight.read_side, behavior_tree=other),
+            ledger=foresight.ledger,
             settlement=foresight.settlement,
-        ).assert_attached_to(
-            behavior=behavior, prediction=prediction, structured_chat=runtime.components.models.structured_chat
+            opportunities=foresight.opportunities,
         )
-    foresight.assembler.half_width = prediction.tree_config.pool_half_width
 
 
-def test_the_foresight_worker_starts_and_stops_with_the_runtime(tmp_path: Path) -> None:
-    """每槽一拍的循环随 Runtime 起停；还没有一代预测树时第一拍失败只留 last_error，不阻断启动。"""
+def test_the_runtime_starts_and_stops_the_foresight_worker(tmp_path: Path) -> None:
+    """Runtime 起停带着预测层的常驻循环：起了在跑（第一拍没有机会表、只报原因，不算失败），停了就停。"""
 
     import asyncio
 
     runtime = _fully_enabled_runtime(tmp_path)
     foresight = runtime.components.foresight
-    assert foresight is not None
+    assert foresight is not None and foresight.worker is not None
 
     async def scenario() -> None:
         await runtime.start()
-        assert foresight.worker.running
+        await asyncio.sleep(0.05)
+        assert foresight.worker is not None and foresight.worker.running and foresight.worker.last_error is None
         await runtime.stop()
         assert not foresight.worker.running
 

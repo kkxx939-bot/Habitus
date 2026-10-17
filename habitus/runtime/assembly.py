@@ -48,6 +48,7 @@ PathLock + version CAS）；用户把数据目录放在 iCloud/Dropbox（SQLite 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from collections.abc import Awaitable, Callable, Mapping
 
 from habitus.behavior.kinds.reader import VocabularyReader
@@ -63,6 +64,7 @@ from habitus.conversation import (
     ConversationSourceRecovery,
     ConversationSourceStore,
 )
+from habitus.foresight import Evidence
 from habitus.foundation.observability import CompositeObserver, MetricRegistry, Observer
 from habitus.infrastructure.observability import ManagedObservability
 from habitus.infrastructure.store.contracts import PathLock
@@ -136,11 +138,20 @@ from habitus.runtime.components import (
     RuntimeModels,
     RuntimeWorkflow,
 )
-from habitus.runtime.foresight import SettlementStage, build_foresight_components
+from habitus.runtime.foresight import (
+    SettlementStage,
+    build_foresight_components,
+    build_foresight_tick,
+    build_foresight_worker,
+    build_reminded_lookup,
+)
 from habitus.runtime.lifecycle import LifecycleWorker
 from habitus.runtime.prediction import PredictionBranches, build_prediction_components
 from habitus.runtime.runtime import Runtime
+from habitus.runtime.scene import build_nightly, build_scene_nightly
+from habitus.runtime.scene_night import relation_config
 from habitus.runtime.session_lane import BehaviorSessionConsumer
+from habitus.runtime.unsealed import UnsealedFromJudgements
 from habitus.runtime.worker import MemoryWorker
 
 
@@ -651,31 +662,84 @@ def build_runtime(
     # 物理那一支没有预测层、也不结算。定了之后要么再起一份接物理一支，要么改成同时读两支。
     session_behavior = None if behavior_components is None else behavior_components.session
     session_prediction = None if prediction_components is None else prediction_components.session
+    # 读账的两个借用值（裁定 49）：α 是关系检验前向验证的显著性，遗忘半衰期是预测树的 decay_half_life_days
+    evidence = (
+        None
+        if session_prediction is None or not config.foresight.enabled
+        else Evidence(
+            alpha=relation_config(config).thresholds.forward_alpha,
+            half_life_days=session_prediction.tree_config.decay_half_life_days,
+        )
+    )
     foresight_components = (
         None
-        if session_behavior is None or session_prediction is None
+        if session_behavior is None or session_prediction is None or evidence is None
         else build_foresight_components(
             config,
             behavior_tree=session_behavior.tree,
-            store=session_prediction.store,
-            # 预测层给模型看的标题用类名：编号 → 类名从词表现读（预测层自己不认识词表包）。
-            class_labels=VocabularyReader(session_behavior.kind_store).class_names,
-            # 承诺上的类编号到结算时可能已被拆改：按"现在对应哪些编号"结算（同一份词表）
+            # 预期上的类编号到结算时可能已被拆改：按"现在对应哪些编号"结算（同一份词表）
             current_classes=VocabularyReader(session_behavior.kind_store).current_ids,
             # 词表迁移做到一半时不结算（有未完成的迁移计划就是在迁移）
             vocabulary_migrating=lambda: session_behavior.kind_store.read_migration() is not None,
             # "那天定稿了"只有归约说了算（链都落树、封口视界已过那天的本地结束），结算按它来。
             closed_days=session_behavior.reduction_runner.closed_days,
-            # 未封口的那一截从这个 Runtime 的判断存储读，按归约自己的口径（消费账本）与它的白天归类。
-            judgements=session_behavior.judgements,
-            ledger=session_behavior.reduction_runner.ledger,
-            stamping=session_behavior.reduction_runner.kinds,
-            structured_chat=structured_chat,
+            evidence=evidence,
             observer=operation_observer,
         )
     )
+    if (
+        foresight_components is not None
+        and session_behavior is not None
+        and session_prediction is not None
+        and evidence is not None
+    ):
+        # 白天那一拍的常驻 worker：未封口的判断经那座桥（判断存储 + 消费账本 + 归约的白天归类）读，
+        # 预测树取会话那一支正在服务的一代，词表版本记在预期上。
+        unsealed = UnsealedFromJudgements(
+            session_behavior.judgements,
+            session_behavior.reduction_runner.ledger,
+            session_behavior.reduction_runner.kinds,
+        )
+        kind_store = session_behavior.kind_store
+        tick = build_foresight_tick(
+            foresight_components,
+            config=config,
+            prediction=session_prediction.store,
+            unsealed=unsealed,
+            evidence=evidence,
+            structured_chat=structured_chat,
+            vocabulary_version=lambda: kind_store.read().version,
+            vocabulary_migrating=lambda: kind_store.read_migration() is not None,
+            observer=operation_observer,
+        )
+        foresight_components = dataclasses.replace(
+            foresight_components, worker=build_foresight_worker(tick, config=config, observer=operation_observer)
+        )
+        # 第 0 步：归约封口时查预测层账本盖 reminded（归约先装、预测层后装，所以在这里接端口）
+        session_behavior.reduction_runner.attach_reminder_lookup(build_reminded_lookup(foresight_components))
+    if session_prediction is not None and session_behavior is not None:
+        # 整晚的串法（语义树第 11 步）：行为树读一次 → 预测树 → 语义树 → 机会表，代替单独的重建；语义树没启用时照旧只重建。
+        scene = build_scene_nightly(
+            config,
+            behavior_tree=session_behavior.tree,
+            kind_store=session_behavior.kind_store,
+            structured_chat=structured_chat,
+            tree_config=session_prediction.tree_config,
+        )
+        if scene is not None:
+            session_prediction.worker.attach_nightly(
+                build_nightly(
+                    config,
+                    behavior_tree=session_behavior.tree,
+                    prediction=session_prediction.rebuilder,
+                    scene=scene,
+                    kind_store=session_behavior.kind_store,
+                    closed_days=session_behavior.reduction_runner.closed_days,
+                    foresight=foresight_components,
+                )
+            )
     if session_prediction is not None:
-        # 夜批的顺序：树重建 → 结算承诺（对着归约已定稿的日子）→ 新语义树的夜批（第 11 步接进第二个参数）。
+        # 夜批的顺序：整晚（或只重建）→ 结算承诺（对着归约已定稿的日子）。
         # 结算只读账本与行为树；它失败自己留观测、被这里吞掉，不许拖着后面一夜不跑。只挂在会话那一支上（见上）。
         session_prediction.worker.after_rebuild = _nightly_stages(
             None if foresight_components is None else foresight_components.settlement,

@@ -43,6 +43,7 @@ class Template(str, Enum):
     CONCEPT = "concept"
 
 
+# TODO(FORESIGHT-EVENT-FIRST-001)：天气等外部事实由数据源注册成新字段（要有历史），规格见 foresight/triggers/assemble.py。
 class Field(str, Enum):
     WEEKEND = "weekend"
     CALENDAR = "calendar"
@@ -230,7 +231,11 @@ class ModeratedMeasure:
 
         if not self.enough:
             return 1.0
-        zs = [_interaction_z(self.inside, self.outside, forced_in, forced_out) for forced_in in (0, 1) for forced_out in (0, 1)]
+        zs = [
+            _interaction_z(self.inside, self.outside, forced_in, forced_out)
+            for forced_in in (0, 1)
+            for forced_out in (0, 1)
+        ]
         if any(z is None for z in zs):
             return 1.0
         largest = max(abs(z) for z in zs if z is not None)

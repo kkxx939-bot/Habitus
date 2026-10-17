@@ -324,12 +324,7 @@ class LaneTests:
         """后果是细分概念的短跨度、不带条件的关系：它的"判不了"来自映射器，要做上下界检验。"""
 
         item = self.concepts.get(key.consequent)
-        return (
-            item is not None
-            and item.kind is ConceptKind.REFINEMENT
-            and not key.condition
-            and not key.segment.long
-        )
+        return item is not None and item.kind is ConceptKind.REFINEMENT and not key.condition and not key.segment.long
 
     def chains(self, antecedent: str) -> tuple[Chain, ...]:
         if antecedent not in self._chains:
@@ -444,7 +439,9 @@ class LaneTests:
         measure = self.measure(key).subset(since=since, last_blocks=last_blocks)
         upper, lower = measure.tails(exact_limit=self.config.thresholds.exact_strata_limit)
         spread, relative = measure.interval(
-            level=self.config.thresholds.interval_level, rounds=self.config.thresholds.bootstrap_rounds, seed=self.seed(key, purpose)
+            level=self.config.thresholds.interval_level,
+            rounds=self.config.thresholds.bootstrap_rounds,
+            seed=self.seed(key, purpose),
         )
         return Subset(
             antecedents=measure.units,
@@ -485,12 +482,14 @@ class LaneTests:
         if measure is None:
             measure = self.measure(test.key)
         spread, relative = measure.interval(
-            level=config.thresholds.interval_level, rounds=config.thresholds.bootstrap_rounds, seed=self.seed(test.key, "interval")
+            level=config.thresholds.interval_level,
+            rounds=config.thresholds.bootstrap_rounds,
+            seed=self.seed(test.key, "interval"),
         )
         heterogeneity = measure.heterogeneity()
         leave_one_out = measure.leave_one_out(upward=test.upward)
         effect = measure.effect()
-        consequent_count = len(self.line.marks.get(test.key.consequent, []))
+        consequent_count = len(self.line.outcomes(test.key.consequent))
         excess = effect.antecedents * effect.difference
         return replace(
             test,

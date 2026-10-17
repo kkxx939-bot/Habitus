@@ -105,6 +105,15 @@ def relation_config(config: HabitusConfig) -> RelationConfig:
 
 
 @dataclass(frozen=True)
+class NightMaterials:
+    """B4 这一晚用过的材料，交给排在语义树之后的那几拍复用（预测层的机会表要在**同一条**时间线上算）：
+    同步词表之后的概念集、各 lane 的时间线。只在内存里传一晚，不落盘。"""
+
+    concepts: ConceptSet
+    timelines: Mapping[str, LaneTimeline]
+
+
+@dataclass(frozen=True)
 class NightReport:
     """一夜的账：每一步各报自己的数，出了岔子的都在 ``signals`` 里，不静默。"""
 
@@ -125,6 +134,8 @@ class NightReport:
     relations: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
     transitions: int = 0
     signals: tuple[str, ...] = ()
+    #: 这一晚的材料（见 ``NightMaterials``）；不进比较与打印。
+    materials: NightMaterials | None = field(default=None, compare=False, repr=False)
 
     def summary(self) -> str:
         counts = "；".join(
@@ -220,7 +231,7 @@ class SceneNightlyRun:
             rhythms = self._rhythms(tree, concepts)
 
         mapping, days, backlog = await self._map_backlog(series, concepts, mapper, rhythms, slack_minutes, now, signals)
-        relations, transitions = await self._relations(series, concepts, signals)
+        relations, transitions, lines = await self._relations(series, concepts, signals)
         return NightReport(
             night=series.cutoff,
             concepts=len(concepts),
@@ -236,6 +247,7 @@ class SceneNightlyRun:
             relations=relations,
             transitions=transitions,
             signals=tuple(signals),
+            materials=NightMaterials(concepts=concepts, timelines=lines),
         )
 
     # ── B3 映射 ─────────────────────────────────────────────────────────────
@@ -282,8 +294,8 @@ class SceneNightlyRun:
 
     async def _relations(
         self, series: EventSeries, concepts: ConceptSet, signals: list[str]
-    ) -> tuple[dict[str, dict[str, int]], int]:
-        """第 ``series.cutoff`` 晚：每条 lane 检验、接上盘上之前最近的一晚折叠、落盘。"""
+    ) -> tuple[dict[str, dict[str, int]], int, dict[str, LaneTimeline]]:
+        """第 ``series.cutoff`` 晚：每条 lane 检验、接上盘上之前最近的一晚折叠、落盘。返回各 lane 的计数、迁移条数与时间线。"""
 
         hits = {record.occurrence_uri: record for day in self.hits.days_done() for record in self.hits.read_day(day)}
         lines = build_timelines(series, concepts, hits, self.relation_config)
@@ -307,7 +319,7 @@ class SceneNightlyRun:
                 f"{'—' if item.before is None else item.before.value} → {item.after.value}：{item.reason}"
                 for item in transitions
             )
-        return counts, moved
+        return counts, moved, lines
 
     # ── B1 同步词表 ─────────────────────────────────────────────────────────
 
@@ -426,4 +438,4 @@ class SceneNightlyRun:
         )
 
 
-__all__ = ["NightReport", "SceneNightConfig", "SceneNightlyRun", "relation_config"]
+__all__ = ["NightMaterials", "NightReport", "SceneNightConfig", "SceneNightlyRun", "relation_config"]

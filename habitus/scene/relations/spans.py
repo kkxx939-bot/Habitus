@@ -52,7 +52,7 @@ from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from enum import Enum
 
 from habitus.scene.relations.timeline import LaneTimeline, Mark
@@ -166,6 +166,17 @@ def merge_for(segment: Segment, chains: tuple[Chain, ...]) -> tuple[Chain, ...]:
     return tuple(kept)
 
 
+@dataclass(frozen=True)
+class Arrival:
+    """实验组这一次的结果，给预测层的机会表用（只读口，不参与检验）：B 来了没有（``came`` 为 None = 结果未知——
+    窗口没整段在场、伸过截止日、或窗口里只有"判不了"），来了的话是哪条记录、它开始的绝对槽号与时刻。"""
+
+    came: bool | None
+    uri: str | None = None
+    slot: int | None = None
+    started_at: datetime | None = None
+
+
 class Controls:
     """量一层：实验组那一刻与同一层的对照时刻，都按人在场的时间量。
 
@@ -204,12 +215,59 @@ class Controls:
             results = self._daily_controls(chain, consequent, segment, antecedent) if treated is not None else []
         else:
             treated = self._treated_slots(segment, chain, consequent)
-            results = self._slot_controls(segment, chain, consequent, pairing, antecedent) if treated is not None else []
+            results = (
+                self._slot_controls(segment, chain, consequent, pairing, antecedent) if treated is not None else []
+            )
         defined = [result for result in results if result is not None]
         if treated is None or not defined:
             return None
         same = treated == 1 and _same_event(self.line, consequent, segment, chain, self.window)
         return Stratum(chain=chain, treated=treated, positives=sum(defined), controls=len(defined), same_event=same)
+
+    def arrival(self, segment: Segment, chain: Chain, consequent: str) -> Arrival:
+        """这一次 A（合并后的一条链）之后，这一段窗口里 B 来没来、来的是哪条。窗口与"结果未知"的判法与 ``stratum`` 的实验组
+        完全同一份（按槽的两段 ``_treated_slots``、按天的两段 ``_day``），只是把"来了"的那条记录也找出来。"""
+
+        if segment.daily:
+            treated = self._day(consequent, segment, chain.day)
+        else:
+            treated = self._treated_slots(segment, chain, consequent)
+        if treated is None:
+            return Arrival(None)
+        if treated == 0:
+            return Arrival(False)
+        first = self._first_arrival(segment, chain, consequent)
+        if first is None:
+            return Arrival(None)  # 只有"判不了"被当成了来了（上下界那两份）：对机会表来说仍是未知
+        return Arrival(True, first.uri, first.slot, first.started_at)
+
+    def _first_arrival(self, segment: Segment, chain: Chain, consequent: str) -> Mark | None:
+        """这一段窗口里最早开始的那条 B（链里自己的记录不算）。"""
+
+        line = self.line
+        if segment.daily:
+            offsets = (1,) if segment is Segment.NEXT_DAY else range(2, 8)
+            days = {chain.day + timedelta(days=offset) for offset in offsets}
+            days = {day for day in days if line.present.get(day)}
+            found = [mark for mark in line.outcomes(consequent) if mark.day in days]
+        elif segment is Segment.CHAIN:
+            low, high = chain.end, chain.end + self.window
+            found = [
+                mark
+                for mark in line.outcomes(consequent)
+                if low <= mark.slot <= high and mark.uri not in chain.uris
+            ]
+        else:
+            start = line.day_start(chain.day)
+            own = chain.end - start
+            present = line.present.get(chain.day, ())
+            wanted = set(present[bisect_right(present, own + self.window) :])
+            found = [
+                mark
+                for mark in line.outcomes(consequent)
+                if mark.slot - start in wanted and mark.uri not in chain.uris
+            ]
+        return min(found, key=lambda mark: (mark.slot, mark.started_at, mark.uri)) if found else None
 
     # ── 前两段：按槽 ───────────────────────────────────────────────────────
 
@@ -225,7 +283,7 @@ class Controls:
         if not wanted:
             return None
         start = line.day_start(day)
-        for mark in line.marks.get(consequent, []):
+        for mark in line.outcomes(consequent):
             if mark.slot - start in wanted and mark.uri not in chain.uris:
                 return 1
         blind = {slot - start for slot in line.unknown.get(consequent, [])}
@@ -242,7 +300,13 @@ class Controls:
         if segment is Segment.CHAIN and pairing is Pairing.SAME_DAY:
             # 同一天别的事做完的时刻（同一槽做完的几件算一个时刻）。做完的那件本身是 B 的不算：它那一类之后暂时不会再来，
             # 对照里的 B 会被压低（实验组的前因不是 B，没有这一层）——两边都得是"一件不是 B 的事做完、它那一类暂时不再来"。
-            itself = {uri for _slot, uri in self._day_marks(consequent, day)[0]}
+            # 被提醒才做的 B 一样是 B 做完了（它当后果看不到，当"做完了一件 B"照算）：按全部记号排，不按 ``outcomes``
+            start_of_day = line.day_start(day)
+            itself = {
+                mark.uri
+                for mark in line.marks.get(consequent, [])
+                if start_of_day <= mark.slot < start_of_day + line.slots_per_day
+            }
             ending: dict[int, set[str]] = {}
             for slot, uri in line.ends.get(day, ()):
                 if uri not in chain.uris and uri not in itself:
@@ -285,7 +349,9 @@ class Controls:
         if key not in self._on_day:
             line = self.line
             start, end = line.day_start(day), line.day_start(day) + line.slots_per_day
-            hits = tuple((mark.slot - start, mark.uri) for mark in line.marks.get(consequent, []) if start <= mark.slot < end)
+            hits = tuple(
+                (mark.slot - start, mark.uri) for mark in line.outcomes(consequent) if start <= mark.slot < end
+            )
             blind = frozenset(slot - start for slot in line.unknown.get(consequent, []) if start <= slot < end)
             self._on_day[key] = (hits, blind)
         return self._on_day[key]
@@ -334,7 +400,7 @@ class Controls:
             position = {slot: index for index, slot in enumerate(present)}
             hit = [0] * len(present)
             blind = [0] * len(present)
-            for mark in line.marks.get(consequent, []):
+            for mark in line.outcomes(consequent):
                 index = position.get(mark.slot - start)
                 if index is not None:
                     hit[index] = 1
@@ -367,7 +433,7 @@ class Controls:
         days = {item for item in window if line.present.get(item)}
         if not days:
             return None
-        if any(mark.day in days for mark in line.marks.get(consequent, [])):
+        if any(mark.day in days for mark in line.outcomes(consequent)):
             return 1
         per_day = line.slots_per_day
         blind = any(date.fromordinal(slot // per_day) in days for slot in line.unknown.get(consequent, []))
@@ -400,7 +466,7 @@ def _same_event(line: LaneTimeline, consequent: str, segment: Segment, chain: Ch
     high = chain.end + window if segment is Segment.CHAIN else line.day_start(chain.day) + line.slots_per_day - 1
     return any(
         low <= item.slot <= high and item.uri not in chain.uris and item.goal in chain.goals
-        for item in line.marks.get(consequent, [])
+        for item in line.outcomes(consequent)
     )
 
 
@@ -422,6 +488,7 @@ def _overlapping(segment: Segment, kept: date, later: date) -> bool:
 __all__ = [
     "MARKER_SEGMENTS",
     "SEGMENTS",
+    "Arrival",
     "Chain",
     "Controls",
     "Pairing",

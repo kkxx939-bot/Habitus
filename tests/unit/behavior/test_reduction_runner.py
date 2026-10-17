@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -191,6 +191,28 @@ def test_full_pipeline_reduces_a_chain_and_a_gap_into_the_tree(tmp_path) -> None
     # 消费账本闭环：全部判断都已入账
     consumed = harness.ledger.consumed_judgement_ids()
     assert {record_id("head"), record_id("tail"), record_id("blur")} <= consumed
+
+
+def test_the_reminded_flag_is_asked_from_the_injected_port_before_staging(tmp_path) -> None:
+    """预测层接上之后（第 0 步）：物化 payload 时按（类, 开始时刻）问一次端口，答案盖在 occurrence 上。"""
+
+    harness = Harness(tmp_path)
+    asked: list[tuple[str, datetime]] = []
+
+    def lookup(kind_token: str, started_at: datetime) -> bool:
+        asked.append((kind_token, started_at))
+        return True
+
+    harness.runner.attach_reminder_lookup(lookup)
+    source = harness.deliver(OBS_A, OBS_B, OBS_C)
+    seed_wash_chain(harness, source)
+    report = asyncio.run(harness.runner.run_once())
+    assert report.published_occurrences == 1
+    (address,) = harness.tree.list_addresses(BehaviorKind.OCCURRENCE)
+    assert harness.tree.read(address).fields["reminded"] is True
+    assert asked and asked[0] == ("s-k0001", at(18)) and all(item == asked[0] for item in asked)
+    with pytest.raises(TypeError):
+        harness.runner.attach_reminder_lookup(object())  # type: ignore[arg-type]
 
 
 def test_second_sweep_is_a_no_op(tmp_path) -> None:

@@ -9,6 +9,10 @@
 - **看不到**：映射器对这条记录判过、但答"看不到"（未决），或这条记录还没映射过（它的类上挂着的细分概念全都不知道）。
   窗口里有"看不到"、又没有命中的，这一次的结果算未知，两边都不计（用户 09-27"没看到就不算"）。
 
+**被提醒过的记录**（行为树的 ``reminded``，裁定 54）：语义树量的是"他自然有多规律"，被系统提醒之后才做的不算。这条记录照样
+在时间线上（``marks``：当前因、合链、算人在场都照常），当**后果**时按"看不到"——不进 ``outcomes``、记进 ``unknown``，窗口里
+只有它的那一次两边都不计。量后果的地方一律读 ``outcomes``；预测树同一个口径（``prediction.source``）。
+
 **「待定」是发生过的一件事，只是词表还没把它稳定成类**（用户 2026-10-12 裁定）：它算人在场、算那天"一件事做完的时刻"
 （链的对照时刻），对任何概念都是"这件事不是 B"；它不是概念，当不了前因或后果，等词表把它升成类、旧记录迁入新编号后才是。
 以前把它当"可能是任何一个后果"、让那一槽对所有概念都判不了，结果每天半条叫不出名的杂事就让次日与第 2–7 天两段整层丢光
@@ -41,6 +45,8 @@ class Mark:
     uri: str
     goal: str | None = None
     last_slot: int | None = None
+    #: 这条记录开始之前被系统提醒过（照抄行为树）：当前因照常，当后果不算自然发生。
+    reminded: bool = False
 
     @property
     def end(self) -> int:
@@ -70,6 +76,19 @@ class LaneTimeline:
     hits: Mapping[str, ConceptHits] = field(default_factory=dict)
     #: 情境概念 → 日子 → 那天成立没有（那天有记录判过它才有值；没判过的日子不在里面，算不知道）。
     situations: dict[str, dict[date, bool]] = field(default_factory=dict)
+
+    #: ``outcomes`` 的缓存：按记号列表的身份与长度认，记号列表换了或追加了就重算（建时间线时是边读边追加的）。
+    _outcomes: dict[str, tuple[int, int, tuple[Mark, ...]]] = field(default_factory=dict, repr=False, compare=False)
+
+    def outcomes(self, concept: str) -> tuple[Mark, ...]:
+        """当后果读的记号：``marks`` 去掉被提醒过的。返回只读的一份，不与 ``marks`` 共用列表。"""
+
+        items = self.marks.get(concept, [])
+        cached = self._outcomes.get(concept)
+        if cached is None or cached[0] != id(items) or cached[1] != len(items):
+            cached = (id(items), len(items), tuple(mark for mark in items if not mark.reminded))
+            self._outcomes[concept] = cached
+        return cached[2]
 
     def day_start(self, day: date) -> int:
         return day.toordinal() * self.slots_per_day
@@ -118,9 +137,18 @@ def build_timelines(
             # 「待定」：已记进人在场与做完时刻；没有概念，不留记号。预测树那边仍把它当"下一件不知道是什么"记删失，两树各算各的
             continue
         found, blind = _concepts_of(record, concepts, hits.get(record.uri))
-        mark = Mark(slot=absolute, started_at=record.started_at, uri=record.uri, goal=record.goal, last_slot=ended)
+        mark = Mark(
+            slot=absolute,
+            started_at=record.started_at,
+            uri=record.uri,
+            goal=record.goal,
+            last_slot=ended,
+            reminded=record.reminded,
+        )
         for identity in found:
             line.marks.setdefault(identity, []).append(mark)
+            if record.reminded:
+                line.unknown.setdefault(identity, []).append(absolute)
         for identity in blind:
             line.unknown.setdefault(identity, []).append(absolute)
     covered = _gap_slots(series, config.slot_minutes, per_day)
@@ -143,6 +171,7 @@ def build_timelines(
         for identity in concepts.behaviors():
             if concepts.lane_of(identity) == line.lane:
                 line.marks.setdefault(identity, [])
+
     blocked = set(covered)
     for (lane, day), (first, final) in spans.items():
         start = day.toordinal() * per_day

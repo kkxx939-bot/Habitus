@@ -1,619 +1,254 @@
-"""预测层在组合根的组装。
+"""预测层在组合根的组装（``19-预测层方案.md`` 第九节，按步接）。
 
-预测层站在派生树之上：数字取自预测树的一代，历史卡取自行为树的读时投影，此刻场景取自行为树的今天加
-判断存储里还没封口的最近一段，已成立的关系取自语义树每条 lane 最近一晚的关系表（``SceneRelations``）。本模块负责把它们接起来，并且**把三件只有组合根知道的事定死**：
+现在接上的：账本（``ForesightLedgerStore``）与结算这一拍（``SettlementStage``，挂在预测树夜批之后）；机会表的存储
+（``OpportunityStore``）与算它的那一拍（``ForesightNightlyRun``，由 ``build_foresight_nightly`` 装、挂在
+``runtime.nightly.Nightly`` 的语义树之后——语义树夜批还没接进常驻 worker，眼下由脚本串）；白天那一拍（``ForesightTick``，由
+``build_foresight_tick`` 装：触发、候选、前因清单，落账；到了时窗按账的级决定说不说）；常驻 worker（``ForesightWorker``，由
+``build_foresight_worker`` 装，assembly 接进 ``worker``，Runtime 起停它）。读账的两个借用值（α、遗忘半衰期）由组合根从
+关系检验与预测树的配置装成 ``Evidence`` 传进来（裁定 49：全系统一个"多大把握"、一种"过去多快淡掉"）。
 
-1. **钉住一代**。每次装配从指针取当前一代并核对它的 ``config_digest`` 与现行配置一致——参数变了就是
-   另一套统计，混读出来的数字互不一致而且看不出来。不一致时硬拒，等夜批按新参数重建。
-2. **此刻是本地时刻**。时区来自 ``config.locale``，不用进程默认时区：读侧的每个"今天是哪一天、
-   此刻在哪个槽"都从它的本地时分算，错一个时区就整体错一天。传 naive 的时刻进来同样硬拒。
-3. **一次查询一份缓存**。``DayIndexCache`` 的契约是"在它的生命周期里同一天只读一次"，所以每次
-   装配新建一个；跨次复用会读到过期的今天。
-
-未封口的判断经 ``UnsealedReader`` 注入；生产实现是 ``runtime.unsealed.UnsealedFromJudgements``（判断存储 +
-消费账本 + 归约的白天归类），没注入时用显式的空实现，明说"最近一小时没补"。
-
-节奏：``ForesightWorker`` 每个槽一拍（对齐到槽边界，槽宽就是树的 ``slot_minutes``），每拍经
-``JudgementRunner`` 装配 → 判断。同一槽内此刻场景没变（``NowScene.fingerprint`` 相同）就复用上一次的
-判断，不再调模型。每拍新判断里**带时窗的「会」**落成承诺（``foresight.ledger``），那天定稿之后由
-``SettlementStage`` 对着行为树结算——账本是真值，**本轮仍不提醒、不代劳**（提醒通道还没有）。承诺上还记下
-说那句话时事实门给的外部条件（``scene.facts``：答了什么、问了哪些键、谁的口径），它是 loss 的证据，
-本轮只记不用；现在还没有任何真实的条件源，所以那三样是空的。
-本模块不碰 memory。
+三件只有组合根知道的事定在这里：此刻是主体本地时刻（时区来自 ``config.locale``）；预测层只接会话一支（按不按 lane 分
+还没定，见 assembly 的 TODO）；账本在 ``storage.root/foresight/<branch>``。
 """
 
 from __future__ import annotations
 
-import asyncio
-import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from habitus.behavior.fusion.store import BehaviorJudgementStore
-from habitus.behavior.reduction.kinds_step import KindStamping
-from habitus.behavior.reduction.ledger import BehaviorReductionLedger
 from habitus.behavior.tree import BehaviorTree
 from habitus.config import HabitusConfig
-from habitus.foresight import (
-    EvidencePack,
-    ForesightError,
-    Moment,
-    NoUnsealed,
-    RelationNote,
-    RelationTable,
-    UnsealedReader,
-    UnsealedRow,
-    assemble,
-    moment_at,
-    present_relations,
-)
-from habitus.foresight.judge import Judge, JudgeConfig, Judgement, LLMJudge
-from habitus.foresight.ledger import Claim, claims_from
-from habitus.foundation.observability import ObservationStatus, Observer
+from habitus.foresight import Evidence, ForesightError, Tolerance, UnsealedReader
+from habitus.foresight.judge import Judge
+from habitus.foundation.observability import Observer
 from habitus.model_client import StructuredChatClient
-from habitus.prediction import builder
-from habitus.prediction.config import PredictionTreeConfig
-from habitus.prediction.errors import PredictionTreeStoreError
-from habitus.prediction.model import PredictionTree
-from habitus.prediction.store import PredictionTreeStore, PublishedGeneration
+from habitus.prediction.store import PredictionTreeStore
 from habitus.runtime.behavior import BehaviorRuntimeComponents
+from habitus.runtime.foresight_causes import CauseStage
+from habitus.runtime.foresight_delivery import DeliveryStage
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
+from habitus.runtime.foresight_nightly import ForesightNightlyRun
+from habitus.runtime.foresight_opportunities import OpportunityStore
+from habitus.runtime.foresight_reminded import RemindedLookup
 from habitus.runtime.foresight_settlement import SettlementStage
-from habitus.runtime.prediction import PredictionRuntimeComponents
+from habitus.runtime.foresight_tick import ForesightTick
+from habitus.runtime.foresight_worker import ForesightWorker
 from habitus.runtime.resident import ResidentWorker
-from habitus.runtime.scene_night import relation_config
-from habitus.runtime.scene_relations import SceneRelations
-from habitus.runtime.unsealed import UnsealedFromJudgements
-from habitus.scene import DayTypeCalendar, FactProvider, NoFacts, NominalCalendar, conditions_of
-from habitus.scene.concepts import ConceptStore
-from habitus.scene.relations import RelationThresholds
+from habitus.scene import DayTypeCalendar, NominalCalendar
+from habitus.scene.relations import RelationConfig
 from habitus.scene.relations.store import RelationStore
-from habitus.scene.views import DayIndexCache
-from habitus.series.reader import admitted
+
+
+@dataclass(frozen=True)
+class ForesightReadSide:
+    """预测层读行为树的那一侧：哪棵树、谁的、按什么日历、什么时区。"""
+
+    behavior_tree: BehaviorTree
+    subject: str
+    calendar: DayTypeCalendar
+    zone: ZoneInfo
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.behavior_tree, BehaviorTree):
+            raise TypeError("behavior_tree must be a BehaviorTree")
+        if not isinstance(self.subject, str) or not self.subject.strip():
+            raise ValueError("subject must be non-empty text")
+        if not isinstance(self.calendar, DayTypeCalendar):
+            raise TypeError("calendar must implement DayTypeCalendar")
+        if not isinstance(self.zone, ZoneInfo):
+            raise TypeError("zone must be a ZoneInfo")
 
 
 @dataclass(frozen=True)
 class ForesightRuntimeComponents:
-    """预测层的全部已组装部件：装配器、判断的执行者、每槽一拍的 worker。"""
+    """预测层的全部已组装部件。``worker`` 在触发与递法接上之前为 None。"""
 
-    assembler: EvidenceAssembler
-    runner: JudgementRunner
-    worker: ForesightWorker
+    read_side: ForesightReadSide
+    ledger: ForesightLedgerStore
     settlement: SettlementStage
+    opportunities: OpportunityStore
+    worker: ResidentWorker | None = None
 
     def __post_init__(self) -> None:
-        if self.runner.assembler is not self.assembler:
-            raise ValueError("the foresight runner must drive the assembled evidence assembler")
-        if self.worker.runner is not self.runner:
-            raise ValueError("the foresight worker must drive the assembled runner")
-        if self.worker.zone is not self.assembler.zone:
-            raise ValueError("the foresight worker must tick in the assembler's time zone")
-        if self.settlement.ledger is not self.runner.ledger:
-            raise ValueError("the runner and the settlement stage must use the same ledger")
-        if self.settlement.assembler is not self.assembler:
+        if self.settlement.ledger is not self.ledger:
+            raise ValueError("the settlement stage must use the assembled ledger")
+        if self.settlement.read_side is not self.read_side:
             raise ValueError("the settlement stage must read the assembled behaviour tree")
+        if not isinstance(self.opportunities, OpportunityStore):
+            raise TypeError("opportunities must be an OpportunityStore")
+        if self.opportunities.root != self.ledger.root:
+            raise ValueError("the opportunity tables live beside the ledger of the same branch")
+        if self.worker is not None and not isinstance(self.worker, ResidentWorker):
+            raise TypeError("worker must be a ResidentWorker or None")
 
-    def assert_attached_to(
-        self,
-        *,
-        behavior: BehaviorRuntimeComponents,
-        prediction: PredictionRuntimeComponents,
-        structured_chat: StructuredChatClient,
-    ) -> None:
-        """实例同一性：预测层必须读**这个** Runtime 的三份存储、经这个 Runtime 的模型客户端判断、按这棵树的参数取窗。
+    def assert_attached_to(self, *, behavior: BehaviorRuntimeComponents) -> None:
+        """实例同一性：预测层必须读**这个** Runtime 的那棵行为树、按它的定稿日结算。"""
 
-        换一份同路径的实例，数字与背景会来自两批不同的日子、"封没封口"会读成另一个口径，而且看不出来。
-        用 ``is`` 比对象，用鸭子取属性：这里只该认"它有没有读对那份东西"，不该认具体类。
-        """
-
-        assembler = self.assembler
-        if assembler.behavior_tree is not behavior.tree:
+        if self.read_side.behavior_tree is not behavior.tree:
             raise ValueError("foresight must read the assembled behaviour tree")
-        if assembler.store is not prediction.store:
-            raise ValueError("foresight must read the assembled prediction store")
-        unsealed = assembler.unsealed
-        if getattr(unsealed, "judgements", None) is not behavior.judgements:
-            raise ValueError("foresight must read unsealed judgements from the assembled judgement store")
-        if getattr(unsealed, "ledger", None) is not behavior.reduction_runner.ledger:
-            raise ValueError("foresight must read the assembled reduction ledger")
-        if getattr(unsealed, "stamping", None) is not behavior.reduction_runner.kinds:
-            raise ValueError("foresight must classify unsealed chains with the reduction's own daytime classifier")
-        if getattr(self.runner.judge, "client", None) is not structured_chat:
-            raise ValueError("foresight must judge through the assembled structured chat client")
-        # 窗口只有一处出处：邻域宽度、转移窗、指纹、槽宽、时区都是那棵树与那个 Runtime 的。
-        tree_config = prediction.tree_config
-        if assembler.half_width != tree_config.pool_half_width:
-            raise ValueError("foresight must take its neighbourhood width from the prediction tree")
-        if assembler.transition_window_seconds != tree_config.transition_window_seconds:
-            raise ValueError("foresight must take its transition window from the prediction tree")
-        if assembler.expected_digest != builder.config_digest(tree_config):
-            raise ValueError("foresight must pin the generation built with the assembled tree parameters")
-        if self.worker.slot_minutes != tree_config.slot_minutes:
-            raise ValueError("the foresight worker must tick at the prediction tree's slot width")
-        if assembler.zone is not prediction.rebuilder.zone:
-            raise ValueError("foresight must use the same time zone as the prediction rebuild")
-
-
-class EvidenceAssembler:
-    """按此刻装配证据包：候选、四层数字、历史卡、此刻场景。"""
-
-    def __init__(
-        self,
-        *,
-        behavior_tree: BehaviorTree,
-        store: PredictionTreeStore,
-        subject: str,
-        zone: ZoneInfo,
-        calendar: DayTypeCalendar,
-        expected_digest: str,
-        half_width: int,
-        window_days: int,
-        transition_window_seconds: float,
-        max_days_per_layer: int,
-        class_labels: Callable[[], Mapping[str, str]],
-        unsealed: UnsealedReader | None = None,
-        relations: Callable[[], RelationTable] | None = None,
-        relation_minimum: int = RelationThresholds().forward_min_antecedents,
-        clock: Callable[[], datetime] | None = None,
-    ) -> None:
-        if not isinstance(behavior_tree, BehaviorTree):
-            raise TypeError("behavior_tree must be a BehaviorTree")
-        if not isinstance(store, PredictionTreeStore):
-            raise TypeError("store must be a PredictionTreeStore")
-        if not isinstance(subject, str) or not subject.strip():
-            raise ValueError("subject must be non-empty text")
-        # zone 是本类真正在守的那条纪律（"此刻必须是主体本地时刻"），却最容易被漏检：
-        # ``astimezone(None)`` 会安安静静地落到**进程默认时区**，产出一个看起来完全正常的
-        # Moment，而今天是哪一天、此刻在哪个槽已经错了。
-        if not isinstance(zone, ZoneInfo):
-            raise TypeError("zone must be a ZoneInfo")
-        if not isinstance(calendar, DayTypeCalendar):
-            raise TypeError("calendar must implement DayTypeCalendar")
-        if not isinstance(expected_digest, str) or not expected_digest:
-            raise ValueError("expected_digest must be non-empty text")
-        if unsealed is not None and not callable(getattr(unsealed, "rows", None)):
-            raise TypeError("unsealed must implement UnsealedReader")
-        if not callable(class_labels):
-            raise TypeError("class_labels must be a callable returning class id -> class name")
-        if relations is not None and not callable(relations):
-            raise TypeError("relations must be a callable returning the relation table and its concepts")
-        self.behavior_tree = behavior_tree
-        self.class_labels = class_labels
-        self.store = store
-        self.subject = subject
-        self.zone = zone
-        self.calendar = calendar
-        self.expected_digest = expected_digest
-        self.half_width = half_width
-        self.window_days = window_days
-        self.transition_window_seconds = transition_window_seconds
-        self.max_days_per_layer = max_days_per_layer
-        self.unsealed: UnsealedReader = NoUnsealed() if unsealed is None else unsealed
-        # 语义树的关系表：没接时证据里没有「已成立的关系」那一节（不是"没有关系"，是没读）。
-        self.relations = relations
-        # 摆关系读数的最少次数 = 前向验证的门槛（组合根从 config.scene.relations 换算，与夜批同一个出处）
-        self.relation_minimum = relation_minimum
-        self._clock = clock if clock is not None else lambda: datetime.now(UTC)
-
-    def assemble(self, *, now: datetime | None = None) -> EvidencePack:
-        """装配这一刻的证据包。
-
-        ``now`` 缺省取注入的时钟；无论哪来，都必须带时区，并换算到主体的时区之后再落钟面——传进来的
-        可以是 UTC，但落到"今天是哪一天、此刻在哪个槽"之前必须先变成本地时刻。
-        """
-
-        published, tree = self._pinned_generation()
-        if tree.config_digest != self.expected_digest:
-            raise ForesightError(
-                "the published prediction generation was built with different estimation "
-                "parameters; wait for the nightly rebuild instead of mixing two sets of statistics"
-            )
-        given = now if now is not None else self._clock()
-        if not isinstance(given, datetime) or given.utcoffset() is None:
-            raise ForesightError(
-                "now must be a timezone-aware datetime; a naive value would be read in the process time zone"
-            )
-        at = given.astimezone(self.zone)
-        cache = DayIndexCache(self.behavior_tree, subject=self.subject, admits=admitted, calendar=self.calendar)
-        moment = moment_at(at, slot_minutes=tree.slot_minutes, day_note=cache.day(at.date()).day_note)
-        # 未封口从今天零点读到此刻：窗口内的进流，更早的只计入"今天做过"（与树上今天的行同一口径）。
-        unsealed = self.unsealed.rows(since=at.replace(hour=0, minute=0, second=0, microsecond=0), until=at)
-        return assemble(
-            tree,
-            moment,
-            cache,
-            generation=published.generation,
-            unsealed=unsealed,
-            half_width=self.half_width,
-            window_days=self.window_days,
-            transition_window_seconds=self.transition_window_seconds,
-            max_days_per_layer=self.max_days_per_layer,
-            # 每次装配现读：词表每晚可能新增类、改名。
-            labels=self.class_labels(),
-            relations=self._present(moment, cache, unsealed, slot_minutes=tree.slot_minutes),
-        )
-
-    def _present(
-        self, moment: Moment, cache: DayIndexCache, unsealed: Sequence[UnsealedRow], *, slot_minutes: int
-    ) -> Mapping[str, tuple[RelationNote, ...]] | None:
-        if self.relations is None:
-            return None
-        try:
-            table = self.relations()
-        except ValueError as exc:
-            # 关系表或概念集损坏：硬拒，与读不了一代树同一个口径——缺一节证据而不报，判断者会以为"没有关系"。
-            raise ForesightError(f"the semantic-tree relations cannot be read: {exc}") from exc
-        # 同一条链的窗口就是树的转移窗（关系检验与预测树用同一个数），按槽算，与检验同一把尺
-        slot_seconds = 60 * slot_minutes
-        return present_relations(
-            table.relations,
-            table.concepts,
-            moment,
-            cache,
-            unsealed,
-            slot_minutes=slot_minutes,
-            window_slots=round(self.transition_window_seconds / slot_seconds),
-            minimum_antecedents=self.relation_minimum,
-            as_of=table.night,
-        )
-
-    def _pinned_generation(self) -> tuple[PublishedGeneration, PredictionTree]:
-        try:
-            published = self.store.active()
-            if published is None:
-                # 还没有发布过任何一代。这不是"什么都不会发生"，是"还没算过"——必须能分清。
-                raise ForesightError("no prediction generation has been published yet")
-            tree = self.store.load_generation(published.generation, expected_digest=published.digest)
-        except PredictionTreeStoreError as exc:
-            # 本层把下层的失败归一成自己的类型：调用方只该认识 ForesightError。
-            raise ForesightError(f"the published prediction generation cannot be read: {exc}") from exc
-        return published, tree
-
-
-@dataclass(frozen=True)
-class JudgementRun:
-    """一拍的结果：读的那一包、判断、这次是不是复用了上一拍（没调模型）、这一拍新落盘的承诺。"""
-
-    pack: EvidencePack
-    judgement: Judgement
-    reused: bool
-    claims: tuple[Claim, ...] = ()
-
-
-class JudgementRunner:
-    """一拍：装配 → 判断。同一槽内此刻场景没变就复用上一次的判断。
-
-    复用的判据是 ``(一代, 日期, 槽, 场景指纹, 各候选的卡数)`` 相同：同一代同一槽候选集合不变，
-    场景指纹不含此刻的时分——钟在走不算场景在变。
-    ``last`` 是最近一拍，供健康面与后续步骤读；复用时 ``last.judgement.moment`` 是上一次判断那一刻，
-    ``last.pack.moment`` 才是这一拍的此刻。
-    """
-
-    def __init__(
-        self,
-        assembler: EvidenceAssembler,
-        judge: Judge,
-        *,
-        ledger: ForesightLedgerStore | None = None,
-        facts: FactProvider | None = None,
-        clock: Callable[[], datetime] | None = None,
-    ) -> None:
-        if not isinstance(assembler, EvidenceAssembler):
-            raise TypeError("assembler must be an EvidenceAssembler")
-        if not callable(getattr(judge, "judge", None)) or not isinstance(getattr(judge, "version", None), str):
-            raise TypeError("judge must implement Judge")
-        if ledger is not None and not isinstance(ledger, ForesightLedgerStore):
-            raise TypeError("ledger must be a ForesightLedgerStore or None")
-        if facts is not None and not isinstance(facts, FactProvider):
-            raise TypeError("facts must implement FactProvider")
-        self.assembler = assembler
-        self.judge = judge
-        self.ledger = ledger
-        # 说这话那一刻的外部条件；没有提供者就是显式的"一个条件都没有"，承诺照记、只是 conditions 为空。
-        self.facts: FactProvider = facts if facts is not None else NoFacts()
-        self._clock = clock if clock is not None else lambda: datetime.now(UTC)
-        self.last: JudgementRun | None = None
-        self._last_key: tuple[object, ...] | None = None
-
-    async def run_once(self, *, now: datetime | None = None) -> JudgementRun:
-        at = now if now is not None else self._clock()
-        # 未封口的链先归类（要调模型，所以在装配之前异步做）；装配时只读归好的
-        await self.assembler.unsealed.prepare(until=at)
-        pack = await asyncio.to_thread(self.assembler.assemble, now=at)
-        key = _reuse_key(pack)
-        previous = self.last
-        if previous is not None and key == self._last_key:
-            run = JudgementRun(pack=pack, judgement=previous.judgement, reused=True)
-        else:
-            judgement = await self.judge.judge(pack)
-            claims = await asyncio.to_thread(self._record, pack, judgement)
-            run = JudgementRun(pack=pack, judgement=judgement, reused=False, claims=claims)
-        self.last = run
-        self._last_key = key
-        return run
-
-    def _conditions(self, pack: EvidencePack) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...], str]:
-        """问事实门要此刻的条件。**源坏了不许拖垮这一拍**：模型已经答过了，条件只是记在旁边的东西，
-        答不出就记成"什么都没问到、口径 unavailable"——那本身就是可读的事实，比丢掉整条承诺好。
-
-        时刻用 ``pack.moment.at``：它是装配时换算过的**主体本地时刻**，也正是判断者看到的那一刻。
-        """
-
-        facts = self.facts
-        try:
-            return conditions_of(facts.at(pack.moment.at)), tuple(key.name for key in facts.keys()), facts.version
-        except Exception:  # noqa: BLE001 - 条件是旁证，源坏了记成"没问到"，不吞掉这一拍
-            return (), (), "unavailable"
-
-    def _record(self, pack: EvidencePack, judgement: Judgement) -> tuple[Claim, ...]:
-        """新判断落账：抽承诺（对着那天已有的未结算承诺去重）、写盘。没有账本就什么都不记。"""
-
-        if self.ledger is None:
-            return ()
-        conditions, keys, version = self._conditions(pack)
-        claims = claims_from(
-            pack,
-            judgement,
-            open_claims=self.ledger.unsettled_claims(pack.moment.day),
-            conditions=conditions,
-            condition_keys=keys,
-            facts_version=version,
-        )
-        for claim in claims:
-            self.ledger.record_claim(claim)
-        return claims
-
-
-def _reuse_key(pack: EvidencePack) -> tuple[object, ...]:
-    return (
-        pack.generation,
-        pack.moment.day.isoformat(),
-        pack.moment.slot,
-        pack.now.fingerprint,
-        tuple((item.kind_token, len(item.background.cards)) for item in pack.expanded),
-    )
-
-
-class ForesightWorker(ResidentWorker):
-    """每个槽一拍：起来先判一次，之后对齐到主体本地时区的槽边界。"""
-
-    _task_name = "habitus-foresight-judge"
-    _observation_category = "foresight"
-
-    def __init__(
-        self,
-        runner: JudgementRunner,
-        *,
-        slot_minutes: int,
-        zone: ZoneInfo,
-        shutdown_timeout_seconds: float,
-        observer: Observer | None = None,
-        clock: Callable[[], datetime] | None = None,
-    ) -> None:
-        super().__init__(shutdown_timeout_seconds=shutdown_timeout_seconds, observer=observer)
-        if not isinstance(runner, JudgementRunner):
-            raise TypeError("runner must be a JudgementRunner")
-        if isinstance(slot_minutes, bool) or not isinstance(slot_minutes, int) or not 0 < slot_minutes <= 1440:
-            raise ValueError("slot_minutes must be a positive integer of at most 1440")
-        if not isinstance(zone, ZoneInfo):
-            raise TypeError("zone must be a ZoneInfo")
-        self.runner = runner
-        self.slot_minutes = slot_minutes
-        self.zone = zone
-        self._clock = clock if clock is not None else lambda: datetime.now(UTC)
-
-    async def run_once(self) -> JudgementRun:
-        if self.running:
-            raise RuntimeError("manual run_once cannot race the resident worker loop")
-        return await self._tick()
-
-    def seconds_until_next_slot(self, *, at: datetime | None = None) -> float:
-        """从 ``at``（缺省此刻）到下一个槽边界还有几秒（主体本地时区，槽从当天 00:00 起数）。正好在边界上算下一个。"""
-
-        local = (at if at is not None else self._clock()).astimezone(self.zone)
-        midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
-        slot_seconds = self.slot_minutes * 60
-        elapsed = (local - midnight).total_seconds() % slot_seconds
-        return slot_seconds - elapsed
-
-    async def _tick(self) -> JudgementRun:
-        started = time.monotonic()
-        try:
-            run = await self.runner.run_once()
-        except Exception as exc:
-            self.last_error = exc
-            self._observe("judgement", ObservationStatus.FAILURE, {"error_type": type(exc).__name__}, started=started)
-            raise
-        self._succeeded()
-        self._observe("judgement", ObservationStatus.SUCCESS, _run_attributes(run), started=started)
-        return run
-
-    async def _run_loop(self) -> None:
-        while not self._stop_requested.is_set():
-            # 下一拍的边界从**这一拍开始**的时刻算：一拍跑过了槽边界，下一槽立刻判，不跳过它。
-            tick_started = self._clock()
-            try:
-                await self._tick()
-            except Exception:  # noqa: BLE001 - 一拍失败只留 last_error 与观测，下一槽照常
-                pass
-            spent = (self._clock() - tick_started).total_seconds()
-            await self._wait(max(0.0, self.seconds_until_next_slot(at=tick_started) - spent))
-
-
-def _run_attributes(run: JudgementRun) -> dict[str, str | int | float | bool]:
-    judgement = run.judgement
-    return {
-        "reused": run.reused,
-        "generation": run.pack.generation,
-        "slot": run.pack.moment.slot,
-        "candidates": len(run.pack.candidates),
-        "expanded": len(run.pack.expanded),
-        "expected": len(judgement.expected),
-        "day_state": judgement.day_state or "未答",
-        "signals": len(judgement.signals),
-        "claims": len(run.claims),
-    }
+        if self.settlement.closed_days != behavior.reduction_runner.closed_days:
+            raise ValueError("foresight must settle against the reduction's own closed days")
 
 
 def build_foresight_components(
     config: HabitusConfig,
     *,
     behavior_tree: BehaviorTree,
-    store: PredictionTreeStore | None,
-    class_labels: Callable[[], Mapping[str, str]],
     current_classes: Callable[[str], Sequence[str]],
     vocabulary_migrating: Callable[[], bool],
-    judge: Judge | None = None,
-    structured_chat: StructuredChatClient | None = None,
-    judgements: BehaviorJudgementStore | None = None,
-    ledger: BehaviorReductionLedger | None = None,
-    stamping: KindStamping | None = None,
-    unsealed: UnsealedReader | None = None,
-    facts: FactProvider | None = None,
-    closed_days: Callable[[], Iterable[date]] | None = None,
-    relations: Callable[[], RelationTable] | None = None,
+    closed_days: Callable[[], Iterable[date]],
+    evidence: Evidence,
     observer: Observer | None = None,
     clock: Callable[[], datetime] | None = None,
     branch: str = "session",
 ) -> ForesightRuntimeComponents | None:
-    """组装预测层；未启用时返回 None。
-
-    ``branch`` 是它接的那一支（三棵树各有会话、物理两支）：语义树的关系表与它自己的结算账本都取这一支的目录。
-    现在只接会话一支（按不按 lane 分还没定，见组合根的 TODO）。
-
-    预测树没发布过就返回 None 而不是半个装配器：跨域校验已经在配置层拒过这种组合，
-    这里是第二道——组合根拿到的部件本来就可能因为上游未启用而是 None。
-
-    判断者二选一：注入一个 ``judge``（测试、DAY1 脚本），或给 ``structured_chat`` 由这里装
-    ``LLMJudge``。未封口的读法同理：给判断存储 + 消费账本 + 白天归类三份就装生产实现，或直接注入
-    一个 ``unsealed``；都不给就是显式的空实现。
-    """
+    """组装预测层；未启用时返回 None。``branch`` 是它接的那一支：账本取这一支的目录。"""
 
     if not config.foresight.enabled:
         return None
-    if store is None:
-        return None
-    resolved_judge = _judge(config, judge=judge, structured_chat=structured_chat, clock=clock)
-    resolved_unsealed = _unsealed(unsealed=unsealed, judgements=judgements, ledger=ledger, stamping=stamping)
-    tree_config = PredictionTreeConfig(**config.prediction.tree_parameters())
-    zone = config.locale.zone()
-    assembler = EvidenceAssembler(
+    read_side = ForesightReadSide(
         behavior_tree=behavior_tree,
-        store=store,
         subject=config.behavior.primary_subject,
-        zone=zone,
         calendar=_calendar(config),
-        # 指纹在这里算一次：读侧每次装配都拿它核对钉住的那一代，防的是跨参数混读。
-        expected_digest=builder.config_digest(tree_config),
-        # 窗口就是树的池化邻域与转移窗，不另配一份——配两份会让数字与背景取自不同的范围。
-        half_width=tree_config.pool_half_width,
-        transition_window_seconds=tree_config.transition_window_seconds,
-        window_days=config.foresight.window_days,
-        max_days_per_layer=config.foresight.max_days_per_layer,
-        class_labels=class_labels,
-        unsealed=resolved_unsealed,
-        # 语义树的关系表：缺省读本 Runtime 语义树根下的（夜批还没跑过就是空表，那一节不出现）。
-        relations=relations
-        if relations is not None
-        else SceneRelations(RelationStore(config.scene_root / branch), ConceptStore(config.scene_root / branch)),
-        relation_minimum=relation_config(config).thresholds.forward_min_antecedents,
-        clock=clock,
+        zone=config.locale.zone(),
     )
-    ledger_store = ForesightLedgerStore(config.foresight_root / branch)
-    runner = JudgementRunner(
-        assembler,
-        resolved_judge,
-        ledger=ledger_store,
-        facts=_facts(facts),
-        clock=clock,
-    )
+    ledger = ForesightLedgerStore(config.foresight_root / branch)
+    opportunities = OpportunityStore(config.foresight_root / branch)
     settlement = SettlementStage(
-        ledger_store,
-        assembler,
-        # 定稿日只有归约说了算；没接上时结算什么都不做，而不是拿别的口径凑一个。
-        closed_days=closed_days if closed_days is not None else tuple,
-        # 承诺记的是说话时的类编号；结算按"这个编号现在对应哪些编号"认（词表拆改之后照样对得上）
+        ledger,
+        read_side,
+        # 定稿日只有归约说了算；承诺记的是形成时的类编号，结算按"这个编号现在对应哪些编号"认
+        closed_days=closed_days,
         current=current_classes,
+        migrating=vocabulary_migrating,
+        evidence=evidence,
+        opportunities=opportunities,
+        lane=branch,
+        observer=observer,
+        clock=clock,
+        tolerance=_tolerance(config),
+    )
+    return ForesightRuntimeComponents(
+        read_side=read_side, ledger=ledger, settlement=settlement, opportunities=opportunities
+    )
+
+
+def build_foresight_nightly(
+    components: ForesightRuntimeComponents,
+    *,
+    relations: RelationStore,
+    relation_config: RelationConfig,
+    observer: Observer | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> ForesightNightlyRun:
+    """机会表那一拍：读语义树的关系表（``relations``）、按关系检验同一份时间参数（``relation_config``，由
+    ``runtime.scene_night.relation_config`` 换算）、写进这一支的机会表存储；同一拍给这一支已结的落空找原因（裁定 55）。
+    交给 ``runtime.nightly.Nightly`` 的 ``foresight``。"""
+
+    return ForesightNightlyRun(
+        components.opportunities,
+        relations,
+        relation_config,
+        observer=observer,
+        clock=clock,
+        causes=CauseStage(
+            components.ledger,
+            lane=components.settlement.lane,
+            current=components.settlement.current,
+            calendar=components.read_side.calendar,
+            clock=clock,
+        ),
+    )
+
+
+def build_foresight_tick(
+    components: ForesightRuntimeComponents,
+    *,
+    config: HabitusConfig,
+    prediction: PredictionTreeStore,
+    unsealed: UnsealedReader,
+    evidence: Evidence,
+    structured_chat: StructuredChatClient | None = None,
+    vocabulary_version: Callable[[], int] | None = None,
+    vocabulary_migrating: Callable[[], bool] | None = None,
+    observer: Observer | None = None,
+    clock: Callable[[], datetime] | None = None,
+    lane: str = "session",
+) -> ForesightTick:
+    """白天那一拍：读这一支的机会表与正在服务的预测树、行为树今天与前 7 天、还没封口的判断（``unsealed``），把此刻对得上
+    历史的预期写进这一支的账本；再把到了时窗的按账的级决定说不说（``structured_chat`` 给了就带模型四问，不给就按算法与模板）。
+    ``shadow_uses_unestablished`` 开着时候选关系也进影子账；词表迁移中（``vocabulary_migrating``）整拍不做。
+
+    送达渠道还没有（方案第二节：本层只产出"递送请求 + 档 + 话"，送达在本层之外），所以 ``reachable`` 为假：提醒档的决定都
+    记「不可达」，结算按没说过处理，模型也不问（裁定 47）。接上渠道时把它改成真，这是组合根唯一要改的一行。"""
+
+    foresight = config.foresight
+    delivery = DeliveryStage(
+        components.ledger,
+        tolerance=_tolerance(config),
+        evidence=evidence,
+        daily_cap=foresight.daily_reminder_cap,
+        severity_review_days=foresight.severity_review_days,
+        holdout_rate=foresight.holdout_rate,
+        holdout_rate_heavy=foresight.holdout_rate_heavy,
+        unit_prior_strength=foresight.unit_prior_strength,
+        judge=(
+            None
+            if structured_chat is None
+            else Judge(
+                structured_chat,
+                retries=foresight.judge_transient_retries,
+                delay_seconds=foresight.judge_transient_retry_delay_seconds,
+            )
+        ),
+        tick_seconds=foresight.tick_interval_seconds,
+        reachable=False,
+    )
+    return ForesightTick(
+        components.ledger,
+        components.opportunities,
+        prediction,
+        components.read_side,
+        unsealed,
+        lane=lane,
+        shadow_unestablished=config.foresight.shadow_uses_unestablished,
+        vocabulary_version=vocabulary_version,
         migrating=vocabulary_migrating,
         observer=observer,
         clock=clock,
+        delivery=delivery,
+        tick_seconds=foresight.tick_interval_seconds,
     )
-    worker = ForesightWorker(
-        runner,
-        # 节奏就是树的槽宽：一槽一拍，与"此刻在哪个槽"用同一个数。
-        slot_minutes=tree_config.slot_minutes,
-        zone=zone,
+
+
+def build_foresight_worker(
+    tick: ForesightTick, *, config: HabitusConfig, observer: Observer | None = None
+) -> ForesightWorker:
+    """常驻 worker：每 ``tick_interval_seconds`` 跑一拍。"""
+
+    return ForesightWorker(
+        tick,
+        interval_seconds=config.foresight.tick_interval_seconds,
         shutdown_timeout_seconds=config.foresight.worker_shutdown_timeout_seconds,
         observer=observer,
-        clock=clock,
-    )
-    return ForesightRuntimeComponents(assembler=assembler, runner=runner, worker=worker, settlement=settlement)
-
-
-def _judge(
-    config: HabitusConfig,
-    *,
-    judge: Judge | None,
-    structured_chat: StructuredChatClient | None,
-    clock: Callable[[], datetime] | None,
-) -> Judge:
-    """二选一，两个都给是接线错误——静默偏向其中一个会让另一份被以为在用。"""
-
-    if judge is not None and structured_chat is not None:
-        raise ValueError("pass either an explicit judge or a structured_chat to build one, not both")
-    if judge is not None:
-        return judge
-    if structured_chat is None:
-        raise ValueError("foresight needs a judge: pass structured_chat or an explicit judge")
-    return LLMJudge(
-        structured_chat,
-        config=JudgeConfig(
-            transient_retries=config.foresight.judge_transient_retries,
-            transient_retry_delay_seconds=config.foresight.judge_transient_retry_delay_seconds,
-        ),
-        clock=clock,
     )
 
 
-def _unsealed(
-    *,
-    unsealed: UnsealedReader | None,
-    judgements: BehaviorJudgementStore | None,
-    ledger: BehaviorReductionLedger | None,
-    stamping: KindStamping | None,
-) -> UnsealedReader | None:
-    """注入一个读口，或给三份存储装生产实现；都不给返回 None（装配器用显式的空实现）。"""
+def build_reminded_lookup(components: ForesightRuntimeComponents) -> RemindedLookup:
+    """归约封口时盖 ``reminded`` 的查法（第 0 步）：交给 ``BehaviorReductionRunner.attach_reminder_lookup``。"""
 
-    stores = (judgements, ledger, stamping)
-    if unsealed is not None and any(item is not None for item in stores):
-        raise ValueError("pass either an explicit unsealed reader or the judgement/ledger/classifier sources, not both")
-    if unsealed is not None:
-        return unsealed
-    if all(item is None for item in stores):
-        return None
-    if judgements is None or ledger is None or stamping is None:
-        raise ValueError(
-            "reading unsealed judgements needs the judgement store, the reduction ledger and the daytime classifier"
-        )
-    return UnsealedFromJudgements(judgements, ledger, stamping)
+    return RemindedLookup(components.ledger, current=components.settlement.current)
 
 
-def _facts(facts: FactProvider | None) -> FactProvider:
-    """外部条件的提供者。**现在没有任何真实源**，所以缺省是显式的空实现——与 ``_calendar`` 退到名义日历同一条
-    纪律：不拿一个没有数据源的合成键去充数（那会让第一版 loss 的数字看起来稳定，实际什么都没量到）。
-    """
-
-    return facts if facts is not None else NoFacts()
+def _tolerance(config: HabitusConfig) -> Tolerance:
+    foresight = config.foresight
+    return Tolerance(floor=foresight.line_floor, ceiling=foresight.line_ceiling, unjudged=foresight.cost_ratio_unjudged)
 
 
 def _calendar(config: HabitusConfig) -> DayTypeCalendar:
-    """当地日历。数据文件的格式还没定，所以现在只有名义日历一种。
-
-    配置层已经拒过非空路径；这里是第二道——组合根是唯一知道"这个路径该交给谁解析"的地方，
-    将来多一种实现时也从这里分叉。
-    """
+    """当地日历。数据文件的格式还没定，所以现在只有名义日历一种。"""
 
     if config.locale.calendar_path is not None:
         raise ForesightError("locale.calendar_path is not supported yet")
@@ -621,11 +256,11 @@ def _calendar(config: HabitusConfig) -> DayTypeCalendar:
 
 
 __all__ = [
-    "EvidenceAssembler",
+    "ForesightReadSide",
     "ForesightRuntimeComponents",
-    "ForesightWorker",
-    "JudgementRun",
-    "JudgementRunner",
-    "UnsealedFromJudgements",
     "build_foresight_components",
+    "build_foresight_nightly",
+    "build_foresight_tick",
+    "build_foresight_worker",
+    "build_reminded_lookup",
 ]

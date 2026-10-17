@@ -126,7 +126,7 @@ def pair(
 
 
 def _boundary(cutoff: date, action: ObservedAction) -> datetime:
-    """"第 ``cutoff`` 天开始"那一刻，按这条行为自己的偏移（行为树的日期是记录自己的本地日期）。"""
+    """ "第 ``cutoff`` 天开始"那一刻，按这条行为自己的偏移（行为树的日期是记录自己的本地日期）。"""
 
     return datetime.combine(cutoff, time(), tzinfo=action.started_at.tzinfo)
 

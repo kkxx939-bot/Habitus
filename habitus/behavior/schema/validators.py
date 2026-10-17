@@ -12,6 +12,7 @@ from typing import Any
 
 from habitus.behavior.model import BehaviorKind, semantic_name
 from habitus.behavior.schema.model import BehaviorSchemaError
+from habitus.behavior.schema.vocabulary import PROMPTERS
 
 
 def validate_payload(kind: BehaviorKind, payload: dict[str, Any]) -> None:
@@ -23,6 +24,11 @@ def validate_payload(kind: BehaviorKind, payload: dict[str, Any]) -> None:
 
 def _validate_occurrence(payload: dict[str, Any]) -> None:
     semantic_name(payload["name"], "occurrence name")
+    # 显式写 null 与不写同义（渲染与读回都按"不知道"处理）
+    if payload.get("prompted_by") is not None and payload["prompted_by"] not in PROMPTERS:
+        raise BehaviorSchemaError(f"occurrence prompted_by must be one of {sorted(PROMPTERS)}")
+    if payload.get("prompted_by") is not None and payload["reminded"] != (payload["prompted_by"] == "system"):
+        raise BehaviorSchemaError("an occurrence prompted by the system is exactly one that was reminded")
     if payload["occurred_on"] != payload["started_at"].date():
         raise BehaviorSchemaError("occurred_on must match the local started_at date")
     if payload["last_observed_at"] < payload["started_at"]:

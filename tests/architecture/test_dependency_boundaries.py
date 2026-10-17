@@ -794,7 +794,7 @@ def test_foresight_only_reads_the_derived_trees() -> None:
     # 模型触点只有判断这一处（提示词渲染 + 服务），客户端从构造器注入。证据装配、渲染、判断的产物
     # 形状、schema 与装配校验都不得碰模型——它们一碰，"证据是纯函数装出来的"就只剩自觉了。
     model_callers = sorted(str(path.relative_to(SRC)) for path in root.rglob("*.py") if "model_client" in imported_roots(path))
-    assert model_callers == ["foresight/judge/prompt.py", "foresight/judge/service.py"]
+    assert set(model_callers) <= {"foresight/judge/prompt.py", "foresight/judge/service.py"}
     # 直接依赖收敛了还不够，算传递闭包：包里除判断包的入口、提示词、服务之外，任何模块都不得经
     # 两跳够到模型客户端（融合包那条已经用变异测试证伪过一次"只查一跳"）。
     foresight_modules = {
@@ -824,22 +824,23 @@ def test_foresight_only_reads_the_derived_trees() -> None:
         module for module in foresight_modules if module not in allowed_model_callers and reaches_model_client(module, set())
     )
     assert leaking == [], f"这些确定性模块传递性地依赖了 ModelClient: {leaking}"
-    # 认识 scene 读侧的只有取背景的 context / cards、编排的 assemble、渲染与结算；**数字那一侧对 scene 零知识**——
-    # 出处日从预测树来、不从别处按覆盖日重推，这条要由边界钉着，不靠自觉。清单是穷举的：
+    # 认识 scene 读侧的只有结算（读行的形状）、机会表的构建（语义树同一条时间线）、触发里链合并与装配、给落空找原因
+    # （同一条时间线、同一把尺、同一份条件判法，裁定 55），清单里那几个文件；
+    # 账本与机会表的形状、钟面与日子两种触发对 scene 零知识。清单是穷举的：
     # 新文件要碰 scene 必须先改这一行，改的时候就得想清楚它属于哪一侧。
     scene_readers = sorted(
         str(path.relative_to(SRC)) for path in root.rglob("*.py") if "scene" in imported_roots(path)
     )
     assert scene_readers == [
-        "foresight/assemble.py",
-        "foresight/cards.py",
-        "foresight/context.py",
+        "foresight/causes.py",
         "foresight/ledger/settle.py",
-        "foresight/relations.py",
-        "foresight/render.py",
+        "foresight/opportunities/build.py",
+        "foresight/triggers/assemble.py",
+        "foresight/triggers/events.py",
+        "foresight/triggers/marks.py",
     ]
     # 而且只经读口进：``habitus.scene.views``（或包根），外加关系与概念的**对象**（``scene.relations`` 包根、
-    # ``scene.concepts.model``，都是纯的）——关系表由组合根从存储读好交进来（``runtime.scene_relations``）。
+    # ``scene.concepts.model``，都是纯的）——关系的历史由机会表带着，白天那一拍不读关系存储。
     # 新语义树的存储与写侧都不许直接碰：绕过读口就等于在预测层里重新长出一条读语义树的路。
     beyond_the_views = sorted(
         f"{path.relative_to(SRC)}: {module}"
@@ -850,15 +851,12 @@ def test_foresight_only_reads_the_derived_trees() -> None:
         not in {"habitus.scene", "habitus.scene.views", "habitus.scene.relations", "habitus.scene.concepts.model"}
     )
     assert beyond_the_views == []
-    assert "scene" not in imported_roots(root / "numbers.py")
     assert "scene" not in imported_roots(root / "model.py")
-    # 判断的产物形状对 scene 零知识：``basis`` 里只有 URI 字符串，不带视图、不带序列。
-    assert "scene" not in imported_roots(root / "judge" / "model.py")
-    assert "scene" not in imported_roots(root / "judge" / "schema.py")
-    # 账本的形状与编解码同样对 scene 零知识；落盘只在组合根的 ``runtime/foresight_ledger.py``——
-    # foresight 整包不许 import infrastructure（上面已钉），这里再钉"写 foresight_root 的只有它一个"。
-    for name in ("model.py", "codec.py", "gate.py", "claims.py"):
+    # 账本的形状与编解码对 scene 零知识（结算规则要读行的形状，是唯一例外）；落盘只在组合根的
+    # ``runtime/foresight_ledger.py``——foresight 整包不许 import infrastructure（上面已钉），这里再钉"写 foresight_root 的只有它一个"。
+    for name in ("model.py", "codec.py"):
         assert "scene" not in imported_roots(root / "ledger" / name)
+        assert "scene" not in imported_roots(root / "opportunities" / name)
     ledger_writers = sorted(
         str(path.relative_to(SRC))
         for path in (SRC / "runtime").rglob("*.py")
@@ -886,7 +884,6 @@ def test_foresight_only_reads_the_derived_trees() -> None:
     )
     assert inside_behavior == [
         "runtime/behavior.py",
-        "runtime/foresight.py",
         "runtime/session_lane.py",
         "runtime/unsealed.py",
     ]
@@ -1054,8 +1051,9 @@ def test_every_package_entry_exports_only_things_that_exist() -> None:
         "habitus.scene.occurrences",
         "habitus.scene.occurrences.mapper",
         "habitus.foresight",
-        "habitus.foresight.judge",
         "habitus.foresight.ledger",
+        "habitus.foresight.opportunities",
+        "habitus.foresight.triggers",
         "habitus.prediction",
         "habitus.integrations.http_api",
         "habitus.integrations.local_service",

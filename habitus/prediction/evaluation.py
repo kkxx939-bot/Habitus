@@ -113,6 +113,7 @@ def split(snapshot: BehaviorSnapshot, *, cutoff: date) -> tuple[BehaviorSnapshot
             if left in position and right in position
         ),
         skipped_duplicates=snapshot.skipped_duplicates,
+        reminded=tuple(item for item in snapshot.reminded if item.day <= cutoff),
     )
     holdout = BehaviorSnapshot(
         actions=tuple(item for item in snapshot.actions if item.day > cutoff),
@@ -120,6 +121,7 @@ def split(snapshot: BehaviorSnapshot, *, cutoff: date) -> tuple[BehaviorSnapshot
         gaps=_gaps_after(snapshot.gaps, cutoff),
         concurrent=(),
         skipped_duplicates=0,
+        reminded=tuple(item for item in snapshot.reminded if item.day > cutoff),
     )
     return train, holdout
 

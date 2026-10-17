@@ -176,13 +176,15 @@ def test_both_trees_read_the_same_records(tmp_path) -> None:
     assert paired in series.concurrent[0]
 
 
-def test_a_reminded_record_is_refused_by_the_prediction_tree_until_randomisation_is_recorded(tmp_path) -> None:
+def test_a_reminded_record_is_carried_and_the_prediction_tree_lets_it_hold_its_place_uncounted(tmp_path) -> None:
+    """序列原样带着 ``reminded``；预测树让它像「待定」一样占位、不计数（被提醒后的发生不进自然率）。"""
+
     site = Site(tmp_path, now=NOW)
     publish(site.behavior_tree, day(0), "吃早饭", 8, 0, kind="早餐", reminded=True)
     series = read_series(site.behavior_tree, cutoff=day(1))
     assert series.records[0].reminded
-    with pytest.raises(PredictionTreeError, match="reminded"):
-        source.snapshot_of(series)
+    snapshot = source.snapshot_of(series)
+    assert snapshot.actions == () and len(snapshot.unnamed) == 1
 
 
 def test_a_series_refuses_what_it_cannot_hold() -> None:
@@ -211,3 +213,13 @@ def test_a_disproved_unreadable_gap_is_dropped_once_for_every_reader(tmp_path) -
         series, concept_set(), {}, RelationConfig(slot_minutes=15, transition_window_slots=3, recurrence_window_days=90)
     )["session"]
     assert 41 in line.present[DAY1]
+
+
+def test_who_prompted_it_is_read_into_the_series_and_old_records_without_it_read_as_unknown(tmp_path) -> None:
+    """行为树 ``prompted_by``（裁定 54）：写了就带进序列；没写的（已写好的旧记录）是 None。"""
+
+    site = Site(tmp_path, now=datetime.combine(day(1), datetime.min.time(), UTC))
+    publish(site.behavior_tree, day(0), "查快递", 16, 30, prompted_by="host_agent")
+    publish(site.behavior_tree, day(0), "查快递", 18, 45)
+    series = read_series(site.behavior_tree, cutoff=day(1))
+    assert [record.prompted_by for record in series.records] == ["host_agent", None]

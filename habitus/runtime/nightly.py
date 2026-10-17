@@ -5,6 +5,7 @@
 序列 = series.reader.read_series(行为树, 截止日 N)        ← 行为树每晚只读这一次
 预测树 = 用这份序列建、发布（基准日 N 的前一天）
 语义树 = SceneNightlyRun.run(序列, 这一代树)               ← B1 同步词表 → B2 写概念 → B3 映射 → B4 关系
+机会表 = ForesightNightlyRun.run(这一晚的概念集与时间线)     ← 预测层 N1，零模型；没接时跳过
 ```
 
 两棵树对同一条记录的读法一致，由序列保证（CI 钉住）；预测树一个模块都不碰行为树。行为树上还没有一条可用记录时
@@ -26,6 +27,7 @@ from datetime import UTC, date, datetime, timedelta
 
 from habitus.behavior.tree import BehaviorTree
 from habitus.prediction.store import PublishedGeneration
+from habitus.runtime.foresight_nightly import ForesightNightlyRun, OpportunityReport
 from habitus.runtime.prediction import PredictionRebuilder
 from habitus.runtime.scene_night import NightReport, SceneNightlyRun
 from habitus.series import EventSeries
@@ -40,6 +42,8 @@ class NightOutcome:
     scene: NightReport | None
     #: 这一晚为什么没跑（没跑是 None）。
     skipped: str | None = None
+    #: 预测层的机会表（没接预测层、或语义树这一晚没跑到就是 None）。
+    opportunities: OpportunityReport | None = None
 
 
 class Nightly:
@@ -52,6 +56,7 @@ class Nightly:
         closed_days: Callable[[], Iterable[date]],
         vocabulary: Callable[[], tuple[int, bool]],
         clock: Callable[[], datetime] | None = None,
+        foresight: ForesightNightlyRun | None = None,
     ) -> None:
         if not isinstance(behavior_tree, BehaviorTree):
             raise TypeError("behavior_tree must be a BehaviorTree")
@@ -67,6 +72,9 @@ class Nightly:
             raise TypeError("vocabulary must be callable (version, migrating)")
         #: 词表此刻的（版本, 有没有未完成的迁移）
         self.vocabulary = vocabulary
+        if foresight is not None and not isinstance(foresight, ForesightNightlyRun):
+            raise TypeError("foresight must be a ForesightNightlyRun or None")
+        self.foresight = foresight
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
 
     async def run_once(self) -> NightOutcome:
@@ -87,7 +95,12 @@ class Nightly:
             return NightOutcome(night=night, series=series, published=None, scene=None)
         tree = self.prediction.store.load_generation(published.generation, expected_digest=published.digest)
         report = await self.scene.run(series=series, tree=tree, now=self._clock())
-        return NightOutcome(night=night, series=series, published=published, scene=report)
+        opportunities = None
+        if self.foresight is not None and report.materials is not None:
+            opportunities = self.foresight.run(
+                night=series.cutoff, concepts=report.materials.concepts, timelines=report.materials.timelines
+            )
+        return NightOutcome(night=night, series=series, published=published, scene=report, opportunities=opportunities)
 
 
 __all__ = ["NightOutcome", "Nightly"]

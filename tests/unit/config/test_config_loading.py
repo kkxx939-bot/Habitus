@@ -382,14 +382,11 @@ def test_locale_is_one_group_shared_by_the_scene_and_foresight_layers(tmp_path) 
         LocaleConfig.from_mapping({"zone": "UTC"})
 
 
-def test_foresight_only_carries_protective_limits_and_needs_both_derived_trees(tmp_path) -> None:
-    """预测层这一组只有保护闸——邻域与转移窗住在 prediction 那边，两处不各配一份。
+def test_foresight_carries_the_loss_ratios_and_protective_limits_and_needs_both_derived_trees(tmp_path) -> None:
+    """预测层这一组没有算法参数：时窗来自历史那几次的实际时刻，转移窗住在 prediction 那边，升不升从账上算（裁定 49）。
+    这里只有开关、两档可接受误提醒率（产品决定）、重轻多久重判、几道保护闸，以及一个还没定的开关（默认关，裁定 46）。
 
-    ``window_days`` 是卡上"上一次"往回看多少天，原先借的是 ``scene.lookback_days``；归组删掉之后
-    它回到真正的使用者这边，不再跨组借。取历史卡不按日历窗，那道闸是 ``max_days_per_layer``。
-
-    启用它却没启用两棵派生树是**配置自相矛盾**：数字取自预测树、与之对应的历史取自情景树，
-    缺一边就装配不出证据。放过去的下场是启动一切正常、什么都没发生、无处可查。
+    启用它却没启用两棵派生树是**配置自相矛盾**：预期的触发一半来自预测树、一半来自语义树，缺一边就装不出来。
     """
 
     from habitus.config.foresight import ForesightConfig
@@ -398,16 +395,32 @@ def test_foresight_only_carries_protective_limits_and_needs_both_derived_trees(t
     assert config.foresight.enabled is False
     assert [field.name for field in dataclasses.fields(ForesightConfig)] == [
         "enabled",
-        "window_days",
-        "max_days_per_layer",
+        "line_floor",
+        "line_ceiling",
+        "cost_ratio_unjudged",
+        "severity_review_days",
+        "shadow_uses_unestablished",
+        "daily_reminder_cap",
+        "holdout_rate",
+        "holdout_rate_heavy",
+        "unit_prior_strength",
         "judge_transient_retries",
         "judge_transient_retry_delay_seconds",
+        "tick_interval_seconds",
         "worker_shutdown_timeout_seconds",
     ]
+    assert config.foresight.shadow_uses_unestablished is True and config.foresight.holdout_rate > 0
+    assert 0 < config.foresight.holdout_rate_heavy <= config.foresight.holdout_rate
+    assert config.foresight.line_floor < config.foresight.line_ceiling
     for field_name, bad in (
-        ("window_days", 0),
-        ("max_days_per_layer", 0),
-        ("max_days_per_layer", True),
+        ("line_floor", 1.0),
+        ("line_ceiling", True),
+        ("cost_ratio_unjudged", 20.0),
+        ("severity_review_days", 0),
+        ("daily_reminder_cap", 0),
+        ("holdout_rate", 0.6),
+        ("holdout_rate_heavy", 0.2),
+        ("shadow_uses_unestablished", "yes"),
         ("judge_transient_retries", -1),
         ("judge_transient_retry_delay_seconds", -1.0),
         ("worker_shutdown_timeout_seconds", 0),
@@ -415,7 +428,13 @@ def test_foresight_only_carries_protective_limits_and_needs_both_derived_trees(t
         with pytest.raises(ConfigError, match=f"foresight.{field_name}"):
             ForesightConfig.from_mapping({field_name: bad})
     with pytest.raises(ConfigError, match="unknown"):
-        ForesightConfig.from_mapping({"pool_half_width": 3})
+        ForesightConfig.from_mapping({"window_days": 3})
+    with pytest.raises(ConfigError, match="unknown"):
+        ForesightConfig.from_mapping({"speak_after_net_hits": 1})  # 节奏项已删（裁定 48、49）
+    with pytest.raises(ConfigError, match="line_floor must lie below"):
+        ForesightConfig.from_mapping({"line_floor": 0.6, "line_ceiling": 0.5})
+    with pytest.raises(ConfigError, match="holdout_rate_heavy must not exceed"):
+        ForesightConfig.from_mapping({"holdout_rate": 0.05, "holdout_rate_heavy": 0.1})
 
     mapping = valid_mapping(tmp_path)
     mapping["foresight"] = {"enabled": True}

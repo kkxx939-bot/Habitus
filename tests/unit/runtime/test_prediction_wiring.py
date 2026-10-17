@@ -172,6 +172,45 @@ def test_the_nightly_stage_runs_after_the_rebuild_and_sees_the_new_generation() 
     assert order == ["rebuild", "nightly_stage"]
 
 
+def test_an_attached_night_replaces_the_bare_rebuild_and_the_settlement_still_follows() -> None:
+    """语义树第 11 步：整晚的跑法（读一次行为树 → 预测树 → 语义树 → 机会表）代替单独的重建；结算仍排在后面。"""
+
+    from dataclasses import dataclass
+
+    from habitus.runtime.prediction import PredictionRebuildWorker
+
+    order: list[str] = []
+
+    class _Rebuilder:
+        def run_once(self) -> str:
+            order.append("rebuild")
+            return "generation"
+
+    @dataclass(frozen=True)
+    class _Outcome:
+        published: str | None
+
+    class _Night:
+        async def run_once(self) -> _Outcome:
+            order.append("night")
+            return _Outcome("night-generation")
+
+    async def stage() -> None:
+        order.append("settlement")
+
+    worker = PredictionRebuildWorker(
+        _Rebuilder(),  # type: ignore[arg-type]
+        interval_seconds=60.0,
+        shutdown_timeout_seconds=1.0,
+        after_rebuild=stage,
+    )
+    worker.attach_nightly(_Night())  # type: ignore[arg-type]
+    assert asyncio.run(worker.run_once()) == "night-generation"
+    assert order == ["night", "settlement"]
+    with pytest.raises(TypeError):
+        worker.attach_nightly(object())  # type: ignore[arg-type]
+
+
 def test_a_failing_nightly_stage_does_not_block_the_rebuild() -> None:
     """派生层不做级联：关联那一拍失败只留观测，下一轮重建照常。"""
 

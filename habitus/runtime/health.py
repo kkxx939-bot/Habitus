@@ -136,7 +136,10 @@ class RuntimeHealthService:
         foresight = self.components.foresight
         if foresight is None:
             return [RuntimeHealthCheck("foresight", RuntimeHealthStatus.HEALTHY, "disabled", critical=False)]
-        return self._worker_checks(runtime_state, (("foresight_judge_worker", foresight.worker),))
+        if foresight.worker is None:
+            # 触发与递法还没接上：只有账本与夜间结算，没有常驻循环可查
+            return [RuntimeHealthCheck("foresight", RuntimeHealthStatus.HEALTHY, "ledger only", critical=False)]
+        return self._worker_checks(runtime_state, (("foresight_worker", foresight.worker),))
 
     @staticmethod
     def _prediction_freshness_check(lane: str, prediction: PredictionRuntimeComponents) -> RuntimeHealthCheck:

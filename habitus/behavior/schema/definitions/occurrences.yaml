@@ -15,6 +15,7 @@ fields:
   - {name: last_observed_at, type: datetime, role: numeric, required: true, description: 最后一条支持观测的时刻（不是结束时刻，结束经常不可知）。}
   - {name: onset_available_at, type: datetime, role: numeric, required: true, description: 链头判断的证据齐备时刻——防标签泄漏的首个切点。}
   - {name: reminded, type: boolean, role: numeric, required: true, description: 开始前窗口内有没有被系统提醒过；被提醒的发生不进自然率。}
+  - {name: prompted_by, type: optional_string, role: semantic, required: false, description: "谁发起的：system（系统提醒）/ host_agent（宿主助手先通知了他）/ self（他自己）；不知道就不写（可选、只在知道时写：已写好的记录不变，照常能读）。"}
   - {name: goal, type: optional_string, role: semantic, required: true, description: 有意识的目标；说不出目标的单位（锁门、喝水）为空，照样是一条行为。}
   - {name: summary, type: string, role: semantic, required: true, description: 脱离观测也读得懂的一句话；链跨多段时按序确定性拼接。}
   - {name: subjects, type: string_list, role: semantic, required: true, description: 谁做的，多值；共同行动的人都写上。}

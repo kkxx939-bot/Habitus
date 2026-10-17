@@ -5,8 +5,10 @@
 
 - 类编号的记录成为 ``ObservedAction``；「待定」成为 ``ObservedUnnamed``（不是候选，只在先后顺序里占位）；
 - 并行对从 uri 翻成**排序之后**的下标（配对层的前置条件）；
-- ``reminded`` 为真的记录**硬拒**：被提醒之后的发生不属于自然率，而提醒的随机化记录还没建（语义树新方案第五节：
-  只算没被提醒的那一栏）。宁可硬拒也不能静默把它数进去——这条护栏必须在提醒功能上线**之前**就在这里挡着；
+- ``reminded`` 为真的记录**不计数、只占位**：被提醒之后的发生不属于自然率（语义树新方案第五节：只算没被提醒的那一栏），
+  它像「待定」一样成为 ``ObservedUnnamed``——先后顺序里有它这一步、哪个格子都不数它；另记进快照的 ``reminded``，
+  那一天对这一类是"不知道"，分子分母都不计（裁定 54，``nodes.blind_days``）。提醒的随机化记录在预测层账本
+  （递送记录的 ``p_speak``），这里不读；之前是硬拒，预测层第 0 步接上 ``reminded`` 的闭环后改成跳过；
 - 截止日原样带进快照：跨过它的转移窗口没看全，配对层记删失。
 """
 
@@ -22,15 +24,17 @@ def snapshot_of(series: EventSeries) -> BehaviorSnapshot:
         raise PredictionTreeError("series must be an EventSeries")
     actions: list[ObservedAction] = []
     unnamed: list[ObservedUnnamed] = []
+    reminded: list[ObservedAction] = []
     rank: dict[str, int] = {}
     for record in series.records:
-        if record.reminded:
-            raise PredictionTreeError(
-                "occurrence is marked as reminded but reminder randomisation is not recorded yet; "
-                "counting it would silently pollute the natural rate (see TODO(PRED-TREE-001))"
-            )
-        if not record.classified:
+        if not record.classified or record.reminded:
             unnamed.append(ObservedUnnamed(started_at=record.started_at, day=record.day, lane=record.lane))
+            if record.classified:
+                reminded.append(
+                    ObservedAction(
+                        action=record.kind_token, started_at=record.started_at, day=record.day, lane=record.lane
+                    )
+                )
             continue
         rank[record.uri] = len(actions)
         actions.append(
@@ -44,10 +48,13 @@ def snapshot_of(series: EventSeries) -> BehaviorSnapshot:
     return BehaviorSnapshot(
         actions=tuple(actions),
         unnamed=tuple(unnamed),
-        gaps=tuple(ObservedGap(started_at=gap.started_at, ended_at=gap.ended_at, watched=gap.watched) for gap in series.gaps),
+        gaps=tuple(
+            ObservedGap(started_at=gap.started_at, ended_at=gap.ended_at, watched=gap.watched) for gap in series.gaps
+        ),
         concurrent=tuple(sorted(concurrent)),
         skipped_duplicates=series.skipped_count(SkipReason.DUPLICATE),
         cutoff=series.cutoff,
+        reminded=tuple(reminded),
     )
 
 

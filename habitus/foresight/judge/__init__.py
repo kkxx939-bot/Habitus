@@ -1,31 +1,33 @@
-"""判断：预测层的模型触点。读渲染好的证据包，对每个摊开的候选说会不会、什么时候、接下来、依据。
+"""模型四问（``19-预测层方案.md`` 第四节、第二节「后果」）：到了该说的时候，模型只看到那几个候选，一个几千字的小包——
 
-包内分工按"一个变化理由"：``model`` 是产物形状，``schema`` 是输出契约，``prompt`` 是措辞，``assembly``
-是自洽校验与降级，``service`` 是调用与重试。模型客户端只在 ``prompt`` 与 ``service`` 出现。
+1. 今天这次和历史那几次像不像？  2. 先说哪个？（外加一句话）  另有按账判一次的：这件事后果重不重？
+
+每个答案指向具体哪条历史记录；问两遍（候选顺序反过来）不一致 → 按算法顺序、轻重缓急取较轻的一级；模型可去掉候选、可改先后，
+不可凭空加候选。模型触点只在 ``prompt``（提示词与 schema）与 ``service``（调一次、问两遍、核对）；``package`` 是纯函数装的材料。
+本包不从 ``habitus.foresight`` 包根导出：包根对模型客户端零知识（架构测试钉着）。
 """
 
-from habitus.foresight.judge.assembly import ASSEMBLY_VERSION, JudgeAssemblyError, assemble_judgement
-from habitus.foresight.judge.model import DAY_STATES, VERDICTS, CandidateVerdict, Judgement
-from habitus.foresight.judge.prompt import JUDGE_PROMPT_VERSION, JUDGE_SYSTEM_PROMPT, build_request
-from habitus.foresight.judge.schema import JUDGE_JSON_SCHEMA, SCHEMA_FINGERPRINT, judge_json_schema
-from habitus.foresight.judge.service import JUDGE_VERSION, Judge, JudgeConfig, LLMJudge
+from habitus.foresight.judge.package import (
+    Candidate,
+    HistoryRow,
+    Package,
+    UnitInput,
+    build_package,
+    plain_text,
+    sources_of,
+)
+from habitus.foresight.judge.service import Judge, Judgement, SeverityJudgement, Verdict
 
 __all__ = [
-    "ASSEMBLY_VERSION",
-    "DAY_STATES",
-    "JUDGE_JSON_SCHEMA",
-    "JUDGE_PROMPT_VERSION",
-    "JUDGE_SYSTEM_PROMPT",
-    "JUDGE_VERSION",
-    "SCHEMA_FINGERPRINT",
-    "VERDICTS",
-    "CandidateVerdict",
+    "Candidate",
+    "HistoryRow",
     "Judge",
-    "JudgeAssemblyError",
-    "JudgeConfig",
     "Judgement",
-    "LLMJudge",
-    "assemble_judgement",
-    "build_request",
-    "judge_json_schema",
+    "Package",
+    "SeverityJudgement",
+    "UnitInput",
+    "Verdict",
+    "build_package",
+    "plain_text",
+    "sources_of",
 ]

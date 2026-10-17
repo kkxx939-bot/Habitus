@@ -403,7 +403,9 @@ def test_vocabulary_jobs_are_exposed_through_the_access_layer(tmp_path) -> None:
     assert runtime.components.behavior is not None
     assert all(branch.kind_store.read().version == 0 for branch in runtime.components.behavior)
     revised = asyncio.run(runtime.run_vocabulary_job("revise", lane="physical"))
-    assert revised.model_calls == 0 and revised.days == ()  # 词表从空开始（裁定 29）：两条 lane 都还没有类，没什么可拆改
+    assert (
+        revised.model_calls == 0 and revised.days == ()
+    )  # 词表从空开始（裁定 29）：两条 lane 都还没有类，没什么可拆改
     with pytest.raises(ValueError, match="unknown vocabulary job"):
         asyncio.run(runtime.run_vocabulary_job("bootstrap", lane="session"))
     # 行为侧未启用时同样明确拒绝

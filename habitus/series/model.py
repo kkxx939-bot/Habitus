@@ -103,6 +103,8 @@ class SeriesRecord:
     #: 地点与同在的人（调节条件的结构字段要看；上游没给时为空）。
     place: str | None = None
     subjects: tuple[str, ...] = ()
+    #: 谁发起的（行为树 ``prompted_by``，裁定 54）：system / host_agent / self；不知道是 None。
+    prompted_by: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "subjects", tuple(self.subjects))

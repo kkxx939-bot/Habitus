@@ -6,6 +6,7 @@
 语义树的关系读数按新方案（``13-语义树新方案``）重建，不住在这里。
 """
 
+from habitus.scene.views.clock import slot_index
 from habitus.scene.views.index import GAP_LOOKBACK_DAYS, DayIndex, DayIndexCache
 from habitus.scene.views.model import (
     ActionRef,
@@ -28,6 +29,7 @@ __all__ = [
     "LastTime",
     "Neighbour",
     "ObservationGap",
+    "slot_index",
     "context_view",
     "history_contexts",
     "last_time",

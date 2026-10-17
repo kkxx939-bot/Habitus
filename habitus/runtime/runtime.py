@@ -355,7 +355,7 @@ class Runtime:
                             {"error_type": type(exc).__name__, "lane": lane},
                         )
             # 预测层每槽一拍，只读两棵派生树与判断存储、只调模型，同一哲学。
-            if self.components.foresight is not None:
+            if self.components.foresight is not None and self.components.foresight.worker is not None:
                 try:
                     await self.components.foresight.worker.start()
                 except Exception as exc:  # noqa: BLE001 - 预测层失败不阻断记忆主链
@@ -443,7 +443,7 @@ class Runtime:
 
         # 预测层先停（它读预测树与行为树），然后预测夜批，最后行为侧。
         foresight = self.components.foresight
-        if foresight is not None:
+        if foresight is not None and foresight.worker is not None:
             try:
                 await foresight.worker.stop()
             except Exception as exc:  # noqa: BLE001 - 预测层停机失败不阻断主链
