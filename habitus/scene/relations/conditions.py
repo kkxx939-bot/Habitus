@@ -12,8 +12,11 @@
 
 **几个条件合起来**（裁定 61 第 6 条、62 第 1 条）：关系键里的条件是一个集合——各条件的文本排序后用 ``CONDITION_JOIN``
 拼成一个键（``join_conditions`` / ``parse_conditions``；``+`` 是概念身份预留的分隔符，地点 / 同在的人取值里含它的不当条件）。
-合起来判：任一不成立就不成立，都成立才成立，否则判不了。分组比的是"全部成立"对"少任意一个"：问的是"再加上这一个，比少一个
-条件时更强吗"；只有一个条件时"少任意一个"就是"不成立"，与原来的分法相同。
+合起来判：任一不成立就不成立，都成立才成立，否则判不了。分组按文献（Webb 2007《Discovering Significant Patterns》附录 A 的
+productive-rule 检验；裁定 63 第 1 条）：集合里每一个条件各比一次，"全部成立"对"其余成立、这一个不成立"，问的是"这一个条件在其余
+条件成立时还加得上东西吗"；整条关系按最难过的那组读（每一组都过才算过）。不把几组对照混成一池——混了之后一个已成立的父条件
+自己的抬升会把池子的基线拉低，什么都不解释的第二个条件也常被判成立（算法评审模拟 N=160、父抬升 0.4 时型一错误 0.55）。
+只有一个条件时就是"成立 / 不成立"两组，与原来的分法相同。
 
 **检验**：开不开由这条关系自己的最小可达 p 定（``ready_to_test``，裁定 60 第 9 条取代固定的前因 ≥ 40）：两边各自全中也能
 显著才开。把这条关系的层按条件分成两组，比两组的平均差值（实验组 − 对照率；差值尺度，裁定 27 第 5 条）：交互 z = 两组之差 /
@@ -235,117 +238,139 @@ def evaluator_all(
 
 @dataclass(frozen=True)
 class ModeratedMeasure:
-    """带条件的量法：同一条关系的层按条件分两组，比两组的"实验组 − 对照"之差（交互）。
+    """带条件的量法：条件集合里**每一个条件各比一次**——"全成立"那一组对"其余成立、这一个不成立"那一组（Webb 2007
+    《Discovering Significant Patterns》附录 A 的 productive-rule 检验；裁定 63 第 1 条）。整条关系按最难过的那组读：
+    尾概率取各组最大（每一组都显著才显著）、最小可达 p 取各组最大（每一组都够得着才开检验）、区间取各组的外包（近端取
+    最不利的——"影响够大"要每个条件都够；远端取最有利的——判"没了"要每个条件都没了）。只有一个条件时就是"成立 / 不成立"
+    两组，与原来的分法相同。
 
     效应报的是**条件下**那一组的实验组率与对照率；区间、第 3 道看的是交互（条件下比条件外多出 / 少了多少）。
     """
 
     inside: tuple[Stratum, ...]
-    outside: tuple[Stratum, ...]
+    outsides: tuple[tuple[Stratum, ...], ...]
     enough: bool
 
     @property
     def units(self) -> int:
-        return len(self.inside) + len(self.outside)
+        return len(self.inside) + sum(len(group) for group in self.outsides)
 
     @property
     def blocks(self) -> int:
-        return len({item.block for item in (*self.inside, *self.outside)})
+        return len({item.block for item in self._all()})
 
     def effect(self) -> stats.Effect:
         return stats.effect(self.inside)
 
     def tails(self, *, exact_limit: int) -> tuple[float, float]:
-        z = self._z()
-        if z is None or not self.inside:
+        zs = self._zs()
+        if zs is None or not self.inside:
             return 1.0, 1.0
-        upper = 0.5 * math.erfc(z / math.sqrt(2.0))
+        uppers = [0.5 * math.erfc(z / math.sqrt(2.0)) for z in zs]
         exact_upper, exact_lower = stats.tails(self.inside, exact_limit=exact_limit)
-        return max(upper, exact_upper), max(1.0 - upper, exact_lower)
+        return max(max(uppers), exact_upper), max(max(1.0 - upper for upper in uppers), exact_lower)
 
     def minimum_p(self) -> float:
-        """两组的实验组各走到全阳 / 全阴时最大的 |z|，与两边各自的精确最小可达 p 取大（两边对称，L10.17）。样本不够（某一边
-        不到 ``MIN_PER_SIDE`` 次、某一组没有有信息的层）就不可能显著。"""
+        """每一组比较各算"两边的实验组各走到全阳 / 全阴时最大的 |z|"，取各组里最小的那个（最难过的那组），再与各边的精确
+        最小可达 p 取大（两边对称，L10.17）。样本不够（某一边不到 ``MIN_PER_SIDE`` 次、某一组没有有信息的层）就不可能显著。"""
 
         if not self.enough:
             return 1.0
-        zs = [
-            _interaction_z(self.inside, self.outside, forced_in, forced_out)
-            for forced_in in (0, 1)
-            for forced_out in (0, 1)
-        ]
-        if any(z is None for z in zs):
-            return 1.0
-        largest = max(abs(z) for z in zs if z is not None)
-        return max(
-            min(1.0, math.erfc(largest / math.sqrt(2.0))), stats.minimum_p(self.inside), stats.minimum_p(self.outside)
-        )
+        largest: list[float] = []
+        for outside in self.outsides:
+            zs = [
+                _interaction_z(self.inside, outside, forced_in, forced_out)
+                for forced_in in (0, 1)
+                for forced_out in (0, 1)
+            ]
+            if any(z is None for z in zs):
+                return 1.0
+            largest.append(max(abs(z) for z in zs if z is not None))
+        normal = min(1.0, math.erfc(min(largest) / math.sqrt(2.0)))
+        return max(normal, stats.minimum_p(self.inside), *(stats.minimum_p(outside) for outside in self.outsides))
 
     def interval(
         self, *, level: float, rounds: int, seed: int
     ) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
-        if len(self.inside) < 2 or len(self.outside) < 2:
-            return None, None
-        blocks: dict[int, list[tuple[bool, float]]] = {}
-        for flag, group in ((True, self.inside), (False, self.outside)):
-            for item in group:
-                blocks.setdefault(item.block, []).append((flag, item.treated - item.control_rate))
-        keys = sorted(blocks)
-        generator = random.Random(seed)
-        values: list[float] = []
-        for _ in range(rounds):
-            drawn = [entry for _ in keys for entry in blocks[keys[generator.randrange(len(keys))]]]
-            held = [value for flag, value in drawn if flag]
-            rest = [value for flag, value in drawn if not flag]
-            if held and rest:
-                values.append(sum(held) / len(held) - sum(rest) / len(rest))
-        if len(values) < rounds * 0.9:
-            return None, None
-        values.sort()
-        tail = (1.0 - level) / 2.0
-        return (_quantile(values, tail), _quantile(values, 1.0 - tail)), None
+        found: list[tuple[float, float]] = []
+        for index, outside in enumerate(self.outsides):
+            spread = _bootstrap(self.inside, outside, level=level, rounds=rounds, seed=seed + index)
+            if spread is None:
+                return None, None
+            found.append(spread)
+        return (min(low for low, _ in found), max(high for _, high in found)), None
 
     def heterogeneity(self) -> float | None:
         return None
 
     def leave_one_out(self, *, upward: bool) -> bool:
-        blocks = sorted({item.block for item in (*self.inside, *self.outside)})
+        blocks = sorted({item.block for item in self._all()})
         if len(blocks) < 2:
             return False
         for block in blocks:
-            rest = ModeratedMeasure(
-                tuple(item for item in self.inside if item.block != block),
-                tuple(item for item in self.outside if item.block != block),
-                self.enough,
-            )
-            difference = rest._interaction()
-            if difference is None or difference == 0.0 or (difference > 0.0) != upward:
-                return False
+            inside = tuple(item for item in self.inside if item.block != block)
+            for outside in self.outsides:
+                rest = tuple(item for item in outside if item.block != block)
+                difference = _interaction(inside, rest)
+                if difference is None or difference == 0.0 or (difference > 0.0) != upward:
+                    return False
         return True
 
     def subset(self, *, since: date | None = None, last_blocks: int | None = None) -> ModeratedMeasure:
-        both = ChainMeasure((*self.inside, *self.outside)).subset(since=since, last_blocks=last_blocks)
+        both = ChainMeasure(self._all()).subset(since=since, last_blocks=last_blocks)
         kept = set(map(id, both.strata))
         return ModeratedMeasure(
             tuple(item for item in self.inside if id(item) in kept),
-            tuple(item for item in self.outside if id(item) in kept),
+            tuple(tuple(item for item in outside if id(item) in kept) for outside in self.outsides),
             self.enough,
         )
 
     def same_event_share(self) -> float | None:
         return ChainMeasure(self.inside).same_event_share()
 
-    def _interaction(self) -> float | None:
-        if not self.inside or not self.outside:
-            return None
-        return _mean_lift(self.inside) - _mean_lift(self.outside)
+    def _all(self) -> tuple[Stratum, ...]:
+        return (*self.inside, *(item for outside in self.outsides for item in outside))
 
-    def _z(self) -> float | None:
-        """两组"实验组 − 对照"平均差值之差的 z（差值尺度，与区间、第 3 道同一个尺度；裁定 27 第 5 条）。"""
+    def _zs(self) -> list[float] | None:
+        """每一组比较的交互 z（差值尺度，与区间、第 3 道同一个尺度；裁定 27 第 5 条）；样本不够或哪一组量不出就没有。"""
 
         if not self.enough:
             return None
-        return _interaction_z(self.inside, self.outside, None, None)
+        zs = [_interaction_z(self.inside, outside, None, None) for outside in self.outsides]
+        return None if any(z is None for z in zs) else [z for z in zs if z is not None]
+
+
+def _interaction(inside: Sequence[Stratum], outside: Sequence[Stratum]) -> float | None:
+    if not inside or not outside:
+        return None
+    return _mean_lift(inside) - _mean_lift(outside)
+
+
+def _bootstrap(
+    inside: Sequence[Stratum], outside: Sequence[Stratum], *, level: float, rounds: int, seed: int
+) -> tuple[float, float] | None:
+    """一组比较的交互区间：按块重抽样，两边各要至少 2 层。"""
+
+    if len(inside) < 2 or len(outside) < 2:
+        return None
+    blocks: dict[int, list[tuple[bool, float]]] = {}
+    for flag, group in ((True, inside), (False, outside)):
+        for item in group:
+            blocks.setdefault(item.block, []).append((flag, item.treated - item.control_rate))
+    keys = sorted(blocks)
+    generator = random.Random(seed)
+    values: list[float] = []
+    for _ in range(rounds):
+        drawn = [entry for _ in keys for entry in blocks[keys[generator.randrange(len(keys))]]]
+        held = [value for flag, value in drawn if flag]
+        rest = [value for flag, value in drawn if not flag]
+        if held and rest:
+            values.append(sum(held) / len(held) - sum(rest) / len(rest))
+    if len(values) < rounds * 0.9:
+        return None
+    values.sort()
+    tail = (1.0 - level) / 2.0
+    return _quantile(values, tail), _quantile(values, 1.0 - tail)
 
 
 def _lifts(items: Sequence[Stratum], forced: int | None) -> list[float]:
@@ -390,25 +415,25 @@ MIN_PER_SIDE = 2
 
 
 def split(measure: ChainMeasure, judges: Sequence[Callable[[Chain], bool | None]]) -> ModeratedMeasure:
-    """层按条件集合分两组：全部成立的进条件下那一组；**恰好少一个**（其余都成立、有一个不成立）的进条件外那一组；
-    别的（有判不了的、少了两个以上）不进任何一组。只有一个条件时就是"成立 / 不成立"两组。
-    两边各自够 ``MIN_PER_SIDE`` 次才算样本够（两边合计够、一边只有一次的，交互根本量不出来）。"""
+    """层按条件集合分组：全部成立的进条件下那一组；**恰好少一个**的按少的是哪一个各进一组（"其余成立、它不成立"，每个条件
+    一组对照）；别的（有判不了的、少了两个以上）不进任何一组。只有一个条件时就是"成立 / 不成立"两组。
+    条件下与每一组对照都各自够 ``MIN_PER_SIDE`` 次才算样本够（哪一组对照只有一次，那个条件的交互就量不出来）。"""
 
     if not judges:
         raise ValueError("a moderated measure needs at least one condition")
     inside: list[Stratum] = []
-    outside: list[Stratum] = []
+    outsides: list[list[Stratum]] = [[] for _ in judges]
     for item in measure.strata:
         flags = [judge(item.chain) for judge in judges]
         if any(flag is None for flag in flags):
             continue
-        missing = sum(1 for flag in flags if flag is False)
-        if missing == 0:
+        failed = [index for index, flag in enumerate(flags) if flag is False]
+        if not failed:
             inside.append(item)
-        elif missing == 1:
-            outside.append(item)
-    enough = len(inside) >= MIN_PER_SIDE and len(outside) >= MIN_PER_SIDE
-    return ModeratedMeasure(tuple(inside), tuple(outside), enough=enough)
+        elif len(failed) == 1:
+            outsides[failed[0]].append(item)
+    enough = len(inside) >= MIN_PER_SIDE and all(len(group) >= MIN_PER_SIDE for group in outsides)
+    return ModeratedMeasure(tuple(inside), tuple(tuple(group) for group in outsides), enough=enough)
 
 
 def ready_to_test(measure: ModeratedMeasure, *, alpha: float) -> bool:

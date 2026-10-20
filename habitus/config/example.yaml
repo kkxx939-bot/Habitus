@@ -540,6 +540,11 @@ workflow:
 #   tick_interval_seconds: 900       # 白天多久一拍（建预期、到时窗的决定说不说；默认一个槽）
 #   worker_shutdown_timeout_seconds: 30
 #   half_life_opportunities: 8       # 证据遗忘的半衰期：几次机会（账、行为单元、时段读数共用；裁定 57，回放后定）
+#   outlet_liveness_hours: 48        # 提醒出口：最近几小时有宿主来取过才算活着（活着才问模型写话、记「待取」；否则记「不可达」）
+#   outlet_lease_minutes: 30         # 一条请求被一个会话取走后多久内别的会话取不到（不超过最晚时限）
+#   outlet_max_attempts: 3           # 一条请求最多放回几次（取走没问出口、租约过期），到了不再给
+#   outlet_claim_limit: 3            # 宿主一次最多取几条
+#   outlet_match_similarity: 0.6     # 认提问：题目与那句话的相似度下限（含类名或一取一问的直接配上）
 
 # 统一生命周期（裁定 15、60）。缺省即可运行；这几个数是运维边界，不是统计量。
 # lifecycle:

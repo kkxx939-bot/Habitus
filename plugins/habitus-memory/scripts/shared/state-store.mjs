@@ -48,6 +48,12 @@ function validateState(value) {
   ))) {
     throw new Error("plugin injection receipts are invalid");
   }
+  // 取过的提醒（方案 32 第 5.1 条，只为去重与运维日志）：可缺省；有就得是 {request_id, claimed_at} 的清单
+  if (value.remindersClaimed != null && (!Array.isArray(value.remindersClaimed) || value.remindersClaimed.some((item) => (
+    !item || typeof item.request_id !== "string" || typeof item.claimed_at !== "string"
+  )))) {
+    throw new Error("plugin claimed reminders are invalid");
+  }
   return value;
 }
 

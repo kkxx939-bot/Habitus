@@ -2,7 +2,8 @@
 
 | 情况 | 提醒反馈 |
 |---|---|
-| 说了 → 做了（说什么都一样） | 好 |
+| 说了 → 之后做了（「提醒后发生」，说什么都一样） | 好 |
+| 说了、可他在说之前就做了（结算是准时 / 早到 / 晚了但做了） | 不写、不算机会：行为识别滞后、提醒出口认出提问时他已经做完（裁定 65）——功劳不是提醒的 |
 | 说了 → 负 / 没回应 → 没做 | 坏（提醒了他没做就是一次误提醒；没回应不算中性，不然误提醒率永远降不下来） |
 | 说了 → 中 → 时限前做了 | 好 |
 | 说了 → 中 → 没做 | 不写、不算机会（中说的是时机，不说明会不会做；兜底：进来的边按做照样掉） |
@@ -32,9 +33,10 @@ def reminder_feedback(
     if spoken_at is None:
         return None
     polarity = latest_polarity(responses)
-    done = result.outcome != "过期待决"
-    if done:
+    if result.outcome == "提醒后发生":
         return UnitFeedback(item.kind_token, item.formed_at, True, item.expectation_id, polarity)
+    if result.outcome != "过期待决":
+        return None  # 说之前就做了（结算只把说出之后的发生记成「提醒后发生」）：这次机会不算提醒的（裁定 65）
     if polarity == "中":
         return None
     return UnitFeedback(item.kind_token, item.formed_at, False, item.expectation_id, polarity)

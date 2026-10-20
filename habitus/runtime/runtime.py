@@ -63,6 +63,7 @@ from habitus.runtime.behavior import deliver_physical as _deliver_physical
 from habitus.runtime.behavior import run_vocabulary_job as _run_vocabulary_job
 from habitus.runtime.components import RuntimeComponents
 from habitus.runtime.consistency import MemoryConsistencyService, MemoryConsistencySnapshot
+from habitus.runtime.foresight_outlet import ClaimedReminder
 from habitus.runtime.health import RuntimeHealthReport, RuntimeHealthService
 from habitus.runtime.lifecycle import LifecycleWorkerState
 from habitus.runtime.lifecycle_sources import memory_jobs_restored
@@ -411,6 +412,23 @@ class Runtime:
             payload,
             observer=self.components.infrastructure.observer,
         )
+
+    async def claim_reminders(
+        self, *, host: str, session: str, at: datetime, limit: int
+    ) -> tuple[ClaimedReminder, ...]:
+        """提醒出口的取口（方案 32 第 4.1 条）：宿主在他敲一句话时来取此刻可取的提醒（带租约），顺手留下活性。预测层没开就是空。
+        ``limit`` 不得超过 ``config.foresight.outlet_claim_limit``；``at`` 由宿主给、带时区。同步的文件读写下沉线程。"""
+
+        self._require_initialized("reminder claim")
+        if not isinstance(at, datetime) or at.utcoffset() is None:
+            raise ValueError("at must be a timezone-aware datetime")
+        cap = self.config.foresight.outlet_claim_limit
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= cap:
+            raise ValueError(f"limit must be an integer between 1 and {cap}")
+        foresight = self.components.foresight
+        if foresight is None or foresight.outlet is None:
+            return ()
+        return await asyncio.to_thread(foresight.outlet.claim, host, session, at, limit)
 
     async def run_vocabulary_job(self, job: str, *, lane: str) -> VocabularyJobReport:
         """词表整理活正门：``grow`` 立刻每晚新增、``revise`` 立刻定期拆改。两条 lane 的词表各是各的，``lane`` 说整理哪一支。"""

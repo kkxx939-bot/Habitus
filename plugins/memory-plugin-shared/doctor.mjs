@@ -49,6 +49,12 @@ export async function runPluginDoctor(
     ? `service ${capabilities.result?.service_version}`
     : `api=${capabilities.result?.api_version || "unavailable"}; missing_protocols=${missingProtocols.join(",")}; missing_features=${missingFeatures.join(",")}`;
   checks.push({ name: "capabilities", status: compatible ? "pass" : "fail", detail: compatibilityDetail });
+  // 提醒出口（方案 32）不是必需特性：没有就只做 memory，这里报 warn 让人知道提醒接不接得上
+  checks.push({
+    name: "reminders",
+    status: availableFeatures.has("reminders_v1") ? "pass" : "warn",
+    detail: availableFeatures.has("reminders_v1") ? "service claims reminders (reminders_v1)" : "service has no reminders_v1; memory only",
+  });
   try {
     const inventory = await outboxInventory(config.stateRoot);
     const failed = inventory.blocked > 0

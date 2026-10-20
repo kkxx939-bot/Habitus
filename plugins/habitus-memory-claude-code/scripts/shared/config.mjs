@@ -82,5 +82,8 @@ export function loadPluginConfig(env = process.env) {
     operationLogKeep: integerValue(env.HABITUS_PLUGIN_LOG_KEEP, 3, 1, 50),
     // 会话状态的退场（26 号清单 7.4）：transcript 不在了、outbox 空了，状态又这么久没动过，才删
     sessionRetireGraceMs: integerValue(env.HABITUS_PLUGIN_SESSION_GRACE_HOURS, 24, 1, 720) * 3_600_000,
+    // 提醒出口（方案 32 第五节）：一次最多取几条（服务端另有上限）、取的单独超时（在 UserPromptSubmit 的预算之内，失败就当这一轮没有提醒）
+    reminderClaimLimit: integerValue(env.HABITUS_PLUGIN_REMINDER_LIMIT, 3, 1, 20),
+    reminderTimeoutMs: integerValue(env.HABITUS_PLUGIN_REMINDER_TIMEOUT_MS, 2_000, 250, 30_000),
   });
 }

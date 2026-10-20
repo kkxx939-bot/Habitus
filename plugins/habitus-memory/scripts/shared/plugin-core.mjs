@@ -25,6 +25,9 @@ import {
 } from "./state-store.mjs";
 
 const REQUIRED_FEATURES = ["conversation_cursor", "flush", "recall", "remember", "remember_idempotency_v1"];
+// 提醒出口不是必需的特性：服务没有它就只做 memory，老服务照常工作（方案 32 第四节）。
+const REMINDERS_FEATURE = "reminders_v1";
+const CLAIMED_REMINDERS_KEPT = 64;
 
 function utcDate() { return new Date().toISOString().slice(0, 10); }
 
@@ -113,6 +116,41 @@ export class PluginCore {
     const state = await this.#locked(adapter, input, (value) => value);
     const response = await this.service.recall(prompt, state);
     return response.ok && typeof response.result?.context === "string" ? response.result.context : "";
+  }
+
+  async claimReminders(adapterValue, input) {
+    // 只在 UserPromptSubmit 取（裁定 64 第 9 条）；失败、超时、服务没这个特性一律当这一轮没有提醒。
+    // 同一会话在租约内重取会拿回自己手里那几条（claimed_at 不变）：注入过的不再注入，免得 agent 每轮都问一遍。
+    const adapter = requireHostAdapter(adapterValue);
+    if (!adapter.prompt(input)) return [];
+    const capabilities = await this.service.capabilities();
+    if (!capabilities.ok) return [];
+    try { requireCompatibleService(capabilities.result, adapter.protocol); } catch { return []; }
+    const features = new Set(Array.isArray(capabilities.result?.features) ? capabilities.result.features : []);
+    if (!features.has(REMINDERS_FEATURE)) return [];
+    const state = await this.#locked(adapter, input, (value) => value);
+    const response = await this.service.claimReminders({
+      host: adapter.host,
+      session: state.conversationId,
+      at: new Date().toISOString(),
+      limit: this.config.reminderClaimLimit || 3,
+    });
+    const reminders = response.ok && Array.isArray(response.result?.reminders) ? response.result.reminders : [];
+    const usable = reminders.filter((item) => (
+      item && typeof item.request_id === "string" && typeof item.text === "string" && typeof item.claimed_at === "string"
+    ));
+    if (usable.length === 0) return [];
+    return this.#locked(adapter, input, async (current) => {
+      const seen = new Set((current.remindersClaimed || []).map((item) => `${item.request_id}@${item.claimed_at}`));
+      const fresh = usable.filter((item) => !seen.has(`${item.request_id}@${item.claimed_at}`));
+      if (fresh.length === 0) return [];
+      const remindersClaimed = [
+        ...(current.remindersClaimed || []),
+        ...fresh.map((item) => ({ request_id: item.request_id, claimed_at: item.claimed_at })),
+      ].slice(-CLAIMED_REMINDERS_KEPT);
+      await writeState(this.config.stateRoot, adapter.host, current.nativeSessionId, { ...current, remindersClaimed });
+      return fresh;
+    });
   }
 
   async recordInjection(adapterValue, input, receiptValue) {

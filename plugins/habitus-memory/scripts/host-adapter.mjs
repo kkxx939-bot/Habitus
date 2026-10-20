@@ -35,6 +35,8 @@ function selectCompleted(records, injectionReceipts) {
 export const hostAdapter = Object.freeze({
   host: "codex",
   protocol: "codex_rollout",
+  // agent 向人提问、等人作答的工具（方案 32 第 4.2 条）：CLI 是 request_user_input，Desktop 用 request_user_input_async
+  questionTool: "request_user_input（Desktop 里是 request_user_input_async）",
   nativeSessionId(input) { return safeIdentifier(input?.session_id || input?.conversation_id); },
   conversationId(input) { return `codex-${this.nativeSessionId(input)}`; },
   prompt(input) { return typeof input?.prompt === "string" ? input.prompt.trim() : ""; },

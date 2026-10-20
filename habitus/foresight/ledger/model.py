@@ -5,7 +5,9 @@
   说没说都记（影子账是唯一没有选择偏差的准确率来源）。身份不含槽号与时刻：同一个触发实例只有一条。
   **每个机会都建**（裁定 49）：形成时这件事已经做了的也建，``observed_from`` 是从什么时候起的发生算这条预期说中的
   （日子 / 情境：当天零点；事件：前因做完那一刻），结算照常对答案——不然账上只剩没做的那几次。
-- **递送**是对一条预期"说不说、按哪一级说"的决定，连同为什么没说。
+- **递送**是对一条预期"说不说、按哪一级说"的决定，连同为什么没说。说出口不由递送那一拍自己记：它只记「待取」（话写好了、等宿主
+  来取），**「说了」由出口在宿主的转写里认出那次提问之后追加**（方案 32 第三节），``decided_at`` 是提问那一刻、``text`` 是题目原文、
+  ``via`` / ``turn`` 是哪个宿主、哪一轮。到最晚时限没人问出口的追加「宿主没取」。
 - **回话**是模型从一段会话里判出的、对一次说出口的提醒的回应：回应的是哪一条、正 / 中 / 负（裁定 61 第 4、5 条；
   不由我们枚举他说的话）。正 / 负关闭那条提醒，中不关。他说的话本身作为行为进行为树，不在这里。
 - **结算**对着行为树给预期一个结果；到最晚时限没发生只是「过期待决」，之后由**追加裁决**补一条（后补），旧记录不改。
@@ -34,12 +36,15 @@ RELATION_BACKED = frozenset({"事件", "情境"})
 #: 递法两档（裁定 48）：影子只记账；提醒在该来了还没来时主动说。
 LEVELS = (0, 1)
 #: 一次递送为什么说了 / 没说。
-#: 「不可达」= 没有送达渠道（裁定 47：接上渠道之前提醒档的决定都是它，结算按没说过处理）；「已发生」= 到了时窗时这件事
+#: 「不可达」= 没有宿主活着（方案 32 第 3.3 条：最近一段没有宿主来取过就不问模型、不写话，结算按没说过处理）；「已发生」= 到了时窗时这件事
 #: 已经做了，不递；「同类已说」= 同一类今天已经说过一句（几本账同一件事只说一次）；「等时窗末」= 到时窗末还没做再说
 #: （「该来了还没来」是提醒的说话时机；这一版不分急缓，一律等时窗末，裁定 58 第 1 条）；「久别回来」= 依据那本账的前因隔了比
-#: 历史最长还久才又出现，这一次只记影子（``foresight.absence``；不改账的级，下一次照常）。
+#: 历史最长还久才又出现，这一次只记影子（``foresight.absence``；不改账的级，下一次照常）；「待取」= 决定说、话已写好，等宿主来取
+#: （裁定 64）；「宿主没取」= 到最晚时限还没人取走 / 没问出口（终局；结算按没说过处理，不写反馈）。
 DELIVERY_REASONS = (
     "说了",
+    "待取",
+    "宿主没取",
     "影子",
     "名额已满",
     "不可达",
@@ -53,6 +58,14 @@ DELIVERY_REASONS = (
 )
 #: 久别回来的递送原因。
 RETURNED = "久别回来"
+#: 真对人说出口了（出口从转写认出提问之后追加；推式宿主由回执）。
+SPOKEN = "说了"
+#: 决定说、话写好了、等宿主来取（裁定 64）。
+AWAITING_HOST = "待取"
+#: 到最晚时限还没人取走 / 没问出口（终局）。
+HOST_NEVER_CLAIMED = "宿主没取"
+#: 带着话、还没说出口的两种递送：「等时窗末」（到时窗末再决定）与「待取」（等宿主来取）。
+_UNSPOKEN_WITH_TEXT = frozenset({"等时窗末", AWAITING_HOST})
 #: 回话的方向（裁定 61 第 4 条）：模型判这段会话对那条提醒是正、中还是负；正 / 负关闭那条提醒，中不关、后面的会话照样判。
 POLARITIES = ("正", "中", "负")
 #: 结算的结果。「过期待决」不是终态。每个机会都建，形成时已做的照常结准时 / 早到（裁定 49）。
@@ -235,7 +248,9 @@ class Expectation:
 @dataclass(frozen=True)
 class Delivery:
     """对一条预期的递送决定。``p_speak`` 是这条被说出的概率（这一版不扣发，确定性规则下是 0 或 1）。
-    ``evidence`` 是模型指的那几条历史记录。"""
+    ``evidence`` 是模型指的那几条历史记录。「说了」上 ``via`` 是哪个宿主说的（``codex`` / ``claude-code`` / ``macos-notification``…）、
+    ``turn`` 是宿主侧那一轮的身份（提问那次调用的 call_id；推式宿主可空）——账本得记"谁说的、在哪一轮"（裁定 64 第 6 条）。
+    没说出口的递送没有宿主，两者都为空。"""
 
     expectation_id: str
     decided_at: datetime
@@ -245,6 +260,8 @@ class Delivery:
     p_speak: float
     text: str | None = None
     evidence: tuple[str, ...] = ()
+    via: str | None = None
+    turn: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.expectation_id, "delivery expectation_id")
@@ -254,7 +271,7 @@ class Delivery:
         if not isinstance(self.spoken, bool):
             raise ForesightError("delivery spoken must be a boolean")
         _one_of(self.reason, DELIVERY_REASONS, "delivery reason")
-        if self.spoken != (self.reason == "说了"):
+        if self.spoken != (self.reason == SPOKEN):
             raise ForesightError("a spoken delivery has reason 说了 and an unspoken one does not")
         if (
             isinstance(self.p_speak, bool)
@@ -262,11 +279,18 @@ class Delivery:
             or not 0.0 <= self.p_speak <= 1.0
         ):
             raise ForesightError("delivery p_speak must be a number between 0 and 1")
-        if self.text is not None and not self.spoken and self.reason != "等时窗末":
-            raise ForesightError("an unspoken delivery carries no text unless it waits for the window to end")
+        if self.text is not None and not self.spoken and self.reason not in _UNSPOKEN_WITH_TEXT:
+            raise ForesightError("an unspoken delivery carries no text unless it waits for the window end or a host")
         if self.text is not None:
             _text(self.text, "delivery text")
         _texts(self.evidence, "delivery evidence")
+        for label in ("via", "turn"):
+            value = getattr(self, label)
+            if value is None:
+                continue
+            _text(value, f"delivery {label}")
+            if not self.spoken:
+                raise ForesightError(f"an unspoken delivery names no host ({label})")
 
 
 @dataclass(frozen=True)
@@ -511,10 +535,13 @@ class UnitLevel:
 
 
 __all__ = [
+    "AWAITING_HOST",
     "DELIVERY_REASONS",
     "FACT_KINDS",
+    "HOST_NEVER_CLAIMED",
     "NATURAL_HITS",
     "POLARITIES",
+    "SPOKEN",
     "VOID",
     "RETURNED",
     "SETTINGS",

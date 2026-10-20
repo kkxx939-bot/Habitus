@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from habitus.behavior.tree import BehaviorTree
@@ -35,12 +35,16 @@ from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_nightly import ForesightNightlyRun
 from habitus.runtime.foresight_opportunities import OpportunityStore
+from habitus.runtime.foresight_outlet import ReminderOutlet
+from habitus.runtime.foresight_outlet_consumer import OutletObservingConsumer
+from habitus.runtime.foresight_outlet_store import OutletStore
 from habitus.runtime.foresight_reminded import RemindedLookup
 from habitus.runtime.foresight_responses import ReminderResponses
 from habitus.runtime.foresight_settlement import SettlementStage
 from habitus.runtime.foresight_tick import ForesightTick
 from habitus.runtime.foresight_worker import ForesightWorker
 from habitus.runtime.resident import ResidentWorker
+from habitus.runtime.session_lane import BehaviorSessionConsumer
 from habitus.scene.relations import RelationConfig
 from habitus.scene.relations.store import RelationStore
 
@@ -77,10 +81,14 @@ class ForesightRuntimeComponents:
     worker: ResidentWorker | None = None
     #: 夜里的账本压实（26 号清单 4.8）；不给就不压。
     compaction: LedgerCompaction | None = None
+    #: 提醒出口（方案 32）：宿主来取、从转写认提问写「说了」；递送那一拍按它的活性决定问不问模型。
+    outlet: ReminderOutlet | None = None
 
     def __post_init__(self) -> None:
         if self.compaction is not None and self.compaction.ledger is not self.ledger:
             raise ValueError("the compaction must use the assembled ledger")
+        if self.outlet is not None and self.outlet.ledger is not self.ledger:
+            raise ValueError("the reminder outlet must write the assembled ledger")
         if self.settlement.ledger is not self.ledger:
             raise ValueError("the settlement stage must use the assembled ledger")
         if self.settlement.read_side is not self.read_side:
@@ -119,9 +127,10 @@ def build_foresight_components(
     clock: Callable[[], datetime] | None = None,
     branch: str = "session",
     calendar: DayTypeCalendar | None = None,
+    kind_label: Callable[[str], str | None] | None = None,
 ) -> ForesightRuntimeComponents | None:
     """组装预测层；未启用时返回 None。``branch`` 是它接的那一支：账本取这一支的目录。``calendar`` 是组合根建好、与语义树共用的
-    那一份（不给就自己建）。"""
+    那一份（不给就自己建）。``kind_label`` 是类编号 → 给人看的类名（词表），出口认提问时拿它配题目；不给就只按话配。"""
 
     if not config.foresight.enabled:
         return None
@@ -157,6 +166,18 @@ def build_foresight_components(
         evidence=evidence,
         statuses=relation_statuses(config.foresight.shadow_uses_unestablished),
     )
+    foresight = config.foresight
+    outlet = ReminderOutlet(
+        OutletStore(config.foresight_root / branch / "outlet"),
+        ledger,
+        liveness=timedelta(hours=foresight.outlet_liveness_hours),
+        lease=timedelta(minutes=foresight.outlet_lease_minutes),
+        max_attempts=foresight.outlet_max_attempts,
+        claim_limit=foresight.outlet_claim_limit,
+        similarity=foresight.outlet_match_similarity,
+        kind_label=kind_label,
+        observer=observer,
+    )
     return ForesightRuntimeComponents(
         read_side=read_side,
         ledger=ledger,
@@ -164,6 +185,7 @@ def build_foresight_components(
         opportunities=opportunities,
         history=history,
         compaction=LedgerCompaction(ledger, evidence=evidence, lane=branch, clock=clock),
+        outlet=outlet,
     )
 
 
@@ -210,8 +232,8 @@ def build_foresight_tick(
     历史的预期写进这一支的账本；再把到了时窗的按账的级决定说不说（``structured_chat`` 给了就带模型四问，不给就按算法与模板）。
     ``shadow_uses_unestablished`` 开着时候选关系也进影子账；词表迁移中（``vocabulary_migrating``）整拍不做。
 
-    送达渠道还没有（方案第二节：本层只产出"递送请求 + 档 + 话"，送达在本层之外），所以 ``reachable`` 为假：提醒档的决定都
-    记「不可达」，结算按没说过处理，模型也不问（裁定 47）。接上渠道时把它改成真，这是组合根唯一要改的一行。"""
+    送达走提醒出口（方案 32）：递送那一拍按出口的活性决定问不问模型——最近一段有宿主来取过才写话、记「待取」，否则记「不可达」；
+    每拍末尾把可取的请求清单交给出口。装了插件的用户自动"接通"，没装的一分钱不多花，组合根不再有写死的一行。"""
 
     foresight = config.foresight
     delivery = DeliveryStage(
@@ -231,7 +253,7 @@ def build_foresight_tick(
             )
         ),
         tick_seconds=foresight.tick_interval_seconds,
-        reachable=False,
+        outlet=components.outlet,
         lane=lane,
     )
     return ForesightTick(
@@ -270,6 +292,16 @@ def build_reminded_lookup(components: ForesightRuntimeComponents) -> RemindedLoo
     return RemindedLookup(components.ledger, current=components.settlement.current)
 
 
+def build_outlet_consumer(
+    components: ForesightRuntimeComponents, inner: BehaviorSessionConsumer, *, observer: Observer | None = None
+) -> OutletObservingConsumer:
+    """会话源的行为侧消费者外面包出口那一层（方案 32 第 4.2 条）：同一份会话先过 ``outlet.observe``，再进会话 lane。"""
+
+    if components.outlet is None:
+        raise ValueError("the foresight components carry no reminder outlet")
+    return OutletObservingConsumer(inner, components.outlet, observer=observer)
+
+
 def build_reminder_responses(
     components: ForesightRuntimeComponents, *, config: HabitusConfig, observer: Observer | None = None
 ) -> ReminderResponses:
@@ -290,6 +322,7 @@ __all__ = [
     "build_foresight_nightly",
     "build_foresight_tick",
     "build_foresight_worker",
+    "build_outlet_consumer",
     "build_reminded_lookup",
     "build_reminder_responses",
 ]

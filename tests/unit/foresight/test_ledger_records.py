@@ -93,6 +93,15 @@ def test_every_record_round_trips_through_its_codec() -> None:
     assert decode_delivery(encode_delivery(delivery)) == delivery
     shadow = Delivery("abc", FORMED, 0, False, "影子", 0.0)
     assert decode_delivery(encode_delivery(shadow)) == shadow
+    # 「说了」记谁说的、在哪一轮（裁定 64 第 6 条）；推式以前的记录没有 via / turn 也合法
+    spoken = Delivery("abc", FORMED + timedelta(minutes=1), 1, True, "说了", 1.0, "周四了，周报还没写。", via="codex", turn="call_1")
+    assert decode_delivery(encode_delivery(spoken)) == spoken
+    plain = Delivery("abc", FORMED + timedelta(minutes=1), 1, True, "说了", 1.0, "周四了。")
+    assert decode_delivery(encode_delivery(plain)) == plain and plain.via is None and plain.turn is None
+    awaiting = Delivery("abc", FORMED, 1, False, "待取", 1.0, "周四了，周报还没写。")
+    assert decode_delivery(encode_delivery(awaiting)) == awaiting
+    unclaimed = Delivery("abc", FORMED + timedelta(hours=3), 1, False, "宿主没取", 0.0)
+    assert decode_delivery(encode_delivery(unclaimed)) == unclaimed
     response = Response("abc", FORMED + timedelta(minutes=1), "负", "conv-1#3-9")
     assert decode_response(encode_response(response)) == response and response.closes
     assert not Response("abc", FORMED, "中", "conv-1#3-9").closes
@@ -143,6 +152,15 @@ def test_records_refuse_shapes_that_cannot_be_settled() -> None:
     with pytest.raises(ForesightError, match="unspoken delivery carries no text"):
         Delivery("abc", FORMED, 0, False, "影子", 0.0, "话")
     assert Delivery("abc", FORMED, 1, False, "等时窗末", 0.0, "话").text == "话"  # 话先备好、到时窗末再说
+    assert Delivery("abc", FORMED, 1, False, "待取", 1.0, "话").text == "话"  # 决定说、话写好了、等宿主来取（裁定 64）
+    with pytest.raises(ForesightError, match="unspoken delivery carries no text"):
+        Delivery("abc", FORMED, 1, False, "宿主没取", 0.0, "话")  # 终局：没人问出口，不带话
+    with pytest.raises(ForesightError, match="names no host"):
+        Delivery("abc", FORMED, 1, False, "待取", 1.0, "话", via="codex")  # 还没说出口，没有"谁说的"
+    with pytest.raises(ForesightError, match="names no host"):
+        Delivery("abc", FORMED, 1, False, "宿主没取", 0.0, turn="call_1")
+    with pytest.raises(ForesightError, match="delivery via"):
+        Delivery("abc", FORMED, 1, True, "说了", 1.0, "话", via="")
     with pytest.raises(ForesightError, match="unknown delivery level"):
         Delivery("abc", FORMED, 2, True, "说了", 1.0)  # 只到提醒（裁定 48）
     with pytest.raises(ForesightError, match="names the occurrence exactly"):
@@ -180,6 +198,11 @@ def test_decoding_refuses_other_schemas_and_other_records() -> None:
     raw["schema_version"] = "foresight_ledger_v5"
     with pytest.raises(ForesightError, match="schema"):
         decode_expectation(raw)
+    # v8（裁定 61 的那一版）也按不支持拒：递送多了原因与 via / turn 之后升到 v9，不做读回的双轨
+    stale = encode_delivery(Delivery("abc", FORMED, 1, False, "影子", 0.0))
+    stale["schema_version"] = "foresight_ledger_v8"
+    with pytest.raises(ForesightError, match="foresight_ledger_v8"):
+        decode_delivery(stale)
     broken = encode_expectation(expectation())
     del broken["window"]
     with pytest.raises(ForesightError, match="malformed"):

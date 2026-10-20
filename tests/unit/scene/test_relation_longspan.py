@@ -243,15 +243,15 @@ def test_moderation_opens_by_the_smallest_reachable_p_with_two_on_each_side() ->
         )  # type: ignore[arg-type]
 
     alpha = CONFIG.thresholds.forward_alpha
-    assert ready_to_test(ModeratedMeasure(side(4, 0), side(4, 100), enough=True), alpha=alpha)
-    assert not ready_to_test(ModeratedMeasure(side(3, 0), side(3, 100), enough=True), alpha=alpha)
-    assert not ready_to_test(ModeratedMeasure(side(4, 0), side(4, 100), enough=False), alpha=alpha)
-    assert ModeratedMeasure((), (), enough=False).minimum_p() == 1.0
+    assert ready_to_test(ModeratedMeasure(side(4, 0), (side(4, 100),), enough=True), alpha=alpha)
+    assert not ready_to_test(ModeratedMeasure(side(3, 0), (side(3, 100),), enough=True), alpha=alpha)
+    assert not ready_to_test(ModeratedMeasure(side(4, 0), (side(4, 100),), enough=False), alpha=alpha)
+    assert ModeratedMeasure((), ((),), enough=False).minimum_p() == 1.0
     lopsided = split(ChainMeasure((*side(1, 0), *side(7, 100))), [lambda chain: None])  # 判不了的不分组
     assert lopsided.inside == () and not lopsided.enough
     flags = iter([True] + [False] * 7)
     one_inside = split(ChainMeasure((*side(1, 0), *side(7, 100))), [lambda chain: next(flags)])
-    assert (len(one_inside.inside), len(one_inside.outside)) == (1, 7) and not one_inside.enough  # 合计 8 次也不够
+    assert (len(one_inside.inside), len(one_inside.outsides[0])) == (1, 7) and not one_inside.enough  # 合计 8 次也不够
     # 列举调节条件前的预筛只要求两边各 2 次的最低量
     few = planted(20)
     tests = LaneTests(line_of(few), CONCEPTS, CONFIG, few.cutoff)
@@ -273,8 +273,8 @@ def test_moderation_asks_the_outside_for_as_much_as_the_inside() -> None:
         )
 
     alpha = CONFIG.thresholds.forward_alpha
-    assert not ready_to_test(ModeratedMeasure(side(8, 5, 0), side(3, 25, 100), enough=True), alpha=alpha)
-    assert ready_to_test(ModeratedMeasure(side(8, 5, 0), side(8, 5, 100), enough=True), alpha=alpha)
+    assert not ready_to_test(ModeratedMeasure(side(8, 5, 0), (side(3, 25, 100),), enough=True), alpha=alpha)
+    assert ready_to_test(ModeratedMeasure(side(8, 5, 0), (side(8, 5, 100),), enough=True), alpha=alpha)
 
 
 def test_a_real_relation_without_a_condition_is_seldom_read_as_moderated() -> None:
@@ -376,7 +376,7 @@ def test_a_new_proposed_condition_is_measured_only_after_it_was_proposed() -> No
     assert key in proposed.keys()
     assert key not in LaneTests(line, CONCEPTS, CONFIG, series.cutoff).keys()
     late = proposed.measure(key, since=proposed_on)
-    assert all(item.chain.day >= proposed_on for item in late.inside + late.outside)  # type: ignore[attr-defined]
+    assert all(item.chain.day >= proposed_on for item in (*late.inside, *late.outsides[0]))  # type: ignore[attr-defined]
 
 
 def test_a_situation_derived_from_behaviour_history_moderates_but_is_not_an_antecedent() -> None:

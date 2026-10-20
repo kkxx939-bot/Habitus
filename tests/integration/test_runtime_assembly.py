@@ -708,6 +708,18 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     assert isinstance(foresight.worker, ForesightWorker)
     tick = foresight.worker.tick
     assert tick.ledger is foresight.ledger and tick.opportunities is foresight.opportunities
+    # 提醒出口（方案 32）：递送那一拍按它的活性问不问模型；会话源的行为侧消费者外面包着它，同一份会话先过出口再进 lane
+    from habitus.conversation import ConversationSourceConsumer
+    from habitus.runtime.foresight_outlet import ReminderOutlet
+    from habitus.runtime.foresight_outlet_consumer import OutletObservingConsumer
+
+    assert isinstance(foresight.outlet, ReminderOutlet) and foresight.outlet.ledger is foresight.ledger
+    assert foresight.outlet.store.root == foresight.ledger.root / "outlet"
+    assert tick.delivery.outlet is foresight.outlet
+    consumer = runtime.components.conversation.behavior_session_consumer
+    assert isinstance(consumer, OutletObservingConsumer) and consumer.outlet is foresight.outlet
+    assert consumer.inner.lane is branches.session_lane
+    assert runtime.components.conversation.source_delivery.consumers[ConversationSourceConsumer.BEHAVIOR_SESSION] is consumer
     # 整晚那一趟：结算第一步，语义树读同一棵行为树、机会表写进同一本账本旁边（语义树第 11 步）；"今天"按主体所在地算
     from habitus.runtime.nightly import Nightly
 

@@ -1,6 +1,7 @@
 """递送那一拍（裁定 48–51、58、61）：到了时窗的预期按这条边从单元历史读出的档决定、记进账本；一条预期只决定一次（「等时窗末」
-除外）；没渠道记「不可达」也不问模型；窗与拍点取交集；一类一天一句；一律到时窗末还没做才说（这一版不分急缓、不扣发）；名额按
-决定的日子数；档变了记一条；可见面能读到每本账；设置与提醒反馈按行为。"""
+除外）；没有宿主活着记「不可达」也不问模型；窗与拍点取交集；一类一天一句；一律到时窗末还没做才说（这一版不分急缓、不扣发）：决定说的
+记「待取」、话交给出口（方案 32），「说了」由出口追加；「待取」之后做了记「已发生」、过时限记「宿主没取」；名额按决定的日子数、「待取」
+也占；档变了记一条；可见面能读到每本账；设置与提醒反馈按行为。"""
 
 from __future__ import annotations
 
@@ -13,10 +14,11 @@ from habitus.foresight import Evidence, Tolerance
 from habitus.foresight.edges import PastMoment
 from habitus.foresight.history import Moment, UnitHistory
 from habitus.foresight.judge import Judge
-from habitus.foresight.ledger import AccountFact, Expectation, Omission, account_key
+from habitus.foresight.ledger import AccountFact, Delivery, Expectation, Omission, account_key
 from habitus.runtime.foresight_delivery import DeliveryStage, JudgeMaterials
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
+from habitus.runtime.foresight_outlet import OpenRequest
 from tests.unit.foresight.scripted_model import recording_client
 
 CST = timezone(timedelta(hours=8))
@@ -102,6 +104,21 @@ class Seeded:
 _SEEDED: dict[str, Seeded] = {}
 
 
+class Outlet:
+    """出口的替身：有没有宿主活着由测试定；记下每拍交过来的可取清单。"""
+
+    def __init__(self, alive: bool = True) -> None:
+        self.is_alive = alive
+        self.published: list[tuple[OpenRequest, ...]] = []
+
+    def alive(self, now: datetime) -> bool:
+        return self.is_alive
+
+    def publish(self, rows, *, now: datetime) -> int:  # type: ignore[no-untyped-def]
+        self.published.append(tuple(rows))
+        return len(rows)
+
+
 def stage(tmp_path, **overrides):  # type: ignore[no-untyped-def]
     ledger = ForesightLedgerStore(tmp_path / "ledger")
     seeded = Seeded(tmp_path / "ledger", ledger)
@@ -111,7 +128,7 @@ def stage(tmp_path, **overrides):  # type: ignore[no-untyped-def]
         evidence=EVIDENCE,
         daily_cap=2,
         tick_seconds=60.0,
-        reachable=True,
+        outlet=Outlet(),
         history=seeded.store,
     )
     values.update(overrides)
@@ -149,22 +166,74 @@ def test_due_expectations_are_decided_once_by_the_level_their_account_has_earned
     assert unit is not None and unit.level == 1
     assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=20), materials)).decided == 0  # 一条只决定一次
     closing = asyncio.run(run.run_once(DAY0 + timedelta(minutes=41), materials))
-    assert closing.by_reason == {"说了": 1} and closing.level_changes == 0  # 该来了还没来
-    (said,) = [item for item in ledger.deliveries_on(DAY0.date()) if item.expectation_id == "today" and item.spoken]
+    assert closing.by_reason == {"待取": 1} and closing.level_changes == 0  # 该来了还没来：话写好、等宿主来取
+    (said,) = [
+        item for item in ledger.deliveries_on(DAY0.date()) if item.expectation_id == "today" and item.reason == "待取"
+    ]
     assert said.text
     assert run.standing_of(expectation("today", DAY0), DAY0 + timedelta(minutes=41)).level == 1
 
 
-def test_without_a_channel_the_decision_is_unreachable_and_the_model_is_not_asked(tmp_path) -> None:
+def test_without_a_live_host_the_window_end_is_unreachable_and_the_model_is_not_asked(tmp_path) -> None:
+    """活性到时窗末才看（方案 32 第 3.3 条）：时窗开时照常「等时窗末」，末了还没有宿主活着才记「不可达」、不问模型。"""
+
     client, provider = recording_client([LIKE, LIKE])
-    run, ledger = stage(tmp_path, reachable=False, judge=Judge(client, retries=0, delay_seconds=0.0))
+    outlet = Outlet(alive=False)
+    run, ledger = stage(tmp_path, outlet=outlet, judge=Judge(client, retries=0, delay_seconds=0.0))
     earn(ledger)
     ledger.record_expectation(expectation("today", DAY0))
-    report = asyncio.run(run.run_once(DAY0 + timedelta(minutes=15), NO_ROWS))
+    opened = asyncio.run(run.run_once(DAY0 + timedelta(minutes=15), NO_ROWS))
+    assert opened.by_reason == {"等时窗末": 1} and opened.by_level == {1: 1}
+    report = asyncio.run(run.run_once(DAY0 + timedelta(minutes=41), NO_ROWS))
     assert report.by_reason == {"不可达": 1} and report.by_level == {1: 1} and report.spoken == 0
-    assert report.judged == 0 and provider.calls == 0  # 送不到：问了也说不出口
-    (stored,) = ledger.deliveries_on(DAY0.date())
-    assert not stored.spoken and stored.text is None
+    assert report.judged == 0 and provider.calls == 0  # 没人来取：问了也说不出口
+    stored = {item.reason: item for item in ledger.deliveries_on(DAY0.date())}
+    assert not stored["不可达"].spoken and stored["不可达"].text is None
+    assert outlet.published[-1] == ()  # 可取清单是空的
+    # 没接出口（None）与没有宿主活着一样
+    run2, ledger2 = stage(tmp_path / "b", outlet=None)
+    earn(ledger2)
+    ledger2.record_expectation(expectation("today", DAY0))
+    asyncio.run(run2.run_once(DAY0 + timedelta(minutes=15), NO_ROWS))
+    assert asyncio.run(run2.run_once(DAY0 + timedelta(minutes=41), NO_ROWS)).by_reason == {"不可达": 1}
+
+
+def test_an_awaiting_request_is_handed_to_the_outlet_and_closed_by_doing_it_spoken_or_the_deadline(tmp_path) -> None:
+    """「待取」之后每拍只做两件事：做了追加「已发生」、过了最晚时限追加「宿主没取」；出口写了「说了」的不再动；
+    可取清单每拍重写、只含还等着的。"""
+
+    outlet = Outlet()
+    run, ledger = stage(tmp_path, outlet=outlet)
+    for kind in ("s-k0002", "s-k0003", "s-k0004"):
+        earn(ledger, kind=kind)
+        ledger.record_expectation(expectation(f"t-{kind}", DAY0, kind=kind))
+    run.daily_cap = 3
+    asyncio.run(run.run_once(DAY0 + timedelta(minutes=15)))
+    closing = asyncio.run(run.run_once(DAY0 + timedelta(minutes=41)))
+    assert closing.by_reason == {"待取": 3} and closing.open_requests == 3
+    rows = outlet.published[-1]
+    assert sorted(row.request_id for row in rows) == ["t-s-k0002", "t-s-k0003", "t-s-k0004"]
+    assert all(row.text and row.level == 1 and row.deadline == DAY0 + timedelta(hours=2) for row in rows)
+    # 出口认出了提问：追加「说了」（出口写，不是这一拍）
+    ledger.record_delivery(
+        DAY0.date(),
+        Delivery("t-s-k0002", DAY0 + timedelta(minutes=50), 1, True, "说了", 1.0, "题目", via="codex", turn="c1"),
+    )
+    done = JudgeMaterials(None, lambda uris: {}, happened=lambda item: item.kind_token == "s-k0003")
+    report = asyncio.run(run.run_once(DAY0 + timedelta(minutes=55), done))
+    assert report.by_reason == {"已发生": 1} and report.open_requests == 1  # 做了的、说了的都不在清单上
+    assert [row.request_id for row in outlet.published[-1]] == ["t-s-k0004"]
+    assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=70), done)).decided == 0  # 没变就不再写
+    over = asyncio.run(run.run_once(DAY0 + timedelta(hours=2, minutes=1), done))
+    assert over.by_reason == {"宿主没取": 1} and over.open_requests == 0
+    stored = {(item.expectation_id, item.reason) for item in ledger.deliveries_on(DAY0.date())}
+    assert ("t-s-k0004", "宿主没取") in stored and ("t-s-k0002", "宿主没取") not in stored
+    assert asyncio.run(run.run_once(DAY0 + timedelta(hours=2, minutes=2), done)).decided == 0
+    # 名额：「待取」与它之后的「说了」同一条预期只算一次——今天三条都已占满，再来一条记「名额已满」
+    earn(ledger, kind="s-k0005")
+    ledger.record_expectation(expectation("t-late", DAY0 + timedelta(minutes=50), kind="s-k0005"))
+    asyncio.run(run.run_once(DAY0 + timedelta(minutes=65)))
+    assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=91))).by_reason == {"名额已满": 1}
 
 
 def test_a_window_shorter_than_a_tick_is_caught_by_the_tick_that_covers_it(tmp_path) -> None:
@@ -186,7 +255,7 @@ def test_light_reminders_wait_for_the_window_end_and_the_cap_counts_by_decision_
     assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=30))).decided == 0  # 时窗里不再问
     done = JudgeMaterials(None, lambda uris: {}, happened=lambda item: item.kind_token == "s-k0004")
     closing = asyncio.run(run.run_once(DAY0 + timedelta(minutes=41), done))
-    assert closing.by_reason == {"说了": 2, "已发生": 1} and closing.spoken == 2  # 名额 2
+    assert closing.by_reason == {"待取": 2, "已发生": 1} and closing.open_requests == 2  # 名额 2，「待取」占名额
     earn(ledger, kind="s-k0005")
     ledger.record_expectation(expectation("t-late", DAY0 + timedelta(minutes=50), kind="s-k0005"))
     asyncio.run(run.run_once(DAY0 + timedelta(minutes=65)))
@@ -195,7 +264,9 @@ def test_light_reminders_wait_for_the_window_end_and_the_cap_counts_by_decision_
     ledger.record_expectation(expectation("t-over", DAY0 + timedelta(minutes=100), kind="s-k0006", deadline_hours=1))
     earn(ledger, kind="s-k0006")
     asyncio.run(run.run_once(DAY0 + timedelta(minutes=115)))
-    assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=161))).decided == 0
+    # 11:41：t-over 过了最晚时限、没决定过，不再递；上午那两条「待取」到这时也没人问出口，记「宿主没取」
+    assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=161))).by_reason == {"宿主没取": 2}
+    assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=162))).decided == 0
 
 
 def test_one_class_is_spoken_once_a_day_even_from_several_accounts(tmp_path) -> None:
@@ -210,9 +281,9 @@ def test_one_class_is_spoken_once_a_day_even_from_several_accounts(tmp_path) -> 
     opened = asyncio.run(run.run_once(DAY0 + timedelta(minutes=15)))
     assert opened.by_reason == {"等时窗末": 1, "单元已选": 1}
     report = asyncio.run(run.run_once(DAY0 + timedelta(minutes=41)))  # 时窗末还没做：说
-    assert report.by_reason == {"说了": 1} and report.spoken == 1
+    assert report.by_reason == {"待取": 1} and report.open_requests == 1
     (subsumed,) = [item for item in ledger.deliveries_on(DAY0.date()) if item.reason == "单元已选"]
-    (said,) = [item for item in ledger.deliveries_on(DAY0.date()) if item.spoken]
+    (said,) = [item for item in ledger.deliveries_on(DAY0.date()) if item.reason == "待取"]
     assert subsumed.evidence == (f"单元:{said.expectation_id}",) and not subsumed.spoken
     # 同一刻后来才形成的那条：并进已经决定过的单元，不另起一个（2026-10-17 四方评审）
     ledger.record_expectation(expectation("c", DAY0 + timedelta(minutes=30), trigger="rel"))
@@ -245,7 +316,7 @@ def test_the_stage_checks_its_inputs(tmp_path) -> None:
     with pytest.raises(ValueError):
         DeliveryStage(ledger, **common, tick_seconds=0)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
-        DeliveryStage(ledger, **common, reachable=(1, 2))  # type: ignore[arg-type]
+        DeliveryStage(ledger, **common, outlet=object())  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         asyncio.run(DeliveryStage(ledger, **common).run_once(datetime(2026, 10, 1, 9, 0)))  # type: ignore[arg-type]
 
@@ -285,7 +356,7 @@ def test_at_the_window_end_the_account_is_read_again_and_the_model_is_asked_then
     assert opened.by_reason == {"等时窗末": 2} and provider.calls == 0
     ledger.record_setting(UnitSetting("s-k0003", DAY0 + timedelta(minutes=20), "以后别提了"))
     closing = asyncio.run(run.run_once(DAY0 + timedelta(minutes=41), NO_ROWS))
-    assert closing.by_reason == {"影子": 1, "说了": 1} and provider.calls == 2
+    assert closing.by_reason == {"影子": 1, "待取": 1} and provider.calls == 2
     stored = {item.expectation_id: item for item in ledger.deliveries_on(DAY0.date()) if item.reason != "等时窗末"}
     assert stored["silenced"].level == 0 and not stored["silenced"].spoken
     assert stored["spoken"].text == "该去医院了"
@@ -297,7 +368,7 @@ def test_a_window_longer_than_a_week_is_still_closed_at_its_end(tmp_path) -> Non
     ledger.record_expectation(expectation("long", DAY0, window=(10, 12 * 24 * 60), deadline_hours=13 * 24))
     assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=15))).by_reason == {"等时窗末": 1}
     end = DAY0 + timedelta(days=12, minutes=15)
-    assert asyncio.run(run.run_once(end)).by_reason == {"说了": 1}
+    assert asyncio.run(run.run_once(end)).by_reason == {"待取": 1}
 
 
 def test_before_speaking_an_event_reminder_checks_its_antecedent_again(tmp_path) -> None:
@@ -340,7 +411,7 @@ def test_before_speaking_an_event_reminder_checks_its_antecedent_again(tmp_path)
     ledger2.record_expectation(item)
     holds = JudgeMaterials(table, rows("s-k0001"))
     asyncio.run(run2.run_once(DAY0 + timedelta(minutes=15), holds))
-    assert asyncio.run(run2.run_once(DAY0 + timedelta(minutes=41), holds)).by_reason == {"说了": 1}
+    assert asyncio.run(run2.run_once(DAY0 + timedelta(minutes=41), holds)).by_reason == {"待取": 1}
 
 
 def test_a_unit_decides_once_for_every_input_of_the_same_moment_including_those_not_yet_due(tmp_path) -> None:
@@ -356,7 +427,7 @@ def test_a_unit_decides_once_for_every_input_of_the_same_moment_including_those_
     assert first.by_reason == {"等时窗末": 1, "单元已选": 1}
     later = next(item for item in ledger.deliveries_on(DAY0.date()) if item.expectation_id == "later")
     assert later.reason == "单元已选" and later.evidence == ("单元:now",)
-    assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=41))).by_reason == {"说了": 1}  # 只有依据那条在时窗末说
+    assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=41))).by_reason == {"待取": 1}  # 只有依据那条在时窗末说
 
 
 def test_a_suppressor_present_holds_the_unit_back_even_when_the_account_alone_would_speak(tmp_path) -> None:
@@ -387,7 +458,7 @@ def test_a_suppressor_present_holds_the_unit_back_even_when_the_account_alone_wo
     tomorrow = DAY0 + timedelta(days=1)
     ledger.record_expectation(expectation("plain", tomorrow, trigger="rel"))
     asyncio.run(run.run_once(tomorrow + timedelta(minutes=16), materials))
-    assert asyncio.run(run.run_once(tomorrow + timedelta(minutes=41), materials)).by_reason == {"说了": 1}
+    assert asyncio.run(run.run_once(tomorrow + timedelta(minutes=41), materials)).by_reason == {"待取": 1}
 
 
 def test_at_the_window_end_the_unit_is_read_again_not_the_basis_account_alone(tmp_path) -> None:
@@ -419,7 +490,7 @@ def test_at_the_window_end_the_unit_is_read_again_not_the_basis_account_alone(tm
         run.standing_of(expectation(n, DAY0, trigger=t), DAY0).level == 0 for n, t in (("a", "rel"), ("b", "clock"))
     )
     closing = asyncio.run(run.run_once(DAY0 + timedelta(minutes=41), materials))
-    assert closing.by_reason == {"说了": 1}
+    assert closing.by_reason == {"待取": 1}
     unit = ledger.unit_level_of("s-k0002")
     assert unit is not None and unit.level == 1
     assert all(ledger.level_of(account) is None for account in weak)  # 账自己的级没被单元的档改写

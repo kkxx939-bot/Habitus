@@ -57,6 +57,7 @@ from habitus.model_client import (
 )
 from habitus.runtime.behavior import BehaviorBranches
 from habitus.runtime.foresight import ForesightRuntimeComponents
+from habitus.runtime.foresight_outlet_consumer import OutletObservingConsumer
 from habitus.runtime.lifecycle import LifecycleWorker
 from habitus.runtime.lifecycle_memory import ConversationChainParticipant
 from habitus.runtime.nightly_worker import NightlyWorker
@@ -159,7 +160,8 @@ class RuntimeConversation:
     source_outcomes: ConversationConsumerOutcomeStore
     memory_outputs: MemoryConversationOutputStore
     behavior_session_outputs: BehaviorSessionOutputStore
-    behavior_session_consumer: BehaviorSessionConsumer
+    #: 会话 lane 消费者；预测层开着时外面包着提醒出口那一层（方案 32 第 4.2 条：同一份会话先过出口再进 lane）。
+    behavior_session_consumer: BehaviorSessionConsumer | OutletObservingConsumer
     source_inspector: ConversationConsumerStateInspector
     source_fence: ConversationConsumerExecutionFence
     source_delivery: ConversationConsumerDelivery
@@ -185,8 +187,8 @@ class RuntimeConversation:
             raise TypeError("memory_outputs must be MemoryConversationOutputStore")
         if not isinstance(self.behavior_session_outputs, BehaviorSessionOutputStore):
             raise TypeError("behavior_session_outputs must be BehaviorSessionOutputStore")
-        if not isinstance(self.behavior_session_consumer, BehaviorSessionConsumer):
-            raise TypeError("behavior_session_consumer must be BehaviorSessionConsumer")
+        if not isinstance(self.behavior_session_consumer, BehaviorSessionConsumer | OutletObservingConsumer):
+            raise TypeError("behavior_session_consumer must be BehaviorSessionConsumer or OutletObservingConsumer")
         if not isinstance(self.source_inspector, ConversationConsumerStateInspector):
             raise TypeError("source_inspector must be ConversationConsumerStateInspector")
         if not isinstance(self.source_fence, ConversationConsumerExecutionFence):
@@ -413,6 +415,10 @@ class RuntimeComponents:
             if step is None or getattr(step, "store", None) is not self.foresight.opportunities:
                 raise ValueError("the nightly run must write the opportunity table the foresight layer reads")
             self.foresight.assert_attached_to(behavior=self.behavior.session)
+            # 出口漏包：提醒记了「待取」、宿主也问了，转写回来却没人认，账上永远没有「说了」——结算全按没说过处理，一处都不报错
+            consumer = self.conversation.behavior_session_consumer
+            if not isinstance(consumer, OutletObservingConsumer) or consumer.outlet is not self.foresight.outlet:
+                raise ValueError("the session lane consumer must be wrapped by the foresight reminder outlet")
         if self.workflow.enqueuer.conversations is not self.conversation.journal:
             raise ValueError("workflow enqueuer must use the shared conversation journal")
         if (

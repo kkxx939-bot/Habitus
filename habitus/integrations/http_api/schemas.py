@@ -111,6 +111,43 @@ class FlushRequest(StrictSchema):
         return value
 
 
+class ReminderClaimRequest(StrictSchema):
+    """宿主来取提醒（方案 32 第 4.1 条）。``session`` 与插件送转写时的 conversation_id 是同一个身份。"""
+
+    host: Annotated[str, Field(pattern=r"^[a-z0-9](?:[a-z0-9-]{0,62})$")]
+    session: Annotated[str, Field(min_length=1, max_length=256)]
+    at: datetime
+    limit: Annotated[int, Field(strict=True, ge=1, le=20)] = 3
+
+    @field_validator("session")
+    @classmethod
+    def validate_session(cls, value: str) -> str:
+        if value != value.strip():
+            raise ValueError("session must not contain surrounding whitespace")
+        return value
+
+    @field_validator("at")
+    @classmethod
+    def validate_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("at must include a timezone offset")
+        return value
+
+
+class ReminderResult(StrictSchema):
+    request_id: Annotated[str, Field(min_length=1)]
+    kind: str
+    text: str
+    options: list[str]
+    deadline: datetime
+    lease_until: datetime
+    claimed_at: datetime
+
+
+class ReminderClaimResult(StrictSchema):
+    reminders: list[ReminderResult]
+
+
 class CapabilitiesResult(StrictSchema):
     api_version: Annotated[str, Field(pattern=r"^[0-9]+\.[0-9]+$")]
     service_version: Annotated[str, Field(min_length=1)]
@@ -287,6 +324,9 @@ __all__ = [
     "RecallResult",
     "RememberRequest",
     "RememberResult",
+    "ReminderClaimRequest",
+    "ReminderClaimResult",
+    "ReminderResult",
     "RetryJobRequest",
     "RetryJobResult",
     "SuccessResponse",

@@ -46,6 +46,8 @@ from habitus.integrations.http_api.schemas import (
     RememberJobResult,
     RememberRequest,
     RememberResult,
+    ReminderClaimRequest,
+    ReminderClaimResult,
     RetryJobRequest,
     RetryJobResult,
     SuccessResponse,
@@ -204,6 +206,14 @@ def _build_public_router(
             intention_scope=body.intention_scope,
         )
         return _success(request, RecallResult.model_validate(result))
+
+    @router.post("/reminders/claim", response_model=SuccessResponse[ReminderClaimResult])
+    async def claim_reminders(
+        request: Request,
+        body: ReminderClaimRequest,
+    ) -> SuccessResponse[object]:
+        result = await handlers.claim_reminders(host=body.host, session=body.session, at=body.at, limit=body.limit)
+        return _success(request, ReminderClaimResult.model_validate(result))
 
     @router.get("/memory/jobs", response_model=SuccessResponse[JobListResult])
     async def list_jobs(

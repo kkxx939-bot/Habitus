@@ -202,6 +202,61 @@ def test_answering_the_assistants_question_opens_a_new_turn() -> None:
     assert "他说：（回答助手的提问）" in render_turn(answered)
 
 
+def test_codex_desktop_replies_arrive_as_a_user_message_and_become_the_answer_turn() -> None:
+    """Codex Desktop：agent 用 request_user_input_async 问完接着干活，工具结果只是"收到了"（不开轮）；他的作答以一条
+    <send_user_message_question_reply> 用户消息晚来，翻成"（回答助手的提问）问题 → 答案"开新的一轮（方案 32 第 5.2 条）。"""
+
+    reply_message = (
+        "<send_user_message_question_reply>\n"
+        '[{"questionItemId":"[\\"request_user_input_async\\",\\"call_1\\",0]","question":"周四了，周报还没写。","answer":"这次不用"}]\n'
+        "</send_user_message_question_reply>\n"
+    )
+    asked, answered = split_turns(
+        CONVERSATION,
+        (
+            prompt(0, "帮我看这个报错", minutes=0),
+            call(
+                1,
+                "request_user_input_async",
+                '{"questions": [{"title": "周四了，周报还没写。"}]}',
+                call_id="call_1",
+                minutes=1,
+            ),
+            result(2, '{"accepted":true}', call_id="call_1", name="request_user_input_async", minutes=1.1),
+            reply(3, "报错是依赖版本不对。", minutes=3),
+            prompt(4, reply_message, minutes=6),
+            reply(5, "好，那先不写。", minutes=7),
+        ),
+    )
+    assert (asked.start_sequence, asked.end_sequence) == (0, 3)  # 收到了不是作答，不开轮
+    assert answered.instruction == f"{ANSWER_PREFIX}周四了，周报还没写。 → 这次不用"
+    assert answered.instructed_at == at(6) and answered.completed_at == at(7)
+    # Codex CLI 的同步提问：作答在工具结果里，和 Claude Code 一样开轮
+    _asked, answered = split_turns(
+        CONVERSATION,
+        (
+            prompt(0, "帮我看这个报错"),
+            call(
+                1, "request_user_input", '{"questions": [{"title": "周四了，周报还没写。"}]}', call_id="c1", minutes=1
+            ),
+            result(
+                2, '{"answers": {"周四了，周报还没写。": "知道了"}}', call_id="c1", name="request_user_input", minutes=2
+            ),
+            reply(3, "好。", minutes=3),
+        ),
+    )
+    assert answered.instruction.startswith(ANSWER_PREFIX) and "知道了" in answered.instruction
+    # 不是作答形状的（JSON 坏了）：照旧当一句人说的话
+    (turn,) = split_turns(
+        CONVERSATION,
+        (
+            prompt(0, "<send_user_message_question_reply>\nnot json\n</send_user_message_question_reply>"),
+            reply(1, "嗯"),
+        ),
+    )
+    assert turn.instruction.startswith("<send_user_message_question_reply>")
+
+
 def test_a_rejected_or_invalid_question_is_not_an_answer() -> None:
     (turn,) = split_turns(
         CONVERSATION,

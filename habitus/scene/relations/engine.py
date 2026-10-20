@@ -553,7 +553,8 @@ class LaneTests:
         elif key.condition:
             window = self.config.transition_window_slots
             judges = [evaluator(self.line, condition, window=window) for condition in key.conditions]
-            # 带条件的只按第 1 道对照分两组比：两组的钟点偏差一样，分组之间抵掉；几个条件合起来比"全成立"对"少任意一个"
+            # 带条件的只按第 1 道对照分组比：两组的钟点偏差一样，分组之间抵掉；几个条件合起来时每个条件各比一次——"全成立"对
+            # "其余成立、它不成立"，按最难过的那组读（裁定 63 第 1 条）
             measure = split(ChainMeasure(self.strata(key)), judges)
         else:
             measure = self._chain_measure(key)
@@ -564,8 +565,12 @@ class LaneTests:
 
         return int(canonical_digest({"key": key.text, "night": self.cutoff.isoformat(), "purpose": purpose})[:16], 16)
 
-    def assess(self, test: RelationTest, measure: Measure | None = None) -> RelationTest:
-        """第 2、3 道与几个只报告的读数，按 ``test.upward`` 那个方向判（候选在某一晚没显著时，状态折叠也要用它）。"""
+    def assess(
+        self, test: RelationTest, measure: Measure | None = None, *, previously_large: bool | None = None
+    ) -> RelationTest:
+        """第 2、3 道与几个只报告的读数，按 ``test.upward`` 那个方向判（候选在某一晚没显著时，状态折叠也要用它）。
+        ``previously_large`` 是上一晚判的"影响够大"：给了就带滞回——进用近端过线，退用远端也掉线（``gone``），中间维持上一晚
+        （裁定 63 第 3 条：成立关系每晚判，线附近的别一晚进一晚出）。"""
 
         config = self.config
         if measure is None:
@@ -589,7 +594,8 @@ class LaneTests:
             relative_interval=relative,
             excess_share=excess / consequent_count if consequent_count else None,
             same_event_share=measure.same_event_share(),
-            large_enough=large_enough(spread, relative, upward=test.upward, config=config),
+            large_enough=large_enough(spread, relative, upward=test.upward, config=config)
+            or (previously_large is True and not gone(spread, relative, upward=test.upward, config=config)),
         )
 
 

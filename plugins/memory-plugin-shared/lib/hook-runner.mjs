@@ -1,10 +1,13 @@
 import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { loadPluginConfig } from "./config.mjs";
+import { INJECTION_TAGS } from "./injection-receipt.mjs";
 import { writeOperationLog } from "./operation-log.mjs";
 import { PluginCore } from "./plugin-core.mjs";
 
-const INJECTION_END = "</habitus-memory-context>";
+const [MEMORY_TAG, REMINDER_TAG] = INJECTION_TAGS;
+// 提醒的三个固定选项由服务给；没给时用这三个（产品定措辞，所有宿主一样，方案 32 第 4.1 条）。
+const DEFAULT_OPTIONS = ["现在就做", "这次不用", "知道了"];
 
 async function readInput() {
   const chunks = [];
@@ -56,13 +59,30 @@ export function encodeContextPayload(value) {
   }).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e");
 }
 
-export function createContextInjection(value, nonce = randomBytes(16).toString("hex")) {
+export function createContextInjection(value, nonce = randomBytes(16).toString("hex"), tag = MEMORY_TAG) {
   if (!/^[0-9a-f]{32}$/.test(nonce)) throw new Error("injection nonce is invalid");
-  const injection = `<habitus-memory-context receipt="${nonce}">\n${encodeContextPayload(value)}\n${INJECTION_END}`;
+  if (!INJECTION_TAGS.includes(tag)) throw new Error("injection tag is unknown");
+  const injection = `<${tag} receipt="${nonce}">\n${encodeContextPayload(value)}\n</${tag}>`;
   return Object.freeze({
     injection,
     receipt: Object.freeze({ nonce, digest: createHash("sha256").update(injection).digest("hex") }),
   });
+}
+
+// 给 agent 的指令块（方案 32 第 5.1 条；措辞要对着真实宿主调，R1 / R8）：先问再做；题目原样、三个选项、允许他自己填；
+// 他怎么答都不用另外处理——系统从转写里认提问与作答。
+export function renderReminderInstruction(reminders, questionTool) {
+  const tool = questionTool || "向用户提问的工具";
+  const lines = [
+    `Habitus 的提醒，不是用户说的话。在做任何别的事之前，先用 ${tool} 问用户下面${reminders.length > 1 ? `这 ${reminders.length} 件事（一件一问，按顺序）` : "这件事"}：`,
+    "题目原样用这句话、给这三个选项、允许他自己填别的话。问完照常做他让你做的事；他怎么答你都不用另外处理，系统自己会记。",
+  ];
+  reminders.forEach((item, index) => {
+    const options = Array.isArray(item.options) && item.options.length > 0 ? item.options : DEFAULT_OPTIONS;
+    lines.push(`${index + 1}. 『${String(item.text).trim()}』`);
+    lines.push(`   选项：${options.join(" / ")}`);
+  });
+  return lines.join("\n");
 }
 
 export async function runHook(action, adapter) {
@@ -81,13 +101,23 @@ export async function runHook(action, adapter) {
     if (action === "user-prompt") {
       const context = await core.recall(adapter, input);
       const prepared = context ? createContextInjection(context) : null;
-      const injection = prepared?.injection || "";
       if (prepared) await core.recordInjection(adapter, input, prepared.receipt);
-      write(
-        context
-          ? adapter.contextOutput(injection)
-          : adapter.successOutput(action),
-      );
+      // 提醒出口（方案 32 第五节）：recall 之后取，取到的拼成指令块、同一套回执包装；取不到当这一轮没有提醒
+      let reminderInjection = "";
+      try {
+        const reminders = await core.claimReminders(adapter, input);
+        if (reminders.length > 0) {
+          const block = createContextInjection(renderReminderInstruction(reminders, adapter.questionTool), undefined, REMINDER_TAG);
+          await core.recordInjection(adapter, input, block.receipt);
+          reminderInjection = block.injection;
+        }
+      } catch (error) {
+        await writeOperationLog(config, adapter, input, {
+          hook: action, stage: "claim_reminders", status: "error", retryable: true, error,
+        });
+      }
+      const injection = [prepared?.injection || "", reminderInjection].filter(Boolean).join("\n");
+      write(injection ? adapter.contextOutput(injection) : adapter.successOutput(action));
       return;
     }
     if (["session-start", "subagent-start"].includes(action)) {

@@ -6,7 +6,7 @@
 
     <root>/expectations/YYYY/MM/DD/<expectation_id>.json
     <root>/deliveries/YYYY/MM/DD/<expectation_id>--<decided_at>.json
-    <root>/responses/YYYY/MM/DD/<expectation_id>--<responded_at>.json
+    <root>/responses/YYYY/MM/DD/<expectation_id>--<responded_at>--<轮的摘要>.json
     <root>/settlements/YYYY/MM/DD/<expectation_id>.json
     <root>/rulings/YYYY/MM/DD/<expectation_id>--<ruled_at>.json
     <root>/omissions/YYYY/MM/DD/<记录身份>.json，另有 _scanned.json 标这一天已查过漏报
@@ -256,9 +256,13 @@ class ForesightLedgerStore:
         return frozenset(entry.name for entry in self._entries(self._day_dir(self._deliveries, day)))
 
     def record_response(self, day: date, item: Response) -> bool:
-        return self._create(
-            self._responses, day, _stamped(item.expectation_id, item.responded_at), encode_response(item)
+        """同一刻对同一条提醒可能有两条回话：出口按他点的固定选项写一条（轮 = call_id）、会话 lane 的桥按模型判的写一条
+        （轮 = 作答那一轮的身份，时刻同一条消息）——文件名带上轮的摘要，两条都落得下；同一轮重放仍幂等。"""
+
+        identity = (
+            f"{_stamped(item.expectation_id, item.responded_at)}--{sha256(item.turn.encode('utf-8')).hexdigest()[:12]}"
         )
+        return self._create(self._responses, day, identity, encode_response(item))
 
     def responses_on(self, day: date) -> tuple[Response, ...]:
         return tuple(self._records(self._responses, day, decode_response))

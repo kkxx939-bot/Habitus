@@ -156,3 +156,31 @@ def test_the_lanes_polarities_are_the_ledgers_polarities() -> None:
     from habitus.foresight.ledger import model
 
     assert tuple(reminders.POLARITIES) == tuple(model.POLARITIES)
+
+
+def test_bug8_the_outlet_and_the_bridge_can_both_write_a_response_for_the_same_moment(tmp_path) -> None:
+    """他点「知道了」：出口按 call_id 写一条中；作答那一轮进桥、模型判负——同一时刻、同一条提醒、不同的轮，两条都要落得下
+    （原来文件名只有预期 + 时刻，第二条被当成账本冲突吞掉，负丢、提醒没关）。"""
+
+    from habitus.foresight.ledger import Response
+
+    ledger = ForesightLedgerStore(tmp_path / "ledger")
+    recorder = Recorder()
+    bridge = ReminderResponses(ledger, limit=5, observer=recorder)
+    ledger.record_expectation(expectation("hotel", DAY0))
+    said = DAY0 + timedelta(minutes=41)
+    ledger.record_delivery(
+        DAY0.date(), Delivery("hotel", said, 1, True, "说了", 1.0, "订酒店吗", via="codex", turn="call_1")
+    )
+    answered = said + timedelta(minutes=2)
+    assert ledger.record_response(DAY0.date(), Response("hotel", answered, "中", "call_1"))
+    bridge.respond("conv#4-6", ReminderResponse("hotel", "负"), at=answered)
+    assert sorted((item.polarity, item.turn) for item in ledger.responses_on(DAY0.date())) == [
+        ("中", "call_1"),
+        ("负", "conv#4-6"),
+    ]
+    assert [event.status.value for event in recorder.events] == ["success"]
+    assert bridge.open(answered + timedelta(minutes=1)) == ()  # 负关了
+    # 同一轮重放仍幂等
+    bridge.respond("conv#4-6", ReminderResponse("hotel", "负"), at=answered)
+    assert len(ledger.responses_on(DAY0.date())) == 2

@@ -9,9 +9,9 @@ export class HabitusServiceClient {
     this.fetchImpl = fetchImpl;
   }
 
-  async request(path, init = {}) {
+  async request(path, init = {}, timeoutMs = this.config.timeoutMs) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await this.fetchImpl(`${this.config.baseUrl}${path}`, {
         ...init,
@@ -80,5 +80,14 @@ export class HabitusServiceClient {
       method: "POST",
       body: JSON.stringify({ conversation_id: state.conversationId, started_on: state.startedOn }),
     });
+  }
+
+  // 提醒出口的取口（方案 32 第 4.1 条）：session 就是送转写时的 conversation_id；单独的短超时。
+  claimReminders({ host, session, at, limit }, timeoutMs = this.config.reminderTimeoutMs || 2_000) {
+    return this.request(
+      "/api/v1/reminders/claim",
+      { method: "POST", body: JSON.stringify({ host, session, at, limit }) },
+      timeoutMs,
+    );
   }
 }

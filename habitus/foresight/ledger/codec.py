@@ -22,8 +22,9 @@ from habitus.foresight.ledger.model import (
     UnitSetting,
 )
 
-#: v8（裁定 61）：事实只剩"做"这一条轴（去掉轴与来源）；回话是"哪一条 + 正 / 中 / 负 + 哪一轮"；提醒反馈与设置按行为。
-LEDGER_SCHEMA_VERSION = "foresight_ledger_v8"
+#: v9（裁定 64）：递送多了「待取」「宿主没取」两种原因、「说了」带 ``via`` / ``turn``（谁说的、在哪一轮）、「待取」可带话。
+#: v8 及更早一律按不支持拒（项目没上线，不留读回的双轨）。
+LEDGER_SCHEMA_VERSION = "foresight_ledger_v9"
 
 
 def encode_expectation(item: Expectation) -> dict[str, Any]:
@@ -110,6 +111,8 @@ def encode_delivery(item: Delivery) -> dict[str, Any]:
         "p_speak": item.p_speak,
         "text": item.text,
         "evidence": list(item.evidence),
+        "via": item.via,
+        "turn": item.turn,
     }
 
 
@@ -125,6 +128,8 @@ def decode_delivery(raw: Mapping[str, Any]) -> Delivery:
             p_speak=float(raw["p_speak"]),
             text=None if raw.get("text") is None else str(raw["text"]),
             evidence=tuple(str(item) for item in raw.get("evidence", [])),
+            via=None if raw.get("via") is None else str(raw["via"]),
+            turn=None if raw.get("turn") is None else str(raw["turn"]),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ForesightError(f"delivery record is malformed: {exc}") from exc

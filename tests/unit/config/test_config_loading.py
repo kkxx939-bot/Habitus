@@ -414,6 +414,11 @@ def test_foresight_carries_the_loss_ratios_and_protective_limits_and_needs_both_
         "tick_interval_seconds",
         "worker_shutdown_timeout_seconds",
         "half_life_opportunities",
+        "outlet_liveness_hours",
+        "outlet_lease_minutes",
+        "outlet_max_attempts",
+        "outlet_claim_limit",
+        "outlet_match_similarity",
         "unseen_day_types",
     ]
     assert config.foresight.shadow_uses_unestablished is True
@@ -429,6 +434,11 @@ def test_foresight_carries_the_loss_ratios_and_protective_limits_and_needs_both_
         ("judge_transient_retry_delay_seconds", -1.0),
         ("worker_shutdown_timeout_seconds", 0),
         ("unseen_day_types", "guess"),
+        ("outlet_liveness_hours", 0.5),
+        ("outlet_lease_minutes", 0),
+        ("outlet_max_attempts", 0),
+        ("outlet_claim_limit", 21),
+        ("outlet_match_similarity", 1.5),
     ):
         with pytest.raises(ConfigError, match=f"foresight.{field_name}"):
             ForesightConfig.from_mapping({field_name: bad})

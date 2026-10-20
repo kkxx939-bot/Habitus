@@ -430,11 +430,13 @@ def _established(before: Relation, test: RelationTest, tests: LaneTests, night: 
     """维持检验：上一次判过之后攒的新数据满一段（成立那晚按功效算好的次数、至少 2 块）才判一次；连续两段都说没了才失效
     （裁定 27 第 3 条）。每晚看最近几块等于每晚给它一次被运气判掉的机会（第四轮评审算法 5：效应恒定的真关系 120 晚里最多
     58% 被判失效）。成立在 v4 之前、没存次数的，按这一晚的读数补算一次存上。
-    当晚的读数带第 2、3 道（``assess``）：``large_enough`` 要每晚都有（裁定 62 第 3 条）。"""
+    当晚的读数带第 2、3 道（``assess``）：``large_enough`` 要每晚都有（裁定 62 第 3 条），带滞回——昨晚够大的今晚要远端也掉线才
+    翻成不够（裁定 63 第 3 条），免得线附近的关系一晚是原因、一晚是巧合，机会表与单元跟着进出。"""
 
     config = tests.config
     thresholds = config.thresholds
-    judged = tests.assess(replace(test, upward=before.upward))
+    previously_large = before.tonight.large_enough if before.tonight is not None else None
+    judged = tests.assess(replace(test, upward=before.upward), previously_large=previously_large)
     needed = before.maintenance_needed
     if needed is None:
         needed = _maintenance_needed(judged, tests)

@@ -40,6 +40,8 @@ function selectCompleted(records, injectionReceipts) {
 export const hostAdapter = Object.freeze({
   host: "claude-code",
   protocol: "claude_code",
+  // agent 向人提问、等人作答的工具（方案 32 第 4.2 条）
+  questionTool: "AskUserQuestion",
   nativeSessionId(input) {
     const parent = safeIdentifier(input?.session_id);
     return input?.agent_id ? safeIdentifier(`${parent}.subagent.${input.agent_id}`) : parent;

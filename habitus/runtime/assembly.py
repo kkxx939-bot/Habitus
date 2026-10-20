@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 
 from habitus.behavior.kinds.reader import VocabularyReader
@@ -151,9 +151,11 @@ from habitus.runtime.foresight import (
     build_foresight_components,
     build_foresight_tick,
     build_foresight_worker,
+    build_outlet_consumer,
     build_reminded_lookup,
     build_reminder_responses,
 )
+from habitus.runtime.foresight_outlet_consumer import OutletObservingConsumer
 from habitus.runtime.lifecycle import LifecycleWorker
 from habitus.runtime.lifecycle_behavior import BehaviorParticipant
 from habitus.runtime.lifecycle_foresight import ForesightParticipant
@@ -580,11 +582,76 @@ def build_runtime(
         span_controller=managed_observability,
         source_settled=behavior_settled,
     )
+    # behavior 关着而 scene / foresight 开着的组合已经在配置层被硬拒（见 HabitusConfig 的跨域校验），
+    # 所以这里 behavior_components 为 None 时整晚那一趟与预测层必然都没开，直接跳过即可。
+    # 夜批顺序：归约把一天定稿 → 整晚那一趟（结算 → 语义树 → 机会表；预测树删了，裁定 59）。
+    # 预测层站在语义树之上，所以排在后面组装；未启用时 build 自己返回 None。
+    # TODO(BHV-SESSION-LANE-001)：预测层按不按 lane 分还没定（用户 2026-10-11：「这个我还没有考虑好，因为预测层的
+    # 逻辑还没有写好」）。现状：整晚那一趟与预测层只接会话那一支（行为树、词表、定稿日、未封口的判断都取自会话一支），
+    # 物理那一支没有语义树夜批、没有预测层、也不结算。定了之后要么再起一份接物理一支，要么改成同时读两支。
+    session_behavior = None if behavior_components is None else behavior_components.session
+    # 当地日历只建一份：语义树与预测层读同一份，夜批开头重读放假数据时两边一起换（2026-10-18 四方评审）
+    calendar = None if session_behavior is None else local_calendar(config)
+    # 读账的两个值（裁定 49）：α 借关系检验前向验证的显著性；遗忘半衰期是几次机会（裁定 57，config.foresight 的临时值）
+    evidence = None if session_behavior is None or not config.foresight.enabled else evidence_of(config)
+    foresight_components = (
+        None
+        if session_behavior is None or evidence is None
+        else build_foresight_components(
+            config,
+            behavior_tree=session_behavior.tree,
+            calendar=calendar,
+            # 预期上的类编号到结算时可能已被拆改：按"现在对应哪些编号"结算（同一份词表）
+            current_classes=VocabularyReader(session_behavior.kind_store).current_ids,
+            # 词表迁移做到一半时不结算（有未完成的迁移计划就是在迁移）
+            vocabulary_migrating=lambda: session_behavior.kind_store.read_migration() is not None,
+            # "那天定稿了"只有归约说了算（链都落树、封口视界已过那天的本地结束），结算按它来。
+            closed_days=session_behavior.reduction_runner.closed_days,
+            evidence=evidence,
+            observer=operation_observer,
+            # 出口认提问时拿类名配题目（词表给人看的名字；编号仍是身份）
+            kind_label=_kind_label(VocabularyReader(session_behavior.kind_store)),
+        )
+    )
+    if foresight_components is not None and session_behavior is not None and evidence is not None:
+        # 白天那一拍的常驻 worker：未封口的判断经那座桥（判断存储 + 消费账本 + 归约的白天归类）读，
+        # 词表版本记在预期上。
+        unsealed = UnsealedFromJudgements(
+            session_behavior.judgements,
+            session_behavior.reduction_runner.ledger,
+            session_behavior.reduction_runner.kinds,
+        )
+        kind_store = session_behavior.kind_store
+        tick = build_foresight_tick(
+            foresight_components,
+            config=config,
+            unsealed=unsealed,
+            evidence=evidence,
+            structured_chat=structured_chat,
+            vocabulary_version=lambda: kind_store.read().version,
+            vocabulary_migrating=lambda: kind_store.read_migration() is not None,
+            observer=operation_observer,
+        )
+        foresight_components = dataclasses.replace(
+            foresight_components, worker=build_foresight_worker(tick, config=config, observer=operation_observer)
+        )
+        # 第 0 步：归约封口时查预测层账本盖 reminded（归约先装、预测层后装，所以在这里接端口）
+        session_behavior.reduction_runner.attach_reminder_lookup(build_reminded_lookup(foresight_components))
+        # 说那一半（方案 30 第五节）：会话 lane 每轮带上开着的提醒、把模型判出的回应写回账本
+        assert behavior_components is not None
+        behavior_components.session_lane.attach_reminders(
+            build_reminder_responses(foresight_components, config=config, observer=operation_observer)
+        )
     # 行为侧没启用时消费者仍要注册（交付层要求名单里每一项都有实现），它把每份源落成"跳过"。
-    behavior_session_consumer = BehaviorSessionConsumer(
+    behavior_session_consumer: BehaviorSessionConsumer | OutletObservingConsumer = BehaviorSessionConsumer(
         None if behavior_components is None else behavior_components.session_lane,
         behavior_session_outputs,
     )
+    if foresight_components is not None and isinstance(behavior_session_consumer, BehaviorSessionConsumer):
+        # 提醒出口（方案 32 第 4.2 条）：同一份会话先过出口（认出 agent 的提问、写「说了」与固定选项的回话），再进会话 lane
+        behavior_session_consumer = build_outlet_consumer(
+            foresight_components, behavior_session_consumer, observer=operation_observer
+        )
     source_inspector = ConversationConsumerStateInspector(source_outcomes)
     source_fence = ConversationConsumerExecutionFence(
         resolved_lock,
@@ -660,64 +727,6 @@ def build_runtime(
         ConversationSourceRecoveryParticipant(source_recovery, source_coordinator, wake_memory=worker.wake),
     ]
 
-    # behavior 关着而 scene / foresight 开着的组合已经在配置层被硬拒（见 HabitusConfig 的跨域校验），
-    # 所以这里 behavior_components 为 None 时整晚那一趟与预测层必然都没开，直接跳过即可。
-    # 夜批顺序：归约把一天定稿 → 整晚那一趟（结算 → 语义树 → 机会表；预测树删了，裁定 59）。
-    # 预测层站在语义树之上，所以排在后面组装；未启用时 build 自己返回 None。
-    # TODO(BHV-SESSION-LANE-001)：预测层按不按 lane 分还没定（用户 2026-10-11：「这个我还没有考虑好，因为预测层的
-    # 逻辑还没有写好」）。现状：整晚那一趟与预测层只接会话那一支（行为树、词表、定稿日、未封口的判断都取自会话一支），
-    # 物理那一支没有语义树夜批、没有预测层、也不结算。定了之后要么再起一份接物理一支，要么改成同时读两支。
-    session_behavior = None if behavior_components is None else behavior_components.session
-    # 当地日历只建一份：语义树与预测层读同一份，夜批开头重读放假数据时两边一起换（2026-10-18 四方评审）
-    calendar = None if session_behavior is None else local_calendar(config)
-    # 读账的两个值（裁定 49）：α 借关系检验前向验证的显著性；遗忘半衰期是几次机会（裁定 57，config.foresight 的临时值）
-    evidence = None if session_behavior is None or not config.foresight.enabled else evidence_of(config)
-    foresight_components = (
-        None
-        if session_behavior is None or evidence is None
-        else build_foresight_components(
-            config,
-            behavior_tree=session_behavior.tree,
-            calendar=calendar,
-            # 预期上的类编号到结算时可能已被拆改：按"现在对应哪些编号"结算（同一份词表）
-            current_classes=VocabularyReader(session_behavior.kind_store).current_ids,
-            # 词表迁移做到一半时不结算（有未完成的迁移计划就是在迁移）
-            vocabulary_migrating=lambda: session_behavior.kind_store.read_migration() is not None,
-            # "那天定稿了"只有归约说了算（链都落树、封口视界已过那天的本地结束），结算按它来。
-            closed_days=session_behavior.reduction_runner.closed_days,
-            evidence=evidence,
-            observer=operation_observer,
-        )
-    )
-    if foresight_components is not None and session_behavior is not None and evidence is not None:
-        # 白天那一拍的常驻 worker：未封口的判断经那座桥（判断存储 + 消费账本 + 归约的白天归类）读，
-        # 词表版本记在预期上。
-        unsealed = UnsealedFromJudgements(
-            session_behavior.judgements,
-            session_behavior.reduction_runner.ledger,
-            session_behavior.reduction_runner.kinds,
-        )
-        kind_store = session_behavior.kind_store
-        tick = build_foresight_tick(
-            foresight_components,
-            config=config,
-            unsealed=unsealed,
-            evidence=evidence,
-            structured_chat=structured_chat,
-            vocabulary_version=lambda: kind_store.read().version,
-            vocabulary_migrating=lambda: kind_store.read_migration() is not None,
-            observer=operation_observer,
-        )
-        foresight_components = dataclasses.replace(
-            foresight_components, worker=build_foresight_worker(tick, config=config, observer=operation_observer)
-        )
-        # 第 0 步：归约封口时查预测层账本盖 reminded（归约先装、预测层后装，所以在这里接端口）
-        session_behavior.reduction_runner.attach_reminder_lookup(build_reminded_lookup(foresight_components))
-        # 说那一半（方案 30 第五节）：会话 lane 每轮带上开着的提醒、把模型判出的回应写回账本
-        assert behavior_components is not None
-        behavior_components.session_lane.attach_reminders(
-            build_reminder_responses(foresight_components, config=config, observer=operation_observer)
-        )
     nightly_worker = None
     scene = None
     if session_behavior is not None:
@@ -842,6 +851,19 @@ def build_runtime(
         foresight=foresight_components,
     )
     return Runtime(config, components, conversation_adapters=conversation_adapters)
+
+
+def _kind_label(reader: VocabularyReader) -> Callable[[str], str | None]:
+    """类编号 → 词表里给人看的类名（没有这个编号、不是编号的给 None）。"""
+
+    def label(token: str) -> str | None:
+        try:
+            found = reader.describe(token)
+        except Exception:  # noqa: BLE001 - 类名只是出口配题目的辅助，词表读不出来不拦取
+            return None
+        return found.name if found is not None else None
+
+    return label
 
 
 def _builtin_provider_factory() -> ProviderFactory:

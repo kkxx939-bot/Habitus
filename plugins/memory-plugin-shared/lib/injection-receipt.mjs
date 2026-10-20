@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
-const END_MARKER = "</habitus-memory-context>";
+// 注进上下文的两种块：记忆上下文、提醒指令（方案 32 第 5.1 条）。回收转写时按回执一并剥掉，免得下一轮被当成会话吃回去。
+export const INJECTION_TAGS = ["habitus-memory-context", "habitus-reminder"];
 const NONCE = /^[0-9a-f]{32}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 
@@ -28,21 +29,24 @@ function stripText(value, receipts) {
       }
       continue;
     }
-    const startMarker = `<habitus-memory-context receipt="${receipt.nonce}">`;
-    let offset = 0;
-    while (offset < result.length) {
-      const start = result.indexOf(startMarker, offset);
-      if (start < 0) break;
-      const endStart = result.indexOf(END_MARKER, start + startMarker.length);
-      if (endStart < 0) break;
-      const end = endStart + END_MARKER.length;
-      const candidate = result.slice(start, end);
-      if (digest(candidate) === receipt.digest) {
-        result = result.slice(0, start) + result.slice(end);
-        removed = true;
-        offset = start;
-      } else {
-        offset = start + startMarker.length;
+    for (const tag of INJECTION_TAGS) {
+      const startMarker = `<${tag} receipt="${receipt.nonce}">`;
+      const endMarker = `</${tag}>`;
+      let offset = 0;
+      while (offset < result.length) {
+        const start = result.indexOf(startMarker, offset);
+        if (start < 0) break;
+        const endStart = result.indexOf(endMarker, start + startMarker.length);
+        if (endStart < 0) break;
+        const end = endStart + endMarker.length;
+        const candidate = result.slice(start, end);
+        if (digest(candidate) === receipt.digest) {
+          result = result.slice(0, start) + result.slice(end);
+          removed = true;
+          offset = start;
+        } else {
+          offset = start + startMarker.length;
+        }
       }
     }
   }

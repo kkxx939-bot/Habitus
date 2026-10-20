@@ -26,7 +26,10 @@ _SERVICE_FEATURES = (
     "recall",
     "remember",
     "remember_idempotency_v1",
+    "reminders_v1",
 )
+#: 提醒的三个固定选项由服务给（方案 32 第 4.1 条）：产品定措辞，所有宿主一样。
+_REMINDER_OPTIONS = ("现在就做", "这次不用", "知道了")
 
 
 class HTTPMemoryJobNotFoundError(LookupError):
@@ -262,6 +265,25 @@ class RuntimeHTTPHandlers:
             "previous": previous,
             "job": reopened,
             "worker_restarted": retried.worker_restarted,
+        }
+
+    async def claim_reminders(self, *, host: str, session: str, at: datetime, limit: int) -> dict[str, object]:
+        """宿主来取此刻可取的提醒（方案 32 第 4.1 条）；``session`` 是宿主侧会话的身份，与它送转写时的 conversation_id 同一个。"""
+
+        claimed = await self.runtime.claim_reminders(host=host, session=session, at=at, limit=limit)
+        return {
+            "reminders": [
+                {
+                    "request_id": item.request_id,
+                    "kind": item.kind,
+                    "text": item.text,
+                    "options": list(item.options or _REMINDER_OPTIONS),
+                    "deadline": item.deadline.isoformat(),
+                    "lease_until": item.lease_until.isoformat(),
+                    "claimed_at": item.claimed_at.isoformat(),
+                }
+                for item in claimed
+            ]
         }
 
     async def health(self, *, deep: bool = False) -> dict[str, object]:

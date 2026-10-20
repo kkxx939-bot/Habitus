@@ -16,7 +16,9 @@ class SessionLaneConfig:
     - ``kept_tool_lines``：超出总上限时工具调用留头尾共几行。
     - ``kept_reply_lines``：超出总上限时助手中途说的话留头尾共几条（依据：本机最长的一轮 989 个动作，
       中途的话逐条各留一点仍会超上限，落到整段盲截；改为只留头尾几条）。
-    - ``question_tools``：助手用来向人提问、等人作答的工具名。人对它的作答算一句人说的话，开新的一轮。
+    - ``question_tools``：助手用来向人提问、**同步**等人作答的工具名（Claude Code 的 ``AskUserQuestion``、Codex CLI 的
+      ``request_user_input``）。人对它的作答（工具结果）算一句人说的话，开新的一轮。Codex Desktop 的 ``request_user_input_async``
+      不在这里：它的工具结果只是"收到了"，作答以一条 ``<send_user_message_question_reply>`` 用户消息晚来，由材料整理翻成作答。
     - ``max_steps`` / ``max_summary_chars`` / ``max_step_chars``：每轮写出来的步骤条数、概要与每条步骤的字数上限。
     """
 
@@ -29,7 +31,7 @@ class SessionLaneConfig:
     max_steps: int = 3
     max_summary_chars: int = 200
     max_step_chars: int = 120
-    question_tools: tuple[str, ...] = ("AskUserQuestion",)
+    question_tools: tuple[str, ...] = ("AskUserQuestion", "request_user_input")
 
     def __post_init__(self) -> None:
         tools = tuple(self.question_tools)

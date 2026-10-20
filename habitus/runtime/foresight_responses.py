@@ -49,6 +49,9 @@ class ReminderResponses:
         return tuple(PendingReminder(item.expectation_id, item.said_at, item.text, item.deadline) for item in found)
 
     def respond(self, turn: str, response: ReminderResponse, *, at: datetime) -> None:
+        # TODO(裁定 64 第 8 条)：模型判正 / 中 / 负这条路保留、不删。他点固定选项的回话由出口直接写（``runtime/foresight_outlet.py``，
+        # 不经模型）；走到这里的是他自己填的话。将来推式宿主（方案 32 第六节的本地通知）或别的 harness 的回复不是提问工具的作答时，
+        # 也要靠这条路判——那时按钮作答仍该由出口 / 回执直接写，这里只管"话"。
         try:
             day = self.ledger.day_of(response.reminder_id)
             if day is None:

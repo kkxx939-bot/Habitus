@@ -36,6 +36,7 @@
 | Job/Receipt | 跨会话乱序、租约 ABA、失败跳过、回执与实写不一致 | `unit/workflow/`, `integration/test_change_receipt_chain.py`, `integration/test_memory_job_full_chain.py` | 顺序、lease、退避、STAGED/COMMITTED 恢复、实际事务回执、人工恢复、History 释放后过期 Job/Receipt 清理 |
 | Worker/Runtime | 重复启动、无心跳执行、失败 Job 无运维入口、错误组装 | `unit/runtime/`, `integration/test_runtime_assembly.py` | Job Worker、LifecycleWorker、全局 lease、耐久游标、局部失败、共享依赖、Runtime 启停/重启/关闭 |
 | 架构边界 | 旧 Evidence/Context 复活、领域反向依赖、双轨 Schema | `architecture/` | 源码静态约束 |
+| 提醒出口（方案 32） | 「待取」后名额双计、租约过期丢「说了」、两个会话各写一条「说了」、Desktop 晚来的作答写不出回话、出口挪到 lane 之后 | `unit/runtime/test_foresight_outlet.py`, `unit/runtime/test_foresight_delivery.py`, `unit/integrations/test_http_reminders.py`, `integration/test_reminder_outlet_consumer.py`, `integration/test_reminder_outlet_chain.py` | 取 / 租约 / 放回计数 / 时限、认提问四种会话与作答三种写法、HTTP 契约、出口先于 lane、四条样例到结算反馈 |
 | Conversation 主链 | History 已发布但 Job 丢失，或 Job 重复 | `integration/test_conversation_to_job.py` | afterTurn、outbox、重放、flush |
 | 完整 MemoryJob 主链 | 组件分别正确但发布顺序或恢复边界错误 | `integration/test_memory_job_full_chain.py` | Summary/Editor 并行、Receipt、事务、双向量 checkpoint、Job 终态、Journal 清理、L2 已提交后向量超时的无重规划恢复 |
 

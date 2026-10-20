@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from datetime import tzinfo
 
@@ -55,6 +56,8 @@ WAKE_LABEL = "（没有新的话；后台任务回来，助手接着做）"
 WAKE_NOTICE_CHARS = 300
 # 人对助手提问的作答，翻成人说的话时带的开头。
 ANSWER_PREFIX = "（回答助手的提问）"
+# Codex Desktop 的作答：agent 用 request_user_input_async 问完就接着干活，他作答之后以一条用户消息回来，JSON 里带问题与答案。
+REPLY_TAG = "<send_user_message_question_reply>"
 # 同一秒里成批出现的"人说的话"是重放，不是他说的。
 REPLAY_BURST = 3
 
@@ -118,7 +121,7 @@ def split_turns(
             if not text or is_synthetic(text) or int(message.occurred_at.timestamp()) in replayed:
                 continue  # 不是人说的话：丢掉，也不结束当前这一轮
             close()
-            current = [message]
+            current = [_reply_as_prompt(message) if text.startswith(REPLY_TAG) else message]
         elif _is_answer(message, asking):
             close()
             current = [_answer_as_prompt(message)]
@@ -164,6 +167,44 @@ def _answer_as_prompt(message: SessionMessage) -> SessionMessage:
         role=SessionMessageRole.PROMPT,
         content=f"{ANSWER_PREFIX}{message.content.strip()}",
     )
+
+
+def _reply_as_prompt(message: SessionMessage) -> SessionMessage:
+    """Codex Desktop 晚来的作答消息翻成"（回答助手的提问）问题 → 答案"；不是那个形状的照旧当人说的话（整段原样）。"""
+
+    pairs = reply_pairs(message.content)
+    if not pairs:
+        return message
+    answered = "；".join(f"{question} → {answer}" for question, answer in pairs)
+    return SessionMessage(
+        sequence=message.sequence,
+        occurred_at=message.occurred_at,
+        role=SessionMessageRole.PROMPT,
+        content=f"{ANSWER_PREFIX}{answered}",
+    )
+
+
+def reply_pairs(content: str) -> tuple[tuple[str, str], ...]:
+    """``<send_user_message_question_reply>`` 消息里的（问题, 答案）；形状不对给空。"""
+
+    body = content.strip()
+    if not body.startswith(REPLY_TAG):
+        return ()
+    body = body[len(REPLY_TAG) :]
+    end = body.rfind("</")
+    body = body[:end] if end >= 0 else body
+    try:
+        items = json.loads(body)
+    except ValueError:
+        return ()
+    if not isinstance(items, list):
+        return ()
+    found = [
+        (" ".join(str(item.get("question", "")).split()), " ".join(str(item["answer"]).split()))
+        for item in items
+        if isinstance(item, dict) and isinstance(item.get("answer"), str)
+    ]
+    return tuple(found)
 
 
 def render_turn(turn: SessionTurn, *, config: SessionLaneConfig | None = None) -> str:
@@ -273,10 +314,12 @@ def _head_tail(text: str, limit: int) -> str:
 
 __all__ = [
     "ANSWER_PREFIX",
+    "REPLY_TAG",
     "WAKE_LABEL",
     "WAKE_PREFIXES",
     "is_synthetic",
     "render_reminders",
     "render_turn",
+    "reply_pairs",
     "split_turns",
 ]

@@ -26,7 +26,15 @@ from datetime import datetime
 
 from habitus.foresight.edges import PastMoment, edge_reading
 from habitus.foresight.errors import ForesightError
-from habitus.foresight.ledger.model import LEVELS, AccountLevel, Delivery, Expectation, UnitSetting, account_key
+from habitus.foresight.ledger.model import (
+    AWAITING_HOST,
+    LEVELS,
+    AccountLevel,
+    Delivery,
+    Expectation,
+    UnitSetting,
+    account_key,
+)
 from habitus.foresight.reliability import Reliability
 
 
@@ -125,8 +133,10 @@ def decide(
     daily_cap: int,
     text: str | None = None,
     evidence: Sequence[str] = (),
+    awaiting_host: bool = False,
 ) -> Delivery:
-    """对一条到了该说时候的预期的递送决定。``spoken_today`` 是今天已经说过几次（保护闸）。"""
+    """对一条到了该说时候的预期的递送决定。``spoken_today`` 是今天已经说过几次（保护闸）。``awaiting_host`` 为真时决定说的那条
+    记「待取」而不是「说了」：话写好了、等宿主来取，"说了"由出口在转写里认出提问之后追加（裁定 64）。"""
 
     if level not in LEVELS:
         raise ForesightError(f"unknown delivery level: {level!r}")
@@ -138,6 +148,8 @@ def decide(
         return Delivery(identity, now, 0, False, "影子", 0.0, evidence=cited)
     if spoken_today >= daily_cap:
         return Delivery(identity, now, level, False, "名额已满", 0.0, evidence=cited)
+    if awaiting_host:
+        return Delivery(identity, now, level, False, AWAITING_HOST, 1.0, text, evidence=cited)
     return Delivery(identity, now, level, True, "说了", 1.0, text, evidence=cited)
 
 

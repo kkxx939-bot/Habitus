@@ -16,6 +16,8 @@ _INT_BOUNDS = (
     ("daily_reminder_cap", 1, 100),
     ("judge_transient_retries", 0, 20),
     ("open_reminders_judged", 1, 50),
+    ("outlet_max_attempts", 1, 20),
+    ("outlet_claim_limit", 1, 20),
 )
 _FLOAT_BOUNDS = (
     ("false_alarm_rate", 0.01, 0.99),
@@ -23,6 +25,9 @@ _FLOAT_BOUNDS = (
     ("judge_transient_retry_delay_seconds", 0.0, 600.0),
     ("worker_shutdown_timeout_seconds", 1.0, 3_600.0),
     ("half_life_opportunities", 1.0, 200.0),
+    ("outlet_liveness_hours", 1.0, 720.0),
+    ("outlet_lease_minutes", 1.0, 1_440.0),
+    ("outlet_match_similarity", 0.1, 1.0),
 )
 _FLAGS = ("enabled", "shadow_uses_unestablished")
 
@@ -61,6 +66,17 @@ class ForesightConfig:
     # 一个月一次的事不再被压到只剩两三次有效样本。行为单元按每一层自己的刻数、temporal 的时段读数按最近 M 次用同一个 H，
     # M = ⌈H · log₂(1/α)⌉ 由组合根算。暂定值，回放后定。
     half_life_opportunities: float = 8.0
+    # ── 提醒出口（方案 32；裁定 64 第 4 条的启动值，以后从真实运行定）──
+    # 活性：最近几小时内有宿主来取过提醒，才算"有宿主活着"——有活着的才问模型写话、记「待取」，没有记「不可达」、不花模型钱。
+    outlet_liveness_hours: float = 48.0
+    # 一条请求被一个会话取走后多久内别的会话取不到（不超过这条的最晚时限）。
+    outlet_lease_minutes: float = 30.0
+    # 一条请求最多被放回（取走了没问出口、租约过期）几次，到了就不再给。
+    outlet_max_attempts: int = 3
+    # 一次取最多给几条（插件来取时带的 limit 不得超过它）。
+    outlet_claim_limit: int = 3
+    # 认提问：题目与那句话去空白后的相似度不低于它才算配上（题目含类名、或一取一问的直接配上，不看这个数）。
+    outlet_match_similarity: float = 0.6
     # ── 没见过的日型怎么建预期（裁定 59 第 7 条的待定项，用户定之前默认不外推）──
     # "skip"：日历关系只在见过他做的那几种日型上建（只在工作日的周三做过，国庆的周三不建）；
     # "official"：没见过的日型按外接放假数据的官方含义归组（调休上班算上班、节假日算休息）。只管建预期，不管关系检验。
