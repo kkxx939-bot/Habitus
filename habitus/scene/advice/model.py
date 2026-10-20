@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 import statistics
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 from types import MappingProxyType
+
+from habitus.foundation.integrity import canonical_json
 
 
 class PriorLevel(str, Enum):
@@ -102,4 +104,40 @@ class ProposalBook:
         return frozenset(item.condition for item in self.accepted(antecedent) if item.condition is not None)
 
 
-__all__ = ["PriorLevel", "PriorTable", "Proposal", "ProposalBook", "settle"]
+def tidy_book(
+    book: ProposalBook,
+    *,
+    alive: Callable[[str], bool],
+    compiles: Callable[[str], bool],
+    max_refused_per_antecedent: int,
+) -> ProposalBook:
+    """提议簿的退出（26 号清单 2.5.5）：前因已经不在的提议与问过的指纹清掉；收下的条件现在编译不了的清掉（以前每晚跳过、
+    每晚报一句）；拒掉的按（前因, 拒因, 原话）去重、每个前因只留最近的 ``max_refused_per_antecedent`` 条——它们会全量进提示词。"""
+
+    if max_refused_per_antecedent < 1:
+        raise ValueError("max_refused_per_antecedent must be positive")
+    kept: list[Proposal] = []
+    seen_refusals: set[tuple[str, str, str]] = set()
+    for item in sorted(book.proposals, key=lambda proposal: proposal.proposed_on, reverse=True):
+        if not alive(item.antecedent):
+            continue
+        if item.condition is not None:
+            if compiles(item.condition):
+                kept.append(item)
+            continue
+        identity = (item.antecedent, str(item.refused), canonical_json(dict(item.raw)))
+        if identity in seen_refusals:
+            continue
+        if sum(1 for other in kept if other.antecedent == item.antecedent and other.refused is not None) >= (
+            max_refused_per_antecedent
+        ):
+            continue
+        seen_refusals.add(identity)
+        kept.append(item)
+    order = {id(item): position for position, item in enumerate(book.proposals)}
+    proposals = tuple(sorted(kept, key=lambda item: order[id(item)]))
+    asked = {name: digest for name, digest in book.asked.items() if alive(name)}
+    return ProposalBook(lane=book.lane, proposals=proposals, asked=asked)
+
+
+__all__ = ["PriorLevel", "PriorTable", "Proposal", "ProposalBook", "settle", "tidy_book"]

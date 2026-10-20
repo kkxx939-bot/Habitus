@@ -188,7 +188,7 @@ class PhysicalSegmentRecorder:
         )
 
     def _record(self, unit: _Unit, covered: frozenset[str]) -> UnitDisposition:
-        accepted = self.ledger.accepted(unit.device, unit.key)
+        accepted = self.ledger.accepted(unit.device, unit.key, unit.started_at)
         if accepted is not None:
             # 收过的单位：内容一样就是重发；不一样就是上游送进来之后又改了，行为树只增不改，不收。
             return (

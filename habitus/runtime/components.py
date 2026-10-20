@@ -14,7 +14,9 @@ from habitus.conversation import (
     ConversationConsumerStateInspector,
     ConversationSourceConsumer,
     ConversationSourceCoordinator,
+    ConversationSourceLedger,
     ConversationSourceRecovery,
+    ConversationSourceReleaser,
     ConversationSourceStore,
 )
 from habitus.foundation.observability import MetricRegistry, Observer
@@ -56,7 +58,8 @@ from habitus.model_client import (
 from habitus.runtime.behavior import BehaviorBranches
 from habitus.runtime.foresight import ForesightRuntimeComponents
 from habitus.runtime.lifecycle import LifecycleWorker
-from habitus.runtime.prediction import PredictionBranches
+from habitus.runtime.lifecycle_memory import ConversationChainParticipant
+from habitus.runtime.nightly_worker import NightlyWorker
 from habitus.runtime.session_lane import BehaviorSessionConsumer
 from habitus.runtime.worker import MemoryWorker
 
@@ -162,6 +165,8 @@ class RuntimeConversation:
     source_delivery: ConversationConsumerDelivery
     source_coordinator: ConversationSourceCoordinator
     source_recovery: ConversationSourceRecovery
+    source_ledger: ConversationSourceLedger
+    source_releaser: ConversationSourceReleaser
     journal: ConversationMessageJournal
     retention: ConversationRetentionPlanner
     boundary_scorer: ConversationSemanticBoundaryScorer
@@ -190,6 +195,20 @@ class RuntimeConversation:
             raise TypeError("source_delivery must be ConversationConsumerDelivery")
         if not isinstance(self.source_coordinator, ConversationSourceCoordinator):
             raise TypeError("source_coordinator must be ConversationSourceCoordinator")
+        if not isinstance(self.source_ledger, ConversationSourceLedger):
+            raise TypeError("source_ledger must be ConversationSourceLedger")
+        if not isinstance(self.source_releaser, ConversationSourceReleaser):
+            raise TypeError("source_releaser must be ConversationSourceReleaser")
+        if (
+            self.source_delivery.ledger is not self.source_ledger
+            or self.source_releaser.ledger is not self.source_ledger
+        ):
+            raise ValueError("conversation source delivery and releaser must share one source ledger")
+        if (
+            self.source_releaser.sources is not self.sources
+            or self.source_releaser.outcomes is not self.source_outcomes
+        ):
+            raise ValueError("conversation source releaser must share the source and outcome stores")
         if not isinstance(self.source_recovery, ConversationSourceRecovery):
             raise TypeError("source_recovery must be ConversationSourceRecovery")
         if not isinstance(self.journal, ConversationMessageJournal):
@@ -331,10 +350,15 @@ class RuntimeWorkflow:
             raise ValueError("memory workflow must share one receipt store")
         if self.worker.runner is not self.runner:
             raise ValueError("memory workflow must share one runner with its worker")
-        if self.lifecycle_worker.manager is not self.lifecycle:
+        chains = [
+            participant
+            for participant in self.lifecycle_worker.participants
+            if isinstance(participant, ConversationChainParticipant)
+        ]
+        if len(chains) != 1 or chains[0].manager is not self.lifecycle:
             raise ValueError("memory workflow must share one lifecycle manager with its worker")
-        if self.lifecycle_worker.journal.path_lock is not self.jobs.path_lock:
-            raise ValueError("both Runtime workers must share one path lock")
+        if self.lifecycle_worker.lock_store is not self.jobs.path_lock.lock_store:
+            raise ValueError("both Runtime workers must share one lock store")
 
 
 @dataclass(frozen=True)
@@ -348,8 +372,8 @@ class RuntimeComponents:
     workflow: RuntimeWorkflow
     # 行为管线的两支（会话、物理各一整套：融合→归约→行为树）；primary_subject 未配置时为 None（行为侧未启用）。
     behavior: BehaviorBranches | None = None
-    # 时间预测树夜批的两支；prediction.enabled 为假时为 None。各读自己那一支的行为树，所以行为侧未启用时也必然为 None。
-    prediction: PredictionBranches | None = None
+    # 整晚那一趟（结算 → 语义树 → 机会表）的常驻节拍；语义树没启用时为 None。它只接会话那一支（见 assembly 的 TODO）。
+    nightly: NightlyWorker | None = None
     # 预测层的证据装配；foresight.enabled 为假时为 None。它现在只接会话那一支（见 assembly 的 TODO）。
     foresight: ForesightRuntimeComponents | None = None
 
@@ -366,25 +390,28 @@ class RuntimeComponents:
             raise TypeError("workflow must be RuntimeWorkflow")
         if self.behavior is not None and not isinstance(self.behavior, BehaviorBranches):
             raise TypeError("behavior must be BehaviorBranches or None")
-        if self.prediction is not None:
-            if not isinstance(self.prediction, PredictionBranches):
-                raise TypeError("prediction must be PredictionBranches or None")
+        if self.nightly is not None:
+            if not isinstance(self.nightly, NightlyWorker):
+                raise TypeError("nightly must be a NightlyWorker or None")
             if self.behavior is None:
-                raise ValueError("prediction rebuilds from the behaviour tree; behaviour must be enabled")
-            # 实例同一性：每一支的夜批必须读**这个** Runtime 写入的、**同一条 lane** 的那棵行为树——
-            # 不是另开一个同路径的实例，更不是另一支的树。
-            for lane, branch in self.prediction:
-                if branch.rebuilder.behavior_tree is not self.behavior.of(lane).tree:
-                    raise ValueError(f"the {lane} prediction branch must rebuild from the {lane} behaviour tree")
+                raise ValueError("the nightly run reads the behaviour tree; behaviour must be enabled")
+            # 实例同一性：整晚那一趟必须读**这个** Runtime 写入的会话那一支行为树——不是另开一个同路径的实例。
+            if getattr(self.nightly.nightly, "behavior_tree", None) is not self.behavior.session.tree:
+                raise ValueError("the nightly run must read the session behaviour tree")
         if self.foresight is not None:
             if not isinstance(self.foresight, ForesightRuntimeComponents):
                 raise TypeError("foresight must be ForesightRuntimeComponents or None")
-            if self.behavior is None or self.prediction is None:
-                raise ValueError("foresight reads the derived trees; behaviour and prediction must be enabled")
-            # 接线漏了的话，进程照常启动、health 全绿、结算（以及后面接进同一个钩子的新语义树各拍）一夜都不会跑，
-            # 而配置里还开着——无处可查。
-            if self.prediction.session.worker.after_rebuild is None:
-                raise ValueError("the settlement stage must be attached to the nightly rebuild")
+            if self.behavior is None or self.nightly is None:
+                raise ValueError(
+                    "foresight reads the semantic layer's nightly run; behaviour and the nightly run must be enabled"
+                )
+            # 接线漏了的话，进程照常启动、health 全绿、结算一夜都不会跑，而配置里还开着——无处可查。结算是整晚那一趟的第一步。
+            if getattr(self.nightly.nightly, "settlement", None) is not self.foresight.settlement:
+                raise ValueError("the settlement stage must be the first step of the nightly run")
+            # 机会表那一步漏接：进程照常、健康全绿（一晚都没写过不算故障），白天永远停在"还没有机会表"（2026-10-18 四方评审）
+            step = getattr(self.nightly.nightly, "foresight", None)
+            if step is None or getattr(step, "store", None) is not self.foresight.opportunities:
+                raise ValueError("the nightly run must write the opportunity table the foresight layer reads")
             self.foresight.assert_attached_to(behavior=self.behavior.session)
         if self.workflow.enqueuer.conversations is not self.conversation.journal:
             raise ValueError("workflow enqueuer must use the shared conversation journal")

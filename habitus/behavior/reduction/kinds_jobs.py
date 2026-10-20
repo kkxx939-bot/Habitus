@@ -87,10 +87,20 @@ class VocabularyJobs:
             self.store.read_pending().pool, vocabulary, now=now, content_of=self._content_of, checkpoint=checkpoint
         )
         outcome = JobsOutcome(model_calls=result.model_calls, signals=result.signals)
-        if result.rechecked:
-            # 先打"已重判"标记再迁移：崩在两步之间时迁移计划还没写，下一晚这些条目不会被再问一次
+        # 要迁进新类的成员不打"聚组过"：它们靠这一版迁移出池；崩在打标记与写迁移计划之间时，它们得留着"新"，下一晚
+        # 再交模型一次把类建出来，否则这个类永远建不成（L10.4）
+        moving = frozenset() if result.record is None else frozenset(move.occurrence for move in result.record.moves)
+        grouped = result.grouped - moving
+        if result.rechecked or grouped or result.missing:
+            # 先打"已重判""聚组过"标记、把树上没有了的拿出池，再迁移：崩在两步之间时迁移计划还没写，下一晚这些条目
+            # 不会被再问一次，也不会再当新条目整批交给模型
             snapshot = self.store.read_pending()
-            self.store.replace_pending(snapshot.pool.rechecked(result.rechecked), expected_revision=snapshot.revision)
+            pool = (
+                snapshot.pool.rechecked(result.rechecked)
+                .grouped(grouped, on=now.astimezone(self.zone).date())
+                .without(result.missing)
+            )
+            self.store.replace_pending(pool, expected_revision=snapshot.revision)
         state = self.store.read_jobs().after_nightly(now)
         return outcome + self._migrate(result.record, state, checkpoint)
 
@@ -143,7 +153,7 @@ class VocabularyJobs:
         return JobsOutcome(migrated.days, 0, (*migrated.signals, *notes))
 
     def _occurrences(self, checkpoint: Callable[[], object]) -> Iterator[_Occurrence]:
-        """树上全部可计的 occurrence（撞车消歧的重复记录跳过，与预测树同一口径）。"""
+        """树上全部可计的 occurrence（撞车消歧的重复记录跳过，与事件序列同一口径）。"""
 
         every = self.config.checkpoint_every
         for index, document in enumerate(self.tree.iter_documents(BehaviorKind.OCCURRENCE)):

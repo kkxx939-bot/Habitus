@@ -138,15 +138,11 @@ def test_compaction_frontier_and_plan_reject_overlap_gap_and_cross_conversation(
     with pytest.raises(ConversationSummaryCompactionError, match="overlapping"):
         ConversationSummaryFrontier((first, overlapping), (), ())
 
-    gapped = segment_summary(
-        segment(segment_id="000000000004-000000000005", messages=closed_turn(start_sequence=4))
-    )
+    gapped = segment_summary(segment(segment_id="000000000004-000000000005", messages=closed_turn(start_sequence=4)))
     from habitus.memory.conversation import ConversationSummaryCompactionPlan
 
     with pytest.raises(ValueError, match="contiguous"):
-        ConversationSummaryCompactionPlan(
-            ConversationRangeSummaryStage.RANGE, (first, gapped), "source_count"
-        )
+        ConversationSummaryCompactionPlan(ConversationRangeSummaryStage.RANGE, (first, gapped), "source_count")
     other = segment_summary(
         segment(
             conversation_id="conversation-2",
@@ -155,6 +151,4 @@ def test_compaction_frontier_and_plan_reject_overlap_gap_and_cross_conversation(
         )
     )
     with pytest.raises(ValueError, match="one conversation"):
-        ConversationSummaryCompactionPlan(
-            ConversationRangeSummaryStage.RANGE, (first, other), "source_count"
-        )
+        ConversationSummaryCompactionPlan(ConversationRangeSummaryStage.RANGE, (first, other), "source_count")

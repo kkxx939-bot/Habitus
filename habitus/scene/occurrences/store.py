@@ -63,12 +63,16 @@ class ConceptHitStore(SceneStore):
     def __init__(self, scene_root: str | Path, **options: int) -> None:
         super().__init__(scene_root, **options)
         self.directory = self._inside(Path(OCCURRENCES_SEGMENT))
+        #: 做完的日子：（完成标记的字节, 解码好的命中）。按（日子, 完成标记）认——标记一变（重做、回填）就重读；没做完的
+        #: 不缓存。映射（B3）、日上下文与关系检验（B4）共用这一个实例，一晚每天只解码一次（26 号清单 6.10）。
+        self._done: dict[date, tuple[bytes, tuple[ConceptHits, ...]]] = {}
 
     # ── 写 ──────────────────────────────────────────────────────────────────
 
     def write(self, record: ConceptHits) -> Path:
         if not isinstance(record, ConceptHits):
             raise TypeError("record must be ConceptHits")
+        self._done.pop(record.address.occurred_on, None)
         path = self.path_for(record.address)
         self._atomic_write(path, encode(record).encode("utf-8"), maximum=MAX_RECORD_BYTES)
         return path
@@ -153,6 +157,7 @@ class ConceptHitStore(SceneStore):
         return tuple(sorted(removed))
 
     def discard_completion(self, day: date) -> bool:
+        self._done.pop(day, None)
         marker = self._day_path(day) / DONE_FILENAME
         if not self._file_exists(marker):
             return False
@@ -177,6 +182,16 @@ class ConceptHitStore(SceneStore):
         点文件与原子写临时文件是噪音，跳过；别的非记录文件报错。
         """
 
+        marker = self._read_bytes(self._day_path(day) / DONE_FILENAME, MAX_MARKER_BYTES)
+        cached = self._done.get(day)
+        if marker is not None and cached is not None and cached[0] == marker:
+            return cached[1]
+        found = self._read_day(day)
+        if marker is not None:
+            self._done[day] = (marker, found)
+        return found
+
+    def _read_day(self, day: date) -> tuple[ConceptHits, ...]:
         directory = self._day_path(day)
         records: list[ConceptHits] = []
         entries, _noise = self._content_files(directory)

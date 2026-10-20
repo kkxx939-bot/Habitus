@@ -78,7 +78,9 @@ def test_require_sha256_rejects_wrong_length_case_alphabet_or_type(digest: objec
         require_sha256(digest, "digest")
 
 
-def _text_message(role: ConversationMessageRole = ConversationMessageRole.PROMPT, **overrides: object) -> ConversationMessage:
+def _text_message(
+    role: ConversationMessageRole = ConversationMessageRole.PROMPT, **overrides: object
+) -> ConversationMessage:
     values: dict[str, object] = {
         "message_id": "message-1",
         "sequence": 0,
@@ -120,7 +122,9 @@ def _tool_result(**overrides: object) -> ConversationMessage:
     return ConversationMessage(**values)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("role", [ConversationMessageRole.PROMPT, ConversationMessageRole.COMPLETION, "prompt", "completion"])
+@pytest.mark.parametrize(
+    "role", [ConversationMessageRole.PROMPT, ConversationMessageRole.COMPLETION, "prompt", "completion"]
+)
 @pytest.mark.parametrize("content", ["a", " ", "\n", "中文", "multi\nline"])
 def test_prompt_and_completion_accept_exact_non_empty_text(role: object, content: str) -> None:
     assert _text_message(role, content=content).content == content  # type: ignore[arg-type]
@@ -225,8 +229,12 @@ def test_tool_call_rejects_result_only_fields(field: str, value: object) -> None
         _tool_call(**{field: value})
 
 
-@pytest.mark.parametrize("status", list(ConversationToolResultStatus) + [item.value for item in ConversationToolResultStatus])
-@pytest.mark.parametrize("mode", list(ConversationToolResultContentMode) + [item.value for item in ConversationToolResultContentMode])
+@pytest.mark.parametrize(
+    "status", list(ConversationToolResultStatus) + [item.value for item in ConversationToolResultStatus]
+)
+@pytest.mark.parametrize(
+    "mode", list(ConversationToolResultContentMode) + [item.value for item in ConversationToolResultContentMode]
+)
 def test_tool_result_accepts_every_declared_terminal_status_and_content_mode(status: object, mode: object) -> None:
     overrides: dict[str, object] = {"tool_status": status, "content_mode": mode}
     if mode in {ConversationToolResultContentMode.OMITTED, "omitted"}:
@@ -315,10 +323,15 @@ def test_message_content_canonicalizes_set_to_deterministic_immutable_sequence()
     [
         closed_turn(),
         tool_turn(),
-        tuple(message(index + 10, role, content) for index, (role, content) in enumerate([
-            (ConversationMessageRole.PROMPT, "p"),
-            (ConversationMessageRole.COMPLETION, "c"),
-        ])),
+        tuple(
+            message(index + 10, role, content)
+            for index, (role, content) in enumerate(
+                [
+                    (ConversationMessageRole.PROMPT, "p"),
+                    (ConversationMessageRole.COMPLETION, "c"),
+                ]
+            )
+        ),
     ],
 )
 def test_message_collection_accepts_contiguous_unique_chronological_sequences(
@@ -362,7 +375,9 @@ def test_message_collection_allows_equal_timestamps_but_rejects_reverse_time() -
     first, second = closed_turn()
     assert ConversationBatch("conversation-1", (first, replace(second, occurred_at=first.occurred_at)))
     with pytest.raises(ConversationMessageSchemaError, match="chronological"):
-        ConversationBatch("conversation-1", (first, replace(second, occurred_at=first.occurred_at - timedelta(seconds=1))))
+        ConversationBatch(
+            "conversation-1", (first, replace(second, occurred_at=first.occurred_at - timedelta(seconds=1)))
+        )
 
 
 def test_message_collection_rejects_duplicate_tool_call_ids() -> None:
@@ -428,23 +443,41 @@ def test_batch_and_segment_reject_unsafe_path_identifiers(identifier: object, ta
 
 
 @pytest.mark.parametrize("factory", [ConversationBatch, ConversationSegment])
-def test_batch_and_segment_round_trip_are_digest_stable(factory: type[ConversationBatch] | type[ConversationSegment]) -> None:
-    value = factory("conversation-1", closed_turn()) if factory is ConversationBatch else factory("conversation-1", "segment-1", closed_turn())
+def test_batch_and_segment_round_trip_are_digest_stable(
+    factory: type[ConversationBatch] | type[ConversationSegment],
+) -> None:
+    value = (
+        factory("conversation-1", closed_turn())
+        if factory is ConversationBatch
+        else factory("conversation-1", "segment-1", closed_turn())
+    )
     restored = factory.from_dict(value.to_dict())
     assert restored == value
     assert restored.digest == value.digest
 
 
 @pytest.mark.parametrize("factory", [ConversationBatch, ConversationSegment])
-def test_batch_and_segment_from_dict_reject_unknown_fields(factory: type[ConversationBatch] | type[ConversationSegment]) -> None:
-    value = factory("conversation-1", closed_turn()) if factory is ConversationBatch else factory("conversation-1", "segment-1", closed_turn())
+def test_batch_and_segment_from_dict_reject_unknown_fields(
+    factory: type[ConversationBatch] | type[ConversationSegment],
+) -> None:
+    value = (
+        factory("conversation-1", closed_turn())
+        if factory is ConversationBatch
+        else factory("conversation-1", "segment-1", closed_turn())
+    )
     with pytest.raises(ConversationMessageSchemaError, match="unknown"):
         factory.from_dict({**value.to_dict(), "owner": "unexpected"})
 
 
 @pytest.mark.parametrize("factory", [ConversationBatch, ConversationSegment])
-def test_batch_and_segment_from_dict_reject_wrong_schema(factory: type[ConversationBatch] | type[ConversationSegment]) -> None:
-    value = factory("conversation-1", closed_turn()) if factory is ConversationBatch else factory("conversation-1", "segment-1", closed_turn())
+def test_batch_and_segment_from_dict_reject_wrong_schema(
+    factory: type[ConversationBatch] | type[ConversationSegment],
+) -> None:
+    value = (
+        factory("conversation-1", closed_turn())
+        if factory is ConversationBatch
+        else factory("conversation-1", "segment-1", closed_turn())
+    )
     with pytest.raises(ConversationMessageSchemaError, match="unsupported"):
         factory.from_dict({**value.to_dict(), "schema_version": "v0"})
 
@@ -455,7 +488,11 @@ def test_batch_and_segment_from_dict_reject_invalid_message_container(
     factory: type[ConversationBatch] | type[ConversationSegment],
     messages: object,
 ) -> None:
-    value = factory("conversation-1", closed_turn()) if factory is ConversationBatch else factory("conversation-1", "segment-1", closed_turn())
+    value = (
+        factory("conversation-1", closed_turn())
+        if factory is ConversationBatch
+        else factory("conversation-1", "segment-1", closed_turn())
+    )
     with pytest.raises(ConversationMessageSchemaError):
         factory.from_dict({**value.to_dict(), "messages": messages})
 
@@ -464,7 +501,11 @@ def test_batch_and_segment_from_dict_reject_invalid_message_container(
 def test_batch_and_segment_from_dict_reject_each_missing_required_field(
     factory: type[ConversationBatch] | type[ConversationSegment],
 ) -> None:
-    value = factory("conversation-1", closed_turn()) if factory is ConversationBatch else factory("conversation-1", "segment-1", closed_turn())
+    value = (
+        factory("conversation-1", closed_turn())
+        if factory is ConversationBatch
+        else factory("conversation-1", "segment-1", closed_turn())
+    )
     payload = value.to_dict()
     required = ["conversation_id", "messages"]
     if factory is ConversationSegment:

@@ -164,9 +164,7 @@ def test_doctor_resolves_conditional_adapter_dependencies_from_registry(
 def test_doctor_reports_unregistered_adapter_without_raising(tmp_path: Path) -> None:
     payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
-    payload["models"]["chat"]["route"].update(
-        {"adapter": "future_chat", "credential_ref": ""}
-    )
+    payload["models"]["chat"]["route"].update({"adapter": "future_chat", "credential_ref": ""})
     config = HabitusConfig.from_mapping(payload)
 
     report = run_doctor(config, check_port=False)
@@ -330,9 +328,7 @@ def test_repair_source_outputs_refuses_while_a_local_service_owns_the_root(
     monkeypatch.setattr(Config, "HabitusConfig", StubConfig)
     monkeypatch.setattr(instance_lock, "ServiceInstanceLock", RefusingLock)
 
-    args = cli._parser().parse_args(
-        ["repair-source-outputs", "a" * 64, "--consumer", "memory"]
-    )
+    args = cli._parser().parse_args(["repair-source-outputs", "a" * 64, "--consumer", "memory"])
     assert cli._repair_source_outputs(args, {}) == 3
     assert "stop it before repairing" in capsys.readouterr().err
 
@@ -341,6 +337,4 @@ def test_repair_source_outputs_rejects_an_unknown_consumer(tmp_path: Path) -> No
     from habitus.integrations.local_service import cli
 
     with pytest.raises(SystemExit):
-        cli._parser().parse_args(
-            ["repair-source-outputs", "a" * 64, "--consumer", "not_a_consumer"]
-        )
+        cli._parser().parse_args(["repair-source-outputs", "a" * 64, "--consumer", "not_a_consumer"])

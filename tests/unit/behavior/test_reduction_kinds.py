@@ -126,6 +126,50 @@ def test_nightly_growth_turns_recurring_pending_entries_into_a_class(tmp_path: P
     assert len(outcome.days) == 3
 
 
+def test_a_crash_before_the_migration_plan_does_not_lose_the_new_class(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """打"聚组过"之后、写迁移计划之前被杀：要迁进新类的成员不能已经算"聚组过"，否则下一晚它们不再是新条目、零次模型
+    调用，类永远建不成（L10.4）。"""
+
+    uris_days = [(f"数行数{i}", 1 + i, 16 + i) for i in range(3)]
+    body = {
+        "groups": [
+            {
+                "members": ["P1", "P2", "P3"],
+                "name": "统计代码规模",
+                "criterion": "数代码行数",
+                "reminder": "该统计代码规模了",
+                "excludes": [],
+                "examples": ["数行数0"],
+                "existing": None,
+            }
+        ]
+    }
+    tree, _, jobs, store = setup(tmp_path, provider=ScriptedProvider([body, body]))
+    uris = [publish(tree, name=name, token="s-待定", minute=minute, day=day) for name, minute, day in uris_days]
+    entries = [
+        PendingEntry(uri, Lane.SESSION, date(2026, 8, day), name, name)
+        for uri, (name, _, day) in zip(uris, uris_days, strict=True)
+    ]
+    store.replace_pending(store.read_pending().pool.with_entries(entries), expected_revision=0)
+    original = jobs.migrator.plan
+
+    def killed(_record):  # type: ignore[no-untyped-def]
+        raise RuntimeError("killed before the migration plan was written")
+
+    monkeypatch.setattr(jobs.migrator, "plan", killed)
+    when = datetime(2026, 8, 20, 3, 0, tzinfo=NOW.tzinfo)
+    try:
+        asyncio.run(jobs.grow(when, checkpoint=lambda: None))
+    except RuntimeError:
+        pass
+    monkeypatch.setattr(jobs.migrator, "plan", original)
+
+    outcome = asyncio.run(jobs.grow(when, checkpoint=lambda: None))
+
+    assert outcome.model_calls == 1
+    assert {token_of(tree, uri) for uri in uris} == {"s-k0003"}
+
+
 def test_nightly_recheck_moves_what_the_classifier_assigns_and_marks_the_rest(tmp_path: Path) -> None:
     nightly = {
         "groups": [
@@ -149,13 +193,18 @@ def test_nightly_recheck_moves_what_the_classifier_assigns_and_marks_the_rest(tm
     tree, _, jobs, store = setup(tmp_path, provider=ScriptedProvider([nightly, recheck]))
     edit = publish(tree, name="改一行代码", token="s-待定", minute=1)
     rename = publish(tree, name="重命名项目", token="s-待定", minute=2)
-    entries = [PendingEntry(uri, Lane.SESSION, date(2026, 8, 16), name, name) for uri, name in ((edit, "改代码"), (rename, "改名"))]
+    entries = [
+        PendingEntry(uri, Lane.SESSION, date(2026, 8, 16), name, name)
+        for uri, name in ((edit, "改代码"), (rename, "改名"))
+    ]
     store.replace_pending(store.read_pending().pool.with_entries(entries), expected_revision=0)
     outcome = asyncio.run(jobs.grow(NOW, checkpoint=lambda: None))
     assert outcome.model_calls == 2
     assert token_of(tree, edit) == "s-k0001" and token_of(tree, rename) == "s-待定"
     pool = store.read_pending().pool.entries
     assert set(pool) == {rename} and pool[rename].rechecked  # 标记落盘（编解码往返）：下一晚不再问
+    # 交模型聚组过的也落盘：下一晚它是旧条目，不再整批交过去（26 号清单 6.6）
+    assert pool[rename].grouped_on == NOW.astimezone(jobs.zone).date() and not pool[rename].fresh
     assert store.read().version == 2 and outcome.days == frozenset({date(2026, 8, 16)})
 
 
@@ -235,7 +284,9 @@ def test_a_migration_plan_that_does_not_apply_is_refused_before_touching_the_tre
     assert store.read_migration() is None
 
 
-def test_a_full_pending_pool_refuses_the_overflow_instead_of_raising(tmp_path: Path) -> None:
+def test_a_full_pending_pool_evicts_its_oldest_entries_so_new_ones_always_get_in(tmp_path: Path) -> None:
+    """池满挤掉进池最早的旧条目（裁定 60 第 2 条，10-19 改）：新条目总能进来；挤掉的只是索引。"""
+
     from habitus.behavior.kinds.config import BehaviorKindConfig
 
     tree = BehaviorTree(tmp_path / "tree")
@@ -244,13 +295,20 @@ def test_a_full_pending_pool_refuses_the_overflow_instead_of_raising(tmp_path: P
         ProcessLocalLockStore(),
         names=("修改代码",),
         provider=NameMatchingProvider(),
-        config=BehaviorKindConfig(max_pending=1),
+        config=BehaviorKindConfig(max_pending=2),
     )
-    entries = [PendingEntry(f"behavior://x{i}", Lane.SESSION, date(2026, 8, 16), "新事", "内容") for i in range(3)]
-    admission = stamping.record_pending(entries)
-    assert admission.added == 1 and len(admission.refused) == 2
-    assert any("kind_pending_pool_full 2" in note for note in admission.signals())
-    assert len(store.read_pending().pool.entries) == 1
+
+    def entry(name: str, day: int) -> PendingEntry:
+        on = date(2026, 8, day)
+        return PendingEntry(f"behavior://{name}", Lane.SESSION, on, "新事", "内容", entered_on=on)
+
+    stamping.record_pending([entry("z-old", 1), entry("a-mid", 2)])
+    admission = stamping.record_pending([entry("m-new", 3)])
+
+    assert admission.added == 1 and admission.evicted == ("behavior://z-old",)
+    assert any("kind_pending_pool_full 1" in note for note in admission.signals())
+    assert set(store.read_pending().pool.entries) == {"behavior://a-mid", "behavior://m-new"}
+    assert stamping.record_pending([entry("m-new", 3)]).added == 0  # 重放同一条不多算、不再挤
 
 
 def test_classification_renews_the_lease_between_chunks(tmp_path: Path) -> None:

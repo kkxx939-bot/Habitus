@@ -1,14 +1,24 @@
-"""融合覆盖索引：哪些观测已经被判过——有窗口、按日整块过期。
+"""融合覆盖索引：哪些观测已经被判过——按日分目录，每条记录按自己的释放条件删。
 
 ## 为什么不用回执目录
 
 "这段观测处理过没有"以前靠全量枚举回执目录回答，归约封口每轮都读一遍。回执只增不减，
-一周 2,689 份、一年十几万份，越过 ``max_receipt_files`` 即枚举永久失效（BHV-REALDATA-001）。而
+一周 2,689 份、一年十几万份，越过 ``max_receipt_files`` 即枚举永久失效（2026-08 真实数据审计）。而
 这个问题真正需要的信息只有观测 id 与"何时判的"，且只在**同一个单位可能再送来**的时间跨度内有意义。
 
 所以覆盖信息单独成索引：``fusion/coverage/YYYY-MM-DD/<receipt_id>.json``，一份回执一个小文件，
-按 ``judged_at`` 的 UTC 日期分目录。读取只看窗口内的日目录；过期是删整个日目录——不堆积，
-删除也是整块操作。窗口进 Config（默认 7 天）。
+按 ``judged_at`` 的 UTC 日期分目录。读取看全部记录（见 ``covered_observation_ids``：读侧开窗会和删除侧的窗口
+形成死锁）；删除由 ``expire`` 按每条记录的释放条件做，删空的日目录一起删。窗口进 Config（默认 7 天）。
+
+## 会话 lane 的记录跟着会话源走（26 号清单 6.1）
+
+会话 lane 的记录带着这一轮所属的会话源（``source_refs``）：那份源的 Behavior 到终态之前不删——做到一半的源隔 10 天才恢复，
+前几轮照样认得出写过，不会重新描述一遍。到终态之后才删，排在会话源释放写水位（``conversation.source``）之后；"到终态"
+由组合根注入（``settled``，behavior 不 import conversation）。没带源的（物理 lane、旧记录）照旧按窗口过期。
+
+## 读的缓存（26 号清单 6.2）
+
+记录只创建、不改写：按文件路径缓存解码好的内容，删的时候一起淘汰。
 
 ## 与释放的顺序
 
@@ -22,6 +32,8 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -43,29 +55,47 @@ _MAX_RECORD_BYTES = 1_048_576
 _MAX_ENTRIES = 100_000
 
 
-class BehaviorCoverageIndex:
-    """按日分区、按窗口过期的"已融合观测"索引。"""
+@dataclass(frozen=True)
+class _Record:
+    observation_ids: frozenset[str]
+    source_refs: tuple[str, ...]
 
-    def __init__(self, behavior_root: str | Path, *, window_days: int = 7) -> None:
+
+class BehaviorCoverageIndex:
+    """按日分区、按窗口过期的"已融合观测"索引。``settled(source_id)``：那份会话源的 Behavior 到终态了没有。"""
+
+    def __init__(
+        self,
+        behavior_root: str | Path,
+        *,
+        window_days: int = 7,
+        settled: Callable[[str], bool] | None = None,
+    ) -> None:
         if isinstance(window_days, bool) or not isinstance(window_days, int) or window_days < 1:
             raise ValueError("coverage window_days must be a positive integer")
+        if settled is not None and not callable(settled):
+            raise TypeError("settled must be callable or None")
         self.root = Path(behavior_root).expanduser().resolve(strict=False)
         self.coverage_root = self.root / "fusion" / "coverage"
         self.window_days = window_days
+        self.settled = settled
+        self._cache: dict[Path, _Record] = {}
 
     # ── 写 ──────────────────────────────────────────────────────────────────────────
 
-    def record(self, receipt: BehaviorFusionReceipt) -> None:
-        """记下这份回执覆盖的全部观测；同身份同内容重复写入幂等。"""
+    def record(self, receipt: BehaviorFusionReceipt, *, sources: tuple[str, ...] = ()) -> None:
+        """记下这份回执覆盖的全部观测（会话 lane 连同这一轮所属的会话源）；同身份同内容重复写入幂等。"""
 
         if not isinstance(receipt, BehaviorFusionReceipt):
             raise TypeError("receipt must be BehaviorFusionReceipt")
-        payload = {
+        payload: dict[str, object] = {
             "schema_version": COVERAGE_SCHEMA_VERSION,
             "receipt_id": receipt.receipt_id,
             "judged_at": receipt.judged_at.astimezone(UTC).isoformat(timespec="microseconds"),
             "observation_ids": sorted(set(receipt.observation_ids)),
         }
+        if sources:
+            payload["source_refs"] = sorted(set(sources))
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         path = self._path(receipt.judged_at, receipt.receipt_id)
         try:
@@ -91,30 +121,19 @@ class BehaviorCoverageIndex:
         covered: set[str] = set()
         for day_path in self._day_directories(None):
             for entry in self._entries(day_path):
-                match = _RECORD_FILE.fullmatch(entry.name)
-                if not entry.is_file() or match is None:
-                    continue
-                encoded = read_regular_bytes(
-                    day_path / entry.name, artifact_root=self.root, max_bytes=_MAX_RECORD_BYTES
-                )
-                try:
-                    payload = json.loads(encoded.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                    raise BehaviorFusionError(f"coverage record is not decodable: {entry.name}") from exc
-                ids = payload.get("observation_ids")
-                if not isinstance(ids, list) or any(not isinstance(item, str) for item in ids):
-                    raise BehaviorFusionError(f"coverage record has invalid observation_ids: {entry.name}")
-                covered.update(ids)
+                if entry.is_file() and _RECORD_FILE.fullmatch(entry.name) is not None:
+                    covered.update(self._strict(day_path / entry.name).observation_ids)
         return frozenset(covered)
 
     # ── 过期 ─────────────────────────────────────────────────────────────────────────
 
     def expire(self, now: datetime, *, retain: frozenset[str] | set[str] = frozenset()) -> int:
-        """删掉窗口之前的覆盖记录；返回删掉的记录数。
+        """删掉再也用不上的覆盖记录；返回删掉的记录数。
 
-        ``retain`` 是**仍在观测存储里**的观测身份：引用到它们的记录不删——交付还在，它的"已融合"
-        就还得答得出来，否则窗口一过它会被当成没判过重做、产出第二套判断，并把封口
-        视界钉在过去（BHV-REALDATA-001 审计）。释放（``_release_unreferenced``）之后下一轮再过期。
+        - 带会话源的：那几份源的 Behavior 都到终态了才删（不看窗口）；
+        - 不带的（物理 lane、旧记录）：窗口之前的才删。
+        ``retain`` 是**仍在观测存储里**的观测身份：引用到它们的记录一律不删——交付还在，它的"已融合"就还得答得出来，
+        否则会被当成没判过重做、产出第二套判断，并把封口视界钉在过去（2026-08 真实数据审计）。
         """
 
         start = self._window_start(now)
@@ -122,42 +141,63 @@ class BehaviorCoverageIndex:
         if not self.coverage_root.is_dir():
             return 0
         keep = set(retain)
-        for entry in self._entries(self.coverage_root):
-            if not entry.is_dir() or _DAY_DIRECTORY.fullmatch(entry.name) is None:
-                continue
-            if date.fromisoformat(entry.name) >= start:
-                continue
-            day_path = self.coverage_root / entry.name
+        for day_path in self._day_directories(None):
+            old = date.fromisoformat(day_path.name) < start
             for item in self._entries(day_path):
                 if not (item.is_file() and _RECORD_FILE.fullmatch(item.name)):
                     continue
-                if keep and self._references(day_path / item.name, keep):
+                path = day_path / item.name
+                record = self._lenient(path)
+                if record is not None and keep and record.observation_ids & keep:
                     continue
-                if durable_unlink(day_path / item.name, artifact_root=self.root):
+                if not self._released(record, old=old):
+                    continue
+                if durable_unlink(path, artifact_root=self.root):
                     removed += 1
-            try:
-                os.rmdir(day_path)
-            except OSError:
-                # 目录里还有不属于本索引的东西（云同步副本之类）：留着，不影响正确性。
-                pass
+                self._cache.pop(path, None)
+            if old or not self._entries(day_path):
+                try:
+                    os.rmdir(day_path)
+                except OSError:
+                    # 目录里还有记录，或不属于本索引的东西（云同步副本之类）：留着，不影响正确性。
+                    pass
         return removed
 
     # ── 内部 ─────────────────────────────────────────────────────────────────────────
 
-    def _references(self, path: Path, ids: set[str]) -> bool:
-        """这份记录是否覆盖了仍在存储里的观测。
+    def _released(self, record: _Record | None, *, old: bool) -> bool:
+        """解不开的记录当作"什么都没覆盖"、按窗口照常删（覆盖索引是可重建的派生物，损坏应当自愈）。"""
 
-        解不开的记录当作"什么都没覆盖"→ 照常被删掉（覆盖索引是可重建的派生物，历史记录损坏
-        应当自愈）。硬拒留给 ``covered_observation_ids``：那里读不出来会把已融合误判成未融合。
-        """
+        if record is None or not record.source_refs:
+            return old
+        return self.settled is not None and all(self.settled(source) for source in record.source_refs)
 
+    def _strict(self, path: Path) -> _Record:
+        """读侧：读不出来就硬拒——那里读错会把已融合误判成未融合。"""
+
+        cached = self._cache.get(path)
+        if cached is not None:
+            return cached
+        encoded = read_regular_bytes(path, artifact_root=self.root, max_bytes=_MAX_RECORD_BYTES)
         try:
-            encoded = read_regular_bytes(path, artifact_root=self.root, max_bytes=_MAX_RECORD_BYTES)
             payload = json.loads(encoded.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError, BehaviorFusionError, OSError):
-            return False
-        listed = payload.get("observation_ids")
-        return isinstance(listed, list) and any(item in ids for item in listed)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise BehaviorFusionError(f"coverage record is not decodable: {path.name}") from exc
+        ids = payload.get("observation_ids")
+        if not isinstance(ids, list) or any(not isinstance(item, str) for item in ids):
+            raise BehaviorFusionError(f"coverage record has invalid observation_ids: {path.name}")
+        sources = payload.get("source_refs", [])
+        if not isinstance(sources, list) or any(not isinstance(item, str) for item in sources):
+            raise BehaviorFusionError(f"coverage record has invalid source_refs: {path.name}")
+        record = _Record(frozenset(ids), tuple(sources))
+        self._cache[path] = record
+        return record
+
+    def _lenient(self, path: Path) -> _Record | None:
+        try:
+            return self._strict(path)
+        except (BehaviorFusionError, OSError, DurablePathIntegrityError):
+            return None
 
     def _window_start(self, now: datetime) -> date:
         if not isinstance(now, datetime) or now.utcoffset() is None:

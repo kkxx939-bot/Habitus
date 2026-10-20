@@ -218,11 +218,28 @@ def test_collection_metadata_accepts_api_key_trust_boundary_or_complete_schema(
     ("metadata", "message"),
     [
         (None, "does not exist"),
-        ({"IndexName": "other", "VectorIndex": {"Distance": "cosine"}, "ScalarIndex": list(protocol._SCALAR_INDEX_FIELDS)}, "another index"),
+        (
+            {
+                "IndexName": "other",
+                "VectorIndex": {"Distance": "cosine"},
+                "ScalarIndex": list(protocol._SCALAR_INDEX_FIELDS),
+            },
+            "another index",
+        ),
         ({"IndexName": "default", "VectorIndex": None, "ScalarIndex": []}, "no VectorIndex"),
-        ({"IndexName": "default", "VectorIndex": {"Distance": "l2"}, "ScalarIndex": list(protocol._SCALAR_INDEX_FIELDS)}, "cosine"),
+        (
+            {
+                "IndexName": "default",
+                "VectorIndex": {"Distance": "l2"},
+                "ScalarIndex": list(protocol._SCALAR_INDEX_FIELDS),
+            },
+            "cosine",
+        ),
         ({"IndexName": "default", "VectorIndex": {"Distance": "cosine"}, "ScalarIndex": None}, "ScalarIndex"),
-        ({"IndexName": "default", "VectorIndex": {"Distance": "cosine"}, "ScalarIndex": ["record_type"]}, "missing scalar fields"),
+        (
+            {"IndexName": "default", "VectorIndex": {"Distance": "cosine"}, "ScalarIndex": ["record_type"]},
+            "missing scalar fields",
+        ),
     ],
 )
 def test_require_index_rejects_missing_or_incompatible_metadata(
@@ -324,8 +341,12 @@ def test_upsert_and_delete_apply_configured_batch_sizes(batch_size: int) -> None
     try:
         asyncio.run(current._upsert_records(values))
         asyncio.run(current.delete(tuple(item.identity for item in values)))
-        assert [len(items) for items in upserted] == [batch_size] * (len(values) // batch_size) + ([len(values) % batch_size] if len(values) % batch_size else [])
-        assert [len(items) for items in deleted] == [batch_size] * (len(values) // batch_size) + ([len(values) % batch_size] if len(values) % batch_size else [])
+        assert [len(items) for items in upserted] == [batch_size] * (len(values) // batch_size) + (
+            [len(values) % batch_size] if len(values) % batch_size else []
+        )
+        assert [len(items) for items in deleted] == [batch_size] * (len(values) // batch_size) + (
+            [len(values) % batch_size] if len(values) % batch_size else []
+        )
         assert tuple(point_id for batch in deleted for point_id in batch) == tuple(
             protocol._point_id(current._scope, item.identity) for item in values
         )
@@ -336,10 +357,7 @@ def test_upsert_and_delete_apply_configured_batch_sizes(batch_size: int) -> None
 def test_delete_all_removes_only_memory_records_and_preserves_metadata() -> None:
     current = backend()
     deleted: list[tuple[str, ...]] = []
-    memory_ids = tuple(
-        protocol._point_id(current._scope, identity)
-        for identity in ("a", "b")
-    )
+    memory_ids = tuple(protocol._point_id(current._scope, identity) for identity in ("a", "b"))
 
     async def scan_raw(**_kwargs):
         return tuple({"id": point_id} for point_id in memory_ids)

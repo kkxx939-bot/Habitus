@@ -29,19 +29,18 @@ def test_completed_intention_uses_separate_partition_and_explicit_scope() -> Non
     assert memory_index_kind(MemoryKind.INTENTION, intention_status="completed") == "intention_completed"
     assert not intention_matches_scope("completed", MemoryIntentionRecallScope.ACTIVE)
     assert intention_matches_scope("completed", MemoryIntentionRecallScope.COMPLETED)
-    assert allowed_memory_index_kinds(
-        (MemoryKind.INTENTION,), MemoryIntentionRecallScope.ALL
-    ) == ("intention", "intention_completed")
+    assert allowed_memory_index_kinds((MemoryKind.INTENTION,), MemoryIntentionRecallScope.ALL) == (
+        "intention",
+        "intention_completed",
+    )
 
 
 def test_kinds_filter_is_unique_and_completed_scope_selects_completed_partition() -> None:
     with pytest.raises(ValueError, match="unique"):
-        allowed_memory_index_kinds(
-            (MemoryKind.PROFILE, MemoryKind.PROFILE), MemoryIntentionRecallScope.ACTIVE
-        )
-    assert allowed_memory_index_kinds(
-        (MemoryKind.INTENTION,), MemoryIntentionRecallScope.COMPLETED
-    ) == ("intention_completed",)
+        allowed_memory_index_kinds((MemoryKind.PROFILE, MemoryKind.PROFILE), MemoryIntentionRecallScope.ACTIVE)
+    assert allowed_memory_index_kinds((MemoryKind.INTENTION,), MemoryIntentionRecallScope.COMPLETED) == (
+        "intention_completed",
+    )
 
 
 def test_non_intention_kind_rejects_intention_status() -> None:
@@ -59,7 +58,9 @@ def test_non_intention_kind_rejects_intention_status() -> None:
         (365, MemoryIntentionReviewLevel.STRONG_REVIEW),
     ],
 )
-def test_reviewer_only_emits_escalating_reminder_without_changing_status(days: int, level: MemoryIntentionReviewLevel) -> None:
+def test_reviewer_only_emits_escalating_reminder_without_changing_status(
+    days: int, level: MemoryIntentionReviewLevel
+) -> None:
     intention = document(MemoryKind.INTENTION)
     review = MemoryIntentionReviewer().review(intention, now=BASE_TIME + timedelta(days=days))
 
@@ -83,9 +84,7 @@ def test_reconfirmation_resets_review_clock() -> None:
     original = document(MemoryKind.INTENTION)
     reconfirmed = replace(
         original,
-        metadata=original.metadata.next_revision(
-            BASE_TIME + timedelta(days=170), refresh_confirmation=True
-        ),
+        metadata=original.metadata.next_revision(BASE_TIME + timedelta(days=170), refresh_confirmation=True),
     )
     review = MemoryIntentionReviewer().review(reconfirmed, now=BASE_TIME + timedelta(days=181))
     assert review is not None

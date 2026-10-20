@@ -332,6 +332,11 @@ def test_cross_month_days_roll_up_into_both_months_and_the_year(tmp_path) -> Non
     )
     generator = ScriptedOverviewGenerator()
     refresher = BehaviorSemanticRefresher(tree, generator)
+
+    def no_full_listing(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("the refresher must not page through the whole tree (26 号清单 6.8)")
+
+    tree.list_addresses = no_full_listing  # type: ignore[method-assign]
     asyncio.run(refresher.refresh_days([DAY, _date(2026, 9, 2)]))
 
     for parts in ((2026, 8), (2026, 9), (2026,)):

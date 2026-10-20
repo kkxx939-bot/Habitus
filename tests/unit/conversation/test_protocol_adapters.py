@@ -103,9 +103,7 @@ def test_anthropic_maps_error_tool_result_without_losing_tool_name() -> None:
             },
             {
                 "role": "user",
-                "content": [
-                    {"type": "tool_result", "tool_use_id": "tool-1", "content": "timeout", "is_error": True}
-                ],
+                "content": [{"type": "tool_result", "tool_use_id": "tool-1", "content": "timeout", "is_error": True}],
             },
         ]
     }

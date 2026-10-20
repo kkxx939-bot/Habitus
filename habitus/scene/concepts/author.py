@@ -32,6 +32,7 @@ from typing import Any, cast
 from habitus.foundation.integrity import canonical_digest
 from habitus.foundation.text import clean_line
 from habitus.model_client import ChatMessage, ChatRequest, StructuredChatClient
+from habitus.scene.concepts.calendar_situations import is_calendar
 from habitus.scene.concepts.model import (
     BASELINE_KEY_SEPARATOR,
     MAX_DEFINITION_CHARS,
@@ -50,12 +51,15 @@ from habitus.scene.concepts.model import (
     GradeMeasure,
     MechanicalRule,
     concept_identity,
+    members_retired,
 )
-from habitus.scene.concepts.rhythm import Rhythm
+from habitus.scene.concepts.rhythm import RHYTHM_RENDER_VERSION, Rhythm
 from habitus.scene.concepts.situation import SituationBasis, SituationError, SituationRule
 from habitus.scene.llm import Failed, ask
 
-CONCEPT_AUTHOR_PROMPT_VERSION = "scene_concept_author_prompt_v5"
+# v5 → v6（2026-10-18，裁定 59）：日历那一族（周几、日历备注）从可写的情境里拿掉，改由外部条件机械给；节律那一行换口径。
+# **未对着真实模型调过**，合入前待用户用真实模型做新旧对照。
+CONCEPT_AUTHOR_PROMPT_VERSION = "scene_concept_author_prompt_v6"
 #: 一批最多写多少个概念（保护闸）。
 MAX_CONCEPTS_PER_BATCH = 40
 MAX_EXAMPLES_PER_CLASS = 5
@@ -157,13 +161,16 @@ CONCEPT_AUTHOR_SYSTEM_PROMPT = """你在一个人的行为词表之上定义概�
 - 已经有的概念不要重写、不要重名。
 
 情境概念还要写一条 situation —— 算法照它算，所以只能用下面这几种说法之一：
-- weekdays：名义上的周几（0=周一 … 6=周日），例：周末 = [5, 6]。
-- calendar_note：当地日历那句话里含某个词，例：调休日 = "补班"。
 - subject：同在的人里有谁。  · place：地点是哪儿。
 - streak：某个概念（类名或概念名）**往前连着 N 个 24 小时**都命中（N ≥ 2），例：赶工中 = 「写代码」连着 3 天。
 - yesterday：这条行为开始之前 **24 小时内**命中过某个概念（可以指定档），例：昨晚晚睡 = 之前 24 小时内命中「晚睡」的重档。
+周几、几号、月末、工作日 / 周末 / 节假日 / 调休这些日历上的日子，系统按当地日历自动给，不要写成情境概念。
 role 填 derived 的**必须**写 situation。写不成上面任何一种的状态（"出差中""生病中"）就别写 situation，
 我们暂时算不出它；"在做哪个项目""心情如何"这类算不出来的，一个都不要写。"""
+
+
+#: 模型能写的情境族：日历那一族由外部条件机械生成（裁定 59），不交给模型。
+AUTHORED_BASES = tuple(item for item in SituationBasis if item is not SituationBasis.CALENDAR)
 
 
 def concept_author_json_schema(briefs: Sequence[ClassBrief]) -> dict[str, Any]:
@@ -205,15 +212,10 @@ def concept_author_json_schema(briefs: Sequence[ClassBrief]) -> dict[str, Any]:
     situation = {
         "type": ["object", "null"],
         "additionalProperties": False,
-        "required": ["basis", "weekdays", "value", "concept", "grade", "days"],
+        "required": ["basis", "value", "concept", "grade", "days"],
         "properties": {
-            "basis": {"type": "string", "enum": [item.value for item in SituationBasis]},
-            "weekdays": {
-                "type": "array",
-                "items": {"type": "integer"},
-                "description": "日型用：0=周一 … 6=周日；其他族填 []。",
-            },
-            "value": {"type": ["string", "null"], "description": "calendar_note / subject / place 要匹配的值。"},
+            "basis": {"type": "string", "enum": [item.value for item in AUTHORED_BASES]},
+            "value": {"type": ["string", "null"], "description": "subject / place 要匹配的值。"},
             "concept": {"type": ["string", "null"], "description": "streak / yesterday 盯的那个概念。"},
             "grade": {"type": ["string", "null"], "description": "只在某一档才算时填档名。"},
             "days": {"type": ["integer", "null"], "description": "streak 连着几天（≥2）；其他族填 null。"},
@@ -286,8 +288,12 @@ CONCEPT_AUTHOR_SCHEMA_FINGERPRINT = canonical_digest(
 )[:12]
 #: 提示词正文的指纹进版本：正文改了而忘了手动升版本号，缓存 / 续跑也不会拿旧答案冒充新提示词的答案（第四轮评审 E15）。
 PROMPT_FINGERPRINT = canonical_digest({"prompt": CONCEPT_AUTHOR_SYSTEM_PROMPT})[:8]
+#: 节律那一行是材料不是提示词正文，指纹摘不到它：口径改了靠它的版本号进缓存键（裁定 59）。
+#: 材料的写法版本（提示词指纹只摘系统提示词，不含材料）：已有概念里日历情境收成一句、没有峰的行为也给节律（2026-10-18 四方评审）。
+AUTHOR_MATERIAL_VERSION = "author_material_v2"
 CONCEPT_AUTHOR_VERSION = (
     f"{CONCEPT_AUTHOR_PROMPT_VERSION}+prompt{PROMPT_FINGERPRINT}+schema{CONCEPT_AUTHOR_SCHEMA_FINGERPRINT}"
+    f"+{RHYTHM_RENDER_VERSION}+{AUTHOR_MATERIAL_VERSION}"
 )
 
 
@@ -302,13 +308,26 @@ def build_concept_request(
         raise ConceptAuthorError("a concept authoring request needs at least one class brief")
     labels = {class_id: label for label, class_id in class_labels(briefs).items()}
     sections = ["## 词表里的行为类", *(brief.render(labels[brief.class_id]) for brief in briefs)]
-    authored = [identity for identity in sorted(existing) if existing[identity].kind is not ConceptKind.BASE]
-    if authored:
+    authored = [
+        identity
+        for identity in sorted(existing)
+        if existing[identity].kind is not ConceptKind.BASE
+        and not is_calendar(existing, identity)
+        and not members_retired(existing, identity)  # 成员类全停了：不再给模型看（26 号清单 5.5）
+    ]
+    calendar = any(is_calendar(existing, identity) for identity in existing)
+    if authored or calendar:
         sections += ["", "## 已经有的概念（不要重写、不要重名）"]
         sections += [_render_existing(existing, identity) for identity in authored]
-    lines = [rhythm.render() for rhythm in rhythms.values() if rhythm.peaks]
+        if calendar:
+            # 日历情境（周几、几号、月末、日型）系统按天机械给出：收成一句，不整份列 40 多条（2026-10-18 四方评审）
+            sections.append(
+                "- 日历上的日子（周一…周日、1号…31号、月末、工作日 / 周末 / 节假日 / 调休上班）：系统按当地日历自动给出，不要写"
+            )
+    # 看不出几点做的也给：多久一次、锚在哪种日子上同样是判断"该不该拆"的材料（原来只给有峰的，那一支永远到不了模型）
+    lines = [rhythm.render() for rhythm in rhythms.values()]
     if lines:
-        sections += ["", "## 这些行为平常的作息（一天几次、几点）", *(f"- {line}" for line in lines)]
+        sections += ["", "## 这些行为平常的作息（做的那天几点做、多久一次）", *(f"- {line}" for line in lines)]
     return ChatRequest(
         messages=(
             ChatMessage(role="system", content=CONCEPT_AUTHOR_SYSTEM_PROMPT),
@@ -553,14 +572,13 @@ def _situation(raw: object, labels: Mapping[str, str]) -> SituationRule | None:
         return None
     if not isinstance(raw, Mapping):
         raise ValueError("situation must be an object or null")
-    weekdays = _list(raw.get("weekdays"), "situation weekdays")
-    if any(isinstance(day, bool) or not isinstance(day, int) for day in weekdays):
-        raise ValueError("situation weekdays must be integers 0–6")
     days = raw.get("days")
+    basis = _enum(SituationBasis, raw.get("basis"), "situation basis")
+    if basis not in AUTHORED_BASES:
+        raise ValueError("calendar situations are generated from the local calendar, not written by the author")
     try:
         return SituationRule(
-            basis=_enum(SituationBasis, raw.get("basis"), "situation basis"),
-            weekdays=tuple(weekdays),
+            basis=basis,
             value=None if raw.get("value") in (None, "") else _text(raw.get("value"), "situation value"),
             concept=None
             if raw.get("concept") in (None, "")

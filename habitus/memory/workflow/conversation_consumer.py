@@ -39,6 +39,8 @@ class MemoryConversationConsumer:
     consumer = ConversationSourceConsumer.MEMORY
     # 长期记忆按 memory_sequence 严格串行，同一会话的更早 Source 必须先落终态。
     ordered_within_conversation = True
+    # 已释放的源被重投时照常执行：Memory 的 ingress 回执按 delivery_id 去重，重放返回原结果。
+    skips_released_sources = False
 
     def __init__(
         self,

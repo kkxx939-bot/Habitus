@@ -42,8 +42,11 @@ export const hostAdapter = Object.freeze({
   contextOutput(context) {
     return { hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: context } };
   },
+  transcriptPath(input) {
+    return typeof input?.transcript_path === "string" && input.transcript_path ? input.transcript_path : null;
+  },
   readTranscriptDelta(input, cursor, config, injectionReceipts) {
-    return readJsonlDelta(input?.transcript_path, cursor, {
+    return readJsonlDelta(this.transcriptPath(input), cursor, {
       maxBytes: config.maxTranscriptBytes,
       selectCompleted: (records) => selectCompleted(records, injectionReceipts),
     });

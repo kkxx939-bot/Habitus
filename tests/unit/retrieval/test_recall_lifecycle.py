@@ -127,12 +127,15 @@ def test_memory_kinds_use_distinct_half_lives_without_fixed_hot_expiry() -> None
     ],
 )
 def test_temperature_boundaries_are_explicit(hotness: float, expected: MemoryTemperature) -> None:
-    assert memory_temperature(
-        hotness,
-        cold2_threshold=0.08,
-        cold1_threshold=0.2,
-        hot_threshold=0.6,
-    ) is expected
+    assert (
+        memory_temperature(
+            hotness,
+            cold2_threshold=0.08,
+            cold1_threshold=0.2,
+            hot_threshold=0.6,
+        )
+        is expected
+    )
 
 
 def test_cold2_probe_must_be_inside_semantic_topk_and_never_expands_k(tmp_path: Path) -> None:

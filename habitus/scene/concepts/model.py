@@ -4,8 +4,8 @@
 - **基础概念**：词表里一个行为类原样对应的概念，身份 = 类编号（``s-k0004``），显示名是类名；同步词表时自动生成，不调模型。
 - **细分概念**：源类 + 区别规则——提醒句相同、只是这一次的条件不同（「晚睡」= 睡觉里比近期常态晚两小时以上的）。
   区别是数值的写成 ``MechanicalRule`` 由算法判；是语义的写成一句区别判据，由模型对着声明的材料答是/否。
-- **汇总概念**：几个类合起来（「写代码」= 修改代码 + 排查问题 + 验证测试），曲线是成员类曲线逐槽相加。
-概念的组成只在一条 lane 内（与预测树的转移只在同 lane 配对一致）。情境概念不挂类。
+- **汇总概念**：几个类合起来（「写代码」= 修改代码 + 排查问题 + 验证测试），节律按成员类合起来的发生算。
+概念的组成只在一条 lane 内（两条 lane 互不相通，裁定 35）。情境概念不挂类。
 
 - **细分概念的区别二选一**：数值的（"比近期常态晚两小时以上"）写成 ``MechanicalRule``，只由算法判、不问模型——
   这条已经是源类（就寝）的记录，"是不是入睡"不用再问；写不成数值的（"改的是前两天刚改过的同一处"）写成区别判据句，
@@ -18,8 +18,9 @@
   （成员改了不用重算任何命中）。
 - **显示名不许重**：给模型看的是名字不是编号（裁定 21-1），同一条 lane 能一起出现的概念名字不许重。
 - **没有版本**：定义变了就整个重算它的命中。
-- TODO（生命周期）：``retired`` 目前只在源类被词表拆改停用时置真，模型写出的细分 / 汇总 / 情境概念从不退
-  （造数实验真实模型 35 晚 122 个概念、退休 0）。退休判据与词表类、待定池的生命周期一起设计（用户 2026-10-12），
+- **停用**：基础概念在源类被词表拆改停用时 ``retired`` 置真；细分 / 汇总概念不存这个标记，成员类全停了就算停用
+  （``members_retired`` 现算）。
+- TODO（生命周期）：情境概念从不退（造数实验真实模型 35 晚 122 个概念、退休 0）。退休判据与词表类、待定池的生命周期一起设计（用户 2026-10-12），
   见 ``behavior/kinds/pending.py`` 的 TODO 与 ``~/Desktop/Habitus实验数据/事件融合与词表重做/待办.md``。
 - **档由算法判**：LLM 只答是不是，几档按数值规则机械定。有 ``MechanicalRule`` 的概念，档比的是规则算出的
   那个量（相对常态的偏移就按偏移分档）。
@@ -81,10 +82,12 @@ class ConceptRole(str, Enum):
 
 
 class ConceptOrigin(str, Enum):
-    """概念从哪来：同步词表自动生成（基础概念），或模型（触点①）写的（细分 / 汇总 / 情境）。"""
+    """概念从哪来：同步词表自动生成（基础概念）、日历机械生成（日历情境），或模型（触点①）写的（细分 / 汇总 / 其余情境）。"""
 
     VOCABULARY = "vocabulary"
     AUTHOR = "author"
+    #: 日历情境：由外部条件包的日历机械生成（周几、几号、月末、日型，以及成立后的周几集合），不由模型写（裁定 59）。
+    CALENDAR = "calendar"
 
 
 class ConceptKind(str, Enum):
@@ -226,7 +229,7 @@ def parse_baseline_value(measure: GradeMeasure, text: object) -> float | None:
 def widen_windows(spans: Sequence[tuple[int, int]], slack_minutes: int) -> tuple[tuple[int, int], ...]:
     """给一天里按钟面顺序排好、互不重叠的几段时段各加两边的容差，**不越过与邻段的中点**。
 
-    容差是预测树的槽位容差（2026-10-01 用户定复用 ``pool_half_width``）；但两个峰之间只隔 15 分钟时，各展 45 分钟会让
+    容差是 ``scene.baseline_slack_slots``（2026-10-01 用户定复用当时预测树的 ``pool_half_width``，预测树删后归语义树，裁定 59）；但两个峰之间只隔 15 分钟时，各展 45 分钟会让
     两个窗口重叠——一条 09:20 的咖啡就会同时归到 08:30 的峰和 09:30 的峰。所以每段最多展到与前后邻段的中点
     （最后一段的"后邻"是次日的第一段，第一段的"前邻"是前一天的最后一段；只有一段时邻居就是它自己隔一天）。
     返回的段可以从负分钟起、或超过 1440（落到前一天 / 次日），与 ``PeakWindow`` 跨午夜的约定一致。
@@ -843,6 +846,19 @@ class ConceptSet(Mapping[str, ConceptDefinition]):
         return frozenset(closed)
 
 
+def members_retired(concepts: ConceptSet, name: str) -> bool:
+    """这个行为概念是不是已经停用（现算、不落盘；26 号清单 5.5）：基础概念看它自己的 ``retired``；细分 / 汇总概念在它的成员
+    类全都停用（或已不在词表里）时停用——合并把源类停了，挂在源类上的细分概念不会再有新记录，不该永远冻在候选。情境概念不挂
+    类，不在这里退。"""
+
+    concept = concepts[name]
+    if concept.role.is_situation:
+        return False
+    if concept.kind is ConceptKind.BASE:
+        return concept.retired
+    return all(member not in concepts or concepts[member].retired for member in concept.classes)
+
+
 def _single_line(value: object, label: str, limit: int) -> str:
     if not isinstance(value, str):
         raise ConceptError(f"{label} must be text")
@@ -926,4 +942,5 @@ __all__ = [
     "widen_windows",
     "concept_identity",
     "parse_baseline_value",
+    "members_retired",
 ]

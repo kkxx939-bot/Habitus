@@ -10,7 +10,8 @@
 - **一段状态**（``HIGH_STATE`` / ``LOW_STATE``）：对这一类每天的次数做变点检测（二分切段，泊松似然，切一刀要换得
   ``2·ln(天数)`` 以上的偏差下降——BIC；每段至少 1 个块长）。最长的那段是它的常态，比常态多的段是"集中期"、少的是"停了一阵"。
   例："排查问题"第 8 周一周 18 条、前后几周零星几条 → 一段集中排查期。
-- **久别重来**（``RETURN``）：隔了超过预测树的复发窗口再出现——与预测树认的"重新开始"同一个判断。状态 = 重来那天到下一次久别。
+- **久别重来**（``RETURN``）：这一次隔得比之前所有没截尾的间隔都长、而且之前的样本够（``temporal.absence``，与预测层「久别」
+  同一个判法，不用固定天数窗；裁定 59）。状态 = 重来那天到下一次久别。
 - **情境概念**（``SITUATION``）：情境成立的日子（那天有记录判过它、而且成立），连着的几天是一段。
 
 **怎么比**（裁定 27 第 4 条，S4）：每段状态和它前后紧挨着的、同样多个人在场的平常日子比（块内对照：慢慢变多变少的
@@ -32,6 +33,7 @@ from datetime import date, timedelta
 from habitus.scene.relations import stats
 from habitus.scene.relations.spans import Segment
 from habitus.scene.relations.timeline import LaneTimeline
+from habitus.temporal.absence import AbsenceVerdict, Visit, effective_gaps, exceeds_longest
 
 
 @dataclass(frozen=True)
@@ -52,9 +54,10 @@ def episodes(
     *,
     block_days: float,
     first_seen: tuple[int, int],
-    recurrence_days: float,
+    alpha: float,
+    visits: Sequence[Visit] = (),
 ) -> tuple[Episode, ...]:
-    """这个前因在这一种标志下的全部状态。"""
+    """这个前因在这一种标志下的全部状态。``visits`` 是这个前因的链日（久别重来用，与块长同一口径）。"""
 
     days = line.days()
     if not days:
@@ -71,9 +74,7 @@ def episodes(
         first = seen[0]
         return (Episode(first, end),) if (first - days[0]).days >= settle else ()
     if segment is Segment.RETURN:
-        starts = [
-            later for earlier, later in zip(seen, seen[1:], strict=False) if (later - earlier).days > recurrence_days
-        ]
+        starts = _returns(visits, present=frozenset(days), alpha=alpha)
         bounds = [*starts, end]
         found = []
         for start, following in zip(bounds, bounds[1:], strict=False):
@@ -81,6 +82,23 @@ def episodes(
             found.append(Episode(start, last + timedelta(days=1) if following != end else end))
         return tuple(found)
     return _states(days, counts, segment, minimum=max(1, math.ceil(block_days)))
+
+
+#: 各段量法的版本：判据一改就加一，状态里记着的旧版本那一段的行会被清掉（``state.fold``；26 号清单 3.5）。
+#: RETURN 2：久别重来改用 ``temporal.absence``——链日、人在场的日子才算长度、被提醒才做的那段截尾（原来是记号日、日历日）。
+MEASURE_VERSIONS: dict[str, int] = {Segment.RETURN.value: 2}
+
+
+def _returns(visits: Sequence[Visit], *, present: frozenset[date], alpha: float) -> list[date]:
+    """久别重来的那几天：逐次往前看，这一次的空白比之前所有没截尾的间隔都长、而且之前的样本够（1/(n+1) ≤ α）。"""
+
+    gaps = effective_gaps(visits, watched=lambda day: 1.0 if day in present else 0.0)
+    needed = math.ceil(1.0 / alpha) - 1
+    return [
+        gap.end
+        for position, gap in enumerate(gaps)
+        if exceeds_longest(gaps[:position], gap, min_samples=needed) is AbsenceVerdict.EXCEEDS
+    ]
 
 
 @dataclass(frozen=True)
@@ -313,8 +331,12 @@ def unit_length(days: Sequence[date], outcomes: Sequence[int | None], found: Seq
     return lag
 
 
-def measure_of(line: LaneTimeline, consequent: str, found: tuple[Episode, ...]) -> EpisodeMeasure:
-    days = line.days()
+def measure_of(
+    line: LaneTimeline, consequent: str, found: tuple[Episode, ...], *, known: frozenset[date] | None = None
+) -> EpisodeMeasure:
+    """``known`` 给了，只在这些日子上比（日历情境：那天日历答不出的，状态里外都不算；裁定 59）。"""
+
+    days = line.days() if known is None else tuple(day for day in line.days() if day in known)
     outcomes = tuple(_daily_outcome(line, consequent, day) for day in days)
     return EpisodeMeasure(days=days, outcomes=outcomes, episodes=found, unit_days=unit_length(days, outcomes, found))
 

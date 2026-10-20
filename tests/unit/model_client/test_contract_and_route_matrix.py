@@ -631,7 +631,21 @@ def test_provider_capabilities_rejects_non_boolean_flags(field: str, invalid: ob
         ProviderCapabilities(**{field: invalid})
 
 
-@pytest.mark.parametrize("model_type", [ToolCall, ToolDefinition, ChatMessage, ResponseFormat, ReasoningOptions, ChatRequest, TokenUsage, ModelResponse, ModelStreamEvent, ProviderCapabilities])
+@pytest.mark.parametrize(
+    "model_type",
+    [
+        ToolCall,
+        ToolDefinition,
+        ChatMessage,
+        ResponseFormat,
+        ReasoningOptions,
+        ChatRequest,
+        TokenUsage,
+        ModelResponse,
+        ModelStreamEvent,
+        ProviderCapabilities,
+    ],
+)
 def test_public_contract_value_objects_are_frozen(model_type: type[object]) -> None:
     assert model_type.__dataclass_params__.frozen is True
 

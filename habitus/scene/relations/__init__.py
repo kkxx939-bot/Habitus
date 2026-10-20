@@ -10,7 +10,16 @@
 ``parse_condition``）同理：预测层给落空找原因时要判"这一次条件成立没有"，与检验同一份（裁定 55）。
 """
 
-from habitus.scene.relations.conditions import Condition, ConditionError, Field, Template, evaluator
+from habitus.scene.relations.conditions import (
+    Condition,
+    ConditionError,
+    Field,
+    Template,
+    evaluator,
+    evaluator_all,
+    join_conditions,
+    parse_conditions,
+)
 from habitus.scene.relations.conditions import parse as parse_condition
 from habitus.scene.relations.config import RelationConfig, RelationConfigError, RelationThresholds
 from habitus.scene.relations.engine import (
@@ -57,8 +66,11 @@ __all__ = [
     "chains_of",
     "comparable",
     "evaluator",
+    "evaluator_all",
     "examine_night",
     "fold",
+    "join_conditions",
     "merge_for",
     "parse_condition",
+    "parse_conditions",
 ]

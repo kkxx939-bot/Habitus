@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -21,9 +21,14 @@ from habitus.behavior.observation import (
     BehaviorObservationStore,
 )
 from habitus.behavior.reduction import BehaviorReductionLedger, BehaviorReductionRunner  # noqa: F401
+from habitus.behavior.reduction.quarantine import ChainQuarantine
+from habitus.behavior.reduction.refresh import RefreshRetries
 from habitus.behavior.tree import BehaviorTree
+from habitus.behavior.tree.dirty_days import DirtyDayLog
 from habitus.behavior.uri import BehaviorURI
 from habitus.foundation.integrity import canonical_digest
+from habitus.foundation.lifecycle import BackoffPolicy
+from habitus.infrastructure.lifecycle import Quarantine, RetryLedger
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from tests.unit.behavior.kinds_fixtures import NameMatchingProvider, kind_components
@@ -78,7 +83,21 @@ class Harness:
             vocabulary_jobs=self.vocabulary_jobs,
             ledger=self.ledger,
             semantic_refresher=semantic_refresher,
+            refresh_retries=RefreshRetries(
+                RetryLedger(
+                    tmp_path / "lifecycle",
+                    owner="behavior-semantic-test",
+                    policy=BackoffPolicy(base_seconds=60.0, cap_seconds=3600.0),
+                    max_attempts=3,
+                    clock=lambda: self.now,
+                )
+            ),
+            chain_quarantine=ChainQuarantine(
+                self.judgements,
+                Quarantine(tmp_path / "lifecycle", owner="behavior-reduction-test", clock=lambda: self.now),
+            ),
             clock=lambda: self.now,
+            dirty_days=DirtyDayLog(tmp_path / "reduction"),
         )
 
     def deliver(self, *observations_batch, seed: str = "delivery", fused: bool = True) -> str:
@@ -171,6 +190,8 @@ def test_full_pipeline_reduces_a_chain_and_a_gap_into_the_tree(tmp_path) -> None
     assert report.published_occurrences == 1
     assert report.published_gaps == 1
     occurrences = harness.tree.list_addresses(BehaviorKind.OCCURRENCE)
+    # 改树改到的日子记进脏日日志，按天缓存的序列据此重读（26 号清单 6.7）
+    assert {address.occurred_on for address in occurrences} <= harness.runner.dirty_days.after(0)[1]
     gaps = harness.tree.list_addresses(BehaviorKind.GAP)
     assert [address.name for address in occurrences] == ["洗手"]
     assert [address.name for address in gaps] == ["没读懂"]
@@ -191,6 +212,25 @@ def test_full_pipeline_reduces_a_chain_and_a_gap_into_the_tree(tmp_path) -> None
     # 消费账本闭环：全部判断都已入账
     consumed = harness.ledger.consumed_judgement_ids()
     assert {record_id("head"), record_id("tail"), record_id("blur")} <= consumed
+
+
+def test_a_round_reads_the_consumption_ledger_once_after_expiry(tmp_path, monkeypatch) -> None:
+    """26 号清单 6.3：过期自己读一遍，之后拼链与物化共用一份——不再各读一遍全量。"""
+
+    harness = Harness(tmp_path)
+    source = harness.deliver(OBS_A, OBS_B, OBS_C, OBS_BLUR)
+    seed_wash_chain(harness, source)
+    original = harness.ledger.load
+    calls: list[str] = []
+
+    def counted():  # type: ignore[no-untyped-def]
+        calls.append("load")
+        return original()
+
+    monkeypatch.setattr(harness.ledger, "load", counted)
+    report = asyncio.run(harness.runner.run_once())
+    assert report.published_occurrences == 1
+    assert len(calls) == 2  # 过期一遍 + 这一轮共用的一遍
 
 
 def test_the_reminded_flag_is_asked_from_the_injected_port_before_staging(tmp_path) -> None:
@@ -508,7 +548,7 @@ def test_a_link_to_a_published_gap_is_dropped_not_published(tmp_path) -> None:
 
 
 def test_a_corrupt_record_is_quarantined_without_stalling_the_sweep(tmp_path) -> None:
-    """单条坏记录隔离降级：留信号、不消费、不许瘫痪整轮归约。"""
+    """单条坏记录隔离降级：留信号、不许瘫痪整轮归约；原记录进隔离区，不再每轮重报。"""
 
     harness = Harness(tmp_path)
     source = harness.deliver(OBS_A, OBS_B, OBS_C)
@@ -535,10 +575,16 @@ def test_a_corrupt_record_is_quarantined_without_stalling_the_sweep(tmp_path) ->
 
     assert report.published_occurrences == 1  # 好链照常落
     assert any("quarantined" in note for note in report.dropped_edges)
+    # 读不出的原记录进隔离区、从存储撤下（2.4.3）：下一轮不再重报
+    assert harness.judgements.read("f" * 64) is None
+    assert [item.meta["kind"] for item in harness.runner.chain_quarantine.quarantine.items()] == ["judgement"]
+    later = asyncio.run(harness.runner.run_once())
+    assert not any("quarantined" in note for note in later.dropped_edges)
 
 
-def test_a_chain_with_an_unaddressable_name_is_skipped_with_a_signal(tmp_path) -> None:
-    """绕过融合守卫写入的坏行为名：按链隔离跳过，不吞整轮、不写检查点炸弹。"""
+def test_a_chain_with_an_unaddressable_name_is_isolated_and_becomes_an_unreadable_gap(tmp_path) -> None:
+    """绕过融合守卫写入的坏行为名：按链隔离，不吞整轮、不写检查点炸弹；原判断进隔离区、换成一条「没读懂」判断，
+    之后归约成空白，不再每轮重报（26 号清单 2.4.2）。"""
 
     harness = Harness(tmp_path)
     source = harness.deliver(OBS_A, OBS_B, OBS_C)
@@ -559,7 +605,13 @@ def test_a_chain_with_an_unaddressable_name_is_skipped_with_a_signal(tmp_path) -
     report = asyncio.run(harness.runner.run_once())
 
     assert report.published_occurrences == 1
-    assert any("skipped" in note for note in report.dropped_edges)
+    assert any("isolated" in note for note in report.dropped_edges)
+    assert harness.judgements.read(record_id("bad-name")) is None
+    (item,) = harness.runner.chain_quarantine.quarantine.items()
+    assert item.meta["judgements"] == record_id("bad-name")
+    later = asyncio.run(harness.runner.run_once())
+    assert later.published_gaps == 1  # 顶替它的「没读懂」判断落成空白
+    assert not any("bad-name" in note or "isolated" in note for note in later.dropped_edges)
 
 
 def test_an_invalid_payload_is_dropped_before_the_checkpoint(tmp_path) -> None:
@@ -653,7 +705,7 @@ def test_sweep_refreshes_day_summaries_after_publishing(tmp_path) -> None:
 
 
 def test_a_day_is_closed_only_after_its_chains_seal_and_its_local_day_ends(tmp_path) -> None:
-    """定稿日是派生层（情景树、预测树）处理历史的前提：树变了的日子先记为开放，链都封口且封口视界
+    """定稿日是派生层（语义树、预测层的结算）处理历史的前提：树变了的日子先记为开放，链都封口且封口视界
     过了那天的本地结束才记为定稿；之后的补发不改变这个事实。"""
 
     harness = Harness(tmp_path)
@@ -718,10 +770,14 @@ def test_a_link_target_skipped_after_naming_defers_the_source(tmp_path) -> None:
 
     report = asyncio.run(harness.runner.run_once())
 
-    assert report.published_documents == 0  # 谁都没落，也没有卡死的检查点
-    assert any("skipped" in note for note in report.dropped_edges)
+    # 目标链物化失败进隔离区（2.4.2），源链这一轮推迟、不带悬空 URI 进检查点
+    assert report.published_documents == 0
+    assert any("isolated" in note for note in report.dropped_edges)
     assert any("deferred: its link target was skipped" in note for note in report.dropped_edges)
-    assert report.chains_pending == 2
+    # 下一轮：目标换成了「没读懂」空白，源链照常落树、指向它的边因目标不可链接而丢掉并说明
+    later = asyncio.run(harness.runner.run_once())
+    assert (later.published_occurrences, later.published_gaps) == (1, 1)
+    assert later.chains_pending == 0
     assert not (tmp_path / "reduction" / "staged.json").exists()
     # 再跑一轮：同样干净失败，不退化成永久撞车
     second = asyncio.run(harness.runner.run_once())
@@ -762,6 +818,10 @@ def test_failed_semantic_refresh_is_retried_from_the_pending_set(tmp_path) -> No
     assert _json.loads((tmp_path / "reduction" / "refresh_pending.json").read_text()) == ["2026-08-16"]
 
     generator.fail = False
+    waiting = asyncio.run(harness.runner.run_once())  # 退避期内：这一天留在集合里，这一轮不试
+    assert not any("semantic refresh failed" in n for n in waiting.dropped_edges)
+    assert _json.loads((tmp_path / "reduction" / "refresh_pending.json").read_text()) == ["2026-08-16"]
+    harness.now = harness.now + timedelta(seconds=61)
     second = asyncio.run(harness.runner.run_once())
 
     assert second.replayed_documents == 0  # 没有检查点可重放；补刷来自待刷新集合
@@ -769,6 +829,37 @@ def test_failed_semantic_refresh_is_retried_from_the_pending_set(tmp_path) -> No
 
     assert harness.tree.layer_exists(BehaviorDirectory.occurrences(2026, 8, 16), BehaviorLevel.OVERVIEW)
     assert not (tmp_path / "reduction" / "refresh_pending.json").exists()
+
+
+def test_an_oversized_overview_is_given_up_after_one_model_call(tmp_path) -> None:
+    """超限是确定性失败：第一次就放弃、移出待刷新集合，之后几轮不再调模型（2.4.1）。"""
+
+    from habitus.behavior.semantic import BehaviorOverviewLimitError, BehaviorSemanticRefresher
+    from tests.unit.behavior.test_semantic_layers import ScriptedOverviewGenerator
+
+    class TooLong(ScriptedOverviewGenerator):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def generate(self, snapshot):
+            self.calls += 1
+            raise BehaviorOverviewLimitError("rendered behavior overview exceeds its configured character bound")
+
+    generator = TooLong()
+    harness = Harness(
+        tmp_path, semantic_refresher=BehaviorSemanticRefresher(BehaviorTree(tmp_path / "tree"), generator)
+    )
+    seed_wash_chain(harness, harness.deliver(OBS_A, OBS_B, OBS_C))
+
+    first = asyncio.run(harness.runner.run_once())
+    assert any("semantic refresh given up for [2026-08-16]" in n for n in first.dropped_edges)
+    assert not (tmp_path / "reduction" / "refresh_pending.json").exists()
+    calls = generator.calls
+    for _ in range(3):
+        harness.now = harness.now + timedelta(hours=2)
+        asyncio.run(harness.runner.run_once())
+    assert generator.calls == calls
 
 
 def test_run_once_works_with_the_production_sqlite_lock_store(tmp_path) -> None:
@@ -790,6 +881,7 @@ def test_run_once_works_with_the_production_sqlite_lock_store(tmp_path) -> None:
         kinds=kinds,
         vocabulary_jobs=jobs,
         ledger=harness.ledger,
+        chain_quarantine=harness.runner.chain_quarantine,
         clock=lambda: harness.now,
     )
     source = harness.deliver(OBS_A, OBS_B, OBS_C)
@@ -894,7 +986,7 @@ def test_an_address_already_on_the_tree_is_disambiguated_without_a_ledger_entry(
     names = sorted(document.fields["name"] for document in harness.tree.iter_documents(BehaviorKind.OCCURRENCE))
     assert names == ["洗手", "洗手-2"]
     assert not (tmp_path / "reduction" / "staged.json").exists()
-    # 消歧记录 = 已知重复：词表整理与预测树都不计（同一口径）
+    # 消歧记录 = 已知重复：词表整理与事件序列都不计（同一口径）
 
 
 def test_coverage_survives_the_window_while_its_delivery_is_still_stored(tmp_path) -> None:
@@ -1033,3 +1125,63 @@ def test_a_replayed_checkpoint_is_cleared_before_the_vocabulary_jobs_run(tmp_pat
     harness.vocabulary_jobs.run_due = watching  # type: ignore[method-assign]
     asyncio.run(harness.runner.run_once())
     assert seen == [False]
+
+
+def test_the_day_of_an_isolated_chain_waits_for_its_unreadable_gap_before_closing(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """stage 里确定性失败的链换成「没读懂」判断，下一轮才归约成空白：这一轮不许先把那一天定稿，否则派生层把那一段
+    读成"没做"（L10.5）。"""
+
+    harness = Harness(tmp_path)
+    source = harness.deliver(OBS_A, OBS_B, OBS_C)
+    seed_wash_chain(harness, source)
+    asyncio.run(harness.runner.run_once())
+    late = harness.deliver(OBS_C, seed="late")
+    harness.judgements.put_payload(
+        judgement_record(
+            "bad-name",
+            behavior=" 前导空格",
+            started_at=at(300),
+            last_observed_at=at(310),
+            evidence_ready_at=at(312),
+            observation_ids=(OBS_C.observation_id,),
+            source_refs=(late,),
+            summary="名字不可寻址",
+        )
+    )
+    harness.now = at(6 * 3600)
+
+    first = asyncio.run(harness.runner.run_once())
+    assert first.published_gaps == 0
+    assert date(2026, 8, 16) not in harness.runner.closed_days()
+
+    second = asyncio.run(harness.runner.run_once())
+    assert second.published_gaps == 1
+    assert date(2026, 8, 16) in harness.runner.closed_days()
+
+
+def test_the_consumption_ledger_is_read_once_per_round_after_it_expired(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """6.3：消费账本一轮只读一次、在过期之后读——反过来读到的是刚过期删掉的条目（L10.14 补测：原先把读挪回过期之前，
+    测试照样全过）。"""
+
+    harness = Harness(tmp_path)
+    source = harness.deliver(OBS_A, OBS_B, OBS_C)
+    seed_wash_chain(harness, source)
+    order: list[str] = []
+    load, expire = harness.ledger.load, harness.ledger.expire
+
+    def loading():  # type: ignore[no-untyped-def]
+        order.append("load")
+        return load()
+
+    def expiring(before):  # type: ignore[no-untyped-def]
+        removed = expire(before)  # 过期自己也要读一遍账本，那一次不算
+        order.clear()
+        order.append("expired")
+        return removed
+
+    monkeypatch.setattr(harness.ledger, "load", loading)
+    monkeypatch.setattr(harness.ledger, "expire", expiring)
+
+    asyncio.run(harness.runner.run_once())
+
+    assert order == ["expired", "load"]

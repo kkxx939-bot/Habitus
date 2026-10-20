@@ -207,3 +207,21 @@ def test_directory_capacity_holds_under_concurrent_publishes(tmp_path) -> None:
     assert sorted(outcomes) == ["capacity", "ok", "ok"]
     # 关键断言：目录没有被合谋越界，读侧枚举完整可用
     assert len(tree.list_addresses(BehaviorKind.OCCURRENCE)) == 2
+
+
+def test_document_lock_rows_are_dropped_after_publishing_and_a_new_holder_still_excludes_others(tmp_path) -> None:
+    """26 号清单 7.1：文档只写一次，锁放了之后那几行再也用不上，空闲的删掉；删了之后再加锁照样互斥（不会误放行）。"""
+
+    from habitus.behavior.editor.writer import BehaviorDocumentLockKeyspace
+    from habitus.behavior.uri import BehaviorURI
+
+    tree = BehaviorTree(tmp_path / "behavior-tree")
+    lock_store = ProcessLocalLockStore()
+    writer = BehaviorDocumentWriter(tree, lock_store, clock=lambda: local(23, 0))
+    document = writer.publish(BehaviorKind.OCCURRENCE, occurrence_payload())
+    assert not any(key.startswith("behavior-document:") for key in (*lock_store.locks, *lock_store.fences))
+    key = BehaviorDocumentLockKeyspace(tree.root).key(BehaviorURI.from_address(document.address))
+    held = lock_store.acquire(key, ttl_seconds=60)
+    with pytest.raises(TimeoutError):
+        lock_store.acquire(key, ttl_seconds=60)
+    lock_store.release(held)

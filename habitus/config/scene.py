@@ -6,8 +6,8 @@
 行数预算——随它整块删掉（2026-09-26）。新语义树按功能分支重建，每支的旋钮在那一支落地时再进配置。
 
 ``relations``：关系检验的统计门槛（裁定 26）。每一项都可以不写，不写就是 ``scene.relations.config.RelationThresholds``
-的默认值（组合根只把写了的换算过去，默认值不在这里抄第二份）。和时间有关的三个数（槽宽、转移窗口、久别重来）不在这一组：
-它们只认预测树的配置，语义树不另配一份。
+的默认值（组合根只把写了的换算过去，默认值不在这里抄第二份）。和时间有关的尺子（槽宽、合并窗口）不在这一组：
+它们只认 ``config.temporal``（裁定 59），语义树不另配一份。
 """
 
 from __future__ import annotations
@@ -21,14 +21,13 @@ from habitus.config.loader import construct_config
 _PROBABILITIES = ("fdr", "forward_alpha", "forward_power", "heterogeneity_alpha", "interval_level")
 _LIFTS = ("min_absolute_lift", "min_relative_lift")
 _COUNTS = (
-    "forward_min_antecedents",
     "forward_max_antecedents",
-    "maintenance_blocks",
     "bootstrap_rounds",
     "exact_strata_limit",
     "first_seen_min_days",
     "first_seen_min_blocks",
-    "moderation_min_antecedents",
+    "condition_ask_min_antecedents",
+    "max_combined_conditions",
 )
 
 
@@ -37,21 +36,20 @@ class SceneRelationsConfig:
     """关系检验的统计门槛覆盖值；``None`` = 用默认值。"""
 
     fdr: float | None = None
-    forward_min_antecedents: int | None = None
     forward_alpha: float | None = None
     forward_power: float | None = None
     forward_max_antecedents: int | None = None
     min_absolute_lift: float | None = None
     min_relative_lift: float | None = None
-    maintenance_blocks: int | None = None
     heterogeneity_alpha: float | None = None
     interval_level: float | None = None
     bootstrap_rounds: int | None = None
     exact_strata_limit: int | None = None
     first_seen_min_days: int | None = None
     first_seen_min_blocks: int | None = None
-    moderation_min_antecedents: int | None = None
+    condition_ask_min_antecedents: int | None = None
     max_blind_share: float | None = None
+    max_combined_conditions: int | None = None
 
     def __post_init__(self) -> None:
         # 非法值在配置层就拒，不让它拖到组装期以裸异常爆。
@@ -85,16 +83,34 @@ class SceneRelationsConfig:
 
 @dataclass(frozen=True)
 class SceneConfig:
-    """语义关联层是否启用，以及关系检验的统计门槛。"""
+    """语义关联层是否启用、关系检验的统计门槛，以及整晚那一趟的节拍（语义树没开就没有整晚，所以节拍归这里）。"""
 
     enabled: bool = False
     relations: SceneRelationsConfig = field(default_factory=SceneRelationsConfig)
+    # 常态按峰分份时，峰的两边各放宽几槽的容差（待定档）。原来借预测树的 pool_half_width，预测树删除后归语义树自己（裁定 59）。
+    baseline_slack_slots: int = 3
+    # 整晚那一趟多久跑一次、停机时等它多久（运维数）。原来挂在预测树的重建节拍上，预测树删除后归这里（裁定 59，清单 5.1）。
+    nightly_interval_seconds: float = 86_400.0
+    nightly_shutdown_timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise TypeError("scene.enabled must be a boolean")
+        if (
+            isinstance(self.baseline_slack_slots, bool)
+            or not isinstance(self.baseline_slack_slots, int)
+            or not 0 <= self.baseline_slack_slots <= 96
+        ):
+            raise ValueError("scene.baseline_slack_slots must be an integer between 0 and 96")
         if not isinstance(self.relations, SceneRelationsConfig):
             raise TypeError("scene.relations must be SceneRelationsConfig")
+        for label, low, high in (
+            ("nightly_interval_seconds", 60.0, 7 * 86_400.0),
+            ("nightly_shutdown_timeout_seconds", 1.0, 3_600.0),
+        ):
+            value = getattr(self, label)
+            if isinstance(value, bool) or not isinstance(value, int | float) or not low <= float(value) <= high:
+                raise ValueError(f"scene.{label} must be between {low:g} and {high:g}")
 
     @classmethod
     def from_mapping(cls, value: Any) -> SceneConfig:

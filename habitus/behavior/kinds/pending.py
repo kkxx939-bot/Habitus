@@ -1,14 +1,13 @@
-"""待定池：白天归不进任何在用类的 occurrence，等每晚新增时整体交给模型聚组。
+"""待定池：白天归不进任何在用类的 occurrence，等每晚新增时交给模型聚组。
 
 按 occurrence 地址幂等——同一条重复放入只留一份（崩溃重放、重复发布都不会多算复现次数）。
 
-TODO（生命周期，用户 2026-10-12 裁定"整个都没有生命周期，记下"；各层一起设计、不单独做，见
-``~/Desktop/Habitus实验数据/事件融合与词表重做/待办.md``）：池里从未转正的条目永远留着，每晚整池进提示词，
-到 ``max_pending`` 才拒收。造数实验（人物 A 一年、真实模型 35 晚）池子只有 6–13 条，是因为粒度规则把 707 条一次性杂事
-里的 57 条并进了类；规则改成"对象就是行为的留对象"之后，"订去杭州的机票""问孩子不肯写作业"这类一次性的事会老实留在
-池里，一年几百条，每晚都要让模型再看一遍。要定的：待定条目多久没凑成类就出池（按 ``recurrence_min_days`` 的倍数）、
-出池后要不要留痕给预测树占位、与词表类的退休（``model.ClassStatus.RETIRED`` 目前只由拆改的合并产生）、语义树概念的
-``retired``（目前从不置真）用同一套机制。
+**每晚只交新条目**（裁定 60 第 2 条）：没聚组过的条目，加上按字符二元组相似召回的几条旧条目（``nightly.recall``），
+一晚有上限、多的留到下一晚。旧条目不清，当索引留着：两件不同月份、措辞相近的同一件事靠召回凑成组。原来每晚整池进提示词，
+一年几百条一次性的事每晚都要让模型再看一遍。树上已经没有的条目在重判时出池；池满时挤掉进池最早的旧条目（只是索引，树上不动），留信号、进容量快照。
+
+TODO（生命周期，留给以后）：词表类的退休（``model.ClassStatus.RETIRED`` 目前只由拆改的合并产生）与语义树情境概念的退休
+用同一套机制，见 ``~/Desktop/Habitus实验数据/事件融合与词表重做/待办.md``。
 """
 
 from __future__ import annotations
@@ -28,6 +27,9 @@ class PendingEntry:
 
     ``rechecked``：每晚新增认作"已有某类"时，已经交白天归类重判过一次、仍判「都不是」。只问一次——
     之后照常参与长新类，不再重判（反复重问会把它磨进一个最像的类，2026-10-09 54 天对照）。
+
+    ``entered_on``：哪天进的池；``grouped_on``：哪一晚交模型聚组过（裁定 60 第 2 条）。没聚组过的是"新条目"，每晚只把
+    新条目与按相似召回的几条旧条目交给模型；旧条目不清，当索引留着。模型输出出错那晚交过去的不算聚组过，第二晚仍是新的。
     """
 
     occurrence: str
@@ -36,6 +38,8 @@ class PendingEntry:
     proposed: str
     content: str
     rechecked: bool = False
+    entered_on: date | None = None
+    grouped_on: date | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "lane", Lane(self.lane))
@@ -47,6 +51,16 @@ class PendingEntry:
                 raise BehaviorKindError(f"pending {name} must be non-empty text")
         if not isinstance(self.rechecked, bool):
             raise BehaviorKindError("pending rechecked must be a bool")
+        for name in ("entered_on", "grouped_on"):
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, date)):
+                raise BehaviorKindError(f"pending {name} must be a date or None")
+
+    @property
+    def fresh(self) -> bool:
+        """还没交模型聚组过。"""
+
+        return self.grouped_on is None
 
 
 @dataclass(frozen=True)
@@ -75,6 +89,14 @@ class PendingPool:
         marked = set(occurrences)
         return PendingPool(
             {key: replace(value, rechecked=True) if key in marked else value for key, value in self.entries.items()}
+        )
+
+    def grouped(self, occurrences: Iterable[str], *, on: date) -> PendingPool:
+        """把这些条目记成 ``on`` 那一晚交模型聚组过；不在池里的忽略。"""
+
+        marked = set(occurrences)
+        return PendingPool(
+            {key: replace(value, grouped_on=on) if key in marked else value for key, value in self.entries.items()}
         )
 
     def without(self, occurrences: Iterable[str]) -> PendingPool:

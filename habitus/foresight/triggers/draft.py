@@ -1,6 +1,6 @@
 """一条候选的草稿：触发出来、还没附反向前因、没有身份的预期。对 scene 零知识。
 
-三种触发各自产草稿，装配时统一补身份、前因清单、出处（预测树的代、机会表那一晚、词表版本）。时刻一律带时区。
+三种触发各自产草稿，装配时统一补身份、前因清单、出处（机会表那一晚、词表版本）。时刻一律带时区。
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from habitus.foresight.errors import ForesightError
 class Draft:
     """``kind_token`` 是候选的类；``source`` / ``trigger`` / ``trigger_instance`` 与账本预期同义；``window`` 来自历史那几次的
     实际时刻（可以早于此刻：到了钟点才建，形成时他可能已经做了）；``deadline`` 是这条触发自己那一段的边界；``basis`` 是命中的
-    那几次（URI）；``observed_from`` 是从什么时候起的发生算这条说中的（钟面 / 日子：当天零点；事件：前因做完那一刻）。"""
+    那几次（URI）；``observed_from`` 是从什么时候起的发生算这条说中的（日子 / 情境：当天零点；事件：前因做完那一刻）。"""
 
     kind_token: str
     source: str
@@ -90,4 +90,11 @@ def clamp(
     return (start, end), max(boundary, end, now)
 
 
-__all__ = ["Draft", "at_time_of", "clamp", "instance_at", "midnight_after", "midnight_of"]
+def spread(times: list[datetime]) -> tuple[datetime, datetime]:
+    """排好序的时刻的 p10 与 p90（按位置取，不插值）：十个以内取最早到最晚，第 11 个起才开始去掉两头。"""
+
+    last = len(times) - 1
+    return times[int(0.1 * last)], times[-1 - int(0.1 * last)]
+
+
+__all__ = ["Draft", "at_time_of", "clamp", "instance_at", "midnight_after", "midnight_of", "spread"]

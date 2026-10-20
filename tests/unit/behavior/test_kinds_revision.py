@@ -192,24 +192,24 @@ def test_split_comes_from_grouping_and_rejudges_only_inside_the_closed_set() -> 
 
 
 def test_split_waits_until_at_least_two_groups_recur() -> None:
-    """分组分出了两组，但一组只有 2 条：按复现不够拆，这周等着（信号里写明每组的条数与天数）。"""
+    """分组分出了两组，但一组只有 1 条：按复现不够拆（门槛 2 条跨 2 天，裁定 59），这周等着（信号里写明每组的条数与天数）。"""
 
-    groups = {"groups": [group(("M1", "M2", "M3", "M4"), "修改代码"), group(("M5", "M6"), "清理")]}
+    groups = {"groups": [group(("M1", "M2", "M3", "M4", "M5"), "修改代码"), group(("M6",), "清理")]}
     result, provider, _ = revise([], groups=[groups])
     assert result.record is None and provider.classify_calls == 0  # 没走到重判与锚点
     assert any(
-        "kind_revision_split_waiting s-k0001: 2 groups, 1 recur" in s and "清理 2 条跨 2 天" in s
+        "kind_revision_split_waiting s-k0001: 2 groups, 1 recur" in s and "清理 1 条跨 1 天" in s
         for s in result.signals
     )
 
 
 def test_split_is_dropped_when_rejudge_leaves_a_side_too_thin() -> None:
-    """分组说两边各 3 条，封闭集合重判只把 2 条清理归过去：证据规则复核不过，整条拆分丢掉。"""
+    """分组说两边各 3 条，封闭集合重判只把 1 条清理归过去：证据规则复核不过（门槛 2 条跨 2 天），整条拆分丢掉。"""
 
-    routes = {**ROUTES, "清理日志": ("修改代码",)}
+    routes = {**ROUTES, "清理日志": ("修改代码",), "清理缓存": ("修改代码",)}
     result, _, _ = revise([], groups=[SPLIT_GROUPS], routes=routes)
     assert result.record is None
-    assert any("split lacks evidence: split-out side has 2 entries over 2 days" in s for s in result.signals)
+    assert any("split lacks evidence: split-out side has 1 entries over 1 days" in s for s in result.signals)
 
 
 def test_groups_with_the_same_reminder_are_one_group_and_do_not_split() -> None:
@@ -515,3 +515,23 @@ def test_the_anchor_cache_follows_the_recent_members_not_just_the_vocabulary_ver
     next_week = check([*MEMBERS, member("e9", "s-k0001", "改调度器", 9)])
     assert repeated < first  # 同一批成员：挑锚点那两遍不再问
     assert next_week > repeated  # 成员换了：重新挑一遍锚点（多了一条成员，分批可能更多）
+
+
+def test_anchor_cache_drops_keys_of_older_vocabulary_versions() -> None:
+    """26 号清单 6.9：词表版本前进后，旧版本的键再也用不上，清掉；同一版的不同批成员照旧各留各的。"""
+
+    from dataclasses import replace as _replace
+
+    provider = RoutingProvider([], ROUTES)
+    caller = KindModelCaller(client_for(provider), config=BehaviorKindConfig())
+    gate = AnchorGate(DaytimeClassifier(caller))
+
+    def check(base: Vocabulary, members: Sequence[Member]) -> None:
+        asyncio.run(gate.check(Lane.SESSION, base, base, frozenset(), members, checkpoint=lambda: None))
+
+    check(vocabulary(), MEMBERS)
+    check(vocabulary(), [*MEMBERS, member("e9", "s-k0001", "改调度器", 9)])
+    assert {key[0] for key in gate._stable} == {vocabulary().version} and len(gate._stable) == 2
+    newer = _replace(vocabulary(), version=vocabulary().version + 1)
+    check(newer, MEMBERS)
+    assert {key[0] for key in gate._stable} == {newer.version} and len(gate._stable) == 1

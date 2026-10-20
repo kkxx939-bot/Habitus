@@ -10,9 +10,9 @@
 ```
 
 两条 lane 各成一个检验族（裁定 21：两条 lane 相互独立、不干扰）。不比的对（机械排除）：自己对自己（那是复现节律，
-归预测树）；读同一批记录的（汇总与成员、基础与它的汇总、细分与它的源类）。
+归 ``scene.recurrence``）；读同一批记录的（汇总与成员、基础与它的汇总、细分与它的源类）。
 
-本模块只算"今晚的数据说什么"。候选要在之后的新数据上复现才成立（前向验证）、成立后只看最近几个块（维持检验）——
+本模块只算"今晚的数据说什么"。候选要在之后的新数据上复现才成立（前向验证）、成立后按段看新数据（维持检验，从上一次判过起不重叠地攒满一段）——
 这两步要跨夜的状态，由状态折叠（第 5 步）调 ``evaluate`` 在对应的子集上做。先验权重由第 7 步给，这里只收。
 """
 
@@ -20,16 +20,29 @@ from __future__ import annotations
 
 import math
 import statistics
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date
 from enum import Enum
 
 from habitus.foundation.integrity import canonical_digest
-from habitus.scene.concepts.model import ConceptKind, ConceptSet
+from habitus.scene.concepts.calendar_situations import calendar_key
+from habitus.scene.concepts.model import ConceptKind, ConceptSet, members_retired
 from habitus.scene.occurrences.model import ConceptHits
 from habitus.scene.relations import longspan, stats
-from habitus.scene.relations.conditions import Condition, Template, evaluator, mechanical, parse, split
+from habitus.scene.relations.calendar import calendar_measure
+from habitus.scene.relations.conditions import (
+    MIN_PER_SIDE,
+    Condition,
+    ModeratedMeasure,
+    Template,
+    evaluator,
+    join_conditions,
+    mechanical,
+    parse_conditions,
+    ready_to_test,
+    split,
+)
 from habitus.scene.relations.config import RelationConfig
 from habitus.scene.relations.longspan import Episode
 from habitus.scene.relations.measures import ChainMeasure, Measure, PairedMeasure
@@ -46,18 +59,35 @@ from habitus.scene.relations.spans import (
 )
 from habitus.scene.relations.timeline import LaneTimeline, build_timelines
 from habitus.series import EventSeries
+from habitus.temporal.absence import Visit
+from habitus.temporal.intervals import common_interval_days
 
 
 @dataclass(frozen=True, order=True)
 class RelationKey:
-    """关系身份 = （lane, 前因, 后果, 跨度段, 条件）。条件为空 = 不带条件；带条件的是"在这个条件下 A → B 比不在时更强 / 更弱"
-    （调节；组合前因"A 与 C 一起"也是一种条件），条件写成 ``conditions.Condition.text``。"""
+    """关系身份 = （lane, 前因, 后果, 跨度段, 条件）。条件为空 = 不带条件；带条件的是"在这些条件下 A → B 比少一个条件时
+    更强 / 更弱"（调节；组合前因"A 与 C 一起"也是一种条件），条件是一个集合，写成 ``conditions.join_conditions`` 的键
+    （几个 ``Condition.text`` 排序后用 ``+`` 拼起来；裁定 61 第 6 条）。"""
 
     lane: str
     antecedent: str
     consequent: str
     segment: Segment
     condition: str = ""
+
+    @property
+    def conditions(self) -> tuple[Condition, ...]:
+        """这条关系挂的条件（没有是空元组）。"""
+
+        return parse_conditions(self.condition)
+
+    def parents(self) -> tuple[RelationKey, ...]:
+        """少任意一个条件的那几条键（组合长在它们上面；单个条件的父是不带条件的那条；不带条件的没有父）。"""
+
+        items = self.conditions
+        return tuple(
+            replace(self, condition=join_conditions(items[:index] + items[index + 1 :])) for index in range(len(items))
+        )
 
     @property
     def text(self) -> str:
@@ -126,7 +156,7 @@ class LaneNight:
 
 @dataclass(frozen=True)
 class Subset:
-    """在一个子集（前向验证的新数据、维持检验的最近几个块）上的读数。"""
+    """在一个子集（前向验证的新数据、维持检验那一段的新数据）上的读数。"""
 
     antecedents: int
     blocks: int
@@ -134,6 +164,8 @@ class Subset:
     p_value: float
     interval: tuple[float, float] | None
     relative_interval: tuple[float, float] | None
+    #: 这几层就算全部最极端（全阳或全阴）能到的单侧 p（取两侧小的那侧，与同一条链入族同一口径）：大于 α 时判了必输。
+    minimum_p: float
 
 
 class LaneTests:
@@ -146,18 +178,19 @@ class LaneTests:
         config: RelationConfig,
         cutoff: date,
         *,
-        notes: Mapping[date, str] | None = None,
         proposals: Mapping[str, tuple[tuple[Condition, date], ...]] | None = None,
+        established: Iterable[RelationKey] = (),
     ) -> None:
-        """``notes``：日子 → 当地日历的备注（调休、节假日……，调节条件的结构字段）。``proposals``：前因 → 大模型提过的条件
-        与提出的那一晚（第 7 步；只在那晚之后的数据上检验）。"""
+        """``proposals``：前因 → 大模型提过的条件
+        与提出的那一晚（第 7 步；只在那晚之后的数据上检验）。``established``：接的那一晚已成立的关系——第二个条件起只在
+        已成立的带条件关系上加一个（裁定 62 第 1 条）。"""
 
         self.line = line
         self.concepts = concepts
         self.config = config
         self.cutoff = cutoff
-        self.notes = dict(notes or {})
         self.proposals = dict(proposals or {})
+        self.established = frozenset(established)
         self.controls = Controls(line, config.transition_window_slots)
         # 上下界检验用的两份：后果"判不了"当 0 / 当 1（裁定 27 第 6 条）
         self._bounds = {
@@ -174,11 +207,11 @@ class LaneTests:
         """全部要量的关系：短跨度两两 × 四段；长跨度（行为概念的四种标志、情境概念成立的日子）；够样本的前因 × 条件。"""
 
         lane = self.line.lane
-        # 停用的概念（类被拆改）不再量：它不会再有新记录，量出来只会是"它没了"（裁定 27 第 9 条）
+        # 停用的概念（类被拆改；细分 / 汇总概念成员类全停了）不再量：它不会再有新记录，量出来只会是"它没了"（裁定 27 第 9 条）
         names = [
             name
             for name in self.line.concepts()
-            if self.concepts.lane_of(name) == lane and not self.concepts[name].retired
+            if self.concepts.lane_of(name) == lane and not members_retired(self.concepts, name)
         ]
         found = [
             RelationKey(lane, antecedent, consequent, segment)
@@ -218,17 +251,19 @@ class LaneTests:
         return rule is not None and rule.basis.reads_history
 
     def _moderated(self, names: list[str]) -> list[RelationKey]:
+        """带条件的关系：单个条件对每个够样本的前因都列（现状，裁定 62 第 1 条）；第二个条件起只在已成立的带条件关系上
+        加一个（{C1} 成立才列 {C1, C2}），条件池同样是机械列举 + 模型提的，最多 ``max_combined_conditions`` 个。
+        同一个集合从几条父关系长出来只有一条键。"""
+
         found: list[RelationKey] = []
         window = self.config.transition_window_slots
+        pools: dict[str, dict[Condition, date | None]] = {}
         for antecedent in names:
             chains = self.chains(antecedent)
-            if len(chains) < self.config.thresholds.moderation_min_antecedents:
-                continue
+            if len(chains) < 2 * MIN_PER_SIDE:
+                continue  # 两边各 2 次的最低要求；够不够开检验由每条关系自己的最小可达 p 定（``ready_to_test``）
             conditions: dict[Condition, date | None] = {
-                condition: None
-                for condition in mechanical(
-                    self.line, self.concepts, antecedent, chains, window=window, notes=self.notes
-                )
+                condition: None for condition in mechanical(self.line, self.concepts, antecedent, chains, window=window)
             }
             # 模型提的条件只在提出之后的数据上检验（防"看过数据再提"）；与机械列举撞上的不算新条件，照旧在全部历史上量——
             # 不然它会把机械条件攒下的证据清掉（第四轮评审人工智能 1：第六批 21 条提议里 20 条与机械列举重复）
@@ -239,6 +274,7 @@ class LaneTests:
                     if condition not in conditions
                 }
             )
+            pools[antecedent] = conditions
             for condition, since in sorted(conditions.items(), key=lambda item: item[0].text):
                 for consequent in names:
                     if not comparable(self.concepts, antecedent, consequent) or _circular(
@@ -250,7 +286,52 @@ class LaneTests:
                         found.append(key)
                         if since is not None:
                             self._proposed[key] = since
+        found.extend(self._grown(names, pools))
         return found
+
+    def _grown(self, names: list[str], pools: Mapping[str, Mapping[Condition, date | None]]) -> list[RelationKey]:
+        """已成立的带条件关系上再加一个条件（第二个及以上）。同一个集合从几条父关系长出来只有一条键：新加的那个条件
+        是机械列举的就在全部历史上量，几条路都是模型提的才只看最早提出之后的数据。"""
+
+        limit = self.config.thresholds.max_combined_conditions
+        grown: dict[RelationKey, list[date | None]] = {}
+        for parent in sorted(self.established):
+            held = parent.conditions
+            pool = pools.get(parent.antecedent)
+            if not held or len(held) >= limit or pool is None:
+                continue
+            if parent.consequent not in names or parent.segment not in SEGMENTS:
+                continue
+            for condition, since in pool.items():
+                if condition in held or _circular(self.concepts, condition, parent.consequent):
+                    continue
+                key = replace(parent, condition=join_conditions((*held, condition)))
+                grown.setdefault(key, []).append(since)
+        for key, sinces in grown.items():
+            if all(since is not None for since in sinces):
+                self._proposed[key] = min(since for since in sinces if since is not None)
+        return sorted(grown)
+
+    def still_defined(self, key: RelationKey) -> bool:
+        """这条关系依赖的东西还在不在（冻住的行的寿命，26 号清单 5.6）：集中期 / 停了一阵随变点重算整段没了、带的条件有一个
+        既不在机械列举里也不在模型提议里了（被拒、消失），就是不在了。只是前因这阵子没有新链的照样算在——它会回来。
+        几个条件合起来的还要求父关系仍然成立，那一条由状态折叠按当晚的结果判（``state._drop_orphaned_combinations``）。"""
+
+        if key.segment in (Segment.HIGH_STATE, Segment.LOW_STATE) and key.antecedent in self.line.concepts():
+            if not self.episodes(key.antecedent, key.segment):
+                return False
+        if key.condition:
+            chains = self.chains(key.antecedent)
+            if not chains:
+                return True
+            window = self.config.transition_window_slots
+            listed = {
+                condition.text
+                for condition in mechanical(self.line, self.concepts, key.antecedent, chains, window=window)
+            }
+            proposed = {condition.text for condition, _since in self.proposals.get(key.antecedent, ())}
+            return all(item.text in listed or item.text in proposed for item in key.conditions)
+        return True
 
     def episodes(self, antecedent: str, segment: Segment) -> tuple[Episode, ...]:
         cache = (antecedent, segment)
@@ -262,7 +343,8 @@ class LaneTests:
                 segment,
                 block_days=blocks.days if blocks is not None else 1.0,
                 first_seen=(self.config.thresholds.first_seen_min_days, self.config.thresholds.first_seen_min_blocks),
-                recurrence_days=self.config.recurrence_window_days,
+                alpha=self.config.thresholds.forward_alpha,
+                visits=tuple(Visit(chain.day, prompted=chain.anchor.reminded) for chain in self.chains(antecedent)),
             )
         return self._episodes[cache]
 
@@ -337,11 +419,9 @@ class LaneTests:
             if not chains:
                 self._blocks[antecedent] = None
             else:
-                gaps = [
-                    (later.anchor.slot - earlier.anchor.slot) / self.line.slots_per_day
-                    for earlier, later in zip(chains, chains[1:], strict=False)
-                ]
-                days = max(1.0, statistics.median(gaps)) if gaps else 1.0
+                # 块长 = max(1 天, 常见间隔)：常见间隔只在 temporal 算一处（相邻发生日隔几个日历日的中位数，裁定 59）
+                common = common_interval_days([chain.day for chain in chains])
+                days = max(1.0, common) if common is not None else 1.0
                 self._blocks[antecedent] = Blocks(days=days, origin=chains[0].day)
         return self._blocks[antecedent]
 
@@ -376,6 +456,13 @@ class LaneTests:
                     blinded.add(key)
                 else:
                     readings[key] = bounded
+            elif (
+                key.condition
+                and isinstance(measure, ModeratedMeasure)
+                and not ready_to_test(measure, alpha=config.thresholds.forward_alpha)
+            ):
+                # 两边全分开也到不了 α：不进检验族（裁定 60 第 9 条，取代固定的前因 ≥ 40）
+                readings[key] = (measure, 1.0, 1.0, upper <= lower)
             elif key.segment is Segment.CHAIN and not key.condition:
                 # 同一条链只检"更多"（裁定 27 第 1 条）：一件接一件做事时，"接下来做什么"此消彼长——对照是别的事做完之后，
                 # 一条强关系（讨论方案 → 修改代码）会让别的前因之后的修改代码都显得"更少"；时长差异也只会造出"更少"。
@@ -434,7 +521,7 @@ class LaneTests:
     def evaluate(
         self, key: RelationKey, *, upward: bool, since: date | None = None, last_blocks: int | None = None, purpose: str
     ) -> Subset:
-        """子集上的读数：``since`` 之后的新数据（前向验证），或最近 ``last_blocks`` 个块（维持检验）。p 是朝 ``upward`` 的单侧。"""
+        """子集上的读数：``since`` 之后的新数据（前向验证、维持检验），或最近 ``last_blocks`` 个块。p 是朝 ``upward`` 的单侧。"""
 
         measure = self.measure(key).subset(since=since, last_blocks=last_blocks)
         upper, lower = measure.tails(exact_limit=self.config.thresholds.exact_strata_limit)
@@ -450,22 +537,24 @@ class LaneTests:
             p_value=upper if upward else lower,
             interval=spread,
             relative_interval=relative,
+            minimum_p=measure.minimum_p() / 2.0,
         )
 
     def measure(self, key: RelationKey, *, since: date | None = None) -> Measure:
         """这个关系怎么量：长跨度按状态（``longspan``），带条件的把层按条件分两组（``conditions``），其余按层。"""
 
         measure: Measure
-        if key.segment.long:
+        rule = calendar_key(self.concepts, key.antecedent) if key.segment is Segment.SITUATION else None
+        if rule is not None:
+            # 日历情境按维度取对照（``relations.calendar``，裁定 59 第 7 条）；模型写的情境仍和前后紧挨着的平常日子比
+            measure = calendar_measure(self.line, key.consequent, *rule)
+        elif key.segment.long:
             measure = longspan.measure_of(self.line, key.consequent, self.episodes(key.antecedent, key.segment))
         elif key.condition:
-            judge = evaluator(
-                self.line, parse(key.condition), window=self.config.transition_window_slots, notes=self.notes
-            )
-            # 带条件的只按第 1 道对照分两组比：两组的钟点偏差一样，分组之间抵掉
-            measure = split(
-                ChainMeasure(self.strata(key)), judge, minimum=self.config.thresholds.moderation_min_antecedents
-            )
+            window = self.config.transition_window_slots
+            judges = [evaluator(self.line, condition, window=window) for condition in key.conditions]
+            # 带条件的只按第 1 道对照分两组比：两组的钟点偏差一样，分组之间抵掉；几个条件合起来比"全成立"对"少任意一个"
+            measure = split(ChainMeasure(self.strata(key)), judges)
         else:
             measure = self._chain_measure(key)
         return measure if since is None else measure.subset(since=since)

@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from habitus.behavior.fusion.lanes.session import SessionMessageRole
 from habitus.conversation import (
@@ -17,9 +19,10 @@ from habitus.conversation import (
     ConversationConsumerOutcomeState,
     ConversationSourceConsumer,
     ConversationSourceEnvelope,
-    ConversationSourceRecovery,
     conversation_source_request_digest,
 )
+from habitus.conversation.source.recovery import recovery_key
+from habitus.foundation.lifecycle import DeterministicFailure
 from habitus.model_client.contracts import ModelStructuredOutputError
 from habitus.pre.conversation import ConversationBatch, ConversationMessage, ConversationToolResultStatus
 from habitus.runtime.session_lane import (
@@ -31,7 +34,8 @@ from habitus.runtime.session_lane import (
 )
 from tests.helpers import closed_turn, tool_turn
 from tests.unit.behavior.session_fixtures import Stores, description, lane
-from tests.unit.conversation.source_v2_helpers import delivery, stores
+from tests.unit.conversation.source_v2_helpers import NOW, delivery, stores
+from tests.unit.conversation.source_v2_helpers import recovery as source_recovery
 
 STARTED_ON = date(2026, 7, 1)
 
@@ -93,6 +97,13 @@ def test_each_turn_in_a_source_becomes_one_judgement_and_the_source_gets_a_recei
         assert all(item["relations"] == [] for item in behavior.judgements.list())
         # 回执里没有对话内容。
         assert "请记住我喜欢简洁回答" not in str(receipt.to_dict())
+        # 覆盖记录带着所属会话源：这份源的 Behavior 到终态之前不删（26 号清单 6.1）
+        import json
+
+        records = [
+            json.loads(path.read_text()) for path in (tmp_path / "behavior" / "fusion" / "coverage").rglob("*.json")
+        ]
+        assert len(records) == 2 and all(item["source_refs"] == [source.source_id] for item in records)
 
     asyncio.run(scenario())
 
@@ -145,7 +156,9 @@ def test_a_failed_turn_leaves_the_source_pending_and_recovery_does_not_repeat_fi
 ) -> None:
     async def scenario() -> None:
         bad = description(name="..")  # 两次都答成不合格的名字：这一轮判失败
-        service, behavior, provider = wired(tmp_path, [description("确认回答风格"), bad, bad, description("检查项目状态")])
+        service, behavior, provider = wired(
+            tmp_path, [description("确认回答风格"), bad, bad, description("检查项目状态")]
+        )
         source = service.sources.put(envelope("fails-once", (*closed_turn(), *tool_turn(start_sequence=2))))
 
         try:
@@ -160,11 +173,11 @@ def test_a_failed_turn_leaves_the_source_pending_and_recovery_does_not_repeat_fi
         )
         assert [item["behavior"] for item in behavior.judgements.list()] == ["确认回答风格"]
 
-        results = await ConversationSourceRecovery(service.sources, service, batch_size=10).recover_pending()
+        results = await source_recovery(service).recover_pending()
 
-        assert [result.error for result in results if result.consumer is ConversationSourceConsumer.BEHAVIOR_SESSION] == [
-            None
-        ]
+        assert [
+            result.error for result in results if result.consumer is ConversationSourceConsumer.BEHAVIOR_SESSION
+        ] == [None]
         assert service.inspect(source, ConversationSourceConsumer.BEHAVIOR_SESSION).state is (
             ConversationConsumerDeliveryState.COMMITTED
         )
@@ -173,6 +186,84 @@ def test_a_failed_turn_leaves_the_source_pending_and_recovery_does_not_repeat_fi
         assert sorted(item["behavior"] for item in behavior.judgements.list()) == ["检查项目状态", "确认回答风格"]
 
     asyncio.run(scenario())
+
+
+def _model_down(service, monkeypatch: pytest.MonkeyPatch) -> list[object]:  # type: ignore[no-untyped-def]
+    """模型连不上（像额度用完）：每次描述都抛可重试的错。返回调用记录。"""
+
+    calls: list[object] = []
+
+    async def down(turn: object, reminders: object = ()) -> object:
+        calls.append(turn)
+        raise ConnectionError("model quota exhausted")
+
+    consumer = service.consumers[ConversationSourceConsumer.BEHAVIOR_SESSION]
+    monkeypatch.setattr(consumer.lane.describer, "describe", down)
+    return calls
+
+
+def test_a_source_the_retry_ledger_gives_up_on_is_written_as_unreadable_and_reaches_a_terminal_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """模型连着调不通到重试账放弃：还没写进树的轮写成没读懂空白，这份源对 Behavior 落终态（23 号第一节第 6 条）——
+    不然下游把"看了没读懂"读成"没做"，信封也永远放不了。"""
+
+    async def scenario() -> None:
+        service, behavior, _provider = wired(tmp_path, [description()])
+        source = service.sources.put(envelope("quota-out", (*closed_turn(), *tool_turn(start_sequence=2))))
+        calls = _model_down(service, monkeypatch)
+        now = [NOW]
+        recovering = source_recovery(service, max_attempts=2, clock=lambda: now[0])
+
+        await recovering.recover_pending()
+        assert service.inspect(source, ConversationSourceConsumer.BEHAVIOR_SESSION).state is (
+            ConversationConsumerDeliveryState.PENDING
+        )
+        now[0] += timedelta(hours=2)
+        await recovering.recover_pending()  # 第二次失败：账判放弃 → 当场写没读懂
+
+        assert len(calls) == 2  # 放弃之后不再问模型
+        assert service.inspect(source, ConversationSourceConsumer.BEHAVIOR_SESSION).state is (
+            ConversationConsumerDeliveryState.COMMITTED
+        )
+        receipt = service.restore_terminal(source, ConversationSourceConsumer.BEHAVIOR_SESSION)
+        assert isinstance(receipt, BehaviorSessionOutput) and all(turn.recorded for turn in receipt.turns)
+        judgements = behavior.judgements.list()
+        assert len(judgements) == 2 and all(item["behavior"] is None for item in judgements)  # 两段没读懂
+        assert (
+            recovering.retries.entry(recovery_key(source.source_id, ConversationSourceConsumer.BEHAVIOR_SESSION))
+            is None
+        )
+
+    asyncio.run(scenario())
+
+
+def test_a_give_up_that_never_became_unreadable_is_finished_on_the_next_round(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """账里已经判了放弃、没读懂还没写（放弃那一刻进程退出）：下一轮恢复补写，不等人工。"""
+
+    async def scenario() -> None:
+        service, behavior, _provider = wired(tmp_path, [description()])
+        source = service.sources.put(envelope("given-up", closed_turn()))
+        calls = _model_down(service, monkeypatch)
+        recovering = source_recovery(service)
+        key = recovery_key(source.source_id, ConversationSourceConsumer.BEHAVIOR_SESSION)
+        recovering.retries.record_failure(key, _Doomed("given up before the crash"))
+
+        await recovering.recover_pending()
+
+        assert calls == []
+        assert service.inspect(source, ConversationSourceConsumer.BEHAVIOR_SESSION).state is (
+            ConversationConsumerDeliveryState.COMMITTED
+        )
+        assert [item["behavior"] for item in behavior.judgements.list()] == [None]
+
+    asyncio.run(scenario())
+
+
+class _Doomed(DeterministicFailure):
+    pass
 
 
 def test_tool_calls_and_failures_cross_the_bridge_in_the_lane_s_own_shape() -> None:
@@ -189,3 +280,13 @@ def test_tool_calls_and_failures_cross_the_bridge_in_the_lane_s_own_shape() -> N
     assert (tool_call.tool_name, tool_call.content) == ("workspace.inspect", '{"path":"."}')  # 参数对象转成一行文字
     assert tool_result.failed
     assert turn.answered
+
+
+def test_the_session_lane_consumer_skips_sources_that_were_already_released() -> None:
+    """2.1.5：会话 lane 的消费者声明"已释放的源重投时跳过"，Memory 不声明（它靠自己的 ingress 去重）（L10.14 补测）。"""
+
+    from habitus.memory.workflow.conversation_consumer import MemoryConversationConsumer
+    from habitus.runtime.session_lane import BehaviorSessionConsumer
+
+    assert BehaviorSessionConsumer.skips_released_sources is True
+    assert MemoryConversationConsumer.skips_released_sources is False

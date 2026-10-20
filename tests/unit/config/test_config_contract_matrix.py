@@ -18,6 +18,7 @@ from habitus.config import (
     WorkflowConfig,
 )
 from habitus.config.foresight import ForesightConfig
+from habitus.config.lifecycle import LifecycleConfig, LifecycleRetryConfig, LifecycleWorkerConfig
 from habitus.config.loader import (
     ConfigError,
     construct_config,
@@ -57,6 +58,9 @@ from habitus.memory.workflow import (
 )
 
 CONFIG_INSTANCES = (
+    LifecycleConfig(),
+    LifecycleWorkerConfig(),
+    LifecycleRetryConfig(),
     SceneConfig(),
     ForesightConfig(),
     LocaleConfig(),
@@ -98,8 +102,7 @@ INTEGER_FIELDS = tuple(
     (instance, field.name)
     for instance in CONFIG_INSTANCES
     for field in fields(instance)
-    if isinstance(getattr(instance, field.name), int)
-    and not isinstance(getattr(instance, field.name), bool)
+    if isinstance(getattr(instance, field.name), int) and not isinstance(getattr(instance, field.name), bool)
 )
 FLOAT_FIELDS = tuple(
     (instance, field.name)

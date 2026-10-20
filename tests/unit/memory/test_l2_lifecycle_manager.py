@@ -486,9 +486,7 @@ def test_context_use_uri_lock_prevents_compaction_from_committing_across_use_sta
     monkeypatch.setattr(recall.store, "record_use", blocked_record_use)
 
     async def race():
-        context = asyncio.create_task(
-            value.record_context_use((value._target(detailed),), used_at=NOW)
-        )
+        context = asyncio.create_task(value.record_context_use((value._target(detailed),), used_at=NOW))
         assert await asyncio.to_thread(entered.wait, 5)
         maintenance = asyncio.create_task(value.maintain())
         await asyncio.sleep(0.05)
@@ -551,9 +549,7 @@ def test_new_semantic_revision_cancels_stale_retirement_and_clears_old_state(
         {"topic": "回答风格", "content": "- 并发写入的新偏好"},
     )
     current_document = value.tree.read(detailed.address)
-    context_use = asyncio.run(
-        value.record_context_use((value._target(current_document),), used_at=current[0])
-    )
+    context_use = asyncio.run(value.record_context_use((value._target(current_document),), used_at=current[0]))
     assert context_use.rejected_uris == ()
     assert value.operation_store.pending() == ()
     revised_state = recall.store.read_many((uri,))[0]
@@ -636,9 +632,7 @@ def test_stale_retirement_worker_and_new_revision_context_use_share_operation_lo
     async def race():
         maintenance = asyncio.create_task(value.maintain())
         assert await asyncio.to_thread(entered.wait, 5)
-        context = asyncio.create_task(
-            value.record_context_use((value._target(current_document),), used_at=current[0])
-        )
+        context = asyncio.create_task(value.record_context_use((value._target(current_document),), used_at=current[0]))
         await asyncio.sleep(0.05)
         release.set()
         return await maintenance, await context
@@ -781,9 +775,7 @@ def test_one_poison_l2_node_does_not_starve_later_scan_candidates(
     monkeypatch.setattr(value.field_compactor, "compact", fail_one)
     result = asyncio.run(value.maintain())
 
-    assert tuple(item.uri for item in result.failures) == (
-        MemoryURI.from_address(poisoned.address),
-    )
+    assert tuple(item.uri for item in result.failures) == (MemoryURI.from_address(poisoned.address),)
     assert result.compacted == (MemoryURI.from_address(healthy.address),)
     assert value.tree.read(poisoned.address).metadata.revision == 1
     assert value.tree.read(healthy.address).metadata.revision == 2

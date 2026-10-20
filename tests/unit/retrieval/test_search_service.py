@@ -318,9 +318,7 @@ def test_sufficient_grader_result_records_only_retained_direct_memory_and_keeps_
     assert tuple(memory.uri for memory in result.memories) == (first_uri,)
     assert result.memories[0].hit.lifecycle_temperature.value == "warm"
     states = instance.recall_lifecycle.store.read_many((first_uri, second_uri))
-    assert tuple((state.uri, state.useful_recall_count) for state in states) == (
-        (first_uri, 1),
-    )
+    assert tuple((state.uri, state.useful_recall_count) for state in states) == ((first_uri, 1),)
     assert instance.tree.read(first.address) == first
 
     recalled = asyncio.run(instance.find("回答偏好", limit=1))
@@ -344,9 +342,7 @@ def test_final_context_exposure_heats_each_retained_direct_memory(tmp_path: Path
     second_uri = MemoryURI.from_address(second.address)
     instance = service(
         tmp_path,
-        semantic=SemanticSearch(
-            (MemorySearchHit(first_uri, 0.9), MemorySearchHit(second_uri, 0.8))
-        ),
+        semantic=SemanticSearch((MemorySearchHit(first_uri, 0.9), MemorySearchHit(second_uri, 0.8))),
         summaries=SummarySearch(),
         responses=[
             {

@@ -58,6 +58,9 @@ class AnchorGate:
         # 不再当锚点，不会记到后面每一处提议的账上（2026-10-13 第 35 晚重放：一个被新切出的类接走的锚点让后面三处拆分全被挡下）
         key = (before.version, lane, tuple(member.occurrence for member in candidates))
         if key not in self._stable:
+            # 词表版本前进了：旧版本的键再也用不上（下一次自检的基线只会更新），清掉（26 号清单 6.9）
+            for stale in [item for item in self._stable if item[0] < before.version]:
+                del self._stable[stale]
             self._stable[key], calls = await self._stable_anchors(candidates, before, checkpoint)
         anchors = [member for member in self._stable[key] if ClassId.parse(member.token) not in touched]
         if not anchors:

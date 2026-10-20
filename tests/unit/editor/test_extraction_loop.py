@@ -251,9 +251,7 @@ def test_preliminary_mutation_failure_does_not_trigger_semantic_regeneration(
     tmp_path: Path,
 ) -> None:
     unconfirmed_intention = empty_candidates()
-    unconfirmed_intention["intentions"] = [
-        candidate_item(MemoryKind.INTENTION, 100, confirmed=False)
-    ]
+    unconfirmed_intention["intentions"] = [candidate_item(MemoryKind.INTENTION, 100, confirmed=False)]
     unused_retry = empty_candidates()
     responses = [finish(), unconfirmed_intention, unused_retry]
     loop = extraction_loop(tmp_path, responses)

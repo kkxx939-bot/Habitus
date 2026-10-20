@@ -36,12 +36,8 @@ def test_relation_candidate_is_resolved_only_after_final_uri_identity_exists() -
             MemoryFinalIdentity(101, MemoryNodeDisposition.CREATE, None, preference_uri),
         )
     )
-    candidate = MemoryRelationCandidate(
-        MemoryRelationAction.ADD, 100, 101, MemoryLinkType.BELONGS_TO
-    )
-    resolved = MemoryRelationResolver().resolve(
-        MemoryCandidateBatch(relations=(candidate,)), identities
-    )
+    candidate = MemoryRelationCandidate(MemoryRelationAction.ADD, 100, 101, MemoryLinkType.BELONGS_TO)
+    resolved = MemoryRelationResolver().resolve(MemoryCandidateBatch(relations=(candidate,)), identities)
     assert resolved == (
         MemoryResolvedRelation(
             MemoryRelationAction.ADD,
@@ -61,9 +57,7 @@ def test_add_relation_updates_source_link_and_target_backlink_atomically_in_plan
             MemoryFinalIdentity(101, MemoryNodeDisposition.CREATE, None, preference_uri),
         )
     )
-    operation = MemoryResolvedRelation(
-        MemoryRelationAction.ADD, profile_uri, preference_uri, MemoryLinkType.BELONGS_TO
-    )
+    operation = MemoryResolvedRelation(MemoryRelationAction.ADD, profile_uri, preference_uri, MemoryLinkType.BELONGS_TO)
     snapshots = batch(
         VersionedSnapshot.missing(str(profile_uri)),
         VersionedSnapshot.missing(str(preference_uri)),
@@ -84,12 +78,8 @@ def test_explicit_remove_keeps_both_nodes_and_removes_complete_link_backlink_pai
     source_uri = MemoryURI.from_address(source.address)
     target_uri = MemoryURI.from_address(target.address)
     relation = MemoryStoredLink(source_uri, target_uri, MemoryLinkType.BELONGS_TO)
-    source = codec().build(
-        source.kind, source.fields, metadata=source.metadata, links=(relation,)
-    )
-    target = codec().build(
-        target.kind, target.fields, metadata=target.metadata, backlinks=(relation,)
-    )
+    source = codec().build(source.kind, source.fields, metadata=source.metadata, links=(relation,))
+    target = codec().build(target.kind, target.fields, metadata=target.metadata, backlinks=(relation,))
     snapshots = batch(memory_snapshot(source), memory_snapshot(target))
     identities = MemoryFinalIdentityMap(
         (
@@ -97,9 +87,7 @@ def test_explicit_remove_keeps_both_nodes_and_removes_complete_link_backlink_pai
             MemoryFinalIdentity(2, MemoryNodeDisposition.NOOP, target_uri, target_uri),
         )
     )
-    operation = MemoryResolvedRelation(
-        MemoryRelationAction.REMOVE, source_uri, target_uri, MemoryLinkType.BELONGS_TO
-    )
+    operation = MemoryResolvedRelation(MemoryRelationAction.REMOVE, source_uri, target_uri, MemoryLinkType.BELONGS_TO)
     read_set = MemoryRelationReadSet.build(snapshots, identities, (operation,))
     plan = MemoryRelationPlanner().plan(identities, (operation,), read_set)
     assert plan.removed == (relation,)
@@ -154,4 +142,3 @@ def test_structural_operation_fails_if_old_link_has_no_matching_backlink() -> No
     )
     with pytest.raises(MemoryRelationIntegrityError, match="backlink"):
         MemoryRelationReadSet.build(snapshots, identities, ())
-

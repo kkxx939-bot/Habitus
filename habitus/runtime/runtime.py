@@ -65,6 +65,7 @@ from habitus.runtime.components import RuntimeComponents
 from habitus.runtime.consistency import MemoryConsistencyService, MemoryConsistencySnapshot
 from habitus.runtime.health import RuntimeHealthReport, RuntimeHealthService
 from habitus.runtime.lifecycle import LifecycleWorkerState
+from habitus.runtime.lifecycle_sources import memory_jobs_restored
 from habitus.runtime.worker import MemoryWorkerState
 
 
@@ -230,7 +231,7 @@ class Runtime:
         self._conversation_adapters = (
             conversation_adapters if conversation_adapters is not None else ConversationAdapterRegistry.with_builtins()
         )
-        self._health = RuntimeHealthService(components)
+        self._health = RuntimeHealthService(components, capacity_warning_share=config.lifecycle.capacity_warning_share)
 
     @property
     def state(self) -> RuntimeState:
@@ -305,18 +306,9 @@ class Runtime:
             await self.components.conversation.summary_vector_index.ensure_ready()
             source_recoveries = await self.components.conversation.source_recovery.recover_pending()
             self._publish_source_delivery_gauges(source_recoveries)
-            # 只有 Memory 的失败阻断启动；Behavior 失败不阻断，但它已经由
-            # ConversationConsumerDelivery 记为事件，并计入下面的 gauge，不再被丢弃。
-            memory_recovery_error = next(
-                (
-                    result.error
-                    for result in source_recoveries
-                    if result.consumer is ConversationSourceConsumer.MEMORY and result.error is not None
-                ),
-                None,
-            )
-            if memory_recovery_error is not None:
-                raise memory_recovery_error
+            # 恢复失败不阻断启动（裁定 60 第 6 条），只降级出事的那个地址：有序的 Memory 对同地址后面的源报"等前序"或
+            # "前序已坏"，别的地址照常；可重试的由周期恢复按退避再试，放弃了的等人工修复。失败都已计入上面的 gauge。
+            self._observe_degraded_source_addresses(source_recoveries, started)
             await self.components.workflow.worker.start()
             try:
                 await self.components.workflow.lifecycle_worker.start()
@@ -341,19 +333,18 @@ class Runtime:
                             started,
                             {"error_type": type(exc).__name__, "lane": branch.lane.value},
                         )
-            # 预测夜批同一哲学：它只读行为树、只写自己的存储，起不来不影响任何在线路径。
-            if self.components.prediction is not None:
-                for lane, prediction_branch in self.components.prediction:
-                    try:
-                        await prediction_branch.worker.start()
-                    except Exception as exc:  # noqa: BLE001 - 预测侧失败不阻断记忆主链
-                        self._observe(
-                            "runtime",
-                            "prediction_start",
-                            ObservationStatus.FAILURE,
-                            started,
-                            {"error_type": type(exc).__name__, "lane": lane},
-                        )
+            # 整晚那一趟同一哲学：它只读行为树、只写派生的存储，起不来不影响任何在线路径。
+            if self.components.nightly is not None:
+                try:
+                    await self.components.nightly.start()
+                except Exception as exc:  # noqa: BLE001 - 夜批失败不阻断记忆主链
+                    self._observe(
+                        "runtime",
+                        "nightly_start",
+                        ObservationStatus.FAILURE,
+                        started,
+                        {"error_type": type(exc).__name__},
+                    )
             # 预测层每槽一拍，只读两棵派生树与判断存储、只调模型，同一哲学。
             if self.components.foresight is not None and self.components.foresight.worker is not None:
                 try:
@@ -441,7 +432,7 @@ class Runtime:
         它读的行为树才停），但既然管着两个域，就不该顶着一个域的名字。
         """
 
-        # 预测层先停（它读预测树与行为树），然后预测夜批，最后行为侧。
+        # 预测层先停（它读机会表与行为树），然后整晚那一趟，最后行为侧。
         foresight = self.components.foresight
         if foresight is not None and foresight.worker is not None:
             try:
@@ -454,17 +445,16 @@ class Runtime:
                     time.monotonic(),
                     {"error_type": type(exc).__name__},
                 )
-        prediction = self.components.prediction
-        for lane, prediction_branch in prediction or ():
+        if self.components.nightly is not None:
             try:
-                await prediction_branch.worker.stop()
-            except Exception as exc:  # noqa: BLE001 - 预测侧停机失败不阻断主链，也不连累另一支
+                await self.components.nightly.stop()
+            except Exception as exc:  # noqa: BLE001 - 夜批停机失败不阻断主链
                 self._observe(
                     "runtime",
-                    "prediction_stop",
+                    "nightly_stop",
                     ObservationStatus.FAILURE,
                     time.monotonic(),
-                    {"error_type": type(exc).__name__, "lane": lane},
+                    {"error_type": type(exc).__name__},
                 )
         behavior = self.components.behavior
         if behavior is None:
@@ -589,17 +579,10 @@ class Runtime:
         self._require_initialized("conversation source recovery")
         results = await self.components.conversation.source_recovery.recover_pending()
         self._publish_source_delivery_gauges(results)
-        if self._state is RuntimeState.RUNNING:
-            for recovered in results:
-                if recovered.consumer is not ConversationSourceConsumer.MEMORY or recovered.error is not None:
-                    continue
-                restored = self.components.conversation.source_delivery.restore_terminal(
-                    recovered.envelope,
-                    ConversationSourceConsumer.MEMORY,
-                )
-                if isinstance(restored, ConversationMemoryIngestResult) and restored.jobs:
-                    self.components.workflow.worker.wake()
-                    break
+        if self._state is RuntimeState.RUNNING and memory_jobs_restored(
+            self.components.conversation.source_delivery, results
+        ):
+            self.components.workflow.worker.wake()
         return results
 
     def repair_conversation_source_outputs(
@@ -620,7 +603,10 @@ class Runtime:
         if envelope is None:
             raise ConversationSourceRepairError(f"unknown Conversation Source: {source_id}")
         repair = ConversationSourceOutputRepair(self.components.conversation.source_delivery)
-        return repair.repair(envelope, ConversationSourceConsumer(consumer))
+        repaired = repair.repair(envelope, ConversationSourceConsumer(consumer))
+        # 修好了就清掉这一份的重试账：放弃过的也在下一轮周期恢复里照常再试
+        self.components.conversation.source_recovery.forgive(source_id, ConversationSourceConsumer(consumer))
+        return repaired
 
     async def flush_conversation(
         self,
@@ -1087,6 +1073,27 @@ class Runtime:
                 directory.chmod(0o700)
             except OSError:
                 pass
+
+    def _observe_degraded_source_addresses(
+        self,
+        results: Sequence[ConversationSourceRecoveryResult],
+        started: float,
+    ) -> None:
+        """启动恢复里 Memory 没恢复成的源落在几个地址上：这些地址降级运行，记一条 DEGRADED 事件。"""
+
+        degraded = {
+            (result.envelope.conversation_id, result.envelope.started_on)
+            for result in results
+            if result.consumer is ConversationSourceConsumer.MEMORY and result.error is not None
+        }
+        if degraded:
+            self._observe(
+                "runtime",
+                "source_recovery",
+                ObservationStatus.DEGRADED,
+                started,
+                {"degraded_addresses": len(degraded)},
+            )
 
     def _publish_source_delivery_gauges(
         self,

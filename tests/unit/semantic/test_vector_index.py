@@ -48,27 +48,36 @@ class VectorStore:
     async def replace_all(self, records, **kwargs):
         self.records = {item.identity: item for item in records}
         self.current = VectorStoreState(
-            kwargs["schema_version"], kwargs["embedding_fingerprint"], kwargs["dimension"],
-            kwargs["checkpoint"], 1 if self.current is None else self.current.generation + 1, len(records),
+            kwargs["schema_version"],
+            kwargs["embedding_fingerprint"],
+            kwargs["dimension"],
+            kwargs["checkpoint"],
+            1 if self.current is None else self.current.generation + 1,
+            len(records),
         )
         return self.current
+
     async def apply(self, upserts, deletes, **kwargs):
         for item in upserts:
             self.records[item.identity] = item
         for identity in deletes:
             self.records.pop(identity, None)
         self.current = VectorStoreState(
-            self.current.schema_version, self.current.embedding_fingerprint, self.current.dimension,
-            kwargs["checkpoint"], self.current.generation + 1, len(self.records),
+            self.current.schema_version,
+            self.current.embedding_fingerprint,
+            self.current.dimension,
+            kwargs["checkpoint"],
+            self.current.generation + 1,
+            len(self.records),
         )
         return self.current
+
     async def search(self, query_vector, *, filters, limit):
         self.filters.append(filters)
-        return tuple(
-            VectorStoreMatch(item, 0.9)
-            for item in self.records.values()
-            if filters.matches(item.attributes)
-        )[:limit]
+        return tuple(VectorStoreMatch(item, 0.9) for item in self.records.values() if filters.matches(item.attributes))[
+            :limit
+        ]
+
     async def scan(self, *, filters, limit):
         return tuple(self.records.values())[:limit]
 
@@ -80,8 +89,11 @@ def index(tmp_path: Path):
     tree = MemoryTree(tmp_path / "memory")
     embedder = Embedder()
     store = VectorStore()
-    return tree, embedder, store, PersistentMemoryVectorIndex(
-        tree, embedder, store, dimension=2, embedding_fingerprint="embed-v1"
+    return (
+        tree,
+        embedder,
+        store,
+        PersistentMemoryVectorIndex(tree, embedder, store, dimension=2, embedding_fingerprint="embed-v1"),
     )
 
 
@@ -172,11 +184,7 @@ def test_incremental_sync_updates_changed_l2_and_advances_global_job_checkpoint(
     assert state.checkpoint == 2
     assert len(embedder.inputs) == 2
     with pytest.raises(MemoryVectorIndexError, match="backwards"):
-        asyncio.run(
-            vector_index.synchronize(
-                changed_uris=(), semantic_results=(), checkpoint=1
-            )
-        )
+        asyncio.run(vector_index.synchronize(changed_uris=(), semantic_results=(), checkpoint=1))
 
 
 def test_l2_search_applies_kind_and_scope_filters_before_top_k(tmp_path: Path) -> None:

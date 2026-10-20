@@ -12,14 +12,10 @@ from habitus.foresight import ForesightError, Seen, form_expectations
 from habitus.foresight.judge import Judge, build_package, plain_text
 from habitus.foresight.judge.prompt import (
     JUDGE_SYSTEM_PROMPT,
-    SEVERITY_SYSTEM_PROMPT,
     JudgeAnswerError,
     assemble,
-    assemble_severity,
     build_request,
-    build_severity_request,
     judge_json_schema,
-    severity_json_schema,
 )
 from habitus.model_client import ModelTransportError
 from tests.unit.foresight.scripted_model import ScriptedProvider, recording_client
@@ -46,7 +42,7 @@ def event_case():  # type: ignore[no-untyped-def]
     rows = seen_until(series, now)
     (expectation,) = [
         item
-        for item in form_expectations(moment=moment_at(now), tree=None, table=table, rows=rows)
+        for item in form_expectations(moment=moment_at(now), table=table, rows=rows, recent=35)
         if item.source == "事件"
     ]
     by_uri = {
@@ -178,51 +174,6 @@ def test_model_failures_degrade_to_the_algorithm_order() -> None:
         Judge(object())  # type: ignore[arg-type]
 
 
-def test_severity_asks_for_a_cost_ratio_twice_and_merges_on_the_ratio_scale() -> None:
-    """代价比（裁定 58 第 1 条）：漏一次相当于错提醒几次，连续的数；每件带前因、历史行带前因 → 后果；两遍差不到一倍取几何平均，
-    差得多取较小的、依据留空；超出保护闸的数挡回去重问。"""
-
-    expectation, table, rows, now, _ = event_case()
-    package = build_package((expectation,), table, rows, now=now, levels={})
-    request = build_severity_request(package.candidates)
-    assert request.messages[0].content == SEVERITY_SYSTEM_PROMPT
-    body = request.messages[1].content or ""
-    assert "## 事项 1：修改代码" in body
-    assert f"前因：{package.candidates[0].trigger_text}" in body
-    assert any(f"{row.antecedent} → {row.consequent}" in body for row in package.candidates[0].history)
-    good = {"verdicts": [{"item": 1, "cost_ratio": 4.0, "basis": "第 6 次漏了要返工", "basis_number": 6}]}
-    assert assemble_severity(good, package.candidates) == {1: (4.0, "第 6 次漏了要返工")}
-    entry = good["verdicts"][0]
-    for bad in (
-        {"verdicts": []},
-        {"verdicts": [{**entry, "item": 2}]},
-        {"verdicts": [{**entry, "cost_ratio": "重"}]},
-        {"verdicts": [{**entry, "cost_ratio": 50.0}]},  # 超出保护闸
-        {"verdicts": [{**entry, "basis": " "}]},  # 依据不能空
-        {"verdicts": [{**entry, "basis_number": 0}]},  # 有历史就要指出是哪一次
-        {"verdicts": [{**entry, "basis_number": 7}]},
-    ):
-        with pytest.raises(JudgeAnswerError):
-            assemble_severity(bad, package.candidates)
-    assert severity_json_schema([1])["properties"]["verdicts"]["items"]["properties"]["item"]["enum"] == [1]
-    with pytest.raises(ForesightError):
-        severity_json_schema([])
-    client, provider = recording_client([good, good])
-    result = asyncio.run(Judge(client, retries=0, delay_seconds=0.0).judge_severity(package))
-    assert not result.failed and result.calls == 2 and result.verdicts[expectation.expectation_id] == (4.0, "第 6 次漏了要返工")
-    assert client.names == ["foresight_severity", "foresight_severity"] and provider.calls == 2
-    close = {"verdicts": [{**entry, "cost_ratio": 2.25, "basis": "补得回来", "basis_number": 2}]}
-    client, _ = recording_client([good, close])
-    result = asyncio.run(Judge(client, retries=0, delay_seconds=0.0).judge_severity(package))
-    assert result.verdicts[expectation.expectation_id][0] == pytest.approx(3.0)  # 4 与 2.25 差不到一倍：几何平均 3
-    far = {"verdicts": [{**entry, "cost_ratio": 0.5, "basis": "随时能补", "basis_number": 2}]}
-    client, _ = recording_client([good, far])
-    result = asyncio.run(Judge(client, retries=0, delay_seconds=0.0).judge_severity(package))
-    assert result.verdicts[expectation.expectation_id] == (0.5, "") and any("代价比" in s for s in result.signals)
-    client, _ = recording_client([{"verdicts": []}])
-    result = asyncio.run(Judge(client, retries=0, delay_seconds=0.0).judge_severity(package))
-    assert result.failed and result.verdicts == {}
-
 def test_the_day_type_is_shown_for_today_and_each_historical_time_when_there_is_a_calendar() -> None:
     expectation, table, rows, now, _ = event_case()
     plain = build_request(build_package((expectation,), table, rows, now=now, levels={}), ()).messages[1].content or ""
@@ -254,6 +205,8 @@ def test_the_models_wording_is_checked_by_code_and_a_bad_one_falls_back_to_the_t
     assert vetted("往常讨论完你会改代码", candidate) == "往常讨论完你会改代码"
     assert vetted("你每次讨论完都会改代码", candidate) == ""  # 材料撑不住的全称
     assert vetted("时窗快过了，改代码吧", candidate) == ""  # 系统说法
+    assert vetted("每周三你会改代码", candidate) == ""  # 情境候选最自然的全称说法（2026-10-18 四方评审）
+    assert vetted("按日历情境你该改代码了", candidate) == "" and vetted("今天日型未知", candidate) == ""
     assert vetted("改" * 41, candidate) == ""
     once = replace(candidate, hits=1)
     assert vetted("往常讨论完你会改代码", once) == "" and vetted("上次讨论完你改了代码", once)
@@ -286,7 +239,9 @@ def test_the_rows_to_read_are_exactly_the_ones_the_package_shows() -> None:
     (relation_row,) = [item for item in table.relations if item.key == expectation.trigger]
     items = list(relation_row.items)
     items.insert(len(items) - 2, replace(items[-3], came=False, consequent_uri=None, consequent_at=None))
-    table = replace(table, relations=tuple(replace(r, items=tuple(items)) if r is relation_row else r for r in table.relations))
+    table = replace(
+        table, relations=tuple(replace(r, items=tuple(items)) if r is relation_row else r for r in table.relations)
+    )
     full = build_package((expectation,), table, rows, now=now, levels={})
     wanted = sources_of((expectation,), table)
     shown = [o for o in items if o.came and o.consequent_at is not None][-6:]
@@ -296,19 +251,81 @@ def test_the_rows_to_read_are_exactly_the_ones_the_package_shows() -> None:
     assert limited.candidates[0].trigger_text == full.candidates[0].trigger_text
 
 
-def test_a_day_of_month_candidate_is_told_as_its_day_and_the_template_says_it_is_not_done_yet() -> None:
-    expectation, table, rows, now, _ = event_case()
-    dom = replace(expectation, source="日子", trigger="day_of_month", trigger_instance=now.date().isoformat())
-    (candidate,) = build_package((dom,), table, rows, now=now, levels={}).candidates
-    assert candidate.trigger_text == f"到了日子：往月 {dom.window[0].day} 号做过"
-    assert plain_text(candidate).endswith("今天还没有。") and f"{dom.window[0].day} 号" in plain_text(candidate)
+def test_a_situation_candidate_is_told_as_its_calendar_day_and_reads_no_calendar_rows() -> None:
+    """「情境」候选（周三 → 写文档）：触发句说今天是周三，历史那几次的前因就是"周三"、当天；情境机会的前因是那一天本身，
+    不去行为树取（calendar:<日子> 不是记录）；没有放假数据时今天标"日型未知"（裁定 59）。"""
+
+    from datetime import date, datetime, time
+
+    from habitus.conditions import LocalCalendar, day_note
+    from habitus.foresight.judge.package import UnitInput, sources_of
+    from habitus.scene.relations import Segment
+    from tests.unit.scene.relation_fixtures import DOCS
+
+    series = planted()
+    table = table_of(series, (relation("周三", DOCS, Segment.SITUATION),), calendar=LocalCalendar())
+    now = datetime.combine(date(2026, 7, 22), time(17, 52), tzinfo=CST)
+    (expectation,) = [
+        item
+        for item in form_expectations(moment=moment_at(now), table=table, rows=seen_until(series, now), recent=35)
+        if item.source == "情境"
+    ]
+    rows = {
+        item.uri: Seen(item.started_at, item.last_observed_at, item.kind_token, item.uri, item.name, item.summary)
+        for item in series.records
+    }
+    units = {expectation.expectation_id: (UnitInput(expectation, 5.0, 6.0),)}
+    package = build_package(
+        (expectation,),
+        table,
+        rows,
+        now=now,
+        levels={},
+        units=units,
+        day_note=lambda day: day_note(LocalCalendar(), day),
+    )
+    (candidate,) = package.candidates
+    assert candidate.source == "情境" and candidate.trigger_text.startswith("处在情境里：今天是周三")
+    assert candidate.history and all(row.antecedent == "周三" and row.gap == "当天" for row in candidate.history)
+    assert candidate.today_note == "日型未知" and candidate.inputs[0].startswith("今天是周三（日历情境）")
+    # 反向前因清单：日历情境的前因今天在场（不按时间线上的记号找，那永远找不到；2026-10-18 四方评审）
+    (antecedent,) = expectation.antecedents
+    assert antecedent.present and antecedent.source == ""
+    assert candidate.antecedents == ("在场 ↑：今天是周三（日历情境）",)
+    assert plain_text(candidate) == f"往常周三你会{candidate.label}，今天还没有。"
+    assert not any(uri.startswith("calendar:") for uri in sources_of((expectation,), table, units=units))
+    # 周几集合：说今天是哪一天、属于哪个集合，不说"今天是周一、周三、周五"（2026-10-18 四方评审）
+    (stored,) = table.relations
+    weekly = replace(
+        stored,
+        antecedent="周一、周三、周五",
+        antecedent_label="周一、周三、周五",
+        calendar_values=("周一", "周三", "周五"),
+    )
+    (as_set,) = build_package((expectation,), replace(table, relations=(weekly,)), rows, now=now, levels={}).candidates
+    assert as_set.trigger_text.startswith("处在情境里：今天是周三（属于「周一、周三、周五」）")
+    # 日型是按名义周末兜底的：触发句照实说，不与抬头的"日型未知"打架
+    workday = replace(
+        stored, antecedent="工作日", antecedent_label="工作日", calendar_key="日历.日型", calendar_values=("工作日",)
+    )
+    nominal = build_package(
+        (expectation,),
+        replace(table, relations=(workday,)),
+        rows,
+        now=now,
+        levels={},
+        day_note=lambda day: day_note(LocalCalendar(), day),
+    ).candidates[0]
+    assert nominal.trigger_text.startswith("处在情境里：今天按名义周末算是工作日（缺放假数据，日型未知）")
 
 
 def test_the_template_names_every_cause_present_when_two_or_more_are() -> None:
     """单元里两件以上的事件原因在场：话里一起说出来（"你订了机票、订了酒店了"），不只报一个。"""
 
     expectation, table, rows, now, _ = event_case()
-    candidate = replace(build_package((expectation,), table, rows, now=now, levels={}).candidates[0], causes=("订机票", "订酒店"))
+    candidate = replace(
+        build_package((expectation,), table, rows, now=now, levels={}).candidates[0], causes=("订机票", "订酒店")
+    )
     assert plain_text(candidate) == f"你订机票、订酒店了，往常接着你会{candidate.label}，这次还没有，要吗？"
     single = replace(candidate, causes=("订机票",))
     assert "订机票、" not in plain_text(single)

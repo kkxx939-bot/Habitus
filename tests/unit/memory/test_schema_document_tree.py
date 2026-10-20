@@ -75,10 +75,13 @@ def test_tool_requires_real_name_shape_and_at_least_one_non_empty_knowledge_fiel
         registry.validate(MemoryKind.TOOL, {"tool_name": "workspace.inspect"})
     with pytest.raises(MemorySchemaError, match="non-empty content"):
         registry.validate(MemoryKind.TOOL, {"tool_name": "workspace.inspect", "purpose": " "})
-    assert registry.validate(
-        MemoryKind.TOOL,
-        {"tool_name": "workspace.inspect", "verification": "检查返回状态"},
-    )["tool_name"] == "workspace.inspect"
+    assert (
+        registry.validate(
+            MemoryKind.TOOL,
+            {"tool_name": "workspace.inspect", "verification": "检查返回状态"},
+        )["tool_name"]
+        == "workspace.inspect"
+    )
 
 
 def test_event_date_is_actual_date_type_and_intention_status_is_controlled() -> None:

@@ -31,6 +31,7 @@ UTC = UTC
 
 def _runtime(*, adapted_after_turn: bool) -> Runtime:
     runtime = object.__new__(Runtime)
+
     async def append_protocol_conversation(_address: object, **values: object) -> SimpleNamespace:
         override = values["after_turn"]
         return SimpleNamespace(
@@ -65,11 +66,7 @@ def _job(sequence: int, status: MemoryJobStatus, *, updated_offset: int = 0) -> 
         worker_id=None,
         lease_expires_at=None,
         next_attempt_at=None,
-        last_error=(
-            "Bearer private-token failed at /Users/alice/private/file.txt"
-            if failed
-            else None
-        ),
+        last_error=("Bearer private-token failed at /Users/alice/private/file.txt" if failed else None),
         created_at=datetime(2026, 7, 30, tzinfo=UTC),
         updated_at=datetime(2026, 7, 30, tzinfo=UTC) + timedelta(seconds=updated_offset),
     )
@@ -334,18 +331,10 @@ def test_remember_reports_the_effective_false_override() -> None:
 
 
 def test_public_job_failure_redacts_windows_and_unc_absolute_paths() -> None:
-    windows = RuntimeHTTPHandlers._sanitize_failure(
-        r"failed at C:\Users\Alice Smith\Private Folder\secret.txt"
-    )
-    slash_windows = RuntimeHTTPHandlers._sanitize_failure(
-        "failed at C:/Users/Alice Smith/Private Folder/secret.txt"
-    )
-    unc = RuntimeHTTPHandlers._sanitize_failure(
-        r"failed at \\server\Private Share\Alice Smith\secret.txt"
-    )
-    extended = RuntimeHTTPHandlers._sanitize_failure(
-        r"failed at \\?\C:\Users\Alice Smith\secret.txt"
-    )
+    windows = RuntimeHTTPHandlers._sanitize_failure(r"failed at C:\Users\Alice Smith\Private Folder\secret.txt")
+    slash_windows = RuntimeHTTPHandlers._sanitize_failure("failed at C:/Users/Alice Smith/Private Folder/secret.txt")
+    unc = RuntimeHTTPHandlers._sanitize_failure(r"failed at \\server\Private Share\Alice Smith\secret.txt")
+    extended = RuntimeHTTPHandlers._sanitize_failure(r"failed at \\?\C:\Users\Alice Smith\secret.txt")
 
     assert "Alice Smith" not in windows
     assert "Alice Smith" not in slash_windows

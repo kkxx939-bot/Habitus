@@ -3,9 +3,9 @@
 全部机械、只读行为树：起因是行为树自带的 ``results_from`` 链；上一次是回看窗内同 kind 的上一条；同时在做与
 和谁来自行为树。情景文档那一半（所在的事、角色、事里更早成员留下的前提）随日情景树删掉了。
 
-按预测树的维度另给三个事实：``first_of_day``（这一条是不是当天该 kind 的第一次——树的危险率与
-累积率只描述首次）；``preceding`` / ``following``（转移窗口内时间上紧邻的上一条 / 下一条，见
-``neighbours``）。窗口与槽宽都由调用方把预测树的配置值原样传进来，两侧不各算各的。
+另给三个机械事实：``first_of_day``（这一条是不是当天该 kind 的第一次）；``preceding`` / ``following``
+（转移窗口内时间上紧邻的上一条 / 下一条，见 ``neighbours``）。窗口与槽宽都由调用方把 ``config.temporal`` 的值原样传进来，
+不各算各的。
 """
 
 from __future__ import annotations
@@ -14,8 +14,6 @@ from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 
 from habitus.behavior.uri import BehaviorURI
-from habitus.scene.views.clock import slot_index as slot_of
-from habitus.scene.views.clock import slots_per_day
 from habitus.scene.views.index import DayIndex, DayIndexCache
 from habitus.scene.views.model import (
     ActionRef,
@@ -24,6 +22,8 @@ from habitus.scene.views.model import (
     Neighbour,
     transition_window,
 )
+from habitus.temporal.slots import slot_index as slot_of
+from habitus.temporal.slots import slots_per_day
 
 _Span = tuple[datetime, datetime]
 
@@ -62,7 +62,7 @@ def history_contexts(
 
     **不再按"语义层处理过没有"筛日子**：那是按天归组的概念，而语义层现在按候选累积，"这个候选
     这一天关联完成了没有"由上游（``foresight`` 的 ``unassociated``）如实报出，不在这里悄悄少取。
-    给了 ``slot_minutes`` 与 ``slot_index`` 就只取钟面邻域内的：槽的口径与预测树同一公式（``views.clock``，
+    给了 ``slot_minutes`` 与 ``slot_index`` 就只取钟面邻域内的：槽的口径是 ``temporal.slots`` 那一个公式（
     环形距离 ≤ ``slot_half_width``）。不给槽就是该 kind 的全部历史（全天那一层吃的就是这一份）。"""
 
     if not isinstance(kind_token, str) or not kind_token:
@@ -140,8 +140,7 @@ def _project(uri: str, index: DayIndex, cache: DayIndexCache, *, window_days: in
 def first_of_day(uri: str, index: DayIndex) -> bool:
     """这一条是不是当天该 kind 的第一次。
 
-    "当天"是行为树的本地日历日（目录），"第一"按开始时刻——与预测树 ``first_days`` 的记账同口径；
-    唯一差别在夏令时回拨的那一小时（树按本地时分槽比先后，这里按瞬时），已知并接受。"""
+    "当天"是行为树的本地日历日（目录），"第一"按开始时刻（夏令时回拨的那一小时按瞬时比先后，已知并接受）。"""
 
     kind_token = str(index.occurrences[uri].fields["kind_token"])
     first = next(
@@ -160,9 +159,9 @@ def neighbours(
 ) -> tuple[Neighbour, Neighbour]:
     """转移窗口内时间上紧邻的上一条与下一条，三态（找到 / 确认没有 / 删失），跨午夜补读相邻的一天。
 
-    ``following`` 与预测树 ``edges.pair`` 找后继的三条规矩同口径：窗口内下一条开始的；跳过与它声明
+    ``following`` 找后继的三条规矩：窗口内下一条开始的；跳过与它声明
     并行的伙伴（``partners``，由调用方算好传入）；起点到后继之间有观测空洞则**删失**——找到了也删，
-    没找到时窗口全程在看才算"确认没有"（树上的 ∅）。前后顺序按 ``(开始瞬时, URI)`` 的全序定，
+    没找到时窗口全程在看才算"确认没有"。前后顺序按 ``(开始瞬时, URI)`` 的全序定，
     同一时刻的两条不会互为前后。
 
     ``preceding`` 是同一规则**反向**用：它之前最近一条不与它并行的行为。这**不是**树上转移边的严格
@@ -231,7 +230,7 @@ def _holes(index: DayIndex, cache: DayIndexCache) -> tuple[_Span, ...]:
 
 
 def _has_hole(holes: tuple[_Span, ...], span: _Span) -> bool:
-    """与预测树 ``edges._window_fully_observed`` 同一判据：有任何空白与 [起, 止] 相交即有洞。"""
+    """有任何空白与 [起, 止] 相交即有洞。"""
 
     start, end = span
     return any(hole_start < end and hole_end > start for hole_start, hole_end in holes)

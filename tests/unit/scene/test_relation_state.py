@@ -81,6 +81,11 @@ def test_a_real_relation_becomes_a_candidate_then_is_established_after_forward_v
     assert established.discovered_on is not None and established.established_on is not None
     assert established.discovered_on < established.forward_passed_on <= established.established_on  # type: ignore[operator]
     assert established.maintenance is not None and established.maintenance.antecedents > 0
+    # 维持检验每段攒几次：成立那晚按"回落到对照率"的功效算好、存下（26 号清单 5.3）
+    assert (
+        established.maintenance_needed is not None
+        and 1 <= established.maintenance_needed <= CONFIG.thresholds.forward_max_antecedents
+    )
     # 成立之后不再进当晚的检验族
     assert established.tonight is not None and established.tonight.verdict.value == "tested"
 
@@ -112,10 +117,11 @@ def test_a_candidate_that_does_not_replicate_is_remembered_as_rejected() -> None
 
 
 def test_a_rejected_candidate_comes_back_only_on_new_data_and_can_still_be_established() -> None:
-    """种子 7 的世界：发现之后第 6 次新数据 p = 0.11 → 退回；退回那晚之后的新数据上又过第 1 道 → 重新候选（要攒更多次）→ 成立。
-    退回不是终点，但回来只能靠新数据。"""
+    """种子 21 的世界：发现之后 6 次新数据 p = 0.139（全中本可到 α，是真没复现）→ 退回；退回那晚之后的新数据上又过第 1 道
+    → 重新候选（要攒更多次）→ 成立。退回不是终点，但回来只能靠新数据。（种子 7 原先在 p = 0.11 退回，那是每层对照太少、
+    全中也到不了 α 的必输局，L10.15 之后不判、接着攒，直接成立。）"""
 
-    nights = nights_of(planted(60, seed=7), 60)
+    nights = nights_of(planted(60, seed=21), 60)
     assert history(nights, PLANTED) == [
         (Status.TESTED, Status.CANDIDATE),
         (Status.CANDIDATE, Status.REJECTED),
@@ -124,7 +130,17 @@ def test_a_rejected_candidate_comes_back_only_on_new_data_and_can_still_be_estab
     ]
     rejected_night = next(state.night for state, moved in nights for item in moved if item.after is Status.REJECTED)
     final = next(item for item in nights[-1][0].relations if item.key == PLANTED)
-    assert final.status is Status.ESTABLISHED and final.discovered_on is not None and final.discovered_on > rejected_night
+    assert (
+        final.status is Status.ESTABLISHED and final.discovered_on is not None and final.discovered_on > rejected_night
+    )
+
+
+def test_a_forward_validation_that_could_not_reach_alpha_waits_instead_of_rejecting() -> None:
+    """种子 7 的世界：攒够算出的次数那晚，每层对照太少、全中也到不了 α（原先在 p = 0.11 退回）。L10.15 之后不判、接着攒，
+    下一批新数据上复现、直接成立，不再白白退回一次。"""
+
+    nights = nights_of(planted(60, seed=7), 60)
+    assert history(nights, PLANTED) == [(Status.TESTED, Status.CANDIDATE), (Status.CANDIDATE, Status.ESTABLISHED)]
 
 
 def test_forward_validation_waits_until_the_new_data_spans_more_than_one_block() -> None:
@@ -145,7 +161,8 @@ def test_forward_validation_waits_until_the_new_data_spans_more_than_one_block()
     state, moved = fold(before, LaneTests(line, CONCEPTS, CONFIG, tonight.cutoff))
     waiting = next(item for item in state.relations if item.key == PLANTED)
     assert waiting.status is Status.CANDIDATE and waiting.forward is not None
-    assert waiting.forward.antecedents >= CONFIG.thresholds.forward_min_antecedents and waiting.forward.blocks == 1
+    assert waiting.forward_needed is not None and waiting.forward.antecedents >= waiting.forward_needed
+    assert waiting.forward.blocks == 1  # 次数够了、块数不够：一天里的几次不是几个独立样本
     assert all(item.key != PLANTED for item in moved)
 
 
@@ -188,11 +205,12 @@ def test_the_store_writes_forward_only_and_keeps_an_append_only_transition_log(t
     for state, moved in nights:
         store.write(state, moved)
     assert store.lanes() == ("session",)
-    assert store.nights("session") == tuple(state.night for state, _moved in nights)
+    assert store.nights("session") == tuple(state.night for state, _moved in nights[-3:])  # 最晚一晚 + 两代备用
     last, last_moved = nights[-1]
     assert store.read("session", last.night) == last
     assert store.previous("session", last.night) == nights[-2][0]
     logged = store.transitions("session")
+    # 删掉的那几晚的迁移照样认得出来：删之前记下了摘要
     assert logged == tuple(item for _state, moved in nights for item in moved) and logged
     log = tmp_path / "scene" / "relations" / "session" / "transitions.jsonl"
     before = log.read_bytes()
@@ -214,6 +232,27 @@ def test_the_store_writes_forward_only_and_keeps_an_append_only_transition_log(t
     store.write(last, ())
     assert all(item.night != last.night for item in store.transitions("session"))
     assert store.read("session", last.night) == last
+
+
+def test_a_batch_whose_night_was_never_written_is_not_mistaken_for_a_pruned_one(tmp_path) -> None:
+    """26 号清单 5.8：第 N 晚追加了迁移、写状态文件之前被杀，下一次写的是 N + 1 晚——N 晚永远没有状态文件，也永远没有
+    "删了"那一行；之后把更早的晚删掉，也不会把 N 晚那一批当成真的。"""
+
+    store = RelationStore(tmp_path / "scene", fallback_generations=1)
+    nights = nights_of(planted(30), 30)
+    crashed_state, crashed_moved = next((state, moved) for state, moved in nights[5:] if moved)
+    for state, moved in nights:
+        if state is crashed_state:
+            store._append_transitions(state.lane, state.night, moved, "f" * 64)  # 写到一半被杀
+            continue
+        store.write(state, moved)
+    nights_on_disk = store.nights("session")
+    assert len(nights_on_disk) == 2 and crashed_state.night not in nights_on_disk
+    logged = store.transitions("session")
+    assert not any(item.night == crashed_state.night for item in logged)
+    assert logged == tuple(item for state, moved in nights if state is not crashed_state for item in moved)
+    with pytest.raises(RelationStoreError, match="fallback_generations"):
+        RelationStore(tmp_path / "other", fallback_generations=0)
 
 
 def test_the_store_refuses_odd_lanes_and_foreign_transitions(tmp_path) -> None:
@@ -245,6 +284,81 @@ def test_a_retired_concept_takes_its_relations_down_with_a_clear_reason() -> Non
     assert not any(item.key.consequent == PLANTED.consequent for item in moved if item.after is Status.CANDIDATE)
 
 
+def test_a_refinement_whose_source_class_was_merged_away_is_no_longer_frozen_as_a_candidate() -> None:
+    """26 号清单 5.5：合并把源类停了，挂在它上面的细分概念不会再有新记录——它的关系按停用处理、不进检验族，也不再给作者看；
+    原来它永远冻在候选。"""
+
+    from habitus.scene.concepts.model import members_retired
+    from habitus.scene.relations import LaneState, Relation
+    from tests.unit.scene.concept_fixtures import REWORK
+
+    series = planted(60)
+    retired = ConceptSet([*(base(title, retired=title == "修改代码") for title in TITLES), REWORK])
+    assert members_retired(retired, REWORK.identity) and not members_retired(retired, base("讨论方案").identity)
+    frozen = Relation(
+        key=RelationKey("session", base("讨论方案").identity, REWORK.identity, Segment.CHAIN),
+        status=Status.CANDIDATE,
+        upward=True,
+        discovered_on=series.cutoff - timedelta(days=30),
+    )
+    previous = LaneState(lane="session", night=series.cutoff - timedelta(days=1), family=1, relations=(frozen,))
+    line = build_timelines(series, retired, {}, CONFIG)["session"]
+    tests = LaneTests(line, retired, CONFIG, series.cutoff)
+    assert not any(REWORK.identity in (key.antecedent, key.consequent) for key in tests.keys())
+    state, moved = fold(previous, tests)
+    assert status_of(state, frozen.key) is Status.EXPIRED
+    assert any(item.key == frozen.key and "概念停用" in item.reason for item in moved)
+
+
+def test_rows_that_can_never_be_used_again_are_cleared_and_quiet_ones_stay_frozen() -> None:
+    """26 号清单 5.6、5.7：集中期随变点重算整段没了、带的条件已不在列举与提议里——这一行清掉，清掉成立的写一条迁移；
+    前因只是这阵子没有新链的照旧冻着；停用概念的休眠行清掉，别的休眠行连 ``reset_on`` 一起留着。"""
+
+    from habitus.scene.relations import LaneState, Relation
+
+    series = planted(60)
+    quiet = base("整理相册")  # 词表里有、这阵子没做过
+    retired_title = "修改代码"
+    concepts = ConceptSet([*(base(title, retired=title == retired_title) for title in TITLES), quiet])
+    night = series.cutoff - timedelta(days=1)
+    discover = series.cutoff - timedelta(days=40)
+
+    def row(key: RelationKey, status: Status, **fields: object) -> Relation:
+        return Relation(key=key, status=status, upward=True, discovered_on=discover, **fields)  # type: ignore[arg-type]
+
+    burst = row(
+        RelationKey("session", DISCUSS, base("调研").identity, Segment.HIGH_STATE),
+        Status.ESTABLISHED,
+        established_on=discover,
+        forward_passed_on=discover,
+        maintained_through=discover,
+    )
+    conditioned = row(
+        RelationKey("session", DISCUSS, base("调研").identity, Segment.CHAIN, "timeline:s-k000000"), Status.CANDIDATE
+    )
+    frozen = row(RelationKey("session", quiet.identity, base("调研").identity, Segment.CHAIN), Status.CANDIDATE)
+    gone_dormant = row(
+        RelationKey("session", DISCUSS, base(retired_title).identity, Segment.CHAIN),
+        Status.EXPIRED,
+        expired_on=discover,
+    )
+    kept_dormant = row(
+        RelationKey("session", DISCUSS, base("调研").identity, Segment.NEXT_DAY), Status.REJECTED, rejected_on=discover
+    )
+    previous = LaneState(
+        lane="session", night=night, family=1, relations=(burst, conditioned, frozen, gone_dormant, kept_dormant)
+    )
+    line = build_timelines(series, concepts, {}, CONFIG)["session"]
+    state, moved = fold(previous, LaneTests(line, concepts, CONFIG, series.cutoff))
+    kept = {relation.key: relation for relation in state.relations}
+    assert burst.key not in kept and conditioned.key not in kept and gone_dormant.key not in kept
+    assert kept[frozen.key].status is Status.CANDIDATE
+    assert kept_dormant.key in kept and kept[kept_dormant.key].reset_on == discover
+    reasons = {item.key: item.reason for item in moved}
+    assert "不在了" in reasons[burst.key] and "不在了" in reasons[conditioned.key]
+    assert gone_dormant.key not in reasons  # 休眠行清掉不必留迁移
+
+
 def test_a_transition_batch_without_its_state_file_is_not_read(tmp_path) -> None:
     """先追加迁移、再写状态文件：中途被杀，日志里会多一批没有状态文件的迁移；读的时候只认与盘上状态文件对得上的那一批（E14）。"""
 
@@ -257,3 +371,29 @@ def test_a_transition_batch_without_its_state_file_is_not_read(tmp_path) -> None
     crashed = tuple(replace(item, night=state.night) for item in recorded[:1])
     store._append_transitions("session", state.night, crashed, "0" * 16)  # 被杀在写状态文件之前
     assert store.transitions("session") == recorded
+
+
+def test_folding_onto_a_night_with_an_older_return_measure_drops_only_those_rows() -> None:
+    """3.5：``fold`` 接上一晚时，量法版本旧了的那一段（久别重来）的行清掉、在新判据下重新发现，别的段原样（L10.14 补测：
+    原先只测了清理函数本身，把 ``fold`` 里那一次调用去掉测试照样全过）。"""
+
+    from habitus.scene.relations.longspan import MEASURE_VERSIONS
+    from habitus.scene.relations.state import Relation
+
+    series = planted(60)
+    nights = nights_of(series, 60)
+    previous = nights[-1][0]
+    assert status_of(previous, PLANTED) is Status.ESTABLISHED
+    stale = Relation(
+        key=key(DISCUSS, CODE, Segment.RETURN), status=Status.CANDIDATE, upward=True, discovered_on=previous.night
+    )
+    older = replace(previous, relations=(*previous.relations, stale), measure_versions={})
+    tonight = series.until(series.cutoff)
+    later = EventSeries(cutoff=previous.night + timedelta(days=1), records=tonight.records)
+    line = build_timelines(later, CONCEPTS, {}, CONFIG)["session"]
+
+    state, _moved = fold(older, LaneTests(line, CONCEPTS, CONFIG, later.cutoff))
+
+    assert stale.key not in {relation.key for relation in state.relations if relation.status is Status.CANDIDATE}
+    assert status_of(state, PLANTED) is Status.ESTABLISHED
+    assert state.measure_versions[Segment.RETURN.value] == MEASURE_VERSIONS[Segment.RETURN.value]

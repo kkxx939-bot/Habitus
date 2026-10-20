@@ -6,16 +6,18 @@
 
 from __future__ import annotations
 
+from habitus.foundation.lifecycle import DeterministicFailure
+
 
 class BehaviorFusionError(ValueError):
     """融合判断的结构、引用或不变量不满足契约。"""
 
 
-class BehaviorFusionLimitError(BehaviorFusionError):
-    """融合产物超过显式容量边界。"""
+class BehaviorFusionLimitError(DeterministicFailure, BehaviorFusionError):
+    """融合产物超过显式容量边界。同样的输入再做一遍也超，所以是确定性失败（26 号清单 2.4.4）。"""
 
 
-class BehaviorFusionTruncatedError(BehaviorFusionError):
+class BehaviorFusionTruncatedError(DeterministicFailure, BehaviorFusionError):
     """模型输出被长度截断，且重试仍截断——这是段容量与输出预算的错配，不是可重试的环境故障。"""
 
 

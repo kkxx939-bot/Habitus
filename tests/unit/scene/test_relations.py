@@ -110,8 +110,8 @@ def test_forward_validation_reads_only_the_new_data() -> None:
     later = tests.evaluate(key(DISCUSS, CODE), upward=True, since=since, purpose="forward")
     everything = tests.evaluate(key(DISCUSS, CODE), upward=True, purpose="forward")
     assert 0 < later.antecedents < everything.antecedents
-    assert later.antecedents >= CONFIG.thresholds.forward_min_antecedents and later.p_value < CONFIG.thresholds.forward_alpha
-    recent = tests.evaluate(key(DISCUSS, CODE), upward=True, last_blocks=CONFIG.thresholds.maintenance_blocks, purpose="maintain")
+    assert later.p_value < CONFIG.thresholds.forward_alpha
+    recent = tests.evaluate(key(DISCUSS, CODE), upward=True, last_blocks=8, purpose="maintain")
     assert recent.antecedents < everything.antecedents and recent.interval is not None
 
 
@@ -156,12 +156,11 @@ def test_pairs_that_read_the_same_records_are_never_compared() -> None:
 
 def test_the_configuration_refuses_contradictions() -> None:
     with pytest.raises(RelationConfigError):
-        RelationConfig(slot_minutes=7, transition_window_slots=3, recurrence_window_days=90)
+        RelationConfig(slot_minutes=7, transition_window_slots=3)
     with pytest.raises(RelationConfigError):
-        RelationConfig(slot_minutes=15, transition_window_slots=96, recurrence_window_days=90)
+        RelationConfig(slot_minutes=15, transition_window_slots=96)
     with pytest.raises(RelationConfigError):
         RelationThresholds(fdr=1.0)
-
 
 
 # --- 统计 ----------------------------------------------------------------------------------------
@@ -245,7 +244,7 @@ def test_a_pending_record_in_the_window_is_a_thing_that_is_not_the_consequent() 
 
 def test_a_daily_antecedent_at_random_times_still_has_same_slot_controls() -> None:
     """讨论方案每个工作日都做、时刻随机：别的周同周几同一钟点多半没在讨论，第二道对照有得比；
-    每天 9:00 固定的调研在别的周同一钟点总在做，第二道对照为空 → 这条链样本不够（每天都来的是预测树的基线）。"""
+    每天 9:00 固定的调研在别的周同一钟点总在做，第二道对照为空 → 这条链样本不够（每天都来的是基线，不是关系）。"""
 
     series = planted()
     line = build_timelines(series, CONCEPTS, {}, CONFIG)["session"]
@@ -254,8 +253,13 @@ def test_a_daily_antecedent_at_random_times_still_has_same_slot_controls() -> No
 
     second = tests.strata(key(DISCUSS, CODE), pairing=Pairing.SAME_SLOT)
     assert second and all(item.controls >= 1 for item in second)
-    # 9:00 那条自己成链的（没和随机时刻的调研并成一条）：别的周同周几 9:00 总在调研，没有对照
-    opening = [chain for chain in tests.chains(RESEARCH) if chain.anchor.started_at.hour == 9 and len(chain.uris) == 1]
+    # 9:00 那条自己成链的（没和随机时刻的调研并成一条）：别的周同周几 9:00 总在调研，没有对照。
+    # 合并按开始时刻的秒数（裁定 59）：9:52 起的随机调研离 9:00 超过 45 分钟，自成一条，不是这里要看的 9:00 那条。
+    opening = [
+        chain
+        for chain in tests.chains(RESEARCH)
+        if (chain.anchor.started_at.hour, chain.anchor.started_at.minute) == (9, 0) and len(chain.uris) == 1
+    ]
     assert opening
     assert all(
         tests.controls.stratum(Segment.CHAIN, chain, CODE, antecedent=RESEARCH, pairing=Pairing.SAME_SLOT) is None

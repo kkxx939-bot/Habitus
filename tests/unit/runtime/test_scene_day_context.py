@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from habitus.conditions import DayType, LocalCalendar
 from habitus.runtime.scene_situations import SceneDayContext
 from habitus.scene.concepts import ConceptRole, ConceptSet
 from habitus.scene.concepts.situation import SituationBasis as B
@@ -38,8 +39,19 @@ def test_the_two_callables_are_built_from_real_material(tmp_path) -> None:
     hits.write(record(SATURDAY, "睡觉", 2, 10, ConceptHit("就寝"), ConceptHit("晚睡", "重")))
 
     class Calendar:
+        version = "test"
+
+        def day_type(self, day):
+            return DayType.MAKEUP_WORKDAY if day == SATURDAY else None
+
         def describe(self, day):
             return "补班日，按周一上班" if day == SATURDAY else None
+
+        def of_day(self, day):
+            return LocalCalendar().of_day(day)
+
+        def for_expectations(self, day):
+            return LocalCalendar().for_expectations(day)
 
     context = SceneDayContext(
         SATURDAY, concepts=CONCEPT_SET, hits=hits, calendar=Calendar(), timezone=CST, subject=SUBJECT
@@ -72,8 +84,19 @@ def test_without_history_only_the_calendar_situations_hold(tmp_path) -> None:
 
 
 class _Silent:
+    version = "test"
+
+    def day_type(self, day):
+        return None
+
     def describe(self, day):
         return None
+
+    def of_day(self, day):
+        return LocalCalendar().of_day(day)
+
+    def for_expectations(self, day):
+        return LocalCalendar().for_expectations(day)
 
 
 def _address(uri: str):

@@ -1,6 +1,6 @@
 """一本账的可靠度（裁定 49）：带遗忘、带强度的 Beta 后验，给出点估计与单侧上下界。纯函数、纯 Python。
 
-每条事实带方向 y（好 / 坏）、强度 g ∈ [0, 1]、时刻 t；权重 ``w = 0.5^((now − t) / H) × g``，``k = Σ w·y``，``n = Σ w``，
+每条事实带方向 y（好 / 坏）、强度 g ∈ [0, 1]、在它那条时钟上的名次 r；权重 ``w = 0.5^((r_last − r) / H) × g``（H 是半衰的机会数），``k = Σ w·y``，``n = Σ w``，
 后验 ``Beta(k + ½, n − k + ½)``（Jeffreys 先验：没有信息时不偏向任何一边）。下界是它的 α 分位数、上界是 1 − α 分位数。
 样本少时区间宽，下界低、上界高——"样本少就没有读数"在这里不用门槛，由区间自己说。
 
@@ -12,9 +12,9 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
 
 from habitus.foresight.errors import ForesightError
+from habitus.foundation.lifecycle import decay
 
 #: 二分求分位数的迭代次数（区间每次减半，60 次到 1e-18 量级）。
 _BISECTIONS = 60
@@ -34,22 +34,26 @@ class Reliability:
     upper: float
 
 
-def weight(at: datetime, now: datetime, *, strength: float, half_life_days: float) -> float:
-    """一条事实此刻的权重：遗忘（半衰期 ``half_life_days``）乘强度。未来的事实（时钟回拨）按此刻算、不放大。"""
+def weighted(items: Iterable[tuple[int, float, bool]], *, last_rank: int, half_life: float) -> list[tuple[float, bool]]:
+    """``items`` 是 (名次, 强度, 好不好)，名次在调用方那条时钟上编好（整本账一次，不在子集里重编）；权重 =
+    强度 × 0.5^((``last_rank`` − 名次) / ``half_life``)：一笔证据只看它之后又来了几次机会，不看隔了几天（裁定 57）。"""
 
-    if half_life_days <= 0:
-        raise ForesightError("half_life_days must be positive")
-    if not 0.0 <= strength <= 1.0:
-        raise ForesightError("strength must lie in [0, 1]")
-    age_days = max(0.0, (now - at).total_seconds() / 86_400.0)
-    return strength * 0.5 ** (age_days / half_life_days)
+    found = []
+    for rank, strength, good in items:
+        if not 0.0 <= strength <= 1.0:
+            raise ForesightError("strength must lie in [0, 1]")
+        if rank > last_rank:
+            raise ForesightError("a rank cannot lie after the last one")
+        try:
+            found.append((strength * decay(last_rank - rank, half_life=half_life), good))
+        except ValueError as exc:
+            raise ForesightError(str(exc)) from exc
+    return found
 
 
 def estimate(weighted: Iterable[tuple[float, bool]], *, alpha: float) -> Reliability:
     """``weighted`` 是 (权重, 好不好)。"""
 
-    if not 0.0 < alpha < 0.5:
-        raise ForesightError("alpha must lie in (0, 0.5)")
     k = n = 0.0
     for w, good in weighted:
         if w < 0:
@@ -57,6 +61,17 @@ def estimate(weighted: Iterable[tuple[float, bool]], *, alpha: float) -> Reliabi
         n += w
         if good:
             k += w
+    return reading(k, n, alpha=alpha)
+
+
+def reading(k: float, n: float, *, alpha: float) -> Reliability:
+    """加权好数 ``k``、加权总数 ``n`` 的读数（账沿时钟 fold 出这两个数，``estimate`` 逐笔加出这两个数）。"""
+
+    if not 0.0 < alpha < 0.5:
+        raise ForesightError("alpha must lie in (0, 0.5)")
+    if n < 0 or not 0 <= k <= n + 1e-9:
+        raise ForesightError("k and n must satisfy 0 <= k <= n")
+    k = min(k, n)
     a, b = k + 0.5, n - k + 0.5
     return Reliability(
         k=k, n=n, mean=a / (a + b), lower=beta_quantile(alpha, a, b), upper=beta_quantile(1.0 - alpha, a, b)
@@ -131,4 +146,4 @@ def _continued_fraction(x: float, a: float, b: float) -> float:
     return result
 
 
-__all__ = ["Reliability", "beta_quantile", "estimate", "incomplete_beta", "miss_run_probability", "weight"]
+__all__ = ["Reliability", "beta_quantile", "estimate", "incomplete_beta", "miss_run_probability", "reading", "weighted"]

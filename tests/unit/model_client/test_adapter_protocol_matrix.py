@@ -390,9 +390,7 @@ def test_openai_prepare_freezes_transport_and_model_visible_projections_separate
         assert plain_prepared.model_visible_body == metadata_prepared.model_visible_body
         assert plain_prepared.estimated_input_tokens == metadata_prepared.estimated_input_tokens
         assert plain_prepared.body != metadata_prepared.body
-        assert json.loads(metadata_prepared.body)["trace_options"] == {
-            "request_id": "internal"
-        }
+        assert json.loads(metadata_prepared.body)["trace_options"] == {"request_id": "internal"}
     finally:
         plain._sync_client.close()
         with_transport_metadata._sync_client.close()
@@ -809,14 +807,7 @@ def test_openai_async_complete_and_stream_use_same_protocol_semantics() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             provider._async_client = lambda: client
             completed = await provider.complete_async(provider.prepare(request(), stream=False))
-            streamed = tuple(
-                [
-                    event
-                    async for event in provider.stream_async(
-                        provider.prepare(request(), stream=True)
-                    )
-                ]
-            )
+            streamed = tuple([event async for event in provider.stream_async(provider.prepare(request(), stream=True))])
             return completed, streamed
 
     try:

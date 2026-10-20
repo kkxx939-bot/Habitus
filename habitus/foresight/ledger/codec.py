@@ -10,19 +10,20 @@ from habitus.foresight.errors import ForesightError
 from habitus.foresight.ledger.model import (
     AccountFact,
     AccountLevel,
-    AccountSetting,
-    AccountSeverity,
     Antecedent,
-    Cause,
     Delivery,
     Expectation,
     Omission,
     Response,
     Ruling,
     Settlement,
+    UnitFeedback,
+    UnitLevel,
+    UnitSetting,
 )
 
-LEDGER_SCHEMA_VERSION = "foresight_ledger_v7"
+#: v8（裁定 61）：事实只剩"做"这一条轴（去掉轴与来源）；回话是"哪一条 + 正 / 中 / 负 + 哪一轮"；提醒反馈与设置按行为。
+LEDGER_SCHEMA_VERSION = "foresight_ledger_v8"
 
 
 def encode_expectation(item: Expectation) -> dict[str, Any]:
@@ -135,8 +136,8 @@ def encode_response(item: Response) -> dict[str, Any]:
         "record": "response",
         "expectation_id": item.expectation_id,
         "responded_at": item.responded_at.isoformat(),
-        "response": item.response,
-        "note": item.note,
+        "polarity": item.polarity,
+        "turn": item.turn,
     }
 
 
@@ -146,8 +147,8 @@ def decode_response(raw: Mapping[str, Any]) -> Response:
         return Response(
             expectation_id=_text(raw, "expectation_id"),
             responded_at=_datetime(raw, "responded_at"),
-            response=_text(raw, "response"),
-            note=None if raw.get("note") is None else str(raw["note"]),
+            polarity=_text(raw, "polarity"),
+            turn=_text(raw, "turn"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ForesightError(f"response record is malformed: {exc}") from exc
@@ -241,45 +242,13 @@ def encode_fact(item: AccountFact) -> dict[str, Any]:
         "record": "fact",
         "account": item.account,
         "at": item.at.isoformat(),
-        "axis": item.axis,
         "good": item.good,
         "strength": item.strength,
         "kind": item.kind,
         "expectation_id": item.expectation_id,
-        "origin": item.origin,
         "offset_minutes": item.offset_minutes,
         "written_at": None if item.written_at is None else item.written_at.isoformat(),
-        "cause": None if item.cause is None else _encode_cause(item.cause),
     }
-
-
-def _encode_cause(item: Cause) -> dict[str, Any]:
-    return {
-        "kind": item.kind,
-        "classes": list(item.classes),
-        "uris": list(item.uris),
-        "relation": item.relation,
-        "segment": item.segment,
-        "condition": item.condition,
-        "holds_when": item.holds_when,
-    }
-
-
-def _decode_cause(raw: object) -> Cause | None:
-    if raw is None:
-        return None
-    if not isinstance(raw, Mapping):
-        raise ValueError("cause must be an object")
-    holds = raw.get("holds_when")
-    return Cause(
-        kind=str(raw["kind"]),
-        classes=tuple(str(item) for item in raw.get("classes", [])),
-        uris=tuple(str(item) for item in raw.get("uris", [])),
-        relation=str(raw.get("relation", "")),
-        segment=str(raw.get("segment", "")),
-        condition=str(raw.get("condition", "")),
-        holds_when=None if holds is None else bool(holds),
-    )
 
 
 def decode_fact(raw: Mapping[str, Any]) -> AccountFact:
@@ -288,64 +257,59 @@ def decode_fact(raw: Mapping[str, Any]) -> AccountFact:
         return AccountFact(
             account=_text(raw, "account"),
             at=_datetime(raw, "at"),
-            axis=_text(raw, "axis"),
             good=bool(raw["good"]),
             strength=float(raw["strength"]),
             kind=_text(raw, "kind"),
             expectation_id=_text(raw, "expectation_id"),
-            origin=_text(raw, "origin"),
             offset_minutes=None if raw.get("offset_minutes") is None else int(raw["offset_minutes"]),
             written_at=None if raw.get("written_at") is None else _datetime(raw, "written_at"),
-            cause=_decode_cause(raw.get("cause")),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ForesightError(f"fact record is malformed: {exc}") from exc
 
 
-def encode_severity(item: AccountSeverity) -> dict[str, Any]:
+def encode_setting(item: UnitSetting) -> dict[str, Any]:
     return {
         "schema_version": LEDGER_SCHEMA_VERSION,
-        "record": "severity",
-        "account": item.account,
-        "judged_at": item.judged_at.isoformat(),
-        "cost_ratio": item.cost_ratio,
-        "basis": item.basis,
-        "expires_at": item.expires_at.isoformat(),
-        "origin": item.origin,
-    }
-
-
-def decode_severity(raw: Mapping[str, Any]) -> AccountSeverity:
-    _check(raw, "severity")
-    try:
-        return AccountSeverity(
-            account=_text(raw, "account"),
-            judged_at=_datetime(raw, "judged_at"),
-            cost_ratio=float(raw["cost_ratio"]),
-            basis=str(raw.get("basis", "")),
-            expires_at=_datetime(raw, "expires_at"),
-            origin=_text(raw, "origin"),
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ForesightError(f"severity record is malformed: {exc}") from exc
-
-
-def encode_setting(item: AccountSetting) -> dict[str, Any]:
-    return {
-        "schema_version": LEDGER_SCHEMA_VERSION,
-        "record": "setting",
-        "account": item.account,
+        "record": "unit_setting",
+        "kind_token": item.kind_token,
         "at": item.at.isoformat(),
         "setting": item.setting,
     }
 
 
-def decode_setting(raw: Mapping[str, Any]) -> AccountSetting:
-    _check(raw, "setting")
+def decode_setting(raw: Mapping[str, Any]) -> UnitSetting:
+    _check(raw, "unit_setting")
     try:
-        return AccountSetting(account=_text(raw, "account"), at=_datetime(raw, "at"), setting=_text(raw, "setting"))
+        return UnitSetting(kind_token=_text(raw, "kind_token"), at=_datetime(raw, "at"), setting=_text(raw, "setting"))
     except (KeyError, TypeError, ValueError) as exc:
-        raise ForesightError(f"setting record is malformed: {exc}") from exc
+        raise ForesightError(f"unit setting record is malformed: {exc}") from exc
+
+
+def encode_feedback(item: UnitFeedback) -> dict[str, Any]:
+    return {
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "record": "unit_feedback",
+        "kind_token": item.kind_token,
+        "at": item.at.isoformat(),
+        "good": item.good,
+        "expectation_id": item.expectation_id,
+        "polarity": item.polarity,
+    }
+
+
+def decode_feedback(raw: Mapping[str, Any]) -> UnitFeedback:
+    _check(raw, "unit_feedback")
+    try:
+        return UnitFeedback(
+            kind_token=_text(raw, "kind_token"),
+            at=_datetime(raw, "at"),
+            good=bool(raw["good"]),
+            expectation_id=_text(raw, "expectation_id"),
+            polarity=None if raw.get("polarity") is None else _text(raw, "polarity"),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ForesightError(f"unit feedback record is malformed: {exc}") from exc
 
 
 def encode_level(item: AccountLevel) -> dict[str, Any]:
@@ -364,6 +328,24 @@ def decode_level(raw: Mapping[str, Any]) -> AccountLevel:
         return AccountLevel(account=_text(raw, "account"), at=_datetime(raw, "at"), level=int(raw["level"]))
     except (KeyError, TypeError, ValueError) as exc:
         raise ForesightError(f"level record is malformed: {exc}") from exc
+
+
+def encode_unit_level(item: UnitLevel) -> dict[str, Any]:
+    return {
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "record": "unit_level",
+        "kind_token": item.kind_token,
+        "at": item.at.isoformat(),
+        "level": item.level,
+    }
+
+
+def decode_unit_level(raw: Mapping[str, Any]) -> UnitLevel:
+    _check(raw, "unit_level")
+    try:
+        return UnitLevel(kind_token=_text(raw, "kind_token"), at=_datetime(raw, "at"), level=int(raw["level"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ForesightError(f"unit level record is malformed: {exc}") from exc
 
 
 def _check(raw: Mapping[str, Any], record: str) -> None:
@@ -398,21 +380,23 @@ __all__ = [
     "decode_delivery",
     "decode_expectation",
     "decode_fact",
+    "decode_feedback",
     "decode_level",
     "decode_omission",
     "decode_response",
     "decode_ruling",
     "decode_setting",
     "decode_settlement",
-    "decode_severity",
+    "decode_unit_level",
     "encode_delivery",
     "encode_expectation",
     "encode_fact",
+    "encode_feedback",
     "encode_level",
     "encode_omission",
     "encode_response",
     "encode_ruling",
     "encode_setting",
     "encode_settlement",
-    "encode_severity",
+    "encode_unit_level",
 ]

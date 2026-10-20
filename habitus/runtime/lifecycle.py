@@ -1,30 +1,33 @@
-"""顶层 Runtime 管理的 Conversation 生命周期维护 Worker。"""
+"""顶层 Runtime 管理的生命周期维护 Worker：只管调度、全局 lease、心跳与参与者之间的失败隔离。
+
+具体放什么由参与者决定（``infrastructure.lifecycle.LifecycleParticipant``）：memory 的会话链与 L2 维护
+（``runtime/lifecycle_memory.py``）、行为侧 / 语义树 / 预测层 / 会话源的释放，都挂在同一个 Worker 上。
+一个参与者抛错只记进它自己的结果，不打断其余参与者；租约丢失则整轮立即停止。
+"""
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import os
 import threading
-from bisect import bisect_right
-from collections.abc import Mapping
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from enum import Enum
 from uuid import uuid4
 
-from habitus.config import ConversationLifecycleConfig
-from habitus.foundation.integrity import canonical_json
+from habitus.config import LifecycleWorkerConfig
 from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
-from habitus.infrastructure.store.contracts import LockToken
-from habitus.infrastructure.store.filesystem import atomic_replace_bytes, read_regular_bytes
-from habitus.memory.compaction import MemoryLifecycleMaintenanceResult, MemoryLifecycleManager
-from habitus.memory.conversation import ConversationAddress, ConversationMessageJournal
-from habitus.memory.workflow import ConversationLifecycleManager
+from habitus.infrastructure.lifecycle import (
+    CapacitySnapshot,
+    CapacitySnapshotStore,
+    LifecycleParticipant,
+    ParticipantReport,
+)
+from habitus.infrastructure.store.contracts import LockStore, LockToken
 
-_LIFECYCLE_CURSOR_SCHEMA = "conversation_lifecycle_cursor_v1"
+_MESSAGE_LIMIT = 1_000
 
 
 class LifecycleWorkerState(str, Enum):
@@ -46,171 +49,132 @@ class LifecycleWorkerLeaseLostError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class LifecycleMaintenanceFailure:
-    """单个 Conversation 维护失败的有界可观察信息。"""
+class LifecycleParticipantOutcome:
+    """一个参与者这一轮的结果：要么有报告，要么有失败。"""
 
-    address: ConversationAddress
-    error_type: str
-    message: str
+    name: str
+    report: ParticipantReport | None = None
+    error_type: str | None = None
+    message: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.address, ConversationAddress):
-            raise TypeError("address must be ConversationAddress")
-        for name in ("error_type", "message"):
-            value = getattr(self, name)
-            if not isinstance(value, str) or not value:
-                raise TypeError(f"{name} must be non-empty text")
-        if len(self.message) > 1_000:
-            raise ValueError("maintenance failure message exceeds its bound")
+        if not isinstance(self.name, str) or not self.name:
+            raise TypeError("participant name must be non-empty text")
+        failed = self.error_type is not None
+        if failed == (self.report is not None):
+            raise ValueError("a participant outcome carries either a report or a failure")
+        if failed and (not self.error_type or not self.message or len(self.message) > _MESSAGE_LIMIT):
+            raise ValueError("participant failure needs a bounded error type and message")
+
+    @property
+    def failed(self) -> bool:
+        return self.error_type is not None
 
 
 @dataclass(frozen=True)
 class LifecycleMaintenanceCycleResult:
-    """一次全局维护周期的选取、成功和失败结果。"""
+    """一次全局维护周期：拿没拿到 lease，以及每个参与者的结果。"""
 
     lease_acquired: bool
     started_at: datetime
     finished_at: datetime
-    selected_addresses: tuple[ConversationAddress, ...]
-    maintained_addresses: tuple[ConversationAddress, ...]
-    failures: tuple[LifecycleMaintenanceFailure, ...]
-    memory_maintenance: MemoryLifecycleMaintenanceResult | None = None
+    outcomes: tuple[LifecycleParticipantOutcome, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.lease_acquired, bool):
             raise TypeError("lease_acquired must be boolean")
         for name in ("started_at", "finished_at"):
             value = getattr(self, name)
-            if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+            if not isinstance(value, datetime) or value.utcoffset() is None:
                 raise ValueError(f"{name} must be timezone-aware")
         if self.finished_at < self.started_at:
             raise ValueError("maintenance cycle cannot finish before it starts")
-        for name in ("selected_addresses", "maintained_addresses"):
-            values = getattr(self, name)
-            if not isinstance(values, tuple) or any(not isinstance(value, ConversationAddress) for value in values):
-                raise TypeError(f"{name} must contain ConversationAddress values")
-        if not isinstance(self.failures, tuple) or any(
-            not isinstance(value, LifecycleMaintenanceFailure) for value in self.failures
+        if not isinstance(self.outcomes, tuple) or any(
+            not isinstance(item, LifecycleParticipantOutcome) for item in self.outcomes
         ):
-            raise TypeError("failures must contain LifecycleMaintenanceFailure values")
-        selected = set(self.selected_addresses)
-        if any(value not in selected for value in self.maintained_addresses):
-            raise ValueError("maintained addresses must come from the selected batch")
-        if any(value.address not in selected for value in self.failures):
-            raise ValueError("failed addresses must come from the selected batch")
-        if set(self.maintained_addresses) & {value.address for value in self.failures}:
-            raise ValueError("one address cannot both succeed and fail in one cycle")
-        if not self.lease_acquired and (self.selected_addresses or self.maintained_addresses or self.failures):
+            raise TypeError("outcomes must contain LifecycleParticipantOutcome values")
+        names = [item.name for item in self.outcomes]
+        if len(names) != len(set(names)):
+            raise ValueError("participant names must be unique within one cycle")
+        if not self.lease_acquired and self.outcomes:
             raise ValueError("a skipped lease cycle cannot contain maintenance results")
-        if self.memory_maintenance is not None and not isinstance(
-            self.memory_maintenance,
-            MemoryLifecycleMaintenanceResult,
-        ):
-            raise TypeError("memory_maintenance must be MemoryLifecycleMaintenanceResult or None")
-        if not self.lease_acquired and self.memory_maintenance is not None:
-            raise ValueError("a skipped lease cycle cannot maintain L2 memory")
 
+    @property
+    def failures(self) -> tuple[LifecycleParticipantOutcome, ...]:
+        return tuple(item for item in self.outcomes if item.failed)
 
-class _LifecycleCursorStore:
-    """在 Workflow 根内保存跨进程轮转所需的最小耐久游标。"""
+    @property
+    def signals(self) -> tuple[str, ...]:
+        """各参与者这一轮报的、要人看的情况（"参与者名: 内容"）。"""
 
-    def __init__(self, manager: ConversationLifecycleManager) -> None:
-        self.root = manager.jobs.root
-        self.path = self.root / "lifecycle" / "state.json"
-        self.max_bytes = manager.jobs.config.max_file_bytes
-
-    def read(self) -> tuple[date, str] | None:
-        try:
-            encoded = read_regular_bytes(
-                self.path,
-                artifact_root=self.root,
-                max_bytes=self.max_bytes,
-            )
-        except FileNotFoundError:
-            return None
-        try:
-            raw = json.loads(encoded)
-        except json.JSONDecodeError as exc:
-            raise LifecycleWorkerStateError("lifecycle cursor state is invalid JSON") from exc
-        expected = {"schema", "started_on", "conversation_id"}
-        if not isinstance(raw, Mapping) or set(raw) != expected:
-            raise LifecycleWorkerStateError("lifecycle cursor state has an invalid shape")
-        if raw["schema"] != _LIFECYCLE_CURSOR_SCHEMA:
-            raise LifecycleWorkerStateError("lifecycle cursor state has an unsupported schema")
-        started_on_value = raw["started_on"]
-        conversation_id = raw["conversation_id"]
-        if not isinstance(started_on_value, str) or not isinstance(conversation_id, str):
-            raise LifecycleWorkerStateError("lifecycle cursor state contains invalid field types")
-        try:
-            address = ConversationAddress(
-                conversation_id=conversation_id,
-                started_on=date.fromisoformat(started_on_value),
-            )
-        except ValueError as exc:
-            raise LifecycleWorkerStateError("lifecycle cursor state is invalid") from exc
-        if encoded != self._encode(address):
-            raise LifecycleWorkerStateError("lifecycle cursor state is not canonically encoded")
-        return address.started_on, address.conversation_id
-
-    def write(self, address: ConversationAddress) -> None:
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("lifecycle cursor address must be ConversationAddress")
-        encoded = self._encode(address)
-        if len(encoded) > self.max_bytes:
-            raise LifecycleWorkerStateError("lifecycle cursor state exceeds its configured bound")
-        atomic_replace_bytes(
-            self.path,
-            encoded,
-            artifact_root=self.root,
+        return tuple(
+            f"{item.name}: {signal}"
+            for item in self.outcomes
+            if item.report is not None
+            for signal in item.report.signals
         )
 
-    @staticmethod
-    def _encode(address: ConversationAddress) -> bytes:
-        return (
-            canonical_json(
-                {
-                    "schema": _LIFECYCLE_CURSOR_SCHEMA,
-                    "started_on": address.started_on.isoformat(),
-                    "conversation_id": address.conversation_id,
-                }
-            )
-            + "\n"
-        ).encode("utf-8")
+
+class _CycleContext:
+    """交给参与者的一轮上下文。``assert_owned`` 是同步的：参与者在线程里调，或用 ``asyncio.to_thread`` 包一层。"""
+
+    def __init__(self, *, now: datetime, token: LockToken, lock_store: LockStore) -> None:
+        self._now = now
+        self._token = token
+        self._lock_store = lock_store
+
+    @property
+    def now(self) -> datetime:
+        return self._now
+
+    def assert_owned(self) -> None:
+        try:
+            self._lock_store.assert_owned(self._token)
+        except TimeoutError as exc:
+            raise LifecycleWorkerLeaseLostError("lifecycle lease is no longer owned") from exc
+
+    def fence_token(self) -> LockToken:
+        return self._token
 
 
 class LifecycleWorker:
-    """按周期取得全局 lease，并有界轮转维护全部 Conversation。"""
+    """按周期取得全局 lease，依次运行各参与者。"""
 
     def __init__(
         self,
-        manager: ConversationLifecycleManager,
-        config: ConversationLifecycleConfig,
+        participants: Sequence[LifecycleParticipant],
+        config: LifecycleWorkerConfig,
         *,
+        lock_store: LockStore,
+        lease_key: str,
+        capacity: CapacitySnapshotStore | None = None,
         worker_id: str | None = None,
-        memory_manager: MemoryLifecycleManager | None = None,
         observer: Observer | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if not isinstance(manager, ConversationLifecycleManager):
-            raise TypeError("manager must be ConversationLifecycleManager")
-        if not isinstance(config, ConversationLifecycleConfig):
-            raise TypeError("config must be ConversationLifecycleConfig")
+        if not isinstance(config, LifecycleWorkerConfig):
+            raise TypeError("config must be LifecycleWorkerConfig")
+        resolved = tuple(participants)
+        names = [participant.name for participant in resolved]
+        if any(not isinstance(name, str) or not name for name in names) or len(names) != len(set(names)):
+            raise ValueError("participants must have unique non-empty names")
+        if not isinstance(lease_key, str) or not lease_key:
+            raise ValueError("lease_key must be non-empty text")
         resolved_worker_id = worker_id or f"lifecycle-{os.getpid()}-{uuid4().hex}"
-        if memory_manager is not None and not isinstance(memory_manager, MemoryLifecycleManager):
-            raise TypeError("memory_manager must be MemoryLifecycleManager")
         if (
             not isinstance(resolved_worker_id, str)
             or not resolved_worker_id
             or any(ord(character) < 32 for character in resolved_worker_id)
         ):
             raise ValueError("worker_id must be non-empty normalized text")
-        self.manager = manager
-        self.journal: ConversationMessageJournal = manager.journal
+        self._participants = resolved
         self.config = config
+        self.lock_store = lock_store
+        self.lock_key = lease_key
+        self.capacity = capacity
         self.worker_id = resolved_worker_id
-        self.memory_manager = memory_manager
-        root_digest = hashlib.sha256(str(self.journal.layout.root).encode("utf-8")).hexdigest()[:24]
-        self.lock_key = f"runtime:lifecycle:{root_digest}"
-        self._cursor_store = _LifecycleCursorStore(manager)
+        self.observer = observer or NullObserver()
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._state = LifecycleWorkerState.CREATED
         self._loop_task: asyncio.Task[None] | None = None
         self._active_cycle: asyncio.Task[LifecycleMaintenanceCycleResult] | None = None
@@ -218,7 +182,10 @@ class LifecycleWorker:
         self._wake_event = asyncio.Event()
         self._last_cycle: LifecycleMaintenanceCycleResult | None = None
         self._last_error: BaseException | None = None
-        self.observer = observer or NullObserver()
+
+    @property
+    def participants(self) -> tuple[LifecycleParticipant, ...]:
+        return self._participants
 
     @property
     def state(self) -> LifecycleWorkerState:
@@ -253,10 +220,7 @@ class LifecycleWorker:
         self._wake_event.clear()
         self._last_error = None
         self._state = LifecycleWorkerState.RUNNING
-        self._loop_task = asyncio.create_task(
-            self._run_loop(),
-            name=f"habitus-lifecycle-worker:{self.worker_id}",
-        )
+        self._loop_task = asyncio.create_task(self._run_loop(), name=f"habitus-lifecycle-worker:{self.worker_id}")
         await asyncio.sleep(0)
 
     async def stop(self) -> None:
@@ -273,10 +237,7 @@ class LifecycleWorker:
         self._stop_requested.set()
         self._wake_event.set()
         try:
-            await asyncio.wait_for(
-                asyncio.shield(task),
-                timeout=self.config.shutdown_timeout_seconds,
-            )
+            await asyncio.wait_for(asyncio.shield(task), timeout=self.config.shutdown_timeout_seconds)
         except TimeoutError:
             task.cancel()
             with suppress(asyncio.CancelledError):
@@ -335,48 +296,27 @@ class LifecycleWorker:
                 self._state = LifecycleWorkerState.STOPPED
 
     async def _run_once(self) -> LifecycleMaintenanceCycleResult:
-        started_at = datetime.now(UTC)
-        lock_store = self.journal.path_lock.lock_store
+        started_at = self._clock()
         try:
-            token = await asyncio.to_thread(
-                lock_store.acquire,
-                self.lock_key,
-                self.config.lease_ttl_seconds,
-            )
+            token = await asyncio.to_thread(self.lock_store.acquire, self.lock_key, self.config.lease_ttl_seconds)
         except TimeoutError:
-            finished_at = datetime.now(UTC)
             return LifecycleMaintenanceCycleResult(
-                lease_acquired=False,
-                started_at=started_at,
-                finished_at=finished_at,
-                selected_addresses=(),
-                maintained_addresses=(),
-                failures=(),
+                lease_acquired=False, started_at=started_at, finished_at=self._clock()
             )
 
         execution = asyncio.create_task(
-            self._maintain_batch(token, started_at),
-            name=f"habitus-lifecycle-cycle:{self.worker_id}",
+            self._maintain_all(token, started_at), name=f"habitus-lifecycle-cycle:{self.worker_id}"
         )
         self._active_cycle = execution
         heartbeat_stop = threading.Event()
         loop = asyncio.get_running_loop()
         heartbeat = asyncio.create_task(
-            asyncio.to_thread(
-                self._heartbeat_blocking,
-                token,
-                execution,
-                heartbeat_stop,
-                loop,
-            ),
+            asyncio.to_thread(self._heartbeat_blocking, token, execution, heartbeat_stop, loop),
             name=f"habitus-lifecycle-heartbeat:{self.worker_id}",
         )
         body_error: BaseException | None = None
         try:
-            done, _pending = await asyncio.wait(
-                {execution, heartbeat},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            done, _pending = await asyncio.wait({execution, heartbeat}, return_when=asyncio.FIRST_COMPLETED)
             if heartbeat in done:
                 heartbeat_error = heartbeat.exception()
                 execution.cancel()
@@ -396,59 +336,36 @@ class LifecycleWorker:
                 await asyncio.gather(execution, return_exceptions=True)
             self._active_cycle = None
             try:
-                await asyncio.to_thread(lock_store.release, token)
+                await asyncio.to_thread(self.lock_store.release, token)
             except Exception:
                 if body_error is None:
                     raise
 
-    async def _maintain_batch(
-        self,
-        token: LockToken,
-        started_at: datetime,
-    ) -> LifecycleMaintenanceCycleResult:
-        addresses = await asyncio.to_thread(self.journal.list_addresses)
-        cursor_key = await asyncio.to_thread(self._cursor_store.read)
-        selected = self._select_batch(addresses, cursor_key)
-        maintained: list[ConversationAddress] = []
-        failures: list[LifecycleMaintenanceFailure] = []
-        lock_store = self.journal.path_lock.lock_store
-        for address in selected:
-            await asyncio.to_thread(lock_store.assert_owned, token)
-            try:
-                await self.manager.maintain_once(address)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                failures.append(self._failure(address, exc))
-            else:
-                maintained.append(address)
-            finally:
-                await asyncio.to_thread(self._write_cursor_fenced, token, address)
-        await asyncio.to_thread(lock_store.assert_owned, token)
-        memory_maintenance = None
-        if self.memory_manager is not None:
-            memory_maintenance = await self.memory_manager.maintain()
-            await asyncio.to_thread(lock_store.assert_owned, token)
+    async def _maintain_all(self, token: LockToken, started_at: datetime) -> LifecycleMaintenanceCycleResult:
+        context = _CycleContext(now=started_at, token=token, lock_store=self.lock_store)
+        outcomes = []
+        for participant in self._participants:
+            await asyncio.to_thread(context.assert_owned)
+            outcomes.append(await self._maintain_one(participant, context))
+        await asyncio.to_thread(context.assert_owned)
         return LifecycleMaintenanceCycleResult(
-            lease_acquired=True,
-            started_at=started_at,
-            finished_at=datetime.now(UTC),
-            selected_addresses=selected,
-            maintained_addresses=tuple(maintained),
-            failures=tuple(failures),
-            memory_maintenance=memory_maintenance,
+            lease_acquired=True, started_at=started_at, finished_at=self._clock(), outcomes=tuple(outcomes)
         )
 
-    def _write_cursor_fenced(
-        self,
-        token: LockToken,
-        address: ConversationAddress,
-    ) -> None:
-        """只允许仍持有本轮全局 lease 的维护者推进耐久游标。"""
-
-        lock_store = self.journal.path_lock.lock_store
-        with lock_store.fenced((token,), ttl_seconds=self.config.lease_ttl_seconds):
-            self._cursor_store.write(address)
+    async def _maintain_one(
+        self, participant: LifecycleParticipant, context: _CycleContext
+    ) -> LifecycleParticipantOutcome:
+        try:
+            report = await participant.maintain(context)
+        except (asyncio.CancelledError, LifecycleWorkerLeaseLostError):
+            raise  # 租约丢了整轮停，不能当成单个参与者的失败接着跑下一个
+        except Exception as exc:
+            message = (str(exc).strip() or type(exc).__name__)[:_MESSAGE_LIMIT]
+            return LifecycleParticipantOutcome(participant.name, error_type=type(exc).__name__, message=message)
+        if self.capacity is not None and report.readings:
+            snapshot = CapacitySnapshot(participant.name, context.now, report.readings)
+            await asyncio.to_thread(self.capacity.publish, snapshot)
+        return LifecycleParticipantOutcome(participant.name, report=report)
 
     def _heartbeat_blocking(
         self,
@@ -459,41 +376,15 @@ class LifecycleWorker:
     ) -> None:
         """在独立线程续租，避免同步文件或 SQLite 操作阻塞事件循环时丢 lease。"""
 
-        lock_store = self.journal.path_lock.lock_store
         while not stop.wait(timeout=self.config.heartbeat_interval_seconds):
             try:
-                lock_store.renew(token, self.config.lease_ttl_seconds)
+                self.lock_store.renew(token, self.config.lease_ttl_seconds)
             except TimeoutError as exc:
                 loop.call_soon_threadsafe(execution.cancel)
                 raise LifecycleWorkerLeaseLostError("lifecycle lease could not be renewed") from exc
             except Exception:
                 loop.call_soon_threadsafe(execution.cancel)
                 raise
-
-    def _select_batch(
-        self,
-        addresses: tuple[ConversationAddress, ...],
-        cursor_key: tuple[date, str] | None,
-    ) -> tuple[ConversationAddress, ...]:
-        if not addresses:
-            return ()
-        limit = min(self.config.max_conversations_per_cycle, len(addresses))
-        keys = tuple((address.started_on, address.conversation_id) for address in addresses)
-        start = 0 if cursor_key is None else bisect_right(keys, cursor_key)
-        ordered = (*addresses[start:], *addresses[:start])
-        return tuple(ordered[:limit])
-
-    @staticmethod
-    def _failure(
-        address: ConversationAddress,
-        error: Exception,
-    ) -> LifecycleMaintenanceFailure:
-        message = str(error).strip() or error.__class__.__name__
-        return LifecycleMaintenanceFailure(
-            address=address,
-            error_type=error.__class__.__name__,
-            message=message[:1_000],
-        )
 
     async def _wait(self, delay_seconds: float) -> None:
         if self._stop_requested.is_set():
@@ -506,21 +397,18 @@ class LifecycleWorker:
             self._wake_event.clear()
 
     def _observe_cycle(self, result: LifecycleMaintenanceCycleResult) -> None:
-        memory_failures = 0 if result.memory_maintenance is None else len(result.memory_maintenance.failures)
         self.observer.record(
             ObservationEvent(
                 category="lifecycle",
                 operation="maintenance_cycle",
-                status=(
-                    ObservationStatus.DEGRADED if result.failures or memory_failures else ObservationStatus.SUCCESS
-                ),
+                status=ObservationStatus.DEGRADED if result.failures or result.signals else ObservationStatus.SUCCESS,
                 duration_seconds=max(0.0, (result.finished_at - result.started_at).total_seconds()),
                 attributes={
                     "lease_acquired": result.lease_acquired,
-                    "selected": len(result.selected_addresses),
-                    "maintained": len(result.maintained_addresses),
+                    "participants": len(result.outcomes),
                     "failures": len(result.failures),
-                    "memory_failures": memory_failures,
+                    "signals": len(result.signals),
+                    "released": sum(item.report.released for item in result.outcomes if item.report is not None),
                 },
             )
         )
@@ -539,7 +427,7 @@ class LifecycleWorker:
 
 __all__ = [
     "LifecycleMaintenanceCycleResult",
-    "LifecycleMaintenanceFailure",
+    "LifecycleParticipantOutcome",
     "LifecycleWorker",
     "LifecycleWorkerLeaseLostError",
     "LifecycleWorkerState",

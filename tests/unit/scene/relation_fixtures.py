@@ -13,7 +13,7 @@ from tests.unit.scene.concept_fixtures import base
 
 CST = timezone(timedelta(hours=8))
 START = date(2026, 6, 1)  # 周一
-CONFIG = RelationConfig(slot_minutes=15, transition_window_slots=3, recurrence_window_days=90)
+CONFIG = RelationConfig(slot_minutes=15, transition_window_slots=3)
 TITLES = ("讨论方案", "修改代码", "调研", "写文档", "提交推送")
 CONCEPTS = ConceptSet([base(title) for title in TITLES])
 DISCUSS, CODE, RESEARCH, DOCS, PUSH = (kind_id(title) for title in TITLES)
@@ -96,5 +96,5 @@ def planted(
     return EventSeries(cutoff=cutoff, records=tuple(records))
 
 
-def key(antecedent: str, consequent: str, segment: Segment = Segment.CHAIN) -> RelationKey:
-    return RelationKey("session", antecedent, consequent, segment)
+def key(antecedent: str, consequent: str, segment: Segment = Segment.CHAIN, *, condition: str = "") -> RelationKey:
+    return RelationKey("session", antecedent, consequent, segment, condition)

@@ -8,7 +8,9 @@
 - 新送来的行为，开始时刻落在已经记成没在看的时段里：整份拒收；
 - 新送来的行为（新的编号），和已经收下的另一段行为在时间上重叠：整份拒收（同一时刻只有一个行为；首尾相接可以）；
 - 新送来的没在看的时段，盖住了已经收下的某段行为的开始时刻：整份拒收；
-- 新送来的没在看的时段，和已经记下的没在看的时段有重叠：只落还没记过的那一截（两边都说没在看，取并集，不重复落）。
+- 新送来的没在看的时段，和已经记下的没在看的时段有重叠：只落还没记过的那一截（两边都说没在看，取并集，不重复落）；
+- 里面有任何一个单位早于补发跨度（``max_backfill_days``，按记录器注入的时钟判）：整份拒收——小账只记得这个跨度
+  （26 号清单 6.4），更早的单位对不了"收过没有"与"矛盾不矛盾"。造数与回测回放历史日子时，时钟跟着回放走。
 
 全是同步的文件读写，调用方放到线程里做。同一个进程里一次只处理一份交付：两份同时进来，各读各的"还没收过"，
 同一段会写出两条。
@@ -18,7 +20,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from habitus.behavior.fusion.lanes.physical.ledger import AcceptedSpan, SpanKind
 from habitus.behavior.fusion.lanes.physical.model import (
@@ -42,16 +44,20 @@ class PhysicalLane:
     """把一份交付里的段依次处理掉。中途出错就整体抛出，调用方之后把同一份交付再送一遍；
     已经写过的段重来时会被认出来、不重复写。"""
 
-    def __init__(self, recorder: PhysicalSegmentRecorder) -> None:
+    def __init__(self, recorder: PhysicalSegmentRecorder, *, max_backfill_days: int) -> None:
         if not isinstance(recorder, PhysicalSegmentRecorder):
             raise TypeError("recorder must be PhysicalSegmentRecorder")
+        if isinstance(max_backfill_days, bool) or not isinstance(max_backfill_days, int) or max_backfill_days < 1:
+            raise ValueError("max_backfill_days must be a positive integer")
         self.recorder = recorder
+        self.max_backfill_days = max_backfill_days
         self._one_at_a_time = threading.Lock()
 
     def consume(self, delivery: PhysicalDelivery) -> tuple[UnitOutcome, ...]:
         if not isinstance(delivery, PhysicalDelivery):
             raise TypeError("delivery must be PhysicalDelivery")
         with self._one_at_a_time:
+            self._within_backfill(delivery)
             pieces = self._reconciled(delivery)  # 先对一遍，矛盾的整份拒收，什么都不写
             covered = self.recorder.covered()
             outcomes = [
@@ -69,6 +75,16 @@ class PhysicalLane:
                 )
             return tuple(outcomes)
 
+    def _within_backfill(self, delivery: PhysicalDelivery) -> None:
+        starts = [segment.started_at for segment in delivery.segments] + [span.started_at for span in delivery.coverage]
+        if not starts:
+            return
+        earliest = self.recorder.clock() - timedelta(days=self.max_backfill_days)
+        if min(starts) < earliest:
+            raise PhysicalDeliveryError(
+                f"a unit starts before the {self.max_backfill_days}-day backfill span the ledger remembers"
+            )
+
     def _reconciled(self, delivery: PhysicalDelivery) -> list[tuple[CoverageSpan, list[tuple[datetime, datetime]]]]:
         """拿这份交付对这块设备之前收下的时段；返回每段没在看的时间里还没记过的那几截。"""
 
@@ -81,7 +97,7 @@ class PhysicalLane:
         unobserved = [item for item in known if item.kind is SpanKind.UNOBSERVED]
         segments = [item for item in known if item.kind is SpanKind.SEGMENT]
         for segment in delivery.segments:
-            if ledger.accepted(device, f"segment#{segment.segment_id}") is not None:
+            if ledger.accepted(device, f"segment#{segment.segment_id}", segment.started_at) is not None:
                 continue  # 收过的段：是重发还是改判由写的那一步分
             if _starts_inside(segment.started_at, unobserved):
                 raise PhysicalDeliveryError(
@@ -93,7 +109,7 @@ class PhysicalLane:
                 )
         pieces: list[tuple[CoverageSpan, list[tuple[datetime, datetime]]]] = []
         for span in delivery.gaps:
-            if ledger.accepted(device, gap_unit(span.started_at, span.ended_at)) is not None:
+            if ledger.accepted(device, gap_unit(span.started_at, span.ended_at), span.started_at) is not None:
                 pieces.append((span, []))
                 continue
             for item in segments:

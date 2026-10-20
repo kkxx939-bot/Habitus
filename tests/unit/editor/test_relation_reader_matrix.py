@@ -61,9 +61,7 @@ def noop_identities(*documents) -> MemoryFinalIdentityMap:
     entries = []
     for page_id, current in enumerate(documents, start=1):
         uri = MemoryURI.from_address(current.address)
-        entries.append(
-            MemoryFinalIdentity(page_id, MemoryNodeDisposition.NOOP, uri, uri)
-        )
+        entries.append(MemoryFinalIdentity(page_id, MemoryNodeDisposition.NOOP, uri, uri))
     return MemoryFinalIdentityMap(tuple(entries))
 
 
@@ -206,9 +204,7 @@ def test_structural_change_reads_every_one_hop_neighbor(
 
 def test_structural_source_disappearance_is_reported_before_planning(tmp_path: Path) -> None:
     source_uri = MemoryURI.from_address(MemoryAddress.preference("已删除"))
-    identities = MemoryFinalIdentityMap(
-        (MemoryFinalIdentity(1, MemoryNodeDisposition.DELETE, source_uri, None),)
-    )
+    identities = MemoryFinalIdentityMap((MemoryFinalIdentity(1, MemoryNodeDisposition.DELETE, source_uri, None),))
     _tree, snapshot_reader = reader(tmp_path)
     known = snapshot_reader.read_many((source_uri,))
 
@@ -227,9 +223,7 @@ def test_known_revision_change_is_reported_before_relation_planning(tmp_path: Pa
         metadata=source.metadata.next_revision(source.metadata.updated_at),
     )
     tree.write(updated)
-    identities = MemoryFinalIdentityMap(
-        (MemoryFinalIdentity(1, MemoryNodeDisposition.DELETE, source_uri, None),)
-    )
+    identities = MemoryFinalIdentityMap((MemoryFinalIdentity(1, MemoryNodeDisposition.DELETE, source_uri, None),))
 
     with pytest.raises(MemoryRelationReadConflictError, match="changed before relation planning"):
         MemoryRelationReadSetLoader(snapshot_reader).load(known, identities, ())

@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
@@ -45,7 +45,8 @@ class SituationInputs:
 
     day: date
     moment: datetime | None = None
-    calendar_note: str | None = None
+    #: 这一天的日历条件（外部条件包给的键值，裁定 59）；``None`` = 没有日历可读。答不出的键不出现（不知道 ≠ 否）。
+    calendar: Mapping[str, str] | None = None
     subjects: tuple[str, ...] = ()
     place: str | None = None
     history: tuple[HitEvent, ...] = field(default_factory=tuple)
@@ -107,12 +108,9 @@ def situation_hits(concepts: ConceptSet, inputs: SituationInputs) -> SituationOu
 def _holds(rule: SituationRule, inputs: SituationInputs) -> bool | None:
     """成立 / 不成立 / ``None`` = 材料不全、判不了。"""
 
-    if rule.basis is SituationBasis.WEEKDAYS:
-        return inputs.day.weekday() in rule.weekdays
-    if rule.basis is SituationBasis.CALENDAR_NOTE:
-        if inputs.calendar_note is None:
-            return None
-        return rule.value is not None and rule.value in inputs.calendar_note
+    if rule.basis is SituationBasis.CALENDAR:
+        known = None if inputs.calendar is None or rule.value is None else inputs.calendar.get(rule.value)
+        return None if known is None else known in rule.values
     if rule.basis is SituationBasis.SUBJECT:
         return rule.value in inputs.subjects
     if rule.basis is SituationBasis.PLACE:

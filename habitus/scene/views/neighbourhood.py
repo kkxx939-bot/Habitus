@@ -1,6 +1,6 @@
 """槽位邻域序列：一次发生（或此刻）前后 ±k 槽内、行为树上的全部原子行为。历史侧与此刻侧共用这一处实现。
 
-槽的口径与预测树同一套（``views.clock``），半宽 k 就是池化用的 ``pool_half_width``。这里**不做环形**——
+槽的口径是 ``temporal.slots`` 那一套，半宽 k 与 ``temporal`` 日内分布收缩用的 ``pool_half_width`` 同一个含义。这里**不做环形**——
 环形只对"同一格的统计"成立（周日 23:45 与周一 00:00 在钟面上相邻），而一次发生前后真实发生过什么走的是
 时间轴，跨午夜就去前一天 / 后一天的目录里取。
 
@@ -16,9 +16,9 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 
 from habitus.behavior.uri import BehaviorURI
-from habitus.scene.views.clock import slot_floor
 from habitus.scene.views.index import DayIndexCache
 from habitus.scene.views.model import FlowRow
+from habitus.temporal.slots import slot_floor
 
 
 def slot_window(at: datetime, *, slot_minutes: int, half_width: int) -> tuple[datetime, datetime]:

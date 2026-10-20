@@ -9,7 +9,7 @@ scene 不 import 词表包（``behavior/kinds``）；组合根用词表的只读
   （改名、改判据不用变更流：同步时按全部类逐个核对）。
 
 occurrence 上的 ``kind_token`` 怎么读（类编号 /「待定」/「非事件」、哪条 lane）不在这里：那是事件序列的读法，
-只写在 ``series.reader``，预测树与语义树共用。
+只写在 ``series.reader``，语义树与 ``temporal`` 共用。
 """
 
 from __future__ import annotations

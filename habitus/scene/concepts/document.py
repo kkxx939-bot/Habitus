@@ -33,7 +33,11 @@ _ROLE_LABELS = {
     ConceptRole.DAY_TYPE: "情境·日型",
     ConceptRole.DERIVED: "情境·派生（算法从历史命中算）",
 }
-_ORIGIN_LABELS = {ConceptOrigin.VOCABULARY: "同步词表自动生成", ConceptOrigin.AUTHOR: "模型写"}
+_ORIGIN_LABELS = {
+    ConceptOrigin.VOCABULARY: "同步词表自动生成",
+    ConceptOrigin.AUTHOR: "模型写",
+    ConceptOrigin.CALENDAR: "日历机械生成",
+}
 _CONTEXT_LABELS = {
     ContextScope.OCCURRENCE: "只看这一条",
     ContextScope.DAY: "要看当天时间线",
@@ -215,12 +219,12 @@ def _situation(item: object) -> SituationRule | None:
     if not isinstance(item, dict) or "basis" not in item:
         raise SceneRecordError("concept situation must be an object naming its basis")
     basis = SituationBasis(item["basis"])
-    weekdays = item.get("weekdays", [])
-    if not isinstance(weekdays, list) or any(isinstance(day, bool) or not isinstance(day, int) for day in weekdays):
-        raise SceneRecordError("concept situation weekdays must be a list of integers")
+    values = item.get("values", [])
+    if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+        raise SceneRecordError("concept situation values must be a list of text")
     return SituationRule(
         basis=basis,
-        weekdays=tuple(weekdays),
+        values=tuple(values),
         value=item.get("value"),
         concept=item.get("concept"),
         grade=item.get("grade"),

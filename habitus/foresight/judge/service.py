@@ -1,14 +1,12 @@
-"""调模型：到了该说时的"像不像、先说哪个、一句话"，与按账判一次的"重轻"。都问两遍（第二遍顺序反过来），逐项对答案；
-传输层瞬态错有界重试；失败不出本模块。
+"""调模型：到了该说时的"像不像、先说哪个、一句话"。问两遍（第二遍顺序反过来），逐项对答案；传输层瞬态错有界重试；失败不出本模块。
 
-两遍对不上的：像不像 → 按"像"留着、顺序按算法（时窗先到的在前）；话 → 第一遍的；代价比 → 差不到一倍取几何平均、差得多取较小的。
-两遍都说不像的才去掉。模型不可用 → ``failed``，调用方按算法顺序、模板措辞递，代价比不落账（下一次再问，没判过按配置的默认值）。
+两遍对不上的：像不像 → 按"像"留着、顺序按算法（时窗先到的在前）；话 → 第一遍的。两遍都说不像的才去掉。
+模型不可用 → ``failed``，调用方按算法顺序、模板措辞递。
 """
 
 from __future__ import annotations
 
 import asyncio
-import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -16,20 +14,13 @@ from typing import Any, cast
 from habitus.foresight.judge.package import Candidate, Package
 from habitus.foresight.judge.prompt import (
     JUDGE_VERSION,
-    SEVERITY_VERSION,
     Answer,
     assemble,
-    assemble_severity,
     build_request,
-    build_severity_request,
     judge_json_schema,
-    severity_json_schema,
 )
 from habitus.foundation.text import clean_line
 from habitus.model_client import ChatRequest, ModelClientError, ModelTransportError, StructuredChatClient
-
-#: 两遍代价比差不到这么多倍算同一个判断（倍数尺度上的"差一倍"）；差得多取较小的。
-_CONSISTENT = 2.0
 
 
 @dataclass(frozen=True)
@@ -56,17 +47,6 @@ class Judgement:
     version: str = JUDGE_VERSION
     calls: int = 0
     extra: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class SeverityJudgement:
-    """预期身份 → (代价比, 依据)。两遍差不到一倍取几何平均，差得多取较小的、依据留空；失败时为空。"""
-
-    verdicts: Mapping[str, tuple[float, str]]
-    signals: tuple[str, ...] = ()
-    failed: bool = False
-    version: str = SEVERITY_VERSION
-    calls: int = 0
 
 
 class Judge:
@@ -119,44 +99,6 @@ class Judge:
                 if verdicts[item.expectation_id].kept
             )
         return Judgement(verdicts=verdicts, order=order, signals=tuple(signals), model=model_a, calls=2)
-
-    async def judge_severity(self, package: Package) -> SeverityJudgement:
-        """每个候选当一件事判代价比；问两遍（第二遍反序），差不到一倍取几何平均，差得多取较小的。"""
-
-        forward = package.candidates
-        answers: list[tuple[Mapping[int, tuple[float, str]], str, tuple[str, ...]]] = []
-        for shown in (forward, tuple(reversed(forward))):
-            request = build_severity_request(shown)
-
-            def validator(parsed: object, shown: tuple[Candidate, ...] = shown) -> Mapping[int, tuple[float, str]]:
-                return assemble_severity(parsed, shown)
-
-            answer = await _ask(
-                self.client,
-                request,
-                schema=severity_json_schema([item.number for item in shown]),
-                validator=validator,
-                retries=self.retries,
-                delay_seconds=self.delay_seconds,
-                name="foresight_severity",
-            )
-            if isinstance(answer, str):
-                return SeverityJudgement(verdicts={}, signals=(answer,), failed=True, calls=len(answers) + 1)
-            answers.append(answer)
-        (first, _model_a, notes_a), (second, _model_b, notes_b) = answers
-        signals = [*notes_a, *notes_b]
-        verdicts: dict[str, tuple[float, str]] = {}
-        for item in forward:
-            ratio_a, basis_a = first[item.number]
-            ratio_b, _basis_b = second[item.number]
-            if max(ratio_a, ratio_b) <= _CONSISTENT * min(ratio_a, ratio_b):
-                # 差不到一倍：同一个判断的两次读数，取几何平均（代价比是倍数，平均要在倍数上取）
-                verdicts[item.expectation_id] = (math.sqrt(ratio_a * ratio_b), basis_a)
-                continue
-            signals.append(f"inconsistent: 事项 {item.number} 代价比两遍差了一倍以上（{ratio_a:g} / {ratio_b:g}）")
-            # 差得多取较小的；依据留空（第一遍的依据可能正是论证较大那个数的话，摆在账页上会和结论对不上）
-            verdicts[item.expectation_id] = (min(ratio_a, ratio_b), "")
-        return SeverityJudgement(verdicts=verdicts, signals=tuple(signals), calls=2)
 
     async def _ask(self, package: Package, shown: tuple[Candidate, ...]) -> tuple[Answer, str, tuple[str, ...]] | str:
         request = build_request(package, shown)
@@ -218,4 +160,4 @@ async def _ask[T](
     raise AssertionError("unreachable")  # pragma: no cover
 
 
-__all__ = ["Judge", "Judgement", "SeverityJudgement", "Verdict"]
+__all__ = ["Judge", "Judgement", "Verdict"]

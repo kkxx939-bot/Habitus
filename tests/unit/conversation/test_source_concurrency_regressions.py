@@ -50,13 +50,9 @@ def test_same_source_consumer_concurrency_executes_only_once_with_lock_inside_re
         memory.release = release
         source_value = service.sources.put(source())
 
-        first = asyncio.create_task(
-            service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
-        )
+        first = asyncio.create_task(service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY))
         await entered.wait()
-        second = asyncio.create_task(
-            service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
-        )
+        second = asyncio.create_task(service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY))
         await asyncio.sleep(0.05)
         assert memory.calls == 1
         release.set()
@@ -104,13 +100,9 @@ def test_different_processor_fingerprints_share_one_execution_lock_and_first_out
         first_service = make_service(first_memory)
         second_service = make_service(second_memory)
         source_value = sources.put(source())
-        first = asyncio.create_task(
-            first_service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
-        )
+        first = asyncio.create_task(first_service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY))
         await entered.wait()
-        second = asyncio.create_task(
-            second_service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
-        )
+        second = asyncio.create_task(second_service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY))
         await asyncio.sleep(0.05)
         assert second_memory.calls == 0
         release.set()
@@ -134,9 +126,7 @@ def test_execution_fence_heartbeats_all_held_memory_leases(tmp_path) -> None:
         memory.entered = entered
         memory.release = release
         source_value = service.sources.put(source())
-        running = asyncio.create_task(
-            service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
-        )
+        running = asyncio.create_task(service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY))
         await entered.wait()
         await asyncio.sleep(0.16)
         assert lock_store.renewals >= 4  # Memory 顺序锁和 Consumer 锁均持续续租。
@@ -158,9 +148,7 @@ def test_heartbeat_loss_prevents_output_and_outcome_publication(tmp_path) -> Non
         memory.entered = entered
         memory.release = release
         source_value = service.sources.put(source())
-        running = asyncio.create_task(
-            service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
-        )
+        running = asyncio.create_task(service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY))
         await entered.wait()
         await asyncio.sleep(0.1)
         release.set()
@@ -241,12 +229,7 @@ def test_newer_memory_source_fails_fast_when_predecessor_is_pending_or_broken(tm
         state = service.inspect(first, ConversationSourceConsumer.MEMORY)
         assert state.outcome is not None and state.outcome.output_ref is not None
         output_path = (
-            tmp_path
-            / "source"
-            / "outputs"
-            / first.source_id
-            / "memory"
-            / f"{state.outcome.output_ref.output_id}.json"
+            tmp_path / "source" / "outputs" / first.source_id / "memory" / f"{state.outcome.output_ref.output_id}.json"
         )
         output_path.unlink()
         with pytest.raises(ConversationOrderedPredecessorBrokenError):

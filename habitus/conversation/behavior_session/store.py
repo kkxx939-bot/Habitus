@@ -17,6 +17,7 @@ from habitus.conversation.source.model import (
     encode_durable_record,
     require_sha256,
 )
+from habitus.conversation.source.output_files import discard_output_directory
 from habitus.conversation.source.receipt import (
     ConsumerOutputRef,
     ConversationSourceConsumer,
@@ -138,6 +139,11 @@ class BehaviorSessionOutputStore:
     def _require_owner(source: ConversationSourceEnvelope, output: BehaviorSessionOutput) -> None:
         if output.source_id != source.source_id or output.source_payload_digest != source.source_payload_digest:
             raise ConversationSourceError("behavior session receipt belongs to another source")
+
+    def discard_all(self, source_id: str) -> int:
+        """释放会话源时删这份源的全部输出。"""
+
+        return discard_output_directory(self.root, self._directory(source_id), max_entries=self.max_files_per_source)
 
     def _directory(self, source_id: str) -> Path:
         require_sha256(source_id, "source_id")

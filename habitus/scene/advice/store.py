@@ -68,6 +68,22 @@ class AdviceStore(SceneStore):
             },
         )
 
+    def prior_keys(self, lane: str) -> tuple[str, ...]:
+        """这条 lane 的全部先验缓存键（给清孤儿用：后果改名、改判据、换提示词或模型都会换键，旧文件没人再读）。"""
+
+        directory = self._inside(Path(ADVICE_SEGMENT, "priors"))
+        records, _noise = self._content_files(directory)
+        keys = []
+        for entry in records:
+            key = entry.name.removesuffix(".json")
+            payload = self._read(self._prior_path(key))
+            if payload is not None and payload.get("lane") == lane:
+                keys.append(key)
+        return tuple(sorted(keys))
+
+    def discard_prior(self, key: str) -> None:
+        self._discard(self._prior_path(key))
+
     # ── 提议簿 ──────────────────────────────────────────────────────────────
 
     def book(self, lane: str) -> ProposalBook:

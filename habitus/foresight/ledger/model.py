@@ -1,19 +1,20 @@
-"""账本的形状（``19-预测层方案.md`` 第二、五节；裁定 48–51）：按预期的六种记录（预期、递送、回话、结算、追加裁决、
-漏报）与按账的四种记录（事实、重轻、设置、级的变化）。只增不改，每条一份记录。
+"""账本的形状（``19-预测层方案.md`` 第二、五节；裁定 48–51、61）：按预期的六种记录（预期、递送、回话、结算、追加裁决、
+漏报）、按账的两种记录（事实、级的变化）与按行为单元的三种记录（提醒反馈、设置、档的变化）。只增不改，每条一份记录。
 
 - **预期**是"此刻对得上历史"时建的一条：什么事、预计什么时候、依据是行为树上哪几次、此刻它的前因在不在场。
   说没说都记（影子账是唯一没有选择偏差的准确率来源）。身份不含槽号与时刻：同一个触发实例只有一条。
   **每个机会都建**（裁定 49）：形成时这件事已经做了的也建，``observed_from`` 是从什么时候起的发生算这条预期说中的
-  （钟面 / 日子：当天零点；事件：前因做完那一刻），结算照常对答案——不然账上只剩没做的那几次。
-- **递送**是对一条预期"说不说、按哪一级说"的决定，连同为什么没说、被说出的概率（随机扣发时不是 0 或 1）。
-- **回话**是主体对一次递送的回应；"拒绝"要拆开：已做过是观测缺口，这次不用是预测错了，稍后是时窗错了。
-- **结算**对着行为树给预期一个结果；到最晚时限没发生只是「过期待决」，之后由**追加裁决**补一条（后补 / 回话 / 未判），
-  旧记录不改。
+  （日子 / 情境：当天零点；事件：前因做完那一刻），结算照常对答案——不然账上只剩没做的那几次。
+- **递送**是对一条预期"说不说、按哪一级说"的决定，连同为什么没说。
+- **回话**是模型从一段会话里判出的、对一次说出口的提醒的回应：回应的是哪一条、正 / 中 / 负（裁定 61 第 4、5 条；
+  不由我们枚举他说的话）。正 / 负关闭那条提醒，中不关。他说的话本身作为行为进行为树，不在这里。
+- **结算**对着行为树给预期一个结果；到最晚时限没发生只是「过期待决」，之后由**追加裁决**补一条（后补），旧记录不改。
 - **漏报**不挂在预期上：发生了、而发生前没有任何一条在时的预期。
-- **事实**是一本账上的一笔：哪条轴（预测 / 反应）、好坏、强度、因为什么。递法只读事实；同一条预期同一条轴后写的覆盖
-  先写的（后补、回话改判一条过期待决时不改旧记录，再写一条）。
-- **重轻**是这本账的属性：模型判一次、落账、到期重判；人可以改（裁定 48）。**设置**是人对账的两个动作
-  （「以后都提醒我」「以后别提了」，「照常」撤销）。**级的变化**记账从影子到提醒、从提醒回影子的那一刻（滞回要知道上一次在哪一级）。
+- **事实**是一本账上的一笔：好坏、强度、因为什么（只有"做"这一条轴：他自己做了没、离窗多近）。账只是流水，权重每晚从
+  单元历史的各刻按边数出来（裁定 61 第 1 条）；同一条预期后写的覆盖先写的（后补改判一条过期待决时不改旧记录，再写一条）。
+- **提醒反馈**挂在行为单元上、一个行为一份（裁定 61 第 1 条）：说了之后做了是好、说了没做（没回应或回了负）是坏；
+  回了中又没做的不写。**设置**是人对一个行为的两个动作（「以后都提醒我」「以后别提了」，「照常」撤销），也按行为。
+  **级的变化**记账从影子到提醒、从提醒回影子的那一刻（滞回要知道上一次在哪一级）；单元的档另记。
 
 本模块对 scene、存储零知识；时刻一律带时区。
 """
@@ -26,44 +27,38 @@ from hashlib import sha256
 
 from habitus.foresight.errors import ForesightError
 
-#: 预期从哪种触发来（``19-预测层方案.md`` 第三节）。
-SOURCES = ("事件", "钟面", "日子", "没做完", "约定", "情境")
+#: 预期从哪种触发来（``19-预测层方案.md`` 第三节；钟面随预测树删了，裁定 59）。
+SOURCES = ("事件", "日子", "没做完", "约定", "情境")
+#: 有语义树关系撑着的触发：触发身份就是关系键，状态、读数、前因都从机会表上那条关系来（裁定 59：事件与情境都算）。
+RELATION_BACKED = frozenset({"事件", "情境"})
 #: 递法两档（裁定 48）：影子只记账；提醒在该来了还没来时主动说。
 LEVELS = (0, 1)
 #: 一次递送为什么说了 / 没说。
 #: 「不可达」= 没有送达渠道（裁定 47：接上渠道之前提醒档的决定都是它，结算按没说过处理）；「已发生」= 到了时窗时这件事
-#: 已经做了，不递；「同类已说」= 同一类今天已经说过一句（几本账同一件事只说一次）；「等时窗末」= 轻的事话准备好了，
-#: 到时窗末还没做再说（「该来了还没来」是提醒的说话时机，「重」的时窗一开就说）。
+#: 已经做了，不递；「同类已说」= 同一类今天已经说过一句（几本账同一件事只说一次）；「等时窗末」= 到时窗末还没做再说
+#: （「该来了还没来」是提醒的说话时机；这一版不分急缓，一律等时窗末，裁定 58 第 1 条）；「久别回来」= 依据那本账的前因隔了比
+#: 历史最长还久才又出现，这一次只记影子（``foresight.absence``；不改账的级，下一次照常）。
 DELIVERY_REASONS = (
     "说了",
     "影子",
     "名额已满",
-    "随机扣发",
     "不可达",
     "模型判不像",
     "已发生",
     "同类已说",
     "等时窗末",
     "前因不成立",
-    "上次的原因今天又在",
     "单元已选",
+    "久别回来",
 )
-#: 主体的回话：人能说的只剩这三句（裁定 50）；「稍后」不进账。
-RESPONSES = ("这次不用", "稍后", "已做过")
+#: 久别回来的递送原因。
+RETURNED = "久别回来"
+#: 回话的方向（裁定 61 第 4 条）：模型判这段会话对那条提醒是正、中还是负；正 / 负关闭那条提醒，中不关、后面的会话照样判。
+POLARITIES = ("正", "中", "负")
 #: 结算的结果。「过期待决」不是终态。每个机会都建，形成时已做的照常结准时 / 早到（裁定 49）。
 OUTCOMES = ("准时", "早到", "晚了但做了", "提醒后发生", "过期待决")
-#: 过期待决之后的追加裁决。「后补」是唯一能从行为记录自动得出的"抓到缺失"。
-RULINGS = ("后补", "用户说忘了", "用户说这次不用", "用户说早做过了", "未判")
-#: 不说的后果重不重：这本账的属性，模型判一次、到期重判，人可改（裁定 48）。没判过按轻。
-#: 这件事本身的代价比 c 能取的范围（裁定 58 第 1 条）：漏一次相当于错提醒几次的代价。范围是保护闸（挡住模型答出的离谱数），
-#: 不是分档；线由 c 与提醒的效果连续地算（``ladder.Tolerance``）。
-COST_RATIO_RANGE = (0.1, 10.0)
-SEVERITY_ORIGINS = ("模型", "人")
-#: 事实的三条轴（裁定 50，裁定 58 第 5–7 条改）：**预测**（他自己做了没、离窗多近）管升；**提醒组**（说了之后做了没、有没有
-#: 明确拒绝；单位权重）管降——它就是"说了而他没做"的那个误提醒率；**扣发组**（该说而随机扣下没说之后做了没；单位权重）是
-#: 提醒组的对照，提醒的效果 = 两者完成率之差。原来的"反应轴"把拒绝（强度 1）、落空（强度 p）、提醒后做了（强度 = 快慢分位）
-#: 加进同一个 Beta，量纲不同、区间宽度失真，删掉。
-FACT_AXES = ("预测", "提醒组", "扣发组")
+#: 过期待决之后的追加裁决。「后补」是唯一能从行为记录自动得出的"抓到缺失"（回话不改判：他说"已经做过了"作为行为进树）。
+RULINGS = ("后补",)
 #: 事实因为什么（给人看，也给强度找同类历史）。
 #: 顺序进事实文件的身份（种类号），只许往后加。「作废」：前因不成立，这次机会不存在（权重 0，裁定 54）。
 FACT_KINDS = (
@@ -73,20 +68,13 @@ FACT_KINDS = (
     "提醒后发生",
     "过期待决",
     "后补",
-    "落空",
-    "这次不用",
-    "已做过",
-    "忘了",
     "作废",
-    "扣发后发生",
-    "扣发后落空",
 )
-FACT_ORIGINS = ("观测", "人说")
-#: 一次落空找到的原因（裁定 55，方案第五节「纠错」）。「推迟」不另记：落空后补做了，那条事实就是「后补」。
-#: 「还没进关联」= 下一步 X 不在任何语义关联里，记下来攒次数（不是终点）；「没看到下一步」= 到最晚时限没有任何动作（观测的边界）。
-#: 单次落空不说"习惯在变"：那是连着落空、账判出"规律断了"的事（裁定 54）。
-CAUSE_KINDS = ("同一件事", "线索没了", "别的起因", "分支有条件", "分支条件不够", "还没进关联", "没看到下一步")
-#: 人对账的设置：「照常」撤销前两者。
+#: 预测轴上算"他自己做了"的那几种（结算、单元、诊断同一份）。
+NATURAL_HITS = frozenset({"准时", "早到", "晚了但做了"})
+#: 前因不成立、这次机会不存在时记的事实种类（权重 0，裁定 54）。
+VOID = "作废"
+#: 人对一个行为的设置：「照常」撤销前两者。
 SETTINGS = ("以后都提醒我", "以后别提了", "照常")
 
 
@@ -136,7 +124,7 @@ def expectation_identity(kind_token: str, source: str, trigger: str, trigger_ins
 
 def anchor_uri(trigger_instance: str) -> str:
     """触发实例里那条记录的出处。「离上次够久」的实例是 ``<上次的 URI>@<这一回合的第一天>``（同一个上次能分几回合到期），
-    其余触发的实例原样返回（事件：前因的开始时刻，按时刻到最近几天的行里找；钟面、几号：今天的日期）。"""
+    其余触发的实例原样返回（事件：前因的开始时刻，按时刻到最近几天的行里找；情境：今天的日期）。"""
 
     uri, separator, _tail = trigger_instance.rpartition("@")
     return uri if separator else trigger_instance
@@ -168,7 +156,7 @@ class Expectation:
 
     ``opportunities`` / ``hits`` 是依据的历史机会数与命中数，摆出来让人掂量，不是门。``level`` 是形成时这本账所在的级。
     ``observed_from`` 是从什么时候起的发生算这条预期说中的（不晚于形成时刻）：时窗是历史那几次的实际时刻，可以早于形成时刻
-    （钟面到了钟点才建、形成时他可能已经做了），已做的照常结算（裁定 49）。
+    （情境、日子到了时窗才建，形成时他可能已经做了），已做的照常结算（裁定 49）。
     """
 
     expectation_id: str
@@ -246,8 +234,8 @@ class Expectation:
 
 @dataclass(frozen=True)
 class Delivery:
-    """对一条预期的递送决定。``p_speak`` 是这条被说出的概率：确定性规则下是 0 或 1，随机扣发时是扣发前的概率。
-    ``evidence`` 是模型指的那几条历史记录。重轻不在这里：它是账的属性（``AccountSeverity``）。"""
+    """对一条预期的递送决定。``p_speak`` 是这条被说出的概率（这一版不扣发，确定性规则下是 0 或 1）。
+    ``evidence`` 是模型指的那几条历史记录。"""
 
     expectation_id: str
     decided_at: datetime
@@ -283,19 +271,24 @@ class Delivery:
 
 @dataclass(frozen=True)
 class Response:
-    """主体对一次递送的回话。"""
+    """一段会话对一条说出口的提醒的回应：模型判的方向（正 / 中 / 负）、哪一段会话（轮的身份，重放不重判）、什么时候说的。"""
 
     expectation_id: str
     responded_at: datetime
-    response: str
-    note: str | None = None
+    polarity: str
+    turn: str
 
     def __post_init__(self) -> None:
         _text(self.expectation_id, "response expectation_id")
         _aware(self.responded_at, "response responded_at")
-        _one_of(self.response, RESPONSES, "response")
-        if self.note is not None:
-            _text(self.note, "response note")
+        _one_of(self.polarity, POLARITIES, "response polarity")
+        _text(self.turn, "response turn")
+
+    @property
+    def closes(self) -> bool:
+        """正 / 负关闭这条提醒（不再判）；中不关。"""
+
+        return self.polarity != "中"
 
 
 @dataclass(frozen=True)
@@ -377,6 +370,12 @@ class Omission:
             raise ForesightError("omission had_expectation must be a boolean")
 
 
+def relation_backed(source: str) -> bool:
+    """这种触发有没有语义树关系撑着（事件、情境）。"""
+
+    return source in RELATION_BACKED
+
+
 def account_key(kind_token: str, source: str, trigger: str) -> str:
     """一本账的身份：事 + 触发种类 + 触发身份（不含触发实例：每次机会都记在同一本上）。"""
 
@@ -399,69 +398,26 @@ def _account(value: object) -> str:
 
 
 @dataclass(frozen=True)
-class Cause:
-    """一次落空对照答案找到的原因（裁定 55）。里面的东西一律落成类编号与行为树编号：白天那一拍不读语义树也核得了
-    "上次的原因今天还在不在"。
-
-    - 同一件事：``classes`` = 他这次做的那一类（与该做的同在一个汇总概念下），``relation`` = 那个汇总概念。
-    - 线索没了：``relation`` = 该做的那件事惯常的前因关系（键文本），这次它的前因没来；或 ``condition`` = ``日型=<备注>``（这天的日型
-      与依据那几次都不同）。
-    - 别的起因：``classes`` = 起因那一类，``relation`` / ``segment`` = 起因 → 他这次做的那件事的关系与跨度段。
-    - 分支有条件：``condition`` = 条件文字，``holds_when`` = 条件取这个值时该做的那件事不来。
-    - 分支条件不够 / 还没进关联：``classes`` = 他接下来做的那一类；没看到下一步：什么都不带。
-    ``uris`` 是依据的行为树编号（他这次做的、起因那一次）。"""
-
-    kind: str
-    classes: tuple[str, ...] = ()
-    uris: tuple[str, ...] = ()
-    relation: str = ""
-    segment: str = ""
-    condition: str = ""
-    holds_when: bool | None = None
-
-    def __post_init__(self) -> None:
-        _one_of(self.kind, CAUSE_KINDS, "cause kind")
-        for label in ("classes", "uris"):
-            value = getattr(self, label)
-            if not isinstance(value, tuple) or any(not isinstance(item, str) or not item for item in value):
-                raise ForesightError(f"cause {label} must be a tuple of non-empty text")
-        for label in ("relation", "segment", "condition"):
-            if not isinstance(getattr(self, label), str):
-                raise ForesightError(f"cause {label} must be text")
-        if self.holds_when is not None and not isinstance(self.holds_when, bool):
-            raise ForesightError("cause holds_when must be a boolean or None")
-        if self.kind == "别的起因" and not (self.classes and self.segment):
-            raise ForesightError("another cause names its class and the span it acts over")
-        if self.kind == "分支有条件" and (not self.condition or self.holds_when is None):
-            raise ForesightError("a conditioned branch names its condition and the value that keeps the matter away")
-
-
-@dataclass(frozen=True)
 class AccountFact:
-    """一本账上的一笔：哪条轴、好坏、强度、因为什么、来自哪条预期。``offset_minutes``：预测轴是偏差（窗内 0、早到为负、
-    晚到为正），提醒组是说完到发生隔了几分钟，补做是最晚时限之后几分钟；别的没有。
+    """一本账上的一笔：好坏、强度、因为什么、来自哪条预期。``offset_minutes`` 是偏差（窗内 0、早到为负、晚到为正），补做是
+    最晚时限之后几分钟；别的没有。
 
-    两个时刻各管各的：``at`` 是这次机会的时刻（这条预期形成的时刻）——遗忘、"规律断了"的先后都按它；``written_at`` 是改判
-    写下的时刻（后补、回话、重结），同一条预期同一条轴谁覆盖谁按它（None = 结算时写的原判，按 ``at``）。改判若取写下的
-    时刻当 ``at``，几天前那次机会就会被当成最新的证据：遗忘被重置，连错的先后也排错。"""
+    两个时刻各管各的：``at`` 是这次机会的时刻（这条预期形成的时刻）——先后都按它；``written_at`` 是改判写下的时刻（后补、
+    重结），同一条预期谁覆盖谁按它（None = 结算时写的原判，按 ``at``）。改判若取写下的时刻当 ``at``，几天前那次机会就会被
+    当成最新的证据：先后排错。"""
 
     account: str
     at: datetime
-    axis: str
     good: bool
     strength: float
     kind: str
     expectation_id: str
-    origin: str = "观测"
     offset_minutes: int | None = None
     written_at: datetime | None = None
-    #: 这次落空找到的原因（裁定 55）：机会表那一拍追加一条同值的改判带上它，不动读数。
-    cause: Cause | None = None
 
     def __post_init__(self) -> None:
         _account(self.account)
         _aware(self.at, "fact at")
-        _one_of(self.axis, FACT_AXES, "fact axis")
         if not isinstance(self.good, bool):
             raise ForesightError("fact good must be a boolean")
         if (
@@ -472,13 +428,10 @@ class AccountFact:
             raise ForesightError("fact strength must be a number in [0, 1]")
         _one_of(self.kind, FACT_KINDS, "fact kind")
         _text(self.expectation_id, "fact expectation_id")
-        _one_of(self.origin, FACT_ORIGINS, "fact origin")
         if self.offset_minutes is not None and (
             isinstance(self.offset_minutes, bool) or not isinstance(self.offset_minutes, int)
         ):
             raise ForesightError("fact offset_minutes must be an integer")
-        if self.cause is not None and not isinstance(self.cause, Cause):
-            raise ForesightError("fact cause must be a Cause or None")
         if self.written_at is not None:
             _aware(self.written_at, "fact written_at")
             if self.written_at < self.at:
@@ -486,55 +439,44 @@ class AccountFact:
 
     @property
     def precedence(self) -> datetime:
-        """同一条预期同一条轴谁覆盖谁：后写的覆盖先写的。"""
+        """同一条预期谁覆盖谁：后写的覆盖先写的。"""
 
         return self.at if self.written_at is None else self.written_at
 
 
 @dataclass(frozen=True)
-class AccountSeverity:
-    """这本账的后果有多重：代价比 c（漏一次相当于错提醒几次，裁定 58 第 1 条）、谁判的、依据、什么时候判的、到什么时候该重判。"""
+class UnitSetting:
+    """人对一个行为的设置；最新的一条说了算。"""
 
-    account: str
-    judged_at: datetime
-    cost_ratio: float
-    basis: str
-    expires_at: datetime
-    origin: str = "模型"
-
-    def __post_init__(self) -> None:
-        _account(self.account)
-        _aware(self.judged_at, "severity judged_at")
-        low, high = COST_RATIO_RANGE
-        if (
-            isinstance(self.cost_ratio, bool)
-            or not isinstance(self.cost_ratio, int | float)
-            or not low <= float(self.cost_ratio) <= high
-        ):
-            raise ForesightError(f"severity cost_ratio must be a number in [{low}, {high}]")
-        if not isinstance(self.basis, str):
-            raise ForesightError("severity basis must be text")
-        _aware(self.expires_at, "severity expires_at")
-        if self.expires_at <= self.judged_at:
-            raise ForesightError("a severity must expire after it was judged")
-        _one_of(self.origin, SEVERITY_ORIGINS, "severity origin")
-
-    def current(self, at: datetime) -> bool:
-        return self.judged_at <= at < self.expires_at
-
-
-@dataclass(frozen=True)
-class AccountSetting:
-    """人对这本账的设置；最新的一条说了算。"""
-
-    account: str
+    kind_token: str
     at: datetime
     setting: str
 
     def __post_init__(self) -> None:
-        _account(self.account)
+        _text(self.kind_token, "setting kind_token")
         _aware(self.at, "setting at")
         _one_of(self.setting, SETTINGS, "setting")
+
+
+@dataclass(frozen=True)
+class UnitFeedback:
+    """一个行为单元的一笔提醒反馈（裁定 61 第 4 条）：说出口的那一刻（``at`` = 依据那条预期形成的时刻，先后与遗忘按它）、
+    好（说了之后做了）/ 坏（说了没做：没回应或回了负）、来自哪条说出口的预期、他回了什么（没回应是 None）。单位权重。"""
+
+    kind_token: str
+    at: datetime
+    good: bool
+    expectation_id: str
+    polarity: str | None = None
+
+    def __post_init__(self) -> None:
+        _text(self.kind_token, "feedback kind_token")
+        _aware(self.at, "feedback at")
+        if not isinstance(self.good, bool):
+            raise ForesightError("feedback good must be a boolean")
+        _text(self.expectation_id, "feedback expectation_id")
+        if self.polarity is not None:
+            _one_of(self.polarity, POLARITIES, "feedback polarity")
 
 
 @dataclass(frozen=True)
@@ -552,34 +494,50 @@ class AccountLevel:
             raise ForesightError(f"unknown account level: {self.level!r}")
 
 
+@dataclass(frozen=True)
+class UnitLevel:
+    """这个行为单元的档在 ``at`` 变成了 ``level``（只在变的时候记）。单元的档按行为记，与账的级分开（2026-10-17 四方评审：
+    单元档写进依据那本账的级，账自己折档时的滞回就读到了别人的历史）。"""
+
+    kind_token: str
+    at: datetime
+    level: int
+
+    def __post_init__(self) -> None:
+        _text(self.kind_token, "unit kind_token")
+        _aware(self.at, "unit level at")
+        if self.level not in LEVELS:
+            raise ForesightError(f"unknown unit level: {self.level!r}")
+
+
 __all__ = [
-    "CAUSE_KINDS",
     "DELIVERY_REASONS",
-    "FACT_AXES",
     "FACT_KINDS",
-    "FACT_ORIGINS",
+    "NATURAL_HITS",
+    "POLARITIES",
+    "VOID",
+    "RETURNED",
     "SETTINGS",
-    "SEVERITY_ORIGINS",
     "AccountFact",
     "AccountLevel",
-    "AccountSetting",
-    "AccountSeverity",
+    "UnitFeedback",
+    "UnitSetting",
     "account_key",
     "parse_account",
+    "relation_backed",
     "LEVELS",
     "OUTCOMES",
-    "RESPONSES",
     "RULINGS",
-    "COST_RATIO_RANGE",
+    "RELATION_BACKED",
     "SOURCES",
     "Antecedent",
-    "Cause",
     "Delivery",
     "Expectation",
     "Omission",
     "Response",
     "Ruling",
     "Settlement",
+    "UnitLevel",
     "anchor_uri",
     "expectation_identity",
 ]

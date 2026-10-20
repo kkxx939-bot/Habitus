@@ -32,26 +32,11 @@ _SOURCE_FILE = re.compile(r"^(?P<source_id>[0-9a-f]{64})\.json$")
 #   被数两遍：判断的证据链里出现重复观测，或一次真实行为被切成两条判断，再往下变成预测的计数偏差。
 # - 改造方案：融合层读取观测时按 ``observation_id`` 归并，同一编号只采信一次；证据引用保留全部
 #   来源交付以便审计。本层不建观测级索引——那需要先知道融合的读取形态，现在设计很可能白做。
-# - 时机更新：原定"与事件融合同批"已失约——融合与 Runtime 接线（BHV-RUNTIME-001）均已完成，
-#   本欠账仍在，且接线后被**激活**：融合 Worker 每拍（默认 5s）调一次 ``list()``，扫描成本随
-#   交付量线性涨、到 ``max_files`` 上限之日融合循环开始永久报错（有健康面信号，不再静默）。
-#   新时机：BHV-LIFECYCLE-001 统一批次，接真实观测源之前必须完成。
+# - 时机：观测的生命周期已经有了（发布即释放 + 覆盖记录，见下）；这一条只剩融合层按 ``observation_id`` 归并，
+#   与真实观测源一起做。
 
-# TODO(BHV-LIFECYCLE-001): 三棵树的生命周期尚未设计，观测存储的枚举上限是它最先暴露的症状。
-# - 现状：``list()`` 越过 ``max_files`` 即永久抛错而不是返回前 N 条；``put`` 仍然一直成功；本类
-#   只有 ``put`` / ``list`` / ``read``，没有任何删除、归档或分区接口。实测把上限设为 3 时，第 4 次
-#   交付后 ``list()`` 永久失败，而写入不受影响。
-# - 具体场景：默认 ``max_files=100_000``，按每分钟一次交付计算约 69 天后 ``list()`` 必然失效。这
-#   不是攻击，是日程表。此外即使未到上限，``list()`` 是全量扁平枚举并逐个解码校验，而融合的第一
-#   步就是"取某个时间窗的观测"——缺少按时间的分区或索引。
-# - 影响大小：高（必然发生且模块内无法恢复），但不应在本层单独修：``behavior/`` 行为树与
-#   ``prediction/`` 预测树同样没有任何保留期、归档或清理设施（两者 grep 均无 lifecycle/retention/
-#   prune 实现），而 ``memory/`` 已经有 ``MemoryLifecycleManager`` 与 ``LifecycleWorker`` 的完整先例。
-# - 改造方案：按 memory 已验证的形态统一设计三棵树的生命周期——保留期、跨层压缩、释放门槛与独立
-#   维护 Worker；观测的释放门槛是"该段观测已确证形成判断"，行为树与预测树各有自己的门槛。同时
-#   把枚举改为按时间分区（与行为树 ``occurrences/YYYY/MM/DD`` 对齐）并提供有界的时间窗读取。
-# - 时机：与 behavior 接入 Runtime 组合根（``TODO(BHV-RUNTIME-001)``）同批；在此之前观测一律保留，
-#   因为在归约能证明某段观测已物化为 occurrence/gap 之前删除它们，会造成无法重建的事实缺口。
+# 生命周期（26 号清单 L2、6.2）：观测在所属判断发布到行为树、且被回执覆盖之后由归约释放（``discard``），不按保留期堆积；
+# ``list()`` 每次都列目录、按身份缓存解码好的信封（文件只创建、不改写），释放时一起淘汰。``max_files`` 是保护闸。
 
 
 class BehaviorObservationStore:
@@ -68,6 +53,8 @@ class BehaviorObservationStore:
             raise TypeError("config must be BehaviorObservationConfig")
         self.config = resolved
         self.envelope_root = self.root / "observations" / "envelopes"
+        #: 交付文件只创建、不改写：按身份缓存解码好的信封（26 号清单 6.2），释放时一起淘汰。列目录照旧每次都列。
+        self._decoded: dict[str, BehaviorObservationEnvelope] = {}
 
     def put(self, envelope: BehaviorObservationEnvelope) -> BehaviorObservationEnvelope:
         if not isinstance(envelope, BehaviorObservationEnvelope):
@@ -94,6 +81,12 @@ class BehaviorObservationStore:
         return stored
 
     def read(self, source_id: str) -> BehaviorObservationEnvelope | None:
+        cached = self._decoded.get(source_id)
+        if cached is not None:
+            if self._path(source_id).is_file():
+                return cached
+            self._decoded.pop(source_id, None)  # 别的实例释放了它
+            return None
         try:
             encoded = read_regular_bytes(
                 self._path(source_id), artifact_root=self.root, max_bytes=self.config.max_file_bytes
@@ -108,6 +101,7 @@ class BehaviorObservationStore:
             raise BehaviorObservationError("observation delivery record is not canonically encoded")
         if envelope.source_id != source_id:
             raise BehaviorObservationError("observation delivery filename does not match source_id")
+        self._decoded[source_id] = envelope
         return envelope
 
     def list(self) -> tuple[BehaviorObservationEnvelope, ...]:
@@ -135,6 +129,7 @@ class BehaviorObservationStore:
     def discard(self, source_id: str) -> bool:
         """释放一份交付：它的全部观测都已融合且所属判断都已发布到树。不存在时幂等返回 ``False``。"""
 
+        self._decoded.pop(source_id, None)
         return durable_unlink(self._path(source_id), artifact_root=self.root)
 
     def _required_read(self, source_id: str) -> BehaviorObservationEnvelope:

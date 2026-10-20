@@ -1,6 +1,6 @@
 # Habitus Repository Constraints
 
-全部 Python 源码位于唯一顶层包 `habitus/` 下（`habitus/config`、`habitus/runtime`、`habitus/model_client`、`habitus/pre`、`habitus/conversation`、`habitus/memory`、`habitus/behavior`、`habitus/prediction`、`habitus/infrastructure`、`habitus/foundation`、`habitus/integrations`、`habitus/benchmark`）；下文提到的 `memory/`、`pre/` 等目录名均指 `habitus/` 下的对应子包，import 一律写 `habitus.<子包>`。
+全部 Python 源码位于唯一顶层包 `habitus/` 下（`habitus/config`、`habitus/runtime`、`habitus/model_client`、`habitus/pre`、`habitus/conversation`、`habitus/memory`、`habitus/behavior`、`habitus/series`、`habitus/temporal`、`habitus/conditions`、`habitus/scene`、`habitus/foresight`、`habitus/infrastructure`、`habitus/foundation`、`habitus/integrations`、`habitus/benchmark`）；下文提到的 `memory/`、`pre/` 等目录名均指 `habitus/` 下的对应子包，import 一律写 `habitus.<子包>`。
 
 本文件约束仓库内所有人工和 Agent 变更。当前用户决策优先于历史实现，不得通过兼容层恢复已经删除的架构。
 

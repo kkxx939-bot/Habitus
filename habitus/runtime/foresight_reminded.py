@@ -37,15 +37,15 @@ class RemindedLookup:
             raise ForesightError("kind_token must be non-empty text")
         if not isinstance(started_at, datetime) or started_at.utcoffset() is None:
             raise ForesightError("started_at must be a timezone-aware datetime")
-        for day in self.ledger.open_days():
+        open_days = self.ledger.open_days()
+        # 结完的日子不会再被问到：它们的缓存淘汰掉（26 号清单 6.13）
+        for stale in [day for day in self._spoken if day not in open_days]:
+            del self._spoken[stale]
+        for day in open_days:
             if day > started_at.date():
                 continue
             for item, decided_at in self._spoken_on(day):
-                if (
-                    decided_at < started_at
-                    and item.covers(started_at)
-                    and kind_token in self.current(item.kind_token)
-                ):
+                if decided_at < started_at and item.covers(started_at) and kind_token in self.current(item.kind_token):
                     return True
         return False
 

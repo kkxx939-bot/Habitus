@@ -73,8 +73,7 @@ _JUDGEMENT_FILE = re.compile(r"^(?P<judgement_id>[0-9a-f]{64})\.json$")
 # BHV-LIFECYCLE-001（判断部分已落地，2026-08-30）：释放门槛不是保留期而是**消费**——归约发布
 # 后 ``discard``；"当日实况"改为已封口读树、未封口读这里，双消费者门槛随之消失。观测同理在链
 # 发布后释放（``behavior/reduction/runner.py``），"已释放的观测均有覆盖记录"由融合覆盖索引
-# （``behavior/fusion/coverage.py``，写在回执落盘同一步）保证。树单日目录的容量见
-# ``behavior/fusion/__init__.py`` 的 TODO(BHV-REALDATA-001)。
+# （``behavior/fusion/coverage.py``，写在回执落盘同一步）保证。
 
 
 class BehaviorJudgementStore:

@@ -1,6 +1,6 @@
 """槽位邻域序列：历史侧从开始前 k 槽到最后所见后 k 槽，此刻侧从当前槽前 k 槽到此刻。全部机械、零 LLM。
 
-守的是三处与预测树同口径的对齐点：槽的起点算法、半宽的含义、跨午夜不做环形而是去邻日取行。
+守的是三处与 ``temporal`` 同口径的对齐点：槽的起点算法、半宽的含义、跨午夜不做环形而是去邻日取行。
 """
 
 from __future__ import annotations
@@ -9,11 +9,9 @@ from datetime import timedelta
 
 import pytest
 
-from habitus.prediction.model import SlotKey
-from habitus.prediction.nodes import pool_indexes
 from habitus.scene.views import DayIndexCache, slot_neighbourhood, slot_neighbourhood_until, slot_window
-from habitus.scene.views.clock import slot_floor, slot_index
 from habitus.series.reader import admitted
+from habitus.temporal.slots import slot_floor, slot_index
 from tests.unit.kind_ids import kind_id
 from tests.unit.scene.fixtures import DAY1, DAY2, SUBJECT, Site, at, publish
 
@@ -29,16 +27,16 @@ def cache_for(ground: Site) -> DayIndexCache:
 # ── 槽的起止 ─────────────────────────────────────────────────────────────────
 
 
-def test_slot_floor_uses_the_prediction_trees_slot_arithmetic() -> None:
-    """槽 = 本地时分 // slot_minutes，与 ``SlotKey.of`` 同一公式；秒与微秒抹掉，时区保留。"""
+def test_slot_floor_uses_the_temporal_slot_arithmetic() -> None:
+    """槽 = 本地时分 // slot_minutes，与 ``temporal.slot_index`` 同一公式；秒与微秒抹掉，时区保留。"""
 
     moment = at(DAY1, 16, 41).replace(second=37, microsecond=5)
     assert slot_floor(moment, slot_minutes=15) == at(DAY1, 16, 30)
     assert slot_floor(moment, slot_minutes=15).tzinfo == moment.tzinfo
 
 
-def test_the_window_covers_exactly_the_trees_pooling_slots() -> None:
-    """窗口里的每一分钟所在的槽，恰好是预测树 ``pool_indexes`` 那几格（不跨午夜时）；两处口径同一。"""
+def test_the_window_covers_exactly_the_slots_within_the_half_width() -> None:
+    """窗口里的每一分钟所在的槽，恰好是此刻那一槽前后各 ``half_width`` 槽（不跨午夜时）；与日内分布收缩用的邻域同一个半宽含义。"""
 
     moment = at(DAY1, 16, 41)
     start, end = slot_window(moment, slot_minutes=15, half_width=3)
@@ -48,7 +46,8 @@ def test_the_window_covers_exactly_the_trees_pooling_slots() -> None:
             for m in range(int((end - start).total_seconds() // 60))
         }
     )
-    assert covered == sorted(pool_indexes(SlotKey.of(moment, slot_minutes=15).slot, 3, 96))
+    centre = slot_index(moment, slot_minutes=15)
+    assert centre == 66 and covered == list(range(centre - 3, centre + 4))
 
 
 def test_slot_window_is_left_closed_right_open_and_crosses_midnight() -> None:

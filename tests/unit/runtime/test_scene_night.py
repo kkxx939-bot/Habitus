@@ -13,22 +13,25 @@ from datetime import timedelta
 
 from habitus.behavior import BehaviorDocumentWriter
 from habitus.behavior.uri import BehaviorURI
+from habitus.conditions import LocalCalendar
+from habitus.foundation.lifecycle import BackoffPolicy
+from habitus.infrastructure.lifecycle import RetryLedger
 from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.model_client import ChatClient, ModelResponse
 from habitus.model_client.structured import StructuredChatClient
 from habitus.runtime.scene_night import SceneNightConfig, SceneNightlyRun
-from habitus.runtime.scene_rhythms import class_curves
-from habitus.scene.calendar import NominalCalendar
-from habitus.scene.concepts import ConceptSet, ConceptStore, ContextScope
+from habitus.scene.concepts import ConceptSet, ContextScope
+from habitus.scene.concepts.calendar_situations import calendar_concepts
 from habitus.scene.concepts.catalog import CatalogChanges, CatalogClass, MovedOccurrence
+from habitus.scene.concepts.rhythm import RhythmRulers
+from habitus.scene.concepts.store import ConceptStore
 from habitus.scene.occurrences import ConceptHitStore
 from habitus.scene.occurrences.mapper import ConceptMapper, MapperConfig
 from habitus.scene.relations import RelationConfig
-from habitus.scene.relations.store import RelationStore
+from habitus.scene.relations.store import RelationStore, RelationStoreError
 from habitus.series.reader import read_series
 from tests.unit.foresight.scripted_model import ScriptedProvider, model_config
 from tests.unit.kind_ids import kind_id
-from tests.unit.runtime.prediction_tree_fixtures import curve, tree
 from tests.unit.scene.concept_fixtures import (
     BEDTIME_KEY,
     EAT_ON_WAKING,
@@ -164,32 +167,41 @@ def nightly(
         catalog=catalog or FakeCatalog(),
         concepts=concepts,
         hits=hits,
-        calendar=NominalCalendar(),
+        calendar=LocalCalendar(),
         timezone=CST,
         mapper_for=mapper_for,
         relations=RelationStore(tmp_path / "scene"),
-        relation_config=RelationConfig(slot_minutes=15, transition_window_slots=3, recurrence_window_days=90),
+        relation_config=RelationConfig(slot_minutes=15, transition_window_slots=3),
         subject=SUBJECT,
+        rulers=RULERS,
+        mapping_retries=RetryLedger(
+            tmp_path / "scene",
+            owner="scene-mapper",
+            policy=BackoffPolicy(base_seconds=60.0, cap_seconds=3600.0),
+            max_attempts=3,
+            clock=lambda: NOW,
+        ),
     )
     return run, provider
 
 
-def prediction_tree():
-    """早餐每天 07:00–08:30 有个峰；就寝夜里有个峰（曲线按类编号存）。"""
-
-    curves = {}
-    for weekday in range(7):
-        curves[(weekday, BREAKFAST)] = curve({14: 0.2, 15: 0.5, 16: 0.1})
-        curves[(weekday, SLEEP)] = curve({46: 0.4, 47: 0.5})
-    return tree(curves)
+RULERS = RhythmRulers(
+    slot_minutes=15,
+    merge_window_seconds=2700,
+    pool_half_width=3,
+    shrink_slot_to_pool=5.0,
+    shrink_pool_to_all_day=5.0,
+    min_peak_mass=0.10,
+    recent=35,
+)
 
 
 def night(run: SceneNightlyRun, day, now):  # type: ignore[no-untyped-def]
-    """跑一晚：序列按"夜批那天"截（``now`` 的日子），与预测树同一份。"""
+    """跑一晚：序列按"夜批那天"截（``now`` 的日子）。"""
 
     series = read_series(run.behavior_tree, cutoff=now.date())
     assert day < series.cutoff  # 第 N 晚映射 N 之前封口的日子
-    return asyncio.run(run.run(series=series, tree=prediction_tree(), now=now))
+    return asyncio.run(run.run(series=series, now=now))
 
 
 def publish_tonight(site: Site, day=TONIGHT) -> tuple[str, str]:
@@ -211,7 +223,11 @@ def test_the_steps_run_in_order_on_a_real_chain(tmp_path) -> None:
     # 只有「起床就吃」（语义区别、要当天时间线）问了模型；晚睡是规则判的
     assert report.mapped == 2 and report.unresolved == 0 and provider.calls == 2  # 「起床就吃」判两次
     assert "起床就吃" in provider.prompts[0] and "晚睡" not in provider.prompts[0].split("## 候选细分概念")[-1]
-    assert report.concepts == 3 + len(AUTHORED)  # 三个类的基础概念 + 盘上写好的四个
+    # 日历情境只长数据里出现过的取值：序列里只有今晚那一天（周二、18 号，日型没数据答不出）——周二、18号两个（裁定 59 第 7 条）
+    calendar = {item.name for item in calendar_concepts(now=NOW, observed=run.calendar.of_day(TONIGHT))} - {
+        item.name for item in AUTHORED
+    }
+    assert calendar == {"周二", "18号"} and report.concepts == 3 + len(AUTHORED) + len(calendar)
     records = {record.kind_token: record for record in run.hits.read_day(TONIGHT)}
     assert {hit.concept for hit in records[SLEEP].hits} == {"晚睡"}
     assert {hit.concept for hit in records[BREAKFAST].hits} == {"起床就吃"}
@@ -327,7 +343,6 @@ def test_a_split_rewrites_group_members_and_the_bridge_follows(tmp_path) -> None
     night(run, TONIGHT + timedelta(days=1), NOW + timedelta(days=1))
     concepts = run.concepts.read_all()
     assert concepts["用餐"].classes == (BREAKFAST, MEAL, BRUNCH)
-    assert class_curves(concepts)["用餐"] == (BREAKFAST, MEAL, BRUNCH)
     assert "用餐" in concepts.ancestors(BRUNCH)  # 命中聚合也认新成员
 
     catalog.merge(BREAKFAST, MEAL)
@@ -478,3 +493,106 @@ def test_a_corrupt_latest_relation_file_does_not_stall_the_nights(tmp_path) -> N
     assert any("读不了" in signal for signal in report.signals)
     assert store.latest_night(lane) == latest + timedelta(days=1)
     store.read(lane, latest + timedelta(days=1))
+
+
+def test_rhythm_anchors_come_from_last_nights_established_calendar_relations(tmp_path) -> None:
+    """节律那一行的"锚在周二"读上一晚已经成立的日历关系，只留最具体的那一族（裁定 59）。"""
+
+    from habitus.scene.relations import RelationKey, Segment
+    from habitus.scene.relations.state import LaneState, Relation, Status
+
+    site, hits = site_with_three_bedtimes(tmp_path)
+    run, _provider = nightly(tmp_path, hits, site)
+    concepts = ConceptSet((*calendar_concepts(now=NOW),))
+    earlier = TONIGHT - timedelta(days=1)
+    held = (
+        Relation(
+            RelationKey("session", "周二", MEAL, Segment.SITUATION), Status.ESTABLISHED, True, established_on=earlier
+        ),
+        Relation(
+            RelationKey("session", "工作日", MEAL, Segment.SITUATION), Status.ESTABLISHED, True, established_on=earlier
+        ),
+        Relation(
+            RelationKey("session", "周三", SLEEP, Segment.SITUATION), Status.CANDIDATE, True, discovered_on=earlier
+        ),
+    )
+    run.relations.write(LaneState(lane="session", night=earlier, family=3, relations=held), ())
+    assert run._anchors(concepts, TONIGHT) == {
+        MEAL: ("周二", "工作日")
+    }  # 候选不算；周几与日型两条都留（检验周几时日型固定住了）
+
+
+def test_rerunning_the_same_night_reverts_the_relations_a_split_touched_again(tmp_path) -> None:
+    """词表拆出新类之后那一晚，涉及被拆类的关系退回候选（裁定 59）。同一晚重跑（同日重启、封口滞后时晚序号不变）照样退回：
+    改了哪些类按上一晚关系状态记的词表版本算，不按概念集的同步进度（第一趟已推进，第二趟就看不到变化了；2026-10-18 四方评审）。"""
+
+    from habitus.scene.relations import RelationKey, Segment
+    from habitus.scene.relations.state import LaneState, Relation, Status
+
+    site, hits = site_with_three_bedtimes(tmp_path)
+    catalog = FakeCatalog()
+    run, _provider = nightly(tmp_path, hits, site, catalog=catalog)
+    publish_tonight(site)
+    earlier = TONIGHT - timedelta(days=1)
+    held = (
+        Relation(
+            RelationKey("session", SLEEP, BREAKFAST, Segment.NEXT_DAY), Status.ESTABLISHED, True, established_on=earlier
+        ),
+    )
+    run.relations.write(LaneState(lane="session", night=earlier, family=1, relations=held, vocabulary=1), ())
+    catalog.split(BREAKFAST, BRUNCH, "早午餐")
+    for _ in range(2):
+        report = night(run, TONIGHT, NOW)
+        stored = run.relations.read("session", report.night)
+        assert stored.vocabulary == catalog.version() == 2
+        assert all(item.status is not Status.ESTABLISHED for item in stored.relations if item.key == held[0].key)
+        reverted = [
+            item
+            for item in run.relations.transitions("session")
+            if item.night == report.night and item.key == held[0].key
+        ]
+        assert reverted and reverted[0].before is Status.ESTABLISHED and reverted[0].after is Status.CANDIDATE
+
+
+def test_weekday_sets_grow_only_from_raising_relations(tmp_path) -> None:
+    """周几集合只从抬高的周几关系合成：工作日天天做的事，周六、周日是压低的，不能和周一、周五并成一个集合再检验
+    （2026-10-18 四方评审）。"""
+
+    from habitus.scene.relations import RelationKey, Segment
+    from habitus.scene.relations.state import LaneState, Relation, Status
+
+    site, hits = site_with_three_bedtimes(tmp_path)
+    run, _provider = nightly(tmp_path, hits, site)
+    concepts = ConceptSet((*calendar_concepts(now=NOW),))
+    for name in concepts:
+        run.concepts.write(concepts[name])
+
+    def held(antecedent: str, upward: bool) -> Relation:
+        return Relation(
+            RelationKey("session", antecedent, MEAL, Segment.SITUATION), Status.CANDIDATE, upward, discovered_on=TONIGHT
+        )
+
+    state = LaneState(
+        "session", TONIGHT, 1, (held("周一", True), held("周五", True), held("周六", False), held("周日", False))
+    )
+    signals: list[str] = []
+    run._grow_weekday_sets(run.concepts.read_all(), state, NOW, signals)
+    assert "周一、周五" in run.concepts.read_all() and "周一、周五、周六、周日" not in run.concepts.read_all()
+    assert "周六、周日" not in run.concepts.read_all()
+
+
+def test_a_relation_table_that_cannot_be_written_fails_only_that_lane(tmp_path, monkeypatch) -> None:
+    """关系表写不出（超限）：这一晚照常走完、留信号，预测层读上一代；不让整晚停（26 号清单 2.5.2）。"""
+
+    site, hits = site_with_three_bedtimes(tmp_path)
+    publish_tonight(site)
+    run, _provider = nightly(tmp_path, hits, site)
+
+    def oversized(_state, _transitions):
+        raise RelationStoreError("relation night exceeds its size bound")
+
+    monkeypatch.setattr(run.relations, "write", oversized)
+    report = night(run, TONIGHT, NOW)
+
+    assert any(signal.startswith("relations: session 这一晚的关系表写不出") for signal in report.signals)
+    assert "session" not in report.relations

@@ -9,7 +9,6 @@ import yaml
 
 from habitus.config import ConfigError, HabitusConfig
 from habitus.config.loader import load_config_object, required_field, strict_fields, strict_object
-from tests.unit.runtime.fixtures import STARTUP_PARAMETERS
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE_CONFIG = REPOSITORY_ROOT / "habitus" / "config" / "example.yaml"
@@ -90,7 +89,9 @@ def test_secret_bearing_yaml_requires_private_file_permissions(tmp_path) -> None
     assert HabitusConfig.from_file(path).credentials.resolve("deepseek")["api_key"] == "private-secret"
 
 
-def test_credential_registry_rejects_missing_references_and_unsafe_values_without_owning_adapter_fields(tmp_path) -> None:
+def test_credential_registry_rejects_missing_references_and_unsafe_values_without_owning_adapter_fields(
+    tmp_path,
+) -> None:
     payload = valid_mapping(tmp_path)
     payload["models"]["chat"]["route"]["credential_ref"] = "missing-provider"
     with pytest.raises(ConfigError, match="does not exist"):
@@ -207,7 +208,9 @@ def test_strict_helpers_reject_loose_types_and_missing_required_fields() -> None
             "snapshot.max_item_bytes",
         ),
         (
-            lambda p: p["conversation"]["summary_vector_store"].update(collection=p["memory"]["vector_store"]["collection"]),
+            lambda p: p["conversation"]["summary_vector_store"].update(
+                collection=p["memory"]["vector_store"]["collection"]
+            ),
             "different vector collections",
         ),
         (
@@ -332,31 +335,31 @@ def test_scene_config_is_a_switch_plus_the_relation_thresholds(tmp_path) -> None
         SceneConfig.from_mapping({"enabled": "yes"})
 
 
-def test_relation_thresholds_come_from_config_and_the_clock_from_the_prediction_tree(tmp_path) -> None:
-    """写了的门槛覆盖默认值、没写的用默认值；槽宽、转移窗口、久别重来只认预测树那一组（语义树不另配）。"""
+def test_relation_thresholds_come_from_config_and_the_clock_from_temporal(tmp_path) -> None:
+    """写了的门槛覆盖默认值、没写的用默认值；槽宽、转移窗口只认 ``config.temporal`` 那一组（语义树不另配，裁定 59）。"""
 
     from habitus.config.scene import SceneConfig
     from habitus.runtime.scene_night import relation_config
     from habitus.scene.relations import RelationThresholds
 
-    scene = SceneConfig.from_mapping({"enabled": True, "relations": {"fdr": 0.2, "forward_min_antecedents": 3}})
-    assert scene.relations.overrides() == {"fdr": 0.2, "forward_min_antecedents": 3}
+    scene = SceneConfig.from_mapping({"enabled": True, "relations": {"fdr": 0.2, "forward_max_antecedents": 30}})
+    assert scene.relations.overrides() == {"fdr": 0.2, "forward_max_antecedents": 30}
     mapping = valid_mapping(tmp_path)
-    mapping["prediction"] = dict(STARTUP_PARAMETERS)
     mapping["behavior"] = {"primary_subject": "用户"}
-    mapping["scene"] = {"enabled": True, "relations": {"fdr": 0.2, "forward_min_antecedents": 3}}
+    mapping["scene"] = {"enabled": True, "relations": {"fdr": 0.2, "forward_max_antecedents": 30}}
     config = HabitusConfig.from_mapping(mapping)
     built = relation_config(config)
-    assert built.thresholds == RelationThresholds(fdr=0.2, forward_min_antecedents=3)
-    assert (built.slot_minutes, built.transition_window_slots, built.recurrence_window_days) == (
-        config.prediction.slot_minutes,
-        config.prediction.transition_window_slots,
-        config.prediction.recurrence_window_days,
+    assert built.thresholds == RelationThresholds(fdr=0.2, forward_max_antecedents=30)
+    # 时间尺子只认 config.temporal（裁定 59）
+    assert (built.slot_minutes, built.transition_window_slots) == (
+        config.temporal.slot_minutes,
+        config.temporal.transition_window_slots,
     )
     for bad, match in (
         ({"fdr": 1.0}, "fdr"),
         ({"min_relative_lift": -0.1}, "min_relative_lift"),
-        ({"maintenance_blocks": 0}, "maintenance_blocks"),
+        ({"condition_ask_min_antecedents": 0}, "condition_ask_min_antecedents"),
+        ({"max_combined_conditions": 0}, "max_combined_conditions"),
         ({"slot_minutes": 15}, "unknown"),  # 时间的数不在这一组
     ):
         with pytest.raises(ConfigError, match=match):
@@ -371,22 +374,28 @@ def test_locale_is_one_group_shared_by_the_scene_and_foresight_layers(tmp_path) 
     config = HabitusConfig.from_mapping(valid_mapping(tmp_path))
     assert config.locale.timezone == "Asia/Shanghai" and config.locale.region == "CN"
     assert str(config.locale.zone()) == "Asia/Shanghai"
-    assert config.locale.calendar_path is None  # 没有日历数据 = 日型恒为空，显式的零修正
+    assert config.locale.calendar_path is None  # 只用内置的放假安排；某一年没有数据，那一年的日型是未知
     for field_name, bad in (("timezone", "Nowhere/Nothing"), ("timezone", " "), ("region", "cn"), ("region", "CHN")):
         with pytest.raises(ConfigError, match=f"locale.{field_name}"):
             LocaleConfig.from_mapping({field_name: bad})
-    # 数据格式还没定：给了路径直接拒，不静默忽略——静默忽略会让人以为调休已经生效。
-    with pytest.raises(ConfigError, match="not supported yet"):
-        LocaleConfig.from_mapping({"calendar_path": "/tmp/cn-2026.json"})
+    # 日历跟着这个人在哪（裁定 59）：州一级的地区码也认；名义周末可配
+    assert LocaleConfig.from_mapping({"region": "US-CA", "nominal_weekend": [6, 5]}).nominal_weekend == (5, 6)
+    for bad in ({"nominal_weekend": []}, {"nominal_weekend": [7]}, {"nominal_weekend": [5, 5]}, {"region": "us-ca"}):
+        with pytest.raises(ConfigError, match="locale"):
+            LocaleConfig.from_mapping(bad)
+    # 覆盖目录（裁定 59）：给了就收下，目录在不在由读取时查；空串直接拒。
+    assert LocaleConfig.from_mapping({"calendar_path": "/srv/calendar"}).calendar_path == "/srv/calendar"
+    with pytest.raises(ConfigError, match="locale.calendar_path"):
+        LocaleConfig.from_mapping({"calendar_path": " "})
     with pytest.raises(ConfigError, match="unknown"):
         LocaleConfig.from_mapping({"zone": "UTC"})
 
 
 def test_foresight_carries_the_loss_ratios_and_protective_limits_and_needs_both_derived_trees(tmp_path) -> None:
-    """预测层这一组没有算法参数：时窗来自历史那几次的实际时刻，转移窗住在 prediction 那边，升不升从账上算（裁定 49）。
+    """预测层这一组没有算法参数：时窗来自历史那几次的实际时刻，转移窗住在 temporal 那边，升不升从账上算（裁定 49）。
     这里只有开关、两档可接受误提醒率（产品决定）、重轻多久重判、几道保护闸，以及一个还没定的开关（默认关，裁定 46）。
 
-    启用它却没启用两棵派生树是**配置自相矛盾**：预期的触发一半来自预测树、一半来自语义树，缺一边就装不出来。
+    启用它却没启用语义树是**配置自相矛盾**：机会表、复现与关系全从语义树那一晚来（预测树删了，裁定 59）。
     """
 
     from habitus.config.foresight import ForesightConfig
@@ -395,35 +404,31 @@ def test_foresight_carries_the_loss_ratios_and_protective_limits_and_needs_both_
     assert config.foresight.enabled is False
     assert [field.name for field in dataclasses.fields(ForesightConfig)] == [
         "enabled",
-        "line_floor",
-        "line_ceiling",
-        "cost_ratio_unjudged",
-        "severity_review_days",
+        "false_alarm_rate",
         "shadow_uses_unestablished",
         "daily_reminder_cap",
-        "holdout_rate",
-        "holdout_rate_heavy",
-        "unit_prior_strength",
+        "open_reminders_judged",
+        "unit_prior_share",
         "judge_transient_retries",
         "judge_transient_retry_delay_seconds",
         "tick_interval_seconds",
         "worker_shutdown_timeout_seconds",
+        "half_life_opportunities",
+        "unseen_day_types",
     ]
-    assert config.foresight.shadow_uses_unestablished is True and config.foresight.holdout_rate > 0
-    assert 0 < config.foresight.holdout_rate_heavy <= config.foresight.holdout_rate
-    assert config.foresight.line_floor < config.foresight.line_ceiling
+    assert config.foresight.shadow_uses_unestablished is True
+    assert config.foresight.unseen_day_types == "skip"  # 待用户定之前不外推（裁定 59 第 7 条）
+    assert config.foresight.false_alarm_rate == pytest.approx(0.33)  # 线 0.67，所有账同一条（裁定 58 第 1 条）
     for field_name, bad in (
-        ("line_floor", 1.0),
-        ("line_ceiling", True),
-        ("cost_ratio_unjudged", 20.0),
-        ("severity_review_days", 0),
+        ("false_alarm_rate", 1.0),
+        ("false_alarm_rate", True),
         ("daily_reminder_cap", 0),
-        ("holdout_rate", 0.6),
-        ("holdout_rate_heavy", 0.2),
+        ("open_reminders_judged", 0),
         ("shadow_uses_unestablished", "yes"),
         ("judge_transient_retries", -1),
         ("judge_transient_retry_delay_seconds", -1.0),
         ("worker_shutdown_timeout_seconds", 0),
+        ("unseen_day_types", "guess"),
     ):
         with pytest.raises(ConfigError, match=f"foresight.{field_name}"):
             ForesightConfig.from_mapping({field_name: bad})
@@ -431,15 +436,37 @@ def test_foresight_carries_the_loss_ratios_and_protective_limits_and_needs_both_
         ForesightConfig.from_mapping({"window_days": 3})
     with pytest.raises(ConfigError, match="unknown"):
         ForesightConfig.from_mapping({"speak_after_net_hits": 1})  # 节奏项已删（裁定 48、49）
-    with pytest.raises(ConfigError, match="line_floor must lie below"):
-        ForesightConfig.from_mapping({"line_floor": 0.6, "line_ceiling": 0.5})
-    with pytest.raises(ConfigError, match="holdout_rate_heavy must not exceed"):
-        ForesightConfig.from_mapping({"holdout_rate": 0.05, "holdout_rate_heavy": 0.1})
+    for removed in ("holdout_rate", "line_floor", "cost_ratio_unjudged", "severity_review_days"):
+        with pytest.raises(ConfigError, match="unknown"):  # 扣发与急缓这一版不做（裁定 58 第 1 条）
+            ForesightConfig.from_mapping({removed: 0.1})
 
     mapping = valid_mapping(tmp_path)
     mapping["foresight"] = {"enabled": True}
-    with pytest.raises(ConfigError, match="config.foresight is enabled"):
+    with pytest.raises(ConfigError, match="config.foresight is enabled but config.scene is not"):
         HabitusConfig.from_mapping(mapping)
+    # 预测树删了（裁定 59）：预测层只要语义树开着，不再要求 config.prediction
+    mapping["behavior"] = {"primary_subject": "家庭成员A"}
+    mapping["scene"] = {"enabled": True}
+    assert HabitusConfig.from_mapping(mapping).foresight.enabled is True
+
+
+def test_the_nightly_run_is_paced_by_the_scene_section() -> None:
+    """整晚那一趟的节拍归语义树那一段（清单 5.1）：默认一天一趟、停机等 30 秒；越界硬拒。"""
+
+    from habitus.config.scene import SceneConfig
+
+    default = SceneConfig()
+    assert (default.nightly_interval_seconds, default.nightly_shutdown_timeout_seconds) == (86_400.0, 30.0)
+    assert SceneConfig.from_mapping({"nightly_interval_seconds": 3600}).nightly_interval_seconds == 3600
+    for field_name, bad in (
+        ("nightly_interval_seconds", 30),
+        ("nightly_interval_seconds", 8 * 86_400),
+        ("nightly_interval_seconds", True),
+        ("nightly_shutdown_timeout_seconds", 0.5),
+        ("nightly_shutdown_timeout_seconds", "30"),
+    ):
+        with pytest.raises(ConfigError, match=f"scene.{field_name}"):
+            SceneConfig.from_mapping({field_name: bad})
 
 
 def test_behavior_kinds_bounds_match_the_domain_bounds() -> None:
@@ -460,3 +487,16 @@ def test_the_scene_relations_group_lists_every_relation_threshold() -> None:
     assert {item.name for item in dataclasses.fields(SceneRelationsConfig)} == {
         item.name for item in dataclasses.fields(RelationThresholds)
     }
+
+
+def test_behaviour_store_capacity_limits_come_through_the_config_boundary() -> None:
+    """26 号清单 8.2：存储的容量闸从 ``Config.behavior`` 进来，按前缀派生到领域配置的同名字段；没写的取领域默认值。"""
+
+    from habitus.config.behavior import BehaviorConfig
+
+    config = BehaviorConfig(observation_max_files=10, fusion_max_judgement_files=20, tree_max_children_per_directory=30)
+    assert config.overrides_for("observation_") == {"max_files": 10}
+    assert config.overrides_for("fusion_") == {"max_judgement_files": 20}
+    assert config.overrides_for("tree_") == {"max_children_per_directory": 30}
+    with pytest.raises(ValueError, match="observation_max_files"):
+        BehaviorConfig(observation_max_files=0)

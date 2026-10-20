@@ -116,10 +116,13 @@ def test_completion_only_source_creates_skipped_outcome_without_output(tmp_path)
         assert ensured.outcome.state is ConversationConsumerOutcomeState.SKIPPED
         assert ensured.outcome.skip_reason == "NO_TURNS"
         assert behavior.output_store.list(source_value) == ()
-        assert service.inspect(
-            source_value,
-            ConversationSourceConsumer.BEHAVIOR_SESSION,
-        ).state is ConversationConsumerDeliveryState.SKIPPED
+        assert (
+            service.inspect(
+                source_value,
+                ConversationSourceConsumer.BEHAVIOR_SESSION,
+            ).state
+            is ConversationConsumerDeliveryState.SKIPPED
+        )
 
     asyncio.run(scenario())
 

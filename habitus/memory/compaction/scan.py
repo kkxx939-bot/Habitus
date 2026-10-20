@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from habitus.foundation.integrity import canonical_json
+from habitus.foundation.lifecycle import BackoffPolicy
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.filesystem import atomic_replace_bytes, read_regular_bytes
 from habitus.memory.model import MemoryAddress
@@ -88,6 +89,7 @@ class MemoryLifecycleScanStore:
         self.max_file_bytes = max_file_bytes
         self.base_retry_seconds = float(base_retry_seconds)
         self.max_retry_seconds = float(max_retry_seconds)
+        self.backoff = BackoffPolicy(base_seconds=self.base_retry_seconds, cap_seconds=self.max_retry_seconds)
         digest = hashlib.sha256(str(tree.root).encode("utf-8")).hexdigest()[:24]
         self.lock_key = f"memory-lifecycle-scan:{digest}"
 
@@ -133,7 +135,7 @@ class MemoryLifecycleScanStore:
             after, failures = self._read()
             previous = failures.get(str(uri))
             attempts = 1 if previous is None else previous.attempts + 1
-            delay = min(self.max_retry_seconds, self.base_retry_seconds * (2 ** min(20, attempts - 1)))
+            delay = self.backoff.delay(attempts)
             message = str(error).strip() or type(error).__name__
             failure = MemoryLifecycleScanFailure(
                 uri=uri,

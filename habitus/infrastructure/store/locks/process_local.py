@@ -94,6 +94,17 @@ class ProcessLocalLockStore:
             if current is not None and current[:2] == (token.token, token.fence):
                 self.locks.pop(token.lock_key, None)
 
+    def discard_idle(self, lock_key: str) -> bool:
+        """空闲（不存在、已释放或已过期）时删掉这把锁的全部状态，连同 fence 计数。"""
+
+        with self._guard:
+            existing = self.locks.get(lock_key)
+            if existing is not None and existing[2] > datetime.now(UTC):
+                return False
+            removed = self.locks.pop(lock_key, None) is not None
+            removed = self.fences.pop(lock_key, None) is not None or removed
+            return removed
+
     def observability_snapshot(self, *, warning_seconds: float) -> LockStoreSnapshot:
         """返回当前有效锁数量和年龄，不暴露任何锁身份。"""
 

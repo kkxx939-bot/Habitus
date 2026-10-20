@@ -8,8 +8,11 @@ function booleanValue(value, fallback) {
 }
 
 function integerValue(value, fallback, minimum, maximum) {
+  // 没设、空串、不是正整数都走默认值：Number("") 是 0，原先会被收成下限，比如宽限期从 24 小时静默降到 1 小时（L10.12）。
+  // 正数照旧收进 [下限, 上限]
+  if (value == null || String(value).trim() === "") return fallback;
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) return fallback;
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return fallback;
   return Math.max(minimum, Math.min(maximum, parsed));
 }
 
@@ -73,5 +76,10 @@ export function loadPluginConfig(env = process.env) {
     timeoutMs: integerValue(env.HABITUS_PLUGIN_TIMEOUT_MS, 15_000, 250, 120_000),
     maxTranscriptBytes: integerValue(env.HABITUS_PLUGIN_MAX_TRANSCRIPT_BYTES, 64 * 1024 * 1024, 1024, 256 * 1024 * 1024),
     debug: booleanValue(env.HABITUS_PLUGIN_DEBUG, false),
+    // 操作日志按大小轮转（26 号清单 7.2）：超过这么大就换一份，旧的留这么多份
+    operationLogMaxBytes: integerValue(env.HABITUS_PLUGIN_LOG_MAX_BYTES, 5 * 1024 * 1024, 4096, 256 * 1024 * 1024),
+    operationLogKeep: integerValue(env.HABITUS_PLUGIN_LOG_KEEP, 3, 1, 50),
+    // 会话状态的退场（26 号清单 7.4）：transcript 不在了、outbox 空了，状态又这么久没动过，才删
+    sessionRetireGraceMs: integerValue(env.HABITUS_PLUGIN_SESSION_GRACE_HOURS, 24, 1, 720) * 3_600_000,
   });
 }

@@ -14,6 +14,7 @@ from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from habitus.conversation import ConversationOrderedPredecessorPendingError, ConversationSourceCapacityError
 from habitus.infrastructure.store.contracts.lock import LockLostError
 from habitus.infrastructure.vector import (
     VectorStoreBusyError,
@@ -281,6 +282,24 @@ def map_exception(exc: Exception) -> HTTPErrorSpec:
             "Storage operation timed out",
             True,
             details={"conflict_type": "path_busy"},
+            retry_after_seconds=1,
+        )
+    if isinstance(exc, ConversationSourceCapacityError):
+        # 会话源的生命周期账满了：等生命周期把旧的放掉再投（同样是 ValueError 的子类，排在下面之前）
+        return HTTPErrorSpec(
+            HTTPErrorCode.RESOURCE_EXHAUSTED,
+            "Conversation source capacity is exhausted",
+            True,
+            details={"conflict_type": "conversation_source_capacity"},
+            retry_after_seconds=60,
+        )
+    if isinstance(exc, ConversationOrderedPredecessorPendingError):
+        # 有序 Consumer 在等同一会话更早的源到终态：正常排队，重试即可推进。它是 ValueError 的子类，必须排在下面之前。
+        return HTTPErrorSpec(
+            HTTPErrorCode.ABORTED,
+            "An earlier conversation source is still being processed",
+            True,
+            details={"conflict_type": "conversation_predecessor_pending"},
             retry_after_seconds=1,
         )
     if isinstance(exc, ValueError):

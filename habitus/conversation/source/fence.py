@@ -146,7 +146,7 @@ class ConversationConsumerExecutionFence:
         *,
         conversation_ordered: bool,
     ) -> tuple[str, ...]:
-        consumer_key = f"conversation-source-consumer:{source.source_id}:{consumer.value}"
+        consumer_key = consumer_lock_key(source.source_id, consumer)
         if not conversation_ordered:
             return (consumer_key,)
         # 锁键字面量与摘要载荷保持历史取值：它们不是持久数据，但新旧进程并存时
@@ -161,8 +161,15 @@ class ConversationConsumerExecutionFence:
         return (f"conversation-memory:{address_digest}", consumer_key)
 
 
+def consumer_lock_key(source_id: str, consumer: ConversationSourceConsumer) -> str:
+    """一份源、一个消费者的执行锁键；交付与释放用同一把，释放时持有它就不会和交付并发。"""
+
+    return f"conversation-source-consumer:{source_id}:{ConversationSourceConsumer(consumer).value}"
+
+
 __all__ = [
     "ConversationConsumerExecutionFence",
     "ConversationConsumerExecutionLease",
     "ConversationConsumerLeaseLostError",
+    "consumer_lock_key",
 ]

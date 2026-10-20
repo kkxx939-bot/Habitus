@@ -121,3 +121,51 @@ def test_the_window_must_be_positive_and_now_must_be_aware(tmp_path: Path) -> No
         index.expire(datetime(2026, 8, 14))  # 过期仍按墙钟切窗口，必须带时区
     with pytest.raises(BehaviorFusionError):
         index._path(BASE, "not-a-receipt-id")
+
+
+def test_a_session_source_resumed_ten_days_later_still_knows_its_first_turns(tmp_path: Path) -> None:
+    """26 号清单 6.1：会话 lane 的覆盖记录带着所属会话源，源的 Behavior 到终态之前不删——做到一半的源 10 天后才恢复，
+    前几轮照样认得出写过、不重新描述；到终态之后才删。没带源的照旧按 7 天的窗口过期。"""
+
+    settled: set[str] = set()
+    index = BehaviorCoverageIndex(tmp_path, window_days=7, settled=lambda source: source in settled)
+    first, second = observation(0, "第一轮：人开口"), observation(4, "第一轮：助手做完")
+    stray = observation(8, "没带源的一条")
+    judged = BASE + timedelta(minutes=5)
+    index.record(receipt((first, second), judged_at=judged), sources=("source-1",))
+    index.record(receipt((stray,), judged_at=judged))
+    ten_days = judged + timedelta(days=10)
+    assert index.expire(ten_days) == 1  # 只删了没带源的那条
+    covered = BehaviorCoverageIndex(tmp_path, window_days=7).covered_observation_ids()
+    assert covered == {first.observation_id, second.observation_id}
+    settled.add("source-1")
+    assert index.expire(ten_days) == 1
+    assert index.covered_observation_ids() == frozenset()
+    assert not (tmp_path / "fusion" / "coverage" / judged.astimezone(UTC).date().isoformat()).exists()
+
+
+def test_a_settled_source_is_released_even_inside_the_window_but_stored_observations_hold_it(tmp_path: Path) -> None:
+    index = BehaviorCoverageIndex(tmp_path, window_days=7, settled=lambda source: True)
+    first = observation(0, "人开口")
+    judged = BASE + timedelta(minutes=5)
+    index.record(receipt((first,), judged_at=judged), sources=("source-1",))
+    assert index.expire(judged + timedelta(hours=1), retain={first.observation_id}) == 0  # 交付还在：留着
+    assert index.expire(judged + timedelta(hours=1)) == 1
+
+
+def test_records_are_decoded_once_and_forgotten_when_deleted(tmp_path: Path) -> None:
+    """26 号清单 6.2：记录只创建、不改写，读一次就缓存；删的时候一起淘汰。"""
+
+    index = BehaviorCoverageIndex(tmp_path, window_days=7, settled=lambda source: True)
+    first = observation(0, "人开口")
+    judged = BASE + timedelta(minutes=5)
+    index.record(receipt((first,), judged_at=judged), sources=("source-1",))
+    assert index.covered_observation_ids() == {first.observation_id}
+    (path,) = list((tmp_path / "fusion" / "coverage").rglob("*.json"))
+    path.chmod(0o000)  # 第二次读不碰盘
+    try:
+        assert index.covered_observation_ids() == {first.observation_id}
+    finally:
+        path.chmod(0o644)
+    index.expire(judged + timedelta(hours=1))
+    assert index._cache == {}

@@ -78,3 +78,31 @@ def test_a_bad_file_someone_else_read_does_not_fail_the_reminder_check(tmp_path)
     ledger.settlements_on(FORMED.date())  # 别的读口读到了坏文件（记在共享的那一份里）
     assert not RemindedLookup(ledger)("s-k0002", FORMED + timedelta(minutes=30))
     assert len(ledger.take_unreadable()) == 1  # 共享的那一份还在，留给读到它的那一拍去报
+
+
+def test_a_day_that_is_finished_leaves_the_memory_cache(tmp_path) -> None:
+    """26 号清单 6.13：结完的日子不会再被问到，缓存跟着淘汰。"""
+
+    ledger = ForesightLedgerStore(tmp_path / "ledger")
+    lookup = RemindedLookup(ledger)
+    ledger.record_expectation(expectation("e1"))
+    ledger.record_delivery(FORMED.date(), Delivery("e1", FORMED + timedelta(minutes=15), 1, True, "说了", 1.0, "话"))
+    assert lookup("s-k0002", FORMED + timedelta(minutes=30)) and FORMED.date() in lookup._spoken
+    ledger.mark_final(FORMED.date(), at=FORMED + timedelta(days=1))
+    assert not lookup("s-k0002", FORMED + timedelta(minutes=30)) and lookup._spoken == {}
+
+
+def test_a_finished_day_leaves_the_cache(tmp_path) -> None:
+    """6.13：结完的日子不会再被问到，它的缓存淘汰掉——常驻的查法不随历史一直长（L10.14 补测：原先没有测试守着）。"""
+
+    ledger = ForesightLedgerStore(tmp_path / "ledger")
+    lookup = RemindedLookup(ledger)
+    ledger.record_expectation(expectation("e1"))
+    ledger.record_delivery(FORMED.date(), Delivery("e1", FORMED + timedelta(minutes=15), 1, True, "说了", 1.0, "话"))
+    assert lookup("s-k0002", FORMED + timedelta(minutes=30))
+    assert FORMED.date() in lookup._spoken
+
+    ledger.mark_final(FORMED.date(), at=FORMED + timedelta(hours=3))
+    assert not lookup("s-k0002", FORMED + timedelta(minutes=30))
+
+    assert lookup._spoken == {}

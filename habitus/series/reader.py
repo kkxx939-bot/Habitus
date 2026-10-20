@@ -1,6 +1,6 @@
-"""把行为树读成第 N 晚的事件序列。行为树的读法**只写在这里**，预测树与语义树都不再自己读、自己判。
+"""把行为树读成第 N 晚的事件序列。行为树的读法**只写在这里**，语义树、``temporal`` 与机会表都不再自己读、自己判。
 
-只有组合根调用本模块（架构测试钉死）：它 import 行为树与词表的编号规则，两棵树只 import 纯值的 ``series.model``。
+只有组合根调用本模块（架构测试钉死）：它 import 行为树与词表的编号规则，读者只 import 纯值的 ``series.model``。
 
 读法：
 
@@ -11,27 +11,27 @@
   「非事件」不进序列，连顺序里也当它不存在；既不是编号也不是占位标记的硬拒；lane 取编号前缀；
 - 观测空白两种都进（``GapKind``），跨过截止时刻的截到那一刻；空白的类型在这里翻译一次，上游改名时以未知取值硬失败；
 - ``concurrent_with`` 链接原样读成无序的 uri 对，只留两端都在序列里的（指向被跳过的一端，那条并行没有两个可用端点）；
-- ``reminded`` 原样带着：被提醒过的发生要不要算进自然率，是消费方的事（预测树让它占位不计数，见 ``prediction.source``）。
+- ``reminded`` 原样带着：被提醒过的发生要不要算进自然率，是消费方的事（``temporal`` 算它做了、但不是自然发生，见 ``temporal.episodes``）。
 
-两条 lane 各是一整套（裁定 35）：行为树、预测树、语义树各有会话、物理两支，各读各的，这里读到的一棵行为树里只有一条
+两条 lane 各是一整套（裁定 35）：行为树、语义树各有会话、物理两支，各读各的，这里读到的一棵行为树里只有一条
 lane 的记录与空白。序列上的 ``lane`` 字段（取自编号前缀）与下游按 lane 分组的逻辑因此总是只有一组——留着不影响结果，
-要删是动三棵树的事。
+要删是动行为树与语义树的事。
 
-TODO(BHV-SESSION-LANE-001)：会话 lane 一轮一条之后，两处读数的含义变了（裁定 32；归词表与下游处理）。
-``prediction/recurrence.py`` 的复发间隔取同一类相邻两条开始时刻的差——一轮一条时量到的是两句话隔多久（三天实测
-全部轮间隔中位 3.7 分钟）；``prediction/edges.py`` 的转移取同 lane 的下一条，大部分会是同一类接同一类。
-15 分钟槽的主计数按天按槽记一次，不受影响。
+TODO(BHV-SESSION-LANE-001)：会话 lane 一轮一条之后（裁定 32），同一类相邻两条常常只隔几分钟（三天实测全部轮间隔中位
+3.7 分钟）。读法不在这里改：``temporal`` 把同一类开始时刻隔不到 45 分钟的连着并成一次、间隔按日历日量（裁定 59），
+关系检验的"同一条链"同一把尺；会话 lane 的切分本身归词表与融合。
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Sequence
 from datetime import date, datetime
 
 from habitus.behavior.document import BehaviorDocument, BehaviorLinkType
 from habitus.behavior.kinds.ids import KindIdError, Lane, lane_of_token, not_event_token, pending_token
 from habitus.behavior.schema.vocabulary import PROMPTERS
-from habitus.behavior.tree import BehaviorAddress, BehaviorKind, BehaviorTree
+from habitus.behavior.tree import BehaviorKind, BehaviorTree
+from habitus.behavior.tree.dirty_days import DirtyDayLog
 from habitus.behavior.uri import BehaviorURI
 from habitus.series.model import (
     EventSeries,
@@ -45,32 +45,74 @@ from habitus.series.model import (
     disproves,
 )
 
-_PAGE_LIMIT = 10_000
 
-# TODO(BHV-LIFECYCLE-001·序列读取): 每晚读行为树是全量扫描，日集合枚举在文档数超过分页上限后二次增长。
-# - 现状：``_days`` 为了拿到"有哪些天"，用 ``list_addresses(kind, limit=10_000, after=…)`` 分页枚举**全部叶子**；
-#   ``BehaviorTree.list_addresses`` 每页都从头重走、按游标跳过，总成本随 页数 × 文档数 增长。树上没有"只列日期"的读接口。
-# - 具体场景：实测 9,270 条 occurrence，页大小 10,000（1 页）0.21s、2,000（5 页）1.67s、1,000（10 页）3.20s。
-#   按约 400 条/天推算，一年约 146,000 条 = 15 页 → 仅"有哪些天"这一步就约 50 秒，而答案只是 365 个日期。
-# - 影响大小：中。夜批离线，失败只报 stale，不影响正确性；成本随历史增长。
-# - 改造方案：① 行为树增加只读的 ``list_days(kind)``，只枚举 YYYY/MM/DD 目录；② 生命周期给行为树定下保留期之后，
-#   只读保留窗内的日期。
-# - 时机：与 BHV-LIFECYCLE-001 统一批次做（用户裁定 2026-09-01：生命周期三棵树统一设计）。在此之前一律全量读——
-#   没有统一门槛之前少读任何一天都会静默改变曝光分母。
+class SeriesReader:
+    """按天缓存行为树文档，每晚在内存里重新拼整份序列（26 号清单 6.7）。
+
+    序列不能按天拆开增量算：空白按截止时刻截断、证伪看全部记录的起点、并行关系跨天——所以缓存的是**解码好的文档**，拼装
+    每晚全量重做。哪些天要重读看归约记下的脏日日志（``behavior.tree.dirty_days``）：读到第几号记在这里，读完截掉；
+    第一次读（缓存是空的）先记下日志读到哪、再读全部日子，期间新记的日子下一次照常重读。新出现的日子（树上有、缓存里没有）
+    当场读。"""
+
+    def __init__(self, tree: BehaviorTree, logs: Sequence[DirtyDayLog] = ()) -> None:
+        if not isinstance(tree, BehaviorTree):
+            raise SeriesError("tree must be a BehaviorTree")
+        self.tree = tree
+        self.logs = tuple(logs)
+        self._days: dict[tuple[BehaviorKind, date], tuple[BehaviorDocument, ...]] = {}
+        self._read_through: list[int] | None = None
+
+    def read(self, *, cutoff: date) -> EventSeries:
+        """第 ``cutoff`` 晚的序列：截止日之前每一天的 occurrence 与空白。"""
+
+        if isinstance(cutoff, datetime) or not isinstance(cutoff, date):
+            raise SeriesError("cutoff must be a date")
+        if not self.logs:
+            # 没有脏日日志就不知道哪天变过：不缓存，每次照读（缓存了只会把改过的日子一直读成旧的）
+            self._days.clear()
+        self._forget_dirty_days()
+        return _assemble(
+            self._documents(BehaviorKind.OCCURRENCE, cutoff), self._documents(BehaviorKind.GAP, cutoff), cutoff
+        )
+
+    def _forget_dirty_days(self) -> None:
+        if self._read_through is None:
+            self._read_through = [log.last() for log in self.logs]
+            return
+        for index, log in enumerate(self.logs):
+            last, days = log.after(self._read_through[index])
+            for day in days:
+                for kind in (BehaviorKind.OCCURRENCE, BehaviorKind.GAP):
+                    self._days.pop((kind, day), None)
+            self._read_through[index] = last
+            log.truncate_through(last)
+
+    def _documents(self, kind: BehaviorKind, cutoff: date) -> list[BehaviorDocument]:
+        found: list[BehaviorDocument] = []
+        for day in self.tree.days(kind):
+            if day >= cutoff:
+                continue
+            key = (kind, day)
+            if key not in self._days:
+                self._days[key] = self.tree.read_day(kind, day)
+            found.extend(self._days[key])
+        return found
 
 
 def read_series(tree: BehaviorTree, *, cutoff: date) -> EventSeries:
-    """第 ``cutoff`` 晚的序列：截止日之前每一天的 occurrence 与空白。"""
+    """第 ``cutoff`` 晚的序列，读一次不缓存（夜批用常驻的 ``SeriesReader``）。"""
 
-    if not isinstance(tree, BehaviorTree):
-        raise SeriesError("tree must be a BehaviorTree")
-    if isinstance(cutoff, datetime) or not isinstance(cutoff, date):
-        raise SeriesError("cutoff must be a date")
+    return SeriesReader(tree).read(cutoff=cutoff)
+
+
+def _assemble(
+    occurrences: Sequence[BehaviorDocument], gap_documents: Sequence[BehaviorDocument], cutoff: date
+) -> EventSeries:
     boundary = EventSeries(cutoff=cutoff)
     records: list[SeriesRecord] = []
     skipped: list[SkippedRecord] = []
     links: list[tuple[str, str]] = []
-    for document in _documents(tree, BehaviorKind.OCCURRENCE, cutoff):
+    for document in occurrences:
         uri = str(BehaviorURI.from_address(document.address))
         day = document.address.occurred_on
         reason = skip_reason(document)
@@ -83,13 +125,12 @@ def read_series(tree: BehaviorTree, *, cutoff: date) -> EventSeries:
             (uri, str(link.to_uri)) for link in document.links if link.link_type is BehaviorLinkType.CONCURRENT_WITH
         )
     present = {record.uri for record in records}
-    # 空白在这里消解一次（``disproves``）：之后预测树、关系检验读到的是同一份
+    # 空白在这里消解一次（``disproves``）：之后 temporal、关系检验读到的是同一份
     starts = sorted(record.started_at for record in records)
     gaps = [
         gap
         for gap in (
-            clip_gap(_gap(document), boundary.boundary_for(document.address.started_at))
-            for document in _documents(tree, BehaviorKind.GAP, cutoff)
+            clip_gap(_gap(document), boundary.boundary_for(document.address.started_at)) for document in gap_documents
         )
         if not disproves(gap.kind, gap.started_at, gap.ended_at, starts)
     ]
@@ -159,21 +200,6 @@ def _gap(document: BehaviorDocument) -> SeriesGap:
         ended_at=_local(document.fields.get("ended_at"), "ended_at"),
         kind=kind,
     )
-
-
-def _documents(tree: BehaviorTree, kind: BehaviorKind, cutoff: date) -> Iterator[BehaviorDocument]:
-    """按天整块读（逐篇 ``read`` 会让每天的目录被重复枚举、成本随篇数平方增长），只读截止日之前的日子。"""
-
-    days: set[date] = set()
-    cursor: BehaviorAddress | None = None
-    while True:
-        page = tree.list_addresses(kind, limit=_PAGE_LIMIT, after=cursor)
-        days.update(address.occurred_on for address in page)
-        if len(page) < _PAGE_LIMIT:
-            break
-        cursor = page[-1]
-    for day in sorted(day for day in days if day < cutoff):
-        yield from tree.read_day(kind, day)
 
 
 def _lane(token: str) -> Lane:

@@ -297,3 +297,35 @@ def test_store_enforces_capacity_and_canonical_leaf_names(tmp_path) -> None:
     canonical.rename(day_dir / canonical.name.replace("早餐", "早餐 "))  # 非规范叶名
     with pytest.raises(ConceptHitStoreError, match="canonical"):
         store.read_day(DAY1)
+
+
+def test_a_finished_day_is_decoded_once_and_read_again_only_when_its_marker_changes(tmp_path) -> None:
+    """26 号清单 6.10：做完的日子按（日子, 完成标记）缓存解码好的命中，映射、日上下文与关系检验共用；重做（标记变了）重读；
+    没做完的不缓存。"""
+
+    from datetime import timedelta
+
+    site = Site(tmp_path, now=NOW)
+    uri = publish(site.behavior_tree, DAY1, "就寝", 23, 50)
+    store = ConceptHitStore(tmp_path / "scene")
+    store.write(hits_for(uri, ConceptHit("晚睡", "轻")))
+    decoded: list[object] = []
+    original = store._decode
+
+    def counting(payload, address):  # type: ignore[no-untyped-def]
+        decoded.append(address)
+        return original(payload, address)
+
+    store._decode = counting  # type: ignore[method-assign]
+    store.read_day(DAY1)
+    store.read_day(DAY1)
+    assert len(decoded) == 2  # 没做完：每次都读盘
+    store.complete_day(DAY1, records=1, completed_at=NOW, mapper=MAPPER)
+    decoded.clear()
+    first = store.read_day(DAY1)
+    assert store.read_day(DAY1) == first and len(decoded) == 1  # 做完了：只解码一次
+    store.retain_only(DAY1, frozenset({BehaviorURI.parse(uri).to_address().identity_name}))
+    store.write(hits_for(uri, ConceptHit("晚睡", "重")))
+    store.complete_day(DAY1, records=1, completed_at=NOW + timedelta(days=1), mapper=MAPPER)
+    (redone,) = store.read_day(DAY1)
+    assert redone.hits[0] == ConceptHit("晚睡", "重")  # 重做过：标记变了、重读

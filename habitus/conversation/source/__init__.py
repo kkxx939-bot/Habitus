@@ -1,5 +1,6 @@
 """不可变 Conversation Source、Output、Outcome、执行栅栏与恢复。"""
 
+from habitus.conversation.source.address import SourceAddress
 from habitus.conversation.source.coordinator import (
     ConversationSourceCoordinator,
     ConversationSourceDispatchHandle,
@@ -16,11 +17,15 @@ from habitus.conversation.source.fence import (
     ConversationConsumerExecutionLease,
     ConversationConsumerLeaseLostError,
 )
+from habitus.conversation.source.index import SourceIndex, SourceMarker
+from habitus.conversation.source.ledger import ConversationSourceLedger
 from habitus.conversation.source.model import (
+    ConversationSourceCapacityError,
     ConversationSourceEnvelope,
     ConversationSourceError,
     conversation_source_request_digest,
 )
+from habitus.conversation.source.pending import PendingSources
 from habitus.conversation.source.receipt import (
     ConsumerOutputRef,
     ConversationConsumerOutcome,
@@ -33,9 +38,12 @@ from habitus.conversation.source.receipt import (
 )
 from habitus.conversation.source.recovery import (
     ConversationSourceRecovery,
+    ConversationSourceRecoveryDeferredError,
     ConversationSourceRecoveryEntry,
+    ConversationSourceRecoveryPlan,
     ConversationSourceRecoveryResult,
 )
+from habitus.conversation.source.release import ConversationSourceReleaser
 from habitus.conversation.source.repair import (
     ConversationSourceOutputRepair,
     ConversationSourceRepairError,
@@ -49,8 +57,16 @@ from habitus.conversation.source.state import (
     ConversationConsumerStateInspector,
 )
 from habitus.conversation.source.store import ConversationSourceStore
+from habitus.conversation.source.watermark import AddressWatermarks
 
 __all__ = [
+    "AddressWatermarks",
+    "ConversationSourceLedger",
+    "ConversationSourceReleaser",
+    "PendingSources",
+    "SourceAddress",
+    "SourceIndex",
+    "SourceMarker",
     "ConsumerOutputRef",
     "ConversationConsumerBrokenOutcomeError",
     "ConversationConsumerCorruptionError",
@@ -76,10 +92,13 @@ __all__ = [
     "ConversationSourceOutputRepair",
     "ConversationSourceRepairError",
     "ConversationSourceRepairResult",
+    "ConversationSourceCapacityError",
     "ConversationSourceError",
     "ConversationSourcePendingDelivery",
     "ConversationSourceRecovery",
+    "ConversationSourceRecoveryDeferredError",
     "ConversationSourceRecoveryEntry",
+    "ConversationSourceRecoveryPlan",
     "ConversationSourceRecoveryResult",
     "ConversationSourceStore",
     "conversation_consumer_output_id",

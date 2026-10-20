@@ -120,7 +120,9 @@ def test_field_schema_rejects_invalid_allowed_values(allowed: object) -> None:
         _field(allowed_values=allowed)
 
 
-@pytest.mark.parametrize("field_type", [MemoryFieldType.INTEGER, MemoryFieldType.NUMBER, MemoryFieldType.BOOLEAN, MemoryFieldType.DATE])
+@pytest.mark.parametrize(
+    "field_type", [MemoryFieldType.INTEGER, MemoryFieldType.NUMBER, MemoryFieldType.BOOLEAN, MemoryFieldType.DATE]
+)
 def test_non_string_field_rejects_allowed_values(field_type: MemoryFieldType) -> None:
     with pytest.raises(MemorySchemaError, match="string fields"):
         _field(field_type=field_type, allowed_values=("value",))
@@ -146,7 +148,10 @@ def test_default_schemas_follow_confirmed_tree_and_operation_modes() -> None:
         MemoryKind.PREFERENCE: ("preferences/{topic}.md", MemoryOperationMode.UPSERT),
         MemoryKind.ENTITY: ("entities/{category}/{name}.md", MemoryOperationMode.UPSERT),
         MemoryKind.TOOL: ("tools/{tool_name}.md", MemoryOperationMode.UPSERT),
-        MemoryKind.EVENT: ("events/{event_date:%Y}/{event_date:%m}/{event_date:%d}/{event_name}.md", MemoryOperationMode.ADD_ONLY),
+        MemoryKind.EVENT: (
+            "events/{event_date:%Y}/{event_date:%m}/{event_date:%d}/{event_name}.md",
+            MemoryOperationMode.ADD_ONLY,
+        ),
         MemoryKind.INTENTION: ("intentions/{intent_name}.md", MemoryOperationMode.UPSERT),
     }
     for schema in SCHEMAS:
@@ -157,7 +162,9 @@ def test_default_schemas_follow_confirmed_tree_and_operation_modes() -> None:
 def test_default_schema_address_fields_exactly_match_path_placeholders(schema: MemoryTypeSchema) -> None:
     address_names = {field.name for field in schema.address_fields}
     assert address_names == set(_template_fields(schema.path_template, "memory path template"))
-    assert all(field.required and field.merge_strategy is MemoryMergeStrategy.IMMUTABLE for field in schema.address_fields)
+    assert all(
+        field.required and field.merge_strategy is MemoryMergeStrategy.IMMUTABLE for field in schema.address_fields
+    )
 
 
 @pytest.mark.parametrize("schema", SCHEMAS, ids=lambda item: item.kind.value)
@@ -167,7 +174,9 @@ def test_default_schema_content_fields_all_appear_in_markdown(schema: MemoryType
 
 
 @pytest.mark.parametrize("kind", tuple(MemoryKind))
-@pytest.mark.parametrize("forbidden", ["uri", "revision", "created_at", "updated_at", "owner", "tag", "confidence", "evidence", "page_id"])
+@pytest.mark.parametrize(
+    "forbidden", ["uri", "revision", "created_at", "updated_at", "owner", "tag", "confidence", "evidence", "page_id"]
+)
 def test_every_memory_payload_rejects_system_or_unknown_fields(kind: MemoryKind, forbidden: str) -> None:
     with pytest.raises(MemorySchemaError, match="unknown"):
         REGISTRY.validate(kind, {**memory_fields(kind), forbidden: "forbidden"})
@@ -200,7 +209,9 @@ def test_every_required_memory_field_rejects_null(kind: MemoryKind, field: str) 
         REGISTRY.validate(kind, {**memory_fields(kind), field: None})
 
 
-STRING_FIELDS = tuple((kind, field.name, field.required) for kind, field in FIELDS if field.field_type is MemoryFieldType.STRING)
+STRING_FIELDS = tuple(
+    (kind, field.name, field.required) for kind, field in FIELDS if field.field_type is MemoryFieldType.STRING
+)
 DATE_FIELDS = tuple((kind, field.name) for kind, field in FIELDS if field.field_type is MemoryFieldType.DATE)
 
 
@@ -267,7 +278,9 @@ def test_intention_rejects_unknown_or_non_string_status(status: object) -> None:
         REGISTRY.validate(MemoryKind.INTENTION, {"intent_name": "事项", "status": status})
 
 
-@pytest.mark.parametrize("field", ["purpose", "when_to_use", "invocation", "constraints", "failure_recovery", "verification"])
+@pytest.mark.parametrize(
+    "field", ["purpose", "when_to_use", "invocation", "constraints", "failure_recovery", "verification"]
+)
 def test_tool_accepts_each_knowledge_field_independently(field: str) -> None:
     payload = {"tool_name": "workspace.inspect", field: "稳定知识"}
     assert REGISTRY.validate(MemoryKind.TOOL, payload)[field] == "稳定知识"

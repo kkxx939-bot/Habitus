@@ -434,6 +434,7 @@ def test_operations_and_metrics_are_available_on_the_loopback_service(monkeypatc
     retry_call = next(value for name, value in handlers.calls if name == "retry_failed_job")
     assert isinstance(retry_call, dict) and retry_call["expected_version"] == "a" * 64
 
+
 def test_readiness_keeps_health_snapshot_on_503_and_lifespan_closes_after_start_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

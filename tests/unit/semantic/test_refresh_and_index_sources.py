@@ -95,4 +95,3 @@ def test_index_source_walk_contains_l2_and_available_l0_l1_but_no_missing_layers
     assert detail.index_kind == "preference"
     assert detail.revision == preference.metadata.revision
     assert detail.scope_roots[0] == "memory://"
-

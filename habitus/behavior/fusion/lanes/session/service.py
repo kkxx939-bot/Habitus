@@ -5,11 +5,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import tzinfo
 
 from habitus.behavior.fusion.lanes.session.config import SessionLaneConfig
-from habitus.behavior.fusion.lanes.session.material import render_turn
+from habitus.behavior.fusion.lanes.session.material import render_reminders, render_turn
 from habitus.behavior.fusion.lanes.session.model import SessionTurn
 from habitus.behavior.fusion.lanes.session.prompt import (
     SESSION_SYSTEM_PROMPT,
@@ -17,6 +18,7 @@ from habitus.behavior.fusion.lanes.session.prompt import (
     assemble_description,
     session_json_schema,
 )
+from habitus.behavior.fusion.lanes.session.reminders import PendingReminder
 from habitus.model_client import ChatMessage, ChatRequest, StructuredChatClient
 
 
@@ -40,9 +42,14 @@ class SessionTurnDescriber:
         self.zone = zone
         self.config = config or SessionLaneConfig()
 
-    async def describe(self, turn: SessionTurn) -> DescribedTurn:
+    async def describe(self, turn: SessionTurn, reminders: Sequence[PendingReminder] = ()) -> DescribedTurn:
+        """``reminders`` 是这一轮开口时还开着的提醒（预测层接上时才有）：带进材料，模型多答这一轮回应了哪几条、正 / 中 / 负。"""
+
         local = turn.instructed_at.astimezone(self.zone)
         content = f"【这一轮】{local:%Y-%m-%d %H:%M}\n{render_turn(turn, config=self.config)}"
+        if reminders:
+            content = f"{content}\n\n{render_reminders(reminders, zone=self.zone)}"
+        numbers = tuple(range(1, len(reminders) + 1))
         response = await self.client.complete_json_async(
             ChatRequest(
                 messages=(
@@ -50,9 +57,9 @@ class SessionTurnDescriber:
                     ChatMessage(role="user", content=content),
                 )
             ),
-            schema=session_json_schema(self.config),
+            schema=session_json_schema(self.config, reminder_numbers=numbers),
             name="behavior_session_turn",
-            validator=lambda parsed: assemble_description(parsed, config=self.config),
+            validator=lambda parsed: assemble_description(parsed, config=self.config, reminder_numbers=numbers),
         )
         description = response.value
         if not isinstance(description, TurnDescription):

@@ -188,9 +188,7 @@ def test_embedding_distance_ranks_safe_boundaries_within_the_same_structure_leve
         max_message_tokens=10,
         token_estimator=lambda item: len(item.content) if isinstance(item.content, str) else 1,
     )
-    live = chunker.normalize(
-        ConversationBatch("conversation-1", closed_turn(prompt="A" * 30))
-    )
+    live = chunker.normalize(ConversationBatch("conversation-1", closed_turn(prompt="A" * 30)))
     planner = ConversationRetentionPlanner(
         config(
             keep_recent_turn_count=0,

@@ -18,6 +18,7 @@ from typing import Protocol, cast
 from urllib.parse import quote
 
 from habitus.behavior.semantic.config import BehaviorSemanticConfig
+from habitus.behavior.semantic.errors import BehaviorOverviewLimitError
 from habitus.behavior.semantic.model import (
     BehaviorDirectorySnapshot,
     BehaviorSemanticEntryKind,
@@ -81,7 +82,7 @@ class LLMBehaviorOverviewGenerator:
         if not snapshot.entries:
             raise ValueError("cannot generate an overview for an empty directory")
         if len(snapshot.entries) > self.config.max_direct_entries:
-            raise ValueError("behavior snapshot exceeds its direct entry bound")
+            raise BehaviorOverviewLimitError("behavior snapshot exceeds its direct entry bound")
         response = await self.client.complete_json_async(
             self._prompt(snapshot),
             schema=self._schema(len(snapshot.entries)),
@@ -102,7 +103,7 @@ class LLMBehaviorOverviewGenerator:
         )
         prompt = _INSTRUCTION + payload
         if len(prompt) > self.config.max_prompt_chars:
-            raise ValueError("behavior overview prompt exceeds its configured character bound")
+            raise BehaviorOverviewLimitError("behavior overview prompt exceeds its configured character bound")
         return prompt
 
     def _schema(self, entry_count: int) -> Mapping[str, object]:
@@ -193,7 +194,7 @@ class LLMBehaviorOverviewGenerator:
                 lines.append(f"- [{label}]({target})：{summary}")
         overview = "\n".join(lines).strip() + "\n"
         if len(overview) > self.config.max_overview_chars:
-            raise ValueError("rendered behavior overview exceeds its configured character bound")
+            raise BehaviorOverviewLimitError("rendered behavior overview exceeds its configured character bound")
         return overview
 
 

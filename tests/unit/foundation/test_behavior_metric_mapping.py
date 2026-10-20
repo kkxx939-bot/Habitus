@@ -16,8 +16,12 @@ SRC = Path(__file__).resolve().parents[3] / "habitus"
 
 
 def test_every_mapped_operation_is_emitted_somewhere_in_production_code() -> None:
-    source = "\n".join(path.read_text(encoding="utf-8") for path in SRC.rglob("*.py") if path.name != "observability.py")
-    missing = sorted({operation for operation, _, _ in (*_BEHAVIOR_COUNTERS, *_BEHAVIOR_GAUGES) if f'"{operation}"' not in source})
+    source = "\n".join(
+        path.read_text(encoding="utf-8") for path in SRC.rglob("*.py") if path.name != "observability.py"
+    )
+    missing = sorted(
+        {operation for operation, _, _ in (*_BEHAVIOR_COUNTERS, *_BEHAVIOR_GAUGES) if f'"{operation}"' not in source}
+    )
     assert missing == []
 
 

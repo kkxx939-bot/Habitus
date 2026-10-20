@@ -1,6 +1,7 @@
 """关系表的落盘形状：每条 lane 每晚一份规范 JSON（全部关系当晚的读数与状态），状态迁移一行一条。
 
-规范化：解码时把读到的对象按规范形式重新序列化比对，一个字节不同就是损坏，不做"尽力解析"。
+规范化：解码时把读到的对象按规范形式重新序列化比对，一个字节不同就是损坏，不做"尽力解析"。只认当前版：项目没上线，
+不为旧版文件留迁移（用户 10-19 定，26 号清单第四节第 9 条）。
 样本不够的只存各段的条数，已检的只存几项读数（每晚从数据重算，不跨夜带历史）；候选、成立、失效、前向未复现存全。
 """
 
@@ -16,7 +17,7 @@ from habitus.scene.relations.spans import Segment
 from habitus.scene.relations.state import LaneState, Relation, Status, Transition
 from habitus.scene.relations.stats import Effect
 
-SCHEMA = "habitus.scene.relations.night/v2"
+SCHEMA = "habitus.scene.relations.night/v4"
 TRANSITION_SCHEMA = "habitus.scene.relations.transition/v1"
 
 
@@ -25,22 +26,26 @@ class RelationRecordError(ValueError):
 
 
 def encode_night(state: LaneState) -> str:
-    return _canonical(
-        {
-            "schema": SCHEMA,
-            "lane": state.lane,
-            "night": state.night,
-            "family": state.family,
-            "relations": [_relation(item) for item in state.relations],
-            "sparse": state.sparse,
-        }
-    )
+    body: dict[str, Any] = {
+        "schema": SCHEMA,
+        "lane": state.lane,
+        "night": state.night,
+        "family": state.family,
+        "relations": [_relation(item) for item in state.relations],
+        "sparse": state.sparse,
+        "vocabulary": state.vocabulary,
+        "measure_versions": state.measure_versions,
+    }
+    return _canonical(body)
 
 
 def decode_night(text: str, *, lane: str, night: date) -> LaneState:
     payload = _parse(text)
+    schema = payload.get("schema")
+    if schema != SCHEMA:
+        raise RelationRecordError(f"relation night has an unsupported schema: {schema!r}")
     try:
-        if payload["schema"] != SCHEMA or payload["lane"] != lane or payload["night"] != night.isoformat():
+        if payload["lane"] != lane or payload["night"] != night.isoformat():
             raise RelationRecordError("relation night does not match its file")
         state = LaneState(
             lane=lane,
@@ -48,6 +53,8 @@ def decode_night(text: str, *, lane: str, night: date) -> LaneState:
             family=int(payload["family"]),
             relations=tuple(_relation_from(item, lane) for item in payload["relations"]),
             sparse={str(name): int(count) for name, count in payload["sparse"].items()},
+            vocabulary=int(payload["vocabulary"]),
+            measure_versions={str(name): int(value) for name, value in payload["measure_versions"].items()},
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise RelationRecordError(f"relation night is not valid: {exc}") from exc
@@ -109,6 +116,7 @@ def _relation(item: Relation) -> dict[str, Any]:
                 "forward_needed": item.forward_needed,
                 "maintained_through": item.maintained_through,
                 "misses": item.misses,
+                "maintenance_needed": item.maintenance_needed,
             }
         )
     return body
@@ -163,6 +171,7 @@ def _subset(item: Subset) -> dict[str, Any]:
         "p_value": item.p_value,
         "interval": item.interval,
         "relative_interval": item.relative_interval,
+        "minimum_p": item.minimum_p,
     }
 
 
@@ -189,6 +198,7 @@ def _relation_from(body: dict[str, Any], lane: str) -> Relation:
         forward_needed=None if body.get("forward_needed") is None else int(body["forward_needed"]),
         maintained_through=_day(body.get("maintained_through")),
         misses=int(body.get("misses", 0)),
+        maintenance_needed=None if body.get("maintenance_needed") is None else int(body["maintenance_needed"]),
     )
 
 
@@ -244,6 +254,7 @@ def _subset_from(body: dict[str, Any]) -> Subset:
         p_value=float(body["p_value"]),
         interval=_pair(body.get("interval")),
         relative_interval=_pair(body.get("relative_interval")),
+        minimum_p=float(body["minimum_p"]),
     )
 
 

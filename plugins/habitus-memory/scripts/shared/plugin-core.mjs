@@ -14,11 +14,24 @@ import {
 } from "./outbox.mjs";
 import { HabitusServiceClient } from "./service-client.mjs";
 import { requireInjectionReceipt } from "./injection-receipt.mjs";
-import { readState, withSessionLock, writeState } from "./state-store.mjs";
+import { stat } from "node:fs/promises";
+import {
+  listStateSessions,
+  readState,
+  removeState,
+  stateModifiedAt,
+  withSessionLock,
+  writeState,
+} from "./state-store.mjs";
 
 const REQUIRED_FEATURES = ["conversation_cursor", "flush", "recall", "remember", "remember_idempotency_v1"];
 
 function utcDate() { return new Date().toISOString().slice(0, 10); }
+
+async function pathExists(path) {
+  try { await stat(path); return true; }
+  catch (error) { if (error?.code === "ENOENT") return false; throw error; }
+}
 
 function occurredAt(input) {
   const candidate = input?.timestamp || input?.occurred_at;
@@ -131,9 +144,41 @@ export class PluginCore {
     catch (error) { return { ok: false, retryable: true, error: error?.message || String(error) }; }
   }
 
+  async retireIdleSessions(adapterValue) {
+    // 会话状态的退场（26 号清单 7.4）：transcript 已经不在、该会话 outbox 为空、状态超过宽限期没动过，才删 state；
+    // 锁目录在锁放掉时随之删掉。老的状态没存 transcript 路径的不删（不知道它的 transcript 还在不在）。
+    const adapter = requireHostAdapter(adapterValue);
+    const retired = [];
+    for (const nativeSessionId of await listStateSessions(this.config.stateRoot, adapter.host)) {
+      try {
+        const done = await withSessionLock(this.config.stateRoot, adapter.host, nativeSessionId, async () => {
+          const state = await readState(this.config.stateRoot, adapter.host, nativeSessionId);
+          if (!state?.transcriptPath || await pathExists(state.transcriptPath)) return false;
+          if ((await listOutbox(this.config.stateRoot, adapter.host, nativeSessionId)).length > 0) return false;
+          const modified = await stateModifiedAt(this.config.stateRoot, adapter.host, nativeSessionId);
+          if (modified == null || Date.now() - modified < this.config.sessionRetireGraceMs) return false;
+          await removeState(this.config.stateRoot, adapter.host, nativeSessionId);
+          return true;
+        });
+        if (done) retired.push(nativeSessionId);
+      } catch {
+        // 某个会话的锁一时拿不到（正在用）或状态读不了：这次跳过，下次 session-end 再看
+      }
+    }
+    return { retired };
+  }
+
   async #locked(adapter, input, callback) {
     const nativeSessionId = adapter.nativeSessionId(input);
-    return this.#lockedSession(adapter, nativeSessionId, () => adapter.conversationId(input), callback);
+    const transcriptPath = typeof adapter.transcriptPath === "function" ? adapter.transcriptPath(input) : null;
+    return this.#lockedSession(adapter, nativeSessionId, () => adapter.conversationId(input), async (state) => {
+      // 记下 transcript 路径（由宿主适配器给）：会话状态退场时要看它还在不在（26 号清单 7.4）
+      if (typeof transcriptPath === "string" && transcriptPath && state.transcriptPath !== transcriptPath) {
+        state = { ...state, transcriptPath };
+        await writeState(this.config.stateRoot, adapter.host, nativeSessionId, state);
+      }
+      return callback(state);
+    });
   }
 
   async #lockedSession(adapter, nativeSessionId, conversationId, callback) {

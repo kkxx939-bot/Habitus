@@ -153,10 +153,7 @@ def test_oversized_turn_uses_regular_contiguous_history_segments_and_jobs(tmp_pa
         (True, False),
     )
     prompt_parts = tuple(
-        message
-        for segment in history
-        for message in segment.messages
-        if message.role.value == "prompt"
+        message for segment in history for message in segment.messages if message.role.value == "prompt"
     )
     assert "".join(str(item.content) for item in prompt_parts) == source_prompt
     assert len({item.logical_message_id for item in prompt_parts}) == 1
@@ -205,11 +202,7 @@ def test_oversized_logical_message_does_not_split_one_fact_across_memory_jobs(tm
         for job in queued
     )
     editor_inputs = tuple(
-        "".join(
-            str(message.content)
-            for message in segment.messages
-            if isinstance(message.content, str)
-        )
+        "".join(str(message.content) for message in segment.messages if isinstance(message.content, str))
         for segment in editor_segments
         if segment is not None
     )
@@ -218,8 +211,6 @@ def test_oversized_logical_message_does_not_split_one_fact_across_memory_jobs(tm
     assert editor_segments[-1] is not None
     assert any(fact in source for source in editor_inputs)
     final_prompt = "".join(
-        str(message.content)
-        for message in editor_segments[-1].messages
-        if message.role.value == "prompt"
+        str(message.content) for message in editor_segments[-1].messages if message.role.value == "prompt"
     )
     assert final_prompt == source_prompt

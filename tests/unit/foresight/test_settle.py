@@ -101,14 +101,18 @@ def test_nothing_by_the_deadline_is_overdue_pending_and_one_done_before_forming_
     assert none.outcome == "过期待决" and none.occurrence_uri is None and not none.hit
     # 到了钟点才建、形成时他已经做了：从当天零点起算，照常按时窗结（裁定 49：每个机会都进账，不再有「多余」）
     clock = expectation(
-        source="钟面",
+        source="日子",
         trigger="weekday=3",
         window=(FORMED - timedelta(minutes=20), FORMED + timedelta(minutes=10)),
         observed_from=FORMED.replace(hour=0, minute=0),
     )
-    done = settle(clock, [row("ran", FORMED - timedelta(minutes=12))], spoken_at=None, settled_at=NOW, current=unchanged)
+    done = settle(
+        clock, [row("ran", FORMED - timedelta(minutes=12))], spoken_at=None, settled_at=NOW, current=unchanged
+    )
     assert (done.outcome, done.occurrence_uri) == ("准时", "ran")
-    earlier = settle(clock, [row("ran", FORMED - timedelta(minutes=50))], spoken_at=None, settled_at=NOW, current=unchanged)
+    earlier = settle(
+        clock, [row("ran", FORMED - timedelta(minutes=50))], spoken_at=None, settled_at=NOW, current=unchanged
+    )
     assert (earlier.outcome, earlier.offset_minutes) == ("早到", -30)
 
 
@@ -173,5 +177,5 @@ def test_an_event_expectation_whose_antecedent_turned_into_something_else_does_n
     assert not antecedent_holds(item, None, flight, current=unchanged)  # 成了非事件 / 被并掉：找不到了
     assert antecedent_holds(item, "s-k0011", flight, current=lambda t: ("s-k0011",) if t == "s-k0001" else (t,))  # 拆改
     assert antecedent_holds(item, None, None, current=unchanged)  # 关系已不在表里：说不清，不判作废
-    clock = expectation(source="钟面", trigger="weekday=3")
+    clock = expectation(source="日子", trigger="weekday=3")
     assert antecedent_holds(clock, None, flight, current=unchanged)  # 只管事件触发

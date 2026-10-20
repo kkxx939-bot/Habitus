@@ -130,9 +130,7 @@ def extraction_context(
         segment_id="segment-1",
         source_segment_digest="0" * 64,
         query=query,
-        search_roots=(MemoryURI.from_directory(MemoryDirectory.preferences()),)
-        if roots is None
-        else roots,
+        search_roots=(MemoryURI.from_directory(MemoryDirectory.preferences()),) if roots is None else roots,
         search_hits=hits,
         snapshots=snapshots,
     )
@@ -311,9 +309,7 @@ def test_additional_search_deduplicates_uri_using_highest_score(tmp_path: Path) 
     uri = MemoryURI.from_address(target.address)
     search = RecordingSearch((MemorySearchHit(uri, 0.2), MemorySearchHit(uri, 0.9)))
     context, _tree, _reader, _search = extraction_context(tmp_path, documents=(target,), search=search)
-    observation = asyncio.run(
-        context.execute(retrieval_decision(MemoryRetrievalAction.SEARCH), iteration=1)
-    )
+    observation = asyncio.run(context.execute(retrieval_decision(MemoryRetrievalAction.SEARCH), iteration=1))
 
     assert observation.result_uris == (str(uri),)
     assert context.search_hits == (MemorySearchHit(uri, 0.9),)
@@ -340,9 +336,7 @@ def test_search_fits_new_hits_to_remaining_item_slots_by_relevance(tmp_path: Pat
         config=config,
         reader_config=reader_config,
     )
-    observation = asyncio.run(
-        context.execute(retrieval_decision(MemoryRetrievalAction.SEARCH), iteration=1)
-    )
+    observation = asyncio.run(context.execute(retrieval_decision(MemoryRetrievalAction.SEARCH), iteration=1))
 
     assert observation.result_uris == (str(first_hit.uri),)
     assert context.search_hits == (first_hit,)
@@ -366,9 +360,7 @@ def test_additional_search_wraps_backend_and_result_contract_failures(
         search=RecordingSearch(raw_result),
     )
     with pytest.raises(MemoryExtractionError, match=message):
-        asyncio.run(
-            context.execute(retrieval_decision(MemoryRetrievalAction.SEARCH), iteration=1)
-        )
+        asyncio.run(context.execute(retrieval_decision(MemoryRetrievalAction.SEARCH), iteration=1))
 
 
 def test_additional_search_rejects_more_hits_than_requested(tmp_path: Path) -> None:
@@ -376,7 +368,9 @@ def test_additional_search_rejects_more_hits_than_requested(tmp_path: Path) -> N
         document(MemoryKind.PREFERENCE, fields={"topic": f"主题-{index}", "content": f"- {index}"})
         for index in range(3)
     )
-    hits = tuple(MemorySearchHit(MemoryURI.from_address(item.address), 0.9 - index / 10) for index, item in enumerate(documents))
+    hits = tuple(
+        MemorySearchHit(MemoryURI.from_address(item.address), 0.9 - index / 10) for index, item in enumerate(documents)
+    )
     context, _tree, _reader, _search = extraction_context(
         tmp_path,
         documents=documents,
@@ -421,18 +415,14 @@ def test_search_without_allowed_roots_fails_before_backend_call(tmp_path: Path) 
 def test_read_requires_a_valid_l2_memory_uri(tmp_path: Path, uri: str) -> None:
     context, _tree, _reader, _search = extraction_context(tmp_path)
     with pytest.raises(MemoryExtractionError, match="valid L2"):
-        asyncio.run(
-            context.execute(retrieval_decision(MemoryRetrievalAction.READ, value=uri), iteration=1)
-        )
+        asyncio.run(context.execute(retrieval_decision(MemoryRetrievalAction.READ, value=uri), iteration=1))
 
 
 def test_read_rejects_valid_but_unexposed_uri(tmp_path: Path) -> None:
     context, _tree, _reader, _search = extraction_context(tmp_path)
     uri = str(MemoryURI.from_address(MemoryAddress.preference("未暴露")))
     with pytest.raises(MemoryExtractionError, match="not exposed"):
-        asyncio.run(
-            context.execute(retrieval_decision(MemoryRetrievalAction.READ, value=uri), iteration=1)
-        )
+        asyncio.run(context.execute(retrieval_decision(MemoryRetrievalAction.READ, value=uri), iteration=1))
 
 
 def test_read_of_prefetched_document_is_cached(tmp_path: Path) -> None:
@@ -599,9 +589,7 @@ def test_snapshots_and_page_ids_are_defensive_views(tmp_path: Path) -> None:
     copied.register_new(MemoryURI.from_address(MemoryAddress.preference("新节点")), 100)
 
     assert context.page_ids.resolve(100) is None
-    assert context.snapshots.total_bytes == sum(
-        item.size_bytes for item in context.snapshots.snapshots
-    )
+    assert context.snapshots.total_bytes == sum(item.size_bytes for item in context.snapshots.snapshots)
 
 
 def test_existing_snapshot_with_mismatched_document_identity_is_rejected(tmp_path: Path) -> None:

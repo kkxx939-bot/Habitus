@@ -164,4 +164,3 @@ def test_from_dict_rejects_unknown_fields_schema_drift_and_naive_time() -> None:
         ConversationMessage.from_dict({**payload, "schema_version": "v0"})
     with pytest.raises(ConversationMessageSchemaError, match="timezone"):
         ConversationMessage("message", 0, ConversationMessageRole.PROMPT, datetime(2026, 1, 1), "hello")
-

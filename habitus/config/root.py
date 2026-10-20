@@ -13,14 +13,15 @@ from habitus.config.conversation import ConversationConfig
 from habitus.config.credentials import CredentialRegistry
 from habitus.config.foresight import ForesightConfig
 from habitus.config.http import HTTPAPIConfig
+from habitus.config.lifecycle import LifecycleConfig
 from habitus.config.loader import ConfigError, group_fields, load_config_object, required_field
 from habitus.config.locale import LocaleConfig
 from habitus.config.memory import MemoryConfig
 from habitus.config.models import ModelConfig
 from habitus.config.observability import ObservabilityConfig
-from habitus.config.prediction import PredictionConfig
 from habitus.config.scene import SceneConfig
 from habitus.config.storage import StorageConfig
+from habitus.config.temporal import TemporalConfig
 from habitus.config.workflow import WorkflowConfig
 
 _FIXED_RETRIEVAL_DOCUMENTS = 1
@@ -37,9 +38,11 @@ class HabitusConfig:
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
-    prediction: PredictionConfig = field(default_factory=PredictionConfig)
     scene: SceneConfig = field(default_factory=SceneConfig)
     foresight: ForesightConfig = field(default_factory=ForesightConfig)
+    temporal: TemporalConfig = field(default_factory=TemporalConfig)
+    # 统一生命周期：Worker 调度、重试账、派生物代数、隔离区、容量告警（裁定 60）。
+    lifecycle: LifecycleConfig = field(default_factory=LifecycleConfig)
     # 主体所在地：情景读侧标日型、预测层造"此刻"时钟，两处必须同一个地方，所以单独一组。
     locale: LocaleConfig = field(default_factory=LocaleConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
@@ -56,9 +59,10 @@ class HabitusConfig:
             ("conversation", self.conversation, ConversationConfig),
             ("memory", self.memory, MemoryConfig),
             ("behavior", self.behavior, BehaviorConfig),
-            ("prediction", self.prediction, PredictionConfig),
             ("scene", self.scene, SceneConfig),
             ("foresight", self.foresight, ForesightConfig),
+            ("temporal", self.temporal, TemporalConfig),
+            ("lifecycle", self.lifecycle, LifecycleConfig),
             ("locale", self.locale, LocaleConfig),
             ("workflow", self.workflow, WorkflowConfig),
         )
@@ -93,15 +97,9 @@ class HabitusConfig:
 
     @property
     def scene_root(self) -> Path:
-        """语义关联层（情景树与刷新进度）的根；与行为树、预测树并列，是行为树的派生物。"""
+        """语义关联层（情景树与刷新进度）的根；与行为树并列，是行为树的派生物。"""
 
         return self.storage_root / "scene"
-
-    @property
-    def prediction_root(self) -> Path:
-        """返回已发布预测树各代的根目录；与行为树同级、互不覆盖。"""
-
-        return self.storage_root / "prediction"
 
     @property
     def foresight_root(self) -> Path:
@@ -135,9 +133,10 @@ class HabitusConfig:
             conversation=ConversationConfig.from_mapping(data.get("conversation", {})),
             memory=MemoryConfig.from_mapping(data.get("memory", {})),
             behavior=BehaviorConfig.from_mapping(data.get("behavior", {})),
-            prediction=PredictionConfig.from_mapping(data.get("prediction", {})),
             scene=SceneConfig.from_mapping(data.get("scene", {})),
             foresight=ForesightConfig.from_mapping(data.get("foresight", {})),
+            temporal=TemporalConfig.from_mapping(data.get("temporal", {})),
+            lifecycle=LifecycleConfig.from_mapping(data.get("lifecycle", {})),
             locale=LocaleConfig.from_mapping(data.get("locale", {})),
             workflow=WorkflowConfig.from_mapping(data.get("workflow", {})),
         )
@@ -173,27 +172,20 @@ class HabitusConfig:
 
     def _validate_cross_domain_limits(self) -> None:
         self._validate_credential_references()
-        # 预测树每夜从行为树重建，行为侧没开就没有输入。这是**配置自相矛盾**（我们自己的两组
-        # 配置互相打架），不是现实世界的形状，所以硬拒。放过去的下场是：启动一切正常、健康面
-        # 报 prediction disabled、什么都没发生、无处可查——用户只是忘了填 primary_subject。
-        if self.prediction.enabled and not self.behavior.enabled:
-            raise ConfigError(
-                "config.prediction is enabled but config.behavior.primary_subject is empty; "
-                "the prediction tree rebuilds from the behaviour tree and has no input without it"
-            )
-        # 情景树同样从行为树派生（每封口日一次归组），行为侧没开就没有输入——同一类配置自相矛盾。
+        # 语义树从行为树派生（每封口日一次映射），行为侧没开就没有输入。这是**配置自相矛盾**（我们自己的两组配置
+        # 互相打架），不是现实世界的形状，所以硬拒：放过去的下场是启动一切正常、什么都没发生、无处可查。
         if self.scene.enabled and not self.behavior.enabled:
             raise ConfigError(
                 "config.scene is enabled but config.behavior.primary_subject is empty; "
                 "the semantic layer reads sealed days of the behaviour tree and has no input without it"
             )
-        # 预测层站在两棵派生树之上：数字取自预测树、背景取自情景树，缺哪一边都装配不出证据。
-        # 同一类配置自相矛盾，硬拒。
-        if self.foresight.enabled and not (self.prediction.enabled and self.scene.enabled):
+        # 预测层的机会表、复现与关系全从语义树那一晚来，结算也是整晚那一趟的第一步（裁定 59：预测树删了）。
+        # 语义树没开就没有整晚、没有机会表——同一类配置自相矛盾，硬拒。
+        if self.foresight.enabled and not self.scene.enabled:
             raise ConfigError(
-                "config.foresight is enabled but config.prediction or config.scene is not; "
-                "the foresight layer reads its numbers from the prediction tree and "
-                "the matching history from the semantic layer, and has nothing to assemble without both"
+                "config.foresight is enabled but config.scene is not; "
+                "the foresight layer reads its opportunity table from the semantic layer's nightly run "
+                "and has nothing to build expectations from without it"
             )
         memory = self.memory
         models = self.models

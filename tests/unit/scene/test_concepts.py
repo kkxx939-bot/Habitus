@@ -24,8 +24,6 @@ from habitus.scene.concepts import (
     ConceptRole,
     ConceptSet,
     ConceptSource,
-    ConceptStore,
-    ConceptStoreError,
     ContextScope,
     GradeMeasure,
     MechanicalRule,
@@ -36,6 +34,7 @@ from habitus.scene.concepts import (
 from habitus.scene.concepts.catalog import CatalogChanges, CatalogClass, MovedOccurrence
 from habitus.scene.concepts.document import decode, encode
 from habitus.scene.concepts.situation import SituationBasis, SituationRule
+from habitus.scene.concepts.store import ConceptStore, ConceptStoreError
 from habitus.scene.concepts.sync import base_concept, plan_sync
 from tests.unit.kind_ids import kind_id
 from tests.unit.scene.concept_fixtures import (
@@ -531,10 +530,22 @@ def test_the_first_sync_generates_a_base_concept_for_every_class() -> None:
         catalog_class("早餐"),
         catalog_class("看文档", active=False),
     )
-    plan = plan_sync(ConceptSet([]), classes, CatalogChanges(since=0, version=4), now=LATER)
+    observed = [
+        ("日历.周几", "周三"),
+        ("日历.几号", "8"),
+        ("日历.月末", "是"),
+        ("日历.月末", "否"),
+        ("日历.日型", "工作日"),
+    ]
+    plan = plan_sync(ConceptSet([]), classes, CatalogChanges(since=0, version=4), now=LATER, observed=observed)
     assert plan.version == 4
-    assert [item.name for item in plan.write] == [kind_id("就寝"), kind_id("早餐"), kind_id("看文档")]
-    first = plan.write[0]
+    written = _behaviours(plan.write)
+    assert [item.name for item in written] == [kind_id("就寝"), kind_id("早餐"), kind_id("看文档")]
+    # 日历情境一次给齐（裁定 59）：7 个周几、31 个号、月末、4 种日型
+    calendar = [item for item in plan.write if item.source.origin is ConceptOrigin.CALENDAR]
+    # 日历情境只长数据里出现过的取值（裁定 59 第 7 条）：没碰到过的"调休上班"不生成
+    assert {item.name for item in calendar} == {"周三", "8号", "月末", "工作日"}
+    first = written[0]
     assert (first.kind, first.title, first.definition, first.lane, first.retired) == (
         ConceptKind.BASE,
         "就寝",
@@ -543,8 +554,8 @@ def test_the_first_sync_generates_a_base_concept_for_every_class() -> None:
         False,
     )
     assert first.source.origin is ConceptOrigin.VOCABULARY and first.created_at == LATER
-    assert plan.write[2].retired  # 停用的类也有基础概念，标成停用
-    assert base_concept(classes[1], now=LATER) == plan.write[1]
+    assert written[2].retired  # 停用的类也有基础概念，标成停用
+    assert base_concept(classes[1], now=LATER) == written[1]
     # 第二次同步：什么都不用写
     again = plan_sync(ConceptSet(plan.write), classes, CatalogChanges(since=4, version=4), now=LATER)
     assert again.write == () and again.moved == ()
@@ -557,7 +568,7 @@ def test_sync_follows_renames_criteria_and_retirement_keeping_identity_and_birth
         CatalogClass(id=kind_id("打球"), name="打篮球", criterion=BALL.definition, lane="session", active=False),
     )
     plan = plan_sync(existing, classes, CatalogChanges(since=2, version=3), now=LATER)
-    by_name = {item.name: item for item in plan.write}
+    by_name = {item.name: item for item in _behaviours(plan.write)}
     assert set(by_name) == {kind_id("就寝"), kind_id("打球")}
     assert by_name[kind_id("就寝")].definition == "躺下准备睡" and by_name[kind_id("就寝")].created_at == CREATED
     assert by_name[kind_id("打球")].title == "打篮球" and by_name[kind_id("打球")].retired
@@ -587,7 +598,7 @@ def test_sync_writes_the_classes_a_split_or_merge_touched_and_passes_the_moves_o
     )
     plan = plan_sync(existing, classes, changes, now=LATER)
     assert plan.version == 5 and plan.moved == moves
-    assert {item.name for item in plan.write} == {kind_id("改提示词"), kind_id("打球"), kind_id("跑步")}
+    assert {item.name for item in _behaviours(plan.write)} == {kind_id("改提示词"), kind_id("打球"), kind_id("跑步")}
     with pytest.raises(TypeError):
         plan_sync([CODING], classes, changes, now=LATER)  # type: ignore[arg-type]
 
@@ -628,3 +639,17 @@ def test_sync_rewrites_group_members_to_the_current_classes() -> None:
     assert "运动" not in {
         item.name for item in plan_sync(existing, classes, CatalogChanges(since=1, version=1), now=LATER).write
     }
+
+
+def _behaviours(items):  # type: ignore[no-untyped-def]
+    """同步计划里除日历情境之外的那些（日历情境每次在概念集里没有时都会补上）。"""
+
+    return [item for item in items if item.source.origin is not ConceptOrigin.CALENDAR]
+
+
+def test_sync_refuses_a_non_calendar_concept_under_a_calendar_name() -> None:
+    squatter = situation("周三", "模型写的周三")
+    with pytest.raises(ValueError, match="calendar situation"):
+        plan_sync(
+            ConceptSet([squatter]), (), CatalogChanges(since=0, version=1), now=LATER, observed=[("日历.周几", "周三")]
+        )

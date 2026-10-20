@@ -118,33 +118,43 @@ class KindStamping:
             payload = item["payload"]
             day = date.fromisoformat(str(payload["occurred_on"]))
             lane = lane_of_token(str(payload["kind_token"]))
-            entries.append(PendingEntry(str(item["ledger"]["uri"]), lane, day, note.proposed, note.content))
+            entries.append(
+                PendingEntry(str(item["ledger"]["uri"]), lane, day, note.proposed, note.content, entered_on=day)
+            )
         return self.record_pending(entries)
 
     def record_pending(self, entries: Sequence[PendingEntry]) -> PendingAdmission:
-        """放进待定池；池满时超出的这批不入池（留信号，由生命周期清理），绝不抛错卡住归约。"""
+        """放进待定池。池满时挤掉进池最早的旧条目（裁定 60 第 2 条，10-19 改）：新习惯恰恰从新条目里长出来，拒收新条目
+        就再也长不出新类。挤掉的只是索引，树上的 occurrence 不动；留信号，绝不抛错卡住归约。"""
 
         if not entries:
             return PendingAdmission(0, ())
         snapshot = self.store.read_pending()
-        fresh = [entry for entry in entries if entry.occurrence not in snapshot.pool.entries]
-        room = max(0, self.store.config.max_pending - len(snapshot.pool.entries))
-        admitted = sorted(fresh, key=lambda entry: entry.occurrence)[:room]
-        refused = tuple(entry.occurrence for entry in fresh if entry not in admitted)
-        if admitted:
-            self.store.replace_pending(snapshot.pool.with_entries(admitted), expected_revision=snapshot.revision)
-        return PendingAdmission(len(admitted), refused)
+        fresh = {entry.occurrence: entry for entry in entries if entry.occurrence not in snapshot.pool.entries}
+        if not fresh:
+            return PendingAdmission(0, ())
+        merged = snapshot.pool.with_entries(fresh.values())
+        overflow = max(0, len(merged.entries) - self.store.config.max_pending)
+        evicted = tuple(entry.occurrence for entry in sorted(merged.entries.values(), key=_entered)[:overflow])
+        self.store.replace_pending(merged.without(evicted), expected_revision=snapshot.revision)
+        return PendingAdmission(len(fresh.keys() - set(evicted)), evicted)
+
+
+def _entered(entry: PendingEntry) -> tuple[date, date, str]:
+    """进池先后：进池那天，同一天按 occurrence 的日子、再按地址（确定性）。"""
+
+    return (entry.entered_on or entry.day, entry.day, entry.occurrence)
 
 
 @dataclass(frozen=True)
 class PendingAdmission:
     added: int
-    refused: tuple[str, ...]
+    evicted: tuple[str, ...]
 
     def signals(self) -> tuple[str, ...]:
         notes = [f"kind_pending_added {self.added}"] if self.added else []
-        if self.refused:
-            notes.append(f"kind_pending_pool_full {len(self.refused)} entries not admitted")
+        if self.evicted:
+            notes.append(f"kind_pending_pool_full {len(self.evicted)} oldest entries evicted")
         return tuple(notes)
 
 
@@ -162,7 +172,7 @@ def content_from_fields(fields: Mapping[str, object]) -> OccurrenceContent:
 
 
 def is_countable(fields: Mapping[str, object]) -> bool:
-    """撞车消歧的重复记录（``original_name`` 非空）不算一次独立的发生——与预测树同一口径。"""
+    """撞车消歧的重复记录（``original_name`` 非空）不算一次独立的发生——与事件序列（``series.reader``）同一口径。"""
 
     return fields.get("original_name") is None
 

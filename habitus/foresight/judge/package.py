@@ -1,9 +1,11 @@
 """模型小包的材料（纯函数、对模型零知识）：每个候选带今天这次、历史那几次（原话、时刻、隔多久）、时窗、前因清单、账的级。
 
 原话从行为树的行来（``Seen.name`` / ``summary``），由组合根按 URI 读好交进来；读不到的只给 URI 的尾巴。
-日型（当地日历对那一天的说法，"补班日，按周一上班"）给今天与历史每一次各标一句，由模型在"像不像"里判，系统不按日型增删候选
-（``scene.calendar`` 的既有裁定：日型是摆在判断者面前的事实，不参与筛选；裁定 52）。没有日历数据时恒为空，不出现在小包里。
-历史只给最近 ``max_history`` 次（小包要小：几千字），次数与机会数另给整数。
+日型（当地日历对那一天的说法，"调休上班日"；外部条件包给，``conditions.day_note``）给今天与历史每一次各标一句，由模型在
+"像不像"里判，系统不按日型增删候选（裁定 52）；没有放假数据的日子标"日型未知"，不让模型当成工作日。锚在日历上的规律不靠这句：
+它是语义树上的日历情境关系，走情境触发（裁定 59）。
+历史只给最近 ``max_history`` 次（小包要小：几千字），次数与机会数另给整数。扎堆合并成一次的几条记录，给的是第一条的原话
+（机会表上前因与后果的出处都是那一次的第一条）。
 """
 
 from __future__ import annotations
@@ -12,19 +14,26 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
+from habitus.conditions import DAY_TYPE_KEY, UNKNOWN_DAY_NOTE, WEEKDAY_KEY, WEEKDAY_NAMES
 from habitus.foresight.errors import ForesightError
-from habitus.foresight.ledger.model import Expectation, anchor_uri
+from habitus.foresight.ledger.model import Expectation, anchor_uri, relation_backed
 from habitus.foresight.model import Seen
 from habitus.foresight.opportunities.model import Opportunity, OpportunityTable, RelationOpportunities
-from habitus.foresight.triggers.days import DAY_OF_MONTH
 from habitus.foundation.text import clean_line
 
-SEGMENT_TEXT = {"chain": "紧接着", "rest_of_day": "当天之后", "next_day": "次日", "days_2_7": "之后 2–7 天内"}
+SEGMENT_TEXT = {
+    "chain": "紧接着",
+    "rest_of_day": "当天之后",
+    "next_day": "次日",
+    "days_2_7": "之后 2–7 天内",
+    "situation": "当天",
+}
 
 
 @dataclass(frozen=True)
 class HistoryRow:
-    """历史上的一次：哪天、前因原话（钟面 / 日子没有）、后果原话、后果几点、隔了多久（分钟；按天的段是隔几天）。"""
+    """历史上的一次：哪天、前因原话（情境是那个日历情境的名字，日子没有）、后果原话、后果几点、隔了多久（分钟；按天的段
+    是隔几天；情境是"当天"）。"""
 
     number: int
     day: date
@@ -54,6 +63,8 @@ class Candidate:
     inputs: tuple[str, ...] = ()
     #: 在场的事件前因里成了依据的那几件的原话（两件以上时话里一起说出来："你订了机票、也订了酒店"）。
     causes: tuple[str, ...] = ()
+    #: 今天处在的、语义树判成原因的日历情境（"周三"）：已成立的日历关系也是原因，和事件原因分开放，话里说"往常周三"。
+    situations: tuple[str, ...] = ()
 
     def uri_of(self, number: int) -> str | None:
         return next((row.uri for row in self.history if row.number == number), None)
@@ -92,7 +103,7 @@ def build_package(
         raise ForesightError("max_history must be a positive integer")
     candidates = []
     for number, item in enumerate(expectations, start=1):
-        relation = _relation(table, item) if item.source == "事件" else None
+        relation = _relation(table, item) if relation_backed(item.source) else None
         label = _label(table, item, relation)
         history = _history(item, relation, rows, max_history)
         if day_note is not None:
@@ -115,7 +126,9 @@ def build_package(
                 expectation_id=item.expectation_id,
                 label=label,
                 source=item.source,
-                trigger_text=_trigger_text(item, relation, rows, now),
+                trigger_text=_trigger_text(
+                    item, relation, rows, now, today_note=day_note(now.date()) if day_note is not None else None
+                ),
                 window=item.window,
                 opportunities=item.opportunities,
                 hits=item.hits,
@@ -123,8 +136,11 @@ def build_package(
                 antecedents=_antecedents(table, item, rows),
                 level=levels.get(item.expectation_id, 0),
                 today_note=day_note(now.date()) if day_note is not None else None,
-                inputs=tuple(_input_line(table, unit, rows) for unit in (units or {}).get(item.expectation_id, ())),
+                inputs=tuple(
+                    _input_line(table, unit, rows, now) for unit in (units or {}).get(item.expectation_id, ())
+                ),
                 causes=_causes(table, (units or {}).get(item.expectation_id, ()), rows),
+                situations=_situations(table, (units or {}).get(item.expectation_id, ())),
             )
         )
     return Package(at=now, candidates=tuple(candidates))
@@ -144,10 +160,11 @@ def sources_of(
     for item in expectations:
         found.add(anchor_uri(item.trigger_instance))
         found |= {antecedent.source for antecedent in item.antecedents if antecedent.source}
-        relation = _relation(table, item) if item.source == "事件" else None
+        relation = _relation(table, item) if relation_backed(item.source) else None
         if relation is not None:
             for opportunity in _hits(relation)[-max_history:]:
-                found.add(opportunity.antecedent_uri)
+                if relation.segment != "situation":  # 情境机会的前因是那一天本身（calendar:<日子>），不是一条记录
+                    found.add(opportunity.antecedent_uri)
                 if opportunity.consequent_uri is not None:
                     found.add(opportunity.consequent_uri)
         else:
@@ -166,15 +183,13 @@ class UnitInput:
     chances: float
 
 
-def _input_line(table: OpportunityTable | None, unit: UnitInput, rows: Mapping[str, Seen]) -> str:
+def _input_line(table: OpportunityTable | None, unit: UnitInput, rows: Mapping[str, Seen], now: datetime) -> str:
     item = unit.expectation
-    relation = _relation(table, item) if item.source == "事件" else None
-    if relation is not None:
+    relation = _relation(table, item) if relation_backed(item.source) else None
+    if relation is not None and relation.segment == "situation":
+        what = f"{_today_in(relation, now)}（日历情境）"
+    elif relation is not None:
         what = f"{_name(rows, item.trigger_instance)}（{relation.antecedent_label}，{SEGMENT_TEXT.get(relation.segment, '')}）"
-    elif item.source == "钟面":
-        what = f"周{'一二三四五六日'[item.window[0].weekday()]}这会儿"
-    elif item.trigger == DAY_OF_MONTH:
-        what = f"每月 {item.window[0].day} 号"
     else:
         what = "离上次够久"
     line = f"{what}：从它出发说中 {unit.hits:.0f} / {unit.chances:.0f} 次"
@@ -189,12 +204,29 @@ def _causes(table: OpportunityTable | None, units: Sequence[UnitInput], rows: Ma
     found = []
     for unit in units:
         relation = _relation(table, unit.expectation) if unit.expectation.source == "事件" else None
-        reading = relation.reading if relation is not None else None
-        if relation is None or reading is None or relation.status != "established":
-            continue
-        if reading.large_enough is True and reading.lift > 0.0:
+        if relation is not None and _is_cause(relation):
             found.append(_name(rows, unit.expectation.trigger_instance))
     return tuple(dict.fromkeys(found))
+
+
+def _situations(table: OpportunityTable | None, units: Sequence[UnitInput]) -> tuple[str, ...]:
+    """今天处在的日历情境里语义树判成原因的那几个（"周三"）。"""
+
+    found = []
+    for unit in units:
+        relation = _relation(table, unit.expectation) if unit.expectation.source == "情境" else None
+        if relation is not None and _is_cause(relation):
+            found.append(relation.antecedent_label)
+    return tuple(dict.fromkeys(found))
+
+
+def _is_cause(relation: RelationOpportunities) -> bool:
+    """关系成立、语义树判效应够大、抬升为正。"""
+
+    reading = relation.reading
+    return (
+        relation.status == "established" and reading is not None and reading.large_enough is True and reading.lift > 0.0
+    )
 
 
 def plain_text(candidate: Candidate) -> str:
@@ -213,18 +245,16 @@ def plain_text(candidate: Candidate) -> str:
                 else f"往常{antecedent}之后你会{label}，这次还没有，要吗？"
             )
         return f"要{label}吗？"
-    if candidate.source == "钟面":
-        return f"上次这会儿你{label}了，今天还没有。" if once else f"往常这会儿你会{label}，今天还没有。"
-    if candidate.trigger_text.startswith("到了日子"):
-        day = candidate.window[0].day
-        return f"上个月 {day} 号你{label}了，今天还没有。" if once else f"往常每月 {day} 号你会{label}，今天还没有。"
+    if candidate.source == "情境":
+        when = "、".join(candidate.situations) or (candidate.history[-1].antecedent if candidate.history else "")
+        return f"往常{when}你会{label}，今天还没有。" if when else f"往常这会儿你会{label}，今天还没有。"
     return f"上次隔这么久你{label}了，这次还没有。" if once else f"往常隔这么久你会{label}，这次还没有。"
 
 
 def _relation(table: OpportunityTable | None, item: Expectation) -> RelationOpportunities | None:
     if table is None:
         return None
-    return next((relation for relation in table.relations if relation.key == item.trigger), None)
+    return table.relation(item.trigger)
 
 
 def _label(table: OpportunityTable | None, item: Expectation, relation: RelationOpportunities | None) -> str:
@@ -262,9 +292,12 @@ def _history(
 ) -> tuple[HistoryRow, ...]:
     found: list[HistoryRow] = []
     if relation is not None:
+        situation = relation.segment == "situation"
         for opportunity in _hits(relation)[-limit:]:
             assert opportunity.consequent_uri is not None and opportunity.consequent_at is not None
-            if relation.segment in ("chain", "rest_of_day"):
+            if situation:
+                gap = "当天"
+            elif relation.segment in ("chain", "rest_of_day"):
                 gap = f"{int((opportunity.consequent_at - opportunity.ended_at).total_seconds() // 60)} 分钟后"
             else:
                 gap = f"第 {(opportunity.consequent_at.date() - opportunity.day).days} 天"
@@ -272,7 +305,7 @@ def _history(
                 HistoryRow(
                     0,
                     opportunity.day,
-                    _name(rows, opportunity.antecedent_uri),
+                    relation.antecedent_label if situation else _name(rows, opportunity.antecedent_uri),
                     _name(rows, opportunity.consequent_uri),
                     opportunity.consequent_at,
                     gap,
@@ -290,8 +323,21 @@ def _history(
     )
 
 
+def _today_in(relation: RelationOpportunities, now: datetime) -> str:
+    """ "今天是周三"；周几集合说今天是哪一天、属于哪个集合——"今天是周一、周三、周六"不对，今天只是其中一天（2026-10-18 四方评审）。"""
+
+    if relation.calendar_key == WEEKDAY_KEY and len(relation.calendar_values) > 1:
+        return f"今天是{WEEKDAY_NAMES[now.weekday()]}（属于「{relation.antecedent_label}」）"
+    return f"今天是{relation.antecedent_label}"
+
+
 def _trigger_text(
-    item: Expectation, relation: RelationOpportunities | None, rows: Mapping[str, Seen], now: datetime
+    item: Expectation,
+    relation: RelationOpportunities | None,
+    rows: Mapping[str, Seen],
+    now: datetime,
+    *,
+    today_note: str | None = None,
 ) -> str:
     if item.source == "事件":
         row = _row(rows, item.trigger_instance)
@@ -300,10 +346,15 @@ def _trigger_text(
         return (
             f"刚发生：{_name(rows, item.trigger_instance)}（{when}）；关系说{segment}会{_label(None, item, relation)}"
         )
-    if item.source == "钟面":
-        return f"到了钟点：周{'一二三四五六日'[item.window[0].weekday()]} {item.window[0]:%H:%M}–{item.window[1]:%H:%M} 往常这会儿做"
-    if item.trigger == DAY_OF_MONTH:
-        return f"到了日子：往月 {item.window[0].day} 号做过"
+    if item.source == "情境":
+        today = _today_in(relation, now) if relation is not None else "今天处在这个日历情境里"
+        if relation is not None and relation.calendar_key == DAY_TYPE_KEY and today_note == UNKNOWN_DAY_NOTE:
+            # 缺放假数据时日型是按名义周末给的：照实说，不让触发句与抬头的"日型未知"自相矛盾（2026-10-18 四方评审）
+            today = f"今天按名义周末算是{relation.antecedent_label}（缺放假数据，日型未知）"
+        return (
+            f"处在情境里：{today}；关系说当天会{_label(None, item, relation)}，"
+            f"往常 {item.window[0]:%H:%M}–{item.window[1]:%H:%M}"
+        )
     last = _row(rows, anchor_uri(item.trigger_instance))
     since = (
         f"离上次（{last.started_at:%m-%d}）已 {(now.date() - last.day).days} 天" if last is not None else "离上次够久"
@@ -316,10 +367,16 @@ def _antecedents(table: OpportunityTable | None, item: Expectation, rows: Mappin
         return ()
     lines = []
     for antecedent in item.antecedents:
-        relation = next((r for r in table.relations if r.key == antecedent.relation), None)
+        relation = table.relation(antecedent.relation)
         if relation is None:
             continue
         arrow = "↑" if antecedent.upward else "↓"
+        if relation.segment == "situation":
+            state = (
+                f"今天是{relation.antecedent_label}" if antecedent.present else f"今天不是{relation.antecedent_label}"
+            )
+            lines.append(f"{'在场' if antecedent.present else '不在场'} {arrow}：{state}（日历情境）")
+            continue
         if antecedent.present:
             lines.append(
                 f"在场 {arrow}：{relation.antecedent_label}（{_name(rows, antecedent.source)}）{SEGMENT_TEXT.get(relation.segment, '')}"

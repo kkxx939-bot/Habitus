@@ -1,9 +1,9 @@
 """行为上下文视图：一条行为周围是什么样，全部是机械投影出来的**观测事实**。
 
-槽位都**按预测树算候选的维度对齐**（2026-09-12 定：树用哪些维度算候选，语义侧就沿同样的维度
-取回上下文）：``first_of_day``（树的危险率与累积率只描述"当天第一次"）、``preceding`` /
-``following``（树的转移边看的是时间上**紧邻**的上一条 / 下一条）、``gaps``（树的曝光分母：这段
-时间在不在看）、``day_note``（当地日历对这一天的说法）。缺什么就是空，不推测、不打分。
+几个机械事实（2026-09-12 定的维度，原来跟着预测树算候选的维度走；预测树删后照旧保留，裁定 59）：
+``first_of_day``（当天第一次）、``preceding`` / ``following``（时间上**紧邻**的上一条 / 下一条）、
+``gaps``（这段时间在不在看，与 ``temporal`` 的观测覆盖同一个口径）、``day_note``（当地日历对这一天的说法）。
+缺什么就是空，不推测、不打分。
 
 原来还有"所在的事"、角色、事里更早成员留下的前提——那是按天归组的产物，已随日情景树删掉；后来的规律级
 记录（``gloss``）也随 2026-09-26 的重构整块删掉。行为之间的关系由语义树的关系表提供，
@@ -15,8 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 
-# 与预测树 ``transition_window_seconds`` 同一个上限（prediction/config.py）：视图只读相邻一天，
-# 窗口超过一天会静默截断，所以在这里同样硬拒。
+# 转移窗口的上限：视图只读相邻一天，窗口超过一天会静默截断，所以硬拒。
 MAX_TRANSITION_WINDOW_SECONDS = 86_400.0
 
 
@@ -48,10 +47,17 @@ class FlowRow:
     status: str | None = None
     #: 谁发起的（行为树 ``prompted_by``：system / host_agent / self）；没写是 None。
     prompted_by: str | None = None
+    #: 地点与同在的人（行为树的结构字段；上游没给时为空）。预测层白天判带条件关系的条件要看它们。
+    place: str | None = None
+    subjects: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.last_observed_at < self.at:
             raise ValueError("a flow row cannot be last seen before it started")
+        if self.place is not None and (not isinstance(self.place, str) or not self.place):
+            raise ValueError("a flow row's place is non-empty text or None")
+        if not isinstance(self.subjects, tuple) or any(not isinstance(item, str) or not item for item in self.subjects):
+            raise ValueError("a flow row's subjects are a tuple of names")
         if isinstance(self.day_count, bool) or not isinstance(self.day_count, int) or self.day_count < 1:
             raise ValueError("a flow row's own kind occurred at least once that day")
 
@@ -93,11 +99,11 @@ class ObservationGap:
 
 @dataclass(frozen=True)
 class Neighbour:
-    """转移窗口内紧邻的一条行为——三态，与预测树的转移边同一组答案：
+    """转移窗口内紧邻的一条行为——三态：
 
-    - ``action`` 非空：找到了（树上的一条转移边）；
-    - ``action`` 为空且 ``censored`` 为假：窗口内**确认没有**（树上的 ∅ 边——"做完就收工"）；
-    - ``censored`` 为真：窗口内有观测空洞，不知道（树上的删失，既不算边也不算 ∅）。
+    - ``action`` 非空：找到了；
+    - ``action`` 为空且 ``censored`` 为假：窗口内**确认没有**（"做完就收工"）；
+    - ``censored`` 为真：窗口内有观测空洞，不知道（删失，既不算找到也不算没有）。
 
     "没算"（调用方没给窗口）不在这里表达，那是视图字段本身为 None。
     """
@@ -117,7 +123,7 @@ class ContextView:
     ``today_kinds`` 只在此刻视图上有意义：今日已发生的 kind，供"历史前提今天成立了没有"的对比，
     它不是前提本身。
 
-    按预测树维度对齐的几个字段：``first_of_day`` 只对历史视图有意义（此刻视图为 None）；
+    几个机械事实字段：``first_of_day`` 只对历史视图有意义（此刻视图为 None）；
     ``preceding`` / ``following`` 只在调用方给了转移窗口时才算（没给即 None，不是"没有"——"没有"
     是三态里的第二态：找过了、确实没有）；
     ``gaps`` 只对此刻视图有意义。

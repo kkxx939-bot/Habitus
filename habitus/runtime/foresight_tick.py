@@ -1,12 +1,12 @@
 """白天那一拍（方案第四节），三步：读材料 → 此刻对得上历史的预期全部建好、落账（不管说不说）→ 到了时窗的按账的级决定说不说
 （``runtime.foresight_delivery``，没接时只建不递）。
 
-组合根只做几件只有它知道的事：此刻是主体的本地时刻（``read_side.zone``）；读派生树——预测树取正在服务的那一代、机会表取这条
-lane 盘上最晚一晚、行为树经 ``scene.views`` 只读今天与前 7 天、还没封口的判断经 ``UnsealedReader``；写账本——同一个身份已经在账上
-的不再写（身份不含槽号、时刻与日子，账本按身份索引，跨天重算得到同一条）；人说过「以后别提了」的账不再建（裁定 50）。
+组合根只做几件只有它知道的事：此刻是主体的本地时刻（``read_side.zone``），今天的日历条件从 ``read_side.calendar`` 取
+（外部条件包，裁定 59）；读派生树——机会表取这条 lane 盘上最晚一晚、行为树经 ``scene.views`` 只读今天与前 7 天、还没封口的判断经 ``UnsealedReader``；写账本——同一个身份已经在账上
+的不再写（身份不含槽号、时刻与日子，账本按身份索引，跨天重算得到同一条）；人说过「以后别提了」的行为不再建（裁定 50、61）。
 进程不留内存状态：重启后重扫得到的都是已有的身份。
 
-词表迁移做到一半时整拍不做（归类一半新编号一半旧编号，结算那一拍同一口径）。没有机会表或预测树还没发布时不建预期、只递昨天建的；
+词表迁移做到一半时整拍不做（归类一半新编号一半旧编号，结算那一拍同一口径）。没有机会表时不建预期、只递昨天建的；
 建不出来（派生树读不到、装配失败）留观测、抛出，让调用方决定下一拍。账本里读不出来的文件条数进观测。
 """
 
@@ -21,12 +21,11 @@ from typing import Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from habitus.behavior.uri import BehaviorURI
-from habitus.foresight import ForesightError, Moment, Seen, UnsealedReader, UnsealedRow, form_expectations
+from habitus.conditions import day_note
+from habitus.foresight import Moment, Seen, UnsealedReader, UnsealedRow, form_expectations
 from habitus.foresight.opportunities import OpportunityTable
 from habitus.foresight.triggers.assemble import seen_rows
 from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
-from habitus.prediction.model import PredictionTree, SlotKey
-from habitus.prediction.store import PredictionTreeStore, PredictionTreeStoreError
 from habitus.runtime.foresight_delivery import DeliveryReport, DeliveryStage, JudgeMaterials
 from habitus.runtime.foresight_implementation import IMPLEMENTATION
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
@@ -34,6 +33,7 @@ from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_settlement import BehaviorReadSide
 from habitus.scene.views import DayIndexCache
 from habitus.series.reader import admitted
+from habitus.temporal.slots import slot_index
 
 
 @runtime_checkable
@@ -64,15 +64,13 @@ class TickReport:
 
 @dataclass(frozen=True)
 class _Materials:
-    """这一拍读到的东西：此刻、最近几天的行、机会表、预测树（后两样没有时为 None，原因在 ``skipped``）。"""
+    """这一拍读到的东西：此刻、最近几天的行、机会表（没有时为 None，原因在 ``skipped``）。"""
 
     now: datetime
     cache: DayIndexCache
     unsealed: tuple[UnsealedRow, ...]
     seen: tuple[Seen, ...]
     table: OpportunityTable | None
-    tree: PredictionTree | None
-    generation: str
     skipped: str | None
 
 
@@ -81,7 +79,6 @@ class ForesightTick:
         self,
         ledger: ForesightLedgerStore,
         opportunities: OpportunityStore,
-        prediction: PredictionTreeStore,
         read_side: TickReadSide,
         unsealed: UnsealedReader,
         *,
@@ -93,13 +90,12 @@ class ForesightTick:
         clock: Callable[[], datetime] | None = None,
         delivery: DeliveryStage | None = None,
         tick_seconds: float | None = None,
+        recent: int,
     ) -> None:
         if not isinstance(ledger, ForesightLedgerStore):
             raise TypeError("ledger must be a ForesightLedgerStore")
         if not isinstance(opportunities, OpportunityStore):
             raise TypeError("opportunities must be an OpportunityStore")
-        if not isinstance(prediction, PredictionTreeStore):
-            raise TypeError("prediction must be a PredictionTreeStore")
         if not isinstance(read_side, TickReadSide):
             raise TypeError("read_side must expose the behaviour tree, subject, calendar and zone")
         if not hasattr(unsealed, "prepare") or not hasattr(unsealed, "rows"):
@@ -110,11 +106,14 @@ class ForesightTick:
             raise TypeError("migrating must be callable or None")
         self.ledger = ledger
         self.opportunities = opportunities
-        self.prediction = prediction
         self.read_side = read_side
         self.unsealed = unsealed
         self.lane = lane
         self.shadow_unestablished = bool(shadow_unestablished)
+        if isinstance(recent, bool) or not isinstance(recent, int) or recent < 1:
+            raise ValueError("recent must be a positive integer")
+        #: 证据的窗口 M：「离上次够久」的时窗与预期的依据只看最近 M 次（``Evidence.window``）。
+        self.recent = recent
         self.vocabulary_version = vocabulary_version
         self.migrating = migrating
         if delivery is not None and (not isinstance(delivery, DeliveryStage) or delivery.ledger is not ledger):
@@ -170,43 +169,35 @@ class ForesightTick:
         day_start = datetime.combine(now.date(), clock_time(0), tzinfo=now.tzinfo)
         await self.unsealed.prepare(until=now)
         unsealed = self.unsealed.rows(since=day_start, until=now)
-        seen = seen_rows(
-            Moment(at=now, slot=0, weekday=now.weekday(), day_note=cache.day(now.date()).day_note), cache, unsealed
-        )
+        seen = seen_rows(Moment(at=now, slot=0), cache, unsealed)
         table = self.opportunities.latest(self.lane)
         if table is None:
-            return _Materials(now, cache, unsealed, seen, None, None, "", "还没有机会表")
-        published = self.prediction.active()
-        if published is None:
-            return _Materials(now, cache, unsealed, seen, table, None, "", "预测树还没发布")
-        try:
-            tree = self.prediction.load_generation(published.generation, expected_digest=published.digest)
-        except PredictionTreeStoreError as exc:
-            raise ForesightError(f"prediction tree cannot be read: {exc}") from exc
-        return _Materials(now, cache, unsealed, seen, table, tree, published.generation, None)
+            return _Materials(now, cache, unsealed, seen, None, "还没有机会表")
+        return _Materials(now, cache, unsealed, seen, table, None)
 
     # ── 第二步：建预期 ──────────────────────────────────────────────────────
 
     def _form(self, materials: _Materials) -> tuple[int, int, dict[str, int]]:
-        if materials.table is None or materials.tree is None:
+        table = materials.table
+        if table is None:
             return 0, 0, {}
         now = materials.now
         moment = Moment(
             at=now,
-            slot=SlotKey.of(now, slot_minutes=materials.tree.slot_minutes).slot,
-            weekday=now.weekday(),
-            day_note=materials.cache.day(now.date()).day_note,
+            slot=slot_index(now, slot_minutes=table.slot_minutes),
+            calendar=dict(self.read_side.calendar.for_expectations(now.date())),
             looked_since=now - self.tick if self.tick is not None else None,
         )
         expectations = form_expectations(
             moment=moment,
-            tree=materials.tree,
-            table=materials.table,
+            table=table,
             rows=materials.seen,
             shadow_unestablished=self.shadow_unestablished,
-            generation=materials.generation,
+            generation=table.night.isoformat(),
             version=str(self.vocabulary_version()) if self.vocabulary_version is not None else "",
             implementation=IMPLEMENTATION,
+            recent=self.recent,
+            calendar_of=lambda day: dict(self.read_side.calendar.for_expectations(day)),
         )
         recorded = 0
         by_source: dict[str, int] = {}
@@ -215,10 +206,10 @@ class ForesightTick:
             by_source[item.source] = by_source.get(item.source, 0) + 1
             if self.ledger.has_expectation(item.expectation_id):
                 continue
-            if item.account not in silenced:
-                setting = self.ledger.setting_of(item.account)
-                silenced[item.account] = setting is not None and setting.setting == "以后别提了"
-            if not silenced[item.account] and self.ledger.record_expectation(item):
+            if item.kind_token not in silenced:
+                setting = self.ledger.setting_of(item.kind_token)
+                silenced[item.kind_token] = setting is not None and setting.setting == "以后别提了"
+            if not silenced[item.kind_token] and self.ledger.record_expectation(item):
                 recorded += 1
         return len(expectations), recorded, by_source
 
@@ -236,10 +227,12 @@ class ForesightTick:
                 materials.table,
                 lambda uris: self._rows_for(uris, materials.cache, materials.unsealed, seen, now),
                 lambda item: any(
-                    row.kind_token == item.kind_token and item.observed_from < row.started_at <= now for row in seen
+                    row.kind_token == item.kind_token
+                    and item.observed_from < row.started_at <= now
+                    and not row.abandoned
+                    for row in seen
                 ),
-                self.read_side.calendar.describe,
-                seen,
+                lambda day: day_note(self.read_side.calendar, day),
             ),
         )
 
@@ -268,7 +261,14 @@ class ForesightTick:
             sealed = cache.day(day).by_uri.get(uri)
             if sealed is not None:
                 found[uri] = Seen(
-                    sealed.at, sealed.last_observed_at, sealed.kind_token, uri, sealed.name, sealed.summary
+                    sealed.at,
+                    sealed.last_observed_at,
+                    sealed.kind_token,
+                    uri,
+                    sealed.name,
+                    sealed.summary,
+                    place=sealed.place,
+                    subjects=sealed.subjects,
                 )
         return found
 
@@ -303,7 +303,6 @@ def _attributes(report: TickReport) -> dict[str, str | int | float | bool]:
     }
     if report.delivery is not None:
         found["judged"] = report.delivery.judged
-        found["severities_judged"] = report.delivery.severities
         found["level_changes"] = report.delivery.level_changes
         found["judge_calls"] = report.delivery.calls
         found["judge_inconsistent"] = sum(1 for signal in report.delivery.signals if "inconsistent" in signal)

@@ -338,9 +338,7 @@ def test_discard_uncommitted_cleans_only_prepared_receipt_and_rolled_back_log(
     recovery.discard_uncommitted(source)
     assert receipts.discarded == [source]
     assert transaction.journal.discarded == (
-        [job.transaction_id]
-        if journal_state is MemoryTransactionJournalState.ROLLED_BACK
-        else []
+        [job.transaction_id] if journal_state is MemoryTransactionJournalState.ROLLED_BACK else []
     )
 
 

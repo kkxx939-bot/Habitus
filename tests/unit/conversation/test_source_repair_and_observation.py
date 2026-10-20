@@ -113,9 +113,7 @@ def test_delivery_observes_every_consumer_terminal(tmp_path) -> None:
         for consumer in ConversationSourceConsumer:
             await service.ensure_outcome(source_value, consumer)
         observed = {
-            event.attributes["consumer"]: event
-            for event in observer.events
-            if event.operation == "consumer_delivery"
+            event.attributes["consumer"]: event for event in observer.events if event.operation == "consumer_delivery"
         }
         assert set(observed) == {consumer.value for consumer in ConversationSourceConsumer}
         for event in observed.values():

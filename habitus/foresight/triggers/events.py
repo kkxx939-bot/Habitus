@@ -15,6 +15,9 @@
 **退场**：此刻已经过了历史上最晚那一次（方案第三节），不再建——按槽的两段多宽限一槽（未封口的判断最多晚一拍才到场，
 紧挨着的链不然永远赶不上）。触发实例是前因那条链的锚的**开始时刻**，不是它的 URI：今天的前因还没封口时只有 ``unsealed:<开始时刻>``
 这个临时出处，封口后换成 URI，身份不能跟着换（前因清单里的 ``source`` 仍记出处，给人看）。
+
+**带条件的关系**（裁定 61 第 6 条）：同一（前因, 后果, 段）的不带条件的那条与它的各个带条件版本是一族，一条链此刻只取
+条件全成立、条件最多的那一条建预期、当前因（``triggers.conditions.most_specific``）；带条件的都不成立才是不带条件的那条。
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from datetime import date, datetime, time, timedelta
 from habitus.foresight.ledger.model import Antecedent
 from habitus.foresight.model import Moment
 from habitus.foresight.opportunities.model import OpportunityTable, RelationOpportunities
+from habitus.foresight.triggers.conditions import families, most_specific
 from habitus.foresight.triggers.draft import Draft, at_time_of, clamp, instance_at, midnight_after, midnight_of
 from habitus.scene.relations import Chain, LaneTimeline, Segment, chains_of, merge_for
 
@@ -67,17 +71,21 @@ def consequent_came(line: LaneTimeline, classes: Iterable[str], segment: Segment
 def event_drafts(
     table: OpportunityTable, line: LaneTimeline, moment: Moment, *, now_slot: int, statuses: Iterable[str]
 ) -> tuple[Draft, ...]:
-    """此刻在场的、抬高后果的关系，每条一份草稿。"""
+    """此刻在场的、抬高后果的关系，每条链一份草稿（同一族只取最具体的那一条）。"""
 
     wanted = set(statuses)
     found: list[Draft] = []
-    for relation in table.relations:
-        if relation.status not in wanted or not relation.upward:
-            continue
-        segment = Segment(relation.segment)
-        for chain in chains_in_segment(
-            line, relation.antecedent_classes, segment, today=moment.day, now_slot=now_slot, window=table.window_slots
-        ):
+    for members in families(
+        relation for relation in table.relations if relation.upward and relation.segment != "situation"
+    ).values():
+        segment = Segment(members[0].segment)
+        chains = chains_in_segment(
+            line, members[0].antecedent_classes, segment, today=moment.day, now_slot=now_slot, window=table.window_slots
+        )
+        for chain in chains:
+            relation = most_specific(members, chain, line, window=table.window_slots)
+            if relation is None or relation.status not in wanted:
+                continue
             came = consequent_came(line, relation.consequent_classes, segment, chain, today=moment.day)
             draft = _draft(relation, segment, chain, line, moment, table, came=came)
             if draft is not None:
@@ -94,30 +102,42 @@ def antecedents_of(
     now_slot: int,
     statuses: Iterable[str],
 ) -> tuple[Antecedent, ...]:
-    """反向：以这个类为后果的全部关系，逐条标前因此刻在不在它那一段里、是抬高还是压低；在场的带前因这一次的出处。"""
+    """反向：以这个类为后果的全部关系，逐条标前因此刻在不在它那一段里、是抬高还是压低；在场的带前因这一次的出处。
+    同一族（不带条件的 + 各带条件版本）里只有最具体成立的那一条算在场。
+    日历情境关系的前因是"今天处在那个日历条件里"（``moment.calendar``），没有出处记录——它不在时间线上，按记号找永远找不到
+    （2026-10-18 四方评审：原来一律记成不在场，判决小包里每个情境候选都带一句"前提缺了"）。"""
 
     wanted = set(statuses)
     found: list[Antecedent] = []
     for relation in table.by_consequent(kind_token):
-        if relation.status not in wanted:
+        if relation.status not in wanted or relation.segment != "situation":
             continue
+        present = relation.calendar_holds(moment.calendar, official=table.unseen_day_types == "official")
+        found.append(Antecedent(relation=relation.key, present=present, upward=relation.upward, source=""))
+    events = [item for item in table.by_consequent(kind_token) if item.segment != "situation"]
+    for members in families(events).values():
         chains = chains_in_segment(
             line,
-            relation.antecedent_classes,
-            Segment(relation.segment),
+            members[0].antecedent_classes,
+            Segment(members[0].segment),
             today=moment.day,
             now_slot=now_slot,
             window=table.window_slots,
         )
-        found.append(
-            Antecedent(
-                relation=relation.key,
-                present=bool(chains),
-                upward=relation.upward,
-                source=chains[0].anchor.uri if chains else "",
+        chosen = most_specific(members, chains[0], line, window=table.window_slots) if chains else None
+        for relation in members:
+            if relation.status not in wanted:
+                continue
+            present = chosen is not None and relation.key == chosen.key
+            found.append(
+                Antecedent(
+                    relation=relation.key,
+                    present=present,
+                    upward=relation.upward,
+                    source=chains[0].anchor.uri if present else "",
+                )
             )
-        )
-    return tuple(found)
+    return tuple(sorted(found, key=lambda item: item.relation))
 
 
 def _draft(

@@ -1,18 +1,25 @@
 """调节条件（含组合前因）：必须编译成三种可算的模板之一，否则丢弃（语义树新方案 ``13`` ②）。
 
-1. **结构字段**（``FIELD``）——机械判，看前因那一条：周几（工作日 / 周末）、日历备注（调休、节假日……）、地点、同在的人；
+1. **结构字段**（``FIELD``）——机械判，看前因那一条：地点、同在的人；周几、日型这类日历条件是日历情境概念，走第 3 种（裁定 59）；
 2. **时间线**（``TIMELINE``）——机械判：A 之前同一条链的窗口里出现过某一类（"讨论方案之后的修改代码"；**组合前因**
    "A 与 C 一起"就是这一种，不另起一套）；
-3. **带判据句的文本概念**（``CONCEPT``）——交映射器打标签：前因那一条命中了某个情境概念（"约了人"这类）。
+3. **情境概念**（``CONCEPT``）——前因那一条命中了某个情境概念（"约了人"这类交映射器打标签；日历情境按那一天的日历机械判，
+   答不出的那天不判）。
 
-条件的来源有两处：机械列举的（每个够样本的前因：周末、出现过的日历备注 / 地点 / 同在的人、出现在它之前的每一类、
+条件的来源有两处：机械列举的（每个够样本的前因：出现过的地点 / 同在的人、出现在它之前的每一类、
 同 lane 的每个情境概念），以及大模型提的（第 7 步：读 A 那一条与它之前的概要、不看 B，提出"可能被什么左右"，
 经 ``compile_proposal`` 编译，落不成模板的进已拒清单，不每晚换个说法反复试）。第 N 晚提的只在 N 之后的数据上检验。
 
-**检验**：只在独立样本 ≥ 40 的前因上开（会话 lane 目前只有修改代码、调研、统计代码行数够），否则样本不够。
-把这条关系的层按条件分成两组，比两组的效应：每组用同一套零假设概率算 Peto 对数优势比 ``(实测 − 期望) / 方差``，
-交互 z = 两组之差 / √(1/方差₁ + 1/方差₂)。不用"每层 y − 对照率"的两样本 t：阳性很少时那个方差几乎全来自各天对照率的起伏，
-会把 p 压到 0（合成数据上没埋关系也出了几十条"调节"）。
+**几个条件合起来**（裁定 61 第 6 条、62 第 1 条）：关系键里的条件是一个集合——各条件的文本排序后用 ``CONDITION_JOIN``
+拼成一个键（``join_conditions`` / ``parse_conditions``；``+`` 是概念身份预留的分隔符，地点 / 同在的人取值里含它的不当条件）。
+合起来判：任一不成立就不成立，都成立才成立，否则判不了。分组比的是"全部成立"对"少任意一个"：问的是"再加上这一个，比少一个
+条件时更强吗"；只有一个条件时"少任意一个"就是"不成立"，与原来的分法相同。
+
+**检验**：开不开由这条关系自己的最小可达 p 定（``ready_to_test``，裁定 60 第 9 条取代固定的前因 ≥ 40）：两边各自全中也能
+显著才开。把这条关系的层按条件分成两组，比两组的平均差值（实验组 − 对照率；差值尺度，裁定 27 第 5 条）：交互 z = 两组之差 /
+√(两组方差之和)。零假设是"两组抬升相等"，不是"都没抬升"，所以方差按两组合起来的公共抬升算（Breslow & Day 1980 §5.3：同质性
+检验的期望与方差在公共效应下算；按"没有效应"算会在关系真实存在时放大 z、多认出不存在的条件——10.17 前实测 I 类错误约 0.14，
+改后约 0.07，见 27 号调研）。两边都要攒到全中能显著（对称）：交互的功效由少的那一边决定（Breslow & Day 1987 §7.10）。
 
 "在条件下更强"说的是两件事：条件下有效应、而且和条件外不一样——按**交并检验**取两者 p 的较大者（有效水平不变）：
 条件下那一组用层内精确检验（泊松二项），交互用上面的 z。只用交互 z 不够：条件下只有两三层时，z 的正态近似失灵，
@@ -25,7 +32,7 @@ from __future__ import annotations
 
 import math
 import random
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from enum import Enum
@@ -43,17 +50,16 @@ class Template(str, Enum):
     CONCEPT = "concept"
 
 
-# TODO(FORESIGHT-EVENT-FIRST-001)：天气等外部事实由数据源注册成新字段（要有历史），规格见 foresight/triggers/assemble.py。
+# TODO(FORESIGHT-EVENT-FIRST-001)：天气等外部事实接进外部条件包（habitus/conditions），在这里注册成新字段（要有历史），
+# 规格见 foresight/triggers/assemble.py。
 class Field(str, Enum):
-    WEEKEND = "weekend"
-    CALENDAR = "calendar"
     PLACE = "place"
     WITH = "with"
 
 
 @dataclass(frozen=True, order=True)
 class Condition:
-    """``template`` 之下：``FIELD`` 用 ``field`` + ``value``（周末不要 value）；``TIMELINE`` / ``CONCEPT`` 用 ``value`` = 概念身份。"""
+    """``template`` 之下：``FIELD`` 用 ``field`` + ``value``；``TIMELINE`` / ``CONCEPT`` 用 ``value`` = 概念身份。"""
 
     template: Template
     value: str = ""
@@ -71,6 +77,24 @@ class ConditionError(ValueError):
     """提议落不成三种模板之一。"""
 
 
+#: 条件集合的键里各条件之间的分隔符（``concepts/model.py`` 的 ``IDENTITY_SEPARATORS`` 预留，概念身份里不会出现）。
+CONDITION_JOIN = "+"
+
+
+def join_conditions(conditions: Iterable[Condition]) -> str:
+    """条件集合 → 关系键里的条件文本（排序、去重；空集合是空串 = 不带条件）。"""
+
+    return CONDITION_JOIN.join(sorted({item.text for item in conditions}))
+
+
+def parse_conditions(text: str) -> tuple[Condition, ...]:
+    """关系键里的条件文本 → 各条件（按文本排序）；空串是空元组。"""
+
+    if not text:
+        return ()
+    return tuple(parse(part) for part in text.split(CONDITION_JOIN))
+
+
 def parse(text: str) -> Condition:
     """``Condition.text`` 的反面（存盘的关系身份里只有文字）。"""
 
@@ -84,7 +108,7 @@ def parse(text: str) -> Condition:
 def compile_proposal(proposal: Mapping[str, object], concepts: ConceptSet, *, lane: str) -> Condition:
     """把一条提议编译成模板；落不成的抛 ``ConditionError``，说清是哪一条不对（进已拒清单）。
 
-    提议的形状：``{"template": "field", "field": "weekend" | "calendar" | "place" | "with", "value": "..."}``、
+    提议的形状：``{"template": "field", "field": "place" | "with", "value": "..."}``、
     ``{"template": "timeline", "concept": "<类名或概念名>"}``、``{"template": "concept", "concept": "<情境概念名>"}``。
     """
 
@@ -98,9 +122,7 @@ def compile_proposal(proposal: Mapping[str, object], concepts: ConceptSet, *, la
         except ValueError as exc:
             raise ConditionError(f"unknown field: {proposal.get('field')!r}") from exc
         value = str(proposal.get("value") or "").strip()
-        if field is Field.WEEKEND:
-            return Condition(Template.FIELD, "", field)
-        if not value or "=" in value or "|" in value:
+        if not value or "=" in value or "|" in value or CONDITION_JOIN in value:
             raise ConditionError(f"field {field.value} needs a plain value")
         return Condition(Template.FIELD, value, field)
     name = str(proposal.get("concept") or "").strip()
@@ -124,19 +146,18 @@ def mechanical(
     chains: Sequence[Chain],
     *,
     window: int,
-    notes: Mapping[date, str],
 ) -> tuple[Condition, ...]:
     """机械列举的条件：在这个前因的链上真有正反两面的（全是或全不是的条件没法比）。"""
 
-    candidates: set[Condition] = {Condition(Template.FIELD, "", Field.WEEKEND)}
+    candidates: set[Condition] = set()
     for chain in chains:
         record = line.records.get(chain.anchor.uri)
-        if notes.get(chain.day):
-            candidates.add(Condition(Template.FIELD, notes[chain.day], Field.CALENDAR))
-        if record is not None and record.place:
+        if record is not None and record.place and CONDITION_JOIN not in record.place:
             candidates.add(Condition(Template.FIELD, record.place, Field.PLACE))
         if record is not None:
-            candidates.update(Condition(Template.FIELD, name, Field.WITH) for name in record.subjects)
+            candidates.update(
+                Condition(Template.FIELD, name, Field.WITH) for name in record.subjects if CONDITION_JOIN not in name
+            )
     for identity in concepts.behaviors():
         if identity != antecedent and concepts.lane_of(identity) == line.lane and line.marks.get(identity):
             candidates.add(Condition(Template.TIMELINE, identity))
@@ -145,16 +166,14 @@ def mechanical(
             candidates.add(Condition(Template.CONCEPT, identity))
     found = []
     for condition in sorted(candidates):
-        judge = evaluator(line, condition, window=window, notes=notes)
+        judge = evaluator(line, condition, window=window)
         flags = {judge(chain) for chain in chains} - {None}
         if flags == {True, False}:
             found.append(condition)
     return tuple(found)
 
 
-def evaluator(
-    line: LaneTimeline, condition: Condition, *, window: int, notes: Mapping[date, str]
-) -> Callable[[Chain], bool | None]:
+def evaluator(line: LaneTimeline, condition: Condition, *, window: int) -> Callable[[Chain], bool | None]:
     """条件 → "这次 A 满足没有"（判不了是 None）。只看前因那一条与它之前，不看 B。"""
 
     if condition.template is Template.FIELD:
@@ -162,10 +181,6 @@ def evaluator(
 
         def by_field(chain: Chain) -> bool | None:
             record = line.records.get(chain.anchor.uri)
-            if field is Field.WEEKEND:
-                return chain.day.weekday() >= 5
-            if field is Field.CALENDAR:
-                return notes.get(chain.day) == condition.value
             if record is None:
                 return None
             if field is Field.PLACE:
@@ -184,7 +199,11 @@ def evaluator(
 
         return by_timeline
 
+    calendar = line.calendar_days(condition.value)
+
     def by_concept(chain: Chain) -> bool | None:
+        if calendar is not None:
+            return calendar.get(chain.day)  # 日历情境：那一天的日历说了算，答不出就是 None
         hits = line.hits.get(chain.anchor.uri)
         if hits is None:
             return None
@@ -194,6 +213,24 @@ def evaluator(
         return any(hit.identity == condition.value for hit in hits.situation_hits)
 
     return by_concept
+
+
+def evaluator_all(
+    line: LaneTimeline, conditions: Sequence[Condition], *, window: int
+) -> Callable[[Chain], bool | None]:
+    """几个条件合起来判：任一不成立 → 不成立；都成立 → 成立；其余（有判不了的）→ 判不了。空集合恒成立。"""
+
+    judges = [evaluator(line, condition, window=window) for condition in conditions]
+
+    def judge(chain: Chain) -> bool | None:
+        flags = [item(chain) for item in judges]
+        if any(flag is False for flag in flags):
+            return False
+        if any(flag is None for flag in flags):
+            return None
+        return True
+
+    return judge
 
 
 @dataclass(frozen=True)
@@ -227,7 +264,8 @@ class ModeratedMeasure:
         return max(upper, exact_upper), max(1.0 - upper, exact_lower)
 
     def minimum_p(self) -> float:
-        """两组的实验组各走到全阳 / 全阴时最大的 |z|。样本不够（前因不到 40、某一组没有有信息的层）就不可能显著。"""
+        """两组的实验组各走到全阳 / 全阴时最大的 |z|，与两边各自的精确最小可达 p 取大（两边对称，L10.17）。样本不够（某一边
+        不到 ``MIN_PER_SIDE`` 次、某一组没有有信息的层）就不可能显著。"""
 
         if not self.enough:
             return 1.0
@@ -239,7 +277,9 @@ class ModeratedMeasure:
         if any(z is None for z in zs):
             return 1.0
         largest = max(abs(z) for z in zs if z is not None)
-        return max(min(1.0, math.erfc(largest / math.sqrt(2.0))), stats.minimum_p(self.inside))
+        return max(
+            min(1.0, math.erfc(largest / math.sqrt(2.0))), stats.minimum_p(self.inside), stats.minimum_p(self.outside)
+        )
 
     def interval(
         self, *, level: float, rounds: int, seed: int
@@ -308,44 +348,75 @@ class ModeratedMeasure:
         return _interaction_z(self.inside, self.outside, None, None)
 
 
-def _excess(items: Sequence[Stratum], forced: int | None) -> tuple[float, float] | None:
-    """一组层的平均"实验组 − 对照"与它在零假设下的方差（实验组的伯努利方差加上对照率的估计方差）。
-    ``forced`` 给了就把实验组全当成它（算最小可达 p）。"""
+def _lifts(items: Sequence[Stratum], forced: int | None) -> list[float]:
+    """每层的"实验组 − 对照率"。``forced`` 给了就把实验组全当成它（算最小可达 p）。"""
 
-    if not items:
-        return None
-    count = len(items)
-    total = sum((item.treated if forced is None else forced) - item.control_rate for item in items)
-    variance = sum(
-        item.null_probability * (1.0 - item.null_probability) * (1.0 + 1.0 / item.controls) for item in items
-    ) / (count * count)
-    if variance <= 0.0:
-        return None
-    return total / count, variance
+    return [(item.treated if forced is None else forced) - item.control_rate for item in items]
+
+
+def _variance(items: Sequence[Stratum], common: float) -> float:
+    """一组层的平均差值在"两组抬升相等、都等于 ``common``"下的方差：实验组的伯努利方差（来的概率 = 对照率 + 公共抬升）
+    加上对照率的估计方差。"""
+
+    def bernoulli(rate: float) -> float:
+        return rate * (1.0 - rate)
+
+    total = sum(
+        bernoulli(min(1.0, max(0.0, item.control_rate + common))) + bernoulli(item.control_rate) / item.controls
+        for item in items
+    )
+    return total / (len(items) * len(items))
 
 
 def _interaction_z(
     inside: Sequence[Stratum], outside: Sequence[Stratum], forced_in: int | None, forced_out: int | None
 ) -> float | None:
     """条件下与条件外的平均差值之差的 z。检验与"影响够大"都在差值尺度上：用优势比检验、差值判门槛，后果的基线一变
-    （周末、地点常常改变基线），优势比一样的关系也会被判成"调节"（第四轮评审算法 7：基线 8% 对 35%、OR 都是 6，44–88% 判成调节）。"""
+    （周末、地点常常改变基线），优势比一样的关系也会被判成"调节"（第四轮评审算法 7：基线 8% 对 35%、OR 都是 6，44–88% 判成调节）。
+    方差在公共抬升下算（见模块说明）。"""
 
-    held, rest = _excess(inside, forced_in), _excess(outside, forced_out)
-    if held is None or rest is None:
+    held, rest = _lifts(inside, forced_in), _lifts(outside, forced_out)
+    if not held or not rest:
         return None
-    return (held[0] - rest[0]) / math.sqrt(held[1] + rest[1])
+    common = (sum(held) + sum(rest)) / (len(held) + len(rest))
+    variance = _variance(inside, common) + _variance(outside, common)
+    if variance <= 0.0:
+        return None
+    return (sum(held) / len(held) - sum(rest) / len(rest)) / math.sqrt(variance)
 
 
-def split(measure: ChainMeasure, judge: Callable[[Chain], bool | None], *, minimum: int) -> ModeratedMeasure:
+#: 调节检验每边至少几次：区间按块重抽样要两边都有至少 2 层（``ModeratedMeasure.interval``）。
+MIN_PER_SIDE = 2
+
+
+def split(measure: ChainMeasure, judges: Sequence[Callable[[Chain], bool | None]]) -> ModeratedMeasure:
+    """层按条件集合分两组：全部成立的进条件下那一组；**恰好少一个**（其余都成立、有一个不成立）的进条件外那一组；
+    别的（有判不了的、少了两个以上）不进任何一组。只有一个条件时就是"成立 / 不成立"两组。
+    两边各自够 ``MIN_PER_SIDE`` 次才算样本够（两边合计够、一边只有一次的，交互根本量不出来）。"""
+
+    if not judges:
+        raise ValueError("a moderated measure needs at least one condition")
     inside: list[Stratum] = []
     outside: list[Stratum] = []
     for item in measure.strata:
-        flag = judge(item.chain)
-        if flag is True:
+        flags = [judge(item.chain) for judge in judges]
+        if any(flag is None for flag in flags):
+            continue
+        missing = sum(1 for flag in flags if flag is False)
+        if missing == 0:
             inside.append(item)
-        elif flag is False:
+        elif missing == 1:
             outside.append(item)
-    return ModeratedMeasure(tuple(inside), tuple(outside), enough=measure.units >= minimum)
+    enough = len(inside) >= MIN_PER_SIDE and len(outside) >= MIN_PER_SIDE
+    return ModeratedMeasure(tuple(inside), tuple(outside), enough=enough)
+
+
+def ready_to_test(measure: ModeratedMeasure, *, alpha: float) -> bool:
+    """这条带条件的关系值不值得开检验（裁定 60 第 9 条：不用固定的 40 次）：两边全分开时最小可达 p 在 ``alpha`` 以内，且每边
+    至少 ``MIN_PER_SIDE`` 次。调节检验是交互的 z 与条件下精确尾概率取大（``tails``），所以用它自己的 ``minimum_p``，不借单样本
+    二项的次数公式。两边要的次数都随对照率变（L10.17 起条件外与条件下对称）：α = 0.05 时对照率 0.1 要 2 次、0.3 要 4 次、0.5 要 6 次。"""
+
+    return measure.enough and measure.minimum_p() <= alpha
 
 
 def _resolve(concepts: ConceptSet, name: str) -> str | None:
@@ -367,6 +438,7 @@ def _quantile(ordered: Sequence[float], fraction: float) -> float:
 
 
 __all__ = [
+    "CONDITION_JOIN",
     "Condition",
     "ConditionError",
     "Field",
@@ -374,7 +446,12 @@ __all__ = [
     "Template",
     "compile_proposal",
     "evaluator",
+    "evaluator_all",
+    "join_conditions",
     "mechanical",
     "parse",
+    "parse_conditions",
+    "MIN_PER_SIDE",
+    "ready_to_test",
     "split",
 ]

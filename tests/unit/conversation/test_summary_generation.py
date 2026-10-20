@@ -138,9 +138,7 @@ def test_partial_segment_summary_preserves_system_owned_turn_boundaries() -> Non
 
 def test_segment_summary_rejects_unknown_model_field_in_server_merge() -> None:
     source = segment(segment_id="000000000000-000000000001")
-    provider = RecordingProvider(
-        [{"operations": [{"field": "system_metadata", "operation": "keep"}]}]
-    )
+    provider = RecordingProvider([{"operations": [{"field": "system_metadata", "operation": "keep"}]}])
     generator = ConversationSummaryGenerator(structured(provider), clock=lambda: SUMMARY_TIME)
 
     with pytest.raises(ConversationSummaryError, match="field operations"):
@@ -215,14 +213,10 @@ def test_range_summary_uses_contiguous_sources_and_system_owned_range_identity()
 
 def test_range_summary_enforces_stage_specific_source_bound_before_model_call() -> None:
     first = replace(
-        segment_summary(
-            segment(segment_id="000000000000-000000000001", messages=closed_turn(start_sequence=0))
-        ),
+        segment_summary(segment(segment_id="000000000000-000000000001", messages=closed_turn(start_sequence=0))),
         overview="x" * 200,
     )
-    second = segment_summary(
-        segment(segment_id="000000000002-000000000003", messages=closed_turn(start_sequence=2))
-    )
+    second = segment_summary(segment(segment_id="000000000002-000000000003", messages=closed_turn(start_sequence=2)))
     plan = ConversationSummaryCompactionPlan(
         ConversationRangeSummaryStage.RANGE,
         (first, second),

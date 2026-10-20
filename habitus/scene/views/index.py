@@ -18,7 +18,7 @@ from habitus.behavior.model import BehaviorKind
 from habitus.behavior.schema.vocabulary import GAP_KINDS
 from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.uri import BehaviorURI
-from habitus.scene.calendar import DayTypeCalendar, NominalCalendar
+from habitus.conditions import DayTypeCalendar, LocalCalendar
 from habitus.scene.views.model import ActionRef, FlowRow, ObservationGap
 from habitus.series.model import GapKind, disproves
 
@@ -30,10 +30,10 @@ GAP_LOOKBACK_DAYS = 31
 class DayIndex:
     """一天的只读索引。行为侧跳过撞车消歧的重复（与预测夜批同口径）；情景侧只读当前一代。
 
-    ``day_note`` 是当地日历对这一天的说法，读时算、不落盘（见 ``scene.calendar``）。
+    ``day_note`` 是当地日历对这一天的说法，读时算、不落盘（见 ``conditions.calendar``）。
 
-    ``gaps`` 是落在这一天里的观测空白，与预测树的曝光分母同两步归一化：更早开始、延续到这一天的
-    空白也读进来并裁到本日（树的 ``group_gaps_by_day``；回看 ``GAP_LOOKBACK_DAYS`` 天的起始目录）；
+    ``gaps`` 是落在这一天里的观测空白，两步归一化：更早开始、延续到这一天的
+    空白也读进来并裁到本日（回看 ``GAP_LOOKBACK_DAYS`` 天的起始目录）；
     零宽度的丢弃、"没读懂"段里若读出了一条行为的开始则整段作废（与事件序列同一条规则 ``series.model.disproves``——
     我们在看、只是没读懂，读出来了就证伪了）。
 
@@ -90,6 +90,8 @@ class DayIndex:
         document = self.occurrences[uri]
         fields = document.fields
         kind_token = str(fields["kind_token"])
+        place = fields.get("place")
+        subjects = fields.get("subjects") or ()
         return FlowRow(
             uri=uri,
             name=str(fields["name"]),
@@ -100,6 +102,8 @@ class DayIndex:
             day_count=counts[kind_token],
             status=str(fields["status"]),
             prompted_by=str(fields["prompted_by"]) if fields.get("prompted_by") is not None else None,
+            place=place if isinstance(place, str) and place else None,
+            subjects=tuple(str(item) for item in subjects if isinstance(item, str) and item),
         )
 
     def others(self, uri: str) -> tuple[str, ...]:
@@ -144,7 +148,7 @@ def _clamp_to_day(started_at: datetime, ended_at: datetime, day: date) -> tuple[
 class DayIndexCache:
     """一次查询里同一天只读一次。
 
-    ``calendar`` 决定每一天的 ``day_note``（见 ``scene.calendar``）；不给就是名义日历，
+    ``calendar`` 决定每一天的 ``day_note``（见 ``conditions.calendar``）；不给就是名义日历，
     即"没有当地日历数据"这个显式的零修正。
     """
 
@@ -165,7 +169,7 @@ class DayIndexCache:
             raise ValueError("subject must be non-empty text")
         self.behavior_tree = behavior_tree
         self.subject = subject
-        self.calendar: DayTypeCalendar = NominalCalendar() if calendar is None else calendar
+        self.calendar: DayTypeCalendar = LocalCalendar() if calendar is None else calendar
         self._days: dict[date, DayIndex] = {}
 
     def day(self, day: date) -> DayIndex:

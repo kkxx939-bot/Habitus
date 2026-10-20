@@ -69,9 +69,7 @@ def test_one_adapter_package_registration_is_shared_by_setup_doctor_and_runtime(
         )
 
     catalog = build_adapter_catalog(registrars=(register,))
-    payload = yaml.safe_load(
-        (REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8")
-    )
+    payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
     payload["models"]["rerank"]["route"].update(
         {
@@ -90,9 +88,7 @@ def test_one_adapter_package_registration_is_shared_by_setup_doctor_and_runtime(
 
     catalog.validate(config)
     report = run_doctor(config, check_port=False, catalog=catalog)
-    adapter_check = next(
-        check for check in report.checks if check.name == "adapter_configuration"
-    )
+    adapter_check = next(check for check in report.checks if check.name == "adapter_configuration")
     assert adapter_check.status is DoctorStatus.PASS
     assert catalog.setup.identify("rerank", payload["models"]["rerank"]).profile_id == "rerank.future"
     runtime = build_runtime(

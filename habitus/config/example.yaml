@@ -128,12 +128,16 @@ conversation:
 
   source:
     max_envelope_bytes: 16777216
-    max_source_files: 100000
+    max_source_addresses: 100000
+    max_markers_per_address: 10000
+    max_pending_sources: 100000
     max_output_files_per_consumer: 4
     max_outcome_bytes: 65536
     max_memory_output_bytes: 33554432
     max_behavior_session_output_bytes: 1048576   # 行为侧会话 lane 的回执（只列各轮时刻，不存内容）
     recovery_batch_size: 100
+    release_batch_addresses: 1000                # 释放每轮最多看多少个地址（按地址游标轮转）
+    orphan_grace_seconds: 86400                  # 标记打上后信封迟迟不在多久算孤儿（put 写到一半崩溃），周期恢复清掉
     execution_lock_ttl_seconds: 300
     execution_lock_heartbeat_seconds: 60.0
     execution_lock_wait_seconds: 30.0
@@ -205,11 +209,7 @@ conversation:
     rerank_score_threshold: 0.0
 
   lifecycle:
-    maintenance_interval_seconds: 3600
     max_conversations_per_cycle: 100
-    lease_ttl_seconds: 300
-    heartbeat_interval_seconds: 60.0
-    shutdown_timeout_seconds: 30.0
     summary_compaction:
       enabled: true
       segment_to_range:
@@ -431,7 +431,7 @@ workflow:
     shutdown_timeout_seconds: 30.0
 
 # 行为管线（两条 lane 的融合 → 归约 → 行为树）。缺省未启用；填入被跟踪主体的稳定标识即启用。
-# 会话、物理两条 lane 各是一整套（存储、归约、行为树、词表、预测树各一支，在 <根>/behavior/<lane>/ 等目录下），
+# 会话、物理两条 lane 各是一整套（存储、归约、行为树、词表各一支，在 <根>/behavior/<lane>/ 等目录下），
 # 互不相通；下面的设置两支共用同一份数值。窗口数值留空时取代码内唯一出处。
 # behavior:
 #   primary_subject: "家庭成员A"
@@ -451,9 +451,11 @@ workflow:
 #   kinds_transient_retry_delay_seconds: 5
 #   kinds_max_encoded_bytes: 16777216  # 词表各文件（清单、变更日志、待定池……）的字节上限
 #   kinds_max_examples: 3              # 每类最多几条代表例子
-#   kinds_recurrence_min_count: 3      # 每晚新增：一组待定至少几条才建类（待定档）
-#   kinds_recurrence_min_days: 3       # 每晚新增：且至少跨几天（待定档）
+#   kinds_recurrence_min_count: 2      # 每晚新增：一组待定至少几条才建类；拆分两边也按它（裁定 59）
+#   kinds_recurrence_min_days: 2       # 每晚新增：且至少跨几天（同一天追问几轮不算复现）；拆分同上
 #   kinds_max_pending: 5000            # 待定池上限（保护闸）
+#   kinds_nightly_max_new: 200         # 每晚新增一晚最多交几条新条目（保护闸，多的留到下一晚；旧条目不进，按相似召回）
+#   kinds_recall_per_entry: 3          # 每条新条目按字符二元组相似召回几条旧条目一起聚组
 #   kinds_nightly_hour: 2              # 每晚新增在本地几点之后跑
 #   kinds_revision_weekday: 2          # 定期拆改在每周几（0=周一，2=周三）
 #   kinds_revision_hour: 3             # 定期拆改在本地几点之后跑
@@ -470,84 +472,88 @@ workflow:
 #   kinds_checkpoint_every: 200        # 扫树、重打树时每处理多少条续一次 sweep 租约
 #   kinds_prompt_max_steps: 12         # 归类与待定池给模型看的每条最多列几步
 #   kinds_sample_max_steps: 4          # 定期拆改抽样原话每条最多列几步
-
-# 时间预测树的夜批。缺省未启用；置 enabled: true 即启用，Runtime 会在行为侧也启用时组装
-# 重建 Worker（这棵树读的就是行为树，行为侧没开就没有输入）。
-#
-# 下面十三个值**全部是启动档，没有一个有数据依据**（见 prediction/config.py 的
-# TODO(PRED-TUNING-001)）。它们要用 prediction/evaluation.py 的留出回测在我们自己的数据上
-# 逐项定档，判据以校准为主。在第一批真实 occurrence 出来之前，不要为了"看起来更合理"提前改。
-# prediction:
-#   enabled: true
-#   slot_minutes: 15                 # 待定档：min(提醒精度目标, 链内相邻间隔低分位)
-#   decay_half_life_days: 60         # 待定档：行为分布的稳定期长度
-#   recent_half_life_days: 14        # 待定档：多快认出习惯变化而不被单周波动骗到；必须短于上一行
-#   pool_half_width: 3               # 待定档：同一习惯的日间时间抖动（单位是槽）。
-#                                    #   ±3 槽 = ±45 分钟。预测层的「窗口」就是它，不另配一份——
-#                                    #   配两份会让证据包里的数字与背景取自不同的时间范围。
-#   shrink_slot_to_pool: 5           # 待定档：留出集上最小化对数损失
-#   shrink_pool_to_weekday: 5        # 待定档：同上
-#   shrink_weekday_to_all_day: 5     # 待定档：同上
-#   laplace_epsilon: 0.5             # 待定档：边的目标份额平滑
-#   transition_window_slots: 3       # 转移窗口（同一条链）几槽：3 槽 = 45 分钟，与池化邻域同一把尺、键分开；
-#                                    #   语义树的"同一条链"跨度段也读它。真实数据上链内 / 链间间隔还没有明显的谷底，跑数后再校
-#   shrink_edge: 5                   # 待定档：留出集上最小化对数损失
-#   recurrence_window_days: 90       # 待定档：超过多久算"重新开始"而不是"复发"
-#   recurrence_half_life_days: 365   # 待定档：复发证据窗必须比钟面长——月频行为在 τ=60 下有效样本封顶 3.4 个
-#   rebuild_interval_seconds: 86400  # 运维数：一天重建一次
-#   published_generations: 7         # 运维数：留七代，够回看一周
-#   worker_shutdown_timeout_seconds: 30
+#   observation_max_files: 100000      # 观测存储最多多少份交付（保护闸；观测在发布后即释放，常态远低于它）
+#   fusion_max_receipt_files: 100000   # 回执最多多少份（保护闸；按覆盖窗口过期）
+#   fusion_max_judgement_files: 1000000  # 判断最多多少份（保护闸；发布即释放）
+#   tree_max_children_per_directory: 10000  # 行为树单个目录最多多少个子项（保护闸）
 
 # 语义关联层。缺省未启用；置 enabled: true 即启用（行为侧必须也启用）。
 # relations 是关系检验的统计门槛（裁定 26）：每一项都可以不写，不写就是下面注释里的默认值（用户 10-07 定的起点，
-# 跑真实数据后再校）。和时间有关的三个数（槽宽、转移窗口、久别重来）只认 prediction 那一组，这里不另配。
+# 跑真实数据后再校）。和时间有关的数（槽宽、转移窗口）只认 temporal 那一组，这里不另配。
 # scene:
 #   enabled: true
+#   baseline_slack_slots: 3          # 常态按峰分份时峰两边各放宽几槽（待定档；原借预测树 pool_half_width，裁定 59）
+#   nightly_interval_seconds: 86400  # 整晚那一趟（结算→语义树→机会表）多久跑一次（运维数；原借预测树的重建节拍，裁定 59）
+#   nightly_shutdown_timeout_seconds: 30  # 停机时等整晚那一趟多久
 #   relations:
 #     fdr: 0.10                        # 第 1 道：当晚检验族的假发现率
-#     forward_min_antecedents: 5       # 前向验证：发现之后新数据里至少攒够几次独立的前因才验
 #     forward_alpha: 0.05              # 前向验证的单侧显著性
-#     forward_power: 0.80              # 要攒几次按功效定：真关系有这么大把握过关（按发现时效应区间离 0 近的一端算）
+#     forward_power: 0.80              # 前向验证与维持检验要攒几次按功效定（没有固定下限；前向按发现时效应区间离 0 近的一端算）
 #     forward_max_antecedents: 40      #   ……至多攒这么多次
 #     min_absolute_lift: 0.05          # 第 3 道"影响够大"：差值区间下限的绝对差
 #     min_relative_lift: 0.20          #   ……与相对差（两样都要够）
-#     maintenance_blocks: 8            # 维持检验：每攒满这么多块新数据判一次，连续两段都说没了才失效
 #     heterogeneity_alpha: 0.05        # 第 2 道：各块效应异质性的显著性
 #     interval_level: 0.95             # 差值区间的置信度
 #     bootstrap_rounds: 400            #   ……按块重抽样的次数
 #     exact_strata_limit: 400          # 有信息的层不超过这么多时 p 值精确算，超过用正态近似
 #     first_seen_min_days: 14          # 长跨度"新类第一次出现"：记录开始后至少过这么多天
 #     first_seen_min_blocks: 3         #   ……并且至少这么多个这一类自己的块长
-#     moderation_min_antecedents: 40   # 调节条件只在独立样本至少这么多的前因上开检验
+#     condition_ask_min_antecedents: 40  # 前因攒到这么多次才问模型要调节条件（机械列举的条件按最小可达 p 开检验，不看它）
 #     max_blind_share: 0.5             # 后果是细分概念时，"判不了"的窗口超过这一成就不进检验族
+#     max_combined_conditions: 3       # 一条关系最多挂几个条件（第二个起只长在已成立的带条件关系上；保护闸）
 
-# 主体所在地。时区与当地日历**两层共用**：情景树读侧用它标每一天的日型（补班、节假日），预测层用它
+# 读行为记录时间用的尺子（裁定 59）：语义树与预测层都经 habitus.temporal 用它们，全系统只此一处。
+# temporal:
+#   slot_minutes: 15                 # 槽宽，须整除一天（待定档：min(提醒精度目标, 链内相邻间隔低分位)）
+#   merge_window_minutes: 45         # 同一类相邻两条开始时刻相隔不超过这么多分钟算同一次（按秒判断）；须是槽宽的整数倍，
+#                                    #   关系检验"同一条链"那一段的槽数由它换算
+#   pool_half_width: 3               # 日内分布收缩的邻域：本槽 ← 前后各这么多槽 ← 全天（待定档）
+#   shrink_slot_to_pool: 5           # 本槽向邻域收缩的先验分量（待定档）
+#   shrink_pool_to_all_day: 5        # 邻域向全天收缩的先验分量（待定档）
+#   min_peak_mass: 0.10              # 一个峰里至少有这么多比例的发生（归一化之后比）
+
+# 主体所在地。时区与当地日历**两层共用**：语义树与预测层用它取每一天的日历条件（周几、几号、日型），预测层用它
 # 造"此刻"的时钟与本地日界。分别配两份迟早对不上，所以单独一组，由组合根分发。
 # 这一组没有 enabled：不启用任何上层时它也无害，启用了就必须是对的。
 # locale:
 #   timezone: Asia/Shanghai          # IANA 名字；决定"今天是哪一天""此刻在哪个槽"
-#   region: CN                       # 当地日历数据的地区码（两位大写）
-#   calendar_path: null              # 当地日历数据文件。**目前只接受 null**：数据格式还没定，
-#                                    #   给了路径直接拒——静默忽略会让人以为调休已经生效。
-#                                    #   null 时日型恒为空，这是显式的零修正，不是降级。
+#   region: CN                       # 这个人所在地的地区码（ISO 3166：CN、SG，州一级如 US-CA）；日历跟着人走，不跟着服务部署在哪
+#   calendar_path: null              # 放假安排目录（外接组件，<年>.json，格式见 conditions/calendar_data.py）；
+#                                    #   null 时没有放假数据：日型是未知（不当普通工作日），周几、几号照常答。
+#   nominal_weekend: [5, 6]          # 没有放假数据时建预期的兜底周末（0=周一 … 6=周日）；统计里不用它
 
-# 预测层。缺省未启用；置 enabled: true 即启用（预测树与情景树必须都已启用——数字取自前者、
-# 与之对应的历史背景取自后者，缺一边就装配不出证据）。
+# 预测层。缺省未启用；置 enabled: true 即启用（语义树必须已启用——机会表、复现与关系全从语义树那一晚来，
+# 结算是整晚那一趟的第一步；预测树删了，裁定 59）。
 #
-# 这一组没有算法参数：时窗来自历史那几次的实际时刻，转移窗就是 prediction.transition_window_slots。
+# 这一组没有算法参数：时窗来自历史那几次的实际时刻，转移窗就是 temporal 的 merge_window_minutes / slot_minutes。
 # 这里只有开关、递法的升降节奏（产品决定，不是统计量）、保护闸；没定的几项先给默认值（裁定 46）。
 # foresight:
 #   enabled: true
-#   line_floor: 0.2                  # 线的下限（线 = 1 / (1 + 代价比 × 提醒效果)，每本账一条、在上下限之间波动）
-#   line_ceiling: 0.9                # 线的上限
-#   cost_ratio_unjudged: 0.5         # 没判过代价比时按它（0.5 → 线 0.67）
-#   severity_review_days: 60         # 重轻按账判一次，多少天后重判
+#   false_alarm_rate: 0.33           # 可接受的误提醒率；线 = 1 − 它（0.33 → 0.67），这一版所有账同一条线
 #   shadow_uses_unestablished: true  # 影子预期也用还没成立的候选关系（账早攒；开口仍只用成立的）
+#   unseen_day_types: skip           # 没见过的日型怎么建预期：skip 不外推（只在见过他做的日型上建）/ official 按放假数据的官方含义归组（待定，裁定 59）
 #   daily_reminder_cap: 6            # 每天最多提醒几次（保护闸，常触发说明线该重看）
-#   holdout_rate: 0.1                # 随机扣发比例，估提醒效应的唯一因果手段
-#   holdout_rate_heavy: 0.05         # 漏一次比错提一次代价大（代价比 > 1）的事的扣发比例（不大于上一项）
-#   unit_prior_strength: 8           # 行为单元分层读数里先验的分量上限（没见过的组合贴着更粗那一层；回放后定）
+#   open_reminders_judged: 5         # 每段会话进融合时最多带几条开着的提醒给模型判回应（按截止由近到远）
+#   unit_prior_share: 0.333          # 行为单元分层读数里先验的分量占有效样本上限的比例（没见过的组合贴着更粗那一层；回放后定）
 #   judge_transient_retries: 1       # 模型对传输层瞬态错的有界重试
 #   judge_transient_retry_delay_seconds: 5.0
 #   tick_interval_seconds: 900       # 白天多久一拍（建预期、到时窗的决定说不说；默认一个槽）
 #   worker_shutdown_timeout_seconds: 30
+#   half_life_opportunities: 8       # 证据遗忘的半衰期：几次机会（账、行为单元、时段读数共用；裁定 57，回放后定）
+
+# 统一生命周期（裁定 15、60）。缺省即可运行；这几个数是运维边界，不是统计量。
+# lifecycle:
+#   worker:                          # LifecycleWorker：各层参与者（memory 会话链与 L2、行为侧、语义树、预测层、会话源）共用一个
+#     maintenance_interval_seconds: 3600   # 每隔多久一轮（首轮也要等满一个周期）
+#     lease_ttl_seconds: 300               # 全局维护 lease 的租期
+#     heartbeat_interval_seconds: 60.0     # 多久续一次 lease（不超过租期的三分之一）
+#     shutdown_timeout_seconds: 30.0       # 停机时最多等当前一轮多久
+#   retry:                           # 重试账：可重试失败按 base × 2^(n−1) 退避（封顶 cap），第 max_attempts 次转为放弃、进隔离区
+#     max_attempts: 5
+#     backoff_base_seconds: 60.0
+#     backoff_cap_seconds: 86400.0
+#   fallback_generations: 2          # 派生物（关系表、机会表、单元历史）当前一代之外留几代备用
+#   quarantine_days: 30              # 隔离区里人工放弃的项留几天再清；没放弃的不自动清
+#   transitions_rotate_files: 4      # 关系迁移日志按大小轮转时留几份
+#   capacity_warning_share: 0.8      # 有上限的量到这个占比报告警（non-critical）
+#   physical_max_backfill_days: 7    # 物理 lane 上游最多补发多少天前的单位

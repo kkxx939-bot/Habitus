@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rename, rm, stat, utimes } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { replaceJsonDurably } from "./atomic-file.mjs";
@@ -54,6 +54,30 @@ export async function readState(root, host, nativeSessionId) {
   const target = paths(root, host, nativeSessionId).state;
   try { return validateState(JSON.parse(await readFile(target, "utf8"))); }
   catch (error) { if (error?.code === "ENOENT") return null; throw error; }
+}
+
+export async function stateModifiedAt(root, host, nativeSessionId) {
+  try { return (await stat(paths(root, host, nativeSessionId).state)).mtimeMs; }
+  catch (error) { if (error?.code === "ENOENT") return null; throw error; }
+}
+
+export async function removeState(root, host, nativeSessionId) {
+  await rm(paths(root, host, nativeSessionId).state, { force: true });
+}
+
+export async function listStateSessions(root, host) {
+  const directory = join(root, "sessions", host);
+  let names;
+  try { names = await readdir(directory); }
+  catch (error) { if (error?.code === "ENOENT") return []; throw error; }
+  const sessions = [];
+  for (const name of names.filter((value) => /^[0-9a-f]{64}\.json$/.test(value))) {
+    try {
+      const value = JSON.parse(await readFile(join(directory, name), "utf8"));
+      if (typeof value?.nativeSessionId === "string" && value.nativeSessionId) sessions.push(value.nativeSessionId);
+    } catch (error) { if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error; }
+  }
+  return sessions.sort();
 }
 
 export async function writeState(root, host, nativeSessionId, value) {

@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import monotonic
 from types import MappingProxyType
 from typing import Protocol
 
+from habitus.conversation.source.address import SourceAddress
 from habitus.conversation.source.fence import (
     ConversationConsumerExecutionFence,
     ConversationConsumerExecutionLease,
 )
+from habitus.conversation.source.ledger import ConversationSourceLedger
 from habitus.conversation.source.model import ConversationSourceEnvelope, ConversationSourceError
 from habitus.conversation.source.receipt import (
     ConversationConsumerOutcome,
@@ -39,6 +41,7 @@ from habitus.foundation.observability import (
 
 _OBSERVATION_CATEGORY = "conversation.source"
 _OBSERVATION_OPERATION = "consumer_delivery"
+RELEASED_SKIP_REASON = "source already released"
 
 
 class ConversationOrderedPredecessorPendingError(ConversationSourceError):
@@ -59,6 +62,11 @@ class ConversationDurableConsumer(Protocol):
     # 不再按 Consumer 名字分支。
     ordered_within_conversation: bool
 
+    # 地址水位已盖住这份源（它和它的输出已经被释放过）时，能不能不执行、直接记 SKIPPED。只有执行不能幂等重放的
+    # Consumer 才需要声明 True（Behavior：覆盖记录过期后重放会写出重复判断）；Memory 靠自己的 ingress 去重，
+    # 照常执行即可，而且它不允许 SKIPPED。
+    skips_released_sources: bool
+
     @property
     def output_store(self) -> ConversationConsumerOutputStore: ...
 
@@ -67,6 +75,33 @@ class ConversationDurableConsumer(Protocol):
         envelope: ConversationSourceEnvelope,
         lease: ConversationConsumerExecutionLease,
     ) -> ConversationConsumerRunResult: ...
+
+
+class ConversationAbandoningConsumer(ConversationDurableConsumer, Protocol):
+    """能"放弃"的 Consumer：重试账对一份源放弃时，不再做原来的处理，按自己的方式记下"这份没读懂"并落终态（Behavior：
+    还没写进树的轮写成没读懂空白，23 号第一节第 6 条）。没有这个能力的 Consumer（Memory）放弃后等人工修复。"""
+
+    async def abandon(
+        self,
+        envelope: ConversationSourceEnvelope,
+        lease: ConversationConsumerExecutionLease,
+        *,
+        reason: str,
+    ) -> ConversationConsumerRunResult: ...
+
+
+_Runner = Callable[
+    [ConversationDurableConsumer, ConversationSourceEnvelope, ConversationConsumerExecutionLease],
+    Awaitable[ConversationConsumerRunResult],
+]
+
+
+async def _execute(
+    implementation: ConversationDurableConsumer,
+    envelope: ConversationSourceEnvelope,
+    lease: ConversationConsumerExecutionLease,
+) -> ConversationConsumerRunResult:
+    return await implementation.execute(envelope, lease)
 
 
 @dataclass(frozen=True)
@@ -99,6 +134,8 @@ class ConversationConsumerDelivery:
                 raise ValueError(f"consumer registered under {key.value} has the wrong consumer identity")
             if not isinstance(implementation.ordered_within_conversation, bool):
                 raise TypeError(f"consumer {key.value} must declare ordered_within_conversation as a boolean")
+            if not isinstance(implementation.skips_released_sources, bool):
+                raise TypeError(f"consumer {key.value} must declare skips_released_sources as a boolean")
         # 枚举本身就是"一个 Source 有哪些 Consumer"的定义，缺一个即为装配错误：
         # 未注册的 Consumer 不会报错，只会永远收不到交付。
         missing = sorted(item.value for item in ConversationSourceConsumer if item not in registry)
@@ -106,6 +143,7 @@ class ConversationConsumerDelivery:
             raise ValueError(f"delivery is missing consumers: {missing}")
         self.sources = sources
         self.outcomes = outcomes
+        self.ledger: ConversationSourceLedger = sources.ledger
         self.inspector = inspector
         self.fence = fence
         self.consumers: Mapping[ConversationSourceConsumer, ConversationDurableConsumer] = MappingProxyType(registry)
@@ -126,9 +164,42 @@ class ConversationConsumerDelivery:
         把 Behavior 的失败整个丢掉）。
         """
 
+        return await self._observed(source, consumer, _execute)
+
+    def abandons(self, consumer: ConversationSourceConsumer) -> bool:
+        return callable(getattr(self._consumer(consumer), "abandon", None))
+
+    async def ensure_abandoned(
+        self,
+        source: ConversationSourceEnvelope,
+        consumer: ConversationSourceConsumer,
+        *,
+        reason: str,
+    ) -> ConversationConsumerEnsureResult:
+        """重试账放弃了这份源：走同一把锁、同一条提交路径，只是让 Consumer 放弃而不是执行（已经终态的照旧返回）。"""
+
+        if not self.abandons(consumer):
+            raise ValueError(f"consumer {ConversationSourceConsumer(consumer).value} cannot abandon a source")
+
+        async def run(
+            implementation: ConversationDurableConsumer,
+            envelope: ConversationSourceEnvelope,
+            lease: ConversationConsumerExecutionLease,
+        ) -> ConversationConsumerRunResult:
+            abandoning: ConversationAbandoningConsumer = implementation  # type: ignore[assignment]
+            return await abandoning.abandon(envelope, lease, reason=reason)
+
+        return await self._observed(source, consumer, run)
+
+    async def _observed(
+        self,
+        source: ConversationSourceEnvelope,
+        consumer: ConversationSourceConsumer,
+        run: _Runner,
+    ) -> ConversationConsumerEnsureResult:
         started = monotonic()
         try:
-            result = await self._ensure_outcome(source, consumer)
+            result = await self._ensure_outcome(source, consumer, run)
         except BaseException as error:
             self._observe(
                 source,
@@ -151,6 +222,7 @@ class ConversationConsumerDelivery:
         self,
         source: ConversationSourceEnvelope,
         consumer: ConversationSourceConsumer,
+        run_consumer: _Runner,
     ) -> ConversationConsumerEnsureResult:
         implementation = self._consumer(consumer)
         state = self.inspector.inspect(
@@ -198,12 +270,25 @@ class ConversationConsumerDelivery:
             self._raise_unrecoverable(locked_state)
             if ordered:
                 await lease.run_fenced(lambda: self._require_ordered_predecessors(source, implementation.consumer))
+            if (
+                implementation.skips_released_sources
+                and locked_state.state is ConversationConsumerDeliveryState.PENDING
+                and self.ledger.released(SourceAddress.of(source), source.batch.end_sequence)
+            ):
+                released = ConversationConsumerRunResult(
+                    disposition=ConversationConsumerRunDisposition.SKIPPED,
+                    output_ref=None,
+                    skip_reason=RELEASED_SKIP_REASON,
+                    runtime_result=None,
+                )
+                outcome = await lease.run_fenced(lambda: self._commit_run(source, implementation, released))
+                return ConversationConsumerEnsureResult(outcome, None)
             if locked_state.state is ConversationConsumerDeliveryState.OUTPUT_READY:
                 outcome = await lease.run_fenced(
                     lambda: self._create_output_outcome(source, implementation, locked_state)
                 )
                 return ConversationConsumerEnsureResult(outcome, None)
-            run = await implementation.execute(source, lease)
+            run = await run_consumer(implementation, source, lease)
             lease.require_alive()
             outcome = await lease.run_fenced(lambda: self._commit_run(source, implementation, run))
             return ConversationConsumerEnsureResult(outcome, run.runtime_result)
@@ -326,16 +411,21 @@ class ConversationConsumerDelivery:
         source: ConversationSourceEnvelope,
         consumer: ConversationSourceConsumer,
     ) -> None:
-        current_key = self._source_order(source)
-        for predecessor in self.sources.list():
-            if predecessor.source_id == source.source_id:
-                continue
-            if (
-                predecessor.conversation_id != source.conversation_id
-                or predecessor.started_on != source.started_on
-                or self._source_order(predecessor) >= current_key
-            ):
-                continue
+        """同一地址里更早的源都得先终态。只读本地址的标记，不列全部信封。
+
+        标记在、信封不在：地址水位盖住了它就是已经释放过（释放时它两边都已终态，等价于 COMMITTED——
+        这只因 Memory 不会 SKIPPED 才成立，有序 Consumer 至今只有 Memory）；没盖住就是 put 还没写完，按等待处理。
+        """
+
+        address = SourceAddress.of(source)
+        for marker in self.ledger.earlier(source):
+            predecessor = self.sources.read(marker.source_id)
+            if predecessor is None:
+                if self.ledger.released(address, marker.end_sequence):
+                    continue
+                raise ConversationOrderedPredecessorPendingError(
+                    f"earlier {consumer.value} Source {marker.source_id} is still being recorded"
+                )
             state = self.inspect(predecessor, consumer)
             if state.state is ConversationConsumerDeliveryState.COMMITTED:
                 continue
@@ -420,6 +510,8 @@ class ConversationConsumerDelivery:
 
 
 __all__ = [
+    "RELEASED_SKIP_REASON",
+    "ConversationAbandoningConsumer",
     "ConversationConsumerDelivery",
     "ConversationConsumerEnsureResult",
     "ConversationDurableConsumer",

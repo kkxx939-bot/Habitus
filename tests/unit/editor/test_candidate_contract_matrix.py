@@ -230,7 +230,9 @@ def test_same_memory_identity_proposal_requires_distinct_valid_target(source: in
         assert proposal.target_page_id == target
 
 
-@pytest.mark.parametrize("basis", [MemoryIdentityProposalBasis.EXPLICIT_FORGET, MemoryIdentityProposalBasis.FULLY_INVALIDATED])
+@pytest.mark.parametrize(
+    "basis", [MemoryIdentityProposalBasis.EXPLICIT_FORGET, MemoryIdentityProposalBasis.FULLY_INVALIDATED]
+)
 @pytest.mark.parametrize("source", [1, 50, 99])
 def test_remove_memory_identity_proposal_accepts_only_explicit_removal_basis(
     basis: MemoryIdentityProposalBasis,
@@ -252,7 +254,9 @@ def test_identity_proposal_source_must_be_existing_page_range(source: int) -> No
         )
 
 
-@pytest.mark.parametrize("basis", [MemoryIdentityProposalBasis.EXPLICIT_FORGET, MemoryIdentityProposalBasis.FULLY_INVALIDATED])
+@pytest.mark.parametrize(
+    "basis", [MemoryIdentityProposalBasis.EXPLICIT_FORGET, MemoryIdentityProposalBasis.FULLY_INVALIDATED]
+)
 def test_same_memory_rejects_removal_basis(basis: MemoryIdentityProposalBasis) -> None:
     with pytest.raises(MemoryCandidateError, match="duplicate_identity"):
         MemoryIdentityProposal(MemoryIdentityProposalType.SAME_MEMORY, 1, 2, basis)
@@ -317,8 +321,12 @@ def test_batch_rejects_duplicate_page_id_across_all_kind_combinations(
     left_kind: MemoryKind,
     right_kind: MemoryKind,
 ) -> None:
-    left = MemoryCandidate(100, left_kind, memory_fields(left_kind), confirmed=True if left_kind is MemoryKind.INTENTION else None)
-    right = MemoryCandidate(100, right_kind, memory_fields(right_kind), confirmed=True if right_kind is MemoryKind.INTENTION else None)
+    left = MemoryCandidate(
+        100, left_kind, memory_fields(left_kind), confirmed=True if left_kind is MemoryKind.INTENTION else None
+    )
+    right = MemoryCandidate(
+        100, right_kind, memory_fields(right_kind), confirmed=True if right_kind is MemoryKind.INTENTION else None
+    )
     with pytest.raises(MemoryCandidateError, match="duplicate page_id"):
         MemoryCandidateBatch(
             **{
@@ -336,7 +344,9 @@ def test_model_validate_requires_every_top_level_array(missing: str) -> None:
         MemoryCandidateBatch.model_validate(output)
 
 
-@pytest.mark.parametrize("unknown", ["uri", "revision", "operations", "deletes", "links", "backlinks", "skills", "topics"])
+@pytest.mark.parametrize(
+    "unknown", ["uri", "revision", "operations", "deletes", "links", "backlinks", "skills", "topics"]
+)
 def test_model_validate_rejects_unknown_top_level_output(unknown: str) -> None:
     output = _empty_output()
     output[unknown] = []
@@ -402,13 +412,15 @@ def test_relation_parser_rejects_each_missing_field(field: str) -> None:
 @pytest.mark.parametrize("field", ["uri", "confidence", "backlink", "source", "target"])
 def test_relation_parser_rejects_unknown_fields(field: str) -> None:
     output = _empty_output()
-    output["relations"] = [{
-        "action": "add",
-        "from_page_id": 100,
-        "to_page_id": 101,
-        "link_type": "related_to",
-        field: "forbidden",
-    }]
+    output["relations"] = [
+        {
+            "action": "add",
+            "from_page_id": 100,
+            "to_page_id": 101,
+            "link_type": "related_to",
+            field: "forbidden",
+        }
+    ]
     with pytest.raises(MemoryCandidateError, match="unknown"):
         MemoryCandidateBatch.model_validate(output)
 
@@ -431,13 +443,15 @@ def test_identity_parser_rejects_each_missing_field(field: str) -> None:
 @pytest.mark.parametrize("field", ["uri", "revision", "delete", "confidence", "reasoning"])
 def test_identity_parser_rejects_unknown_fields(field: str) -> None:
     output = _empty_output()
-    output["identity_proposals"] = [{
-        "proposal_type": "same_memory",
-        "source_page_id": 1,
-        "target_page_id": 100,
-        "basis": "duplicate_identity",
-        field: "forbidden",
-    }]
+    output["identity_proposals"] = [
+        {
+            "proposal_type": "same_memory",
+            "source_page_id": 1,
+            "target_page_id": 100,
+            "basis": "duplicate_identity",
+            field: "forbidden",
+        }
+    ]
     with pytest.raises(MemoryCandidateError, match="unknown"):
         MemoryCandidateBatch.model_validate(output)
 

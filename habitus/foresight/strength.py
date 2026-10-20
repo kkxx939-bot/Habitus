@@ -6,7 +6,7 @@
 - 窗外发生（早到 / 晚了但做了）：好，强度 = 历史上偏差不小于这一次的比例（窗内发生记偏差 0）。
 - 没发生、之后补做：坏，强度 = 历史间隔里不长于补做延迟的比例（隔得比他最短的正常间隔还短，就不算坏）。
 
-提醒组与扣发组的事实是单位权重（裁定 58 第 6 条）：拒绝、落空、提醒后做了量纲不同，不再给强度。
+提醒组的事实是单位权重（裁定 58 第 6 条）：拒绝、落空、提醒后做了量纲不同，不再给强度。
 """
 
 from __future__ import annotations
@@ -38,11 +38,4 @@ def catch_up_strength(delay_days: float, gaps_days: Sequence[int]) -> float:
     return sum(1 for gap in gaps_days if gap <= delay_days) / len(gaps_days)
 
 
-def gaps_of(days: Sequence[int]) -> tuple[int, ...]:
-    """按日序号（``date.toordinal()``）给出的发生日子 → 相邻两次的间隔（天）。"""
-
-    ordered = sorted(set(days))
-    return tuple(later - earlier for earlier, later in zip(ordered, ordered[1:], strict=False))
-
-
-__all__ = ["MIN_HISTORY", "catch_up_strength", "gaps_of", "offset_strength"]
+__all__ = ["MIN_HISTORY", "catch_up_strength", "offset_strength"]

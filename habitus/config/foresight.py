@@ -1,9 +1,8 @@
 """预测层的运行配置（``19-预测层方案.md`` 第六节）。
 
-这里没有算法参数：时窗来自历史那几次的实际时刻，回看多远由每条关系自己的实测跨度定，转移窗就是预测树的
-``transition_window_slots``；升不升从账上算（裁定 49），α 借关系引擎的 ``forward_alpha``、遗忘借预测树的
-``decay_half_life_days``（遗忘随统一生命周期再定，裁定 15）。这里只有四类东西：开关、可接受的误提醒率（产品决定，不随用户变，
-裁定 52）、重轻多久重判、保护闸。没定的几项先给默认值、不挡开工（裁定 46）。
+这里没有算法参数：时窗来自历史那几次的实际时刻，回看多远由每条关系自己的实测跨度定，时间尺子在 ``config.temporal``；
+升不升从账上算（裁定 49），α 借关系引擎的 ``forward_alpha``。这里是开关、可接受的误提醒率（产品决定，不随用户变，裁定 52）、
+保护闸，以及账本遗忘的半衰期（按这本账自己的机会数，裁定 57；临时值，回放后定）。没定的几项先给默认值、不挡开工（裁定 46）。
 """
 
 from __future__ import annotations
@@ -16,35 +15,26 @@ from habitus.config.loader import construct_config
 _INT_BOUNDS = (
     ("daily_reminder_cap", 1, 100),
     ("judge_transient_retries", 0, 20),
+    ("open_reminders_judged", 1, 50),
 )
 _FLOAT_BOUNDS = (
-    ("holdout_rate", 0.0, 0.5),
-    ("holdout_rate_heavy", 0.0, 0.5),
-    ("unit_prior_strength", 0.0, 1_000.0),
-    ("line_floor", 0.01, 0.99),
-    ("line_ceiling", 0.01, 0.99),
-    ("cost_ratio_unjudged", 0.1, 10.0),
-    ("severity_review_days", 1.0, 3_650.0),
+    ("false_alarm_rate", 0.01, 0.99),
     ("tick_interval_seconds", 60.0, 86_400.0),
     ("judge_transient_retry_delay_seconds", 0.0, 600.0),
     ("worker_shutdown_timeout_seconds", 1.0, 3_600.0),
+    ("half_life_opportunities", 1.0, 200.0),
 )
 _FLAGS = ("enabled", "shadow_uses_unestablished")
 
 
 @dataclass(frozen=True)
 class ForesightConfig:
-    """预测层是否启用、线的上下限、重轻多久重判、几道保护闸。"""
+    """预测层是否启用、可接受的误提醒率、几道保护闸。"""
 
     enabled: bool = False
-    # ── 影子 → 提醒的线：每本账一条，在上下限之间波动（裁定 58 第 1 条）──
-    # 线 = 1 / (1 + c × e)：c 是这件事本身的代价比（漏一次相当于错提醒几次，模型按账判），e 是提醒的效果上界（提醒组 − 扣发组）。
-    # 上下限是产品的保护闸；没判过的按 ``cost_ratio_unjudged``（0.5 → 线 0.67，按轻的那一头）。暂定值，回放后定。
-    line_floor: float = 0.2
-    line_ceiling: float = 0.9
-    cost_ratio_unjudged: float = 0.5
-    # 重轻按账判一次，过这么多天重判（归统一生命周期，裁定 15；在那之前做成配置）。
-    severity_review_days: float = 60.0
+    # ── 影子 → 提醒的线 = 1 − 可接受的误提醒率，所有账同一条（裁定 58 第 1 条：扣发与急缓这一版都不做）──
+    # 下界过线 = 有 1 − α 的把握说出口的那几次里他不做的不超过这个比例。0.33 → 线 0.67。暂定值，回放后定。
+    false_alarm_rate: float = 0.33
     # ── 没定的，先给默认值（裁定 46；常识冷启动没有消费者，开关删了，要做时见待办）──
     # 影子预期可来自历史上跟过、但语义树还没成立的关系；开口仍只用成立的。默认开（裁定 56 第 6 条：成立关系上半年几乎
     # 没有——甲盘 3 月底 0 条、5 月底 10 条——候选进影子让账早几个月开始攒；影子不开口）。
@@ -52,22 +42,33 @@ class ForesightConfig:
     # ── 保护闸 ──
     # 每天最多主动提醒几次；应当很少触发，常触发说明升级条件该重看。
     daily_reminder_cap: int = 6
-    # 随机扣发的比例：按已知概率不说一部分提醒，是估提醒效应的唯一因果手段（裁定 50 默认开）。最轻一级与最重一级各一个，
-    # 中间按级插；重的也扣、比例更小（裁定 58 第 7 条：不扣就估不出提醒在重的事上有没有用）。暂定值，回放后定。
-    holdout_rate: float = 0.1
-    holdout_rate_heavy: float = 0.05
+    # 每段会话进融合时最多带几条开着的提醒给模型判回应（按截止由近到远；没带进去的只按做结算；裁定 61 第 5 条）。
+    # 启动值，以后从回放定。
+    open_reminders_judged: int = 5
     # ── 行为单元（裁定 56 第 12 条）──
-    # 单元读数分层退（同一组 → 同样多 → 最强那一个），每一层以下一层的读数为先验，先验的分量最多这么多（还不超过下一层自己的
-    # 有效样本）：没见过的组合贴着更粗的那一层，见得越多越按它自己。暂定值，回放后定。
-    unit_prior_strength: float = 8.0
+    # 单元读数分层退（同一组 → 同样多 → 最强那一个），"同一组"以"同样多"里别的组合为先验；先验的分量 = 有效样本上限
+    # 1 / (1 − 2^(−1/H)) 的这个比例（还不超过先验自己的有效样本）：没见过的组合贴着更粗的那一层，见得越多越按它自己。
+    # 按机会数遗忘后有效样本有上限（H = 8 时约 12），分量写成固定数会占到四成、让 100/100 的组合也过不了线。暂定值，回放后定。
+    unit_prior_share: float = 1 / 3
     # 模型对传输层瞬态错的有界重试。
     judge_transient_retries: int = 1
     judge_transient_retry_delay_seconds: float = 5.0
     # 常驻 worker：白天多久一拍（一拍 = 建预期、到时窗的决定说不说；默认一个槽），与停机时限。
     tick_interval_seconds: float = 900.0
     worker_shutdown_timeout_seconds: float = 30.0
+    # ── 账本遗忘的半衰期（几次机会，裁定 57）──
+    # 一笔证据的分量只看它之后这本账又来了几次机会（边数这本账的全部机会，单元的提醒反馈只数到时窗末还没做的，裁定 60 第 4 条），不看隔了几天：
+    # 一个月一次的事不再被压到只剩两三次有效样本。行为单元按每一层自己的刻数、temporal 的时段读数按最近 M 次用同一个 H，
+    # M = ⌈H · log₂(1/α)⌉ 由组合根算。暂定值，回放后定。
+    half_life_opportunities: float = 8.0
+    # ── 没见过的日型怎么建预期（裁定 59 第 7 条的待定项，用户定之前默认不外推）──
+    # "skip"：日历关系只在见过他做的那几种日型上建（只在工作日的周三做过，国庆的周三不建）；
+    # "official"：没见过的日型按外接放假数据的官方含义归组（调休上班算上班、节假日算休息）。只管建预期，不管关系检验。
+    unseen_day_types: str = "skip"
 
     def __post_init__(self) -> None:
+        if self.unseen_day_types not in ("skip", "official"):
+            raise ValueError("foresight.unseen_day_types must be 'skip' or 'official'")
         for name in _FLAGS:
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"foresight.{name} must be a boolean")
@@ -75,14 +76,13 @@ class ForesightConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or not lower <= value <= upper:
                 raise ValueError(f"foresight.{name} must be an integer between {lower} and {upper}")
+        share = self.unit_prior_share
+        if isinstance(share, bool) or not isinstance(share, int | float) or not 0.0 < float(share) < 1.0:
+            raise ValueError("foresight.unit_prior_share must be a number strictly between 0 and 1")
         for name, low, high in _FLOAT_BOUNDS:
             number = getattr(self, name)
             if isinstance(number, bool) or not isinstance(number, int | float) or not low <= float(number) <= high:
                 raise ValueError(f"foresight.{name} must be a number between {low:g} and {high:g}")
-        if self.line_floor >= self.line_ceiling:
-            raise ValueError("foresight.line_floor must lie below foresight.line_ceiling")
-        if self.holdout_rate_heavy > self.holdout_rate:
-            raise ValueError("foresight.holdout_rate_heavy must not exceed foresight.holdout_rate")
 
     @classmethod
     def from_mapping(cls, value: Any) -> ForesightConfig:

@@ -48,6 +48,10 @@ class ConversationConsumerOutputStore(Protocol):
 
     def remove(self, source: ConversationSourceEnvelope, output_id: str) -> bool: ...
 
+    def discard_all(self, source_id: str) -> int:
+        """释放会话源时删这份源的全部输出；只凭 source_id，信封可能已经删了。"""
+        ...
+
 
 @dataclass(frozen=True)
 class ConversationConsumerState:

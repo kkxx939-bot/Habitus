@@ -16,7 +16,14 @@ from habitus.behavior.kinds.changes import (
     VersionRecord,
 )
 from habitus.behavior.kinds.ids import ClassId, KindIdError, Lane
-from habitus.behavior.kinds.model import BehaviorClass, BehaviorKindError, ClassOrigin, ClassStatus, Exclusion
+from habitus.behavior.kinds.model import (
+    BehaviorClass,
+    BehaviorKindError,
+    ClassOrigin,
+    ClassStatus,
+    Exclusion,
+    Vocabulary,
+)
 from habitus.behavior.kinds.pending import PendingEntry
 from habitus.behavior.kinds.schedule import JobState
 
@@ -58,6 +65,38 @@ def class_from(raw: object) -> BehaviorClass:
         raise BehaviorKindCodecError(f"behavior class is invalid: {exc}") from exc
 
 
+def vocabulary_payload(vocabulary: Vocabulary) -> dict[str, Any]:
+    """某一版的整份词表（变更日志截断时的快照，26 号清单 6.5）。"""
+
+    return {
+        "version": vocabulary.version,
+        "classes": [class_payload(vocabulary.classes[key]) for key in sorted(vocabulary.classes, key=str)],
+        "branches": {
+            str(source): [str(target) for target in targets]
+            for source, targets in sorted(vocabulary.branches.items(), key=lambda item: str(item[0]))
+        },
+    }
+
+
+def vocabulary_from(raw: object) -> Vocabulary:
+    data = _object(raw, {"version", "classes", "branches"}, "vocabulary")
+    classes = tuple(class_from(item) for item in _list(data["classes"], "classes"))
+    branches = data["branches"]
+    if not isinstance(branches, dict):
+        raise BehaviorKindCodecError("vocabulary branches must be an object")
+    try:
+        return Vocabulary(
+            version=data["version"],
+            classes={item.id: item for item in classes},
+            branches={
+                ClassId.parse(source): tuple(ClassId.parse(target) for target in _list(targets, "branch targets"))
+                for source, targets in branches.items()
+            },
+        )
+    except (BehaviorKindError, KindIdError, ValueError, TypeError) as exc:
+        raise BehaviorKindCodecError(f"vocabulary snapshot is invalid: {exc}") from exc
+
+
 def record_payload(record: VersionRecord) -> dict[str, Any]:
     return {
         "version": record.version,
@@ -97,11 +136,18 @@ def pending_payload(entry: PendingEntry) -> dict[str, Any]:
         "proposed": entry.proposed,
         "content": entry.content,
         "rechecked": entry.rechecked,
+        "entered_on": None if entry.entered_on is None else entry.entered_on.isoformat(),
+        "grouped_on": None if entry.grouped_on is None else entry.grouped_on.isoformat(),
     }
 
 
+_PENDING_KEYS = {"occurrence", "lane", "day", "proposed", "content", "rechecked"}
+
+
 def pending_from(raw: object) -> PendingEntry:
-    data = _object(raw, {"occurrence", "lane", "day", "proposed", "content", "rechecked"}, "pending entry")
+    # 26 号清单 6.6 之前写下的池没有这两个字段：按"还没进过聚组"读，下一次写池时补上
+    dated = isinstance(raw, dict) and "grouped_on" in raw
+    data = _object(raw, _PENDING_KEYS | ({"entered_on", "grouped_on"} if dated else set()), "pending entry")
     try:
         return PendingEntry(
             occurrence=data["occurrence"],
@@ -110,6 +156,8 @@ def pending_from(raw: object) -> PendingEntry:
             proposed=data["proposed"],
             content=data["content"],
             rechecked=data["rechecked"],
+            entered_on=_day_or_none(data.get("entered_on")),
+            grouped_on=_day_or_none(data.get("grouped_on")),
         )
     except (BehaviorKindError, ValueError, TypeError) as exc:
         raise BehaviorKindCodecError(f"pending entry is invalid: {exc}") from exc
@@ -185,6 +233,14 @@ def _exclusion(raw: object) -> Exclusion:
     return Exclusion(text=data["text"], goes_to=None if target is None else ClassId.parse(target))
 
 
+def _day_or_none(value: object) -> date | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise BehaviorKindCodecError("a day must be ISO text or null")
+    return date.fromisoformat(value)
+
+
 def _object(raw: object, keys: set[str], label: str) -> dict[str, Any]:
     if not isinstance(raw, dict) or set(raw) != keys:
         raise BehaviorKindCodecError(f"{label} shape is invalid")
@@ -207,4 +263,6 @@ __all__ = [
     "record_payload",
     "job_state_from",
     "job_state_payload",
+    "vocabulary_from",
+    "vocabulary_payload",
 ]

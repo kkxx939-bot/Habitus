@@ -136,9 +136,7 @@ def test_receipt_store_is_canonical_listed_by_sequence_and_cleanup_checks_state(
     store._create(second)
     store._create(first)
 
-    address_receipts = store.list_for_conversation(
-        ConversationAddress("conversation-1", date(2026, 7, 1))
-    )
+    address_receipts = store.list_for_conversation(ConversationAddress("conversation-1", date(2026, 7, 1)))
     assert address_receipts == (first, second)
     assert store.read(first.source) == first
     with pytest.raises(MemoryChangeReceiptError, match="only a COMMITTED"):

@@ -1,15 +1,15 @@
-"""结算这一拍（夜批，排在预测树重建之后）：对着行为树给已到最晚时限的预期一个结果，给过期待决的补裁决，给定稿日查漏报。
+"""结算这一拍（夜批的第一步，排在找原因之前，见 ``runtime.nightly``；没接语义树时挂在只重建之后）：对着行为树给已到最晚时限的预期一个结果，给过期待决的补裁决，给定稿日查漏报。
 
 "那天定稿了"只有归约说了算（``BehaviorReductionRunner.closed_days``）。一条预期在它最晚时限那天定稿之后才结算，
 结算只做一次；过期待决的在之后每晚看一次有没有补做（这本账下一条预期形成之前：每个机会都建预期之后，同一本账的下一条
 就是这条触发自己的下一次机会，裁定 49）。漏报按定稿日查一次，查过就标记。一天里的预期都结了、过期待决的裁决再也不会变，
 就标这一天结完（``mark_final``），之后每晚只读还要看的那一截，账本再长也一样。
 
-结算与裁决落账时顺手往这本账上写事实（裁定 48、50、51、58）：**预测轴**——准时 / 早到 / 晚了但做了是好、过期待决是坏，
+结算与裁决落账时顺手往这本账上写事实（裁定 48、50、51、58、61）：准时 / 早到 / 晚了但做了是好、过期待决是坏，
 后补再写一条打折的坏覆盖它（补做那天离上一次发生隔了几天，在这一类历史间隔里的位置）；提醒后才做的是中性（提醒的功劳不算
 习惯本身）。强度按这本账自己的历史分布算（``foresight.strength``）：偏差在历史偏差里的位置、补做那天离上次多久在这一类历史
-间隔里的位置。**提醒组**——说了之后做了是好、说了没做（落空）是坏；**扣发组**——随机扣下没说之后做了是好、没做是坏；这两组
-单位权重，提醒的效果是两组完成率之差。
+间隔里的位置。**提醒反馈**挂在行为单元上、一个行为一份：依据那条说出口的预期结算时写一笔——做了是好、没做（没回应或回了负）
+是坏、回了中又没做的不写（``foresight.feedback``）；同一单元一并决定的几条按依据的说出时刻结算（「单元已选」引它）。
 账本里读不出来的文件跳过、条数进观测，不让一个坏文件停掉整晚。
 
 词表迁移做到一半时整拍不做（树上的行一半新编号一半旧编号），下一拍再来。结算失败自己留观测，不许拖着后面一夜不跑。
@@ -18,57 +18,88 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.uri import BehaviorURI
+from habitus.conditions import DayTypeCalendar
 from habitus.foresight import Evidence, Standing, Tolerance, climb, current_facts
-from habitus.foresight.causes import AGAIN, CITE
-from habitus.foresight.diagnosis import POSTPONED, Diagnosis, Followed, MissFacts, Settled, diagnose
-from habitus.foresight.ladder import HELD_OUT, PREDICTION, REMINDED, REVISIONS
+from habitus.foresight.clock import REVISIONS, is_opportunity
+from habitus.foresight.diagnosis import Diagnosis, MissFacts, Settled, diagnose
+from habitus.foresight.facts import catch_up_fact, ruling_moot, ruling_settled, same_fact, settlement_fact, slice_of
+from habitus.foresight.feedback import reminder_feedback
+from habitus.foresight.history import UnitHistory
 from habitus.foresight.ledger import (
-    FACT_AXES,
+    NATURAL_HITS,
+    VOID,
     AccountFact,
     Delivery,
     Expectation,
-    Ruling,
+    Response,
     Settlement,
     antecedent_holds,
     omissions,
+    relation_backed,
     rule_overdue,
     settle,
 )
 from habitus.foresight.opportunities import OpportunityTable
-from habitus.foresight.strength import MIN_HISTORY, catch_up_strength, gaps_of, offset_strength
-from habitus.foresight.units import UNIT
+from habitus.foresight.units import UNIT, UNIT_CITE
+from habitus.foundation.lifecycle import covers
 from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
+from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
-from habitus.scene import DayTypeCalendar
 from habitus.scene.views import DayIndexCache, FlowRow
 from habitus.series.reader import admitted
 
-#: 前因不成立时记的事实种类（权重 0）。
-VOID = "作废"
-#: 随机扣下没说的递送原因。
-HELD = "随机扣发"
+#: 诊断看最近几天结过的预期；重建"落空那一刻的账"时再往前看几天（最晚时限在那一刻之后的预期那时还没结出来）。
+#: 两者之和是诊断够得着的最早一天：账本压实只压它之前的（``runtime.foresight_compaction``）。
+DIAGNOSIS_DAYS = 30
+DEADLINE_LOOKBACK_DAYS = 30
+DIAGNOSIS_REACH_DAYS = DIAGNOSIS_DAYS + DEADLINE_LOOKBACK_DAYS
 
 
 @dataclass(frozen=True)
 class Asked:
-    """这条预期递送上发生过什么：第一次说出口的时刻（没说过是 None）、有没有被随机扣下。"""
+    """这条预期递送上发生过什么：第一次说出口的时刻（没说过是 None），以及是不是它自己说的（依据）——单元替它一并决定的
+    （「单元已选」）按依据的说出时刻结算，但提醒反馈只由依据那条写一笔（裁定 61 第 1 条："同一单元一起开口的几条按同一个
+    说出时刻结算"）。"""
 
     spoken_at: datetime | None
-    held: bool
+    own: bool = False
 
     @staticmethod
-    def of(deliveries: Iterable[Delivery], expectation_id: str) -> Asked:
-        mine = [item for item in deliveries if item.expectation_id == expectation_id]
-        spoken = [item.decided_at for item in mine if item.spoken]
-        return Asked(min(spoken) if spoken else None, any(item.reason == HELD for item in mine))
+    def of(
+        deliveries: Iterable[Delivery],
+        expectation_id: str,
+        *,
+        of_basis: Callable[[str], Iterable[Delivery]] | None = None,
+    ) -> Asked:
+        """``deliveries`` 是这条预期所在那一天的递送；``of_basis`` 按依据的身份给依据那一天的递送——单元跨天（次日段的事件
+        预期与第二天的日子 / 情境预期拢成一个单元）时依据的「说了」不在成员这一天下。"""
+
+        items = tuple(deliveries)
+        spoken = [item.decided_at for item in items if item.expectation_id == expectation_id and item.spoken]
+        if spoken:
+            return Asked(min(spoken), own=True)
+        cited = {
+            cite.removeprefix(UNIT_CITE)
+            for item in items
+            if item.expectation_id == expectation_id and item.reason == UNIT
+            for cite in item.evidence
+            if cite.startswith(UNIT_CITE)
+        }
+        pool = list(items)
+        if of_basis is not None:
+            for basis in sorted(cited):
+                pool.extend(of_basis(basis))
+        by_basis = [item.decided_at for item in pool if item.expectation_id in cited and item.spoken]
+        return Asked(min(by_basis) if by_basis else None)
 
 
 @runtime_checkable
@@ -110,6 +141,7 @@ class SettlementStage:
         observer: Observer | None = None,
         clock: Callable[[], datetime] | None = None,
         tolerance: Tolerance | None = None,
+        history: HistoryStore | None = None,
     ) -> None:
         if not isinstance(ledger, ForesightLedgerStore):
             raise TypeError("ledger must be a ForesightLedgerStore")
@@ -137,11 +169,17 @@ class SettlementStage:
             raise TypeError("tolerance must be a Tolerance or None")
         #: 诊断要知道每本账的线（预算内那一关）；没给就不在夜批观测里出诊断。
         self.tolerance = tolerance
+        if history is not None and not isinstance(history, HistoryStore):
+            raise TypeError("history must be a HistoryStore or None")
+        #: 单元历史（夜里重标过的快照）：诊断重建"落空那一刻这条边的位置"从它读（裁定 61：权重归单元）；没给就按没有历史算。
+        self.history = history
+        self._facts_cache: dict[str, list[AccountFact]] | None = None
 
     def run_once(self) -> SettlementReport:
         started = time.monotonic()
         try:
-            report = self._run()
+            with self._caching_facts():
+                report = self._run()
         except Exception as exc:
             self._observe(ObservationStatus.FAILURE, {"error_type": type(exc).__name__}, started)
             raise
@@ -187,7 +225,7 @@ class SettlementStage:
                     if day not in pending:
                         pending.append(day)
                     continue
-                asked = Asked.of(self.ledger.deliveries_on(day), item.expectation_id)
+                asked = Asked.of(self.ledger.deliveries_on(day), item.expectation_id, of_basis=self._deliveries_of)
                 result = settle(
                     item,
                     _rows(cache, item.formed_at.date(), item.deadline.date()),
@@ -197,13 +235,19 @@ class SettlementStage:
                 )
                 # 先写事实再写结算：中间断了，重来时这条还没结、照结一遍，事实的身份由预期与形成时刻定、重写幂等；
                 # 反过来的顺序会让结过的这条再也不被看到，事实永远补不上。前因不成立的这次机会不存在：只记作废（权重 0）
-                # 断在两次写之间、重来时：上次写下的原判就是这次机会的事实，不再算一遍（这期间账上又多了别的事实，
-                # 重算出的强度可能不同，同一身份写不同内容会让整晚卡死）
-                if not self._settled_facts_exist(item):
-                    for fact in self._facts_for(
-                        item, result, asked=asked, cache=cache, table=table, known_by=item.deadline
-                    ):
-                        self.ledger.append_fact(fact)
+                # 断在两次写之间、重来时：上次写下的那一笔不再算一遍（这期间账上又多了别的事实，重算出的强度可能不同，
+                # 同一身份写不同内容会让整晚卡死）
+                if not self._settled(item):
+                    self._append(self._fact_for(item, result, cache=cache, table=table, known_by=item.deadline))
+                # 提醒反馈：只有依据那条写；这次机会不算数（观测空白、前因不成立）的不写——不知道他做没做就不是误提醒
+                # （裁定 54）；已经写过的不再算一遍（这期间来了回应会改变内容，同一身份不同内容会让整晚卡死）
+                fact = self._current_fact(item)
+                if asked.own and fact is not None and is_opportunity(fact) and not self._feedback_written(item):
+                    feedback = reminder_feedback(
+                        item, result, spoken_at=asked.spoken_at, responses=self._responses(day, item.expectation_id)
+                    )
+                    if feedback is not None:
+                        self.ledger.record_feedback(feedback)
                 self.ledger.record_settlement(result)
                 outcomes[result.outcome] = outcomes.get(result.outcome, 0) + 1
             count, undecided = self._rule(day, cache, last_closed, now, formed, table)
@@ -243,7 +287,7 @@ class SettlementStage:
             expectation_id
             for expectation_id in settled - ruled
             if expectation_id in by_id
-            and (fact := self._current_prediction(by_id[expectation_id])) is not None
+            and (fact := self._current_fact(by_id[expectation_id])) is not None
             and fact.kind == "过期待决"
         }
         if not overdue:
@@ -253,48 +297,65 @@ class SettlementStage:
         for expectation_id in sorted(overdue):
             item = by_id[expectation_id]
             if last_closed is None or last_closed <= item.deadline.date():
-                waiting = waiting or not _ruling_moot(item, table)
+                waiting = waiting or not ruling_moot(item, table)
                 continue
             before = next((at for at in formed.get(item.account, ()) if at > item.deadline), None)
             ruling = rule_overdue(
                 item, _rows(cache, item.deadline.date(), last_closed), before=before, ruled_at=now, current=self.current
             )
             if ruling is not None:
-                self.ledger.append_fact(self._catch_up_fact(item, ruling, table))
+                self._append(catch_up_fact(item, ruling, table))
                 if self.ledger.record_ruling(day, ruling):
                     count += 1
                 continue
-            if not _ruling_settled(item, before, last_closed, table):
+            if not ruling_settled(item, before, last_closed, table):
                 waiting = True
         return count, waiting
 
-    def _facts_for(
+    def _fact_for(
         self,
         item: Expectation,
         result: Settlement,
         *,
-        asked: Asked,
         cache: DayIndexCache,
         table: OpportunityTable | None,
         known_by: datetime,
-    ) -> tuple[AccountFact, ...]:
-        """一次结算往账上写哪几条事实。前因不成立：这次机会不存在，只记作废（权重 0）；窗口里有观测空白又没看到发生：他可能做了、
+    ) -> AccountFact:
+        """一次结算往账上写哪一笔事实。前因不成立：这次机会不存在，只记作废（权重 0）；窗口里有观测空白又没看到发生：他可能做了、
         我们没看到，记中性（裁定 54）；不是这条自己的提醒引出的、可那次发生是别的账的提醒引出来的：不是这本账的自然命中，记一笔强度 0 的
         「提醒后发生」（做了，但不算证据）；其余按结果与强度（历史只取 ``known_by`` 之前已经写下的）。"""
 
         if not self._antecedent_holds(item, cache, table):
-            return (AccountFact(item.account, item.formed_at, PREDICTION, False, 0.0, VOID, item.expectation_id),)
+            return AccountFact(item.account, item.formed_at, False, 0.0, VOID, item.expectation_id)
         if result.outcome == "过期待决" and _unobserved(item, cache):
-            return (AccountFact(item.account, item.formed_at, PREDICTION, False, 0.0, "过期待决", item.expectation_id),)
-        if result.outcome != "提醒后发生" and result.occurrence_uri is not None and _prompted(cache, result.occurrence_uri):
-            return (AccountFact(item.account, item.formed_at, PREDICTION, True, 0.0, "提醒后发生", item.expectation_id),)
-        return self._settlement_facts(item, result, asked=asked, known_by=known_by)
+            return AccountFact(item.account, item.formed_at, False, 0.0, "过期待决", item.expectation_id)
+        if (
+            result.outcome != "提醒后发生"
+            and result.occurrence_uri is not None
+            and _prompted(cache, result.occurrence_uri)
+        ):
+            return AccountFact(item.account, item.formed_at, True, 0.0, "提醒后发生", item.expectation_id)
+        known = [fact for fact in self._facts(item.account) if fact.precedence <= known_by]
+        base = self.ledger.compaction_of(item.account)
+        earlier = base.offset_history() if base is not None else ()
+        return settlement_fact(item, result, known=known, earlier_offsets=earlier)
+
+    def _responses(self, day: date, expectation_id: str) -> tuple[Response, ...]:
+        return tuple(item for item in self.ledger.responses_on(day) if item.expectation_id == expectation_id)
+
+    def _deliveries_of(self, expectation_id: str) -> tuple[Delivery, ...]:
+        """一条预期（依据）所在那一天的递送；不知道它在哪一天就是空。"""
+
+        day = self.ledger.day_of(expectation_id)
+        return self.ledger.deliveries_on(day) if day is not None else ()
+
+    def _feedback_written(self, item: Expectation) -> bool:
+        return any(found.expectation_id == item.expectation_id for found in self.ledger.feedback_of(item.kind_token))
 
     def resettle(self, days: Iterable[date]) -> int:
         """修了 bug 之后：用当前代码把这些日子里已结的预期重结一遍，和账上现有的不一样的追加改判（机会的时刻不变，写下的时刻取
-        此刻，后写的覆盖先写的；旧记录不改，裁定 54）。新结果少了一条轴（比如原来说了没做、现在作废）就给那条轴补一笔强度 0 的，
-        把旧的盖掉。只碰三条轴上的结算事实，不碰后补、回话这类之后才有的改判。改回过期待决的日子若已标结完，重新打开，
-        让之后每晚照常看有没有补做。返回改了几条预期。"""
+        此刻，后写的覆盖先写的；旧记录不改，裁定 54）。只碰结算事实，不碰后补这类之后才有的改判，也不碰单元的提醒反馈。
+        改回过期待决的日子若已标结完，重新打开，让之后每晚照常看有没有补做。返回改了几条预期。"""
 
         cache = DayIndexCache(
             self.read_side.behavior_tree,
@@ -304,15 +365,21 @@ class SettlementStage:
         )
         table = self.opportunities.latest(self.lane) if self.opportunities is not None else None
         now = self._clock()
+        with self._caching_facts():
+            return self._resettle(days, cache, table, now)
+
+    def _resettle(
+        self, days: Iterable[date], cache: DayIndexCache, table: OpportunityTable | None, now: datetime
+    ) -> int:
         revised = 0
         for day in sorted(set(days)):
             settled = {item.expectation_id for item in self.ledger.settlements_on(day)}
             deliveries = self.ledger.deliveries_on(day)
-            reopen = changed_here = False
+            reopen = False
             for item in self.ledger.expectations_on(day):
-                if item.expectation_id not in settled:
-                    continue
-                asked = Asked.of(deliveries, item.expectation_id)
+                if item.expectation_id not in settled or self._compacted(item):
+                    continue  # 重结只作用于没压实的窗口：压实的那一段已经并进累计值，不会再变
+                asked = Asked.of(deliveries, item.expectation_id, of_basis=self._deliveries_of)
                 result = settle(
                     item,
                     _rows(cache, item.formed_at.date(), item.deadline.date()),
@@ -320,56 +387,60 @@ class SettlementStage:
                     settled_at=now,
                     current=self.current,
                 )
-                fresh = {
-                    fact.axis: fact
-                    for fact in self._facts_for(
-                        item,
-                        result,
-                        asked=asked,
-                        cache=cache,
-                        table=table,
-                        known_by=now,
-                    )
-                }
-                latest = {
-                    fact.axis: fact
-                    for fact in current_facts(self.ledger.facts_of(item.account))
-                    if fact.expectation_id == item.expectation_id
-                }
-                prediction = fresh[PREDICTION]
-                changed = False
-                for axis in FACT_AXES:
-                    old, new = latest.get(axis), fresh.get(axis)
-                    if old is not None and old.kind in _LATER_RULINGS:
-                        continue
-                    if new is None:
-                        if old is None or old.strength == 0.0:
-                            continue
-                        # 这条轴这次不该有事实了：补一笔同种类、强度 0 的盖掉旧的
-                        new = replace(old, good=False, strength=0.0, kind=prediction.kind, offset_minutes=None)
-                    if old is not None and _same(old, new):
-                        continue
-                    self.ledger.append_fact(replace(new, at=item.formed_at, written_at=now))
-                    changed = True
-                if changed:
-                    revised += 1
-                    changed_here = True
-                    if prediction.kind == "过期待决" and prediction.strength > 0.0:
-                        reopen = True
+                fresh = self._fact_for(item, result, cache=cache, table=table, known_by=now)
+                old = self._current_fact(item)
+                if old is not None and (old.kind in _LATER_RULINGS or same_fact(old, fresh)):
+                    continue
+                self._append(replace(fresh, at=item.formed_at, written_at=now))
+                revised += 1
+                if fresh.kind == "过期待决" and fresh.strength > 0.0:
+                    reopen = True
             if reopen and self.ledger.is_final(day):
                 self.ledger.reopen(day)
-            elif changed_here:
-                self.ledger.forget_explained(day)  # 改判后的那条不带原因：让找原因那一拍再找一次
         return revised
+
+    def _compacted(self, item: Expectation) -> bool:
+        base = self.ledger.compaction_of(item.account)
+        return base is not None and base.covers(item.formed_at, item.expectation_id)
+
+    # ── 一拍里每本账的事实只读一次 ─────────────────────────────────────────────
+
+    @contextmanager
+    def _caching_facts(self) -> Iterator[None]:
+        """一晚的结算里一本账的事实只从盘上读一次，之后写下的顺手加进缓存（2026-10-17 四方评审：原来每条预期把这本账整本读
+        两三遍，一晚的量是条数 × 事实数）。出了这一拍就不留。"""
+
+        self._facts_cache = {}
+        try:
+            yield
+        finally:
+            self._facts_cache = None
+
+    def _facts(self, account: str) -> tuple[AccountFact, ...]:
+        if self._facts_cache is None:
+            return self.ledger.facts_of(account)
+        if account not in self._facts_cache:
+            self._facts_cache[account] = list(self.ledger.facts_of(account))
+        return tuple(self._facts_cache[account])
+
+    def _append(self, fact: AccountFact) -> None:
+        if self.ledger.append_fact(fact) and self._facts_cache is not None and fact.account in self._facts_cache:
+            self._facts_cache[fact.account].append(fact)
 
     # ── 前因 ────────────────────────────────────────────────────────────────
 
     def _antecedent_holds(self, item: Expectation, cache: DayIndexCache, table: OpportunityTable | None) -> bool:
-        """事件触发：前因那条记录（按开始时刻找，封口后的样子）现在还属于这条关系的前因类吗。"""
+        """事件触发：前因那条记录（按开始时刻找，封口后的样子）现在还属于这条关系的前因类吗。情境触发：按最新的日历，
+        那一天还处在这个日历情境里吗（放假数据后来补上了，原来按名义当成工作日的那天就作废）。关系已不在表里说不清，不判作废。"""
 
+        relation = table.relation(item.trigger) if table is not None else None
+        if item.source == "情境":
+            if relation is None or relation.calendar_key is None or table is None:
+                return True
+            today = dict(self.read_side.calendar.for_expectations(item.day))
+            return relation.calendar_holds(today, official=table.unseen_day_types == "official")
         if item.source != "事件":
             return True
-        relation = next((r for r in table.relations if r.key == item.trigger), None) if table is not None else None
         classes = relation.antecedent_classes if relation is not None else None
         try:
             started = datetime.fromisoformat(item.trigger_instance).astimezone(item.formed_at.tzinfo)
@@ -390,89 +461,20 @@ class SettlementStage:
             )
         return antecedent_holds(item, found, classes, current=self.current)
 
-    def _current_prediction(self, item: Expectation) -> AccountFact | None:
-        """这条预期此刻在预测轴上算数的那一条（后写的覆盖先写的）。"""
+    def _current_fact(self, item: Expectation) -> AccountFact | None:
+        """这条预期此刻算数的那一笔（后写的覆盖先写的）。"""
 
-        mine = [fact for fact in self.ledger.facts_of(item.account) if fact.expectation_id == item.expectation_id]
-        return next((fact for fact in current_facts(mine) if fact.axis == PREDICTION), None)
+        mine = [fact for fact in self._facts(item.account) if fact.expectation_id == item.expectation_id]
+        return next(iter(current_facts(mine)), None)
 
-    def _settled_facts_exist(self, item: Expectation) -> bool:
-        """这条预期的原判（结算时写的、不是改判）已经写过了。"""
+    def _settled(self, item: Expectation) -> bool:
+        """这条预期的原判（结算时写的、不是改判）已经写下了。"""
 
         return any(
-            fact.expectation_id == item.expectation_id and fact.written_at is None
-            for fact in self.ledger.facts_of(item.account)
+            fact.expectation_id == item.expectation_id and fact.written_at is None for fact in self._facts(item.account)
         )
 
     # ── 账上的事实 ──────────────────────────────────────────────────────────
-
-    def _settlement_facts(
-        self, item: Expectation, result: Settlement, *, asked: Asked, known_by: datetime
-    ) -> tuple[AccountFact, ...]:
-        """预测轴一笔，说过的再在提醒组记一笔、随机扣下的在扣发组记一笔（裁定 58 第 5–7 条）：提醒组与扣发组单位权重；
-        提醒后才做的在预测轴是中性（强度 0）——提醒的功劳不算这个习惯本身，提醒有没有用看提醒组与扣发组之差。
-
-        事实的时刻是这次机会形成的时刻（不是结算那一刻）：遗忘按机会算，「这次不用」压回之前形成的机会不算压回之后的证据。
-        历史分布只看这本账在这次机会**之前**的预期（之后的机会拿来比这一次是用未来解释过去），且只认 ``known_by`` 之前已经写下的
-        （结算时取最晚时限：哪一晚结、断没断过重来，算出的都是同一份；重结时取此刻：用修过的那一份）。"""
-
-        account = item.account
-        at = item.formed_at
-        known = [fact for fact in self.ledger.facts_of(account) if fact.precedence <= known_by]
-        prior = tuple(
-            fact for fact in current_facts(known) if fact.expectation_id != item.expectation_id and fact.at < at
-        )
-        outcome = result.outcome
-        if outcome in ("准时", "早到", "晚了但做了"):
-            offset = 0 if outcome == "准时" else int(result.offset_minutes or 0)
-            history = [
-                fact.offset_minutes or 0
-                for fact in prior
-                if fact.axis == PREDICTION and fact.good and fact.kind in ("准时", "早到", "晚了但做了")
-            ]
-            natural = AccountFact(
-                account,
-                at,
-                PREDICTION,
-                True,
-                offset_strength(offset, history),
-                outcome,
-                item.expectation_id,
-                offset_minutes=offset,
-            )
-            if asked.held:  # 扣下没说，他自己做了
-                return (natural, AccountFact(account, at, HELD_OUT, True, 1.0, "扣发后发生", item.expectation_id))
-            return (natural,)
-        if outcome == "提醒后发生":
-            delay = int(result.offset_minutes or 0)
-            return (
-                AccountFact(account, at, PREDICTION, True, 0.0, outcome, item.expectation_id, offset_minutes=delay),
-                AccountFact(account, at, REMINDED, True, 1.0, outcome, item.expectation_id, offset_minutes=delay),
-            )
-        found = [AccountFact(account, at, PREDICTION, False, 1.0, "过期待决", item.expectation_id)]
-        if asked.spoken_at is not None:
-            found.append(AccountFact(account, at, REMINDED, False, 1.0, "落空", item.expectation_id))
-        elif asked.held:
-            found.append(AccountFact(account, at, HELD_OUT, False, 1.0, "扣发后落空", item.expectation_id))
-        return tuple(found)
-
-    @staticmethod
-    def _catch_up_fact(item: Expectation, ruling: Ruling, table: OpportunityTable | None) -> AccountFact:
-        """后补：覆盖那条过期待决的坏，按"补做那天离上一次发生隔了几天"在这一类历史间隔里的位置打折
-        （隔得比他最短的正常间隔还短就不算坏；已经隔了一个正常间隔那么久，就和没做一样坏）。"""
-
-        delay = int(ruling.delay_minutes or 0)
-        return AccountFact(
-            item.account,
-            item.formed_at,
-            PREDICTION,
-            False,
-            _catch_up_strength(item, delay, table),
-            "后补",
-            item.expectation_id,
-            offset_minutes=delay,
-            written_at=ruling.ruled_at,
-        )
 
     def _formed_by_account(self, days: Sequence[date]) -> dict[str, list[datetime]]:
         """账 → 这本账从最早一个还要看的日子起全部预期形成的时刻（升序），一晚读一遍：裁「后补」时找这本账的下一次机会。"""
@@ -494,8 +496,13 @@ class SettlementStage:
         从还要看的日子里取最晚时限不早于这一天的（结完的日子里的预期最晚时限都早于还没查过的定稿日）。"""
 
         found = 0
+        if not closed:
+            return 0
+        # 只走"查过漏报"水位以上的日子（26 号清单 6.11；定稿不按顺序，所以水位按连续前缀推）
+        start = min(closed)
+        watermark = self.ledger.scan_watermark(start=start)
         for day in sorted(closed):
-            if self.ledger.scanned(day):
+            if covers(watermark, day):
                 continue
             rows = cache.day(day).rows
             covering = [
@@ -508,7 +515,7 @@ class SettlementStage:
             items = omissions(rows, covering, noticed_at=now, current=self.current)
             for omission in items:
                 self.ledger.record_omission(omission)
-            self.ledger.mark_scanned(day, scanned_at=now, found=len(items))
+            watermark = self.ledger.mark_scanned(day, start=start)
             found += len(items)
         return found
 
@@ -528,12 +535,9 @@ class SettlementStage:
             **counts,
             "wrong_within_budget": found.within_budget(spoken_only=True),
             "calibration_off": sum(1 for row in found.calibration if row.off),
-            "held_again": sum(item.held for item in found.adjustments.values()),
-            "held_again_right": sum(item.right for item in found.adjustments.values()),
-            "substitutions_flagged": sum(1 for row in found.substitutions if row.flagged),
         }
 
-    def diagnose(self, *, now: datetime, days: int = 30) -> Diagnosis:
+    def diagnose(self, *, now: datetime, days: int = DIAGNOSIS_DAYS) -> Diagnosis:
         """最近 ``days`` 天里结过的预期：每一次落空归到哪一关（``foresight.diagnosis``），外加按切片的校准表。只读。"""
 
         if self.tolerance is None:
@@ -550,10 +554,10 @@ class SettlementStage:
         listed = {relation.key for relation in table.relations} if table is not None else None
         start = now.date() - timedelta(days=days)
         accounts: dict[str, tuple[AccountFact, ...]] = {}
+        lane = table.lane if table is not None else self.lane
+        history = self.history.latest(lane) if self.history is not None else None
         misses: list[MissFacts] = []
         settled_rows: list[Settled] = []
-        held: list[tuple[str, str]] = []  # （因此没说的那条预期, 引用的那次落空）
-        followed: list[Followed] = []
         for day in self.ledger.days_with_expectations():
             if day < start:
                 continue
@@ -561,13 +565,6 @@ class SettlementStage:
             deliveries = self.ledger.deliveries_on(day)
             spoken = {item.expectation_id for item in deliveries if item.spoken}
             subsumed = {item.expectation_id for item in deliveries if item.reason == UNIT}
-            held.extend(
-                (item.expectation_id, cite.removeprefix(CITE))
-                for item in deliveries
-                if item.reason == AGAIN
-                for cite in item.evidence
-                if cite.startswith(CITE)
-            )
             for item in self.ledger.expectations_on(day):
                 outcome = outcomes.get(item.expectation_id)
                 if outcome is None:
@@ -575,22 +572,16 @@ class SettlementStage:
                 facts = accounts.get(item.account)
                 if facts is None:
                     facts = accounts.setdefault(item.account, current_facts(self.ledger.facts_of(item.account)))
-                mine = [fact for fact in facts if fact.expectation_id == item.expectation_id]
-                # 这一次现在算什么，按账上现在算数的那条预测轴事实（重结、后补都改的是它），不按当初的结算记录
-                now_as = next((fact for fact in mine if fact.axis == PREDICTION), None)
+                # 这一次现在算什么，按账上现在算数的那笔事实（重结、后补都改的是它），不按当初的结算记录
+                now_as = next((fact for fact in facts if fact.expectation_id == item.expectation_id), None)
                 if now_as is None:
                     continue
                 voided = now_as.kind == VOID
-                neutral = (now_as.kind == "过期待决" and now_as.strength == 0.0) or any(
-                    fact.kind == "已做过" for fact in mine
-                )
-                name = _slice(item)
-                visible_miss = now_as.kind == "后补" or (now_as.kind == "过期待决" and now_as.strength > 0.0)
-                if not voided and (now_as.kind in _NATURAL_HITS or visible_miss):
-                    followed.append(Followed(item.account, self._next_kind(item, cache), missed=visible_miss))
+                neutral = now_as.kind == "过期待决" and now_as.strength == 0.0
+                name = slice_of(item)
                 if not voided and not neutral and now_as.kind != "提醒后发生" and item.opportunities > 0:
                     settled_rows.append(
-                        Settled(name, item.implementation, item.hits / item.opportunities, now_as.kind in _NATURAL_HITS)
+                        Settled(name, item.implementation, item.hits / item.opportunities, now_as.kind in NATURAL_HITS)
                     )
                 if not (now_as.kind in ("过期待决", "后补") or (voided and outcome == "过期待决")):
                     continue
@@ -603,71 +594,30 @@ class SettlementStage:
                         spoken=item.expectation_id in spoken,
                         voided=voided,
                         neutral=neutral,
-                        standing=self._standing_at(item.account, facts, item.deadline),
+                        standing=self._standing_at(item, history),
                         cache=cache,
                         listed=listed,
-                        found=POSTPONED if now_as.kind == "后补" else (now_as.cause.kind if now_as.cause else None),
+                        postponed=now_as.kind == "后补",
                     )
                 )
-        return diagnose(
-            misses, settled_rows, alpha=self.evidence.alpha, held=self._held(held, accounts), followed=followed
-        )
+        return diagnose(misses, settled_rows, alpha=self.evidence.alpha)
 
-    def _next_kind(self, item: Expectation, cache: DayIndexCache) -> str | None:
-        """时窗开始之后他接着做的第一件别的事的类（到最晚时限；时窗开始前就结束了的不算；与找原因的"下一步"同一个口径）。"""
-
-        kinds = {item.kind_token, *self.current(item.kind_token)}
-        start, end = item.window[0].astimezone(UTC), item.deadline.astimezone(UTC)
-        found = [
-            row
-            for row in _rows(cache, item.window[0].date(), item.deadline.date())
-            if row.kind_token not in kinds
-            and _classified(row.kind_token)
-            and row.at.astimezone(UTC) <= end
-            and row.last_observed_at.astimezone(UTC) >= start
-        ]
-        first = min(found, key=lambda row: (row.at.astimezone(UTC), row.uri), default=None)
-        return None if first is None else first.kind_token
-
-    def _held(
-        self, held: Sequence[tuple[str, str]], accounts: dict[str, tuple[AccountFact, ...]]
-    ) -> tuple[tuple[str, bool], ...]:
-        """每一次"上次的原因今天又在、不说"：（那条原因的种类, 他果然没做）。还没结的不算。"""
-
-        found = []
-        for expectation_id, cited in held:
-            day = self.ledger.day_of(expectation_id)
-            item = next(
-                (e for e in self.ledger.expectations_on(day) if e.expectation_id == expectation_id), None
-            ) if day is not None else None
-            if item is None:
-                continue
-            facts = accounts.get(item.account)
-            if facts is None:
-                facts = accounts.setdefault(item.account, current_facts(self.ledger.facts_of(item.account)))
-            outcome = next((f for f in facts if f.expectation_id == expectation_id and f.axis == PREDICTION), None)
-            cause = next(
-                (f.cause for f in facts if f.expectation_id == cited and f.axis == PREDICTION and f.cause is not None),
-                None,
-            )
-            if outcome is None or cause is None or outcome.kind in (VOID, "提醒后发生"):
-                continue
-            found.append((cause.kind, outcome.kind not in _NATURAL_HITS))
-        return tuple(found)
-
-    def _standing_at(self, account: str, facts: tuple[AccountFact, ...], at: datetime) -> Standing:
-        """这次落空那一刻（最晚时限）这本账的位置：账上那时已有的机会（含这一次），按那时生效的重轻、设置与上一次的级。
-        拿此刻的位置去判一个月前的落空，过了断点又恢复的会被说成预算内，正在断的会把之前的也拖成说不清。"""
+    def _standing_at(self, item: Expectation, history: UnitHistory | None) -> Standing:
+        """这次落空那一刻（最晚时限）这条边的位置：单元历史（``history``，夜里按当晚语义树重标的最晚一晚，一次诊断只读一回）里
+        这条边在那一刻之前的那几刻，按那时生效的设置与上一次的级。拿此刻的位置去判一个月前的落空，过了断点又恢复的会被说成
+        预算内，正在断的会把之前的也拖成说不清；按刻的时刻截到那一刻（``edge_reading(visible_at=)``），之后的刻不算。"""
 
         assert self.tolerance is not None
+        at = item.deadline
+        moments = history.of(item.kind_token) if history is not None else ()
         return climb(
-            facts,
+            moments,
+            item.account,
+            now=at,
             tolerance=self.tolerance,
             evidence=self.evidence,
-            now=at,
-            severity=_latest_by(self.ledger.severities_of(account), at, lambda item: item.judged_at),
-            setting=_latest_by(self.ledger.settings_of(account), at, lambda item: item.at),
-            previous=_latest_by(self.ledger.levels_of(account), at, lambda item: item.at),
+            setting=_latest_by(self.ledger.settings_of(item.kind_token), at, lambda found: found.at),
+            previous=_latest_by(self.ledger.levels_of(item.account), at, lambda found: found.at),
         )
 
     def _miss(
@@ -681,7 +631,7 @@ class SettlementStage:
         standing: Standing,
         cache: DayIndexCache,
         listed: set[str] | None,
-        found: str | None = None,
+        postponed: bool = False,
     ) -> MissFacts:
         kinds = {item.kind_token, *self.current(item.kind_token)}
         window_rows = _rows(cache, item.observed_from.date(), item.deadline.date())
@@ -704,12 +654,12 @@ class SettlementStage:
             abandoned=abandoned,
             broken=standing.break_at is not None and item.formed_at >= standing.break_at,
             within_budget=standing.prediction.lower >= standing.threshold,
-            relation_gone=item.source == "事件" and listed is not None and item.trigger not in listed,
+            relation_gone=relation_backed(item.source) and listed is not None and item.trigger not in listed,
             reclassified=tuple(self.current(item.kind_token)) != (item.kind_token,),
             antecedent_absent=any(a.upward and not a.present for a in item.antecedents),
             day_type_differs=today_note is not None and bool(notes) and today_note not in notes,
             notice_driven=any(row is not None and row.prompted_by == "host_agent" for row in history),
-            found=found,
+            postponed=postponed,
         )
 
     def _observe(
@@ -729,58 +679,8 @@ class SettlementStage:
             pass
 
 
-def _last_before(item: Expectation, table: OpportunityTable | None) -> tuple[date | None, tuple[int, ...]]:
-    """这条预期之前这一类最后一次发生在哪天，与这一类历史上相邻两次隔几天（机会表的日历；没有表就是空）。"""
-
-    calendar = table.kind(item.kind_token) if table is not None else None
-    if calendar is None:
-        return None, ()
-    gaps = gaps_of([entry.day.toordinal() for entry in calendar.days])
-    earlier = [entry.day for entry in calendar.days if entry.first_at < item.observed_from]
-    return (max(earlier) if earlier else None), gaps
-
-
-def _catch_up_strength(item: Expectation, delay_minutes: int, table: OpportunityTable | None) -> float:
-    last, gaps = _last_before(item, table)
-    if last is None:
-        return 1.0
-    caught = (item.deadline + timedelta(minutes=delay_minutes)).date()
-    return catch_up_strength(float(max(0, (caught - last).days)), gaps)
-
-
-def _ruling_settled(item: Expectation, before: datetime | None, last_closed: date, table: OpportunityTable | None) -> bool:
-    """这条过期待决以后还会不会被裁出不同的结果：下一次机会已经形成且那天已定稿（之后的发生归下一次），或者从上一次发生到
-    已定稿的尽头已经隔了不短于最长的正常间隔（再补做强度也是 1），或者没有间隔可比（强度恒为 1）。"""
-
-    if before is not None and last_closed >= before.date():
-        return True
-    if _ruling_moot(item, table):
-        return True
-    last, gaps = _last_before(item, table)
-    assert last is not None
-    return (last_closed - last).days >= max(gaps)
-
-
-def _ruling_moot(item: Expectation, table: OpportunityTable | None) -> bool:
-    """没有上一次或没有间隔可比：补做的强度恒为 1，裁不裁账上都一样坏（裁了只多一个「后补」的名字）。"""
-
-    last, gaps = _last_before(item, table)
-    return last is None or len(gaps) < MIN_HISTORY
-
-
-_NATURAL_HITS = frozenset({"准时", "早到", "晚了但做了"})
-#: 结算之后才有的改判（后补、回话）：重结不盖它们。
-_LATER_RULINGS = REVISIONS | {"这次不用"}
-
-
-def _slice(item: Expectation) -> str:
-    """校准表的切片：触发的种类（钟面按周几是一种，事件按跨度段）。"""
-
-    if item.source == "钟面":
-        return "钟面"
-    if item.source == "事件":
-        return f"事件:{item.trigger.rsplit('|', 1)[-1]}"
-    return f"日子:{item.trigger}"
+#: 结算之后才有的改判（后补）：重结不盖它们。
+_LATER_RULINGS = REVISIONS
 
 
 def _basis_row(cache: DayIndexCache, uri: str) -> FlowRow | None:
@@ -807,22 +707,6 @@ def _unobserved(item: Expectation, cache: DayIndexCache) -> bool:
 def _latest_by[T](items: Iterable[T], at: datetime, moment: Callable[[T], datetime]) -> T | None:
     earlier = [item for item in items if moment(item) <= at]
     return max(earlier, key=moment) if earlier else None
-
-
-def _classified(token: str) -> bool:
-    """成了类的编号（形如 ``s-k0013``）；「待定」「非事件」这些占位标记不是一件可比的事。"""
-
-    _lane, separator, rest = token.partition("-k")
-    return bool(separator) and rest.isdigit()
-
-
-def _same(old: AccountFact, new: AccountFact) -> bool:
-    return (old.kind, old.good, round(old.strength, 9), old.offset_minutes) == (
-        new.kind,
-        new.good,
-        round(new.strength, 9),
-        new.offset_minutes,
-    )
 
 
 def _prompted(cache: DayIndexCache, uri: str) -> bool:

@@ -9,6 +9,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from habitus.conversation.source.address import remove_if_empty
 from habitus.conversation.source.model import (
     ConversationSourceError,
     encode_durable_record,
@@ -20,6 +21,7 @@ from habitus.foundation.integrity import canonical_digest, canonicalize
 from habitus.infrastructure.store.filesystem import (
     ImmutableArtifactConflictError,
     atomic_create_bytes,
+    durable_unlink,
     read_regular_bytes,
 )
 
@@ -321,6 +323,13 @@ class ConversationConsumerOutcomeStore:
         if outcome.source_id != source_id or outcome.consumer is not ConversationSourceConsumer(consumer):
             raise ConversationSourceError("consumer outcome path does not match its identity")
         return outcome
+
+    def discard(self, source_id: str, consumer: ConversationSourceConsumer) -> bool:
+        """释放：删一份 Outcome；这份源的两份都删完后目录随之删掉。"""
+
+        removed = durable_unlink(self._path(source_id, consumer), artifact_root=self.root)
+        remove_if_empty(self.outcome_root / source_id, artifact_root=self.root)
+        return removed
 
     def _path(self, source_id: str, consumer: ConversationSourceConsumer) -> Path:
         require_sha256(source_id, "source_id")

@@ -170,7 +170,7 @@ def test_the_request_shows_class_names_and_criteria_never_counts() -> None:
     authored = ConceptSet(
         (*(EXISTING[identity] for identity in EXISTING), refinement("夜宵", "睡前两小时内吃东西", "就寝"))
     )
-    rhythm = Rhythm(SLEEP, (RhythmPeak(1, 1380, 1440, 0.8),), 7, 24.0, label="就寝")
+    rhythm = Rhythm(SLEEP, (RhythmPeak(1, 1380, 1440, 0.8),), 1.0, 0.95, label="就寝")
     rendered = build_concept_request(BRIEFS, authored, {SLEEP: rhythm}).messages[-1].content or ""
     assert "- 修改代码（session）：改动代码文件｜例：调整 Tagent 的记忆召回代码" in rendered
     assert "- 吃饭（physical）：吃一顿饭｜例：（没给例子）" in rendered
@@ -181,8 +181,18 @@ def test_the_request_shows_class_names_and_criteria_never_counts() -> None:
         "已经有的概念（不要重写、不要重名）" in rendered
         and "- 夜宵（refinement：就寝）：睡前两小时内吃东西" in rendered
     )
-    assert "就寝：一天 1 个机会" in rendered  # 节律按类名显示
+    assert (
+        "就寝：做的那天多在 23:00–00:00（占 80%）；平均 1.0 天一次，在看的日子里 95% 有它" in rendered
+    )  # 节律按类名显示
     assert "次、跨" not in rendered and "→ 给它一个概念" not in rendered  # 不看次数（裁定七：按次数定粒度太死板）
+    # 看不出几点做的也给（多久一次同样是材料）；日历情境收成一句、不整份列（2026-10-18 四方评审）
+    from habitus.scene.concepts.calendar_situations import calendar_concepts
+
+    flat = Rhythm(MEAL, (), 2.0, 0.5, label="吃饭")
+    with_calendar = ConceptSet((*authored.values(), *calendar_concepts(now=CREATED)))
+    rendered = build_concept_request(BRIEFS, with_calendar, {SLEEP: rhythm, MEAL: flat}).messages[-1].content or ""
+    assert "吃饭：看不出一天里固定在几点；平均 2.0 天一次" in rendered
+    assert "日历上的日子" in rendered and "- 周三（" not in rendered and "15号" not in rendered
     without = build_concept_request(BRIEFS[:1], EXISTING).messages[-1].content or ""
     assert "已经有的概念" not in without and "作息" not in without
     with pytest.raises(ConceptAuthorError, match="at least one class brief"):

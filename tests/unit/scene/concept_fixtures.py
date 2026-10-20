@@ -148,13 +148,23 @@ EXERCISE = group("运动", "以活动身体为目的的行为", "打球", "跑�
 #: 「出差中」**故意不带情境说明**：这类状态要等事实门（``scene/facts.py``）接上真实数据源才算得出，
 #: 在那之前它进得了概念集、也能被假设引用，只是永远不命中、分不出层。
 TRAVELLING = situation("出差中", "人在常住地之外过夜")
-#: 「周末」是纯日历的，算法算得出：名义上的周六/周日。
-WEEKEND = situation(
-    "周末",
-    "当地日历上的周六或周日",
-    role=ConceptRole.DAY_TYPE,
-    rule=SituationRule(SituationBasis.WEEKDAYS, weekdays=(5, 6)),
-)
+
+
+def calendar(name: str, key: str, *values: str) -> ConceptDefinition:
+    """日历情境（裁定 59）：外部条件的日历键取某几个值，机械生成、不由模型写。"""
+
+    return ConceptDefinition(
+        name=name,
+        definition=f"当地日历上的{name}",
+        role=ConceptRole.DAY_TYPE,
+        source=ConceptSource(ConceptOrigin.CALENDAR),
+        created_at=CREATED,
+        situation=SituationRule(SituationBasis.CALENDAR, value=key, values=values),
+    )
+
+
+#: 「周末」是纯日历的，算法算得出：周六/周日。
+WEEKEND = calendar("周末", "日历.周几", "周六", "周日")
 
 ALL_CONCEPTS = (
     BEDTIME,

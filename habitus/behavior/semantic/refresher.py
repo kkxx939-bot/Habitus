@@ -17,11 +17,17 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import UTC, date, datetime
 
 from habitus.behavior.model import BehaviorAddress, BehaviorDirectory, BehaviorKind, BehaviorLevel
 from habitus.behavior.semantic.config import BehaviorSemanticConfig
+from habitus.behavior.semantic.errors import (
+    BehaviorOverviewEmptyError,
+    BehaviorOverviewHeadMissingError,
+    BehaviorOverviewLimitError,
+    BehaviorSemanticRefreshError,
+)
 from habitus.behavior.semantic.generator import BehaviorOverviewGenerator
 from habitus.behavior.semantic.model import (
     BehaviorDirectorySnapshot,
@@ -34,11 +40,6 @@ from habitus.behavior.tree import BehaviorTree
 from habitus.foundation.integrity import canonical_digest
 
 _SOURCE_MARKER = re.compile(r"<!-- habitus-semantic-source: ([0-9a-f]{64}) -->")
-_PAGE_LIMIT = 10_000
-
-
-class BehaviorSemanticRefreshError(RuntimeError):
-    """生成结果无法安全发布。"""
 
 
 class BehaviorSemanticRefresher:
@@ -70,16 +71,16 @@ class BehaviorSemanticRefresher:
             raise TypeError("days must contain date values")
         if not affected:
             return ()
-        occurrences = self._addresses_by_date(BehaviorKind.OCCURRENCE)
-        gaps = self._addresses_by_date(BehaviorKind.GAP)
-
         results: list[BehaviorSemanticRefreshResult] = []
         for day in affected:
+            # 每处理一天只列当天、所在月与年的目录（26 号清单 6.8），不再把全树按日分组
+            occurrences = self.tree.list_day_addresses(BehaviorKind.OCCURRENCE, day)
+            gaps = self.tree.list_day_addresses(BehaviorKind.GAP, day)
             results.append(await self._refresh_occurrence_day(day, occurrences, gaps))
             results.append(self._refresh_gap_day(day, gaps))
         for year, month in sorted({(day.year, day.month) for day in affected}):
-            occ_days = sorted({d for d in occurrences if (d.year, d.month) == (year, month)})
-            gap_days = sorted({d for d in gaps if (d.year, d.month) == (year, month)})
+            occ_days = self.tree.days_in(BehaviorKind.OCCURRENCE, year, month)
+            gap_days = self.tree.days_in(BehaviorKind.GAP, year, month)
             results.append(
                 await self._refresh_rollup(
                     BehaviorDirectory.occurrences(year, month),
@@ -93,8 +94,8 @@ class BehaviorSemanticRefresher:
                 )
             )
         for year in sorted({day.year for day in affected}):
-            occ_months = sorted({(d.year, d.month) for d in occurrences if d.year == year})
-            gap_months = sorted({(d.year, d.month) for d in gaps if d.year == year})
+            occ_months = sorted({(d.year, d.month) for d in self.tree.days_in(BehaviorKind.OCCURRENCE, year)})
+            gap_months = sorted({(d.year, d.month) for d in self.tree.days_in(BehaviorKind.GAP, year)})
             results.append(
                 await self._refresh_rollup(
                     BehaviorDirectory.occurrences(year),
@@ -112,10 +113,7 @@ class BehaviorSemanticRefresher:
     # ── occurrences 层级：LLM 叙述 ───────────────────────────────────────────────────
 
     async def _refresh_occurrence_day(
-        self,
-        day: date,
-        occurrences: dict[date, list[BehaviorAddress]],
-        gaps: dict[date, list[BehaviorAddress]],
+        self, day: date, occurrences: Sequence[BehaviorAddress], gaps: Sequence[BehaviorAddress]
     ) -> BehaviorSemanticRefreshResult:
         directory = BehaviorDirectory.occurrences(day.year, day.month, day.day)
         if not self.tree.directory_exists(directory):
@@ -123,8 +121,8 @@ class BehaviorSemanticRefresher:
         # 当日叙述的输入 = 行为 + 同日空白，按开始瞬时排成一条时间轴（叙述要按时间讲）。
         timeline = sorted(
             (
-                *((address, BehaviorSemanticEntryKind.OCCURRENCE) for address in occurrences.get(day, ())),
-                *((address, BehaviorSemanticEntryKind.GAP) for address in gaps.get(day, ())),
+                *((address, BehaviorSemanticEntryKind.OCCURRENCE) for address in occurrences),
+                *((address, BehaviorSemanticEntryKind.GAP) for address in gaps),
             ),
             key=lambda pair: (_instant(pair[0].started_at), pair[0].identity_name),
         )
@@ -175,17 +173,17 @@ class BehaviorSemanticRefresher:
             return BehaviorSemanticRefreshResult(directory, BehaviorSemanticRefreshStatus.UNCHANGED, snapshot.digest)
         overview = await self.generator.generate(snapshot)
         if not isinstance(overview, str) or not overview.strip():
-            raise BehaviorSemanticRefreshError("behavior overview generator returned empty text")
+            raise BehaviorOverviewEmptyError("behavior overview generator returned empty text")
         return self._write(directory, overview, snapshot.digest)
 
     # ── gaps 层级：确定性枚举，零模型调用 ─────────────────────────────────────────────
 
-    def _refresh_gap_day(self, day: date, gaps: dict[date, list[BehaviorAddress]]) -> BehaviorSemanticRefreshResult:
+    def _refresh_gap_day(self, day: date, gaps: Sequence[BehaviorAddress]) -> BehaviorSemanticRefreshResult:
         directory = BehaviorDirectory.gaps(day.year, day.month, day.day)
         if not self.tree.directory_exists(directory):
             return BehaviorSemanticRefreshResult(directory, BehaviorSemanticRefreshStatus.MISSING)
         day_gaps = sorted(
-            gaps.get(day, ()),
+            gaps,
             key=lambda address: (_instant(address.started_at), address.identity_name),
         )
         if not day_gaps:
@@ -224,7 +222,7 @@ class BehaviorSemanticRefresher:
     def _write(self, directory: BehaviorDirectory, overview: str, digest: str) -> BehaviorSemanticRefreshResult:
         normalized = overview.strip() + "\n"
         if len(normalized) > self.config.max_overview_chars:
-            raise BehaviorSemanticRefreshError("behavior overview exceeds its configured bound")
+            raise BehaviorOverviewLimitError("behavior overview exceeds its configured bound")
         stamped = f"{normalized}\n<!-- habitus-semantic-source: {digest} -->\n"
         self.tree.write_layers(directory, abstract=self._abstract_from_overview(normalized), overview=stamped)
         return BehaviorSemanticRefreshResult(directory, BehaviorSemanticRefreshStatus.WRITTEN, digest)
@@ -264,23 +262,10 @@ class BehaviorSemanticRefresher:
                 content.append(stripped)
         compact = " ".join(content)
         if not compact:
-            raise BehaviorSemanticRefreshError("behavior overview has no leading paragraph")
+            raise BehaviorOverviewHeadMissingError("behavior overview has no leading paragraph")
         if len(compact) > self.config.max_abstract_chars:
             compact = compact[: self.config.max_abstract_chars - 1].rstrip() + "…"
         return compact + "\n"
-
-    def _addresses_by_date(self, kind: BehaviorKind) -> dict[date, list[BehaviorAddress]]:
-        """全树按日分组；全量扫描是 BHV-LIFECYCLE-001 的已知欠账，随时间窗读取一并改。"""
-
-        grouped: dict[date, list[BehaviorAddress]] = {}
-        cursor: BehaviorAddress | None = None
-        while True:
-            page = self.tree.list_addresses(kind, limit=_PAGE_LIMIT, after=cursor)
-            for address in page:
-                grouped.setdefault(address.occurred_on, []).append(address)
-            if len(page) < _PAGE_LIMIT:
-                return grouped
-            cursor = page[-1]
 
 
 def _instant(value: datetime) -> datetime:

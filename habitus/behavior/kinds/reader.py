@@ -53,7 +53,7 @@ class VocabularyReader:
 
         if isinstance(version, bool) or not isinstance(version, int) or version < 0:
             raise ValueError("version must be a non-negative integer")
-        return tuple(record for record in self.store.records() if record.version > version)
+        return self.store.changes_since(version)
 
 
 def _class_id(token: str) -> ClassId | None:

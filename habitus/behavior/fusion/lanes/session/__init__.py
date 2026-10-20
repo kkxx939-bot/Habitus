@@ -27,6 +27,12 @@ from habitus.behavior.fusion.lanes.session.prompt import (
 from habitus.behavior.fusion.lanes.session.protocol import SESSION_PROTOCOL
 from habitus.behavior.fusion.lanes.session.recorder import SESSION_FUSION_VERSION, SessionTurnRecorder, session_observer
 from habitus.behavior.fusion.lanes.session.redaction import redact
+from habitus.behavior.fusion.lanes.session.reminders import (
+    NoReminders,
+    PendingReminder,
+    ReminderFeedback,
+    ReminderResponse,
+)
 from habitus.behavior.fusion.lanes.session.service import DescribedTurn, SessionTurnDescriber
 
 __all__ = [
@@ -35,6 +41,10 @@ __all__ = [
     "SESSION_PROTOCOL",
     "SESSION_SYSTEM_PROMPT",
     "DescribedTurn",
+    "NoReminders",
+    "PendingReminder",
+    "ReminderFeedback",
+    "ReminderResponse",
     "SessionLane",
     "SessionLaneConfig",
     "SessionMessage",

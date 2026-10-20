@@ -22,13 +22,20 @@ class ConversationSourceConfig:
     """Source、Output、Outcome、Recovery 与执行租约的独立容量边界。"""
 
     max_envelope_bytes: int = 16 * 1024 * 1024
-    max_source_files: int = 100_000
+    # 生命周期账的有界枚举：有标记的地址数、单个地址的标记数、还没终态的源数（26 号清单 2.1）。
+    max_source_addresses: int = 100_000
+    max_markers_per_address: int = 10_000
+    max_pending_sources: int = 100_000
     max_output_files_per_consumer: int = 4
     max_outcome_bytes: int = 64 * 1024
     max_memory_output_bytes: int = 32 * 1024 * 1024
     # 行为侧会话 lane 的回执：每份源一份，只列各轮的时刻，不存内容。
     max_behavior_session_output_bytes: int = 1024 * 1024
     recovery_batch_size: int = 100
+    # 释放每轮最多看多少个地址：按地址游标轮转，一轮的工作量不随历史地址数变大。
+    release_batch_addresses: int = 1_000
+    # "还没终态"标记打上之后，信封迟迟不在（put 写到一半崩溃、再没重投）多久算孤儿、由周期恢复清掉。
+    orphan_grace_seconds: int = 86_400
     execution_lock_ttl_seconds: int = 300
     execution_lock_heartbeat_seconds: float = 60.0
     execution_lock_wait_seconds: float = 30.0
@@ -37,12 +44,16 @@ class ConversationSourceConfig:
     def __post_init__(self) -> None:
         for integer_name, integer_value, integer_maximum in (
             ("max_envelope_bytes", self.max_envelope_bytes, 256 * 1024 * 1024),
-            ("max_source_files", self.max_source_files, 10_000_000),
+            ("max_source_addresses", self.max_source_addresses, 10_000_000),
+            ("max_markers_per_address", self.max_markers_per_address, 10_000_000),
+            ("max_pending_sources", self.max_pending_sources, 10_000_000),
             ("max_output_files_per_consumer", self.max_output_files_per_consumer, 1_000),
             ("max_outcome_bytes", self.max_outcome_bytes, 16 * 1024 * 1024),
             ("max_memory_output_bytes", self.max_memory_output_bytes, 512 * 1024 * 1024),
             ("max_behavior_session_output_bytes", self.max_behavior_session_output_bytes, 64 * 1024 * 1024),
             ("recovery_batch_size", self.recovery_batch_size, 100_000),
+            ("release_batch_addresses", self.release_batch_addresses, 1_000_000),
+            ("orphan_grace_seconds", self.orphan_grace_seconds, 30 * 86_400),
             ("execution_lock_ttl_seconds", self.execution_lock_ttl_seconds, 86_400),
         ):
             _bounded_int(
@@ -70,42 +81,21 @@ class ConversationSourceConfig:
 
 @dataclass(frozen=True)
 class ConversationLifecycleConfig:
-    """Conversation 原文释放和两阶段 Summary 压缩的统一生命周期配置。"""
+    """Conversation 原文释放和两阶段 Summary 压缩的统一生命周期配置。
 
-    maintenance_interval_seconds: int = 3_600
+    LifecycleWorker 的周期、lease、心跳与停机等待已搬到 ``lifecycle.worker``（各层参与者共用一个 Worker）；
+    这里只留会话链自己的：每轮最多轮转多少个 Conversation、Summary 压缩。"""
+
     max_conversations_per_cycle: int = 100
-    lease_ttl_seconds: int = 300
-    heartbeat_interval_seconds: float = 60.0
-    shutdown_timeout_seconds: float = 30.0
     summary_compaction: ConversationSummaryCompactionConfig = field(default_factory=ConversationSummaryCompactionConfig)
 
     def __post_init__(self) -> None:
-        _bounded_int(
-            self.maintenance_interval_seconds,
-            "conversation lifecycle maintenance_interval_seconds",
-            minimum=60,
-            maximum=86_400,
-        )
         _bounded_int(
             self.max_conversations_per_cycle,
             "conversation lifecycle max_conversations_per_cycle",
             minimum=1,
             maximum=10_000,
         )
-        _bounded_int(
-            self.lease_ttl_seconds,
-            "conversation lifecycle lease_ttl_seconds",
-            minimum=30,
-            maximum=3_600,
-        )
-        for name, value, maximum in (
-            ("heartbeat_interval_seconds", self.heartbeat_interval_seconds, 1_200.0),
-            ("shutdown_timeout_seconds", self.shutdown_timeout_seconds, 3_600.0),
-        ):
-            if isinstance(value, bool) or not isinstance(value, int | float) or not 0 < float(value) <= maximum:
-                raise ValueError(f"conversation lifecycle {name} must be greater than zero and at most {maximum:g}")
-        if self.heartbeat_interval_seconds > self.lease_ttl_seconds / 3:
-            raise ValueError("conversation lifecycle heartbeat interval must be at most one third of the lease TTL")
         if not isinstance(
             self.summary_compaction,
             ConversationSummaryCompactionConfig,
@@ -116,25 +106,9 @@ class ConversationLifecycleConfig:
     def from_mapping(cls, value: object) -> ConversationLifecycleConfig:
         data = group_fields(cls, value, "config.conversation.lifecycle")
         return cls(
-            maintenance_interval_seconds=_integer_value(
-                data.get("maintenance_interval_seconds", 3_600),
-                "config.conversation.lifecycle.maintenance_interval_seconds",
-            ),
             max_conversations_per_cycle=_integer_value(
                 data.get("max_conversations_per_cycle", 100),
                 "config.conversation.lifecycle.max_conversations_per_cycle",
-            ),
-            lease_ttl_seconds=_integer_value(
-                data.get("lease_ttl_seconds", 300),
-                "config.conversation.lifecycle.lease_ttl_seconds",
-            ),
-            heartbeat_interval_seconds=_number_value(
-                data.get("heartbeat_interval_seconds", 60.0),
-                "config.conversation.lifecycle.heartbeat_interval_seconds",
-            ),
-            shutdown_timeout_seconds=_number_value(
-                data.get("shutdown_timeout_seconds", 30.0),
-                "config.conversation.lifecycle.shutdown_timeout_seconds",
             ),
             summary_compaction=_summary_compaction_config(data.get("summary_compaction", {})),
         )
@@ -228,12 +202,6 @@ def _integer_value(value: object, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ConfigError(f"'{path}' must be an integer")
     return value
-
-
-def _number_value(value: object, path: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise ConfigError(f"'{path}' must be numeric")
-    return float(value)
 
 
 def _summary_compaction_config(value: object) -> ConversationSummaryCompactionConfig:

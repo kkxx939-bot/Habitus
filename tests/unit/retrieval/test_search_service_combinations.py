@@ -101,9 +101,7 @@ def test_one_hop_expansion_does_not_recursively_expand_neighbor_relations(tmp_pa
     result = asyncio.run(instance.find("用户是谁"))
 
     assert tuple(item.document.kind for item in result.memories[0].related) == (MemoryKind.PREFERENCE,)
-    assert entity_uri not in {
-        MemoryURI.from_address(item.document.address) for item in result.memories[0].related
-    }
+    assert entity_uri not in {MemoryURI.from_address(item.document.address) for item in result.memories[0].related}
 
 
 def test_inconsistent_or_missing_backlink_fails_closed_instead_of_returning_partial_relation(
@@ -134,6 +132,7 @@ def test_completed_intention_is_excluded_only_as_active_relation_neighbor(tmp_pa
         completed=True,
     )
     profile_uri = MemoryURI.from_address(profile.address)
+
     class ScopeSearch(SemanticSearch):
         async def search(self, query, **kwargs):
             self.calls.append((query, kwargs))
@@ -214,9 +213,7 @@ def test_filtered_completed_intention_does_not_consume_one_hop_quota(tmp_path: P
 
     result = asyncio.run(instance.find("用户是谁", limit=1))
 
-    assert tuple(item.document.kind for item in result.memories[0].related) == (
-        MemoryKind.PREFERENCE,
-    )
+    assert tuple(item.document.kind for item in result.memories[0].related) == (MemoryKind.PREFERENCE,)
 
 
 def test_multi_query_failure_aborts_whole_result_instead_of_returning_partial_memory(tmp_path: Path) -> None:

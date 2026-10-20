@@ -7,8 +7,9 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from habitus.foresight import ForesightError
-from habitus.foresight.opportunities import KindDay, KindDays, OpportunityTable
+from habitus.foresight.opportunities import KindDays, OpportunityTable
 from habitus.runtime.foresight_opportunities import OpportunityStore
+from habitus.temporal import OccurrenceDay
 
 CST = timezone(timedelta(hours=8))
 NIGHT = date(2026, 7, 27)
@@ -22,10 +23,13 @@ def table(night: date, lane: str = "session", kinds: int = 1) -> OpportunityTabl
         relation_night=night,
         slot_minutes=15,
         window_slots=3,
-        present_days=(night - timedelta(days=1),),
         relations=(),
         kinds=tuple(
-            KindDays(f"s-k{index:04d}", f"类{index}", (KindDay(first.date(), "behavior://a.md", first, 1, 1),))
+            KindDays(
+                f"s-k{index:04d}",
+                f"类{index}",
+                (OccurrenceDay(first.date(), "behavior://a.md", first, 1, 1, "behavior://a.md", first),),
+            )
             for index in range(1, kinds + 1)
         ),
     )

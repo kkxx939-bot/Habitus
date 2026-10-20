@@ -50,9 +50,7 @@ def lifecycle_manager(
     journal = ConversationMessageJournal(tmp_path / "conversation", path_lock)
     segment_store = ConversationSummaryStore(journal.layout)
     range_store = ConversationRangeSummaryStore(journal.layout)
-    compaction_config = compaction_config or ConversationSummaryCompactionConfig(
-        enabled=compaction_enabled
-    )
+    compaction_config = compaction_config or ConversationSummaryCompactionConfig(enabled=compaction_enabled)
     compactor = ConversationSummaryCompactor(
         journal,
         segment_store,
@@ -248,9 +246,7 @@ def test_archive_retirement_waits_for_actual_use_window_and_grace_then_deletes_c
         raise AssertionError("pending retirement must resume before new Summary compaction")
 
     monkeypatch.setattr(manager.compactor, "compact_once", unexpected_compaction)
-    resumed = asyncio.run(
-        manager.maintain_once(address, now=BASE_TIME + timedelta(days=15))
-    )
+    resumed = asyncio.run(manager.maintain_once(address, now=BASE_TIME + timedelta(days=15)))
     assert resumed.deleted_archive_summary_ids == (archive.range_id,)
     assert resumed.compaction.reason == "resumed pending Archive retirement before new compaction"
     monkeypatch.setattr(manager.compactor, "compact_once", compact_once)

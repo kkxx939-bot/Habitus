@@ -120,7 +120,11 @@ def test_prompted_by_is_optional_known_values_only_and_agrees_with_reminded() ->
     REGISTRY.validate(BehaviorKind.OCCURRENCE, {**base, "prompted_by": "host_agent"})
     REGISTRY.validate(BehaviorKind.OCCURRENCE, {**base, "reminded": True, "prompted_by": "system"})
     REGISTRY.validate(BehaviorKind.OCCURRENCE, {**base, "prompted_by": None})  # 显式 null = 不知道，与不写同义
-    for bad in ({**base, "prompted_by": "朋友"}, {**base, "prompted_by": "system"}, {**base, "reminded": True, "prompted_by": "self"}):
+    for bad in (
+        {**base, "prompted_by": "朋友"},
+        {**base, "prompted_by": "system"},
+        {**base, "reminded": True, "prompted_by": "self"},
+    ):
         with pytest.raises(BehaviorSchemaError):
             REGISTRY.validate(BehaviorKind.OCCURRENCE, bad)
     # 写了才渲染；不写的旧记录正文一字不变（读回时按正文逐字比对，所以旧树照常能读）
@@ -390,3 +394,54 @@ def test_pagination_cursor_order_matches_enumeration_order(tmp_path) -> None:
         cursor = page[-1]
     assert [a.identity_name for a in paged] == [a.identity_name for a in full]
     assert len(paged) == 2  # 无遗漏、无重复
+
+
+def test_paging_resumes_from_the_cursor_day_instead_of_walking_from_the_start(tmp_path) -> None:
+    """26 号清单 6.8：排序键先按日期，游标之前的年、月、日按目录名跳过；分页结果与一次全列完全一样。"""
+
+    from datetime import date as _date
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+    from datetime import timezone as _tz
+
+    from habitus.behavior import BehaviorDocumentWriter, BehaviorTree
+    from habitus.infrastructure.store.locks import ProcessLocalLockStore
+
+    cst = _tz(_td(hours=8))
+    tree = BehaviorTree(tmp_path / "behavior-tree")
+    writer = BehaviorDocumentWriter(tree, ProcessLocalLockStore(), clock=lambda: _dt(2027, 1, 5, 23, 0, tzinfo=cst))
+    for index, day in enumerate((_date(2026, 11, 30), _date(2026, 12, 1), _date(2027, 1, 2))):
+        for minute in (1, 2):
+            started = _dt(day.year, day.month, day.day, 9, minute, tzinfo=cst)
+            writer.publish(
+                BehaviorKind.OCCURRENCE,
+                occurrence_payload(
+                    occurred_on=day,
+                    name=f"事{index}{minute}",
+                    kind_token="s-k0001",
+                    started_at=started,
+                    last_observed_at=started + _td(minutes=1),
+                    onset_available_at=started + _td(seconds=2),
+                    basis=(),
+                    goal=None,
+                    summary="一件事",
+                ),
+            )
+    full = tree.list_addresses(BehaviorKind.OCCURRENCE)
+    paged, cursor = [], None
+    while page := tree.list_addresses(BehaviorKind.OCCURRENCE, limit=1, after=cursor):
+        paged.extend(page)
+        cursor = page[-1]
+    assert paged == list(full) and len(full) == 6
+    listed: list[str] = []
+    original = tree._markdown_names
+
+    def counting(directory):  # type: ignore[no-untyped-def]
+        listed.append(str(directory))
+        return original(directory)
+
+    tree._markdown_names = counting  # type: ignore[method-assign]
+    assert tree.list_addresses(BehaviorKind.OCCURRENCE, limit=10, after=full[-2]) == (full[-1],)
+    assert listed and all("2027/01/02" in path for path in listed)  # 游标之前的两天连目录都没进
+    assert tree.days_in(BehaviorKind.OCCURRENCE, 2026) == (_date(2026, 11, 30), _date(2026, 12, 1))
+    assert tree.days_in(BehaviorKind.OCCURRENCE, 2026, 12) == (_date(2026, 12, 1),)

@@ -385,7 +385,8 @@ def test_a_description_is_capped_and_redacted_before_it_is_stored() -> None:
 def test_text_over_its_cap_is_cut_at_a_pause_and_marked() -> None:
     config = SessionLaneConfig(max_summary_chars=30)
     described = assemble_description(
-        description(summary="他要求把配置拆成两层，助手照做并跑通了检查；随后又补了三处遗漏的引用并重新验证。"), config=config
+        description(summary="他要求把配置拆成两层，助手照做并跑通了检查；随后又补了三处遗漏的引用并重新验证。"),
+        config=config,
     )
     assert described.summary == "他要求把配置拆成两层，助手照做并跑通了检查…"  # 截在停顿上，不从词中间切
 
@@ -525,7 +526,7 @@ def test_a_turn_interrupted_after_its_judgement_is_finished_not_judged_again(
     turn = one_turn(prompt(0, "继续"), reply(1, "拆完了。"))
     store, method = crash_at.split(".")
 
-    def crash(*_: object) -> None:
+    def crash(*_: object, **__: object) -> None:
         raise RuntimeError("进程崩溃")
 
     with monkeypatch.context() as patched:
@@ -551,7 +552,7 @@ def test_a_turn_interrupted_before_its_judgement_is_simply_judged(
     session, _ = lane(stores, [description("第一次的说法"), description("第二次的说法")])
     turn = one_turn(prompt(0, "继续"), reply(1, "拆完了。"))
 
-    def crash(*_: object) -> None:
+    def crash(*_: object, **__: object) -> None:
         raise RuntimeError("进程崩溃")
 
     with monkeypatch.context() as patched:
@@ -574,7 +575,10 @@ def test_coverage_is_read_once_for_a_batch_of_turns(tmp_path: Path, monkeypatch:
         tuple(
             message
             for index in range(4)
-            for message in (prompt(2 * index, f"第 {index} 句", minutes=index), reply(2 * index + 1, "好。", minutes=index + 0.5))
+            for message in (
+                prompt(2 * index, f"第 {index} 句", minutes=index),
+                reply(2 * index + 1, "好。", minutes=index + 0.5),
+            )
         ),
     )
     reads = 0
@@ -590,3 +594,131 @@ def test_coverage_is_read_once_for_a_batch_of_turns(tmp_path: Path, monkeypatch:
     asyncio.run(session.consume(turns, before_each=lambda: checks.append(1)))
     assert reads == 1
     assert len(checks) == 4  # 每一轮之前都问一次调用方还该不该接着做
+
+
+# ── 还开着的提醒（方案 30 第五节；裁定 61 第 5 条、62 第 2 条） ─────────────────────────────────
+
+
+class _Reminders:
+    """接口的一个假实现：给定几条开着的提醒，记下写回来的回应。"""
+
+    def __init__(self, pending: tuple) -> None:  # type: ignore[type-arg]
+        self.pending = pending
+        self.asked: list[datetime] = []
+        self.responses: list[tuple[str, str, str, datetime]] = []
+
+    def open(self, at: datetime) -> tuple:  # type: ignore[type-arg]
+        self.asked.append(at)
+        return self.pending
+
+    def respond(self, turn: str, response, *, at: datetime) -> None:  # type: ignore[no-untyped-def]
+        self.responses.append((turn, response.reminder_id, response.polarity, at))
+
+
+def _pending() -> tuple:  # type: ignore[type-arg]
+    from habitus.behavior.fusion.lanes.session import PendingReminder
+
+    return (
+        PendingReminder("hotel", at(-30), "订完机票往常你会订酒店，这次要吗？", at(180)),
+        PendingReminder("card", at(-20), "该还信用卡了", at(600)),
+    )
+
+
+def test_open_reminders_go_into_the_material_and_the_answer_names_which_one_he_answered() -> None:
+    from habitus.behavior.fusion.lanes.session import PendingReminder, assemble_description, session_json_schema
+    from habitus.behavior.fusion.lanes.session.material import render_reminders
+
+    text = render_reminders(_pending(), zone=ZONE)
+    assert "【还开着的提醒】" in text and "1. " in text and "2. " in text and "订完机票" in text
+    assert render_reminders((), zone=ZONE) == ""
+    secret = PendingReminder("x", at(0), "token=sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456 要吗", at(10))
+    assert "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456" not in render_reminders((secret,), zone=ZONE)
+    # 没带提醒：输出里不要 responses；带了：必须有，编号只认带进去的、一条最多一项、方向只认正 / 中 / 负
+    assert "responses" not in session_json_schema()["required"]
+    schema = session_json_schema(reminder_numbers=(1, 2))
+    assert "responses" in schema["required"]
+    assert schema["properties"]["responses"]["items"]["properties"]["reminder"]["enum"] == [1, 2]
+    described = assemble_description(
+        {**description(), "responses": [{"reminder": 2, "polarity": "负"}]}, reminder_numbers=(1, 2)
+    )
+    assert described.responses == ((2, "负"),)
+    assert assemble_description(description(), reminder_numbers=(1, 2)).responses == ()
+    for bad in (
+        [{"reminder": 3, "polarity": "正"}],
+        [{"reminder": 1, "polarity": "也许"}],
+        [{"reminder": 1, "polarity": "正"}, {"reminder": 1, "polarity": "负"}],
+        "正",
+    ):
+        with pytest.raises(BehaviorFusionError):
+            assemble_description({**description(), "responses": bad}, reminder_numbers=(1, 2))
+    with pytest.raises(BehaviorFusionError):
+        assemble_description({**description(), "responses": [{"reminder": 1, "polarity": "正"}]})  # 没带提醒：不认
+
+
+def test_a_turn_is_judged_once_against_the_open_reminders_and_the_response_is_written_after_the_record(
+    tmp_path: Path,
+) -> None:
+    stores = Stores(tmp_path)
+    session, provider = lane(stores, [{**description(), "responses": [{"reminder": 1, "polarity": "中"}]}])
+    reminders = _Reminders(_pending())
+    session.attach_reminders(reminders)
+    turn = one_turn(prompt(0, "酒店晚点再订，先把代码行数统计一下"), reply(1, "8,792 行。", minutes=5))
+
+    (outcome,) = asyncio.run(session.consume((turn,)))
+
+    assert outcome.disposition is TurnDisposition.RECORDED and provider.calls == 1
+    assert reminders.asked == [turn.instructed_at]  # 问的是他开口那一刻开着的提醒
+    assert "【还开着的提醒】" in provider.prompts[-1] and "订完机票" in provider.prompts[-1]
+    assert reminders.responses == [(turn.key, "hotel", "中", turn.instructed_at)]
+    # 重放：这一轮已经记录过，不再问模型、不再写回应（一轮只判一次）
+    (again,) = asyncio.run(session.consume((turn,)))
+    assert again.disposition is TurnDisposition.ALREADY_RECORDED and provider.calls == 1
+    assert len(reminders.responses) == 1
+
+
+def test_without_the_feedback_port_the_model_is_asked_nothing_about_reminders(tmp_path: Path) -> None:
+    stores = Stores(tmp_path)
+    session, provider = lane(stores, [description()])
+    turn = one_turn(prompt(0, "统计一下代码行数"), reply(1, "8,792 行。", minutes=5))
+    (outcome,) = asyncio.run(session.consume((turn,)))
+    assert outcome.disposition is TurnDisposition.RECORDED
+    assert "【还开着的提醒】" not in provider.prompts[-1]
+    with pytest.raises(TypeError):
+        session.attach_reminders(object())  # type: ignore[arg-type]
+
+
+def test_the_prompt_and_the_output_shape_agree_on_when_responses_exists() -> None:
+    """没带提醒时输出形状不收 responses 字段（additionalProperties: false），系统提示词说的必须是同一件事；
+    模型照提示词答出来的两种输出都要过真实的形状校验。"""
+
+    from habitus.behavior.fusion.lanes.session import SESSION_SYSTEM_PROMPT, session_json_schema
+    from habitus.model_client.schema_validation import JSONSchemaValidationError, validate_json_schema
+
+    assert "不要有 responses 这个字段" in SESSION_SYSTEM_PROMPT and "responses 填 []" not in SESSION_SYSTEM_PROMPT
+    validate_json_schema(description(), session_json_schema())
+    with pytest.raises(JSONSchemaValidationError):
+        validate_json_schema({**description(), "responses": []}, session_json_schema())
+    validate_json_schema({**description(), "responses": []}, session_json_schema(reminder_numbers=(1,)))
+    validate_json_schema(
+        {**description(), "responses": [{"reminder": 1, "polarity": "中"}]}, session_json_schema(reminder_numbers=(1,))
+    )
+
+
+def test_the_response_is_written_only_after_the_turn_is_recorded(tmp_path: Path) -> None:
+    """回应落账本在记录落定之后：记录失败这一轮会重来，回应先写了就会在重来时再判一次。"""
+
+    stores = Stores(tmp_path)
+    session, _provider = lane(stores, [{**description(), "responses": [{"reminder": 1, "polarity": "正"}]}])
+    recorded_when_responding: list[int] = []
+
+    class Ordered(_Reminders):
+        def respond(self, turn: str, response, *, at: datetime) -> None:  # type: ignore[no-untyped-def]
+            recorded_when_responding.append(len(list(stores.judgements.list())))
+            super().respond(turn, response, at=at)
+
+    reminders = Ordered(_pending())
+    session.attach_reminders(reminders)
+    turn = one_turn(prompt(0, "好，订一下酒店；先统计代码行数"), reply(1, "8,792 行。", minutes=5))
+    (outcome,) = asyncio.run(session.consume((turn,)))
+    assert outcome.disposition is TurnDisposition.RECORDED
+    assert recorded_when_responding == [1] and len(reminders.responses) == 1

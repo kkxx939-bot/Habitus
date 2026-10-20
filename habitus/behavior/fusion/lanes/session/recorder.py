@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, tzinfo
@@ -37,6 +38,7 @@ from habitus.behavior.observation import (
     BehaviorObservationEnvelope,
     BehaviorObservationStore,
 )
+from habitus.infrastructure.lifecycle import Quarantine
 
 SESSION_FUSION_VERSION = f"behavior_session_fusion_v1+{SESSION_PROMPT_VERSION}"
 _OBSERVER_PREFIX = "session/"
@@ -50,11 +52,16 @@ def session_observer(conversation_id: str) -> str:
 
 @dataclass(frozen=True)
 class InterruptedRecord:
-    """上一次写到一半的那条判断：判断已经落盘，回执还没有。"""
+    """上一次写到一半的那条判断：判断已经落盘，回执还没有。``description`` 为 None 是一段没读懂（上一次是确定性地
+    写不成、写没读懂写到一半）。"""
 
     judgement_id: str
     judged_at: datetime
-    description: TurnDescription
+    description: TurnDescription | None
+
+    @property
+    def unreadable(self) -> bool:
+        return self.description is None
 
 
 class SessionTurnRecorder:
@@ -70,6 +77,7 @@ class SessionTurnRecorder:
         primary_subject: str,
         zone: tzinfo,
         clock: Callable[[], datetime],
+        quarantine: Quarantine,
     ) -> None:
         if not isinstance(observations, BehaviorObservationStore):
             raise TypeError("observations must be BehaviorObservationStore")
@@ -85,6 +93,8 @@ class SessionTurnRecorder:
             raise TypeError("zone must be a tzinfo")
         if not callable(clock):
             raise TypeError("clock must be callable")
+        if not isinstance(quarantine, Quarantine):
+            raise TypeError("quarantine must be Quarantine")
         self.observations = observations
         self.judgements = judgements
         self.receipts = receipts
@@ -92,6 +102,7 @@ class SessionTurnRecorder:
         self.primary_subject = primary_subject
         self.zone = zone
         self.clock = clock
+        self.quarantine = quarantine
 
     def covered(self) -> frozenset[str]:
         """已经被回执覆盖的观测。读一次要扫全部覆盖记录，一批轮只读一次，不要每轮读。"""
@@ -129,7 +140,9 @@ class SessionTurnRecorder:
         return InterruptedRecord(
             judgement_id=first["judgement_id"],
             judged_at=datetime.fromisoformat(first["judged_at"]),
-            description=TurnDescription(
+            description=None
+            if first["behavior"] is None
+            else TurnDescription(
                 name=first["behavior"],
                 summary=first["summary"],
                 goal=first["goal"],
@@ -137,12 +150,18 @@ class SessionTurnRecorder:
             ),
         )
 
-    def resume(self, turn: SessionTurn, interrupted: InterruptedRecord) -> str:
-        """把写到一半的那一轮接着写完：照落盘的那条判断补上回执，不产生第二条判断。"""
+    def resume(self, turn: SessionTurn, interrupted: InterruptedRecord, *, sources: tuple[str, ...] = ()) -> str:
+        """把写到一半的那一轮接着写完：照落盘的那条判断补上回执，不产生第二条判断。没读懂的照没读懂的路径补写
+        （判定时刻取这一轮做完的时刻，身份与上一次相同）。"""
 
-        judgement_id = self.record(
-            turn, interrupted.description, validation_attempts=1, judged_at=interrupted.judged_at
-        )
+        if interrupted.description is None:
+            judgement_id = self.record_unreadable(
+                turn, reason="resumed an interrupted unreadable write", sources=sources
+            )
+        else:
+            judgement_id = self.record(
+                turn, interrupted.description, validation_attempts=1, judged_at=interrupted.judged_at, sources=sources
+            )
         if judgement_id != interrupted.judgement_id:
             raise BehaviorFusionError("an interrupted session judgement could not be resumed under its identity")
         return judgement_id
@@ -154,13 +173,11 @@ class SessionTurnRecorder:
         *,
         validation_attempts: int,
         judged_at: datetime | None = None,
+        sources: tuple[str, ...] = (),
     ) -> str:
-        """写这一轮的凭据、判断与回执，返回判断的编号。``judged_at`` 只在接着写完上一次时给。"""
+        """写这一轮的凭据、判断与回执，返回判断的编号。``judged_at`` 只在接着写完上一次时给。``sources`` 是这一轮所属的
+        会话源：覆盖记录带上它，会话源的 Behavior 到终态之前不删（做到一半的源隔多久恢复都认得出前几轮写过）。"""
 
-        opened, closed = self._evidence(turn)
-        envelope = self._envelope(turn, (opened, closed))
-        # 先落凭据再落判断：归约落树时要读凭据；顺序反过来的话，中途崩溃会留下一条读不到凭据的判断。
-        self.observations.put(envelope)
         judgement = BehaviorJudgement(
             judgement_no=1,
             covers=(1, 2),
@@ -176,7 +193,55 @@ class SessionTurnRecorder:
             status_basis=JudgementStatusBasis.OBSERVED,
             relations=(),
         )
-        judged_at = self.clock() if judged_at is None else judged_at
+        return self._publish(
+            turn,
+            judgement,
+            validation_attempts=validation_attempts,
+            judged_at=self.clock() if judged_at is None else judged_at,
+            sources=sources,
+        )
+
+    def record_unreadable(self, turn: SessionTurn, *, reason: str, sources: tuple[str, ...] = ()) -> str:
+        """这一轮确定性地写不成（超限、输出被截断）：按"读不懂"的产出路径把它写成一段没读懂，返回那条判断的编号。
+
+        已经落盘、但回执没落的可读判断一并拿走（副本进隔离区）——否则它照样会被归约落树；凭据由这份回执覆盖，
+        封口前沿不再被钉住（26 号清单 2.4.4）。判定时刻取这一轮做完的时刻，重来时身份不变、幂等。
+        """
+
+        owned = [item.observation_id for item in self._evidence(turn)]
+        for stale in self.judgements.list():
+            if stale["observation_ids"] == owned and stale["behavior"] is not None:
+                self.quarantine.put(
+                    f"session-turn:{stale['judgement_id']}",
+                    json.dumps(stale, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+                    reason=reason,
+                    meta={"kind": "session_turn", "turn": turn.key},
+                )
+                self.judgements.discard(stale["judgement_id"])
+        unreadable = BehaviorJudgement(
+            judgement_no=1,
+            covers=(1, 2),
+            subjects=(),
+            claim=BehaviorClaim(behavior=None, goal=None, summary=None, basis=()),
+            status=None,
+            status_basis=None,
+            relations=(),
+        )
+        return self._publish(turn, unreadable, validation_attempts=1, judged_at=turn.completed_at, sources=sources)
+
+    def _publish(
+        self,
+        turn: SessionTurn,
+        judgement: BehaviorJudgement,
+        *,
+        validation_attempts: int,
+        judged_at: datetime,
+        sources: tuple[str, ...] = (),
+    ) -> str:
+        opened, closed = self._evidence(turn)
+        envelope = self._envelope(turn, (opened, closed))
+        # 先落凭据再落判断：归约落树时要读凭据；顺序反过来的话，中途崩溃会留下一条读不到凭据的判断。
+        self.observations.put(envelope)
         derived = derive_judgements(
             BehaviorJudgementBatch((judgement,)),
             (opened, closed),
@@ -196,7 +261,7 @@ class SessionTurnRecorder:
         )
         for item in derived:
             self.judgements.put_payload(judgement_payload(item))
-        self.coverage.record(self.receipts.put(receipt))
+        self.coverage.record(self.receipts.put(receipt), sources=sources)
         return derived[0].judgement_id
 
     def _evidence(self, turn: SessionTurn) -> tuple[BehaviorObservation, BehaviorObservation]:

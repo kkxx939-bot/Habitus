@@ -12,6 +12,7 @@ from habitus.config.conversation import (
 from habitus.config.credentials import CredentialRegistry
 from habitus.config.foresight import ForesightConfig
 from habitus.config.http import HTTPAPIConfig
+from habitus.config.lifecycle import LifecycleConfig, LifecycleRetryConfig, LifecycleWorkerConfig
 from habitus.config.loader import ConfigError
 from habitus.config.locale import LocaleConfig
 from habitus.config.memory import MemoryConfig
@@ -26,6 +27,7 @@ from habitus.config.observability import (
 from habitus.config.root import HabitusConfig
 from habitus.config.scene import SceneConfig
 from habitus.config.storage import StorageConfig
+from habitus.config.temporal import TemporalConfig
 from habitus.config.workflow import MemoryWorkflowLifecycleConfig, WorkerConfig, WorkflowConfig
 from habitus.memory.intention import MemoryIntentionReviewConfig
 from habitus.memory.retrieval import MemoryRecallLifecycleConfig, MemorySearchServiceConfig
@@ -51,6 +53,10 @@ __all__ = [
     "ObservabilityAuditConfig",
     "ObservabilityConfig",
     "ForesightConfig",
+    "LifecycleConfig",
+    "LifecycleRetryConfig",
+    "LifecycleWorkerConfig",
+    "TemporalConfig",
     "LocaleConfig",
     "SceneConfig",
     "ObservabilityLoggingConfig",

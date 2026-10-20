@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Protocol
 
@@ -11,17 +12,17 @@ from habitus.foresight.errors import ForesightError
 
 @dataclass(frozen=True)
 class Moment:
-    """ "此刻"在钟面上的位置，外加当地日历对今天的说法。
+    """ "此刻"：本地时刻、在第几槽、今天的日历条件。
 
     契约：``at`` 必须是**主体的本地时刻**（与行为树上 occurrence 同一偏移）。今天是哪一天、
-    此刻在哪个槽，全部从它的本地时分算——传 UTC 进来会读错一天、也会读错槽。``slot`` 与
-    ``weekday`` 由装配层用树自己的槽宽映射出来，不在这里重算，否则钟面就有了两种算法。
+    此刻在哪个槽，全部从它的本地时分算——传 UTC 进来会读错一天、也会读错槽。``slot`` 由装配层用
+    ``temporal`` 的槽运算映射出来，不在这里重算。``calendar`` 是今天的日历条件（周几、几号、日型；裁定 59）：
+    没有放假数据时日型取名义值，只给建预期用。
     """
 
     at: datetime
     slot: int
-    weekday: int
-    day_note: str | None = None
+    calendar: Mapping[str, str] = field(default_factory=dict)
     #: 上一次看的时刻（上一拍）。时窗在那之后才关的，这一拍还算赶上了：拍点晚了一点不让没做的那次机会从账上消失。
     #: None = 只看此刻。
     looked_since: datetime | None = None
@@ -86,10 +87,21 @@ class Seen:
     #: 融合给这一次起的名字与一句话概要（模型小包里"今天这次"与"历史那几次"读的就是它们；触发不读）。
     name: str = ""
     summary: str = ""
+    #: 开始了但放弃了（树上那一行的 status 是 abandoned）：不算这件事做了——与结算同一种读法（裁定 54：一条记录一种读法）。
+    abandoned: bool = False
+    #: 地点与同在的人（树上的结构字段，上游没给时为空）：白天判带条件关系的"地点 / 同在的人"条件成不成立要看它们。
+    place: str | None = None
+    subjects: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not isinstance(self.summary, str):
             raise ForesightError("seen row name and summary must be text")
+        if self.place is not None and (not isinstance(self.place, str) or not self.place):
+            raise ForesightError("seen row place must be non-empty text or None")
+        if not isinstance(self.subjects, tuple) or any(not isinstance(item, str) or not item for item in self.subjects):
+            raise ForesightError("seen row subjects must be a tuple of names")
+        if not isinstance(self.abandoned, bool):
+            raise ForesightError("seen row abandoned must be a boolean")
         for label in ("started_at", "ended_at"):
             value = getattr(self, label)
             if not isinstance(value, datetime) or value.utcoffset() is None:

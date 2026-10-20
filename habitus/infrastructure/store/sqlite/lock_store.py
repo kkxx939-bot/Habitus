@@ -270,6 +270,30 @@ class SQLiteLockStore:
         finally:
             conn.close()
 
+    def discard_idle(self, lock_key: str) -> bool:
+        """在同一个写事务里读出那一行，空闲（已释放或租约已过期）才删。"""
+
+        self.initialize()
+        now = datetime.now(UTC)
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute("SELECT * FROM locks WHERE lock_key = ?", (lock_key,)).fetchone()
+            if existing is None or (existing["token"] and self._lease_active(str(existing["expires_at"]), now)):
+                conn.rollback()
+                return False
+            conn.execute("DELETE FROM locks WHERE lock_key = ?", (lock_key,))
+            conn.commit()
+            return True
+        except sqlite3.OperationalError as exc:
+            if conn.in_transaction:
+                conn.rollback()
+            if self._is_contention(exc):
+                raise TimeoutError(f"Lock store busy while discarding: {lock_key}") from exc
+            raise
+        finally:
+            conn.close()
+
     def observability_snapshot(self, *, warning_seconds: float) -> LockStoreSnapshot:
         """只聚合有效租约和持有时长，不返回锁键、owner 或 token。"""
 

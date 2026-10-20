@@ -11,11 +11,11 @@ from habitus.conversation.source import (
     ConversationConsumerDeliveryState,
     ConversationConsumerOutcomeState,
     ConversationSourceConsumer,
-    ConversationSourceRecovery,
 )
 from habitus.memory.workflow import MemoryConversationOutput
 from habitus.pre.conversation import ConversationMessageRole
 from tests.unit.conversation.source_v2_helpers import NOW, FakeMemoryConsumer, delivery, ingest_result, source
+from tests.unit.conversation.source_v2_helpers import recovery as source_recovery
 
 
 async def _write_orphan_memory_output(service, consumer, source_value):
@@ -33,20 +33,26 @@ def test_recovery_adopts_memory_output_without_rerunning_consumer(tmp_path) -> N
         source_value = service.sources.put(source())
         await _write_orphan_memory_output(service, memory, source_value)
         assert memory.calls == 1
-        assert service.inspect(
-            source_value,
-            ConversationSourceConsumer.MEMORY,
-        ).state is ConversationConsumerDeliveryState.OUTPUT_READY
+        assert (
+            service.inspect(
+                source_value,
+                ConversationSourceConsumer.MEMORY,
+            ).state
+            is ConversationConsumerDeliveryState.OUTPUT_READY
+        )
 
-        recovery = ConversationSourceRecovery(service.sources, service, batch_size=10)
+        recovery = source_recovery(service)
         results = await recovery.recover_pending()
         memory_results = [item for item in results if item.consumer is ConversationSourceConsumer.MEMORY]
         assert len(memory_results) == 1 and memory_results[0].error is None
         assert memory.calls == 1
-        assert service.inspect(
-            source_value,
-            ConversationSourceConsumer.MEMORY,
-        ).state is ConversationConsumerDeliveryState.COMMITTED
+        assert (
+            service.inspect(
+                source_value,
+                ConversationSourceConsumer.MEMORY,
+            ).state
+            is ConversationConsumerDeliveryState.COMMITTED
+        )
 
     asyncio.run(scenario())
 
@@ -89,17 +95,23 @@ def test_recovery_adopts_behavior_output_without_running_the_consumer_again(tmp_
         ) as lease:
             await behavior.execute(source_value, lease)
         assert behavior.calls == 1
-        assert service.inspect(
-            source_value,
-            ConversationSourceConsumer.BEHAVIOR_SESSION,
-        ).state is ConversationConsumerDeliveryState.OUTPUT_READY
-        recovery = ConversationSourceRecovery(service.sources, service, batch_size=10)
+        assert (
+            service.inspect(
+                source_value,
+                ConversationSourceConsumer.BEHAVIOR_SESSION,
+            ).state
+            is ConversationConsumerDeliveryState.OUTPUT_READY
+        )
+        recovery = source_recovery(service)
         await recovery.recover_pending()
         assert behavior.calls == 1
-        assert service.inspect(
-            source_value,
-            ConversationSourceConsumer.BEHAVIOR_SESSION,
-        ).state is ConversationConsumerDeliveryState.COMMITTED
+        assert (
+            service.inspect(
+                source_value,
+                ConversationSourceConsumer.BEHAVIOR_SESSION,
+            ).state
+            is ConversationConsumerDeliveryState.COMMITTED
+        )
 
     asyncio.run(scenario())
 
@@ -123,10 +135,13 @@ def test_multiple_orphan_outputs_are_ambiguous_and_fail_closed(tmp_path) -> None
         )
         memory.output_store.put(source_value, first)
         memory.output_store.put(source_value, second)
-        assert service.inspect(
-            source_value,
-            ConversationSourceConsumer.MEMORY,
-        ).state is ConversationConsumerDeliveryState.CORRUPTED
+        assert (
+            service.inspect(
+                source_value,
+                ConversationSourceConsumer.MEMORY,
+            ).state
+            is ConversationConsumerDeliveryState.CORRUPTED
+        )
         with pytest.raises(ConversationConsumerCorruptionError, match="multiple orphan"):
             await service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
 
@@ -151,11 +166,9 @@ def test_committed_outcome_with_missing_output_is_broken_and_not_recreated(tmp_p
         state = service.inspect(source_value, ConversationSourceConsumer.MEMORY)
         assert state.state is ConversationConsumerDeliveryState.BROKEN_OUTCOME
         calls = memory.calls
-        recovery = ConversationSourceRecovery(service.sources, service, batch_size=10)
+        recovery = source_recovery(service)
         result = next(
-            item
-            for item in await recovery.recover_pending()
-            if item.consumer is ConversationSourceConsumer.MEMORY
+            item for item in await recovery.recover_pending() if item.consumer is ConversationSourceConsumer.MEMORY
         )
         assert result.error is not None
         assert memory.calls == calls
@@ -180,10 +193,13 @@ def test_output_record_digest_mismatch_is_corrupted_and_not_overwritten(tmp_path
         value = json.loads(path.read_text(encoding="utf-8"))
         value["output_record_digest"] = "0" * 64
         path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
-        assert service.inspect(
-            source_value,
-            ConversationSourceConsumer.MEMORY,
-        ).state is ConversationConsumerDeliveryState.CORRUPTED
+        assert (
+            service.inspect(
+                source_value,
+                ConversationSourceConsumer.MEMORY,
+            ).state
+            is ConversationConsumerDeliveryState.CORRUPTED
+        )
         before = path.read_bytes()
         with pytest.raises(ConversationConsumerCorruptionError):
             await service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
@@ -201,10 +217,13 @@ def test_outcome_record_digest_mismatch_is_corrupted(tmp_path) -> None:
         value = json.loads(path.read_text(encoding="utf-8"))
         value["outcome_record_digest"] = "0" * 64
         path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
-        assert service.inspect(
-            source_value,
-            ConversationSourceConsumer.MEMORY,
-        ).state is ConversationConsumerDeliveryState.CORRUPTED
+        assert (
+            service.inspect(
+                source_value,
+                ConversationSourceConsumer.MEMORY,
+            ).state
+            is ConversationConsumerDeliveryState.CORRUPTED
+        )
 
     asyncio.run(scenario())
 
@@ -229,10 +248,13 @@ def test_skipped_outcome_with_behavior_output_is_corrupted(tmp_path) -> None:
             ),
         )
         behavior.output_store.put(source_value, output)
-        assert service.inspect(
-            source_value,
-            ConversationSourceConsumer.BEHAVIOR_SESSION,
-        ).state is ConversationConsumerDeliveryState.CORRUPTED
+        assert (
+            service.inspect(
+                source_value,
+                ConversationSourceConsumer.BEHAVIOR_SESSION,
+            ).state
+            is ConversationConsumerDeliveryState.CORRUPTED
+        )
 
     asyncio.run(scenario())
 
@@ -243,7 +265,7 @@ def test_recovery_only_runs_missing_behavior_when_memory_is_committed(tmp_path) 
         source_value = service.sources.put(source())
         await service.ensure_outcome(source_value, ConversationSourceConsumer.MEMORY)
         memory_calls = memory.calls
-        recovery = ConversationSourceRecovery(service.sources, service, batch_size=10)
+        recovery = source_recovery(service)
         results = await recovery.recover_pending()
         assert [item.consumer for item in results] == [ConversationSourceConsumer.BEHAVIOR_SESSION]
         assert behavior.calls == 1

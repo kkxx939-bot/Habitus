@@ -279,7 +279,9 @@ def test_change_log_reads_records_whose_free_text_holds_a_unicode_line_separator
 
     store = BehaviorKindStore(tmp_path)
     store.append(
-        VersionRecord(1, datetime(2026, 10, 7, tzinfo=UTC), ChangeReason.NIGHTLY, (AddClass(edit_class()),), note="甲 乙"),
+        VersionRecord(
+            1, datetime(2026, 10, 7, tzinfo=UTC), ChangeReason.NIGHTLY, (AddClass(edit_class()),), note="甲 乙"
+        ),
         expected_version=0,
     )
     (record,) = store.records()

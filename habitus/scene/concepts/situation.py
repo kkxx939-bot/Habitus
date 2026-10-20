@@ -9,7 +9,7 @@
 
 | 族 | 基准 | 例 |
 |---|---|---|
-| 日型 | ``WEEKDAYS`` 名义周几 · ``CALENDAR_NOTE`` 当地日历那句话里含某个词 | 「周末」=(周六,周日) · 「调休日」含"补班" |
+| 日历 | ``CALENDAR`` 外部条件里日历的某个键取某几个值（由外部条件包按天给，机械生成、不由模型写；裁定 59） | 「周三」= 日历.周几∈{周三} · 「工作日」= 日历.日型∈{工作日} |
 | 对象 | ``SUBJECT`` 同在者里有谁 · ``PLACE`` 地点是哪儿 | 「和家人一起」 · 「在公司」 |
 | 派生 | ``STREAK`` 某概念往前连着几个 24 小时都命中 · ``YESTERDAY`` 之前 24 小时内命中过 | 「赶工中」 · 「昨晚晚睡」 |
 
@@ -43,8 +43,7 @@ class SituationError(ValueError):
 class SituationBasis(str, Enum):
     """算这个情境要看什么。每一族的参数不同，构造时按族核对，缺一个就拒。"""
 
-    WEEKDAYS = "weekdays"
-    CALENDAR_NOTE = "calendar_note"
+    CALENDAR = "calendar"
     SUBJECT = "subject"
     PLACE = "place"
     STREAK = "streak"
@@ -56,7 +55,7 @@ class SituationBasis(str, Enum):
 
     @property
     def needs_value(self) -> bool:
-        return self in {SituationBasis.CALENDAR_NOTE, SituationBasis.SUBJECT, SituationBasis.PLACE}
+        return self in {SituationBasis.CALENDAR, SituationBasis.SUBJECT, SituationBasis.PLACE}
 
     @property
     def reads_history(self) -> bool:
@@ -67,11 +66,11 @@ class SituationBasis(str, Enum):
 
 @dataclass(frozen=True)
 class SituationRule:
-    """一条情境说明。字段按族用：``weekdays`` 只给日型，``value`` 给日历/同在/地点，``concept``（+``grade``、
-    ``days``）给派生。"""
+    """一条情境说明。字段按族用：日历是 ``value``（外部条件的键）+ ``values``（成立的那几个取值）；同在、地点是 ``value``；
+    派生是 ``concept``（+``grade``、``days``）。"""
 
     basis: SituationBasis
-    weekdays: tuple[int, ...] = ()
+    values: tuple[str, ...] = ()
     value: str | None = None
     concept: str | None = None
     grade: str | None = None
@@ -79,22 +78,23 @@ class SituationRule:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "basis", SituationBasis(self.basis))
-        self._check_weekdays()
+        self._check_values()
         self._check_value()
         self._check_concept()
         self._check_days()
 
-    def _check_weekdays(self) -> None:
-        days = tuple(self.weekdays)
-        if self.basis is SituationBasis.WEEKDAYS:
-            if not days or any(isinstance(day, bool) or not isinstance(day, int) or not 0 <= day <= 6 for day in days):
-                raise SituationError("a weekday situation names one or more weekdays, Monday=0 … Sunday=6")
-            if len(set(days)) != len(days):
-                raise SituationError("weekdays must be distinct")
-            object.__setattr__(self, "weekdays", tuple(sorted(set(days))))
+    def _check_values(self) -> None:
+        values = tuple(self.values)
+        if self.basis is SituationBasis.CALENDAR:
+            cleaned = tuple(clean_line(item) for item in values)
+            if not cleaned or any(not item or len(item) > MAX_VALUE_CHARS for item in cleaned):
+                raise SituationError("a calendar situation names one or more values of its key")
+            if len(set(cleaned)) != len(cleaned):
+                raise SituationError("calendar values must be distinct")
+            object.__setattr__(self, "values", cleaned)
             return
-        if days:
-            raise SituationError(f"{self.basis.value} takes no weekdays")
+        if values:
+            raise SituationError(f"{self.basis.value} takes no values")
 
     def _check_value(self) -> None:
         if self.basis.needs_value:
@@ -138,8 +138,8 @@ class SituationRule:
         """进指纹与文档的形状：只含这一族真正用到的字段。"""
 
         data: dict[str, object] = {"basis": self.basis.value}
-        if self.basis is SituationBasis.WEEKDAYS:
-            data["weekdays"] = list(self.weekdays)
+        if self.basis is SituationBasis.CALENDAR:
+            data["values"] = list(self.values)
         if self.basis.needs_value:
             data["value"] = self.value
         if self.basis.needs_concept:
@@ -152,11 +152,8 @@ class SituationRule:
     def criterion(self) -> str:
         """给人读的一句话（也进概念文档）。"""
 
-        names = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
-        if self.basis is SituationBasis.WEEKDAYS:
-            return "名义上是" + "/".join(names[day] for day in self.weekdays)
-        if self.basis is SituationBasis.CALENDAR_NOTE:
-            return f"当地日历那句话里含「{self.value}」"
+        if self.basis is SituationBasis.CALENDAR:
+            return f"日历的「{self.value}」是 " + "/".join(self.values)
         if self.basis is SituationBasis.SUBJECT:
             return f"同在的人里有「{self.value}」"
         if self.basis is SituationBasis.PLACE:

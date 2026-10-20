@@ -12,15 +12,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import date
 
+from habitus.conditions import DAY_TYPE_KEY
 from habitus.foundation.integrity import canonical_digest
-from habitus.scene.advice.conditions import ConditionProposer, Occasion
+from habitus.scene.advice.conditions import CONDITION_PROMPT_VERSION, ConditionProposer, Occasion
 from habitus.scene.advice.conditions import question_for as condition_question
-from habitus.scene.advice.model import PriorLevel, Proposal, ProposalBook
+from habitus.scene.advice.model import PriorLevel, Proposal, ProposalBook, tidy_book
 from habitus.scene.advice.prior import PriorAdvisor
 from habitus.scene.advice.prior import question_for as prior_question
 from habitus.scene.advice.store import AdviceStore
+from habitus.scene.concepts.calendar_situations import calendar_key, is_calendar
 from habitus.scene.concepts.model import ConceptSet
-from habitus.scene.relations import LaneTests, RelationKey, comparable
+from habitus.scene.relations import LaneTests, LaneTimeline, RelationKey, comparable
 from habitus.scene.relations.conditions import Condition, parse
 from habitus.scene.relations.spans import Chain
 
@@ -53,6 +55,7 @@ class RelationAdvice:
         concepts, lane = tests.concepts, tests.line.lane
         names = [name for name in concepts.behaviors() if concepts.lane_of(name) == lane]
         levels: dict[tuple[str, str], PriorLevel] = {}
+        current: set[str] = set()
         missing = 0
         for consequent in names:
             antecedents = [name for name in names if comparable(concepts, name, consequent)]
@@ -63,6 +66,7 @@ class RelationAdvice:
             key = canonical_digest(
                 {"lane": lane, "consequent": _pair_part(concepts, consequent), "advisor": self.prior.version}
             )
+            current.add(key)
             cached = dict(self.store.prior(key) or {})
             ids = {antecedent: canonical_digest(_pair_part(concepts, antecedent))[:16] for antecedent in antecedents}
             unasked = [antecedent for antecedent in antecedents if ids[antecedent] not in cached]
@@ -85,6 +89,10 @@ class RelationAdvice:
             levels.update(((antecedent, consequent), level) for antecedent, level in known.items())
         if missing:
             signals.append(f"prior: {lane} 有 {missing} 个后果缺先验（缺的前因权重按 1）")
+        if not self.cache_only:
+            # 清这条 lane 的孤儿先验：后果改名、改判据、换了先验触点的版本或模型，旧键没人再读（26 号清单 2.5.5）
+            for orphan in set(self.store.prior_keys(lane)) - current:
+                self.store.discard_prior(orphan)
         return {
             key: levels[(key.antecedent, key.consequent)].weight
             for key in tests.keys()
@@ -100,24 +108,55 @@ class RelationAdvice:
         book = self.store.book(lane)
         if self.conditions is not None and not self.cache_only:
             book = await self._ask(tests, book, night, signals)
+        if not self.cache_only:
+            tidied = tidy_book(
+                book,
+                alive=lambda antecedent: antecedent in concepts,
+                compiles=_compiles,
+                max_refused_per_antecedent=MAX_REFUSED_PER_ANTECEDENT,
+            )
+            if tidied != book:
+                signals.append(
+                    f"advice: {lane} 提议簿清掉 {len(book.proposals) - len(tidied.proposals)} 条（前因已删、条件读不了、重复的拒因）"
+                )
+                self.store.write_book(tidied)
+                book = tidied
         usable: dict[str, list[tuple[Condition, date]]] = {}
         for item in book.proposals:
             if item.condition is not None and item.proposed_on <= night and item.antecedent in concepts:
-                usable.setdefault(item.antecedent, []).append((parse(item.condition), item.proposed_on))
+                try:
+                    condition = parse(item.condition)
+                except ValueError:
+                    # 旧提议簿里的条件落不成现在的模板（日历字段 v2 起拿掉了）：跳过并报出来，不让整晚抛（2026-10-18 四方评审）
+                    signals.append(f"advice: {lane} 提议簿里的条件「{item.condition}」现在读不了，跳过")
+                    continue
+                usable.setdefault(item.antecedent, []).append((condition, item.proposed_on))
         return {antecedent: tuple(found) for antecedent, found in usable.items()}
 
     async def _ask(self, tests: LaneTests, book: ProposalBook, night: date, signals: list[str]) -> ProposalBook:
         assert self.conditions is not None
         concepts, lane = tests.concepts, tests.line.lane
-        # 只看这条 lane 的概念（与不属于任何 lane 的情境）：另一条 lane 改了概念不该连带这条重问（裁定 21-2；E9）
+        # 只看这条 lane 的概念（与不属于任何 lane 的情境）：另一条 lane 改了概念不该连带这条重问（裁定 21-2；E9）。日历情境不算：
+        # 它们不进问题（系统机械检验），长出一个周几集合不该让两条 lane 全部前因重问一遍；提示词版本算进去：改了提示词要重问
+        # （2026-10-18 四方评审）。
         fingerprint = canonical_digest(
-            sorted(concepts[name].fingerprint for name in concepts if concepts.lane_of(name) in (lane, None))
+            {
+                "version": CONDITION_PROMPT_VERSION,
+                "concepts": sorted(
+                    concepts[name].fingerprint
+                    for name in concepts
+                    if concepts.lane_of(name) in (lane, None) and not is_calendar(concepts, name)
+                ),
+            }
         )
         proposals = list(book.proposals)
         asked = dict(book.asked)
         for antecedent in sorted(name for name in concepts.behaviors() if concepts.lane_of(name) == lane):
             chains = tests.chains(antecedent)
-            if len(chains) < tests.config.thresholds.moderation_min_antecedents or asked.get(antecedent) == fingerprint:
+            if (
+                len(chains) < tests.config.thresholds.condition_ask_min_antecedents
+                or asked.get(antecedent) == fingerprint
+            ):
                 continue
             question = condition_question(
                 concepts,
@@ -140,6 +179,31 @@ class RelationAdvice:
         return updated
 
 
+#: 每个前因保留的已拒提议条数：它们全量进提示词，给模型看"这些说过不行"，只留最近的（保护闸）。
+MAX_REFUSED_PER_ANTECEDENT = 20
+
+
+def _compiles(condition: str) -> bool:
+    try:
+        parse(condition)
+    except ValueError:
+        return False
+    return True
+
+
+def _day_type(line: LaneTimeline, concepts: ConceptSet, day: date) -> str:
+    """那天的日型（日历情境机械给的，裁定 59）；答不出就不写。"""
+
+    held = [
+        concepts[identity].name
+        for identity in sorted(line.calendar)
+        if (key := calendar_key(concepts, identity)) is not None
+        and key[0] == DAY_TYPE_KEY
+        and line.situations.get(identity, {}).get(day)
+    ]
+    return f"，{'、'.join(held)}" if held else ""
+
+
 def occasions(tests: LaneTests, concepts: ConceptSet, chains: tuple[Chain, ...]) -> tuple[Occasion, ...]:
     """按时间均匀挑几次 A；每次给它自己与当天之前的几件事（同 lane）。不给之后发生的任何事。"""
 
@@ -159,7 +223,7 @@ def occasions(tests: LaneTests, concepts: ConceptSet, chains: tuple[Chain, ...])
         ][-BEFORE:]
         found.append(
             Occasion(
-                moment=f"{record.started_at:%Y-%m-%d %H:%M}（周{WEEKDAYS[record.started_at.weekday()]}）",
+                moment=f"{record.started_at:%Y-%m-%d %H:%M}（周{WEEKDAYS[record.started_at.weekday()]}{_day_type(line, concepts, record.day)}）",
                 summary=record.summary,
                 goal=record.goal,
                 place=record.place,

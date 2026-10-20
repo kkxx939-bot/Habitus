@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, tzinfo
 from enum import Enum
 
+from habitus.foresight import ForesightError
 from habitus.memory.workflow import MemoryJobStatus
-from habitus.prediction.errors import PredictionTreeStoreError
 from habitus.runtime.components import RuntimeComponents
+from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.lifecycle import LifecycleWorkerState
-from habitus.runtime.prediction import PredictionRuntimeComponents
 from habitus.runtime.resident import ResidentWorker
 from habitus.runtime.worker import MemoryWorkerState
+
+_SIGNAL_DETAIL_LIMIT = 1_000
 
 
 class RuntimeHealthStatus(str, Enum):
@@ -42,10 +44,13 @@ class RuntimeHealthReport:
 class RuntimeHealthService:
     """聚合现有组件状态，不触发索引重建或业务写入。"""
 
-    def __init__(self, components: RuntimeComponents) -> None:
+    def __init__(self, components: RuntimeComponents, *, capacity_warning_share: float = 0.8) -> None:
         if not isinstance(components, RuntimeComponents):
             raise TypeError("components must be RuntimeComponents")
+        if isinstance(capacity_warning_share, bool) or not 0.0 < float(capacity_warning_share) < 1.0:
+            raise ValueError("capacity_warning_share must lie in (0, 1)")
         self.components = components
+        self.capacity_warning_share = float(capacity_warning_share)
 
     async def report(self, runtime_state: str, *, deep: bool = False) -> RuntimeHealthReport:
         if not isinstance(runtime_state, str) or not runtime_state:
@@ -57,10 +62,11 @@ class RuntimeHealthService:
             self._lifecycle_storage_check(runtime_state),
             self._memory_worker_check(),
             self._lifecycle_check(),
+            self._lifecycle_capacity_check(),
             self._observability_check(),
         ]
         checks.extend(self._behavior_checks(runtime_state))
-        checks.extend(self._prediction_checks(runtime_state))
+        checks.extend(self._nightly_checks(runtime_state))
         checks.extend(self._foresight_checks(runtime_state))
         checks.append(await self._queue_check())
         checks.extend(
@@ -114,20 +120,28 @@ class RuntimeHealthService:
             tuple((f"behavior_reduction_worker_{branch.lane.value}", branch.reduction_worker) for branch in behavior),
         )
 
-    def _prediction_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:
-        """预测夜批的健康面；同样 non-critical。
+    def _nightly_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:
+        """整晚那一趟的健康面；同样 non-critical。
 
-        夜批循环死掉不会让任何请求出错——它只是让树停在昨天的数据上，而这**恰恰是最难
-        自己发现的故障**：读侧照常返回数字，只是那些数字越来越旧。所以循环存活必须上健康面。
+        夜批循环死掉不会让任何请求出错——它只是让语义树和机会表停在昨天，而这**恰恰是最难自己发现的故障**：
+        白天照常建预期，只是依据越来越旧。所以循环存活必须上健康面；接了预测层时再看机会表最晚一晚有多旧（清单 5.3）。
         """
 
-        prediction = self.components.prediction
-        if prediction is None:
-            return [RuntimeHealthCheck("prediction", RuntimeHealthStatus.HEALTHY, "disabled", critical=False)]
-        checks = self._worker_checks(
-            runtime_state, tuple((f"prediction_rebuild_worker_{lane}", branch.worker) for lane, branch in prediction)
-        )
-        checks.extend(self._prediction_freshness_check(lane, branch) for lane, branch in prediction)
+        nightly = self.components.nightly
+        if nightly is None:
+            return [RuntimeHealthCheck("nightly", RuntimeHealthStatus.HEALTHY, "disabled", critical=False)]
+        checks = self._worker_checks(runtime_state, (("nightly_worker", nightly),))
+        calendar = getattr(getattr(nightly.nightly, "scene", None), "calendar", None)
+        problems = tuple(getattr(calendar, "problems", ()))
+        if problems:
+            # 放假数据有年份读不了：那几年日型未知（建预期按名义周末），进程照常——但要让人看见、去改文件
+            checks.append(
+                RuntimeHealthCheck("calendar", RuntimeHealthStatus.DEGRADED, "; ".join(problems)[:500], critical=False)
+            )
+        foresight = self.components.foresight
+        if foresight is not None:
+            zone = getattr(nightly.nightly, "zone", UTC)
+            checks.append(self._opportunity_freshness_check(foresight.opportunities, nightly.interval_seconds, zone))
         return checks
 
     def _foresight_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:
@@ -142,38 +156,38 @@ class RuntimeHealthService:
         return self._worker_checks(runtime_state, (("foresight_worker", foresight.worker),))
 
     @staticmethod
-    def _prediction_freshness_check(lane: str, prediction: PredictionRuntimeComponents) -> RuntimeHealthCheck:
-        """树有多旧。循环活着不等于树在更新——这正是上面那段 docstring 说最难自己发现的故障。
+    def _opportunity_freshness_check(
+        store: OpportunityStore, interval_seconds: float, zone: tzinfo
+    ) -> RuntimeHealthCheck:
+        """机会表有多旧。循环活着不等于整晚在产出——这正是上面那段 docstring 说最难自己发现的故障。
 
-        容忍两个重建周期：一拍没赶上是正常抖动，连着两拍没出新代就说明重建实际没在产出
-        （行为树空、发布被拒、每拍都抛在同一个地方）。还没发布过任何一代不算故障：
-        行为侧刚接入、第一夜还没到的时候就是这个状态。
+        第 N 晚的表在 N 那天写（截止日 N 只用到前一天），所以"多旧"从 N 那天零点（主体所在地）量起；容忍两个周期、且至少
+        一整天加一个周期：一拍没赶上是正常抖动，连着两拍没出新的一晚就说明整晚实际没在产出（序列空、词表迁移卡住、每拍都抛在
+        同一处）。一天最多出一晚新的表，节拍短于半天时只按两个周期量会在每天下午起一直误报（2026-10-18 四方评审）。
+        还没写过任何一晚不算故障：行为侧刚接入、第一夜还没到的时候就是这个状态。
         """
 
+        lane = "session"
         try:
-            published = prediction.store.active()
-        except PredictionTreeStoreError as exc:
+            night = store.latest_night(lane)
+        except ForesightError as exc:
             return RuntimeHealthCheck(
-                f"prediction_tree_{lane}",
+                f"opportunities_{lane}",
                 RuntimeHealthStatus.UNHEALTHY,
                 f"unreadable:{type(exc).__name__}",
                 critical=False,
             )
-        if published is None:
+        if night is None:
             return RuntimeHealthCheck(
-                f"prediction_tree_{lane}", RuntimeHealthStatus.HEALTHY, "never_published", critical=False
+                f"opportunities_{lane}", RuntimeHealthStatus.HEALTHY, "never_written", critical=False
             )
-        age = (datetime.now(UTC) - published.published_at).total_seconds()
-        tolerance = 2.0 * prediction.tree_config.rebuild_interval_seconds
-        if age > tolerance:
+        age = (datetime.now(UTC) - datetime.combine(night, time(0), tzinfo=zone)).total_seconds()
+        if age > max(2.0 * interval_seconds, 86_400.0 + interval_seconds):
             return RuntimeHealthCheck(
-                f"prediction_tree_{lane}",
-                RuntimeHealthStatus.DEGRADED,
-                f"stale:{int(age)}s",
-                critical=False,
+                f"opportunities_{lane}", RuntimeHealthStatus.DEGRADED, f"stale:{int(age)}s", critical=False
             )
         return RuntimeHealthCheck(
-            f"prediction_tree_{lane}", RuntimeHealthStatus.HEALTHY, f"age:{int(age)}s", critical=False
+            f"opportunities_{lane}", RuntimeHealthStatus.HEALTHY, f"night:{night}", critical=False
         )
 
     @staticmethod
@@ -230,7 +244,44 @@ class RuntimeHealthService:
             return RuntimeHealthCheck(
                 "lifecycle_worker", RuntimeHealthStatus.DEGRADED, self._error(worker.last_error), critical=False
             )
+        failed = () if worker.last_cycle is None else worker.last_cycle.failures
+        if failed:
+            detail = "; ".join(f"{item.name}: {item.error_type}" for item in failed)
+            return RuntimeHealthCheck("lifecycle_worker", RuntimeHealthStatus.DEGRADED, detail, critical=False)
+        signals = () if worker.last_cycle is None else worker.last_cycle.signals
+        if signals:
+            # 参与者报的"要人看的情况"（坏掉待修的源、隔离了的交付……）：不影响就绪，但要看得见
+            detail = "; ".join(signals)[:_SIGNAL_DETAIL_LIMIT]
+            return RuntimeHealthCheck("lifecycle_worker", RuntimeHealthStatus.DEGRADED, detail, critical=False)
         return RuntimeHealthCheck("lifecycle_worker", RuntimeHealthStatus.HEALTHY, worker.state.value, critical=False)
+
+    def _lifecycle_capacity_check(self) -> RuntimeHealthCheck:
+        """只读各参与者上一轮落盘的容量快照，不自己扫存储；到告警线报 degraded（不影响就绪）。"""
+
+        store = self.components.workflow.lifecycle_worker.capacity
+        if store is None:
+            return RuntimeHealthCheck(
+                "lifecycle_capacity", RuntimeHealthStatus.HEALTHY, "not configured", critical=False
+            )
+        try:
+            snapshots = store.read_all()
+        except Exception as exc:  # noqa: BLE001 - 快照坏了只是看不见水位，不该让健康检查本身失败
+            return RuntimeHealthCheck(
+                "lifecycle_capacity", RuntimeHealthStatus.DEGRADED, self._error(exc), critical=False
+            )
+        crowded = [
+            f"{snapshot.participant}.{reading.name}: {reading.count}/{reading.limit}"
+            for snapshot in snapshots
+            for reading in snapshot.readings
+            if reading.share is not None and reading.share >= self.capacity_warning_share
+        ]
+        if crowded:
+            return RuntimeHealthCheck(
+                "lifecycle_capacity", RuntimeHealthStatus.DEGRADED, "; ".join(crowded), critical=False
+            )
+        return RuntimeHealthCheck(
+            "lifecycle_capacity", RuntimeHealthStatus.HEALTHY, f"{len(snapshots)} snapshots", critical=False
+        )
 
     def _lifecycle_storage_check(self, runtime_state: str) -> RuntimeHealthCheck:
         recall_store = self.components.memory.search.recall_lifecycle.store

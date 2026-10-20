@@ -127,6 +127,7 @@ export async function runHook(action, adapter) {
         if (!flushed?.ok) await writeOperationLog(config, adapter, input, {
           hook: action, stage: "flush", status: "pending", retryable: true,
         });
+        if (action === "session-end") await core.retireIdleSessions(adapter);
         return;
       }
       await core.enqueueCapture(adapter, input);

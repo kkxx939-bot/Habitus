@@ -18,7 +18,7 @@ from datetime import date, tzinfo
 
 from habitus.behavior.document import BehaviorDocument
 from habitus.behavior.model import BehaviorKind
-from habitus.scene.calendar import DayTypeCalendar
+from habitus.conditions import DayTypeCalendar
 from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.concepts.rhythm import Rhythm
 from habitus.scene.occurrences.baselines import RECENT_WINDOW_DAYS, BaselineSnapshot, baseline_table, local_minute
@@ -62,6 +62,7 @@ class SceneDayContext:
         self.timezone = timezone
         self.subject = subject
         self.note = calendar.describe(day)
+        self.calendar_conditions = dict(calendar.of_day(day))
         self.reads_today = day in history_days(concepts, day)
         self.history: tuple[HitEvent, ...] = hit_events(
             (record for past in history_days(concepts, day) if past < day for record in hits.read_day(past)), concepts
@@ -93,7 +94,7 @@ class SceneDayContext:
             SituationInputs(
                 day=self.day,
                 moment=moment,
-                calendar_note=self.note,
+                calendar=self.calendar_conditions,
                 subjects=tuple(item for item in subjects if item != self.subject) if self.subject else subjects,
                 place=None if place is None else str(place),
                 history=history,

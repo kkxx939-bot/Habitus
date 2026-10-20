@@ -501,9 +501,7 @@ def test_hierarchy_reranker_invalid_output_falls_back_to_vector_scores(scores: o
     [(1, "a"), (2, "ab"), (3, "abc"), (4, "a..."), (10, "abcdefghij")],
 )
 def test_rerank_text_truncation_is_deterministic(maximum: int, expected: str) -> None:
-    current = engine(
-        config=MemorySemanticSearchConfig(max_rerank_document_chars=maximum)
-    )
+    current = engine(config=MemorySemanticSearchConfig(max_rerank_document_chars=maximum))
     assert current._rerank_text("abcdefghij") == expected
 
 

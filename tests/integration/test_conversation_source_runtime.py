@@ -24,6 +24,17 @@ from tests.helpers import closed_turn
 from tests.integration.test_runtime_assembly import runtime_config, runtime_dependencies
 
 
+def only_envelope(runtime):
+    """这些用例只写过一份源：经生命周期账的标记找到它（信封存储不再提供全量列举）。"""
+
+    conversation = runtime.components.conversation
+    (directory,) = conversation.source_ledger.index.address_directories()
+    (marker,) = conversation.source_ledger.index.markers_in(directory)
+    envelope = conversation.sources.read(marker.source_id)
+    assert envelope is not None
+    return envelope
+
+
 def test_runtime_start_recovers_durable_source_with_only_missing_outcomes(tmp_path: Path) -> None:
     async def scenario() -> None:
         providers, vectors = runtime_dependencies()
@@ -92,6 +103,78 @@ def test_runtime_start_recovers_durable_source_with_only_missing_outcomes(tmp_pa
     asyncio.run(scenario())
 
 
+def _durable_source(conversation_id: str) -> ConversationSourceEnvelope:
+    started_on = date(2026, 8, 7)
+    batch = ConversationBatch(conversation_id, closed_turn())
+    request_digest = conversation_source_request_digest(
+        conversation_id=conversation_id,
+        started_on=started_on,
+        protocol="normalized",
+        batch=batch,
+        after_turn=False,
+        omit_tool_call_ids=frozenset(),
+    )
+    return ConversationSourceEnvelope.create(
+        conversation_id=conversation_id,
+        started_on=started_on,
+        protocol="normalized",
+        batch=batch,
+        after_turn=False,
+        omit_tool_call_ids=frozenset(),
+        delivery_id=request_digest,
+        request_digest=request_digest,
+        recorded_at=datetime(2026, 8, 7, 1, 0, tzinfo=UTC),
+    )
+
+
+def test_a_broken_memory_source_degrades_only_its_address_at_startup(tmp_path: Path) -> None:
+    """裁定 60 第 6 条：一份 Memory 源恢复不成不再整体阻断启动；别的地址照常恢复，出事的那一份留给周期恢复按退避再试。"""
+
+    async def scenario() -> None:
+        providers, vectors = runtime_dependencies()
+        runtime = build_runtime(
+            runtime_config(tmp_path),
+            providers=providers,
+            vector_stores=vectors,
+            path_lock=PathLock(ProcessLocalLockStore()),
+        )
+        runtime.initialize()
+        conversation = runtime.components.conversation
+        broken, healthy = _durable_source("startup-broken"), _durable_source("startup-healthy")
+        consumer = conversation.source_delivery.consumers[ConversationSourceConsumer.MEMORY]
+        original = consumer.execute
+
+        async def failing(_self, envelope, lease):
+            if envelope.source_id == broken.source_id:
+                raise ConnectionError("vector store unreachable")
+            return await original(envelope, lease)
+
+        consumer.execute = MethodType(failing, consumer)  # type: ignore[method-assign]
+        conversation.sources.put(broken)
+        conversation.sources.put(healthy)
+
+        # 释放与恢复认同一个隔离区（L10.2：组合根原先没接，坏掉的 Behavior 永远挡住地址）
+        assert conversation.source_releaser.quarantined == conversation.source_recovery.quarantine.contains
+
+        await runtime.start()
+
+        assert runtime.state is RuntimeState.RUNNING
+        delivery = conversation.source_delivery
+        assert (
+            delivery.inspect(healthy, ConversationSourceConsumer.MEMORY).state
+            is ConversationConsumerDeliveryState.COMMITTED
+        )
+        assert (
+            delivery.inspect(broken, ConversationSourceConsumer.MEMORY).state
+            is ConversationConsumerDeliveryState.PENDING
+        )
+        key = f"{broken.source_id}/{ConversationSourceConsumer.MEMORY.value}"
+        assert conversation.source_recovery.retries.entry(key) is not None
+        await runtime.close()
+
+    asyncio.run(scenario())
+
+
 def test_runtime_append_returns_after_memory_without_waiting_for_blocked_behavior(tmp_path: Path) -> None:
     async def scenario() -> None:
         providers, vectors = runtime_dependencies()
@@ -119,11 +202,14 @@ def test_runtime_append_returns_after_memory_without_waiting_for_blocked_behavio
         await entered.wait()
         memory = await asyncio.wait_for(append, timeout=1.0)
         assert memory.append.next_sequence == batch.end_sequence + 1
-        envelope = runtime.components.conversation.sources.list()[0]
-        assert runtime.components.conversation.source_delivery.inspect(
-            envelope,
-            ConversationSourceConsumer.BEHAVIOR_SESSION,
-        ).state is ConversationConsumerDeliveryState.PENDING
+        envelope = only_envelope(runtime)
+        assert (
+            runtime.components.conversation.source_delivery.inspect(
+                envelope,
+                ConversationSourceConsumer.BEHAVIOR_SESSION,
+            ).state
+            is ConversationConsumerDeliveryState.PENDING
+        )
         release.set()
         assert await runtime.components.conversation.source_coordinator.wait_for_idle(1.0)
         await runtime.close()
@@ -157,7 +243,7 @@ def test_runtime_memory_wait_can_remain_blocked_while_behavior_finishes(tmp_path
         append = asyncio.create_task(runtime.append_conversation(address, batch))
         await entered.wait()
         for _attempt in range(100):
-            envelope = runtime.components.conversation.sources.list()[0]
+            envelope = only_envelope(runtime)
             state = runtime.components.conversation.source_delivery.inspect(
                 envelope,
                 ConversationSourceConsumer.BEHAVIOR_SESSION,
@@ -208,17 +294,46 @@ def test_runtime_close_timeout_is_explicit_and_does_not_cancel_behavior_consumer
         batch = ConversationBatch(address.conversation_id, closed_turn())
         await runtime.append_conversation(address, batch)
         await entered.wait()
-        envelope = runtime.components.conversation.sources.list()[0]
+        envelope = only_envelope(runtime)
         with pytest.raises(RuntimeShutdownTimeoutError) as captured:
             await asyncio.wait_for(runtime.close(), timeout=1.0)
         assert runtime.state is RuntimeState.CLOSING
-        assert tuple(
-            (item.source_id, item.consumer) for item in captured.value.pending_deliveries
-        ) == ((envelope.source_id, ConversationSourceConsumer.BEHAVIOR_SESSION),)
+        assert tuple((item.source_id, item.consumer) for item in captured.value.pending_deliveries) == (
+            (envelope.source_id, ConversationSourceConsumer.BEHAVIOR_SESSION),
+        )
         assert runtime.components.conversation.source_coordinator.running_task_count == 1
         release.set()
         assert await runtime.components.conversation.source_coordinator.wait_for_idle(1.0)
         await runtime.close()
         assert runtime.state is RuntimeState.CLOSED
+
+    asyncio.run(scenario())
+
+
+def test_a_corrupt_envelope_does_not_stop_the_runtime_from_starting(tmp_path: Path) -> None:
+    """一份信封读不出来：启动照常，别的地址照常恢复（L10.9；原先 ``Runtime.start`` 整体失败）。"""
+
+    async def scenario() -> None:
+        providers, vectors = runtime_dependencies()
+        runtime = build_runtime(
+            runtime_config(tmp_path),
+            providers=providers,
+            vector_stores=vectors,
+            path_lock=PathLock(ProcessLocalLockStore()),
+        )
+        runtime.initialize()
+        conversation = runtime.components.conversation
+        bad, good = _durable_source("startup-corrupt"), _durable_source("startup-fine")
+        conversation.sources.put(bad)
+        conversation.sources.put(good)
+        path = conversation.sources._path(bad.source_id)
+        path.write_bytes(path.read_bytes()[:-5] + b"xxxxx")
+
+        await runtime.start()
+
+        assert runtime.state is RuntimeState.RUNNING
+        memory = ConversationSourceConsumer.MEMORY
+        assert conversation.source_delivery.inspect(good, memory).state is ConversationConsumerDeliveryState.COMMITTED
+        await runtime.close()
 
     asyncio.run(scenario())

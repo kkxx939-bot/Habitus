@@ -22,6 +22,8 @@ _KINDS_INT_BOUNDS = (
     ("kinds_recurrence_min_count", 1, 1_000),
     ("kinds_recurrence_min_days", 1, 365),
     ("kinds_max_pending", 1, 1_000_000),
+    ("kinds_nightly_max_new", 1, 10_000),
+    ("kinds_recall_per_entry", 0, 50),
     ("kinds_nightly_hour", 0, 23),
     ("kinds_revision_weekday", 0, 6),
     ("kinds_revision_hour", 0, 23),
@@ -37,6 +39,12 @@ _KINDS_INT_BOUNDS = (
     ("kinds_checkpoint_every", 1, 100_000),
     ("kinds_prompt_max_steps", 0, 200),
     ("kinds_sample_max_steps", 0, 200),
+)
+_CAPACITY_FIELDS = (
+    "observation_max_files",
+    "fusion_max_receipt_files",
+    "fusion_max_judgement_files",
+    "tree_max_children_per_directory",
 )
 _KINDS_FLOAT_BOUNDS = (
     ("kinds_transient_retry_delay_seconds", 0.0, 600.0),
@@ -83,6 +91,8 @@ class BehaviorConfig:
     kinds_recurrence_min_count: int | None = None
     kinds_recurrence_min_days: int | None = None
     kinds_max_pending: int | None = None
+    kinds_nightly_max_new: int | None = None
+    kinds_recall_per_entry: int | None = None
     kinds_nightly_hour: int | None = None
     kinds_revision_weekday: int | None = None
     kinds_revision_hour: int | None = None
@@ -99,6 +109,13 @@ class BehaviorConfig:
     kinds_checkpoint_every: int | None = None
     kinds_prompt_max_steps: int | None = None
     kinds_sample_max_steps: int | None = None
+    # 存储的容量闸（26 号清单 8.2：生命周期相关、原来写死在各存储的默认值里；只挪不改值，不写就是领域模块的默认值）。
+    # 字段名 = 前缀 + 那份配置的同名字段：``observation_`` → BehaviorObservationConfig、``fusion_`` → BehaviorFusionConfig、
+    # ``tree_`` → BehaviorTreeConfig。
+    observation_max_files: int | None = None
+    fusion_max_receipt_files: int | None = None
+    fusion_max_judgement_files: int | None = None
+    tree_max_children_per_directory: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.primary_subject, str):
@@ -136,6 +153,12 @@ class BehaviorConfig:
                 isinstance(number, bool) or not isinstance(number, int | float) or not low <= float(number) <= high
             ):
                 raise ValueError(f"behavior.{name} must be between {low:g} and {high:g}")
+        for name in _CAPACITY_FIELDS:
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 10_000_000
+            ):
+                raise ValueError(f"behavior.{name} must be an integer between 1 and 10000000")
         if self.reduction_sweep_lock_ttl_seconds is not None and (
             isinstance(self.reduction_sweep_lock_ttl_seconds, bool)
             or not isinstance(self.reduction_sweep_lock_ttl_seconds, int)
@@ -160,6 +183,15 @@ class BehaviorConfig:
             field.name[len("session_") :]: getattr(self, field.name)
             for field in fields(self)
             if field.name.startswith("session_") and getattr(self, field.name) is not None
+        }
+
+    def overrides_for(self, prefix: str) -> dict[str, Any]:
+        """非空的 ``<prefix>*`` 字段 → 那份领域配置的同名字段（存储的容量闸用，按前缀派生，不双份维护）。"""
+
+        return {
+            field.name[len(prefix) :]: getattr(self, field.name)
+            for field in fields(self)
+            if field.name.startswith(prefix) and getattr(self, field.name) is not None
         }
 
     def kinds_overrides(self) -> dict[str, Any]:

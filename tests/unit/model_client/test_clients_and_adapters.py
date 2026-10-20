@@ -218,13 +218,16 @@ def test_provider_errors_are_normalized_by_status_and_transport(error: Exception
 def test_retry_delay_honors_bounded_retry_after_and_deterministic_jitter() -> None:
     error = ModelRateLimitError("limited", retry_after_seconds=100)
     assert retry_delay(0, base_delay=1, max_delay=10, error=error) == 10
-    assert retry_delay(
-        2,
-        base_delay=1,
-        max_delay=10,
-        error=ModelTransportError("temporary"),
-        uniform=lambda low, high: 1.0,
-    ) == 4
+    assert (
+        retry_delay(
+            2,
+            base_delay=1,
+            max_delay=10,
+            error=ModelTransportError("temporary"),
+            uniform=lambda low, high: 1.0,
+        )
+        == 4
+    )
 
 
 def test_openai_compatible_adapter_sends_messages_tools_schema_and_normalizes_response() -> None:

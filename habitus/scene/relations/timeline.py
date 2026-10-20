@@ -1,6 +1,6 @@
 """一条 lane 的概念时间线：关系检验读的全部事实，从事件序列与概念命中现算，不落盘。
 
-**单位是预测树的槽**（用户 10-07：「设计成我们预测树的事件槽位吧，包括时间的设计」）。一条记录落在
+**单位是 ``temporal`` 的槽**（用户 10-07：「设计成我们预测树的事件槽位吧，包括时间的设计」；预测树删后槽运算收在 ``temporal.slots``，裁定 59）。一条记录落在
 "它自己的本地日期 × 当天第几槽"；为了跨天比较，槽号写成绝对槽号 ``日序号 × 每天槽数 + 当天第几槽``。
 
 每个概念在时间线上有两种记号：
@@ -11,7 +11,7 @@
 
 **被提醒过的记录**（行为树的 ``reminded``，裁定 54）：语义树量的是"他自然有多规律"，被系统提醒之后才做的不算。这条记录照样
 在时间线上（``marks``：当前因、合链、算人在场都照常），当**后果**时按"看不到"——不进 ``outcomes``、记进 ``unknown``，窗口里
-只有它的那一次两边都不计。量后果的地方一律读 ``outcomes``；预测树同一个口径（``prediction.source``）。
+只有它的那一次两边都不计。量后果的地方一律读 ``outcomes``；``temporal`` 同一个口径（被提醒的那一次不算自然发生，``temporal.episodes``）。
 
 **「待定」是发生过的一件事，只是词表还没把它稳定成类**（用户 2026-10-12 裁定）：它算人在场、算那天"一件事做完的时刻"
 （链的对照时刻），对任何概念都是"这件事不是 B"；它不是概念，当不了前因或后果，等词表把它升成类、旧记录迁入新编号后才是。
@@ -29,10 +29,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
+from habitus.conditions import DayTypeCalendar
+from habitus.scene.concepts.calendar_situations import calendar_key
 from habitus.scene.concepts.model import ConceptKind, ConceptSet
 from habitus.scene.occurrences.model import ConceptHits
 from habitus.scene.relations.config import RelationConfig
 from habitus.series import EventSeries, SeriesRecord
+from habitus.temporal.merge import merge_starts
+from habitus.temporal.slots import absolute_slot, slot_index
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,10 @@ class LaneTimeline:
     hits: Mapping[str, ConceptHits] = field(default_factory=dict)
     #: 情境概念 → 日子 → 那天成立没有（那天有记录判过它才有值；没判过的日子不在里面，算不知道）。
     situations: dict[str, dict[date, bool]] = field(default_factory=dict)
+    #: 哪些情境是日历机械填的（``calendar_days`` 读它们）。
+    calendar: set[str] = field(default_factory=set)
+    #: 日子 → 那天的日历条件（键 → 取值；日型答不出的那天没有日型这个键）。日历情境按维度取对照时读它（``relations.calendar``）。
+    calendar_conditions: dict[date, dict[str, str]] = field(default_factory=dict)
 
     #: ``outcomes`` 的缓存：按记号列表的身份与长度认，记号列表换了或追加了就重算（建时间线时是边读边追加的）。
     _outcomes: dict[str, tuple[int, int, tuple[Mark, ...]]] = field(default_factory=dict, repr=False, compare=False)
@@ -96,6 +104,11 @@ class LaneTimeline:
     def concepts(self) -> tuple[str, ...]:
         return tuple(sorted(self.marks))
 
+    def calendar_days(self, identity: str) -> Mapping[date, bool] | None:
+        """日历情境按天机械填的成立与否（只有日历情境才有）；不是日历情境就是 None。"""
+
+        return self.situations.get(identity) if identity in self.calendar else None
+
     def days(self) -> tuple[date, ...]:
         """人在场的日子（升序）。"""
 
@@ -107,13 +120,16 @@ def build_timelines(
     concepts: ConceptSet,
     hits: Mapping[str, ConceptHits],
     config: RelationConfig,
+    *,
+    calendar: DayTypeCalendar | None = None,
 ) -> dict[str, LaneTimeline]:
-    """每条 lane 一条时间线。``hits`` 是 uri → 这条记录的概念命中（映射器的产物，没映射过的不在里面）。"""
+    """每条 lane 一条时间线。``hits`` 是 uri → 这条记录的概念命中（映射器的产物，没映射过的不在里面）。
+    ``calendar`` 给了，日历情境按天机械填上（人在场的每一天；那天日历答不出的不填，不知道 ≠ 否；裁定 59）。"""
 
     per_day = config.slots_per_day
     lines: dict[str, LaneTimeline] = {}
     spans: dict[tuple[str, date], tuple[int, int]] = {}
-    starts: dict[tuple[str, str], list[tuple[int, str]]] = {}
+    starts: dict[tuple[str, str], list[tuple[datetime, str]]] = {}
     for record in series.records:
         line = lines.setdefault(
             record.lane,
@@ -125,16 +141,16 @@ def build_timelines(
         )
         line.records[record.uri] = record
         _situations(line, record, concepts, hits.get(record.uri))
-        slot = _slot(record.started_at, config.slot_minutes)
-        absolute = record.day.toordinal() * per_day + slot
+        slot = slot_index(record.started_at, slot_minutes=config.slot_minutes)
+        absolute = absolute_slot(record.started_at, slot_minutes=config.slot_minutes)
         last = _last_slot(record, config.slot_minutes, per_day)
         first, final = spans.get((record.lane, record.day), (slot, last))
         spans[(record.lane, record.day)] = (min(first, slot), max(final, last))
         ended = record.day.toordinal() * per_day + max(slot, last)
         line.ends.setdefault(record.day, []).append((ended, record.uri))
-        starts.setdefault((record.lane, record.kind_token), []).append((absolute, record.uri))
+        starts.setdefault((record.lane, record.kind_token), []).append((record.started_at, record.uri))
         if not record.classified:
-            # 「待定」：已记进人在场与做完时刻；没有概念，不留记号。预测树那边仍把它当"下一件不知道是什么"记删失，两树各算各的
+            # 「待定」：已记进人在场与做完时刻；没有概念，不留记号
             continue
         found, blind = _concepts_of(record, concepts, hits.get(record.uri))
         mark = Mark(
@@ -152,13 +168,14 @@ def build_timelines(
         for identity in blind:
             line.unknown.setdefault(identity, []).append(absolute)
     covered = _gap_slots(series, config.slot_minutes, per_day)
-    window = config.transition_window_slots
-    followed = {
-        uri
-        for items in starts.values()
-        for (slot, uri), (later, _next) in zip(sorted(items), sorted(items)[1:], strict=False)
-        if later - slot <= window
-    }
+    # 同一类之后合并窗口内又开始了的，不是它那条链的最后一件：每一次（``temporal.merge_starts``，与 ``chains_of`` 同一把尺）里
+    # 除了最后那条都算"后面还接着"（2026-10-18 四方评审：原来这里内联了一份合并规则）
+    window_seconds = config.transition_window_slots * config.slot_minutes * 60
+    followed: set[str] = set()
+    for begun in starts.values():
+        ordered = sorted(begun)
+        for group in merge_starts([moment for moment, _uri in ordered], window_seconds=window_seconds):
+            followed.update(ordered[index][1] for index in group[:-1])
     for line in lines.values():
         line.hits = hits
         for day, finished in line.ends.items():
@@ -176,7 +193,24 @@ def build_timelines(
     for (lane, day), (first, final) in spans.items():
         start = day.toordinal() * per_day
         lines[lane].present[day] = tuple(slot for slot in range(first, final + 1) if start + slot not in blocked)
+    if calendar is not None:
+        _calendar_situations(lines, concepts, calendar)
     return lines
+
+
+def _calendar_situations(lines: Mapping[str, LaneTimeline], concepts: ConceptSet, calendar: DayTypeCalendar) -> None:
+    keyed = {
+        identity: rule for identity in concepts.situations() if (rule := calendar_key(concepts, identity)) is not None
+    }
+    for line in lines.values():
+        for day in line.days():
+            conditions = dict(calendar.of_day(day))
+            line.calendar_conditions[day] = conditions
+            for identity, (name, values) in keyed.items():
+                line.calendar.add(identity)
+                known = conditions.get(name)
+                if known is not None:
+                    line.situations.setdefault(identity, {})[day] = known in values
 
 
 def _situations(line: LaneTimeline, record: SeriesRecord, concepts: ConceptSet, mapped: ConceptHits | None) -> None:
@@ -227,16 +261,12 @@ def _added_after(concepts: ConceptSet, identity: str, mapped: ConceptHits) -> bo
     return item.kind is ConceptKind.REFINEMENT and item.created_at > mapped.mapped_at
 
 
-def _slot(moment: datetime, slot_minutes: int) -> int:
-    return (moment.hour * 60 + moment.minute) // slot_minutes
-
-
 def _last_slot(record: SeriesRecord, slot_minutes: int, per_day: int) -> int:
     """最后所见落在当天第几槽；过了午夜的截在当天最后一槽（人在场按日子算）。"""
 
     if record.last_observed_at.date() != record.day:
         return per_day - 1
-    return _slot(record.last_observed_at, slot_minutes)
+    return slot_index(record.last_observed_at, slot_minutes=slot_minutes)
 
 
 def _gap_slots(series: EventSeries, slot_minutes: int, per_day: int) -> tuple[int, ...]:
@@ -245,8 +275,8 @@ def _gap_slots(series: EventSeries, slot_minutes: int, per_day: int) -> tuple[in
         if gap.ended_at <= gap.started_at:
             continue
         last = gap.ended_at - timedelta(microseconds=1)  # 正好停在槽边界上的，那一槽没被盖住
-        start = gap.started_at.date().toordinal() * per_day + _slot(gap.started_at, slot_minutes)
-        end = last.date().toordinal() * per_day + _slot(last, slot_minutes)
+        start = gap.started_at.date().toordinal() * per_day + slot_index(gap.started_at, slot_minutes=slot_minutes)
+        end = last.date().toordinal() * per_day + slot_index(last, slot_minutes=slot_minutes)
         covered.update(range(start, max(start, end) + 1))
     return tuple(sorted(covered))
 

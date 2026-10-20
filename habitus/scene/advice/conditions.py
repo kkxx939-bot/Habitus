@@ -19,11 +19,16 @@ from habitus.foundation.integrity import canonical_digest
 from habitus.foundation.text import clean_line
 from habitus.model_client import ChatMessage, ChatRequest, StructuredChatClient
 from habitus.scene.advice.model import Proposal
+from habitus.scene.concepts.calendar_situations import is_calendar
 from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.llm import Answered, Failed, ask
 from habitus.scene.relations.conditions import ConditionError, Field, Template, compile_proposal
 
-CONDITION_PROMPT_VERSION = "scene_relation_conditions_prompt_v1"
+# v1 → v2（2026-10-18，裁定 59）：结构字段里的 weekend / calendar 拿掉，周几、工作日、节假日这类改成名单里的日历情境（concept 提）；
+# 每次记录的时刻后面标上那天的日型。**未对着真实模型调过**，合入前待用户用真实模型做新旧对照。
+# v2 → v3（2026-10-18 四方评审）：日历情境不进名单，提示词说清它们系统已经机械检验、不要提——名单里列着 40 多个日历情境时，
+# 模型的 5 个名额多半提"周末""周三"，必然与机械列举撞车、不算新条件，挤掉地点、同在的人、时间线这些它真正能补上的。
+CONDITION_PROMPT_VERSION = "scene_relation_conditions_prompt_v3"
 #: 一次最多收几条提议（多了说明模型在凑数）。
 MAX_PROPOSALS = 5
 
@@ -32,10 +37,10 @@ CONDITION_SYSTEM_PROMPT = """你在为一个人的某一类行为找"它可能�
 给你这类行为的几次记录：每次的时刻、概要、目标、地点、同在的人，以及当天在它之前的几件事。请提出最多 5 个
 "这一类行为在某种情境下，之后的走向可能不一样"的情境条件。条件必须能写成下面三种之一，否则不要提：
 
-1. field（结构字段）：weekend（是否周末）、calendar（当天的日历备注，value 写备注原文，如"调休"）、
-   place（地点，value 写地点原文）、with（同在的某个人，value 写名字原文）；
+1. field（结构字段）：place（地点，value 写地点原文）、with（同在的某个人，value 写名字原文）；
 2. timeline（时间线）：这件事之前不久（同一段连续的工作里）出现过某一类行为，concept 写那一类的名字；
-3. concept（情境概念）：这次记录被标为某个情境，concept 写情境的名字。
+3. concept（情境概念）：这次记录被标为某个情境，concept 写情境的名字（只能从情境名单里选）。周几、几号、工作日 / 周末 / 节假日
+   这些日历上的日子系统已经自动检验过，不在名单里，不要提。
 
 规则：
 - 只根据给你的记录与名单提，不要编名单之外的名字、地点或人；
@@ -105,7 +110,11 @@ def question_for(
     refused: Sequence[str] = (),
 ) -> ConditionQuestion:
     behaviours = tuple(name for name in concepts.behaviors() if name != antecedent and concepts.lane_of(name) == lane)
-    situations = tuple(name for name in concepts.situations() if concepts.lane_of(name) in (lane, None))
+    situations = tuple(
+        name
+        for name in concepts.situations()
+        if concepts.lane_of(name) in (lane, None) and not is_calendar(concepts, name)
+    )
     names = (antecedent, *behaviours, *situations)
     return ConditionQuestion(
         lane=lane,

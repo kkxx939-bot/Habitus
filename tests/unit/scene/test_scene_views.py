@@ -1,6 +1,6 @@
-"""读时投影：行为侧的上下文，按预测树算候选的维度对齐。全部机械、零 LLM。
+"""读时投影：行为侧的上下文（几个机械事实）。全部机械、零 LLM。
 
-这一组守的是四块非平凡逻辑——它们都是与预测树"同口径"的对齐点，漂了不会有任何地方报错：
+这一组守的是四块非平凡逻辑——它们都是与 temporal / 事件序列"同口径"的对齐点，漂了不会有任何地方报错：
 钟面邻域过滤、并行关系的对称闭包、主体剔除、观测空白的反证规则。
 """
 
@@ -24,7 +24,7 @@ def cache_for(ground: Site) -> DayIndexCache:
 
 
 def test_only_the_clock_face_neighbourhood_is_taken(tmp_path) -> None:
-    """槽的口径与预测树同一公式：``minute_of_day // slot_minutes``，环形距离 ≤ 半宽。
+    """槽的口径与 temporal.slots 同一公式：``minute_of_day // slot_minutes``，环形距离 ≤ 半宽。
 
     同一天同一 kind 两条落在不同槽——不按槽过滤的话，远处那条也会混进这一格的背景。
     """
@@ -89,7 +89,7 @@ def test_the_subject_is_dropped_from_who_else_was_there(tmp_path) -> None:
 
 def test_an_unreadable_gap_is_voided_by_a_behaviour_that_started_inside_it(tmp_path) -> None:
     """ "没读懂"的那段里若读出了一条行为的开始，整段作废——我们在看，只是没读懂，读出来了就
-    证伪了。这条直接决定预测树的曝光分母。"""
+    证伪了。这条直接决定观测覆盖（temporal.coverage）的分母。"""
 
     from habitus.behavior import BehaviorDocumentWriter
     from habitus.behavior.model import BehaviorKind

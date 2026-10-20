@@ -206,6 +206,9 @@ class BehaviorDocumentWriter:
             )
             with self._path_lock.fenced(guards):
                 yield
+        # 文档只写一次（add-only）：锁放了之后这几行再也用不上，空闲的删掉（26 号清单 7.1）；别人正持有的不动
+        for key in keys:
+            self._path_lock.lock_store.discard_idle(key)
 
     def _require_read_back(self, expected: BehaviorDocument) -> None:
         actual = self.tree.read(expected.address)

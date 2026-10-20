@@ -94,10 +94,7 @@ def context(
 
 def output(*queries: tuple[str, str, int]) -> dict[str, object]:
     return {
-        "queries": [
-            {"query": query, "intent": intent, "priority": priority}
-            for query, intent, priority in queries
-        ]
+        "queries": [{"query": query, "intent": intent, "priority": priority} for query, intent, priority in queries]
     }
 
 
@@ -200,7 +197,9 @@ def test_direct_plan_rejects_query_over_public_bound() -> None:
     provider = RecordingPlannerProvider([])
     planner = MemorySearchQueryPlanner(
         structured(provider),
-        config=MemorySearchServiceConfig(max_query_chars=10, max_planned_query_chars=10, summary_fallback_max_query_chars=10),
+        config=MemorySearchServiceConfig(
+            max_query_chars=10, max_planned_query_chars=10, summary_fallback_max_query_chars=10
+        ),
     )
     with pytest.raises(ValueError, match="query exceeds"):
         planner.direct("x" * 11)

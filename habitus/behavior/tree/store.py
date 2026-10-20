@@ -246,7 +246,7 @@ class BehaviorTree:
 
         逐篇 ``read`` 每次都沿路径逐级做身份校验，其中日目录那一级会重新枚举整个目录——
         一天 2,074 篇就是 2,074 × 2,074 次条目扫描（实测 13.6 ms/篇、一天 28 秒），读一天的
-        成本随篇数平方增长。预测树夜批与语义关联都是按天整块读，走这里。
+        成本随篇数平方增长。事件序列与语义关联都是按天整块读，走这里。
         """
 
         resolved_kind = BehaviorKind(kind)
@@ -368,7 +368,11 @@ class BehaviorTree:
         result: list[BehaviorAddress] = []
         kinds = (selected_kind,) if selected_kind is not None else tuple(BehaviorKind)
         for resolved_kind in kinds:
-            for address in self._iter_kind(resolved_kind):
+            if after is not None and tuple(BehaviorKind).index(resolved_kind) < tuple(BehaviorKind).index(after.kind):
+                continue
+            # 翻页从游标那一天续（26 号清单 6.8）：排序键先按日期，游标之前的年、月、日按目录名直接跳过，不再每页从头重走
+            since = after.occurred_on if after is not None and resolved_kind is after.kind else None
+            for address in self._iter_kind(resolved_kind, since=since):
                 if after_key is not None and self._address_order_key(address) <= after_key:
                     continue
                 result.append(address)
@@ -393,34 +397,65 @@ class BehaviorTree:
             relative.with_name(f"{folded_leaf}.md").as_posix(),
         )
 
-    def _iter_kind(self, kind: BehaviorKind) -> Iterator[BehaviorAddress]:
+    def days(self, kind: BehaviorKind) -> tuple[date, ...]:
+        """这一种文档有哪些日子（只列年 / 月 / 日目录，不列叶子）：按天缓存的读侧据此找新增的日子（26 号清单 6.7）。"""
+
+        if not self.directory_exists(BehaviorDirectory.root()):
+            return ()
+        return tuple(day for day, _path in self._day_paths(BehaviorKind(kind)))
+
+    def days_in(self, kind: BehaviorKind, year: int, month: int | None = None) -> tuple[date, ...]:
+        """这一年（给了月份就是这个月）里这一种文档有哪些日子：只列那一年 / 那个月的目录（语义刷新的月、年概览用，6.8）。"""
+
+        if not self.directory_exists(BehaviorDirectory.root()):
+            return ()
+        return tuple(day for day, _path in self._day_paths(BehaviorKind(kind), year=year, month=month))
+
+    def _iter_kind(self, kind: BehaviorKind, *, since: date | None = None) -> Iterator[BehaviorAddress]:
+        for occurred_on, day_path in self._day_paths(kind, since=since):
+            for name in self._markdown_names(day_path):
+                try:
+                    yield BehaviorAddress.from_identity(kind, occurred_on, name)
+                except (TypeError, ValueError) as exc:
+                    raise BehaviorTreeIntegrityError("behavior leaf contains an invalid timestamp identity") from exc
+
+    def _day_paths(
+        self,
+        kind: BehaviorKind,
+        *,
+        year: int | None = None,
+        month: int | None = None,
+        since: date | None = None,
+    ) -> Iterator[tuple[date, Path]]:
+        """日目录，按日期升序；``year`` / ``month`` 只走那一年 / 那个月，``since`` 跳过它之前的年、月、日（按目录名，不进去列）。"""
+
         root = self.root.joinpath(*kind_directory_prefix(kind))
         for year_path in self._directories(root):
             if len(year_path.name) != 4 or not is_ascii_digits(year_path.name):
                 raise BehaviorTreeIntegrityError("behavior year directory must use YYYY")
+            if (year is not None and int(year_path.name) != year) or (
+                since is not None and int(year_path.name) < since.year
+            ):
+                continue
             for month_path in self._directories(year_path):
                 if len(month_path.name) != 2 or not is_ascii_digits(month_path.name):
                     raise BehaviorTreeIntegrityError("behavior month directory must use MM")
+                if month is not None and int(month_path.name) != month:
+                    continue
+                if since is not None and (int(year_path.name), int(month_path.name)) < (since.year, since.month):
+                    continue
                 for day_path in self._directories(month_path):
                     if len(day_path.name) != 2 or not is_ascii_digits(day_path.name):
                         raise BehaviorTreeIntegrityError("behavior day directory must use DD")
                     try:
-                        occurred_on = date(
-                            int(year_path.name),
-                            int(month_path.name),
-                            int(day_path.name),
-                        )
+                        occurred_on = date(int(year_path.name), int(month_path.name), int(day_path.name))
                     except ValueError as exc:
                         raise BehaviorTreeIntegrityError(
                             "behavior directory contains an invalid calendar date"
                         ) from exc
-                    for name in self._markdown_names(day_path):
-                        try:
-                            yield BehaviorAddress.from_identity(kind, occurred_on, name)
-                        except (TypeError, ValueError) as exc:
-                            raise BehaviorTreeIntegrityError(
-                                "behavior leaf contains an invalid timestamp identity"
-                            ) from exc
+                    if since is not None and occurred_on < since:
+                        continue
+                    yield occurred_on, day_path
 
     def _existing_document_path(self, address: BehaviorAddress) -> Path:
         return self._existing_relative_path(self._relative_path(address), leaf_is_file=True)

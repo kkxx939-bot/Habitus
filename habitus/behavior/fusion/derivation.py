@@ -17,7 +17,7 @@
 ## 行为时间保留本地偏移
 
 ``started_at`` / ``last_observed_at`` 取所覆盖观测的 ``local_occurred_at``，**带本地偏移**。
-不能折 UTC：行为的时间事实是它**实际发生的本地时刻**——树按本地日期分目录、时间预测树按本地
+不能折 UTC：行为的时间事实是它**实际发生的本地时刻**——树按本地日期分目录、``temporal`` 按本地
 钟面计数，东八区凌晨的行为折成 UTC 会掉到前一天、错一个钟面槽位。``foundation.integrity.canonicalize`` 会折 UTC，所以这些字段的序列化必须单独
 处理（见 ``store.py``）。
 

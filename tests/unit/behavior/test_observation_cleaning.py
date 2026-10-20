@@ -307,6 +307,24 @@ def test_store_reuses_the_existing_record_when_a_delivery_is_replayed(tmp_path) 
     assert store.list() == (first,)
 
 
+def test_store_decodes_each_delivery_once_and_forgets_it_when_released(tmp_path) -> None:
+    """26 号清单 6.2：交付只创建、不改写，解码一次就缓存；列目录照旧每次都列；释放（或别的实例删了它）就淘汰。"""
+
+    store = BehaviorObservationStore(tmp_path, config=CONFIG)
+    first = store.put(envelope(adapt()))
+    path = store._path(first.source_id)
+    path.chmod(0o000)  # 之后的读不碰文件内容
+    try:
+        assert store.list() == (first,) and store.read(first.source_id) == first
+    finally:
+        path.chmod(0o644)
+    other = BehaviorObservationStore(tmp_path, config=CONFIG)
+    assert other.discard(first.source_id)
+    assert store.read(first.source_id) is None and store.list() == ()
+    second = store.put(envelope(adapt(), delivery_seed="delivery-2"))
+    assert store.discard(second.source_id) and second.source_id not in store._decoded
+
+
 def test_store_rejects_a_reused_delivery_id_carrying_other_content(tmp_path) -> None:
     store = BehaviorObservationStore(tmp_path, config=CONFIG)
     original = envelope(adapt())
@@ -369,5 +387,3 @@ def test_store_round_trip_and_tampering_detection(tmp_path) -> None:
     inner["batch"]["observations"][0]["semantics"] = "有人离开玄关"
     with pytest.raises(BehaviorObservationError):
         BehaviorObservationEnvelope.from_dict(inner, config=CONFIG)
-
-

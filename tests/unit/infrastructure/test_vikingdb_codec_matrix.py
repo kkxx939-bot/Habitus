@@ -470,7 +470,9 @@ def test_scan_order_batch_rejects_non_record_and_simulated_hash_collision(monkey
         ((1, 2, 3), 10, ((1, 2, 3),)),
     ],
 )
-def test_batching_preserves_order_and_tail(values: tuple[int, ...], size: int, expected: tuple[tuple[int, ...], ...]) -> None:
+def test_batching_preserves_order_and_tail(
+    values: tuple[int, ...], size: int, expected: tuple[tuple[int, ...], ...]
+) -> None:
     assert protocol._batches(values, size) == expected
 
 

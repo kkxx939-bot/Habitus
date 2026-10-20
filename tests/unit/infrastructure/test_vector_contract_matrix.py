@@ -775,9 +775,21 @@ def test_vikingdb_from_mapping_rejects_unknown_fields() -> None:
 @pytest.mark.parametrize(
     ("config", "route", "expected"),
     [
-        (VikingDBVectorStoreConfig(region="cn-beijing"), VectorStoreRouteConfig(), "https://api-vikingdb.vikingdb.cn-beijing.volces.com"),
-        (VikingDBVectorStoreConfig(region="cn-shanghai"), VectorStoreRouteConfig(), "https://api-vikingdb.vikingdb.cn-shanghai.volces.com"),
-        (VikingDBVectorStoreConfig(), VectorStoreRouteConfig(base_url="https://custom.example.com"), "https://custom.example.com"),
+        (
+            VikingDBVectorStoreConfig(region="cn-beijing"),
+            VectorStoreRouteConfig(),
+            "https://api-vikingdb.vikingdb.cn-beijing.volces.com",
+        ),
+        (
+            VikingDBVectorStoreConfig(region="cn-shanghai"),
+            VectorStoreRouteConfig(),
+            "https://api-vikingdb.vikingdb.cn-shanghai.volces.com",
+        ),
+        (
+            VikingDBVectorStoreConfig(),
+            VectorStoreRouteConfig(base_url="https://custom.example.com"),
+            "https://custom.example.com",
+        ),
         (
             VikingDBVectorStoreConfig(auth_mode="private_headers", region="", credential_headers={"X": "{token}"}),
             VectorStoreRouteConfig(base_url="http://localhost:8080"),
@@ -785,7 +797,9 @@ def test_vikingdb_from_mapping_rejects_unknown_fields() -> None:
         ),
     ],
 )
-def test_vikingdb_data_url_resolution(config: VikingDBVectorStoreConfig, route: VectorStoreRouteConfig, expected: str) -> None:
+def test_vikingdb_data_url_resolution(
+    config: VikingDBVectorStoreConfig, route: VectorStoreRouteConfig, expected: str
+) -> None:
     assert config.data_url(route) == expected
 
 
@@ -804,7 +818,10 @@ def test_vikingdb_console_url_requires_ak_sk(auth_mode: str) -> None:
 
 
 def test_vikingdb_console_url_uses_explicit_or_region_endpoint() -> None:
-    assert VikingDBVectorStoreConfig(auth_mode="ak_sk").resolved_console_url() == "https://vikingdb.cn-beijing.volcengineapi.com"
+    assert (
+        VikingDBVectorStoreConfig(auth_mode="ak_sk").resolved_console_url()
+        == "https://vikingdb.cn-beijing.volcengineapi.com"
+    )
     explicit = VikingDBVectorStoreConfig(auth_mode="ak_sk", console_url="https://console.example.com")
     assert explicit.resolved_console_url() == "https://console.example.com"
 
@@ -851,12 +868,16 @@ def test_credential_template_renders_only_declared_placeholders() -> None:
         ("999", 10, 10.0),
     ],
 )
-def test_retry_after_is_finite_non_negative_and_bounded(value: str | None, maximum: float, expected: float | None) -> None:
+def test_retry_after_is_finite_non_negative_and_bounded(
+    value: str | None, maximum: float, expected: float | None
+) -> None:
     assert bounded_retry_after(value, maximum) == expected
 
 
 def test_vikingdb_requirements_validate_record_search_and_response_capacities() -> None:
-    config = VikingDBVectorStoreConfig(max_records=100, max_search_hits=20, fetch_batch_size=1, search_page_size=1, scan_page_size=1)
+    config = VikingDBVectorStoreConfig(
+        max_records=100, max_search_hits=20, fetch_batch_size=1, search_page_size=1, scan_page_size=1
+    )
     route = VectorStoreRouteConfig(max_response_bytes=20_000)
     config.validate_requirements(VectorStoreRequirements(2, 100, 20, 100), route)
     with pytest.raises(ValueError, match="max_records"):

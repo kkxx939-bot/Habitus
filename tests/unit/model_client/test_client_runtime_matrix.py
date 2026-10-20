@@ -189,9 +189,7 @@ class ScriptedProvider:
 
     def prepare(self, request: ChatRequest, *, stream: bool) -> PreparedChatRequest:
         self.prepare_calls += 1
-        visible: dict[str, object] = {
-            "messages": [asdict(message) for message in request.messages]
-        }
+        visible: dict[str, object] = {"messages": [asdict(message) for message in request.messages]}
         if request.tools:
             visible["tools"] = [asdict(tool) for tool in request.tools]
         if request.response_format is not None:
@@ -442,9 +440,7 @@ def test_sync_stream_never_retries_after_emitting_event() -> None:
 
 
 def test_async_stream_retries_before_first_event() -> None:
-    provider = ScriptedProvider(
-        async_streams=[TimeoutError("connect"), stream_events()]
-    )
+    provider = ScriptedProvider(async_streams=[TimeoutError("connect"), stream_events()])
     delays: list[float] = []
 
     async def record(delay: float) -> None:

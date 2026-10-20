@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir } from "node:fs/promises";
+import { mkdir, readFile, readdir, rmdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createJsonDurably, replaceJsonDurably, unlinkDurably } from "./atomic-file.mjs";
 import { sessionKey } from "./state-store.mjs";
@@ -92,9 +92,15 @@ export async function listPendingSessions(root, host) {
   catch (error) { if (error?.code === "ENOENT") return []; throw error; }
   const identities = new Set();
   for (const entry of sessions.filter((value) => value.isDirectory())) {
-    const files = (await readdir(join(hostRoot, entry.name))).filter((name) => name.endsWith(".json")).sort();
+    // 不加锁读：ack 删完最后一个文件时会在会话锁里把目录删掉（26 号清单 7.3），列的这一刻目录或文件可能已经没了
+    let files;
+    try { files = (await readdir(join(hostRoot, entry.name))).filter((name) => name.endsWith(".json")).sort(); }
+    catch (error) { if (error?.code === "ENOENT") continue; throw error; }
     if (files.length === 0) continue;
-    const item = JSON.parse(await readFile(join(hostRoot, entry.name, files[0]), "utf8"));
+    let text;
+    try { text = await readFile(join(hostRoot, entry.name, files[0]), "utf8"); }
+    catch (error) { if (error?.code === "ENOENT") continue; throw error; }
+    const item = JSON.parse(text);
     if (item?.schemaVersion !== ITEM_SCHEMA || typeof item.nativeSessionId !== "string") {
       throw new Error("invalid plugin outbox session");
     }
@@ -152,6 +158,9 @@ export async function blockOutboxItem(root, item, reason, claimToken = null) {
 export async function acknowledgeOutboxItem(root, item, claimToken) {
   if (item.status !== "inflight" || item.claimToken !== claimToken) throw new Error("outbox acknowledgement lost its claim");
   await unlinkDurably(itemPath(root, item));
+  // 删完最后一个文件就把这个会话的空目录删掉（26 号清单 7.3）。调用方持着会话锁，入队也在同一把锁里，不会删到一半有人往里写
+  try { await rmdir(directory(root, item.host, item.nativeSessionId)); }
+  catch (error) { if (!["ENOTEMPTY", "EEXIST", "ENOENT"].includes(error?.code)) throw error; }
 }
 
 export function claimIsActive(item, now = Date.now()) {

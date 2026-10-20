@@ -10,8 +10,6 @@ from habitus.foresight import ForesightError
 from habitus.foresight.ledger import (
     AccountFact,
     AccountLevel,
-    AccountSetting,
-    AccountSeverity,
     Antecedent,
     Delivery,
     Expectation,
@@ -19,28 +17,30 @@ from habitus.foresight.ledger import (
     Response,
     Ruling,
     Settlement,
+    UnitFeedback,
+    UnitSetting,
     account_key,
     anchor_uri,
     decode_delivery,
     decode_expectation,
     decode_fact,
+    decode_feedback,
     decode_level,
     decode_omission,
     decode_response,
     decode_ruling,
     decode_setting,
     decode_settlement,
-    decode_severity,
     encode_delivery,
     encode_expectation,
     encode_fact,
+    encode_feedback,
     encode_level,
     encode_omission,
     encode_response,
     encode_ruling,
     encode_setting,
     encode_settlement,
-    encode_severity,
     expectation_identity,
     parse_account,
 )
@@ -93,8 +93,9 @@ def test_every_record_round_trips_through_its_codec() -> None:
     assert decode_delivery(encode_delivery(delivery)) == delivery
     shadow = Delivery("abc", FORMED, 0, False, "影子", 0.0)
     assert decode_delivery(encode_delivery(shadow)) == shadow
-    response = Response("abc", FORMED + timedelta(minutes=1), "这次不用", "住朋友家")
-    assert decode_response(encode_response(response)) == response
+    response = Response("abc", FORMED + timedelta(minutes=1), "负", "conv-1#3-9")
+    assert decode_response(encode_response(response)) == response and response.closes
+    assert not Response("abc", FORMED, "中", "conv-1#3-9").closes
     settlement = Settlement("abc", "s-k0002", DAY, FORMED + timedelta(days=1), "晚了但做了", "behavior://c.md", 12)
     assert decode_settlement(encode_settlement(settlement)) == settlement
     ruling = Ruling("abc", FORMED + timedelta(days=2), "后补", "behavior://d.md", 400)
@@ -102,12 +103,14 @@ def test_every_record_round_trips_through_its_codec() -> None:
     omission = Omission("behavior://e.md", "s-k0003", DAY, FORMED + timedelta(days=1), False)
     assert decode_omission(encode_omission(omission)) == omission
     account = item.account
-    fact = AccountFact(account, FORMED, "预测", True, 0.4, "晚了但做了", "abc", offset_minutes=12)
+    fact = AccountFact(account, FORMED, True, 0.4, "晚了但做了", "abc", offset_minutes=12)
     assert decode_fact(encode_fact(fact)) == fact
-    severity = AccountSeverity(account, FORMED, 4.0, "上次漏了要补办", FORMED + timedelta(days=60))
-    assert decode_severity(encode_severity(severity)) == severity
-    setting = AccountSetting(account, FORMED, "以后别提了")
+    setting = UnitSetting("s-k0002", FORMED, "以后别提了")
     assert decode_setting(encode_setting(setting)) == setting
+    feedback = UnitFeedback("s-k0002", FORMED, False, "abc", "负")
+    assert decode_feedback(encode_feedback(feedback)) == feedback
+    quiet = UnitFeedback("s-k0002", FORMED, True, "abc")
+    assert decode_feedback(encode_feedback(quiet)) == quiet
     level = AccountLevel(account, FORMED, 1)
     assert decode_level(encode_level(level)) == level
 
@@ -148,28 +151,26 @@ def test_records_refuse_shapes_that_cannot_be_settled() -> None:
         Settlement("abc", "s-k0002", DAY, FORMED, "准时", "behavior://c.md", 3)
     with pytest.raises(ForesightError, match="后补"):
         Ruling("abc", FORMED, "后补")
-    with pytest.raises(ForesightError, match="后补"):
-        Ruling("abc", FORMED, "用户说忘了", "behavior://d.md", 5)
+    with pytest.raises(ForesightError, match="unknown ruling"):
+        Ruling("abc", FORMED, "用户说忘了", "behavior://d.md", 5)  # 回话不改判：他说的话作为行为进树（裁定 61）
     with pytest.raises(ForesightError, match="unknown settlement outcome"):
         Settlement("abc", "s-k0002", DAY, FORMED, "多余")  # 每个机会都建，已做的照常结（裁定 49）
-    with pytest.raises(ForesightError, match="unknown response"):
-        Response("abc", FORMED, "接受")  # 人能说的只剩三句（裁定 50）
+    with pytest.raises(ForesightError, match="unknown response polarity"):
+        Response("abc", FORMED, "接受", "conv-1#1-2")  # 模型只判正 / 中 / 负（裁定 61）
     account = expectation().account
     with pytest.raises(ForesightError, match="strength"):
-        AccountFact(account, FORMED, "预测", True, 1.5, "准时", "abc")
-    with pytest.raises(ForesightError, match="unknown fact axis"):
-        AccountFact(account, FORMED, "代劳", True, 1.0, "准时", "abc")
+        AccountFact(account, FORMED, True, 1.5, "准时", "abc")
+    with pytest.raises(ForesightError, match="unknown fact kind"):
+        AccountFact(account, FORMED, False, 1.0, "这次不用", "abc")  # 回话不是账上的事实
     with pytest.raises(ForesightError, match="malformed account key"):
-        AccountFact("s-k0002", FORMED, "预测", True, 1.0, "准时", "abc")
-    with pytest.raises(ForesightError, match="expire after"):
-        AccountSeverity(account, FORMED, 4.0, "", FORMED)
-    with pytest.raises(ForesightError, match="cost_ratio"):
-        AccountSeverity(account, FORMED, 40.0, "", FORMED + timedelta(days=1))  # 代价比超出保护闸
+        AccountFact("s-k0002", FORMED, True, 1.0, "准时", "abc")
     with pytest.raises(ForesightError, match="unknown setting"):
-        AccountSetting(account, FORMED, "代劳")
+        UnitSetting("s-k0002", FORMED, "代劳")
+    with pytest.raises(ForesightError, match="unknown feedback polarity"):
+        UnitFeedback("s-k0002", FORMED, True, "abc", "也许")
     with pytest.raises(ForesightError, match="unknown account level"):
         AccountLevel(account, FORMED, 3)
-    assert parse_account(account_key("s-k0002", "钟面", "weekday=1")) == ("s-k0002", "钟面", "weekday=1")
+    assert parse_account(account_key("s-k0002", "日子", "weekday=1")) == ("s-k0002", "日子", "weekday=1")
 
 
 def test_decoding_refuses_other_schemas_and_other_records() -> None:

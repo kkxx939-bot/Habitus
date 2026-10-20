@@ -82,7 +82,7 @@ def wired(tmp_path: Path) -> tuple[PhysicalLane, Stores]:
         primary_subject=SUBJECT,
         clock=lambda: stores.now,
     )
-    return PhysicalLane(recorder), stores
+    return PhysicalLane(recorder, max_backfill_days=7), stores
 
 
 def readable(stores: Stores) -> list[dict[str, Any]]:
@@ -411,14 +411,19 @@ def test_unobserved_time_reported_twice_is_recorded_as_its_union(tmp_path: Path)
 
 
 def test_resends_and_revisions_are_still_recognised_after_the_evidence_is_released(tmp_path: Path) -> None:
-    """凭据在落树之后释放、覆盖记录过了窗口会清；晚到几天的重发与改判仍要认得出来。"""
+    """凭据在落树之后释放、覆盖记录也会清；补发跨度之内晚到几天的重发与改判仍要靠小账认得出来；跨度之外的整份拒收
+    （小账只记得这个跨度，26 号清单 6.4）。"""
+
+    import shutil
+
+    from habitus.behavior.fusion.lanes.physical.model import PhysicalDeliveryError
 
     lane, stores = wired(tmp_path)
     lane.consume(parse_delivery(delivery()))
     for envelope in stores.observations.list():
         stores.observations.discard(envelope.source_id)
-    stores.now += timedelta(days=30)
-    stores.coverage.expire(stores.now)
+    stores.now += timedelta(days=6)
+    shutil.rmtree(tmp_path / "fusion" / "coverage")  # 覆盖记录已清：只剩小账
 
     resent = lane.consume(parse_delivery(delivery(delivery_id="delivery-late")))
     revised = lane.consume(parse_delivery(edited(("segments", 0, "behavior"), "洗脸")))
@@ -426,6 +431,23 @@ def test_resends_and_revisions_are_still_recognised_after_the_evidence_is_releas
     assert {item.disposition for item in resent} == {UnitDisposition.ALREADY_RECORDED}
     assert revised[0].disposition is UnitDisposition.REVISION_REJECTED
     assert sorted(item["behavior"] for item in readable(stores)) == ["洗手", "跑步"]
+    stores.now += timedelta(days=24)
+    with pytest.raises(PhysicalDeliveryError, match="backfill"):
+        lane.consume(parse_delivery(delivery(delivery_id="delivery-far-too-late")))
+
+
+def test_the_ledger_forgets_whole_utc_days_past_the_backfill_span(tmp_path: Path) -> None:
+    """26 号清单 6.4：编号与时段两份都按 UTC 日分目录，过了补发跨度再多一个日就整日删。"""
+
+    lane, stores = wired(tmp_path)
+    lane.consume(parse_delivery(delivery()))
+    ledger = lane.recorder.ledger
+    segment_days = [path.name for path in (tmp_path / "fusion" / "physical" / "segments").iterdir() if path.is_dir()]
+    assert segment_days == [DAY]
+    assert ledger.expire(stores.now + timedelta(days=8), backfill_days=7) == 0  # 跨度 + 一个日之内：都留着
+    removed = ledger.expire(stores.now + timedelta(days=9), backfill_days=7)
+    assert removed >= 2  # 编号那一日、时段那一日
+    assert not any((tmp_path / "fusion" / "physical" / "segments").iterdir())
 
 
 def test_a_delivery_that_arrives_days_late_lands_on_the_day_it_happened(tmp_path: Path) -> None:

@@ -4,36 +4,35 @@
 **单元**（裁定 56 第 12 条，``runtime.foresight_units``）：同一个行为这一刻的全部输入——到了时窗的那几条预期，加上说中的范围
 和它们连成一片、还没到时窗的那几条——拢成一个单元；单元读数 = 这一组在场时历史上下一步来了多少，按依据那本账的线过线。
 依据那一条照下面的流程走（时窗开 / 时窗末、模型、名额）；其余几条记「单元已选」并引依据——它们照旧各自结算，各前因的权重
-（账）仍各自随结算调。
+（账）仍各自随结算调。同一刻后来才形成的同一类预期（说中的范围和已决定过的依据相连）也并进它，不另起一个单元。历史是夜里按当晚
+语义树重标过的那一份（``runtime.foresight_history``），白天不扫账本。
 
-档不存成状态：每次从这本账的事实折出来（``foresight.ladder.climb``），只在变的时候记一条"级的变化"给滞回与可见面用。
-一拍只读到了时窗那几本账的 ``accounts/<账>/`` 目录，不扫整本账（裁定 48：账加按账索引）。
+档不存成状态：每次算出来——边的级（``foresight.ladder.climb``，从单元历史里这条边的那几刻读）与单元的档
+（``foresight.units.unit_level``：单元读数、单元的提醒反馈、单元的设置）分开，各自只在变的时候记一条（账的级、``UnitLevel``）
+给滞回与可见面用。白天不扫账本：边从夜里重标过的单元历史读，提醒反馈与设置从 ``units/<行为>/`` 读（裁定 61）。
 
 一条预期到了时窗决定一次（时窗与这一拍的区间有交集就算到了：一拍一槽，时窗比一槽短的也落得上），账上已有决定的不再决定；
-只有「等时窗末」不是终局——轻的事到时窗末还没做再说（「该来了还没来」是提醒的说话时机；「重」的时窗一开就说）。到时窗末那一拍
-重新折一遍这本账的档（窗里回了「这次不用」或设了「以后别提了」就不说了），这时才问模型、才写那句话：话里的"今天""这会儿"
-说的是开口那一刻。
+只有「等时窗末」不是终局——到时窗末还没做再说（「该来了还没来」是提醒的说话时机；这一版不分急缓，裁定 58 第 1 条）。到时窗末那一拍
+按依据与它当时一并决定的那几条重算一次单元（窗里设了「以后别提了」就不说了），这时才问模型、才写那句话：
+话里的"今天""这会儿"说的是开口那一刻。
 到了时窗时这件事已经做了记「已发生」；同一类今天已经说过一句的记「同类已说」；没有送达渠道的记「不可达」（裁定 47：接上渠道
 之前提醒档都是它，结算按没说过处理）。每日上限按决定的日子数。
 
-模型只在有渠道时问（一级都送不到，问了也说不出口）：
-- **重轻**按账判一次（裁定 48）：这本账已有过至少一次结算、还没判过或已到期，就在它到时窗那一拍判；判了落账、到期
-  （``severity_review_days``）重判；没判过、模型不可用按轻。
-- **像不像、先说哪个、一句话**：只问这一拍真要开口的——提醒档、还没做、同一类今天还没说过、名额没满；重的在时窗开时问，
-  轻的在时窗末问。一拍一个小包。两遍都说不像的记「模型判不像」；像的按模型的先后占名额、用模型的话；模型不可用按算法顺序、
-  模板措辞。
+模型只在有渠道时问（一级都送不到，问了也说不出口）：**像不像、先说哪个、一句话**——只问这一拍真要开口的（提醒档、时窗末还没做、
+同一类今天还没说过、名额没满）。一拍一个小包。两遍都说不像的记「模型判不像」；像的按模型的先后占名额、用模型的话；模型不可用
+按算法顺序、模板措辞。
 送达渠道在本层之外：这里产出的是"递送决定 + 档 + 话"。
 """
 
 from __future__ import annotations
 
-import random
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 
-from habitus.foresight import Evidence, Seen, Standing, Tolerance, climb, current_facts, decide
-from habitus.foresight.causes import AGAIN, CITE, cause_holds
+from habitus.foresight import Evidence, Seen, Standing, Tolerance, climb, decide
+from habitus.foresight.absence import returned_after_absence
+from habitus.foresight.feedback import feedback_reading
 from habitus.foresight.judge import (
     Judge,
     Judgement,
@@ -44,25 +43,27 @@ from habitus.foresight.judge import (
     plain_text,
     sources_of,
 )
-from habitus.foresight.ladder import PREDICTION
 from habitus.foresight.ledger import (
-    AccountFact,
+    RETURNED,
     AccountLevel,
-    AccountSeverity,
     Delivery,
     Expectation,
+    UnitLevel,
     antecedent_holds,
     parse_account,
+    relation_backed,
 )
 from habitus.foresight.opportunities import OpportunityTable, TreeReading
+from habitus.foresight.reliability import Reliability
 from habitus.foresight.units import UNIT, UNIT_CITE
+from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_units import Unit, UnitPlanner, UnitView
 
 #: 不是终局的递送原因：之后还会再决定一次。
 _PENDING = "等时窗末"
-
-_NATURAL_HITS = frozenset({"准时", "早到", "晚了但做了"})
+#: 优先于久别的设置：人说了"以后都提醒我"，就不因为久别回来而先看一次。
+_ALWAYS = "以后都提醒我"
 
 
 @dataclass(frozen=True)
@@ -72,9 +73,8 @@ class DeliveryReport:
     spoken: int
     by_reason: dict[str, int] = field(default_factory=dict)
     by_level: dict[int, int] = field(default_factory=dict)
-    #: 模型这一拍问了几个候选（像不像）、判了几本账的重轻、调了几次、留下的信号。
+    #: 模型这一拍问了几个候选（像不像）、调了几次、留下的信号。
     judged: int = 0
-    severities: int = 0
     calls: int = 0
     signals: tuple[str, ...] = ()
     judge_failed: bool = False
@@ -94,17 +94,14 @@ class JudgeMaterials:
     happened: Callable[[Expectation], bool] = lambda item: False
     #: 当地日历对某一天的说法（进小包给模型判像不像；没有日历数据时恒为空）。
     day_note: Callable[[date], str | None] = lambda day: None
-    #: 最近几天到此刻开始过的事（核"上次落空的原因今天又在不在"用，裁定 55）。
-    seen: tuple[Seen, ...] = ()
 
 
 @dataclass(frozen=True)
 class AccountView:
-    """可见面读的一本账（裁定 50）：是什么、此刻在哪一档、两条轴的读数、重轻、设置、最近几条事实。"""
+    """可见面读的一本账（裁定 50）：是什么、此刻在哪一档、两条轴的读数、设置、最近几条事实。"""
 
     account: str
     standing: Standing
-    severity: AccountSeverity | None
     facts: int
     recent: tuple[str, ...]
 
@@ -128,14 +125,12 @@ class DeliveryStage:
         tolerance: Tolerance,
         evidence: Evidence,
         daily_cap: int,
-        severity_review_days: float,
-        holdout_rate: float = 0.0,
-        holdout_rate_heavy: float = 0.0,
-        draw: Callable[[], float] | None = None,
         judge: Judge | None = None,
         tick_seconds: float = 900.0,
         reachable: bool = False,
-        unit_prior_strength: float = 8.0,
+        unit_prior_share: float = 1 / 3,
+        history: HistoryStore | None = None,
+        lane: str = "session",
     ) -> None:
         if not isinstance(ledger, ForesightLedgerStore):
             raise TypeError("ledger must be a ForesightLedgerStore")
@@ -143,19 +138,8 @@ class DeliveryStage:
             raise TypeError("tolerance must be a Tolerance and evidence an Evidence")
         if isinstance(daily_cap, bool) or not isinstance(daily_cap, int) or daily_cap < 1:
             raise ValueError("daily_cap must be a positive integer")
-        for name, rate in (("holdout_rate", holdout_rate), ("holdout_rate_heavy", holdout_rate_heavy)):
-            if isinstance(rate, bool) or not isinstance(rate, int | float) or not 0.0 <= rate < 1.0:
-                raise ValueError(f"{name} must be a number in [0, 1)")
-        if holdout_rate_heavy > holdout_rate:
-            raise ValueError("a graver matter is not held out more often than a light one")
         if isinstance(tick_seconds, bool) or not isinstance(tick_seconds, int | float) or tick_seconds <= 0:
             raise ValueError("tick_seconds must be a positive number")
-        if (
-            isinstance(severity_review_days, bool)
-            or not isinstance(severity_review_days, int | float)
-            or severity_review_days <= 0
-        ):
-            raise ValueError("severity_review_days must be a positive number")
         if judge is not None and not isinstance(judge, Judge):
             raise TypeError("judge must be a Judge or None")
         if not isinstance(reachable, bool):
@@ -164,83 +148,91 @@ class DeliveryStage:
         self.tolerance = tolerance
         self.evidence = evidence
         self.daily_cap = daily_cap
-        self.severity_review = timedelta(days=float(severity_review_days))
-        #: 随机扣发的比例，最轻、最重两级（中间按级线性插；裁定 58 第 7 条：重的也扣、比例更小）。
-        self.holdout_rate = float(holdout_rate)
-        self.holdout_rate_heavy = float(holdout_rate_heavy)
-        self._draw = draw if draw is not None else random.random  # noqa: S311 - 扣发抽样不是安全用途
         self.judge = judge
         self.tick = timedelta(seconds=float(tick_seconds))
         #: 有没有送达渠道（没有 = 提醒档都「不可达」，也不问模型）。
         self.reachable = reachable
-        self.units = UnitPlanner(ledger, evidence=evidence, prior_strength=unit_prior_strength)
+        self.units = UnitPlanner(history, evidence=evidence, prior_share=unit_prior_share, lane=lane)
 
     async def run_once(self, now: datetime, materials: JudgeMaterials | None = None) -> DeliveryReport:
         if not isinstance(now, datetime) or now.utcoffset() is None:
             raise ValueError("now must be a timezone-aware datetime")
         found = self._due(now)
-        due, closing, waiting = found.opened, found.closing, found.waiting
-        judged, calls, signals, severity_failed, judged_accounts = await self._severities(due, materials, now)
-        # 这一拍新判的优先，没有就读账上已有的（之前判的、人改的）
-        severities = {
-            item.account: judged.get(item.account) or self.ledger.severity_of(item.account) for item in (*due, *waiting)
-        }
+        table = materials.table if materials is not None else None
+        calls = 0
+        signals: tuple[str, ...] = ()
         cached: dict[str, Standing] = {}
+        feedbacks: dict[str, Reliability | None] = {}
+        settings: dict[str, str | None] = {}
 
         def standing_of(item: Expectation) -> Standing:
             if item.account not in cached:
-                cached[item.account] = self._standing(item.account, now, severities.get(item.account))
+                cached[item.account] = self._standing(item.account, item.kind_token, now, table)
             return cached[item.account]
 
+        def previous_unit(kind: str) -> int | None:
+            level = self.ledger.unit_level_of(kind)
+            return level.level if level is not None else None
+
+        def feedback_of(kind: str) -> Reliability | None:
+            if kind not in feedbacks:
+                feedbacks[kind] = self._feedback(kind, table)
+            return feedbacks[kind]
+
+        def setting_of(kind: str) -> str | None:
+            if kind not in settings:
+                settings[kind] = self._setting(kind, now)
+            return settings[kind]
+
         units = self.units.plan(
-            due,
-            waiting,
+            found.opened,
+            found.waiting,
             standing_of=standing_of,
-            previous_level=lambda account: level.level if (level := self.ledger.level_of(account)) is not None else None,
-            table=materials.table if materials is not None else None,
+            previous_level=previous_unit,
+            feedback_of=feedback_of,
+            setting_of=setting_of,
+            table=table,
             now=now,
         )
-        opened = tuple(unit.basis for unit in units)
-        standings = {unit.basis.account: unit.standing for unit in units}
-        for item, _pending in closing:
-            if item.account not in standings:
-                standings[item.account] = self._standing(item.account, now, None)
+        # 时窗末：按依据与它当时一并决定的那几条重算单元（2026-10-17 四方评审：原来改按依据那本账自己的档判，几个前因一起才稳的
+        # 轻事时窗开时单元说该说、时窗末又成了影子）
+        closing_units = {
+            item.expectation_id: self.units.unit_for(
+                (item, *found.members.get(item.expectation_id, ())),
+                due=(item.expectation_id,),
+                standing_of=standing_of,
+                previous_level=previous_unit,
+                feedback_of=feedback_of,
+                setting_of=setting_of,
+                table=table,
+                now=now,
+            )
+            for item, _pending in found.closing
+        }
+        every = (*units, *closing_units.values())
+        standings = {unit.basis.expectation_id: unit.standing for unit in every}
+        inputs: dict[str, tuple[UnitInput, ...]] = {unit.basis.expectation_id: _unit_inputs(unit) for unit in every}
         spoken_today, spoken_kinds = self._spoken_today(now)
         tally = _Tally(now, spoken_today, spoken_kinds)
         for unit in units:
             for member in unit.members:
-                self._record(
-                    tally,
-                    member,
-                    Delivery(
-                        member.expectation_id, now, unit.level, False, UNIT, 0.0, evidence=(f"{UNIT_CITE}{unit.basis.expectation_id}",)
-                    ),
-                )
-        inputs: dict[str, tuple[UnitInput, ...]] = {unit.basis.expectation_id: _unit_inputs(unit) for unit in units}
-        for item, _pending in closing:
-            together = (item, *found.members.get(item.expectation_id, ()))
-            inputs[item.expectation_id] = tuple(
-                UnitInput(member, standing_of(member).prediction.k, standing_of(member).prediction.n) for member in together
-            )
-        speaking = (
-            *(item for item in opened if _urgent(severities.get(item.account), now)),
-            *(item for item, _pending in closing),
-        )
+                self._subsume(tally, member, unit.basis.expectation_id, unit.level)
+        for item, cited, level in found.joins:
+            self._subsume(tally, item, cited, level)
+        speaking = tuple(item for item, _pending in found.closing)
         judgement = await self._judge(speaking, standings, materials, now, tally, inputs)
-        for item, pending in closing:
+        for item, pending in self._ordered_closing(found.closing, judgement):
             verdict = judgement.verdicts.get(item.expectation_id) if judgement is not None else None
-            severity = self.ledger.severity_of(item.account)
             self._record(
                 tally,
                 item,
-                self._closing(item, pending, standings[item.account], severity, verdict, materials, tally, inputs),
+                self._closing(item, pending, standings[item.expectation_id], verdict, materials, tally, inputs),
             )
-        for item in self._ordered(opened, judgement):
-            verdict = judgement.verdicts.get(item.expectation_id) if judgement is not None else None
-            standing = standings[item.account]
-            severity = severities.get(item.account)
-            self._record(tally, item, self._opening(item, standing, severity, verdict, materials, tally, inputs))
-        changes = self._record_levels(standings, now)
+        for unit in units:
+            self._record(
+                tally, unit.basis, self._opening(unit.basis, standings[unit.basis.expectation_id], materials, tally)
+            )
+        changes = self._record_levels(cached, every, now)
         if judgement is not None:
             calls += judgement.calls
             signals = (*signals, *judgement.signals)
@@ -255,10 +247,9 @@ class DeliveryStage:
             else len(judgement.verdicts)
             if not judgement.failed
             else len(judgement.order),
-            severities=judged_accounts,
             calls=calls,
             signals=signals,
-            judge_failed=severity_failed or (judgement is not None and judgement.failed),
+            judge_failed=judgement is not None and judgement.failed,
             level_changes=changes,
             unreadable=len(self.ledger.take_unreadable()),
         )
@@ -266,56 +257,48 @@ class DeliveryStage:
     # ── 一条预期的决定 ──────────────────────────────────────────────────────
 
     def _opening(
-        self,
-        item: Expectation,
-        standing: Standing,
-        severity: AccountSeverity | None,
-        verdict: Verdict | None,
-        materials: JudgeMaterials | None,
-        tally: _Tally,
-        inputs: Mapping[str, Sequence[UnitInput]],
+        self, item: Expectation, standing: Standing, materials: JudgeMaterials | None, tally: _Tally
     ) -> Delivery:
-        """时窗开了：按账的档决定；重的按模型的答案当场说，轻的记「等时窗末」（那时再问模型、再写话）。"""
+        """时窗开了：按档决定；依据那本账久别回来的记「久别回来」；提醒档一律记「等时窗末」——到时窗末还没做再问模型、再写话（这一版不分急缓，裁定 58 第 1 条）。"""
 
         now = tally.now
         level = standing.level
-        evidence = verdict.evidence if verdict is not None else ()
         if materials is not None and materials.happened(item):
-            return Delivery(item.expectation_id, now, level, False, "已发生", 0.0, evidence=evidence)
+            return Delivery(item.expectation_id, now, level, False, "已发生", 0.0)
         if level == 0:
-            return Delivery(item.expectation_id, now, 0, False, "影子", 0.0, evidence=evidence)
+            return Delivery(item.expectation_id, now, 0, False, "影子", 0.0)
+        if self._returned(item, standing, materials):
+            return Delivery(item.expectation_id, now, level, False, RETURNED, 0.0)
         if not self.reachable:
-            return Delivery(item.expectation_id, now, level, False, "不可达", 0.0, evidence=evidence)
-        if not _urgent(severity, now) and now <= item.window[1]:
-            # 该来了还没来才说：到时窗末再决定、再问模型
-            return Delivery(item.expectation_id, now, level, False, _PENDING, 0.0)
-        return self._speak(item, level, severity, verdict, materials, tally, inputs)
+            return Delivery(item.expectation_id, now, level, False, "不可达", 0.0)
+        return Delivery(item.expectation_id, now, level, False, _PENDING, 0.0)
 
     def _closing(
         self,
         item: Expectation,
         pending: Delivery,
         standing: Standing,
-        severity: AccountSeverity | None,
         verdict: Verdict | None,
         materials: JudgeMaterials | None,
         tally: _Tally,
         inputs: Mapping[str, Sequence[UnitInput]],
     ) -> Delivery:
-        """时窗末到了的轻的事：还没做、这本账此刻还在提醒档就说；做了记「已发生」；窗里被压回影子或关了账的记「影子」。"""
+        """时窗末到了：还没做、此刻还在提醒档就说；做了记「已发生」；窗里被压回影子或关了账的记「影子」；久别回来的记「久别回来」
+        （时窗开时判过一次；跨夜的时窗换了机会表，这里再判一次）。"""
 
         now = tally.now
         if materials is not None and materials.happened(item):
             return Delivery(item.expectation_id, now, pending.level, False, "已发生", 0.0)
         if standing.level == 0:
             return Delivery(item.expectation_id, now, 0, False, "影子", 0.0)
-        return self._speak(item, standing.level, severity, verdict, materials, tally, inputs)
+        if self._returned(item, standing, materials):
+            return Delivery(item.expectation_id, now, standing.level, False, RETURNED, 0.0)
+        return self._speak(item, standing.level, verdict, materials, tally, inputs)
 
     def _speak(
         self,
         item: Expectation,
         level: int,
-        severity: AccountSeverity | None,
         verdict: Verdict | None,
         materials: JudgeMaterials | None,
         tally: _Tally,
@@ -325,9 +308,6 @@ class DeliveryStage:
         evidence = verdict.evidence if verdict is not None else ()
         if not self._antecedent_holds(item, materials):
             return Delivery(item.expectation_id, now, level, False, "前因不成立", 0.0, evidence=evidence)
-        again = self._cause_again(item, materials, now)
-        if again is not None:
-            return Delivery(item.expectation_id, now, level, False, AGAIN, 0.0, evidence=(f"{CITE}{again}",))
         if verdict is not None and not verdict.kept:
             return Delivery(item.expectation_id, now, level, False, "模型判不像", 0.0, evidence=evidence)
         if item.kind_token in tally.spoken_kinds:
@@ -338,10 +318,18 @@ class DeliveryStage:
             now=now,
             spoken_today=tally.spoken_today,
             daily_cap=self.daily_cap,
-            holdout_rate=self._holdout(severity, now),
-            draw=self._draw(),
             text=self._text(item, verdict, materials, now, inputs),
             evidence=evidence,
+        )
+
+    def _returned(self, item: Expectation, standing: Standing, materials: JudgeMaterials | None) -> bool:
+        """依据那本账久别回来：这一次只记影子，不改账的级、不写单元的档（26 号清单 3.3）；「以后都提醒我」优先。"""
+
+        if standing.setting == _ALWAYS:
+            return False
+        table = materials.table if materials is not None else None
+        return returned_after_absence(
+            self.ledger.facts_of(item.account), item, table, self.ledger.compaction_of(item.account)
         )
 
     @staticmethod
@@ -350,7 +338,7 @@ class DeliveryStage:
 
         if item.source != "事件" or materials is None or materials.table is None:
             return True
-        relation = next((r for r in materials.table.relations if r.key == item.trigger), None)
+        relation = materials.table.relation(item.trigger)
         seen = materials.rows_for((item.trigger_instance,)).get(item.trigger_instance)
         return antecedent_holds(
             item,
@@ -359,68 +347,14 @@ class DeliveryStage:
             current=lambda token: (token,),
         )
 
-    def _cause_again(self, item: Expectation, materials: JudgeMaterials | None, now: datetime) -> str | None:
-        """这本账最近的落空里，原因此刻对这条预期又成立的那一次（预期身份）；没有是 None。
+    def _subsume(self, tally: _Tally, item: Expectation, basis_id: str, level: int) -> None:
+        """同一刻同一个行为的另一个输入：单元替它一并决定，记「单元已选」并引依据。"""
 
-        "最近"借遗忘的半衰期（生命周期统一设定之前各层都借它）。一条原因被用过、而因此没说的那一次他其实自己做了，
-        这条原因就错了，不再用（下一次的答案验这次调整）。"""
-
-        if materials is None or materials.table is None:
-            return None
-        table = materials.table
-        horizon = timedelta(days=self.evidence.half_life_days)
-        facts = current_facts(self.ledger.facts_of(item.account))
-        causes = sorted(
-            (
-                fact
-                for fact in facts
-                if fact.axis == PREDICTION
-                and fact.cause is not None
-                and fact.kind == "过期待决"
-                and fact.expectation_id != item.expectation_id
-                and now - horizon <= fact.at <= now
-            ),
-            key=lambda fact: fact.at,
-            reverse=True,
+        self._record(
+            tally,
+            item,
+            Delivery(item.expectation_id, tally.now, level, False, UNIT, 0.0, evidence=(f"{UNIT_CITE}{basis_id}",)),
         )
-        for fact in causes:
-            assert fact.cause is not None
-            if self._disproved(fact, facts):
-                continue
-            if cause_holds(
-                fact.cause,
-                item,
-                materials.seen,
-                now=now,
-                lane=table.lane,
-                slot_minutes=table.slot_minutes,
-                window_slots=table.window_slots,
-                day_note=materials.day_note,
-            ):
-                return fact.expectation_id
-        return None
-
-    def _disproved(self, cause: AccountFact, facts: Iterable[AccountFact]) -> bool:
-        """这条原因用过、而因此没说的那一次他自己做了。"""
-
-        cited = f"{CITE}{cause.expectation_id}"
-        for fact in facts:
-            if fact.axis != PREDICTION or fact.kind not in _NATURAL_HITS or fact.at <= cause.at:
-                continue
-            day = self.ledger.day_of(fact.expectation_id)
-            if day is None:
-                continue
-            if any(
-                delivery.expectation_id == fact.expectation_id and delivery.reason == AGAIN and cited in delivery.evidence
-                for delivery in self.ledger.deliveries_on(day)
-            ):
-                return True
-        return False
-
-    def _holdout(self, severity: AccountSeverity | None, now: datetime) -> float:
-        """漏一次比错提一次代价大的（c > 1）用较小的扣发比例，其余用较大的（裁定 58 第 7 条：都扣，重的扣得少）。"""
-
-        return self.holdout_rate_heavy if _urgent(severity, now) else self.holdout_rate
 
     def _record(self, tally: _Tally, item: Expectation, delivery: Delivery) -> None:
         if not self.ledger.record_delivery(item.day, delivery):
@@ -429,59 +363,88 @@ class DeliveryStage:
 
     # ── 账 ──────────────────────────────────────────────────────────────────
 
-    def standing_of(self, expectation: Expectation, now: datetime) -> Standing:
-        """这条预期所在那本账此刻的位置（运维与回放用）。"""
+    def standing_of(self, expectation: Expectation, now: datetime, table: OpportunityTable | None = None) -> Standing:
+        """这条预期那条边此刻的位置（运维与回放用）。"""
 
-        return self._standing(expectation.account, now, None)
+        return self._standing(expectation.account, expectation.kind_token, now, table)
 
-    def _standing(self, account: str, now: datetime, judged: AccountSeverity | None) -> Standing:
+    def _standing(self, account: str, kind: str, now: datetime, table: OpportunityTable | None) -> Standing:
+        """一条边此刻的位置：从这个行为的单元历史（夜里重标过的最晚一晚）里签名含它的那几刻读。"""
+
+        history = self.units.history_of(table)
         return climb(
-            self.ledger.facts_of(account),
+            history.of(kind) if history is not None else (),
+            account,
+            now=now,
             tolerance=self.tolerance,
             evidence=self.evidence,
-            now=now,
-            severity=judged if judged is not None else self.ledger.severity_of(account),
-            setting=self.ledger.setting_of(account),
+            setting=self.ledger.setting_of(kind),
             previous=self.ledger.level_of(account),
         )
 
-    def _record_levels(self, standings: Mapping[str, Standing], now: datetime) -> int:
-        """档变了才记一条（滞回要知道上一次在哪一档；可见面要知道哪天升的）。"""
+    def _feedback(self, kind: str, table: OpportunityTable | None) -> Reliability | None:
+        """单元的提醒反馈读数：反馈那几笔，加上单元历史里他没做的那几刻推时钟（``feedback.feedback_reading``）。"""
+
+        facts = self.ledger.feedback_of(kind)
+        if not facts:
+            return None
+        history = self.units.history_of(table)
+        return feedback_reading(
+            facts,
+            moments=history.labelled(kind) if history is not None else (),
+            alpha=self.evidence.alpha,
+            half_life=self.evidence.half_life,
+            window=self.evidence.window,
+        )
+
+    def _setting(self, kind: str, now: datetime) -> str | None:
+        setting = self.ledger.setting_of(kind)
+        if setting is None or setting.at > now or setting.setting == "照常":
+            return None
+        return setting.setting
+
+    def _record_levels(self, accounts: Mapping[str, Standing], units: Iterable[Unit], now: datetime) -> int:
+        """档变了才记一条：账的级按这本账自己从事实折出的档（滞回要知道上一次在哪一档；可见面要知道哪天升的），
+        行为单元的档另记（``UnitLevel``，按行为）——两者分开，账自己折档时的滞回不读单元的档。"""
 
         changes = 0
-        for account, standing in standings.items():
+        for account, standing in accounts.items():
             previous = self.ledger.level_of(account)
             if (previous.level if previous is not None else 0) != standing.level:
                 if self.ledger.record_level(AccountLevel(account, now, standing.level)):
                     changes += 1
+        latest: dict[str, int] = {}
+        for unit in units:
+            latest[unit.kind_token] = unit.level
+        for kind, level in latest.items():
+            previous_unit = self.ledger.unit_level_of(kind)
+            if (previous_unit.level if previous_unit is not None else 0) != level:
+                if self.ledger.record_unit_level(UnitLevel(kind, now, level)):
+                    changes += 1
         return changes
 
-    def account_views(self, now: datetime, *, recent: int = 5) -> tuple[AccountView, ...]:
-        """全部账此刻的样子（可见面的只读口；可见面本身在层外）。"""
+    def account_views(
+        self, now: datetime, table: OpportunityTable | None = None, *, recent: int = 5
+    ) -> tuple[AccountView, ...]:
+        """全部账此刻的样子（可见面的只读口；可见面本身在层外）：边的位置从单元历史读，流水里最近几笔给人看。"""
 
         views = []
         for account in self.ledger.accounts():
             facts = self.ledger.facts_of(account)
-            severity = self.ledger.severity_of(account)
-            standing = self._standing(account, now, severity)
-            tail = tuple(
-                f"{item.at:%m-%d} {item.axis}{'好' if item.good else '坏'} {item.kind}" for item in facts[-recent:]
-            )
-            views.append(AccountView(account, standing, severity, len(facts), tail))
+            kind, _source, _trigger = parse_account(account)
+            standing = self._standing(account, kind, now, table)
+            tail = tuple(f"{item.at:%m-%d} {'好' if item.good else '坏'} {item.kind}" for item in facts[-recent:])
+            views.append(AccountView(account, standing, len(facts), tail))
         return tuple(views)
 
     def unit_views(self, now: datetime, table: OpportunityTable | None) -> tuple[UnitView, ...]:
-        """全部行为单元此刻的样子（可见面的只读口）：每个行为的每个输入——账此刻的位置、语义树读数、两个数对不对得上。"""
+        """全部行为单元此刻的样子（可见面的只读口）：每个行为的每个输入——边此刻的位置、语义树读数、两个数对不对得上。"""
 
         by_kind: dict[str, list[tuple[str, Standing, TreeReading | None]]] = {}
         for account in self.ledger.accounts():
             kind, source, trigger = parse_account(account)
-            standing = self._standing(account, now, self.ledger.severity_of(account))
-            relation = (
-                next((item for item in table.relations if item.key == trigger), None)
-                if table is not None and source == "事件"
-                else None
-            )
+            standing = self._standing(account, kind, now, table)
+            relation = table.relation(trigger) if table is not None and relation_backed(source) else None
             by_kind.setdefault(kind, []).append((account, standing, relation.reading if relation is not None else None))
         return UnitPlanner.views(by_kind)
 
@@ -507,39 +470,6 @@ class DeliveryStage:
 
     # ── 模型 ────────────────────────────────────────────────────────────────
 
-    async def _severities(
-        self, due: tuple[Expectation, ...], materials: JudgeMaterials | None, now: datetime
-    ) -> tuple[dict[str, AccountSeverity], int, tuple[str, ...], bool, int]:
-        """到了时窗的账里还没判过或已到期的：判一次轻重缓急、落账。没有渠道或模型就不判。"""
-
-        found: dict[str, AccountSeverity] = {}
-        if self.judge is None or materials is None or not self.reachable:
-            return found, 0, (), False, 0
-        asked: dict[str, Expectation] = {}
-        for item in due:
-            if item.account in asked or item.account in found:
-                continue
-            current = self.ledger.severity_of(item.account)
-            if current is not None and current.current(now):
-                found[item.account] = current
-                continue
-            # 第一次到了该问时就判，不等这本账结算过一次（一年几次的事等一次结算就是几个月，裁定 58 第 1 条）
-            asked[item.account] = item
-        if not asked:
-            return found, 0, (), False, 0
-        package = self._package(tuple(asked.values()), materials, now, {})
-        result = await self.judge.judge_severity(package)
-        if result.failed:
-            return found, result.calls, result.signals, True, 0
-        for account, item in asked.items():
-            verdict = result.verdicts.get(item.expectation_id)
-            if verdict is None:
-                continue
-            record = AccountSeverity(account, now, verdict[0], verdict[1], now + self.severity_review)
-            self.ledger.record_severity(record)
-            found[account] = record
-        return found, result.calls, result.signals, False, len(asked)
-
     async def _judge(
         self,
         due: tuple[Expectation, ...],
@@ -558,13 +488,14 @@ class DeliveryStage:
         asked = tuple(
             item
             for item in due
-            if standings[item.account].level >= 1
+            if standings[item.expectation_id].level >= 1
             and item.kind_token not in tally.spoken_kinds
             and not materials.happened(item)
+            and not self._returned(item, standings[item.expectation_id], materials)
         )
         if not asked:
             return None
-        levels = {item.expectation_id: standings[item.account].level for item in asked}
+        levels = {item.expectation_id: standings[item.expectation_id].level for item in asked}
         return await self.judge.judge(self._package(asked, materials, now, levels, inputs))
 
     @staticmethod
@@ -581,14 +512,16 @@ class DeliveryStage:
         )
 
     @staticmethod
-    def _ordered(due: tuple[Expectation, ...], judgement: Judgement | None) -> tuple[Expectation, ...]:
+    def _ordered_closing(
+        closing: tuple[tuple[Expectation, Delivery], ...], judgement: Judgement | None
+    ) -> tuple[tuple[Expectation, Delivery], ...]:
         """模型排的先后在前（名额先给它们），其余按时窗。"""
 
         if judgement is None:
-            return due
-        by_id = {item.expectation_id: item for item in due}
+            return closing
+        by_id = {item.expectation_id: (item, pending) for item, pending in closing}
         first = [by_id[identity] for identity in judgement.order if identity in by_id]
-        rest = [item for item in due if item.expectation_id not in judgement.order]
+        rest = [pair for pair in closing if pair[0].expectation_id not in judgement.order]
         return tuple(first + rest)
 
     @staticmethod
@@ -614,10 +547,12 @@ class DeliveryStage:
         还没决定过的不再递：那是结算去记的事。另记每条依据替哪几条一并决定过（「单元已选」引它）：时窗末开口时小包与话照样
         带上同一刻的全部输入。"""
 
-        opened: list[Expectation] = []
+        fresh: list[Expectation] = []
         closing: list[tuple[Expectation, Delivery]] = []
         waiting: list[Expectation] = []
         members: dict[str, list[Expectation]] = {}
+        #: 已经作为依据决定过、还没结的（类 → (预期, 最近那次决定的档)）：后来才形成的同一刻的输入并进它，不另起一个单元。
+        bases: dict[str, list[tuple[Expectation, int]]] = {}
         instant = now.astimezone(UTC)
         since = instant - self.tick
         for day in self.ledger.open_days():
@@ -633,14 +568,39 @@ class DeliveryStage:
                 start, end = (item.window[0].astimezone(UTC), item.window[1].astimezone(UTC))
                 if not made:
                     if start <= instant and end > since:
-                        opened.append(item)
+                        fresh.append(item)
                     elif start > instant:
                         waiting.append(item)
                     continue
+                if all(made_one.reason != UNIT for made_one in made):
+                    bases.setdefault(item.kind_token, []).append((item, made[-1].level))
                 pending = [d for d in made if d.reason == _PENDING]
                 if pending and len(pending) == len(made) and end < instant <= item.deadline.astimezone(UTC):
                     closing.append((item, pending[-1]))
-        return _Due(tuple(opened), tuple(closing), tuple(waiting), {key: tuple(value) for key, value in members.items()})
+        # 同一刻被拆成几个单元（2026-10-17 四方评审）：先到时窗的那条（日子、情境）已在时窗开时决定过，同一刻后来才形成的事件那条并进它
+        opened: list[Expectation] = []
+        joins: list[tuple[Expectation, str, int]] = []
+        for item in fresh:
+            base = next(
+                (
+                    (other, level)
+                    for other, level in bases.get(item.kind_token, ())
+                    if item.observed_from < other.deadline and item.deadline > other.observed_from
+                ),
+                None,
+            )
+            if base is None:
+                opened.append(item)
+            else:
+                joins.append((item, base[0].expectation_id, base[1]))
+                members.setdefault(base[0].expectation_id, []).append(item)
+        return _Due(
+            tuple(opened),
+            tuple(closing),
+            tuple(waiting),
+            {key: tuple(value) for key, value in members.items()},
+            tuple(joins),
+        )
 
     def _spoken_today(self, now: datetime) -> tuple[int, frozenset[str]]:
         """今天（按决定的日子）已经说过几次、说过哪些类。说出口的递送挂在预期所在的日子下：今天决定的，那条预期还没结（结算
@@ -668,6 +628,8 @@ class _Due:
     waiting: tuple[Expectation, ...]
     #: 依据的预期身份 → 它在「单元已选」里替哪几条一并决定过。
     members: Mapping[str, tuple[Expectation, ...]]
+    #: 这一拍刚到时窗、并进一个已经决定过的单元的：（这条, 依据的身份, 依据那次决定的档）。
+    joins: tuple[tuple[Expectation, str, int], ...] = ()
 
 
 def _unit_inputs(unit: Unit) -> tuple[UnitInput, ...]:
@@ -676,12 +638,6 @@ def _unit_inputs(unit: Unit) -> tuple[UnitInput, ...]:
     return tuple(
         UnitInput(item.expectation, item.standing.prediction.k, item.standing.prediction.n) for item in unit.inputs
     )
-
-
-def _urgent(severity: AccountSeverity | None, now: datetime) -> bool:
-    """漏一次比错提一次代价大（此刻生效的代价比 c > 1；过期的按没判过）：时窗一开就说，不等时窗末。1 是好处等于代价的临界点。"""
-
-    return severity is not None and severity.current(now) and severity.cost_ratio > 1.0
 
 
 class _Tally:

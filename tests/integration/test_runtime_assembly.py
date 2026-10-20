@@ -39,7 +39,6 @@ from habitus.runtime import (
 )
 from tests.helpers import BASE_TIME
 from tests.model_helpers import prepare_chat_request
-from tests.unit.runtime.fixtures import STARTUP_PARAMETERS
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
@@ -655,8 +654,10 @@ def test_runtime_memory_search_facades_use_the_real_search_service_and_lifecycle
     asyncio.run(scenario())
 
 
-def _fully_enabled_runtime(tmp_path: Path):  # type: ignore[no-untyped-def]
+def _fully_enabled_runtime(tmp_path: Path, *, lifecycle: dict | None = None):  # type: ignore[no-untyped-def]
     payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
+    if lifecycle:
+        payload["lifecycle"] = {**payload.get("lifecycle", {}), **lifecycle}
     payload["storage"]["root"] = str(tmp_path / "data")
     for route, adapter in (
         (payload["models"]["chat"]["route"], "fake_chat"),
@@ -667,7 +668,6 @@ def _fully_enabled_runtime(tmp_path: Path):  # type: ignore[no-untyped-def]
     ):
         route.update(provider="fake", adapter=adapter, credential_ref="")
     payload["behavior"] = {"primary_subject": "家庭成员A"}
-    payload["prediction"] = dict(STARTUP_PARAMETERS)
     payload["scene"] = {"enabled": True}
     payload["foresight"] = {"enabled": True}
     config = HabitusConfig.from_mapping(payload)
@@ -686,40 +686,45 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
 
     runtime = _fully_enabled_runtime(tmp_path)
     branches = runtime.components.behavior
-    predictions = runtime.components.prediction
-    assert branches is not None and predictions is not None
-    # 预测树两支各读自己那一支的行为树；预测层（与结算）现在只接会话那一支。
-    assert predictions.physical.rebuilder.behavior_tree is branches.physical.tree
-    assert predictions.physical.worker.after_rebuild is None
-    behavior, prediction = branches.session, predictions.session
-    # 夜批钩子**真的挂在重建之后**（结算那一拍；新语义树的各拍随后面几刀接进同一个钩子）。
-    assert prediction.worker.after_rebuild is not None
+    worker = runtime.components.nightly
+    assert branches is not None and worker is not None
+    # 整晚那一趟与预测层（与结算）现在只接会话那一支；预测树删了（裁定 59），整晚自己一个常驻节拍。
+    behavior = branches.session
+    assert worker.interval_seconds == runtime.config.scene.nightly_interval_seconds
+    assert worker.shutdown_timeout_seconds == runtime.config.scene.nightly_shutdown_timeout_seconds
     foresight = runtime.components.foresight
     assert foresight is not None
     assert foresight.read_side.behavior_tree is behavior.tree
-    # 账本在 storage.root/foresight/<支>；结算认的是归约的定稿日；夜批钩子里结算排在最前（同一个 after_rebuild）。
+    # 账本在 storage.root/foresight/<支>；结算认的是归约的定稿日。
     assert foresight.ledger.root == runtime.config.foresight_root / "session"
     assert foresight.settlement.ledger is foresight.ledger
     assert foresight.settlement.closed_days == behavior.reduction_runner.closed_days
     # 机会表与账本同住这一支的目录（``opportunities/<lane>/<晚>.json``）
     assert foresight.opportunities.root == foresight.ledger.root
-    # 白天那一拍的常驻 worker 接上了：读会话那一支正在服务的预测树、同一本账本，未封口的判断经那座桥读
+    # 白天那一拍的常驻 worker 接上了：读会话那一支的机会表、同一本账本，未封口的判断经那座桥读（不读预测树，裁定 59）
     from habitus.runtime.foresight_worker import ForesightWorker
     from habitus.runtime.unsealed import UnsealedFromJudgements
 
     assert isinstance(foresight.worker, ForesightWorker)
     tick = foresight.worker.tick
     assert tick.ledger is foresight.ledger and tick.opportunities is foresight.opportunities
-    # 整晚的串法接进了预测树那一支的常驻 worker：语义树读同一棵行为树、机会表写进同一本账本旁边（语义树第 11 步）
+    # 整晚那一趟：结算第一步，语义树读同一棵行为树、机会表写进同一本账本旁边（语义树第 11 步）；"今天"按主体所在地算
     from habitus.runtime.nightly import Nightly
 
-    nightly = prediction.worker.nightly
+    nightly = worker.nightly
     assert isinstance(nightly, Nightly)
-    assert nightly.behavior_tree is behavior.tree and nightly.prediction is prediction.rebuilder
+    assert nightly.behavior_tree is behavior.tree and nightly.zone == runtime.config.locale.zone()
+    # 当地日历只建一份：语义树、预测层的读侧共用，整晚开头重读的就是它（2026-10-18 四方评审）
+    assert nightly.scene.calendar is foresight.read_side.calendar and nightly.refresh_calendar is not None
+    assert nightly.foresight.calendar is foresight.read_side.calendar
     assert nightly.scene.behavior_tree is behavior.tree and nightly.scene.relations.root == runtime.config.scene_root
     assert nightly.foresight is not None and nightly.foresight.store is foresight.opportunities
     assert nightly.closed_days == behavior.reduction_runner.closed_days
-    assert tick.prediction is prediction.store and tick.read_side is foresight.read_side
+    assert nightly.settlement is foresight.settlement
+    # 单元历史：夜里那一拍重标、白天的单元读同一份（裁定 55 新版第 2 条）
+    assert nightly.foresight.history is foresight.history and foresight.history.store.root == foresight.ledger.root
+    assert tick.delivery.units.history is foresight.history.store
+    assert not hasattr(tick, "prediction") and tick.read_side is foresight.read_side
     assert isinstance(tick.unsealed, UnsealedFromJudgements) and tick.unsealed.judgements is behavior.judgements
     assert tick.delivery is not None and tick.delivery.ledger is foresight.ledger
     assert foresight.worker.interval_seconds == runtime.config.foresight.tick_interval_seconds
@@ -732,6 +737,7 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
             ledger=foresight.ledger,
             settlement=foresight.settlement,
             opportunities=foresight.opportunities,
+            history=foresight.history,
         )
 
 
@@ -759,8 +765,87 @@ def test_an_enabled_foresight_layer_that_is_not_attached_to_the_nightly_batch_is
 
     runtime = _fully_enabled_runtime(tmp_path)
     components = runtime.components
-    assert components.prediction is not None
-    components.prediction.session.worker.after_rebuild = None
+    assert components.nightly is not None
+    components.nightly.nightly.settlement = None  # type: ignore[attr-defined]
 
-    with pytest.raises(ValueError, match="attached to the nightly rebuild"):
+    with pytest.raises(ValueError, match="first step of the nightly run"):
         replace(components)
+    with pytest.raises(ValueError, match="nightly run must be enabled"):
+        replace(components, nightly=None)
+    components.nightly.nightly.settlement = runtime.components.foresight.settlement  # type: ignore[attr-defined, union-attr]
+    components.nightly.nightly.foresight = None  # type: ignore[attr-defined]
+    with pytest.raises(ValueError, match="opportunity table the foresight layer reads"):
+        replace(components)
+
+
+def test_the_runtime_starts_and_stops_the_nightly_worker_and_reports_how_old_the_opportunity_table_is(
+    tmp_path: Path,
+) -> None:
+    """整晚那一趟自己一个常驻节拍，Runtime 起停它；健康面看它活着，接了预测层时再看机会表最晚一晚有多旧（清单 5.1、5.3）。"""
+
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    from habitus.foresight.opportunities import OpportunityTable
+
+    runtime = _fully_enabled_runtime(tmp_path)
+    worker = runtime.components.nightly
+    foresight = runtime.components.foresight
+    assert worker is not None and foresight is not None
+
+    def check(report, name):  # type: ignore[no-untyped-def]
+        return next(item for item in report.checks if item.name == name)
+
+    async def scenario() -> None:
+        report = await runtime.health()
+        assert check(report, "opportunities_session").detail == "never_written"  # 第一夜还没到：不算故障
+        await runtime.start()
+        await asyncio.sleep(0.05)
+        assert worker.running
+        report = await runtime.health()
+        assert check(report, "nightly_worker").status.value == "healthy"
+        await runtime.stop()
+        assert not worker.running
+
+    asyncio.run(scenario())
+    zone = runtime.config.locale.zone()
+    # 放假数据有年份读不了：健康面报出来（非关键），进程照常
+    worker.nightly.scene.calendar.problems = ("2027.json: 写坏了",)  # type: ignore[attr-defined]
+    calendar_check = check(asyncio.run(runtime.health()), "calendar")
+    assert (
+        calendar_check.status.value == "degraded"
+        and "2027.json" in calendar_check.detail
+        and not calendar_check.critical
+    )
+    worker.nightly.scene.calendar.problems = ()  # type: ignore[attr-defined]
+    today = datetime.now(UTC).astimezone(zone).date()
+    stale = today - timedelta(days=3)  # 连着两个周期（一天一趟）没出新的一晚
+    foresight.opportunities.write(OpportunityTable("session", stale, stale, 15, 3, (), ()))
+    report = asyncio.run(runtime.health())
+    assert check(report, "opportunities_session").status.value == "degraded"
+    foresight.opportunities.write(OpportunityTable("session", today, today, 15, 3, (), ()))
+    report = asyncio.run(runtime.health())
+    item = check(report, "opportunities_session")
+    assert item.status.value == "healthy" and item.detail == f"night:{today}" and not item.critical
+    # 节拍短于半天：一天最多出一晚新的表，今天那一晚到晚上也不算旧（2026-10-18 四方评审）
+    worker.interval_seconds = 3600.0
+    assert check(asyncio.run(runtime.health()), "opportunities_session").status.value == "healthy"
+
+
+def test_every_derived_store_keeps_the_configured_number_of_fallback_generations(tmp_path: Path) -> None:
+    """6.12：关系表、机会表、单元历史快照都留"当前一代 + ``lifecycle.fallback_generations`` 代"（L10.14 补测：默认值碰巧
+    与各存储自己的默认相等，接线断了测试也看不出来——这里配一个不同于默认的数）。"""
+
+    runtime = _fully_enabled_runtime(tmp_path, lifecycle={"fallback_generations": 4})
+    foresight = runtime.components.foresight
+    scene = runtime.components.nightly.nightly.scene  # type: ignore[union-attr]
+    assert foresight is not None
+    assert scene.relations.fallback_generations == 4
+    assert foresight.opportunities._files.retained_nights == 5
+    assert foresight.history.store._files.retained_nights == 5
+    # 6.5：语义树还要读的词表版本经组合根交给行为侧参与者，截断不会越过它们
+    (behavior,) = [
+        item for item in runtime.components.workflow.lifecycle_worker._participants if item.name == "behavior"
+    ]
+    assert behavior.derived_versions is not None
+    assert scene.concepts.synced_version() in behavior.derived_versions()

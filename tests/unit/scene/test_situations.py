@@ -18,7 +18,7 @@ from habitus.scene.occurrences.situations import (
     hit_events,
     situation_hits,
 )
-from tests.unit.scene.concept_fixtures import cid, situation
+from tests.unit.scene.concept_fixtures import calendar, cid, situation
 from tests.unit.scene.fixtures import DAY1, at
 from tests.unit.scene.hit_fixtures import CONCEPTS, record
 
@@ -26,9 +26,7 @@ SATURDAY = DAY1  # 2026-08-15 是周六
 FRIDAY = SATURDAY - timedelta(days=1)
 THURSDAY = SATURDAY - timedelta(days=2)
 
-SWAP_DAY = situation(
-    "调休日", "当地日历说这天要补班", role=ConceptRole.DAY_TYPE, rule=SituationRule(B.CALENDAR_NOTE, value="补班")
-)
+SWAP_DAY = calendar("调休日", "日历.日型", "调休上班")
 WITH_FAMILY = situation(
     "和家人一起", "这件事是和家人一起做的", role=ConceptRole.OBJECT, rule=SituationRule(B.SUBJECT, value="家人B")
 )
@@ -59,7 +57,7 @@ def test_the_three_families_each_compute_and_checked_is_a_superset_of_holding() 
     inputs = SituationInputs(
         day=SATURDAY,
         moment=BREAKFAST,
-        calendar_note="补班日，按周一上班",
+        calendar={"日历.周几": "周六", "日历.日型": "调休上班"},
         subjects=("家人B",),
         place="公司",
         history=(HitEvent(at(SATURDAY, 2, 10), "晚睡", "重"),),
@@ -74,9 +72,9 @@ def test_the_three_families_each_compute_and_checked_is_a_superset_of_holding() 
         "昨晚晚睡",
         "赶工中",
     }  # 赶工中判过、不成立
-    # 材料给不全 → 那一族**不判**（不当成立、也不当"判过不成立"）：没有日历那句话、没有 moment
+    # 材料给不全 → 那一族**不判**（不当成立、也不当"判过不成立"）：没有日历条件（周末、调休日都判不了）、没有 moment
     bare = situation_hits(SITUATIONS, SituationInputs(day=FRIDAY))
-    assert bare.hits == () and set(bare.checked) == {"周末", "和家人一起", "在公司"}
+    assert bare.hits == () and set(bare.checked) == {"和家人一起", "在公司"}
 
 
 def test_yesterday_is_anchored_on_the_occurrence_not_the_calendar_day() -> None:
@@ -155,8 +153,10 @@ def test_how_much_history_to_prepare_comes_from_the_concepts() -> None:
 
 
 def test_a_rule_that_the_algorithm_cannot_compute_is_refused() -> None:
-    with pytest.raises(SituationError, match="takes no weekdays"):
-        SituationRule(B.PLACE, weekdays=(5,), value="公司")
+    with pytest.raises(SituationError, match="takes no values"):
+        SituationRule(B.PLACE, values=("周六",), value="公司")
+    with pytest.raises(SituationError, match="calendar situation"):
+        SituationRule(B.CALENDAR, value="日历.周几")
     with pytest.raises(SituationError, match="watches no concept"):
         SituationRule(B.SUBJECT, value="家人B", concept="打球")
     with pytest.raises(SituationError, match="names the concept it watches"):

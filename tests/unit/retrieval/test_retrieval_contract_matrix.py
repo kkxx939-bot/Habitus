@@ -31,9 +31,7 @@ from habitus.memory.uri import MemoryURI
 from tests.helpers import BASE_TIME, document
 
 INTEGER_CONFIG_FIELDS = tuple(
-    field.name
-    for field in fields(MemorySearchServiceConfig)
-    if field.name != "summary_fallback_enabled"
+    field.name for field in fields(MemorySearchServiceConfig) if field.name != "summary_fallback_enabled"
 )
 
 
@@ -222,7 +220,14 @@ def test_search_hit_rejects_vector_score_outside_cosine_range(vector_score: floa
         MemorySearchHit(MemoryURI.from_address(MemoryAddress.profile()), 0.5, vector_score=vector_score)
 
 
-@pytest.mark.parametrize("uri", [MemoryURI.root(), MemoryURI.from_directory(MemoryDirectory.preferences()), MemoryURI("memory://preferences/.abstract.md")])
+@pytest.mark.parametrize(
+    "uri",
+    [
+        MemoryURI.root(),
+        MemoryURI.from_directory(MemoryDirectory.preferences()),
+        MemoryURI("memory://preferences/.abstract.md"),
+    ],
+)
 def test_search_hit_requires_l2_document_uri(uri: MemoryURI) -> None:
     with pytest.raises(ValueError, match="L2"):
         MemorySearchHit(uri, 0.5)
@@ -253,7 +258,10 @@ def test_typed_query_rejects_invalid_text_fields(field: str, value: object) -> N
         MemoryTypedQuery(**kwargs)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("value", [None, [], "query", {}, {"query": "q", "intent": "i"}, {"query": "q", "intent": "i", "priority": 1, "uri": "x"}])
+@pytest.mark.parametrize(
+    "value",
+    [None, [], "query", {}, {"query": "q", "intent": "i"}, {"query": "q", "intent": "i", "priority": 1, "uri": "x"}],
+)
 def test_typed_query_parser_requires_exact_shape(value: object) -> None:
     with pytest.raises(ValueError):
         MemoryTypedQuery.from_dict(value)
@@ -372,8 +380,12 @@ def test_matched_memory_relations_must_be_unique_and_sorted() -> None:
     seed = document(MemoryKind.PROFILE)
     left = document(MemoryKind.PREFERENCE)
     right = document(MemoryKind.ENTITY)
-    first_link = MemoryStoredLink(MemoryURI.from_address(seed.address), MemoryURI.from_address(left.address), MemoryLinkType.DERIVED_FROM)
-    second_link = MemoryStoredLink(MemoryURI.from_address(seed.address), MemoryURI.from_address(right.address), MemoryLinkType.DERIVED_FROM)
+    first_link = MemoryStoredLink(
+        MemoryURI.from_address(seed.address), MemoryURI.from_address(left.address), MemoryLinkType.DERIVED_FROM
+    )
+    second_link = MemoryStoredLink(
+        MemoryURI.from_address(seed.address), MemoryURI.from_address(right.address), MemoryLinkType.DERIVED_FROM
+    )
     first = MemoryRelatedMemory(first_link, left)
     second = MemoryRelatedMemory(second_link, right)
     ordered = tuple(sorted((first, second), key=lambda item: item.relation.identity))
@@ -414,7 +426,10 @@ def test_search_result_accepts_consistent_primary_memory_result() -> None:
     assert result.context
 
 
-@pytest.mark.parametrize("roots", [(), [], (MemoryURI.from_address(MemoryAddress.profile()),), (MemoryURI("memory://preferences/.abstract.md"),)])
+@pytest.mark.parametrize(
+    "roots",
+    [(), [], (MemoryURI.from_address(MemoryAddress.profile()),), (MemoryURI("memory://preferences/.abstract.md"),)],
+)
 def test_search_result_requires_nonempty_directory_roots(roots: object) -> None:
     with pytest.raises((TypeError, ValueError)):
         _search_result(target_roots=roots)

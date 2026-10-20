@@ -51,7 +51,11 @@ def committed_triplet(
         journal_store,
         clock=lambda: BASE_TIME,
     )
-    plan = update_editor_plan(preference_content="- 更新为简洁回答") if update else editor_plan(with_relation=with_relation)
+    plan = (
+        update_editor_plan(preference_content="- 更新为简洁回答")
+        if update
+        else editor_plan(with_relation=with_relation)
+    )
     if update:
         old = plan.commit.logical_writes()[0].before.value
         assert old is not None

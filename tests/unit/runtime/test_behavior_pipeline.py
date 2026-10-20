@@ -176,6 +176,25 @@ def test_each_lane_gets_its_own_whole_pipeline_and_they_share_only_the_chat_clie
     ]
     assert isinstance(branches.session.fusion, SessionLane)
     assert isinstance(branches.physical.fusion, PhysicalLane)
+    # 脏日日志只有语义树夜批读（只接会话一支）；这份配置没开语义树，两支都不记——没人截，记了只会一直长（L10.3）
+    assert [branch.reduction_runner.dirty_days for branch in branches] == [None, None]
+    # 生命周期骨架自己的状态：两支的隔离区与刷新重试账、会话源的隔离区与恢复账都挂进同一个清理参与者（L10.10）
+    (housekeeping,) = [
+        item
+        for item in runtime.components.workflow.lifecycle_worker._participants
+        if item.name == "lifecycle-housekeeping"
+    ]
+    assert sorted(item.owner for item in housekeeping.quarantines) == [
+        "behavior-reduction-physical",
+        "behavior-reduction-session",
+        "behavior-session-lane",
+        "conversation-source-behavior",
+    ]
+    assert sorted(item.owner for item in housekeeping.retries) == [
+        "behavior-semantic-physical",
+        "behavior-semantic-session",
+        "conversation-source-recovery",
+    ]
     assert branches.session.fusion.describer.client is runtime.components.models.structured_chat
     for behavior in branches:
         assert behavior.reduction_runner.context_lookback_seconds == FUSION_CONTEXT_LOOKBACK_SECONDS
@@ -418,3 +437,53 @@ def test_vocabulary_jobs_are_exposed_through_the_access_layer(tmp_path) -> None:
     dark.initialize()
     with pytest.raises(RuntimeStateError, match="behavior pipeline is not configured"):
         asyncio.run(dark.run_vocabulary_job("grow", lane="session"))
+
+
+def test_the_behavior_participant_expires_physical_units_truncates_the_journal_and_reports_pools(
+    tmp_path: Path,
+) -> None:
+    """6.14：行为侧参与者挂进生命周期 Worker，每轮放掉物理一支过了补发跨度的小账、把词表变更日志截到还要读的最老一版、
+    报两支待定池的容量（L10.14 补测：原先这个参与者一条测试都没有）。"""
+
+    from datetime import UTC
+
+    from habitus.behavior.fusion.lanes.physical.ledger import AcceptedSpan, SpanKind
+    from habitus.behavior.kinds.changes import AddClass, ChangeReason, VersionRecord
+    from tests.unit.behavior.kinds_fixtures import named_classes
+
+    runtime = build_runtime(
+        behavior_enabled_config(tmp_path),
+        providers=runtime_dependencies()[0],
+        vector_stores=runtime_dependencies()[1],
+        path_lock=PathLock(ProcessLocalLockStore()),
+    )
+    branches = runtime.components.behavior
+    assert branches is not None
+    (participant,) = [
+        item for item in runtime.components.workflow.lifecycle_worker._participants if item.name == "behavior"
+    ]
+    now = datetime.now(UTC)
+    ledger = branches.physical.physical_ledger
+    assert ledger is not None
+    stale = now - timedelta(days=runtime.config.lifecycle.physical_max_backfill_days + 5)
+    ledger.accept("watch-1", "u-1", "digest", AcceptedSpan(SpanKind.SEGMENT, stale, stale + timedelta(minutes=5)))
+    store = branches.session.kind_store
+    for version, item in enumerate(named_classes(("一", "二")), start=store.read().version + 1):
+        store.append(
+            VersionRecord(version, now - timedelta(days=400), ChangeReason.NIGHTLY, (AddClass(item),)),
+            expected_version=version - 1,
+        )
+
+    class _Context:
+        def __init__(self) -> None:
+            self.now = now
+
+        def assert_owned(self) -> None:
+            return None
+
+    report = participant._maintain_blocking(_Context())
+
+    assert ledger.accepted("watch-1", "u-1", stale) is None
+    assert store.journal.segments()[0] == store.read().version  # 没有派生物还在读：截到当前
+    assert {reading.name for reading in report.readings} == {"session_kinds_pending", "physical_kinds_pending"}
+    assert report.released >= 2

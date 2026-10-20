@@ -1,7 +1,8 @@
 """词表的文件存储（插件交付：全是文件，不建表）。树根下四个文件：
 
 - ``kinds.md``            当前清单：给人看的列表 + 版本号元数据；由变更日志推出来，是视图不是真相；
-- ``kinds.changes.jsonl`` 变更日志：一行一版，只追加；当前词表 = 依次应用每一版（真相）；
+- ``kinds.changes.jsonl`` 变更日志：一行一版，只追加；当前词表 = 快照 + 依次应用之后的每一版（真相）；
+- ``kinds.snapshot.json`` 截断那一版的整份词表（``journal``，26 号清单 6.5）；
 - ``kinds.pending.json``  待定池；
 - ``kinds.migration.json`` 迁移计划：只在"重打树"期间存在，内容就是将要追加的那一版；崩溃后按它续做；
 - ``kinds.jobs.json``    两件定时活的跨次状态：上次每晚新增、上次定期拆改的时刻，最近几次提过的合并（合并证据）。
@@ -12,10 +13,11 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from habitus.behavior.kinds.changes import VersionRecord, apply, replay
+from habitus.behavior.kinds.changes import VersionRecord, apply
 from habitus.behavior.kinds.codec import (
     BehaviorKindCodecError,
     job_state_from,
@@ -26,6 +28,7 @@ from habitus.behavior.kinds.codec import (
     record_payload,
 )
 from habitus.behavior.kinds.config import BehaviorKindConfig
+from habitus.behavior.kinds.journal import SNAPSHOT_FILENAME, VocabularyJournal, VocabularyJournalError
 from habitus.behavior.kinds.model import BehaviorKindError, Vocabulary
 from habitus.behavior.kinds.pending import PendingPool
 from habitus.behavior.kinds.render import render_catalog
@@ -43,6 +46,17 @@ CHANGES_FILENAME = "kinds.changes.jsonl"
 PENDING_FILENAME = "kinds.pending.json"
 MIGRATION_FILENAME = "kinds.migration.json"
 JOBS_FILENAME = "kinds.jobs.json"
+
+
+# 变更日志的追加（归约 sweep）、截断（生命周期）、写迁移计划都是"读整份、改、整份写回"，分在不同线程里：同一份日志
+# 的这几种改写必须串起来，否则截断会把刚追加的一版抹掉，清单视图已是新版、日志却没有（L10.3）。按路径共用一把。
+_JOURNAL_LOCKS: dict[Path, threading.Lock] = {}
+_JOURNAL_LOCKS_GUARD = threading.Lock()
+
+
+def _journal_lock(path: Path) -> threading.Lock:
+    with _JOURNAL_LOCKS_GUARD:
+        return _JOURNAL_LOCKS.setdefault(path, threading.Lock())
 
 
 class BehaviorKindStoreError(ValueError):
@@ -71,45 +85,62 @@ class BehaviorKindStore:
         self.pending_path = self.root / PENDING_FILENAME
         self.migration_path = self.root / MIGRATION_FILENAME
         self.jobs_path = self.root / JOBS_FILENAME
+        self._journal_lock = _journal_lock(self.changes_path)
+        self.journal = VocabularyJournal(
+            self.changes_path, self.root / SNAPSHOT_FILENAME, read_text=self._read_text, write_text=self._write
+        )
 
     # ── 变更日志与当前词表 ─────────────────────────────────────────────────────────
 
     def records(self) -> tuple[VersionRecord, ...]:
-        text = self._read_text(self.changes_path)
-        if text is None:
-            return ()
-        records: list[VersionRecord] = []
-        # 只按 "\n" 切：JSON 已把记录内部的换行转义，``splitlines`` 还会在 U+2028 这类字符上切，把一条记录切成两半。
-        for number, line in enumerate((item for item in text.split("\n") if item), start=1):
-            try:
-                records.append(record_from(json.loads(line)))
-            except (json.JSONDecodeError, BehaviorKindCodecError) as exc:
-                raise BehaviorKindStoreError(f"change log line {number} is invalid: {exc}") from exc
-        return tuple(records)
+        """快照之后的每一版。"""
+
+        try:
+            return self.journal.records()
+        except VocabularyJournalError as exc:
+            raise BehaviorKindStoreError(str(exc)) from exc
 
     def read(self) -> Vocabulary:
         try:
-            return replay(self.records())
-        except BehaviorKindError as exc:
-            raise BehaviorKindStoreError(f"change log does not replay: {exc}") from exc
+            return self.journal.current()
+        except VocabularyJournalError as exc:
+            raise BehaviorKindStoreError(str(exc)) from exc
+
+    def changes_since(self, version: int) -> tuple[VersionRecord, ...]:
+        """``version`` 之后的每一版；早于快照的请求报错（截断了，不返回不完整的结果）。"""
+
+        try:
+            return self.journal.changes_since(version)
+        except VocabularyJournalError as exc:
+            raise BehaviorKindStoreError(str(exc)) from exc
+
+    def truncate_before(self, version: int) -> bool:
+        """把 ``version`` 及以前折进快照（下限由组合根算好，见 ``journal``）。迁移做到一半时不截。"""
+
+        with self._journal_lock:
+            if self.read_migration() is not None:
+                return False
+            try:
+                return self.journal.truncate_before(version)
+            except VocabularyJournalError as exc:
+                raise BehaviorKindStoreError(str(exc)) from exc
 
     def append(self, record: VersionRecord, *, expected_version: int) -> Vocabulary:
         """追加一版；当前最后一版不是 ``expected_version`` 就拒绝。随后重写清单视图。"""
 
-        current = self.read()
-        if current.version != expected_version:
-            raise BehaviorKindConflictError(
-                f"vocabulary version changed: expected {expected_version}, found {current.version}"
-            )
-        try:
-            updated = apply(current, record)
-        except BehaviorKindError as exc:
-            raise BehaviorKindStoreError(f"version {record.version} does not apply: {exc}") from exc
-        existing = self._read_text(self.changes_path) or ""
-        line = json.dumps(record_payload(record), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        self._write(self.changes_path, f"{existing}{line}\n")
-        self._write(self.catalog_path, render_catalog(updated, schema_version=KINDS_SCHEMA_VERSION))
-        return updated
+        with self._journal_lock:
+            current = self.read()
+            if current.version != expected_version:
+                raise BehaviorKindConflictError(
+                    f"vocabulary version changed: expected {expected_version}, found {current.version}"
+                )
+            try:
+                updated = apply(current, record)
+            except BehaviorKindError as exc:
+                raise BehaviorKindStoreError(f"version {record.version} does not apply: {exc}") from exc
+            self.journal.append(record)
+            self._write(self.catalog_path, render_catalog(updated, schema_version=KINDS_SCHEMA_VERSION))
+            return updated
 
     def catalog_in_sync(self) -> bool:
         """清单视图是不是当前词表推出来的样子（监控用；崩在两次写之间时会是 False，下一次追加即修复）。"""
@@ -165,17 +196,18 @@ class BehaviorKindStore:
     def write_migration(self, record: VersionRecord) -> None:
         """写下将要追加的那一版；已有一份没做完的计划时拒绝（先续做完它）。"""
 
-        if self.read_migration() is not None:
-            raise BehaviorKindConflictError("an unfinished migration plan exists; resume it first")
-        current = self.read()
-        if record.version != current.version + 1:
-            raise BehaviorKindConflictError("migration plan must be the next version")
-        try:
-            apply(current, record)  # 先试应用：不可应用的计划不许落盘（否则先改树、后在追加日志时永久失败）
-        except BehaviorKindError as exc:
-            raise BehaviorKindStoreError(f"migration plan does not apply: {exc}") from exc
-        payload = json.dumps(record_payload(record), ensure_ascii=False, sort_keys=True, indent=1)
-        self._write(self.migration_path, payload + "\n")
+        with self._journal_lock:  # 与截断串起来：截断先看"有没有迁移"再动手，两步之间不能插进一份计划
+            if self.read_migration() is not None:
+                raise BehaviorKindConflictError("an unfinished migration plan exists; resume it first")
+            current = self.read()
+            if record.version != current.version + 1:
+                raise BehaviorKindConflictError("migration plan must be the next version")
+            try:
+                apply(current, record)  # 先试应用：不可应用的计划不许落盘（否则先改树、后在追加日志时永久失败）
+            except BehaviorKindError as exc:
+                raise BehaviorKindStoreError(f"migration plan does not apply: {exc}") from exc
+            payload = json.dumps(record_payload(record), ensure_ascii=False, sort_keys=True, indent=1)
+            self._write(self.migration_path, payload + "\n")
 
     def clear_migration(self) -> None:
         try:

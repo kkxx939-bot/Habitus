@@ -83,15 +83,11 @@ class VectorStore:
 
     async def search(self, _vector, *, filters, limit):
         return tuple(
-            VectorStoreMatch(record, 0.8)
-            for record in self.records.values()
-            if filters.matches(record.attributes)
+            VectorStoreMatch(record, 0.8) for record in self.records.values() if filters.matches(record.attributes)
         )[:limit]
 
     async def scan(self, *, filters, limit):
-        return tuple(
-            record for record in self.records.values() if filters.matches(record.attributes)
-        )[:limit]
+        return tuple(record for record in self.records.values() if filters.matches(record.attributes))[:limit]
 
     async def close(self):
         return None
@@ -199,9 +195,7 @@ def test_summary_synchronize_exactly_deletes_manifest_hidden_identity(tmp_path: 
     assert tuple(store.records) == (reference.identity,)
 
     retirements.hidden_identities.add(reference.identity)
-    state = asyncio.run(
-        index.synchronize(address, removed_references=(reference,))
-    )
+    state = asyncio.run(index.synchronize(address, removed_references=(reference,)))
 
     assert state.record_count == 0
     assert store.records == {}

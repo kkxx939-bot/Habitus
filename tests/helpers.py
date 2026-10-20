@@ -55,7 +55,9 @@ def closed_turn(*, start_sequence: int = 0, prompt: str = "请记住我喜欢简
     )
 
 
-def tool_turn(*, start_sequence: int = 0, status: ConversationToolResultStatus = ConversationToolResultStatus.COMPLETED) -> tuple[ConversationMessage, ...]:
+def tool_turn(
+    *, start_sequence: int = 0, status: ConversationToolResultStatus = ConversationToolResultStatus.COMPLETED
+) -> tuple[ConversationMessage, ...]:
     """构造工具调用与唯一终态结果均闭合的一轮对话。"""
 
     return (
@@ -135,7 +137,11 @@ def memory_fields(kind: MemoryKind) -> dict[str, object]:
         MemoryKind.PREFERENCE: {"topic": "回答风格", "content": "- 偏好简洁直接的回答"},
         MemoryKind.ENTITY: {"category": "项目", "name": "Habitus", "summary": "Habitus 是用户正在重构的记忆系统。"},
         MemoryKind.TOOL: {"tool_name": "workspace.inspect", "verification": "返回工作区状态后检查退出状态。"},
-        MemoryKind.EVENT: {"event_date": date(2026, 7, 1), "event_name": "确认记忆树", "summary": "用户确认了六类长期记忆树。"},
+        MemoryKind.EVENT: {
+            "event_date": date(2026, 7, 1),
+            "event_name": "确认记忆树",
+            "summary": "用户确认了六类长期记忆树。",
+        },
         MemoryKind.INTENTION: {"intent_name": "完成记忆系统重构", "status": "open", "next_step": "补齐测试体系"},
     }[kind]
 

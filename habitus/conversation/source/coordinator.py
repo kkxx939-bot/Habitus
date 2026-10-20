@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Coroutine, Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -83,11 +83,8 @@ class ConversationSourceCoordinator:
             raise ValueError("coordinator and delivery must share the Source Store")
         self.sources = sources
         self.delivery = delivery
-        self._tasks: set[asyncio.Task[ConversationConsumerEnsureResult]] = set()
-        self._task_deliveries: dict[
-            asyncio.Task[ConversationConsumerEnsureResult],
-            ConversationSourcePendingDelivery,
-        ] = {}
+        self._tasks: set[asyncio.Task[object]] = set()
+        self._task_deliveries: dict[asyncio.Task[object], tuple[ConversationSourcePendingDelivery, ...]] = {}
 
     def start(self, envelope: ConversationSourceEnvelope) -> ConversationSourceDispatchHandle:
         durable = self.sources.put(envelope)
@@ -96,9 +93,22 @@ class ConversationSourceCoordinator:
         # 按枚举顺序遍历注册表，保证启动顺序确定，且新增 Consumer 不必改这里。
         for consumer in ConversationSourceConsumer:
             task = loop.create_task(self.delivery.ensure_outcome(durable, consumer))
-            self._track(task, durable.source_id, consumer)
+            self._track(task, (ConversationSourcePendingDelivery(durable.source_id, consumer),))
             tasks[consumer] = task
         return ConversationSourceDispatchHandle(durable, self.delivery, MappingProxyType(tasks))
+
+    def dispatch(
+        self,
+        deliveries: Iterable[tuple[str, ConversationSourceConsumer]],
+        work: Coroutine[object, object, object],
+    ) -> asyncio.Task[object]:
+        """把一段交付工作（周期恢复的一批）挂到协调器上跑：不占住调用方，停机时与 ``start`` 的交付一起排空，
+        还在跑时 ``pending_deliveries`` 列得出它负责的那些 Source/Consumer。"""
+
+        named = tuple(ConversationSourcePendingDelivery(source_id, consumer) for source_id, consumer in deliveries)
+        task: asyncio.Task[object] = asyncio.get_running_loop().create_task(work)
+        self._track(task, named)
+        return task
 
     async def wait_for_idle(self, timeout_seconds: float | None) -> bool:
         """有界等待但不取消 Consumer；超时后 Recovery 仍可复用耐久状态。"""
@@ -119,27 +129,25 @@ class ConversationSourceCoordinator:
 
         return tuple(
             sorted(
-                (delivery for task, delivery in self._task_deliveries.items() if not task.done()),
+                {
+                    delivery
+                    for task, deliveries in self._task_deliveries.items()
+                    if not task.done()
+                    for delivery in deliveries
+                },
                 key=lambda item: (item.source_id, item.consumer.value),
             )
         )
 
-    def _track(
-        self,
-        task: asyncio.Task[ConversationConsumerEnsureResult],
-        source_id: str,
-        consumer: ConversationSourceConsumer,
-    ) -> None:
+    def _track(self, task: asyncio.Task[object], deliveries: tuple[ConversationSourcePendingDelivery, ...]) -> None:
         self._tasks.add(task)
-        self._task_deliveries[task] = ConversationSourcePendingDelivery(source_id, consumer)
+        self._task_deliveries[task] = deliveries
 
-        def completed(done: asyncio.Task[ConversationConsumerEnsureResult]) -> None:
+        def completed(done: asyncio.Task[object]) -> None:
             self._tasks.discard(done)
             self._task_deliveries.pop(done, None)
             if not done.cancelled():
                 # 取出异常避免"未检索异常"警告；失败本身由调用方 wait/inspect 观察。
-                # TODO(conversation-source): 后台 Consumer 的失败当前不落任何记录，
-                # 无人 wait 时会静默停摆；可观测方案待与 Behavior 下游一并确定。
                 done.exception()
 
         task.add_done_callback(completed)

@@ -6,39 +6,52 @@ from pathlib import Path
 
 import pytest
 
+from habitus.infrastructure.lifecycle import ParticipantReport
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.conversation import ConversationAddress
 from habitus.memory.workflow import MemoryJobStatus
 from habitus.memory.workflow.jobs import MemoryJobStore
 from habitus.runtime import (
+    ConversationChainResult,
     LifecycleMaintenanceCycleResult,
     LifecycleMaintenanceFailure,
+    LifecycleParticipantOutcome,
     MemoryJobRetryResult,
     RuntimeInitialization,
 )
 from tests.helpers import BASE_TIME, segment
 
 
-def test_lifecycle_cycle_separates_success_and_failure_within_selected_batch() -> None:
+def test_conversation_chain_result_separates_success_and_failure_within_selected_batch() -> None:
     first = ConversationAddress("a", date(2026, 7, 1))
     second = ConversationAddress("b", date(2026, 7, 1))
     failure = LifecycleMaintenanceFailure(second, "RuntimeError", "临时失败")
+    result = ConversationChainResult((first, second), (first,), (failure,))
+    assert result.maintained_addresses == (first,)
+    assert result.failures == (failure,)
+    with pytest.raises(ValueError, match="both succeed and fail"):
+        replace(result, maintained_addresses=(first, second))
+
+
+def test_lifecycle_cycle_result_validates_outcomes() -> None:
+    report = ParticipantReport(released=2)
     result = LifecycleMaintenanceCycleResult(
         lease_acquired=True,
         started_at=BASE_TIME,
         finished_at=BASE_TIME + timedelta(seconds=1),
-        selected_addresses=(first, second),
-        maintained_addresses=(first,),
-        failures=(failure,),
+        outcomes=(
+            LifecycleParticipantOutcome("a", report=report),
+            LifecycleParticipantOutcome("b", error_type="RuntimeError", message="boom"),
+        ),
     )
-    assert result.maintained_addresses == (first,)
-    assert result.failures == (failure,)
-
-    with pytest.raises(ValueError, match="both succeed and fail"):
-        replace(result, maintained_addresses=(first, second))
+    assert [item.name for item in result.failures] == ["b"]
     with pytest.raises(ValueError, match="skipped lease"):
         replace(result, lease_acquired=False)
+    with pytest.raises(ValueError, match="unique"):
+        replace(result, outcomes=(LifecycleParticipantOutcome("a", report=report),) * 2)
+    with pytest.raises(ValueError, match="either a report or a failure"):
+        LifecycleParticipantOutcome("c")
 
 
 def test_runtime_initialization_requires_absolute_root_and_stable_recovery_ids(tmp_path: Path) -> None:

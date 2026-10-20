@@ -7,8 +7,9 @@
 2. 一轮一轮交给会话 lane（描述 + 写判断）；
 3. 给这份源留一份回执（``conversation/behavior_session``），供会话源的交付契约判定"处理完了"。
 
-失败怎么办：某一轮的模型调用失败就让异常抛出去，这份源不落终态，由会话源现有的恢复机制之后重做
-（方案：一轮判失败时不写空白）；重做时已经写过判断的轮会被认出来，不重复写。
+失败怎么办：某一轮的模型调用失败就让异常抛出去，这份源不落终态，由会话源的恢复按重试账之后重做；重做时已经写过判断的
+轮会被认出来，不重复写。重试账放弃了（怎么失败的都一样）就走 ``abandon``：还没写进树的轮写成没读懂空白、落终态
+（23 号第一节第 6 条：缺失必须记录，否则下游把"看了没读懂"读成"没做"）。
 
 TODO(BHV-SESSION-LANE-001)：只收本人在交互界面里说话的会话（裁定 37）——现在只挡得住子代理的会话
 （会话身份带 ``.subagent.``）。脚本调起、定时触发的会话在信封上没有任何标识，要插件与服务入口先把来源带上来。
@@ -26,6 +27,7 @@ from habitus.behavior.fusion.lanes.session import (
     SessionMessageRole,
     SessionTurn,
     TurnDisposition,
+    TurnOutcome,
     split_turns,
 )
 from habitus.conversation.behavior_session import (
@@ -94,6 +96,8 @@ class BehaviorSessionConsumer:
     consumer = ConversationSourceConsumer.BEHAVIOR_SESSION
     # 一轮一条、互不相认：同一个会话的几份源谁先处理都一样。
     ordered_within_conversation = False
+    # 已释放的源被重投时不再执行：覆盖记录会随源释放，重放就会写出重复的判断。
+    skips_released_sources = True
 
     def __init__(
         self,
@@ -124,15 +128,48 @@ class BehaviorSessionConsumer:
         envelope: ConversationSourceEnvelope,
         lease: ConversationConsumerExecutionLease,
     ) -> ConversationConsumerRunResult:
+        turns = self._turns(envelope)
+        if isinstance(turns, ConversationConsumerRunResult):
+            return turns
+        assert self.lane is not None
+        # 一轮一次模型调用，可能很久：每轮之前确认租约还在，丢了就停，别和接手的那一方各写一遍。
+        outcomes = await self.lane.consume(turns, before_each=lease.require_alive, sources=(envelope.source_id,))
+        return await self._receipt(envelope, lease, outcomes)
+
+    async def abandon(
+        self,
+        envelope: ConversationSourceEnvelope,
+        lease: ConversationConsumerExecutionLease,
+        *,
+        reason: str,
+    ) -> ConversationConsumerRunResult:
+        """重试账放弃了这份源：不再问模型，还没写进树的轮写成没读懂，照常留回执、落终态（信封因此可以释放）。"""
+
+        turns = self._turns(envelope)
+        if isinstance(turns, ConversationConsumerRunResult):
+            return turns
+        assert self.lane is not None
+        outcomes = await self.lane.abandon(
+            turns, reason=reason, before_each=lease.require_alive, sources=(envelope.source_id,)
+        )
+        return await self._receipt(envelope, lease, outcomes)
+
+    def _turns(self, envelope: ConversationSourceEnvelope) -> tuple[SessionTurn, ...] | ConversationConsumerRunResult:
+        """这份源要处理的轮；没有要处理的（行为侧没启用、子代理的会话、没有一轮）给出"跳过"。"""
+
         if self.lane is None:
             return _skipped(SKIP_BEHAVIOR_DISABLED)
         if _SUBAGENT_MARK in envelope.conversation_id:
             return _skipped(SKIP_SUBAGENT)
         turns = session_turns(envelope, question_tools=self.lane.describer.config.question_tools)
-        if not turns:
-            return _skipped(SKIP_NO_TURNS)
-        # 一轮一次模型调用，可能很久：每轮之前确认租约还在，丢了就停，别和接手的那一方各写一遍。
-        outcomes = await self.lane.consume(turns, before_each=lease.require_alive)
+        return turns if turns else _skipped(SKIP_NO_TURNS)
+
+    async def _receipt(
+        self,
+        envelope: ConversationSourceEnvelope,
+        lease: ConversationConsumerExecutionLease,
+        outcomes: tuple[TurnOutcome, ...],
+    ) -> ConversationConsumerRunResult:
         records = [
             BehaviorSessionTurnRecord(
                 start_sequence=outcome.turn.start_sequence,

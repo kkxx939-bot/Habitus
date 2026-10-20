@@ -1,6 +1,5 @@
 """精确节点匹配、YAML 字段合并和最终身份安全规划测试。"""
 
-
 import pytest
 
 from habitus.infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
@@ -60,9 +59,7 @@ def test_new_candidate_requires_explicit_missing_target_and_uses_page_id_100_or_
     uri = MemoryURI.from_address(candidate.address)
     missing = VersionedSnapshot.missing(str(uri))
     read_set = MemoryMutationReadSet(SnapshotBatch((), 0), target_batch(missing))
-    plan = MemoryMutationPlanner().plan(
-        MemoryCandidateBatch(preferences=(candidate,)), read_set, MemoryPageIdMap()
-    )
+    plan = MemoryMutationPlanner().plan(MemoryCandidateBatch(preferences=(candidate,)), read_set, MemoryPageIdMap())
     assert plan.mutations[0].action is MemoryMutationAction.CREATE
     assert plan.mutations[0].uri == uri
 
@@ -126,9 +123,7 @@ def test_final_identity_map_rejects_merge_without_live_target_and_duplicate_live
     profile_uri = MemoryURI.from_address(document(MemoryKind.PROFILE).address)
     preference_uri = MemoryURI.from_address(document(MemoryKind.PREFERENCE).address)
     with pytest.raises(MemoryFinalIdentityError, match="separately planned live node"):
-        MemoryFinalIdentityMap(
-            (MemoryFinalIdentity(1, MemoryNodeDisposition.MERGE, preference_uri, profile_uri),)
-        )
+        MemoryFinalIdentityMap((MemoryFinalIdentity(1, MemoryNodeDisposition.MERGE, preference_uri, profile_uri),))
     with pytest.raises(MemoryFinalIdentityError, match="multiple node identities"):
         MemoryFinalIdentityMap(
             (
@@ -136,4 +131,3 @@ def test_final_identity_map_rejects_merge_without_live_target_and_duplicate_live
                 MemoryFinalIdentity(101, MemoryNodeDisposition.CREATE, None, profile_uri),
             )
         )
-

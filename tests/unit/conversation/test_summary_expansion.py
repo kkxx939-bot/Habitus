@@ -89,8 +89,6 @@ def test_default_expansion_read_bound_covers_default_legal_archive_fanout(tmp_pa
         ConversationRangeSummaryStore(layout),
     )
     config = ConversationSummaryCompactionConfig()
-    legal_reads = config.range_to_archive.max_source_count * (
-        1 + config.segment_to_range.max_source_count
-    )
+    legal_reads = config.range_to_archive.max_source_count * (1 + config.segment_to_range.max_source_count)
 
     assert expander.max_source_reads >= legal_reads

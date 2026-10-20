@@ -10,10 +10,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import tzinfo
 
 from habitus.behavior.fusion.lanes.session.config import SessionLaneConfig
 from habitus.behavior.fusion.lanes.session.model import SessionMessage, SessionMessageRole, SessionTurn
 from habitus.behavior.fusion.lanes.session.redaction import redact
+from habitus.behavior.fusion.lanes.session.reminders import PendingReminder
 
 # 宿主注入的合成消息：不是人说的话，不开一轮。
 SYNTHETIC_PREFIXES = (
@@ -170,6 +172,20 @@ def render_turn(turn: SessionTurn, *, config: SessionLaneConfig | None = None) -
     return redact(_render(turn, config or SessionLaneConfig()))
 
 
+def render_reminders(reminders: Sequence[PendingReminder], *, zone: tzinfo) -> str:
+    """还开着的提醒那一节（方案 30 第五节）：按带进来的顺序编号，模型按编号答回应的是哪一条。没有就是空串。"""
+
+    if not reminders:
+        return ""
+    lines = ["【还开着的提醒】系统之前对他说过、还没过期的几句："]
+    for number, item in enumerate(reminders, start=1):
+        said = item.said_at.astimezone(zone)
+        until = item.deadline.astimezone(zone)
+        text = redact(" ".join(item.text.split())) or "（没有留下原话）"
+        lines.append(f"  {number}. {said:%m-%d %H:%M} 说过：「{text}」（最晚到 {until:%m-%d %H:%M}）")
+    return "\n".join(lines)
+
+
 def _render(turn: SessionTurn, limits: SessionLaneConfig) -> str:
     instruction = _head_tail(redact(turn.instruction), limits.max_instruction_chars)
     replies = [
@@ -255,4 +271,12 @@ def _head_tail(text: str, limit: int) -> str:
     return f"{text[:half]}……（中间省略 {len(text) - 2 * half} 字）……{text[-half:]}"
 
 
-__all__ = ["ANSWER_PREFIX", "WAKE_LABEL", "WAKE_PREFIXES", "is_synthetic", "render_turn", "split_turns"]
+__all__ = [
+    "ANSWER_PREFIX",
+    "WAKE_LABEL",
+    "WAKE_PREFIXES",
+    "is_synthetic",
+    "render_reminders",
+    "render_turn",
+    "split_turns",
+]

@@ -1,6 +1,6 @@
 """跨度段、扎堆合并与配对的层（语义树新方案 ``13`` ①）。
 
-**四段互不重叠，按预测树的槽对齐**：A（合并后的那条链）在第 ``e`` 槽做完（最后所见），
+**四段互不重叠，按 ``temporal`` 的槽对齐**：A（合并后的那条链）在第 ``e`` 槽做完（最后所见），
 
 1. **同一条链**：``[e, e + W]``（W = 转移窗口的槽数）；实验组只算不是 A 那条链自己的记录。从**做完**起量，不从开始起量：
    人一件接一件做事，A 做着的时候别的事要等它做完；从开始量，做得久的 A 会对一切后果都"更少"（第四轮评审算法 1，合成数据
@@ -11,13 +11,13 @@
 
 每段各自报，一个效应不会在几档重复显著；允许"不随时间单调"的形状。
 
-**扎堆合并**：同一个概念相邻两次隔不到 W 槽的算同一条链里的一次（与预测树对"链"同一个定义），锚在链头。
+**扎堆合并**：同一个概念相邻两次隔不到 W 槽的算同一条链里的一次（与 ``temporal.merge_starts`` 对"一次"同一个定义），锚在链头。
 后面几段窗口仍重叠的再合一次（"窗口重叠才合并"，结构规则、没有常数）：当天剩下的与次日，同一天的几条链合成一次；
 第 2–7 天，隔不到 6 天的合成一次（两个窗口 [d+2, d+7] 与 [d'+2, d'+7] 重叠当且仅当 d' − d ≤ 5）。
 
 **只量人在场的时间**：窗口里人不在的那段不是"B 没来"，是没有机会来。不这么量，"A 之后人就下线了"会被读成
 "A 让一切都更难发生"（合成数据实测：17:50 收工前写文档，于是"写文档 → 当天剩下的修改代码 / 调研 / 讨论方案"全部显著为负；
-周五做的事"让次日什么都不发生"）。那是"A 之后收工"，预测树的"没有后继"已经记着，不是两件事之间的关系。所以：
+周五做的事"让次日什么都不发生"）。那是"A 之后收工"，不是两件事之间的关系。所以：
 
 - 同一条链的窗口要整段人在场（A 是收工前最后一件的，这一次结果未知）；
 - 当天剩下的，量的是 A 之后到当天结束人在场的槽；
@@ -42,10 +42,10 @@
 - **次日、第 2–7 天**：别的周、同一个周几、当天没做 A、人在场的日子。
 
 **对照里不能有 A**：对照回答"没做 A 会怎样"，一个每周四都做的 A，别的周四多半也做了它，拿那些时刻当对照等于拿实验组比实验组，
-效应被抹平。按槽的段排"那一刻附近有 A"，按天的段排"那天有 A"。每天都来的东西是预测树的基线，语义树只说基线之外的关系。
+效应被抹平。按槽的段排"那一刻附近有 A"，按天的段排"那天有 A"。每天都来的东西是基线，关系只说基线之外的。
 
 跨天与当天之后用"同一个周几"（裁定 27 第 2 条）：取同一周别的日子扣不掉周几，会把两件事各自的周节律（周四开会、周五写周报，
-彼此无关）读成关系，而周几 × 钟点本来就是预测树的基线；周与周之间的慢漂移由按块的检验与维持检验兜。
+彼此无关）读成关系，而周几本身的效应由日历情境关系单独检验（裁定 59）；周与周之间的慢漂移由按块的检验与维持检验兜。
 """
 
 from __future__ import annotations
@@ -56,6 +56,8 @@ from datetime import date, datetime, timedelta
 from enum import Enum
 
 from habitus.scene.relations.timeline import LaneTimeline, Mark
+from habitus.temporal.merge import merge_starts
+from habitus.temporal.slots import MINUTES_PER_DAY
 
 
 class Segment(str, Enum):
@@ -70,7 +72,7 @@ class Segment(str, Enum):
     #: 一段明显多于 / 少于它自己常态的日子（变点检测）。
     HIGH_STATE = "high_state"
     LOW_STATE = "low_state"
-    #: 久别重来之后（隔了超过预测树的复发窗口）。
+    #: 久别重来之后（这一次的空白比之前没截尾的间隔都长，``temporal.absence``）。
     RETURN = "return"
     #: 情境概念成立的日子（如「出差中」「周末」）。
     SITUATION = "situation"
@@ -139,18 +141,13 @@ class Stratum:
 
 
 def chains_of(line: LaneTimeline, concept: str, window: int) -> tuple[Chain, ...]:
-    """扎堆合并：相邻两次隔不到 ``window`` 槽的并进同一条链。"""
+    """扎堆合并：相邻两次开始时刻相隔不超过合并窗口（``window`` 槽换算成秒）的并进同一条链（裁定 59：按秒判断，
+    合并规则只在 ``temporal.merge_starts`` 一处）。"""
 
-    found: list[Chain] = []
-    members: list[Mark] = []
-    for mark in line.marks.get(concept, []):
-        if members and mark.slot - members[-1].slot > window:
-            found.append(_chain(members))
-            members = []
-        members.append(mark)
-    if members:
-        found.append(_chain(members))
-    return tuple(found)
+    marks = sorted(line.marks.get(concept, []), key=lambda item: (item.started_at, item.slot, item.uri))
+    seconds = window * (MINUTES_PER_DAY // line.slots_per_day) * 60
+    groups = merge_starts([mark.started_at for mark in marks], window_seconds=seconds)
+    return tuple(_chain([marks[index] for index in group]) for group in groups)
 
 
 def merge_for(segment: Segment, chains: tuple[Chain, ...]) -> tuple[Chain, ...]:
@@ -253,9 +250,7 @@ class Controls:
         elif segment is Segment.CHAIN:
             low, high = chain.end, chain.end + self.window
             found = [
-                mark
-                for mark in line.outcomes(consequent)
-                if low <= mark.slot <= high and mark.uri not in chain.uris
+                mark for mark in line.outcomes(consequent) if low <= mark.slot <= high and mark.uri not in chain.uris
             ]
         else:
             start = line.day_start(chain.day)
@@ -263,9 +258,7 @@ class Controls:
             present = line.present.get(chain.day, ())
             wanted = set(present[bisect_right(present, own + self.window) :])
             found = [
-                mark
-                for mark in line.outcomes(consequent)
-                if mark.slot - start in wanted and mark.uri not in chain.uris
+                mark for mark in line.outcomes(consequent) if mark.slot - start in wanted and mark.uri not in chain.uris
             ]
         return min(found, key=lambda mark: (mark.slot, mark.started_at, mark.uri)) if found else None
 

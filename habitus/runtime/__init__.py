@@ -23,11 +23,17 @@ from habitus.runtime.health import (
 )
 from habitus.runtime.lifecycle import (
     LifecycleMaintenanceCycleResult,
-    LifecycleMaintenanceFailure,
+    LifecycleParticipantOutcome,
     LifecycleWorker,
     LifecycleWorkerLeaseLostError,
     LifecycleWorkerState,
     LifecycleWorkerStateError,
+)
+from habitus.runtime.lifecycle_memory import (
+    ConversationChainParticipant,
+    ConversationChainResult,
+    LifecycleMaintenanceFailure,
+    MemoryL2Participant,
 )
 from habitus.runtime.runtime import (
     MemoryJobAbandonResult,
@@ -44,6 +50,9 @@ from habitus.runtime.runtime import (
 from habitus.runtime.worker import MemoryWorker, MemoryWorkerState, MemoryWorkerStateError
 
 __all__ = [
+    "ConversationChainParticipant",
+    "ConversationChainResult",
+    "MemoryL2Participant",
     "Runtime",
     "RuntimeComponents",
     "RuntimeConversation",
@@ -70,6 +79,7 @@ __all__ = [
     "MemoryConsistencyTimeoutError",
     "LifecycleMaintenanceCycleResult",
     "LifecycleMaintenanceFailure",
+    "LifecycleParticipantOutcome",
     "LifecycleWorker",
     "LifecycleWorkerLeaseLostError",
     "LifecycleWorkerState",

@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from typing import cast
 
+from habitus.conversation import ConversationOrderedPredecessorBrokenError, ConversationOrderedPredecessorPendingError
 from habitus.infrastructure.store.contracts.lock import LockLostError
 from habitus.integrations.http import HTTPMemoryJobConflictError, HTTPMemoryJobNotFoundError
 from habitus.integrations.http_api.app import create_http_app
@@ -121,6 +122,39 @@ def test_lock_loss_and_runtime_unavailability_have_distinct_retry_semantics() ->
         True,
     )
     assert "/private/path" not in lock.message
+
+
+def test_waiting_for_an_earlier_source_is_retryable_but_a_broken_one_is_not() -> None:
+    """「等前序」是有序 Consumer 的正常排队（裁定 60 第 6 条）：可重试、带 Retry-After，不再落进 ValueError 的 400；
+    前序已坏的照旧不可重试。"""
+
+    pending = map_exception(
+        ConversationOrderedPredecessorPendingError("earlier memory Source s-1 has no terminal Outcome")
+    )
+    broken = map_exception(ConversationOrderedPredecessorBrokenError("earlier memory Source s-1 is corrupted"))
+
+    assert (pending.code, pending.status_code, pending.retryable, pending.retry_after_seconds) == (
+        HTTPErrorCode.ABORTED,
+        409,
+        True,
+        1,
+    )
+    assert pending.details == {"conflict_type": "conversation_predecessor_pending"}
+    assert "s-1" not in pending.message
+    assert (broken.code, broken.retryable) == (HTTPErrorCode.INVALID_ARGUMENT, False)
+
+
+def test_a_full_conversation_source_ledger_asks_the_client_to_retry_later() -> None:
+    from habitus.conversation import ConversationSourceCapacityError
+
+    spec = map_exception(ConversationSourceCapacityError("pending sources reached their bound"))
+
+    assert (spec.code, spec.status_code, spec.retryable, spec.retry_after_seconds) == (
+        HTTPErrorCode.RESOURCE_EXHAUSTED,
+        429,
+        True,
+        60,
+    )
 
 
 def test_model_rate_limit_preserves_bounded_retry_after_without_provider_details() -> None:

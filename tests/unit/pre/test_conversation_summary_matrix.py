@@ -222,7 +222,11 @@ def test_segment_summary_source_binding_detects_each_changed_source_dimension() 
         replace(value, start_sequence=value.start_sequence + 1),
         replace(value, end_sequence=value.end_sequence + 1),
         replace(value, started_at=value.started_at - timedelta(seconds=1)),
-        replace(value, ended_at=value.ended_at + timedelta(seconds=1), generated_at=value.generated_at + timedelta(seconds=2)),
+        replace(
+            value,
+            ended_at=value.ended_at + timedelta(seconds=1),
+            generated_at=value.generated_at + timedelta(seconds=2),
+        ),
     ]
     for mutated in mutations:
         with pytest.raises(ConversationSummarySchemaError, match="does not match"):
@@ -277,7 +281,11 @@ def test_segment_summary_from_dict_rejects_wrong_schema_version() -> None:
 
 @pytest.mark.parametrize("stage", list(ConversationRangeSummaryStage))
 def test_range_summary_stage_maps_to_exact_source_kind(stage: ConversationRangeSummaryStage) -> None:
-    expected = ConversationSummarySourceKind.SEGMENT if stage is ConversationRangeSummaryStage.RANGE else ConversationSummarySourceKind.RANGE
+    expected = (
+        ConversationSummarySourceKind.SEGMENT
+        if stage is ConversationRangeSummaryStage.RANGE
+        else ConversationSummarySourceKind.RANGE
+    )
     assert stage.source_kind is expected
 
 
@@ -320,7 +328,9 @@ def test_summary_source_reference_accepts_bounded_sequence_identity(start: int, 
 )
 def test_summary_source_reference_rejects_invalid_sequence_range(start: object, end: object) -> None:
     with pytest.raises(ConversationSummarySchemaError):
-        ConversationSummarySourceRef(ConversationSummarySourceKind.SEGMENT, "000000000000-000000000001", "a" * 64, start, end)  # type: ignore[arg-type]
+        ConversationSummarySourceRef(
+            ConversationSummarySourceKind.SEGMENT, "000000000000-000000000001", "a" * 64, start, end
+        )  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("summary_id", ["wrong", "000000000000-000000000002", "00000000000-000000000001"])
@@ -502,23 +512,26 @@ def test_range_summary_round_trip_is_exact_and_digest_stable_for_both_stages() -
         assert restored.digest == value.digest
 
 
-@pytest.mark.parametrize("field", [
-    "schema_version",
-    "conversation_id",
-    "range_id",
-    "stage",
-    "source_refs",
-    "start_sequence",
-    "end_sequence",
-    "started_at",
-    "ended_at",
-    "generated_at",
-    "overview",
-    "chronology",
-    "corrections",
-    "ending_state",
-    "open_threads",
-])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "schema_version",
+        "conversation_id",
+        "range_id",
+        "stage",
+        "source_refs",
+        "start_sequence",
+        "end_sequence",
+        "started_at",
+        "ended_at",
+        "generated_at",
+        "overview",
+        "chronology",
+        "corrections",
+        "ending_state",
+        "open_threads",
+    ],
+)
 def test_range_summary_from_dict_requires_exact_field_set(field: str) -> None:
     payload = _range_summary()[0].to_dict()
     payload.pop(field)

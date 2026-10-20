@@ -150,10 +150,15 @@ def test_merge_retires_source_but_keeps_explicitly_planned_target_identity(tmp_p
         pages,
     )
     identities = MemoryFinalIdentityMap(
-        tuple(sorted((
-            MemoryFinalIdentity(source_page, MemoryNodeDisposition.MERGE, source_uri, target_uri),  # type: ignore[arg-type]
-            MemoryFinalIdentity(target_page, MemoryNodeDisposition.NOOP, target_uri, target_uri),  # type: ignore[arg-type]
-        ), key=lambda item: item.page_id))
+        tuple(
+            sorted(
+                (
+                    MemoryFinalIdentity(source_page, MemoryNodeDisposition.MERGE, source_uri, target_uri),  # type: ignore[arg-type]
+                    MemoryFinalIdentity(target_page, MemoryNodeDisposition.NOOP, target_uri, target_uri),  # type: ignore[arg-type]
+                ),
+                key=lambda item: item.page_id,
+            )
+        )
     )
     plan = MemoryCommitPlan.build(
         mutation,

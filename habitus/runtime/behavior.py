@@ -6,7 +6,7 @@
     会话那一支：会话源的交付 → ``runtime/session_lane.py`` 的桥 → 一轮一条判断（LLM 描述）
     物理那一支：上游的一份交付（Runtime 正门）→ 一段一条判断（不调模型）
     每一支各自：判断 / 回执存储 → 归约 sweep（封口 → 词表归类 → 行为树 + L0/L1 → 定稿日记账）
-    → 夜批（见 runtime/prediction.py）
+    → 整晚那一趟（会话那一支；见 runtime/nightly.py）
 
 两支不共用任何存储、词表、归约或 Worker：一支上的记录、空白、词表的类，另一支看不到（裁定 35）。
 
@@ -24,7 +24,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, tzinfo
 
 from habitus.behavior.fusion import BehaviorFusionReceiptStore, BehaviorJudgementStore
-from habitus.behavior.fusion.config import FUSION_CONTEXT_LOOKBACK_SECONDS
+from habitus.behavior.fusion.config import FUSION_CONTEXT_LOOKBACK_SECONDS, BehaviorFusionConfig
 from habitus.behavior.fusion.coverage import BehaviorCoverageIndex
 from habitus.behavior.fusion.lanes.physical import (
     PhysicalLane,
@@ -47,6 +47,7 @@ from habitus.behavior.kinds.nightly import NightlyGrower, PendingRecheck
 from habitus.behavior.kinds.revision import AnchorGate, Reviser
 from habitus.behavior.kinds.store import BehaviorKindStore
 from habitus.behavior.observation import BehaviorObservationStore
+from habitus.behavior.observation.config import BehaviorObservationConfig
 from habitus.behavior.reduction import (
     DEFAULT_SWEEP_LOCK_TTL_SECONDS,
     BehaviorReductionBusyError,
@@ -57,8 +58,12 @@ from habitus.behavior.reduction import (
 from habitus.behavior.reduction.kinds_jobs import VocabularyJobs
 from habitus.behavior.reduction.kinds_migration import KindMigrator
 from habitus.behavior.reduction.kinds_step import KindStamping
+from habitus.behavior.reduction.quarantine import ChainQuarantine
+from habitus.behavior.reduction.refresh import RefreshRetries
 from habitus.behavior.semantic import BehaviorSemanticRefresher, LLMBehaviorOverviewGenerator
 from habitus.behavior.tree import BehaviorTree
+from habitus.behavior.tree.config import BehaviorTreeConfig
+from habitus.behavior.tree.dirty_days import DirtyDayLog
 from habitus.config import HabitusConfig
 from habitus.foundation.observability import (
     NullObserver,
@@ -68,9 +73,11 @@ from habitus.foundation.observability import (
     SpanController,
     observe_operation,
 )
+from habitus.infrastructure.lifecycle import Quarantine, RetryLedger
 from habitus.infrastructure.store.contracts.lock import LockStore
 from habitus.infrastructure.store.contracts.path_lock import PathLock
 from habitus.model_client import StructuredChatClient
+from habitus.runtime.lifecycle_retry import retry_ledger
 from habitus.runtime.resident import ResidentWorker
 
 
@@ -149,6 +156,26 @@ class BehaviorRuntimeComponents:
         if ledger is not None and ledger.root != root:
             raise ValueError(f"behavior branch {self.lane.value} keeps its segment ledger outside its own root")
 
+    @property
+    def physical_ledger(self) -> PhysicalSegmentLedger | None:
+        """物理一支的小账（生命周期按补发跨度整日释放，26 号清单 6.4）；会话一支没有。"""
+
+        return self.fusion.recorder.ledger if isinstance(self.fusion, PhysicalLane) else None
+
+    @property
+    def quarantines(self) -> tuple[Quarantine, ...]:
+        """这一支的隔离区（归约的链、会话 lane 的轮）：放弃的项按统一寿命清、各报容量（L10.10）。"""
+
+        found = [self.reduction_runner.chain_quarantine.quarantine]
+        if isinstance(self.fusion, SessionLane):
+            found.append(self.fusion.recorder.quarantine)
+        return tuple(found)
+
+    @property
+    def retry_ledgers(self) -> tuple[RetryLedger, ...]:
+        refresh = self.reduction_runner.refresh_retries
+        return () if refresh is None else (refresh.ledger,)
+
 
 @dataclass(frozen=True)
 class BehaviorBranches:
@@ -198,8 +225,8 @@ class BehaviorBranches:
 class BehaviorReductionWorker(ResidentWorker):
     """归约 sweep 的常驻节拍（用户裁定 5 分钟一轮）；正确性全在 runner，这里只管节奏。
 
-    sweep 内部的同步 IO 会短暂占用事件循环——量级受 BHV-LIFECYCLE-001 的全量扫描欠账支配，
-    节拍是 5 分钟一次，随时间分区改造一并根治。
+    sweep 内部的同步 IO 会短暂占用事件循环；原料随消费释放、读法按天缓存之后（26 号清单 L2、L6）量级不再随历史涨，
+    节拍是 5 分钟一次。
     """
 
     _task_name = "habitus-behavior-reduction"
@@ -262,8 +289,10 @@ def build_behavior_components(
     observer: Observer | None = None,
     span_controller: SpanController | None = None,
     clock: Callable[[], datetime] | None = None,
+    source_settled: Callable[[str], bool] | None = None,
 ) -> BehaviorBranches | None:
-    """组装行为管线的两支；``primary_subject`` 未配置时返回 None（行为侧未启用）。
+    """组装行为管线的两支；``primary_subject`` 未配置时返回 None（行为侧未启用）。``source_settled`` 答"这份会话源的
+    Behavior 到终态了没有"（会话 lane 的覆盖记录据它释放，26 号清单 6.1）；behavior 不 import conversation，由这里注入。
 
     无存储写入、无模型请求——与 ``build_runtime`` 同一纪律。
     """
@@ -280,6 +309,7 @@ def build_behavior_components(
             observer=observer,
             span_controller=span_controller,
             clock=clock,
+            source_settled=source_settled,
         )
 
     return BehaviorBranches(session=branch(Lane.SESSION), physical=branch(Lane.PHYSICAL))
@@ -294,6 +324,7 @@ def _build_branch(
     observer: Observer | None,
     span_controller: SpanController | None,
     clock: Callable[[], datetime] | None,
+    source_settled: Callable[[str], bool] | None = None,
 ) -> BehaviorRuntimeComponents:
     """一条 lane 的那一支。全部存储传**这一支的根**（各存储按自己的契约派生子路径——传子目录会造成
     目录二次嵌套与锁键漂移，评审实测过）；归约的 sweep 锁按根派生，两支互不相抢。"""
@@ -308,13 +339,21 @@ def _build_branch(
         else FUSION_CONTEXT_LOOKBACK_SECONDS
     )
 
-    observations = BehaviorObservationStore(root)
-    judgements = BehaviorJudgementStore(root)
-    receipts = BehaviorFusionReceiptStore(root)
+    # 存储的容量闸从 Config 边界进来（26 号清单 8.2）；没写的是各领域配置的默认值
+    observations = BehaviorObservationStore(
+        root, config=BehaviorObservationConfig(**behavior_config.overrides_for("observation_"))
+    )
+    fusion_config = BehaviorFusionConfig(**behavior_config.overrides_for("fusion_"))
+    judgements = BehaviorJudgementStore(root, config=fusion_config)
+    receipts = BehaviorFusionReceiptStore(root, config=fusion_config)
     # 一份覆盖索引两处共用：融合写、归约读——各自实例化会按不同窗口口径回答"处理过没有"。
-    coverage = BehaviorCoverageIndex(root, window_days=behavior_config.coverage_window_days)
+    coverage = BehaviorCoverageIndex(
+        root,
+        window_days=behavior_config.coverage_window_days,
+        settled=source_settled if lane is Lane.SESSION else None,
+    )
 
-    tree = BehaviorTree(root / "tree")
+    tree = BehaviorTree(root / "tree", tree_config=BehaviorTreeConfig(**behavior_config.overrides_for("tree_")))
     # 词表的门槛从唯一的 Config 边界进来；模型只经 KindModelCaller 一个触点。
     kind_config = BehaviorKindConfig(**behavior_config.kinds_overrides())
     kind_store = BehaviorKindStore(tree.root, config=kind_config)
@@ -329,6 +368,14 @@ def _build_branch(
         vocabulary_jobs=vocabulary_jobs,
         ledger=BehaviorReductionLedger(root / "reduction"),
         semantic_refresher=BehaviorSemanticRefresher(tree, LLMBehaviorOverviewGenerator(structured_chat)),
+        refresh_retries=RefreshRetries(
+            retry_ledger(root, owner=f"behavior-semantic-{lane.value}", config=config.lifecycle.retry, clock=clock)
+        ),
+        # 脏日日志只有语义树夜批读（只接会话一支）：别的支不记
+        dirty_days=DirtyDayLog(root / "reduction") if lane is Lane.SESSION and config.scene.enabled else None,
+        chain_quarantine=ChainQuarantine(
+            judgements, Quarantine(root, owner=f"behavior-reduction-{lane.value}", clock=clock or _utc_now)
+        ),
         clock=clock,
         context_lookback_seconds=context_lookback,
         coverage=coverage,
@@ -355,6 +402,7 @@ def _build_branch(
                 primary_subject=behavior_config.primary_subject,
                 zone=zone,
                 clock=lane_clock,
+                quarantine=Quarantine(root, owner="behavior-session-lane", clock=lane_clock),
             ),
         )
     else:
@@ -367,7 +415,8 @@ def _build_branch(
                 ledger=PhysicalSegmentLedger(root),
                 primary_subject=behavior_config.primary_subject,
                 clock=lane_clock,
-            )
+            ),
+            max_backfill_days=config.lifecycle.physical_max_backfill_days,
         )
     return BehaviorRuntimeComponents(
         lane=lane,
@@ -501,6 +550,10 @@ def _record(
         )
     except Exception:  # noqa: BLE001 - 观测失败不许影响运维动作
         pass
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 __all__ = [

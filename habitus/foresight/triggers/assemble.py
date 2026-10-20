@@ -1,4 +1,4 @@
-"""一刻的装配（方案第四节前半）：最近几天的行 → 时间线 → 三种触发出草稿 → 每条附反向前因清单 → 账本的预期。
+"""一刻的装配（方案第四节前半）：最近几天的行 → 时间线 → 三种触发（事件、情境、日子）出草稿 → 每条附反向前因清单 → 账本的预期。
 
 读口：行为树经 ``scene.views`` 的 ``DayIndexCache``（已封口的行），还没封口的判断经 ``UnsealedReader`` 读好传进来。
 回看 7 天（第 2–7 天那一段最远看到 7 天前）。预期身份 = 类 + 触发种类 + 触发身份 + 触发实例，**不含机会表那一晚、不含日子**：
@@ -8,20 +8,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from datetime import timedelta
+from collections.abc import Callable, Mapping, Sequence
+from datetime import date, timedelta
 
 from habitus.foresight.errors import ForesightError
 from habitus.foresight.ledger.model import Expectation, expectation_identity
+from habitus.foresight.ledger.settle import NOT_DONE
 from habitus.foresight.model import Moment, Seen, UnsealedRow
 from habitus.foresight.opportunities.model import OpportunityTable
-from habitus.foresight.triggers.clock import clock_drafts
 from habitus.foresight.triggers.days import day_drafts
 from habitus.foresight.triggers.draft import Draft
 from habitus.foresight.triggers.events import antecedents_of, event_drafts
-from habitus.foresight.triggers.marks import absolute_slot, timeline_of
-from habitus.prediction.model import PredictionTree
+from habitus.foresight.triggers.marks import timeline_of
+from habitus.foresight.triggers.situations import situation_drafts
 from habitus.scene.views import DayIndexCache
+from habitus.temporal.slots import absolute_slot, slot_index
 
 LOOKBACK_DAYS = 7
 
@@ -34,7 +35,17 @@ def seen_rows(moment: Moment, cache: DayIndexCache, unsealed: Sequence[UnsealedR
     for offset in range(LOOKBACK_DAYS, -1, -1):
         day = moment.day - timedelta(days=offset)
         rows.extend(
-            Seen(row.at, min(row.last_observed_at, now), row.kind_token, row.uri, row.name, row.summary or "")
+            Seen(
+                row.at,
+                min(row.last_observed_at, now),
+                row.kind_token,
+                row.uri,
+                row.name,
+                row.summary or "",
+                abandoned=row.status in NOT_DONE,
+                place=row.place,
+                subjects=row.subjects,
+            )
             for row in cache.day(day).rows
             if row.at <= now
         )
@@ -56,59 +67,62 @@ def seen_rows(moment: Moment, cache: DayIndexCache, unsealed: Sequence[UnsealedR
 def form_expectations(
     *,
     moment: Moment,
-    tree: PredictionTree | None,
     table: OpportunityTable | None,
     rows: Sequence[Seen],
     shadow_unestablished: bool = False,
     generation: str = "",
     version: str = "",
     implementation: str = "",
+    recent: int,
+    calendar_of: Callable[[date], Mapping[str, str]] | None = None,
 ) -> tuple[Expectation, ...]:
-    """此刻对得上历史的全部预期。``tree`` 为 None 就没有钟面触发，``table`` 为 None 就没有事件与日子触发（也没有前因清单）。"""
+    """此刻对得上历史的全部预期。``table`` 为 None 就一条也不建（三种触发都从机会表读）。``recent`` 是证据的窗口 M：
+    「离上次够久」的时窗只看最近 M 次命中，每条预期的依据只列最近 M 次（窗外的分量已低于 α；账本单条也不会越写越大）。
+    ``calendar_of`` 给某一天的日历条件（带条件的关系里日历情境条件白天判它要；不给就只有今天的，取 ``moment.calendar``）。"""
 
-    if tree is not None and table is not None and tree.slot_minutes != table.slot_minutes:
-        raise ForesightError("the prediction tree and the opportunity table must share one slot width")
-    if tree is not None and moment.slot != (moment.at.hour * 60 + moment.at.minute) // tree.slot_minutes:
-        raise ForesightError("moment.slot must be mapped with the prediction tree's slot width")
-    done_today = frozenset(row.kind_token for row in rows if row.day == moment.day)
-    statuses = ("established", "candidate") if shadow_unestablished else ("established",)
-    # TODO(FORESIGHT-EVENT-FIRST-001)：触发改成以行为事件为主、时间与天气等降为外部条件（裁定 53，用户 2026-10-17：
-    # 只记、不在这一版改）。本 TODO 是代码侧唯一规格来源，另两处只引用它。
-    # 为什么：零模型全年盘 7,237 条预期，挂在时间上的占 95%（离上次够久 2,998 自然命中 35%、钟面周几 2,793 中 18%、
-    # 几号 1,058 中 13%），从前因出发的事件触发只有 388 条却最准（days_2_7 41%）；钟面账在节假日照样给"周二跑步"开窗。
-    # 改法：
-    # ① 事件为主：这个后果在语义树上有成立的前因关系时，不再为它建钟面草稿；时窗从前因起算（events.py 已是这样）。
-    #    节假日没有"下班到家"，预期自然不建，裁定 52 的"日型进小包"随之降级。
-    # ② 钟面降为兜底：只在后果没有任何成立前因时建（前因观测不到，如起床要等物理 lane）；几号 / 离上次够久照旧，
-    #    哪本账可靠由账自己分出来（裁定 49），不另判"外部约束类"。
-    # ③ 外部条件进关系：日型、天气、地点、同在的人都当语义树关系的调节条件（scene/relations/conditions.py），
-    #    机会表接带条件的关系（opportunities/build.py 现在整条跳过），账键带上条件（"到家 → 跑步｜不下雨"各记一本），
-    #    触发时判此刻条件成不成立；条件合的那本账自己攒得起来就开口，就是 2026-09-17"外部条件调门控"的落法，不另写公式。
-    # ④ 天气要新加外部事实来源接缝：必须答得出"那天那时是多少"（有历史），只有预报的源不能用；日历接 scene 的日型接缝。
-    # 影响：triggers/assemble.py、clock.py、opportunities/build.py、ledger 的 account_key、conditions.Field、组合根注入事实源。
-    # 风险：每多一个条件切一刀，跑步全年 68 次，调节检验要前因 ≥ 40（moderation_min_antecedents）才开，带条件的账要攒
-    # 几个月；条件源越多候选越多，交并检验不管总共试了多少条，接源时一起定是否做多重比较校正；造的数据按钟面埋习惯、
-    # 没有天气，测不了这个转向，要先造事件驱动与天气调节的习惯。
-    drafts: list[Draft] = []
-    line = None
-    now_slot = 0
-    if table is not None:
-        line = timeline_of(
-            rows, lane=table.lane, slot_minutes=table.slot_minutes, horizon=moment.day + timedelta(days=1)
-        )
-        now_slot = absolute_slot(moment.at, slot_minutes=table.slot_minutes)
-        drafts.extend(event_drafts(table, line, moment, now_slot=now_slot, statuses=statuses))
-    if tree is not None:
-        drafts.extend(clock_drafts(tree, table, moment, done_today=done_today))
-    if table is not None:
-        drafts.extend(day_drafts(table, moment, done_today=done_today))
+    if isinstance(recent, bool) or not isinstance(recent, int) or recent < 1:
+        raise ForesightError("recent must be a positive integer")
+    if table is None:
+        return ()
+    if moment.slot != slot_index(moment.at, slot_minutes=table.slot_minutes):
+        raise ForesightError("moment.slot must be mapped with the opportunity table's slot width")
+    done_today = frozenset(row.kind_token for row in rows if row.day == moment.day and not row.abandoned)
+    statuses = relation_statuses(shadow_unestablished)
+    # TODO(FORESIGHT-EVENT-FIRST-001)：触发以行为事件与语义树的关系为主、时间与天气等是外部条件（裁定 53）。本 TODO 是
+    # 代码侧唯一规格来源，另两处只引用它。
+    # 为什么：零模型全年盘上挂在钟点上的账准度低（周几 18%、几号 13%），从前因出发的事件触发最准（days_2_7 41%）；
+    # 钟面账在节假日照样给"周二跑步"开窗。
+    # 已做（裁定 59）：钟面、几号两种触发随预测树删了；周几 / 几号 / 日型成了语义树的日历情境关系，走「情境」触发
+    # （triggers/situations.py）——锚在工作日的规律节假日自然不建；「离上次够久」读语义树登记的复现。哪本账可靠由账自己
+    # 分出来（裁定 49），不另判"外部约束类"。
+    # 已做（裁定 61、62）：成立的带条件关系进机会表（opportunities/build.py），账键就是带条件的关系键（"到家 → 跑步｜不下雨"
+    #    各记一本），触发时判此刻条件成不成立（triggers/conditions.py）；条件合的那本账自己攒得起来就开口，不另写公式。
+    # 还没做：
+    # ② 天气接进外部条件包（habitus/conditions，同一个 FactProvider 协议）：必须答得出"那天那时是多少"（有历史），只有
+    #    预报的源不能用；语义树的调节条件按字段读（scene/relations/conditions.py）。
+    # 影响：conditions.Field、组合根注入事实源。
+    # 风险：每多一个条件切一刀，跑步全年 68 次，调节检验开不开由每条关系自己的最小可达 p 定（每边至少 2 次，``conditions.ready_to_test``），带条件的账要攒
+    # 几个月；条件源越多候选越多，交并检验不管总共试了多少条，接源时一起定是否做多重比较校正；现有造的数据没有天气，
+    # 测不了这一步，要先造天气调节的习惯。
+    line = timeline_of(
+        rows,
+        lane=table.lane,
+        slot_minutes=table.slot_minutes,
+        horizon=moment.day + timedelta(days=1),
+        conditions=tuple(spec for relation in table.relations for spec in relation.conditions),
+        calendar_of=calendar_of
+        if calendar_of is not None
+        else lambda day: moment.calendar if day == moment.day else {},
+    )
+    now_slot = absolute_slot(moment.at, slot_minutes=table.slot_minutes)
+    drafts: list[Draft] = [
+        *event_drafts(table, line, moment, now_slot=now_slot, statuses=statuses),
+        *situation_drafts(table, moment, done_today=done_today, statuses=statuses),
+        *day_drafts(table, moment, done_today=done_today, recent=recent),
+    ]
     found: dict[str, Expectation] = {}
     for draft in drafts:
-        antecedents = (
-            antecedents_of(table, draft.kind_token, line, moment, now_slot=now_slot, statuses=statuses)
-            if table is not None and line is not None
-            else ()
-        )
+        antecedents = antecedents_of(table, draft.kind_token, line, moment, now_slot=now_slot, statuses=statuses)
         identity = expectation_identity(draft.kind_token, draft.source, draft.trigger, draft.trigger_instance)
         found[identity] = Expectation(
             expectation_id=identity,
@@ -120,17 +134,23 @@ def form_expectations(
             trigger_instance=draft.trigger_instance,
             window=draft.window,
             deadline=draft.deadline,
-            basis=draft.basis,
+            basis=draft.basis[-recent:],
             opportunities=draft.opportunities,
             hits=draft.hits,
             observed_from=draft.observed_from,
             antecedents=antecedents,
             generation=generation,
-            night=table.night if table is not None else None,
+            night=table.night,
             version=version,
             implementation=implementation,
         )
     return tuple(found[key] for key in sorted(found))
 
 
-__all__ = ["LOOKBACK_DAYS", "form_expectations", "seen_rows"]
+def relation_statuses(shadow_unestablished: bool) -> tuple[str, ...]:
+    """建预期与重标单元历史认哪几种关系状态（同一份，裁定 56 第 6 条）：成立的；``shadow_uses_unestablished`` 开着时加候选。"""
+
+    return ("established", "candidate") if shadow_unestablished else ("established",)
+
+
+__all__ = ["LOOKBACK_DAYS", "form_expectations", "relation_statuses", "seen_rows"]

@@ -1,34 +1,33 @@
-"""事件序列（语义树新方案 ``13`` 第四节）：行为树的读法只写一处、截止日是类型的一部分、两棵树读同一份。
+"""事件序列（语义树新方案 ``13`` 第四节）：行为树的读法只写一处、截止日是类型的一部分、各个读者读同一份。
 
 CI 钉的两条都在这里：
-- 截止日之后追加任意数据，第 N 晚的序列与预测树逐字节不变；
-- 两棵树对同一条记录的读法一致（预测树的动作 / 占位与语义树映射的记录，是同一批 uri）。
+- 截止日之后追加任意数据，第 N 晚的序列与从它算出的复现（``temporal``，预测层「离上次够久」读它）都不变；
+- 语义树映射与复现对同一条记录的读法一致（有类的进复现、待定的不进，是同一批 uri；预测树删了，裁定 59）。
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
 from habitus.behavior import BehaviorLinkType
 from habitus.behavior.kinds.ids import Lane, not_event_token, pending_token
-from habitus.prediction import builder, codec, source
-from habitus.prediction.errors import PredictionTreeError
 from habitus.scene.concepts import ConceptSet
+from habitus.scene.concepts.rhythm import RhythmRulers
 from habitus.scene.occurrences import ConceptHitStore
 from habitus.scene.occurrences.mapper import ConceptMapper, MapperConfig, map_closed_day
+from habitus.scene.recurrence import recurrences_of
 from habitus.series import EventSeries, GapKind, SeriesError, SkipReason
 from habitus.series.reader import read_series
 from tests.unit.foresight.scripted_model import recording_client
-from tests.unit.prediction.prediction_fixtures import config
 from tests.unit.scene.concept_fixtures import BEDTIME, BREAKFAST, CODING
 from tests.unit.scene.fixtures import DAY1, SUBJECT, Site, publish, publish_gap
 
 NOW = datetime(2026, 9, 1, 3, 0, tzinfo=UTC)
 PENDING = pending_token(Lane.SESSION)
+RULERS = RhythmRulers(15, 2700, 3, 5.0, 5.0, 0.10, 35)
 NOT_EVENT = not_event_token(Lane.SESSION)
 
 
@@ -87,19 +86,17 @@ def test_cutting_a_series_equals_reading_at_that_cutoff(tmp_path) -> None:
 
 
 def test_appending_data_from_the_cutoff_on_changes_nothing_on_night_n(tmp_path) -> None:
-    """第 N 晚只用 N 之前的数据：在 N 当天及以后追加任意记录与空白，第 N 晚的序列和建出来的预测树逐字节不变。"""
+    """第 N 晚只用 N 之前的数据：在 N 当天及以后追加任意记录与空白，第 N 晚的序列和从它算出的复现都不变。"""
 
     site = Site(tmp_path, now=NOW)
     a_week(site)
     tonight = day(5)
 
-    def night_n() -> tuple[EventSeries, str]:
+    def night_n() -> tuple[EventSeries, dict]:  # type: ignore[type-arg]
         series = read_series(site.behavior_tree, cutoff=tonight)
-        tree = builder.build(source.snapshot_of(series), config=config(), reference=series.last_day, built_at=NOW)
-        return series, json.dumps(codec.encode(tree), ensure_ascii=False, sort_keys=True)
+        return series, dict(recurrences_of(series, RULERS))
 
     before = night_n()
-    # 第 4 天 23:30 的就寝之后 00:10 才来的那条：窗口跨过截止时刻，第 N 晚记删失，不算"没有后继"
     publish(site.behavior_tree, tonight, "又改代码", 0, 10, kind="修改代码")
     publish(site.behavior_tree, tonight, "说不清", 9, 0, kind=PENDING)
     publish(site.behavior_tree, day(9), "吃早饭", 8, 0, kind="早餐")
@@ -111,16 +108,9 @@ def test_appending_data_from_the_cutoff_on_changes_nothing_on_night_n(tmp_path) 
     assert read_series(site.behavior_tree, cutoff=day(6)) != before[0]
 
 
-def test_the_reference_day_must_be_sealed() -> None:
-    series = EventSeries(cutoff=day(3))
-    with pytest.raises(PredictionTreeError, match="sealed day"):
-        builder.build(source.snapshot_of(series), config=config(), reference=day(3), built_at=NOW)
-
-
-def test_both_trees_read_the_same_records(tmp_path) -> None:
-    """同一条记录两棵树读法一致：预测树的动作 / 占位与语义树映射下来的记录是同一批（同一份序列给的）。
-
-    第二轮评审 D5 就是两处各写一遍写反了（「待定」在预测树里是占位、在语义树里被当成"没来"）。
+def test_the_semantic_layer_and_the_recurrences_read_the_same_records(tmp_path) -> None:
+    """同一条记录各个读者读法一致：语义树映射下来的有类记录，就是复现里数到的那几类；待定的两边都不当成一类的发生
+    （同一份序列给的）。第二轮评审 D5 就是两处各写一遍写反了（「待定」在一处是占位、在另一处被当成"没来"）。
     """
 
     site = Site(tmp_path, now=NOW)
@@ -137,7 +127,7 @@ def test_both_trees_read_the_same_records(tmp_path) -> None:
         links=((BehaviorLinkType.CONCURRENT_WITH.value, paired),),
     )
     series = read_series(site.behavior_tree, cutoff=day(7))
-    snapshot = source.snapshot_of(series)
+    recurrences = recurrences_of(series, RULERS)
 
     hits = ConceptHitStore(tmp_path / "scene")
     client, _provider = recording_client([])
@@ -163,28 +153,28 @@ def test_both_trees_read_the_same_records(tmp_path) -> None:
         )
     mapped = {record.occurrence_uri: record for offset in range(7) for record in hits.read_day(day(offset))}
     assert set(mapped) == {record.uri for record in series.records}
-    # 类 / 待定两边分得一样：预测树的动作数 = 语义树里有类的记录数，占位数 = 待定记录数
-    assert len(snapshot.actions) == sum(record.classified for record in mapped.values())
-    assert len(snapshot.unnamed) == sum(not record.classified for record in mapped.values())
+    # 类 / 待定两边分得一样：复现里的类 = 语义树里有类的记录的类，待定的不在复现里
+    assert set(recurrences) == {record.kind_token for record in mapped.values() if record.classified}
+    assert PENDING not in recurrences and NOT_EVENT not in recurrences
     assert not mapped[pending].classified and mapped[pending].kind_token == PENDING
     # 编号与 lane 一致
     by_uri = {record.uri: record for record in series.records}
     for uri, record in mapped.items():
         assert (record.kind_token, record.lane) == (by_uri[uri].kind_token, by_uri[uri].lane)
-    # 并行：两边读的是同一对
-    assert len(series.concurrent) == 1 and len(snapshot.concurrent) == 1
-    assert paired in series.concurrent[0]
+    # 并行：序列里读到的就是那一对
+    assert len(series.concurrent) == 1 and paired in series.concurrent[0]
 
 
-def test_a_reminded_record_is_carried_and_the_prediction_tree_lets_it_hold_its_place_uncounted(tmp_path) -> None:
-    """序列原样带着 ``reminded``；预测树让它像「待定」一样占位、不计数（被提醒后的发生不进自然率）。"""
+def test_a_reminded_record_is_carried_and_the_recurrence_counts_it_as_done_but_not_natural(tmp_path) -> None:
+    """序列原样带着 ``reminded``；复现里那一天算做了（"离上次多久"按全部发生算），但不是自然发生（不进命中，裁定 54）。"""
 
     site = Site(tmp_path, now=NOW)
     publish(site.behavior_tree, day(0), "吃早饭", 8, 0, kind="早餐", reminded=True)
     series = read_series(site.behavior_tree, cutoff=day(1))
     assert series.records[0].reminded
-    snapshot = source.snapshot_of(series)
-    assert snapshot.actions == () and len(snapshot.unnamed) == 1
+    (breakfast,) = recurrences_of(series, RULERS).values()
+    (only,) = breakfast.days
+    assert (only.count, only.natural, only.natural_uri) == (1, 0, None)
 
 
 def test_a_series_refuses_what_it_cannot_hold() -> None:
@@ -195,9 +185,9 @@ def test_a_series_refuses_what_it_cannot_hold() -> None:
 
 
 def test_a_disproved_unreadable_gap_is_dropped_once_for_every_reader(tmp_path) -> None:
-    """「没读懂」10:15–10:30 里读出了 10:20 那条行为的开始：这段空白被证伪、整段作废。序列这一处消解，预测树与关系检验读到
+    """「没读懂」10:15–10:30 里读出了 10:20 那条行为的开始：这段空白被证伪、整段作废。序列这一处消解，temporal 与关系检验读到
     同一份——关系时间线上 10:15 那一槽算人在场（第四轮评审 E2：以前关系时间线不作废，"同一条链"丢掉的恰好是后果出现的那一次）。
-    「未观测」不被证伪（留给预测树当矛盾报）。"""
+    「未观测」不被证伪（留给消费方当矛盾报）。"""
 
     from habitus.scene.relations import RelationConfig, build_timelines
     from tests.unit.scene.concept_fixtures import concept_set
@@ -209,9 +199,9 @@ def test_a_disproved_unreadable_gap_is_dropped_once_for_every_reader(tmp_path) -
     publish_gap(site.behavior_tree, DAY1, (6, 0), (7, 0), kind="未观测")
     series = read_series(site.behavior_tree, cutoff=DAY1 + timedelta(days=1))
     assert [gap.kind for gap in series.gaps] == [GapKind.UNOBSERVED]
-    line = build_timelines(
-        series, concept_set(), {}, RelationConfig(slot_minutes=15, transition_window_slots=3, recurrence_window_days=90)
-    )["session"]
+    line = build_timelines(series, concept_set(), {}, RelationConfig(slot_minutes=15, transition_window_slots=3))[
+        "session"
+    ]
     assert 41 in line.present[DAY1]
 
 
@@ -223,3 +213,45 @@ def test_who_prompted_it_is_read_into_the_series_and_old_records_without_it_read
     publish(site.behavior_tree, day(0), "查快递", 18, 45)
     series = read_series(site.behavior_tree, cutoff=day(1))
     assert [record.prompted_by for record in series.records] == ["host_agent", None]
+
+
+def test_a_record_backfilled_three_days_late_shows_up_the_next_night(tmp_path) -> None:
+    """26 号清单 6.7：序列按天缓存、每晚在内存里重新拼；补发进 3 天前的一条，归约把那一天记进脏日日志，下一晚重读那一天。
+    没记脏的日子读缓存——同一棵树上改了却不记，下一晚看不见（缓存确实在起作用、靠的就是这份日志）。"""
+
+    from habitus.behavior.tree.dirty_days import DirtyDayLog
+    from habitus.series.reader import SeriesReader
+
+    site = Site(tmp_path, now=NOW)
+    a_week(site)
+    log = DirtyDayLog(tmp_path / "reduction")
+    log.record({day(0)})  # 第一次读之前记的：缓存本来就是空的，跳过
+    reader = SeriesReader(site.behavior_tree, (log,))
+    first = reader.read(cutoff=day(7))
+    late = publish(site.behavior_tree, day(4), "补发的一条", 16, 0, kind="修改代码")
+    log.record({day(4)})
+    unlogged = publish(site.behavior_tree, day(3), "改了却没记", 17, 0, kind="修改代码")
+    second = reader.read(cutoff=day(8))
+    uris = {record.uri for record in second.records}
+    assert late in uris and late not in {record.uri for record in first.records}
+    assert unlogged not in uris  # 没记脏：读的是缓存
+    assert log.after(0) == (log.last(), frozenset())  # 读过的截掉了
+    assert (
+        read_series(site.behavior_tree, cutoff=day(8)).records
+        == SeriesReader(site.behavior_tree).read(cutoff=day(8)).records
+    )
+    assert unlogged in {record.uri for record in read_series(site.behavior_tree, cutoff=day(8)).records}
+
+
+def test_a_reader_without_a_dirty_day_log_never_serves_a_stale_day(tmp_path) -> None:
+    """没有脏日日志就不知道哪天变过：不缓存，每次照读（L10.3；原先永久缓存，改过的日子一直读成旧的）。"""
+
+    from habitus.series.reader import SeriesReader
+
+    site = Site(tmp_path, now=NOW)
+    a_week(site)
+    reader = SeriesReader(site.behavior_tree)
+    reader.read(cutoff=day(7))
+    changed = publish(site.behavior_tree, day(3), "改过的一天", 17, 0, kind="修改代码")
+
+    assert changed in {record.uri for record in reader.read(cutoff=day(8)).records}

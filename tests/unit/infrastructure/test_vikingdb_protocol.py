@@ -101,9 +101,10 @@ def test_api_key_request_uses_bearer_auth_canonical_json_and_absolute_path() -> 
 
     assert result["result"] == {"ok": True}
     assert observed[0].headers["authorization"] == "Bearer secret"
-    assert observed[0].content == json.dumps(
-        {"b": 2, "a": "中文"}, ensure_ascii=False, separators=(",", ":"), allow_nan=False
-    ).encode()
+    assert (
+        observed[0].content
+        == json.dumps({"b": 2, "a": "中文"}, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
+    )
     invalid_path_client = client(handler)
     with pytest.raises(ValueError, match="absolute API path"):
         asyncio.run(invalid_path_client.data("relative", {}))
@@ -205,9 +206,7 @@ def test_record_round_trip_binds_identity_hash_index_fields_and_full_attributes(
 
 def test_backend_search_rejects_duplicate_pages_and_non_finite_scores() -> None:
     async def scenario(items: list[dict[str, object]], error: str) -> None:
-        real_client = await async_client(
-            lambda _request: httpx.Response(200, json={"code": 0})
-        )
+        real_client = await async_client(lambda _request: httpx.Response(200, json={"code": 0}))
         backend = VikingDBBackend(
             "volcengine",
             "memory",

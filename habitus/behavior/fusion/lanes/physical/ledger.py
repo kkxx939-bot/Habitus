@@ -3,17 +3,21 @@
 两件事要一直成立，而凭据观测在落树之后就释放、覆盖记录过了窗口也会清，靠它们只认得出最近的：
 
 - **同一段再送一遍不重复写、上游改判不收**：按"哪台设备的哪一段"记下当时内容的摘要
-  （``fusion/physical/segments/<编号摘要>.json``）。摘要只由上游给的字段算，不含本机的时区、主体名、代码里的措辞。
+  （``fusion/physical/segments/<这一段开始的 UTC 日>/<编号摘要>.json``）。摘要只由上游给的字段算，不含本机的时区、
+  主体名、代码里的措辞。
 - **后来的交付不许和收下的矛盾**：行为树只增不改，一条行为落在已经记成"没在看"的时段里，下游就读不了这棵树了。
   所以按设备、按日另记收过的时段（``fusion/physical/spans/<设备摘要>/<UTC 日>/<单位摘要>.json``），新交付进来时对一遍。
 
-两份都只增不减、一个单位一个小文件，没有行为内容。
+两份都是一个单位一个小文件，没有行为内容；都按 UTC 日分目录、整日过期（26 号清单 6.4）：上游最多补发
+``physical_max_backfill_days`` 天，再多留一个 UTC 日的余量（时区边界）；更早的单位整份交付拒收（``PhysicalLane``），
+所以过期的那几天再也用不上。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import Enum
@@ -21,9 +25,11 @@ from pathlib import Path
 
 from habitus.behavior.fusion.errors import BehaviorFusionError
 from habitus.infrastructure.store.filesystem import (
+    DurableDirectoryEntry,
     DurablePathIntegrityError,
     ImmutableArtifactConflictError,
     atomic_create_bytes,
+    durable_unlink,
     list_real_directory,
     read_regular_bytes,
 )
@@ -57,12 +63,12 @@ class PhysicalSegmentLedger:
         self.segment_root = self.root / "fusion" / "physical" / "segments"
         self.span_root = self.root / "fusion" / "physical" / "spans"
 
-    def accepted(self, device: str, unit: str) -> str | None:
-        """这个单位收过没有；收过就返回当时内容的摘要。"""
+    def accepted(self, device: str, unit: str, started_at: datetime) -> str | None:
+        """这个单位收过没有；收过就返回当时内容的摘要。``started_at`` 是这个单位的开始时刻（编号条目按它的 UTC 日分目录）。"""
 
         try:
             encoded = read_regular_bytes(
-                self._unit_path(device, unit), artifact_root=self.root, max_bytes=_MAX_ENTRY_BYTES
+                self._unit_path(device, unit, started_at), artifact_root=self.root, max_bytes=_MAX_ENTRY_BYTES
             )
         except FileNotFoundError:
             return None
@@ -90,13 +96,32 @@ class PhysicalSegmentLedger:
             self._create(self._span_path(device, day, unit), record)
             day += timedelta(days=1)
         self._create(
-            self._unit_path(device, unit),
+            self._unit_path(device, unit, started),
             json.dumps(
-                {"schema_version": LEDGER_SCHEMA_VERSION, "content_digest": content_digest},
+                {
+                    "schema_version": LEDGER_SCHEMA_VERSION,
+                    "content_digest": content_digest,
+                    "started_at": started.isoformat(timespec="microseconds"),
+                },
                 ensure_ascii=False,
                 sort_keys=True,
             ).encode("utf-8"),
         )
+
+    def expire(self, now: datetime, *, backfill_days: int) -> int:
+        """删掉比 ``now`` 早 ``backfill_days`` + 1 个 UTC 日的整日目录（编号与时段两份同口径）；
+        返回删掉的日目录数。这些日子里的单位再送来会整份拒收，记着也用不上。"""
+
+        if isinstance(backfill_days, bool) or not isinstance(backfill_days, int) or backfill_days < 1:
+            raise ValueError("backfill_days must be a positive integer")
+        cutoff = _utc(now).date() - timedelta(days=backfill_days + 1)
+        removed = 0
+        for directory in (self.segment_root, *self._device_directories()):
+            for entry in self._entries(directory):
+                if entry.is_dir() and _is_day(entry.name) and date.fromisoformat(entry.name) < cutoff:
+                    self._remove_directory(directory / entry.name)
+                    removed += 1
+        return removed
 
     def spans(self, device: str, started_at: datetime, ended_at: datetime) -> tuple[AcceptedSpan, ...]:
         """这台设备收过的、与 ``[started_at, ended_at]`` 所在的那些 UTC 日有关的时段（去重，按开始时刻排好）。"""
@@ -136,8 +161,30 @@ class PhysicalSegmentLedger:
             if existing != encoded:
                 raise BehaviorFusionError("physical ledger entry was already written with different content") from exc
 
-    def _unit_path(self, device: str, unit: str) -> Path:
-        return self.segment_root / f"{_digest(f'{device}#{unit}')}.json"
+    def _unit_path(self, device: str, unit: str, started_at: datetime) -> Path:
+        return self.segment_root / _utc(started_at).date().isoformat() / f"{_digest(f'{device}#{unit}')}.json"
+
+    def _remove_directory(self, directory: Path) -> None:
+        """一个只放小文件的目录整个删掉：逐个走受控删除，再删空目录（留着别的东西就留着目录）。"""
+
+        for entry in self._entries(directory):
+            if entry.is_file():
+                durable_unlink(directory / entry.name, artifact_root=self.root)
+        try:
+            os.rmdir(directory)
+        except OSError:
+            pass
+
+    def _device_directories(self) -> list[Path]:
+        return [self.span_root / entry.name for entry in self._entries(self.span_root) if entry.is_dir()]
+
+    def _entries(self, directory: Path) -> tuple[DurableDirectoryEntry, ...]:
+        try:
+            return tuple(list_real_directory(directory, artifact_root=self.root, max_entries=_MAX_DAY_ENTRIES))
+        except FileNotFoundError:
+            return ()
+        except DurablePathIntegrityError as exc:
+            raise BehaviorFusionError("physical ledger directory is invalid or exceeds its bound") from exc
 
     def _span_directory(self, device: str, day: date) -> Path:
         return self.span_root / _digest(device) / day.isoformat()
@@ -154,6 +201,14 @@ def _decode(encoded: bytes) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise BehaviorFusionError("physical ledger entry must be an object")
     return payload
+
+
+def _is_day(name: str) -> bool:
+    try:
+        date.fromisoformat(name)
+    except ValueError:
+        return False
+    return len(name) == 10
 
 
 def _utc(value: datetime) -> datetime:

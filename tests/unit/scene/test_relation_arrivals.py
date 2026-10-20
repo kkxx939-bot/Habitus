@@ -21,7 +21,9 @@ from tests.unit.scene.relation_fixtures import (
 
 
 def line_of(*records: SeriesRecord, days: int = 1):  # type: ignore[no-untyped-def]
-    series = EventSeries(cutoff=START + timedelta(days=days), records=tuple(sorted(records, key=lambda r: (r.started_at, r.uri))))
+    series = EventSeries(
+        cutoff=START + timedelta(days=days), records=tuple(sorted(records, key=lambda r: (r.started_at, r.uri)))
+    )
     return build_timelines(series, CONCEPTS, {}, CONFIG)["session"]
 
 
@@ -76,7 +78,11 @@ def test_rest_of_day_and_daily_segments_find_the_consequent_in_their_own_windows
     assert rest.came is True and rest.started_at is not None and rest.started_at.hour == 15
     (docs,) = merge_for(Segment.NEXT_DAY, chains_of(line, DOCS, CONFIG.transition_window_slots))
     tomorrow = controls.arrival(Segment.NEXT_DAY, docs, CODE)
-    assert tomorrow.came is True and tomorrow.started_at is not None and tomorrow.started_at.date() == day + timedelta(days=1)
+    assert (
+        tomorrow.came is True
+        and tomorrow.started_at is not None
+        and tomorrow.started_at.date() == day + timedelta(days=1)
+    )
     week = controls.arrival(Segment.DAYS_2_7, docs, CODE)
     assert week.came is True and week.started_at is not None and week.started_at.date() == day + timedelta(days=3)
     # 次日段里没有调研之外的东西 → 写文档 → 讨论方案 次日没来
@@ -109,7 +115,9 @@ def test_a_reminded_consequent_is_not_a_natural_arrival_but_still_starts_a_chain
     assert chains_of(line, CODE, CONFIG.transition_window_slots)  # 当前因照常
     # 同一窗口里另有一条自然发生的：照常算来了
     natural = record(day, 10, 30, "修改代码", number=2)
-    both = line_of(record(day, 9, 0, "调研"), record(day, 10, 0, "讨论方案"), code, natural, record(day, 14, 0, "提交推送"))
+    both = line_of(
+        record(day, 9, 0, "调研"), record(day, 10, 0, "讨论方案"), code, natural, record(day, 14, 0, "提交推送")
+    )
     (again,) = chains_of(both, DISCUSS, CONFIG.transition_window_slots)
     arrival = Controls(both, CONFIG.transition_window_slots).arrival(Segment.CHAIN, again, CODE)
     assert arrival.came is True and arrival.uri == natural.uri

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from habitus.conversation.behavior_session import (
@@ -11,6 +11,7 @@ from habitus.conversation.behavior_session import (
     BehaviorSessionTurnRecord,
 )
 from habitus.conversation.source import (
+    AddressWatermarks,
     ConversationConsumerDelivery,
     ConversationConsumerExecutionFence,
     ConversationConsumerOutcomeStore,
@@ -19,12 +20,19 @@ from habitus.conversation.source import (
     ConversationConsumerStateInspector,
     ConversationSourceConsumer,
     ConversationSourceEnvelope,
+    ConversationSourceLedger,
     ConversationSourceStore,
+    PendingSources,
+    SourceIndex,
     conversation_source_request_digest,
 )
 from habitus.conversation.source.fence import ConversationConsumerExecutionLease
+from habitus.conversation.source.quarantine import SourceQuarantine
+from habitus.conversation.source.recovery import ConversationSourceRecovery
 from habitus.foundation.integrity import canonical_digest
+from habitus.foundation.lifecycle import BackoffPolicy
 from habitus.foundation.observability import ObservationEvent, Observer
+from habitus.infrastructure.lifecycle import Quarantine, RetryLedger
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.conversation import ConversationAppendResult, ConversationAppendStatus, ConversationRetentionPlan
@@ -115,6 +123,7 @@ def ingest_result(source_value: ConversationSourceEnvelope) -> ConversationMemor
 class FakeMemoryConsumer:
     consumer = ConversationSourceConsumer.MEMORY
     ordered_within_conversation = True
+    skips_released_sources = False
 
     def __init__(
         self,
@@ -180,9 +189,7 @@ def behavior_session_output(
     )
     if not turns:
         return None
-    return BehaviorSessionOutput.create(
-        source=source_value, processor_fingerprint=processor_fingerprint, turns=turns
-    )
+    return BehaviorSessionOutput.create(source=source_value, processor_fingerprint=processor_fingerprint, turns=turns)
 
 
 class FakeBehaviorConsumer:
@@ -190,6 +197,7 @@ class FakeBehaviorConsumer:
 
     consumer = ConversationSourceConsumer.BEHAVIOR_SESSION
     ordered_within_conversation = False
+    skips_released_sources = True
 
     def __init__(
         self,
@@ -236,8 +244,16 @@ class FakeBehaviorConsumer:
         )
 
 
+def source_ledger(root: Path) -> ConversationSourceLedger:
+    return ConversationSourceLedger(
+        SourceIndex(root, max_addresses=1_000, max_markers_per_address=1_000),
+        PendingSources(root, max_entries=1_000),
+        AddressWatermarks(root),
+    )
+
+
 def stores(root: Path):
-    sources = ConversationSourceStore(root, max_files=100, max_file_bytes=2_000_000)
+    sources = ConversationSourceStore(root, max_file_bytes=2_000_000, ledger=source_ledger(root))
     outcomes = ConversationConsumerOutcomeStore(root, max_file_bytes=100_000)
     memory_outputs = MemoryConversationOutputStore(
         root,
@@ -293,3 +309,34 @@ def delivery(
         observer=observer,
     )
     return service, memory_consumer, behavior_consumer
+
+
+def recovery(
+    service: ConversationConsumerDelivery,
+    *,
+    batch_size: int = 10,
+    max_attempts: int = 3,
+    orphan_grace: timedelta = timedelta(hours=24),
+    clock: Callable[[], datetime] = lambda: NOW,
+) -> ConversationSourceRecovery:
+    """恢复连同它的重试账；账落在会话根目录下，时钟默认停在 ``NOW``（退避期不会自己过去）。"""
+
+    retries = RetryLedger(
+        service.ledger.pending.root,
+        owner="conversation-source-recovery",
+        policy=BackoffPolicy(base_seconds=60.0, cap_seconds=3_600.0),
+        max_attempts=max_attempts,
+        clock=clock,
+    )
+    quarantine = SourceQuarantine(
+        Quarantine(service.ledger.pending.root, owner="conversation-source-behavior", clock=clock)
+    )
+    return ConversationSourceRecovery(
+        service.sources,
+        service,
+        batch_size=batch_size,
+        retries=retries,
+        quarantine=quarantine,
+        orphan_grace=orphan_grace,
+        clock=clock,
+    )

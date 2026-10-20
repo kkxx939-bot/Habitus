@@ -69,9 +69,10 @@ def test_plugin_connection_path_honors_an_explicit_isolated_state_root(
 ) -> None:
     state_root = tmp_path / "plugin-state"
 
-    assert resolve_plugin_connection_path(
-        environ={"HABITUS_PLUGIN_STATE_DIR": str(state_root)}
-    ) == state_root / "connection.json"
+    assert (
+        resolve_plugin_connection_path(environ={"HABITUS_PLUGIN_STATE_DIR": str(state_root)})
+        == state_root / "connection.json"
+    )
 
 
 def test_cli_always_binds_the_default_yaml_without_requiring_an_export(
@@ -167,9 +168,7 @@ def test_cloud_setup_applies_custom_routes_and_shared_vikingdb_resources(
         ),
         rerank=ProfileSelection(
             "rerank.aliyun.qwen3",
-            {
-                "base_url": "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-api/v1"
-            },
+            {"base_url": "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-api/v1"},
         ),
         vector=ProfileSelection(
             "vector.vikingdb.managed",
@@ -511,9 +510,7 @@ def test_cloud_wizard_requires_a_real_alibaba_workspace_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     choices = iter((1, 1, 2, 1, 1))
-    required_text = Mock(
-        return_value="https://workspace.cn-beijing.maas.aliyuncs.com/compatible-api/v1"
-    )
+    required_text = Mock(return_value="https://workspace.cn-beijing.maas.aliyuncs.com/compatible-api/v1")
     monkeypatch.setattr(
         cli,
         "_prompt_choice",
@@ -582,9 +579,7 @@ def test_credential_updates_follow_the_same_normalized_name_rules_as_config_load
     destination = tmp_path / "config" / "habitus.yaml"
     payload = yaml.safe_load(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
     payload["credentials"][" DeepSeek "] = payload["credentials"].pop("deepseek")
-    payload["credentials"][" DeepSeek "][" API_KEY "] = payload["credentials"][
-        " DeepSeek "
-    ].pop("api_key")
+    payload["credentials"][" DeepSeek "][" API_KEY "] = payload["credentials"][" DeepSeek "].pop("api_key")
     destination.parent.mkdir(parents=True)
     destination.write_text(
         yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
@@ -652,9 +647,7 @@ def test_noninteractive_init_can_install_multiple_harnesses_without_knowing_thei
         ]
     )
 
-    delegated.assert_called_once_with(
-        ["install", "--harness", "codex", "--harness", "future-harness"]
-    )
+    delegated.assert_called_once_with(["install", "--harness", "codex", "--harness", "future-harness"])
     assert destination.is_file()
 
 
@@ -703,9 +696,7 @@ def test_custom_config_init_persists_plugin_connection_in_the_default_state_root
     )
 
     assert default_connection.is_file()
-    assert '"base_url": "http://127.0.0.1:8787"' in default_connection.read_text(
-        encoding="utf-8"
-    )
+    assert '"base_url": "http://127.0.0.1:8787"' in default_connection.read_text(encoding="utf-8")
 
 
 def test_interactive_eof_cancels_before_writing_configuration(

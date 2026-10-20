@@ -31,12 +31,14 @@ ContentOf = Callable[[str], OccurrenceContent | None]
 
 @dataclass(frozen=True)
 class RecheckResult:
-    """``assigned``：重判归进了类的（occurrence → 类编号）；``released``：重判过、仍不归已有类的，从此照常长新类。"""
+    """``assigned``：重判归进了类的（occurrence → 类编号）；``released``：重判过、仍不归已有类的，从此照常长新类；
+    ``missing``：树上已经没有的（出池，26 号清单 6.6）。"""
 
     assigned: Mapping[str, str]
     released: frozenset[str]
     model_calls: int
     signals: tuple[str, ...]
+    missing: frozenset[str] = frozenset()
 
 
 class PendingRecheck:
@@ -55,19 +57,21 @@ class PendingRecheck:
     ) -> RecheckResult:
         signals: list[str] = []
         requests: list[ClassifyRequest] = []
+        missing: set[str] = set()
         for entry in entries:
             content = content_of(entry.occurrence)
             if content is None:
-                signals.append(f"kind_pending_recheck_missing {entry.occurrence}: not on the tree; left as is")
+                signals.append(f"kind_pending_recheck_missing {entry.occurrence}: not on the tree; leaves the pool")
+                missing.add(entry.occurrence)
                 continue
             requests.append(ClassifyRequest(entry.occurrence, entry.lane, content))
         if not requests:
-            return RecheckResult({}, frozenset(), 0, tuple(signals))
+            return RecheckResult({}, frozenset(), 0, tuple(signals), frozenset(missing))
         result = await classify_in_chunks(self.classifier, requests, vocabulary, checkpoint=checkpoint)
         assigned = {key: verdict.token for key, verdict in result.verdicts.items() if verdict.outcome is Outcome.CLASS}
         # 「都不是」与「不是一件事」都不归已有类：这条本来就在待定池里，白天归类没归进去，就放行去长新类
         released = frozenset(result.verdicts) - frozenset(assigned)
-        return RecheckResult(assigned, released, result.model_calls, (*signals, *result.signals))
+        return RecheckResult(assigned, released, result.model_calls, (*signals, *result.signals), frozenset(missing))
 
 
 __all__ = ["ContentOf", "PendingRecheck", "RecheckResult"]

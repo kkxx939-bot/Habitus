@@ -10,7 +10,8 @@ from typing import Any
 
 from habitus.foresight.errors import ForesightError
 from habitus.foresight.opportunities.model import (
-    KindDay,
+    ConditionSpec,
+    DayWatch,
     KindDays,
     Opportunity,
     OpportunityTable,
@@ -18,9 +19,14 @@ from habitus.foresight.opportunities.model import (
     TreeReading,
 )
 from habitus.foundation.integrity import CanonicalSerializationError, canonical_json
+from habitus.temporal import DayInterval, OccurrenceDay
 
-#: v3：每条关系带语义树这一晚的读数（裁定 56 第 10、12 条）。v2 这一版还没有盘，不迁移。
-OPPORTUNITY_SCHEMA = "habitus.foresight.opportunities/v3"
+#: v4（裁定 59）：日历换成 temporal 的复现（按天的发生 + 相邻间隔的漏看权重与截尾）、去掉 present_days、日历情境关系带键与取值。
+#: v5（2026-10-18 四方评审）：表上记这一晚用的放假数据版本（裁定 59 第 4 条）。
+#: v6（2026-10-18，S8）：日历关系带"见过的日型"、表上带"没见过的日型怎么办"。
+#: v7（26 号清单 3.3）：表上带每天看着的比例与日型（账的久别用）。表每晚整张重写，项目没上线，旧版不迁移。
+#: v8（裁定 61 第 6 条）：成立的带条件关系进表，每条关系带它挂的条件（文本 + 白天判它要的类编号 / 日历键）。
+OPPORTUNITY_SCHEMA = "habitus.foresight.opportunities/v8"
 
 
 def encode_table(table: OpportunityTable) -> str:
@@ -33,9 +39,13 @@ def encode_table(table: OpportunityTable) -> str:
         "relation_night": table.relation_night.isoformat() if table.relation_night is not None else None,
         "slot_minutes": table.slot_minutes,
         "window_slots": table.window_slots,
-        "present_days": [day.isoformat() for day in table.present_days],
         "relations": [_relation(item) for item in table.relations],
         "kinds": [_kind(item) for item in table.kinds],
+        "calendar_version": table.calendar_version,
+        "unseen_day_types": table.unseen_day_types,
+        "watch": [
+            {"day": item.day.isoformat(), "share": item.share, "day_type": item.day_type} for item in table.watch
+        ],
     }
     try:
         return canonical_json(payload)
@@ -56,17 +66,26 @@ def decode_table(text: str, *, lane: str | None = None, night: date | None = Non
             relation_night=None if payload["relation_night"] is None else _date(payload["relation_night"]),
             slot_minutes=int(payload["slot_minutes"]),
             window_slots=int(payload["window_slots"]),
-            present_days=tuple(_date(item) for item in payload["present_days"]),
             relations=tuple(_relation_from(item) for item in payload["relations"]),
             kinds=tuple(_kind_from(item) for item in payload["kinds"]),
+            calendar_version=None if payload["calendar_version"] is None else str(payload["calendar_version"]),
+            unseen_day_types=str(payload["unseen_day_types"]),
+            watch=tuple(_watch_from(item) for item in payload["watch"]),
         )
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError, IndexError) as exc:
         raise ForesightError(f"opportunity table is not valid: {exc}") from exc
     if (lane is not None and table.lane != lane) or (night is not None and table.night != night):
         raise ForesightError("opportunity table does not match its file")
     if encode_table(table) != text:
         raise ForesightError("opportunity table is not in canonical form")
     return table
+
+
+def _watch_from(raw: Mapping[str, Any]) -> DayWatch:
+    day_type = raw["day_type"]
+    return DayWatch(
+        day=_date(raw["day"]), share=float(raw["share"]), day_type=None if day_type is None else str(day_type)
+    )
 
 
 # ── 关系 ────────────────────────────────────────────────────────────────────
@@ -85,6 +104,18 @@ def _relation(item: RelationOpportunities) -> dict[str, Any]:
         "status": item.status,
         "upward": item.upward,
         "items": [_opportunity(chance) for chance in item.items],
+        "calendar_key": item.calendar_key,
+        "calendar_values": list(item.calendar_values),
+        "within_day_types": list(item.within_day_types),
+        "conditions": [
+            {
+                "text": spec.text,
+                "classes": list(spec.classes),
+                "calendar_key": spec.calendar_key,
+                "calendar_values": list(spec.calendar_values),
+            }
+            for spec in item.conditions
+        ],
         "reading": None
         if item.reading is None
         else {
@@ -109,6 +140,19 @@ def _relation_from(raw: Mapping[str, Any]) -> RelationOpportunities:
         upward=_flag(raw["upward"]),
         items=tuple(_opportunity_from(chance) for chance in raw["items"]),
         reading=_reading_from(raw["reading"]),
+        calendar_key=None if raw["calendar_key"] is None else str(raw["calendar_key"]),
+        calendar_values=tuple(str(value) for value in raw["calendar_values"]),
+        within_day_types=tuple(str(value) for value in raw["within_day_types"]),
+        conditions=tuple(_condition_from(spec) for spec in raw["conditions"]),
+    )
+
+
+def _condition_from(raw: Mapping[str, Any]) -> ConditionSpec:
+    return ConditionSpec(
+        text=str(raw["text"]),
+        classes=tuple(str(token) for token in raw["classes"]),
+        calendar_key=None if raw["calendar_key"] is None else str(raw["calendar_key"]),
+        calendar_values=tuple(str(value) for value in raw["calendar_values"]),
     )
 
 
@@ -171,26 +215,35 @@ def _kind(item: KindDays) -> dict[str, Any]:
             }
             for day in item.days
         ],
+        # 第 i 段在第 i 天与第 i+1 天之间：只存漏看的权重与是否截尾，天数由两头的日子算
+        "intervals": [{"seen": interval.seen, "censored": interval.censored} for interval in item.intervals],
     }
 
 
 def _kind_from(raw: Mapping[str, Any]) -> KindDays:
-    return KindDays(
-        kind_token=str(raw["kind_token"]),
-        label=str(raw["label"]),
-        days=tuple(
-            KindDay(
-                day=_date(day["day"]),
-                first_uri=str(day["first_uri"]),
-                first_at=_moment(day["first_at"]),
-                count=int(day["count"]),
-                natural=int(day["natural"]),
-                natural_uri=None if day.get("natural_uri") is None else str(day["natural_uri"]),
-                natural_at=None if day.get("natural_at") is None else _moment(day["natural_at"]),
-            )
-            for day in raw["days"]
-        ),
+    days = tuple(
+        OccurrenceDay(
+            day=_date(day["day"]),
+            first_uri=str(day["first_uri"]),
+            first_at=_moment(day["first_at"]),
+            count=int(day["count"]),
+            natural=int(day["natural"]),
+            natural_uri=None if day["natural_uri"] is None else str(day["natural_uri"]),
+            natural_at=None if day["natural_at"] is None else _moment(day["natural_at"]),
+        )
+        for day in raw["days"]
     )
+    intervals = tuple(
+        DayInterval(
+            previous=days[index],
+            following=days[index + 1],
+            days=(days[index + 1].day - days[index].day).days,
+            seen=float(interval["seen"]),
+            censored=_flag(interval["censored"]),
+        )
+        for index, interval in enumerate(raw["intervals"])
+    )
+    return KindDays(kind_token=str(raw["kind_token"]), label=str(raw["label"]), days=days, intervals=intervals)
 
 
 # ── 标量 ────────────────────────────────────────────────────────────────────
