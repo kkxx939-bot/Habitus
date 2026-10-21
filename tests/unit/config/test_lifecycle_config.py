@@ -79,7 +79,6 @@ def test_bad_retry_values_are_rejected(kwargs: dict[str, object]) -> None:
     "kwargs",
     [
         {"fallback_generations": 0},
-        {"quarantine_days": 0},
         {"capacity_warning_share": 1.0},
         {"physical_max_backfill_days": 400},
         {"worker": {}},

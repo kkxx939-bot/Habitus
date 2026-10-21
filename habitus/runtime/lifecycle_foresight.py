@@ -4,7 +4,9 @@
 - **索引**：结完、过了那天最晚时限 + 8 天的日子，删它的预期的索引项（之后不会再有触发按同一身份建它）；
 - **整天**（预期、递送、回话、结算、追加裁决）：结完、出了诊断够得着的那一段（30 + 30 天）、单元历史已经记下了那一天、
   那一天的每条预期都已并进它那本账的压实段——四条都满足才删（先删索引）；
-- **单元的档**：留最新一条与最近 60 天。
+- **单元的档**：留最新一条与最近 60 天；
+- **单元的提醒反馈**：每个行为留最近 ``feedback_kept`` 条（裁定 66），更早的、那天已经整天释放的删掉。不得小于读数窗口 M：
+  读数只看最近 M 项，留得比它少就改了读数。
 """
 
 from __future__ import annotations
@@ -33,10 +35,15 @@ class ForesightParticipant:
         history: HistoryStore,
         *,
         lane: str,
+        feedback_kept: int,
+        window: int,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(ledger, ForesightLedgerStore) or not isinstance(history, HistoryStore):
             raise TypeError("ledger must be a ForesightLedgerStore and history a HistoryStore")
+        if isinstance(feedback_kept, bool) or not isinstance(feedback_kept, int) or feedback_kept < window:
+            raise ValueError("lifecycle.feedback_kept must not be smaller than the reading window")
+        self.feedback_kept = feedback_kept
         self.ledger = ledger
         self.history = history
         self.lane = lane
@@ -68,6 +75,7 @@ class ForesightParticipant:
         for kind in self.ledger.unit_kinds():
             ctx.assert_owned()
             released += self.ledger.trim_unit_levels(kind, before=now - timedelta(days=LEVEL_DAYS))
+            released += self.ledger.trim_feedback(kind, keep=self.feedback_kept)
         readings = (CapacityReading("foresight_open_days", len(self.ledger.open_days()), DIAGNOSIS_REACH_DAYS),)
         return ParticipantReport(released=released, readings=readings)
 

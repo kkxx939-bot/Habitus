@@ -27,7 +27,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 
@@ -48,6 +48,7 @@ from habitus.foresight.ledger import (
     AWAITING_HOST,
     HOST_NEVER_CLAIMED,
     RETURNED,
+    UNOBSERVED,
     AccountLevel,
     Delivery,
     Expectation,
@@ -100,6 +101,11 @@ class JudgeMaterials:
     happened: Callable[[Expectation], bool] = lambda item: False
     #: 当地日历对某一天的说法（进小包给模型判像不像；没有日历数据时恒为空）。
     day_note: Callable[[date], str | None] = lambda day: None
+    #: 这条预期说中的范围里（起算 → 此刻）有没有「没读懂」（裁定 67 第 14 条、68 第 2 条）。
+    unobserved: Callable[[Expectation], bool] = lambda item: False
+    #: 时窗末用得着就当场重读那段「没读懂」（裁定 68 第 1 条）：读出了什么为真——这一拍不决定，下一拍按读出的再判；
+    #: 没接（预测层单独跑、没有重试堆）就是 None，有「没读懂」直接记「说不准」。
+    reread: Callable[[Expectation], Awaitable[bool]] | None = None
 
 
 @dataclass(frozen=True)
@@ -229,9 +235,11 @@ class DeliveryStage:
                 self._subsume(tally, member, unit.basis.expectation_id, unit.level)
         for item, cited, level in found.joins:
             self._subsume(tally, item, cited, level)
-        speaking = tuple(item for item, _pending in found.closing)
+        deferred = await self._reread(found.closing, materials)
+        closing = tuple((item, pending) for item, pending in found.closing if item.expectation_id not in deferred)
+        speaking = tuple(item for item, _pending in closing)
         judgement = await self._judge(speaking, standings, materials, now, tally, inputs)
-        for item, pending in self._ordered_closing(found.closing, judgement):
+        for item, pending in self._ordered_closing(closing, judgement):
             verdict = judgement.verdicts.get(item.expectation_id) if judgement is not None else None
             self._record(
                 tally,
@@ -314,17 +322,36 @@ class DeliveryStage:
         tally: _Tally,
         inputs: Mapping[str, Sequence[UnitInput]],
     ) -> Delivery:
-        """时窗末到了：还没做、此刻还在提醒档就说；做了记「已发生」；窗里被压回影子或关了账的记「影子」；久别回来的记「久别回来」
+        """时窗末到了：还没做、此刻还在提醒档就说；做了记「已发生」；窗里有「没读懂」的记「说不准」（他可能已经做了、我们没看到，
+        不把"看了没读懂"读成"没做"，裁定 67 第 14 条）；窗里被压回影子或关了账的记「影子」；久别回来的记「久别回来」
         （时窗开时判过一次；跨夜的时窗换了机会表，这里再判一次）。"""
 
         now = tally.now
         if materials is not None and materials.happened(item):
             return Delivery(item.expectation_id, now, pending.level, False, "已发生", 0.0)
+        if materials is not None and materials.unobserved(item):
+            return Delivery(item.expectation_id, now, pending.level, False, UNOBSERVED, 0.0)
         if standing.level == 0:
             return Delivery(item.expectation_id, now, 0, False, "影子", 0.0)
         if self._returned(item, standing, materials):
             return Delivery(item.expectation_id, now, standing.level, False, RETURNED, 0.0)
         return self._speak(item, standing.level, verdict, materials, tally, inputs)
+
+    @staticmethod
+    async def _reread(
+        closing: Sequence[tuple[Expectation, Delivery]], materials: JudgeMaterials | None
+    ) -> frozenset[str]:
+        """时窗末要说、还没看到他做、范围里有「没读懂」的，先当场重读那一段（裁定 68 第 1 条）；读出了什么的这一拍不决定。"""
+
+        if materials is None or materials.reread is None:
+            return frozenset()
+        found: set[str] = set()
+        for item, _pending in closing:
+            if materials.happened(item) or not materials.unobserved(item):
+                continue
+            if await materials.reread(item):
+                found.add(item.expectation_id)
+        return frozenset(found)
 
     def _speak(
         self,

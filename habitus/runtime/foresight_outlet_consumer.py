@@ -22,7 +22,7 @@ from habitus.runtime.foresight_outlet import HostMessage, ReminderOutlet
 from habitus.runtime.session_lane import BehaviorSessionConsumer
 
 #: 会话协议 → 宿主名（出口按宿主挑提问工具；认不出的协议按全部宿主的工具表认）。
-HOST_BY_PROTOCOL = {"codex_rollout": "codex", "claude_code": "claude-code"}
+HOST_BY_PROTOCOL = {"codex_rollout": "codex", "claude_code": "claude-code", "opencode": "opencode"}
 
 
 class OutletObservingConsumer:

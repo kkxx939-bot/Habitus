@@ -538,6 +538,7 @@ def test_runtime_public_conversation_interface_returns_pending_consistency_handl
             "openai_chat_completions",
             "openai_responses",
             "openclaw",
+            "opencode",
         )
         report = await runtime.health()
         assert report.status.value in {"healthy", "degraded"}
@@ -690,7 +691,27 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     assert branches is not None and worker is not None
     # 整晚那一趟与预测层（与结算）现在只接会话那一支；预测树删了（裁定 59），整晚自己一个常驻节拍。
     behavior = branches.session
-    assert worker.interval_seconds == runtime.config.scene.nightly_interval_seconds
+    assert worker.at == runtime.config.scene.nightly_time and worker.zone == runtime.config.locale.zone()
+    assert worker.last_run.path == runtime.config.scene_root / "nightly" / "last_run.json"
+    # 每晚开头的重试接着两支各自的重试堆（裁定 67）；会话一支连同它的会话 lane
+    retry = worker.nightly.retry
+    assert retry is not None
+    from habitus.behavior.retry import RetryKind
+    from habitus.behavior.retry.handlers import ChainHandler, TurnHandler
+
+    assert [(item.name, item.backlog, sorted(item.handlers)) for item in retry.branches] == [
+        ("session", branches.session.retry_backlog, [RetryKind.CHAIN, RetryKind.TURN]),
+        ("physical", branches.physical.retry_backlog, [RetryKind.CHAIN]),
+    ]
+    session_handlers = retry.branches[0].handlers
+    assert isinstance(session_handlers[RetryKind.TURN], TurnHandler)
+    assert session_handlers[RetryKind.TURN].lane is branches.session.fusion
+    assert isinstance(session_handlers[RetryKind.CHAIN], ChainHandler)
+    assert session_handlers[RetryKind.CHAIN].failed is branches.session.reduction_runner.failed_chains
+    assert branches.session.fusion.tree is branches.session.tree  # 补救时认"已经落树"（裁定 68 第 5 条）
+    # 时窗末当场重读接着会话一支的重试堆（裁定 68 第 1 条）
+    assert runtime.components.foresight is not None and runtime.components.foresight.worker is not None
+    assert runtime.components.foresight.worker.tick.reread is not None
     assert worker.shutdown_timeout_seconds == runtime.config.scene.nightly_shutdown_timeout_seconds
     foresight = runtime.components.foresight
     assert foresight is not None
@@ -719,7 +740,10 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     consumer = runtime.components.conversation.behavior_session_consumer
     assert isinstance(consumer, OutletObservingConsumer) and consumer.outlet is foresight.outlet
     assert consumer.inner.lane is branches.session_lane
-    assert runtime.components.conversation.source_delivery.consumers[ConversationSourceConsumer.BEHAVIOR_SESSION] is consumer
+    assert (
+        runtime.components.conversation.source_delivery.consumers[ConversationSourceConsumer.BEHAVIOR_SESSION]
+        is consumer
+    )
     # 整晚那一趟：结算第一步，语义树读同一棵行为树、机会表写进同一本账本旁边（语义树第 11 步）；"今天"按主体所在地算
     from habitus.runtime.nightly import Nightly
 

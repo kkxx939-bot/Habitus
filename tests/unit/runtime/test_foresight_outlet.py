@@ -685,4 +685,42 @@ def test_ruling65b_a_question_asked_after_the_thing_was_already_done_is_not_spok
     assert run.claim("claude-code", "claude-other", asked_at, 3) == ()
 
 
+def test_opencode_question_tool_is_recognised_with_its_answer(tmp_path) -> None:
+    """OpenCode 的 question 工具：题目在 questions[].question、选项是 {label}；作答由插件写成 "<题目>"="<作答>"。"""
+
+    run, ledger, _ = outlet(tmp_path)
+    item = expectation()
+    awaiting(ledger, item)
+    now = ASKED + timedelta(minutes=10)
+    run.publish([request(item)], now=now)
+    run.claim("opencode", "opencode-ses_1", now, 3)
+    arguments = {
+        "questions": [
+            {"question": TEXT, "header": "提醒", "options": [{"label": o, "description": ""} for o in OPTIONS]}
+        ]
+    }
+    call = HostMessage(
+        3,
+        now + timedelta(minutes=1),
+        "tool_call",
+        json.dumps(arguments, ensure_ascii=False),
+        tool_name="question",
+        tool_call_id="call_q",
+    )
+    answer = HostMessage(
+        4,
+        now + timedelta(minutes=2),
+        "tool_result",
+        f'"{TEXT}"="现在就做"',
+        tool_name="question",
+        tool_call_id="call_q",
+    )
+    report = run.observe("opencode-ses_1", turn(call, answer, at=now + timedelta(seconds=2)), host="opencode")
+    assert (report.spoken, report.responded) == (1, 1)
+    (spoken,) = [d for d in ledger.deliveries_on(item.day) if d.spoken]
+    assert (spoken.via, spoken.turn) == ("opencode", "call_q")
+    (response,) = ledger.responses_on(item.day)
+    assert response.polarity == "正"
+
+
 from habitus.runtime.foresight_outlet import REPLY_TAG  # noqa: E402 - 放在最后：上面的夹具只用名字

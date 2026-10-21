@@ -12,10 +12,15 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, fields
+from datetime import time
 from typing import Any
 
 from habitus.config.loader import construct_config
+
+#: 整晚那一趟的本地时刻：两位小时（00–23）、两位分钟。
+_CLOCK = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 
 # (字段, 下界, 上界)：与 scene/relations/config.py 的校验一致。
 _PROBABILITIES = ("fdr", "forward_alpha", "forward_power", "heterogeneity_alpha", "interval_level")
@@ -89,8 +94,9 @@ class SceneConfig:
     relations: SceneRelationsConfig = field(default_factory=SceneRelationsConfig)
     # 常态按峰分份时，峰的两边各放宽几槽的容差（待定档）。原来借预测树的 pool_half_width，预测树删除后归语义树自己（裁定 59）。
     baseline_slack_slots: int = 3
-    # 整晚那一趟多久跑一次、停机时等它多久（运维数）。原来挂在预测树的重建节拍上，预测树删除后归这里（裁定 59，清单 5.1）。
-    nightly_interval_seconds: float = 86_400.0
+    # 整晚那一趟在主体本地的几点跑（"HH:MM"）、停机时等它多久（运维数）。固定时刻而不是"进程一启动先跑、之后每隔一天"：
+    # 那一趟开头要重试白天读不懂的、只试一次（裁定 67 第 7 条），重启插件那一刻多半额度还没恢复；启动时只补跑错过的那一趟。
+    nightly_at: str = "04:00"
     nightly_shutdown_timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:
@@ -104,13 +110,16 @@ class SceneConfig:
             raise ValueError("scene.baseline_slack_slots must be an integer between 0 and 96")
         if not isinstance(self.relations, SceneRelationsConfig):
             raise TypeError("scene.relations must be SceneRelationsConfig")
-        for label, low, high in (
-            ("nightly_interval_seconds", 60.0, 7 * 86_400.0),
-            ("nightly_shutdown_timeout_seconds", 1.0, 3_600.0),
-        ):
-            value = getattr(self, label)
-            if isinstance(value, bool) or not isinstance(value, int | float) or not low <= float(value) <= high:
-                raise ValueError(f"scene.{label} must be between {low:g} and {high:g}")
+        if not isinstance(self.nightly_at, str) or not _CLOCK.fullmatch(self.nightly_at):
+            raise ValueError("scene.nightly_at must be a local time written HH:MM")
+        timeout = self.nightly_shutdown_timeout_seconds
+        if isinstance(timeout, bool) or not isinstance(timeout, int | float) or not 1.0 <= float(timeout) <= 3_600.0:
+            raise ValueError("scene.nightly_shutdown_timeout_seconds must be between 1 and 3600")
+
+    @property
+    def nightly_time(self) -> time:
+        hours, minutes = self.nightly_at.split(":")
+        return time(int(hours), int(minutes))
 
     @classmethod
     def from_mapping(cls, value: Any) -> SceneConfig:

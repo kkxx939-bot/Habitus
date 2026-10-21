@@ -27,10 +27,11 @@ from habitus.behavior.observation import BehaviorObservation
 from habitus.behavior.reduction.chains import BehaviorChain
 from habitus.behavior.reduction.errors import BehaviorReductionError
 from habitus.behavior.reduction.record import ReducibleJudgement
+from habitus.behavior.schema.vocabulary import UNREADABLE_GAP
 
 REDUCTION_VERSION = "behavior_reduction_v1"
 
-UNREADABLE_GAP_KIND = "没读懂"
+UNREADABLE_GAP_KIND = UNREADABLE_GAP
 UNOBSERVED_GAP_KIND = "未观测"
 # 空判断上写着这个依据的，是上游说"这段时间没在看"（物理 lane 的覆盖时段），不是看了没读懂。
 _UNOBSERVED_BASIS = "unobserved"

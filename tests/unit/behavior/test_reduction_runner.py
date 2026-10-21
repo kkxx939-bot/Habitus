@@ -21,14 +21,15 @@ from habitus.behavior.observation import (
     BehaviorObservationStore,
 )
 from habitus.behavior.reduction import BehaviorReductionLedger, BehaviorReductionRunner  # noqa: F401
-from habitus.behavior.reduction.quarantine import ChainQuarantine
+from habitus.behavior.reduction.failed import FailedChains
 from habitus.behavior.reduction.refresh import RefreshRetries
 from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.tree.dirty_days import DirtyDayLog
 from habitus.behavior.uri import BehaviorURI
 from habitus.foundation.integrity import canonical_digest
 from habitus.foundation.lifecycle import BackoffPolicy
-from habitus.infrastructure.lifecycle import Quarantine, RetryLedger
+from habitus.behavior.retry import RetryBacklogStore, RetryKind
+from habitus.infrastructure.lifecycle import RetryLedger
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from tests.unit.behavior.kinds_fixtures import NameMatchingProvider, kind_components
@@ -92,9 +93,11 @@ class Harness:
                     clock=lambda: self.now,
                 )
             ),
-            chain_quarantine=ChainQuarantine(
+            failed_chains=FailedChains(
                 self.judgements,
-                Quarantine(tmp_path / "lifecycle", owner="behavior-reduction-test", clock=lambda: self.now),
+                ledger=self.ledger,
+                clock=lambda: self.now,
+                backlog=RetryBacklogStore(tmp_path, max_items=100),
             ),
             clock=lambda: self.now,
             dirty_days=DirtyDayLog(tmp_path / "reduction"),
@@ -548,7 +551,7 @@ def test_a_link_to_a_published_gap_is_dropped_not_published(tmp_path) -> None:
 
 
 def test_a_corrupt_record_is_quarantined_without_stalling_the_sweep(tmp_path) -> None:
-    """单条坏记录隔离降级：留信号、不许瘫痪整轮归约；原记录进隔离区，不再每轮重报。"""
+    """单条坏记录隔离降级：留信号、不许瘫痪整轮归约；原记录从存储撤下，不再每轮重报。"""
 
     harness = Harness(tmp_path)
     source = harness.deliver(OBS_A, OBS_B, OBS_C)
@@ -575,16 +578,16 @@ def test_a_corrupt_record_is_quarantined_without_stalling_the_sweep(tmp_path) ->
 
     assert report.published_occurrences == 1  # 好链照常落
     assert any("quarantined" in note for note in report.dropped_edges)
-    # 读不出的原记录进隔离区、从存储撤下（2.4.3）：下一轮不再重报
+    # 读不出的原记录从存储撤下（2.4.3）：读不出时间、没法重试，不进每晚重试的堆（裁定 67 第 10 条）；下一轮不再重报
     assert harness.judgements.read("f" * 64) is None
-    assert [item.meta["kind"] for item in harness.runner.chain_quarantine.quarantine.items()] == ["judgement"]
+    assert harness.runner.failed_chains.backlog.count() == 0
     later = asyncio.run(harness.runner.run_once())
     assert not any("quarantined" in note for note in later.dropped_edges)
 
 
 def test_a_chain_with_an_unaddressable_name_is_isolated_and_becomes_an_unreadable_gap(tmp_path) -> None:
-    """绕过融合守卫写入的坏行为名：按链隔离，不吞整轮、不写检查点炸弹；原判断进隔离区、换成一条「没读懂」判断，
-    之后归约成空白，不再每轮重报（26 号清单 2.4.2）。"""
+    """绕过融合守卫写入的坏行为名：按链隔离，不吞整轮、不写检查点炸弹；原判断进每晚重试的堆、换成一条「没读懂」判断，
+    之后归约成空白，不再每轮重报（26 号清单 2.4.2；裁定 67）。"""
 
     harness = Harness(tmp_path)
     source = harness.deliver(OBS_A, OBS_B, OBS_C)
@@ -605,13 +608,24 @@ def test_a_chain_with_an_unaddressable_name_is_isolated_and_becomes_an_unreadabl
     report = asyncio.run(harness.runner.run_once())
 
     assert report.published_occurrences == 1
-    assert any("isolated" in note for note in report.dropped_edges)
+    assert any("set aside" in note for note in report.dropped_edges)
     assert harness.judgements.read(record_id("bad-name")) is None
-    (item,) = harness.runner.chain_quarantine.quarantine.items()
-    assert item.meta["judgements"] == record_id("bad-name")
+    (item,) = harness.runner.failed_chains.backlog.snapshot().items
+    assert item.kind is RetryKind.CHAIN
+    assert [record["judgement_id"] for record in item.payload["records"]] == [record_id("bad-name")]
     later = asyncio.run(harness.runner.run_once())
     assert later.published_gaps == 1  # 顶替它的「没读懂」判断落成空白
-    assert not any("bad-name" in note or "isolated" in note for note in later.dropped_edges)
+    assert not any("bad-name" in note or "set aside" in note for note in later.dropped_edges)
+
+    # 当晚重试：原判断放回存储再归约一次，同一份代码照样失败——撤下就完，不再造第二条「没读懂」、不再进堆
+    harness.runner.failed_chains.backlog.discard(item.item_id for item in [item])
+    for record in item.payload["records"]:
+        harness.judgements.put_payload(record)
+    retried = asyncio.run(harness.runner.run_once())
+    assert any("failed again on retry" in note for note in retried.dropped_edges)
+    assert retried.published_gaps == 0
+    assert harness.judgements.read(record_id("bad-name")) is None
+    assert harness.runner.failed_chains.backlog.count() == 0
 
 
 def test_an_invalid_payload_is_dropped_before_the_checkpoint(tmp_path) -> None:
@@ -770,7 +784,7 @@ def test_a_link_target_skipped_after_naming_defers_the_source(tmp_path) -> None:
 
     report = asyncio.run(harness.runner.run_once())
 
-    # 目标链物化失败进隔离区（2.4.2），源链这一轮推迟、不带悬空 URI 进检查点
+    # 目标链物化失败进每晚重试的堆、换成「没读懂」（2.4.2；裁定 67），源链这一轮推迟、不带悬空 URI 进检查点
     assert report.published_documents == 0
     assert any("isolated" in note for note in report.dropped_edges)
     assert any("deferred: its link target was skipped" in note for note in report.dropped_edges)
@@ -881,7 +895,7 @@ def test_run_once_works_with_the_production_sqlite_lock_store(tmp_path) -> None:
         kinds=kinds,
         vocabulary_jobs=jobs,
         ledger=harness.ledger,
-        chain_quarantine=harness.runner.chain_quarantine,
+        failed_chains=harness.runner.failed_chains,
         clock=lambda: harness.now,
     )
     source = harness.deliver(OBS_A, OBS_B, OBS_C)

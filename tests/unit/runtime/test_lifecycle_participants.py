@@ -9,7 +9,7 @@ from datetime import UTC, date, datetime, timedelta, timezone
 from habitus.behavior.kinds.changes import AddClass, ChangeReason, VersionRecord
 from habitus.behavior.kinds.config import BehaviorKindConfig
 from habitus.behavior.kinds.store import BehaviorKindStore
-from habitus.foresight.ledger import AccountFact, Expectation
+from habitus.foresight.ledger import AccountFact, Expectation, UnitFeedback, UnitLevel
 from habitus.foresight.ledger.compaction import AccountCompaction
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
@@ -74,7 +74,7 @@ def test_a_day_is_released_only_when_final_out_of_reach_recorded_and_compacted(t
         ledger.record_expectation(item)
         ledger.append_fact(AccountFact(item.account, item.formed_at, True, 1.0, "准时", identity))
         ledger.mark_final(day, at=item.deadline)
-    participant = ForesightParticipant(ledger, history, lane="session", clock=lambda: now)
+    participant = ForesightParticipant(ledger, history, lane="session", feedback_kept=100, window=35, clock=lambda: now)
     asyncio.run(participant.maintain(_Context(now)))  # type: ignore[arg-type]
     assert ledger.expectations_on(old) and ledger.day_of("old") is None  # 没记进单元历史、没压实：只放索引
     assert ledger.day_of("recent") is None  # 最晚时限 + 8 天也过了：放索引
@@ -148,12 +148,16 @@ def test_a_day_killed_halfway_through_its_release_is_released_on_a_later_round(t
 
     ledger._discard_day_dir = killed_after_settlements  # type: ignore[method-assign]
     with pytest.raises(KeyboardInterrupt):
-        ForesightParticipant(ledger, history, lane="session", clock=lambda: now)._maintain_blocking(_Context(now))
+        ForesightParticipant(
+            ledger, history, lane="session", feedback_kept=100, window=35, clock=lambda: now
+        )._maintain_blocking(_Context(now))
 
     restarted = ForesightLedgerStore(tmp_path / "ledger")
     stage = HistoryStage(restarted, history, evidence=Evidence(alpha=0.05, half_life=10.0), statuses=("成立",))
     stage._record("session", date(2026, 10, 10))
-    participant = ForesightParticipant(restarted, history, lane="session", clock=lambda: now)
+    participant = ForesightParticipant(
+        restarted, history, lane="session", feedback_kept=100, window=35, clock=lambda: now
+    )
     participant._maintain_blocking(_Context(now))
 
     assert restarted.is_final(old)
@@ -208,11 +212,13 @@ def test_an_unreadable_relation_night_does_not_block_the_vocabulary_floor(tmp_pa
     assert store.vocabulary_of("session", newer) in versions
 
 
-def test_housekeeping_purges_what_was_abandoned_long_ago_and_reports_both_stores(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """隔离区与重试账原先只进不出（L10.10）：放弃超过统一寿命的清掉，没放弃的、还在重试的不动；两样都报容量。"""
+def test_housekeeping_expires_what_was_given_up_long_ago_and_reports_the_backlogs(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """重试账原先只进不出（L10.10）：放弃超过统一寿命的回收，还在重试的不动；每晚重试的堆只报容量（它自己试完就删，
+    裁定 67）。"""
 
+    from habitus.behavior.retry import RetryBacklogStore
     from habitus.foundation.lifecycle import BackoffPolicy, DeterministicFailure
-    from habitus.infrastructure.lifecycle import Quarantine, RetryLedger
+    from habitus.infrastructure.lifecycle import RetryLedger
     from habitus.runtime.lifecycle_housekeeping import LifecycleHousekeepingParticipant
 
     class _Broken(DeterministicFailure, ValueError):
@@ -221,10 +227,7 @@ def test_housekeeping_purges_what_was_abandoned_long_ago_and_reports_both_stores
     long_ago = datetime(2026, 8, 1, tzinfo=UTC)
     now = long_ago + timedelta(days=45)
     clock = [long_ago]
-    quarantine = Quarantine(tmp_path, owner="q", clock=lambda: clock[0])
-    quarantine.put("old-abandoned", b"x", reason="bad")
-    quarantine.put("old-kept", b"y", reason="bad")
-    quarantine.abandon("old-abandoned")
+    backlog = RetryBacklogStore(tmp_path / "session", max_items=50)
     retries = RetryLedger(
         tmp_path,
         owner="r",
@@ -237,13 +240,19 @@ def test_housekeeping_purges_what_was_abandoned_long_ago_and_reports_both_stores
     clock[0] = now
     retries.record_failure("given-up-recently", _Broken("bad"))
 
-    report = LifecycleHousekeepingParticipant((quarantine,), (retries,), keep_days=30)._maintain_blocking(_Context(now))
+    report = LifecycleHousekeepingParticipant((retries,), keep_days=30, backlogs=(backlog,))._maintain_blocking(
+        _Context(now)
+    )
 
-    assert report.released == 2
-    assert [item.item_id for item in quarantine.items()] == ["old-kept"]
+    assert report.released == 1
     assert retries.entry("given-up") is None
     assert retries.entry("retrying") is not None and retries.entry("given-up-recently") is not None
-    assert {reading.name: reading.count for reading in report.readings} == {"quarantine_q": 1, "retry_r": 2}
+    assert {(reading.name, reading.count, reading.limit) for reading in report.readings} == {
+        ("retry_r", 2, retries.max_entries),
+        ("retry_backlog_session", 0, 50),
+        ("retry_backlog_session_refused_full", 0, None),
+        ("retry_backlog_session_refused_late", 0, None),
+    }
 
 
 def test_an_index_entry_waits_for_the_latest_deadline_plus_the_grace_before_it_goes(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -261,11 +270,15 @@ def test_an_index_entry_waits_for_the_latest_deadline_plus_the_grace_before_it_g
     index = ledger._index / "indexed.json"
 
     early = item.deadline + timedelta(days=INDEX_GRACE_DAYS - 1)
-    ForesightParticipant(ledger, history, lane="session", clock=lambda: early)._maintain_blocking(_Context(early))
+    ForesightParticipant(
+        ledger, history, lane="session", feedback_kept=100, window=35, clock=lambda: early
+    )._maintain_blocking(_Context(early))
     assert index.exists()
 
     late = item.deadline + timedelta(days=INDEX_GRACE_DAYS, hours=1)
-    ForesightParticipant(ledger, history, lane="session", clock=lambda: late)._maintain_blocking(_Context(late))
+    ForesightParticipant(
+        ledger, history, lane="session", feedback_kept=100, window=35, clock=lambda: late
+    )._maintain_blocking(_Context(late))
     assert not index.exists()
     assert ledger.expectations_on(day)  # 整天还没放（单元历史没记过）：只放了索引
 
@@ -283,3 +296,38 @@ def test_releasing_a_day_drops_it_from_the_in_memory_finals(tmp_path) -> None:  
     ledger.discard_day(day)
 
     assert day not in ledger._finals
+
+
+def test_feedback_keeps_the_latest_n_and_drops_older_ones_only_once_their_day_is_released(tmp_path) -> None:
+    """裁定 66：每个行为的提醒反馈留最近 ``feedback_kept`` 条；更早的、那天已整天释放的删，那天还在的留（结算守卫要看）。"""
+
+    ledger = ForesightLedgerStore(tmp_path / "ledger")
+    history = HistoryStore(tmp_path / "ledger")
+    now = datetime(2026, 10, 10, 12, 0, tzinfo=CST)
+    ledger.record_unit_level(UnitLevel("s-k0002", now - timedelta(days=1), 1))
+    days = [date(2026, 6, 1) + timedelta(days=offset) for offset in range(5)]
+    for index, day in enumerate(days):
+        item = _expectation(day, f"e{index}")
+        ledger.record_expectation(item)
+        ledger.record_feedback(UnitFeedback("s-k0002", item.formed_at, index % 2 == 0, item.expectation_id))
+    ledger.discard_day(days[0])
+    ledger.discard_index(days[2])  # 索引先放了、那天还在：按形成时刻前后一天找到预期文件，不删
+    participant = ForesightParticipant(ledger, history, lane="session", feedback_kept=2, window=2, clock=lambda: now)
+    participant._maintain_blocking(_Context(now))
+    assert [item.expectation_id for item in ledger.feedback_of("s-k0002")] == ["e1", "e2", "e3", "e4"]
+    for day in days[1:3]:
+        ledger.discard_day(day)
+    participant._maintain_blocking(_Context(now))
+    assert [item.expectation_id for item in ledger.feedback_of("s-k0002")] == ["e3", "e4"]
+    for day in days[3:]:
+        ledger.discard_day(day)
+    participant._maintain_blocking(_Context(now))
+    assert [item.expectation_id for item in ledger.feedback_of("s-k0002")] == ["e3", "e4"]  # 那天放了，最近 2 条照留
+
+
+def test_feedback_kept_below_the_reading_window_is_refused(tmp_path) -> None:
+    import pytest
+
+    ledger = ForesightLedgerStore(tmp_path / "ledger")
+    with pytest.raises(ValueError, match="reading window"):
+        ForesightParticipant(ledger, HistoryStore(tmp_path / "ledger"), lane="session", feedback_kept=34, window=35)

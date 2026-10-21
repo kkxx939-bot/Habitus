@@ -112,8 +112,8 @@ class ConversationSourceRecoveryParticipant:
         signals: list[str] = []
         if plan.broken:
             signals.append(f"{len(plan.broken)} conversation source deliveries are broken and wait for repair")
-        if plan.isolated:
-            signals.append(f"{len(plan.isolated)} broken behavior deliveries were quarantined")
+        if plan.salvaged:
+            signals.append(f"{len(plan.salvaged)} broken behavior deliveries were salvaged")
         if plan.corrupt:
             signals.append(f"{len(plan.corrupt)} conversation source envelopes are unreadable and wait for repair")
         return ParticipantReport(readings=readings, signals=tuple(signals))

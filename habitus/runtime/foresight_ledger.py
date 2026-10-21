@@ -9,7 +9,7 @@
     <root>/responses/YYYY/MM/DD/<expectation_id>--<responded_at>--<轮的摘要>.json
     <root>/settlements/YYYY/MM/DD/<expectation_id>.json
     <root>/rulings/YYYY/MM/DD/<expectation_id>--<ruled_at>.json
-    <root>/omissions/YYYY/MM/DD/<记录身份>.json，另有 _scanned.json 标这一天已查过漏报
+    <root>/omissions/YYYY/MM/DD/<记录身份>.json       查过漏报的日子记在 omissions_scanned.json 水位里
     <root>/settlements/YYYY/MM/DD/_final.json        这一天结完了（全部结算、过期待决的裁决再也不会变），之后不再读
     <root>/index/expectations/<expectation_id>.json   身份 → 它在哪一天（同一身份全账本只建一条，跨天的触发靠它查重）
     <root>/accounts/<账哈希>/account.json              这本账是什么（类、触发种类、触发身份）
@@ -92,7 +92,6 @@ from habitus.infrastructure.store.filesystem import (
 
 _MAX_ENTRIES = 100_000
 _MAX_BYTES = 1_000_000
-_SCANNED = "_scanned"
 _FINAL = "_final"
 _MAX_UNREADABLE = 1_000
 #: 一本账压实了的那一段（整份替换）。
@@ -296,25 +295,15 @@ class ForesightLedgerStore:
         return tuple(self._records(self._omissions, day, decode_omission))
 
     def scan_watermark(self, *, start: date) -> Watermark[date]:
-        """查过漏报的日子（26 号清单 6.11）：连续前缀 + 零散查过的；没有时从 ``start`` 的前一天起。以前每天一个
-        ``_scanned.json`` 的旧标记第一次读时并进来、再删掉。"""
+        """查过漏报的日子（26 号清单 6.11）：连续前缀 + 零散查过的；没有时从 ``start`` 的前一天起。"""
 
         raw = self._read_watermark(_SCAN_WATERMARK)
         if raw is None:
-            watermark: Watermark[date] = Watermark(through=start - timedelta(days=1))
-        else:
-            watermark = Watermark(
-                through=date.fromisoformat(str(raw["through"])),
-                above=frozenset(date.fromisoformat(str(day)) for day in raw["above"]),
-            )
-        legacy = [day for day in self._days(self._omissions) if self._read(self._omissions, day, _SCANNED) is not None]
-        if legacy:
-            for day in legacy:
-                watermark = mark(watermark, day, successor=_next_day) if watermark.through < day else watermark
-            self._save_scan_watermark(watermark)
-            for day in legacy:
-                durable_unlink(self._day_dir(self._omissions, day) / f"{_SCANNED}.json", artifact_root=self.root)
-        return watermark
+            return Watermark(through=start - timedelta(days=1))
+        return Watermark(
+            through=date.fromisoformat(str(raw["through"])),
+            above=frozenset(date.fromisoformat(str(day)) for day in raw["above"]),
+        )
 
     def mark_scanned(self, day: date, *, start: date) -> Watermark[date]:
         """这一天查过漏报了（同一天不再查第二遍）。"""
@@ -526,6 +515,40 @@ class ForesightLedgerStore:
 
         found = self._decoded(self._unit_dir(kind_token) / "feedback", decode_feedback, None)
         return tuple(sorted(found, key=lambda item: (item.at, item.expectation_id)))
+
+    def trim_feedback(self, kind_token: str, *, keep: int) -> int:
+        """这个行为的提醒反馈按说出口的先后只留最近 ``keep`` 条；更早的、它那条预期所在那天已经整天释放的删掉（那天还在的
+        留着：结算的"写过就不再写"守卫要看它）。返回删了几条（裁定 66）。"""
+
+        directory = self._unit_dir(kind_token) / "feedback"
+        found: list[tuple[UnitFeedback, Path]] = []
+        for entry in self._entries(directory):
+            if not entry.is_file() or not entry.name.endswith(".json") or entry.name.startswith((".", "_")):
+                continue
+            path = directory / entry.name
+            try:
+                found.append((decode_feedback(self._load(path)), path))
+            except ForesightError:
+                continue
+        found.sort(key=lambda pair: (pair[0].at, pair[0].expectation_id))
+        older = found[: max(0, len(found) - keep)]
+        return sum(
+            1
+            for item, path in older
+            if self._released(item.expectation_id, item.at) and durable_unlink(path, artifact_root=self.root)
+        )
+
+    def _released(self, expectation_id: str, formed_at: datetime) -> bool:
+        """这条预期所在那天已经整天释放：索引还在就看它指的那天，索引先放了就看形成时刻前后各一天（预期的日子是主体本地日，
+        形成时刻可能是 UTC 写法）里都没有它的预期文件。"""
+
+        day = self.day_of(expectation_id)
+        candidates = (
+            (day,) if day is not None else tuple(formed_at.date() + timedelta(days=shift) for shift in (-1, 0, 1))
+        )
+        return not any(
+            (self._day_dir(self._expectations, found) / f"{expectation_id}.json").is_file() for found in candidates
+        )
 
     def unit_level_of(self, kind_token: str) -> UnitLevel | None:
         """这个行为单元最近一条档的变化（没有就是从没变过：影子）。"""

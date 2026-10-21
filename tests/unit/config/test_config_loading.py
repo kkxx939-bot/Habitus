@@ -275,6 +275,8 @@ def test_behavior_config_enforces_its_scalar_bounds() -> None:
         ({"reduction_sweep_lock_ttl_seconds": 59}, "reduction_sweep_lock_ttl_seconds"),
         ({"reduction_sweep_lock_ttl_seconds": 86_401}, "reduction_sweep_lock_ttl_seconds"),
         ({"reduction_sweep_lock_ttl_seconds": True}, "reduction_sweep_lock_ttl_seconds"),
+        ({"retry_backlog_max": 0}, "retry_backlog_max"),
+        ({"retry_backlog_max": True}, "retry_backlog_max"),
     ):
         with pytest.raises(ValueError, match=match):
             BehaviorConfig(**kwargs)
@@ -465,13 +467,16 @@ def test_the_nightly_run_is_paced_by_the_scene_section() -> None:
 
     from habitus.config.scene import SceneConfig
 
+    from datetime import time
+
     default = SceneConfig()
-    assert (default.nightly_interval_seconds, default.nightly_shutdown_timeout_seconds) == (86_400.0, 30.0)
-    assert SceneConfig.from_mapping({"nightly_interval_seconds": 3600}).nightly_interval_seconds == 3600
+    assert (default.nightly_at, default.nightly_shutdown_timeout_seconds) == ("04:00", 30.0)
+    assert default.nightly_time == time(4, 0)  # 裁定 67 第 7 条：本地固定时刻
+    assert SceneConfig.from_mapping({"nightly_at": "23:30"}).nightly_time == time(23, 30)
     for field_name, bad in (
-        ("nightly_interval_seconds", 30),
-        ("nightly_interval_seconds", 8 * 86_400),
-        ("nightly_interval_seconds", True),
+        ("nightly_at", "4:00"),
+        ("nightly_at", "24:00"),
+        ("nightly_at", 400),
         ("nightly_shutdown_timeout_seconds", 0.5),
         ("nightly_shutdown_timeout_seconds", "30"),
     ):

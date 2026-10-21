@@ -75,6 +75,9 @@ class BehaviorConfig:
     # （否则会被当成没判过重做），所以它不限制下游停机时长、不丢数据。
     # 树上的数据不受它影响（撞车消歧的占用集合以树上既有地址为最终真相，不依赖账本窗口）。
     coverage_window_days: int = 7
+    # 每晚重试的堆每一支最多留几项（裁定 67 第 8 条，保护闸）：满了新来的只落「没读懂」、不进堆，计数留信号。
+    # 量级按一天的轮数给：模型断一整天也大多装得下，又不至于让一晚的重试把刚恢复的额度一下烧光。
+    retry_backlog_max: int = 500
     # 基础词表（裁定 6：门槛做成配置）：全部可调字段，留空取 ``behavior/kinds/config.py`` 的默认值
     # （默认值只在领域模块）。字段名 = ``kinds_`` + BehaviorKindConfig 的同名字段，组合根按前缀派生注入。
     # 会话 lane 的保护上限（方案第五节）：留空取 ``behavior/fusion/lanes/session/config.py`` 的默认值。
@@ -132,6 +135,12 @@ class BehaviorConfig:
             or not 1 <= self.coverage_window_days <= 365
         ):
             raise ValueError("behavior.coverage_window_days must be between 1 and 365")
+        if (
+            isinstance(self.retry_backlog_max, bool)
+            or not isinstance(self.retry_backlog_max, int)
+            or not 1 <= self.retry_backlog_max <= 100_000
+        ):
+            raise ValueError("behavior.retry_backlog_max must be an integer between 1 and 100000")
         for name, upper in (
             ("session_max_turn_chars", 1_000_000),
             ("session_max_instruction_chars", 1_000_000),

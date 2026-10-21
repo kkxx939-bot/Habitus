@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 from habitus.behavior.fusion.errors import BehaviorFusionError
 
@@ -87,4 +89,57 @@ class SessionTurn:
         )
 
 
-__all__ = ["SessionMessage", "SessionMessageRole", "SessionTurn"]
+def encode_turn(turn: SessionTurn) -> dict[str, Any]:
+    """一轮编成 JSON 对象（每晚重试的堆里存它，裁定 67）：与输入同形，重试走同一个描述器。"""
+
+    return {
+        "conversation_id": turn.conversation_id,
+        "start_sequence": turn.start_sequence,
+        "end_sequence": turn.end_sequence,
+        "instructed_at": turn.instructed_at.isoformat(timespec="microseconds"),
+        "completed_at": turn.completed_at.isoformat(timespec="microseconds"),
+        "instruction": turn.instruction,
+        "messages": [
+            {
+                "sequence": item.sequence,
+                "occurred_at": item.occurred_at.isoformat(timespec="microseconds"),
+                "role": item.role.value,
+                "content": item.content,
+                "tool_name": item.tool_name,
+                "tool_call_id": item.tool_call_id,
+                "failed": item.failed,
+            }
+            for item in turn.messages
+        ],
+    }
+
+
+def decode_turn(raw: Mapping[str, Any]) -> SessionTurn:
+    """``encode_turn`` 的反面；形状不对抛 ``BehaviorFusionError``。"""
+
+    try:
+        return SessionTurn(
+            conversation_id=str(raw["conversation_id"]),
+            start_sequence=int(raw["start_sequence"]),
+            end_sequence=int(raw["end_sequence"]),
+            instructed_at=datetime.fromisoformat(str(raw["instructed_at"])),
+            completed_at=datetime.fromisoformat(str(raw["completed_at"])),
+            instruction=str(raw["instruction"]),
+            messages=tuple(
+                SessionMessage(
+                    sequence=int(item["sequence"]),
+                    occurred_at=datetime.fromisoformat(str(item["occurred_at"])),
+                    role=SessionMessageRole(item["role"]),
+                    content=str(item["content"]),
+                    tool_name=None if item["tool_name"] is None else str(item["tool_name"]),
+                    tool_call_id=None if item["tool_call_id"] is None else str(item["tool_call_id"]),
+                    failed=bool(item["failed"]),
+                )
+                for item in raw["messages"]
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise BehaviorFusionError(f"encoded session turn is invalid: {exc}") from exc
+
+
+__all__ = ["SessionMessage", "SessionMessageRole", "SessionTurn", "decode_turn", "encode_turn"]

@@ -17,8 +17,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, tzinfo
@@ -55,11 +56,14 @@ from habitus.behavior.reduction import (
     BehaviorReductionRunner,
     VocabularyJobReport,
 )
+from habitus.behavior.reduction.failed import FailedChains
 from habitus.behavior.reduction.kinds_jobs import VocabularyJobs
 from habitus.behavior.reduction.kinds_migration import KindMigrator
 from habitus.behavior.reduction.kinds_step import KindStamping
-from habitus.behavior.reduction.quarantine import ChainQuarantine
 from habitus.behavior.reduction.refresh import RefreshRetries
+from habitus.behavior.retry import RetryBacklogStore, RetryBranch, RetryHandler, RetryKind, RetryStage
+from habitus.behavior.retry.handlers import ChainHandler, TurnHandler
+from habitus.behavior.retry.reread import Rereader
 from habitus.behavior.semantic import BehaviorSemanticRefresher, LLMBehaviorOverviewGenerator
 from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.tree.config import BehaviorTreeConfig
@@ -73,7 +77,7 @@ from habitus.foundation.observability import (
     SpanController,
     observe_operation,
 )
-from habitus.infrastructure.lifecycle import Quarantine, RetryLedger
+from habitus.infrastructure.lifecycle import RetryLedger
 from habitus.infrastructure.store.contracts.lock import LockStore
 from habitus.infrastructure.store.contracts.path_lock import PathLock
 from habitus.model_client import StructuredChatClient
@@ -101,6 +105,9 @@ class BehaviorRuntimeComponents:
     reduction_runner: BehaviorReductionRunner
     fusion: SessionLane | PhysicalLane
     reduction_worker: BehaviorReductionWorker
+    #: 这一支每晚重试的堆（裁定 67）：会话 lane 放写成「没读懂」的轮，归约放失败的链。没开语义树就没有夜批、没人来试，
+    #: 不建堆（读不懂的只落「没读懂」）。
+    retry_backlog: RetryBacklogStore | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "lane", Lane(self.lane))
@@ -149,6 +156,16 @@ class BehaviorRuntimeComponents:
             ("reduction ledger", self.reduction_runner.ledger.root.parent),
             ("tree", self.tree.root.parent),
         )
+        if self.retry_backlog is not None:
+            if not isinstance(self.retry_backlog, RetryBacklogStore):
+                raise TypeError("behavior components retry_backlog must be RetryBacklogStore")
+            if self.retry_backlog.root != root:
+                raise ValueError(f"behavior branch {self.lane.value} keeps its retry backlog outside its own root")
+            fronts = [self.reduction_runner.failed_chains.backlog]
+            if isinstance(self.fusion, SessionLane):
+                fronts.append(self.fusion.backlog)
+            if any(front is not self.retry_backlog for front in fronts):
+                raise ValueError("behavior components must share one retry backlog instance")
         for label, home in homes:
             if home != root:
                 raise ValueError(f"behavior branch {self.lane.value} keeps its {label} outside its own root")
@@ -161,15 +178,6 @@ class BehaviorRuntimeComponents:
         """物理一支的小账（生命周期按补发跨度整日释放，26 号清单 6.4）；会话一支没有。"""
 
         return self.fusion.recorder.ledger if isinstance(self.fusion, PhysicalLane) else None
-
-    @property
-    def quarantines(self) -> tuple[Quarantine, ...]:
-        """这一支的隔离区（归约的链、会话 lane 的轮）：放弃的项按统一寿命清、各报容量（L10.10）。"""
-
-        found = [self.reduction_runner.chain_quarantine.quarantine]
-        if isinstance(self.fusion, SessionLane):
-            found.append(self.fusion.recorder.quarantine)
-        return tuple(found)
 
     @property
     def retry_ledgers(self) -> tuple[RetryLedger, ...]:
@@ -358,6 +366,9 @@ def _build_branch(
     kind_config = BehaviorKindConfig(**behavior_config.kinds_overrides())
     kind_store = BehaviorKindStore(tree.root, config=kind_config)
     kinds, vocabulary_jobs = _vocabulary(tree, lock_store, kind_store, structured_chat, config.locale.zone(), lane)
+    reduction_ledger = BehaviorReductionLedger(root / "reduction")
+    # 每晚重试的堆只在有夜批时建（夜批随语义树开）：没人来试的堆只会一直满着
+    backlog = RetryBacklogStore(root, max_items=behavior_config.retry_backlog_max) if config.scene.enabled else None
     reduction_runner = BehaviorReductionRunner(
         judgements=judgements,
         observations=observations,
@@ -366,16 +377,14 @@ def _build_branch(
         lock_store=lock_store,
         kinds=kinds,
         vocabulary_jobs=vocabulary_jobs,
-        ledger=BehaviorReductionLedger(root / "reduction"),
+        ledger=reduction_ledger,
         semantic_refresher=BehaviorSemanticRefresher(tree, LLMBehaviorOverviewGenerator(structured_chat)),
         refresh_retries=RefreshRetries(
             retry_ledger(root, owner=f"behavior-semantic-{lane.value}", config=config.lifecycle.retry, clock=clock)
         ),
         # 脏日日志只有语义树夜批读（只接会话一支）：别的支不记
         dirty_days=DirtyDayLog(root / "reduction") if lane is Lane.SESSION and config.scene.enabled else None,
-        chain_quarantine=ChainQuarantine(
-            judgements, Quarantine(root, owner=f"behavior-reduction-{lane.value}", clock=clock or _utc_now)
-        ),
+        failed_chains=FailedChains(judgements, ledger=reduction_ledger, clock=clock or _utc_now, backlog=backlog),
         clock=clock,
         context_lookback_seconds=context_lookback,
         coverage=coverage,
@@ -402,8 +411,9 @@ def _build_branch(
                 primary_subject=behavior_config.primary_subject,
                 zone=zone,
                 clock=lane_clock,
-                quarantine=Quarantine(root, owner="behavior-session-lane", clock=lane_clock),
             ),
+            backlog=backlog,
+            tree=tree,
         )
     else:
         fusion = PhysicalLane(
@@ -428,6 +438,7 @@ def _build_branch(
         kind_store=kind_store,
         reduction_runner=reduction_runner,
         fusion=fusion,
+        retry_backlog=backlog,
         reduction_worker=BehaviorReductionWorker(
             reduction_runner,
             interval_seconds=behavior_config.reduction_sweep_interval_seconds,
@@ -436,6 +447,58 @@ def _build_branch(
             span_controller=span_controller,
         ),
     )
+
+
+#: 白天的归约正占着锁时，夜批重试那一次归约等几次、每次隔多久（它一轮几分钟内结束；等不到也不要紧：放回的判断
+#: 下一轮白天照样落树）。
+REDUCE_BUSY_ATTEMPTS = 12
+REDUCE_BUSY_DELAY_SECONDS = 10.0
+
+
+def retry_stage_of(
+    branches: Iterable[BehaviorRuntimeComponents],
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> RetryStage | None:
+    """每晚跑批第一步的重试（裁定 67、68）：各支有重试堆的接进来——会话一支的会话轮交给会话 lane，两支的链交给各自的
+    归约；一支都没有就是 None。"""
+
+    found: list[RetryBranch] = []
+    for branch in branches:
+        if branch.retry_backlog is None:
+            continue
+        handlers: dict[RetryKind, RetryHandler] = {RetryKind.CHAIN: ChainHandler(branch.reduction_runner.failed_chains)}
+        if isinstance(branch.fusion, SessionLane):
+            handlers[RetryKind.TURN] = TurnHandler(branch.fusion)
+        found.append(RetryBranch(branch.lane.value, branch.retry_backlog, handlers, _reduce_when_free(branch, sleep)))
+    return RetryStage(found) if found else None
+
+
+def rereader_of(branch: BehaviorRuntimeComponents) -> Callable[[datetime, datetime], Awaitable[bool]] | None:
+    """时窗末当场重读的口（裁定 68 第 1 条）：会话一支的重试堆 + 会话轮处理器；没有重试堆或不是会话一支就是 None。"""
+
+    if branch.retry_backlog is None or not isinstance(branch.fusion, SessionLane):
+        return None
+    return Rereader(branch.retry_backlog, TurnHandler(branch.fusion)).reread
+
+
+def _reduce_when_free(
+    branch: BehaviorRuntimeComponents, sleep: Callable[[float], Awaitable[None]]
+) -> Callable[[], Awaitable[str | None]]:
+    async def reduce() -> str | None:
+        for attempt in range(REDUCE_BUSY_ATTEMPTS):
+            try:
+                await branch.reduction_runner.run_once()
+            except BehaviorReductionBusyError:
+                if attempt + 1 < REDUCE_BUSY_ATTEMPTS:
+                    await sleep(REDUCE_BUSY_DELAY_SECONDS)
+                continue
+            except Exception as exc:  # noqa: BLE001 - 归约自己留观测；这一步不拖住这一晚
+                return f"{branch.lane.value}: {type(exc).__name__}"
+            return None
+        return f"{branch.lane.value}: busy"
+
+    return reduce
 
 
 def deliver_physical(

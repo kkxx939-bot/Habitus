@@ -7,6 +7,7 @@ const SOURCE = join(PLUGINS, "memory-plugin-shared", "lib");
 const TARGETS = [
   join(PLUGINS, "habitus-memory", "scripts", "shared"),
   join(PLUGINS, "habitus-memory-claude-code", "scripts", "shared"),
+  join(PLUGINS, "habitus-memory-opencode", "scripts", "shared"),
 ];
 const HEADER = "// GENERATED FROM plugins/memory-plugin-shared/lib. DO NOT EDIT.\n";
 

@@ -27,12 +27,12 @@ from habitus.conversation.source import (
     conversation_source_request_digest,
 )
 from habitus.conversation.source.fence import ConversationConsumerExecutionLease
-from habitus.conversation.source.quarantine import SourceQuarantine
 from habitus.conversation.source.recovery import ConversationSourceRecovery
+from habitus.conversation.source.salvage import SourceSalvage
 from habitus.foundation.integrity import canonical_digest
 from habitus.foundation.lifecycle import BackoffPolicy
 from habitus.foundation.observability import ObservationEvent, Observer
-from habitus.infrastructure.lifecycle import Quarantine, RetryLedger
+from habitus.infrastructure.lifecycle import RetryLedger
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.conversation import ConversationAppendResult, ConversationAppendStatus, ConversationRetentionPlan
@@ -318,6 +318,7 @@ def recovery(
     max_attempts: int = 3,
     orphan_grace: timedelta = timedelta(hours=24),
     clock: Callable[[], datetime] = lambda: NOW,
+    salvaged: list[ConversationSourceEnvelope] | None = None,
 ) -> ConversationSourceRecovery:
     """恢复连同它的重试账；账落在会话根目录下，时钟默认停在 ``NOW``（退避期不会自己过去）。"""
 
@@ -328,15 +329,15 @@ def recovery(
         max_attempts=max_attempts,
         clock=clock,
     )
-    quarantine = SourceQuarantine(
-        Quarantine(service.ledger.pending.root, owner="conversation-source-behavior", clock=clock)
+    salvage = SourceSalvage(
+        service.ledger.pending.root, salvager=salvaged.append if salvaged is not None else (lambda _envelope: None)
     )
     return ConversationSourceRecovery(
         service.sources,
         service,
         batch_size=batch_size,
         retries=retries,
-        quarantine=quarantine,
+        salvage=salvage,
         orphan_grace=orphan_grace,
         clock=clock,
     )

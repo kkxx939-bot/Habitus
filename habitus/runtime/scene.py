@@ -16,6 +16,7 @@ from datetime import date, datetime
 
 from habitus.behavior.kinds.reader import VocabularyReader
 from habitus.behavior.kinds.store import BehaviorKindStore
+from habitus.behavior.retry import RetryStage
 from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.tree.dirty_days import DirtyDayLog
 from habitus.conditions import DayTypeCalendar
@@ -27,7 +28,7 @@ from habitus.runtime.evidence import evidence_of
 from habitus.runtime.foresight import ForesightRuntimeComponents, build_foresight_nightly
 from habitus.runtime.lifecycle_retry import retry_ledger
 from habitus.runtime.nightly import Nightly
-from habitus.runtime.nightly_worker import NightlyWorker
+from habitus.runtime.nightly_worker import LastRun, NightlyWorker
 from habitus.runtime.scene_advice import RelationAdvice
 from habitus.runtime.scene_authoring import ConceptAuthoring
 from habitus.runtime.scene_night import SceneNightConfig, SceneNightlyRun, relation_config
@@ -116,8 +117,9 @@ def build_nightly(
     foresight: ForesightRuntimeComponents | None,
     clock: Callable[[], datetime] | None = None,
     dirty_days: DirtyDayLog | None = None,
+    retry: RetryStage | None = None,
 ) -> Nightly:
-    """整晚的串法：结算（预测层接着时）→ 行为树读一次，语义树、机会表与找原因（预测层接着时）用同一份序列。
+    """整晚的串法：重试白天读不懂的（裁定 67）→ 结算（预测层接着时）→ 行为树读一次，语义树、机会表与找原因（预测层接着时）用同一份序列。
     ``dirty_days`` 是这一支归约记的脏日日志：序列按天缓存、只重读变过的日子（26 号清单 6.7）。"""
 
     reader = VocabularyReader(kind_store)
@@ -142,16 +144,19 @@ def build_nightly(
             )
         ),
         settlement=None if foresight is None else foresight.settlement,
+        retry=retry,
     )
 
 
 def build_nightly_worker(config: HabitusConfig, nightly: Nightly, *, observer: Observer | None = None) -> NightlyWorker:
-    """整晚那一趟的常驻节拍：每 ``scene.nightly_interval_seconds`` 一趟。"""
+    """整晚那一趟的常驻节拍：每天主体本地的 ``scene.nightly_at``；上一趟开跑的时刻落在语义树根下（裁定 67 第 7 条）。"""
 
     return NightlyWorker(
         nightly,
-        interval_seconds=config.scene.nightly_interval_seconds,
+        at=config.scene.nightly_time,
+        zone=config.locale.zone(),
         shutdown_timeout_seconds=config.scene.nightly_shutdown_timeout_seconds,
+        last_run=LastRun(config.scene_root / "nightly" / "last_run.json", root=config.scene_root),
         observer=observer,
     )
 

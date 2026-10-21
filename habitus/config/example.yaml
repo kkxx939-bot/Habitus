@@ -440,6 +440,7 @@ workflow:
 #   reduction_sweep_lock_ttl_seconds: 600   # 归约 sweep 的租约时长；周尺度回填可调大（默认 600）
 #   worker_shutdown_timeout_seconds: 30
 #   coverage_window_days: 7            # 重做去重的判据；覆盖记录/回执/账本的过期期限（覆盖记录在其凭据释放前不过期）
+#   retry_backlog_max: 500             # 每晚重试的堆每一支最多几项（保护闸）；满了新来的只落「没读懂」
 #   # 会话 lane 的保护上限；留空取 behavior/fusion/lanes/session/config.py 的默认值
 #   session_max_turn_chars: 8000       # 一轮对话给模型的材料总字数上限（超出先削工具调用中段，人的指令最后才削）
 #   session_max_instruction_chars: 4000  # 人的那条指令最多留多少字
@@ -483,7 +484,7 @@ workflow:
 # scene:
 #   enabled: true
 #   baseline_slack_slots: 3          # 常态按峰分份时峰两边各放宽几槽（待定档；原借预测树 pool_half_width，裁定 59）
-#   nightly_interval_seconds: 86400  # 整晚那一趟（结算→语义树→机会表）多久跑一次（运维数；原借预测树的重建节拍，裁定 59）
+#   nightly_at: "04:00"             # 整晚那一趟（重试→结算→语义树→机会表）在主体本地几点跑；启动时只补跑错过的那一趟（裁定 67）
 #   nightly_shutdown_timeout_seconds: 30  # 停机时等整晚那一趟多久
 #   relations:
 #     fdr: 0.10                        # 第 1 道：当晚检验族的假发现率
@@ -532,7 +533,7 @@ workflow:
 #   false_alarm_rate: 0.33           # 可接受的误提醒率；线 = 1 − 它（0.33 → 0.67），这一版所有账同一条线
 #   shadow_uses_unestablished: true  # 影子预期也用还没成立的候选关系（账早攒；开口仍只用成立的）
 #   unseen_day_types: skip           # 没见过的日型怎么建预期：skip 不外推（只在见过他做的日型上建）/ official 按放假数据的官方含义归组（待定，裁定 59）
-#   daily_reminder_cap: 6            # 每天最多提醒几次（保护闸，常触发说明线该重看）
+#   daily_reminder_cap: 10           # 每天最多提醒几次（保护闸，常触发说明线该重看）
 #   open_reminders_judged: 5         # 每段会话进融合时最多带几条开着的提醒给模型判回应（按截止由近到远）
 #   unit_prior_share: 0.333          # 行为单元分层读数里先验的分量占有效样本上限的比例（没见过的组合贴着更粗那一层；回放后定）
 #   judge_transient_retries: 1       # 模型对传输层瞬态错的有界重试
@@ -553,12 +554,13 @@ workflow:
 #     lease_ttl_seconds: 300               # 全局维护 lease 的租期
 #     heartbeat_interval_seconds: 60.0     # 多久续一次 lease（不超过租期的三分之一）
 #     shutdown_timeout_seconds: 30.0       # 停机时最多等当前一轮多久
-#   retry:                           # 重试账：可重试失败按 base × 2^(n−1) 退避（封顶 cap），第 max_attempts 次转为放弃、进隔离区
+#   retry:                           # 重试账：可重试失败按 base × 2^(n−1) 退避（封顶 cap），第 max_attempts 次转为放弃
 #     max_attempts: 5
 #     backoff_base_seconds: 60.0
 #     backoff_cap_seconds: 86400.0
+#     given_up_days: 30              # 放弃了超过这么多天的条目回收
 #   fallback_generations: 2          # 派生物（关系表、机会表、单元历史）当前一代之外留几代备用
-#   quarantine_days: 30              # 隔离区里人工放弃的项留几天再清；没放弃的不自动清
 #   transitions_rotate_files: 4      # 关系迁移日志按大小轮转时留几份
 #   capacity_warning_share: 0.8      # 有上限的量到这个占比报告警（non-critical）
 #   physical_max_backfill_days: 7    # 物理 lane 上游最多补发多少天前的单位
+#   feedback_kept: 100               # 单元提醒反馈每个行为留最近几条；更早且那天已释放的删（不小于读数窗口 M）

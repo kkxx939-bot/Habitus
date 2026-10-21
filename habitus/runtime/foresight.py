@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -227,6 +227,7 @@ def build_foresight_tick(
     observer: Observer | None = None,
     clock: Callable[[], datetime] | None = None,
     lane: str = "session",
+    reread: Callable[[datetime, datetime], Awaitable[bool]] | None = None,
 ) -> ForesightTick:
     """白天那一拍：读这一支的机会表、今天的日历条件、行为树今天与前 7 天、还没封口的判断（``unsealed``），把此刻对得上
     历史的预期写进这一支的账本；再把到了时窗的按账的级决定说不说（``structured_chat`` 给了就带模型四问，不给就按算法与模板）。
@@ -270,6 +271,7 @@ def build_foresight_tick(
         delivery=delivery,
         tick_seconds=foresight.tick_interval_seconds,
         recent=evidence.window,
+        reread=reread,
     )
 
 

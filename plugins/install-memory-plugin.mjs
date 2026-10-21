@@ -1,11 +1,9 @@
-#!/usr/bin/env node
-
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, parse, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   HARNESS_REGISTRY,
   MARKETPLACE_NAME,
@@ -76,7 +74,7 @@ async function stageMarketplace(root, sourceRoot, registry) {
         errorOnExist: true,
       });
     }
-    for (const definition of definitions) {
+    for (const definition of definitions.filter((item) => item.marketplaceManifest)) {
       const destination = join(staging, definition.marketplaceManifest.path);
       await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
       await writeFile(
@@ -195,7 +193,61 @@ function pluginIsInstalled(entry) {
   return entry?.installed !== false;
 }
 
-async function inspectHarness(definition, runner) {
+// ── 文件注册（OpenCode）：在宿主的插件目录放一个入口文件，指向 marketplace 根里的插件 ────────────────────────
+const ENTRY_MARKER = "// habitus-memory: managed by `habitus plugin`. Do not edit.";
+
+export function fileEntryPath(definition, env = process.env) {
+  const base = env.XDG_CONFIG_HOME ? resolve(env.XDG_CONFIG_HOME) : join(homedir(), ".config");
+  return join(base, ...definition.fileEntry.configPath, definition.fileEntry.name);
+}
+
+export function fileEntrySource(definition, root) {
+  const target = pathToFileURL(join(root, "plugins", definition.pluginDirectory, definition.fileEntry.module)).href;
+  return `${ENTRY_MARKER}\nexport { default } from ${JSON.stringify(target)};\n`;
+}
+
+async function inspectFileEntry(definition, runner, env) {
+  const available = runner.available(definition.command);
+  let text = null;
+  try { text = await readFile(fileEntryPath(definition, env), "utf8"); }
+  catch (error) { if (error?.code !== "ENOENT") throw error; }
+  const ours = typeof text === "string" && text.startsWith(ENTRY_MARKER);
+  const target = ours ? text.match(/from "(file:[^"]+)"/)?.[1] : null;
+  const root = target ? dirname(dirname(dirname(fileURLToPath(target)))) : null;
+  return {
+    harness: definition.id,
+    available,
+    marketplaceSource: root,
+    installed: Boolean(ours && target),
+    enabled: Boolean(ours && target),
+    foreignEntry: typeof text === "string" && !ours,
+  };
+}
+
+async function writeFileEntry(definition, root, env) {
+  const path = fileEntryPath(definition, env);
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  let existing = null;
+  try { existing = await readFile(path, "utf8"); }
+  catch (error) { if (error?.code !== "ENOENT") throw error; }
+  if (existing != null && !existing.startsWith(ENTRY_MARKER)) {
+    throw new Error(`${path} exists and is not managed by Habitus; move it away first`);
+  }
+  await writeFile(path, fileEntrySource(definition, root), { mode: 0o600 });
+}
+
+async function removeFileEntry(definition, env) {
+  const path = fileEntryPath(definition, env);
+  let existing = null;
+  try { existing = await readFile(path, "utf8"); }
+  catch (error) { if (error?.code === "ENOENT") return false; throw error; }
+  if (!existing.startsWith(ENTRY_MARKER)) return false;
+  await rm(path, { force: true });
+  return true;
+}
+
+async function inspectHarness(definition, runner, env = process.env) {
+  if (definition.registration === "file") return inspectFileEntry(definition, runner, env);
   if (!runner.available(definition.command)) {
     return {
       harness: definition.id,
@@ -222,16 +274,18 @@ async function inspectHarness(definition, runner) {
   };
 }
 
-function removeHarnessRegistration(snapshot, definition, runner) {
+async function removeHarnessRegistration(snapshot, definition, runner, env = process.env) {
+  if (definition.registration === "file") { await removeFileEntry(definition, env); return; }
   if (snapshot.installed) runner.run(definition.command, definition.pluginRemove);
   if (snapshot.marketplaceSource) runner.run(definition.command, definition.marketplaceRemove);
 }
 
-function installHarnessRegistration(snapshot, definition, root, runner, { refresh }) {
+async function installHarnessRegistration(snapshot, definition, root, runner, { refresh, env = process.env }) {
+  if (definition.registration === "file") { await writeFileEntry(definition, root, env); return; }
   const sourceChanged = snapshot.marketplaceSource != null
     && resolve(snapshot.marketplaceSource) !== resolve(root);
   const mustRefresh = refresh || sourceChanged || (snapshot.installed && !snapshot.enabled);
-  if (mustRefresh) removeHarnessRegistration(snapshot, definition, runner);
+  if (mustRefresh) await removeHarnessRegistration(snapshot, definition, runner, env);
   const marketplacePresent = snapshot.marketplaceSource && !mustRefresh;
   const pluginPresent = snapshot.installed && snapshot.enabled && !mustRefresh;
   if (!marketplacePresent) {
@@ -241,10 +295,15 @@ function installHarnessRegistration(snapshot, definition, root, runner, { refres
   if (definition.pluginEnable) runner.run(definition.command, definition.pluginEnable);
 }
 
-async function restoreHarness(snapshot, definition, runner) {
+async function restoreHarness(snapshot, definition, runner, env = process.env) {
+  if (definition.registration === "file") {
+    if (snapshot.installed && snapshot.marketplaceSource) await writeFileEntry(definition, snapshot.marketplaceSource, env);
+    else await removeFileEntry(definition, env);
+    return;
+  }
   if (!snapshot.available) return;
-  const current = await inspectHarness(definition, runner);
-  try { removeHarnessRegistration(current, definition, runner); } catch {}
+  const current = await inspectHarness(definition, runner, env);
+  try { await removeHarnessRegistration(current, definition, runner, env); } catch {}
   if (snapshot.marketplaceSource) {
     runner.run(
       definition.command,
@@ -294,6 +353,7 @@ export async function executePluginLifecycle(
     runner = new CommandRunner(),
     sourceRoot = REPOSITORY_PLUGINS,
     registry = HARNESS_REGISTRY,
+    env = process.env,
   } = {},
 ) {
   if (options.action === "harnesses") {
@@ -312,7 +372,7 @@ export async function executePluginLifecycle(
   const allowUnavailable = requestedHarnesses.length === 0 || requestedHarnesses.includes("all");
   const snapshots = [];
   for (const definition of definitions) {
-    const snapshot = await inspectHarness(definition, runner);
+    const snapshot = await inspectHarness(definition, runner, env);
     if (
       !snapshot.available
       && !allowUnavailable
@@ -335,11 +395,11 @@ export async function executePluginLifecycle(
     try {
       for (const value of snapshots.filter((item) => item.snapshot.available)) {
         processed.push(value);
-        removeHarnessRegistration(value.snapshot, value.definition, runner);
+        await removeHarnessRegistration(value.snapshot, value.definition, runner, env);
       }
     } catch (error) {
       for (const value of processed.reverse()) {
-        await restoreHarness(value.snapshot, value.definition, runner).catch(() => {});
+        await restoreHarness(value.snapshot, value.definition, runner, env).catch(() => {});
       }
       throw error;
     }
@@ -365,19 +425,19 @@ export async function executePluginLifecycle(
   try {
     for (const value of snapshots.filter((item) => item.snapshot.available)) {
       processed.push(value);
-      installHarnessRegistration(
+      await installHarnessRegistration(
         value.snapshot,
         value.definition,
         root,
         runner,
-        { refresh: options.action === "update" },
+        { refresh: options.action === "update", env },
       );
     }
     await transaction.commit();
   } catch (error) {
     await transaction.rollback();
     for (const value of processed.reverse()) {
-      await restoreHarness(value.snapshot, value.definition, runner).catch(() => {});
+      await restoreHarness(value.snapshot, value.definition, runner, env).catch(() => {});
     }
     throw error;
   }
@@ -415,32 +475,4 @@ export function parseArgs(argv) {
     throw new Error("--prepare-only is valid only for install or update");
   }
   return options;
-}
-
-async function isMainModule() {
-  if (!process.argv[1]) return false;
-  try { return await realpath(fileURLToPath(import.meta.url)) === await realpath(process.argv[1]); }
-  catch { return false; }
-}
-
-if (await isMainModule()) {
-  try {
-    const options = parseArgs(process.argv.slice(2));
-    if (options.help) {
-      process.stdout.write(
-        "usage: habitus-plugin [install|status|update|remove|harnesses] "
-        + "[--harness ID|--host ID] [--root PATH] [--prepare-only] [--json]\n",
-      );
-      process.exitCode = 0;
-    } else {
-    const result = await executePluginLifecycle(options);
-    if (options.json || ["status", "harnesses"].includes(options.action)) {
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    }
-    else process.stdout.write(`Habitus plugin ${options.action} completed at ${result.root}\n`);
-    }
-  } catch (error) {
-    process.stderr.write(`Habitus plugin lifecycle failed: ${error?.message || error}\n`);
-    process.exitCode = 1;
-  }
 }

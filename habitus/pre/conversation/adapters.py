@@ -93,6 +93,7 @@ class ConversationAdapterRegistry:
         registry.register(CodexRolloutConversationAdapter())
         registry.register(ClaudeCodeConversationAdapter())
         registry.register(OpenClawConversationAdapter())
+        registry.register(OpenCodeConversationAdapter())
         return registry
 
 
@@ -472,6 +473,123 @@ class OpenClawConversationAdapter:
         return builder.finish(after_turn=completed, ignored_items=ignored)
 
 
+class OpenCodeConversationAdapter:
+    """适配 OpenCode 的会话消息（插件把每条已完成的消息原样镜像成一条记录：``{"info": Message, "parts": [Part]}``，即
+    ``client.session.messages`` 的形状）。
+
+    - 人的消息：非合成（``synthetic``）、非忽略的文本段 → 人说的话；OpenCode 自己合成的（读文件的回执）与我们注入的上下文都是合成段，不算。
+    - 助手的消息：文本段 → 答复；工具段只收已结束的（``completed`` / ``error``），一段拆成调用 + 结果；没结束的连调用也不收（调用与结果
+      不闭合就进不了 Conversation）。思考、步骤、快照、补丁、文件等段不收。
+    - 提问工具 ``question`` 的作答：插件从 ``question.replied`` 事件拿到他点了什么，挂在 ``state.habitus_answers``
+      （``[{question, answers: [标签]}]``）；有它就把结果写成 ``"<题目>"="<作答>"`` 一行一题，和 Claude Code 的作答同一个形状，
+      提醒出口与会话 lane 都按这个认（方案 32 第 4.2 条、方案 36 第四节）。
+    时刻：OpenCode 记毫秒时间戳。
+    """
+
+    protocol = "opencode"
+
+    def adapt(self, payload: object, context: ConversationAdapterContext) -> ConversationAdaptation:
+        builder = _Builder(self.protocol, context)
+        ignored = 0
+        for index, raw in enumerate(_records(payload, "OpenCode records")):
+            record = _mapping(raw, f"records[{index}]")
+            info = _mapping(record.get("info"), "OpenCode message info")
+            role = _clean_text(info.get("role"), "OpenCode message role").lower()
+            if role not in {"user", "assistant"}:
+                ignored += 1
+                continue
+            time = info.get("time")
+            created = _epoch_ms(time.get("created") if isinstance(time, Mapping) else None, context.occurred_at)
+            for part_index, raw_part in enumerate(_sequence(record.get("parts", ()), "OpenCode parts")):
+                part = _mapping(raw_part, "OpenCode part")
+                ignored += _add_opencode_part(builder, role, part, f"{index}.{part_index}", created)
+        completed = bool(builder.messages and builder.messages[-1].role is ConversationMessageRole.COMPLETION)
+        return builder.finish(after_turn=completed, ignored_items=ignored)
+
+
+def _add_opencode_part(
+    builder: _Builder, role: str, part: Mapping[str, object], source: str, fallback: datetime
+) -> int:
+    part_type = part.get("type")
+    if part_type == "text":
+        text = part.get("text")
+        if (
+            part.get("synthetic") is True
+            or part.get("ignored") is True
+            or not isinstance(text, str)
+            or not text.strip()
+        ):
+            return 1
+        span = part.get("time")
+        at = _epoch_ms(span.get("end") or span.get("start") if isinstance(span, Mapping) else None, fallback)
+        builder.add(
+            ConversationMessageRole.PROMPT if role == "user" else ConversationMessageRole.COMPLETION,
+            text.strip(),
+            source_index=source,
+            occurred_at=at,
+        )
+        return 0
+    if part_type != "tool" or role != "assistant":
+        return 1
+    state = _mapping(part.get("state"), "OpenCode tool state")
+    status = state.get("status")
+    if status not in {"completed", "error"}:
+        return 1
+    call_id = _clean_text(part.get("callID"), "OpenCode tool callID")
+    name = _clean_text(part.get("tool"), "OpenCode tool name")
+    span = state.get("time")
+    started = _epoch_ms(span.get("start") if isinstance(span, Mapping) else None, fallback)
+    ended = _epoch_ms(span.get("end") if isinstance(span, Mapping) else None, started)
+    builder.add(
+        ConversationMessageRole.TOOL_CALL,
+        _tool_arguments(state.get("input") or {}),
+        source_index=f"{source}.call",
+        tool_call_id=call_id,
+        tool_name=name,
+        occurred_at=started,
+    )
+    answers = _opencode_answers(state.get("habitus_answers"))
+    if status == "error":
+        content: object = str(state.get("error") or "error")
+    elif answers is not None:
+        content = answers
+    else:
+        content = _tool_result_content(state.get("output"))
+    builder.add(
+        ConversationMessageRole.TOOL_RESULT,
+        content,
+        source_index=f"{source}.result",
+        tool_call_id=call_id,
+        tool_name=name,
+        tool_status=ConversationToolResultStatus.ERROR if status == "error" else ConversationToolResultStatus.COMPLETED,
+        occurred_at=ended,
+    )
+    return 0
+
+
+def _opencode_answers(value: object) -> str | None:
+    """``[{question, answers: [标签]}]`` → 一行一题 ``"<题目>"="<作答>"``（多选用顿号连）。形状不对给 None（用工具原输出）。"""
+
+    if not isinstance(value, Sequence) or isinstance(value, str) or not value:
+        return None
+    lines: list[str] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            return None
+        question, answers = item.get("question"), item.get("answers")
+        if not isinstance(question, str) or not isinstance(answers, Sequence) or isinstance(answers, str):
+            return None
+        labels = [label for label in answers if isinstance(label, str) and label]
+        lines.append(f'"{question}"="{"、".join(labels)}"')
+    return "\n".join(lines)
+
+
+def _epoch_ms(value: object, fallback: datetime) -> datetime:
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+        return fallback
+    return datetime.fromtimestamp(value / 1000, tz=UTC)
+
+
 def _message_sequence(payload: object) -> tuple[object, ...]:
     if isinstance(payload, Mapping):
         payload = payload.get("messages")
@@ -658,4 +776,5 @@ __all__ = [
     "OpenAIChatCompletionsConversationAdapter",
     "OpenAIResponsesConversationAdapter",
     "OpenClawConversationAdapter",
+    "OpenCodeConversationAdapter",
 ]

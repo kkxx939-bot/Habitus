@@ -40,6 +40,7 @@ from habitus.foresight.ledger.model import (
     SETTINGS,
     SOURCES,
     SPOKEN,
+    UNOBSERVED,
     VOID,
     AccountFact,
     AccountLevel,
@@ -70,6 +71,7 @@ from habitus.foresight.ledger.settle import (
 
 __all__ = [
     "AWAITING_HOST",
+    "UNOBSERVED",
     "DELIVERY_REASONS",
     "FACT_KINDS",
     "HOST_NEVER_CLAIMED",

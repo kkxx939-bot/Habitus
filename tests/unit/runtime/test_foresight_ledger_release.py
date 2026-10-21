@@ -58,13 +58,10 @@ def test_the_final_low_watermark_moves_only_over_a_contiguous_prefix_and_backs_o
     )
 
 
-def test_scanning_is_one_watermark_and_old_per_day_markers_fold_into_it(tmp_path) -> None:
+def test_scanning_is_one_watermark_marked_out_of_order(tmp_path) -> None:
     store = seeded(tmp_path)
-    legacy = store.root / "omissions" / "2026" / "12" / "01"
-    legacy.mkdir(parents=True)
-    (legacy / "_scanned.json").write_text('{"record":"scanned"}')
-    watermark = store.scan_watermark(start=FIRST)
-    assert covers(watermark, FIRST) and not (legacy / "_scanned.json").exists()
+    assert not covers(store.scan_watermark(start=FIRST), FIRST)
+    store.mark_scanned(FIRST, start=FIRST)
     store.mark_scanned(FIRST + timedelta(days=2), start=FIRST)  # 乱序：第 3 天先查
     watermark = store.scan_watermark(start=FIRST)
     assert watermark.through == FIRST and FIRST + timedelta(days=2) in watermark.above

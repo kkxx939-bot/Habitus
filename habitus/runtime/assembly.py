@@ -50,7 +50,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 from habitus.behavior.kinds.reader import VocabularyReader
 from habitus.config import HabitusConfig
@@ -70,9 +70,9 @@ from habitus.conversation import (
     PendingSources,
     SourceIndex,
 )
-from habitus.conversation.source.quarantine import SourceQuarantine
+from habitus.conversation.source.salvage import SourceSalvage
 from habitus.foundation.observability import CompositeObserver, MetricRegistry, Observer
-from habitus.infrastructure.lifecycle import CapacitySnapshotStore, LifecycleParticipant, Quarantine
+from habitus.infrastructure.lifecycle import CapacitySnapshotStore, LifecycleParticipant
 from habitus.infrastructure.observability import ManagedObservability
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.sqlite import SQLiteLockStore
@@ -136,7 +136,7 @@ from habitus.memory.workflow import (
 )
 from habitus.model_client import ProviderFactory, StructuredChatClient
 from habitus.pre.conversation import ConversationAdapterRegistry
-from habitus.runtime.behavior import build_behavior_components
+from habitus.runtime.behavior import build_behavior_components, rereader_of, retry_stage_of
 from habitus.runtime.components import (
     RuntimeComponents,
     RuntimeConversation,
@@ -166,7 +166,7 @@ from habitus.runtime.lifecycle_scene import SceneParticipant, scene_vocabulary_v
 from habitus.runtime.lifecycle_sources import ConversationSourceParticipant, ConversationSourceRecoveryParticipant
 from habitus.runtime.runtime import Runtime
 from habitus.runtime.scene import build_nightly, build_nightly_worker, build_scene_nightly
-from habitus.runtime.session_lane import BehaviorSessionConsumer
+from habitus.runtime.session_lane import BehaviorSessionConsumer, session_salvager
 from habitus.runtime.unsealed import UnsealedFromJudgements
 from habitus.runtime.worker import MemoryWorker
 
@@ -631,6 +631,7 @@ def build_runtime(
             vocabulary_version=lambda: kind_store.read().version,
             vocabulary_migrating=lambda: kind_store.read_migration() is not None,
             observer=operation_observer,
+            reread=rereader_of(session_behavior),
         )
         foresight_components = dataclasses.replace(
             foresight_components, worker=build_foresight_worker(tick, config=config, observer=operation_observer)
@@ -671,8 +672,10 @@ def build_runtime(
         observer=operation_observer,
     )
     source_coordinator = ConversationSourceCoordinator(source_store, source_delivery)
-    source_quarantine = SourceQuarantine(
-        Quarantine(config.conversation_root, owner="conversation-source-behavior", clock=lambda: datetime.now(UTC))
+    # 行为侧的账坏了的会话源：逐轮补救（没写过的轮落「没读懂」、进每晚重试的堆，裁定 67 第 5 条、68 第 3 条）
+    source_salvage = SourceSalvage(
+        config.conversation_root,
+        salvager=session_salvager(None if behavior_components is None else behavior_components.session_lane),
     )
     source_recovery = ConversationSourceRecovery(
         source_store,
@@ -681,7 +684,7 @@ def build_runtime(
         retries=retry_ledger(
             config.conversation_root, owner="conversation-source-recovery", config=config.lifecycle.retry
         ),
-        quarantine=source_quarantine,
+        salvage=source_salvage,
         orphan_grace=timedelta(seconds=source_config.orphan_grace_seconds),
     )
     source_releaser = ConversationSourceReleaser(
@@ -694,7 +697,7 @@ def build_runtime(
         },
         resolved_lock.lock_store,
         lock_ttl_seconds=source_config.execution_lock_ttl_seconds,
-        quarantined=source_quarantine.contains,
+        salvage=source_salvage,
     )
     runner = MemoryJobRunner(
         jobs,
@@ -750,6 +753,7 @@ def build_runtime(
                     closed_days=session_behavior.reduction_runner.closed_days,
                     foresight=foresight_components,
                     dirty_days=session_behavior.reduction_runner.dirty_days,
+                    retry=retry_stage_of(() if behavior_components is None else behavior_components),
                 ),
                 observer=operation_observer,
             )
@@ -768,19 +772,25 @@ def build_runtime(
         )
     if foresight_components is not None:
         participants.append(
-            ForesightParticipant(foresight_components.ledger, foresight_components.history.store, lane="session")
+            ForesightParticipant(
+                foresight_components.ledger,
+                foresight_components.history.store,
+                lane="session",
+                feedback_kept=config.lifecycle.feedback_kept,
+                window=evidence_of(config).window,
+            )
         )
-    # 生命周期骨架自己的状态（隔离区、重试账）按统一寿命清、报容量（L10.10）
+    # 生命周期骨架自己的状态（重试账、每晚重试的堆）按统一寿命清、报容量（L10.10；裁定 67）
     branches = () if behavior_components is None else tuple(behavior_components)
     participants.append(
         LifecycleHousekeepingParticipant(
-            (source_quarantine.quarantine, *(item for branch in branches for item in branch.quarantines)),
             (
                 source_recovery.retries,
                 *(item for branch in branches for item in branch.retry_ledgers),
                 *(() if scene is None else (scene.mapping_retries,)),
             ),
-            keep_days=config.lifecycle.quarantine_days,
+            keep_days=config.lifecycle.retry.given_up_days,
+            backlogs=tuple(branch.retry_backlog for branch in branches if branch.retry_backlog is not None),
         )
     )
     lifecycle_worker = LifecycleWorker(

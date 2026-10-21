@@ -52,25 +52,8 @@ dev = [
 
 [project.scripts]
 habitus-benchmark = "habitus.benchmark.cli:main"
-habitus = "habitus.integrations.local_service.cli:main"
 habitus-server = "habitus.integrations.local_service.cli:main"
 habitus-http = "habitus.integrations.local_service.cli:main"
-habitus-plugin = "habitus.integrations.local_service.plugin_cli:main"
-
-[tool.setuptools.data-files]
-"share/habitus/plugins" = ["plugins/harnesses.mjs", "plugins/install-memory-plugin.mjs", "plugins/package.json"]
-"share/habitus/plugins/memory-plugin-shared" = ["plugins/memory-plugin-shared/doctor.mjs"]
-"share/habitus/plugins/memory-plugin-shared/lib" = ["plugins/memory-plugin-shared/lib/*.mjs"]
-"share/habitus/plugins/habitus-memory" = ["plugins/habitus-memory/LICENSE"]
-"share/habitus/plugins/habitus-memory/.codex-plugin" = ["plugins/habitus-memory/.codex-plugin/plugin.json"]
-"share/habitus/plugins/habitus-memory/hooks" = ["plugins/habitus-memory/hooks/hooks.json"]
-"share/habitus/plugins/habitus-memory/scripts" = ["plugins/habitus-memory/scripts/*.mjs"]
-"share/habitus/plugins/habitus-memory/scripts/shared" = ["plugins/habitus-memory/scripts/shared/*.mjs"]
-"share/habitus/plugins/habitus-memory-claude-code" = ["plugins/habitus-memory-claude-code/LICENSE"]
-"share/habitus/plugins/habitus-memory-claude-code/.claude-plugin" = ["plugins/habitus-memory-claude-code/.claude-plugin/plugin.json"]
-"share/habitus/plugins/habitus-memory-claude-code/hooks" = ["plugins/habitus-memory-claude-code/hooks/hooks.json"]
-"share/habitus/plugins/habitus-memory-claude-code/scripts" = ["plugins/habitus-memory-claude-code/scripts/*.mjs"]
-"share/habitus/plugins/habitus-memory-claude-code/scripts/shared" = ["plugins/habitus-memory-claude-code/scripts/shared/*.mjs"]
 
 [tool.setuptools.packages.find]
 where = ["."]

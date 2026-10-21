@@ -12,6 +12,8 @@ from habitus.model_client.config import (
     RerankModelConfig,
 )
 from habitus.model_client.contracts import (
+    MODEL_DETERMINISTIC,
+    MODEL_UNAVAILABLE,
     ChatCallContext,
     ChatMessage,
     ChatProvider,
@@ -57,6 +59,8 @@ from habitus.model_client.token_budget import (
 )
 
 __all__ = [
+    "MODEL_DETERMINISTIC",
+    "MODEL_UNAVAILABLE",
     "CapabilityConfig",
     "ChatClient",
     "ChatCallContext",

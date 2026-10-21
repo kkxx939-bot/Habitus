@@ -254,9 +254,12 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
     model_callers = sorted(
         str(path.relative_to(SRC)) for path in behavior_root.rglob("*.py") if "model_client" in imported_roots(path)
     )
+    # ``retry/handlers.py`` 不调模型：只读 ``model_client`` 具名导出的两组异常（模型用不了 / 同一份输入再问也一样）
+    # 来给每晚重试的结果分类（裁定 68 第 5 条），调模型的仍是会话 lane 的 service。
     assert model_callers == [
         "behavior/fusion/lanes/session/service.py",
         "behavior/kinds/calls.py",
+        "behavior/retry/handlers.py",
         "behavior/semantic/generator.py",
     ]
 
@@ -427,15 +430,20 @@ def test_the_behaviour_tree_is_read_into_the_series_in_one_place() -> None:
         path.relative_to(SRC).as_posix() for path in series_root.rglob("*.py") if "behavior" in imported_roots(path)
     )
     assert readers == ["series/reader.py"]
-    # 只有标准库：空白作废的规则（``disproves``）用到 bisect 与 collections.abc，仍是纯函数
+    # 只有标准库，外加一个纯函数：空白作废的规则（``disproves``）判"有没有一条行为的起点落在空白里"用的是
+    # ``foundation.intervals``——每天的语义概览在行为层、读不了 series，与它共用这一个判法（裁定 67）
     assert imported_roots(series_root / "model.py") <= {
         "__future__",
-        "bisect",
         "collections",
         "dataclasses",
         "datetime",
         "enum",
+        "foundation",
     }
+    assert {
+        module for module in imported_modules(series_root / "model.py") if module.startswith("habitus.foundation")
+    } == {"habitus.foundation.intervals"}
+    assert imported_roots(SRC / "foundation" / "intervals.py") <= {"__future__", "bisect", "collections", "datetime"}
     assert "habitus.series.reader" not in imported_modules(series_root / "__init__.py")
     importers = sorted(
         path.relative_to(SRC).parts[0]
@@ -918,7 +926,7 @@ def test_foundation_depends_on_no_other_package() -> None:
 
 
 def test_infrastructure_lifecycle_depends_only_on_foundation_and_store() -> None:
-    """生命周期的基础设施（参与者协议、重试账、隔离区、容量快照）各层都要用：它只认 ``foundation`` 与
+    """生命周期的基础设施（参与者协议、重试账、容量快照）各层都要用：它只认 ``foundation`` 与
     ``infrastructure.store``，一旦 import 领域包或配置，那个包就成了所有层的传递依赖。整个 ``infrastructure``
     现在已经 import config 与 model_client，所以只钉这个子包。"""
 

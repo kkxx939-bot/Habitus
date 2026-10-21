@@ -17,6 +17,7 @@ TODO(BHV-SESSION-LANE-001)：只收本人在交互界面里说话的会话（裁
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict
 
 from habitus.behavior.fusion.lanes.session import (
@@ -194,6 +195,20 @@ class BehaviorSessionConsumer:
         )
 
 
+def session_salvager(lane: SessionLane | None) -> Callable[[ConversationSourceEnvelope], None]:
+    """会话源"处理完了没有"的账坏了时由会话源那一侧调（``conversation.source.salvage``）：把这份源拆成轮，交给会话 lane
+    逐轮补救（裁定 67 第 5、16 条；"写没写过"的判法、那一天收不收都在行为侧）。行为侧没启用就什么都不做。"""
+
+    if lane is None:
+        return lambda _envelope: None
+    session = lane
+
+    def salvage(envelope: ConversationSourceEnvelope) -> None:
+        session.salvage(session_turns(envelope, question_tools=session.describer.config.question_tools))
+
+    return salvage
+
+
 def _skipped(reason: str) -> ConversationConsumerRunResult:
     return ConversationConsumerRunResult(
         disposition=ConversationConsumerRunDisposition.SKIPPED,
@@ -208,5 +223,6 @@ __all__ = [
     "SKIP_NO_TURNS",
     "SKIP_SUBAGENT",
     "BehaviorSessionConsumer",
+    "session_salvager",
     "session_turns",
 ]

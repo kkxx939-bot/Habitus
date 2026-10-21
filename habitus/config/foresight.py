@@ -46,7 +46,7 @@ class ForesightConfig:
     shadow_uses_unestablished: bool = True
     # ── 保护闸 ──
     # 每天最多主动提醒几次；应当很少触发，常触发说明升级条件该重看。
-    daily_reminder_cap: int = 6
+    daily_reminder_cap: int = 10
     # 每段会话进融合时最多带几条开着的提醒给模型判回应（按截止由近到远；没带进去的只按做结算；裁定 61 第 5 条）。
     # 启动值，以后从回放定。
     open_reminders_judged: int = 5

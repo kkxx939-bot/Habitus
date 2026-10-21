@@ -6,6 +6,8 @@ import argparse
 import getpass
 import json
 import os
+import shutil
+import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -26,7 +28,7 @@ class WizardCancelled(RuntimeError):
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """先处理 init/doctor/plugin，再延迟导入 HTTP 与 Runtime。"""
+    """先处理 init/doctor，再延迟导入 HTTP 与 Runtime。插件生命周期在 npm 命令 ``habitus`` 里（方案 36）。"""
 
     args = _parser().parse_args(list(argv) if argv is not None else None)
     values = _environment(args.config)
@@ -39,15 +41,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         code = _doctor(args, values)
         if code:
             raise SystemExit(code)
-        return
-    if args.command == "plugin":
-        arguments = list(args.plugin_arguments)
-        if args.plugin_help:
-            arguments.insert(0, "--help")
-        _delegate_plugin(arguments)
-        return
-    if args.command == "harnesses":
-        _delegate_plugin(["harnesses", "--json"])
         return
     if args.command == "repair-source-outputs":
         code = _repair_source_outputs(args, values)
@@ -182,10 +175,7 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
     ):
         harnesses = ["all"]
     if harnesses:
-        delegated = ["install"]
-        for harness in harnesses:
-            delegated.extend(("--harness", harness))
-        _delegate_plugin(delegated)
+        _install_plugins(harnesses)
 
     start = args.start
     if start is None and interactive and doctor_ok is not False:
@@ -198,7 +188,8 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
     if doctor_ok is False:
         return 1
     sys.stdout.write(
-        f"Next: habitus-server --config {result.path}\nAgent plugins: habitus plugin install --harness <id>\n"
+        f"Next: habitus-server --config {result.path}\n"
+        "Agent plugins: npm install -g @habitus/cli && habitus plugin install --harness <id>\n"
     )
     return 0
 
@@ -360,15 +351,21 @@ def _maybe_offer_init(explicit: str | None, values: dict[str, str]) -> bool:
     return True
 
 
-def _delegate_plugin(arguments: Sequence[str]) -> None:
-    from habitus.integrations.local_service.plugin_cli import run
+def _install_plugins(harnesses: Sequence[str]) -> None:
+    """插件装在 npm 包 ``@habitus/cli`` 里（方案 36）：装了就替用户跑 ``habitus plugin install``，没装就说怎么装。服务这一侧
+    不再带插件、不再自己调 Node 安装器。"""
 
-    try:
-        code = run(arguments)
-    except (RuntimeError, ValueError) as exc:
-        raise SystemExit(str(exc)) from exc
-    if code:
-        raise SystemExit(code)
+    command = shutil.which("habitus")
+    arguments = [part for harness in harnesses for part in ("--harness", harness)]
+    if command is None:
+        sys.stdout.write(
+            "Agent plugins need the Habitus command line: npm install -g @habitus/cli\n"
+            f"then: habitus plugin install {' '.join(arguments)}\n"
+        )
+        return
+    completed = subprocess.run([command, "plugin", "install", *arguments], check=False)  # noqa: S603
+    if completed.returncode:
+        raise SystemExit(completed.returncode)
 
 
 def _repair_source_outputs(args: argparse.Namespace, values: Mapping[str, str]) -> int:
@@ -689,10 +686,6 @@ def _parser() -> argparse.ArgumentParser:
         help="只报告将保留和删除哪些 Output，不改动任何文件",
     )
 
-    plugin = subparsers.add_parser("plugin", add_help=False, help="委托 Agent Harness 插件生命周期")
-    plugin.add_argument("-h", "--help", dest="plugin_help", action="store_true")
-    plugin.add_argument("plugin_arguments", nargs=argparse.REMAINDER)
-    subparsers.add_parser("harnesses", help="列出已注册和可用的 Agent Harness")
 
     parser.set_defaults(
         command="serve",

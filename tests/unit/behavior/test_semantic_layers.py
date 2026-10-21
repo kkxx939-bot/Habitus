@@ -83,6 +83,42 @@ def test_day_overview_merges_gaps_into_one_timeline(tmp_path) -> None:
     assert (day_dir.identity_parts, BehaviorSemanticRefreshStatus.WRITTEN) in statuses
 
 
+def _occurrence_at(name: str, hour: int, minute: int) -> dict[str, Any]:
+    start, end = local(hour, minute), local(hour, minute + 1)
+    step = {"semantics": name, "started_at": start, "ended_at": end, "available_at": end}
+    return occurrence_payload(name=name, started_at=start, last_observed_at=end, onset_available_at=start, basis=[step])
+
+
+def test_an_unreadable_gap_voided_by_a_behaviour_inside_it_leaves_the_day_overview(tmp_path) -> None:
+    """裁定 67：每晚补回来的行为落在原来那段「没读懂」里，读的时候整段作废（与序列、按天读树同一条规则）——当天的叙述与
+    空白枚举里都不再有它；「未观测」不消解，照旧列出。"""
+
+    tree, writer = build_tree(tmp_path)
+    writer.publish(BehaviorKind.GAP, gap_payload())  # 20:10–20:40 没读懂
+    writer.publish(BehaviorKind.GAP, gap_payload(gap_kind="未观测", started_at=local(21, 0), ended_at=local(21, 30)))
+    writer.publish(
+        BehaviorKind.OCCURRENCE,
+        _occurrence_at("补回来的", 20, 10),
+    )
+    writer.publish(
+        BehaviorKind.OCCURRENCE,
+        _occurrence_at("盖不到的", 21, 5),
+    )
+    generator = ScriptedOverviewGenerator()
+
+    refresh(tree, generator)
+
+    day_dir = BehaviorDirectory.occurrences(DAY.year, DAY.month, DAY.day)
+    day_snapshot = next(s for s in generator.snapshots if s.directory == day_dir)
+    assert [entry.kind for entry in day_snapshot.entries] == [
+        BehaviorSemanticEntryKind.OCCURRENCE,
+        BehaviorSemanticEntryKind.GAP,
+        BehaviorSemanticEntryKind.OCCURRENCE,
+    ]
+    gaps = tree.read_layer(BehaviorDirectory.gaps(DAY.year, DAY.month, DAY.day), BehaviorLevel.OVERVIEW)
+    assert "本日记录 1 段观测空白" in gaps and "21:00" in gaps and "20:10" not in gaps
+
+
 def test_month_and_year_roll_up_from_day_abstracts(tmp_path) -> None:
     tree, writer = build_tree(tmp_path)
     writer.publish(BehaviorKind.OCCURRENCE, occurrence_payload())
@@ -343,3 +379,19 @@ def test_cross_month_days_roll_up_into_both_months_and_the_year(tmp_path) -> Non
         assert tree.layer_exists(BehaviorDirectory.occurrences(*parts), BehaviorLevel.OVERVIEW)
     year_snapshot = next(s for s in generator.snapshots if s.directory == BehaviorDirectory.occurrences(2026))
     assert [entry.name for entry in year_snapshot.entries] == ["08", "09"]
+
+
+def test_only_counted_behaviours_void_an_unreadable_gap_in_the_day_overview(tmp_path) -> None:
+    """裁定 68 第 5 条：作废空白只认算数的行为（撞车重复、「非事件」不算），与序列、按天读树同一条（``behavior.kinds.counted``）。"""
+
+    from habitus.behavior.kinds.ids import Lane, not_event_token
+
+    tree, writer = build_tree(tmp_path)
+    writer.publish(BehaviorKind.GAP, gap_payload())  # 20:10–20:40 没读懂
+    noise = _occurrence_at("一条小命令", 20, 15)
+    noise["kind_token"] = not_event_token(Lane.SESSION)
+    writer.publish(BehaviorKind.OCCURRENCE, noise)
+    refresh(tree, ScriptedOverviewGenerator())
+
+    gaps = tree.read_layer(BehaviorDirectory.gaps(DAY.year, DAY.month, DAY.day), BehaviorLevel.OVERVIEW)
+    assert "本日记录 1 段观测空白" in gaps and "20:10" in gaps

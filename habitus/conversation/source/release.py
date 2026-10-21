@@ -3,18 +3,18 @@
 门槛，三条同时满足：
 1. 同一地址后面有一份 start_sequence 更大、Memory 已 COMMITTED 的交付——插件同会话严格顺序投递，后一份
    已提交，前一份就不会再被重投；
-2. 这份源两个消费者都已终态（COMMITTED / SKIPPED；隔离区里的算终态）；
+2. 这份源两个消费者都已终态（COMMITTED / SKIPPED；行为侧的账坏了、已补救的算终态，``salvage``）；
 3. 同一地址更早的源都已释放——所以水位只会连续推进。
 每个地址最后一份永远满足不了第 1 条，随会话退休一起删（memory 侧，待定）。
 
 删的顺序：持有两个消费者的执行锁 → 写地址水位（fence 住全局 lease 与两把锁）→ 删信封 → 删 Outcome → 删输出 →
-放锁、删两把锁行 → 删"还没终态"标记 → 最后删索引标记。任何一步崩溃，下一轮从索引标记续删：水位已盖住、且信封
+放锁、删两把锁行 → 删"已补救"标记 → 删"还没终态"标记 → 最后删索引标记。任何一步崩溃，下一轮从索引标记续删：水位已盖住、且信封
 已不在或两边已终态，就直接往下删，不再看第 1、3 条；信封还在又没终态的是序号回退后的新源，等它终态。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from types import MappingProxyType
 
 from habitus.conversation.source.fence import consumer_lock_key
@@ -25,16 +25,13 @@ from habitus.conversation.source.receipt import (
     ConversationConsumerOutcomeStore,
     ConversationSourceConsumer,
 )
+from habitus.conversation.source.salvage import SourceSalvage
 from habitus.conversation.source.state import ConversationConsumerOutputStore
 from habitus.conversation.source.store import ConversationSourceStore
 from habitus.infrastructure.lifecycle import LifecycleContext
 from habitus.infrastructure.store.contracts import LockStore, LockToken
 
 _TERMINAL = frozenset({ConversationConsumerOutcomeState.COMMITTED, ConversationConsumerOutcomeState.SKIPPED})
-
-
-def _never_quarantined(_source_id: str, _consumer: ConversationSourceConsumer) -> bool:
-    return False
 
 
 class ConversationSourceReleaser:
@@ -47,7 +44,7 @@ class ConversationSourceReleaser:
         lock_store: LockStore,
         *,
         lock_ttl_seconds: int,
-        quarantined: Callable[[str, ConversationSourceConsumer], bool] = _never_quarantined,
+        salvage: SourceSalvage | None = None,
     ) -> None:
         missing = sorted(item.value for item in ConversationSourceConsumer if item not in outputs)
         if missing:
@@ -62,7 +59,9 @@ class ConversationSourceReleaser:
         )
         self.lock_store = lock_store
         self.lock_ttl_seconds = lock_ttl_seconds
-        self.quarantined = quarantined
+        if salvage is not None and not isinstance(salvage, SourceSalvage):
+            raise TypeError("salvage must be a SourceSalvage")
+        self.salvage = salvage
 
     def releasable(self, directory_name: str) -> tuple[SourceMarker, ...]:
         """这个地址里现在可以放的源，按顺序；遇到第一份放不了的就停（第 3 条）。"""
@@ -115,6 +114,8 @@ class ConversationSourceReleaser:
                 self.lock_store.release(token)
         for consumer in ConversationSourceConsumer:
             self.lock_store.discard_idle(consumer_lock_key(marker.source_id, consumer))
+        if self.salvage is not None:
+            self.salvage.discard(marker.source_id)
         ctx.assert_owned()
         self.ledger.pending.clear(marker.source_id)
         self.ledger.index.remove(marker)
@@ -126,7 +127,7 @@ class ConversationSourceReleaser:
         settled = 0
         for source_id, _address in self.ledger.pending.listing():
             if all(
-                self.quarantined(source_id, consumer)
+                self._salvaged(source_id, consumer)
                 or ((outcome := self.outcomes.read(source_id, consumer)) is not None and outcome.state in _TERMINAL)
                 for consumer in ConversationSourceConsumer
             ):
@@ -150,11 +151,14 @@ class ConversationSourceReleaser:
         outcome = self.outcomes.read(marker.source_id, ConversationSourceConsumer.MEMORY)
         return outcome is not None and outcome.state is ConversationConsumerOutcomeState.COMMITTED
 
+    def _salvaged(self, source_id: str, consumer: ConversationSourceConsumer) -> bool:
+        return self.salvage is not None and self.salvage.contains(source_id, consumer)
+
     def _terminal(self, marker: SourceMarker) -> bool:
         if self.sources.read(marker.source_id) is None:
             return False  # put 还没写完
         for consumer in ConversationSourceConsumer:
-            if self.quarantined(marker.source_id, consumer):
+            if self._salvaged(marker.source_id, consumer):
                 continue
             outcome = self.outcomes.read(marker.source_id, consumer)
             if outcome is None or outcome.state not in _TERMINAL:

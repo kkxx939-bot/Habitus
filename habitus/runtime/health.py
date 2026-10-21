@@ -141,7 +141,7 @@ class RuntimeHealthService:
         foresight = self.components.foresight
         if foresight is not None:
             zone = getattr(nightly.nightly, "zone", UTC)
-            checks.append(self._opportunity_freshness_check(foresight.opportunities, nightly.interval_seconds, zone))
+            checks.append(self._opportunity_freshness_check(foresight.opportunities, nightly.period_seconds, zone))
         return checks
 
     def _foresight_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:

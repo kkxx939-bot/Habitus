@@ -1,6 +1,7 @@
 """第 N 晚在组合根的串法：行为树只读一次，语义树与机会表用同一份序列（语义树新方案 ``13`` 第四节；预测树删了，裁定 59）。
 
 ```
+重试   = RetryStage.run_once(through=昨天)                 ← 白天读不懂的按天重试一次、落树、试完就删（裁定 67、68）；出错只留观测
 结算   = SettlementStage.run_once()                       ← 预测层：已到最晚时限、那天定稿的预期对着行为树结；没接时跳过
 今晚 N = min(主体所在地的"今天", 最后一个已封口日子的次日)   ← 封口由归约说了算（与结算同一个口径）
 序列 = series.reader.SeriesReader.read(截止日 N)         ← 行为树每晚只拼这一次（按天缓存，只重读变过的日子）；一条记录都没有就这一晚不跑
@@ -32,6 +33,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from habitus.behavior.retry import RetryReport, RetryStage
 from habitus.behavior.tree import BehaviorTree
 from habitus.runtime.foresight_nightly import ForesightNightlyRun, OpportunityReport
 from habitus.runtime.foresight_settlement import SettlementReport, SettlementStage
@@ -53,6 +55,9 @@ class NightOutcome:
     settled: SettlementReport | None = None
     #: 结算抛了什么（异常类型名；没失败是 None）。整晚照跑，常驻节拍据它在健康面上留痕（2026-10-18 四方评审）。
     settlement_failed: str | None = None
+    #: 这一晚开头的重试（没接是 None）与它抛了什么。
+    retried: RetryReport | None = None
+    retry_failed: str | None = None
 
 
 class Nightly:
@@ -69,6 +74,7 @@ class Nightly:
         settlement: SettlementStage | None = None,
         refresh_calendar: Callable[[], object] | None = None,
         series: SeriesReader | None = None,
+        retry: RetryStage | None = None,
     ) -> None:
         if not isinstance(behavior_tree, BehaviorTree):
             raise TypeError("behavior_tree must be a BehaviorTree")
@@ -90,6 +96,9 @@ class Nightly:
             raise TypeError("vocabulary must be callable (version, migrating)")
         #: 词表此刻的（版本, 有没有未完成的迁移）
         self.vocabulary = vocabulary
+        if retry is not None and not isinstance(retry, RetryStage):
+            raise TypeError("retry must be a RetryStage or None")
+        self.retry = retry
         if foresight is not None and not isinstance(foresight, ForesightNightlyRun):
             raise TypeError("foresight must be a ForesightNightlyRun or None")
         self.foresight = foresight
@@ -110,29 +119,61 @@ class Nightly:
     async def run_once(self) -> NightOutcome:
         if self.refresh_calendar is not None:
             await asyncio.to_thread(self.refresh_calendar)
+        # 重试排在结算之前：补回来的当晚就按真实情况结、进序列（裁定 67 第 2 条）
+        retried, retry_failed = await self._retry()
         settled, failed = await self._settle()
         closed = sorted(self.closed_days())
         night = self.tonight()
         if not closed:
             # 一天都还没封口（刚装上）：没有完整的一天可算，这一晚不跑
             return NightOutcome(
-                night, EventSeries(cutoff=night), None, "一天都还没封口", settled=settled, settlement_failed=failed
+                night,
+                EventSeries(cutoff=night),
+                None,
+                "一天都还没封口",
+                settled=settled,
+                settlement_failed=failed,
+                retried=retried,
+                retry_failed=retry_failed,
             )
         night = min(night, closed[-1] + timedelta(days=1))
         before = self.vocabulary()
         if before[1]:
             return NightOutcome(
-                night, EventSeries(cutoff=night), None, "词表迁移还没做完", settled=settled, settlement_failed=failed
+                night,
+                EventSeries(cutoff=night),
+                None,
+                "词表迁移还没做完",
+                settled=settled,
+                settlement_failed=failed,
+                retried=retried,
+                retry_failed=retry_failed,
             )
         # 全量扫行为树与写机会表是同步 IO：下沉到线程，不卡白天那一拍与同一个循环上的在线请求（2026-10-18 四方评审）
         series = await asyncio.to_thread(self.series.read, cutoff=night)
         if self.vocabulary() != before:
             return NightOutcome(
-                night, EventSeries(cutoff=night), None, "读序列时词表变了", settled=settled, settlement_failed=failed
+                night,
+                EventSeries(cutoff=night),
+                None,
+                "读序列时词表变了",
+                settled=settled,
+                settlement_failed=failed,
+                retried=retried,
+                retry_failed=retry_failed,
             )
         if not series.records:
             # 只有观测空白、一条记录都没有（上游刚接入）：没有可量的东西
-            return NightOutcome(night, series, None, "序列里还没有记录", settled=settled, settlement_failed=failed)
+            return NightOutcome(
+                night,
+                series,
+                None,
+                "序列里还没有记录",
+                settled=settled,
+                settlement_failed=failed,
+                retried=retried,
+                retry_failed=retry_failed,
+            )
         report = await self.scene.run(series=series, now=self._clock())
         opportunities = None
         if self.foresight is not None and report.materials is not None:
@@ -151,7 +192,25 @@ class Nightly:
             opportunities=opportunities,
             settled=settled,
             settlement_failed=failed,
+            retried=retried,
+            retry_failed=retry_failed,
         )
+
+    def clean_leftovers(self) -> int:
+        """常驻节拍一起来就调：上一晚中途被杀剩下的重试项撤回、删掉（裁定 68 第 3 条）。"""
+
+        return 0 if self.retry is None else self.retry.clean_leftovers()
+
+    async def _retry(self) -> tuple[RetryReport | None, str | None]:
+        """重试与它抛了什么：出错不许拖着后面一夜不跑（裁定 67 第 4 条），但要交出去给健康面。"""
+
+        if self.retry is None:
+            return None, None
+        try:
+            # 04:00 那一趟处理前一天及更早的；零点之后新进、属于今天的等今天那一趟（裁定 68 第 3 条）
+            return await self.retry.run_once(through=self.tonight() - timedelta(days=1)), None
+        except Exception as exc:  # noqa: BLE001 - 不许拖着后面一夜不跑
+            return None, type(exc).__name__
 
     async def _settle(self) -> tuple[SettlementReport | None, str | None]:
         """结算与它抛了什么。失败不许拖着后面一夜不跑，但要交出去：只吞掉的话健康面一直报好（结算自己已记观测）。"""

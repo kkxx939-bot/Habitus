@@ -1,8 +1,6 @@
-#!/usr/bin/env node
-
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { access, readdir, readFile, realpath } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -27,11 +25,13 @@ export async function runPluginDoctor(
     registry = HARNESS_REGISTRY,
     protocols = registry.list().map((definition) => definition.protocol),
     inspectHarnesses = harnessRegistrationChecks,
+    inspectFeatures = harnessFeatureChecks,
   } = {},
 ) {
   const checks = [];
   checks.push(nodeRuntimeCheck(), ...(await bundleChecks(registry)));
   checks.push(...await inspectHarnesses(registry));
+  checks.push(...await inspectFeatures(registry));
   const health = await service.health();
   checks.push({ name: "health", status: health.ok ? "pass" : "fail", detail: health.ok ? "service reachable" : String(health.error) });
   const ready = await service.ready();
@@ -102,10 +102,11 @@ async function manifestCheck(registry = HARNESS_REGISTRY) {
     for (const definition of registry.list()) {
       const pluginRoot = join(PLUGINS_ROOT, definition.pluginDirectory);
       const manifest = JSON.parse(await readFile(join(pluginRoot, definition.pluginManifest), "utf8"));
-      const hooks = JSON.parse(await readFile(join(pluginRoot, definition.hooksManifest), "utf8"));
       if (manifest.name !== PLUGIN_NAME || typeof manifest.version !== "string" || !manifest.version) {
         throw new Error("plugin identity is invalid");
       }
+      if (!definition.hooksManifest) continue;
+      const hooks = JSON.parse(await readFile(join(pluginRoot, definition.hooksManifest), "utf8"));
       for (const name of definition.requiredHooks) {
         if (!Array.isArray(hooks.hooks?.[name])) {
           throw new Error(`required hook is missing for ${definition.id}: ${name}`);
@@ -137,11 +138,64 @@ async function sharedBundleCheck(registry = HARNESS_REGISTRY) {
   }
 }
 
+export async function harnessFeatureChecks(registry = HARNESS_REGISTRY, run = spawnSync) {
+  // 插件装上了但宿主的 hook 特性没开，记忆与提醒的 hook 一个都不会跑：按注册表里声明的特性逐项查（宿主没装 CLI 的跳过）
+  const checks = [];
+  for (const definition of registry.list().filter((item) => item.featureInventory)) {
+    const result = run(definition.command, definition.featureInventory.args, { encoding: "utf8", timeout: 5000 });
+    if (result.error?.code === "ENOENT") continue;
+    if (result.error || result.status !== 0) {
+      checks.push({ name: `features_${definition.id}`, status: "warn", detail: "Harness feature list is unavailable" });
+      continue;
+    }
+    const enabled = parseFeatureList(result.stdout);
+    const missing = definition.featureInventory.required.filter((name) => enabled.get(name) !== true);
+    checks.push({
+      name: `features_${definition.id}`,
+      status: missing.length === 0 ? "pass" : "fail",
+      detail: missing.length === 0
+        ? `required features enabled: ${definition.featureInventory.required.join(", ")}`
+        : `features off: ${missing.join(", ")} (enable them in the harness config, then restart it)`,
+    });
+  }
+  return checks;
+}
+
+export function parseFeatureList(text) {
+  // `codex features list` 一行一项：名字、阶段（可能含空格）、true / false
+  const found = new Map();
+  for (const line of String(text).split("\n")) {
+    const match = line.trim().match(/^([a-z0-9_]+)\s+.*\s(true|false)$/);
+    if (match) found.set(match[1], match[2] === "true");
+  }
+  return found;
+}
+
 export async function harnessRegistrationChecks(registry = HARNESS_REGISTRY) {
-  return registry.list().map((definition) => inspectHarness(definition));
+  return Promise.all(registry.list().map((definition) => inspectHarness(definition)));
+}
+
+async function inspectFileHarness(definition) {
+  const { fileEntryPath } = await import("../install-memory-plugin.mjs");
+  const probe = spawnSync(definition.command, ["--version"], { encoding: "utf8", timeout: 5000 });
+  if (probe.error?.code === "ENOENT") {
+    return { name: `harness_${definition.id}`, status: "warn", detail: "Harness CLI is not installed" };
+  }
+  try {
+    const text = await readFile(fileEntryPath(definition), "utf8");
+    const ours = text.startsWith("// habitus-memory:");
+    return {
+      name: `harness_${definition.id}`,
+      status: ours ? "pass" : "warn",
+      detail: ours ? "Habitus plugin is registered" : "plugin entry exists but is not managed by Habitus",
+    };
+  } catch {
+    return { name: `harness_${definition.id}`, status: "warn", detail: "Habitus plugin is not registered" };
+  }
 }
 
 function inspectHarness(definition) {
+  if (definition.registration === "file") return inspectFileHarness(definition);
   const result = spawnSync(definition.command, definition.pluginInventory, {
     encoding: "utf8",
     timeout: 5000,
@@ -235,23 +289,4 @@ export async function outboxInventory(root, { now = Date.now(), maxPendingAgeMs 
     }
   }
   return counts;
-}
-
-async function isMainModule() {
-  if (!process.argv[1]) return false;
-  try {
-    return await realpath(fileURLToPath(import.meta.url)) === await realpath(process.argv[1]);
-  } catch {
-    return false;
-  }
-}
-
-if (await isMainModule()) {
-  let report;
-  try { report = await runPluginDoctor(); }
-  catch (error) {
-    report = { ok: false, checks: [{ name: "config", status: "fail", detail: error?.message || String(error) }] };
-  }
-  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-  if (!report.ok) process.exitCode = 1;
 }

@@ -178,18 +178,15 @@ def test_each_lane_gets_its_own_whole_pipeline_and_they_share_only_the_chat_clie
     assert isinstance(branches.physical.fusion, PhysicalLane)
     # 脏日日志只有语义树夜批读（只接会话一支）；这份配置没开语义树，两支都不记——没人截，记了只会一直长（L10.3）
     assert [branch.reduction_runner.dirty_days for branch in branches] == [None, None]
-    # 生命周期骨架自己的状态：两支的隔离区与刷新重试账、会话源的隔离区与恢复账都挂进同一个清理参与者（L10.10）
+    # 生命周期骨架自己的状态：两支的刷新重试账、会话源的恢复账与每晚重试的堆都挂进同一个清理参与者（L10.10；裁定 67）
     (housekeeping,) = [
         item
         for item in runtime.components.workflow.lifecycle_worker._participants
         if item.name == "lifecycle-housekeeping"
     ]
-    assert sorted(item.owner for item in housekeeping.quarantines) == [
-        "behavior-reduction-physical",
-        "behavior-reduction-session",
-        "behavior-session-lane",
-        "conversation-source-behavior",
-    ]
+    assert housekeeping.backlogs == ()
+    # 读不懂的进每晚重试的堆（裁定 67）；这份配置没开语义树、没有夜批来试，不建堆
+    assert [branch.retry_backlog for branch in branches] == [None, None]
     assert sorted(item.owner for item in housekeeping.retries) == [
         "behavior-semantic-physical",
         "behavior-semantic-session",

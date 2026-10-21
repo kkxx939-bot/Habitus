@@ -13,16 +13,18 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from datetime import time as clock_time
 from typing import Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
 
+from habitus.behavior.schema.vocabulary import UNREADABLE_GAP
 from habitus.behavior.uri import BehaviorURI
 from habitus.conditions import day_note
 from habitus.foresight import Moment, Seen, UnsealedReader, UnsealedRow, form_expectations
+from habitus.foresight.ledger import Expectation
 from habitus.foresight.opportunities import OpportunityTable
 from habitus.foresight.triggers.assemble import seen_rows
 from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
@@ -34,6 +36,9 @@ from habitus.runtime.foresight_settlement import BehaviorReadSide
 from habitus.scene.views import DayIndexCache
 from habitus.series.reader import admitted
 from habitus.temporal.slots import slot_index
+
+#: 递送只为「没读懂」不说（「未观测」照常说，裁定 68 第 2 条）。
+_UNREADABLE = frozenset({UNREADABLE_GAP})
 
 
 @runtime_checkable
@@ -91,6 +96,7 @@ class ForesightTick:
         delivery: DeliveryStage | None = None,
         tick_seconds: float | None = None,
         recent: int,
+        reread: Callable[[datetime, datetime], Awaitable[bool]] | None = None,
     ) -> None:
         if not isinstance(ledger, ForesightLedgerStore):
             raise TypeError("ledger must be a ForesightLedgerStore")
@@ -127,6 +133,8 @@ class ForesightTick:
         self.tick = timedelta(seconds=float(tick_seconds)) if tick_seconds is not None else None
         self.observer: Observer = observer if observer is not None else NullObserver()
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
+        #: 时窗末当场重读那段「没读懂」的口（会话一支的重试堆，裁定 68 第 1 条）；没接就是 None。
+        self.reread = reread
 
     async def run_once(self) -> TickReport:
         started = time.monotonic()
@@ -233,8 +241,19 @@ class ForesightTick:
                     for row in seen
                 ),
                 lambda day: day_note(self.read_side.calendar, day),
+                lambda item: _unobserved(item, materials, now),
+                None if self.reread is None else self._reread_for(now),
             ),
         )
+
+    def _reread_for(self, now: datetime) -> Callable[[Expectation], Awaitable[bool]]:
+        reread = self.reread
+        assert reread is not None
+
+        async def run(item: Expectation) -> bool:
+            return await reread(item.observed_from, now)
+
+        return run
 
     @staticmethod
     def _rows_for(
@@ -287,6 +306,25 @@ class ForesightTick:
             )
         except Exception:  # noqa: BLE001 - 观测不许影响这一拍
             pass
+
+
+def _unobserved(item: Expectation, materials: _Materials, now: datetime) -> bool:
+    """说中的范围（起算 → 此刻）里有没有「没读懂」（只认它，「未观测」照常说，裁定 68 第 2 条）：已落树的（被行为作废的
+    已去掉，与结算同一个判法），加上还没封口的「没读懂」判断；还没封口的可读行为从那段里开头的，也把它作废——白天当场
+    重读补回来、还没归约的那一条就是这样（裁定 68 第 1 条）。"""
+
+    start, end = item.observed_from.astimezone(UTC), now.astimezone(UTC)
+    stretches = [
+        (gap.started_at.astimezone(UTC), gap.ended_at.astimezone(UTC))
+        for gap in materials.cache.gaps_within(item.observed_from, now, kinds=_UNREADABLE)
+    ]
+    stretches += [
+        (row.started_at.astimezone(UTC), row.last_observed_at.astimezone(UTC))
+        for row in materials.unsealed
+        if row.name is None and row.started_at.astimezone(UTC) < end and row.last_observed_at.astimezone(UTC) > start
+    ]
+    readable = [row.started_at.astimezone(UTC) for row in materials.unsealed if row.name is not None]
+    return any(not any(begin <= opened < finish for opened in readable) for begin, finish in stretches)
 
 
 def _attributes(report: TickReport) -> dict[str, str | int | float | bool]:

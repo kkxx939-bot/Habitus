@@ -20,7 +20,9 @@ import re
 from collections.abc import Iterable, Sequence
 from datetime import UTC, date, datetime
 
+from habitus.behavior.kinds.counted import uncounted
 from habitus.behavior.model import BehaviorAddress, BehaviorDirectory, BehaviorKind, BehaviorLevel
+from habitus.behavior.schema.vocabulary import UNREADABLE_GAP
 from habitus.behavior.semantic.config import BehaviorSemanticConfig
 from habitus.behavior.semantic.errors import (
     BehaviorOverviewEmptyError,
@@ -38,6 +40,7 @@ from habitus.behavior.semantic.model import (
 )
 from habitus.behavior.tree import BehaviorTree
 from habitus.foundation.integrity import canonical_digest
+from habitus.foundation.intervals import starts_within
 
 _SOURCE_MARKER = re.compile(r"<!-- habitus-semantic-source: ([0-9a-f]{64}) -->")
 
@@ -75,7 +78,7 @@ class BehaviorSemanticRefresher:
         for day in affected:
             # 每处理一天只列当天、所在月与年的目录（26 号清单 6.8），不再把全树按日分组
             occurrences = self.tree.list_day_addresses(BehaviorKind.OCCURRENCE, day)
-            gaps = self.tree.list_day_addresses(BehaviorKind.GAP, day)
+            gaps = self._standing_gaps(occurrences, self.tree.list_day_addresses(BehaviorKind.GAP, day))
             results.append(await self._refresh_occurrence_day(day, occurrences, gaps))
             results.append(self._refresh_gap_day(day, gaps))
         for year, month in sorted({(day.year, day.month) for day in affected}):
@@ -109,6 +112,28 @@ class BehaviorSemanticRefresher:
                 )
             )
         return tuple(results)
+
+    def _standing_gaps(
+        self, occurrences: Sequence[BehaviorAddress], gaps: Sequence[BehaviorAddress]
+    ) -> tuple[BehaviorAddress, ...]:
+        """去掉被这一天的行为作废的「没读懂」（与序列、按天读树同一条规则，``series.model.disproves``；规则的理由写在那里）：
+        之后补回来的行为（每晚重试，裁定 67）落在那段里，叙述里就只有那条行为，不再并排一段「观测空白」。"""
+
+        # 只有算数的行为能作废空白（撞车重复、「非事件」不算，与序列同一条，``behavior.kinds.counted``）
+        starts = sorted(
+            _instant(address.started_at) for address in occurrences if uncounted(self.tree.read(address).fields) is None
+        )
+        standing: list[BehaviorAddress] = []
+        for address in gaps:
+            fields = self.tree.read(address).fields
+            watched = fields.get("gap_kind") == UNREADABLE_GAP
+            begin, end = (
+                datetime.fromisoformat(str(fields["started_at"])),
+                datetime.fromisoformat(str(fields["ended_at"])),
+            )
+            if not (watched and starts_within(begin, end, starts)):
+                standing.append(address)
+        return tuple(standing)
 
     # ── occurrences 层级：LLM 叙述 ───────────────────────────────────────────────────
 

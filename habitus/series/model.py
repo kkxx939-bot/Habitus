@@ -17,11 +17,12 @@
 
 from __future__ import annotations
 
-from bisect import bisect_left
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from enum import Enum
+
+from habitus.foundation.intervals import starts_within
 
 
 class SeriesError(ValueError):
@@ -54,12 +55,7 @@ def disproves(kind: GapKind, started_at: datetime, ended_at: datetime, starts: S
 
     ``starts`` 是这段空白可能盖住的那些记录的开始时刻（升序）。"""
 
-    if not kind.watched:
-        return False
-    begin, end = started_at.timestamp(), ended_at.timestamp()
-    stamps = [moment.timestamp() for moment in starts]
-    index = bisect_left(stamps, begin)
-    return index < len(stamps) and stamps[index] < end
+    return kind.watched and starts_within(started_at, ended_at, starts)
 
 
 class SkipReason(str, Enum):

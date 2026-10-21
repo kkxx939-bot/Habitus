@@ -34,6 +34,7 @@ from habitus.behavior.observation import BehaviorObservation, BehaviorObservatio
 from habitus.behavior.reduction.chains import BehaviorChain, ChainAssembly
 from habitus.behavior.reduction.closure import DayClosureState, plan_closure
 from habitus.behavior.reduction.errors import BehaviorReductionBusyError, BehaviorReductionError
+from habitus.behavior.reduction.failed import FailedChains
 from habitus.behavior.reduction.kinds_jobs import JobsOutcome, VocabularyJobs
 from habitus.behavior.reduction.kinds_step import KindStamping, KindStamps, chain_content
 from habitus.behavior.reduction.ledger import BehaviorReductionEntry, BehaviorReductionLedger
@@ -45,7 +46,6 @@ from habitus.behavior.reduction.payloads import (
     occurrence_payload,
 )
 from habitus.behavior.reduction.pending import pending_judgements
-from habitus.behavior.reduction.quarantine import ChainQuarantine
 from habitus.behavior.reduction.record import ReducibleJudgement
 from habitus.behavior.reduction.refresh import RefreshRetries, RefreshVerdict
 from habitus.behavior.reduction.sealing import (
@@ -146,7 +146,7 @@ class BehaviorReductionRunner:
         reminded: Callable[[str, datetime], bool] | None = None,
         refresh_retries: RefreshRetries | None = None,
         dirty_days: DirtyDayLog | None = None,
-        chain_quarantine: ChainQuarantine,
+        failed_chains: FailedChains,
     ) -> None:
         """``context_lookback_seconds`` 必须与融合 runner 实际使用的值一致（同一配置源）——
         融合"还能续"与归约"已封口"是同一个窗口的两面，各配一个数会静默分叉。
@@ -203,9 +203,11 @@ class BehaviorReductionRunner:
         #: 改树改到的日子记一笔增量，按天缓存的读侧据此只重读变过的日子（26 号清单 6.7）。没有读侧的支（物理一支、
         #: 没开语义树的会话一支）不给，不记——没人截，记了只会一直长（L10.3）。
         self.dirty_days = dirty_days
-        if not isinstance(chain_quarantine, ChainQuarantine):
-            raise TypeError("chain_quarantine must be ChainQuarantine")
-        self.chain_quarantine = chain_quarantine
+        if not isinstance(failed_chains, FailedChains):
+            raise TypeError("failed_chains must be FailedChains")
+        if failed_chains.judgements is not judgements or failed_chains.ledger is not ledger:
+            raise ValueError("failed chains must set aside judgements from the runner's own store and ledger")
+        self.failed_chains = failed_chains
         self.clock = clock or (lambda: datetime.now(UTC))
         self.context_lookback_seconds = float(context_lookback_seconds)
         if coverage is not None and not isinstance(coverage, BehaviorCoverageIndex):
@@ -302,7 +304,7 @@ class BehaviorReductionRunner:
         quarantined = list(pending.quarantined)
         for raw in pending.rejected:
             guard.checkpoint()
-            self.chain_quarantine.isolate_record(raw, reason="judgement record is not parseable")
+            self.failed_chains.drop_record(raw)
         assembly = pending.assembly
         guard.checkpoint()
         with observe_operation(self.observer, OBSERVATION_CATEGORY, "reduction_seal") as attributes:
@@ -385,7 +387,9 @@ class BehaviorReductionRunner:
             atomic_replace_bytes(self._checkpoint_path, encoded, artifact_root=self.ledger.root)
         self._publish_checkpoint(checkpoint, guard)
         guard.checkpoint()
-        self._isolate_failed_chains(failed, guard)
+        self._isolate_failed_chains(
+            failed, guard, consumed=frozenset(i for entry in entries for i in entry.judgement_ids)
+        )
         self._touch_refresh_days(_document_days(documents), guard)
         # 这一轮没落树的链所在的日子也不能定稿：缩批留下的要下一轮才发布；隔离的换成了「没读懂」判断，下一轮才归约成
         # 空白——先定稿，派生层就把那一段读成"没做"（L10.5）
@@ -664,7 +668,7 @@ class BehaviorReductionRunner:
             if token is None:
                 skipped_chains.add(index)
                 if chain_content(chain) is None:
-                    # 没有可给归类看的内容：再归几次也一样，进隔离区（2.4.2）；有内容只是这一轮没拿到结论的，照旧下轮再归
+                    # 没有可给归类看的内容：再归几次也一样，进每晚重试的堆、换成「没读懂」（2.4.2；裁定 67）；有内容只是这一轮没拿到结论的，照旧下轮再归
                     failed.append((chain, "behavior name is not addressable"))
                     dropped.append(f"chain {chain.chain_digest} isolated: behavior name is not addressable")
                 else:
@@ -872,14 +876,24 @@ class BehaviorReductionRunner:
         replayed = sum(1 for item in documents if isinstance(item, Mapping) and item.get("kind") != "ledger-only")
         return replayed, days
 
-    def _isolate_failed_chains(self, failed: Sequence[tuple[BehaviorChain, str]], guard: LeaseGuard) -> None:
-        """stage 里确定性失败的链进隔离区，换成一条「没读懂」判断，下一轮归约成空白（``quarantine.py``）。"""
+    def _isolate_failed_chains(
+        self, failed: Sequence[tuple[BehaviorChain, str]], guard: LeaseGuard, *, consumed: frozenset[str]
+    ) -> None:
+        """stage 里确定性失败的链进每晚重试的堆，换成一条「没读懂」判断，下一轮归约成空白（``failed.py``）；当晚重试又失败的
+        直接撤下。"""
 
         for chain, reason in failed:
             guard.checkpoint()
             with guard.fenced():
-                replacement = self.chain_quarantine.isolate_chain(chain, reason)
-            self._sweep_signals.append(f"chain {chain.chain_digest} isolated ({reason}); unreadable {replacement[:12]}")
+                replacement, admission = self.failed_chains.fail_chain(chain, consumed=consumed)
+            if replacement is None:
+                self._sweep_signals.append(f"chain {chain.chain_digest} failed again on retry ({reason}); dropped")
+                continue
+            kept = admission is not None and admission.kept
+            self._sweep_signals.append(
+                f"chain {chain.chain_digest} {'set aside for retry' if kept else 'not kept for retry'} ({reason}); "
+                f"unreadable {replacement[:12]}" + ("" if kept or admission is None else f"; backlog {admission.value}")
+            )
 
     def _touch_refresh_days(self, days: Iterable[date], guard: LeaseGuard) -> None:
         """这些天的内容刚变过：记进待刷新集合，并清掉它们的重试账（放弃的是旧内容，新内容重新给机会）。"""

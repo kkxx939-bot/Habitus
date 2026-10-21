@@ -61,6 +61,8 @@ QUESTION_TOOLS: tuple[QuestionTool, ...] = (
     QuestionTool("claude-code", "AskUserQuestion", "question"),
     QuestionTool("codex", "request_user_input", "title"),
     QuestionTool("codex", "request_user_input_async", "title", replies_later=True),
+    # OpenCode 的 question 工具同步等作答；插件把 question.replied 的作答写进结果（"<题目>"="<作答>"，方案 36 第四节）
+    QuestionTool("opencode", "question", "question"),
 )
 
 

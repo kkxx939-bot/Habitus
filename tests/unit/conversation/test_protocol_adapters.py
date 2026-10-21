@@ -308,3 +308,57 @@ def test_agent_harness_records_preserve_completed_text_turns(protocol: str, reco
         ConversationMessageRole.PROMPT,
         ConversationMessageRole.COMPLETION,
     )
+
+
+def test_opencode_messages_keep_typed_text_finished_tools_and_question_answers() -> None:
+    """OpenCode：合成段（我们注入的上下文、它自己读文件的回执）不是他说的话；没结束的工具不收；提问工具的作答按
+    ``"<题目>"="<作答>"`` 写成结果，与 Claude Code 同形（方案 36 第四节）。"""
+
+    question = {"questions": [{"question": "周四了，周报还没写。", "header": "提醒", "options": [{"label": "现在就做", "description": ""}]}]}
+    records = [
+        {
+            "info": {"id": "msg_1", "role": "user", "sessionID": "ses_1", "time": {"created": 1792000000000}},
+            "parts": [
+                {"type": "text", "text": "<habitus-memory-context receipt=\"x\">…</habitus-memory-context>", "synthetic": True},
+                {"type": "text", "text": "帮我看看这个报错"},
+            ],
+        },
+        {
+            "info": {"id": "msg_2", "role": "assistant", "sessionID": "ses_1", "time": {"created": 1792000001000, "completed": 1792000060000}},
+            "parts": [
+                {"type": "step-start"},
+                {"type": "reasoning", "text": "想一想"},
+                {
+                    "type": "tool", "callID": "call_q", "tool": "question",
+                    "state": {
+                        "status": "completed", "input": question, "output": "User answered.", "title": "", "metadata": {},
+                        "time": {"start": 1792000002000, "end": 1792000010000},
+                        "habitus_answers": [{"question": "周四了，周报还没写。", "answers": ["这次不用"]}],
+                    },
+                },
+                {
+                    "type": "tool", "callID": "call_b", "tool": "bash",
+                    "state": {"status": "error", "input": {"command": "pytest"}, "error": "exit 1", "time": {"start": 1792000011000, "end": 1792000012000}},
+                },
+                {"type": "tool", "callID": "call_r", "tool": "read", "state": {"status": "running", "input": {}, "time": {"start": 1792000013000}}},
+                {"type": "text", "text": "看完了，是依赖版本不对。", "time": {"start": 1792000050000, "end": 1792000060000}},
+            ],
+        },
+    ]
+    result = ConversationAdapterRegistry.with_builtins().adapt("opencode", {"records": records}, context())
+    messages = result.batch.messages
+    assert [item.role for item in messages] == [
+        ConversationMessageRole.PROMPT,
+        ConversationMessageRole.TOOL_CALL,
+        ConversationMessageRole.TOOL_RESULT,
+        ConversationMessageRole.TOOL_CALL,
+        ConversationMessageRole.TOOL_RESULT,
+        ConversationMessageRole.COMPLETION,
+    ]
+    assert messages[0].content == "帮我看看这个报错"
+    assert messages[1].tool_name == "question" and messages[1].tool_call_id == "call_q"
+    assert messages[2].content == '"周四了，周报还没写。"="这次不用"'
+    assert messages[4].tool_status is ConversationToolResultStatus.ERROR
+    assert messages[0].occurred_at == datetime.fromtimestamp(1792000000, tz=UTC)
+    assert messages[5].occurred_at == datetime.fromtimestamp(1792000060, tz=UTC)
+    assert result.after_turn and result.ignored_items == 4  # 合成段、步骤、思考、没结束的工具

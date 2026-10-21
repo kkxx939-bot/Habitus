@@ -180,6 +180,29 @@ class DayIndexCache:
             )
         return cached
 
+    def has_gap(self, start: datetime, end: datetime, *, kinds: frozenset[str] | None = None) -> bool:
+        """``start`` → ``end`` 这一段里有没有观测空白（被那天的行为作废的「没读懂」已经去掉）：那段没看到，"没做"就说不准。
+        结算判"窗里有空白记中性"两种都认；递送判"窗里有空白不说"只认「没读懂」（``kinds``，裁定 68 第 2 条）。"""
+
+        return bool(self.gaps_within(start, end, kinds=kinds))
+
+    def gaps_within(
+        self, start: datetime, end: datetime, *, kinds: frozenset[str] | None = None
+    ) -> tuple[ObservationGap, ...]:
+        begin, finish = start.astimezone(UTC), end.astimezone(UTC)
+        found: list[ObservationGap] = []
+        day = start.date()
+        while day <= end.date():
+            found.extend(
+                gap
+                for gap in self.day(day).gaps
+                if (kinds is None or gap.kind in kinds)
+                and gap.started_at.astimezone(UTC) < finish
+                and gap.ended_at.astimezone(UTC) > begin
+            )
+            day += timedelta(days=1)
+        return tuple(found)
+
     def _note(self, day: date) -> str | None:
         """问一次当地日历。空白串当作"没话说"——判断者读到一个空的注记比读不到更糟。"""
 

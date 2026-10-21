@@ -28,7 +28,8 @@ from collections.abc import Sequence
 from datetime import date, datetime
 
 from habitus.behavior.document import BehaviorDocument, BehaviorLinkType
-from habitus.behavior.kinds.ids import KindIdError, Lane, lane_of_token, not_event_token, pending_token
+from habitus.behavior.kinds.counted import uncounted
+from habitus.behavior.kinds.ids import KindIdError, Lane, lane_of_token, pending_token
 from habitus.behavior.schema.vocabulary import PROMPTERS
 from habitus.behavior.tree import BehaviorKind, BehaviorTree
 from habitus.behavior.tree.dirty_days import DirtyDayLog
@@ -148,14 +149,19 @@ def _assemble(
 def skip_reason(document: BehaviorDocument) -> SkipReason | None:
     """一条 occurrence 为什么不进序列（不进是 None）：撞车消歧的已知重复、「非事件」。
 
-    这是行为树上一条记录**算不算数**的唯一规则。读今天还没封口那段的读侧（预测层的证据卡）也用它——组合根把它注入
+    规则本身在行为层（``behavior.kinds.counted``，语义概览也用它）；这里只把它译成序列的跳过原因。读今天还没封口那段的读侧（预测层的证据卡）也用它——组合根把它注入
     ``scene.views.DayIndexCache``，不各写一遍（第二轮评审 D5 就是两处各写一遍写反了）。
     """
 
-    if document.fields.get("original_name") is not None:
-        return SkipReason.DUPLICATE
-    token = _text(document.fields.get("kind_token"), "kind_token")
-    return SkipReason.NOT_EVENT if token == not_event_token(_lane(token)) else None
+    if document.fields.get("original_name") is None:
+        _text(document.fields.get("kind_token"), "kind_token")
+    try:
+        reason = uncounted(document.fields)
+    except KindIdError as exc:
+        raise SeriesError(
+            f"kind_token is neither a class id nor a marker: {document.fields.get('kind_token')!r}"
+        ) from exc
+    return None if reason is None else SkipReason.DUPLICATE if reason == "duplicate" else SkipReason.NOT_EVENT
 
 
 def admitted(document: BehaviorDocument) -> bool:

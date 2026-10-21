@@ -1,0 +1,15 @@
+{
+  "name": "habitus-local",
+  "description": "Local Habitus plugins for Claude Code.",
+  "owner": {
+    "name": "Habitus"
+  },
+  "plugins": [
+    {
+      "name": "habitus-memory",
+      "description": "Single-user local semantic memory for Claude Code.",
+      "source": "./plugins/habitus-memory-claude-code",
+      "category": "productivity"
+    }
+  ]
+}

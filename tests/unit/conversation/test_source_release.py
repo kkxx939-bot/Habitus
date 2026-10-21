@@ -17,9 +17,8 @@ from habitus.conversation.source import (
     SourceAddress,
 )
 from habitus.conversation.source.delivery import RELEASED_SKIP_REASON
-from habitus.conversation.source.quarantine import SourceQuarantine
+from habitus.conversation.source.salvage import SourceSalvage
 from habitus.foundation.integrity import canonical_digest
-from habitus.infrastructure.lifecycle import Quarantine
 from habitus.infrastructure.store.contracts import LockToken
 from tests.unit.conversation.source_v2_helpers import behavior_session_output, delivery, source
 from tests.unit.conversation.source_v2_helpers import recovery as source_recovery
@@ -55,9 +54,7 @@ def _setup(root: Path):
         },
         lock_store,
         lock_ttl_seconds=30,
-        quarantined=SourceQuarantine(
-            Quarantine(root, owner="conversation-source-behavior", clock=lambda: datetime(2026, 8, 9, tzinfo=UTC))
-        ).contains,
+        salvage=SourceSalvage(root, salvager=lambda _envelope: None),
     )
     return service, memory, behavior, releaser, _Context(lock_store)
 
@@ -156,9 +153,10 @@ def test_a_new_source_under_the_watermark_is_not_released_before_it_is_consumed(
     asyncio.run(scenario())
 
 
-def test_a_broken_behavior_source_is_quarantined_and_stops_holding_up_its_address(tmp_path: Path) -> None:
-    """Behavior 坏了不会自愈（两份孤儿输出、没有 Outcome）：不隔离的话它过不了释放门槛第 2 条，同地址后面的源按第 3 条
-    也一份都放不了。恢复把信封副本送进隔离区、Behavior 按终态算，地址照常往下放（26 号清单 2.1.7 / L10.2）。"""
+def test_a_broken_behavior_source_is_salvaged_and_stops_holding_up_its_address(tmp_path: Path) -> None:
+    """Behavior 坏了不会自愈（两份孤儿输出、没有 Outcome）：不处置的话它过不了释放门槛第 2 条，同地址后面的源按第 3 条
+    也一份都放不了。恢复把信封交给行为侧逐轮补救、记"已补救"，Behavior 按终态算，地址照常往下放；释放时标记一起删
+    （26 号清单 2.1.7 / L10.2；裁定 67 第 5 条）。"""
 
     async def scenario() -> None:
         service, _memory, behavior, releaser, ctx = _setup(tmp_path)
@@ -174,12 +172,17 @@ def test_a_broken_behavior_source_is_quarantined_and_stops_holding_up_its_addres
         assert state is ConversationConsumerDeliveryState.CORRUPTED
         assert releaser.release_address(_directory(service), ctx) == 0
 
-        plan = source_recovery(service).plan()
+        salvaged: list = []
+        plan = source_recovery(service, salvaged=salvaged).plan()
 
-        assert [entry.envelope.source_id for entry in plan.isolated] == [broken.source_id]
+        assert [entry.envelope.source_id for entry in plan.salvaged] == [broken.source_id]
+        assert [envelope.source_id for envelope in salvaged] == [broken.source_id]
         assert plan.broken == ()
         assert source_recovery(service).pending() == ()
+        assert releaser.salvage is not None
+        assert releaser.salvage.contains(broken.source_id, ConversationSourceConsumer.BEHAVIOR_SESSION)
         assert releaser.release_address(_directory(service), ctx) == 2
+        assert not releaser.salvage.contains(broken.source_id, ConversationSourceConsumer.BEHAVIOR_SESSION)
 
     asyncio.run(scenario())
 

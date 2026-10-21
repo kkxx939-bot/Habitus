@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from habitus.config import HabitusConfig
-from habitus.integrations.local_service import cli, plugin_cli
+from habitus.integrations.local_service import cli
 from habitus.integrations.local_service import initialization as initialization_module
 from habitus.integrations.local_service.cloud_setup import (
     ProfileSelection,
@@ -622,33 +622,43 @@ def test_interactive_initializer_prompts_each_missing_credential_without_echoing
     assert "viking-secret" not in output
 
 
-def test_noninteractive_init_can_install_multiple_harnesses_without_knowing_their_types(
+def test_noninteractive_init_hands_harness_installs_to_the_npm_command(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """插件装在 npm 包里（方案 36）：装了 ``habitus`` 命令就替用户跑 ``habitus plugin install``，宿主名原样转手；没装就说怎么装。"""
+
     destination = tmp_path / "config" / "habitus.yaml"
-    delegated = Mock()
-    monkeypatch.setattr(cli, "_delegate_plugin", delegated)
+    run = Mock(return_value=Mock(returncode=0))
+    monkeypatch.setattr(cli.shutil, "which", Mock(return_value="/usr/local/bin/habitus"))
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    arguments = [
+        "init",
+        "--config",
+        str(destination),
+        "--from-config",
+        str(EXAMPLE_CONFIG),
+        "--non-interactive",
+        "--skip-doctor",
+        "--no-start",
+        "--harness",
+        "codex",
+        "--harness",
+        "future-harness",
+    ]
 
-    cli.main(
-        [
-            "init",
-            "--config",
-            str(destination),
-            "--from-config",
-            str(EXAMPLE_CONFIG),
-            "--non-interactive",
-            "--skip-doctor",
-            "--no-start",
-            "--harness",
-            "codex",
-            "--harness",
-            "future-harness",
-        ]
+    cli.main(arguments)
+
+    run.assert_called_once_with(
+        ["/usr/local/bin/habitus", "plugin", "install", "--harness", "codex", "--harness", "future-harness"],
+        check=False,
     )
-
-    delegated.assert_called_once_with(["install", "--harness", "codex", "--harness", "future-harness"])
     assert destination.is_file()
+    monkeypatch.setattr(cli.shutil, "which", Mock(return_value=None))
+    cli.main([*arguments, "--force"])
+    assert "npm install -g @habitus/cli" in capsys.readouterr().out
+    assert run.call_count == 1
 
 
 def test_noninteractive_default_init_uses_valid_cloud_defaults_without_placeholder_rerank(
@@ -724,20 +734,6 @@ def test_missing_config_offer_handles_eof_without_leaking_wizard_exception(
 
     assert handled is False
     assert not destination.exists()
-
-
-def test_plugin_assets_can_be_found_in_a_pip_target_scheme(tmp_path: Path) -> None:
-    target = tmp_path / "target"
-    plugin_root = target / "share" / "habitus" / "plugins"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "install-memory-plugin.mjs").write_text("// installed\n", encoding="utf-8")
-
-    resolved = plugin_cli._plugin_root(
-        source=tmp_path / "source-without-assets",
-        search_paths=(target,),
-    )
-
-    assert resolved == plugin_root
 
 
 def test_plugin_connection_projection_uses_the_configured_loopback_port(tmp_path: Path) -> None:

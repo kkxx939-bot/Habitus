@@ -31,16 +31,10 @@ from habitus.behavior.reduction.kinds_step import KindStamping, chain_content
 from habitus.behavior.reduction.ledger import BehaviorReductionLedger
 from habitus.behavior.reduction.pending import pending_judgements
 from habitus.foresight import UnsealedRow
-from habitus.model_client import (
-    ModelAuthenticationError,
-    ModelPermissionError,
-    ModelQuotaError,
-    ModelResponseError,
-    ModelTransportError,
-)
+from habitus.model_client import MODEL_UNAVAILABLE, ModelResponseError
 
 #: 这一拍归不成就留着下一拍再试的模型错误（运行时的）；配置错误照样抛出来——吞掉它会让每一拍都悄悄归不上
-_TRANSIENT = (ModelTransportError, ModelResponseError, ModelQuotaError, ModelAuthenticationError, ModelPermissionError)
+_TRANSIENT: tuple[type[BaseException], ...] = (*MODEL_UNAVAILABLE, ModelResponseError)
 
 
 class UnsealedFromJudgements:

@@ -482,7 +482,20 @@ class ModelStructuredOutputError(ModelClientError):
     code = "MODEL_STRUCTURED_OUTPUT"
 
 
+#: 模型此刻用不了（连不上、限流、额度满、鉴权或权限失效）：换一份输入也一样，过一阵再来。
+MODEL_UNAVAILABLE: tuple[type[ModelClientError], ...] = (
+    ModelTransportError,
+    ModelQuotaError,
+    ModelAuthenticationError,
+    ModelPermissionError,
+)
+#: 同一份输入再问几遍也一样（输入超长、触发内容安全）：只有输入或处理口径变了才值得再问。
+MODEL_DETERMINISTIC: tuple[type[ModelClientError], ...] = (ModelInputTooLargeError, ModelContentSafetyError)
+
+
 __all__ = [
+    "MODEL_DETERMINISTIC",
+    "MODEL_UNAVAILABLE",
     "ChatMessage",
     "ChatRequest",
     "MessageRole",

@@ -694,14 +694,7 @@ def _basis_row(cache: DayIndexCache, uri: str) -> FlowRow | None:
 def _unobserved(item: Expectation, cache: DayIndexCache) -> bool:
     """这条预期说中的范围（起算 → 最晚时限）里有没有观测空白：那段没看到，"没做"就说不准。"""
 
-    start, end = item.observed_from.astimezone(UTC), item.deadline.astimezone(UTC)
-    day = item.observed_from.date()
-    while day <= item.deadline.date():
-        for gap in cache.day(day).gaps:
-            if gap.started_at.astimezone(UTC) < end and gap.ended_at.astimezone(UTC) > start:
-                return True
-        day += timedelta(days=1)
-    return False
+    return cache.has_gap(item.observed_from, item.deadline)
 
 
 def _latest_by[T](items: Iterable[T], at: datetime, moment: Callable[[T], datetime]) -> T | None:

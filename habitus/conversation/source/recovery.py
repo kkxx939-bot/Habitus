@@ -21,8 +21,8 @@ from habitus.conversation.source.delivery import (
     ConversationOrderedPredecessorPendingError,
 )
 from habitus.conversation.source.model import ConversationSourceEnvelope, ConversationSourceError
-from habitus.conversation.source.quarantine import SourceQuarantine
 from habitus.conversation.source.receipt import ConversationConsumerOutcome, ConversationSourceConsumer
+from habitus.conversation.source.salvage import SourceSalvage
 from habitus.conversation.source.state import ConversationConsumerDeliveryState
 from habitus.conversation.source.store import ConversationSourceStore
 from habitus.infrastructure.lifecycle import FailureKind, RetryDecision, RetryLedger
@@ -60,13 +60,14 @@ class ConversationSourceRecoveryResult:
 
 @dataclass(frozen=True)
 class ConversationSourceRecoveryPlan:
-    """一轮该怎么处置每个没终态的 Source/Consumer。``attempt`` 按恢复顺序排好、最多一批；``isolated`` 是这一轮
-    刚送进隔离区的（Behavior 坏了，从此按终态算）；``broken`` 是坏了又不隔离的（Memory，等人工修复）。"""
+    """一轮该怎么处置每个没终态的 Source/Consumer。``attempt`` 按恢复顺序排好、最多一批；``salvaged`` 是这一轮
+    刚补救过的（Behavior 的账坏了：没写过的轮落「没读懂」、能重试的进每晚重试的堆，从此按终态算）；``broken`` 是坏了又
+    不补救的（Memory，等人工修复）。"""
 
     attempt: tuple[ConversationSourceRecoveryEntry, ...]
     broken: tuple[ConversationSourceRecoveryEntry, ...]
     deferred: tuple[ConversationSourceRecoveryEntry, ...]
-    isolated: tuple[ConversationSourceRecoveryEntry, ...] = ()
+    salvaged: tuple[ConversationSourceRecoveryEntry, ...] = ()
     #: 信封读不出来（损坏）的源：没法恢复，也不能让它拖垮这一轮，记下等人工处置（L10.9）。
     corrupt: tuple[str, ...] = ()
 
@@ -85,7 +86,7 @@ class ConversationSourceRecovery:
         *,
         batch_size: int,
         retries: RetryLedger,
-        quarantine: SourceQuarantine,
+        salvage: SourceSalvage,
         orphan_grace: timedelta,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -95,22 +96,22 @@ class ConversationSourceRecovery:
             raise ValueError("batch_size must be a positive integer")
         if not isinstance(retries, RetryLedger):
             raise TypeError("retries must be a RetryLedger")
-        if not isinstance(quarantine, SourceQuarantine):
-            raise TypeError("quarantine must be a SourceQuarantine")
+        if not isinstance(salvage, SourceSalvage):
+            raise TypeError("salvage must be a SourceSalvage")
         if not isinstance(orphan_grace, timedelta) or orphan_grace <= timedelta(0):
             raise ValueError("orphan_grace must be a positive timedelta")
         self.sources = sources
         self.delivery = delivery
         self.batch_size = batch_size
         self.retries = retries
-        self.quarantine = quarantine
+        self.salvage = salvage
         self.orphan_grace = orphan_grace
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
 
     def pending(self) -> tuple[ConversationSourceRecoveryEntry, ...]:
         """只看"还没终态"的标记，不列全部信封。顺手清三种残留标记：
 
-        - 两个消费者都已终态（隔离区里的算终态）：标记本该删掉，惰性地在这里删；
+        - 两个消费者都已终态（行为侧的账坏了、已补救的算终态）：标记本该删掉，惰性地在这里删；
         - 信封已经不在、地址水位盖住了它：释放删到一半留下的；
         - 信封不在、水位也没盖住、标记已超过宽限期：put 写到一半崩溃、再没重投的孤儿。它的索引标记一起删，
           不然同地址更早的源永远"还在记录"，有序 Consumer 与释放都会卡在它前面。
@@ -138,7 +139,7 @@ class ConversationSourceRecovery:
             waiting = [
                 ConversationSourceRecoveryEntry(envelope, consumer, state.state)
                 for consumer in ConversationSourceConsumer
-                if not self.quarantine.contains(source_id, consumer)
+                if not self.salvage.contains(source_id, consumer)
                 and (state := self.delivery.inspect(envelope, consumer)).state not in _TERMINAL
             ]
             if waiting:
@@ -156,15 +157,15 @@ class ConversationSourceRecovery:
         attempt: list[ConversationSourceRecoveryEntry] = []
         broken: list[ConversationSourceRecoveryEntry] = []
         deferred: list[ConversationSourceRecoveryEntry] = []
-        isolated: list[ConversationSourceRecoveryEntry] = []
+        salvaged: list[ConversationSourceRecoveryEntry] = []
         pending, corrupt = self._scan()
         held = self._held_memory_addresses(pending, busy)
         for entry in pending:
             if (entry.envelope.source_id, entry.consumer) in busy or _waits_behind(entry, held):
                 continue
-            if entry.state in _BROKEN and self.quarantine.isolates(entry.consumer):
-                self.quarantine.isolate(entry.envelope, entry.consumer, reason=entry.state.value)
-                isolated.append(entry)
+            if entry.state in _BROKEN and self.salvage.salvages(entry.consumer):
+                self.salvage.salvage(entry.envelope, entry.consumer)
+                salvaged.append(entry)
             elif entry.state in _BROKEN:
                 broken.append(entry)
             elif self._abandoning(entry):
@@ -175,7 +176,7 @@ class ConversationSourceRecovery:
             elif len(attempt) < self.batch_size:
                 attempt.append(entry)
         return ConversationSourceRecoveryPlan(
-            _in_recovery_order(attempt), tuple(broken), tuple(deferred), tuple(isolated), corrupt
+            _in_recovery_order(attempt), tuple(broken), tuple(deferred), tuple(salvaged), corrupt
         )
 
     def _held_memory_addresses(

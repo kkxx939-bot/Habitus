@@ -18,7 +18,7 @@ from habitus.behavior.fusion.lanes.session import (
     SessionTurnRecorder,
 )
 from habitus.behavior.observation import BehaviorObservationStore
-from habitus.infrastructure.lifecycle import Quarantine
+from habitus.behavior.retry import RetryBacklogStore
 from habitus.model_client import ChatClient, ChatModelConfig, ProviderConfig, StructuredChatClient
 from tests.unit.behavior.scripted_provider import ScriptedProvider
 
@@ -79,7 +79,7 @@ class Stores:
         self.receipts = BehaviorFusionReceiptStore(root)
         self.coverage = BehaviorCoverageIndex(root)
         self.now = at(130)
-        self.quarantine = Quarantine(root / "lifecycle", owner="behavior-session-test", clock=lambda: self.now)
+        self.backlog = RetryBacklogStore(root, max_items=100)
 
     def recorder(self) -> SessionTurnRecorder:
         return SessionTurnRecorder(
@@ -90,7 +90,6 @@ class Stores:
             primary_subject=SUBJECT,
             zone=ZONE,
             clock=lambda: self.now,
-            quarantine=self.quarantine,
         )
 
 
@@ -117,4 +116,5 @@ def lane(
     stores: Stores, bodies: list[dict[str, Any]], *, config: SessionLaneConfig | None = None
 ) -> tuple[SessionLane, ScriptedProvider]:
     chat, provider = client(bodies)
-    return SessionLane(SessionTurnDescriber(chat, zone=ZONE, config=config), stores.recorder()), provider
+    describer = SessionTurnDescriber(chat, zone=ZONE, config=config)
+    return SessionLane(describer, stores.recorder(), backlog=stores.backlog), provider

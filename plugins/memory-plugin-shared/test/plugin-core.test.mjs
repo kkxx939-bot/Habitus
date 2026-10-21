@@ -360,20 +360,18 @@ test("Harness registry drives a future adapter through lifecycle orchestration",
   assert.equal(result.harnesses[0].available, true);
 });
 
-test("realpath-aware entrypoints execute through filesystem symlinks", async (t) => {
+test("the habitus command runs through a filesystem symlink (npm global bin)", async (t) => {
   const directory = await temporaryRoot(t);
-  const installer = join(directory, "install-link.mjs");
-  const doctor = join(directory, "doctor-link.mjs");
-  await symlink(join(PLUGINS_ROOT, "install-memory-plugin.mjs"), installer);
-  await symlink(join(PLUGINS_ROOT, "memory-plugin-shared", "doctor.mjs"), doctor);
+  const command = join(directory, "habitus");
+  await symlink(join(PLUGINS_ROOT, "bin", "habitus.mjs"), command);
   const marketplace = join(directory, "marketplace");
-  const installed = spawnSync(process.execPath, [installer, "install", "--prepare-only", "--root", marketplace, "--json"], {
+  const installed = spawnSync(process.execPath, [command, "plugin", "install", "--prepare-only", "--root", marketplace, "--json"], {
     encoding: "utf8",
   });
   assert.equal(installed.status, 0, installed.stderr);
   assert.equal(JSON.parse(installed.stdout).preparedOnly, true);
 
-  const diagnosed = spawnSync(process.execPath, [doctor], {
+  const diagnosed = spawnSync(process.execPath, [command, "doctor", "--json"], {
     encoding: "utf8",
     env: {
       ...process.env,
@@ -579,17 +577,17 @@ test("plugin doctor reports every durable outbox lifecycle state", async (t) => 
       result: {
         api_version: "1.0",
         service_version: "test",
-        protocols: ["claude_code", "codex_rollout"],
+        protocols: ["claude_code", "codex_rollout", "opencode"],
         features: FEATURES,
       },
     }),
   };
   const report = await runPluginDoctor(
     { stateRoot },
-    { service, inspectHarnesses: async () => [] },
+    { service, inspectHarnesses: async () => [], inspectFeatures: async () => [] },
   );
   const outbox = report.checks.find((check) => check.name === "outbox");
-  assert.equal(report.ok, true);
+  assert.equal(report.ok, true, JSON.stringify(report.checks));
   assert.match(outbox.detail, /queued_items=1/);
   assert.match(outbox.detail, /inflight_items=0/);
 });

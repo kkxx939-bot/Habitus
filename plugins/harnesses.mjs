@@ -45,6 +45,9 @@ const DEFINITIONS = [
     pluginAdd: ["plugin", "add", PLUGIN_ID],
     pluginRemove: ["plugin", "remove", PLUGIN_ID, "--json"],
     pluginEnable: null,
+    // 插件 hook 要宿主的特性开着才跑（OpenViking 的 Codex 安装写 `plugin_hooks = true`；Codex 0.147 起这个开关已标 removed、
+    // 并入常开的 `hooks`）。doctor 按这张表查：列出的特性必须是开着的
+    featureInventory: { args: ["features", "list"], required: ["hooks"] },
   },
   {
     id: "claude-code",
@@ -93,6 +96,28 @@ const DEFINITIONS = [
     pluginRemove: ["plugin", "uninstall", PLUGIN_ID],
     pluginEnable: ["plugin", "enable", PLUGIN_ID],
   },
+  {
+    // OpenCode 没有插件 marketplace：它启动时加载 `<配置目录>/opencode/plugins/` 下的 .js。注册 = 在那里放一个一行的入口文件，
+    // 转手到 marketplace 根里暂存的插件目录（与 OpenViking 源码安装的 wrapper 同一个做法）
+    id: "opencode",
+    aliases: ["opencode", "oc"],
+    displayName: "OpenCode",
+    command: "opencode",
+    protocol: "opencode",
+    pluginDirectory: "habitus-memory-opencode",
+    pluginManifest: "package.json",
+    hooksManifest: null,
+    requiredHooks: [],
+    requiredAssets: [
+      "package.json",
+      "index.mjs",
+      "scripts/host-adapter.mjs",
+      "scripts/mirror.mjs",
+      "scripts/shared/plugin-core.mjs",
+    ],
+    registration: "file",
+    fileEntry: { configPath: ["opencode", "plugins"], name: "habitus-memory.js", module: "index.mjs" },
+  },
 ];
 
 function validateDefinition(value) {
@@ -105,11 +130,27 @@ function validateDefinition(value) {
   if (!value.command || !value.protocol || !value.pluginDirectory) {
     throw new Error(`harness execution metadata is incomplete: ${value.id}`);
   }
-  if (!value.marketplaceManifest?.path || !value.marketplaceManifest?.document) {
+  const registration = value.registration ?? "marketplace";
+  if (registration === "marketplace" && (!value.marketplaceManifest?.path || !value.marketplaceManifest?.document)) {
     throw new Error(`harness marketplace metadata is incomplete: ${value.id}`);
+  }
+  if (registration === "file" && (
+    !Array.isArray(value.fileEntry?.configPath) || !/^[a-z0-9-]+\.js$/.test(value.fileEntry?.name || "") || !value.fileEntry?.module
+  )) {
+    throw new Error(`harness file entry metadata is incomplete: ${value.id}`);
+  }
+  if (!["marketplace", "file"].includes(registration)) throw new Error(`unknown harness registration: ${value.id}`);
+  if (value.featureInventory != null && (
+    !Array.isArray(value.featureInventory.args) || !Array.isArray(value.featureInventory.required)
+  )) {
+    throw new Error(`harness feature inventory is invalid: ${value.id}`);
   }
   return Object.freeze({
     ...value,
+    registration,
+    marketplaceManifest: value.marketplaceManifest ?? null,
+    fileEntry: value.fileEntry ? Object.freeze({ ...value.fileEntry, configPath: Object.freeze([...value.fileEntry.configPath]) }) : null,
+    featureInventory: value.featureInventory ?? null,
     aliases: Object.freeze([...value.aliases]),
     requiredHooks: Object.freeze([...value.requiredHooks]),
     requiredAssets: Object.freeze([...value.requiredAssets]),

@@ -214,3 +214,36 @@ def test_an_abandoned_attempt_is_seen_but_not_as_done(tmp_path) -> None:
     moment = Moment(at(TODAY, 11, 0), slot=44)
     today = [row for row in seen_rows(moment, cache, ()) if row.started_at.date() == TODAY]
     assert [(row.kind_token, row.abandoned) for row in today] == [(CODE, True)]
+
+
+def test_an_unreadable_stretch_is_found_on_the_tree_or_among_the_unsealed_judgements() -> None:
+    """递送"说不准"的判据（裁定 67 第 14 条、68 第 1、2 条）：树上的「没读懂」（只认它，与结算同一个作废判法），或还没封口
+    的「没读懂」判断；还没封口的可读行为从那段里开头的（白天当场重读补回来、还没归约的）把它作废。"""
+
+    from types import SimpleNamespace
+
+    from habitus.foresight import UnsealedRow
+    from habitus.runtime.foresight_tick import _unobserved
+
+    start = datetime(2026, 10, 21, 9, 0, tzinfo=UTC)
+    item = SimpleNamespace(observed_from=start)
+    now = start + timedelta(hours=1)
+    stretch = SimpleNamespace(started_at=start + timedelta(minutes=10), ended_at=start + timedelta(minutes=12))
+
+    class Cache:
+        def __init__(self, gaps) -> None:  # type: ignore[no-untyped-def]
+            self.gaps = gaps
+
+        def gaps_within(self, begin, end, *, kinds):  # type: ignore[no-untyped-def]
+            assert (begin, end, kinds) == (start, now, frozenset({"没读懂"}))  # 「未观测」不让它不说
+            return self.gaps
+
+    unreadable = UnsealedRow(None, None, start + timedelta(minutes=10), start + timedelta(minutes=12), None)
+    readable = UnsealedRow("写周报", "s-k0002", start + timedelta(minutes=10), start + timedelta(minutes=12), None)
+    earlier = UnsealedRow(None, None, start - timedelta(hours=2), start - timedelta(hours=1), None)
+    assert _unobserved(item, SimpleNamespace(cache=Cache((stretch,)), unsealed=()), now)  # type: ignore[arg-type]
+    assert _unobserved(item, SimpleNamespace(cache=Cache(()), unsealed=(unreadable,)), now)  # type: ignore[arg-type]
+    assert not _unobserved(item, SimpleNamespace(cache=Cache(()), unsealed=(earlier,)), now)  # type: ignore[arg-type]
+    # 补回来、还没归约：树上那段与未封口的「没读懂」都被它作废
+    assert not _unobserved(item, SimpleNamespace(cache=Cache((stretch,)), unsealed=(readable,)), now)  # type: ignore[arg-type]
+    assert not _unobserved(item, SimpleNamespace(cache=Cache(()), unsealed=(unreadable, readable)), now)  # type: ignore[arg-type]

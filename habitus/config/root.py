@@ -41,7 +41,7 @@ class HabitusConfig:
     scene: SceneConfig = field(default_factory=SceneConfig)
     foresight: ForesightConfig = field(default_factory=ForesightConfig)
     temporal: TemporalConfig = field(default_factory=TemporalConfig)
-    # 统一生命周期：Worker 调度、重试账、派生物代数、隔离区、容量告警（裁定 60）。
+    # 统一生命周期：Worker 调度、重试账、派生物代数、容量告警（裁定 60）。
     lifecycle: LifecycleConfig = field(default_factory=LifecycleConfig)
     # 主体所在地：情景读侧标日型、预测层造"此刻"时钟，两处必须同一个地方，所以单独一组。
     locale: LocaleConfig = field(default_factory=LocaleConfig)

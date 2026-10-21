@@ -563,3 +563,49 @@ def test_a_return_seen_only_at_the_window_end_is_not_put_to_the_model(tmp_path) 
     closing = asyncio.run(run.run_once(DAY0 + timedelta(minutes=41), JudgeMaterials(_absence_table(), lambda uris: {})))
     assert closing.by_reason == {"久别回来": 1} and closing.spoken == 0
     assert provider.calls == 0
+
+
+def test_a_closing_window_with_an_unreadable_stretch_is_not_spoken(tmp_path) -> None:
+    """裁定 67 第 14 条：时窗末说中的范围里有「没读懂」——他可能已经做了、我们没看到，记「说不准」、不说、出口取不到。"""
+
+    run, ledger = stage(tmp_path)
+    earn(ledger)
+    ledger.record_expectation(expectation("today", DAY0))
+    plain = JudgeMaterials(None, lambda uris: {})
+    asyncio.run(run.run_once(DAY0 + timedelta(minutes=16), plain))  # 时窗开：等时窗末
+    blind = JudgeMaterials(None, lambda uris: {}, unobserved=lambda item: item.expectation_id == "today")
+    closing = asyncio.run(run.run_once(DAY0 + timedelta(minutes=41), blind))
+    assert closing.by_reason == {"说不准": 1} and closing.spoken == 0
+    assert not any(item.reason == "待取" for item in ledger.deliveries_on(DAY0.date()))
+
+
+def test_a_closing_window_with_an_unreadable_stretch_is_reread_before_deciding(tmp_path) -> None:
+    """裁定 68 第 1 条：范围里有「没读懂」先当场重读——读出了什么，这一拍不决定，下一拍按读出的再判（正是这件事就
+    「已发生」）；读不出来（模型用不了、堆里没有）才记「说不准」。"""
+
+    run, ledger = stage(tmp_path)
+    earn(ledger)
+    ledger.record_expectation(expectation("today", DAY0))
+    asyncio.run(run.run_once(DAY0 + timedelta(minutes=16), JudgeMaterials(None, lambda uris: {})))
+    asked: list[str] = []
+
+    async def recovered(item) -> bool:  # type: ignore[no-untyped-def]
+        asked.append(item.expectation_id)
+        return True
+
+    blind = JudgeMaterials(None, lambda uris: {}, unobserved=lambda item: True, reread=recovered)
+    deferred = asyncio.run(run.run_once(DAY0 + timedelta(minutes=41), blind))
+    assert asked == ["today"] and deferred.by_reason == {} and deferred.decided == 0
+    seen = JudgeMaterials(None, lambda uris: {}, happened=lambda item: True)
+    assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=42), seen)).by_reason == {"已发生": 1}
+
+    run2, ledger2 = stage(tmp_path / "unavailable")
+    earn(ledger2)
+    ledger2.record_expectation(expectation("today", DAY0))
+    asyncio.run(run2.run_once(DAY0 + timedelta(minutes=16), JudgeMaterials(None, lambda uris: {})))
+
+    async def unavailable(_item) -> bool:  # type: ignore[no-untyped-def]
+        return False
+
+    stuck = JudgeMaterials(None, lambda uris: {}, unobserved=lambda item: True, reread=unavailable)
+    assert asyncio.run(run2.run_once(DAY0 + timedelta(minutes=41), stuck)).by_reason == {"说不准": 1}

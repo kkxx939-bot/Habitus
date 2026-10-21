@@ -22,12 +22,15 @@ STATUS_BASES = frozenset({"observed", "inferred", "observation_lost"})
 # 观测空白的两种类型：没读懂（融合给出 behavior 为空的判断）、未观测（上游覆盖信号，
 # 契约尚未接入，见 TODO(BHV-TREE-REBUILD-001) 上游缺口一节）。
 GAP_KINDS = frozenset({"没读懂", "未观测"})
+#: 在看、但没看明白的那一种：它可以被那段里读出的行为作废（``behavior.schema.gaps``）。
+UNREADABLE_GAP = "没读懂"
 
 # 这件事是谁发起的（裁定 54）：系统提醒了他 / 宿主助手先通知了他（包裹到了、账单到期）/ 他自己。不知道就不写这个字段。
 PROMPTERS = frozenset({"system", "host_agent", "self"})
 
 __all__ = [
     "GAP_KINDS",
+    "UNREADABLE_GAP",
     "PROMPTERS",
     "OCCURRENCE_STATUSES",
     "SHA256",

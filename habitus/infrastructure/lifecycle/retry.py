@@ -1,7 +1,7 @@
 """重试账：替掉各处"失败了就下一轮原样再来、没有上限"的重排。
 
 - 可重试的（传输、超时）按退避推迟，次数用完转确定性；
-- 确定性的（标了 ``DeterministicFailure``）第一次就不再重试，交调用方送隔离区；
+- 确定性的（标了 ``DeterministicFailure``）第一次就不再重试，交调用方处置（会话源：放弃、写成没读懂、进每晚重试的堆）；
 - 一个 owner 一份文件；写是"读整份、改、整份写回"，同一进程里几个线程（并发恢复、生命周期的回收）会同时写，所以
   按文件路径串起来（L10.10）。跨进程不共用同一个 owner。
 
@@ -44,7 +44,7 @@ class FailureKind(str, Enum):
 
 
 class RetryLedgerFullError(RuntimeError):
-    """条目全是确定性失败、又撞上了上限：要人去处理隔离区。"""
+    """条目全是确定性失败、又撞上了上限：放弃了的条目回收得不够快，要人去看。"""
 
 
 @dataclass(frozen=True)
@@ -63,7 +63,7 @@ class RetryDecision:
 
     @property
     def give_up(self) -> bool:
-        """不再重试：调用方该把对象送进隔离区、发 signal。"""
+        """不再重试：调用方该放弃这一份（写成没读懂）、发 signal。"""
 
         return self.entry.kind is FailureKind.DETERMINISTIC
 
@@ -160,7 +160,7 @@ class RetryLedger:
         return self._drop(lambda key, _entry: not alive(key))
 
     def expire_given_up(self, before: datetime) -> int:
-        """放弃时刻早于 ``before`` 的确定性条目回收（统一寿命 ``lifecycle.quarantine_days``，由组合根给）。"""
+        """放弃时刻早于 ``before`` 的确定性条目回收（统一寿命 ``lifecycle.retry.given_up_days``，由组合根给）。"""
 
         return self._drop(lambda _key, entry: entry.kind is FailureKind.DETERMINISTIC and entry.next_at < before)
 

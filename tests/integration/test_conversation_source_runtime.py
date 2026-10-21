@@ -153,8 +153,8 @@ def test_a_broken_memory_source_degrades_only_its_address_at_startup(tmp_path: P
         conversation.sources.put(broken)
         conversation.sources.put(healthy)
 
-        # 释放与恢复认同一个隔离区（L10.2：组合根原先没接，坏掉的 Behavior 永远挡住地址）
-        assert conversation.source_releaser.quarantined == conversation.source_recovery.quarantine.contains
+        # 释放与恢复认同一份"已补救"标记（L10.2：组合根原先没接，坏掉的 Behavior 永远挡住地址；裁定 67 第 5 条）
+        assert conversation.source_releaser.salvage is conversation.source_recovery.salvage
 
         await runtime.start()
 
