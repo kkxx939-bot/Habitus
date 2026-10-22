@@ -171,7 +171,10 @@ class SessionLane:
         self.recorder.withdraw(turn)
 
     async def _describe(self, turn: SessionTurn, sources: tuple[str, ...]) -> TurnOutcome:
-        pending = await asyncio.to_thread(self.reminders.open, turn.instructed_at)
+        # 一轮 = 宿主的一轮：提醒可能就在这一轮里问出口、他也在这一轮里作答，所以按他在这一轮里最后一次开口时还开着的算——
+        # 那之前问出口的都在、那时还没过最晚时限的都在（不按这一轮结束：一轮跑二十分钟，最晚时限可能落在中间，他是在时限前
+        # 回的）；出口已按固定选项写过回话、关掉的不再带。回话的时刻也记那一刻
+        pending = await asyncio.to_thread(self.reminders.open, turn.last_said_at)
         described = await self.describer.describe(turn, pending)
         judgement_id = await asyncio.to_thread(
             self.recorder.record,
@@ -182,7 +185,7 @@ class SessionLane:
         )
         for number, polarity in described.description.responses:
             response = ReminderResponse(pending[number - 1].reminder_id, polarity)
-            await asyncio.to_thread(self.reminders.respond, turn.key, response, at=turn.instructed_at)
+            await asyncio.to_thread(self.reminders.respond, turn.key, response, at=turn.last_said_at)
         return TurnOutcome(turn, TurnDisposition.RECORDED, judgement_id, described.validation_attempts)
 
     async def _unreadable(self, turn: SessionTurn, cause: RetryCause, sources: tuple[str, ...]) -> TurnOutcome:

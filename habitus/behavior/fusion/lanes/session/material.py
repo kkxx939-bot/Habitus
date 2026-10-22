@@ -72,11 +72,12 @@ def split_turns(
     *,
     question_tools: Sequence[str] = (),
 ) -> tuple[SessionTurn, ...]:
-    """把一个会话的消息按"人说的话"拆成一轮一轮；合成消息与重放不开轮。
+    """把一个会话的消息拆成一轮一轮：一轮 = 宿主的一轮（``SessionTurn``）；合成消息与重放不开轮。
 
-    人对助手提问的作答（``question_tools`` 的工具结果；是哪几个工具由会话协议决定，组合根按协议适配器的声明传进来，只传
-    同步等作答的那些——Codex Desktop 的异步提问作答以一条用户消息晚来，由材料整理翻成作答）也是人说的话：助手发问时上一轮到此为止，
-    作答开新的一轮。提问没成（参数不合法）或被他拒绝的不算作答——拒绝之后他会另说一句话，那句话自己开轮。
+    人说的话开一轮，除非它插在宿主这一轮的中间（``mid_turn``，协议适配器按宿主自己的轮次标）——那是他在助手干活时作答、
+    补一句、叫停，留在这一轮里。同步提问工具的作答（``question_tools`` 的工具结果；是哪几个工具由会话协议决定，组合根按协议
+    适配器的声明传进来）本来就在宿主的一轮中间，翻成一句"（回答助手的提问）…"留在这一轮里；Codex Desktop 的异步作答是一条
+    用户消息，插在一轮中间的同样留下，在一轮结束之后才到的自己开一轮。提问没成（参数不合法）或被他拒绝的不算作答。
 
     助手说完话停下之后，被后台任务通知或别的会话的消息叫醒又做的那一段，不算进上一轮，自己算一轮；
     助手还在干活（上一条不是它的答复）时到的通知不算叫醒，这一轮照常继续。被叫醒之后什么也没做的，和别的
@@ -115,17 +116,27 @@ def split_turns(
     for message in messages:
         if message.role is SessionMessageRole.PROMPT:
             text = message.content.strip()
+            if message.mid_turn and not current:
+                continue  # 这一批从一轮中间切起（开头在更早一批里）：与开头的其余残留一样不属于这一批的任何一轮
+            if message.mid_turn and _wakes(text):
+                continue  # 宿主说它插在一轮中间：助手还在这一轮里，通知不算叫醒（与记忆按同一个"一轮"）
             if _wakes(text) and (not current or current[-1].role is SessionMessageRole.COMPLETION):
                 close()
                 current = [_wake_as_prompt(message)]  # 上一轮到助手停下为止；被叫醒的这一段自己算一轮
                 continue
             if not text or is_synthetic(text) or int(message.occurred_at.timestamp()) in replayed:
                 continue  # 不是人说的话：丢掉，也不结束当前这一轮
+            spoken = _reply_as_prompt(message) if text.startswith(REPLY_TAG) else message
+            if message.mid_turn:
+                current.append(spoken)  # 他在助手干活时说的：这一轮的一部分
+                continue
             close()
-            current = [_reply_as_prompt(message) if text.startswith(REPLY_TAG) else message]
+            current = [spoken]
         elif _is_answer(message, asking):
-            close()
-            current = [_answer_as_prompt(message)]
+            if current:
+                current.append(_answer_as_prompt(message))
+            else:
+                current = [_answer_as_prompt(message)]
         elif current:
             current.append(message)
     close()
@@ -230,6 +241,12 @@ def render_reminders(reminders: Sequence[PendingReminder], *, zone: tzinfo) -> s
 
 def _render(turn: SessionTurn, limits: SessionLaneConfig) -> str:
     instruction = _head_tail(redact(turn.instruction), limits.max_instruction_chars)
+    # 第一句之后的人说的话都是他在助手干活时说的（作答、补一句、叫停）；人说的话不削，只按单句上限截
+    interjections = [
+        _head_tail(redact(item.content.strip()), limits.max_instruction_chars)
+        for item in turn.messages[1:]
+        if item.role is SessionMessageRole.PROMPT and item.content.strip()
+    ]
     replies = [
         redact(item.content.strip())
         for item in turn.messages[1:]
@@ -240,6 +257,9 @@ def _render(turn: SessionTurn, limits: SessionLaneConfig) -> str:
 
     def build(call_lines: list[str], middle_replies: list[str], final: str) -> str:
         lines = [f"他说：{instruction}"]
+        if interjections:
+            lines.append("助手干活时他又说（按先后）：")
+            lines.extend(f"  - {text}" for text in interjections)
         if middle_replies:
             lines.append("助手中途说：")
             lines.extend(f"  - {text}" for text in middle_replies)

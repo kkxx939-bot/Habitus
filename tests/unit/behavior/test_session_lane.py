@@ -176,8 +176,10 @@ def test_too_many_interim_replies_keep_only_the_head_and_tail_ones() -> None:
     assert "助手最后说：全部完成。" in text
 
 
-def test_answering_the_assistants_question_opens_a_new_turn() -> None:
-    asked, answered = split_turns(
+def test_answering_the_assistants_question_stays_in_the_turn() -> None:
+    """一轮 = 宿主的一轮：助手问、他答、助手接着做完，是同一件事的一轮；作答翻成一句人说的话留在这一轮里（用户 2026-10-22）。"""
+
+    (turn,) = split_turns(
         CONVERSATION,
         (
             prompt(0, "把配置集中起来", minutes=0),
@@ -194,61 +196,66 @@ def test_answering_the_assistants_question_opens_a_new_turn() -> None:
         ),
         question_tools=("AskUserQuestion", "request_user_input"),
     )
-    assert (asked.start_sequence, asked.end_sequence) == (0, 2)
-    assert asked.completed_at == at(2)  # 助手发问时上一轮到此为止
-    assert asked.answered
-    assert answered.instructed_at == at(9)  # 他作答的时刻
-    assert answered.instruction == f'{ANSWER_PREFIX}Your questions have been answered: "放哪？"="独立模块"'
-    assert answered.completed_at == at(12)
-    assert "他说：（回答助手的提问）" in render_turn(answered)
+    assert (turn.start_sequence, turn.end_sequence) == (0, 4)
+    assert turn.instruction == "把配置集中起来"
+    assert (turn.instructed_at, turn.completed_at) == (at(0), at(12))
+    material = render_turn(turn)
+    assert f'助手干活时他又说（按先后）：\n  - {ANSWER_PREFIX}Your questions have been answered: "放哪？"="独立模块"' in material
+    assert "助手最后说：按独立模块改完了。" in material
 
 
-def test_codex_desktop_replies_arrive_as_a_user_message_and_become_the_answer_turn() -> None:
-    """Codex Desktop：agent 用 request_user_input_async 问完接着干活，工具结果只是"收到了"（不开轮）；他的作答以一条
-    <send_user_message_question_reply> 用户消息晚来，翻成"（回答助手的提问）问题 → 答案"开新的一轮（方案 32 第 5.2 条）。"""
+def test_what_he_says_while_the_assistant_works_stays_in_that_turn() -> None:
+    """他 10-12 一场 Desktop 会话的形状：一轮里作答、补一句、叫停（适配器按宿主的轮次标 mid_turn），都是这一件事；
+    同样的话若不是插在中间（上一轮已经答完）就自己开一轮。"""
 
     reply_message = (
         "<send_user_message_question_reply>\n"
-        '[{"questionItemId":"[\\"request_user_input_async\\",\\"call_1\\",0]","question":"周四了，周报还没写。","answer":"这次不用"}]\n'
+        '[{"questionItemId":"[\\"request_user_input_async\\",\\"call_1\\",0]","question":"走哪条路？","answer":"云助手"}]\n'
         "</send_user_message_question_reply>\n"
     )
+    turns = split_turns(
+        CONVERSATION,
+        (
+            prompt(0, "看一下能不能写个脚本连我的云电脑", minutes=0),
+            reply(1, "我先检查客户端。", minutes=1),
+            call(2, "request_user_input_async", '{"questions": [{"title": "走哪条路？"}]}', call_id="call_1", minutes=2),
+            result(3, '{"accepted":true}', call_id="call_1", name="request_user_input_async", minutes=2.1),
+            prompt(4, reply_message, minutes=4, mid_turn=True),
+            call(5, "js", "{}", call_id="c2", minutes=5),
+            prompt(6, "你可以先看一下我是账号", minutes=6, mid_turn=True),
+            prompt(7, "还是暂停吧", minutes=8, mid_turn=True),
+            reply(8, "已暂停。", minutes=9),
+            prompt(9, "是不是脚本上传了就可以了？", minutes=20),
+            reply(10, "上传脚本还不够。", minutes=21),
+        ),
+        question_tools=("AskUserQuestion", "request_user_input"),
+    )
+    assert [(turn.start_sequence, turn.end_sequence) for turn in turns] == [(0, 8), (9, 10)]
+    material = render_turn(turns[0])
+    assert (
+        "助手干活时他又说（按先后）：\n"
+        f"  - {ANSWER_PREFIX}走哪条路？ → 云助手\n"
+        "  - 你可以先看一下我是账号\n"
+        "  - 还是暂停吧"
+    ) in material
+    assert "他说：看一下能不能写个脚本连我的云电脑" in material
+
+    # Desktop 的作答在上一轮答完之后才到（他回来点了选项，宿主为它开了新的一轮）：自己开一轮
     asked, answered = split_turns(
         CONVERSATION,
         (
             prompt(0, "帮我看这个报错", minutes=0),
-            call(
-                1,
-                "request_user_input_async",
-                '{"questions": [{"title": "周四了，周报还没写。"}]}',
-                call_id="call_1",
-                minutes=1,
-            ),
+            call(1, "request_user_input_async", '{"questions": [{"title": "走哪条路？"}]}', call_id="call_1", minutes=1),
             result(2, '{"accepted":true}', call_id="call_1", name="request_user_input_async", minutes=1.1),
             reply(3, "报错是依赖版本不对。", minutes=3),
             prompt(4, reply_message, minutes=6),
-            reply(5, "好，那先不写。", minutes=7),
+            reply(5, "好。", minutes=7),
         ),
         question_tools=("AskUserQuestion", "request_user_input"),
     )
-    assert (asked.start_sequence, asked.end_sequence) == (0, 3)  # 收到了不是作答，不开轮
-    assert answered.instruction == f"{ANSWER_PREFIX}周四了，周报还没写。 → 这次不用"
+    assert (asked.start_sequence, asked.end_sequence) == (0, 3)  # "收到了"不是作答
+    assert answered.instruction == f"{ANSWER_PREFIX}走哪条路？ → 云助手"
     assert answered.instructed_at == at(6) and answered.completed_at == at(7)
-    # Codex CLI 的同步提问：作答在工具结果里，和 Claude Code 一样开轮
-    _asked, answered = split_turns(
-        CONVERSATION,
-        (
-            prompt(0, "帮我看这个报错"),
-            call(
-                1, "request_user_input", '{"questions": [{"title": "周四了，周报还没写。"}]}', call_id="c1", minutes=1
-            ),
-            result(
-                2, '{"answers": {"周四了，周报还没写。": "知道了"}}', call_id="c1", name="request_user_input", minutes=2
-            ),
-            reply(3, "好。", minutes=3),
-        ),
-        question_tools=("AskUserQuestion", "request_user_input"),
-    )
-    assert answered.instruction.startswith(ANSWER_PREFIX) and "知道了" in answered.instruction
     # 不是作答形状的（JSON 坏了）：照旧当一句人说的话
     (turn,) = split_turns(
         CONVERSATION,
@@ -281,11 +288,13 @@ def test_other_tool_results_never_open_a_turn() -> None:
         (prompt(0, "跑测试"), call(1, "bash", "pytest", call_id="c1"), result(2, "ok", call_id="c1", name="bash")),
     )
     assert turn.end_sequence == 2
-    assert split_turns(
+    # 提问工具的作答也不开轮：它在宿主的这一轮里
+    (asked,) = split_turns(
         CONVERSATION,
         (prompt(0, "跑"), call(1, "Ask", "{}", call_id="c"), result(2, "选 1", call_id="c", name="Ask")),
         question_tools=("Ask",),
-    )[1].instruction.endswith("选 1")
+    )
+    assert asked.end_sequence == 2 and f"{ANSWER_PREFIX}选 1" in render_turn(asked)
 
 
 def test_work_done_after_being_woken_is_its_own_turn() -> None:
@@ -725,9 +734,11 @@ def test_a_turn_is_judged_once_against_the_open_reminders_and_the_response_is_wr
     (outcome,) = asyncio.run(session.consume((turn,)))
 
     assert outcome.disposition is TurnDisposition.RECORDED and provider.calls == 1
-    assert reminders.asked == [turn.instructed_at]  # 问的是他开口那一刻开着的提醒
+    # 问的是他在这一轮里最后一次开口时开着的提醒（一轮 = 宿主的一轮，提醒可能就在这一轮里问出口、他也在这一轮里作答；
+    # 不按这一轮结束：最晚时限可能落在一轮中间，他是在时限前回的）
+    assert reminders.asked == [turn.last_said_at]
     assert "【还开着的提醒】" in provider.prompts[-1] and "订完机票" in provider.prompts[-1]
-    assert reminders.responses == [(turn.key, "hotel", "中", turn.instructed_at)]
+    assert reminders.responses == [(turn.key, "hotel", "中", turn.last_said_at)]
     # 重放：这一轮已经记录过，不再问模型、不再写回应（一轮只判一次）
     (again,) = asyncio.run(session.consume((turn,)))
     assert again.disposition is TurnDisposition.ALREADY_RECORDED and provider.calls == 1
@@ -780,3 +791,48 @@ def test_the_response_is_written_only_after_the_turn_is_recorded(tmp_path: Path)
     (outcome,) = asyncio.run(session.consume((turn,)))
     assert outcome.disposition is TurnDisposition.RECORDED
     assert recorded_when_responding == [1] and len(reminders.responses) == 1
+
+
+def test_he_last_spoke_when_his_last_words_in_the_round_were_said() -> None:
+    (turn,) = split_turns(
+        CONVERSATION,
+        (
+            prompt(0, "帮我改个配置", minutes=0),
+            reply(1, "我先看一下。", minutes=1),
+            prompt(2, "顺便把日志级别也调低", minutes=4, mid_turn=True),
+            reply(3, "都改好了。", minutes=20),
+        ),
+    )
+    assert (turn.instructed_at, turn.last_said_at, turn.completed_at) == (at(0), at(4), at(20))
+
+
+def test_a_notice_that_arrives_inside_the_hosts_turn_does_not_wake_a_new_round() -> None:
+    """宿主说通知插在这一轮中间（助手中途说过话也一样）：助手还在这一轮里，不算叫醒、不另开一轮。"""
+
+    (turn,) = split_turns(
+        CONVERSATION,
+        (
+            prompt(0, "跑全量测试，派个子代理看日志", minutes=0),
+            reply(1, "已派出子代理。", minutes=1),
+            prompt(2, "<subagent_notification>done</subagent_notification>", minutes=5, mid_turn=True),
+            reply(3, "测试全过。", minutes=6),
+        ),
+    )
+    assert (turn.start_sequence, turn.end_sequence) == (0, 3)
+
+
+def test_a_batch_cut_inside_a_turn_leaves_his_leftover_words_to_no_round() -> None:
+    """一批从一轮中间切起：开头那一截（含他插的话）属于更早一批里的那一轮，不拿来另开一轮（不出碎片）。"""
+
+    turns = split_turns(
+        CONVERSATION,
+        (
+            call(0, "js", "{}", call_id="c1", minutes=0),
+            result(1, "ok", call_id="c1", name="js", minutes=0.5),
+            prompt(2, "还是暂停吧", minutes=1, mid_turn=True),
+            reply(3, "已暂停。", minutes=2),
+            prompt(4, "下一个问题", minutes=10),
+            reply(5, "好的。", minutes=11),
+        ),
+    )
+    assert [turn.instruction for turn in turns] == ["下一个问题"]

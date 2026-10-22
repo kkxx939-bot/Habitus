@@ -146,6 +146,7 @@ class _Builder:
         tool_name: str | None = None,
         tool_status: ConversationToolResultStatus | None = None,
         occurred_at: datetime | None = None,
+        mid_turn: bool = False,
     ) -> None:
         sequence = self.context.start_sequence + len(self.messages)
         identity = canonical_digest(
@@ -172,6 +173,7 @@ class _Builder:
             content_mode=(
                 ConversationToolResultContentMode.INLINE if role is ConversationMessageRole.TOOL_RESULT else None
             ),
+            mid_turn=mid_turn,
         )
         self.messages.append(message)
         if role is ConversationMessageRole.TOOL_CALL:
@@ -337,10 +339,30 @@ class CodexRolloutConversationAdapter:
         QuestionTool("codex", "request_user_input", "title"),
         QuestionTool("codex", "request_user_input_async", "title", replies_later=True),
     )
+    # Codex 以 role=user 写进转写、但不是人说的话的上下文消息：会话开头和中途都会写，当成人话会自成一轮、没有回复，
+    # 整批转写被保留规则拒收。与 developer 消息一样不收。前三个是本机 CLI 0.147 与 Desktop 0.153–0.162 真实转写里见到的
+    # （2026-10-22 扫了 15 份；见到的是 ``<external_codex_apps_open_page``，按会话 lane 的口径收 ``<external_codex`` 整族）；
+    # 其余是会话 lane 一直当"不是人话"的 Codex 合成消息（``lanes/session/material.py``）。
+    # Desktop 的作答 ``<send_user_message_question_reply>`` 与后台任务叫醒的 ``<subagent_notification>`` 不在此列。
+    host_context_prefixes = (
+        "<environment_context",
+        "<external_codex",
+        "<recommended_plugins",
+        "<user_instructions",
+        "# AGENTS.md instructions",
+        "<skill>",
+        "<in-app-browser",
+        "<turn_aborted",
+        "<user_shell_command",
+    )
 
     def adapt(self, payload: object, context: ConversationAdapterContext) -> ConversationAdaptation:
         builder = _Builder(self.protocol, context)
         ignored = 0
+        # Codex 自己分轮（每轮以 task_started 开始，本机 25 份真实转写里每句人话前都有）：一轮里第一句人话之后再来的人话
+        # （他作答、补一句、叫停）是插在这一轮中间的。一批不一定从一轮开头切起（插件在一轮中途的答复处、压缩前都会送一批），
+        # 所以这一批里第一个 task_started 之前的人话，属于开头在更早一批里的那一轮——也是插在中间的。
+        human_in_turn = True
         for index, raw in enumerate(_records(payload, "Codex rollout records")):
             record = _mapping(raw, f"records[{index}]")
             record_type = record.get("type")
@@ -351,6 +373,8 @@ class CodexRolloutConversationAdapter:
             item_type = _clean_text(item.get("type"), "Codex response_item type")
             occurred_at = _timestamp(record.get("timestamp"), context.occurred_at)
             if record_type == "event_msg":
+                if item_type == "task_started":
+                    human_in_turn = False
                 if item_type != "sub_agent_activity":
                     ignored += 1
                     continue
@@ -372,7 +396,7 @@ class CodexRolloutConversationAdapter:
                 if role not in {"user", "assistant"}:
                     raise ConversationProtocolError(f"unsupported Codex message role: {role}")
                 content = _responses_text(item.get("content"))
-                if not content:
+                if not content or (role == "user" and content.lstrip().startswith(self.host_context_prefixes)):
                     ignored += 1
                     continue
                 builder.add(
@@ -380,7 +404,9 @@ class CodexRolloutConversationAdapter:
                     content,
                     source_index=str(index),
                     occurred_at=occurred_at,
+                    mid_turn=role == "user" and human_in_turn,
                 )
+                human_in_turn = human_in_turn or role == "user"
             elif item_type == "agent_message":
                 content = _responses_text(item.get("content"))
                 if not content:

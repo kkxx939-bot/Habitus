@@ -1,6 +1,7 @@
 """Conversation 完整轮次提交、语义切段与大工具结果降载测试。"""
 
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import pytest
 
@@ -14,8 +15,12 @@ from habitus.memory.conversation import (
     ConversationToolResultReducer,
 )
 from habitus.pre.conversation import (
+    ConversationAdapterContext,
+    ConversationAdapterRegistry,
     ConversationBatch,
+    ConversationMessage,
     ConversationMessageRole,
+    ConversationMessageSchemaError,
     ConversationToolResultContentMode,
     ConversationToolResultStatus,
 )
@@ -241,3 +246,197 @@ def test_tool_result_reducer_keeps_small_result_summarizes_large_text_and_omits_
         reducer.reduce(closed_turn()[0])
     with pytest.raises(ValueError, match="force-omitted"):
         reducer.reduce(original, force_omit=True, force_summarize=True)
+
+
+def _codex_message(role: str, text: str) -> dict[str, object]:
+    kind = "input_text" if role == "user" else "output_text"
+    return {"type": "response_item", "payload": {"type": "message", "role": role, "content": [{"type": kind, "text": text}]}}
+
+
+def test_a_real_shaped_codex_rollout_passes_the_after_turn_check() -> None:
+    """Codex（CLI 与 Desktop）在会话开头和中途以用户消息写进上下文；它们不是人说的话、不开一轮，
+    否则整批转写在提交边界被拒（2026-10-22 实测：每个会话的第一批都 400、后面的永远排在它后面）。"""
+
+    records = [
+        {"type": "session_meta", "payload": {}},
+        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}},
+        _codex_message("developer", "<permissions instructions>…"),
+        _codex_message("user", "<environment_context>\n  <cwd>/w</cwd>\n</environment_context>"),
+        _codex_message("user", '<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>'),
+        _codex_message("user", "stats.py 的平均分不对，帮我看看"),
+        {"type": "response_item", "payload": {"type": "function_call", "call_id": "call_q", "name": "request_user_input_async",
+                                              "arguments": '{"questions":[{"title":"周报还没写。","options":["现在就做"]}]}'}},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "call_q", "output": '{"accepted":true}'}},
+        _codex_message("assistant", "多减了 1，已修正。"),
+        {"type": "event_msg", "payload": {"type": "task_complete"}},
+        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t2"}},
+        _codex_message("user", "<recommended_plugins>…</recommended_plugins>"),
+        _codex_message("user", '<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>'),
+        _codex_message(
+            "user",
+            '<send_user_message_question_reply>\n[{"questionItemId":"[\\"request_user_input_async\\",\\"call_q\\",0]",'
+            '"question":"周报还没写。","answer":"现在就做"}]\n</send_user_message_question_reply>',
+        ),
+        _codex_message("assistant", "收到。"),
+    ]
+    adapted = ConversationAdapterRegistry.with_builtins().adapt(
+        "codex_rollout", records, ConversationAdapterContext("codex-s1", 0, datetime(2026, 10, 22, tzinfo=UTC))
+    )
+    roles = tuple(item.role for item in adapted.batch.messages)
+    assert roles == (
+        ConversationMessageRole.PROMPT,
+        ConversationMessageRole.TOOL_CALL,
+        ConversationMessageRole.TOOL_RESULT,
+        ConversationMessageRole.COMPLETION,
+        ConversationMessageRole.PROMPT,
+        ConversationMessageRole.COMPLETION,
+    )
+    # Desktop 的作答仍是一条人说的话（提醒出口与会话 lane 都读它）
+    assert adapted.batch.messages[4].content.startswith("<send_user_message_question_reply>")
+    assert adapted.after_turn
+    planner = ConversationRetentionPlanner(config(commit_token_threshold=1), token_estimator=lambda _: 1)
+    planner.plan(adapted.batch, after_turn=True)  # 以前在这里抛 "afterTurn requires every turn to end with a final completion"
+
+
+def _task_started() -> dict[str, object]:
+    return {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t"}}
+
+
+def _call(call_id: str, name: str) -> list[dict[str, object]]:
+    return [
+        {"type": "response_item", "payload": {"type": "function_call", "call_id": call_id, "name": name, "arguments": "{}"}},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": call_id, "output": "ok"}},
+    ]
+
+
+def test_what_he_says_while_the_agent_is_still_working_stays_in_that_turn() -> None:
+    """照他 10-12 一场真实 Desktop 会话的形状：一轮里他作答两次、又补一句、最后叫停，agent 才给最终回复。
+    插在中间的四句是同一轮的，不开新一轮；整批过提交边界，切段也不从这几句前面切开。"""
+
+    records = [
+        _task_started(),
+        _codex_message("user", "<environment_context>…</environment_context>"),
+        _codex_message("user", "看一下能不能写个脚本连我的云电脑"),
+        _codex_message("assistant", "我先检查客户端和连接方式。"),
+        *_call("call_q1", "request_user_input_async"),
+        _codex_message("user", '<send_user_message_question_reply>\n[{"questionItemId":"[\\"request_user_input_async\\",\\"call_q1\\",0]","question":"走哪条路？","answer":"云助手"}]\n</send_user_message_question_reply>'),
+        *_call("call_js1", "js"),
+        _codex_message("user", "你可以先看一下我是账号"),
+        *_call("call_js2", "js"),
+        _codex_message("user", "还是暂停吧"),
+        _codex_message("assistant", "已暂停。"),
+        {"type": "event_msg", "payload": {"type": "task_complete"}},
+        _task_started(),
+        _codex_message("user", "是不是脚本上传了就可以了？"),
+        _codex_message("assistant", "上传脚本还不够。"),
+    ]
+    adapted = ConversationAdapterRegistry.with_builtins().adapt(
+        "codex_rollout", records, ConversationAdapterContext("codex-s1", 0, datetime(2026, 10, 12, tzinfo=UTC))
+    )
+    prompts = [item for item in adapted.batch.messages if item.role is ConversationMessageRole.PROMPT]
+    assert [item.mid_turn for item in prompts] == [False, True, True, True, False]
+    assert [item.starts_turn for item in prompts] == [True, False, False, False, True]
+    planner = ConversationRetentionPlanner(config(commit_token_threshold=1), token_estimator=lambda _: 1)
+    planner.plan(adapted.batch, after_turn=True)  # 以前在作答那一句处切出一轮没有回复的，整批被拒
+    # 插话前面不是"一轮结束"：最终回复之前的任何位置都不算轮次边界
+    final = next(i for i, item in enumerate(adapted.batch.messages) if item.content == "已暂停。")
+    for index, item in enumerate(adapted.batch.messages[:final]):
+        assert ConversationRetentionPlanner._boundary_kind(adapted.batch.messages, index) != "turn", item.content
+
+
+def test_a_mid_turn_mark_survives_the_round_trip_and_only_prompts_carry_it() -> None:
+    marked = replace(message(0, ConversationMessageRole.PROMPT, "还是暂停吧"), mid_turn=True)
+    assert ConversationMessage.from_dict(marked.to_dict()) == marked
+    # 没标的消息序列化不变（已有的身份摘要不受影响）
+    plain = message(0, ConversationMessageRole.PROMPT, "x")
+    assert "mid_turn" not in plain.to_dict()
+    with pytest.raises(ConversationMessageSchemaError, match="only a prompt"):
+        replace(message(1, ConversationMessageRole.COMPLETION, "y"), mid_turn=True)
+
+
+def test_a_batch_cut_in_the_middle_of_a_codex_turn_still_knows_his_words_are_mid_turn() -> None:
+    """插件会在一轮中途的答复处、压缩前送一批：下一批里没有 task_started，他的插话照样是插在中间的（四路评审确认的 bug）。"""
+
+    second_batch = [
+        *_call("call_js1", "js"),
+        _codex_message("user", "你可以先看一下我是账号"),
+        *_call("call_js2", "js"),
+        _codex_message("assistant", "已暂停。"),
+    ]
+    adapted = ConversationAdapterRegistry.with_builtins().adapt(
+        "codex_rollout", second_batch, ConversationAdapterContext("codex-s1", 40, datetime(2026, 10, 12, tzinfo=UTC))
+    )
+    (spoken,) = [item for item in adapted.batch.messages if item.role is ConversationMessageRole.PROMPT]
+    assert spoken.mid_turn and not spoken.starts_turn
+    planner = ConversationRetentionPlanner(config(commit_token_threshold=1), token_estimator=lambda _: 1)
+    planner.plan(adapted.batch, after_turn=True, leading_continuation=True)  # 以前这里又是那个 400
+
+
+def test_a_mid_turn_interjection_right_after_a_progress_reply_is_not_a_turn_boundary() -> None:
+    """他 10-12 的真实形状：助手中途说一句、他紧接着作答。那句中途答复不是这一轮的结尾，切段不在它后面切。"""
+
+    messages = (
+        message(0, ConversationMessageRole.PROMPT, "看一下能不能写个脚本"),
+        message(1, ConversationMessageRole.COMPLETION, "我先检查客户端。"),
+        replace(message(2, ConversationMessageRole.PROMPT, "（回答助手的提问）走哪条路？ → 云助手"), mid_turn=True),
+        message(3, ConversationMessageRole.COMPLETION, "已暂停。"),
+    )
+    assert ConversationRetentionPlanner._boundary_kind(messages, 1) != "turn"
+    assert 1 not in ConversationRetentionPlanner._safe_boundaries(messages)
+    assert ConversationRetentionPlanner._boundary_kind(messages, 3) == "turn"
+
+
+def test_a_long_turn_with_his_interjection_is_sealed_in_pieces_that_know_they_are_mid_turn(tmp_path) -> None:
+    """一轮长到要切成几段、中间有他的插话：整批收下；以插话开头的那一段知道自己是从一轮中间开始的。"""
+
+    from datetime import date
+
+    from habitus.infrastructure.store.contracts import PathLock
+    from habitus.infrastructure.store.locks import ProcessLocalLockStore
+    from habitus.memory.conversation import ConversationAddress, ConversationMessageJournal
+    from habitus.memory.workflow import ConversationMemoryEnqueuer
+    from habitus.memory.workflow.jobs import MemoryJobStore
+
+    records = [
+        _task_started(),
+        _codex_message("user", "看一下能不能写个脚本连我的云电脑"),
+        *_call("c1", "js"),
+        *_call("c2", "js"),
+        _codex_message("user", "你可以先看一下我是账号"),
+        *_call("c3", "js"),
+        *_call("c4", "js"),
+        _codex_message("assistant", "已暂停。"),
+    ]
+    adapted = ConversationAdapterRegistry.with_builtins().adapt(
+        "codex_rollout", records, ConversationAdapterContext("k", 0, datetime(2026, 10, 22, tzinfo=UTC))
+    )
+    lock = PathLock(ProcessLocalLockStore())
+    journal = ConversationMessageJournal(tmp_path / "c", lock)
+    planner = ConversationRetentionPlanner(
+        config(commit_token_threshold=1, keep_recent_turn_count=0, retained_message_token_budget=4, max_segment_messages=3),
+        token_estimator=lambda _: 1,
+    )
+    enqueuer = ConversationMemoryEnqueuer(journal, MemoryJobStore(tmp_path / "w", lock, memory_root=tmp_path / "m"), planner)
+    address = ConversationAddress("k", date(2026, 10, 22))
+    enqueuer.append_and_maybe_enqueue(address, adapted.batch, after_turn=True)
+    segments = journal.list_history(address)
+    assert len(segments) > 1
+    for segment in segments:
+        head = segment.messages[0]
+        assert segment.starts_mid_turn == (not head.starts_turn)
+    assert any(segment.messages[0].mid_turn and segment.starts_mid_turn for segment in segments)
+
+
+def test_semantic_cut_points_never_fall_between_a_progress_reply_and_his_interjection() -> None:
+    from habitus.memory.conversation.segmentation import _safe_semantic_units
+
+    messages = (
+        message(0, ConversationMessageRole.PROMPT, "看一下能不能写个脚本"),
+        message(1, ConversationMessageRole.COMPLETION, "我先检查客户端。"),
+        replace(message(2, ConversationMessageRole.PROMPT, "还是暂停吧"), mid_turn=True),
+        message(3, ConversationMessageRole.COMPLETION, "已暂停。"),
+        message(4, ConversationMessageRole.PROMPT, "下一个问题"),
+        message(5, ConversationMessageRole.COMPLETION, "好的。"),
+    )
+    # 中途那句答复（1）后面紧跟的是他插的话：那里不是切点（以前会在 1 后面切开）；其余照旧
+    assert [sequence for sequence, _ in _safe_semantic_units(messages)] == [0, 2, 3, 4, 5]

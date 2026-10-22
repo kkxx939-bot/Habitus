@@ -5,11 +5,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { main } from "../../bin/habitus.mjs";
+import { hookReviewState, main } from "../../bin/habitus.mjs";
 import { HARNESS_REGISTRY, createHarnessRegistry } from "../../harnesses.mjs";
 import { executePluginLifecycle, parseArgs } from "../../install-memory-plugin.mjs";
-import { fileEntryPath } from "../../registrations.mjs";
-import { harnessFeatureChecks, harnessRegistrationChecks, marketplaceCheck, parseFeatureList, runPluginDoctor } from "../doctor.mjs";
+import { fileEntryPath, inspectHookReview } from "../../registrations.mjs";
+import {
+  harnessFeatureChecks, harnessHookReviewChecks, harnessRegistrationChecks, marketplaceCheck, parseFeatureList, runPluginDoctor,
+} from "../doctor.mjs";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 
 function sink() {
   const chunks = [];
@@ -260,6 +264,7 @@ test("the doctor requires protocols only for harnesses registered on this machin
     service,
     inspectFeatures: async () => [],
     inspectMarketplace: async () => ({ name: "marketplace", status: "pass", detail: "" }),
+    inspectHookReviews: async () => [],
   };
   const root = await mkdtemp(join(tmpdir(), "habitus-cli-test-"));
   try {
@@ -440,4 +445,138 @@ test("the registry refuses two harnesses that would write the same manifest and 
     /claude-code and zcode would write the same marketplace:\.claude-plugin\/marketplace\.json/,
   );
   assert.throws(() => HARNESS_REGISTRY.resolve("zed"), /unknown Agent Harness: zed \(supported: codex, claude-code, zcode, opencode, pi, dsh\)/);
+});
+
+
+// 假的 `codex app-server`：按行收 JSON-RPC，initialize 之后答 hooks/list
+function fakeAppServer(hooks) {
+  return () => {
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.kill = () => {};
+    let buffer = "";
+    child.stdin.on("data", (chunk) => {
+      buffer += chunk;
+      let newline;
+      while ((newline = buffer.indexOf("\n")) >= 0) {
+        const message = JSON.parse(buffer.slice(0, newline));
+        buffer = buffer.slice(newline + 1);
+        if (message.id === 1) child.stdout.write(`${JSON.stringify({ id: 1, result: {} })}\n`);
+        if (message.id === 2) child.stdout.write(`${JSON.stringify({ id: 2, result: { data: [{ cwd: "/", hooks }] } })}\n`);
+      }
+    });
+    return child;
+  };
+}
+
+test("Codex hooks the user has not approved are reported with how to approve them", async () => {
+  const codex = HARNESS_REGISTRY.resolve("codex");
+  const hooks = [
+    { pluginId: "habitus-memory@habitus-local", eventName: "userPromptSubmit", trustStatus: "untrusted" },
+    { pluginId: "habitus-memory@habitus-local", eventName: "stop", trustStatus: "modified" },
+    { pluginId: "habitus-memory@habitus-local", eventName: "sessionStart", trustStatus: "trusted" },
+    { pluginId: "someone-else@market", eventName: "stop", trustStatus: "untrusted" },
+  ];
+  const review = await inspectHookReview(codex, { spawnImpl: fakeAppServer(hooks), timeoutMs: 2000 });
+  assert.deepEqual(review.pending, ["userPromptSubmit", "stop"]);
+  assert.equal(review.hooks.length, 3);
+
+  const registered = [{ name: "harness_codex", status: "pass" }, { name: "harness_claude-code", status: "pass" }];
+  const [check] = await harnessHookReviewChecks(HARNESS_REGISTRY, registered, async () => review);
+  assert.equal(check.name, "hooks_review_codex");
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /2 hook\(s\) not approved \(userPromptSubmit, stop\): 打开 Codex 输入 \/hooks/);
+
+  const approved = await harnessHookReviewChecks(HARNESS_REGISTRY, registered, async () => ({ available: true, hooks: [{}], pending: [] }));
+  assert.equal(approved[0].status, "pass");
+  // 没注册的宿主不问
+  assert.deepEqual(await harnessHookReviewChecks(HARNESS_REGISTRY, [{ name: "harness_codex", status: "warn" }], async () => review), []);
+  // 宿主没装或不答：说查不到，不算批没批
+  const missing = await inspectHookReview({ ...codex, command: "habitus-no-such-harness" }, { timeoutMs: 2000 });
+  assert.equal(missing.available, false);
+  const [unknown] = await harnessHookReviewChecks(HARNESS_REGISTRY, registered, async () => missing);
+  assert.equal(unknown.status, "warn");
+});
+
+
+test("the doctor runs the hook approval check and reports a service error in words", async () => {
+  const root = await mkdtemp(join(tmpdir(), "habitus-cli-test-"));
+  try {
+    const report = await runPluginDoctor({ stateRoot: root }, {
+      service: { health: async () => ({ ok: false, error: { code: "UNAVAILABLE", message: "runtime is starting" } }) },
+      inspectHarnesses: async () => [{ name: "harness_codex", status: "pass" }],
+      inspectFeatures: async () => [],
+      inspectMarketplace: async () => ({ name: "marketplace", status: "pass", detail: "" }),
+      inspectHookReviews: async (_registry, registrations) => {
+        assert.deepEqual(registrations.map((check) => check.name), ["harness_codex"]);  // 拿到的是注册检查的结果
+        return [{ name: "hooks_review_codex", status: "fail", detail: "1 hook(s) not approved" }];
+      },
+    });
+    const byName = Object.fromEntries(report.checks.map((check) => [check.name, check]));
+    assert.equal(byName.hooks_review_codex.status, "fail");
+    assert.equal(report.ok, false);
+    assert.match(byName.health.detail, /^UNAVAILABLE: runtime is starting; start it with: habitus-server$/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("install and status say whether Codex will run the hooks, and never call an empty list approved", async () => {
+  const item = (hookReview) => ({ harness: "codex", installed: true, enabled: true, hookReview });
+  assert.equal(hookReviewState(item(null)), "");
+  assert.equal(hookReviewState(item({ available: true, hooks: [{}, {}], pending: [] })), "；hook 已批准");
+  assert.match(hookReviewState(item({ available: true, hooks: [{}], pending: ["stop"] })), /1 个 hook 还没批准，不会运行：打开 Codex 输入 \/hooks/);
+  assert.match(hookReviewState(item({ available: true, hooks: [], pending: [] })), /没列出 Habitus 的 hook，不会运行/);
+  assert.match(hookReviewState(item({ available: false, error: "x" })), /查不到/);
+  // Codex 一条都没列：doctor 判失败，并先指向特性开关
+  const codex = HARNESS_REGISTRY.resolve("codex");
+  assert.equal(codex.hookReview.kind, "codex-app-server");
+  return harnessHookReviewChecks(HARNESS_REGISTRY, [{ name: "harness_codex", status: "pass" }], async () => ({ available: true, hooks: [], pending: [] }))
+    .then(([check]) => {
+      assert.equal(check.status, "fail");
+      assert.match(check.detail, /check features_codex above/);
+    });
+});
+
+test("a harness whose hook approval protocol is unknown is a definition error", () => {
+  assert.throws(() => inspectHookReview({ id: "x", hookReview: { kind: "nope" } }), /unknown hookReview kind/);
+});
+
+
+test("plugin install / status ask the harness whether its hooks are approved and say how to approve", async () => {
+  const lifecycle = async (options) => ({
+    action: options.action, root: "/tmp/m",
+    harnesses: [{ harness: "codex", installed: true, enabled: true }, { harness: "opencode", installed: true, enabled: true }],
+  });
+  const asked = [];
+  const reviewHooks = async (definition) => { asked.push(definition.id); return { available: true, hooks: [{}], pending: ["stop"] }; };
+  for (const action of ["install", "status"]) {
+    const out = sink();
+    assert.equal(await main(["plugin", action, "--harness", "codex"], { stdout: out, stderr: sink(), lifecycle, reviewHooks }), 0);
+    assert.match(out.text(), /codex +已注册；1 个 hook 还没批准，不会运行：打开 Codex 输入 \/hooks/);
+  }
+  assert.deepEqual(asked, ["codex", "codex"]);  // 只问要求逐条批准的宿主（OpenCode 不问）
+  // 只准备、不注册时不问
+  assert.equal(await main(["plugin", "install", "--prepare-only"], { stdout: sink(), stderr: sink(), lifecycle, reviewHooks }), 0);
+  assert.deepEqual(asked, ["codex", "codex"]);
+});
+
+test("the doctor reports a not-ready service in words", async () => {
+  const root = await mkdtemp(join(tmpdir(), "habitus-cli-test-"));
+  try {
+    const report = await runPluginDoctor({ stateRoot: root }, {
+      service: {
+        health: async () => ({ ok: true }),
+        ready: async () => ({ ok: false, error: { code: "NOT_READY", message: "vector index building" } }),
+        capabilities: async () => ({ ok: false, error: "x" }),
+      },
+      inspectHarnesses: async () => [], inspectFeatures: async () => [], inspectHookReviews: async () => [],
+      inspectMarketplace: async () => ({ name: "marketplace", status: "pass", detail: "" }),
+    });
+    const ready = report.checks.find((check) => check.name === "ready");
+    assert.equal(ready.detail, "NOT_READY: vector index building");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

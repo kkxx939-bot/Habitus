@@ -8,8 +8,9 @@ import {
   PLUGIN_NAME,
 } from "../harnesses.mjs";
 import { defaultMarketplaceRoot, marketplaceStatus } from "../install-memory-plugin.mjs";
-import { CommandRunner, registrationOf } from "../registrations.mjs";
+import { CommandRunner, inspectHookReview, registrationOf } from "../registrations.mjs";
 import { loadPluginConfig } from "./lib/config.mjs";
+import { errorText } from "./lib/service-client.mjs";
 import { HabitusServiceClient } from "./lib/service-client.mjs";
 import { readState, sessionKey } from "./lib/state-store.mjs";
 
@@ -28,6 +29,7 @@ export async function runPluginDoctor(
     inspectHarnesses = harnessRegistrationChecks,
     inspectFeatures = harnessFeatureChecks,
     inspectMarketplace = marketplaceCheck,
+    inspectHookReviews = harnessHookReviewChecks,
   } = {},
 ) {
   const checks = [];
@@ -35,10 +37,11 @@ export async function runPluginDoctor(
   const registrations = await inspectHarnesses(registry, env);
   checks.push(...registrations, await inspectMarketplace(registry, env));
   checks.push(...await inspectFeatures(registry));
+  checks.push(...await inspectHookReviews(registry, registrations));
   const health = await service.health();
   if (!health.ok) {
     // 连不上就只报这一条：就绪、特性、提醒都无从谈起，别把它们报成一串不相干的失败
-    checks.push({ name: "health", status: "fail", detail: `${String(health.error)}; start it with: habitus-server` });
+    checks.push({ name: "health", status: "fail", detail: `${errorText(health.error)}; start it with: habitus-server` });
   } else {
     checks.push({ name: "health", status: "pass", detail: "service reachable" });
     checks.push(...await serviceChecks(service, protocols ?? registeredProtocols(registry, registrations)));
@@ -69,7 +72,7 @@ function registeredProtocols(registry, registrations) {
 async function serviceChecks(service, requiredProtocols) {
   const checks = [];
   const ready = await service.ready();
-  checks.push({ name: "ready", status: ready.ok && ready.result?.ready === true ? "pass" : "fail", detail: ready.ok ? String(ready.result?.status) : String(ready.error) });
+  checks.push({ name: "ready", status: ready.ok && ready.result?.ready === true ? "pass" : "fail", detail: ready.ok ? String(ready.result?.status) : errorText(ready.error) });
   const capabilities = await service.capabilities();
   const availableProtocols = new Set(capabilities.result?.protocols || []);
   const availableFeatures = new Set(capabilities.result?.features || []);
@@ -189,6 +192,27 @@ export async function harnessFeatureChecks(registry = HARNESS_REGISTRY, run = sp
         ? `required features enabled: ${definition.featureInventory.required.join(", ")}`
         : `features off: ${missing.join(", ")} (enable them in the harness config, then restart it)`,
     });
+  }
+  return checks;
+}
+
+// 插件注册了、hook 却没被用户批准，宿主照样一个都不跑：只查已注册、且宿主要求逐条批准的
+export async function harnessHookReviewChecks(registry = HARNESS_REGISTRY, registrations = [], review = inspectHookReview) {
+  const registered = new Set(registrations.filter((check) => check.status === "pass").map((check) => check.name));
+  const checks = [];
+  for (const definition of registry.list().filter((item) => item.hookReview && registered.has(`harness_${item.id}`))) {
+    const name = `hooks_review_${definition.id}`;
+    const result = await review(definition);
+    if (!result?.available) {
+      checks.push({ name, status: "warn", detail: `cannot ask the harness which hooks are approved: ${result?.error || "unknown"}` });
+    } else if (result.hooks.length === 0) {
+      // 列不出来多半是宿主的 hook 特性关着（看上面的 features_ 那一项），特性开着才是插件没装上
+      checks.push({ name, status: "fail", detail: `the harness lists no Habitus hooks, so none will run: check features_${definition.id} above; if hooks are enabled, run: habitus plugin update` });
+    } else if (result.pending.length > 0) {
+      checks.push({ name, status: "fail", detail: `${result.pending.length} hook(s) not approved (${result.pending.join(", ")}): ${definition.hookReview.instruction}` });
+    } else {
+      checks.push({ name, status: "pass", detail: `all ${result.hooks.length} hooks approved` });
+    }
   }
   return checks;
 }

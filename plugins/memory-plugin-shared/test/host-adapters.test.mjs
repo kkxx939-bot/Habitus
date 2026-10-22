@@ -23,14 +23,14 @@ const config = { maxTranscriptBytes: 1024 * 1024 };
 test("Codex capture waits for custom tool output and a terminal assistant message", async (t) => {
   const pending = await transcript(t, [
     { type: "response_item", payload: { type: "custom_tool_call", call_id: "c1", name: "shell", input: "pwd" } },
-    { type: "response_item", payload: { type: "message", role: "assistant", content: [] } },
+    { type: "response_item", payload: { type: "message", role: "assistant", phase: "final_answer", content: [] } },
   ]);
   assert.equal(await codex.readTranscriptDelta({ transcript_path: pending }, null, config), null);
 
   const complete = await transcript(t, [
     { type: "response_item", payload: { type: "custom_tool_call", call_id: "c1", name: "shell", input: "pwd" } },
     { type: "response_item", payload: { type: "custom_tool_call_output", call_id: "c1", output: "/tmp" } },
-    { type: "response_item", payload: { type: "message", role: "assistant", content: [] } },
+    { type: "response_item", payload: { type: "message", role: "assistant", phase: "final_answer", content: [] } },
   ]);
   const delta = await codex.readTranscriptDelta({ transcript_path: complete }, null, config);
   assert.equal(delta.records.length, 3);
@@ -42,7 +42,7 @@ test("Codex capture waits for tool search output and retains native agent events
     { type: "response_item", payload: { type: "agent_message", author: "worker", content: [{ type: "output_text", text: "evidence" }] } },
     { type: "response_item", payload: { type: "sub_agent_activity", event_id: "e1", kind: "completed" } },
     { type: "response_item", payload: { type: "tool_search_call", call_id: "s1", arguments: { query: "memory" } } },
-    { type: "response_item", payload: { type: "message", role: "assistant", content: "not terminal" } },
+    { type: "response_item", payload: { type: "message", role: "assistant", phase: "final_answer", content: "not terminal" } },
   ]);
   assert.equal(await codex.readTranscriptDelta({ transcript_path: path }, null, config), null);
 
@@ -51,7 +51,7 @@ test("Codex capture waits for tool search output and retains native agent events
     { type: "response_item", payload: { type: "sub_agent_activity", event_id: "e1", kind: "completed" } },
     { type: "response_item", payload: { type: "tool_search_call", call_id: "s1", arguments: { query: "memory" } } },
     { type: "response_item", payload: { type: "tool_search_output", call_id: "s1", tools: [{ name: "github" }] } },
-    { type: "response_item", payload: { type: "message", role: "assistant", content: "terminal" } },
+    { type: "response_item", payload: { type: "message", role: "assistant", phase: "final_answer", content: "terminal" } },
   ]);
   const delta = await codex.readTranscriptDelta({ transcript_path: complete }, null, config);
   assert.equal(delta.records.length, 5);
@@ -98,7 +98,7 @@ test("injected memory context is consumed but excluded from captured payload", a
   const prepared = createContextInjection("hidden", "2".repeat(32));
   const path = await transcript(t, [
     { type: "response_item", payload: { type: "message", role: "user", content: prepared.injection } },
-    { type: "response_item", payload: { type: "message", role: "assistant", content: "done" } },
+    { type: "response_item", payload: { type: "message", role: "assistant", phase: "final_answer", content: "done" } },
   ]);
   const delta = await codex.readTranscriptDelta({ transcript_path: path }, null, config, [prepared.receipt]);
   assert.equal(delta.records.length, 1);
@@ -112,7 +112,7 @@ test("receipt removes only the injected byte range from concatenated Codex conte
       type: "response_item",
       payload: { type: "message", role: "user", content: `before\n${prepared.injection}\nafter` },
     },
-    { type: "response_item", payload: { type: "message", role: "assistant", content: "done" } },
+    { type: "response_item", payload: { type: "message", role: "assistant", phase: "final_answer", content: "done" } },
   ]);
   const delta = await codex.readTranscriptDelta({ transcript_path: path }, null, config, [prepared.receipt]);
   assert.equal(delta.records[0].payload.content, "before\n\nafter");
@@ -139,7 +139,7 @@ test("nonce marker with a modified body is preserved", async (t) => {
   const modified = prepared.injection.replace("hidden", "user fact");
   const path = await transcript(t, [
     { type: "response_item", payload: { type: "message", role: "user", content: modified } },
-    { type: "response_item", payload: { type: "message", role: "assistant", content: "done" } },
+    { type: "response_item", payload: { type: "message", role: "assistant", phase: "final_answer", content: "done" } },
   ]);
   const delta = await codex.readTranscriptDelta({ transcript_path: path }, null, config, [prepared.receipt]);
   assert.equal(delta.records[0].payload.content, modified);
@@ -148,8 +148,34 @@ test("nonce marker with a modified body is preserved", async (t) => {
 test("literal context marker without an injection receipt remains user content", async (t) => {
   const path = await transcript(t, [
     { type: "response_item", payload: { type: "message", role: "user", content: "literal <habitus-memory-context> fact" } },
-    { type: "response_item", payload: { type: "message", role: "assistant", content: "done" } },
+    { type: "response_item", payload: { type: "message", role: "assistant", phase: "final_answer", content: "done" } },
   ]);
   const delta = await codex.readTranscriptDelta({ transcript_path: path }, null, config, []);
   assert.equal(delta.records.length, 2);
+});
+
+
+test("Codex capture never cuts inside a turn: a progress reply is not where a batch ends", async (t) => {
+  // 压缩前（PreCompact）来取时这一轮还在做：只有中途的进度答复，没有 final_answer —— 不送，整轮留到做完一起送
+  const midTurn = await transcript(t, [
+    { type: "event_msg", payload: { type: "task_started" } },
+    { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "看下报错" }] } },
+    { type: "response_item", payload: { type: "message", role: "assistant", phase: "commentary", content: "我先看一下。" } },
+    { type: "response_item", payload: { type: "function_call", call_id: "c1", name: "exec", arguments: "{}" } },
+    { type: "response_item", payload: { type: "function_call_output", call_id: "c1", output: "ok" } },
+  ]);
+  assert.equal(await codex.readTranscriptDelta({ transcript_path: midTurn }, null, config), null);
+
+  const done = await transcript(t, [
+    { type: "event_msg", payload: { type: "task_started" } },
+    { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "看下报错" }] } },
+    { type: "response_item", payload: { type: "message", role: "assistant", phase: "commentary", content: "我先看一下。" } },
+    { type: "compacted", payload: { message: "", replacement_history: [] } },
+    { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "还是暂停吧" }] } },
+    { type: "response_item", payload: { type: "message", role: "assistant", phase: "final_answer", content: "已暂停。" } },
+    { type: "event_msg", payload: { type: "task_complete" } },
+  ]);
+  const delta = await codex.readTranscriptDelta({ transcript_path: done }, null, config);
+  assert.equal(delta.records.length, 6);  // 压缩前后两半、中途插的话、最终答复，一批送；task_complete 留给下一批
+  assert.equal(delta.afterTurn, true);
 });

@@ -26,7 +26,8 @@ class SessionMessageRole(str, Enum):
 
 @dataclass(frozen=True)
 class SessionMessage:
-    """会话里的一条消息。``failed`` 只对工具结果有意义。"""
+    """会话里的一条消息。``failed`` 只对工具结果有意义。``mid_turn``：人说的话插在宿主的一轮中间（助手还没给出最终答复时他作答、
+    补一句、叫停），属于这一轮、不开新一轮（由协议适配器按宿主自己的轮次标，与记忆主链认的"一轮"是同一个）。"""
 
     sequence: int
     occurred_at: datetime
@@ -35,6 +36,7 @@ class SessionMessage:
     tool_name: str | None = None
     tool_call_id: str | None = None
     failed: bool = False
+    mid_turn: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "role", SessionMessageRole(self.role))
@@ -44,14 +46,17 @@ class SessionMessage:
             raise BehaviorFusionError("session message occurred_at must be timezone-aware")
         if not isinstance(self.content, str):
             raise BehaviorFusionError("session message content must be text")
+        if not isinstance(self.mid_turn, bool):
+            raise BehaviorFusionError("session message mid_turn must be a boolean")
 
 
 @dataclass(frozen=True)
 class SessionTurn:
-    """一轮对话：人说的一句话，加上到他下一句话之前助手做的全部事。
+    """一轮对话 = 宿主的一轮：他开口的那句话，到助手给出最终答复为止助手做的全部事，以及这中间他又说的话。
 
-    "人说的话"也包括他对助手提问的作答（拆轮时翻成一句人说的话）；助手发问时上一轮就到此为止。
-    助手停下之后被后台任务叫醒又做的那一段也自己算一轮，打头的是叫醒它的那条通知。
+    助手还在干活时他说的话——对助手提问的作答（翻成"（回答助手的提问）…"）、补一句、叫停——都在这一轮里，不另开一轮
+    （用户 2026-10-22：一件事被切成碎片是设计哲学的问题，记忆与行为两边按同一个"一轮"）。``messages`` 里第一条之后的
+    人说的话就是这些中途的话。助手停下之后被后台任务叫醒又做的那一段自己算一轮，打头的是叫醒它的那条通知。
 
     ``instructed_at`` 是人开口的时刻，``completed_at`` 是这一轮最后一条消息的时刻（助手做完的时刻）。
     """
@@ -77,6 +82,12 @@ class SessionTurn:
         """这一轮的身份：哪个会话、第几条到第几条消息。"""
 
         return f"{self.conversation_id}#{self.start_sequence}-{self.end_sequence}"
+
+    @property
+    def last_said_at(self) -> datetime:
+        """他在这一轮里最后一次开口的时刻（开口那句、或之后作答 / 补一句 / 叫停的最后一句）。他对提醒的回应只能出在这之前。"""
+
+        return max(item.occurred_at for item in self.messages if item.role is SessionMessageRole.PROMPT)
 
     @property
     def answered(self) -> bool:

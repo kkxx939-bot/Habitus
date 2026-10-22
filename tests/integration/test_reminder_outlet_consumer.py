@@ -142,8 +142,9 @@ def wired(tmp_path: Path, bodies: list[dict[str, Any]], host_of=None):  # type: 
     return service, ledger, provider
 
 
-def run(tmp_path: Path, answer: str, second_body: dict[str, Any], host_of=None):  # type: ignore[no-untyped-def]
-    service, ledger, provider = wired(tmp_path, [description("看报错"), second_body], host_of)
+def run(tmp_path: Path, answer: str, body: dict[str, Any], host_of=None):  # type: ignore[no-untyped-def]
+    # 一轮 = 宿主的一轮：他开口、agent 问、他作答、agent 答完，模型只看这一轮一次（用户 2026-10-22）
+    service, ledger, provider = wired(tmp_path, [body], host_of)
 
     async def scenario() -> None:
         source = service.sources.put(envelope(conversation(answer)))
@@ -154,32 +155,32 @@ def run(tmp_path: Path, answer: str, second_body: dict[str, Any], host_of=None):
     return ledger, provider
 
 
-def test_a_fixed_no_is_written_by_the_outlet_and_the_answer_turn_no_longer_carries_the_reminder(tmp_path: Path) -> None:
-    ledger, provider = run(tmp_path, "这次不用", description("回答提问"))
+def test_a_fixed_no_is_written_by_the_outlet_and_the_turn_no_longer_carries_the_reminder(tmp_path: Path) -> None:
+    ledger, provider = run(tmp_path, "这次不用", description("看报错"))
     (spoken,) = [d for d in ledger.deliveries_on(DAY) if d.spoken]
     assert (spoken.decided_at, spoken.text, spoken.via, spoken.turn) == (CLAIMED_AT + timedelta(seconds=30), TEXT, "claude-code", "toolu_1")
     (response,) = ledger.responses_on(DAY)
     assert (response.polarity, response.turn) == ("负", "toolu_1")
-    assert provider.calls == 2  # 两轮：他的话那一轮、作答那一轮
-    assert "【还开着的提醒】" not in provider.prompts[1]  # 负已经关了，作答那一轮模型不再见到这条
+    assert provider.calls == 1  # 提问与作答在同一轮里
+    assert "【还开着的提醒】" not in provider.prompts[0]  # 出口先写了负、已经关了，这一轮模型不再见到这条
     assert ReminderResponses(ledger, limit=5).open(CLAIMED_AT + timedelta(minutes=2)) == ()
 
 
-def test_a_fixed_noted_leaves_the_reminder_open_so_the_answer_turn_still_carries_it(tmp_path: Path) -> None:
-    ledger, provider = run(tmp_path, "知道了", description("回答提问", responses=[]))
+def test_a_fixed_noted_leaves_the_reminder_open_so_the_turn_still_carries_it(tmp_path: Path) -> None:
+    ledger, provider = run(tmp_path, "知道了", description("看报错", responses=[]))
     (response,) = ledger.responses_on(DAY)
     assert response.polarity == "中"
-    assert provider.calls == 2
-    # 出口先于 lane：作答那一轮进桥时这条提醒已经"开着"（说出口的时刻 = 提问那一刻，早于他作答），模型见得到
-    assert "【还开着的提醒】" in provider.prompts[1] and TEXT in provider.prompts[1]
-    assert "【还开着的提醒】" not in provider.prompts[0]  # 他敲第一句话时还没问出口
-    payload = json.loads(provider.prompts[1]) if provider.prompts[1].startswith("{") else None
+    assert provider.calls == 1
+    # 出口先于 lane；这一轮按它结束时还开着的提醒带（这一轮里刚问出口、"知道了"不关），模型见得到、他的作答也在材料里
+    assert "【还开着的提醒】" in provider.prompts[0] and TEXT in provider.prompts[0]
+    assert "助手干活时他又说" in provider.prompts[0] and "知道了" in provider.prompts[0]
+    payload = json.loads(provider.prompts[0]) if provider.prompts[0].startswith("{") else None
     assert payload is None  # 材料是文字不是 JSON（只是确认提示词形状没变）
 
 
 def test_a_protocol_without_a_harness_is_not_read_for_questions(tmp_path: Path) -> None:
     """协议没声明宿主（通用 SDK 协议）：出口不认里面的提问，会话 lane 照常。"""
 
-    ledger, provider = run(tmp_path, "这次不用", description("回答提问"), host_of=lambda _protocol: None)
+    ledger, provider = run(tmp_path, "这次不用", description("看报错"), host_of=lambda _protocol: None)
     assert [d for d in ledger.deliveries_on(DAY) if d.spoken] == [] and ledger.responses_on(DAY) == ()
-    assert provider.calls == 2
+    assert provider.calls == 1

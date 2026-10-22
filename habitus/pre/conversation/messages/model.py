@@ -112,6 +112,9 @@ class ConversationMessage:
     logical_message_id: str | None = None
     logical_part_index: int | None = None
     logical_part_count: int | None = None
+    #: 人说的话插在宿主的一轮中间（agent 还没给出最终回复时他作答、补一句、叫停）：属于这一轮，不开新一轮。
+    #: 由知道宿主自己轮次的协议适配器标（Codex 按 task_started 分轮），记忆主链与会话 lane 都按它认"一轮"。
+    mid_turn: bool = False
 
     SCHEMA_VERSION = "conversation_message_v2"
 
@@ -169,6 +172,11 @@ class ConversationMessage:
                 raise ConversationMessageSchemaError("only prompt and completion text can have logical parts")
         elif logical_message_id is not None:
             raise ConversationMessageSchemaError("logical_message_id is only valid for a split logical message")
+
+        if not isinstance(self.mid_turn, bool):
+            raise ConversationMessageSchemaError("mid_turn must be a boolean")
+        if self.mid_turn and role is not ConversationMessageRole.PROMPT:
+            raise ConversationMessageSchemaError("only a prompt can arrive mid-turn")
 
         if self.original_size_bytes is not None:
             if (
@@ -289,6 +297,8 @@ class ConversationMessage:
             payload["logical_message_id"] = self.logical_message_id
             payload["logical_part_index"] = self.logical_part_index
             payload["logical_part_count"] = self.logical_part_count
+        if self.mid_turn:
+            payload["mid_turn"] = True
         return canonicalize(payload)
 
     @classmethod
@@ -310,6 +320,7 @@ class ConversationMessage:
             "logical_message_id",
             "logical_part_index",
             "logical_part_count",
+            "mid_turn",
         }
         unknown = set(payload) - allowed
         if unknown:
@@ -349,7 +360,14 @@ class ConversationMessage:
             logical_message_id=payload.get("logical_message_id"),
             logical_part_index=payload.get("logical_part_index"),
             logical_part_count=payload.get("logical_part_count"),
+            mid_turn=payload.get("mid_turn", False),
         )
+
+    @property
+    def starts_turn(self) -> bool:
+        """这条消息开一轮：人说的话，不是一条长消息的后续分块，也不是插在宿主一轮中间的话。"""
+
+        return self.role is ConversationMessageRole.PROMPT and not self.is_logical_continuation and not self.mid_turn
 
     @property
     def is_logical_continuation(self) -> bool:
@@ -530,8 +548,7 @@ class ConversationSegment:
     def starts_mid_turn(self) -> bool:
         """片段是否从前一个 History Segment 延续同一逻辑轮次。"""
 
-        first = self.messages[0]
-        return first.role is not ConversationMessageRole.PROMPT or first.is_logical_continuation
+        return not self.messages[0].starts_turn
 
     @property
     def ends_mid_turn(self) -> bool:

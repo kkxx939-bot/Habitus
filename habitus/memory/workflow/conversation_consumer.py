@@ -68,11 +68,11 @@ class MemoryConversationConsumer:
                 "output_schema_version": MEMORY_CONVERSATION_OUTPUT_SCHEMA_VERSION,
                 "tool_result_reducer_version": "conversation_tool_result_reducer_v1",
                 "text_chunker_version": "conversation_message_chunker_v1",
-                "retention_planner_version": "conversation_retention_planner_v1",
+                "retention_planner_version": "conversation_retention_planner_v2",
                 "segmentation_config": asdict(enqueuer.retention_planner.config),
                 "message_chunker_max_tokens": enqueuer.message_chunker.max_message_tokens,
                 "semantic_boundary": {
-                    "version": "conversation_semantic_boundary_scorer_v1",
+                    "version": "conversation_semantic_boundary_scorer_v2",
                     "embedding_fingerprint": boundary_scorer.embedding_fingerprint,
                     "max_unit_chars": boundary_scorer.max_unit_chars,
                 },

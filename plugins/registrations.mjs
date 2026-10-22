@@ -5,7 +5,7 @@
 // - file：在宿主的插件目录放一个带受管标记的入口文件，指向 marketplace 根里的插件（OpenCode、pi）。
 // - cordis-patch：装宿主的 hook 桥，在它的 home 级 patch 文件里写一段受管配置（DeepSeek Harness）。
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -317,3 +317,73 @@ export function registrationOf(definition) {
   if (!registration) throw new Error(`unknown harness registration: ${definition.registration}`);
   return registration;
 }
+
+// 宿主要求用户逐条批准插件 hook 时（定义里的 hookReview），问宿主我们的 hook 批没批：
+// {available, hooks: [{event, trustStatus}], pending: [没批准的 event]}；宿主没装或没答给 available: false。
+// 怎么问是宿主的协议，按 hookReview.kind 选一组（与注册方式按 registration 选一组同理），协调层不写宿主分支
+export function inspectHookReview(definition, options = {}) {
+  if (!definition.hookReview) return Promise.resolve(null);
+  const review = HOOK_REVIEWS[definition.hookReview.kind];
+  if (!review) throw new Error(`${definition.id} has an unknown hookReview kind: ${definition.hookReview.kind}`);
+  return review(definition, options);
+}
+
+// Codex：`codex app-server` 的 JSON-RPC（initialize → hooks/list），trustStatus 由 Codex 自己判（trusted / managed 才算批了）
+function inspectCodexAppServerHooks(definition, { spawnImpl = spawn, timeoutMs = 15_000, cwd = homedir() } = {}) {
+  return new Promise((resolvePromise) => {
+    let child;
+    let settled = false;
+    let buffer = "";
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { child?.kill(); } catch { /* 已经退出 */ }
+      resolvePromise(value);
+    };
+    const timer = setTimeout(() => finish({ available: false, error: "harness did not answer" }), timeoutMs);
+    const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`);
+    try {
+      child = spawnImpl(definition.command, definition.hookReview.args, { cwd, stdio: ["pipe", "pipe", "ignore"] });
+    } catch (error) {
+      finish({ available: false, error: error?.message || String(error) });
+      return;
+    }
+    child.on("error", (error) => finish({ available: false, error: error?.code === "ENOENT" ? "harness is not installed" : error.message }));
+    child.on("exit", () => finish({ available: false, error: "harness exited before answering" }));
+    child.stdin.on("error", () => {});
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk;
+      let newline;
+      while ((newline = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        let message;
+        try { message = JSON.parse(line); } catch { continue; }
+        if (message.id === 1) {
+          send({ method: "initialized" });
+          send({ id: 2, method: "hooks/list", params: { cwds: [cwd] } });
+        } else if (message.id === 2) {
+          if (message.error) {
+            finish({ available: false, error: message.error.message || "hooks/list failed" });
+            return;
+          }
+          const hooks = (message.result?.data || [])
+            .flatMap((entry) => entry.hooks || [])
+            .filter((hook) => hook.pluginId === PLUGIN_ID)
+            .map((hook) => ({ event: hook.eventName, trustStatus: hook.trustStatus }));
+          const pending = hooks.filter((hook) => !["trusted", "managed"].includes(hook.trustStatus)).map((hook) => hook.event);
+          finish({ available: true, hooks, pending });
+        }
+      }
+    });
+    send({
+      id: 1,
+      method: "initialize",
+      params: { clientInfo: { name: "habitus", title: null, version: "1" }, capabilities: { experimentalApi: true, requestAttestation: false } },
+    });
+  });
+}
+
+const HOOK_REVIEWS = { "codex-app-server": inspectCodexAppServerHooks };

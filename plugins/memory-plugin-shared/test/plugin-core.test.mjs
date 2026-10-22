@@ -195,7 +195,10 @@ test("non-retryable service rejection blocks but never drops the outbox item", a
   const service = {
     capabilities: async () => capabilities(),
     cursor: async () => ({ ok: true, result: { next_sequence: 4 } }),
-    remember: async () => ({ ok: false, retryable: false, error: { code: "INVALID_ARGUMENT" } }),
+    remember: async () => ({
+      ok: false, retryable: false,
+      error: { code: "INVALID_ARGUMENT", message: "afterTurn requires every turn to end with a final completion", retryable: false },
+    }),
   };
   const core = new PluginCore({ stateRoot, timeoutMs: 1000 }, { service });
   const host = adapter(() => ({ records: [{ type: "assistant" }], startCursor: null, nextCursor: transcriptCursor(1), afterTurn: true }));
@@ -206,6 +209,8 @@ test("non-retryable service rejection blocks but never drops the outbox item", a
   const pending = await listOutbox(stateRoot, host.host, input.session_id);
   assert.equal(pending.length, 1);
   assert.equal(pending[0].status, "blocked");
+  // 拒收原因要读得懂（以前记成 "[object Object]"）
+  assert.equal(pending[0].blockedReason, "INVALID_ARGUMENT: afterTurn requires every turn to end with a final completion");
 });
 
 test("service client sends no authorization header", async () => {

@@ -1,4 +1,15 @@
 // GENERATED FROM plugins/memory-plugin-shared/lib. DO NOT EDIT.
+// 服务的错误体是 {code, message, retryable}：记日志、写 outbox 时转成一行字（直接 String() 只得到 "[object Object]"）
+export function errorText(error) {
+  if (error == null) return "";
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object" && typeof error.message === "string") {
+    return error.code ? `${error.code}: ${error.message}` : error.message;
+  }
+  try { return JSON.stringify(error); } catch { return String(error); }
+}
+
 function retryableStatus(status) {
   return !status || status === 408 || status === 429 || status >= 500;
 }

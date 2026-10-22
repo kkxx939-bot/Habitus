@@ -101,6 +101,7 @@ def _message(message: ConversationMessage) -> SessionMessage:
         tool_name=message.tool_name,
         tool_call_id=message.tool_call_id,
         failed=message.tool_status is ConversationToolResultStatus.ERROR,
+        mid_turn=message.mid_turn,
     )
 
 

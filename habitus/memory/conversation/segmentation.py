@@ -319,7 +319,7 @@ def _safe_semantic_units(
             message.role is ConversationMessageRole.COMPLETION
             and message.completes_logical_message
             and following is not None
-            and not (following.role is ConversationMessageRole.PROMPT and not following.is_logical_continuation)
+            and not following.starts_turn
         ):
             continue
         rendered = "\n".join(f"{item.role.value}: {canonical_json(item.content)}" for item in buffered)

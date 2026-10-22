@@ -2,6 +2,9 @@ import { hasMeaningfulMessageContent, stripInjectionReceipts } from "./shared/in
 import { readJsonlDelta } from "./shared/jsonl.mjs";
 import { safeIdentifier } from "./shared/host-adapter.mjs";
 
+// 一批只切在一轮结束处：Codex 给每一轮的最终答复标 phase = "final_answer"（本机 0.147–0.162 的 74 个做完的轮，每轮恰好
+// 一条、都是最后一条答复）。中途的进度答复不切——压缩前（PreCompact）也只送已经结束的轮，做到一半的那一轮留在转写文件里，
+// 等它做完连同压缩后的那一半一起送；一轮不再被拆成两批（裁定 69：一轮 = 宿主的一轮）。
 function selectCompleted(records, injectionReceipts) {
   const accepted = [];
   const pending = new Set();
@@ -24,7 +27,7 @@ function selectCompleted(records, injectionReceipts) {
       && cleanedItem?.type === "message"
       && !hasMeaningfulMessageContent(cleanedItem.content);
     if (!injectionOnly) accepted.push(stripped.value);
-    if (itemType === "message" && item?.role === "assistant" && pending.size === 0) {
+    if (itemType === "message" && item?.role === "assistant" && item?.phase === "final_answer" && pending.size === 0) {
       safe = { consumedCount: index + 1, recordCount: accepted.length };
     }
   }

@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HARNESS_REGISTRY } from "../harnesses.mjs";
 import { executePluginLifecycle, parseArgs as parsePluginArgs } from "../install-memory-plugin.mjs";
+import { inspectHookReview } from "../registrations.mjs";
 import { runPluginDoctor } from "../memory-plugin-shared/doctor.mjs";
 import { loadPluginConfig } from "../memory-plugin-shared/lib/config.mjs";
 import { memory } from "./memory.mjs";
@@ -39,7 +40,14 @@ const HELP = `usage: habitus <command> [options]
 服务地址取 HABITUS_URL，或 ~/.habitus/agent-plugin/connection.json（habitus-server init 写的），默认 http://127.0.0.1:8787。
 `;
 
-export async function main(argv, { stdout = process.stdout, stderr = process.stderr, env = process.env } = {}) {
+// lifecycle / reviewHooks 只为测试可替换（默认就是真的安装器与宿主查询）
+export async function main(
+  argv,
+  {
+    stdout = process.stdout, stderr = process.stderr, env = process.env,
+    lifecycle = executePluginLifecycle, reviewHooks = inspectHookReview,
+  } = {},
+) {
   const args = [...argv];
   const command = args.shift();
   try {
@@ -51,7 +59,7 @@ export async function main(argv, { stdout = process.stdout, stderr = process.std
       stdout.write(`${await packageVersion()}\n`);
       return 0;
     }
-    if (command === "plugin") return await plugin(args, { stdout, env });
+    if (command === "plugin") return await plugin(args, { stdout, env, lifecycle, reviewHooks });
     if (command === "harnesses") return await harnesses(args, { stdout });
     if (command === "doctor") return await doctor(args, { stdout, env });
     if (command === "status") return await status(args, { stdout, env });
@@ -70,22 +78,38 @@ export async function main(argv, { stdout = process.stdout, stderr = process.std
   }
 }
 
-async function plugin(args, { stdout, env }) {
+async function plugin(args, { stdout, env, lifecycle, reviewHooks }) {
   const action = args[0];
   if (args.includes("-h") || args.includes("--help")) { stdout.write(HELP); return 0; }
   if (!PLUGIN_ACTIONS.has(action)) throw new Error("usage: habitus plugin <install|update|remove|status> [options]");
   const options = parsePluginArgs(args, env);
-  const result = await executePluginLifecycle(options, { env });
+  const result = await lifecycle(options, { env });
+  // 宿主要求逐条批准 hook 的（Codex）：装好、更新后与查状态时顺手问一句批没批，没批就说怎么批
+  if (["install", "update", "status"].includes(action) && !options.prepareOnly) {
+    for (const item of result.harnesses || []) {
+      const definition = HARNESS_REGISTRY.resolve(item.harness);
+      if (item.installed && item.enabled && definition.hookReview) item.hookReview = await reviewHooks(definition);
+    }
+  }
   if (options.json) { writeJson(stdout, result); return 0; }
   stdout.write(`Habitus 插件 ${action}：${result.root}\n`);
   for (const item of result.harnesses || []) {
-    stdout.write(`  ${item.harness.padEnd(14)} ${harnessState(item)}\n`);
+    stdout.write(`  ${item.harness.padEnd(14)} ${harnessState(item)}${hookReviewState(item)}\n`);
   }
   if (result.marketplace) {
     const { prepared, stale } = result.marketplace;
     stdout.write(`  marketplace：${!prepared ? "未准备" : stale ? "比当前 npm 包旧，运行 habitus plugin update" : "已就绪"}\n`);
   }
   return 0;
+}
+
+export function hookReviewState(item) {
+  const review = item.hookReview;
+  if (!review) return "";
+  if (!review.available) return "；hook 批没批查不到";
+  if (review.hooks.length === 0) return "；宿主没列出 Habitus 的 hook，不会运行（运行 habitus doctor 查原因）";
+  if (review.pending.length === 0) return "；hook 已批准";
+  return `；${review.pending.length} 个 hook 还没批准，不会运行：${HARNESS_REGISTRY.resolve(item.harness).hookReview.instruction}`;
 }
 
 function harnessState(item) {

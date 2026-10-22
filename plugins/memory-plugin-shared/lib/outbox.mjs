@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rmdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createJsonDurably, replaceJsonDurably, unlinkDurably } from "./atomic-file.mjs";
+import { errorText } from "./service-client.mjs";
 import { sessionKey } from "./state-store.mjs";
 
 const DIR_MODE = 0o700;
@@ -149,7 +150,7 @@ export async function blockOutboxItem(root, item, reason, claimToken = null) {
     status: "blocked",
     claimToken: null,
     claimExpiresAt: null,
-    blockedReason: String(reason || "non-retryable service error"),
+    blockedReason: errorText(reason) || "non-retryable service error",
   };
   await replaceJsonDurably(itemPath(root, item), updated);
   return { ...updated, filename: item.filename };

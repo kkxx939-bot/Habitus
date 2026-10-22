@@ -444,7 +444,7 @@ class ConversationRetentionPlanner:
     def _turns(messages: tuple[ConversationMessage, ...]) -> tuple[ConversationTurn, ...]:
         grouped: list[list[ConversationMessage]] = []
         for message in messages:
-            if (message.role is ConversationMessageRole.PROMPT and not message.is_logical_continuation) or not grouped:
+            if message.starts_turn or not grouped:
                 grouped.append([message])
             else:
                 grouped[-1].append(message)
@@ -463,9 +463,7 @@ class ConversationRetentionPlanner:
         leading_continuation: bool,
     ) -> None:
         for index, turn in enumerate(turns):
-            if turn.messages[0].role is not ConversationMessageRole.PROMPT and not (
-                index == 0 and leading_continuation
-            ):
+            if not turn.messages[0].starts_turn and not (index == 0 and leading_continuation):
                 raise ConversationRetentionError("every conversation turn must start with a prompt")
             if turn.messages[-1].role is not ConversationMessageRole.COMPLETION:
                 raise ConversationRetentionError("afterTurn requires every turn to end with a final completion")
@@ -504,7 +502,7 @@ class ConversationRetentionPlanner:
                 message.role is ConversationMessageRole.COMPLETION
                 and message.completes_logical_message
                 and following is not None
-                and not (following.role is ConversationMessageRole.PROMPT and not following.is_logical_continuation)
+                and not following.starts_turn
             ):
                 # 中间 completion 后仍有同轮工具步骤时不在此切割，确保 Segment
                 # 仅凭首尾角色就能确定 starts/ends_mid_turn。
@@ -524,7 +522,7 @@ class ConversationRetentionPlanner:
             and current.completes_logical_message
             and (
                 following is None
-                or (following.role is ConversationMessageRole.PROMPT and not following.is_logical_continuation)
+                or following.starts_turn
             )
         ):
             return "turn"

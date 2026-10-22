@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 
 import HabitusMemoryPlugin, { userText } from "../../habitus-memory-opencode/index.mjs";
 import { hostAdapter } from "../../habitus-memory-opencode/scripts/host-adapter.mjs";
-import { TranscriptMirror as SharedMirror, transcriptPath as sharedPath } from "../lib/parts-transcript.mjs";
+import { TranscriptMirror as SharedMirror, selectCompletedMessages, transcriptPath as sharedPath } from "../lib/parts-transcript.mjs";
 
 class TranscriptMirror extends SharedMirror { constructor(root) { super(root, "opencode"); } }
 const transcriptPath = (root, id) => sharedPath(root, id, "opencode");
@@ -286,4 +286,13 @@ test("session.deleted sends what was already mirrored without fetching the delet
   assert.equal(fetches, 1);
   assert.equal(remembered.length, 1);
   await assert.rejects(readFile(transcriptPath(stateRoot, "ses_1"), "utf8"), /ENOENT/);
+});
+
+
+test("a batch never ends on an OpenCode step that is about to call tools (one turn is never split, ruling 69)", () => {
+  const user = { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "看下报错" }] };
+  const step = { info: { id: "a1", role: "assistant", finish: "tool-calls", time: { created: 1, completed: 2 } }, parts: [] };
+  const final = { info: { id: "a2", role: "assistant", finish: "stop", time: { created: 3, completed: 4 } }, parts: [] };
+  assert.equal(selectCompletedMessages([user, step], []), null);  // 压缩前来取：这一轮还在调工具，不送
+  assert.equal(selectCompletedMessages([user, step, final], []).records.length, 3);
 });

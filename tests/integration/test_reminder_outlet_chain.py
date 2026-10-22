@@ -1,6 +1,6 @@
 """造数端到端（方案 32 第九节第 3 条；方案 30 验收里"提醒 → 回话 → 做没做"第一次能跑的地方）：
 
-时窗末记「待取」→ 伪宿主取走、送回一份含 agent 提问与他作答的转写 → 出口记「说了」→ 作答那一轮带着开着的提醒判回应 →
+时窗末记「待取」→ 伪宿主取走、送回一份含 agent 提问与他作答的转写 → 出口记「说了」→ 这一轮（提问与作答都在里面）带着开着的提醒判回应 →
 时限到结算写反馈。四条样例：选"现在就做"并做了（好，回复由出口写）；选"这次不用"（坏，由出口写）；选"知道了"又没做（不写）；
 自己填"下周再弄"（模型判中、不写）。递送那一拍、出口、会话 lane、结算都是真的；模型是照脚本回答的替身。
 """
@@ -191,8 +191,9 @@ def test_reminder_to_reply_to_doing_closes_the_loop(  # noqa: PLR0913 - 四条�
     conversation_root = tmp_path / "conversation"
     _s, _o, _m, behavior_outputs = stores(conversation_root)
     behavior = Stores(tmp_path / "behavior")
-    second = description("回答提问") if judged is None else description("回答提问", responses=judged)
-    session, provider = lane(behavior, [description("看报错"), second])
+    # 一轮 = 宿主的一轮：他开口、agent 先问、他作答、agent 接着答完，是同一轮、模型只看一次（用户 2026-10-22）
+    only = description("看报错") if judged is None else description("看报错", responses=judged)
+    session, provider = lane(behavior, [only])
     session.attach_reminders(ReminderResponses(ledger, limit=5))
     consumer = OutletObservingConsumer(BehaviorSessionConsumer(session, behavior_outputs), outlet)
     service, _memory, _behavior = delivery(conversation_root, behavior=consumer)  # type: ignore[arg-type]
@@ -208,7 +209,9 @@ def test_reminder_to_reply_to_doing_closes_the_loop(  # noqa: PLR0913 - 四条�
     assert (spoken.decided_at, spoken.via, spoken.turn) == (asked_at, HOST, "toolu_1")
     (response,) = ledger.responses_on(DAY)
     assert response.polarity == polarity
-    assert ("【还开着的提醒】" in provider.prompts[1]) == (judged is not None)  # 正 / 负关了，中还开着
+    assert len(provider.prompts) == 1
+    # 出口先按固定选项写了回话：正 / 负关了、这一轮不再带；中（知道了）与自己填的还开着，这一轮带着、交给模型判
+    assert ("【还开着的提醒】" in provider.prompts[0]) == (judged is not None)
     if done is not None:
         publish(site.behavior_tree, DAY, "订酒店", *done, kind="订酒店")
     # 之后每拍：说出口了就不再动它；过了最晚时限也不记「宿主没取」

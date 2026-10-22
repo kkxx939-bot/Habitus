@@ -302,3 +302,27 @@ def test_question_tools_follow_the_conversation_protocol() -> None:
     assert names("opencode") == ("question",)
     assert names("codex_rollout") == ("request_user_input",)  # Desktop 的异步提问作答晚来，不按工具结果开轮
     assert names("openai_chat_completions") == ()
+
+
+def test_the_bridge_from_a_codex_source_keeps_his_interjections_in_the_same_round() -> None:
+    """会话源信封 → ``session_turns``：Codex 适配器标的"插在一轮中间"一路带到会话 lane（一轮 = 宿主的一轮，裁定 69）。"""
+
+    from habitus.pre.conversation import ConversationAdapterContext, ConversationAdapterRegistry
+
+    def say(role: str, text: str) -> dict[str, Any]:
+        kind = "input_text" if role == "user" else "output_text"
+        return {"type": "response_item", "payload": {"type": "message", "role": role, "content": [{"type": kind, "text": text}]}}
+
+    records = [
+        {"type": "event_msg", "payload": {"type": "task_started"}},
+        say("user", "看一下能不能写个脚本连我的云电脑"),
+        say("assistant", "我先检查客户端。"),
+        say("user", "还是暂停吧"),
+        say("assistant", "已暂停。"),
+    ]
+    adapted = ConversationAdapterRegistry.with_builtins().adapt(
+        "codex_rollout", records, ConversationAdapterContext("codex-x", 0, datetime(2026, 7, 1, 9, 0, tzinfo=UTC))
+    )
+    (turn,) = session_turns(envelope("codex-x", adapted.batch.messages))
+    assert turn.instruction == "看一下能不能写个脚本连我的云电脑"
+    assert [m.content for m in turn.messages if m.role is SessionMessageRole.PROMPT][1:] == ["还是暂停吧"]

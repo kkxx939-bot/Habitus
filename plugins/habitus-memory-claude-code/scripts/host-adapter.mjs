@@ -13,6 +13,9 @@ function blocks(record) {
   return Array.isArray(content) ? content : [];
 }
 
+// 切点：没有挂着的工具调用、stop_reason 不是 tool_use 的答复之后。这也可能落在一轮中间（流式写下的答复块 stop_reason 为空），
+// 压缩前送的那一批会把一轮拆开；但子代理一轮的最后一条答复 stop_reason 同样为空，不能只认 end_turn（2026-10-22 对本机
+// 60 份转写试过：57 份会一条都送不出）。Claude Code 怎么认"一轮结束"待它的真实转写核清（待办），在那之前保持原样。
 function selectCompleted(records, injectionReceipts) {
   const selected = [];
   const pending = new Set();

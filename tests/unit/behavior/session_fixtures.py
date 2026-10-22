@@ -31,8 +31,8 @@ def at(minutes: float) -> datetime:
     return START + timedelta(minutes=minutes)
 
 
-def prompt(sequence: int, text: str, *, minutes: float = 0.0) -> SessionMessage:
-    return SessionMessage(sequence, at(minutes), SessionMessageRole.PROMPT, text)
+def prompt(sequence: int, text: str, *, minutes: float = 0.0, mid_turn: bool = False) -> SessionMessage:
+    return SessionMessage(sequence, at(minutes), SessionMessageRole.PROMPT, text, mid_turn=mid_turn)
 
 
 def reply(sequence: int, text: str, *, minutes: float = 1.0) -> SessionMessage:

@@ -14,7 +14,8 @@ export function transcriptPath(stateRoot, sessionId, host) {
   return join(stateRoot, "transcripts", host, `${key}.jsonl`);
 }
 
-// 一轮读到最后一条完成了的助手消息为止（info.time.completed 有了才算完成）
+// 一轮读到最后一条完成了的助手消息为止（info.time.completed 有了才算完成）；只切在一轮结束处（裁定 69）：OpenCode 每调一次
+// 模型是一条助手消息，要接着调工具的那条 finish = "tool-calls"，不切——压缩前送的那一批也不把一轮拆开
 export function selectCompletedMessages(records, injectionReceipts) {
   const accepted = [];
   let safe = null;
@@ -22,7 +23,11 @@ export function selectCompletedMessages(records, injectionReceipts) {
     const record = records[index];
     if (record == null) continue;
     accepted.push(stripInjectionReceipts(record, injectionReceipts).value);
-    if (record?.info?.role === "assistant" && Number.isFinite(record?.info?.time?.completed)) {
+    if (
+      record?.info?.role === "assistant"
+      && Number.isFinite(record?.info?.time?.completed)
+      && record?.info?.finish !== "tool-calls"
+    ) {
       safe = { consumedCount: index + 1, recordCount: accepted.length };
     }
   }
