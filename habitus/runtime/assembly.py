@@ -78,6 +78,7 @@ from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.sqlite import SQLiteLockStore
 from habitus.infrastructure.vector import VectorStoreFactory, VectorStoreRequirements
 from habitus.infrastructure.vector.adapters import register_builtin_vector_adapters
+from habitus.memory.browse import MemoryBrowser
 from habitus.memory.compaction import (
     MemoryFieldCompactor,
     MemoryLifecycleCommitter,
@@ -166,7 +167,7 @@ from habitus.runtime.lifecycle_scene import SceneParticipant, scene_vocabulary_v
 from habitus.runtime.lifecycle_sources import ConversationSourceParticipant, ConversationSourceRecoveryParticipant
 from habitus.runtime.runtime import Runtime
 from habitus.runtime.scene import build_nightly, build_nightly_worker, build_scene_nightly
-from habitus.runtime.session_lane import BehaviorSessionConsumer, session_salvager
+from habitus.runtime.session_lane import BehaviorSessionConsumer, answered_question_tools, session_salvager
 from habitus.runtime.unsealed import UnsealedFromJudgements
 from habitus.runtime.worker import MemoryWorker
 
@@ -195,6 +196,8 @@ def build_runtime(
     if observer is not None and not callable(getattr(observer, "record", None)):
         raise TypeError("observer must implement record")
 
+    # 会话协议的适配器也声明各宿主的提问工具与宿主名：出口、会话 lane、出口那层消费者都从这一份取
+    adapters = conversation_adapters if conversation_adapters is not None else ConversationAdapterRegistry.with_builtins()
     resolved_providers = providers or _builtin_provider_factory()
     resolved_vector_stores = vector_stores or register_builtin_vector_adapters()
     metrics_config = config.observability.metrics
@@ -611,6 +614,7 @@ def build_runtime(
             observer=operation_observer,
             # 出口认提问时拿类名配题目（词表给人看的名字；编号仍是身份）
             kind_label=_kind_label(VocabularyReader(session_behavior.kind_store)),
+            question_tools=adapters.question_tools(),
         )
     )
     if foresight_components is not None and session_behavior is not None and evidence is not None:
@@ -647,11 +651,12 @@ def build_runtime(
     behavior_session_consumer: BehaviorSessionConsumer | OutletObservingConsumer = BehaviorSessionConsumer(
         None if behavior_components is None else behavior_components.session_lane,
         behavior_session_outputs,
+        question_tools=answered_question_tools(adapters),
     )
     if foresight_components is not None and isinstance(behavior_session_consumer, BehaviorSessionConsumer):
         # 提醒出口（方案 32 第 4.2 条）：同一份会话先过出口（认出 agent 的提问、写「说了」与固定选项的回话），再进会话 lane
         behavior_session_consumer = build_outlet_consumer(
-            foresight_components, behavior_session_consumer, observer=operation_observer
+            foresight_components, behavior_session_consumer, observer=operation_observer, host_of=adapters.host
         )
     source_inspector = ConversationConsumerStateInspector(source_outcomes)
     source_fence = ConversationConsumerExecutionFence(
@@ -675,7 +680,10 @@ def build_runtime(
     # 行为侧的账坏了的会话源：逐轮补救（没写过的轮落「没读懂」、进每晚重试的堆，裁定 67 第 5 条、68 第 3 条）
     source_salvage = SourceSalvage(
         config.conversation_root,
-        salvager=session_salvager(None if behavior_components is None else behavior_components.session_lane),
+        salvager=session_salvager(
+            None if behavior_components is None else behavior_components.session_lane,
+            question_tools=answered_question_tools(adapters),
+        ),
     )
     source_recovery = ConversationSourceRecovery(
         source_store,
@@ -845,6 +853,7 @@ def build_runtime(
             semantic_refresher=semantic_refresher,
             vector_index=vector_index,
             lifecycle=memory_lifecycle,
+            browser=MemoryBrowser(tree),
         ),
         workflow=RuntimeWorkflow(
             jobs=jobs,
@@ -860,7 +869,7 @@ def build_runtime(
         nightly=nightly_worker,
         foresight=foresight_components,
     )
-    return Runtime(config, components, conversation_adapters=conversation_adapters)
+    return Runtime(config, components, conversation_adapters=adapters)
 
 
 def _kind_label(reader: VocabularyReader) -> Callable[[str], str | None]:

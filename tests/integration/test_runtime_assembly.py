@@ -4,7 +4,7 @@ import asyncio
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +19,7 @@ from habitus.infrastructure.vector import VectorStoreFactory
 from habitus.integrations.agent import AgentMemoryGateway
 from habitus.integrations.http import RuntimeHTTPHandlers
 from habitus.integrations.sdk import AgentMemoryHooks, PreparedAgentTurn
+from habitus.memory.browse import MemoryBrowseNotFoundError
 from habitus.memory.conversation import ConversationAddress
 from habitus.memory.model import MemoryKind
 from habitus.memory.retrieval import MemoryRetrievalSufficiency, SQLiteMemoryRecallLifecycleStore
@@ -535,11 +536,22 @@ def test_runtime_public_conversation_interface_returns_pending_consistency_handl
             "anthropic_messages",
             "claude_code",
             "codex_rollout",
+            "dsh",
             "openai_chat_completions",
             "openai_responses",
             "openclaw",
             "opencode",
+            "pi",
+            "zcode",
         )
+        # 记忆树的公开浏览经同一棵树（方案 36 第 2 步）：初始化后根下只有固定分支、还没有文档
+        root = await runtime.list_memory()
+        assert str(root.uri) == "memory://" and root.documents == ()
+        assert "memory://preferences" in {str(item) for item in root.directories}
+        with pytest.raises(MemoryBrowseNotFoundError):
+            await runtime.read_memory("memory://profile.md")
+        assert (await runtime.reminders(date(2026, 7, 28))).reminders == ()  # 还没有提醒
+        assert (await runtime.reminders()).day == datetime.now(runtime.config.locale.zone()).date()
         report = await runtime.health()
         assert report.status.value in {"healthy", "degraded"}
         assert "habitus_" in runtime.prometheus_metrics()

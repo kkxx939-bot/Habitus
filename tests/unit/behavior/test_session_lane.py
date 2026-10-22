@@ -192,6 +192,7 @@ def test_answering_the_assistants_question_opens_a_new_turn() -> None:
             ),
             reply(4, "按独立模块改完了。", minutes=12),
         ),
+        question_tools=("AskUserQuestion", "request_user_input"),
     )
     assert (asked.start_sequence, asked.end_sequence) == (0, 2)
     assert asked.completed_at == at(2)  # 助手发问时上一轮到此为止
@@ -227,6 +228,7 @@ def test_codex_desktop_replies_arrive_as_a_user_message_and_become_the_answer_tu
             prompt(4, reply_message, minutes=6),
             reply(5, "好，那先不写。", minutes=7),
         ),
+        question_tools=("AskUserQuestion", "request_user_input"),
     )
     assert (asked.start_sequence, asked.end_sequence) == (0, 3)  # 收到了不是作答，不开轮
     assert answered.instruction == f"{ANSWER_PREFIX}周四了，周报还没写。 → 这次不用"
@@ -244,6 +246,7 @@ def test_codex_desktop_replies_arrive_as_a_user_message_and_become_the_answer_tu
             ),
             reply(3, "好。", minutes=3),
         ),
+        question_tools=("AskUserQuestion", "request_user_input"),
     )
     assert answered.instruction.startswith(ANSWER_PREFIX) and "知道了" in answered.instruction
     # 不是作答形状的（JSON 坏了）：照旧当一句人说的话

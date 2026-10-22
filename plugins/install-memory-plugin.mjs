@@ -1,16 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import { cp, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, parse, relative, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import {
-  HARNESS_REGISTRY,
-  MARKETPLACE_NAME,
-  PLUGIN_ID,
-  PLUGIN_NAME,
-  publicHarnessDescriptor,
-} from "./harnesses.mjs";
+import { fileURLToPath } from "node:url";
+import { HARNESS_REGISTRY, MARKETPLACE_NAME, publicHarnessDescriptor } from "./harnesses.mjs";
+import { CommandRunner, registrationOf } from "./registrations.mjs";
+
+function inspectHarness(definition, runner, env) {
+  return registrationOf(definition).inspect(definition, runner, env);
+}
 
 const REPOSITORY_PLUGINS = dirname(fileURLToPath(import.meta.url));
 const INSTALL_SCHEMA = 1;
@@ -36,7 +34,7 @@ async function syncDirectory(path) {
   finally { await handle.close(); }
 }
 
-async function sourceDigest(sourceRoot, registry) {
+export async function sourceDigest(sourceRoot = REPOSITORY_PLUGINS, registry = HARNESS_REGISTRY) {
   const hash = createHash("sha256");
   const names = [
     ...new Set(registry.list().map((definition) => definition.pluginDirectory)),
@@ -147,175 +145,6 @@ export async function prepareMarketplace(root, options = {}) {
   return transaction.root;
 }
 
-class CommandRunner {
-  available(command) {
-    const result = spawnSync(command, ["--version"], { encoding: "utf8", timeout: 3000 });
-    return result.status === 0 && !result.error;
-  }
-
-  json(command, args) {
-    const result = spawnSync(command, args, { encoding: "utf8", timeout: 10_000, maxBuffer: 16 * 1024 * 1024 });
-    if (result.error) throw result.error;
-    if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed with status ${result.status}`);
-    try { return JSON.parse(result.stdout); }
-    catch (error) { throw new Error(`${command} returned invalid JSON`, { cause: error }); }
-  }
-
-  run(command, args) {
-    const result = spawnSync(command, args, { stdio: "inherit", timeout: 30_000 });
-    if (result.error) throw result.error;
-    if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed with status ${result.status}`);
-  }
-}
-
-function commandArguments(values, root) {
-  return values.map((value) => value === "{root}" ? root : value);
-}
-
-function marketplaceEntries(value) {
-  if (Array.isArray(value?.marketplaces)) return value.marketplaces;
-  if (Array.isArray(value)) return value;
-  return [];
-}
-
-function pluginEntries(value) {
-  if (Array.isArray(value?.installed)) return value.installed;
-  if (Array.isArray(value?.plugins)) return value.plugins;
-  if (Array.isArray(value)) return value;
-  return [];
-}
-
-function marketplaceSource(entry) {
-  return entry?.root || entry?.path || entry?.source?.path || entry?.marketplaceSource?.source || null;
-}
-
-function pluginIsInstalled(entry) {
-  return entry?.installed !== false;
-}
-
-// ── 文件注册（OpenCode）：在宿主的插件目录放一个入口文件，指向 marketplace 根里的插件 ────────────────────────
-const ENTRY_MARKER = "// habitus-memory: managed by `habitus plugin`. Do not edit.";
-
-export function fileEntryPath(definition, env = process.env) {
-  const base = env.XDG_CONFIG_HOME ? resolve(env.XDG_CONFIG_HOME) : join(homedir(), ".config");
-  return join(base, ...definition.fileEntry.configPath, definition.fileEntry.name);
-}
-
-export function fileEntrySource(definition, root) {
-  const target = pathToFileURL(join(root, "plugins", definition.pluginDirectory, definition.fileEntry.module)).href;
-  return `${ENTRY_MARKER}\nexport { default } from ${JSON.stringify(target)};\n`;
-}
-
-async function inspectFileEntry(definition, runner, env) {
-  const available = runner.available(definition.command);
-  let text = null;
-  try { text = await readFile(fileEntryPath(definition, env), "utf8"); }
-  catch (error) { if (error?.code !== "ENOENT") throw error; }
-  const ours = typeof text === "string" && text.startsWith(ENTRY_MARKER);
-  const target = ours ? text.match(/from "(file:[^"]+)"/)?.[1] : null;
-  const root = target ? dirname(dirname(dirname(fileURLToPath(target)))) : null;
-  return {
-    harness: definition.id,
-    available,
-    marketplaceSource: root,
-    installed: Boolean(ours && target),
-    enabled: Boolean(ours && target),
-    foreignEntry: typeof text === "string" && !ours,
-  };
-}
-
-async function writeFileEntry(definition, root, env) {
-  const path = fileEntryPath(definition, env);
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  let existing = null;
-  try { existing = await readFile(path, "utf8"); }
-  catch (error) { if (error?.code !== "ENOENT") throw error; }
-  if (existing != null && !existing.startsWith(ENTRY_MARKER)) {
-    throw new Error(`${path} exists and is not managed by Habitus; move it away first`);
-  }
-  await writeFile(path, fileEntrySource(definition, root), { mode: 0o600 });
-}
-
-async function removeFileEntry(definition, env) {
-  const path = fileEntryPath(definition, env);
-  let existing = null;
-  try { existing = await readFile(path, "utf8"); }
-  catch (error) { if (error?.code === "ENOENT") return false; throw error; }
-  if (!existing.startsWith(ENTRY_MARKER)) return false;
-  await rm(path, { force: true });
-  return true;
-}
-
-async function inspectHarness(definition, runner, env = process.env) {
-  if (definition.registration === "file") return inspectFileEntry(definition, runner, env);
-  if (!runner.available(definition.command)) {
-    return {
-      harness: definition.id,
-      available: false,
-      marketplaceSource: null,
-      installed: false,
-      enabled: false,
-    };
-  }
-  const marketplaces = marketplaceEntries(runner.json(definition.command, definition.marketplaceInventory));
-  const plugins = pluginEntries(runner.json(definition.command, definition.pluginInventory));
-  const marketplace = marketplaces.find((entry) => entry?.name === MARKETPLACE_NAME);
-  const plugin = plugins.find((entry) => (
-    entry?.pluginId === PLUGIN_ID
-    || (entry?.name === PLUGIN_NAME
-      && (entry?.marketplaceName === MARKETPLACE_NAME || entry?.marketplace === MARKETPLACE_NAME))
-  ));
-  return {
-    harness: definition.id,
-    available: true,
-    marketplaceSource: marketplaceSource(marketplace),
-    installed: Boolean(plugin && pluginIsInstalled(plugin)),
-    enabled: Boolean(plugin && plugin?.enabled !== false),
-  };
-}
-
-async function removeHarnessRegistration(snapshot, definition, runner, env = process.env) {
-  if (definition.registration === "file") { await removeFileEntry(definition, env); return; }
-  if (snapshot.installed) runner.run(definition.command, definition.pluginRemove);
-  if (snapshot.marketplaceSource) runner.run(definition.command, definition.marketplaceRemove);
-}
-
-async function installHarnessRegistration(snapshot, definition, root, runner, { refresh, env = process.env }) {
-  if (definition.registration === "file") { await writeFileEntry(definition, root, env); return; }
-  const sourceChanged = snapshot.marketplaceSource != null
-    && resolve(snapshot.marketplaceSource) !== resolve(root);
-  const mustRefresh = refresh || sourceChanged || (snapshot.installed && !snapshot.enabled);
-  if (mustRefresh) await removeHarnessRegistration(snapshot, definition, runner, env);
-  const marketplacePresent = snapshot.marketplaceSource && !mustRefresh;
-  const pluginPresent = snapshot.installed && snapshot.enabled && !mustRefresh;
-  if (!marketplacePresent) {
-    runner.run(definition.command, commandArguments(definition.marketplaceAdd, root));
-  }
-  if (!pluginPresent) runner.run(definition.command, definition.pluginAdd);
-  if (definition.pluginEnable) runner.run(definition.command, definition.pluginEnable);
-}
-
-async function restoreHarness(snapshot, definition, runner, env = process.env) {
-  if (definition.registration === "file") {
-    if (snapshot.installed && snapshot.marketplaceSource) await writeFileEntry(definition, snapshot.marketplaceSource, env);
-    else await removeFileEntry(definition, env);
-    return;
-  }
-  if (!snapshot.available) return;
-  const current = await inspectHarness(definition, runner, env);
-  try { await removeHarnessRegistration(current, definition, runner, env); } catch {}
-  if (snapshot.marketplaceSource) {
-    runner.run(
-      definition.command,
-      commandArguments(definition.marketplaceAdd, snapshot.marketplaceSource),
-    );
-    if (snapshot.installed) {
-      runner.run(definition.command, definition.pluginAdd);
-      if (definition.pluginEnable) runner.run(definition.command, definition.pluginEnable);
-    }
-  }
-}
-
 function selectedHarnesses(values, registry) {
   const requested = values.length === 0 ? ["all"] : values;
   if (requested.includes("all")) return registry.list();
@@ -327,20 +156,27 @@ function selectedHarnesses(values, registry) {
   return [...unique.values()];
 }
 
-async function marketplaceStatus(root) {
+// stale：宿主跑的是 marketplace 根里的暂存副本，npm 包升级后两边摘要对不上，要 `habitus plugin update` 才换新
+export async function marketplaceStatus(root, { sourceRoot = REPOSITORY_PLUGINS, registry = HARNESS_REGISTRY } = {}) {
+  let marker;
   try {
-    const marker = JSON.parse(await readFile(join(root, ".habitus-install.json"), "utf8"));
+    marker = JSON.parse(await readFile(join(root, ".habitus-install.json"), "utf8"));
     if (marker.schemaVersion !== INSTALL_SCHEMA || marker.marketplace !== MARKETPLACE_NAME) throw new Error("invalid marker");
-    return { prepared: true, sourceDigest: marker.sourceDigest, preparedAt: marker.preparedAt };
   } catch (error) {
-    if (error?.code === "ENOENT") return { prepared: false, sourceDigest: null, preparedAt: null };
-    return { prepared: false, sourceDigest: null, preparedAt: null, error: error?.message || String(error) };
+    if (error?.code === "ENOENT") return { prepared: false, stale: false, sourceDigest: null, preparedAt: null };
+    return { prepared: false, stale: false, sourceDigest: null, preparedAt: null, error: error?.message || String(error) };
   }
+  const current = await sourceDigest(sourceRoot, registry);
+  return { prepared: true, stale: marker.sourceDigest !== current, sourceDigest: marker.sourceDigest, preparedAt: marker.preparedAt };
 }
 
-async function removeMarketplaceRoot(rootValue) {
-  const root = dedicatedRoot(rootValue, REPOSITORY_PLUGINS);
-  const status = await marketplaceStatus(root);
+export function defaultMarketplaceRoot(env = process.env) {
+  return join(env.HOME || homedir(), ".habitus", "plugin-marketplace");
+}
+
+async function removeMarketplaceRoot(rootValue, sourceRoot, registry) {
+  const root = dedicatedRoot(rootValue, sourceRoot);
+  const status = await marketplaceStatus(root, { sourceRoot, registry });
   if (!status.prepared) return false;
   await rm(root, { recursive: true, force: true });
   await syncDirectory(dirname(root));
@@ -382,32 +218,44 @@ export async function executePluginLifecycle(
     }
     snapshots.push({ snapshot, definition });
   }
+  // 报给人看的是动手之后的状态
+  const inspectSelected = () => Promise.all(definitions.map((definition) => inspectHarness(definition, runner, env)));
   if (options.action === "status") {
     return {
       action: "status",
       root,
-      marketplace: await marketplaceStatus(root),
+      marketplace: await marketplaceStatus(root, { sourceRoot, registry }),
       harnesses: snapshots.map((value) => value.snapshot),
     };
   }
   if (options.action === "remove") {
     const processed = [];
     try {
-      for (const value of snapshots.filter((item) => item.snapshot.available)) {
+      // 不靠宿主 CLI 的注册方式（文件入口）CLI 不在也照样删
+      const removable = snapshots.filter((item) => item.snapshot.available || !registrationOf(item.definition).needsCommand);
+      for (const value of removable) {
         processed.push(value);
-        await removeHarnessRegistration(value.snapshot, value.definition, runner, env);
+        await registrationOf(value.definition).remove(value.snapshot, value.definition, runner, env);
       }
     } catch (error) {
       for (const value of processed.reverse()) {
-        await restoreHarness(value.snapshot, value.definition, runner, env).catch(() => {});
+        await registrationOf(value.definition).restore(value.snapshot, value.definition, runner, env).catch(() => {});
       }
       throw error;
     }
+    // 根目录是所有宿主共用的：只卸一部分时，没被选中的宿主还指着它就留着
+    const selected = new Set(definitions.map((definition) => definition.id));
+    const others = await Promise.all(registry.list()
+      .filter((definition) => !selected.has(definition.id))
+      .map((definition) => inspectHarness(definition, runner, env)));
+    const stillUsed = others.some((snapshot) => (
+      snapshot.marketplaceSource != null && resolve(snapshot.marketplaceSource) === root
+    ));
     return {
       action: "remove",
       root,
-      removed: await removeMarketplaceRoot(root),
-      harnesses: snapshots.map((value) => value.snapshot),
+      removed: stillUsed ? false : await removeMarketplaceRoot(root, sourceRoot, registry),
+      harnesses: await inspectSelected(),
     };
   }
 
@@ -418,14 +266,14 @@ export async function executePluginLifecycle(
       action: options.action,
       root,
       preparedOnly: true,
-      harnesses: snapshots.map((value) => value.snapshot),
+      harnesses: await inspectSelected(),
     };
   }
   const processed = [];
   try {
     for (const value of snapshots.filter((item) => item.snapshot.available)) {
       processed.push(value);
-      await installHarnessRegistration(
+      await registrationOf(value.definition).install(
         value.snapshot,
         value.definition,
         root,
@@ -437,7 +285,7 @@ export async function executePluginLifecycle(
   } catch (error) {
     await transaction.rollback();
     for (const value of processed.reverse()) {
-      await restoreHarness(value.snapshot, value.definition, runner, env).catch(() => {});
+      await registrationOf(value.definition).restore(value.snapshot, value.definition, runner, env).catch(() => {});
     }
     throw error;
   }
@@ -445,24 +293,27 @@ export async function executePluginLifecycle(
     action: options.action,
     root,
     preparedOnly: false,
-    harnesses: snapshots.map((value) => value.snapshot),
+    harnesses: await inspectSelected(),
   };
 }
 
-export function parseArgs(argv) {
+export function parseArgs(argv, env = process.env) {
   const values = [...argv];
   const action = ACTIONS.has(values[0]) ? values.shift() : "install";
   const options = {
     action,
     harnesses: [],
-    root: join(homedir(), ".habitus", "plugin-marketplace"),
+    root: defaultMarketplaceRoot(env),
     prepareOnly: false,
     json: false,
   };
   for (let index = 0; index < values.length; index += 1) {
     const value = values[index];
     if (value === "--host" || value === "--harness") options.harnesses.push(values[++index]);
-    else if (value === "--root") options.root = values[++index];
+    else if (value === "--root") {
+      options.root = values[++index];
+      if (options.root == null || options.root.startsWith("--")) throw new Error("--root requires a directory");
+    }
     else if (value === "--prepare-only") options.prepareOnly = true;
     else if (value === "--json") options.json = true;
     else if (value === "-h" || value === "--help") options.help = true;

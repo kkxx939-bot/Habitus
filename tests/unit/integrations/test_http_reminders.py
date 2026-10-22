@@ -93,3 +93,32 @@ def test_the_runtime_refuses_a_limit_above_the_configured_cap_and_a_naive_moment
     with pytest.raises(ValueError, match="timezone"):
         asyncio.run(runtime.claim_reminders(host="codex", session="s", at=datetime(2026, 10, 22, 15), limit=1))
     assert datetime.now(UTC).tzinfo is UTC
+
+
+def test_the_report_route_lists_each_reminder_stage_and_the_counts() -> None:
+    from habitus.runtime.foresight_outlet import Handoff
+    from habitus.runtime.foresight_reminders import ReminderDay, ReminderProgress
+
+    deadline = AT.replace(hour=18, minute=0, second=0)
+    day = ReminderDay(
+        AT.date(),
+        (
+            ReminderProgress("e1", "写周报", "周报还没写。", deadline, "说了", AT, AT + timedelta(minutes=2), "codex", "正",
+                             AT + timedelta(minutes=3), None, 0, (Handoff("codex", "codex-thread-1", AT, "spoken"),)),
+            ReminderProgress("e2", "跑备份", "备份还没跑。", deadline, "宿主没取", AT, None, None, None, None, None, None, ()),
+        ),
+    )
+    runtime = _runtime(())
+    runtime.reminders = AsyncMock(return_value=day)  # type: ignore[method-assign]
+    assert "reminders_report_v1" in RuntimeHTTPHandlers(runtime).capabilities()["features"]  # type: ignore[operator]
+    with TestClient(create_http_app(runtime), base_url="http://127.0.0.1:8787") as client:
+        response = client.get("/api/v1/reminders", params={"day": "2026-10-22"})
+        assert response.status_code == 200, response.text
+        result = response.json()["result"]
+    assert (result["day"], result["spoken"], result["never_claimed"], result["responded"], result["awaiting"]) == (
+        "2026-10-22", 1, 1, 1, 0,
+    )
+    first = result["reminders"][0]
+    assert (first["stage"], first["spoken_via"], first["response"]) == ("说了", "codex", "正")
+    assert first["handoffs"] == [{"host": "codex", "session": "codex-thread-1", "claimed_at": AT.isoformat(), "ended": "spoken"}]
+    runtime.reminders.assert_awaited_once_with(AT.date())  # type: ignore[attr-defined]

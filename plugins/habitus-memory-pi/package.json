@@ -1,0 +1,10 @@
+{
+  "name": "habitus-memory",
+  "version": "0.1.0",
+  "description": "Single-user local semantic memory and reminders for pi, powered by Habitus.",
+  "type": "module",
+  "main": "index.mjs",
+  "license": "Apache-2.0",
+  "keywords": ["pi-package", "pi", "habitus", "memory", "local-first"],
+  "pi": { "extensions": ["./index.mjs"] }
+}

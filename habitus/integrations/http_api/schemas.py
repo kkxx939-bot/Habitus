@@ -148,6 +148,73 @@ class ReminderClaimResult(StrictSchema):
     reminders: list[ReminderResult]
 
 
+class MemoryListResult(StrictSchema):
+    """``habitus memory ls``：一个目录的直接内容，只给 ``memory://`` 地址。"""
+
+    uri: str
+    directories: list[str]
+    documents: list[str]
+    abstract: str | None
+
+
+class MemoryLinkResult(StrictSchema):
+    from_uri: str
+    to_uri: str
+    link_type: str
+
+
+class MemoryReadResult(StrictSchema):
+    """``habitus memory read``：文档给结构化字段与正文；目录的 L0 / L1 层只有 ``text``。"""
+
+    uri: str
+    node: Literal["document", "layer"]
+    kind: str | None = None
+    level: Literal["abstract", "overview"] | None = None
+    revision: int | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    last_confirmed_at: datetime | None = None
+    fields: dict[str, Any] | None = None
+    text: str
+    links: list[MemoryLinkResult] = []
+    backlinks: list[MemoryLinkResult] = []
+
+
+class ReminderHandoffResult(StrictSchema):
+    host: str
+    session: str
+    claimed_at: datetime
+    ended: str | None
+
+
+class ReminderProgressResult(StrictSchema):
+    request_id: str
+    kind: str
+    text: str
+    deadline: datetime
+    stage: Literal["待取", "取走了", "说了", "宿主没取"]
+    awaiting_at: datetime
+    spoken_at: datetime | None
+    spoken_via: str | None
+    response: Literal["正", "中", "负"] | None
+    responded_at: datetime | None
+    outcome: str | None
+    attempts: int | None
+    handoffs: list[ReminderHandoffResult]
+
+
+class ReminderDayResult(StrictSchema):
+    """``habitus reminders``：某天进了提醒出口的每条提醒走到了哪一步，加上 R8 要看的几个数。"""
+
+    day: date
+    reminders: list[ReminderProgressResult]
+    awaiting: int
+    taken: int
+    spoken: int
+    never_claimed: int
+    responded: int
+
+
 class CapabilitiesResult(StrictSchema):
     api_version: Annotated[str, Field(pattern=r"^[0-9]+\.[0-9]+$")]
     service_version: Annotated[str, Field(min_length=1)]

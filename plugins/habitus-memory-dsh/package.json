@@ -1,0 +1,8 @@
+{
+  "name": "habitus-memory",
+  "version": "0.1.0",
+  "description": "Single-user local semantic memory and reminders for DeepSeek Harness, powered by Habitus (via the dsh Claude Code hooks bridge).",
+  "type": "module",
+  "license": "Apache-2.0",
+  "keywords": ["deepseek-harness", "dsh", "habitus", "memory", "local-first"]
+}

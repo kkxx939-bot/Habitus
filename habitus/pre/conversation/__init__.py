@@ -9,9 +9,13 @@ from habitus.pre.conversation.adapters import (
     ConversationAdapterRegistry,
     ConversationProtocolAdapter,
     ConversationProtocolError,
+    DeepSeekHarnessConversationAdapter,
     OpenAIChatCompletionsConversationAdapter,
     OpenAIResponsesConversationAdapter,
     OpenClawConversationAdapter,
+    OpenCodeConversationAdapter,
+    PiConversationAdapter,
+    ZCodeConversationAdapter,
 )
 from habitus.pre.conversation.messages import (
     ConversationBatch,
@@ -22,6 +26,7 @@ from habitus.pre.conversation.messages import (
     ConversationToolResultContentMode,
     ConversationToolResultStatus,
 )
+from habitus.pre.conversation.questions import QuestionTool
 from habitus.pre.conversation.summaries import (
     ConversationRangeSummary,
     ConversationRangeSummaryStage,
@@ -36,6 +41,7 @@ __all__ = [
     "AnthropicMessagesConversationAdapter",
     "ClaudeCodeConversationAdapter",
     "CodexRolloutConversationAdapter",
+    "DeepSeekHarnessConversationAdapter",
     "ConversationAdaptation",
     "ConversationAdapterContext",
     "ConversationAdapterRegistry",
@@ -44,6 +50,10 @@ __all__ = [
     "OpenAIChatCompletionsConversationAdapter",
     "OpenAIResponsesConversationAdapter",
     "OpenClawConversationAdapter",
+    "OpenCodeConversationAdapter",
+    "PiConversationAdapter",
+    "ZCodeConversationAdapter",
+    "QuestionTool",
     "ConversationBatch",
     "ConversationMessage",
     "ConversationMessageRole",

@@ -1,5 +1,6 @@
 """外部 Conversation 协议转换的角色、工具配对和拒绝场景。"""
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -331,9 +332,10 @@ def test_opencode_messages_keep_typed_text_finished_tools_and_question_answers()
                 {
                     "type": "tool", "callID": "call_q", "tool": "question",
                     "state": {
-                        "status": "completed", "input": question, "output": "User answered.", "title": "", "metadata": {},
+                        "status": "completed", "input": question, "title": "",
+                        "output": 'User has answered your questions: "周四了，周报还没写。"="这次不用". You can now continue.',
+                        "metadata": {"answers": [["这次不用"]]},
                         "time": {"start": 1792000002000, "end": 1792000010000},
-                        "habitus_answers": [{"question": "周四了，周报还没写。", "answers": ["这次不用"]}],
                     },
                 },
                 {
@@ -362,3 +364,157 @@ def test_opencode_messages_keep_typed_text_finished_tools_and_question_answers()
     assert messages[0].occurred_at == datetime.fromtimestamp(1792000000, tz=UTC)
     assert messages[5].occurred_at == datetime.fromtimestamp(1792000060, tz=UTC)
     assert result.after_turn and result.ignored_items == 4  # 合成段、步骤、思考、没结束的工具
+
+
+def test_opencode_compaction_summaries_are_not_agent_replies() -> None:
+    """压缩写的摘要（summary 为真）不是 agent 对他说的话。"""
+
+    records = [
+        {"info": {"id": "u", "role": "user", "time": {"created": 1792000000000}}, "parts": [{"type": "compaction", "auto": True}]},
+        {
+            "info": {"id": "s", "role": "assistant", "summary": True, "mode": "compaction", "time": {"created": 1792000001000, "completed": 1792000002000}},
+            "parts": [{"type": "text", "text": "## Summary\n之前在改登录页"}],
+        },
+        {"info": {"id": "u2", "role": "user", "time": {"created": 1792000003000}}, "parts": [{"type": "text", "text": "继续改"}]},
+    ]
+    result = ConversationAdapterRegistry.with_builtins().adapt("opencode", {"records": records}, context())
+    assert [item.content for item in result.batch.messages] == ["继续改"]
+
+
+def test_opencode_timestamps_out_of_range_are_protocol_errors() -> None:
+    """坏时间戳按协议错误拒收（400），不当成服务内部错误（500）。"""
+
+    records = [{"info": {"id": "m", "role": "user", "time": {"created": 10**20}}, "parts": [{"type": "text", "text": "x"}]}]
+    with pytest.raises(ConversationProtocolError, match="out of range"):
+        ConversationAdapterRegistry.with_builtins().adapt("opencode", {"records": records}, context())
+
+
+def test_each_harness_protocol_declares_its_host_and_question_tools() -> None:
+    """提问工具与宿主名由各协议的适配器声明（方案 36 第八节第 1 条）：通用 SDK 协议两样都没有，接新宿主只加一个适配器。"""
+
+    from habitus.pre.conversation import QuestionTool
+
+    registry = ConversationAdapterRegistry.with_builtins()
+    assert registry.host("codex_rollout") == "codex" and registry.host("CLAUDE_CODE") == "claude-code"
+    assert registry.host("openai_chat_completions") is None and registry.host("nope") is None
+    assert [tool.tool for tool in registry.question_tools("codex_rollout")] == ["request_user_input", "request_user_input_async"]
+    assert registry.question_tools("opencode") == (QuestionTool("opencode", "question", "question"),)
+    assert registry.question_tools("openai_chat_completions") == ()
+    assert {tool.host for tool in registry.question_tools()} == {"codex", "claude-code", "opencode", "pi", "zcode", "dsh"}
+    with pytest.raises(ValueError):
+        QuestionTool("codex", " ", "title")
+
+
+def test_pi_session_entries_keep_spoken_text_tools_and_the_ask_user_answer() -> None:
+    """pi 的会话 JSONL：只收 message 记录；人说的话、答复、toolCall 块与 toolResult；插件注入的 custom、思考、会话头、
+    模型变更与压缩都不收；ask_user 的结果已是 ``"<题目>"="<作答>"``。"""
+
+    records = [
+        {"type": "session", "version": 3, "id": "s1", "timestamp": "2026-10-22T07:00:00Z", "cwd": "/w"},
+        {"type": "model_change", "id": "a", "parentId": None, "timestamp": "2026-10-22T07:00:00Z", "provider": "x", "modelId": "y"},
+        {"type": "message", "id": "b", "parentId": "a", "timestamp": "2026-10-22T07:00:01Z",
+         "message": {"role": "user", "content": [{"type": "text", "text": "帮我看看这个报错"}], "timestamp": 1792998001000}},
+        {"type": "message", "id": "c", "parentId": "b", "timestamp": "2026-10-22T07:00:01Z",
+         "message": {"role": "custom", "customType": "habitus-memory", "content": "<habitus-memory-context>…", "display": False, "timestamp": 1792998001000}},
+        {"type": "message", "id": "d", "parentId": "c", "timestamp": "2026-10-22T07:00:05Z",
+         "message": {"role": "assistant", "stopReason": "toolUse", "timestamp": 1792998002000, "content": [
+             {"type": "thinking", "thinking": "想一想"},
+             {"type": "toolCall", "id": "call_q", "name": "ask_user", "arguments": {"questions": [{"question": "周报还没写。", "options": [{"label": "现在就做"}]}]}},
+         ]}},
+        {"type": "message", "id": "e", "parentId": "d", "timestamp": "2026-10-22T07:00:09Z",
+         "message": {"role": "toolResult", "toolCallId": "call_q", "toolName": "ask_user", "isError": False, "timestamp": 1792998009000,
+                     "content": [{"type": "text", "text": '"周报还没写。"="这次不用"'}]}},
+        {"type": "compaction", "id": "f", "parentId": "e", "timestamp": "2026-10-22T07:00:10Z", "summary": "…", "firstKeptEntryId": "b"},
+        {"type": "message", "id": "g", "parentId": "f", "timestamp": "2026-10-22T07:00:20Z",
+         "message": {"role": "assistant", "stopReason": "stop", "timestamp": 1792998011000, "content": [{"type": "text", "text": "看完了，是依赖版本不对。"}]}},
+    ]
+    result = ConversationAdapterRegistry.with_builtins().adapt("pi", {"records": records}, context())
+    messages = result.batch.messages
+    assert [item.role for item in messages] == [
+        ConversationMessageRole.PROMPT,
+        ConversationMessageRole.TOOL_CALL,
+        ConversationMessageRole.TOOL_RESULT,
+        ConversationMessageRole.COMPLETION,
+    ]
+    assert messages[0].content == "帮我看看这个报错"
+    assert (messages[1].tool_name, messages[1].tool_call_id) == ("ask_user", "call_q")
+    assert messages[2].content == '"周报还没写。"="这次不用"'
+    assert messages[0].occurred_at == datetime.fromtimestamp(1792998001, tz=UTC)
+    assert result.after_turn and result.ignored_items == 5  # 会话头、模型变更、注入的 custom、思考、压缩
+    registry = ConversationAdapterRegistry.with_builtins()
+    assert registry.host("pi") == "pi" and [tool.tool for tool in registry.question_tools("pi")] == ["ask_user"]
+
+
+def test_zcode_messages_read_like_opencode_with_ask_user_question_and_no_hook_context_line() -> None:
+    """ZCode 的消息与 OpenCode 同形；AskUserQuestion 的作答在结果文字里；ZCode 给注入加的那行 hook 上下文前缀不是他说的话。"""
+
+    records = [
+        {
+            "info": {"id": "m1", "role": "user", "time": {"created": 1792000000000}},
+            "parts": [
+                {"type": "text", "text": "UserPromptSubmit hook additional context: \n#1"},
+                {"type": "text", "text": "帮我看看这个报错"},
+            ],
+        },
+        {
+            "info": {"id": "m2", "role": "assistant", "time": {"created": 1792000001000, "completed": 1792000060000}},
+            "parts": [
+                {
+                    "type": "tool", "callID": "call_q", "tool": "AskUserQuestion",
+                    "state": {
+                        "status": "completed", "input": {"questions": [{"question": "周报还没写。"}]}, "metadata": {},
+                        "output": 'User has answered your questions: "周报还没写。"="现在就做". You can now continue with the user\'s answers in mind.',
+                        "time": {"start": 1792000002000, "end": 1792000010000},
+                    },
+                },
+                {"type": "text", "text": "好，现在写。", "time": {"start": 1792000050000, "end": 1792000060000}},
+            ],
+        },
+    ]
+    registry = ConversationAdapterRegistry.with_builtins()
+    messages = registry.adapt("zcode", {"records": records}, context()).batch.messages
+    assert [item.content for item in messages if item.role is ConversationMessageRole.PROMPT] == ["帮我看看这个报错"]
+    assert '"周报还没写。"="现在就做"' in messages[2].content
+    assert registry.host("zcode") == "zcode" and [tool.tool for tool in registry.question_tools("zcode")] == ["AskUserQuestion"]
+
+
+def test_deepseek_harness_events_keep_human_text_tools_and_structured_question_answers() -> None:
+    """DeepSeek Harness 的日志事件：只有人亲手输入（source.kind user）算他说的话，hook 桥注入的上下文不算；tool-call 块是调用、
+    tool/call 事件重复不收；ask_user_question 的结构化作答按题目 id 配回成 ``"<题目>"="<作答>"``。"""
+
+    question_args = json.dumps({"questions": [{"id": "q1", "question": "周报还没写。", "options": [{"label": "现在就做"}]}]}, ensure_ascii=False)
+    records = [
+        {"id": "s1", "createdAt": "2026-10-22T07:00:00Z", "cwd": "/w"},
+        {"type": "turn/start", "seq": 1, "time": 1792998000000, "data": {"turn": 1}},
+        {"type": "user/message", "seq": 2, "time": 1792998001000, "surfaceOp": "append",
+         "data": {"id": "u1", "role": "user", "source": {"kind": "user"}, "content": [{"type": "text", "text": "帮我看看这个报错"}]}},
+        {"type": "user/message", "seq": 3, "time": 1792998001000, "surfaceOp": "append",
+         "data": {"id": "u2", "role": "user", "source": {"kind": "hooks-claude-code"}, "content": [{"type": "text", "text": "<habitus-memory-context>…"}]}},
+        {"type": "assistant/message", "seq": 4, "time": 1792998002000, "surfaceOp": "append",
+         "data": {"turn": 1, "step": 1, "stream": [], "message": {"id": "a1", "role": "assistant", "source": {"kind": "model"}, "content": [
+             {"type": "reasoning", "text": "想一想"},
+             {"type": "tool-call", "id": "call_q", "name": "ask_user_question", "arguments": question_args},
+         ]}}},
+        {"type": "tool/call", "seq": 5, "time": 1792998002000, "data": {"turn": 1, "step": 1, "callId": "call_q", "name": "ask_user_question", "arguments": question_args}},
+        {"type": "tool/result", "seq": 6, "time": 1792998009000, "surfaceOp": "append",
+         "data": {"turn": 1, "step": 1, "message": {"id": "t1", "role": "tool", "toolCallId": "call_q", "source": {"kind": "tool"},
+                  "content": [{"type": "text", "text": json.dumps({"answers": [{"id": "q1", "selected": ["这次不用"]}]}, ensure_ascii=False)}]}}},
+        {"type": "assistant/message", "seq": 7, "time": 1792998011000, "surfaceOp": "append",
+         "data": {"turn": 1, "step": 2, "stream": [], "message": {"id": "a2", "role": "assistant", "source": {"kind": "model"}, "content": [{"type": "text", "text": "好，那先不写。"}]}}},
+        {"type": "turn/end", "seq": 8, "time": 1792998011000, "data": {"turn": 1, "reason": "completed"}},
+    ]
+    registry = ConversationAdapterRegistry.with_builtins()
+    result = registry.adapt("dsh", {"records": records}, context())
+    messages = result.batch.messages
+    assert [item.role for item in messages] == [
+        ConversationMessageRole.PROMPT,
+        ConversationMessageRole.TOOL_CALL,
+        ConversationMessageRole.TOOL_RESULT,
+        ConversationMessageRole.COMPLETION,
+    ]
+    assert messages[0].content == "帮我看看这个报错"
+    assert messages[1].tool_name == "ask_user_question"
+    assert messages[2].content == '"周报还没写。"="这次不用"' and messages[2].tool_name == "ask_user_question"
+    assert messages[0].occurred_at == datetime.fromtimestamp(1792998001, tz=UTC)
+    assert result.after_turn and result.ignored_items == 6  # 会话头、turn/start、注入的上下文、思考、tool/call、turn/end
+    assert registry.host("dsh") == "dsh" and [tool.tool for tool in registry.question_tools("dsh")] == ["ask_user_question"]

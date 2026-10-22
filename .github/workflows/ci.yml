@@ -24,39 +24,43 @@ jobs:
         working-directory: plugins
         run: |
           npm run sync
-          git diff --exit-code -- habitus-memory/scripts/shared habitus-memory-claude-code/scripts/shared
+          git diff --exit-code -- '*/scripts/shared/*'
           npm test
       - name: Compile, lint, type check and full test suite (scripts/ci.sh)
         run: bash scripts/ci.sh
       - name: Verify unified bootstrap and secure non-interactive init
         run: |
           init_root="$RUNNER_TEMP/habitus-init"
-          habitus --help
+          habitus-server --help
           habitus-server init --help
-          habitus init --config "$init_root/config.yaml" --from-config habitus/config/example.yaml --non-interactive --skip-doctor --no-start
+          habitus-server init --config "$init_root/config.yaml" --from-config habitus/config/example.yaml --non-interactive --skip-doctor --no-start
           test -f "$init_root/config.yaml"
           test "$(stat -c '%a' "$init_root/config.yaml")" = "600"
           HABITUS_CI_CONFIG_PATH="$init_root/config.yaml" python -c 'import os; from habitus.config import HabitusConfig; c=HabitusConfig.from_file(os.environ["HABITUS_CI_CONFIG_PATH"]); assert c.models.chat.route.credential_ref == "deepseek"; assert c.models.embedding.route.credential_ref == "ark"; assert c.models.rerank.route.credential_ref == "dashscope"; assert c.memory.vector_store.route.credential_ref == "vikingdb"'
-          habitus harnesses
       - name: Build wheel and verify its contents against pyproject
         run: |
           python -m build --wheel
           python scripts/check_wheel.py
-      - name: Install wheel and execute packaged plugin lifecycle
+      - name: Install wheel and the npm CLI, execute the packaged plugin lifecycle
         run: |
           smoke_venv="$RUNNER_TEMP/habitus-wheel-smoke"
+          npm_prefix="$RUNNER_TEMP/habitus-npm"
           marketplace_root="$RUNNER_TEMP/habitus-marketplace"
           doctor_output="$RUNNER_TEMP/habitus-plugin-doctor.json"
           python -m venv "$smoke_venv"
           "$smoke_venv/bin/pip" install --no-deps dist/*.whl
-          "$smoke_venv/bin/habitus" --help
+          "$smoke_venv/bin/habitus-server" --help
           "$smoke_venv/bin/habitus-server" init --help
-          "$smoke_venv/bin/habitus-plugin" harnesses --json
-          "$smoke_venv/bin/habitus-plugin" install --prepare-only --root "$marketplace_root" --json
-          "$smoke_venv/bin/habitus-plugin" update --prepare-only --root "$marketplace_root" --json
-          "$smoke_venv/bin/habitus-plugin" status --root "$marketplace_root" --json
+          (cd plugins && npm pack --pack-destination "$RUNNER_TEMP")
+          npm install -g --prefix "$npm_prefix" "$RUNNER_TEMP"/habitus-*.tgz
+          habitus="$npm_prefix/bin/habitus"
+          "$habitus" --version
+          "$habitus" harnesses --json
+          "$habitus" plugin install --prepare-only --root "$marketplace_root" --json
+          "$habitus" plugin update --prepare-only --root "$marketplace_root" --json
+          "$habitus" plugin status --root "$marketplace_root" --json
           set +e
-          HABITUS_URL=http://127.0.0.1:1 HABITUS_PLUGIN_TIMEOUT_MS=250 "$smoke_venv/bin/habitus-plugin" doctor > "$doctor_output"
+          HABITUS_URL=http://127.0.0.1:1 HABITUS_PLUGIN_TIMEOUT_MS=250 "$habitus" doctor --json > "$doctor_output"
           doctor_status=$?
           set -e
           test "$doctor_status" -eq 1

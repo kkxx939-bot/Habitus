@@ -26,6 +26,7 @@ from habitus.foresight.judge import Judge
 from habitus.foresight.triggers.assemble import relation_statuses
 from habitus.foundation.observability import Observer
 from habitus.model_client import StructuredChatClient
+from habitus.pre.conversation import QuestionTool
 from habitus.runtime.behavior import BehaviorRuntimeComponents
 from habitus.runtime.conditions import local_calendar
 from habitus.runtime.foresight_compaction import LedgerCompaction
@@ -128,6 +129,7 @@ def build_foresight_components(
     branch: str = "session",
     calendar: DayTypeCalendar | None = None,
     kind_label: Callable[[str], str | None] | None = None,
+    question_tools: Sequence[QuestionTool] | None = None,
 ) -> ForesightRuntimeComponents | None:
     """组装预测层；未启用时返回 None。``branch`` 是它接的那一支：账本取这一支的目录。``calendar`` 是组合根建好、与语义树共用的
     那一份（不给就自己建）。``kind_label`` 是类编号 → 给人看的类名（词表），出口认提问时拿它配题目；不给就只按话配。"""
@@ -176,6 +178,7 @@ def build_foresight_components(
         claim_limit=foresight.outlet_claim_limit,
         similarity=foresight.outlet_match_similarity,
         kind_label=kind_label,
+        tools=question_tools,
         observer=observer,
     )
     return ForesightRuntimeComponents(
@@ -295,13 +298,17 @@ def build_reminded_lookup(components: ForesightRuntimeComponents) -> RemindedLoo
 
 
 def build_outlet_consumer(
-    components: ForesightRuntimeComponents, inner: BehaviorSessionConsumer, *, observer: Observer | None = None
+    components: ForesightRuntimeComponents,
+    inner: BehaviorSessionConsumer,
+    *,
+    observer: Observer | None = None,
+    host_of: Callable[[str], str | None] | None = None,
 ) -> OutletObservingConsumer:
     """会话源的行为侧消费者外面包出口那一层（方案 32 第 4.2 条）：同一份会话先过 ``outlet.observe``，再进会话 lane。"""
 
     if components.outlet is None:
         raise ValueError("the foresight components carry no reminder outlet")
-    return OutletObservingConsumer(inner, components.outlet, observer=observer)
+    return OutletObservingConsumer(inner, components.outlet, observer=observer, host_of=host_of)
 
 
 def build_reminder_responses(

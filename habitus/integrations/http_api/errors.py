@@ -25,8 +25,10 @@ from habitus.infrastructure.vector import (
 from habitus.integrations.http import HTTPMemoryJobConflictError, HTTPMemoryJobNotFoundError
 from habitus.integrations.http_api.body_limit import RequestBodyLimitExceeded
 from habitus.integrations.http_api.schemas import ErrorInfo, ErrorResponse, HTTPErrorCode
+from habitus.memory.browse import MemoryBrowseNotFoundError
 from habitus.memory.conversation import ConversationJournalError, ConversationWriteConflictError
 from habitus.memory.retrieval import MemorySearchError
+from habitus.memory.tree import MemoryTreeConsistencyError, MemoryTreeIntegrityError
 from habitus.memory.workflow import MemoryJobBlockedError, MemoryJobError, MemoryJobNotReadyError
 from habitus.model_client import (
     ModelAuthenticationError,
@@ -220,6 +222,14 @@ def map_exception(exc: Exception) -> HTTPErrorSpec:
 
     if isinstance(exc, HTTPMemoryJobNotFoundError):
         return HTTPErrorSpec(HTTPErrorCode.NOT_FOUND, str(exc), False)
+    if isinstance(exc, MemoryBrowseNotFoundError):
+        return HTTPErrorSpec(HTTPErrorCode.NOT_FOUND, str(exc), False)
+    if isinstance(exc, MemoryTreeConsistencyError):
+        # 正赶上一次多文档发布：稍后重读就是一致的
+        return HTTPErrorSpec(HTTPErrorCode.UNAVAILABLE, "Memory tree is being updated", True, retry_after_seconds=1)
+    if isinstance(exc, MemoryTreeIntegrityError):
+        # 记忆树里有不合规的条目：是存储的问题，不是请求参数的问题（它是 ValueError 的子类，必须排在下面之前）
+        return HTTPErrorSpec(HTTPErrorCode.INTERNAL, "Memory tree failed integrity validation", False)
     if isinstance(exc, HTTPMemoryJobConflictError):
         return HTTPErrorSpec(HTTPErrorCode.FAILED_PRECONDITION, str(exc), False)
     if isinstance(exc, RequestBodyLimitExceeded):

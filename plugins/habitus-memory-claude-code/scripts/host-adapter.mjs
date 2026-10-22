@@ -1,6 +1,7 @@
 import { hasMeaningfulMessageContent, stripInjectionReceipts } from "./shared/injection-receipt.mjs";
 import { readJsonlDelta } from "./shared/jsonl.mjs";
 import { safeIdentifier } from "./shared/host-adapter.mjs";
+import { zcodeAdapter } from "./zcode-adapter.mjs";
 
 function accepted(record) {
   if (!["user", "assistant"].includes(record?.type) || record?.isSidechain === true || record?.isMeta === true) return false;
@@ -37,7 +38,7 @@ function selectCompleted(records, injectionReceipts) {
   return { consumedCount: safe.consumedCount, records: selected.slice(0, safe.recordCount), afterTurn: true };
 }
 
-export const hostAdapter = Object.freeze({
+export const claudeCodeAdapter = Object.freeze({
   host: "claude-code",
   protocol: "claude_code",
   // agent 向人提问、等人作答的工具（方案 32 第 4.2 条）
@@ -63,3 +64,10 @@ export const hostAdapter = Object.freeze({
     });
   },
 });
+
+// 同一份插件也装在 ZCode 里（它认 Claude Code 的插件格式）：ZCode 给 hook 进程设 ZCODE_SESSION_ID，据此换成 ZCode 的适配器
+export function selectHostAdapter(env = process.env) {
+  return env.ZCODE_SESSION_ID ? zcodeAdapter : claudeCodeAdapter;
+}
+
+export const hostAdapter = selectHostAdapter();

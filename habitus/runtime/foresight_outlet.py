@@ -13,7 +13,7 @@
   租约过期只让别的会话能取（不算放回：问可能早就问了、转写只是还没回来）；历任持有者都认得出自己那次提问。
 
 传输状态（可取清单、取走记录、问过的提问、宿主活性）在 ``runtime/foresight_outlet_store.py``，不进账本。
-宿主 → 提问工具 / 题目字段 / 作答怎么回来 是这里的一张表（``QUESTION_TOOLS``，数据不是分支）。
+宿主 → 提问工具 / 题目字段 / 作答怎么回来 由各会话协议的适配器声明（``ConversationAdapterRegistry.question_tools``），组合根传进来。
 
 TODO(裁定 64 第 8 条)：自由作答现在走会话 lane 的模型判正 / 中 / 负（``runtime/foresight_responses.py`` 那座桥）；推式宿主（第六节
 本地通知）与别的 harness 的回复不是提问工具的作答时也要靠那条路——这里只写固定选项，模型路保留不删。
@@ -33,6 +33,7 @@ from typing import Any, Protocol
 from habitus.foresight.errors import ForesightError
 from habitus.foresight.ledger import SPOKEN, Delivery, Response
 from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
+from habitus.pre.conversation import ConversationAdapterRegistry, QuestionTool
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_outlet_store import OutletStore
 
@@ -45,25 +46,6 @@ REPLY_TAG = "<send_user_message_question_reply>"
 _CLAIM_TOLERANCE = timedelta(seconds=120)
 _QUOTED = re.compile(r'=\s*"([^"]*)"')
 _QUOTED_PAIR = re.compile(r'"([^"]+)"\s*=\s*"([^"]*)"')
-
-
-@dataclass(frozen=True)
-class QuestionTool:
-    """一个宿主的提问工具：工具名、题目在参数 ``questions[]`` 里叫什么、作答是不是晚些才以用户消息回来。"""
-
-    host: str
-    tool: str
-    title_key: str
-    replies_later: bool = False
-
-
-QUESTION_TOOLS: tuple[QuestionTool, ...] = (
-    QuestionTool("claude-code", "AskUserQuestion", "question"),
-    QuestionTool("codex", "request_user_input", "title"),
-    QuestionTool("codex", "request_user_input_async", "title", replies_later=True),
-    # OpenCode 的 question 工具同步等作答；插件把 question.replied 的作答写进结果（"<题目>"="<作答>"，方案 36 第四节）
-    QuestionTool("opencode", "question", "question"),
-)
 
 
 @dataclass(frozen=True)
@@ -101,6 +83,25 @@ class ClaimedReminder:
     deadline: datetime
     lease_until: datetime
     claimed_at: datetime
+
+
+@dataclass(frozen=True)
+class Handoff:
+    """一次取走：哪个宿主的哪个会话、什么时候取的、后来怎样了（``None`` 是还在租约里；过期 / 放回 / 说出口了）。"""
+
+    host: str
+    session: str
+    claimed_at: datetime
+    ended: str | None
+
+
+@dataclass(frozen=True)
+class ClaimTrail:
+    """一条请求被取走的经过（``habitus reminders`` 看的）：放回了几次、依次谁取的。过了最晚时限就清掉了。"""
+
+    request_id: str
+    attempts: int
+    handoffs: tuple[Handoff, ...]
 
 
 @dataclass(frozen=True)
@@ -207,7 +208,7 @@ class ReminderOutlet:
         max_attempts: int,
         claim_limit: int,
         similarity: float,
-        tools: Sequence[QuestionTool] = QUESTION_TOOLS,
+        tools: Sequence[QuestionTool] | None = None,
         kind_label: Callable[[str], str | None] | None = None,
         observer: Observer | None = None,
     ) -> None:
@@ -230,7 +231,8 @@ class ReminderOutlet:
         self.max_attempts = max_attempts
         self.claim_limit = claim_limit
         self.similarity = float(similarity)
-        self.tools = tuple(tools)
+        # 不给就是内置协议适配器声明的那些（组合根按实际注册的协议传）
+        self.tools = tuple(tools) if tools is not None else ConversationAdapterRegistry.with_builtins().question_tools()
         self.kind_label = kind_label
         self.observer: Observer = observer if observer is not None else NullObserver()
         #: 取（HTTP 线程）、认（消费者线程）、每拍重写清单（worker）三方都读-改-写同一批小文件：进程内一把锁串起来
@@ -295,6 +297,9 @@ class ReminderOutlet:
             raise ForesightError("at must be a timezone-aware datetime")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= self.claim_limit:
             raise ForesightError(f"limit must be an integer between 1 and {self.claim_limit}")
+        if host not in {tool.host for tool in self.tools}:
+            # 没有提问工具的宿主问不了他：不给、也不算它活着（方案 36 第四节），免得它占租约、把放回次数耗到上限
+            return ()
         with self._lock:
             self.store.touch_host(host, at)
             self.sweep(at)
@@ -346,6 +351,31 @@ class ReminderOutlet:
             holder.lease_until,
             holder.claimed_at,
         )
+
+    def trails(self) -> dict[str, ClaimTrail]:
+        """此刻还留着的取走记录（只读，不改租约）。"""
+
+        with self._lock:
+            found: dict[str, ClaimTrail] = {}
+            for raw in self.store.claims().values():
+                claim = _decode_claim(raw)
+                if claim is None:
+                    continue
+                holders = (*claim.history, *([claim.holder] if claim.holder is not None else ()))
+                found[claim.request.request_id] = ClaimTrail(
+                    claim.request.request_id,
+                    claim.attempts,
+                    tuple(
+                        Handoff(item.host, item.session, item.claimed_at, item.ended)
+                        for item in sorted(holders, key=lambda item: item.claimed_at)
+                    ),
+                )
+            return found
+
+    def kind_name(self, kind_token: str) -> str:
+        """类编号 → 给人看的类名（词表里没有就是编号）。"""
+
+        return self._label(kind_token)
 
     def _label(self, kind_token: str) -> str:
         if self.kind_label is None:
@@ -479,7 +509,11 @@ class ReminderOutlet:
         self._mark_spoken(claim)
         self._drop_open(claim.request.request_id)
         result = results.get(call.tool_call_id or "")
-        if result is not None and not tool.replies_later and not result.failed:
+        if result is not None and not tool.replies_later and result.failed:
+            # 同步提问工具的结果是失败：他把提问关掉了（OpenCode 的 question.rejected）或提问没成。问是问出口了，作答不会再来，
+            # 不记成"等晚到的作答"
+            return "spoken"
+        if result is not None and not tool.replies_later:
             polarity = answer_in_result(result.content, question.title, single=len(_questions(call, tool)) == 1)
             if polarity is not None and self._record_response(
                 claim, result.occurred_at, polarity, call.tool_call_id or ""
@@ -873,14 +907,14 @@ def _encode_asked(claim: _Claim, question: _Question, *, host: str, session: str
 __all__ = [
     "OPTIONS",
     "POLARITY_OF_OPTION",
-    "QUESTION_TOOLS",
     "REPLY_TAG",
+    "ClaimTrail",
     "ClaimedReminder",
+    "Handoff",
     "HostMessage",
     "ObserveReport",
     "OpenRequest",
     "OutletPort",
-    "QuestionTool",
     "ReminderOutlet",
     "answer_in_result",
     "fixed_polarity",

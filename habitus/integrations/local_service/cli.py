@@ -187,10 +187,9 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
         _exec_serve(result.path)
     if doctor_ok is False:
         return 1
-    sys.stdout.write(
-        f"Next: habitus-server --config {result.path}\n"
-        "Agent plugins: npm install -g @habitus/cli && habitus plugin install --harness <id>\n"
-    )
+    sys.stdout.write(f"Next: habitus-server --config {result.path}\n")
+    if not harnesses:
+        sys.stdout.write("Agent plugins: npm install -g habitus && habitus plugin install --harness <id>\n")
     return 0
 
 
@@ -352,20 +351,34 @@ def _maybe_offer_init(explicit: str | None, values: dict[str, str]) -> bool:
 
 
 def _install_plugins(harnesses: Sequence[str]) -> None:
-    """插件装在 npm 包 ``@habitus/cli`` 里（方案 36）：装了就替用户跑 ``habitus plugin install``，没装就说怎么装。服务这一侧
+    """插件装在 npm 包 ``habitus`` 里（方案 36）：装了就替用户跑 ``habitus plugin install``，没装就说怎么装。服务这一侧
     不再带插件、不再自己调 Node 安装器。"""
 
-    command = shutil.which("habitus")
+    command = _npm_habitus()
     arguments = [part for harness in harnesses for part in ("--harness", harness)]
     if command is None:
         sys.stdout.write(
-            "Agent plugins need the Habitus command line: npm install -g @habitus/cli\n"
+            "Agent plugins need the Habitus command line: npm install -g habitus\n"
             f"then: habitus plugin install {' '.join(arguments)}\n"
         )
         return
     completed = subprocess.run([command, "plugin", "install", *arguments], check=False)  # noqa: S603
     if completed.returncode:
         raise SystemExit(completed.returncode)
+
+
+def _npm_habitus() -> str | None:
+    """PATH 上的 ``habitus`` 得是 npm 的那个（Node 脚本）；早先 pip 装的同名 Python 入口可能还留在某个环境里，认不出就当没装。"""
+
+    command = shutil.which("habitus")
+    if command is None:
+        return None
+    try:
+        with Path(command).resolve().open("rb") as handle:
+            shebang = handle.readline(256)
+    except OSError:
+        return None
+    return command if b"node" in shebang else None
 
 
 def _repair_source_outputs(args: argparse.Namespace, values: Mapping[str, str]) -> int:
@@ -636,7 +649,7 @@ def _write_doctor(report: object, output: TextIO) -> None:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="habitus")
+    parser = argparse.ArgumentParser(prog="habitus-server")
     parser.add_argument("--config", help="覆盖 HABITUS_CONFIG_FILE 指向的配置文件")
     subparsers = parser.add_subparsers(dest="command")
 

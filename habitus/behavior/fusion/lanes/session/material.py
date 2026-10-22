@@ -70,11 +70,12 @@ def split_turns(
     conversation_id: str,
     messages: Sequence[SessionMessage],
     *,
-    question_tools: Sequence[str] = SessionLaneConfig().question_tools,
+    question_tools: Sequence[str] = (),
 ) -> tuple[SessionTurn, ...]:
     """把一个会话的消息按"人说的话"拆成一轮一轮；合成消息与重放不开轮。
 
-    人对助手提问的作答（``question_tools`` 的工具结果）也是人说的话：助手发问时上一轮到此为止，
+    人对助手提问的作答（``question_tools`` 的工具结果；是哪几个工具由会话协议决定，组合根按协议适配器的声明传进来，只传
+    同步等作答的那些——Codex Desktop 的异步提问作答以一条用户消息晚来，由材料整理翻成作答）也是人说的话：助手发问时上一轮到此为止，
     作答开新的一轮。提问没成（参数不合法）或被他拒绝的不算作答——拒绝之后他会另说一句话，那句话自己开轮。
 
     助手说完话停下之后，被后台任务通知或别的会话的消息叫醒又做的那一段，不算进上一轮，自己算一轮；

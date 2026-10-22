@@ -23,6 +23,7 @@ from habitus.foundation.observability import MetricRegistry, Observer
 from habitus.infrastructure.observability import ManagedObservability
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.vector import VectorStoreFactory
+from habitus.memory.browse import MemoryBrowser
 from habitus.memory.compaction import MemoryLifecycleManager
 from habitus.memory.conversation import (
     ConversationMessageJournal,
@@ -280,10 +281,15 @@ class RuntimeMemory:
     semantic_refresher: MemorySemanticRefresher
     vector_index: PersistentMemoryVectorIndex
     lifecycle: MemoryLifecycleManager
+    browser: MemoryBrowser
 
     def __post_init__(self) -> None:
         if not isinstance(self.tree, MemoryTree):
             raise TypeError("tree must be MemoryTree")
+        if not isinstance(self.browser, MemoryBrowser):
+            raise TypeError("browser must be MemoryBrowser")
+        if self.browser.tree is not self.tree:
+            raise ValueError("memory browser must use the shared memory tree")
         if not isinstance(self.search, SearchService):
             raise TypeError("search must be SearchService")
         if not isinstance(self.editor, MemoryEditor):

@@ -85,6 +85,31 @@ export function renderReminderInstruction(reminders, questionTool) {
   return lines.join("\n");
 }
 
+// 他说了一句话：召回记忆、取提醒，拼成要注入的块（没有就是空串）。命令 hook 与进程内插件（OpenCode）共用这一份：
+// 取提醒出错只丢提醒、记一笔日志，召回的记忆照样注入；召回出错由调用方兜（那时什么都不注入）。
+export async function promptInjection(core, adapter, input, { config, hook }) {
+  // 子代理的"一句话"是主 agent 写的任务，不是他说的话（宿主认得出子代理时由适配器说）
+  if (typeof adapter.isSubagent === "function" && adapter.isSubagent(input)) return "";
+  const context = await core.recall(adapter, input);
+  const prepared = context ? createContextInjection(context) : null;
+  if (prepared) await core.recordInjection(adapter, input, prepared.receipt);
+  // 提醒出口（方案 32 第五节）：recall 之后取，取到的拼成指令块、同一套回执包装；取不到当这一轮没有提醒
+  let reminderInjection = "";
+  try {
+    const reminders = await core.claimReminders(adapter, input);
+    if (reminders.length > 0) {
+      const block = createContextInjection(renderReminderInstruction(reminders, adapter.questionTool), undefined, REMINDER_TAG);
+      await core.recordInjection(adapter, input, block.receipt);
+      reminderInjection = block.injection;
+    }
+  } catch (error) {
+    await writeOperationLog(config, adapter, input, {
+      hook, stage: "claim_reminders", status: "error", retryable: true, error,
+    }).catch(() => {});
+  }
+  return [prepared?.injection || "", reminderInjection].filter(Boolean).join("\n");
+}
+
 export async function runHook(action, adapter) {
   let config;
   let input = {};
@@ -97,26 +122,11 @@ export async function runHook(action, adapter) {
       write(adapter.successOutput(action));
       return;
     }
+    // 宿主的转写不在 hook 给的那个文件里时（ZCode：真会话在它的库里），适配器先把输入准备好（比如镜像出转写、换掉路径）
+    if (typeof adapter.prepareInput === "function") input = await adapter.prepareInput(input, config, action);
     const core = new PluginCore(config);
     if (action === "user-prompt") {
-      const context = await core.recall(adapter, input);
-      const prepared = context ? createContextInjection(context) : null;
-      if (prepared) await core.recordInjection(adapter, input, prepared.receipt);
-      // 提醒出口（方案 32 第五节）：recall 之后取，取到的拼成指令块、同一套回执包装；取不到当这一轮没有提醒
-      let reminderInjection = "";
-      try {
-        const reminders = await core.claimReminders(adapter, input);
-        if (reminders.length > 0) {
-          const block = createContextInjection(renderReminderInstruction(reminders, adapter.questionTool), undefined, REMINDER_TAG);
-          await core.recordInjection(adapter, input, block.receipt);
-          reminderInjection = block.injection;
-        }
-      } catch (error) {
-        await writeOperationLog(config, adapter, input, {
-          hook: action, stage: "claim_reminders", status: "error", retryable: true, error,
-        });
-      }
-      const injection = [prepared?.injection || "", reminderInjection].filter(Boolean).join("\n");
+      const injection = await promptInjection(core, adapter, input, { config, hook: action });
       write(injection ? adapter.contextOutput(injection) : adapter.successOutput(action));
       return;
     }

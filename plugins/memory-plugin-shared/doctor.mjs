@@ -5,10 +5,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   HARNESS_REGISTRY,
-  MARKETPLACE_NAME,
-  PLUGIN_ID,
   PLUGIN_NAME,
 } from "../harnesses.mjs";
+import { defaultMarketplaceRoot, marketplaceStatus } from "../install-memory-plugin.mjs";
+import { CommandRunner, registrationOf } from "../registrations.mjs";
 import { loadPluginConfig } from "./lib/config.mjs";
 import { HabitusServiceClient } from "./lib/service-client.mjs";
 import { readState, sessionKey } from "./lib/state-store.mjs";
@@ -23,38 +23,26 @@ export async function runPluginDoctor(
   {
     service = new HabitusServiceClient(config),
     registry = HARNESS_REGISTRY,
-    protocols = registry.list().map((definition) => definition.protocol),
+    env = process.env,
+    protocols = null,
     inspectHarnesses = harnessRegistrationChecks,
     inspectFeatures = harnessFeatureChecks,
+    inspectMarketplace = marketplaceCheck,
   } = {},
 ) {
   const checks = [];
   checks.push(nodeRuntimeCheck(), ...(await bundleChecks(registry)));
-  checks.push(...await inspectHarnesses(registry));
+  const registrations = await inspectHarnesses(registry, env);
+  checks.push(...registrations, await inspectMarketplace(registry, env));
   checks.push(...await inspectFeatures(registry));
   const health = await service.health();
-  checks.push({ name: "health", status: health.ok ? "pass" : "fail", detail: health.ok ? "service reachable" : String(health.error) });
-  const ready = await service.ready();
-  checks.push({ name: "ready", status: ready.ok && ready.result?.ready === true ? "pass" : "fail", detail: ready.ok ? String(ready.result?.status) : String(ready.error) });
-  const capabilities = await service.capabilities();
-  const availableProtocols = new Set(capabilities.result?.protocols || []);
-  const availableFeatures = new Set(capabilities.result?.features || []);
-  const missingProtocols = protocols.filter((protocol) => !availableProtocols.has(protocol));
-  const missingFeatures = REQUIRED_FEATURES.filter((feature) => !availableFeatures.has(feature));
-  const compatible = capabilities.ok
-    && capabilities.result?.api_version === "1.0"
-    && missingProtocols.length === 0
-    && missingFeatures.length === 0;
-  const compatibilityDetail = compatible
-    ? `service ${capabilities.result?.service_version}`
-    : `api=${capabilities.result?.api_version || "unavailable"}; missing_protocols=${missingProtocols.join(",")}; missing_features=${missingFeatures.join(",")}`;
-  checks.push({ name: "capabilities", status: compatible ? "pass" : "fail", detail: compatibilityDetail });
-  // 提醒出口（方案 32）不是必需特性：没有就只做 memory，这里报 warn 让人知道提醒接不接得上
-  checks.push({
-    name: "reminders",
-    status: availableFeatures.has("reminders_v1") ? "pass" : "warn",
-    detail: availableFeatures.has("reminders_v1") ? "service claims reminders (reminders_v1)" : "service has no reminders_v1; memory only",
-  });
+  if (!health.ok) {
+    // 连不上就只报这一条：就绪、特性、提醒都无从谈起，别把它们报成一串不相干的失败
+    checks.push({ name: "health", status: "fail", detail: `${String(health.error)}; start it with: habitus-server` });
+  } else {
+    checks.push({ name: "health", status: "pass", detail: "service reachable" });
+    checks.push(...await serviceChecks(service, protocols ?? registeredProtocols(registry, registrations)));
+  }
   try {
     const inventory = await outboxInventory(config.stateRoot);
     const failed = inventory.blocked > 0
@@ -70,6 +58,50 @@ export async function runPluginDoctor(
     checks.push({ name: "outbox", status: "fail", detail: error?.message || String(error) });
   }
   return { ok: checks.every((check) => check.status !== "fail"), checks };
+}
+
+// 只有本机已注册的宿主，它的会话协议缺了才算失败；别的宿主缺协议只提示（新 CLI 连老服务时只用 Codex 的人照常能用）
+function registeredProtocols(registry, registrations) {
+  const registered = new Set(registrations.filter((check) => check.status === "pass").map((check) => check.name));
+  return registry.list().filter((definition) => registered.has(`harness_${definition.id}`)).map((definition) => definition.protocol);
+}
+
+async function serviceChecks(service, requiredProtocols) {
+  const checks = [];
+  const ready = await service.ready();
+  checks.push({ name: "ready", status: ready.ok && ready.result?.ready === true ? "pass" : "fail", detail: ready.ok ? String(ready.result?.status) : String(ready.error) });
+  const capabilities = await service.capabilities();
+  const availableProtocols = new Set(capabilities.result?.protocols || []);
+  const availableFeatures = new Set(capabilities.result?.features || []);
+  const missingProtocols = requiredProtocols.filter((protocol) => !availableProtocols.has(protocol));
+  const missingFeatures = REQUIRED_FEATURES.filter((feature) => !availableFeatures.has(feature));
+  const compatible = capabilities.ok
+    && capabilities.result?.api_version === "1.0"
+    && missingProtocols.length === 0
+    && missingFeatures.length === 0;
+  const compatibilityDetail = compatible
+    ? `service ${capabilities.result?.service_version}`
+    : `api=${capabilities.result?.api_version || "unavailable"}; missing_protocols=${missingProtocols.join(",")}; missing_features=${missingFeatures.join(",")} (service is too old; upgrade habitus-server)`;
+  checks.push({ name: "capabilities", status: compatible ? "pass" : "fail", detail: compatibilityDetail });
+  // 提醒出口（方案 32）不是必需特性：没有就只做 memory，这里报 warn 让人知道提醒接不接得上
+  checks.push({
+    name: "reminders",
+    status: availableFeatures.has("reminders_v1") ? "pass" : "warn",
+    detail: availableFeatures.has("reminders_v1") ? "service claims reminders (reminders_v1)" : "service has no reminders_v1; memory only",
+  });
+  return checks;
+}
+
+// 宿主跑的是 marketplace 根里的暂存副本：npm 包升级后不 update，宿主一直跑旧插件
+export async function marketplaceCheck(registry = HARNESS_REGISTRY, env = process.env) {
+  try {
+    const status = await marketplaceStatus(defaultMarketplaceRoot(env), { sourceRoot: PLUGINS_ROOT, registry });
+    if (!status.prepared) return { name: "marketplace", status: "warn", detail: "plugins are not installed; run: habitus plugin install" };
+    if (status.stale) return { name: "marketplace", status: "warn", detail: "installed plugins are older than this npm package; run: habitus plugin update" };
+    return { name: "marketplace", status: "pass", detail: `prepared ${status.preparedAt}` };
+  } catch (error) {
+    return { name: "marketplace", status: "warn", detail: error?.message || String(error) };
+  }
 }
 
 function nodeRuntimeCheck() {
@@ -171,69 +203,24 @@ export function parseFeatureList(text) {
   return found;
 }
 
-export async function harnessRegistrationChecks(registry = HARNESS_REGISTRY) {
-  return Promise.all(registry.list().map((definition) => inspectHarness(definition)));
+export async function harnessRegistrationChecks(registry = HARNESS_REGISTRY, env = process.env, runner = undefined) {
+  return Promise.all(registry.list().map((definition) => inspectHarness(definition, env, runner)));
 }
 
-async function inspectFileHarness(definition) {
-  const { fileEntryPath } = await import("../install-memory-plugin.mjs");
-  const probe = spawnSync(definition.command, ["--version"], { encoding: "utf8", timeout: 5000 });
-  if (probe.error?.code === "ENOENT") {
-    return { name: `harness_${definition.id}`, status: "warn", detail: "Harness CLI is not installed" };
-  }
+// 和安装器用同一组注册方式去查（不再自己解析一遍宿主清单或入口文件）；宿主 CLI 报错只记 warn，不算体检失败
+async function inspectHarness(definition, env, runner = new CommandRunner()) {
+  const name = `harness_${definition.id}`;
+  let snapshot;
   try {
-    const text = await readFile(fileEntryPath(definition), "utf8");
-    const ours = text.startsWith("// habitus-memory:");
-    return {
-      name: `harness_${definition.id}`,
-      status: ours ? "pass" : "warn",
-      detail: ours ? "Habitus plugin is registered" : "plugin entry exists but is not managed by Habitus",
-    };
-  } catch {
-    return { name: `harness_${definition.id}`, status: "warn", detail: "Habitus plugin is not registered" };
+    snapshot = await registrationOf(definition).inspect(definition, runner, env);
+  } catch (error) {
+    return { name, status: "warn", detail: `Harness plugin inventory is unavailable: ${error?.message || error}` };
   }
-}
-
-function inspectHarness(definition) {
-  if (definition.registration === "file") return inspectFileHarness(definition);
-  const result = spawnSync(definition.command, definition.pluginInventory, {
-    encoding: "utf8",
-    timeout: 5000,
-    maxBuffer: 8 * 1024 * 1024,
-  });
-  if (result.error?.code === "ENOENT") {
-    return { name: `harness_${definition.id}`, status: "warn", detail: "Harness CLI is not installed" };
-  }
-  if (result.error || result.status !== 0) {
-    return { name: `harness_${definition.id}`, status: "warn", detail: "Harness plugin inventory is unavailable" };
-  }
-  try {
-    const inventory = JSON.parse(result.stdout);
-    const installed = Array.isArray(inventory?.installed)
-      ? inventory.installed
-      : Array.isArray(inventory?.plugins)
-        ? inventory.plugins
-        : Array.isArray(inventory)
-          ? inventory
-          : [];
-    const plugin = installed.find((entry) => (
-      entry?.pluginId === PLUGIN_ID
-      || (entry?.name === PLUGIN_NAME
-        && (entry?.marketplaceName === MARKETPLACE_NAME || entry?.marketplace === MARKETPLACE_NAME))
-    ));
-    const registered = Boolean(plugin && plugin.installed !== false && plugin.enabled !== false);
-    return {
-      name: `harness_${definition.id}`,
-      status: registered ? "pass" : "warn",
-      detail: registered ? "Habitus plugin is registered" : "Habitus plugin is not registered",
-    };
-  } catch {
-    return {
-      name: `harness_${definition.id}`,
-      status: "warn",
-      detail: "Harness plugin inventory returned invalid JSON",
-    };
-  }
+  if (!snapshot.available) return { name, status: "warn", detail: "Harness is not installed" };
+  if (snapshot.installed && snapshot.enabled) return { name, status: "pass", detail: "Habitus plugin is registered" };
+  if (snapshot.dangling) return { name, status: "fail", detail: "plugin entry points at a missing plugin; run: habitus plugin install" };
+  if (snapshot.foreignEntry) return { name, status: "warn", detail: "plugin entry exists but is not managed by Habitus" };
+  return { name, status: "warn", detail: "Habitus plugin is not registered" };
 }
 
 export async function outboxInventory(root, { now = Date.now(), maxPendingAgeMs = MAX_PENDING_AGE_MS } = {}) {

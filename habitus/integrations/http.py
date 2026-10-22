@@ -11,9 +11,11 @@ from habitus.foundation.redaction import redact_sensitive_text
 from habitus.integrations.agent import AgentMemoryGateway
 from habitus.integrations.sdk.contracts import ConversationRef
 from habitus.integrations.sdk.wire import encode_flush, encode_recall, encode_remember
+from habitus.memory.browse import MemoryLayerText
 from habitus.memory.conversation import ConversationAddress
 from habitus.memory.intention import MemoryIntentionRecallScope
-from habitus.memory.model import MemoryKind
+from habitus.memory.model import MemoryKind, MemoryLevel
+from habitus.memory.uri import MemoryURI
 from habitus.memory.workflow import MemoryJob, MemoryJobBlockedError, MemoryJobStatus
 from habitus.runtime import Runtime, RuntimeHealthReport
 
@@ -23,10 +25,12 @@ _SERVICE_FEATURES = (
     "conversation_cursor",
     "flush",
     "memory_jobs",
+    "memory_tree_v1",
     "recall",
     "remember",
     "remember_idempotency_v1",
     "reminders_v1",
+    "reminders_report_v1",
 )
 #: 提醒的三个固定选项由服务给（方案 32 第 4.1 条）：产品定措辞，所有宿主一样。
 _REMINDER_OPTIONS = ("现在就做", "这次不用", "知道了")
@@ -265,6 +269,81 @@ class RuntimeHTTPHandlers:
             "previous": previous,
             "job": reopened,
             "worker_restarted": retried.worker_restarted,
+        }
+
+    async def list_memory(self, uri: str | None = None) -> dict[str, object]:
+        """列记忆树的一个目录（省略是根）：子目录、文档的 ``memory://`` 地址与目录摘要，不给文件路径。"""
+
+        listing = await self.runtime.list_memory(uri)
+        return {
+            "uri": str(listing.uri),
+            "directories": [str(item) for item in listing.directories],
+            "documents": [str(item) for item in listing.documents],
+            "abstract": listing.abstract,
+        }
+
+    async def read_memory(self, uri: str) -> dict[str, object]:
+        """读一个记忆文档（结构化字段 + 正文），或一个目录的摘要 / 概览层原文。"""
+
+        value = await self.runtime.read_memory(uri)
+        if isinstance(value, MemoryLayerText):
+            return {
+                "uri": str(value.uri),
+                "node": "layer",
+                "level": "abstract" if value.level is MemoryLevel.ABSTRACT else "overview",
+                "text": value.text,
+            }
+        return {
+            "uri": str(MemoryURI.from_address(value.address)),
+            "node": "document",
+            "kind": value.kind.value,
+            "revision": value.metadata.revision,
+            "created_at": value.metadata.created_at.isoformat(),
+            "updated_at": value.metadata.updated_at.isoformat(),
+            "last_confirmed_at": None if value.metadata.last_confirmed_at is None else value.metadata.last_confirmed_at.isoformat(),
+            "fields": dict(value.fields),
+            "text": value.markdown_body,
+            "links": [link.to_dict() for link in value.links],
+            "backlinks": [link.to_dict() for link in value.backlinks],
+        }
+
+    async def reminders(self, day: date | None = None) -> dict[str, object]:
+        """某天（省略是服务所在时区的今天）每条提醒走到了哪一步：待取 / 取走了 / 说了 / 宿主没取，回话与结算结果。"""
+
+        report = await self.runtime.reminders(day)
+        return {
+            "day": report.day.isoformat(),
+            "reminders": [
+                {
+                    "request_id": item.expectation_id,
+                    "kind": item.kind,
+                    "text": item.text,
+                    "deadline": item.deadline.isoformat(),
+                    "stage": item.stage,
+                    "awaiting_at": item.awaiting_at.isoformat(),
+                    "spoken_at": None if item.spoken_at is None else item.spoken_at.isoformat(),
+                    "spoken_via": item.spoken_via,
+                    "response": item.response,
+                    "responded_at": None if item.responded_at is None else item.responded_at.isoformat(),
+                    "outcome": item.outcome,
+                    "attempts": item.attempts,
+                    "handoffs": [
+                        {
+                            "host": handoff.host,
+                            "session": handoff.session,
+                            "claimed_at": handoff.claimed_at.isoformat(),
+                            "ended": handoff.ended,
+                        }
+                        for handoff in item.handoffs
+                    ],
+                }
+                for item in report.reminders
+            ],
+            "awaiting": report.count("待取"),
+            "taken": report.count("取走了"),
+            "spoken": report.count("说了"),
+            "never_claimed": report.count("宿主没取"),
+            "responded": report.responded,
         }
 
     async def claim_reminders(self, *, host: str, session: str, at: datetime, limit: int) -> dict[str, object]:

@@ -38,4 +38,8 @@ step "Full deterministic test suite with branch coverage"
 python -m coverage run --branch -m pytest -q
 python -m coverage report
 
+# 宿主插件与 npm 命令行（plugins/）：共享库副本是否与源一致由测试守住
+step "Agent plugins and npm CLI (node --test)"
+(cd plugins && npm test)
+
 printf '\nAll checks passed.\n'

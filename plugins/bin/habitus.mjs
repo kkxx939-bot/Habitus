@@ -9,10 +9,13 @@ import { HARNESS_REGISTRY } from "../harnesses.mjs";
 import { executePluginLifecycle, parseArgs as parsePluginArgs } from "../install-memory-plugin.mjs";
 import { runPluginDoctor } from "../memory-plugin-shared/doctor.mjs";
 import { loadPluginConfig } from "../memory-plugin-shared/lib/config.mjs";
-import { HabitusServiceClient } from "../memory-plugin-shared/lib/service-client.mjs";
+import { memory } from "./memory.mjs";
+import { reminders } from "./reminders.mjs";
+import { call, connect } from "./service.mjs";
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ACTIONS = new Set(["install", "update", "remove", "status"]);
+const SERVER_COMMANDS = new Set(["init", "serve"]);
 
 const HELP = `usage: habitus <command> [options]
 
@@ -27,6 +30,10 @@ const HELP = `usage: habitus <command> [options]
   habitus doctor [--json]                           服务、特性、宿主注册、宿主 hook 开关、outbox
   habitus status [--json]                           服务健康、就绪、版本与特性
   habitus recall <问题> [--limit N] [--json]         搜记忆
+  habitus memory ls [地址]                           列记忆树的一个目录（省略是根）
+  habitus memory tree [地址] [-L 层数]                记忆树一览（默认 3 层）
+  habitus memory read <地址>                         读一条记忆，或目录的 .abstract.md / .overview.md
+  habitus reminders [--day YYYY-MM-DD] [--json]     某天（默认今天）每条提醒走到哪一步：待取 / 取走了 / 说了 / 宿主没取
 
   habitus --version | --help
 服务地址取 HABITUS_URL，或 ~/.habitus/agent-plugin/connection.json（habitus-server init 写的），默认 http://127.0.0.1:8787。
@@ -44,11 +51,17 @@ export async function main(argv, { stdout = process.stdout, stderr = process.std
       stdout.write(`${await packageVersion()}\n`);
       return 0;
     }
-    if (command === "plugin") return await plugin(args, { stdout });
+    if (command === "plugin") return await plugin(args, { stdout, env });
     if (command === "harnesses") return await harnesses(args, { stdout });
     if (command === "doctor") return await doctor(args, { stdout, env });
     if (command === "status") return await status(args, { stdout, env });
     if (command === "recall") return await recall(args, { stdout, env });
+    if (command === "memory") return await memory(args, { stdout, env });
+    if (command === "reminders") return await reminders(args, { stdout, env });
+    if (SERVER_COMMANDS.has(command)) {
+      stderr.write(`habitus ${command} 是服务端命令，现在叫 habitus-server ${command}（pip 装的 Habitus 服务带的）。\n`);
+      return 2;
+    }
     stderr.write(`unknown command: ${command}\n\n${HELP}`);
     return 2;
   } catch (error) {
@@ -57,20 +70,29 @@ export async function main(argv, { stdout = process.stdout, stderr = process.std
   }
 }
 
-async function plugin(args, { stdout }) {
+async function plugin(args, { stdout, env }) {
   const action = args[0];
+  if (args.includes("-h") || args.includes("--help")) { stdout.write(HELP); return 0; }
   if (!PLUGIN_ACTIONS.has(action)) throw new Error("usage: habitus plugin <install|update|remove|status> [options]");
-  const options = parsePluginArgs(args);
-  if (options.help) { stdout.write(HELP); return 0; }
-  const result = await executePluginLifecycle(options);
+  const options = parsePluginArgs(args, env);
+  const result = await executePluginLifecycle(options, { env });
   if (options.json) { writeJson(stdout, result); return 0; }
   stdout.write(`Habitus 插件 ${action}：${result.root}\n`);
   for (const item of result.harnesses || []) {
-    const state = !item.available ? "本机没有这个 CLI" : item.installed && item.enabled ? "已注册" : "未注册";
-    stdout.write(`  ${item.harness.padEnd(14)} ${state}\n`);
+    stdout.write(`  ${item.harness.padEnd(14)} ${harnessState(item)}\n`);
   }
-  if (result.marketplace) stdout.write(`  marketplace：${result.marketplace.prepared ? "已就绪" : "未准备"}\n`);
+  if (result.marketplace) {
+    const { prepared, stale } = result.marketplace;
+    stdout.write(`  marketplace：${!prepared ? "未准备" : stale ? "比当前 npm 包旧，运行 habitus plugin update" : "已就绪"}\n`);
+  }
   return 0;
+}
+
+function harnessState(item) {
+  if (item.installed && item.enabled) return "已注册";
+  if (item.dangling) return "入口指向的插件已不在，运行 habitus plugin install 修复";
+  if (item.foreignEntry) return "同名入口不是 Habitus 的，未注册";
+  return item.available ? "未注册" : "本机没有这个宿主";
 }
 
 async function harnesses(args, { stdout }) {
@@ -87,7 +109,7 @@ async function harnesses(args, { stdout }) {
 async function doctor(args, { stdout, env }) {
   const json = consumeFlag(args, "--json");
   rejectRest(args);
-  const report = await runPluginDoctor(loadPluginConfig(env), { registry: HARNESS_REGISTRY });
+  const report = await runPluginDoctor(loadPluginConfig(env), { registry: HARNESS_REGISTRY, env });
   if (json) writeJson(stdout, report);
   else {
     for (const check of report.checks) {
@@ -102,8 +124,7 @@ async function doctor(args, { stdout, env }) {
 async function status(args, { stdout, env }) {
   const json = consumeFlag(args, "--json");
   rejectRest(args);
-  const config = loadPluginConfig(env);
-  const service = new HabitusServiceClient(config);
+  const { config, service } = connect(env);
   const [health, ready, capabilities] = await Promise.all([service.health(), service.ready(), service.capabilities()]);
   const report = {
     base_url: config.baseUrl,
@@ -135,14 +156,12 @@ async function recall(args, { stdout, env }) {
   const query = args.join(" ").trim();
   if (!query) throw new Error("usage: habitus recall <问题> [--limit N] [--json]");
   if (limit != null && !(Number.isSafeInteger(Number(limit)) && Number(limit) > 0)) throw new Error("--limit must be a positive integer");
-  const service = new HabitusServiceClient(loadPluginConfig(env));
-  const response = await service.request("/api/v1/memory/recall", {
+  const found = await call(connect(env), "recall", "/api/v1/memory/recall", {
     method: "POST",
     body: JSON.stringify(limit == null ? { query } : { query, limit: Number(limit) }),
   });
-  if (!response.ok) throw new Error(`recall failed: ${JSON.stringify(response.error)}`);
-  if (json) { writeJson(stdout, response.result); return 0; }
-  const result = response.result || {};
+  if (json) { writeJson(stdout, found); return 0; }
+  const result = found || {};
   if (!result.memories?.length && !result.context) { stdout.write("没有相关记忆。\n"); return 0; }
   for (const item of result.memories || []) stdout.write(`${Number(item.score).toFixed(2)}  ${item.uri}\n`);
   if (result.context) stdout.write(`\n${result.context}\n`);

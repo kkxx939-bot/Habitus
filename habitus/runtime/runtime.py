@@ -6,7 +6,7 @@ import asyncio
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import Enum
 from pathlib import Path
 
@@ -30,11 +30,13 @@ from habitus.foundation.observability import (
 )
 from habitus.infrastructure.observability import AuditRecord
 from habitus.infrastructure.store.contracts import LockStoreSnapshot
+from habitus.memory.browse import MemoryLayerText, MemoryListing
 from habitus.memory.conversation import (
     ConversationAddress,
     ConversationIngressRequest,
     ConversationSummaryReference,
 )
+from habitus.memory.document import MemoryDocument
 from habitus.memory.editor import MemoryTransactionJournalState
 from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryKind
@@ -64,6 +66,7 @@ from habitus.runtime.behavior import run_vocabulary_job as _run_vocabulary_job
 from habitus.runtime.components import RuntimeComponents
 from habitus.runtime.consistency import MemoryConsistencyService, MemoryConsistencySnapshot
 from habitus.runtime.foresight_outlet import ClaimedReminder
+from habitus.runtime.foresight_reminders import ReminderDay, reminder_day
 from habitus.runtime.health import RuntimeHealthReport, RuntimeHealthService
 from habitus.runtime.lifecycle import LifecycleWorkerState
 from habitus.runtime.lifecycle_sources import memory_jobs_restored
@@ -197,7 +200,6 @@ class RuntimeConversationProtocolIngestResult:
         return self.ingest.append.next_sequence
 
 
-# TODO(memory-tree-public-read): 前端树形展示协议确定后，再增加独立公共读取服务；当前不得泄露内部存储布局。
 class Runtime:
     """只管理组装、初始化顺序和 Job 执行入口，不承载领域规则。"""
 
@@ -429,6 +431,18 @@ class Runtime:
         if foresight is None or foresight.outlet is None:
             return ()
         return await asyncio.to_thread(foresight.outlet.claim, host, session, at, limit)
+
+    async def reminders(self, day: date | None = None) -> ReminderDay:
+        """``day``（省略是本地今天）进了提醒出口的每条提醒走到了哪一步（方案 36 第 2 步）。预测层没开就是空。只读。"""
+
+        self._require_initialized("reminder report")
+        resolved = day if day is not None else datetime.now(self.config.locale.zone()).date()
+        if not isinstance(resolved, date) or isinstance(resolved, datetime):
+            raise ValueError("day must be a date")
+        foresight = self.components.foresight
+        if foresight is None:
+            return ReminderDay(resolved, ())
+        return await asyncio.to_thread(reminder_day, foresight.ledger, foresight.outlet, resolved)
 
     async def run_vocabulary_job(self, job: str, *, lane: str) -> VocabularyJobReport:
         """词表整理活正门：``grow`` 立刻每晚新增、``revise`` 立刻定期拆改。两条 lane 的词表各是各的，``lane`` 说整理哪一支。"""
@@ -839,6 +853,18 @@ class Runtime:
             kinds=kinds,
             intention_scope=intention_scope,
         )
+
+    async def list_memory(self, uri: MemoryURI | str | None = None) -> MemoryListing:
+        """浏览记忆树：列一个目录（省略是根）的子目录与文档，只给 ``memory://`` 地址（方案 36 第 2 步）。"""
+
+        self._require_initialized("memory browse")
+        return await asyncio.to_thread(self.components.memory.browser.list, uri)
+
+    async def read_memory(self, uri: MemoryURI | str) -> MemoryDocument | MemoryLayerText:
+        """读一个记忆文档，或一个目录的摘要 / 概览层。"""
+
+        self._require_initialized("memory browse")
+        return await asyncio.to_thread(self.components.memory.browser.read, uri)
 
     async def search_memory(
         self,

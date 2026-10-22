@@ -627,11 +627,17 @@ def test_noninteractive_init_hands_harness_installs_to_the_npm_command(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """插件装在 npm 包里（方案 36）：装了 ``habitus`` 命令就替用户跑 ``habitus plugin install``，宿主名原样转手；没装就说怎么装。"""
+    """插件装在 npm 包里（方案 36）：装了 ``habitus`` 命令就替用户跑 ``habitus plugin install``，宿主名原样转手；没装、
+    或 PATH 上的 ``habitus`` 是早先 pip 留下的 Python 入口，就说怎么装，安装提示只打一遍。"""
 
     destination = tmp_path / "config" / "habitus.yaml"
+    npm_command = tmp_path / "bin" / "habitus.mjs"
+    npm_command.parent.mkdir()
+    npm_command.write_text("#!/usr/bin/env node\n")
+    stale_command = tmp_path / "bin" / "habitus"
+    stale_command.write_text("#!/opt/anaconda3/bin/python\nfrom integrations.local_service.cli import main\n")
     run = Mock(return_value=Mock(returncode=0))
-    monkeypatch.setattr(cli.shutil, "which", Mock(return_value="/usr/local/bin/habitus"))
+    monkeypatch.setattr(cli.shutil, "which", Mock(return_value=str(npm_command)))
     monkeypatch.setattr(cli.subprocess, "run", run)
     arguments = [
         "init",
@@ -651,13 +657,15 @@ def test_noninteractive_init_hands_harness_installs_to_the_npm_command(
     cli.main(arguments)
 
     run.assert_called_once_with(
-        ["/usr/local/bin/habitus", "plugin", "install", "--harness", "codex", "--harness", "future-harness"],
+        [str(npm_command), "plugin", "install", "--harness", "codex", "--harness", "future-harness"],
         check=False,
     )
     assert destination.is_file()
-    monkeypatch.setattr(cli.shutil, "which", Mock(return_value=None))
-    cli.main([*arguments, "--force"])
-    assert "npm install -g @habitus/cli" in capsys.readouterr().out
+    assert "npm install" not in capsys.readouterr().out
+    for which in (None, str(stale_command)):
+        monkeypatch.setattr(cli.shutil, "which", Mock(return_value=which))
+        cli.main([*arguments, "--force"])
+        assert capsys.readouterr().out.count("npm install -g habitus") == 1
     assert run.call_count == 1
 
 

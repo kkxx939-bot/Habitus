@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 
 from habitus.conversation.source import (
     ConversationConsumerExecutionLease,
@@ -17,19 +18,22 @@ from habitus.conversation.source import (
 from habitus.foresight import ForesightError
 from habitus.foundation.integrity import canonical_json
 from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
+from habitus.pre.conversation import ConversationAdapterRegistry
 from habitus.pre.conversation.messages import ConversationMessage, ConversationToolResultStatus
 from habitus.runtime.foresight_outlet import HostMessage, ReminderOutlet
 from habitus.runtime.session_lane import BehaviorSessionConsumer
-
-#: 会话协议 → 宿主名（出口按宿主挑提问工具；认不出的协议按全部宿主的工具表认）。
-HOST_BY_PROTOCOL = {"codex_rollout": "codex", "claude_code": "claude-code", "opencode": "opencode"}
 
 
 class OutletObservingConsumer:
     """包在会话 lane 消费者外面的一层：先 ``outlet.observe``，再交给里面那个。交付契约认的几个字段原样转手。"""
 
     def __init__(
-        self, inner: BehaviorSessionConsumer, outlet: ReminderOutlet, *, observer: Observer | None = None
+        self,
+        inner: BehaviorSessionConsumer,
+        outlet: ReminderOutlet,
+        *,
+        observer: Observer | None = None,
+        host_of: Callable[[str], str | None] | None = None,
     ) -> None:
         if not isinstance(inner, BehaviorSessionConsumer):
             raise TypeError("inner must be a BehaviorSessionConsumer")
@@ -37,6 +41,8 @@ class OutletObservingConsumer:
             raise TypeError("outlet must be a ReminderOutlet")
         self.inner = inner
         self.outlet = outlet
+        #: 会话协议 → 宿主名（出口按宿主挑提问工具）；由协议适配器声明，组合根把注册表的查法传进来
+        self.host_of = host_of if host_of is not None else ConversationAdapterRegistry.with_builtins().host
         self.observer: Observer = observer if observer is not None else NullObserver()
         self.consumer = inner.consumer
         self.ordered_within_conversation = inner.ordered_within_conversation
@@ -60,7 +66,9 @@ class OutletObservingConsumer:
         return await self.inner.abandon(envelope, lease, reason=reason)
 
     async def _observe(self, envelope: ConversationSourceEnvelope) -> None:
-        host = HOST_BY_PROTOCOL.get(envelope.protocol)
+        host = self.host_of(envelope.protocol)
+        if host is None:
+            return  # 通用 SDK 协议的会话不是从哪个宿主来取过提醒的，里面也没有我们认的提问工具
         messages = tuple(host_message(item) for item in envelope.batch.messages)
         try:
             await asyncio.to_thread(self.outlet.observe, envelope.conversation_id, messages, host=host)
@@ -93,4 +101,4 @@ def host_message(message: ConversationMessage) -> HostMessage:
     )
 
 
-__all__ = ["HOST_BY_PROTOCOL", "OutletObservingConsumer", "host_message"]
+__all__ = ["OutletObservingConsumer", "host_message"]

@@ -116,7 +116,7 @@ def envelope(messages: tuple[ConversationMessage, ...]) -> ConversationSourceEnv
     )
 
 
-def wired(tmp_path: Path, bodies: list[dict[str, Any]]):  # type: ignore[no-untyped-def]
+def wired(tmp_path: Path, bodies: list[dict[str, Any]], host_of=None):  # type: ignore[no-untyped-def]
     conversation_root = tmp_path / "conversation"
     _sources, _outcomes, _memory_outputs, behavior_outputs = stores(conversation_root)
     behavior = Stores(tmp_path / "behavior")
@@ -137,13 +137,13 @@ def wired(tmp_path: Path, bodies: list[dict[str, Any]]):  # type: ignore[no-unty
     ledger.record_delivery(DAY, Delivery("e1", AWAITING_AT, 1, False, "待取", 1.0, TEXT))
     outlet.publish([OpenRequest("e1", item.kind_token, TEXT, item.deadline, item.formed_at, 1, DAY)], now=AWAITING_AT)
     assert [r.request_id for r in outlet.claim("claude-code", SESSION, CLAIMED_AT, 3)] == ["e1"]
-    consumer = OutletObservingConsumer(BehaviorSessionConsumer(session, behavior_outputs), outlet)
+    consumer = OutletObservingConsumer(BehaviorSessionConsumer(session, behavior_outputs), outlet, host_of=host_of)
     service, _memory, _behavior = delivery(conversation_root, behavior=consumer)  # type: ignore[arg-type]
     return service, ledger, provider
 
 
-def run(tmp_path: Path, answer: str, second_body: dict[str, Any]):  # type: ignore[no-untyped-def]
-    service, ledger, provider = wired(tmp_path, [description("看报错"), second_body])
+def run(tmp_path: Path, answer: str, second_body: dict[str, Any], host_of=None):  # type: ignore[no-untyped-def]
+    service, ledger, provider = wired(tmp_path, [description("看报错"), second_body], host_of)
 
     async def scenario() -> None:
         source = service.sources.put(envelope(conversation(answer)))
@@ -175,3 +175,11 @@ def test_a_fixed_noted_leaves_the_reminder_open_so_the_answer_turn_still_carries
     assert "【还开着的提醒】" not in provider.prompts[0]  # 他敲第一句话时还没问出口
     payload = json.loads(provider.prompts[1]) if provider.prompts[1].startswith("{") else None
     assert payload is None  # 材料是文字不是 JSON（只是确认提示词形状没变）
+
+
+def test_a_protocol_without_a_harness_is_not_read_for_questions(tmp_path: Path) -> None:
+    """协议没声明宿主（通用 SDK 协议）：出口不认里面的提问，会话 lane 照常。"""
+
+    ledger, provider = run(tmp_path, "这次不用", description("回答提问"), host_of=lambda _protocol: None)
+    assert [d for d in ledger.deliveries_on(DAY) if d.spoken] == [] and ledger.responses_on(DAY) == ()
+    assert provider.calls == 2

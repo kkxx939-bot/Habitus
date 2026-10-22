@@ -290,3 +290,15 @@ def test_the_session_lane_consumer_skips_sources_that_were_already_released() ->
 
     assert BehaviorSessionConsumer.skips_released_sources is True
     assert MemoryConversationConsumer.skips_released_sources is False
+
+
+def test_question_tools_follow_the_conversation_protocol() -> None:
+    """人对提问的作答开新的一轮，认的工具按会话协议：OpenCode 的 ``question`` 算，通用 SDK 协议里碰巧叫 ``question`` 的工具不算。"""
+
+    from habitus.pre.conversation import ConversationAdapterRegistry
+    from habitus.runtime.session_lane import answered_question_tools
+
+    names = answered_question_tools(ConversationAdapterRegistry.with_builtins())
+    assert names("opencode") == ("question",)
+    assert names("codex_rollout") == ("request_user_input",)  # Desktop 的异步提问作答晚来，不按工具结果开轮
+    assert names("openai_chat_completions") == ()

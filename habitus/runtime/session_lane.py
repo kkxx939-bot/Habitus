@@ -45,6 +45,7 @@ from habitus.conversation.source import (
     ConversationSourceEnvelope,
 )
 from habitus.foundation.integrity import canonical_digest, canonical_json
+from habitus.pre.conversation.adapters import ConversationAdapterRegistry
 from habitus.pre.conversation.messages import (
     ConversationMessage,
     ConversationMessageRole,
@@ -60,10 +61,22 @@ SKIP_SUBAGENT = "SUBAGENT_CONVERSATION"
 SKIP_NO_TURNS = "NO_TURNS"
 
 
+def answered_question_tools(registry: ConversationAdapterRegistry) -> Callable[[str], tuple[str, ...]]:
+    """协议 → 那个宿主里"人对它的作答算一句人说的话"的提问工具名：协议适配器声明的提问工具里同步等作答的那些。"""
+
+    def names(protocol: str) -> tuple[str, ...]:
+        return tuple(tool.tool for tool in registry.question_tools(protocol) if not tool.replies_later)
+
+    return names
+
+
+_BUILTIN_QUESTION_TOOLS = answered_question_tools(ConversationAdapterRegistry.with_builtins())
+
+
 def session_turns(
     envelope: ConversationSourceEnvelope,
     *,
-    question_tools: tuple[str, ...] = SessionLaneConfig().question_tools,
+    question_tools: tuple[str, ...] | None = None,
 ) -> tuple[SessionTurn, ...]:
     """把一份会话源信封拆成一轮一轮。子代理的会话一轮也不出。
 
@@ -75,7 +88,7 @@ def session_turns(
     return split_turns(
         envelope.conversation_id,
         tuple(_message(item) for item in envelope.batch.messages),
-        question_tools=question_tools,
+        question_tools=_BUILTIN_QUESTION_TOOLS(envelope.protocol) if question_tools is None else question_tools,
     )
 
 
@@ -104,6 +117,8 @@ class BehaviorSessionConsumer:
         self,
         lane: SessionLane | None,
         store: BehaviorSessionOutputStore,
+        *,
+        question_tools: Callable[[str], tuple[str, ...]] = _BUILTIN_QUESTION_TOOLS,
     ) -> None:
         if lane is not None and not isinstance(lane, SessionLane):
             raise TypeError("lane must be SessionLane or None")
@@ -112,6 +127,7 @@ class BehaviorSessionConsumer:
         self.lane = lane
         self.store = store
         self.output_store = store
+        self.question_tools = question_tools
         config = SessionLaneConfig() if lane is None else lane.describer.config
         # 提示词、材料上限或回执形状变了，同一份源就该算另一种处理结果。
         self.processor_fingerprint = canonical_digest(
@@ -162,7 +178,7 @@ class BehaviorSessionConsumer:
             return _skipped(SKIP_BEHAVIOR_DISABLED)
         if _SUBAGENT_MARK in envelope.conversation_id:
             return _skipped(SKIP_SUBAGENT)
-        turns = session_turns(envelope, question_tools=self.lane.describer.config.question_tools)
+        turns = session_turns(envelope, question_tools=self.question_tools(envelope.protocol))
         return turns if turns else _skipped(SKIP_NO_TURNS)
 
     async def _receipt(
@@ -195,7 +211,11 @@ class BehaviorSessionConsumer:
         )
 
 
-def session_salvager(lane: SessionLane | None) -> Callable[[ConversationSourceEnvelope], None]:
+def session_salvager(
+    lane: SessionLane | None,
+    *,
+    question_tools: Callable[[str], tuple[str, ...]] = _BUILTIN_QUESTION_TOOLS,
+) -> Callable[[ConversationSourceEnvelope], None]:
     """会话源"处理完了没有"的账坏了时由会话源那一侧调（``conversation.source.salvage``）：把这份源拆成轮，交给会话 lane
     逐轮补救（裁定 67 第 5、16 条；"写没写过"的判法、那一天收不收都在行为侧）。行为侧没启用就什么都不做。"""
 
@@ -204,7 +224,7 @@ def session_salvager(lane: SessionLane | None) -> Callable[[ConversationSourceEn
     session = lane
 
     def salvage(envelope: ConversationSourceEnvelope) -> None:
-        session.salvage(session_turns(envelope, question_tools=session.describer.config.question_tools))
+        session.salvage(session_turns(envelope, question_tools=question_tools(envelope.protocol)))
 
     return salvage
 

@@ -132,6 +132,8 @@ def test_claims_hand_out_open_requests_by_deadline_with_a_lease_and_keep_the_hos
     # 别的会话这时只拿得到没被租着的那一条
     other = run.claim("claude-code", "claude-s2", now + timedelta(minutes=5), 3)
     assert [item.request_id for item in other] == ["e4"]
+    # 没有提问工具的宿主问不了他：不给，也不点亮活性（方案 36 第四节）
+    assert run.claim("pi", "pi-s1", now + timedelta(minutes=5), 3) == ()
     with pytest.raises(ForesightError, match="limit"):
         run.claim("codex", SESSION, now, 4)
     with pytest.raises(ForesightError, match="timezone"):
@@ -723,4 +725,67 @@ def test_opencode_question_tool_is_recognised_with_its_answer(tmp_path) -> None:
     assert response.polarity == "正"
 
 
+def test_a_dismissed_synchronous_question_is_spoken_but_never_waits_for_a_late_answer(tmp_path) -> None:
+    """他把 OpenCode 的提问关掉了（工具结果是失败 "The user dismissed this question"）：问出口了记「说了」，不写回话，
+    也不记成"等晚到的作答"——同步工具的作答不会再来。"""
+
+    run, ledger, _ = outlet(tmp_path)
+    item = expectation()
+    awaiting(ledger, item)
+    now = ASKED + timedelta(minutes=10)
+    run.publish([request(item)], now=now)
+    run.claim("opencode", "opencode-ses_1", now, 3)
+    arguments = {"questions": [{"question": TEXT, "header": "提醒", "options": [{"label": o} for o in OPTIONS]}]}
+    call = HostMessage(3, now + timedelta(minutes=1), "tool_call", json.dumps(arguments, ensure_ascii=False), tool_name="question", tool_call_id="call_q")
+    dismissed = HostMessage(
+        4, now + timedelta(minutes=2), "tool_result", "The user dismissed this question", tool_name="question", tool_call_id="call_q", failed=True
+    )
+    report = run.observe("opencode-ses_1", turn(call, dismissed, at=now + timedelta(seconds=2)), host="opencode")
+    assert (report.spoken, report.responded, report.awaiting_reply) == (1, 0, 0)
+    assert ledger.responses_on(item.day) == () and run.store.asked() == {}
+
+
 from habitus.runtime.foresight_outlet import REPLY_TAG  # noqa: E402 - 放在最后：上面的夹具只用名字
+
+
+# ── habitus reminders：某天每条提醒走到了哪一步（方案 36 第 2 步）────────────────────────────────
+
+
+def test_the_reminder_day_reads_each_stage_from_the_ledger_and_the_claim_trail(tmp_path) -> None:
+    from habitus.runtime.foresight_reminders import reminder_day
+
+    run, ledger, _ = outlet(tmp_path)
+    spoken, taken, waiting, missed, quiet = (
+        expectation(f"e{i}", kind="s-k0002" if i == 1 else f"s-k000{i + 4}", deadline_hours=4 + i) for i in range(1, 6)
+    )
+    for item in (spoken, taken, waiting, missed):
+        awaiting(ledger, item)
+    ledger.record_expectation(quiet)  # 只等时窗末、没进出口的不列
+    ledger.record_delivery(quiet.day, Delivery("e5", ASKED, 1, False, "等时窗末", 1.0, TEXT))
+    ledger.record_delivery(missed.day, Delivery("e4", missed.deadline, 1, False, "宿主没取", 1.0))
+    now = ASKED + timedelta(minutes=10)
+    run.publish([request(spoken), request(taken), request(waiting)], now=now)
+    run.claim("claude-code", "claude-s1", now, 1)  # 取走 e1
+    asked_at = now + timedelta(minutes=2)
+    run.observe(
+        "claude-s1",
+        turn(
+            claude_question(TEXT, at=asked_at),
+            claude_answer(f'User has answered your questions: "{TEXT}"="现在就做". You can now continue.', at=asked_at + timedelta(seconds=30)),
+            at=now + timedelta(seconds=3),
+        ),
+        host="claude-code",
+    )
+    run.claim("codex", SESSION, now + timedelta(minutes=5), 1)  # 取走 e2，还在租约里
+
+    report = reminder_day(ledger, run, FORMED.date())
+    stages = {item.expectation_id: item.stage for item in report.reminders}
+    assert stages == {"e1": "说了", "e2": "取走了", "e3": "待取", "e4": "宿主没取"}
+    first = report.reminders[0]
+    assert (first.kind, first.text, first.spoken_via, first.spoken_at, first.response) == (
+        "写周报", TEXT, "claude-code", asked_at, "正",
+    )
+    second = next(item for item in report.reminders if item.expectation_id == "e2")
+    assert second.attempts == 0 and [(h.host, h.session, h.ended) for h in second.handoffs] == [("codex", SESSION, None)]
+    assert (report.count("说了"), report.count("宿主没取"), report.responded) == (1, 1, 1)
+    assert reminder_day(ledger, None, FORMED.date()).reminders[0].kind == "s-k0002"  # 没有出口就给编号

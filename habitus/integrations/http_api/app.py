@@ -41,6 +41,8 @@ from habitus.integrations.http_api.schemas import (
     HTTPErrorCode,
     JobListResult,
     JobStatusResult,
+    MemoryListResult,
+    MemoryReadResult,
     RecallRequest,
     RecallResult,
     RememberJobResult,
@@ -48,6 +50,7 @@ from habitus.integrations.http_api.schemas import (
     RememberResult,
     ReminderClaimRequest,
     ReminderClaimResult,
+    ReminderDayResult,
     RetryJobRequest,
     RetryJobResult,
     SuccessResponse,
@@ -206,6 +209,30 @@ def _build_public_router(
             intention_scope=body.intention_scope,
         )
         return _success(request, RecallResult.model_validate(result))
+
+    @router.get("/memory/tree", response_model=SuccessResponse[MemoryListResult])
+    async def list_memory(
+        request: Request,
+        uri: Annotated[str | None, Query(min_length=1, max_length=1024)] = None,
+    ) -> SuccessResponse[object]:
+        result = await handlers.list_memory(uri)
+        return _success(request, MemoryListResult.model_validate(result))
+
+    @router.get("/memory/document", response_model=SuccessResponse[MemoryReadResult])
+    async def read_memory(
+        request: Request,
+        uri: Annotated[str, Query(min_length=1, max_length=1024)],
+    ) -> SuccessResponse[object]:
+        result = await handlers.read_memory(uri)
+        return _success(request, MemoryReadResult.model_validate(result))
+
+    @router.get("/reminders", response_model=SuccessResponse[ReminderDayResult])
+    async def reminders(
+        request: Request,
+        day: Annotated[date | None, Query()] = None,
+    ) -> SuccessResponse[object]:
+        result = await handlers.reminders(day)
+        return _success(request, ReminderDayResult.model_validate(result))
 
     @router.post("/reminders/claim", response_model=SuccessResponse[ReminderClaimResult])
     async def claim_reminders(
