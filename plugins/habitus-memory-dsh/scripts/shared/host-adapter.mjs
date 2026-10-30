@@ -27,3 +27,11 @@ export function safeIdentifier(value) {
   if (!normalized) throw new Error("host session identity is missing");
   return normalized.slice(0, 220);
 }
+
+// 适配器的 selectCompleted 收尾：boundaries 是这一段里每一轮结束的位置（读到第几条、收下了几条），按先后排；
+// 一轮都没结束给 null。最后一轮的结束处就是这一次能确认到的位置
+export function completedTurns(accepted, boundaries) {
+  const last = boundaries.at(-1);
+  if (last == null) return null;
+  return { consumedCount: last.consumedCount, records: accepted.slice(0, last.recordCount), afterTurn: true, boundaries };
+}

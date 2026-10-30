@@ -1,4 +1,6 @@
 // GENERATED FROM plugins/memory-plugin-shared/lib. DO NOT EDIT.
+import { rememberPartBody } from "./remember-parts.mjs";
+
 // 服务的错误体是 {code, message, retryable}：记日志、写 outbox 时转成一行字（直接 String() 只得到 "[object Object]"）
 export function errorText(error) {
   if (error == null) return "";
@@ -8,6 +10,20 @@ export function errorText(error) {
     return error.code ? `${error.code}: ${error.message}` : error.message;
   }
   try { return JSON.stringify(error); } catch { return String(error); }
+}
+
+// remember 的请求体：送的与按服务上限量大小的是同一份字节
+export function rememberBody(item) {
+  return JSON.stringify({
+    delivery_id: item.deliveryId,
+    conversation_id: item.conversationId,
+    started_on: item.startedOn,
+    protocol: item.protocol,
+    payload: item.payload,
+    start_sequence: item.startSequence,
+    occurred_at: item.occurredAt,
+    after_turn: item.afterTurn,
+  });
 }
 
 function retryableStatus(status) {
@@ -21,20 +37,24 @@ export class HabitusServiceClient {
     this.fetchImpl = fetchImpl;
   }
 
-  async request(path, init = {}, timeoutMs = this.config.timeoutMs) {
+  // reportedStatuses：契约里仍回 SuccessResponse 的非 2xx 状态码（/ready 未就绪的 503），按成功读出 result
+  async request(path, init = {}, timeoutMs = this.config.timeoutMs, { reportedStatuses = [] } = {}) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
+      // 不跟随重定向：只认 baseUrl 这个本机地址（config.mjs），回 3xx 当请求失败，转写不会跟着被送到别处
       const response = await this.fetchImpl(`${this.config.baseUrl}${path}`, {
         ...init,
         headers: { "Content-Type": "application/json", ...(init.headers || {}) },
+        redirect: "error",
         signal: controller.signal,
       });
       const body = await response.json().catch(() => null);
       if (!body || typeof body !== "object") {
         return { ok: false, status: response.status, retryable: true, error: "invalid JSON response" };
       }
-      if (!response.ok || body.status === "error") {
+      const reported = reportedStatuses.includes(response.status) && body.status === "ok";
+      if ((!response.ok && !reported) || body.status === "error") {
         const retryable = body?.error?.retryable;
         return {
           ok: false,
@@ -52,8 +72,9 @@ export class HabitusServiceClient {
   }
 
   health() { return this.request("/health"); }
-  ready() { return this.request("/ready"); }
-  capabilities() { return this.request("/api/v1/capabilities"); }
+  // 未就绪时回 503 + HealthResult（ready: false 与各项检查），调用方按 result.ready 判
+  ready(timeoutMs) { return this.request("/ready", {}, timeoutMs, { reportedStatuses: [503] }); }
+  capabilities(timeoutMs) { return this.request("/api/v1/capabilities", {}, timeoutMs); }
 
   cursor(conversationId, startedOn) {
     const query = new URLSearchParams({ conversation_id: conversationId, started_on: startedOn });
@@ -61,22 +82,15 @@ export class HabitusServiceClient {
   }
 
   remember(item) {
-    return this.request("/api/v1/memory/remember", {
-      method: "POST",
-      body: JSON.stringify({
-        delivery_id: item.deliveryId,
-        conversation_id: item.conversationId,
-        started_on: item.startedOn,
-        protocol: item.protocol,
-        payload: item.payload,
-        start_sequence: item.startSequence,
-        occurred_at: item.occurredAt,
-        after_turn: item.afterTurn,
-      }),
-    });
+    return this.request("/api/v1/memory/remember", { method: "POST", body: rememberBody(item) });
   }
 
-  recall(query, state) {
+  // 单独一轮超过请求体上限时分块上传的一块（remember-parts.mjs）
+  rememberPart(part) {
+    return this.request("/api/v1/memory/remember/parts", { method: "POST", body: rememberPartBody(part) });
+  }
+
+  recall(query, state, timeoutMs) {
     return this.request("/api/v1/memory/recall", {
       method: "POST",
       body: JSON.stringify({
@@ -84,7 +98,7 @@ export class HabitusServiceClient {
         conversation_id: state.conversationId,
         started_on: state.startedOn,
       }),
-    });
+    }, timeoutMs);
   }
 
   flush(state) {

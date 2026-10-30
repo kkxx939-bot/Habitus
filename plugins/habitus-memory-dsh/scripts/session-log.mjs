@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, readFile, readdir, stat } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import * as zlib from "node:zlib";
+import { dropTornTail } from "./shared/parts-transcript.mjs";
 
 // DeepSeek Harness（deepseek-ai/deepseek-harness，MIT）的会话日志（dsh-session-persistence-jsonl，0.2.1-rc.2 源码）：
 //   $DSH_HOME/sessions/--<规范化 cwd>--/<转义后的会话 id>/session.v<N>.jsonl[.zstd]
@@ -126,9 +127,8 @@ export async function mirrorEvents(stateRoot, sessionId, events) {
   const fresh = events.filter((event) => event.seq > last).sort((left, right) => left.seq - right.seq);
   if (fresh.length > 0) {
     await mkdir(join(stateRoot, "transcripts", "dsh"), { recursive: true, mode: 0o700 });
-    const existing = await stat(path).then((value) => value.size, () => 0);
-    const prefix = existing > 0 && !(await readFile(path, "utf8")).endsWith("\n") ? "\n" : "";
-    await appendFile(path, `${prefix}${fresh.map((event) => JSON.stringify(event)).join("\n")}\n`, { mode: 0o600 });
+    await dropTornTail(path);
+    await appendFile(path, `${fresh.map((event) => JSON.stringify(event)).join("\n")}\n`, { mode: 0o600 });
   }
   return { path, appended: fresh.length };
 }

@@ -17,6 +17,7 @@ import { listOutbox } from "../lib/outbox.mjs";
 import { PluginCore } from "../lib/plugin-core.mjs";
 import { HabitusServiceClient } from "../lib/service-client.mjs";
 import { readState, withSessionLock } from "../lib/state-store.mjs";
+import { isolatedEnv } from "./support/isolated-env.mjs";
 
 const PLUGINS_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const FEATURES = ["conversation_cursor", "flush", "recall", "remember", "remember_idempotency_v1"];
@@ -286,37 +287,39 @@ test("marketplace preparation is isolated and produces private manifests", async
   const manifestMode = (await stat(join(root, ".agents", "plugins", "marketplace.json"))).mode & 0o777;
   assert.equal(manifestMode, 0o600);
   const hooks = JSON.parse(await readFile(join(root, "plugins", "habitus-memory-claude-code", "hooks", "hooks.json"), "utf8"));
-  assert.ok(hooks.hooks.SubagentStart);
-  assert.ok(hooks.hooks.SubagentStop);
+  // 子代理的会话不进记忆：Claude Code 的插件不挂 SubagentStart / SubagentStop
+  assert.equal(hooks.hooks.SubagentStart, undefined);
+  assert.equal(hooks.hooks.SubagentStop, undefined);
 });
 
 test("plugin lifecycle is idempotent, migrates sources, rolls back, and removes cleanly", async (t) => {
   const root = await temporaryRoot(t);
   const runner = new FakeHostRunner();
+  const { env } = await isolatedEnv(t);
   const options = { action: "install", host: "codex", root, prepareOnly: false, json: true };
 
-  await executePluginLifecycle(options, { runner });
+  await executePluginLifecycle(options, { runner, env });
   assert.equal(runner.marketplaceSource, root);
   assert.equal(runner.installed, true);
   const firstCallCount = runner.calls.length;
-  await executePluginLifecycle(options, { runner });
+  await executePluginLifecycle(options, { runner, env });
   assert.equal(runner.calls.length, firstCallCount);
 
   runner.marketplaceSource = join(root, "old-source");
-  await executePluginLifecycle(options, { runner });
+  await executePluginLifecycle(options, { runner, env });
   assert.equal(runner.marketplaceSource, root);
   assert.equal(runner.installed, true);
 
   runner.failNextPluginAdd = true;
   await assert.rejects(
-    executePluginLifecycle({ ...options, action: "update" }, { runner }),
+    executePluginLifecycle({ ...options, action: "update" }, { runner, env }),
     /simulated host cache failure/,
   );
   assert.equal(runner.marketplaceSource, root);
   assert.equal(runner.installed, true);
-  assert.equal((await executePluginLifecycle({ ...options, action: "status" }, { runner })).marketplace.prepared, true);
+  assert.equal((await executePluginLifecycle({ ...options, action: "status" }, { runner, env })).marketplace.prepared, true);
 
-  const removed = await executePluginLifecycle({ ...options, action: "remove" }, { runner });
+  const removed = await executePluginLifecycle({ ...options, action: "remove" }, { runner, env });
   assert.equal(removed.removed, true);
   assert.equal(runner.marketplaceSource, null);
   assert.equal(runner.installed, false);
@@ -365,28 +368,38 @@ test("Harness registry drives a future adapter through lifecycle orchestration",
   assert.equal(result.harnesses[0].available, true);
 });
 
+// 隔离的 HOME / PATH 下跑（PATH 上的 codex 是假的、报告插件已注册），两次子进程都带超时、到点 SIGKILL：
+// doctor 一路问到 hook 批没批（hooks_review_codex），所有宿主调用都落在临时目录里
 test("the habitus command runs through a filesystem symlink (npm global bin)", async (t) => {
   const directory = await temporaryRoot(t);
+  const isolated = await isolatedEnv(t, { fakeCodex: true });
   const command = join(directory, "habitus");
   await symlink(join(PLUGINS_ROOT, "bin", "habitus.mjs"), command);
   const marketplace = join(directory, "marketplace");
+  const bounded = { encoding: "utf8", timeout: 30_000, killSignal: "SIGKILL" };
   const installed = spawnSync(process.execPath, [command, "plugin", "install", "--prepare-only", "--root", marketplace, "--json"], {
-    encoding: "utf8",
+    ...bounded,
+    env: isolated.env,
   });
   assert.equal(installed.status, 0, installed.stderr);
   assert.equal(JSON.parse(installed.stdout).preparedOnly, true);
 
   const diagnosed = spawnSync(process.execPath, [command, "doctor", "--json"], {
-    encoding: "utf8",
+    ...bounded,
     env: {
-      ...process.env,
+      ...isolated.env,
       HABITUS_URL: "http://127.0.0.1:1",
       HABITUS_PLUGIN_STATE_DIR: join(directory, "state"),
       HABITUS_PLUGIN_TIMEOUT_MS: "250",
     },
   });
-  assert.equal(diagnosed.status, 1);
-  assert.equal(Array.isArray(JSON.parse(diagnosed.stdout).checks), true);
+  assert.equal(diagnosed.error, undefined);
+  assert.equal(diagnosed.status, 1, diagnosed.stderr);
+  const checks = JSON.parse(diagnosed.stdout).checks;
+  assert.ok(checks.some((check) => check.name === "hooks_review_codex"), JSON.stringify(checks));
+  const calls = await isolated.calls();
+  assert.ok(calls.some((call) => call.command === "codex" && call.argv === "app-server"), JSON.stringify(calls));
+  assert.ok(calls.every((call) => call.home === isolated.env.HOME), JSON.stringify(calls));
 });
 
 test("real Codex hook process negotiates, recalls, and persists its injection receipt", async (t) => {
@@ -395,7 +408,7 @@ test("real Codex hook process negotiates, recalls, and persists its injection re
     const result = request.url === "/api/v1/capabilities"
       ? { api_version: "1.0", service_version: "test", protocols: ["codex_rollout"], features: FEATURES }
       : request.url === "/ready"
-        ? { ready: true, status: "healthy" }
+        ? { ready: true, recall_ready: true, status: "healthy" }
         : request.url === "/api/v1/memory/recall"
           ? { context: "remembered context", query: "prompt", queries: ["prompt"], memories: [], summaries: [], degradations: [], budget_exhausted: false }
           : {};
@@ -425,7 +438,7 @@ test("real Codex hook process negotiates, recalls, and persists its injection re
     script,
     JSON.stringify({ session_id: "hook-smoke", prompt: "prompt" }),
     {
-      ...process.env,
+      ...(await isolatedEnv(t)).env,
       HABITUS_URL: `http://127.0.0.1:${address.port}`,
       HABITUS_PLUGIN_STATE_DIR: stateRoot,
       HABITUS_PLUGIN_TIMEOUT_MS: "1000",
@@ -465,7 +478,7 @@ test("recall performs capability negotiation before readiness and never calls re
       ok: true,
       result: { api_version: "2.0", protocols: ["codex_rollout"], features: FEATURES },
     }),
-    ready: async () => { readyCalls += 1; return { ok: true, result: { ready: true } }; },
+    ready: async () => { readyCalls += 1; return { ok: true, result: { ready: true, recall_ready: true } }; },
     recall: async () => { recallCalls += 1; return { ok: true, result: { context: "unsafe" } }; },
   };
   const core = new PluginCore({ stateRoot, timeoutMs: 1000 }, { service });
@@ -473,6 +486,52 @@ test("recall performs capability negotiation before readiness and never calls re
   assert.equal(await core.recall(adapter(() => null), { session_id: "incompatible-recall", prompt: "hello" }), "");
   assert.equal(readyCalls, 0);
   assert.equal(recallCalls, 0);
+});
+
+// 裁定 80 问题 2：记忆写入侧停住（Job 失败待处置、在等模型恢复，/ready 503）不让召回停下；召回本身没就绪才跳过
+test("recall goes on while only the memory write side is not ready and stops when recall itself is not", async (t) => {
+  const stateRoot = await temporaryRoot(t);
+  let recalls = 0;
+  let readiness = { ready: false, recall_ready: true, status: "degraded" };
+  const service = {
+    capabilities: async () => ({ ok: true, result: { api_version: "1.0", protocols: ["codex_rollout"], features: FEATURES } }),
+    ready: async () => ({ ok: true, status: 503, result: readiness }),
+    recall: async () => { recalls += 1; return { ok: true, result: { context: "他喜欢简洁回答" } }; },
+  };
+  const core = new PluginCore({ stateRoot, timeoutMs: 1000 }, { service });
+  assert.equal(await core.recall(adapter(() => null), { session_id: "write-side-blocked", prompt: "hello" }), "他喜欢简洁回答");
+  readiness = { ready: false, recall_ready: false, status: "unhealthy" };
+  assert.equal(await core.recall(adapter(() => null), { session_id: "write-side-blocked", prompt: "hello" }), "");
+  assert.equal(recalls, 1);
+});
+
+test("the doctor and the hooks judge a service's compatibility the same way", async (t) => {
+  const stateRoot = await temporaryRoot(t);
+  const full = { api_version: "1.0", service_version: "test", protocols: ["codex_rollout"], features: [...FEATURES, "reminders_v1"] };
+  const cases = [
+    full,
+    { ...full, api_version: "2.0" },
+    { ...full, protocols: ["claude_code"] },
+    ...FEATURES.map((missing) => ({ ...full, features: full.features.filter((feature) => feature !== missing) })),
+  ];
+  for (const [index, result] of cases.entries()) {
+    const service = {
+      health: async () => ({ ok: true }),
+      ready: async () => ({ ok: true, result: { ready: true, recall_ready: true, status: "healthy" } }),
+      capabilities: async () => ({ ok: true, result }),
+    };
+    const core = new PluginCore({ stateRoot, timeoutMs: 1000 }, { service });
+    const hookAccepts = await core.sessionStart(adapter(() => null), { session_id: `compat-${index}` }).then(() => true, () => false);
+    const report = await runPluginDoctor({ stateRoot }, {
+      service,
+      inspectHarnesses: async () => [{ name: "harness_codex", status: "pass" }],
+      inspectFeatures: async () => [], inspectHookReviews: async () => [],
+      inspectMarketplace: async () => ({ name: "marketplace", status: "pass", detail: "" }),
+    });
+    const doctorAccepts = report.checks.find((check) => check.name === "capabilities").status === "pass";
+    assert.equal(doctorAccepts, hookAccepts, JSON.stringify(result));
+    assert.equal(hookAccepts, index === 0, JSON.stringify(result));
+  }
 });
 
 test("host adapter identifiers cannot escape the plugin state root", () => {
@@ -537,7 +596,7 @@ test("session start recovers another pending session for the same host", async (
   assert.deepEqual(delivered, ["orphan"]);
 });
 
-test("remember network I/O does not hold the session lock", async (t) => {
+test("remember network I/O does not hold the session lock", { timeout: 20_000 }, async (t) => {
   const stateRoot = await temporaryRoot(t);
   const input = { session_id: "network-lock" };
   const host = adapter((cursor) => cursor == null
@@ -559,7 +618,11 @@ test("remember network I/O does not hold the session lock", async (t) => {
   const core = new PluginCore({ stateRoot, timeoutMs: 1000 }, { service });
   await core.enqueueCapture(host, input);
   const draining = core.drain(host, input);
-  await rememberStarted;
+  // drain 没走到 remember 就返回了（比如服务被判不兼容）时立刻失败，不在 rememberStarted 前一直挂着
+  await Promise.race([
+    rememberStarted,
+    draining.then((result) => { throw new Error(`drain finished before remember: ${JSON.stringify(result)}`); }),
+  ]);
   let entered = false;
   await withSessionLock(stateRoot, host.host, input.session_id, async () => { entered = true; });
   assert.equal(entered, true);
@@ -576,7 +639,7 @@ test("plugin doctor reports every durable outbox lifecycle state", async (t) => 
   await core.enqueueCapture(host, { session_id: "doctor-outbox" });
   const service = {
     health: async () => ({ ok: true, result: { status: "healthy" } }),
-    ready: async () => ({ ok: true, result: { ready: true, status: "healthy" } }),
+    ready: async () => ({ ok: true, result: { ready: true, recall_ready: true, status: "healthy" } }),
     capabilities: async () => ({
       ok: true,
       result: {
@@ -589,7 +652,7 @@ test("plugin doctor reports every durable outbox lifecycle state", async (t) => 
   };
   const report = await runPluginDoctor(
     { stateRoot },
-    { service, inspectHarnesses: async () => [], inspectFeatures: async () => [] },
+    { service, env: (await isolatedEnv(t)).env, inspectHarnesses: async () => [], inspectFeatures: async () => [] },
   );
   const outbox = report.checks.find((check) => check.name === "outbox");
   assert.equal(report.ok, true, JSON.stringify(report.checks));
@@ -608,7 +671,7 @@ test("plugin doctor fails when an outbox session lost its durable state", async 
   await rm(join(stateRoot, "sessions", host.host, stateFiles.find((name) => name.endsWith(".json"))));
   const service = {
     health: async () => ({ ok: true, result: { status: "healthy" } }),
-    ready: async () => ({ ok: true, result: { ready: true, status: "healthy" } }),
+    ready: async () => ({ ok: true, result: { ready: true, recall_ready: true, status: "healthy" } }),
     capabilities: async () => ({
       ok: true,
       result: {
@@ -620,7 +683,7 @@ test("plugin doctor fails when an outbox session lost its durable state", async 
 
   const report = await runPluginDoctor(
     { stateRoot },
-    { service, inspectHarnesses: async () => [] },
+    { service, env: (await isolatedEnv(t)).env, inspectHarnesses: async () => [] },
   );
   const outbox = report.checks.find((check) => check.name === "outbox");
   assert.equal(report.ok, false);
@@ -663,7 +726,9 @@ test("hook boundary fails open and records a private structured failure", async 
   const result = spawnSync(process.execPath, [script], {
     input: "{not-json",
     encoding: "utf8",
-    env: { ...process.env, HABITUS_PLUGIN_DEBUG: "0", HABITUS_PLUGIN_STATE_DIR: stateRoot },
+    env: { ...(await isolatedEnv(t)).env, HABITUS_PLUGIN_DEBUG: "0", HABITUS_PLUGIN_STATE_DIR: stateRoot },
+    timeout: 30_000,
+    killSignal: "SIGKILL",
   });
 
   assert.equal(result.status, 0);
@@ -676,4 +741,26 @@ test("hook boundary fails open and records a private structured failure", async 
   assert.equal(event.stage, "hook");
   assert.equal(event.retryable, true);
   assert.equal((await stat(logPath)).mode & 0o777, 0o600);
+});
+
+// 杀变异 R2-PC07（入队前不剥媒体）：媒体载荷在入队前换成占位，适配器给的记录哪怕没剥过（不经 readJsonlDelta 的适配器），
+// outbox 里与送出去的都不带 base64
+test("media payloads are replaced before a capture is queued, whichever adapter read the records", async (t) => {
+  const stateRoot = await temporaryRoot(t);
+  const image = `data:image/png;base64,${"A".repeat(4096)}`;
+  const core = new PluginCore({ stateRoot, timeoutMs: 1000 }, { service: {} });
+  const host = adapter((cursor) => cursor == null
+    ? {
+      records: [{ type: "user", content: [{ type: "input_image", image_url: image }, { type: "input_text", text: "看图" }] }],
+      startCursor: null,
+      nextCursor: transcriptCursor(1),
+      afterTurn: true,
+    }
+    : null);
+  await core.enqueueCapture(host, { session_id: "media" });
+  const [item] = await listOutbox(stateRoot, host.host, "media");
+  const queued = JSON.stringify(item);
+  assert.equal(queued.includes("AAAA"), false);
+  assert.match(queued, /"omitted_bytes":4118/);
+  assert.match(queued, /"text":"看图"/);
 });

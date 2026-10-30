@@ -64,6 +64,16 @@ function connectionURL(stateRoot) {
   }
 }
 
+// HABITUS_PLUGIN_DEBUG 只在这里解析（config.debug）；配置读不出来时 hook 入口也用它判要不要打堆栈
+export function debugEnabled(env = process.env) {
+  return booleanValue(env.HABITUS_PLUGIN_DEBUG, false);
+}
+
+// 后台请求与问宿主（habitus doctor / plugin status 问 Codex 的 hook 批没批）共用的超时；单独可取，读不出连接配置时也取得到
+export function pluginTimeoutMs(env = process.env) {
+  return integerValue(env.HABITUS_PLUGIN_TIMEOUT_MS, 15_000, 250, 120_000);
+}
+
 export function loadPluginConfig(env = process.env) {
   const selectedConfig = env.HABITUS_CONFIG_FILE
     ? join(dirname(resolve(env.HABITUS_CONFIG_FILE)), "agent-plugin")
@@ -73,16 +83,22 @@ export function loadPluginConfig(env = process.env) {
     enabled: booleanValue(env.HABITUS_MEMORY_ENABLED, true),
     baseUrl: requireLoopbackURL(env.HABITUS_URL || connectionURL(stateRoot) || "http://127.0.0.1:8787"),
     stateRoot,
-    timeoutMs: integerValue(env.HABITUS_PLUGIN_TIMEOUT_MS, 15_000, 250, 120_000),
+    timeoutMs: pluginTimeoutMs(env),
+    // 读转写一次最多读这么多增量（从游标往后；不管整个转写多大），超过的下次接着读
     maxTranscriptBytes: integerValue(env.HABITUS_PLUGIN_MAX_TRANSCRIPT_BYTES, 64 * 1024 * 1024, 1024, 256 * 1024 * 1024),
-    debug: booleanValue(env.HABITUS_PLUGIN_DEBUG, false),
+    debug: debugEnabled(env),
     // 操作日志按大小轮转（26 号清单 7.2）：超过这么大就换一份，旧的留这么多份
     operationLogMaxBytes: integerValue(env.HABITUS_PLUGIN_LOG_MAX_BYTES, 5 * 1024 * 1024, 4096, 256 * 1024 * 1024),
     operationLogKeep: integerValue(env.HABITUS_PLUGIN_LOG_KEEP, 3, 1, 50),
     // 会话状态的退场（26 号清单 7.4）：transcript 不在了、outbox 空了，状态又这么久没动过，才删
     sessionRetireGraceMs: integerValue(env.HABITUS_PLUGIN_SESSION_GRACE_HOURS, 24, 1, 720) * 3_600_000,
-    // 提醒出口（方案 32 第五节）：一次最多取几条（服务端另有上限）、取的单独超时（在 UserPromptSubmit 的预算之内，失败就当这一轮没有提醒）
+    // 提醒出口（方案 32 第五节）：一次最多取几条（服务端另有上限）、取的单独超时（在下面 UserPromptSubmit 的预算之内，失败就当这一轮没有提醒）
     reminderClaimLimit: integerValue(env.HABITUS_PLUGIN_REMINDER_LIMIT, 3, 1, 20),
     reminderTimeoutMs: integerValue(env.HABITUS_PLUGIN_REMINDER_TIMEOUT_MS, 2_000, 250, 30_000),
+    // UserPromptSubmit 这一路（问 capabilities、ready、召回、取提醒）的总预算，宿主给这个 hook 30 s（hooks.json）：
+    // 取提醒占预算的最后 reminderTimeoutMs（最多一半），前面几个请求共用其余部分；每个请求的超时取"自己的超时"与"预算剩下的"中小的那个，
+    // 服务接了连接不回话时整条路径也在预算内收场。只管这一路，Stop / SessionEnd 等后台 worker 仍用 timeoutMs。
+    // 默认 20 s：召回走服务的多查询规划与充分性判断（都调模型），留给它的约 18 s 不少于原来单个请求的 15 s；加上等会话锁的最多 5 s 仍在 30 s 内
+    promptBudgetMs: integerValue(env.HABITUS_PLUGIN_PROMPT_BUDGET_MS, 20_000, 1_000, 25_000),
   });
 }

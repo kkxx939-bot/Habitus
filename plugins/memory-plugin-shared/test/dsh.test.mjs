@@ -8,7 +8,7 @@ import * as zlib from "node:zlib";
 import { createDshAdapter } from "../../habitus-memory-dsh/scripts/host-adapter.mjs";
 import { decodeLog, encodeSegment, mirrorEvents, readSessionLog } from "../../habitus-memory-dsh/scripts/session-log.mjs";
 import { executePluginLifecycle } from "../../install-memory-plugin.mjs";
-import { promptInjection } from "../lib/hook-runner.mjs";
+import { createContextInjection, promptInjection } from "../lib/hook-runner.mjs";
 import { requireHostAdapter } from "../lib/host-adapter.mjs";
 import { patchFilePath } from "../../registrations.mjs";
 import { HARNESS_REGISTRY } from "../../harnesses.mjs";
@@ -65,6 +65,20 @@ test("the local mirror only appends events past the last mirrored seq", async (t
   assert.deepEqual(seqs, [1, 2, 3]);
 });
 
+test("a torn last line in the mirror is cut before appending, so the session stays readable", async (t) => {
+  const stateRoot = await temporaryRoot(t);
+  const config = { enabled: true, stateRoot, timeoutMs: 1000, maxTranscriptBytes: 1 << 20 };
+  const events = [event(1, "turn/start"), event(2, "user/message"), event(3, "turn/end"), event(4, "turn/start"), event(5, "user/message"), event(6, "turn/end")];
+  const adapter = createDshAdapter({ readLog: async () => ({ header: header("torn"), events }) });
+  const { path } = await mirrorEvents(stateRoot, "torn", events.slice(0, 3));
+  await writeFile(path, `${await readFile(path, "utf8")}${JSON.stringify(events[3]).slice(0, 20)}`);
+  const stop = await adapter.prepareInput({ session_id: "torn", transcript_path: "" }, config, "stop");
+  const delta = await adapter.readTranscriptDelta(stop, null, config, []);
+  assert.equal(delta.records.length, 6);
+  const seqs = (await readFile(path, "utf8")).trim().split("\n").map((value) => JSON.parse(value).seq);
+  assert.deepEqual(seqs, [1, 2, 3, 4, 5, 6]);
+});
+
 test("the dsh adapter mirrors on capture, recognises subagent sessions and skips their prompts", async (t) => {
   const stateRoot = await temporaryRoot(t);
   const config = { enabled: true, stateRoot, timeoutMs: 1000, maxTranscriptBytes: 1 << 20 };
@@ -79,9 +93,21 @@ test("the dsh adapter mirrors on capture, recognises subagent sessions and skips
   assert.equal((await readFile(stop.transcript_path, "utf8")).trim().split("\n").length, 2);
   assert.equal(adapter.conversationId(stop), "dsh-main");
   const child = await adapter.prepareInput({ session_id: "child", transcript_path: "", prompt: "去查" }, config, "user-prompt");
-  assert.equal(adapter.conversationId(child), "dsh-main.subagent.child");
+  assert.equal(adapter.isSubagent(child), true);
+  assert.equal(adapter.isSubagent(stop), false);
   const core = { recall: () => assert.fail("a subagent's task prompt is not his words") };
   assert.equal(await promptInjection(core, adapter, child, { config, hook: "user-prompt" }), "");
+});
+
+// Q3：子代理的会话不进记忆——Stop 时既不镜像它的日志，也不送（真跑 hook 进程的那一条在 hook-runner.test）
+test("a dsh subagent session's log is not mirrored when it stops", async (t) => {
+  const stateRoot = await temporaryRoot(t);
+  const config = { enabled: true, stateRoot, timeoutMs: 1000, maxTranscriptBytes: 1 << 20 };
+  const logs = { child: { header: header("child", { parentSession: "main", origin: "subagent" }), events: [event(1, "user/message"), event(2, "turn/end")] } };
+  const adapter = createDshAdapter({ readLog: async (id) => logs[id] });
+  const child = await adapter.prepareInput({ session_id: "child", transcript_path: "" }, config, "stop");
+  assert.equal(adapter.isSubagent(child), true);
+  await assert.rejects(readFile(child.transcript_path, "utf8"), /ENOENT/);
 });
 
 test("installing for dsh adds the hooks bridge and a managed entry to the home patch, leaving the rest alone", async (t) => {
@@ -114,4 +140,42 @@ test("installing for dsh adds the hooks bridge and a managed entry to the home p
     /flow-style YAML list/,
   );
   assert.equal(await readFile(path, "utf8"), "[{name: x}]\n");
+});
+
+async function mirroredStop(t, events) {
+  const stateRoot = await temporaryRoot(t);
+  const config = { enabled: true, stateRoot, timeoutMs: 1000, maxTranscriptBytes: 1 << 20 };
+  const adapter = createDshAdapter({ readLog: async () => ({ header: header("cut"), events }) });
+  return { adapter, config, input: await adapter.prepareInput({ session_id: "cut", transcript_path: "" }, config, "stop") };
+}
+
+// 杀变异 DS01（任意记录都能切）：dsh 只在 turn/end 之后切（裁定 69），一轮做到一半的事件留到下一批
+test("dsh batches end only at turn/end", async (t) => {
+  const events = [event(1, "turn/start"), event(2, "user/message"), event(3, "turn/end"), event(4, "turn/start"), event(5, "user/message")];
+  const { adapter, config, input } = await mirroredStop(t, events);
+  const delta = await adapter.readTranscriptDelta(input, null, config, []);
+  assert.deepEqual(delta.records.map((record) => record.seq), [1, 2, 3]);
+  const unfinished = await mirroredStop(t, events.slice(3));
+  assert.equal(await unfinished.adapter.readTranscriptDelta(unfinished.input, null, unfinished.config, []), null);
+});
+
+// 杀变异 DS04（dsh 不剥注入回执）：桥把注入的上下文写进会话日志，送回服务前要按回执剥掉
+test("blocks the plugin injected are stripped from the dsh log before it is sent", async (t) => {
+  const prepared = createContextInjection("用户偏好简洁回答。", "6".repeat(32));
+  const events = [event(1, "user/message", { text: `看报错\n${prepared.injection}` }), event(2, "turn/end")];
+  const { adapter, config, input } = await mirroredStop(t, events);
+  const delta = await adapter.readTranscriptDelta(input, null, config, [prepared.receipt]);
+  assert.equal(delta.records[0].data.text, "看报错\n");
+  assert.equal(JSON.stringify(delta.records).includes("habitus-memory-context"), false);
+});
+
+// 杀变异 DS04（只留最后一个轮边界）：一段里有几轮就给几个轮边界，按轮拼批时才能在每一轮的结束处拆开
+test("a dsh delta holding two finished turns reports both turn ends", async (t) => {
+  const events = [
+    event(1, "turn/start"), event(2, "user/message"), event(3, "turn/end"),
+    event(4, "turn/start"), event(5, "user/message"), event(6, "turn/end"),
+  ];
+  const { adapter, config, input } = await mirroredStop(t, events);
+  const delta = await adapter.readTranscriptDelta(input, null, config, []);
+  assert.deepEqual(delta.turns.map((turn) => turn.records.map((record) => record.seq)), [[1, 2, 3], [4, 5, 6]]);
 });

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +17,7 @@ import { executePluginLifecycle } from "../../install-memory-plugin.mjs";
 import { fileEntryPath } from "../../registrations.mjs";
 import { requireHostAdapter } from "../lib/host-adapter.mjs";
 import { PluginCore } from "../lib/plugin-core.mjs";
+import { isolatedEnv } from "./support/isolated-env.mjs";
 
 const FEATURES = ["conversation_cursor", "flush", "recall", "remember", "remember_idempotency_v1"];
 
@@ -33,7 +35,7 @@ function message(id, role, parts, { completed = true } = {}) {
 function fakeService({ reminders = [], context = "", remembered = [] } = {}) {
   return {
     capabilities: async () => ({ ok: true, result: { api_version: "1.0", protocols: ["opencode"], features: [...FEATURES, "reminders_v1"] } }),
-    ready: async () => ({ ok: true, result: { ready: true } }),
+    ready: async () => ({ ok: true, result: { ready: true, recall_ready: true } }),
     recall: async () => ({ ok: true, result: { context } }),
     claimReminders: async () => ({ ok: true, result: { reminders } }),
     cursor: async () => ({ ok: true, result: { next_sequence: 0 } }),
@@ -48,14 +50,15 @@ function fakeService({ reminders = [], context = "", remembered = [] } = {}) {
 test("the OpenCode host adapter satisfies the shared contract", () => {
   assert.equal(requireHostAdapter(hostAdapter), hostAdapter);
   assert.equal(hostAdapter.conversationId({ session_id: "ses_1" }), "opencode-ses_1");
-  assert.equal(hostAdapter.nativeSessionId({ session_id: "ses_2", parent_id: "ses_1" }), "ses_1.subagent.ses_2");
+  assert.equal(hostAdapter.isSubagent({ session_id: "ses_2", parent_id: "ses_1" }), true);
+  assert.equal(hostAdapter.isSubagent({ session_id: "ses_1" }), false);
   assert.equal(userText([{ type: "text", text: "注入", synthetic: true }, { type: "text", text: " 帮我看看 " }]), "帮我看看");
 });
 
 test("chat.message injects recalled memory and the reminder block as one synthetic part", async (t) => {
   const stateRoot = await temporaryRoot(t);
   const config = { enabled: true, stateRoot, timeoutMs: 1000, maxTranscriptBytes: 1 << 20, reminderClaimLimit: 3 };
-  const reminder = { request_id: "e1", kind: "写周报", text: "周四了，周报还没写。", options: ["现在就做", "这次不用", "知道了"], claimed_at: "2026-10-22T15:52:10+08:00" };
+  const reminder = { request_id: "e1", kind: "写周报", text: "周四了，周报还没写。", options: ["现在就做", "这次不用", "知道了", "已经做过了"], claimed_at: "2026-10-22T15:52:10+08:00" };
   const core = new PluginCore(config, { service: fakeService({ context: "用户偏好简洁回答。", reminders: [reminder] }) });
   const hooks = await HabitusMemoryPlugin({ client: {} }, { config, core });
   const output = { message: { id: "msg_1", sessionID: "ses_1" }, parts: [{ type: "text", text: "帮我看看这个报错" }] };
@@ -122,7 +125,7 @@ test("the mirror survives a restart without duplicating lines", async (t) => {
 
 test("installing for OpenCode writes a managed entry file and removing it deletes only ours", async (t) => {
   const root = await temporaryRoot(t);
-  const env = { XDG_CONFIG_HOME: join(root, "config") };
+  const env = { ...(await isolatedEnv(t)).env, XDG_CONFIG_HOME: join(root, "config") };
   const definition = HARNESS_REGISTRY.resolve("opencode");
   const runner = { available: () => true, json: () => ({}), run: () => { throw new Error("no CLI commands for file registration"); } };
   const marketplace = join(root, "marketplace");
@@ -238,6 +241,32 @@ test("a subagent session's task prompt neither recalls memory nor claims reminde
   assert.equal(claims, 1);
 });
 
+// Q3：task 工具起的子会话不进记忆——空闲、压缩、删除时都不镜像、不送；主会话照常
+test("a subagent session is neither mirrored nor sent when it goes idle, compacts or is deleted", async (t) => {
+  const stateRoot = await temporaryRoot(t);
+  const config = { enabled: true, stateRoot, timeoutMs: 1000, maxTranscriptBytes: 1 << 20 };
+  const remembered = [];
+  let flushed = 0;
+  const core = new PluginCore(config, { service: { ...fakeService({ remembered }), flush: async () => { flushed += 1; return { ok: true, result: {} }; } } });
+  const turn = (sessionID) => [
+    { ...message("m1", "user", [{ type: "text", text: "去查一下" }]), info: { id: `${sessionID}-1`, role: "user", sessionID, time: { created: 1 } } },
+    { ...message("m2", "assistant", [{ type: "text", text: "查到了" }]), info: { id: `${sessionID}-2`, role: "assistant", sessionID, time: { created: 1, completed: 2 } } },
+  ];
+  const client = { session: {
+    messages: async ({ path }) => ({ data: turn(path.id) }),
+    get: async ({ path }) => ({ data: { id: path.id, parentID: path.id === "ses_child" ? "ses_parent" : undefined } }),
+  } };
+  const hooks = await HabitusMemoryPlugin({ client }, { config, core });
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_child" } } });
+  await hooks["experimental.session.compacting"]({ sessionID: "ses_child" });
+  await hooks.event({ event: { type: "session.deleted", properties: { info: { id: "ses_child" } } } });
+  assert.deepEqual(remembered, []);
+  assert.equal(flushed, 0);
+  await assert.rejects(readFile(transcriptPath(stateRoot, "ses_child"), "utf8"), /ENOENT/);
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_parent" } } });
+  assert.deepEqual(remembered.map((item) => item.conversationId), ["opencode-ses_parent"]);
+});
+
 test("an assistant message left incomplete by a crash does not block later messages", async (t) => {
   const stateRoot = await temporaryRoot(t);
   const result = await new TranscriptMirror(stateRoot).mirror("ses_1", [
@@ -262,14 +291,59 @@ test("compaction summaries and the replayed prompt are not mirrored; inline atta
     message("a1", "assistant", [{ type: "tool", callID: "c", tool: "read", state: { status: "completed", input: {}, output: "Image read", attachments: [{ type: "file", mime: "image/png", url: image }], time: { start: 1, end: 2 } } }]),
     message("c", "user", [{ type: "compaction", auto: true, overflow: true }]),
     summary,
-    message("u2", "user", [{ type: "text", text: "改登录页" }]),
+    message("u2", "user", [{ type: "text", text: "改登录页" }, { type: "text", text: "[Attached image/png: a.png]" }]),
     message("a2", "assistant", [{ type: "text", text: "继续改" }]),
   ]);
   const text = await readFile(transcriptPath(stateRoot, "ses_1"), "utf8");
   const ids = text.trim().split("\n").map((line) => JSON.parse(line).info.id);
   assert.deepEqual(ids, ["u1", "a1", "c", "a2"]);
   assert.ok(!text.includes("base64"));
-  assert.match(text, /\[omitted image\/png \d+B\]/);
+  const [u1, a1] = text.trim().split("\n").map((line) => JSON.parse(line));
+  const placeholder = { type: "file", media_type: "image/png", omitted_bytes: image.length, omitted_sha256: createHash("sha256").update(image).digest("hex") };
+  assert.deepEqual(u1.parts[1], placeholder);
+  assert.deepEqual(a1.parts[0].state.attachments, [placeholder]);
+});
+
+test("after a manual compaction nothing is replayed: the same words said again are mirrored", async (t) => {
+  const stateRoot = await temporaryRoot(t);
+  const summary = message("s", "assistant", [{ type: "text", text: "## Summary" }]);
+  Object.assign(summary.info, { summary: true, mode: "compaction" });
+  await new TranscriptMirror(stateRoot).mirror("ses_1", [
+    message("u1", "user", [{ type: "text", text: "继续" }]),
+    message("a1", "assistant", [{ type: "text", text: "好" }]),
+    message("c", "user", [{ type: "compaction", auto: false }]),
+    summary,
+    message("u2", "user", [{ type: "text", text: "继续" }]),
+    message("a2", "assistant", [{ type: "text", text: "好" }]),
+  ]);
+  const ids = (await readFile(transcriptPath(stateRoot, "ses_1"), "utf8")).trim().split("\n").map((line) => JSON.parse(line).info.id);
+  assert.deepEqual(ids, ["u1", "a1", "c", "u2", "a2"]);
+});
+
+test("an overflow replay whose image or PDF became [Attached ...] text is still recognised as the replay", async (t) => {
+  const stateRoot = await temporaryRoot(t);
+  const summary = message("s", "assistant", [{ type: "text", text: "## Summary" }]);
+  Object.assign(summary.info, { summary: true, mode: "compaction" });
+  await new TranscriptMirror(stateRoot).mirror("ses_1", [
+    message("u1", "user", [
+      { type: "text", text: "看看这张图" },
+      { type: "file", mime: "image/png", filename: "x.png", url: "file:///x.png" },
+      { type: "file", mime: "application/pdf", url: "file:///spec.pdf" },
+      { type: "file", mime: "text/plain", filename: "notes.txt", url: "file:///notes.txt" },
+    ]),
+    message("a1", "assistant", [{ type: "text", text: "好" }]),
+    message("c", "user", [{ type: "compaction", auto: true, overflow: true }]),
+    summary,
+    message("u2", "user", [
+      { type: "text", text: "看看这张图" },
+      { type: "text", text: "[Attached image/png: x.png]" },
+      { type: "text", text: "[Attached application/pdf: file]" },
+      { type: "file", mime: "text/plain", filename: "notes.txt", url: "file:///notes.txt" },
+    ]),
+    message("a2", "assistant", [{ type: "text", text: "图里是登录页" }]),
+  ]);
+  const ids = (await readFile(transcriptPath(stateRoot, "ses_1"), "utf8")).trim().split("\n").map((line) => JSON.parse(line).info.id);
+  assert.deepEqual(ids, ["u1", "a1", "c", "a2"]);
 });
 
 test("session.deleted sends what was already mirrored without fetching the deleted messages", async (t) => {
@@ -295,4 +369,70 @@ test("a batch never ends on an OpenCode step that is about to call tools (one tu
   const final = { info: { id: "a2", role: "assistant", finish: "stop", time: { created: 3, completed: 4 } }, parts: [] };
   assert.equal(selectCompletedMessages([user, step], []), null);  // 压缩前来取：这一轮还在调工具，不送
   assert.equal(selectCompletedMessages([user, step, final], []).records.length, 3);
+});
+
+// 杀变异 PT04（OpenCode / ZCode 只留最后一个轮边界）：一段里有几轮就给几个轮边界
+test("an OpenCode delta holding two finished turns reports both turn ends", async (t) => {
+  const stateRoot = await temporaryRoot(t);
+  const file = join(stateRoot, "mirror.jsonl");
+  await writeFile(file, [
+    message("m1", "user", [{ type: "text", text: "一" }]),
+    message("m2", "assistant", [{ type: "text", text: "好" }]),
+    message("m3", "user", [{ type: "text", text: "二" }]),
+    message("m4", "assistant", [{ type: "text", text: "行" }]),
+  ].map((value) => `${JSON.stringify(value)}\n`).join(""));
+  const delta = await hostAdapter.readTranscriptDelta({ transcript_path: file }, null, { maxTranscriptBytes: 1 << 20 }, []);
+  assert.deepEqual(delta.turns.map((turn) => turn.records.map((record) => record.info.id)), [["m1", "m2"], ["m3", "m4"]]);
+});
+
+// 杀变异 PT02（没有完成时刻的助手消息也算一轮结束）：助手消息要有 time.completed 才算答完；中途断掉、没写完成时刻的不是切点
+test("an assistant message without a completion time is not where a turn ends", () => {
+  const records = [
+    message("u1", "user", [{ type: "text", text: "改登录页" }]),
+    message("a1", "assistant", [{ type: "text", text: "改到一半" }], { completed: false }),
+    message("u2", "user", [{ type: "text", text: "继续" }]),
+  ];
+  assert.equal(selectCompletedMessages(records, []), null);
+  const done = selectCompletedMessages([...records, message("a2", "assistant", [{ type: "text", text: "改好了" }])], []);
+  assert.deepEqual(done.boundaries, [{ consumedCount: 4, recordCount: 4 }]);
+});
+
+// 杀变异 PT10（认重放时把 synthetic / ignored 段也算进"他说的话"）：压缩前那条消息里插件注入的 synthetic 段、宿主标了 ignored 的段
+// 不是人话；重放那条只有人话时照样认得出是重放，不进转写
+test("an overflow replay is recognised by what was said, leaving out synthetic and ignored parts", async (t) => {
+  const stateRoot = await temporaryRoot(t);
+  const summary = message("s", "assistant", [{ type: "text", text: "## Summary" }]);
+  Object.assign(summary.info, { summary: true, mode: "compaction" });
+  await new TranscriptMirror(stateRoot).mirror("ses_1", [
+    message("u1", "user", [
+      { type: "text", text: "<habitus-memory-context>召回的记忆</habitus-memory-context>", synthetic: true },
+      { type: "text", text: "宿主忽略的段", ignored: true },
+      { type: "text", text: "继续改登录页" },
+    ]),
+    message("a1", "assistant", [{ type: "text", text: "好" }]),
+    message("c", "user", [{ type: "compaction", auto: true, overflow: true }]),
+    summary,
+    message("u2", "user", [{ type: "text", text: "继续改登录页" }]),
+    message("a2", "assistant", [{ type: "text", text: "改好了" }]),
+  ]);
+  const ids = (await readFile(transcriptPath(stateRoot, "ses_1"), "utf8")).trim().split("\n").map((line) => JSON.parse(line).info.id);
+  assert.deepEqual(ids, ["u1", "a1", "c", "a2"]);
+});
+
+// T6：HABITUS_PLUGIN_DEBUG（config.debug）在 OpenCode 进程内也生效：出错照常只记日志、放行，开着时另把堆栈打到 stderr
+test("with debug on, an error inside the OpenCode plugin prints its stack to stderr; with it off nothing is printed", async (t) => {
+  for (const debug of [true, false]) {
+    const stateRoot = await temporaryRoot(t);
+    const config = { enabled: true, stateRoot, timeoutMs: 1000, maxTranscriptBytes: 1 << 20, debug };
+    const client = { session: { get: async () => ({ data: {} }), messages: async () => { throw new Error("opencode messages exploded"); } } };
+    const hooks = await HabitusMemoryPlugin({ client }, { config, core: new PluginCore(config, { service: fakeService() }) });
+    const written = [];
+    const write = process.stderr.write;
+    process.stderr.write = (chunk) => { written.push(String(chunk)); return true; };
+    try { await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_dbg" } } }); }
+    finally { process.stderr.write = write; }
+    if (debug) assert.match(written.join(""), /^\[habitus-memory\] Error: opencode messages exploded\n\s+at /);
+    else assert.equal(written.join(""), "");
+    assert.match(await readFile(join(stateRoot, "logs", "operations.jsonl"), "utf8"), /opencode messages exploded/);
+  }
 });

@@ -36,7 +36,7 @@ async function seed(stateRoot, nativeSessionId, transcriptPath, hoursAgo) {
 test("the transcript path given by the host adapter is kept in the session state", async () => {
   const stateRoot = await mkdtemp(join(tmpdir(), "habitus-retire-path-"));
   const transcript = join(stateRoot, "transcript.jsonl");
-  const input = { session_id: "s1", agent_transcript_path: transcript };
+  const input = { session_id: "s1", transcript_path: transcript };
   await core(stateRoot).recordInjection(hostAdapter, input, { nonce: "a".repeat(32), digest: "b".repeat(64) });
   assert.equal((await readState(stateRoot, hostAdapter.host, "s1")).transcriptPath, transcript);
 });

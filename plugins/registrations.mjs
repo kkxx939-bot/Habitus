@@ -1,4 +1,4 @@
-// 宿主插件的注册方式（方案 36）：每种方式一组 inspect / install / remove / restore，安装器与 doctor 都按定义里的
+// 宿主插件的注册方式（方案 36）：每种方式一组 present / inspect / install / remove / restore，安装器与 doctor 都按定义里的
 // ``registration`` 选一组来用，不在各处按方式写分支。加一种方式（比如 pi 的 npm 扩展）就是在这里加一组、注册表里声明。
 //
 // - marketplace：调宿主原生命令（`plugin marketplace add` / `plugin add` …），宿主自己记它装了什么（Codex、Claude Code）。
@@ -8,18 +8,26 @@
 import { spawn, spawnSync } from "node:child_process";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { MARKETPLACE_NAME, PLUGIN_ID, PLUGIN_NAME } from "./harnesses.mjs";
 
+// 宿主命令一律同步跑、带超时：到点直接 SIGKILL（spawnSync 的超时信号只发一次、发完还要同步等它退出，
+// 宿主若接管了 SIGTERM，默认的 SIGTERM 等于没有超时）。env 是要查的那个环境（PATH、HOME 都取它）
 export class CommandRunner {
+  constructor(env = process.env) {
+    this.env = env;
+  }
+
   available(command) {
-    const result = spawnSync(command, ["--version"], { encoding: "utf8", timeout: 3000 });
+    const result = spawnSync(command, ["--version"], { encoding: "utf8", timeout: 3000, killSignal: "SIGKILL", env: this.env });
     return result.status === 0 && !result.error;
   }
 
   json(command, args) {
-    const result = spawnSync(command, args, { encoding: "utf8", timeout: 10_000, maxBuffer: 16 * 1024 * 1024 });
+    const result = spawnSync(command, args, {
+      encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL", maxBuffer: 16 * 1024 * 1024, env: this.env,
+    });
     if (result.error) throw result.error;
     if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed with status ${result.status}`);
     try { return JSON.parse(result.stdout); }
@@ -27,7 +35,7 @@ export class CommandRunner {
   }
 
   run(command, args) {
-    const result = spawnSync(command, args, { stdio: "inherit", timeout: 30_000 });
+    const result = spawnSync(command, args, { stdio: "inherit", timeout: 30_000, killSignal: "SIGKILL", env: this.env });
     if (result.error) throw result.error;
     if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed with status ${result.status}`);
   }
@@ -82,14 +90,18 @@ export function fileEntrySource(definition, root) {
 }
 
 // 文件注册不需要宿主 CLI：宿主的配置目录在（桌面版不一定把 CLI 放进 PATH）、或入口已经在，就算本机有这个宿主。
+async function fileEntryPresent(definition, runner, env = process.env) {
+  return await exists(fileEntryPath(definition, env))
+    || await exists(join(configBase(definition, env), definition.fileEntry.configPath[0]))
+    || runner.available(definition.command);
+}
+
 // 入口指向的模块不在了（根目录被删、换过 --root）算悬空，不算已注册。
 async function inspectFileEntry(definition, runner, env = process.env) {
   let text = null;
   try { text = await readFile(fileEntryPath(definition, env), "utf8"); }
   catch (error) { if (error?.code !== "ENOENT") throw error; }
-  const available = text != null
-    || await exists(join(configBase(definition, env), definition.fileEntry.configPath[0]))
-    || runner.available(definition.command);
+  const available = await fileEntryPresent(definition, runner, env);
   const ours = typeof text === "string" && text.startsWith(ENTRY_MARKER);
   const targetUrl = ours ? text.match(/from "(file:[^"]+)"/)?.[1] : null;
   const target = targetUrl ? fileURLToPath(targetUrl) : null;
@@ -133,6 +145,9 @@ async function removeFileEntry(definition, env) {
 }
 
 const MARKETPLACE = Object.freeze({
+  // 宿主自己记装了什么，本机有没有它就看它的 CLI
+  async present(definition, runner) { return runner.available(definition.command); },
+
   async inspect(definition, runner) {
     if (!runner.available(definition.command)) {
       return { harness: definition.id, available: false, marketplaceSource: null, installed: false, enabled: false };
@@ -191,6 +206,7 @@ const MARKETPLACE = Object.freeze({
 });
 
 const FILE = Object.freeze({
+  present: fileEntryPresent,
   inspect: (definition, runner, env) => inspectFileEntry(definition, runner, env),
   // 文件入口不在宿主 CLI 上登记，删除不需要它：在就删（只删我们自己的）
   async remove(_snapshot, definition, _runner, env) { await removeFileEntry(definition, env); },
@@ -247,10 +263,18 @@ function onlyComments(text) {
 }
 
 const CORDIS_PATCH = Object.freeze({
+  // 装要跑 dsh 自己的插件命令；卸与恢复只改 patch 文件，不要命令
   needsCommand: true,
+  // 与文件注册同口径：dsh 的 home 在、或命令在，就算本机有
+  async present(definition, runner, env) {
+    return runner.available(definition.command) || await exists(dshHome(env));
+  },
+  missingCommandReason(definition, env) {
+    return `本机有 ${shownPath(dshHome(env), env)} 但 PATH 上没有 ${definition.command} 命令`;
+  },
   async inspect(definition, runner, env) {
     const text = await readPatch(patchFilePath(definition, env));
-    const available = runner.available(definition.command) || await exists(dshHome(env));
+    const available = await CORDIS_PATCH.present(definition, runner, env);
     const parts = text == null ? null : splitPatch(text);
     const pluginRoot = parts?.block.match(/pluginRoot: ("[^"\n]*")/)?.[1];
     const plugin = pluginRoot ? JSON.parse(pluginRoot) : null;
@@ -306,8 +330,17 @@ async function writePatchBlock(definition, block, env) {
   await writeFile(path, next, { mode: 0o600 });
 }
 
+function shownPath(path, env) {
+  const home = resolve(env.HOME || homedir());
+  return path === home || path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
+}
+
 const REGISTRATIONS = Object.freeze({
-  marketplace: { ...MARKETPLACE, needsCommand: true },
+  marketplace: {
+    ...MARKETPLACE,
+    needsCommand: true,
+    missingCommandReason: (definition) => `PATH 上没有 ${definition.command} 命令`,
+  },
   file: FILE,
   "cordis-patch": CORDIS_PATCH,
 });
@@ -316,6 +349,18 @@ export function registrationOf(definition) {
   const registration = REGISTRATIONS[definition.registration];
   if (!registration) throw new Error(`unknown harness registration: ${definition.registration}`);
   return registration;
+}
+
+// "本机有没有这个宿主"只有这一个口径：habitus harnesses、plugin install / status、doctor 都经它（inspect 也是）
+export function harnessPresent(definition, runner, env = process.env) {
+  return registrationOf(definition).present(definition, runner, env);
+}
+
+// 本机有这个宿主、但它的注册方式要跑宿主命令而命令不在 PATH 上：返回装不了的原因，装得了返回 null
+export function installBlocker(definition, runner, env = process.env) {
+  const registration = registrationOf(definition);
+  if (!registration.needsCommand || runner.available(definition.command)) return null;
+  return registration.missingCommandReason(definition, env);
 }
 
 // 宿主要求用户逐条批准插件 hook 时（定义里的 hookReview），问宿主我们的 hook 批没批：
@@ -328,29 +373,55 @@ export function inspectHookReview(definition, options = {}) {
   return review(definition, options);
 }
 
+// 问完（答了、没答、出错）都把 app-server 收干净再交结果：关 stdin、断开两条管道、SIGTERM，宽限内没退就 SIGKILL，
+// 等到它退出。宿主可能接管 SIGTERM、它的子进程可能占着 stdout：只发一次 SIGTERM 不等它退，doctor / plugin status
+// 印完结果也会被子进程的句柄吊着不退出。最长用时是 timeoutMs + 2 × HOOK_REVIEW_KILL_GRACE_MS
+export const HOOK_REVIEW_KILL_GRACE_MS = 1000;
+
 // Codex：`codex app-server` 的 JSON-RPC（initialize → hooks/list），trustStatus 由 Codex 自己判（trusted / managed 才算批了）
-function inspectCodexAppServerHooks(definition, { spawnImpl = spawn, timeoutMs = 15_000, cwd = homedir() } = {}) {
+function inspectCodexAppServerHooks(definition, { spawnImpl = spawn, timeoutMs = 15_000, env = process.env, cwd = env.HOME || homedir() } = {}) {
   return new Promise((resolvePromise) => {
     let child;
     let settled = false;
+    let exited = false;
     let buffer = "";
+    const signal = (name) => {
+      try { child?.kill(name); } catch { /* 已经退出 */ }
+    };
     const finish = (value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      try { child?.kill(); } catch { /* 已经退出 */ }
-      resolvePromise(value);
+      try { child?.stdin?.end(); } catch { /* 管道已断 */ }
+      child?.stdin?.destroy?.();
+      child?.stdout?.destroy?.();
+      if (exited) { resolvePromise(value); return; }
+      signal("SIGTERM");
+      // 没起来的（没有 pid）没有进程可等
+      if (!child?.pid) { resolvePromise(value); return; }
+      const kill = setTimeout(() => {
+        signal("SIGKILL");
+        // SIGKILL 之后仍等不到 exit 就不再等，结果照样交回去
+        setTimeout(() => resolvePromise(value), HOOK_REVIEW_KILL_GRACE_MS);
+      }, HOOK_REVIEW_KILL_GRACE_MS);
+      child.once("exit", () => {
+        clearTimeout(kill);
+        resolvePromise(value);
+      });
     };
     const timer = setTimeout(() => finish({ available: false, error: "harness did not answer" }), timeoutMs);
     const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`);
     try {
-      child = spawnImpl(definition.command, definition.hookReview.args, { cwd, stdio: ["pipe", "pipe", "ignore"] });
+      child = spawnImpl(definition.command, definition.hookReview.args, { cwd, env, stdio: ["pipe", "pipe", "ignore"] });
     } catch (error) {
       finish({ available: false, error: error?.message || String(error) });
       return;
     }
     child.on("error", (error) => finish({ available: false, error: error?.code === "ENOENT" ? "harness is not installed" : error.message }));
-    child.on("exit", () => finish({ available: false, error: "harness exited before answering" }));
+    child.on("exit", () => {
+      exited = true;
+      finish({ available: false, error: "harness exited before answering" });
+    });
     child.stdin.on("error", () => {});
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {

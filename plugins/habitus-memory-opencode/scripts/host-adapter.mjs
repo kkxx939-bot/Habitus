@@ -10,10 +10,9 @@ export const hostAdapter = Object.freeze({
   protocol: "opencode",
   // agent 向人提问、等人作答的工具（方案 32 第 4.2 条；OpenCode 的 question 工具）
   questionTool: "question",
-  nativeSessionId(input) {
-    const id = safeIdentifier(input?.session_id);
-    return input?.parent_id ? safeIdentifier(`${input.parent_id}.subagent.${id}`) : id;
-  },
+  nativeSessionId(input) { return safeIdentifier(input?.session_id); },
+  // task 工具起的子会话（有父会话）不进记忆：它的提示是主 agent 写的任务，结果已回到主会话
+  isSubagent(input) { return Boolean(input?.parent_id); },
   conversationId(input) { return `opencode-${this.nativeSessionId(input)}`; },
   prompt(input) { return typeof input?.prompt === "string" ? input.prompt.trim() : ""; },
   successOutput() { return {}; },

@@ -3,7 +3,7 @@
 // 失败一律静默放行，不拦 OpenCode。
 
 import { loadPluginConfig } from "./scripts/shared/config.mjs";
-import { promptInjection } from "./scripts/shared/hook-runner.mjs";
+import { promptInjection, writeDebugStack } from "./scripts/shared/hook-runner.mjs";
 import { writeOperationLog } from "./scripts/shared/operation-log.mjs";
 import { PluginCore } from "./scripts/shared/plugin-core.mjs";
 import { hostAdapter } from "./scripts/host-adapter.mjs";
@@ -42,6 +42,7 @@ export async function HabitusMemoryPlugin({ client } = {}, { config: given, core
     catch (error) {
       await writeOperationLog(config, hostAdapter, input(sessionId), { hook: stage, stage, status: "error", retryable: true, error })
         .catch(() => {});
+      writeDebugStack(config.debug, error);
       return undefined;
     }
   }
@@ -66,7 +67,8 @@ export async function HabitusMemoryPlugin({ client } = {}, { config: given, core
   }
 
   async function capture(sessionId, { flush = false, fetch = true } = {}) {
-    await resolveParent(sessionId);
+    // 子会话不进记忆：不镜像、不送（它的提示是主 agent 写的任务，结果已回到主会话）
+    if (await resolveParent(sessionId)) return undefined;
     if (fetch) {
       const response = await client.session.messages({ path: { id: sessionId } });
       const messages = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
@@ -83,6 +85,7 @@ export async function HabitusMemoryPlugin({ client } = {}, { config: given, core
   // 会话删了：最后一批送完、服务确认收尾后，镜像文件和过了宽限期的会话状态都清掉
   async function close(sessionId) {
     // session.deleted 发出来时 OpenCode 已经删了消息（拉不到），只送已经镜像下来的
+    if (await resolveParent(sessionId)) { parents.delete(sessionId); return; }
     const flushed = await capture(sessionId, { flush: true, fetch: false });
     if (!flushed?.ok) return;
     await transcripts.forget(sessionId);

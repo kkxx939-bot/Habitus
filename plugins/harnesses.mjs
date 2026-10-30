@@ -47,7 +47,15 @@ const DEFINITIONS = [
     pluginEnable: null,
     // 插件 hook 要宿主的特性开着才跑（OpenViking 的 Codex 安装写 `plugin_hooks = true`；Codex 0.147 起这个开关已标 removed、
     // 并入常开的 `hooks`）。doctor 按这张表查：列出的特性必须是开着的
-    featureInventory: { args: ["features", "list"], required: ["hooks"] },
+    featureInventory: {
+      args: ["features", "list"],
+      required: ["hooks"],
+      // 提醒相关、缺了只 warn 的特性（记忆照常）：默认模式没有提问工具时，提醒在那里问不出去
+      advisory: [{
+        name: "default_mode_request_user_input",
+        note: "Codex CLI 的默认模式没有 request_user_input，提醒在那里问不出去；Codex Desktop 不受影响",
+      }],
+    },
     // Codex 要求每条 hook 先由用户批准一次（Codex 里输入 /hooks；记在 config.toml 的 [hooks.state]），没批准的静默跳过、
     // hook 内容一改又要重批（OpenViking 的 Codex 接入同样要这一步）。经 `codex app-server` 的 hooks/list 问 Codex 自己的判定
     hookReview: { kind: "codex-app-server", args: ["app-server"], instruction: "打开 Codex 输入 /hooks，批准 Habitus 的 hook" },
@@ -61,21 +69,12 @@ const DEFINITIONS = [
     pluginDirectory: "habitus-memory-claude-code",
     pluginManifest: ".claude-plugin/plugin.json",
     hooksManifest: "hooks/hooks.json",
-    requiredHooks: [
-      "SessionStart",
-      "UserPromptSubmit",
-      "Stop",
-      "PreCompact",
-      "SessionEnd",
-      "SubagentStart",
-      "SubagentStop",
-    ],
+    // 不挂 SubagentStart / SubagentStop：子代理的会话不进记忆（它的提示是主 agent 写的任务，结果已回到主会话的转写里）
+    requiredHooks: ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact", "SessionEnd"],
     requiredAssets: [
       ".claude-plugin/plugin.json",
       "hooks/hooks.json",
       "scripts/shared/plugin-core.mjs",
-      "scripts/subagent-start.mjs",
-      "scripts/subagent-stop.mjs",
     ],
     marketplaceManifest: {
       path: ".claude-plugin/marketplace.json",
@@ -212,6 +211,10 @@ function validateDefinition(value) {
   if (!["marketplace", "file", "cordis-patch"].includes(registration)) throw new Error(`unknown harness registration: ${value.id}`);
   if (value.featureInventory != null && (
     !Array.isArray(value.featureInventory.args) || !Array.isArray(value.featureInventory.required)
+    || (value.featureInventory.advisory != null && (
+      !Array.isArray(value.featureInventory.advisory)
+      || value.featureInventory.advisory.some((item) => typeof item?.name !== "string" || typeof item?.note !== "string")
+    ))
   )) {
     throw new Error(`harness feature inventory is invalid: ${value.id}`);
   }
@@ -224,7 +227,9 @@ function validateDefinition(value) {
     fileEntry: value.fileEntry
       ? Object.freeze({ ...value.fileEntry, base: value.fileEntry.base ?? "config", configPath: Object.freeze([...value.fileEntry.configPath]) })
       : null,
-    featureInventory: value.featureInventory ?? null,
+    featureInventory: value.featureInventory
+      ? Object.freeze({ ...value.featureInventory, advisory: Object.freeze([...(value.featureInventory.advisory ?? [])]) })
+      : null,
     aliases: Object.freeze([...value.aliases]),
     requiredHooks: Object.freeze([...value.requiredHooks]),
     requiredAssets: Object.freeze([...value.requiredAssets]),

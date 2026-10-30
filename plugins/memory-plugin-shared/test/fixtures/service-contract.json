@@ -1,0 +1,104 @@
+{
+  "api_version": "1.0",
+  "features": [
+    "conversation_cursor",
+    "flush",
+    "memory_jobs",
+    "memory_tree_v1",
+    "recall",
+    "remember",
+    "remember_idempotency_v1",
+    "remember_parts_v1",
+    "reminders_v1",
+    "reminders_report_v1"
+  ],
+  "protocols": {
+    "anthropic_messages": {"host": null, "question_tools": []},
+    "claude_code": {"host": "claude-code", "question_tools": ["AskUserQuestion"]},
+    "codex_rollout": {"host": "codex", "question_tools": ["request_user_input", "request_user_input_async"]},
+    "dsh": {"host": "dsh", "question_tools": ["ask_user_question"]},
+    "openai_chat_completions": {"host": null, "question_tools": []},
+    "openai_responses": {"host": null, "question_tools": []},
+    "openclaw": {"host": null, "question_tools": []},
+    "opencode": {"host": "opencode", "question_tools": ["question"]},
+    "pi": {"host": "pi", "question_tools": ["ask_user"]},
+    "zcode": {"host": "zcode", "question_tools": ["AskUserQuestion"]}
+  },
+  "subagent_mark": ".subagent.",
+  "default_max_request_bytes": 16777216,
+  "loopback_hosts": [
+    {"host": "127.0.0.1", "loopback": true},
+    {"host": "127.1.2.3", "loopback": true},
+    {"host": "127.255.255.254", "loopback": true},
+    {"host": "::1", "loopback": true},
+    {"host": "0:0:0:0:0:0:0:1", "loopback": true},
+    {"host": "localhost", "loopback": true},
+    {"host": "LOCALHOST", "loopback": true},
+    {"host": "::ffff:127.0.0.1", "loopback": false},
+    {"host": "::ffff:7f00:1", "loopback": false},
+    {"host": "::1%lo0", "loopback": false},
+    {"host": "::", "loopback": false},
+    {"host": "10.0.0.1", "loopback": false},
+    {"host": "0.0.0.0", "loopback": false},
+    {"host": "128.0.0.1", "loopback": false},
+    {"host": "localhost.", "loopback": false},
+    {"host": "localhost.localdomain", "loopback": false},
+    {"host": "example.com", "loopback": false}
+  ],
+  "remember_parts": {
+    "feature": "remember_parts_v1",
+    "path": "/api/v1/memory/remember/parts",
+    "max_request_bytes": 1024,
+    "body": "{\"delivery_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"conversation_id\":\"codex-contract-parts\",\"started_on\":\"2026-10-23\",\"protocol\":\"codex_rollout\",\"payload\":{\"records\":[{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}},{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"读一下日志\"}]}},{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"shell\",\"call_id\":\"c1\",\"arguments\":\"{\\\"command\\\":[\\\"cat\\\",\\\"a.log\\\"]}\"}},{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"c1\",\"output\":\"第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n第一行 \\\"引号\\\" 与 \\\\ 反斜杠\\n\"}},{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"读完了\"}]}}]},\"start_sequence\":0,\"occurred_at\":\"2026-10-23T08:00:00.000Z\",\"after_turn\":true}",
+    "parts": [
+      {
+        "delivery_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "part_index": 0,
+        "part_count": 6,
+        "body_bytes": 3182,
+        "body_sha256": "fb342cc5a9cc915d07bce26033080cff862e1f68a973fed7c474399fd4c6ebe1",
+        "data": "eyJkZWxpdmVyeV9pZCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJjb252ZXJzYXRpb25faWQiOiJjb2RleC1jb250cmFjdC1wYXJ0cyIsInN0YXJ0ZWRfb24iOiIyMDI2LTEwLTIzIiwicHJvdG9jb2wiOiJjb2RleF9yb2xsb3V0IiwicGF5bG9hZCI6eyJyZWNvcmRzIjpbeyJ0eXBlIjoiZXZlbnRfbXNnIiwicGF5bG9hZCI6eyJ0eXBlIjoidGFza19zdGFydGVkIn19LHsidHlwZSI6InJlc3BvbnNlX2l0ZW0iLCJwYXlsb2FkIjp7InR5cGUiOiJtZXNzYWdlIiwicm9sZSI6InVzZXIiLCJjb250ZW50IjpbeyJ0eXBlIjoiaW5wdXRfdGV4dCIsInRleHQiOiLor7vkuIDkuIvml6Xlv5cifV19fSx7InR5cGUiOiJyZXNwb25zZV9pdGVtIiwicGF5bG9hZCI6eyJ0eXBlIjoiZnVuY3Rpb25fY2FsbCIsIm5hbWUiOiJzaGVsbCIsImNhbGxfaWQiOiJjMSIsImFyZ3VtZW50cyI6IntcImNvbW1hbmRcIjpbXCJjYXRcIixcImEubG9nXCJdfSJ9fSx7InR5cGUiOiJyZXNwb25zZV9pdGVtIiwicGF5bG9hZCI6eyJ0eXBlIjoiZnVuY3Rpb25fY2FsbF9vdXRwdXQiLCJj"
+      },
+      {
+        "delivery_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "part_index": 1,
+        "part_count": 6,
+        "body_bytes": 3182,
+        "body_sha256": "fb342cc5a9cc915d07bce26033080cff862e1f68a973fed7c474399fd4c6ebe1",
+        "data": "YWxsX2lkIjoiYzEiLCJvdXRwdXQiOiLnrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXl"
+      },
+      {
+        "delivery_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "part_index": 2,
+        "part_count": 6,
+        "body_bytes": 3182,
+        "body_sha256": "fb342cc5a9cc915d07bce26033080cff862e1f68a973fed7c474399fd4c6ebe1",
+        "data": "j7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXl"
+      },
+      {
+        "delivery_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "part_index": 3,
+        "part_count": 6,
+        "body_bytes": 3182,
+        "body_sha256": "fb342cc5a9cc915d07bce26033080cff862e1f68a973fed7c474399fd4c6ebe1",
+        "data": "j7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXl"
+      },
+      {
+        "delivery_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "part_index": 4,
+        "part_count": 6,
+        "body_bytes": 3182,
+        "body_sha256": "fb342cc5a9cc915d07bce26033080cff862e1f68a973fed7c474399fd4c6ebe1",
+        "data": "j7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXlj7dcIiDkuI4gXFwg5Y+N5pac5p2gXG7nrKzkuIDooYwgXCLlvJXl"
+      },
+      {
+        "delivery_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "part_index": 5,
+        "part_count": 6,
+        "body_bytes": 3182,
+        "body_sha256": "fb342cc5a9cc915d07bce26033080cff862e1f68a973fed7c474399fd4c6ebe1",
+        "data": "j7dcIiDkuI4gXFwg5Y+N5pac5p2gXG4ifX0seyJ0eXBlIjoicmVzcG9uc2VfaXRlbSIsInBheWxvYWQiOnsidHlwZSI6Im1lc3NhZ2UiLCJyb2xlIjoiYXNzaXN0YW50IiwicGhhc2UiOiJmaW5hbF9hbnN3ZXIiLCJjb250ZW50IjpbeyJ0eXBlIjoib3V0cHV0X3RleHQiLCJ0ZXh0Ijoi6K+75a6M5LqGIn1dfX1dfSwic3RhcnRfc2VxdWVuY2UiOjAsIm9jY3VycmVkX2F0IjoiMjAyNi0xMC0yM1QwODowMDowMC4wMDBaIiwiYWZ0ZXJfdHVybiI6dHJ1ZX0="
+      }
+    ]
+  }
+}

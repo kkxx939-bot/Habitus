@@ -2,12 +2,14 @@
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, open, readFile, rm, truncate } from "node:fs/promises";
 import { join } from "node:path";
+import { completedTurns } from "./host-adapter.mjs";
 import { stripInjectionReceipts } from "./injection-receipt.mjs";
+import { stripMedia } from "./media.mjs";
 
 // "消息 + 片段"型宿主（OpenCode、ZCode：一条消息 {info, parts}，会话不落成文件、要从宿主的 API 或库里拿）的转写镜像：
 // 把已完成的消息按顺序镜像成本地 JSONL，之后与 Codex / Claude Code 同一条路——按游标读增量、进 outbox、送回服务。
 // 只追加不改写：共享库的游标按"文件前缀不变"认增量。不镜像的：压缩写的摘要和压缩后重放的原话（不是他和 agent 说的话）；
-// 附件、读图的 data: base64 换成占位（服务端用不上，留着会把镜像撑到上限、整个会话停采）。
+// 附件、读图的 data: base64 换成占位（media.mjs；服务端用不上，留着会把镜像撑大）。
 
 export function transcriptPath(stateRoot, sessionId, host) {
   const key = createHash("sha256").update(`${host}\n${sessionId}`).digest("hex");
@@ -18,7 +20,7 @@ export function transcriptPath(stateRoot, sessionId, host) {
 // 模型是一条助手消息，要接着调工具的那条 finish = "tool-calls"，不切——压缩前送的那一批也不把一轮拆开
 export function selectCompletedMessages(records, injectionReceipts) {
   const accepted = [];
-  let safe = null;
+  const boundaries = [];
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
     if (record == null) continue;
@@ -28,11 +30,10 @@ export function selectCompletedMessages(records, injectionReceipts) {
       && Number.isFinite(record?.info?.time?.completed)
       && record?.info?.finish !== "tool-calls"
     ) {
-      safe = { consumedCount: index + 1, recordCount: accepted.length };
+      boundaries.push({ consumedCount: index + 1, recordCount: accepted.length });
     }
   }
-  if (safe == null) return null;
-  return { consumedCount: safe.consumedCount, records: accepted.slice(0, safe.recordCount), afterTurn: true };
+  return completedTurns(accepted, boundaries);
 }
 
 export class TranscriptMirror {
@@ -99,8 +100,9 @@ export class TranscriptMirror {
   }
 }
 
-// 上次追加写到一半（进程被杀、盘满）会留一行残缺的 JSON：截到最后一个换行，否则新内容拼在坏行上、之后每次读都报错
-async function dropTornTail(path) {
+// 上次追加写到一半（进程被杀、盘满）会留一行残缺的 JSON：截到最后一个换行，否则新内容拼在坏行上、之后每次读都报错。
+// 往本地 JSONL 镜像追加前都先过这一步（DeepSeek Harness 的事件镜像也用它）
+export async function dropTornTail(path) {
   let handle;
   try { handle = await open(path, "r"); }
   catch (error) { if (error?.code === "ENOENT") return; throw error; }
@@ -124,11 +126,14 @@ async function dropTornTail(path) {
   }
 }
 
-// 压缩（OpenCode compaction.ts）：一条只有 compaction 段的 user 消息 → summary 为真的助手摘要 → 溢出时把压缩前最后那句人话
-// 原样复制成一条新的 user 消息重放。摘要和重放的那句都不是这一轮新说的，不进转写
+// 压缩（OpenCode compaction.ts）：一条只有 compaction 段的 user 消息 → summary 为真的助手摘要；只有自动压缩且是上下文溢出触发的
+// （compaction 段 auto && overflow），才把压缩前最后那句人话复制成一条新的 user 消息重放，复制时图片 / PDF 这类 file 段换成
+// "[Attached <mime>: <文件名>]" 文字段。摘要和重放的那句都不是这一轮新说的，不进转写；手动压缩之后他说的话即使与压缩前一字不差也是新说的。
+// ZCode 的压缩不写 summary 为真的助手消息、compaction 段不带 overflow、也不重放原话，这里认不出任何东西，照常镜像
 function compactionArtifacts(messages) {
   const skipped = new Set();
   let lastSaid = null;
+  let replays = false;
   let pendingReplay = null;
   for (const message of messages) {
     const info = message?.info;
@@ -136,17 +141,25 @@ function compactionArtifacts(messages) {
     const parts = Array.isArray(message.parts) ? message.parts : [];
     if (info.role === "assistant" && (info.summary === true || info.mode === "compaction")) {
       skipped.add(info.id);
-      pendingReplay = lastSaid;
+      pendingReplay = replays ? lastSaid : null;
       continue;
     }
     if (info.role !== "user") { pendingReplay = null; continue; }
-    if (parts.some((part) => part?.type === "compaction")) continue;
-    const said = spokenText(parts);
+    const compaction = parts.find((part) => part?.type === "compaction");
+    if (compaction) { replays = compaction.auto === true && compaction.overflow === true; continue; }
+    const said = spokenText(parts.map(asReplayed));
     if (pendingReplay != null && said === pendingReplay) skipped.add(info.id);
     pendingReplay = null;
     if (said) lastSaid = said;
   }
   return skipped;
+}
+
+// 重放时 OpenCode 对 file 段的改写（compaction.ts，MessageV2.isMedia：image/* 与 application/pdf）
+function asReplayed(part) {
+  if (part?.type !== "file" || typeof part.mime !== "string") return part;
+  if (!part.mime.startsWith("image/") && part.mime !== "application/pdf") return part;
+  return { type: "text", text: `[Attached ${part.mime}: ${part.filename ?? "file"}]` };
 }
 
 function spokenText(parts) {
@@ -157,23 +170,7 @@ function spokenText(parts) {
     .trim();
 }
 
+// 镜像前就把附件、读图的 data: base64 换成占位（media.mjs，与入队时同一份规则）：服务端用不上，留着会把镜像撑大
 function slim(message) {
-  const parts = (message.parts || []).map((part) => {
-    if (part?.type === "file" && isInline(part.url)) return { ...part, url: placeholder(part) };
-    const attachments = part?.type === "tool" ? part.state?.attachments : undefined;
-    if (!Array.isArray(attachments) || !attachments.some((item) => isInline(item?.url))) return part;
-    return {
-      ...part,
-      state: { ...part.state, attachments: attachments.map((item) => isInline(item?.url) ? { ...item, url: placeholder(item) } : item) },
-    };
-  });
-  return { info: message.info, parts };
-}
-
-function isInline(url) {
-  return typeof url === "string" && url.startsWith("data:");
-}
-
-function placeholder(item) {
-  return `[omitted ${item.mime || "data"} ${item.url.length}B]`;
+  return { info: message.info, parts: stripMedia(message.parts || []) };
 }

@@ -1,17 +1,22 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { hookReviewState, main } from "../../bin/habitus.mjs";
 import { HARNESS_REGISTRY, createHarnessRegistry } from "../../harnesses.mjs";
 import { executePluginLifecycle, parseArgs } from "../../install-memory-plugin.mjs";
-import { fileEntryPath, inspectHookReview } from "../../registrations.mjs";
+import { HOOK_REVIEW_KILL_GRACE_MS, fileEntryPath, inspectHookReview } from "../../registrations.mjs";
 import {
-  harnessFeatureChecks, harnessHookReviewChecks, harnessRegistrationChecks, marketplaceCheck, parseFeatureList, runPluginDoctor,
+  harnessFeatureChecks, harnessFeatureGaps, harnessHookReviewChecks, harnessRegistrationChecks, marketplaceCheck, parseFeatureList, runPluginDoctor,
 } from "../doctor.mjs";
+import { loadPluginConfig } from "../lib/config.mjs";
+import { HabitusServiceClient } from "../lib/service-client.mjs";
+import { isolatedEnv } from "./support/isolated-env.mjs";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
@@ -20,7 +25,7 @@ function sink() {
   return { write: (value) => { chunks.push(String(value)); }, text: () => chunks.join("") };
 }
 
-async function serve(t, routes) {
+async function serve(t, routes, statuses = {}) {
   const calls = [];
   const server = createServer((request, response) => {
     let body = "";
@@ -28,7 +33,7 @@ async function serve(t, routes) {
     request.on("end", () => {
       calls.push({ url: request.url, body: body ? JSON.parse(body) : null });
       const result = routes[request.url];
-      response.writeHead(result ? 200 : 404, { "Content-Type": "application/json" });
+      response.writeHead(result ? statuses[request.url] ?? 200 : 404, { "Content-Type": "application/json" });
       response.end(JSON.stringify(result ? { status: "ok", result } : { status: "error", error: { code: "NOT_FOUND", retryable: false } }));
     });
   });
@@ -68,8 +73,8 @@ test("help, version and unknown commands", async () => {
 
 test("status reads health, readiness and capabilities from the local service", async (t) => {
   const service = await serve(t, {
-    "/health": { status: "healthy", ready: true, checked_at: "2026-10-21T00:00:00Z", checks: [] },
-    "/ready": { status: "degraded", ready: true, checked_at: "2026-10-21T00:00:00Z", checks: [{ name: "foresight", status: "degraded", detail: "no table yet", critical: false }] },
+    "/health": { status: "healthy", ready: true, recall_ready: true, checked_at: "2026-10-21T00:00:00Z", checks: [] },
+    "/ready": { status: "degraded", ready: true, recall_ready: true, checked_at: "2026-10-21T00:00:00Z", checks: [{ name: "foresight", status: "degraded", detail: "no table yet", critical: false }] },
     "/api/v1/capabilities": { api_version: "1.0", service_version: "0.1.0", protocols: ["codex_rollout"], features: ["recall", "reminders_v1"] },
   });
   if (!service) return;
@@ -114,11 +119,16 @@ test("recall posts the query and prints the hits", async (t) => {
   assert.equal(await main(["recall", "x", "--limit", "0"], { stdout: sink(), stderr: sink(), env }), 1);
 });
 
-test("harnesses lists the registered hosts", async () => {
+test("harnesses lists the registered hosts", async (t) => {
+  const isolated = await isolatedEnv(t);
   const out = sink();
-  assert.equal(await main(["harnesses", "--json"], { stdout: out, stderr: sink() }), 0);
+  assert.equal(await main(["harnesses", "--json"], { stdout: out, stderr: sink(), env: isolated.env }), 0);
   const ids = JSON.parse(out.text()).harnesses.map((item) => item.id);
   assert.deepEqual(ids, HARNESS_REGISTRY.list().map((item) => item.id));
+  // 每个宿主的 --version 都落到假宿主上（经 env 的 PATH），HOME 也是临时的那个
+  const calls = await isolated.calls();
+  assert.deepEqual(calls.map((call) => call.command).sort(), HARNESS_REGISTRY.list().map((item) => item.command).sort());
+  assert.ok(calls.every((call) => call.home === isolated.env.HOME), JSON.stringify(calls));
 });
 
 test("the doctor fails a harness whose hook feature is off and skips hosts without a CLI", () => {
@@ -131,24 +141,57 @@ test("the doctor fails a harness whose hook feature is off and skips hosts witho
   assert.equal(parseFeatureList(listing).get("hooks"), false);
   assert.equal(parseFeatureList(listing).get("apps"), true);
   const registry = createHarnessRegistry(HARNESS_REGISTRY.list().map((item) => ({ ...item })));
-  const off = harnessFeatureChecks(registry, () => ({ status: 0, stdout: listing }));
+  const off = harnessFeatureChecks(registry, [], () => ({ status: 0, stdout: listing }));
   return off.then((checks) => {
     assert.deepEqual(checks.map((item) => [item.name, item.status]), [["features_codex", "fail"]]);
     assert.match(checks[0].detail, /features off: hooks/);
-    return harnessFeatureChecks(registry, () => ({ status: 0, stdout: listing.replace("stable             false", "stable             true") }));
+    return harnessFeatureChecks(registry, [], () => ({ status: 0, stdout: listing.replace("stable             false", "stable             true") }));
   }).then((checks) => {
     assert.equal(checks[0].status, "pass");
-    return harnessFeatureChecks(registry, () => ({ error: Object.assign(new Error("missing"), { code: "ENOENT" }) }));
+    return harnessFeatureChecks(registry, [], () => ({ error: Object.assign(new Error("missing"), { code: "ENOENT" }) }));
   }).then((checks) => {
     assert.deepEqual(checks, []);
   });
+});
+
+// B10：Codex CLI 的默认模式没有提问工具时，提醒在那里问不出去——Codex 已注册才报，只报 warn，不让体检失败
+test("the doctor warns, without failing, when a registered Codex has no request_user_input in its default mode", async () => {
+  const listing = (value) => [
+    "default_mode_request_user_input      under development  " + value,
+    "hooks                                stable             true",
+  ].join("\n");
+  const run = (stdout) => () => ({ status: 0, stdout });
+  const registered = [{ name: "harness_codex", status: "pass" }];
+  for (const stdout of [listing("false"), "hooks                                stable             true"]) {
+    const [check] = await harnessFeatureChecks(HARNESS_REGISTRY, registered, run(stdout));
+    assert.deepEqual([check.name, check.status], ["features_codex", "warn"]);
+    assert.match(check.detail, /Codex CLI 的默认模式没有 request_user_input，提醒在那里问不出去；Codex Desktop 不受影响/);
+  }
+  // 开着、或 Codex 没注册：不提
+  assert.equal((await harnessFeatureChecks(HARNESS_REGISTRY, registered, run(listing("true"))))[0].status, "pass");
+  assert.equal((await harnessFeatureChecks(HARNESS_REGISTRY, [], run(listing("false"))))[0].status, "pass");
+  // 杀变异 DR06：查过、但没注册上（warn / fail）的 Codex 也不提
+  for (const status of ["warn", "fail"]) {
+    assert.equal((await harnessFeatureChecks(HARNESS_REGISTRY, [{ name: "harness_codex", status }], run(listing("false"))))[0].status, "pass");
+  }
+  // hook 特性本身没开仍是 fail
+  const hooksOff = listing("false").replace("stable             true", "stable             false");
+  assert.equal((await harnessFeatureChecks(HARNESS_REGISTRY, registered, run(hooksOff)))[0].status, "fail");
+  // habitus plugin status 那一行带同一句
+  const lifecycle = async (options) => ({ action: options.action, root: "/tmp/m", harnesses: [{ harness: "codex", installed: true, enabled: true }] });
+  const featureGaps = (definition) => harnessFeatureGaps(definition, run(listing("false")));
+  const out = sink();
+  assert.equal(await main(["plugin", "status", "--harness", "codex"], {
+    stdout: out, stderr: sink(), lifecycle, reviewHooks: async () => null, featureGaps,
+  }), 0);
+  assert.match(out.text(), /codex +已注册；Codex CLI 的默认模式没有 request_user_input，提醒在那里问不出去；Codex Desktop 不受影响\n/);
 });
 
 test("the repository root carries the same marketplace manifests the installer stages", async () => {
   // 用户可以不经 npm、直接用宿主原生命令装：`codex plugin marketplace add <仓库>` / `claude plugin marketplace add <仓库>`。
   // 根目录那两份必须与安装器暂存的一模一样（相对路径 ./plugins/<目录> 两处都成立）
   const { readFile } = await import("node:fs/promises");
-  const repository = join(new URL(".", import.meta.url).pathname, "..", "..", "..");
+  const repository = join(fileURLToPath(new URL(".", import.meta.url)), "..", "..", "..");
   for (const definition of HARNESS_REGISTRY.list().filter((item) => item.marketplaceManifest)) {
     const written = JSON.parse(await readFile(join(repository, definition.marketplaceManifest.path), "utf8"));
     assert.deepEqual(written, definition.marketplaceManifest.document, definition.id);
@@ -251,7 +294,7 @@ test("the doctor flags installed plugins older than the npm package", async (t) 
 test("the doctor requires protocols only for harnesses registered on this machine", async () => {
   const service = {
     health: async () => ({ ok: true }),
-    ready: async () => ({ ok: true, result: { ready: true, status: "healthy" } }),
+    ready: async () => ({ ok: true, result: { ready: true, recall_ready: true, status: "healthy" } }),
     capabilities: async () => ({
       ok: true,
       result: {
@@ -305,12 +348,30 @@ test("argument edges: plugin --help, --root without a value, and server commands
   const out = sink(); const err = sink();
   assert.equal(await main(["plugin", "--help"], { stdout: out, stderr: err }), 0);
   assert.match(out.text(), /habitus plugin install/);
+  // T12（裁定 75 第 5 条）：--root 不是用户选项，帮助里不出现（只留给测试）
+  assert.doesNotMatch(out.text(), /--root/);
   assert.throws(() => parseArgs(["install", "--root"]), /--root requires a directory/);
   assert.throws(() => parseArgs(["install", "--root", "--json"]), /--root requires a directory/);
   const server = sink();
   assert.equal(await main(["init"], { stdout: out, stderr: server }), 2);
   assert.match(server.text(), /habitus-server init/);
   assert.equal(parseArgs(["status"], { HOME: "/tmp/someone" }).root, "/tmp/someone/.habitus/plugin-marketplace");
+});
+
+// T13（裁定 72 的"本地服务"口径）：命令行说给人看的话里不再有"服务端"：habitus init / serve 的提示，以及 bin/ 下所有不是注释的行
+test("the command line calls the Habitus service the local service, never 服务端", async () => {
+  for (const command of ["init", "serve"]) {
+    const err = sink();
+    assert.equal(await main([command], { stdout: sink(), stderr: err }), 2);
+    assert.match(err.text(), new RegExp(`本地服务.*habitus-server ${command}`));
+    assert.doesNotMatch(err.text(), /服务端/);
+  }
+  const bin = fileURLToPath(new URL("../../bin/", import.meta.url));
+  for (const name of (await readdir(bin)).filter((value) => value.endsWith(".mjs"))) {
+    const lines = (await readFile(join(bin, name), "utf8")).split("\n");
+    const spoken = lines.filter((line) => !line.trim().startsWith("//") && line.includes("服务端"));
+    assert.deepEqual(spoken, [], name);
+  }
 });
 
 // ── habitus memory（方案 36 第 2 步）──────────────────────────────────────────────────────────────
@@ -415,6 +476,23 @@ const REMINDER_DAY = {
   awaiting: 0, taken: 1, spoken: 1, never_claimed: 0, responded: 1,
 };
 
+// 段 6 Q15：「待取」之后他先做了的那条显示「已发生」，不再永远显示「待取」
+test("reminders shows a reminder he did before being asked as happened", async (t) => {
+  const happened = {
+    ...REMINDER_DAY.reminders[1], request_id: "e3", stage: "已发生", handoffs: [], attempts: 0,
+  };
+  const service = await serve(t, {
+    "/health": { status: "healthy" },
+    "/api/v1/capabilities": { api_version: "1.0", service_version: "0.1.0", protocols: [], features: ["reminders_report_v1"] },
+    "/api/v1/reminders?day=2026-10-22": { ...REMINDER_DAY, reminders: [happened], spoken: 0, taken: 0, responded: 0 },
+  });
+  if (!service) return;
+  const env = { HABITUS_URL: service.url, HABITUS_PLUGIN_STATE_DIR: await stateRoot(t), HABITUS_PLUGIN_TIMEOUT_MS: "1000" };
+  const out = sink();
+  assert.equal(await main(["reminders", "--day", "2026-10-22"], { stdout: out, stderr: sink(), env }), 0);
+  assert.match(out.text(), /20:10 {2}跑备份 {2}待取（时限 23:00） → 他先做了（已发生）\n/);
+});
+
 test("reminders shows each reminder's stage and the counts R8 needs", async (t) => {
   const service = await serve(t, {
     "/health": { status: "healthy" },
@@ -470,7 +548,7 @@ function fakeAppServer(hooks) {
   };
 }
 
-test("Codex hooks the user has not approved are reported with how to approve them", async () => {
+test("Codex hooks the user has not approved are reported with how to approve them", async (t) => {
   const codex = HARNESS_REGISTRY.resolve("codex");
   const hooks = [
     { pluginId: "habitus-memory@habitus-local", eventName: "userPromptSubmit", trustStatus: "untrusted" },
@@ -493,7 +571,7 @@ test("Codex hooks the user has not approved are reported with how to approve the
   // 没注册的宿主不问
   assert.deepEqual(await harnessHookReviewChecks(HARNESS_REGISTRY, [{ name: "harness_codex", status: "warn" }], async () => review), []);
   // 宿主没装或不答：说查不到，不算批没批
-  const missing = await inspectHookReview({ ...codex, command: "habitus-no-such-harness" }, { timeoutMs: 2000 });
+  const missing = await inspectHookReview({ ...codex, command: "habitus-no-such-harness" }, { timeoutMs: 2000, env: (await isolatedEnv(t)).env });
   assert.equal(missing.available, false);
   const [unknown] = await harnessHookReviewChecks(HARNESS_REGISTRY, registered, async () => missing);
   assert.equal(unknown.status, "warn");
@@ -553,7 +631,9 @@ test("plugin install / status ask the harness whether its hooks are approved and
   const reviewHooks = async (definition) => { asked.push(definition.id); return { available: true, hooks: [{}], pending: ["stop"] }; };
   for (const action of ["install", "status"]) {
     const out = sink();
-    assert.equal(await main(["plugin", action, "--harness", "codex"], { stdout: out, stderr: sink(), lifecycle, reviewHooks }), 0);
+    assert.equal(await main(["plugin", action, "--harness", "codex"], {
+      stdout: out, stderr: sink(), lifecycle, reviewHooks, featureGaps: () => ({ available: true, missing: [], advisory: [] }),
+    }), 0);
     assert.match(out.text(), /codex +已注册；1 个 hook 还没批准，不会运行：打开 Codex 输入 \/hooks/);
   }
   assert.deepEqual(asked, ["codex", "codex"]);  // 只问要求逐条批准的宿主（OpenCode 不问）
@@ -579,4 +659,256 @@ test("the doctor reports a not-ready service in words", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+// ── /ready 的 503 带着各项检查（B9）────────────────────────────────────────────────────────────────
+
+const NOT_READY = {
+  status: "unhealthy", ready: false, recall_ready: false, checked_at: "2026-10-23T00:00:00Z",
+  checks: [
+    { name: "memory_worker", status: "unhealthy", detail: "worker stopped: VectorStoreError", critical: true },
+    { name: "foresight", status: "healthy", detail: "ok", critical: false },
+  ],
+};
+
+test("a not-ready service answers /ready with 503 and its checks; status and the doctor name the unhealthy ones", async (t) => {
+  const service = await serve(t, {
+    "/health": { status: "unhealthy", ready: false, recall_ready: false, checked_at: "2026-10-23T00:00:00Z", checks: [] },
+    "/ready": NOT_READY,
+    "/api/v1/capabilities": { api_version: "1.0", service_version: "0.1.0", protocols: ["codex_rollout"], features: ["recall"] },
+  }, { "/ready": 503 });
+  if (!service) return;
+  const env = { HABITUS_URL: service.url, HABITUS_PLUGIN_STATE_DIR: await stateRoot(t), HABITUS_PLUGIN_TIMEOUT_MS: "1000" };
+  const human = sink();
+  assert.equal(await main(["status"], { stdout: human, stderr: sink(), env }), 1);
+  assert.match(human.text(), /未就绪/);
+  assert.match(human.text(), /! memory_worker: unhealthy worker stopped: VectorStoreError/);
+  const json = sink();
+  assert.equal(await main(["status", "--json"], { stdout: json, stderr: sink(), env }), 1);
+  const report = JSON.parse(json.text());
+  assert.equal(report.ready, false);
+  assert.deepEqual(report.checks.map((check) => check.name), ["memory_worker", "foresight"]);
+
+  const client = new HabitusServiceClient({ baseUrl: service.url, timeoutMs: 1000 });
+  const doctor = await runPluginDoctor({ stateRoot: env.HABITUS_PLUGIN_STATE_DIR }, {
+    service: client,
+    inspectHarnesses: async () => [], inspectFeatures: async () => [], inspectHookReviews: async () => [],
+    inspectMarketplace: async () => ({ name: "marketplace", status: "pass", detail: "" }),
+  });
+  const ready = doctor.checks.find((check) => check.name === "ready");
+  assert.equal(ready.status, "fail");
+  assert.equal(ready.detail, "unhealthy; memory_worker: unhealthy worker stopped: VectorStoreError");
+  // 别的接口回 503 仍是失败，不按成功读
+  assert.equal((await client.request("/ready")).ok, false);
+});
+
+// ── 子命令的 --help（B19）──────────────────────────────────────────────────────────────────────────
+
+test("every subcommand's --help prints its usage and sends nothing; a non-existent --day is refused locally", async (t) => {
+  const service = await serve(t, {});
+  if (!service) return;
+  const env = { HABITUS_URL: service.url, HABITUS_PLUGIN_STATE_DIR: await stateRoot(t), HABITUS_PLUGIN_TIMEOUT_MS: "1000" };
+  const cases = [
+    [["doctor", "--help"], /usage: habitus doctor/],
+    [["status", "-h"], /usage: habitus status/],
+    [["harnesses", "--help"], /usage: habitus harnesses/],
+    [["recall", "--help"], /usage: habitus recall/],
+    [["recall", "回答风格", "--help"], /usage: habitus recall/],
+    [["memory", "ls", "--help"], /usage: habitus memory ls/],
+    [["memory", "tree", "-L", "2", "--help"], /usage: habitus memory ls/],
+    [["memory", "read", "--help"], /usage: habitus memory ls/],
+    [["reminders", "--help"], /usage: habitus reminders/],
+  ];
+  for (const [argv, usage] of cases) {
+    const out = sink(); const err = sink();
+    assert.equal(await main(argv, { stdout: out, stderr: err, env }), 0, `${argv.join(" ")}: ${err.text()}`);
+    assert.match(out.text(), usage, argv.join(" "));
+  }
+  for (const day of ["2026-02-30", "2026-02-29", "2026-13-01", "2026-04-31"]) {
+    const err = sink();
+    assert.equal(await main(["reminders", "--day", day], { stdout: sink(), stderr: err, env }), 1);
+    assert.match(err.text(), new RegExp(`--day ${day} 日期不存在`));
+  }
+  assert.deepEqual(service.calls, []);
+});
+
+// 杀变异 BN16（memory ls 多给的参数不报错）：多出来的参数报出来，不当成没看见、也不去问服务
+test("memory ls with two addresses names the extra argument and sends nothing", async (t) => {
+  const service = await memoryService(t);
+  if (!service) return;
+  const err = sink();
+  assert.equal(await main(["memory", "ls", "preferences", "entities"], { stdout: sink(), stderr: err, env: service.env }), 1);
+  assert.match(err.text(), /unknown argument: entities/);
+  assert.deepEqual(service.calls, []);
+});
+
+// 杀变异 BN13（reminders 不查 reminders_report_v1）：老服务没有这张报表，先说"服务太老"，不去撞接口
+test("reminders says the service is too old when it has no reminders report", async (t) => {
+  const service = await serve(t, {
+    "/health": { status: "healthy" },
+    "/api/v1/capabilities": { api_version: "1.0", service_version: "0.0.9", protocols: [], features: ["reminders_v1"] },
+    "/api/v1/reminders": REMINDER_DAY,
+  });
+  if (!service) return;
+  const env = { HABITUS_URL: service.url, HABITUS_PLUGIN_STATE_DIR: await stateRoot(t), HABITUS_PLUGIN_TIMEOUT_MS: "1000" };
+  const err = sink();
+  assert.equal(await main(["reminders"], { stdout: sink(), stderr: err, env }), 1);
+  assert.match(err.text(), /服务太老.*reminders_report_v1/);
+  assert.equal(service.calls.some((call) => call.url.startsWith("/api/v1/reminders")), false);
+});
+
+// 杀变异 BN15（"谁取走了"取第一次交接）：放回过又被别的宿主取走的提醒，显示现在拿着它的那一个
+test("reminders shows the host that holds a reminder now, not the one that put it back", async (t) => {
+  const passedOn = {
+    ...REMINDER_DAY.reminders[1],
+    attempts: 1,
+    handoffs: [
+      { host: "codex", session: "codex-thread-1", claimed_at: "2026-10-22T20:11:00+08:00", ended: "released" },
+      { host: "claude-code", session: "claude-s2", claimed_at: "2026-10-22T20:12:00+08:00", ended: null },
+    ],
+  };
+  const service = await serve(t, {
+    "/health": { status: "healthy" },
+    "/api/v1/capabilities": { api_version: "1.0", service_version: "0.1.0", protocols: [], features: ["reminders_report_v1"] },
+    "/api/v1/reminders?day=2026-10-22": { ...REMINDER_DAY, reminders: [passedOn], spoken: 0, responded: 0 },
+  });
+  if (!service) return;
+  const env = { HABITUS_URL: service.url, HABITUS_PLUGIN_STATE_DIR: await stateRoot(t), HABITUS_PLUGIN_TIMEOUT_MS: "1000" };
+  const out = sink();
+  assert.equal(await main(["reminders", "--day", "2026-10-22"], { stdout: out, stderr: sink(), env }), 0);
+  assert.match(out.text(), /跑备份 {2}待取（时限 23:00） → claude-code 取走 20:12 → 放回 1 次\n/);
+});
+
+// 杀变异 BN02（没装上的宿主也去问 hook 批没批）：只问已注册、已启用的宿主；没装上的问了也是白问（还要起宿主进程）
+test("plugin status asks about hook approval only for harnesses that are registered", async () => {
+  const lifecycle = async (options) => ({
+    action: options.action, root: "/tmp/m",
+    harnesses: [{ harness: "codex", available: true, installed: false, enabled: false }],
+  });
+  const asked = [];
+  const reviewHooks = async (definition) => { asked.push(definition.id); return { available: true, hooks: [{}], pending: ["stop"] }; };
+  const out = sink();
+  assert.equal(await main(["plugin", "status"], { stdout: out, stderr: sink(), lifecycle, reviewHooks }), 0);
+  assert.deepEqual(asked, []);
+  assert.match(out.text(), /codex +未注册\n/);
+});
+
+// 杀变异 RG10（managed 的 hook 也算没批）：Codex 判成 managed（受管理员策略管）的 hook 与 trusted 一样算批了
+test("Codex hooks that are managed count as approved", async () => {
+  const codex = HARNESS_REGISTRY.resolve("codex");
+  const hooks = [
+    { pluginId: "habitus-memory@habitus-local", eventName: "stop", trustStatus: "managed" },
+    { pluginId: "habitus-memory@habitus-local", eventName: "sessionStart", trustStatus: "trusted" },
+  ];
+  const review = await inspectHookReview(codex, { spawnImpl: fakeAppServer(hooks), timeoutMs: 2000 });
+  assert.deepEqual(review.pending, []);
+  assert.equal(review.hooks.length, 2);
+});
+
+// 杀变异 RG17（app-server 不答时不超时）：`codex app-server` 起来了却一直不答，到点给"没答"并把它杀掉，doctor / plugin status 不挂住
+test("a Codex app-server that never answers times out and is killed", { timeout: 3000 }, async () => {
+  let killed = false;
+  const silent = () => {
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.kill = () => { killed = true; };
+    return child;
+  };
+  const review = await inspectHookReview(HARNESS_REGISTRY.resolve("codex"), { spawnImpl: silent, timeoutMs: 50 });
+  assert.deepEqual(review, { available: false, error: "harness did not answer" });
+  assert.equal(killed, true);
+});
+
+const HABITUS = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "bin", "habitus.mjs");
+
+// 真进程跑 habitus 命令：limitMs 到了还没退就 SIGKILL 并记下（挂住的那种，测试里不能无限等）
+function runHabitus(args, env, limitMs) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const child = spawn(process.execPath, [HABITUS, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+    let hung = false;
+    const limit = setTimeout(() => { hung = true; child.kill("SIGKILL"); }, limitMs);
+    child.once("error", reject);
+    child.once("exit", (code) => { clearTimeout(limit); resolve({ code, hung, elapsed: Date.now() - started, stdout, stderr }); });
+  });
+}
+
+function alive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error?.code !== "ESRCH"; }
+}
+
+// 杀变异 T23（问完只发一次 SIGTERM、不等它退）：app-server 是真 OS 进程、忽略 SIGTERM（或退了但孙进程占着 stdout）时，
+// habitus doctor / plugin status 照样在"hook review 超时 + 固定宽限"内退出，退出时 app-server 已不在。超时取 HABITUS_PLUGIN_TIMEOUT_MS
+for (const mode of ["silent-ignore-term", "answer-ignore-term", "grandchild"]) {
+  for (const args of [["doctor", "--json"], ["plugin", "status", "--json"]]) {
+    test(`habitus ${args.filter((arg) => arg !== "--json").join(" ")} exits and leaves no app-server behind (app-server: ${mode})`, { timeout: 20_000 }, async (t) => {
+      const isolated = await isolatedEnv(t, { fakeCodex: true });
+      const timeoutMs = 500;
+      const env = {
+        ...isolated.env,
+        FAKE_CODEX_APP_SERVER: mode,
+        HABITUS_URL: "http://127.0.0.1:1",
+        HABITUS_PLUGIN_TIMEOUT_MS: String(timeoutMs),
+      };
+      const result = await runHabitus(args, env, 15_000);
+      assert.equal(result.hung, false, `habitus ${args.join(" ")} hung: ${result.stderr}`);
+      // 超时 + 两段宽限，外加起进程、别的检查的余量（仍远小于默认的 15 s）
+      assert.ok(result.elapsed < timeoutMs + 2 * HOOK_REVIEW_KILL_GRACE_MS + 5000, `took ${result.elapsed} ms`);
+      const report = JSON.parse(result.stdout);
+      const review = args[0] === "doctor"
+        ? report.checks.find((check) => check.name === "hooks_review_codex")
+        : report.harnesses.find((item) => item.harness === "codex").hookReview;
+      assert.ok(review, result.stdout);
+      const [server] = (await isolated.pids()).filter((item) => item.role === "app-server");
+      assert.ok(server, "the fake app-server was never started");
+      assert.equal(alive(server.pid), false, `app-server ${server.pid} is still running`);
+    });
+  }
+}
+
+// 杀变异 T23（spawnSync 的超时只发 SIGTERM）：`codex features list` 忽略 SIGTERM、一直不答，doctor 照样在它的 5 s 超时 + 余量内返回，记 warn
+test("habitus doctor returns when the harness feature list ignores SIGTERM and never answers", { timeout: 30_000 }, async (t) => {
+  const isolated = await isolatedEnv(t, { fakeCodex: true });
+  const env = { ...isolated.env, FAKE_CODEX_FEATURES: "hang", HABITUS_URL: "http://127.0.0.1:1", HABITUS_PLUGIN_TIMEOUT_MS: "500" };
+  const result = await runHabitus(["doctor", "--json"], env, 25_000);
+  assert.equal(result.hung, false, result.stderr);
+  assert.ok(result.elapsed < 5000 + 2 * HOOK_REVIEW_KILL_GRACE_MS + 5000, `took ${result.elapsed} ms`);
+  const features = JSON.parse(result.stdout).checks.find((check) => check.name === "features_codex");
+  assert.equal(features.status, "warn");
+  const [listing] = (await isolated.pids()).filter((item) => item.role === "features");
+  assert.equal(alive(listing.pid), false);
+});
+
+// 杀变异 T23（hook review 的超时写死 15 s）：doctor 与 plugin status 把 HABITUS_PLUGIN_TIMEOUT_MS 交给 hook review
+test("the hook review uses HABITUS_PLUGIN_TIMEOUT_MS in doctor and plugin status", async (t) => {
+  const isolated = await isolatedEnv(t);
+  const env = { ...isolated.env, HABITUS_PLUGIN_TIMEOUT_MS: "250" };
+  let doctorOptions = null;
+  await runPluginDoctor(loadPluginConfig(env), {
+    env,
+    service: { health: async () => ({ ok: false, error: new Error("down") }) },
+    inspectHarnesses: async () => [{ name: "harness_codex", status: "pass" }],
+    inspectFeatures: async () => [],
+    inspectMarketplace: async () => ({ name: "marketplace", status: "pass", detail: "" }),
+    inspectHookReviews: async (_registry, _registrations, _review, options) => { doctorOptions = options; return []; },
+  });
+  assert.equal(doctorOptions.timeoutMs, 250);
+  assert.equal(doctorOptions.env, env);
+
+  const reviewed = [];
+  const lifecycle = async (options) => ({
+    action: options.action, root: "/tmp/m",
+    harnesses: [{ harness: "codex", available: true, installed: true, enabled: true }],
+  });
+  const reviewHooks = async (_definition, options) => { reviewed.push(options); return { available: true, hooks: [{}], pending: [] }; };
+  const featureGaps = () => ({ available: true, missing: [], advisory: [] });
+  assert.equal(await main(["plugin", "status"], { stdout: sink(), stderr: sink(), env, lifecycle, reviewHooks, featureGaps }), 0);
+  assert.equal(reviewed[0].timeoutMs, 250);
+  assert.equal(reviewed[0].env, env);
 });

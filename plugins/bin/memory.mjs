@@ -12,7 +12,10 @@ const MAX_DEPTH = 6;
 
 export async function memory(args, { stdout, env }) {
   const action = args.shift();
-  if (!action || action === "-h" || action === "--help") { stdout.write(`${USAGE}\n`); return 0; }
+  if (!action || action === "-h" || action === "--help" || args.includes("-h") || args.includes("--help")) {
+    stdout.write(`${USAGE}\n`);
+    return 0;
+  }
   const json = take(args, "--json");
   if (action === "ls") return ls(args, { stdout, env, json });
   if (action === "tree") return tree(args, { stdout, env, json });

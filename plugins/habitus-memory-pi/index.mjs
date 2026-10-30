@@ -4,7 +4,7 @@
 // 没有会话文件的进程（-p --no-session，比如子代理示例另起的 pi）不是他在说话，什么都不做。失败一律静默放行，不拦 pi。
 
 import { loadPluginConfig } from "./scripts/shared/config.mjs";
-import { promptInjection } from "./scripts/shared/hook-runner.mjs";
+import { promptInjection, writeDebugStack } from "./scripts/shared/hook-runner.mjs";
 import { writeOperationLog } from "./scripts/shared/operation-log.mjs";
 import { PluginCore } from "./scripts/shared/plugin-core.mjs";
 import { hostAdapter } from "./scripts/host-adapter.mjs";
@@ -37,6 +37,7 @@ export default function HabitusMemoryExtension(pi, { config: given, core } = {})
     catch (error) {
       await writeOperationLog(config, hostAdapter, value, { hook: stage, stage, status: "error", retryable: true, error })
         .catch(() => {});
+      writeDebugStack(config.debug, error);
       return undefined;
     }
   }

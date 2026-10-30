@@ -86,28 +86,64 @@ export async function listOutbox(root, host, nativeSessionId) {
   return items;
 }
 
+// 不加锁读：ack 删完最后一个文件时会在会话锁里把目录删掉（26 号清单 7.3），列的这一刻目录或文件可能已经没了，
+// 没了的就跳过（下面三个读法都只容 ENOENT）
+async function entriesOrNull(path) {
+  try { return await readdir(path, { withFileTypes: true }); }
+  catch (error) { if (error?.code === "ENOENT") return null; throw error; }
+}
+
+async function itemFilesOrNull(directoryPath) {
+  try { return (await readdir(directoryPath)).filter((name) => name.endsWith(".json")).sort(); }
+  catch (error) { if (error?.code === "ENOENT") return null; throw error; }
+}
+
+async function itemOrNull(path) {
+  let text;
+  try { text = await readFile(path, "utf8"); }
+  catch (error) { if (error?.code === "ENOENT") return null; throw error; }
+  return JSON.parse(text);
+}
+
 export async function listPendingSessions(root, host) {
   const hostRoot = join(root, "outbox", host);
-  let sessions;
-  try { sessions = await readdir(hostRoot, { withFileTypes: true }); }
-  catch (error) { if (error?.code === "ENOENT") return []; throw error; }
+  const sessions = await entriesOrNull(hostRoot);
+  if (sessions == null) return [];
   const identities = new Set();
   for (const entry of sessions.filter((value) => value.isDirectory())) {
-    // 不加锁读：ack 删完最后一个文件时会在会话锁里把目录删掉（26 号清单 7.3），列的这一刻目录或文件可能已经没了
-    let files;
-    try { files = (await readdir(join(hostRoot, entry.name))).filter((name) => name.endsWith(".json")).sort(); }
-    catch (error) { if (error?.code === "ENOENT") continue; throw error; }
-    if (files.length === 0) continue;
-    let text;
-    try { text = await readFile(join(hostRoot, entry.name, files[0]), "utf8"); }
-    catch (error) { if (error?.code === "ENOENT") continue; throw error; }
-    const item = JSON.parse(text);
+    const files = await itemFilesOrNull(join(hostRoot, entry.name));
+    if (!files?.length) continue;
+    const item = await itemOrNull(join(hostRoot, entry.name, files[0]));
+    if (item == null) continue;
     if (item?.schemaVersion !== ITEM_SCHEMA || typeof item.nativeSessionId !== "string") {
       throw new Error("invalid plugin outbox session");
     }
     identities.add(item.nativeSessionId);
   }
   return [...identities].sort();
+}
+
+// 整个 outbox 的盘点（doctor 用）：按宿主、会话列出每一条还在的条目；条目本身不合规就报错
+export async function inventoryOutbox(root) {
+  const outbox = join(root, "outbox");
+  const sessions = [];
+  for (const host of ((await entriesOrNull(outbox)) || []).filter((entry) => entry.isDirectory())) {
+    for (const session of ((await entriesOrNull(join(outbox, host.name))) || []).filter((entry) => entry.isDirectory())) {
+      const directoryPath = join(outbox, host.name, session.name);
+      const items = [];
+      for (const filename of (await itemFilesOrNull(directoryPath)) || []) {
+        const item = await itemOrNull(join(directoryPath, filename));
+        if (item == null) continue;
+        if (item?.schemaVersion !== ITEM_SCHEMA || !/^[0-9a-f]{64}$/.test(item?.deliveryId || "")) {
+          throw new Error("outbox item schema is invalid");
+        }
+        if (sessionKey(host.name, item.nativeSessionId) !== session.name) throw new Error("outbox session key is invalid");
+        items.push(item);
+      }
+      if (items.length > 0) sessions.push({ host: host.name, nativeSessionId: items[0].nativeSessionId, items });
+    }
+  }
+  return sessions;
 }
 
 export async function bindOutboxItem(root, item, startSequence) {

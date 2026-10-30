@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { loadPluginConfig } from "../lib/config.mjs";
-import { writeOperationLog } from "../lib/operation-log.mjs";
+import { writeOperationLog, writeRepeatedFailureLogs } from "../lib/operation-log.mjs";
 
 const ADAPTER = { host: "test-host", nativeSessionId: () => "session-1" };
 
@@ -82,4 +82,38 @@ test("blank or non-positive settings fall back to their defaults instead of the 
   }
   assert.equal(loadPluginConfig({ ...root, HABITUS_PLUGIN_SESSION_GRACE_HOURS: "2" }).sessionRetireGraceMs, 2 * 3_600_000);
   assert.equal(loadPluginConfig({ ...root, HABITUS_PLUGIN_TIMEOUT_MS: "100" }).timeoutMs, 250);
+});
+
+async function lines(stateRoot) {
+  try { return (await readFile(join(stateRoot, "logs", "operations.jsonl"), "utf8")).trim().split("\n").filter(Boolean).length; }
+  catch (error) { if (error?.code === "ENOENT") return 0; throw error; }
+}
+
+const RECALL_DOWN = { hook: "user-prompt", failures: [{ stage: "recall", reason: "service_unavailable", detail: "fetch failed" }], settled: [] };
+const sessionAdapter = { host: "test-host", nativeSessionId: (input) => input.session_id };
+
+// 杀变异 J21（记号只留一个会话）：几个会话交替出同一个原因，各自只记第一次
+test("sessions taking turns with the same failure each log it once", async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "habitus-oplog-"));
+  const settings = config(stateRoot);
+  const start = Date.now();
+  for (const [index, session] of ["A", "B", "A", "B"].entries()) {
+    await writeRepeatedFailureLogs(settings, sessionAdapter, { session_id: session }, RECALL_DOWN, start + index);
+  }
+  assert.equal(await lines(stateRoot), 2);
+});
+
+// 杀变异 J22（记号满了丢最近的）：超过 64 个会话时丢的是最早记的那个，最近的还认得出、不重记
+test("when more than 64 sessions are remembered the earliest is dropped, not the latest", async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "habitus-oplog-"));
+  const settings = config(stateRoot);
+  const start = Date.now();
+  for (let index = 0; index <= 64; index += 1) {
+    await writeRepeatedFailureLogs(settings, sessionAdapter, { session_id: `s${index}` }, RECALL_DOWN, start + index);
+  }
+  assert.equal(await lines(stateRoot), 65);
+  await writeRepeatedFailureLogs(settings, sessionAdapter, { session_id: "s64" }, RECALL_DOWN, start + 65);
+  assert.equal(await lines(stateRoot), 65);
+  await writeRepeatedFailureLogs(settings, sessionAdapter, { session_id: "s0" }, RECALL_DOWN, start + 66);
+  assert.equal(await lines(stateRoot), 66);
 });

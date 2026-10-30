@@ -26,7 +26,7 @@ function validateState(value) {
   if (![2, 3].includes(value?.schemaVersion)) throw new Error("unsupported plugin state schema");
   if (typeof value.nativeSessionId !== "string" || !value.nativeSessionId) throw new Error("plugin state session is invalid");
   if (!Number.isSafeInteger(value.nextSequence) || value.nextSequence < 0) throw new Error("plugin state sequence is invalid");
-  if (value.acknowledgedTranscriptCursor != null && ![1, 2].includes(value.acknowledgedTranscriptCursor.schemaVersion)) {
+  if (value.acknowledgedTranscriptCursor != null && ![1, 2, 3].includes(value.acknowledgedTranscriptCursor.schemaVersion)) {
     throw new Error("plugin transcript cursor schema is invalid");
   }
   if (value.schemaVersion === 2) {
@@ -84,6 +84,43 @@ export async function listStateSessions(root, host) {
     } catch (error) { if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error; }
   }
   return sessions.sort();
+}
+
+async function eachState(root, visit) {
+  const sessionsRoot = join(root, "sessions");
+  let hosts;
+  try { hosts = await readdir(sessionsRoot, { withFileTypes: true }); }
+  catch (error) { if (error?.code === "ENOENT") return; throw error; }
+  for (const host of hosts.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort()) {
+    for (const nativeSessionId of await listStateSessions(root, host)) {
+      let state;
+      try { state = await readState(root, host, nativeSessionId); } catch { continue; }
+      if (state != null) visit(host, nativeSessionId, state);
+    }
+  }
+}
+
+// 最近一次读转写失败、之后还没读成功过的会话（plugin-core 的 enqueueCapture 记下 captureFailure）：给 doctor 列
+export async function listCaptureFailures(root) {
+  const failures = [];
+  await eachState(root, (host, nativeSessionId, state) => {
+    const failure = state.captureFailure;
+    if (failure != null) {
+      failures.push({ host, nativeSessionId, reason: String(failure.reason), since: String(failure.since ?? failure.at), at: String(failure.at) });
+    }
+  });
+  return failures;
+}
+
+// 原样超过读取额度、跳过没读的转写行（plugin-core 记在 skippedTranscriptLines，每个会话留最近几条）：给 doctor 列
+export async function listSkippedTranscriptLines(root) {
+  const skipped = [];
+  await eachState(root, (host, nativeSessionId, state) => {
+    for (const line of Array.isArray(state.skippedTranscriptLines) ? state.skippedTranscriptLines : []) {
+      skipped.push({ host, nativeSessionId, lineCount: Number(line?.lineCount), bytes: Number(line?.bytes), at: String(line?.at) });
+    }
+  });
+  return skipped;
 }
 
 export async function writeState(root, host, nativeSessionId, value) {

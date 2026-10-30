@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,6 +10,7 @@ import { HARNESS_REGISTRY } from "../../harnesses.mjs";
 import { executePluginLifecycle } from "../../install-memory-plugin.mjs";
 import { requireHostAdapter } from "../lib/host-adapter.mjs";
 import { PluginCore } from "../lib/plugin-core.mjs";
+import { sessionKey } from "../lib/state-store.mjs";
 
 const NO_SQLITE = await import("node:sqlite").then(() => false, () => "Node without node:sqlite");
 
@@ -108,4 +109,33 @@ test("ZCode registers through its own marketplace commands and borrows Claude Co
   const manifest = JSON.parse(await readFile(join(marketplace, ".claude-plugin", "marketplace.json"), "utf8"));
   assert.equal(manifest.plugins[0].source, "./plugins/habitus-memory-claude-code");
   assert.equal(HARNESS_REGISTRY.resolve("zc").manifestOf, "claude-code");
+});
+
+// T5：ZCode 没有 SessionEnd，镜像是插件自己的文件：会话从 ZCode 的库里没了、outbox 送空、过了宽限期，会话状态与镜像一起退场；
+// 库里还有它、或 outbox 还有没送的，都不退
+test("a ZCode session gone from its database is retired with its mirror, but not while it exists or has unsent batches", { skip: NO_SQLITE }, async (t) => {
+  const root = await temporaryRoot(t);
+  const db = join(root, "db.sqlite");
+  await sessionDatabase(db);
+  const config = { enabled: true, stateRoot: join(root, "state"), timeoutMs: 1000, maxTranscriptBytes: 1 << 20, sessionRetireGraceMs: 0 };
+  const adapter = createZCodeAdapter({ dbPath: db });
+  assert.equal(adapter.retiresOnSessionStart, true);
+  const input = await adapter.prepareInput({ session_id: "sess_1" }, config, "stop");
+  const service = {
+    capabilities: async () => ({ ok: true, result: { api_version: "1.0", protocols: ["zcode"], features: FEATURES } }),
+    cursor: async () => ({ ok: true, result: { next_sequence: 0 } }),
+    remember: async () => ({ ok: true, result: { next_sequence: 2 } }),
+  };
+  const core = new PluginCore(config, { service });
+  await core.enqueueCapture(adapter, input);
+  const { DatabaseSync } = await import("node:sqlite");
+  const forget = () => { const handle = new DatabaseSync(db); handle.exec("delete from message where session_id = 'sess_1'"); handle.close(); };
+  const state = join(config.stateRoot, "sessions", "zcode", `${sessionKey("zcode", "sess_1")}.json`);
+  assert.deepEqual(await core.retireIdleSessions(adapter), { retired: [] }); // 还在库里
+  forget();
+  assert.deepEqual(await core.retireIdleSessions(adapter), { retired: [] }); // outbox 还有一批没送
+  await core.drain(adapter, input);
+  assert.deepEqual(await core.retireIdleSessions(adapter), { retired: ["sess_1"] });
+  await assert.rejects(stat(state), /ENOENT/);
+  await assert.rejects(stat(input.transcript_path), /ENOENT/);
 });

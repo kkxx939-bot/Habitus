@@ -9,12 +9,13 @@ import {
 } from "../harnesses.mjs";
 import { defaultMarketplaceRoot, marketplaceStatus } from "../install-memory-plugin.mjs";
 import { CommandRunner, inspectHookReview, registrationOf } from "../registrations.mjs";
+import { REMINDERS_FEATURE, hasFeature, serviceGaps } from "./lib/compat.mjs";
 import { loadPluginConfig } from "./lib/config.mjs";
 import { errorText } from "./lib/service-client.mjs";
 import { HabitusServiceClient } from "./lib/service-client.mjs";
-import { readState, sessionKey } from "./lib/state-store.mjs";
+import { inventoryOutbox } from "./lib/outbox.mjs";
+import { listCaptureFailures, listSkippedTranscriptLines, readState } from "./lib/state-store.mjs";
 
-const REQUIRED_FEATURES = ["conversation_cursor", "flush", "recall", "remember", "remember_idempotency_v1"];
 const PLUGINS_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const GENERATED_HEADER = "// GENERATED FROM plugins/memory-plugin-shared/lib. DO NOT EDIT.\n";
 const MAX_PENDING_AGE_MS = 24 * 60 * 60 * 1000;
@@ -36,8 +37,8 @@ export async function runPluginDoctor(
   checks.push(nodeRuntimeCheck(), ...(await bundleChecks(registry)));
   const registrations = await inspectHarnesses(registry, env);
   checks.push(...registrations, await inspectMarketplace(registry, env));
-  checks.push(...await inspectFeatures(registry));
-  checks.push(...await inspectHookReviews(registry, registrations));
+  checks.push(...await inspectFeatures(registry, registrations, spawnSync, env));
+  checks.push(...await inspectHookReviews(registry, registrations, inspectHookReview, { timeoutMs: config.timeoutMs, env }));
   const health = await service.health();
   if (!health.ok) {
     // 连不上就只报这一条：就绪、特性、提醒都无从谈起，别把它们报成一串不相干的失败
@@ -55,11 +56,15 @@ export async function runPluginDoctor(
     checks.push({
       name: "outbox",
       status: failed ? "fail" : inventory.aged > 0 ? "warn" : "pass",
-      detail: Object.entries(inventory).map(([status, count]) => `${status}_items=${count}`).join("; "),
+      detail: [
+        ...Object.entries(inventory).map(([status, count]) => `${status}_items=${count}`),
+        ...(await blockedOutboxItems(config.stateRoot)),
+      ].join("; "),
     });
   } catch (error) {
     checks.push({ name: "outbox", status: "fail", detail: error?.message || String(error) });
   }
+  checks.push(await captureCheck(config.stateRoot));
   return { ok: checks.every((check) => check.status !== "fail"), checks };
 }
 
@@ -71,28 +76,52 @@ function registeredProtocols(registry, registrations) {
 
 async function serviceChecks(service, requiredProtocols) {
   const checks = [];
-  const ready = await service.ready();
-  checks.push({ name: "ready", status: ready.ok && ready.result?.ready === true ? "pass" : "fail", detail: ready.ok ? String(ready.result?.status) : errorText(ready.error) });
+  checks.push(readinessCheck(await service.ready()));
   const capabilities = await service.capabilities();
-  const availableProtocols = new Set(capabilities.result?.protocols || []);
-  const availableFeatures = new Set(capabilities.result?.features || []);
-  const missingProtocols = requiredProtocols.filter((protocol) => !availableProtocols.has(protocol));
-  const missingFeatures = REQUIRED_FEATURES.filter((feature) => !availableFeatures.has(feature));
+  const gaps = serviceGaps(capabilities.result, requiredProtocols);
   const compatible = capabilities.ok
-    && capabilities.result?.api_version === "1.0"
-    && missingProtocols.length === 0
-    && missingFeatures.length === 0;
+    && gaps.apiVersion
+    && gaps.missingProtocols.length === 0
+    && gaps.missingFeatures.length === 0;
   const compatibilityDetail = compatible
     ? `service ${capabilities.result?.service_version}`
-    : `api=${capabilities.result?.api_version || "unavailable"}; missing_protocols=${missingProtocols.join(",")}; missing_features=${missingFeatures.join(",")} (service is too old; upgrade habitus-server)`;
+    : `api=${capabilities.result?.api_version || "unavailable"}; missing_protocols=${gaps.missingProtocols.join(",")}; missing_features=${gaps.missingFeatures.join(",")} (service is too old; upgrade habitus-server)`;
   checks.push({ name: "capabilities", status: compatible ? "pass" : "fail", detail: compatibilityDetail });
   // 提醒出口（方案 32）不是必需特性：没有就只做 memory，这里报 warn 让人知道提醒接不接得上
+  const reminders = hasFeature(capabilities.result, REMINDERS_FEATURE);
   checks.push({
     name: "reminders",
-    status: availableFeatures.has("reminders_v1") ? "pass" : "warn",
-    detail: availableFeatures.has("reminders_v1") ? "service claims reminders (reminders_v1)" : "service has no reminders_v1; memory only",
+    status: reminders ? "pass" : "warn",
+    // 服务只在预测层开着时公布 reminders_v1（裁定 80 第 1 条）：没有就是提醒没开，说清怎么开
+    detail: reminders
+      ? `service claims reminders (${REMINDERS_FEATURE})`
+      : `reminders are off: the service's prediction layer is not enabled (no ${REMINDERS_FEATURE}); memory only. `
+        + "To turn reminders on, set behavior.primary_subject, scene.enabled: true and foresight.enabled: true "
+        + "in config.yaml (commented examples in habitus/config/example.yaml), then restart habitus-server",
   });
   return checks;
+}
+
+// 未就绪时服务照样给出各项检查（/ready 的 503 带 HealthResult）：报出哪几项不健康，而不是只说一个总状态。
+// 记忆写入在等模型恢复（memory_queue 报 waiting_for_model：额度 / 余额、鉴权、断网）不是失败——Job 排着队按长退避自己重试，
+// 召回照常（recall_ready）——报 warn 并说该看哪里；Job 真失败待处置、召回本身不可用报 fail
+function readinessCheck(ready) {
+  if (!ready.ok) return { name: "ready", status: "fail", detail: errorText(ready.error) };
+  const checks = Array.isArray(ready.result?.checks) ? ready.result.checks : [];
+  const unhealthy = checks
+    .filter((check) => check?.status !== "healthy")
+    .map((check) => `${check.name}: ${check.status} ${check.detail}`);
+  const waiting = checks.find((check) => check?.name === "memory_queue" && String(check?.detail).startsWith("waiting_for_model:"));
+  const otherCritical = checks.filter((check) => check?.critical !== false && check?.status !== "healthy" && check !== waiting);
+  const detail = [String(ready.result?.status), ...unhealthy];
+  if (ready.result?.ready === true) return { name: "ready", status: "pass", detail: detail.join("; ") };
+  if (waiting && otherCritical.length === 0 && ready.result?.recall_ready === true) {
+    detail.push("memory writes are waiting for the chat model to recover (quota or balance, credentials, network); "
+      + "queued jobs retry on their own and recall still works; check the model credentials and account");
+    return { name: "ready", status: "warn", detail: detail.join("; ") };
+  }
+  if (ready.result?.recall_ready === true) detail.push("recall still works; memory writes are stopped (see memory_queue / memory_worker above)");
+  return { name: "ready", status: "fail", detail: detail.join("; ") };
 }
 
 // 宿主跑的是 marketplace 根里的暂存副本：npm 包升级后不 update，宿主一直跑旧插件
@@ -173,36 +202,53 @@ async function sharedBundleCheck(registry = HARNESS_REGISTRY) {
   }
 }
 
-export async function harnessFeatureChecks(registry = HARNESS_REGISTRY, run = spawnSync) {
-  // 插件装上了但宿主的 hook 特性没开，记忆与提醒的 hook 一个都不会跑：按注册表里声明的特性逐项查（宿主没装 CLI 的跳过）
+// 宿主的特性清单对照注册表：必需的缺了 hook 一个都不跑；提醒相关的（advisory）缺了只是提醒问不出去。宿主没装 CLI 给 null。
+// 到点直接 SIGKILL：宿主接管了 SIGTERM 时，spawnSync 默认的超时信号兜不住
+export function harnessFeatureGaps(definition, run = spawnSync, env = process.env) {
+  const result = run(definition.command, definition.featureInventory.args, { encoding: "utf8", timeout: 5000, killSignal: "SIGKILL", env });
+  if (result.error?.code === "ENOENT") return null;
+  if (result.error || result.status !== 0) return { available: false };
+  const enabled = parseFeatureList(result.stdout);
+  return {
+    available: true,
+    missing: definition.featureInventory.required.filter((name) => enabled.get(name) !== true),
+    advisory: definition.featureInventory.advisory.filter((item) => enabled.get(item.name) !== true),
+  };
+}
+
+export async function harnessFeatureChecks(registry = HARNESS_REGISTRY, registrations = [], run = spawnSync, env = process.env) {
+  // 插件装上了但宿主的 hook 特性没开，记忆与提醒的 hook 一个都不会跑：按注册表里声明的特性逐项查（宿主没装 CLI 的跳过）。
+  // 提醒相关的特性只对已注册的宿主查，缺了报 warn
+  const registered = new Set(registrations.filter((check) => check.status === "pass").map((check) => check.name));
   const checks = [];
   for (const definition of registry.list().filter((item) => item.featureInventory)) {
-    const result = run(definition.command, definition.featureInventory.args, { encoding: "utf8", timeout: 5000 });
-    if (result.error?.code === "ENOENT") continue;
-    if (result.error || result.status !== 0) {
+    const gaps = harnessFeatureGaps(definition, run, env);
+    if (gaps == null) continue;
+    if (!gaps.available) {
       checks.push({ name: `features_${definition.id}`, status: "warn", detail: "Harness feature list is unavailable" });
       continue;
     }
-    const enabled = parseFeatureList(result.stdout);
-    const missing = definition.featureInventory.required.filter((name) => enabled.get(name) !== true);
+    const advisory = registered.has(`harness_${definition.id}`) ? gaps.advisory : [];
+    const detail = gaps.missing.length === 0
+      ? `required features enabled: ${definition.featureInventory.required.join(", ")}`
+      : `features off: ${gaps.missing.join(", ")} (enable them in the harness config, then restart it)`;
     checks.push({
       name: `features_${definition.id}`,
-      status: missing.length === 0 ? "pass" : "fail",
-      detail: missing.length === 0
-        ? `required features enabled: ${definition.featureInventory.required.join(", ")}`
-        : `features off: ${missing.join(", ")} (enable them in the harness config, then restart it)`,
+      status: gaps.missing.length > 0 ? "fail" : advisory.length > 0 ? "warn" : "pass",
+      detail: [detail, ...advisory.map((item) => `${item.name} off: ${item.note}`)].join("; "),
     });
   }
   return checks;
 }
 
-// 插件注册了、hook 却没被用户批准，宿主照样一个都不跑：只查已注册、且宿主要求逐条批准的
-export async function harnessHookReviewChecks(registry = HARNESS_REGISTRY, registrations = [], review = inspectHookReview) {
+// 插件注册了、hook 却没被用户批准，宿主照样一个都不跑：只查已注册、且宿主要求逐条批准的。
+// options（超时 timeoutMs、环境 env）原样交给 review
+export async function harnessHookReviewChecks(registry = HARNESS_REGISTRY, registrations = [], review = inspectHookReview, options = {}) {
   const registered = new Set(registrations.filter((check) => check.status === "pass").map((check) => check.name));
   const checks = [];
   for (const definition of registry.list().filter((item) => item.hookReview && registered.has(`harness_${item.id}`))) {
     const name = `hooks_review_${definition.id}`;
-    const result = await review(definition);
+    const result = await review(definition, options);
     if (!result?.available) {
       checks.push({ name, status: "warn", detail: `cannot ask the harness which hooks are approved: ${result?.error || "unknown"}` });
     } else if (result.hooks.length === 0) {
@@ -232,7 +278,7 @@ export async function harnessRegistrationChecks(registry = HARNESS_REGISTRY, env
 }
 
 // 和安装器用同一组注册方式去查（不再自己解析一遍宿主清单或入口文件）；宿主 CLI 报错只记 warn，不算体检失败
-async function inspectHarness(definition, env, runner = new CommandRunner()) {
+async function inspectHarness(definition, env, runner = new CommandRunner(env)) {
   const name = `harness_${definition.id}`;
   let snapshot;
   try {
@@ -247,55 +293,65 @@ async function inspectHarness(definition, env, runner = new CommandRunner()) {
   return { name, status: "warn", detail: "Habitus plugin is not registered" };
 }
 
-export async function outboxInventory(root, { now = Date.now(), maxPendingAgeMs = MAX_PENDING_AGE_MS } = {}) {
-  const outbox = join(root, "outbox");
-  let hosts;
-  try { hosts = await readdir(outbox, { withFileTypes: true }); }
-  catch (error) {
-    if (error?.code === "ENOENT") {
+// 转写读不出来的会话（没进 outbox，outbox 那一项看不见）：每次 Stop 都照样失败、这个会话停采，直到读成功一次（fail）。
+// 原样超过读取额度、跳过没读的行：采集照常往下走，那一行的内容没进记忆（warn，列出是哪个会话的第几行、多大）
+export async function captureCheck(root) {
+  try {
+    const failures = await listCaptureFailures(root);
+    if (failures.length > 0) {
       return {
-        queued: 0, bound: 0, inflight: 0, blocked: 0,
-        aged: 0, expiredInflight: 0, missingState: 0, invalidState: 0,
+        name: "capture",
+        status: "fail",
+        detail: failures.map((item) => `${item.host} session ${item.nativeSessionId}: transcript not read since ${item.since} (last tried ${item.at}): ${item.reason}`).join("; "),
       };
     }
-    throw error;
+    const skipped = await listSkippedTranscriptLines(root);
+    if (skipped.length > 0) {
+      return {
+        name: "capture",
+        status: "warn",
+        detail: skipped.map((item) => `${item.host} session ${item.nativeSessionId}: transcript line ${item.lineCount} (${item.bytes} bytes) skipped at ${item.at}: over the read limit (HABITUS_PLUGIN_MAX_TRANSCRIPT_BYTES)`).join("; "),
+      };
+    }
+    return { name: "capture", status: "pass", detail: "no session is stuck reading its transcript" };
+  } catch (error) {
+    return { name: "capture", status: "fail", detail: error?.message || String(error) };
   }
+}
+
+// 卡住的每一条：哪个宿主、哪个会话、为什么（超过服务请求上限的写着这一批多大、超了多少）
+export async function blockedOutboxItems(root) {
+  const lines = [];
+  for (const session of await inventoryOutbox(root)) {
+    for (const item of session.items.filter((value) => value.status === "blocked")) {
+      lines.push(`blocked ${session.host} session ${session.nativeSessionId}: ${item.blockedReason || "non-retryable service error"}`);
+    }
+  }
+  return lines;
+}
+
+// 列 outbox 用 outbox.mjs 那一份（与 hook worker 并发时读到一半消失的会话、条目跳过），这里只数状态
+export async function outboxInventory(root, { now = Date.now(), maxPendingAgeMs = MAX_PENDING_AGE_MS } = {}) {
   const counts = {
     queued: 0, bound: 0, inflight: 0, blocked: 0,
     aged: 0, expiredInflight: 0, missingState: 0, invalidState: 0,
   };
   const statuses = new Set(["queued", "bound", "inflight", "blocked"]);
-  for (const host of hosts.filter((entry) => entry.isDirectory())) {
-    const sessions = await readdir(join(outbox, host.name), { withFileTypes: true });
-    for (const session of sessions.filter((entry) => entry.isDirectory())) {
-      const directory = join(outbox, host.name, session.name);
-      const files = (await readdir(directory)).filter((name) => name.endsWith(".json"));
-      if (files.length === 0) continue;
-      let stateChecked = false;
-      for (const filename of files) {
-        const item = JSON.parse(await readFile(join(directory, filename), "utf8"));
-        if (item?.schemaVersion !== 2 || !/^[0-9a-f]{64}$/.test(item?.deliveryId || "")) {
-          throw new Error("outbox item schema is invalid");
-        }
-        if (!statuses.has(item.status)) throw new Error(`unsupported outbox status: ${item.status}`);
-        if (sessionKey(host.name, item.nativeSessionId) !== session.name) throw new Error("outbox session key is invalid");
-        if (!stateChecked) {
-          try {
-            const state = await readState(root, host.name, item.nativeSessionId);
-            if (state == null) counts.missingState += 1;
-          } catch {
-            counts.invalidState += 1;
-          }
-          stateChecked = true;
-        }
-        counts[item.status] += 1;
-        const createdAt = Date.parse(item.createdAt);
-        if (!Number.isFinite(createdAt)) throw new Error("outbox item createdAt is invalid");
-        if (now - createdAt > maxPendingAgeMs) counts.aged += 1;
-        if (item.status === "inflight") {
-          const expiresAt = Date.parse(item.claimExpiresAt);
-          if (!Number.isFinite(expiresAt) || expiresAt <= now) counts.expiredInflight += 1;
-        }
+  for (const session of await inventoryOutbox(root)) {
+    try {
+      if (await readState(root, session.host, session.nativeSessionId) == null) counts.missingState += 1;
+    } catch {
+      counts.invalidState += 1;
+    }
+    for (const item of session.items) {
+      if (!statuses.has(item.status)) throw new Error(`unsupported outbox status: ${item.status}`);
+      counts[item.status] += 1;
+      const createdAt = Date.parse(item.createdAt);
+      if (!Number.isFinite(createdAt)) throw new Error("outbox item createdAt is invalid");
+      if (now - createdAt > maxPendingAgeMs) counts.aged += 1;
+      if (item.status === "inflight") {
+        const expiresAt = Date.parse(item.claimExpiresAt);
+        if (!Number.isFinite(expiresAt) || expiresAt <= now) counts.expiredInflight += 1;
       }
     }
   }

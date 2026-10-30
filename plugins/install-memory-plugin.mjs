@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, parse, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HARNESS_REGISTRY, MARKETPLACE_NAME, publicHarnessDescriptor } from "./harnesses.mjs";
-import { CommandRunner, registrationOf } from "./registrations.mjs";
+import { CommandRunner, harnessPresent, installBlocker, registrationOf } from "./registrations.mjs";
 
 function inspectHarness(definition, runner, env) {
   return registrationOf(definition).inspect(definition, runner, env);
@@ -98,11 +98,30 @@ async function stageMarketplace(root, sourceRoot, registry) {
   }
 }
 
+// install / update 整个换掉根目录：只换不存在的、空的、或带合法安装标记的（与 remove 只删带标记的同口径），
+// 别的目录里可能是用户自己的东西
+async function requireReplaceable(root, sourceRoot, registry) {
+  let entries;
+  try { entries = await readdir(root); }
+  catch (error) {
+    if (error?.code === "ENOENT") return;
+    if (error?.code === "ENOTDIR") throw new Error(`marketplace root ${root} exists and is not a directory`);
+    throw error;
+  }
+  if (entries.length === 0) return;
+  if ((await marketplaceStatus(root, { sourceRoot, registry })).prepared) return;
+  throw new Error(
+    `marketplace root ${root} is not empty and has no Habitus install marker (.habitus-install.json);`
+    + " refusing to replace it. Move it aside, then run the command again",
+  );
+}
+
 async function swapMarketplace(
   rootValue,
   { sourceRoot = REPOSITORY_PLUGINS, registry = HARNESS_REGISTRY } = {},
 ) {
   const root = dedicatedRoot(rootValue, sourceRoot);
+  await requireReplaceable(root, sourceRoot, registry);
   const staging = await stageMarketplace(root, sourceRoot, registry);
   const backup = `${root}.backup-${randomUUID()}`;
   let hadPrevious = false;
@@ -186,19 +205,19 @@ async function removeMarketplaceRoot(rootValue, sourceRoot, registry) {
 export async function executePluginLifecycle(
   options,
   {
-    runner = new CommandRunner(),
+    env = process.env,
+    runner = new CommandRunner(env),
     sourceRoot = REPOSITORY_PLUGINS,
     registry = HARNESS_REGISTRY,
-    env = process.env,
   } = {},
 ) {
   if (options.action === "harnesses") {
     return {
       action: "harnesses",
-      harnesses: registry.list().map((definition) => publicHarnessDescriptor(
+      harnesses: await Promise.all(registry.list().map(async (definition) => publicHarnessDescriptor(
         definition,
-        { available: runner.available(definition.command) },
-      )),
+        { available: await harnessPresent(definition, runner, env) },
+      ))),
     };
   }
   const root = dedicatedRoot(options.root, sourceRoot);
@@ -206,7 +225,13 @@ export async function executePluginLifecycle(
     ?? (options.host ? [options.host] : []);
   const definitions = selectedHarnesses(requestedHarnesses, registry);
   const allowUnavailable = requestedHarnesses.length === 0 || requestedHarnesses.includes("all");
+  const registering = ["install", "update"].includes(options.action) && !options.prepareOnly;
+  // update 不点名宿主：只重新注册已经注册过的（装着的，或入口还在、指向的副本没了的）；没装过的、卸掉了的不碰
+  const registeredOnly = options.action === "update" && requestedHarnesses.length === 0;
+  const wanted = (snapshot) => snapshot.available && (!registeredOnly || snapshot.installed || snapshot.dangling === true);
   const snapshots = [];
+  // 不点名时本机有、却装不了的宿主（要跑的宿主命令不在 PATH 上）跳过并说明原因，不连累别的宿主
+  const skipped = new Map();
   for (const definition of definitions) {
     const snapshot = await inspectHarness(definition, runner, env);
     if (
@@ -216,10 +241,14 @@ export async function executePluginLifecycle(
     ) {
       throw new Error(`${definition.id} CLI is not installed`);
     }
+    const blocker = registering && wanted(snapshot) ? installBlocker(definition, runner, env) : null;
+    if (blocker && !allowUnavailable) throw new Error(`${definition.id} CLI is not installed: ${blocker}`);
+    if (blocker) skipped.set(definition.id, blocker);
     snapshots.push({ snapshot, definition });
   }
   // 报给人看的是动手之后的状态
-  const inspectSelected = () => Promise.all(definitions.map((definition) => inspectHarness(definition, runner, env)));
+  const inspectSelected = async () => (await Promise.all(definitions.map((definition) => inspectHarness(definition, runner, env))))
+    .map((snapshot) => (skipped.has(snapshot.harness) ? { ...snapshot, skipped: skipped.get(snapshot.harness) } : snapshot));
   if (options.action === "status") {
     return {
       action: "status",
@@ -271,7 +300,7 @@ export async function executePluginLifecycle(
   }
   const processed = [];
   try {
-    for (const value of snapshots.filter((item) => item.snapshot.available)) {
+    for (const value of snapshots.filter((item) => wanted(item.snapshot) && !skipped.has(item.definition.id))) {
       processed.push(value);
       await registrationOf(value.definition).install(
         value.snapshot,
@@ -310,6 +339,7 @@ export function parseArgs(argv, env = process.env) {
   for (let index = 0; index < values.length; index += 1) {
     const value = values[index];
     if (value === "--host" || value === "--harness") options.harnesses.push(values[++index]);
+    // --root 只给测试换 marketplace 根（用户只用默认根：status / doctor / update / remove 都只认默认根），不写进 --help 与 README
     else if (value === "--root") {
       options.root = values[++index];
       if (options.root == null || options.root.startsWith("--")) throw new Error("--root requires a directory");

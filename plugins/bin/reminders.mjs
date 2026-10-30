@@ -1,4 +1,4 @@
-// habitus reminders（方案 36 第 2 步）：某天进了提醒出口的每条提醒走到了哪一步——待取 / 取走了 / 说了 / 宿主没取，
+// habitus reminders（方案 36 第 2 步）：某天进了提醒出口的每条提醒走到了哪一步——待取 / 取走了 / 说了 / 宿主没取 / 已发生，
 // 他怎么回的、结算结果；顶上一行是 R8 要看的数（问出口的比例、宿主没取、放回次数）。只读，经 GET /api/v1/reminders。
 
 import { call, connect, requireFeature } from "./service.mjs";
@@ -12,6 +12,7 @@ export async function reminders(args, { stdout, env }) {
   const day = value(values, "--day");
   if (values.length > 0) throw new Error(`unknown argument: ${values[0]}\n${USAGE}`);
   if (day != null && !/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error("--day must look like 2026-10-21");
+  if (day != null && !calendarDay(day)) throw new Error(`--day ${day} 日期不存在`);
   const connection = connect(env);
   await requireFeature(connection, "reminders_report_v1");
   const report = await call(connection, "reminders", `/api/v1/reminders${day ? `?day=${day}` : ""}`);
@@ -37,6 +38,7 @@ function progress(item) {
   if (item.stage === "取走了" && holder) steps.push(`${holder.host} 取走 ${clock(holder.claimed_at)}`);
   if (item.stage === "说了") steps.push(`说了（${item.spoken_via ?? "?"} ${clock(item.spoken_at)}）`);
   if (item.stage === "宿主没取") steps.push("宿主没取");
+  if (item.stage === "已发生") steps.push("他先做了（已发生）");
   if (item.response) steps.push(`回话 ${item.response} ${clock(item.responded_at)}`);
   if (item.outcome) steps.push(`结果 ${item.outcome}`);
   if (item.attempts) steps.push(`放回 ${item.attempts} 次`);
@@ -47,6 +49,14 @@ function progress(item) {
 function clock(iso) {
   const match = typeof iso === "string" ? iso.match(/T(\d{2}:\d{2})/) : null;
   return match ? match[1] : "?";
+}
+
+// 按公历核这一天在不在（2026-02-30 不在），不交给服务去报一句笼统的校验失败
+function calendarDay(text) {
+  const [year, month, day] = text.split("-").map(Number);
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
 }
 
 function take(args, flag) {

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readJsonlDelta } from "./shared/jsonl.mjs";
@@ -9,7 +10,8 @@ import { TranscriptMirror, selectCompletedMessages, transcriptPath } from "./sha
 // - hook 给的 transcript_path 是这一次 hook 临时写的一行、跑完就删；真会话在 ~/.zcode/cli/db/db.sqlite 的 message / part 表，
 //   一条消息 {info, parts} 与 OpenCode 同形。所以每次 hook 先把这个会话已完成的消息从库里镜像成本地 JSONL，再按游标读增量。
 // - 只有 SessionStart / UserPromptSubmit / Stop 等七个事件：没有 PreCompact、SessionEnd、Subagent*（hooks.json 里写了也只记一条
-//   警告跳过）；子代理里不跑任何 hook。
+//   警告跳过）；子代理里不跑任何 hook。会话状态与镜像的退场因此放在 SessionStart 的后台（retiresOnSessionStart），
+//   "会话不在了"看库里还有没有它的消息（镜像是插件自己的文件，不能拿它判）。
 // 待实测：注入的上下文在库里存成什么样（ZCode 前面加一行 "UserPromptSubmit hook additional context:"）；后台送转写的进程会不会
 // 被 ZCode 连同进程组杀掉。
 
@@ -45,12 +47,33 @@ export async function readZCodeSession(sessionId, dbPath = SESSION_DB) {
   }
 }
 
-export function createZCodeAdapter({ dbPath = SESSION_DB, readSession = readZCodeSession } = {}) {
+// 库里还有没有这个会话的消息：库文件都没了（ZCode 卸了、库删了）也算没有；库读不了照常抛（退场这次跳过）
+export async function zcodeSessionExists(sessionId, dbPath = SESSION_DB) {
+  if (!existsSync(dbPath)) return false;
+  const { DatabaseSync } = await import("node:sqlite").catch(() => {
+    throw new Error(`reading the ZCode session database needs node:sqlite (Node >= 22.5); found Node ${process.version}`);
+  });
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    return db.prepare("select 1 from message where session_id = ? limit 1").get(sessionId) != null;
+  } finally {
+    db.close();
+  }
+}
+
+export function createZCodeAdapter({ dbPath = SESSION_DB, readSession = readZCodeSession, sessionExists = zcodeSessionExists } = {}) {
   return Object.freeze({
     host: HOST,
     protocol: "zcode",
     questionTool: "AskUserQuestion",
+    retiresOnSessionStart: true,
     nativeSessionId(input) { return safeIdentifier(input?.session_id); },
+    hostSessionId(input) { return typeof input?.session_id === "string" ? input.session_id : null; },
+    // 没记下宿主会话 id 的老状态当它还在（不退场）
+    async sessionExists(state) {
+      if (typeof state?.hostSessionId !== "string" || !state.hostSessionId) return true;
+      return sessionExists(state.hostSessionId, dbPath);
+    },
     conversationId(input) { return `zcode-${this.nativeSessionId(input)}`; },
     prompt(input) { return typeof input?.prompt === "string" ? input.prompt.trim() : ""; },
     successOutput() { return {}; },
