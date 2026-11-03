@@ -75,10 +75,6 @@ def value_set(key: str, values: Iterable[str], *, now: datetime) -> ConceptDefin
     return _concept("、".join(value_name(key, value) for value in ordered), key, ordered, now=now)
 
 
-def weekday_set(names: Iterable[str], *, now: datetime) -> ConceptDefinition:
-    return value_set(WEEKDAY_KEY, names, now=now)
-
-
 def is_calendar(concepts: ConceptSet, identity: str) -> bool:
     return identity in concepts and concepts[identity].source.origin is ConceptOrigin.CALENDAR
 
@@ -157,5 +153,4 @@ __all__ = [
     "value_name",
     "value_set",
     "value_sets_to_add",
-    "weekday_set",
 ]

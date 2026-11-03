@@ -38,12 +38,19 @@ from habitus.behavior.kinds.changes import (
 from habitus.behavior.kinds.classify.classifier import DaytimeClassifier
 from habitus.behavior.kinds.config import BehaviorKindConfig
 from habitus.behavior.kinds.ids import ClassId, Lane
-from habitus.behavior.kinds.model import BehaviorClass, BehaviorKindError, ClassOrigin, Exclusion, Vocabulary
+from habitus.behavior.kinds.model import (
+    BehaviorClass,
+    BehaviorKindError,
+    ClassOrigin,
+    Exclusion,
+    Vocabulary,
+    sentence_key,
+)
 from habitus.behavior.kinds.revision.anchors import AnchorGate
 from habitus.behavior.kinds.revision.evidence import split_shortfall
 from habitus.behavior.kinds.revision.facts import Member, members_of
-from habitus.behavior.kinds.revision.grouping import Group, group_members, sentence_key
-from habitus.behavior.kinds.revision.prompt import NEW, REVISION_SYSTEM_PROMPT, render_user_message, revision_schema
+from habitus.behavior.kinds.revision.grouping import Group, group_members
+from habitus.behavior.kinds.revision.prompt import REVISION_SYSTEM_PROMPT, render_user_message, revision_schema
 from habitus.behavior.kinds.revision.proposals import (
     Draft,
     MergeProposal,
@@ -121,10 +128,7 @@ class Reviser:
         for lane in Lane:
             if not vocabulary.active(lane):
                 continue
-            if len(run.steps) >= cap:
-                run.signals.append(f"kind_revision_cap_reached {cap}")
-                break
-            await self._split_by_grouping(lane, run)
+            await self._split_by_grouping(lane, run)  # 已到上限时它不做事，下面这一句照样报上限、停下
             if len(run.steps) >= cap:
                 run.signals.append(f"kind_revision_cap_reached {cap}")
                 break
@@ -314,8 +318,6 @@ class Reviser:
         lane = proposal.source.lane
         first = run.working.next_id(lane).number
         new_ids = tuple(ClassId(lane, first + offset) for offset in range(len(proposal.new)))
-        if any(target == NEW for draft in proposal.new for _, target in draft.excludes):
-            raise BehaviorKindError("a split-out class cannot exclude itself")
         news = tuple(
             draft.to_class(new_id, origin=ClassOrigin.SPLIT)
             for draft, new_id in zip(proposal.new, new_ids, strict=True)
@@ -334,7 +336,8 @@ class Reviser:
         )
         run.calls += result.model_calls
         moved_to = {str(new.id): {move.occurrence for move in moves if move.target == str(new.id)} for new in news}
-        moved_anywhere = set().union(*moved_to.values()) if moved_to else set()
+        # 留下的那边 = 一条也没搬走的：搬去新类的、搬去已有类的都不算（裁定 17 ①）
+        moved_anywhere = {move.occurrence for move in moves}
         kept = [member for member in own if member.occurrence not in moved_anywhere]
         for new in news:
             shortfall = split_shortfall(

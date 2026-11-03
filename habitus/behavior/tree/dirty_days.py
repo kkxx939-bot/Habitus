@@ -3,7 +3,13 @@
 
     <lane 根>/reduction/dirty_days.jsonl     一行 {"seq": 序号, "days": [...]}，只追加
 
-读侧记着自己读到第几号（消费水位），读完把它及以前的截掉（唯一的消费者）。记的是**增量**：归约里"待刷新集合"是合并后的
+读侧记着自己读到第几号（消费水位），读完把它及以前的截掉（唯一的消费者）。
+
+写与读同一个字节上限（写得进就读得回）：记这一笔会让文件超限时，先把已有的各号并成一号（最后一号、日子取并集）再记。
+并起来只会让读侧多重读几天、不会少读——水位落在被并的几号之间时，并成的那一号比水位新，它的日子照样读到；水位已过
+那几号的，它们本来就读过了。日子的并集一年不过几 KB，远不到上限。
+
+记的是**增量**：归约里"待刷新集合"是合并后的
 集合、刷新成功还会去掉日子，拿它当变化记录会漏掉"变过又刷完"的那些天。放在行为树这一层而不是归约包里：读侧（series）
 只认得行为树，不该为了读这份日志把归约（连同模型客户端）一起 import 进来。
 """
@@ -56,6 +62,8 @@ class DirtyDayLog:
             if not found:
                 return last
             entries.append((last + 1, tuple(found)))
+            if len(_encoded(entries)) > _MAX_BYTES:
+                entries = [(last + 1, tuple(sorted({day for _number, items in entries for day in items})))]
             self._write(entries)
             return last + 1
 
@@ -100,15 +108,21 @@ class DirtyDayLog:
         return found
 
     def _write(self, entries: list[tuple[int, tuple[date, ...]]]) -> None:
-        payload = "".join(
-            json.dumps({"seq": number, "days": [day.isoformat() for day in days]}, separators=(",", ":")) + "\n"
-            for number, days in entries
-        ).encode("utf-8")
+        payload = _encoded(entries)
+        if len(payload) > _MAX_BYTES:
+            raise DirtyDayLogError("dirty-day log would exceed its byte bound")
         try:
             ensure_real_directory(self.root, artifact_root=self.root)
             atomic_replace_bytes(self.path, payload, artifact_root=self.root)
         except DurablePathIntegrityError as exc:
             raise DirtyDayLogError(f"dirty-day log cannot be written: {exc}") from exc
+
+
+def _encoded(entries: list[tuple[int, tuple[date, ...]]]) -> bytes:
+    return "".join(
+        json.dumps({"seq": number, "days": [day.isoformat() for day in days]}, separators=(",", ":")) + "\n"
+        for number, days in entries
+    ).encode("utf-8")
 
 
 __all__ = ["DIRTY_DAYS_FILENAME", "DirtyDayLog", "DirtyDayLogError"]

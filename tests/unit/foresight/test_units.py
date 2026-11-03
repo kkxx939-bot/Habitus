@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from habitus.foresight import Evidence, Tolerance, climb
+from habitus.foresight.edges import edge_reading
 from habitus.foresight.errors import ForesightError
 from habitus.foresight.feedback import feedback_reading
 from habitus.foresight.history import labelled_moments, record_of
@@ -19,6 +20,9 @@ from habitus.foresight.units import (
     Level,
     PastMoment,
     basis,
+    connected,
+    joinable,
+    meets,
     self_check,
     signature,
     unit_level,
@@ -283,3 +287,171 @@ def test_coincidental_inputs_stay_out_of_the_signature_and_the_counts() -> None:
         inputs, history, now=NOW, evidence=EVIDENCE, prior_share=1 / 3, coincidental={"session|photo|luggage|days_2_7"}
     )
     assert with_both.level is Level.STRONGEST and without.level is Level.SAME_SET
+
+
+def test_meets_needs_a_real_overlap_while_connected_also_joins_ranges_that_only_touch() -> None:
+    first = expect("a", formed=NOW - timedelta(hours=6), hours=3)  # 15:00 → 18:00
+    touching = expect("b", formed=NOW - timedelta(hours=3), hours=3)  # 18:00 → 21:00
+    assert meets(first, NOW - timedelta(hours=4), NOW)
+    assert not meets(first, NOW - timedelta(hours=3), NOW)  # 只碰到端点
+    assert not meets(touching, NOW - timedelta(hours=6), NOW - timedelta(hours=3))
+    assert [[item.expectation_id for item in group] for group in connected([first, touching])] == [["a", "b"]]
+
+
+def day_expect(identity: str, day: int, *, source: str = "日子", trigger: str = "interval") -> Expectation:
+    """以当天为单位的预期：起算当天零点、最晚时限次日零点（``triggers.days`` / ``triggers.situations``）。"""
+
+    midnight = datetime(2026, 1, day, tzinfo=CST)
+    return replace(
+        expect(identity, source=source, trigger=trigger, formed=midnight + timedelta(hours=4, minutes=15)),
+        window=(midnight + timedelta(hours=8), midnight + timedelta(hours=9)),
+        observed_from=midnight,
+        deadline=midnight + timedelta(days=1),
+    )
+
+
+def test_day_unit_expectations_on_adjacent_days_are_separate_moments() -> None:
+    """每天都做的事：今天那条的最晚时限正是明天那条的起算，只碰到端点不连成一刻（日子、情境都是）；同一天的照连。"""
+
+    days = [day_expect(f"d{day}", day) for day in (4, 5, 6)]
+    assert [[item.expectation_id for item in group] for group in connected(days)] == [["d4"], ["d5"], ["d6"]]
+    workdays = [
+        day_expect(f"w{day}", day, source="情境", trigger="session|weekday|luggage|situation") for day in (5, 6)
+    ]
+    assert [[item.expectation_id for item in group] for group in connected(workdays)] == [["w5"], ["w6"]]
+    same_day = [day_expect("d5", 5), workdays[0]]
+    assert [[item.expectation_id for item in group] for group in connected(same_day)] == [["d5", "w5"]]
+
+
+def test_an_event_range_that_only_touches_a_day_range_still_joins_it() -> None:
+    """只有两头都是以当天为单位的预期才不连：事件那条（前因做完起算的当天剩下的）碰到明天零点，与明天那条照连。"""
+
+    today = datetime(2026, 1, 5, tzinfo=CST)
+    rest_of_day = replace(
+        expect("evening", formed=today + timedelta(hours=20), hours=4), observed_from=today + timedelta(hours=20)
+    )
+    tomorrow = day_expect("d6", 6)
+    assert [[item.expectation_id for item in group] for group in connected([rest_of_day, tomorrow])] == [
+        ["evening", "d6"]
+    ]
+
+
+def test_twenty_daily_hits_are_twenty_moments_and_reach_the_line() -> None:
+    """单元历史：20 天每天准时命中是 20 刻，读数下界过 0.67 线（并成一刻时有效样本约 1，过不了线）。"""
+
+    items = [day_expect(f"d{day:02d}", day) for day in range(4, 24)]
+    records = [
+        record_of(item, AccountFact(item.account, item.formed_at, True, 1.0, "准时", item.expectation_id))
+        for item in items
+    ]
+    moments = labelled_moments(records, present=lambda group: frozenset({group[0].account}))
+    assert len(moments) == 20
+    reading = edge_reading(
+        [moment.past for moment in moments], items[0].account, alpha=0.05, half_life=8.0, window=40
+    ).reading
+    assert reading.lower > 0.67
+
+
+def two_day_expect(identity: str, day: int) -> Expectation:
+    """他偶尔隔一天做时的「离上次够久」：起算当天零点、最晚时限后天零点（覆盖今天和明天，``triggers.days``）。"""
+
+    item = day_expect(identity, day)
+    return replace(item, deadline=item.observed_from + timedelta(days=2))
+
+
+def hit(item: Expectation, occurrence: str):  # type: ignore[no-untyped-def]
+    fact = AccountFact(item.account, item.formed_at, True, 1.0, "准时", item.expectation_id)
+    return record_of(item, fact, occurrence_uri=occurrence)
+
+
+def test_overlapping_day_unit_expectations_from_different_days_are_separate_moments() -> None:
+    """裁定 81 第 1 条：起算不在同一天的两条以当天为单位的预期，重叠也不连；同一天的照连。"""
+
+    days = [two_day_expect(f"d{day}", day) for day in (6, 7, 8)]
+    assert [[item.expectation_id for item in group] for group in connected(days)] == [["d6"], ["d7"], ["d8"]]
+    same_day = [
+        two_day_expect("d7", 7),
+        day_expect("w7", 7, source="情境", trigger="session|weekday|luggage|situation"),
+    ]
+    assert [[item.expectation_id for item in group] for group in connected(same_day)] == [["d7", "w7"]]
+
+
+def test_an_occurrence_two_day_expectations_both_saw_counts_once_for_the_earlier_one() -> None:
+    """裁定 81 第 2 条：01-06 没做、01-07 做了——01-06 那条（到 01-08）与 01-07 那条都认 01-07 那一次，只算给起算最早的
+    01-06 那一刻；01-07 那条自己的发生账上看不到，不算。01-09 做了的那一次同样只算一次。"""
+
+    d6, d7, d8, d9 = (two_day_expect(f"d{day}", day) for day in (6, 7, 8, 9))
+    records = [hit(d6, "o7"), hit(d7, "o7"), hit(d8, "o9"), hit(d9, "o9")]
+    moments = labelled_moments(records, present=lambda group: frozenset({group[0].account}))
+    assert [(moment.expectation_ids, moment.past.came) for moment in moments] == [(("d6",), True), (("d8",), True)]
+
+
+def test_twenty_days_each_done_under_two_day_ranges_are_twenty_moments_and_reach_the_line() -> None:
+    """每天都做、每条预期覆盖今天和明天：每条认的是自己那天的发生，20 刻、下界过 0.67 线（重叠即同一刻时并成 1 刻）。"""
+
+    items = [two_day_expect(f"d{day:02d}", day) for day in range(4, 24)]
+    records = [hit(item, f"o{item.day.isoformat()}") for item in items]
+    moments = labelled_moments(records, present=lambda group: frozenset({group[0].account}))
+    assert len(moments) == 20 and all(moment.past.came for moment in moments)
+    reading = edge_reading(
+        [moment.past for moment in moments], items[0].account, alpha=0.05, half_life=8.0, window=40
+    ).reading
+    assert reading.lower > 0.67
+
+
+def test_expectations_joined_into_one_moment_still_share_their_occurrence() -> None:
+    """裁定 81 第 3 条：同一天的日子与情境、与事件那条连成的一刻照旧是一刻、一次命中；去重只在不相连的刻之间。"""
+
+    d7 = two_day_expect("d7", 7)
+    w7 = day_expect("w7", 7, source="情境", trigger="session|weekday|luggage|situation")
+    evening = replace(
+        expect("evening", formed=datetime(2026, 1, 7, 20, tzinfo=CST), hours=4),
+        observed_from=datetime(2026, 1, 7, 20, tzinfo=CST),
+    )
+    moments = labelled_moments(
+        [hit(d7, "o7"), hit(w7, "o7"), hit(evening, "o7")], present=lambda group: frozenset({group[0].account})
+    )
+    assert [(moment.expectation_ids, moment.past.came) for moment in moments] == [(("d7", "evening", "w7"), True)]
+
+
+# ── 裁定 90：并单元也照"以天为单位、起算不在同一天的不是同一刻" ─────────────────
+
+
+def _two_days(identity: str, day: int) -> Expectation:
+    """1、2 天混着的「离上次够久」：时窗从当天 08:00 到次日，最晚时限次日过完。"""
+
+    item = day_expect(identity, day)
+    return replace(
+        item, window=(item.window[0], item.window[1] + timedelta(days=1)), deadline=item.deadline + timedelta(days=1)
+    )
+
+
+def test_day_unit_expectations_from_different_days_are_never_one_moment() -> None:
+    """``joinable``：两条都以当天为单位、起算不在同一天的不是同一刻（重叠也不是）；同一天的、有一条是事件的照算同一刻。"""
+
+    yesterday, today = _two_days("y", 5), _two_days("t", 6)
+    assert meets(today, yesterday.observed_from, yesterday.deadline)  # 范围真的相交
+    assert not joinable(yesterday, today) and not joinable(today, yesterday)
+    assert joinable(
+        day_expect("d6", 6), day_expect("w6", 6, source="情境", trigger="session|weekday|luggage|situation")
+    )
+    evening = replace(expect("evening", formed=NOW, hours=4), observed_from=NOW)
+    assert joinable(yesterday, evening) and joinable(evening, today)
+
+
+def test_a_waiting_day_unit_expectation_of_another_day_is_not_pulled_into_the_unit() -> None:
+    """白天拢单元（``runtime.foresight_units._groups``）：昨天起算、今天时窗开了的那条与今天起算、还没到时窗的那条范围相交，
+    但不是同一刻，不拉进同一个单元（不然后者记「单元已选」、真漏了也不提醒）；还没到时窗的事件那条照拉。"""
+
+    from habitus.runtime.foresight_units import _groups
+
+    opened = _two_days("y", 5)
+    later = replace(
+        _two_days("t", 6), window=(opened.window[1] + timedelta(hours=1), opened.window[1] + timedelta(hours=2))
+    )
+    event = replace(
+        expect("e", formed=opened.window[1], hours=2),
+        observed_from=opened.window[1] - timedelta(hours=1),
+    )
+    ((group, due),) = _groups((opened,), (later, event))
+    assert [item.expectation_id for item in group] == ["y", "e"] and due == ("y",)

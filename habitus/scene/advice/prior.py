@@ -16,9 +16,9 @@ from typing import Any, cast
 from habitus.foundation.integrity import canonical_digest
 from habitus.foundation.text import clean_line
 from habitus.model_client import ChatMessage, ChatRequest, StructuredChatClient
+from habitus.model_client.asking import Answered, Failed, ask
 from habitus.scene.advice.model import PriorLevel, settle
 from habitus.scene.concepts.model import ConceptSet
-from habitus.scene.llm import Answered, Failed, ask
 
 # v1 → v2（2026-10-08，裁定 27 第 8 条）：例子"讨论完方案之后动手改代码"正是这份数据上唯一成立的那一对——等于把检验结果写进了先验；
 # 换成与数据无关的例子，判据一字未动。没跑真实模型对照（去掉的是泄漏，不是调措辞），对照放到提示词那一轮。

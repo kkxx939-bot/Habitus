@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import timedelta
 
 import pytest
@@ -14,7 +14,7 @@ from habitus.conversation.source import (
     ConversationSourceEnvelope,
     ConversationSourceError,
 )
-from habitus.foundation.integrity import canonical_digest
+from habitus.foundation.integrity import canonical_digest, canonicalize
 from habitus.memory.workflow import (
     ConversationMemoryIngestResult,
     MemoryConversationOutput,
@@ -93,6 +93,20 @@ def test_source_rejects_request_digest_that_is_not_the_canonical_request() -> No
         )
 
 
+def test_an_envelope_whose_source_id_is_not_its_delivery_identity_is_rejected_even_with_consistent_digests() -> None:
+    """``source_id`` 换掉、两道摘要按换过的值重算（自洽）：摘要校验拦不住，只有身份校验认得出它不是这次交付的源。"""
+
+    original = source()
+    forged = "0" * 64
+    payload = {**original._payload(), "source_id": forged}
+    payload_digest = canonical_digest(payload)
+    record_digest = canonical_digest(
+        canonicalize({**payload, "source_payload_digest": payload_digest, "recorded_at": original.recorded_at})
+    )
+    with pytest.raises(ConversationSourceError, match="delivery identity"):
+        replace(original, source_id=forged, source_payload_digest=payload_digest, source_record_digest=record_digest)
+
+
 def test_source_read_verifies_full_record_digest(tmp_path) -> None:
     value = source()
     source_store, _outcomes, _memory_outputs, _projections = stores(tmp_path)
@@ -138,13 +152,13 @@ def test_coordinator_start_returns_before_blocked_behavior_and_memory_wait_is_in
         source_value = source()
 
         handle = coordinator.start(source_value)
-        memory = await asyncio.wait_for(handle.wait_memory(), timeout=1.0)
+        memory = await asyncio.wait_for(handle.wait(ConversationSourceConsumer.MEMORY), timeout=1.0)
         assert memory.append.next_sequence == 1
         await asyncio.wait_for(entered.wait(), timeout=1.0)
-        assert not handle.behavior_session_task.done()
-        assert handle.inspect_memory().state is ConversationConsumerDeliveryState.COMMITTED
+        assert not handle.tasks[ConversationSourceConsumer.BEHAVIOR_SESSION].done()
+        assert handle.inspect(ConversationSourceConsumer.MEMORY).state is ConversationConsumerDeliveryState.COMMITTED
         release.set()
-        projected = await handle.wait_behavior_session()
+        projected = await handle.wait(ConversationSourceConsumer.BEHAVIOR_SESSION)
         assert projected is not None
 
     asyncio.run(scenario())

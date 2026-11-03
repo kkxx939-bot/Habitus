@@ -1,7 +1,7 @@
 """归约各步骤的可观测属性：从各步自己的产物算计数与时效，不读存储、不碰模型。
 
-归约的复杂度在"什么时候能落、为什么没落"：链要等窗口过去才封口，被链接牵住的链要一起等，
-成稿时还会因为名字、链接目标或文档上限被扣下。这里把这些去向分别计数，并算出行为从发生到
+归约的复杂度在"什么时候能落、为什么没落"：判断要等窗口过去才封口，成稿时还会因为名字或文档上限
+被扣下。这里把这些去向分别计数，并算出行为从发生到
 上树的时效——预测层能多早用上一件事，取决于这几个数。
 """
 
@@ -13,7 +13,6 @@ from datetime import datetime
 from typing import Any
 
 from habitus.behavior.model import BehaviorKind
-from habitus.behavior.reduction.chains import ChainAssembly
 from habitus.behavior.reduction.pending import PendingJudgements
 from habitus.behavior.reduction.record import ReducibleJudgement
 from habitus.behavior.semantic.model import BehaviorSemanticRefreshResult, BehaviorSemanticRefreshStatus
@@ -23,25 +22,17 @@ _LEDGER_ONLY = "ledger-only"
 
 
 def assembly_attributes(pending: PendingJudgements) -> Attributes:
-    """待归约判断组成的链；丢掉的关系按关系种类计（首词就是关系名或 ``chain``）。"""
+    """待归约的判断：多少条会落成 occurrence、多少条是空白，多少条坏记录被隔离。"""
 
-    assembly = pending.assembly
-    attributes: Attributes = {
-        "chains": len(assembly.chains),
-        "chain_judgements": sum(len(chain.consumed) for chain in assembly.chains),
-        "superseded_judgements": sum(len(chain.superseded) for chain in assembly.chains),
-        "gaps": len(assembly.gaps),
-        "absorbed_unreadable": len(assembly.absorbed_unreadable),
+    return {
+        "chains": len(pending.occurrences),
+        "gaps": len(pending.gaps),
         "quarantined_records": len(pending.quarantined),
-        "quarantined_judgements": len(assembly.quarantined_ids),
-        "dropped_edges": len(assembly.dropped_edges),
     }
-    attributes.update(count_notes_by_leading_token(assembly.dropped_edges, prefix="dropped_"))
-    return attributes
 
 
 def seal_attributes(
-    assembly: ChainAssembly,
+    pending: PendingJudgements,
     ready_indexes: Sequence[int],
     ready_gaps: Sequence[ReducibleJudgement],
     *,
@@ -49,24 +40,21 @@ def seal_attributes(
     horizon: datetime,
     frontier_cutoff: datetime | None,
 ) -> Attributes:
-    """封口：视界落后现在多久、谁在拖它，以及到了时间却被链接牵住没放行的链。"""
+    """封口：视界落后现在多久、谁在拖它。"""
 
     ready = set(ready_indexes)
-    unsealed = [chain for index, chain in enumerate(assembly.chains) if index not in ready]
-    due = sum(1 for chain in assembly.chains if chain.newest_evidence_at < horizon)
+    unsealed = [record for index, record in enumerate(pending.occurrences) if index not in ready]
     return {
         "ready_chains": len(ready),
         "ready_gaps": len(ready_gaps),
         "unsealed_chains": len(unsealed),
-        "unsealed_gaps": len(assembly.gaps) - len(ready_gaps),
-        # 证据已过视界、却因并行/因果链接的另一端还没封口而一起等的链。
-        "chains_held_by_links": due - len(ready),
+        "unsealed_gaps": len(pending.gaps) - len(ready_gaps),
         "horizon_lag_seconds": seconds_between(now, horizon),
         # 最早一条还没被融合覆盖的观测把视界往回拉；融合队列卡住时它会一直涨。
         "frontier_pending": frontier_cutoff is not None,
         "frontier_age_seconds": 0.0 if frontier_cutoff is None else seconds_between(now, frontier_cutoff),
         "oldest_unsealed_wait_seconds": (
-            seconds_between(now, min(chain.head.evidence_ready_at for chain in unsealed)) if unsealed else 0.0
+            seconds_between(now, min(record.evidence_ready_at for record in unsealed)) if unsealed else 0.0
         ),
     }
 
@@ -105,8 +93,8 @@ def stage_attributes(
     shrink_rounds: int,
     checkpoint_bytes: int,
 ) -> Attributes:
-    """成稿：就绪的链有多少真的成了文档，其余被扣下（名字不可寻址、链接目标没成稿、过不了校验，
-    或检查点超界被二分推迟到下一轮）。"""
+    """成稿：就绪的判断有多少真的成了文档，其余被扣下（名字不可寻址、过不了校验，或检查点超界被二分推迟到
+    下一轮）。"""
 
     kinds = Counter(str(item.get("kind")) for item in documents)
     occurrences = kinds.get(BehaviorKind.OCCURRENCE.value, 0)
@@ -122,7 +110,6 @@ def stage_attributes(
             for item in documents
             if item.get("kind") == BehaviorKind.OCCURRENCE.value and item["payload"].get("original_name") is not None
         ),
-        "links": sum(len(item.get("links", ())) for item in documents),
         "shrink_rounds": shrink_rounds,
         "checkpoint_bytes": checkpoint_bytes,
         "notes": len(notes),

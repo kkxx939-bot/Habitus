@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -13,7 +14,9 @@ from habitus.foresight.history import (
     UnitHistory,
     build_history,
     decode_history,
+    decode_record,
     encode_history,
+    encode_record,
     present_inputs,
     record_of,
 )
@@ -350,3 +353,16 @@ def test_relabelling_credits_each_moment_to_the_most_specific_established_combin
         statuses=("established",),
     )
     assert all(base_input not in moment.signature for moment in quiet.of(GYM))
+
+
+def test_a_record_names_the_occurrence_of_a_natural_hit_only_and_round_trips() -> None:
+    """裁定 81：自然命中带着结算认出的那次发生（一次发生只算给一刻用），落空与不知道的不带。"""
+
+    item = gym(TUESDAYS[1])
+    found = "behavior://occurrences/2026/07/14/gym.md"
+    came = record_of(item, answers()[item.expectation_id], occurrence_uri=found)
+    assert came.occurrence_uri == found and decode_record(encode_record(came)) == came
+    missed = AccountFact(item.account, item.formed_at, False, 1.0, "过期待决", item.expectation_id)
+    assert record_of(item, missed, occurrence_uri=found).occurrence_uri is None
+    with pytest.raises(ForesightError, match="natural hit"):
+        replace(record_of(item, missed), occurrence_uri=found)

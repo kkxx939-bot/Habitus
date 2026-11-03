@@ -15,6 +15,7 @@ from habitus.temporal.intervals import (
     day_intervals,
     gap_days,
     median_days,
+    overdue_at,
 )
 from habitus.temporal.merge import merge_starts
 from habitus.temporal.profile import MIN_PEAK_DAYS, DayProfile, Peak, day_profile, peaks_of
@@ -58,6 +59,7 @@ __all__ = [
     "median_days",
     "merge_starts",
     "occurrence_days",
+    "overdue_at",
     "peaks_of",
     "require_aware",
     "require_slot_minutes",

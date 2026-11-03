@@ -16,6 +16,7 @@ from habitus.model_client import (
     EmbeddingModelConfig,
     EmbeddingVector,
     ModelAuthenticationError,
+    ModelQuotaError,
     ModelRateLimitError,
     ModelResponse,
     ModelResponseError,
@@ -209,6 +210,9 @@ class StatusError(RuntimeError):
         (StatusError(429, "too many", 2.0), ModelRateLimitError),
         (StatusError(503, "offline"), ModelTransportError),
         (TimeoutError("timeout"), ModelTransportError),
+        # DeepSeek 余额不足：402 + "Insufficient Balance"，是额度问题、不是答坏了（裁定 80 问题 2）
+        (StatusError(402, "Insufficient Balance"), ModelQuotaError),
+        (RuntimeError("Insufficient Balance"), ModelQuotaError),
     ],
 )
 def test_provider_errors_are_normalized_by_status_and_transport(error: Exception, expected: type[Exception]) -> None:

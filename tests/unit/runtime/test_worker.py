@@ -9,7 +9,6 @@ import pytest
 
 from habitus.config import WorkerConfig
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.conversation import ConversationAddress
 from habitus.memory.workflow import (
     MemoryJobBlockedError,
@@ -24,6 +23,7 @@ from habitus.memory.workflow import (
 from habitus.memory.workflow.jobs import MemoryJobConfig, MemoryJobStore
 from habitus.runtime import MemoryWorker, MemoryWorkerState, MemoryWorkerStateError
 from tests.helpers import segment
+from tests.lock_store import ProcessLocalLockStore
 
 
 class LeaseStore:

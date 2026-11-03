@@ -141,12 +141,6 @@ class BehaviorTypeSchema:
     def field_map(self) -> dict[str, BehaviorFieldSchema]:
         return {field.name: field for field in self.fields}
 
-    def fields_of(self, role: BehaviorFieldRole) -> tuple[BehaviorFieldSchema, ...]:
-        """按面取字段——消费者据此选择自己的读集，加字段不改读取代码。"""
-
-        resolved = BehaviorFieldRole(role)
-        return tuple(field for field in self.fields if field.role is resolved)
-
 
 @dataclass(frozen=True)
 class BehaviorSchemaMaterialization:

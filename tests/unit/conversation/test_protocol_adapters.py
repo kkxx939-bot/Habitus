@@ -287,7 +287,7 @@ def test_literal_plugin_context_markup_in_user_text_is_preserved() -> None:
             "claude_code",
             [
                 {"type": "assistant", "isSidechain": True, "message": {"role": "assistant", "content": "忽略"}},
-                {"type": "user", "message": {"role": "user", "content": "问题"}},
+                {"type": "user", "origin": {"kind": "human"}, "message": {"role": "user", "content": "问题"}},
                 {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "回答"}]}},
             ],
         ),
@@ -518,3 +518,377 @@ def test_deepseek_harness_events_keep_human_text_tools_and_structured_question_a
     assert messages[0].occurred_at == datetime.fromtimestamp(1792998001, tz=UTC)
     assert result.after_turn and result.ignored_items == 6  # 会话头、turn/start、注入的上下文、思考、tool/call、turn/end
     assert registry.host("dsh") == "dsh" and [tool.tool for tool in registry.question_tools("dsh")] == ["ask_user_question"]
+
+
+# ── 宿主时刻倒退（U1）：先后以转写顺序为准，时刻夹成不降 ────────────────────────────────────────────
+
+_T = 1_790_000_000_000  # 毫秒
+
+
+def _opencode_user(text: str = "查一下") -> dict:
+    return {"info": {"role": "user", "time": {"created": _T}}, "parts": [{"type": "text", "text": text, "time": {"start": _T, "end": _T}}]}
+
+
+def _opencode_tool(call_id: str, start: int, end: int) -> dict:
+    return {
+        "type": "tool", "callID": call_id, "tool": "WebSearch",
+        "state": {"status": "completed", "input": {"q": call_id}, "output": f"r-{call_id}", "time": {"start": _T + start, "end": _T + end}},
+    }
+
+
+@pytest.mark.parametrize("protocol", ["opencode", "zcode"])
+def test_parallel_opencode_tools_and_a_text_part_that_ends_earlier_keep_transcript_order(protocol: str) -> None:
+    """并行的两个工具（调用 1 [100, 5000]、调用 2 [200, 4000]）与"工具结束晚于其后文字段"的真实形状：宿主给的时刻倒退，
+    不再整批拒收；时刻夹成不降，序号与调用—结果的配对按转写顺序不变。"""
+
+    parallel = {
+        "info": {"role": "assistant", "time": {"created": _T + 50}},
+        "parts": [
+            _opencode_tool("a", 100, 5000),
+            _opencode_tool("b", 200, 4000),
+            {"type": "text", "text": "好了", "time": {"start": _T + 5100, "end": _T + 5200}},
+        ],
+    }
+    later_text = {
+        "info": {"role": "assistant", "time": {"created": _T + 6000}},
+        "parts": [
+            _opencode_tool("c", 6694, 6738),
+            {"type": "text", "text": "读完了", "time": {"start": _T + 6700, "end": _T + 6709}},
+        ],
+    }
+    messages = ConversationAdapterRegistry.with_builtins().adapt(
+        protocol, {"records": [_opencode_user(), parallel, later_text]}, context()
+    ).batch.messages
+
+    assert [(item.role.value, item.tool_call_id) for item in messages] == [
+        ("prompt", None),
+        ("tool_call", "a"), ("tool_result", "a"),
+        ("tool_call", "b"), ("tool_result", "b"),
+        ("completion", None),
+        ("tool_call", "c"), ("tool_result", "c"),
+        ("completion", None),
+    ]
+    assert [item.sequence for item in messages] == list(range(10, 19))
+    assert all(left.occurred_at <= right.occurred_at for left, right in zip(messages, messages[1:], strict=False))
+    at = lambda offset: datetime.fromtimestamp((_T + offset) / 1000, tz=UTC)  # noqa: E731
+    # 早于上一条的夹到上一条，不早的照原样
+    assert [item.occurred_at for item in messages] == [
+        at(0), at(100), at(5000), at(5000), at(5000), at(5200), at(6694), at(6738), at(6738)
+    ]
+
+
+def test_claude_code_parallel_tool_results_written_a_few_ms_out_of_order_are_accepted() -> None:
+    records = [
+        {"type": "user", "origin": {"kind": "human"}, "timestamp": "2026-10-01T00:00:00.000Z", "message": {"role": "user", "content": "读两个文件"}},
+        {"type": "assistant", "timestamp": "2026-10-01T00:00:01.000Z",
+         "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {"f": 1}}]}},
+        {"type": "assistant", "timestamp": "2026-10-01T00:00:01.100Z",
+         "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t2", "name": "Read", "input": {"f": 2}}]}},
+        {"type": "user", "timestamp": "2026-10-01T00:00:01.261Z",
+         "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "a"}]}},
+        {"type": "user", "timestamp": "2026-10-01T00:00:01.259Z",
+         "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t2", "content": "b"}]}},
+        {"type": "assistant", "timestamp": "2026-10-01T00:00:02.000Z",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "完成"}]}},
+    ]
+    messages = ConversationAdapterRegistry.with_builtins().adapt("claude_code", {"records": records}, context()).batch.messages
+
+    assert [(item.role.value, item.tool_call_id, item.content) for item in messages[3:5]] == [
+        ("tool_result", "t1", "a"),
+        ("tool_result", "t2", "b"),
+    ]
+    assert messages[4].occurred_at == messages[3].occurred_at == datetime(2026, 10, 1, 0, 0, 1, 261000, tzinfo=UTC)
+    assert all(left.occurred_at <= right.occurred_at for left, right in zip(messages, messages[1:], strict=False))
+
+
+# ── 消息身份（U6、S2-16b）：不依赖记录在这次请求里的位置，同一会话不同序号不撞 ────────────────────────────
+
+
+def test_message_identity_does_not_depend_on_ignored_records_in_the_payload() -> None:
+    meta = {"type": "user", "isMeta": True, "timestamp": "2026-10-01T00:00:00Z", "message": {"role": "user", "content": "<local-command-caveat>x"}}
+    turn = [
+        {"type": "user", "origin": {"kind": "human"}, "timestamp": "2026-10-01T00:00:01Z", "message": {"role": "user", "content": "你好"}},
+        {"type": "assistant", "timestamp": "2026-10-01T00:00:02Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "在"}]}},
+    ]
+    registry = ConversationAdapterRegistry.with_builtins()
+    with_meta = registry.adapt("claude_code", {"records": [meta, *turn]}, context()).batch.messages
+    without = registry.adapt("claude_code", {"records": turn}, context()).batch.messages
+
+    assert [item.message_id for item in with_meta] == [item.message_id for item in without]
+
+
+def test_the_same_words_at_two_sequences_of_one_conversation_have_two_identities() -> None:
+    registry = ConversationAdapterRegistry.with_builtins()
+    payload = {"messages": [{"role": "user", "content": "继续"}]}
+    first = registry.adapt("openai_chat_completions", payload, ConversationAdapterContext("c", 0, datetime(2026, 10, 1, tzinfo=UTC)))
+    later = registry.adapt("openai_chat_completions", payload, ConversationAdapterContext("c", 5, datetime(2026, 10, 1, tzinfo=UTC)))
+
+    assert first.batch.messages[0].message_id != later.batch.messages[0].message_id
+
+
+# ── 宿主"不是人话"的过滤与状态映射（U9 见证输入） ─────────────────────────────────────────────────
+
+
+def _spoken(protocol: str, records: list) -> list[tuple[str, str]]:
+    messages = ConversationAdapterRegistry.with_builtins().adapt(protocol, {"records": records}, context()).batch.messages
+    return [(item.role.value, str(item.content)) for item in messages]
+
+
+def test_claude_code_meta_records_are_not_his_words() -> None:
+    assert _spoken(
+        "claude_code",
+        [
+            {"type": "user", "isMeta": True, "message": {"role": "user", "content": "<local-command-caveat>Caveat"}},
+            {"type": "user", "origin": {"kind": "human"}, "message": {"role": "user", "content": "你好"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "在"}]}},
+        ],
+    ) == [("prompt", "你好"), ("completion", "在")]
+
+
+@pytest.mark.parametrize("event", ["UserPromptSubmit", "SessionStart", "Stop"])
+def test_every_zcode_hook_context_line_is_not_his_words(event: str) -> None:
+    records = [
+        {"info": {"role": "user", "time": {"created": _T}}, "parts": [
+            {"type": "text", "text": f"{event} hook additional context: x", "time": {"end": _T}},
+            {"type": "text", "text": "真话", "time": {"end": _T}},
+        ]},
+        {"info": {"role": "assistant", "time": {"created": _T + 1}}, "parts": [{"type": "text", "text": "答", "time": {"end": _T + 2}}]},
+    ]
+    assert _spoken("zcode", records) == [("prompt", "真话"), ("completion", "答")]
+
+
+def test_an_opencode_summary_flagged_message_is_not_an_agent_reply() -> None:
+    records = [
+        _opencode_user("问"),
+        {"info": {"role": "assistant", "summary": True, "time": {"created": _T + 1}}, "parts": [{"type": "text", "text": "压缩摘要", "time": {"end": _T + 2}}]},
+        {"info": {"role": "assistant", "time": {"created": _T + 3}}, "parts": [{"type": "text", "text": "答", "time": {"end": _T + 4}}]},
+    ]
+    assert _spoken("opencode", records) == [("prompt", "问"), ("completion", "答")]
+
+
+def test_a_late_deepseek_harness_question_reply_is_his_words() -> None:
+    records = [
+        {"type": "user/message", "time": _T, "data": {"source": {"kind": "user"}, "content": "问"}},
+        {"type": "assistant/message", "time": _T + 1, "data": {"message": {"content": [{"type": "text", "text": "要不要?"}]}}},
+        {"type": "user/message", "time": _T + 2, "data": {"source": {"kind": "user-question-reply"}, "content": "要"}},
+    ]
+    assert _spoken("dsh", records) == [("prompt", "问"), ("completion", "要不要?"), ("prompt", "要")]
+
+
+@pytest.mark.parametrize(
+    "text", ["<user_shell_command>ls</user_shell_command>", "<turn_aborted>The user interrupted</turn_aborted>"]
+)
+def test_codex_shell_commands_and_aborted_turn_notes_are_not_his_words(text: str) -> None:
+    records = [
+        {"type": "event_msg", "timestamp": "2026-10-01T00:00:00Z", "payload": {"type": "task_started"}},
+        {"type": "response_item", "timestamp": "2026-10-01T00:00:01Z",
+         "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "做事"}]}},
+        {"type": "response_item", "timestamp": "2026-10-01T00:00:02Z",
+         "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "好"}]}},
+        {"type": "response_item", "timestamp": "2026-10-01T00:00:03Z",
+         "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}},
+    ]
+    assert _spoken("codex_rollout", records) == [("prompt", "做事"), ("completion", "好")]
+
+
+@pytest.mark.parametrize("status", ["cancelled", "canceled"])
+def test_a_cancelled_tool_result_keeps_its_terminal_status(status: str) -> None:
+    payload = {"items": [
+        {"type": "message", "role": "user", "content": "x"},
+        {"type": "function_call", "call_id": "1", "name": "f", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "1", "output": "stop", "status": status},
+    ]}
+    messages = ConversationAdapterRegistry.with_builtins().adapt("openai_responses", payload, context()).batch.messages
+    assert messages[-1].tool_status is ConversationToolResultStatus.CANCELLED
+
+
+# ── 宿主报错结束的一轮（U2，裁定 76 第 2 条） ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("protocol", ["opencode", "zcode"])
+def test_an_assistant_message_that_ended_in_a_host_error_becomes_the_turn_s_reply(protocol: str) -> None:
+    error = {"name": "AiSdkModelAdapterError", "data": {"message": "exceed quota limit, api_key=sk-abc123", "code": "model_request_failed"}}
+    records = [
+        {"info": {"role": "user", "time": {"created": 1_791_469_998_000}}, "parts": [{"type": "text", "text": "继续"}]},
+        {"info": {"role": "assistant", "time": {"created": 1_791_469_998_188, "completed": 1_791_469_998_283}, "error": error},
+         "parts": [{"type": "step-start"}]},
+    ]
+    adapted = ConversationAdapterRegistry.with_builtins().adapt(protocol, {"records": records}, context())
+
+    assert [(item.role.value, item.content) for item in adapted.batch.messages] == [
+        ("prompt", "继续"),
+        ("completion", "[host error] AiSdkModelAdapterError: exceed quota limit, api_key=[REDACTED]"),
+    ]
+    assert adapted.batch.messages[1].occurred_at == datetime(2026, 10, 8, 14, 33, 18, 283000, tzinfo=UTC)  # 取 info.time.completed
+    assert adapted.after_turn
+
+
+def test_a_host_error_after_tools_closes_the_turn_after_the_last_result() -> None:
+    records = [
+        {"info": {"role": "user", "time": {"created": 1_000}}, "parts": [{"type": "text", "text": "看下目录"}]},
+        {"info": {"role": "assistant", "time": {"created": 1_100}}, "parts": [
+            {"type": "tool", "callID": "b1", "tool": "Bash",
+             "state": {"status": "completed", "input": {"command": "ls"}, "output": "a", "time": {"start": 1_200, "end": 1_300}}},
+        ]},
+        {"info": {"role": "assistant", "time": {"created": 1_400}, "error": {"name": "StartPlanBusyAutoRetryExhaustedError"}},
+         "parts": [{"type": "step-start"}]},
+    ]
+    messages = ConversationAdapterRegistry.with_builtins().adapt("zcode", {"records": records}, context()).batch.messages
+
+    assert [item.role.value for item in messages] == ["prompt", "tool_call", "tool_result", "completion"]
+    assert messages[-1].content == "[host error] StartPlanBusyAutoRetryExhaustedError"
+
+
+# ── Claude Code 宿主注入、不是人话的消息（U3，裁定 76 第 3 条） ─────────────────────────────────────────
+
+
+def claude_code_host_messages() -> list[dict[str, object]]:
+    """本机真实转写里的形状：压缩摘要、/model 的两条记录、[Request interrupted、轮中间的后台任务通知、
+    <artifact-content…> 压缩摘要、``!`` 模式的 <bash-input> 与它的输出、``claude -p`` 的输入。"""
+
+    def user(text: str, **marks: object) -> dict[str, object]:
+        return {"type": "user", **marks, "message": {"role": "user", "content": text}}
+
+    def assistant(*blocks: dict[str, object]) -> dict[str, object]:
+        return {"type": "assistant", "message": {"role": "assistant", "content": list(blocks)}}
+
+    human = {"origin": {"kind": "human"}, "turnOrigin": "human"}
+    records: list[dict[str, object]] = [
+        user("This session is being continued from a previous conversation…", isCompactSummary=True),
+        user("<command-name>/model</command-name>\n<command-message>model</command-message>"),
+        user("<local-command-stdout>Set model to opus</local-command-stdout>"),
+        user("跑一下全量回归", **human),
+        assistant({"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "pytest"}}),
+        user("<task-notification><status>completed</status></task-notification>",
+             origin={"kind": "task-notification"}, turnOrigin="task_notification"),
+        {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}},
+        user("[Request interrupted by user]"),
+        user("先别跑了", **human),
+        assistant({"type": "text", "text": "已停。"}),
+        user("<artifact-content-authoring>…</artifact-content-authoring>", isCompactSummary=True, turnOrigin="human"),
+        user("<bash-input>npm login</bash-input>"),
+        user("<bash-stdout>Logged in</bash-stdout><bash-stderr></bash-stderr>", turnOrigin="human"),
+        user("[system] Return exactly one JSON object", turnOrigin="sdk"),
+        assistant({"type": "text", "text": "{}"}),
+    ]
+    return [{**record, "timestamp": f"2026-10-01T00:{index:02d}:00Z"} for index, record in enumerate(records)]
+
+
+def test_claude_code_keeps_only_his_words_by_the_host_s_own_marks() -> None:
+    messages = ConversationAdapterRegistry.with_builtins().adapt(
+        "claude_code", {"records": claude_code_host_messages()}, context()
+    ).batch.messages
+
+    assert [(item.role.value, str(item.content)[:20], item.mid_turn) for item in messages] == [
+        ("prompt", "跑一下全量回归", False),
+        ("tool_call", "{'command': 'pytest'", False),
+        ("prompt", "<task-notification><", True),  # 助手还在干活时到的通知：插在这一轮中间
+        ("tool_result", "ok", False),
+        ("prompt", "先别跑了", True),  # 叫停之后他补的一句：还在这一轮里（裁定 69）
+        ("completion", "已停。", False),
+        ("prompt", "<bash-input>npm logi", False),
+        ("prompt", "[system] Return exac", True),
+        ("completion", "{}", False),
+    ]
+
+
+# ── 一条人话里有几个文字块：十个适配器同一个口径，合成一句（U14） ────────────────────────────────────────
+
+_FIRST, _SECOND = "<ide_opened_file>src/app.py</ide_opened_file>", "帮我看下这个报错"
+
+
+def _two_text_blocks(protocol: str) -> object:
+    """同一条人的消息带两个文字块、后面一条答复，按各协议自己的形状写。"""
+
+    anthropic = [{"type": "text", "text": _FIRST}, {"type": "text", "text": _SECOND}]
+    opencode = [
+        {"info": {"role": "user", "time": {"created": _T}}, "parts": [{"type": "text", "text": _FIRST}, {"type": "text", "text": _SECOND}]},
+        {"info": {"role": "assistant", "time": {"created": _T + 1}}, "parts": [{"type": "text", "text": "好的"}]},
+    ]
+    payloads: dict[str, object] = {
+        "openai_chat_completions": {"messages": [{"role": "user", "content": anthropic}, {"role": "assistant", "content": "好的"}]},
+        "openai_responses": {"items": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": _FIRST}, {"type": "input_text", "text": _SECOND}]},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "好的"}]},
+        ]},
+        "anthropic_messages": {"messages": [
+            {"role": "user", "content": anthropic},
+            {"role": "assistant", "content": [{"type": "text", "text": "好的"}]},
+        ]},
+        "codex_rollout": {"records": [
+            {"type": "event_msg", "timestamp": "2026-10-01T00:00:00Z", "payload": {"type": "task_started"}},
+            {"type": "response_item", "timestamp": "2026-10-01T00:00:01Z", "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": _FIRST}, {"type": "input_text", "text": _SECOND}]}},
+            {"type": "response_item", "timestamp": "2026-10-01T00:00:02Z",
+             "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "好的"}]}},
+        ]},
+        "claude_code": {"records": [
+            {"type": "user", "origin": {"kind": "human"}, "message": {"role": "user", "content": anthropic}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "好的"}]}},
+        ]},
+        "openclaw": {"records": [
+            {"type": "message", "message": {"role": "user", "content": anthropic}},
+            {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "好的"}]}},
+        ]},
+        "pi": {"records": [
+            {"type": "message", "message": {"role": "user", "content": anthropic, "timestamp": _T}},
+            {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "好的"}], "timestamp": _T + 1}},
+        ]},
+        "opencode": {"records": opencode},
+        "zcode": {"records": opencode},
+        "dsh": {"records": [
+            {"type": "user/message", "time": _T, "data": {"source": {"kind": "user"}, "content": anthropic}},
+            {"type": "assistant/message", "time": _T + 1, "data": {"message": {"content": [{"type": "text", "text": "好的"}]}}},
+        ]},
+    }
+    return payloads[protocol]
+
+
+_ALL_PROTOCOLS = (
+    "openai_chat_completions",
+    "openai_responses",
+    "anthropic_messages",
+    "codex_rollout",
+    "claude_code",
+    "openclaw",
+    "pi",
+    "opencode",
+    "zcode",
+    "dsh",
+)
+
+
+def test_the_multi_text_block_matrix_covers_every_registered_adapter() -> None:
+    """新加的适配器必须进下面这张矩阵：同一条人话的几个文字块怎么收，各协议不能各说各的。"""
+
+    assert set(ConversationAdapterRegistry.with_builtins().protocols()) == set(_ALL_PROTOCOLS)
+
+
+@pytest.mark.parametrize("protocol", _ALL_PROTOCOLS)
+def test_several_text_blocks_of_one_human_message_are_one_prompt(protocol: str) -> None:
+    """一条人话的几个文字块用换行合成一句：拆成几句会各开一轮，afterTurn 时整批被保留规则拒收、会话卡住。"""
+
+    from habitus.memory.conversation.retention import ConversationRetentionPlanner
+
+    result = ConversationAdapterRegistry.with_builtins().adapt(protocol, _two_text_blocks(protocol), context())
+
+    prompts = [item for item in result.batch.messages if item.role is ConversationMessageRole.PROMPT]
+    assert [item.content for item in prompts] == [f"{_FIRST}\n{_SECOND}"]
+    assert [item.starts_turn for item in prompts] == [True]
+    assert result.after_turn
+    ConversationRetentionPlanner().plan(result.batch, after_turn=True, flush=True)
+
+
+def test_a_claude_code_compact_summary_is_not_his_words_even_when_marked_sdk() -> None:
+    """压缩写的摘要不收，``turnOrigin`` 为 sdk 也一样（S2R-43）：先看是不是压缩摘要，再看来源标记。"""
+
+    assert _spoken(
+        "claude_code",
+        [
+            {"type": "user", "isCompactSummary": True, "turnOrigin": "sdk",
+             "message": {"role": "user", "content": "This session is being continued from a previous conversation."}},
+            {"type": "user", "turnOrigin": "sdk", "message": {"role": "user", "content": "[system]\n跑一下"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "好"}]}},
+        ],
+    ) == [("prompt", "[system]\n跑一下"), ("completion", "好")]

@@ -1,28 +1,20 @@
 """封口判据：机械推论，不含任何语义判断。
 
-融合的一切跨窗口引用（continues / supersedes / 跨段 concurrent 等）只能指向
-``recent_before(cutoff, lookback)`` 选出的上下文，截断用 ``evidence_ready_at``，其中 cutoff =
-该段观测的最早 ``available_at``。因此一条判断"再也不可能被引用"当且仅当它的
-``evidence_ready_at`` 同时老出了两类未来引用源的窗口：
+一条判断要等它的 ``evidence_ready_at`` 同时老出两类"还在路上"的输入的窗口才封口落树：
 
 1. **墙钟**：尚未交付的观测。依赖一条上游契约假设：交付以真实送达时刻标注 ``available_at``、
-   不回填过去的时刻（观测层只强制 ``available_at >= occurred_at`` 与不超前于 ``recorded_at``，
-   "不回填"**没有守卫**——已列入上游契约缺口，接入真实观测源时要么在投递口加校验、要么推翻
-   本条判据）。
-2. **已交付、尚未融合完成的观测**：它们将来会切成段，段的 cutoff 是这些观测的历史
-   ``available_at``——只看墙钟会把还能被这些段引用的链提前封口。这一类的机械下界是
-   **全部尚未被任何融合回执覆盖的观测的最早 ``available_at``**（排队中、已入队未提交、
-   甚至还没被入队扫描捡走的，全都没有回执，一网打尽；不能只看最老未提交作业——补发场景下
-   段的 cutoff 不随队列序单调）。
+   不回填过去的时刻（观测层只强制 ``available_at >= occurred_at``，"不回填"**没有守卫**——已列入上游
+   契约缺口，接入真实观测源时要么在投递口加校验、要么推翻本条判据）。
+2. **已交付、尚未融合完成的观测**：机械下界是**全部尚未被任何融合回执覆盖的观测的最早
+   ``available_at``**（还没写判断的交付都没有回执，一网打尽）。
 
 两者取最小、再回退一个 lookback，得到封口视界；``evidence_ready_at`` 早于视界的判断机械闭合。
-lookback 只准从 ``behavior.fusion.config`` import——融合"还能续"与归约"已封口"必须是同一个数。
+lookback 只准从 ``behavior.fusion.config`` import，组合根喂进来的是同一个数。这个窗口原是逐帧融合"往回看多久的
+先前判断"的窗口（出了窗口就不会再被后续判断指向）；两条 lane 都不产出判断间关系之后，它只剩"落树之前等多久"。
 
-TODO(BHV-SESSION-LANE-001)：会话 lane 的记录不必等这一个窗口（方案已定，裁定 31；这一轮只改融合，没动归约）。
-会话 lane 一轮一条、不带任何续接关系（``fusion/lanes/session``），"还可能被后面的判断引用"对它不成立，
-所以它的链一送到就可以封口落树。现状：它和逐帧融合的链用同一个视界，要等满 ``lookback_seconds``（默认 1 小时）。
-改法：封口判据按链的来源分——只由会话 lane 凭据（协议 ``habitus_session_turn_v1``）支撑的链不看墙钟窗口。
-影响：只改落树的时刻，不改落树的内容。例：19:55 送到的一轮现在 20:55 才落树，改后 19:55 落树。
+会话 lane 的记录一送到就封口（裁定 31）：一轮一条、送到时就是完整的，记录不等 lookback（``arrival_horizon``，只等
+还没融合完的观测）。物理 lane 的记录仍等满 lookback。定稿日（``closure``）两条 lane 都仍看带 lookback 的视界：
+只改落树的时刻，不改哪天什么时候定稿。例：19:55 送到的一轮 19:55 之后的第一轮 sweep 就落树，不再等到 20:55。
 """
 
 from __future__ import annotations
@@ -30,8 +22,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
-from habitus.behavior.document.link import BehaviorLinkType
-from habitus.behavior.reduction.chains import BehaviorChain, ChainAssembly
 from habitus.behavior.reduction.errors import BehaviorReductionError
 from habitus.behavior.reduction.record import ReducibleJudgement
 
@@ -44,62 +34,34 @@ def seal_horizon(
 ) -> datetime:
     """返回封口视界；``frontier_cutoff`` 为空表示融合队列已清空。"""
 
-    if not isinstance(now, datetime) or now.utcoffset() is None:
-        raise BehaviorReductionError("now must be a timezone-aware datetime")
     if isinstance(lookback_seconds, bool) or not isinstance(lookback_seconds, int | float):
         raise BehaviorReductionError("lookback_seconds must be a number")
     if lookback_seconds <= 0:
         raise BehaviorReductionError("lookback_seconds must be positive")
+    return arrival_horizon(now=now, frontier_cutoff=frontier_cutoff) - timedelta(seconds=float(lookback_seconds))
+
+
+def arrival_horizon(*, now: datetime, frontier_cutoff: datetime | None) -> datetime:
+    """一送到就封口的那一支（会话 lane）用的记录视界：墙钟与还没融合完的观测取最小，不再回退 lookback。"""
+
+    if not isinstance(now, datetime) or now.utcoffset() is None:
+        raise BehaviorReductionError("now must be a timezone-aware datetime")
     horizon = now.astimezone(UTC)
     if frontier_cutoff is not None:
         if not isinstance(frontier_cutoff, datetime) or frontier_cutoff.utcoffset() is None:
             raise BehaviorReductionError("frontier_cutoff must be a timezone-aware datetime")
         horizon = min(horizon, frontier_cutoff.astimezone(UTC))
-    return horizon - timedelta(seconds=float(lookback_seconds))
+    return horizon
 
 
-def sealed_chain_indexes(assembly: ChainAssembly, horizon: datetime) -> tuple[int, ...]:
-    """已封口且**可发布**的链下标。
+def sealed_indexes(occurrences: Sequence[ReducibleJudgement], horizon: datetime) -> tuple[int, ...]:
+    """已封口的可读判断在 ``occurrences`` 里的下标（升序）。"""
 
-    封口本身只看链上最晚判断是否出窗；可发布还要求批内引用关系闭合（见
-    ``closed_under_links``），这就是"封口按依赖拓扑排"的机械实现。指向消费账本里已落盘目标
-    的边不在这里出现（那些判断已不在待归约集合中）。
-    """
-
-    sealed = {index for index, chain in enumerate(assembly.chains) if _sealed(chain, horizon)}
-    return closed_under_links(assembly, sealed)
-
-
-def closed_under_links(assembly: ChainAssembly, candidates: set[int]) -> tuple[int, ...]:
-    """把候选集剔到批内引用闭合的不动点；runner 缩批后也必须用它重闭合。
-
-    两条闭合规则：
-    1. 前向边的目标必须同批（目标未就绪则本链推迟）；
-    2. **concurrent_with 对称封口**：并行边可能由早链声明、组装时翻挂到晚链——早链若先封口
-       单独发布，它的判断（边的唯一载体）随链消费，下一轮晚链落盘时边已无声蒸发（评审两路
-       独立抓到的接缝）。所以边的目标（更早链）也必须等宿主链同批封口，两边一起走。
-    """
-
-    kept = set(candidates)
-    concurrent_hosts: dict[int, list[int]] = {}
-    for index in range(len(assembly.chains)):
-        for kind, target_index in assembly.cross_links_of(index):
-            if kind == BehaviorLinkType.CONCURRENT_WITH.value:
-                concurrent_hosts.setdefault(target_index, []).append(index)
-    changed = True
-    while changed:
-        changed = False
-        for index in tuple(kept):
-            targets_ready = all(target in kept for _kind, target in assembly.cross_links_of(index))
-            hosts_ready = all(host in kept for host in concurrent_hosts.get(index, ()))
-            if not (targets_ready and hosts_ready):
-                kept.discard(index)
-                changed = True
-    return tuple(sorted(kept))
+    return tuple(index for index, item in enumerate(occurrences) if item.evidence_ready_at < horizon)
 
 
 def sealed_gaps(gaps: Sequence[ReducibleJudgement], horizon: datetime) -> tuple[ReducibleJudgement, ...]:
-    """已封口的没读懂段：出窗前它仍可能被 supersedes 认领（后来读懂了），必须等。"""
+    """已封口的空白段，按 ``(evidence_ready_at, judgement_id)`` 排。"""
 
     return tuple(
         sorted(
@@ -109,8 +71,4 @@ def sealed_gaps(gaps: Sequence[ReducibleJudgement], horizon: datetime) -> tuple[
     )
 
 
-def _sealed(chain: BehaviorChain, horizon: datetime) -> bool:
-    return chain.newest_evidence_at < horizon
-
-
-__all__ = ["closed_under_links", "seal_horizon", "sealed_chain_indexes", "sealed_gaps"]
+__all__ = ["arrival_horizon", "seal_horizon", "sealed_gaps", "sealed_indexes"]

@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from habitus.behavior import BehaviorDocumentWriter, BehaviorKind, BehaviorTree
+from habitus.behavior import BehaviorKind, BehaviorTree
 from habitus.behavior.model import BehaviorDirectory, BehaviorLevel
 from habitus.behavior.semantic import (
     BehaviorDirectorySnapshot,
@@ -19,7 +19,7 @@ from habitus.behavior.semantic import (
     BehaviorSemanticRefreshStatus,
     LLMBehaviorOverviewGenerator,
 )
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.behavior.tree.writer import BehaviorDocumentWriter
 from habitus.model_client import (
     ChatClient,
     ChatModelConfig,
@@ -30,6 +30,7 @@ from habitus.model_client import (
     ProviderConfig,
     StructuredChatClient,
 )
+from tests.lock_store import ProcessLocalLockStore
 from tests.unit.behavior.tree_payloads import DAY, gap_payload, local, occurrence_payload
 
 
@@ -395,3 +396,47 @@ def test_only_counted_behaviours_void_an_unreadable_gap_in_the_day_overview(tmp_
 
     gaps = tree.read_layer(BehaviorDirectory.gaps(DAY.year, DAY.month, DAY.day), BehaviorLevel.OVERVIEW)
     assert "本日记录 1 段观测空白" in gaps and "20:10" in gaps
+
+
+def test_a_cross_midnight_unreadable_gap_reads_the_same_in_the_day_overview_and_the_series(tmp_path) -> None:
+    """「没读懂」当天 23:30 → 次日 00:30，次日 00:10 读出一条行为：按天切开，次日那半段作废、当天那半段留着——当天的叙述
+    里还有这段空白，事件序列里当天那段也还在（一条记录一种读法；以前序列整段作废、叙述留着）。"""
+
+    from datetime import timedelta
+
+    from habitus.series.reader import read_series
+
+    tree = BehaviorTree(tmp_path / "behavior-tree")
+    later = local(23, 0) + timedelta(days=2)
+    writer = BehaviorDocumentWriter(tree, ProcessLocalLockStore(), clock=lambda: later)
+    writer.publish(
+        BehaviorKind.GAP, gap_payload(started_at=local(23, 30), ended_at=local(0, 30) + timedelta(days=1))
+    )
+    writer.publish(BehaviorKind.OCCURRENCE, _occurrence_at("看书", 21, 0))
+    start = local(0, 10) + timedelta(days=1)
+    step = {"semantics": "统计行数", "started_at": start, "ended_at": start, "available_at": start}
+    writer.publish(
+        BehaviorKind.OCCURRENCE,
+        occurrence_payload(
+            occurred_on=DAY + timedelta(days=1),
+            name="统计行数",
+            started_at=start,
+            last_observed_at=start,
+            onset_available_at=start,
+            basis=[step],
+        ),
+    )
+    generator = ScriptedOverviewGenerator()
+
+    refresh(tree, generator)
+
+    day_dir = BehaviorDirectory.occurrences(DAY.year, DAY.month, DAY.day)
+    day_snapshot = next(s for s in generator.snapshots if s.directory == day_dir)
+    assert [entry.kind for entry in day_snapshot.entries] == [
+        BehaviorSemanticEntryKind.OCCURRENCE,
+        BehaviorSemanticEntryKind.GAP,
+    ]
+    series = read_series(tree, cutoff=DAY + timedelta(days=2))
+    assert [(gap.started_at, gap.ended_at) for gap in series.gaps] == [
+        (local(23, 30), local(0, 0) + timedelta(days=1))
+    ]

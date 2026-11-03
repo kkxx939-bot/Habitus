@@ -22,21 +22,11 @@ from habitus.infrastructure.store.filesystem import (
 
 _SOURCE_FILE = re.compile(r"^(?P<source_id>[0-9a-f]{64})\.json$")
 
-# TODO(BHV-FUSION-003): 跨交付的观测级去重归融合层。
-# - 现状：幂等只到交付粒度（``source_id`` 由 ``observer_id`` 与 ``delivery_id`` 派生）。同一条
-#   观测（``observation_id`` 完全相同）换一个 ``delivery_id`` 再送一次，就会落成两份记录。
-# - 具体场景：滑窗推送是上游常态——每 30 秒推送"最近 60 秒的观测"即有 50% 重叠；agent 重启后
-#   用新 ``delivery_id`` 重发；多实例同时上报。实测两个 delivery 携带同一条观测，存储里该事实
-#   出现 2 次而 ``observation_id`` 只有 1 个。
-# - 影响大小：中。不影响本层正确性，但融合若不归并会把同一份证据数两遍，导致同一份证据
-#   被数两遍：判断的证据链里出现重复观测，或一次真实行为被切成两条判断，再往下变成预测的计数偏差。
-# - 改造方案：融合层读取观测时按 ``observation_id`` 归并，同一编号只采信一次；证据引用保留全部
-#   来源交付以便审计。本层不建观测级索引——那需要先知道融合的读取形态，现在设计很可能白做。
-# - 时机：观测的生命周期已经有了（发布即释放 + 覆盖记录，见下）；这一条只剩融合层按 ``observation_id`` 归并，
-#   与真实观测源一起做。
-
 # 生命周期（26 号清单 L2、6.2）：观测在所属判断发布到行为树、且被回执覆盖之后由归约释放（``discard``），不按保留期堆积；
 # ``list()`` 每次都列目录、按身份缓存解码好的信封（文件只创建、不改写），释放时一起淘汰。``max_files`` 是保护闸。
+# 本存储自己的一份读不出来（坏了、不是规范编码、文件名对不上）：数据坏了（裁定 94 错误分类）——把坏的那一份挪进
+# ``observations/isolated/``、记下身份（``take_isolated``，归约留信号报出），枚举照常往下走：它钉不住封口视界、挡不住定稿。
+# 读不出它的时间，所以树上落不成「错误」空白；这一点只能报出、等人看。
 
 
 class BehaviorObservationStore:
@@ -53,6 +43,9 @@ class BehaviorObservationStore:
             raise TypeError("config must be BehaviorObservationConfig")
         self.config = resolved
         self.envelope_root = self.root / "observations" / "envelopes"
+        self.isolated_root = self.root / "observations" / "isolated"
+        #: 这一次 ``take_isolated`` 以来挪进隔离区的身份（坏了挪不动的也在里面：照样跳过、每次都报）。
+        self._isolated: list[str] = []
         #: 交付文件只创建、不改写：按身份缓存解码好的信封（26 号清单 6.2），释放时一起淘汰。列目录照旧每次都列。
         self._decoded: dict[str, BehaviorObservationEnvelope] = {}
 
@@ -123,8 +116,38 @@ class BehaviorObservationStore:
                 # 自己的文件若损坏仍然明确失败，不在这里被掩盖。
                 continue
             source_ids.append(match.group("source_id"))
-        envelopes = tuple(self._required_read(source_id) for source_id in sorted(source_ids))
+        envelopes: list[BehaviorObservationEnvelope] = []
+        for source_id in sorted(source_ids):
+            try:
+                envelopes.append(self._required_read(source_id))
+            except (BehaviorObservationError, DurablePathIntegrityError):
+                if self._path(source_id).is_file():
+                    self._isolate(source_id)  # 坏了：放一边，不挡后面（裁定 94 错误分类）
+                    continue
+                raise
         return tuple(sorted(envelopes, key=lambda item: (item.batch.started_at, item.recorded_at, item.source_id)))
+
+    def take_isolated(self) -> tuple[str, ...]:
+        """上次取走以来因为读不出而放一边的交付身份，取走即清。"""
+
+        found, self._isolated = tuple(self._isolated), []
+        return found
+
+    def _isolate(self, source_id: str) -> None:
+        """原字节复制进隔离区再删掉原件；读不出原字节（超限、不是普通文件）就留在原处，只是每次都跳过、都报。"""
+
+        self._isolated.append(source_id)
+        self._decoded.pop(source_id, None)
+        try:
+            raw = read_regular_bytes(
+                self._path(source_id), artifact_root=self.root, max_bytes=self.config.max_file_bytes
+            )
+            atomic_create_bytes(self.isolated_root / f"{source_id}.json", raw, artifact_root=self.root)
+        except ImmutableArtifactConflictError:
+            pass  # 上一次挪了一半：副本已在
+        except (OSError, DurablePathIntegrityError):
+            return
+        durable_unlink(self._path(source_id), artifact_root=self.root)
 
     def discard(self, source_id: str) -> bool:
         """释放一份交付：它的全部观测都已融合且所属判断都已发布到树。不存在时幂等返回 ``False``。"""

@@ -3,6 +3,9 @@
 import pytest
 
 from habitus.memory.model import MemoryKind
+from habitus.memory.recall import (
+    MemoryTemperature,
+)
 from habitus.memory.retrieval import (
     MemoryContextAssembler,
     MemoryMatchedMemory,
@@ -10,7 +13,6 @@ from habitus.memory.retrieval import (
     MemorySearchError,
     MemorySearchHit,
     MemorySearchServiceConfig,
-    MemoryTemperature,
     MemoryTypedQuery,
 )
 from habitus.memory.retrieval.context import render_recent_messages

@@ -20,6 +20,7 @@ from habitus.behavior.fusion.lanes.session import (
 from habitus.behavior.observation import BehaviorObservationStore
 from habitus.behavior.retry import RetryBacklogStore
 from habitus.model_client import ChatClient, ChatModelConfig, ProviderConfig, StructuredChatClient
+from tests.lock_store import ProcessLocalLockStore
 from tests.unit.behavior.scripted_provider import ScriptedProvider
 
 ZONE = ZoneInfo("Asia/Shanghai")
@@ -31,8 +32,15 @@ def at(minutes: float) -> datetime:
     return START + timedelta(minutes=minutes)
 
 
-def prompt(sequence: int, text: str, *, minutes: float = 0.0, mid_turn: bool = False) -> SessionMessage:
-    return SessionMessage(sequence, at(minutes), SessionMessageRole.PROMPT, text, mid_turn=mid_turn)
+def prompt(
+    sequence: int,
+    text: str,
+    *,
+    minutes: float = 0.0,
+    mid_turn: bool = False,
+    answers: tuple[tuple[str, str], ...] = (),
+) -> SessionMessage:
+    return SessionMessage(sequence, at(minutes), SessionMessageRole.PROMPT, text, mid_turn=mid_turn, answers=answers)
 
 
 def reply(sequence: int, text: str, *, minutes: float = 1.0) -> SessionMessage:
@@ -76,7 +84,7 @@ class Stores:
     def __init__(self, root: Path) -> None:
         self.observations = BehaviorObservationStore(root)
         self.judgements = BehaviorJudgementStore(root)
-        self.receipts = BehaviorFusionReceiptStore(root)
+        self.receipts = BehaviorFusionReceiptStore(root, lock_store=ProcessLocalLockStore())
         self.coverage = BehaviorCoverageIndex(root)
         self.now = at(130)
         self.backlog = RetryBacklogStore(root, max_items=100)

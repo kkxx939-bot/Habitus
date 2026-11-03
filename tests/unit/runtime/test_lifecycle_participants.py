@@ -85,8 +85,7 @@ def test_a_day_is_released_only_when_final_out_of_reach_recorded_and_compacted(t
             account=account,
             through=(_expectation(old, "old").formed_at, "old"),
             offsets=((0, 1),),
-            gap_count=0,
-            longest_gap=0.0,
+            gap_lengths=(),
             last_day=old,
             day_types=(None,),
         )
@@ -133,8 +132,7 @@ def test_a_day_killed_halfway_through_its_release_is_released_on_a_later_round(t
             account=item.account,
             through=(item.formed_at, "newer"),
             offsets=((0, 2),),
-            gap_count=0,
-            longest_gap=0.0,
+            gap_lengths=(),
             last_day=newer,
             day_types=(None,),
         )

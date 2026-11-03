@@ -18,7 +18,7 @@ from habitus.behavior.kinds.ids import ClassId, Lane
 from habitus.behavior.kinds.model import BehaviorClass, ClassOrigin, Vocabulary
 from habitus.behavior.kinds.revision import AnchorGate, Member, Reviser, RevisionResult
 from habitus.behavior.kinds.revision.proposals import parse_proposals
-from habitus.behavior.kinds.schedule import JobState, nightly_due, revision_due, revision_period
+from habitus.behavior.kinds.schedule import JobState, revision_due, revision_period
 from tests.unit.behavior.kinds_fixtures import (
     EDIT,
     NOW,
@@ -471,31 +471,21 @@ def test_merge_evidence_needs_consecutive_earlier_periods() -> None:
     assert later.merge_supported(PAIR, runs=2, period="2026-10-07")
 
 
-def test_revision_period_is_the_date_of_the_latest_scheduled_moment() -> None:
-    tz = timezone(timedelta(hours=8))
-    assert revision_period(datetime(2026, 10, 7, 4, 0, tzinfo=tz), weekday=2, hour=3) == "2026-10-07"
-    assert revision_period(datetime(2026, 10, 7, 2, 0, tzinfo=tz), weekday=2, hour=3) == "2026-09-30"
-    assert revision_period(datetime(2026, 10, 12, 9, 0, tzinfo=tz), weekday=2, hour=3) == "2026-10-07"
+def test_the_revision_period_is_named_after_the_night_that_starts_it() -> None:
+    """拆改周期按线的那一晚算（裁定 94 第 9 条：不挂钟点）：从每周 ``weekday`` 那一晚起到下一个那一晚之前是一个周期。"""
+
+    assert revision_period(date(2026, 10, 7), weekday=2) == "2026-10-07"  # 周三那一晚
+    assert revision_period(date(2026, 10, 6), weekday=2) == "2026-09-30"  # 周二还在上一个周期
+    assert revision_period(date(2026, 10, 12), weekday=2) == "2026-10-07"
 
 
-def test_revision_is_due_once_after_each_scheduled_moment() -> None:
-    tz = timezone(timedelta(hours=8))
-    wednesday_4am = datetime(2026, 10, 7, 4, 0, tzinfo=tz)
-    assert revision_due(wednesday_4am, None, weekday=2, hour=3)
-    assert not revision_due(wednesday_4am, wednesday_4am - timedelta(minutes=30), weekday=2, hour=3)
-    assert revision_due(wednesday_4am + timedelta(days=2), wednesday_4am - timedelta(days=6), weekday=2, hour=3)
-    assert not revision_due(
-        datetime(2026, 10, 7, 2, 0, tzinfo=tz), datetime(2026, 10, 1, 3, 30, tzinfo=tz), weekday=2, hour=3
-    )
-
-
-def test_nightly_is_due_once_a_day_after_its_hour() -> None:
-    tz = timezone(timedelta(hours=8))
-    three_am = datetime(2026, 10, 7, 3, 0, tzinfo=tz)
-    assert nightly_due(three_am, None, hour=2)
-    assert not nightly_due(three_am, three_am - timedelta(minutes=30), hour=2)
-    assert nightly_due(three_am, three_am - timedelta(hours=2), hour=2)
-    assert not nightly_due(datetime(2026, 10, 7, 1, 0, tzinfo=tz), datetime(2026, 10, 6, 2, 30, tzinfo=tz), hour=2)
+def test_the_revision_is_due_once_per_period_on_the_first_night_the_line_reaches_it() -> None:
+    wednesday = date(2026, 10, 7)
+    assert revision_due(wednesday, None, weekday=2)  # 从没拆改过
+    assert not revision_due(wednesday, wednesday, weekday=2)  # 这一晚已经拆改过
+    assert revision_due(wednesday + timedelta(days=2), wednesday - timedelta(days=6), weekday=2)  # 周三那一晚线没跑到：周五补
+    assert not revision_due(wednesday + timedelta(days=6), wednesday + timedelta(days=2), weekday=2)  # 这个周期补过了
+    assert not revision_due(date(2026, 10, 6), date(2026, 10, 1), weekday=2)
 
 
 def test_the_anchor_cache_follows_the_recent_members_not_just_the_vocabulary_version() -> None:
@@ -535,3 +525,107 @@ def test_anchor_cache_drops_keys_of_older_vocabulary_versions() -> None:
     newer = _replace(vocabulary(), version=vocabulary().version + 1)
     check(newer, MEMBERS)
     assert {key[0] for key in gate._stable} == {newer.version} and len(gate._stable) == 1
+
+
+def test_split_evidence_counts_only_what_really_stays_in_the_original_class() -> None:
+    """E12（裁定 17 ①）：「修改代码」8 条——3 条搬去已有的调研、3 条切成新类「清理」、2 条零散在封闭集合重判也归调研：
+    原类一条不剩，留下的那边不够格，拆分作废。零散归回原类时剩 2 条跨 2 天，够默认门槛，照常拆。"""
+
+    odd = [member(f"z{d}", "s-k0001", n, d) for d, n in ((7, "帮我算个税"), (8, "查下汇率"))]
+    groups = {
+        "groups": [
+            group(EDIT_KEYS, "调研", existing="C1"),
+            group(CLEAN_KEYS, "清理"),
+            group(("M7",), "算个税"),
+            group(("M8",), "查汇率"),
+        ]
+    }
+
+    def routes(scattered_to: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
+        return {
+            **ROUTES,
+            **{m.content.name: ("调研",) for m in EDITS},
+            **{m.content.name: ("清理", "修改代码") for m in CLEANS},
+            **{m.content.name: scattered_to for m in odd},
+        }
+
+    result, _, _ = revise([], groups=[groups], routes=routes(("调研",)), members=[*MEMBERS, *odd])
+    assert result.record is None
+    assert any("split lacks evidence: remaining side has 0 entries" in s for s in result.signals)
+
+    kept, _, _ = revise([], groups=[groups], routes=routes(("修改代码",)), members=[*MEMBERS, *odd])
+    assert kept.record is not None
+    assert {m.occurrence for m in kept.record.moves}.isdisjoint({m.occurrence for m in odd})
+
+
+def test_two_groups_of_a_later_batch_can_both_join_the_same_earlier_group() -> None:
+    """E4：分批时后一批两组都归进同一个前批组（都答 existing=G1，或一组答 existing、另一组提醒句与它相同被自动并入）：
+    不抛错，G1 收下第二批的全部成员。前批组按位置认——第一组并进去之后 G1 已换成新对象，按值找会找不到。"""
+
+    from habitus.behavior.kinds.revision.grouping import group_members
+
+    config = BehaviorKindConfig(merge_evidence_runs=2, grouping_batch_size=3)
+    first = {"groups": [group(("M1", "M2", "M3"), "修改代码")]}
+    answers = {
+        "both_existing": {
+            "groups": [group(("M1",), "清理", existing="G1"), group(("M2", "M3"), "收拾", existing="G1")]
+        },
+        "same_reminder": {
+            "groups": [
+                group(("M1",), "改代码", reminder="该修改代码了"),
+                group(("M2", "M3"), "收拾", existing="G1"),
+            ]
+        },
+    }
+    for second in answers.values():
+        provider = RoutingProvider([first, second])
+        caller = KindModelCaller(client_for(provider), config=config)
+        groups, calls, signals = asyncio.run(
+            group_members(
+                caller,
+                edit_class(),
+                [research_class(), count_class()],
+                [*EDITS, *CLEANS],
+                batch_size=3,
+                max_steps=config.sample_max_steps,
+                max_examples=config.max_examples,
+            )
+        )
+        assert (calls, signals) == (2, ())
+        (only,) = groups
+        assert {m.occurrence for m in only.members} == {m.occurrence for m in (*EDITS, *CLEANS)}
+
+
+# ── 变异测试补的探针（段 4 E19）──────────────────────────────────────────────────────
+
+
+def test_a_class_stops_cooling_once_its_change_is_older_than_the_cooldown() -> None:
+    """V01：冷却只算最近 ``cooldown_days`` 天的改动；更早改过的类照常能拆改（不然改过一次就永远冻住）。"""
+
+    from habitus.behavior.kinds.revision import cooling_classes
+
+    days = BehaviorKindConfig().cooldown_days
+    old = VersionRecord(3, NOW - timedelta(days=days + 1), ChangeReason.NIGHTLY, (AddClass(count_class()),))
+    recent = VersionRecord(4, NOW - timedelta(days=days - 1), ChangeReason.NIGHTLY, (AddClass(research_class()),))
+    assert cooling_classes((old, recent), now=NOW, days=days) == frozenset({RESEARCH})
+
+
+def test_a_proposal_on_a_cooling_class_is_skipped_before_any_rejudge_or_anchor_call() -> None:
+    """V02：冷却中的类的提议在动手之前就跳过——不做重判、不过锚点，不多花模型调用。"""
+
+    nightly = VersionRecord(3, NOW - timedelta(days=1), ChangeReason.NIGHTLY, (AddClass(count_class()),))
+    result, provider, _ = revise([proposal("merge", "C3", target="C2")], state=EVIDENCE, records=(nightly,))
+    assert result.record is None
+    assert provider.calls == 2 and provider.classify_calls == 0  # 「修改代码」分组一次 + 提案一次；没有归类调用
+    assert any(s.startswith("kind_revision_skipped MergeProposal s-k0003: class is cooling") for s in result.signals)
+
+
+def test_revision_samples_are_spread_over_the_whole_period_not_taken_from_its_start() -> None:
+    """V09：给模型看的抽样原话按日子均匀取，覆盖整段时间，不是只取最早的几条。"""
+
+    from habitus.behavior.kinds.revision.reviser import _spread
+
+    members = [member(f"m{day}", "s-k0001", f"第{day}天", day) for day in range(1, 21)]
+    picked = _spread(members, 4)
+    assert len(picked) == 4
+    assert [item.day.day for item in picked] == [1, 6, 11, 16]

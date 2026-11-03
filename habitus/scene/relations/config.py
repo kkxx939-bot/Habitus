@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-MINUTES_PER_DAY = 24 * 60
+from habitus.temporal.slots import MINUTES_PER_DAY
 
 
 class RelationConfigError(ValueError):
@@ -109,4 +109,4 @@ def _positive_int(value: object) -> bool:
     return not isinstance(value, bool) and isinstance(value, int) and value > 0
 
 
-__all__ = ["MINUTES_PER_DAY", "RelationConfig", "RelationConfigError", "RelationThresholds"]
+__all__ = ["RelationConfig", "RelationConfigError", "RelationThresholds"]

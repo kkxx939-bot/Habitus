@@ -218,7 +218,6 @@ def test_tool_call_requires_call_id_and_exact_tool_name(missing: str) -> None:
     ("field", "value"),
     [
         ("tool_status", ConversationToolResultStatus.COMPLETED),
-        ("content_mode", ConversationToolResultContentMode.INLINE),
         ("source_ref", "file"),
         ("original_size_bytes", 1),
         ("original_sha256", "a" * 64),
@@ -227,6 +226,12 @@ def test_tool_call_requires_call_id_and_exact_tool_name(missing: str) -> None:
 def test_tool_call_rejects_result_only_fields(field: str, value: object) -> None:
     with pytest.raises(ConversationMessageSchemaError, match="cannot carry"):
         _tool_call(**{field: value})
+
+
+@pytest.mark.parametrize("mode", [ConversationToolResultContentMode.INLINE, ConversationToolResultContentMode.OMITTED])
+def test_tool_call_arguments_are_only_verbatim_or_summarized(mode: ConversationToolResultContentMode) -> None:
+    with pytest.raises(ConversationMessageSchemaError, match="verbatim or summarized"):
+        _tool_call(content_mode=mode, original_size_bytes=1, original_sha256="a" * 64)
 
 
 @pytest.mark.parametrize(

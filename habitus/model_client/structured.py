@@ -174,6 +174,18 @@ class StructuredChatClient:
         )
         return cast(StructuredResponse[T], result)
 
+    def estimate_model_input_tokens(
+        self,
+        request: ChatRequest | str,
+        *,
+        model_class: type[object],
+        name: str = "structured_response",
+    ) -> int:
+        """估算 ``complete_model`` 第一次发出的请求（带上结构化输出说明）的模型可见输入 token，不发请求。"""
+
+        schema, _validator = _model_contract(model_class)
+        return self.client.estimate_input_tokens(self._prepare(request, schema=schema, name=name))
+
     def _prepare(
         self,
         request: ChatRequest | str,

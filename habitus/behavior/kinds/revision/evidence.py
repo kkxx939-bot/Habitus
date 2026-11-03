@@ -6,13 +6,10 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
 
-from habitus.behavior.kinds.model import BehaviorClass
+from habitus.behavior.kinds.model import BehaviorClass, sentence_key
 from habitus.behavior.kinds.revision.facts import Member
-
-_NOISE = re.compile(r"[\s，。、,.!！？?「」\"'“”]+")
 
 
 def split_shortfall(
@@ -26,17 +23,14 @@ def split_shortfall(
 ) -> str | None:
     """拆分不够格时说出差在哪；够格返回 ``None``。"""
 
-    if _same_sentence(new.reminder, narrowed.reminder):
+    # 分组已按同一把尺子把提醒句相同的组并成一组，切出的类到这里不会与收窄的原类同句：这一条是防御，挡住别的造提案路径
+    if sentence_key(new.reminder) == sentence_key(narrowed.reminder):
         return f"reminders are the same ({new.reminder!r})"
     for side, members in (("split-out", new_members), ("remaining", kept_members)):
         days = len({member.day for member in members})
         if len(members) < min_count or days < min_days:
             return f"{side} side has {len(members)} entries over {days} days"
     return None
-
-
-def _same_sentence(left: str, right: str) -> bool:
-    return _NOISE.sub("", left).casefold() == _NOISE.sub("", right).casefold()
 
 
 __all__ = ["split_shortfall"]

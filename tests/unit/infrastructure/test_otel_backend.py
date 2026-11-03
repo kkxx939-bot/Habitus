@@ -10,8 +10,8 @@ from types import ModuleType
 
 import pytest
 
-from habitus.config.observability import ObservabilityTracingConfig
 from habitus.foundation.observability import ObservationEvent, ObservationStatus, bind_observation_context
+from habitus.infrastructure.observability.config import ObservabilityTracingConfig
 from habitus.infrastructure.observability.otel import OpenTelemetryBackend
 
 UTC = UTC
@@ -204,3 +204,18 @@ def test_shutdown_attempts_both_providers_and_reports_first_failure() -> None:
     assert meter.calls == 1
     assert tracer.calls == 1
     assert backend.initialized is False
+
+
+@pytest.mark.parametrize("protocol", ["http", "grpc"])
+def test_tracing_endpoint_follows_the_model_base_url_rule_for_plain_http(protocol: str) -> None:
+    """导出带凭据头：远端明文 HTTP 被拒（gRPC 同样，https 端点导出器强制 TLS）；回环地址仍可明文，远端 https 可用。"""
+
+    with pytest.raises(ValueError, match="remote tracing endpoint must use HTTPS"):
+        ObservabilityTracingConfig(
+            enabled=True,
+            endpoint="http://otel.example.com:4318",
+            protocol=protocol,
+            credential_ref="otel",
+        )
+    for endpoint in ("http://127.0.0.1:4318", "http://localhost:4318", "http://[::1]:4318", "https://otel.example.com"):
+        assert ObservabilityTracingConfig(enabled=True, endpoint=endpoint, protocol=protocol).endpoint == endpoint

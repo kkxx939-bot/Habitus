@@ -24,7 +24,10 @@ from habitus.conversation.source.model import (
     ConversationSourceEnvelope,
     ConversationSourceError,
     conversation_source_request_digest,
+    require_sha256,
+    source_timestamp,
 )
+from habitus.conversation.source.output_files import discard_output_directory
 from habitus.conversation.source.pending import PendingSources
 from habitus.conversation.source.receipt import (
     ConsumerOutputRef,
@@ -103,4 +106,7 @@ __all__ = [
     "ConversationSourceStore",
     "conversation_consumer_output_id",
     "conversation_source_request_digest",
+    "discard_output_directory",
+    "require_sha256",
+    "source_timestamp",
 ]

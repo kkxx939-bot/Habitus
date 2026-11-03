@@ -16,8 +16,7 @@
 （行为与观测空白）的归约是另一层（``behavior/reduction``）：封口、词表归类、落树都在那里。
 
 为 Reachy 逐帧观测写的那条线（入队、切段、作业、逐帧提示词、逐帧归属、跨窗续写）已随物理 lane 改用
-上游送最终结果而删除（裁定 40）。``judgement`` 里的续接、修正、并行关系与归约里的组链是它留下的，
-两条 lane 都不产出这些关系；删它们是归约的改动（TODO(BHV-SESSION-LANE-001)）。
+上游送最终结果而删除（裁定 40），它留下的判断间关系（续接、修正、并行、因果）与归约里的组链也一并删了。
 """
 
 from habitus.behavior.fusion.config import BehaviorFusionConfig
@@ -29,7 +28,6 @@ from habitus.behavior.fusion.derivation import (
     DurableJudgement,
     derive_judgements,
     judgement_payload,
-    without_unresolvable_relations,
 )
 from habitus.behavior.fusion.errors import BehaviorFusionError, BehaviorFusionLimitError
 from habitus.behavior.fusion.judgement import (
@@ -37,8 +35,6 @@ from habitus.behavior.fusion.judgement import (
     BehaviorFact,
     BehaviorJudgement,
     BehaviorJudgementBatch,
-    JudgementLink,
-    JudgementRelation,
     JudgementStatus,
     JudgementStatusBasis,
 )
@@ -70,8 +66,6 @@ __all__ = [
     "BehaviorJudgementStore",
     "DurableFact",
     "DurableJudgement",
-    "JudgementLink",
-    "JudgementRelation",
     "JudgementStatus",
     "JudgementStatusBasis",
     "build_fusion_receipt",
@@ -79,5 +73,4 @@ __all__ = [
     "judgement_payload",
     "receipt_identity",
     "segment_identity",
-    "without_unresolvable_relations",
 ]

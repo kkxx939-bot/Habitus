@@ -4,18 +4,18 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from habitus.behavior import BehaviorDocumentWriter
 from habitus.behavior.kinds.changes import AddClass, ChangeReason, Move, VersionRecord
 from habitus.behavior.kinds.ids import Lane
 from habitus.behavior.kinds.pending import PendingEntry
 from habitus.behavior.model import BehaviorKind
 from habitus.behavior.tree import BehaviorTree
+from habitus.behavior.tree.writer import BehaviorDocumentWriter
 from habitus.behavior.uri import BehaviorURI
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from tests.lock_store import ProcessLocalLockStore
 from tests.unit.behavior.kinds_fixtures import (
     NOW,
     NameMatchingProvider,
@@ -38,7 +38,7 @@ def publish(tree: BehaviorTree, *, name: str, token: str, minute: int, day: int 
         basis=(),
     )
     document = BehaviorDocumentWriter(tree, ProcessLocalLockStore(), clock=lambda: local(23, 0)).publish(
-        BehaviorKind.OCCURRENCE, payload, links=()
+        BehaviorKind.OCCURRENCE, payload
     )
     return str(BehaviorURI.from_address(document.address))
 
@@ -122,7 +122,7 @@ def test_nightly_growth_turns_recurring_pending_entries_into_a_class(tmp_path: P
     outcome = asyncio.run(jobs.grow(datetime(2026, 8, 20, 3, 0, tzinfo=NOW.tzinfo), checkpoint=lambda: None))
     assert {token_of(tree, uri) for uri in uris} == {"s-k0003"}
     assert store.read().get(named_classes(("a", "b", "c"))[2].id).name == "统计代码规模"
-    assert store.read_pending().pool.entries == {} and store.read_jobs().nightly_at is not None
+    assert store.read_pending().pool.entries == {}
     assert len(outcome.days) == 3
 
 
@@ -215,20 +215,27 @@ def test_revision_through_the_jobs_records_state_even_without_changes(tmp_path: 
     assert outcome.model_calls == 1 and store.read_jobs().revision_at == NOW and store.read().version == 1
 
 
-def test_due_jobs_run_once_per_schedule(tmp_path: Path) -> None:
-    tree, _, jobs, store = setup(tmp_path, provider=ScriptedProvider([{"proposals": []}]))
-    first = asyncio.run(jobs.run_due(NOW, checkpoint=lambda: None))
-    state = store.read_jobs()
-    assert state.nightly_at == NOW and state.revision_at == NOW
-    assert first.model_calls == 1  # 空池的每晚新增不调模型；本周的拆改提议调一次
-    again = asyncio.run(jobs.run_due(NOW, checkpoint=lambda: None))
-    assert again == type(again)()  # 同一天、同一周期都不再跑
+def test_the_nightly_jobs_revise_once_per_period_on_the_line(tmp_path: Path) -> None:
+    """裁定 94 第 9 条：每晚新增与定期拆改都在线上（``nightly``），不挂钟点——这一晚所在的拆改周期里还没拆改过才拆改，同一周期
+    之后几晚不再拆改，下一个周期的第一晚再拆改。"""
+
+    tree, _, jobs, store = setup(tmp_path, provider=ScriptedProvider([{"proposals": []}, {"proposals": []}]))
+    night = NOW.astimezone(jobs.zone).date()  # 10-05（周一）：拆改周期从 09-30（周三）那一晚起
+    first = asyncio.run(jobs.nightly(NOW, night=night, checkpoint=lambda: None))
+    assert first.model_calls == 1 and store.read_jobs().revision_at == NOW  # 待定池是空的：只有本周期的拆改提议调一次
+    assert store.read_jobs().merge_history[-1][0] == "2026-09-30"
+    tomorrow = NOW + timedelta(days=1)
+    again = asyncio.run(jobs.nightly(tomorrow, night=night + timedelta(days=1), checkpoint=lambda: None))
+    assert again.model_calls == 0 and store.read_jobs().revision_at == NOW  # 同一周期不再拆改
+    wednesday = NOW + timedelta(days=2)  # 10-07 那一晚起是下一个周期
+    asyncio.run(jobs.nightly(wednesday, night=night + timedelta(days=2), checkpoint=lambda: None))
+    assert store.read_jobs().revision_at == wednesday and store.read_jobs().merge_history[-1][0] == "2026-10-07"
 
 
 # ── 评审修复（`05-评审/汇总.md` 甲类）──────────────────────────────────────────────
 
 
-def test_scheduled_state_is_saved_before_the_migration_runs(tmp_path: Path) -> None:
+def test_the_migration_plan_is_saved_before_the_migration_runs(tmp_path: Path) -> None:
     body = {
         "groups": [
             {
@@ -255,7 +262,6 @@ def test_scheduled_state_is_saved_before_the_migration_runs(tmp_path: Path) -> N
         asyncio.run(jobs.grow(NOW, checkpoint=lambda: None))
     except RuntimeError:
         pass
-    assert store.read_jobs().nightly_at == NOW  # 状态已存：下一轮不会再跑一遍每晚新增
     assert store.read_migration() is not None  # 计划在：下一轮续做
 
 
@@ -281,6 +287,78 @@ def test_a_migration_plan_that_does_not_apply_is_refused_before_touching_the_tre
         raise AssertionError("expected refusal")
     except BehaviorKindStoreError:
         pass
+    assert store.read_migration() is None
+
+
+def _bound_one_byte_short(store, record: VersionRecord) -> None:  # type: ignore[no-untyped-def]
+    """把字节上限改成"日志恰好放不下这一版"。"""
+
+    from dataclasses import replace
+
+    store.config = replace(store.config, max_encoded_bytes=len(store.journal.with_record(record).encode("utf-8")) - 1)
+
+
+def test_a_version_the_change_log_cannot_hold_is_refused_before_touching_the_tree(tmp_path: Path) -> None:
+    """E9：变更日志写不下这一版就不落计划、不动树——先改树、后写日志失败，词表会永远停在迁移一半。"""
+
+    from habitus.behavior.kinds.store import BehaviorKindJournalFullError
+
+    tree, _, jobs, store = setup(tmp_path)
+    uri = publish(tree, name="数行数", token="s-k0002", minute=1)
+    record = VersionRecord(2, NOW, ChangeReason.REVISION, (), (Move(uri, "s-k0002", "s-k0001"),))
+    _bound_one_byte_short(store, record)
+
+    try:
+        jobs.migrator.apply(record, checkpoint=lambda: None)
+        raise AssertionError("expected refusal")
+    except BehaviorKindJournalFullError:
+        pass
+    assert token_of(tree, uri) == "s-k0002" and store.read_migration() is None and store.read().version == 1
+
+
+def test_a_plan_the_change_log_can_no_longer_hold_is_withdrawn_untouched_instead_of_failing_every_sweep(
+    tmp_path: Path,
+) -> None:
+    tree, _, jobs, store = setup(tmp_path)
+    uri = publish(tree, name="数行数", token="s-k0002", minute=1)
+    record = VersionRecord(2, NOW, ChangeReason.REVISION, (), (Move(uri, "s-k0002", "s-k0001"),))
+    store.write_migration(record)  # 计划写下之后上限才改小
+    _bound_one_byte_short(store, record)
+
+    outcome = jobs.migrator.resume(checkpoint=lambda: None)
+
+    assert outcome is not None and outcome.applied == 0
+    assert any("kind_migration_refused v2" in signal for signal in outcome.signals)
+    assert token_of(tree, uri) == "s-k0002" and store.read_migration() is None and store.read().version == 1
+    assert jobs.migrator.resume(checkpoint=lambda: None) is None
+
+
+def test_a_nightly_version_the_change_log_cannot_hold_is_signalled_once_not_asked_again_every_sweep(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    body = {
+        "groups": [
+            {
+                "members": ["P1", "P2", "P3"],
+                "name": "统计代码规模",
+                "criterion": "数行数",
+                "reminder": "该统计了",
+                "excludes": [],
+                "examples": [],
+                "existing": None,
+            }
+        ]
+    }
+    tree, _, jobs, store = setup(tmp_path, provider=ScriptedProvider([body]))
+    uris = [publish(tree, name=f"数行数{i}", token="s-待定", minute=i, day=16 + i) for i in range(3)]
+    entries = [PendingEntry(uri, Lane.SESSION, date(2026, 8, 16 + i), "统计", "数行数") for i, uri in enumerate(uris)]
+    store.replace_pending(store.read_pending().pool.with_entries(entries), expected_revision=0)
+    monkeypatch.setattr(store, "has_room_for", lambda record: False)
+
+    outcome = asyncio.run(jobs.grow(NOW, checkpoint=lambda: None))
+
+    assert any(signal.startswith("kind_version_refused v2") for signal in outcome.signals)
+    assert {token_of(tree, uri) for uri in uris} == {"s-待定"} and store.read().version == 1
     assert store.read_migration() is None
 
 
@@ -329,19 +407,36 @@ def test_classification_renews_the_lease_between_chunks(tmp_path: Path) -> None:
     assert len(result.verdicts) == 5 and len(beats) == 3  # 5 条、每块 2 条 → 3 块，块间各续一次
 
 
-def test_due_jobs_use_the_configured_zone_not_the_process_zone(tmp_path: Path) -> None:
-    """同一时刻、同一份上次运行记录：东八区还没到每晚 02:00，西八区已经过了——两种时区结论相反，读进程时区的实现过不了两条。"""
+def test_the_last_revision_night_is_read_in_the_configured_zone_not_the_process_zone(tmp_path: Path) -> None:
+    """同一份上次拆改记录：东八区那是 10-07（周三）那一晚、这个周期拆改过了；西八区还是 10-06（周二）、属于上一个周期——两种
+    时区结论相反，读进程时区的实现过不了两条。"""
 
-    from datetime import timedelta, timezone
+    from datetime import UTC, timezone
 
-    last = datetime(2026, 10, 5, 18, 30, tzinfo=NOW.tzinfo)  # 东八区 10-06 02:30 / 西八区 10-05 10:30
-    instant = datetime(2026, 10, 6, 17, 30, tzinfo=NOW.tzinfo)  # 东八区 10-07 01:30 / 西八区 10-06 09:30
+    last = datetime(2026, 10, 6, 20, 0, tzinfo=UTC)  # 东八区 10-07 04:00 / 西八区 10-06 12:00
+    instant = datetime(2026, 10, 7, 20, 0, tzinfo=UTC)
     for hours, expect_ran in ((8, False), (-8, True)):
         tree = BehaviorTree(tmp_path / f"tree{hours}")
         _, jobs, store = kind_components(
-            tree, ProcessLocalLockStore(), names=(), provider=ScriptedProvider([{"groups": []}])
+            tree, ProcessLocalLockStore(), names=(), provider=ScriptedProvider([{"proposals": []}])
         )
         jobs.zone = timezone(timedelta(hours=hours))
-        store.replace_jobs(store.read_jobs().after_nightly(last))
-        asyncio.run(jobs.run_due(instant, checkpoint=lambda: None))
-        assert (store.read_jobs().nightly_at == instant) is expect_ran, hours
+        store.replace_jobs(store.read_jobs().after_revision(last, "2026-09-30", frozenset(), keep=2))
+        asyncio.run(jobs.nightly(instant, night=date(2026, 10, 7), checkpoint=lambda: None))
+        assert (store.read_jobs().revision_at == instant) is expect_ran, hours
+
+
+def test_a_planned_move_whose_occurrence_is_gone_is_skipped_with_a_signal(tmp_path: Path) -> None:
+    """KM2（段 4 E19 探针）：迁移计划里的条目在树上已经没有了：跳过、留信号，其余照常迁完（不每轮抛错卡住迁移）。"""
+
+    tree, _, jobs, _store = setup(tmp_path)
+    uri = publish(tree, name="数行数", token="s-k0002", minute=1)
+    gone = uri.replace("数行数", "早就没了")
+    record = VersionRecord(
+        2, NOW, ChangeReason.REVISION, (), (Move(gone, "s-k0002", "s-k0001"), Move(uri, "s-k0002", "s-k0001"))
+    )
+
+    outcome = jobs.migrator.apply(record, checkpoint=lambda: None)
+
+    assert outcome.applied == 1 and outcome.skipped == 1 and token_of(tree, uri) == "s-k0001"
+    assert any("occurrence is gone" in signal for signal in outcome.signals)

@@ -11,13 +11,13 @@ import pytest
 from habitus.config import ConversationLifecycleConfig, LifecycleWorkerConfig
 from habitus.infrastructure.lifecycle import CapacityReading, CapacitySnapshotStore, LifecycleContext, ParticipantReport
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.conversation import (
     ConversationAddress,
     ConversationMessageJournal,
     ConversationRangeSummaryGenerator,
     ConversationRangeSummaryStore,
     ConversationSummaryCompactor,
+    ConversationSummaryRetirementStore,
     ConversationSummaryStore,
     PersistentConversationSummaryVectorIndex,
 )
@@ -36,6 +36,7 @@ from habitus.runtime import (
 )
 from habitus.runtime.lifecycle_memory import conversation_lease_key
 from tests.helpers import closed_turn, codec
+from tests.lock_store import ProcessLocalLockStore
 from tests.unit.conversation.test_summary_indexing import Embedder, VectorStore
 from tests.unit.retrieval.test_search_service import structured
 
@@ -51,6 +52,7 @@ def manager(tmp_path: Path) -> ConversationLifecycleManager:
         range_store,
         ConversationRangeSummaryGenerator(structured([])),
     )
+    retirements = ConversationSummaryRetirementStore(tmp_path / "workflow")
     summary_index = PersistentConversationSummaryVectorIndex(
         journal,
         compactor,
@@ -58,6 +60,7 @@ def manager(tmp_path: Path) -> ConversationLifecycleManager:
         VectorStore(),
         dimension=2,
         embedding_fingerprint="lifecycle-worker-test-v1",
+        retirement_store=retirements,
     )
 
     async def synchronize(_address, *, checkpoint=None):
@@ -79,6 +82,7 @@ def manager(tmp_path: Path) -> ConversationLifecycleManager:
         jobs,
         MemoryChangeReceiptStore(tmp_path / "workflow", document_codec),
         MemoryTransactionJournal(tmp_path / "workflow" / "transactions", document_codec),
+        retirements,
     )
 
 

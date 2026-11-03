@@ -10,7 +10,6 @@ import pytest
 
 from habitus.infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.document import MemoryLinkType
 from habitus.memory.editor import (
     MemoryCandidate,
@@ -46,6 +45,7 @@ from habitus.memory.workflow.receipt import (
     MemoryNodeChangeAction,
 )
 from tests.helpers import BASE_TIME, codec, document, memory_fields, snapshot_batch
+from tests.lock_store import ProcessLocalLockStore
 
 
 def editor_plan(*, preference_content: str = "- 偏好简洁回答", with_relation: bool = False):

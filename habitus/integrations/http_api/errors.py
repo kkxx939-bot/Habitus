@@ -22,8 +22,13 @@ from habitus.infrastructure.vector import (
     VectorStoreError,
     VectorStoreIntegrityError,
 )
-from habitus.integrations.http import HTTPMemoryJobConflictError, HTTPMemoryJobNotFoundError
 from habitus.integrations.http_api.body_limit import RequestBodyLimitExceeded
+from habitus.integrations.http_api.handlers import HTTPMemoryJobConflictError, HTTPMemoryJobNotFoundError
+from habitus.integrations.http_api.remember_parts import (
+    RememberPartsCapacityError,
+    RememberPartsRestartError,
+    RememberPartsTooLargeError,
+)
 from habitus.integrations.http_api.schemas import ErrorInfo, ErrorResponse, HTTPErrorCode
 from habitus.memory.browse import MemoryBrowseNotFoundError
 from habitus.memory.conversation import ConversationJournalError, ConversationWriteConflictError
@@ -234,6 +239,24 @@ def map_exception(exc: Exception) -> HTTPErrorSpec:
         return HTTPErrorSpec(HTTPErrorCode.FAILED_PRECONDITION, str(exc), False)
     if isinstance(exc, RequestBodyLimitExceeded):
         return HTTPErrorSpec(HTTPErrorCode.REQUEST_TOO_LARGE, "Request body exceeds the configured limit", False)
+    if isinstance(exc, RememberPartsRestartError):
+        # 分块上传接不上（本地服务重启丢了暂存、过期、块序号跳了）：插件从第 0 块整批重送
+        return HTTPErrorSpec(
+            HTTPErrorCode.ABORTED,
+            str(exc),
+            True,
+            details={"conflict_type": "remember_parts_restart"},
+        )
+    if isinstance(exc, RememberPartsCapacityError):
+        return HTTPErrorSpec(
+            HTTPErrorCode.RESOURCE_EXHAUSTED,
+            "Remember parts staging is full",
+            True,
+            details={"conflict_type": "remember_parts_capacity"},
+            retry_after_seconds=1,
+        )
+    if isinstance(exc, RememberPartsTooLargeError):
+        return HTTPErrorSpec(HTTPErrorCode.REQUEST_TOO_LARGE, str(exc), False)
     if isinstance(exc, MemoryConsistencyTimeoutError):
         return HTTPErrorSpec(
             HTTPErrorCode.DEADLINE_EXCEEDED,

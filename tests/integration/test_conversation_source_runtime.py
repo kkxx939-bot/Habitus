@@ -16,12 +16,12 @@ from habitus.conversation import (
     conversation_source_request_digest,
 )
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.conversation import ConversationAddress
 from habitus.pre.conversation import ConversationBatch
 from habitus.runtime import RuntimeShutdownTimeoutError, RuntimeState, build_runtime
 from tests.helpers import closed_turn
 from tests.integration.test_runtime_assembly import runtime_config, runtime_dependencies
+from tests.lock_store import ProcessLocalLockStore
 
 
 def only_envelope(runtime):
@@ -75,14 +75,14 @@ def test_runtime_start_recovers_durable_source_with_only_missing_outcomes(tmp_pa
             recorded_at=datetime(2026, 8, 7, 1, 0, tzinfo=UTC),
         )
         runtime.components.conversation.sources.put(envelope)
-        assert tuple(entry.consumer for entry in runtime.components.conversation.source_recovery.pending()) == (
+        assert tuple(entry.consumer for entry in runtime.components.conversation.source_recovery.plan().attempt) == (
             ConversationSourceConsumer.MEMORY,
             ConversationSourceConsumer.BEHAVIOR_SESSION,
         )
 
         await runtime.start()
 
-        assert runtime.components.conversation.source_recovery.pending() == ()
+        assert runtime.components.conversation.source_recovery.plan().attempt == ()
         assert await runtime.read_live_conversation(ConversationAddress(batch.conversation_id, started_on)) == batch
         memory_outcome = runtime.components.conversation.source_outcomes.read(
             envelope.source_id,
@@ -301,7 +301,7 @@ def test_runtime_close_timeout_is_explicit_and_does_not_cancel_behavior_consumer
         assert tuple((item.source_id, item.consumer) for item in captured.value.pending_deliveries) == (
             (envelope.source_id, ConversationSourceConsumer.BEHAVIOR_SESSION),
         )
-        assert runtime.components.conversation.source_coordinator.running_task_count == 1
+        assert len(runtime.components.conversation.source_coordinator.pending_deliveries) == 1
         release.set()
         assert await runtime.components.conversation.source_coordinator.wait_for_idle(1.0)
         await runtime.close()
@@ -334,6 +334,64 @@ def test_a_corrupt_envelope_does_not_stop_the_runtime_from_starting(tmp_path: Pa
         assert runtime.state is RuntimeState.RUNNING
         memory = ConversationSourceConsumer.MEMORY
         assert conversation.source_delivery.inspect(good, memory).state is ConversationConsumerDeliveryState.COMMITTED
+        await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_an_envelope_over_the_read_bound_does_not_stop_the_runtime_from_starting(tmp_path: Path) -> None:
+    """读上限调低后有一份信封比它大：启动照常，别的地址照常恢复（裁定 60 第 6 条）。"""
+
+    async def scenario() -> None:
+        providers, vectors = runtime_dependencies()
+        runtime = build_runtime(
+            runtime_config(tmp_path),
+            providers=providers,
+            vector_stores=vectors,
+            path_lock=PathLock(ProcessLocalLockStore()),
+        )
+        runtime.initialize()
+        conversation = runtime.components.conversation
+        big, small = _durable_source("startup-big-" + "x" * 200), _durable_source("startup-small")
+        conversation.sources.put(big)
+        conversation.sources.put(small)
+        sizes = [conversation.sources._path(item.source_id).stat().st_size for item in (small, big)]
+        assert sizes[0] < sizes[1]
+        conversation.sources.max_file_bytes = sizes[0]
+
+        await runtime.start()
+
+        assert runtime.state is RuntimeState.RUNNING
+        memory = ConversationSourceConsumer.MEMORY
+        assert conversation.source_delivery.inspect(small, memory).state is ConversationConsumerDeliveryState.COMMITTED
+        assert conversation.source_recovery.plan().corrupt == (big.source_id,)
+        await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_failing_recovery_round_does_not_stop_the_runtime_from_starting(tmp_path: Path) -> None:
+    """整轮恢复本身出错（例如账读不了）也不挡启动：记一条失败事件，交给周期恢复再来（裁定 60 第 6 条）。"""
+
+    async def scenario() -> None:
+        providers, vectors = runtime_dependencies()
+        runtime = build_runtime(
+            runtime_config(tmp_path),
+            providers=providers,
+            vector_stores=vectors,
+            path_lock=PathLock(ProcessLocalLockStore()),
+        )
+        runtime.initialize()
+
+        async def broken_round(_self):  # type: ignore[no-untyped-def]
+            raise RuntimeError("source ledger is unreadable")
+
+        recovery = runtime.components.conversation.source_recovery
+        recovery.recover_pending = MethodType(broken_round, recovery)  # type: ignore[method-assign]
+
+        await runtime.start()
+
+        assert runtime.state is RuntimeState.RUNNING
         await runtime.close()
 
     asyncio.run(scenario())

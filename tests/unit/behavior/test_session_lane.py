@@ -28,7 +28,6 @@ from habitus.behavior.fusion.lanes.session import (
 )
 from habitus.behavior.fusion.lanes.session.material import ANSWER_PREFIX, WAKE_LABEL
 from habitus.behavior.fusion.lanes.session.redaction import REDACTED
-from habitus.model_client.contracts import ModelStructuredOutputError
 from tests.unit.behavior.session_fixtures import (
     START,
     ZONE,
@@ -70,33 +69,19 @@ def test_a_turn_runs_from_one_instruction_to_just_before_the_next() -> None:
     assert (turns[1].instructed_at, turns[1].completed_at) == (at(4), at(9))
 
 
-def test_synthetic_host_messages_do_not_open_a_turn_nor_close_the_current_one() -> None:
-    turns = split_turns(
-        CONVERSATION,
-        (
-            prompt(0, "继续"),
-            prompt(1, "<system-reminder>后台任务结束</system-reminder>", minutes=1),
-            reply(2, "接着拆完了。", minutes=2),
-        ),
-    )
-    assert len(turns) == 1
-    assert turns[0].instruction == "继续"
-    assert turns[0].end_sequence == 2
-
-
 def test_three_instructions_in_the_same_second_are_a_replay_not_speech() -> None:
     replayed = tuple(prompt(index, f"重放的第 {index} 句") for index in range(3))
     assert split_turns(CONVERSATION, (*replayed, reply(3, "……"))) == ()
 
 
-def test_host_messages_in_the_same_second_do_not_make_his_one_sentence_a_replay() -> None:
-    """宿主常在他开口的那一秒里连写几条合成消息；重放只数人说的话，他真说的那一句照样开轮。"""
+def test_wake_notices_in_the_same_second_do_not_make_his_one_sentence_a_replay() -> None:
+    """后台任务的通知常和他开口落在同一秒；重放只数人说的话，他真说的那一句照样开轮。"""
 
     (turn,) = split_turns(
         CONVERSATION,
         (
-            prompt(0, "<environment_context>cwd=/Users/a</environment_context>"),
-            prompt(1, "<recommended_plugins>…</recommended_plugins>"),
+            prompt(0, "<task-notification>a done</task-notification>", mid_turn=True),
+            prompt(1, "<task-notification>b done</task-notification>", mid_turn=True),
             prompt(2, "把词表的归类逻辑讲一下"),
             reply(3, "归类分三步……"),
         ),
@@ -204,6 +189,24 @@ def test_answering_the_assistants_question_stays_in_the_turn() -> None:
     assert "助手最后说：按独立模块改完了。" in material
 
 
+def test_an_answer_at_the_head_of_a_batch_cut_mid_turn_belongs_to_the_earlier_turn() -> None:
+    """一批从一轮中间切起、开头就是他对提问的作答：这一轮的开头在更早一批里，作答和同位置的其余残留一样不在这一批开轮
+    （记忆主链也只从人说的话开轮，裁定 69）。"""
+
+    turns = split_turns(
+        CONVERSATION,
+        (
+            call(0, "AskUserQuestion", '{"questions": [{"question": "放哪？"}]}', call_id="q1"),
+            result(1, '"放哪？"="独立模块"', call_id="q1", name="AskUserQuestion", minutes=2),
+            reply(2, "按独立模块改完了。", minutes=3),
+            prompt(3, "下一步呢", minutes=4),
+            reply(4, "写测试。", minutes=5),
+        ),
+        question_tools=("AskUserQuestion",),
+    )
+    assert [(turn.start_sequence, turn.end_sequence) for turn in turns] == [(3, 4)]
+
+
 def test_what_he_says_while_the_assistant_works_stays_in_that_turn() -> None:
     """他 10-12 一场 Desktop 会话的形状：一轮里作答、补一句、叫停（适配器按宿主的轮次标 mid_turn），都是这一件事；
     同样的话若不是插在中间（上一轮已经答完）就自己开一轮。"""
@@ -220,7 +223,7 @@ def test_what_he_says_while_the_assistant_works_stays_in_that_turn() -> None:
             reply(1, "我先检查客户端。", minutes=1),
             call(2, "request_user_input_async", '{"questions": [{"title": "走哪条路？"}]}', call_id="call_1", minutes=2),
             result(3, '{"accepted":true}', call_id="call_1", name="request_user_input_async", minutes=2.1),
-            prompt(4, reply_message, minutes=4, mid_turn=True),
+            prompt(4, reply_message, minutes=4, mid_turn=True, answers=(("走哪条路？", "云助手"),)),
             call(5, "js", "{}", call_id="c2", minutes=5),
             prompt(6, "你可以先看一下我是账号", minutes=6, mid_turn=True),
             prompt(7, "还是暂停吧", minutes=8, mid_turn=True),
@@ -248,7 +251,7 @@ def test_what_he_says_while_the_assistant_works_stays_in_that_turn() -> None:
             call(1, "request_user_input_async", '{"questions": [{"title": "走哪条路？"}]}', call_id="call_1", minutes=1),
             result(2, '{"accepted":true}', call_id="call_1", name="request_user_input_async", minutes=1.1),
             reply(3, "报错是依赖版本不对。", minutes=3),
-            prompt(4, reply_message, minutes=6),
+            prompt(4, reply_message, minutes=6, answers=(("走哪条路？", "云助手"),)),
             reply(5, "好。", minutes=7),
         ),
         question_tools=("AskUserQuestion", "request_user_input"),
@@ -256,7 +259,7 @@ def test_what_he_says_while_the_assistant_works_stays_in_that_turn() -> None:
     assert (asked.start_sequence, asked.end_sequence) == (0, 3)  # "收到了"不是作答
     assert answered.instruction == f"{ANSWER_PREFIX}走哪条路？ → 云助手"
     assert answered.instructed_at == at(6) and answered.completed_at == at(7)
-    # 不是作答形状的（JSON 坏了）：照旧当一句人说的话
+    # 组合根没认出作答（形状不对）：照旧当一句人说的话
     (turn,) = split_turns(
         CONVERSATION,
         (
@@ -479,6 +482,29 @@ def test_malformed_descriptions_are_rejected_so_the_model_is_asked_again(body: o
         assemble_description(body)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("summary", "他让助手给全家👨\u200d👩\u200d👧订周末的票。"),
+        ("summary", "查\u200b快递"),
+        ("summary", "跑测试，输出 \x1b[31mFAILED\x1b[0m"),
+        ("goal", "订\u200d票"),
+        ("steps", ["查\u200b快递"]),
+    ],
+)
+def test_text_the_tree_could_not_hold_is_rejected_at_the_fusion_entry(field: str, value: object) -> None:
+    """E3：融合入口与行为树 schema 同一条文本规则——零宽字符、ANSI 控制符这里就拒（模型重答），不放行之后在树上永远
+    落不了。"""
+
+    from habitus.behavior.schema.fields import text
+    from habitus.behavior.schema.model import BehaviorSchemaError
+
+    with pytest.raises(BehaviorFusionError, match="control or zero-width"):
+        assemble_description(description(**{field: value}))
+    with pytest.raises(BehaviorSchemaError):
+        text(value[0] if isinstance(value, list) else value, field)
+
+
 # ── 一轮一条判断 ─────────────────────────────────────────────────────────────────────
 
 
@@ -494,7 +520,7 @@ def test_one_turn_becomes_one_judgement_spanning_instruction_to_completion(tmp_p
     (judgement,) = stores.judgements.list()
     assert judgement["judgement_id"] == outcome.judgement_id
     assert judgement["behavior"] == "统计本地项目代码行数"
-    assert judgement["relations"] == []  # 不判续、不合并：一轮一条，互不相认
+    assert "relations" not in judgement  # 不判续、不合并：一轮一条，互不相认，判断里没有关系这一项
     assert judgement["prompt_version"] == SESSION_PROMPT_VERSION
     # 开始是人开口的时刻，最后所见是助手做完的时刻，都带本地偏移。
     assert datetime.fromisoformat(judgement["started_at"]) == START.astimezone(ZONE)
@@ -550,20 +576,24 @@ def test_redoing_a_turn_does_not_write_it_twice(tmp_path: Path) -> None:
     assert len(stores.judgements.list()) == 1
 
 
-def test_a_failed_description_leaves_nothing_behind_so_the_turn_can_be_retried(tmp_path: Path) -> None:
+def test_an_answer_of_the_wrong_shape_is_set_aside_as_an_error_for_the_night(tmp_path: Path) -> None:
+    """裁定 94 错误分类：模型答了但格式不合（结构化校验用尽）——白天放一边：这一轮当场落「错误」、进夜里待处理的堆（原因
+    ``INVALID``，夜里前置处理再试一次），不抛给会话源反复重做。"""
+
+    from habitus.behavior.retry import RetryCause
+
     stores = Stores(tmp_path)
     bad = description(name="..")
     session, provider = lane(stores, [bad, bad, description()])
     turn = one_turn(prompt(0, "继续"), reply(1, "拆完了。"))
 
-    with pytest.raises(ModelStructuredOutputError, match="domain validation"):
-        asyncio.run(session.consume((turn,)))
-    assert stores.judgements.list() == ()
-    assert stores.observations.list() == ()  # 不写"没读懂"的空白
-
     (outcome,) = asyncio.run(session.consume((turn,)))
-    assert outcome.disposition is TurnDisposition.RECORDED
-    assert provider.calls == 3
+    assert outcome.disposition is TurnDisposition.ERROR
+    (stored,) = stores.judgements.list()
+    assert stored["behavior"] is None and stored["status_basis"] == "error"
+    (item,) = stores.backlog.snapshot().items
+    assert item.cause is RetryCause.INVALID and item.cause.retried
+    assert provider.calls == 2
 
 
 def test_the_model_sees_this_turn_only_and_never_the_person_s_secrets(tmp_path: Path) -> None:
@@ -610,6 +640,77 @@ def test_a_turn_interrupted_after_its_judgement_is_finished_not_judged_again(
     assert provider.calls == 1  # 没有重问模型
     assert session.recorder.is_recorded(turn)
     assert len(stores.receipts.list()) == 1
+
+
+def test_a_turn_interrupted_before_a_prompt_upgrade_is_finished_under_the_version_it_was_written_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """判断落了、回执没落就崩了，重启前升级了提示词：仍按凭据认出那条判断，照它落盘时的版本补上回执，不再写第二条。"""
+
+    from habitus.behavior.fusion.lanes.session import recorder as recorder_module
+
+    stores = Stores(tmp_path)
+    session, provider = lane(stores, [description("升级前的说法"), description("升级后的说法")])
+    turn = one_turn(prompt(0, "继续"), reply(1, "拆完了。"))
+
+    def crash(*_: object, **__: object) -> None:
+        raise RuntimeError("进程崩溃")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(stores.receipts, "put", crash)
+        with pytest.raises(RuntimeError):
+            asyncio.run(session.consume((turn,)))
+    written_with = recorder_module.SESSION_FUSION_VERSION
+    monkeypatch.setattr(recorder_module, "SESSION_FUSION_VERSION", f"{written_with}+upgraded")
+    monkeypatch.setattr(recorder_module, "SESSION_PROMPT_VERSION", f"{SESSION_PROMPT_VERSION}+upgraded")
+
+    (outcome,) = asyncio.run(session.consume((turn,)))
+
+    assert outcome.disposition is TurnDisposition.ALREADY_RECORDED
+    (judgement,) = stores.judgements.list()
+    assert judgement["behavior"] == "升级前的说法"
+    assert judgement["fusion_version"] == written_with
+    (receipt,) = stores.receipts.list()
+    assert receipt.prompt_version == SESSION_PROMPT_VERSION
+    assert provider.calls == 1
+    assert session.recorder.is_recorded(turn)
+
+
+def test_a_turn_resumed_under_another_identity_is_refused_not_written_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S02（段 4 E19 探针，防御检查）：接着写完时算出的身份与落盘那条对不上（例如认出那条之后主体名改了）——抛错，
+    不静默写出第二条判断。"""
+
+    from habitus.behavior.fusion.lanes.session import SessionTurnRecorder
+
+    stores = Stores(tmp_path)
+    session, _provider = lane(stores, [description("第一次的说法")])
+    turn = one_turn(prompt(0, "继续"), reply(1, "拆完了。"))
+
+    def crash(*_: object, **__: object) -> None:
+        raise RuntimeError("进程崩溃")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(stores.receipts, "put", crash)
+        with pytest.raises(RuntimeError):
+            asyncio.run(session.consume((turn,)))
+    renamed = SessionTurnRecorder(
+        observations=stores.observations,
+        judgements=stores.judgements,
+        receipts=stores.receipts,
+        coverage=stores.coverage,
+        primary_subject="改过名的主体",
+        zone=ZONE,
+        clock=lambda: stores.now,
+    )
+    interrupted = session.recorder.interrupted(turn)  # 改名之前认出的那一条
+    assert interrupted is not None
+    for envelope in stores.observations.list():  # 凭据随主体名变：旧的那份不在了，新的才落得下
+        stores.observations.discard(envelope.source_id)
+
+    with pytest.raises(BehaviorFusionError, match="could not be resumed under its identity"):
+        renamed.resume(turn, interrupted)
 
 
 def test_a_turn_interrupted_before_its_judgement_is_simply_judged(
@@ -709,6 +810,19 @@ def test_open_reminders_go_into_the_material_and_the_answer_names_which_one_he_a
         {**description(), "responses": [{"reminder": 2, "polarity": "负"}]}, reminder_numbers=(1, 2)
     )
     assert described.responses == ((2, "负"),)
+    # 「已做」（他说这一次已经做过了，裁定 91 第 3 条②）是第四个方向：形状与校验都收；与预测层账本的方向是同一组值
+    from habitus.behavior.fusion.lanes.session import SESSION_SYSTEM_PROMPT
+    from habitus.foresight.ledger import POLARITIES as LEDGER_POLARITIES
+
+    assert schema["properties"]["responses"]["items"]["properties"]["polarity"]["enum"] == ["正", "中", "负", "已做"]
+    assert tuple(schema["properties"]["responses"]["items"]["properties"]["polarity"]["enum"]) == LEDGER_POLARITIES
+    done = assemble_description(
+        {**description(), "responses": [{"reminder": 1, "polarity": "已做"}]}, reminder_numbers=(1, 2)
+    )
+    assert done.responses == ((1, "已做"),)
+    # 提示词 v7：说已经做过了的落「已做」，不再落「正」
+    assert "已做：他说这一次已经做过了" in SESSION_SYSTEM_PROMPT
+    assert "说已经做了的照他说的算" not in SESSION_SYSTEM_PROMPT
     assert assemble_description(description(), reminder_numbers=(1, 2)).responses == ()
     for bad in (
         [{"reminder": 3, "polarity": "正"}],

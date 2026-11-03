@@ -3,22 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError
 
-from habitus.integrations.http import HTTPMemoryJobConflictError, RuntimeHTTPHandlers
-from habitus.integrations.sdk import (
-    AgentFlushResult,
-    AgentHookSession,
-    AgentMemoryHooks,
-    AgentRecallResult,
-    AgentRememberResult,
-    ConversationRef,
-    PreparedAgentTurn,
-)
+from habitus.integrations.http_api.handlers import HTTPMemoryJobConflictError, RuntimeHTTPHandlers
+from habitus.integrations.http_api.schemas import RecallRequest
+from habitus.memory.model import MemoryKind
 from habitus.memory.workflow import MemoryJob, MemoryJobStatus
 from habitus.runtime import (
     MemoryConsistencySnapshot,
@@ -103,106 +98,8 @@ def test_remember_reports_adapter_boundary_when_caller_does_not_override_it() ->
         )
     )
 
-    assert result["after_turn"] is True
-    assert result["next_sequence"] == 2
-
-
-def test_agent_hooks_cover_resume_recall_remember_checkpoint_and_close() -> None:
-    address_date = date(2026, 7, 30)
-    recalled = AgentRecallResult(
-        query="用户偏好",
-        queries=("用户偏好",),
-        context="用户偏好简洁回答。",
-        memories=(),
-        summaries=(),
-        degradations=(),
-        budget_exhausted=False,
-    )
-    memory = SimpleNamespace(
-        cursor=AsyncMock(return_value=4),
-        recall=AsyncMock(return_value=recalled),
-        remember=AsyncMock(
-            return_value=AgentRememberResult(
-                ignored_items=0,
-                after_turn=True,
-                next_sequence=6,
-            )
-        ),
-        flush=AsyncMock(return_value=AgentFlushResult()),
-    )
-    hooks = AgentMemoryHooks(memory)
-
-    async def scenario() -> None:
-        session = await hooks.resume_session(
-            "conversation-hooks",
-            address_date,
-            "openai_chat_completions",
-        )
-        assert session.next_sequence == 4
-        assert AgentHookSession.from_dict(session.to_dict()) == session
-
-        before = await hooks.before_turn(session, "用户偏好")
-        assert before.context == "用户偏好简洁回答。"
-        prepared = hooks.prepare_after_turn(
-            session,
-            {"messages": [{"role": "assistant", "content": "好的"}]},
-            occurred_at=datetime(2026, 7, 30, tzinfo=UTC),
-            after_turn=True,
-        )
-        assert PreparedAgentTurn.from_dict(prepared.to_dict()) == prepared
-        after = await hooks.after_turn(prepared)
-        assert session.next_sequence == 4
-        assert after.session.next_sequence == 6
-        closed = await hooks.on_session_close(after.session, wait_timeout_seconds=2.0)
-        assert closed.session == after.session
-
-    asyncio.run(scenario())
-
-    memory.cursor.assert_awaited_once()
-    assert memory.recall.await_args.kwargs["conversation"].conversation_id == "conversation-hooks"
-    assert memory.remember.await_args.kwargs["start_sequence"] == 4
-    assert memory.remember.await_args.kwargs["protocol"] == "openai_chat_completions"
-    assert memory.flush.await_args.kwargs["wait_timeout_seconds"] == 2.0
-
-
-def test_agent_hook_retries_the_same_prepared_turn_without_advancing_after_failure() -> None:
-    session = AgentMemoryHooks.new_session(
-        "conversation-hooks-failure",
-        date(2026, 7, 30),
-        "anthropic_messages",
-    )
-    remembered = AgentRememberResult(
-        ignored_items=0,
-        after_turn=True,
-        next_sequence=2,
-    )
-    memory = SimpleNamespace(
-        cursor=AsyncMock(return_value=0),
-        recall=AsyncMock(),
-        remember=AsyncMock(side_effect=(TimeoutError("response lost"), remembered)),
-        flush=AsyncMock(),
-    )
-    hooks = AgentMemoryHooks(memory)
-    prepared = hooks.prepare_after_turn(
-        session,
-        {"messages": [{"role": "assistant", "content": "结果"}]},
-        occurred_at=datetime(2026, 7, 30, tzinfo=UTC),
-        after_turn=True,
-    )
-
-    with pytest.raises(TimeoutError, match="response lost"):
-        asyncio.run(hooks.after_turn(prepared))
-
-    assert session.next_sequence == 0
-    result = asyncio.run(hooks.after_turn(PreparedAgentTurn.from_dict(prepared.to_dict())))
-    assert result.session.next_sequence == 2
-    first, second = memory.remember.await_args_list
-    assert first.kwargs == second.kwargs
-
-
-def test_sdk_conversation_ref_rejects_datetime_as_started_on() -> None:
-    with pytest.raises(TypeError, match="calendar date"):
-        ConversationRef("conversation-invalid-date", datetime(2026, 7, 30, tzinfo=UTC))
+    assert result.result.after_turn is True
+    assert result.result.next_sequence == 2
 
 
 def test_job_queries_apply_reverse_pagination_filtering_and_safe_failure_details() -> None:
@@ -245,18 +142,18 @@ def test_job_queries_apply_reverse_pagination_filtering_and_safe_failure_details
         )
     )
 
-    assert [item["memory_sequence"] for item in first_page["jobs"]] == [3, 2]
-    assert first_page["next_before_sequence"] == 2
-    assert [item["memory_sequence"] for item in queued["jobs"]] == [2]
-    assert [item["memory_sequence"] for item in older["jobs"]] == [1]
-    assert blocked["job"]["memory_sequence"] == 3  # type: ignore[index]
-    assert status["blocking"] is True
-    assert status["manual_action_required"] is True
-    failure = status["last_failure"]
-    assert isinstance(failure, dict)
-    assert "private-token" not in failure["message"]
-    assert "/Users/alice" not in failure["message"]
-    assert "[PATH]" in failure["message"]
+    assert [item.memory_sequence for item in first_page.jobs] == [3, 2]
+    assert first_page.next_before_sequence == 2
+    assert [item.memory_sequence for item in queued.jobs] == [2]
+    assert [item.memory_sequence for item in older.jobs] == [1]
+    assert blocked.job is not None and blocked.job.memory_sequence == 3
+    assert status.blocking is True
+    assert status.manual_action_required is True
+    failure = status.last_failure
+    assert failure is not None
+    assert "private-token" not in failure.message
+    assert "/Users/alice" not in failure.message
+    assert "[PATH]" in failure.message
 
 
 def test_retry_requires_exact_current_blocker_version_and_returns_reopened_job() -> None:
@@ -288,9 +185,9 @@ def test_retry_requires_exact_current_blocker_version_and_returns_reopened_job()
         )
     )
 
-    assert result["previous"]["job_status"] == "failed"  # type: ignore[index]
-    assert result["job"]["job_status"] == "queued"  # type: ignore[index]
-    assert result["worker_restarted"] is True
+    assert result.previous.job_status == "failed"
+    assert result.job.job_status == "queued"
+    assert result.worker_restarted is True
     runtime.retry_failed_memory_job.assert_awaited_once_with(failed)
 
 
@@ -309,7 +206,7 @@ def test_remember_reports_the_effective_true_override() -> None:
         )
     )
 
-    assert result["after_turn"] is True
+    assert result.result.after_turn is True
 
 
 def test_remember_reports_the_effective_false_override() -> None:
@@ -327,7 +224,7 @@ def test_remember_reports_the_effective_false_override() -> None:
         )
     )
 
-    assert result["after_turn"] is False
+    assert result.result.after_turn is False
 
 
 def test_public_job_failure_redacts_windows_and_unc_absolute_paths() -> None:
@@ -341,3 +238,83 @@ def test_public_job_failure_redacts_windows_and_unc_absolute_paths() -> None:
     assert "server" not in unc
     assert "Alice Smith" not in extended
     assert all("[PATH]" in value for value in (windows, slash_windows, unc, extended))
+
+
+@pytest.mark.parametrize(("ready", "status_code"), [(True, 200), (False, 503)])
+def test_readiness_maps_an_unready_runtime_to_503(ready: bool, status_code: int) -> None:
+    from habitus.runtime import RuntimeHealthCheck, RuntimeHealthReport, RuntimeHealthStatus
+
+    status = RuntimeHealthStatus.HEALTHY if ready else RuntimeHealthStatus.UNHEALTHY
+    runtime = object.__new__(Runtime)
+    runtime.health = AsyncMock(  # type: ignore[method-assign]
+        return_value=RuntimeHealthReport(
+            status=status,
+            ready=ready,
+            checked_at=datetime(2026, 7, 30, tzinfo=UTC),
+            checks=(RuntimeHealthCheck("runtime", status, "ready" if ready else "not started"),),
+            recall_ready=ready,
+        )
+    )
+
+    code, payload = asyncio.run(RuntimeHTTPHandlers(runtime).readiness())
+
+    assert code == status_code
+    assert payload.ready is ready
+
+
+def test_job_list_gives_no_next_page_cursor_when_the_page_holds_every_match() -> None:
+    jobs = (_job(1, MemoryJobStatus.COMMITTED), _job(2, MemoryJobStatus.QUEUED))
+    handler = RuntimeHTTPHandlers(_job_runtime(jobs, blocked=None))
+
+    for limit in (2, 10):
+        page = asyncio.run(
+            handler.list_jobs(conversation_id="conversation-handler", started_on=date(2026, 7, 30), limit=limit)
+        )
+        assert [item.memory_sequence for item in page.jobs] == [2, 1]
+        assert page.next_before_sequence is None
+
+
+def test_retry_refuses_a_failed_job_that_is_not_the_current_blocker() -> None:
+    older = _job(2, MemoryJobStatus.FAILED, updated_offset=2)
+    blocker = _job(3, MemoryJobStatus.FAILED, updated_offset=3)
+    runtime = _job_runtime((older, blocker), blocked=blocker)
+    runtime.retry_failed_memory_job = AsyncMock()  # type: ignore[method-assign]
+    handler = RuntimeHTTPHandlers(runtime)
+
+    with pytest.raises(HTTPMemoryJobConflictError, match="not the current blocking failed job"):
+        asyncio.run(
+            handler.retry_failed_job(
+                2,
+                conversation_id="conversation-handler",
+                started_on=date(2026, 7, 30),
+                expected_version=handler._job_version(older),
+            )
+        )
+    runtime.retry_failed_memory_job.assert_not_awaited()
+
+
+def test_job_version_changes_when_only_the_last_error_changes() -> None:
+    """只差等长的错误文本也算不同版本（版本看错误内容，不只看长度）。"""
+
+    failed = _job(3, MemoryJobStatus.FAILED)
+    assert failed.last_error is not None
+
+    assert RuntimeHTTPHandlers._job_version(failed) != RuntimeHTTPHandlers._job_version(
+        replace(failed, last_error=failed.last_error.replace("private", "PRIVATE"))
+    )
+
+
+def test_public_job_failure_is_truncated_to_500_characters() -> None:
+    message = RuntimeHTTPHandlers._sanitize_failure("x" * 600)
+
+    assert message == "x" * 500 + "...[truncated]"
+    assert RuntimeHTTPHandlers._sanitize_failure("x" * 500) == "x" * 500
+
+
+def test_recall_request_refuses_duplicate_kinds() -> None:
+    assert RecallRequest.model_validate({"query": "q", "kinds": ["event", "tool"]}).kinds == (
+        MemoryKind.EVENT,
+        MemoryKind.TOOL,
+    )
+    with pytest.raises(ValidationError, match="kinds must not contain duplicates"):
+        RecallRequest.model_validate({"query": "q", "kinds": ["event", "event"]})

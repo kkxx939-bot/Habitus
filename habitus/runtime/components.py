@@ -19,8 +19,8 @@ from habitus.conversation import (
     ConversationSourceReleaser,
     ConversationSourceStore,
 )
-from habitus.foundation.observability import MetricRegistry, Observer
-from habitus.infrastructure.observability import ManagedObservability
+from habitus.foundation.observability import Observer
+from habitus.infrastructure.observability import ManagedObservability, MetricRegistry
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.vector import VectorStoreFactory
 from habitus.memory.browse import MemoryBrowser

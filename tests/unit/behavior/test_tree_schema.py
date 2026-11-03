@@ -88,7 +88,7 @@ def test_directory_factories_map_to_new_prefixes() -> None:
 
 def test_occurrence_schema_declares_all_faces() -> None:
     schema = REGISTRY.get(BehaviorKind.OCCURRENCE)
-    names = {role: [f.name for f in schema.fields_of(role)] for role in BehaviorFieldRole}
+    names = {role: [f.name for f in schema.fields if f.role is role] for role in BehaviorFieldRole}
     assert names[BehaviorFieldRole.ADDRESS] == ["occurred_on", "name", "started_at"]
     assert names[BehaviorFieldRole.NUMERIC] == [
         "kind_token",
@@ -337,19 +337,11 @@ def test_kinds_registry_lives_in_the_address_space() -> None:
     parsed = BehaviorURI.parse("behavior://kinds.md")
     assert parsed == uri
     assert parsed.node_type is BehaviorURINodeType.REGISTRY
-    assert parsed.containing_directory == BehaviorDirectory.root()
     with pytest.raises(BehaviorURIError):
         parsed.to_address()
     # 日期目录里的 kinds.md 不是登记表也不是合法文档地址
     with pytest.raises(BehaviorURIError):
         BehaviorURI("behavior://occurrences/2026/08/16/kinds.md")
-
-
-def test_registry_path_resolves_to_the_tree_root_file(tmp_path) -> None:
-    from habitus.behavior import BehaviorTree
-
-    tree = BehaviorTree(tmp_path / "behavior-tree")
-    assert tree.path_for_uri("behavior://kinds.md") == tree.root / "kinds.md"
 
 
 def test_pagination_cursor_order_matches_enumeration_order(tmp_path) -> None:
@@ -360,8 +352,9 @@ def test_pagination_cursor_order_matches_enumeration_order(tmp_path) -> None:
     from datetime import timedelta as _td
     from datetime import timezone as _tz
 
-    from habitus.behavior import BehaviorDocumentWriter, BehaviorTree
-    from habitus.infrastructure.store.locks import ProcessLocalLockStore
+    from habitus.behavior import BehaviorTree
+    from habitus.behavior.tree.writer import BehaviorDocumentWriter
+    from tests.lock_store import ProcessLocalLockStore
 
     cst = _tz(_td(hours=8))
     tree = BehaviorTree(tmp_path / "behavior-tree")
@@ -404,8 +397,9 @@ def test_paging_resumes_from_the_cursor_day_instead_of_walking_from_the_start(tm
     from datetime import timedelta as _td
     from datetime import timezone as _tz
 
-    from habitus.behavior import BehaviorDocumentWriter, BehaviorTree
-    from habitus.infrastructure.store.locks import ProcessLocalLockStore
+    from habitus.behavior import BehaviorTree
+    from habitus.behavior.tree.writer import BehaviorDocumentWriter
+    from tests.lock_store import ProcessLocalLockStore
 
     cst = _tz(_td(hours=8))
     tree = BehaviorTree(tmp_path / "behavior-tree")

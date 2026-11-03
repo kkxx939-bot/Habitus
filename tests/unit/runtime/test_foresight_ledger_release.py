@@ -100,3 +100,26 @@ def test_omissions_keep_only_the_recent_days_and_unit_levels_keep_the_latest_and
     latest = store.unit_level_of("s-k0002")
     assert latest is not None and latest.at == now - timedelta(days=10)
     assert replace(latest, level=0) == latest
+
+
+def test_an_unreadable_level_file_is_counted_and_left_while_the_rest_are_trimmed(tmp_path) -> None:
+    """段 6 Q17：账的级与单元的档同一个修剪（原来两份逐行相同）；读不出来的档文件原来永不删、也不报——现在计入观测，
+    不删（不知道它是哪一刻的），别的照常修剪。"""
+
+    from habitus.foresight.ledger import AccountLevel
+
+    store = seeded(tmp_path)
+    now = datetime(2027, 3, 1, tzinfo=CST)
+    account = "s-k0002\n事件\nrel"
+    for days_ago, level in ((150, 1), (100, 0), (90, 1), (10, 0)):
+        store.record_unit_level(UnitLevel("s-k0002", now - timedelta(days=days_ago), level))
+        store.record_level(AccountLevel(account, now - timedelta(days=days_ago), level))
+    bad_unit = store._unit_dir("s-k0002") / "levels" / "20260101T000000000000.json"
+    bad_account = store._account_dir(account) / "levels" / "20260101T000000000000.json"
+    for bad in (bad_unit, bad_account):
+        bad.write_text("{", encoding="utf-8")
+    store.take_unreadable()
+    assert store.trim_unit_levels("s-k0002", before=now - timedelta(days=60)) == 2
+    assert store.trim_levels(account, before=now - timedelta(days=60)) == 2
+    assert set(store.take_unreadable()) == {str(bad_unit), str(bad_account)}
+    assert bad_unit.exists() and bad_account.exists()

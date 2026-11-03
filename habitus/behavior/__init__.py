@@ -7,14 +7,6 @@ from habitus.behavior.document import (
     BehaviorDocumentIntegrityError,
     BehaviorDocumentLimitError,
     BehaviorDocumentMetadata,
-    BehaviorLinkType,
-    BehaviorStoredLink,
-)
-from habitus.behavior.editor import (
-    BehaviorDocumentWriter,
-    BehaviorPublishConflictError,
-    BehaviorReadBackError,
-    BehaviorWriteConfig,
 )
 from habitus.behavior.model import BehaviorAddress, BehaviorDirectory, BehaviorKind, BehaviorLevel
 from habitus.behavior.schema import BehaviorFieldRole, BehaviorSchemaError, BehaviorSchemaRegistry
@@ -35,16 +27,11 @@ __all__ = [
     "BehaviorDocumentIntegrityError",
     "BehaviorDocumentLimitError",
     "BehaviorDocumentMetadata",
-    "BehaviorDocumentWriter",
     "BehaviorFieldRole",
     "BehaviorKind",
     "BehaviorLevel",
-    "BehaviorLinkType",
-    "BehaviorPublishConflictError",
-    "BehaviorReadBackError",
     "BehaviorSchemaError",
     "BehaviorSchemaRegistry",
-    "BehaviorStoredLink",
     "BehaviorTree",
     "BehaviorTreeConfig",
     "BehaviorTreeConflictError",
@@ -52,5 +39,4 @@ __all__ = [
     "BehaviorURI",
     "BehaviorURIError",
     "BehaviorURINodeType",
-    "BehaviorWriteConfig",
 ]

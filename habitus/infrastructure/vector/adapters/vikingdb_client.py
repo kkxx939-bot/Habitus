@@ -160,6 +160,7 @@ class VikingDBRestClient:
             if 200 <= status < 300 and error is None:
                 return decoded
             code, message = error or ("HTTPError", payload[:4000].decode("utf-8", errors="replace"))
+            message = self._without_credentials(message)
             normalized_code = code.casefold()
             if status == 404 or "notfound" in normalized_code or "not_found" in normalized_code:
                 raise VikingDBNotFoundError(f"vikingdb resource does not exist: {message}")
@@ -285,6 +286,14 @@ class VikingDBRestClient:
             self.route.retry_base_delay_seconds * (2**attempt),
             self.route.retry_max_delay_seconds,
         )
+
+    def _without_credentials(self, message: str) -> str:
+        """回包里的报错可能原样带回被拒的凭据（401 的 ``security token[AK]``）：按值换掉，不进异常、日志与启动失败那一行。"""
+
+        for value in sorted(set(self._credentials.values()), key=len, reverse=True):
+            if len(value) >= 4:
+                message = message.replace(value, "[REDACTED]")
+        return message
 
     def _validate_credentials(self) -> None:
         invalid = sorted(

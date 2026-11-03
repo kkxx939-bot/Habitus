@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.runtime import build_runtime
 from habitus.runtime.components import (
     RuntimeComponents,
@@ -19,6 +18,7 @@ from habitus.runtime.components import (
     RuntimeWorkflow,
 )
 from tests.integration.test_runtime_assembly import runtime_config, runtime_dependencies
+from tests.lock_store import ProcessLocalLockStore
 
 INVALID_OBJECTS = (None, "value", 0, 1, True, False, (), [], {}, object())
 

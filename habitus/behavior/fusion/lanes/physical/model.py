@@ -16,6 +16,7 @@ from enum import Enum
 
 from habitus.behavior.fusion.errors import BehaviorFusionError
 from habitus.behavior.fusion.lanes.physical.config import PhysicalLaneConfig
+from habitus.behavior.model import readable_text
 
 SOURCE_PREFIX = "physical/"
 _DELIVERY_FIELDS = frozenset({"source", "device", "delivery_id", "sent_at", "segments", "coverage"})
@@ -118,6 +119,9 @@ def _segment(value: object, index: int, limits: PhysicalLaneConfig) -> PhysicalS
     facts = tuple(_text(item, f"{label}.facts") for item in _items(body.get("facts", ()), f"{label}.facts"))
     if len(facts) > limits.max_facts or any(len(item) > limits.max_fact_chars for item in facts):
         raise PhysicalDeliveryError(f"{label}.facts exceeds the configured limit")
+    # 与行为树 schema 同一条文本规则（事实写进摘要）：这里收下、树上拒收的话，这一段永远落不了树
+    if any(not readable_text(item) for item in facts):
+        raise PhysicalDeliveryError(f"{label}.facts must be plain text without control or zero-width characters")
     return PhysicalSegment(
         segment_id=_identifier(body["id"], f"{label}.id", limits.max_segment_id_chars),
         behavior=_text(body["behavior"], f"{label}.behavior"),
@@ -155,7 +159,11 @@ def _require_ordered(segments: Sequence[PhysicalSegment]) -> None:
     """行为段按时间排好、互不重叠：同一时刻只有一个行为。编号不重复。"""
 
     for before, after in zip(segments, segments[1:], strict=False):
-        if after.started_at < before.ended_at:
+        # 起止完全相同也算重叠（两段同一刻的零长段）：与跨交付对已收段的判法同一口径
+        if after.started_at < before.ended_at or (after.started_at, after.ended_at) == (
+            before.started_at,
+            before.ended_at,
+        ):
             raise PhysicalDeliveryError("segments must be ordered and must not overlap")
     if len({item.segment_id for item in segments}) != len(segments):
         raise PhysicalDeliveryError("segment ids must be unique within a delivery")

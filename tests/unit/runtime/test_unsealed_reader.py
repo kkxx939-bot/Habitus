@@ -13,9 +13,9 @@ from habitus.behavior.kinds.changes import AddClass, ChangeReason, VersionRecord
 from habitus.behavior.kinds.config import BehaviorKindConfig
 from habitus.behavior.reduction.ledger import BehaviorReductionEntry, BehaviorReductionLedger
 from habitus.behavior.tree import BehaviorTree
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.model_client import ModelQuotaError, ModelTransportError
 from habitus.runtime.unsealed import UnsealedFromJudgements
+from tests.lock_store import ProcessLocalLockStore
 from tests.unit.behavior.kinds_fixtures import (
     NOW,
     NameMatchingProvider,
@@ -89,18 +89,6 @@ def test_pending_chains_become_rows_and_consumed_ones_do_not(tmp_path) -> None:
     ]
 
 
-def test_continues_links_merge_into_one_row_with_the_chain_head_start_and_latest_sight(tmp_path) -> None:
-    """并链按归约自己的算法：起点是链头，最后看到是视图里最晚的；不是两行。"""
-
-    unsealed, judgements, _ledger, _provider = reader(tmp_path)
-    judgements.put_payload(record("first", behavior="打球", start=0, end=600))
-    judgements.put_payload(
-        record("second", behavior="打球", start=1200, end=1800, relations=(("continues", record_id("first")),))
-    )
-    (row,) = unsealed.rows(since=at(-3600), until=at(3600))
-    assert (row.name, row.started_at, row.last_observed_at) == ("打球", at(0), at(1800))
-
-
 def test_unreadable_judgements_are_gap_rows_and_the_window_is_by_overlap(tmp_path) -> None:
     unsealed, judgements, _ledger, _provider = reader(tmp_path)
     judgements.put_payload(record("blur", behavior=None, start=0, end=300))
@@ -138,21 +126,19 @@ def test_the_reader_insists_on_aware_bounds_and_the_right_stores(tmp_path) -> No
         UnsealedFromJudgements(BehaviorJudgementStore(tmp_path), BehaviorReductionLedger(tmp_path), object())  # type: ignore[arg-type]
 
 
-def test_each_chain_is_classified_once_and_again_only_when_it_grows(tmp_path) -> None:
-    """按链缓存：同一条链下一拍不再问模型；续上了新的一段（链变了）才重归。封口的链从缓存里清掉。"""
+def test_each_judgement_is_classified_once(tmp_path) -> None:
+    """按节点身份缓存：同一条下一拍不再问模型；新来一条才问。封口的从缓存里清掉。"""
 
     unsealed, judgements, _ledger, provider = reader(tmp_path)
     judgements.put_payload(record("first", behavior="打球", start=0, end=600))
     prepared(unsealed, at(700))
     prepared(unsealed, at(800))
     assert provider.calls == 1
-    judgements.put_payload(
-        record("second", behavior="打球", start=1200, end=1800, relations=(("continues", record_id("first")),))
-    )
+    judgements.put_payload(record("second", behavior="打球", start=1200, end=1800))
     prepared(unsealed, at(1900))
     assert provider.calls == 2
-    (row,) = unsealed.rows(since=at(-3600), until=at(3600))
-    assert row.kind_token == PLAY
+    rows = unsealed.rows(since=at(-3600), until=at(3600))
+    assert [(row.started_at, row.kind_token) for row in rows] == [(at(0), PLAY), (at(1200), PLAY)]
 
 
 def test_unclassified_until_prepared_and_not_events_stay_out(tmp_path) -> None:
@@ -228,3 +214,17 @@ def test_a_new_vocabulary_version_reclassifies_the_open_chains(tmp_path) -> None
     )
     prepared(unsealed, at(800))
     assert provider.calls == 2
+
+
+def test_on_the_nightly_line_an_unusable_model_stops_the_night_instead_of_being_swallowed(tmp_path) -> None:
+    """review-94b 低 4：日子预期那一段（夜里那条线上）归未封口判断时碰到模型整个用不了，原样抛出——线据它停下这一晚、报"模型调不通"
+    （裁定 94 第 8 条），不拿没归上的建预期；白天那一拍照旧留着下一拍再试。撤回 ``in_line`` 那一处这里就红。"""
+
+    import pytest
+
+    for error in (ModelQuotaError("quota exhausted"), ModelTransportError("down")):
+        unsealed, judgements, ledger, _provider = reader(tmp_path / type(error).__name__, provider=ScriptedProvider([error]))
+        judgements.put_payload(record("play", behavior="打球", start=0, end=600))
+        in_line = UnsealedFromJudgements(judgements, ledger, unsealed.stamping, in_line=True)
+        with pytest.raises(type(error)):
+            prepared(in_line, at(700))

@@ -9,7 +9,7 @@
 
 **截止日是类型的一部分**：第 N 晚的序列 ``cutoff = N``，只含已封口、早于第 N 天的记录。行为树的日期是每条记录
 **自己的本地日期**（``occurred_on == started_at`` 的本地日），所以"第 N 天开始"那一刻也按每条记录自己的偏移算
-（``boundary_for``）。跨过这一刻的窗口没看全，消费方记删失；跨过这一刻的观测空白截到这一刻。
+（``boundary_for``）。跨过这一刻的窗口没看全，消费方记删失；观测空白按本地日切开，只留截止日之前那几天的段。
 
 ``until(day)`` 把一份序列截到更早的截止日；它与"直接按那个截止日读一遍"必须逐值相等（CI 钉住）——回放、回测
 因此只读一次行为树，再一天一天往前截。
@@ -17,12 +17,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from enum import Enum
 
-from habitus.foundation.intervals import starts_within
+from habitus.foundation.intervals import standing_pieces
 
 
 class SeriesError(ValueError):
@@ -30,32 +30,49 @@ class SeriesError(ValueError):
 
 
 class GapKind(str, Enum):
-    """观测空白的两种：没读懂（在看、但没看明白）与未观测（没在看）。"""
+    """观测空白的三种：没读懂（在看、模型读了给不出结论）、错误（在看、系统出了问题没读成，裁定 94 第 3 条）与未观测（没在看）。"""
 
     UNREADABLE = "没读懂"
+    ERROR = "错误"
     UNOBSERVED = "未观测"
 
     @property
     def watched(self) -> bool:
-        """这段空白期间我们在不在看。两种都进曝光扣减，证伪能力不同（``disproves``）。"""
+        """这段空白期间我们在不在看。三种都进曝光扣减，证伪能力不同（``standing_parts``）：「错误」与「没读懂」一样可被作废。"""
 
-        return self is GapKind.UNREADABLE
+        return self is not GapKind.UNOBSERVED
 
 
-def disproves(kind: GapKind, started_at: datetime, ended_at: datetime, starts: Sequence[datetime]) -> bool:
-    """这段空白是不是被证伪了（证伪了就整段作废）。**一条记录一种读法的落点**：序列读空白时用它，预测层的证据卡按天读树时也用它，
-    不各写一遍（第四轮评审 E2：当时旧预测树、证据卡作废，关系时间线不作废，"同一条链"丢掉的恰好是后果出现的那一次）。
+def standing_parts(gap: SeriesGap, starts_on: Callable[[date], Sequence[datetime]]) -> tuple[SeriesGap, ...]:
+    """一段观测空白读进序列的样子：按本地日切开，「没读懂」的每一天那段被那一天读出的行为起点证伪就作废
+    （规则与理由在 ``foundation.intervals.standing_pieces``，按天读树的视图、行为层的当日叙述用的是同一条）。
 
-    - **在看（「没读懂」）**：它断言的正是"这段读不出行为"。这段里若真读出了一条行为的起点（叫不出名的「待定」也算：那一刻确实
-      看懂了在做一件事），这句断言就被证伪了——**整段作废**。作废是唯一不需要编造宽度的规则：只挖掉"那一瞬"是零测度、等于没挖；
-      挖"可见跨度"要最后所见，而瞬时行为的跨度仍然是零。代价：作废之后那段里可能还有没读出来的行为，会被当成"没有"
-      （真实数据上很小：DAY1 的 21 段空白全是「没读懂」、非零宽的 4 段共 137.8 秒，被证伪的 1 段宽 21.9 秒）。
-    - **没在看（「未观测」）**：里面不可能读出行为。真出现了，是上游把"没在看"与"看见了"同时写进了树——这里**不消解**，
-      让消费方（``temporal`` 算观测覆盖时）以明确的矛盾报出来。
+    - **在看（「没读懂」）**：它断言的正是"这段读不出行为"。那一天那段里若真读出了一条行为的起点（叫不出名的「待定」也算：
+      那一刻确实看懂了在做一件事），这句断言就被证伪了，那一段作废。代价：作废之后那段里可能还有没读出来的行为，会被当成
+      "没有"（真实数据上很小：DAY1 的 21 段空白全是「没读懂」、非零宽的 4 段共 137.8 秒，被证伪的 1 段宽 21.9 秒）。
+    - **没在看（「未观测」）**：里面不可能读出行为。真出现了，是上游把"没在看"与"看见了"同时写进了树——这里不消解：
+      那段照样算没在看（覆盖扣掉），那条记录照样进序列；目前没有哪一处把这种矛盾单独报出来。
 
-    ``starts`` 是这段空白可能盖住的那些记录的开始时刻（升序）。"""
+    ``starts_on(某一天)`` 给那一天算数的记录的开始时刻（升序）。"""
 
-    return kind.watched and starts_within(started_at, ended_at, starts)
+    return tuple(
+        SeriesGap(uri=gap.uri, started_at=begin, ended_at=end, kind=gap.kind)
+        for begin, end in standing_pieces(gap.started_at, gap.ended_at, voidable=gap.watched, starts_on=starts_on)
+    )
+
+
+#: 哪几条 lane 一整天一条记录都没有，那天就算没在看（裁定 89 第 2 条）。会话 lane 只在有会话时才有东西进来，"那天没开会话"
+#: 不会被上游报成空白：一整天一条都没有（连「非事件」、撞车重复都没有），对预测账就等同于上游报了全天「未观测」——中性、
+#: 不算机会，跨这天的间隔按漏看算；与语义树"人不在场"（``scene.relations.timeline``：那天没有记录就不在场）同口径。
+#: 物理 lane 不在里面：它的上游没在看时自己报「未观测」，空着的一天照旧算在看（那天就是没做）。
+#: 取值是 ``behavior.kinds.Lane`` 的 value（本模块零依赖、不 import 它；架构测试钉住两边一致）。
+SILENT_DAY_UNWATCHED_LANES = frozenset({"session"})
+
+
+def silent_day_unwatched(lane: str) -> bool:
+    """这条 lane 一整天没有记录是不是就算那天没在看（``SILENT_DAY_UNWATCHED_LANES``）。"""
+
+    return lane in SILENT_DAY_UNWATCHED_LANES
 
 
 class SkipReason(str, Enum):
@@ -69,7 +86,7 @@ class SkipReason(str, Enum):
 
 @dataclass(frozen=True)
 class SkippedRecord:
-    """没进序列的一条，只作可观测量（哪天、为什么），不参与任何计算。"""
+    """没进序列的一条，只作可观测量（哪天、为什么），不参与任何计算；只说明那天有记录（``EventSeries.active_days``）。"""
 
     uri: str
     day: date
@@ -151,15 +168,13 @@ class EventSeries:
     """第 ``cutoff`` 晚的事件序列。
 
     - ``records`` 按（开始时刻, uri）升序，全部早于截止日；
-    - ``gaps`` 按（开始时刻, uri）升序，结束不晚于各自的截止时刻（跨过的已截断）；
-    - ``concurrent`` 是行为树声明的并行对（``concurrent_with``），两端都在 ``records`` 里，按 uri 排好；
+    - ``gaps`` 按（开始时刻, uri）升序，每段落在一个本地日里（跨午夜的空白按天切成几段、同一个 uri），只有截止日之前的日子；
     - ``skipped`` 是没进序列的记录（重复、非事件），只作可观测量，按（日, uri）排好。
     """
 
     cutoff: date
     records: tuple[SeriesRecord, ...] = ()
     gaps: tuple[SeriesGap, ...] = ()
-    concurrent: tuple[tuple[str, str], ...] = ()
     skipped: tuple[SkippedRecord, ...] = ()
 
     def __post_init__(self) -> None:
@@ -177,11 +192,6 @@ class EventSeries:
         uris = {record.uri for record in records}
         if len(uris) != len(records):
             raise SeriesError("a record appears twice")
-        pairs = tuple(self.concurrent)
-        if any(left >= right or left not in uris or right not in uris for left, right in pairs):
-            raise SeriesError("concurrent pairs are ordered uri pairs of records in the series")
-        if list(pairs) != sorted(set(pairs)):
-            raise SeriesError("concurrent pairs must be sorted and distinct")
         skipped = tuple(self.skipped)
         if any(item.day >= self.cutoff for item in skipped):
             raise SeriesError("a series only reports skips from before its cutoff")
@@ -190,7 +200,6 @@ class EventSeries:
         object.__setattr__(self, "skipped", skipped)
         object.__setattr__(self, "records", records)
         object.__setattr__(self, "gaps", gaps)
-        object.__setattr__(self, "concurrent", pairs)
 
     @property
     def last_day(self) -> date:
@@ -211,6 +220,11 @@ class EventSeries:
     def on(self, day: date) -> tuple[SeriesRecord, ...]:
         return tuple(record for record in self.records if record.day == day)
 
+    def active_days(self) -> frozenset[date]:
+        """有记录的日子：进了序列的、没进的（「非事件」、撞车重复）都算——那天有过会话（``silent_day_unwatched``）。"""
+
+        return frozenset(record.day for record in self.records) | frozenset(item.day for item in self.skipped)
+
     def skipped_on(self, day: date, reason: SkipReason) -> int:
         return sum(1 for item in self.skipped if item.day == day and item.reason is reason)
 
@@ -218,7 +232,7 @@ class EventSeries:
         return sum(1 for item in self.skipped if item.reason is reason)
 
     def gaps_on(self, day: date) -> tuple[SeriesGap, ...]:
-        """开始在这一天的空白（行为树按开始日存空白）。"""
+        """落在这一天的空白段（跨午夜的空白前一天开始的那段，后一天那半段也在这里）。"""
 
         return tuple(gap for gap in self.gaps if gap.started_at.date() == day)
 
@@ -227,28 +241,13 @@ class EventSeries:
 
         if cutoff > self.cutoff:
             raise SeriesError("a series cannot be extended past its own cutoff")
-        earlier = EventSeries(cutoff=cutoff)
-        records = tuple(record for record in self.records if record.day < cutoff)
-        kept = {record.uri for record in records}
+        # 空白已按天切开、每天那段只由那一天的记录判（``standing_parts``）：留下截止日之前那几天的段，就是直接读的样子
         return EventSeries(
             cutoff=cutoff,
-            records=records,
-            gaps=tuple(
-                clip_gap(gap, earlier.boundary_for(gap.started_at))
-                for gap in self.gaps
-                if gap.started_at.date() < cutoff
-            ),
-            concurrent=tuple(pair for pair in self.concurrent if pair[0] in kept and pair[1] in kept),
+            records=tuple(record for record in self.records if record.day < cutoff),
+            gaps=tuple(gap for gap in self.gaps if gap.started_at.date() < cutoff),
             skipped=tuple(item for item in self.skipped if item.day < cutoff),
         )
-
-
-def clip_gap(gap: SeriesGap, boundary: datetime) -> SeriesGap:
-    """跨过截止时刻的空白截到那一刻（读行为树与 ``until`` 共用这一条）。"""
-
-    if gap.ended_at <= boundary:
-        return gap
-    return SeriesGap(uri=gap.uri, started_at=gap.started_at, ended_at=max(gap.started_at, boundary), kind=gap.kind)
 
 
 def _order(item: SeriesRecord | SeriesGap) -> tuple[datetime, str]:
@@ -262,7 +261,8 @@ __all__ = [
     "SeriesGap",
     "SeriesRecord",
     "SkipReason",
+    "SILENT_DAY_UNWATCHED_LANES",
     "SkippedRecord",
-    "clip_gap",
-    "disproves",
+    "silent_day_unwatched",
+    "standing_parts",
 ]

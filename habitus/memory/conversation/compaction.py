@@ -20,7 +20,6 @@ from habitus.infrastructure.store.filesystem import (
     durable_unlink,
     read_regular_bytes,
 )
-from habitus.memory.compaction.field_ops import SemanticFieldOperationBatch
 from habitus.memory.conversation.field_validation import summary_content_from_operations
 from habitus.memory.conversation.layout import ConversationAddress, ConversationLayout
 from habitus.memory.conversation.messages import ConversationMessageJournal
@@ -28,6 +27,7 @@ from habitus.memory.conversation.summary import (
     ConversationSummaryConfig,
     ConversationSummaryStore,
 )
+from habitus.memory.field_ops import SemanticFieldOperationBatch
 from habitus.model_client import ChatCallContext, ChatMessage, ChatRequest, StructuredChatClient
 from habitus.pre.conversation import (
     ConversationRangeSummary,

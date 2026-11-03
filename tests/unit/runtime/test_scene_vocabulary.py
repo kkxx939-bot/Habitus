@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import signal
 from dataclasses import replace
 from pathlib import Path
 
@@ -23,7 +24,10 @@ from habitus.behavior.kinds.reader import VocabularyReader
 from habitus.behavior.kinds.store import BehaviorKindStore
 from habitus.runtime.scene_vocabulary import VocabularyCatalog
 from habitus.scene.concepts.catalog import ClassCatalog, MovedOccurrence
+from habitus.scene.concepts.model import ConceptSet
+from habitus.scene.concepts.sync import base_concept, plan_sync
 from tests.unit.behavior.kinds_fixtures import EDIT, NOW, RESEARCH, edit_class, research_class
+from tests.unit.scene.concept_fixtures import group
 
 PROMPTS = ClassId(Lane.SESSION, 3)
 URI = "behavior://occurrences/2026/10/03/调整提示词@2026-10-03T10:00:00+08:00.md"
@@ -96,3 +100,39 @@ def test_no_changes_keeps_the_current_version(tmp_path: Path) -> None:
     empty = VocabularyCatalog(VocabularyReader(BehaviorKindStore(tmp_path / "empty")))
     blank = empty.changes_since(0)
     assert blank.version == 0 and blank.moved == ()
+
+
+def test_a_class_split_off_and_merged_away_between_two_syncs_regroups_in_finite_time(tmp_path: Path) -> None:
+    """真实词表历史：v2 从打球拆出打羽毛球、v3 打羽毛球并进跑步；语义树上次停在 v1，汇总概念「运动」（打球 + 跑步）
+    按 ``changes_since(1)`` 改写成员要在有限步里停下（拆出又并掉的类不留下）。"""
+
+    store = BehaviorKindStore(tmp_path)
+    ball = BehaviorClass(ClassId(Lane.SESSION, 1), "打球", "球类", "该打球了", origin=ClassOrigin.PROMOTED)
+    run = BehaviorClass(ClassId(Lane.SESSION, 2), "跑步", "跑步", "该跑步了", origin=ClassOrigin.PROMOTED)
+    badminton = BehaviorClass(ClassId(Lane.SESSION, 3), "打羽毛球", "羽毛球", "该打羽毛球了", origin=ClassOrigin.PROMOTED)
+    store.append(VersionRecord(1, NOW, ChangeReason.NIGHTLY, (AddClass(ball), AddClass(run))), expected_version=0)
+    narrowed = replace(ball, criterion="球类（不含羽毛球）")
+    store.append(
+        VersionRecord(2, NOW, ChangeReason.REVISION, split_operations(narrowed, badminton)), expected_version=1
+    )
+    store.append(
+        VersionRecord(3, NOW, ChangeReason.REVISION, merge_operations(badminton.id, run.id)), expected_version=2
+    )
+    catalog = VocabularyCatalog(VocabularyReader(store))
+    changes = catalog.changes_since(1)
+    assert dict(changes.split_from) == {"s-k0003": "s-k0001"} and dict(changes.merged_into) == {"s-k0003": "s-k0002"}
+    classes = {item.id: item for item in catalog.classes()}
+    exercise = replace(group("运动", "以活动身体为目的的行为", "打球", "跑步"), classes=("s-k0001", "s-k0002"))
+    existing = ConceptSet([*(base_concept(item, now=NOW) for item in classes.values()), exercise])
+
+    def expire(*_: object) -> None:
+        raise TimeoutError("plan_sync did not return within 3 s")
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.alarm(3)
+    try:
+        plan = plan_sync(existing, tuple(classes.values()), changes, now=NOW)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    assert "运动" not in {item.name for item in plan.write}

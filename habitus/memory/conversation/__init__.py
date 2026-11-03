@@ -46,6 +46,7 @@ from habitus.memory.conversation.layout import (
 from habitus.memory.conversation.messages import (
     ConversationAppendResult,
     ConversationAppendStatus,
+    ConversationEditorTurn,
     ConversationJournalConfig,
     ConversationJournalError,
     ConversationJournalState,
@@ -96,6 +97,7 @@ __all__ = [
     "ConversationIngressReceiptStore",
     "ConversationIngressRequest",
     "ConversationIngressState",
+    "ConversationEditorTurn",
     "ConversationJournalConfig",
     "ConversationJournalError",
     "ConversationJournalState",

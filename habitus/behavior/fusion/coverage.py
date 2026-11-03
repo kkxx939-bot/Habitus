@@ -16,6 +16,11 @@
 前几轮照样认得出写过，不会重新描述一遍。到终态之后才删，排在会话源释放写水位（``conversation.source``）之后；"到终态"
 由组合根注入（``settled``，behavior 不 import conversation）。没带源的（物理 lane、旧记录）照旧按窗口过期。
 
+## 也记交付的位置
+
+每条记录还记着这份回执引用的交付（``envelope_ids``，即凭据信封的身份）。物理 lane 的信封身份只由"哪台设备的哪个单位"定，
+凭据释放之后，靠它仍认得出"这个位置上的单位写完过"——上游改判再送时内容变了、凭据身份跟着变，按观测认不出来。
+
 ## 读的缓存（26 号清单 6.2）
 
 记录只创建、不改写：按文件路径缓存解码好的内容，删的时候一起淘汰。
@@ -48,7 +53,7 @@ from habitus.infrastructure.store.filesystem import (
     read_regular_bytes,
 )
 
-COVERAGE_SCHEMA_VERSION = "behavior_fusion_coverage_v1"
+COVERAGE_SCHEMA_VERSION = "behavior_fusion_coverage_v2"
 _DAY_DIRECTORY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _RECORD_FILE = re.compile(r"^(?P<receipt_id>[0-9a-f]{64})\.json$")
 _MAX_RECORD_BYTES = 1_048_576
@@ -58,6 +63,7 @@ _MAX_ENTRIES = 100_000
 @dataclass(frozen=True)
 class _Record:
     observation_ids: frozenset[str]
+    envelope_ids: frozenset[str]
     source_refs: tuple[str, ...]
 
 
@@ -93,6 +99,7 @@ class BehaviorCoverageIndex:
             "receipt_id": receipt.receipt_id,
             "judged_at": receipt.judged_at.astimezone(UTC).isoformat(timespec="microseconds"),
             "observation_ids": sorted(set(receipt.observation_ids)),
+            "envelope_ids": sorted(set(receipt.source_refs)),
         }
         if sources:
             payload["source_refs"] = sorted(set(sources))
@@ -119,11 +126,25 @@ class BehaviorCoverageIndex:
         """
 
         covered: set[str] = set()
-        for day_path in self._day_directories(None):
-            for entry in self._entries(day_path):
-                if entry.is_file() and _RECORD_FILE.fullmatch(entry.name) is not None:
-                    covered.update(self._strict(day_path / entry.name).observation_ids)
+        for record in self._records():
+            covered.update(record.observation_ids)
         return frozenset(covered)
+
+    def covered_envelope_ids(self) -> frozenset[str]:
+        """盘上全部覆盖记录引用的交付（凭据信封）身份：这些位置上的单位写完过。与观测同一口径、不设窗口。"""
+
+        covered: set[str] = set()
+        for record in self._records():
+            covered.update(record.envelope_ids)
+        return frozenset(covered)
+
+    def _records(self) -> list[_Record]:
+        return [
+            self._strict(day_path / entry.name)
+            for day_path in self._day_directories(None)
+            for entry in self._entries(day_path)
+            if entry.is_file() and _RECORD_FILE.fullmatch(entry.name) is not None
+        ]
 
     # ── 过期 ─────────────────────────────────────────────────────────────────────────
 
@@ -186,10 +207,13 @@ class BehaviorCoverageIndex:
         ids = payload.get("observation_ids")
         if not isinstance(ids, list) or any(not isinstance(item, str) for item in ids):
             raise BehaviorFusionError(f"coverage record has invalid observation_ids: {path.name}")
+        envelopes = payload.get("envelope_ids")
+        if not isinstance(envelopes, list) or any(not isinstance(item, str) for item in envelopes):
+            raise BehaviorFusionError(f"coverage record has invalid envelope_ids: {path.name}")
         sources = payload.get("source_refs", [])
         if not isinstance(sources, list) or any(not isinstance(item, str) for item in sources):
             raise BehaviorFusionError(f"coverage record has invalid source_refs: {path.name}")
-        record = _Record(frozenset(ids), tuple(sources))
+        record = _Record(frozenset(ids), frozenset(envelopes), tuple(sources))
         self._cache[path] = record
         return record
 

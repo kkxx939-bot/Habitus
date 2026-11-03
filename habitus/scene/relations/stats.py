@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import random
+from bisect import bisect_right
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -91,11 +92,31 @@ def minimum_p(strata: Sequence[Stratum]) -> float:
     return min(1.0, 2.0 * min(all_up, all_down))
 
 
-def one_sided(strata: Sequence[Stratum], *, upward: bool, exact_limit: int) -> float:
-    """前向验证与维持检验用：只朝发现时的方向检。"""
+def minimum_one_sided(strata: Sequence[Stratum], *, upward: bool) -> float:
+    """朝一个方向检时能达到的最小单侧 p：全部有信息的层都阳性（朝上）或都阴性（朝下）的概率。
 
-    upper, lower = tails(strata, exact_limit=exact_limit)
-    return upper if upward else lower
+    只朝一个方向检的地方（同一条链只检"更多"、前向验证与维持检验朝发现时的方向）用这个：取两侧小的那侧，
+    朝上的检验在对照率高于一半时会被读成"够得着"，其实全中也到不了（例：6 层、每层对照率 0.75，全中 p = 0.178）。
+    """
+
+    informative = [item.null_probability for item in strata if 0.0 < item.null_probability < 1.0]
+    if not informative:
+        return 1.0
+    return math.prod(informative) if upward else math.prod(1.0 - p for p in informative)
+
+
+def assumed_extreme(strata: Sequence[Stratum], *, upward: bool) -> float:
+    """假设实验组全中（``upward``）或全不中时，这个结果在零假设下的概率：每层的零假设概率按**假设的**结果重算——全中时
+    (阳性 + 1) / (对照 + 1)，全不中时 1 − 阳性 / (对照 + 1)——不看实测的实验组。没有层时是 1。
+
+    调节条件的开测门用它估条件外那一边（裁定 60 第 9 条、L10.17、裁定 94 第 5 条：按"分得最干净"估，不看实测）。它与
+    ``minimum_p`` / ``minimum_one_sided`` 口径不同：那两个按实测的层算，是层内条件检验在已观测的阳性数下够得着的最小 p
+    （自己没来、对照也一个没有的层在那个检验里确实没信息）；条件外"当天从不出现 B"的层在这里假设全中时是有信息的。
+    """
+
+    if upward:
+        return math.prod((item.positives + 1) / (item.controls + 1) for item in strata)
+    return math.prod(1.0 - item.positives / (item.controls + 1) for item in strata)
 
 
 def interval(
@@ -117,10 +138,10 @@ def interval(
         if result.relative is not None:
             relatives.append(result.relative)
     tail = (1.0 - level) / 2.0
-    spread = (_quantile(differences, tail), _quantile(differences, 1.0 - tail))
+    spread = (quantile(differences, tail), quantile(differences, 1.0 - tail))
     if len(relatives) < rounds * 0.9:
         return spread, None  # 对照率常常是 0：相对差说不清
-    return spread, (_quantile(relatives, tail), _quantile(relatives, 1.0 - tail))
+    return spread, (quantile(relatives, tail), quantile(relatives, 1.0 - tail))
 
 
 def heterogeneity(strata: Sequence[Stratum]) -> float:
@@ -225,11 +246,14 @@ def tarone_bh(
     raw = {key: max(weights.get(key, 1.0), 1e-12) for key in keys}
     scale = len(keys) / sum(raw.values())
     weight = {key: raw[key] * scale for key in keys}
+    # c(K) = 门槛 q / K 以内的检验数随 K 不增：按比值排好序，每个 K 二分数一次（O(n log n)，不再每个 K 扫一遍全部键）
+    ratios = {key: minimum[key] / weight[key] for key in keys}
+    ordered = sorted(ratios.values())
     family: list[str] = keys
     for limit in range(1, len(keys) + 1):
-        members = [key for key in keys if minimum[key] / weight[key] <= q / limit]
-        if len(members) <= limit:
-            family = members
+        threshold = q / limit
+        if bisect_right(ordered, threshold) <= limit:
+            family = [key for key in keys if ratios[key] <= threshold]
             break
     if not family:
         return frozenset(), frozenset()
@@ -258,7 +282,9 @@ def _normal_sf(z: float) -> float:
     return 0.5 * math.erfc(z / math.sqrt(2.0))
 
 
-def _quantile(values: Sequence[float], fraction: float) -> float:
+def quantile(values: Sequence[float], fraction: float) -> float:
+    """线性插值的分位数（区间与重抽样共用这一个）。"""
+
     ordered = sorted(values)
     position = fraction * (len(ordered) - 1)
     low = math.floor(position)
@@ -307,14 +333,16 @@ def _gamma_q(a: float, x: float) -> float:
 
 __all__ = [
     "Effect",
+    "assumed_extreme",
     "effect",
     "heterogeneity",
     "interval",
     "leave_one_block_out",
+    "minimum_one_sided",
     "minimum_p",
-    "one_sided",
     "required_antecedents",
     "tails",
+    "quantile",
     "tarone_bh",
     "two_sided",
 ]

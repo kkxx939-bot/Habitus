@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
 
+from habitus.foundation.embedding import EmbeddingVector
 from habitus.infrastructure.store.contracts import LeaseGuard, PathLock
 from habitus.infrastructure.vector.contracts import RawVectorBackend
 from habitus.infrastructure.vector.model import (
@@ -22,7 +23,6 @@ from habitus.infrastructure.vector.model import (
     VectorStoreState,
     VectorStoreUnsupportedTopologyError,
 )
-from habitus.model_client import EmbeddingVector
 
 _PUBLICATION_FORMAT = "habitus_vector_publication_v1"
 _STATE_METADATA = "state"

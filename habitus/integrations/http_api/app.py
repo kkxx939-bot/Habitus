@@ -1,4 +1,4 @@
-"""只把现有 RuntimeHTTPHandlers 映射为最小 FastAPI 契约。"""
+"""只把 ``handlers.RuntimeHTTPHandlers`` 映射为最小 FastAPI 契约。"""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from habitus.foundation.observability import (
     Observer,
     bind_observation_context,
 )
-from habitus.integrations.http import RuntimeHTTPHandlers
 from habitus.integrations.http_api.body_limit import RequestBodyLimitMiddleware
 from habitus.integrations.http_api.errors import (
     documented_error_responses,
@@ -27,13 +26,18 @@ from habitus.integrations.http_api.errors import (
     install_exception_handlers,
     unhandled_error,
 )
+from habitus.integrations.http_api.handlers import RuntimeHTTPHandlers
 from habitus.integrations.http_api.local_security import local_request_violation
 from habitus.integrations.http_api.observation import HTTPObservationMiddleware
+from habitus.integrations.http_api.remember_parts import (
+    RememberPart,
+    RememberPartsIntegrityError,
+    RememberPartsStaging,
+)
 from habitus.integrations.http_api.request_id import REQUEST_ID_HEADER, RequestIDMiddleware
 from habitus.integrations.http_api.schemas import (
     AuditListResult,
     BlockedJobResult,
-    CapabilitiesResult,
     ConversationCursorResult,
     FlushRequest,
     FlushResult,
@@ -45,7 +49,8 @@ from habitus.integrations.http_api.schemas import (
     MemoryReadResult,
     RecallRequest,
     RecallResult,
-    RememberJobResult,
+    RememberPartRequest,
+    RememberPartResult,
     RememberRequest,
     RememberResult,
     ReminderClaimRequest,
@@ -53,6 +58,7 @@ from habitus.integrations.http_api.schemas import (
     ReminderDayResult,
     RetryJobRequest,
     RetryJobResult,
+    ServiceCapabilitiesResult,
     SuccessResponse,
 )
 from habitus.integrations.local_service import ServiceInstanceLock
@@ -71,67 +77,28 @@ def _success(request: Request, result: object) -> SuccessResponse[object]:
     return SuccessResponse(result=result, request_id=_request_id(request))
 
 
-def _remember_result(payload: dict[str, object]) -> RememberResult:
-    raw_jobs = payload.get("jobs")
-    if not isinstance(raw_jobs, list):
-        raise RuntimeError("remember handler returned invalid jobs")
-    if any(not isinstance(item, dict) for item in raw_jobs):
-        raise RuntimeError("remember handler returned an invalid job entry")
-    public_jobs = [
-        RememberJobResult.model_validate(
-            {
-                "memory_sequence": item.get("memory_sequence"),
-                "conversation_id": item.get("conversation_id"),
-                "started_on": item.get("started_on"),
-                "status": item.get("status"),
-            }
-        )
-        for item in raw_jobs
-        if isinstance(item, dict)
-    ]
-    return RememberResult.model_validate(
-        {
-            "ignored_items": payload.get("ignored_items"),
-            "after_turn": payload.get("after_turn"),
-            "next_sequence": payload.get("next_sequence"),
-            "jobs": public_jobs,
-            "consistency": payload.get("consistency"),
-        }
-    )
-
-
-def _flush_result(payload: dict[str, object]) -> FlushResult:
-    raw_jobs = payload.get("jobs")
-    if not isinstance(raw_jobs, list) or any(not isinstance(item, dict) for item in raw_jobs):
-        raise RuntimeError("flush handler returned invalid jobs")
-    return FlushResult.model_validate(
-        {
-            "jobs": [RememberJobResult.model_validate(item) for item in raw_jobs],
-            "consistency": payload.get("consistency"),
-        }
-    )
-
-
 def _build_public_router(
     handlers: RuntimeHTTPHandlers,
     observer: Observer,
+    *,
+    max_request_bytes: int,
+    remember_parts: RememberPartsStaging,
 ) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1",
         responses=documented_error_responses(),
     )
 
-    @router.get("/capabilities", response_model=SuccessResponse[CapabilitiesResult])
+    @router.get("/capabilities", response_model=SuccessResponse[ServiceCapabilitiesResult])
     async def capabilities(request: Request) -> SuccessResponse[object]:
-        result = CapabilitiesResult.model_validate(handlers.capabilities())
-        return _success(request, result)
+        served = handlers.capabilities()
+        return _success(
+            request,
+            ServiceCapabilitiesResult(**served.model_dump(), max_request_bytes=max_request_bytes),
+        )
 
-    @router.post("/memory/remember", response_model=SuccessResponse[RememberResult])
-    async def remember(
-        request: Request,
-        body: RememberRequest,
-    ) -> SuccessResponse[object]:
-        result = await handlers.remember(
+    async def remember_request(body: RememberRequest) -> RememberResult:
+        outcome = await handlers.remember(
             conversation_id=body.conversation_id,
             started_on=body.started_on,
             protocol=body.protocol,
@@ -142,29 +109,61 @@ def _build_public_router(
             wait_timeout_seconds=body.wait_timeout_seconds,
             delivery_id=body.delivery_id,
         )
-        raw_jobs = result.get("jobs")
-        if isinstance(raw_jobs, list):
-            for item in raw_jobs:
-                if not isinstance(item, dict):
-                    continue
-                sequence = item.get("memory_sequence")
-                transaction_id = item.get("transaction_id")
-                if not isinstance(sequence, int) or not isinstance(transaction_id, str):
-                    continue
-                with bind_observation_context(
-                    memory_sequence=sequence,
-                    transaction_id=transaction_id,
-                ):
-                    observer.record(
-                        ObservationEvent(
-                            category="http",
-                            operation="job_accepted",
-                            status=ObservationStatus.SUCCESS,
-                            duration_seconds=0.0,
-                            attributes={"job_status": str(item.get("status", "unknown"))},
-                        )
+        for job in outcome.accepted_jobs:
+            with bind_observation_context(
+                memory_sequence=job.memory_sequence,
+                transaction_id=job.transaction_id,
+            ):
+                observer.record(
+                    ObservationEvent(
+                        category="http",
+                        operation="job_accepted",
+                        status=ObservationStatus.SUCCESS,
+                        duration_seconds=0.0,
+                        attributes={"job_status": job.status.value},
                     )
-        return _success(request, _remember_result(result))
+                )
+        return outcome.result
+
+    @router.post("/memory/remember", response_model=SuccessResponse[RememberResult])
+    async def remember(
+        request: Request,
+        body: RememberRequest,
+    ) -> SuccessResponse[object]:
+        return _success(request, await remember_request(body))
+
+    @router.post("/memory/remember/parts", response_model=SuccessResponse[RememberPartResult])
+    async def remember_part(
+        request: Request,
+        body: RememberPartRequest,
+    ) -> SuccessResponse[object]:
+        # 单独一轮超过请求体上限时插件分块上传：收齐、核对摘要后拼回原请求体，走与上面完全相同的 remember 路径
+        assembled = await remember_parts.accept(
+            RememberPart(
+                delivery_id=body.delivery_id,
+                part_index=body.part_index,
+                part_count=body.part_count,
+                body_bytes=body.body_bytes,
+                body_sha256=body.body_sha256,
+                data=body.data,
+            )
+        )
+        if assembled is None:
+            return _success(
+                request,
+                RememberPartResult(received_parts=body.part_index + 1, part_count=body.part_count, remember=None),
+            )
+        whole = RememberRequest.model_validate_json(assembled)
+        if whole.delivery_id != body.delivery_id:
+            raise RememberPartsIntegrityError("the assembled request carries a different delivery_id")
+        return _success(
+            request,
+            RememberPartResult(
+                received_parts=body.part_count,
+                part_count=body.part_count,
+                remember=await remember_request(whole),
+            ),
+        )
 
     @router.get(
         "/memory/conversations/cursor",
@@ -181,7 +180,7 @@ def _build_public_router(
             conversation_id=conversation_id,
             started_on=started_on,
         )
-        return _success(request, ConversationCursorResult.model_validate(result))
+        return _success(request, result)
 
     @router.post("/memory/flush", response_model=SuccessResponse[FlushResult])
     async def flush(
@@ -193,7 +192,7 @@ def _build_public_router(
             started_on=body.started_on,
             wait_timeout_seconds=body.wait_timeout_seconds,
         )
-        return _success(request, _flush_result(result))
+        return _success(request, result)
 
     @router.post("/memory/recall", response_model=SuccessResponse[RecallResult])
     async def recall(
@@ -208,7 +207,7 @@ def _build_public_router(
             kinds=body.kinds,
             intention_scope=body.intention_scope,
         )
-        return _success(request, RecallResult.model_validate(result))
+        return _success(request, result)
 
     @router.get("/memory/tree", response_model=SuccessResponse[MemoryListResult])
     async def list_memory(
@@ -216,7 +215,7 @@ def _build_public_router(
         uri: Annotated[str | None, Query(min_length=1, max_length=1024)] = None,
     ) -> SuccessResponse[object]:
         result = await handlers.list_memory(uri)
-        return _success(request, MemoryListResult.model_validate(result))
+        return _success(request, result)
 
     @router.get("/memory/document", response_model=SuccessResponse[MemoryReadResult])
     async def read_memory(
@@ -224,7 +223,7 @@ def _build_public_router(
         uri: Annotated[str, Query(min_length=1, max_length=1024)],
     ) -> SuccessResponse[object]:
         result = await handlers.read_memory(uri)
-        return _success(request, MemoryReadResult.model_validate(result))
+        return _success(request, result)
 
     @router.get("/reminders", response_model=SuccessResponse[ReminderDayResult])
     async def reminders(
@@ -232,7 +231,7 @@ def _build_public_router(
         day: Annotated[date | None, Query()] = None,
     ) -> SuccessResponse[object]:
         result = await handlers.reminders(day)
-        return _success(request, ReminderDayResult.model_validate(result))
+        return _success(request, result)
 
     @router.post("/reminders/claim", response_model=SuccessResponse[ReminderClaimResult])
     async def claim_reminders(
@@ -240,7 +239,7 @@ def _build_public_router(
         body: ReminderClaimRequest,
     ) -> SuccessResponse[object]:
         result = await handlers.claim_reminders(host=body.host, session=body.session, at=body.at, limit=body.limit)
-        return _success(request, ReminderClaimResult.model_validate(result))
+        return _success(request, result)
 
     @router.get("/memory/jobs", response_model=SuccessResponse[JobListResult])
     async def list_jobs(
@@ -260,7 +259,7 @@ def _build_public_router(
             limit=limit,
             before_sequence=before_sequence,
         )
-        return _success(request, JobListResult.model_validate(result))
+        return _success(request, result)
 
     @router.get(
         "/memory/jobs/blocked",
@@ -268,7 +267,7 @@ def _build_public_router(
     )
     async def blocked_job(request: Request) -> SuccessResponse[object]:
         result = await handlers.blocked_job()
-        return _success(request, BlockedJobResult.model_validate(result))
+        return _success(request, result)
 
     @router.get("/memory/jobs/{memory_sequence}", response_model=SuccessResponse[JobStatusResult])
     async def job_status(
@@ -284,7 +283,7 @@ def _build_public_router(
             conversation_id=conversation_id,
             started_on=started_on,
         )
-        return _success(request, JobStatusResult.model_validate(result))
+        return _success(request, result)
 
     return router
 
@@ -318,7 +317,7 @@ def _build_operations_router(
             started_on=started_on,
             expected_version=body.expected_version,
         )
-        return _success(request, RetryJobResult.model_validate(result))
+        return _success(request, result)
 
     @router.get(
         "/audit",
@@ -329,7 +328,7 @@ def _build_operations_router(
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
     ) -> SuccessResponse[object]:
         result = await handlers.recent_audit_events(limit=limit)
-        return _success(request, AuditListResult.model_validate(result))
+        return _success(request, result)
 
     return router
 
@@ -441,7 +440,19 @@ def create_http_app(
     )
     app.add_middleware(RequestIDMiddleware)
 
-    app.include_router(_build_public_router(handlers, observer))
+    # 分块上传的暂存只在这个进程的内存里：本地服务重启后插件从第 0 块整批重送（remember_parts.py）
+    remember_parts = RememberPartsStaging(
+        max_bytes=resolved_config.remember_parts_max_bytes,
+        ttl_seconds=resolved_config.remember_parts_ttl_seconds,
+    )
+    app.include_router(
+        _build_public_router(
+            handlers,
+            observer,
+            max_request_bytes=resolved_config.max_request_bytes,
+            remember_parts=remember_parts,
+        )
+    )
     app.include_router(_build_operations_router(handlers))
 
     @app.get(
@@ -451,7 +462,7 @@ def create_http_app(
         tags=["system"],
     )
     async def health(request: Request) -> SuccessResponse[object]:
-        return _success(request, HealthResult.model_validate(await handlers.health(deep=False)))
+        return _success(request, await handlers.health(deep=False))
 
     readiness_responses = documented_error_responses(exclude_statuses=frozenset({503}))
     readiness_responses[503] = {
@@ -474,7 +485,7 @@ def create_http_app(
     async def readiness(request: Request):  # noqa: ANN202
         status_code, payload = await handlers.readiness()
         response = SuccessResponse(
-            result=HealthResult.model_validate(payload),
+            result=payload,
             request_id=_request_id(request),
         )
         return JSONResponse(status_code=status_code, content=response.model_dump(mode="json"))

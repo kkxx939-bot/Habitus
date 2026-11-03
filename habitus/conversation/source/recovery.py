@@ -68,8 +68,11 @@ class ConversationSourceRecoveryPlan:
     broken: tuple[ConversationSourceRecoveryEntry, ...]
     deferred: tuple[ConversationSourceRecoveryEntry, ...]
     salvaged: tuple[ConversationSourceRecoveryEntry, ...] = ()
-    #: 信封读不出来（损坏）的源：没法恢复，也不能让它拖垮这一轮，记下等人工处置（L10.9）。
+    #: 信封或"还没终态"标记读不出来（损坏）的源：没法恢复，也不能让它拖垮这一轮，记下等人工处置（L10.9）。
     corrupt: tuple[str, ...] = ()
+    #: 读不出来的账本条目，按 ``source/`` 下的相对路径：认不出的"还没终态"文件（``pending/<文件名>``）与索引读不出来的
+    #: 地址（``index/<地址目录>``）。坏条目只挡它自己（裁定 60 第 6 条）：坏索引只挡它那个地址，别的地址照常恢复。
+    unreadable: tuple[str, ...] = ()
 
 
 def recovery_key(source_id: str, consumer: ConversationSourceConsumer) -> str:
@@ -108,33 +111,39 @@ class ConversationSourceRecovery:
         self.orphan_grace = orphan_grace
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
 
-    def pending(self) -> tuple[ConversationSourceRecoveryEntry, ...]:
-        """只看"还没终态"的标记，不列全部信封。顺手清三种残留标记：
+    def _scan(self) -> tuple[tuple[ConversationSourceRecoveryEntry, ...], tuple[str, ...], tuple[str, ...]]:
+        """只看"还没终态"的标记，不列全部信封；读不出来的信封与标记进 ``corrupt``，读不出来的账本条目进 ``unreadable``。
+        顺手清四种残留标记：
 
         - 两个消费者都已终态（行为侧的账坏了、已补救的算终态）：标记本该删掉，惰性地在这里删；
         - 信封已经不在、地址水位盖住了它：释放删到一半留下的；
         - 信封不在、水位也没盖住、标记已超过宽限期：put 写到一半崩溃、再没重投的孤儿。它的索引标记一起删，
-          不然同地址更早的源永远"还在记录"，有序 Consumer 与释放都会卡在它前面。
+          不然同地址更早的源永远"还在记录"，有序 Consumer 与释放都会卡在它前面；
+        - 还有源没终态的地址上，只剩索引标记（没有"还没终态"标记、没有信封、水位没盖住）且超过宽限期的：put 打完索引
+          标记、还没打"还没终态"标记就失败（容量闸、进程被杀），再没重投的孤儿。同地址后面的有序 Consumer 等的就是它。
 
-        还在宽限期内的不动：那可能是正在进行的 put，同一份源重投时会补上信封。
+        还在宽限期内的不动：那可能是正在进行的 put，同一份源重投时会补上信封。一个地址的索引读不出来（坏标记、杂文件），
+        只跳过这个地址的清理；它的源照常进这一轮，交付时自己报错、记重试账。
         """
 
-        return self._scan()[0]
-
-    def _scan(self) -> tuple[tuple[ConversationSourceRecoveryEntry, ...], tuple[str, ...]]:
         ledger = self.delivery.ledger
         entries: list[ConversationSourceRecoveryEntry] = []
-        corrupt: list[str] = []
+        listing = ledger.pending.listing()
+        corrupt: list[str] = list(listing.corrupt)
+        unreadable: set[str] = {f"pending/{name}" for name in listing.unsupported}
         alive: set[str] = set()
-        for source_id, address in ledger.pending.listing():
+        for source_id, address in listing.sources:
             try:
                 envelope = self.sources.read(source_id)
             except ConversationSourceError:
                 corrupt.append(source_id)  # 一份坏信封只挡它自己：启动与周期恢复照常处理别的
                 continue
             if envelope is None:
-                if self._released(source_id, address) or self._expired_orphan(source_id, address):
-                    ledger.pending.clear(source_id)
+                try:
+                    if self._released(source_id, address) or self._expired_orphan(source_id, address):
+                        ledger.pending.clear(source_id)
+                except ConversationSourceError:
+                    unreadable.add(f"index/{address.digest}")
                 continue
             waiting = [
                 ConversationSourceRecoveryEntry(envelope, consumer, state.state)
@@ -148,8 +157,14 @@ class ConversationSourceRecovery:
             else:
                 ledger.pending.clear(source_id)
         self.retries.reap(alive.__contains__)
+        marked = {source_id for source_id, _address in listing.sources} | set(listing.corrupt)
+        for address in {SourceAddress.of(entry.envelope) for entry in entries}:
+            try:
+                self._clear_orphan_index_markers(address, marked)
+            except ConversationSourceError:
+                unreadable.add(f"index/{address.digest}")
         ordered = tuple(sorted(entries, key=lambda entry: (entry.envelope.recorded_at, entry.envelope.source_id)))
-        return ordered, tuple(corrupt)
+        return ordered, tuple(corrupt), tuple(sorted(unreadable))
 
     def plan(self, *, busy: Collection[tuple[str, ConversationSourceConsumer]] = ()) -> ConversationSourceRecoveryPlan:
         """``busy`` 是正在交付中的 Source/Consumer（协调器里还在跑的），这一轮不碰。"""
@@ -158,8 +173,8 @@ class ConversationSourceRecovery:
         broken: list[ConversationSourceRecoveryEntry] = []
         deferred: list[ConversationSourceRecoveryEntry] = []
         salvaged: list[ConversationSourceRecoveryEntry] = []
-        pending, corrupt = self._scan()
-        held = self._held_memory_addresses(pending, busy)
+        pending, corrupt, unreadable = self._scan()
+        held = self._held_ordered_addresses(pending, busy)
         for entry in pending:
             if (entry.envelope.source_id, entry.consumer) in busy or _waits_behind(entry, held):
                 continue
@@ -176,20 +191,25 @@ class ConversationSourceRecovery:
             elif len(attempt) < self.batch_size:
                 attempt.append(entry)
         return ConversationSourceRecoveryPlan(
-            _in_recovery_order(attempt), tuple(broken), tuple(deferred), tuple(salvaged), corrupt
+            _in_recovery_order(attempt, self.delivery.ordered),
+            tuple(broken),
+            tuple(deferred),
+            tuple(salvaged),
+            corrupt,
+            unreadable,
         )
 
-    def _held_memory_addresses(
+    def _held_ordered_addresses(
         self,
         pending: tuple[ConversationSourceRecoveryEntry, ...],
         busy: Collection[tuple[str, ConversationSourceConsumer]],
-    ) -> dict[SourceAddress, int]:
-        """有序的 Memory 在每个地址上被挡在哪个序号：那一份坏了、在退避、或正在交付，同地址后面的只会报"等前序"，
-        不该占这一批（L10.8；原先它们每轮占满批次，别的地址的新源永远进不来）。"""
+    ) -> dict[tuple[SourceAddress, ConversationSourceConsumer], int]:
+        """有序 Consumer（现在是 Memory）在每个地址上被挡在哪个序号：那一份坏了、在退避、或正在交付，同地址后面的只会报
+        "等前序"，不该占这一批（L10.8；原先它们每轮占满批次，别的地址的新源永远进不来）。"""
 
-        held: dict[SourceAddress, int] = {}
+        held: dict[tuple[SourceAddress, ConversationSourceConsumer], int] = {}
         for entry in pending:
-            if entry.consumer is not ConversationSourceConsumer.MEMORY:
+            if not self.delivery.ordered(entry.consumer):
                 continue
             blocked = (
                 entry.state in _BROKEN
@@ -197,9 +217,9 @@ class ConversationSourceRecovery:
                 or self.retries.blocked(entry.key)
             )
             if blocked:
-                address = SourceAddress.of(entry.envelope)
+                key = (SourceAddress.of(entry.envelope), entry.consumer)
                 start = entry.envelope.batch.start_sequence
-                held[address] = min(start, held.get(address, start))
+                held[key] = min(start, held.get(key, start))
         return held
 
     async def recover_pending(self) -> tuple[ConversationSourceRecoveryResult, ...]:
@@ -214,20 +234,23 @@ class ConversationSourceRecovery:
     async def recover_all(
         self, entries: Iterable[ConversationSourceRecoveryEntry]
     ) -> tuple[ConversationSourceRecoveryResult, ...]:
-        """Memory 按会话顺序一份接一份（有序 Consumer），Behavior 各自并发。"""
+        """有序 Consumer（Memory）按会话顺序一份接一份，其余（Behavior）各自并发。"""
 
-        ordered = _in_recovery_order(entries)
-        behavior_tasks = tuple(
-            asyncio.create_task(self.recover(entry))
-            for entry in ordered
-            if entry.consumer is ConversationSourceConsumer.BEHAVIOR_SESSION
+        ordered = _in_recovery_order(entries, self.delivery.ordered)
+        concurrent = tuple(
+            asyncio.create_task(self.recover(entry)) for entry in ordered if not self.delivery.ordered(entry.consumer)
         )
         results: list[ConversationSourceRecoveryResult] = []
-        for entry in ordered:
-            if entry.consumer is ConversationSourceConsumer.MEMORY:
-                results.append(await self.recover(entry))
-        if behavior_tasks:
-            results.extend(await asyncio.gather(*behavior_tasks))
+        try:
+            for entry in ordered:
+                if self.delivery.ordered(entry.consumer):
+                    results.append(await self.recover(entry))
+            if concurrent:
+                results.extend(await asyncio.gather(*concurrent))
+        except BaseException:
+            for task in concurrent:  # 这一批被取消：并发的那几份一起停，不留在后台
+                task.cancel()
+            raise
         return tuple(results)
 
     async def recover(self, entry: ConversationSourceRecoveryEntry) -> ConversationSourceRecoveryResult:
@@ -237,11 +260,10 @@ class ConversationSourceRecovery:
             return await self._abandon(entry)
         try:
             ensured = await self.delivery.ensure_outcome(entry.envelope, entry.consumer)
-        except BaseException as exc:
-            if isinstance(exc, Exception):
-                decision = await asyncio.to_thread(self._settle, entry, exc)
-                if decision is not None and decision.give_up and self.delivery.abandons(entry.consumer):
-                    return await self._abandon(entry)
+        except Exception as exc:  # 取消不接：停机时立刻生效，不再往下跑这一批
+            decision = await asyncio.to_thread(self._settle, entry, exc)
+            if decision is not None and decision.give_up and self.delivery.abandons(entry.consumer):
+                return await self._abandon(entry)
             return ConversationSourceRecoveryResult(entry.envelope, entry.consumer, None, exc)
         await asyncio.to_thread(self._settle, entry, None)
         return ConversationSourceRecoveryResult(entry.envelope, entry.consumer, ensured.outcome, None)
@@ -305,24 +327,42 @@ class ConversationSourceRecovery:
                 ledger.index.remove(marker)
         return True
 
+    def _clear_orphan_index_markers(self, address: SourceAddress, marked: set[str]) -> None:
+        ledger = self.delivery.ledger
+        now = self._clock()
+        for marker in ledger.index.markers(address):
+            if marker.source_id in marked or ledger.released(address, marker.end_sequence):
+                continue
+            created = ledger.index.marked_at(marker)
+            if created is None or now - created < self.orphan_grace:
+                continue
+            try:
+                envelope = self.sources.read(marker.source_id)
+            except ConversationSourceError:
+                continue  # 信封在、只是坏了：不是孤儿
+            if envelope is None:
+                ledger.index.remove(marker)
 
-def _waits_behind(entry: ConversationSourceRecoveryEntry, held: dict[SourceAddress, int]) -> bool:
-    if entry.consumer is not ConversationSourceConsumer.MEMORY:
-        return False
-    blocker = held.get(SourceAddress.of(entry.envelope))
+
+def _waits_behind(
+    entry: ConversationSourceRecoveryEntry, held: dict[tuple[SourceAddress, ConversationSourceConsumer], int]
+) -> bool:
+    blocker = held.get((SourceAddress.of(entry.envelope), entry.consumer))
     return blocker is not None and entry.envelope.batch.start_sequence > blocker
 
 
 def _in_recovery_order(
     entries: Iterable[ConversationSourceRecoveryEntry],
+    ordered: Callable[[ConversationSourceConsumer], bool],
 ) -> tuple[ConversationSourceRecoveryEntry, ...]:
-    """Memory 按会话、起始日、序号排（有序 Consumer 必须先前后后）；Behavior 按记录时刻。"""
+    """有序 Consumer 按会话、起始日、序号排（必须先前后后），其余按记录时刻。"""
 
     def order(entry: ConversationSourceRecoveryEntry) -> tuple[object, ...]:
         envelope = entry.envelope
-        if entry.consumer is ConversationSourceConsumer.MEMORY:
+        if ordered(entry.consumer):
             return (
                 0,
+                entry.consumer.value,
                 envelope.conversation_id,
                 envelope.started_on,
                 envelope.batch.start_sequence,

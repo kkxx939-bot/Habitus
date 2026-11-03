@@ -4,14 +4,14 @@
 ``config.scene_root``；模型触点（映射器、概念作者、先验、调节条件）全部走同一个 ``StructuredChatClient``；关系检验的
 时间尺子只认 ``config.temporal``（``relation_config``）、常态分份的容差是 ``config.scene.baseline_slack_slots``。未启用时返回 None。
 
-整晚的串法（结算 → 行为树读一次 → 语义树 → 机会表）在 ``runtime.nightly.Nightly``，由 ``build_nightly`` 装好、
-``build_nightly_worker`` 交给它自己的常驻节拍（``runtime.nightly_worker.NightlyWorker``；预测树删了，裁定 59）；
-结算是整晚的第一步（找原因要在同一晚读到它结出的落空）。
+整晚的串法（前置处理：探模型、重试 → 结算 → 词表（每晚新增、定期拆改）→ 行为树读一次 → 语义树 → 机会表 → 单元 → 当天的日子预期）在 ``runtime.nightly.Nightly``，由
+``build_nightly`` 装好、``build_nightly_worker`` 交给它自己的常驻节拍（``runtime.nightly_worker.NightlyWorker``：前一天定稿后起跑，
+裁定 94 第 1 条；预测树删了，裁定 59）；结算排在语义树之前（找原因要在同一晚读到它结出的落空）。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from datetime import date, datetime
 
 from habitus.behavior.kinds.reader import VocabularyReader
@@ -22,7 +22,7 @@ from habitus.behavior.tree.dirty_days import DirtyDayLog
 from habitus.conditions import DayTypeCalendar
 from habitus.config import HabitusConfig
 from habitus.foundation.observability import Observer
-from habitus.model_client import StructuredChatClient
+from habitus.model_client import ModelUnreachable, StructuredChatClient
 from habitus.runtime.conditions import SharedCalendar, local_calendar
 from habitus.runtime.evidence import evidence_of
 from habitus.runtime.foresight import ForesightRuntimeComponents, build_foresight_nightly
@@ -31,7 +31,8 @@ from habitus.runtime.nightly import Nightly
 from habitus.runtime.nightly_worker import LastRun, NightlyWorker
 from habitus.runtime.scene_advice import RelationAdvice
 from habitus.runtime.scene_authoring import ConceptAuthoring
-from habitus.runtime.scene_night import SceneNightConfig, SceneNightlyRun, relation_config
+from habitus.runtime.scene_config import relation_config
+from habitus.runtime.scene_night import SceneNightConfig, SceneNightlyRun
 from habitus.runtime.scene_vocabulary import VocabularyCatalog
 from habitus.scene.advice.conditions import ConditionProposer
 from habitus.scene.advice.prior import PriorAdvisor
@@ -118,9 +119,14 @@ def build_nightly(
     clock: Callable[[], datetime] | None = None,
     dirty_days: DirtyDayLog | None = None,
     retry: RetryStage | None = None,
+    structured_chat: StructuredChatClient | None = None,
+    vocabulary_jobs: Sequence[Callable[[date], Awaitable[object]]] = (),
 ) -> Nightly:
-    """整晚的串法：重试白天读不懂的（裁定 67）→ 结算（预测层接着时）→ 行为树读一次，语义树、机会表与找原因（预测层接着时）用同一份序列。
-    ``dirty_days`` 是这一支归约记的脏日日志：序列按天缓存、只重读变过的日子（26 号清单 6.7）。"""
+    """整晚的串法：重试白天读不懂的（裁定 67）→ 结算（预测层接着时）→ 行为树读一次，语义树、机会表与找原因（预测层接着时）用同一份序列
+    → 当天的日子预期（预测层的 ``days`` 接着时，裁定 94 第 1 条）。
+    ``dirty_days`` 是这一支归约记的脏日日志：序列按天缓存、只重读变过的日子（26 号清单 6.7）。``structured_chat`` 给了就在线的
+    最前面探一次模型（``model_probe``，裁定 94 第 4 条）。``vocabulary_jobs`` 是各支的词表整理活（每晚新增、定期拆改），在线上结构那一段
+    之前跑（裁定 94 第 8、9 条）。"""
 
     reader = VocabularyReader(kind_store)
     return Nightly(
@@ -145,20 +151,50 @@ def build_nightly(
         ),
         settlement=None if foresight is None else foresight.settlement,
         retry=retry,
+        days=None if foresight is None else foresight.days,
+        probe=None if structured_chat is None else model_probe(structured_chat),
+        vocabulary_jobs=vocabulary_jobs,
     )
 
 
-def build_nightly_worker(config: HabitusConfig, nightly: Nightly, *, observer: Observer | None = None) -> NightlyWorker:
-    """整晚那一趟的常驻节拍：每天主体本地的 ``scene.nightly_at``；上一趟开跑的时刻落在语义树根下（裁定 67 第 7 条）。"""
+def model_probe(structured_chat: StructuredChatClient) -> Callable[[], Awaitable[None]]:
+    """前置处理最先那一探（裁定 94 第 4、8 条）：问一次供应商的健康探针（网络抖动按普通调用的规矩先重试几次，
+    ``ChatClient.health_check_async``），答不上（连不上、鉴权、权限、服务端坏、没配好）就抛 ``ModelUnreachable``，这一晚停下。
+    供应商没有异步探针的不探（探不了不等于调不通）：额度满这类探针看不出来的，由线上之后任何一处调模型碰到时停线（重试的会话轮、
+    归约归类、每晚新增词表、语义树的各触点）。"""
+
+    async def probe() -> None:
+        check: Callable[[], Awaitable[Mapping[str, object]]] | None = getattr(
+            structured_chat.client, "health_check_async", None
+        )
+        if not callable(check):
+            return
+        result = await check()
+        code = str(result.get("error_code") or "health check failed")
+        if result.get("ok") is not True and code != "async_health_check_unsupported":
+            raise ModelUnreachable(code)
+
+    return probe
+
+
+def nightly_last_run(config: HabitusConfig) -> LastRun:
+    """夜里那条线自己的记录（跑过哪一晚、跑到哪一步、哪几晚跑完了），落在语义树根下。组合根只建一份：常驻节拍写它，结算读它认
+    停掉的那天（裁定 94 第 9 条）。"""
+
+    return LastRun(config.scene_root / "nightly" / "last_run.json", root=config.scene_root)
+
+
+def build_nightly_worker(
+    config: HabitusConfig, nightly: Nightly, *, last_run: LastRun, observer: Observer | None = None
+) -> NightlyWorker:
+    """整晚那一趟的常驻节拍：前一天定稿完成就接着跑（裁定 94 第 1 条）。"""
 
     return NightlyWorker(
         nightly,
-        at=config.scene.nightly_time,
-        zone=config.locale.zone(),
         shutdown_timeout_seconds=config.scene.nightly_shutdown_timeout_seconds,
-        last_run=LastRun(config.scene_root / "nightly" / "last_run.json", root=config.scene_root),
+        last_run=last_run,
         observer=observer,
     )
 
 
-__all__ = ["build_nightly", "build_nightly_worker", "build_scene_nightly"]
+__all__ = ["build_nightly", "build_nightly_worker", "build_scene_nightly", "model_probe", "nightly_last_run"]

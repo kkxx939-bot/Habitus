@@ -97,11 +97,6 @@ class BehaviorSchemaRegistry:
             markdown_body=render_markdown(normalized_kind, normalized),
         )
 
-    def address_for(self, kind: BehaviorKind | str, payload: Mapping[str, Any]) -> BehaviorAddress:
-        normalized_kind = _behavior_kind(kind)
-        normalized = self.validate(normalized_kind, payload)
-        return self._address_for_validated(normalized_kind, normalized)
-
     def render_markdown(self, kind: BehaviorKind | str, payload: Mapping[str, Any]) -> str:
         normalized_kind = _behavior_kind(kind)
         return render_markdown(normalized_kind, self.validate(normalized_kind, payload))

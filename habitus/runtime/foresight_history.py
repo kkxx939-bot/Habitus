@@ -2,7 +2,8 @@
 时间线把全部记录重标一遍在场的输入，一条 lane 一晚一份快照；白天的单元只读最晚一晚的快照，不再逐拍扫账本。落盘的目录与字节在
 ``runtime.foresight_history_store``。
 
-- **记**：账本里结完（``is_final``）、还没记过的日子，每条预期记一份；结完之后又被重结撤回的日子从"记过的"里拿掉，再结完时
+- **记**：账本里结完（``is_final``）、还没记过的日子，每条预期记一份（自然命中带上结算认出的那次发生：一次发生只算给一刻，
+  裁定 81）；结完之后又被重结撤回的日子从"记过的"里拿掉，再结完时
   整天重记（同一条预期的记录整份替换）。不再每晚回读"回看多少天"的日目录：账本压实会删掉旧事实，单元历史的原料自己存着。
 - **重标**：每晚读全部记录，按当晚的语义树重标在场的输入；一刻的分量是原始强度，"规律断了"的打折读的时候对正在读的那串刻算
   （``edges.fold_sequence``），不存打折后的。
@@ -19,6 +20,7 @@ from datetime import date, datetime, time, timedelta
 
 from habitus.foresight import Evidence
 from habitus.foresight.clock import current_facts
+from habitus.foresight.diagnosis import DIAGNOSIS_REACH_DAYS
 from habitus.foresight.history import (
     MomentRecord,
     UnitHistory,
@@ -30,7 +32,6 @@ from habitus.foresight.ledger import AccountFact
 from habitus.foresight.opportunities import OpportunityTable
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
-from habitus.runtime.foresight_settlement import DIAGNOSIS_REACH_DAYS
 from habitus.scene.relations import LaneTimeline
 
 
@@ -83,6 +84,7 @@ class HistoryStage:
                 continue
             if day in recorded:
                 continue
+            found_on = {item.expectation_id: item.occurrence_uri for item in self.ledger.settlements_on(day)}
             for item in self.ledger.expectations_on(day):
                 if known_by is None:
                     known_by = datetime.combine(night, time(0, 0), tzinfo=item.formed_at.tzinfo)
@@ -92,7 +94,7 @@ class HistoryStage:
                 fact = next(
                     (found for found in facts[item.account] if found.expectation_id == item.expectation_id), None
                 )
-                self.store.put_record(lane, record_of(item, fact))
+                self.store.put_record(lane, record_of(item, fact, occurrence_uri=found_on.get(item.expectation_id)))
             recorded.add(day)
         self.store.set_recorded_days(lane, recorded)
         return self.store.records(lane)

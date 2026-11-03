@@ -9,10 +9,10 @@ from contextlib import contextmanager
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from starlette.middleware.exceptions import ExceptionMiddleware
-from starlette.responses import StreamingResponse
+from starlette.responses import JSONResponse, StreamingResponse
 
 from habitus.foundation.observability import ObservationEvent, ObservationStatus, SpanController
 from habitus.integrations.http_api.errors import install_exception_handlers, unhandled_error
@@ -126,6 +126,26 @@ def test_service_generates_a_fresh_identity_and_ignores_the_caller_header() -> N
     assert first_id != "caller-owned"
     assert first_id != second_id
     assert current_request_id() is None
+
+
+def test_a_request_id_header_set_inside_the_app_is_replaced_by_the_single_server_identity() -> None:
+    """应用内部（例如照抄调用方请求头）写出的 X-Request-ID 必须被剥掉，响应只带一个服务端身份。"""
+
+    app = _app()
+
+    @app.get("/echo")
+    async def echo(request: Request):  # noqa: ANN202
+        return JSONResponse(
+            {"request_id": current_request_id()},
+            headers={REQUEST_ID_HEADER: request.headers.get(REQUEST_ID_HEADER, "")},
+        )
+
+    with TestClient(app, base_url="http://127.0.0.1:8787") as client:
+        response = client.get("/echo", headers={REQUEST_ID_HEADER: "caller-owned"})
+
+    assert response.status_code == 200
+    assert response.headers.get_list(REQUEST_ID_HEADER) == [response.json()["request_id"]]
+    _assert_response_identity(response)
 
 
 def test_framework_and_domain_failures_return_the_generated_identity() -> None:

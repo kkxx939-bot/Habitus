@@ -86,17 +86,17 @@ def initialize_config(
     existing = _read_existing(path)
     if existing is not None and not force:
         if stat.S_IMODE(path.stat().st_mode) & 0o077:
-            atomic_replace_bytes(path, existing, artifact_root=path.parent)
-        HabitusConfig.from_file(path)
+            atomic_replace_bytes(path, existing, artifact_root=path.parent, restrict_existing_directories=False)
+        _load_file(path)
         return ConfigInitializationResult(path=path, created=False, backup_path=None)
 
     encoded = _validated_template(source)
     backup_path = None
     if existing is not None:
         backup_path = path.with_name(f"{path.stem}.bak{path.suffix}")
-        atomic_replace_bytes(backup_path, existing, artifact_root=path.parent)
-    atomic_replace_bytes(path, encoded, artifact_root=path.parent)
-    HabitusConfig.from_file(path)
+        atomic_replace_bytes(backup_path, existing, artifact_root=path.parent, restrict_existing_directories=False)
+    atomic_replace_bytes(path, encoded, artifact_root=path.parent, restrict_existing_directories=False)
+    _load_file(path)
     return ConfigInitializationResult(path=path, created=True, backup_path=backup_path)
 
 
@@ -110,7 +110,7 @@ def initialize_config_from_mapping(
 
     if not isinstance(payload, Mapping):
         raise TypeError("config payload must be an object")
-    HabitusConfig.from_mapping(payload)
+    _load_mapping(payload)
     encoded = yaml.safe_dump(dict(payload), allow_unicode=True, sort_keys=False).encode("utf-8")
     if len(encoded) > _MAX_INITIALIZED_CONFIG_BYTES:
         raise ValueError("Habitus config exceeds the one-megabyte limit")
@@ -131,14 +131,14 @@ def load_initialization_mapping(source: Path | None = None) -> dict[str, object]
             payload = load_config_object(template)
     if not encoded:
         raise ValueError("Habitus config cannot be empty")
-    HabitusConfig.from_mapping(payload)
+    _load_mapping(payload)
     return payload
 
 
 def missing_credential_fields(path: Path) -> tuple[CredentialField, ...]:
     """返回当前运行链实际引用但尚未填写的秘密字段。"""
 
-    config = HabitusConfig.from_file(path)
+    config = _load_file(path)
     from habitus.integrations.local_service.adapter_catalog import load_adapter_catalog
 
     required = {
@@ -189,11 +189,29 @@ def configure_credentials(
             current[raw_field_name] = secret
         registry[raw_reference] = current
     payload["credentials"] = registry
-    config = HabitusConfig.from_mapping(payload)
+    config = _load_mapping(payload)
     encoded = yaml.safe_dump(payload, allow_unicode=True, sort_keys=False).encode("utf-8")
-    atomic_replace_bytes(path, encoded, artifact_root=path.parent)
-    HabitusConfig.from_file(path)
+    atomic_replace_bytes(path, encoded, artifact_root=path.parent, restrict_existing_directories=False)
+    _load_file(path)
     return config
+
+
+def plugin_connection_paths(config_path: Path, *, environ: Mapping[str, str] | None = None) -> tuple[Path, ...]:
+    """插件找服务用的连接文件有几份：配置旁边那份（``agent-plugin/connection.json``，带 ``HABITUS_CONFIG_FILE`` 的宿主读它），
+    以及不带这个变量的宿主读的那份（``resolve_plugin_connection_path``：``HABITUS_PLUGIN_STATE_DIR`` 下，没设就是
+    ``~/.habitus/agent-plugin/connection.json``）。两处是同一个文件时只有一份。init 写、serve 启动时刷新、doctor 核对都按这一处。"""
+
+    adjacent = Path(config_path).expanduser().absolute().parent / "agent-plugin" / "connection.json"
+    default = resolve_plugin_connection_path(environ=environ)
+    return (adjacent,) if default == adjacent else (adjacent, default)
+
+
+def plugin_connection_url(config: HabitusConfig) -> str:
+    """连接文件里写的服务地址：配置的本地监听地址（IPv6 加方括号）。"""
+
+    host = config.http.host
+    authority = f"[{host}]" if ":" in host else host
+    return f"http://{authority}:{config.http.port}"
 
 
 def write_plugin_connection(
@@ -211,26 +229,41 @@ def write_plugin_connection(
     )
     if path.parent == Path(path.anchor):
         raise ValueError("plugin connection must be stored in a dedicated child directory")
-    host = config.http.host
-    authority = f"[{host}]" if ":" in host else host
     payload = {
         "schema_version": 1,
-        "base_url": f"http://{authority}:{config.http.port}",
+        "base_url": plugin_connection_url(config),
     }
     encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
-    atomic_replace_bytes(path, encoded, artifact_root=path.parent)
+    atomic_replace_bytes(path, encoded, artifact_root=path.parent, restrict_existing_directories=False)
     return path
+
+
+def _load_file(path: Path) -> HabitusConfig:
+    return _validated(HabitusConfig.from_file(path))
+
+
+def _load_mapping(payload: object) -> HabitusConfig:
+    return _validated(HabitusConfig.from_mapping(payload))
+
+
+def _validated(config: HabitusConfig) -> HabitusConfig:
+    """覆盖项的值域归领域配置（配置层只查类型）：写配置前一并走一遍，越界值拒绝写入、报错带配置键。"""
+
+    from habitus.runtime import validate_domain_configs
+
+    validate_domain_configs(config)
+    return config
 
 
 def _validated_template(source: Path | None) -> bytes:
     if source is not None:
         template = Path(source).expanduser().absolute()
         encoded = _read_required_regular_file(template)
-        HabitusConfig.from_file(template)
+        _load_file(template)
         return encoded
     resource = resources.files("habitus.config").joinpath("example.yaml")
     with resources.as_file(resource) as template:
-        HabitusConfig.from_file(template)
+        _load_file(template)
         return template.read_bytes()
 
 
@@ -245,15 +278,15 @@ def _initialize_encoded(
     existing = _read_existing(path)
     if existing is not None and not force:
         if stat.S_IMODE(path.stat().st_mode) & 0o077:
-            atomic_replace_bytes(path, existing, artifact_root=path.parent)
-        HabitusConfig.from_file(path)
+            atomic_replace_bytes(path, existing, artifact_root=path.parent, restrict_existing_directories=False)
+        _load_file(path)
         return ConfigInitializationResult(path=path, created=False, backup_path=None)
     backup_path = None
     if existing is not None:
         backup_path = path.with_name(f"{path.stem}.bak{path.suffix}")
-        atomic_replace_bytes(backup_path, existing, artifact_root=path.parent)
-    atomic_replace_bytes(path, encoded, artifact_root=path.parent)
-    HabitusConfig.from_file(path)
+        atomic_replace_bytes(backup_path, existing, artifact_root=path.parent, restrict_existing_directories=False)
+    atomic_replace_bytes(path, encoded, artifact_root=path.parent, restrict_existing_directories=False)
+    _load_file(path)
     return ConfigInitializationResult(path=path, created=True, backup_path=backup_path)
 
 

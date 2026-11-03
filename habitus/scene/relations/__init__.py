@@ -15,6 +15,7 @@ from habitus.scene.relations.conditions import (
     ConditionError,
     Field,
     Template,
+    all_hold,
     evaluator,
     evaluator_all,
     join_conditions,
@@ -34,7 +35,7 @@ from habitus.scene.relations.engine import (
 )
 from habitus.scene.relations.spans import SEGMENTS, Arrival, Chain, Controls, Segment, chains_of, merge_for
 from habitus.scene.relations.state import LaneState, Relation, StateError, Status, Transition, fold
-from habitus.scene.relations.timeline import LaneTimeline, Mark, build_timelines
+from habitus.scene.relations.timeline import LaneTimeline, Mark, build_timelines, fill_calendar, last_slot
 
 __all__ = [
     "SEGMENTS",
@@ -65,11 +66,14 @@ __all__ = [
     "build_timelines",
     "chains_of",
     "comparable",
+    "all_hold",
     "evaluator",
     "evaluator_all",
     "examine_night",
+    "fill_calendar",
     "fold",
     "join_conditions",
+    "last_slot",
     "merge_for",
     "parse_condition",
     "parse_conditions",

@@ -34,6 +34,9 @@ def test_example_yaml_declares_a_complete_cross_domain_configuration(tmp_path) -
     assert config.memory.semantic_search.vector_score_threshold == 0.0
     assert config.memory.semantic_search.rerank_score_threshold == 0.2
     assert config.workflow.jobs.max_attempts == 5
+    assert config.memory.vector_index.lock_ttl_seconds == 30
+    assert config.memory.vector_index.lock_wait_timeout_seconds == 30.0
+    assert config.memory.vector_index.lock_retry_delay_seconds == 0.02
     assert config.models.rerank is not None
     assert config.models.rerank.route.provider == "aliyun"
     assert config.models.rerank.route.adapter == "openai_compatible_rerank"
@@ -118,6 +121,19 @@ def test_yaml_loader_rejects_duplicate_keys_unknown_fields_and_typo_with_suggest
     payload = valid_mapping(tmp_path)
     payload["memroy"] = payload.pop("memory")
     with pytest.raises(ConfigError, match="did you mean 'config.memory'"):
+        HabitusConfig.from_mapping(payload)
+
+
+def test_memory_editor_retrieval_group_is_named_for_the_write_side_prefetch(tmp_path) -> None:
+    """写入侧旧记忆预取的配置节叫 ``memory.editor_retrieval``；旧键 ``memory.retrieval`` 不再被接受。"""
+
+    payload = valid_mapping(tmp_path)
+    payload["memory"]["editor_retrieval"]["search_limit"] = 4
+    assert HabitusConfig.from_mapping(payload).memory.editor_retrieval.search_limit == 4
+
+    payload = valid_mapping(tmp_path)
+    payload["memory"]["retrieval"] = payload["memory"].pop("editor_retrieval")
+    with pytest.raises(ConfigError, match="config.memory.retrieval"):
         HabitusConfig.from_mapping(payload)
 
 
@@ -284,28 +300,29 @@ def test_behavior_config_enforces_its_scalar_bounds() -> None:
         BehaviorConfig(primary_subject=123)  # type: ignore[arg-type]
 
 
-def test_behavior_kinds_fields_are_bounded_and_derived_by_prefix() -> None:
-    """kinds_* 与 behavior/kinds/config.py 的字段一一对应、下界一致；覆盖项按前缀派生，不双份维护。"""
+def test_behavior_kinds_fields_are_typed_and_derived_by_prefix() -> None:
+    """kinds_* 与 behavior/kinds/config.py 的字段一一对应；配置层只查类型，覆盖项按前缀派生，不双份维护。"""
 
     from dataclasses import fields
 
     from habitus.behavior.kinds.config import BehaviorKindConfig
     from habitus.config.behavior import BehaviorConfig
 
-    assert BehaviorConfig().kinds_overrides() == {}
+    assert BehaviorConfig().overrides_for("kinds_") == {}
     domain = {field.name for field in fields(BehaviorKindConfig)}
     exposed = {field.name.removeprefix("kinds_") for field in fields(BehaviorConfig) if field.name.startswith("kinds_")}
     assert exposed == domain  # 每个门槛都能从配置调（裁定 6），而且不多出领域里没有的字段
-    config = BehaviorConfig(kinds_batch_size=5, kinds_nightly_hour=4, kinds_max_anchor_pull=0.05)
-    overrides = config.kinds_overrides()
-    assert overrides == {"batch_size": 5, "nightly_hour": 4, "max_anchor_pull": 0.05}
+    config = BehaviorConfig(kinds_batch_size=5, kinds_revision_weekday=4, kinds_max_anchor_pull=0.05)
+    overrides = config.overrides_for("kinds_")
+    assert overrides == {"batch_size": 5, "revision_weekday": 4, "max_anchor_pull": 0.05}
     assert BehaviorKindConfig(**overrides).batch_size == 5
+    # 配置层只查类型；值域归 BehaviorKindConfig，越界的值在组装时拒（见 test_out_of_range_overrides_are_refused_at_startup）
+    assert BehaviorConfig(kinds_batch_size=0).overrides_for("kinds_") == {"batch_size": 0}
     for kwargs, match in (
-        ({"kinds_batch_size": 0}, "kinds_batch_size"),
-        ({"kinds_revision_weekday": 7}, "kinds_revision_weekday"),
-        ({"kinds_recurrence_min_count": True}, "kinds_recurrence_min_count"),
-        ({"kinds_transient_retry_delay_seconds": 601}, "kinds_transient_retry_delay_seconds"),
-        ({"kinds_max_anchor_pull": 1.5}, "kinds_max_anchor_pull"),
+        ({"kinds_batch_size": 1.5}, "kinds_batch_size must be an integer"),
+        ({"kinds_recurrence_min_count": True}, "kinds_recurrence_min_count must be an integer"),
+        ({"kinds_transient_retry_delay_seconds": "5"}, "kinds_transient_retry_delay_seconds must be a number"),
+        ({"kinds_max_anchor_pull": False}, "kinds_max_anchor_pull must be a number"),
     ):
         with pytest.raises(ValueError, match=match):
             BehaviorConfig(**kwargs)
@@ -341,7 +358,7 @@ def test_relation_thresholds_come_from_config_and_the_clock_from_temporal(tmp_pa
     """写了的门槛覆盖默认值、没写的用默认值；槽宽、转移窗口只认 ``config.temporal`` 那一组（语义树不另配，裁定 59）。"""
 
     from habitus.config.scene import SceneConfig
-    from habitus.runtime.scene_night import relation_config
+    from habitus.runtime.scene_config import relation_config
     from habitus.scene.relations import RelationThresholds
 
     scene = SceneConfig.from_mapping({"enabled": True, "relations": {"fdr": 0.2, "forward_max_antecedents": 30}})
@@ -357,11 +374,12 @@ def test_relation_thresholds_come_from_config_and_the_clock_from_temporal(tmp_pa
         config.temporal.slot_minutes,
         config.temporal.transition_window_slots,
     )
+    # 配置层只查类型；值域归 RelationThresholds，越界的值在组装时拒（见 test_out_of_range_overrides_are_refused_at_startup）
+    assert SceneConfig.from_mapping({"relations": {"fdr": 1.0}}).relations.overrides() == {"fdr": 1.0}
     for bad, match in (
-        ({"fdr": 1.0}, "fdr"),
-        ({"min_relative_lift": -0.1}, "min_relative_lift"),
-        ({"condition_ask_min_antecedents": 0}, "condition_ask_min_antecedents"),
-        ({"max_combined_conditions": 0}, "max_combined_conditions"),
+        ({"fdr": "0.1"}, "scene.relations.fdr must be a number"),
+        ({"max_blind_share": True}, "scene.relations.max_blind_share must be a number"),
+        ({"condition_ask_min_antecedents": 4.0}, "scene.relations.condition_ask_min_antecedents must be an integer"),
         ({"slot_minutes": 15}, "unknown"),  # 时间的数不在这一组
     ):
         with pytest.raises(ConfigError, match=match):
@@ -422,6 +440,7 @@ def test_foresight_carries_the_loss_ratios_and_protective_limits_and_needs_both_
         "outlet_claim_limit",
         "outlet_match_similarity",
         "unseen_day_types",
+        "store",
     ]
     assert config.foresight.shadow_uses_unestablished is True
     assert config.foresight.unseen_day_types == "skip"  # 待用户定之前不外推（裁定 59 第 7 条）
@@ -444,6 +463,14 @@ def test_foresight_carries_the_loss_ratios_and_protective_limits_and_needs_both_
     ):
         with pytest.raises(ConfigError, match=f"foresight.{field_name}"):
             ForesightConfig.from_mapping({field_name: bad})
+    # 落盘的容量闸是运维边界（段 6 Q17）：整段可配、未知字段与越界都拒
+    assert config.foresight.store.record_max_bytes == 1_000_000
+    tuned = ForesightConfig.from_mapping({"store": {"opportunity_table_max_bytes": 32 * 1024 * 1024}})
+    assert tuned.store.opportunity_table_max_bytes == 32 * 1024 * 1024
+    with pytest.raises(ConfigError, match="foresight.store.record_max_bytes"):
+        ForesightConfig.from_mapping({"store": {"record_max_bytes": 10}})
+    with pytest.raises(ConfigError, match="unknown"):
+        ForesightConfig.from_mapping({"store": {"max_files": 3}})
     with pytest.raises(ConfigError, match="unknown"):
         ForesightConfig.from_mapping({"window_days": 3})
     with pytest.raises(ConfigError, match="unknown"):
@@ -462,35 +489,76 @@ def test_foresight_carries_the_loss_ratios_and_protective_limits_and_needs_both_
     assert HabitusConfig.from_mapping(mapping).foresight.enabled is True
 
 
-def test_the_nightly_run_is_paced_by_the_scene_section() -> None:
-    """整晚那一趟的节拍归语义树那一段（清单 5.1）：默认一天一趟、停机等 30 秒；越界硬拒。"""
+def test_the_nightly_run_has_no_clock_time_only_a_shutdown_wait() -> None:
+    """整晚那一趟前一天定稿完成就接着跑，不挂固定时刻（裁定 94 第 1 条）：语义树那一段只留停机等多久（默认 30 秒），越界硬拒；
+    写了旧的 ``nightly_at`` 是未知字段。"""
 
     from habitus.config.scene import SceneConfig
 
-    from datetime import time
-
-    default = SceneConfig()
-    assert (default.nightly_at, default.nightly_shutdown_timeout_seconds) == ("04:00", 30.0)
-    assert default.nightly_time == time(4, 0)  # 裁定 67 第 7 条：本地固定时刻
-    assert SceneConfig.from_mapping({"nightly_at": "23:30"}).nightly_time == time(23, 30)
+    assert SceneConfig().nightly_shutdown_timeout_seconds == 30.0
     for field_name, bad in (
-        ("nightly_at", "4:00"),
-        ("nightly_at", "24:00"),
-        ("nightly_at", 400),
         ("nightly_shutdown_timeout_seconds", 0.5),
         ("nightly_shutdown_timeout_seconds", "30"),
     ):
         with pytest.raises(ConfigError, match=f"scene.{field_name}"):
             SceneConfig.from_mapping({field_name: bad})
+    with pytest.raises(ConfigError, match="nightly_at"):
+        SceneConfig.from_mapping({"nightly_at": "04:00"})
 
 
-def test_behavior_kinds_bounds_match_the_domain_bounds() -> None:
-    """配置层不 import behavior，上下界只能各写一份——用测试钉住两份一致。"""
+def startup_yaml(tmp_path: Path, *, behavior: dict[str, object], scene: dict[str, object]) -> Path:
+    """example.yaml 换上 fake 路由、写进 behavior / scene 两段，落成真实的 YAML 文件。"""
 
-    from habitus.behavior.kinds.config import _INTEGER_BOUNDS
-    from habitus.config.behavior import _KINDS_INT_BOUNDS
+    payload = valid_mapping(tmp_path)
+    for route in (
+        payload["models"]["chat"]["route"],
+        payload["models"]["embedding"]["route"],
+        payload["models"]["rerank"]["route"],
+        payload["memory"]["vector_store"]["route"],
+        payload["conversation"]["summary_vector_store"]["route"],
+    ):
+        route.update(provider="fake", credential_ref="")
+    payload["models"]["chat"]["route"]["adapter"] = "fake_chat"
+    payload["models"]["embedding"]["route"]["adapter"] = "fake_embedding"
+    payload["models"]["rerank"]["route"]["adapter"] = "fake_rerank"
+    payload["memory"]["vector_store"]["route"]["adapter"] = "fake_vector"
+    payload["conversation"]["summary_vector_store"]["route"]["adapter"] = "fake_vector"
+    payload["behavior"] = behavior
+    payload["scene"] = scene
+    path = tmp_path / "habitus.yaml"
+    path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return path
 
-    assert {(f"kinds_{name}", low, high) for name, low, high in _INTEGER_BOUNDS} == set(_KINDS_INT_BOUNDS)
+
+@pytest.mark.parametrize(
+    ("behavior", "scene", "key"),
+    [
+        ({"primary_subject": "用户", "kinds_batch_size": 0}, {}, "config.behavior.kinds_batch_size"),
+        ({"primary_subject": "用户", "kinds_max_anchor_pull": 1.5}, {}, "config.behavior.kinds_max_anchor_pull"),
+        # 几项之间的约束（复现天数不超过复现条数）同样在组装时拒、点得出写了的那一项
+        ({"primary_subject": "用户", "kinds_recurrence_min_days": 5}, {}, "config.behavior.kinds_recurrence_min_days"),
+        # 行为侧没开：写错的值照样在启动时拒，不被静默收下
+        ({"kinds_revision_weekday": 7}, {}, "config.behavior.kinds_revision_weekday"),
+        ({"primary_subject": "用户"}, {"enabled": True, "relations": {"fdr": 1.0}}, "config.scene.relations.fdr"),
+        ({}, {"relations": {"min_relative_lift": -0.1}}, "config.scene.relations.min_relative_lift"),
+        ({}, {"relations": {"max_combined_conditions": 0}}, "config.scene.relations.max_combined_conditions"),
+    ],
+)
+def test_out_of_range_overrides_are_refused_at_startup(
+    tmp_path: Path, behavior: dict[str, object], scene: dict[str, object], key: str
+) -> None:
+    """kinds_* 与 scene.relations 的值域只在领域配置（配置层不 import 领域、不抄第二份）：配置文件照常读进来，
+    ``build_runtime`` 组装时由领域配置拒，报错点得出是哪个配置键；不论那一侧开没开都拒。"""
+
+    from habitus.infrastructure.store.contracts import PathLock
+    from habitus.runtime import build_runtime
+    from tests.integration.test_runtime_assembly import runtime_dependencies
+    from tests.lock_store import ProcessLocalLockStore
+
+    config = HabitusConfig.from_file(startup_yaml(tmp_path, behavior=behavior, scene=scene))
+    providers, vectors = runtime_dependencies()
+    with pytest.raises(ConfigError, match=f"invalid '{key}'"):
+        build_runtime(config, providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore()))
 
 
 def test_the_scene_relations_group_lists_every_relation_threshold() -> None:
@@ -513,5 +581,113 @@ def test_behaviour_store_capacity_limits_come_through_the_config_boundary() -> N
     assert config.overrides_for("observation_") == {"max_files": 10}
     assert config.overrides_for("fusion_") == {"max_judgement_files": 20}
     assert config.overrides_for("tree_") == {"max_children_per_directory": 30}
-    with pytest.raises(ValueError, match="observation_max_files"):
-        BehaviorConfig(observation_max_files=0)
+    with pytest.raises(ValueError, match="observation_max_files must be an integer"):
+        BehaviorConfig(observation_max_files=1.5)  # type: ignore[arg-type]
+
+
+def _behavior_domains() -> dict[str, type]:
+    from habitus.behavior.document import BehaviorDocumentConfig
+    from habitus.behavior.fusion.config import BehaviorFusionConfig
+    from habitus.behavior.fusion.lanes.physical import PhysicalLaneConfig
+    from habitus.behavior.fusion.lanes.session import SessionLaneConfig
+    from habitus.behavior.kinds.config import BehaviorKindConfig
+    from habitus.behavior.observation.config import BehaviorObservationConfig
+    from habitus.behavior.semantic import BehaviorSemanticConfig
+    from habitus.behavior.tree.config import BehaviorTreeConfig
+    from habitus.behavior.tree.writer import BehaviorWriteConfig
+
+    return {
+        "session_": SessionLaneConfig,
+        "physical_": PhysicalLaneConfig,
+        "kinds_": BehaviorKindConfig,
+        "observation_": BehaviorObservationConfig,
+        "fusion_": BehaviorFusionConfig,
+        "tree_": BehaviorTreeConfig,
+        "document_": BehaviorDocumentConfig,
+        "write_": BehaviorWriteConfig,
+        "semantic_": BehaviorSemanticConfig,
+    }
+
+
+# 存储的内容类上限（一次交付多少条、每条多长）随上游契约一起定，这一版只接与生命周期相关的容量闸（26 号清单 8.2）
+_PARTIAL_PREFIXES = frozenset({"observation_", "fusion_", "tree_"})
+
+
+def test_every_behaviour_override_prefix_maps_onto_its_domain_config() -> None:
+    """E18：每一组覆盖项都按前缀对到一份领域配置的同名字段——会话 / 物理 lane、词表、文档、写锁、语义概览的每个字段都调得到，
+    不多出领域里没有的字段；组合根把它们真的交给领域配置。"""
+
+    from habitus.config.behavior import OVERRIDE_PREFIXES, BehaviorConfig
+    from habitus.runtime.behavior import behavior_domain_configs
+
+    domains = _behavior_domains()
+    assert set(OVERRIDE_PREFIXES) == set(domains)
+    exposed_all = {item.name for item in dataclasses.fields(BehaviorConfig)}
+    for prefix, domain in domains.items():
+        names = {item.name for item in dataclasses.fields(domain)}
+        exposed = {name.removeprefix(prefix) for name in exposed_all if name.startswith(prefix)}
+        assert exposed <= names, prefix
+        if prefix not in _PARTIAL_PREFIXES:
+            assert exposed == names, prefix
+    built = behavior_domain_configs(
+        BehaviorConfig(
+            session_max_step_chars=99,
+            physical_max_segments=7,
+            document_max_encoded_bytes=4096,
+            write_lock_ttl_seconds=45,
+            semantic_max_prompt_chars=5000,
+        )
+    )
+    assert built.session.max_step_chars == 99
+    assert built.physical.max_segments == 7
+    assert built.document.max_encoded_bytes == 4096
+    assert built.write.lock_ttl_seconds == 45
+    assert built.semantic.max_prompt_chars == 5000
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "accepted"),
+    [
+        ("session_max_steps", 60, True),  # 领域收（配置层以前另写了上限 50）
+        ("tree_max_children_per_directory", 5_000_000, False),  # 领域拒（配置层以前另写了上限 1000 万）
+        ("tree_max_children_per_directory", 1, False),
+        ("write_lock_ttl_seconds", 0, False),
+        ("physical_max_facts", 0, False),
+    ],
+)
+def test_behaviour_override_ranges_are_the_domain_ranges(field: str, value: int, accepted: bool) -> None:
+    """值域只在领域配置一处：配置层只查类型、照常读进来，组装时由领域配置判；拒了报的是配置键。"""
+
+    from habitus.config.behavior import BehaviorConfig
+    from habitus.runtime.behavior import behavior_domain_configs
+
+    config = BehaviorConfig(**{field: value})
+    if accepted:
+        behavior_domain_configs(config)
+    else:
+        with pytest.raises(ConfigError, match=f"invalid 'config.behavior.{field}'"):
+            behavior_domain_configs(config)
+
+
+def test_ingress_ceilings_default_to_the_same_64_mib() -> None:
+    """分块上传拼回的一轮（最大 http.remember_parts_max_bytes）要整份放进会话源单条信封与会话日志单文件：三者默认对齐。"""
+
+    from habitus.config import ConversationSourceConfig, HTTPAPIConfig
+    from habitus.memory.conversation import ConversationJournalConfig
+
+    assert (
+        ConversationSourceConfig().max_envelope_bytes
+        == ConversationJournalConfig().max_file_bytes
+        == HTTPAPIConfig().remember_parts_max_bytes
+        == 64 * 1024 * 1024
+    )
+    example = yaml.safe_load((Path(__file__).resolve().parents[3] / "habitus/config/example.yaml").read_text("utf-8"))
+    assert example["conversation"]["source"]["max_envelope_bytes"] == 64 * 1024 * 1024
+
+
+@pytest.mark.parametrize("value", [0, -1, 1023, 64 * 1024 * 1024 + 1])
+def test_http_max_request_bytes_outside_its_range_is_rejected(value: int) -> None:
+    from habitus.config import HTTPAPIConfig
+
+    with pytest.raises(ValueError, match="max_request_bytes must be between 1024 and 67108864"):
+        HTTPAPIConfig(max_request_bytes=value)

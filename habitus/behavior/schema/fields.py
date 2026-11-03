@@ -12,7 +12,7 @@ from datetime import date, datetime
 from typing import Any
 
 from habitus.behavior.kinds.ids import KindIdError, lane_of_token
-from habitus.behavior.model import behavior_local_timestamp
+from habitus.behavior.model import behavior_local_timestamp, readable_text
 from habitus.behavior.schema.model import BehaviorFieldSchema, BehaviorFieldType, BehaviorSchemaError
 from habitus.behavior.schema.vocabulary import (
     GAP_KINDS,
@@ -41,7 +41,7 @@ def text(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise BehaviorSchemaError(f"{label} must be non-empty text")
     normalized = value.strip()
-    if any(not character.isprintable() and character not in "\n\t" for character in normalized):
+    if not readable_text(normalized):
         raise BehaviorSchemaError(f"{label} contains control characters")
     return normalized
 

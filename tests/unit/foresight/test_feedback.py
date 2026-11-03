@@ -1,4 +1,4 @@
-"""单元的提醒反馈（裁定 61 第 4 条；方案 30 第四节）：说 + 做合判——做了是好、没回应或负又没做是坏、中又没做不写；
+"""单元的提醒反馈（裁定 61 第 4 条；方案 30 第四节）：说 + 做合判——做了是好、没回应或负又没做是坏、中或已做又没做不写；
 读数单位权重、上界掉到线下单元回影子。"""
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import pytest
 
 from habitus.foresight import Evidence, Tolerance
 from habitus.foresight.edges import PastMoment
-from habitus.foresight.feedback import feedback_reading, latest_polarity, reminder_feedback
+from habitus.foresight.feedback import feedback_reading, latest_polarity, reminder_feedback, said_done
 from habitus.foresight.history import Moment
 from habitus.foresight.ladder import Standing
 from habitus.foresight.ledger import Expectation, Response, Settlement, UnitFeedback
@@ -71,6 +71,9 @@ def said(polarity: str, minutes: int = 30) -> Response:
         ("过期待决", (said("负"),), False),  # 这次不用、没做
         ("过期待决", (said("正"), said("负", 60)), False),  # 最后一次判出的方向算数
         ("过期待决", (said("中"),), None),  # 中、没做：不写、不算机会
+        ("过期待决", (said("已做"),), None),  # 他说已经做过了、没看到做：观测的缺口，不写（裁定 91 第 3 条②）
+        ("过期待决", (said("已做", 30), said("负", 60)), None),  # 已做也关闭：之后的负不再判
+        ("提醒后发生", (said("已做"),), True),  # 看到说了之后做了：照常是好
     ],
 )
 def test_say_and_do_are_judged_together_with_doing_first(outcome: str, responses, expected) -> None:  # type: ignore[no-untyped-def]
@@ -119,11 +122,16 @@ def test_the_first_closing_response_decides_and_a_later_neutral_cannot_undo_it()
     assert latest_polarity((said("正", 60), said("负", 30))) == "负"  # 最早关闭的那条
     assert latest_polarity((said("中", 30), said("中", 60))) == "中"
     assert latest_polarity(()) is None
+    # 「已做」也关闭（裁定 91 第 3 条②）：结算读同一个方向判他是不是说了已做
+    assert latest_polarity((said("中", 30), said("已做", 60))) == "已做"
+    assert said_done((said("中", 30), said("已做", 60)))
+    assert not said_done((said("负", 30), said("已做", 60)))
+    assert not said_done(())
 
 
-def test_the_feedback_clock_advances_by_the_units_silent_misses_so_a_pushed_back_unit_can_recover() -> None:
-    """裁定 60 第 4 条：回了影子以后没有"说"、不再写反馈，但他每一次到时窗末还没做的机会推一格名次，遗忘把上界带回线上；
-    记过反馈的那几刻、他自己做了的那几刻不推。"""
+def test_the_feedback_clock_advances_by_every_opportunity_of_the_unit_so_a_pushed_back_unit_can_recover() -> None:
+    """裁定 91 第 3 条①（改裁定 60 第 4 条）：回了影子以后没有"说"、不再写反馈，但他之后的每一次机会——做了的、没做的——都
+    推一格名次，遗忘把上界带回线上（降档是扣分、可恢复，裁定 54 第 2 条）；记过反馈的那几刻不另数一遍。"""
 
     rows = [UnitFeedback(HOTEL, NOW + timedelta(days=index), index < 12, f"e{index}") for index in range(16)]
     options = dict(alpha=EVIDENCE.alpha, half_life=EVIDENCE.half_life, window=EVIDENCE.window)
@@ -137,15 +145,18 @@ def test_the_feedback_clock_advances_by_the_units_silent_misses_so_a_pushed_back
             for index in range(count)
         )
 
-    # 记过反馈的那几刻（同一条预期）不另数一遍；他自己做了的那几刻不是"还没做"的机会
+    # 记过反馈的那几刻（同一条预期）不另数一遍
     same = tuple(Moment(PastMoment(row.at, edge, row.good, 1.0), (row.expectation_id,)) for row in rows)
     assert feedback_reading(rows, moments=same, **options) == stuck
-    assert feedback_reading(rows, moments=later(50, True), **options) == stuck
-    # 没做的机会推着时钟走（分量 0、不添计数）：上界回到线上，单元才有再开口的一天；推满 M 格旧的全忘光
+    # 他自己做了的机会与没做的机会一样推着时钟走（分量 0、不添计数，只当名次）：读数一模一样
+    for count in (1, 4, 20):
+        assert feedback_reading(rows, moments=later(count, True), **options) == feedback_reading(
+            rows, moments=later(count, False), **options
+        )
     readings = [
-        feedback_reading(rows, moments=later(count, False), **options) for count in range(1, EVIDENCE.window + 1)
+        feedback_reading(rows, moments=later(count, True), **options) for count in range(1, EVIDENCE.window + 1)
     ]
-    assert readings[-1].n == 0.0
+    assert readings[-1].n == 0.0  # 推满 M 格旧的全忘光
     recovered = next(count for count, found in enumerate(readings, start=1) if found.upper >= LOSS.threshold)
     assert 1 < recovered <= EVIDENCE.window
     standing = Standing(level=1, threshold=LOSS.threshold, prediction=reading(9.0, 9.5, alpha=0.05))

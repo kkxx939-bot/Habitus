@@ -9,7 +9,8 @@ from datetime import date, datetime, time, timedelta, timezone
 import pytest
 
 from habitus.conditions import HolidayTable, HolidayYear, LocalCalendar
-from habitus.foresight import ForesightError, Moment, Seen, form_expectations
+from habitus.config.foresight import ForesightConfig
+from habitus.foresight import Batch, ForesightError, Moment, Seen, form_expectations
 from habitus.foresight.ledger import expectation_identity
 from habitus.foresight.opportunities import (
     KindDays,
@@ -33,6 +34,8 @@ from tests.unit.scene.relation_fixtures import CODE, CONCEPTS, CONFIG, DISCUSS, 
 
 CST = timezone(timedelta(hours=8))
 RULERS = RhythmRulers(15, 2700, 3, 5.0, 5.0, 0.10, 35)
+#: 产品默认的那条线 θ = 1 − 可接受的误提醒率：「离上次够久」的时窗往后接几天由它定（裁定 89 第 1 条）。
+LINE = 1.0 - ForesightConfig().false_alarm_rate
 #: 带日历情境的概念集（周三、20 号、工作日……按天机械填）。
 CALENDAR_CONCEPTS = ConceptSet(
     (*(CONCEPTS[identity] for identity in CONCEPTS.behaviors()), *calendar_concepts(now=CREATED))
@@ -399,7 +402,7 @@ def test_the_interval_trigger_is_a_discrete_hazard_by_elapsed_days_and_the_windo
     assert set(gaps) == {1, 3}  # 每个工作日 09:00 调研：隔 1 天，过周末隔 3 天
     today = series.cutoff  # 2026-07-25 周六，没有记录；离上次（周五）1 天
     now = datetime.combine(today, time(8, 0), tzinfo=CST)
-    drafts = day_drafts(table, moment_at(now), done_today=frozenset(), recent=35)
+    drafts = day_drafts(table, moment_at(now), done_today=frozenset(), recent=35, line=LINE)
     (interval,) = [item for item in drafts if item.kind_token == RESEARCH and item.trigger == "interval"]
     last = research.days[-1]
     assert last.day == date(2026, 7, 24) and interval.trigger_instance == f"{last.first_uri}@2026-07-25"
@@ -414,29 +417,39 @@ def test_the_interval_trigger_is_a_discrete_hazard_by_elapsed_days_and_the_windo
     evening = datetime.combine(today, time(20, 0), tzinfo=CST)
     assert not [
         item
-        for item in day_drafts(table, moment_at(evening), done_today=frozenset(), recent=35)
+        for item in day_drafts(table, moment_at(evening), done_today=frozenset(), recent=35, line=LINE)
         if item.kind_token == RESEARCH and item.trigger == "interval"
     ]
     # 周一（逝去 3 天）：在险的只剩过周末的那几次，命中全是它们——另一簇、另一条实例
     monday = datetime.combine(date(2026, 7, 27), time(8, 0), tzinfo=CST)
     (later,) = [
         item
-        for item in day_drafts(table, moment_at(monday), done_today=frozenset(), recent=35)
+        for item in day_drafts(table, moment_at(monday), done_today=frozenset(), recent=35, line=LINE)
         if item.kind_token == RESEARCH and item.trigger == "interval"
     ]
     assert later.trigger_instance == f"{last.first_uri}@2026-07-27"
     assert later.opportunities == later.hits == gaps.count(3) and later.window[0] == monday.replace(hour=9)
-    # 逝去 2 天、5 天：历史上没有恰好隔这么久做过的，不是它的日子；今天已做的照建（裁定 49）
-    for day in (date(2026, 7, 26), date(2026, 7, 29)):
-        moment = moment_at(datetime.combine(day, time(8, 0), tzinfo=CST))
-        assert not [
-            item
-            for item in day_drafts(table, moment, done_today=frozenset(), recent=35)
-            if item.kind_token == RESEARCH and item.trigger == "interval"
-        ]
+    # 逝去 2 天：历史上没有恰好隔这么久做过、也还没超过历史，不是它的日子
+    sunday = moment_at(datetime.combine(date(2026, 7, 26), time(8, 0), tzinfo=CST))
+    assert not [
+        item
+        for item in day_drafts(table, sunday, done_today=frozenset(), recent=35, line=LINE)
+        if item.kind_token == RESEARCH and item.trigger == "interval"
+    ]
+    # 逝去 5 天（周一周二都没做）：比历史上的间隔都久，按常见间隔 1 天继续，只管这一天、新的身份（裁定 90）
+    wednesday = datetime.combine(date(2026, 7, 29), time(8, 0), tzinfo=CST)
+    (overdue,) = [
+        item
+        for item in day_drafts(table, moment_at(wednesday), done_today=frozenset(), recent=35, line=LINE)
+        if item.kind_token == RESEARCH and item.trigger == "interval"
+    ]
+    assert overdue.trigger_instance == f"{last.first_uri}@2026-07-29"
+    assert overdue.window[0] == wednesday.replace(hour=9) and overdue.window[1].date() == date(2026, 7, 29)
+    assert overdue.hits == gaps.count(1) and overdue.opportunities == len(gaps)  # 借常见间隔（1 天）那一天的读数
+    # 今天已做的照建（裁定 49）
     (done,) = [
         item
-        for item in day_drafts(table, moment_at(now), done_today=frozenset({RESEARCH}), recent=35)
+        for item in day_drafts(table, moment_at(now), done_today=frozenset({RESEARCH}), recent=35, line=LINE)
         if item.kind_token == RESEARCH and item.trigger == "interval"
     ]
     assert done.trigger_instance == interval.trigger_instance
@@ -444,13 +457,15 @@ def test_the_interval_trigger_is_a_discrete_hazard_by_elapsed_days_and_the_windo
     # 做了的过了窗也照建；没做的过了窗退场（上面晚上那一拍）
     assert [
         item
-        for item in day_drafts(table, moment_at(evening), done_today=frozenset({RESEARCH}), recent=35)
+        for item in day_drafts(table, moment_at(evening), done_today=frozenset({RESEARCH}), recent=35, line=LINE)
         if item.kind_token == RESEARCH and item.trigger == "interval"
     ]
 
 
 def test_consecutive_gaps_are_one_cluster_whichever_day_it_is_recomputed_on() -> None:
-    """间隔 2、3、4 天连成一簇：第 2 天建的那条与第 3 天重算的是同一个身份（不然第 3 天那次发生被同一本账结成两次命中）。"""
+    """间隔 2、3、4 天连成一簇（2 次、3 次、2 次）：第 2 天建的那条时窗盖住第 2、3 天（到第 3 天来了的 5/7 已过线，不再往后接），
+    第 3 天重算是同一个身份（不然第 3 天那次发生被同一本账结成两次命中）；第 4 天那条时窗没盖住，从第 4 天另开一段、新的身份
+    （``ClusterReading.opened``，裁定 90）。"""
 
     start = date(2026, 6, 1)
     offsets = [0]
@@ -465,13 +480,54 @@ def test_consecutive_gaps_are_one_cluster_whichever_day_it_is_recomputed_on() ->
     for elapsed in (2, 3, 4):
         moment = moment_at(datetime.combine(days[-1] + timedelta(days=elapsed), time(8, 0), tzinfo=CST))
         (draft,) = [
-            item for item in day_drafts(table, moment, done_today=frozenset(), recent=35) if item.trigger == "interval"
+            item
+            for item in day_drafts(table, moment, done_today=frozenset(), recent=35, line=LINE)
+            if item.trigger == "interval"
         ]
         instances.append(draft.trigger_instance)
-    assert instances == [f"veg-{days[-1]:%m%d}@{days[-1] + timedelta(days=2)}"] * 3
+    assert instances == [
+        f"veg-{days[-1]:%m%d}@{days[-1] + timedelta(days=2)}",
+        f"veg-{days[-1]:%m%d}@{days[-1] + timedelta(days=2)}",
+        f"veg-{days[-1]:%m%d}@{days[-1] + timedelta(days=4)}",
+    ]
 
 
 # ── 装配 ────────────────────────────────────────────────────────────────────
+
+
+def test_the_daytime_batch_builds_no_day_expectations_and_the_nightly_batch_builds_only_those() -> None:
+    """裁定 94 第 1 条：日子预期一天只建一次，在夜里那条线的末尾（``Batch.DAYS``）；白天那一拍（``Batch.MOMENT``）只建事件与情境，
+    不按"日期变了"再建一份。日子预期只从这张表读"上次"：读到的行里有比表更新的那次也不改（不再用行去补一张旧表）。"""
+
+    series = planted()
+    table = table_of(series, (relation(DISCUSS, CODE),))
+    discussion, _code = discussion_followed_by_code(series)
+    now = just_after(discussion)
+    rows = seen_until(series, now)
+
+    def sources(batch: Batch, rows: tuple[Seen, ...]) -> set[str]:
+        found = form_expectations(moment=moment_at(now), table=table, rows=rows, batch=batch, recent=35, line=LINE)
+        return {item.source for item in found}
+
+    assert sources(Batch.MOMENT, rows) == {"事件"}
+    assert sources(Batch.DAYS, rows) == {"日子"}
+    friday = date(2026, 7, 24)
+    stale = table_of(
+        EventSeries(
+            cutoff=friday - timedelta(days=1),
+            records=tuple(item for item in series.records if item.day < friday - timedelta(days=1)),
+        ),
+        (),
+    )
+    at = datetime.combine(friday, time(0, 30), tzinfo=CST)
+    late = [
+        item
+        for item in form_expectations(
+            moment=moment_at(at), table=stale, rows=seen_until(series, at), batch=Batch.DAYS, recent=35, line=LINE
+        )
+        if item.kind_token == RESEARCH
+    ]
+    assert late == []  # 表只到周三：离上次读成 2 天，周四那次在行里也不拿来补（这张表本来就不该在周五建日子预期）
 
 
 def test_assembly_gives_each_draft_an_identity_without_the_night_and_attaches_the_antecedents() -> None:
@@ -480,7 +536,20 @@ def test_assembly_gives_each_draft_an_identity_without_the_night_and_attaches_th
     discussion, _code = discussion_followed_by_code(series)
     now = just_after(discussion)
     rows = seen_until(series, now)
-    found = form_expectations(moment=moment_at(now), table=table, rows=rows, generation="g1", version="3", recent=35)
+    found = tuple(
+        item
+        for batch in Batch
+        for item in form_expectations(
+            moment=moment_at(now),
+            table=table,
+            rows=rows,
+            batch=batch,
+            generation="g1",
+            version="3",
+            recent=35,
+            line=LINE,
+        )
+    )
     assert found and all(
         item.formed_at == now and item.night == table.night and item.generation == "g1" and item.version == "3"
         for item in found
@@ -507,8 +576,8 @@ def test_the_moment_slot_must_use_the_table_slot_width() -> None:
     table = table_of(series, ())
     now = datetime.combine(series.cutoff, time(8, 0), tzinfo=CST)
     with pytest.raises(ForesightError, match="moment.slot"):
-        form_expectations(moment=Moment(at=now, slot=0), table=table, rows=(), recent=35)
-    assert form_expectations(moment=moment_at(now), table=None, rows=(), recent=35) == ()
+        form_expectations(moment=Moment(at=now, slot=0), table=table, rows=(), batch=Batch.MOMENT, recent=35, line=LINE)
+    assert form_expectations(moment=moment_at(now), table=None, rows=(), batch=Batch.DAYS, recent=35, line=LINE) == ()
 
 
 def test_a_window_that_closed_since_the_last_look_is_still_built_when_nothing_was_done() -> None:
@@ -544,11 +613,11 @@ def test_the_interval_window_follows_the_latest_habit_not_the_whole_history() ->
     )
     table = OpportunityTable("session", days[-1], days[-1], 15, 3, (), (runs,))
     early = moment_at(datetime.combine(days[-1] + timedelta(days=2), time(5, 0), tzinfo=CST))
-    (recent,) = day_drafts(table, early, done_today=frozenset(), recent=35)
+    (recent,) = day_drafts(table, early, done_today=frozenset(), recent=35, line=LINE)
     assert recent.window[1].time() < time(8, 0) and recent.opportunities == 79
-    (whole,) = day_drafts(table, early, done_today=frozenset(), recent=80)
+    (whole,) = day_drafts(table, early, done_today=frozenset(), recent=80, line=LINE)
     assert whole.window[1].time() >= time(19, 0)  # 全历史时窗末拖到 19:00
-    found = form_expectations(moment=early, table=table, rows=(), recent=35)
+    found = form_expectations(moment=early, table=table, rows=(), batch=Batch.DAYS, recent=35, line=LINE)
     assert len(found) == 1 and len(found[0].basis) == 35 and found[0].basis[-1] == f"run-{days[-1]:%y%m%d}"
 
 
@@ -570,7 +639,9 @@ def test_a_day_done_only_after_a_reminder_is_unknown_to_the_interval_trigger() -
     weekly = OpportunityTable("session", days[-1], days[-1], 15, 3, (), (veg,))
     later = moment_at(datetime.combine(days[-1] + timedelta(days=7), time(8, 0), tzinfo=CST))
     (interval,) = [
-        item for item in day_drafts(weekly, later, done_today=frozenset(), recent=35) if item.trigger == "interval"
+        item
+        for item in day_drafts(weekly, later, done_today=frozenset(), recent=35, line=LINE)
+        if item.trigger == "interval"
     ]
     assert (interval.hits, interval.opportunities) == (3, 3)
     # 时窗与出处：每周五改代码，第三个周五 07:00 被提醒改了一次、09:30 又自己改了一次；另几周都是 09:30
@@ -588,7 +659,7 @@ def test_a_day_done_only_after_a_reminder_is_unknown_to_the_interval_trigger() -
     early = datetime.combine(today, time(6, 0), tzinfo=CST)
     (code,) = [
         item
-        for item in day_drafts(built, moment_at(early), done_today=frozenset(), recent=35)
+        for item in day_drafts(built, moment_at(early), done_today=frozenset(), recent=35, line=LINE)
         if item.kind_token == CODE and item.trigger == "interval"
     ]
     assert code.window[0].time() == time(9, 30)
@@ -663,7 +734,13 @@ def test_a_family_forms_only_its_most_specific_holding_relation_and_the_base_whe
     # 装配出来的预期按同一规则：先调研过的那次记在带条件的那本账上
     now = just_after(primed)
     formed = form_expectations(
-        moment=moment_at(now), table=table, rows=seen_until(series, now), shadow_unestablished=False, recent=35
+        moment=moment_at(now),
+        table=table,
+        rows=seen_until(series, now),
+        batch=Batch.MOMENT,
+        shadow_unestablished=False,
+        recent=35,
+        line=LINE,
     )
     mine = [item for item in formed if item.trigger_instance == instance_at(primed.started_at)]
     assert [item.trigger for item in mine] == [primed_key.text]
@@ -693,3 +770,102 @@ def test_conditions_the_day_cannot_judge_fall_back_to_the_plain_relation() -> No
     assert [item.trigger for item in drafts if item.trigger_instance == instance_at(discussion.started_at)] == [
         key(DISCUSS, CODE).text
     ]
+
+
+def test_an_antecedent_whose_start_was_corrected_keeps_the_same_expectation_identity() -> None:
+    """段 6 Q5：事件触发的实例是前因的开始时刻；前因封口时开始被更正挪了几分钟（还是那一行），下一拍原来建出第二条预期、
+    同一本账记两笔。这本账上已经建过、落在这一行里的实例照旧用：前后两拍是同一个身份。"""
+
+    series = planted()
+    table = table_of(series, (relation(DISCUSS, CODE),))
+    discussion, code = discussion_followed_by_code(series)
+
+    def form(rows: tuple[Seen, ...], now: datetime, looked: datetime, known: dict[str, tuple[str, ...]]):  # type: ignore[no-untyped-def]
+        found = form_expectations(
+            moment=replace(moment_at(now), looked_since=looked),
+            table=table,
+            rows=rows,
+            batch=Batch.MOMENT,
+            recent=35,
+            line=LINE,
+            calendar_of=lambda _day: {},
+            known_instances=lambda account: known.get(account, ()),
+        )
+        return [item for item in found if item.kind_token == CODE and item.source == "事件"]
+
+    first_at = just_after(discussion)
+    (first,) = form(seen_until(series, first_at), first_at, first_at - timedelta(minutes=15), {})
+    later = first_at + timedelta(minutes=15)
+    corrected = discussion.started_at - timedelta(minutes=3)
+    moved = tuple(
+        replace(row, started_at=corrected) if row.source == discussion.uri else row
+        for row in seen_until(series, later)
+        if row.source != code.uri or row.started_at <= later
+    )
+    (unknown,) = form(moved, later, first_at, {})
+    assert unknown.expectation_id != first.expectation_id  # 不知道建过：按新的开始时刻是另一个身份
+    (again,) = form(moved, later, first_at, {first.account: (first.trigger_instance,)})
+    assert again.expectation_id == first.expectation_id and again.trigger_instance == instance_at(discussion.started_at)
+    # 另一行（不跨过原来那一刻）的实例不沿用
+    elsewhere = (first.trigger_instance.replace(str(discussion.started_at.year), str(discussion.started_at.year - 1)),)
+    (other,) = form(moved, later, first_at, {first.account: elsewhere})
+    assert other.trigger_instance == instance_at(corrected)
+
+
+def test_a_rest_of_day_window_and_deadline_stop_at_the_end_of_that_day() -> None:
+    """段 6 Q8：「当天剩下的」的最晚时限是那一段的边界（当天过完，方案 19 第九节第 3 步）。历史那几次"做完之后多久"挪到今天
+    可能越过午夜：原来 ``clamp`` 把最晚时限推到次日早上，次日的发生结成准时；时窗终点截在边界、最晚时限就是边界；
+    整段时窗都在边界之后的不建。"""
+
+    today = date(2026, 3, 3)
+
+    def at(day: date, hour: int, minute: int = 0) -> datetime:
+        return datetime.combine(day, time(hour, minute), tzinfo=CST)
+
+    def history(offsets_hours: tuple[float, ...]) -> tuple[Opportunity, ...]:
+        found = []
+        for index, hours in enumerate(offsets_hours):
+            day = today - timedelta(days=len(offsets_hours) - index)
+            ended = at(day, 14)
+            found.append(
+                Opportunity(
+                    f"behavior://a{index}.md",
+                    (f"behavior://a{index}.md",),
+                    day,
+                    ended,
+                    True,
+                    f"behavior://c{index}.md",
+                    ended + timedelta(hours=hours),
+                )
+            )
+        return tuple(found)
+
+    def drafts(offsets_hours: tuple[float, ...]):  # type: ignore[no-untyped-def]
+        rest = RelationOpportunities(
+            key=key(DISCUSS, CODE, Segment.REST_OF_DAY).text,
+            antecedent="a",
+            consequent="c",
+            antecedent_label="讨论方案",
+            consequent_label="修改代码",
+            antecedent_classes=(DISCUSS,),
+            consequent_classes=(CODE,),
+            segment="rest_of_day",
+            status="established",
+            upward=True,
+            items=history(offsets_hours),
+        )
+        table = OpportunityTable("session", today, today, 15, 3, (rest,), ())
+        now = at(today, 22, 0)
+        rows = (Seen(at(today, 20, 45), at(today, 21, 0), DISCUSS, "behavior://today.md"),)
+        line = timeline_of(rows, lane="session", slot_minutes=15, horizon=today + timedelta(days=1))
+        moment = Moment(at=now, slot=(22 * 60) // 15, calendar={})
+        return event_drafts(
+            table, line, moment, now_slot=absolute_slot(now, slot_minutes=15), statuses=("established",)
+        )
+
+    boundary = at(today + timedelta(days=1), 0)
+    (crossing,) = drafts((1.5, 9.0))  # 今天 21:00 做完：22:30 起、次日 06:00 止 → 截在午夜
+    assert crossing.window == (at(today, 22, 30), boundary) and crossing.deadline == boundary
+    (late,) = drafts((2.9, 2.95))  # 一槽宽的下限也不越过边界
+    assert late.window[1] <= boundary and late.deadline == boundary
+    assert drafts((3.5, 9.0)) == ()  # 整段时窗都在边界之后：这一段里没有它的时窗

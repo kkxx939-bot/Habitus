@@ -1,31 +1,13 @@
-"""行为上下文视图：一条行为周围是什么样，全部是机械投影出来的**观测事实**。
+"""行为树读侧的两种值：时间轴上的一条原子行为（``FlowRow``）与一段观测空白（``ObservationGap``）。
 
-几个机械事实（2026-09-12 定的维度，原来跟着预测树算候选的维度走；预测树删后照旧保留，裁定 59）：
-``first_of_day``（当天第一次）、``preceding`` / ``following``（时间上**紧邻**的上一条 / 下一条）、
-``gaps``（这段时间在不在看，与 ``temporal`` 的观测覆盖同一个口径）、``day_note``（当地日历对这一天的说法）。
-缺什么就是空，不推测、不打分。
-
-原来还有"所在的事"、角色、事里更早成员留下的前提——那是按天归组的产物，已随日情景树删掉；后来的规律级
-记录（``gloss``）也随 2026-09-26 的重构整块删掉。行为之间的关系由语义树的关系表提供，
+全部是从行为树机械读出来的**观测事实**，缺什么就是空，不推测、不打分。行为之间的关系由语义树的关系表提供，
 这里只剩行为树自己的读侧。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
-
-# 转移窗口的上限：视图只读相邻一天，窗口超过一天会静默截断，所以硬拒。
-MAX_TRANSITION_WINDOW_SECONDS = 86_400.0
-
-
-@dataclass(frozen=True)
-class ActionRef:
-    """一条行为的引用：URI + 名字 + kind_token（对比按 kind_token，展示用名字）。"""
-
-    uri: str
-    name: str
-    kind_token: str
+from datetime import datetime
 
 
 @dataclass(frozen=True)
@@ -63,18 +45,6 @@ class FlowRow:
 
 
 @dataclass(frozen=True)
-class LastTime:
-    """同 kind 的上一次：哪一条、距今几天。
-
-    原来还带"当时所在的事"，那是按天归组的概念；换成规律级之后，那一次的上下文按行为 URI
-    直接取记录就有，不需要在这里带一个中间容器。
-    """
-
-    uri: str
-    days_ago: int
-
-
-@dataclass(frozen=True)
 class ObservationGap:
     """一段观测空白（行为树的 gap 节点，已按天裁开）：``kind`` 是上游词表里的两个取值之一（没读懂 / 未观测）。
 
@@ -97,89 +67,4 @@ class ObservationGap:
             raise ValueError("observation gap kind must be non-empty text")
 
 
-@dataclass(frozen=True)
-class Neighbour:
-    """转移窗口内紧邻的一条行为——三态：
-
-    - ``action`` 非空：找到了；
-    - ``action`` 为空且 ``censored`` 为假：窗口内**确认没有**（"做完就收工"）；
-    - ``censored`` 为真：窗口内有观测空洞，不知道（删失，既不算找到也不算没有）。
-
-    "没算"（调用方没给窗口）不在这里表达，那是视图字段本身为 None。
-    """
-
-    action: ActionRef | None
-    censored: bool = False
-
-    def __post_init__(self) -> None:
-        if self.action is not None and self.censored:
-            raise ValueError("a found neighbour cannot also be censored")
-
-
-@dataclass(frozen=True)
-class ContextView:
-    """一条行为（``occurrence_uri`` 非空）或此刻（``occurrence_uri`` 为空）的上下文。
-
-    ``today_kinds`` 只在此刻视图上有意义：今日已发生的 kind，供"历史前提今天成立了没有"的对比，
-    它不是前提本身。
-
-    几个机械事实字段：``first_of_day`` 只对历史视图有意义（此刻视图为 None）；
-    ``preceding`` / ``following`` 只在调用方给了转移窗口时才算（没给即 None，不是"没有"——"没有"
-    是三态里的第二态：找过了、确实没有）；
-    ``gaps`` 只对此刻视图有意义。
-
-    ``day_note`` 是当地日历对这一天的说法（"补班日，按周一上班"），没有日历数据时恒为空。它是
-    摆在判断者面前的一个事实，不参与本层的任何筛选与排序——"今天像周几"由判断者自己判。
-    """
-
-    kind_token: str
-    at: datetime
-    occurrence_uri: str | None = None
-    name: str | None = None
-    causes: tuple[ActionRef, ...] = ()
-    last_time: LastTime | None = None
-    concurrent: tuple[ActionRef, ...] = ()
-    subjects: tuple[str, ...] = ()
-    summary: str | None = None
-    first_of_day: bool | None = None
-    preceding: Neighbour | None = None
-    following: Neighbour | None = None
-    day_note: str | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.kind_token, str) or not self.kind_token:
-            raise ValueError("context view kind_token must be non-empty text")
-        if not isinstance(self.at, datetime) or self.at.utcoffset() is None:
-            raise ValueError("context view at must be a timezone-aware datetime")
-
-    @property
-    def day(self) -> date:
-        return self.at.date()
-
-    @property
-    def weekday(self) -> int:
-        return self.at.weekday()
-
-
-def transition_window(value: float | None) -> float | None:
-    """转移窗口的唯一守卫：None 即"不算"；否则必须是正数且不超过一天（视图只读相邻一天）。"""
-
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
-        raise ValueError("transition_window_seconds must be a positive number or None")
-    if value > MAX_TRANSITION_WINDOW_SECONDS:
-        raise ValueError("transition_window_seconds must not exceed one day")
-    return float(value)
-
-
-__all__ = [
-    "MAX_TRANSITION_WINDOW_SECONDS",
-    "ActionRef",
-    "ContextView",
-    "FlowRow",
-    "LastTime",
-    "Neighbour",
-    "ObservationGap",
-    "transition_window",
-]
+__all__ = ["FlowRow", "ObservationGap"]

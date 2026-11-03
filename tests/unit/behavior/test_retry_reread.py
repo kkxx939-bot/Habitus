@@ -6,10 +6,9 @@ import asyncio
 from datetime import timedelta
 from pathlib import Path
 
-from habitus.behavior.fusion.lanes.session import split_turns
+from habitus.behavior.fusion.lanes.session import TurnHandler, split_turns
 from habitus.behavior.fusion.lanes.session.model import encode_turn
 from habitus.behavior.retry import RetryCause, RetryItem, RetryKind, retry_id
-from habitus.behavior.retry.handlers import TurnHandler
 from habitus.behavior.retry.reread import Rereader
 from habitus.model_client import ModelQuotaError
 from tests.unit.behavior.session_fixtures import Stores, at, description, lane, prompt, reply
@@ -47,6 +46,41 @@ def test_an_unavailable_model_keeps_the_turn_for_the_night(tmp_path: Path) -> No
         raise ModelQuotaError("quota exhausted")
 
     session.describer.describe = quota  # type: ignore[method-assign]
+    item = _item("范围里的", 10)
+    stores.backlog.put(item)
+    assert not asyncio.run(Rereader(stores.backlog, TurnHandler(session)).reread(at(5), at(5) + timedelta(hours=1)))
+    assert [found.item_id for found in stores.backlog.snapshot().items] == [item.item_id]
+
+
+def test_an_answer_that_never_validates_keeps_the_turn_for_the_night_without_raising(tmp_path: Path) -> None:
+    """E2：时窗末重读时模型答得不合格（结构化输出校验用尽）——不往外抛（抛出去那一拍的递送全失败），留在堆里等当晚。"""
+
+    from habitus.model_client import ModelStructuredOutputError
+
+    stores = Stores(tmp_path)
+    session, _provider = lane(stores, [])
+
+    async def invalid(_turn, _reminders=()):  # type: ignore[no-untyped-def]
+        raise ModelStructuredOutputError("validation exhausted")
+
+    session.describer.describe = invalid  # type: ignore[method-assign]
+    item = _item("范围里的", 10)
+    stores.backlog.put(item)
+    assert not asyncio.run(Rereader(stores.backlog, TurnHandler(session)).reread(at(5), at(5) + timedelta(hours=1)))
+    assert [found.item_id for found in stores.backlog.snapshot().items] == [item.item_id]
+
+
+def test_a_write_bug_while_rereading_keeps_the_turn_for_the_night_without_raising(tmp_path: Path) -> None:
+    """写入出错（bug，不再算"格式不合"，review-94b 低 7）在时窗末重读时同样只拦这一项：不往外抛（抛出去那一拍的递送全失败），
+    留在堆里等当晚的前置处理计数报出。"""
+
+    stores = Stores(tmp_path)
+    session, _provider = lane(stores, [description()])
+
+    def broken(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise ValueError("bad write")
+
+    session.recorder.record = broken  # type: ignore[method-assign]
     item = _item("范围里的", 10)
     stores.backlog.put(item)
     assert not asyncio.run(Rereader(stores.backlog, TurnHandler(session)).reread(at(5), at(5) + timedelta(hours=1)))

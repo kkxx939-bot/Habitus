@@ -11,19 +11,32 @@
 只是没做完。
 
 事件触发可能在前因还没封口时就建了（实例是前因的开始时刻）；封口之后前因归成了别的类、或成了非事件（不进行），这次机会就不存在
-——``antecedent_holds`` 判它，结算与递送共用（裁定 54：前因不成立 → 作废）。
+——``antecedent_holds`` 判它（裁定 54：前因不成立 → 作废）。结算与递送开口前对"前因还成立吗"读同一份：前因那一行按实例找、
+类按 ``current`` 认词表拆改（``event_antecedent_holds``）；对"做了没"也是同一个口径（``counts_as_done``：说中的范围里、
+这一类按 ``current`` 认、没放弃）。只有一处两边不同：情境要不要按最新的日历重核——结算重核（``antecedent_holds_when_settling``），
+递送开口前不重核（``antecedent_holds_when_delivering``）。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from datetime import UTC, datetime, timedelta
+from collections.abc import Callable, Iterable, Sequence
+from datetime import UTC, date, datetime, timedelta
+from typing import NamedTuple
 
 from habitus.foresight.ledger.model import Expectation, Omission, Ruling, Settlement
+from habitus.foresight.opportunities.model import RelationOpportunities
 from habitus.scene.views import FlowRow
 
 #: 不算"做了"的结束方式。
 NOT_DONE = frozenset({"abandoned"})
+
+
+class AntecedentRow(NamedTuple):
+    """找前因时一行要的三样：开始、最后所见、现在的类（结算从树上的行取，递送从这一拍读到的行取）。"""
+
+    started_at: datetime
+    last_seen_at: datetime
+    kind_token: str
 
 
 def settle(
@@ -34,7 +47,8 @@ def settle(
     settled_at: datetime,
     current: Callable[[str], Sequence[str]],
 ) -> Settlement:
-    """``rows`` 是从形成那天到最晚时限那天的全部行（按时刻排）；``spoken_at`` 是这条预期第一次被说出的时刻（没说过是 None）。"""
+    """``rows`` 是从起算那天（``observed_from``；晚形成的预期，起算可能早于形成那天）到最晚时限那天的全部行（按时刻排）；
+    ``spoken_at`` 是这条预期第一次被说出的时刻（没说过是 None）。"""
 
     def record(outcome: str, uri: str | None = None, offset: int | None = None) -> Settlement:
         return Settlement(
@@ -66,11 +80,25 @@ def first_occurrence(
 ) -> FlowRow | None:
     """``observed_from`` 之后、最晚时限之前这一类第一次发生的那一行。"""
 
-    kinds = _kinds(expectation, current)
     for row in sorted(rows, key=lambda item: _utc(item.at)):
-        if row.kind_token in kinds and expectation.covers(_utc(row.at)) and row.status not in NOT_DONE:
+        if counts_as_done(expectation, row.kind_token, row.at, abandoned=row.status in NOT_DONE, current=current):
             return row
     return None
+
+
+def counts_as_done(
+    expectation: Expectation,
+    kind_token: str,
+    started_at: datetime,
+    *,
+    abandoned: bool,
+    current: Callable[[str], Sequence[str]],
+) -> bool:
+    """一条 ``started_at`` 开始、类为 ``kind_token`` 的记录算不算这条预期说的那件事做了：落在说中的范围里（起算之后、最晚时限之前）、
+    这一类按 ``current`` 认（原编号也算：迁移做到一半时那天的行可能还是原编号）、没放弃。结算（``first_occurrence``）与递送判
+    "这回已经做了"（``foresight.delivery.done_since``）同一个口径。"""
+
+    return kind_token in _kinds(expectation, current) and expectation.covers(_utc(started_at)) and not abandoned
 
 
 def antecedent_holds(
@@ -91,6 +119,72 @@ def antecedent_holds(
     return antecedent_kind in wanted
 
 
+def event_antecedent_holds(
+    expectation: Expectation,
+    relation: RelationOpportunities | None,
+    *,
+    rows_on: Callable[[date], Iterable[AntecedentRow]],
+    current: Callable[[str], Sequence[str]],
+) -> bool:
+    """事件触发：前因那条记录（按实例——前因的开始时刻——在那天与前后各一天里找，封口后的样子）现在还属于这条关系的前因类吗。
+    先找开始时刻对得上的；封口时前因的开始可能被更正挪了一点，就找跨过那一刻的那一行（行为有先后、不会两行同时）。类按 ``current``
+    认词表拆改。不是事件触发、关系已不在表里（或没有机会表）、实例读不出时刻的：说不清，不判作废。``rows_on`` 给某一天的行，
+    只在用得着时才问。结算与递送开口前共用这一个。"""
+
+    if expectation.source != "事件" or relation is None:
+        return True
+    try:
+        started = datetime.fromisoformat(expectation.trigger_instance).astimezone(expectation.formed_at.tzinfo)
+    except ValueError:
+        return True
+    moment = started.astimezone(UTC)
+    rows = [row for offset in (0, -1, 1) for row in rows_on(started.date() + timedelta(days=offset))]
+    found = next((row.kind_token for row in rows if _utc(row.started_at) == moment), None)
+    if found is None:
+        found = next(
+            (row.kind_token for row in rows if _utc(row.started_at) <= moment <= _utc(row.last_seen_at)),
+            None,
+        )
+    return antecedent_holds(expectation, found, relation.antecedent_classes, current=current)
+
+
+def antecedent_holds_when_settling(
+    expectation: Expectation,
+    relation: RelationOpportunities | None,
+    *,
+    official: bool,
+    calendar_on: Callable[[date], Iterable[tuple[str, str]]],
+    rows_on: Callable[[date], Iterable[AntecedentRow]],
+    current: Callable[[str], Sequence[str]],
+) -> bool:
+    """结算时这次机会的前因还成不成立。``relation`` 是机会表里这条预期的关系（关系已不在表里、或没有机会表：说不清，不判作废）；
+    ``official`` 是机会表对没见过的日型按不按官方含义归组；``calendar_on`` 按最新的日历给某一天的日历情境，``rows_on`` 给某一天
+    树上的行，两者只在用得着时才问。
+
+    - 情境触发：那一天按最新的日历还处在这个日历情境里吗（放假数据后来补上了，原来按名义当成工作日的那天就作废）；
+    - 事件触发：``event_antecedent_holds``（与递送开口前同一个）。"""
+
+    if expectation.source == "情境":
+        if relation is None or relation.calendar_key is None:
+            return True
+        return relation.calendar_holds(dict(calendar_on(expectation.day)), official=official)
+    return event_antecedent_holds(expectation, relation, rows_on=rows_on, current=current)
+
+
+def antecedent_holds_when_delivering(
+    expectation: Expectation,
+    relation: RelationOpportunities | None,
+    *,
+    rows_on: Callable[[date], Iterable[AntecedentRow]],
+    current: Callable[[str], Sequence[str]],
+) -> bool:
+    """开口之前再核一遍事件触发的前因：它可能是没封口时建的，封口后归成了别的类、或成了非事件（找不到了）；``rows_on`` 给某一天
+    这一拍读到的行。找法与类的映射和结算同一个（``event_antecedent_holds``）。情境不按日历重核（结算重核；递送要不要也重核
+    待定）。"""
+
+    return event_antecedent_holds(expectation, relation, rows_on=rows_on, current=current)
+
+
 def rule_overdue(
     expectation: Expectation,
     rows: Sequence[FlowRow],
@@ -99,7 +193,7 @@ def rule_overdue(
     ruled_at: datetime,
     current: Callable[[str], Sequence[str]],
 ) -> Ruling | None:
-    """过期待决之后：最晚时限之后、``before``（这本账下一条预期形成的时刻；没有就是看到的尽头）之前补做了 → 「后补」。
+    """过期待决之后：最晚时限之后、``before``（这本账下一条预期开始看的时刻；没有就是看到的尽头）之前补做了 → 「后补」。
     下一次机会按账找、不按类找（裁定 48、49）：周四漏跑、周二照常跑，周二是周二那本账的机会，对周四这本账是"下一次之前"
     的补做——是不是真补，交给强度（补做延迟在这类历史间隔里的位置，裁定 51），这里只认方向。
     没补做不裁（等回话或下一次机会）；回话的裁决由调用方按回话记，不经这里。"""
@@ -177,4 +271,16 @@ def _minutes(delta: timedelta) -> int:
     return int(round(delta.total_seconds() / 60.0))
 
 
-__all__ = ["first_occurrence", "omissions", "rule_overdue", "settle"]
+__all__ = [
+    "NOT_DONE",
+    "AntecedentRow",
+    "antecedent_holds",
+    "antecedent_holds_when_delivering",
+    "antecedent_holds_when_settling",
+    "counts_as_done",
+    "event_antecedent_holds",
+    "first_occurrence",
+    "omissions",
+    "rule_overdue",
+    "settle",
+]

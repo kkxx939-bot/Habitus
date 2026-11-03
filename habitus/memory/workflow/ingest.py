@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 
 from habitus.memory.conversation import (
     ConversationAddress,
@@ -19,7 +20,8 @@ from habitus.memory.conversation.segmentation import (
     ConversationBoundaryHints,
     ConversationMessageChunker,
 )
-from habitus.memory.workflow.jobs import MemoryJob, MemoryJobError, MemoryJobStore
+from habitus.memory.workflow.jobs import MemoryJob, MemoryJobError, MemoryJobStatus, MemoryJobStore
+from habitus.memory.workflow.recovery import staged_job_segment
 from habitus.pre.conversation import (
     ConversationBatch,
     ConversationMessageRole,
@@ -141,7 +143,7 @@ class ConversationMemoryEnqueuer:
         omit_tool_call_ids: frozenset[str] = frozenset(),
         ingress: ConversationIngressRequest | None = None,
     ) -> ConversationAppendResult:
-        """降载工具结果、切分超长文本，再写入唯一 live 主链。"""
+        """降载工具结果、切分超长文本、把超过一段上限的工具交换抽到放得下，再写入唯一 live 主链。"""
 
         if not isinstance(batch, ConversationBatch):
             raise TypeError("batch must be ConversationBatch")
@@ -155,11 +157,6 @@ class ConversationMemoryEnqueuer:
                 self.tool_result_reducer.reduce(
                     message,
                     force_omit=message.tool_call_id in omit_tool_call_ids,
-                    force_summarize=(
-                        message.tool_call_id not in omit_tool_call_ids
-                        and self.retention_planner.token_estimator(message)
-                        > self.retention_planner.config.max_segment_tokens
-                    ),
                 )
                 if message.role is ConversationMessageRole.TOOL_RESULT
                 else message
@@ -167,7 +164,17 @@ class ConversationMemoryEnqueuer:
             ),
         )
         normalized = self.message_chunker.normalize(reduced)
-        return self.conversations.append(address, normalized, ingress=ingress)
+        fitted = self.tool_result_reducer.fit_exchanges(
+            normalized,
+            self.retention_planner,
+            originals={
+                message.message_id: message
+                for message in batch.messages
+                if message.role in {ConversationMessageRole.TOOL_CALL, ConversationMessageRole.TOOL_RESULT}
+            },
+            omit_tool_call_ids=omit_tool_call_ids,
+        )
+        return self.conversations.append(address, fitted, ingress=ingress)
 
     def flush(self, address: ConversationAddress) -> ConversationMemoryFlushResult:
         """显式提交全部剩余完整轮次，不关闭或冻结 Conversation。"""
@@ -189,6 +196,72 @@ class ConversationMemoryEnqueuer:
     ) -> ConversationRetentionPlan:
         """读取当前 live 快照并执行一次无副作用切段规划。"""
 
+        return self._plan(
+            address,
+            after_turn=after_turn,
+            flush=flush,
+            drain_pending=False,
+            boundary_hints=boundary_hints,
+        )
+
+    def enqueue_ready_segments(
+        self,
+        address: ConversationAddress,
+        *,
+        after_turn: bool,
+        flush: bool,
+        boundary_hints: ConversationBoundaryHints | None = None,
+    ) -> tuple[tuple[MemoryJob, ...], ConversationRetentionPlan]:
+        queued: list[MemoryJob] = []
+        final_plan = self._plan(
+            address,
+            after_turn=after_turn,
+            flush=flush,
+            drain_pending=False,
+            boundary_hints=boundary_hints,
+        )
+        staged_checked = False
+        for _ in range(1_000):
+            if not final_plan.should_seal:
+                return tuple(queued), final_plan
+            if not staged_checked:
+                staged_checked = True
+                completed, sealed = self._complete_staged(address)
+                queued.extend(completed)
+                if sealed:
+                    final_plan = self._plan(
+                        address,
+                        after_turn=after_turn,
+                        flush=flush,
+                        drain_pending=False,
+                        boundary_hints=boundary_hints,
+                    )
+                    continue
+            assert final_plan.through_sequence is not None
+            queued.append(
+                self.seal_and_enqueue(
+                    address,
+                    through_sequence=final_plan.through_sequence,
+                )
+            )
+            final_plan = self._plan(
+                address,
+                after_turn=after_turn,
+                flush=flush,
+                drain_pending=after_turn and not flush,
+                boundary_hints=boundary_hints,
+            )
+        raise MemoryJobError("automatic conversation sealing exceeded its progress bound")
+
+    def _plan(
+        self,
+        address: ConversationAddress,
+        *,
+        after_turn: bool,
+        flush: bool,
+        drain_pending: bool,
+        boundary_hints: ConversationBoundaryHints | None,
+    ) -> ConversationRetentionPlan:
         live = self.conversations.read_live(address)
         state = self.conversations.read_state(address)
         leading_continuation = bool(
@@ -201,63 +274,42 @@ class ConversationMemoryEnqueuer:
             live,
             after_turn=after_turn,
             flush=flush,
-            drain_pending=False,
+            drain_pending=drain_pending,
             boundary_hints=boundary_hints,
             leading_continuation=leading_continuation,
         )
 
-    def enqueue_ready_segments(
-        self,
-        address: ConversationAddress,
-        *,
-        after_turn: bool,
-        flush: bool,
-        boundary_hints: ConversationBoundaryHints | None = None,
-    ) -> tuple[tuple[MemoryJob, ...], ConversationRetentionPlan]:
-        queued: list[MemoryJob] = []
-        live = self.conversations.read_live(address)
-        state = self.conversations.read_state(address)
-        leading_continuation = bool(
-            live is not None
-            and state.archived_through_sequence is not None
-            and live.start_sequence == state.archived_through_sequence + 1
-            and not live.messages[0].starts_turn
-        )
-        final_plan = self.retention_planner.plan(
-            live,
-            after_turn=after_turn,
-            flush=flush,
-            drain_pending=False,
-            boundary_hints=boundary_hints,
-            leading_continuation=leading_continuation,
-        )
-        for _ in range(1_000):
-            if not final_plan.should_seal:
-                return tuple(queued), final_plan
-            assert final_plan.through_sequence is not None
-            queued.append(
-                self.seal_and_enqueue(
-                    address,
-                    through_sequence=final_plan.through_sequence,
-                )
+    def _complete_staged(self, address: ConversationAddress) -> tuple[tuple[MemoryJob, ...], bool]:
+        """按原边界补完本会话在 history 发布或激活前中断的 STAGED Job，新边界只能接在它们之后；返回激活的 Job 与
+        这一步有没有封过段。重试用尽、还没被认领过的 FAILED Job（人工 ``retry_failed`` 后回到 STAGED）也先按原边界
+        发布 history，但不激活：它照旧等人工处置，重试时 history 已在原边界上，补完能对上。"""
+
+        activated: list[MemoryJob] = []
+        sealed = False
+        for job in self.jobs.list_for_conversation(address):
+            exhausted = job.status is MemoryJobStatus.FAILED and job.claim_generation == 0
+            if job.status is not MemoryJobStatus.STAGED and not exhausted:
+                continue
+            if exhausted:
+                _start_sequence, end_sequence = self.conversations.layout.segment_range(job.segment_id)
+                archived = self.conversations.read_state(address).archived_through_sequence
+                if archived is not None and archived >= end_sequence:
+                    continue  # 原边界已发布过：重试时由补完核对
+            segment = staged_job_segment(
+                self.conversations,
+                job,
+                before_history_publish=partial(self._require_staged_source, job),
             )
-            live = self.conversations.read_live(address)
-            state = self.conversations.read_state(address)
-            leading_continuation = bool(
-                live is not None
-                and state.archived_through_sequence is not None
-                and live.start_sequence == state.archived_through_sequence + 1
-                and not live.messages[0].starts_turn
-            )
-            final_plan = self.retention_planner.plan(
-                live,
-                after_turn=after_turn,
-                flush=flush,
-                drain_pending=after_turn and not flush,
-                boundary_hints=boundary_hints,
-                leading_continuation=leading_continuation,
-            )
-        raise MemoryJobError("automatic conversation sealing exceeded its progress bound")
+            self._require_staged_source(job, segment)
+            sealed = True
+            if not exhausted:
+                activated.append(self.jobs.activate(job))
+        return tuple(activated), sealed
+
+    @staticmethod
+    def _require_staged_source(job: MemoryJob, segment: ConversationSegment) -> None:
+        if segment.segment_id != job.segment_id or segment.digest != job.source_segment_digest:
+            raise MemoryJobError("staged MemoryJob does not match the ConversationSegment at its boundary")
 
     def seal_and_enqueue(
         self,

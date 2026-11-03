@@ -166,6 +166,11 @@ class ConversationConsumerDelivery:
 
         return await self._observed(source, consumer, _execute)
 
+    def ordered(self, consumer: ConversationSourceConsumer) -> bool:
+        """这个 Consumer 是否声明了同一会话内严格按源的顺序处理。"""
+
+        return self._consumer(consumer).ordered_within_conversation
+
     def abandons(self, consumer: ConversationSourceConsumer) -> bool:
         return callable(getattr(self._consumer(consumer), "abandon", None))
 
@@ -482,10 +487,6 @@ class ConversationConsumerDelivery:
             )
         except Exception:
             pass
-
-    @staticmethod
-    def _source_order(source: ConversationSourceEnvelope) -> tuple[int, int, str]:
-        return (source.batch.start_sequence, source.batch.end_sequence, source.source_id)
 
     @staticmethod
     def _terminal_result(

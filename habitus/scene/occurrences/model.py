@@ -9,6 +9,7 @@
   模型这一次没答成）。它与 ``hits=()`` 必须分得开——没命中在关系检验里是负样本，没判不是；续跑按原因决定要不要重问；
 - ``lane`` 是这条记录所在的 lane（编号前缀读出来，由映射时的词表口给）：时间线、叙事、结算都只在同一条 lane 里看；
 - ``recent_digest`` 是映射时给的"近几天同类记录"的摘要：别的日子被词表迁移改了编号，这份材料就变了，要重判；
+  ``timeline_digest`` 是映射时给的"当天时间线"的摘要：同一天后来补进了记录或空白，这份材料就变了，要重判；
 - ``started_at`` / ``last_observed_at`` 来自行为树，落在这里让 ``occurrences/`` 对下游自足：窗锚在
   ``started_at``（2026-09-26 裁定，不锚"结束时刻"——树上没有结束时刻，``last_observed_at`` 是我们停止
   观测的那一刻，会随观测覆盖动），``last_observed_at`` 只参与删失判定与档的复核；
@@ -95,6 +96,7 @@ class ConceptHits:
     #: ``kind_token`` 是类编号（True）还是「待定」（False）；「非事件」不映射、没有记录。
     classified: bool = True
     recent_digest: str | None = None
+    timeline_digest: str | None = None
     #: 这条记录**判过**哪些情境概念（含成立的）。没判过（材料不全、情境概念是后来才加的）与判过不成立
     #: 在盘上要分得开，稳定性分层才知道哪一层该收哪条（2026-09-30 裁定八）。
     situations_checked: tuple[str, ...] = ()
@@ -115,8 +117,10 @@ class ConceptHits:
             raise ConceptHitsError("kind_token must be non-empty text without surrounding whitespace")
         if not isinstance(self.lane, str) or not self.lane.strip() or self.lane != self.lane.strip():
             raise ConceptHitsError("lane must be non-empty text without surrounding whitespace")
-        if self.recent_digest is not None and (not isinstance(self.recent_digest, str) or not self.recent_digest):
-            raise ConceptHitsError("recent_digest must be non-empty text or None")
+        for label in ("recent_digest", "timeline_digest"):
+            value = getattr(self, label)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ConceptHitsError(f"{label} must be non-empty text or None")
         if not isinstance(self.classified, bool):
             raise ConceptHitsError("classified must be a boolean")
         if not self.classified and self.hits:

@@ -10,6 +10,7 @@ TODO（生命周期）：``ClassStatus.RETIRED`` 现在只由定期拆改的合�
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -20,6 +21,15 @@ from habitus.behavior.kinds.ids import ClassId, Lane
 
 class BehaviorKindError(ValueError):
     pass
+
+
+_SENTENCE_NOISE = re.compile(r"[\s，。、,.!！？?「」\"'“”]+")
+
+
+def sentence_key(text: str) -> str:
+    """两句提醒去掉空白与标点后逐字相同就当同一句（类 = 提醒句相同的一件事，裁定 16）。拆改分组合组、拆分证据都按它。"""
+
+    return _SENTENCE_NOISE.sub("", text).casefold()
 
 
 class ClassStatus(str, Enum):
@@ -191,4 +201,5 @@ __all__ = [
     "ClassStatus",
     "Exclusion",
     "Vocabulary",
+    "sentence_key",
 ]

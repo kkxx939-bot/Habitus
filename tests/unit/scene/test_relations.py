@@ -200,6 +200,68 @@ def test_the_minimum_attainable_p_is_the_all_one_way_probability() -> None:
     assert stats.minimum_p([stratum(0, 0, 4)]) == 1.0  # 对照里一个阳性都没有、自己也没有：没信息
 
 
+def test_a_one_way_test_only_reaches_as_low_as_its_own_side() -> None:
+    """只朝一侧检时最小可达 p 取这一侧：6 层、每层对照率 0.75，朝上全中也只有 0.75⁶ ≈ 0.178；朝下全阴是 0.25⁶。"""
+
+    strata = [stratum(1, 2, 3, block=index) for index in range(6)]  # q = 0.75
+    assert stats.minimum_one_sided(strata, upward=True) == pytest.approx(0.75**6)
+    assert stats.minimum_one_sided(strata, upward=False) == pytest.approx(0.25**6)
+    assert stats.minimum_one_sided([stratum(0, 0, 4)], upward=True) == 1.0
+
+
+def test_a_chain_that_cannot_reach_alpha_upward_stays_out_of_the_family(monkeypatch) -> None:
+    """同一条链只检"更多"：入族看朝上那一侧的最小可达 p。每层对照率 0.75 的 6 层朝上全中也只有 0.178，不进检验族
+    （按两侧小的那侧读成 2.4e-4 会进族，把族撑大、压住别的真检验）。"""
+
+    from habitus.scene.relations.measures import ChainMeasure
+
+    series = planted()
+    line = build_timelines(series, CONCEPTS, {}, CONFIG)["session"]
+    tests = LaneTests(line, CONCEPTS, CONFIG, series.cutoff)
+    chain = next(item for item in tests.keys() if item.segment is Segment.CHAIN and not item.condition)
+    strata = tuple(stratum(1, 2, 3, block=index) for index in range(6))
+    monkeypatch.setattr(tests, "keys", lambda: (chain,))
+    monkeypatch.setattr(tests, "measure", lambda key, since=None: ChainMeasure(strata))
+    monkeypatch.setattr(tests, "refined_consequent", lambda key: False)
+    (test,) = tests.night().tests
+    assert test.minimum_p == pytest.approx(0.75**6) and test.verdict is Verdict.SPARSE
+
+
+def _tarone_family_by_definition(minimum, weights, q):  # type: ignore[no-untyped-def]
+    """Tarone 修剪照定义一个 K 一个 K 数（与实现对照用）。"""
+
+    keys = sorted(minimum)
+    scale = len(keys) / sum(max(weights.get(key, 1.0), 1e-12) for key in keys)
+    ratio = {key: minimum[key] / (max(weights.get(key, 1.0), 1e-12) * scale) for key in keys}
+    for limit in range(1, len(keys) + 1):
+        members = [key for key in keys if ratio[key] <= q / limit]
+        if len(members) <= limit:
+            return frozenset(members)
+    return frozenset()
+
+
+def test_tarone_family_matches_its_definition_and_stays_fast_on_a_large_night() -> None:
+    """检验族与"一个 K 一个 K 数"的定义逐项相同；四十万个键、四百个够得着的，一次不到一秒（原来每个 K 扫一遍全部键）。"""
+
+    import random
+    import time
+
+    generator = random.Random(3)
+    for _ in range(200):
+        keys = [f"k{index}" for index in range(generator.randint(1, 60))]
+        minimum = {key: generator.choice([1e-6, 1e-3, 0.01, 0.05, 0.2, 1.0, generator.random()]) for key in keys}
+        weights = {key: generator.choice([0.5, 2.0, generator.random() + 0.1]) for key in keys if generator.random() < 0.5}
+        p_values = {key: generator.random() for key in keys}
+        family, _passed = stats.tarone_bh(p_values, minimum, weights, q=0.1)
+        assert family == _tarone_family_by_definition(minimum, weights, 0.1)
+    keys = [f"k{index}" for index in range(400_000)]
+    minimum = {key: 1e-6 if index < 400 else 1.0 for index, key in enumerate(keys)}
+    p_values = {key: generator.random() if index < 400 else 1.0 for index, key in enumerate(keys)}
+    started = time.perf_counter()
+    family, _passed = stats.tarone_bh(p_values, minimum, {}, q=0.05)
+    assert time.perf_counter() - started < 1.0 and len(family) == 400
+
+
 def test_tarone_prunes_hopeless_tests_and_bh_controls_the_rest() -> None:
     p_values = {"a": 0.001, "b": 0.02, "c": 0.5, "hopeless": 0.9}
     minimum = {"a": 1e-6, "b": 1e-6, "c": 1e-6, "hopeless": 0.5}
@@ -348,3 +410,90 @@ def test_a_refinement_consequent_is_judged_on_both_bounds() -> None:
     tests = LaneTests(line, concepts, CONFIG, series.cutoff)
     (rework,) = [test for test in tests.night().tests if test.key == key(DISCUSS, "返工")]
     assert rework.verdict is not Verdict.SIGNIFICANT
+
+
+def test_a_refined_consequent_on_the_same_chain_is_only_tested_for_more() -> None:
+    """裁定 27 第 1 条：同一条链只检"更多"，后果是细分概念（「返工」，走上下界检验）也一样。讨论方案之后接写文档、调研 /
+    提交推送之后接修改代码（一半映射成返工）：「讨论方案 → 返工」少得显著，但这条链不检"更少"，不判显著、方向只记朝上。"""
+
+    import random
+
+    from habitus.scene.occurrences import ConceptHits
+    from habitus.scene.occurrences.model import ConceptHit
+    from tests.unit.scene.hit_fixtures import uri_for
+
+    generator = random.Random(11)
+    records = []
+    for workday in workdays(50):
+        hours = list(range(8, 19))
+        generator.shuffle(hours)
+        for hour in hours[:3]:
+            minute = generator.choice((0, 10))
+            records += [record(workday, hour, minute, "讨论方案", number=hour)]
+            records += [record(workday, hour, minute + 20, "写文档", number=hour)]
+        for hour in hours[3:7]:
+            minute = generator.choice((0, 10))
+            records += [record(workday, hour, minute, generator.choice(("调研", "提交推送")), number=hour)]
+            records += [record(workday, hour, minute + 20, "修改代码", number=hour)]
+    records.sort(key=lambda item: (item.started_at, item.uri))
+    series = EventSeries(cutoff=workdays(50)[-1] + timedelta(days=1), records=tuple(records))
+    concepts = ConceptSet([*CONCEPTS.values(), REWORK])
+    hits = {}
+    for index, item in enumerate(item for item in series.records if item.kind_token == CODE):
+        hits[item.uri] = ConceptHits(
+            occurrence_uri=uri_for(item.day, item.name, item.started_at.hour, item.started_at.minute),
+            kind_token=item.kind_token,
+            last_observed_at=item.last_observed_at,
+            hits=(ConceptHit(cid("返工")),) if index % 2 == 0 else (),
+            situation_hits=(),
+            situations_checked=(),
+            unresolved={},
+            baseline_snapshot={},
+            mapper="t",
+            mapped_at=datetime(2026, 10, 1, tzinfo=CST),
+            lane="session",
+            classified=True,
+        )
+    line = build_timelines(series, concepts, hits, CONFIG)["session"]
+    night = LaneTests(line, concepts, CONFIG, series.cutoff).night()
+    (rework,) = [
+        test
+        for test in night.tests
+        if test.key == RelationKey("session", DISCUSS, cid("返工"), Segment.CHAIN)
+    ]
+    assert rework.upward and rework.verdict is not Verdict.SIGNIFICANT and rework.effect.treated_rate < 0.05
+
+
+def test_a_record_past_midnight_ends_in_the_last_slot_of_its_day() -> None:
+    """23:00 开始、次日 00:20 最后所见：人在场按日子算，做完的那一槽截在当天最后一槽（第 95 槽）。"""
+
+    day = START
+    late = replace(record(day, 23, 0, "调研"), last_observed_at=at(day + timedelta(days=1), 0, 20))
+    line = build_timelines(EventSeries(cutoff=day + timedelta(days=2), records=(late,)), CONCEPTS, {}, CONFIG)["session"]
+    ((ended, _uri),) = line.ends[day]
+    assert ended == day.toordinal() * 96 + 95
+
+
+def test_only_the_last_start_of_a_merged_run_ends_its_chain() -> None:
+    """同一类 17:00、17:20 两次（合并窗口内连着）：那一天"做完"的时刻只记最后那条，前一条后面还接着。"""
+
+    day = START
+    first, second = record(day, 17, 0, "调研", number=1), record(day, 17, 20, "调研", number=2)
+    line = build_timelines(EventSeries(cutoff=day + timedelta(days=1), records=(first, second)), CONCEPTS, {}, CONFIG)[
+        "session"
+    ]
+    assert [uri for _ended, uri in line.ends[day]] == [second.uri]
+
+
+def test_two_days_2_7_windows_six_days_apart_do_not_merge() -> None:
+    """后几段窗口重叠的再合一次：第 2–7 天的窗口，隔 5 天的两条链窗口还挨着第 7 天、合成一条；隔 6 天的不重叠、各算各的。"""
+
+    from habitus.scene.relations import chains_of, merge_for
+
+    def chains(gap: int):  # type: ignore[no-untyped-def]
+        days = (START, START + timedelta(days=gap))
+        series = EventSeries(cutoff=days[-1] + timedelta(days=10), records=tuple(record(d, 9, 0, "调研") for d in days))
+        line = build_timelines(series, CONCEPTS, {}, CONFIG)["session"]
+        return merge_for(Segment.DAYS_2_7, chains_of(line, RESEARCH, CONFIG.transition_window_slots))
+
+    assert len(chains(5)) == 1 and len(chains(6)) == 2

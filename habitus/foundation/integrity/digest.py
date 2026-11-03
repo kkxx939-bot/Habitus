@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any
+from typing import Any, TypeGuard
 
 from habitus.foundation.integrity.canonical_json import canonical_json
 
@@ -16,6 +16,12 @@ def text_digest(value: str) -> str:
     """返回精确 UTF-8 文本字节的 SHA-256 摘要。"""
 
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def is_sha256_hex(value: object) -> TypeGuard[str]:
+    """是不是小写十六进制的 SHA-256 摘要文字（64 位）。各层的摘要校验都用这一份，只各自翻成本层的错误。"""
+
+    return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
 
 def bytes_digest(value: bytes) -> str:
@@ -32,4 +38,4 @@ def bytes_digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-__all__ = ["bytes_digest", "canonical_digest", "text_digest"]
+__all__ = ["bytes_digest", "canonical_digest", "is_sha256_hex", "text_digest"]

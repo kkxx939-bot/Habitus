@@ -10,45 +10,20 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 from typing import Any
 
-from habitus.config.loader import construct_config
+from habitus.config.loader import construct_config, require_override_types
 
-# (字段, 下界, 上界)：与 behavior/kinds/config.py 的校验一致。
-_KINDS_INT_BOUNDS = (
-    ("kinds_batch_size", 1, 100),
-    ("kinds_validation_rounds", 0, 10),
-    ("kinds_transient_retries", 0, 20),
-    ("kinds_max_encoded_bytes", 1, 256 * 1024 * 1024),
-    ("kinds_max_examples", 1, 10),
-    ("kinds_recurrence_min_count", 1, 1_000),
-    ("kinds_recurrence_min_days", 1, 365),
-    ("kinds_max_pending", 1, 1_000_000),
-    ("kinds_nightly_max_new", 1, 10_000),
-    ("kinds_recall_per_entry", 0, 50),
-    ("kinds_nightly_hour", 0, 23),
-    ("kinds_revision_weekday", 0, 6),
-    ("kinds_revision_hour", 0, 23),
-    ("kinds_merge_evidence_runs", 1, 20),
-    ("kinds_cooldown_days", 0, 365),
-    ("kinds_max_changes_per_revision", 1, 100),
-    ("kinds_lane_candidate_cap", 1, 10_000),
-    ("kinds_anchors_per_class", 1, 100),
-    ("kinds_revision_samples_per_class", 1, 100),
-    ("kinds_revision_window_days", 7, 730),
-    ("kinds_grouping_min_members", 2, 10_000),
-    ("kinds_grouping_batch_size", 2, 500),
-    ("kinds_checkpoint_every", 1, 100_000),
-    ("kinds_prompt_max_steps", 0, 200),
-    ("kinds_sample_max_steps", 0, 200),
-)
-_CAPACITY_FIELDS = (
-    "observation_max_files",
-    "fusion_max_receipt_files",
-    "fusion_max_judgement_files",
-    "tree_max_children_per_directory",
-)
-_KINDS_FLOAT_BOUNDS = (
-    ("kinds_transient_retry_delay_seconds", 0.0, 600.0),
-    ("kinds_max_anchor_pull", 0.0, 1.0),
+# 按前缀派生到领域配置的覆盖项（字段名 = 前缀 + 领域配置的同名字段）。这里只查类型；值域只在领域配置，组合根构造时拒
+# （带配置键）——同一条边界只定义一处。
+OVERRIDE_PREFIXES = (
+    "session_",
+    "physical_",
+    "kinds_",
+    "observation_",
+    "fusion_",
+    "tree_",
+    "document_",
+    "write_",
+    "semantic_",
 )
 
 
@@ -84,7 +59,23 @@ class BehaviorConfig:
     # 字段名 = ``session_`` + SessionLaneConfig 的同名字段，组合根按前缀派生注入。
     session_max_turn_chars: int | None = None
     session_max_instruction_chars: int | None = None
+    session_tool_argument_chars: int | None = None
+    session_tool_error_chars: int | None = None
+    session_kept_tool_lines: int | None = None
+    session_kept_reply_lines: int | None = None
     session_max_steps: int | None = None
+    session_max_summary_chars: int | None = None
+    session_max_step_chars: int | None = None
+    # 物理 lane 的保护上限：留空取 ``behavior/fusion/lanes/physical/config.py`` 的默认值。
+    # 字段名 = ``physical_`` + PhysicalLaneConfig 的同名字段。
+    physical_max_segments: int | None = None
+    physical_max_coverage_spans: int | None = None
+    physical_max_facts: int | None = None
+    physical_max_fact_chars: int | None = None
+    physical_max_summary_chars: int | None = None
+    physical_max_device_chars: int | None = None
+    physical_max_segment_id_chars: int | None = None
+    physical_max_future_seconds: int | None = None
     kinds_batch_size: int | None = None
     kinds_validation_rounds: int | None = None
     kinds_transient_retries: int | None = None
@@ -96,9 +87,7 @@ class BehaviorConfig:
     kinds_max_pending: int | None = None
     kinds_nightly_max_new: int | None = None
     kinds_recall_per_entry: int | None = None
-    kinds_nightly_hour: int | None = None
     kinds_revision_weekday: int | None = None
-    kinds_revision_hour: int | None = None
     kinds_max_anchor_pull: float | None = None
     kinds_merge_evidence_runs: int | None = None
     kinds_cooldown_days: int | None = None
@@ -119,6 +108,17 @@ class BehaviorConfig:
     fusion_max_receipt_files: int | None = None
     fusion_max_judgement_files: int | None = None
     tree_max_children_per_directory: int | None = None
+    # 行为树文档的物理边界（``document_`` → BehaviorDocumentConfig）、文档写锁的租约（``write_`` → BehaviorWriteConfig）、
+    # 每天的语义概览（``semantic_`` → BehaviorSemanticConfig）：都是保护闸，留空取领域默认值。
+    document_max_markdown_body_chars: int | None = None
+    document_max_encoded_bytes: int | None = None
+    write_lock_ttl_seconds: int | None = None
+    semantic_max_direct_entries: int | None = None
+    semantic_max_prompt_chars: int | None = None
+    semantic_max_narrative_chars: int | None = None
+    semantic_max_entry_summary_chars: int | None = None
+    semantic_max_overview_chars: int | None = None
+    semantic_max_abstract_chars: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.primary_subject, str):
@@ -141,33 +141,8 @@ class BehaviorConfig:
             or not 1 <= self.retry_backlog_max <= 100_000
         ):
             raise ValueError("behavior.retry_backlog_max must be an integer between 1 and 100000")
-        for name, upper in (
-            ("session_max_turn_chars", 1_000_000),
-            ("session_max_instruction_chars", 1_000_000),
-            ("session_max_steps", 50),
-        ):
-            value = getattr(self, name)
-            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= upper):
-                raise ValueError(f"behavior.{name} must be an integer between 1 and {upper}")
-        # 下界与 behavior/kinds/config.py 一致：非法值在配置层就拒，不让它拖到组装期以裸异常爆。
-        for name, lower, upper in _KINDS_INT_BOUNDS:
-            value = getattr(self, name)
-            if value is None:
-                continue
-            if isinstance(value, bool) or not isinstance(value, int) or not lower <= value <= upper:
-                raise ValueError(f"behavior.{name} must be an integer between {lower} and {upper}")
-        for name, low, high in _KINDS_FLOAT_BOUNDS:
-            number = getattr(self, name)
-            if number is not None and (
-                isinstance(number, bool) or not isinstance(number, int | float) or not low <= float(number) <= high
-            ):
-                raise ValueError(f"behavior.{name} must be between {low:g} and {high:g}")
-        for name in _CAPACITY_FIELDS:
-            value = getattr(self, name)
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 10_000_000
-            ):
-                raise ValueError(f"behavior.{name} must be an integer between 1 and 10000000")
+        for prefix in OVERRIDE_PREFIXES:
+            require_override_types(self, path="behavior", prefix=prefix)
         if self.reduction_sweep_lock_ttl_seconds is not None and (
             isinstance(self.reduction_sweep_lock_ttl_seconds, bool)
             or not isinstance(self.reduction_sweep_lock_ttl_seconds, int)
@@ -185,31 +160,15 @@ class BehaviorConfig:
     def enabled(self) -> bool:
         return bool(self.primary_subject.strip())
 
-    def session_overrides(self) -> dict[str, Any]:
-        """非空的 ``session_*`` 字段 → ``SessionLaneConfig`` 的同名字段。"""
-
-        return {
-            field.name[len("session_") :]: getattr(self, field.name)
-            for field in fields(self)
-            if field.name.startswith("session_") and getattr(self, field.name) is not None
-        }
-
     def overrides_for(self, prefix: str) -> dict[str, Any]:
-        """非空的 ``<prefix>*`` 字段 → 那份领域配置的同名字段（存储的容量闸用，按前缀派生，不双份维护）。"""
+        """非空的 ``<prefix>*`` 字段 → 那份领域配置的同名字段（``OVERRIDE_PREFIXES``，按前缀派生，不双份维护）。"""
 
+        if prefix not in OVERRIDE_PREFIXES:
+            raise ValueError(f"unknown behavior override prefix {prefix!r}")
         return {
             field.name[len(prefix) :]: getattr(self, field.name)
             for field in fields(self)
             if field.name.startswith(prefix) and getattr(self, field.name) is not None
-        }
-
-    def kinds_overrides(self) -> dict[str, Any]:
-        """非空的 ``kinds_*`` 字段 → ``BehaviorKindConfig`` 的同名字段（按前缀派生，不双份维护）。"""
-
-        return {
-            field.name[len("kinds_") :]: getattr(self, field.name)
-            for field in fields(self)
-            if field.name.startswith("kinds_") and getattr(self, field.name) is not None
         }
 
     @classmethod
@@ -217,4 +176,4 @@ class BehaviorConfig:
         return construct_config(cls, value, "config.behavior")
 
 
-__all__ = ["BehaviorConfig"]
+__all__ = ["OVERRIDE_PREFIXES", "BehaviorConfig"]

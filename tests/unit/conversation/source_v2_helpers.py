@@ -34,7 +34,6 @@ from habitus.foundation.lifecycle import BackoffPolicy
 from habitus.foundation.observability import ObservationEvent, Observer
 from habitus.infrastructure.lifecycle import RetryLedger
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.conversation import ConversationAppendResult, ConversationAppendStatus, ConversationRetentionPlan
 from habitus.memory.workflow import (
     ConversationMemoryIngestResult,
@@ -42,6 +41,7 @@ from habitus.memory.workflow import (
     MemoryConversationOutputStore,
 )
 from habitus.pre.conversation import ConversationBatch, ConversationMessage, ConversationMessageRole
+from tests.lock_store import ProcessLocalLockStore
 
 NOW = datetime(2026, 8, 8, 1, 0, tzinfo=UTC)
 STARTED_ON = date(2026, 8, 8)
@@ -330,7 +330,12 @@ def recovery(
         clock=clock,
     )
     salvage = SourceSalvage(
-        service.ledger.pending.root, salvager=salvaged.append if salvaged is not None else (lambda _envelope: None)
+        service.ledger.pending.root,
+        salvagers={
+            ConversationSourceConsumer.BEHAVIOR_SESSION: (
+                salvaged.append if salvaged is not None else (lambda _envelope: None)
+            )
+        },
     )
     return ConversationSourceRecovery(
         service.sources,

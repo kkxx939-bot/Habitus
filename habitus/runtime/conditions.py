@@ -13,9 +13,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import date
+from pathlib import Path
 
 from habitus.conditions import Conditions, DayType, LocalCalendar
-from habitus.conditions.calendar_data import read_holiday_table
+from habitus.conditions.calendar_data import bundled_holiday_directory, read_holiday_table
 from habitus.config import HabitusConfig
 
 
@@ -25,7 +26,7 @@ class SharedCalendar:
     def __init__(
         self,
         region: str,
-        directory: str | None,
+        directory: str | Path | None,
         *,
         nominal_weekend: tuple[int, ...],
         region_on: Callable[[date], str] | None = None,
@@ -78,10 +79,15 @@ class SharedCalendar:
 
 
 def local_calendar(config: HabitusConfig) -> SharedCalendar:
-    """放假安排是外接组件：``locale.calendar_path`` 给了目录就读它；没给就只答周几、几号、月末，日型未知。"""
+    """放假安排是外接组件：``locale.calendar_path`` 给了目录就只读它；没给就读随包附带的这个地区的那一份，地区没带就只答
+    周几、几号、月末，日型未知。"""
 
+    region = config.locale.region
+    directory = config.locale.calendar_path
     return SharedCalendar(
-        config.locale.region, config.locale.calendar_path, nominal_weekend=config.locale.nominal_weekend
+        region,
+        directory if directory is not None else bundled_holiday_directory(region),
+        nominal_weekend=config.locale.nominal_weekend,
     )
 
 

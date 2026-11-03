@@ -5,9 +5,9 @@
 - **取**（``claim``）：宿主在 UserPromptSubmit 时来取此刻可取的请求，带租约（租约内别的会话取不到；同一会话重取拿回自己手里的）；
   来取这件事本身就是活性（``alive``）——最近一段有宿主来取过，递送那一拍才问模型写话、记「待取」，否则记「不可达」、不花模型钱。
 - **认**（``observe``）：转写照常由 Stop hook 送回服务；同一份会话先过出口、再进会话 lane。出口在取走记录对应的会话里找 agent 用
-  宿主提问工具问人的那次调用：题目含类名、或与那句话相似、或选项就是我们给的三个 → 配上 → 账本追加「说了」（``decided_at`` =
+  宿主提问工具问人的那次调用：题目含类名、或与那句话相似、或选项就是我们给的那几个 → 配上 → 账本追加「说了」（``decided_at`` =
   提问那一刻、``text`` = 题目原文、``via`` = 宿主、``turn`` = call_id）。他点的固定选项直接写回话（现在就做 → 正、这次不用 → 负、
-  知道了 → 中），不经模型；自己填的话不写，交给会话 lane 的模型照旧判（裁定 64 第 7、8 条）。取走了、这一轮过了却没问 → 放回、
+  知道了 → 中、已经做过了 → 已做），不经模型；自己填的话不写，交给会话 lane 的模型照旧判（裁定 64 第 7、8 条）。取走了、这一轮过了却没问 → 放回、
   ``attempts += 1``；到上限不再给。
 - **保证**：一条预期最多一条「说了」（写前查账本已有的 spoken，重放、换会话再问都挡住）；提问出现在最晚时限之后的不算；
   租约过期只让别的会话能取（不算放回：问可能早就问了、转写只是还没回来）；历任持有者都认得出自己那次提问。
@@ -15,7 +15,7 @@
 传输状态（可取清单、取走记录、问过的提问、宿主活性）在 ``runtime/foresight_outlet_store.py``，不进账本。
 宿主 → 提问工具 / 题目字段 / 作答怎么回来 由各会话协议的适配器声明（``ConversationAdapterRegistry.question_tools``），组合根传进来。
 
-TODO(裁定 64 第 8 条)：自由作答现在走会话 lane 的模型判正 / 中 / 负（``runtime/foresight_responses.py`` 那座桥）；推式宿主（第六节
+TODO(裁定 64 第 8 条)：自由作答现在走会话 lane 的模型判正 / 中 / 负 / 已做（``runtime/foresight_responses.py`` 那座桥）；推式宿主（第六节
 本地通知）与别的 harness 的回复不是提问工具的作答时也要靠那条路——这里只写固定选项，模型路保留不删。
 """
 
@@ -31,17 +31,16 @@ from difflib import SequenceMatcher
 from typing import Any, Protocol
 
 from habitus.foresight.errors import ForesightError
-from habitus.foresight.ledger import SPOKEN, Delivery, Response
+from habitus.foresight.ledger import SAID_DONE, SPOKEN, Delivery, Response
 from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
-from habitus.pre.conversation import ConversationAdapterRegistry, QuestionTool
+from habitus.pre.conversation import ConversationAdapterRegistry, QuestionTool, parse_question_replies
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_outlet_store import OutletStore
 
-#: 三个固定选项（产品定措辞，所有宿主一样；第三个不叫"稍后再说"——不再问第二次，裁定 64 第 8 条）与它们映成的回话方向。
-OPTIONS = ("现在就做", "这次不用", "知道了")
-POLARITY_OF_OPTION = {"现在就做": "正", "这次不用": "负", "知道了": "中"}
-#: Codex Desktop 的作答：一条用户消息，JSON 里带 questionItemId（含 call_id）、question、answer。
-REPLY_TAG = "<send_user_message_question_reply>"
+#: 四个固定选项（产品定措辞，所有宿主一样；第三个不叫"稍后再说"——不再问第二次，裁定 64 第 8 条；第四个"已经做过了"记「已做」：
+#: 到时限没看到做时提醒反馈不写、账上记中性，裁定 91 第 3 条②）与它们映成的回话方向。
+OPTIONS = ("现在就做", "这次不用", "知道了", "已经做过了")
+POLARITY_OF_OPTION = {"现在就做": "正", "这次不用": "负", "知道了": "中", "已经做过了": SAID_DONE}
 #: 取走时刻与转写里人那句话的时刻可能差几秒（hook 在提交时跑，转写记的是宿主自己的时间）：窗口往前留一点。
 _CLAIM_TOLERANCE = timedelta(seconds=120)
 _QUOTED = re.compile(r'=\s*"([^"]*)"')
@@ -74,7 +73,7 @@ class OpenRequest:
 
 @dataclass(frozen=True)
 class ClaimedReminder:
-    """取走的一条（给宿主）：题目原文、三个选项、最晚时限、租约到何时、这次取走的时刻（宿主按它判是不是重取）。"""
+    """取走的一条（给宿主）：题目原文、固定选项、最晚时限、租约到何时、这次取走的时刻（宿主按它判是不是重取）。"""
 
     request_id: str
     kind: str
@@ -257,10 +256,16 @@ class ReminderOutlet:
             return len(ordered)
 
     def sweep(self, now: datetime) -> int:
-        """租约过期的放给别的会话（不算放回）；过了最晚时限的取走记录与问过的提问删掉（那时账上已记「宿主没取」）。"""
+        """租约过期的放给别的会话（不算放回）；过了最晚时限的取走记录与问过的提问删掉（那时账上已记「宿主没取」）。
+        读不出来的取走记录与提问不知道它的最晚时限、也配不上任何提问：与形状不对的同样删掉，计入观测。"""
 
         with self._lock:
             changed = 0
+            broken = sum(self.store.remove_claim(request_id) for request_id in self.store.broken_claims())
+            broken += sum(self.store.remove_asked(key) for key in self.store.broken_asked())
+            unreadable = len(self.store.take_unreadable())
+            if broken or unreadable:
+                self._observe(ObservationStatus.FAILURE, "sweep", {"broken_removed": broken, "unreadable": unreadable})
             for request_id, raw in self.store.claims().items():
                 claim = _decode_claim(raw)
                 if claim is None:
@@ -460,7 +465,7 @@ class ReminderOutlet:
     def _score(self, claim: _Claim, question: _Question, *, single: bool) -> float | None:
         """一条取走的提醒与一题配不配、配得多像。先看选项：带着选项却不是我们那三个的，是 agent 自己的问题，不配。然后：
         我们的选项 + 题目含类名最强（2 + 相似度）；与那句话相似度过线次之（相似度本身；没带选项的提问只能走这条）；这个会话只剩
-        一条没说出口时，带着我们三个选项的那一题兜底（0.5——题目被 agent 改写了也认得）。"""
+        一条没说出口时，带着我们固定选项的那一题兜底（0.5——题目被 agent 改写了也认得）。"""
 
         ours = _options_are_ours(question.options)
         if question.options and not ours:
@@ -564,15 +569,15 @@ class ReminderOutlet:
             return 0
         written = 0
         for item in messages:
-            if item.role != "prompt" or not item.content.lstrip().startswith(REPLY_TAG):
+            if item.role != "prompt":
                 continue
-            for call_id, index, answer in parse_reply(item.content):
-                key = OutletStore.asked_key(f"{call_id}#{index}")
+            for reply in parse_question_replies(item.content):
+                key = OutletStore.asked_key(f"{reply.call_id}#{reply.index}")
                 raw = asked.pop(key, None)
                 if raw is None:
                     continue
                 self.store.remove_asked(key)
-                polarity = fixed_polarity(answer)
+                polarity = fixed_polarity(reply.answer)
                 if polarity is None:
                     continue  # 自己填的话：交给会话 lane 的模型判
                 try:
@@ -580,7 +585,7 @@ class ReminderOutlet:
                     request_id = str(raw["request_id"])
                 except (KeyError, ValueError):
                     continue
-                if self._write_response(day, Response(request_id, item.occurred_at, polarity, call_id)):
+                if self._write_response(day, Response(request_id, item.occurred_at, polarity, reply.call_id)):
                     written += 1
         return written
 
@@ -664,7 +669,7 @@ class ReminderOutlet:
 
 
 def fixed_polarity(answer: str) -> str | None:
-    """作答整句等于三个固定选项之一 → 方向；否则 None（自己填的话）。"""
+    """作答整句等于固定选项之一 → 方向；否则 None（自己填的话）。"""
 
     return POLARITY_OF_OPTION.get(" ".join(answer.split()))
 
@@ -685,47 +690,6 @@ def answer_in_result(content: str, title: str, *, single: bool) -> str | None:
         if " ".join(match.group(1).split()) == " ".join(title.split()):
             return fixed_polarity(match.group(2))
     return fixed_polarity_in(content) if single else None
-
-
-def parse_reply(content: str) -> tuple[tuple[str, int, str], ...]:
-    """Codex Desktop 的作答消息 → ``(call_id, 题序, answer)``；形状不对给空（那条消息照旧当人说的话）。"""
-
-    body = content.strip()
-    if not body.startswith(REPLY_TAG):
-        return ()
-    body = body[len(REPLY_TAG) :]
-    end = body.rfind("</")
-    body = body[:end] if end >= 0 else body
-    try:
-        items = json.loads(body)
-    except ValueError:
-        return ()
-    if not isinstance(items, list):
-        return ()
-    found: list[tuple[str, int, str]] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        identity = _call_id_of(item.get("questionItemId"))
-        answer = item.get("answer")
-        if identity is not None and isinstance(answer, str):
-            found.append((identity[0], identity[1], answer))
-    return tuple(found)
-
-
-def _call_id_of(value: object) -> tuple[str, int] | None:
-    """``questionItemId`` 是一段 JSON 文本：``["request_user_input_async","call_xxx",0]`` —— 工具名、call_id、第几题。"""
-
-    if not isinstance(value, str):
-        return None
-    try:
-        parts = json.loads(value)
-    except ValueError:
-        return None
-    if not (isinstance(parts, list) and len(parts) >= 2 and isinstance(parts[1], str) and parts[1]):
-        return None
-    index = parts[2] if len(parts) >= 3 and isinstance(parts[2], int) and not isinstance(parts[2], bool) else 0
-    return parts[1], index
 
 
 def _questions(call: HostMessage, tool: QuestionTool) -> tuple[_Question, ...]:
@@ -907,7 +871,6 @@ def _encode_asked(claim: _Claim, question: _Question, *, host: str, session: str
 __all__ = [
     "OPTIONS",
     "POLARITY_OF_OPTION",
-    "REPLY_TAG",
     "ClaimTrail",
     "ClaimedReminder",
     "Handoff",
@@ -919,5 +882,4 @@ __all__ = [
     "answer_in_result",
     "fixed_polarity",
     "fixed_polarity_in",
-    "parse_reply",
 ]

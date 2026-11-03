@@ -9,7 +9,6 @@ from types import SimpleNamespace
 import pytest
 
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.conversation import ConversationAddress, ConversationMessageJournal
 from habitus.memory.editor import (
     MemoryCommitTransaction,
@@ -27,6 +26,7 @@ from habitus.memory.workflow import (
 from habitus.memory.workflow.receipt import MemoryChangeReceiptState, MemoryChangeReceiptStore, MemoryChangeSource
 from habitus.memory.workflow.recovery import MemoryJobTransactionRecovery, MemoryStagedJobRecovery
 from tests.helpers import BASE_TIME, codec, segment
+from tests.lock_store import ProcessLocalLockStore
 
 
 def staged_job(tmp_path: Path):
@@ -70,7 +70,10 @@ class FakeConversationJournal:
         self.seal_calls: list[tuple[object, int]] = []
         self.layout = SimpleNamespace(segment_range=lambda _segment_id: (source.start_sequence, source.end_sequence))
 
-    def seal(self, address, *, through_sequence):
+    def read_state(self, _address):
+        return SimpleNamespace(archived_through_sequence=None)
+
+    def seal(self, address, *, through_sequence, before_history_publish=None):
         self.seal_calls.append((address, through_sequence))
         if self.error is not None:
             raise self.error
@@ -320,9 +323,21 @@ def test_discard_uncommitted_preserves_committed_transaction_and_receipt(tmp_pat
     assert receipts.discarded == []
 
 
+def test_discard_uncommitted_preserves_receipt_of_indeterminate_prepared_transaction(tmp_path: Path) -> None:
+    _store, job, _source = staged_job(tmp_path)
+    source = MemoryChangeSource.from_job(job)
+    transaction = FakeTransaction(SimpleNamespace(state=MemoryTransactionJournalState.PREPARED))
+    receipts = FakeReceiptStore(SimpleNamespace(state=MemoryChangeReceiptState.PREPARED))
+    recovery = transaction_recovery(transaction, receipts)
+
+    recovery.discard_uncommitted(source)
+    assert receipts.discarded == []
+    assert transaction.journal.discarded == []
+
+
 @pytest.mark.parametrize(
     "journal_state",
-    [None, MemoryTransactionJournalState.PREPARED, MemoryTransactionJournalState.ROLLED_BACK],
+    [None, MemoryTransactionJournalState.ROLLED_BACK],
 )
 def test_discard_uncommitted_cleans_only_prepared_receipt_and_rolled_back_log(
     tmp_path: Path,

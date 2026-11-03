@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -21,7 +22,7 @@ from habitus.scene.relations.conditions import (
 )
 from habitus.scene.relations.longspan import Episode, EpisodeMeasure, episodes, measure_of, unit_length
 from habitus.scene.relations.spans import chains_of
-from habitus.series import EventSeries, SeriesRecord
+from habitus.series import EventSeries, GapKind, SeriesGap, SeriesRecord
 from habitus.temporal.absence import Visit
 from tests.unit.scene.concept_fixtures import calendar, situation
 from tests.unit.scene.relation_fixtures import (
@@ -33,6 +34,7 @@ from tests.unit.scene.relation_fixtures import (
     PUSH,
     RESEARCH,
     START,
+    at,
     planted,
     record,
 )
@@ -117,6 +119,34 @@ def test_a_return_after_a_gap_longer_than_all_before_starts_a_state() -> None:
     assert found(daily(few), Segment.RETURN) == ()  # 之前只有 4 个间隔：样本少不判
 
 
+@pytest.mark.parametrize(
+    ("kind", "hidden"),
+    [(GapKind.UNOBSERVED, ((7, 0), (12, 0))), (GapKind.UNREADABLE, ((10, 3), (10, 12)))],
+    ids=["unobserved", "unreadable"],
+)
+def test_a_return_on_a_day_without_a_present_slot_does_not_stall_the_lane(kind, hidden) -> None:  # type: ignore[no-untyped-def]
+    """久别重来那天唯一一条记录（10:01 起 4 分钟）被观测空白整个盖住，那天人在场一槽不剩：这一晚照样检验完，
+    久别重来那一段从重来那天起算。"""
+
+    records = []
+    for offset in range(70):
+        day = START + timedelta(days=offset)
+        records.append(record(day, 9, 0, "调研"))
+        if offset <= 44 and offset % 2 == 0:
+            records.append(record(day, 11, 0, "写文档"))
+    back = START + timedelta(days=70)
+    last = record(back, 10, 1, "写文档")
+    records.append(replace(last, last_observed_at=last.started_at + timedelta(minutes=4)))
+    records.sort(key=lambda item: (item.started_at, item.uri))
+    (begin, finish) = hidden
+    gap = SeriesGap(uri="behavior://gaps/g.md", started_at=at(back, *begin), ended_at=at(back, *finish), kind=kind)
+    series = EventSeries(cutoff=back + timedelta(days=1), records=tuple(records), gaps=(gap,))
+    line = build_timelines(series, CONCEPTS, {}, CONFIG)["session"]
+    assert not line.present.get(back)
+    night = LaneTests(line, CONCEPTS, CONFIG, series.cutoff).night()
+    assert any(test.key.segment is Segment.RETURN for test in night.tests)
+
+
 def test_return_needs_nineteen_earlier_gaps_at_alpha_five_percent() -> None:
     """⌈1/α⌉ − 1：之前 19 个间隔判，18 个不判（26 号清单 3.4）。"""
 
@@ -165,6 +195,9 @@ def test_a_clean_state_effect_is_compared_with_the_days_around_it() -> None:
     upper, lower = measure.tails(exact_limit=0)
     assert upper == pytest.approx(1 / math.comb(24, 8)) and lower == 1.0
     assert measure.minimum_p() == pytest.approx(2 / math.comb(24, 8))
+    # 只朝一侧：朝上全写进状态 1 / C(24, 8)；朝下状态里一天不写 C(16, 8) / C(24, 8)
+    assert measure.minimum_toward(upward=True) == pytest.approx(1 / math.comb(24, 8))
+    assert measure.minimum_toward(upward=False) == pytest.approx(math.comb(16, 8) / math.comb(24, 8))
     spread, relative = measure.interval(level=0.95, rounds=200, seed=0)
     assert spread == (1.0, 1.0) and relative is None  # 对照率是 0：说不清相对差
     # 只有一段状态：切成前后两半，两半各自都比对照多
@@ -229,7 +262,7 @@ def test_a_moderated_relation_is_found_under_its_condition() -> None:
     )
 
 
-def test_moderation_opens_by_the_smallest_reachable_p_with_two_on_each_side() -> None:
+def test_moderation_opens_by_the_smallest_reachable_p_with_a_floor_on_each_side() -> None:
     """裁定 60 第 9 条：不用固定的前因 ≥ 40。对照率 0.3 时两边各 4 次全分开能在 α = 0.05 以内显著——开测；各 3 次不行；
     一边只有 1 次的，两边合计再多也不算样本够。"""
 
@@ -252,11 +285,36 @@ def test_moderation_opens_by_the_smallest_reachable_p_with_two_on_each_side() ->
     flags = iter([True] + [False] * 7)
     one_inside = split(ChainMeasure((*side(1, 0), *side(7, 100))), [lambda chain: next(flags)])
     assert (len(one_inside.inside), len(one_inside.outsides[0])) == (1, 7) and not one_inside.enough  # 合计 8 次也不够
-    # 列举调节条件前的预筛只要求两边各 2 次的最低量
+    # 列举调节条件前的预筛只要求两边各 ``MIN_PER_SIDE`` 次的最低量
     few = planted(20)
     tests = LaneTests(line_of(few), CONCEPTS, CONFIG, few.cutoff)
     assert len(tests.chains(DISCUSS)) >= 2 * MIN_PER_SIDE
     assert any(key.condition for key in tests.keys() if key.antecedent == DISCUSS)
+
+
+@pytest.mark.parametrize("upward", [True, False])
+def test_a_moderated_measure_reaches_its_one_sided_minimum_when_the_two_sides_split_all_the_way(upward: bool) -> None:
+    """只朝一侧检的最小可达 p：条件下全阳、条件外全阴（朝下反过来）时实际那一侧的尾概率就是它（条件外 4 层）。条件外只有 3 层时
+    条件外的次数门比实际的尾概率更难过（全中 / 全不中只有 (16/51)³ ≈ 0.031），读数由次数门定——与开测门同一口径（裁定 94 第 5 条）。"""
+
+    from habitus.scene.relations.spans import Stratum
+
+    def side(count: int, treated: int, positives: int, start: int) -> tuple[Stratum, ...]:
+        return tuple(
+            Stratum(chain=None, treated=treated, positives=positives, controls=50, block=start + index)  # type: ignore[arg-type]
+            for index in range(count)
+        )
+
+    # 两边对照率不同（条件下 25/50，条件外朝上 15/50、朝下 35/50）：交互 z 朝两侧走到最远的距离不一样
+    inside, outside, elsewhere = (1, 0, 15) if upward else (0, 1, 35)
+    measure = ModeratedMeasure(side(6, inside, 25, 0), (side(4, outside, elsewhere, 100),), enough=True)
+    upper, lower = measure.tails(exact_limit=40)
+    assert measure.minimum_toward(upward=upward) == pytest.approx(upper if upward else lower)
+    thin = ModeratedMeasure(side(6, inside, 25, 0), (side(3, outside, elsewhere, 100),), enough=True)
+    upper, lower = thin.tails(exact_limit=40)
+    assert thin.minimum_toward(upward=upward) == pytest.approx((16 / 51) ** 3)
+    assert (16 / 51) ** 3 > (upper if upward else lower)
+    assert ModeratedMeasure((), ((),), enough=False).minimum_toward(upward=upward) == 1.0
 
 
 def test_moderation_asks_the_outside_for_as_much_as_the_inside() -> None:

@@ -4,15 +4,20 @@ infrastructure，形状与编解码在 ``foresight.history``，这里只管目�
     <root>/unit_moments/<lane>/<预期身份>.json        一条结完的预期在预测轴上的结果（原始强度）
     <root>/unit_moments/<lane>/_recorded.json        记过的日子
     <root>/unit_history/<lane>/<YYYY-MM-DD>.json      这一晚重标过的快照
+
+坏文件按预测层各 store 的同一个总则（``runtime.foresight_files``）：一份读不出来（解析不了、旧 schema）的每刻记录跳过、计入观测
+（``take_unreadable``），快照照写、压实照常——它那一刻从读数里少了，不让整晚停；"记过的日子"读不出来就当没记过，结完的日子
+整天重记（同一条预期的记录整份替换，幂等）。
 """
 
 from __future__ import annotations
 
-import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
+from typing import Any
 
+from habitus.config.foresight import ForesightStoreConfig
 from habitus.foresight import ForesightError
 from habitus.foresight.history import (
     MomentRecord,
@@ -23,36 +28,36 @@ from habitus.foresight.history import (
     encode_record,
 )
 from habitus.foundation.ids import canonical_path_identity
-from habitus.infrastructure.store.filesystem import (
-    DurablePathIntegrityError,
-    atomic_replace_bytes,
-    durable_unlink,
-    ensure_real_directory,
-    list_real_directory,
-    read_regular_bytes,
-    real_directory_exists,
-)
+from habitus.runtime.foresight_files import JsonFiles
 from habitus.runtime.foresight_nightly_files import NightlyFiles
 
 HISTORY_SEGMENT = "unit_history"
 MOMENT_SEGMENT = "unit_moments"
-MAX_HISTORY_BYTES = 32 * 1024 * 1024
-_MAX_RECORD_BYTES = 64 * 1024
-_MAX_RECORDS = 200_000
 _RECORDED = "_recorded.json"
 
 
 class HistoryStore:
-    def __init__(self, root: str | Path, *, retained_nights: int = 3) -> None:
+    def __init__(
+        self, root: str | Path, *, retained_nights: int = 3, limits: ForesightStoreConfig | None = None
+    ) -> None:
+        limits = limits if limits is not None else ForesightStoreConfig()
         self._files = NightlyFiles(
             root,
             segment=HISTORY_SEGMENT,
             label="unit history",
-            max_bytes=MAX_HISTORY_BYTES,
+            max_bytes=limits.unit_history_max_bytes,
             retained_nights=retained_nights,
+            max_entries=limits.nightly_max_entries,
         )
         self.root = self._files.root
         self._moments = self.root / MOMENT_SEGMENT
+        self._records = JsonFiles(
+            self.root,
+            label="unit moment",
+            max_bytes=limits.unit_moment_max_record_bytes,
+            max_entries=limits.unit_moment_max_records,
+            max_unreadable=limits.unreadable_max_paths,
+        )
 
     # ── 快照 ────────────────────────────────────────────────────────────────
 
@@ -66,49 +71,40 @@ class HistoryStore:
         return decode_history(self._files.read(lane, night), lane=lane, night=night)
 
     def latest(self, lane: str) -> UnitHistory | None:
-        night = self.latest_night(lane)
-        return None if night is None else self.read(lane, night)
+        """盘上最晚一晚读得出来的快照（最晚那一份坏了往前退一晚，坏的计入观测）；没有是 None。"""
+
+        return self._files.latest(lane, lambda text, night: decode_history(text, lane=lane, night=night))
 
     # ── 每刻的记录 ──────────────────────────────────────────────────────────
 
     def put_record(self, lane: str, item: MomentRecord) -> None:
         """同一条预期的记录整份替换（重结之后再结完，结果可能变了）。"""
 
-        self._replace(self._lane(lane) / f"{_name(item.expectation_id)}.json", encode_record(item))
+        self._records.replace(self._lane(lane) / f"{_name(item.expectation_id)}.json", encode_record(item))
 
     def records(self, lane: str) -> tuple[MomentRecord, ...]:
-        directory = self._lane(lane)
-        found = []
-        for name in self._names(directory):
-            if name == _RECORDED:
-                continue
-            found.append(decode_record(self._load(directory / name)))
+        """这条 lane 的全部每刻记录；读不出来的跳过、计入观测。"""
+
+        found = [item for _stem, item in self._records.decoded(self._lane(lane), decode_record)]
         return tuple(sorted(found, key=lambda item: (item.formed_at, item.expectation_id)))
 
     def discard_records(self, lane: str, expectation_ids: Iterable[str]) -> int:
         directory = self._lane(lane)
-        removed = 0
-        for identity in expectation_ids:
-            try:
-                removed += durable_unlink(directory / f"{_name(identity)}.json", artifact_root=self.root)
-            except DurablePathIntegrityError as exc:
-                raise ForesightError(f"unit moment record cannot be removed: {exc}") from exc
-        return removed
+        return sum(1 for identity in expectation_ids if self._records.remove(directory / f"{_name(identity)}.json"))
 
     def recorded_days(self, lane: str) -> frozenset[date]:
-        path = self._lane(lane) / _RECORDED
-        if _RECORDED not in self._names(self._lane(lane)):
-            return frozenset()
-        days = self._load(path).get("days")
-        if not isinstance(days, list):
-            raise ForesightError(f"recorded days of lane {lane!r} are malformed")
-        try:
-            return frozenset(date.fromisoformat(str(day)) for day in days)
-        except (TypeError, ValueError) as exc:
-            raise ForesightError(f"recorded days of lane {lane!r} are malformed: {exc}") from exc
+        """记过的日子；读不出来当没记过（计入观测）。"""
+
+        found = self._records.read(self._lane(lane) / _RECORDED, _recorded_days)
+        return frozenset() if found is None else found
 
     def set_recorded_days(self, lane: str, days: Iterable[date]) -> None:
-        self._replace(self._lane(lane) / _RECORDED, {"days": sorted(day.isoformat() for day in days)})
+        self._records.replace(self._lane(lane) / _RECORDED, {"days": sorted(day.isoformat() for day in days)})
+
+    def take_unreadable(self) -> tuple[str, ...]:
+        """上次 ``take`` 以来跳过的坏文件（路径），取走即清。"""
+
+        return (*self._records.take_unreadable(), *self._files.take_unreadable())
 
     def _lane(self, lane: str) -> Path:
         try:
@@ -119,35 +115,15 @@ class HistoryStore:
             raise ForesightError(f"lane {lane!r} is not a canonical directory name")
         return self._moments / lane
 
-    def _names(self, directory: Path) -> tuple[str, ...]:
-        try:
-            if not real_directory_exists(directory, artifact_root=self.root):
-                return ()
-            entries = list_real_directory(directory, artifact_root=self.root, max_entries=_MAX_RECORDS)
-        except DurablePathIntegrityError as exc:
-            raise ForesightError(f"unit moment directory cannot be listed: {exc}") from exc
-        return tuple(
-            sorted(e.name for e in entries if e.is_file() and e.name.endswith(".json") and not e.name.startswith("."))
-        )
 
-    def _replace(self, path: Path, payload: Mapping[str, object]) -> None:
-        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        if len(encoded) > _MAX_RECORD_BYTES:
-            raise ForesightError(f"unit moment file {path.name} exceeds its byte budget")
-        try:
-            ensure_real_directory(path.parent, artifact_root=self.root)
-            atomic_replace_bytes(path, encoded, artifact_root=self.root)
-        except DurablePathIntegrityError as exc:
-            raise ForesightError(f"unit moment file cannot be written: {exc}") from exc
-
-    def _load(self, path: Path) -> dict[str, object]:
-        try:
-            raw = json.loads(read_regular_bytes(path, artifact_root=self.root, max_bytes=_MAX_RECORD_BYTES))
-        except (DurablePathIntegrityError, ValueError) as exc:
-            raise ForesightError(f"unit moment file {path.name} cannot be read: {exc}") from exc
-        if not isinstance(raw, dict):
-            raise ForesightError(f"unit moment file {path.name} is not an object")
-        return raw
+def _recorded_days(raw: dict[str, Any]) -> frozenset[date]:
+    days = raw.get("days")
+    try:
+        if not isinstance(days, list):
+            raise TypeError("days must be a list")
+        return frozenset(date.fromisoformat(str(day)) for day in days)
+    except (TypeError, ValueError) as exc:
+        raise ForesightError(f"recorded days are malformed: {exc}") from exc
 
 
 def _name(expectation_id: str) -> str:

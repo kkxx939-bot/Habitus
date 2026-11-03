@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from habitus.config import HabitusConfig
 from habitus.foresight import Evidence
-from habitus.runtime.scene_night import relation_config
+from habitus.runtime.scene_config import relation_config
 
 
 def evidence_of(config: HabitusConfig) -> Evidence:

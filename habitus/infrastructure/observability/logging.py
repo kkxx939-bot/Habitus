@@ -31,6 +31,8 @@ _SAFE_LOG_FIELDS = frozenset(
     }
 )
 _STANDARD_LOG_FIELDS = frozenset(logging.makeLogRecord({}).__dict__)
+_MESSAGE_LIMIT = 2_000
+_MESSAGE_ELISION = " … "
 
 
 class StructuredLogObserver:
@@ -141,6 +143,10 @@ def _safe_attributes(attributes: object) -> dict[str, str | int | float | bool]:
         "stage",
         "worker_state",
         "job_status",
+        "retrieval_ended_at_limit",
+        "read_only_noop_count",
+        "source_rejected_count",
+        "source_rejected_reasons",
         "queue_staged",
         "queue_queued",
         "queue_running",
@@ -184,7 +190,13 @@ def _trace_fields() -> dict[str, str]:
 
 
 def _safe_message(value: str) -> str:
-    return redact_sensitive_text(value)[:2_000]
+    """脱敏后超过上限的消息保留头尾、省掉中间：头上说在做什么，末尾常是栈的最后一行（真正的异常）。"""
+
+    text = redact_sensitive_text(value)
+    if len(text) <= _MESSAGE_LIMIT:
+        return text
+    kept = (_MESSAGE_LIMIT - len(_MESSAGE_ELISION)) // 2
+    return f"{text[:kept]}{_MESSAGE_ELISION}{text[-kept:]}"
 
 
 __all__ = ["JSONLogFormatter", "StructuredLogObserver", "configure_json_logging"]

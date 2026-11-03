@@ -87,6 +87,21 @@ class Standing:
     discount: float = 1.0
 
 
+def effective_setting(setting: UnitSetting | None, now: datetime) -> str | None:
+    """``now`` 那一刻这个行为生效的设置：最新那条已经设下（不晚于此刻）、又不是「照常」（照常就是撤销）；没有就是 None。
+    边的级与单元的档读的是同一条。"""
+
+    if setting is None or setting.at > now or setting.setting == "照常":
+        return None
+    return setting.setting
+
+
+def silenced(setting: UnitSetting | None) -> bool:
+    """人对这个行为说过「以后别提了」（最新那条就是它）：触发不再为它建预期（裁定 50、61）。"""
+
+    return setting is not None and setting.setting == "以后别提了"
+
+
 def climb(
     moments: Sequence[PastMoment],
     account: str,
@@ -105,7 +120,7 @@ def climb(
     )
     prediction = folded.reading
     threshold = tolerance.threshold
-    chosen = setting.setting if setting is not None and setting.at <= now and setting.setting != "照常" else None
+    chosen = effective_setting(setting, now)
     if chosen == "以后都提醒我":
         level = 1
     elif chosen == "以后别提了" or prediction.upper < threshold:
@@ -153,4 +168,13 @@ def decide(
     return Delivery(identity, now, level, True, "说了", 1.0, text, evidence=cited)
 
 
-__all__ = ["Evidence", "Tolerance", "Standing", "account_key", "climb", "decide"]
+__all__ = [
+    "Evidence",
+    "Tolerance",
+    "Standing",
+    "account_key",
+    "climb",
+    "decide",
+    "effective_setting",
+    "silenced",
+]

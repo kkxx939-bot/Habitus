@@ -36,10 +36,11 @@ from habitus.scene.relations import LaneTimeline, Segment
 from habitus.temporal.slots import absolute_slot
 
 #: v2（裁定 61 第 7 条）：每刻的分量是原始强度，"规律断了"的打折读的时候算；签名按族取最具体的成立组合、不含巧合输入。
-#: v3：每刻带着它由哪几条预期组成——单元的提醒反馈时钟按"到时窗末还没做"的机会推进（裁定 60 第 4 条），要认出哪几刻
-#: 已经作为提醒反馈记过、不再数一遍。
+#: v3：每刻带着它由哪几条预期组成——单元的提醒反馈时钟按这个行为的每一次机会推进（裁定 91 第 3 条①；原为裁定 60 第 4 条
+#: "到时窗末还没做"的机会，格式不变），要认出哪几刻已经作为提醒反馈记过、不再数一遍。
 HISTORY_SCHEMA_VERSION = 3
-MOMENT_RECORD_SCHEMA = "foresight_unit_moment_v1"
+#: v2（裁定 81）：自然命中带着认出的那次发生，一次发生只算给一刻。
+MOMENT_RECORD_SCHEMA = "foresight_unit_moment_v2"
 #: 看得见的落空（强度大于 0 才算：观测空白里的中性不算知道）。
 _MISSES = frozenset({"过期待决", "后补"})
 
@@ -50,7 +51,8 @@ class MomentRecord:
 
     ``came``：自然命中为真，看得见的落空为假，其余（被提醒才做、观测空白、作废）为 None——不算知道，但照样参与"说中的范围
     连成一片"（它能把前后两条连成同一刻）。``strength`` 是原始强度：规律断了的打折在读的时候对正在读的那串刻算
-    （``edges.fold_sequence``），不存打折后的。"""
+    （``edges.fold_sequence``），不存打折后的。``occurrence_uri`` 是自然命中时结算认出的那次发生（结算记录读不到时为 None）：
+    两条不相连的预期认的是同一次发生时，只算给起算最早的那一条（``labelled_moments``）。"""
 
     expectation_id: str
     kind_token: str
@@ -60,6 +62,7 @@ class MomentRecord:
     deadline: datetime
     came: bool | None
     strength: float
+    occurrence_uri: str | None = None
 
     def __post_init__(self) -> None:
         for label in ("expectation_id", "kind_token", "account"):
@@ -71,10 +74,12 @@ class MomentRecord:
                 raise ForesightError(f"moment record {label} must be a timezone-aware datetime")
         if not 0.0 <= self.strength <= 1.0 or (self.came is None and self.strength != 0.0):
             raise ForesightError("a moment record carries a strength in [0, 1], and none when its outcome is unknown")
+        if self.occurrence_uri is not None and (self.came is not True or not isinstance(self.occurrence_uri, str)):
+            raise ForesightError("a moment record names an occurrence only for a natural hit")
 
 
-def record_of(item: Expectation, fact: AccountFact | None) -> MomentRecord:
-    """一条结完的预期、它在预测轴上现在算数的那一笔（没有为 None），变成一份记录。"""
+def record_of(item: Expectation, fact: AccountFact | None, *, occurrence_uri: str | None = None) -> MomentRecord:
+    """一条结完的预期、它在预测轴上现在算数的那一笔（没有为 None）、结算认出的那次发生，变成一份记录（发生只在自然命中时留）。"""
 
     came: bool | None = None
     strength = 0.0
@@ -91,6 +96,7 @@ def record_of(item: Expectation, fact: AccountFact | None) -> MomentRecord:
         item.deadline,
         came,
         strength,
+        occurrence_uri if came is True else None,
     )
 
 
@@ -105,6 +111,7 @@ def encode_record(item: MomentRecord) -> dict[str, Any]:
         "deadline": item.deadline.isoformat(),
         "came": item.came,
         "strength": item.strength,
+        "occurrence_uri": item.occurrence_uri,
     }
 
 
@@ -115,6 +122,9 @@ def decode_record(raw: Mapping[str, Any]) -> MomentRecord:
         came = raw["came"]
         if came is not None and not isinstance(came, bool):
             raise ValueError("came must be a boolean or null")
+        occurrence = raw["occurrence_uri"]
+        if occurrence is not None and not isinstance(occurrence, str):
+            raise ValueError("occurrence_uri must be text or null")
         return MomentRecord(
             str(raw["expectation_id"]),
             str(raw["kind_token"]),
@@ -124,6 +134,7 @@ def decode_record(raw: Mapping[str, Any]) -> MomentRecord:
             datetime.fromisoformat(str(raw["deadline"])),
             came,
             float(raw["strength"]),
+            occurrence,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ForesightError(f"unit moment record is malformed: {exc}") from exc
@@ -221,11 +232,23 @@ def labelled_moments(
     records: Iterable[MomentRecord], *, present: Callable[[Sequence[MomentRecord]], frozenset[str]]
 ) -> tuple[Moment, ...]:
     """一个行为的每一刻（``units.connected``）：有一条自然命中就是来了（分量取命中里最重的），没有命中而有看得见的落空就是没来
-    （分量取落空里最重的），其余不知道、不算。分量 = 原始强度（打折在读的时候算）；在场的那一组由 ``present`` 给。"""
+    （分量取落空里最重的），其余不知道、不算。分量 = 原始强度（打折在读的时候算）；在场的那一组由 ``present`` 给。
+
+    一次发生只算给一刻（裁定 81）：以当天为单位、起算不在同一天的两条重叠也各是一刻，两条可能都认同一次发生（他 01-06 没做、
+    01-07 做了，01-06 那条覆盖到 01-08、01-07 那条从 01-07 起，都认 01-07 那一次）。按起算先后看，这次发生算给起算最早的那一刻
+    （认它的那条在它发生时还开着——它是那条范围里的第一次）；后面那条要等它自己的发生，账上只记了每条范围里的第一次，它自己的
+    发生看不到，这一条按不知道算（不当落空：它可能在范围里又做了一次）。"""
 
     found = []
+    claimed: set[str] = set()
     for group in connected(records):
-        hits = [item.strength for item in group if item.came is True]
+        counted = [
+            item
+            for item in group
+            if item.came is True and (item.occurrence_uri is None or item.occurrence_uri not in claimed)
+        ]
+        claimed.update(item.occurrence_uri for item in counted if item.occurrence_uri is not None)
+        hits = [item.strength for item in counted]
         misses = [item.strength for item in group if item.came is False]
         if hits:
             came, strength = True, max(hits)

@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
+import unicodedata
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, replace
 
 from habitus.foundation.integrity import canonical_json
 from habitus.memory.conversation.segmentation import (
     SEMANTIC_CHUNKER_VERSION,
     ConversationBoundaryHints,
 )
+from habitus.memory.conversation.tool_result_extraction import ToolResultExtractor
+from habitus.pre.conversation.media import describe_media_only
 from habitus.pre.conversation.messages import (
     ConversationBatch,
     ConversationMessage,
@@ -29,23 +30,19 @@ class ConversationRetentionError(ValueError):
 ConversationTokenEstimator = Callable[[ConversationMessage], int]
 
 
-def _token_weight(character: str) -> float:
-    code_point = ord(character)
-    if (
-        0x3400 <= code_point <= 0x4DBF
-        or 0x4E00 <= code_point <= 0x9FFF
-        or 0xF900 <= code_point <= 0xFAFF
-        or 0x20000 <= code_point <= 0x2EBEF
-        or 0x3040 <= code_point <= 0x30FF
-        or 0x31F0 <= code_point <= 0x31FF
-        or 0xAC00 <= code_point <= 0xD7AF
-        or 0x1100 <= code_point <= 0x11FF
-        or 0x3130 <= code_point <= 0x318F
-        or 0xFF00 <= code_point <= 0xFFEF
-        or 0x3000 <= code_point <= 0x303F
-    ):
+_WIDE_EAST_ASIAN_WIDTHS = frozenset({"W", "F"})
+
+
+def _character_token_cost(character: str) -> float:
+    """单个字符折算的 Token 数，按 Unicode 东亚宽度（UAX #11）分三档。
+
+    宽字符与全角字符（W / F：汉字、假名、韩文音节、全角标点与字母、多数 emoji）记 1.5；其余落在基本多文种平面
+    以外的字符记 2.0；剩下的拉丁字母、数字、半角标点和空白记 0.25。
+    """
+
+    if unicodedata.east_asian_width(character) in _WIDE_EAST_ASIAN_WIDTHS:
         return 1.5
-    if code_point > 0xFFFF:
+    if ord(character) > 0xFFFF:
         return 2.0
     return 0.25
 
@@ -56,7 +53,7 @@ def estimate_conversation_message_tokens(message: ConversationMessage) -> int:
     if not isinstance(message, ConversationMessage):
         raise TypeError("message must be a ConversationMessage")
     rendered = canonical_json(message.to_dict())
-    return max(1, math.ceil(sum(_token_weight(character) for character in rendered)))
+    return max(1, math.ceil(sum(_character_token_cost(character) for character in rendered)))
 
 
 @dataclass(frozen=True)
@@ -410,6 +407,25 @@ class ConversationRetentionPlanner:
         selected = max(preferred or candidates, key=lambda item: (item[0], item[1]))
         return messages[: selected[1] + 1], selected[2]
 
+    def atomic_spans(self, messages: tuple[ConversationMessage, ...]) -> tuple[tuple[int, int], ...]:
+        """按安全切点把消息分成 ``[start, end)`` 下标区间：区间里面切不开，一组工具交换及连着它的消息只能整组进段。"""
+
+        safe_sequences = set(self._safe_boundaries(messages))
+        spans: list[tuple[int, int]] = []
+        start = 0
+        for index, message in enumerate(messages):
+            if message.sequence in safe_sequences:
+                spans.append((start, index + 1))
+                start = index + 1
+        if start < len(messages):
+            spans.append((start, len(messages)))
+        return tuple(spans)
+
+    def fits_segment(self, messages: tuple[ConversationMessage, ...]) -> bool:
+        """这些消息能否放进一段（消息数、字节、Token 三个上限）。"""
+
+        return self._within_segment_budget(messages)
+
     def _live_safety_exceeded(self, messages: tuple[ConversationMessage, ...]) -> bool:
         return not self._within_live_window(messages)
 
@@ -555,15 +571,22 @@ class ConversationRetentionPlanner:
         )
 
 
+#: 抽一组工具交换时，摘录字数从配置值逐次减半，最少到这么多字。
+_MIN_EXCHANGE_SUMMARY_CHARS = 128
+#: 调用参数是对象时，规范 JSON 不超过这么多字的字段原样保留（路径、命令、开关），只抽更大的字段。
+_VERBATIM_ARGUMENT_CHARS = 256
+
+
 # TODO(conversation-source): 修改此压缩算法语义时，必须同步提升
 # memory/workflow/conversation_consumer.py 中 tool_result_reducer_version。
 class ConversationToolResultReducer:
-    """在写入 Conversation 前压缩超大工具结果，不建立旁路原文存储。"""
+    """在写入 Conversation 前压缩超大工具结果与超限工具交换里的调用参数，不建立旁路原文存储。"""
 
     def __init__(self, config: ConversationSegmentationConfig | None = None) -> None:
         if config is not None and not isinstance(config, ConversationSegmentationConfig):
             raise TypeError("config must be ConversationSegmentationConfig")
         self.config = config or ConversationSegmentationConfig()
+        self.extractor = ToolResultExtractor(self.config.max_tool_result_summary_chars)
 
     def reduce(
         self,
@@ -572,8 +595,13 @@ class ConversationToolResultReducer:
         force_omit: bool = False,
         force_summarize: bool = False,
         description: str | None = None,
+        maximum: int | None = None,
     ) -> ConversationMessage:
-        """保留小结果；把大文本概括，把媒体或不可保留结果明确省略。"""
+        """保留小结果；把大文本抽成关键信息，把媒体或不可保留结果明确省略。
+
+        只有媒体的结果记原载荷的字节数与 sha256（经不经插件占位都相同，见 ``describe_media_only``）；
+        其余结果记整份内容规范 JSON 的字节数与 sha256。``maximum`` 是摘录字数上限，缺省取配置值。
+        """
 
         if not isinstance(message, ConversationMessage):
             raise TypeError("message must be ConversationMessage")
@@ -585,22 +613,34 @@ class ConversationToolResultReducer:
             raise TypeError("force_summarize must be boolean")
         if force_omit and force_summarize:
             raise ValueError("tool result cannot be force-omitted and force-summarized together")
+        if message.content_mode is not ConversationToolResultContentMode.INLINE:
+            return message
         encoded = canonical_json(message.content).encode("utf-8")
         size = len(encoded)
         digest = hashlib.sha256(encoded).hexdigest()
-        if message.content_mode is not ConversationToolResultContentMode.INLINE:
-            return message
-        if not force_omit and not force_summarize and size <= self.config.max_inline_tool_result_bytes:
+        media = describe_media_only(message.content)
+        if not force_omit and media is None and not force_summarize and size <= self.config.max_inline_tool_result_bytes:
             return message
 
-        if force_omit:
+        if media is not None:
+            # 只有媒体、没有文字的结果按"媒体只存描述、大小与摘要值"处理，不论大小；大小与摘要值指原载荷。
+            content = self._description(description, fallback=media.text)
+            size, digest = media.original_size_bytes, media.original_sha256
+            mode = ConversationToolResultContentMode.OMITTED
+        elif force_omit:
             content = self._description(
                 description,
                 fallback="工具结果属于媒体、二进制、下载载荷或不可长期保存内容，原始载荷未保存。",
             )
             mode = ConversationToolResultContentMode.OMITTED
         else:
-            content = self._summarize(message.content)
+            assert message.tool_status is not None
+            content = self._extractor(maximum).extract(
+                message.content,
+                tool_name=message.tool_name,
+                tool_status=message.tool_status.value,
+                size_bytes=size,
+            )
             mode = ConversationToolResultContentMode.SUMMARIZED
         return ConversationMessage(
             message_id=message.message_id,
@@ -617,28 +657,137 @@ class ConversationToolResultReducer:
             original_sha256=digest,
         )
 
-    def _summarize(self, value: Any) -> str:
+    def reduce_tool_call(self, message: ConversationMessage, *, maximum: int | None = None) -> ConversationMessage:
+        """把调用参数抽成关键信息：对象参数里小字段原样留、大字段各自抽取，其余情形整份抽取；记原参数的字节数与 sha256。"""
+
+        if not isinstance(message, ConversationMessage):
+            raise TypeError("message must be ConversationMessage")
+        if message.role is not ConversationMessageRole.TOOL_CALL:
+            raise ValueError("only tool_call messages can have their arguments reduced")
+        if message.content_mode is not None:
+            return message
+        encoded = canonical_json(message.content).encode("utf-8")
+        return replace(
+            message,
+            content=self._call_arguments(message.content, message.tool_name, self._maximum(maximum)),
+            content_mode=ConversationToolResultContentMode.SUMMARIZED,
+            original_size_bytes=len(encoded),
+            original_sha256=hashlib.sha256(encoded).hexdigest(),
+        )
+
+    def fit_exchanges(
+        self,
+        batch: ConversationBatch,
+        planner: ConversationRetentionPlanner,
+        *,
+        originals: Mapping[str, ConversationMessage],
+        omit_tool_call_ids: frozenset[str] = frozenset(),
+    ) -> ConversationBatch:
+        """让这一批里每组切不开的工具交换都放得进一段。
+
+        超限的一组按当前 Token 从大到小，逐个把工具结果或调用参数从原文（``originals`` 按 message_id 取）
+        重新抽取，放得下就停；全抽过仍放不下，摘录字数减半再来，直到下限。只看这一批本身，同一批重放结果相同。
+        放不进的（消息条数超限、或切不开的部分不是工具消息）原样留给规划器报错。
+        """
+
+        if not isinstance(batch, ConversationBatch):
+            raise TypeError("batch must be ConversationBatch")
+        if not isinstance(planner, ConversationRetentionPlanner):
+            raise TypeError("planner must be ConversationRetentionPlanner")
+        messages = list(batch.messages)
+        changed = False
+        for start, end in planner.atomic_spans(batch.messages):
+            unit = tuple(messages[start:end])
+            if planner.fits_segment(unit):
+                continue
+            fitted = self._fit_unit(unit, planner, originals, omit_tool_call_ids)
+            if fitted != unit:
+                messages[start:end] = fitted
+                changed = True
+        return ConversationBatch(batch.conversation_id, tuple(messages)) if changed else batch
+
+    def _fit_unit(
+        self,
+        unit: tuple[ConversationMessage, ...],
+        planner: ConversationRetentionPlanner,
+        originals: Mapping[str, ConversationMessage],
+        omit_tool_call_ids: frozenset[str],
+    ) -> tuple[ConversationMessage, ...]:
+        candidates = [
+            index
+            for index, message in enumerate(unit)
+            if self._reducible(originals.get(message.message_id), omit_tool_call_ids)
+        ]
+        if not candidates or len(unit) > planner.config.max_segment_messages:
+            return unit
+        current = list(unit)
         maximum = self.config.max_tool_result_summary_chars
-        if isinstance(value, Mapping):
-            keys = [str(key) for key in list(value)[:32]]
-            prefix = f"工具结果已压缩：JSON 对象，共 {len(value)} 个顶层字段；字段：{', '.join(keys)}。\n"
-        elif isinstance(value, list | tuple):
-            prefix = f"工具结果已压缩：JSON 数组，共 {len(value)} 项。\n"
-        elif isinstance(value, str):
-            prefix = f"工具结果已压缩：文本，共 {len(value)} 个字符。\n"
-        else:
-            prefix = f"工具结果已压缩：{type(value).__name__}。\n"
-        rendered = json.dumps(value, ensure_ascii=False, sort_keys=True) if not isinstance(value, str) else value
-        remaining = max(0, maximum - len(prefix))
-        if len(rendered) <= remaining:
-            sample = rendered
-        elif remaining >= 64:
-            head = max(1, remaining * 2 // 3)
-            tail = max(1, remaining - head - 5)
-            sample = f"{rendered[:head]}\n...\n{rendered[-tail:]}"
-        else:
-            sample = rendered[:remaining]
-        return (prefix + sample)[:maximum]
+        while True:
+            for index in sorted(candidates, key=lambda item: (-planner.token_estimator(current[item]), item)):
+                if planner.fits_segment(tuple(current)):
+                    return tuple(current)
+                smaller = self._reduced_member(originals[current[index].message_id], maximum)
+                if planner.token_estimator(smaller) < planner.token_estimator(current[index]):
+                    current[index] = smaller
+            if planner.fits_segment(tuple(current)) or maximum <= _MIN_EXCHANGE_SUMMARY_CHARS:
+                return tuple(current)
+            maximum = max(_MIN_EXCHANGE_SUMMARY_CHARS, maximum // 2)
+
+    @staticmethod
+    def _reducible(original: ConversationMessage | None, omit_tool_call_ids: frozenset[str]) -> bool:
+        if original is None:
+            return False
+        if original.role is ConversationMessageRole.TOOL_CALL:
+            return original.content_mode is None
+        return (
+            original.role is ConversationMessageRole.TOOL_RESULT
+            and original.content_mode is ConversationToolResultContentMode.INLINE
+            and original.tool_call_id not in omit_tool_call_ids
+            and describe_media_only(original.content) is None
+        )
+
+    def _reduced_member(self, original: ConversationMessage, maximum: int) -> ConversationMessage:
+        if original.role is ConversationMessageRole.TOOL_CALL:
+            return self.reduce_tool_call(original, maximum=maximum)
+        return self.reduce(original, force_summarize=True, maximum=maximum)
+
+    def _call_arguments(self, content: object, tool_name: str | None, maximum: int) -> object:
+        if isinstance(content, Mapping):
+            sizes = {key: len(canonical_json(value)) for key, value in content.items()}
+            large = {key for key, size in sizes.items() if size > _VERBATIM_ARGUMENT_CHARS}
+            kept = sum(size for key, size in sizes.items() if key not in large)
+            if large and kept <= maximum // 2:
+                extractor = ToolResultExtractor(max(_MIN_EXCHANGE_SUMMARY_CHARS, (maximum - kept) // len(large)))
+                return {
+                    key: (
+                        extractor.extract(
+                            value,
+                            tool_name=tool_name,
+                            size_bytes=len(canonical_json(value).encode("utf-8")),
+                            call_argument=str(key),
+                        )
+                        if key in large
+                        else value
+                    )
+                    for key, value in content.items()
+                }
+        return ToolResultExtractor(maximum).extract(
+            content,
+            tool_name=tool_name,
+            size_bytes=len(canonical_json(content).encode("utf-8")),
+            call_argument="",
+        )
+
+    def _maximum(self, maximum: int | None) -> int:
+        if maximum is None:
+            return self.config.max_tool_result_summary_chars
+        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
+            raise ValueError("maximum must be a positive integer or None")
+        return maximum
+
+    def _extractor(self, maximum: int | None) -> ToolResultExtractor:
+        resolved = self._maximum(maximum)
+        return self.extractor if resolved == self.extractor.maximum else ToolResultExtractor(resolved)
 
     @staticmethod
     def _description(value: str | None, *, fallback: str) -> str:

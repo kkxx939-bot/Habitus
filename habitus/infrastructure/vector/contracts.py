@@ -5,13 +5,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Protocol
 
+from habitus.foundation.embedding import EmbeddingVector
 from habitus.infrastructure.vector.model import (
     VectorStoreFilter,
     VectorStoreMatch,
     VectorStoreRecord,
     VectorStoreState,
 )
-from habitus.model_client import EmbeddingVector
 
 
 class VectorStore(Protocol):

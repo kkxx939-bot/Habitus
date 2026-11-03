@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -11,7 +12,7 @@ import pytest
 from habitus.foresight import Evidence, ForesightError
 from habitus.foresight.edges import PastMoment, edge_reading
 from habitus.foresight.history import Moment, UnitHistory
-from habitus.foresight.ledger import AccountFact, Expectation
+from habitus.foresight.ledger import AccountFact, Expectation, Settlement
 from habitus.foresight.opportunities import OpportunityTable
 from habitus.foresight.triggers import timeline_of
 from habitus.runtime.foresight_history import HistoryStage
@@ -197,3 +198,53 @@ def test_the_store_keeps_the_latest_nights_and_refuses_to_rewrite_the_past(tmp_p
         store.write(UnitHistory("session", NIGHT, {}))
     with pytest.raises(TypeError):
         HistoryStage(object(), store, evidence=EVIDENCE, statuses=())  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("content", ['{"schema_version": 999}', "{", "[]"])
+def test_a_bad_moment_record_is_skipped_and_counted_and_the_snapshot_is_still_written(tmp_path, content) -> None:
+    """段 6 Q2：单元历史一份坏 / 旧 schema 的每刻记录不让这一晚抛（原来每晚抛、快照停在出错前、压实跟着停）——跳过、计入观测，
+    快照照写；"记过的日子"读不出来就当没记过，结完的日子整天重记。"""
+
+    run, ledger, store = stage(tmp_path)
+    for weeks in (1, 2):
+        record(ledger, gym(NIGHT - timedelta(weeks=weeks)), came=True)
+    table, line = nothing()
+    run.run(night=NIGHT - timedelta(days=1), table=table, line=line)  # type: ignore[arg-type]
+    bad = store.root / "unit_moments" / "session" / "gym-old.json"
+    bad.write_text(content, encoding="utf-8")
+    recorded = store.root / "unit_moments" / "session" / "_recorded.json"
+    recorded.write_text("{", encoding="utf-8")
+    assert run.run(night=NIGHT, table=table, line=line) == 2  # type: ignore[arg-type]
+    stored = store.latest("session")
+    assert stored is not None and stored.night == NIGHT and len(stored.of("s-k0002")) == 2
+    assert set(store.take_unreadable()) == {str(bad), str(recorded)}
+    assert len(store.recorded_days("session")) == 2  # 重记之后整份重写成读得出的
+
+
+def test_a_corrupt_latest_snapshot_falls_back_to_the_night_before(tmp_path) -> None:
+    store = HistoryStore(tmp_path / "ledger")
+    store.write(UnitHistory("session", NIGHT, {}))
+    latest = store.write(UnitHistory("session", NIGHT + timedelta(days=1), {}))
+    latest.write_text("{", encoding="utf-8")
+    found = store.latest("session")
+    assert found is not None and found.night == NIGHT and store.take_unreadable() == (str(latest),)
+
+
+def test_an_occurrence_two_overlapping_day_expectations_settled_on_is_one_moment(tmp_path) -> None:
+    """裁定 81：结算给每条预期各认一次发生（账不变）；记录带上结算认出的那次发生，01-06 没做、01-07 做了时 01-06 与 01-07
+    两条都认 01-07 那一次，单元历史只算给起算最早的 01-06 那一刻。"""
+
+    run, ledger, store = stage(tmp_path)
+    found = "behavior://occurrences/2026/09/07/news.md"
+    for day in (date(2026, 9, 6), date(2026, 9, 7)):
+        start = datetime(day.year, day.month, day.day, tzinfo=CST)
+        item = replace(
+            gym(day), trigger="interval", deadline=start + timedelta(days=2), window=(start, start + timedelta(hours=9))
+        )
+        record(ledger, item, came=True)
+        ledger.record_settlement(Settlement(item.expectation_id, item.kind_token, day, NIGHT_AT, "准时", found))
+    table, line = nothing()
+    assert run.run(night=NIGHT, table=table, line=line) == 1  # type: ignore[arg-type]
+    (moment,) = store.latest("session").labelled("s-k0002")  # type: ignore[union-attr]
+    assert moment.expectation_ids == ("gym-2026-09-06",) and moment.past.came
+    assert {item.occurrence_uri for item in store.records("session")} == {found}

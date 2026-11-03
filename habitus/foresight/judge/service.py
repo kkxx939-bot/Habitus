@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -19,8 +18,8 @@ from habitus.foresight.judge.prompt import (
     build_request,
     judge_json_schema,
 )
-from habitus.foundation.text import clean_line
-from habitus.model_client import ChatRequest, ModelClientError, ModelTransportError, StructuredChatClient
+from habitus.model_client import ChatRequest, ModelUnreachable, StructuredChatClient
+from habitus.model_client.asking import Failed, ask
 
 
 @dataclass(frozen=True)
@@ -136,28 +135,19 @@ async def _ask[T](
     delay_seconds: float,
     name: str = "foresight_judge",
 ) -> tuple[T, str, tuple[str, ...]] | str:
-    """与语义树各触点同一段调法（``scene.llm.ask``；预测层不许 import 那个模块，照样子写一份）：传输层瞬态错按退避重试，
-    答复不合格由结构层带着错误重问；都没成返回信号文本。"""
+    """调模型用各触点共用的那一段（``model_client.asking.ask``）：传输层瞬态错按退避重试，答复不合格由结构层带着错误重问；
+    都没成返回信号文本。判决在白天那一拍：模型整个用不了（``ModelUnreachable``）也只是这一次没判成，调用方按算法顺序、模板
+    措辞递——停线只属于夜里那条线（裁定 94 第 8 条）。"""
 
-    for attempt in range(retries + 1):
-        try:
-            response = await client.complete_json_async(request, schema=schema, name=name, validator=validator)
-        except ModelTransportError as exc:
-            if attempt >= retries:
-                return f"model: transport failed after {retries + 1} attempts: {clean_line(str(exc))[:120]}"
-            await asyncio.sleep(delay_seconds * (attempt + 1))
-            continue
-        except ModelClientError as exc:
-            cause = exc.__cause__
-            detail = f"；{clean_line(str(cause))[:220]}" if cause is not None else ""
-            return f"model: {type(exc).__name__}: {clean_line(str(exc))[:120]}{detail}"
-        notes: list[str] = []
-        if response.validation_attempts > 1:
-            notes.append(f"structured: answered on attempt {response.validation_attempts}")
-        if response.parse_mode != "strict":
-            notes.append(f"structured: json parsed via {response.parse_mode}")
-        return cast(T, response.value), response.response.model, tuple(notes)
-    raise AssertionError("unreachable")  # pragma: no cover
+    try:
+        answer = await ask(
+            client, request, schema=schema, name=name, validator=validator, retries=retries, delay_seconds=delay_seconds
+        )
+    except ModelUnreachable as exc:
+        return f"model unreachable: {exc}"
+    if isinstance(answer, Failed):
+        return answer.signal
+    return cast(T, answer.value), answer.model, answer.notes
 
 
 __all__ = ["Judge", "Judgement", "Verdict"]

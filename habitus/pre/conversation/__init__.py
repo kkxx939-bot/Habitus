@@ -26,7 +26,12 @@ from habitus.pre.conversation.messages import (
     ConversationToolResultContentMode,
     ConversationToolResultStatus,
 )
-from habitus.pre.conversation.questions import QuestionTool
+from habitus.pre.conversation.questions import (
+    QUESTION_REPLY_TAG,
+    QuestionReply,
+    QuestionTool,
+    parse_question_replies,
+)
 from habitus.pre.conversation.summaries import (
     ConversationRangeSummary,
     ConversationRangeSummaryStage,
@@ -53,7 +58,10 @@ __all__ = [
     "OpenCodeConversationAdapter",
     "PiConversationAdapter",
     "ZCodeConversationAdapter",
+    "QUESTION_REPLY_TAG",
+    "QuestionReply",
     "QuestionTool",
+    "parse_question_replies",
     "ConversationBatch",
     "ConversationMessage",
     "ConversationMessageRole",

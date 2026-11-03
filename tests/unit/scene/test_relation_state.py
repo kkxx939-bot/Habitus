@@ -397,3 +397,64 @@ def test_folding_onto_a_night_with_an_older_return_measure_drops_only_those_rows
     assert stale.key not in {relation.key for relation in state.relations if relation.status is Status.CANDIDATE}
     assert status_of(state, PLANTED) is Status.ESTABLISHED
     assert state.measure_versions[Segment.RETURN.value] == MEASURE_VERSIONS[Segment.RETURN.value]
+
+
+def _stub_tests(subset):  # type: ignore[no-untyped-def]
+    from types import SimpleNamespace
+
+    return SimpleNamespace(config=CONFIG, assess=lambda item, **_kwargs: item, evaluate=lambda *_a, **_k: subset)
+
+
+def _judged():  # type: ignore[no-untyped-def]
+    """当晚那一份读数的替身：只给折叠要看的几样（方向、时间上稳、影响够大、效应与区间）。"""
+
+    from dataclasses import dataclass
+
+    from habitus.scene.relations import stats
+
+    @dataclass(frozen=True)
+    class Judged:
+        upward: bool = True
+        stable: bool = True
+        large_enough: bool = True
+        effect: stats.Effect = stats.Effect(20, 0.9, 0.1)
+        interval: tuple[float, float] = (0.6, 0.9)
+
+    return Judged()
+
+
+def test_forward_validation_needs_two_blocks_however_many_antecedents() -> None:
+    """新数据次数够了、也极显著，但全在一个块里（一天里的几次不是几个独立样本）：接着等，不判。"""
+
+    from habitus.scene.relations import stats
+    from habitus.scene.relations.engine import Subset
+    from habitus.scene.relations.state import Relation, _candidate
+
+    subset = Subset(20, 1, stats.Effect(20, 0.9, 0.1), 1e-6, (0.6, 0.9), (3.0, 8.0), 1e-9)
+    key = RelationKey("session", "a", "b", Segment.CHAIN)
+    before = Relation(key, Status.CANDIDATE, True, discovered_on=date(2026, 8, 1), forward_needed=5)
+    after, reason = _candidate(before, _judged(), _stub_tests(subset), date(2026, 8, 20))  # type: ignore[arg-type]
+    assert after.status is Status.CANDIDATE and reason is None
+
+
+def test_a_clearly_significant_maintenance_segment_clears_the_misses() -> None:
+    """维持检验那一段明确显著：之前记的一次没过清零，关系照旧成立。"""
+
+    from habitus.scene.relations import stats
+    from habitus.scene.relations.engine import Subset
+    from habitus.scene.relations.state import Relation, _established
+
+    subset = Subset(20, 3, stats.Effect(20, 0.9, 0.1), 1e-6, (0.6, 0.9), (3.0, 8.0), 1e-9)
+    key = RelationKey("session", "a", "b", Segment.CHAIN)
+    before = Relation(
+        key,
+        Status.ESTABLISHED,
+        True,
+        discovered_on=date(2026, 7, 1),
+        established_on=date(2026, 7, 10),
+        maintained_through=date(2026, 8, 1),
+        misses=1,
+        maintenance_needed=5,
+    )
+    after, _reason = _established(before, _judged(), _stub_tests(subset), date(2026, 8, 20))  # type: ignore[arg-type]
+    assert after.status is Status.ESTABLISHED and after.misses == 0

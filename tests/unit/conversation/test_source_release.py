@@ -48,13 +48,10 @@ def _setup(root: Path):
         service.sources,
         service.outcomes,
         service.ledger,
-        {
-            ConversationSourceConsumer.MEMORY: memory.output_store,
-            ConversationSourceConsumer.BEHAVIOR_SESSION: behavior.output_store,
-        },
+        service.consumers,
         lock_store,
         lock_ttl_seconds=30,
-        salvage=SourceSalvage(root, salvager=lambda _envelope: None),
+        salvage=SourceSalvage(root, salvagers={ConversationSourceConsumer.BEHAVIOR_SESSION: lambda _envelope: None}),
     )
     return service, memory, behavior, releaser, _Context(lock_store)
 
@@ -178,7 +175,8 @@ def test_a_broken_behavior_source_is_salvaged_and_stops_holding_up_its_address(t
         assert [entry.envelope.source_id for entry in plan.salvaged] == [broken.source_id]
         assert [envelope.source_id for envelope in salvaged] == [broken.source_id]
         assert plan.broken == ()
-        assert source_recovery(service).pending() == ()
+        again = source_recovery(service).plan()
+        assert (again.attempt, again.broken, again.deferred, again.salvaged) == ((), (), (), ())
         assert releaser.salvage is not None
         assert releaser.salvage.contains(broken.source_id, ConversationSourceConsumer.BEHAVIOR_SESSION)
         assert releaser.release_address(_directory(service), ctx) == 2
@@ -245,10 +243,10 @@ def test_recovery_clears_marks_of_terminal_and_released_sources(tmp_path: Path) 
         service.ledger.pending.mark(first)  # 释放后残留的"还没终态"标记
 
         recovery = source_recovery(service)
-        pending = recovery.pending()
+        pending = recovery.plan().attempt
 
         assert {entry.envelope.source_id for entry in pending} == {waiting.source_id}
-        remaining = {source_id for source_id, _address in service.ledger.pending.listing()}
+        remaining = {source_id for source_id, _address in service.ledger.pending.listing().sources}
         assert remaining == {waiting.source_id}
         assert second.source_id not in remaining
 
@@ -296,5 +294,110 @@ def test_behavior_skips_a_redelivered_source_only_because_it_declares_so(tmp_pat
         outcome = service.outcomes.read(again.source_id, ConversationSourceConsumer.BEHAVIOR_SESSION)
         assert outcome is not None and outcome.skip_reason != RELEASED_SKIP_REASON
         assert behavior.calls == calls + 1
+
+    asyncio.run(scenario())
+
+
+def test_a_rewound_source_below_the_watermark_is_released_without_moving_the_watermark(tmp_path: Path) -> None:
+    """插件状态重建、序号从头数：水位已越过这份新源的 end_sequence。它两边都终态之后照常释放，水位不动、不后退。"""
+
+    async def scenario() -> None:
+        service, _memory, _behavior, releaser, ctx = _setup(tmp_path)
+        first = [await _deliver(service, source(sequence=n, delivery_seed=f"d{n}")) for n in range(3)]
+        directory = _directory(service)
+        assert releaser.release_address(directory, ctx) == 2
+        address = SourceAddress.of(first[0])
+        through = service.ledger.watermarks.released_through(address)
+        rewound = await _deliver(service, source(sequence=0, delivery_seed="rewound"))
+
+        assert releaser.release_address(directory, ctx) == 1
+
+        assert service.sources.read(rewound.source_id) is None
+        assert service.ledger.watermarks.released_through(address) == through
+        assert [marker.source_id for marker in service.ledger.index.markers_in(directory)] == [first[2].source_id]
+
+    asyncio.run(scenario())
+
+
+def test_one_address_failing_to_release_does_not_stop_the_others_or_settling(tmp_path: Path) -> None:
+    """释放一轮里某个地址出错：记一条信号，排在后面的地址照常释放，``settle_pending`` 照常跑。"""
+
+    from habitus.runtime.lifecycle_sources import ConversationSourceParticipant
+
+    async def scenario() -> None:
+        service, _memory, _behavior, releaser, ctx = _setup(tmp_path)
+        for conversation in ("conv-a", "conv-b"):
+            for n in range(2):
+                await _deliver(service, source(conversation_id=conversation, sequence=n, delivery_seed=f"{conversation}{n}"))
+        directories = sorted(service.ledger.index.address_directories())
+        failing = directories[0]
+        original = releaser.release_address
+
+        def release_address(directory: str, context) -> int:  # type: ignore[no-untyped-def]
+            if directory == failing:
+                raise RuntimeError("one address is broken")
+            return original(directory, context)
+
+        releaser.release_address = release_address  # type: ignore[method-assign]
+        participant = ConversationSourceParticipant(releaser, batch_addresses=10)
+
+        report = await participant.maintain(ctx)
+
+        assert report.released == 1
+        assert any("failed to release" in signal for signal in report.signals)
+        assert service.ledger.pending.listing().sources == ()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("how", ["truncated", "missing_address", "ds_store"])
+def test_a_bad_pending_entry_does_not_fail_every_release_round(tmp_path: Path, how: str) -> None:
+    """一份坏的"还没终态"标记、或那个目录里的 ``.DS_Store``：释放一轮照常跑完（U16），别的源的标记照常清。"""
+
+    import json
+
+    from habitus.runtime.lifecycle_sources import ConversationSourceParticipant
+
+    async def scenario() -> None:
+        service, _memory, _behavior, releaser, ctx = _setup(tmp_path)
+        bad = service.sources.put(source(conversation_id="bad", delivery_seed="bad"))
+        good = await _deliver(service, source(conversation_id="good", delivery_seed="good"))
+        pending_root = service.ledger.pending.pending_root
+        marker = pending_root / f"{bad.source_id}.json"
+        if how == "truncated":
+            marker.write_bytes(marker.read_bytes()[:15])
+        elif how == "missing_address":
+            payload = json.loads(marker.read_bytes())
+            payload.pop("address")
+            marker.write_bytes(json.dumps(payload).encode())
+        else:
+            (pending_root / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+        participant = ConversationSourceParticipant(releaser, batch_addresses=10)
+
+        report = participant._maintain_blocking(ctx)
+
+        assert not (pending_root / f"{good.source_id}.json").exists()
+        remaining = 2 if how == "ds_store" else 1  # 坏的那份（与杂文件）留着等人工处置，照样占容量
+        assert {reading.name: reading.count for reading in report.readings}["pending_sources"] == remaining
+
+    asyncio.run(scenario())
+
+
+def test_an_unlistable_pending_directory_is_a_signal_not_a_failed_round(tmp_path: Path) -> None:
+    """"还没终态"目录整个列不出来（超过枚举上限）：释放照常做完，这一轮带一条信号，不整轮失败。"""
+
+    from habitus.runtime.lifecycle_sources import ConversationSourceParticipant
+
+    async def scenario() -> None:
+        service, _memory, _behavior, releaser, ctx = _setup(tmp_path)
+        for conversation in ("conv-a", "conv-b"):
+            await _deliver(service, source(conversation_id=conversation, delivery_seed=conversation))
+        service.ledger.pending.max_entries = 1
+        participant = ConversationSourceParticipant(releaser, batch_addresses=10)
+
+        report = participant._maintain_blocking(ctx)
+
+        assert {reading.name: reading.count for reading in report.readings}["pending_sources"] == 2
+        assert any("pending markers failed to settle" in signal for signal in report.signals)
 
     asyncio.run(scenario())

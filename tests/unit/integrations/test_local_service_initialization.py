@@ -113,6 +113,22 @@ def test_force_initialization_preserves_previous_config_in_private_backup(tmp_pa
     assert stat.S_IMODE(result.backup_path.stat().st_mode) == 0o600
 
 
+def test_initializer_refuses_to_write_an_out_of_range_override(tmp_path: Path) -> None:
+    """值域归领域配置（配置层只查类型）：init 写配置前照旧拒越界值，报错带配置键，什么都不写。"""
+
+    payload = yaml.safe_load(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
+    payload["scene"] = {"relations": {"fdr": 1.0}}
+    source = tmp_path / "source.yaml"
+    source.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    destination = tmp_path / "habitus" / "config.yaml"
+
+    with pytest.raises(ValueError, match="invalid 'config.scene.relations.fdr'"):
+        initialize_config(destination, source=source)
+    with pytest.raises(ValueError, match="invalid 'config.scene.relations.fdr'"):
+        initialize_config_from_mapping(destination, payload)
+    assert not destination.exists()
+
+
 def test_initializer_rejects_a_symbolic_link_destination(tmp_path: Path) -> None:
     real = tmp_path / "real.yaml"
     real.write_bytes(EXAMPLE_CONFIG.read_bytes())
@@ -121,6 +137,59 @@ def test_initializer_rejects_a_symbolic_link_destination(tmp_path: Path) -> None
 
     with pytest.raises(OSError):
         initialize_config(linked, source=EXAMPLE_CONFIG, force=True)
+
+
+def test_init_through_a_symbolic_link_directory_exits_with_one_line_naming_the_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """配置目录途经符号链接：拒绝写入，一行原因带被拒的目录，不打栈。"""
+
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    monkeypatch.setattr(
+        initialization_module,
+        "DEFAULT_PLUGIN_CONNECTION_PATH",
+        tmp_path / "home" / ".habitus" / "agent-plugin" / "connection.json",
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["init", "--config", str(link / "config.yaml"), "--non-interactive", "--skip-doctor", "--no-start"])
+
+    message = str(raised.value.code)
+    assert message.startswith("Habitus initialization failed: ")
+    assert "\n" not in message and "Traceback" not in message
+    assert "symbolic link" in message
+    assert message.endswith(f": {link}")
+    assert not (real / "config.yaml").exists()
+    assert not (real / "agent-plugin").exists()
+
+
+def test_init_with_plugin_state_through_a_symbolic_link_exits_with_one_line_naming_the_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """默认插件状态目录途经符号链接：连接文件那一步同样一行原因带目录。"""
+
+    real = tmp_path / "real-home"
+    real.mkdir()
+    link = tmp_path / "home"
+    link.symlink_to(real, target_is_directory=True)
+    default_connection = link / ".habitus" / "agent-plugin" / "connection.json"
+    monkeypatch.setattr(initialization_module, "DEFAULT_PLUGIN_CONNECTION_PATH", default_connection)
+    destination = tmp_path / "custom" / "config.yaml"
+
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["init", "--config", str(destination), "--non-interactive", "--skip-doctor", "--no-start"])
+
+    message = str(raised.value.code)
+    assert message.startswith("Habitus plugin connection initialization failed: ")
+    assert "\n" not in message and "Traceback" not in message
+    assert "symbolic link" in message
+    assert message.endswith(f": {default_connection.parent}")
+    assert not (real / ".habitus" / "agent-plugin" / "connection.json").exists()
 
 
 def test_default_cloud_setup_generates_a_strict_config_without_placeholder_rerank() -> None:
@@ -889,3 +958,196 @@ def test_exec_serve_replaces_process_with_module_bootstrap(monkeypatch: pytest.M
         "--config",
         str(config),
     ]
+
+
+def test_init_keeps_the_permissions_of_an_existing_config_directory(tmp_path: Path) -> None:
+    """配置放进用户已有的目录（如 ~/Documents，0755）：init 不改它的权限；只有自己新建的 agent-plugin/ 是 0700。"""
+
+    documents = tmp_path / "Documents"
+    documents.mkdir()
+    documents.chmod(0o755)
+    (documents / "notes.txt").write_text("mine\n", encoding="utf-8")
+    destination = documents / "habitus.yaml"
+
+    cli.main(["init", "--config", str(destination), "--non-interactive", "--skip-doctor", "--no-start"])
+
+    assert stat.S_IMODE(documents.stat().st_mode) == 0o755
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert stat.S_IMODE((documents / "agent-plugin").stat().st_mode) == 0o700
+
+
+def test_noninteractive_init_with_empty_credentials_says_where_to_fill_them(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    destination = tmp_path / "config" / "config.yaml"
+
+    cli.main(["init", "--config", str(destination), "--non-interactive", "--skip-doctor", "--no-start"])
+
+    output = capsys.readouterr().out
+    assert "Credentials are empty" in output
+    assert f"under 'credentials' in {destination}" in output
+    assert f"habitus-server doctor --config {destination}" in output
+
+
+def test_init_after_a_failed_doctor_gives_the_next_step_and_does_not_offer_plugins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    destination = tmp_path / "config" / "habitus.yaml"
+    confirm = Mock(return_value=False)
+    install = Mock()
+    monkeypatch.setattr(cli, "_interactive", Mock(return_value=True))
+    monkeypatch.setattr(cli, "_configure_missing_credentials", Mock())
+    monkeypatch.setattr(cli, "_doctor", Mock(return_value=1))
+    monkeypatch.setattr(cli, "_confirm_after_write", confirm)
+    monkeypatch.setattr(cli, "_install_plugins", install)
+
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["init", "--config", str(destination), "--from-config", str(EXAMPLE_CONFIG), "--doctor"])
+
+    assert raised.value.code == 1
+    output = capsys.readouterr().out
+    assert (
+        f"Next: fix the [FAIL] items above (config file: {destination}), "
+        f"then run: habitus-server doctor --config {destination}"
+    ) in output
+    assert confirm.call_count == 0
+    install.assert_not_called()
+
+
+def test_init_all_harnesses_hands_all_to_the_plugin_installer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    install = Mock()
+    monkeypatch.setattr(cli, "_install_plugins", install)
+
+    cli.main(
+        [
+            "init",
+            "--config",
+            str(tmp_path / "config" / "habitus.yaml"),
+            "--from-config",
+            str(EXAMPLE_CONFIG),
+            "--non-interactive",
+            "--skip-doctor",
+            "--no-start",
+            "--all-harnesses",
+        ]
+    )
+
+    install.assert_called_once_with(["all"])
+
+
+def test_plugin_connection_brackets_an_ipv6_loopback_host(tmp_path: Path) -> None:
+    payload = load_initialization_mapping()
+    payload["http"]["host"] = "::1"  # type: ignore[index]
+    config = HabitusConfig.from_mapping(payload)
+
+    path = write_plugin_connection(config, tmp_path / "agent-plugin" / "connection.json")
+
+    assert '"base_url": "http://[::1]:8787"' in path.read_text(encoding="utf-8")
+
+
+def test_plugin_connection_keeps_the_permissions_of_an_existing_directory(tmp_path: Path) -> None:
+    """连接文件写进用户已有的目录（如 0755 的 ~/.config/habitus）：只写文件本身 0600，不收紧那个目录。"""
+
+    existing = tmp_path / "habitus-config"
+    existing.mkdir()
+    existing.chmod(0o755)
+    config = HabitusConfig.from_mapping(load_initialization_mapping())
+
+    path = write_plugin_connection(config, existing / "connection.json")
+
+    assert stat.S_IMODE(existing.stat().st_mode) == 0o755
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_init_exits_with_the_plugin_installer_exit_code_when_it_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``habitus plugin install`` 失败（非零退出码）时 init 以同一个退出码结束，不当作装好了。"""
+
+    npm_command = tmp_path / "bin" / "habitus.mjs"
+    npm_command.parent.mkdir()
+    npm_command.write_text("#!/usr/bin/env node\n")
+    monkeypatch.setattr(cli.shutil, "which", Mock(return_value=str(npm_command)))
+    monkeypatch.setattr(cli.subprocess, "run", Mock(return_value=Mock(returncode=3)))
+    execute = Mock()
+    monkeypatch.setattr(cli, "_exec_serve", execute)
+
+    with pytest.raises(SystemExit) as raised:
+        cli.main(
+            [
+                "init",
+                "--config",
+                str(tmp_path / "config" / "habitus.yaml"),
+                "--from-config",
+                str(EXAMPLE_CONFIG),
+                "--non-interactive",
+                "--skip-doctor",
+                "--start",
+                "--harness",
+                "codex",
+            ]
+        )
+
+    assert raised.value.code == 3
+    execute.assert_not_called()
+
+
+def test_init_does_not_start_the_server_after_a_failed_doctor_even_when_start_is_requested(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    execute = Mock()
+    monkeypatch.setattr(cli, "_doctor", Mock(return_value=1))
+    monkeypatch.setattr(cli, "_exec_serve", execute)
+
+    with pytest.raises(SystemExit) as raised:
+        cli.main(
+            [
+                "init",
+                "--config",
+                str(tmp_path / "config" / "habitus.yaml"),
+                "--from-config",
+                str(EXAMPLE_CONFIG),
+                "--non-interactive",
+                "--doctor",
+                "--start",
+            ]
+        )
+
+    assert raised.value.code == 1
+    execute.assert_not_called()
+    assert "Habitus server was not started because Doctor reported failures." in capsys.readouterr().err
+
+
+def test_config_and_plugin_state_paths_directly_under_the_filesystem_root_are_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="dedicated child directory"):
+        resolve_config_path(Path("/habitus.yaml"))
+    with pytest.raises(ValueError, match="dedicated child directory"):
+        resolve_plugin_connection_path(environ={"HABITUS_PLUGIN_STATE_DIR": "/"})
+    assert resolve_plugin_connection_path(environ={"HABITUS_PLUGIN_STATE_DIR": str(tmp_path)}) == (
+        tmp_path / "connection.json"
+    )
+
+
+def test_mapping_initializer_repairs_the_permissions_of_an_existing_config_it_keeps(tmp_path: Path) -> None:
+    """不加 --force 时沿用已有配置，但它若被放宽到组或其他人可读，就收回成 0600（配置里有密钥），内容一字不动。"""
+
+    destination = tmp_path / "config" / "habitus.yaml"
+    payload = yaml.safe_load(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
+    initialize_config_from_mapping(destination, payload)
+    original = destination.read_bytes()
+    destination.chmod(0o644)
+
+    result = initialize_config_from_mapping(destination, {**payload, "http": {**payload["http"], "port": 9999}})
+
+    assert result.created is False
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert destination.read_bytes() == original

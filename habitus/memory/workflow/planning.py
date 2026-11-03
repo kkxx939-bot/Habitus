@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from habitus.memory.conversation import ConversationAddress
 from habitus.memory.conversation.summary import ConversationSummaryService
 from habitus.memory.editor.engine import MemoryEditor, MemoryEditorPlan
+from habitus.memory.editor.extraction import MemoryTurnContext
 from habitus.pre.conversation import ConversationSegment, ConversationSegmentSummary
 
 _USE_SOURCE_SEGMENT = object()
@@ -48,6 +49,7 @@ class MemorySegmentProductBuilder:
         segment: ConversationSegment,
         *,
         editor_segment: ConversationSegment | None | object = _USE_SOURCE_SEGMENT,
+        turn_context: MemoryTurnContext | None = None,
     ) -> MemorySegmentProducts:
         """等待两个分支全部收束后返回，任一失败都不产生可提交结果。"""
 
@@ -71,7 +73,7 @@ class MemorySegmentProductBuilder:
             )
         summary_result, plan_result = await gather(
             self.summary_service.get_or_create(address, segment),
-            self.editor.plan(resolved_editor_segment),
+            self.editor.plan(resolved_editor_segment, turn_context=turn_context),
             return_exceptions=True,
         )
         if isinstance(summary_result, BaseException):

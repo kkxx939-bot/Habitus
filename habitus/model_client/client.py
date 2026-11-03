@@ -229,21 +229,27 @@ class ChatClient:
                 "model": self.provider.model,
                 "error_code": "async_health_check_unsupported",
             }
-        try:
-            async_probe = cast(
-                Callable[[], Awaitable[Mapping[str, object]]],
-                probe,
-            )
-            result = await async_probe()
-            return dict(result)
-        except Exception as exc:
-            failure = normalize_provider_error(exc)
-            return {
-                "ok": False,
-                "provider": self.provider.provider_name,
-                "model": self.provider.model,
-                "error_code": failure.code,
-            }
+        async_probe = cast(
+            Callable[[], Awaitable[Mapping[str, object]]],
+            probe,
+        )
+        # 探针与普通调用同一套重试规矩：网络抖动这类可重试的错按路由的次数与退避再探，一次超时不当成整个用不了（裁定 94 第 8 条）
+        for attempt in range(self.config.route.max_retries + 1):
+            try:
+                result = await async_probe()
+                return dict(result)
+            except Exception as exc:
+                failure = normalize_provider_error(exc)
+                if failure.retryable and attempt < self.config.route.max_retries:
+                    await self._async_sleep(self._retry_delay(attempt, failure))
+                    continue
+                return {
+                    "ok": False,
+                    "provider": self.provider.provider_name,
+                    "model": self.provider.model,
+                    "error_code": failure.code,
+                }
+        raise AssertionError("health probe retry loop exhausted without a result")  # pragma: no cover
 
     async def aclose(self) -> None:
         """释放 Chat Provider 的同步和异步传输资源。"""
@@ -296,6 +302,14 @@ class ChatClient:
                         retry_count=attempt,
                     )
                     raise failure from exc
+
+    def estimate_input_tokens(self, request: ChatRequest | str) -> int:
+        """按供应商真实的请求投影估算模型可见输入 token，不发请求；与每次调用前的预算检查（``_prepare``）同一个估法。"""
+
+        prepared = self.provider.prepare(self._request(request), stream=False)
+        if not isinstance(prepared, PreparedChatRequest):
+            raise ModelResponseError("provider returned an invalid prepared chat request")
+        return prepared.estimated_input_tokens
 
     def _request(self, request: ChatRequest | str) -> ChatRequest:
         if isinstance(request, str):

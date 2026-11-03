@@ -21,6 +21,8 @@ http:
   host: 127.0.0.1
   port: 8787
   max_request_bytes: 16777216
+  remember_parts_max_bytes: 67108864
+  remember_parts_ttl_seconds: 600.0
 
 observability:
   metrics:
@@ -53,7 +55,7 @@ models:
       model: deepseek-chat
       base_url: https://api.deepseek.com
       credential_ref: deepseek
-      # 行为融合一段几十条片段要模型输出整张逐帧归属表，30s 对日尺度数据第一次就超时（实测）。
+      # 单次结构化输出可能很长（词表分组一次最多 60 条、语义概览的材料最多 12 万字），等待按长输出给。
       timeout_seconds: 300.0
       max_retries: 2
       retry_base_delay_seconds: 0.5
@@ -63,7 +65,7 @@ models:
       extra_headers: {}
       extra_body: {}
     context_window_tokens: 64000
-    # 留空走厂商默认 4096，行为融合的逐帧归属表会更早被截断；取 deepseek-chat 的上限。
+    # 留空走厂商默认 4096，长的结构化输出会更早被截断；取 deepseek-chat 的上限。
     max_output_tokens: 8192
     structured_output_mode: json_object
     reasoning: false
@@ -127,7 +129,8 @@ conversation:
     lock_retry_delay_seconds: 0.01
 
   source:
-    max_envelope_bytes: 16777216
+    # 一份会话源信封（一次送来、或分块拼回的一批）的上限；与 conversation.journal.max_file_bytes、http.remember_parts_max_bytes 对齐
+    max_envelope_bytes: 67108864
     max_source_addresses: 100000
     max_markers_per_address: 10000
     max_pending_sources: 100000
@@ -311,7 +314,7 @@ memory:
     max_compactions_per_cycle: 4
     max_retirements_per_cycle: 4
 
-  retrieval:
+  editor_retrieval:
     max_query_chars: 5000
     max_prompt_chars: 1000
     max_completion_chars: 500
@@ -359,6 +362,9 @@ memory:
     max_record_chars: 16000
     embedding_batch_size: 128
     stale_retries: 2
+    lock_ttl_seconds: 30
+    lock_wait_timeout_seconds: 30.0
+    lock_retry_delay_seconds: 0.02
 
   semantic_search:
     mode: hierarchical
@@ -415,6 +421,9 @@ workflow:
     lease_ttl_seconds: 120
     retry_base_delay_seconds: 1.0
     retry_max_delay_seconds: 60.0
+    # 模型此刻用不了（额度 / 余额、鉴权、断网、限流）时不计入 max_attempts，按这组长退避排回队列等它恢复
+    model_wait_base_delay_seconds: 60.0
+    model_wait_max_delay_seconds: 86400.0
     lock_ttl_seconds: 30
     lock_wait_timeout_seconds: 5.0
     lock_retry_delay_seconds: 0.01
@@ -444,7 +453,22 @@ workflow:
 #   # 会话 lane 的保护上限；留空取 behavior/fusion/lanes/session/config.py 的默认值
 #   session_max_turn_chars: 8000       # 一轮对话给模型的材料总字数上限（超出先削工具调用中段，人的指令最后才削）
 #   session_max_instruction_chars: 4000  # 人的那条指令最多留多少字
+#   session_tool_argument_chars: 120   # 每次工具调用留参数开头多少字
+#   session_tool_error_chars: 240      # 工具调用失败时留报错多少字
+#   session_kept_tool_lines: 12        # 超出总上限时工具调用留头尾共几行（至少 2）
+#   session_kept_reply_lines: 6        # 超出总上限时助手中途说的话留头尾共几条（至少 2）
 #   session_max_steps: 3               # 每轮写出来的步骤最多几条
+#   session_max_summary_chars: 200     # 每轮写出来的概要最多多少字
+#   session_max_step_chars: 120        # 每条步骤最多多少字
+#   # 物理 lane 的保护上限；留空取 behavior/fusion/lanes/physical/config.py 的默认值
+#   physical_max_segments: 2000        # 一份交付最多几个行为段
+#   physical_max_coverage_spans: 2000  # 一份交付最多几个覆盖时段
+#   physical_max_facts: 5              # 一段最多带几条补充事实
+#   physical_max_fact_chars: 80        # 每条补充事实最多多少字
+#   physical_max_summary_chars: 200    # 拼出来的概要最多多少字
+#   physical_max_device_chars: 120     # 设备名最多多少字
+#   physical_max_segment_id_chars: 200  # 段编号最多多少字
+#   physical_max_future_seconds: 300   # 段的结束最多比交付的送出时刻晚多少秒（留给时钟不齐）
 #   # 基础词表（裁定 6：门槛全部是配置）；留空取 behavior/kinds/config.py 的默认值。标"待定档"的要等真实数据重定
 #   kinds_batch_size: 10               # 白天归类一次调用判几条
 #   kinds_validation_rounds: 2         # 没答好的条目重问几轮（每轮只问没答好的），用尽当「待定」
@@ -457,9 +481,7 @@ workflow:
 #   kinds_max_pending: 5000            # 待定池上限（保护闸）
 #   kinds_nightly_max_new: 200         # 每晚新增一晚最多交几条新条目（保护闸，多的留到下一晚；旧条目不进，按相似召回）
 #   kinds_recall_per_entry: 3          # 每条新条目按字符二元组相似召回几条旧条目一起聚组
-#   kinds_nightly_hour: 2              # 每晚新增在本地几点之后跑
-#   kinds_revision_weekday: 2          # 定期拆改在每周几（0=周一，2=周三）
-#   kinds_revision_hour: 3             # 定期拆改在本地几点之后跑
+#   kinds_revision_weekday: 2          # 定期拆改的周期从每周几那一晚起（0=周一，2=周三；在夜里那条线上，不挂钟点）
 #   kinds_merge_evidence_runs: 2       # 合并要在连续几个拆改周期里都被提出才算有证据（裁定 17）
 #   kinds_cooldown_days: 14            # 改过的类冷却几天（待定档）
 #   kinds_max_changes_per_revision: 3  # 一次拆改最多改几处（待定档）
@@ -477,6 +499,16 @@ workflow:
 #   fusion_max_receipt_files: 100000   # 回执最多多少份（保护闸；按覆盖窗口过期）
 #   fusion_max_judgement_files: 1000000  # 判断最多多少份（保护闸；发布即释放）
 #   tree_max_children_per_directory: 10000  # 行为树单个目录最多多少个子项（保护闸）
+#   document_max_markdown_body_chars: 24000  # 行为树一篇文档的正文最多多少字（保护闸）
+#   document_max_encoded_bytes: 512000  # 行为树一篇文档编码后最多多少字节（保护闸；归约发布前的干跑同样查）
+#   write_lock_ttl_seconds: 30         # 行为树文档写锁的租约（秒，1–3600）
+#   # 每天的语义概览（L0/L1）的保护上限；留空取 behavior/semantic/config.py 的默认值
+#   semantic_max_direct_entries: 512   # 一个目录最多读几个直接子项
+#   semantic_max_prompt_chars: 120000  # 给模型的材料最多多少字
+#   semantic_max_narrative_chars: 4000  # 生成的叙述最多多少字
+#   semantic_max_entry_summary_chars: 500  # 每个子项的摘要最多多少字
+#   semantic_max_overview_chars: 64000  # 渲染出的概览最多多少字
+#   semantic_max_abstract_chars: 800   # 简介最多多少字（不超过概览）
 
 # 语义关联层。缺省未启用；置 enabled: true 即启用（行为侧必须也启用）。
 # relations 是关系检验的统计门槛（裁定 26）：每一项都可以不写，不写就是下面注释里的默认值（用户 10-07 定的起点，
@@ -484,8 +516,7 @@ workflow:
 # scene:
 #   enabled: true
 #   baseline_slack_slots: 3          # 常态按峰分份时峰两边各放宽几槽（待定档；原借预测树 pool_half_width，裁定 59）
-#   nightly_at: "04:00"             # 整晚那一趟（重试→结算→语义树→机会表）在主体本地几点跑；启动时只补跑错过的那一趟（裁定 67）
-#   nightly_shutdown_timeout_seconds: 30  # 停机时等整晚那一趟多久
+#   nightly_shutdown_timeout_seconds: 30  # 停机时等整晚那一趟多久（那一趟前一天定稿完成就接着跑，不挂固定时刻，裁定 94）
 #   relations:
 #     fdr: 0.10                        # 第 1 道：当晚检验族的假发现率
 #     forward_alpha: 0.05              # 前向验证的单侧显著性
@@ -519,8 +550,9 @@ workflow:
 # locale:
 #   timezone: Asia/Shanghai          # IANA 名字；决定"今天是哪一天""此刻在哪个槽"
 #   region: CN                       # 这个人所在地的地区码（ISO 3166：CN、SG，州一级如 US-CA）；日历跟着人走，不跟着服务部署在哪
-#   calendar_path: null              # 放假安排目录（外接组件，<年>.json，格式见 conditions/calendar_data.py）；
-#                                    #   null 时没有放假数据：日型是未知（不当普通工作日），周几、几号照常答。
+#   calendar_path: null              # 放假安排目录（外接组件，<年>.json，格式见 conditions/calendar_data.py）；配了只读它。
+#                                    #   null 时读随包附带的（目前只有 CN 2025、2026，照国务院办公厅通知原文）；
+#                                    #   哪年没有数据，那年日型是未知（不当普通工作日），周几、几号照常答。
 #   nominal_weekend: [5, 6]          # 没有放假数据时建预期的兜底周末（0=周一 … 6=周日）；统计里不用它
 
 # 预测层。缺省未启用；置 enabled: true 即启用（语义树必须已启用——机会表、复现与关系全从语义树那一晚来，
@@ -540,12 +572,22 @@ workflow:
 #   judge_transient_retry_delay_seconds: 5.0
 #   tick_interval_seconds: 900       # 白天多久一拍（建预期、到时窗的决定说不说；默认一个槽）
 #   worker_shutdown_timeout_seconds: 30
-#   half_life_opportunities: 8       # 证据遗忘的半衰期：几次机会（账、行为单元、时段读数共用；裁定 57，回放后定）
+#   half_life_opportunities: 8       # 证据遗忘的半衰期：几次机会（账、行为单元、时段读数共用；裁定 57，回放后定）；账的久别也要空白 ≥ H 个典型间隔（裁定 88）
 #   outlet_liveness_hours: 48        # 提醒出口：最近几小时有宿主来取过才算活着（活着才问模型写话、记「待取」；否则记「不可达」）
 #   outlet_lease_minutes: 30         # 一条请求被一个会话取走后多久内别的会话取不到（不超过最晚时限）
 #   outlet_max_attempts: 3           # 一条请求最多放回几次（取走没问出口、租约过期），到了不再给
 #   outlet_claim_limit: 3            # 宿主一次最多取几条
 #   outlet_match_similarity: 0.6     # 认提问：题目与那句话的相似度下限（含类名或一取一问的直接配上）
+#   store:                           # 落盘的容量闸（运维边界；撞上了是该看压实、退出、释放有没有在推进）
+#     record_max_bytes: 1000000          # 账本与出口的一份记录最多多少字节（写入就查，超限的不落盘）
+#     directory_max_entries: 100000      # 账本一个目录最多列多少条
+#     unreadable_max_paths: 1000         # 两次取走之间最多记多少条坏文件路径
+#     outlet_max_entries: 10000          # 出口一个目录（取走记录、问过的提问、宿主活性）最多列多少条
+#     unit_moment_max_records: 200000    # 单元历史的每刻记录一条 lane 最多多少份
+#     unit_moment_max_record_bytes: 65536
+#     unit_history_max_bytes: 33554432   # 一晚的单元历史快照最多多少字节
+#     opportunity_table_max_bytes: 16777216  # 一晚的机会表最多多少字节
+#     nightly_max_entries: 10000         # 每晚派生物一条 lane 的目录最多列多少条
 
 # 统一生命周期（裁定 15、60）。缺省即可运行；这几个数是运维边界，不是统计量。
 # lifecycle:

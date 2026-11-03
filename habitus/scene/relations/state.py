@@ -399,7 +399,7 @@ def _candidate(before: Relation, test: RelationTest, tests: LaneTests, night: da
     needed = before.forward_needed if before.forward_needed is not None else _forward_needed(judged, tests)
     if forward.antecedents < needed or forward.blocks < 2:
         return current, None  # 新数据还不够（次数与块数两维都要够：一天里的几次不是几个独立样本），接着等
-    if forward.minimum_p > thresholds.forward_alpha:
+    if forward.minimum_p >= thresholds.forward_alpha:
         # 次数够了，但每层对照太少，这几层就算全中也到不了 α（例：每层 2 个对照、攒 2 次，全中也只有 (1/3)² ≈ 0.11）：
         # 判了必输，再攒，不判。要攒的次数按"对照很多"的二项算，不知道以后每层有几个对照；匹配设计的样本量本该带每层对照数
         # （L10.15，用户 10-19 定；文献见 27 号调研）。

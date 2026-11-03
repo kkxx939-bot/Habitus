@@ -10,11 +10,11 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from habitus.behavior import BehaviorDocumentWriter
 from habitus.behavior.model import BehaviorKind
 from habitus.behavior.tree import BehaviorTree
+from habitus.behavior.tree.writer import BehaviorDocumentWriter
 from habitus.behavior.uri import BehaviorURI
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from tests.lock_store import ProcessLocalLockStore
 from tests.unit.behavior.tree_payloads import gap_payload, occurrence_payload
 from tests.unit.kind_ids import kind_id
 
@@ -37,11 +37,10 @@ def publish(
     minute: int,
     *,
     kind: str | None = None,
-    links: tuple[tuple[str, str], ...] = (),
     lasts_minutes: int = 10,
     **overrides: Any,
 ) -> str:
-    """往行为树发布一条 occurrence（可带前向 links），返回它的 URI。``lasts_minutes`` 定最后所见。"""
+    """往行为树发布一条 occurrence，返回它的 URI。``lasts_minutes`` 定最后所见。"""
 
     started = at(day, hour, minute)
     writer = BehaviorDocumentWriter(tree, ProcessLocalLockStore(), clock=lambda: started + timedelta(hours=3))
@@ -57,7 +56,7 @@ def publish(
         goal=overrides.pop("goal", None),
         **overrides,
     )
-    document = writer.publish(BehaviorKind.OCCURRENCE, payload, links=links)
+    document = writer.publish(BehaviorKind.OCCURRENCE, payload)
     return str(BehaviorURI.from_address(document.address))
 
 

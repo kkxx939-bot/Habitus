@@ -24,13 +24,9 @@
 注意 ``last_observed_at`` 是"**最后一条支持它的观测**发生在什么时候"，不是"行为在什么时候
 结束"——后者我们经常不知道，那正是 ``status_basis=observation_lost`` 要表达的事。
 
-## 身份不含关系
+## 身份不含来源
 
-``judgement_id`` 由"它说了什么、依据哪些观测、什么时候"派生，**不含 relation**。因为并行是
-互指的：甲指乙、乙指甲，若关系进身份就成了循环依赖，谁也算不出来。关系是判断之间的连接，
-不属于一条判断自身的身份。
-
-也**不含 source_refs**：它是"这些观测由哪几次交付送来的"，属于溯源而不是内容。同一批观测被重复
+``judgement_id`` 由"它说了什么、依据哪些观测、什么时候"派生，**不含 source_refs**：它是"这些观测由哪几次交付送来的"，属于溯源而不是内容。同一批观测被重复
 投递两次，得到的应当是同一条判断，而不是两条。代价是身份的输入是 payload 的真子集——理论上
 同内容、同 ``judged_at``、不同来源的两条会算出同一个身份却有不同的字节，写第二份时被存储的撞车
 检查硬失败。实测构造不出正常路径：同一段观测的 ``source_refs`` 由切段一次定死，而不同批次必然
@@ -40,8 +36,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -49,7 +45,6 @@ from habitus.behavior.fusion.errors import BehaviorFusionError
 from habitus.behavior.fusion.judgement import (
     BehaviorJudgement,
     BehaviorJudgementBatch,
-    JudgementLink,
     JudgementStatus,
     JudgementStatusBasis,
 )
@@ -94,19 +89,12 @@ class DurableJudgement:
     basis: tuple[DurableFact, ...]
     status: JudgementStatus | None
     status_basis: JudgementStatusBasis | None
-    relations: tuple[tuple[str, str], ...]
     fusion_version: str
     prompt_version: str
 
     @property
     def is_readable(self) -> bool:
         return self.behavior is not None
-
-    @property
-    def fusion_lag_seconds(self) -> float:
-        """判断比证据晚了多久；运维指标，不参与任何语义。"""
-
-        return (self.judged_at - self.evidence_ready_at).total_seconds()
 
 
 def derive_judgements(
@@ -117,7 +105,6 @@ def derive_judgements(
     judged_at: datetime,
     fusion_version: str,
     prompt_version: str,
-    context_ids: Sequence[str] = (),
 ) -> tuple[DurableJudgement, ...]:
     """把一批判断绑定成耐久记录。
 
@@ -139,18 +126,13 @@ def derive_judgements(
     if not resolved_sources:
         raise BehaviorFusionError("source_refs must not be empty")
 
-    # 两遍：先算身份（身份不含关系，所以没有循环），再把关系指向具体的身份。
-    identities = {item.judgement_no: _identity(item, by_no, judged_at=judged_at) for item in batch.judgements}
-    context = tuple(context_ids)
     return tuple(
         _derive(
             item,
             by_no,
             source_refs=resolved_sources,
             judged_at=judged_at,
-            judgement_id=identities[item.judgement_no],
-            identities=identities,
-            context=context,
+            judgement_id=_identity(item, by_no, judged_at=judged_at),
             fusion_version=fusion_version,
             prompt_version=prompt_version,
         )
@@ -195,8 +177,6 @@ def _derive(
     source_refs: tuple[str, ...],
     judged_at: datetime,
     judgement_id: str,
-    identities: Mapping[int, str],
-    context: tuple[str, ...],
     fusion_version: str,
     prompt_version: str,
 ) -> DurableJudgement:
@@ -224,42 +204,9 @@ def _derive(
         ),
         status=judgement.status,
         status_basis=judgement.status_basis,
-        relations=tuple((link.kind.value, _target_identity(link, identities, context)) for link in judgement.relations),
         fusion_version=fusion_version,
         prompt_version=prompt_version,
     )
-
-
-def without_unresolvable_relations(judgement: DurableJudgement, visible_ids: Collection[str]) -> DurableJudgement:
-    """剪掉指向"不会落盘的判断"的关系。
-
-    个人版只跟踪主体一个人，旁人的判断不落盘。而并行关系是**相互**的：模型按提示词只在一边
-    声明，装配层会自动补上另一边——于是主体那条判断上会出现一条指向旁人判断的关系，随后旁人
-    那条被分流掉。留着它，不可变存储里就永久躺着一个指向不存在记录的 ``target_id``；旁人在做
-    什么本来就不在范围内，所以剪掉不损失任何我们要的东西。
-
-    ``judgement_id`` 是**不含 relations** 的内容摘要（并行相互指向会让身份循环依赖），所以剪枝
-    不会改变身份，也就不会与已经落盘的同一条判断冲突。
-    """
-
-    visible = set(visible_ids)
-    kept = tuple(link for link in judgement.relations if link[1] in visible)
-    if len(kept) == len(judgement.relations):
-        return judgement
-    return replace(judgement, relations=kept)
-
-
-def _target_identity(link: JudgementLink, identities: Mapping[int, str], context: tuple[str, ...]) -> str:
-    """把关系的临时目标换成耐久身份；本批与上下文两个来源在这里合流。"""
-
-    if link.context_no is not None:
-        if link.context_no > len(context):
-            raise BehaviorFusionError(
-                f"relation references context judgement C{link.context_no}, but only {len(context)} were supplied"
-            )
-        return context[link.context_no - 1]
-    assert link.target_no is not None
-    return identities[link.target_no]
 
 
 def _fragment_index(
@@ -308,7 +255,7 @@ def persistable_judgements(
 ) -> tuple[DurableJudgement, ...]:
     """哪些判断进判断存储：主体的行为 + 没读懂的观测段。
 
-    旁人的可读判断分流（会淹没判断存储，下游对它们毫无用处，观测身份已留在回执）；
+    旁人的可读判断不落（会淹没判断存储，下游对它们毫无用处）；
     behavior=空的判断不属于任何人——它是"主体的观测轨道上这段没读懂"，归约层要把它物化成
     gap 节点，必须落盘。回执与落盘共用本函数：两处各算一遍会让 StagedFusion 的
     "staged 判断 == 回执 judgement_ids" 校验静默失效。
@@ -337,7 +284,6 @@ def judgement_payload(judgement: DurableJudgement) -> dict[str, Any]:
         ],
         "status": None if judgement.status is None else judgement.status.value,
         "status_basis": None if judgement.status_basis is None else judgement.status_basis.value,
-        "relations": [{"kind": kind, "target_id": target} for kind, target in judgement.relations],
         "fusion_version": judgement.fusion_version,
         "prompt_version": judgement.prompt_version,
     }

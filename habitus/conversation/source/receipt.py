@@ -19,6 +19,7 @@ from habitus.conversation.source.model import (
 )
 from habitus.foundation.integrity import canonical_digest, canonicalize
 from habitus.infrastructure.store.filesystem import (
+    DurablePathIntegrityError,
     ImmutableArtifactConflictError,
     atomic_create_bytes,
     durable_unlink,
@@ -314,6 +315,8 @@ class ConversationConsumerOutcomeStore:
             )
         except FileNotFoundError:
             return None
+        except DurablePathIntegrityError as exc:
+            raise ConversationSourceError("consumer outcome exceeds its read bound or is not a regular file") from exc
         try:
             outcome = ConversationConsumerOutcome.from_dict(json.loads(encoded))
         except (UnicodeDecodeError, json.JSONDecodeError, ConversationSourceError) as exc:

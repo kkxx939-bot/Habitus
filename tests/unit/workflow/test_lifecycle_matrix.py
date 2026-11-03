@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from habitus.memory.conversation import ConversationAddress
+from habitus.memory.conversation import ConversationAddress, ConversationSummaryRetirementStore
 from habitus.memory.editor import MemoryTransactionJournalState
 from habitus.memory.workflow import (
     ConversationLifecycleError,
@@ -34,6 +34,7 @@ from tests.unit.workflow.test_lifecycle_manager import lifecycle_manager
         ("jobs", object(), "jobs must be"),
         ("receipts", object(), "receipts must be"),
         ("transaction_journal", object(), "transaction_journal must be"),
+        ("retirement_store", object(), "retirement_store must be"),
         ("summary_config", object(), "summary_config must be"),
         ("workflow_config", object(), "workflow_config must be"),
     ],
@@ -54,6 +55,7 @@ def test_constructor_rejects_invalid_collaborator(
         "jobs": manager.jobs,
         "receipts": manager.receipts,
         "transaction_journal": manager.transaction_journal,
+        "retirement_store": manager.retirement_store,
         "summary_config": manager.summary_config,
         "workflow_config": manager.workflow_config,
     }
@@ -74,7 +76,24 @@ def test_constructor_rejects_summary_config_different_from_compactor(tmp_path: P
             manager.jobs,
             manager.receipts,
             manager.transaction_journal,
+            manager.retirement_store,
             summary_config=replace(manager.summary_config, cleanup_batch_size=1),
+        )
+
+
+def test_constructor_rejects_retirement_store_not_shared_with_summary_index(tmp_path: Path) -> None:
+    manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
+    with pytest.raises(ValueError, match="share one retirement store"):
+        ConversationLifecycleManager(
+            manager.compactor,
+            manager.journal,
+            manager.segment_store,
+            manager.range_store,
+            manager.summary_vector_index,
+            manager.jobs,
+            manager.receipts,
+            manager.transaction_journal,
+            ConversationSummaryRetirementStore(tmp_path / "other-workflow"),
         )
 
 

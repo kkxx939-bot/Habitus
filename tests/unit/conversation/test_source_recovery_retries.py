@@ -9,14 +9,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 from habitus.conversation.source import (
     ConversationConsumerDeliveryState,
     ConversationSourceConsumer,
     ConversationSourceCoordinator,
+    ConversationSourceError,
     ConversationSourceRecoveryDeferredError,
+    SourceAddress,
 )
 from habitus.conversation.source.recovery import recovery_key
 from habitus.runtime.lifecycle_sources import ConversationSourceRecoveryParticipant
@@ -156,14 +161,14 @@ def test_orphan_markers_are_cleared_only_after_the_grace_period(tmp_path: Path) 
     now = [datetime.now(UTC)]
     recovering = recovery(service, orphan_grace=timedelta(hours=24), clock=lambda: now[0])
 
-    assert recovering.pending() == ()
-    assert [item for item, _address in service.ledger.pending.listing()] == [orphan.source_id]
-    assert service.ledger.index.count() == 1
+    assert recovering.plan().attempt == ()
+    assert [item for item, _address in service.ledger.pending.listing().sources] == [orphan.source_id]
+    assert len(service.ledger.index.address_directories()) == 1
 
     now[0] += timedelta(hours=25)
-    assert recovering.pending() == ()
-    assert service.ledger.pending.listing() == ()
-    assert service.ledger.index.count() == 0
+    assert recovering.plan().attempt == ()
+    assert service.ledger.pending.listing().sources == ()
+    assert len(service.ledger.index.address_directories()) == 0
 
 
 def test_the_participant_hands_the_batch_to_the_coordinator_without_waiting(tmp_path: Path) -> None:
@@ -251,5 +256,265 @@ def test_an_unreadable_envelope_only_holds_itself_back(tmp_path: Path) -> None:
 
         assert plan.corrupt == (bad.source_id,)
         assert _state(service, good, MEMORY) is ConversationConsumerDeliveryState.COMMITTED
+
+    asyncio.run(scenario())
+
+
+def test_an_envelope_over_the_read_bound_only_holds_itself_back(tmp_path: Path) -> None:
+    """读上限调低之后，比它大的那份信封是坏的、只挡它自己：进 ``corrupt``，另一份照常恢复，不冲出这一轮。"""
+
+    async def scenario() -> None:
+        service, _memory, _behavior = delivery(tmp_path)
+        big, small = source(conversation_id="big", content="长" * 3000), source(conversation_id="small")
+        service.sources.put(big)
+        service.sources.put(small)
+        sizes = {item.source_id: service.sources._path(item.source_id).stat().st_size for item in (big, small)}
+        service.sources.max_file_bytes = (sizes[big.source_id] + sizes[small.source_id]) // 2
+        recovering = recovery(service)
+
+        plan = recovering.plan()
+        await recovering.recover_pending()
+
+        assert plan.corrupt == (big.source_id,)
+        assert {entry.envelope.source_id for entry in plan.attempt} == {small.source_id}
+        assert _state(service, small, MEMORY) is ConversationConsumerDeliveryState.COMMITTED
+
+    asyncio.run(scenario())
+
+
+def test_an_outcome_over_the_read_bound_is_a_corrupted_delivery_not_a_crash(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        service, _memory, _behavior = delivery(tmp_path)
+        envelope = service.sources.put(source(conversation_id="outcome"))
+        await service.ensure_outcome(envelope, MEMORY)
+        service.outcomes.max_file_bytes = 16
+
+        assert _state(service, envelope, MEMORY) is ConversationConsumerDeliveryState.CORRUPTED
+        plan = recovery(service).plan()
+        assert [(entry.envelope.source_id, entry.consumer) for entry in plan.broken] == [(envelope.source_id, MEMORY)]
+
+    asyncio.run(scenario())
+
+
+def test_an_index_marker_left_without_its_pending_marker_is_cleared_after_the_grace_period(tmp_path: Path) -> None:
+    """put 打完索引标记、还没打"还没终态"标记就失败（容量闸、进程被杀），这份源再没重投：同地址后面那份的 Memory
+    等的就是它。过了宽限期，恢复删掉这个孤儿索引标记，后面那份照常提交；宽限期内不动（可能是正在进行的 put）。"""
+
+    async def scenario() -> None:
+        service, _memory, _behavior = delivery(tmp_path)
+        orphan = source(conversation_id="y", sequence=0, delivery_seed="lost")
+        service.ledger.index.mark(orphan)  # 只有索引标记：没有"还没终态"标记，也没有信封
+        later = service.sources.put(source(conversation_id="y", sequence=1, delivery_seed="later"))
+        now = [datetime.now(UTC)]
+        recovering = recovery(service, orphan_grace=timedelta(hours=24), clock=lambda: now[0])
+
+        await recovering.recover_pending()
+        assert [marker.source_id for marker in service.ledger.earlier(later)] == [orphan.source_id]
+        assert _state(service, later, MEMORY) is ConversationConsumerDeliveryState.PENDING
+
+        now[0] += timedelta(hours=25)
+        await recovering.recover_pending()
+        assert service.ledger.earlier(later) == ()
+        assert _state(service, later, MEMORY) is ConversationConsumerDeliveryState.COMMITTED
+
+    asyncio.run(scenario())
+
+
+# ── 坏条目只挡它自己（裁定 60 第 6 条，U12 / U16） ─────────────────────────────────────────────────────
+
+
+def _damage_index(service, envelope, how: str) -> None:  # type: ignore[no-untyped-def]
+    directory = service.ledger.index.index_root / SourceAddress.of(envelope).digest
+    marker = next(path for path in directory.iterdir() if not path.name.startswith("."))
+    if how == "truncated":
+        marker.write_bytes(marker.read_bytes()[:20])
+    elif how == "missing_field":
+        payload = json.loads(marker.read_bytes())
+        payload.pop("start_sequence")
+        marker.write_bytes(json.dumps(payload).encode())
+    elif how == "ds_store":
+        (directory / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+    elif how == "editor_backup":
+        (directory / f"{marker.name}~").write_bytes(marker.read_bytes())
+
+
+@pytest.mark.parametrize("how", ["truncated", "missing_field", "ds_store", "editor_backup"])
+def test_a_corrupt_index_marker_only_holds_its_own_address(tmp_path: Path, how: str) -> None:
+    """一个地址的索引读不出来（坏标记、目录里的杂文件）：恢复照常处理别的地址，这个地址记进 ``unreadable``，它自己的
+    Memory 交付读不了前序、报错记账；不让每一轮恢复都整轮失败。"""
+
+    async def scenario() -> None:
+        service, _memory, _behavior = delivery(tmp_path)
+        bad = service.sources.put(source(conversation_id="bad", delivery_seed="bad"))
+        good = service.sources.put(source(conversation_id="good", delivery_seed="good"))
+        _damage_index(service, bad, how)
+        recovering = recovery(service)
+
+        plan = recovering.plan()
+        results = await recovering.recover_pending()
+
+        assert plan.unreadable == (f"index/{SourceAddress.of(bad).digest}",)
+        assert _state(service, good, MEMORY) is ConversationConsumerDeliveryState.COMMITTED
+        assert _state(service, bad, MEMORY) is not ConversationConsumerDeliveryState.COMMITTED
+        failed = next(result for result in results if result.envelope == bad and result.consumer is MEMORY)
+        assert isinstance(failed.error, ConversationSourceError)
+
+    asyncio.run(scenario())
+
+
+def test_a_corrupt_index_under_a_marker_whose_envelope_is_gone_only_holds_its_address(tmp_path: Path) -> None:
+    """"还没终态"标记在、信封不在（put 写到一半），要看索引判它是不是释放过；索引坏了也只挡这个地址。"""
+
+    async def scenario() -> None:
+        service, _memory, _behavior = delivery(tmp_path)
+        lost = source(conversation_id="bad", delivery_seed="lost")
+        service.ledger.admit(lost)
+        good = service.sources.put(source(conversation_id="good", delivery_seed="good"))
+        _damage_index(service, lost, "ds_store")
+        recovering = recovery(service)
+
+        plan = recovering.plan()
+        await recovering.recover_pending()
+
+        assert plan.unreadable == (f"index/{SourceAddress.of(lost).digest}",)
+        assert _state(service, good, MEMORY) is ConversationConsumerDeliveryState.COMMITTED
+
+    asyncio.run(scenario())
+
+
+def _damage_pending(service, envelope, how: str) -> None:  # type: ignore[no-untyped-def]
+    path = service.ledger.pending.pending_root / f"{envelope.source_id}.json"
+    if how == "truncated":
+        path.write_bytes(path.read_bytes()[:15])
+    elif how == "missing_address":
+        payload = json.loads(path.read_bytes())
+        payload.pop("address")
+        path.write_bytes(json.dumps(payload).encode())
+    elif how == "ds_store":
+        (service.ledger.pending.pending_root / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+
+
+@pytest.mark.parametrize("how", ["truncated", "missing_address"])
+def test_a_corrupt_pending_marker_only_holds_its_own_source(tmp_path: Path, how: str) -> None:
+    async def scenario() -> None:
+        service, _memory, _behavior = delivery(tmp_path)
+        bad = service.sources.put(source(conversation_id="bad", delivery_seed="bad"))
+        good = service.sources.put(source(conversation_id="good", delivery_seed="good"))
+        _damage_pending(service, bad, how)
+        recovering = recovery(service)
+
+        plan = recovering.plan()
+        await recovering.recover_pending()
+
+        assert plan.corrupt == (bad.source_id,)
+        assert _state(service, good, MEMORY) is ConversationConsumerDeliveryState.COMMITTED
+        marker = service.ledger.pending.pending_root / f"{bad.source_id}.json"
+        assert marker.exists()  # 坏的那份留着等人工处置
+        with pytest.raises(ConversationSourceError):  # 缺字段也是"坏标记"，不是裸 KeyError
+            service.ledger.pending._address(marker)
+
+    asyncio.run(scenario())
+
+
+def test_a_stray_file_among_the_pending_markers_only_holds_itself(tmp_path: Path) -> None:
+    """"还没终态"目录里多一个 ``.DS_Store``：不吞掉（记进 ``unreadable`` 等人处置），也不挡任何一份源。"""
+
+    async def scenario() -> None:
+        service, _memory, _behavior = delivery(tmp_path)
+        first = service.sources.put(source(conversation_id="first", delivery_seed="first"))
+        second = service.sources.put(source(conversation_id="second", delivery_seed="second"))
+        _damage_pending(service, first, "ds_store")
+        recovering = recovery(service)
+
+        plan = recovering.plan()
+        await recovering.recover_pending()
+
+        assert plan.unreadable == ("pending/.DS_Store",)
+        assert _state(service, first, MEMORY) is ConversationConsumerDeliveryState.COMMITTED
+        assert _state(service, second, MEMORY) is ConversationConsumerDeliveryState.COMMITTED
+
+    asyncio.run(scenario())
+
+
+def test_a_corrupt_envelope_s_index_marker_is_not_cleared_as_an_orphan(tmp_path: Path) -> None:
+    """信封在、只是坏了：它不是孤儿。过了宽限期它的索引标记也留着，同地址后面的 Memory 照旧等它（S2R-13）。"""
+
+    async def scenario() -> None:
+        service, _memory, _behavior = delivery(tmp_path)
+        broken = service.sources.put(source(conversation_id="y", sequence=0, delivery_seed="broken"))
+        later = service.sources.put(source(conversation_id="y", sequence=1, delivery_seed="later"))
+        path = service.sources._path(broken.source_id)
+        path.write_bytes(path.read_bytes()[:-5] + b"xxxxx")
+        service.ledger.pending.clear(broken.source_id)  # 只剩索引标记：正是孤儿清理要看的那种
+        now = [datetime.now(UTC) + timedelta(days=30)]
+        recovering = recovery(service, orphan_grace=timedelta(hours=24), clock=lambda: now[0])
+
+        results = await recovering.recover_pending()
+
+        assert [marker.source_id for marker in service.ledger.earlier(later)] == [broken.source_id]
+        waiting = next(result for result in results if result.envelope == later and result.consumer is MEMORY)
+        assert waiting.error is not None
+        assert _state(service, later, MEMORY) is ConversationConsumerDeliveryState.PENDING
+
+    asyncio.run(scenario())
+
+
+# ── 取消立刻生效（U17） ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_cancelling_a_recovery_batch_stops_it_at_once(tmp_path: Path) -> None:
+    """停机时取消一批恢复：取消照常抛出，后面的有序条目不再跑，并发的那几份也一起停。"""
+
+    async def scenario() -> None:
+        service, _memory, _behavior = delivery(tmp_path)
+        first = service.sources.put(source(conversation_id="ordered", sequence=0, delivery_seed="a"))
+        second = service.sources.put(source(conversation_id="ordered", sequence=1, delivery_seed="b"))
+        started: list[tuple[str, ConversationSourceConsumer]] = []
+        cancelled: list[ConversationSourceConsumer] = []
+        entered = asyncio.Event()
+
+        async def ensure_outcome(envelope, consumer):  # type: ignore[no-untyped-def]
+            started.append((envelope.source_id, consumer))
+            entered.set()
+            try:
+                await asyncio.sleep(1.0)  # 有界：取消没生效时这一批照跑，测试看到的是正常返回而不是挂住
+            except asyncio.CancelledError:
+                cancelled.append(consumer)
+                raise
+
+        service.ensure_outcome = ensure_outcome  # type: ignore[method-assign]
+        recovering = recovery(service)
+        entries = recovering.plan().attempt
+        task = asyncio.create_task(recovering.recover_all(entries))
+        await entered.wait()
+        await asyncio.sleep(0)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0)
+        assert (second.source_id, MEMORY) not in started
+        assert (first.source_id, MEMORY) in started
+        assert cancelled.count(BEHAVIOR) == 2  # 并发的 Behavior 两份没留在后台
+        assert recovering.retries.entry(recovery_key(first.source_id, MEMORY)) is None  # 取消不是失败、不记账
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("consumer", [MEMORY, BEHAVIOR])
+def test_an_output_over_the_read_bound_is_a_corrupted_delivery_not_a_crash(tmp_path: Path, consumer) -> None:  # type: ignore[no-untyped-def]
+    """两个消费者的输出读超上限都转成源错误（U4 的另两处）：交付判为 CORRUPTED，Memory 进 ``broken`` 等人工、Behavior
+    当场补救，都不冲出这一轮。"""
+
+    async def scenario() -> None:
+        service, _memory, _behavior = delivery(tmp_path)
+        envelope = service.sources.put(source(conversation_id="output"))
+        await service.ensure_outcome(envelope, consumer)
+        service.consumers[consumer].output_store.max_file_bytes = 16
+
+        assert _state(service, envelope, consumer) is ConversationConsumerDeliveryState.CORRUPTED
+        plan = recovery(service).plan()
+        held = plan.broken if consumer is MEMORY else plan.salvaged
+        assert [(entry.envelope.source_id, entry.consumer) for entry in held] == [(envelope.source_id, consumer)]
 
     asyncio.run(scenario())

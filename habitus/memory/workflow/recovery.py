@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from habitus.memory.conversation import ConversationAddress, ConversationMessageJournal
 from habitus.memory.editor.transaction import MemoryCommitTransaction
 from habitus.memory.editor.transaction_log import (
@@ -22,6 +24,28 @@ from habitus.memory.workflow.receipt import (
     MemoryChangeReceiptStore,
     MemoryChangeSource,
 )
+from habitus.pre.conversation import ConversationSegment
+
+
+def staged_job_segment(
+    conversations: ConversationMessageJournal,
+    job: MemoryJob,
+    *,
+    before_history_publish: Callable[[ConversationSegment], None] | None = None,
+) -> ConversationSegment:
+    """STAGED Job 原边界上的那一段：还没发布就按原边界封存；已经按原边界发布、后面又封了新段（重试用尽成 FAILED 时
+    前台照常往后封），就读回那份 history。读回的不是它（那个边界上没有这一段）照常报错。调用方核对段身份与摘要。"""
+
+    address = ConversationAddress(job.conversation_id, job.started_on)
+    _start_sequence, end_sequence = conversations.layout.segment_range(job.segment_id)
+    archived = conversations.read_state(address).archived_through_sequence
+    if archived is not None and archived > end_sequence:
+        return conversations.read_segment(address, job.segment_id)
+    return conversations.seal(
+        address,
+        through_sequence=end_sequence,
+        before_history_publish=before_history_publish,
+    ).segment
 
 
 class MemoryStagedJobRecovery:
@@ -48,10 +72,8 @@ class MemoryStagedJobRecovery:
             return job
         job = self.jobs.require_staged_ready(job)
         try:
-            address = ConversationAddress(job.conversation_id, job.started_on)
-            _start_sequence, end_sequence = self.conversations.layout.segment_range(job.segment_id)
-            sealed = self.conversations.seal(address, through_sequence=end_sequence)
-            if sealed.segment.segment_id != job.segment_id or sealed.segment.digest != job.source_segment_digest:
+            segment = staged_job_segment(self.conversations, job)
+            if segment.segment_id != job.segment_id or segment.digest != job.source_segment_digest:
                 raise MemoryJobError("recovered ConversationSegment does not match its staged MemoryJob")
             return self.jobs.activate(job)
         except MemoryJobNotReadyError:
@@ -107,12 +129,19 @@ class MemoryJobTransactionRecovery:
         return None
 
     def discard_uncommitted(self, source: MemoryChangeSource) -> None:
-        """正常执行失败后只清理尚未对应 COMMITTED 事务的准备态回执。"""
+        """正常执行失败后只清理确定不会提交的准备态回执。
+
+        COMMITTED 日志与 PREPARED 日志都保留回执：PREPARED 表示 L2 是否已写完尚未确定，
+        下一次执行先由 `recover_pending` 判定，提交了就靠这份回执补完，回滚了再由 `inspect` 清理。
+        """
 
         if not isinstance(source, MemoryChangeSource):
             raise TypeError("source must be MemoryChangeSource")
         journal = self.transaction.journal.try_read(source.transaction_id)
-        if journal is not None and journal.state is MemoryTransactionJournalState.COMMITTED:
+        if journal is not None and journal.state in {
+            MemoryTransactionJournalState.COMMITTED,
+            MemoryTransactionJournalState.PREPARED,
+        }:
             return
         current = self.change_receipts.try_read(source)
         if current is not None and current.state is MemoryChangeReceiptState.PREPARED:
@@ -130,4 +159,4 @@ class MemoryJobTransactionRecovery:
         return True
 
 
-__all__ = ["MemoryJobTransactionRecovery", "MemoryStagedJobRecovery"]
+__all__ = ["MemoryJobTransactionRecovery", "MemoryStagedJobRecovery", "staged_job_segment"]

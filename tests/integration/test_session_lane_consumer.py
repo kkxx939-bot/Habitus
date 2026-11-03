@@ -23,7 +23,6 @@ from habitus.conversation import (
 )
 from habitus.conversation.source.recovery import recovery_key
 from habitus.foundation.lifecycle import DeterministicFailure
-from habitus.model_client.contracts import ModelStructuredOutputError
 from habitus.pre.conversation import ConversationBatch, ConversationMessage, ConversationToolResultStatus
 from habitus.runtime.session_lane import (
     SKIP_BEHAVIOR_DISABLED,
@@ -94,7 +93,7 @@ def test_each_turn_in_a_source_becomes_one_judgement_and_the_source_gets_a_recei
         ]
         assert provider.calls == 2  # 每轮恰好一次模型调用
         assert sorted(item["behavior"] for item in behavior.judgements.list()) == ["检查项目状态", "确认回答风格"]
-        assert all(item["relations"] == [] for item in behavior.judgements.list())
+        assert all("relations" not in item for item in behavior.judgements.list())
         # 回执里没有对话内容。
         assert "请记住我喜欢简洁回答" not in str(receipt.to_dict())
         # 覆盖记录带着所属会话源：这份源的 Behavior 到终态之前不删（26 号清单 6.1）
@@ -152,18 +151,29 @@ def test_a_source_without_any_instruction_has_no_turns(tmp_path: Path) -> None:
 
 
 def test_a_failed_turn_leaves_the_source_pending_and_recovery_does_not_repeat_finished_turns(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """一轮的描述抛了会话 lane 不归类的错（这里是连接断了一次）：抛给会话源、源不落终态；重做时第一轮被认出来、不再问模型。
+    （模型答了但格式不合不再抛：白天放一边落「错误」，裁定 94 错误分类，见 ``test_session_lane``。）"""
+
     async def scenario() -> None:
-        bad = description(name="..")  # 两次都答成不合格的名字：这一轮判失败
-        service, behavior, provider = wired(
-            tmp_path, [description("确认回答风格"), bad, bad, description("检查项目状态")]
-        )
+        service, behavior, provider = wired(tmp_path, [description("确认回答风格"), description("检查项目状态")])
+        consumer = service.consumers[ConversationSourceConsumer.BEHAVIOR_SESSION]
+        real = consumer.lane.describer.describe
+        calls = {"n": 0}
+
+        async def drops_once(turn, reminders=()):  # type: ignore[no-untyped-def]
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise ConnectionError("connection reset")
+            return await real(turn, reminders)
+
+        monkeypatch.setattr(consumer.lane.describer, "describe", drops_once)
         source = service.sources.put(envelope("fails-once", (*closed_turn(), *tool_turn(start_sequence=2))))
 
         try:
             await service.ensure_outcome(source, ConversationSourceConsumer.BEHAVIOR_SESSION)
-        except ModelStructuredOutputError:
+        except ConnectionError:
             pass
         else:  # pragma: no cover - 上面必须抛
             raise AssertionError("the failing turn must surface")
@@ -182,7 +192,7 @@ def test_a_failed_turn_leaves_the_source_pending_and_recovery_does_not_repeat_fi
             ConversationConsumerDeliveryState.COMMITTED
         )
         # 重做时第一轮被认出来，没有再问模型、没有再写一条。
-        assert provider.calls == 4
+        assert provider.calls == 2 and calls["n"] == 3
         assert sorted(item["behavior"] for item in behavior.judgements.list()) == ["检查项目状态", "确认回答风格"]
 
     asyncio.run(scenario())
@@ -311,7 +321,10 @@ def test_the_bridge_from_a_codex_source_keeps_his_interjections_in_the_same_roun
 
     def say(role: str, text: str) -> dict[str, Any]:
         kind = "input_text" if role == "user" else "output_text"
-        return {"type": "response_item", "payload": {"type": "message", "role": role, "content": [{"type": kind, "text": text}]}}
+        return {
+            "type": "response_item",
+            "payload": {"type": "message", "role": role, "content": [{"type": kind, "text": text}]},
+        }
 
     records = [
         {"type": "event_msg", "payload": {"type": "task_started"}},
@@ -326,3 +339,25 @@ def test_the_bridge_from_a_codex_source_keeps_his_interjections_in_the_same_roun
     (turn,) = session_turns(envelope("codex-x", adapted.batch.messages))
     assert turn.instruction == "看一下能不能写个脚本连我的云电脑"
     assert [m.content for m in turn.messages if m.role is SessionMessageRole.PROMPT][1:] == ["还是暂停吧"]
+
+
+def test_memory_and_the_session_lane_cut_a_claude_code_transcript_into_the_same_rounds() -> None:
+    """裁定 69、76：同一份 Claude Code 转写，记忆主链开轮的地方（``starts_turn``）就是会话 lane 一轮的开头；宿主注入的
+    消息两边都不开轮，记忆的保留规则在 afterTurn 处收下整批。"""
+
+    from habitus.memory.conversation import ConversationRetentionPlanner, ConversationSegmentationConfig
+    from habitus.pre.conversation import ConversationAdapterContext, ConversationAdapterRegistry
+    from tests.unit.conversation.test_protocol_adapters import claude_code_host_messages
+
+    adapted = ConversationAdapterRegistry.with_builtins().adapt(
+        "claude_code",
+        {"records": claude_code_host_messages()},
+        ConversationAdapterContext("claude-x", 0, datetime(2026, 7, 1, 9, 0, tzinfo=UTC)),
+    )
+    memory_starts = [item.sequence for item in adapted.batch.messages if item.starts_turn]
+    lane_starts = [turn.start_sequence for turn in session_turns(envelope("claude-x", adapted.batch.messages))]
+
+    assert memory_starts == lane_starts == [0, 6]
+    ConversationRetentionPlanner(ConversationSegmentationConfig(commit_token_threshold=1)).plan(
+        adapted.batch, after_turn=True
+    )

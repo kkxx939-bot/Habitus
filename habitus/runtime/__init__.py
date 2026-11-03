@@ -1,6 +1,6 @@
 """Habitus 记忆主链的顶层组合入口。"""
 
-from habitus.runtime.assembly import build_runtime
+from habitus.runtime.assembly import build_runtime, validate_domain_configs
 from habitus.runtime.components import (
     RuntimeComponents,
     RuntimeConversation,
@@ -38,7 +38,6 @@ from habitus.runtime.lifecycle_memory import (
 from habitus.runtime.runtime import (
     MemoryJobAbandonResult,
     MemoryJobRetryResult,
-    MemoryUseReceipt,
     Runtime,
     RuntimeConversationProtocolIngestResult,
     RuntimeInitialization,
@@ -71,7 +70,6 @@ __all__ = [
     "RuntimeHealthStatus",
     "MemoryJobRetryResult",
     "MemoryJobAbandonResult",
-    "MemoryUseReceipt",
     "RuntimeConversationProtocolIngestResult",
     "MemoryConsistencyService",
     "MemoryConsistencySnapshot",
@@ -88,4 +86,5 @@ __all__ = [
     "MemoryWorkerState",
     "MemoryWorkerStateError",
     "build_runtime",
+    "validate_domain_configs",
 ]

@@ -6,15 +6,9 @@ from datetime import UTC, timedelta
 
 import pytest
 
-from habitus.behavior import (
-    BehaviorDocumentWriter,
-    BehaviorKind,
-    BehaviorLinkType,
-    BehaviorPublishConflictError,
-    BehaviorTree,
-    BehaviorURI,
-)
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.behavior import BehaviorDocumentIntegrityError, BehaviorKind, BehaviorTree, BehaviorURI
+from habitus.behavior.tree.writer import BehaviorDocumentWriter, BehaviorPublishConflictError
+from tests.lock_store import ProcessLocalLockStore
 from tests.unit.behavior.tree_payloads import (
     action_segment_payload,
     gap_payload,
@@ -63,55 +57,21 @@ def test_replay_semantics_three_ways(tmp_path) -> None:
         other_clock.publish(BehaviorKind.OCCURRENCE, occurrence_payload())
 
 
-def test_forward_link_requires_existing_target(tmp_path) -> None:
+def test_published_documents_carry_no_links_and_the_old_envelope_is_refused(tmp_path) -> None:
+    """判断之间不再互相指向，文档信封里没有 ``links`` 键；带 ``links`` 的旧文档按严格读取拒绝。"""
+
     writer, tree = build_writer(tmp_path)
-    cause = writer.publish(BehaviorKind.OCCURRENCE, occurrence_payload())
-    cause_uri = BehaviorURI.from_address(cause.address)
-
-    follow = writer.publish(
-        BehaviorKind.OCCURRENCE,
-        action_segment_payload(
-            started_at=local(19, 40),
-            last_observed_at=local(19, 41),
-            onset_available_at=local(19, 40, 2),
-        ),
-        links=((BehaviorLinkType.RESULTS_FROM, cause_uri),),
-    )
-    loaded = tree.read(follow.address)
-    assert len(loaded.links) == 1
-    assert str(loaded.links[0].to_uri) == str(cause_uri)
-    assert loaded.links[0].link_type is BehaviorLinkType.RESULTS_FROM
-    assert not hasattr(loaded, "backlinks")  # 只存前向，读侧取闭包；backlinks 槽位已整体退役
-
-    missing = str(cause_uri).replace("洗了手", "不存在的行为")
-    with pytest.raises(BehaviorPublishConflictError, match="does not exist"):
-        writer.publish(
-            BehaviorKind.OCCURRENCE,
-            action_segment_payload(
-                started_at=local(21, 0),
-                last_observed_at=local(21, 1),
-                onset_available_at=local(21, 0, 2),
-            ),
-            links=((BehaviorLinkType.CONCURRENT_WITH, missing),),
-        )
-
-
-def test_gap_publish_and_no_links(tmp_path) -> None:
-    writer, tree = build_writer(tmp_path)
-    document = writer.publish(BehaviorKind.GAP, gap_payload())
-    assert tree.exists(document.address)
     occurrence = writer.publish(BehaviorKind.OCCURRENCE, occurrence_payload())
-    with pytest.raises(ValueError, match="only occurrences carry forward links"):
-        writer.publish(
-            BehaviorKind.GAP,
-            gap_payload(started_at=local(21, 10), ended_at=local(21, 20)),
-            links=(
-                (
-                    BehaviorLinkType.CONCURRENT_WITH,
-                    BehaviorURI.from_address(occurrence.address),
-                ),
-            ),
-        )
+    gap = writer.publish(BehaviorKind.GAP, gap_payload())
+    for document in (occurrence, gap):
+        loaded = tree.read(document.address)
+        assert not hasattr(loaded, "links") and not hasattr(loaded, "backlinks")
+        assert '"links"' not in tree.document_codec.encode(loaded)
+    raw = tree.document_codec.encode(tree.read(occurrence.address))
+    legacy = raw.replace('\n  "revision":', '\n  "links": [],\n  "revision":', 1)
+    assert '"links": []' in legacy
+    with pytest.raises(BehaviorDocumentIntegrityError, match="invalid shape"):
+        tree.document_codec.decode(legacy, expected_address=occurrence.address)
 
 
 def test_timeline_enumeration_interleaves_kinds_by_day(tmp_path) -> None:
@@ -212,7 +172,7 @@ def test_directory_capacity_holds_under_concurrent_publishes(tmp_path) -> None:
 def test_document_lock_rows_are_dropped_after_publishing_and_a_new_holder_still_excludes_others(tmp_path) -> None:
     """26 号清单 7.1：文档只写一次，锁放了之后那几行再也用不上，空闲的删掉；删了之后再加锁照样互斥（不会误放行）。"""
 
-    from habitus.behavior.editor.writer import BehaviorDocumentLockKeyspace
+    from habitus.behavior.tree.writer import BehaviorDocumentLockKeyspace
     from habitus.behavior.uri import BehaviorURI
 
     tree = BehaviorTree(tmp_path / "behavior-tree")

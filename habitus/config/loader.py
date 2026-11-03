@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import difflib
 import math
+import re
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import TypeVar
+from typing import TypeVar, get_args, get_type_hints
 
 import yaml
 from yaml.nodes import MappingNode
@@ -131,6 +133,47 @@ def construct_config(
         raise ConfigError(f"invalid '{path}': {exc}") from exc
 
 
+def require_override_types(group: object, *, path: str, prefix: str = "") -> None:
+    """覆盖项（``int | None`` / ``float | None``，``None`` = 用领域默认值）只查类型：值域归领域配置，见 ``construct_overrides``。
+
+    整数还是数按字段的真实类型判（``typing.get_type_hints``），不看注解写成什么字符串。
+    """
+
+    hints = get_type_hints(type(group))
+    for item in dataclasses.fields(group):  # type: ignore[arg-type]
+        value = getattr(group, item.name)
+        if not item.name.startswith(prefix) or value is None:
+            continue
+        accepted = get_args(hints[item.name]) or (hints[item.name],)
+        if int in accepted and float not in accepted:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{path}.{item.name} must be an integer")
+        elif isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueError(f"{path}.{item.name} must be a number")
+
+
+def construct_overrides(
+    factory: Callable[..., _ConfigValue],
+    overrides: Mapping[str, object],
+    *,
+    path: str,
+    prefix: str = "",
+) -> _ConfigValue:
+    """用配置里写了的覆盖项构造一份领域配置；值域只由领域配置校验，拒了就包成指得出配置键的 ``ConfigError``。
+
+    领域的报错只认它自己的字段名（``batch_size must ...``），这里把报错里出现的覆盖项还原成配置键
+    （``config.behavior.kinds_batch_size``）；一个都认不出（例如几项之间互相矛盾、报错没点名写了的那项）时指到这一组。
+    """
+
+    try:
+        return factory(**overrides)
+    except (TypeError, ValueError) as exc:
+        message = str(exc)
+        named = [name for name in overrides if re.search(rf"\b{re.escape(name)}\b", message)]
+        keys = ", ".join(f"'{path}.{prefix}{name}'" for name in named) or f"'{path}'"
+        raise ConfigError(f"invalid {keys}: {message}") from exc
+
+
 def required_field(data: Mapping[str, object], name: str, *, path: str) -> object:
     """读取必填字段，不使用假值判断篡改合法值。"""
 
@@ -197,8 +240,10 @@ _StrictSafeLoader.add_constructor(
 __all__ = [
     "ConfigError",
     "construct_config",
+    "construct_overrides",
     "group_fields",
     "load_config_object",
+    "require_override_types",
     "required_field",
     "strict_fields",
     "strict_object",

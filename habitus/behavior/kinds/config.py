@@ -19,9 +19,7 @@ _INTEGER_BOUNDS: tuple[tuple[str, int, int], ...] = (
     ("max_pending", 1, 1_000_000),
     ("nightly_max_new", 1, 10_000),
     ("recall_per_entry", 0, 50),
-    ("nightly_hour", 0, 23),
     ("revision_weekday", 0, 6),
-    ("revision_hour", 0, 23),
     ("merge_evidence_runs", 1, 20),
     ("cooldown_days", 0, 365),
     ("max_changes_per_revision", 1, 100),
@@ -42,9 +40,10 @@ class BehaviorKindConfig:
     """词表的门槛与运维边界（标"待定档"的是起步值，等真实数据重定）。
 
     - 归类调用：一次判几条、结构不对重问几轮、瞬态错误重试几次。
-    - 每晚新增：每天几点（本地时间）；待定池里一组至少几条、跨几天才建类（2 条跨 2 天，裁定 59：跨天守的是"换一天又来了"，
+    - 每晚新增（在夜里那条线上、结构那一段之前跑，不挂钟点，裁定 94 第 8、9 条）：待定池里一组至少几条、跨几天才建类（2 条跨 2 天，裁定 59：跨天守的是"换一天又来了"，
       同一天追问几轮不算）；待定池上限是保护闸。拆分沿用同一对门槛（"反复做"只有一个定义）。
-    - 定期拆改（裁定 17）：每周几、几点；放行 = 证据规则（拆分两边各至少 ``recurrence_min_count`` 条、跨
+    - 定期拆改（裁定 17；在夜里那条线上、结构那一段之前，每周 ``revision_weekday`` 那一晚起的周期里线第一次跑到它就拆改，
+      不挂钟点，裁定 94 第 9 条）：放行 = 证据规则（拆分两边各至少 ``recurrence_min_count`` 条、跨
       ``recurrence_min_days`` 天，提醒句不同；合并要在 ``merge_evidence_runs`` 个不同周期里都被提出）+ 锚点自检
       （每个没动过的类取 ``anchors_per_class`` 个站得稳的锚点，新清单下被拉走的比例不超过 ``max_anchor_pull``）；
       改过的类冷却几天；一次最多改几处；每类给模型看几条原话（只给合并 / 改判据的提案用）。
@@ -68,9 +67,7 @@ class BehaviorKindConfig:
     # 每晚新增一晚最多交几条新条目给模型（保护闸；多的留到下一晚，裁定 60 第 2 条）、每条新条目按相似召回几条旧条目。
     nightly_max_new: int = 200
     recall_per_entry: int = 3
-    nightly_hour: int = 2
     revision_weekday: int = 2
-    revision_hour: int = 3
     max_anchor_pull: float = 0.02
     merge_evidence_runs: int = 2
     cooldown_days: int = 14

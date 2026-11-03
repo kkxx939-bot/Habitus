@@ -4,6 +4,7 @@ from habitus.memory.editor.candidate import (
     MemoryCandidate,
     MemoryCandidateBatch,
     MemoryCandidateError,
+    MemoryCandidateViolation,
     MemoryIdentityProposal,
     MemoryIdentityProposalBasis,
     MemoryIdentityProposalType,
@@ -23,9 +24,10 @@ from habitus.memory.editor.extraction import (
     MemoryExtractionResult,
     MemoryRetrievalAction,
     MemoryRetrievalDecision,
-    MemoryRetrievalIncompleteError,
+    MemoryRetrievalFinalDecision,
     MemoryRetrievalObservation,
     MemoryRetrievalStatus,
+    MemoryTurnContext,
 )
 from habitus.memory.editor.identity import (
     MemoryFinalIdentity,
@@ -47,7 +49,6 @@ from habitus.memory.editor.link_plan import (
     MemoryRelationPlanner,
     MemoryRelationReadSet,
 )
-from habitus.memory.editor.lock_key import MemoryDocumentLockKeyspace
 from habitus.memory.editor.mutation import (
     MemoryFieldMergeError,
     MemoryFieldMerger,
@@ -102,10 +103,12 @@ from habitus.memory.editor.transaction_log import (
 )
 
 __all__ = [
+    "MemoryTurnContext",
     "ConversationSegmentQueryBuilder",
     "MemoryCandidate",
     "MemoryCandidateBatch",
     "MemoryCandidateError",
+    "MemoryCandidateViolation",
     "MemoryCommitConfig",
     "MemoryCommitConflictError",
     "MemoryCommitError",
@@ -136,7 +139,6 @@ __all__ = [
     "MemoryIdentityProposal",
     "MemoryIdentityProposalBasis",
     "MemoryIdentityProposalType",
-    "MemoryDocumentLockKeyspace",
     "MemoryFieldMergeError",
     "MemoryFieldMergeResult",
     "MemoryFieldMerger",
@@ -159,7 +161,7 @@ __all__ = [
     "MemoryRetrievalConfig",
     "MemoryRetrievalDecision",
     "MemoryRetrievalError",
-    "MemoryRetrievalIncompleteError",
+    "MemoryRetrievalFinalDecision",
     "MemoryRetrievalObservation",
     "MemoryRetrievalStatus",
     "MemoryPageIdError",

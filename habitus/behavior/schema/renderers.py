@@ -90,13 +90,20 @@ def _render_occurrence(payload: Mapping[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+_GAP_TEXT = {
+    "未观测": "这段时间我们不知道发生了什么。",
+    "没读懂": "这段时间观测到了内容，但没能读懂。",
+    "错误": "这段时间观测到了内容，但系统出了问题没读成。",
+}
+
+
 def _render_gap(payload: Mapping[str, Any]) -> str:
     lines = [
         f"# {payload['gap_kind']}",
         "",
         f"**时段** {_local(payload['started_at'])} — {_local(payload['ended_at'])}",
         "",
-        "这段时间我们不知道发生了什么。" if payload["gap_kind"] == "未观测" else "这段时间观测到了内容，但没能读懂。",
+        _GAP_TEXT[payload["gap_kind"]],
     ]
     return "\n".join(lines).rstrip() + "\n"
 

@@ -15,7 +15,7 @@ from habitus.infrastructure.editor.snapshot import (
 )
 from habitus.infrastructure.store.contracts.lock import LockLostError, LockToken
 from habitus.infrastructure.store.contracts.path_lock import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from tests.lock_store import ProcessLocalLockStore
 
 
 def test_snapshot_reader_records_found_missing_digest_and_stable_batch_order() -> None:

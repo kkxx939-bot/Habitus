@@ -78,6 +78,7 @@ class MemoryMutationPlanner:
                 fields=merged.fields,
                 changed_fields=merged.changed_fields,
                 confirms_intention=confirms_intention,
+                read_only_target=merged.read_only_target,
             )
             try:
                 working_page_ids.register_resolved(match.uri, match.candidate.page_id)

@@ -250,19 +250,39 @@ class ConversationMessageChunker:
             units = splitters[level](text)
             if len(units) > 1:
                 resolved: list[str] = []
-                current = ""
-                for unit in units:
-                    candidate = current + unit
-                    if current and not self._fits(source, candidate):
-                        resolved.extend(self._split_text(source, current, level=level + 1))
-                        current = unit
-                    else:
-                        current = candidate
-                if current:
-                    resolved.extend(self._split_text(source, current, level=level + 1))
+                for block in self._greedy_blocks(source, units):
+                    resolved.extend(self._split_text(source, block, level=level + 1))
                 return resolved
             return self._split_text(source, text, level=level + 1)
         return self._hard_split(source, text)
+
+    def _greedy_blocks(self, source: ConversationMessage, units: list[str]) -> list[str]:
+        """从左往右把相邻单元贪心并成块：每块从一个单元起（单个放不下的交给下一级再拆），并到再多一个就放不下为止。
+
+        放不放得下随追加文本单调，所以每块的终点按倍增再二分去找，每块只估算 O(log 单元数) 次、每次估的文本不超过
+        块长的两倍；不逐个单元重估整块（那样一块之内是平方的，几十 KB 没有换行的单行要跑上百秒）。
+        """
+
+        offsets = [0]
+        for unit in units:
+            offsets.append(offsets[-1] + len(unit))
+        text = "".join(units)
+        count = len(units)
+        blocks: list[str] = []
+        start = 0
+        while start < count:
+            # [start, good) 放得下；终点到 bad 就放不下（count + 1 表示还没见到放不下的）
+            good, bad, step = start + 1, count + 1, 1
+            while good + 1 < bad:
+                candidate = min(good + step, count) if bad > count else (good + bad) // 2
+                if self._fits(source, text[offsets[start] : offsets[candidate]]):
+                    good = candidate
+                    step *= 2
+                else:
+                    bad = candidate
+            blocks.append(text[offsets[start] : offsets[good]])
+            start = good
+        return blocks
 
     def _hard_split(self, source: ConversationMessage, text: str) -> list[str]:
         result: list[str] = []

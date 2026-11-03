@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from habitus.conversation.source.address import SourceAddress, entry_count, remove_if_empty
@@ -109,8 +110,14 @@ class SourceIndex:
         remove_if_empty(self.index_root / marker.address.digest, artifact_root=self.root)
         return removed
 
-    def count(self) -> int:
-        return len(self.address_directories())
+    def marked_at(self, marker: SourceMarker) -> datetime | None:
+        """标记打上的时刻：标记只建一次、从不改写，文件的修改时刻就是它。标记已不在时为 None。"""
+
+        try:
+            modified = self._path(marker).lstat().st_mtime
+        except FileNotFoundError:
+            return None
+        return datetime.fromtimestamp(modified, UTC)
 
     # ── 内部 ──────────────────────────────────────────────────────────────────────────
 
@@ -130,19 +137,25 @@ class SourceIndex:
         return tuple(sorted(markers, key=lambda item: item.order))
 
     def _read(self, path: Path) -> SourceMarker:
-        encoded = read_regular_bytes(path, artifact_root=self.root, max_bytes=_MAX_MARKER_BYTES)
+        try:
+            encoded = read_regular_bytes(path, artifact_root=self.root, max_bytes=_MAX_MARKER_BYTES)
+        except DurablePathIntegrityError as exc:
+            raise ConversationSourceError("source marker exceeds its read bound") from exc
         try:
             payload = json.loads(encoded)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ConversationSourceError("source marker is corrupt") from exc
         if not isinstance(payload, dict) or payload.get("schema") != _SCHEMA:
             raise ConversationSourceError("source marker has an unexpected schema")
-        marker = SourceMarker(
-            require_sha256(payload["source_id"], "source_id"),
-            SourceAddress.from_dict(payload["address"]),
-            int(payload["start_sequence"]),
-            int(payload["end_sequence"]),
-        )
+        try:
+            marker = SourceMarker(
+                require_sha256(payload["source_id"], "source_id"),
+                SourceAddress.from_dict(payload["address"]),
+                int(payload["start_sequence"]),
+                int(payload["end_sequence"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ConversationSourceError("source marker is missing a field or has a malformed one") from exc
         if path != self._path(marker) or encoded != self._encode(marker):
             raise ConversationSourceError("source marker does not match its path or canonical form")
         return marker

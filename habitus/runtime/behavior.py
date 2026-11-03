@@ -17,18 +17,20 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, tzinfo
+from typing import Any
 
+from habitus.behavior.document import BehaviorDocumentConfig
 from habitus.behavior.fusion import BehaviorFusionReceiptStore, BehaviorJudgementStore
 from habitus.behavior.fusion.config import FUSION_CONTEXT_LOOKBACK_SECONDS, BehaviorFusionConfig
 from habitus.behavior.fusion.coverage import BehaviorCoverageIndex
 from habitus.behavior.fusion.lanes.physical import (
     PhysicalLane,
+    PhysicalLaneConfig,
     PhysicalSegmentLedger,
     PhysicalSegmentRecorder,
     UnitOutcome,
@@ -39,6 +41,7 @@ from habitus.behavior.fusion.lanes.session import (
     SessionLaneConfig,
     SessionTurnDescriber,
     SessionTurnRecorder,
+    TurnHandler,
 )
 from habitus.behavior.kinds.calls import KindModelCaller
 from habitus.behavior.kinds.classify import DaytimeClassifier
@@ -56,19 +59,20 @@ from habitus.behavior.reduction import (
     BehaviorReductionRunner,
     VocabularyJobReport,
 )
-from habitus.behavior.reduction.failed import FailedChains
+from habitus.behavior.reduction.failed import ChainHandler, FailedChains
 from habitus.behavior.reduction.kinds_jobs import VocabularyJobs
 from habitus.behavior.reduction.kinds_migration import KindMigrator
 from habitus.behavior.reduction.kinds_step import KindStamping
 from habitus.behavior.reduction.refresh import RefreshRetries
-from habitus.behavior.retry import RetryBacklogStore, RetryBranch, RetryHandler, RetryKind, RetryStage
-from habitus.behavior.retry.handlers import ChainHandler, TurnHandler
+from habitus.behavior.retry import Reduction, RetryBacklogStore, RetryBranch, RetryHandler, RetryKind, RetryStage
 from habitus.behavior.retry.reread import Rereader
-from habitus.behavior.semantic import BehaviorSemanticRefresher, LLMBehaviorOverviewGenerator
+from habitus.behavior.semantic import BehaviorSemanticConfig, BehaviorSemanticRefresher, LLMBehaviorOverviewGenerator
 from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.tree.config import BehaviorTreeConfig
 from habitus.behavior.tree.dirty_days import DirtyDayLog
-from habitus.config import HabitusConfig
+from habitus.behavior.tree.writer import BehaviorWriteConfig
+from habitus.config import BehaviorConfig, HabitusConfig
+from habitus.config.loader import construct_overrides
 from habitus.foundation.observability import (
     NullObserver,
     ObservationEvent,
@@ -79,8 +83,7 @@ from habitus.foundation.observability import (
 )
 from habitus.infrastructure.lifecycle import RetryLedger
 from habitus.infrastructure.store.contracts.lock import LockStore
-from habitus.infrastructure.store.contracts.path_lock import PathLock
-from habitus.model_client import StructuredChatClient
+from habitus.model_client import MODEL_DETERMINISTIC, MODEL_UNUSABLE, ModelUnreachable, StructuredChatClient
 from habitus.runtime.lifecycle_retry import retry_ledger
 from habitus.runtime.resident import ResidentWorker
 
@@ -139,6 +142,8 @@ class BehaviorRuntimeComponents:
             (self.fusion.recorder.receipts, self.receipts, "fusion receipts"),
             (self.fusion.recorder.coverage, self.coverage, "coverage index (fusion)"),
             (self.reduction_worker.runner, self.reduction_runner, "reduction worker runner"),
+            # 回执按 receipt_id 加的路径锁要与树写入、归约同一个锁存储，不然两个写者各拿各的锁、互不相见。
+            (self.receipts.lock_store, self.reduction_runner.lock_store, "lock store (receipts)"),
         )
         for actual, wanted, label in shared:
             if actual is not wanted:
@@ -260,7 +265,7 @@ class BehaviorReductionWorker(ResidentWorker):
             try:
                 # 一轮 sweep 一条 trace：成链、封口、定类型（含模型调用）、发布、摘要刷新都挂在下面。
                 with _span(self.span_controller, "reduction_sweep"):
-                    await self.runner.run_once()
+                    report = await self.runner.run_once()
             except BehaviorReductionBusyError:
                 # sweep 锁被另一持有者占用：多实例场景的正常让路，跳过本拍即可。
                 self._observe("reduction_sweep", ObservationStatus.SUCCESS, {"skipped": "lock_busy"})
@@ -274,6 +279,9 @@ class BehaviorReductionWorker(ResidentWorker):
                 )
             else:
                 self._succeeded()
+                if report.bugs:
+                    # 归约拦住了我们自己的 bug（这批链已换成「错误」、那天照常定稿）：当场挂到健康面（裁定 94 第 8 条）
+                    self.last_error = RuntimeError("; ".join(report.bugs)[:1_000])
             await self._wait(self.interval_seconds)
 
 
@@ -288,12 +296,48 @@ class _LaneObserver:
         self._observer.record(replace(event, attributes={**event.attributes, "lane": self._lane}))
 
 
+@dataclass(frozen=True)
+class BehaviorDomainConfigs:
+    """``config.behavior`` 里写了的覆盖项换算成的各份领域配置；没写的取领域默认值。"""
+
+    observation: BehaviorObservationConfig
+    fusion: BehaviorFusionConfig
+    tree: BehaviorTreeConfig
+    document: BehaviorDocumentConfig
+    write: BehaviorWriteConfig
+    semantic: BehaviorSemanticConfig
+    kinds: BehaviorKindConfig
+    session: SessionLaneConfig
+    physical: PhysicalLaneConfig
+
+
+def behavior_domain_configs(behavior: BehaviorConfig) -> BehaviorDomainConfigs:
+    """值域只由领域配置校验（配置层只查类型）；拒了报的是配置键（``config.behavior.kinds_batch_size``）。
+
+    ``build_runtime`` 不论行为侧开没开都先调一次：写错的值在启动时拒，不因为这一侧没开就被静默收下。
+    """
+
+    def domain(factory: Callable[..., Any], prefix: str) -> Any:
+        return construct_overrides(factory, behavior.overrides_for(prefix), path="config.behavior", prefix=prefix)
+
+    return BehaviorDomainConfigs(
+        observation=domain(BehaviorObservationConfig, "observation_"),
+        fusion=domain(BehaviorFusionConfig, "fusion_"),
+        tree=domain(BehaviorTreeConfig, "tree_"),
+        document=domain(BehaviorDocumentConfig, "document_"),
+        write=domain(BehaviorWriteConfig, "write_"),
+        semantic=domain(BehaviorSemanticConfig, "semantic_"),
+        kinds=domain(BehaviorKindConfig, "kinds_"),
+        session=domain(SessionLaneConfig, "session_"),
+        physical=domain(PhysicalLaneConfig, "physical_"),
+    )
+
+
 def build_behavior_components(
     config: HabitusConfig,
     *,
     structured_chat: StructuredChatClient,
     lock_store: LockStore,
-    path_lock: PathLock,
     observer: Observer | None = None,
     span_controller: SpanController | None = None,
     clock: Callable[[], datetime] | None = None,
@@ -338,6 +382,7 @@ def _build_branch(
     目录二次嵌套与锁键漂移，评审实测过）；归约的 sweep 锁按根派生，两支互不相抢。"""
 
     behavior_config = config.behavior
+    domain = behavior_domain_configs(behavior_config)
     root = config.behavior_root / lane.value
     # 这一支发出的每条观测事件都带上是哪一支：两支的事件、指标同名，不带就分不出、还会互相盖掉。
     observer = None if observer is None else _LaneObserver(observer, lane)
@@ -348,12 +393,9 @@ def _build_branch(
     )
 
     # 存储的容量闸从 Config 边界进来（26 号清单 8.2）；没写的是各领域配置的默认值
-    observations = BehaviorObservationStore(
-        root, config=BehaviorObservationConfig(**behavior_config.overrides_for("observation_"))
-    )
-    fusion_config = BehaviorFusionConfig(**behavior_config.overrides_for("fusion_"))
-    judgements = BehaviorJudgementStore(root, config=fusion_config)
-    receipts = BehaviorFusionReceiptStore(root, config=fusion_config)
+    observations = BehaviorObservationStore(root, config=domain.observation)
+    judgements = BehaviorJudgementStore(root, config=domain.fusion)
+    receipts = BehaviorFusionReceiptStore(root, lock_store=lock_store, config=domain.fusion)
     # 一份覆盖索引两处共用：融合写、归约读——各自实例化会按不同窗口口径回答"处理过没有"。
     coverage = BehaviorCoverageIndex(
         root,
@@ -361,11 +403,12 @@ def _build_branch(
         settled=source_settled if lane is Lane.SESSION else None,
     )
 
-    tree = BehaviorTree(root / "tree", tree_config=BehaviorTreeConfig(**behavior_config.overrides_for("tree_")))
+    tree = BehaviorTree(root / "tree", tree_config=domain.tree, document_config=domain.document)
     # 词表的门槛从唯一的 Config 边界进来；模型只经 KindModelCaller 一个触点。
-    kind_config = BehaviorKindConfig(**behavior_config.kinds_overrides())
-    kind_store = BehaviorKindStore(tree.root, config=kind_config)
-    kinds, vocabulary_jobs = _vocabulary(tree, lock_store, kind_store, structured_chat, config.locale.zone(), lane)
+    kind_store = BehaviorKindStore(tree.root, config=domain.kinds)
+    kinds, vocabulary_jobs = _vocabulary(
+        tree, lock_store, kind_store, structured_chat, config.locale.zone(), lane, write_config=domain.write
+    )
     reduction_ledger = BehaviorReductionLedger(root / "reduction")
     # 每晚重试的堆只在有夜批时建（夜批随语义树开）：没人来试的堆只会一直满着
     backlog = RetryBacklogStore(root, max_items=behavior_config.retry_backlog_max) if config.scene.enabled else None
@@ -378,15 +421,27 @@ def _build_branch(
         kinds=kinds,
         vocabulary_jobs=vocabulary_jobs,
         ledger=reduction_ledger,
-        semantic_refresher=BehaviorSemanticRefresher(tree, LLMBehaviorOverviewGenerator(structured_chat)),
+        semantic_refresher=BehaviorSemanticRefresher(
+            tree, LLMBehaviorOverviewGenerator(structured_chat, config=domain.semantic), config=domain.semantic
+        ),
         refresh_retries=RefreshRetries(
-            retry_ledger(root, owner=f"behavior-semantic-{lane.value}", config=config.lifecycle.retry, clock=clock)
+            # 概览要调模型：输入超长、内容安全这两类同一份内容再问也一样，第一次就放弃（内容变了会清账重新给机会）
+            retry_ledger(
+                root,
+                owner=f"behavior-semantic-{lane.value}",
+                config=config.lifecycle.retry,
+                clock=clock,
+                deterministic=MODEL_DETERMINISTIC,
+            )
         ),
         # 脏日日志只有语义树夜批读（只接会话一支）：别的支不记
         dirty_days=DirtyDayLog(root / "reduction") if lane is Lane.SESSION and config.scene.enabled else None,
         failed_chains=FailedChains(judgements, ledger=reduction_ledger, clock=clock or _utc_now, backlog=backlog),
         clock=clock,
         context_lookback_seconds=context_lookback,
+        # 会话 lane 的记录一送到就封口（裁定 31）；物理 lane 仍等满窗口
+        seal_on_arrival=lane is Lane.SESSION,
+        write_config=domain.write,
         coverage=coverage,
         sweep_lock_ttl_seconds=(
             behavior_config.reduction_sweep_lock_ttl_seconds
@@ -400,9 +455,7 @@ def _build_branch(
     fusion: SessionLane | PhysicalLane
     if lane is Lane.SESSION:
         fusion = SessionLane(
-            SessionTurnDescriber(
-                structured_chat, zone=zone, config=SessionLaneConfig(**behavior_config.session_overrides())
-            ),
+            SessionTurnDescriber(structured_chat, zone=zone, config=domain.session),
             SessionTurnRecorder(
                 observations=observations,
                 judgements=judgements,
@@ -425,6 +478,7 @@ def _build_branch(
                 ledger=PhysicalSegmentLedger(root),
                 primary_subject=behavior_config.primary_subject,
                 clock=lane_clock,
+                config=domain.physical,
             ),
             max_backfill_days=config.lifecycle.physical_max_backfill_days,
         )
@@ -449,17 +503,7 @@ def _build_branch(
     )
 
 
-#: 白天的归约正占着锁时，夜批重试那一次归约等几次、每次隔多久（它一轮几分钟内结束；等不到也不要紧：放回的判断
-#: 下一轮白天照样落树）。
-REDUCE_BUSY_ATTEMPTS = 12
-REDUCE_BUSY_DELAY_SECONDS = 10.0
-
-
-def retry_stage_of(
-    branches: Iterable[BehaviorRuntimeComponents],
-    *,
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-) -> RetryStage | None:
+def retry_stage_of(branches: Iterable[BehaviorRuntimeComponents]) -> RetryStage | None:
     """每晚跑批第一步的重试（裁定 67、68）：各支有重试堆的接进来——会话一支的会话轮交给会话 lane，两支的链交给各自的
     归约；一支都没有就是 None。"""
 
@@ -470,7 +514,7 @@ def retry_stage_of(
         handlers: dict[RetryKind, RetryHandler] = {RetryKind.CHAIN: ChainHandler(branch.reduction_runner.failed_chains)}
         if isinstance(branch.fusion, SessionLane):
             handlers[RetryKind.TURN] = TurnHandler(branch.fusion)
-        found.append(RetryBranch(branch.lane.value, branch.retry_backlog, handlers, _reduce_when_free(branch, sleep)))
+        found.append(RetryBranch(branch.lane.value, branch.retry_backlog, handlers, _reduce(branch)))
     return RetryStage(found) if found else None
 
 
@@ -482,21 +526,22 @@ def rereader_of(branch: BehaviorRuntimeComponents) -> Callable[[datetime, dateti
     return Rereader(branch.retry_backlog, TurnHandler(branch.fusion)).reread
 
 
-def _reduce_when_free(
-    branch: BehaviorRuntimeComponents, sleep: Callable[[float], Awaitable[None]]
-) -> Callable[[], Awaitable[str | None]]:
-    async def reduce() -> str | None:
-        for attempt in range(REDUCE_BUSY_ATTEMPTS):
-            try:
-                await branch.reduction_runner.run_once()
-            except BehaviorReductionBusyError:
-                if attempt + 1 < REDUCE_BUSY_ATTEMPTS:
-                    await sleep(REDUCE_BUSY_DELAY_SECONDS)
-                continue
-            except Exception as exc:  # noqa: BLE001 - 归约自己留观测；这一步不拖住这一晚
-                return f"{branch.lane.value}: {type(exc).__name__}"
-            return None
-        return f"{branch.lane.value}: busy"
+#: 重试段的归约碰到它就是模型整个用不了（与夜里那条线同一口径，``runtime.nightly``）。
+_UNREACHABLE: tuple[type[BaseException], ...] = (ModelUnreachable, *MODEL_UNUSABLE)
+
+
+def _reduce(branch: BehaviorRuntimeComponents) -> Callable[[], Awaitable[Reduction]]:
+    """重试段里这一支的那一次归约（裁定 94 第 9 条）：锁被另一进程拿着 = 还没准备好（``BUSY``，线下一眼从这里接着跑）；
+    归类时模型整个用不了 = ``UNREACHABLE``（线停下这一晚）；别的异常是 bug，原样抛给线停下、报出。"""
+
+    async def reduce() -> Reduction:
+        try:
+            report = await branch.reduction_runner.run_once()
+        except BehaviorReductionBusyError:
+            return Reduction.BUSY
+        except _UNREACHABLE:
+            return Reduction.UNREACHABLE
+        return Reduction.UNREACHABLE if report.unavailable else Reduction.DONE
 
     return reduce
 
@@ -545,6 +590,8 @@ def _vocabulary(
     structured_chat: StructuredChatClient,
     zone: tzinfo,
     lane: Lane,
+    *,
+    write_config: BehaviorWriteConfig,
 ) -> tuple[KindStamping, VocabularyJobs]:
     """词表的两块：归约里的白天归类，与三件整理活（定期拆改的放行只靠用户自己的数据，裁定 17）。"""
 
@@ -554,7 +601,7 @@ def _vocabulary(
     jobs = VocabularyJobs(
         tree=tree,
         stamping=stamping,
-        migrator=KindMigrator(tree, lock_store, store),
+        migrator=KindMigrator(tree, lock_store, store, write_config=write_config),
         grower=NightlyGrower(caller, PendingRecheck(classifier)),
         reviser=Reviser(caller, AnchorGate(classifier)),
         zone=zone,
@@ -622,8 +669,10 @@ def _utc_now() -> datetime:
 __all__ = [
     "BehaviorReductionWorker",
     "BehaviorBranches",
+    "BehaviorDomainConfigs",
     "BehaviorRuntimeComponents",
     "UnitOutcome",
+    "behavior_domain_configs",
     "build_behavior_components",
     "deliver_physical",
     "run_vocabulary_job",

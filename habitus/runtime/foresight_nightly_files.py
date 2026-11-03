@@ -5,10 +5,16 @@
 派生物每晚从同一份序列重算，不是账本：同一晚重跑整文件原子替换、回读比对；比盘上最晚一晚更早的晚不写（派生树按固定先后处理
 已封口的历史，不往回改）；写完把更早的晚删到只剩 ``retained_nights`` 晚。住在组合根：``foresight`` 不许 import infrastructure，
 形状与编解码在 ``foresight`` 里，这里只管目录与字节。
+
+目录里只认 ``<YYYY-MM-DD>.json``：别的名字（编辑器备份、``copy``、写到一半的临时文件）不是哪一晚，跳过不报。读最晚一晚时
+那一份读不出来（解析不了、形状或版本不对）就往前退一晚（留的那几代备用就是为这个，26 号清单 6.12），坏的那一份计入观测
+（``take_unreadable``）。
 """
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 
@@ -27,20 +33,25 @@ from habitus.infrastructure.store.filesystem import (
     regular_file_exists,
 )
 
-_MAX_ENTRIES = 10_000
-
 
 class NightlyFiles:
     """``label`` 只进报错（"opportunity table"、"unit history"）。"""
 
-    def __init__(self, root: str | Path, *, segment: str, label: str, max_bytes: int, retained_nights: int) -> None:
+    def __init__(
+        self, root: str | Path, *, segment: str, label: str, max_bytes: int, retained_nights: int, max_entries: int
+    ) -> None:
         if isinstance(retained_nights, bool) or not isinstance(retained_nights, int) or retained_nights <= 0:
             raise ForesightError("retained_nights must be a positive integer")
+        if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries <= 0:
+            raise ForesightError("max_entries must be a positive integer")
         self.root = Path(root).expanduser().resolve(strict=False)
         self.directory = self.root / segment
         self.label = label
         self.max_bytes = max_bytes
         self.retained_nights = retained_nights
+        self.max_entries = max_entries
+        self._unreadable: list[str] = []
+        self._lock = threading.Lock()
 
     def write(self, lane: str, night: date, payload: bytes) -> Path:
         latest = self.latest_night(lane)
@@ -75,19 +86,42 @@ class NightlyFiles:
                 not entry.is_file()
                 or entry.name.startswith(".")
                 or atomic_temporary_destination(entry.name) is not None
+                or not entry.name.endswith(".json")
             ):
                 continue
-            if not entry.name.endswith(".json"):
-                raise ForesightError(f"unexpected entry in the {self.label} directory: {entry.name!r}")
             try:
-                found.append(date.fromisoformat(entry.name[:-5]))
-            except ValueError as exc:
-                raise ForesightError(f"{self.label} {entry.name!r} is not named by its night") from exc
+                night = date.fromisoformat(entry.name[:-5])
+            except ValueError:
+                continue  # 不是按晚起名的（备份、副本）：不是哪一晚
+            if entry.name == f"{night.isoformat()}.json":
+                found.append(night)
         return tuple(sorted(found))
 
     def latest_night(self, lane: str) -> date | None:
         nights = self.nights(lane)
         return nights[-1] if nights else None
+
+    def latest[T](self, lane: str, decode: Callable[[str, date], T]) -> T | None:
+        """最晚一晚读得出来的那一份（``decode`` 把一晚的文本解码，坏的抛 ``ForesightError``）：最晚那一份坏了就往前退一晚，
+        坏的计入观测；一晚都读不出来是 None。"""
+
+        for night in reversed(self.nights(lane)):
+            try:
+                return decode(self.read(lane, night), night)
+            except ForesightError:
+                with self._lock:
+                    path = str(self.lane_directory(lane) / f"{night.isoformat()}.json")
+                    if path not in self._unreadable:
+                        self._unreadable.append(path)
+        return None
+
+    def take_unreadable(self) -> tuple[str, ...]:
+        """上次 ``take`` 以来读最晚一晚时跳过的坏文件（路径），取走即清。"""
+
+        with self._lock:
+            found = tuple(self._unreadable)
+            self._unreadable.clear()
+        return found
 
     def read(self, lane: str, night: date) -> str:
         payload = self._read_bytes(self.lane_directory(lane) / f"{night.isoformat()}.json")
@@ -123,7 +157,7 @@ class NightlyFiles:
 
     def _entries(self, directory: Path) -> tuple[DurableDirectoryEntry, ...]:
         try:
-            return tuple(list_real_directory(directory, artifact_root=self.root, max_entries=_MAX_ENTRIES))
+            return tuple(list_real_directory(directory, artifact_root=self.root, max_entries=self.max_entries))
         except DurablePathIntegrityError as exc:
             raise ForesightError(f"{self.label} directory cannot be listed: {exc}") from exc
 

@@ -196,7 +196,11 @@ class RelationStore(SceneStore):
             return [], {}
         rows: list[tuple[int, date, Transition | None, str]] = []
         pruned: dict[date, str] = {}
-        for number, line in enumerate(payload.decode("utf-8").splitlines(), start=1):
+        # 只按 LF 切行：日志是规范 JSON（不转义非 ASCII），U+2028 这类字符原样在行内，``splitlines`` 会把一行切成两半
+        lines = payload.decode("utf-8").split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        for number, line in enumerate(lines, start=1):
             try:
                 envelope = json.loads(line)
                 if "pruned_night" in envelope:

@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.concepts.rhythm import RhythmRulers, rhythms_of
 from tests.unit.scene.concept_fixtures import BALL, EXERCISE, RUNNING, cid
-from tests.unit.temporal.fixtures import at, record, series
+from tests.unit.temporal.fixtures import at, record, series, with_sessions
 
 RULERS = RhythmRulers(
     slot_minutes=15,
@@ -25,7 +25,7 @@ def test_rhythm_of_a_weekly_kind_and_its_group() -> None:
     ball = [record(at(START + timedelta(days=7 * week), 19, 0), cid("打球")) for week in range(8)]
     run = [record(at(START + timedelta(days=7 * week + 3), 7, 0), cid("跑步")) for week in range(8)]
     found = rhythms_of(
-        series(ball + run, cutoff=START + timedelta(days=56)),
+        series(with_sessions(ball + run, cutoff=START + timedelta(days=56)), cutoff=START + timedelta(days=56)),
         ConceptSet((BALL, RUNNING, EXERCISE)),
         RULERS,
         anchors={cid("打球"): ("周一",)},

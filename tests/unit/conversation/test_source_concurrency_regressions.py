@@ -15,7 +15,7 @@ from habitus.conversation.source import (
     ConversationSourceCoordinator,
 )
 from habitus.infrastructure.store.contracts import LockToken, PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from tests.lock_store import ProcessLocalLockStore
 from tests.unit.conversation.source_v2_helpers import (
     NOW,
     FakeBehaviorConsumer,
@@ -169,15 +169,15 @@ def test_cancelled_api_waiter_does_not_cancel_underlying_memory_consumer(tmp_pat
         memory.release = release
         coordinator = ConversationSourceCoordinator(service.sources, service)
         handle = coordinator.start(source())
-        waiter = asyncio.create_task(handle.wait_memory())
+        waiter = asyncio.create_task(handle.wait(ConversationSourceConsumer.MEMORY))
         await entered.wait()
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiter
-        assert not handle.memory_task.cancelled()
-        assert not handle.memory_task.done()
+        assert not handle.tasks[ConversationSourceConsumer.MEMORY].cancelled()
+        assert not handle.tasks[ConversationSourceConsumer.MEMORY].done()
         release.set()
-        restored = await handle.wait_memory()
+        restored = await handle.wait(ConversationSourceConsumer.MEMORY)
         assert restored.append.next_sequence == 1
 
     asyncio.run(scenario())
@@ -189,10 +189,10 @@ def test_behavior_failure_does_not_delay_or_rollback_memory(tmp_path) -> None:
         behavior.fail = RuntimeError("projection failed")
         coordinator = ConversationSourceCoordinator(service.sources, service)
         handle = coordinator.start(source())
-        memory = await asyncio.wait_for(handle.wait_memory(), timeout=1.0)
+        memory = await asyncio.wait_for(handle.wait(ConversationSourceConsumer.MEMORY), timeout=1.0)
         assert memory.append.next_sequence == 1
         with pytest.raises(RuntimeError, match="projection failed"):
-            await handle.wait_behavior_session()
+            await handle.wait(ConversationSourceConsumer.BEHAVIOR_SESSION)
         assert service.restore_terminal(handle.envelope, ConversationSourceConsumer.MEMORY) == memory
 
     asyncio.run(scenario())
@@ -208,11 +208,11 @@ def test_blocked_memory_does_not_prevent_behavior_projection_completion(tmp_path
         coordinator = ConversationSourceCoordinator(service.sources, service)
         handle = coordinator.start(source())
         await entered.wait()
-        projected = await asyncio.wait_for(handle.wait_behavior_session(), timeout=1.0)
+        projected = await asyncio.wait_for(handle.wait(ConversationSourceConsumer.BEHAVIOR_SESSION), timeout=1.0)
         assert projected is not None
-        assert not handle.memory_task.done()
+        assert not handle.tasks[ConversationSourceConsumer.MEMORY].done()
         release.set()
-        await handle.wait_memory()
+        await handle.wait(ConversationSourceConsumer.MEMORY)
 
     asyncio.run(scenario())
 
@@ -234,5 +234,50 @@ def test_newer_memory_source_fails_fast_when_predecessor_is_pending_or_broken(tm
         output_path.unlink()
         with pytest.raises(ConversationOrderedPredecessorBrokenError):
             await service.ensure_outcome(second, ConversationSourceConsumer.MEMORY)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("ordered", [False, True])
+def test_cancelling_a_wait_for_the_execution_lock_does_not_leak_the_lock(ordered: bool) -> None:
+    """A 持锁时 B 在等同一把锁，B 被取消；A 放锁后 B 那个停不下来的等锁线程会拿到锁——它要被当场放回去，C 随后能取到，
+    锁存储里不留残余（U18；生产用 SQLite 锁，漏了要等 TTL、跨重启也在）。"""
+
+    async def scenario() -> None:
+        store = ProcessLocalLockStore()
+        lock = PathLock(store)
+        envelope = source()
+        consumer = ConversationSourceConsumer.MEMORY
+
+        def fence(wait: float) -> ConversationConsumerExecutionFence:
+            return ConversationConsumerExecutionFence(lock, ttl_seconds=30, heartbeat_interval_seconds=1, wait_seconds=wait)
+
+        held = asyncio.Event()
+        release = asyncio.Event()
+
+        async def holder() -> None:
+            async with fence(2.0).acquire(envelope, consumer):
+                held.set()
+                await release.wait()
+
+        async def waiter() -> None:
+            async with fence(2.0).acquire(envelope, consumer, conversation_ordered=ordered):
+                raise AssertionError("the cancelled waiter must not enter the fenced body")
+
+        a = asyncio.create_task(holder())
+        await held.wait()
+        b = asyncio.create_task(waiter())
+        await asyncio.sleep(0.1)
+        b.cancel()
+        await asyncio.sleep(0.05)
+        release.set()
+        await a
+        with pytest.raises(asyncio.CancelledError):
+            await b
+        await asyncio.sleep(0.5)  # 等锁线程的重试间隔远小于这个：漏的话此时锁已被它拿走
+
+        assert store.locks == {}
+        async with fence(0.2).acquire(envelope, consumer, conversation_ordered=ordered):
+            pass
 
     asyncio.run(scenario())

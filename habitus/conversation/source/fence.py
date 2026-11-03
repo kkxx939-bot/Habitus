@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Callable
 from contextlib import AbstractContextManager, asynccontextmanager, suppress
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from habitus.conversation.source.model import ConversationSourceEnvelope, ConversationSourceError
 from habitus.conversation.source.receipt import ConversationSourceConsumer
@@ -104,7 +104,7 @@ class ConversationConsumerExecutionFence:
                     ttl_seconds=self.ttl_seconds,
                     wait_timeout_seconds=self.wait_seconds,
                 )
-                guard = await asyncio.to_thread(acquired_context.__enter__)
+                guard = await _enter_or_release_on_cancel(acquired_context)
                 contexts.append(acquired_context)
                 guards.append(guard)
             lease = ConversationConsumerExecutionLease(self.path_lock, tuple(guards))
@@ -149,16 +149,40 @@ class ConversationConsumerExecutionFence:
         consumer_key = consumer_lock_key(source.source_id, consumer)
         if not conversation_ordered:
             return (consumer_key,)
-        # 锁键字面量与摘要载荷保持历史取值：它们不是持久数据，但新旧进程并存时
-        # 一旦不一致就会各取一把不同的锁，顺序保证随之失效。
+        # 同一地址、同一个有序 Consumer 一把顺序锁
         address_digest = canonical_digest(
             {
-                "schema_version": "conversation_memory_order_lock_v1",
+                "schema_version": "conversation_order_lock_v2",
+                "consumer": consumer.value,
                 "conversation_id": source.conversation_id,
                 "started_on": source.started_on.isoformat(),
             }
         )
-        return (f"conversation-memory:{address_digest}", consumer_key)
+        return (f"conversation-ordered:{address_digest}", consumer_key)
+
+
+async def _enter_or_release_on_cancel(context: AbstractContextManager[LeaseGuard]) -> LeaseGuard:
+    """在线程里等锁。线程里的等待停不下来：被取消时等它出结果，拿到了就当场放回去再抛取消，锁不会漏到 TTL。
+    最多多等一个锁等待上限（``wait_seconds``）。"""
+
+    entering = asyncio.ensure_future(asyncio.to_thread(context.__enter__))
+    try:
+        return await asyncio.shield(entering)
+    except asyncio.CancelledError:
+        await _finish_despite_cancel(entering)
+        if not entering.cancelled() and entering.exception() is None:
+            await _finish_despite_cancel(asyncio.ensure_future(asyncio.to_thread(context.__exit__, None, None, None)))
+        raise
+
+
+async def _finish_despite_cancel(work: asyncio.Future[Any]) -> None:
+    """等一件已经在线程里跑的事做完；中途再被取消也接着等（取消在调用方收尾后照常抛出）。"""
+
+    while not work.done():
+        with suppress(asyncio.CancelledError):
+            await asyncio.wait((work,))
+    if not work.cancelled():
+        work.exception()  # 取走结果，不留"异常没人取"的告警
 
 
 def consumer_lock_key(source_id: str, consumer: ConversationSourceConsumer) -> str:

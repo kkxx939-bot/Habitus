@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.conversation import (
     ConversationAddress,
     ConversationMessageJournal,
@@ -15,6 +14,7 @@ from habitus.memory.conversation import (
     ConversationRangeSummaryStore,
     ConversationSummaryCompactionConfig,
     ConversationSummaryCompactor,
+    ConversationSummaryRetirementStore,
     ConversationSummaryStore,
     PersistentConversationSummaryVectorIndex,
     SQLiteConversationSummaryUseStore,
@@ -35,6 +35,7 @@ from habitus.pre.conversation import (
     ConversationSummarySourceRef,
 )
 from tests.helpers import BASE_TIME, closed_turn, codec, segment_summary, summary_content
+from tests.lock_store import ProcessLocalLockStore
 from tests.unit.conversation.test_summary_indexing import Embedder, VectorStore
 from tests.unit.retrieval.test_search_service import structured
 
@@ -62,6 +63,7 @@ def lifecycle_manager(
         use_store=use_store,
         config=compaction_config,
     )
+    retirements = ConversationSummaryRetirementStore(tmp_path / "workflow")
     summary_index = PersistentConversationSummaryVectorIndex(
         journal,
         compactor,
@@ -69,6 +71,7 @@ def lifecycle_manager(
         VectorStore(),
         dimension=2,
         embedding_fingerprint="lifecycle-test-v1",
+        retirement_store=retirements,
     )
     calls = []
 
@@ -98,6 +101,7 @@ def lifecycle_manager(
         jobs,
         receipts,
         MemoryTransactionJournal(tmp_path / "workflow" / "transactions", document_codec),
+        retirements,
         summary_config=compaction_config,
     )
     return manager, calls

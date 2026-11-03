@@ -21,7 +21,9 @@ from habitus.memory.conversation import (
 class ConversationSourceConfig:
     """Source、Output、Outcome、Recovery 与执行租约的独立容量边界。"""
 
-    max_envelope_bytes: int = 16 * 1024 * 1024
+    # 与会话日志单文件上限、分块上传的暂存上限对齐：一轮的文字本身超过一次请求上限时插件分块上传、本地服务拼回完整的一轮，
+    # 拼回的一轮要放得进会话源（裁定 72 第 2 条）
+    max_envelope_bytes: int = 64 * 1024 * 1024
     # 生命周期账的有界枚举：有标记的地址数、单个地址的标记数、还没终态的源数（26 号清单 2.1）。
     max_source_addresses: int = 100_000
     max_markers_per_address: int = 10_000

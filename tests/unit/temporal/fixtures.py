@@ -31,6 +31,33 @@ def record(
     )
 
 
+def with_sessions(records: list[SeriesRecord], *, cutoff: date) -> list[SeriesRecord]:
+    """``records`` 加上从最早那天起到截止日前每天 06:00 一条叫不出名的「待定」：每天都开过会话。会话 lane 一整天没有会话算
+    没在看（裁定 89 第 2 条），要"在看、只是没做"的日子就得有它；「待定」不是类，不进任何一类的发生与间隔。"""
+
+    if not records:
+        return list(records)
+    day, found = min(item.day for item in records), list(records)
+    while day < cutoff:
+        moment = at(day, 6)
+        found.append(
+            SeriesRecord(
+                uri=f"behavior://s-待定/{moment.isoformat()}/session",
+                name="会话",
+                day=day,
+                started_at=moment,
+                last_observed_at=moment + timedelta(minutes=5),
+                kind_token="s-待定",
+                lane=LANE,
+                classified=False,
+                reminded=False,
+                summary="会话",
+            )
+        )
+        day += timedelta(days=1)
+    return found
+
+
 def gap(start: datetime, end: datetime, kind: GapKind = GapKind.UNOBSERVED) -> SeriesGap:
     return SeriesGap(uri=f"behavior://gap/{start.isoformat()}", started_at=start, ended_at=end, kind=kind)
 

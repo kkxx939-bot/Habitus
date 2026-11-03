@@ -32,12 +32,14 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
+from functools import cached_property
 from types import MappingProxyType
 
 from habitus.behavior.model import semantic_name
 from habitus.foundation.ids import canonical_path_identity, canonical_text_identity, require_safe_path_segment
 from habitus.foundation.integrity import canonical_digest
 from habitus.scene.concepts.situation import SituationBasis, SituationError, SituationRule
+from habitus.temporal.slots import MINUTES_PER_DAY
 
 MAX_DEFINITION_CHARS = 400
 MAX_NOTE_CHARS = 400
@@ -46,7 +48,6 @@ MAX_BASELINE_KEY_CHARS = 120
 MAX_BASELINE_KEYS = 8
 MIN_GRADES = 2
 MAX_GRADES = 3
-MINUTES_PER_DAY = 24 * 60
 #: 概念身份、档名会被拼进组合键（前因的集合、带档的前因），这几个分隔符不许出现在它们里面，
 #: 否则两个不同的组合能拼出同一个键（实测：概念名 ``出差中+晚睡`` 与集合 ``{出差中, 晚睡}``）。
 IDENTITY_SEPARATORS = ("+", "@", "--", "#")
@@ -559,8 +560,10 @@ class ConceptDefinition:
             raise ConceptError("relative grades need a relative rule to say what they are relative to")
         return grades
 
-    @property
+    @cached_property
     def identity(self) -> str:
+        """规范身份。定义不可变，算一次就记住（两两检验每晚要问几十万次，每次重新校验身份串占了折叠的大半时间）。"""
+
         return concept_identity(self.name)
 
     @property
@@ -695,15 +698,21 @@ class ConceptSet(Mapping[str, ConceptDefinition]):
                 )
         self._items: Mapping[str, ConceptDefinition] = MappingProxyType(resolved)
         self._base: Mapping[str, str] = MappingProxyType(base)
+        #: 概念集不可变：现算的"成员是不是全停了"按身份记一次（两两检验每晚按名字问几十万次，26 号清单 P3）
+        self._retired: dict[str, bool] = {}
         for lane in {item.lane for item in resolved.values() if item.lane is not None}:
             self._require_unique_labels(lane)
 
     def _require_unique_labels(self, lane: str) -> None:
-        """给模型看的是名字不是编号（裁定 21-1）：同一条 lane 能一起出现的概念（这条 lane 的 + 不属于任何 lane 的）名字不许重。"""
+        """给模型看的是名字不是编号（裁定 21-1）：同一条 lane 能一起出现的概念（这条 lane 的 + 不属于任何 lane 的）名字不许重。
+
+        停用了的不算（与词表同一口径：词表只要求在用的类不重名）：它们不再给模型看，并掉的「吃饭」之后又长出一个
+        「吃饭」，两个概念各自留着、只有在用的那个会被问到。
+        """
 
         seen: dict[str, str] = {}
         for identity, item in self._items.items():
-            if self.lane_of(identity) not in (lane, None):
+            if self.lane_of(identity) not in (lane, None) or members_retired(self, identity):
                 continue
             key = canonical_text_identity(item.label, "concept label")
             if key in seen:
@@ -713,6 +722,10 @@ class ConceptSet(Mapping[str, ConceptDefinition]):
             seen[key] = item.name
 
     def __getitem__(self, key: str) -> ConceptDefinition:
+        # 已是规范身份的直接命中，不再每次重新校验身份串（两两检验按名字查几十万次）；别的写法照常规范化
+        found = self._items.get(key) if isinstance(key, str) else None
+        if found is not None:
+            return found
         try:
             identity = concept_identity(key)
         except ConceptError as exc:
@@ -729,6 +742,8 @@ class ConceptSet(Mapping[str, ConceptDefinition]):
         return len(self._items)
 
     def __contains__(self, key: object) -> bool:
+        if isinstance(key, str) and key in self._items:
+            return True
         try:
             return concept_identity(key) in self._items
         except ConceptError:
@@ -852,11 +867,16 @@ def members_retired(concepts: ConceptSet, name: str) -> bool:
     类，不在这里退。"""
 
     concept = concepts[name]
-    if concept.role.is_situation:
-        return False
-    if concept.kind is ConceptKind.BASE:
-        return concept.retired
-    return all(member not in concepts or concepts[member].retired for member in concept.classes)
+    cached = concepts._retired.get(concept.identity)
+    if cached is None:
+        if concept.role.is_situation:
+            cached = False
+        elif concept.kind is ConceptKind.BASE:
+            cached = concept.retired
+        else:
+            cached = all(member not in concepts or concepts[member].retired for member in concept.classes)
+        concepts._retired[concept.identity] = cached
+    return cached
 
 
 def _single_line(value: object, label: str, limit: int) -> str:

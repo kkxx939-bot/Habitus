@@ -7,8 +7,12 @@
 - 预测层接上时（``reminders``，方案 30 第五节）：每轮把他开口那一刻还开着的提醒带给模型，判出的回应在这一轮记录落定之后
   写回去。一轮只判一次、重放不重判：已经记录过的轮不再问模型，也就不再写回应；记录落定之后、回应写回之前断了，这一轮的回应
   就丢了（结算按"没回应"处理），不为它重问模型。
-- 写成「没读懂」的轮（确定性写不成、或重试账放弃了）把这一轮本身放进每晚重试的堆（``backlog``，裁定 67）：当晚跑批前
-  ``retry`` 再描述一次，成了就补一条判断（原「没读懂」不删，读的时候被它作废），没成就算了。
+- 写成「错误」的轮（系统出了问题没读成，裁定 94 第 3 条：确定性写不成——含内容安全拦下、输入超长，见 ``service``——、
+  模型此刻用不了或没配好（裁定 80 第 5 条：不抛给会话源等它重做，不然那一天照样到点定稿、结算把没看到的读成"没做"）、
+  模型答了但格式不合，或重试账放弃了）只连累它自己，后面的轮照常判；它把这一轮本身放进夜里待处理的堆（``backlog``，裁定 67），
+  进来的原因（``RetryCause``）定夜里试不试：能重试的由当晚前置处理 ``retry`` 再描述一次，成了就补一条判断（原「错误」不删，
+  读的时候被它作废），没成就保持「错误」。重试编排（``behavior/retry``）对会话轮调的处理器是这里的 ``TurnHandler``：处理器
+  跟着它试的东西走，重试包不反过来依赖 lane。
 
 存储都是同步的文件读写，放到线程里做，不占着事件循环。
 """
@@ -21,11 +25,30 @@ from dataclasses import dataclass
 from datetime import date
 from enum import Enum
 
-from habitus.behavior.fusion.lanes.session.model import SessionTurn, encode_turn
+from habitus.behavior.fusion.errors import BehaviorFusionError
+from habitus.behavior.fusion.lanes.session.model import SessionTurn, decode_turn, encode_turn
 from habitus.behavior.fusion.lanes.session.recorder import SessionTurnRecorder
 from habitus.behavior.fusion.lanes.session.reminders import NoReminders, ReminderFeedback, ReminderResponse
-from habitus.behavior.fusion.lanes.session.service import SessionTurnDescriber
-from habitus.behavior.retry import Admission, NoRetryBacklog, RetryBacklog, RetryCause, RetryItem, RetryKind, retry_id
+from habitus.behavior.fusion.lanes.session.service import (
+    CONTENT_REFUSED,
+    DESCRIBE_INVALID,
+    DESCRIBE_UNAVAILABLE,
+    RETRY_BUSY,
+    RETRY_DETERMINISTIC,
+    RETRY_INVALID,
+    RETRY_UNAVAILABLE,
+    SessionTurnDescriber,
+)
+from habitus.behavior.retry import (
+    Admission,
+    Attempt,
+    NoRetryBacklog,
+    RetryBacklog,
+    RetryCause,
+    RetryItem,
+    RetryKind,
+    retry_id,
+)
 from habitus.behavior.tree import BehaviorKind, BehaviorTree
 from habitus.foundation.lifecycle import DeterministicFailure
 
@@ -36,7 +59,7 @@ class TurnDisposition(str, Enum):
     RECORDED = "recorded"  # 这次写了判断
     ALREADY_RECORDED = "already_recorded"  # 之前写过（重做时），包括上一次写到一半、这次接着写完的
     UNANSWERED = "unanswered"  # 助手没答复也没调用，不出记录
-    UNREADABLE = "unreadable"  # 写不成（确定性的，或重试账放弃了）：写成一段没读懂，不再每次重做（26 号清单 2.4.4）
+    ERROR = "error"  # 系统出了问题没读成：写成一段「错误」，放进夜里待处理的堆，不再每次重做（26 号清单 2.4.4；裁定 94 第 3 条）
 
 
 @dataclass(frozen=True)
@@ -50,8 +73,8 @@ class TurnOutcome:
 
 
 class SessionLane:
-    """把若干轮依次处理掉。某一轮的模型调用失败就整体抛出，由调用方（会话源的重做机制）之后重来；
-    已经写过的轮重来时会被认出来、不重复写。"""
+    """把若干轮依次处理掉。某一轮的模型调用失败（模型用不了与确定性失败之外的）就整体抛出，由调用方（会话源的重做机制）
+    之后重来；已经写过的轮重来时会被认出来、不重复写。"""
 
     def __init__(
         self,
@@ -76,7 +99,7 @@ class SessionLane:
         self.recorder = recorder
         #: 开着的提醒从哪来、回应写到哪去（组合根在预测层装好之后接上；没接就是空实现）。
         self.reminders: ReminderFeedback = reminders if reminders is not None else NoReminders()
-        #: 写成「没读懂」的轮放到哪里等当晚重试（没接就只落「没读懂」）。
+        #: 写成「错误」的轮放到哪里等当晚重试（没接就只落「错误」）。
         self.backlog: RetryBacklog = backlog if backlog is not None else NoRetryBacklog()
         #: 这一支的行为树：补救时认"这一轮已经落树"（没给就只认覆盖记录与判断存储）。
         self.tree = tree
@@ -108,8 +131,8 @@ class SessionLane:
         before_each: Callable[[], None] | None = None,
         sources: tuple[str, ...] = (),
     ) -> tuple[TurnOutcome, ...]:
-        """重试账对这份源放弃了（怎么失败的都一样，23 号第一节第 6 条）：还没写进树的轮不再问模型，写成一段没读懂——
-        不留空白，下游就会把"看了没读懂"读成"没做"。写完了的、写到一半的照常认回来。"""
+        """重试账对这份源放弃了（怎么失败的都一样，23 号第一节第 6 条）：还没写进树的轮不再问模型，写成一段「错误」——
+        不留空白，下游就会把"看不到"读成"没做"。写完了的、写到一半的照常认回来。"""
 
         return await self._each(turns, before_each, sources, given_up=reason)
 
@@ -141,16 +164,21 @@ class SessionLane:
             interrupted = await asyncio.to_thread(self.recorder.interrupted, turn)
             if interrupted is not None:
                 judgement_id = await asyncio.to_thread(self.recorder.resume, turn, interrupted, sources=sources)
-                resumed = TurnDisposition.UNREADABLE if interrupted.unreadable else TurnDisposition.ALREADY_RECORDED
+                resumed = TurnDisposition.ERROR if interrupted.unreadable else TurnDisposition.ALREADY_RECORDED
                 return TurnOutcome(turn, resumed, judgement_id)
             if given_up is not None:
-                return await self._unreadable(turn, RetryCause.GIVEN_UP, sources)
+                return await self._error(turn, RetryCause.GIVEN_UP, sources)
             return await self._describe(turn, sources)
-        except DeterministicFailure:
-            return await self._unreadable(turn, RetryCause.DETERMINISTIC, sources)
+        except DeterministicFailure as exc:
+            refused = isinstance(exc.__cause__, CONTENT_REFUSED)
+            return await self._error(turn, RetryCause.REFUSED if refused else RetryCause.DETERMINISTIC, sources)
+        except DESCRIBE_UNAVAILABLE:
+            return await self._error(turn, RetryCause.UNAVAILABLE, sources)
+        except DESCRIBE_INVALID:
+            return await self._error(turn, RetryCause.INVALID, sources)
 
     async def retry(self, turn: SessionTurn) -> TurnOutcome:
-        """重试堆里的一轮（每晚跑批前；时窗末用得着时白天先试，裁定 67、68）：不看写没写过（它已经落了「没读懂」，覆盖记录
+        """重试堆里的一轮（每晚跑批前；时窗末用得着时白天先试，裁定 67、68）：不看写没写过（它已经落了「错误」，覆盖记录
         会说"写过了"），再描述一次、补一条判断。上一次重试写到一半就断了的（可读判断落了、还没归约），接着写完、不重问模型。
         失败就撤回这一次写下的（``withdraw``），错误照样抛给调用方（它按"模型用不了 / 内容不合格 / 确定性失败"计数）。"""
 
@@ -165,8 +193,22 @@ class SessionLane:
             await asyncio.to_thread(self.withdraw, turn)
             raise
 
+    def retried(self, turn: SessionTurn) -> bool:
+        """``retry`` 写回的这一轮还在不在：落了树（这一支那天有一条从这一轮开口那一刻开始的行为），或判断还在存储里、凭据
+        也在（等归约）。写回途中被同时跑的白天归约释放了凭据的，那条判断落不了树、只剩原来那段「错误」——不算补回。
+        没给树就只认判断存储。"""
+
+        if self.recorder.readable_pending(turn):
+            return True
+        if self.tree is None:
+            return False
+        return any(
+            address.started_at == turn.instructed_at
+            for address in self.tree.list_day_addresses(BehaviorKind.OCCURRENCE, self._day(turn))
+        )
+
     def withdraw(self, turn: SessionTurn) -> None:
-        """撤回这一轮写到一半的重试，回到重试之前的样子（原「没读懂」不动）：重试失败时、上一晚中途被杀剩下的那一项丢弃时。"""
+        """撤回这一轮写到一半的重试，回到重试之前的样子（原「错误」不动）：重试失败时、上一晚中途被杀剩下的那一项丢弃时。"""
 
         self.recorder.withdraw(turn)
 
@@ -188,16 +230,17 @@ class SessionLane:
             await asyncio.to_thread(self.reminders.respond, turn.key, response, at=turn.last_said_at)
         return TurnOutcome(turn, TurnDisposition.RECORDED, judgement_id, described.validation_attempts)
 
-    async def _unreadable(self, turn: SessionTurn, cause: RetryCause, sources: tuple[str, ...]) -> TurnOutcome:
-        """先落「没读懂」（下游不等它），再把这一轮放进重试堆；堆满了就只是「没读懂」。"""
+    async def _error(self, turn: SessionTurn, cause: RetryCause, sources: tuple[str, ...]) -> TurnOutcome:
+        """先落「错误」（下游不等它），再把这一轮放进夜里待处理的堆；堆满了就只是「错误」。"""
 
-        unreadable = await asyncio.to_thread(self.recorder.record_unreadable, turn, sources=sources)
+        failed = await asyncio.to_thread(self.recorder.record_error, turn, sources=sources)
         await asyncio.to_thread(self._keep, turn, cause)
-        return TurnOutcome(turn, TurnDisposition.UNREADABLE, unreadable)
+        return TurnOutcome(turn, TurnDisposition.ERROR, failed)
 
     def salvage(self, turns: Sequence[SessionTurn]) -> tuple[TurnOutcome, ...]:
-        """会话源"处理完了没有"的账坏了（信封完好，裁定 67 第 5、16 条）：逐轮看写没写过，没写过的落「没读懂」、进重试堆
-        （那一天的夜批已经跑过的，堆按天拒收，裁定 68 第 3 条）。不问模型，全是同步的读写。
+        """会话源"处理完了没有"的账坏了（信封完好，裁定 67 第 5、16 条）：逐轮看写没写过，没写过的落「错误」（数据坏了，
+        裁定 94 错误分类）、进夜里待处理的堆（材料完好，夜里照裁定 67 第 5 条再描述一次；那一天的夜批已经跑过的，堆按天拒收，
+        裁定 68 第 3 条）。不问模型，全是同步的读写。
 
         "写过"三处任一认得出就算：覆盖记录、判断存储里凭据相同的判断（写了没归约；回执没落的照常接着写完）、树上
         （这一支那天有一条从这一轮开口那一刻开始的行为或空白）——覆盖记录可能早在判坏之前就随 Behavior"到终态"
@@ -217,9 +260,9 @@ class SessionLane:
                 judgement_id = self.recorder.resume(turn, interrupted)
                 outcomes.append(TurnOutcome(turn, TurnDisposition.ALREADY_RECORDED, judgement_id))
                 continue
-            unreadable = self.recorder.record_unreadable(turn)
-            self._keep(turn, RetryCause.DETERMINISTIC)
-            outcomes.append(TurnOutcome(turn, TurnDisposition.UNREADABLE, unreadable))
+            failed = self.recorder.record_error(turn)
+            self._keep(turn, RetryCause.DAMAGED)
+            outcomes.append(TurnOutcome(turn, TurnDisposition.ERROR, failed))
         return tuple(outcomes)
 
     def _landed(self, turn: SessionTurn) -> bool:
@@ -234,7 +277,7 @@ class SessionLane:
         )
 
     def _keep(self, turn: SessionTurn, cause: RetryCause) -> Admission:
-        """这一轮放进每晚重试的堆；拒收的（满了、那天已过）它已经落了「没读懂」，堆自己记数（裁定 68 第 3、4 条）。"""
+        """这一轮放进夜里待处理的堆；拒收的（满了、那天已过）它已经落了「错误」，堆自己记数（裁定 68 第 3、4 条）。"""
 
         return self.backlog.put(
             RetryItem(
@@ -251,4 +294,44 @@ class SessionLane:
         return turn.instructed_at.astimezone(self.recorder.zone).date()
 
 
-__all__ = ["SessionLane", "TurnDisposition", "TurnOutcome"]
+class TurnHandler:
+    """重试堆里会话轮的处理器（裁定 67、68）：交给会话 lane 再描述一次；时窗末当场重读用的也是它。"""
+
+    def __init__(self, lane: SessionLane) -> None:
+        if not isinstance(lane, SessionLane):
+            raise TypeError("lane must be SessionLane")
+        self.lane = lane
+
+    async def attempt(self, item: RetryItem) -> Attempt:
+        try:
+            turn = decode_turn(item.payload)
+        except BehaviorFusionError:
+            return Attempt.DETERMINISTIC
+        try:
+            await self.lane.retry(turn)
+        except RETRY_DETERMINISTIC:
+            return Attempt.DETERMINISTIC
+        except RETRY_UNAVAILABLE:
+            return Attempt.UNAVAILABLE
+        except RETRY_BUSY:
+            return Attempt.BUSY
+        except RETRY_INVALID:
+            return Attempt.INVALID
+        return Attempt.RECOVERED
+
+    def recovered(self, item: RetryItem) -> bool:
+        try:
+            turn = decode_turn(item.payload)
+        except BehaviorFusionError:
+            return False
+        return self.lane.retried(turn)
+
+    def abandon(self, item: RetryItem) -> None:
+        try:
+            turn = decode_turn(item.payload)
+        except BehaviorFusionError:
+            return
+        self.lane.withdraw(turn)
+
+
+__all__ = ["SessionLane", "TurnDisposition", "TurnHandler", "TurnOutcome"]

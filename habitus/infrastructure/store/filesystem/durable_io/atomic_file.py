@@ -98,7 +98,18 @@ def _open_boundary_directory(boundary: Path, *, create: bool) -> int:
         raise
 
 
-def _open_control_parent(path: Path, artifact_root: str | Path) -> int:
+def _open_control_parent(
+    path: Path,
+    artifact_root: str | Path,
+    *,
+    restrict_existing_directories: bool = True,
+) -> int:
+    """逐级打开（必要时以 0700 创建）目标父目录。
+
+    ``restrict_existing_directories`` 为真时，根与途经目录无论新旧一律收紧到 0700（存储根都归 Habitus 独占）；
+    为假时只有本次新建的目录是 0700，已有目录的权限原样不动。
+    """
+
     candidate = Path(path).expanduser().absolute()
     boundary = Path(artifact_root).expanduser().absolute()
     if boundary.is_symlink():
@@ -119,10 +130,11 @@ def _open_control_parent(path: Path, artifact_root: str | Path) -> int:
     except (OSError, DurablePathIntegrityError) as exc:
         raise DurablePathIntegrityError("artifact root is not a safe directory") from exc
     try:
-        try:
-            os.fchmod(directory_descriptor, 0o700)
-        except OSError:
-            pass
+        if restrict_existing_directories:
+            try:
+                os.fchmod(directory_descriptor, 0o700)
+            except OSError:
+                pass
         for part in relative_parent.parts:
             try:
                 os.mkdir(part, 0o700, dir_fd=directory_descriptor)
@@ -137,10 +149,11 @@ def _open_control_parent(path: Path, artifact_root: str | Path) -> int:
                 ) from exc
             os.close(directory_descriptor)
             directory_descriptor = child
-            try:
-                os.fchmod(directory_descriptor, 0o700)
-            except OSError:
-                pass
+            if restrict_existing_directories:
+                try:
+                    os.fchmod(directory_descriptor, 0o700)
+                except OSError:
+                    pass
         return directory_descriptor
     except BaseException:
         os.close(directory_descriptor)
@@ -242,10 +255,24 @@ def atomic_create_bytes(path: Path, encoded: bytes, *, artifact_root: str | Path
         os.close(parent_descriptor)
 
 
-def atomic_replace_bytes(path: Path, encoded: bytes, *, artifact_root: str | Path) -> None:
-    """原子创建或替换一个可变普通文件。"""
+def atomic_replace_bytes(
+    path: Path,
+    encoded: bytes,
+    *,
+    artifact_root: str | Path,
+    restrict_existing_directories: bool = True,
+) -> None:
+    """原子创建或替换一个可变普通文件（0600）。
 
-    parent_descriptor = _open_control_parent(path, artifact_root)
+    写进用户自己的目录（如配置所在目录）时传 ``restrict_existing_directories=False``：只有新建的目录是 0700，
+    已有目录的权限不动。
+    """
+
+    parent_descriptor = _open_control_parent(
+        path,
+        artifact_root,
+        restrict_existing_directories=restrict_existing_directories,
+    )
     temporary_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
     try:
         try:

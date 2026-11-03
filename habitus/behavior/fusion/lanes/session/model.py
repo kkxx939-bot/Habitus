@@ -27,7 +27,9 @@ class SessionMessageRole(str, Enum):
 @dataclass(frozen=True)
 class SessionMessage:
     """会话里的一条消息。``failed`` 只对工具结果有意义。``mid_turn``：人说的话插在宿主的一轮中间（助手还没给出最终答复时他作答、
-    补一句、叫停），属于这一轮、不开新一轮（由协议适配器按宿主自己的轮次标，与记忆主链认的"一轮"是同一个）。"""
+    补一句、叫停），属于这一轮、不开新一轮（由协议适配器按宿主自己的轮次标，与记忆主链认的"一轮"是同一个）。
+    ``answers``：这条人说的话是他对异步提问的作答消息（Codex Desktop），每题一对（题目, 作答）；认作答形状的是组合根
+    （按会话协议），这边只管把它当成一句"（回答助手的提问）…"。"""
 
     sequence: int
     occurred_at: datetime
@@ -37,6 +39,7 @@ class SessionMessage:
     tool_call_id: str | None = None
     failed: bool = False
     mid_turn: bool = False
+    answers: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "role", SessionMessageRole(self.role))
@@ -48,6 +51,13 @@ class SessionMessage:
             raise BehaviorFusionError("session message content must be text")
         if not isinstance(self.mid_turn, bool):
             raise BehaviorFusionError("session message mid_turn must be a boolean")
+        if not isinstance(self.answers, tuple) or any(
+            not isinstance(pair, tuple) or len(pair) != 2 or not all(isinstance(part, str) for part in pair)
+            for pair in self.answers
+        ):
+            raise BehaviorFusionError("session message answers must be (question, answer) text pairs")
+        if self.answers and self.role is not SessionMessageRole.PROMPT:
+            raise BehaviorFusionError("only the person's words can carry answers")
 
 
 @dataclass(frozen=True)

@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import cast
 
+from habitus.foundation.embedding import EmbeddingVector
 from habitus.foundation.integrity import canonicalize
-from habitus.model_client import EmbeddingVector
 
 VectorScalar = str | int | float | bool
 VectorValue = VectorScalar | tuple[VectorScalar, ...]

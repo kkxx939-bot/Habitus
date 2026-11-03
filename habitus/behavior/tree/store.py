@@ -14,7 +14,6 @@ from habitus.behavior.document import (
     BehaviorDocumentLimitError,
 )
 from habitus.behavior.model import (
-    KINDS_REGISTRY_FILENAME,
     BehaviorAddress,
     BehaviorDirectory,
     BehaviorKind,
@@ -25,7 +24,7 @@ from habitus.behavior.model import (
 )
 from habitus.behavior.schema import BehaviorSchemaRegistry
 from habitus.behavior.tree.config import BehaviorTreeConfig
-from habitus.behavior.uri import BehaviorURI, BehaviorURINodeType
+from habitus.behavior.uri import BehaviorURI
 from habitus.foundation.ids import canonical_path_identity
 from habitus.infrastructure.store.filesystem import (
     DurableDirectoryEntry,
@@ -109,31 +108,22 @@ class BehaviorTree:
         self._require_inside_root(candidate)
         return candidate
 
-    def layer_path(self, directory: BehaviorDirectory, level: BehaviorLevel) -> Path:
-        normalized = BehaviorLevel(level)
-        return self.directory_path(directory) / normalized.sidecar_filename
+    def storable_bytes(self, document: BehaviorDocument) -> bytes:
+        """文档写盘时的编码；正文或编码后字节超出上限就拒（``BehaviorDocumentLimitError``）。写入与归约发布前的干跑共用这一处。"""
 
-    def path_for_uri(self, uri: BehaviorURI | str) -> Path:
-        parsed = BehaviorURI.parse(uri)
-        if parsed.node_type is BehaviorURINodeType.DOCUMENT:
-            return self.path_for(parsed.to_address())
-        if parsed.node_type is BehaviorURINodeType.DIRECTORY:
-            return self.directory_path(parsed.to_directory())
-        if parsed.node_type is BehaviorURINodeType.REGISTRY:
-            # 词表是树根的单文件节点；读写走 BehaviorKindStore，这里只负责路径解析。
-            return self.root / KINDS_REGISTRY_FILENAME
-        directory, level = parsed.to_layer()
-        return self.layer_path(directory, level)
+        if not isinstance(document, BehaviorDocument):
+            raise TypeError("document must be a BehaviorDocument")
+        encoded = self._document_codec.encode(document).encode("utf-8")
+        self.document_config.validate_body(document.markdown_body)
+        self.document_config.validate_encoded(encoded)
+        return encoded
 
     def create(self, document: BehaviorDocument) -> BehaviorDocument:
         """原子创建 add-only L2；目标已绑定到不同内容时拒绝覆盖。"""
 
         if not isinstance(document, BehaviorDocument):
             raise TypeError("document must be a BehaviorDocument")
-        encoded = self._document_codec.encode(document).encode("utf-8")
-        self.document_config.validate_body(document.markdown_body)
-        self.document_config.validate_relations(links=len(document.links))
-        self.document_config.validate_encoded(encoded)
+        encoded = self.storable_bytes(document)
         self.initialize()
         path = self._existing_document_path(document.address)
         self._ensure_directory(path.parent)
@@ -145,7 +135,7 @@ class BehaviorTree:
         return document
 
     def replace(self, document: BehaviorDocument) -> BehaviorDocument:
-        """改写一个已存在的 L2：**只允许 ``kind_token`` 变**（词表重打），其余字段、链接、地址逐字不变。
+        """改写一个已存在的 L2：**只允许 ``kind_token`` 变**（词表重打），其余字段、地址逐字不变。
 
         树是 add-only 的，这是唯一的改写通道，且只为"归错可改词表重打、不动地址"这一条设计裁定而开
         （``behavior/model.py`` 与 occurrences schema 都写明 kind_token 可修）。修订号 +1、created_at 不变、
@@ -164,8 +154,6 @@ class BehaviorTree:
         }
         if changed - {"kind_token"}:
             raise BehaviorTreeConflictError(f"behavior L2 replace may only change kind_token, not {sorted(changed)}")
-        if current.links != document.links:
-            raise BehaviorTreeConflictError("behavior L2 replace cannot change links")
         meta, prior = document.metadata, current.metadata
         if (
             meta.revision != prior.revision + 1
@@ -173,9 +161,7 @@ class BehaviorTree:
             or meta.updated_at < prior.updated_at
         ):
             raise BehaviorTreeConflictError("behavior L2 replace must advance the revision in place")
-        encoded = self._document_codec.encode(document).encode("utf-8")
-        self.document_config.validate_body(document.markdown_body)
-        self.document_config.validate_encoded(encoded)
+        encoded = self.storable_bytes(document)
         try:
             atomic_replace_bytes(self._existing_document_path(document.address), encoded, artifact_root=self.root)
         except DurablePathIntegrityError as exc:
@@ -207,7 +193,6 @@ class BehaviorTree:
         try:
             document = self._document_codec.decode(raw, expected_address=address)
             self.document_config.validate_body(document.markdown_body)
-            self.document_config.validate_relations(links=len(document.links))
             return document
         except (BehaviorDocumentIntegrityError, BehaviorDocumentLimitError) as exc:
             raise BehaviorTreeIntegrityError("behavior L2 document failed integrity validation") from exc
@@ -271,7 +256,6 @@ class BehaviorTree:
             try:
                 document = self._document_codec.decode(raw, expected_address=address)
                 self.document_config.validate_body(document.markdown_body)
-                self.document_config.validate_relations(links=len(document.links))
             except (BehaviorDocumentIntegrityError, BehaviorDocumentLimitError) as exc:
                 raise BehaviorTreeIntegrityError("behavior L2 document failed integrity validation") from exc
             documents.append(document)

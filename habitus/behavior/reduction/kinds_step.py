@@ -1,6 +1,6 @@
-"""归约里的词表一步：封口的链交白天归类，发布后把待定条目放进待定池（裁定 7 的范围）。
+"""归约里的词表一步：封口的判断交白天归类，发布后把待定条目放进待定池（裁定 7 的范围）。
 
-- 归类看整条链（原话 + 每段概要 + 目标 + 步骤），不只看链头名字；
+- 归类看原话 + 概要 + 目标 + 步骤，不只看名字；
 - ``kind_token`` 写编号或占位标记（「待定」「非事件」），树上照常记录；
 - 待定条目在发布之后才进待定池（要用 occurrence 地址做键），按地址幂等，检查点重放不会多算；
 - 「非事件」留 ``kind_not_event`` 信号：融合在运行时读不到它（词表在融合之后），它是离线评价融合质量的计数（裁定 13）；
@@ -14,9 +14,10 @@ lane 由组合根给：两条 lane 各是一整套（各自的归约、词表、
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 
+from habitus.behavior.kinds.calls import CallFailure
 from habitus.behavior.kinds.classify import (
     ClassifyRequest,
     ClassifyResult,
@@ -29,7 +30,17 @@ from habitus.behavior.kinds.ids import Lane, lane_of_token
 from habitus.behavior.kinds.model import Vocabulary
 from habitus.behavior.kinds.pending import PendingEntry
 from habitus.behavior.kinds.store import BehaviorKindStore
-from habitus.behavior.reduction.chains import BehaviorChain
+from habitus.behavior.reduction.record import ReducibleJudgement
+from habitus.behavior.retry import RetryCause
+
+#: 归类没问出结论的那几条换成「错误」时进堆的原因：内容安全拦下的不重试、健康面单列；输入超长是我们自己处理不了的
+#: （材料上限与模型窗口没对上，裁定 94 错误分类）；模型整个用不了的放一边、夜里再归一次；别的是 bug，当场报、不白试。
+SET_ASIDE: Mapping[CallFailure, RetryCause] = {
+    CallFailure.REFUSED: RetryCause.REFUSED,
+    CallFailure.TOO_LARGE: RetryCause.DETERMINISTIC,
+    CallFailure.UNAVAILABLE: RetryCause.UNAVAILABLE,
+    CallFailure.BUG: RetryCause.DETERMINISTIC,
+}
 
 
 @dataclass(frozen=True)
@@ -51,7 +62,7 @@ class PendingNote:
 
 @dataclass(frozen=True)
 class KindStamps:
-    """一批链的归类结果，按链身份（``chain_digest``）给。"""
+    """一批判断的归类结果，按它们落成的节点身份（``chain_digest``）给。"""
 
     tokens: Mapping[str, str]
     pending: Mapping[str, PendingNote]
@@ -60,6 +71,8 @@ class KindStamps:
     not_events: int
     model_calls: int
     signals: tuple[str, ...]
+    #: 没有归类结果、要换成「错误」放一边的（按节点身份）与为什么（定夜里试不试）。
+    set_aside: Mapping[str, CallFailure] = field(default_factory=dict)
 
 
 class KindStamping:
@@ -72,17 +85,19 @@ class KindStamping:
         self.classifier = classifier
         self.lane = Lane(lane)
 
-    async def classify(self, chains: Sequence[BehaviorChain], *, checkpoint: Callable[[], object]) -> KindStamps:
+    async def classify(self, records: Sequence[ReducibleJudgement], *, checkpoint: Callable[[], object]) -> KindStamps:
         requests: list[ClassifyRequest] = []
-        for chain in chains:
-            content = chain_content(chain)
+        for record in records:
+            content = judgement_content(record)
             if content is not None:
-                requests.append(ClassifyRequest(chain.chain_digest, self.lane, content))
+                requests.append(ClassifyRequest(record.chain_digest, self.lane, content))
         result = await self.classify_requests(requests, self.store.read(), checkpoint=checkpoint)
         by_key = {request.key: request for request in requests}
         signals = list(result.signals)
         pending: dict[str, PendingNote] = {}
         for key, verdict in result.verdicts.items():
+            if key in result.unanswerable:
+                continue  # 没问出结论：换成「错误」，不落成待定
             if verdict.outcome is Outcome.PENDING:
                 content = by_key[key].content
                 rendered = content.render(max_steps=self.classifier.config.prompt_max_steps)
@@ -91,13 +106,14 @@ class KindStamping:
                 signals.append(f"kind_not_event {key[:12]} {by_key[key].content.name!r}: {verdict.reason}")
         outcomes = [verdict.outcome for verdict in result.verdicts.values()]
         return KindStamps(
-            tokens={key: verdict.token for key, verdict in result.verdicts.items()},
+            tokens={key: verdict.token for key, verdict in result.verdicts.items() if key not in result.unanswerable},
             pending=pending,
             requests=len(requests),
             classified=outcomes.count(Outcome.CLASS),
             not_events=outcomes.count(Outcome.NOT_EVENT),
             model_calls=result.model_calls,
             signals=tuple(signals),
+            set_aside=dict(result.unanswerable),
         )
 
     async def classify_requests(
@@ -118,6 +134,7 @@ class KindStamping:
             payload = item["payload"]
             day = date.fromisoformat(str(payload["occurred_on"]))
             lane = lane_of_token(str(payload["kind_token"]))
+            # 进池那天就是这条落树的那天；读侧取 ``entered_on or day`` 也回落到它，这里显式写下，读侧改口径也不跟着变
             entries.append(
                 PendingEntry(str(item["ledger"]["uri"]), lane, day, note.proposed, note.content, entered_on=day)
             )
@@ -159,7 +176,7 @@ class PendingAdmission:
 
 
 def content_from_fields(fields: Mapping[str, object]) -> OccurrenceContent:
-    """树上一条 occurrence 给归类看的内容（与 ``chain_content`` 同一形状：原话 + 概要 + 目标 + 步骤）。"""
+    """树上一条 occurrence 给归类看的内容（与 ``judgement_content`` 同一形状：原话 + 概要 + 目标 + 步骤）。"""
 
     summary = str(fields.get("summary") or "").strip()
     goal = str(fields.get("goal") or "").strip() or None
@@ -177,16 +194,16 @@ def is_countable(fields: Mapping[str, object]) -> bool:
     return fields.get("original_name") is None
 
 
-def chain_content(chain: BehaviorChain) -> OccurrenceContent | None:
-    """一条链给归类看的内容；链头没有可读名字（绕过融合守卫的坏数据）时给 ``None``。"""
+def judgement_content(record: ReducibleJudgement) -> OccurrenceContent | None:
+    """一条可读判断给归类看的内容；没有可读名字（绕过融合守卫的坏数据）时给 ``None``。"""
 
-    name = chain.head.behavior
+    name = record.behavior
     if not isinstance(name, str) or not name.strip():
         return None
-    summaries = tuple(item.summary.strip() for item in chain.view if item.summary and item.summary.strip())
-    goals = tuple(dict.fromkeys(item.goal.strip() for item in chain.view if item.goal and item.goal.strip()))
-    steps = tuple(semantics.strip() for item in chain.view for semantics, _ in item.basis if semantics.strip())
-    return OccurrenceContent(name=name.strip(), summaries=summaries, goal="；".join(goals) or None, steps=steps)
+    summaries = (record.summary.strip(),) if record.summary and record.summary.strip() else ()
+    goal = record.goal.strip() if record.goal and record.goal.strip() else None
+    steps = tuple(semantics.strip() for semantics, _ in record.basis if semantics.strip())
+    return OccurrenceContent(name=name.strip(), summaries=summaries, goal=goal, steps=steps)
 
 
 __all__ = [
@@ -194,7 +211,7 @@ __all__ = [
     "KindStamps",
     "PendingAdmission",
     "PendingNote",
-    "chain_content",
     "content_from_fields",
     "is_countable",
+    "judgement_content",
 ]

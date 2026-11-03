@@ -11,7 +11,7 @@ import pytest
 
 from habitus.behavior.kinds.ids import Lane
 from habitus.behavior.uri import BehaviorURI
-from habitus.model_client import ModelTransportError
+from habitus.model_client import ModelContentSafetyError, ModelTransportError, ModelUnreachable
 from habitus.scene.concepts import ConceptSet, ContextScope, GradeMeasure
 from habitus.scene.occurrences import ConceptHit, ConceptHitStore
 from habitus.scene.occurrences.mapper import (
@@ -27,7 +27,7 @@ from habitus.scene.occurrences.mapper import (
     map_closed_day,
     mapper_json_schema,
 )
-from habitus.scene.occurrences.model import UnresolvedReason
+from habitus.scene.occurrences.model import MAX_SIGNAL_CHARS, UnresolvedReason
 from habitus.series.reader import read_series
 from tests.unit.foresight.scripted_model import recording_client
 from tests.unit.kind_ids import kind_id
@@ -303,9 +303,24 @@ def test_a_model_failure_leaves_the_candidates_unresolved_instead_of_raising(tmp
         mapper.map(document_for(site, uri), material=MappingMaterial(timeline=timeline_for(site, uri)))
     )
     assert record.hits == () and dict(record.unresolved) == {"起床就吃": UnresolvedReason.MODEL_FAILED}
-    # 失败信号由共用的调模型那一段（``scene.llm``）给，说得出是哪一层没过。
+    # 失败信号由共用的调模型那一段（``model_client.asking``）给，说得出是哪一层没过。
     assert any(signal.startswith("model: ModelStructuredOutputError") for signal in record.signals)
     assert provider.calls == 2
+
+
+def test_a_long_validator_error_still_leaves_the_record_unresolved_with_signals_within_budget(tmp_path) -> None:
+    """模型两轮都答了不在选项里的名字：结构层的报错带着 schema 片段（三百多字），信号截到单条上限内，照样是未决，不抛。"""
+
+    site = Site(tmp_path, now=NOW)
+    uri = publish(site.behavior_tree, DAY1, "吃了碗面", 7, 0, kind="早餐")
+    wrong = {"verdicts": [{"concept": "起床就吃（早餐）", "verdict": "yes"}]}
+    mapper, _client, provider = mapper_for([wrong, wrong])
+    record = asyncio.run(
+        mapper.map(document_for(site, uri), material=MappingMaterial(timeline=timeline_for(site, uri)))
+    )
+    assert dict(record.unresolved) == {"起床就吃": UnresolvedReason.MODEL_FAILED} and provider.calls == 2
+    (failure,) = [signal for signal in record.signals if signal.startswith("model: ")]
+    assert len(failure) == MAX_SIGNAL_CHARS and "起床就吃（早餐）" in failure
 
 
 def test_an_incomplete_answer_is_corrected_by_the_structured_layer_and_leaves_a_note(tmp_path) -> None:
@@ -476,6 +491,28 @@ def test_resume_reasks_only_when_the_inputs_changed(tmp_path) -> None:
     assert (report.mapped, report.resumed, report.unresolved) == (1, 0, 0) and recovered_provider.calls == 2
 
 
+@pytest.mark.parametrize("first", ["no", "unknown"])
+def test_resume_reasks_once_when_the_day_timeline_gained_a_record(tmp_path, first: str) -> None:
+    """要当天时间线的细分概念（「起床就吃」）：第一次答"没有" / "看不到"之后，同一天又补进 07:10 起床——时间线这份材料变了，
+    下一次映射重问一次、判成；材料不再变就不再问。"""
+
+    site = Site(tmp_path, now=NOW)
+    publish(site.behavior_tree, DAY1, "吃了碗面", 7, 30, kind="早餐", summary="坐下吃了碗面")
+    if first == "unknown":
+        publish_gap(site.behavior_tree, DAY1, (6, 0), (7, 20), kind="未观测")
+    store = ConceptHitStore(tmp_path / "scene")
+    answer = {"verdicts": [{"concept": "起床就吃", "verdict": first}]}
+    mapper, _client, provider = mapper_for([answer, answer, YES_EAT, YES_EAT])
+    map_day(site, store, mapper)
+    assert store.read_day(DAY1)[0].hits == () and provider.calls == 2
+    publish(site.behavior_tree, DAY1, "起床", 7, 10, kind="起床", lasts_minutes=5)
+    report = map_day(site, store, mapper)
+    (meal,) = [record for record in store.read_day(DAY1) if record.kind_token == cid("早餐")]
+    assert provider.calls == 4 and report.rewritten == 1 and meal.hits == (ConceptHit("起床就吃"),)
+    again = map_day(site, store, mapper)
+    assert provider.calls == 4 and again.resumed == 2
+
+
 def test_mapping_refuses_to_wipe_a_day_the_behaviour_tree_cannot_see(tmp_path) -> None:
     """行为树这一天比盘上少（读不到、或根指错到别的树）：多半是根指错或封口日算错，不能静默清掉多出来的再盖章。"""
 
@@ -516,6 +553,19 @@ def test_the_day_timeline_only_carries_the_same_lane_and_gaps(tmp_path) -> None:
     records = {record.address.name: record for record in store.read_day(DAY1)}
     assert records["出门散步"].lane == "physical" and records["吃了碗面"].lane == "session"
     assert provider.calls == 2  # 物理 lane 那条的类上没挂细分概念，不问模型
+
+
+def test_the_day_timeline_carries_the_morning_half_of_an_overnight_gap(tmp_path) -> None:
+    """前一天 22:00 到当天 08:00 的「未观测」：当天的映射材料里有它落在当天的那段（00:00–08:00），与观测覆盖按天切的口径一样——
+    不然早上被盖住的那几个小时在模型看来是"在看、什么都没做"。"""
+
+    site = Site(tmp_path, now=NOW)
+    publish(site.behavior_tree, DAY1, "吃了碗面", 9, 30, kind="早餐", summary="坐下吃了碗面", lasts_minutes=20)
+    publish_gap(site.behavior_tree, DAY1 - timedelta(days=1), (22, 0), (8, 0), end_day=DAY1)
+    mapper, _client, provider = mapper_for([NO_EAT, NO_EAT])
+    map_day(site, ConceptHitStore(tmp_path / "scene"), mapper)
+    timeline = provider.prompts[-1].split("当天时间线")[-1]
+    assert "00:00–08:00 【未观测】" in timeline
 
 
 def test_the_day_timeline_stops_at_the_record_being_judged(tmp_path) -> None:
@@ -619,12 +669,35 @@ def test_a_day_with_a_model_failure_is_not_stamped_and_is_asked_again(tmp_path) 
     site = Site(tmp_path, now=NOW)
     publish(site.behavior_tree, DAY1, "吃了碗面", 7, 0, kind="早餐", summary="坐下吃了碗面")
     store = ConceptHitStore(tmp_path / "scene")
-    mapper, _client, _provider = mapper_for([ModelTransportError("down")])
+    mapper, _client, provider = mapper_for([])
+
+    async def blocked(_request):  # type: ignore[no-untyped-def]
+        raise ModelContentSafetyError("blocked")
+
+    provider.complete_async = blocked  # type: ignore[method-assign]
     report = map_day(site, store, mapper)
     assert report.model_failed > 0 and store.read_marker(DAY1) is None
     mapper, _client, provider = mapper_for([YES_EAT])
     report = map_day(site, store, mapper)
     assert report.model_failed == 0 and store.read_marker(DAY1) is not None and provider.calls > 0
+
+
+def test_an_unusable_model_is_not_swallowed_as_a_failed_mapping(tmp_path) -> None:
+    """裁定 94 第 8 条：映射时模型整个用不了（传输重试用完、额度、鉴权……）不吞成"这一处没答成"——抛 ``ModelUnreachable``，
+    夜里那条线据它整晚停；这一天不盖完成章。"""
+
+    site = Site(tmp_path, now=NOW)
+    publish(site.behavior_tree, DAY1, "吃了碗面", 7, 0, kind="早餐", summary="坐下吃了碗面")
+    store = ConceptHitStore(tmp_path / "scene")
+    mapper, _client, provider = mapper_for([])
+
+    async def down(_request):  # type: ignore[no-untyped-def]
+        raise ModelTransportError("down")
+
+    provider.complete_async = down  # type: ignore[method-assign]
+    with pytest.raises(ModelUnreachable):
+        map_day(site, store, mapper)
+    assert store.read_marker(DAY1) is None
 
 
 def test_a_new_refinement_only_reopens_the_days_its_class_appears_on() -> None:

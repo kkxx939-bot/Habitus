@@ -402,14 +402,17 @@ def test_before_speaking_an_event_reminder_checks_its_antecedent_again(tmp_path)
         seen = Seen(started, started, kind, "behavior://x.md", "订机票", "")
         return lambda uris: {uri: seen for uri in uris}
 
-    changed = JudgeMaterials(table, rows("s-k0009"))
+    def read(kind: str) -> tuple[Seen, ...]:
+        return (Seen(started, started, kind, "behavior://x.md", "订机票", ""),)
+
+    changed = JudgeMaterials(table, rows("s-k0009"), seen=read("s-k0009"))
     asyncio.run(run.run_once(DAY0 + timedelta(minutes=15), changed))
     closing = asyncio.run(run.run_once(DAY0 + timedelta(minutes=41), changed))
     assert closing.by_reason == {"前因不成立": 1} and closing.spoken == 0
     run2, ledger2 = stage(tmp_path / "b")
     earn(ledger2, source="事件")
     ledger2.record_expectation(item)
-    holds = JudgeMaterials(table, rows("s-k0001"))
+    holds = JudgeMaterials(table, rows("s-k0001"), seen=read("s-k0001"))
     asyncio.run(run2.run_once(DAY0 + timedelta(minutes=15), holds))
     assert asyncio.run(run2.run_once(DAY0 + timedelta(minutes=41), holds)).by_reason == {"待取": 1}
 
@@ -507,18 +510,18 @@ def _absence_table():  # type: ignore[no-untyped-def]
 
 
 def _middle_band(ledger: ForesightLedgerStore) -> str:
-    """4/4 的账（下界不到线、上界过线）、上一次在提醒档：靠滞回留在提醒档。四次隔一天一次，之后隔了 8 天才又来。"""
+    """4/4 的账（下界不到线、上界过线）、上一次在提醒档：靠滞回留在提醒档。四次隔一天一次，之后隔了 16 天（8 个典型间隔，裁定 88）才又来。"""
 
     from habitus.foresight.ledger import AccountLevel, UnitLevel
 
     account = account_key("s-k0002", "日子", "rel")
-    for offset in (14, 12, 10, 8):
+    for offset in (22, 20, 18, 16):
         ledger.append_fact(AccountFact(account, DAY0 - timedelta(days=offset), True, 1.0, "准时", f"old-{offset}"))
     seeded_of(ledger).put(
-        "s-k0002", [PastMoment(DAY0 - timedelta(days=offset), frozenset({account}), True) for offset in (14, 12, 10, 8)]
+        "s-k0002", [PastMoment(DAY0 - timedelta(days=offset), frozenset({account}), True) for offset in (22, 20, 18, 16)]
     )
-    ledger.record_level(AccountLevel(account, DAY0 - timedelta(days=15), 1))
-    ledger.record_unit_level(UnitLevel("s-k0002", DAY0 - timedelta(days=15), 1))
+    ledger.record_level(AccountLevel(account, DAY0 - timedelta(days=23), 1))
+    ledger.record_unit_level(UnitLevel("s-k0002", DAY0 - timedelta(days=23), 1))
     return account
 
 
@@ -539,6 +542,51 @@ def test_a_return_after_absence_stays_quiet_once_and_the_next_one_is_back_at_the
     ledger.record_expectation(expectation("next", following))
     report = asyncio.run(run.run_once(following + timedelta(minutes=15), materials))
     assert report.by_reason == {"等时窗末": 1} and report.by_level == {1: 1}
+
+
+def _daily_habit(ledger: ForesightLedgerStore, offsets: range) -> None:
+    """天天做的事（``offsets`` 是 DAY0 往前的天数），上一次在提醒档。"""
+
+    from habitus.foresight.ledger import AccountLevel, UnitLevel
+
+    account = account_key("s-k0002", "日子", "rel")
+    for offset in offsets:
+        ledger.append_fact(AccountFact(account, DAY0 - timedelta(days=offset), True, 1.0, "准时", f"old-{offset}"))
+    seeded_of(ledger).put(
+        "s-k0002", [PastMoment(DAY0 - timedelta(days=offset), frozenset({account}), True) for offset in offsets]
+    )
+    first = DAY0 - timedelta(days=max(offsets) + 1)
+    ledger.record_level(AccountLevel(account, first, 1))
+    ledger.record_unit_level(UnitLevel("s-k0002", first, 1))
+
+
+@pytest.mark.parametrize(
+    ("offsets", "reason"),
+    [
+        (range(21, 1, -1), "等时窗末"),  # 漏了昨天一天：空白 2 天，照常（裁定 88 第 1 条，E1）
+        (range(27, 6, -1), "等时窗末"),  # 空白 7 天（中间 6 天没做）：不到 8 个典型间隔
+        (range(28, 7, -1), "久别回来"),  # 空白 8 天（中间 7 天没做）：久别
+    ],
+)
+def test_the_configured_half_life_decides_a_daily_habits_return_after_absence(tmp_path, offsets, reason) -> None:
+    """组合根那一份 H（``example.yaml`` → ``HabitusConfig`` → ``evidence_of``）一路传到递送那一拍的久别判法：
+    天天做的事漏一天不算久别、照常等时窗末；空白满 8 天才「久别回来」。"""
+
+    import yaml
+
+    from habitus.config import HabitusConfig
+    from habitus.runtime.evidence import evidence_of
+    from tests.integration.test_runtime_assembly import REPOSITORY_ROOT
+
+    raw = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
+    raw["storage"]["root"] = str(tmp_path / "data")
+    evidence = evidence_of(HabitusConfig.from_mapping(raw))
+    assert evidence.half_life == 8.0
+    run, ledger = stage(tmp_path, evidence=evidence)
+    _daily_habit(ledger, offsets)
+    ledger.record_expectation(expectation("today", DAY0))
+    opening = asyncio.run(run.run_once(DAY0 + timedelta(minutes=15), JudgeMaterials(_absence_table(), lambda uris: {})))
+    assert opening.by_reason == {reason: 1} and opening.by_level == {1: 1} and opening.spoken == 0
 
 
 def test_always_remind_me_wins_over_a_return_after_absence(tmp_path) -> None:
@@ -609,3 +657,283 @@ def test_a_closing_window_with_an_unreadable_stretch_is_reread_before_deciding(t
 
     stuck = JudgeMaterials(None, lambda uris: {}, unobserved=lambda item: True, reread=unavailable)
     assert asyncio.run(run2.run_once(DAY0 + timedelta(minutes=41), stuck)).by_reason == {"说不准": 1}
+
+
+# --- 递送与结算对同一份行的读法（段 6 Q4）---------------------------------------------------------------------
+
+_Q4_CASES = {
+    "对照": ("讨论方案", (9, 0), "修改代码"),
+    "前因开始被更正 09:00→08:57": ("讨论方案", (8, 57), "修改代码"),
+    "前因拆改": ("讨论方案-拆A", (9, 0), "修改代码"),
+    "后果拆改、他已经做了": ("讨论方案", (9, 0), "修改代码-拆"),
+    "前因开始被更正、没做": ("讨论方案", (8, 57), None),
+    "前因拆改、没做": ("讨论方案-拆A", (9, 0), None),
+}
+
+
+@pytest.mark.parametrize("case", list(_Q4_CASES))
+def test_delivery_and_settlement_read_the_same_rows_the_same_way(tmp_path, case) -> None:
+    """段 6 Q4：同一棵树、同一张表，递送（这一拍读到的行 → 开口前核前因、判做没做）与结算（树上的行 → 前因成立吗、第一次
+    发生）结论相同。原来前因开始被更正 / 拆改后递送说不成立（不说）、结算说成立（他没做就记过期待决，账上一笔坏）；后果拆改后
+    递送说没做（他做完了还被问）、结算说准时。"""
+
+    from datetime import date
+
+    from habitus.conditions import LocalCalendar
+    from habitus.foresight.delivery import done_since
+    from habitus.foresight.ledger import AntecedentRow, antecedent_holds_when_settling, first_occurrence
+    from habitus.foresight.model import Moment as TickMoment
+    from habitus.foresight.opportunities import OpportunityTable, RelationOpportunities
+    from habitus.foresight.triggers.assemble import seen_rows
+    from habitus.foresight.triggers.draft import instance_at
+    from habitus.runtime.foresight_tick import ForesightTick
+    from habitus.scene.views import DayIndexCache
+    from habitus.series.reader import admitted
+    from tests.unit.kind_ids import kind_id
+    from tests.unit.scene.fixtures import SUBJECT, Site, at, publish
+
+    day = date(2026, 12, 10)
+    discuss, code = kind_id("讨论方案"), kind_id("修改代码")
+    split = {discuss: (kind_id("讨论方案-拆A"),), code: (kind_id("修改代码-拆"),)}
+
+    def current(token: str) -> tuple[str, ...]:
+        return split.get(token, (token,))
+
+    relation = RelationOpportunities(
+        key="session|A|C|chain",
+        antecedent="A",
+        consequent="C",
+        antecedent_label="讨论方案",
+        consequent_label="修改代码",
+        antecedent_classes=(discuss,),
+        consequent_classes=(code,),
+        segment="chain",
+        status="established",
+        upward=True,
+        items=(),
+    )
+    table = OpportunityTable("session", day, day, 15, 3, (relation,), ())
+    item = Expectation(
+        expectation_id="e1",
+        kind_token=code,
+        day=day,
+        formed_at=at(day, 9, 25),
+        source="事件",
+        trigger=relation.key,
+        trigger_instance=instance_at(at(day, 9, 0)),  # 建预期时（前因还没封口）前因开始在 09:00
+        window=(at(day, 9, 30), at(day, 9, 50)),
+        deadline=at(day, 10, 25),
+        basis=(),
+        opportunities=10,
+        hits=8,
+        observed_from=at(day, 9, 20),
+    )
+    antecedent, start, consequent = _Q4_CASES[case]
+    site = Site(tmp_path, now=at(day, 23, 0))
+    publish(site.behavior_tree, day, "前因", *start, kind=antecedent, lasts_minutes=20)
+    if consequent is not None:
+        publish(site.behavior_tree, day, "后果", 9, 40, kind=consequent)
+    cache = DayIndexCache(site.behavior_tree, subject=SUBJECT, admits=admitted, calendar=LocalCalendar())
+    now = at(day, 9, 51)
+    seen = seen_rows(TickMoment(at=now, slot=0), cache, ())
+    run, _ledger = stage(tmp_path / "stage", current=current)
+    materials = JudgeMaterials(table, lambda uris: ForesightTick._rows_for(uris, cache, (), seen, now), seen=seen)
+    settling = antecedent_holds_when_settling(
+        item,
+        relation,
+        official=False,
+        calendar_on=lambda _day: (),
+        rows_on=lambda found: [AntecedentRow(r.at, r.last_observed_at, r.kind_token) for r in cache.day(found).rows],
+        current=current,
+    )
+    assert run._antecedent_holds(item, materials) is settling is True
+    done = first_occurrence(item, cache.day(day).rows, current=current) is not None
+    assert done_since(item, seen, now=now, current=current) is done is (consequent is not None)
+
+
+@pytest.mark.parametrize(
+    ("deadline_minutes", "closing_at"),
+    [(60, "10:06"), (52, "10:06"), (57, "10:06"), (70, "10:06")],
+    ids=["终点到时限 8 分钟", "终点等于时限", "5 分钟", "对照 18 分钟"],
+)
+def test_the_window_end_is_caught_by_the_tick_whose_interval_meets_it_and_waiting_always_ends(
+    tmp_path, deadline_minutes, closing_at
+) -> None:
+    """段 6 Q7：时窗末那一拍按拍区间与 (时窗终点, 最晚时限] 取交集，不再要求"此刻"落在区间里——区间短于一拍、为 0 时
+    原来永远到不了时窗末，账停在「等时窗末」。拍长 15 分钟、拍点在 :06 :21 :36 :51，时窗 09:10–09:52。"""
+
+    from dataclasses import replace
+
+    run, ledger = stage(tmp_path, tick_seconds=900.0)
+    earn(ledger)
+    item = replace(expectation("e", DAY0, window=(10, 52)), deadline=DAY0 + timedelta(minutes=deadline_minutes))
+    ledger.record_expectation(item)
+    for minutes in (6, 21, 36, 51, 66, 81):
+        asyncio.run(run.run_once(DAY0 + timedelta(minutes=minutes), NO_ROWS))
+    decided = sorted(ledger.deliveries_on(DAY0.date()), key=lambda found: found.decided_at)
+    assert [found.reason for found in decided][0] == "等时窗末"
+    assert len(decided) >= 2 and decided[1].decided_at.strftime("%H:%M") == closing_at
+    assert decided[-1].reason not in ("等时窗末", "待取")  # 有终局
+
+
+def test_a_window_end_reached_already_in_the_opening_tick_is_decided_in_the_next_tick(tmp_path) -> None:
+    """开时窗那一拍就已越过终点（时窗 09:03–09:05，09:06 那一拍开窗时就过了终点）：终点之后的第一拍是下一拍，照样决定；
+    中间停过机、(终点, 最晚时限] 整段落在没跑的拍里的不再决定（过了时限的不再说）。"""
+
+    from dataclasses import replace
+
+    run, ledger = stage(tmp_path, tick_seconds=900.0)
+    earn(ledger)
+    early = replace(expectation("early", DAY0, window=(3, 5)), deadline=DAY0 + timedelta(minutes=5))
+    ledger.record_expectation(early)
+    assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=6), NO_ROWS)).by_reason == {"等时窗末": 1}
+    assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=21), NO_ROWS)).decided == 1
+    # 终点与最晚时限重合、上一拍正好落在终点：越过终点的这一拍照样决定
+    run3, ledger3 = stage(tmp_path / "c", tick_seconds=900.0)
+    earn(ledger3)
+    edge = replace(expectation("edge", DAY0, window=(1, 5)), deadline=DAY0 + timedelta(minutes=5))
+    ledger3.record_expectation(edge)
+    assert asyncio.run(run3.run_once(DAY0 + timedelta(minutes=2), NO_ROWS)).by_reason == {"等时窗末": 1}
+    assert asyncio.run(run3.run_once(DAY0 + timedelta(minutes=5), NO_ROWS)).decided == 0
+    assert asyncio.run(run3.run_once(DAY0 + timedelta(minutes=20), NO_ROWS)).decided == 1
+    run2, ledger2 = stage(tmp_path / "b", tick_seconds=900.0)
+    earn(ledger2)
+    missed = replace(expectation("missed", DAY0, window=(1, 20)), deadline=DAY0 + timedelta(minutes=30))
+    ledger2.record_expectation(missed)
+    assert asyncio.run(run2.run_once(DAY0 + timedelta(minutes=6), NO_ROWS)).by_reason == {"等时窗末": 1}
+    assert asyncio.run(run2.run_once(DAY0 + timedelta(hours=3), NO_ROWS)).decided == 0
+
+
+@pytest.mark.parametrize(("done_minutes", "reason"), [(None, "宿主没取"), (130, "宿主没取"), (90, "已发生")])
+def test_an_awaiting_request_done_only_after_its_deadline_ends_as_never_claimed(tmp_path, done_minutes, reason) -> None:
+    """段 6 Q15：「待取」过了最晚时限（11:00）才做的不算这一回做了（结算结成过期待决），记「宿主没取」；原来 11:11 那一拍
+    把 11:10 的那次读成「已发生」。时限内（10:30）做了的照常记「已发生」。"""
+
+    from habitus.foresight import Seen
+    from habitus.foresight.delivery import done_since
+
+    run, ledger = stage(tmp_path, tick_seconds=900.0)
+    earn(ledger)
+    ledger.record_expectation(expectation("e", DAY0, window=(10, 40)))  # 时窗 09:10–09:40，最晚时限 11:00
+    rows = (
+        ()
+        if done_minutes is None
+        else (Seen(DAY0 + timedelta(minutes=done_minutes), DAY0 + timedelta(minutes=done_minutes + 5), "s-k0002", "u"),)
+    )
+
+    def materials(now: datetime) -> JudgeMaterials:
+        seen = tuple(row for row in rows if row.started_at <= now)
+        return JudgeMaterials(
+            None, lambda uris: {}, happened=lambda item: done_since(item, seen, now=now, current=run.current)
+        )
+
+    for minutes in (11, 41, 56, 71, 86, 101, 116, 131, 146):
+        now = DAY0 + timedelta(minutes=minutes)
+        asyncio.run(run.run_once(now, materials(now)))
+    decided = [item.reason for item in sorted(ledger.deliveries_on(DAY0.date()), key=lambda found: found.decided_at)]
+    assert decided[:2] == ["等时窗末", "待取"] and decided[-1] == reason and len(decided) == 3
+
+
+def test_an_input_not_yet_due_joins_only_one_unit_and_the_tick_does_not_fail(tmp_path) -> None:
+    """段 6 Q19：同一类两组到了时窗、互不相连（A 09:00 起、09:50 止；B 09:51 起），还没到时窗的 W 和两组都连着——原来
+    W 并进两个单元、两边各记一条「单元已选」，同一刻同一身份两份内容，这一拍整个抛（所有类的递送中断，A 丢一次决定）。
+    一个输入只进一个单元。"""
+
+    from dataclasses import replace
+
+    def at(minutes: int) -> datetime:
+        return DAY0 + timedelta(minutes=minutes)
+
+    def made(identity: str, trigger: str, observed: int, window: tuple[int, int], deadline: int) -> Expectation:
+        item = expectation(identity, DAY0, trigger=trigger)
+        return replace(
+            item,
+            observed_from=at(observed),
+            formed_at=at(observed),
+            window=(at(window[0]), at(window[1])),
+            deadline=at(deadline),
+        )
+
+    run, ledger = stage(tmp_path, tick_seconds=900.0)
+    for trigger in ("a", "b", "w"):
+        earn(ledger, trigger=trigger)
+    for item in (made("A", "a", 0, (41, 45), 50), made("B", "b", 51, (52, 90), 120), made("W", "w", 0, (90, 105), 180)):
+        ledger.record_expectation(item)
+    report = asyncio.run(run.run_once(at(55)))
+    assert report.by_reason.get("单元已选") == 1
+    subsumed = [item for item in ledger.deliveries_on(DAY0.date()) if item.expectation_id == "W"]
+    assert len(subsumed) == 1 and subsumed[0].reason == "单元已选"
+    assert {item.expectation_id for item in ledger.deliveries_on(DAY0.date())} == {"A", "B", "W"}
+
+
+# --- 段 6 Q18：存活变异补的断言 ----------------------------------------------------------------------------------
+
+
+def test_a_window_that_closed_between_two_ticks_is_still_opened_by_the_later_tick(tmp_path) -> None:
+    """时窗在两拍之间开、又在两拍之间关（09:07–09:12，拍点 09:00、09:15）：09:15 那一拍的区间盖到了它，照样决定
+    （M59：改成"终点不早于此刻"就丢了这次机会）。"""
+
+    run, ledger = stage(tmp_path, tick_seconds=900.0)
+    ledger.record_expectation(expectation("between", DAY0, window=(7, 12)))
+    assert asyncio.run(run.run_once(DAY0)).decided == 0
+    assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=15))).by_reason == {"影子": 1}
+
+
+def test_the_window_end_moment_itself_is_still_inside_the_window(tmp_path) -> None:
+    """拍点恰在时窗终点：时窗还没过完，不是时窗末那一拍（M60：``<`` 改 ``<=``）；下一拍才是。"""
+
+    run, ledger = stage(tmp_path, tick_seconds=900.0)
+    earn(ledger)
+    ledger.record_expectation(expectation("e", DAY0, window=(10, 30)))
+    assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=15), NO_ROWS)).by_reason == {"等时窗末": 1}
+    assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=30), NO_ROWS)).decided == 0
+    assert asyncio.run(run.run_once(DAY0 + timedelta(minutes=45), NO_ROWS)).by_reason == {"待取": 1}
+
+
+def test_the_model_is_not_asked_once_the_days_cap_is_full(tmp_path) -> None:
+    """名额满了不问模型（成本保护，M63：去掉这一道也全绿）：记「名额已满」，一次也没调。"""
+
+    client, provider = recording_client([LIKE, LIKE])
+    run, ledger = stage(tmp_path, judge=Judge(client, retries=0, delay_seconds=0.0))
+    for index, kind in enumerate(("s-k0007", "s-k0008")):
+        said = expectation(f"said-{index}", DAY0, kind=kind)
+        ledger.record_expectation(said)
+        ledger.record_delivery(said.day, Delivery(said.expectation_id, DAY0, 1, True, "说了", 1.0, "话"))
+    earn(ledger)
+    ledger.record_expectation(expectation("e", DAY0))
+    asyncio.run(run.run_once(DAY0 + timedelta(minutes=15), NO_ROWS))
+    closing = asyncio.run(run.run_once(DAY0 + timedelta(minutes=41), NO_ROWS))
+    assert closing.by_reason == {"名额已满": 1} and provider.calls == 0
+
+
+def test_a_later_input_joins_the_basis_not_a_member_the_unit_already_decided_for(tmp_path) -> None:
+    """后来才到时窗的同一类输入只并进依据，不并进「单元已选」的成员（M66：成员也被当成依据，后来并进的那条引错依据，
+    结算的说出时刻就跟着错）：和成员连着、和依据不连着的那条自己开一个单元。"""
+
+    from dataclasses import replace
+
+    def at(minutes: int) -> datetime:
+        return DAY0 + timedelta(minutes=minutes)
+
+    def made(identity: str, trigger: str, observed: int, window: tuple[int, int], deadline: int) -> Expectation:
+        item = expectation(identity, DAY0, trigger=trigger)
+        return replace(
+            item,
+            observed_from=at(observed),
+            formed_at=at(observed),
+            window=(at(window[0]), at(window[1])),
+            deadline=at(deadline),
+        )
+
+    run, ledger = stage(tmp_path, tick_seconds=900.0)
+    for trigger in ("a", "m", "f"):
+        earn(ledger, trigger=trigger)
+    ledger.record_expectation(made("A", "a", 0, (10, 40), 60))  # 依据：09:00 → 10:00
+    ledger.record_expectation(made("M", "m", 30, (90, 120), 180))  # 和 A 连着、还没到时窗：成员
+    asyncio.run(run.run_once(at(15)))
+    member = next(item for item in ledger.deliveries_on(DAY0.date()) if item.expectation_id == "M")
+    assert member.reason == "单元已选" and member.evidence == ("单元:A",)
+    ledger.record_expectation(made("F", "f", 90, (100, 130), 150))  # 和 M 连着、和 A 不连着
+    asyncio.run(run.run_once(at(105)))
+    later = [item for item in ledger.deliveries_on(DAY0.date()) if item.expectation_id == "F"]
+    assert later and all(item.evidence != ("单元:M",) for item in later)

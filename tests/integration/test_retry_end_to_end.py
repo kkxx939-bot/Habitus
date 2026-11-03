@@ -7,12 +7,16 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 
-import pytest
-
-from habitus.behavior.fusion.lanes.session import SessionLane, SessionTurnDescriber, SessionTurnRecorder, split_turns
+from habitus.behavior.fusion.lanes.session import (
+    SessionLane,
+    SessionTurnDescriber,
+    SessionTurnRecorder,
+    TurnHandler,
+    split_turns,
+)
 from habitus.behavior.model import BehaviorKind
-from habitus.behavior.retry import RetryBranch, RetryKind, RetryStage
-from habitus.behavior.retry.handlers import ChainHandler, TurnHandler
+from habitus.behavior.reduction.failed import ChainHandler
+from habitus.behavior.retry import Reduction, RetryBranch, RetryKind, RetryStage
 from habitus.scene.views import DayIndexCache
 from habitus.series.reader import admitted
 from tests.unit.behavior import session_fixtures as sf
@@ -38,13 +42,15 @@ class Site:
 
     def lane(self, bodies):  # type: ignore[no-untyped-def]
         chat, provider = sf.client(bodies)
-        session = SessionLane(SessionTurnDescriber(chat, zone=sf.ZONE), self.recorder, backlog=self.backlog)
+        session = SessionLane(
+            SessionTurnDescriber(chat, zone=sf.ZONE), self.recorder, backlog=self.backlog, tree=self.h.tree
+        )
         return session, provider
 
     def stage(self, session) -> RetryStage:  # type: ignore[no-untyped-def]
-        async def reduce() -> str | None:
+        async def reduce() -> Reduction:
             await self.h.runner.run_once()
-            return None
+            return Reduction.DONE
 
         handlers = {RetryKind.TURN: TurnHandler(session), RetryKind.CHAIN: ChainHandler(self.h.runner.failed_chains)}
         return RetryStage([RetryBranch("session", self.backlog, handlers, reduce)])
@@ -81,7 +87,7 @@ def test_a_given_up_turn_is_recovered_at_night_and_the_gap_stops_counting(tmp_pa
     site.h.now = sf.at(600)
     report = asyncio.run(site.stage(night_lane).run_once(through=_day(turn)))
 
-    assert (report.recovered, report.taken, report.unreduced) == (1, 1, ())
+    assert (report.recovered, report.taken, report.ready) == (1, 1, True)
     assert provider.calls == 1 and site.occurrences() == [NAME]
     assert not site.has_gap(turn)  # 当晚结算按天读树看到的是那条行为，不是空白
     assert site.backlog.count() == 0 and site.h.judgements.list() == () and site.h.observations.list() == ()
@@ -110,9 +116,9 @@ def test_a_failed_retry_does_not_pin_the_seal_once_the_original_coverage_is_gone
     site.h.receipts.put = broken  # type: ignore[method-assign]
     night_lane, _ = site.lane([sf.description(NAME)])
     site.h.now = sf.at(600)
-    # 磁盘错误不是"内容不合格"：抛出去，夜批记 ``retry_failed``、健康面看得见；这一次写下的已经撤回
-    with pytest.raises(OSError):
-        asyncio.run(site.stage(night_lane).run_once(through=_day(turn)))
+    # 磁盘错误不是"内容不合格"：只拦这一项、记成处理不了（健康面列出，裁定 94 第 8 条）；这一次写下的已经撤回
+    report = asyncio.run(site.stage(night_lane).run_once(through=_day(turn)))
+    assert report.deterministic == 1 and report.recovered == 0
     site.h.receipts.put = original  # type: ignore[method-assign]
     assert site.h.observations.list() == () and site.h.judgements.list() == ()
 
@@ -121,3 +127,31 @@ def test_a_failed_retry_does_not_pin_the_seal_once_the_original_coverage_is_gone
     asyncio.run(next_lane.consume([tomorrow], sources=("session-source-2",)))
     site.h.now = sf.at(1000) + timedelta(hours=1)
     assert asyncio.run(site.h.runner.run_once()).published_occurrences == 1
+
+
+def test_a_turn_whose_evidence_a_concurrent_sweep_released_mid_retry_is_not_counted_as_recovered(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """E10：夜里重试重新落下凭据、还没落判断时，白天的一轮归约正好跑完、把（已被原「没读懂」覆盖的）凭据释放了——那条
+    判断落不了树、只剩原来那段「没读懂」；重试报告不能说它补回了。"""
+
+    site = Site(tmp_path)
+    turn = _turn("统计一下行数", 0)
+    day_lane, _ = site.lane([])
+    asyncio.run(day_lane.abandon([turn], reason="quota"))
+    asyncio.run(site.h.runner.run_once())
+    night_lane, provider = site.lane([sf.description(NAME)])
+    site.h.now = sf.at(600)
+    original = site.h.judgements.put_payload
+    raced: list[int] = []
+
+    def put_after_a_concurrent_sweep(payload):  # type: ignore[no-untyped-def]
+        if not raced:
+            raced.append(1)
+            asyncio.run(site.h.runner.run_once())  # 另一个线程里的白天 sweep，在"凭据已落、判断未落"之间跑完
+        return original(payload)
+
+    site.h.judgements.put_payload = put_after_a_concurrent_sweep  # type: ignore[method-assign]
+    report = asyncio.run(site.stage(night_lane).run_once(through=_day(turn)))
+
+    assert raced and provider.calls == 1
+    assert site.occurrences() == [] and site.has_gap(turn)
+    assert (report.taken, report.recovered, report.deterministic) == (1, 0, 1)

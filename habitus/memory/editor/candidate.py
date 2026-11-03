@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import date
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, replace
+from datetime import date, tzinfo
 from enum import Enum
 from itertools import combinations
 from typing import Any, ClassVar
@@ -53,6 +53,7 @@ _MEMORY_OUTPUT_FIELDS = tuple(_OUTPUT_FIELD_TO_KIND)
 _IDENTITY_OUTPUT_FIELD = "identity_proposals"
 _RELATION_OUTPUT_FIELD = "relations"
 _OUTPUT_FIELDS = (*_MEMORY_OUTPUT_FIELDS, _IDENTITY_OUTPUT_FIELD, _RELATION_OUTPUT_FIELD)
+_MISSING = object()
 
 
 class MemoryIdentityProposalType(str, Enum):
@@ -224,6 +225,40 @@ class MemoryCandidate:
         if self.kind is MemoryKind.INTENTION:
             result["confirmed"] = self.confirmed
         return result
+
+
+@dataclass(frozen=True)
+class MemoryCandidateViolation:
+    """一条记忆候选、关系候选或身份提议没通过来源校验：是哪一条、违反了哪条规则。"""
+
+    item: MemoryCandidate | MemoryRelationCandidate | MemoryIdentityProposal
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.item, MemoryCandidate | MemoryRelationCandidate | MemoryIdentityProposal):
+            raise TypeError("violation item must be a memory candidate, relation candidate or identity proposal")
+        if not isinstance(self.reason, str) or not self.reason.strip():
+            raise ValueError("violation reason must be non-empty text")
+
+    def describe(self) -> str:
+        """一行说清是哪一条、违反了什么，供修补轮请求与 Job 审计使用。"""
+
+        item = self.item
+        if isinstance(item, MemoryCandidate):
+            label = f"{_KIND_TO_OUTPUT_FIELD[item.kind]} page_id={item.page_id}"
+        elif isinstance(item, MemoryRelationCandidate):
+            label = f"relations {item.action.value} {item.from_page_id}->{item.to_page_id} {item.link_type.value}"
+        else:
+            label = f"identity_proposals {item.proposal_type.value} source_page_id={item.source_page_id}"
+        return f"{label}: {self.reason}"
+
+
+def _violation_key(item: object) -> object:
+    """同一批里认出同一条：记忆候选按批内唯一的 page_id，关系与身份提议按自身的值。"""
+
+    if isinstance(item, MemoryCandidate):
+        return ("candidate", item.page_id)
+    return item
 
 
 @dataclass(frozen=True)
@@ -421,8 +456,28 @@ class MemoryCandidateBatch:
         segment: ConversationSegment,
         old_memories: MemorySnapshotBatch,
         page_ids: MemoryPageIdMap,
+        *,
+        zone: tzinfo,
     ) -> MemoryCandidateBatch:
-        """绑定原始会话和旧记忆，执行无法由静态 JSON Schema 表达的约束。"""
+        """绑定原始会话和旧记忆，执行无法由静态 JSON Schema 表达的约束；有一条不过就明确失败。"""
+
+        violations = self.context_violations(segment, old_memories, page_ids, zone=zone)
+        if violations:
+            raise MemoryCandidateError(violations[0].reason)
+        return self
+
+    def context_violations(
+        self,
+        segment: ConversationSegment,
+        old_memories: MemorySnapshotBatch,
+        page_ids: MemoryPageIdMap,
+        *,
+        zone: tzinfo,
+    ) -> tuple[MemoryCandidateViolation, ...]:
+        """逐条列出通不过来源校验的候选、关系与身份提议；日期按主体所在地 ``zone`` 的本地日算。
+
+        page_id 表与本批完整旧快照不一致是系统自身的错，不落到哪一条上，直接明确失败。
+        """
 
         if not isinstance(segment, ConversationSegment):
             raise TypeError("segment must be a ConversationSegment")
@@ -430,24 +485,68 @@ class MemoryCandidateBatch:
             raise TypeError("old_memories must be a MemorySnapshotBatch")
         if not isinstance(page_ids, MemoryPageIdMap):
             raise TypeError("page_ids must be a MemoryPageIdMap")
-        self._validate_page_references(old_memories, page_ids)
-        self._validate_identity_relation_separation()
-        self._validate_relation_removals(old_memories, page_ids)
-        self._validate_tool_sources(segment)
-        self._validate_event_invariants(segment)
-        self._validate_completed_intentions(old_memories)
-        return self
-
-    def _validate_page_references(
-        self,
-        old_memories: MemorySnapshotBatch,
-        page_ids: MemoryPageIdMap,
-    ) -> None:
+        if not isinstance(zone, tzinfo):
+            raise TypeError("zone must be a tzinfo")
         expected_old_uris = {snapshot.identity for snapshot in old_memories.snapshots if snapshot.exists}
         mapped_old_uris = {uri for _page_id, uri in page_ids.existing_items()}
         if mapped_old_uris != expected_old_uris:
             raise MemoryCandidateError("page_id map does not match the complete old-memory snapshot batch")
+        return (
+            *self._page_reference_violations(page_ids),
+            *self._identity_relation_violations(),
+            *self._relation_removal_violations(old_memories, page_ids),
+            *self._tool_source_violations(segment, old_memories),
+            *self._event_violations(segment, zone),
+            *self._completed_intention_violations(old_memories),
+        )
 
+    def without_context_violations(
+        self,
+        segment: ConversationSegment,
+        old_memories: MemorySnapshotBatch,
+        page_ids: MemoryPageIdMap,
+        *,
+        zone: tzinfo,
+    ) -> tuple[MemoryCandidateBatch, tuple[MemoryCandidateViolation, ...]]:
+        """剔除通不过来源校验的条目，连同引用被剔候选的关系与身份提议；返回剩下的批次与剔掉的每一条及原因。"""
+
+        batch = self
+        dropped: list[MemoryCandidateViolation] = []
+        while True:
+            violations = batch.context_violations(segment, old_memories, page_ids, zone=zone)
+            if not violations:
+                return batch, tuple(dropped)
+            removed: dict[object, MemoryCandidateViolation] = {}
+            for violation in violations:
+                removed.setdefault(_violation_key(violation.item), violation)
+            dropped_page_ids = {
+                violation.item.page_id for violation in removed.values() if isinstance(violation.item, MemoryCandidate)
+            }
+            for relation in batch.relations:
+                if dropped_page_ids & {relation.from_page_id, relation.to_page_id}:
+                    removed.setdefault(
+                        relation, MemoryCandidateViolation(relation, "relation references a dropped memory candidate")
+                    )
+            for proposal in batch.identity_proposals:
+                if proposal.target_page_id in dropped_page_ids:
+                    removed.setdefault(
+                        proposal,
+                        MemoryCandidateViolation(proposal, "identity proposal targets a dropped memory candidate"),
+                    )
+            dropped.extend(removed.values())
+
+            def keep(item: object, removed: dict[object, MemoryCandidateViolation] = removed) -> bool:
+                return _violation_key(item) not in removed
+
+            batch = replace(
+                batch,
+                **{
+                    field_name: tuple(item for item in getattr(batch, field_name) if keep(item))
+                    for field_name in self._FIELD_NAMES
+                },
+            )
+
+    def _page_reference_violations(self, page_ids: MemoryPageIdMap) -> Iterator[MemoryCandidateViolation]:
         available_page_ids = set(page_ids.page_ids())
         candidate_page_ids: set[int] = set()
         for candidate in self.iter_candidates():
@@ -456,57 +555,69 @@ class MemoryCandidateBatch:
             resolved_uri = page_ids.resolve(candidate.page_id)
             if candidate.page_id <= EXISTING_PAGE_ID_MAX:
                 if resolved_uri is None or resolved_uri != candidate_uri:
-                    raise MemoryCandidateError(
-                        "existing memory candidate must reuse the page_id assigned to its exact URI"
+                    yield MemoryCandidateViolation(
+                        candidate, "existing memory candidate must reuse the page_id assigned to its exact URI"
                     )
             elif old_page_id is not None:
-                raise MemoryCandidateError("candidate for an existing memory URI must reuse its existing page_id")
+                yield MemoryCandidateViolation(
+                    candidate, "candidate for an existing memory URI must reuse its existing page_id"
+                )
             available_page_ids.add(candidate.page_id)
             candidate_page_ids.add(candidate.page_id)
 
         for relation in self.relations:
             if relation.from_page_id not in available_page_ids:
-                raise MemoryCandidateError("relation candidate references an unknown from_page_id")
-            if relation.to_page_id not in available_page_ids:
-                raise MemoryCandidateError("relation candidate references an unknown to_page_id")
+                yield MemoryCandidateViolation(relation, "relation candidate references an unknown from_page_id")
+            elif relation.to_page_id not in available_page_ids:
+                yield MemoryCandidateViolation(relation, "relation candidate references an unknown to_page_id")
 
         for proposal in self.identity_proposals:
             if proposal.source_page_id not in page_ids.page_ids():
-                raise MemoryCandidateError("identity proposal source is not a complete old-memory page_id")
-            if proposal.source_page_id in candidate_page_ids:
-                raise MemoryCandidateError("identity proposal source cannot also appear as a memory candidate")
-            if proposal.target_page_id is not None and proposal.target_page_id not in available_page_ids:
-                raise MemoryCandidateError("identity proposal references an unknown target_page_id")
-            if (
+                yield MemoryCandidateViolation(
+                    proposal, "identity proposal source is not a complete old-memory page_id"
+                )
+            elif proposal.source_page_id in candidate_page_ids:
+                yield MemoryCandidateViolation(
+                    proposal, "identity proposal source cannot also appear as a memory candidate"
+                )
+            elif proposal.target_page_id is not None and proposal.target_page_id not in available_page_ids:
+                yield MemoryCandidateViolation(proposal, "identity proposal references an unknown target_page_id")
+            elif (
                 proposal.proposal_type is MemoryIdentityProposalType.SAME_MEMORY
                 and proposal.target_page_id not in candidate_page_ids
             ):
-                raise MemoryCandidateError("same_memory target must also appear as a fully planned memory candidate")
+                yield MemoryCandidateViolation(
+                    proposal, "same_memory target must also appear as a fully planned memory candidate"
+                )
 
-    def _validate_identity_relation_separation(self) -> None:
+    def _identity_relation_violations(self) -> Iterator[MemoryCandidateViolation]:
         """待退休来源不能同时参与显式关系变更。"""
 
         retired_sources = {proposal.source_page_id for proposal in self.identity_proposals}
         for relation in self.relations:
             if relation.from_page_id in retired_sources or relation.to_page_id in retired_sources:
-                raise MemoryCandidateError("identity proposal source cannot also be referenced by a relation candidate")
+                yield MemoryCandidateViolation(
+                    relation, "identity proposal source cannot also be referenced by a relation candidate"
+                )
 
-    def _validate_relation_removals(
+    def _relation_removal_violations(
         self,
         old_memories: MemorySnapshotBatch,
         page_ids: MemoryPageIdMap,
-    ) -> None:
+    ) -> Iterator[MemoryCandidateViolation]:
         """REMOVE 必须逐字命中已完整读取且双向一致的旧关系。"""
 
         for relation in self.relations:
             if relation.action is not MemoryRelationAction.REMOVE:
                 continue
             if relation.from_page_id > EXISTING_PAGE_ID_MAX or relation.to_page_id > EXISTING_PAGE_ID_MAX:
-                raise MemoryCandidateError("relation remove must reference two existing memory page_ids")
+                yield MemoryCandidateViolation(relation, "relation remove must reference two existing memory page_ids")
+                continue
             from_uri = page_ids.resolve(relation.from_page_id)
             to_uri = page_ids.resolve(relation.to_page_id)
             if from_uri is None or to_uri is None:
-                raise MemoryCandidateError("relation remove references an unresolved existing page_id")
+                yield MemoryCandidateViolation(relation, "relation remove references an unresolved existing page_id")
+                continue
             stored = MemoryStoredLink(
                 from_uri=MemoryURI.parse(from_uri),
                 to_uri=MemoryURI.parse(to_uri),
@@ -522,11 +633,24 @@ class MemoryCandidateBatch:
                 or not isinstance(source.value, MemoryDocument)
                 or not isinstance(target.value, MemoryDocument)
             ):
-                raise MemoryCandidateError("relation remove requires both complete old endpoint snapshots")
-            if stored not in source.value.links or stored not in target.value.backlinks:
-                raise MemoryCandidateError("relation remove does not match a complete existing Link/Backlink pair")
+                yield MemoryCandidateViolation(
+                    relation, "relation remove requires both complete old endpoint snapshots"
+                )
+            elif stored not in source.value.links or stored not in target.value.backlinks:
+                yield MemoryCandidateViolation(
+                    relation, "relation remove does not match a complete existing Link/Backlink pair"
+                )
 
-    def _validate_tool_sources(self, segment: ConversationSegment) -> None:
+    def _tool_source_violations(
+        self,
+        segment: ConversationSegment,
+        old_memories: MemorySnapshotBatch,
+    ) -> Iterator[MemoryCandidateViolation]:
+        """工具候选要有本段成功调用；本段新写的 failure_recovery 要有本段"失败后成功"。
+
+        与同一旧工具记忆逐值相同、原样带过来的 failure_recovery 已有来源，不再要求本段证据。
+        """
+
         calls = {
             message.tool_call_id: message
             for message in segment.messages
@@ -551,38 +675,51 @@ class MemoryCandidateBatch:
         for candidate in self.tools:
             tool_name = candidate.fields.get("tool_name")
             if not isinstance(tool_name, str) or tool_name not in successful_names:
-                raise MemoryCandidateError("tool candidate requires a matching successful tool_call/tool_result pair")
+                yield MemoryCandidateViolation(
+                    candidate, "tool candidate requires a matching successful tool_call/tool_result pair"
+                )
+                continue
             if "failure_recovery" not in candidate.fields:
+                continue
+            if candidate.fields["failure_recovery"] == _old_field_value(candidate, old_memories, "failure_recovery"):
                 continue
             failures = failed_at.get(tool_name, [])
             successes = succeeded_at.get(tool_name, [])
             if not any(failure < success for failure in failures for success in successes):
-                raise MemoryCandidateError("tool failure_recovery requires a failure followed by a successful result")
+                yield MemoryCandidateViolation(
+                    candidate, "tool failure_recovery requires a failure followed by a successful result"
+                )
 
-    def _validate_completed_intentions(self, old_memories: MemorySnapshotBatch) -> None:
+    def _completed_intention_violations(self, old_memories: MemorySnapshotBatch) -> Iterator[MemoryCandidateViolation]:
         for candidate in self.intentions:
             if candidate.fields.get("status") != "completed":
                 continue
             if candidate.confirmed is not True:
-                raise MemoryCandidateError("completed intention requires explicit confirmation in this conversation")
+                yield MemoryCandidateViolation(
+                    candidate, "completed intention requires explicit confirmation in this conversation"
+                )
+                continue
             uri = str(MemoryURI.from_address(candidate.address))
             snapshot = old_memories.get(uri)
             if snapshot is None or not snapshot.exists or snapshot.value is None:
-                raise MemoryCandidateError("completed intention must target an existing intention read in this batch")
-            if not isinstance(snapshot.value, MemoryDocument):
-                raise MemoryCandidateError("completed intention snapshot is not a memory document")
-            if snapshot.value.kind is not MemoryKind.INTENTION:
-                raise MemoryCandidateError("completed intention snapshot has the wrong memory type")
+                yield MemoryCandidateViolation(
+                    candidate, "completed intention must target an existing intention read in this batch"
+                )
+            elif not isinstance(snapshot.value, MemoryDocument):
+                yield MemoryCandidateViolation(candidate, "completed intention snapshot is not a memory document")
+            elif snapshot.value.kind is not MemoryKind.INTENTION:
+                yield MemoryCandidateViolation(candidate, "completed intention snapshot has the wrong memory type")
 
-    def _validate_event_invariants(self, segment: ConversationSegment) -> None:
-        """只校验模型语义结果中可确定验证的 Event 日期边界。"""
+    def _event_violations(self, segment: ConversationSegment, zone: tzinfo) -> Iterator[MemoryCandidateViolation]:
+        """只校验模型语义结果中可确定验证的 Event 日期边界：不晚于片段最后一条消息在主体所在地的那一天。"""
 
+        latest = segment.ended_at.astimezone(zone).date()
         for candidate in self.events:
             event_date = candidate.address.event_date
             if not isinstance(event_date, date):  # pragma: no cover - Event 地址由 Schema 严格生成。
                 raise MemoryCandidateError("event candidate requires a calendar date")
-            if event_date > segment.ended_at.date():
-                raise MemoryCandidateError("future event date cannot represent an occurred Event")
+            if event_date > latest:
+                yield MemoryCandidateViolation(candidate, "future event date cannot represent an occurred Event")
 
     def to_dict(self) -> dict[str, object]:
         """输出与模型 JSON Schema 完全一致的候选批次。"""
@@ -599,6 +736,15 @@ class MemoryCandidateBatch:
         """按 Schema 字段顺序返回本批次的全部记忆候选。"""
 
         return tuple(candidate for field_name in self._MEMORY_FIELD_NAMES for candidate in getattr(self, field_name))
+
+
+def _old_field_value(candidate: MemoryCandidate, old_memories: MemorySnapshotBatch, field_name: str) -> object:
+    """返回候选同一 URI 的完整旧记忆里该字段的值；没有旧节点或旧字段时返回缺失标记。"""
+
+    snapshot = old_memories.get(str(MemoryURI.from_address(candidate.address)))
+    if snapshot is None or not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
+        return _MISSING
+    return snapshot.value.fields.get(field_name, _MISSING)
 
 
 def _candidate_item_schema(schema: MemoryTypeSchema) -> dict[str, object]:
@@ -808,6 +954,7 @@ __all__ = [
     "MemoryCandidate",
     "MemoryCandidateBatch",
     "MemoryCandidateError",
+    "MemoryCandidateViolation",
     "MemoryIdentityProposal",
     "MemoryIdentityProposalBasis",
     "MemoryIdentityProposalType",

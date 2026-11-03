@@ -13,7 +13,7 @@ from pathlib import Path
 
 from habitus.behavior.kinds.changes import AddClass, ChangeReason, VersionRecord
 from habitus.behavior.tree.dirty_days import DirtyDayLog
-from tests.unit.behavior.kinds_fixtures import NOW, named_classes
+from tests.unit.behavior.kinds_fixtures import NOW, catalog_in_sync, named_classes
 from tests.unit.behavior.test_reduction_kinds import setup
 
 _PAUSE_SECONDS = 0.3
@@ -79,7 +79,7 @@ def test_truncating_the_vocabulary_journal_never_loses_a_concurrent_append(tmp_p
     _race(truncate, append)
 
     assert store.read().version == base + 2
-    assert store.catalog_in_sync()
+    assert catalog_in_sync(store)
 
 
 def test_truncating_the_dirty_day_log_never_loses_a_concurrent_record(tmp_path: Path) -> None:

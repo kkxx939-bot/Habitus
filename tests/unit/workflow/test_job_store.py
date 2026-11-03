@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from habitus.infrastructure.store.contracts.path_lock import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.conversation import ConversationAddress
 from habitus.memory.workflow.jobs import (
     MemoryJobBlockedError,
@@ -19,6 +18,7 @@ from habitus.memory.workflow.jobs import (
     MemoryJobStore,
 )
 from tests.helpers import BASE_TIME, closed_turn, segment
+from tests.lock_store import ProcessLocalLockStore
 
 
 class Clock:
@@ -187,3 +187,34 @@ def test_durable_failed_job_without_error_is_rejected_as_corrupt_state(tmp_path:
 def test_retry_delay_is_bounded_exponential() -> None:
     config = MemoryJobConfig(retry_base_delay_seconds=2, retry_max_delay_seconds=5)
     assert [config.retry_delay_seconds(attempt) for attempt in (1, 2, 3, 4)] == [2, 4, 5, 5]
+
+
+def test_waiting_for_the_model_uses_its_own_long_backoff_and_never_exhausts_attempts(tmp_path: Path) -> None:
+    """模型此刻用不了（余额、鉴权、断网）：长退避排回队列、不计入 max_attempts，停多久都不进 FAILED；模型恢复后
+    下一次认领照常跑，别的失败把"等模型"清零、照旧按 max_attempts 收（裁定 80 问题 2）。"""
+
+    clock = Clock()
+    jobs = store(tmp_path, clock, max_attempts=2)
+    address = ConversationAddress("conversation-a", date(2026, 7, 1))
+    job = jobs.activate(jobs.stage(address, source("conversation-a", 0)))
+
+    delays = []
+    for _ in range(12):  # 远多于 max_attempts=2
+        waiting = jobs.fail(jobs.claim(job, "worker"), RuntimeError("Insufficient Balance"), waits_for_model=True)
+        assert waiting.status is MemoryJobStatus.QUEUED and waiting.waiting_for_model
+        assert waiting.attempts == 0
+        assert waiting.next_attempt_at is not None
+        delays.append((waiting.next_attempt_at - clock.now).total_seconds())
+        with pytest.raises(MemoryJobNotReadyError):
+            jobs.claim(waiting, "worker")
+        clock.advance(seconds=int(delays[-1]))
+        job = waiting
+    assert delays[:4] == [60, 120, 240, 480] and delays[-1] == 86_400
+    assert jobs.oldest_uncommitted() == job  # 落盘后读回同一份（含 model_waits）
+
+    # 恢复之后别的失败：等模型清零，照旧按 max_attempts 收
+    retried = jobs.fail(jobs.claim(job, "worker"), RuntimeError("temporary"), retryable=True)
+    assert retried.status is MemoryJobStatus.QUEUED and retried.model_waits == 0 and retried.attempts == 1
+    clock.advance(seconds=1)
+    failed = jobs.fail(jobs.claim(retried, "worker"), RuntimeError("still broken"), retryable=True)
+    assert failed.status is MemoryJobStatus.FAILED and not failed.waiting_for_model

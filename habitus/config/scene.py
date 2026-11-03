@@ -12,28 +12,10 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field, fields
-from datetime import time
 from typing import Any
 
-from habitus.config.loader import construct_config
-
-#: 整晚那一趟的本地时刻：两位小时（00–23）、两位分钟。
-_CLOCK = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
-
-# (字段, 下界, 上界)：与 scene/relations/config.py 的校验一致。
-_PROBABILITIES = ("fdr", "forward_alpha", "forward_power", "heterogeneity_alpha", "interval_level")
-_LIFTS = ("min_absolute_lift", "min_relative_lift")
-_COUNTS = (
-    "forward_max_antecedents",
-    "bootstrap_rounds",
-    "exact_strata_limit",
-    "first_seen_min_days",
-    "first_seen_min_blocks",
-    "condition_ask_min_antecedents",
-    "max_combined_conditions",
-)
+from habitus.config.loader import construct_config, require_override_types
 
 
 @dataclass(frozen=True)
@@ -57,28 +39,8 @@ class SceneRelationsConfig:
     max_combined_conditions: int | None = None
 
     def __post_init__(self) -> None:
-        # 非法值在配置层就拒，不让它拖到组装期以裸异常爆。
-        for name in _PROBABILITIES:
-            value = getattr(self, name)
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int | float) or not 0.0 < value < 1.0
-            ):
-                raise ValueError(f"scene.relations.{name} must lie strictly between 0 and 1")
-        for name in _LIFTS:
-            value = getattr(self, name)
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int | float) or not 0.0 <= value < 1.0
-            ):
-                raise ValueError(f"scene.relations.{name} must lie in [0, 1)")
-        share = self.max_blind_share
-        if share is not None and (
-            isinstance(share, bool) or not isinstance(share, int | float) or not 0.0 < share <= 1.0
-        ):
-            raise ValueError("scene.relations.max_blind_share must lie in (0, 1]")
-        for name in _COUNTS:
-            value = getattr(self, name)
-            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
-                raise ValueError(f"scene.relations.{name} must be a positive integer")
+        # 这里只查类型；值域只在 scene/relations/config.py，组合根构造 RelationThresholds 时拒（带配置键）。
+        require_override_types(self, path="scene.relations")
 
     def overrides(self) -> dict[str, Any]:
         """写了的字段 → ``RelationThresholds`` 的同名字段。"""
@@ -88,15 +50,13 @@ class SceneRelationsConfig:
 
 @dataclass(frozen=True)
 class SceneConfig:
-    """语义关联层是否启用、关系检验的统计门槛，以及整晚那一趟的节拍（语义树没开就没有整晚，所以节拍归这里）。"""
+    """语义关联层是否启用、关系检验的统计门槛，以及整晚那一趟停机时等多久（语义树没开就没有整晚，所以归这里）。"""
 
     enabled: bool = False
     relations: SceneRelationsConfig = field(default_factory=SceneRelationsConfig)
     # 常态按峰分份时，峰的两边各放宽几槽的容差（待定档）。原来借预测树的 pool_half_width，预测树删除后归语义树自己（裁定 59）。
     baseline_slack_slots: int = 3
-    # 整晚那一趟在主体本地的几点跑（"HH:MM"）、停机时等它多久（运维数）。固定时刻而不是"进程一启动先跑、之后每隔一天"：
-    # 那一趟开头要重试白天读不懂的、只试一次（裁定 67 第 7 条），重启插件那一刻多半额度还没恢复；启动时只补跑错过的那一趟。
-    nightly_at: str = "04:00"
+    # 整晚那一趟停机时等它多久（运维数）。那一趟什么时候跑不是配置：前一天定稿完成就接着跑（裁定 94 第 1 条）。
     nightly_shutdown_timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:
@@ -110,16 +70,9 @@ class SceneConfig:
             raise ValueError("scene.baseline_slack_slots must be an integer between 0 and 96")
         if not isinstance(self.relations, SceneRelationsConfig):
             raise TypeError("scene.relations must be SceneRelationsConfig")
-        if not isinstance(self.nightly_at, str) or not _CLOCK.fullmatch(self.nightly_at):
-            raise ValueError("scene.nightly_at must be a local time written HH:MM")
         timeout = self.nightly_shutdown_timeout_seconds
         if isinstance(timeout, bool) or not isinstance(timeout, int | float) or not 1.0 <= float(timeout) <= 3_600.0:
             raise ValueError("scene.nightly_shutdown_timeout_seconds must be between 1 and 3600")
-
-    @property
-    def nightly_time(self) -> time:
-        hours, minutes = self.nightly_at.split(":")
-        return time(int(hours), int(minutes))
 
     @classmethod
     def from_mapping(cls, value: Any) -> SceneConfig:

@@ -12,14 +12,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import date
 
-from habitus.conditions import DAY_TYPE_KEY
+from habitus.conditions import DAY_TYPE_KEY, WEEKDAY_NAMES
 from habitus.foundation.integrity import canonical_digest
 from habitus.scene.advice.conditions import CONDITION_PROMPT_VERSION, ConditionProposer, Occasion
 from habitus.scene.advice.conditions import question_for as condition_question
 from habitus.scene.advice.model import PriorLevel, Proposal, ProposalBook, tidy_book
 from habitus.scene.advice.prior import PriorAdvisor
 from habitus.scene.advice.prior import question_for as prior_question
-from habitus.scene.advice.store import AdviceStore
+from habitus.scene.advice.store import AdviceStore, AdviceStoreError
 from habitus.scene.concepts.calendar_situations import calendar_key, is_calendar
 from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.relations import LaneTests, LaneTimeline, RelationKey, comparable
@@ -30,7 +30,6 @@ from habitus.scene.relations.spans import Chain
 OCCASIONS = 6
 #: 每次 A 带它当天之前的几件事。
 BEFORE = 3
-WEEKDAYS = "一二三四五六日"
 
 
 class RelationAdvice:
@@ -106,21 +105,26 @@ class RelationAdvice:
 
         lane, concepts = tests.line.lane, tests.concepts
         book = self.store.book(lane)
-        if self.conditions is not None and not self.cache_only:
-            book = await self._ask(tests, book, night, signals)
-        if not self.cache_only:
-            tidied = tidy_book(
-                book,
-                alive=lambda antecedent: antecedent in concepts,
-                compiles=_compiles,
-                max_refused_per_antecedent=MAX_REFUSED_PER_ANTECEDENT,
-            )
-            if tidied != book:
-                signals.append(
-                    f"advice: {lane} 提议簿清掉 {len(book.proposals) - len(tidied.proposals)} 条（前因已删、条件读不了、重复的拒因）"
+        try:
+            if self.conditions is not None and not self.cache_only:
+                book = await self._ask(tests, book, night, signals)
+            if not self.cache_only:
+                tidied = tidy_book(
+                    book,
+                    alive=lambda antecedent: antecedent in concepts,
+                    compiles=_compiles,
+                    max_refused_per_antecedent=MAX_REFUSED_PER_ANTECEDENT,
                 )
-                self.store.write_book(tidied)
-                book = tidied
+                if tidied != book:
+                    signals.append(
+                        f"advice: {lane} 提议簿清掉 {len(book.proposals) - len(tidied.proposals)} 条（前因已删、条件读不了、重复的拒因）"
+                    )
+                    self.store.write_book(tidied)
+                    book = tidied
+        except AdviceStoreError as exc:
+            # 提议簿写不出（超了单份上限等）：这一晚只用盘上已有的那份，其余照常；这一晚问到的没记下，下一晚会再问
+            signals.append(f"advice: {lane} 提议簿写不出（{exc}），这一晚只用盘上已有的提议")
+            book = self.store.book(lane)
         usable: dict[str, list[tuple[Condition, date]]] = {}
         for item in book.proposals:
             if item.condition is not None and item.proposed_on <= night and item.antecedent in concepts:
@@ -223,7 +227,7 @@ def occasions(tests: LaneTests, concepts: ConceptSet, chains: tuple[Chain, ...])
         ][-BEFORE:]
         found.append(
             Occasion(
-                moment=f"{record.started_at:%Y-%m-%d %H:%M}（周{WEEKDAYS[record.started_at.weekday()]}{_day_type(line, concepts, record.day)}）",
+                moment=f"{record.started_at:%Y-%m-%d %H:%M}（{WEEKDAY_NAMES[record.started_at.weekday()]}{_day_type(line, concepts, record.day)}）",
                 summary=record.summary,
                 goal=record.goal,
                 place=record.place,

@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -15,7 +14,7 @@ from typing import Any
 
 from habitus.behavior.kinds.calls import KindModelCaller, KindModelOutputError
 from habitus.behavior.kinds.ids import ClassId
-from habitus.behavior.kinds.model import BehaviorClass, BehaviorKindError
+from habitus.behavior.kinds.model import BehaviorClass, BehaviorKindError, sentence_key
 from habitus.behavior.kinds.revision.facts import Member
 from habitus.behavior.kinds.revision.proposals import Draft
 from habitus.behavior.kinds.rules import ENTRY_FORMAT, RULES_VERSION, SAMENESS_RULE
@@ -35,8 +34,6 @@ GROUPING_SYSTEM_PROMPT = f"""下面这些行为记录现在都归在同一个行
 
 {ENTRY_FORMAT}
 """
-
-_NOISE = re.compile(r"[\s，。、,.!！？?「」\"'“”]+")
 
 
 @dataclass(frozen=True)
@@ -154,13 +151,15 @@ async def group_members(
     for start in range(0, len(ordered), batch_size):
         batch = {f"M{i}": member for i, member in enumerate(ordered[start : start + batch_size], start=1)}
         earlier = {f"G{i}": group for i, group in enumerate(merged, start=1)}
+        # 前批组按位置认，不按值找：同一批两组归进同一个前批组时，第一组并进去之后那个组已换成新对象
+        positions = {f"G{i}": i - 1 for i in range(1, len(merged) + 1)}
         calls += 1
         try:
             raw = await _ask(caller, item, keyed_others, batch, earlier, max_steps=max_steps, max_examples=max_examples)
         except KindModelOutputError as exc:
             return (), calls, (f"kind_revision_grouping_rejected {item.id}: {exc}",)
         for group, existing in _groups(raw, batch, keyed_others, max_examples=max_examples):
-            index = _index_of(merged, earlier, existing, group)
+            index = _index_of(merged, positions, existing, group)
             if index is None:
                 merged.append(group)
             else:
@@ -168,9 +167,9 @@ async def group_members(
     return tuple(merged), calls, ()
 
 
-def _index_of(merged: Sequence[Group], earlier: Mapping[str, Group], existing: str | None, group: Group) -> int | None:
+def _index_of(merged: Sequence[Group], positions: Mapping[str, int], existing: str | None, group: Group) -> int | None:
     if existing is not None:
-        return merged.index(earlier[existing])
+        return positions[existing]
     if group.into is not None:
         return next((i for i, found in enumerate(merged) if found.into == group.into), None)
     key = sentence_key(group.draft.reminder)
@@ -238,7 +237,7 @@ def _groups(
 ) -> list[tuple[Group, str | None]]:
     found: list[tuple[Group, str | None]] = []
     for group in raw:
-        excludes: list[tuple[str, ClassId | str | None]] = [
+        excludes: list[tuple[str, ClassId | None]] = [
             (str(exclusion["text"]).strip(), classes[exclusion["goes_to"]].id if exclusion["goes_to"] else None)
             for exclusion in group["excludes"]
         ]
@@ -268,17 +267,10 @@ def _merge(first: Group, second: Group, *, max_examples: int) -> Group:
     return Group((*first.members, *second.members), draft, first.into)
 
 
-def sentence_key(text: str) -> str:
-    """两句提醒去掉空白与标点后逐字相同就当同一句（与 ``evidence`` 的"提醒句相同"同一口径）。"""
-
-    return _NOISE.sub("", text).casefold()
-
-
 __all__ = [
     "GROUPING_PROMPT_VERSION",
     "GROUPING_SYSTEM_PROMPT",
     "Group",
     "group_members",
     "grouping_schema",
-    "sentence_key",
 ]

@@ -1,4 +1,5 @@
-"""判缺失：这一次的空白比历史上最长的间隔还长；长度按看着的日子算，截尾作下界，样本不够不判。"""
+"""判缺失：这一次的空白比历史上最长的间隔还长；长度按看着的日子算，截尾作下界，样本不够不判。
+账的久别另要空白不短于 H 个典型间隔（历史间隔中位数，裁定 88 第 2 条）。"""
 
 from __future__ import annotations
 
@@ -8,10 +9,12 @@ import pytest
 
 from habitus.temporal.absence import (
     AbsenceVerdict,
+    GapSummary,
     Visit,
     effective_gaps,
     exceeds_longest,
     gap_between,
+    long_absence,
     open_gap,
 )
 
@@ -99,3 +102,87 @@ def test_gap_shape_is_validated() -> None:
         EffectiveGap(WED, WED, 1.0, False)
     with pytest.raises(ValueError):
         EffectiveGap(WED, WED + timedelta(days=1), -1.0, False)
+
+
+# --- 账的久别：比历史最长还长，且至少 H 个典型间隔（裁定 88 第 2 条）-------------------------------------
+
+
+def test_the_typical_gap_is_the_median_of_the_uncensored_gaps() -> None:
+    assert GapSummary().count == 0 and GapSummary().longest == 0.0 and GapSummary().typical == 0.0
+    odd = GapSummary().including(effective_gaps([Visit(WED + timedelta(days=d)) for d in (0, 1, 2, 9)]))
+    assert odd.lengths == ((1.0, 2), (7.0, 1)) and odd.count == 3 and odd.longest == 7.0 and odd.typical == 1.0
+    even = GapSummary(((1.0, 1), (3.0, 1), (5.0, 1), (40.0, 1)))
+    assert even.typical == 4.0  # 中间两个的平均
+    prompted = [Visit(WED), Visit(WED + timedelta(days=1)), Visit(WED + timedelta(days=30), prompted=True)]
+    assert GapSummary().including(effective_gaps(prompted)).lengths == ((1.0, 1),)  # 截尾那段不进
+    assert odd.including(()) is odd
+
+
+def test_a_gap_summary_refuses_unordered_repeated_or_empty_entries() -> None:
+    for lengths in (((3.0, 1), (1.0, 1)), ((1.0, 1), (1.0, 2)), ((1.0, 0),), ((-1.0, 1),)):
+        with pytest.raises(ValueError):
+            GapSummary(lengths)
+    with pytest.raises(IndexError):
+        GapSummary(((1.0, 1),))._ranked(1)
+
+
+def test_a_daily_habit_missing_one_day_is_not_a_long_absence_but_eight_typical_gaps_are() -> None:
+    """天天做：漏一天（空白 2 天）比历来都长，但不到 8 个典型间隔；空白 7 天不算、8 天算。"""
+
+    gaps = effective_gaps([Visit(WED + timedelta(days=d)) for d in range(20)])
+    last = WED + timedelta(days=19)
+
+    def verdict(blank: int) -> AbsenceVerdict:
+        current = open_gap(last, last + timedelta(days=blank))
+        assert current is not None
+        return long_absence(gaps, current, min_samples=2, typical_multiple=8.0)
+
+    assert verdict(2) is AbsenceVerdict.WITHIN
+    assert verdict(7) is AbsenceVerdict.WITHIN
+    assert verdict(8) is AbsenceVerdict.EXCEEDS
+
+
+def test_a_weekly_habit_stopped_three_weeks_is_not_a_long_absence_but_eight_weeks_is() -> None:
+    gaps = effective_gaps(_weekly(8))
+    last = WED + timedelta(days=49)
+    for weeks, expected in ((3, AbsenceVerdict.WITHIN), (8, AbsenceVerdict.EXCEEDS)):
+        current = open_gap(last, last + timedelta(weeks=weeks))
+        assert current is not None
+        assert long_absence(gaps, current, min_samples=2, typical_multiple=8.0) is expected
+    almost = open_gap(last, last + timedelta(days=55))
+    assert almost is not None and long_absence(gaps, almost, min_samples=2, typical_multiple=8.0) is AbsenceVerdict.WITHIN
+
+
+def test_a_long_absence_still_needs_to_beat_the_longest_gap_and_enough_samples() -> None:
+    """一次很长的旧间隔把"历史最长"抬上去：够 8 个典型间隔也还要比它长；样本不够不判。"""
+
+    gaps = effective_gaps([Visit(WED + timedelta(days=d)) for d in (0, 1, 2, 3, 23, 24, 25)])  # 中间停过 20 天
+    last = WED + timedelta(days=25)
+    for blank, expected in ((12, AbsenceVerdict.WITHIN), (20, AbsenceVerdict.WITHIN), (21, AbsenceVerdict.EXCEEDS)):
+        current = open_gap(last, last + timedelta(days=blank))
+        assert current is not None
+        assert long_absence(gaps, current, min_samples=2, typical_multiple=8.0) is expected
+    current = open_gap(last, last + timedelta(days=60))
+    assert current is not None
+    assert long_absence(gaps[:1], current, min_samples=2, typical_multiple=8.0) is AbsenceVerdict.UNDECIDED
+
+
+def test_a_long_absence_reads_the_typical_gap_across_the_compacted_part() -> None:
+    """压实那一段天天做、窗口里只剩几次每三天一次：典型间隔按全历史（1 天）算，空白 10 天算久别；只看窗口（3 天）就不算。"""
+
+    earlier = GapSummary(((1.0, 40),))
+    window = effective_gaps([Visit(WED + timedelta(days=d)) for d in (0, 3, 6, 9)])
+    current = open_gap(WED + timedelta(days=9), WED + timedelta(days=19))
+    assert current is not None
+    assert long_absence(window, current, min_samples=2, typical_multiple=8.0) is AbsenceVerdict.WITHIN
+    verdict = long_absence(window, current, min_samples=2, typical_multiple=8.0, earlier=earlier)
+    assert verdict is AbsenceVerdict.EXCEEDS
+
+
+def test_the_typical_multiple_must_be_a_positive_finite_number() -> None:
+    current = gap_between(WED, WED + timedelta(days=1))
+    for bad in (0.0, -1.0, float("inf"), float("nan"), True, "8"):
+        with pytest.raises(ValueError):
+            long_absence((), current, min_samples=2, typical_multiple=bad)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        long_absence((), current, min_samples=0, typical_multiple=8.0)

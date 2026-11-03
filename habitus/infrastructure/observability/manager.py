@@ -6,9 +6,9 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
-from habitus.config.observability import ObservabilityConfig
 from habitus.foundation.observability import ObservationEvent
 from habitus.infrastructure.observability.audit import AuditRecord, AuditStore
+from habitus.infrastructure.observability.config import ObservabilityConfig
 from habitus.infrastructure.observability.logging import StructuredLogObserver
 from habitus.infrastructure.observability.otel import OpenTelemetryBackend
 

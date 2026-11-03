@@ -1,5 +1,5 @@
 """会话 lane 对"开着的提醒"的接口（方案 30 第五节；裁定 61 第 5 条、62 第 2 条）：每段会话进融合时把还开着的提醒带给模型，
-模型判这段会话在回应哪一条、正 / 中 / 负；判出来的回应经这个口写回去。
+模型判这段会话在回应哪一条、正 / 中 / 负 / 已做；判出来的回应经这个口写回去。
 
 行为侧对预测层零知识：谁给开着的提醒、回应写到哪里，由组合根注入（``runtime/foresight_responses.py``）；没接时是
 ``NoReminders``——材料里没有这一节，模型也不被问。
@@ -13,8 +13,9 @@ from typing import Protocol, runtime_checkable
 
 from habitus.behavior.fusion.errors import BehaviorFusionError
 
-#: 回应的方向：模型只判这三种（裁定 61 第 4 条）。
-POLARITIES = ("正", "中", "负")
+#: 回应的方向：模型只判这四种（裁定 61 第 4 条；「已做」= 他说这一次已经做过了，裁定 91 第 3 条②）。
+#: 与预测层账本的方向（``foresight.ledger.POLARITIES``）同一组值，由组合根的桥原样写过去（行为侧不认识预测层，这里各写一份）。
+POLARITIES = ("正", "中", "负", "已做")
 
 
 @dataclass(frozen=True)

@@ -7,18 +7,23 @@ from pathlib import Path
 import pytest
 
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.infrastructure.vector import (
     VectorStoreBusyError,
     VectorStoreConflictError,
+    VectorStoreError,
     VectorStoreIntegrityError,
 )
 from habitus.memory.conversation import ConversationAddress
-from habitus.memory.editor.extraction import MemoryExtractionCapacityError
+from habitus.memory.editor.extraction import (
+    MemoryExtractionCapacityError,
+    MemoryExtractionError,
+    MemoryExtractionPermanentError,
+)
+from habitus.memory.editor.retrieval import MemoryRetrievalError
 from habitus.memory.editor.transaction import MemoryCommitConflictError
 from habitus.memory.model import MemoryKind
 from habitus.memory.uri import MemoryURI
-from habitus.memory.workflow.failure import memory_job_failure_is_retryable
+from habitus.memory.workflow.failure import MemoryJobFailureKind, memory_job_failure_kind
 from habitus.memory.workflow.jobs import MemoryJobConfig, MemoryJobError, MemoryJobLeaseLostError, MemoryJobStore
 from habitus.memory.workflow.receipt import (
     MemoryChangeReceipt,
@@ -30,9 +35,21 @@ from habitus.memory.workflow.receipt import (
     MemoryNodeChangeAction,
     MemoryPreparedNodeChange,
 )
-from habitus.model_client import ModelResponseError, ModelTransportError
+from habitus.model_client import (
+    ModelAuthenticationError,
+    ModelConfigurationError,
+    ModelContentSafetyError,
+    ModelInputTooLargeError,
+    ModelPermissionError,
+    ModelQuotaError,
+    ModelRateLimitError,
+    ModelResponseError,
+    ModelStructuredOutputError,
+    ModelTransportError,
+)
 from habitus.runtime.consistency import MemoryConsistencyService, MemoryConsistencyState
 from tests.helpers import BASE_TIME, closed_turn, codec, document, segment
+from tests.lock_store import ProcessLocalLockStore
 
 
 def source(*, sequence: int = 1) -> MemoryChangeSource:
@@ -145,28 +162,64 @@ def test_receipt_store_is_canonical_listed_by_sequence_and_cleanup_checks_state(
     assert not store.discard_prepared(first.source)
 
 
+WAITS = MemoryJobFailureKind.WAITS_FOR_MODEL
+RETRY = MemoryJobFailureKind.RETRYABLE
+PERMANENT = MemoryJobFailureKind.PERMANENT
+
+
+def wrapped(outer: BaseException, cause: BaseException) -> BaseException:
+    """照检索、抽取的写法把依赖的失败包一层（``raise outer from cause``）。"""
+
+    outer.__cause__ = cause
+    return outer
+
+
 @pytest.mark.parametrize(
-    ("error", "retryable"),
+    ("error", "kind"),
     [
-        (TimeoutError("slow"), True),
-        (MemoryCommitConflictError("changed"), True),
-        (VectorStoreBusyError("busy"), True),
-        (VectorStoreConflictError("generation"), True),
-        (ModelTransportError("network"), True),
-        (MemoryJobLeaseLostError("lost"), False),
-        (VectorStoreIntegrityError("corrupt"), False),
-        (ModelResponseError("invalid"), False),
-        (MemoryExtractionCapacityError("too large"), False),
-        (MemoryJobError("invalid state"), False),
-        (ValueError("bad input"), False),
-        (RuntimeError("unknown runtime fault"), True),
+        (TimeoutError("slow"), RETRY),
+        (MemoryCommitConflictError("changed"), RETRY),
+        (VectorStoreConflictError("generation"), RETRY),
+        # 向量库连不上（断网、超时、5xx、索引重建中）：与等模型同一档（裁定 82 第 3 条）
+        (VectorStoreBusyError("busy"), WAITS),
+        # 检索、抽取把依赖失败包成自己的 RuntimeError 之后按根因归类
+        (wrapped(MemoryRetrievalError("memory semantic search failed"), VectorStoreBusyError("down")), WAITS),
+        (wrapped(MemoryExtractionError("additional search failed"), VectorStoreBusyError("down")), WAITS),
+        (wrapped(MemoryRetrievalError("memory semantic search failed"), ModelTransportError("embedding")), WAITS),
+        (
+            wrapped(MemoryRetrievalError("memory semantic search failed"), VectorStoreError("401 Unauthorized")),
+            PERMANENT,
+        ),
+        (wrapped(MemoryRetrievalError("memory semantic search failed"), RuntimeError("unknown")), RETRY),
+        (wrapped(MemoryRetrievalError("memory semantic search failed"), ValueError("bad hit")), RETRY),
+        (wrapped(MemoryExtractionPermanentError("invalid"), ModelTransportError("network")), PERMANENT),
+        # 模型此刻用不了：断网 / 5xx、限流、额度或余额、鉴权、权限、服务端答坏 → 等模型恢复（裁定 80 问题 2）
+        (ModelTransportError("network"), WAITS),
+        (ModelRateLimitError("rate limit"), WAITS),
+        (ModelQuotaError("Insufficient Balance"), WAITS),
+        (ModelAuthenticationError("invalid key"), WAITS),
+        (ModelPermissionError("denied"), WAITS),
+        (ModelResponseError("invalid"), WAITS),
+        # 答复用完结构纠错仍不合格：Job 层有界重试（M14）
+        (ModelStructuredOutputError("model failed json_schema validation after 2 attempt(s)"), RETRY),
+        # 同一份输入再试也一样：第一次就 FAILED
+        (ModelInputTooLargeError("too large"), PERMANENT),
+        (ModelContentSafetyError("blocked"), PERMANENT),
+        (ModelConfigurationError("missing dependency"), PERMANENT),
+        (MemoryExtractionCapacityError("too large"), PERMANENT),
+        (MemoryExtractionPermanentError("invalid candidates"), PERMANENT),
+        (MemoryJobLeaseLostError("lost"), PERMANENT),
+        (VectorStoreIntegrityError("corrupt"), PERMANENT),
+        (MemoryJobError("invalid state"), PERMANENT),
+        (ValueError("bad input"), PERMANENT),
+        (RuntimeError("unknown runtime fault"), RETRY),
     ],
 )
-def test_failure_policy_retries_only_transient_or_unknown_runtime_faults(
+def test_failure_policy_waits_for_the_model_retries_transient_faults_and_stops_on_deterministic_ones(
     error: BaseException,
-    retryable: bool,
+    kind: MemoryJobFailureKind,
 ) -> None:
-    assert memory_job_failure_is_retryable(error) is retryable
+    assert memory_job_failure_kind(error) is kind
 
 
 def test_committed_receipt_does_not_finish_consistency_before_job_terminal_state(

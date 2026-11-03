@@ -94,7 +94,7 @@ def test_the_compaction_keeps_the_offsets_and_the_gaps_and_accumulates_across_ro
     assert base is not None
     assert base.through == (START + timedelta(days=44), "d044")  # 50 次里留最近 5 次
     assert dict(base.offsets) == {0: 27, 30: 18}  # 前 45 天：27 次准时、18 次早到 30 分钟
-    assert base.gap_count == 44 and base.longest_gap == 1.0 and base.last_day == date(2026, 2, 14)
+    assert base.gap_lengths == ((1.0, 44),) and base.last_day == date(2026, 2, 14)
     assert base.day_types == (None,)
     assert sorted(base.offset_history()) == [0] * 27 + [30] * 18
     # 读的一方忽略压实段以内残留的文件；同一窗口再压一次没有可压的
@@ -106,7 +106,7 @@ def test_the_compaction_keeps_the_offsets_and_the_gaps_and_accumulates_across_ro
     plan = compactable(again, open_day=None, diagnosis_since=now.date(), window=1)
     further = decode_compaction(encode_compaction(compact(again, plan, table=None)))
     assert further.through == (START + timedelta(days=48), "d048")
-    assert dict(further.offsets) == {0: 30, 30: 19} and further.gap_count == 48
+    assert dict(further.offsets) == {0: 30, 30: 19} and further.gap_lengths == ((1.0, 48),)
     assert further.last_day == date(2026, 2, 18)
 
 
@@ -123,7 +123,11 @@ def test_the_compaction_codec_refuses_other_schemas_and_contradictions() -> None
     with pytest.raises(ForesightError, match="offsets"):
         decode_compaction({**raw, "offsets": [[30, 1], [0, 2]]})
     with pytest.raises(ForesightError, match="gaps"):
-        decode_compaction({**raw, "gap_count": 0, "longest_gap": 3.0})
+        decode_compaction({**raw, "gap_lengths": [[3.0, 1], [1.0, 2]]})
+    with pytest.raises(ForesightError, match="gaps"):
+        decode_compaction({**raw, "gap_lengths": [[1.0, 0]]})
+    with pytest.raises(ForesightError, match="not valid"):
+        decode_compaction({key: value for key, value in raw.items() if key != "gap_lengths"})
 
 
 def test_settlement_reads_the_compacted_offsets_as_earlier_history() -> None:

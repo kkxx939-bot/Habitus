@@ -37,6 +37,7 @@ from habitus.foresight.ledger.model import (
     RELATION_BACKED,
     RETURNED,
     RULINGS,
+    SAID_DONE,
     SETTINGS,
     SOURCES,
     SPOKEN,
@@ -62,7 +63,11 @@ from habitus.foresight.ledger.model import (
 )
 from habitus.foresight.ledger.settle import (
     NOT_DONE,
+    AntecedentRow,
     antecedent_holds,
+    antecedent_holds_when_delivering,
+    antecedent_holds_when_settling,
+    counts_as_done,
     first_occurrence,
     omissions,
     rule_overdue,
@@ -77,6 +82,7 @@ __all__ = [
     "HOST_NEVER_CLAIMED",
     "SPOKEN",
     "NATURAL_HITS",
+    "SAID_DONE",
     "POLARITIES",
     "VOID",
     "RETURNED",
@@ -131,5 +137,9 @@ __all__ = [
     "rule_overdue",
     "settle",
     "NOT_DONE",
+    "AntecedentRow",
     "antecedent_holds",
+    "antecedent_holds_when_delivering",
+    "antecedent_holds_when_settling",
+    "counts_as_done",
 ]

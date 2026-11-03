@@ -7,6 +7,12 @@ from habitus.infrastructure.observability.logging import (
     configure_json_logging,
 )
 from habitus.infrastructure.observability.manager import ManagedObservability
+from habitus.infrastructure.observability.metrics import (
+    MetricRegistry,
+    MetricUpdate,
+    ObservabilitySnapshot,
+    project_metric_updates,
+)
 from habitus.infrastructure.observability.otel import OpenTelemetryBackend
 
 __all__ = [
@@ -14,7 +20,11 @@ __all__ = [
     "AuditStore",
     "JSONLogFormatter",
     "ManagedObservability",
+    "MetricRegistry",
+    "MetricUpdate",
+    "ObservabilitySnapshot",
     "OpenTelemetryBackend",
     "StructuredLogObserver",
     "configure_json_logging",
+    "project_metric_updates",
 ]

@@ -1,8 +1,9 @@
 """结算往账上写哪一笔事实（裁定 48–51、54、61）：纯函数，不读盘、不读时钟。组合根（``runtime/foresight_settlement.py``）
 读账本与行为树、把结果交给这里，再把这里给出的事实落账（2026-10-17 四方评审：原来这些规则与读写混在结算那一拍里，只能落盘来测）。
 
-- **结算**：一笔"做"的事实——准时 / 早到 / 晚了但做了是好，过期待决是坏；提醒后才做的是中性（强度 0：提醒的功劳不算习惯本身）。
-  提醒反馈不在账上，挂在行为单元上（``foresight.feedback``）。
+- **结算**：先过四条短路（``short_circuit_fact``）——前因不成立记作废、窗里有观测空白又没看到发生记中性、他回了"已经做过了"
+  又没看到发生记中性、别的账的提醒引出的发生记强度 0 的「提醒后发生」；都不是才按结果与强度写一笔"做"的事实（``settlement_fact``）——准时 / 早到 / 晚了但做了是好，
+  过期待决是坏；提醒后才做的是中性（强度 0：提醒的功劳不算习惯本身）。提醒反馈不在账上，挂在行为单元上（``foresight.feedback``）。
 - **后补**：覆盖那条过期待决的坏，按"补做那天离上一次发生隔了几天"在这一类**这次机会之前**的历史间隔里的位置打折。
 - **裁不裁**：以后还会不会被裁出不同的结果（下一次机会已形成且定稿 / 已隔得比最长的正常间隔还久 / 没有间隔可比）。
 """
@@ -13,9 +14,36 @@ from collections.abc import Iterable, Sequence
 from datetime import date, datetime, timedelta
 
 from habitus.foresight.clock import current_facts
-from habitus.foresight.ledger.model import NATURAL_HITS, AccountFact, Expectation, Ruling, Settlement
+from habitus.foresight.ledger.model import NATURAL_HITS, VOID, AccountFact, Expectation, Ruling, Settlement
 from habitus.foresight.opportunities.model import OpportunityTable
 from habitus.foresight.strength import MIN_HISTORY, catch_up_strength, offset_strength
+
+
+def short_circuit_fact(
+    item: Expectation,
+    result: Settlement,
+    *,
+    antecedent_holds: bool,
+    unobserved: bool,
+    said_done: bool,
+    prompted: bool,
+) -> AccountFact | None:
+    """一次结算先过的四条短路，都不是就是 None（按结果与强度写，``settlement_fact``）。组合根把四件只有它读得到的事判好交进来：
+
+    - ``antecedent_holds``：前因此刻还成立（不成立：这次机会不存在，只记作废，权重 0）；
+    - ``unobserved``：这条说中的范围（起算 → 最晚时限）里有观测空白——过期待决时他可能做了、我们没看到，记中性（裁定 54）；
+    - ``said_done``：说给他的那条提醒（这条自己的，或单元替它一并决定时依据那条的）他回了「已做」——过期待决时同样是他做了、
+      我们没看到，记中性（裁定 54 第 3 条③、91 第 3 条②；单元历史那一刻因此看不到）。看到做了的照常按结果写；
+    - ``prompted``：结算认出的那次发生是系统提醒引出来的（没有发生就是 False）——不是这条自己的提醒引出的，就不是这本账的
+      自然命中，记一笔强度 0 的「提醒后发生」（做了，但不算证据）。"""
+
+    if not antecedent_holds:
+        return AccountFact(item.account, item.formed_at, False, 0.0, VOID, item.expectation_id)
+    if result.outcome == "过期待决" and (unobserved or said_done):
+        return AccountFact(item.account, item.formed_at, False, 0.0, "过期待决", item.expectation_id)
+    if result.outcome != "提醒后发生" and result.occurrence_uri is not None and prompted:
+        return AccountFact(item.account, item.formed_at, True, 0.0, "提醒后发生", item.expectation_id)
+    return None
 
 
 def settlement_fact(
@@ -141,5 +169,6 @@ __all__ = [
     "ruling_settled",
     "same_fact",
     "settlement_fact",
+    "short_circuit_fact",
     "slice_of",
 ]

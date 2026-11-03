@@ -1,5 +1,7 @@
 """六类候选、会话证据约束和一次解析周期 page_id 测试。"""
 
+from datetime import UTC
+
 import pytest
 
 from habitus.infrastructure.editor.snapshot import SnapshotBatch
@@ -103,13 +105,13 @@ def test_tool_candidate_requires_exact_successful_tool_name_from_conversation() 
     batch = MemoryCandidateBatch.model_validate(output)
     empty_old = SnapshotBatch((), 0)
 
-    batch.validate_context(segment(messages=tool_turn()), empty_old, MemoryPageIdMap())
+    batch.validate_context(segment(messages=tool_turn()), empty_old, MemoryPageIdMap(), zone=UTC)
     wrong_name = empty_output()
     wrong_name["tools"] = [{**candidate_item(MemoryKind.TOOL, 100), "tool_name": "translated.inspect"}]
     with pytest.raises(MemoryCandidateError, match="successful tool_call"):
         MemoryCandidateBatch.model_validate(wrong_name).validate_context(
             segment(messages=tool_turn()), empty_old, MemoryPageIdMap()
-        )
+        , zone=UTC)
 
 
 def test_tool_failure_recovery_requires_failure_before_later_success() -> None:
@@ -148,14 +150,14 @@ def test_tool_failure_recovery_requires_failure_before_later_success() -> None:
     MemoryCandidateBatch.model_validate(output).validate_context(
         ConversationSegment("conversation-1", "segment-1", messages),
         SnapshotBatch((), 0),
-        MemoryPageIdMap(),
+        MemoryPageIdMap(), zone=UTC,
     )
 
     no_failure = segment(messages=tool_turn())
     with pytest.raises(MemoryCandidateError, match="failure followed"):
         MemoryCandidateBatch.model_validate(output).validate_context(
             no_failure, SnapshotBatch((), 0), MemoryPageIdMap()
-        )
+        , zone=UTC)
 
 
 def test_completed_intention_must_reuse_existing_page_and_be_explicitly_confirmed() -> None:
@@ -171,23 +173,102 @@ def test_completed_intention_must_reuse_existing_page_and_be_explicitly_confirme
             "confirmed": True,
         }
     ]
-    MemoryCandidateBatch.model_validate(output).validate_context(segment(), old_batch, page_ids)
+    MemoryCandidateBatch.model_validate(output).validate_context(segment(), old_batch, page_ids, zone=UTC)
 
     output["intentions"][0]["confirmed"] = False
     with pytest.raises(MemoryCandidateError, match="explicit confirmation"):
-        MemoryCandidateBatch.model_validate(output).validate_context(segment(), old_batch, page_ids)
+        MemoryCandidateBatch.model_validate(output).validate_context(segment(), old_batch, page_ids, zone=UTC)
 
 
 def test_event_candidate_uses_schema_date_and_rejects_only_future_date_invariant() -> None:
     output = empty_output()
     output["events"] = [candidate_item(MemoryKind.EVENT, 100)]
     batch = MemoryCandidateBatch.model_validate(output)
-    batch.validate_context(segment(), SnapshotBatch((), 0), MemoryPageIdMap())
+    batch.validate_context(segment(), SnapshotBatch((), 0), MemoryPageIdMap(), zone=UTC)
 
     output["events"][0]["event_date"] = "2099-01-01"
     with pytest.raises(MemoryCandidateError, match="future event date"):
         MemoryCandidateBatch.model_validate(output).validate_context(
             segment(),
             SnapshotBatch((), 0),
-            MemoryPageIdMap(),
+            MemoryPageIdMap(), zone=UTC,
+        )
+
+
+def test_tool_failure_recovery_carried_over_verbatim_keeps_its_old_source() -> None:
+    """主链端到端扩 3 份 Job #15（对话 060）：更新 Bash 时逐值保留旧 failure_recovery，本段只有成功结果。"""
+
+    old_recovery = (
+        "在当前 macOS zsh 环境中，若 `timeout` 报 command not found，可去掉该包装命令，改用 Bash 调用本身的"
+        "超时限制，并让 `curl` 使用 `--max-time`；随后成功取得远端 GitHub API 数据和 raw 源文件。"
+    )
+    old_fields = {
+        "tool_name": "workspace.inspect",
+        "invocation": "在 zsh 中检索 Python 源码时，可使用 `grep -rln \"模式\" 目录 --include='*.py'`。",
+        "failure_recovery": old_recovery,
+        "verification": "本次调用成功列出了 memory 包目录、源文件清单以及包外运行时调用位置。",
+    }
+    old_batch = snapshot_batch(document(MemoryKind.TOOL, fields=old_fields))
+    page_ids = MemoryPageIdMap.from_snapshots(old_batch)
+    only_successes = segment(messages=tool_turn())
+    output = empty_output()
+    output["tools"] = [
+        {
+            "page_id": 1,
+            **old_fields,
+            "constraints": "调用结束后工作目录会重置；依赖特定目录的命令应在同一次调用内显式 `cd`。",
+        }
+    ]
+    MemoryCandidateBatch.model_validate(output).validate_context(only_successes, old_batch, page_ids, zone=UTC)
+
+    output["tools"][0]["failure_recovery"] = old_recovery + "另：本段新写的一句恢复办法。"
+    with pytest.raises(MemoryCandidateError, match="failure followed"):
+        MemoryCandidateBatch.model_validate(output).validate_context(only_successes, old_batch, page_ids, zone=UTC)
+
+    old_without_recovery = {name: value for name, value in old_fields.items() if name != "failure_recovery"}
+    fresh_batch = snapshot_batch(document(MemoryKind.TOOL, fields=old_without_recovery))
+    output["tools"][0]["failure_recovery"] = old_recovery
+    with pytest.raises(MemoryCandidateError, match="failure followed"):
+        MemoryCandidateBatch.model_validate(output).validate_context(
+            only_successes, fresh_batch, MemoryPageIdMap.from_snapshots(fresh_batch)
+        , zone=UTC)
+
+
+def test_event_date_is_checked_against_the_subjects_local_day() -> None:
+    """他在 UTC+8 早上 07:30 说"我今天早上跑了 5 公里"：消息存 2026-10-25T23:30Z，本地已是 10-26（M6）。"""
+
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from habitus.pre.conversation import ConversationMessage, ConversationMessageRole
+
+    morning = (
+        ConversationMessage(
+            message_id="m-0",
+            sequence=0,
+            role=ConversationMessageRole.PROMPT,
+            occurred_at=datetime(2026, 10, 25, 23, 30, tzinfo=UTC),
+            content="我今天早上跑了 5 公里",
+        ),
+        ConversationMessage(
+            message_id="m-1",
+            sequence=1,
+            role=ConversationMessageRole.COMPLETION,
+            occurred_at=datetime(2026, 10, 25, 23, 30, 5, tzinfo=UTC),
+            content="记下了。",
+        ),
+    )
+    shanghai = ZoneInfo("Asia/Shanghai")
+    output = empty_output()
+    output["events"] = [candidate_item(MemoryKind.EVENT, 100)]
+    output["events"][0]["event_date"] = "2026-10-26"
+    batch = MemoryCandidateBatch.model_validate(output)
+    batch.validate_context(segment(messages=morning), SnapshotBatch((), 0), MemoryPageIdMap(), zone=shanghai)
+    with pytest.raises(MemoryCandidateError, match="future event date"):
+        batch.validate_context(segment(messages=morning), SnapshotBatch((), 0), MemoryPageIdMap(), zone=UTC)
+
+    output["events"][0]["event_date"] = "2026-10-27"
+    with pytest.raises(MemoryCandidateError, match="future event date"):
+        MemoryCandidateBatch.model_validate(output).validate_context(
+            segment(messages=morning), SnapshotBatch((), 0), MemoryPageIdMap(), zone=shanghai
         )

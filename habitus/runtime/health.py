@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, tzinfo
+from datetime import UTC, date, datetime, timedelta
 from enum import Enum
 
 from habitus.foresight import ForesightError
@@ -12,10 +13,14 @@ from habitus.memory.workflow import MemoryJobStatus
 from habitus.runtime.components import RuntimeComponents
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.lifecycle import LifecycleWorkerState
+from habitus.runtime.nightly import NightOutcome
+from habitus.runtime.nightly_worker import kept_errors
 from habitus.runtime.resident import ResidentWorker
 from habitus.runtime.worker import MemoryWorkerState
 
 _SIGNAL_DETAIL_LIMIT = 1_000
+#: 只关记忆写入侧的检查：后台 Job 停住（失败待处置、或在等模型恢复）不影响已有记忆的召回。
+_WRITE_SIDE_CHECKS = frozenset({"memory_worker", "memory_queue"})
 
 
 class RuntimeHealthStatus(str, Enum):
@@ -39,6 +44,8 @@ class RuntimeHealthReport:
     ready: bool
     checked_at: datetime
     checks: tuple[RuntimeHealthCheck, ...]
+    #: 召回所需的就绪：与 ``ready`` 同一判法，但不看只关写入侧的检查（记忆 Job 停住时召回照常可用）
+    recall_ready: bool
 
 
 class RuntimeHealthService:
@@ -103,7 +110,11 @@ class RuntimeHealthService:
         else:
             status = RuntimeHealthStatus.HEALTHY
         ready = runtime_state in {"ready", "running"} and not critical_unhealthy and not critical_degraded
-        return RuntimeHealthReport(status, ready, datetime.now(UTC), tuple(checks))
+        recall_ready = runtime_state in {"ready", "running"} and not any(
+            check.critical and check.name not in _WRITE_SIDE_CHECKS and check.status is not RuntimeHealthStatus.HEALTHY
+            for check in checks
+        )
+        return RuntimeHealthReport(status, ready, datetime.now(UTC), tuple(checks), recall_ready)
 
     def _behavior_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:
         """行为管线的健康面；**non-critical**——行为失败不阻断记忆主链的既定哲学在健康面同样成立。
@@ -115,10 +126,26 @@ class RuntimeHealthService:
         behavior = self.components.behavior
         if behavior is None:
             return [RuntimeHealthCheck("behavior", RuntimeHealthStatus.HEALTHY, "disabled", critical=False)]
-        return self._worker_checks(
+        checks = self._worker_checks(
             runtime_state,
             tuple((f"behavior_reduction_worker_{branch.lane.value}", branch.reduction_worker) for branch in behavior),
         )
+        for branch in behavior:
+            pinned = branch.reduction_runner.pinned
+            if pinned:
+                # 封口视界被哪几份观测钉住：比它晚的观测已被回执覆盖、它没有（裁定 94 第 8 条）——那天及以后定不了稿；逐份列出
+                checks.append(
+                    RuntimeHealthCheck(
+                        f"behavior_seal_horizon_{branch.lane.value}",
+                        RuntimeHealthStatus.DEGRADED,
+                        "; ".join(
+                            f"pinned by observation delivery {item.source_id} since {item.since.isoformat()}"
+                            for item in pinned
+                        )[:1_000],
+                        critical=False,
+                    )
+                )
+        return checks
 
     def _nightly_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:
         """整晚那一趟的健康面；同样 non-critical。
@@ -131,6 +158,7 @@ class RuntimeHealthService:
         if nightly is None:
             return [RuntimeHealthCheck("nightly", RuntimeHealthStatus.HEALTHY, "disabled", critical=False)]
         checks = self._worker_checks(runtime_state, (("nightly_worker", nightly),))
+        checks.extend(_night_line_checks(nightly.last_outcome))
         calendar = getattr(getattr(nightly.nightly, "scene", None), "calendar", None)
         problems = tuple(getattr(calendar, "problems", ()))
         if problems:
@@ -140,8 +168,8 @@ class RuntimeHealthService:
             )
         foresight = self.components.foresight
         if foresight is not None:
-            zone = getattr(nightly.nightly, "zone", UTC)
-            checks.append(self._opportunity_freshness_check(foresight.opportunities, nightly.period_seconds, zone))
+            closed_days = getattr(nightly.nightly, "closed_days", None)
+            checks.append(self._opportunity_freshness_check(foresight.opportunities, closed_days))
         return checks
 
     def _foresight_checks(self, runtime_state: str) -> list[RuntimeHealthCheck]:
@@ -157,14 +185,12 @@ class RuntimeHealthService:
 
     @staticmethod
     def _opportunity_freshness_check(
-        store: OpportunityStore, interval_seconds: float, zone: tzinfo
+        store: OpportunityStore, closed_days: Callable[[], Iterable[date]] | None
     ) -> RuntimeHealthCheck:
         """机会表有多旧。循环活着不等于整晚在产出——这正是上面那段 docstring 说最难自己发现的故障。
 
-        第 N 晚的表在 N 那天写（截止日 N 只用到前一天），所以"多旧"从 N 那天零点（主体所在地）量起；容忍两个周期、且至少
-        一整天加一个周期：一拍没赶上是正常抖动，连着两拍没出新的一晚就说明整晚实际没在产出（序列空、词表迁移卡住、每拍都抛在
-        同一处）。一天最多出一晚新的表，节拍短于半天时只按两个周期量会在每天下午起一直误报（2026-10-18 四方评审）。
-        还没写过任何一晚不算故障：行为侧刚接入、第一夜还没到的时候就是这个状态。
+        不写死周期（裁定 68 第 4 条）：线在前一天定稿之后跑（裁定 94 第 1 条），所以该有的最晚一晚是"最后定稿日 + 1"；盘上最晚
+        那张表比它早就是陈旧（线没跑到、没跑完、停下了）。还没写过任何一晚、还没有定稿日都不算故障：行为侧刚接入、第一夜还没到。
         """
 
         lane = "session"
@@ -181,10 +207,14 @@ class RuntimeHealthService:
             return RuntimeHealthCheck(
                 f"opportunities_{lane}", RuntimeHealthStatus.HEALTHY, "never_written", critical=False
             )
-        age = (datetime.now(UTC) - datetime.combine(night, time(0), tzinfo=zone)).total_seconds()
-        if age > max(2.0 * interval_seconds, 86_400.0 + interval_seconds):
+        closed = sorted(closed_days()) if closed_days is not None else []
+        if closed and night < closed[-1] + timedelta(days=1):
+            expected = closed[-1] + timedelta(days=1)
             return RuntimeHealthCheck(
-                f"opportunities_{lane}", RuntimeHealthStatus.DEGRADED, f"stale:{int(age)}s", critical=False
+                f"opportunities_{lane}",
+                RuntimeHealthStatus.DEGRADED,
+                f"stale:night {night} behind {expected}",
+                critical=False,
             )
         return RuntimeHealthCheck(
             f"opportunities_{lane}", RuntimeHealthStatus.HEALTHY, f"night:{night}", critical=False
@@ -337,6 +367,16 @@ class RuntimeHealthService:
         if job.status is MemoryJobStatus.FAILED:
             self.components.infrastructure.observability.set_gauge("memory_queue_blocked", 1)
             return RuntimeHealthCheck("memory_queue", RuntimeHealthStatus.DEGRADED, f"failed:{job.memory_sequence}")
+        if job.waiting_for_model:
+            # 模型此刻用不了（额度、鉴权、断网……）：不是失败，长退避里等它恢复；要人看的多半是换 key 或充值
+            assert job.next_attempt_at is not None
+            self.components.infrastructure.observability.set_gauge("memory_queue_blocked", 1)
+            return RuntimeHealthCheck(
+                "memory_queue",
+                RuntimeHealthStatus.DEGRADED,
+                f"waiting_for_model:{job.memory_sequence};waits={job.model_waits};"
+                f"next_attempt_at={job.next_attempt_at.isoformat()}",
+            )
         self.components.infrastructure.observability.set_gauge("memory_queue_blocked", 0)
         return RuntimeHealthCheck(
             "memory_queue", RuntimeHealthStatus.HEALTHY, f"{job.status.value}:{job.memory_sequence}"
@@ -399,6 +439,27 @@ class RuntimeHealthService:
     @staticmethod
     def _error(error: BaseException | None) -> str:
         return "none" if error is None else type(error).__name__
+
+
+def _night_line_checks(outcome: NightOutcome | None) -> list[RuntimeHealthCheck]:
+    """夜里那条线最近一趟要人看的：停下了（"模型调不通"、某一段出错），以及前置处理里保持「错误·看不到」的（我们自己处理不了的、
+    内容安全拦下的、格式不合夜里再试仍不合的，裁定 94 第 4、8 条）——两条各报各的，停下了也不盖住后一条。锁被占不在这里：那是还没
+    准备好，线停在那一段、下一眼接着跑（"nightly line not finished"）。
+    都是 non-critical：白天照常建预期与提醒。"""
+
+    if outcome is None:
+        return []
+    checks: list[RuntimeHealthCheck] = []
+    if outcome.stopped is not None:
+        checks.append(
+            RuntimeHealthCheck("nightly_line", RuntimeHealthStatus.DEGRADED, outcome.stopped[:500], critical=False)
+        )
+    kept = kept_errors(outcome.retried)
+    if kept is not None:
+        checks.append(
+            RuntimeHealthCheck("nightly_errors", RuntimeHealthStatus.DEGRADED, f"错误·看不到：{kept}", critical=False)
+        )
+    return checks
 
 
 __all__ = [

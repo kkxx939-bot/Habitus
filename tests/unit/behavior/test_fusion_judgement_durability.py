@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
 
 from habitus.behavior.fusion import (
+    JUDGEMENT_SCHEMA_VERSION,
+    RECEIPT_SCHEMA_VERSION,
     BehaviorFusionConfig,
     BehaviorFusionReceipt,
     BehaviorFusionReceiptStore,
@@ -18,12 +22,11 @@ from habitus.behavior.fusion import (
     judgement_payload,
     receipt_identity,
     segment_identity,
-    without_unresolvable_relations,
 )
 from habitus.behavior.fusion.errors import BehaviorFusionError, BehaviorFusionLimitError
-from habitus.behavior.fusion.store import _JUDGEMENT_KEYS
 from habitus.behavior.observation import BehaviorObservation, BehaviorObservationConfig
 from habitus.foundation.integrity import canonical_json, canonicalize
+from tests.lock_store import ProcessLocalLockStore
 from tests.unit.behavior.judgement_builders import SUBJECT, batch_from, judgement, unreadable, wire
 
 TZ8 = timezone(timedelta(hours=8))
@@ -49,7 +52,7 @@ def fragment(
         observer_id="home-a/hall",
         occurred_at=at,
         available_at=at + timedelta(milliseconds=delay_ms),
-        modality="vision",
+        modality="physical",
         semantics=semantics,
         participants=participants or [SUBJECT],
         knowledge_state="observed",
@@ -79,7 +82,7 @@ def body() -> dict[str, Any]:
                 goal="清洁双手",
                 basis=["走到水池边打开水龙头", "打肥皂搓手"],
             ),
-            judgement(2, behavior="打哈欠", relations=[("concurrent_with", 1)]),
+            judgement(2, behavior="打哈欠"),
             unreadable(3),
         ],
         [[(1, 1)], [(1, 1)], [(1, 1)], [(1, 2)], [(2, None)], [(3, None)]],
@@ -87,7 +90,7 @@ def body() -> dict[str, Any]:
 
 
 def derived(raw: dict[str, Any] | None = None, *, judged_at: datetime = JUDGED_AT):
-    batch = batch_from(raw or body(), fragment_count=len(FRAGMENTS))
+    batch = batch_from(raw or body())
     return derive_judgements(
         batch,
         FRAGMENTS,
@@ -117,7 +120,6 @@ def test_judged_at_is_recorded_because_it_cannot_be_derived() -> None:
     washing = derived()[0]
     assert washing.judged_at == JUDGED_AT.astimezone(UTC)
     assert washing.judged_at > washing.evidence_ready_at
-    assert washing.fusion_lag_seconds == pytest.approx((JUDGED_AT - FRAGMENTS[1].available_at).total_seconds())
 
 
 def test_behavior_time_keeps_its_local_offset() -> None:
@@ -173,7 +175,7 @@ def test_system_bound_fields_are_not_taken_from_the_model() -> None:
 def test_source_refs_must_be_supplied_by_the_caller() -> None:
     """来源身份无法从片段推出，属于系统在模型输出之外绑定的事实。"""
 
-    batch = batch_from(body(), fragment_count=len(FRAGMENTS))
+    batch = batch_from(body())
     with pytest.raises(BehaviorFusionError):
         derive_judgements(
             batch,
@@ -186,7 +188,7 @@ def test_source_refs_must_be_supplied_by_the_caller() -> None:
 
 
 def test_judged_at_must_be_timezone_aware() -> None:
-    batch = batch_from(body(), fragment_count=len(FRAGMENTS))
+    batch = batch_from(body())
     with pytest.raises(BehaviorFusionError, match="timezone-aware"):
         derive_judgements(
             batch,
@@ -271,12 +273,11 @@ def test_the_receipt_records_disposition_without_copying_content() -> None:
     """判断自己有耐久记录，所以回执回到它本来该是的样子——一份处置清单。"""
 
     record = receipt()
-    # 主体的判断与没读懂的观测段进 judgement_ids（后者归约层要物化成 gap）；旁人的只留观测身份。
+    # 主体的判断与没读懂的观测段进 judgement_ids（后者归约层要物化成 gap）；旁人的不进。
     assert record.judgement_ids == tuple(
         item.judgement_id for item in derived() if not item.is_readable or SUBJECT in item.subjects
     )
     assert record.unreadable_observation_ids == (FRAGMENTS[5].observation_id,)
-    assert record.unreadable_ratio == pytest.approx(1 / 6)
     encoded = json.dumps(record.to_dict(), ensure_ascii=False)
     assert "洗手" not in encoded
 
@@ -308,21 +309,106 @@ def test_a_receipt_cannot_report_observations_outside_its_segment() -> None:
 
 
 def test_receipts_round_trip_through_the_store(tmp_path) -> None:
-    store = BehaviorFusionReceiptStore(tmp_path)
+    store = BehaviorFusionReceiptStore(tmp_path, lock_store=ProcessLocalLockStore())
     record = receipt()
     assert store.put(record).to_dict() == record.to_dict()
     assert store.list() == (store.read(record.receipt_id),)
 
 
 def test_a_corrupt_receipt_file_fails_loudly(tmp_path) -> None:
-    store = BehaviorFusionReceiptStore(tmp_path)
+    store = BehaviorFusionReceiptStore(tmp_path, lock_store=ProcessLocalLockStore())
     record = store.put(receipt())
-    path = store.receipt_root / f"{record.receipt_id}.json"
+    (path,) = store.receipt_root.glob(f"*_{record.receipt_id}.json")
     payload = record.to_dict()
     payload["prompt_version"] = "tampered"
     path.write_text(canonical_json(payload) + "\n", encoding="utf-8")
     with pytest.raises(BehaviorFusionError):
         store.read(record.receipt_id)
+
+
+def test_a_receipt_carries_only_the_slimmed_keys() -> None:
+    """旁人、无归属两份清单两条 lane 都恒空，回执里不再有这两个键。"""
+
+    payload = receipt().to_dict()
+    assert payload["schema_version"] == RECEIPT_SCHEMA_VERSION
+    assert "out_of_scope_observation_ids" not in payload and "unowned_observation_ids" not in payload
+    with pytest.raises(BehaviorFusionError, match="schema is invalid"):
+        BehaviorFusionReceipt.from_dict({**payload, "unowned_observation_ids": []})
+
+
+def test_the_receipt_filename_carries_its_judgement_moment(tmp_path) -> None:
+    store = BehaviorFusionReceiptStore(tmp_path, lock_store=ProcessLocalLockStore())
+    record = store.put(receipt())
+    (path,) = store.receipt_root.iterdir()
+    assert path.name == f"{record.judged_at.astimezone(UTC):%Y%m%dT%H%M%S%fZ}_{record.receipt_id}.json"
+
+
+def test_a_rerun_at_another_moment_reuses_the_first_receipt(tmp_path) -> None:
+    """同一片段同版本重跑、判定时刻不同：文件名不同，撞车仍按 receipt_id 找到先到的那份。"""
+
+    store = BehaviorFusionReceiptStore(tmp_path, lock_store=ProcessLocalLockStore())
+    first = store.put(receipt())
+    later = build_fusion_receipt(
+        derived(judged_at=JUDGED_AT + timedelta(hours=20)),
+        FRAGMENTS,
+        source_refs=SOURCE_REFS,
+        prompt_version=PROMPT_VERSION,
+        validation_attempts=2,
+        primary_subject=SUBJECT,
+    )
+    assert later.receipt_id == first.receipt_id and later.judged_at != first.judged_at
+    assert store.put(later) == first
+    assert len(list(store.receipt_root.iterdir())) == 1
+
+
+def test_concurrent_puts_of_one_receipt_id_leave_a_single_receipt(tmp_path, monkeypatch) -> None:
+    """两个写者同时为同一 ``receipt_id`` 以不同时刻落回执：盘上只留一份，两边拿到的是同一份。
+
+    "先找、再创建"之间放一道栅栏：没有按 ``receipt_id`` 的锁时，两个写者都会在栅栏处汇合、都没找到、各建一份；
+    有锁时后一个写者等在锁外，栅栏等不到它就放行，它进来时已经能找到先到的那份。
+    """
+
+    store = BehaviorFusionReceiptStore(tmp_path, lock_store=ProcessLocalLockStore())
+    first = receipt()
+    second = build_fusion_receipt(
+        derived(judged_at=JUDGED_AT + timedelta(hours=20)),
+        FRAGMENTS,
+        source_refs=SOURCE_REFS,
+        prompt_version=PROMPT_VERSION,
+        validation_attempts=2,
+        primary_subject=SUBJECT,
+    )
+    assert first.receipt_id == second.receipt_id and first.judged_at != second.judged_at
+    barrier = threading.Barrier(2)
+    entries = BehaviorFusionReceiptStore._entries
+
+    def rendezvous(self: BehaviorFusionReceiptStore) -> Any:
+        found = entries(self)
+        try:
+            barrier.wait(timeout=0.5)
+        except threading.BrokenBarrierError:
+            pass
+        return found
+
+    monkeypatch.setattr(BehaviorFusionReceiptStore, "_entries", rendezvous)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [future.result() for future in [pool.submit(store.put, first), pool.submit(store.put, second)]]
+    monkeypatch.undo()
+
+    assert len(list(store.receipt_root.iterdir())) == 1
+    assert results[0] == results[1] == store.read(first.receipt_id)
+
+
+def test_expiry_reads_only_the_filename_moment(tmp_path) -> None:
+    """过期只看文件名里的时刻，不解码正文：正文读不懂（例如旧版本）的回执照样按时刻过期。"""
+
+    store = BehaviorFusionReceiptStore(tmp_path, lock_store=ProcessLocalLockStore())
+    record = store.put(receipt())
+    (path,) = store.receipt_root.iterdir()
+    path.write_text('{"schema_version": "behavior_fusion_receipt_v4"}\n', encoding="utf-8")
+    assert store.expire(record.judged_at) == 0
+    assert store.expire(record.judged_at + timedelta(microseconds=1)) == 1
+    assert list(store.receipt_root.iterdir()) == []
 
 
 def test_a_malformed_payload_is_refused_before_it_poisons_the_store(tmp_path) -> None:
@@ -347,6 +433,21 @@ def test_a_malformed_payload_is_refused_before_it_poisons_the_store(tmp_path) ->
         store.put_payload(extra)
 
     assert store.list() == ()
+
+
+def test_judgements_no_longer_carry_relations_and_the_old_shape_is_refused(tmp_path) -> None:
+    """判断之间的关系不再产出，键也删了；带 ``relations`` 的旧格式（v1）按严格读取拒绝。"""
+
+    store = BehaviorJudgementStore(tmp_path)
+    payload = judgement_payload(derived()[0])
+    assert "relations" not in payload
+    store.put_payload(payload)
+    (stored,) = store.list()
+    assert stored["schema_version"] == JUDGEMENT_SCHEMA_VERSION and "relations" not in stored
+    with pytest.raises(BehaviorFusionError, match="unknown=\\['relations'\\]"):
+        store.put_payload({**payload, "judgement_id": "f" * 64, "relations": []})
+    with pytest.raises(BehaviorFusionError, match="schema is invalid"):
+        store.put_payload({**payload, "judgement_id": "e" * 64, "schema_version": "behavior_judgement_v1"})
 
 
 def test_identical_replays_are_absorbed_below_the_store_not_by_it(tmp_path) -> None:
@@ -380,7 +481,7 @@ def test_the_receipt_separates_other_peoples_behaviour_from_unreadable_frames() 
             observer_id="home-a/hall",
             occurred_at=MIDNIGHT + timedelta(seconds=12),
             available_at=MIDNIGHT + timedelta(seconds=13),
-            modality="vision",
+            modality="physical",
             semantics="客人从门口走过",
             participants=[SUBJECT, guest],
             knowledge_state="observed",
@@ -398,7 +499,7 @@ def test_the_receipt_separates_other_peoples_behaviour_from_unreadable_frames() 
         ],
         [[(1, 1)], [(1, 1)], [(1, 1)], [(2, None)], [(3, None)]],
     )
-    batch = batch_from(raw, fragment_count=len(fragments))
+    batch = batch_from(raw)
     items = derive_judgements(
         batch,
         fragments,
@@ -415,12 +516,9 @@ def test_the_receipt_separates_other_peoples_behaviour_from_unreadable_frames() 
         validation_attempts=1,
         primary_subject=SUBJECT,
     )
-    # 主体那条 + 没读懂那条进 judgement_ids；旁人（客人）那条只留观测身份。
+    # 主体那条 + 没读懂那条进 judgement_ids；旁人（客人）那条不进。
     assert len(record.judgement_ids) == 2
-    assert record.out_of_scope_observation_ids == (fragments[3].observation_id,)
     assert record.unreadable_observation_ids == (fragments[4].observation_id,)
-    assert record.out_of_scope_ratio == pytest.approx(0.2)
-    assert record.unreadable_ratio == pytest.approx(0.2)
 
 
 def test_a_segment_with_no_behaviour_of_the_subject_still_yields_a_receipt() -> None:
@@ -432,7 +530,7 @@ def test_a_segment_with_no_behaviour_of_the_subject_still_yields_a_receipt() -> 
             observer_id="home-a/hall",
             occurred_at=MIDNIGHT + timedelta(seconds=index * 4),
             available_at=MIDNIGHT + timedelta(seconds=index * 4 + 1),
-            modality="vision",
+            modality="physical",
             semantics=f"客人在客厅活动{index}",
             participants=[SUBJECT, guest],
             knowledge_state="observed",
@@ -446,7 +544,7 @@ def test_a_segment_with_no_behaviour_of_the_subject_still_yields_a_receipt() -> 
         [judgement(1, behavior="走动", subjects=[guest])],
         [[(1, None)]] * 3,
     )
-    batch = batch_from(raw, fragment_count=len(fragments))
+    batch = batch_from(raw)
     items = derive_judgements(
         batch,
         fragments,
@@ -464,133 +562,17 @@ def test_a_segment_with_no_behaviour_of_the_subject_still_yields_a_receipt() -> 
         primary_subject=SUBJECT,
     )
     assert record.judgement_ids == ()
-    assert record.out_of_scope_ratio == 1.0
 
 
-def test_pruning_keeps_relations_whose_target_survives() -> None:
-    """只剪不可解析的那些；指向落盘判断或上下文判断的关系原样保留。"""
-
-    fragments = (fragment(0, "洗手", participants=[SUBJECT]),)
-    raw = wire([judgement(1, behavior="洗手", goal="清洁双手", summary="洗手", basis=["冲手"])], [[(1, 1)]])
-    batch = batch_from(raw, fragment_count=1)
-    derived = derive_judgements(
-        batch,
-        fragments,
-        source_refs=("d1",),
-        judged_at=JUDGED_AT,
-        fusion_version=LANE_VERSION,
-        prompt_version=PROMPT_VERSION,
-    )
-    only = derived[0]
-
-    assert without_unresolvable_relations(only, {only.judgement_id}) is only
-
-
-def test_context_is_ordered_by_real_time_not_by_the_local_offset_string(tmp_path) -> None:
-    """上下文按**时刻**排序，不能按 ``started_at`` 的字符串排。
-
-    ``started_at`` 刻意保留本地偏移（时间事实是实际发生的本地时刻，折 UTC 会把东八区凌晨的
-    行为掉到前一天），所以它的字符串序不是时间序。出行跨时区、或者一次 DST 切换带来的 1 小时偏移变化，
-    就足以让两条判断的先后颠倒——而这个顺序直接决定模型看到的 C1..Cn 编号。
-    """
-
-    store = BehaviorJudgementStore(tmp_path)
-    template = {key: None for key in _JUDGEMENT_KEYS}
-
-    def record(identity: str, started_at: str, ready_at: str) -> dict[str, object]:
-        payload = dict(template)
-        payload.update(
-            {
-                "schema_version": "behavior_judgement_v1",
-                "judgement_id": identity,
-                "judged_at": ready_at,
-                "evidence_ready_at": ready_at,
-                "started_at": started_at,
-                "last_observed_at": started_at,
-                "observation_ids": [f"observation-{identity[:4]}"],
-                "source_refs": ["delivery"],
-                "subjects": [SUBJECT],
-                "behavior": "行为",
-                "goal": None,
-                "summary": "摘要",
-                "basis": [],
-                "status": "completed",
-                "status_basis": "observed",
-                "relations": [],
-                "fusion_version": "v",
-                "prompt_version": "p",
-            }
-        )
-        return payload
-
-    # 东八区的这条真实更早（UTC 16:30），但字符串以 "2026-08-15" 开头，字符串序会把它排到后面。
-    store.put_payload(record("b" * 64, "2026-08-15T00:30:00.000000+08:00", "2026-08-15T00:00:00.000000Z"))
-    store.put_payload(record("a" * 64, "2026-08-14T20:00:00.000000-05:00", "2026-08-15T02:00:00.000000Z"))
-
-    context = store.recent_before(datetime(2026, 8, 15, 3, tzinfo=UTC), limit=8, lookback_seconds=86_400)
-
-    moments = [datetime.fromisoformat(str(item["started_at"])).astimezone(UTC) for item in context]
-    assert moments == sorted(moments)
-    assert str(context[0]["started_at"]).endswith("+08:00")
-
-
-def test_a_long_running_judgement_stays_inside_the_lookback_window(tmp_path) -> None:
-    """回看下界按 ``last_observed_at``，不按 ``started_at``：做饭、看电影这类超过 lookback 的长行为，
-    其后续段必须仍能看到自己的前半截，否则跨窗口 ``continues`` 断链（审计 NEW-4 复现）。"""
-
-    from habitus.behavior.fusion.store import BehaviorJudgementStore
-
-    store = BehaviorJudgementStore(str(tmp_path))
-    template = {key: None for key in _JUDGEMENT_KEYS}
-
-    def record(identity: str, started: str, last: str) -> dict[str, object]:
-        payload = dict(template)
-        payload.update(
-            {
-                "schema_version": "behavior_judgement_v1",
-                "judgement_id": identity,
-                "judged_at": last,
-                "evidence_ready_at": last,
-                "started_at": started,
-                "last_observed_at": last,
-                "observation_ids": [f"observation-{identity[:4]}"],
-                "source_refs": ["delivery"],
-                "subjects": [SUBJECT],
-                "behavior": "行为",
-                "goal": None,
-                "summary": "摘要",
-                "basis": [],
-                "status": "ongoing",
-                "status_basis": "observation_lost",
-                "relations": [],
-                "fusion_version": "v",
-                "prompt_version": "p",
-            }
-        )
-        return payload
-
-    cutoff = datetime(2026, 8, 15, 3, tzinfo=UTC)
-    # 做饭：两小时前开始（早于 1 小时回看下界），但最后观测就在本段之前一分钟
-    store.put_payload(record("c" * 64, "2026-08-15T01:00:00.000000Z", "2026-08-15T02:59:00.000000Z"))
-    # 洗手：完全落在窗口内
-    store.put_payload(record("d" * 64, "2026-08-15T02:50:00.000000Z", "2026-08-15T02:55:00.000000Z"))
-    # 昨天那条：最后观测也早于下界，应当被排除
-    store.put_payload(record("e" * 64, "2026-08-14T01:00:00.000000Z", "2026-08-14T02:00:00.000000Z"))
-
-    context = store.recent_before(cutoff, limit=8, lookback_seconds=3_600)
-
-    assert [str(item["judgement_id"])[0] for item in context] == ["c", "d"]
-
-
-def test_a_frame_shared_by_a_guest_and_an_unreadable_judgement_stays_out_of_scope() -> None:
-    """tracked 只算主体可读判断的观测：v3 把没读懂判断并入 in_scope 后，这条口径不许跟着漂。"""
+def test_a_frame_also_claimed_by_a_readable_judgement_is_not_unreadable() -> None:
+    """一帧同时被可读判断与没读懂判断认领，它已经被读懂了，不计入 unreadable。"""
 
     guest = "客人C"
     shared = BehaviorObservation.create(
         observer_id="home-a/hall",
         occurred_at=MIDNIGHT + timedelta(seconds=12),
         available_at=MIDNIGHT + timedelta(seconds=13),
-        modality="vision",
+        modality="physical",
         semantics="客人走过，画面另一半模糊",
         participants=[SUBJECT, guest],
         knowledge_state="observed",
@@ -607,7 +589,7 @@ def test_a_frame_shared_by_a_guest_and_an_unreadable_judgement_stays_out_of_scop
         ],
         [[(1, 1)], [(2, None), (3, None)]],  # 同一帧：旁人可读判断 + 没读懂判断都认领
     )
-    batch = batch_from(raw, fragment_count=len(fragments))
+    batch = batch_from(raw)
     items = derive_judgements(
         batch,
         fragments,
@@ -624,6 +606,4 @@ def test_a_frame_shared_by_a_guest_and_an_unreadable_judgement_stays_out_of_scop
         validation_attempts=1,
         primary_subject=SUBJECT,
     )
-    # 这一帧被旁人读懂了、且不属于主体——必须留在 out_of_scope；同时它已被读懂，不计 unreadable。
-    assert record.out_of_scope_observation_ids == (shared.observation_id,)
     assert record.unreadable_observation_ids == ()

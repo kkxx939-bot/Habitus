@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 from habitus.conversation.source.ledger import ConversationSourceLedger
@@ -11,8 +10,10 @@ from habitus.conversation.source.model import (
     ConversationSourceEnvelope,
     ConversationSourceError,
     encode_durable_record,
+    require_sha256,
 )
 from habitus.infrastructure.store.filesystem import (
+    DurablePathIntegrityError,
     ImmutableArtifactConflictError,
     atomic_create_bytes,
     durable_unlink,
@@ -65,6 +66,9 @@ class ConversationSourceStore:
             encoded = read_regular_bytes(self._path(source_id), artifact_root=self.root, max_bytes=self.max_file_bytes)
         except FileNotFoundError:
             return None
+        except DurablePathIntegrityError as exc:
+            # 超过读上限、不是普通文件：这一份是坏的，只挡它自己（恢复记进 corrupt，别的源照常）
+            raise ConversationSourceError("source record exceeds its read bound or is not a regular file") from exc
         try:
             envelope = ConversationSourceEnvelope.from_dict(json.loads(encoded))
         except (UnicodeDecodeError, json.JSONDecodeError, ConversationSourceError) as exc:
@@ -81,9 +85,7 @@ class ConversationSourceStore:
         return durable_unlink(self._path(source_id), artifact_root=self.root)
 
     def _path(self, source_id: str) -> Path:
-        if not isinstance(source_id, str) or re.fullmatch(r"[0-9a-f]{64}", source_id) is None:
-            raise ConversationSourceError("source_id must be lowercase SHA-256 text")
-        return self.envelope_root / f"{source_id}.json"
+        return self.envelope_root / f"{require_sha256(source_id, 'source_id')}.json"
 
     def _encode(self, envelope: ConversationSourceEnvelope) -> bytes:
         return encode_durable_record(envelope.to_dict(), max_bytes=self.max_file_bytes, label="source record")

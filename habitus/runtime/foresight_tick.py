@@ -1,12 +1,20 @@
-"""白天那一拍（方案第四节），三步：读材料 → 此刻对得上历史的预期全部建好、落账（不管说不说）→ 到了时窗的按账的级决定说不说
-（``runtime.foresight_delivery``，没接时只建不递）。
+"""白天那一拍（方案第四节），三步：读材料 → 此刻对得上历史的事件、情境预期建好、落账（不管说不说）→ 到了时窗的按账的级决定
+说不说（``runtime.foresight_delivery``，没接时只建不递）。
 
-组合根只做几件只有它知道的事：此刻是主体的本地时刻（``read_side.zone``），今天的日历条件从 ``read_side.calendar`` 取
-（外部条件包，裁定 59）；读派生树——机会表取这条 lane 盘上最晚一晚、行为树经 ``scene.views`` 只读今天与前 7 天、还没封口的判断经 ``UnsealedReader``；写账本——同一个身份已经在账上
-的不再写（身份不含槽号、时刻与日子，账本按身份索引，跨天重算得到同一条）；人说过「以后别提了」的行为不再建（裁定 50、61）。
-进程不留内存状态：重启后重扫得到的都是已有的身份。
+白天那一拍只走事实（裁定 94 第 1 条）：结算、回话、账的读数，事件与情境在夜里定下的关系与日历上实例化；**不建日子预期**——
+当天的日子预期一天只建一次，是夜里那条线的最后一步（``runtime.foresight_days``），白天不按"日期变了"自己再建一份。读材料与落账
+的那一段与夜里共用（``runtime.foresight_forming``）。
 
-词表迁移做到一半时整拍不做（归类一半新编号一半旧编号，结算那一拍同一口径）。没有机会表时不建预期、只递昨天建的；
+**今晚的线跑完之前不建任何预期**（情境、事件也一样，裁定 94 第 1 条：只有整条线跑完，这一晚才算跑过）：今天这一晚的线还没
+跑完（零点到夜里那条线跑完之间、线被拖住或停下的那一天——含表写出后才停的），这一拍只递已经建好的、不建新的；停掉的那天白天也
+不建，与结算"停掉那天按看不到"读同一个判断（``LastRun.finished``）。**线跑完后的下一拍补建**：这一拍从今天零点起看
+（``looked_since`` = 零点），零点到这一拍之间关掉的时窗也算赶上了，照建、照结（裁定 49 第 1 条）；之后照常按一拍的宽度看。
+"这一晚的表已经补建过"只记在这一拍的对象上（进程重启后的第一拍再从零点看一遍：同一身份只建一次，多看不多建）。
+补建抓不回来的：「同一条链」那一段的事件预期只认此刻离前因做完不超过转移窗口的链（``triggers.events``），零点后做完、到补建
+那一拍已经过了转移窗口的前因，那一段的预期补不回来（这条链此刻落在「当天剩下的」那一段：那一段另有成立的关系才建，是另一条
+预期）。「当天剩下的」「次日」「第 2–7 天」与情境（日历）的都按天或按今天的链判，补建时抓得回来。
+
+词表迁移做到一半时整拍不做（归类一半新编号一半旧编号，结算那一拍同一口径）。没有今天这一晚的机会表时不建预期、只递已经建好的；
 建不出来（派生树读不到、装配失败）留观测、抛出，让调用方决定下一拍。账本里读不出来的文件条数进观测。
 """
 
@@ -15,38 +23,36 @@ from __future__ import annotations
 import time
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from datetime import time as clock_time
-from typing import Protocol, runtime_checkable
-from zoneinfo import ZoneInfo
 
-from habitus.behavior.schema.vocabulary import UNREADABLE_GAP
+from habitus.behavior.schema.vocabulary import UNSEEN_GAPS
 from habitus.behavior.uri import BehaviorURI
 from habitus.conditions import day_note
-from habitus.foresight import Moment, Seen, UnsealedReader, UnsealedRow, form_expectations
+from habitus.foresight import Batch, Seen, UnsealedReader, UnsealedRow
+from habitus.foresight.delivery import done_since
+from habitus.foresight.ladder import Tolerance
 from habitus.foresight.ledger import Expectation
 from habitus.foresight.opportunities import OpportunityTable
-from habitus.foresight.triggers.assemble import seen_rows
-from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
+from habitus.foresight.triggers.assemble import LOOKBACK_DAYS
+from habitus.foundation.intervals import standing_pieces
+from habitus.foundation.observability import NullObserver, ObservationStatus, Observer
 from habitus.runtime.foresight_delivery import DeliveryReport, DeliveryStage, JudgeMaterials
-from habitus.runtime.foresight_implementation import IMPLEMENTATION
+from habitus.runtime.foresight_forming import (
+    ExpectationForming,
+    Formed,
+    FormingReadSide,
+    Recent,
+    held_by_migration,
+    observe_foresight,
+    tonight_table,
+)
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
-from habitus.runtime.foresight_settlement import BehaviorReadSide
 from habitus.scene.views import DayIndexCache
-from habitus.series.reader import admitted
-from habitus.temporal.slots import slot_index
 
-#: 递送只为「没读懂」不说（「未观测」照常说，裁定 68 第 2 条）。
-_UNREADABLE = frozenset({UNREADABLE_GAP})
-
-
-@runtime_checkable
-class TickReadSide(BehaviorReadSide, Protocol):
-    """这一拍要读的那棵行为树、主体、日历（与结算同一侧）外加时区（预测层的装配器 ``ForesightReadSide`` 就是这个形状）。"""
-
-    @property
-    def zone(self) -> ZoneInfo: ...
+#: 递送只为「没读懂」与「错误」不说（都是在看却看不到；「未观测」照常说，裁定 68 第 2 条、94 第 3 条）。
+_UNREADABLE = UNSEEN_GAPS
 
 
 @dataclass(frozen=True)
@@ -69,14 +75,15 @@ class TickReport:
 
 @dataclass(frozen=True)
 class _Materials:
-    """这一拍读到的东西：此刻、最近几天的行、机会表（没有时为 None，原因在 ``skipped``）。"""
+    """这一拍读到的东西：最近几天、机会表（没有时为 None，原因在 ``skipped``）。"""
 
-    now: datetime
-    cache: DayIndexCache
-    unsealed: tuple[UnsealedRow, ...]
-    seen: tuple[Seen, ...]
+    recent: Recent
     table: OpportunityTable | None
     skipped: str | None
+
+    @property
+    def now(self) -> datetime:
+        return self.recent.now
 
 
 class ForesightTick:
@@ -84,7 +91,7 @@ class ForesightTick:
         self,
         ledger: ForesightLedgerStore,
         opportunities: OpportunityStore,
-        read_side: TickReadSide,
+        read_side: FormingReadSide,
         unsealed: UnsealedReader,
         *,
         lane: str = "session",
@@ -96,16 +103,21 @@ class ForesightTick:
         delivery: DeliveryStage | None = None,
         tick_seconds: float | None = None,
         recent: int,
+        tolerance: Tolerance,
         reread: Callable[[datetime, datetime], Awaitable[bool]] | None = None,
+        line_finished: Callable[[date], bool | None] | None = None,
     ) -> None:
-        if not isinstance(ledger, ForesightLedgerStore):
-            raise TypeError("ledger must be a ForesightLedgerStore")
+        self.forming = ExpectationForming(
+            ledger,
+            read_side,
+            unsealed,
+            recent=recent,
+            tolerance=tolerance,
+            shadow_unestablished=shadow_unestablished,
+            vocabulary_version=vocabulary_version,
+        )
         if not isinstance(opportunities, OpportunityStore):
             raise TypeError("opportunities must be an OpportunityStore")
-        if not isinstance(read_side, TickReadSide):
-            raise TypeError("read_side must expose the behaviour tree, subject, calendar and zone")
-        if not hasattr(unsealed, "prepare") or not hasattr(unsealed, "rows"):
-            raise TypeError("unsealed must be an UnsealedReader")
         if not isinstance(lane, str) or not lane:
             raise ValueError("lane must be non-empty text")
         if migrating is not None and not callable(migrating):
@@ -113,14 +125,7 @@ class ForesightTick:
         self.ledger = ledger
         self.opportunities = opportunities
         self.read_side = read_side
-        self.unsealed = unsealed
         self.lane = lane
-        self.shadow_unestablished = bool(shadow_unestablished)
-        if isinstance(recent, bool) or not isinstance(recent, int) or recent < 1:
-            raise ValueError("recent must be a positive integer")
-        #: 证据的窗口 M：「离上次够久」的时窗与预期的依据只看最近 M 次（``Evidence.window``）。
-        self.recent = recent
-        self.vocabulary_version = vocabulary_version
         self.migrating = migrating
         if delivery is not None and (not isinstance(delivery, DeliveryStage) or delivery.ledger is not ledger):
             raise TypeError("delivery must be a DeliveryStage on the same ledger")
@@ -133,93 +138,101 @@ class ForesightTick:
         self.tick = timedelta(seconds=float(tick_seconds)) if tick_seconds is not None else None
         self.observer: Observer = observer if observer is not None else NullObserver()
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
-        #: 时窗末当场重读那段「没读懂」的口（会话一支的重试堆，裁定 68 第 1 条）；没接就是 None。
+        #: 时窗末当场重读那段「没读懂」「错误」的口（会话一支的重试堆，裁定 68 第 1 条）；没接就是 None。
         self.reread = reread
+        if line_finished is not None and not callable(line_finished):
+            raise TypeError("line_finished must be callable or None")
+        #: 夜里那条线自己记的"这一晚跑完了没有"（与结算认停掉的那天同一个判断，``LastRun.finished``）：今天这一晚的线跑完了
+        #: 才建预期（裁定 94 第 1 条）；没接就只看表是不是今天这一晚的。
+        self.line_finished = line_finished
+        #: 用今天这一晚的表补建过的那一天（表出来后第一拍从零点起看，之后按一拍看）。
+        self._caught_up: date | None = None
 
     async def run_once(self) -> TickReport:
         started = time.monotonic()
         try:
             report = await self._run()
         except Exception as exc:
-            self._observe(ObservationStatus.FAILURE, {"error_type": type(exc).__name__}, started)
+            observe_foresight(
+                self.observer, "tick", ObservationStatus.FAILURE, {"error_type": type(exc).__name__}, started
+            )
             raise
-        self._observe(ObservationStatus.SUCCESS, _attributes(report), started)
+        observe_foresight(self.observer, "tick", ObservationStatus.SUCCESS, _attributes(report), started)
         return report
 
     async def _run(self) -> TickReport:
         now = self._clock().astimezone(self.read_side.zone)
-        if self.migrating is not None and self.migrating():
-            return TickReport(now, 0, 0, skipped="词表迁移还没做完")
+        held = held_by_migration(self.migrating)
+        if held is not None:
+            return TickReport(now, 0, 0, skipped=held)
         materials = await self._read(now)
-        formed, recorded, by_source = self._form(materials)
+        formed = self._form(materials)
         delivered = await self._deliver(materials)
         return TickReport(
             now,
-            formed,
-            recorded,
-            by_source,
+            formed.formed,
+            formed.recorded,
+            formed.by_source,
             materials.skipped,
             delivered.decided if delivered is not None else 0,
             delivered.spoken if delivered is not None else 0,
             delivered,
-            len(self.ledger.take_unreadable()) + (delivered.unreadable if delivered is not None else 0),
+            len(self.ledger.take_unreadable())
+            + len(self.opportunities.take_unreadable())
+            + (delivered.unreadable if delivered is not None else 0),
         )
 
     # ── 第一步：读 ──────────────────────────────────────────────────────────
 
     async def _read(self, now: datetime) -> _Materials:
-        cache = DayIndexCache(
-            self.read_side.behavior_tree,
-            subject=self.read_side.subject,
-            admits=admitted,
-            calendar=self.read_side.calendar,
-        )
-        day_start = datetime.combine(now.date(), clock_time(0), tzinfo=now.tzinfo)
-        await self.unsealed.prepare(until=now)
-        unsealed = self.unsealed.rows(since=day_start, until=now)
-        seen = seen_rows(Moment(at=now, slot=0), cache, unsealed)
-        table = self.opportunities.latest(self.lane)
-        if table is None:
-            return _Materials(now, cache, unsealed, seen, None, "还没有机会表")
-        return _Materials(now, cache, unsealed, seen, table, None)
+        recent = await self.forming.read(now)
+        # 今晚的表还没出来：递送照常用盘上最晚那张，建预期等表出来（裁定 94 第 1 条）
+        table, skipped = tonight_table(self.opportunities, self.lane, now.date(), line_finished=self.line_finished)
+        return _Materials(recent, table, skipped)
 
     # ── 第二步：建预期 ──────────────────────────────────────────────────────
 
-    def _form(self, materials: _Materials) -> tuple[int, int, dict[str, int]]:
-        table = materials.table
-        if table is None:
-            return 0, 0, {}
+    def _form(self, materials: _Materials) -> Formed:
+        if materials.table is None or materials.skipped is not None:
+            return Formed()
         now = materials.now
-        moment = Moment(
-            at=now,
-            slot=slot_index(now, slot_minutes=table.slot_minutes),
-            calendar=dict(self.read_side.calendar.for_expectations(now.date())),
-            looked_since=now - self.tick if self.tick is not None else None,
+        formed = self.forming.form(
+            materials.recent,
+            materials.table,
+            batch=Batch.MOMENT,
+            looked_since=self._looked_since(now),
+            known_instances=self._known_instances(now),
         )
-        expectations = form_expectations(
-            moment=moment,
-            table=table,
-            rows=materials.seen,
-            shadow_unestablished=self.shadow_unestablished,
-            generation=table.night.isoformat(),
-            version=str(self.vocabulary_version()) if self.vocabulary_version is not None else "",
-            implementation=IMPLEMENTATION,
-            recent=self.recent,
-            calendar_of=lambda day: dict(self.read_side.calendar.for_expectations(day)),
-        )
-        recorded = 0
-        by_source: dict[str, int] = {}
-        silenced: dict[str, bool] = {}
-        for item in expectations:
-            by_source[item.source] = by_source.get(item.source, 0) + 1
-            if self.ledger.has_expectation(item.expectation_id):
-                continue
-            if item.kind_token not in silenced:
-                setting = self.ledger.setting_of(item.kind_token)
-                silenced[item.kind_token] = setting is not None and setting.setting == "以后别提了"
-            if not silenced[item.kind_token] and self.ledger.record_expectation(item):
-                recorded += 1
-        return len(expectations), recorded, by_source
+        self._caught_up = now.date()
+        return formed
+
+    def _looked_since(self, now: datetime) -> datetime | None:
+        """这一拍从哪一刻起看：今天这一晚的表出来后的第一拍从零点起（补建，裁定 94 第 1 条），之后按一拍的宽度。"""
+
+        if self._caught_up != now.date():
+            return datetime.combine(now.date(), clock_time(0), tzinfo=now.tzinfo)
+        return now - self.tick if self.tick is not None else None
+
+    def _known_instances(self, now: datetime) -> Callable[[str], tuple[str, ...]]:
+        """账 → 这本账上已经建过的事件预期的触发实例（还要看的、回看窗里的日子；问到才读，一拍只读一遍）：前因的开始被更正后，
+        同一次机会沿用原来的实例（``form_expectations`` 的 ``known_instances``）。"""
+
+        found: dict[str, list[str]] | None = None
+        since = now.date() - timedelta(days=LOOKBACK_DAYS)
+
+        def of(account: str) -> tuple[str, ...]:
+            nonlocal found
+            if found is None:
+                found = {}
+                for day in self.ledger.open_days():
+                    if day < since:
+                        continue
+                    for item in self.ledger.expectations_on(day):
+                        if item.source == "事件":
+                            found.setdefault(item.account, []).append(item.trigger_instance)
+            return tuple(found.get(account, ()))
+
+        return of
 
     # ── 第三步：递送 ────────────────────────────────────────────────────────
 
@@ -228,21 +241,18 @@ class ForesightTick:
 
         if self.delivery is None:
             return None
-        now, seen = materials.now, materials.seen
+        now, seen = materials.now, materials.recent.seen
+        current = self.delivery.current
         return await self.delivery.run_once(
             now,
             JudgeMaterials(
                 materials.table,
-                lambda uris: self._rows_for(uris, materials.cache, materials.unsealed, seen, now),
-                lambda item: any(
-                    row.kind_token == item.kind_token
-                    and item.observed_from < row.started_at <= now
-                    and not row.abandoned
-                    for row in seen
-                ),
+                lambda uris: self._rows_for(uris, materials.recent.cache, materials.recent.unsealed, seen, now),
+                lambda item: done_since(item, seen, now=now, current=current),
                 lambda day: day_note(self.read_side.calendar, day),
-                lambda item: _unobserved(item, materials, now),
+                lambda item: _unobserved(item, materials.recent, now),
                 None if self.reread is None else self._reread_for(now),
+                seen,
             ),
         )
 
@@ -291,40 +301,33 @@ class ForesightTick:
                 )
         return found
 
-    def _observe(
-        self, status: ObservationStatus, attributes: dict[str, str | int | float | bool], started: float
-    ) -> None:
-        try:
-            self.observer.record(
-                ObservationEvent(
-                    category="foresight",
-                    operation="tick",
-                    status=status,
-                    duration_seconds=max(0.0, time.monotonic() - started),
-                    attributes=attributes,
-                )
-            )
-        except Exception:  # noqa: BLE001 - 观测不许影响这一拍
-            pass
 
-
-def _unobserved(item: Expectation, materials: _Materials, now: datetime) -> bool:
-    """说中的范围（起算 → 此刻）里有没有「没读懂」（只认它，「未观测」照常说，裁定 68 第 2 条）：已落树的（被行为作废的
-    已去掉，与结算同一个判法），加上还没封口的「没读懂」判断；还没封口的可读行为从那段里开头的，也把它作废——白天当场
-    重读补回来、还没归约的那一条就是这样（裁定 68 第 1 条）。"""
+def _unobserved(item: Expectation, recent: Recent, now: datetime) -> bool:
+    """说中的范围（起算 → 此刻）里有没有「没读懂」或「错误」（都是看不到；「未观测」照常说，裁定 68 第 2 条、94 第 3 条）：已落树的（被行为作废的
+    已去掉，与结算同一个读法），加上还没封口的「没读懂」判断；还没封口的可读行为从那段里开头的，也把它作废——白天当场
+    重读补回来、还没归约的那一条就是这样（裁定 68 第 1 条）。作废用的是空白的那一个读法（``foundation.intervals.standing_pieces``：
+    按天切开，每天那段由那一天的行为判）。"""
 
     start, end = item.observed_from.astimezone(UTC), now.astimezone(UTC)
     stretches = [
-        (gap.started_at.astimezone(UTC), gap.ended_at.astimezone(UTC))
-        for gap in materials.cache.gaps_within(item.observed_from, now, kinds=_UNREADABLE)
+        (gap.started_at, gap.ended_at) for gap in recent.cache.gaps_within(item.observed_from, now, kinds=_UNREADABLE)
     ]
     stretches += [
-        (row.started_at.astimezone(UTC), row.last_observed_at.astimezone(UTC))
-        for row in materials.unsealed
+        (row.started_at, row.last_observed_at)
+        for row in recent.unsealed
         if row.name is None and row.started_at.astimezone(UTC) < end and row.last_observed_at.astimezone(UTC) > start
     ]
-    readable = [row.started_at.astimezone(UTC) for row in materials.unsealed if row.name is not None]
-    return any(not any(begin <= opened < finish for opened in readable) for begin, finish in stretches)
+    readable: dict[date, list[datetime]] = {}
+    for row in recent.unsealed:
+        if row.name is not None:
+            readable.setdefault(row.started_at.date(), []).append(row.started_at)
+    for moments in readable.values():
+        moments.sort(key=lambda moment: moment.astimezone(UTC))
+    return any(
+        begin.astimezone(UTC) < end and finish.astimezone(UTC) > start
+        for opened, closed in stretches
+        for begin, finish in standing_pieces(opened, closed, voidable=True, starts_on=lambda day: readable.get(day, ()))
+    )
 
 
 def _attributes(report: TickReport) -> dict[str, str | int | float | bool]:
@@ -349,4 +352,4 @@ def _attributes(report: TickReport) -> dict[str, str | int | float | bool]:
     return found
 
 
-__all__ = ["ForesightTick", "TickReadSide", "TickReport"]
+__all__ = ["ForesightTick", "TickReport"]

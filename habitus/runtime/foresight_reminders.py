@@ -1,7 +1,7 @@
 """某一天各条提醒走到了哪一步（方案 36 第 2 步 ``habitus reminders``；R8 实测时看"问的比例"、放回次数、宿主没取的比例）。
 
 只读：从账本拼——决定说的那条递送（「待取」与写好的话）、出口认出提问后追加的「说了」（经哪个宿主）、终局的「宿主没取」、
-回话（正 / 中 / 负）、结算的结果；还没过最晚时限的，再从出口的取走记录拼上谁取走了、放回了几次（过了时限那份记录就清掉了）。
+「待取」之后他自己先做了的「已发生」（终局，不再给出去）、回话（正 / 中 / 负 / 已做）、结算的结果；还没过最晚时限的，再从出口的取走记录拼上谁取走了、放回了几次（过了时限那份记录就清掉了）。
 """
 
 from __future__ import annotations
@@ -13,13 +13,15 @@ from habitus.foresight.ledger.model import AWAITING_HOST, HOST_NEVER_CLAIMED, SP
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_outlet import Handoff, ReminderOutlet
 
-#: 进了出口的三种递送：等取、说出口了、到时限没人取 / 没问出口
-_OUTLET_REASONS = frozenset({AWAITING_HOST, SPOKEN, HOST_NEVER_CLAIMED})
+#: 「待取」之后他在被问之前自己做了（终局）。
+HAPPENED = "已发生"
+#: 进了出口的四种递送：等取、说出口了、到时限没人取 / 没问出口、等取的时候他先做了
+_OUTLET_REASONS = frozenset({AWAITING_HOST, SPOKEN, HOST_NEVER_CLAIMED, HAPPENED})
 
 
 @dataclass(frozen=True)
 class ReminderProgress:
-    """一条提醒：``stage`` 是此刻走到的那一步——待取 / 取走了 / 说了 / 宿主没取。"""
+    """一条提醒：``stage`` 是此刻走到的那一步——待取 / 取走了 / 说了 / 宿主没取 / 已发生。"""
 
     expectation_id: str
     kind: str
@@ -68,9 +70,17 @@ def reminder_day(ledger: ForesightLedgerStore, outlet: ReminderOutlet | None, da
         first = min(awaiting, key=lambda item: item.decided_at)
         spoken = next((item for item in sorted(items, key=lambda d: d.decided_at) if item.reason == SPOKEN), None)
         never = any(item.reason == HOST_NEVER_CLAIMED for item in items)
+        happened = any(item.reason == HAPPENED and item.decided_at >= first.decided_at for item in items)
         trail = trails.get(expectation_id)
         holding = trail is not None and any(handoff.ended is None for handoff in trail.handoffs)
-        stage = SPOKEN if spoken else HOST_NEVER_CLAIMED if never else "取走了" if holding else AWAITING_HOST
+        if spoken:
+            stage = SPOKEN
+        elif never:
+            stage = HOST_NEVER_CLAIMED
+        elif happened:
+            stage = HAPPENED
+        else:
+            stage = "取走了" if holding else AWAITING_HOST
         response = responses.get(expectation_id)
         rows.append(
             ReminderProgress(

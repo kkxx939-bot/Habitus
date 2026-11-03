@@ -1,5 +1,6 @@
 """统一模型配置、Provider 工厂和供应商无关能力契约。"""
 
+from habitus.foundation.embedding import EmbeddingVector
 from habitus.model_client.client import ChatClient
 from habitus.model_client.config import (
     CapabilityConfig,
@@ -13,7 +14,9 @@ from habitus.model_client.config import (
 )
 from habitus.model_client.contracts import (
     MODEL_DETERMINISTIC,
+    MODEL_REFUSED,
     MODEL_UNAVAILABLE,
+    MODEL_UNUSABLE,
     ChatCallContext,
     ChatMessage,
     ChatProvider,
@@ -33,6 +36,7 @@ from habitus.model_client.contracts import (
     ModelStreamEvent,
     ModelStructuredOutputError,
     ModelTransportError,
+    ModelUnreachable,
     PreparedChatRequest,
     ProviderCapabilities,
     ReasoningOptions,
@@ -46,7 +50,6 @@ from habitus.model_client.embedding import (
     Embedder,
     EmbeddingClient,
     EmbeddingProvider,
-    EmbeddingVector,
 )
 from habitus.model_client.factory import ProviderBuildContext, ProviderBuilder, ProviderFactory
 from habitus.model_client.json_parser import JSONParseMode, ParsedJSON, parse_json_response
@@ -60,7 +63,9 @@ from habitus.model_client.token_budget import (
 
 __all__ = [
     "MODEL_DETERMINISTIC",
+    "MODEL_REFUSED",
     "MODEL_UNAVAILABLE",
+    "MODEL_UNUSABLE",
     "CapabilityConfig",
     "ChatClient",
     "ChatCallContext",
@@ -93,6 +98,7 @@ __all__ = [
     "ModelStreamEvent",
     "ModelStructuredOutputError",
     "ModelTransportError",
+    "ModelUnreachable",
     "PreparedChatRequest",
     "ParsedJSON",
     "ProviderBuildContext",

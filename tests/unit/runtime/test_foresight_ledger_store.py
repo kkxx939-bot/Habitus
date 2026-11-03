@@ -200,3 +200,40 @@ def test_an_oversized_record_is_refused_at_write_time(tmp_path) -> None:
         store.record_expectation(huge)
     assert store.expectations_on(FORMED.date()) == ()
     assert store.day_of(huge.expectation_id) is None  # 连索引都没占
+
+
+def test_an_unreadable_watermark_falls_back_to_the_per_day_final_markers(tmp_path) -> None:
+    """段 6 Q3：结完低水位读不出来时 ``open_days`` / ``is_final`` 不抛——水位当没有、按逐天的 ``_final`` 标记认，坏文件计入
+    观测；下一次推进水位时整份重写。开着的提醒（会话 lane 每轮问的那一口）也照常读。"""
+
+    from habitus.runtime.foresight_responses import ReminderResponses
+
+    store = ForesightLedgerStore(tmp_path / "ledger")
+    first, second = expectation(), replace(expectation("e2"), day=FORMED.date() + timedelta(days=1))
+    store.record_expectation(first)
+    store.record_expectation(second)
+    store.mark_final(first.day, at=first.deadline)
+    watermark = tmp_path / "ledger" / "final_through.json"
+    assert store.final_through() == first.day
+    watermark.write_text("{", encoding="utf-8")
+    fresh = ForesightLedgerStore(tmp_path / "ledger")  # 内存里没有记住的标记
+    assert fresh.open_days() == (second.day,) and fresh.is_final(first.day)
+    assert ReminderResponses(fresh, limit=5).open(FORMED) == ()
+    assert str(watermark) in fresh.take_unreadable()
+    fresh.mark_final(second.day, at=second.deadline)
+    assert fresh.final_through() == second.day  # 整份重写成读得出的
+
+
+def test_an_unreadable_index_entry_is_skipped_not_rebuilt_and_not_fatal(tmp_path) -> None:
+    """段 6 Q3：索引点读同一个总则——读不出来记下坏文件、当不知道在哪一天；这个身份算写过（不另起一份、``record_expectation``
+    不抛），白天那一拍照常往下走。"""
+
+    store = ForesightLedgerStore(tmp_path / "ledger")
+    item = expectation()
+    store.record_expectation(item)
+    index = tmp_path / "ledger" / "index" / "expectations" / "e1.json"
+    index.write_text('{"record": "index"', encoding="utf-8")
+    assert store.day_of("e1") is None
+    assert store.has_expectation("e1") is True
+    assert store.record_expectation(item) is False
+    assert store.take_unreadable() == (str(index),)

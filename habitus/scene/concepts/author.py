@@ -32,6 +32,7 @@ from typing import Any, cast
 from habitus.foundation.integrity import canonical_digest
 from habitus.foundation.text import clean_line
 from habitus.model_client import ChatMessage, ChatRequest, StructuredChatClient
+from habitus.model_client.asking import Failed, ask
 from habitus.scene.concepts.calendar_situations import is_calendar
 from habitus.scene.concepts.model import (
     BASELINE_KEY_SEPARATOR,
@@ -55,7 +56,6 @@ from habitus.scene.concepts.model import (
 )
 from habitus.scene.concepts.rhythm import RHYTHM_RENDER_VERSION, Rhythm
 from habitus.scene.concepts.situation import SituationBasis, SituationError, SituationRule
-from habitus.scene.llm import Failed, ask
 
 # v5 → v6（2026-10-18，裁定 59）：日历那一族（周几、日历备注）从可写的情境里拿掉，改由外部条件机械给；节律那一行换口径。
 # **未对着真实模型调过**，合入前待用户用真实模型做新旧对照。

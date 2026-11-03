@@ -15,10 +15,10 @@ import asyncio
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 
+from habitus.foresight.diagnosis import DIAGNOSIS_DAYS, DIAGNOSIS_REACH_DAYS
 from habitus.infrastructure.lifecycle import CapacityReading, LifecycleContext, ParticipantReport
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
-from habitus.runtime.foresight_settlement import DIAGNOSIS_DAYS, DIAGNOSIS_REACH_DAYS
 
 #: 结完之后再等几天放索引：最晚时限最多在形成之后 7 天（第 2–7 天段），再多一天余量。
 INDEX_GRACE_DAYS = 8

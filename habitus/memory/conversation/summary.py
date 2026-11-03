@@ -17,9 +17,9 @@ from habitus.infrastructure.store.filesystem import (
     durable_unlink,
     read_regular_bytes,
 )
-from habitus.memory.compaction.field_ops import SemanticFieldOperationBatch
 from habitus.memory.conversation.field_validation import summary_content_from_operations
 from habitus.memory.conversation.layout import ConversationAddress, ConversationLayout
+from habitus.memory.field_ops import SemanticFieldOperationBatch
 from habitus.model_client import (
     ChatCallContext,
     ChatMessage,

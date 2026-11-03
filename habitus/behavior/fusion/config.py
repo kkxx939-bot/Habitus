@@ -10,9 +10,8 @@ from dataclasses import dataclass
 # 归约的封口视界：一条判断的证据齐备之后过了这么久，才封口落树（``behavior/reduction``）。
 # 这个数原是逐帧融合"往回看多久的先前判断"的窗口——出了窗口就不会再有后续指向它，链才能机械闭合；
 # 逐帧融合退役后两条 lane 都是一个单位一条、互不指向，它只剩"落树之前等多久"这一个作用。
-# 归约只准从这里取，组合根把 ``Config.behavior`` 解析出的同一份数值喂进去。
-# TODO(BHV-SESSION-LANE-001)：两条 lane 的记录送到时就是完整的，方案定的是一送到就封口、不等这一小时；
-# 那是归约的改动，等融合改完再做。
+# 归约只准从这里取，组合根把 ``Config.behavior`` 解析出的同一份数值喂进去。会话 lane 的记录一送到就封口、不等它
+# （裁定 31），它只管物理 lane 的落树与两条 lane 的定稿日（``behavior/reduction/sealing``）。
 FUSION_CONTEXT_LOOKBACK_SECONDS = 3_600.0
 
 

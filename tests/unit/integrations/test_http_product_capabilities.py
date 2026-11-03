@@ -4,11 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import subprocess
-import sys
-from collections.abc import Mapping
 from datetime import UTC, date, datetime
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -19,11 +15,26 @@ from fastapi.testclient import TestClient
 from habitus.config import HTTPAPIConfig
 from habitus.foundation.observability import ObservationEvent
 from habitus.integrations.http_api import app as app_module
-from habitus.integrations.sdk import ConversationRef, HabitusHTTPClient
+from habitus.integrations.http_api.handlers import RememberOutcome
+from habitus.integrations.http_api.schemas import (
+    AuditListResult,
+    BlockedJobResult,
+    CapabilitiesResult,
+    ConversationCursorResult,
+    FlushResult,
+    HealthResult,
+    JobListResult,
+    JobStatusResult,
+    RecallResult,
+    RememberResult,
+    RetryJobResult,
+)
+from habitus.memory.workflow import MemoryJob, MemoryJobStatus
 from habitus.runtime import Runtime
 
 UTC = UTC
-REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+# 分块请求体要读完才往下走：中间件丢了请求体或卡在 receive 上时，测试在这个时限内失败而不是挂住
+_BODY_WAIT_SECONDS = 10
 
 
 def _assert_response_request_id(response: httpx.Response) -> str:
@@ -42,41 +53,49 @@ class CollectingObserver:
         self.events.append(event)
 
 
-class DelegatingHTTPTransport:
-    """证明 SDK 只依赖 request 能力，而非具体 httpx.AsyncClient 类型。"""
+def _job(sequence: int = 7, *, status: str = "failed", blocking: bool = True) -> JobStatusResult:
+    return JobStatusResult.model_validate(
+        {
+            "memory_sequence": sequence,
+            "conversation_id": "conversation-http",
+            "started_on": "2026-07-30",
+            "state": status,
+            "job_status": status,
+            "terminal": status in {"failed", "committed", "abandoned"},
+            "attempts": 2,
+            "next_attempt_at": None,
+            "last_failure": {"message": "model unavailable"} if status == "failed" else None,
+            "blocking": blocking,
+            "manual_action_required": status == "failed" and blocking,
+            "version": "a" * 64,
+            "created_at": "2026-07-30T01:00:00Z",
+            "updated_at": "2026-07-30T01:01:00Z",
+        }
+    )
 
-    def __init__(self, client: httpx.AsyncClient) -> None:
-        self.client = client
 
-    async def request(
-        self,
-        method: str,
-        url: str,
-        *,
-        headers: Mapping[str, str],
-        json: object | None,
-        params: Mapping[str, str] | None,
-    ) -> httpx.Response:
-        return await self.client.request(method, url, headers=headers, json=json, params=params)
+def _accepted_job(conversation_id: str, started_on: date) -> MemoryJob:
+    """路由只从受理的 Job 上取观测关联用的事务身份，内部字段不进响应。"""
 
-
-def _job(sequence: int = 7, *, status: str = "failed", blocking: bool = True) -> dict[str, object]:
-    return {
-        "memory_sequence": sequence,
-        "conversation_id": "conversation-http",
-        "started_on": "2026-07-30",
-        "state": status,
-        "job_status": status,
-        "terminal": status in {"failed", "committed", "abandoned"},
-        "attempts": 2,
-        "next_attempt_at": None,
-        "last_failure": {"message": "model unavailable"} if status == "failed" else None,
-        "blocking": blocking,
-        "manual_action_required": status == "failed" and blocking,
-        "version": "a" * 64,
-        "created_at": "2026-07-30T01:00:00Z",
-        "updated_at": "2026-07-30T01:01:00Z",
-    }
+    moment = datetime(2026, 7, 30, 1, tzinfo=UTC)
+    return MemoryJob(
+        memory_sequence=7,
+        conversation_id=conversation_id,
+        started_on=started_on,
+        segment_id="internal-segment",
+        source_segment_digest="b" * 64,
+        transaction_id="7" * 32,
+        status=MemoryJobStatus.QUEUED,
+        attempts=0,
+        claim_id=None,
+        claim_generation=0,
+        worker_id=None,
+        lease_expires_at=None,
+        next_attempt_at=None,
+        last_error=None,
+        created_at=moment,
+        updated_at=moment,
+    )
 
 
 class CapabilityHandlers:
@@ -85,103 +104,112 @@ class CapabilityHandlers:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
 
-    def capabilities(self) -> dict[str, object]:
+    def capabilities(self) -> CapabilitiesResult:
         self.calls.append(("capabilities", None))
-        return {
-            "api_version": "1.0",
-            "service_version": "0.1.0",
-            "protocols": ["openai", "anthropic"],
-            "features": ["recall", "remember", "remember_idempotency_v1"],
-        }
+        return CapabilitiesResult(
+            api_version="1.0",
+            service_version="0.1.0",
+            protocols=["openai", "anthropic"],
+            features=["recall", "remember", "remember_idempotency_v1"],
+        )
 
-    async def remember(self, **values: object) -> dict[str, object]:
+    async def remember(self, **values: object) -> RememberOutcome:
         self.calls.append(("remember", values))
-        return {
-            "ignored_items": 0,
-            "after_turn": bool(values["after_turn"]),
-            "next_sequence": 2,
-            "jobs": [
+        conversation_id, started_on = values["conversation_id"], values["started_on"]
+        assert isinstance(conversation_id, str) and isinstance(started_on, date)
+        job = _accepted_job(conversation_id, started_on)
+        return RememberOutcome(
+            result=RememberResult.model_validate(
                 {
-                    "memory_sequence": 7,
-                    "conversation_id": values["conversation_id"],
-                    "started_on": str(values["started_on"]),
-                    "segment_id": "internal-segment",
-                    "source_segment_digest": "b" * 64,
-                    "transaction_id": "transaction-http-7",
-                    "status": "queued",
+                    "ignored_items": 0,
+                    "after_turn": bool(values["after_turn"]),
+                    "next_sequence": 2,
+                    "jobs": [
+                        {
+                            "memory_sequence": job.memory_sequence,
+                            "conversation_id": job.conversation_id,
+                            "started_on": job.started_on,
+                            "status": job.status.value,
+                        }
+                    ],
+                    "consistency": [],
                 }
-            ],
-            "consistency": [],
-        }
+            ),
+            accepted_jobs=(job,),
+        )
 
-    async def conversation_cursor(self, **values: object) -> dict[str, object]:
+    async def conversation_cursor(self, **values: object) -> ConversationCursorResult:
         self.calls.append(("conversation_cursor", values))
-        return {"next_sequence": 2}
+        return ConversationCursorResult(next_sequence=2)
 
-    async def flush(self, **values: object) -> dict[str, object]:
+    async def flush(self, **values: object) -> FlushResult:
         self.calls.append(("flush", values))
-        return {"jobs": [], "consistency": []}
+        return FlushResult(jobs=[], consistency=[])
 
-    async def recall(self, query: str, **values: object) -> dict[str, object]:
+    async def recall(self, query: str, **values: object) -> RecallResult:
         self.calls.append(("recall", {"query": query, **values}))
-        return {
-            "query": query,
-            "queries": [query],
-            "context": "用户偏好简洁回答。",
-            "memories": [
-                {
-                    "uri": "memory://preferences/response_style.md",
-                    "score": 0.91,
-                    "matched_queries": [query],
-                }
-            ],
-            "summaries": [],
-            "degradations": [],
-            "budget_exhausted": False,
-        }
+        return RecallResult.model_validate(
+            {
+                "query": query,
+                "queries": [query],
+                "context": "用户偏好简洁回答。",
+                "memories": [
+                    {
+                        "uri": "memory://preferences/response_style.md",
+                        "score": 0.91,
+                        "matched_queries": [query],
+                    }
+                ],
+                "summaries": [],
+                "degradations": [],
+                "budget_exhausted": False,
+            }
+        )
 
-    async def list_jobs(self, **values: object) -> dict[str, object]:
+    async def list_jobs(self, **values: object) -> JobListResult:
         self.calls.append(("list_jobs", values))
-        return {"jobs": [_job()], "next_before_sequence": None}
+        return JobListResult(jobs=[_job()], next_before_sequence=None)
 
-    async def blocked_job(self) -> dict[str, object]:
+    async def blocked_job(self) -> BlockedJobResult:
         self.calls.append(("blocked_job", None))
-        return {"job": _job()}
+        return BlockedJobResult(job=_job())
 
-    async def job_status(self, sequence: int, **values: object) -> dict[str, object]:
+    async def job_status(self, sequence: int, **values: object) -> JobStatusResult:
         self.calls.append(("job_status", {"sequence": sequence, **values}))
         return _job(sequence)
 
-    async def retry_failed_job(self, sequence: int, **values: object) -> dict[str, object]:
+    async def retry_failed_job(self, sequence: int, **values: object) -> RetryJobResult:
         self.calls.append(("retry_failed_job", {"sequence": sequence, **values}))
-        return {
-            "previous": _job(sequence),
-            "job": _job(sequence, status="queued", blocking=False),
-            "worker_restarted": True,
-        }
+        return RetryJobResult(
+            previous=_job(sequence),
+            job=_job(sequence, status="queued", blocking=False),
+            worker_restarted=True,
+        )
 
-    async def recent_audit_events(self, *, limit: int) -> dict[str, object]:
+    async def recent_audit_events(self, *, limit: int) -> AuditListResult:
         self.calls.append(("recent_audit_events", limit))
-        return {
-            "events": [
-                {
-                    "audit_id": "c" * 32,
-                    "occurred_at": "2026-07-30T01:02:00Z",
-                    "category": "operations",
-                    "operation": "retry_job",
-                    "status": "success",
-                    "request_id": "operations-request",
-                    "memory_sequence": 7,
-                    "attributes": {"job_status": "queued"},
-                }
-            ]
-        }
+        return AuditListResult.model_validate(
+            {
+                "events": [
+                    {
+                        "audit_id": "c" * 32,
+                        "occurred_at": "2026-07-30T01:02:00Z",
+                        "category": "operations",
+                        "operation": "retry_job",
+                        "status": "success",
+                        "request_id": "operations-request",
+                        "memory_sequence": 7,
+                        "attributes": {"job_status": "queued"},
+                    }
+                ]
+            }
+        )
 
-    async def health(self, *, deep: bool = False) -> dict[str, object]:
+    async def health(self, *, deep: bool = False) -> HealthResult:
         self.calls.append(("health", deep))
         return _health(ready=True)
 
-    async def readiness(self) -> tuple[int, dict[str, object]]:
+    async def readiness(self) -> tuple[int, HealthResult]:
         self.calls.append(("readiness", None))
         return 200, _health(ready=True)
 
@@ -190,20 +218,23 @@ class CapabilityHandlers:
         return "habitus_operations_total 3\n", "text/plain; version=0.0.4; charset=utf-8"
 
 
-def _health(*, ready: bool) -> dict[str, object]:
-    return {
-        "status": "healthy" if ready else "unhealthy",
-        "ready": ready,
-        "checked_at": datetime(2026, 7, 30, 1, tzinfo=UTC).isoformat(),
-        "checks": [
-            {
-                "name": "runtime",
-                "status": "healthy" if ready else "unhealthy",
-                "detail": "ready" if ready else "not ready",
-                "critical": True,
-            }
-        ],
-    }
+def _health(*, ready: bool) -> HealthResult:
+    return HealthResult.model_validate(
+        {
+            "status": "healthy" if ready else "unhealthy",
+            "ready": ready,
+            "recall_ready": ready,
+            "checked_at": datetime(2026, 7, 30, 1, tzinfo=UTC).isoformat(),
+            "checks": [
+                {
+                    "name": "runtime",
+                    "status": "healthy" if ready else "unhealthy",
+                    "detail": "ready" if ready else "not ready",
+                    "critical": True,
+                }
+            ],
+        }
+    )
 
 
 def _runtime(observer: CollectingObserver | None = None) -> Runtime:
@@ -278,6 +309,7 @@ def test_memory_routes_expose_public_results_and_preserve_handler_inputs(monkeyp
         "service_version": "0.1.0",
         "protocols": ["openai", "anthropic"],
         "features": ["recall", "remember", "remember_idempotency_v1"],
+        "max_request_bytes": 4096,
     }
     public_job = remembered.json()["result"]["jobs"][0]
     assert public_job == {
@@ -303,7 +335,7 @@ def test_memory_routes_expose_public_results_and_preserve_handler_inputs(monkeyp
     assert any(name == "flush" for name, _value in handlers.calls)
     accepted = next(event for event in observer.events if event.operation == "job_accepted")
     assert accepted.context.memory_sequence == 7
-    assert accepted.context.transaction_id == "transaction-http-7"
+    assert accepted.context.transaction_id == "7" * 32
     request_events = [event for event in observer.events if event.operation == "request"]
     assert request_events
     assert all(event.attributes["http_route"] != "/__unmatched__" for event in request_events)
@@ -311,105 +343,26 @@ def test_memory_routes_expose_public_results_and_preserve_handler_inputs(monkeyp
     runtime.close.assert_awaited_once()
 
 
-def test_http_client_implements_the_same_agent_memory_port(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_invalid_delivery_identity_is_rejected_before_the_domain_handler(monkeypatch: pytest.MonkeyPatch) -> None:
     app, _runtime_value, handlers, _observer = _app(monkeypatch)
+    body = {
+        "delivery_id": "not-a-delivery-id",
+        "conversation_id": "delivery",
+        "started_on": "2026-08-01",
+        "protocol": "codex_rollout",
+        "payload": {"records": []},
+        "start_sequence": 0,
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+    }
 
-    async def scenario() -> None:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport) as raw_client:
-            client = HabitusHTTPClient(
-                "http://127.0.0.1",
-                transport=DelegatingHTTPTransport(raw_client),
-            )
-            conversation = ConversationRef("conversation-http", date(2026, 7, 30))
-            capabilities = await client.capabilities()
-            remembered = await client.remember(
-                conversation,
-                protocol="openai_chat_completions",
-                payload={"messages": [{"role": "assistant", "content": "好的"}]},
-                start_sequence=0,
-                occurred_at=datetime(2026, 7, 30, 1, tzinfo=UTC),
-                after_turn=True,
-                delivery_id="e" * 64,
-            )
-            cursor = await client.cursor(conversation)
-            recalled = await client.recall("回答风格", conversation=conversation)
-            flushed = await client.flush(conversation)
-            await client.close()
+    with TestClient(app, base_url="http://127.0.0.1:8787", raise_server_exceptions=False) as client:
+        response = client.post("/api/v1/memory/remember", json=body)
 
-        assert remembered.after_turn is True
-        assert capabilities.api_version == "1.0"
-        assert capabilities.protocols == ("openai", "anthropic")
-        assert remembered.next_sequence == 2
-        assert remembered.jobs[0].status == "queued"
-        assert cursor == 2
-        assert recalled.context == "用户偏好简洁回答。"
-        assert flushed.jobs == ()
-
-    asyncio.run(scenario())
-
-    assert any(name == "remember" for name, _value in handlers.calls)
-    sdk_remember = next(value for name, value in handlers.calls if name == "remember")
-    assert isinstance(sdk_remember, dict)
-    assert sdk_remember["delivery_id"] == "e" * 64
-    assert any(name == "conversation_cursor" for name, _value in handlers.calls)
-    assert any(name == "recall" for name, _value in handlers.calls)
-    assert any(name == "flush" for name, _value in handlers.calls)
-
-
-def test_unauthenticated_sdk_rejects_a_non_loopback_service_url() -> None:
-    with pytest.raises(ValueError, match="loopback"):
-        HabitusHTTPClient("http://192.168.1.20:8787")
-
-
-@pytest.mark.parametrize(
-    "base_url",
-    [
-        "http://user:secret@127.0.0.1:8787",
-        "http://127.0.0.1:8787/api",
-        "http://127.0.0.1:8787;params",
-        "http://127.0.0.1:8787?query=1",
-        "http://127.0.0.1:8787#fragment",
-        "http://127.0.0.1:invalid",
-    ],
-)
-def test_unauthenticated_sdk_accepts_only_a_loopback_origin(base_url: str) -> None:
-    with pytest.raises(ValueError):
-        HabitusHTTPClient(base_url)
-
-
-def test_sdk_rejects_an_invalid_delivery_identity_before_network_io() -> None:
-    client = HabitusHTTPClient("http://127.0.0.1:8787")
-
-    async def scenario() -> None:
-        with pytest.raises(ValueError, match="delivery_id"):
-            await client.remember(
-                ConversationRef("delivery", date(2026, 8, 1)),
-                protocol="codex_rollout",
-                payload={"records": []},
-                start_sequence=0,
-                occurred_at=datetime(2026, 8, 1, tzinfo=UTC),
-                delivery_id="not-a-delivery-id",
-            )
-        await client.close()
-
-    asyncio.run(scenario())
-
-
-def test_sdk_import_does_not_load_runtime_or_memory_packages() -> None:
-    script = (
-        "import json, sys; import habitus.integrations.sdk; "
-        "print(json.dumps({'runtime': 'habitus.runtime' in sys.modules, 'memory': 'habitus.memory' in sys.modules}))"
-    )
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=REPOSITORY_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    assert json.loads(completed.stdout) == {"runtime": False, "memory": False}
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_ARGUMENT"
+    (violation,) = response.json()["error"]["details"]["validation_errors"]
+    assert violation["location"] == ["body", "delivery_id"]
+    assert not any(name == "remember" for name, _value in handlers.calls)
 
 
 def test_operations_and_metrics_are_available_on_the_loopback_service(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -527,9 +480,201 @@ def test_chunked_oversized_request_cannot_bypass_body_limit(monkeypatch: pytest.
                 assert "content-length" not in request.headers
                 return await client.send(request)
 
-    response = asyncio.run(scenario())
+    response = asyncio.run(asyncio.wait_for(scenario(), _BODY_WAIT_SECONDS))
 
     assert response.status_code == 413
     assert response.json()["error"]["code"] == "REQUEST_TOO_LARGE"
     _assert_response_request_id(response)
+    assert not any(name == "remember" for name, _value in handlers.calls)
+
+
+def test_chunked_body_over_limit_after_a_complete_json_prefix_never_reaches_the_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """分块请求的第一块已是完整 JSON、第二块才超限：必须在路由执行前拒绝，handler 一次都不被调用。"""
+
+    app, _runtime_value, handlers, _observer = _app(monkeypatch, max_bytes=1024)
+    encoded = json.dumps(
+        {
+            "conversation_id": "conversation-http",
+            "started_on": "2026-07-30",
+            "protocol": "openai",
+            "payload": {"content": "short"},
+            "start_sequence": 0,
+            "occurred_at": "2026-07-30T01:00:00+00:00",
+        }
+    ).encode("utf-8")
+    assert len(encoded) < 1024
+
+    async def chunks():  # noqa: ANN202
+        yield encoded
+        yield b" " * 1024
+
+    async def scenario() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8787") as client:
+                request = client.build_request(
+                    "POST",
+                    "/api/v1/memory/remember",
+                    headers={"Content-Type": "application/json"},
+                    content=chunks(),
+                )
+                assert "content-length" not in request.headers
+                return await client.send(request)
+
+    response = asyncio.run(asyncio.wait_for(scenario(), _BODY_WAIT_SECONDS))
+
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "REQUEST_TOO_LARGE"
+    _assert_response_request_id(response)
+    assert not any(name == "remember" for name, _value in handlers.calls)
+
+
+def test_chunked_body_within_limit_is_replayed_to_the_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    app, _runtime_value, handlers, _observer = _app(monkeypatch, max_bytes=4096)
+    encoded = json.dumps(
+        {
+            "conversation_id": "conversation-http",
+            "started_on": "2026-07-30",
+            "protocol": "openai",
+            "payload": {"content": "short"},
+            "start_sequence": 0,
+            "occurred_at": "2026-07-30T01:00:00+00:00",
+        }
+    ).encode("utf-8")
+
+    async def chunks():  # noqa: ANN202
+        yield encoded[:10]
+        yield encoded[10:]
+
+    async def scenario() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8787") as client:
+                request = client.build_request(
+                    "POST",
+                    "/api/v1/memory/remember",
+                    headers={"Content-Type": "application/json"},
+                    content=chunks(),
+                )
+                return await client.send(request)
+
+    response = asyncio.run(asyncio.wait_for(scenario(), _BODY_WAIT_SECONDS))
+
+    assert response.status_code == 200
+    remember_call = next(value for name, value in handlers.calls if name == "remember")
+    assert isinstance(remember_call, dict) and remember_call["payload"] == {"content": "short"}
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [(b"host", b"attacker.example")],
+        [(b"host", b"127.0.0.1:8787"), (b"origin", b"https://attacker.example")],
+    ],
+)
+def test_chunked_request_from_a_foreign_host_or_origin_is_refused_before_reading_its_body(
+    monkeypatch: pytest.MonkeyPatch,
+    headers: list[tuple[bytes, bytes]],
+) -> None:
+    """不带 Content-Length 的请求：Host / Origin 不合格时一块请求体也不读就拒绝（分块限长先读完整份请求体）。"""
+
+    app, _runtime_value, handlers, _observer = _app(monkeypatch)
+    read = 0
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        nonlocal read
+        read += 1
+        return {"type": "http.request", "body": b"x" * 256, "more_body": read < 10}
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/v1/memory/remember",
+        "raw_path": b"/api/v1/memory/remember",
+        "query_string": b"",
+        "headers": [*headers, (b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", 8787),
+        "root_path": "",
+    }
+
+    async def scenario() -> None:
+        async with app.router.lifespan_context(app):
+            await app(scope, receive, send)
+
+    asyncio.run(asyncio.wait_for(scenario(), _BODY_WAIT_SECONDS))
+
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    assert start["status"] == 400
+    assert read == 0
+    assert not handlers.calls
+
+
+@pytest.mark.parametrize(
+    ("host", "origin", "detail"),
+    [
+        # 带 userinfo 的 Origin：主机部分是回环也要拒（杀"去掉 userinfo 检查"）
+        ("127.0.0.1:8787", "http://user:secret@127.0.0.1:8787", "user information"),
+        # 非 HTTP scheme 的回环 Origin（杀"去掉 scheme 检查"）
+        ("127.0.0.1:8787", "ftp://127.0.0.1:8787", "loopback HTTP origin"),
+        # Host 前后带空白（杀"去掉 Host 空白检查"）：urlsplit 会静默删掉制表符，只有这条检查拦得住
+        ("\t127.0.0.1:8787", None, "Host"),
+        ("127.0.0.1:8787\t", None, "Host"),
+        (" 127.0.0.1:8787", None, "Host"),
+    ],
+)
+def test_local_request_boundary_rejects_userinfo_scheme_and_padded_host(
+    host: str,
+    origin: str | None,
+    detail: str,
+) -> None:
+    from habitus.integrations.http_api.local_security import local_request_violation
+
+    violation = local_request_violation(host_header=host, origin_header=origin)
+
+    assert violation is not None and detail in violation
+    assert local_request_violation(host_header="127.0.0.1:8787", origin_header="http://127.0.0.1:8787") is None
+
+
+def test_negative_content_length_is_rejected_before_domain_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    app, _runtime_value, handlers, _observer = _app(monkeypatch)
+
+    with TestClient(app, base_url="http://127.0.0.1:8787", raise_server_exceptions=False) as client:
+        response = client.post(
+            "/api/v1/memory/remember",
+            headers={"Content-Length": "-1", "Content-Type": "application/json"},
+            content=b"",
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "Content-Length must not be negative"
+    assert not handlers.calls
+
+
+def test_remember_rejects_an_occurred_at_without_timezone(monkeypatch: pytest.MonkeyPatch) -> None:
+    app, _runtime_value, handlers, _observer = _app(monkeypatch)
+    body = {
+        "conversation_id": "conversation-http",
+        "started_on": "2026-07-30",
+        "protocol": "openai",
+        "payload": {"content": "naive time"},
+        "start_sequence": 0,
+        "occurred_at": "2026-07-30T01:00:00",
+    }
+
+    with TestClient(app, base_url="http://127.0.0.1:8787", raise_server_exceptions=False) as client:
+        response = client.post("/api/v1/memory/remember", json=body)
+
+    assert response.status_code == 400
+    (violation,) = response.json()["error"]["details"]["validation_errors"]
+    assert violation["location"] == ["body", "occurred_at"]
     assert not any(name == "remember" for name, _value in handlers.calls)

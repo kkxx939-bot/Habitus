@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import importlib.util
+import json
 import os
 import shutil
 import socket
@@ -20,6 +22,16 @@ if TYPE_CHECKING:
     from habitus.integrations.local_service.adapter_catalog import AdapterCatalog
 
 _MINIMUM_FREE_BYTES = 1024**3
+# Habitus 还没发布到 PyPI：缺依赖的安装提示与 README 一样从源码仓库装
+HABITUS_SOURCE = "git+https://github.com/kkxx939-bot/Habitus"
+# 与 pyproject 的 optional-dependencies 对应：模块由哪个 extra 提供；cloud 是 http + model + vikingdb 的合集。
+_EXTRA_BY_MODULE = {
+    "fastapi": "http",
+    "uvicorn": "http",
+    "json_repair": "model",
+    "jsonschema": "model",
+    "volcengine": "vikingdb",
+}
 
 
 class DoctorStatus(str, Enum):
@@ -116,6 +128,10 @@ def run_doctor_from_env(
         raise TypeError("environ must be a string mapping")
     try:
         config = HabitusConfig.from_env(environ=values)
+        from habitus.runtime import validate_domain_configs
+
+        # 覆盖项的值域归领域配置：越界值在这一步与读配置同一项报失败，带配置键
+        validate_domain_configs(config)
     except (ConfigError, OSError, TypeError, ValueError) as exc:
         detail = str(exc).strip() or "configuration could not be loaded"
         return DoctorReport((DoctorCheck("config", DoctorStatus.FAIL, detail),))
@@ -126,7 +142,7 @@ def run_doctor_from_env(
         probe_timeout_seconds=probe_timeout_seconds,
         catalog=catalog,
     )
-    return DoctorReport((_config_file_security(values), *report.checks))
+    return DoctorReport((_config_file_security(values), *report.checks, _plugin_connection_check(config, values)))
 
 
 def run_startup_preflight(
@@ -163,9 +179,19 @@ def _storage_check(root: Path) -> DoctorCheck:
     return DoctorCheck("storage", DoctorStatus.PASS, f"writable; free_bytes={free}")
 
 
+def pip_install_command(extra: str) -> str:
+    """装带某个 extra 的 Habitus 的命令，与 README 的装法一致。"""
+
+    return f'pip install "habitus[{extra}] @ {HABITUS_SOURCE}"'
+
+
 def _python_dependency_check(module: str) -> DoctorCheck:
     if importlib.util.find_spec(module) is None:
-        return DoctorCheck(module, DoctorStatus.FAIL, "Python dependency is not installed")
+        extra = _EXTRA_BY_MODULE.get(module)
+        detail = "Python dependency is not installed"
+        if extra is not None:
+            detail += f"; provided by the '{extra}' extra (also in 'cloud'): {pip_install_command('cloud')}"
+        return DoctorCheck(module, DoctorStatus.FAIL, detail)
     return DoctorCheck(module, DoctorStatus.PASS, "available")
 
 
@@ -224,19 +250,27 @@ def _node_check() -> DoctorCheck:
 
 
 def _ingress_capacity_check(config: HabitusConfig) -> DoctorCheck:
-    request_bytes = config.http.max_request_bytes
-    journal_bytes = config.conversation.journal.max_file_bytes
-    if request_bytes > journal_bytes:
-        return DoctorCheck(
-            "ingress_capacity",
-            DoctorStatus.FAIL,
-            f"http_max_request_bytes={request_bytes} exceeds conversation_journal_max_file_bytes={journal_bytes}",
+    # 一次送来的请求与分块上传拼回的一批（最大到 remember_parts_max_bytes）都要整份放得进
+    # 会话源单条信封与会话日志单文件：任一上限小于入口上限，插件送来的大轮会被本地服务拒收
+    ingress = {
+        "http.max_request_bytes": config.http.max_request_bytes,
+        "http.remember_parts_max_bytes": config.http.remember_parts_max_bytes,
+    }
+    ceilings = {
+        "conversation.source.max_envelope_bytes": config.conversation.source.max_envelope_bytes,
+        "conversation.journal.max_file_bytes": config.conversation.journal.max_file_bytes,
+    }
+    ingress_key, ingress_bytes = max(ingress.items(), key=lambda item: item[1])
+    sizes = "; ".join(f"{key}={value}" for key, value in (*ingress.items(), *ceilings.items()))
+    short = [key for key, value in ceilings.items() if value < ingress_bytes]
+    if short:
+        fixes = "; ".join(
+            f"{key}={ceilings[key]} is below {ingress_key}={ingress_bytes}: "
+            f"set {key} to at least {ingress_bytes} in the config file"
+            for key in short
         )
-    return DoctorCheck(
-        "ingress_capacity",
-        DoctorStatus.PASS,
-        f"http_max_request_bytes={request_bytes}; conversation_journal_max_file_bytes={journal_bytes}",
-    )
+        return DoctorCheck("ingress_capacity", DoctorStatus.FAIL, f"{fixes} ({sizes})")
+    return DoctorCheck("ingress_capacity", DoctorStatus.PASS, sizes)
 
 
 def _deep_checks(
@@ -400,21 +434,67 @@ def _config_file_security(environ: Mapping[str, str]) -> DoctorCheck:
     return DoctorCheck("config_permissions", DoctorStatus.PASS, f"{path} mode={mode:03o}")
 
 
+def _plugin_connection_check(config: HabitusConfig, environ: Mapping[str, str]) -> DoctorCheck:
+    """插件的连接文件（init 写、serve 启动时刷新的那几份）指的是不是配置里的监听地址：改了端口还没重启服务时插件连不上，
+    这一项写出哪份文件指向哪里、配置是哪里。只提示（WARN），不挡启动。"""
+
+    from habitus.integrations.local_service.initialization import (
+        plugin_connection_paths,
+        plugin_connection_url,
+        resolve_config_path,
+    )
+
+    expected = plugin_connection_url(config)
+    try:
+        paths = plugin_connection_paths(resolve_config_path(None, environ=dict(environ)), environ=environ)
+    except ValueError as exc:
+        return DoctorCheck("plugin_connection", DoctorStatus.WARN, str(exc))
+    problems: list[str] = []
+    for path in paths:
+        try:
+            recorded = json.loads(path.read_text(encoding="utf-8")).get("base_url")
+        except FileNotFoundError:
+            problems.append(f"{path} is missing")
+            continue
+        except (OSError, ValueError, AttributeError) as exc:
+            problems.append(f"{path} is unreadable ({type(exc).__name__})")
+            continue
+        if recorded != expected:
+            problems.append(f"{path} points to {recorded}")
+    if not problems:
+        return DoctorCheck("plugin_connection", DoctorStatus.PASS, f"{', '.join(map(str, paths))} -> {expected}")
+    return DoctorCheck(
+        "plugin_connection",
+        DoctorStatus.WARN,
+        f"{'; '.join(problems)}, but the configuration listens on {expected}; "
+        "restart habitus-server (it rewrites the file on start) or rerun habitus-server init",
+    )
+
+
 def _port_check(host: str, port: int) -> DoctorCheck:
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     with socket.socket(family, socket.SOCK_STREAM) as listener:
         try:
             listener.bind((host, port))
         except OSError as exc:
-            return DoctorCheck("port", DoctorStatus.FAIL, f"listener unavailable: {type(exc).__name__}")
+            if exc.errno == errno.EADDRINUSE:
+                detail = (
+                    f"{host}:{port} is already in use; a habitus-server may already be running "
+                    "(doctor can skip this check with --skip-port)"
+                )
+            else:
+                detail = f"listener unavailable: {exc.strerror or type(exc).__name__}"
+            return DoctorCheck("port", DoctorStatus.FAIL, detail)
     return DoctorCheck("port", DoctorStatus.PASS, "available")
 
 
 __all__ = [
+    "HABITUS_SOURCE",
     "DoctorCheck",
     "DoctorReport",
     "DoctorStatus",
     "StartupPreflightError",
+    "pip_install_command",
     "run_doctor",
     "run_doctor_from_env",
     "run_startup_preflight",

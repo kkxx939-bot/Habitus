@@ -58,7 +58,7 @@ class LifecycleHousekeepingParticipant:
             ctx.assert_owned()
             name = backlog.root.name
             readings.append(CapacityReading(f"retry_backlog_{name}", backlog.count(), backlog.max_items))
-            # 拒收累计（满了 / 那天的夜批已经跑过）：这些轮只落了「没读懂」、不会再补（裁定 68 第 3、4 条）
+            # 拒收累计（满了 / 那天的夜批已经跑过）：这些项树上照旧是「错误」（看不到）、不会再补（裁定 68 第 3、4 条，94 第 3 条）
             readings.extend(
                 CapacityReading(f"retry_backlog_{name}_refused_{reason}", count)
                 for reason, count in sorted(backlog.refused().items())

@@ -23,18 +23,16 @@ from habitus.conversation import (
     conversation_source_request_digest,
 )
 from habitus.foundation.observability import (
-    ObservabilitySnapshot,
     ObservationEvent,
     ObservationStatus,
     bind_observation_context,
 )
-from habitus.infrastructure.observability import AuditRecord
+from habitus.infrastructure.observability import AuditRecord, ObservabilitySnapshot
 from habitus.infrastructure.store.contracts import LockStoreSnapshot
 from habitus.memory.browse import MemoryLayerText, MemoryListing
 from habitus.memory.conversation import (
     ConversationAddress,
     ConversationIngressRequest,
-    ConversationSummaryReference,
 )
 from habitus.memory.document import MemoryDocument
 from habitus.memory.editor import MemoryTransactionJournalState
@@ -123,25 +121,6 @@ class RuntimeInitialization:
             not isinstance(identifier, str) or not identifier for identifier in self.recovered_transaction_ids
         ):
             raise TypeError("recovered_transaction_ids must contain non-empty strings")
-
-
-@dataclass(frozen=True)
-class MemoryUseReceipt:
-    """回答消费方显式确认实际使用的 L2 与 Summary 身份。"""
-
-    memory_uris: tuple[MemoryURI, ...]
-    summary_references: tuple[ConversationSummaryReference, ...]
-    used_at: datetime
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.memory_uris, tuple) or any(not isinstance(uri, MemoryURI) for uri in self.memory_uris):
-            raise TypeError("memory_uris must contain MemoryURI values")
-        if not isinstance(self.summary_references, tuple) or any(
-            not isinstance(reference, ConversationSummaryReference) for reference in self.summary_references
-        ):
-            raise TypeError("summary_references must contain ConversationSummaryReference values")
-        if self.used_at.tzinfo is None or self.used_at.utcoffset() is None:
-            raise ValueError("used_at must be timezone-aware")
 
 
 @dataclass(frozen=True)
@@ -307,11 +286,18 @@ class Runtime:
                 return
             await self.components.memory.vector_index.ensure_ready()
             await self.components.conversation.summary_vector_index.ensure_ready()
-            source_recoveries = await self.components.conversation.source_recovery.recover_pending()
-            self._publish_source_delivery_gauges(source_recoveries)
             # 恢复失败不阻断启动（裁定 60 第 6 条），只降级出事的那个地址：有序的 Memory 对同地址后面的源报"等前序"或
-            # "前序已坏"，别的地址照常；可重试的由周期恢复按退避再试，放弃了的等人工修复。失败都已计入上面的 gauge。
-            self._observe_degraded_source_addresses(source_recoveries, started)
+            # "前序已坏"，别的地址照常；可重试的由周期恢复按退避再试，放弃了的等人工修复。失败都计入 gauge。
+            # 整轮恢复本身出错（读不了账）同样不挡启动：记一条失败事件，交给周期恢复再来。
+            try:
+                source_recoveries = await self.components.conversation.source_recovery.recover_pending()
+            except Exception as exc:  # noqa: BLE001 - 恢复失败不阻断启动
+                self._observe(
+                    "runtime", "source_recovery", ObservationStatus.FAILURE, started, {"error_type": type(exc).__name__}
+                )
+            else:
+                self._publish_source_delivery_gauges(source_recoveries)
+                self._observe_degraded_source_addresses(source_recoveries, started)
             await self.components.workflow.worker.start()
             try:
                 await self.components.workflow.lifecycle_worker.start()
@@ -415,22 +401,30 @@ class Runtime:
             observer=self.components.infrastructure.observer,
         )
 
+    def reminders_enabled(self) -> bool:
+        """提醒出口开着没有：预测层装上了、带着出口。没开时取口恒为空，服务不公布 ``reminders_v1``。"""
+
+        foresight = self.components.foresight
+        return foresight is not None and foresight.outlet is not None
+
     async def claim_reminders(
         self, *, host: str, session: str, at: datetime, limit: int
     ) -> tuple[ClaimedReminder, ...]:
         """提醒出口的取口（方案 32 第 4.1 条）：宿主在他敲一句话时来取此刻可取的提醒（带租约），顺手留下活性。预测层没开就是空。
-        ``limit`` 不得超过 ``config.foresight.outlet_claim_limit``；``at`` 由宿主给、带时区。同步的文件读写下沉线程。"""
+        ``limit`` 是正整数；超过 ``config.foresight.outlet_claim_limit`` 的按这个上限取（宿主那边的上限各自配，不因为配得大就一条都取不到）。
+        ``at`` 由宿主给、带时区。同步的文件读写下沉线程。"""
 
         self._require_initialized("reminder claim")
         if not isinstance(at, datetime) or at.utcoffset() is None:
             raise ValueError("at must be a timezone-aware datetime")
-        cap = self.config.foresight.outlet_claim_limit
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= cap:
-            raise ValueError(f"limit must be an integer between 1 and {cap}")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
         foresight = self.components.foresight
         if foresight is None or foresight.outlet is None:
             return ()
-        return await asyncio.to_thread(foresight.outlet.claim, host, session, at, limit)
+        return await asyncio.to_thread(
+            foresight.outlet.claim, host, session, at, min(limit, self.config.foresight.outlet_claim_limit)
+        )
 
     async def reminders(self, day: date | None = None) -> ReminderDay:
         """``day``（省略是本地今天）进了提醒出口的每条提醒走到了哪一步（方案 36 第 2 步）。预测层没开就是空。只读。"""
@@ -548,7 +542,7 @@ class Runtime:
         handle = self.components.conversation.source_coordinator.start(envelope)
         # 每个 Consumer 的成败由 ConversationConsumerDelivery 统一观察，覆盖前台、
         # 启动恢复和显式恢复三条路径；这里不再为单个 Consumer 另挂回调。
-        result = await handle.wait_memory()
+        result = await handle.wait(ConversationSourceConsumer.MEMORY)
         if not isinstance(result, ConversationMemoryIngestResult):
             raise RuntimeError("Memory Conversation Consumer completed without an ingest result")
         if result.jobs and self._state is RuntimeState.RUNNING:
@@ -889,42 +883,6 @@ class Runtime:
             kinds=kinds,
             intention_scope=intention_scope,
         )
-
-    async def record_memory_use(
-        self,
-        *,
-        memory_uris: tuple[MemoryURI | str, ...] = (),
-        summary_references: tuple[ConversationSummaryReference, ...] = (),
-        used_at: datetime | None = None,
-    ) -> MemoryUseReceipt:
-        """手动兼容入口；标准检索链已按最终模型可见 Context 自动计入，勿重复上报。"""
-
-        self._require_initialized("memory use receipt")
-        if not isinstance(memory_uris, tuple):
-            raise TypeError("memory_uris must be a tuple")
-        parsed_uris = tuple(MemoryURI.parse(uri) for uri in memory_uris)
-        for uri in parsed_uris:
-            uri.to_address()
-        if len(parsed_uris) != len(set(parsed_uris)):
-            raise ValueError("memory_uris must be unique")
-        if not isinstance(summary_references, tuple) or any(
-            not isinstance(reference, ConversationSummaryReference) for reference in summary_references
-        ):
-            raise TypeError("summary_references must contain ConversationSummaryReference values")
-        if len({reference.identity for reference in summary_references}) != len(summary_references):
-            raise ValueError("summary_references must be unique")
-        timestamp = used_at or datetime.now(UTC)
-        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-            raise ValueError("used_at must be timezone-aware")
-        if parsed_uris:
-            await self.components.memory.lifecycle.record_use(parsed_uris, used_at=timestamp)
-        if summary_references:
-            await asyncio.to_thread(
-                self.components.conversation.summary_use.record_use,
-                summary_references,
-                used_at=timestamp,
-            )
-        return MemoryUseReceipt(parsed_uris, summary_references, timestamp)
 
     async def maintain_conversation(
         self,

@@ -7,7 +7,6 @@ from pathlib import Path
 
 from habitus.infrastructure.lifecycle import CapacityReading, CapacitySnapshot, ParticipantReport
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.runtime import (
     LifecycleMaintenanceCycleResult,
     LifecycleParticipantOutcome,
@@ -16,6 +15,7 @@ from habitus.runtime import (
 )
 from tests.helpers import BASE_TIME
 from tests.integration.test_runtime_assembly import runtime_config, runtime_dependencies
+from tests.lock_store import ProcessLocalLockStore
 
 
 def _lifecycle_check(tmp_path: Path, cycle: LifecycleMaintenanceCycleResult | None):

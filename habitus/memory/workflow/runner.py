@@ -15,7 +15,7 @@ from habitus.memory.indexing import PersistentMemoryVectorIndex
 from habitus.memory.semantic import MemorySemanticRefresher
 from habitus.memory.workflow.completion import MemoryCommittedJobFinalizer, MemoryRecallStateCleaner
 from habitus.memory.workflow.execution import MemoryJobExecutor
-from habitus.memory.workflow.failure import memory_job_failure_is_retryable
+from habitus.memory.workflow.failure import MemoryJobFailureKind, memory_job_failure_kind
 from habitus.memory.workflow.jobs import (
     MemoryJob,
     MemoryJobError,
@@ -199,10 +199,12 @@ class MemoryJobRunner:
             except MemoryJobLeaseLostError:
                 raise
             except Exception as exc:
+                kind = memory_job_failure_kind(exc)
                 failed = self.store.fail(
                     lease,
                     exc,
-                    retryable=memory_job_failure_is_retryable(exc),
+                    retryable=kind is not MemoryJobFailureKind.PERMANENT,
+                    waits_for_model=kind is MemoryJobFailureKind.WAITS_FOR_MODEL,
                     before_settlement=lambda: self.transaction_recovery.discard_uncommitted(source),
                 )
                 raise MemoryJobExecutionError(

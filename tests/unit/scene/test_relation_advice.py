@@ -206,9 +206,10 @@ def test_conditions_are_asked_once_per_concept_set_and_used_only_from_the_night_
     asyncio.run(advice.proposals(tests, night + timedelta(days=1), []))
     assert provider.calls == len(eligible)  # 概念集没变：不再问
     # 长出一个日历情境（周几集合）不算概念集变了：它不进问题，不该让全部前因重问一遍（2026-10-18 四方评审）
-    from habitus.scene.concepts.calendar_situations import weekday_set
+    from habitus.conditions import WEEKDAY_KEY
+    from habitus.scene.concepts.calendar_situations import value_set
 
-    grown = ConceptSet((*CONCEPTS.values(), weekday_set(["周一", "周三"], now=TRAVEL.created_at)))
+    grown = ConceptSet((*CONCEPTS.values(), value_set(WEEKDAY_KEY, ["周一", "周三"], now=TRAVEL.created_at)))
     regrown = LaneTests(build_timelines(series, grown, {}, CONFIG)["session"], grown, CONFIG, series.cutoff)
     asyncio.run(advice.proposals(regrown, night + timedelta(days=1), []))
     assert provider.calls == len(eligible)

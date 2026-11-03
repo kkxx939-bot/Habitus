@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.conversation import ConversationAddress, ConversationMessageJournal
 from habitus.memory.editor import MemoryEditor
 from habitus.memory.workflow import (
@@ -25,6 +24,7 @@ from habitus.memory.workflow.recovery import MemoryStagedJobRecovery
 from habitus.pre.conversation import ConversationBatch
 from tests.helpers import closed_turn, segment, segment_summary
 from tests.integration.test_change_receipt_chain import editor_plan
+from tests.lock_store import ProcessLocalLockStore
 
 
 def job_store(tmp_path: Path) -> MemoryJobStore:
@@ -67,7 +67,7 @@ def test_segment_products_run_both_read_only_branches_concurrently_and_wait_for_
             summary_finished = True
             return segment_summary(current)
 
-        async def build_plan(current):
+        async def build_plan(current, *, turn_context=None):
             nonlocal editor_finished
             editor_started.set()
             await summary_started.wait()
@@ -102,7 +102,7 @@ def test_segment_product_failure_waits_for_sibling_but_never_returns_partial_pro
             await asyncio.sleep(0)
             raise RuntimeError("summary failed")
 
-        async def finish_editor(_source):
+        async def finish_editor(_source, *, turn_context=None):
             nonlocal sibling_finished
             await asyncio.sleep(0.001)
             sibling_finished = True
@@ -268,3 +268,56 @@ def test_runner_propagates_lease_loss_without_marking_current_job_failed(tmp_pat
 
     assert store.oldest_uncommitted().status is MemoryJobStatus.RUNNING
     assert "discard_uncommitted" not in events
+
+
+# ── 前台补完 STAGED Job 的两处段身份核对（M9 的防线，U22） ──────────────────────────────────────────────
+
+
+def _foreground(tmp_path: Path):  # type: ignore[no-untyped-def]
+    from habitus.memory.conversation import ConversationRetentionPlanner, ConversationSegmentationConfig
+    from habitus.memory.workflow import ConversationMemoryEnqueuer
+
+    lock = PathLock(ProcessLocalLockStore())
+    journal = ConversationMessageJournal(tmp_path / "conversation", lock)
+    jobs = MemoryJobStore(tmp_path / "workflow", lock, memory_root=tmp_path / "memory")
+    planner = ConversationRetentionPlanner(
+        ConversationSegmentationConfig(commit_token_threshold=1, keep_recent_turn_count=1, retained_message_token_budget=10_000),
+        token_estimator=lambda _message: 1,
+    )
+    address = ConversationAddress("conversation-1", date(2026, 7, 1))
+    journal.append(
+        address,
+        ConversationBatch("conversation-1", (*closed_turn(start_sequence=0), *closed_turn(start_sequence=2))),
+    )
+    other = segment(segment_id="000000000000-000000000001", messages=closed_turn(prompt="不是这一段说的话"))
+    return journal, jobs, ConversationMemoryEnqueuer(journal, jobs, planner), address, jobs.stage(address, other)
+
+
+def test_the_foreground_does_not_publish_history_for_a_staged_job_that_does_not_match_its_boundary(tmp_path: Path) -> None:
+    """STAGED Job 记的段与 live 在它边界上的那一段对不上：发布 history 之前就停，不发布、不激活。"""
+
+    from habitus.memory.workflow import MemoryJobError
+
+    journal, jobs, enqueuer, address, staged = _foreground(tmp_path)
+
+    with pytest.raises(MemoryJobError, match="does not match"):
+        enqueuer.flush(address)
+
+    assert journal.list_history(address) == ()
+    assert jobs.oldest_uncommitted().status is MemoryJobStatus.STAGED
+    assert jobs.oldest_uncommitted().memory_sequence == staged.memory_sequence
+
+
+def test_the_foreground_does_not_activate_a_staged_job_whose_published_segment_differs(tmp_path: Path) -> None:
+    """边界上已经有一份发布过的 history（封存返回原样、不走发布前那一处核对），但不是 Job 记的那一段：不激活。"""
+
+    from habitus.memory.workflow import MemoryJobError
+
+    journal, jobs, enqueuer, address, _staged = _foreground(tmp_path)
+    journal.seal(address, through_sequence=1)
+
+    with pytest.raises(MemoryJobError, match="does not match"):
+        enqueuer.flush(address)
+
+    assert tuple(item.segment_id for item in journal.list_history(address)) == ("000000000000-000000000001",)
+    assert jobs.oldest_uncommitted().status is MemoryJobStatus.STAGED

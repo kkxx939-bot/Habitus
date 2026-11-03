@@ -114,7 +114,7 @@ class ConversationLifecycleManager:
         jobs: MemoryJobStore,
         receipts: MemoryChangeReceiptStore,
         transaction_journal: MemoryTransactionJournal,
-        retirement_store: ConversationSummaryRetirementStore | None = None,
+        retirement_store: ConversationSummaryRetirementStore,
         *,
         summary_config: ConversationSummaryCompactionConfig | None = None,
         workflow_config: MemoryWorkflowLifecycleConfig | None = None,
@@ -135,11 +135,8 @@ class ConversationLifecycleManager:
             raise TypeError("receipts must be MemoryChangeReceiptStore")
         if not isinstance(transaction_journal, MemoryTransactionJournal):
             raise TypeError("transaction_journal must be MemoryTransactionJournal")
-        if retirement_store is not None and not isinstance(
-            retirement_store,
-            ConversationSummaryRetirementStore,
-        ):
-            raise TypeError("retirement_store must be ConversationSummaryRetirementStore or None")
+        if not isinstance(retirement_store, ConversationSummaryRetirementStore):
+            raise TypeError("retirement_store must be ConversationSummaryRetirementStore")
         if summary_config is not None and not isinstance(
             summary_config,
             ConversationSummaryCompactionConfig,
@@ -158,6 +155,8 @@ class ConversationLifecycleManager:
             raise ValueError("lifecycle manager must reuse the compactor Conversation stores")
         if summary_vector_index.compactor is not compactor:
             raise ValueError("lifecycle manager must reuse the Summary vector index compactor")
+        if summary_vector_index.sources.retirement_store is not retirement_store:
+            raise ValueError("lifecycle manager and Summary index must share one retirement store")
         if receipts.codec is not transaction_journal.codec:
             raise ValueError("lifecycle receipts and transaction journal must share one codec")
         resolved_summary_config = compactor.config if summary_config is None else summary_config
@@ -171,12 +170,7 @@ class ConversationLifecycleManager:
         self.jobs = jobs
         self.receipts = receipts
         self.transaction_journal = transaction_journal
-        self.retirement_store = retirement_store or ConversationSummaryRetirementStore(jobs.root)
-        source_retirements = summary_vector_index.sources.retirement_store
-        if source_retirements is None:
-            summary_vector_index.sources.retirement_store = self.retirement_store
-        elif source_retirements is not self.retirement_store:
-            raise ValueError("lifecycle manager and Summary index must share one retirement store")
+        self.retirement_store = retirement_store
         self.summary_config = resolved_summary_config
         self.workflow_config = workflow_config or MemoryWorkflowLifecycleConfig()
 

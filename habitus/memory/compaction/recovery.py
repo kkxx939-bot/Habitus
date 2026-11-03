@@ -115,8 +115,8 @@ class MemoryRecoveryStore:
     def __init__(
         self,
         tree: MemoryTree,
+        workflow_root: str | Path,
         *,
-        root: str | Path | None = None,
         max_records_per_memory: int = 1,
         max_file_bytes: int = 4 * 1024 * 1024,
     ) -> None:
@@ -126,12 +126,8 @@ class MemoryRecoveryStore:
             raise ValueError("memory recovery keeps exactly one active baseline per memory")
         if isinstance(max_file_bytes, bool) or not isinstance(max_file_bytes, int) or max_file_bytes <= 0:
             raise ValueError("max_file_bytes must be a positive integer")
-        canonical = (tree.root.parent / "workflow" / "lifecycle" / "l2_recovery").resolve(strict=False)
-        resolved = canonical if root is None else Path(root).expanduser().resolve(strict=False)
-        if resolved != canonical:
-            raise ValueError("memory recovery store must use the canonical sibling workflow root")
         self.tree = tree
-        self.root = resolved
+        self.root = tree.require_outside(Path(workflow_root) / "lifecycle" / "l2_recovery")
         self.codec: MemoryDocumentCodec = tree.document_codec
         self.max_records_per_memory = 1
         self.max_file_bytes = max_file_bytes
@@ -141,7 +137,11 @@ class MemoryRecoveryStore:
         os.chmod(self.root, 0o700)
 
     def save(self, document: MemoryDocument, *, saved_at: datetime) -> MemoryRecoveryRecord:
-        """保存待压缩详细基线；相同内容重放不受 saved_at 差异影响。"""
+        """保存待压缩详细基线；相同内容重放不受 saved_at 差异影响。
+
+        活动基线只在它绑定的压缩 L2 仍是当前版本时受保护；L2 已被更高 revision 取代时，
+        该基线已不能恢复（`for_compacted` 与 `restore` 都拒绝），由新一代基线覆盖。
+        """
 
         if not isinstance(document, MemoryDocument):
             raise TypeError("document must be MemoryDocument")
@@ -164,7 +164,11 @@ class MemoryRecoveryStore:
             )
             if same_source:
                 return current
-            if current.active:
+            if (
+                current.active
+                and current.compacted_revision is not None
+                and record.source_revision <= current.compacted_revision
+            ):
                 raise MemoryRecoveryError("active recovery baseline cannot be overwritten")
         self._write(record)
         verified = self._read(record.uri)

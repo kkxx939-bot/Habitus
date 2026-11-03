@@ -18,11 +18,12 @@ from habitus.config.loader import ConfigError, group_fields, load_config_object,
 from habitus.config.locale import LocaleConfig
 from habitus.config.memory import MemoryConfig
 from habitus.config.models import ModelConfig
-from habitus.config.observability import ObservabilityConfig
+from habitus.config.observability import observability_config_from_mapping
 from habitus.config.scene import SceneConfig
 from habitus.config.storage import StorageConfig
 from habitus.config.temporal import TemporalConfig
 from habitus.config.workflow import WorkflowConfig
+from habitus.infrastructure.observability.config import ObservabilityConfig
 
 _FIXED_RETRIEVAL_DOCUMENTS = 1
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -129,7 +130,7 @@ class HabitusConfig:
             models=ModelConfig.from_mapping(required_field(data, "models", path="config")),
             credentials=CredentialRegistry.from_mapping(required_field(data, "credentials", path="config")),
             http=HTTPAPIConfig.from_mapping(data.get("http", {})),
-            observability=ObservabilityConfig.from_mapping(data.get("observability", {})),
+            observability=observability_config_from_mapping(data.get("observability", {})),
             conversation=ConversationConfig.from_mapping(data.get("conversation", {})),
             memory=MemoryConfig.from_mapping(data.get("memory", {})),
             behavior=BehaviorConfig.from_mapping(data.get("behavior", {})),
@@ -210,11 +211,13 @@ class HabitusConfig:
             raise ConfigError(
                 "memory.transaction_journal.max_record_bytes must be at least twice memory.snapshot.max_total_bytes"
             )
-        initial_items = _FIXED_RETRIEVAL_DOCUMENTS + memory.retrieval.max_tool_uris + memory.retrieval.search_limit
+        initial_items = (
+            _FIXED_RETRIEVAL_DOCUMENTS + memory.editor_retrieval.max_tool_uris + memory.editor_retrieval.search_limit
+        )
         if initial_items > memory.snapshot.max_items:
-            raise ConfigError("memory retrieval can exceed memory.snapshot.max_items")
+            raise ConfigError("memory.editor_retrieval can exceed memory.snapshot.max_items")
         if initial_items > memory.extraction.max_old_memory_items:
-            raise ConfigError("memory retrieval can exceed memory.extraction.max_old_memory_items")
+            raise ConfigError("memory.editor_retrieval can exceed memory.extraction.max_old_memory_items")
         if memory.search_service.max_limit > memory.snapshot.max_items:
             raise ConfigError("memory.search_service.max_limit cannot exceed memory.snapshot.max_items")
         if memory.search_service.max_relation_neighbors_total > memory.snapshot.max_items:
@@ -271,14 +274,14 @@ class HabitusConfig:
         maximum_query_chars = max(
             memory.search_service.max_query_chars,
             memory.search_service.max_planned_query_chars,
-            memory.retrieval.max_query_chars,
+            memory.editor_retrieval.max_query_chars,
             memory.extraction.max_query_chars,
         )
         if maximum_query_chars > models.embedding.max_input_chars:
             raise ConfigError("memory query character limits cannot exceed models.embedding.max_input_chars")
         maximum_search_request = max(
             memory.search_service.max_limit * memory.search_service.candidate_multiplier,
-            memory.retrieval.search_limit,
+            memory.editor_retrieval.search_limit,
             memory.extraction.additional_search_limit,
         )
         maximum_vector_candidates = max(

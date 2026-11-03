@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
 from habitus.foundation.ids import require_safe_path_segment
-from habitus.foundation.integrity import canonical_digest, canonicalize, immutable_snapshot
+from habitus.foundation.integrity import canonical_digest, canonicalize, immutable_snapshot, is_sha256_hex
+from habitus.foundation.timestamps import TimestampError, TimestampZoneError, utc_timestamp
 
 
 class ConversationMessageSchemaError(ValueError):
@@ -35,7 +36,7 @@ class ConversationToolResultStatus(str, Enum):
 
 
 class ConversationToolResultContentMode(str, Enum):
-    """工具结果在 Conversation 中保留到什么程度。"""
+    """工具结果（以及超限时的工具调用参数）在 Conversation 中保留到什么程度。"""
 
     INLINE = "inline"
     SUMMARIZED = "summarized"
@@ -45,26 +46,20 @@ class ConversationToolResultContentMode(str, Enum):
 def conversation_datetime(value: datetime | str, label: str) -> datetime:
     """解析带时区时间并规范为 UTC。"""
 
-    if isinstance(value, datetime):
-        parsed = value
-    elif isinstance(value, str):
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ConversationMessageSchemaError(f"{label} must be ISO-8601") from exc
-    else:
+    if not isinstance(value, datetime | str):
         raise ConversationMessageSchemaError(f"{label} must be a datetime or ISO-8601 string")
-    if parsed.tzinfo is None:
-        raise ConversationMessageSchemaError(f"{label} must include timezone")
-    return parsed.astimezone(UTC)
+    try:
+        return utc_timestamp(value)
+    except TimestampZoneError as exc:
+        raise ConversationMessageSchemaError(f"{label} must include timezone") from exc
+    except TimestampError as exc:
+        raise ConversationMessageSchemaError(f"{label} must be ISO-8601") from exc
 
 
 def require_sha256(value: object, label: str) -> str:
     """校验小写 SHA-256 十六进制摘要。"""
 
-    if not isinstance(value, str) or len(value) != 64:
-        raise ConversationMessageSchemaError(f"{label} must be a SHA-256 hex digest")
-    if any(character not in "0123456789abcdef" for character in value):
+    if not is_sha256_hex(value):
         raise ConversationMessageSchemaError(f"{label} must be a SHA-256 hex digest")
     return value
 
@@ -218,23 +213,30 @@ class ConversationMessage:
             raise ConversationMessageSchemaError("prompt and completion cannot carry tool-result fields")
 
     def _validate_tool_call(self, content: Any) -> None:
+        """调用参数默认原样（``content_mode`` 为空）；一组工具交换超过一段的上限时参数被抽成 ``summarized``，
+        这时必须带原参数规范 JSON 的字节数与 sha256。"""
+
         if not isinstance(content, dict | str):
             raise ConversationMessageSchemaError("tool_call content must be an object or exact argument string")
         if isinstance(content, str) and not content:
             raise ConversationMessageSchemaError("tool_call argument string must be non-empty")
         if self.tool_call_id is None or self.tool_name is None:
             raise ConversationMessageSchemaError("tool_call requires tool_call_id and tool_name")
-        if any(
-            value is not None
-            for value in (
-                self.tool_status,
-                self.content_mode,
-                self.source_ref,
-                self.original_size_bytes,
-                self.original_sha256,
-            )
-        ):
+        if self.tool_status is not None or self.source_ref is not None:
             raise ConversationMessageSchemaError("tool_call cannot carry tool-result fields")
+        if self.content_mode is None:
+            if self.original_size_bytes is not None or self.original_sha256 is not None:
+                raise ConversationMessageSchemaError("verbatim tool_call cannot carry original-argument metadata")
+            return
+        try:
+            content_mode = ConversationToolResultContentMode(self.content_mode)
+        except ValueError as exc:
+            raise ConversationMessageSchemaError("tool_call content mode is unsupported") from exc
+        if content_mode is not ConversationToolResultContentMode.SUMMARIZED:
+            raise ConversationMessageSchemaError("tool_call arguments can only be verbatim or summarized")
+        if self.original_size_bytes is None or self.original_sha256 is None:
+            raise ConversationMessageSchemaError("summarized tool_call requires original-argument size and sha256")
+        object.__setattr__(self, "content_mode", content_mode)
 
     def _validate_tool_result(self, content: Any) -> None:
         if self.tool_call_id is None or self.tool_name is None:

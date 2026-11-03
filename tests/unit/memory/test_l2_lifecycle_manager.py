@@ -2,23 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.compaction import (
     MemoryFieldCompactor,
     MemoryLifecycleCommitter,
     MemoryLifecycleMaintenanceConfig,
     MemoryLifecycleManager,
     MemoryLifecycleOperationPhase,
+    MemoryLifecycleOperationStore,
+    MemoryLifecycleScanStore,
     MemoryRecoveryStore,
 )
+from habitus.memory.compaction.scan import MemoryCompactionKeep, MemoryLifecycleScanStateError
 from habitus.memory.editor import MemoryCommitTransaction, MemoryTransactionJournal
 from habitus.memory.model import MemoryKind
-from habitus.memory.retrieval import (
+from habitus.memory.recall import (
     MemoryRecallLifecycle,
     MemoryRecallLifecycleConfig,
     SQLiteMemoryRecallLifecycleStore,
@@ -27,25 +29,28 @@ from habitus.memory.snapshot import MemorySnapshotReader
 from habitus.memory.tree import MemoryTree
 from habitus.memory.uri import MemoryURI
 from tests.helpers import codec, document
+from tests.lock_store import ProcessLocalLockStore
 from tests.unit.conversation.test_summary_generation import RecordingProvider, structured
 
 NOW = datetime(2026, 8, 3, 8, 0, tzinfo=UTC)
 
 
-def manager(tmp_path, responses, *, maintenance_config=None):
+def manager(tmp_path, responses, *, maintenance_config=None, recall_config=None):
     current = [NOW]
     tree = MemoryTree(tmp_path / "memory", document_codec=codec())
     reader = MemorySnapshotReader(tree)
+    path_lock = PathLock(ProcessLocalLockStore())
+    workflow_root = tmp_path / "workflow"
     transaction = MemoryCommitTransaction(
         tree,
         reader,
-        PathLock(ProcessLocalLockStore()),
-        MemoryTransactionJournal(tmp_path / "workflow" / "transactions", tree.document_codec),
+        path_lock,
+        MemoryTransactionJournal(workflow_root / "transactions", tree.document_codec),
         clock=lambda: current[0],
     )
-    config = MemoryRecallLifecycleConfig(
+    config = recall_config or MemoryRecallLifecycleConfig(
         preference_half_life_days=1,
-        preference_retire_days=5,
+        preference_retire_days=30,
         cold2_probe_interval_days=1,
         cold2_probe_limit=2,
         retire_candidate_grace_days=1,
@@ -65,8 +70,10 @@ def manager(tmp_path, responses, *, maintenance_config=None):
         reader,
         recall,
         MemoryFieldCompactor(structured(provider)),
-        MemoryRecoveryStore(tree),
+        MemoryRecoveryStore(tree, workflow_root),
         MemoryLifecycleCommitter(transaction, reader),
+        MemoryLifecycleOperationStore(tree, path_lock, workflow_root),
+        MemoryLifecycleScanStore(tree, path_lock, workflow_root),
         config=maintenance_config,
         clock=lambda: current[0],
         derived_refresh=refresh,
@@ -130,7 +137,7 @@ def test_cold2_compaction_keeps_recovery_and_actual_use_restores_detailed_l2(tmp
     assert refreshed == [(uri,), (uri,)]
 
 
-def test_cold2_retires_only_after_compaction_retention_window_and_grace(tmp_path) -> None:
+def test_cold2_retires_after_retire_window_from_last_activity_and_grace(tmp_path) -> None:
     value, recall, current, refreshed = manager(
         tmp_path,
         [
@@ -196,7 +203,7 @@ def test_actual_use_does_not_restore_stale_recovery_over_newer_semantic_update(t
 
     assert value.expand_for_probe(updated) == updated
     current[0] = NOW + timedelta(days=1)
-    asyncio.run(value.record_use((uri,), used_at=current[0]))
+    asyncio.run(value.record_context_use((value._target(updated),), used_at=current[0]))
 
     retained = value.tree.read(detailed.address)
     state = recall.store.read_many((uri,))[0]
@@ -779,3 +786,346 @@ def test_one_poison_l2_node_does_not_starve_later_scan_candidates(
     assert result.compacted == (MemoryURI.from_address(healthy.address),)
     assert value.tree.read(poisoned.address).metadata.revision == 1
     assert value.tree.read(healthy.address).metadata.revision == 2
+
+
+@pytest.mark.parametrize(
+    ("kind", "fields", "field", "compact_text"),
+    [
+        (
+            MemoryKind.ENTITY,
+            {
+                "category": "项目",
+                "name": "Habitus",
+                "summary": "Habitus 是用户正在重构的记忆系统，用 Python 写，分行为层与记忆层，计划插件交付。",
+            },
+            "summary",
+            "Habitus 是用户在重构的记忆系统。",
+        ),
+        (
+            MemoryKind.INTENTION,
+            {
+                "intent_name": "完成记忆系统重构",
+                "status": "open",
+                "next_step": "补齐测试体系，先写生命周期测试，再写检索测试，最后跑 ci",
+            },
+            "next_step",
+            "补齐测试体系",
+        ),
+    ],
+)
+def test_compaction_of_l2_without_optional_fields_commits_and_stays_usable(
+    tmp_path,
+    kind,
+    fields,
+    field,
+    compact_text,
+) -> None:
+    value, _recall, current, _refreshed = manager(
+        tmp_path,
+        [{"operations": [{"field": field, "operation": "update", "content": compact_text}]}],
+    )
+    detailed = document(kind, fields=fields, timestamp=NOW - timedelta(days=200))
+    value.tree.write(detailed)
+    uri = MemoryURI.from_address(detailed.address)
+
+    result = asyncio.run(value.maintain())
+
+    compact_document = value.tree.read(detailed.address)
+    assert result.failures == ()
+    assert result.compacted == (uri,)
+    assert value.operation_store.pending() == ()
+    assert set(compact_document.fields) == set(fields)
+    assert compact_document.fields[field] == compact_text
+    current[0] = NOW + timedelta(days=1)
+    context_use = asyncio.run(
+        value.record_context_use((value._target(compact_document),), used_at=current[0]),
+    )
+    assert context_use.rejected_uris == ()
+    assert tuple(item.fields for item in context_use.documents) == (detailed.fields,)
+
+
+def test_compacted_l2_rewritten_by_editor_recompacts_when_cold_again_and_retires(tmp_path) -> None:
+    responses = [
+        {"operations": [{"field": "content", "operation": "update", "content": "- 简洁"}]},
+        {"operations": [{"field": "content", "operation": "update", "content": "- 详细解释"}]},
+    ]
+    value, _recall, current, _refreshed = manager(tmp_path, responses)
+    detailed = document(
+        MemoryKind.PREFERENCE,
+        fields={"topic": "回答风格", "content": "- 偏好简洁回答\n- 开头先给结论\n- 保留路径"},
+        timestamp=NOW - timedelta(days=10),
+    )
+    value.tree.write(detailed)
+    uri = MemoryURI.from_address(detailed.address)
+    assert asyncio.run(value.maintain()).compacted == (uri,)
+    rewritten, _commit = value.committer.replace_fields(
+        value.snapshot_reader.read(uri),
+        {"topic": "回答风格", "content": "- 用户改口：要详细解释\n- 每步给出理由\n- 附上命令"},
+    )
+    assert value.recovery_store.for_compacted(value.snapshot_reader.read(uri)) is None
+
+    current[0] = NOW + timedelta(days=3)
+    recompacted = asyncio.run(value.maintain())
+    assert recompacted.failures == ()
+    assert recompacted.compacted == (uri,)
+    assert responses == []
+    compact_document = value.tree.read(detailed.address)
+    assert compact_document.fields["content"] == "- 详细解释"
+    assert value.expand_for_probe(compact_document).fields == rewritten.fields
+
+    current[0] = NOW + timedelta(days=4)
+    assert asyncio.run(value.maintain()) == type(recompacted)(1, (), ())
+    retired = None
+    for day in range(5, 40):
+        current[0] = NOW + timedelta(days=day)
+        cycle = asyncio.run(value.maintain())
+        assert cycle.failures == ()
+        if cycle.retired:
+            retired = cycle.retired
+            break
+    assert retired == (uri,)
+    assert value.tree.list_addresses() == ()
+
+
+@pytest.mark.parametrize(
+    ("recall_config", "step_days"),
+    [
+        (
+            MemoryRecallLifecycleConfig(
+                preference_half_life_days=1,
+                preference_retire_days=5,
+                retire_candidate_grace_days=1,
+            ),
+            0.5,
+        ),
+        (MemoryRecallLifecycleConfig(), 5.0),
+    ],
+    ids=["short-window", "default-config"],
+)
+def test_compaction_write_back_does_not_reset_retirement_clock(
+    tmp_path,
+    recall_config,
+    step_days,
+) -> None:
+    value, recall, current, _refreshed = manager(
+        tmp_path,
+        [{"operations": [{"field": "content", "operation": "update", "content": "- 简洁"}]}],
+        recall_config=recall_config,
+    )
+    detailed = document(
+        MemoryKind.PREFERENCE,
+        fields={"topic": "回答风格", "content": "- 偏好简洁回答\n- 开头先给结论\n- 保留路径"},
+        timestamp=NOW,
+    )
+    value.tree.write(detailed)
+    uri = MemoryURI.from_address(detailed.address)
+    compacted_at = None
+    for step in range(1, 1_000):
+        current[0] = NOW + timedelta(days=step * step_days)
+        if asyncio.run(value.maintain()).compacted == (uri,):
+            compacted_at = current[0]
+            break
+    assert compacted_at is not None
+    compacted_document = value.tree.read(detailed.address)
+    assert compacted_document.metadata.revision == 2
+    assert compacted_document.metadata.updated_at == compacted_at
+    last_activity = detailed.metadata.updated_at
+    retire = timedelta(days=recall_config.preference_retire_days)
+    grace = timedelta(days=recall_config.retire_candidate_grace_days)
+
+    def run_at(moment):
+        current[0] = moment
+        result = asyncio.run(value.maintain())
+        assert result.failures == ()
+        state = recall.store.read_many((uri,))
+        return result, state[0] if state else None
+
+    _result, before = run_at(last_activity + retire - timedelta(hours=1))
+    assert before is not None and before.retire_candidate_at is None
+    _result, marked = run_at(last_activity + retire)
+    assert marked is not None and marked.retire_candidate_at == last_activity + retire
+    within_grace, _state = run_at(last_activity + retire + grace / 2)
+    assert within_grace.retired == ()
+    assert value.tree.list_addresses() == (detailed.address,)
+    after_grace, _state = run_at(last_activity + retire + grace)
+    assert after_grace.retired == (uri,)
+    assert value.tree.list_addresses() == ()
+
+
+_KEEP_EVENT = {"operations": [{"field": "summary", "operation": "keep"}]}
+
+
+def _run_until_deleted(value, recall, current, uri, *, start, limit_days, hourly_near):
+    """推进真实维护循环直到删除，记录标候选与删除的时刻。
+
+    关键时刻前后一天逐小时推进，其余每 12 小时一轮，控制单测耗时。
+    """
+
+    seen: dict[str, datetime] = {}
+    moment = start
+    while moment <= start + timedelta(days=limit_days):
+        current[0] = moment
+        result = asyncio.run(value.maintain())
+        state = recall.store.read_many((uri,))
+        if state and state[0].retire_candidate_at is not None:
+            seen.setdefault("candidate", moment)
+        if result.retired == (uri,):
+            seen["deleted"] = moment
+            return seen
+        near = any(abs(moment - point) <= timedelta(days=1) for point in hourly_near)
+        moment += timedelta(hours=1 if near else 12)
+    return seen
+
+
+def test_cold_event_answered_keep_is_asked_once_and_still_retires_on_schedule(tmp_path) -> None:
+    responses = [dict(_KEEP_EVENT) for _ in range(10)]
+    config = MemoryRecallLifecycleConfig()
+    value, recall, current, _refreshed = manager(tmp_path, responses, recall_config=config)
+    event = document(MemoryKind.EVENT, timestamp=NOW)
+    value.tree.write(event)
+    uri = MemoryURI.from_address(event.address)
+
+    retire = timedelta(days=config.event_retire_days)
+    grace = timedelta(days=config.retire_candidate_grace_days)
+    seen = _run_until_deleted(
+        value,
+        recall,
+        current,
+        uri,
+        start=NOW,
+        limit_days=240,
+        hourly_near=(NOW + timedelta(days=37), NOW + retire, NOW + retire + grace),
+    )
+
+    assert len(responses) == 9
+    assert value.tree.list_addresses() == ()
+    assert seen == {"candidate": NOW + retire, "deleted": NOW + retire + grace}
+
+
+def test_keep_verdict_is_not_reasked_until_the_memory_is_used_and_cools_again(tmp_path) -> None:
+    responses = [dict(_KEEP_EVENT) for _ in range(10)]
+    value, _recall, current, _refreshed = manager(tmp_path, responses, recall_config=MemoryRecallLifecycleConfig())
+    event = document(MemoryKind.EVENT, timestamp=NOW - timedelta(days=40))
+    value.tree.write(event)
+    for hour in range(5):
+        current[0] = NOW + timedelta(hours=hour)
+        result = asyncio.run(value.maintain())
+        assert result.failures == ()
+        assert result.compacted == ()
+    assert len(responses) == 9
+
+    current[0] = NOW + timedelta(days=1)
+    use = asyncio.run(value.record_context_use((value._target(event),), used_at=current[0]))
+    assert use.rejected_uris == ()
+    current[0] = NOW + timedelta(days=30)
+    asyncio.run(value.maintain())
+    assert len(responses) == 9
+    current[0] = NOW + timedelta(days=60)
+    asyncio.run(value.maintain())
+    asyncio.run(value.maintain())
+    assert len(responses) == 8
+
+
+def test_retirement_does_not_wait_for_a_compaction_model_that_keeps_failing(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = MemoryRecallLifecycleConfig()
+    value, recall, current, _refreshed = manager(tmp_path, [], recall_config=config)
+    event = document(MemoryKind.EVENT, timestamp=NOW)
+    value.tree.write(event)
+    uri = MemoryURI.from_address(event.address)
+    calls = []
+
+    async def unavailable(source):
+        calls.append(source.address)
+        raise RuntimeError("compaction model unavailable")
+
+    monkeypatch.setattr(value.field_compactor, "compact", unavailable)
+
+    retire = timedelta(days=config.event_retire_days)
+    grace = timedelta(days=config.retire_candidate_grace_days)
+    seen = _run_until_deleted(
+        value,
+        recall,
+        current,
+        uri,
+        start=NOW,
+        limit_days=240,
+        hourly_near=(NOW + timedelta(days=37), NOW + retire, NOW + retire + grace),
+    )
+
+    assert calls
+    assert value.tree.list_addresses() == ()
+    backoff_cap = timedelta(seconds=value.scan_store.max_retry_seconds)
+    assert NOW + retire <= seen["candidate"] <= NOW + retire + backoff_cap
+    assert seen["deleted"] == seen["candidate"] + grace
+
+
+def test_compaction_quota_counts_model_attempts_not_successes(tmp_path) -> None:
+    responses = [dict(_KEEP_EVENT) for _ in range(20)]
+    value, _recall, current, _refreshed = manager(tmp_path, responses, recall_config=MemoryRecallLifecycleConfig())
+    for index in range(10):
+        value.tree.write(
+            document(
+                MemoryKind.EVENT,
+                fields={
+                    "event_name": f"事件{index}",
+                    "event_date": date(2026, 6, 1),
+                    "summary": f"第 {index} 件事的经过",
+                },
+                timestamp=NOW - timedelta(days=40),
+            )
+        )
+    assert len(value.tree.list_addresses()) == 10
+
+    asked = []
+    for hour in range(4):
+        current[0] = NOW + timedelta(hours=hour)
+        before = len(responses)
+        result = asyncio.run(value.maintain())
+        assert result.failures == ()
+        asked.append(before - len(responses))
+
+    assert asked == [4, 4, 2, 0]
+
+
+def test_compaction_keep_ledger_matches_exact_version_and_stays_bounded(tmp_path) -> None:
+    tree = MemoryTree(tmp_path / "memory", document_codec=codec())
+    store = MemoryLifecycleScanStore(
+        tree,
+        PathLock(ProcessLocalLockStore()),
+        tmp_path / "workflow",
+        max_compaction_keeps=2,
+    )
+    store.initialize()
+    uris = [MemoryURI.parse(f"memory://preferences/p{index}.md") for index in range(3)]
+    versions = [
+        MemoryCompactionKeep(uri, 1, "a" * 64, None, NOW + timedelta(hours=index)) for index, uri in enumerate(uris)
+    ]
+    store.record_compaction_keep(versions[0])
+    assert store.compaction_kept(versions[0])
+    assert not store.compaction_kept(MemoryCompactionKeep(uris[0], 2, "a" * 64, None, NOW))
+    assert not store.compaction_kept(MemoryCompactionKeep(uris[0], 1, "b" * 64, None, NOW))
+    assert not store.compaction_kept(MemoryCompactionKeep(uris[0], 1, "a" * 64, NOW, NOW))
+
+    store.record_compaction_keep(versions[1])
+    store.record_compaction_keep(versions[2])
+    assert [store.compaction_kept(item) for item in versions] == [False, True, True]
+
+
+def test_stale_v1_scan_state_fails_with_the_file_to_delete_and_is_left_untouched(tmp_path) -> None:
+    tree = MemoryTree(tmp_path / "memory", document_codec=codec())
+    state_path = tmp_path / "workflow" / "lifecycle" / "l2_scan_state.json"
+    state_path.parent.mkdir(parents=True)
+    stale = b'{"after_uri":null,"failures":[],"schema":"memory_lifecycle_scan_v1"}\n'
+    state_path.write_bytes(stale)
+    store = MemoryLifecycleScanStore(tree, PathLock(ProcessLocalLockStore()), tmp_path / "workflow")
+
+    with pytest.raises(MemoryLifecycleScanStateError) as raised:
+        store.initialize()
+
+    assert str(raised.value) == (
+        f"这是旧格式扫描账（memory_lifecycle_scan_v1），删除 {state_path.resolve()} 后重启即可（只存游标与退避）"
+    )
+    assert state_path.read_bytes() == stale

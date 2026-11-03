@@ -42,6 +42,7 @@ _QUOTA = (
     "account quota",
     "accountoverdue",
     "billing hard limit",
+    "insufficient balance",
 )
 _RATE_LIMIT = (
     "rate limit",
@@ -76,7 +77,8 @@ def normalize_provider_error(error: Exception) -> ModelClientError:
         return ModelContentSafetyError(message)
     if status == 413 or _contains(lowered, _INPUT_TOO_LARGE):
         return ModelInputTooLargeError(message)
-    if _contains(lowered, _QUOTA):
+    # 402 Payment Required：DeepSeek 余额不足（"Insufficient Balance"）走这个状态码
+    if status == 402 or _contains(lowered, _QUOTA):
         return ModelQuotaError(message)
     if status == 401:
         return ModelAuthenticationError(message)

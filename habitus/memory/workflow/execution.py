@@ -10,6 +10,7 @@ from habitus.foundation.observability import NullObserver, Observer, observe_ope
 from habitus.memory.conversation import ConversationAddress, ConversationMessageJournal
 from habitus.memory.conversation.summary import ConversationSummaryService
 from habitus.memory.editor.engine import MemoryEditor
+from habitus.memory.editor.extraction import MemoryTurnContext
 from habitus.memory.editor.transaction import MemoryCommitResult
 from habitus.memory.editor.transaction_log import (
     MemoryTransactionJournalRecord,
@@ -22,6 +23,10 @@ from habitus.memory.workflow.jobs import (
 )
 from habitus.memory.workflow.planning import MemorySegmentProductBuilder
 from habitus.memory.workflow.receipt import MemoryChangeReceiptStore, MemoryChangeSource
+from habitus.pre.conversation import ConversationSegment
+
+#: 观察事件文本属性的上限（``foundation.observability.ObservationEvent``）：剔除原因拼起来超出时截断。
+_OBSERVED_TEXT_MAX_CHARS = 256
 
 
 @dataclass(frozen=True)
@@ -95,14 +100,23 @@ class MemoryJobExecutor:
             segment = self.conversations.read_segment(address, job.segment_id)
         if segment.digest != job.source_segment_digest:
             raise MemoryJobError("sealed ConversationSegment digest does not match its MemoryJob")
-        editor_segment = self.conversations.read_editor_segment(address, segment)
+        editor_segment, turn_context = self._editor_input(address, segment)
         summary_existed = self.summary_service.store.try_read(address, segment) is not None
-        with observe_operation(self.observer, "workflow", "memory_plan"):
+        with observe_operation(self.observer, "workflow", "memory_plan") as observed:
             products = await self.segment_products.build(
                 address,
                 segment,
                 editor_segment=editor_segment,
+                turn_context=turn_context,
             )
+            extraction = products.editor_plan.extraction
+            if extraction is not None:
+                observed["retrieval_ended_at_limit"] = extraction.retrieval_ended_at_limit
+                observed["read_only_noop_count"] = len(extraction.mutations.read_only_targets)
+                observed["source_rejected_count"] = len(extraction.source_rejections)
+                if extraction.source_rejections:
+                    reasons = "; ".join(item.describe() for item in extraction.source_rejections)
+                    observed["source_rejected_reasons"] = reasons[:_OBSERVED_TEXT_MAX_CHARS]
         products.summary.require_matches_source(segment)
         self.jobs.assert_current(lease)
 
@@ -130,6 +144,33 @@ class MemoryJobExecutor:
             journal=journal,
             summary_generated=not summary_existed,
         )
+
+    def _editor_input(
+        self,
+        address: ConversationAddress,
+        segment: ConversationSegment,
+    ) -> tuple[ConversationSegment | None, MemoryTurnContext | None]:
+        """这一段的 Job 抽取什么：整轮放得下就照旧等到轮尾一次抽整轮（轮中间的段只写摘要）；放不下就每段抽自己，
+        带上这一轮开头的人话与前面各段的段摘要（照 OpenViking ``retention.py`` ``_partial_latest_turn_plan``）。
+
+        判据只看整轮的消息与配置（``MemoryEditor.turn_fits_whole``），同一轮里每一段的 Job 判出来一样：要么只有轮尾那段
+        抽整轮，要么每段各抽各的，不漏不重。
+        """
+
+        turn = self.conversations.read_editor_turn(address, segment)
+        if self.editor.turn_fits_whole(turn.whole):
+            return (None if segment.ends_mid_turn else turn.whole), None
+        summaries = tuple(
+            summary
+            for summary in (self.summary_service.store.try_read(address, earlier) for earlier in turn.earlier)
+            if summary is not None
+        )
+        context = MemoryTurnContext(
+            opening_prompts=() if turn.source_index == 0 else turn.opening_prompts,
+            earlier_summaries=summaries,
+            earlier_segment_count=len(turn.earlier),
+        )
+        return segment, context
 
     def _timestamp(self) -> datetime:
         value = self.clock()

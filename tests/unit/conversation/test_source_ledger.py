@@ -36,7 +36,7 @@ def test_marking_is_idempotent_and_ordered(tmp_path: Path) -> None:
     markers = ledger.index.markers(SourceAddress.of(earlier))
     assert [marker.source_id for marker in markers] == [earlier.source_id, later.source_id]
     assert [marker.source_id for marker in ledger.earlier(later)] == [earlier.source_id]
-    assert {source_id for source_id, _ in ledger.pending.listing()} == {earlier.source_id, later.source_id}
+    assert {source_id for source_id, _ in ledger.pending.listing().sources} == {earlier.source_id, later.source_id}
 
 
 def test_index_rejects_unknown_entries_but_skips_temporary_files(tmp_path: Path) -> None:
@@ -96,7 +96,7 @@ def test_marks_beyond_the_bounds_are_refused_at_write_time(tmp_path: Path) -> No
     with pytest.raises(ConversationSourceCapacityError):
         pending.mark(source(conversation_id="d"))
 
-    assert index.count() == 2
+    assert len(index.address_directories()) == 2
     assert pending.count() == 3
 
 

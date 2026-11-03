@@ -1,16 +1,16 @@
-"""词表两件定时活的跨次状态与"该不该跑"（时刻都是用户本地时间，时区由调用方给）：
+"""定期拆改的跨次状态与"这一晚该不该拆改"（裁定 94 第 9 条：词表的每晚新增与定期拆改都在夜里那条线上、结构那一段之前，
+不挂任何钟点）：
 
-- 每晚新增：每天 ``nightly_hour`` 点之后跑一次；
-- 定期拆改：每周 ``revision_weekday`` 的 ``revision_hour`` 点之后跑一次。合并要有证据：同一对（a→b）在最近连续
+- 每晚新增：线每晚跑一次，不需要跨次状态；
+- 定期拆改：每周一次，拆改周期按线的那一晚算——从每周 ``revision_weekday`` 那一晚起到下一个那一晚之前是一个周期，这个周期里
+  线第一次跑到它就拆改（那一晚线没跑到，之后几晚接着补，不累积）。合并要有证据：同一对（a→b）在最近连续
   ``merge_evidence_runs`` 个**拆改周期**里都被提出才放行（裁定 17：按周期计，同一周期里跑几次都只算一次）。
-
-错过的那一次（机器没开）开机后补跑一次，不累积。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from habitus.behavior.kinds.model import BehaviorKindError
 
@@ -20,15 +20,15 @@ PeriodMerges = tuple[str, frozenset[MergePair]]
 
 @dataclass(frozen=True)
 class JobState:
-    nightly_at: datetime | None = None
+    #: 上一次拆改在什么时候（它的本地日就是线的那一晚，"这个周期拆改过没有"按它判）。
     revision_at: datetime | None = None
     merge_history: tuple[PeriodMerges, ...] = ()
 
     def __post_init__(self) -> None:
-        for name in ("nightly_at", "revision_at"):
-            value = getattr(self, name)
-            if value is not None and (not isinstance(value, datetime) or value.utcoffset() is None):
-                raise BehaviorKindError(f"{name} must be timezone-aware")
+        if self.revision_at is not None and (
+            not isinstance(self.revision_at, datetime) or self.revision_at.utcoffset() is None
+        ):
+            raise BehaviorKindError("revision_at must be timezone-aware")
         periods = [period for period, _ in self.merge_history]
         if len(set(periods)) != len(periods):
             raise BehaviorKindError("merge history must have one entry per revision period")
@@ -48,44 +48,23 @@ class JobState:
             history.append((period, proposed))
         return replace(self, revision_at=at, merge_history=tuple(history[-keep:]))
 
-    def after_nightly(self, at: datetime) -> JobState:
-        return replace(self, nightly_at=at)
+
+def revision_start(night: date, *, weekday: int) -> date:
+    """这一晚属于哪个拆改周期：最近一个（含这一晚）``weekday`` 那一晚。"""
+
+    return night - timedelta(days=(night.weekday() - weekday) % 7)
 
 
-def nightly_due(now: datetime, last_run_at: datetime | None, *, hour: int) -> bool:
-    """最近一个"每天 ``hour`` 点"已经到了、且那之后还没跑过。"""
+def revision_period(night: date, *, weekday: int) -> str:
+    """拆改周期的名字（合并证据按它计）：周期起点那一晚的日期。"""
 
-    return _due(_latest_slot(now, hour=hour, period_days=1, offset_days=0), last_run_at)
-
-
-def revision_due(now: datetime, last_run_at: datetime | None, *, weekday: int, hour: int) -> bool:
-    """最近一个"每周 ``weekday`` 的 ``hour`` 点"已经到了、且那之后还没跑过。"""
-
-    return _due(revision_slot(now, weekday=weekday, hour=hour), last_run_at)
+    return revision_start(night, weekday=weekday).isoformat()
 
 
-def revision_period(now: datetime, *, weekday: int, hour: int) -> str:
-    """这一刻属于哪个拆改周期：最近一个拆改时刻的本地日期。"""
+def revision_due(night: date, last: date | None, *, weekday: int) -> bool:
+    """这一晚所在的拆改周期里还没拆改过。"""
 
-    return revision_slot(now, weekday=weekday, hour=hour).date().isoformat()
-
-
-def revision_slot(now: datetime, *, weekday: int, hour: int) -> datetime:
-    return _latest_slot(now, hour=hour, period_days=7, offset_days=(now.weekday() - weekday) % 7)
+    return last is None or revision_start(last, weekday=weekday) < revision_start(night, weekday=weekday)
 
 
-def _latest_slot(now: datetime, *, hour: int, period_days: int, offset_days: int) -> datetime:
-    if now.utcoffset() is None:
-        raise BehaviorKindError("now must be timezone-aware")
-    # fold=0：夏令时回拨那天"几点"出现两次，取第一次，回拨后的同一钟点不会再算一次到期。
-    scheduled = now.replace(hour=hour, minute=0, second=0, microsecond=0, fold=0) - timedelta(days=offset_days)
-    if scheduled > now:
-        scheduled -= timedelta(days=period_days)
-    return scheduled
-
-
-def _due(scheduled: datetime, last_run_at: datetime | None) -> bool:
-    return last_run_at is None or last_run_at < scheduled
-
-
-__all__ = ["JobState", "MergePair", "PeriodMerges", "nightly_due", "revision_due", "revision_period", "revision_slot"]
+__all__ = ["JobState", "MergePair", "PeriodMerges", "revision_due", "revision_period", "revision_start"]

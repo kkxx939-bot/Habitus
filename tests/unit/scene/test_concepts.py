@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import signal
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -31,8 +32,10 @@ from habitus.scene.concepts import (
     concept_identity,
     parse_baseline_value,
 )
+from habitus.scene.concepts.calendar_situations import calendar_concepts
 from habitus.scene.concepts.catalog import CatalogChanges, CatalogClass, MovedOccurrence
 from habitus.scene.concepts.document import decode, encode
+from habitus.scene.concepts.model import members_retired
 from habitus.scene.concepts.situation import SituationBasis, SituationRule
 from habitus.scene.concepts.store import ConceptStore, ConceptStoreError
 from habitus.scene.concepts.sync import base_concept, plan_sync
@@ -55,6 +58,7 @@ from tests.unit.scene.concept_fixtures import (
     SLEEP_LATE,
     TRAVELLING,
     WEEKEND,
+    base,
     cid,
     concept_set,
     group,
@@ -366,6 +370,77 @@ def test_labels_are_unique_within_a_lane_but_may_repeat_across_lanes() -> None:
     assert both.label_of(kind_id("打球", Lane.PHYSICAL)) == both.label_of(cid("打球")) == "打球"
 
 
+def test_a_retired_concept_may_share_its_label_with_one_in_use() -> None:
+    """与词表同一口径：只有在用的不许同名。并掉的「打球」停用后又长出一个「打球」，两个都留着，按名字只找得到在用的。"""
+
+    retired = replace(BALL, retired=True)
+    reborn = replace(base("另一个打球"), title="打球")
+    both = ConceptSet([*(item for item in ALL_CONCEPTS if item.name != BALL.name), retired, reborn])
+    assert both.label_of(retired.name) == both.label_of(reborn.name) == "打球"
+    with pytest.raises(ConceptError, match="both show as"):
+        ConceptSet([*ALL_CONCEPTS, reborn])
+
+
+def test_sync_refuses_before_writing_a_class_that_would_show_like_a_concept_in_use() -> None:
+    """写盘前整体核对：拆出的类叫「晚睡」撞了细分概念、类叫「周二」撞了日历情境——那两份不进 ``write``，带着理由进
+    ``rejected``；不撞的照常写。"""
+
+    classes = (
+        catalog_class("就寝"),
+        catalog_class("早餐"),
+        catalog_class("晚睡"),
+        catalog_class("周二"),
+        catalog_class("午睡"),
+    )
+    existing = ConceptSet(
+        [base("就寝"), base("早餐"), SLEEP_LATE, *calendar_concepts(now=LATER, observed=[("日历.周几", "周二")])]
+    )
+    plan = plan_sync(existing, classes, CatalogChanges(since=1, version=2), now=LATER)
+    assert {item.name for item in plan.write} == {kind_id("午睡")}
+    assert {item.name for item, _reason in plan.rejected} == {kind_id("晚睡"), kind_id("周二")}
+    assert all("both show as" in reason for _item, reason in plan.rejected)
+    # 计划里剩下的写完，概念集仍然自洽
+    ConceptSet([*existing.values(), *plan.write])
+
+
+def test_lookups_by_identity_do_not_revalidate_the_identity_string(monkeypatch) -> None:
+    """概念集不可变：按规范身份查、问身份、问"成员是不是全停了"都只算一次（两两检验每晚按名字问几十万次，重新校验身份串
+    曾占折叠的大半时间）。"""
+
+    import habitus.scene.concepts.model as model
+
+    concepts = concept_set()
+    names = list(concepts)
+    for name in names:
+        concepts[name].identity  # noqa: B018 - 先算一次身份
+        members_retired(concepts, name)
+    calls: list[object] = []
+    real = model.concept_identity
+
+    def counting(value: object) -> str:
+        calls.append(value)
+        return real(value)
+
+    monkeypatch.setattr(model, "concept_identity", counting)
+    for _ in range(3):
+        for name in names:
+            assert concepts[name].identity == name and name in concepts
+            members_retired(concepts, name)
+    assert calls == []
+    # "成员是不是全停了"记过一次之后只查它自己，不再逐个查成员
+    lookups: list[str] = []
+    real_get = ConceptSet.__getitem__
+
+    def get(self: ConceptSet, key: str) -> ConceptDefinition:
+        lookups.append(key)
+        return real_get(self, key)
+
+    monkeypatch.setattr(ConceptSet, "__getitem__", get)
+    for name in names:
+        members_retired(concepts, name)
+    assert lookups == names
+
+
 def test_only_judged_concepts_enter_the_set_fingerprint() -> None:
     concepts = concept_set()
     assert len(concepts.fingerprint) == 16 and ConceptSet(ALL_CONCEPTS).fingerprint == concepts.fingerprint
@@ -639,6 +714,45 @@ def test_sync_rewrites_group_members_to_the_current_classes() -> None:
     assert "运动" not in {
         item.name for item in plan_sync(existing, classes, CatalogChanges(since=1, version=1), now=LATER).write
     }
+
+
+def _within_seconds(seconds: int, call):  # type: ignore[no-untyped-def]
+    """在限定秒数内调用；不返回就抛 TimeoutError（防住死循环把整个测试进程挂住）。"""
+
+    def expire(*_: object) -> None:
+        raise TimeoutError(f"did not return within {seconds} s")
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.alarm(seconds)
+    try:
+        return call()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def test_sync_regroups_in_finitely_many_steps_when_a_split_off_class_is_merged_away() -> None:
+    """同一段变更里先拆出新类、新类又并进别的类（或并回源类）：有限步停下，成员是现编号、不重复。"""
+
+    classes = (
+        catalog_class("打球", criterion=BALL.definition),
+        catalog_class("跑步", criterion=RUNNING.definition),
+        catalog_class("打羽毛球", active=False),
+    )
+    existing = ConceptSet([BALL, RUNNING, EXERCISE])
+    badminton = kind_id("打羽毛球")
+    for target in (cid("跑步"), cid("打球")):
+        changes = CatalogChanges(since=1, version=3, split_from={badminton: cid("打球")}, merged_into={badminton: target})
+        plan = _within_seconds(3, lambda changes=changes: plan_sync(existing, classes, changes, now=LATER))
+        # 拆出的类最后并进了成员里已有的类：成员仍是（打球, 跑步），汇总概念不用写
+        assert "运动" not in {item.name for item in plan.write}
+    # 拆出的类并进成员之外的类：那个类进成员
+    changes = CatalogChanges(
+        since=1, version=3, split_from={badminton: cid("打球")}, merged_into={badminton: kind_id("快走")}
+    )
+    plan = _within_seconds(3, lambda: plan_sync(existing, (*classes, catalog_class("快走")), changes, now=LATER))
+    (regrouped,) = [item for item in plan.write if item.name == "运动"]
+    assert regrouped.classes == (cid("打球"), cid("跑步"), kind_id("快走"))
 
 
 def _behaviours(items):  # type: ignore[no-untyped-def]

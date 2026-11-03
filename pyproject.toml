@@ -51,22 +51,19 @@ dev = [
 ]
 
 [project.scripts]
-habitus-benchmark = "habitus.benchmark.cli:main"
 habitus-server = "habitus.integrations.local_service.cli:main"
-habitus-http = "habitus.integrations.local_service.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-# habitus/benchmark/data 是本地数据集与一次性实验脚本，不进 git；但本地构建时它在磁盘上，
-# 不显式排除就会被打进 wheel，导致本地 wheel 与 CI wheel 内容不一致。
-exclude = ["habitus.benchmark.data", "habitus.benchmark.data.*"]
+# 记忆基准（habitus/benchmark）是开发工具，只在仓库里跑（python -m habitus.benchmark），不随服务发布。
+exclude = ["habitus.benchmark", "habitus.benchmark.*"]
 include = ["habitus*"]
 
 [tool.setuptools.package-data]
 "habitus.config" = ["*.yaml"]
-"habitus.benchmark" = ["README.md", "datasets/*.json", "policies/*.json"]
 "habitus.memory.schema.definitions" = ["*.yaml"]
 "habitus.behavior.schema.definitions" = ["*.yaml"]
+"habitus.conditions" = ["holidays/*/*.json"]
 
 [tool.ruff]
 line-length = 120
@@ -90,9 +87,6 @@ ignore = [
 [tool.mypy]
 python_version = "3.13"
 ignore_missing_imports = true
-# habitus/benchmark/data 不进 git（本地数据集与实验脚本，远端 CI 不存在）；里面的脚本会 import tests/，
-# 不排除的话本地全链会把测试文件也拖进类型检查。与下方 pyright 的 exclude 保持一致。
-exclude = ["^habitus/benchmark/data/"]
 check_untyped_defs = false
 warn_unused_ignores = true
 warn_redundant_casts = true
@@ -100,8 +94,6 @@ warn_redundant_casts = true
 [tool.pyright]
 pythonVersion = "3.13"
 typeCheckingMode = "basic"
-# habitus/benchmark/data 不进 git（本地数据集与实验脚本，远端 CI 不存在）；本地跑全链时排除。
-exclude = ["habitus/benchmark/data"]
 include = ["habitus"]
 # 关着是因为 integrations 的两个包用 ``__getattr__`` 懒加载（HTTP 适配器不该把 FastAPI 拖进
 # 轻量 Doctor），静态检查看不穿它、会把合法的导出全报成缺失。真正守 ``__all__`` 的是

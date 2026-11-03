@@ -1,6 +1,6 @@
 """时窗末用得着就当场重读（裁定 68 第 1 条）：预测层到时窗末要说时，说中的范围里有「没读懂」，就把那段里还在重试堆里的
 会话轮重读一次——走的就是夜里重试那一个处理器。读出来了这一项就从堆里删掉（这一天它已经试过、成了）；模型此刻用不了、
-答得不合格的留在堆里等当晚。
+锁被占、答得不合格的留在堆里等当晚。
 """
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from habitus.behavior.retry.model import RetryKind
-from habitus.behavior.retry.stage import Attempt, RetryHandler
+from habitus.behavior.retry.stage import Attempt, RetryHandler, attempt
 from habitus.behavior.retry.store import RetryBacklogStore
 
 
@@ -26,14 +26,18 @@ class Rereader:
 
         recovered = False
         for item in self.backlog.snapshot().items:
-            if item.kind is not RetryKind.TURN or not _opened_within(item.payload, start, end):
-                continue
-            outcome = await self.handler.attempt(item)
+            if (
+                item.kind is not RetryKind.TURN
+                or not item.cause.retried
+                or not _opened_within(item.payload, start, end)
+            ):
+                continue  # 内容安全拦下的、我们自己处理不了的不白试（裁定 94 错误分类）
+            outcome = await attempt(self.handler, item)  # 一项抛了是 bug：只拦这一项，留在堆里等当晚报出
             if outcome is Attempt.RECOVERED:
                 self.backlog.discard((item.item_id,))
                 recovered = True
-            elif outcome is Attempt.UNAVAILABLE:
-                break  # 模型此刻用不了：别的也不必试了
+            elif outcome in (Attempt.UNAVAILABLE, Attempt.BUSY):
+                break  # 模型此刻用不了、或锁被另一进程拿着：别的也不必试了，留在堆里等当晚
         return recovered
 
 

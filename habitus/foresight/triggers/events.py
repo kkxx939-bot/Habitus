@@ -177,6 +177,12 @@ def _draft(
         observed_from = min(ended, now)
     else:
         observed_from = midnight_of(chain.day + timedelta(days=1 if segment is Segment.NEXT_DAY else 2), now)
+    if segment is Segment.REST_OF_DAY:
+        # 「当天剩下的」到那一天过完为止（方案 19 第九节第 3 步：最晚时限 = 这一段的边界）：历史那几次的偏移挪到今天
+        # 可能越过午夜，时窗终点截在边界上；整段时窗都在边界之后的，这一段里没有它的时窗，不建
+        if start >= boundary:
+            return None
+        end = min(end, boundary)
     clamped = clamp(
         start,
         end,
@@ -190,6 +196,9 @@ def _draft(
     if clamped is None:
         return None  # 退场：历史上最晚的那一次也过了
     window, deadline = clamped
+    if segment is Segment.REST_OF_DAY:
+        # 一槽宽的下限也不越过边界
+        window, deadline = (window[0], min(window[1], boundary)), boundary
     return Draft(
         kind_token=relation.consequent_classes[0],
         source="事件",

@@ -11,12 +11,11 @@ import json
 from dataclasses import dataclass, field
 from datetime import timedelta
 
-from habitus.behavior import BehaviorDocumentWriter
+from habitus.behavior.tree.writer import BehaviorDocumentWriter
 from habitus.behavior.uri import BehaviorURI
 from habitus.conditions import LocalCalendar
 from habitus.foundation.lifecycle import BackoffPolicy
 from habitus.infrastructure.lifecycle import RetryLedger
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.model_client import ChatClient, ModelResponse
 from habitus.model_client.structured import StructuredChatClient
 from habitus.runtime.scene_night import SceneNightConfig, SceneNightlyRun
@@ -26,10 +25,11 @@ from habitus.scene.concepts.catalog import CatalogChanges, CatalogClass, MovedOc
 from habitus.scene.concepts.rhythm import RhythmRulers
 from habitus.scene.concepts.store import ConceptStore
 from habitus.scene.occurrences import ConceptHitStore
-from habitus.scene.occurrences.mapper import ConceptMapper, MapperConfig
+from habitus.scene.occurrences.mapper import ConceptMapper, ConceptMapperError, MapperConfig
 from habitus.scene.relations import RelationConfig
 from habitus.scene.relations.store import RelationStore, RelationStoreError
 from habitus.series.reader import read_series
+from tests.lock_store import ProcessLocalLockStore
 from tests.unit.foresight.scripted_model import ScriptedProvider, model_config
 from tests.unit.kind_ids import kind_id
 from tests.unit.scene.concept_fixtures import (
@@ -576,7 +576,7 @@ def test_weekday_sets_grow_only_from_raising_relations(tmp_path) -> None:
         "session", TONIGHT, 1, (held("周一", True), held("周五", True), held("周六", False), held("周日", False))
     )
     signals: list[str] = []
-    run._grow_weekday_sets(run.concepts.read_all(), state, NOW, signals)
+    run._grow_value_sets(run.concepts.read_all(), state, NOW, signals)
     assert "周一、周五" in run.concepts.read_all() and "周一、周五、周六、周日" not in run.concepts.read_all()
     assert "周六、周日" not in run.concepts.read_all()
 
@@ -596,3 +596,270 @@ def test_a_relation_table_that_cannot_be_written_fails_only_that_lane(tmp_path, 
 
     assert any(signal.startswith("relations: session 这一晚的关系表写不出") for signal in report.signals)
     assert "session" not in report.relations
+
+
+def test_a_class_named_like_a_concept_in_use_neither_stalls_the_nights_nor_leaves_a_file(tmp_path) -> None:
+    """词表合法、概念集不自洽的三种撞名：并掉的「吃饭」又长出一个「吃饭」（停用的不算撞，两个都留着）；拆出的类叫「晚睡」
+    撞了模型写的细分概念；类叫「周二」撞了日历情境。后两种那份概念不写盘、报出来，每一晚照常跑完、关系表照常落盘。"""
+
+    site, hits = site_with_three_bedtimes(tmp_path)
+    publish_tonight(site)
+    catalog = FakeCatalog()
+    run, _provider = nightly(tmp_path, hits, site, catalog=catalog)
+    night(run, TONIGHT, NOW)
+
+    catalog.merge(MEAL, BREAKFAST)
+    night(run, TONIGHT + timedelta(days=1), NOW + timedelta(days=1))
+    reborn = kind_id("又长出来的吃饭")
+    catalog.active[reborn] = ("吃饭", "坐下吃一顿饭")
+    late = kind_id("拆出来的晚睡")
+    catalog.split(SLEEP, late, "晚睡")
+    tuesday = kind_id("周二例会")
+    catalog.active[tuesday] = ("周二", "周二的例会")
+    for offset in (2, 3):
+        report = night(run, TONIGHT + timedelta(days=offset), NOW + timedelta(days=offset))
+        assert run.relations.nights("session")[-1] == (NOW + timedelta(days=offset)).date()
+        refused = [signal for signal in report.signals if "没同步" in signal]
+        assert len(refused) == 2
+        assert any("「晚睡」" in signal and "both show as" in signal for signal in refused)
+        assert any("「周二」" in signal for signal in refused)
+    concepts = run.concepts.read_all()
+    assert concepts[reborn].label == "吃饭" and not concepts[reborn].retired and concepts[MEAL].retired
+    assert late not in concepts and tuesday not in concepts
+    on_disk = {path.name for path in (tmp_path / "scene" / "concepts").glob("*.md")}
+    assert f"{late}.md" not in on_disk and f"{tuesday}.md" not in on_disk
+
+
+def mapping_key(run: SceneNightlyRun, day, now) -> str:  # type: ignore[no-untyped-def]
+    """重试账里这一天的键：日子 + 这一天按现在的概念集的映射口径。"""
+
+    series = read_series(run.behavior_tree, cutoff=now.date())
+    version = run.mapper_for(run.concepts.read_all()).day_version(record.kind_token for record in series.on(day))
+    return f"map:{day.isoformat()}:{version}"
+
+
+class AnswerWithAWrongName(AnswerByCandidates):
+    """假模型每次都答一个不在选项里的名字：结构层两轮都过不去，报错里带着 schema 片段（比单条信号的上限长）。"""
+
+    async def complete_async(self, request):  # type: ignore[no-untyped-def, override]
+        self.calls += 1
+        body = {"verdicts": [{"concept": "起床就吃（早餐）", "verdict": "yes"}]}
+        return ModelResponse(
+            content=json.dumps(body, ensure_ascii=False),
+            model=self.model,
+            provider=self.provider_name,
+            finish_reason="stop",
+        )
+
+
+def test_a_mapping_the_model_never_answers_goes_to_the_retry_ledger_and_the_night_finishes(tmp_path) -> None:
+    """模型两轮都没答成、失败信号超长：那条记未决、那天进重试账，这一晚照样跑完 B4；下一晚那天在退避里不重排。"""
+
+    site, hits = site_with_three_bedtimes(tmp_path)
+    publish_tonight(site)
+    run, provider = nightly(tmp_path, hits, site)
+    provider.complete_async = AnswerWithAWrongName(frozenset()).complete_async.__get__(provider)  # type: ignore[method-assign]
+    report = night(run, TONIGHT, NOW)
+    assert report.model_failed == 1 and run.relations.nights("session") == (NOW.date(),)
+    assert TONIGHT not in run.hits.days_done()
+    key = mapping_key(run, TONIGHT, NOW)
+    assert run.mapping_retries.entry(key) is not None and run.mapping_retries.blocked(key)
+    later = night(run, TONIGHT + timedelta(days=1), NOW + timedelta(days=1))
+    assert TONIGHT not in later.mapped_days and any("模型没答成" in signal for signal in later.signals)
+
+
+def test_a_record_that_cannot_be_written_fails_only_its_day(tmp_path, monkeypatch) -> None:
+    """映射器写不出一条记录（``ConceptMapperError``，比如常态表超了记录上限）：那天记进重试账、报出来，这一晚其余照常。"""
+
+    site, hits = site_with_three_bedtimes(tmp_path)
+    publish_tonight(site)
+    run, _provider = nightly(tmp_path, hits, site)
+
+    async def refuse(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise ConceptMapperError("baseline_snapshot carries at most 32 entries")
+
+    monkeypatch.setattr(ConceptMapper, "map", refuse)
+    report = night(run, TONIGHT, NOW)
+    assert run.relations.nights("session") == (NOW.date(),) and TONIGHT not in run.hits.days_done()
+    assert any(f"mapping: {TONIGHT} 写不出" in signal and "32 entries" in signal for signal in report.signals)
+    entry = run.mapping_retries.entry(mapping_key(run, TONIGHT, NOW))
+    assert entry is not None and entry.error_type == "ConceptMapperError"
+
+
+def _yesterday_breakfast_night(tmp_path, *, both: bool):  # type: ignore[no-untyped-def]
+    """「昨天吃过早餐」（派生情境，看前一天的命中）：第 10、11 天各一条早餐、第 10 天还有一条就寝；``both`` 为假时第 10 天
+    那条早餐先不写。"""
+
+    from habitus.scene.concepts.situation import SituationBasis, SituationRule
+    from habitus.scene.concepts.sync import base_concept
+    from tests.unit.scene.concept_fixtures import situation
+    from tests.unit.scene.fixtures import Site, at
+
+    first, second = DAY1 + timedelta(days=10), DAY1 + timedelta(days=11)
+    site = Site(tmp_path, now=at(second + timedelta(days=3), 3, 0))
+    hits = ConceptHitStore(tmp_path / "scene")
+    early = publish(site.behavior_tree, first, "吃早饭", 8, 0, kind="早餐") if both else None
+    publish(site.behavior_tree, first, "上床", 23, 0, kind="就寝")
+    late = publish(site.behavior_tree, second, "吃早饭", 7, 30, kind="早餐")
+    run, _provider = nightly(tmp_path, hits, site)
+    run.concepts.write(base_concept(CatalogClass(BREAKFAST, "早餐", "早上的第一顿饭", "session", True), now=NOW))
+    rule = SituationRule(SituationBasis.YESTERDAY, concept=BREAKFAST)
+    run.concepts.write(situation("昨天吃过早餐", "前一天吃过早餐", rule=rule))
+    return site, run, (first, second), (early, late)
+
+
+def _yesterday_hit(run: SceneNightlyRun, day, uri) -> bool:  # type: ignore[no-untyped-def]
+    record = next(item for item in run.hits.read_day(day) if item.occurrence_uri == uri)
+    return "昨天吃过早餐" in {hit.concept for hit in record.situation_hits}
+
+
+def test_days_backfilled_in_one_night_are_mapped_oldest_first_so_history_situations_see_them(tmp_path) -> None:
+    """同一晚回填相邻两天：挑日子仍是最新的先，映射按先后——第 11 天那条早餐算「昨天吃过早餐」时第 10 天已经映射好。"""
+
+    _site, run, (first, second), (_early, late) = _yesterday_breakfast_night(tmp_path, both=True)
+    report = night(run, second, at(second + timedelta(days=1), 3, 0))
+    assert set(report.mapped_days) == {first, second}
+    assert _yesterday_hit(run, second, late)
+
+
+def test_a_day_mapped_later_revisits_the_days_that_read_it_as_history(tmp_path) -> None:
+    """第 10、11 天先映射完（那时第 10 天只有就寝，第 11 天「昨天吃过早餐」判过不成立）；之后第 10 天补进早餐、那一晚只重映射
+    第 10 天——读它的第 11 天回访一遍，只就地重算情境、不问模型，「昨天吃过早餐」补上。"""
+
+    site, run, (first, second), (_early, late) = _yesterday_breakfast_night(tmp_path, both=False)
+    night(run, second, at(second + timedelta(days=1), 3, 0))
+    assert not _yesterday_hit(run, second, late)
+    publish(site.behavior_tree, first, "吃早饭", 8, 0, kind="早餐")
+    report = night(run, second + timedelta(days=1), at(second + timedelta(days=2), 3, 0))
+    assert report.mapped_days == (first,)
+    assert _yesterday_hit(run, second, late)
+
+
+def test_the_heavy_steps_run_off_the_event_loop(tmp_path, monkeypatch) -> None:
+    """夜批跑在本地服务的事件循环上：读整支概念、同步词表、节律、时间线、检验与折叠、机会表的材料都在线程里算，
+    同一个循环上的心跳每一步都不停（每一步各拖 0.3 秒，心跳最长的间隔也远小于它）。"""
+
+    import threading
+    import time
+
+    import habitus.runtime.scene_night as night_module
+
+    site, hits = site_with_three_bedtimes(tmp_path)
+    publish_tonight(site)
+    run, _provider = nightly(tmp_path, hits, site)
+    on_loop: list[str] = []
+    loop_thread: list[int] = []
+
+    def slowed(name: str, real):  # type: ignore[no-untyped-def]
+        def slow(*args, **kwargs):  # type: ignore[no-untyped-def]
+            if threading.get_ident() == loop_thread[0]:
+                on_loop.append(name)
+            end = time.perf_counter() + 0.3
+            while time.perf_counter() < end:
+                pass
+            return real(*args, **kwargs)
+
+        return slow
+
+    for name in ("plan_sync", "rhythms_of", "build_timelines", "fold", "coverage_by_lane"):
+        monkeypatch.setattr(night_module, name, slowed(name, getattr(night_module, name)))
+    monkeypatch.setattr(run.concepts, "read_all", slowed("read_all", run.concepts.read_all))
+
+    async def main() -> float:
+        loop_thread.append(threading.get_ident())
+        beats: list[float] = []
+
+        async def heart() -> None:
+            while True:
+                beats.append(time.perf_counter())
+                await asyncio.sleep(0.02)
+
+        task = asyncio.create_task(heart())
+        await asyncio.sleep(0.05)
+        await run.run(series=read_series(run.behavior_tree, cutoff=NOW.date()), now=NOW)
+        await asyncio.sleep(0.05)
+        task.cancel()
+        return max(later - earlier for earlier, later in zip(beats, beats[1:], strict=False))
+
+    longest = asyncio.run(main())
+    assert on_loop == [] and longest < 0.2
+
+
+def test_the_coverage_is_computed_once_a_night(tmp_path, monkeypatch) -> None:
+    """各 lane 的观测覆盖只取决于序列：一晚算一次，节律（同步词表后、写概念后各一遍）与机会表的材料都用这一份。"""
+
+    import habitus.runtime.scene_night as night_module
+    import habitus.scene.concepts.rhythm as rhythm_module
+    from habitus.scene.concepts.rhythm import coverage_of
+
+    site, hits = site_with_three_bedtimes(tmp_path)
+    publish_tonight(site)
+    run, _provider = nightly(tmp_path, hits, site)
+    calls: list[str] = []
+    real_by_lane = night_module.coverage_by_lane
+
+    def by_lane(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append("lanes")
+        return real_by_lane(*args, **kwargs)
+
+    def single(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append("one lane")
+        return coverage_of(*args, **kwargs)
+
+    monkeypatch.setattr(night_module, "coverage_by_lane", by_lane)
+    monkeypatch.setattr(rhythm_module, "coverage_of", single)
+    report = night(run, TONIGHT, NOW)
+    assert calls == ["lanes"] and report.materials is not None and report.materials.coverage
+
+
+def test_a_proposal_book_that_cannot_be_written_or_read_does_not_stall_the_night(tmp_path, monkeypatch) -> None:
+    """提议簿写不出（超了单份上限）：这一晚用盘上那份，关系表照常落盘；读不了：这条 lane 这一晚沿用上一晚，整晚照样跑完。"""
+
+    from datetime import date
+
+    from habitus.runtime.scene_advice import RelationAdvice
+    from habitus.scene.advice.model import Proposal, ProposalBook
+    from habitus.scene.advice.store import AdviceStore, AdviceStoreError
+
+    site, hits = site_with_three_bedtimes(tmp_path)
+    publish_tonight(site)
+    run, _provider = nightly(tmp_path, hits, site)
+    store = AdviceStore(tmp_path / "scene")
+    gone = Proposal(antecedent="s-k999999", proposed_on=date(2026, 8, 1), why="前因已删", refused="unknown template")
+    store.write_book(ProposalBook(lane="session", proposals=(gone,), asked={}))
+    run.advice = RelationAdvice(store=store, prior=None, conditions=None)
+
+    def too_big(book):  # type: ignore[no-untyped-def]
+        raise AdviceStoreError("scene record exceeds its byte budget")
+
+    monkeypatch.setattr(store, "write_book", too_big)
+    report = night(run, TONIGHT, NOW)
+    assert run.relations.nights("session") == (NOW.date(),)
+    assert any("提议簿写不出" in signal for signal in report.signals)
+
+    def unreadable(lane):  # type: ignore[no-untyped-def]
+        raise AdviceStoreError("proposal book is corrupt")
+
+    monkeypatch.setattr(store, "book", unreadable)
+    later = night(run, TONIGHT + timedelta(days=1), NOW + timedelta(days=1))
+    assert run.relations.nights("session") == (NOW.date(),)
+    assert any("提议簿读不了" in signal for signal in later.signals) and later.materials is not None
+
+
+def test_a_move_on_a_day_not_yet_in_this_series_leaves_its_mapping_alone(tmp_path) -> None:
+    """补跑更早的一晚时，迁移改到的那天还不在这一份序列里（没封口）：不在这一晚重映射——拿这份序列去映射它会把那天
+    盘上的命中当成"树上没有"全清掉；等它封口那一晚照常映射。"""
+
+    site, hits = site_with_three_bedtimes(tmp_path)
+    _bed, meal = publish_tonight(site)
+    catalog = FakeCatalog()
+    run, _provider = nightly(tmp_path, hits, site, catalog=catalog)
+    night(run, TONIGHT, NOW)
+    before = len(run.hits.read_day(TONIGHT))
+    address = BehaviorURI.parse(meal).to_address()
+    BehaviorDocumentWriter(site.behavior_tree, ProcessLocalLockStore(), clock=lambda: NOW).restamp_kind_token(
+        address, MEAL
+    )
+    catalog.move(meal, BREAKFAST, MEAL)
+    report = night(run, TONIGHT - timedelta(days=1), at(TONIGHT, 3, 0))
+    assert report.remapped_days == 0 and before == 2 and len(run.hits.read_day(TONIGHT)) == before

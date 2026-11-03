@@ -6,7 +6,7 @@ from datetime import date
 
 import pytest
 
-from habitus.temporal import absolute_slot, episodes_of, merge_starts, occurrence_days, slot_index
+from habitus.temporal import absolute_slot, episodes_of, merge_starts, occurrence_days, slot_floor, slot_index
 from tests.unit.temporal.fixtures import at, record
 
 WED = date(2026, 1, 7)
@@ -50,6 +50,19 @@ def test_slot_arithmetic() -> None:
     assert absolute_slot(at(WED, 0, 0), slot_minutes=15) == WED.toordinal() * 96
 
 
+def test_slot_floor_uses_the_temporal_slot_arithmetic() -> None:
+    """槽起点 = 本地时分 // slot_minutes，与 ``slot_index`` 同一公式；秒与微秒抹掉，时区保留。"""
+
+    moment = at(WED, 16, 41).replace(second=37, microsecond=5)
+    assert slot_floor(moment, slot_minutes=15) == at(WED, 16, 30)
+    assert slot_floor(moment, slot_minutes=15).tzinfo == moment.tzinfo
+    for bad in (7, 0):
+        with pytest.raises(ValueError, match="divisor of 1440"):
+            slot_floor(moment, slot_minutes=bad)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        slot_floor(moment.replace(tzinfo=None), slot_minutes=15)
+
+
 def test_series_gives_one_kinds_timeline_without_pending_records() -> None:
     from dataclasses import replace
 
@@ -59,3 +72,10 @@ def test_series_gives_one_kinds_timeline_without_pending_records() -> None:
     found = series([record(at(WED, 17)), record(at(WED, 18), "s-k0002"), pending], cutoff=date(2026, 1, 8))
     assert [item.kind_token for item in found.records_of("s-k0001")] == ["s-k0001"]
     assert found.records_of("s-待定") == ()
+
+
+def test_starts_exactly_one_window_apart_are_one_occurrence() -> None:
+    """合并窗口是"隔不到或恰好 45 分钟"：17:00 与 17:45 相隔恰好 2700 秒，合成一次。"""
+
+    day = date(2026, 8, 17)
+    assert merge_starts([at(day, 17, 0), at(day, 17, 45)], window_seconds=2700) == ((0, 1),)

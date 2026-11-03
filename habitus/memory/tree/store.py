@@ -92,16 +92,8 @@ class MemoryTree:
 
     @property
     def visibility_journal(self) -> _VisibilityJournal | None:
-        """返回由事务层绑定的可见性日志，不赋予物理存储提交职责。"""
+        """返回由事务层绑定的可见性日志，不赋予物理存储提交职责；未绑定时为 ``None``，公开读取不跨事务核对。"""
 
-        if self._visibility_journal is None:
-            conventional_root = self.root.parent / "workflow" / "transactions"
-            from habitus.memory.editor.transaction_log import MemoryTransactionJournal
-
-            self._visibility_journal = MemoryTransactionJournal(
-                conventional_root,
-                self.document_codec,
-            )
         return self._visibility_journal
 
     def bind_visibility_journal(self, journal: object) -> None:
@@ -118,6 +110,14 @@ class MemoryTree:
         if current_root is not None and current_root != root:
             raise ValueError("memory tree is already bound to another visibility journal")
         self._visibility_journal = cast(_VisibilityJournal, journal)
+
+    def require_outside(self, path: str | Path) -> Path:
+        """把树外工作目录（事务日志、生命周期状态）规范成绝对路径；落在 L2 记忆树内的位置一律拒绝。"""
+
+        resolved = Path(path).expanduser().resolve(strict=False)
+        if resolved.is_relative_to(self.root):
+            raise ValueError("workflow state must be stored outside the L2 memory tree")
+        return resolved
 
     def initialize(self) -> Path:
         """只创建静态目录；没有真实内容时不创建空的 profile.md。"""

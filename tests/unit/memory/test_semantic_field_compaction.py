@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from habitus.memory.compaction import (
+from habitus.memory.field_ops import (
     SemanticFieldMergePolicy,
     SemanticFieldOperationBatch,
     SemanticFieldOperationError,

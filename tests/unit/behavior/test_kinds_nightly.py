@@ -250,3 +250,28 @@ def test_entries_gone_from_the_tree_leave_the_pool_when_rechecked() -> None:
         entries=entries,
     )
     assert result.missing == {"behavior://s-gone"}
+
+
+def test_old_entries_rechecked_before_are_not_recalled_into_a_second_recheck() -> None:
+    """G04（段 4 E19 探针）：重判只问一次——新类建出来后按成员召回旧条目时，以前重判过的不再交白天归类重判（不多调模型）。"""
+
+    similar = [
+        replace(_old(index, "统计代码行数", f"数 MemoryOS 的统计代码行数（第 {index} 次）"), rechecked=True)
+        for index in range(6)
+    ]
+    entries = PendingPool({entry.occurrence: entry for entry in (*pool().entries.values(), *similar)})
+    result, provider = grow(
+        {
+            "groups": [
+                group(["P1", "P2", "P3", "P4", "P6", "P7", "P8", "P9"], "统计代码规模"),
+                group(["P5"], "核对时间"),
+            ]
+        },
+        answer(("R1", "C3", None), ("R2", "C3", None)),
+        entries=entries,
+        config=BehaviorKindConfig(recall_per_entry=1),
+    )
+    assert provider.calls == 1  # 只有聚组那一次
+    record = result.record
+    assert record is not None
+    assert {"behavior://old0004", "behavior://old0005"}.isdisjoint(move.occurrence for move in record.moves)

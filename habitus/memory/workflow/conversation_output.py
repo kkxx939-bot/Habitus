@@ -10,17 +10,15 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from habitus.conversation.source.model import (
-    ConversationSourceEnvelope,
-    ConversationSourceError,
-    require_sha256,
-    source_timestamp,
-)
-from habitus.conversation.source.output_files import discard_output_directory
-from habitus.conversation.source.receipt import (
+from habitus.conversation.source import (
     ConsumerOutputRef,
     ConversationSourceConsumer,
+    ConversationSourceEnvelope,
+    ConversationSourceError,
     conversation_consumer_output_id,
+    discard_output_directory,
+    require_sha256,
+    source_timestamp,
 )
 from habitus.foundation.integrity import canonical_digest, canonical_json, canonicalize
 from habitus.infrastructure.store.filesystem import (
@@ -415,6 +413,8 @@ class MemoryConversationOutputStore:
             )
         except FileNotFoundError:
             return None
+        except DurablePathIntegrityError as exc:
+            raise ConversationSourceError("memory output exceeds its read bound or is not a regular file") from exc
         try:
             output = MemoryConversationOutput.from_dict(json.loads(encoded))
         except (UnicodeDecodeError, json.JSONDecodeError, ConversationSourceError) as exc:

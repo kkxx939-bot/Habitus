@@ -8,13 +8,13 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from habitus.config.observability import ObservabilityConfig, ObservabilityTracingConfig
 from habitus.foundation.observability import (
     ObservationEvent,
     ObservationStatus,
     bind_observation_context,
 )
 from habitus.infrastructure.observability import AuditStore, JSONLogFormatter, ManagedObservability
+from habitus.infrastructure.observability.config import ObservabilityConfig, ObservabilityTracingConfig
 
 UTC = UTC
 
@@ -234,3 +234,34 @@ def test_managed_observability_preserves_business_error_when_span_exit_fails(
             raise ValueError("business failed")
 
     assert managed.health() == ("degraded", "otel_span_exit:RuntimeError")
+
+
+def test_json_logging_keeps_the_last_line_of_an_overlong_stack() -> None:
+    """B24：超长消息原先只截前 2000 字符，深栈末行的异常（真正原因）被截掉；现在保留头尾、总长不超过上限。"""
+
+    frames = "".join(
+        f'  File "/srv/app/habitus/module_{index}.py", line {index}, in handler_{index}\n    result = step_{index}(payload)\n'
+        for index in range(40)
+    )
+    stack = (
+        "provider check failed\nTraceback (most recent call last):\n"
+        f"{frames}RuntimeError: provider check failed: 401 Unauthorized"
+    )
+    record = logging.LogRecord(
+        name="habitus.test",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="%s",
+        args=(stack,),
+        exc_info=None,
+    )
+
+    message = json.loads(JSONLogFormatter().format(record))["message"]
+
+    assert len(stack) > 2_000
+    assert len(message) <= 2_000
+    assert message.startswith("provider check failed Traceback (most recent call last):")
+    assert message.endswith("RuntimeError: provider check failed: 401 Unauthorized")
+    assert " … " in message
+    assert "/srv/app" not in message

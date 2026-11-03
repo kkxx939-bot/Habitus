@@ -212,6 +212,9 @@ def test_reminder_to_reply_to_doing_closes_the_loop(  # noqa: PLR0913 - 四条�
     assert len(provider.prompts) == 1
     # 出口先按固定选项写了回话：正 / 负关了、这一轮不再带；中（知道了）与自己填的还开着，这一轮带着、交给模型判
     assert ("【还开着的提醒】" in provider.prompts[0]) == (judged is not None)
+    # 他那天开过会话（15:11 这一轮「看报错」，这里的会话 lane 写在另一棵树上，补一条到结算读的树）：会话 lane 一整天没有会话
+    # 才算没在看（裁定 89 第 2 条），这里要的是"在看、没做"
+    publish(site.behavior_tree, DAY, "看报错", 15, 11, kind="看报错")
     if done is not None:
         publish(site.behavior_tree, DAY, "订酒店", *done, kind="订酒店")
     # 之后每拍：说出口了就不再动它；过了最晚时限也不记「宿主没取」

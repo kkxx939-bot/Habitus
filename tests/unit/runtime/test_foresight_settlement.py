@@ -12,7 +12,7 @@ import pytest
 from habitus.conditions import LocalCalendar
 from habitus.foresight import Evidence, Tolerance
 from habitus.foresight.edges import PastMoment
-from habitus.foresight.ledger import Delivery, Expectation, Response
+from habitus.foresight.ledger import Delivery, Expectation, Response, Settlement
 from habitus.foundation.observability import ObservationEvent
 from habitus.runtime.foresight import ForesightReadSide
 from habitus.runtime.foresight_history_store import HistoryStore
@@ -70,6 +70,13 @@ def stage(tmp_path, closed: tuple[date, ...], *, observer: Recorder | None = Non
     return site, ledger, settlement
 
 
+def a_session(site, *days: date) -> None:  # type: ignore[no-untyped-def]
+    """那几天开过会话（做的是别的事，06:00 看新闻）：会话 lane 一整天没有会话算没在看（裁定 89 第 2 条），要"在看、没做"就得有它。"""
+
+    for day in days:
+        publish(site.behavior_tree, day, "看新闻", 6, 0, kind="看新闻")
+
+
 def test_only_expectations_whose_deadline_day_is_closed_are_settled(tmp_path) -> None:
     site, ledger, settlement = stage(tmp_path, closed=(DAY,))
     formed = at(DAY, 14, 7)
@@ -119,6 +126,7 @@ def test_a_reminded_occurrence_is_settled_as_after_the_reminder(tmp_path) -> Non
 
 def test_overdue_pending_is_ruled_caught_up_once_a_later_closed_day_shows_the_occurrence(tmp_path) -> None:
     site, ledger, settlement = stage(tmp_path, closed=(DAY, DAY + timedelta(days=1)))
+    a_session(site, DAY)  # 那天在看、没做：真漏做才谈得上补做（整天没会话是中性，不进待裁）
     formed = at(DAY, 14, 7)
     ledger.record_expectation(expectation("hotel", HOTEL, formed, window_minutes=(4, 51), deadline_hours=3))
     publish(site.behavior_tree, DAY + timedelta(days=1), "订酒店", 9, 0, kind="订酒店")
@@ -158,6 +166,7 @@ def test_a_catch_up_is_only_before_the_next_chance_of_the_same_account(tmp_path)
 
 def test_another_accounts_next_chance_does_not_block_a_catch_up(tmp_path) -> None:
     site, ledger, settlement = stage(tmp_path, closed=(DAY, DAY + timedelta(days=1)))
+    a_session(site, DAY)
     ledger.record_expectation(expectation("hotel", HOTEL, at(DAY, 14, 7), window_minutes=(4, 51), deadline_hours=3))
     morning = at(DAY + timedelta(days=1), 8, 0)
     ledger.record_expectation(
@@ -189,6 +198,92 @@ def test_a_corrupt_ledger_file_is_skipped_and_counted_not_fatal(tmp_path) -> Non
     assert report.settled == 0
     (event,) = recorder.events
     assert event.status.value == "success" and event.attributes["unreadable"] == 1
+
+
+def _two_days(tmp_path, closed: list[date]):  # type: ignore[no-untyped-def]
+    """D 日 hotel（当天的最晚时限）与 card（最晚时限在次日），次日 nextday；定稿日按 ``closed`` 的现状给。"""
+
+    site = Site(tmp_path, now=at(DAY, 23, 0))
+    read_side = ForesightReadSide(site.behavior_tree, SUBJECT, LocalCalendar(), ZoneInfo("Asia/Shanghai"))
+    ledger = ForesightLedgerStore(tmp_path / "ledger")
+    recorder = Recorder()
+    settlement = SettlementStage(
+        ledger,
+        read_side,
+        closed_days=lambda: tuple(closed),
+        current=lambda token: (token,),
+        migrating=lambda: False,
+        evidence=Evidence(alpha=0.05, half_life=8.0),
+        observer=recorder,
+        clock=lambda: at(DAY + timedelta(days=2), 4, 0).astimezone(UTC),
+    )
+    hotel = expectation("hotel", HOTEL, at(DAY, 14, 7), window_minutes=(4, 51), deadline_hours=3)
+    card = expectation("card", CARD, at(DAY, 14, 7), window_minutes=(60 * 20, 60 * 21), deadline_hours=30)
+    following = expectation(
+        "nextday", CARD, at(DAY + timedelta(days=1), 9, 0), window_minutes=(0, 30), deadline_hours=3
+    )
+    for item in (hotel, card, following):
+        ledger.record_expectation(replace(item, trigger_instance=f"behavior://{item.expectation_id}.md"))
+    ledger.record_delivery(DAY, Delivery("hotel", at(DAY, 14, 12), 1, True, "说了", 1.0, "要订酒店吗"))
+    publish(site.behavior_tree, DAY, "订酒店", 14, 30, kind="订酒店")
+    return ledger, settlement, recorder
+
+
+def _corrupt(path, how: str) -> None:  # type: ignore[no-untyped-def]
+    path.write_text({"half": '{"record": "settle', "old_schema": '{"schema_version": 8}', "not_object": "[]"}[how])
+
+
+@pytest.mark.parametrize("how", ["half", "old_schema", "not_object"])
+def test_an_unreadable_settlement_file_is_not_settled_again_and_later_days_still_settle(tmp_path, how) -> None:
+    """段 6 Q1：结算文件读不出来时，当成没结、再结一遍，结出的内容（结算时刻不同）必然和盘上的不一样——同名不同内容抛，
+    按日子升序走到这一天就停，后面的日子、裁决、``mark_final`` 永远做不到。结算文件在就算结过：不重结、不抛、计入观测。"""
+
+    closed = [DAY]
+    ledger, settlement, recorder = _two_days(tmp_path, closed)
+    settlement.run_once()
+    assert [item.expectation_id for item in ledger.settlements_on(DAY)] == ["hotel"]
+    hotel = next(item for item in ledger.expectations_on(DAY) if item.expectation_id == "hotel")
+    facts = len(ledger.facts_of(hotel.account))
+    path = tmp_path / "ledger" / "settlements" / "2026" / "12" / "10" / "hotel.json"
+    _corrupt(path, how)
+    closed.append(DAY + timedelta(days=1))
+    for _night in range(2):
+        settlement.run_once()  # 不抛
+    assert ledger.unsettled_expectations(DAY) == () and ledger.unsettled_expectations(DAY + timedelta(days=1)) == ()
+    assert {item.expectation_id for item in ledger.settlements_on(DAY + timedelta(days=1))} == {"nextday"}
+    assert ledger.open_days() == ()
+    assert len(ledger.facts_of(hotel.account)) == facts  # 坏文件那一条不重复写事实
+    assert recorder.events[1].attributes["unreadable"] >= 1 and recorder.events[1].status.value == "success"
+
+
+@pytest.mark.parametrize("bad", ["fact", "feedback"])
+def test_an_unreadable_fact_or_feedback_left_by_a_crash_does_not_wedge_the_nights(tmp_path, monkeypatch, bad) -> None:
+    """段 6 Q1 同根：写了事实（和提醒反馈）、还没写结算就断了，那份事实 / 反馈又坏了——重结时同名的那一份写不进去。
+    坏的那一份不重写、不抛，结算照写，后面的日子照常结。"""
+
+    closed = [DAY, DAY + timedelta(days=1)]
+    ledger, settlement, _recorder = _two_days(tmp_path, closed)
+    record = ledger.record_settlement
+
+    def crash(item: Settlement) -> bool:
+        if item.expectation_id == "hotel":
+            raise OSError("disk went away")
+        return record(item)
+
+    monkeypatch.setattr(ledger, "record_settlement", crash)
+    with pytest.raises(OSError):
+        settlement.run_once()
+    monkeypatch.undo()
+    hotel = next(item for item in ledger.expectations_on(DAY) if item.expectation_id == "hotel")
+    directory = ledger._account_dir(hotel.account) / "facts" if bad == "fact" else ledger._unit_dir(HOTEL) / "feedback"
+    (path,) = sorted(directory.glob("hotel--*.json"))
+    path.write_text('{"record": "fa', encoding="utf-8")
+    for _night in range(2):
+        settlement.run_once()  # 不抛
+    assert path.read_text(encoding="utf-8") == '{"record": "fa'  # 坏的那一份不被覆盖
+    assert {item.expectation_id for item in ledger.settlements_on(DAY)} == {"hotel", "card"}
+    assert {item.expectation_id for item in ledger.settlements_on(DAY + timedelta(days=1))} == {"nextday"}
+    assert ledger.open_days() == ()
 
 
 def test_a_crash_between_the_facts_and_the_settlement_is_healed_on_the_next_night(tmp_path, monkeypatch) -> None:
@@ -394,8 +489,9 @@ def test_a_miss_under_an_observation_gap_is_neutral_not_bad(tmp_path) -> None:
     assert [item.outcome for item in ledger.settlements_on(DAY)] == ["过期待决"]
     (fact,) = ledger.facts_of(hotel.account)
     assert (fact.kind, fact.strength) == ("过期待决", 0.0)
-    # 没有空白的另一条照常是一笔坏
-    _site2, ledger2, settlement2 = stage(tmp_path / "b", closed=(DAY,))
+    # 没有空白、那天开过会话的另一条照常是一笔坏
+    site2, ledger2, settlement2 = stage(tmp_path / "b", closed=(DAY,))
+    a_session(site2, DAY)
     ledger2.record_expectation(hotel)
     settlement2.run_once()
     (plain,) = ledger2.facts_of(hotel.account)
@@ -409,6 +505,7 @@ def test_the_nightly_diagnosis_reads_each_miss_from_the_ledger_and_the_tree(tmp_
     from habitus.foresight.diagnosis import UNEXPLAINED, UNSEEN
 
     site, ledger, settlement = stage(tmp_path, closed=(DAY,))
+    a_session(site, DAY)
     settlement.tolerance = Tolerance(line=2 / 3)
     said = expectation("said", HOTEL, at(DAY, 14, 7), window_minutes=(4, 51), deadline_hours=3)
     ledger.record_expectation(said)
@@ -505,6 +602,7 @@ def test_resettle_keeps_the_opportunity_time_and_diagnosis_follows(tmp_path) -> 
 
     now = at(DAY + timedelta(days=2), 4, 0)
     site, ledger, settlement = _resettle_stage(tmp_path, (DAY,), now=now)
+    a_session(site, DAY)
     hotel = expectation("hotel", HOTEL, at(DAY, 14, 7), window_minutes=(4, 51), deadline_hours=3)
     ledger.record_expectation(hotel)
     ledger.record_delivery(DAY, Delivery("hotel", at(DAY, 14, 15), 1, True, "说了", 1.0, "要订酒店吗"))
@@ -531,6 +629,7 @@ def test_resettle_back_to_overdue_reopens_a_final_day_so_a_catch_up_can_still_be
 
     later = DAY + timedelta(days=1)
     site, ledger, settlement = _resettle_stage(tmp_path, (DAY, later), now=at(DAY + timedelta(days=2), 4, 0))
+    a_session(site, DAY, later)
     hotel = expectation("hotel", HOTEL, at(DAY, 14, 7), window_minutes=(4, 51), deadline_hours=3)
     ledger.record_expectation(hotel)
     ledger.record_settlement(Settlement("hotel", HOTEL, DAY, at(DAY, 23, 0), "准时", "behavior://ghost.md"))
@@ -684,6 +783,7 @@ def test_a_spoken_miss_lands_one_unit_weight_bad_on_the_units_feedback(tmp_path)
     from habitus.foresight.ledger import Response
 
     site, ledger, settlement = _resettle_stage(tmp_path, (DAY,), now=at(DAY + timedelta(days=1), 4, 0))
+    a_session(site, DAY)
     spoken = expectation("spoken", HOTEL, at(DAY, 14, 7), window_minutes=(4, 51), deadline_hours=3)
     ledger.record_expectation(spoken)
     ledger.record_delivery(DAY, Delivery("spoken", at(DAY, 14, 15), 1, True, "说了", 1.0, "要订酒店吗"))
@@ -695,7 +795,8 @@ def test_a_spoken_miss_lands_one_unit_weight_bad_on_the_units_feedback(tmp_path)
     # 回了中、没做：不写；回了负：坏、带方向
     for identity, polarity, expected in (("later", "中", None), ("no", "负", False)):
         root = tmp_path / identity
-        _site, ledger2, settlement2 = _resettle_stage(root, (DAY,), now=at(DAY + timedelta(days=1), 4, 0))
+        site2, ledger2, settlement2 = _resettle_stage(root, (DAY,), now=at(DAY + timedelta(days=1), 4, 0))
+        a_session(site2, DAY)  # 回了话的那天当然开过会话
         item = replace(spoken, expectation_id=identity, trigger_instance=f"behavior://{identity}.md")
         ledger2.record_expectation(item)
         ledger2.record_delivery(DAY, Delivery(identity, at(DAY, 14, 15), 1, True, "说了", 1.0, "要订酒店吗"))
@@ -719,6 +820,46 @@ def test_a_spoken_miss_lands_one_unit_weight_bad_on_the_units_feedback(tmp_path)
     (member_fact,) = ledger3.facts_of(member.account)
     assert (member_fact.kind, member_fact.strength) == ("提醒后发生", 0.0)
     assert [f.expectation_id for f in ledger3.feedback_of(HOTEL)] == ["basis"]
+
+
+@pytest.mark.parametrize(("polarity", "expected"), [("已做", ("过期待决", 0.0)), ("负", ("后补", 1.0))])
+def test_a_said_done_reply_is_neutral_for_the_basis_and_the_unit_members_it_speaks_for(
+    tmp_path, polarity: str, expected: tuple[str, float]
+) -> None:
+    """裁定 91 第 3 条②（落实 54 第 3 条③）：依据说出口、他回「已做」、到时限没看到做 → 依据与「单元已选」引它的那条，账上都是
+    中性（强度 0、不算机会），提醒反馈不写，单元历史那一刻看不到，也不进待裁（之后看到做了不改判后补）；重结不改回来。
+    对照：回了负照旧都是坏（第二天补做了，裁成后补、强度 1）、反馈一笔坏。"""
+
+    from habitus.foresight import current_facts as live
+    from habitus.foresight.clock import is_opportunity
+    from habitus.foresight.history import record_of
+
+    site, ledger, settlement = _resettle_stage(
+        tmp_path, (DAY, DAY + timedelta(days=1)), now=at(DAY + timedelta(days=2), 4, 0)
+    )
+    a_session(site, DAY, DAY + timedelta(days=1))
+    basis = expectation("basis", HOTEL, at(DAY, 14, 7), window_minutes=(4, 51), deadline_hours=3)
+    member = replace(basis, expectation_id="member", source="日子", trigger="interval", trigger_instance="x@2026-12-10")
+    ledger.record_expectation(basis)
+    ledger.record_expectation(member)
+    ledger.record_delivery(
+        DAY, Delivery("member", at(DAY, 14, 10), 1, False, "单元已选", 0.0, evidence=("单元:basis",))
+    )
+    ledger.record_delivery(DAY, Delivery("basis", at(DAY, 14, 15), 1, True, "说了", 1.0, "要订酒店吗"))
+    ledger.record_response(DAY, Response("basis", at(DAY, 14, 20), polarity, "conv#1-3"))
+    publish(site.behavior_tree, DAY + timedelta(days=1), "订酒店", 9, 0, kind="订酒店")  # 第二天看到做了
+    report = settlement.run_once()
+    assert report.outcomes == {"过期待决": 2}
+    for item in (basis, member):
+        (fact,) = live(ledger.facts_of(item.account))
+        assert (fact.kind, fact.strength) == expected
+        assert is_opportunity(fact) is (expected[1] > 0.0)
+        assert record_of(item, fact).came is (None if expected[1] == 0.0 else False)
+    feedback = ledger.feedback_of(HOTEL)
+    assert [(f.good, f.polarity) for f in feedback] == ([] if polarity == "已做" else [(False, "负")])
+    if polarity == "已做":
+        assert ledger.rulings_on(DAY) == ()  # 中性不进待裁
+        assert settlement.resettle([DAY]) == 0
 
 
 def test_a_unit_moment_is_one_miss_not_one_per_input(tmp_path) -> None:
@@ -753,6 +894,7 @@ def test_a_crash_after_the_fact_and_before_the_feedback_fills_in_only_the_feedba
     """说了没做：账上一笔、单元上一笔。账上那笔写了、单元那笔还没写就断——下一晚只补单元那笔，不重算已写的那一笔。"""
 
     site, ledger, settlement = stage(tmp_path, closed=(DAY,))
+    a_session(site, DAY)
     hotel = expectation("hotel", HOTEL, at(DAY, 14, 7), window_minutes=(4, 51), deadline_hours=3)
     ledger.record_expectation(hotel)
     ledger.record_delivery(DAY, Delivery("hotel", at(DAY, 14, 15), 1, True, "说了", 1.0, "要订酒店吗"))
@@ -882,6 +1024,7 @@ def test_a_feedback_already_written_is_not_rewritten_when_a_late_response_would_
     账本只增不改——已经写过的那笔不再写，整晚照常结完，不卡死。"""
 
     site, ledger, settlement = _resettle_stage(tmp_path, (DAY,), now=at(DAY + timedelta(days=1), 4, 0))
+    a_session(site, DAY)
     hotel = expectation("hotel", HOTEL, at(DAY, 14, 7), window_minutes=(4, 51), deadline_hours=3)
     ledger.record_expectation(hotel)
     ledger.record_delivery(DAY, Delivery("hotel", at(DAY, 14, 15), 1, True, "说了", 1.0, "要订酒店吗"))
@@ -944,3 +1087,107 @@ def test_the_diagnosis_reads_the_unit_history_snapshot_once_not_once_per_miss(tm
     monkeypatch.setattr(settlement.history, "latest", counted)
     assert len(settlement.diagnose(now=now).misses) == days * per_day
     assert calls["n"] == 1
+
+
+def test_an_expectation_formed_late_still_sees_what_happened_from_its_observed_from_day(tmp_path) -> None:
+    """段 6 Q9：结算取行从 ``observed_from`` 那天起（与诊断、``covers`` 同口径）。原来从形成那天起：服务停了两天、周五才形成的
+    「第 2–7 天」预期（起算是周三零点）看不到周三那次发生，结成过期待决；重结那条路同样。"""
+
+    monday = date(2026, 12, 7)
+    wednesday, friday = monday + timedelta(days=2), monday + timedelta(days=4)
+    site = Site(tmp_path, now=at(monday, 23, 0))
+    read_side = ForesightReadSide(site.behavior_tree, SUBJECT, LocalCalendar(), ZoneInfo("Asia/Shanghai"))
+    ledger = ForesightLedgerStore(tmp_path / "ledger")
+    late = Expectation(
+        expectation_id="late",
+        kind_token=HOTEL,
+        day=friday,
+        formed_at=at(friday, 8, 0),
+        source="事件",
+        trigger="session|s-k0001|s-k0002|days_2_7",
+        trigger_instance="2026-12-07T01:00:00+00:00",
+        window=(at(wednesday, 9, 0), at(monday + timedelta(days=7), 18, 0)),
+        deadline=at(monday + timedelta(days=8), 0, 0),
+        basis=(),
+        opportunities=10,
+        hits=8,
+        observed_from=at(wednesday, 0, 0),
+    )
+    ledger.record_expectation(late)
+    uri = publish(site.behavior_tree, wednesday, "订酒店", 10, 0, kind="订酒店")
+    closed = tuple(monday + timedelta(days=offset) for offset in range(10))
+    settlement = SettlementStage(
+        ledger,
+        read_side,
+        closed_days=lambda: closed,
+        current=lambda token: (token,),
+        migrating=lambda: False,
+        evidence=Evidence(alpha=0.05, half_life=8.0),
+        clock=lambda: at(monday + timedelta(days=9), 4, 0).astimezone(UTC),
+    )
+    settlement.run_once()
+    (settled,) = ledger.settlements_on(friday)
+    assert (settled.outcome, settled.occurrence_uri) == ("准时", uri)
+    assert settlement.resettle([friday]) == 0  # 重结那条路读同一截：结论一样，不改判
+
+
+# --- 段 6 Q18：存活变异补的断言 ----------------------------------------------------------------------------------
+
+
+def test_an_overdue_is_not_ruled_until_a_day_after_its_deadline_day_is_closed(tmp_path) -> None:
+    """后补要等最晚时限那天之后的日子定稿才裁（M54：``<=`` 改 ``<``）：最晚时限那天晚上的补做，那天定稿时不裁。"""
+
+    closed = [DAY]
+    site, ledger, settlement = stage(tmp_path, closed=())
+    settlement.closed_days = lambda: tuple(closed)
+    ledger.record_expectation(expectation("hotel", HOTEL, at(DAY, 14, 7), window_minutes=(4, 51), deadline_hours=3))
+    publish(site.behavior_tree, DAY, "订酒店", 20, 0, kind="订酒店")  # 最晚时限 17:07 之后、同一天
+    first = settlement.run_once()
+    assert first.outcomes == {"过期待决": 1} and first.rulings == 0 and ledger.rulings_on(DAY) == ()
+
+
+def test_a_day_with_an_overdue_still_waiting_for_its_ruling_is_not_final(tmp_path, monkeypatch) -> None:
+    """过期待决以后还可能被裁成后补（``ruling_moot`` / ``ruling_settled`` 都说还要等）：那一天不标结完，之后的补做裁得到
+    （M55：``mark_final`` 不看等裁决——那天标了结完、之后再不读它，补做永远裁不到、账上留着坏）。"""
+
+    import habitus.runtime.foresight_settlement as module
+
+    monkeypatch.setattr(module, "ruling_moot", lambda item, table: False)
+    monkeypatch.setattr(module, "ruling_settled", lambda *args: False)
+    closed = [DAY, DAY + timedelta(days=1)]
+    site, ledger, settlement = stage(tmp_path, closed=())
+    settlement.closed_days = lambda: tuple(closed)
+    a_session(site, DAY)
+    ledger.record_expectation(expectation("hotel", HOTEL, at(DAY, 14, 7), window_minutes=(4, 51), deadline_hours=3))
+    settlement.run_once()
+    assert [item.outcome for item in ledger.settlements_on(DAY)] == ["过期待决"] and not ledger.is_final(DAY)
+    publish(site.behavior_tree, DAY + timedelta(days=2), "订酒店", 10, 0, kind="订酒店")
+    closed.append(DAY + timedelta(days=2))
+    assert settlement.run_once().rulings == 1 and [item.ruling for item in ledger.rulings_on(DAY)] == ["后补"]
+
+
+def test_the_strength_of_a_settlement_reads_only_what_was_written_by_its_deadline(tmp_path) -> None:
+    """强度的历史只取最晚时限之前已经写下的（哪一晚结、断没断过重来，算出的都是同一份；M58：改取"此刻之前"）：最晚时限之后
+    才写下的一条改判不进这一次的历史。"""
+
+    from habitus.foresight.ledger import AccountFact
+
+    site, ledger, settlement = stage(tmp_path, closed=(DAY,))
+    formed = at(DAY, 14, 7)
+    item = expectation("hotel", HOTEL, formed, window_minutes=(15, 51), deadline_hours=3)
+    ledger.record_expectation(item)
+    account = item.account
+    ledger.append_fact(AccountFact(account, formed - timedelta(days=14), True, 1.0, "准时", "w2", offset_minutes=0))
+    ledger.append_fact(
+        AccountFact(account, formed - timedelta(days=7), True, 1.0, "晚了但做了", "w1", offset_minutes=30)
+    )
+    # 最晚时限之后、结算之前写下的改判：把上周那次改成了准时
+    revised = AccountFact(
+        account, formed - timedelta(days=7), True, 1.0, "准时", "w1", offset_minutes=0, written_at=at(DAY, 22, 0)
+    )
+    ledger.append_fact(revised)
+    publish(site.behavior_tree, DAY, "订酒店", 14, 12, kind="订酒店")  # 时窗 14:22 起：早到 10 分钟
+    settlement.run_once()
+    fact = next(found for found in ledger.facts_of(account) if found.expectation_id == "hotel")
+    assert (fact.kind, fact.offset_minutes) == ("早到", -10)
+    assert fact.strength == 0.5  # 历史 [0, 30]：偏得不小于 10 分钟的一半；改判写在最晚时限之后，不算

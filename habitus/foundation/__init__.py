@@ -3,10 +3,7 @@
 from habitus.foundation.ids import canonical_path_identity, require_safe_path_segment
 from habitus.foundation.observability import (
     CompositeObserver,
-    MetricRegistry,
-    MetricUpdate,
     NullObserver,
-    ObservabilitySnapshot,
     ObservationContext,
     ObservationEvent,
     ObservationStatus,
@@ -15,15 +12,11 @@ from habitus.foundation.observability import (
     bind_observation_context,
     current_observation_context,
     observe_operation,
-    project_metric_updates,
 )
 
 __all__ = [
     "CompositeObserver",
-    "MetricRegistry",
-    "MetricUpdate",
     "NullObserver",
-    "ObservabilitySnapshot",
     "ObservationContext",
     "ObservationEvent",
     "ObservationStatus",
@@ -33,6 +26,5 @@ __all__ = [
     "canonical_path_identity",
     "current_observation_context",
     "observe_operation",
-    "project_metric_updates",
     "require_safe_path_segment",
 ]

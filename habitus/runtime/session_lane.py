@@ -45,6 +45,7 @@ from habitus.conversation.source import (
     ConversationSourceEnvelope,
 )
 from habitus.foundation.integrity import canonical_digest, canonical_json
+from habitus.pre.conversation import parse_question_replies
 from habitus.pre.conversation.adapters import ConversationAdapterRegistry
 from habitus.pre.conversation.messages import (
     ConversationMessage,
@@ -93,15 +94,18 @@ def session_turns(
 
 
 def _message(message: ConversationMessage) -> SessionMessage:
+    content = message.content if isinstance(message.content, str) else canonical_json(message.content)
+    replies = parse_question_replies(content) if message.role is ConversationMessageRole.PROMPT else ()
     return SessionMessage(
         sequence=message.sequence,
         occurred_at=message.occurred_at,
         role=SessionMessageRole(ConversationMessageRole(message.role).value),
-        content=message.content if isinstance(message.content, str) else canonical_json(message.content),
+        content=content,
         tool_name=message.tool_name,
         tool_call_id=message.tool_call_id,
         failed=message.tool_status is ConversationToolResultStatus.ERROR,
         mid_turn=message.mid_turn,
+        answers=tuple((reply.question, reply.answer) for reply in replies),
     )
 
 

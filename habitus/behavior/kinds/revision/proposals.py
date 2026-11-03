@@ -8,17 +8,16 @@ from typing import Any
 
 from habitus.behavior.kinds.ids import ClassId
 from habitus.behavior.kinds.model import BehaviorClass, BehaviorKindError, ClassOrigin, Exclusion
-from habitus.behavior.kinds.revision.prompt import NEW
 
 
 @dataclass(frozen=True)
 class Draft:
-    """一份还没分配编号的条目；``excludes`` 的去向可以是 ``NEW``（拆分时指向拆出的新类）。"""
+    """一份还没分配编号的条目；``excludes`` 的去向是已有的类或空（拆出的新类由 ``reviser`` 拆分时按新编号写进原类）。"""
 
     name: str
     criterion: str
     reminder: str
-    excludes: tuple[tuple[str, ClassId | str | None], ...]
+    excludes: tuple[tuple[str, ClassId | None], ...]
     examples: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -28,11 +27,8 @@ class Draft:
         if len(set(self.examples)) != len(self.examples):
             raise BehaviorKindError("draft examples repeat")
 
-    def to_class(self, class_id: ClassId, *, origin: ClassOrigin, new_id: ClassId | None = None) -> BehaviorClass:
-        excludes = tuple(
-            Exclusion(text, new_id if target == NEW else target if isinstance(target, ClassId) else None)
-            for text, target in self.excludes
-        )
+    def to_class(self, class_id: ClassId, *, origin: ClassOrigin) -> BehaviorClass:
+        excludes = tuple(Exclusion(text, target) for text, target in self.excludes)
         return BehaviorClass(
             id=class_id,
             name=self.name,
@@ -118,19 +114,14 @@ def _proposal(item: Mapping[str, Any], classes: Mapping[str, BehaviorClass], *, 
         raise BehaviorKindError(f"unknown proposal kind {kind!r} (splits are decided by grouping, not proposed)")
     if item["draft"] is None:
         raise BehaviorKindError("revise needs a draft")
-    draft = _draft(item["draft"], classes, max_examples=max_examples)
-    if any(target == NEW for _, target in draft.excludes):
-        raise BehaviorKindError("a revise may not point an exclusion at NEW")
-    return ReviseProposal(source, draft, reason)
+    return ReviseProposal(source, _draft(item["draft"], classes, max_examples=max_examples), reason)
 
 
 def _draft(raw: Mapping[str, Any], classes: Mapping[str, BehaviorClass], *, max_examples: int) -> Draft:
-    excludes: list[tuple[str, ClassId | str | None]] = []
+    excludes: list[tuple[str, ClassId | None]] = []
     for exclusion in raw["excludes"]:
         target = exclusion["goes_to"]
-        excludes.append(
-            (str(exclusion["text"]).strip(), NEW if target == NEW else classes[target].id if target else None)
-        )
+        excludes.append((str(exclusion["text"]).strip(), classes[target].id if target else None))
     return Draft(
         name=str(raw["name"]).strip(),
         criterion=str(raw["criterion"]).strip(),

@@ -1,10 +1,12 @@
 """Conversation 完整轮次提交、语义切段与大工具结果降载测试。"""
 
+import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
 
+from habitus.foundation.integrity import canonical_json
 from habitus.memory.conversation import (
     ConversationBoundaryHints,
     ConversationMessageChunker,
@@ -224,6 +226,71 @@ def test_embedding_distance_ranks_safe_boundaries_within_the_same_structure_leve
     assert semantic.embedding_fingerprint == "embedding-v1"
 
 
+def test_a_strong_semantic_hint_never_beats_a_complete_turn_boundary_in_the_window() -> None:
+    chunker = ConversationMessageChunker(max_message_tokens=1_000, token_estimator=lambda _: 10)
+    live = chunker.normalize(
+        ConversationBatch(
+            "conversation-1",
+            tuple(item for turn in range(6) for item in closed_turn(start_sequence=2 * turn, prompt=f"第{turn}轮")),
+        )
+    )
+    planner = ConversationRetentionPlanner(
+        config(
+            keep_recent_turn_count=0,
+            max_segment_tokens=100,
+            retained_message_token_budget=1_000,
+        ),
+        token_estimator=lambda _: 10,
+    )
+    hints = ConversationBoundaryHints(live.digest, (ConversationSemanticBoundary(8, 2.0),), "embedding-v1")
+
+    plan = planner.plan(live, after_turn=True, flush=True, boundary_hints=hints)
+
+    assert plan.through_sequence == 9
+
+
+def test_a_boundary_inside_the_sixty_percent_window_beats_a_better_structure_before_it() -> None:
+    chunker = ConversationMessageChunker(max_message_tokens=1_000, token_estimator=lambda _: 10)
+    messages = [*closed_turn(start_sequence=0, prompt="短轮"), message(2, ConversationMessageRole.PROMPT, "长轮")]
+    sequence = 3
+    for index in range(5):
+        messages.append(
+            message(
+                sequence,
+                ConversationMessageRole.TOOL_CALL,
+                {"i": index},
+                tool_call_id=f"call-{index}",
+                tool_name="read",
+            )
+        )
+        messages.append(
+            message(
+                sequence + 1,
+                ConversationMessageRole.TOOL_RESULT,
+                "ok",
+                tool_call_id=f"call-{index}",
+                tool_name="read",
+                tool_status=ConversationToolResultStatus.COMPLETED,
+                content_mode=ConversationToolResultContentMode.INLINE,
+            )
+        )
+        sequence += 2
+    messages.append(message(sequence, ConversationMessageRole.COMPLETION, "完成"))
+    live = chunker.normalize(ConversationBatch("conversation-1", tuple(messages)))
+    planner = ConversationRetentionPlanner(
+        config(
+            keep_recent_turn_count=0,
+            max_segment_tokens=100,
+            retained_message_token_budget=1_000,
+        ),
+        token_estimator=lambda _: 10,
+    )
+
+    plan = planner.plan(live, after_turn=True, flush=True)
+
+    assert plan.through_sequence == 8
+
+
 def test_tool_result_reducer_keeps_small_result_summarizes_large_text_and_omits_media() -> None:
     original = tool_turn()[2]
     reducer = ConversationToolResultReducer(config())
@@ -392,10 +459,10 @@ def test_a_long_turn_with_his_interjection_is_sealed_in_pieces_that_know_they_ar
     from datetime import date
 
     from habitus.infrastructure.store.contracts import PathLock
-    from habitus.infrastructure.store.locks import ProcessLocalLockStore
     from habitus.memory.conversation import ConversationAddress, ConversationMessageJournal
     from habitus.memory.workflow import ConversationMemoryEnqueuer
     from habitus.memory.workflow.jobs import MemoryJobStore
+    from tests.lock_store import ProcessLocalLockStore
 
     records = [
         _task_started(),
@@ -440,3 +507,314 @@ def test_semantic_cut_points_never_fall_between_a_progress_reply_and_his_interje
     )
     # 中途那句答复（1）后面紧跟的是他插的话：那里不是切点（以前会在 1 后面切开）；其余照旧
     assert [sequence for sequence, _ in _safe_semantic_units(messages)] == [0, 2, 3, 4, 5]
+
+
+def _exchange_enqueuer(tmp_path, **overrides: object):  # type: ignore[no-untyped-def]
+    from datetime import date
+
+    from habitus.infrastructure.store.contracts import PathLock
+    from habitus.memory.conversation import ConversationAddress, ConversationMessageJournal
+    from habitus.memory.workflow import ConversationMemoryEnqueuer
+    from habitus.memory.workflow.jobs import MemoryJobStore
+    from tests.lock_store import ProcessLocalLockStore
+
+    values: dict[str, object] = {
+        "commit_token_threshold": 1,
+        "keep_recent_turn_count": 0,
+        "retained_message_token_budget": 10_000,
+        "max_segment_tokens": 2_000,
+        "max_inline_tool_result_bytes": 64 * 1024,
+        "max_tool_result_summary_chars": 1_000,
+    }
+    values.update(overrides)
+    lock = PathLock(ProcessLocalLockStore())
+    journal = ConversationMessageJournal(tmp_path / "c", lock)
+    planner = ConversationRetentionPlanner(config(**values))
+    enqueuer = ConversationMemoryEnqueuer(journal, MemoryJobStore(tmp_path / "w", lock, memory_root=tmp_path / "m"), planner)
+    return enqueuer, journal, ConversationAddress("conversation-1", date(2026, 10, 26))
+
+
+def _result(sequence: int, call_id: str, content: str) -> ConversationMessage:
+    return message(
+        sequence,
+        ConversationMessageRole.TOOL_RESULT,
+        content,
+        tool_call_id=call_id,
+        tool_name="Read",
+        tool_status=ConversationToolResultStatus.COMPLETED,
+        content_mode=ConversationToolResultContentMode.INLINE,
+    )
+
+
+def test_two_parallel_reads_that_only_together_exceed_a_segment_are_fitted_not_stuck(tmp_path) -> None:
+    """真实形状（05c8b451 第 0 批）：两个并行 Read，单条都不超一段，合起来超；整组抽到放得下，会话照常封存。"""
+
+    enqueuer, journal, address = _exchange_enqueuer(tmp_path)
+    small = "".join(f"import module_{index}\n" for index in range(180))
+    large = "".join(f"line {index} ok\n" for index in range(420))
+    turn = (
+        message(0, ConversationMessageRole.PROMPT, "看一下这两个文件"),
+        message(1, ConversationMessageRole.TOOL_CALL, {"file_path": "/a.py"}, tool_call_id="r1", tool_name="Read"),
+        message(2, ConversationMessageRole.TOOL_CALL, {"file_path": "/b.log"}, tool_call_id="r2", tool_name="Read"),
+        _result(3, "r1", small),
+        _result(4, "r2", large),
+        message(5, ConversationMessageRole.COMPLETION, "看完了。"),
+    )
+    estimate = enqueuer.retention_planner.token_estimator
+    assert estimate(turn[3]) < 2_000 and estimate(turn[4]) < 2_000
+    assert sum(estimate(item) for item in turn[1:5]) > 2_000
+
+    enqueuer.append_and_maybe_enqueue(address, ConversationBatch("conversation-1", turn), after_turn=True)
+
+    assert journal.read_live(address) is None
+    stored = {item.sequence: item for segment in journal.list_history(address) for item in segment.messages}
+    assert stored[3].content_mode is ConversationToolResultContentMode.INLINE
+    assert stored[4].content_mode is ConversationToolResultContentMode.SUMMARIZED
+    assert "工具结果已压缩" in stored[4].content
+    for segment in journal.list_history(address):
+        calls = {item.tool_call_id for item in segment.messages if item.role is ConversationMessageRole.TOOL_CALL}
+        results = {item.tool_call_id for item in segment.messages if item.role is ConversationMessageRole.TOOL_RESULT}
+        assert calls == results
+
+
+def test_one_write_whose_arguments_exceed_a_segment_keeps_the_path_and_seals(tmp_path) -> None:
+    """段 3 C1 形状：一次 Write 写入约 9,200 字，参数单独就超一段；路径原样留、内容抽取，记原参数大小与 sha256。"""
+
+    enqueuer, journal, address = _exchange_enqueuer(tmp_path, max_segment_tokens=12_000, max_tool_result_summary_chars=4_000)
+    document = "这是一段很长的中文设计文档内容，用来写入文件。" * 400
+    arguments = {"file_path": "docs/plan.md", "content": document}
+    turn = (
+        message(0, ConversationMessageRole.PROMPT, "把方案写进 docs/plan.md"),
+        message(1, ConversationMessageRole.TOOL_CALL, arguments, tool_call_id="w1", tool_name="Write"),
+        replace(_result(2, "w1", "File created successfully"), tool_name="Write"),
+        message(3, ConversationMessageRole.COMPLETION, "已写入。"),
+    )
+    assert enqueuer.retention_planner.token_estimator(turn[1]) > 12_000
+
+    enqueuer.append_and_maybe_enqueue(address, ConversationBatch("conversation-1", turn), after_turn=True)
+
+    assert journal.read_live(address) is None
+    call = journal.list_history(address)[0].messages[1]
+    assert call.content_mode is ConversationToolResultContentMode.SUMMARIZED
+    assert call.content["file_path"] == "docs/plan.md"
+    assert call.content["content"].startswith("工具调用参数已压缩（关键信息抽取，未调用模型）：Write 调用的参数 content")
+    assert "省略了" in call.content["content"]
+    encoded = canonical_json(arguments).encode("utf-8")
+    assert call.original_size_bytes == len(encoded)
+    assert call.original_sha256 == hashlib.sha256(encoded).hexdigest()
+
+
+def test_an_exchange_that_already_fits_a_segment_keeps_its_arguments_and_results_verbatim(tmp_path) -> None:
+    enqueuer, journal, address = _exchange_enqueuer(tmp_path)
+    turn = tool_turn()
+
+    enqueuer.append_and_maybe_enqueue(address, ConversationBatch("conversation-1", turn), after_turn=True)
+
+    stored = journal.list_history(address)[0].messages
+    assert stored == turn
+
+
+def test_a_summarized_tool_call_must_carry_its_original_size_and_digest() -> None:
+    call = message(1, ConversationMessageRole.TOOL_CALL, {"path": "."}, tool_call_id="c", tool_name="t")
+    summarized = ConversationToolResultReducer(config()).reduce_tool_call(call)
+    assert ConversationMessage.from_dict(summarized.to_dict()) == summarized
+    with pytest.raises(ConversationMessageSchemaError, match="original-argument size"):
+        replace(summarized, original_sha256=None)
+    with pytest.raises(ConversationMessageSchemaError, match="verbatim tool_call"):
+        replace(call, original_size_bytes=3)
+    with pytest.raises(ConversationMessageSchemaError, match="verbatim or summarized"):
+        replace(summarized, content_mode=ConversationToolResultContentMode.OMITTED)
+
+
+# ── 切不开的工具交换抽到放得下：对半缩、只换更小的、从原文重抽、下限（N1 的防线，U22） ──────────────────────
+
+
+def _parallel_exchange(count: int, result: str, *, tool: str = "Read") -> list[ConversationMessage]:
+    """一句人话、``count`` 个并行调用、各自的结果、一句答复：调用与结果合起来是一组切不开的工具交换。"""
+
+    turn = [message(0, ConversationMessageRole.PROMPT, "把这些都看一下")]
+    turn += [
+        message(1 + index, ConversationMessageRole.TOOL_CALL, {"file_path": f"/repo/pkg/module_{index}.py"},
+                tool_call_id=f"c{index}", tool_name=tool)
+        for index in range(count)
+    ]
+    turn += [
+        replace(_result(1 + count + index, f"c{index}", result.replace("{k}", str(index))), tool_name=tool)
+        for index in range(count)
+    ]
+    turn.append(message(1 + 2 * count, ConversationMessageRole.COMPLETION, "看完了。"))
+    return turn
+
+
+def _stored(journal, address) -> list[ConversationMessage]:  # type: ignore[no-untyped-def]
+    return [item for segment in journal.list_history(address) for item in segment.messages]
+
+
+def test_twelve_parallel_reads_are_fitted_by_halving_the_excerpts_and_keep_small_calls_verbatim(tmp_path) -> None:
+    """12 个并行 Read、每个约 2,800 token（段上限 12,000、摘录 4,000 字）：每份都抽成 4,000 字一轮还放不下，摘录对半缩到
+    2,000 字再抽，放下了就停，会话照常封存；小调用参数抽了反而更大，原样留着。"""
+
+    enqueuer, journal, address = _exchange_enqueuer(tmp_path, max_segment_tokens=12_000, max_tool_result_summary_chars=4_000)
+    body = "".join(f"line {line} of module {{k}}: value = compute({line})\n" for line in range(250))
+    turn = _parallel_exchange(12, body)
+
+    enqueuer.append_and_maybe_enqueue(address, ConversationBatch("conversation-1", tuple(turn)), after_turn=True)
+
+    assert journal.read_live(address) is None
+    stored = _stored(journal, address)
+    results = [item for item in stored if item.role is ConversationMessageRole.TOOL_RESULT]
+    assert {item.content_mode for item in results} == {ConversationToolResultContentMode.SUMMARIZED}
+    assert min(len(item.content) for item in results) <= 2_000  # 缩过一轮
+    calls = [item for item in stored if item.role is ConversationMessageRole.TOOL_CALL]
+    assert [(item.content, item.content_mode) for item in calls] == [
+        ({"file_path": f"/repo/pkg/module_{index}.py"}, None) for index in range(12)
+    ]
+
+
+def test_a_result_asked_to_be_omitted_stays_omitted_while_its_group_is_fitted(tmp_path) -> None:
+    """同一组里有一份被要求省略的结果（不可长期保存）：整组抽到放得下时它仍只有说明文字，原文不以摘录落库。"""
+
+    enqueuer, journal, address = _exchange_enqueuer(tmp_path, max_segment_tokens=12_000, max_tool_result_summary_chars=4_000)
+    body = "".join(f"line {line} of module {{k}}: value = compute({line})\n" for line in range(250))
+    turn = _parallel_exchange(12, body)
+    turn[24] = replace(_result(24, "c11", "SECRET_TOKEN=abcd1234 " * 400), tool_name="Read")
+
+    enqueuer.append_and_maybe_enqueue(
+        address, ConversationBatch("conversation-1", tuple(turn)), after_turn=True, omit_tool_call_ids=frozenset({"c11"})
+    )
+
+    stored = _stored(journal, address)
+    omitted = next(item for item in stored if item.role is ConversationMessageRole.TOOL_RESULT and item.tool_call_id == "c11")
+    assert omitted.content_mode is ConversationToolResultContentMode.OMITTED
+    assert not any("SECRET_TOKEN" in canonical_json(item.content) for item in stored)
+
+
+def test_results_over_the_inline_bound_are_re_extracted_from_the_original_to_fit(tmp_path) -> None:
+    """14 份约 80 KB 的结果：进来时先各降成 4,000 字摘录；整组放不下时从原文重抽成 2,000 字的摘录，放得进一段。
+    从已降载的摘录再抽只能抽回原样（约 4,000 字），整组永远放不下。"""
+
+    enqueuer, journal, address = _exchange_enqueuer(
+        tmp_path, max_segment_tokens=12_000, max_tool_result_summary_chars=4_000, max_inline_tool_result_bytes=64 * 1024
+    )
+    body = "".join(f"2026-10-01 log{{k}} line {line} status ok detail {line * 7}\n" for line in range(1_700))
+    turn = _parallel_exchange(14, body, tool="Bash")
+    assert len(turn[15].content.encode()) > 64 * 1024
+
+    enqueuer.append_and_maybe_enqueue(address, ConversationBatch("conversation-1", tuple(turn)), after_turn=True)
+
+    assert journal.read_live(address) is None
+    results = [item for item in _stored(journal, address) if item.role is ConversationMessageRole.TOOL_RESULT]
+    assert len(results) == 14 and min(len(item.content) for item in results) <= 2_000
+
+
+def test_halving_stops_at_the_excerpt_floor_when_the_group_still_cannot_fit(tmp_path) -> None:
+    """48 份结果连 128 字的摘录都放不进一段：对半缩到 128 字的下限就停（不无限缩下去），留给规划器报错。"""
+
+    enqueuer, journal, address = _exchange_enqueuer(tmp_path, max_segment_tokens=2_000, max_tool_result_summary_chars=4_000)
+    body = "".join(f"line {line} of module {{k}}: value = compute({line})\n" for line in range(200))
+    turn = _parallel_exchange(48, body)
+
+    enqueuer.append(address, ConversationBatch("conversation-1", tuple(turn)))
+
+    live = journal.read_live(address)
+    assert live is not None
+    results = [item for item in live.messages if item.role is ConversationMessageRole.TOOL_RESULT]
+    at_floor = [
+        enqueuer.tool_result_reducer.reduce(original, force_summarize=True, maximum=128).content
+        for original in turn
+        if original.role is ConversationMessageRole.TOOL_RESULT
+    ]
+    assert [item.content for item in results] == at_floor
+    with pytest.raises(ConversationRetentionError, match="atomic tool exchange"):
+        enqueuer.enqueue_ready_segments(address, after_turn=True, flush=True)
+
+
+# ── 超长单行的拆块：每块只估算 O(log 单元数) 次（U21） ───────────────────────────────────────────────────
+
+
+def _prompt(text: str) -> ConversationBatch:
+    return ConversationBatch("conversation-1", (message(0, ConversationMessageRole.PROMPT, text),))
+
+
+def test_a_long_single_line_is_chunked_without_re_estimating_the_block_per_unit() -> None:
+    """80 KB 没有换行、空格分隔的单行（32,000 个小单元）：原样拼回、两块；估算器调用次数有界（以前每加一个单元重估
+    整块，这一条要跑一百多秒）。"""
+
+    from habitus.memory.conversation.retention import estimate_conversation_message_tokens
+
+    calls = [0]
+
+    def counting(item: ConversationMessage) -> int:
+        calls[0] += 1
+        return estimate_conversation_message_tokens(item)
+
+    text = "word " * 16_000
+    chunker = ConversationMessageChunker(max_message_tokens=12_000, token_estimator=counting)
+
+    parts = chunker.normalize(_prompt(text)).messages
+
+    assert "".join(str(item.content) for item in parts) == text
+    assert len(parts) == 2
+    assert calls[0] < 200
+
+
+@pytest.mark.parametrize(
+    ("text", "limit"),
+    [
+        ("第一段。\n\n第二段很长很长。\n\n" + "x" * 80 + "\n短\n" + "句子。" * 30, 24),
+        ("word " * 300, 40),
+        ("```code\nx = 1\n```\n\n" + "长" * 90 + " a b c " * 20, 30),
+        ("a" * 200 + " " + "b" * 3, 25),
+    ],
+)
+def test_chunk_boundaries_are_the_greedy_ones(text: str, limit: int) -> None:
+    """块的切法与逐单元贪心并块（每块并到再多一个就放不下）一致：同样的输入、同样的块。"""
+
+    estimate = lambda item: len(item.content) if isinstance(item.content, str) else 1  # noqa: E731
+
+    class _Greedy(ConversationMessageChunker):
+        def _greedy_blocks(self, source, units):  # type: ignore[no-untyped-def]
+            blocks, current = [], ""
+            for unit in units:
+                if current and not self._fits(source, current + unit):
+                    blocks.append(current)
+                    current = unit
+                else:
+                    current += unit
+            return [*blocks, current] if current else blocks
+
+    expected = _Greedy(max_message_tokens=limit, token_estimator=estimate).normalize(_prompt(text)).messages
+    actual = ConversationMessageChunker(max_message_tokens=limit, token_estimator=estimate).normalize(_prompt(text)).messages
+
+    assert [item.content for item in actual] == [item.content for item in expected]
+    assert len(actual) > 1
+
+
+@pytest.mark.parametrize(
+    ("character", "cost"),
+    [
+        ("汉", 1.5),  # 中日韩统一表意文字
+        ("𠀀", 1.5),  # 扩展 B 区表意文字（基本多文种平面以外，东亚宽字符）
+        ("か", 1.5),  # 平假名
+        ("カ", 1.5),  # 片假名
+        ("한", 1.5),  # 韩文音节
+        ("Ａ", 1.5),  # 全角拉丁字母
+        ("，", 1.5),  # 全角逗号
+        ("。", 1.5),  # 中文句号
+        ("😀", 1.5),  # emoji（东亚宽字符）
+        ("𝐀", 2.0),  # 基本多文种平面以外、不是东亚宽字符
+        ("a", 0.25),
+        ("7", 0.25),
+        (" ", 0.25),
+        ("—", 0.25),  # 东亚宽度不定（A）的破折号按窄字符算
+    ],
+)
+def test_token_estimate_charges_each_character_by_east_asian_width(character: str, cost: float) -> None:
+    from habitus.memory.conversation.retention import estimate_conversation_message_tokens
+
+    repeat = 40
+
+    def estimate(text: str) -> int:
+        return estimate_conversation_message_tokens(message(0, ConversationMessageRole.PROMPT, text))
+
+    assert estimate("x" + character * repeat) - estimate("x") == cost * repeat

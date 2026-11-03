@@ -8,13 +8,13 @@ from types import MappingProxyType
 from typing import Any
 
 from habitus.foundation.integrity import canonical_json
-from habitus.memory.compaction.field_ops import (
+from habitus.memory.document import MemoryDocument
+from habitus.memory.field_ops import (
     SemanticFieldMergePolicy,
     SemanticFieldOperationBatch,
     SemanticFieldOperationError,
     merge_semantic_fields,
 )
-from habitus.memory.document import MemoryDocument
 from habitus.memory.schema import MemoryFieldRole, MemoryFieldSchema, MemoryFieldType, MemorySchemaRegistry
 from habitus.model_client import ChatCallContext, ChatMessage, ChatRequest, StructuredChatClient
 
@@ -100,7 +100,9 @@ class MemoryFieldCompactor:
             )
             for field in content_fields
         )
-        source_fields = {field.name: document.fields.get(field.name, "") for field in content_fields}
+        source_fields = {
+            field.name: document.fields[field.name] for field in content_fields if field.name in document.fields
+        }
         payload = canonical_json(
             {
                 "memory_type": document.kind.value,

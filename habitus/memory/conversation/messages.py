@@ -196,6 +196,59 @@ class _ConversationSealPlan:
     encoded_live: bytes
 
 
+@dataclass(frozen=True)
+class ConversationEditorTurn:
+    """一个 History Segment 所在的逻辑轮次：这一轮已封存的各段，加上还在 live 里、没封存的轮尾。
+
+    封存只发生在完整轮次已经进来之后（afterTurn / flush 都要求 live 里每一轮以最终答复收尾），所以一段封存时，它那一轮
+    剩下的消息不在后面的 history 里就在 live 里；中间答复后面还有同轮工具步骤时不在那里切段（``retention.py``
+    ``_safe_boundaries``），这一轮在哪里结束不随之后怎么切段而变。同一轮里每一段的 Job 读到的都是同一整轮。
+    """
+
+    segments: tuple[ConversationSegment, ...]
+    source_index: int
+    unsealed: tuple[ConversationMessage, ...]
+
+    def __post_init__(self) -> None:
+        if not self.segments or any(not isinstance(segment, ConversationSegment) for segment in self.segments):
+            raise TypeError("segments must be a non-empty tuple of ConversationSegment values")
+        if isinstance(self.source_index, bool) or not 0 <= self.source_index < len(self.segments):
+            raise ValueError("source_index must point into segments")
+        if any(not isinstance(message, ConversationMessage) for message in self.unsealed):
+            raise TypeError("unsealed must contain ConversationMessage values")
+
+    @property
+    def source(self) -> ConversationSegment:
+        return self.segments[self.source_index]
+
+    @property
+    def earlier(self) -> tuple[ConversationSegment, ...]:
+        """这一轮里排在本段之前、已封存的各段。"""
+
+        return self.segments[: self.source_index]
+
+    @property
+    def opening_prompts(self) -> tuple[ConversationMessage, ...]:
+        """这一轮开头他说的话（开轮那条起连续的人话）。"""
+
+        messages = self.segments[0].messages
+        end = 0
+        while end < len(messages) and messages[end].role is ConversationMessageRole.PROMPT:
+            end += 1
+        return messages[:end]
+
+    @property
+    def whole(self) -> ConversationSegment:
+        """整轮拼成一个片段（含没封存的轮尾）。"""
+
+        messages = tuple(message for segment in self.segments for message in segment.messages) + self.unsealed
+        return ConversationSegment(
+            conversation_id=self.source.conversation_id,
+            segment_id=ConversationLayout.segment_id(messages[0].sequence, messages[-1].sequence),
+            messages=messages,
+        )
+
+
 class ConversationMessageJournal:
     """按 Conversation 粒度串行化 live/history 文件操作。"""
 
@@ -624,6 +677,14 @@ class ConversationMessageJournal:
     def list_history(self, address: ConversationAddress) -> tuple[ConversationSegment, ...]:
         """按序读取仍未被生命周期游标逻辑释放的 History Segment。"""
 
+        return self._retained_history_and_live(address)[0]
+
+    def _retained_history_and_live(
+        self,
+        address: ConversationAddress,
+    ) -> tuple[tuple[ConversationSegment, ...], tuple[ConversationMessage, ...]]:
+        """在同一次加锁里读出仍保留的 History Segment 与 live 消息。"""
+
         with self.path_lock.acquire(
             self.layout.lock_key(address),
             ttl_seconds=self.config.lock_ttl_seconds,
@@ -641,57 +702,55 @@ class ConversationMessageJournal:
                     state=state,
                 )
                 active = tuple(reference for reference in references if reference.end_sequence > state.released_through)
-                return tuple(self.read_segment(address, reference.segment_id) for reference in active)
+                history = tuple(self.read_segment(address, reference.segment_id) for reference in active)
+                return history, self._read_live_messages(address)
 
-    def read_editor_segment(
+    def read_editor_turn(
         self,
         address: ConversationAddress,
         source: ConversationSegment,
-    ) -> ConversationSegment | None:
-        """在完整轮次边界重组编辑输入；未闭合轮次返回显式延迟。"""
+    ) -> ConversationEditorTurn:
+        """读出 ``source`` 所在的整个逻辑轮次：向前接到开轮那一段，向后接到这一轮的最终答复（可能还在 live 里）。"""
 
         if not isinstance(address, ConversationAddress):
             raise TypeError("address must be ConversationAddress")
         if not isinstance(source, ConversationSegment):
             raise TypeError("source must be ConversationSegment")
-        history = self.list_history(address)
+        history, live = self._retained_history_and_live(address)
         positions = [index for index, segment in enumerate(history) if segment.segment_id == source.segment_id]
         if len(positions) != 1:
             raise ConversationJournalError("editor source segment is not retained exactly once")
         position = positions[0]
-        current = history[position]
-        if current.digest != source.digest:
+        if history[position].digest != source.digest:
             raise ConversationJournalError("editor source segment digest changed")
-        if current.ends_mid_turn:
-            return None
 
         start = position
         while history[start].starts_mid_turn:
             if start == 0:
                 raise ConversationJournalError("editor input lost the retained beginning of its logical turn")
-            previous = history[start - 1]
-            following = history[start]
-            if previous.end_sequence + 1 != following.start_sequence:
-                raise ConversationJournalError("editor input history contains a sequence gap")
-            if not previous.ends_mid_turn:
-                raise ConversationJournalError("editor input turn-boundary flags are inconsistent")
             start -= 1
-
-        selected = history[start : position + 1]
+        end = position
+        while history[end].ends_mid_turn and end + 1 < len(history):
+            end += 1
+        selected = history[start : end + 1]
         for previous, following in zip(selected, selected[1:], strict=False):
             if previous.end_sequence + 1 != following.start_sequence:
                 raise ConversationJournalError("editor input history contains a sequence gap")
-            if previous.ends_mid_turn != following.starts_mid_turn:
+            if previous.ends_mid_turn != following.starts_mid_turn or not previous.ends_mid_turn:
                 raise ConversationJournalError("editor input turn-boundary flags are inconsistent")
-        messages = tuple(message for segment in selected for message in segment.messages)
-        return ConversationSegment(
-            conversation_id=current.conversation_id,
-            segment_id=self.layout.segment_id(
-                messages[0].sequence,
-                messages[-1].sequence,
-            ),
-            messages=messages,
-        )
+
+        unsealed: tuple[ConversationMessage, ...] = ()
+        if selected[-1].ends_mid_turn:
+            if not live or live[0].sequence != selected[-1].end_sequence + 1 or live[0].starts_turn:
+                raise ConversationJournalError("editor input lost the unsealed end of its logical turn")
+            tail = 1
+            while tail < len(live) and not live[tail].starts_turn:
+                tail += 1
+            unsealed = live[:tail]
+            final = unsealed[-1]
+            if final.role is not ConversationMessageRole.COMPLETION or not final.completes_logical_message:
+                raise ConversationJournalError("editor input logical turn has no final completion")
+        return ConversationEditorTurn(segments=selected, source_index=position - start, unsealed=unsealed)
 
     def release_history_prefix(
         self,
@@ -911,7 +970,11 @@ class ConversationMessageJournal:
         if not source:
             return ()
         messages: list[ConversationMessage] = []
-        for line_number, line in enumerate(source.splitlines(), start=1):
+        # 只按 LF 切行：canonical_json 不转义 U+2028/U+2029/U+0085，str.splitlines 会把它们当行界切断记录。
+        lines = source.split("\n")
+        if lines[-1] == "":
+            lines.pop()
+        for line_number, line in enumerate(lines, start=1):
             if not line:
                 raise ConversationJournalError(f"conversation JSONL contains an empty line at {line_number}")
             try:
@@ -1249,6 +1312,7 @@ def _is_sha256(value: object) -> bool:
 __all__ = [
     "ConversationAppendResult",
     "ConversationAppendStatus",
+    "ConversationEditorTurn",
     "ConversationJournalConfig",
     "ConversationJournalError",
     "ConversationJournalState",

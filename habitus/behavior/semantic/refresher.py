@@ -17,12 +17,12 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, date, datetime
 
 from habitus.behavior.kinds.counted import uncounted
 from habitus.behavior.model import BehaviorAddress, BehaviorDirectory, BehaviorKind, BehaviorLevel
-from habitus.behavior.schema.vocabulary import UNREADABLE_GAP
+from habitus.behavior.schema.vocabulary import UNSEEN_GAPS
 from habitus.behavior.semantic.config import BehaviorSemanticConfig
 from habitus.behavior.semantic.errors import (
     BehaviorOverviewEmptyError,
@@ -40,7 +40,7 @@ from habitus.behavior.semantic.model import (
 )
 from habitus.behavior.tree import BehaviorTree
 from habitus.foundation.integrity import canonical_digest
-from habitus.foundation.intervals import starts_within
+from habitus.foundation.intervals import standing_pieces
 
 _SOURCE_MARKER = re.compile(r"<!-- habitus-semantic-source: ([0-9a-f]{64}) -->")
 
@@ -116,8 +116,9 @@ class BehaviorSemanticRefresher:
     def _standing_gaps(
         self, occurrences: Sequence[BehaviorAddress], gaps: Sequence[BehaviorAddress]
     ) -> tuple[BehaviorAddress, ...]:
-        """去掉被这一天的行为作废的「没读懂」（与序列、按天读树同一条规则，``series.model.disproves``；规则的理由写在那里）：
-        之后补回来的行为（每晚重试，裁定 67）落在那段里，叙述里就只有那条行为，不再并排一段「观测空白」。"""
+        """去掉在这一天那段被这一天的行为作废的「没读懂」（与序列、按天读树同一个读法，``foundation.intervals.standing_pieces``；
+        规则的理由写在那里）：之后补回来的行为（每晚重试，裁定 67）落在那段里，叙述里就只有那条行为，不再并排一段「观测空白」。
+        跨午夜的空白记在它开始那一天：那一天那段还站得住就留着（次日那半段由次日的行为判，与这一天的叙述无关）。"""
 
         # 只有算数的行为能作废空白（撞车重复、「非事件」不算，与序列同一条，``behavior.kinds.counted``）
         starts = sorted(
@@ -126,12 +127,18 @@ class BehaviorSemanticRefresher:
         standing: list[BehaviorAddress] = []
         for address in gaps:
             fields = self.tree.read(address).fields
-            watched = fields.get("gap_kind") == UNREADABLE_GAP
             begin, end = (
                 datetime.fromisoformat(str(fields["started_at"])),
                 datetime.fromisoformat(str(fields["ended_at"])),
             )
-            if not (watched and starts_within(begin, end, starts)):
+            day = begin.date()
+            pieces = standing_pieces(
+                begin,
+                end,
+                voidable=fields.get("gap_kind") in UNSEEN_GAPS,
+                starts_on=_only_on(day, starts),
+            )
+            if any(piece_start.date() == day for piece_start, _end in pieces):
                 standing.append(address)
         return tuple(standing)
 
@@ -291,6 +298,12 @@ class BehaviorSemanticRefresher:
         if len(compact) > self.config.max_abstract_chars:
             compact = compact[: self.config.max_abstract_chars - 1].rstrip() + "…"
         return compact + "\n"
+
+
+def _only_on(day: date, starts: Sequence[datetime]) -> Callable[[date], Sequence[datetime]]:
+    """只有 ``day`` 那一天有起点（叙述按天，别的日子的行为不来判这一天的空白）。"""
+
+    return lambda on: starts if on == day else ()
 
 
 def _instant(value: datetime) -> datetime:

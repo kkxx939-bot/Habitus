@@ -9,13 +9,13 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from habitus.conditions import LocalCalendar
-from habitus.foresight import NoUnsealed
+from habitus.foresight import ForesightError, NoUnsealed
 from habitus.foundation.observability import ObservationEvent, ObservationStatus
 from habitus.runtime.foresight import ForesightReadSide
 from habitus.runtime.foresight_tick import ForesightTick
 from habitus.runtime.foresight_worker import ForesightWorker
-from tests.unit.runtime.test_foresight_tick import TODAY, site_with_three_mornings, stores
-from tests.unit.scene.fixtures import SUBJECT, at
+from tests.unit.runtime.test_foresight_tick import TODAY, TOLERANCE, site_with_three_mornings, stores
+from tests.unit.scene.fixtures import SUBJECT, at, publish
 
 
 class Recorder:
@@ -29,12 +29,17 @@ class Recorder:
 def worker(tmp_path, *, broken: bool = False, recorder: Recorder | None = None) -> ForesightWorker:  # type: ignore[no-untyped-def]
     site, _codes = site_with_three_mornings(tmp_path)
     ledger, opportunities = stores(tmp_path, site)
+    publish(site.behavior_tree, TODAY, "讨论方案", 10, 0)  # 刚讨论完：这一拍建一条「事件」预期（日子预期在夜里建）
     read_side = ForesightReadSide(site.behavior_tree, SUBJECT, LocalCalendar(), ZoneInfo("Asia/Shanghai"))
-    tick = ForesightTick(ledger, opportunities, read_side, NoUnsealed(), clock=lambda: at(TODAY, 10, 15), recent=35)
-    if broken:  # 机会表文件坏了：那一拍读不出来
-        (opportunities.root / "opportunities" / "session" / f"{TODAY.isoformat()}.json").write_text(
-            "{", encoding="utf-8"
-        )
+    tick = ForesightTick(
+        ledger, opportunities, read_side, NoUnsealed(), clock=lambda: at(TODAY, 10, 15), recent=35, tolerance=TOLERANCE
+    )
+    if broken:  # 那一拍读不出来（派生树读不到；坏的机会表文件不再算：往前退一晚、计入观测）
+
+        async def unreadable(_now: object) -> None:
+            raise ForesightError("derived tree cannot be read")
+
+        tick._read = unreadable  # type: ignore[method-assign,assignment]
     return ForesightWorker(tick, interval_seconds=3600.0, shutdown_timeout_seconds=5.0, observer=recorder)
 
 
@@ -53,7 +58,7 @@ def test_the_loop_runs_a_tick_then_waits_and_stops(tmp_path) -> None:
 
     asyncio.run(scenario())
     loops = [event for event in recorder.events if event.operation == "tick_loop"]
-    assert loops and loops[0].status is ObservationStatus.SUCCESS and loops[0].attributes["recorded"] == 3
+    assert loops and loops[0].status is ObservationStatus.SUCCESS and loops[0].attributes["recorded"] == 1
     assert asyncio.run(run.run_once()).recorded == 0  # 手动再跑一拍：同一身份不再写
 
 

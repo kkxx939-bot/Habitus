@@ -163,3 +163,11 @@ def test_a_rule_that_the_algorithm_cannot_compute_is_refused() -> None:
         SituationRule(B.YESTERDAY)
     with pytest.raises(ValueError):
         B("open_claim")  # 「约了球还没打」那一族 2026-09-30 取消
+
+
+def test_yesterday_includes_a_hit_exactly_24_hours_before() -> None:
+    """「之前 24 小时内」是 [此刻 − 24h, 此刻)：恰好 24 小时前的那次晚睡算在里面。"""
+
+    exactly = (HitEvent(BREAKFAST - timedelta(hours=24), "晚睡", "重"),)
+    inputs = SituationInputs(day=SATURDAY, moment=BREAKFAST, history=exactly)
+    assert "昨晚晚睡" in names(situation_hits(SITUATIONS, inputs).hits)

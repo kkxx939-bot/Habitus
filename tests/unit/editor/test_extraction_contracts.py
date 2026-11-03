@@ -8,7 +8,7 @@ from habitus.memory.editor import (
     MemoryRetrievalAction,
     MemoryRetrievalConfig,
     MemoryRetrievalDecision,
-    MemoryRetrievalIncompleteError,
+    MemoryRetrievalFinalDecision,
     MemoryRetrievalObservation,
     MemoryRetrievalStatus,
 )
@@ -75,16 +75,49 @@ def test_retrieval_decision_allows_exactly_one_action_shape() -> None:
         )
 
 
-def test_final_retrieval_round_cannot_request_another_tool_action() -> None:
-    decision = MemoryRetrievalDecision(
-        MemoryRetrievalStatus.INSUFFICIENT,
-        MemoryRetrievalAction.SEARCH,
-        "继续搜索",
-        None,
-        "上下文不足",
+def test_final_retrieval_round_schema_and_decision_only_allow_finish() -> None:
+    schema = MemoryRetrievalFinalDecision.model_json_schema()
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+    assert properties["action"]["enum"] == ["finish"]
+    assert properties["query"]["type"] == "null"
+    assert properties["uri"]["type"] == "null"
+
+    ended = MemoryRetrievalFinalDecision.model_validate(
+        {
+            "status": "insufficient",
+            "action": "finish",
+            "query": None,
+            "uri": None,
+            "reason": "检索没有找到旧记忆。",
+        }
     )
-    with pytest.raises(MemoryRetrievalIncompleteError, match="final round"):
-        decision.require_action_allowed(allow_action=False)
+    assert ended.status is MemoryRetrievalStatus.INSUFFICIENT
+    assert isinstance(ended, MemoryRetrievalDecision)
+    with pytest.raises(ValueError, match="can only finish"):
+        MemoryRetrievalFinalDecision(
+            MemoryRetrievalStatus.INSUFFICIENT,
+            MemoryRetrievalAction.SEARCH,
+            "继续搜索",
+            None,
+            "上下文不足",
+        )
+    with pytest.raises(ValueError, match="cannot carry"):
+        MemoryRetrievalFinalDecision(
+            MemoryRetrievalStatus.SUFFICIENT,
+            MemoryRetrievalAction.FINISH,
+            "多余查询",
+            None,
+            "完成",
+        )
+    with pytest.raises(ValueError, match="insufficient retrieval cannot finish"):
+        MemoryRetrievalDecision(
+            MemoryRetrievalStatus.INSUFFICIENT,
+            MemoryRetrievalAction.FINISH,
+            None,
+            None,
+            "动作轮的不足仍须继续检索",
+        )
 
 
 def test_observation_is_a_bounded_audit_reference_not_a_document_copy() -> None:

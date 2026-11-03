@@ -1,17 +1,16 @@
-"""供应商无关的向量值对象、Provider 协议和统一异步运行层。"""
+"""供应商无关的向量 Provider 协议和统一异步运行层。"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import threading
 import time
 import weakref
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
 from typing import Protocol
 
+from habitus.foundation.embedding import EmbeddingVector
 from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
 from habitus.model_client.config import EmbeddingModelConfig
 from habitus.model_client.contracts import ModelClientError, ModelResponseError
@@ -25,39 +24,6 @@ _ASYNC_EMBED_SEMAPHORES: weakref.WeakKeyDictionary[
 ] = weakref.WeakKeyDictionary()
 _ASYNC_EMBED_LOCK = threading.Lock()
 _SLOW_CALL_SECONDS = 3.0
-
-
-@dataclass(frozen=True)
-class EmbeddingVector:
-    """经过有限值、非零范数和 L2 归一化的稠密向量。"""
-
-    values: tuple[float, ...]
-
-    def __post_init__(self) -> None:
-        if isinstance(self.values, list):
-            values = tuple(self.values)
-        elif isinstance(self.values, tuple):
-            values = self.values
-        else:
-            raise TypeError("embedding vector values must be a tuple or list")
-        if not values:
-            raise ValueError("embedding vector must not be empty")
-        normalized: list[float] = []
-        for value in values:
-            if isinstance(value, bool) or not isinstance(value, int | float):
-                raise TypeError("embedding vector values must be numeric")
-            number = float(value)
-            if not math.isfinite(number):
-                raise ValueError("embedding vector values must be finite")
-            normalized.append(number)
-        norm = math.sqrt(sum(value * value for value in normalized))
-        if norm == 0:
-            raise ValueError("embedding vector must have a non-zero norm")
-        object.__setattr__(self, "values", tuple(value / norm for value in normalized))
-
-    @property
-    def dimension(self) -> int:
-        return len(self.values)
 
 
 class EmbeddingProvider(Protocol):
@@ -279,5 +245,4 @@ __all__ = [
     "Embedder",
     "EmbeddingClient",
     "EmbeddingProvider",
-    "EmbeddingVector",
 ]

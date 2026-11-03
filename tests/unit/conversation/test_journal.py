@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from habitus.infrastructure.store.contracts.path_lock import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.conversation import (
     ConversationAddress,
     ConversationAppendStatus,
@@ -22,6 +21,7 @@ from habitus.memory.conversation import (
 from habitus.memory.conversation import messages as conversation_messages
 from habitus.pre.conversation import ConversationBatch
 from tests.helpers import closed_turn
+from tests.lock_store import ProcessLocalLockStore
 
 
 def journal(tmp_path: Path) -> ConversationMessageJournal:
@@ -51,6 +51,33 @@ def test_append_is_contiguous_idempotent_and_rejects_conflicting_replay(tmp_path
     gap = ConversationBatch("conversation-1", closed_turn(start_sequence=3))
     with pytest.raises(ConversationWriteConflictError, match="gap"):
         store.append(address(), gap)
+
+
+@pytest.mark.parametrize(
+    "separator",
+    [" ", " ", "\u0085", "\u000b", "\u000c", "\u001c", "\u001d", "\u001e"],
+)
+def test_content_with_unicode_line_boundaries_reads_back_from_live_and_history(
+    tmp_path: Path,
+    separator: str,
+) -> None:
+    store = journal(tmp_path)
+    turn = closed_turn()
+    batch = ConversationBatch(
+        "conversation-1",
+        (replace(turn[0], content=f"第一行{separator}第二行"), turn[1]),
+    )
+    store.append(address(), batch)
+    raw = store.layout.live_path(address()).read_bytes()
+    assert raw.count(b"\n") == len(batch.messages)
+
+    assert store.read_live(address()) == batch
+    following = ConversationBatch("conversation-1", closed_turn(start_sequence=2))
+    assert store.append(address(), following).status is ConversationAppendStatus.EXTENDED
+
+    sealed = store.seal(address(), through_sequence=1).segment
+    assert store.read_segment(address(), sealed.segment_id).messages == batch.messages
+    assert store.read_live(address()) == following
 
 
 def test_delivery_receipt_recovers_commit_lost_after_live_publish(

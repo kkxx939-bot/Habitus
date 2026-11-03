@@ -1,53 +1,40 @@
-"""云侧行为 agent 送入的规范行为观测；清洗层的唯一数据契约。
+"""行为观测：两条 lane 给每个单位写下的凭据；清洗层的唯一数据契约。
 
-上游的 VLM 与 ASR 位于 Habitus 之外，它们先把感知结果变成行为语义，再由 agent 送进来；
-本层永远不接触原始帧、音频或识别片段，只保存对它们的引用。
+观测不是感知结果本身。会话 lane 给每一轮写两条（人开口、助手做完，``fusion/lanes/session``），物理 lane 给上游送来的
+每个单位写两条（开始、结束，``fusion/lanes/physical``）；判断引用它们的身份，归约从它们物化 basis 的时间。
+内容（会话原文、上游的识别结果）不在这里，这里只留引用（``evidence_refs``）。
 
 ## 本层做什么、不做什么
 
 清洗层是确定性的、无模型的、可重放的：协议归一、结构与枚举校验、时间归一、内容身份派生、
 交付级幂等和容量边界。它**可以拒绝，但不能解释**——能因为结构不合法、时间不合法、超出容量或
-重复交付而拒绝一条输入，但不能因为"这条看起来没意义"而丢弃。低置信度观测照常收下，是否采信
-属于后续融合层的语义判断。
+重复交付而拒绝一条输入，但不能因为"这条看起来没意义"而丢弃。
 
-这里的幂等只到**交付**粒度：同一 ``delivery_id`` 重投复用既有记录。**跨交付的观测级重复由
-融合层负责**（见 ``store`` 模块的 ``TODO(BHV-FUSION-003)``），本层不做，也不应声称做了。
+这里的幂等只到**交付**粒度：同一 ``delivery_id`` 重投复用既有记录。两条 lane 的交付身份都只由"哪个单位"定
+（会话的一轮、设备上的一段），同一个单位不管送几次都落在同一个位置上。
 
 ## ``participants`` 必须非空：无主体即非行为观测
 
 一条观测必须至少有一个主体。这是**结构判断**而不是语义判断——行为 Event 的定义是"某个主体
-的一个有意识的目标"，没有主体就无从谈起，因此无主体的输入在定义上不是行为观测，与"这条看起来
-没价值"那种语义过滤完全不同，不违反本层"可以拒绝但不能解释"的纪律。
-
-它同时挡掉两类输入：上游在无人时段发出的**无活动心跳**（本通道只接受行为观测，liveness 信号
-应走运维通道），以及**无主体的环境变化**（如"门被风吹开"）。后者曾被考虑作为 ``trigger`` 的
-证据来源而单独设一类，最终决定一并挡掉：规则保持干净，环境证据的价值等有真实数据后再评估。
+的一个有意识的目标"，没有主体就无从谈起，因此无主体的输入在定义上不是行为观测。
 
 ## 两条明确不做的事
 
 以下两项曾被提出并否决，理由都是 Habitus 与上游的职责边界；再次提出前请先确认该边界已改变。
 
-1. **不记录上游模型版本。** 云侧 VLM/ASR 换代会让语义分布迁移，但上游换不换模型不是 Habitus
-   的问题——Habitus 负责处理记忆与行为，不管理上游版本。这与 coding agent 那条 lane 的混版
-   契约不矛盾：那里的 ``projector_version`` 记录的是 Habitus **自己的**投影实现版本。
-2. **观测不携带时段。** 观测只有 ``occurred_at`` 一个时间点，不设 ``ended_at``。事件的时间
-   跨度需要 LLM 在事件融合时判断；让观测携带时间范围，等于让上游提前替融合层切定事件边界。
+1. **不记录上游模型版本。** 上游换代会让语义分布迁移，但上游换不换模型不是 Habitus 的问题——Habitus 负责
+   处理记忆与行为，不管理上游版本。
+2. **观测不携带时段。** 观测只有 ``occurred_at`` 一个时间点，不设 ``ended_at``；一个单位的开始与结束是两条观测。
 
 ## ``available_at`` 是本层最重要的字段
 
 ``occurred_at`` 是"这件事什么时候发生"，``available_at`` 是"这条语义什么时候第一次可被下游
-使用"。摄像头 20:00:00.0 拍到人开门，云侧推理与送达耗时 1.5 秒，则 ``occurred_at`` 是
-20:00:00.0 而 ``available_at`` 是 20:00:01.5——在这 1.5 秒里"有人回家"这条语义在世界上还
-不存在，任何下游都不可能拿它做决策。
+使用"。两条 lane 都只在单位结束时才知道它（会话的一轮做完、上游送来一段已经结束的行为），所以两条凭据的
+``available_at`` 都是单位结束的时刻——开始那条的 ``occurred_at`` 早于它。
 
-这个延迟只有上游知道，因此它是**必填**字段，缺失即拒绝，绝不用 ``occurred_at`` 顶替：整条
-预测链的防标签泄漏都建立在它上面（预测侧的每个切点都以它为可见性 cutoff——落进行为树后
-即 occurrence 的 ``onset_available_at`` 与 basis 各步的 ``available_at``）。把它填成观测时间，模型就会学到它在线上
-永远拿不到的信息，而这种失真在离线指标上完全看不出来。
-
-注意本层只能拦住"字段缺失"这一种误用；``available_at == occurred_at`` 是合法的零延迟取值，
-与"上游偷懒直接填了发生时间"在数据上无法区分。下游不应假设本层提供了比"字段存在且不早于
-发生时间"更强的保证。
+它是**必填**字段，缺失即拒绝，绝不用 ``occurred_at`` 顶替：整条预测链的防标签泄漏都建立在它上面（预测侧的
+每个切点都以它为可见性 cutoff——落进行为树后即 occurrence 的 ``onset_available_at`` 与 basis 各步的
+``available_at``）。本层只能保证"字段存在且不早于发生时间"，下游不应假设更强的保证。
 
 ## 时间一律以 UTC 表示，本地偏移单独保存
 
@@ -61,7 +48,7 @@
    这条缝就不存在。
 2. **本地日历日必须可还原。** 行为树地址要求 ``occurred_on`` 是行为发生地的**本地**日历日期，
    而规范序列化会把 datetime 一律折成 UTC。若不单独保存偏移，东八区凌晨的观测回读后会落到
-   前一天，融合层再也无法还原正确日期。``local_occurred_at`` 提供确定性的还原。
+   前一天，再也无法还原正确日期。``local_occurred_at`` 提供确定性的还原。
 """
 
 from __future__ import annotations
@@ -74,7 +61,7 @@ from typing import Any
 
 from habitus.behavior.observation.config import BehaviorObservationConfig
 from habitus.behavior.observation.errors import BehaviorObservationError, BehaviorObservationLimitError
-from habitus.foundation.integrity import canonical_digest, canonicalize
+from habitus.foundation.integrity import canonical_digest, canonicalize, is_sha256_hex
 
 OBSERVATION_SCHEMA_VERSION = "behavior_observation_v1"
 BATCH_SCHEMA_VERSION = "behavior_observation_batch_v1"
@@ -90,10 +77,8 @@ _MAX_UTC_OFFSET_MINUTES = 24 * 60
 
 
 class BehaviorObservationModality(str, Enum):
-    """产生该观测语义的上游感知模态。"""
+    """这条凭据来自哪条 lane。"""
 
-    VISION = "vision"
-    AUDIO = "audio"
     # 会话 lane 的凭据：不是感知出来的观测，只标一轮对话的开始与结束时刻（内容不在这里，见 fusion/lanes/session）。
     SESSION = "session"
     # 物理 lane 的凭据：上游已经认定好的一段行为（或一段没在看的时间）的开始与结束时刻（见 fusion/lanes/physical）。
@@ -101,11 +86,7 @@ class BehaviorObservationModality(str, Enum):
 
 
 def require_sha256(value: object, label: str) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
+    if not is_sha256_hex(value):
         raise BehaviorObservationError(f"{label} must be lowercase SHA-256 text")
     return value
 
@@ -476,10 +457,6 @@ class BehaviorObservationBatch:
     def started_at(self) -> datetime:
         return self.observations[0].occurred_at
 
-    @property
-    def last_available_at(self) -> datetime:
-        return max(item.available_at for item in self.observations)
-
     def to_dict(self) -> dict[str, Any]:
         payload = canonicalize(
             {
@@ -566,10 +543,6 @@ class BehaviorObservationEnvelope:
         resolved_protocol = normalized_protocol(protocol, max_chars=config.max_identifier_chars)
         resolved_delivery = require_sha256(delivery_id, "delivery_id")
         resolved_recorded_at = to_utc(aware_timestamp(recorded_at, "recorded_at"), "recorded_at")
-        # 语义还没可用就已经被送达，是结构性矛盾而不是时钟抖动；容差由 Config 给出。
-        skew = (batch.last_available_at - resolved_recorded_at).total_seconds()
-        if skew > config.max_clock_skew_seconds:
-            raise BehaviorObservationError("observation delivery carries semantics that are not available yet")
         source_id = cls.source_identity(resolved_observer, resolved_delivery)
         payload = _envelope_payload(
             source_id=source_id,

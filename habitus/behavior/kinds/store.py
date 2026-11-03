@@ -5,7 +5,7 @@
 - ``kinds.snapshot.json`` 截断那一版的整份词表（``journal``，26 号清单 6.5）；
 - ``kinds.pending.json``  待定池；
 - ``kinds.migration.json`` 迁移计划：只在"重打树"期间存在，内容就是将要追加的那一版；崩溃后按它续做；
-- ``kinds.jobs.json``    两件定时活的跨次状态：上次每晚新增、上次定期拆改的时刻，最近几次提过的合并（合并证据）。
+- ``kinds.jobs.json``    定期拆改的跨次状态：上次拆改的时刻（它的本地日是线的哪一晚），最近几次提过的合并（合并证据）。
 
 写入都带期望版本（CAS）：变更日志按"当前最后一版"比对，待定池按自己的修订号比对。
 """
@@ -61,6 +61,10 @@ def _journal_lock(path: Path) -> threading.Lock:
 
 class BehaviorKindStoreError(ValueError):
     pass
+
+
+class BehaviorKindJournalFullError(BehaviorKindStoreError):
+    """变更日志放不下下一版：计划不落盘、树不动（写得进读不回的日志会让词表永久停在迁移一半）。"""
 
 
 class BehaviorKindConflictError(RuntimeError):
@@ -142,12 +146,6 @@ class BehaviorKindStore:
             self._write(self.catalog_path, render_catalog(updated, schema_version=KINDS_SCHEMA_VERSION))
             return updated
 
-    def catalog_in_sync(self) -> bool:
-        """清单视图是不是当前词表推出来的样子（监控用；崩在两次写之间时会是 False，下一次追加即修复）。"""
-
-        expected = render_catalog(self.read(), schema_version=KINDS_SCHEMA_VERSION)
-        return self._read_text(self.catalog_path) == expected
-
     # ── 待定池 ───────────────────────────────────────────────────────────────────
 
     def read_pending(self) -> PendingSnapshot:
@@ -206,8 +204,17 @@ class BehaviorKindStore:
                 apply(current, record)  # 先试应用：不可应用的计划不许落盘（否则先改树、后在追加日志时永久失败）
             except BehaviorKindError as exc:
                 raise BehaviorKindStoreError(f"migration plan does not apply: {exc}") from exc
+            if not self.has_room_for(record):  # 同一个道理：日志放不下这一版，也不许先改树
+                raise BehaviorKindJournalFullError(
+                    f"{CHANGES_FILENAME} has no room for version {record.version} within its encoded byte bound"
+                )
             payload = json.dumps(record_payload(record), ensure_ascii=False, sort_keys=True, indent=1)
             self._write(self.migration_path, payload + "\n")
+
+    def has_room_for(self, record: VersionRecord) -> bool:
+        """把这一版追加进变更日志之后，日志仍在字节上限之内。"""
+
+        return len(self.journal.with_record(record).encode("utf-8")) <= self.config.max_encoded_bytes
 
     def clear_migration(self) -> None:
         try:
@@ -215,7 +222,7 @@ class BehaviorKindStore:
         except DurablePathIntegrityError as exc:
             raise BehaviorKindStoreError("migration plan cannot be removed safely") from exc
 
-    # ── 定时状态 ─────────────────────────────────────────────────────────────────
+    # ── 拆改状态 ─────────────────────────────────────────────────────────────────
 
     def read_jobs(self) -> JobState:
         text = self._read_text(self.jobs_path)
@@ -261,6 +268,7 @@ __all__ = [
     "JOBS_FILENAME",
     "PENDING_FILENAME",
     "BehaviorKindConflictError",
+    "BehaviorKindJournalFullError",
     "BehaviorKindStore",
     "BehaviorKindStoreError",
     "PendingSnapshot",

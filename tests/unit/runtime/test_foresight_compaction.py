@@ -33,7 +33,7 @@ def reading(ledger: ForesightLedgerStore):  # type: ignore[no-untyped-def]
 
     account = ranked_account(ledger.facts_of(ACCOUNT), visible_at=NOW, base=ledger.compaction_of(ACCOUNT))
     base = account.base
-    return (account.prediction.keys[-35:], None if base is None else (base.offsets, base.gap_count, base.longest_gap))
+    return (account.prediction.keys[-35:], None if base is None else (base.offsets, base.gap_lengths))
 
 
 def compaction(ledger: ForesightLedgerStore) -> LedgerCompaction:
@@ -52,10 +52,8 @@ def test_compaction_keeps_the_window_and_the_summary_and_drops_the_files(tmp_pat
     assert len(list((ledger._account_dir(ACCOUNT) / "facts").iterdir())) == 120 - report.discarded
     after_keys, summary = reading(ledger)
     assert after_keys == keys and summary is not None
-    offsets, gaps, longest = summary
-    assert (
-        dict(offsets) == {0: 47, 40: 29} and gaps == 84 and longest == 1.0
-    )  # 前 85 天：窗内 47、晚 40 分钟 29、没做 9
+    offsets, gaps = summary
+    assert dict(offsets) == {0: 47, 40: 29} and gaps == ((1.0, 84),)  # 前 85 天：窗内 47、晚 40 分钟 29、没做 9
     # 第二晚：没有新机会就不再压；之后的事实照常接着 fold
     assert compaction(ledger).run(night=NOW.date(), table=None).compacted == 0
 
@@ -114,3 +112,25 @@ def test_only_the_reach_of_diagnosis_and_the_level_just_before_it_are_kept(tmp_p
         NOW - timedelta(days=5),
     ]
     assert date(2026, 1, 1) < NOW.date()
+
+
+def test_an_old_compaction_file_is_refused_with_the_file_to_delete(tmp_path) -> None:
+    """裁定 88 第 2 条要间隔中位数，旧版 v2 只存个数与最长的：不迁移，读到明确报错、点名删哪个文件（裁定 86 第 2 条的做法）。"""
+
+    import json
+
+    import pytest
+
+    from habitus.foresight.errors import ForesightError
+
+    ledger = ForesightLedgerStore(tmp_path)
+    seeded(ledger)
+    compaction(ledger).run(night=NOW.date(), table=None)
+    path = ledger._account_dir(ACCOUNT) / "compaction.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    old = {key: value for key, value in raw.items() if key != "gap_lengths"}
+    old.update(schema_version="foresight_account_compaction_v2", gap_count=84, longest_gap=1.0)
+    path.write_text(json.dumps(old), encoding="utf-8")
+    with pytest.raises(ForesightError, match="旧格式的压实摘要") as caught:
+        ledger.compaction_of(ACCOUNT)
+    assert str(path) in str(caught.value)

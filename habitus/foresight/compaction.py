@@ -65,8 +65,7 @@ def compact(account: RankedAccount, plan: CompactionPlan, *, table: OpportunityT
         account=_account_of(account, plan),
         through=plan.boundary,
         offsets=tuple(sorted(offsets.items())),
-        gap_count=gaps.count,
-        longest_gap=gaps.longest,
+        gap_lengths=gaps.lengths,
         last_day=last_day,
         day_types=day_types,
     )

@@ -6,12 +6,11 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.memory.editor import MemoryDocumentLockKeyspace
 from habitus.memory.indexing.config import MemoryVectorIndexConfig
 from habitus.memory.indexing.model import MemoryIndexSource
 from habitus.memory.intention import memory_index_kind
 from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
-from habitus.memory.tree import MemoryTree
+from habitus.memory.tree import MemoryDocumentLockKeyspace, MemoryTree
 from habitus.memory.uri import MemoryURI, MemoryURINodeType
 
 
@@ -117,9 +116,9 @@ class MemoryIndexSourceReader:
             return
         with self.path_lock.acquire(
             self._transaction_lock_key,
-            ttl_seconds=30,
-            wait_timeout_seconds=30.0,
-            retry_delay_seconds=0.02,
+            ttl_seconds=self.config.lock_ttl_seconds,
+            wait_timeout_seconds=self.config.lock_wait_timeout_seconds,
+            retry_delay_seconds=self.config.lock_retry_delay_seconds,
         ) as guard:
             with guard.fenced():
                 yield

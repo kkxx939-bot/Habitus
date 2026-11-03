@@ -18,10 +18,10 @@ from typing import Any, cast
 from habitus.foundation.integrity import canonical_digest
 from habitus.foundation.text import clean_line
 from habitus.model_client import ChatMessage, ChatRequest, StructuredChatClient
+from habitus.model_client.asking import Answered, Failed, ask
 from habitus.scene.advice.model import Proposal
 from habitus.scene.concepts.calendar_situations import is_calendar
 from habitus.scene.concepts.model import ConceptSet
-from habitus.scene.llm import Answered, Failed, ask
 from habitus.scene.relations.conditions import ConditionError, Field, Template, compile_proposal
 
 # v1 → v2（2026-10-18，裁定 59）：结构字段里的 weekend / calendar 拿掉，周几、工作日、节假日这类改成名单里的日历情境（concept 提）；

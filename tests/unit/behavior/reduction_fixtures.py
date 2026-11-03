@@ -38,7 +38,7 @@ def observation(offset: int, semantics: str, *, participants: list[str] | None =
         observer_id=OBSERVER,
         occurred_at=moment,
         available_at=moment + timedelta(seconds=2),
-        modality="vision",
+        modality="physical",
         semantics=semantics,
         participants=participants or [SUBJECT],
         knowledge_state="observed",
@@ -63,7 +63,6 @@ def judgement_record(
     basis: tuple[tuple[str, tuple[str, ...]], ...] = (),
     status: str | None = "completed",
     status_basis: str | None = "observed",
-    relations: tuple[tuple[str, str], ...] = (),
 ) -> dict[str, Any]:
     unreadable = behavior is None
     return {
@@ -81,7 +80,6 @@ def judgement_record(
         "basis": [{"semantics": semantics, "observation_ids": list(ids)} for semantics, ids in basis],
         "status": None if unreadable else status,
         "status_basis": None if unreadable else status_basis,
-        "relations": [{"kind": kind, "target_id": target} for kind, target in relations],
         "fusion_version": FUSION_VERSION_TEXT,
         "prompt_version": "behavior_judgement_prompt_v15",
     }

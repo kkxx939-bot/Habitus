@@ -19,6 +19,7 @@ from habitus.foresight import (
     ranked_account,
 )
 from habitus.foresight.edges import PastMoment
+from habitus.foresight.ladder import effective_setting, silenced
 from habitus.foresight.ledger import AccountFact, AccountLevel, Expectation, UnitSetting
 
 CST = timezone(timedelta(hours=8))
@@ -227,3 +228,17 @@ def test_a_revision_overrides_by_when_it_was_written_but_stays_at_its_own_opport
     # 写下的时刻早于机会的时刻说不通
     with pytest.raises(ForesightError):
         replace(original, written_at=NOW - timedelta(days=11))
+
+
+def test_a_setting_takes_effect_once_set_and_as_usual_withdraws_it() -> None:
+    assert effective_setting(None, NOW) is None
+    assert effective_setting(UnitSetting(KIND, NOW, "以后都提醒我"), NOW) == "以后都提醒我"
+    assert effective_setting(UnitSetting(KIND, NOW + timedelta(minutes=1), "以后别提了"), NOW) is None
+    assert effective_setting(UnitSetting(KIND, NOW - timedelta(days=1), "照常"), NOW) is None
+
+
+def test_only_never_again_stops_forming_expectations() -> None:
+    assert silenced(UnitSetting(KIND, NOW, "以后别提了"))
+    assert not silenced(UnitSetting(KIND, NOW, "以后都提醒我"))
+    assert not silenced(UnitSetting(KIND, NOW, "照常"))
+    assert not silenced(None)

@@ -1,10 +1,15 @@
 """观测覆盖：哪些时段我们在看（裁定 59 第 6 条第 3 步）。密度、日内分布、漏看概率共用这一个分母。
 
-口径沿用旧预测树的曝光（"在看"）：从这条 lane 第一条记录那天起、到最后一个已封口的日子，每个日历日都算——一整天没记录也
-算在看（那天就是没做）；扣掉上游明确报的空白（"没读懂"与"未观测"两种都扣；被证伪的"没读懂"已在读序列时作废）；按槽、按
-比例扣（一个槽被盖住一半，就算半槽在看）。不按周几分桶。
+口径沿用旧预测树的曝光（"在看"）：从这条 lane 第一条记录那天起、到最后一个已封口的日子，每个日历日都算；扣掉上游明确报的
+空白（"没读懂"与"未观测"两种都扣；被证伪的"没读懂"已在读序列时作废）；按槽、按比例扣（一个槽被盖住一半，就算半槽在看；
+几段空白重叠时按并集扣）。不按周几分桶。
 
-这和语义树的"人在场"（当天有记录的日子里，第一条开始到最后一条结束）不是同一个问题，各用各的名字、不并。
+一整天没记录：会话 lane 算那天没在看（整天覆盖 0，等同上游报了全天「未观测」；裁定 89 第 2 条，规则在
+``series.model.silent_day_unwatched``）——会话 lane 只在有会话时才有记录，没开会话不会报成空白；物理 lane 的上游没在看时自己报
+空白，空着的一天照旧算在看（那天就是没做）。
+
+这和语义树的"人在场"（当天有记录的日子里，第一条开始到最后一条结束）不是同一个问题，各用各的名字、不并；只在"一整天没会话"
+这一点上两边同口径（那天不在场 / 没在看）。
 """
 
 from __future__ import annotations
@@ -14,7 +19,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from types import MappingProxyType
 
-from habitus.series.model import EventSeries, SeriesGap
+from habitus.series.model import EventSeries, SeriesGap, silent_day_unwatched
 from habitus.temporal.episodes import OccurrenceDay
 from habitus.temporal.slots import slots_per_day
 
@@ -56,16 +61,22 @@ class Coverage:
 
 
 def coverage_of(series: EventSeries, lane: str, *, slot_minutes: int) -> Coverage:
-    """``lane`` 从第一条记录那天到序列最后一个已封口的日子，每天每槽在看的比例。"""
+    """``lane`` 从第一条记录那天到序列最后一个已封口的日子，每天每槽在看的比例（会话 lane 一整天没记录的那天是 0）。"""
 
-    first = next((record.day for record in series.records if record.lane == lane), None)
+    # 记录按时刻排，偏移不同时时刻最早的那条不一定是日期最早的：起点取日期最早的那一天
+    first = min((record.day for record in series.records if record.lane == lane), default=None)
     if first is None or first > series.last_day:
         return Coverage(slot_minutes=slot_minutes, days={})
     by_day = _gaps_by_day(series.gaps)
+    active = series.active_days() if silent_day_unwatched(lane) else None
+    unwatched = tuple(0.0 for _ in range(slots_per_day(slot_minutes)))
     days = {}
     day = first
     while day <= series.last_day:
-        days[day] = day_coverage(day, by_day.get(day, ()), slot_minutes=slot_minutes)
+        if active is not None and day not in active:
+            days[day] = unwatched
+        else:
+            days[day] = day_coverage(day, by_day.get(day, ()), slot_minutes=slot_minutes)
         day += timedelta(days=1)
     return Coverage(slot_minutes=slot_minutes, days=days)
 
@@ -76,11 +87,9 @@ def day_coverage(day: date, gaps: Sequence[SeriesGap], *, slot_minutes: int) -> 
     slots = slots_per_day(slot_minutes)
     width = float(slot_minutes * 60)
     coverage = [1.0] * slots
-    for gap in gaps:
-        start = _seconds_into_day(gap.started_at, day)
-        end = _seconds_into_day(gap.ended_at, day)
-        if end <= start:
-            continue
+    for start, end in _union(
+        (_seconds_into_day(gap.started_at, day), _seconds_into_day(gap.ended_at, day)) for gap in gaps
+    ):
         first = max(int(start // width), 0)
         last = min(int((end - 1e-9) // width), slots - 1)
         for index in range(first, last + 1):
@@ -89,6 +98,18 @@ def day_coverage(day: date, gaps: Sequence[SeriesGap], *, slot_minutes: int) -> 
             if overlap > 0:
                 coverage[index] = max(coverage[index] - overlap / width, 0.0)
     return tuple(coverage)
+
+
+def _union(spans: Iterable[tuple[float, float]]) -> list[tuple[float, float]]:
+    """重叠的空白并成一段（会话的「没读懂」与物理的「未观测」可以盖住同一段）：同一段时间只扣一次。"""
+
+    merged: list[tuple[float, float]] = []
+    for start, end in sorted(span for span in spans if span[1] > span[0]):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def blind_days(days: Sequence[OccurrenceDay]) -> frozenset[date]:

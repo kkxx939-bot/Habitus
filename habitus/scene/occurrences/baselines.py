@@ -36,7 +36,6 @@ from datetime import date, datetime, timedelta, tzinfo
 from types import MappingProxyType
 
 from habitus.scene.concepts.model import (
-    MINUTES_PER_DAY,
     BaselineKey,
     BaselineStatistic,
     BaselineWindow,
@@ -47,6 +46,7 @@ from habitus.scene.concepts.model import (
 )
 from habitus.scene.concepts.rhythm import Rhythm
 from habitus.scene.occurrences.model import ConceptHits
+from habitus.temporal.slots import MINUTES_PER_DAY
 
 #: 不分峰的那一层的峰号；有节律的概念峰外的记录也归到这里。
 UNSPLIT = 0

@@ -10,21 +10,25 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+from habitus.config.foresight import ForesightStoreConfig
 from habitus.foresight.opportunities import OpportunityTable, decode_table, encode_table
 from habitus.runtime.foresight_nightly_files import NightlyFiles
 
 OPPORTUNITIES_SEGMENT = "opportunities"
-MAX_TABLE_BYTES = 16 * 1024 * 1024
 
 
 class OpportunityStore:
-    def __init__(self, root: str | Path, *, retained_nights: int = 3) -> None:
+    def __init__(
+        self, root: str | Path, *, retained_nights: int = 3, limits: ForesightStoreConfig | None = None
+    ) -> None:
+        limits = limits if limits is not None else ForesightStoreConfig()
         self._files = NightlyFiles(
             root,
             segment=OPPORTUNITIES_SEGMENT,
             label="opportunity table",
-            max_bytes=MAX_TABLE_BYTES,
+            max_bytes=limits.opportunity_table_max_bytes,
             retained_nights=retained_nights,
+            max_entries=limits.nightly_max_entries,
         )
         self.root = self._files.root
         self.directory = self._files.directory
@@ -46,10 +50,14 @@ class OpportunityStore:
         return decode_table(self._files.read(lane, night), lane=lane, night=night)
 
     def latest(self, lane: str) -> OpportunityTable | None:
-        """盘上最晚一晚的表；没有是 None。"""
+        """盘上最晚一晚读得出来的表（最晚那一份坏了往前退一晚，坏的计入观测）；没有是 None。"""
 
-        night = self.latest_night(lane)
-        return None if night is None else self.read(lane, night)
+        return self._files.latest(lane, lambda text, night: decode_table(text, lane=lane, night=night))
+
+    def take_unreadable(self) -> tuple[str, ...]:
+        """上次 ``take`` 以来跳过的坏表（路径），取走即清。"""
+
+        return self._files.take_unreadable()
 
 
-__all__ = ["MAX_TABLE_BYTES", "OPPORTUNITIES_SEGMENT", "OpportunityStore"]
+__all__ = ["OPPORTUNITIES_SEGMENT", "OpportunityStore"]

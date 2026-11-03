@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
+from habitus.behavior.kinds.calls import CallFailure
 from habitus.behavior.kinds.classify.classifier import ClassifyResult, DaytimeClassifier, KindVerdict
 from habitus.behavior.kinds.classify.request import ClassifyRequest
 from habitus.behavior.kinds.model import Vocabulary
@@ -20,16 +21,18 @@ async def classify_in_chunks(
     checkpoint: Callable[[], object],
 ) -> ClassifyResult:
     verdicts: dict[str, KindVerdict] = {}
+    unanswerable: dict[str, CallFailure] = {}
     signals: list[str] = []
     calls = 0
     size = classifier.config.batch_size
     for start in range(0, len(requests), size):
         result = await classifier.classify(requests[start : start + size], vocabulary)
         verdicts.update(result.verdicts)
+        unanswerable.update(result.unanswerable)
         signals.extend(result.signals)
         calls += result.model_calls
         checkpoint()
-    return ClassifyResult(verdicts, calls, tuple(signals))
+    return ClassifyResult(verdicts, calls, tuple(signals), unanswerable)
 
 
 __all__ = ["classify_in_chunks"]

@@ -1,17 +1,19 @@
 """白天归类：每条 occurrence 封口就归到同 lane 的一个在用类；归不进打「待定」，不是一件事打「非事件」。
 
 只能归到已有的类，白天不建类（设计 二）。结构不对只重问没答好的那几条，
-重问轮数用尽仍答不好的一律当「待定」（宁可待定，不要勉强归类），留信号。模型经注入的 ``KindModelCaller`` 调用。
+重问轮数用尽仍答不好的一律当「待定」（宁可待定，不要勉强归类），留信号。这一批触发内容安全或输入超长的不重问（同一份输入
+再问也一样，裁定 94 错误分类）：这一批的几条按「待定」交回、另记进 ``unanswerable``，归约据它按错误处理。模型经注入的
+``KindModelCaller`` 调用。
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from habitus.behavior.kinds.calls import KindModelCaller, KindModelOutputError
+from habitus.behavior.kinds.calls import CallFailure, KindModelCaller, KindModelOutputError, call_failure
 from habitus.behavior.kinds.classify.prompt import (
     CLASSIFY_SYSTEM_PROMPT,
     NOT_EVENT,
@@ -46,6 +48,8 @@ class ClassifyResult:
     verdicts: Mapping[str, KindVerdict]
     model_calls: int
     signals: tuple[str, ...]
+    #: 这一批触发内容安全或输入超长、没问出结论的几条（不重问；``verdicts`` 里按「待定」）：键 → 哪一类。
+    unanswerable: Mapping[str, CallFailure] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -70,6 +74,7 @@ class DaytimeClassifier:
         if len(set(keys)) != len(keys):
             raise BehaviorKindError("classify request keys must be unique")
         verdicts: dict[str, KindVerdict] = {}
+        unanswerable: dict[str, CallFailure] = {}
         signals: list[str] = []
         calls = 0
         for lane in Lane:
@@ -87,12 +92,14 @@ class DaytimeClassifier:
             for start in range(0, len(same_lane), self.config.batch_size):
                 chunk = same_lane[start : start + self.config.batch_size]
                 batch = _Batch(lane, classes, {f"R{i}": r for i, r in enumerate(chunk, start=1)})
-                answered, used = await self._judge(batch, signals)
+                answered, used = await self._judge(batch, signals, unanswerable)
                 verdicts.update(answered)
                 calls += used
-        return ClassifyResult(verdicts, calls, tuple(signals))
+        return ClassifyResult(verdicts, calls, tuple(signals), unanswerable)
 
-    async def _judge(self, batch: _Batch, signals: list[str]) -> tuple[dict[str, KindVerdict], int]:
+    async def _judge(
+        self, batch: _Batch, signals: list[str], unanswerable: dict[str, CallFailure]
+    ) -> tuple[dict[str, KindVerdict], int]:
         verdicts: dict[str, KindVerdict] = {}
         remaining = batch
         calls = 0
@@ -103,7 +110,16 @@ class DaytimeClassifier:
             try:
                 items = await self._call(remaining)
             except KindModelOutputError as exc:
-                signals.append(f"kind_classify_rejected {sorted(r.key for r in remaining.items.values())}: {exc}")
+                keys = sorted(r.key for r in remaining.items.values())
+                failure = call_failure(exc)
+                if failure in (CallFailure.REFUSED, CallFailure.TOO_LARGE):
+                    # 同一份输入再问也一样：不重问。这几条按「待定」交回（词表整理活照旧这么读），另记进 ``unanswerable``——
+                    # 归约据它把这几条换成「错误」，不落成待定
+                    signals.append(f"kind_classify_{failure.value} {keys}: {exc}")
+                    unanswerable.update(dict.fromkeys(keys, failure))
+                    verdicts.update({r.key: _pending(r, failure.value) for r in remaining.items.values()})
+                    return verdicts, calls
+                signals.append(f"kind_classify_rejected {keys}: {exc}")
                 continue
             accepted = _accepted(items, remaining)
             verdicts.update(accepted)

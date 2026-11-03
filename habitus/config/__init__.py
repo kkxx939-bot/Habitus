@@ -10,27 +10,23 @@ from habitus.config.conversation import (
     ConversationSummaryCompactionConfig,
 )
 from habitus.config.credentials import CredentialRegistry
-from habitus.config.foresight import ForesightConfig
+from habitus.config.foresight import ForesightConfig, ForesightStoreConfig
 from habitus.config.http import HTTPAPIConfig
 from habitus.config.lifecycle import LifecycleConfig, LifecycleRetryConfig, LifecycleWorkerConfig
 from habitus.config.loader import ConfigError
 from habitus.config.locale import LocaleConfig
 from habitus.config.memory import MemoryConfig
 from habitus.config.models import ModelConfig, StructuredOutputConfig
-from habitus.config.observability import (
-    ObservabilityAuditConfig,
-    ObservabilityConfig,
-    ObservabilityLoggingConfig,
-    ObservabilityMetricsConfig,
-    ObservabilityTracingConfig,
-)
 from habitus.config.root import HabitusConfig
 from habitus.config.scene import SceneConfig
 from habitus.config.storage import StorageConfig
 from habitus.config.temporal import TemporalConfig
 from habitus.config.workflow import MemoryWorkflowLifecycleConfig, WorkerConfig, WorkflowConfig
 from habitus.memory.intention import MemoryIntentionReviewConfig
-from habitus.memory.retrieval import MemoryRecallLifecycleConfig, MemorySearchServiceConfig
+from habitus.memory.recall import (
+    MemoryRecallLifecycleConfig,
+)
+from habitus.memory.retrieval import MemorySearchServiceConfig
 
 __all__ = [
     "BehaviorConfig",
@@ -50,18 +46,14 @@ __all__ = [
     "MemorySearchServiceConfig",
     "MemoryWorkflowLifecycleConfig",
     "ModelConfig",
-    "ObservabilityAuditConfig",
-    "ObservabilityConfig",
     "ForesightConfig",
+    "ForesightStoreConfig",
     "LifecycleConfig",
     "LifecycleRetryConfig",
     "LifecycleWorkerConfig",
     "TemporalConfig",
     "LocaleConfig",
     "SceneConfig",
-    "ObservabilityLoggingConfig",
-    "ObservabilityMetricsConfig",
-    "ObservabilityTracingConfig",
     "StorageConfig",
     "StructuredOutputConfig",
     "WorkerConfig",

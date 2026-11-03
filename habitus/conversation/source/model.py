@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Any
 
-from habitus.foundation.integrity import canonical_digest, canonical_json, canonicalize
+from habitus.foundation.integrity import canonical_digest, canonical_json, canonicalize, is_sha256_hex
+from habitus.foundation.timestamps import TimestampError, TimestampZoneError, utc_timestamp
 from habitus.pre.conversation import ConversationBatch
 
 SOURCE_SCHEMA_VERSION = "conversation_source_envelope_v2"
@@ -23,11 +24,7 @@ class ConversationSourceCapacityError(ConversationSourceError):
 
 
 def require_sha256(value: object, label: str) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
+    if not is_sha256_hex(value):
         raise ConversationSourceError(f"{label} must be lowercase SHA-256 text")
     return value
 
@@ -67,18 +64,14 @@ def encode_durable_record(record: Mapping[str, Any], *, max_bytes: int, label: s
 
 
 def source_timestamp(value: datetime | str, label: str) -> datetime:
-    if isinstance(value, datetime):
-        parsed = value
-    elif isinstance(value, str):
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ConversationSourceError(f"{label} must be ISO-8601") from exc
-    else:
+    if not isinstance(value, datetime | str):
         raise ConversationSourceError(f"{label} must be a datetime")
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ConversationSourceError(f"{label} must be timezone-aware")
-    return parsed.astimezone(UTC)
+    try:
+        return utc_timestamp(value)
+    except TimestampZoneError as exc:
+        raise ConversationSourceError(f"{label} must be timezone-aware") from exc
+    except TimestampError as exc:
+        raise ConversationSourceError(f"{label} must be ISO-8601") from exc
 
 
 def _protocol(value: object) -> str:

@@ -150,12 +150,29 @@ def test_a_response_that_cannot_be_written_is_observed_not_raised(tmp_path, monk
 
 
 def test_the_lanes_polarities_are_the_ledgers_polarities() -> None:
-    """会话 lane 不认识预测层，方向的三个字各写一份：这里钉住两份相同，漂了桥会把回应静默丢掉。"""
+    """会话 lane 不认识预测层，方向的四个值各写一份：这里钉住两份相同，漂了桥会把回应静默丢掉。"""
 
     from habitus.behavior.fusion.lanes.session import reminders
     from habitus.foresight.ledger import model
 
     assert tuple(reminders.POLARITIES) == tuple(model.POLARITIES)
+    assert model.SAID_DONE in reminders.POLARITIES
+
+
+def test_a_said_done_response_from_the_lane_is_written_and_closes_the_reminder(tmp_path) -> None:
+    """裁定 91 第 3 条②：模型判出「已做」，桥原样写进账本、关闭这条提醒（之后的轮不再带）。"""
+
+    ledger = ForesightLedgerStore(tmp_path / "ledger")
+    bridge = ReminderResponses(ledger, limit=5)
+    ledger.record_expectation(expectation("hotel", DAY0))
+    ledger.record_delivery(
+        DAY0.date(), Delivery("hotel", DAY0 + timedelta(minutes=41), 1, True, "说了", 1.0, "订酒店吗")
+    )
+    at = DAY0 + timedelta(hours=2)
+    assert [item.reminder_id for item in bridge.open(at)] == ["hotel"]
+    bridge.respond("conv#1-3", ReminderResponse("hotel", "已做"), at=at)
+    assert [(item.polarity, item.closes) for item in ledger.responses_on(DAY0.date())] == [("已做", True)]
+    assert bridge.open(at + timedelta(minutes=1)) == ()
 
 
 def test_bug8_the_outlet_and_the_bridge_can_both_write_a_response_for_the_same_moment(tmp_path) -> None:

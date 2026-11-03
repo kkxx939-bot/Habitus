@@ -18,7 +18,7 @@ from habitus.foundation.integrity import canonical_json
 from habitus.infrastructure.store.contracts import LeaseGuard, PathLock
 from habitus.infrastructure.store.filesystem import atomic_replace_bytes, durable_unlink, read_regular_bytes
 from habitus.memory.snapshot import MemorySnapshot
-from habitus.memory.tree import MemoryTree
+from habitus.memory.tree import MemoryTree, memory_root_lock_prefix
 from habitus.memory.uri import MemoryURI
 
 
@@ -169,8 +169,8 @@ class MemoryLifecycleOperationStore:
         self,
         tree: MemoryTree,
         path_lock: PathLock,
+        workflow_root: str | Path,
         *,
-        root: str | Path | None = None,
         max_operations: int = 100_000,
         max_file_bytes: int = 512 * 1024,
     ) -> None:
@@ -184,17 +184,12 @@ class MemoryLifecycleOperationStore:
         }.items():
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-        canonical = (tree.root.parent / "workflow" / "lifecycle" / "l2_operations").resolve(strict=False)
-        resolved = canonical if root is None else Path(root).expanduser().resolve(strict=False)
-        if resolved != canonical:
-            raise ValueError("memory lifecycle operations must use the canonical workflow root")
         self.tree = tree
         self.path_lock = path_lock
-        self.root = resolved
+        self.root = tree.require_outside(Path(workflow_root) / "lifecycle" / "l2_operations")
         self.max_operations = max_operations
         self.max_file_bytes = max_file_bytes
-        root_digest = hashlib.sha256(str(tree.root).encode("utf-8")).hexdigest()[:24]
-        self._lock_prefix = f"memory-lifecycle-operation:{root_digest}"
+        self._lock_prefix = memory_root_lock_prefix("memory-lifecycle-operation", tree.root)
 
     def initialize(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)

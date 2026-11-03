@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import json
 import os
@@ -14,6 +15,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
 if TYPE_CHECKING:
+    from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+    from habitus.config import HabitusConfig
     from habitus.conversation import ConversationSourceConsumer
     from habitus.integrations.local_service.cloud_setup import (
         CloudSetupSelection,
@@ -53,9 +57,14 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 
 def _doctor(args: argparse.Namespace, values: Mapping[str, str]) -> int:
+    from habitus.config import ConfigError, HabitusConfig
     from habitus.integrations.local_service.adapter_catalog import load_adapter_catalog
     from habitus.integrations.local_service.doctor import run_doctor_from_env
 
+    # --deep 会构造真实组件、探测失败时记观测日志：先与 serve 一样配好日志，免得裸消息漏到 stderr；
+    # 配置读不出来时不配，体检报告的 config 一项会说原因
+    with contextlib.suppress(ConfigError, OSError, TypeError, ValueError):
+        _configure_logging(HabitusConfig.from_env(environ=values))
     catalog = load_adapter_catalog()
     report = run_doctor_from_env(
         environ=values,
@@ -73,6 +82,7 @@ def _doctor(args: argparse.Namespace, values: Mapping[str, str]) -> int:
 
 def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
     from habitus.config import HabitusConfig
+    from habitus.infrastructure.store.filesystem.path_safety import DurablePathIntegrityError
     from habitus.integrations.local_service.adapter_catalog import load_adapter_catalog
     from habitus.integrations.local_service.cloud_setup import (
         apply_cloud_selection,
@@ -83,9 +93,8 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
         initialize_config,
         initialize_config_from_mapping,
         load_initialization_mapping,
+        plugin_connection_paths,
         resolve_config_path,
-        resolve_plugin_connection_path,
-        write_plugin_connection,
     )
 
     catalog = load_adapter_catalog()
@@ -132,16 +141,15 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
         return 0
     except (OSError, TypeError, ValueError) as exc:
         raise SystemExit(f"Habitus initialization failed: {exc}") from exc
+    except DurablePathIntegrityError as exc:
+        raise SystemExit(f"Habitus initialization failed: {_path_integrity_reason(exc)}: {destination.parent}") from exc
     values["HABITUS_CONFIG_FILE"] = str(result.path)
     try:
         config = HabitusConfig.from_file(result.path)
-        adjacent_connection = result.path.parent / "agent-plugin" / "connection.json"
-        write_plugin_connection(config, adjacent_connection)
-        default_connection = resolve_plugin_connection_path(environ=values)
-        if default_connection != adjacent_connection:
-            write_plugin_connection(config, default_connection)
+        connections = plugin_connection_paths(result.path, environ=values)
     except (OSError, TypeError, ValueError) as exc:
         raise SystemExit(f"Habitus plugin connection initialization failed: {exc}") from exc
+    _write_plugin_connections(config, connections, "initialization")
     state = "updated" if result.backup_path is not None else "created" if result.created else "using existing"
     sys.stdout.write(f"Habitus config {state}: {result.path}\n")
     if result.backup_path is not None:
@@ -149,6 +157,7 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
 
     if interactive:
         _configure_missing_credentials(result.path)
+    _write_missing_credentials_hint(result.path)
     run_doctor = args.run_doctor
     if run_doctor is None and interactive:
         run_doctor = _confirm_after_write("Validate the setup now?", default=True)
@@ -161,6 +170,11 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
             json=False,
         )
         doctor_ok = _doctor(doctor_args, values) == 0
+        if not doctor_ok:
+            sys.stdout.write(
+                f"Next: fix the [FAIL] items above (config file: {result.path}), "
+                f"then run: habitus-server doctor --config {result.path}\n"
+            )
 
     harnesses = list(args.harnesses)
     if args.all_harnesses:
@@ -168,6 +182,7 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
     elif (
         not harnesses
         and interactive
+        and doctor_ok is not False
         and _confirm_after_write(
             "Install Habitus memory plugins for detected Agent Harnesses?",
             default=False,
@@ -191,6 +206,38 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
     if not harnesses:
         sys.stdout.write("Agent plugins: npm install -g habitus && habitus plugin install --harness <id>\n")
     return 0
+
+
+def _write_plugin_connections(config: HabitusConfig, connections: Sequence[Path], action: str) -> None:
+    """按配置的监听地址写插件的连接文件（``plugin_connection_paths`` 给的那几份）；写不了就一行原因退出，点名哪个目录。"""
+
+    from habitus.infrastructure.store.filesystem.path_safety import DurablePathIntegrityError
+    from habitus.integrations.local_service.initialization import write_plugin_connection
+
+    for connection in connections:
+        try:
+            write_plugin_connection(config, connection)
+        except (OSError, TypeError, ValueError) as exc:
+            raise SystemExit(f"Habitus plugin connection {action} failed: {exc}") from exc
+        except DurablePathIntegrityError as exc:
+            raise SystemExit(
+                f"Habitus plugin connection {action} failed: {_path_integrity_reason(exc)}: {connection.parent}"
+            ) from exc
+
+
+def _path_integrity_reason(exc: BaseException) -> str:
+    """路径完整性错误逐层包装（"不是安全目录" ← "不能穿过符号链接"）：拼成一行，外层在前。"""
+
+    from habitus.infrastructure.store.filesystem.path_safety import DurablePathIntegrityError
+
+    reasons: list[str] = []
+    current: BaseException | None = exc
+    while isinstance(current, DurablePathIntegrityError):
+        reason = " ".join(str(current).split())
+        if reason and reason not in reasons:
+            reasons.append(reason)
+        current = current.__cause__
+    return ": ".join(reasons) or type(exc).__name__
 
 
 def _prompt_cloud_setup(
@@ -317,6 +364,18 @@ def _configure_missing_credentials(path: Path) -> None:
         raise SystemExit(f"Habitus credential configuration failed: {exc}") from exc
     count = sum(len(fields) for fields in updates.values())
     sys.stdout.write(f"Configured {count} credential fields in {path}\n")
+
+
+def _write_missing_credentials_hint(path: Path) -> None:
+    from habitus.integrations.local_service.initialization import missing_credential_fields
+
+    missing = missing_credential_fields(path)
+    if missing:
+        fields = ", ".join(f"credentials.{item.reference}.{item.field}" for item in missing)
+        sys.stdout.write(
+            f"Credentials are empty ({fields}): fill them in under 'credentials' in {path}, "
+            f"then run: habitus-server doctor --config {path}\n"
+        )
 
 
 def _maybe_offer_init(explicit: str | None, values: dict[str, str]) -> bool:
@@ -485,41 +544,111 @@ def _report_repair_plan(
     return 0
 
 
-def _serve(values: Mapping[str, str]) -> None:
-    """服务模式才加载可选 HTTP 依赖和重量级组合根。"""
+def _configure_logging(config: HabitusConfig) -> None:
+    """独立进程的日志：配置里开着就把 JSON 结构化日志写到 stderr（serve 与 doctor 共用）。"""
 
-    from habitus.config import ConfigError, HabitusConfig
     from habitus.infrastructure.observability import configure_json_logging
-    from habitus.integrations.http_api.app import create_http_app
-    from habitus.integrations.local_service.adapter_catalog import load_adapter_catalog
-    from habitus.integrations.local_service.doctor import run_startup_preflight
-    from habitus.integrations.local_service.instance_lock import ServiceInstanceLock
-    from habitus.runtime import build_runtime
+
+    if config.observability.logging.enabled:
+        configure_json_logging(level=config.observability.logging.level)
+
+
+def _serve(values: Mapping[str, str]) -> None:
+    """服务模式才加载可选 HTTP 依赖和重量级组合根；先确认 HTTP extra 已装，再导入 HTTP 应用。"""
 
     try:
+        import fastapi  # noqa: F401
         import uvicorn
     except ImportError as exc:
-        raise SystemExit("habitus-server requires the 'http' optional dependencies") from exc
+        from habitus.integrations.local_service.doctor import pip_install_command
+
+        raise SystemExit(
+            f"habitus-server serve requires the 'http' extra ({exc.name or 'fastapi/uvicorn'} is missing); "
+            f"install with: {pip_install_command('cloud')} (the default cloud setup, includes 'http') "
+            f"or {pip_install_command('http')}"
+        ) from exc
+
+    from habitus.config import ConfigError, HabitusConfig
+    from habitus.foundation.redaction import redact_secrets
+    from habitus.integrations.http_api.app import create_http_app
+    from habitus.integrations.local_service.adapter_catalog import load_adapter_catalog
+    from habitus.integrations.local_service.doctor import StartupPreflightError, run_startup_preflight
+    from habitus.integrations.local_service.initialization import plugin_connection_paths, resolve_config_path
+    from habitus.integrations.local_service.instance_lock import ServiceInstanceLock
+    from habitus.runtime import build_runtime
 
     try:
         config = HabitusConfig.from_env(environ=values)
     except (ConfigError, OSError, TypeError, ValueError) as exc:
         raise SystemExit(f"Habitus configuration failed: {exc}") from exc
-    if config.observability.logging.enabled:
-        configure_json_logging(level=config.observability.logging.level)
+    _configure_logging(config)
     catalog = load_adapter_catalog()
-    run_startup_preflight(config, environ=values, catalog=catalog)
+    try:
+        run_startup_preflight(config, environ=values, catalog=catalog)
+    except StartupPreflightError as exc:
+        raise SystemExit(f"Habitus startup preflight failed: {' '.join(str(exc).split())}") from None
+    # 改了 http.host / port 之后不用重跑 init：启动时按这次的监听地址把插件的连接文件刷新一遍（与 init 写的是同几份）
+    try:
+        connections = plugin_connection_paths(resolve_config_path(None, environ=dict(values)), environ=values)
+    except ValueError as exc:
+        raise SystemExit(f"Habitus plugin connection refresh failed: {exc}") from exc
+    _write_plugin_connections(config, connections, "refresh")
     runtime = build_runtime(
         config,
         providers=catalog.providers,
         vector_stores=catalog.vector_stores,
     )
-    app = create_http_app(
-        runtime,
-        config=config.http,
-        instance_lock=ServiceInstanceLock(config.storage_root / "service" / "http.lock"),
+    app = _StartupFailureGuard(
+        create_http_app(
+            runtime,
+            config=config.http,
+            instance_lock=ServiceInstanceLock(config.storage_root / "service" / "http.lock"),
+        )
     )
-    uvicorn.run(app, host=config.http.host, port=config.http.port, log_config=None)
+    try:
+        uvicorn.run(app, host=config.http.host, port=config.http.port, log_config=None)
+    except SystemExit:
+        if app.failure is None:
+            raise
+        # 云服务拒收凭据时回包会带出凭据原文（401 的 security token[…]）：这一行原因先去掉凭据
+        reason = " ".join(redact_secrets(str(app.failure)).split()) or type(app.failure).__name__
+        raise SystemExit(f"Habitus startup failed: {reason}") from None
+
+
+class _StartupFailureGuard:
+    """包住 ASGI 应用：启动阶段（实例锁、``runtime.start``）抛出的异常记下来，不让整段栈进日志。
+
+    Starlette 把启动异常的整段 traceback 作为 ``lifespan.startup.failed`` 的消息交给 uvicorn 打出；
+    这里截下那条消息、换成空消息，uvicorn 照常按启动失败退出，原因由 ``_serve`` 写成一行。
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+        self.failure: BaseException | None = None
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "lifespan":
+            await self._app(scope, receive, send)
+            return
+        held: Message | None = None
+
+        async def guarded_send(message: Message) -> None:
+            nonlocal held
+            if message["type"] == "lifespan.startup.failed":
+                held = message
+                return
+            await send(message)
+
+        try:
+            await self._app(scope, receive, guarded_send)
+        except BaseException as exc:
+            if held is None:
+                raise
+            self.failure = exc
+            await send({"type": "lifespan.startup.failed", "message": ""})
+            return
+        if held is not None:
+            await send(held)
 
 
 def _exec_serve(path: Path) -> None:
@@ -648,6 +777,17 @@ def _write_doctor(report: object, output: TextIO) -> None:
         output.write(f"[{check.status.value.upper()}] {check.name}: {check.detail}\n")
 
 
+def _source_consumer(value: str) -> str:
+    """``--consumer`` 的取值必须是会话源的一个 Consumer 名；用到这个子命令时才导入会话源。"""
+
+    from habitus.conversation import ConversationSourceConsumer
+
+    names = tuple(item.value for item in ConversationSourceConsumer)
+    if value not in names:
+        raise argparse.ArgumentTypeError(f"invalid choice: {value!r} (choose from {', '.join(names)})")
+    return value
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="habitus-server")
     parser.add_argument("--config", help="覆盖 HABITUS_CONFIG_FILE 指向的配置文件")
@@ -690,8 +830,8 @@ def _parser() -> argparse.ArgumentParser:
     repair.add_argument(
         "--consumer",
         required=True,
-        choices=("memory", "behavior_session"),
-        help="要修复的 Consumer",
+        type=_source_consumer,
+        help="要修复的 Consumer（会话源的 Consumer 名）",
     )
     repair.add_argument(
         "--dry-run",
@@ -706,7 +846,6 @@ def _parser() -> argparse.ArgumentParser:
         skip_port=False,
         deep=False,
         probe_timeout=15.0,
-        plugin_help=False,
         dry_run=False,
     )
     return parser

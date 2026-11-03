@@ -10,8 +10,8 @@
 - **一段状态**（``HIGH_STATE`` / ``LOW_STATE``）：对这一类每天的次数做变点检测（二分切段，泊松似然，切一刀要换得
   ``2·ln(天数)`` 以上的偏差下降——BIC；每段至少 1 个块长）。最长的那段是它的常态，比常态多的段是"集中期"、少的是"停了一阵"。
   例："排查问题"第 8 周一周 18 条、前后几周零星几条 → 一段集中排查期。
-- **久别重来**（``RETURN``）：这一次隔得比之前所有没截尾的间隔都长、而且之前的样本够（``temporal.absence``，与预测层「久别」
-  同一个判法，不用固定天数窗；裁定 59）。状态 = 重来那天到下一次久别。
+- **久别重来**（``RETURN``）：这一次隔得比之前所有没截尾的间隔都长、而且之前的样本够（``temporal.absence.exceeds_longest``，
+  不用固定天数窗；裁定 59）。预测层的账的久别另要"至少 H 个典型间隔"（裁定 88 第 2 条），这里没跟着改。状态 = 重来那天到下一次久别。
 - **情境概念**（``SITUATION``）：情境成立的日子（那天有记录判过它、而且成立），连着的几天是一段。
 
 **怎么比**（裁定 27 第 4 条，S4）：每段状态和它前后紧挨着的、同样多个人在场的平常日子比（块内对照：慢慢变多变少的
@@ -78,8 +78,13 @@ def episodes(
         bounds = [*starts, end]
         found = []
         for start, following in zip(bounds, bounds[1:], strict=False):
-            last = max(day for day in seen if start <= day < following)
-            found.append(Episode(start, last + timedelta(days=1) if following != end else end))
+            if following == end:
+                found.append(Episode(start, end))
+                continue
+            inside = [day for day in seen if start <= day < following]
+            # 重来那天人不在场（整天被观测空白盖住）、到下一次重来之前在场的日子里一次也没见到：这一段没有可量的日子，不立
+            if inside:
+                found.append(Episode(start, max(inside) + timedelta(days=1)))
         return tuple(found)
     return _states(days, counts, segment, minimum=max(1, math.ceil(block_days)))
 
@@ -155,6 +160,15 @@ class EpisodeMeasure:
         lowest = math.prod(table.null()[min(table.null())] for table in tables)
         return min(1.0, 2.0 * min(highest, lowest))
 
+    def minimum_toward(self, *, upward: bool) -> float:
+        """只朝一侧检：每段都取到这一侧最极端（全阳朝上、全阴朝下）的概率。"""
+
+        tables = self._tables()
+        if not tables:
+            return 1.0
+        pick = max if upward else min
+        return min(1.0, math.prod(table.null()[pick(table.null())] for table in tables))
+
     def interval(
         self, *, level: float, rounds: int, seed: int
     ) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
@@ -179,11 +193,11 @@ class EpisodeMeasure:
                 relatives.append(result.relative)
         ordered = sorted(differences)
         tail = (1.0 - level) / 2.0
-        spread = (_quantile(ordered, tail), _quantile(ordered, 1.0 - tail))
+        spread = (stats.quantile(ordered, tail), stats.quantile(ordered, 1.0 - tail))
         if len(relatives) < rounds * 0.9:
             return spread, None
         ordered_relatives = sorted(relatives)
-        return spread, (_quantile(ordered_relatives, tail), _quantile(ordered_relatives, 1.0 - tail))
+        return spread, (stats.quantile(ordered_relatives, tail), stats.quantile(ordered_relatives, 1.0 - tail))
 
     def heterogeneity(self) -> float | None:
         return None  # 段数很少，看"去掉一段方向变不变"（``leave_one_out``）
@@ -434,13 +448,6 @@ def _rate(values: Sequence[int], low: int, high: int) -> float:
 
 def _mean(values: Sequence[int]) -> float:
     return sum(values) / len(values) if values else 0.0
-
-
-def _quantile(ordered: Sequence[float], fraction: float) -> float:
-    position = fraction * (len(ordered) - 1)
-    low = math.floor(position)
-    high = min(low + 1, len(ordered) - 1)
-    return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
 
 
 __all__ = ["Episode", "EpisodeMeasure", "episodes", "measure_of", "unit_length"]

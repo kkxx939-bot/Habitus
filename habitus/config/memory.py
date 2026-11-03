@@ -20,8 +20,10 @@ from habitus.memory.editor import (
 )
 from habitus.memory.indexing import MemoryVectorIndexConfig
 from habitus.memory.intention import MemoryIntentionReviewConfig
-from habitus.memory.retrieval import (
+from habitus.memory.recall import (
     MemoryRecallLifecycleConfig,
+)
+from habitus.memory.retrieval import (
     MemorySearchServiceConfig,
     MemorySemanticSearchConfig,
 )
@@ -41,7 +43,7 @@ class MemoryConfig:
     recall_lifecycle: MemoryRecallLifecycleConfig = field(default_factory=MemoryRecallLifecycleConfig)
     field_compaction: MemoryFieldCompactionConfig = field(default_factory=MemoryFieldCompactionConfig)
     lifecycle_maintenance: MemoryLifecycleMaintenanceConfig = field(default_factory=MemoryLifecycleMaintenanceConfig)
-    retrieval: MemoryRetrievalConfig = field(default_factory=MemoryRetrievalConfig)
+    editor_retrieval: MemoryRetrievalConfig = field(default_factory=MemoryRetrievalConfig)
     vector_store: VectorStoreConfig = field(default_factory=VectorStoreConfig)
     vector_index: MemoryVectorIndexConfig = field(default_factory=MemoryVectorIndexConfig)
     semantic_search: MemorySemanticSearchConfig = field(default_factory=MemorySemanticSearchConfig)
@@ -60,7 +62,7 @@ class MemoryConfig:
             ("recall_lifecycle", self.recall_lifecycle, MemoryRecallLifecycleConfig),
             ("field_compaction", self.field_compaction, MemoryFieldCompactionConfig),
             ("lifecycle_maintenance", self.lifecycle_maintenance, MemoryLifecycleMaintenanceConfig),
-            ("retrieval", self.retrieval, MemoryRetrievalConfig),
+            ("editor_retrieval", self.editor_retrieval, MemoryRetrievalConfig),
             ("vector_store", self.vector_store, VectorStoreConfig),
             ("vector_index", self.vector_index, MemoryVectorIndexConfig),
             (
@@ -125,10 +127,10 @@ class MemoryConfig:
                 data.get("lifecycle_maintenance", {}),
                 "config.memory.lifecycle_maintenance",
             ),
-            retrieval=construct_config(
+            editor_retrieval=construct_config(
                 MemoryRetrievalConfig,
-                data.get("retrieval", {}),
-                "config.memory.retrieval",
+                data.get("editor_retrieval", {}),
+                "config.memory.editor_retrieval",
             ),
             vector_store=_vector_store_config(data.get("vector_store", {})),
             vector_index=construct_config(

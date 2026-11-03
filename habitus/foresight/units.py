@@ -4,8 +4,8 @@
 日历情境（周三、工作日，裁定 59）、离上次够久），它那本账就是这个输入的权重（由结算一次次调，裁定 56 第 3 条）；压低这个行为、此刻在场的关系
 （取消出差）也算进这一组。像 transformer 里一个 token 看上下文里全部 token；区别是不学注意力，直接从历史数。
 
-**读数** = 这一组在场时，历史上下一步来了多少。历史上的"一刻"是同一个行为的几条预期在说中的范围上连成一片的那一段，
-来没来看它们在预测轴上现在算数的那几笔（裁定 54：被提醒才做的、观测空白里的、作废的都不算知道），一刻的分量是定它来没来的
+**读数** = 这一组在场时，历史上下一步来了多少。历史上的"一刻"是同一个行为的几条预期在说中的范围上连成一片的那一段（以当天为单位、
+起算不在同一天的各自一刻，一次发生只算给一条，裁定 81；``connected``），来没来看它们在预测轴上现在算数的那几笔（裁定 54：被提醒才做的、观测空白里的、作废的都不算知道），一刻的分量是定它来没来的
 那一笔的强度（窗外发生、后补、规律断了的打折都在里面，与账同一把尺）。历史上每一刻在场的输入每晚按当晚的语义树重标
 （裁定 55 新版第 2 条，``foresight.history``）：一条新关系长出来那一晚，它在场的那几刻自动换进新组合。样本少分层退：
 
@@ -34,7 +34,7 @@ from typing import Protocol
 from habitus.foresight.edges import DOWN, PastMoment, fold_sequence, ordered
 from habitus.foresight.errors import ForesightError
 from habitus.foresight.ladder import Evidence, Standing
-from habitus.foresight.ledger.model import NATURAL_HITS, Expectation, relation_backed
+from habitus.foresight.ledger.model import NATURAL_HITS, Expectation, parse_account, relation_backed
 from habitus.foresight.opportunities.model import OpportunityTable, TreeReading
 from habitus.foresight.reliability import Reliability, estimate
 from habitus.foundation.lifecycle import effective_cap
@@ -42,6 +42,10 @@ from habitus.foundation.lifecycle import effective_cap
 #: 同一刻同一个行为的另外几个输入的递送原因：单元替它们一并决定，证据里写 ``UNIT_CITE + 依据那条预期的身份``。
 UNIT = "单元已选"
 UNIT_CITE = "单元:"
+
+#: 以当天为单位的预期：说中的范围从当天零点起（``triggers.days`` / ``triggers.situations``）。起算不在同一天的两条各自是一刻，
+#: 重叠也不连（裁定 81）。
+DAY_SOURCES = frozenset({"日子", "情境"})
 
 
 class Level(str, Enum):
@@ -90,10 +94,13 @@ def signature(expectations: Iterable[Expectation], *, coincidental: Collection[s
 
 
 class Span(Protocol):
-    """说中的范围：从什么时候起的发生算这一条说中的、最晚时限（预期与单元历史的每刻记录都有）。"""
+    """说中的范围：从什么时候起的发生算这一条说中的、最晚时限，连同记在哪本账上（预期与单元历史的每刻记录都有）。"""
 
     @property
     def expectation_id(self) -> str: ...
+
+    @property
+    def account(self) -> str: ...
 
     @property
     def observed_from(self) -> datetime: ...
@@ -103,19 +110,52 @@ class Span(Protocol):
 
 
 def connected[S: Span](items: Iterable[S]) -> list[list[S]]:
-    """同一个行为的预期按说中的范围（起算 → 最晚时限）连成一片的分成一组（一刻）。"""
+    """同一个行为的预期按说中的范围（起算 → 最晚时限）连成一片的分成一组（一刻）：两条重叠或只碰到端点就连。例外是两条都以当天
+    为单位（``DAY_SOURCES``）、起算不在同一天：各自是一刻，重叠也不连（裁定 81）——他偶尔隔一天做时，今天那条覆盖今天和明天，
+    与明天那条重叠，连起来就把一串天并成一刻。这样两条可能都认同一次发生，单元历史记刻时只算给起算最早的那一条
+    （``foresight.history.labelled_moments``）。同一天的、事件与日子之间的照连（经事件那条连到两天的，也就是同一刻）。"""
 
     ordered = sorted(items, key=lambda item: (item.observed_from, item.expectation_id))
-    groups: list[list[S]] = []
-    end: datetime | None = None
-    for item in ordered:
-        if groups and end is not None and item.observed_from <= end:
-            groups[-1].append(item)
-            end = max(end, item.deadline)
-        else:
-            groups.append([item])
-            end = item.deadline
-    return groups
+    parent = list(range(len(ordered)))
+
+    def root(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    open_: list[int] = []
+    for index, item in enumerate(ordered):
+        # 按起算排好了：前面那条的最晚时限不早于这条的起算就是重叠或碰到端点
+        open_ = [other for other in open_ if ordered[other].deadline >= item.observed_from]
+        for other in open_:
+            if joinable(ordered[other], item):
+                parent[root(index)] = root(other)
+        open_.append(index)
+    groups: dict[int, list[S]] = {}
+    for index, item in enumerate(ordered):
+        groups.setdefault(root(index), []).append(item)
+    return sorted(groups.values(), key=lambda group: (group[0].observed_from, group[0].expectation_id))
+
+
+def joinable(first: Span, second: Span) -> bool:
+    """两条说中的范围相交时能不能算同一刻：两条都以当天为单位、起算不在同一天的不能（裁定 81）。``connected`` 连片、白天拢单元
+    拉还没到时窗的、后来才到时窗的并进已决定过的依据，三处都照这一条（裁定 90：1、2 天混着的事，今天那条两天时窗不并进昨天
+    已经做完的那一刻，真漏了照常到时窗末提醒）。"""
+
+    return not (_by_day(first) and _by_day(second) and first.observed_from.date() != second.observed_from.date())
+
+
+def _by_day(item: Span) -> bool:
+    return parse_account(item.account)[1] in DAY_SOURCES
+
+
+def meets(item: Span, start: datetime, end: datetime) -> bool:
+    """这条说中的范围（起算 → 最晚时限）与 ``start`` → ``end`` 相交：只碰到端点不算。白天拢单元时把还没到时窗的同一刻输入
+    拉进一组、把后来才到时窗的并进已经决定过的依据，都用这一把尺（``connected`` 连成一片时碰到端点也算，两者不同）；两处都还要
+    ``joinable``（以当天为单位、起算不在同一天的不是同一刻）。"""
+
+    return item.observed_from < end and item.deadline > start
 
 
 def unit_reading(
@@ -186,15 +226,28 @@ def speakable(item: Input) -> bool:
     """这个输入能不能当开口的依据（方案第六节"开口只用成立的"）：日子能；有关系撑着的输入（事件、情境）只有关系已成立、
     语义树没判它效应不够大（巧合）的才能——候选关系与巧合只进读数、不当依据。"""
 
-    if not relation_backed(item.expectation.source):
+    return _speaks(item.expectation, item.reading, item.status)
+
+
+def voiced(table: OpportunityTable | None, expectation: Expectation) -> bool:
+    """这条预期按此刻的机会表能不能当开口的依据（``speakable`` 同一条规则，关系状态与读数从表上读）：递送判依据没说成时用——
+    依据不能开口、单元记了影子，被它吸收的成员照常接手（裁定 56 第 12 条、裁定 92 第 2 条②）。"""
+
+    return _speaks(expectation, *tree_reading(table, expectation))
+
+
+def _speaks(expectation: Expectation, reading: TreeReading | None, status: str | None) -> bool:
+    if not relation_backed(expectation.source):
         return True
-    return item.status == "established" and not (item.reading is not None and item.reading.large_enough is False)
+    return status == "established" and not (reading is not None and reading.large_enough is False)
 
 
 def basis(inputs: Sequence[Input], *, due: Iterable[str] | None = None) -> Input:
-    """说话的依据：有关系撑着的输入里关系成立、语义树判效应够大、抬升最高的那条；没有就取账下界最高的那条（日子，或抬升
-    不够大的事件）——账高、抬升低的是巧合搭车，不当依据（裁定 56 第 10 条）。``due`` 给了就只从这些预期（已到时窗的）里选：
-    还没到时窗的只当输入，不当依据（2026-10-17 四方评审：拿次日那条当依据，重的会提前一天说、轻的会推到第二天）。"""
+    """说话的依据：有关系撑着的输入里关系成立、语义树判效应够大、抬升最高的那条；没有就从能当依据的输入（``speakable``：
+    日子，或成立而效应没被判不够大的关系）里取账下界最高的那条——候选关系与巧合只进读数、不当依据（裁定 56 第 10、12 条）：
+    候选那本影子账下界再高也不抢日子账的依据（裁定 91）。一条能当依据的都没有，才在它们里面取，单独当依据时记影子
+    （``unit_level``）。``due`` 给了就只从这些预期（已到时窗的）里选：还没到时窗的只当输入，不当依据（2026-10-17 四方评审：
+    拿次日那条当依据，重的会提前一天说、轻的会推到第二天）。"""
 
     if not inputs:
         raise ForesightError("a unit needs at least one input to speak from")
@@ -210,8 +263,7 @@ def basis(inputs: Sequence[Input], *, due: Iterable[str] | None = None) -> Input
     ]
     if causes:
         return max(causes, key=lambda item: (item.reading.lift if item.reading else 0.0, item.account))
-    coincidental = {item.account for item in pool if item.reading is not None and item.reading.large_enough is False}
-    plain = [item for item in pool if item.account not in coincidental] or pool
+    plain = [item for item in pool if speakable(item)] or pool
     return max(plain, key=lambda item: (item.standing.prediction.lower, item.account))
 
 
@@ -282,6 +334,7 @@ __all__ = [
     "NATURAL_HITS",
     "UNIT",
     "UNIT_CITE",
+    "DAY_SOURCES",
     "Check",
     "Input",
     "Level",
@@ -289,10 +342,13 @@ __all__ = [
     "UnitReading",
     "basis",
     "connected",
+    "joinable",
+    "meets",
     "self_check",
     "signature",
     "speakable",
     "tree_reading",
     "unit_level",
     "unit_reading",
+    "voiced",
 ]

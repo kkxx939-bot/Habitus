@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from habitus.conditions import HolidayTable, HolidayYear, LocalCalendar
+from habitus.conditions import WEEKDAY_KEY, HolidayTable, HolidayYear, LocalCalendar
 from habitus.foresight import ForesightError
 from habitus.foresight.opportunities import (
     DayWatch,
@@ -21,7 +21,7 @@ from habitus.foresight.opportunities import (
     encode_table,
 )
 from habitus.scene.concepts import ConceptSet
-from habitus.scene.concepts.calendar_situations import calendar_concepts, weekday_set
+from habitus.scene.concepts.calendar_situations import calendar_concepts, value_set
 from habitus.scene.concepts.rhythm import RhythmRulers
 from habitus.scene.recurrence import coverage_by_lane, recurrences_of
 from habitus.scene.relations import Relation, RelationKey, Segment, Status, build_timelines, chains_of, merge_for
@@ -211,7 +211,7 @@ def test_calendar_situation_relations_list_each_day_the_condition_held_and_keep_
     def situation(antecedent: str) -> Relation:
         return Relation(key=key(antecedent, DOCS, Segment.SITUATION), status=Status.ESTABLISHED, upward=True)
 
-    both = weekday_set(("周三", "周五"), now=CREATED)
+    both = value_set(WEEKDAY_KEY, ("周三", "周五"), now=CREATED)
     concepts = ConceptSet([base(title) for title in TITLES] + [*calendar_concepts(now=CREATED), both])
     found = table((situation("周三"), situation("工作日")), concepts, calendar=LocalCalendar())
     assert {item.antecedent for item in found.relations} == {"周三", "工作日"}

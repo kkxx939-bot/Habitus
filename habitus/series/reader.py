@@ -9,8 +9,7 @@
   不做判重（判重只在融合层解决）；
 - ``kind_token`` 在这里分流（裁定 18、19）：类编号进序列（``classified``）；「待定」进序列但不是类（只占先后顺序）；
   「非事件」不进序列，连顺序里也当它不存在；既不是编号也不是占位标记的硬拒；lane 取编号前缀；
-- 观测空白两种都进（``GapKind``），跨过截止时刻的截到那一刻；空白的类型在这里翻译一次，上游改名时以未知取值硬失败；
-- ``concurrent_with`` 链接原样读成无序的 uri 对，只留两端都在序列里的（指向被跳过的一端，那条并行没有两个可用端点）；
+- 观测空白两种都进（``GapKind``），按本地日切开、只留截止日之前那几天的段；空白的类型在这里翻译一次，上游改名时以未知取值硬失败；
 - ``reminded`` 原样带着：被提醒过的发生要不要算进自然率，是消费方的事（``temporal`` 算它做了、但不是自然发生，见 ``temporal.episodes``）。
 
 两条 lane 各是一整套（裁定 35）：行为树、语义树各有会话、物理两支，各读各的，这里读到的一棵行为树里只有一条
@@ -27,7 +26,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import date, datetime
 
-from habitus.behavior.document import BehaviorDocument, BehaviorLinkType
+from habitus.behavior.document import BehaviorDocument
 from habitus.behavior.kinds.counted import uncounted
 from habitus.behavior.kinds.ids import KindIdError, Lane, lane_of_token, pending_token
 from habitus.behavior.schema.vocabulary import PROMPTERS
@@ -42,8 +41,7 @@ from habitus.series.model import (
     SeriesRecord,
     SkippedRecord,
     SkipReason,
-    clip_gap,
-    disproves,
+    standing_parts,
 )
 
 
@@ -109,10 +107,8 @@ def read_series(tree: BehaviorTree, *, cutoff: date) -> EventSeries:
 def _assemble(
     occurrences: Sequence[BehaviorDocument], gap_documents: Sequence[BehaviorDocument], cutoff: date
 ) -> EventSeries:
-    boundary = EventSeries(cutoff=cutoff)
     records: list[SeriesRecord] = []
     skipped: list[SkippedRecord] = []
-    links: list[tuple[str, str]] = []
     for document in occurrences:
         uri = str(BehaviorURI.from_address(document.address))
         day = document.address.occurred_on
@@ -122,26 +118,22 @@ def _assemble(
             continue
         token = _text(document.fields.get("kind_token"), "kind_token")
         records.append(_record(document, uri, token, _lane(token)))
-        links.extend(
-            (uri, str(link.to_uri)) for link in document.links if link.link_type is BehaviorLinkType.CONCURRENT_WITH
-        )
-    present = {record.uri for record in records}
-    # 空白在这里消解一次（``disproves``）：之后 temporal、关系检验读到的是同一份
-    starts = sorted(record.started_at for record in records)
+    # 空白在这里消解一次（``standing_parts``：按天切开、每天那段由那一天的记录判）：之后 temporal、关系检验读到的是同一份
+    starts: dict[date, list[datetime]] = {}
+    for record in records:
+        starts.setdefault(record.day, []).append(record.started_at)
+    for moments in starts.values():
+        moments.sort()
     gaps = [
-        gap
-        for gap in (
-            clip_gap(_gap(document), boundary.boundary_for(document.address.started_at)) for document in gap_documents
-        )
-        if not disproves(gap.kind, gap.started_at, gap.ended_at, starts)
+        part
+        for document in gap_documents
+        for part in standing_parts(_gap(document), lambda day: starts.get(day, ()))
+        if part.started_at.date() < cutoff
     ]
     return EventSeries(
         cutoff=cutoff,
         records=tuple(sorted(records, key=lambda item: (item.started_at, item.uri))),
         gaps=tuple(sorted(gaps, key=lambda item: (item.started_at, item.uri))),
-        concurrent=tuple(
-            sorted({_unordered(left, right) for left, right in links if left != right and {left, right} <= present})
-        ),
         skipped=tuple(sorted(skipped, key=lambda item: (item.day, item.uri))),
     )
 
@@ -213,10 +205,6 @@ def _lane(token: str) -> Lane:
         return lane_of_token(token)
     except KindIdError as exc:
         raise SeriesError(f"kind_token is neither a class id nor a marker: {token!r}") from exc
-
-
-def _unordered(left: str, right: str) -> tuple[str, str]:
-    return (left, right) if left <= right else (right, left)
 
 
 def _text(raw: object, field: str) -> str:

@@ -122,6 +122,29 @@ def semantic_name(value: object, field_name: str) -> str:
     return name
 
 
+class BehaviorNameTooLongError(ValueError):
+    """名字能当地址，但没给撞车消歧后缀留出字节（``MAX_BEHAVIOR_NAME_UTF8_BYTES``）。"""
+
+
+def behavior_name(value: object) -> str:
+    """一条行为的名字：能当行为树地址（``semantic_name``），且在融合层的字节预算之内。两条 lane 的入口与判断本身都按它查。"""
+
+    name = semantic_name(value, "behavior")
+    if len(name.encode("utf-8")) > MAX_BEHAVIOR_NAME_UTF8_BYTES:
+        raise BehaviorNameTooLongError("behavior name exceeds the byte budget kept for a collision suffix")
+    return name
+
+
+# 名字会拿去当路径上的一段，这些符号不能有：直接换成空格（同一个说法每次换出来的都一样）。
+_PATH_SYMBOLS = str.maketrans(dict.fromkeys('/\\:<>"|?*', " "))
+
+
+def address_name(raw: str) -> str:
+    """把一个说法洗成能当路径一段的样子：路径符号换成空格、空白收拢、去掉首尾的点与空格。洗完仍要过 ``behavior_name``。"""
+
+    return " ".join(raw.translate(_PATH_SYMBOLS).split()).strip(". ")
+
+
 def behavior_local_timestamp(value: object, field_name: str) -> datetime:
     """校验用于行为事实和地址身份的带时区本地时间。"""
 
@@ -212,6 +235,13 @@ def _parse_identity_timestamp(value: str, field_name: str) -> datetime:
     return resolved
 
 
+def readable_text(value: str) -> bool:
+    """树上的文本字段（摘要、目标、步骤）收不收得下：除换行与制表符以外不许有不可打印字符——控制符、ANSI 转义、零宽字符
+    与其他格式符（含组合表情里的零宽连接符）。树 schema 与两条 lane 的融合入口共用这一条：入口放行的文本树上一定收得下。"""
+
+    return not any(not character.isprintable() and character not in "\n\t" for character in value)
+
+
 def is_ascii_digits(value: object) -> bool:
     """只接受行为树日期目录使用的 ASCII 十进制数字。"""
 
@@ -231,8 +261,8 @@ def is_ascii_digits(value: object) -> bool:
 # 与认证/协议一起定（正门已在 ``Runtime.deliver_physical``）；② 容量类配置：生命周期相关的几项（观测、回执、判断的
 # 份数上限，行为树单目录子项上限）已从 ``Config.behavior`` 进来（26 号清单 8.2），其余内容上限仍用领域默认值；
 # ③ 各处点名的实测调优（词表/语义提示词）与生命周期欠账。
-# 【裁定】episodes 零占位维持（用户确认，见下方 BHV-EPISODE-002 的新定位）；links 归信封层
-# （用户确认，沿 memory 树先例）；basis 步骤时间窗校验删除（用户确认，见 validators.py）。
+# 【裁定】episodes 零占位维持（用户确认，见下方 BHV-EPISODE-002 的新定位）；文档不带 links
+# （两条 lane 都不产出判断间关系，信封层的 links 已删）；basis 步骤时间窗校验删除（用户确认，见 validators.py）。
 # 与用户数十轮讨论逐条裁定，吸收并关闭旧 TODO(BHV-TREE-TIMEBASE-001)（其地址时间基问题由下述
 # 地址设计解决）。按"定位 → 树形状 → occurrence → gap → 写入层 → 边界与缺口 → 已关闭支线 →
 # 待定"组织。
@@ -278,21 +308,20 @@ def is_ascii_digits(value: object) -> bool:
 #     kind_token         基础词表的类编号（s-k0007 / p-k0003）或占位标记（s-待定 / s-非事件）；schema 只收
 #                        这两种形状（裁定 19）。归约发布前由白天归类给出，之后只能由词表迁移改写
 #                        （``writer.restamp_kind_token``）；不渲染进正文——它是统计用的机器字段
-#     status             ongoing|completed|interrupted|abandoned  ← 链尾判断逐字，零发明
+#     status             ongoing|completed|interrupted|abandoned  ← 判断逐字，零发明
 #     status_basis       observed|inferred|observation_lost       ← 同上；interrupted 与
 #                        observation_lost 之分是删失纪律的根
 #     last_observed_at   最后支持观测的时刻（≠ 结束时刻）
-#     onset_available_at 链头判断的 evidence_ready_at——防标签泄漏的切点（终审补回的字段）
+#     onset_available_at 判断的 evidence_ready_at——防标签泄漏的切点（终审补回的字段）
 #     reminded           开始前窗口内被提醒过与否 ← 干预账本（干预混淆）
 # - 语义面（判断存储会释放，此处必须自足）：goal（可空；一条 occurrence 是"可提醒或可代劳的行为
 #   单位"而不是"任何动作"——2026-08-30 裁定，无意识小动作与过渡帧在融合层归属为空、不进树，
-#   曝光分母靠"这段在观测"而非动作段落树）、summary（链内有序拼接）、
+#   曝光分母靠"这段在观测"而非动作段落树）、summary（判断原文）、
 #   subjects（多值）、place（可空，等上游）、original_name（可空，仅撞车消歧记录非空）、
 #   basis[{semantics, observation_ids, 起止, available_at}]（每步时间在写入时从观测物化）。
-# - links 在文档**信封层**（用户裁定，沿 memory 树同一机制：links 是文档间的结构关系，与
-#   created_at 同级的元数据，不是本篇的语义内容）：**只有前向**，concurrent_with / results_from
-#   → 先前 occurrence URI；add-only 下不维护 backlinks，读侧取对称闭包——沿融合层同一纪律。
-# - 溯源（system 角色，不渲染进正文）：chain_digest（WP3 起只留链身份；逐条 id 随原料释放即成死引用）/
+# - 文档之间没有链接：两条 lane 都不产出判断间关系，归约也不写链接，信封里不再有 links 键
+#   （带 links 的旧文档按严格读取拒绝）。
+# - 溯源（system 角色，不渲染进正文）：chain_digest（WP3 起只留节点身份；逐条 id 随原料释放即成死引用）/
 #   fusion_version / reduction_version。
 # - 旧 schema 整体退役：confidence、conflicts、trigger、constraints、closure_reason、actions 的
 #   全部 14 个子字段（actor/method/parameters/target_refs/…）——无源或 coding-agent 词表；
@@ -302,18 +331,13 @@ def is_ascii_digits(value: object) -> bool:
 #   "每个非 system 字段必须出现在渲染结果里"（``kind_token`` 例外：编号不进正文，裁定 19）。
 #
 # ── 写入层（归约；零发明）────────────────────────────────────────────────────────────────
-# - 封口是机械推论不是语义判断：链尾 evidence_ready_at 老出封口视界
+# - 封口是机械推论不是语义判断：判断的 evidence_ready_at 老出封口视界
 #   （FUSION_CONTEXT_LOOKBACK_SECONDS=3600s，唯一出处 behavior/fusion/config.py，归约层只准 import
-#   不准自带数）→ 链闭合、信息已定、物化。这个窗口原是逐帧融合"还能指回多久以前"的范围；逐帧融合退役后
-#   两条 lane 的判断互不指向，它只剩"落树之前等多久"（一送到就封口见 TODO(BHV-SESSION-LANE-001)）。判据须同时对墙钟与融合队列
-#   前沿（oldest_uncommitted 段的最早 available_at）出窗——停机补算的积压段 cutoff 是历史时刻，
-#   只看墙钟会把还能被引用的链提前封口。晚到的修正/结果在机械上不存在（取消追加旁路的依据）。
+#   不准自带数）→ 信息已定、物化。这个窗口原是逐帧融合"还能指回多久以前"的范围；逐帧融合退役后
+#   两条 lane 的判断互不指向，它只剩"落树之前等多久"（会话 lane 一送到就封口，见 reduction/sealing）。判据须同时对墙钟与
+#   还没写成判断的观测（未被回执覆盖的观测的最早 available_at）出窗。
 # - 五条死规则（用户一口气裁定）：
-#   ① 链头取值：occurrence 的 name 与 started_at 取链头**第一条未被替换**判断的值；supersedes
-#     替换链头时新判断即新链头——替换者继承被替换者在链中的**位置**（不按自己的时间重排，
-#     时间修正不会让行为改名）。修正把开始时间改到晚于链上延续段 = 产物内部矛盾（延续不可能
-#     早于事件自己的开始），该链隔离不落树、每轮留信号（用户裁定：矛盾产物不进树，同 supersedes
-#     成环一类处置）。
+#   ① 取值：一条可读判断落成一条 occurrence，name 与 started_at 逐字取判断的值。
 #   ② 撞车消歧：同批出现同地址（同名判断共享最早观测）时，后序一条名字加确定性序号后缀，
 #     原始名照存语义面 original_name 字段（已落 schema）——地址是身份不是语义。（后续裁定：
 #     判重只在融合层解决——同主体同刻开始的同名行为在融合校验里打回让模型合并（fusion_v2）；
@@ -328,10 +352,8 @@ def is_ascii_digits(value: object) -> bool:
 #   ⑤ staged 幂等（抄融合 StagedFusion 的检查点形状）：白天归类、reminded 查询这些会随时间漂移
 #     的输入全部发生在 stage 之前；stage 之后只有确定性落盘——否则崩溃重试间词表/账本已变，
 #     同地址不同字节，add-only 撞车卡死串行队列。
-# - 其余规则：continues 合并、supersedes 在缓冲内就地替换（全史留在判断存储，树存修正后视图）；
-#   summary/basis/goal 确定性拼接不再调模型（goal 为链内非空值按序去重拼接——用户裁定原封不动
-#   保留，语义关联层要用，不许替模型二选一或置空丢失）；跨链 links 只指向**已封口**目标，目标未封则本链推迟封口
-#   （封口按依赖拓扑排）；白天归类是写入层唯一的 LLM 触点（只在已有类里选，选不上标待定）；
+# - 其余规则：summary/basis/goal 逐字取判断、不再调模型（原封不动保留，语义关联层要用，不许置空丢失）；
+#   白天归类是写入层唯一的 LLM 触点（只在已有类里选，选不上标待定）；
 #   behavior=空的判断不进树，但在释放前转成
 #   带起止的"没读懂"gap 节点（语义关联要用：「没发生」与「发生了但没读懂」是两种空白）。
 #
@@ -345,8 +367,7 @@ def is_ascii_digits(value: object) -> bool:
 #   存在；信号到来前"未观测"gap 无生产者，退化=视作全程在看）。
 #
 # ── 已关闭的支线 ──────────────────────────────────────────────────────────────────────
-# - Outcome/amendments 追加通道：封口窗口使晚到引用机械上不可能，取消；结果由结果方 occurrence 的
-#   前向 results_from 表达。
+# - Outcome/amendments 追加通道：封口窗口使晚到引用机械上不可能，取消。
 # - 旁侧账本：被 gap 树节点取代（时间轴统一、纪律同构、退化自动成立）。
 # - 数字面/语义面拆成两类节点：两面是同一事实的投影，拆分复活跨文档事务与镜像地址的全部代价；
 #   分组在 schema 角色层显式化。
@@ -579,11 +600,15 @@ __all__ = [
     "BehaviorDirectory",
     "BehaviorKind",
     "BehaviorLevel",
+    "BehaviorNameTooLongError",
+    "address_name",
     "behavior_identity_name",
     "behavior_local_timestamp",
+    "behavior_name",
     "behavior_static_directories",
     "is_ascii_digits",
     "kind_directory_prefix",
     "kind_for_directory_prefix",
+    "readable_text",
     "split_behavior_identity",
 ]

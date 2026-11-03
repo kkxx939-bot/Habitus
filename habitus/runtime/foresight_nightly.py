@@ -157,6 +157,9 @@ class ForesightNightlyRun:
                 "relations": sum(item.relations for item in lanes.values()),
                 "chances": sum(item.chances for item in lanes.values()),
                 "moments": sum(item.moments for item in lanes.values()),
+                # 机会表、单元历史读回时跳过的坏文件（坏的一份不让这一晚停，计入观测）
+                "unreadable": len(self.store.take_unreadable())
+                + (len(self.history.store.take_unreadable()) if self.history is not None else 0),
             },
             started,
         )

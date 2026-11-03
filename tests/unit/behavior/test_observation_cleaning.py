@@ -28,7 +28,7 @@ def raw_observation(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
         "occurred_at": NOW.isoformat(),
         "available_at": (NOW + timedelta(milliseconds=1500)).isoformat(),
-        "modality": "vision",
+        "modality": "physical",
         "semantics": "有人开门进入玄关",
         "participants": ["家庭成员A"],
         "knowledge_state": "observed",
@@ -72,7 +72,7 @@ def observation(**overrides: object) -> BehaviorObservation:
         "observer_id": OBSERVER,
         "occurred_at": NOW,
         "available_at": NOW,
-        "modality": "vision",
+        "modality": "physical",
         "semantics": "有人开门进入玄关",
         "participants": ["家庭成员A"],
         "knowledge_state": "observed",
@@ -110,12 +110,6 @@ def test_dst_fold_cannot_bypass_the_available_at_invariant() -> None:
 
     with pytest.raises(BehaviorObservationError):
         observation(occurred_at=later, available_at=earlier)
-
-
-def test_delivery_cannot_carry_semantics_that_are_not_available_yet() -> None:
-    future = adapt(raw_observation(available_at="9999-01-01T00:00:00+00:00"))
-    with pytest.raises(BehaviorObservationError):
-        envelope(future)
 
 
 # --- 本地时区可还原 -------------------------------------------------------------------
@@ -167,7 +161,7 @@ def test_direct_construction_normalizes_types_and_rejects_illegal_content() -> N
         "occurred_at": NOW.astimezone(UTC),
         "available_at": NOW.astimezone(UTC),
         "utc_offset_minutes": 480,
-        "modality": "vision",
+        "modality": "physical",
         "semantics": "有人开门",
         "participants": ["家庭成员A"],
         "knowledge_state": "observed",
@@ -269,7 +263,7 @@ def test_batch_requires_one_observer_and_chronological_order() -> None:
         occurred_at=(NOW + timedelta(seconds=3)).isoformat(),
         available_at=(NOW + timedelta(seconds=4)).isoformat(),
         semantics="说了一句「我回来了」",
-        modality="audio",
+        modality="session",
         knowledge_state="reported",
     )
     with pytest.raises(BehaviorObservationError):

@@ -4,7 +4,7 @@
 提示词只写规则，不放具体场景的例子（每个用户的场景不同）。
 
 材料里带着"还开着的提醒"时（预测层接上了，方案 30 第五节；裁定 61 第 5 条、62 第 2 条），模型另答一件事：这一轮他的话
-是不是在回应其中某一条、正 / 中 / 负。这一节写成对每条提醒依次回答的两问（他在说哪件事 → 这一次做不做），不写"什么情况判什么"
+是不是在回应其中某一条、正 / 中 / 负 / 已做。这一节写成对每条提醒依次回答的两问（他在说哪件事 → 这一次做不做），不写"什么情况判什么"
 的清单（用户 2026-10-21："我希望可以用规则而不是不断漏洞补丁"）；v5 是对着真实模型四轮对照定下的
 （`Habitus实验数据/实验：会话lane反馈提示词对照_2026-10-21/`，实验里叫 v7）。
 """
@@ -19,7 +19,7 @@ from habitus.behavior.fusion.errors import BehaviorFusionError
 from habitus.behavior.fusion.lanes.session.config import SessionLaneConfig
 from habitus.behavior.fusion.lanes.session.redaction import redact
 from habitus.behavior.fusion.lanes.session.reminders import POLARITIES
-from habitus.behavior.model import MAX_BEHAVIOR_NAME_UTF8_BYTES, semantic_name
+from habitus.behavior.model import BehaviorNameTooLongError, address_name, behavior_name, readable_text
 
 #: v2 → v3（2026-10-19，裁定 61、62）：加"还开着的提醒"一节的判法与输出 ``responses``。未对着真实模型调过。
 #: v3 → v4（2026-10-20，评审 C1）：没带提醒时不要 ``responses`` 字段（原来说"填 []"，而输出形状在没带提醒时不收这个字段）。
@@ -27,7 +27,9 @@ from habitus.behavior.model import MAX_BEHAVIOR_NAME_UTF8_BYTES, semantic_name
 #: 提醒不拿来补名字；steps 只算有调用记录的。
 #: v5 → v6（2026-10-22，用户：一轮 = 宿主的一轮）：助手干活时他又说的话（作答、补一句、叫停）在同一轮的材料里，
 #: 交代给模型；summary 写上他中途改主意 / 叫停。判法不变。
-SESSION_PROMPT_VERSION = "behavior_session_turn_prompt_v6"
+#: v6 → v7（2026-10-30，裁定 91 第 3 条②）：第二问先分"这一次已经做过了"（已做）与还没做的三档；"说已经做了"从正挪到已做。
+#: 其余判法不变。
+SESSION_PROMPT_VERSION = "behavior_session_turn_prompt_v7"
 
 SESSION_SYSTEM_PROMPT = """\
 你在为一套行为记忆系统整理一个人和助手的对话。
@@ -54,7 +56,7 @@ SESSION_SYSTEM_PROMPT = """\
 
 系统之前对他说过几句提醒，问他这一次要不要做某件事，列在【还开着的提醒】里，带编号和"最晚到"。
 
-  responses  一个数组，每项 {reminder: 编号, polarity: "正" | "中" | "负"}。
+  responses  一个数组，每项 {reminder: 编号, polarity: "已做" | "正" | "中" | "负"}。
 
 对每一条提醒，依次回答两问：
 
@@ -64,8 +66,10 @@ SESSION_SYSTEM_PROMPT = """\
   这两样都没有，就是开着的提醒里唯一的那一条——开着不止一条就分不出，算没在说哪一条。
   只有他说的正是这条提醒的那件事，才算在回应它。只算他自己说的话：助手说了什么、替他做了什么，都不是他的回应。
 
-二、这一次——这条提醒的"最晚到"之前——他做不做？按他有没有往后推、推到哪里分三档，每句话只落一档：
-  正：没往后推——现在就做、正在做、已经做了，或者交给助手去办。说已经做了的照他说的算，做没做系统另外对着记录看。
+二、这一次——这条提醒的"最晚到"之前——他做不做？先看这件事这一次他是不是说已经做完了；没做完的，再按他有没有往后推、
+推到哪里分三档。每句话只落一档：
+  已做：他说这一次已经做过了、做完了。照他说的算，做没做系统另外对着记录看。
+  正：还没做完，也没往后推——现在就做、正在做，或者交给助手去办。
   中：往后推了，推到的时候还在"最晚到"之前；或者他自己也说不准做不做。
   负：不做——不要、取消，或者推到"最晚到"之后。
   他的话里没有说做不做的（只是在回助手的话），不算回应。
@@ -96,7 +100,7 @@ def session_json_schema(
                         "enum": list(reminder_numbers),
                         "description": "提醒的编号，照抄。",
                     },
-                    "polarity": {"type": "string", "enum": list(POLARITIES), "description": "正 / 中 / 负。"},
+                    "polarity": {"type": "string", "enum": list(POLARITIES), "description": "正 / 中 / 负 / 已做。"},
                 },
             },
         }
@@ -141,7 +145,7 @@ def assemble_description(
     parsed: object, *, config: SessionLaneConfig | None = None, reminder_numbers: Sequence[int] = ()
 ) -> TurnDescription:
     """校验模型输出；不合格就抛错，由结构化客户端把错误反馈给模型重答。落盘前的那道密钥抹除在这里做。
-    ``reminder_numbers`` 是材料里带进去的提醒编号：回应只认这些编号、一条最多一项、方向只认正 / 中 / 负。"""
+    ``reminder_numbers`` 是材料里带进去的提醒编号：回应只认这些编号、一条最多一项、方向只认正 / 中 / 负 / 已做。"""
 
     limits = config or SessionLaneConfig()
     if not isinstance(parsed, Mapping):
@@ -149,13 +153,15 @@ def assemble_description(
     raw_name = parsed.get("name")
     if not isinstance(raw_name, str) or not raw_name.strip():
         raise BehaviorFusionError("name is required")
-    name = _name(raw_name)
+    # 名字会拿去当路径上的一段。模型写的名字里带着文件路径、「A/B 两种方案」「问题：…」是常事，为一个符号让模型整条重答
+    # 不值得，也未必答得对：路径符号直接换成空格（``address_name``）。
+    name = address_name(redact(raw_name))
     try:
-        semantic_name(name, "behavior")
+        behavior_name(name)
+    except BehaviorNameTooLongError as exc:
+        raise BehaviorFusionError("name is too long; describe it in fewer words") from exc
     except (TypeError, ValueError) as exc:
         raise BehaviorFusionError(f"name is not usable ({exc}); rephrase it as a plain short phrase") from exc
-    if len(name.encode("utf-8")) > MAX_BEHAVIOR_NAME_UTF8_BYTES:
-        raise BehaviorFusionError("name is too long; describe it in fewer words")
     summary = parsed.get("summary")
     if not isinstance(summary, str) or not summary.strip():
         raise BehaviorFusionError("summary must be a non-empty sentence")
@@ -166,13 +172,22 @@ def assemble_description(
     if not isinstance(steps, list) or any(not isinstance(item, str) for item in steps):
         raise BehaviorFusionError("steps must be an array of text")
     kept = tuple(_clip(redact(" ".join(item.split())), limits.max_step_chars) for item in steps if item.strip())
-    return TurnDescription(
+    description = TurnDescription(
         name=name,
         summary=_clip(redact(" ".join(summary.split())), limits.max_summary_chars),
         goal=None if goal is None else _clip(redact(" ".join(goal.split())), limits.max_summary_chars),
         steps=kept[: limits.max_steps],
         responses=_responses(parsed.get("responses", []), reminder_numbers),
     )
+    # 与行为树 schema 同一条文本规则：这里放行、树上拒收的话，这条判断永远落不了树
+    for label, value in (
+        ("summary", description.summary),
+        ("goal", description.goal),
+        *(("steps", step) for step in description.steps),
+    ):
+        if value is not None and not readable_text(value):
+            raise BehaviorFusionError(f"{label} contains control or zero-width characters; write it as plain text")
+    return description
 
 
 def _responses(raw: object, numbers: Sequence[int]) -> tuple[tuple[int, str], ...]:
@@ -198,14 +213,7 @@ def _responses(raw: object, numbers: Sequence[int]) -> tuple[tuple[int, str], ..
     return tuple(sorted(found.items()))
 
 
-# 名字会拿去当路径上的一段，这些符号不能有。模型写的名字里带着文件路径、「A/B 两种方案」「问题：…」是常事，
-# 为一个符号让模型整条重答不值得，也未必答得对：直接换成空格。
-_PATH_SYMBOLS = str.maketrans(dict.fromkeys('/\\:<>"|?*', " "))
 _BREAKS = "。；;！？!?，,、 "
-
-
-def _name(raw: str) -> str:
-    return " ".join(redact(raw).translate(_PATH_SYMBOLS).split()).strip(". ")
 
 
 def _clip(text: str, limit: int) -> str:

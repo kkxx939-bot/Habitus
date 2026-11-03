@@ -56,6 +56,9 @@ def encode(record: ConceptHits) -> str:
         "mapped_at": record.mapped_at,
         "signals": list(record.signals),
     }
+    if record.timeline_digest is not None:
+        # 只有要当天时间线的记录才有；没有就不写这个键，盘上不要时间线的记录与之前一字不差
+        payload["timeline_digest"] = record.timeline_digest
     return encode_record("\n".join(lines) + "\n", MARKER, payload)
 
 
@@ -75,6 +78,7 @@ def decode(text: str, *, expected_uri: str | None = None) -> ConceptHits:
             unresolved=_mapping(payload, "unresolved"),
             lane=_text(payload, "lane"),
             recent_digest=_optional_text(payload, "recent_digest"),
+            timeline_digest=_optional_text(payload, "timeline_digest"),
             baseline_snapshot=_mapping(payload, "baseline_snapshot"),
             mapper=_text(payload, "mapper"),
             mapped_at=datetime.fromisoformat(_text(payload, "mapped_at")),

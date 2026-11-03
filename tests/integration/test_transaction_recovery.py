@@ -8,7 +8,6 @@ import pytest
 
 from habitus.infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.editor import (
     MemoryCandidate,
     MemoryCandidateBatch,
@@ -35,6 +34,7 @@ from habitus.memory.snapshot import MemorySnapshotReader
 from habitus.memory.tree import MemoryTree
 from habitus.memory.uri import MemoryURI
 from tests.helpers import BASE_TIME, codec, document, memory_fields
+from tests.lock_store import ProcessLocalLockStore
 
 
 def transaction(tmp_path: Path):

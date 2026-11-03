@@ -220,6 +220,19 @@ class RoutingProvider(ScriptedProvider):
         )
 
 
+def catalog_in_sync(store: Any) -> bool:
+    """清单视图是不是当前词表推出来的样子（崩在两次写之间时会是 False，下一次追加即修复）。"""
+
+    from habitus.behavior.kinds.render import render_catalog
+    from habitus.behavior.kinds.store import KINDS_SCHEMA_VERSION
+
+    if not store.catalog_path.exists():
+        return False
+    return store.catalog_path.read_text(encoding="utf-8") == render_catalog(
+        store.read(), schema_version=KINDS_SCHEMA_VERSION
+    )
+
+
 def named_classes(names: tuple[str, ...], *, lane: Lane = Lane.SESSION) -> tuple[BehaviorClass, ...]:
     return tuple(
         BehaviorClass(ClassId(lane, number), name, f"{name}的判据", f"该{name}了", origin=ClassOrigin.PROMOTED)

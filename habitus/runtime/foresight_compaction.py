@@ -14,9 +14,9 @@ from datetime import UTC, date, datetime, timedelta
 
 from habitus.foresight import Evidence, ForesightError, ranked_account
 from habitus.foresight.compaction import compact, compactable
+from habitus.foresight.diagnosis import DIAGNOSIS_REACH_DAYS
 from habitus.foresight.opportunities import OpportunityTable
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
-from habitus.runtime.foresight_settlement import DIAGNOSIS_REACH_DAYS
 
 
 @dataclass(frozen=True)

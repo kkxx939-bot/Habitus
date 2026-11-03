@@ -8,7 +8,7 @@ from datetime import timedelta, timezone
 
 import pytest
 
-from habitus.foresight import ForesightError, Seen, form_expectations
+from habitus.foresight import Batch, ForesightError, Seen, form_expectations
 from habitus.foresight.judge import Judge, build_package, plain_text
 from habitus.foresight.judge.prompt import (
     JUDGE_SYSTEM_PROMPT,
@@ -20,6 +20,7 @@ from habitus.foresight.judge.prompt import (
 from habitus.model_client import ModelTransportError
 from tests.unit.foresight.scripted_model import ScriptedProvider, recording_client
 from tests.unit.foresight.test_triggers import (
+    LINE,
     discussion_followed_by_code,
     just_after,
     moment_at,
@@ -42,7 +43,9 @@ def event_case():  # type: ignore[no-untyped-def]
     rows = seen_until(series, now)
     (expectation,) = [
         item
-        for item in form_expectations(moment=moment_at(now), table=table, rows=rows, recent=35)
+        for item in form_expectations(
+            moment=moment_at(now), table=table, rows=rows, batch=Batch.MOMENT, recent=35, line=LINE
+        )
         if item.source == "事件"
     ]
     by_uri = {
@@ -165,7 +168,8 @@ def test_model_failures_degrade_to_the_algorithm_order() -> None:
     )
     judgement = asyncio.run(judge.judge(package))
     assert judgement.failed and judgement.verdicts == {} and judgement.order == (expectation.expectation_id,)
-    assert judgement.signals[0].startswith("model: transport failed after 2 attempts") and provider.calls >= 2
+    # 传输重试用完是"模型整个用不了"：判决在白天，只算这一次没判成（不停线，停线只属于夜里那条线，裁定 94 第 8 条）
+    assert judgement.signals[0].startswith("model unreachable: model: ModelTransportError") and provider.calls >= 2
     # 答复不合格两轮都不过：也是失败，信号说出哪条核对不过
     client, _ = recording_client([{"verdicts": [], "order": []}])
     judgement = asyncio.run(Judge(client, retries=0, delay_seconds=0.0).judge(package))
@@ -267,7 +271,9 @@ def test_a_situation_candidate_is_told_as_its_calendar_day_and_reads_no_calendar
     now = datetime.combine(date(2026, 7, 22), time(17, 52), tzinfo=CST)
     (expectation,) = [
         item
-        for item in form_expectations(moment=moment_at(now), table=table, rows=seen_until(series, now), recent=35)
+        for item in form_expectations(
+            moment=moment_at(now), table=table, rows=seen_until(series, now), batch=Batch.MOMENT, recent=35, line=LINE
+        )
         if item.source == "情境"
     ]
     rows = {
@@ -329,3 +335,18 @@ def test_the_template_names_every_cause_present_when_two_or_more_are() -> None:
     assert plain_text(candidate) == f"你订机票、订酒店了，往常接着你会{candidate.label}，这次还没有，要吗？"
     single = replace(candidate, causes=("订机票",))
     assert "订机票、" not in plain_text(single)
+
+
+def test_a_wording_rejected_in_the_first_answer_falls_back_to_the_second_answers() -> None:
+    """段 6 Q18（M74）：第一遍的话被代码判掉（材料撑不住的全称）、第二遍的话可用：用第二遍的，不退回模板。"""
+
+    expectation, table, rows, now, _ = event_case()
+    package = build_package((expectation,), table, rows, now=now, levels={})
+    client, _ = recording_client(
+        [
+            {"verdicts": [verdict(1, text="你每次讨论完都会改代码")], "order": [1]},
+            {"verdicts": [verdict(1)], "order": [1]},
+        ]
+    )
+    judgement = asyncio.run(Judge(client, retries=0, delay_seconds=0.0).judge(package))
+    assert judgement.verdicts[expectation.expectation_id].text == "往常讨论完你会改代码"

@@ -9,7 +9,7 @@ Python 运行时）。用户裁定：插件不该在本地建数据库表；各�
 
 **现状**：Python 侧仍有三处 SQLite，文件全在 ``config.workflow_root`` 下，都由本模块装配：
 
-1. ``memory_recall_lifecycle.sqlite3`` —— ``memory/retrieval/lifecycle_store.py`` 的
+1. ``memory_recall_lifecycle.sqlite3`` —— ``memory/recall/store.py`` 的
    ``SQLiteMemoryRecallLifecycleStore``，表 ``memory_recall_lifecycle``，主键 uri。一行 = 一篇 L2 记忆的
    使用/冷热/退休事实（useful_recall_count、last_useful_recall_at、cold2_probe_count、compacted_at、
    retire_candidate_at、retired_at、version）。写入方是 ``memory/compaction/lifecycle.py``
@@ -22,8 +22,8 @@ Python 运行时）。用户裁定：插件不该在本地建数据库表；各�
 3. ``locks.sqlite3`` / ``memory_vector_locks.sqlite3`` / ``summary_vector_locks.sqlite3`` ——
    ``infrastructure/store/sqlite/lock_store.py`` 的 ``SQLiteLockStore``，表 ``locks``
    （lock_key、token、expires_at、owner、created_at、fence）。这是跨进程租约锁：**行为归约 runner、
-   行为写入器、情景刷新器、记忆提交事务全靠它**。``infrastructure/store/locks/process_local.py`` 是
-   进程内实现，不跨进程。
+   行为写入器、情景刷新器、记忆提交事务全靠它**。进程内实现只在测试里
+   （``tests/lock_store.py``），不跨进程。
 
 **性质区分**：1、2 是派生状态（从使用回执可重建，丢了只是冷热判断退回默认）；3 是协调机制
 （不存数据，但跨进程 fence 必须正确）。改造时两类分开定。
@@ -71,9 +71,9 @@ from habitus.conversation import (
     SourceIndex,
 )
 from habitus.conversation.source.salvage import SourceSalvage
-from habitus.foundation.observability import CompositeObserver, MetricRegistry, Observer
+from habitus.foundation.observability import CompositeObserver, Observer
 from habitus.infrastructure.lifecycle import CapacitySnapshotStore, LifecycleParticipant
-from habitus.infrastructure.observability import ManagedObservability
+from habitus.infrastructure.observability import ManagedObservability, MetricRegistry
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.sqlite import SQLiteLockStore
 from habitus.infrastructure.vector import VectorStoreFactory, VectorStoreRequirements
@@ -83,6 +83,8 @@ from habitus.memory.compaction import (
     MemoryFieldCompactor,
     MemoryLifecycleCommitter,
     MemoryLifecycleManager,
+    MemoryLifecycleOperationStore,
+    MemoryLifecycleScanStore,
     MemoryRecoveryStore,
 )
 from habitus.memory.conversation import (
@@ -112,15 +114,17 @@ from habitus.memory.editor import (
 )
 from habitus.memory.indexing import PersistentMemoryVectorIndex, memory_embedding_fingerprint
 from habitus.memory.intention import MemoryIntentionReviewer
+from habitus.memory.recall import (
+    MemoryRecallLifecycle,
+    SQLiteMemoryRecallLifecycleStore,
+)
 from habitus.memory.retrieval import (
     ConversationSearchContextReader,
     MemoryContextAssembler,
-    MemoryRecallLifecycle,
     MemoryRetrievalGrader,
     MemorySearchQueryPlanner,
     MemorySemanticSearchEngine,
     SearchService,
-    SQLiteMemoryRecallLifecycleStore,
 )
 from habitus.memory.schema import MemorySchemaRegistry
 from habitus.memory.semantic import LLMMemoryOverviewGenerator, MemorySemanticRefresher
@@ -137,7 +141,7 @@ from habitus.memory.workflow import (
 )
 from habitus.model_client import ProviderFactory, StructuredChatClient
 from habitus.pre.conversation import ConversationAdapterRegistry
-from habitus.runtime.behavior import build_behavior_components, rereader_of, retry_stage_of
+from habitus.runtime.behavior import behavior_domain_configs, build_behavior_components, rereader_of, retry_stage_of
 from habitus.runtime.components import (
     RuntimeComponents,
     RuntimeConversation,
@@ -150,6 +154,7 @@ from habitus.runtime.conditions import local_calendar
 from habitus.runtime.evidence import evidence_of
 from habitus.runtime.foresight import (
     build_foresight_components,
+    build_foresight_days,
     build_foresight_tick,
     build_foresight_worker,
     build_outlet_consumer,
@@ -166,10 +171,24 @@ from habitus.runtime.lifecycle_retry import retry_ledger
 from habitus.runtime.lifecycle_scene import SceneParticipant, scene_vocabulary_versions
 from habitus.runtime.lifecycle_sources import ConversationSourceParticipant, ConversationSourceRecoveryParticipant
 from habitus.runtime.runtime import Runtime
-from habitus.runtime.scene import build_nightly, build_nightly_worker, build_scene_nightly
+from habitus.runtime.scene import build_nightly, build_nightly_worker, build_scene_nightly, nightly_last_run
+from habitus.runtime.scene_config import relation_thresholds
 from habitus.runtime.session_lane import BehaviorSessionConsumer, answered_question_tools, session_salvager
 from habitus.runtime.unsealed import UnsealedFromJudgements
 from habitus.runtime.worker import MemoryWorker
+
+
+def validate_domain_configs(config: HabitusConfig) -> None:
+    """覆盖项的值域只由领域配置校验（配置层只查类型、不 import 领域）：把写了的覆盖项构造成领域配置走一遍。
+
+    不论那一侧开没开都构造：写错的值以带配置键的 ``ConfigError`` 拒，不被静默收下、也不拖到运行中才炸。
+    ``build_runtime`` 开头、本地服务的 doctor 与 init 读完配置都调它。
+    """
+
+    if not isinstance(config, HabitusConfig):
+        raise TypeError("config must be HabitusConfig")
+    behavior_domain_configs(config.behavior)
+    relation_thresholds(config)
 
 
 def build_runtime(
@@ -195,9 +214,12 @@ def build_runtime(
         raise TypeError("path_lock must be PathLock or None")
     if observer is not None and not callable(getattr(observer, "record", None)):
         raise TypeError("observer must implement record")
+    validate_domain_configs(config)
 
     # 会话协议的适配器也声明各宿主的提问工具与宿主名：出口、会话 lane、出口那层消费者都从这一份取
-    adapters = conversation_adapters if conversation_adapters is not None else ConversationAdapterRegistry.with_builtins()
+    adapters = (
+        conversation_adapters if conversation_adapters is not None else ConversationAdapterRegistry.with_builtins()
+    )
     resolved_providers = providers or _builtin_provider_factory()
     resolved_vector_stores = vector_stores or register_builtin_vector_adapters()
     metrics_config = config.observability.metrics
@@ -309,7 +331,7 @@ def build_runtime(
         schema_registry=schema_registry,
         snapshot_reader=snapshot_reader,
         semantic_search=semantic_search,
-        config=memory_config.retrieval,
+        config=memory_config.editor_retrieval,
     )
 
     chat = resolved_providers.create_chat_client(
@@ -325,6 +347,7 @@ def build_runtime(
     extraction_loop = MemoryExtractionLoop(
         client=structured_chat,
         retriever=retriever,
+        zone=config.locale.zone(),
         config=memory_config.extraction,
     )
 
@@ -467,7 +490,7 @@ def build_runtime(
         registry=schema_registry,
         config=memory_config.field_compaction,
     )
-    recovery_store = MemoryRecoveryStore(tree)
+    recovery_store = MemoryRecoveryStore(tree, config.workflow_root)
     lifecycle_committer = MemoryLifecycleCommitter(transaction, snapshot_reader)
 
     async def refresh_lifecycle_derivatives(uris):
@@ -482,6 +505,8 @@ def build_runtime(
         field_compactor,
         recovery_store,
         lifecycle_committer,
+        MemoryLifecycleOperationStore(tree, resolved_lock, config.workflow_root),
+        MemoryLifecycleScanStore(tree, resolved_lock, config.workflow_root),
         config=memory_config.lifecycle_maintenance,
         derived_refresh=refresh_lifecycle_derivatives,
     )
@@ -580,14 +605,13 @@ def build_runtime(
         config,
         structured_chat=structured_chat,
         lock_store=resolved_lock.lock_store,
-        path_lock=resolved_lock,
         observer=operation_observer,
         span_controller=managed_observability,
         source_settled=behavior_settled,
     )
     # behavior 关着而 scene / foresight 开着的组合已经在配置层被硬拒（见 HabitusConfig 的跨域校验），
     # 所以这里 behavior_components 为 None 时整晚那一趟与预测层必然都没开，直接跳过即可。
-    # 夜批顺序：归约把一天定稿 → 整晚那一趟（结算 → 语义树 → 机会表；预测树删了，裁定 59）。
+    # 夜里一条线：归约把前一天定稿 → 接着整晚那一趟（重试 → 结算 → 语义树 → 机会表 → 单元 → 当天的日子预期；裁定 94 第 1 条）。
     # 预测层站在语义树之上，所以排在后面组装；未启用时 build 自己返回 None。
     # TODO(BHV-SESSION-LANE-001)：预测层按不按 lane 分还没定（用户 2026-10-11：「这个我还没有考虑好，因为预测层的
     # 逻辑还没有写好」）。现状：整晚那一趟与预测层只接会话那一支（行为树、词表、定稿日、未封口的判断都取自会话一支），
@@ -597,6 +621,8 @@ def build_runtime(
     calendar = None if session_behavior is None else local_calendar(config)
     # 读账的两个值（裁定 49）：α 借关系检验前向验证的显著性；遗忘半衰期是几次机会（裁定 57，config.foresight 的临时值）
     evidence = None if session_behavior is None or not config.foresight.enabled else evidence_of(config)
+    # 夜里那条线自己的记录只建一份：常驻节拍写，结算读它认停掉的那天（裁定 94 第 9 条）；没有语义树就没有这条线
+    last_run = nightly_last_run(config) if session_behavior is not None and config.scene.enabled else None
     foresight_components = (
         None
         if session_behavior is None or evidence is None
@@ -615,21 +641,25 @@ def build_runtime(
             # 出口认提问时拿类名配题目（词表给人看的名字；编号仍是身份）
             kind_label=_kind_label(VocabularyReader(session_behavior.kind_store)),
             question_tools=adapters.question_tools(),
+            line_finished=None if last_run is None else last_run.finished,
         )
     )
     if foresight_components is not None and session_behavior is not None and evidence is not None:
         # 白天那一拍的常驻 worker：未封口的判断经那座桥（判断存储 + 消费账本 + 归约的白天归类）读，
         # 词表版本记在预期上。
-        unsealed = UnsealedFromJudgements(
-            session_behavior.judgements,
-            session_behavior.reduction_runner.ledger,
-            session_behavior.reduction_runner.kinds,
-        )
+        def unsealed_reader(*, in_line: bool) -> UnsealedFromJudgements:
+            return UnsealedFromJudgements(
+                session_behavior.judgements,
+                session_behavior.reduction_runner.ledger,
+                session_behavior.reduction_runner.kinds,
+                in_line=in_line,
+            )
+
         kind_store = session_behavior.kind_store
         tick = build_foresight_tick(
             foresight_components,
             config=config,
-            unsealed=unsealed,
+            unsealed=unsealed_reader(in_line=False),
             evidence=evidence,
             structured_chat=structured_chat,
             vocabulary_version=lambda: kind_store.read().version,
@@ -638,7 +668,19 @@ def build_runtime(
             reread=rereader_of(session_behavior),
         )
         foresight_components = dataclasses.replace(
-            foresight_components, worker=build_foresight_worker(tick, config=config, observer=operation_observer)
+            foresight_components,
+            worker=build_foresight_worker(tick, config=config, observer=operation_observer),
+            # 当天的日子预期：夜里那条线的最后一步（裁定 94 第 1 条），与白天那一拍读同一种未封口的桥；线上那一份碰到模型
+            # 整个用不了就抛给线停下（裁定 94 第 8 条），白天那一份留到下一拍
+            days=build_foresight_days(
+                foresight_components,
+                config=config,
+                unsealed=unsealed_reader(in_line=True),
+                evidence=evidence,
+                vocabulary_version=lambda: kind_store.read().version,
+                vocabulary_migrating=lambda: kind_store.read_migration() is not None,
+                observer=operation_observer,
+            ),
         )
         # 第 0 步：归约封口时查预测层账本盖 reminded（归约先装、预测层后装，所以在这里接端口）
         session_behavior.reduction_runner.attach_reminder_lookup(build_reminded_lookup(foresight_components))
@@ -680,10 +722,12 @@ def build_runtime(
     # 行为侧的账坏了的会话源：逐轮补救（没写过的轮落「没读懂」、进每晚重试的堆，裁定 67 第 5 条、68 第 3 条）
     source_salvage = SourceSalvage(
         config.conversation_root,
-        salvager=session_salvager(
-            None if behavior_components is None else behavior_components.session_lane,
-            question_tools=answered_question_tools(adapters),
-        ),
+        salvagers={
+            ConversationSourceConsumer.BEHAVIOR_SESSION: session_salvager(
+                None if behavior_components is None else behavior_components.session_lane,
+                question_tools=answered_question_tools(adapters),
+            )
+        },
     )
     source_recovery = ConversationSourceRecovery(
         source_store,
@@ -699,10 +743,7 @@ def build_runtime(
         source_store,
         source_outcomes,
         source_ledger,
-        {
-            ConversationSourceConsumer.MEMORY: memory_output_store,
-            ConversationSourceConsumer.BEHAVIOR_SESSION: behavior_session_outputs,
-        },
+        source_delivery.consumers,
         resolved_lock.lock_store,
         lock_ttl_seconds=source_config.execution_lock_ttl_seconds,
         salvage=source_salvage,
@@ -740,8 +781,8 @@ def build_runtime(
 
     nightly_worker = None
     scene = None
-    if session_behavior is not None:
-        # 整晚那一趟（语义树第 11 步）：结算 → 行为树读一次 → 语义树 → 机会表 → 找原因，自己一个常驻节拍。
+    if session_behavior is not None and last_run is not None:
+        # 整晚那一趟（语义树第 11 步）：重试 → 结算 → 词表（每晚新增、定期拆改）→ 行为树读一次 → 语义树 → 机会表 → 单元 → 当天的日子预期，前一天定稿后起跑。
         # 语义树没启用时没有整晚（预测层在配置层就要求语义树开着，结算也就不会落空）。
         scene = build_scene_nightly(
             config,
@@ -762,7 +803,12 @@ def build_runtime(
                     foresight=foresight_components,
                     dirty_days=session_behavior.reduction_runner.dirty_days,
                     retry=retry_stage_of(() if behavior_components is None else behavior_components),
+                    structured_chat=structured_chat,
+                    vocabulary_jobs=()
+                    if behavior_components is None
+                    else tuple(branch.reduction_runner.nightly_vocabulary for branch in behavior_components),
                 ),
+                last_run=last_run,
                 observer=operation_observer,
             )
     # 行为侧、语义树、预测层的释放各一个参与者（26 号清单 6.14），挂进同一个生命周期 Worker

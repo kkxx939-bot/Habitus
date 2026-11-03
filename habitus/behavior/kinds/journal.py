@@ -96,9 +96,12 @@ class VocabularyJournal:
         return tuple(record for record in self._after(base.version) if record.version > version)
 
     def append(self, record: VersionRecord) -> None:
-        existing = self._read_text(self.changes_path) or ""
-        line = json.dumps(record_payload(record), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        self._write_text(self.changes_path, f"{existing}{line}\n")
+        self._write_text(self.changes_path, self.with_record(record))
+
+    def with_record(self, record: VersionRecord) -> str:
+        """追加这一版之后日志的全文（追加与"放不放得下"同一份算法）。"""
+
+        return (self._read_text(self.changes_path) or "") + _line(record)
 
     def truncate_before(self, version: int) -> bool:
         """把 ``version`` 及以前的版本折进快照；``version`` 不比现在的快照新就什么也不做。返回做没做。"""
@@ -110,12 +113,7 @@ class VocabularyJournal:
         self._write_text(
             self.snapshot_path, json.dumps(vocabulary_payload(snapshot), ensure_ascii=False, sort_keys=True) + "\n"
         )
-        kept = self._after(version)
-        lines = "".join(
-            json.dumps(record_payload(record), ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
-            for record in kept
-        )
-        self._write_text(self.changes_path, lines)
+        self._write_text(self.changes_path, "".join(_line(record) for record in self._after(version)))
         return True
 
     def _after(self, version: int) -> tuple[VersionRecord, ...]:
@@ -132,6 +130,10 @@ class VocabularyJournal:
             if record.version > version:
                 found.append(record)
         return tuple(found)
+
+
+def _line(record: VersionRecord) -> str:
+    return json.dumps(record_payload(record), ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
 
 
 def replay_onto(base: Vocabulary, records: Iterable[VersionRecord]) -> Vocabulary:

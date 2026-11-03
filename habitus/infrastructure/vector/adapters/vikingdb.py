@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import TypeVar, cast
 
+from habitus.foundation.embedding import EmbeddingVector
 from habitus.infrastructure.vector.adapters.vikingdb_client import (
     VikingDBNotFoundError,
     VikingDBRestClient,
@@ -25,7 +26,6 @@ from habitus.infrastructure.vector.model import (
     VectorStoreRecord,
     VectorValue,
 )
-from habitus.model_client import EmbeddingVector
 
 _POINT_NAMESPACE = uuid.UUID("1bd3197e-6322-5ed2-b4c1-f583cf35fec5")
 _RECORD_TYPE_MEMORY = "memory"

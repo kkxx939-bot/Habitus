@@ -93,13 +93,6 @@ class BehaviorURI:
         return cls._from_segments(directory.identity_parts)
 
     @classmethod
-    def from_layer(cls, directory: BehaviorDirectory, level: BehaviorLevel) -> BehaviorURI:
-        if not isinstance(directory, BehaviorDirectory):
-            raise TypeError("directory must be a BehaviorDirectory")
-        normalized = BehaviorLevel(level)
-        return cls._from_segments((*directory.identity_parts, normalized.sidecar_filename))
-
-    @classmethod
     def kinds(cls) -> BehaviorURI:
         """基础词表清单视图的 URI（behavior://kinds.md）。"""
 
@@ -140,14 +133,6 @@ class BehaviorURI:
         return self._uri
 
     @property
-    def full_path(self) -> str:
-        return self._uri[len(f"{self.SCHEME}://") :]
-
-    @property
-    def decoded_path(self) -> str:
-        return "/".join(self._segments)
-
-    @property
     def segments(self) -> tuple[str, ...]:
         return self._segments
 
@@ -168,16 +153,6 @@ class BehaviorURI:
         if not self._segments:
             return None
         return self._from_segments(self._segments[:-1])
-
-    @property
-    def containing_directory(self) -> BehaviorDirectory:
-        if self._node_type is BehaviorURINodeType.DOCUMENT:
-            assert self._address is not None
-            return BehaviorDirectory.for_address(self._address)
-        if self._node_type is BehaviorURINodeType.REGISTRY:
-            return BehaviorDirectory.root()
-        assert self._directory is not None
-        return self._directory
 
     def to_address(self) -> BehaviorAddress:
         if self._node_type is not BehaviorURINodeType.DOCUMENT or self._address is None:
@@ -202,10 +177,6 @@ class BehaviorURI:
         if not part or "/" in part or "\\" in part:
             raise BehaviorURIError("behavior URI join part must be one safe non-empty segment")
         return self._from_segments((*self._segments, part))
-
-    def matches_prefix(self, prefix: BehaviorURI | str) -> bool:
-        parsed = self.parse(prefix)
-        return self._segments[: len(parsed._segments)] == parsed._segments
 
     def __str__(self) -> str:
         return self._uri

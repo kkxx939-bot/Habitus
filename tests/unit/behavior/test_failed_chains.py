@@ -7,8 +7,7 @@ from datetime import UTC, datetime
 import pytest
 
 from habitus.behavior.fusion.store import BehaviorJudgementStore
-from habitus.behavior.reduction.chains import assemble_chains
-from habitus.behavior.reduction.failed import FailedChains, unreadable_record
+from habitus.behavior.reduction.failed import FailedChains, error_record
 from habitus.behavior.reduction.ledger import BehaviorReductionLedger
 from habitus.behavior.reduction.record import parse_judgement_record
 from habitus.behavior.retry import RetryBacklogStore, RetryCause, RetryKind
@@ -35,7 +34,7 @@ def _setup(tmp_path):
     ]
     for record in records:
         store.put_payload(record)
-    chain = assemble_chains(tuple(parse_judgement_record(store.read(r["judgement_id"])) for r in records[:1])).chains[0]
+    chain = parse_judgement_record(store.read(records[0]["judgement_id"]))
     failed = FailedChains(
         store, ledger=BehaviorReductionLedger(tmp_path / "reduction"), clock=lambda: NOW, backlog=backlog
     )
@@ -75,11 +74,11 @@ def test_a_chain_failing_again_on_retry_is_only_removed(tmp_path) -> None:
 
     probe_store, _backlog, _failed, chain = _setup(tmp_path / "probe")
     records = [probe_store.read(record_id("first"))]
-    done = frozenset({unreadable_record(chain.chain_digest, records)["judgement_id"]})
+    done = frozenset({error_record(chain.chain_digest, records)["judgement_id"]})
     store, backlog, failed, chain = _setup(tmp_path / "retry")
     assert failed.fail_chain(chain, consumed=done) == (None, None)
     assert store.read(record_id("first")) is None and backlog.count() == 0
-    assert store.read(unreadable_record(chain.chain_digest, records)["judgement_id"]) is None
+    assert store.read(error_record(chain.chain_digest, records)["judgement_id"]) is None
 
 
 def test_dropping_a_record_removes_it(tmp_path) -> None:
@@ -111,3 +110,23 @@ def test_a_set_aside_chain_is_restored_judged_recovered_by_the_ledger_and_withdr
     assert store.read(record_id("first")) is not None  # 已经归约消费了的不撤（释放归归约自己管）
     broken = type(item)(item.item_id, item.kind, item.cause, item.day, item.entered_at, {"records": []})
     assert not failed.restore(broken)
+
+
+def test_the_unreadable_replacement_spans_the_original_from_its_start_to_its_last_sighting() -> None:
+    """FA2（段 4 E19 探针）：顶替失败链的「没读懂」覆盖原判断那一整段：最早开始 → 最晚看到。"""
+
+    record = judgement_record(
+        "x",
+        behavior="洗手",
+        started_at=at(100),
+        last_observed_at=at(400),
+        evidence_ready_at=at(401),
+        observation_ids=("o1",),
+        source_refs=("s1",),
+        summary="洗手",
+    )
+    replacement = error_record("c" * 64, [record])
+    assert (replacement["started_at"], replacement["last_observed_at"]) == (
+        record["started_at"],
+        record["last_observed_at"],
+    )

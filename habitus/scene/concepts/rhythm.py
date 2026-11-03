@@ -13,9 +13,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from habitus.scene.concepts.model import MINUTES_PER_DAY, ConceptError, ConceptSet, concept_identity
+from habitus.scene.concepts.model import ConceptError, ConceptSet, concept_identity
 from habitus.series.model import EventSeries, SeriesRecord
-from habitus.temporal import Rulers, coverage_of, kind_reading
+from habitus.temporal import Coverage, Rulers, coverage_of, kind_reading
+from habitus.temporal.slots import MINUTES_PER_DAY
 
 #: 一天最多认几个峰。一天十几个峰的行为（操作手机）多半是概念定得太宽，不是真有十几次机会——保护闸，超了就截断。
 MAX_RHYTHM_PEAKS = 12
@@ -127,11 +128,13 @@ def rhythms_of(
     rulers: RhythmRulers,
     *,
     anchors: Mapping[str, Sequence[str]] | None = None,
+    coverage: Mapping[str, Coverage] | None = None,
 ) -> Mapping[str, Rhythm]:
     """每个行为概念的节律。概念的发生 = 它那几个类（基础 / 细分是自己的类，汇总是成员类）的记录合在一起再扎堆；
-    一次都没有的概念不在结果里（调用方按"看不出"处理）。``anchors``：概念 → 已成立的日历关系说的那几种日子。"""
+    一次都没有的概念不在结果里（调用方按"看不出"处理）。``anchors``：概念 → 已成立的日历关系说的那几种日子。
+    ``coverage`` 是已经算好的各 lane 覆盖（没给就现算）。"""
 
-    coverage = {}
+    lanes: dict[str, Coverage] = dict(coverage or {})
     found: dict[str, Rhythm] = {}
     for identity in concepts.behaviors():
         classes = set(concepts.classes_of(identity))
@@ -141,9 +144,9 @@ def rhythms_of(
         if not records:
             continue
         lane = records[0].lane
-        if lane not in coverage:
-            coverage[lane] = coverage_of(series, lane, slot_minutes=rulers.slot_minutes)
-        reading = kind_reading(records, coverage[lane], rulers)
+        if lane not in lanes:
+            lanes[lane] = coverage_of(series, lane, slot_minutes=rulers.slot_minutes)
+        reading = kind_reading(records, lanes[lane], rulers)
         profile, density = reading.profile, reading.density
         peaks: tuple[RhythmPeak, ...] = ()
         if profile is not None:

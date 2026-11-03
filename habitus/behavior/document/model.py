@@ -7,9 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from habitus.behavior.document.link import BehaviorStoredLink, normalize_stored_links
 from habitus.behavior.model import BehaviorAddress, BehaviorKind
-from habitus.behavior.uri import BehaviorURI
 from habitus.foundation.integrity import immutable_snapshot
 
 
@@ -54,7 +52,6 @@ class BehaviorDocument:
     metadata: BehaviorDocumentMetadata
     fields: Mapping[str, Any]
     markdown_body: str
-    links: tuple[BehaviorStoredLink, ...] = ()
 
     def __post_init__(self) -> None:
         kind = BehaviorKind(self.kind)
@@ -70,11 +67,6 @@ class BehaviorDocument:
             raise ValueError("behavior document Markdown body must be non-empty")
         if not self.markdown_body.endswith("\n"):
             raise ValueError("behavior document Markdown body must end with a newline")
-        links = normalize_stored_links(self.links, label="behavior document links")
-        uri = BehaviorURI.from_address(self.address)
-        if any(link.from_uri != uri for link in links):
-            raise ValueError("behavior document forward link has the wrong source URI")
-        object.__setattr__(self, "links", links)
 
 
 __all__ = ["BehaviorDocument", "BehaviorDocumentMetadata", "utc_timestamp"]

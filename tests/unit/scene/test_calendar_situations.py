@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from habitus.conditions import LocalCalendar
+from habitus.conditions import WEEKDAY_KEY, LocalCalendar
 from habitus.scene.concepts.calendar_situations import (
     calendar_concepts,
     calendar_key,
     most_specific,
     value_set,
     value_sets_to_add,
-    weekday_set,
 )
 from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.relations import LaneTests, Segment, build_timelines
@@ -81,8 +80,10 @@ def test_the_coarser_calendar_antecedent_explains_the_finer() -> None:
     """同状态同方向时：集合包住的取值、小集合不留；月末包住的 31 号不留。周几与日型不当嵌套（检验周几时日型固定住了）；
     互不包含的各自留着。"""
 
-    small = weekday_set(["周一", "周三"], now=CREATED)
-    concepts = ConceptSet((*calendar_concepts(now=CREATED), weekday_set(["周一", "周三", "周六"], now=CREATED), small))
+    small = value_set(WEEKDAY_KEY, ["周一", "周三"], now=CREATED)
+    concepts = ConceptSet(
+        (*calendar_concepts(now=CREATED), value_set(WEEKDAY_KEY, ["周一", "周三", "周六"], now=CREATED), small)
+    )
     assert most_specific(concepts, ["周一", "周三", "周一、周三、周六", "周五"]) == ("周一、周三、周六", "周五")
     assert most_specific(concepts, ["周一、周三", "周一、周三、周六"]) == ("周一、周三、周六",)
     assert most_specific(concepts, ["31号", "月末"]) == ("月末",)

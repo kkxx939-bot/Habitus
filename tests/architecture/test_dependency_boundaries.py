@@ -193,6 +193,34 @@ def test_memory_kernel_never_imports_the_local_product_shell() -> None:
     assert violations == []
 
 
+def test_memory_internal_layers_keep_their_dependency_direction() -> None:
+    """记忆域内部的依赖方向：
+
+    - 锁键是树的属性（``memory.tree.lock_key``）：树与派生层（语义 L0/L1、向量索引）不为一个锁键 import 编辑器，
+      也就不会把 extraction、model_client 一起拉进来；树外工作目录由组装注入，树也不再反向 import 事务日志；
+    - 会话摘要与 L2 压缩共用的字段操作协议在 ``memory.field_ops``，conversation 不经过 compaction；
+    - 召回生命周期状态（``memory.recall``）被检索读、被 L2 生命周期编排写，自己不依赖压缩、编辑器或检索——
+      否则 ``editor → retrieval → recall → compaction → editor`` 又成环；
+    - ``habitus.memory`` 包根只有 docstring，不转手任何子包——``import habitus.memory.uri`` 不能载入整个记忆域。
+    """
+
+    def importers(package: str, target: str) -> list[str]:
+        return sorted(
+            str(path.relative_to(REPOSITORY_ROOT))
+            for path in (SRC / "memory" / package).rglob("*.py")
+            if any(module == target or module.startswith(f"{target}.") for module in imported_modules(path))
+        )
+
+    for package in ("tree", "semantic", "indexing"):
+        assert importers(package, "habitus.memory.editor") == [], package
+    assert importers("conversation", "habitus.memory.compaction") == []
+    for target in ("habitus.memory.compaction", "habitus.memory.editor", "habitus.memory.retrieval"):
+        assert importers("recall", target) == [], target
+    package_root = ast.parse((SRC / "memory" / "__init__.py").read_text(encoding="utf-8"))
+    assert len(package_root.body) == 1
+    assert ast.get_docstring(package_root)
+
+
 def test_memory_schema_contains_exactly_the_six_confirmed_l2_kinds() -> None:
     definitions = SRC / "memory" / "schema" / "definitions"
     assert {path.stem for path in definitions.glob("*.yaml")} == {
@@ -254,12 +282,10 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
     model_callers = sorted(
         str(path.relative_to(SRC)) for path in behavior_root.rglob("*.py") if "model_client" in imported_roots(path)
     )
-    # ``retry/handlers.py`` 不调模型：只读 ``model_client`` 具名导出的两组异常（模型用不了 / 同一份输入再问也一样）
-    # 来给每晚重试的结果分类（裁定 68 第 5 条），调模型的仍是会话 lane 的 service。
+    # 每晚重试的结果分类（裁定 68 第 5 条）也定在会话 lane 的 service 里：重试处理器只按它导出的三组分，不直接认识模型客户端。
     assert model_callers == [
         "behavior/fusion/lanes/session/service.py",
         "behavior/kinds/calls.py",
-        "behavior/retry/handlers.py",
         "behavior/semantic/generator.py",
     ]
 
@@ -340,7 +366,7 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
 def test_reduction_modules_reach_the_model_only_through_the_runner() -> None:
     """归约层的 LLM 触点只有 runner 与词表的两步（白天归类 kinds_step、整理活 kinds_jobs）；纯函数模块连传递依赖都不许有。
 
-    与融合层同一形状的传递闭包守卫：只查一跳会放过 ``chains → runner → resolver →
+    与融合层同一形状的传递闭包守卫：只查一跳会放过 ``payloads → runner → resolver →
     ModelClient`` 这类多跳链；闭包图必须跨到 kinds 与 fusion，否则经它们中转的泄漏不可见。
     """
 
@@ -462,6 +488,53 @@ def test_behaviour_never_depends_on_its_derivations() -> None:
         if imported_roots(path) & {"scene", "temporal", "foresight"}
     ]
     assert violations == []
+
+
+def _behavior_unit(module: str) -> str | None:
+    """behavior 里的一个子包（或顶层模块）；两条 lane 各算一个，与 ``fusion`` 顶层共用的部分分开。包根不算。"""
+
+    parts = module.split(".")
+    if parts[:2] != ["habitus", "behavior"] or len(parts) < 3:
+        return None
+    if parts[2] == "fusion" and len(parts) >= 5 and parts[3] == "lanes":
+        return ".".join(parts[2:5])
+    return parts[2]
+
+
+def test_behavior_subpackages_depend_on_each_other_without_cycles() -> None:
+    """behavior 子包之间的依赖无环（含函数里的 import）：重试编排不依赖它要试的会话 lane 与归约，处理器跟着它试的东西住
+    （``TurnHandler`` 在会话 lane、``ChainHandler`` 在 ``reduction.failed``）。环能跑起来只靠包根不转手，换个导入顺序就炸。"""
+
+    behavior_root = SRC / "behavior"
+    graph: dict[str, set[str]] = {}
+    for path in behavior_root.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        module = ".".join(("habitus", *path.relative_to(SRC).with_suffix("").parts)).removesuffix(".__init__")
+        source = _behavior_unit(module)
+        if source is None:
+            continue
+        for name in imported_modules(path):
+            target = _behavior_unit(name)
+            if target is not None and target != source:
+                graph.setdefault(source, set()).add(target)
+
+    cycles: list[list[str]] = []
+    state: dict[str, int] = {}  # 1 = 正在走，2 = 走完了
+
+    def walk(node: str, trail: list[str]) -> None:
+        state[node] = 1
+        for target in sorted(graph.get(node, ())):
+            if state.get(target) == 1:
+                cycles.append([*trail[trail.index(target) :], target])
+            elif target not in state:
+                walk(target, [*trail, target])
+        state[node] = 2
+
+    for node in sorted(graph):
+        if node not in state:
+            walk(node, [node])
+    assert cycles == []
 
 
 def _scene_module_graph() -> dict[str, Path]:
@@ -606,7 +679,7 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
     现有 ``concepts / occurrences`` 两支加行为树读侧 ``views``。**全部按传递闭包判**：
 
     - scene 里触达 ``model_client`` 的只有模型触点（写概念、映射器、先验、候选调节条件）与它们共用的调模型那一段
-      （``scene.llm``），而且它们都不从包根导出；
+      （``model_client.asking``，与预测层同一份），而且它们都不从包根导出；
     - 没有任何模块触达 foresight——节律、复现由 ``temporal`` 算，预测层读语义树，反过来不行；
     - 引用单向：``concepts`` 不引用别支；``occurrences`` 只引用 ``concepts``；``relations``（关系检验与状态）只引用前两支，
       不调模型；只有 ``relations.store`` 碰存储，其余（检验、折叠、编码）是纯算法，包根也不转手存储；三支不触达 ``views``
@@ -636,7 +709,6 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
         "habitus.scene.advice.conditions",
         "habitus.scene.advice.prior",
         "habitus.scene.concepts.author",
-        "habitus.scene.llm",
         "habitus.scene.occurrences.mapper",
     ]
     # 建议（先验、候选条件）只引用概念与关系检验里纯的那几块：看不到命中、看不到关系表，也碰不到行为树
@@ -645,7 +717,7 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
         for name in graph
         if name.startswith(("habitus.scene.concepts", "habitus.scene.advice", "habitus.scene.relations"))
         or name
-        in {"habitus.scene.llm", "habitus.scene.storage", "habitus.scene.codec", "habitus.scene.occurrences.model"}
+        in {"habitus.scene.storage", "habitus.scene.codec", "habitus.scene.occurrences.model"}
     } - {"habitus.scene.relations.store"}
     assert "habitus.scene.advice.prior" not in imported_modules(scene_root / "advice" / "__init__.py")
     assert "habitus.scene.advice.conditions" not in imported_modules(scene_root / "advice" / "__init__.py")
@@ -662,7 +734,7 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
     )
     assert detours == []
     branches = ("concepts", "occurrences", "relations")
-    shared = {"habitus.scene.codec", "habitus.scene.storage", "habitus.scene.llm"}
+    shared = {"habitus.scene.codec", "habitus.scene.storage"}
 
     def branch_modules(branch: str) -> list[str]:
         return sorted(
@@ -691,21 +763,22 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
         if module != "habitus.scene.relations.store"
         for name in _scene_closure(module, graph)
         if name.startswith(
-            ("habitus.model_client", "habitus.infrastructure", "habitus.scene.storage", "habitus.scene.llm")
+            ("habitus.model_client", "habitus.infrastructure", "habitus.scene.storage")
         )
         or name
         in {"habitus.scene.occurrences.store", "habitus.scene.concepts.store", "habitus.scene.occurrences.mapper"}
     }
     assert impure == set(), impure
     assert not any(
-        name.startswith(("habitus.model_client", "habitus.scene.llm"))
+        name.startswith("habitus.model_client")
         for name in _scene_closure("habitus.scene.relations.store", graph)
     )
     for branch in branches:
         assert "habitus.scene" not in scene_reach(branch), branch
         assert not any(name.startswith("habitus.scene.views") for name in scene_reach(branch)), branch
+    # 写入口住在 behavior.tree 包里，而 scene 允许读 behavior.tree：禁的是 tree.writer 这一个模块。
     behavior_write_side = (
-        "habitus.behavior.editor",
+        "habitus.behavior.tree.writer",
         "habitus.behavior.reduction",
         "habitus.behavior.fusion",
         "habitus.behavior.kinds",
@@ -713,10 +786,22 @@ def test_scene_tree_is_a_pure_derivation_of_the_behaviour_tree() -> None:
         "habitus.behavior.semantic",
     )
     assert _scene_modules_reaching(graph, *behavior_write_side) == []
-    # 旧树不许回来：目录名与模块名一起钉（2026-09-26 删的旧语义树，2026-10-07 删的假设 / 账本 / 关系投影）。
+    # 旧树不许回来：目录名与模块名一起钉（2026-09-26 删的旧语义树，2026-10-07 删的假设 / 账本 / 关系投影，
+    # 2026-10-22 删的上下文视图投影与槽位邻域序列）。
     for gone in ("association", "regularity", "backlog.py", "model.py", "uri.py", "hypotheses", "ledger"):
         assert not (scene_root / gone).exists(), gone
-    for gone in ("gloss", "relations", "accounts", "materialize", "placebo", "people", "strength", "fulfilment"):
+    for gone in (
+        "gloss",
+        "relations",
+        "accounts",
+        "materialize",
+        "placebo",
+        "people",
+        "strength",
+        "fulfilment",
+        "projection",
+        "neighbourhood",
+    ):
         assert not (scene_root / "views" / f"{gone}.py").exists(), gone
     # views 只剩行为树读侧：一个模块都不许触达 concepts / occurrences（关系表另建，不住在这里）。
     assert [
@@ -876,7 +961,7 @@ def test_foresight_only_reads_the_derived_trees() -> None:
     bridge_imports = {
         module for module in imported_modules(runtime_root / "unsealed.py") if module.startswith("habitus.behavior")
     }
-    # 归类用归约自己的白天归类（``KindStamping`` + 它的请求形状与链内容），不另起一套口径。
+    # 归类用归约自己的白天归类（``KindStamping`` + 它的请求形状与判断内容），不另起一套口径。
     assert bridge_imports <= {
         "habitus.behavior.fusion.store",
         "habitus.behavior.kinds.classify",
@@ -925,10 +1010,23 @@ def test_foundation_depends_on_no_other_package() -> None:
     assert violations == []
 
 
+@pytest.mark.parametrize("package", ["habitus.config", "habitus.model_client"])
+def test_infrastructure_never_imports_config_or_model_client(package: str) -> None:
+    """``infrastructure`` 是底座：配置值对象归各后端自己（``config`` 只做 YAML 聚合构造），向量值对象在
+    ``foundation``。底座一旦反向 import 配置根或模型调用层，配置根与模型 SDK 就成了所有存储与观测后端的传递依赖。"""
+
+    violations = sorted(
+        f"{path.relative_to(SRC)}: {module}"
+        for path in (SRC / "infrastructure").rglob("*.py")
+        for module in imported_modules(path)
+        if module == package or module.startswith(f"{package}.")
+    )
+    assert violations == []
+
+
 def test_infrastructure_lifecycle_depends_only_on_foundation_and_store() -> None:
     """生命周期的基础设施（参与者协议、重试账、容量快照）各层都要用：它只认 ``foundation`` 与
-    ``infrastructure.store``，一旦 import 领域包或配置，那个包就成了所有层的传递依赖。整个 ``infrastructure``
-    现在已经 import config 与 model_client，所以只钉这个子包。"""
+    ``infrastructure.store``，一旦 import 领域包或配置，那个包就成了所有层的传递依赖。"""
 
     allowed = ("habitus.infrastructure.lifecycle", "habitus.infrastructure.store", "habitus.foundation")
     violations = sorted(
@@ -948,7 +1046,6 @@ def test_ledger_compaction_reaches_storage_only_through_the_ledger_facade() -> N
     allowed = (
         "habitus.foresight",
         "habitus.runtime.foresight_ledger",
-        "habitus.runtime.foresight_settlement",
     )
     violations = sorted(
         module for module in imported_modules(path) if module.startswith("habitus") and not module.startswith(allowed)
@@ -1006,6 +1103,19 @@ def test_conversation_never_depends_on_memory_or_behavior() -> None:
     assert not (SRC / "conversation" / "projection").exists()
 
 
+def test_memory_reaches_the_conversation_source_only_through_its_public_package() -> None:
+    """记忆侧只经 ``habitus.conversation.source`` 的公开入口用会话源，不伸进它的内部子模块。"""
+
+    violations = sorted(
+        f"{path.relative_to(SRC)}: {module}"
+        for path in (SRC / "memory").rglob("*.py")
+        if "__pycache__" not in path.parts
+        for module in imported_modules(path)
+        if module.startswith("habitus.conversation") and module != "habitus.conversation.source"
+    )
+    assert violations == []
+
+
 def test_the_session_lane_meets_the_conversation_source_only_in_the_composition_root() -> None:
     """会话 lane 住在行为侧、不认识会话源；会话源也不认识它。两边只在 ``runtime/session_lane.py`` 这一座桥上相遇。"""
 
@@ -1052,6 +1162,24 @@ def test_the_session_lane_meets_the_conversation_source_only_in_the_composition_
             for path in (SRC / "behavior" / "fusion" / "lanes" / lane).glob("*.py")
             if any(module.startswith(f"habitus.behavior.fusion.lanes.{other}") for module in imported_modules(path))
         ] == []
+
+
+def test_conversation_source_mechanics_read_consumer_declarations_not_consumer_names() -> None:
+    """交付、恢复、释放、补救、执行栅栏只认 Consumer 自己的声明（``ordered_within_conversation``、``output_store``、
+    注入的补救）与枚举本身，不按具体 Consumer 分支；本地服务命令行的 Consumer 取值也从枚举来。"""
+
+    source_root = SRC / "conversation" / "source"
+    names = ("ConversationSourceConsumer.MEMORY", "ConversationSourceConsumer.BEHAVIOR_SESSION", "conversation-memory")
+    violations = [
+        f"{path.name}: {name}"
+        for path in sorted(source_root.glob("*.py"))
+        if path.name != "receipt.py"  # 枚举本身的定义
+        for name in names
+        if name in path.read_text(encoding="utf-8")
+    ]
+    assert violations == []
+    cli = (SRC / "integrations" / "local_service" / "cli.py").read_text(encoding="utf-8")
+    assert '"behavior_session"' not in cli and "'behavior_session'" not in cli
 
 
 def test_memory_conversation_consumer_wraps_the_single_existing_enqueuer_chain() -> None:
@@ -1166,6 +1294,98 @@ def test_the_vocabulary_reaches_the_model_only_through_its_one_caller() -> None:
         f"{module} -> {name}"
         for module, path in graph.items()
         for name in imported_modules(path)
-        if name.startswith(("habitus.behavior.tree", "habitus.behavior.reduction", "habitus.behavior.editor"))
+        if name.startswith(("habitus.behavior.tree", "habitus.behavior.reduction", "habitus.behavior.tree.writer"))
     )
     assert upward == []
+
+
+def test_input_too_large_and_content_safety_are_classified_only_through_model_deterministic() -> None:
+    """输入超长 / 内容安全 = 同一份输入再问也一样，这条分类只定义一处（``model_client.MODEL_DETERMINISTIC``）：行为侧、组合根、
+    基础设施一律按这一组分类，不各自点名这两个异常（以前三份口径：概览刷新同一天调 5 次、会话 lane 一轮被拦连累后面的轮）。"""
+
+    named = ("ModelInputTooLargeError", "ModelContentSafetyError")
+    offenders = sorted(
+        f"{path.relative_to(SRC)}:{node.lineno}"
+        for root in ("behavior", "runtime", "infrastructure")
+        for path in (SRC / root).rglob("*.py")
+        if "__pycache__" not in path.parts
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+        if (isinstance(node, ast.Name) and node.id in named)
+        or (isinstance(node, ast.Attribute) and node.attr in named)
+        or (isinstance(node, ast.ImportFrom) and any(alias.name in named for alias in node.names))
+    )
+    assert offenders == []
+    # 用到这一组的地方：会话 lane 的模型触点（含每晚重试的分类）、词表的模型触点、组合根给概览刷新的重试账
+    users = sorted(
+        str(path.relative_to(SRC))
+        for root in ("behavior", "runtime", "infrastructure")
+        for path in (SRC / root).rglob("*.py")
+        if "__pycache__" not in path.parts
+        and any(
+            isinstance(node, ast.ImportFrom) and any(alias.name == "MODEL_DETERMINISTIC" for alias in node.names)
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+        )
+    )
+    assert users == [
+        "behavior/fusion/lanes/session/service.py",
+        "behavior/kinds/calls.py",
+        "runtime/behavior.py",
+    ]
+
+
+def test_model_unavailable_is_classified_only_through_the_shared_group() -> None:
+    """"模型此刻用不了、等它恢复"只定义一处（``model_client.MODEL_UNAVAILABLE``）：记忆 Job 的长退避、会话 lane 的重试堆都从
+    这一组取，记忆侧不再各自点名其中的异常（以前记忆只看 ``retryable``，余额不足、鉴权失效一次就 FAILED，裁定 80 问题 2）。"""
+
+    named = (
+        "ModelTransportError",
+        "ModelRateLimitError",
+        "ModelQuotaError",
+        "ModelAuthenticationError",
+        "ModelPermissionError",
+        "ModelResponseError",
+    )
+    offenders = sorted(
+        f"{path.relative_to(SRC)}:{node.lineno}"
+        for path in (SRC / "memory").rglob("*.py")
+        if "__pycache__" not in path.parts
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+        if (isinstance(node, ast.Name) and node.id in named)
+        or (isinstance(node, ast.Attribute) and node.attr in named)
+        or (isinstance(node, ast.ImportFrom) and any(alias.name in named for alias in node.names))
+    )
+    assert offenders == []
+    users = sorted(
+        str(path.relative_to(SRC))
+        for root in ("memory", "behavior")
+        for path in (SRC / root).rglob("*.py")
+        if "__pycache__" not in path.parts
+        and any(
+            isinstance(node, ast.ImportFrom)
+            and any(alias.name in {"MODEL_UNAVAILABLE", "MODEL_UNUSABLE"} for alias in node.names)
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+        )
+    )
+    # ``MODEL_UNUSABLE`` = 这一组 + 没配好：行为侧"模型整个用不了"（停线、放一边等当晚）从它取（裁定 94 第 8 条）
+    assert users == [
+        "behavior/fusion/lanes/session/service.py",
+        "behavior/kinds/calls.py",
+        "memory/workflow/failure.py",
+    ]
+
+
+def test_memory_gets_the_subjects_time_zone_from_the_composition_root() -> None:
+    """记忆按主体所在地的本地日校验 Event 日期、给抽取材料的时刻带本地偏移（M6）：时区与行为、语义树同一出处
+    ``config.locale``，由组合根注入；记忆域自己不读配置、不认进程时区。"""
+
+    offenders = sorted(
+        str(path.relative_to(REPOSITORY_ROOT))
+        for root in ("memory", "pre")
+        for path in (SRC / root).rglob("*.py")
+        if "__pycache__" not in path.parts and ("config" in imported_roots(path) or "zoneinfo" in imported_roots(path))
+    )
+    assert offenders == []
+    assembly = (SRC / "runtime" / "assembly.py").read_text(encoding="utf-8")
+    loop_call = assembly[assembly.index("MemoryExtractionLoop(") :]
+    loop_call = loop_call[: loop_call.index("\n    )")]
+    assert "zone=config.locale.zone()," in loop_call

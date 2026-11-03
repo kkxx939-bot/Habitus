@@ -33,9 +33,11 @@ from habitus.behavior.document import BehaviorDocument
 from habitus.behavior.model import BehaviorKind
 from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.uri import BehaviorURI
+from habitus.conditions import WEEKDAY_NAMES
 from habitus.foundation.integrity import canonical_digest
 from habitus.foundation.text import clean_line
 from habitus.model_client import ChatMessage, ChatRequest, StructuredChatClient
+from habitus.model_client.asking import Answered, Failed, ask
 from habitus.scene.concepts.model import (
     BaselineKey,
     ConceptDefinition,
@@ -43,14 +45,18 @@ from habitus.scene.concepts.model import (
     ContextScope,
     GradeMeasure,
 )
-from habitus.scene.llm import Answered, Failed, ask
-from habitus.scene.occurrences.model import ConceptHit, ConceptHits, ConceptHitsError, UnresolvedReason
+from habitus.scene.occurrences.model import (
+    MAX_SIGNAL_CHARS,
+    ConceptHit,
+    ConceptHits,
+    ConceptHitsError,
+    UnresolvedReason,
+)
 from habitus.scene.occurrences.situations import SituationOutcome
 from habitus.scene.occurrences.store import ConceptHitStore
 from habitus.series import EventSeries, SeriesGap, SeriesRecord, SkipReason
 
 MAPPER_PROMPT_VERSION = "scene_concept_mapper_prompt_v4"
-_WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 MAPPER_SYSTEM_PROMPT = """你在判断一条被观测到的行为满足哪些细分条件。
 
@@ -234,7 +240,7 @@ class OccurrenceFacts:
         if self.steps:
             lines.append("步骤：" + " → ".join(self.steps))
         lines += [
-            f"开始：{started.strftime('%Y-%m-%d %H:%M')}（{_WEEKDAYS[started.weekday()]}）",
+            f"开始：{started.strftime('%Y-%m-%d %H:%M')}（{WEEKDAY_NAMES[started.weekday()]}）",
             f"最后所见：{self.last_observed_at.strftime('%H:%M')}（历时约 {round(self.duration_minutes)} 分钟）",
             f"同在：{'、'.join(others) if others else '（无）'}",
             f"地点：{self.place if self.place else '（未知）'}",
@@ -329,7 +335,7 @@ def _render_recent(rows: Sequence[TimelineEntry], limit: int) -> list[str]:
         return ["（这几天没有）"]
     ordered = sorted(rows, key=lambda row: (row.started_at.astimezone(UTC), row.uri))[-limit:]
     return [
-        f"- {row.started_at.strftime('%m-%d %H:%M')}（{_WEEKDAYS[row.started_at.weekday()]}）{row.name}（{row.summary}）"
+        f"- {row.started_at.strftime('%m-%d %H:%M')}（{WEEKDAY_NAMES[row.started_at.weekday()]}）{row.name}（{row.summary}）"
         for row in ordered
     ]
 
@@ -487,6 +493,9 @@ class ConceptMapper:
                 lane=lane,
                 signals=verdict.signals,
                 recent_digest=None if given.recent is None else recent_digest(given.recent),
+                timeline_digest=timeline_digest(given.timeline)
+                if classified and ContextScope.DAY in self.needs(facts.kind_token)
+                else None,
             )
         except ConceptHitsError as exc:
             raise ConceptMapperError(str(exc)) from exc
@@ -541,13 +550,13 @@ class ConceptMapper:
             if isinstance(answer, Failed):
                 # 模型层的失败不出本模块：这些候选记未决，一条 occurrence 不把整天塌掉。
                 verdict.unresolved.update((concept.name, UnresolvedReason.MODEL_FAILED) for concept in candidates)
-                verdict.signals += (answer.signal,)
+                verdict.note(answer.signal)
                 return
         assert isinstance(first, Answered) and isinstance(second, Answered)
         readings = [
             _readings(cast("tuple[tuple[str, ...], tuple[str, ...]]", answer.value)) for answer in (first, second)
         ]
-        verdict.signals += first.notes + second.notes
+        verdict.note(*first.notes, *second.notes)
         measures = facts.measures()
         for concept in candidates:
             once, twice = (reading(concept.identity) for reading in readings)
@@ -636,7 +645,23 @@ class _Verdict:
 
     def unsure(self, concept: ConceptDefinition, reason: UnresolvedReason, note: str) -> None:
         self.unresolved[concept.name] = reason
-        self.signals += (f"unresolved: {concept.name} {note}",)
+        self.note(f"unresolved: {concept.name} {note}")
+
+    def note(self, *texts: str) -> None:
+        """留痕截到记录的单条上限之内：模型失败的信号带着核对报错，可能比上限长，截掉尾巴也不能让整条记录写不出。"""
+
+        self.signals += tuple(clean_line(text)[:MAX_SIGNAL_CHARS] for text in texts)
+
+
+def timeline_digest(rows: Sequence[TimelineEntry]) -> str:
+    """ "当天时间线"这份材料的摘要：每一行的地址、时刻与说法。同一天后来补进一条记录（或一段空白），这里就会变。"""
+
+    return canonical_digest(
+        [
+            [row.uri, row.name, row.started_at.isoformat(), row.last_observed_at.isoformat(), row.summary, row.gap]
+            for row in rows
+        ]
+    )[:16]
 
 
 def recent_digest(rows: Sequence[TimelineEntry]) -> str:
@@ -733,9 +758,14 @@ async def map_closed_day(
             hits, checked = situations.hits, situations.checked
         else:
             hits, checked = tuple(situations), ()
+        seen_until = records[uri].last_observed_at
+        timeline = tuple(item for item in timelines[lane] if item.started_at <= seen_until)
+        day_material = timeline if classified and ContextScope.DAY in mapper.needs(token) else None
         if store.exists(document.address):
             existing = store.read(document.address)
-            if existing.mapper == mapper.version_for(token) and _inputs_unchanged(existing, token, baseline, rows):
+            if existing.mapper == mapper.version_for(token) and _inputs_unchanged(
+                existing, token, baseline, rows, day_material
+            ):
                 if _same_situations(existing, hits, checked):
                     resumed += 1
                 else:
@@ -744,8 +774,6 @@ async def map_closed_day(
                     refreshed += 1
                 continue
             rewritten += 1
-        seen_until = records[uri].last_observed_at
-        timeline = tuple(item for item in timelines[lane] if item.started_at <= seen_until)
         material = MappingMaterial(baseline=baseline, timeline=timeline, recent=rows)
         record = await mapper.map(
             document,
@@ -819,12 +847,17 @@ def _same_situations(existing: ConceptHits, hits: Sequence[ConceptHit], checked:
 
 
 def _inputs_unchanged(
-    existing: ConceptHits, token: str, baseline: Mapping[str, str], recent: Sequence[TimelineEntry] | None
+    existing: ConceptHits,
+    token: str,
+    baseline: Mapping[str, str],
+    recent: Sequence[TimelineEntry] | None,
+    timeline: Sequence[TimelineEntry] | None,
 ) -> bool:
     """续跑判据是"输入没变"，不是"没有未决"。
 
     - 编号变了（词表迁移改写了这一条）一律重判：候选是挂在类上的细分概念，类换了候选就换了；
     - "近几天同类记录"变了（别的日子被迁移改了编号）重判：要它的细分概念答案可能变；
+    - "当天时间线"变了（同一天后来补进了记录或空白）重判：答过"没有""看不到"的，补进来的那条可能正是判据要找的；
     - 带未决的：模型这一次没答成、或当时材料没给到 → 重问；因缺常态 / 常态解不出而未决的，常态表变了才重问；
       模型答"看不到"的，材料没变就不重问（再问一遍答案不会变）。
     """
@@ -832,6 +865,8 @@ def _inputs_unchanged(
     if existing.kind_token != token:
         return False
     if existing.recent_digest != (None if recent is None else recent_digest(recent)):
+        return False
+    if existing.timeline_digest != (None if timeline is None else timeline_digest(timeline)):
         return False
     reasons = set(existing.unresolved.values())
     if reasons & _RETRY_REASONS:

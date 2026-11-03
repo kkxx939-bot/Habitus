@@ -36,7 +36,7 @@ from habitus.memory.workflow.jobs.model import (
 )
 from habitus.pre.conversation import ConversationSegment
 
-_JOB_SCHEMA = "memory_job_v3"
+_JOB_SCHEMA = "memory_job_v4"
 _JOB_STATE_SCHEMA = "memory_job_sequence_state_v1"
 
 
@@ -418,14 +418,20 @@ class MemoryJobStore:
         error: BaseException,
         *,
         retryable: bool = True,
+        waits_for_model: bool = False,
         before_settlement: Callable[[], None] | None = None,
     ) -> MemoryJob:
-        """在同一租约栅栏内清理未提交副作用、记录失败和退避。"""
+        """在同一租约栅栏内清理未提交副作用、记录失败和退避。
+
+        ``waits_for_model``：模型此刻用不了，这一次不计入尝试次数，按 ``model_wait_*`` 的长退避排回队列等它恢复。
+        """
 
         if not isinstance(error, BaseException):
             raise TypeError("error must be an exception")
         if not isinstance(retryable, bool):
             raise TypeError("retryable must be boolean")
+        if not isinstance(waits_for_model, bool):
+            raise TypeError("waits_for_model must be boolean")
         if before_settlement is not None and not callable(before_settlement):
             raise TypeError("before_settlement must be callable or None")
         message = " ".join(str(error).split()) or type(error).__name__
@@ -434,6 +440,7 @@ class MemoryJobStore:
             committed=False,
             error=message[:MEMORY_JOB_ERROR_MAX_CHARS],
             retryable=retryable,
+            waits_for_model=waits_for_model,
             before_settlement=before_settlement,
         )
 
@@ -537,6 +544,7 @@ class MemoryJobStore:
         committed: bool,
         error: str | None,
         retryable: bool,
+        waits_for_model: bool = False,
         before_settlement: Callable[[], None] | None = None,
     ) -> MemoryJob:
         self._require_lease(lease)
@@ -545,10 +553,19 @@ class MemoryJobStore:
             current = self._current_lease_job(lease, now=now)
             if before_settlement is not None:
                 before_settlement()
+            attempts = current.attempts
+            model_waits = 0
             if committed:
                 status = MemoryJobStatus.COMMITTED
                 next_attempt_at = None
                 last_error = current.last_error
+            elif waits_for_model:
+                # 认领时已经记了一次尝试：等模型恢复的这一次退回去，不让它把 max_attempts 用完
+                status = MemoryJobStatus.QUEUED
+                attempts = current.attempts - 1
+                model_waits = current.model_waits + 1
+                next_attempt_at = now + timedelta(seconds=self.config.model_wait_delay_seconds(model_waits))
+                last_error = error
             elif not retryable or current.attempts >= self.config.max_attempts:
                 status = MemoryJobStatus.FAILED
                 next_attempt_at = None
@@ -560,6 +577,8 @@ class MemoryJobStore:
             finished = replace(
                 current,
                 status=status,
+                attempts=attempts,
+                model_waits=model_waits,
                 claim_id=None,
                 worker_id=None,
                 lease_expires_at=None,
@@ -897,6 +916,7 @@ class MemoryJobStore:
                 "lease_expires_at": MemoryJobStore._format_optional_time(job.lease_expires_at),
                 "next_attempt_at": MemoryJobStore._format_optional_time(job.next_attempt_at),
                 "last_error": job.last_error,
+                "model_waits": job.model_waits,
                 "created_at": MemoryJobStore._format_time(job.created_at),
                 "updated_at": MemoryJobStore._format_time(job.updated_at),
             }
@@ -923,6 +943,7 @@ class MemoryJobStore:
             "lease_expires_at",
             "next_attempt_at",
             "last_error",
+            "model_waits",
             "created_at",
             "updated_at",
         }
@@ -946,6 +967,7 @@ class MemoryJobStore:
                 lease_expires_at=MemoryJobStore._parse_optional_time(value["lease_expires_at"]),
                 next_attempt_at=MemoryJobStore._parse_optional_time(value["next_attempt_at"]),
                 last_error=value["last_error"],
+                model_waits=value["model_waits"],
                 created_at=MemoryJobStore._parse_time(value["created_at"]),
                 updated_at=MemoryJobStore._parse_time(value["updated_at"]),
             )

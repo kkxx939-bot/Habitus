@@ -8,12 +8,12 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 
 from habitus.conversation.source import (
+    ConversationConsumerExecutionLease,
     ConversationConsumerRunDisposition,
     ConversationConsumerRunResult,
     ConversationSourceConsumer,
     ConversationSourceEnvelope,
 )
-from habitus.conversation.source.fence import ConversationConsumerExecutionLease
 from habitus.foundation.integrity import canonical_digest
 from habitus.memory.conversation import (
     ConversationAddress,
@@ -66,7 +66,7 @@ class MemoryConversationConsumer:
             {
                 "schema_version": MEMORY_CONVERSATION_PROCESSOR_SCHEMA_VERSION,
                 "output_schema_version": MEMORY_CONVERSATION_OUTPUT_SCHEMA_VERSION,
-                "tool_result_reducer_version": "conversation_tool_result_reducer_v1",
+                "tool_result_reducer_version": "conversation_tool_result_reducer_v4",
                 "text_chunker_version": "conversation_message_chunker_v1",
                 "retention_planner_version": "conversation_retention_planner_v2",
                 "segmentation_config": asdict(enqueuer.retention_planner.config),

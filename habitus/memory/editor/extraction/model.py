@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from habitus.infrastructure.editor.snapshot import SnapshotBatch
-from habitus.memory.editor.candidate import MemoryCandidateBatch
+from habitus.memory.editor.candidate import MemoryCandidateBatch, MemoryCandidateViolation
 from habitus.memory.editor.mutation import MemoryMutationPlan
 from habitus.memory.editor.page_id import MemoryPageIdMap
 from habitus.memory.snapshot import MemorySnapshotBatch
@@ -26,10 +26,6 @@ class MemoryExtractionPermanentError(MemoryExtractionError):
 
 class MemoryExtractionCapacityError(MemoryExtractionPermanentError):
     """完整事实无法装入已配置的模型或旧记忆预算。"""
-
-
-class MemoryRetrievalIncompleteError(MemoryExtractionPermanentError):
-    """受控检索达到上限后，旧记忆上下文仍不足。"""
 
 
 class MemoryRetrievalStatus(str, Enum):
@@ -72,7 +68,10 @@ class MemoryRetrievalDecision:
         object.__setattr__(self, "reason", reason)
         object.__setattr__(self, "query", query)
         object.__setattr__(self, "uri", uri)
+        self._require_valid_combination()
 
+    def _require_valid_combination(self) -> None:
+        status, action, query, uri = self.status, self.action, self.query, self.uri
         if action is MemoryRetrievalAction.FINISH:
             if status is MemoryRetrievalStatus.INSUFFICIENT:
                 raise ValueError("insufficient retrieval cannot finish")
@@ -94,45 +93,26 @@ class MemoryRetrievalDecision:
     def model_json_schema(cls) -> dict[str, object]:
         """返回 Retrieval Grader 的无置信度严格 Schema。"""
 
-        return {
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "title": "MemoryRetrievalDecision",
-            "description": (
+        return _decision_schema(
+            title="MemoryRetrievalDecision",
+            description=(
                 "判断当前完整旧记忆是否足够支撑记忆候选解析。每轮只能 finish、执行一次"
                 " memory_search，或读取一个已经由系统暴露的 memory URI。不得输出多个查询、"
                 "记忆候选、置信度、修改或写入操作。"
             ),
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["status", "action", "query", "uri", "reason"],
-            "properties": {
-                "status": {
-                    "type": "string",
-                    "enum": [status.value for status in MemoryRetrievalStatus],
-                },
-                "action": {
-                    "type": "string",
-                    "enum": [action.value for action in MemoryRetrievalAction],
-                },
-                "query": {
-                    "type": ["string", "null"],
-                    "minLength": 1,
-                    "maxLength": 20_000,
-                    "description": "memory_search 的单个语义查询；其他动作必须为 null。",
-                },
-                "uri": {
-                    "type": ["string", "null"],
-                    "minLength": 1,
-                    "description": "memory_read 的一个完整 memory:// L2 URI；其他动作必须为 null。",
-                },
-                "reason": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": _MAX_REASON_CHARS,
-                    "description": "只解释检索充分性，不生成或修正记忆内容。",
-                },
+            actions=tuple(MemoryRetrievalAction),
+            query={
+                "type": ["string", "null"],
+                "minLength": 1,
+                "maxLength": 20_000,
+                "description": "memory_search 的单个语义查询；其他动作必须为 null。",
             },
-        }
+            uri={
+                "type": ["string", "null"],
+                "minLength": 1,
+                "description": "memory_read 的一个完整 memory:// L2 URI；其他动作必须为 null。",
+            },
+        )
 
     @classmethod
     def model_validate(cls, value: object) -> MemoryRetrievalDecision:
@@ -153,15 +133,37 @@ class MemoryRetrievalDecision:
             reason=_clean_text(payload["reason"], "reason"),
         )
 
-    def require_action_allowed(self, *, allow_action: bool) -> None:
-        """最终检索轮禁止继续调用工具。"""
 
-        if not isinstance(allow_action, bool):
-            raise TypeError("allow_action must be boolean")
-        if not allow_action and self.action is not MemoryRetrievalAction.FINISH:
-            raise MemoryRetrievalIncompleteError(
-                "retrieval grader requested another action after the configured final round"
-            )
+@dataclass(frozen=True)
+class MemoryRetrievalFinalDecision(MemoryRetrievalDecision):
+    """检索轮次用完后的结束决策：只能 finish，status 如实记录已读材料是否充分。
+
+    这一轮系统不再执行工具，所以 insufficient 也只是结束检索、按已读到的旧记忆继续，
+    不构成失败。
+    """
+
+    def _require_valid_combination(self) -> None:
+        if self.action is not MemoryRetrievalAction.FINISH:
+            raise ValueError("final retrieval round can only finish")
+        if self.query is not None or self.uri is not None:
+            raise ValueError("finish retrieval action cannot carry query or uri")
+
+    @classmethod
+    def model_json_schema(cls) -> dict[str, object]:
+        """返回检索轮次用完后只允许 finish 的严格 Schema。"""
+
+        return _decision_schema(
+            title="MemoryRetrievalFinalDecision",
+            description=(
+                "检索轮次预算已经用完，系统不会再执行 memory_search 或 memory_read。只能返回"
+                " finish，按已读到的完整旧记忆和先前检索结果结束检索；status 如实记录这些材料"
+                "是否充分，insufficient 不会导致失败。不得输出查询、URI、记忆候选、置信度、"
+                "修改或写入操作。"
+            ),
+            actions=(MemoryRetrievalAction.FINISH,),
+            query={"type": "null", "description": "最后一轮不能再搜索，必须为 null。"},
+            uri={"type": "null", "description": "最后一轮不能再读取，必须为 null。"},
+        )
 
 
 @dataclass(frozen=True)
@@ -220,6 +222,10 @@ class MemoryExtractionResult:
     page_ids: MemoryPageIdMap
     retrieval_decisions: tuple[MemoryRetrievalDecision, ...]
     retrieval_observations: tuple[MemoryRetrievalObservation, ...]
+    retrieval_ended_at_limit: bool = False
+    """检索在轮次上限处结束：最后一轮判定已读材料不足，或最后一轮答复没能通过结构校验。"""
+    source_rejections: tuple[MemoryCandidateViolation, ...] = ()
+    """修补一轮后仍通不过来源校验、从本批剔掉的条目及原因（含引用被剔候选的关系与身份提议）。"""
 
     def __post_init__(self) -> None:
         for name in ("conversation_id", "segment_id"):
@@ -239,12 +245,54 @@ class MemoryExtractionResult:
             raise ValueError("preliminary mutation plan must cover every memory candidate exactly once")
         if not isinstance(self.page_ids, MemoryPageIdMap):
             raise TypeError("page_ids must be a MemoryPageIdMap")
-        if not self.retrieval_decisions or any(
-            not isinstance(item, MemoryRetrievalDecision) for item in self.retrieval_decisions
-        ):
+        if not isinstance(self.retrieval_ended_at_limit, bool):
+            raise TypeError("retrieval_ended_at_limit must be boolean")
+        if any(not isinstance(item, MemoryRetrievalDecision) for item in self.retrieval_decisions):
+            raise TypeError("retrieval_decisions contains an invalid decision")
+        if not self.retrieval_decisions and not self.retrieval_ended_at_limit:
             raise TypeError("retrieval_decisions must contain at least one decision")
         if any(not isinstance(item, MemoryRetrievalObservation) for item in self.retrieval_observations):
             raise TypeError("retrieval_observations contains an invalid observation")
+        if not isinstance(self.source_rejections, tuple) or any(
+            not isinstance(item, MemoryCandidateViolation) for item in self.source_rejections
+        ):
+            raise TypeError("source_rejections must be a tuple of candidate violations")
+
+
+def _decision_schema(
+    *,
+    title: str,
+    description: str,
+    actions: tuple[MemoryRetrievalAction, ...],
+    query: dict[str, object],
+    uri: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": title,
+        "description": description,
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["status", "action", "query", "uri", "reason"],
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": [status.value for status in MemoryRetrievalStatus],
+            },
+            "action": {
+                "type": "string",
+                "enum": [action.value for action in actions],
+            },
+            "query": query,
+            "uri": uri,
+            "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": _MAX_REASON_CHARS,
+                "description": "只解释检索充分性，不生成或修正记忆内容。",
+            },
+        },
+    }
 
 
 def _strict_object(
@@ -286,7 +334,7 @@ __all__ = [
     "MemoryExtractionResult",
     "MemoryRetrievalAction",
     "MemoryRetrievalDecision",
-    "MemoryRetrievalIncompleteError",
+    "MemoryRetrievalFinalDecision",
     "MemoryRetrievalObservation",
     "MemoryRetrievalStatus",
 ]

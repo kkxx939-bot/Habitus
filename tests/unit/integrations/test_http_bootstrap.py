@@ -12,9 +12,7 @@ import pytest
 import habitus.config as Config
 import habitus.runtime as Runtime
 from habitus.config import HTTPAPIConfig
-from habitus.infrastructure import observability
 from habitus.integrations.http_api import app as app_module
-from habitus.integrations.http_api import bootstrap
 from habitus.integrations.local_service import ServiceInstanceLock
 from habitus.integrations.local_service import cli as local_cli
 from habitus.integrations.local_service import doctor as doctor_module
@@ -40,42 +38,6 @@ def test_http_config_rejects_remote_binding_and_removed_auth_fields() -> None:
         HTTPAPIConfig.from_mapping({"api_key_env": "HABITUS_HTTP_API_KEY"})
 
 
-def test_factory_uses_one_config_and_creates_storage_scoped_instance_lock(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    environ = {"HABITUS_CONFIG_FILE": "/tmp/habitus.yaml"}
-    config = SimpleNamespace(
-        http=HTTPAPIConfig(),
-        storage_root=tmp_path,
-        observability=SimpleNamespace(logging=SimpleNamespace(enabled=True, level="WARNING")),
-    )
-    runtime = object()
-    app = object()
-    from_env = Mock(return_value=config)
-    build = Mock(return_value=runtime)
-    create = Mock(return_value=app)
-    configure = Mock()
-    monkeypatch.setattr(Config.HabitusConfig, "from_env", from_env)
-    monkeypatch.setattr(Runtime, "build_runtime", build)
-    monkeypatch.setattr(app_module, "create_http_app", create)
-    monkeypatch.setattr(observability, "configure_json_logging", configure)
-    monkeypatch.setattr(doctor_module, "run_startup_preflight", Mock())
-
-    result = bootstrap.create_app_from_env(environ=environ)
-
-    assert result is app
-    from_env.assert_called_once_with(environ=environ)
-    build.assert_called_once_with(config)
-    configure.assert_called_once_with(level="WARNING")
-    call = create.call_args
-    assert call.args == (runtime,)
-    assert call.kwargs["config"] is config.http
-    lock = call.kwargs["instance_lock"]
-    assert isinstance(lock, ServiceInstanceLock)
-    assert lock.path == tmp_path / "service" / "http.lock"
-
-
 def test_process_entrypoint_preflights_then_binds_configured_listener(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -92,13 +54,33 @@ def test_process_entrypoint_preflights_then_binds_configured_listener(
     monkeypatch.setattr(Config.HabitusConfig, "from_env", Mock(return_value=config))
     monkeypatch.setattr(doctor_module, "run_startup_preflight", preflight)
     monkeypatch.setattr(Runtime, "build_runtime", Mock(return_value=runtime))
-    monkeypatch.setattr(app_module, "create_http_app", Mock(return_value=app))
+    create = Mock(return_value=app)
+    monkeypatch.setattr(app_module, "create_http_app", create)
     monkeypatch.setitem(sys.modules, "uvicorn", SimpleNamespace(run=run))
+    monkeypatch.setenv("HABITUS_CONFIG_FILE", str(tmp_path / "config" / "config.yaml"))
+    monkeypatch.setenv("HABITUS_PLUGIN_STATE_DIR", str(tmp_path / "plugin-state"))
+    refresh = Mock()
+    monkeypatch.setattr(local_cli, "_write_plugin_connections", refresh)
 
     local_cli.main([])
 
     preflight.assert_called_once()
-    run.assert_called_once_with(app, host="127.0.0.9", port=9876, log_config=None)
+    # 起 uvicorn 之前按这次的配置刷新插件的连接文件：配置旁边那份与插件默认读的那份
+    refresh.assert_called_once_with(
+        config,
+        (tmp_path / "config" / "agent-plugin" / "connection.json", tmp_path / "plugin-state" / "connection.json"),
+        "refresh",
+    )
+    run.assert_called_once_with(ANY, host="127.0.0.9", port=9876, log_config=None)
+    served = run.call_args.args[0]
+    # 交给 uvicorn 的是包了启动失败截获的同一个应用
+    assert isinstance(served, local_cli._StartupFailureGuard) and served._app is app
+    call = create.call_args
+    assert call.args == (runtime,)
+    assert call.kwargs["config"] is config.http
+    lock = call.kwargs["instance_lock"]
+    assert isinstance(lock, ServiceInstanceLock)
+    assert lock.path == tmp_path / "service" / "http.lock"
 
 
 def test_doctor_subcommand_uses_the_same_config_and_never_builds_runtime(

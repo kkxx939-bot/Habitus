@@ -229,7 +229,9 @@ def test_the_settlement_still_runs_when_the_rest_of_the_night_is_skipped(tmp_pat
     assert calls == ["结算", "结算"]
 
 
-def test_a_failing_settlement_does_not_stop_the_night(tmp_path, monkeypatch) -> None:
+def test_a_failing_settlement_stops_the_night(tmp_path, monkeypatch) -> None:
+    """结算抛了是 bug：这一晚停下（不跑语义树与机会表、不拿旧数据顶），健康面报出，下一晚照常（裁定 94 第 8 条）。"""
+
     built, foresight, scene, site = _night_with_settlement(tmp_path)
 
     def broken():  # type: ignore[no-untyped-def]
@@ -247,8 +249,8 @@ def test_a_failing_settlement_does_not_stop_the_night(tmp_path, monkeypatch) -> 
         settlement=built.settlement,
     )
     outcome = asyncio.run(run.run_once())
-    assert outcome.settled is None and outcome.scene is not None and outcome.opportunities is not None
-    assert outcome.settlement_failed == "RuntimeError"  # 交出去，常驻节拍据它在健康面留痕
+    assert outcome.settled is None and outcome.scene is None and outcome.opportunities is None
+    assert outcome.stopped == "结算出错: RuntimeError" and not outcome.complete
     import pytest
 
     with pytest.raises(TypeError, match="SettlementStage"):
@@ -362,3 +364,39 @@ def test_the_ledger_is_compacted_only_after_the_unit_history_has_run(tmp_path) -
     run.run(night=series.cutoff, concepts=CONCEPTS, timelines=build_timelines(series, CONCEPTS, {}, CONFIG))
 
     assert order == ["history", "compaction"]
+
+
+def test_a_bad_unit_moment_record_still_lets_the_ledger_be_compacted_and_is_counted(tmp_path) -> None:
+    """段 6 Q2：单元历史里一份坏记录原来让这一晚的单元历史抛、压实跟着跳过，每晚都这样；坏的那一份跳过、计入观测，
+    单元历史照写，压实照常调用。"""
+
+    from habitus.runtime.foresight_compaction import CompactionReport, LedgerCompaction
+
+    recorder = Recorder()
+    site, _hits = site_with_three_bedtimes(tmp_path)
+    built = components(tmp_path, site)
+    moments = built.history.store.root / "unit_moments" / "session"
+    moments.mkdir(parents=True)
+    bad = moments / "old.json"
+    bad.write_text('{"schema_version": 999}', encoding="utf-8")
+    compaction = LedgerCompaction(built.ledger, evidence=Evidence(alpha=0.05, half_life=8.0), lane="session")
+    calls: list[object] = []
+
+    def compact(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        return CompactionReport()
+
+    compaction.run = compact  # type: ignore[method-assign]
+    run = ForesightNightlyRun(
+        OpportunityStore(tmp_path / "foresight" / "session"),
+        RelationStore(tmp_path / "scene"),
+        CONFIG,
+        history=built.history,
+        compaction=compaction,
+        observer=recorder,
+    )
+    series = planted(days=3)
+    report = run.run(night=series.cutoff, concepts=CONCEPTS, timelines=build_timelines(series, CONCEPTS, {}, CONFIG))
+    assert report.failed == () and len(calls) == 1
+    assert built.history.store.latest("session") is not None
+    assert recorder.events[-1].attributes["unreadable"] == 1 and bad.exists()

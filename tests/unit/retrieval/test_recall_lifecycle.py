@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from habitus.memory.model import MemoryKind
-from habitus.memory.retrieval import (
+from habitus.memory.recall import (
     MemoryRecallCandidate,
     MemoryRecallLifecycle,
     MemoryRecallLifecycleConfig,
@@ -192,6 +192,50 @@ def test_compacted_cold2_retires_after_inactivity_and_explicit_grace_without_pro
     assert instance.retirement_grace_elapsed(candidate_state, now=NOW + timedelta(days=1))
 
 
+def test_retirement_clock_needs_no_compaction_and_ignores_compaction_write_back(tmp_path: Path) -> None:
+    config = MemoryRecallLifecycleConfig(preference_half_life_days=1, preference_retire_days=30)
+    instance = lifecycle(tmp_path, config)
+    last_activity = NOW - timedelta(days=20)
+    never_compacted = candidate(updated_at=last_activity, suffix="plain")
+    assert not instance.retirement_eligible(instance.rank((never_compacted,), now=NOW)[0], now=NOW)
+    due = NOW + timedelta(days=10)
+    assert instance.retirement_eligible(instance.rank((never_compacted,), now=due)[0], now=due)
+    marked = instance.mark_retire_candidate(never_compacted.target, marked_at=due, expected_version=0)
+    assert marked.compacted_at is None
+    assert marked.retire_candidate_at == due
+
+    source = candidate(updated_at=last_activity, suffix="compacted")
+    written_back = replace(
+        source,
+        target=MemoryRecallTarget(source.uri, 2, source.target.document_created_at),
+        updated_at=NOW,
+    )
+    instance.mark_compacted(
+        written_back.target,
+        lifecycle_activity_at=last_activity,
+        compacted_at=NOW,
+        expected_version=0,
+    )
+    before_due = due - timedelta(hours=1)
+    assert not instance.retirement_eligible(instance.rank((written_back,), now=before_due)[0], now=before_due)
+    assert instance.retirement_eligible(instance.rank((written_back,), now=due)[0], now=due)
+
+
+def test_retire_candidate_on_revised_content_keeps_use_history(tmp_path: Path) -> None:
+    instance = lifecycle(tmp_path)
+    old = candidate(revision=1)
+    used = instance.record_use((old.target,), used_at=NOW)[0]
+    revised = MemoryRecallTarget(old.uri, 2, old.target.document_created_at)
+
+    marked = instance.mark_retire_candidate(revised, marked_at=NOW + timedelta(days=1), expected_version=used.version)
+
+    assert marked.document_revision == 2
+    assert marked.useful_recall_count == 1
+    assert marked.last_useful_recall_at == NOW
+    assert marked.lifecycle_activity_at is None
+    assert marked.retire_candidate_at == NOW + timedelta(days=1)
+
+
 def test_new_business_revision_exits_old_compaction_and_keeps_use_history(tmp_path: Path) -> None:
     instance = lifecycle(tmp_path)
     old = candidate(revision=1)
@@ -309,8 +353,45 @@ def test_store_rejects_conflicting_targets_oversized_batches_and_old_schema(tmp_
     invalid_path = tmp_path / "invalid.sqlite3"
     with closing(sqlite3.connect(invalid_path)) as connection:
         connection.execute("CREATE TABLE memory_recall_lifecycle (uri TEXT PRIMARY KEY)")
-    with pytest.raises(MemoryRecallLifecycleError, match="initialize"):
+    with pytest.raises(MemoryRecallLifecycleError, match="schema is incompatible"):
         SQLiteMemoryRecallLifecycleStore(invalid_path)
+
+
+def test_store_with_stale_compaction_first_constraint_fails_on_open_and_names_the_file(tmp_path: Path) -> None:
+    stale_path = tmp_path / "recall.sqlite3"
+    with closing(sqlite3.connect(stale_path)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE memory_recall_lifecycle (
+                uri TEXT PRIMARY KEY,
+                document_revision INTEGER NOT NULL CHECK(document_revision > 0),
+                document_created_at TEXT NOT NULL,
+                useful_recall_count INTEGER NOT NULL CHECK(useful_recall_count >= 0),
+                last_useful_recall_at TEXT,
+                lifecycle_activity_at TEXT,
+                cold2_probe_count INTEGER NOT NULL CHECK(cold2_probe_count >= 0),
+                last_cold2_probe_at TEXT,
+                compacted_at TEXT,
+                retire_candidate_at TEXT,
+                retired_at TEXT,
+                version INTEGER NOT NULL CHECK(version > 0),
+                CHECK((useful_recall_count = 0) = (last_useful_recall_at IS NULL)),
+                CHECK((cold2_probe_count = 0) = (last_cold2_probe_at IS NULL)),
+                CHECK(retire_candidate_at IS NULL OR compacted_at IS NOT NULL),
+                CHECK(retired_at IS NULL OR retire_candidate_at IS NOT NULL)
+            )
+            """
+        )
+        connection.commit()
+    before = stale_path.read_bytes()
+
+    with pytest.raises(MemoryRecallLifecycleError) as raised:
+        SQLiteMemoryRecallLifecycleStore(stale_path)
+
+    message = str(raised.value)
+    assert f"删除 {stale_path.absolute()} 后重启" in message
+    assert "使用计数" in message and "压缩标记" in message
+    assert stale_path.read_bytes() == before
 
 
 def test_lifecycle_score_only_degrades_positive_and_negative_semantic_scores() -> None:

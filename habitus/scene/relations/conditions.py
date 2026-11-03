@@ -23,6 +23,10 @@ productive-rule 检验；裁定 63 第 1 条）：集合里每一个条件各比
 √(两组方差之和)。零假设是"两组抬升相等"，不是"都没抬升"，所以方差按两组合起来的公共抬升算（Breslow & Day 1980 §5.3：同质性
 检验的期望与方差在公共效应下算；按"没有效应"算会在关系真实存在时放大 z、多认出不存在的条件——10.17 前实测 I 类错误约 0.14，
 改后约 0.07，见 27 号调研）。两边都要攒到全中能显著（对称）：交互的功效由少的那一边决定（Breslow & Day 1987 §7.10）。
+开测门交给 Tarone 的最小可达 p 是检验真实可达的下界（裁定 94 第 5 条，``ModeratedMeasure.minimum_p``）：条件下按实测层算（检验里
+它是层内精确检验，阳性边际固定），条件外按假设全中 / 全不中算（只用对照数，不看实测——当天从不出现 B 的层照样有信息）；两边对照都
+没有 B 时量不出的那一端跳过，不判成永远不显著；条件下（含对照）完全没有 B 的压低型不开测（检验在那里没有信息）。每边至少
+``MIN_PER_SIDE`` = 3 次。前向验证用的单侧版（``minimum_toward``）同一口径。
 
 "在条件下更强"说的是两件事：条件下有效应、而且和条件外不一样——按**交并检验**取两者 p 的较大者（有效水平不变）：
 条件下那一组用层内精确检验（泊松二项），交互用上面的 z。只用交互 z 不够：条件下只有两三层时，z 的正态近似失灵，
@@ -40,7 +44,7 @@ from dataclasses import dataclass
 from datetime import date
 from enum import Enum
 
-from habitus.scene.concepts.model import ConceptRole, ConceptSet
+from habitus.scene.concepts.model import ConceptRole, ConceptSet, members_retired
 from habitus.scene.relations import stats
 from habitus.scene.relations.measures import ChainMeasure
 from habitus.scene.relations.spans import Chain, Stratum
@@ -125,7 +129,7 @@ def compile_proposal(proposal: Mapping[str, object], concepts: ConceptSet, *, la
         except ValueError as exc:
             raise ConditionError(f"unknown field: {proposal.get('field')!r}") from exc
         value = str(proposal.get("value") or "").strip()
-        if not value or "=" in value or "|" in value or CONDITION_JOIN in value:
+        if not value or not value.isprintable() or "=" in value or "|" in value or CONDITION_JOIN in value:
             raise ConditionError(f"field {field.value} needs a plain value")
         return Condition(Template.FIELD, value, field)
     name = str(proposal.get("concept") or "").strip()
@@ -221,9 +225,14 @@ def evaluator(line: LaneTimeline, condition: Condition, *, window: int) -> Calla
 def evaluator_all(
     line: LaneTimeline, conditions: Sequence[Condition], *, window: int
 ) -> Callable[[Chain], bool | None]:
-    """几个条件合起来判：任一不成立 → 不成立；都成立 → 成立；其余（有判不了的）→ 判不了。空集合恒成立。"""
+    """几个条件合起来判（``all_hold``）。"""
 
-    judges = [evaluator(line, condition, window=window) for condition in conditions]
+    return all_hold([evaluator(line, condition, window=window) for condition in conditions])
+
+
+def all_hold(judges: Sequence[Callable[[Chain], bool | None]]) -> Callable[[Chain], bool | None]:
+    """几个判法合起来判：任一不成立 → 不成立；都成立 → 成立；其余（有判不了的）→ 判不了。空集合恒成立。
+    语义树检验与预测层白天判条件都用这一个。"""
 
     def judge(chain: Chain) -> bool | None:
         flags = [item(chain) for item in judges]
@@ -271,23 +280,51 @@ class ModeratedMeasure:
         return max(max(uppers), exact_upper), max(max(1.0 - upper for upper in uppers), exact_lower)
 
     def minimum_p(self) -> float:
-        """每一组比较各算"两边的实验组各走到全阳 / 全阴时最大的 |z|"，取各组里最小的那个（最难过的那组），再与各边的精确
-        最小可达 p 取大（两边对称，L10.17）。样本不够（某一边不到 ``MIN_PER_SIDE`` 次、某一组没有有信息的层）就不可能显著。"""
+        """开测门交给 Tarone 的最小可达双侧 p（裁定 60 第 9 条、L10.17、裁定 94 第 5 条）：检验本身朝两个方向各走到最干净
+        （``_cleanest``：条件下按实测层、条件外按假设），取小的那个方向乘 2；再要每一组对照自己全中或全不中也能显著
+        （``_side_minimum``：条件外的次数门，两边对称——交互的功效由少的那一边决定）。某一边不到 ``MIN_PER_SIDE`` 次就不可能显著。"""
 
-        if not self.enough:
+        if not self._countable():
             return 1.0
-        largest: list[float] = []
+        reachable = min(1.0, 2.0 * min(self._cleanest(upward=True), self._cleanest(upward=False)))
+        return max(reachable, *(_side_minimum(side) for side in self.outsides))
+
+    def minimum_toward(self, *, upward: bool) -> float:
+        """只朝一侧检时的最小可达单侧 p（前向验证用它判"攒够了还到不了 α 就不判"；维持检验只存进读数）：与开测门同一口径
+        （裁定 94 第 5 条），朝这一侧分得最干净（``_cleanest``），再加条件外的次数门（``_side_one_sided``）与每边至少
+        ``MIN_PER_SIDE`` 次。次数按这一份（子集）自己的层数数：前向验证只看发现之后的新数据，``subset`` 留着全量的 ``enough``。"""
+
+        if not self._countable():
+            return 1.0
+        return max(self._cleanest(upward=upward), *(_side_one_sided(side) for side in self.outsides))
+
+    def _countable(self) -> bool:
+        """条件下与每一组对照都至少 ``MIN_PER_SIDE`` 次（``split`` 算 ``enough`` 用的同一条）。"""
+
+        return self.enough and _sides_enough(self.inside, self.outsides)
+
+    def _cleanest(self, *, upward: bool) -> float:
+        """朝一侧分得最干净时检验本身的单侧 p，是 ``tails`` 在同一个结果上的两半取大，不混两个方向：
+        交互 z——条件下那一组全中（朝上）或全不中（朝下），每一组对照取让交互离得最远的那一端（全不中或全中；方差为 0、量不出的
+        那一端跳过，不当成"永远不显著"），取各组里最难过的；条件下的精确尾概率——那几层朝这一侧全中的概率。
+
+        **条件下按实测层**（``stats.minimum_one_sided``）：它是检验里真做的层内条件检验，固定每层阳性数（实验组 + 对照），
+        自己没来、对照也一个没有的层在那个检验里怎么都没信息——所以条件下（含对照）完全没有 B 的压低型朝下到不了、不开测
+        （裁定 94 第 5 条）。**条件外按假设**：z 里每组对照取假设的全中 / 全不中，次数要求在 ``_side_minimum`` /
+        ``_side_one_sided``（只用对照数）；条件外不做精确检验。
+        （条件下也按假设全中算时，后果几乎不出现的带条件关系都会进族、p 恒为 1：v0.11 会话 lane 05-13 那晚族从 1007 涨到 5655，
+        E5 那条反被 Tarone 挤出去。）哪一组两端都量不出就到不了。"""
+
+        sign = 1.0 if upward else -1.0
+        farthest: list[float] = []
         for outside in self.outsides:
-            zs = [
-                _interaction_z(self.inside, outside, forced_in, forced_out)
-                for forced_in in (0, 1)
-                for forced_out in (0, 1)
-            ]
-            if any(z is None for z in zs):
+            zs = [_interaction_z(self.inside, outside, int(upward), forced_out) for forced_out in (0, 1)]
+            found = [sign * z for z in zs if z is not None]
+            if not found:
                 return 1.0
-            largest.append(max(abs(z) for z in zs if z is not None))
-        normal = min(1.0, math.erfc(min(largest) / math.sqrt(2.0)))
-        return max(normal, stats.minimum_p(self.inside), *(stats.minimum_p(outside) for outside in self.outsides))
+            farthest.append(max(found))
+        normal = 0.5 * math.erfc(min(farthest) / math.sqrt(2.0))
+        return min(1.0, max(normal, stats.minimum_one_sided(self.inside, upward=upward)))
 
     def interval(
         self, *, level: float, rounds: int, seed: int
@@ -370,7 +407,7 @@ def _bootstrap(
         return None
     values.sort()
     tail = (1.0 - level) / 2.0
-    return _quantile(values, tail), _quantile(values, 1.0 - tail)
+    return stats.quantile(values, tail), stats.quantile(values, 1.0 - tail)
 
 
 def _lifts(items: Sequence[Stratum], forced: int | None) -> list[float]:
@@ -410,8 +447,12 @@ def _interaction_z(
     return (sum(held) / len(held) - sum(rest) / len(rest)) / math.sqrt(variance)
 
 
-#: 调节检验每边至少几次：区间按块重抽样要两边都有至少 2 层（``ModeratedMeasure.interval``）。
-MIN_PER_SIDE = 2
+#: 调节检验每边至少几次（裁定 94 第 5 条）。少的时候交互 z 的正态近似偏乐观，按同侧比（报出的单侧 p 对这个方向上真实能得到的概率）：
+#: 两边对照都没有 B、条件下 n 层全中、条件外 n 层全不中，z = √(2n)；零假设（两组同一个来的概率 π）下真能得到这个结果的概率最大是
+#: π^n(1 − π)^n 在 π = ½ 时的 1/4^n。n = 2：z = 2、单侧报 0.0228，真实最大 1/16 = 0.0625，偏乐观约 2.7 倍，而且真实值已过 0.05——
+#: 门开了也判不出。n = 3：z ≈ 2.45、单侧报 0.0072，真实最大 1/64 ≈ 0.0156，仍偏乐观约 2.2 倍，但真实值在 0.05 以内；经族阈值
+#: （Tarone 修剪后的更小的 α）之后这点乐观影响小。区间按块重抽样要两边都有至少 2 层（``ModeratedMeasure.interval``），3 也满足。
+MIN_PER_SIDE = 3
 
 
 def split(measure: ChainMeasure, judges: Sequence[Callable[[Chain], bool | None]]) -> ModeratedMeasure:
@@ -432,14 +473,23 @@ def split(measure: ChainMeasure, judges: Sequence[Callable[[Chain], bool | None]
             inside.append(item)
         elif len(failed) == 1:
             outsides[failed[0]].append(item)
-    enough = len(inside) >= MIN_PER_SIDE and all(len(group) >= MIN_PER_SIDE for group in outsides)
-    return ModeratedMeasure(tuple(inside), tuple(tuple(group) for group in outsides), enough=enough)
+    return ModeratedMeasure(
+        tuple(inside), tuple(tuple(group) for group in outsides), enough=_sides_enough(inside, outsides)
+    )
+
+
+def _sides_enough(inside: Sequence[Stratum], outsides: Sequence[Sequence[Stratum]]) -> bool:
+    return len(inside) >= MIN_PER_SIDE and all(len(group) >= MIN_PER_SIDE for group in outsides)
 
 
 def ready_to_test(measure: ModeratedMeasure, *, alpha: float) -> bool:
-    """这条带条件的关系值不值得开检验（裁定 60 第 9 条：不用固定的 40 次）：两边全分开时最小可达 p 在 ``alpha`` 以内，且每边
+    """这条带条件的关系值不值得开检验（裁定 60 第 9 条：不用固定的 40 次）：两边分得最干净时最小可达 p 在 ``alpha`` 以内，且每边
     至少 ``MIN_PER_SIDE`` 次。调节检验是交互的 z 与条件下精确尾概率取大（``tails``），所以用它自己的 ``minimum_p``，不借单样本
-    二项的次数公式。两边要的次数都随对照率变（L10.17 起条件外与条件下对称）：α = 0.05 时对照率 0.1 要 2 次、0.3 要 4 次、0.5 要 6 次。"""
+    二项的次数公式。两边要的次数都随对照率变（L10.17 起条件外与条件下对称）：α = 0.05、两边次数相同、每层 20 个对照时，两边对照率
+    都是 0 时交互 z = √(2n)、2 次就到 0.0455，但那是正态近似偏乐观（见 ``MIN_PER_SIDE``），由每边至少 3 次挡住；都是 0.3 要各 4 次，
+    都是 0.5 要各 6 次；条件外当天从不出现 B、条件下 0.1 要各 3 次。
+    条件下按实测层算：自己没来、对照里也没有 B 的层不算数（见 ``ModeratedMeasure._cleanest``），所以条件下（含对照）完全没有 B 的
+    压低型永远不开（裁定 94 第 5 条：检验在那里没有信息）。"""
 
     return measure.enough and measure.minimum_p() <= alpha
 
@@ -447,19 +497,30 @@ def ready_to_test(measure: ModeratedMeasure, *, alpha: float) -> bool:
 def _resolve(concepts: ConceptSet, name: str) -> str | None:
     if name in concepts:
         return concepts[name].identity
-    matches = [identity for identity in concepts if concepts.label_of(identity) == name]
+    # 名字只在在用的概念里唯一（停用的可以与在用的同名），按名字找只找在用的
+    matches = [
+        identity
+        for identity in concepts
+        if concepts.label_of(identity) == name and not members_retired(concepts, identity)
+    ]
     return matches[0] if len(matches) == 1 else None
+
+
+def _side_minimum(items: Sequence[Stratum]) -> float:
+    """条件外的次数门（双侧，开测门用）：一组对照自己全中或全不中时最小的双侧精确 p。L10.17 的"条件外也要攒到全中能显著"。"""
+
+    return min(1.0, 2.0 * _side_one_sided(items))
+
+
+def _side_one_sided(items: Sequence[Stratum]) -> float:
+    """条件外的次数门（单侧，前向验证用）：一组对照自己全中或全不中时较小的那个概率。按假设的结果算、只用对照数
+    （``stats.assumed_extreme``），不看实测——条件外当天从不出现 B 的层假设全中时是有信息的。"""
+
+    return min(stats.assumed_extreme(items, upward=True), stats.assumed_extreme(items, upward=False))
 
 
 def _mean_lift(items: Sequence[Stratum]) -> float:
     return sum(item.treated - item.control_rate for item in items) / len(items)
-
-
-def _quantile(ordered: Sequence[float], fraction: float) -> float:
-    position = fraction * (len(ordered) - 1)
-    low = math.floor(position)
-    high = min(low + 1, len(ordered) - 1)
-    return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
 
 
 __all__ = [
@@ -471,6 +532,7 @@ __all__ = [
     "Template",
     "compile_proposal",
     "evaluator",
+    "all_hold",
     "evaluator_all",
     "join_conditions",
     "mechanical",

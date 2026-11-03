@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +42,7 @@ from habitus.infrastructure.store.filesystem import (
     read_regular_bytes,
 )
 
-JUDGEMENT_SCHEMA_VERSION = "behavior_judgement_v1"
+JUDGEMENT_SCHEMA_VERSION = "behavior_judgement_v2"
 
 # 读路径按名字取这些键，所以写路径必须逐个要求它们存在——否则一条缺键的记录写得进、读不回，
 # 而它会让 ``list()`` 抛裸 KeyError（连错误谱系都不在），且本层没有删除接口，枚举就此永久报废。
@@ -63,7 +63,6 @@ _JUDGEMENT_KEYS = frozenset(
         "basis",
         "status",
         "status_basis",
-        "relations",
         "fusion_version",
         "prompt_version",
     }
@@ -145,64 +144,6 @@ class BehaviorJudgementStore:
         records = [self._required_read(identity) for identity in sorted(identities)]
         # 排序键的存在性由 ``_decode`` 的形状校验保证，这里不会再抛 KeyError。
         return tuple(sorted(records, key=lambda item: (item["evidence_ready_at"], item["judgement_id"])))
-
-    def recent_before(
-        self,
-        moment: datetime,
-        *,
-        limit: int,
-        lookback_seconds: float,
-        judged_before: datetime | None = None,
-    ) -> tuple[dict[str, Any], ...]:
-        """本段之前已经成立的最近 ``limit`` 条判断（按 started_at 升序）。
-
-        "之前"按**事件时间**判：判断的 ``last_observed_at <= moment``（本段最早观测的发生时刻）。
-        事件时间上晚于本段的判断绝不可见——那是把后来才知道的事喂回给更早的一段（标签泄漏，
-        补发的旧段尤其如此）。不再按送达时刻（``evidence_ready_at``）严格小于截断：真实数据里视觉/
-        转写混合、2 秒抽样，前一段末条的送达常晚于本段首条，按送达截断会系统性丢掉"被切段拦腰
-        切断的前半截"（BHV-REALDATA-001 审计复现）。``judged_before`` 给了再加一道"已落盘"（融合串行，
-        本作业开始前落盘的才算成立）。
-
-        回看窗口同样按事件时间，且与截断用**同一个字段**：``last_observed_at >= moment - lookback``
-        （"这条判断在过去 lookback 内还有观测"）。不能用 ``started_at`` 作下界——做饭、看电影这类
-        超过 lookback 的长行为，其后续段会看不到自己的前半截、无法 continues（审计 NEW-4 复现）。选取必须确定性：按
-        ``(last_observed_at, started_at, judgement_id)`` 取尾部——并列时不能退化成按哈希随机抽样。
-        """
-
-        if not isinstance(moment, datetime) or moment.utcoffset() is None:
-            raise BehaviorFusionError("moment must be a timezone-aware datetime")
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
-            raise BehaviorFusionError("limit must be a positive integer")
-        if isinstance(lookback_seconds, bool) or not isinstance(lookback_seconds, (int, float)):
-            raise BehaviorFusionError("lookback_seconds must be a number")
-        if lookback_seconds <= 0:
-            raise BehaviorFusionError("lookback_seconds must be positive")
-        if judged_before is not None and (not isinstance(judged_before, datetime) or judged_before.utcoffset() is None):
-            raise BehaviorFusionError("judged_before must be a timezone-aware datetime")
-        cutoff = moment.astimezone(UTC)
-        earliest = cutoff - timedelta(seconds=float(lookback_seconds))
-        settled = None if judged_before is None else judged_before.astimezone(UTC)
-
-        def eligible(record: Mapping[str, Any]) -> bool:
-            if _parse_instant(record["last_observed_at"]) > cutoff:
-                return False
-            if _parse_instant(record["last_observed_at"]) < earliest:
-                return False
-            return settled is None or _parse_instant(record["judged_at"]) <= settled
-
-        selected = sorted(
-            (record for record in self.list() if eligible(record)),
-            key=lambda item: (
-                _parse_instant(item["last_observed_at"]),
-                _parse_instant(item["started_at"]),
-                item["judgement_id"],
-            ),
-        )
-        tail = selected[-limit:]
-        # 按**时刻**排，不能按 ``started_at`` 的字符串排：它刻意保留本地偏移，所以字符串序不是
-        # 时间序。跨时区（出行）或 DST 切换时，1 小时的偏移变化就足以让两条判断的先后颠倒，
-        # 而这个顺序直接决定模型看到的 C1..Cn 编号。
-        return tuple(sorted(tail, key=lambda item: (_parse_instant(item["started_at"]), item["judgement_id"])))
 
     def _required_read(self, judgement_id: str) -> dict[str, Any]:
         record = self.read(judgement_id)

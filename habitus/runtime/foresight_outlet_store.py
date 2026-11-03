@@ -8,12 +8,12 @@
     <foresight 根>/outlet/asked/<摘要>.json    问出口了、作答还没来的提问（Codex Desktop 的作答在下一份转写里才来），按调用身份存
     <foresight 根>/outlet/hosts/<宿主>.json    这个宿主最近一次来取的时刻（活性）
 
-小文件、整份替换；一个坏文件不许让整层停：读不出来的当没有。
+小文件、整份替换；一个坏文件不许让整层停（预测层各 store 同一个总则，``runtime.foresight_files``）：读不出来的当没有、
+计入观测（``take_unreadable``）；坏的取走记录与提问文件名照样列出来（``broken_claims`` / ``broken_asked``），出口清扫时删掉。
 """
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -21,23 +21,24 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from habitus.config.foresight import ForesightStoreConfig
 from habitus.foresight.errors import ForesightError
-from habitus.infrastructure.store.filesystem import (
-    DurablePathIntegrityError,
-    atomic_replace_bytes,
-    durable_unlink,
-    list_real_directory,
-    read_regular_bytes,
-)
+from habitus.runtime.foresight_files import JsonFiles
 
-_MAX_BYTES = 1_000_000
-_MAX_ENTRIES = 10_000
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 class OutletStore:
-    def __init__(self, root: str | Path) -> None:
-        self.root = Path(root).expanduser().resolve(strict=False)
+    def __init__(self, root: str | Path, *, limits: ForesightStoreConfig | None = None) -> None:
+        limits = limits if limits is not None else ForesightStoreConfig()
+        self._files = JsonFiles(
+            root,
+            label="outlet",
+            max_bytes=limits.record_max_bytes,
+            max_entries=limits.outlet_max_entries,
+            max_unreadable=limits.unreadable_max_paths,
+        )
+        self.root = self._files.root
         self._open = self.root / "open.json"
         self._claims = self.root / "claims"
         self._asked = self.root / "asked"
@@ -69,6 +70,11 @@ class OutletStore:
     def claims(self) -> dict[str, dict[str, Any]]:
         return self._all(self._claims)
 
+    def broken_claims(self) -> tuple[str, ...]:
+        """读不出来的取走记录（请求身份）：不知道它的最晚时限，出口清扫时删掉（计入观测）。"""
+
+        return self._broken(self._claims)
+
     # ── 问过的提问（按调用身份） ───────────────────────────────────────────
 
     @staticmethod
@@ -91,6 +97,16 @@ class OutletStore:
     def asked(self) -> dict[str, dict[str, Any]]:
         return self._all(self._asked)
 
+    def broken_asked(self) -> tuple[str, ...]:
+        """读不出来的提问（文件名）：出口清扫时删掉（计入观测）。"""
+
+        return self._broken(self._asked)
+
+    def take_unreadable(self) -> tuple[str, ...]:
+        """上次 ``take`` 以来跳过的坏文件（路径），取走即清。"""
+
+        return self._files.take_unreadable()
+
     # ── 宿主活性 ────────────────────────────────────────────────────────────
 
     def touch_host(self, host: str, at: datetime) -> None:
@@ -110,46 +126,29 @@ class OutletStore:
     # ── 目录与字节 ──────────────────────────────────────────────────────────
 
     def _all(self, directory: Path) -> dict[str, dict[str, Any]]:
-        if not directory.is_dir():
-            return {}
-        try:
-            entries = list_real_directory(directory, artifact_root=self.root, max_entries=_MAX_ENTRIES)
-        except DurablePathIntegrityError as exc:
-            raise ForesightError(f"outlet directory is invalid: {exc}") from exc
-        found: dict[str, dict[str, Any]] = {}
-        for entry in sorted(entries, key=lambda item: item.name):
-            if not entry.is_file() or not entry.name.endswith(".json") or entry.name.startswith("."):
-                continue
-            raw = self._load(directory / entry.name)
-            if raw is not None:
-                found[entry.name.removesuffix(".json")] = raw
-        return found
+        return dict(self._files.decoded(directory, _as_is))
+
+    def _broken(self, directory: Path) -> tuple[str, ...]:
+        return tuple(
+            name.removesuffix(".json")
+            for name in self._files.names(directory)
+            if not self._files.readable(directory / name, _as_is)
+        )
 
     def _load(self, path: Path) -> dict[str, Any] | None:
-        if not path.is_file():
-            return None
-        try:
-            raw = json.loads(read_regular_bytes(path, artifact_root=self.root, max_bytes=_MAX_BYTES))
-        except (DurablePathIntegrityError, ValueError):
-            return None
-        return raw if isinstance(raw, dict) else None
+        return self._files.read(path, _as_is)
 
     def _write(self, path: Path, payload: dict[str, Any]) -> None:
-        encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode(
-            "utf-8"
-        )
-        if len(encoded) > _MAX_BYTES:
-            raise ForesightError(f"outlet record {path.name} exceeds {_MAX_BYTES} bytes; not written")
-        try:
-            atomic_replace_bytes(path, encoded, artifact_root=self.root)
-        except DurablePathIntegrityError as exc:
-            raise ForesightError(f"outlet path is not writable: {exc}") from exc
+        self._files.replace(path, payload)
 
     def _remove(self, path: Path) -> bool:
-        try:
-            return durable_unlink(path, artifact_root=self.root)
-        except DurablePathIntegrityError as exc:
-            raise ForesightError(f"outlet path is not removable: {exc}") from exc
+        return self._files.remove(path)
+
+
+def _as_is(raw: dict[str, Any]) -> dict[str, Any]:
+    """传输状态的形状由出口自己读（``runtime/foresight_outlet.py``）：这里只认"是一个 JSON 对象"。"""
+
+    return raw
 
 
 def _safe(value: object, label: str) -> str:

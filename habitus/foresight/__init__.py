@@ -7,7 +7,8 @@
 本包只读派生树、不写任何树；不开文件、不拿锁（落盘在组合根 ``runtime/foresight_ledger.py`` 与
 ``runtime/foresight_opportunities.py``）。模型触点只在 ``judge`` 子包。账本的形状与编解码（``ledger``）、结算规则
 （``ledger.settle``）、夜里的机会表（``opportunities``）、此刻的触发与候选（``triggers``）、可靠度（``reliability``）、
-反馈强度（``strength``）、账的流水（``clock``）、单元的边与权重（``edges``）、提醒反馈（``feedback``）、递法（``ladder``）。
+反馈强度（``strength``）、账的流水（``clock``）、单元的边与权重（``edges``）、提醒反馈（``feedback``）、递法（``ladder``）、
+递送原因（``delivery``）。
 """
 
 from habitus.foresight.clock import RankedAccount, current_facts, ranked_account
@@ -15,9 +16,10 @@ from habitus.foresight.errors import ForesightError
 from habitus.foresight.ladder import Evidence, Standing, Tolerance, account_key, climb, decide
 from habitus.foresight.model import Moment, NoUnsealed, Seen, UnsealedReader, UnsealedRow
 from habitus.foresight.opportunities import OpportunityTable, build_table
-from habitus.foresight.triggers import form_expectations
+from habitus.foresight.triggers import Batch, form_expectations
 
 __all__ = [
+    "Batch",
     "Evidence",
     "ForesightError",
     "Moment",

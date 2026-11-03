@@ -11,11 +11,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date
 
-from habitus.behavior.editor.writer import BehaviorDocumentWriter
 from habitus.behavior.kinds.changes import Move, VersionRecord
 from habitus.behavior.kinds.model import BehaviorKindError
-from habitus.behavior.kinds.store import BehaviorKindStore
+from habitus.behavior.kinds.store import BehaviorKindJournalFullError, BehaviorKindStore
 from habitus.behavior.tree import BehaviorTree
+from habitus.behavior.tree.writer import BehaviorDocumentWriter, BehaviorWriteConfig
 from habitus.behavior.uri import BehaviorURI
 from habitus.infrastructure.store.contracts.lock import LockStore
 
@@ -30,7 +30,14 @@ class MigrationOutcome:
 
 
 class KindMigrator:
-    def __init__(self, tree: BehaviorTree, lock_store: LockStore, store: BehaviorKindStore) -> None:
+    def __init__(
+        self,
+        tree: BehaviorTree,
+        lock_store: LockStore,
+        store: BehaviorKindStore,
+        *,
+        write_config: BehaviorWriteConfig | None = None,
+    ) -> None:
         if not isinstance(tree, BehaviorTree):
             raise TypeError("tree must be BehaviorTree")
         if not isinstance(store, BehaviorKindStore):
@@ -38,6 +45,7 @@ class KindMigrator:
         self.tree = tree
         self.lock_store = lock_store
         self.store = store
+        self.write_config = write_config
 
     def apply(self, record: VersionRecord, *, checkpoint: Callable[[], object]) -> MigrationOutcome:
         """写计划并立刻执行。需要在两步之间记别的状态时，分开调 ``plan`` 与 ``resume``。"""
@@ -67,7 +75,9 @@ class KindMigrator:
         return self._carry_out(plan, checkpoint)
 
     def _carry_out(self, record: VersionRecord, checkpoint: Callable[[], object]) -> MigrationOutcome:
-        writer = BehaviorDocumentWriter(self.tree, self.lock_store, clock=lambda: record.at)
+        if not self.store.has_room_for(record):
+            return self._refuse(record)
+        writer = BehaviorDocumentWriter(self.tree, self.lock_store, clock=lambda: record.at, config=self.write_config)
         applied: list[Move] = []
         days: set[date] = set()
         signals: list[str] = []
@@ -95,6 +105,20 @@ class KindMigrator:
         version = record.version if record.operations or applied else None
         skipped = len(record.moves) - len(applied)
         return MigrationOutcome(version, len(applied), skipped, frozenset(days), tuple(signals))
+
+    def _refuse(self, record: VersionRecord) -> MigrationOutcome:
+        """计划写下之后日志才放不下这一版（上限改小过）：树上一条都还没动就撤下计划、留信号，不每轮在同一处失败；
+        已经动过就只能停在这里等人处理（放宽上限或截断日志）。"""
+
+        for move in record.moves:
+            address = BehaviorURI.parse(move.occurrence).to_address()
+            if self.tree.exists(address) and self.tree.read(address).fields.get("kind_token") == move.target:
+                raise BehaviorKindJournalFullError(
+                    f"version {record.version} is half applied but the change log has no room for it"
+                )
+        self.store.clear_migration()
+        signal = f"kind_migration_refused v{record.version}: the change log has no room for it; the tree is unchanged"
+        return MigrationOutcome(None, 0, len(record.moves), frozenset(), (signal,))
 
     def _finish(self, record: VersionRecord) -> None:
         # 迁走的条目（转正、改归别的类）移出待定池；版本里的迁移不会把条目迁进「待定」。

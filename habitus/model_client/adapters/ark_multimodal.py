@@ -10,12 +10,12 @@ from collections.abc import Mapping, Sequence
 
 import httpx
 
+from habitus.foundation.embedding import EmbeddingVector
 from habitus.model_client.config import EmbeddingModelConfig
 from habitus.model_client.contracts import (
     ModelConfigurationError,
     ModelResponseError,
 )
-from habitus.model_client.embedding import EmbeddingVector
 from habitus.model_client.json_parser import parse_json_response
 
 _RESERVED_REQUEST_FIELDS = {

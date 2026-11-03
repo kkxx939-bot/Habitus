@@ -115,3 +115,11 @@ def test_the_catch_up_gaps_come_from_the_recurrence_without_censored_or_later_in
     )
     last, gaps = last_before(item, table)
     assert last == days[3].day and gaps == (5, 6)  # 0→5 与 7→13；5→7 截尾、13→30 在这次之后
+
+
+def test_a_history_offset_exactly_as_far_counts_as_having_strayed_that_far() -> None:
+    """偏差强度"不小于这一次"含相等（分钟是整数，并列很常见；M35：``>=`` 改 ``>``）。"""
+
+    history = [0, 0, 0, 25, -30, 0, 0, 0, 0, 40]
+    assert offset_strength(25, history) == pytest.approx(0.3)
+    assert offset_strength(-30, history) == pytest.approx(0.2)

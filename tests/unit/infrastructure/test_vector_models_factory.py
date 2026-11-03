@@ -6,7 +6,6 @@ import hashlib
 import pytest
 
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.infrastructure.store.sqlite import SQLiteLockStore
 from habitus.infrastructure.vector import (
     PublishedVectorStore,
@@ -27,6 +26,7 @@ from habitus.infrastructure.vector.adapters.vikingdb_config import (
     render_credential_template,
 )
 from habitus.model_client import EmbeddingVector
+from tests.lock_store import ProcessLocalLockStore
 
 
 def record(identity: str = "memory://profile", *, kind: str = "profile") -> VectorStoreRecord:

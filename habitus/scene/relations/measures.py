@@ -29,6 +29,10 @@ class Measure(Protocol):
 
     def minimum_p(self) -> float: ...
 
+    def minimum_toward(self, *, upward: bool) -> float:
+        """只朝 ``upward`` 这一侧检时的最小可达单侧 p。"""
+        ...
+
     def interval(
         self, *, level: float, rounds: int, seed: int
     ) -> tuple[tuple[float, float] | None, tuple[float, float] | None]: ...
@@ -66,6 +70,9 @@ class ChainMeasure:
 
     def minimum_p(self) -> float:
         return stats.minimum_p(self.strata)
+
+    def minimum_toward(self, *, upward: bool) -> float:
+        return stats.minimum_one_sided(self.strata, upward=upward)
 
     def interval(
         self, *, level: float, rounds: int, seed: int
@@ -130,6 +137,9 @@ class PairedMeasure:
 
     def minimum_p(self) -> float:
         return max(part.minimum_p() for part in self.parts)
+
+    def minimum_toward(self, *, upward: bool) -> float:
+        return max(part.minimum_toward(upward=upward) for part in self.parts)
 
     def interval(
         self, *, level: float, rounds: int, seed: int

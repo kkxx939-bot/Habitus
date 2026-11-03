@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from habitus.memory.compaction.field_ops import (
+from habitus.memory.field_ops import (
     SemanticFieldMergePolicy,
     SemanticFieldOperationBatch,
+    content_items,
     merge_semantic_fields,
 )
 from habitus.pre.conversation import ConversationSummaryContent
@@ -33,22 +34,11 @@ def summary_content_from_operations(
     merged = merge_semantic_fields(_SUMMARY_FIELDS, operations, _SUMMARY_POLICIES)
     return ConversationSummaryContent(
         overview=merged["overview"],
-        chronology=_items(merged["chronology"]),
-        corrections=_items(merged["corrections"]),
+        chronology=content_items(merged["chronology"]),
+        corrections=content_items(merged["corrections"]),
         ending_state=merged["ending_state"],
-        open_threads=_items(merged["open_threads"]),
+        open_threads=content_items(merged["open_threads"]),
     )
-
-
-def _items(value: str) -> tuple[str, ...]:
-    items: list[str] = []
-    for line in value.splitlines():
-        item = line.strip()
-        if item.startswith(("- ", "* ")):
-            item = item[2:].strip()
-        if item and item not in items:
-            items.append(item)
-    return tuple(items)
 
 
 __all__ = ["summary_content_from_operations"]

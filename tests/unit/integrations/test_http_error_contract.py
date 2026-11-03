@@ -5,13 +5,13 @@ from typing import cast
 
 from habitus.conversation import ConversationOrderedPredecessorBrokenError, ConversationOrderedPredecessorPendingError
 from habitus.infrastructure.store.contracts.lock import LockLostError
-from habitus.integrations.http import HTTPMemoryJobConflictError, HTTPMemoryJobNotFoundError
 from habitus.integrations.http_api.app import create_http_app
 from habitus.integrations.http_api.errors import (
     ERROR_CODE_TO_HTTP_STATUS,
     documented_error_responses,
     map_exception,
 )
+from habitus.integrations.http_api.handlers import HTTPMemoryJobConflictError, HTTPMemoryJobNotFoundError
 from habitus.integrations.http_api.schemas import ErrorResponse, HTTPErrorCode
 from habitus.memory.conversation import ConversationJournalError, ConversationWriteConflictError
 from habitus.memory.retrieval import MemorySearchError

@@ -165,14 +165,13 @@ def pending_from(raw: object) -> PendingEntry:
 
 def job_state_payload(state: JobState) -> dict[str, Any]:
     return {
-        "nightly_at": _iso(state.nightly_at),
         "revision_at": _iso(state.revision_at),
         "merge_history": [[period, sorted([list(pair) for pair in pairs])] for period, pairs in state.merge_history],
     }
 
 
 def job_state_from(raw: object) -> JobState:
-    data = _object(raw, {"nightly_at", "revision_at", "merge_history"}, "job state")
+    data = _object(raw, {"revision_at", "merge_history"}, "job state")
     try:
         history = []
         for entry in _list(data["merge_history"], "merge_history"):
@@ -184,7 +183,7 @@ def job_state_from(raw: object) -> JobState:
                     raise BehaviorKindCodecError("merge pair must be [source, target]")
                 pairs.add((pair[0], pair[1]))
             history.append((entry[0], frozenset(pairs)))
-        return JobState(_parse_time(data["nightly_at"]), _parse_time(data["revision_at"]), tuple(history))
+        return JobState(_parse_time(data["revision_at"]), tuple(history))
     except (BehaviorKindError, ValueError, TypeError) as exc:
         raise BehaviorKindCodecError(f"job state is invalid: {exc}") from exc
 

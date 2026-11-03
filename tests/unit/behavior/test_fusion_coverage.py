@@ -24,7 +24,7 @@ def observation(offset: int, semantics: str) -> BehaviorObservation:
         observer_id="home-a/hall",
         occurred_at=at,
         available_at=at + timedelta(seconds=1),
-        modality="vision",
+        modality="physical",
         semantics=semantics,
         participants=[SUBJECT],
         knowledge_state="observed",
@@ -169,3 +169,14 @@ def test_records_are_decoded_once_and_forgotten_when_deleted(tmp_path: Path) -> 
         path.chmod(0o644)
     index.expire(judged + timedelta(hours=1))
     assert index._cache == {}
+
+
+def test_the_same_receipt_recorded_again_with_other_content_is_refused(tmp_path: Path) -> None:
+    """C04（段 4 E19 探针）：同一回执身份、内容不同（所属的会话源不同）的覆盖记录要报冲突，不能静默当成幂等。"""
+
+    index = BehaviorCoverageIndex(tmp_path)
+    item = receipt((observation(0, "洗手"),), judged_at=BASE)
+    index.record(item, sources=("source-a",))
+    index.record(item, sources=("source-a",))  # 同内容幂等
+    with pytest.raises(BehaviorFusionError):
+        index.record(item, sources=("source-b",))

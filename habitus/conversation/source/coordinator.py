@@ -18,8 +18,7 @@ from habitus.conversation.source.store import ConversationSourceStore
 class ConversationSourceDispatchHandle:
     """分离各 Consumer 的等待与状态检查；等待取消不会传播到底层任务。
 
-    ``tasks`` 覆盖全部已注册 Consumer，``wait``/``inspect`` 是通用入口；
-    Memory 与行为会话 lane 的具名方法只是调用方常用的便捷门面。
+    ``tasks`` 覆盖全部已注册 Consumer，``wait``/``inspect`` 是通用入口。
     """
 
     envelope: ConversationSourceEnvelope
@@ -35,29 +34,6 @@ class ConversationSourceDispatchHandle:
 
     def inspect(self, consumer: ConversationSourceConsumer) -> ConversationConsumerState:
         return self.delivery.inspect(self.envelope, ConversationSourceConsumer(consumer))
-
-    @property
-    def memory_task(self) -> asyncio.Task[ConversationConsumerEnsureResult]:
-        return self.tasks[ConversationSourceConsumer.MEMORY]
-
-    @property
-    def behavior_session_task(self) -> asyncio.Task[ConversationConsumerEnsureResult]:
-        return self.tasks[ConversationSourceConsumer.BEHAVIOR_SESSION]
-
-    async def wait_memory(self) -> object:
-        value = await self.wait(ConversationSourceConsumer.MEMORY)
-        if value is None:
-            raise RuntimeError("Memory Consumer cannot complete as SKIPPED")
-        return value
-
-    async def wait_behavior_session(self) -> object | None:
-        return await self.wait(ConversationSourceConsumer.BEHAVIOR_SESSION)
-
-    def inspect_memory(self) -> ConversationConsumerState:
-        return self.inspect(ConversationSourceConsumer.MEMORY)
-
-    def inspect_behavior_session(self) -> ConversationConsumerState:
-        return self.inspect(ConversationSourceConsumer.BEHAVIOR_SESSION)
 
 
 @dataclass(frozen=True)
@@ -118,10 +94,6 @@ class ConversationSourceCoordinator:
             return True
         _done, unfinished = await asyncio.wait(pending, timeout=timeout_seconds)
         return not unfinished
-
-    @property
-    def running_task_count(self) -> int:
-        return sum(not task.done() for task in self._tasks)
 
     @property
     def pending_deliveries(self) -> tuple[ConversationSourcePendingDelivery, ...]:

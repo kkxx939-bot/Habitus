@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.infrastructure.vector import VectorStoreMatch, VectorStoreState
 from habitus.memory.conversation import (
     ConversationAddress,
@@ -29,6 +28,7 @@ from habitus.memory.conversation.indexing.model import summary_reference
 from habitus.model_client import EmbeddingVector
 from habitus.pre.conversation import ConversationBatch
 from tests.helpers import closed_turn, segment, segment_summary
+from tests.lock_store import ProcessLocalLockStore
 from tests.unit.retrieval.test_search_service import structured
 
 

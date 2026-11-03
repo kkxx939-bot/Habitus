@@ -10,7 +10,9 @@ from types import SimpleNamespace
 import pytest
 
 from habitus.scene.relations import RelationKey, Segment, stats
-from habitus.scene.relations.engine import RelationTest, Subset, Verdict
+from habitus.scene.relations.engine import LaneTests, RelationTest, Subset, Verdict
+from habitus.scene.relations.measures import ChainMeasure
+from habitus.scene.relations.spans import Stratum
 from habitus.scene.relations.state import Relation, Status, _candidate, _forward_needed, _maintenance_needed
 from tests.unit.scene.relation_fixtures import CONFIG
 
@@ -67,6 +69,38 @@ def test_forward_validation_waits_while_even_all_hits_could_not_reach_alpha() ->
 
     judged, note = night(_forward(3, p_value=0.2, minimum_p=(1 / 3) ** 3))
     assert judged.status is Status.REJECTED and note is not None and "没复现" in note
+
+
+@pytest.mark.parametrize(
+    ("upward", "strata"),
+    [
+        # 朝上、6 层每层对照率 0.75：全中 p = 0.75⁶ ≈ 0.178
+        (True, tuple(Stratum(chain=None, treated=1, positives=2, controls=3, block=index) for index in range(6))),  # type: ignore[arg-type]
+        # 朝下、6 层每层对照率 0.25：全阴 p = 0.75⁶
+        (False, tuple(Stratum(chain=None, treated=0, positives=1, controls=3, block=index) for index in range(6))),  # type: ignore[arg-type]
+        # 边界：两层对照率 1/4、1/5，全中 p 恰好 = α，判了也过不了（显著要 p < α）
+        (
+            True,
+            (
+                Stratum(chain=None, treated=1, positives=0, controls=3, block=0),  # type: ignore[arg-type]
+                Stratum(chain=None, treated=1, positives=0, controls=4, block=1),  # type: ignore[arg-type]
+            ),
+        ),
+    ],
+    ids=["upward", "downward", "exactly alpha"],
+)
+def test_forward_validation_waits_when_its_own_side_cannot_reach_alpha(upward: bool, strata) -> None:  # type: ignore[no-untyped-def]
+    """前向验证朝发现时的方向检，守卫也按这一侧算最小可达 p：这一侧全中也到不了 α（含恰好等于 α）就接着等、不判。"""
+
+    measure = ChainMeasure(strata)
+    stub = SimpleNamespace(config=CONFIG, measure=lambda key: measure, seed=lambda key, purpose: 0)
+    forward = LaneTests.evaluate(stub, KEY, upward=upward, since=None, purpose="forward")  # type: ignore[arg-type]
+    assert forward.p_value >= CONFIG.thresholds.forward_alpha
+    before = Relation(KEY, Status.CANDIDATE, upward, discovered_on=date(2026, 10, 1), forward_needed=len(strata))
+    tests = SimpleNamespace(config=CONFIG, assess=lambda item, measure=None: item, evaluate=lambda *a, **k: forward)
+    found = discovered(1.0, 0.1, interval=(0.8, 1.0), upward=upward)
+    waiting, note = _candidate(before, found, tests, date(2026, 10, 9))  # type: ignore[arg-type]
+    assert waiting.status is Status.CANDIDATE and note is None
 
 
 def test_maintenance_asks_how_many_it_takes_to_see_a_fall_back_to_the_control_rate() -> None:

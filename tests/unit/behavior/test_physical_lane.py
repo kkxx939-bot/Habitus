@@ -181,7 +181,8 @@ def test_each_segment_becomes_one_judgement_that_only_restates_what_upstream_sai
     assert wash["behavior"] == "洗手"
     assert wash["summary"] == "洗手，09:12–09:12"  # 固定句式：什么行为、几点到几点
     assert run["summary"] == "跑步，18:30–19:02；3.2 公里"  # 上游带了补充事实就拼上
-    assert (wash["goal"], wash["basis"], wash["relations"]) == (None, [], [])  # 手表看不出目标与步骤；不接续
+    assert (wash["goal"], wash["basis"]) == (None, [])  # 手表看不出目标与步骤
+    assert "relations" not in wash  # 不接续：判断里没有关系这一项
     assert wash["started_at"].startswith(f"{DAY}T09:12:03")
     assert wash["last_observed_at"].startswith(f"{DAY}T09:12:41")
     assert wash["subjects"] == [SUBJECT]
@@ -466,7 +467,7 @@ def test_a_segment_interrupted_halfway_is_finished_not_written_twice(
     lane, stores = wired(tmp_path)
     store, method = crash_at.split(".")
 
-    def crash(*_: object) -> None:
+    def crash(*_: object, **__: object) -> None:
         raise RuntimeError("进程崩溃")
 
     with monkeypatch.context() as patched:
@@ -481,6 +482,62 @@ def test_a_segment_interrupted_halfway_is_finished_not_written_twice(
     assert len(blanks(stores)) == 1
     assert len(stores.receipts.list()) == 3
     assert {item.disposition for item in lane.consume(parse_delivery(delivery()))} == {UnitDisposition.ALREADY_RECORDED}
+
+
+def test_a_segment_interrupted_before_a_rule_upgrade_is_finished_under_the_version_it_was_written_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """判断落了、回执没落就崩了，重启前改过转换规则的版本：仍按凭据认出那条判断，照它落盘时的版本补上回执。"""
+
+    from habitus.behavior.fusion.lanes.physical import recorder as recorder_module
+
+    lane, stores = wired(tmp_path)
+
+    def crash(*_: object) -> None:
+        raise RuntimeError("进程崩溃")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(stores.receipts, "put", crash)
+        with pytest.raises(RuntimeError):
+            lane.consume(parse_delivery(delivery()))
+    monkeypatch.setattr(recorder_module, "PHYSICAL_FUSION_VERSION", f"{PHYSICAL_FUSION_VERSION}+upgraded")
+    stores.now += timedelta(minutes=7)
+
+    outcomes = lane.consume(parse_delivery(delivery()))
+
+    assert outcomes[0].disposition is UnitDisposition.ALREADY_RECORDED
+    (wash,) = [item for item in readable(stores) if item["behavior"] == "洗手"]
+    assert wash["fusion_version"] == PHYSICAL_FUSION_VERSION
+    assert sorted(item["behavior"] for item in readable(stores)) == ["洗手", "跑步"]
+
+
+def test_a_revision_of_a_segment_whose_ledger_entry_was_lost_is_refused_after_its_evidence_is_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回执与覆盖都落了、小账没落就崩了；归约随后把凭据释放了；上游改判再送：这个位置上的段写完过，是改判，不收。"""
+
+    lane, stores = wired(tmp_path)
+    ledger = lane.recorder.ledger
+    accept = ledger.accept
+
+    def crash_on_the_first_segment(device: str, key: str, digest: str, span: Any) -> None:
+        if key == "segment#seg-000812":
+            raise RuntimeError("进程崩溃")
+        accept(device, key, digest, span)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(ledger, "accept", crash_on_the_first_segment)
+        with pytest.raises(RuntimeError):
+            lane.consume(parse_delivery(delivery()))
+    for envelope in stores.observations.list():  # 归约落树之后释放凭据
+        stores.observations.discard(envelope.source_id)
+
+    revised = edited(("segments", 0, "behavior"), "洗脸")
+    revised["delivery_id"] = "delivery-0002"
+    outcomes = lane.consume(parse_delivery(revised))
+
+    assert outcomes[0].disposition is UnitDisposition.REVISION_REJECTED
+    assert sorted(item["behavior"] for item in readable(stores)) == ["洗手", "跑步"]  # 没有「洗脸」
 
 
 def test_a_half_written_segment_that_upstream_then_corrects_is_replaced_not_left_behind(
@@ -509,3 +566,132 @@ def test_a_half_written_segment_that_upstream_then_corrects_is_replaced_not_left
     covered = stores.coverage.covered_observation_ids(stores.now)
     stored = {item.observation_id for envelope in stores.observations.list() for item in envelope.batch.observations}
     assert stored <= covered
+
+
+@pytest.mark.parametrize("facts", [["🏃‍♂️ 3.2 公里"], ["3.2​公里"], ["配速 \x1b[31m5:30\x1b[0m"]])
+def test_facts_the_tree_could_not_hold_are_refused_at_the_door(facts: list[str]) -> None:
+    """E3：事实写进行为的摘要，树 schema 不收零宽字符、ANSI 控制符——门口按同一条文本规则整份拒（上游改了可以重发），
+    不收下之后在归约里永远落不了树。"""
+
+    with pytest.raises(PhysicalDeliveryError, match="plain text"):
+        parse_delivery(edited(("segments", 1, "facts"), facts))
+
+
+@pytest.mark.parametrize("together", [True, False])
+def test_two_zero_length_segments_at_the_same_instant_are_refused_however_they_are_sent(
+    tmp_path: Path, together: bool
+) -> None:
+    """E11②：两段起止都是同一刻的零长段——同一份交付里送、分两份送，判法一致：都拒（起止完全相同算重叠）。"""
+
+    first = {"id": "z1", "behavior": "按按钮", "started_at": moment("09:12:03"), "ended_at": moment("09:12:03")}
+    second = {"id": "z2", "behavior": "按开关", "started_at": moment("09:12:03"), "ended_at": moment("09:12:03")}
+    if together:
+        with pytest.raises(PhysicalDeliveryError, match="must not overlap"):
+            parse_delivery(delivery(segments=[first, second]))
+        return
+    lane, _stores = wired(tmp_path)
+    lane.consume(parse_delivery(delivery(segments=[first])))
+    observed = [{"started_at": moment("07:40:00"), "ended_at": moment("13:05:00"), "state": "observing"}]
+    with pytest.raises(PhysicalDeliveryError, match="overlaps a segment already recorded"):
+        lane.consume(parse_delivery(later(segments=[second], coverage=observed)))
+
+
+# ── 变异测试补的探针（段 4 E19）──────────────────────────────────────────────────────
+
+
+def _cover(*spans: tuple[str, str, str]) -> list[dict[str, Any]]:
+    return [{"started_at": moment(start), "ended_at": moment(end), "state": state} for start, end, state in spans]
+
+
+def test_an_unobserved_span_across_utc_midnight_still_blocks_a_later_behaviour_inside_it(tmp_path: Path) -> None:
+    """P10：没在看的时段跨过 UTC 零点（本地 08:00）：另一份交付把一段行为放在零点之后那一截里，照样拒收。"""
+
+    lane, _stores = wired(tmp_path)
+    first = delivery(
+        segments=[],
+        coverage=_cover(
+            ("06:00:00", "07:00:00", "observing"),
+            ("07:00:00", "10:00:00", "not_worn"),
+            ("10:00:00", "12:00:00", "observing"),
+        ),
+    )
+    lane.consume(parse_delivery(first))
+    second = delivery(
+        delivery_id="d-2",
+        coverage=_cover(("08:30:00", "09:45:00", "observing")),
+        segments=[
+            {"id": "seg-x", "behavior": "喝水", "started_at": moment("09:00:00"), "ended_at": moment("09:05:00")}
+        ],
+    )
+    with pytest.raises(PhysicalDeliveryError):
+        lane.consume(parse_delivery(second))
+
+
+def test_a_behaviour_starting_exactly_where_unobserved_time_starts_is_refused(tmp_path: Path) -> None:
+    """P01：新的一段正好从已经记成没在看的时段的起点开始，也算落在没在看里，拒收。"""
+
+    lane, _stores = wired(tmp_path)
+    lane.consume(parse_delivery(delivery()))  # 13:05–14:20 充电
+    second = delivery(
+        delivery_id="d-2",
+        coverage=_cover(("13:05:00", "13:30:00", "observing")),
+        segments=[
+            {"id": "seg-y", "behavior": "喝水", "started_at": moment("13:05:00"), "ended_at": moment("13:06:00")}
+        ],
+    )
+    with pytest.raises(PhysicalDeliveryError):
+        lane.consume(parse_delivery(second))
+
+
+def test_a_segment_resent_after_a_crash_before_the_ledger_and_its_release_is_not_written_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P13：回执与覆盖落了、小账没落就崩；判断与凭据随后被归约释放；上游原样重发：认得出写过，不再写一条。"""
+
+    lane, stores = wired(tmp_path)
+    accept = lane.recorder.ledger.accept
+    calls = {"n": 0}
+
+    def crash_once(*args: Any, **kwargs: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("killed before the ledger entry")
+        accept(*args, **kwargs)
+
+    monkeypatch.setattr(lane.recorder.ledger, "accept", crash_once)
+    body = delivery(segments=delivery()["segments"][:1], coverage=_cover(("07:40:00", "13:05:00", "observing")))
+    with pytest.raises(OSError):
+        lane.consume(parse_delivery(body))
+    for item in list(stores.judgements.list()):  # 归约落树之后释放判断与凭据
+        stores.judgements.discard(item["judgement_id"])
+    for envelope in list(stores.observations.list()):
+        stores.observations.discard(envelope.source_id)
+
+    outcomes = lane.consume(parse_delivery(body))
+
+    assert outcomes[0].disposition is UnitDisposition.ALREADY_RECORDED  # 认出写过、补上小账，不当成改判
+    assert readable(stores) == []
+
+
+def test_a_revision_of_a_segment_whose_ledger_entry_was_lost_is_refused_before_its_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P11：回执与覆盖落了、小账没落就崩；凭据还在、上游就改判再送：这个位置上的段写完过，是改判，不收。"""
+
+    lane, stores = wired(tmp_path)
+    accept = lane.recorder.ledger.accept
+
+    def crash_on_the_first_segment(device: str, key: str, digest: str, span: Any) -> None:
+        if key == "segment#seg-000812":
+            raise RuntimeError("进程崩溃")
+        accept(device, key, digest, span)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(lane.recorder.ledger, "accept", crash_on_the_first_segment)
+        with pytest.raises(RuntimeError):
+            lane.consume(parse_delivery(delivery()))
+
+    outcomes = lane.consume(parse_delivery(edited(("segments", 0, "behavior"), "洗脸")))
+
+    assert outcomes[0].disposition is UnitDisposition.REVISION_REJECTED
+    assert sorted(item["behavior"] for item in readable(stores)) == ["洗手", "跑步"]

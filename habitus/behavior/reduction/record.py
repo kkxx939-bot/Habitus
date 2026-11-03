@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import Any
 
 from habitus.behavior.reduction.errors import BehaviorReductionError
+from habitus.foundation.integrity import canonical_digest
 
 
 def _text(record: Mapping[str, Any], key: str) -> str:
@@ -76,7 +77,10 @@ def _local(record: Mapping[str, Any], key: str) -> datetime:
 
 @dataclass(frozen=True)
 class ReducibleJudgement:
-    """一条待归约的判断；字段语义与耐久记录一致，只是类型换成了可计算的值。"""
+    """一条待归约的判断；字段语义与耐久记录一致，只是类型换成了可计算的值。
+
+    一条可读判断归约成一条 occurrence，一条空判断归约成一段空白——判断之间不互相指向，没有并链。
+    """
 
     judgement_id: str
     evidence_ready_at: datetime
@@ -91,7 +95,6 @@ class ReducibleJudgement:
     basis: tuple[tuple[str, tuple[str, ...]], ...]
     status: str | None
     status_basis: str | None
-    relations: tuple[tuple[str, str], ...]
     fusion_version: str
 
     @property
@@ -100,9 +103,15 @@ class ReducibleJudgement:
 
     @property
     def order_key(self) -> tuple[datetime, str]:
-        """链内排序键：行为时刻优先、身份定序——与融合上下文的排序纪律一致。"""
+        """落树顺序：行为时刻优先、身份定序。"""
 
         return (self.started_at, self.judgement_id)
+
+    @property
+    def chain_digest(self) -> str:
+        """它归约成的那个节点在消费账本与树上的身份（字段名 ``chain_digest``）：所消费判断身份集合的摘要。"""
+
+        return canonical_digest({"judgement_ids": [self.judgement_id]})
 
 
 def parse_judgement_record(record: Mapping[str, Any]) -> ReducibleJudgement:
@@ -116,14 +125,6 @@ def parse_judgement_record(record: Mapping[str, Any]) -> ReducibleJudgement:
         if not isinstance(item, Mapping):
             raise BehaviorReductionError(f"judgement record basis[{index}] must be a mapping")
         basis.append((_text(item, "semantics"), _texts(item, "observation_ids")))
-    relations_raw = record.get("relations")
-    if isinstance(relations_raw, str | bytes) or not isinstance(relations_raw, Sequence):
-        raise BehaviorReductionError("judgement record field relations must be an array")
-    relations: list[tuple[str, str]] = []
-    for index, item in enumerate(relations_raw, start=1):
-        if not isinstance(item, Mapping):
-            raise BehaviorReductionError(f"judgement record relations[{index}] must be a mapping")
-        relations.append((_text(item, "kind"), _text(item, "target_id")))
     subjects_raw = record.get("subjects")
     if isinstance(subjects_raw, str | bytes) or not isinstance(subjects_raw, Sequence):
         raise BehaviorReductionError("judgement record field subjects must be an array")
@@ -144,7 +145,6 @@ def parse_judgement_record(record: Mapping[str, Any]) -> ReducibleJudgement:
         basis=tuple(basis),
         status=_optional_text(record, "status"),
         status_basis=_optional_text(record, "status_basis"),
-        relations=tuple(relations),
         fusion_version=_text(record, "fusion_version"),
     )
     # 融合层不变量在门口复核：可读判断必带摘要/状态/主体。缺了说明存储被绕写，

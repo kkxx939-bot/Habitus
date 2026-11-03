@@ -1,23 +1,29 @@
-"""一刻的装配（方案第四节前半）：最近几天的行 → 时间线 → 三种触发（事件、情境、日子）出草稿 → 每条附反向前因清单 → 账本的预期。
+"""一刻的装配（方案第四节前半）：最近几天的行 → 时间线 → 触发出草稿 → 每条附反向前因清单 → 账本的预期。
+
+一次装配建哪几种触发由 ``Batch`` 定（裁定 94 第 1 条）：白天那一拍（``Batch.MOMENT``）只在夜里定下的关系与日历上实例化——
+事件、情境；当天的日子预期（``Batch.DAYS``）一天只建一次，是夜里那条线的最后一步，用的是这条线刚写的、含昨天的那张表。
 
 读口：行为树经 ``scene.views`` 的 ``DayIndexCache``（已封口的行），还没封口的判断经 ``UnsealedReader`` 读好传进来。
 回看 7 天（第 2–7 天那一段最远看到 7 天前）。预期身份 = 类 + 触发种类 + 触发身份 + 触发实例，**不含机会表那一晚、不含日子**：
 同一个触发实例（同一条前因、同一个上次的同一簇、同一天）全账本只建一条，哪一晚的表只记在 ``night`` 字段上；跨天的触发
-（次日、第 2–7 天、离上次够久）第二天重算出同一个身份，账本按身份查重、不再写一份。
+（次日、第 2–7 天、离上次够久）第二天重算出同一个身份，账本按身份查重、不再写一份。事件触发的实例是前因的开始时刻：
+前因封口时开始可能被更正挪了一点，那还是同一次机会——这本账上已经建过、落在这一行里的实例照旧用（``known_instances``）。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from datetime import date, timedelta
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
+from enum import Enum
 
 from habitus.foresight.errors import ForesightError
-from habitus.foresight.ledger.model import Expectation, expectation_identity
+from habitus.foresight.ledger.model import Expectation, account_key, expectation_identity
 from habitus.foresight.ledger.settle import NOT_DONE
 from habitus.foresight.model import Moment, Seen, UnsealedRow
 from habitus.foresight.opportunities.model import OpportunityTable
 from habitus.foresight.triggers.days import day_drafts
-from habitus.foresight.triggers.draft import Draft
+from habitus.foresight.triggers.draft import Draft, instance_at
 from habitus.foresight.triggers.events import antecedents_of, event_drafts
 from habitus.foresight.triggers.marks import timeline_of
 from habitus.foresight.triggers.situations import situation_drafts
@@ -25,6 +31,15 @@ from habitus.scene.views import DayIndexCache
 from habitus.temporal.slots import absolute_slot, slot_index
 
 LOOKBACK_DAYS = 7
+
+
+class Batch(Enum):
+    """一次装配建哪几种触发。"""
+
+    #: 白天那一拍：事件（前因刚发生）与情境（今天的日历条件）。
+    MOMENT = "moment"
+    #: 夜里那条线的末尾：当天的「离上次够久」。
+    DAYS = "days"
 
 
 def seen_rows(moment: Moment, cache: DayIndexCache, unsealed: Sequence[UnsealedRow]) -> tuple[Seen, ...]:
@@ -69,16 +84,21 @@ def form_expectations(
     moment: Moment,
     table: OpportunityTable | None,
     rows: Sequence[Seen],
+    batch: Batch,
     shadow_unestablished: bool = False,
     generation: str = "",
     version: str = "",
     implementation: str = "",
     recent: int,
+    line: float,
     calendar_of: Callable[[date], Mapping[str, str]] | None = None,
+    known_instances: Callable[[str], Iterable[str]] | None = None,
 ) -> tuple[Expectation, ...]:
-    """此刻对得上历史的全部预期。``table`` 为 None 就一条也不建（三种触发都从机会表读）。``recent`` 是证据的窗口 M：
+    """此刻对得上历史的、``batch`` 那几种触发的预期。``table`` 为 None 就一条也不建（三种触发都从机会表读）。``recent`` 是证据的窗口 M：
     「离上次够久」的时窗只看最近 M 次命中，每条预期的依据只列最近 M 次（窗外的分量已低于 α；账本单条也不会越写越大）。
-    ``calendar_of`` 给某一天的日历条件（带条件的关系里日历情境条件白天判它要；不给就只有今天的，取 ``moment.calendar``）。"""
+    ``line`` 是账的那条线 θ：「离上次够久」的时窗往后接几天由它定（``temporal.cluster_at``，裁定 89 第 1 条）。
+    ``calendar_of`` 给某一天的日历条件（带条件的关系里日历情境条件白天判它要；不给就只有今天的，取 ``moment.calendar``）。
+    ``known_instances`` 按账给这本账上已经建过的事件预期的触发实例（不给就是没有）：前因的开始被更正后，同一次机会沿用它。"""
 
     if isinstance(recent, bool) or not isinstance(recent, int) or recent < 1:
         raise ForesightError("recent must be a positive integer")
@@ -104,7 +124,7 @@ def form_expectations(
     # 风险：每多一个条件切一刀，跑步全年 68 次，调节检验开不开由每条关系自己的最小可达 p 定（每边至少 2 次，``conditions.ready_to_test``），带条件的账要攒
     # 几个月；条件源越多候选越多，交并检验不管总共试了多少条，接源时一起定是否做多重比较校正；现有造的数据没有天气，
     # 测不了这一步，要先造天气调节的习惯。
-    line = timeline_of(
+    marks = timeline_of(
         rows,
         lane=table.lane,
         slot_minutes=table.slot_minutes,
@@ -115,14 +135,19 @@ def form_expectations(
         else lambda day: moment.calendar if day == moment.day else {},
     )
     now_slot = absolute_slot(moment.at, slot_minutes=table.slot_minutes)
-    drafts: list[Draft] = [
-        *event_drafts(table, line, moment, now_slot=now_slot, statuses=statuses),
-        *situation_drafts(table, moment, done_today=done_today, statuses=statuses),
-        *day_drafts(table, moment, done_today=done_today, recent=recent),
-    ]
+    drafts: list[Draft] = (
+        [*day_drafts(table, moment, done_today=done_today, recent=recent, line=line)]
+        if batch is Batch.DAYS
+        else [
+            *event_drafts(table, marks, moment, now_slot=now_slot, statuses=statuses),
+            *situation_drafts(table, moment, done_today=done_today, statuses=statuses),
+        ]
+    )
     found: dict[str, Expectation] = {}
     for draft in drafts:
-        antecedents = antecedents_of(table, draft.kind_token, line, moment, now_slot=now_slot, statuses=statuses)
+        if known_instances is not None and draft.source == "事件":
+            draft = _same_chance(draft, rows, known_instances)
+        antecedents = antecedents_of(table, draft.kind_token, marks, moment, now_slot=now_slot, statuses=statuses)
         identity = expectation_identity(draft.kind_token, draft.source, draft.trigger, draft.trigger_instance)
         found[identity] = Expectation(
             expectation_id=identity,
@@ -147,10 +172,29 @@ def form_expectations(
     return tuple(found[key] for key in sorted(found))
 
 
+def _same_chance(draft: Draft, rows: Sequence[Seen], known_instances: Callable[[str], Iterable[str]]) -> Draft:
+    """事件触发的实例是前因那一行的开始时刻；封口时开始可能被更正挪了一点（同一行，只是开始早了几分钟），那还是同一次机会：
+    这本账上已经建过的实例落在这一行里（开始到最后所见之间，行为有先后、不会两行同时）就沿用它，身份不变——不再建第二条预期、
+    同一次机会不在账上记两笔。与结算、递送找前因同一把尺（``ledger.settle.event_antecedent_holds``：跨过那一刻的那一行）。"""
+
+    anchor = next((row for row in rows if instance_at(row.started_at) == draft.trigger_instance), None)
+    if anchor is None:
+        return draft
+    begin, end = anchor.started_at.astimezone(UTC), anchor.ended_at.astimezone(UTC)
+    for known in sorted(set(known_instances(account_key(draft.kind_token, draft.source, draft.trigger)))):
+        try:
+            moment = datetime.fromisoformat(known).astimezone(UTC)
+        except ValueError:
+            continue
+        if known != draft.trigger_instance and begin <= moment <= end:
+            return replace(draft, trigger_instance=known)
+    return draft
+
+
 def relation_statuses(shadow_unestablished: bool) -> tuple[str, ...]:
     """建预期与重标单元历史认哪几种关系状态（同一份，裁定 56 第 6 条）：成立的；``shadow_uses_unestablished`` 开着时加候选。"""
 
     return ("established", "candidate") if shadow_unestablished else ("established",)
 
 
-__all__ = ["LOOKBACK_DAYS", "form_expectations", "relation_statuses", "seen_rows"]
+__all__ = ["LOOKBACK_DAYS", "Batch", "form_expectations", "relation_statuses", "seen_rows"]

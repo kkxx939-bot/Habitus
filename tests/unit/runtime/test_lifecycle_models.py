@@ -8,7 +8,6 @@ import pytest
 
 from habitus.infrastructure.lifecycle import ParticipantReport
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.conversation import ConversationAddress
 from habitus.memory.workflow import MemoryJobStatus
 from habitus.memory.workflow.jobs import MemoryJobStore
@@ -21,6 +20,7 @@ from habitus.runtime import (
     RuntimeInitialization,
 )
 from tests.helpers import BASE_TIME, segment
+from tests.lock_store import ProcessLocalLockStore
 
 
 def test_conversation_chain_result_separates_success_and_failure_within_selected_batch() -> None:

@@ -25,7 +25,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
@@ -203,14 +203,7 @@ def _calendar_situations(lines: Mapping[str, LaneTimeline], concepts: ConceptSet
         identity: rule for identity in concepts.situations() if (rule := calendar_key(concepts, identity)) is not None
     }
     for line in lines.values():
-        for day in line.days():
-            conditions = dict(calendar.of_day(day))
-            line.calendar_conditions[day] = conditions
-            for identity, (name, values) in keyed.items():
-                line.calendar.add(identity)
-                known = conditions.get(name)
-                if known is not None:
-                    line.situations.setdefault(identity, {})[day] = known in values
+        fill_calendar(line, keyed, line.days(), calendar.of_day)
 
 
 def _situations(line: LaneTimeline, record: SeriesRecord, concepts: ConceptSet, mapped: ConceptHits | None) -> None:
@@ -262,11 +255,34 @@ def _added_after(concepts: ConceptSet, identity: str, mapped: ConceptHits) -> bo
 
 
 def _last_slot(record: SeriesRecord, slot_minutes: int, per_day: int) -> int:
-    """最后所见落在当天第几槽；过了午夜的截在当天最后一槽（人在场按日子算）。"""
+    return last_slot(record.day, record.last_observed_at, slot_minutes=slot_minutes, per_day=per_day)
 
-    if record.last_observed_at.date() != record.day:
+
+def last_slot(day: date, last_observed_at: datetime, *, slot_minutes: int, per_day: int) -> int:
+    """最后所见落在 ``day`` 那天第几槽；过了午夜的截在当天最后一槽（人在场按日子算）。预测层白天排时间线也用这一条。"""
+
+    if last_observed_at.date() != day:
         return per_day - 1
-    return slot_index(record.last_observed_at, slot_minutes=slot_minutes)
+    return slot_index(last_observed_at, slot_minutes=slot_minutes)
+
+
+def fill_calendar(
+    line: LaneTimeline,
+    keyed: Mapping[str, tuple[str, Collection[str]]],
+    days: Iterable[date],
+    conditions_of: Callable[[date], Mapping[str, str] | Iterable[tuple[str, str]]],
+) -> None:
+    """日历情境按天机械填：``keyed`` 是情境身份 → （日历键, 成立的那几个取值）。那天日历答不出的不填（不知道 ≠ 否；裁定 59）。
+    语义树建时间线与预测层白天排时间线用这同一个。"""
+
+    for day in days:
+        conditions = dict(conditions_of(day))
+        line.calendar_conditions[day] = conditions
+        for identity, (key, values) in keyed.items():
+            line.calendar.add(identity)
+            known = conditions.get(key)
+            if known is not None:
+                line.situations.setdefault(identity, {})[day] = known in values
 
 
 def _gap_slots(series: EventSeries, slot_minutes: int, per_day: int) -> tuple[int, ...]:
@@ -281,4 +297,4 @@ def _gap_slots(series: EventSeries, slot_minutes: int, per_day: int) -> tuple[in
     return tuple(sorted(covered))
 
 
-__all__ = ["LaneTimeline", "Mark", "build_timelines"]
+__all__ = ["LaneTimeline", "Mark", "build_timelines", "fill_calendar", "last_slot"]

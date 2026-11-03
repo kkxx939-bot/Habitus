@@ -67,10 +67,27 @@ def test_corrupt_or_missing_tables_are_refused(tmp_path) -> None:
     path.write_text(path.read_text() + " ", encoding="utf-8")
     with pytest.raises(ForesightError, match="canonical"):
         store.read("session", NIGHT)
-    (path.parent / "notes.txt").write_text("x", encoding="utf-8")
-    with pytest.raises(ForesightError, match="unexpected entry"):
-        store.nights("session")
+    # 别的名字（备份、副本、笔记）不是哪一晚：跳过不报，写下一晚也不受影响（段 6 Q2）
+    for stray in ("notes.txt", f"{NIGHT.isoformat()}.json.bak", f"{NIGHT.isoformat()} copy.json", "x.json"):
+        (path.parent / stray).write_text("x", encoding="utf-8")
+    assert store.nights("session") == (NIGHT,) and store.latest_night("session") == NIGHT
+    store.write(table(NIGHT + timedelta(days=1)))
+    assert store.nights("session") == (NIGHT, NIGHT + timedelta(days=1))
     with pytest.raises(ForesightError):
         store.read("../escape", NIGHT)
     with pytest.raises(ForesightError, match="positive"):
         OpportunityStore(tmp_path / "x", retained_nights=0)
+
+
+def test_a_corrupt_latest_table_falls_back_to_the_night_before_and_is_counted(tmp_path) -> None:
+    """段 6 Q2：最晚那一晚的表读不出来就往前退一晚（留的那几代备用就是为这个），坏的那一份计入观测；一晚都读不出来是 None。"""
+
+    store = OpportunityStore(tmp_path / "foresight")
+    store.write(table(NIGHT))
+    latest = store.write(table(NIGHT + timedelta(days=1)))
+    latest.write_text("{", encoding="utf-8")
+    found = store.latest("session")
+    assert found is not None and found.night == NIGHT
+    assert store.take_unreadable() == (str(latest),) and store.take_unreadable() == ()
+    (store.root / "opportunities" / "session" / f"{NIGHT.isoformat()}.json").write_text("[]", encoding="utf-8")
+    assert store.latest("session") is None and len(store.take_unreadable()) == 2

@@ -8,12 +8,15 @@ from pathlib import Path
 import pytest
 
 import habitus.infrastructure.store.filesystem.durable_io.atomic_file as atomic_file_module
+from habitus.infrastructure.store.contracts import PathLock
+from habitus.memory.compaction import MemoryLifecycleOperationStore, MemoryLifecycleScanStore
 from habitus.memory.document import MemoryDocumentConfig, MemoryDocumentMetadata
-from habitus.memory.editor import MemoryDocumentLockKeyspace
 from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
-from habitus.memory.tree import MemoryTree, MemoryTreeConfig, MemoryTreeIntegrityError
+from habitus.memory.semantic import MemorySemanticRefresher
+from habitus.memory.tree import MemoryDocumentLockKeyspace, MemoryTree, MemoryTreeConfig, MemoryTreeIntegrityError
 from habitus.memory.uri import MemoryURI
 from tests.helpers import BASE_TIME, codec, document, memory_fields
+from tests.lock_store import ProcessLocalLockStore
 
 ADDRESSES = (
     MemoryAddress.profile(),
@@ -651,3 +654,29 @@ def test_tree_overwrite_preserves_address_and_accepts_next_revision(tmp_path: Pa
     tree.write(second)
     assert tree.read(first.address) == second
     assert tree.list_addresses(MemoryKind.PREFERENCE) == (first.address,)
+
+
+def test_lock_keys_derived_from_the_memory_root_keep_their_literal_strings() -> None:
+    """锁键是跨进程协调用的字符串：根摘要前缀改由 ``tree.lock_key`` 统一算之后，每种键必须与原来逐字相同。"""
+
+    class _Generator:
+        def generate(self, snapshot):  # pragma: no cover - 只为构造刷新器
+            raise AssertionError(snapshot)
+
+    root_digest = "6988d8f5be62511ef8ed9bb0"
+    uri_digest = "5dd4f775cc27154312c3bd5b841c410a6cf2611734f652ae2a88f864d1f85f50"
+    tree = MemoryTree(Path("/habitus-lock-key-fixture/memory"))
+    path_lock = PathLock(ProcessLocalLockStore())
+    keyspace = MemoryDocumentLockKeyspace(tree.root)
+    refresher = MemorySemanticRefresher(tree, _Generator(), path_lock)
+    workflow_root = Path("/habitus-lock-key-fixture/workflow")
+    operations = MemoryLifecycleOperationStore(tree, path_lock, workflow_root)
+    scan = MemoryLifecycleScanStore(tree, path_lock, workflow_root)
+
+    assert keyspace.key("memory://preferences/style.md") == f"memory-document:{root_digest}:{uri_digest}"
+    assert keyspace.transaction_key() == f"memory-document:{root_digest}:transaction"
+    assert refresher._transaction_lock_key == f"memory-document:{root_digest}:transaction"
+    assert refresher._lock_key(MemoryDirectory.root()) == f"memory-semantic:{root_digest}:/"
+    assert refresher._lock_key(MemoryDirectory.preferences()) == f"memory-semantic:{root_digest}:preferences"
+    assert operations._lock_prefix == f"memory-lifecycle-operation:{root_digest}"
+    assert scan.lock_key == f"memory-lifecycle-scan:{root_digest}"

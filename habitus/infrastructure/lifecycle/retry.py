@@ -1,7 +1,8 @@
 """重试账：替掉各处"失败了就下一轮原样再来、没有上限"的重排。
 
 - 可重试的（传输、超时）按退避推迟，次数用完转确定性；
-- 确定性的（标了 ``DeterministicFailure``）第一次就不再重试，交调用方处置（会话源：放弃、写成没读懂、进每晚重试的堆）；
+- 确定性的（标了 ``DeterministicFailure``，或属于构造时给的 ``deterministic`` 那几类）第一次就不再重试，交调用方处置
+  （会话源：放弃、写成没读懂、进每晚重试的堆）；本层不认识上层的异常，"哪些算同一份输入再问也一样"由组合根注入；
 - 一个 owner 一份文件；写是"读整份、改、整份写回"，同一进程里几个线程（并发恢复、生命周期的回收）会同时写，所以
   按文件路径串起来（L10.10）。跨进程不共用同一个 owner。
 
@@ -79,6 +80,7 @@ class RetryLedger:
         clock: Callable[[], datetime],
         max_entries: int = 10_000,
         max_file_bytes: int = 8 * 1024 * 1024,
+        deterministic: tuple[type[BaseException], ...] = (),
     ) -> None:
         if not isinstance(policy, BackoffPolicy):
             raise TypeError("policy must be BackoffPolicy")
@@ -89,6 +91,10 @@ class RetryLedger:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{label} must be a positive integer")
+        if not isinstance(deterministic, tuple) or any(
+            not isinstance(item, type) or not issubclass(item, BaseException) for item in deterministic
+        ):
+            raise TypeError("deterministic must be a tuple of exception types")
         self.root = Path(root).expanduser().resolve(strict=False)
         self.owner = require_safe_path_segment(owner, "owner")
         self.path = self.root / "lifecycle" / "retry" / f"{self.owner}.json"
@@ -97,6 +103,8 @@ class RetryLedger:
         self.max_entries = max_entries
         self.max_file_bytes = max_file_bytes
         self._clock = clock
+        #: 同一份输入再问也一样的那几类（``DeterministicFailure`` 之外）：第一次就放弃。
+        self._deterministic: tuple[type[BaseException], ...] = (DeterministicFailure, *deterministic)
         self._lock = _lock_for(self.path)
 
     def record_failure(self, key: str, error: BaseException) -> RetryDecision:
@@ -106,7 +114,7 @@ class RetryLedger:
             entries = self._read()
             previous = entries.get(key)
             attempts = 1 if previous is None else previous.attempts + 1
-            deterministic = isinstance(error, DeterministicFailure) or attempts >= self.max_attempts
+            deterministic = isinstance(error, self._deterministic) or attempts >= self.max_attempts
             now = self._now()
             entry = RetryEntry(
                 key=_require_key(key),

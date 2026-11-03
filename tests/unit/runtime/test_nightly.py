@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from datetime import time as clock_time
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from habitus.foundation.observability import ObservationEvent, ObservationStatus
-from habitus.runtime.nightly import Nightly
+from habitus.runtime.nightly import STEPS, Nightly
 from habitus.runtime.nightly_worker import LastRun, NightlyWorker
 from tests.unit.runtime.test_scene_night import NOW, TONIGHT, nightly, publish_tonight, site_with_three_bedtimes
 
@@ -147,19 +146,29 @@ class Recorder:
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-FOUR = clock_time(4, 0)
 
 
-def test_the_nightly_worker_catches_up_a_missed_night_then_waits_and_survives_a_failing_one(tmp_path) -> None:
-    """整晚那一趟自己的常驻节拍：启动时错过了最近一个预定时刻（从没跑过）就补跑一趟、记下读数、等下一个预定时刻；
-    一趟抛了只记 last_error，循环不死（裁定 67 第 7 条）。"""
+def test_the_line_is_ready_once_yesterday_is_closed(tmp_path) -> None:
+    """裁定 94 第 1 条：夜里那条线前一天定稿完成就接着跑，不等钟点——昨天在归约的定稿日里，今天这一晚就能跑；还没定稿就等。"""
+
+    closed: list[object] = []
+    _site, run = assembled(tmp_path, closed_days=lambda: tuple(closed))
+    today = run.tonight()
+    assert run.ready() is None  # 一天都还没定稿
+    closed.append(today - timedelta(days=2))
+    assert run.ready() is None  # 前天定稿了、昨天还没有：零点到定稿之间不跑
+    closed.append(today - timedelta(days=1))
+    assert run.ready() == today
+
+
+def test_the_nightly_worker_runs_once_yesterday_closes_then_waits_and_survives_a_failing_one(tmp_path) -> None:
+    """整晚那一趟自己的常驻节拍：昨天定稿了、今天这一晚还没跑过就跑一趟、记下读数，之后不再跑；
+    一趟抛了只记 last_error、不记跑过，循环不死。"""
 
     site, run = assembled(tmp_path)
     publish_tonight(site)
     recorder = Recorder()
-    worker = NightlyWorker(
-        run, at=FOUR, zone=SHANGHAI, shutdown_timeout_seconds=5.0, clock=lambda: NOW, observer=recorder
-    )
+    worker = NightlyWorker(run, shutdown_timeout_seconds=5.0, observer=recorder)
 
     async def scenario() -> None:
         await worker.start()
@@ -170,16 +179,20 @@ def test_the_nightly_worker_catches_up_a_missed_night_then_waits_and_survives_a_
         await worker.stop()
 
     asyncio.run(scenario())
-    (event,) = [item for item in recorder.events if item.operation == "night"]  # 补跑一趟之后在等，不再跑
+    (event,) = [item for item in recorder.events if item.operation == "night"]  # 跑过一趟之后在等，不再跑
     assert worker.last_outcome is not None and worker.last_outcome.scene is not None
     assert event.status is ObservationStatus.SUCCESS and event.attributes["night"] == str(worker.last_outcome.night)
     assert event.attributes["scene"] is True and event.attributes["records"] == len(worker.last_outcome.series.records)
+    assert worker.last_run.read() == run.tonight()
 
     class Broken:
-        async def run_once(self):  # type: ignore[no-untyped-def]
+        def ready(self):  # type: ignore[no-untyped-def]
+            return TONIGHT
+
+        async def run_once(self, **_progress):  # type: ignore[no-untyped-def]
             raise OSError("disk")
 
-    failing = NightlyWorker(Broken(), at=FOUR, zone=SHANGHAI, shutdown_timeout_seconds=5.0, observer=recorder)
+    failing = NightlyWorker(Broken(), shutdown_timeout_seconds=5.0, observer=recorder)
 
     async def broken() -> None:
         await failing.start()
@@ -189,84 +202,102 @@ def test_the_nightly_worker_catches_up_a_missed_night_then_waits_and_survives_a_
 
     asyncio.run(broken())
     assert recorder.events[-1].status is ObservationStatus.FAILURE
+    assert failing.last_run.read() is None  # 抛了不算跑过：下一眼从断点接着跑（裁定 94 第 1 条）
     with pytest.raises(TypeError):
-        NightlyWorker(object(), at=FOUR, zone=SHANGHAI, shutdown_timeout_seconds=1.0)  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        NightlyWorker(run, at="04:00", zone=SHANGHAI, shutdown_timeout_seconds=1.0)  # type: ignore[arg-type]
+        NightlyWorker(object(), shutdown_timeout_seconds=1.0)  # type: ignore[arg-type]
 
 
-def test_a_restart_only_catches_up_a_night_it_actually_missed(tmp_path) -> None:
-    """上一趟开跑的时刻落盘：重启时上一趟在最近一个 04:00 之后就不跑（不在额度还没恢复的白天把唯一一次重试用掉），
-    早于它才补跑；读不出就当没跑过。"""
+def test_a_restart_runs_the_night_only_if_it_has_not_run_for_it(tmp_path) -> None:
+    """跑过哪一晚落盘：重启时昨天已定稿、这一晚还没跑过就接着跑（服务夜里没跑的，起来从断点接着跑），跑过了就不跑；
+    昨天还没定稿就等；读不出当没跑过；记下的那一晚晚于今天（时钟回拨过）也再跑一趟。"""
 
     path = tmp_path / "nightly" / "last_run.json"
-    now = datetime(2026, 10, 21, 15, 10, tzinfo=SHANGHAI)
+    ready: list[object] = [TONIGHT]
+
+    class Line:
+        def ready(self):  # type: ignore[no-untyped-def]
+            return ready[0]
+
+        async def run_once(self):  # type: ignore[no-untyped-def]
+            raise AssertionError("not run")
 
     def worker(last: LastRun) -> NightlyWorker:
-        return NightlyWorker(
-            object.__new__(_Stub),
-            at=FOUR,
-            zone=SHANGHAI,
-            shutdown_timeout_seconds=1.0,
-            last_run=last,
-            clock=lambda: now,
-        )
+        return NightlyWorker(Line(), shutdown_timeout_seconds=1.0, last_run=last)
 
-    assert worker(LastRun(path, root=tmp_path)).missed()  # 从没跑过
-    LastRun(path, root=tmp_path).write(datetime(2026, 10, 21, 4, 0, 5, tzinfo=SHANGHAI))
-    assert not worker(LastRun(path, root=tmp_path)).missed()  # 今早 04:00 跑过了：15:10 重启不跑
-    LastRun(path, root=tmp_path).write(datetime(2026, 10, 20, 4, 0, 5, tzinfo=SHANGHAI))
-    assert worker(LastRun(path, root=tmp_path)).missed()  # 今早那一趟错过了：补跑
+    assert worker(LastRun(path, root=tmp_path)).due() == TONIGHT  # 从没跑过
+    LastRun(path, root=tmp_path).write(TONIGHT, finished=True)
+    assert worker(LastRun(path, root=tmp_path)).due() is None  # 这一晚跑过了：重启不跑
+    LastRun(path, root=tmp_path).write(TONIGHT - timedelta(days=1), finished=True)
+    assert worker(LastRun(path, root=tmp_path)).due() == TONIGHT  # 上一次是前一晚：接着跑
+    LastRun(path, root=tmp_path).write(TONIGHT + timedelta(days=2), finished=True)
+    assert worker(LastRun(path, root=tmp_path)).due() == TONIGHT
     path.write_text("{broken")
-    assert worker(LastRun(path, root=tmp_path)).missed()
+    assert worker(LastRun(path, root=tmp_path)).due() == TONIGHT
+    ready[0] = None
+    assert worker(LastRun(path, root=tmp_path)).due() is None  # 昨天还没定稿
 
 
-def test_the_due_times_are_the_subjects_local_clock() -> None:
-    from habitus.runtime.nightly_worker import latest_due, next_due
+def test_a_night_cut_off_midway_is_run_again_on_the_next_look(tmp_path) -> None:
+    """被杀（取消）的那一趟不记这一晚：下一眼昨天照样定稿、这一晚还没记下，从头再走一遍——每一步重跑都幂等。"""
 
-    before = datetime(2026, 10, 21, 3, 59, tzinfo=SHANGHAI)
-    after = datetime(2026, 10, 21, 4, 0, tzinfo=SHANGHAI)
-    assert latest_due(before, at=FOUR, zone=SHANGHAI) == datetime(2026, 10, 20, 4, 0, tzinfo=SHANGHAI)
-    assert latest_due(after, at=FOUR, zone=SHANGHAI) == after
-    assert next_due(before, at=FOUR, zone=SHANGHAI) == after
-    assert next_due(after, at=FOUR, zone=SHANGHAI) == datetime(2026, 10, 22, 4, 0, tzinfo=SHANGHAI)
-    # 进程用 UTC 写法也一样：2026-10-20 20:30Z 是上海 10-21 04:30
-    assert latest_due(datetime(2026, 10, 20, 20, 30, tzinfo=UTC), at=FOUR, zone=SHANGHAI) == after
+    from habitus.runtime.nightly import NightOutcome
+    from habitus.series import EventSeries
+
+    runs: list[str] = []
+
+    class Line:
+        def ready(self):  # type: ignore[no-untyped-def]
+            return TONIGHT
+
+        async def run_once(self, **_progress):  # type: ignore[no-untyped-def]
+            runs.append("跑")
+            if len(runs) == 1:
+                raise asyncio.CancelledError
+            return NightOutcome(TONIGHT, EventSeries(cutoff=TONIGHT), None, None, done=STEPS)
+
+    worker = NightlyWorker(Line(), shutdown_timeout_seconds=1.0)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(worker._night(TONIGHT))
+    assert worker.due() == TONIGHT
+    asyncio.run(worker._night(TONIGHT))
+    assert worker.due() is None and runs == ["跑", "跑"]
 
 
-class _Stub:
-    async def run_once(self):  # type: ignore[no-untyped-def]
-        raise AssertionError("not run")
+def test_a_stopped_night_or_kept_errors_leave_an_error_on_the_worker(tmp_path) -> None:
+    """这一晚停下了（结算出错），或前置处理里有保持「错误·看不到」的：常驻节拍在 ``last_error`` 上留痕（健康面读它），
+    下一趟好了就清掉。"""
 
-
-def test_a_night_whose_settlement_or_retry_failed_leaves_an_error_on_the_worker(tmp_path) -> None:
-    """整晚照跑完了、但结算或开头的重试抛了：常驻节拍在 ``last_error`` 上留痕（健康面读它），下一趟好了就清掉。"""
-
+    from habitus.behavior.retry import RetryReport
     from habitus.runtime.nightly import NightOutcome
     from habitus.series import EventSeries
 
     outcomes = iter(
         [
-            NightOutcome(TONIGHT, EventSeries(cutoff=TONIGHT), None, None, settlement_failed="OSError"),
-            NightOutcome(TONIGHT, EventSeries(cutoff=TONIGHT), None, None, retry_failed="ModelQuotaError"),
-            NightOutcome(TONIGHT, EventSeries(cutoff=TONIGHT), None, None),
+            NightOutcome(TONIGHT, EventSeries(cutoff=TONIGHT), None, None, stopped="结算出错: OSError"),
+            NightOutcome(
+                TONIGHT, EventSeries(cutoff=TONIGHT), None, None, retried=RetryReport(deterministic=1), done=STEPS
+            ),
+            NightOutcome(TONIGHT, EventSeries(cutoff=TONIGHT), None, None, done=STEPS),
         ]
     )
 
     class Stub:
-        async def run_once(self):  # type: ignore[no-untyped-def]
+        def ready(self):  # type: ignore[no-untyped-def]
+            return TONIGHT
+
+        async def run_once(self, **_progress):  # type: ignore[no-untyped-def]
             return next(outcomes)
 
     recorder = Recorder()
-    worker = NightlyWorker(Stub(), at=FOUR, zone=SHANGHAI, shutdown_timeout_seconds=5.0, observer=recorder)
-    asyncio.run(worker._night())
+    worker = NightlyWorker(Stub(), shutdown_timeout_seconds=5.0, observer=recorder)
+    asyncio.run(worker._night(TONIGHT))
     assert isinstance(worker.last_error, RuntimeError) and "OSError" in str(worker.last_error)
-    asyncio.run(worker._night())
-    assert "nightly retry failed: ModelQuotaError" in str(worker.last_error)
-    asyncio.run(worker._night())
+    asyncio.run(worker._night(TONIGHT))
+    assert "nightly errors kept unseen: 处理不了 1" in str(worker.last_error)
+    asyncio.run(worker._night(TONIGHT))
     assert worker.last_error is None
     first = next(item for item in recorder.events if item.operation == "night")
-    assert first.attributes["settlement_failed"] == "OSError"
+    assert first.attributes["stopped"] == "结算出错: OSError"
 
 
 def test_the_night_refreshes_the_calendar_before_anything_else(tmp_path) -> None:
@@ -296,8 +327,42 @@ def test_the_night_refreshes_the_calendar_before_anything_else(tmp_path) -> None
         )  # type: ignore[arg-type]
 
 
-def test_the_retry_runs_before_the_settlement_and_its_failure_does_not_stop_the_night(tmp_path) -> None:
-    """裁定 67 第 2、4 条：白天读不懂的先重试、落树，结算才看得到；重试抛错这一晚照常往下，健康面看得见。"""
+def test_a_calendar_refresh_that_raises_does_not_stop_the_night(tmp_path) -> None:
+    """重读放假数据抛错：照用上一次读到的日历，重试、结算、语义树照跑，抛了什么记在这一晚的结果上、健康面看得见。"""
+
+    from habitus.behavior.retry import RetryReport
+    from habitus.runtime.nightly_worker import _problems
+
+    order: list[str] = []
+    site, run = assembled(tmp_path)
+    publish_tonight(site)
+
+    def broken() -> None:
+        raise TypeError("unhashable type: 'list'")
+
+    class Retry:
+        async def run_once(self, *, through):  # type: ignore[no-untyped-def]
+            order.append("重试")
+            return RetryReport()
+
+    class Settlement:
+        def run_once(self):  # type: ignore[no-untyped-def]
+            order.append("结算")
+
+    run.refresh_calendar = broken
+    run.retry = Retry()  # type: ignore[assignment]
+    run.settlement = Settlement()  # type: ignore[assignment]
+    for _ in range(2):
+        order.clear()
+        outcome = asyncio.run(run.run_once())
+        assert order == ["重试", "结算"] and outcome.scene is not None
+        assert outcome.calendar_failed == "TypeError"
+        assert "nightly calendar refresh failed: TypeError" in _problems(outcome)
+
+
+def test_the_retry_runs_before_the_settlement_and_a_retry_that_raises_stops_the_night(tmp_path) -> None:
+    """裁定 67 第 2 条：白天读不懂的先重试、落树，结算才看得到。重试整个抛了是 bug（一项的 bug 由重试自己逐项拦）：这一晚
+    停下、健康面报出，不接着跑结算与结构（裁定 94 第 8 条）。"""
 
     from habitus.behavior.retry import RetryReport
 
@@ -318,23 +383,24 @@ def test_the_retry_runs_before_the_settlement_and_its_failure_does_not_stop_the_
     run.settlement = Settlement()  # type: ignore[assignment]
     outcome = asyncio.run(run.run_once())
     assert order == [f"重试到 {run.tonight() - timedelta(days=1)}", "结算"]  # 处理前一天及更早的（裁定 68 第 3 条）
-    assert outcome.retried == RetryReport(taken=1, recovered=1) and outcome.retry_failed is None
+    assert outcome.retried == RetryReport(taken=1, recovered=1) and outcome.stopped is None
 
     class Broken:
         async def run_once(self, *, through):  # type: ignore[no-untyped-def]
             raise OSError("disk")
 
     run.retry = Broken()  # type: ignore[assignment]
+    order.clear()
     outcome = asyncio.run(run.run_once())
-    assert outcome.retry_failed == "OSError" and outcome.scene is not None
+    assert outcome.stopped == "前置处理出错: OSError" and outcome.scene is None and order == []
 
 
-def test_the_worker_naps_in_short_slices_and_survives_a_marker_it_cannot_write(tmp_path) -> None:
-    """裁定 68 第 4 条：等下一个 04:00 时一次最多睡 5 分钟、醒来重看墙钟（Mac 合盖时单调时钟不走）；``last_run`` 写不进
-    照跑、健康面看得见；记下的时刻晚于此刻（时钟回拨过）当没跑过；一起来就把上一晚中途被杀剩下的重试项清掉。"""
+def test_the_worker_looks_in_short_slices_and_survives_a_marker_it_cannot_write(tmp_path) -> None:
+    """隔 5 分钟看一眼昨天定稿了没有、醒来重看墙钟（Mac 合盖时单调时钟不走，裁定 68 第 4 条）；``last_run`` 写不进照跑、
+    健康面看得见；读不了定稿日照样活着；一起来就把上一晚中途被杀剩下的重试项清掉。"""
 
     from habitus.runtime.nightly import NightOutcome
-    from habitus.runtime.nightly_worker import MAX_NAP_SECONDS
+    from habitus.runtime.nightly_worker import POLL_SECONDS
     from habitus.series import EventSeries
 
     naps: list[float] = []
@@ -345,17 +411,17 @@ def test_the_worker_naps_in_short_slices_and_survives_a_marker_it_cannot_write(t
             cleaned.append("清")
             return 0
 
-        async def run_once(self):  # type: ignore[no-untyped-def]
-            return NightOutcome(TONIGHT, EventSeries(cutoff=TONIGHT), None, None)
+        def ready(self):  # type: ignore[no-untyped-def]
+            return TONIGHT
+
+        async def run_once(self, **_progress):  # type: ignore[no-untyped-def]
+            return NightOutcome(TONIGHT, EventSeries(cutoff=TONIGHT), None, None, done=STEPS)
 
     class Unwritable(LastRun):
-        def write(self, started_at):  # type: ignore[no-untyped-def]
+        def write(self, night):  # type: ignore[no-untyped-def]
             raise OSError("read-only")
 
-    now = datetime(2026, 10, 21, 15, 10, tzinfo=SHANGHAI)
-    worker = NightlyWorker(
-        Stub(), at=FOUR, zone=SHANGHAI, shutdown_timeout_seconds=1.0, last_run=Unwritable(), clock=lambda: now
-    )
+    worker = NightlyWorker(Stub(), shutdown_timeout_seconds=1.0, last_run=Unwritable())
 
     async def nap(seconds: float) -> None:
         naps.append(seconds)
@@ -363,17 +429,26 @@ def test_the_worker_naps_in_short_slices_and_survives_a_marker_it_cannot_write(t
 
     worker._wait = nap  # type: ignore[method-assign]
     asyncio.run(worker._run_loop())
-    assert cleaned == ["清"] and naps == [MAX_NAP_SECONDS]
+    assert cleaned == ["清"] and naps == [POLL_SECONDS]
     assert "last-run marker not written" in str(worker.last_error)
 
-    future = LastRun()
-    future.write(now + timedelta(days=2))
-    assert NightlyWorker(
-        Stub(), at=FOUR, zone=SHANGHAI, shutdown_timeout_seconds=1.0, last_run=future, clock=lambda: now
-    ).missed()
+    class Unreadable(Stub):
+        def ready(self):  # type: ignore[no-untyped-def]
+            raise OSError("day_closure.json")
+
+    blind = NightlyWorker(Unreadable(), shutdown_timeout_seconds=1.0)
+
+    async def stop(_seconds: float) -> None:
+        blind._stop_requested.set()
+
+    blind._wait = stop  # type: ignore[method-assign]
+    asyncio.run(blind._run_loop())
+    assert isinstance(blind.last_error, OSError) and blind.last_outcome is None
 
 
-def test_a_night_whose_whole_retry_batch_was_dropped_for_an_unavailable_model_is_degraded() -> None:
+def test_a_stopped_night_still_lists_the_errors_kept_unseen() -> None:
+    """停下的那一晚也列前置处理里保持「错误·看不到」的（同一晚两条都要看得见）；什么都没有就是空。"""
+
     from habitus.behavior.retry import RetryReport
     from habitus.runtime.nightly import NightOutcome
     from habitus.runtime.nightly_worker import _problems
@@ -384,14 +459,14 @@ def test_a_night_whose_whole_retry_batch_was_dropped_for_an_unavailable_model_is
         EventSeries(cutoff=TONIGHT),
         None,
         None,
-        settlement_failed="OSError",
-        retried=RetryReport(taken=3, unavailable=3),
+        retried=RetryReport(taken=3, invalid=1, unavailable=1),
+        stopped="模型调不通: quota",
     )
     assert _problems(both) == [
-        "nightly settlement failed: OSError",
-        "nightly retry dropped 3 items: model unavailable",
+        "nightly stopped: 模型调不通: quota",
+        "nightly errors kept unseen: 处理不了 0，内容安全 0，格式不合 1",
     ]
     fine = NightOutcome(
-        TONIGHT, EventSeries(cutoff=TONIGHT), None, None, retried=RetryReport(taken=2, recovered=1, unavailable=1)
+        TONIGHT, EventSeries(cutoff=TONIGHT), None, None, retried=RetryReport(taken=2, recovered=2), done=STEPS
     )
     assert _problems(fine) == []

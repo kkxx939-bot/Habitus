@@ -12,26 +12,16 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 
 from habitus.foresight.opportunities.model import ConditionSpec, RelationOpportunities
-from habitus.scene.relations import Chain, LaneTimeline, Template, evaluator
+from habitus.scene.relations import Chain, LaneTimeline, Template, all_hold, evaluator
 from habitus.scene.relations import parse_condition as parse
 
 
 def judge_for(
     line: LaneTimeline, conditions: Sequence[ConditionSpec], *, window: int
 ) -> Callable[[Chain], bool | None]:
-    """几个条件合起来判：任一不成立 → 不成立；都成立 → 成立；有判不了的 → 判不了。空集合恒成立。"""
+    """几个条件合起来判，判法与语义树同一个（``all_hold``）：任一不成立 → 不成立；都成立 → 成立；有判不了的 → 判不了。"""
 
-    judges = [_judge(line, spec, window) for spec in conditions]
-
-    def judge(chain: Chain) -> bool | None:
-        flags = [item(chain) for item in judges]
-        if any(flag is False for flag in flags):
-            return False
-        if any(flag is None for flag in flags):
-            return None
-        return True
-
-    return judge
+    return all_hold([_judge(line, spec, window) for spec in conditions])
 
 
 def _judge(line: LaneTimeline, spec: ConditionSpec, window: int) -> Callable[[Chain], bool | None]:

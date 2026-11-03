@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from habitus.infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
 from habitus.memory.document import MemoryDocument
-from habitus.memory.editor.extraction import MemoryExtractionLoop, MemoryExtractionResult
+from habitus.memory.editor.extraction import MemoryExtractionLoop, MemoryExtractionResult, MemoryTurnContext
 from habitus.memory.editor.identity import MemoryFinalIdentityMap, MemoryIdentityPlanner
 from habitus.memory.editor.link_plan import MemoryRelationPlan, MemoryRelationReadSet
 from habitus.memory.editor.mutation import MemoryMutationPlan, MemoryMutationReadSet
@@ -114,12 +114,22 @@ class MemoryEditor:
         self.relation_reader = relation_reader or MemoryRelationReadSetLoader(extraction_loop.mutation_reader.reader)
         self.relationship_editor = relationship_editor or MemoryRelationshipEditor()
 
-    async def plan(self, segment: ConversationSegment) -> MemoryEditorPlan:
-        """对不可变完整 Segment 形成不含落盘副作用的统一计划。"""
+    def turn_fits_whole(self, whole: ConversationSegment) -> bool:
+        """整轮能不能一次抽取（见 ``MemoryExtractionLoop.turn_fits_whole``）。"""
+
+        return self.extraction_loop.turn_fits_whole(whole)
+
+    async def plan(
+        self,
+        segment: ConversationSegment,
+        *,
+        turn_context: MemoryTurnContext | None = None,
+    ) -> MemoryEditorPlan:
+        """对不可变完整 Segment 形成不含落盘副作用的统一计划；一轮按段分开抽取时带上同轮上下文。"""
 
         if not isinstance(segment, ConversationSegment):
             raise TypeError("segment must be a ConversationSegment")
-        extraction = await self.extraction_loop.extract(segment)
+        extraction = await self.extraction_loop.extract(segment, turn_context=turn_context)
         mutations = extraction.mutations
         identities = self.identity_planner.plan(extraction)
         snapshots = self._merge_snapshots(

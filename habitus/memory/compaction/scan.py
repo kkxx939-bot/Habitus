@@ -1,20 +1,24 @@
-"""保存 L2 生命周期扫描游标和单节点退避状态。"""
+"""保存 L2 生命周期扫描游标、单节点退避状态和压缩模型判过 KEEP 的内容版本。"""
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from habitus.foundation.integrity import canonical_json
 from habitus.foundation.lifecycle import BackoffPolicy
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.filesystem import atomic_replace_bytes, read_regular_bytes
 from habitus.memory.model import MemoryAddress
-from habitus.memory.tree import MemoryTree
+from habitus.memory.tree import MemoryTree, memory_root_lock_prefix
 from habitus.memory.uri import MemoryURI
+
+_SCHEMA = "memory_lifecycle_scan_v2"
+# 旧版扫描账的 schema 标记：只用来认出旧文件并明确报错，不迁移、不读其中内容。
+_STALE_SCHEMA = "memory_lifecycle_scan_v1"
 
 
 class MemoryLifecycleScanStateError(RuntimeError):
@@ -53,15 +57,61 @@ class MemoryLifecycleScanFailure:
         }
 
 
+@dataclass(frozen=True)
+class MemoryCompactionKeep:
+    """压缩模型对某一版 L2 答 KEEP 的记录。
+
+    键是内容版本（revision 与快照摘要）加最近一次被用到的时刻：内容变了、或被用到过（回到热区再冷下来），
+    记录就不再匹配，下一次冷下来会重新送模型判。
+    """
+
+    uri: MemoryURI
+    revision: int
+    source_digest: str
+    last_used_at: datetime | None
+    judged_at: datetime
+
+    def __post_init__(self) -> None:
+        parsed = MemoryURI.parse(self.uri)
+        parsed.to_address()
+        object.__setattr__(self, "uri", parsed)
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision <= 0:
+            raise ValueError("memory compaction keep revision must be positive")
+        if not isinstance(self.source_digest, str) or not self.source_digest:
+            raise ValueError("memory compaction keep source_digest must be non-empty")
+        if self.last_used_at is not None:
+            object.__setattr__(self, "last_used_at", _timestamp(self.last_used_at))
+        object.__setattr__(self, "judged_at", _timestamp(self.judged_at))
+
+    def same_version(self, other: MemoryCompactionKeep) -> bool:
+        return (
+            self.uri == other.uri
+            and self.revision == other.revision
+            and self.source_digest == other.source_digest
+            and self.last_used_at == other.last_used_at
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "uri": str(self.uri),
+            "revision": self.revision,
+            "source_digest": self.source_digest,
+            "last_used_at": None if self.last_used_at is None else _format_timestamp(self.last_used_at),
+            "judged_at": _format_timestamp(self.judged_at),
+        }
+
+
 class MemoryLifecycleScanStore:
-    """用一个小型规范 JSON 保存跨重启游标和有界失败集合。"""
+    """用一个小型规范 JSON 保存跨重启游标、有界失败集合和有界 KEEP 记录。"""
 
     def __init__(
         self,
         tree: MemoryTree,
         path_lock: PathLock,
+        workflow_root: str | Path,
         *,
         max_failures: int = 10_000,
+        max_compaction_keeps: int = 10_000,
         max_file_bytes: int = 2 * 1024 * 1024,
         base_retry_seconds: float = 60.0,
         max_retry_seconds: float = 86_400.0,
@@ -72,6 +122,12 @@ class MemoryLifecycleScanStore:
             raise TypeError("path_lock must be PathLock")
         if isinstance(max_failures, bool) or not isinstance(max_failures, int) or max_failures <= 0:
             raise ValueError("max_failures must be positive")
+        if (
+            isinstance(max_compaction_keeps, bool)
+            or not isinstance(max_compaction_keeps, int)
+            or max_compaction_keeps <= 0
+        ):
+            raise ValueError("max_compaction_keeps must be positive")
         if isinstance(max_file_bytes, bool) or not isinstance(max_file_bytes, int) or max_file_bytes <= 0:
             raise ValueError("max_file_bytes must be positive")
         for name, value in {
@@ -82,46 +138,66 @@ class MemoryLifecycleScanStore:
                 raise ValueError(f"{name} must be positive numeric data")
         if float(max_retry_seconds) < float(base_retry_seconds):
             raise ValueError("max_retry_seconds cannot be lower than base_retry_seconds")
-        self.root = (tree.root.parent / "workflow").resolve(strict=False)
+        self.root = tree.require_outside(workflow_root)
         self.path = self.root / "lifecycle" / "l2_scan_state.json"
         self.path_lock = path_lock
         self.max_failures = max_failures
+        self.max_compaction_keeps = max_compaction_keeps
         self.max_file_bytes = max_file_bytes
         self.base_retry_seconds = float(base_retry_seconds)
         self.max_retry_seconds = float(max_retry_seconds)
         self.backoff = BackoffPolicy(base_seconds=self.base_retry_seconds, cap_seconds=self.max_retry_seconds)
-        digest = hashlib.sha256(str(tree.root).encode("utf-8")).hexdigest()[:24]
-        self.lock_key = f"memory-lifecycle-scan:{digest}"
+        self.lock_key = memory_root_lock_prefix("memory-lifecycle-scan", tree.root)
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._read()
 
     def cursor(self) -> MemoryAddress | None:
-        after, _failures = self._read()
-        return None if after is None else MemoryURI.parse(after).to_address()
+        state = self._read()
+        return None if state.after is None else MemoryURI.parse(state.after).to_address()
 
     def eligible(self, uri: MemoryURI, *, now: datetime) -> bool:
-        _after, failures = self._read()
-        failure = failures.get(str(uri))
+        failure = self._read().failures.get(str(uri))
         return failure is None or _timestamp(now) >= failure.retry_at
 
     def advance(self, address: MemoryAddress) -> None:
         uri = MemoryURI.from_address(address)
         with self.path_lock.acquire(self.lock_key, ttl_seconds=30):
-            _after, failures = self._read()
-            self._write(str(uri), failures)
+            state = self._read()
+            state.after = str(uri)
+            self._write(state)
 
     def reset_cursor(self) -> None:
         with self.path_lock.acquire(self.lock_key, ttl_seconds=30):
-            _after, failures = self._read()
-            self._write(None, failures)
+            state = self._read()
+            state.after = None
+            self._write(state)
 
     def clear_failure(self, uri: MemoryURI) -> None:
         with self.path_lock.acquire(self.lock_key, ttl_seconds=30):
-            after, failures = self._read()
-            failures.pop(str(uri), None)
-            self._write(after, failures)
+            state = self._read()
+            state.failures.pop(str(uri), None)
+            self._write(state)
+
+    def compaction_kept(self, version: MemoryCompactionKeep) -> bool:
+        """这一版内容（含最近被用到的时刻）是否已被压缩模型判过 KEEP。"""
+
+        if not isinstance(version, MemoryCompactionKeep):
+            raise TypeError("version must be MemoryCompactionKeep")
+        recorded = self._read().keeps.get(str(version.uri))
+        return recorded is not None and recorded.same_version(version)
+
+    def record_compaction_keep(self, version: MemoryCompactionKeep) -> None:
+        if not isinstance(version, MemoryCompactionKeep):
+            raise TypeError("version must be MemoryCompactionKeep")
+        with self.path_lock.acquire(self.lock_key, ttl_seconds=30):
+            state = self._read()
+            state.keeps[str(version.uri)] = version
+            if len(state.keeps) > self.max_compaction_keeps:
+                oldest = min(state.keeps.values(), key=lambda item: (item.judged_at, str(item.uri)))
+                state.keeps.pop(str(oldest.uri), None)
+            self._write(state)
 
     def record_failure(
         self,
@@ -132,7 +208,8 @@ class MemoryLifecycleScanStore:
     ) -> MemoryLifecycleScanFailure:
         current_time = _timestamp(failed_at)
         with self.path_lock.acquire(self.lock_key, ttl_seconds=30):
-            after, failures = self._read()
+            state = self._read()
+            failures = state.failures
             previous = failures.get(str(uri))
             attempts = 1 if previous is None else previous.attempts + 1
             delay = self.backoff.delay(attempts)
@@ -148,10 +225,10 @@ class MemoryLifecycleScanStore:
             if len(failures) > self.max_failures:
                 oldest = min(failures.values(), key=lambda item: (item.retry_at, str(item.uri)))
                 failures.pop(str(oldest.uri), None)
-            self._write(after, failures)
+            self._write(state)
             return failure
 
-    def _read(self) -> tuple[str | None, dict[str, MemoryLifecycleScanFailure]]:
+    def _read(self) -> _ScanState:
         try:
             encoded = read_regular_bytes(
                 self.path,
@@ -159,12 +236,16 @@ class MemoryLifecycleScanStore:
                 max_bytes=self.max_file_bytes,
             )
         except FileNotFoundError:
-            return None, {}
+            return _ScanState(None, {}, {})
         try:
             raw = json.loads(encoded)
-            if not isinstance(raw, Mapping) or set(raw) != {"schema", "after_uri", "failures"}:
+            if isinstance(raw, Mapping) and raw.get("schema") == _STALE_SCHEMA:
+                raise MemoryLifecycleScanStateError(
+                    f"这是旧格式扫描账（{_STALE_SCHEMA}），删除 {self.path} 后重启即可（只存游标与退避）"
+                )
+            if not isinstance(raw, Mapping) or set(raw) != {"schema", "after_uri", "failures", "compaction_keeps"}:
                 raise ValueError("invalid fields")
-            if raw["schema"] != "memory_lifecycle_scan_v1":
+            if raw["schema"] != _SCHEMA:
                 raise ValueError("unsupported schema")
             after = raw["after_uri"]
             if after is not None:
@@ -192,34 +273,64 @@ class MemoryLifecycleScanStore:
                 if str(failure.uri) in failures:
                     raise ValueError("duplicate failure")
                 failures[str(failure.uri)] = failure
-            if encoded != self._encode(after, failures):
+            keep_values = raw["compaction_keeps"]
+            if not isinstance(keep_values, list) or len(keep_values) > self.max_compaction_keeps:
+                raise ValueError("invalid compaction keeps")
+            keeps: dict[str, MemoryCompactionKeep] = {}
+            for value in keep_values:
+                if not isinstance(value, Mapping) or set(value) != {
+                    "uri",
+                    "revision",
+                    "source_digest",
+                    "last_used_at",
+                    "judged_at",
+                }:
+                    raise ValueError("invalid compaction keep")
+                keep = MemoryCompactionKeep(
+                    uri=MemoryURI.parse(value["uri"]),
+                    revision=value["revision"],
+                    source_digest=value["source_digest"],
+                    last_used_at=None if value["last_used_at"] is None else _parse_timestamp(value["last_used_at"]),
+                    judged_at=_parse_timestamp(value["judged_at"]),
+                )
+                if str(keep.uri) in keeps:
+                    raise ValueError("duplicate compaction keep")
+                keeps[str(keep.uri)] = keep
+            state = _ScanState(after, failures, keeps)
+            if encoded != self._encode(state):
                 raise ValueError("non-canonical state")
-            return after, failures
+            return state
+        except MemoryLifecycleScanStateError:
+            raise
         except Exception as exc:
             raise MemoryLifecycleScanStateError("failed to read L2 lifecycle scan state") from exc
 
-    def _write(
-        self,
-        after: str | None,
-        failures: dict[str, MemoryLifecycleScanFailure],
-    ) -> None:
-        encoded = self._encode(after, failures)
+    def _write(self, state: _ScanState) -> None:
+        encoded = self._encode(state)
         if len(encoded) > self.max_file_bytes:
             raise MemoryLifecycleScanStateError("L2 lifecycle scan state exceeds its file bound")
         atomic_replace_bytes(self.path, encoded, artifact_root=self.root)
 
     @staticmethod
-    def _encode(after: str | None, failures: dict[str, MemoryLifecycleScanFailure]) -> bytes:
+    def _encode(state: _ScanState) -> bytes:
         return (
             canonical_json(
                 {
-                    "schema": "memory_lifecycle_scan_v1",
-                    "after_uri": after,
-                    "failures": [failures[key].to_dict() for key in sorted(failures)],
+                    "schema": _SCHEMA,
+                    "after_uri": state.after,
+                    "failures": [state.failures[key].to_dict() for key in sorted(state.failures)],
+                    "compaction_keeps": [state.keeps[key].to_dict() for key in sorted(state.keeps)],
                 }
             )
             + "\n"
         ).encode("utf-8")
+
+
+@dataclass
+class _ScanState:
+    after: str | None
+    failures: dict[str, MemoryLifecycleScanFailure]
+    keeps: dict[str, MemoryCompactionKeep]
 
 
 def _timestamp(value: datetime) -> datetime:
@@ -239,6 +350,7 @@ def _parse_timestamp(value: object) -> datetime:
 
 
 __all__ = [
+    "MemoryCompactionKeep",
     "MemoryLifecycleScanFailure",
     "MemoryLifecycleScanStateError",
     "MemoryLifecycleScanStore",

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import ipaddress
 from urllib.parse import urlsplit
+
+from habitus.foundation.network import is_loopback_host
 
 
 def local_request_violation(*, host_header: str | None, origin_header: str | None) -> str | None:
@@ -40,13 +41,7 @@ def _loopback_authority(value: str | None) -> bool:
 def _is_loopback(host: str | None) -> bool:
     if not isinstance(host, str) or not host:
         return False
-    normalized = host.strip("[]").casefold()
-    if normalized == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(normalized).is_loopback
-    except ValueError:
-        return False
+    return is_loopback_host(host.strip("[]"))
 
 
 __all__ = ["local_request_violation"]

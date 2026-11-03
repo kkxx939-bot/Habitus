@@ -3,8 +3,9 @@
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.conversation import (
     ConversationAddress,
     ConversationMessageJournal,
@@ -15,6 +16,7 @@ from habitus.memory.workflow import ConversationMemoryEnqueuer
 from habitus.memory.workflow.jobs import MemoryJobStatus, MemoryJobStore
 from habitus.pre.conversation import ConversationBatch
 from tests.helpers import closed_turn
+from tests.lock_store import ProcessLocalLockStore
 
 
 def build_chain(tmp_path: Path) -> tuple[ConversationMessageJournal, MemoryJobStore, ConversationMemoryEnqueuer]:
@@ -194,12 +196,9 @@ def test_oversized_logical_message_does_not_split_one_fact_across_memory_jobs(tm
     )
     flushed = enqueuer.flush(address)
     queued = (*appended.jobs, *flushed.jobs)
+    triggers = tuple(journal.read_segment(address, job.segment_id) for job in queued)
     editor_segments = tuple(
-        journal.read_editor_segment(
-            address,
-            journal.read_segment(address, job.segment_id),
-        )
-        for job in queued
+        None if trigger.ends_mid_turn else journal.read_editor_turn(address, trigger).whole for trigger in triggers
     )
     editor_inputs = tuple(
         "".join(str(message.content) for message in segment.messages if isinstance(message.content, str))
@@ -214,3 +213,158 @@ def test_oversized_logical_message_does_not_split_one_fact_across_memory_jobs(tm
         str(message.content) for message in editor_segments[-1].messages if message.role.value == "prompt"
     )
     assert final_prompt == source_prompt
+
+
+def test_flush_completes_staged_job_left_before_history_publish_before_sealing_a_new_boundary(
+    tmp_path: Path,
+) -> None:
+    journal, jobs, enqueuer = build_chain(tmp_path)
+    address = ConversationAddress("conversation-1", date(2026, 7, 1))
+    journal.append(
+        address,
+        ConversationBatch("conversation-1", (*closed_turn(start_sequence=0), *closed_turn(start_sequence=2))),
+    )
+    stage = jobs.stage
+    failures = [OSError("history write failed after STAGED")]
+
+    def stage_then_fail(address_value, segment):
+        staged = stage(address_value, segment)
+        if failures:
+            raise failures.pop()
+        return staged
+
+    jobs.stage = stage_then_fail  # type: ignore[method-assign]
+    with pytest.raises(OSError, match="after STAGED"):
+        enqueuer.seal_and_enqueue(address, through_sequence=1)
+    jobs.stage = stage  # type: ignore[method-assign]
+    assert journal.list_history(address) == ()
+
+    result = enqueuer.flush(address)
+
+    history = journal.list_history(address)
+    assert tuple(item.segment_id for item in history) == ("000000000000-000000000001", "000000000002-000000000003")
+    assert tuple((job.memory_sequence, job.segment_id, job.status) for job in result.jobs) == (
+        (1, history[0].segment_id, MemoryJobStatus.QUEUED),
+        (2, history[1].segment_id, MemoryJobStatus.QUEUED),
+    )
+    assert tuple(job.source_segment_digest for job in result.jobs) == tuple(item.digest for item in history)
+    assert jobs.claim(jobs.oldest_uncommitted(), "worker").job.memory_sequence == 1
+
+
+def test_after_turn_activates_staged_job_whose_history_was_published_before_its_activation(
+    tmp_path: Path,
+) -> None:
+    journal, jobs, enqueuer = build_chain(tmp_path)
+    address = ConversationAddress("conversation-1", date(2026, 7, 1))
+    journal.append(
+        address,
+        ConversationBatch("conversation-1", (*closed_turn(start_sequence=0), *closed_turn(start_sequence=2))),
+    )
+    activate = jobs.activate
+    failures = [OSError("process stopped before activation")]
+
+    def fail_once(job):
+        if failures:
+            raise failures.pop()
+        return activate(job)
+
+    jobs.activate = fail_once  # type: ignore[method-assign]
+    with pytest.raises(OSError, match="before activation"):
+        enqueuer.seal_and_enqueue(address, through_sequence=1)
+    jobs.activate = activate  # type: ignore[method-assign]
+    assert tuple(item.segment_id for item in journal.list_history(address)) == ("000000000000-000000000001",)
+
+    result = enqueuer.append_and_maybe_enqueue(
+        address,
+        ConversationBatch("conversation-1", closed_turn(start_sequence=4)),
+        after_turn=True,
+    )
+
+    assert tuple((job.memory_sequence, job.segment_id, job.status) for job in result.jobs) == (
+        (1, "000000000000-000000000001", MemoryJobStatus.QUEUED),
+        (2, "000000000002-000000000003", MemoryJobStatus.QUEUED),
+    )
+    assert jobs.claim(jobs.oldest_uncommitted(), "worker").job.memory_sequence == 1
+
+
+def _exhaust_a_staged_job(journal: ConversationMessageJournal, jobs: MemoryJobStore, enqueuer, address) -> None:  # type: ignore[no-untyped-def]
+    """封存 0–1 时 history 发布报磁盘满：Job 1 停在 STAGED；之后每次补完都失败，重试用尽成 FAILED（从没被认领过）。"""
+
+    publish = journal._publish_seal
+
+    def disk_full(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise OSError(28, "No space left on device")
+
+    journal._publish_seal = disk_full  # type: ignore[method-assign]
+    try:
+        with pytest.raises(OSError, match="No space"):
+            enqueuer.seal_and_enqueue(address, through_sequence=1)
+    finally:
+        journal._publish_seal = publish  # type: ignore[method-assign]
+    job = jobs.oldest_uncommitted()
+    while job.status is MemoryJobStatus.STAGED:
+        job = jobs.record_staged_failure(job, OSError(28, "No space left on device"))
+    assert job.status is MemoryJobStatus.FAILED and job.claim_generation == 0
+    assert journal.list_history(address) == ()
+
+
+def test_a_staged_job_that_exhausted_its_retries_is_not_bypassed_by_a_new_boundary(tmp_path: Path) -> None:
+    """重试用尽的 STAGED Job 等人工处置时，他又说了一轮：前台先按它原来的边界发布 history（Job 照旧 FAILED、不激活），
+    新边界接在后面；人工 ``retry_failed`` 之后补完读回那份 history、对上了就激活（U15）。"""
+
+    from habitus.memory.workflow.recovery import MemoryStagedJobRecovery
+
+    journal, jobs, enqueuer = build_chain(tmp_path)
+    address = ConversationAddress("conversation-1", date(2026, 7, 1))
+    journal.append(
+        address,
+        ConversationBatch("conversation-1", (*closed_turn(start_sequence=0), *closed_turn(start_sequence=2))),
+    )
+    _exhaust_a_staged_job(journal, jobs, enqueuer, address)
+
+    result = enqueuer.append_and_maybe_enqueue(
+        address, ConversationBatch("conversation-1", closed_turn(start_sequence=4)), after_turn=True
+    )
+
+    history = tuple(item.segment_id for item in journal.list_history(address))
+    assert history == ("000000000000-000000000001", "000000000002-000000000003")
+    assert tuple((job.memory_sequence, job.segment_id, job.status) for job in result.jobs) == (
+        (2, "000000000002-000000000003", MemoryJobStatus.QUEUED),
+    )
+    failed = jobs.oldest_uncommitted()
+    assert (failed.memory_sequence, failed.status) == (1, MemoryJobStatus.FAILED)
+
+    retried = jobs.retry_failed(failed)
+    assert retried.status is MemoryJobStatus.STAGED
+    recovered = MemoryStagedJobRecovery(journal, jobs).recover(retried)
+
+    assert recovered.status is MemoryJobStatus.QUEUED
+    assert recovered.source_segment_digest == journal.list_history(address)[0].digest
+    assert jobs.claim(jobs.oldest_uncommitted(), "worker").job.memory_sequence == 1
+
+
+def test_a_retried_staged_job_whose_history_is_behind_newer_segments_is_activated_by_the_foreground(
+    tmp_path: Path,
+) -> None:
+    """人工重试之后、Worker 补完之前前台又要封存：那份 STAGED Job 的 history 早已发布、后面还有新段，前台读回核对后激活。"""
+
+    journal, jobs, enqueuer = build_chain(tmp_path)
+    address = ConversationAddress("conversation-1", date(2026, 7, 1))
+    journal.append(
+        address,
+        ConversationBatch("conversation-1", (*closed_turn(start_sequence=0), *closed_turn(start_sequence=2))),
+    )
+    _exhaust_a_staged_job(journal, jobs, enqueuer, address)
+    enqueuer.append_and_maybe_enqueue(
+        address, ConversationBatch("conversation-1", closed_turn(start_sequence=4)), after_turn=True
+    )
+    jobs.retry_failed(jobs.oldest_uncommitted())
+
+    result = enqueuer.append_and_maybe_enqueue(
+        address, ConversationBatch("conversation-1", closed_turn(start_sequence=6)), after_turn=True
+    )
+
+    assert tuple((job.memory_sequence, job.segment_id, job.status) for job in result.jobs) == (
+        (1, "000000000000-000000000001", MemoryJobStatus.QUEUED),
+        (3, "000000000004-000000000005", MemoryJobStatus.QUEUED),
+    )

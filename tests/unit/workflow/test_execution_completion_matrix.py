@@ -10,11 +10,12 @@ from pathlib import Path
 import pytest
 
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.conversation import ConversationAddress
 from habitus.memory.editor import MemoryTransactionJournalState
 from habitus.memory.model import MemoryKind
-from habitus.memory.retrieval import MemoryRecallTarget
+from habitus.memory.recall import (
+    MemoryRecallTarget,
+)
 from habitus.memory.uri import MemoryURI
 from habitus.memory.workflow import MemoryChangeReceiptState, MemoryChangeSource, MemoryJobError, MemoryJobStatus
 from habitus.memory.workflow.completion import MemoryCommittedJobFinalizer, MemoryJobCompletion
@@ -25,6 +26,7 @@ from habitus.runtime import build_runtime
 from tests.helpers import BASE_TIME, closed_turn, document, segment, segment_summary
 from tests.integration.test_change_receipt_chain import editor_plan
 from tests.integration.test_memory_job_full_chain import dependencies, runtime_config
+from tests.lock_store import ProcessLocalLockStore
 
 
 def runtime(tmp_path: Path):
@@ -141,7 +143,7 @@ def test_product_builder_propagates_editor_failure_after_summary_branch_finishes
             summary_finished = True
             return segment_summary(current)
 
-        async def fail_plan(_current):
+        async def fail_plan(_current, *, turn_context=None):
             await asyncio.sleep(0)
             raise RuntimeError("editor failed")
 
@@ -333,7 +335,7 @@ def test_execution_receipt_audits_the_exact_editor_segment(tmp_path: Path) -> No
     address = ConversationAddress(lease.job.conversation_id, lease.job.started_on)
     conversations = value.components.workflow.runner.executor.conversations
     trigger = conversations.read_segment(address, lease.job.segment_id)
-    editor_segment = conversations.read_editor_segment(address, trigger)
+    editor_segment = None if trigger.ends_mid_turn else conversations.read_editor_turn(address, trigger).whole
 
     assert editor_segment is not None
     assert receipt.source.editor_segment_id == editor_segment.segment_id

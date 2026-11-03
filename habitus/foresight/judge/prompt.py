@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from habitus.conditions import WEEKDAY_NAMES
 from habitus.foresight.errors import ForesightError
 from habitus.foresight.judge.package import Candidate, Package
 from habitus.foundation.integrity import canonical_digest
@@ -109,7 +110,7 @@ def build_request(package: Package, candidates: Sequence[Candidate]) -> ChatRequ
 
     note = next((item.today_note for item in candidates if item.today_note), None)
     lines = [
-        f"此刻 {package.at:%Y-%m-%d %H:%M}（周{'一二三四五六日'[package.at.weekday()]}）"
+        f"此刻 {package.at:%Y-%m-%d %H:%M}（{WEEKDAY_NAMES[package.at.weekday()]}）"
         + (f"，今天：{note}" if note else "")
         + f"。候选 {len(candidates)} 个。",
         "",
@@ -122,7 +123,7 @@ def build_request(package: Package, candidates: Sequence[Candidate]) -> ChatRequ
         if item.history:
             lines += ["历史（最近几次）："]
             for row in item.history:
-                head = f"  {row.number}. {row.day:%m-%d}（周{'一二三四五六日'[row.day.weekday()]}{'，' + row.note if row.note else ''}）"
+                head = f"  {row.number}. {row.day:%m-%d}（{WEEKDAY_NAMES[row.day.weekday()]}{'，' + row.note if row.note else ''}）"
                 if row.antecedent:
                     lines += [f"{head} {row.antecedent} → {row.gap} {row.consequent}（{row.consequent_at:%H:%M}）"]
                 else:

@@ -13,13 +13,11 @@ class BehaviorDocumentLimitError(ValueError):
 class BehaviorDocumentConfig:
     max_markdown_body_chars: int = 24_000
     max_encoded_bytes: int = 512_000
-    max_relations_per_document: int = 512
 
     def __post_init__(self) -> None:
         for name, value in {
             "max_markdown_body_chars": self.max_markdown_body_chars,
             "max_encoded_bytes": self.max_encoded_bytes,
-            "max_relations_per_document": self.max_relations_per_document,
         }.items():
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
@@ -41,12 +39,6 @@ class BehaviorDocumentConfig:
             raise TypeError("encoded behavior semantic layer must be bytes")
         if len(payload) > self.max_encoded_bytes:
             raise BehaviorDocumentLimitError("behavior semantic layer exceeds its configured byte limit")
-
-    def validate_relations(self, *, links: int) -> None:
-        if isinstance(links, bool) or not isinstance(links, int) or links < 0:
-            raise ValueError("behavior document links count must be a non-negative integer")
-        if links > self.max_relations_per_document:
-            raise BehaviorDocumentLimitError("behavior document links exceeds its configured relation limit")
 
 
 __all__ = ["BehaviorDocumentConfig", "BehaviorDocumentLimitError"]

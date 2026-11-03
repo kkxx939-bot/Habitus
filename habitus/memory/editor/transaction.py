@@ -20,7 +20,6 @@ from habitus.memory.editor.identity import (
     MemoryNodeDisposition,
 )
 from habitus.memory.editor.link_plan import MemoryRelationPlan
-from habitus.memory.editor.lock_key import MemoryDocumentLockKeyspace
 from habitus.memory.editor.mutation.model import (
     MemoryMutationAction,
     MemoryMutationPlan,
@@ -34,7 +33,7 @@ from habitus.memory.editor.transaction_log import (
 )
 from habitus.memory.model import MemoryKind
 from habitus.memory.snapshot import MemorySnapshotBatch, MemorySnapshotReader
-from habitus.memory.tree import MemoryTree
+from habitus.memory.tree import MemoryDocumentLockKeyspace, MemoryTree
 from habitus.memory.uri import MemoryURI
 
 
@@ -444,9 +443,6 @@ class MemoryCommitTransaction:
             raise TypeError("journal must be a MemoryTransactionJournal")
         if journal.codec is not tree.document_codec:
             raise ValueError("journal and memory tree must share one document codec")
-        canonical_journal_root = (tree.root.parent / "workflow" / "transactions").resolve(strict=False)
-        if journal.root != canonical_journal_root:
-            raise ValueError("transaction journal must use the canonical sibling workflow/transactions root")
         try:
             journal.root.relative_to(tree.root)
         except ValueError:

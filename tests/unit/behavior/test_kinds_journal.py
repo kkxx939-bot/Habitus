@@ -11,7 +11,15 @@ from habitus.behavior.kinds.changes import AddClass, ChangeReason, ReviseClass, 
 from habitus.behavior.kinds.journal import VocabularyJournalError
 from habitus.behavior.kinds.reader import VocabularyReader
 from habitus.behavior.kinds.store import BehaviorKindStore, BehaviorKindStoreError
-from tests.unit.behavior.kinds_fixtures import EDIT, NOW, RESEARCH, edit_class, named_classes, research_class
+from tests.unit.behavior.kinds_fixtures import (
+    EDIT,
+    NOW,
+    RESEARCH,
+    catalog_in_sync,
+    edit_class,
+    named_classes,
+    research_class,
+)
 
 RUN = named_classes(("编辑", "调研", "跑步"))[2]
 
@@ -43,7 +51,7 @@ def test_truncation_keeps_the_vocabulary_and_everything_after_the_floor(tmp_path
     assert not store.truncate_before(2)  # 不比现在的快照新：不动
     # 截断之后照常追加
     store.append(VersionRecord(5, NOW, ChangeReason.NIGHTLY, (AddClass(RUN),)), expected_version=4)
-    assert store.read().version == 5 and store.catalog_in_sync()
+    assert store.read().version == 5 and catalog_in_sync(store)
 
 
 def test_a_crash_between_the_snapshot_and_the_shortened_log_reads_the_same(tmp_path: Path) -> None:

@@ -22,8 +22,11 @@
 账是流水（权重每晚从单元历史数，裁定 61）；开不开口看单元：单元历史、单元的提醒反馈、单元的设置。
 
 递送、回话、裁决都挂在它们那条预期所在的日子下，读一条预期的全部往来只开一个目录。
-一个坏文件不许让整层停：按日子读回时读不出来（解析不了、形状或版本不对）的那一份记下路径、跳过，调用方把条数带进观测
-（``take_unreadable``）；只想知道"自己这一次读到了哪些坏文件"的调用方传 ``unreadable=`` 自己的列表，不经共享的那一份。
+一个坏文件不许让整层停（读写的规矩在 ``runtime.foresight_files``，各 store 同一份）：读不出来（解析不了、形状或版本不对）的
+那一份记下路径、跳过，调用方把条数带进观测（``take_unreadable``）；只想知道"自己这一次读到了哪些坏文件"的调用方传
+``unreadable=`` 自己的列表，不经共享的那一份。点读同一个口径：索引、水位读不出来记下、当没有（水位没有就按逐天的结完标记认）；
+结算、事实、提醒反馈这些写一次的记录，盘上同名的一份读不出来时不重写、不抛——这一条当已经写过（结算文件在就算结过），
+后面的日子照常结。盘读到一半的 IO 错不是坏文件，照旧抛。
 
 "还要看的日子"（``open_days``）= 有预期、还没标结完的日子：结算、递送、提醒标记只读这些，账本再长每拍也只读最近一截；
 最远看到哪天由账本自己说（时窗跨多少天、过期待决等多久裁决），不写死回看天数。
@@ -31,7 +34,6 @@
 
 from __future__ import annotations
 
-import json
 import threading
 from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime, timedelta
@@ -39,6 +41,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from habitus.config.foresight import ForesightStoreConfig
 from habitus.foresight import ForesightError
 from habitus.foresight.ledger import (
     FACT_KINDS,
@@ -77,23 +80,23 @@ from habitus.foresight.ledger import (
     encode_unit_level,
     parse_account,
 )
-from habitus.foresight.ledger.compaction import AccountCompaction, decode_compaction, encode_compaction
+from habitus.foresight.ledger.compaction import (
+    STALE_COMPACTION_SCHEMA,
+    AccountCompaction,
+    decode_compaction,
+    encode_compaction,
+)
 from habitus.foundation.lifecycle import Watermark, mark
 from habitus.infrastructure.store.filesystem import (
     DurableDirectoryEntry,
     DurablePathIntegrityError,
     ImmutableArtifactConflictError,
     atomic_create_bytes,
-    atomic_replace_bytes,
     durable_unlink,
-    list_real_directory,
-    read_regular_bytes,
 )
+from habitus.runtime.foresight_files import JsonFiles
 
-_MAX_ENTRIES = 100_000
-_MAX_BYTES = 1_000_000
 _FINAL = "_final"
-_MAX_UNREADABLE = 1_000
 #: 一本账压实了的那一段（整份替换）。
 _COMPACTION = "compaction.json"
 #: 结完低水位、查过漏报的日子（26 号清单 6.11）。
@@ -101,19 +104,35 @@ _FINAL_WATERMARK = "final_through.json"
 _SCAN_WATERMARK = "omissions_scanned.json"
 
 
-def _fitting(payload: dict[str, Any], identity: str) -> bytes:
-    """编码并查大小：写入就查（以前只在读回时查，超限的文件照样落盘，按目录读时被当坏文件跳过、结算永远结不到它，
-    点读时直接抛、一条记录卡住整晚结算；26 号清单 2.5.4）。"""
+def _watermark(raw: dict[str, Any]) -> dict[str, Any]:
+    """水位文件的形状：``through`` 是日期。"""
 
-    encoded = _encoded(payload)
-    if len(encoded) > _MAX_BYTES:
-        raise ForesightError(f"ledger record {identity} exceeds {_MAX_BYTES} bytes ({len(encoded)}); not written")
-    return encoded
+    try:
+        date.fromisoformat(str(raw["through"]))
+    except (KeyError, ValueError) as exc:
+        raise ForesightError("ledger watermark is malformed") from exc
+    return raw
+
+
+def _index_day(raw: dict[str, Any]) -> date:
+    try:
+        return date.fromisoformat(str(raw["day"]))
+    except (KeyError, ValueError) as exc:
+        raise ForesightError("ledger index entry is corrupt") from exc
 
 
 class ForesightLedgerStore:
-    def __init__(self, root: str | Path) -> None:
-        self.root = Path(root).expanduser().resolve(strict=False)
+    def __init__(self, root: str | Path, *, limits: ForesightStoreConfig | None = None) -> None:
+        limits = limits if limits is not None else ForesightStoreConfig()
+        #: 写一次的记录写入就查大小（超限的不落盘：按目录读时会被当坏文件跳过、结算永远结不到它，26 号清单 2.5.4）。
+        self._files = JsonFiles(
+            root,
+            label="ledger",
+            max_bytes=limits.record_max_bytes,
+            max_entries=limits.directory_max_entries,
+            max_unreadable=limits.unreadable_max_paths,
+        )
+        self.root = self._files.root
         self._expectations = self.root / "expectations"
         self._deliveries = self.root / "deliveries"
         self._responses = self.root / "responses"
@@ -123,7 +142,6 @@ class ForesightLedgerStore:
         self._index = self.root / "index" / "expectations"
         self._accounts = self.root / "accounts"
         self._units = self.root / "units"
-        self._unreadable: list[str] = []
         #: 标过结完的日子（标记只增不撤，记住了就不用再看盘）。
         self._finals: set[date] = set()
         #: 夜批（结算在线程里跑）与白天那一拍共用这一个实例：这两份内存状态的改动加锁（2026-10-17 四方评审）。
@@ -134,40 +152,44 @@ class ForesightLedgerStore:
     def record_expectation(self, item: Expectation) -> bool:
         """同一身份全账本只写一次：索引先占位（身份 → 日子），另一天再来同一身份就是重复、不写。"""
 
-        known = self.day_of(item.expectation_id)
-        if known is not None and known != item.day:
+        placed, known = self._index_entry(item.expectation_id)
+        if placed and known != item.day:
+            # 另一天的同一身份是重复；索引坏了（记下坏文件）：这个身份占过位、不知道在哪一天，不另起一份
             return False
         payload = encode_expectation(item)
-        _fitting(payload, item.expectation_id)  # 超限的连索引都不占：否则留下一条指向不存在预期的索引
+        self._files.encode(payload, item.expectation_id)  # 超限的连索引都不占：否则留下一条指向不存在预期的索引
         # 先占索引再写预期：中间断了，重来时索引指着同一天、预期照写；反过来的顺序会让第二天按身份查不到、再建一份
         self._index_create(item.expectation_id, item.day)
-        return self._create(self._expectations, item.day, item.expectation_id, payload)
+        return self._create(self._expectations, item.day, item.expectation_id, payload, decode_expectation)
 
     def day_of(self, expectation_id: str) -> date | None:
-        """这个身份的预期在哪一天；没建过是 None。"""
+        """这个身份的预期在哪一天；没建过、索引读不出来（记下坏文件）是 None。"""
 
-        path = self._index / f"{expectation_id}.json"
-        if not path.is_file():
-            return None
-        raw = self._load(path)
-        try:
-            return date.fromisoformat(str(raw["day"]))
-        except (KeyError, ValueError) as exc:
-            raise ForesightError(f"ledger index entry {expectation_id} is corrupt") from exc
+        return self._files.read(self._index / f"{expectation_id}.json", _index_day)
 
     def has_expectation(self, expectation_id: str) -> bool:
         """这条预期真写下了：索引占了位、而且那一天的预期文件在（2026-10-17 四方评审：只看索引的话，"索引写了、预期文件还没写
-        就断了"的那条，之后每拍都被当成已有、``record_expectation`` 补写那一步永远走不到，这次机会就丢了）。"""
+        就断了"的那条，之后每拍都被当成已有、``record_expectation`` 补写那一步永远走不到，这次机会就丢了）。索引坏了的
+        算写过：不知道它在哪一天，不另起一份。"""
 
-        day = self.day_of(expectation_id)
-        return day is not None and (self._day_dir(self._expectations, day) / f"{expectation_id}.json").is_file()
+        placed, day = self._index_entry(expectation_id)
+        if not placed:
+            return False
+        return day is None or (self._day_dir(self._expectations, day) / f"{expectation_id}.json").is_file()
+
+    def _index_entry(self, expectation_id: str) -> tuple[bool, date | None]:
+        """（索引占没占位, 指的那一天）；占了位却读不出来（记下坏文件）是 ``(True, None)``。"""
+
+        path = self._index / f"{expectation_id}.json"
+        if not path.is_file():
+            return False, None
+        return True, self._files.read(path, _index_day)
 
     def expectations_on(self, day: date, *, unreadable: list[str] | None = None) -> tuple[Expectation, ...]:
         return tuple(self._records(self._expectations, day, decode_expectation, unreadable))
 
     def expectation(self, day: date, expectation_id: str) -> Expectation | None:
-        raw = self._read(self._expectations, day, expectation_id)
-        return None if raw is None else decode_expectation(raw)
+        return self._files.read(self._day_dir(self._expectations, day) / f"{expectation_id}.json", decode_expectation)
 
     def days_with_expectations(self, *, since: date | None = None) -> tuple[date, ...]:
         return tuple(day for day in self._days(self._expectations) if since is None or day >= since)
@@ -180,7 +202,8 @@ class ForesightLedgerStore:
         return tuple(day for day in self.days_with_expectations(since=since) if not self.is_final(day))
 
     def final_through(self) -> date | None:
-        """结完低水位：这一天及以前有预期的日子全部结完了（没有为 None）。"""
+        """结完低水位：这一天及以前有预期的日子全部结完了（没有为 None；读不出来也是 None，记下坏文件——逐天的结完标记照样认，
+        下一次推进水位时整份重写）。"""
 
         raw = self._read_watermark(_FINAL_WATERMARK)
         return None if raw is None else date.fromisoformat(str(raw["through"]))
@@ -200,7 +223,7 @@ class ForesightLedgerStore:
         """这一天结完了：全部结算过、过期待决的裁决再也不会变。之后结算、递送、提醒标记都不再读它。"""
 
         payload: dict[str, Any] = {"record": "final", "day": day.isoformat(), "at": at.isoformat()}
-        created = self._create(self._settlements, day, _FINAL, payload)
+        created = self._create(self._settlements, day, _FINAL, payload, _final_marker)
         with self._lock:
             self._finals.add(day)
         self._advance_final_through()
@@ -236,14 +259,23 @@ class ForesightLedgerStore:
         return False
 
     def unsettled_expectations(self, day: date) -> tuple[Expectation, ...]:
+        """这一天还没结算的预期。结算文件在就算结过——读不出来的那一份也是（记下坏文件）：当成没结、再结一遍，结出的内容
+        （结算时刻不同）必然和盘上的不一样，写不进去；坏文件那一条不重结，后面的日子照常结。"""
+
+        directory = self._day_dir(self._settlements, day)
         settled = {item.expectation_id for item in self.settlements_on(day)}
+        settled |= {name.removesuffix(".json") for name in self._files.names(directory)}
         return tuple(item for item in self.expectations_on(day) if item.expectation_id not in settled)
 
     # ── 递送与回话 ──────────────────────────────────────────────────────────
 
     def record_delivery(self, day: date, item: Delivery) -> bool:
         return self._create(
-            self._deliveries, day, _stamped(item.expectation_id, item.decided_at), encode_delivery(item)
+            self._deliveries,
+            day,
+            _stamped(item.expectation_id, item.decided_at),
+            encode_delivery(item),
+            decode_delivery,
         )
 
     def deliveries_on(self, day: date, *, unreadable: list[str] | None = None) -> tuple[Delivery, ...]:
@@ -261,7 +293,7 @@ class ForesightLedgerStore:
         identity = (
             f"{_stamped(item.expectation_id, item.responded_at)}--{sha256(item.turn.encode('utf-8')).hexdigest()[:12]}"
         )
-        return self._create(self._responses, day, identity, encode_response(item))
+        return self._create(self._responses, day, identity, encode_response(item), decode_response)
 
     def responses_on(self, day: date) -> tuple[Response, ...]:
         return tuple(self._records(self._responses, day, decode_response))
@@ -269,13 +301,17 @@ class ForesightLedgerStore:
     # ── 结算与裁决 ──────────────────────────────────────────────────────────
 
     def record_settlement(self, item: Settlement) -> bool:
-        return self._create(self._settlements, item.day, item.expectation_id, encode_settlement(item))
+        return self._create(
+            self._settlements, item.day, item.expectation_id, encode_settlement(item), decode_settlement
+        )
 
     def settlements_on(self, day: date) -> tuple[Settlement, ...]:
         return tuple(self._records(self._settlements, day, decode_settlement))
 
     def record_ruling(self, day: date, item: Ruling) -> bool:
-        return self._create(self._rulings, day, _stamped(item.expectation_id, item.ruled_at), encode_ruling(item))
+        return self._create(
+            self._rulings, day, _stamped(item.expectation_id, item.ruled_at), encode_ruling(item), decode_ruling
+        )
 
     def rulings_on(self, day: date) -> tuple[Ruling, ...]:
         return tuple(self._records(self._rulings, day, decode_ruling))
@@ -289,7 +325,7 @@ class ForesightLedgerStore:
         identity = sha256(item.occurrence_uri.encode("utf-8")).hexdigest()[:24]
         if (self._day_dir(self._omissions, item.day) / f"{identity}.json").is_file():
             return False
-        return self._create(self._omissions, item.day, identity, encode_omission(item))
+        return self._create(self._omissions, item.day, identity, encode_omission(item), decode_omission)
 
     def omissions_on(self, day: date) -> tuple[Omission, ...]:
         return tuple(self._records(self._omissions, day, decode_omission))
@@ -297,7 +333,7 @@ class ForesightLedgerStore:
     def scan_watermark(self, *, start: date) -> Watermark[date]:
         """查过漏报的日子（26 号清单 6.11）：连续前缀 + 零散查过的；没有时从 ``start`` 的前一天起。"""
 
-        raw = self._read_watermark(_SCAN_WATERMARK)
+        raw = self._read_watermark(_SCAN_WATERMARK, _scan_watermark)
         if raw is None:
             return Watermark(through=start - timedelta(days=1))
         return Watermark(
@@ -345,15 +381,13 @@ class ForesightLedgerStore:
     def trim_unit_levels(self, kind_token: str, *, before: datetime) -> int:
         """单元的档只留 ``before`` 之后的，外加它之前最近的一条；返回删了几个。"""
 
-        directory = self._unit_dir(kind_token) / "levels"
-        dated: list[tuple[datetime, Path]] = []
-        for entry in self._entries(directory):
-            if entry.is_file() and entry.name.endswith(".json"):
-                path = directory / entry.name
-                try:
-                    dated.append((decode_unit_level(self._load(path)).at, path))
-                except ForesightError:
-                    continue
+        return self._trim_dated(self._unit_dir(kind_token) / "levels", lambda raw: decode_unit_level(raw).at, before)
+
+    def _trim_dated(self, directory: Path, moment: Callable[[dict[str, Any]], datetime], before: datetime) -> int:
+        """档的变化只留 ``before`` 之后的，外加 ``before`` 之前最近的那一条（滞回与诊断要知道那时在哪一档）；读不出来的
+        档文件记下坏文件、不删（不知道它是哪一刻的）。返回删了几个。"""
+
+        dated = [(at, directory / f"{stem}.json") for stem, at in self._files.decoded(directory, moment)]
         older = sorted((item for item in dated if item[0] < before), key=lambda item: item[0])
         return sum(1 for _at, path in older[:-1] if durable_unlink(path, artifact_root=self.root))
 
@@ -362,7 +396,7 @@ class ForesightLedgerStore:
 
         found: set[str] = set()
         for entry in self._entries(self._units):
-            for record in self._decoded(self._units / entry.name / "levels", decode_unit_level, None):
+            for record in self._decoded(self._units / entry.name / "levels", decode_unit_level):
                 found.add(record.kind_token)
                 break
         return tuple(sorted(found))
@@ -384,27 +418,27 @@ class ForesightLedgerStore:
             {"through": watermark.through.isoformat(), "above": sorted(day.isoformat() for day in watermark.above)},
         )
 
-    def _read_watermark(self, name: str) -> dict[str, Any] | None:
-        path = self.root / name
-        return self._load(path) if path.is_file() else None
+    def _read_watermark(
+        self, name: str, decode: Callable[[dict[str, Any]], dict[str, Any]] = _watermark
+    ) -> dict[str, Any] | None:
+        """水位（读不出来的记下坏文件、当没有）。"""
+
+        return self._files.read(self.root / name, decode)
 
     def _write_watermark(self, name: str, payload: dict[str, Any]) -> None:
-        try:
-            atomic_replace_bytes(self.root / name, _encoded(payload), artifact_root=self.root)
-        except DurablePathIntegrityError as exc:
-            raise ForesightError(f"ledger watermark {name} is not writable: {exc}") from exc
+        self._files.replace(self.root / name, payload)
 
     # ── 按账 ────────────────────────────────────────────────────────────────
 
     def append_fact(self, item: AccountFact) -> bool:
         identity = f"{item.expectation_id}--k{FACT_KINDS.index(item.kind):02d}--{_stamp(item.precedence)}"
-        return self._account_create(item.account, "facts", identity, encode_fact(item))
+        return self._account_create(item.account, "facts", identity, encode_fact(item), decode_fact)
 
     def facts_of(self, account: str) -> tuple[AccountFact, ...]:
         """这本账压实以外的事实；压实那一段里残留的文件（写完累计值、删文件之前崩溃）一律忽略。"""
 
         base = self.compaction_of(account)
-        found = self._account_records(account, "facts", decode_fact)
+        found = self._decoded(self._account_dir(account) / "facts", decode_fact)
         return tuple(fact for fact in found if base is None or not base.covers(fact.at, fact.expectation_id))
 
     # ── 压实（26 号清单 4.8；策略在 ``foresight.compaction``，这里只管字节）──────────────────
@@ -413,7 +447,13 @@ class ForesightLedgerStore:
         path = self._account_dir(account) / _COMPACTION
         if not path.is_file():
             return None
-        found = decode_compaction(self._load(path))
+        raw = self._files.load(path)
+        if raw.get("schema_version") == STALE_COMPACTION_SCHEMA:
+            raise ForesightError(
+                f"这是旧格式的压实摘要（{STALE_COMPACTION_SCHEMA}，只存间隔个数与最长的、算不出久别要的典型间隔），新版本不迁移；"
+                f"删除 {path} 后重启即可。会丢掉的只有这本账压实那一段的摘要（自然命中的偏差、机会间隔），窗口内的事实不受影响"
+            )
+        found = decode_compaction(raw)
         if found.account != account:
             raise ForesightError("account compaction does not match its account")
         return found
@@ -424,13 +464,8 @@ class ForesightLedgerStore:
         directory = self._account_dir(item.account)
         meta = directory / "account.json"
         if not meta.is_file():
-            self._write(meta, {"record": "account", "account": item.account})
-        try:
-            atomic_replace_bytes(
-                directory / _COMPACTION, _fitting(encode_compaction(item), _COMPACTION), artifact_root=self.root
-            )
-        except DurablePathIntegrityError as exc:
-            raise ForesightError(f"ledger path is not writable: {exc}") from exc
+            self._write(meta, {"record": "account", "account": item.account}, parse_account_text)
+        self._files.replace(directory / _COMPACTION, encode_compaction(item))
 
     def discard_compacted(self, account: str) -> int:
         """删掉压实那一段盖住的事实文件（同一条预期后写的改判一起删）；返回删了几个。没有压实就什么也不删。"""
@@ -440,67 +475,54 @@ class ForesightLedgerStore:
             return 0
         directory = self._account_dir(account) / "facts"
         removed = 0
-        for entry in self._entries(directory):
-            if not entry.is_file() or not entry.name.endswith(".json"):
-                continue
-            path = directory / entry.name
-            try:
-                fact = decode_fact(self._load(path))
-            except ForesightError:
-                continue
-            if base.covers(fact.at, fact.expectation_id) and durable_unlink(path, artifact_root=self.root):
+        for stem, fact in self._files.decoded(directory, decode_fact):
+            if base.covers(fact.at, fact.expectation_id) and durable_unlink(
+                directory / f"{stem}.json", artifact_root=self.root
+            ):
                 removed += 1
         return removed
 
     def trim_levels(self, account: str, *, before: datetime) -> int:
-        """级的变化只留 ``before`` 之后的，外加 ``before`` 之前最近的那一条（滞回与诊断要知道那时在哪一级）；返回删了几个。"""
+        """账的级只留 ``before`` 之后的，外加它之前最近的一条；返回删了几个。"""
 
-        directory = self._account_dir(account) / "levels"
-        dated: list[tuple[datetime, Path]] = []
-        for entry in self._entries(directory):
-            if entry.is_file() and entry.name.endswith(".json"):
-                path = directory / entry.name
-                try:
-                    dated.append((decode_level(self._load(path)).at, path))
-                except ForesightError:
-                    continue
-        older = sorted((item for item in dated if item[0] < before), key=lambda item: item[0])
-        return sum(1 for _at, path in older[:-1] if durable_unlink(path, artifact_root=self.root))
+        return self._trim_dated(self._account_dir(account) / "levels", lambda raw: decode_level(raw).at, before)
 
     def record_level(self, item: AccountLevel) -> bool:
-        return self._account_create(item.account, "levels", _stamp(item.at), encode_level(item))
+        return self._account_create(item.account, "levels", _stamp(item.at), encode_level(item), decode_level)
 
     def level_of(self, account: str) -> AccountLevel | None:
         """最近一条级的变化（没有就是从没变过：影子）。"""
 
-        found = list(self._account_records(account, "levels", decode_level))
+        found = list(self._decoded(self._account_dir(account) / "levels", decode_level))
         return max(found, key=lambda item: item.at) if found else None
 
     def levels_of(self, account: str) -> tuple[AccountLevel, ...]:
-        return tuple(sorted(self._account_records(account, "levels", decode_level), key=lambda i: i.at))
+        return tuple(sorted(self._decoded(self._account_dir(account) / "levels", decode_level), key=lambda i: i.at))
 
     # ── 单元的档、设置、提醒反馈（按行为，与账的级分开；裁定 61） ──────────────────────────
 
     def record_unit_level(self, item: UnitLevel) -> bool:
         return self._write(
-            self._unit_dir(item.kind_token) / "levels" / f"{_stamp(item.at)}.json", encode_unit_level(item)
+            self._unit_dir(item.kind_token) / "levels" / f"{_stamp(item.at)}.json",
+            encode_unit_level(item),
+            decode_unit_level,
         )
 
     def record_setting(self, item: UnitSetting) -> bool:
         return self._write(
-            self._unit_dir(item.kind_token) / "settings" / f"{_stamp(item.at)}.json", encode_setting(item)
+            self._unit_dir(item.kind_token) / "settings" / f"{_stamp(item.at)}.json",
+            encode_setting(item),
+            decode_setting,
         )
 
     def setting_of(self, kind_token: str) -> UnitSetting | None:
         """这个行为最新的一条设置（没有就是没设过）。"""
 
-        found = list(self._decoded(self._unit_dir(kind_token) / "settings", decode_setting, None))
+        found = list(self._decoded(self._unit_dir(kind_token) / "settings", decode_setting))
         return max(found, key=lambda item: item.at) if found else None
 
     def settings_of(self, kind_token: str) -> tuple[UnitSetting, ...]:
-        return tuple(
-            sorted(self._decoded(self._unit_dir(kind_token) / "settings", decode_setting, None), key=lambda i: i.at)
-        )
+        return tuple(sorted(self._decoded(self._unit_dir(kind_token) / "settings", decode_setting), key=lambda i: i.at))
 
     def record_feedback(self, item: UnitFeedback) -> bool:
         """说出口的那条预期结算时写的一笔提醒反馈（同一条预期一笔；重写幂等）。"""
@@ -508,12 +530,13 @@ class ForesightLedgerStore:
         return self._write(
             self._unit_dir(item.kind_token) / "feedback" / f"{item.expectation_id}--{_stamp(item.at)}.json",
             encode_feedback(item),
+            decode_feedback,
         )
 
     def feedback_of(self, kind_token: str) -> tuple[UnitFeedback, ...]:
         """这个行为的全部提醒反馈（按说出口的那一刻排）。"""
 
-        found = self._decoded(self._unit_dir(kind_token) / "feedback", decode_feedback, None)
+        found = self._decoded(self._unit_dir(kind_token) / "feedback", decode_feedback)
         return tuple(sorted(found, key=lambda item: (item.at, item.expectation_id)))
 
     def trim_feedback(self, kind_token: str, *, keep: int) -> int:
@@ -521,15 +544,7 @@ class ForesightLedgerStore:
         留着：结算的"写过就不再写"守卫要看它）。返回删了几条（裁定 66）。"""
 
         directory = self._unit_dir(kind_token) / "feedback"
-        found: list[tuple[UnitFeedback, Path]] = []
-        for entry in self._entries(directory):
-            if not entry.is_file() or not entry.name.endswith(".json") or entry.name.startswith((".", "_")):
-                continue
-            path = directory / entry.name
-            try:
-                found.append((decode_feedback(self._load(path)), path))
-            except ForesightError:
-                continue
+        found = [(item, directory / f"{stem}.json") for stem, item in self._files.decoded(directory, decode_feedback)]
         found.sort(key=lambda pair: (pair[0].at, pair[0].expectation_id))
         older = found[: max(0, len(found) - keep)]
         return sum(
@@ -553,7 +568,7 @@ class ForesightLedgerStore:
     def unit_level_of(self, kind_token: str) -> UnitLevel | None:
         """这个行为单元最近一条档的变化（没有就是从没变过：影子）。"""
 
-        found = list(self._decoded(self._unit_dir(kind_token) / "levels", decode_unit_level, None))
+        found = list(self._decoded(self._unit_dir(kind_token) / "levels", decode_unit_level))
         return max(found, key=lambda item: item.at) if found else None
 
     def _unit_dir(self, kind_token: str) -> Path:
@@ -566,76 +581,54 @@ class ForesightLedgerStore:
         for entry in self._entries(self._accounts):
             if not entry.is_dir():
                 continue
-            path = self._accounts / entry.name / "account.json"
-            if not path.is_file():
-                continue
-            try:
-                found.append(parse_account_text(self._load(path)))
-            except ForesightError:
-                self._note_unreadable(path, None)
+            account = self._files.read(self._accounts / entry.name / "account.json", parse_account_text)
+            if account is not None:
+                found.append(account)
         return tuple(sorted(found))
 
     def _account_dir(self, account: str) -> Path:
         return self._accounts / sha256(account.encode("utf-8")).hexdigest()[:24]
 
-    def _account_create(self, account: str, kind: str, identity: str, payload: dict[str, Any]) -> bool:
+    def _account_create(
+        self, account: str, kind: str, identity: str, payload: dict[str, Any], decode: Callable[[dict[str, Any]], Any]
+    ) -> bool:
         directory = self._account_dir(account)
         meta = directory / "account.json"
         if not meta.is_file():
-            self._write(meta, {"record": "account", "account": account})
-        return self._write(directory / kind / f"{identity}.json", payload)
-
-    def _account_records[T](self, account: str, kind: str, decode: Callable[[dict[str, Any]], T]) -> Iterable[T]:
-        return self._decoded(self._account_dir(account) / kind, decode, None)
+            self._write(meta, {"record": "account", "account": account}, parse_account_text)
+        return self._write(directory / kind / f"{identity}.json", payload, decode)
 
     # ── 坏文件 ──────────────────────────────────────────────────────────────
 
     def take_unreadable(self) -> tuple[str, ...]:
-        """上次 ``take`` 以来按日子读回时跳过的坏文件（路径），取走即清。"""
+        """上次 ``take`` 以来读回时跳过的坏文件（路径），取走即清。"""
 
-        with self._lock:
-            found = tuple(self._unreadable)
-            self._unreadable.clear()
-        return found
-
-    def _note_unreadable(self, path: Path, sink: list[str] | None) -> None:
-        if sink is not None:
-            if str(path) not in sink and len(sink) < _MAX_UNREADABLE:
-                sink.append(str(path))
-            return
-        with self._lock:
-            if str(path) not in self._unreadable and len(self._unreadable) < _MAX_UNREADABLE:
-                self._unreadable.append(str(path))
+        return self._files.take_unreadable()
 
     # ── 目录与字节 ──────────────────────────────────────────────────────────
 
     def _index_create(self, expectation_id: str, day: date) -> None:
         payload: dict[str, Any] = {"record": "index", "expectation_id": expectation_id, "day": day.isoformat()}
         try:
-            atomic_create_bytes(self._index / f"{expectation_id}.json", _encoded(payload), artifact_root=self.root)
+            atomic_create_bytes(
+                self._index / f"{expectation_id}.json",
+                self._files.encode(payload, expectation_id),
+                artifact_root=self.root,
+            )
         except ImmutableArtifactConflictError as exc:
             raise ForesightError(f"ledger index entry {expectation_id} already points at another day") from exc
         except DurablePathIntegrityError as exc:
             raise ForesightError(f"ledger index is not writable: {exc}") from exc
 
-    def _create(self, root: Path, day: date, identity: str, payload: dict[str, Any]) -> bool:
-        return self._write(self._day_dir(root, day) / f"{identity}.json", payload)
+    def _create(
+        self, root: Path, day: date, identity: str, payload: dict[str, Any], decode: Callable[[dict[str, Any]], Any]
+    ) -> bool:
+        return self._write(self._day_dir(root, day) / f"{identity}.json", payload, decode)
 
-    def _write(self, path: Path, payload: dict[str, Any]) -> bool:
-        identity = path.stem
-        encoded = _fitting(payload, identity)
-        try:
-            return atomic_create_bytes(path, encoded, artifact_root=self.root)
-        except ImmutableArtifactConflictError as exc:
-            raise ForesightError(f"ledger record {identity} already exists with different content") from exc
-        except DurablePathIntegrityError as exc:
-            raise ForesightError(f"ledger path is not writable: {exc}") from exc
+    def _write(self, path: Path, payload: dict[str, Any], decode: Callable[[dict[str, Any]], Any]) -> bool:
+        """写一次不改（``JsonFiles.create``）：盘上同名的一份读不出来是坏文件，记下、不重写、不抛。"""
 
-    def _read(self, root: Path, day: date, identity: str) -> dict[str, Any] | None:
-        path = self._day_dir(root, day) / f"{identity}.json"
-        if not path.is_file():
-            return None
-        return self._load(path)
+        return self._files.create(path, payload, decode)
 
     def _records[T](
         self, root: Path, day: date, decode: Callable[[dict[str, Any]], T], sink: list[str] | None = None
@@ -643,28 +636,11 @@ class ForesightLedgerStore:
         return self._decoded(self._day_dir(root, day), decode, sink)
 
     def _decoded[T](
-        self, directory: Path, decode: Callable[[dict[str, Any]], T], sink: list[str] | None
+        self, directory: Path, decode: Callable[[dict[str, Any]], T], sink: list[str] | None = None
     ) -> Iterable[T]:
-        """一个目录里的记录逐条解码；读不出来、形状或版本不对的（解码在 try 里）记下路径、跳过。"""
+        """一个目录里的记录逐条解码；读不出来、形状或版本不对的记下路径、跳过。"""
 
-        for entry in sorted(self._entries(directory), key=lambda item: item.name):
-            if not entry.is_file() or not entry.name.endswith(".json") or entry.name.startswith((".", "_")):
-                continue
-            path = directory / entry.name
-            try:
-                yield decode(self._load(path))
-            except ForesightError:
-                self._note_unreadable(path, sink)
-
-    def _load(self, path: Path) -> dict[str, Any]:
-        try:
-            encoded = read_regular_bytes(path, artifact_root=self.root, max_bytes=_MAX_BYTES)
-            raw = json.loads(encoded)
-        except (DurablePathIntegrityError, ValueError) as exc:
-            raise ForesightError(f"ledger record {path.name} cannot be read: {exc}") from exc
-        if not isinstance(raw, dict):
-            raise ForesightError(f"ledger record {path.name} is not an object")
-        return raw
+        return (item for _stem, item in self._files.decoded(directory, decode, sink))
 
     def _days(self, root: Path) -> tuple[date, ...]:
         days: list[date] = []
@@ -680,12 +656,7 @@ class ForesightLedgerStore:
         return tuple(sorted(days))
 
     def _entries(self, directory: Path) -> tuple[DurableDirectoryEntry, ...]:
-        if not directory.is_dir():
-            return ()
-        try:
-            return tuple(list_real_directory(directory, artifact_root=self.root, max_entries=_MAX_ENTRIES))
-        except DurablePathIntegrityError as exc:
-            raise ForesightError(f"ledger directory is invalid: {exc}") from exc
+        return self._files.entries(directory)
 
     @staticmethod
     def _day_dir(root: Path, day: date) -> Path:
@@ -696,8 +667,25 @@ def _next_day(day: date) -> date:
     return day + timedelta(days=1)
 
 
-def _encoded(payload: dict[str, Any]) -> bytes:
-    return (json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+def _scan_watermark(raw: dict[str, Any]) -> dict[str, Any]:
+    """查过漏报的水位：``through`` 加零散查过的 ``above``。"""
+
+    _watermark(raw)
+    above = raw.get("above")
+    try:
+        if not isinstance(above, list):
+            raise ValueError("above must be a list")
+        for day in above:
+            date.fromisoformat(str(day))
+    except ValueError as exc:
+        raise ForesightError("ledger scan watermark is malformed") from exc
+    return raw
+
+
+def _final_marker(raw: dict[str, Any]) -> dict[str, Any]:
+    if raw.get("record") != "final":
+        raise ForesightError("ledger final marker is malformed")
+    return raw
 
 
 def _stamp(at: datetime) -> str:

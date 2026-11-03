@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.editor.transaction import MemoryCommitTransaction
 from habitus.memory.editor.transaction_log import (
     MemoryTransactionJournal,
@@ -30,6 +29,7 @@ from habitus.memory.workflow.receipt import (
 )
 from tests.helpers import BASE_TIME, codec, document
 from tests.integration.test_change_receipt_chain import editor_plan, source, update_editor_plan
+from tests.lock_store import ProcessLocalLockStore
 
 
 def committed_triplet(

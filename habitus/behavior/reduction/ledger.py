@@ -1,10 +1,9 @@
 """归约消费账本：哪些判断已经被物化成了哪个树节点。
 
-一物三用：
-1. **幂等重放**——账本条目按链身份 add-only 落盘（字节相同幂等成功），崩溃重试不重复归约；
+一物两用：
+1. **幂等重放**——账本条目按节点身份（``chain_digest``）add-only 落盘（字节相同幂等成功），崩溃重试不重复归约；
 2. **释放门槛**——判断存储的生命周期（``TODO(BHV-LIFECYCLE-001)``，已改定为单门槛）以"已被归约
-   消费"为其中一半依据；
-3. **链接解析**——晚封口的链引用早已落盘的目标时，从这里把判断身份换成树 URI。
+   消费"为其中一半依据。
 
 账本只存关联不存语义（同"结算账本"纪律）；条目内容与 staged 检查点逐字节一致，重放路径上
 没有任何重新计算。
@@ -42,7 +41,7 @@ _KINDS = {"occurrence", "gap"}
 
 @dataclass(frozen=True)
 class BehaviorReductionEntry:
-    """一条链（或一段空白）的消费记录。"""
+    """一个树节点（occurrence 或一段空白）的消费记录。"""
 
     chain_digest: str
     kind: str
@@ -90,7 +89,7 @@ class BehaviorReductionEntry:
 
 
 class BehaviorReductionLedger:
-    """按链身份 add-only 的消费账本。"""
+    """按节点身份 add-only 的消费账本。"""
 
     def __init__(self, root: str | Path) -> None:
         resolved = Path(root).expanduser().absolute()
@@ -136,8 +135,8 @@ class BehaviorReductionLedger:
     def expire(self, before: datetime) -> int:
         """删掉 ``staged_at`` 早于 ``before`` 的消费记录。
 
-        账本三个用途都只在封口窗口附近有效：幂等重放看当轮检查点；释放门槛在判断被 discard 后
-        自然成立；链接解析只指向回看窗口内的目标。窗口之外的条目只是堆积。
+        账本两个用途都只在封口窗口附近有效：幂等重放看当轮检查点；释放门槛在判断被 discard 后
+        自然成立。窗口之外的条目只是堆积。
         """
 
         if not isinstance(before, datetime) or before.utcoffset() is None:

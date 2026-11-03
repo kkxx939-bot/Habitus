@@ -14,7 +14,7 @@ TODO(BHV-SESSION-LANE-001)：方案里已定、这一轮没做的（裁定 35、
 """
 
 from habitus.behavior.fusion.lanes.session.config import SessionLaneConfig
-from habitus.behavior.fusion.lanes.session.lane import SessionLane, TurnDisposition, TurnOutcome
+from habitus.behavior.fusion.lanes.session.lane import SessionLane, TurnDisposition, TurnHandler, TurnOutcome
 from habitus.behavior.fusion.lanes.session.material import render_turn, split_turns
 from habitus.behavior.fusion.lanes.session.model import SessionMessage, SessionMessageRole, SessionTurn
 from habitus.behavior.fusion.lanes.session.prompt import (
@@ -54,6 +54,7 @@ __all__ = [
     "SessionTurnRecorder",
     "TurnDescription",
     "TurnDisposition",
+    "TurnHandler",
     "TurnOutcome",
     "assemble_description",
     "redact",

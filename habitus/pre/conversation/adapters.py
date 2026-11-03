@@ -10,6 +10,9 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from habitus.foundation.integrity import canonical_digest
+from habitus.foundation.redaction import redact_secrets
+from habitus.foundation.timestamps import TimestampError, TimestampZoneError, utc_timestamp
+from habitus.pre.conversation.media import describe_media_only
 from habitus.pre.conversation.messages import (
     ConversationBatch,
     ConversationMessage,
@@ -141,7 +144,6 @@ class _Builder:
         role: ConversationMessageRole,
         content: object,
         *,
-        source_index: str,
         tool_call_id: str | None = None,
         tool_name: str | None = None,
         tool_status: ConversationToolResultStatus | None = None,
@@ -154,18 +156,22 @@ class _Builder:
                 "protocol": self.protocol,
                 "conversation_id": self.context.conversation_id,
                 "sequence": sequence,
-                "source_index": source_index,
                 "role": role.value,
-                "content": content,
+                "content": _identity_content(role, content),
                 "tool_call_id": tool_call_id,
                 "tool_name": tool_name,
             }
         )[:32]
+        # 先后以转写顺序为准：宿主按段或按记录各给时刻（并行工具的开始 / 结束交错、并行结果的记录差几毫秒），
+        # 早于上一条的夹到上一条，不按时刻重排。
+        at = self.context.occurred_at if occurred_at is None else occurred_at
+        if self.messages and at < self.messages[-1].occurred_at:
+            at = self.messages[-1].occurred_at
         message = ConversationMessage(
             message_id=f"{self.protocol}-{identity}",
             sequence=sequence,
             role=role,
-            occurred_at=self.context.occurred_at if occurred_at is None else occurred_at,
+            occurred_at=at,
             content=content,
             tool_call_id=tool_call_id,
             tool_name=tool_name,
@@ -211,11 +217,10 @@ class OpenAIChatCompletionsConversationAdapter:
                     builder.add(
                         ConversationMessageRole.PROMPT if role == "user" else ConversationMessageRole.COMPLETION,
                         content,
-                        source_index=str(index),
                     )
                 tool_calls = item.get("tool_calls", ())
                 if tool_calls is not None:
-                    for call_index, raw_call in enumerate(_sequence(tool_calls, "tool_calls")):
+                    for raw_call in _sequence(tool_calls, "tool_calls"):
                         call = _mapping(raw_call, "tool_call")
                         function = _mapping(call.get("function"), "tool_call.function")
                         call_id = _clean_text(call.get("id"), "tool_call.id")
@@ -223,7 +228,6 @@ class OpenAIChatCompletionsConversationAdapter:
                         builder.add(
                             ConversationMessageRole.TOOL_CALL,
                             _tool_arguments(function.get("arguments")),
-                            source_index=f"{index}.tool_calls.{call_index}",
                             tool_call_id=call_id,
                             tool_name=name,
                         )
@@ -236,7 +240,6 @@ class OpenAIChatCompletionsConversationAdapter:
                 builder.add(
                     ConversationMessageRole.TOOL_RESULT,
                     _tool_result_content(item.get("content")),
-                    source_index=str(index),
                     tool_call_id=call_id,
                     tool_name=result_name,
                     tool_status=_tool_result_status(item.get("status")),
@@ -275,7 +278,6 @@ class OpenAIResponsesConversationAdapter:
                     builder.add(
                         ConversationMessageRole.PROMPT if role == "user" else ConversationMessageRole.COMPLETION,
                         content,
-                        source_index=str(index),
                     )
             elif item_type == "function_call":
                 call_id = _clean_text(item.get("call_id", item.get("id")), "function_call.call_id")
@@ -283,7 +285,6 @@ class OpenAIResponsesConversationAdapter:
                 builder.add(
                     ConversationMessageRole.TOOL_CALL,
                     _tool_arguments(item.get("arguments")),
-                    source_index=str(index),
                     tool_call_id=call_id,
                     tool_name=name,
                 )
@@ -295,7 +296,6 @@ class OpenAIResponsesConversationAdapter:
                 builder.add(
                     ConversationMessageRole.TOOL_RESULT,
                     _tool_result_content(item.get("output")),
-                    source_index=str(index),
                     tool_call_id=call_id,
                     tool_name=result_name,
                     tool_status=_tool_result_status(item.get("status")),
@@ -322,7 +322,6 @@ class AnthropicMessagesConversationAdapter:
                 builder,
                 role=role,
                 content=item.get("content"),
-                source_prefix=str(message_index),
                 occurred_at=context.occurred_at,
             )
         completed = bool(builder.messages and builder.messages[-1].role is ConversationMessageRole.COMPLETION)
@@ -341,8 +340,8 @@ class CodexRolloutConversationAdapter:
     )
     # Codex 以 role=user 写进转写、但不是人说的话的上下文消息：会话开头和中途都会写，当成人话会自成一轮、没有回复，
     # 整批转写被保留规则拒收。与 developer 消息一样不收。前三个是本机 CLI 0.147 与 Desktop 0.153–0.162 真实转写里见到的
-    # （2026-10-22 扫了 15 份；见到的是 ``<external_codex_apps_open_page``，按会话 lane 的口径收 ``<external_codex`` 整族）；
-    # 其余是会话 lane 一直当"不是人话"的 Codex 合成消息（``lanes/session/material.py``）。
+    # （2026-10-22 扫了 15 份；见到的是 ``<external_codex_apps_open_page``，收 ``<external_codex`` 整族）；
+    # 其余是 Codex 的其他合成消息（技能、内置浏览器、被打断的轮、他在终端里跑的命令）。会话 lane 没有自己的前缀表，靠这里去掉。
     # Desktop 的作答 ``<send_user_message_question_reply>`` 与后台任务叫醒的 ``<subagent_notification>`` 不在此列。
     host_context_prefixes = (
         "<environment_context",
@@ -384,7 +383,6 @@ class CodexRolloutConversationAdapter:
                 builder.add(
                     ConversationMessageRole.COMPLETION,
                     "[sub-agent-activity]\n" + json.dumps(activity, ensure_ascii=False, sort_keys=True),
-                    source_index=str(index),
                     occurred_at=occurred_at,
                 )
                 continue
@@ -402,7 +400,6 @@ class CodexRolloutConversationAdapter:
                 builder.add(
                     ConversationMessageRole.PROMPT if role == "user" else ConversationMessageRole.COMPLETION,
                     content,
-                    source_index=str(index),
                     occurred_at=occurred_at,
                     mid_turn=role == "user" and human_in_turn,
                 )
@@ -417,7 +414,6 @@ class CodexRolloutConversationAdapter:
                 builder.add(
                     ConversationMessageRole.COMPLETION,
                     f"[agent-message {author} -> {recipient}]\n{content}",
-                    source_index=str(index),
                     occurred_at=occurred_at,
                 )
             elif item_type == "sub_agent_activity":
@@ -427,7 +423,6 @@ class CodexRolloutConversationAdapter:
                 builder.add(
                     ConversationMessageRole.COMPLETION,
                     "[sub-agent-activity]\n" + json.dumps(activity, ensure_ascii=False, sort_keys=True),
-                    source_index=str(index),
                     occurred_at=occurred_at,
                 )
             elif item_type in {"function_call", "custom_tool_call", "tool_search_call"}:
@@ -443,7 +438,6 @@ class CodexRolloutConversationAdapter:
                 builder.add(
                     ConversationMessageRole.TOOL_CALL,
                     _tool_arguments(item.get("arguments", item.get("input", {}))),
-                    source_index=str(index),
                     tool_call_id=call_id,
                     tool_name=name,
                     occurred_at=occurred_at,
@@ -460,7 +454,6 @@ class CodexRolloutConversationAdapter:
                         if item_type == "tool_search_output"
                         else item.get("output", item.get("result"))
                     ),
-                    source_index=str(index),
                     tool_call_id=call_id,
                     tool_name=result_name,
                     tool_status=_tool_result_status(item.get("status")),
@@ -473,7 +466,14 @@ class CodexRolloutConversationAdapter:
 
 
 class ClaudeCodeConversationAdapter:
-    """适配 Claude Code 项目会话 JSONL 解码后的记录序列。"""
+    """适配 Claude Code 项目会话 JSONL 解码后的记录序列。
+
+    用户记录里的文字是不是他说的话，按宿主自带的标记判（``_claude_code_user_text``）：``origin.kind`` 为 human 的是他说的；
+    别的 ``origin``（后台任务回来的 ``task-notification``）是叫醒助手的通知，照样收成一条，会话 lane 按叫醒认；压缩摘要
+    （``isCompactSummary``）不收；没有 ``origin`` 的只收 ``claude -p`` 的输入（``turnOrigin`` 为 sdk）和 ``!`` 模式他敲的命令
+    （``<bash-input>``），``/model`` 等斜杠命令的两条记录、``[Request interrupted``、命令输出都是宿主写的，不收。
+    助手还没给出答复（上一条收下的不是答复）时来的文字插在宿主的这一轮中间，标 ``mid_turn``（裁定 69）。
+    """
 
     protocol = "claude_code"
     host = "claude-code"
@@ -496,15 +496,36 @@ class ClaudeCodeConversationAdapter:
             role = _clean_text(message.get("role"), "Claude Code message role").lower()
             if role not in {"user", "assistant"}:
                 raise ConversationProtocolError(f"unsupported Claude Code message role: {role}")
+            content = message.get("content")
             ignored += _add_anthropic_content(
                 builder,
                 role=role,
-                content=message.get("content"),
-                source_prefix=str(index),
+                content=content,
                 occurred_at=_timestamp(record.get("timestamp"), context.occurred_at),
+                user_text=role == "assistant" or _claude_code_user_text(record, content),
+                mid_turn=bool(builder.messages) and builder.messages[-1].role is not ConversationMessageRole.COMPLETION,
             )
         completed = bool(builder.messages and builder.messages[-1].role is ConversationMessageRole.COMPLETION)
         return builder.finish(after_turn=completed, ignored_items=ignored)
+
+
+def _claude_code_user_text(record: Mapping[str, object], content: object) -> bool:
+    """这条 Claude Code 用户记录里的文字收不收（见 ``ClaudeCodeConversationAdapter``）。"""
+
+    if record.get("isCompactSummary") is True:
+        return False
+    origin = record.get("origin")
+    if isinstance(origin, Mapping):
+        return isinstance(origin.get("kind"), str)
+    if record.get("turnOrigin") == "sdk":
+        return True
+    if isinstance(content, str):
+        texts: tuple[object, ...] = (content,)
+    elif isinstance(content, Sequence):
+        texts = tuple(block.get("text") for block in content if isinstance(block, Mapping) and block.get("type") == "text")
+    else:
+        texts = ()
+    return bool(texts) and isinstance(texts[0], str) and texts[0].lstrip().startswith("<bash-input>")
 
 
 class OpenClawConversationAdapter:
@@ -529,7 +550,6 @@ class OpenClawConversationAdapter:
                 builder,
                 role=role,
                 content=message.get("content"),
-                source_prefix=str(index),
                 occurred_at=_timestamp(
                     record.get("timestamp", message.get("timestamp")),
                     context.occurred_at,
@@ -567,15 +587,14 @@ class PiConversationAdapter:
             role = message.get("role")
             at = _epoch_ms(message.get("timestamp"), _timestamp(record.get("timestamp"), context.occurred_at))
             if role == "user":
-                ignored += _add_pi_text(builder, ConversationMessageRole.PROMPT, message.get("content"), str(index), at)
+                ignored += _add_pi_text(builder, ConversationMessageRole.PROMPT, message.get("content"), at)
             elif role == "assistant":
-                ignored += _add_pi_assistant(builder, message.get("content"), str(index), at)
+                ignored += _add_pi_assistant(builder, message.get("content"), at)
             elif role == "toolResult":
                 call_id = _clean_text(message.get("toolCallId"), "pi toolResult toolCallId")
                 builder.add(
                     ConversationMessageRole.TOOL_RESULT,
                     _pi_text(message.get("content")) or "",
-                    source_index=f"{index}.result",
                     tool_call_id=call_id,
                     tool_name=_clean_text(message.get("toolName"), "pi toolResult toolName"),
                     tool_status=(
@@ -604,31 +623,28 @@ def _pi_text(content: object) -> str:
     return "\n".join(texts).strip()
 
 
-def _add_pi_text(
-    builder: _Builder, role: ConversationMessageRole, content: object, source: str, at: datetime
-) -> int:
+def _add_pi_text(builder: _Builder, role: ConversationMessageRole, content: object, at: datetime) -> int:
     text = _pi_text(content)
     if not text:
         return 1
-    builder.add(role, text, source_index=source, occurred_at=at)
+    builder.add(role, text, occurred_at=at)
     return 0
 
 
-def _add_pi_assistant(builder: _Builder, content: object, source: str, at: datetime) -> int:
+def _add_pi_assistant(builder: _Builder, content: object, at: datetime) -> int:
     if isinstance(content, str):
-        return _add_pi_text(builder, ConversationMessageRole.COMPLETION, content, source, at)
+        return _add_pi_text(builder, ConversationMessageRole.COMPLETION, content, at)
     ignored = 0
-    for block_index, raw in enumerate(_sequence(content if content is not None else (), "pi assistant content")):
+    for raw in _sequence(content if content is not None else (), "pi assistant content"):
         block = _mapping(raw, "pi assistant content block")
         kind = block.get("type")
         text = block.get("text")
         if kind == "text" and isinstance(text, str) and text.strip():
-            builder.add(ConversationMessageRole.COMPLETION, text.strip(), source_index=f"{source}.{block_index}", occurred_at=at)
+            builder.add(ConversationMessageRole.COMPLETION, text.strip(), occurred_at=at)
         elif kind == "toolCall":
             builder.add(
                 ConversationMessageRole.TOOL_CALL,
                 _tool_arguments(block.get("arguments") or {}),
-                source_index=f"{source}.{block_index}",
                 tool_call_id=_clean_text(block.get("id"), "pi toolCall id"),
                 tool_name=_clean_text(block.get("name"), "pi toolCall name"),
                 occurred_at=at,
@@ -649,6 +665,8 @@ class OpenCodeConversationAdapter:
       对齐）；据此把结果写成 ``"<题目>"="<作答>"`` 一行一题，和 Claude Code 的作答同一个形状，提醒出口与会话 lane 都按这个认
       （方案 32 第 4.2 条、方案 36 第四节）。
     - 压缩写的摘要（``summary`` 为真 / ``mode`` 是 compaction 的助手消息）不收；压缩后重放的那句人话插件镜像时就去掉了。
+    - 宿主报错结束的助手消息（``info.error``，如限流、额度用完）：报错写成这条消息最后一条答复 ``[host error] <类型>: <信息>``
+      （抹掉凭据），这一轮照常封口；"继续"之后直接报错、这一轮只有他那句话的也一样。
     时刻：OpenCode 记毫秒时间戳。
     """
 
@@ -669,9 +687,16 @@ class OpenCodeConversationAdapter:
                 continue
             time = info.get("time")
             created = _epoch_ms(time.get("created") if isinstance(time, Mapping) else None, context.occurred_at)
-            for part_index, raw_part in enumerate(_sequence(record.get("parts", ()), "OpenCode parts")):
-                part = _mapping(raw_part, "OpenCode part")
-                ignored += _add_opencode_part(builder, role, part, f"{index}.{part_index}", created)
+            parts = tuple(
+                _mapping(raw_part, "OpenCode part") for raw_part in _sequence(record.get("parts", ()), "OpenCode parts")
+            )
+            for part in _merged_spoken_parts(parts) if role == "user" else parts:
+                ignored += _add_opencode_part(builder, role, part, created)
+            error = info.get("error")
+            if role == "assistant" and isinstance(error, Mapping):
+                # 宿主报错结束的一轮（限流、额度用完）：报错只在 info.error，照出一条答复（裁定 39、76）
+                ended = _epoch_ms(time.get("completed") if isinstance(time, Mapping) else None, created)
+                builder.add(ConversationMessageRole.COMPLETION, _host_error_text(error), occurred_at=ended)
         completed = bool(builder.messages and builder.messages[-1].role is ConversationMessageRole.COMPLETION)
         return builder.finish(after_turn=completed, ignored_items=ignored)
 
@@ -708,12 +733,12 @@ class DeepSeekHarnessConversationAdapter:
                 spoken = isinstance(source, Mapping) and source.get("kind") in self._SPOKEN
                 text = _dsh_text(data.get("content")) if spoken else ""
                 if text:
-                    builder.add(ConversationMessageRole.PROMPT, text, source_index=str(index), occurred_at=at)
+                    builder.add(ConversationMessageRole.PROMPT, text, occurred_at=at)
                 else:
                     ignored += 1
             elif kind == "assistant/message" and isinstance(data, Mapping):
                 message = _mapping(data.get("message"), "DeepSeek Harness assistant message")
-                ignored += _add_dsh_assistant(builder, message.get("content"), str(index), at, asked)
+                ignored += _add_dsh_assistant(builder, message.get("content"), at, asked)
             elif kind == "tool/result" and isinstance(data, Mapping):
                 message = _mapping(data.get("message"), "DeepSeek Harness tool result")
                 call_id = _clean_text(message.get("toolCallId"), "DeepSeek Harness toolCallId")
@@ -722,7 +747,6 @@ class DeepSeekHarnessConversationAdapter:
                 builder.add(
                     ConversationMessageRole.TOOL_RESULT,
                     answers if answers is not None else text,
-                    source_index=f"{index}.result",
                     tool_call_id=call_id,
                     tool_name=builder.tool_names.get(call_id, "unknown"),
                     tool_status=(
@@ -749,16 +773,14 @@ def _dsh_text(content: object) -> str:
     return "\n".join(texts).strip()
 
 
-def _add_dsh_assistant(
-    builder: _Builder, content: object, source: str, at: datetime, asked: dict[str, Mapping[str, object]]
-) -> int:
+def _add_dsh_assistant(builder: _Builder, content: object, at: datetime, asked: dict[str, Mapping[str, object]]) -> int:
     ignored = 0
-    for block_index, raw in enumerate(_sequence(content if content is not None else (), "DeepSeek Harness assistant content")):
+    for raw in _sequence(content if content is not None else (), "DeepSeek Harness assistant content"):
         block = _mapping(raw, "DeepSeek Harness content block")
         kind = block.get("type")
         text = block.get("text")
         if kind == "text" and isinstance(text, str) and text.strip():
-            builder.add(ConversationMessageRole.COMPLETION, text.strip(), source_index=f"{source}.{block_index}", occurred_at=at)
+            builder.add(ConversationMessageRole.COMPLETION, text.strip(), occurred_at=at)
         elif kind == "tool-call":
             call_id = _clean_text(block.get("id"), "DeepSeek Harness tool-call id")
             arguments = _tool_arguments(block.get("arguments") or {})
@@ -767,7 +789,6 @@ def _add_dsh_assistant(
             builder.add(
                 ConversationMessageRole.TOOL_CALL,
                 arguments,
-                source_index=f"{source}.{block_index}",
                 tool_call_id=call_id,
                 tool_name=_clean_text(block.get("name"), "DeepSeek Harness tool-call name"),
                 occurred_at=at,
@@ -842,24 +863,17 @@ def _without_hook_context(raw: object) -> object:
 
 
 def _add_opencode_part(
-    builder: _Builder, role: str, part: Mapping[str, object], source: str, fallback: datetime
+    builder: _Builder, role: str, part: Mapping[str, object], fallback: datetime
 ) -> int:
     part_type = part.get("type")
     if part_type == "text":
-        text = part.get("text")
-        if (
-            part.get("synthetic") is True
-            or part.get("ignored") is True
-            or not isinstance(text, str)
-            or not text.strip()
-        ):
+        if not _kept_text_part(part):
             return 1
         span = part.get("time")
         at = _epoch_ms(span.get("end") or span.get("start") if isinstance(span, Mapping) else None, fallback)
         builder.add(
             ConversationMessageRole.PROMPT if role == "user" else ConversationMessageRole.COMPLETION,
-            text.strip(),
-            source_index=source,
+            str(part["text"]).strip(),
             occurred_at=at,
         )
         return 0
@@ -877,7 +891,6 @@ def _add_opencode_part(
     builder.add(
         ConversationMessageRole.TOOL_CALL,
         _tool_arguments(state.get("input") or {}),
-        source_index=f"{source}.call",
         tool_call_id=call_id,
         tool_name=name,
         occurred_at=started,
@@ -892,13 +905,52 @@ def _add_opencode_part(
     builder.add(
         ConversationMessageRole.TOOL_RESULT,
         content,
-        source_index=f"{source}.result",
         tool_call_id=call_id,
         tool_name=name,
         tool_status=ConversationToolResultStatus.ERROR if status == "error" else ConversationToolResultStatus.COMPLETED,
         occurred_at=ended,
     )
     return 0
+
+
+def _kept_text_part(part: Mapping[str, object]) -> bool:
+    """收下的文字段：不是合成、不是忽略、有字。"""
+
+    text = part.get("text")
+    return (
+        part.get("type") == "text"
+        and part.get("synthetic") is not True
+        and part.get("ignored") is not True
+        and isinstance(text, str)
+        and bool(text.strip())
+    )
+
+
+def _merged_spoken_parts(parts: tuple[Mapping[str, object], ...]) -> tuple[Mapping[str, object], ...]:
+    """一条人的消息里他说的几段文字用换行合成一段、放在第一段的位置（与把多块拼成一条的协议同口径）：拆成几句会各开
+    一轮，整批被拒收。别的段原样。"""
+
+    spoken = [index for index, part in enumerate(parts) if _kept_text_part(part)]
+    if len(spoken) < 2:
+        return parts
+    text = "\n".join(str(parts[index]["text"]).strip() for index in spoken)
+    first = spoken[0]
+    return tuple(
+        {**part, "text": text} if index == first else part
+        for index, part in enumerate(parts)
+        if index == first or index not in spoken
+    )
+
+
+def _host_error_text(error: Mapping[str, object]) -> str:
+    """宿主报错写成一条答复：``[host error] <类型>: <信息>``，抹掉凭据。"""
+
+    name = error.get("name")
+    data = error.get("data")
+    detail = data.get("message") if isinstance(data, Mapping) else None
+    kind = name.strip() if isinstance(name, str) and name.strip() else "UnknownError"
+    text = f"[host error] {kind}: {detail.strip()}" if isinstance(detail, str) and detail.strip() else f"[host error] {kind}"
+    return redact_secrets(text)
 
 
 def _opencode_answers(arguments: object, metadata: object) -> str | None:
@@ -953,12 +1005,11 @@ def _timestamp(value: object, fallback: datetime) -> datetime:
     if not isinstance(value, str):
         raise ConversationProtocolError("record timestamp must be ISO-8601 text")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
+        return utc_timestamp(value)
+    except TimestampZoneError as exc:
+        raise ConversationProtocolError("record timestamp must include timezone") from exc
+    except TimestampError as exc:
         raise ConversationProtocolError("record timestamp must be ISO-8601 text") from exc
-    if parsed.tzinfo is None:
-        raise ConversationProtocolError("record timestamp must include timezone")
-    return parsed.astimezone(UTC)
 
 
 def _add_anthropic_content(
@@ -966,28 +1017,46 @@ def _add_anthropic_content(
     *,
     role: str,
     content: object,
-    source_prefix: str,
     occurred_at: datetime,
+    user_text: bool = True,
+    mid_turn: bool = False,
 ) -> int:
+    """``user_text`` 为假时这条记录的文字块不收（工具结果照收）；``mid_turn`` 标在收下的人话上。一条人话里的几个文字块
+    用换行合成一句、放在第一个文字块的位置（与把多块拼成一条的协议同口径）：拆成几句会各开一轮，整批被拒收。"""
+
     if isinstance(content, str):
+        if not user_text:
+            return 1
         builder.add(
             ConversationMessageRole.PROMPT if role == "user" else ConversationMessageRole.COMPLETION,
             _clean_text(content, "message content"),
-            source_index=source_prefix,
             occurred_at=occurred_at,
+            mid_turn=mid_turn and role == "user",
         )
         return 0
     ignored = 0
-    for block_index, raw_block in enumerate(_sequence(content, "message content")):
-        block = _mapping(raw_block, "message content block")
-        block_type = _clean_text(block.get("type"), "message content block type")
-        source_index = f"{source_prefix}.{block_index}"
-        if block_type == "text":
+    blocks = tuple(
+        (_clean_text(block.get("type"), "message content block type"), block)
+        for block in (_mapping(raw_block, "message content block") for raw_block in _sequence(content, "message content"))
+    )
+    spoken = (
+        "\n".join(_clean_text(block.get("text"), "message text") for block_type, block in blocks if block_type == "text")
+        if role == "user" and user_text
+        else None
+    )
+    for block_type, block in blocks:
+        if block_type == "text" and not user_text:
+            ignored += 1
+        elif block_type == "text" and spoken is not None:
+            if spoken:
+                builder.add(ConversationMessageRole.PROMPT, spoken, occurred_at=occurred_at, mid_turn=mid_turn)
+                spoken = ""  # 后面的文字块已经合进这一句
+        elif block_type == "text":
             builder.add(
                 ConversationMessageRole.PROMPT if role == "user" else ConversationMessageRole.COMPLETION,
                 _clean_text(block.get("text"), "message text"),
-                source_index=source_index,
                 occurred_at=occurred_at,
+                mid_turn=mid_turn and role == "user",
             )
         elif block_type == "tool_use":
             call_id = _clean_text(block.get("id"), "tool_use.id")
@@ -995,7 +1064,6 @@ def _add_anthropic_content(
             builder.add(
                 ConversationMessageRole.TOOL_CALL,
                 block.get("input", {}),
-                source_index=source_index,
                 tool_call_id=call_id,
                 tool_name=name,
                 occurred_at=occurred_at,
@@ -1008,7 +1076,6 @@ def _add_anthropic_content(
             builder.add(
                 ConversationMessageRole.TOOL_RESULT,
                 _tool_result_content(block.get("content")),
-                source_index=source_index,
                 tool_call_id=call_id,
                 tool_name=result_name,
                 tool_status=_tool_result_status_from_error_flag(block.get("is_error")),
@@ -1065,6 +1132,23 @@ def _tool_arguments(value: object) -> object:
             return value
         return dict(parsed) if isinstance(parsed, Mapping) else value
     raise ConversationProtocolError("tool arguments must be an object or non-empty JSON text")
+
+
+def _identity_content(role: ConversationMessageRole, content: object) -> object:
+    """身份摘要里的内容：只有媒体的工具结果取媒体事实（描述、原载荷大小与摘要值），原载荷与插件占位算出同一个身份。"""
+
+    if role is not ConversationMessageRole.TOOL_RESULT:
+        return content
+    media = describe_media_only(content)
+    if media is None:
+        return content
+    return {
+        "media_only": {
+            "text": media.text,
+            "original_size_bytes": media.original_size_bytes,
+            "original_sha256": media.original_sha256,
+        }
+    }
 
 
 def _tool_result_content(value: object) -> object:

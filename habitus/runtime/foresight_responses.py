@@ -1,7 +1,7 @@
 """开着的提醒与回话的桥（方案 30 第五节；裁定 61 第 5 条、62 第 2 条）：会话 lane 每轮问"此刻还开着哪些提醒"、把模型判出的
 回应写回账本。住在组合根：行为侧不认识预测层，这座桥实现会话 lane 的 ``ReminderFeedback`` 接口、读写预测层的账本。
 
-- **开着的提醒**：账本里还没结完的日子上说出口的递送，预期的最晚时限还没到、还没判出正 / 负的；按截止由近到远，最多
+- **开着的提醒**：账本里还没结完的日子上说出口的递送，预期的最晚时限还没到、还没判出正 / 负 / 已做的；按截止由近到远，最多
   ``limit`` 条（``config.foresight.open_reminders_judged``）。
 - **回应**：按轮的身份记一条（``Response.turn``），同一轮同一条提醒重放时内容相同、幂等；写不进去（账本冲突、读不到预期在哪一天、
   盘坏了）都不让这一轮失败，只记观测——回应丢了结算按"没回应"处理。
@@ -49,7 +49,7 @@ class ReminderResponses:
         return tuple(PendingReminder(item.expectation_id, item.said_at, item.text, item.deadline) for item in found)
 
     def respond(self, turn: str, response: ReminderResponse, *, at: datetime) -> None:
-        # TODO(裁定 64 第 8 条)：模型判正 / 中 / 负这条路保留、不删。他点固定选项的回话由出口直接写（``runtime/foresight_outlet.py``，
+        # TODO(裁定 64 第 8 条)：模型判正 / 中 / 负 / 已做这条路保留、不删。他点固定选项的回话由出口直接写（``runtime/foresight_outlet.py``，
         # 不经模型）；走到这里的是他自己填的话。将来推式宿主（方案 32 第六节的本地通知）或别的 harness 的回复不是提问工具的作答时，
         # 也要靠这条路判——那时按钮作答仍该由出口 / 回执直接写，这里只管"话"。
         try:

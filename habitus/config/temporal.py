@@ -9,8 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from habitus.config.loader import construct_config
-
-MINUTES_PER_DAY = 24 * 60
+from habitus.temporal.slots import MINUTES_PER_DAY
 
 
 @dataclass(frozen=True)

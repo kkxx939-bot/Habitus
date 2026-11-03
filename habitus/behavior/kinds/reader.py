@@ -6,9 +6,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from types import MappingProxyType
-
 from habitus.behavior.kinds.changes import VersionRecord
 from habitus.behavior.kinds.ids import ClassId, is_marker
 from habitus.behavior.kinds.model import BehaviorClass, Vocabulary
@@ -42,11 +39,6 @@ class VocabularyReader:
         if class_id is None:
             return ()
         return tuple(str(item) for item in self.snapshot().descendants(class_id))
-
-    def class_names(self) -> Mapping[str, str]:
-        """编号 → 类名（含停用的）：给下游渲染"给人和模型看的名字"用，编号仍是身份。"""
-
-        return MappingProxyType({str(item.id): item.name for item in self.snapshot().classes.values()})
 
     def changes_since(self, version: int) -> tuple[VersionRecord, ...]:
         """``version`` 之后的每一版（新增、拆分、合并、改判据与迁移），按版本号从小到大；派生树据此同步。"""

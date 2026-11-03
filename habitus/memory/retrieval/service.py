@@ -21,15 +21,15 @@ from habitus.memory.intention import (
     intention_matches_scope,
 )
 from habitus.memory.model import MemoryKind, MemoryLevel
-from habitus.memory.retrieval.assembler import MemoryContextAssembler
-from habitus.memory.retrieval.context import ConversationSearchContextReader
-from habitus.memory.retrieval.grader import MemoryRetrievalGrader
-from habitus.memory.retrieval.lifecycle import (
+from habitus.memory.recall import (
     MemoryRecallCandidate,
     MemoryRecallLifecycle,
     MemoryRecallLifecycleError,
     MemoryRecallTarget,
 )
+from habitus.memory.retrieval.assembler import MemoryContextAssembler
+from habitus.memory.retrieval.context import ConversationSearchContextReader
+from habitus.memory.retrieval.grader import MemoryRetrievalGrader
 from habitus.memory.retrieval.model import (
     MemoryMatchedMemory,
     MemoryQueryPlan,

@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 
 from habitus.infrastructure.store.contracts.path_lock import PathLock
-from habitus.memory.editor.lock_key import MemoryDocumentLockKeyspace
 from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryLevel
 from habitus.memory.semantic.config import MemorySemanticConfig
 from habitus.memory.semantic.generator import MemoryOverviewGenerator
@@ -18,6 +16,7 @@ from habitus.memory.semantic.model import (
     MemorySemanticRefreshResult,
     MemorySemanticRefreshStatus,
 )
+from habitus.memory.tree.lock_key import MemoryDocumentLockKeyspace, memory_root_lock_prefix
 from habitus.memory.tree.store import MemoryTree
 
 
@@ -46,8 +45,7 @@ class MemorySemanticRefresher:
         self.generator = generator
         self.path_lock = path_lock
         self.config = config or MemorySemanticConfig()
-        root_identity = hashlib.sha256(str(self.tree.root).encode("utf-8")).hexdigest()[:24]
-        self._lock_prefix = f"memory-semantic:{root_identity}"
+        self._lock_prefix = memory_root_lock_prefix("memory-semantic", self.tree.root)
         self._transaction_lock_key = MemoryDocumentLockKeyspace(tree.root).transaction_key()
 
     def refresh_for(self, address: MemoryAddress) -> tuple[MemorySemanticRefreshResult, ...]:

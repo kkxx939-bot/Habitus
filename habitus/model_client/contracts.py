@@ -482,20 +482,37 @@ class ModelStructuredOutputError(ModelClientError):
     code = "MODEL_STRUCTURED_OUTPUT"
 
 
-#: 模型此刻用不了（连不上、限流、额度满、鉴权或权限失效）：换一份输入也一样，过一阵再来。
+#: 模型此刻用不了（连不上、限流、额度满或余额不足、鉴权或权限失效、服务端答坏了）：换一份输入也一样，过一阵再来。
+#: 服务端答坏了（``ModelResponseError``，带 ``failover_eligible``）问题在服务端、不在这份输入。各处"等模型恢复"的分类
+#: 只从这一组取（记忆 Job 的长退避、会话 lane 的重试堆、未封口判断的桥）。
 MODEL_UNAVAILABLE: tuple[type[ModelClientError], ...] = (
     ModelTransportError,
     ModelQuotaError,
     ModelAuthenticationError,
     ModelPermissionError,
+    ModelResponseError,
 )
 #: 同一份输入再问几遍也一样（输入超长、触发内容安全）：只有输入或处理口径变了才值得再问。
 MODEL_DETERMINISTIC: tuple[type[ModelClientError], ...] = (ModelInputTooLargeError, ModelContentSafetyError)
+#: ``MODEL_DETERMINISTIC`` 里"这一条触发了内容安全"的那一种：只这一条记「错误」、不重试、健康面单列（裁定 94 错误分类）；
+#: 输入超长是材料上限与模型窗口没对上，按我们自己处理不了的 bug 算，不在这里。
+MODEL_REFUSED: tuple[type[ModelClientError], ...] = (ModelContentSafetyError,)
+#: 模型整个用不了：此刻用不了的那一组加上没配好（``ModelConfigurationError``，含缺依赖）。夜里那条线上任何一处调模型碰到它
+#: 就整晚停（``ModelUnreachable``，裁定 94 第 8 条）。
+MODEL_UNUSABLE: tuple[type[ModelClientError], ...] = (*MODEL_UNAVAILABLE, ModelConfigurationError)
+
+
+class ModelUnreachable(RuntimeError):
+    """模型整个调不通（连不上 / 限流、额度或余额、鉴权、权限、服务端答坏、没配好）：再多重试也处理不了。夜里那条线碰到它
+    这一晚停下、健康面写"模型调不通"，下一晚照常再跑（裁定 94 第 4、8 条）。不是 ``ModelClientError``：它不是某一次调用的
+    失败分类，而是"这一处调模型的结论是整个用不了"，由各触点（``model_client.asking.ask``、夜里的探针）抛出。"""
 
 
 __all__ = [
     "MODEL_DETERMINISTIC",
+    "MODEL_REFUSED",
     "MODEL_UNAVAILABLE",
+    "MODEL_UNUSABLE",
     "ChatMessage",
     "ChatRequest",
     "MessageRole",
@@ -514,6 +531,7 @@ __all__ = [
     "ModelStreamEvent",
     "ModelStructuredOutputError",
     "ModelTransportError",
+    "ModelUnreachable",
     "ProviderCapabilities",
     "ReasoningOptions",
     "ResponseFormat",

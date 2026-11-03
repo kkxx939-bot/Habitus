@@ -12,18 +12,25 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
-from habitus.behavior import BehaviorLinkType
 from habitus.behavior.kinds.ids import Lane, not_event_token, pending_token
 from habitus.scene.concepts import ConceptSet
 from habitus.scene.concepts.rhythm import RhythmRulers
 from habitus.scene.occurrences import ConceptHitStore
 from habitus.scene.occurrences.mapper import ConceptMapper, MapperConfig, map_closed_day
 from habitus.scene.recurrence import recurrences_of
-from habitus.series import EventSeries, GapKind, SeriesError, SkipReason
+from habitus.series import (
+    SILENT_DAY_UNWATCHED_LANES,
+    EventSeries,
+    GapKind,
+    SeriesError,
+    SkippedRecord,
+    SkipReason,
+    silent_day_unwatched,
+)
 from habitus.series.reader import read_series
 from tests.unit.foresight.scripted_model import recording_client
 from tests.unit.scene.concept_fixtures import BEDTIME, BREAKFAST, CODING
-from tests.unit.scene.fixtures import DAY1, SUBJECT, Site, publish, publish_gap
+from tests.unit.scene.fixtures import DAY1, SUBJECT, Site, at, publish, publish_gap
 
 NOW = datetime(2026, 9, 1, 3, 0, tzinfo=UTC)
 PENDING = pending_token(Lane.SESSION)
@@ -65,7 +72,7 @@ def test_the_reading_rules_live_in_one_place(tmp_path) -> None:
     # 被提醒过的原样带着，目标、概要也在
     (reminded,) = [record for record in series.records if record.uri == meal]
     assert reminded.reminded and reminded.goal == "吃饱" and reminded.summary
-    # 两种空白；跨过截止时刻的截到那一刻（第 4 天 23:55 起的未观测本来到第 5 天 00:05）
+    # 两种空白；按本地日切开，只留截止日之前那几天的段（第 4 天 23:55 起的未观测本来到第 5 天 00:05）
     kinds = {(gap.started_at.date(), gap.kind) for gap in series.gaps}
     assert kinds == {(day(3), GapKind.UNREADABLE), (day(4), GapKind.UNOBSERVED)}
     crossing = next(gap for gap in series.gaps if gap.kind is GapKind.UNOBSERVED)
@@ -116,7 +123,7 @@ def test_the_semantic_layer_and_the_recurrences_read_the_same_records(tmp_path) 
     site = Site(tmp_path, now=NOW)
     a_week(site)
     pending = publish(site.behavior_tree, day(2), "说不清的另一件事", 16, 0, kind=PENDING)
-    paired = publish(site.behavior_tree, day(2), "边吃边看", 12, 0, kind="早餐")
+    publish(site.behavior_tree, day(2), "边吃边看", 12, 0, kind="早餐")
     publish(
         site.behavior_tree,
         day(2),
@@ -124,7 +131,6 @@ def test_the_semantic_layer_and_the_recurrences_read_the_same_records(tmp_path) 
         12,
         5,
         kind="修改代码",
-        links=((BehaviorLinkType.CONCURRENT_WITH.value, paired),),
     )
     series = read_series(site.behavior_tree, cutoff=day(7))
     recurrences = recurrences_of(series, RULERS)
@@ -161,8 +167,6 @@ def test_the_semantic_layer_and_the_recurrences_read_the_same_records(tmp_path) 
     by_uri = {record.uri: record for record in series.records}
     for uri, record in mapped.items():
         assert (record.kind_token, record.lane) == (by_uri[uri].kind_token, by_uri[uri].lane)
-    # 并行：序列里读到的就是那一对
-    assert len(series.concurrent) == 1 and paired in series.concurrent[0]
 
 
 def test_a_reminded_record_is_carried_and_the_recurrence_counts_it_as_done_but_not_natural(tmp_path) -> None:
@@ -180,14 +184,12 @@ def test_a_reminded_record_is_carried_and_the_recurrence_counts_it_as_done_but_n
 def test_a_series_refuses_what_it_cannot_hold() -> None:
     with pytest.raises(SeriesError, match="cutoff must be a date"):
         EventSeries(cutoff=datetime(2026, 1, 1, tzinfo=UTC))  # type: ignore[arg-type]
-    with pytest.raises(SeriesError, match="concurrent pairs"):
-        EventSeries(cutoff=day(1), concurrent=(("a", "b"),))
 
 
 def test_a_disproved_unreadable_gap_is_dropped_once_for_every_reader(tmp_path) -> None:
     """「没读懂」10:15–10:30 里读出了 10:20 那条行为的开始：这段空白被证伪、整段作废。序列这一处消解，temporal 与关系检验读到
     同一份——关系时间线上 10:15 那一槽算人在场（第四轮评审 E2：以前关系时间线不作废，"同一条链"丢掉的恰好是后果出现的那一次）。
-    「未观测」不被证伪（留给消费方当矛盾报）。"""
+    「未观测」不被证伪（那段照样算没在看，目前没有哪一处单独报这种矛盾）。"""
 
     from habitus.scene.relations import RelationConfig, build_timelines
     from tests.unit.scene.concept_fixtures import concept_set
@@ -203,6 +205,30 @@ def test_a_disproved_unreadable_gap_is_dropped_once_for_every_reader(tmp_path) -
         "session"
     ]
     assert 41 in line.present[DAY1]
+
+
+@pytest.mark.parametrize(
+    ("record_on", "standing"),
+    [((1, 0, 30), ((0, 23), (1, 0))), ((0, 23, 30), ((1, 0), (1, 2)))],
+    ids=["disproved after midnight", "disproved before midnight"],
+)
+def test_a_cross_midnight_unreadable_gap_reads_the_same_on_every_night(tmp_path, record_on, standing) -> None:  # type: ignore[no-untyped-def]
+    """「没读懂」第 0 天 23:00 → 第 1 天 02:00，一条行为落在里面：按本地日切开，每天那段只由那一天的行为判——被证伪的
+    那一天那段作废，另一天那段留着。哪一晚读、读完再截到哪一晚，结果都一样（截止日不变量：``read(N) == read(N+k).until(N)``）。"""
+
+    site = Site(tmp_path, now=NOW)
+    publish(site.behavior_tree, day(0), "看书", 21, 0)
+    publish_gap(site.behavior_tree, day(0), (23, 0), (2, 0), kind="没读懂", end_day=day(1))
+    offset, hour, minute = record_on
+    publish(site.behavior_tree, day(offset), "看手机", hour, minute)
+    publish(site.behavior_tree, day(2), "看书", 21, 0)
+    nights = {cutoff: read_series(site.behavior_tree, cutoff=day(cutoff)) for cutoff in (1, 2, 3, 4)}
+    for cutoff, series in nights.items():
+        for later in range(cutoff, 5):
+            assert nights[later].until(day(cutoff)) == series
+    (gap,) = nights[4].gaps
+    (begin_day, begin_hour), (end_day, end_hour) = standing
+    assert (gap.started_at, gap.ended_at) == (at(day(begin_day), begin_hour, 0), at(day(end_day), end_hour, 0))
 
 
 def test_who_prompted_it_is_read_into_the_series_and_old_records_without_it_read_as_unknown(tmp_path) -> None:
@@ -255,3 +281,77 @@ def test_a_reader_without_a_dirty_day_log_never_serves_a_stale_day(tmp_path) -> 
     changed = publish(site.behavior_tree, day(3), "改过的一天", 17, 0, kind="修改代码")
 
     assert changed in {record.uri for record in reader.read(cutoff=day(8)).records}
+
+
+def test_an_unobserved_gap_is_not_voided_by_a_record_inside_it(tmp_path) -> None:
+    """「未观测」10:00–11:00 里 10:10 有一条记录：没在看的那段不被证伪，空白照样留着（只有「没读懂」会被作废）。"""
+
+    site = Site(tmp_path, now=NOW)
+    publish(site.behavior_tree, DAY1, "看手机", 10, 10)
+    publish_gap(site.behavior_tree, DAY1, (10, 0), (11, 0), kind="未观测")
+    assert len(read_series(site.behavior_tree, cutoff=day(1)).gaps) == 1
+
+
+def test_a_record_starting_exactly_where_an_unreadable_gap_ends_does_not_void_it(tmp_path) -> None:
+    """空白是半开区间 [开始, 结束)：恰在「没读懂」结束那一刻开始的记录不在里面，空白留着。"""
+
+    site = Site(tmp_path, now=NOW)
+    publish(site.behavior_tree, DAY1, "看手机", 11, 0)
+    publish_gap(site.behavior_tree, DAY1, (10, 0), (11, 0), kind="没读懂")
+    assert len(read_series(site.behavior_tree, cutoff=day(1)).gaps) == 1
+
+
+def test_a_last_seen_written_with_another_offset_is_read_in_the_start_offset(tmp_path) -> None:
+    """开始 23:00 +08:00、最后所见写成 00:55 +09:00（= 23:55 +08:00，同一天）：读出来统一到开始的偏移，还是当天、不当跨午夜，
+    关系时间线上做完的那一槽是 23:45 那一槽。"""
+
+    from datetime import timezone
+
+    from habitus.behavior.model import BehaviorKind
+    from habitus.behavior.tree.writer import BehaviorDocumentWriter
+    from habitus.scene.relations import RelationConfig, build_timelines
+    from tests.lock_store import ProcessLocalLockStore
+    from tests.unit.behavior.tree_payloads import occurrence_payload
+    from tests.unit.kind_ids import kind_id
+    from tests.unit.scene.fixtures import at
+
+    site = Site(tmp_path, now=NOW)
+    started = at(DAY1, 23, 0)
+    last = datetime(DAY1.year, DAY1.month, DAY1.day + 1, 0, 55, tzinfo=timezone(timedelta(hours=9)))
+    writer = BehaviorDocumentWriter(site.behavior_tree, ProcessLocalLockStore(), clock=lambda: started + timedelta(hours=3))
+    writer.publish(
+        BehaviorKind.OCCURRENCE,
+        occurrence_payload(
+            occurred_on=DAY1,
+            name="追剧",
+            kind_token=kind_id("追剧"),
+            started_at=started,
+            last_observed_at=last,
+            onset_available_at=started + timedelta(seconds=2),
+            basis=(),
+            goal=None,
+        ),
+    )
+    series = read_series(site.behavior_tree, cutoff=day(1))
+    (record,) = series.records
+    assert record.last_observed_at == last and record.last_observed_at.utcoffset() == started.utcoffset()
+    line = build_timelines(series, ConceptSet([]), {}, RelationConfig(slot_minutes=15, transition_window_slots=3))[
+        "session"
+    ]
+    ((ended, _uri),) = line.ends[DAY1]
+    assert ended == DAY1.toordinal() * 96 + 95
+
+
+def test_only_the_session_lane_reads_a_day_without_records_as_unwatched() -> None:
+    """裁定 89 第 2 条：会话 lane 一整天没有记录 = 没在看；物理 lane 的上游自己报空白，不在里面。取值与 ``Lane`` 的 value 一致。"""
+
+    assert frozenset({Lane.SESSION.value}) == SILENT_DAY_UNWATCHED_LANES
+    assert silent_day_unwatched(Lane.SESSION.value) and not silent_day_unwatched(Lane.PHYSICAL.value)
+
+
+def test_active_days_count_skipped_records_too() -> None:
+    """那天只有一条「非事件」也算有记录（开过会话）：``active_days`` 进序列的、没进的都算。"""
+
+    first, second = date(2026, 5, 1), date(2026, 5, 2)
+    found = EventSeries(cutoff=date(2026, 5, 4), skipped=(SkippedRecord("behavior://x", second, SkipReason.NOT_EVENT),))
+    assert found.active_days() == frozenset({second}) and first not in found.active_days()

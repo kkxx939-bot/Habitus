@@ -4,7 +4,7 @@
 历史上这里是一串写死的文件名断言（"behavior/tree/store.py 必须在 wheel 里"），
 每次重构目录就会过期，CI 因此红过四次。这个脚本改为按规则校验，重构目录时自动跟着变：
 
-1. 受控包内每一个纳入版本库的 .py，都必须出现在 wheel 里（漏打包）；
+1. 受控包内每一个纳入版本库的 .py，都必须出现在 wheel 里（漏打包）；packages.find 排除的包（开发工具）反过来一个都不许进；
 2. wheel 里每一个 .py，都必须在源码树里存在（删掉的模块被陈旧构建产物带进来）；
 3. [tool.setuptools.package-data] 声明的每条 glob 至少命中一个文件，且命中的文件都在 wheel 里；
 4. [tool.setuptools.data-files] 声明的每条 glob 同上，落点为声明的 share 路径。
@@ -34,8 +34,8 @@ def fail(message: str, items: list[str] | None = None) -> None:
 
 
 def tracked_files() -> list[Path]:
-    """版本库里的文件清单。用 git 而不是遍历磁盘，天然排除 habitus/benchmark/data 这类
-    被 gitignore 的本地数据集——它们不进 git，CI 上也不存在。"""
+    """版本库里的文件清单。用 git 而不是遍历磁盘，天然排除被 gitignore 的本地数据集与构建产物——
+    它们不进 git，CI 上也不存在。"""
     out = subprocess.run(
         ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True, text=True
     ).stdout
@@ -46,6 +46,16 @@ def package_roots(config: dict) -> list[str]:
     """packages.find 的 include 形如 "behavior*"，取出顶层包名。"""
     patterns = config["tool"]["setuptools"]["packages"]["find"]["include"]
     return [pattern.rstrip("*") for pattern in patterns]
+
+
+def excluded_dirs(config: dict) -> list[str]:
+    """packages.find 的 exclude（形如 "habitus.benchmark"、"habitus.benchmark.*"）换成目录前缀：这些包故意不进 wheel。"""
+    patterns = config["tool"]["setuptools"]["packages"]["find"].get("exclude", [])
+    return sorted({pattern.removesuffix(".*").replace(".", "/") + "/" for pattern in patterns})
+
+
+def shipped(path: str, roots: list[str], excluded: list[str]) -> bool:
+    return any(path.startswith(root) for root in roots) and not any(path.startswith(prefix) for prefix in excluded)
 
 
 def main() -> None:
@@ -61,13 +71,14 @@ def main() -> None:
     setuptools_config = config["tool"]["setuptools"]
     names = set(zipfile.ZipFile(wheel_path).namelist())
     roots = package_roots(config)
+    excluded = excluded_dirs(config)
     tracked = tracked_files()
 
     # 1. 受控包内纳入版本库的 .py 都要在 wheel 里。
     expected_modules = {
         str(path)
         for path in tracked
-        if path.suffix == ".py" and any(str(path).startswith(root) for root in roots)
+        if path.suffix == ".py" and shipped(str(path), roots, excluded)
     }
     if missing := expected_modules - names:
         fail(f"以下模块在源码树里，却没被打进 {wheel_path.name}", sorted(missing))
@@ -80,6 +91,8 @@ def main() -> None:
         if name.endswith(".py")
         and not name.startswith(f"{wheel_path.name.split('-')[0]}-")  # 跳过 .dist-info
     }
+    if leaked := sorted(name for name in wheel_modules if any(name.startswith(prefix) for prefix in excluded)):
+        fail(f"{wheel_path.name} 里有 packages.find 排除了的包", leaked)
     if stale := wheel_modules - tracked_set:
         fail(f"{wheel_path.name} 里有源码树中不存在的模块（构建产物陈旧？）", sorted(stale))
 
@@ -127,7 +140,7 @@ def main() -> None:
         for path in tracked
         if path.suffix in {".yaml", ".yml", ".json"}
         and path.parent in package_dirs
-        and any(str(path).startswith(root) for root in roots)
+        and shipped(str(path), roots, excluded)
         and str(path) not in names
     ]
     if undeclared:

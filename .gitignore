@@ -47,4 +47,5 @@ dist/
 
 # Benchmark 运行产物
 benchmark/results/
-habitus/benchmark/data/
+# 本地数据集（EgoLife 七天等），不进 git
+/data/

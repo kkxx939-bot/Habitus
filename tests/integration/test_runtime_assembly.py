@@ -6,23 +6,26 @@ from contextlib import closing
 from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
-from types import SimpleNamespace
 
+import httpx
 import pytest
 import yaml
 
 from habitus.behavior.tree import BehaviorTree
 from habitus.config import HabitusConfig
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.infrastructure.vector import VectorStoreFactory
-from habitus.integrations.agent import AgentMemoryGateway
-from habitus.integrations.http import RuntimeHTTPHandlers
-from habitus.integrations.sdk import AgentMemoryHooks, PreparedAgentTurn
+from habitus.integrations.http_api import create_http_app
+from habitus.integrations.http_api.handlers import RuntimeHTTPHandlers
 from habitus.memory.browse import MemoryBrowseNotFoundError
 from habitus.memory.conversation import ConversationAddress
 from habitus.memory.model import MemoryKind
-from habitus.memory.retrieval import MemoryRetrievalSufficiency, SQLiteMemoryRecallLifecycleStore
+from habitus.memory.recall import (
+    SQLiteMemoryRecallLifecycleStore,
+)
+from habitus.memory.retrieval import (
+    MemoryRetrievalSufficiency,
+)
 from habitus.memory.uri import MemoryURI
 from habitus.model_client import (
     EmbeddingVector,
@@ -39,6 +42,7 @@ from habitus.runtime import (
     build_runtime,
 )
 from tests.helpers import BASE_TIME
+from tests.lock_store import ProcessLocalLockStore
 from tests.model_helpers import prepare_chat_request
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -308,6 +312,30 @@ def test_assembly_wires_one_shared_chain_without_touching_storage(tmp_path: Path
     assert components.workflow.worker.runner is components.workflow.runner
 
 
+def test_memory_workflow_state_is_injected_from_the_configured_workflow_root(tmp_path: Path) -> None:
+    """记忆侧树外状态由组装注入 ``config.workflow_root``；默认配置下路径与"记忆根的兄弟 workflow 目录"逐字相同。"""
+
+    config = runtime_config(tmp_path)
+    providers, vectors = runtime_dependencies()
+    runtime = build_runtime(
+        config,
+        providers=providers,
+        vector_stores=vectors,
+        path_lock=PathLock(ProcessLocalLockStore()),
+    )
+
+    lifecycle = runtime.components.memory.lifecycle
+    sibling = lifecycle.tree.root.parent / "workflow"
+    assert config.workflow_root == sibling
+    journal = lifecycle.committer.transaction.journal
+    assert journal.root == sibling / "transactions"
+    assert lifecycle.tree.visibility_journal is journal
+    assert lifecycle.recovery_store.root == sibling / "lifecycle" / "l2_recovery"
+    assert lifecycle.operation_store.root == sibling / "lifecycle" / "l2_operations"
+    assert lifecycle.scan_store.path == sibling / "lifecycle" / "l2_scan_state.json"
+    assert not config.storage_root.exists()
+
+
 def test_assembly_accepts_an_external_harness_protocol_registry(tmp_path: Path) -> None:
     class FutureHarnessAdapter:
         protocol = "future_harness"
@@ -557,71 +585,51 @@ def test_runtime_public_conversation_interface_returns_pending_consistency_handl
         assert "habitus_" in runtime.prometheus_metrics()
         http = RuntimeHTTPHandlers(runtime)
         capabilities = http.capabilities()
-        assert capabilities["api_version"] == "1.0"
-        assert capabilities["protocols"] == list(runtime.conversation_protocols())
-        assert "remember_idempotency_v1" in capabilities["features"]
+        assert capabilities.api_version == "1.0"
+        assert capabilities.protocols == list(runtime.conversation_protocols())
+        assert "remember_idempotency_v1" in capabilities.features
+        # 预测层没开：取口恒为空，不公布提醒出口（裁定 80 第 1 条）
+        assert not runtime.reminders_enabled() and "reminders_v1" not in capabilities.features
         status, readiness = await http.readiness()
         assert status in {200, 503}
-        assert readiness["status"] in {"healthy", "degraded", "unhealthy"}
+        assert readiness.status in {"healthy", "degraded", "unhealthy"}
 
-        hooks = AgentMemoryHooks(AgentMemoryGateway(runtime))
-        hook_session = hooks.new_session(
-            "conversation-hook-runtime",
-            date(2026, 7, 28),
-            "openai_chat_completions",
-        )
-        prepared = hooks.prepare_after_turn(
-            hook_session,
-            payload,
-            occurred_at=BASE_TIME,
-            after_turn=False,
-        )
-        hook_result = await hooks.after_turn(prepared)
-        assert hook_result.session.next_sequence == 2
-        hook_closed = await hooks.on_session_close(hook_result.session)
-        assert len(hook_closed.flush.jobs) == 1
-
-        retry_gateway = AgentMemoryGateway(runtime)
-        attempts = 0
-
-        async def remember_then_lose_response(*args, **kwargs):
-            nonlocal attempts
-            attempts += 1
-            remembered = await retry_gateway.remember(*args, **kwargs)
-            if attempts == 1:
-                raise TimeoutError("simulated lost response")
-            return remembered
-
-        retry_hooks = AgentMemoryHooks(
-            SimpleNamespace(
-                remember=remember_then_lose_response,
-                recall=retry_gateway.recall,
-                flush=retry_gateway.flush,
-                cursor=retry_gateway.cursor,
+        # 插件经 HTTP 走的同一条链：写一轮、会话关闭时 flush 封段
+        transport = httpx.ASGITransport(app=create_http_app(runtime))
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8787") as client:
+            turn = {
+                "conversation_id": "conversation-hook-runtime",
+                "started_on": "2026-07-28",
+                "protocol": "openai_chat_completions",
+                "payload": payload,
+                "start_sequence": 0,
+                "occurred_at": BASE_TIME.isoformat(),
+                "after_turn": False,
+            }
+            remembered = await client.post("/api/v1/memory/remember", json=turn)
+            assert remembered.status_code == 200, remembered.text
+            assert remembered.json()["result"]["next_sequence"] == 2
+            closed = await client.post(
+                "/api/v1/memory/flush",
+                json={"conversation_id": "conversation-hook-runtime", "started_on": "2026-07-28"},
             )
-        )
-        retry_session = retry_hooks.new_session(
-            "conversation-hook-retry",
-            date(2026, 7, 28),
-            "openai_chat_completions",
-        )
-        retry_prepared = retry_hooks.prepare_after_turn(
-            retry_session,
-            payload,
-            occurred_at=BASE_TIME,
-            after_turn=False,
-        )
-        with pytest.raises(TimeoutError, match="simulated lost response"):
-            await retry_hooks.after_turn(retry_prepared)
-        retry_address = ConversationAddress("conversation-hook-retry", date(2026, 7, 28))
-        assert await runtime.conversation_cursor(retry_address) == 2
-        restored_prepared = PreparedAgentTurn.from_dict(retry_prepared.to_dict())
-        retry_result = await retry_hooks.after_turn(restored_prepared)
-        assert retry_result.session.next_sequence == 2
-        retry_live = await runtime.read_live_conversation(retry_address)
-        assert retry_live is not None and len(retry_live.messages) == 2
-        retry_closed = await retry_hooks.on_session_close(retry_result.session)
-        assert len(retry_closed.flush.jobs) == 1
+            assert len(closed.json()["result"]["jobs"]) == 1
+
+            # 第一次写入的响应丢了，插件原样重投同一轮（同一 start_sequence）：服务端不重复追加
+            retry_turn = {**turn, "conversation_id": "conversation-hook-retry"}
+            assert (await client.post("/api/v1/memory/remember", json=retry_turn)).status_code == 200
+            retry_address = ConversationAddress("conversation-hook-retry", date(2026, 7, 28))
+            assert await runtime.conversation_cursor(retry_address) == 2
+            replayed_turn = await client.post("/api/v1/memory/remember", json=retry_turn)
+            assert replayed_turn.status_code == 200, replayed_turn.text
+            assert replayed_turn.json()["result"]["next_sequence"] == 2
+            retry_live = await runtime.read_live_conversation(retry_address)
+            assert retry_live is not None and len(retry_live.messages) == 2
+            retry_closed = await client.post(
+                "/api/v1/memory/flush",
+                json={"conversation_id": "conversation-hook-retry", "started_on": "2026-07-28"},
+            )
+            assert len(retry_closed.json()["result"]["jobs"]) == 1
         await runtime.close()
 
     asyncio.run(scenario())
@@ -703,13 +711,13 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     assert branches is not None and worker is not None
     # 整晚那一趟与预测层（与结算）现在只接会话那一支；预测树删了（裁定 59），整晚自己一个常驻节拍。
     behavior = branches.session
-    assert worker.at == runtime.config.scene.nightly_time and worker.zone == runtime.config.locale.zone()
     assert worker.last_run.path == runtime.config.scene_root / "nightly" / "last_run.json"
     # 每晚开头的重试接着两支各自的重试堆（裁定 67）；会话一支连同它的会话 lane
     retry = worker.nightly.retry
     assert retry is not None
+    from habitus.behavior.fusion.lanes.session import TurnHandler
+    from habitus.behavior.reduction.failed import ChainHandler
     from habitus.behavior.retry import RetryKind
-    from habitus.behavior.retry.handlers import ChainHandler, TurnHandler
 
     assert [(item.name, item.backlog, sorted(item.handlers)) for item in retry.branches] == [
         ("session", branches.session.retry_backlog, [RetryKind.CHAIN, RetryKind.TURN]),
@@ -724,6 +732,7 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     # 时窗末当场重读接着会话一支的重试堆（裁定 68 第 1 条）
     assert runtime.components.foresight is not None and runtime.components.foresight.worker is not None
     assert runtime.components.foresight.worker.tick.reread is not None
+    assert runtime.reminders_enabled()
     assert worker.shutdown_timeout_seconds == runtime.config.scene.nightly_shutdown_timeout_seconds
     foresight = runtime.components.foresight
     assert foresight is not None
@@ -769,13 +778,27 @@ def test_the_whole_derived_chain_assembles_with_every_layer_switched_on(tmp_path
     assert nightly.foresight is not None and nightly.foresight.store is foresight.opportunities
     assert nightly.closed_days == behavior.reduction_runner.closed_days
     assert nightly.settlement is foresight.settlement
+    # 当天的日子预期是夜里那条线的最后一步（裁定 94 第 1 条），与白天那一拍读同一种未封口的桥、写同一本账；线上那一份碰到模型
+    # 整个用不了就抛给线（裁定 94 第 8 条），白天那一份留到下一拍
+    assert nightly.days is foresight.days and foresight.days is not None
+    assert foresight.days.ledger is foresight.ledger and foresight.days.opportunities is foresight.opportunities
+    in_line = foresight.days.forming.unsealed
+    assert isinstance(in_line, UnsealedFromJudgements) and in_line.in_line
+    assert in_line.judgements is behavior.judgements and not tick.forming.unsealed.in_line  # type: ignore[attr-defined]
+    # 线自己的记录只有一份：常驻节拍写，结算与白天那一拍读同一个"这一晚跑完了没有"（裁定 94 第 1、9 条）
+    assert foresight.settlement.finished == worker.last_run.finished
+    assert tick.line_finished == worker.last_run.finished
     # 单元历史：夜里那一拍重标、白天的单元读同一份（裁定 55 新版第 2 条）
     assert nightly.foresight.history is foresight.history and foresight.history.store.root == foresight.ledger.root
     assert tick.delivery.units.history is foresight.history.store
     assert not hasattr(tick, "prediction") and tick.read_side is foresight.read_side
-    assert isinstance(tick.unsealed, UnsealedFromJudgements) and tick.unsealed.judgements is behavior.judgements
+    unsealed = tick.forming.unsealed
+    assert isinstance(unsealed, UnsealedFromJudgements) and unsealed.judgements is behavior.judgements
     assert tick.delivery is not None and tick.delivery.ledger is foresight.ledger
     assert foresight.worker.interval_seconds == runtime.config.foresight.tick_interval_seconds
+    # 「离上次够久」的时窗往后接几天用的是递送那同一条线（裁定 89 第 1 条）：配置里的 1 − 可接受的误提醒率
+    assert tick.forming.tolerance == tick.delivery.tolerance == foresight.days.forming.tolerance
+    assert tick.forming.tolerance.line == pytest.approx(1.0 - runtime.config.foresight.false_alarm_rate)
     from habitus.runtime.foresight import ForesightRuntimeComponents
 
     other = BehaviorTree(tmp_path / "elsewhere")
@@ -867,7 +890,8 @@ def test_the_runtime_starts_and_stops_the_nightly_worker_and_reports_how_old_the
     )
     worker.nightly.scene.calendar.problems = ()  # type: ignore[attr-defined]
     today = datetime.now(UTC).astimezone(zone).date()
-    stale = today - timedelta(days=3)  # 连着两个周期（一天一趟）没出新的一晚
+    stale = today - timedelta(days=1)  # 昨天已定稿、今天这一晚的表还没出来：落后于"最后定稿日 + 1"（裁定 68 第 4 条）
+    worker.nightly.closed_days = lambda: (today - timedelta(days=1),)  # type: ignore[attr-defined]
     foresight.opportunities.write(OpportunityTable("session", stale, stale, 15, 3, (), ()))
     report = asyncio.run(runtime.health())
     assert check(report, "opportunities_session").status.value == "degraded"
@@ -875,9 +899,6 @@ def test_the_runtime_starts_and_stops_the_nightly_worker_and_reports_how_old_the
     report = asyncio.run(runtime.health())
     item = check(report, "opportunities_session")
     assert item.status.value == "healthy" and item.detail == f"night:{today}" and not item.critical
-    # 节拍短于半天：一天最多出一晚新的表，今天那一晚到晚上也不算旧（2026-10-18 四方评审）
-    worker.interval_seconds = 3600.0
-    assert check(asyncio.run(runtime.health()), "opportunities_session").status.value == "healthy"
 
 
 def test_every_derived_store_keeps_the_configured_number_of_fallback_generations(tmp_path: Path) -> None:
@@ -897,3 +918,180 @@ def test_every_derived_store_keeps_the_configured_number_of_fallback_generations
     ]
     assert behavior.derived_versions is not None
     assert scene.concepts.synced_version() in behavior.derived_versions()
+
+
+def test_a_host_transcript_with_parallel_tools_whose_times_go_backwards_is_remembered_over_http(tmp_path: Path) -> None:
+    """ZCode / OpenCode 并行工具的时刻倒退（调用 2 早于结果 1 开始、结果 2 早于结果 1 结束）：宿主自己合法的转写，
+    本地服务收下（不是不可重试的 400、插件不会挡住这个会话），按转写顺序存、时刻不降。"""
+
+    async def scenario() -> None:
+        providers, vectors = runtime_dependencies()
+        runtime = build_runtime(
+            runtime_config(tmp_path), providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())
+        )
+        runtime.initialize()
+        start = 1_790_000_000_000
+
+        def tool(call_id: str, begin: int, end: int) -> dict:
+            return {
+                "type": "tool", "callID": call_id, "tool": "WebSearch",
+                "state": {"status": "completed", "input": {"q": call_id}, "output": call_id, "time": {"start": start + begin, "end": start + end}},
+            }
+
+        records = [
+            {"info": {"role": "user", "time": {"created": start}}, "parts": [{"type": "text", "text": "查一下", "time": {"end": start}}]},
+            {"info": {"role": "assistant", "time": {"created": start + 50}}, "parts": [
+                tool("a", 100, 5000), tool("b", 200, 4000), {"type": "text", "text": "好了", "time": {"end": start + 5200}},
+            ]},
+        ]
+        transport = httpx.ASGITransport(app=create_http_app(runtime))
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8787") as client:
+            remembered = await client.post(
+                "/api/v1/memory/remember",
+                json={
+                    "conversation_id": "zcode-parallel-tools",
+                    "started_on": "2026-10-01",
+                    "protocol": "zcode",
+                    "payload": {"records": records},
+                    "start_sequence": 0,
+                    "occurred_at": BASE_TIME.isoformat(),
+                    "after_turn": True,
+                },
+            )
+        assert remembered.status_code == 200, remembered.text
+        live = await runtime.read_live_conversation(ConversationAddress("zcode-parallel-tools", date(2026, 10, 1)))
+        assert live is not None
+        assert [(item.role.value, item.tool_call_id) for item in live.messages] == [
+            ("prompt", None), ("tool_call", "a"), ("tool_result", "a"), ("tool_call", "b"), ("tool_result", "b"), ("completion", None)
+        ]
+        assert all(left.occurred_at <= right.occurred_at for left, right in zip(live.messages, live.messages[1:], strict=False))
+        await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_rounds_a_host_ended_with_a_quota_error_are_remembered_and_do_not_hold_up_the_next_one(tmp_path: Path) -> None:
+    """真实 ZCode 形状（裁定 76 第 2 条）：两次工具之后 429、"继续"之后直接 429（这一轮只有他那句话），报错只在
+    ``info.error``；两轮都照出一条答复封口，后面正常的一轮照常进记忆，没有一批被挡在前一批后面。"""
+
+    async def scenario() -> None:
+        providers, vectors = runtime_dependencies()
+        runtime = build_runtime(
+            runtime_config(tmp_path), providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())
+        )
+        runtime.initialize()
+        start = 1_791_467_400_000
+        busy = {
+            "name": "StartPlanBusyAutoRetryExhaustedError",
+            "data": {"message": "Start Plan is busy and automatic model stream recovery reached the maximum retry count.",
+                     "code": "model_rate_limited"},
+        }
+
+        def user(at: int, text: str) -> dict:
+            return {"info": {"role": "user", "time": {"created": start + at}}, "parts": [{"type": "text", "text": text}]}
+
+        def bash(call_id: str, at: int) -> dict:
+            return {"type": "tool", "callID": call_id, "tool": "Bash",
+                    "state": {"status": "completed", "input": {"command": "ls"}, "output": "a.txt", "time": {"start": start + at, "end": start + at + 10}}}
+
+        batches = [
+            [user(0, "看下目录"),
+             {"info": {"role": "assistant", "time": {"created": start + 5}}, "parts": [{"type": "step-start"}, bash("b1", 10), bash("b2", 30)]},
+             {"info": {"role": "assistant", "time": {"created": start + 60, "completed": start + 170}, "error": busy}, "parts": [{"type": "step-start"}]}],
+            [user(1_000, "继续"),
+             {"info": {"role": "assistant", "time": {"created": start + 1_010, "completed": start + 1_100}, "error": busy}, "parts": [{"type": "step-start"}]}],
+            [user(2_000, "再试一次"),
+             {"info": {"role": "assistant", "time": {"created": start + 2_010}}, "parts": [{"type": "text", "text": "好了"}]}],
+        ]
+        sequence = 0
+        transport = httpx.ASGITransport(app=create_http_app(runtime))
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8787") as client:
+            for records in batches:
+                remembered = await client.post(
+                    "/api/v1/memory/remember",
+                    json={
+                        "conversation_id": "zcode-quota",
+                        "started_on": "2026-10-01",
+                        "protocol": "zcode",
+                        "payload": {"records": records},
+                        "start_sequence": sequence,
+                        "occurred_at": BASE_TIME.isoformat(),
+                        "after_turn": True,
+                    },
+                )
+                assert remembered.status_code == 200, remembered.text
+                sequence = await runtime.conversation_cursor(ConversationAddress("zcode-quota", date(2026, 10, 1)))
+        assert sequence == 10  # 6 + 2 + 2：每一批都进了 journal，一批也没被挡住
+        await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_daily_reminder_is_not_held_back_as_a_return_after_absence_by_the_settlement_lag(tmp_path: Path) -> None:
+    """G3：天天做、已在提醒档的事，第 T 天白天账上的事实只到 T−2（D 日那条 D+2 04:00 才结），T−1 那条已形成还没结算。
+    经 ``build_runtime`` 组装的递送那一拍，时窗开时记「等时窗末」，不记「久别回来」。"""
+
+    from datetime import timedelta
+
+    from habitus.foresight.edges import PastMoment
+    from habitus.foresight.history import Moment, UnitHistory
+    from habitus.foresight.ledger import AccountFact, AccountLevel, Expectation, UnitLevel, account_key
+    from habitus.foresight.opportunities import DayWatch, OpportunityTable
+    from habitus.runtime.foresight_delivery import JudgeMaterials
+
+    runtime = _fully_enabled_runtime(tmp_path)
+    foresight = runtime.components.foresight
+    assert foresight is not None and foresight.worker is not None
+    delivery = foresight.worker.tick.delivery
+    assert delivery is not None
+    ledger = foresight.ledger
+    zone = runtime.config.locale.zone()
+    kind = "s-k0002"
+    account = account_key(kind, "日子", "rel")
+    today = datetime(2026, 10, 31, 9, 0, tzinfo=zone)
+
+    def formed(offset: int) -> Expectation:
+        at = today - timedelta(days=offset)
+        return Expectation(
+            expectation_id=f"e-{offset}",
+            kind_token=kind,
+            day=at.date(),
+            formed_at=at,
+            source="日子",
+            trigger="rel",
+            trigger_instance=f"behavior://e-{offset}.md",
+            window=(at + timedelta(minutes=10), at + timedelta(minutes=40)),
+            deadline=datetime.combine(at.date() + timedelta(days=1), datetime.min.time(), tzinfo=zone),
+            basis=(),
+            opportunities=8,
+            hits=8,
+            observed_from=at,
+        )
+
+    settled = range(30, 1, -1)  # T−30 … T−2：结过、那天结完了
+    for offset in settled:
+        item = formed(offset)
+        ledger.record_expectation(item)
+        ledger.append_fact(AccountFact(account, item.formed_at, True, 1.0, "准时", item.expectation_id))
+        ledger.mark_final(item.day, at=item.formed_at + timedelta(days=2))
+    ledger.record_expectation(formed(1))  # T−1：已形成，最晚时限那天还没定稿，没结算
+    ledger.record_expectation(formed(0))
+    ledger.record_level(AccountLevel(account, today - timedelta(days=31), 1))
+    ledger.record_unit_level(UnitLevel(kind, today - timedelta(days=31), 1))
+    foresight.history.store.write(
+        UnitHistory(
+            "session",
+            (today - timedelta(days=1)).date(),
+            {
+                kind: tuple(
+                    Moment(PastMoment(formed(offset).formed_at, frozenset({account}), True), (f"{kind}-{offset}",))
+                    for offset in settled
+                )
+            },
+        )
+    )
+    watch = tuple(DayWatch((today - timedelta(days=offset)).date(), 1.0) for offset in range(31, 0, -1))
+    table = OpportunityTable("session", (today - timedelta(days=1)).date(), None, 15, 3, (), (), watch=watch)
+
+    report = asyncio.run(delivery.run_once(today + timedelta(minutes=15), JudgeMaterials(table, lambda uris: {})))
+    assert report.by_reason == {"等时窗末": 1} and report.by_level == {1: 1}

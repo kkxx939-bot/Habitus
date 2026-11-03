@@ -7,8 +7,9 @@ from contextlib import contextmanager
 from importlib import import_module
 from typing import Any
 
-from habitus.config.observability import ObservabilityTracingConfig
-from habitus.foundation.observability import ObservationEvent, ObservationStatus, project_metric_updates
+from habitus.foundation.observability import ObservationEvent, ObservationStatus
+from habitus.infrastructure.observability.config import ObservabilityTracingConfig
+from habitus.infrastructure.observability.metrics import project_metric_updates
 
 
 class OpenTelemetryBackend:

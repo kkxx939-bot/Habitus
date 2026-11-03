@@ -12,8 +12,6 @@ from habitus.behavior.fusion.judgement import (
     BehaviorFact,
     BehaviorJudgement,
     BehaviorJudgementBatch,
-    JudgementLink,
-    JudgementRelation,
     JudgementStatus,
     JudgementStatusBasis,
 )
@@ -31,8 +29,6 @@ def judgement(
     basis: list[str] | None = None,
     status: str | None = "completed",
     status_basis: str | None = "observed",
-    relations: list[tuple[str, int]] | None = None,
-    context_relations: list[tuple[str, int]] | None = None,
 ) -> dict[str, Any]:
     """一条判断；``basis`` 按顺序给出事实语义，编号自动从 1 排。"""
 
@@ -47,10 +43,6 @@ def judgement(
         "basis": [{"basis_no": index, "semantics": item} for index, item in enumerate(facts, start=1)],
         "status": None if unreadable else status,
         "status_basis": None if unreadable else status_basis,
-        "relations": [
-            *({"kind": kind, "target": target, "context_target": None} for kind, target in (relations or [])),
-            *({"kind": kind, "target": None, "context_target": target} for kind, target in (context_relations or [])),
-        ],
     }
 
 
@@ -79,7 +71,7 @@ def wire(
     return {"judgements": judgements, "frames": frames(assignment)}
 
 
-def batch_from(raw: dict[str, Any], *, fragment_count: int) -> BehaviorJudgementBatch:
+def batch_from(raw: dict[str, Any]) -> BehaviorJudgementBatch:
     """把 ``wire`` 的写法翻成一批判断：每条判断覆盖哪些帧、每条步骤落在哪些帧，由 ``frames`` 的归属反推。"""
 
     covers: dict[int, list[int]] = {}
@@ -89,7 +81,6 @@ def batch_from(raw: dict[str, Any], *, fragment_count: int) -> BehaviorJudgement
             covers.setdefault(item["judgement_no"], []).append(frame["no"])
             if item["basis_no"] is not None:
                 steps.setdefault((item["judgement_no"], item["basis_no"]), []).append(frame["no"])
-    owned = {no for numbers in covers.values() for no in numbers}
     judgements = []
     for item in raw["judgements"]:
         number = item["judgement_no"]
@@ -106,15 +97,10 @@ def batch_from(raw: dict[str, Any], *, fragment_count: int) -> BehaviorJudgement
                 claim=BehaviorClaim(behavior=item["behavior"], goal=item["goal"], summary=item["summary"], basis=basis),
                 status=None if item["status"] is None else JudgementStatus(item["status"]),
                 status_basis=None if item["status_basis"] is None else JudgementStatusBasis(item["status_basis"]),
-                relations=tuple(
-                    JudgementLink(JudgementRelation(link["kind"]), link["target"], link["context_target"])
-                    for link in item["relations"]
-                ),
             )
         )
-    judgements.sort(key=lambda entry: entry.earliest_fragment_no)
-    unowned = tuple(no for no in range(1, fragment_count + 1) if no not in owned)
-    return BehaviorJudgementBatch(tuple(judgements), unowned_fragment_nos=unowned)
+    judgements.sort(key=lambda entry: entry.covers[0])
+    return BehaviorJudgementBatch(tuple(judgements))
 
 
 __all__ = ["SUBJECT", "batch_from", "frames", "judgement", "unreadable", "wire"]

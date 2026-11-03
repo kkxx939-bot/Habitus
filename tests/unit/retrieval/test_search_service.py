@@ -10,8 +10,9 @@ from pathlib import Path
 import pytest
 
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
-from habitus.memory.compaction import MemoryContextUseResult
+from habitus.memory.compaction import (
+    MemoryContextUseResult,
+)
 from habitus.memory.conversation import (
     ConversationAddress,
     ConversationMessageJournal,
@@ -24,14 +25,17 @@ from habitus.memory.conversation.indexing import ConversationSummaryMatch
 from habitus.memory.conversation.indexing.model import summary_reference
 from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryDirectory, MemoryKind, MemoryLevel
-from habitus.memory.retrieval import (
-    ConversationSearchContextReader,
-    MemoryContextAssembler,
-    MemoryQueryResult,
+from habitus.memory.recall import (
     MemoryRecallLifecycle,
     MemoryRecallLifecycleConfig,
     MemoryRecallLifecycleError,
     MemoryRecallTarget,
+    SQLiteMemoryRecallLifecycleStore,
+)
+from habitus.memory.retrieval import (
+    ConversationSearchContextReader,
+    MemoryContextAssembler,
+    MemoryQueryResult,
     MemoryRetrievalGrader,
     MemorySearchHit,
     MemorySearchMode,
@@ -42,7 +46,6 @@ from habitus.memory.retrieval import (
     MemoryTypedQuery,
     MemoryVectorMatch,
     SearchService,
-    SQLiteMemoryRecallLifecycleStore,
 )
 from habitus.memory.snapshot import MemorySnapshotReader
 from habitus.memory.tree import MemoryTree
@@ -57,6 +60,7 @@ from habitus.model_client import (
     StructuredChatClient,
 )
 from tests.helpers import document, segment, segment_summary
+from tests.lock_store import ProcessLocalLockStore
 from tests.model_helpers import prepare_chat_request
 
 

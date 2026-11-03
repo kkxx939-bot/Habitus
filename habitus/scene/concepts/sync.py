@@ -11,10 +11,13 @@
 - **汇总概念的成员跟着改写成现编号**：成员里有类拆出了新类，新类加进来；成员被并掉，换成并入的那个类。这样曲线（桥）
   与命中聚合、重言判断读的是同一份成员（第二轮评审 C2）。改写之后不足两个成员的，保持原样（并掉的那个类已经没有记录，
   不影响读数）。
+- **写盘前整体核对**：计划写完的概念集必须自洽。会与在用概念撞显示名的那几份不写、连同理由交给夜批报出来，其余照常
+  （撞名时怎么改名方案没定，这里不替词表改名）。
 """
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -23,6 +26,7 @@ from habitus.scene.concepts.calendar_situations import calendar_concepts
 from habitus.scene.concepts.catalog import CatalogChanges, CatalogClass, MovedOccurrence
 from habitus.scene.concepts.model import (
     ConceptDefinition,
+    ConceptError,
     ConceptKind,
     ConceptOrigin,
     ConceptRole,
@@ -40,6 +44,8 @@ class SyncPlan:
     write: tuple[ConceptDefinition, ...] = ()
     #: 迁移改了编号的 occurrence：它们所在的日子要重映射。
     moved: tuple[MovedOccurrence, ...] = ()
+    #: 写进去会让概念集不自洽（与在用的概念撞了显示名）而没写的，连同理由；夜批报出来，盘上不留这份。
+    rejected: tuple[tuple[ConceptDefinition, str], ...] = ()
 
 
 def base_concept(item: CatalogClass, *, now: datetime) -> ConceptDefinition:
@@ -78,7 +84,40 @@ def plan_sync(
         if item is not None
     )
     write += _calendar(existing, now=now, observed=observed)
-    return SyncPlan(version=changes.version, write=write, moved=changes.moved)
+    accepted, rejected = _consistent(existing, write)
+    return SyncPlan(version=changes.version, write=accepted, moved=changes.moved, rejected=rejected)
+
+
+def _consistent(
+    existing: ConceptSet, write: tuple[ConceptDefinition, ...]
+) -> tuple[tuple[ConceptDefinition, ...], tuple[tuple[ConceptDefinition, str], ...]]:
+    """写盘之前整体核一遍：计划写完的概念集要自洽。不自洽时按计划顺序一份一份加，加进去不自洽的那份不写。
+
+    撞名（类改成或长成与在用概念同一个显示名）在词表那边是合法的，这里不替它改名，只是不写、报出来：
+    已有的概念照旧，其余照常同步；词表把名字改开之后，下一次同步按全部类核对时自然补上。
+    """
+
+    def compose(items: Iterable[ConceptDefinition]) -> ConceptSet:
+        merged = dict(existing.items())
+        merged.update((item.identity, item) for item in items)
+        return ConceptSet(merged.values())
+
+    try:
+        compose(write)
+    except ConceptError:
+        pass
+    else:
+        return write, ()
+    accepted: list[ConceptDefinition] = []
+    rejected: list[tuple[ConceptDefinition, str]] = []
+    for item in write:
+        try:
+            compose((*accepted, item))
+        except ConceptError as exc:
+            rejected.append((item, str(exc)))
+        else:
+            accepted.append(item)
+    return tuple(accepted), tuple(rejected)
 
 
 def _calendar(
@@ -110,23 +149,28 @@ def _reconcile(existing: ConceptSet, item: CatalogClass, *, now: datetime) -> Co
 
 
 def _regroup(item: ConceptDefinition, changes: CatalogChanges) -> ConceptDefinition | None:
-    """汇总概念的成员改写成现编号：拆出来的新类加进来，被并掉的换成并入的类；没变或改写后不足两个就不写。"""
+    """汇总概念的成员改写成现编号：拆出来的新类加进来，被并掉的换成并入的类；没变或改写后不足两个就不写。
+
+    按"走到过的类"推进，每个类只走一次：一个类拆出的类加在末尾，被并掉的类原位换成并入的类（再走它）。
+    这样"先拆出、新类又并进别的类"或并链首尾相接，都在有限步里停下。
+    """
 
     if item.kind is not ConceptKind.GROUP:
         return None
-    members = list(item.classes)
-    changed = True
-    while changed:
-        changed = False
-        for new, source in changes.split_from.items():
-            if source in members and new not in members:
-                members.append(new)
-                changed = True
-        for old, target in changes.merged_into.items():
-            if old in members:
-                members = [target if member == old else member for member in members]
-                changed = True
-        members = list(dict.fromkeys(members))
+    members: list[str] = []
+    seen: set[str] = set()
+    pending = deque(item.classes)
+    while pending:
+        current = pending.popleft()
+        if current in seen:
+            continue
+        seen.add(current)
+        pending.extend(new for new, source in changes.split_from.items() if source == current)
+        target = changes.merged_into.get(current)
+        if target is None:
+            members.append(current)
+        else:
+            pending.appendleft(target)
     if tuple(members) == item.classes or len(members) < 2:
         return None
     return replace(item, classes=tuple(members))

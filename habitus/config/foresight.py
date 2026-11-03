@@ -7,10 +7,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from habitus.config.loader import construct_config
+from habitus.config.loader import construct_config, group_fields
 
 _INT_BOUNDS = (
     ("daily_reminder_cap", 1, 100),
@@ -30,6 +30,50 @@ _FLOAT_BOUNDS = (
     ("outlet_match_similarity", 0.1, 1.0),
 )
 _FLAGS = ("enabled", "shadow_uses_unestablished")
+_STORE_BOUNDS = (
+    ("record_max_bytes", 1_024, 64 * 1024 * 1024),
+    ("directory_max_entries", 1_000, 10_000_000),
+    ("unreadable_max_paths", 1, 1_000_000),
+    ("outlet_max_entries", 100, 1_000_000),
+    ("unit_moment_max_records", 1_000, 100_000_000),
+    ("unit_moment_max_record_bytes", 1_024, 16 * 1024 * 1024),
+    ("unit_history_max_bytes", 1_024 * 1_024, 1_024 * 1_024 * 1_024),
+    ("opportunity_table_max_bytes", 1_024 * 1_024, 1_024 * 1_024 * 1_024),
+    ("nightly_max_entries", 100, 1_000_000),
+)
+
+
+@dataclass(frozen=True)
+class ForesightStoreConfig:
+    """预测层落盘的容量闸（AGENTS"可调运维边界"）：一份记录多大、一个目录多少条、坏文件清单记多少条、每晚派生物多大。
+    闸只是保护，不是统计量；撞上了是该看容量的信号（压实、退出、释放是否在推进）。"""
+
+    # 账本与出口的一份记录最多多少字节（写入就查，超限的不落盘）。
+    record_max_bytes: int = 1_000_000
+    # 账本一个目录最多列多少条（日目录、按账、按行为单元的目录）。
+    directory_max_entries: int = 100_000
+    # 两次取走之间最多记多少条坏文件路径（再多的只计不记）。
+    unreadable_max_paths: int = 1_000
+    # 出口一个目录（取走记录、问过的提问、宿主活性）最多列多少条。
+    outlet_max_entries: int = 10_000
+    # 单元历史的每刻记录一条 lane 最多多少份、一份最多多少字节。
+    unit_moment_max_records: int = 200_000
+    unit_moment_max_record_bytes: int = 64 * 1024
+    # 一晚的单元历史快照、机会表最多多少字节。
+    unit_history_max_bytes: int = 32 * 1024 * 1024
+    opportunity_table_max_bytes: int = 16 * 1024 * 1024
+    # 每晚派生物一条 lane 的目录最多列多少条。
+    nightly_max_entries: int = 10_000
+
+    def __post_init__(self) -> None:
+        for name, lower, upper in _STORE_BOUNDS:
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or not lower <= value <= upper:
+                raise ValueError(f"foresight.store.{name} must be an integer between {lower} and {upper}")
+
+    @classmethod
+    def from_mapping(cls, value: Any) -> ForesightStoreConfig:
+        return construct_config(cls, value, "config.foresight.store")
 
 
 @dataclass(frozen=True)
@@ -62,9 +106,10 @@ class ForesightConfig:
     tick_interval_seconds: float = 900.0
     worker_shutdown_timeout_seconds: float = 30.0
     # ── 账本遗忘的半衰期（几次机会，裁定 57）──
-    # 一笔证据的分量只看它之后这本账又来了几次机会（边数这本账的全部机会，单元的提醒反馈只数到时窗末还没做的，裁定 60 第 4 条），不看隔了几天：
+    # 一笔证据的分量只看它之后这本账又来了几次机会（边数这本账的全部机会，单元的提醒反馈数这个行为单元历史里的每一次机会，裁定 91 第 3 条①），不看隔了几天：
     # 一个月一次的事不再被压到只剩两三次有效样本。行为单元按每一层自己的刻数、temporal 的时段读数按最近 M 次用同一个 H，
-    # M = ⌈H · log₂(1/α)⌉ 由组合根算。暂定值，回放后定。
+    # M = ⌈H · log₂(1/α)⌉ 由组合根算。账的久别也用这个 H：空白至少 H 个典型间隔（历史间隔中位数）才算（裁定 88 第 2 条）。
+    # 暂定值，回放后定。
     half_life_opportunities: float = 8.0
     # ── 提醒出口（方案 32；裁定 64 第 4 条的启动值，以后从真实运行定）──
     # 活性：最近几小时内有宿主来取过提醒，才算"有宿主活着"——有活着的才问模型写话、记「待取」，没有记「不可达」、不花模型钱。
@@ -81,8 +126,12 @@ class ForesightConfig:
     # "skip"：日历关系只在见过他做的那几种日型上建（只在工作日的周三做过，国庆的周三不建）；
     # "official"：没见过的日型按外接放假数据的官方含义归组（调休上班算上班、节假日算休息）。只管建预期，不管关系检验。
     unseen_day_types: str = "skip"
+    # ── 落盘的容量闸 ──
+    store: ForesightStoreConfig = field(default_factory=ForesightStoreConfig)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.store, ForesightStoreConfig):
+            raise TypeError("foresight.store must be ForesightStoreConfig")
         if self.unseen_day_types not in ("skip", "official"):
             raise ValueError("foresight.unseen_day_types must be 'skip' or 'official'")
         for name in _FLAGS:
@@ -102,7 +151,9 @@ class ForesightConfig:
 
     @classmethod
     def from_mapping(cls, value: Any) -> ForesightConfig:
-        return construct_config(cls, value, "config.foresight")
+        data = dict(group_fields(cls, value, "config.foresight"))
+        data["store"] = ForesightStoreConfig.from_mapping(data.get("store", {}))
+        return construct_config(cls, data, "config.foresight")
 
 
-__all__ = ["ForesightConfig"]
+__all__ = ["ForesightConfig", "ForesightStoreConfig"]

@@ -1,19 +1,13 @@
-"""把闭合的链与没读懂段物化成行为树 payload。
+"""把封口的判断物化成行为树 payload：一条可读判断一条 occurrence，一条空判断一段空白。
 
-纯函数、零发明：每个字段的取值规则都是 ``TODO(BHV-TREE-REBUILD-001)`` 的既定裁定——身份看
-链头、结局看链尾、过程全保留；时间在这里做**唯一一次**换算（本地+偏移进树，树内与读侧零换算）。
+纯函数、零发明：每个字段的取值规则都是 ``TODO(BHV-TREE-REBUILD-001)`` 的既定裁定——语义逐字来自
+判断；时间在这里做**唯一一次**换算（本地+偏移进树，树内与读侧零换算）。
 产出为 JSON 可序列化的字典（时间全部是 ISO 字符串）：同一份 payload 既直接过 schema 校验，也
 能逐字节写进 staged 检查点——崩溃重试逐字节重放的前提。
 
-已定但值得点名的两条取数规则：
-
-- ``goal`` 与 summary 同一条纪律：**链内非空值按序去重拼接**（用户裁定：原封不动保留，语义
-  关联层靠它做判断，不许替模型二选一或置空丢失）。各段一致时去重后就是那一个；前段判不出、
-  后段判出时自然只剩后段的；前后段声明了不同目标时两个都在（"清理餐桌；准备待客"）——分歧
-  本身就是语义。goal 与 basis 的空非空互不约束（WP4 随"一条 occurrence = 可提醒可代劳的单位"改定）。
-- basis 每步的时间从观测物化：起止取覆盖观测 ``occurred_at`` 的最小/最大（按各自的本地偏移
-  还原），``available_at`` 取覆盖观测的最大值、用末观测的偏移表达——判断存储会释放，这些时间
-  必须在此自足。
+已定但值得点名的取数规则：goal 与 basis 的空非空互不约束（WP4 随"一条 occurrence = 可提醒可代劳的单位"
+改定）；basis 每步的时间从观测物化：起止取覆盖观测 ``occurred_at`` 的最小/最大（按各自的本地偏移
+还原），``available_at`` 取覆盖观测的最大值、用末观测的偏移表达——判断存储会释放，这些时间必须在此自足。
 """
 
 from __future__ import annotations
@@ -24,38 +18,42 @@ from typing import Any
 
 from habitus.behavior.model import BehaviorAddress
 from habitus.behavior.observation import BehaviorObservation
-from habitus.behavior.reduction.chains import BehaviorChain
 from habitus.behavior.reduction.errors import BehaviorReductionError
 from habitus.behavior.reduction.record import ReducibleJudgement
-from habitus.behavior.schema.vocabulary import UNREADABLE_GAP
+from habitus.behavior.schema.vocabulary import ERROR_GAP, UNREADABLE_GAP
 
 REDUCTION_VERSION = "behavior_reduction_v1"
 
 UNREADABLE_GAP_KIND = UNREADABLE_GAP
 UNOBSERVED_GAP_KIND = "未观测"
+ERROR_GAP_KIND = ERROR_GAP
 # 空判断上写着这个依据的，是上游说"这段时间没在看"（物理 lane 的覆盖时段），不是看了没读懂。
 _UNOBSERVED_BASIS = "unobserved"
+# 空判断上写着这个依据的，是系统出了问题没读成（裁定 94 第 3 条），不是模型读了给不出结论。
+ERROR_BASIS = "error"
 
 
 def gap_kind_of(record: ReducibleJudgement) -> str:
-    """一条空判断落成哪种空白：上游说没在看的是「未观测」，其余是「没读懂」。"""
+    """一条空判断落成哪种空白：上游说没在看的是「未观测」，系统出了问题的是「错误」，其余是「没读懂」。"""
 
-    return UNOBSERVED_GAP_KIND if record.status_basis == _UNOBSERVED_BASIS else UNREADABLE_GAP_KIND
+    if record.status_basis == _UNOBSERVED_BASIS:
+        return UNOBSERVED_GAP_KIND
+    return ERROR_GAP_KIND if record.status_basis == ERROR_BASIS else UNREADABLE_GAP_KIND
 
 
 def _iso(value: datetime) -> str:
     return value.isoformat(timespec="microseconds")
 
 
-def chain_address(chain: BehaviorChain, name: str) -> BehaviorAddress:
-    """链在树上的地址；撞车消歧时以后缀名重算。"""
+def occurrence_address(record: ReducibleJudgement, name: str) -> BehaviorAddress:
+    """一条可读判断在树上的地址；撞车消歧时以后缀名重算。"""
 
-    started_at = chain.head.started_at
+    started_at = record.started_at
     return BehaviorAddress.occurrence(started_at.date(), name, started_at)
 
 
 def occurrence_payload(
-    chain: BehaviorChain,
+    record: ReducibleJudgement,
     *,
     name: str,
     original_name: str | None,
@@ -64,49 +62,38 @@ def occurrence_payload(
     reminded: bool = False,
     prompted_by: str | None = None,
 ) -> dict[str, Any]:
-    """一条闭合链的 occurrence payload。``name`` 已含可能的消歧后缀；``reminded`` 是调用方在 stage 之前
+    """一条可读判断的 occurrence payload。``name`` 已含可能的消歧后缀；``reminded`` 是调用方在 stage 之前
     对着预测层账本查好的"开始前有没有被提醒过"（本层对预测层零知识，只收一个布尔）。``prompted_by`` 是谁发起的
     （裁定 54）；不知道是 None、不写这个字段。系统提醒过的就是 system。"""
 
-    head, tail = chain.head, chain.tail
-    if head.behavior is None or tail.status is None or tail.status_basis is None:
+    if record.behavior is None or record.status is None or record.status_basis is None or record.summary is None:
         raise BehaviorReductionError("an occurrence chain must be built from readable judgements")
-    summaries = [member.summary for member in chain.view]
-    if any(item is None for item in summaries):
-        raise BehaviorReductionError("an occurrence chain must be built from readable judgements")
-    last_observed = chain.last_observed_at
-    # "何时可知"存储为 UTC；进树换算成链头行为时刻的本地偏移——occurrence 上只有一种时间约定。
-    onset = head.evidence_ready_at.astimezone(head.started_at.tzinfo)
-    consumed = chain.consumed
-    basis = [
-        _basis_step(semantics, observation_ids, observations)
-        for member in chain.view
-        for semantics, observation_ids in member.basis
-    ]
-    distinct_goals = {item.goal: None for item in chain.view if item.goal is not None}
-    goal = "；".join(distinct_goals) if distinct_goals else None
-    del consumed  # 溯源只留链身份：原料在发布后即释放，逐条 id 只会是死引用（实测占文档 70%）
+    # "何时可知"存储为 UTC；进树换算成行为开始时刻的本地偏移——occurrence 上只有一种时间约定。
+    onset = record.evidence_ready_at.astimezone(record.started_at.tzinfo)
+    basis = [_basis_step(semantics, observation_ids, observations) for semantics, observation_ids in record.basis]
+    # 溯源只留节点身份：原料在发布后即释放，逐条观测 id 只会是死引用（实测占文档 70%）
     return {
-        "occurred_on": head.started_at.date().isoformat(),
+        "occurred_on": record.started_at.date().isoformat(),
         "name": name,
-        "started_at": _iso(head.started_at),
+        "started_at": _iso(record.started_at),
         "kind_token": kind_token,
-        "status": tail.status,
-        "status_basis": tail.status_basis,
-        "last_observed_at": _iso(last_observed),
+        "status": record.status,
+        "status_basis": record.status_basis,
+        "last_observed_at": _iso(record.last_observed_at),
         "onset_available_at": _iso(onset),
         # 开始前窗口内是否提醒过：由 runner 经组合根注入的端口查预测层账本，在 stage 前定格（死规则⑤）。
         "reminded": bool(reminded),
-        "goal": goal,
-        "summary": "；".join(item for item in summaries if item is not None),
-        "subjects": _merged_subjects(chain),
+        "goal": record.goal,
+        "summary": record.summary,
+        # 共同行动的人都保住，按首次出现的顺序、不重复。
+        "subjects": list(dict.fromkeys(record.subjects)),
         # 上游契约缺口：place 等观测侧提供后由此填入。
         "place": None,
         "original_name": original_name,
         "basis": basis,
         **({"prompted_by": "system" if reminded else prompted_by} if (reminded or prompted_by is not None) else {}),
-        "chain_digest": chain.chain_digest,
-        "fusion_version": head.fusion_version,
+        "chain_digest": record.chain_digest,
+        "fusion_version": record.fusion_version,
         "reduction_version": REDUCTION_VERSION,
     }
 
@@ -127,16 +114,6 @@ def gap_payload(record: ReducibleJudgement, *, chain_digest: str) -> dict[str, A
         "chain_digest": chain_digest,
         "reduction_version": REDUCTION_VERSION,
     }
-
-
-def _merged_subjects(chain: BehaviorChain) -> list[str]:
-    """链内主体的并集，按首次出现的顺序——共同行动的人都保住，不重复。"""
-
-    seen: dict[str, None] = {}
-    for member in chain.view:
-        for subject in member.subjects:
-            seen.setdefault(subject, None)
-    return list(seen)
 
 
 def _basis_step(
@@ -167,9 +144,11 @@ def _basis_step(
 __all__ = [
     "REDUCTION_VERSION",
     "UNOBSERVED_GAP_KIND",
+    "ERROR_BASIS",
+    "ERROR_GAP_KIND",
     "UNREADABLE_GAP_KIND",
-    "chain_address",
     "gap_kind_of",
     "gap_payload",
+    "occurrence_address",
     "occurrence_payload",
 ]

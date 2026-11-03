@@ -6,7 +6,7 @@ import asyncio
 from datetime import UTC, date, datetime, timedelta
 
 from habitus.behavior.reduction.closure import DayClosureState, plan_closure
-from tests.unit.behavior.test_reduction_runner import OBS_A, OBS_B, OBS_C, Harness, at, seed_wash_chain
+from tests.unit.behavior.test_reduction_runner import OBS_A, OBS_B, OBS_C, Harness, at, seed_wash
 
 EIGHT = timedelta(hours=8)
 THU, FRI, SAT, SUN = date(2026, 10, 15), date(2026, 10, 16), date(2026, 10, 17), date(2026, 10, 18)
@@ -80,7 +80,7 @@ def test_the_runner_closes_a_silent_day_after_a_recorded_one(tmp_path) -> None:
     """真实 runner：16 日有一条链；18 日凌晨再跑一轮时，没有任何记录的 17 日也定稿。"""
 
     harness = Harness(tmp_path)
-    seed_wash_chain(harness, harness.deliver(OBS_A, OBS_B, OBS_C))
+    seed_wash(harness, harness.deliver(OBS_A, OBS_B, OBS_C))
     asyncio.run(harness.runner.run_once())
     harness.now = at(30 * 3600)  # 18 日 01:30 CST，封口视界已过 17 日本地结束
     asyncio.run(harness.runner.run_once())

@@ -7,7 +7,7 @@ import pytest
 
 from habitus.infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
+from habitus.memory.compaction import MemoryLifecycleOperationStore, MemoryLifecycleScanStore, MemoryRecoveryStore
 from habitus.memory.document import MemoryLinkType
 from habitus.memory.editor import (
     MemoryCandidate,
@@ -35,6 +35,7 @@ from habitus.memory.snapshot import MemorySnapshotReader
 from habitus.memory.tree import MemoryTree, MemoryTreeConsistencyError
 from habitus.memory.uri import MemoryURI
 from tests.helpers import BASE_TIME, codec, memory_fields
+from tests.lock_store import ProcessLocalLockStore
 
 
 def missing_batch(*uris: MemoryURI) -> SnapshotBatch:
@@ -42,16 +43,47 @@ def missing_batch(*uris: MemoryURI) -> SnapshotBatch:
     return SnapshotBatch(snapshots, 0)
 
 
-def test_commit_transaction_rejects_noncanonical_visibility_journal(tmp_path: Path) -> None:
+def test_workflow_state_follows_the_injected_root_not_the_memory_root_parent(tmp_path: Path) -> None:
+    """记忆根挪到别处、工作目录不动：事务日志与 L2 生命周期状态都落在注入的工作目录，不再从记忆根推。"""
+
+    document_codec = codec()
+    tree = MemoryTree(tmp_path / "elsewhere" / "memory", document_codec=document_codec)
+    workflow_root = tmp_path / "data" / "workflow"
+    path_lock = PathLock(ProcessLocalLockStore())
+    journal = MemoryTransactionJournal(workflow_root / "transactions", document_codec)
+    MemoryCommitTransaction(tree, MemorySnapshotReader(tree), path_lock, journal)
+    recovery = MemoryRecoveryStore(tree, workflow_root)
+    operations = MemoryLifecycleOperationStore(tree, path_lock, workflow_root)
+    scan = MemoryLifecycleScanStore(tree, path_lock, workflow_root)
+    for store in (recovery, operations, scan):
+        store.initialize()
+
+    resolved = workflow_root.resolve()
+    assert tree.visibility_journal is journal
+    assert recovery.root == resolved / "lifecycle" / "l2_recovery"
+    assert operations.root == resolved / "lifecycle" / "l2_operations"
+    assert scan.path == resolved / "lifecycle" / "l2_scan_state.json"
+    assert not (tree.root.parent / "workflow").exists()
+
+
+def test_workflow_state_is_refused_inside_the_memory_tree(tmp_path: Path) -> None:
     document_codec = codec()
     tree = MemoryTree(tmp_path / "memory", document_codec=document_codec)
-    with pytest.raises(ValueError, match="canonical sibling"):
+    inside = tree.root / "workflow"
+    path_lock = PathLock(ProcessLocalLockStore())
+    with pytest.raises(ValueError, match="outside the L2 memory tree"):
         MemoryCommitTransaction(
             tree,
             MemorySnapshotReader(tree),
-            PathLock(ProcessLocalLockStore()),
-            MemoryTransactionJournal(tmp_path / "custom-transactions", document_codec),
+            path_lock,
+            MemoryTransactionJournal(inside / "transactions", document_codec),
         )
+    with pytest.raises(ValueError, match="outside the L2 memory tree"):
+        MemoryRecoveryStore(tree, inside)
+    with pytest.raises(ValueError, match="outside the L2 memory tree"):
+        MemoryLifecycleOperationStore(tree, path_lock, inside)
+    with pytest.raises(ValueError, match="outside the L2 memory tree"):
+        MemoryLifecycleScanStore(tree, path_lock, inside)
 
 
 def test_create_two_nodes_with_link_and_backlink_in_one_recoverable_transaction(tmp_path: Path) -> None:
@@ -222,7 +254,12 @@ def test_multi_document_commit_is_visible_to_readers_as_one_snapshot(
         tree.exists(profile.address)
     with pytest.raises(MemoryTreeConsistencyError, match="prepared multi-document"):
         tree.list_addresses()
+    # 另一个进程打开同一棵树：可见性日志由它自己的组装注入（同一个 workflow/transactions 目录），不从记忆根推。
     separately_opened_tree = MemoryTree(tree.root, document_codec=document_codec)
+    assert separately_opened_tree.visibility_journal is None
+    separately_opened_tree.bind_visibility_journal(
+        MemoryTransactionJournal(tmp_path / "workflow" / "transactions", document_codec)
+    )
     with pytest.raises(MemoryTreeConsistencyError, match="prepared multi-document"):
         separately_opened_tree.exists(profile.address)
     during = reader.read_many((profile_uri, preference_uri))

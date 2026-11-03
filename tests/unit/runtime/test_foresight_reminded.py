@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -49,11 +50,6 @@ def test_reminded_means_a_spoken_delivery_of_that_class_before_the_occurrence_st
         lookup("", FORMED)
     with pytest.raises(ForesightError):
         lookup("s-k0002", FORMED.replace(tzinfo=None))
-    # 账本读不出来：抛，不许静默记成没提醒
-    (tmp_path / "ledger" / "expectations" / "2026" / "10" / "01" / "e1.json").write_text("{", encoding="utf-8")
-    lookup = RemindedLookup(ledger)  # 新的查法（读过的那天记住了：只增的记录读一遍就够）
-    with pytest.raises(ForesightError, match="could not be read"):
-        lookup("s-k0002", FORMED + timedelta(minutes=30))
     with pytest.raises(TypeError):
         RemindedLookup(object())  # type: ignore[arg-type]
 
@@ -67,6 +63,25 @@ def test_reminded_recognises_the_class_through_the_same_mapping_as_settlement(tm
     split = RemindedLookup(ledger, current=lambda token: ("s-k0020",) if token == "s-k0002" else (token,))
     assert split("s-k0020", FORMED + timedelta(minutes=30))
     assert not RemindedLookup(ledger)("s-k0020", FORMED + timedelta(minutes=30))
+
+
+@pytest.mark.parametrize("bad", ["expectations", "deliveries"])
+def test_a_bad_ledger_file_is_skipped_and_counted_not_raised(tmp_path, bad) -> None:
+    """段 6 Q3：坏的预期 / 递送文件不让查法抛（抛的话会话 lane 归约每轮失败、那天定稿不了、结算等定稿，互等成死锁）——
+    跳过、计入观测；坏的那一份里的「说了」盖不上 reminded，读得出的照常认。"""
+
+    ledger = ForesightLedgerStore(tmp_path / "ledger")
+    ledger.record_expectation(expectation("e1"))
+    ledger.record_expectation(expectation("e2", kind="s-k0003"))
+    ledger.record_delivery(FORMED.date(), Delivery("e1", FORMED + timedelta(minutes=15), 1, True, "说了", 1.0, "话"))
+    ledger.record_delivery(FORMED.date(), Delivery("e2", FORMED + timedelta(minutes=15), 1, True, "说了", 1.0, "话"))
+    directory = tmp_path / "ledger" / bad / "2026" / "10" / "01"
+    broken = sorted(directory.glob("e1*.json"))[0]
+    broken.write_text('{"schema_version": 8}', encoding="utf-8")
+    lookup = RemindedLookup(ledger)
+    assert not lookup("s-k0002", FORMED + timedelta(minutes=30))  # 坏的那一份：盖不上
+    assert lookup("s-k0003", FORMED + timedelta(minutes=30))  # 同一天读得出的照常认
+    assert ledger.take_unreadable() == (str(broken),)
 
 
 def test_a_bad_file_someone_else_read_does_not_fail_the_reminder_check(tmp_path) -> None:
@@ -106,3 +121,47 @@ def test_a_finished_day_leaves_the_cache(tmp_path) -> None:
     assert not lookup("s-k0002", FORMED + timedelta(minutes=30))
 
     assert lookup._spoken == {}
+
+
+@pytest.mark.parametrize("bad", ["old_schema_delivery", "truncated_expectation"])
+def test_the_reduction_keeps_landing_rows_and_closing_days_when_a_ledger_file_is_bad(tmp_path, bad) -> None:
+    """段 6 Q3 端到端：真实归约 runner 接真实查法，还要看的那天有一份坏递送 / 坏预期——每轮照常落树、天照常定稿
+    （原来每轮抛、树上 0 条、``closed_days`` 一直是空）。"""
+
+    import asyncio
+    import json
+
+    from habitus.behavior.model import BehaviorKind
+    from tests.unit.behavior.reduction_fixtures import at
+    from tests.unit.behavior.test_reduction_runner import OBS_A, OBS_B, OBS_C, Harness, seed_wash
+
+    harness = Harness(tmp_path)
+    ledger = ForesightLedgerStore(tmp_path / "ledger")
+    formed = at(0) - timedelta(hours=1)
+    item = replace(
+        expectation("e1", kind="s-k0001"),
+        day=formed.date(),
+        formed_at=formed,
+        observed_from=formed,
+        window=(formed + timedelta(minutes=4), formed + timedelta(minutes=51)),
+        deadline=formed + timedelta(hours=30),
+    )
+    ledger.record_expectation(item)
+    ledger.record_delivery(item.day, Delivery("e1", formed + timedelta(minutes=5), 1, True, "说了", 1.0, "要洗手吗"))
+    day = f"{item.day.year:04d}/{item.day.month:02d}/{item.day.day:02d}"
+    if bad == "old_schema_delivery":
+        directory = tmp_path / "ledger" / "deliveries" / day
+        raw = json.loads(next(directory.iterdir()).read_text(encoding="utf-8"))
+        (directory / "e0--old.json").write_text(json.dumps({**raw, "schema_version": "foresight_ledger_v8"}))
+    else:
+        (tmp_path / "ledger" / "expectations" / day / "e2.json").write_text("{", encoding="utf-8")
+    harness.runner.attach_reminder_lookup(RemindedLookup(ledger))
+    seed_wash(harness, harness.deliver(OBS_A, OBS_B, OBS_C))
+    closed = []
+    for _round in range(3):
+        harness.now = harness.now + timedelta(days=1)
+        asyncio.run(harness.runner.run_once())
+        closed.append(len(harness.runner.closed_days()))
+    assert len(harness.tree.list_addresses(BehaviorKind.OCCURRENCE)) == 1
+    assert closed[-1] > closed[0] >= 1
+    assert ledger.take_unreadable()

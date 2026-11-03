@@ -67,6 +67,23 @@ class RememberRequest(StrictSchema):
         return value
 
 
+class RememberPartRequest(StrictSchema):
+    """单独一轮超过请求体上限时分块上传的一块：``data`` 是整批 remember 请求体字节的一段（标准 base64）。"""
+
+    delivery_id: DeliveryId
+    part_index: NonNegativeSequence
+    part_count: Annotated[int, Field(strict=True, ge=2, le=100_000)]
+    body_bytes: PositiveSequence
+    body_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    data: Annotated[str, Field(min_length=4)]
+
+    @model_validator(mode="after")
+    def validate_part_index(self) -> RememberPartRequest:
+        if self.part_index >= self.part_count:
+            raise ValueError("part_index must be smaller than part_count")
+        return self
+
+
 class RecallRequest(StrictSchema):
     query: Annotated[str, Field(min_length=1)]
     conversation_id: Annotated[str, Field(min_length=1, max_length=256)] | None = None
@@ -192,11 +209,11 @@ class ReminderProgressResult(StrictSchema):
     kind: str
     text: str
     deadline: datetime
-    stage: Literal["待取", "取走了", "说了", "宿主没取"]
+    stage: Literal["待取", "取走了", "说了", "宿主没取", "已发生"]
     awaiting_at: datetime
     spoken_at: datetime | None
     spoken_via: str | None
-    response: Literal["正", "中", "负"] | None
+    response: Literal["正", "中", "负", "已做"] | None
     responded_at: datetime | None
     outcome: str | None
     attempts: int | None
@@ -222,6 +239,12 @@ class CapabilitiesResult(StrictSchema):
     features: list[str]
 
 
+class ServiceCapabilitiesResult(CapabilitiesResult):
+    """``/capabilities`` 对外的那一份：服务能力加上 HTTP 层的请求体上限（插件据此把一批按轮拆成几个请求）。"""
+
+    max_request_bytes: PositiveSequence
+
+
 class RememberJobResult(StrictSchema):
     memory_sequence: PositiveSequence
     conversation_id: str
@@ -240,6 +263,14 @@ class RememberResult(StrictSchema):
     next_sequence: NonNegativeSequence
     jobs: list[RememberJobResult]
     consistency: list[ConsistencyResult]
+
+
+class RememberPartResult(StrictSchema):
+    """收下一块之后：收齐前 ``remember`` 为空；收齐那一块带回拼回的整批按 ``/memory/remember`` 处理的结果。"""
+
+    received_parts: PositiveSequence
+    part_count: PositiveSequence
+    remember: RememberResult | None
 
 
 class FlushResult(StrictSchema):
@@ -342,6 +373,8 @@ class HealthCheckResult(StrictSchema):
 class HealthResult(StrictSchema):
     status: str
     ready: bool
+    # 召回所需的就绪：不看只关记忆写入侧的检查（记忆 Job 失败待处置或在等模型恢复时召回照常可用）
+    recall_ready: bool
     checked_at: datetime
     checks: list[HealthCheckResult]
 
@@ -389,6 +422,8 @@ __all__ = [
     "CapabilitiesResult",
     "RecallRequest",
     "RecallResult",
+    "RememberPartRequest",
+    "RememberPartResult",
     "RememberRequest",
     "RememberResult",
     "ReminderClaimRequest",
@@ -396,5 +431,6 @@ __all__ = [
     "ReminderResult",
     "RetryJobRequest",
     "RetryJobResult",
+    "ServiceCapabilitiesResult",
     "SuccessResponse",
 ]

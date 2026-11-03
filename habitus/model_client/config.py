@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import ipaddress
 import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 from urllib.parse import urlsplit
+
+from habitus.foundation.network import is_loopback_host
 
 ModelCapability = Literal["chat", "embedding", "rerank"]
 EmbeddingInputMode = Literal["text", "multimodal"]
@@ -210,17 +211,8 @@ def _validate_base_url(base_url: str) -> None:
         or parsed.fragment
     ):
         raise ValueError("model base_url must be one credential-free HTTP(S) origin or API prefix")
-    if parsed.scheme == "http" and not _is_loopback_host(parsed.hostname):
+    if parsed.scheme == "http" and not is_loopback_host(parsed.hostname):
         raise ValueError("remote model base_url must use HTTPS")
-
-
-def _is_loopback_host(hostname: str) -> bool:
-    if hostname.casefold() == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(hostname).is_loopback
-    except ValueError:
-        return False
 
 
 def _positive_float(value: object, label: str, *, maximum: float) -> float:

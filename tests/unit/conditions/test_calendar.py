@@ -201,3 +201,43 @@ def test_the_runtime_reader_skips_a_bad_year_and_reports_it(tmp_path: Path) -> N
     assert not empty.years and none == ()
     missing_table, missing = read_holiday_table("CN", tmp_path / "missing")
     assert not missing_table.years and missing and "does not exist" in missing[0]
+
+
+_DEEP = "[" * 100_000 + "]" * 100_000
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        json.dumps(_year(weekend=[[5, 6]])),
+        json.dumps(_year(makeup_workdays=[{"day": f"{YEAR}-10-10"}])),
+        json.dumps(_year(makeup_workdays=[[f"{YEAR}-10-10"]])),
+        json.dumps(_year(weekend=[])).replace('"weekend": []', f'"weekend": {_DEEP}'),
+    ],
+    ids=["weekend nested", "makeup as objects", "makeup nested", "deep nesting"],
+)
+def test_a_structurally_wrong_year_is_skipped_alone(tmp_path: Path, body: str) -> None:
+    """取值写成列表 / 对象 / 深嵌套：严格读法报成数据写错；宽松读法只跳过这一年、问题交出去，同目录写对的年份照留。"""
+
+    from habitus.conditions.calendar_data import read_holiday_table
+
+    with pytest.raises(CalendarDataError):
+        parse_holiday_year(body)
+    (tmp_path / f"{YEAR}.json").write_text(body, encoding="utf-8")
+    (tmp_path / f"{YEAR - 1}.json").write_text(
+        json.dumps(_year(year=YEAR - 1, holidays={f"{YEAR - 1}-10-01": "国庆节"}, makeup_workdays=[])),
+        encoding="utf-8",
+    )
+    table, problems = read_holiday_table("CN", tmp_path)
+    assert set(table.years) == {YEAR - 1}
+    assert len(problems) == 1 and problems[0].startswith(f"{YEAR}.json")
+
+
+def test_the_runtime_reader_skips_a_year_of_another_region(tmp_path: Path) -> None:
+    """宽松读法也核地区：目录里混进一份新加坡的那一年，跳过并报出来，不当成这个地区的放假安排。"""
+
+    from habitus.conditions.calendar_data import read_holiday_table
+
+    (tmp_path / f"{YEAR}.json").write_text(json.dumps(_year(region="SG")), encoding="utf-8")
+    table, problems = read_holiday_table("CN", tmp_path)
+    assert not table.years and len(problems) == 1 and "CN" in problems[0]

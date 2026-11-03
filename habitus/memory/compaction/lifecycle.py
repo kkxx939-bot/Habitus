@@ -1,4 +1,8 @@
-"""协调 COLD_2 压缩、最终上下文恢复和终态退休。"""
+"""协调 COLD_2 压缩、最终上下文恢复和终态退休。
+
+退休与压缩互不依赖：COLD_2 且最近一次活动超过该类退休期即标候选，宽限期满删除，不要求先压缩过；
+压缩尽力而为，模型答 KEEP 只在扫描账里记"这一版内容判过"，同一版内容不再送模型。
+"""
 
 from __future__ import annotations
 
@@ -16,9 +20,13 @@ from habitus.memory.compaction.operation import (
     MemoryLifecycleOperationStore,
 )
 from habitus.memory.compaction.recovery import MemoryRecoveryStore
-from habitus.memory.compaction.scan import MemoryLifecycleScanFailure, MemoryLifecycleScanStore
+from habitus.memory.compaction.scan import (
+    MemoryCompactionKeep,
+    MemoryLifecycleScanFailure,
+    MemoryLifecycleScanStore,
+)
 from habitus.memory.document import MemoryDocument
-from habitus.memory.retrieval.lifecycle import (
+from habitus.memory.recall import (
     MemoryRecallCandidate,
     MemoryRecallLifecycle,
     MemoryRecallRanking,
@@ -85,9 +93,9 @@ class MemoryLifecycleManager:
         field_compactor: MemoryFieldCompactor,
         recovery_store: MemoryRecoveryStore,
         committer: MemoryLifecycleCommitter,
+        operation_store: MemoryLifecycleOperationStore,
+        scan_store: MemoryLifecycleScanStore,
         *,
-        operation_store: MemoryLifecycleOperationStore | None = None,
-        scan_store: MemoryLifecycleScanStore | None = None,
         config: MemoryLifecycleMaintenanceConfig | None = None,
         clock: Callable[[], datetime] | None = None,
         derived_refresh: Callable[[tuple[MemoryURI, ...]], Awaitable[None]] | None = None,
@@ -110,11 +118,9 @@ class MemoryLifecycleManager:
             raise TypeError("clock must be callable")
         if derived_refresh is not None and not callable(derived_refresh):
             raise TypeError("derived_refresh must be callable")
-        default_operations = MemoryLifecycleOperationStore(tree, committer.transaction.path_lock)
-        default_scan = MemoryLifecycleScanStore(tree, committer.transaction.path_lock)
-        if operation_store is not None and not isinstance(operation_store, MemoryLifecycleOperationStore):
-            raise TypeError("operation_store must be MemoryLifecycleOperationStore")
-        if scan_store is not None and not isinstance(scan_store, MemoryLifecycleScanStore):
+        if not isinstance(operation_store, MemoryLifecycleOperationStore) or operation_store.tree is not tree:
+            raise ValueError("lifecycle manager and operation store must share one tree")
+        if not isinstance(scan_store, MemoryLifecycleScanStore):
             raise TypeError("scan_store must be MemoryLifecycleScanStore")
         self.tree = tree
         self.snapshot_reader = snapshot_reader
@@ -122,8 +128,8 @@ class MemoryLifecycleManager:
         self.field_compactor = field_compactor
         self.recovery_store = recovery_store
         self.committer = committer
-        self.operation_store = operation_store or default_operations
-        self.scan_store = scan_store or default_scan
+        self.operation_store = operation_store
+        self.scan_store = scan_store
         self.config = config or MemoryLifecycleMaintenanceConfig()
         self.clock = clock or (lambda: datetime.now(UTC))
         self.derived_refresh = derived_refresh
@@ -135,10 +141,14 @@ class MemoryLifecycleManager:
         self.scan_store.initialize()
 
     async def maintain(self) -> MemoryLifecycleMaintenanceResult:
-        """先续跑耐久操作，再有界轮转并隔离每个 L2 节点的失败。"""
+        """先续跑耐久操作，再有界轮转并隔离每个 L2 节点的失败。
+
+        每轮压缩名额按送模型的次数算：压成、KEEP、报错都占一个。
+        """
 
         now = self._timestamp()
         self.initialize()
+        compaction_attempts = 0
         compacted: list[MemoryURI] = []
         retired: list[MemoryURI] = []
         failures: list[MemoryLifecycleMaintenanceFailure] = []
@@ -206,28 +216,34 @@ class MemoryLifecycleManager:
                     continue
                 if ranking.temperature is not MemoryTemperature.COLD_2:
                     continue
-                if ranking.state.compacted_at is None:
-                    if len(compacted) >= self.config.max_compactions_per_cycle:
+                if self.recall_lifecycle.retirement_eligible(ranking, now=now):
+                    if len(retired) >= self.config.max_retirements_per_cycle:
                         continue
-                    if await self._compact(snapshot, now=now):
-                        compacted.append(uri)
+                    await self._consider_retirement(snapshot, ranking, now=now)
+                    refreshed = await asyncio.to_thread(self._ranking, snapshot, now)
+                    if refreshed.state.retired_at is not None:
+                        operation = await asyncio.to_thread(
+                            self.operation_store.prepare,
+                            MemoryLifecycleOperationKind.RETIRE,
+                            snapshot,
+                            planned_fields=None,
+                            expected_state_version=refreshed.state.version,
+                            prepared_at=now,
+                        )
+                        outcome = await self._resume_operation(operation, finish_derived=True)
+                        if outcome is MemoryLifecycleOperationKind.RETIRE:
+                            retired.append(uri)
                     continue
-                if len(retired) >= self.config.max_retirements_per_cycle:
+                if ranking.state.compacted_at is not None:
                     continue
-                await self._consider_retirement(snapshot, ranking, now=now)
-                refreshed = await asyncio.to_thread(self._ranking, snapshot, now)
-                if refreshed.state.retired_at is not None:
-                    operation = await asyncio.to_thread(
-                        self.operation_store.prepare,
-                        MemoryLifecycleOperationKind.RETIRE,
-                        snapshot,
-                        planned_fields=None,
-                        expected_state_version=refreshed.state.version,
-                        prepared_at=now,
-                    )
-                    outcome = await self._resume_operation(operation, finish_derived=True)
-                    if outcome is MemoryLifecycleOperationKind.RETIRE:
-                        retired.append(uri)
+                if compaction_attempts >= self.config.max_compactions_per_cycle:
+                    continue
+                version = _compaction_keep(snapshot, ranking, now)
+                if await asyncio.to_thread(self.scan_store.compaction_kept, version):
+                    continue
+                compaction_attempts += 1
+                if await self._compact(snapshot, version, now=now):
+                    compacted.append(uri)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -358,21 +374,6 @@ class MemoryLifecycleManager:
                 self.recovery_store.delete(target.uri)
             return snapshot, state, None
 
-    async def record_use(
-        self,
-        uris: tuple[MemoryURI, ...],
-        *,
-        used_at: datetime | None = None,
-    ) -> tuple[MemoryRecallTarget, ...]:
-        """兼容进程内显式入口；产品正确性不依赖外部回执。"""
-
-        if not isinstance(uris, tuple):
-            raise TypeError("used memory URIs must be a tuple")
-        snapshots = tuple([await asyncio.to_thread(self.snapshot_reader.read, uri) for uri in uris])
-        targets = tuple(self._target_snapshot(snapshot) for snapshot in snapshots)
-        result = await self.record_context_use(targets, used_at=used_at)
-        return tuple(self._target(document) for document in result.documents)
-
     def expand_for_probe(self, document: MemoryDocument) -> MemoryDocument:
         """只为最终 Context 预算临时展开活动基线，不修改 L2 或热度。"""
 
@@ -398,11 +399,18 @@ class MemoryLifecycleManager:
             compacted_snapshot=snapshot,
         )
 
-    async def _compact(self, source: MemorySnapshot, *, now: datetime) -> bool:
+    async def _compact(
+        self,
+        source: MemorySnapshot,
+        version: MemoryCompactionKeep,
+        *,
+        now: datetime,
+    ) -> bool:
         if not source.exists or not isinstance(source.value, MemoryDocument):
             return False
         result = await self.field_compactor.compact(source.value)
         if not result.changed:
+            await asyncio.to_thread(self.scan_store.record_compaction_keep, version)
             return False
         current = await asyncio.to_thread(self.snapshot_reader.read, source.identity)
         if not _same_snapshot(current, source):
@@ -784,6 +792,24 @@ def _timestamp(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("memory lifecycle timestamp must include a timezone")
     return value.astimezone(UTC)
+
+
+def _compaction_keep(
+    snapshot: MemorySnapshot,
+    ranking: MemoryRecallRanking,
+    now: datetime,
+) -> MemoryCompactionKeep:
+    """把送去压缩的这一版内容写成 KEEP 记录的键；判过之后内容或被用到的时刻变了才会再送。"""
+
+    if snapshot.revision is None or snapshot.source_digest is None:
+        raise ValueError("memory compaction source snapshot must carry a revision and digest")
+    return MemoryCompactionKeep(
+        uri=ranking.candidate.uri,
+        revision=snapshot.revision,
+        source_digest=snapshot.source_digest,
+        last_used_at=ranking.state.last_useful_recall_at,
+        judged_at=now,
+    )
 
 
 def _same_snapshot(left: MemorySnapshot, right: MemorySnapshot) -> bool:

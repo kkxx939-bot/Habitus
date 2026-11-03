@@ -75,6 +75,13 @@ class RelationKey:
     segment: Segment
     condition: str = ""
 
+    def __post_init__(self) -> None:
+        # 键会写进关系表与迁移日志的一行里：换行、行分隔符这类不可打印的字符一个都不收
+        for label in ("lane", "antecedent", "consequent", "condition"):
+            value = getattr(self, label)
+            if not isinstance(value, str) or not value.isprintable():
+                raise ValueError(f"relation key {label} must be printable text")
+
     @property
     def conditions(self) -> tuple[Condition, ...]:
         """这条关系挂的条件（没有是空元组）。"""
@@ -164,7 +171,7 @@ class Subset:
     p_value: float
     interval: tuple[float, float] | None
     relative_interval: tuple[float, float] | None
-    #: 这几层就算全部最极端（全阳或全阴）能到的单侧 p（取两侧小的那侧，与同一条链入族同一口径）：大于 α 时判了必输。
+    #: 这几层朝这条关系的方向全中（朝上全阳、朝下全阴）能到的单侧 p：不小于 α 时判了必输。
     minimum_p: float
 
 
@@ -261,7 +268,7 @@ class LaneTests:
         for antecedent in names:
             chains = self.chains(antecedent)
             if len(chains) < 2 * MIN_PER_SIDE:
-                continue  # 两边各 2 次的最低要求；够不够开检验由每条关系自己的最小可达 p 定（``ready_to_test``）
+                continue  # 两边各 ``MIN_PER_SIDE`` 次的最低要求；够不够开检验由每条关系自己的最小可达 p 定（``ready_to_test``）
             conditions: dict[Condition, date | None] = {
                 condition: None for condition in mechanical(self.line, self.concepts, antecedent, chains, window=window)
             }
@@ -396,7 +403,11 @@ class LaneTests:
         found = []
         for bound in (low, high):
             upper, lower = bound.tails(exact_limit=exact)
-            found.append((stats.two_sided(upper, lower), bound.minimum_p(), upper <= lower))
+            if key.segment is Segment.CHAIN:
+                # 同一条链只检"更多"（裁定 27 第 1 条），细分概念当后果也一样
+                found.append((upper, bound.minimum_toward(upward=True), True))
+            else:
+                found.append((stats.two_sided(upper, lower), bound.minimum_p(), upper <= lower))
         (p_low, min_low, up_low), (p_high, min_high, up_high) = found
         if up_low != up_high:
             return measure, 1.0, max(min_low, min_high), up_low  # 两头方向都不一致：说不了
@@ -467,7 +478,7 @@ class LaneTests:
                 # 同一条链只检"更多"（裁定 27 第 1 条）：一件接一件做事时，"接下来做什么"此消彼长——对照是别的事做完之后，
                 # 一条强关系（讨论方案 → 修改代码）会让别的前因之后的修改代码都显得"更少"；时长差异也只会造出"更少"。
                 # "做完 A 之后更不会接着做 B"在这里多半是别处关系的影子，不是一条独立的发现，对"接下来可能做什么"也没用。
-                readings[key] = (measure, upper, measure.minimum_p() / 2.0, True)
+                readings[key] = (measure, upper, measure.minimum_toward(upward=True), True)
             else:
                 readings[key] = (measure, stats.two_sided(upper, lower), measure.minimum_p(), upper <= lower)
         texts = {key.text: key for key in readings}
@@ -537,7 +548,7 @@ class LaneTests:
             p_value=upper if upward else lower,
             interval=spread,
             relative_interval=relative,
-            minimum_p=measure.minimum_p() / 2.0,
+            minimum_p=measure.minimum_toward(upward=upward),
         )
 
     def measure(self, key: RelationKey, *, since: date | None = None) -> Measure:

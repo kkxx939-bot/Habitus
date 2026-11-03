@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 from habitus.infrastructure.store.contracts.path_lock import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.memory.indexing import MemoryIndexSourceReader, MemoryVectorIndexConfig
 from habitus.memory.model import MemoryDirectory, MemoryKind, MemoryLevel
 from habitus.memory.semantic import (
@@ -16,6 +15,7 @@ from habitus.memory.semantic import (
 )
 from habitus.memory.tree import MemoryTree
 from tests.helpers import document
+from tests.lock_store import ProcessLocalLockStore
 
 
 class OverviewGenerator:
@@ -95,3 +95,26 @@ def test_index_source_walk_contains_l2_and_available_l0_l1_but_no_missing_layers
     assert detail.index_kind == "preference"
     assert detail.revision == preference.metadata.revision
     assert detail.scope_roots[0] == "memory://"
+
+
+def test_index_source_takes_the_memory_root_lock_with_its_injected_config(tmp_path: Path) -> None:
+    tree = MemoryTree(tmp_path / "memory")
+    tree.write(document(MemoryKind.PREFERENCE))
+    path_lock = PathLock(ProcessLocalLockStore())
+    acquired = []
+    acquire = path_lock.acquire
+
+    def recording_acquire(key, **options):
+        acquired.append(options)
+        return acquire(key, **options)
+
+    path_lock.acquire = recording_acquire  # type: ignore[method-assign]
+    config = MemoryVectorIndexConfig(
+        lock_ttl_seconds=45,
+        lock_wait_timeout_seconds=7.5,
+        lock_retry_delay_seconds=0.05,
+    )
+
+    MemoryIndexSourceReader(tree, config=config, path_lock=path_lock).walk()
+
+    assert acquired == [{"ttl_seconds": 45, "wait_timeout_seconds": 7.5, "retry_delay_seconds": 0.05}]

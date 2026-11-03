@@ -15,7 +15,7 @@ from habitus.memory.intention import (
     intention_matches_scope,
 )
 from habitus.memory.model import MemoryKind
-from habitus.memory.retrieval.lifecycle import MemoryTemperature
+from habitus.memory.recall import MemoryTemperature
 from habitus.memory.uri import MemoryURI, MemoryURINodeType
 
 
@@ -180,29 +180,6 @@ class MemoryRetrievalAssessment:
         )
 
     @classmethod
-    def model_json_schema(cls) -> dict[str, object]:
-        return {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["decision", "reason", "missing_information", "summary_query"],
-            "properties": {
-                "decision": {"type": "string", "enum": [item.value for item in MemoryRetrievalSufficiency]},
-                "reason": {"type": "string", "minLength": 1, "maxLength": 10_000},
-                "missing_information": {
-                    "type": "array",
-                    "maxItems": 10,
-                    "items": {"type": "string", "minLength": 1, "maxLength": 10_000},
-                },
-                "summary_query": {
-                    "anyOf": [
-                        {"type": "string", "minLength": 1, "maxLength": 5_000},
-                        {"type": "null"},
-                    ]
-                },
-            },
-        }
-
-    @classmethod
     def model_validate(cls, value: object) -> MemoryRetrievalAssessment:
         if not isinstance(value, Mapping):
             raise TypeError("retrieval assessment must be an object")
@@ -330,31 +307,6 @@ class MemoryQueryPlanContent:
         normalized = {(query.query.casefold(), query.intent.casefold()) for query in self.queries}
         if len(normalized) != len(self.queries):
             raise ValueError("memory query plan contains duplicate queries")
-
-    @classmethod
-    def model_json_schema(cls) -> dict[str, object]:
-        return {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["queries"],
-            "properties": {
-                "queries": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 8,
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["query", "intent", "priority"],
-                        "properties": {
-                            "query": {"type": "string", "minLength": 1, "maxLength": 5_000},
-                            "intent": {"type": "string", "minLength": 1, "maxLength": 1_000},
-                            "priority": {"type": "integer", "minimum": 1, "maximum": 5},
-                        },
-                    },
-                }
-            },
-        }
 
     @classmethod
     def model_validate(cls, value: object) -> MemoryQueryPlanContent:

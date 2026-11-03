@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from datetime import tzinfo
 
@@ -18,52 +17,21 @@ from habitus.behavior.fusion.lanes.session.model import SessionMessage, SessionM
 from habitus.behavior.fusion.lanes.session.redaction import redact
 from habitus.behavior.fusion.lanes.session.reminders import PendingReminder
 
-# 宿主注入的合成消息：不是人说的话，不开一轮。
-SYNTHETIC_PREFIXES = (
-    "<environment_context",
-    "<recommended_plugins",
-    "<turn_aborted",
-    "<skill>",
-    "<in-app-browser",
-    "<external_codex",
-    "# AGENTS.md",
-    "<user_instructions",
-    "<user_shell_command",
-    "<subagent_notification",
-    "<task-notification",
-    "<local-command",
-    "<command-name>",
-    "<system-reminder",
-    "This session is being continued",
-    "<artifact-content",
-    "Another Claude session",
-    "[Cross-session",
-    "[Image: original",
-    "[Your previous response",
-    "[Request interrupted",
-    "Caveat:",
-)
-# 把停下来的助手重新叫起来的合成消息（后台任务做完了、别的会话发来消息）。助手已经说完话之后被它叫醒
+# 宿主注入、不是人说的话（压缩摘要、斜杠命令记录、环境上下文等）由各协议适配器按宿主自己的标记去掉，到这里的
+# 人话里只剩两类要 lane 自己认的：叫醒通知（下面）与同秒重放（``REPLAY_BURST``）。
+# 把停下来的助手重新叫起来的通知（Claude Code 后台任务做完了、Codex 子 agent 回来）。助手已经说完话之后被它叫醒
 # 又做的那一段，本质上还是在这场对话里处理任务：上一轮到它停下为止，被叫醒的那一段自己算一轮、自己出一条记录。
 WAKE_PREFIXES = (
     "<task-notification",
     "<subagent_notification",
-    "Another Claude session",
-    "[Cross-session",
 )
 # 被叫醒的那一轮没有人说的话，"他说"的位置写这个开头，后面跟叫醒它的那条通知的开头。
 WAKE_LABEL = "（没有新的话；后台任务回来，助手接着做）"
 WAKE_NOTICE_CHARS = 300
 # 人对助手提问的作答，翻成人说的话时带的开头。
 ANSWER_PREFIX = "（回答助手的提问）"
-# Codex Desktop 的作答：agent 用 request_user_input_async 问完就接着干活，他作答之后以一条用户消息回来，JSON 里带问题与答案。
-REPLY_TAG = "<send_user_message_question_reply>"
 # 同一秒里成批出现的"人说的话"是重放，不是他说的。
 REPLAY_BURST = 3
-
-
-def is_synthetic(text: str) -> bool:
-    return text.lstrip().startswith(SYNTHETIC_PREFIXES)
 
 
 def split_turns(
@@ -72,7 +40,7 @@ def split_turns(
     *,
     question_tools: Sequence[str] = (),
 ) -> tuple[SessionTurn, ...]:
-    """把一个会话的消息拆成一轮一轮：一轮 = 宿主的一轮（``SessionTurn``）；合成消息与重放不开轮。
+    """把一个会话的消息拆成一轮一轮：一轮 = 宿主的一轮（``SessionTurn``）；同秒重放不开轮。
 
     人说的话开一轮，除非它插在宿主这一轮的中间（``mid_turn``，协议适配器按宿主自己的轮次标）——那是他在助手干活时作答、
     补一句、叫停，留在这一轮里。同步提问工具的作答（``question_tools`` 的工具结果；是哪几个工具由会话协议决定，组合根按协议
@@ -86,7 +54,7 @@ def split_turns(
 
     asking = frozenset(question_tools)
 
-    # 只数人说的话：宿主在同一秒里写下的合成消息、叫醒通知不算数，否则人真说的那一句会被它们连累丢掉。
+    # 只数人说的话：宿主在同一秒里写下的叫醒通知不算数，否则人真说的那一句会被它们连累丢掉。
     burst: dict[int, int] = {}
     for message in messages:
         if message.role is SessionMessageRole.PROMPT and _spoken(message.content):
@@ -124,19 +92,21 @@ def split_turns(
                 close()
                 current = [_wake_as_prompt(message)]  # 上一轮到助手停下为止；被叫醒的这一段自己算一轮
                 continue
-            if not text or is_synthetic(text) or int(message.occurred_at.timestamp()) in replayed:
-                continue  # 不是人说的话：丢掉，也不结束当前这一轮
-            spoken = _reply_as_prompt(message) if text.startswith(REPLY_TAG) else message
+            if _wakes(text):
+                continue  # 助手还在干活时到的通知：不是他说的话，也不结束这一轮
+            if not text or int(message.occurred_at.timestamp()) in replayed:
+                continue  # 空的或同秒重放：不是他说的，丢掉，也不结束当前这一轮
+            spoken = _reply_as_prompt(message) if message.answers else message
             if message.mid_turn:
                 current.append(spoken)  # 他在助手干活时说的：这一轮的一部分
                 continue
             close()
             current = [spoken]
         elif _is_answer(message, asking):
-            if current:
+            if (
+                current
+            ):  # 这一批从一轮中间切起时开头的作答属于更早一批里的那一轮：与开头的其余残留一样丢掉（记忆也不从它开轮）
                 current.append(_answer_as_prompt(message))
-            else:
-                current = [_answer_as_prompt(message)]
         elif current:
             current.append(message)
     close()
@@ -144,7 +114,7 @@ def split_turns(
 
 
 def _spoken(text: str) -> bool:
-    return bool(text.strip()) and not is_synthetic(text)
+    return bool(text.strip()) and not _wakes(text)
 
 
 def _wakes(text: str) -> bool:
@@ -182,41 +152,17 @@ def _answer_as_prompt(message: SessionMessage) -> SessionMessage:
 
 
 def _reply_as_prompt(message: SessionMessage) -> SessionMessage:
-    """Codex Desktop 晚来的作答消息翻成"（回答助手的提问）问题 → 答案"；不是那个形状的照旧当人说的话（整段原样）。"""
+    """Codex Desktop 晚来的作答消息翻成"（回答助手的提问）问题 → 答案"。"""
 
-    pairs = reply_pairs(message.content)
-    if not pairs:
-        return message
-    answered = "；".join(f"{question} → {answer}" for question, answer in pairs)
+    answered = "；".join(
+        f"{' '.join(question.split())} → {' '.join(answer.split())}" for question, answer in message.answers
+    )
     return SessionMessage(
         sequence=message.sequence,
         occurred_at=message.occurred_at,
         role=SessionMessageRole.PROMPT,
         content=f"{ANSWER_PREFIX}{answered}",
     )
-
-
-def reply_pairs(content: str) -> tuple[tuple[str, str], ...]:
-    """``<send_user_message_question_reply>`` 消息里的（问题, 答案）；形状不对给空。"""
-
-    body = content.strip()
-    if not body.startswith(REPLY_TAG):
-        return ()
-    body = body[len(REPLY_TAG) :]
-    end = body.rfind("</")
-    body = body[:end] if end >= 0 else body
-    try:
-        items = json.loads(body)
-    except ValueError:
-        return ()
-    if not isinstance(items, list):
-        return ()
-    found = [
-        (" ".join(str(item.get("question", "")).split()), " ".join(str(item["answer"]).split()))
-        for item in items
-        if isinstance(item, dict) and isinstance(item.get("answer"), str)
-    ]
-    return tuple(found)
 
 
 def render_turn(turn: SessionTurn, *, config: SessionLaneConfig | None = None) -> str:
@@ -335,12 +281,9 @@ def _head_tail(text: str, limit: int) -> str:
 
 __all__ = [
     "ANSWER_PREFIX",
-    "REPLY_TAG",
     "WAKE_LABEL",
     "WAKE_PREFIXES",
-    "is_synthetic",
     "render_reminders",
     "render_turn",
-    "reply_pairs",
     "split_turns",
 ]

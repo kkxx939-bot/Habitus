@@ -9,17 +9,18 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from habitus.foresight import ForesightError
-from habitus.foresight.ledger import Delivery, Expectation
+from habitus.foresight.ledger import POLARITIES, SAID_DONE, Delivery, Expectation
 from habitus.foundation.observability import ObservationEvent
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_outlet import (
     OPTIONS,
+    POLARITY_OF_OPTION,
     HostMessage,
     OpenRequest,
     ReminderOutlet,
     answer_in_result,
+    fixed_polarity,
     fixed_polarity_in,
-    parse_reply,
 )
 from habitus.runtime.foresight_outlet_store import OutletStore
 
@@ -369,19 +370,19 @@ def test_the_outlet_checks_its_inputs(tmp_path) -> None:
         store.write_claim("../x", {})
 
 
-def test_the_pure_readers_recognise_fixed_options_and_desktop_replies() -> None:
+def test_the_pure_readers_recognise_fixed_options() -> None:
     assert fixed_polarity_in('User has answered your questions: "问题"="知道了". You can now continue.') == "中"
     assert fixed_polarity_in(json.dumps({"answers": {"q1": "现在就做"}})) == "正"
     assert fixed_polarity_in("这次不用") == "负"
     assert fixed_polarity_in("The user doesn't want to proceed with this tool use.") is None
     assert fixed_polarity_in('"问题"="知道了"；"问题2"="这次不用"') is None  # 两个选项同时出现：说不清
     assert fixed_polarity_in("下周再弄") is None
-    replies = parse_reply(
-        f'{REPLY_TAG}\n[{{"questionItemId":"[\\"request_user_input_async\\",\\"call_1\\",0]","question":"q","answer":"a"}}]\n</send_user_message_question_reply>\n'
-    )
-    assert replies == (("call_1", 0, "a"),)
-    assert parse_reply("<send_user_message_question_reply>\nnot json\n</send_user_message_question_reply>") == ()
-    assert parse_reply("随便一句话") == ()
+    # 第四个固定选项（裁定 91 第 3 条②）：已经做过了 → 已做，不经模型
+    assert OPTIONS == ("现在就做", "这次不用", "知道了", "已经做过了")
+    assert fixed_polarity("已经做过了") == "已做" == SAID_DONE
+    assert fixed_polarity_in('User has answered your questions: "问题"="已经做过了". You can now continue.') == "已做"
+    assert fixed_polarity("早上浇过了") is None  # 自己填的话交会话 lane 判
+    assert set(POLARITY_OF_OPTION.values()) == set(POLARITIES)  # 每个方向都有一个固定选项
 
 
 # ── 五路评审 + 测试工程师确认过的九条 bug 的回归（2026-10-20） ──────────────────────────
@@ -745,8 +746,7 @@ def test_a_dismissed_synchronous_question_is_spoken_but_never_waits_for_a_late_a
     assert ledger.responses_on(item.day) == () and run.store.asked() == {}
 
 
-from habitus.runtime.foresight_outlet import REPLY_TAG  # noqa: E402 - 放在最后：上面的夹具只用名字
-
+from habitus.pre.conversation import QUESTION_REPLY_TAG as REPLY_TAG  # noqa: E402 - 放在最后：上面的夹具只用名字
 
 # ── habitus reminders：某天每条提醒走到了哪一步（方案 36 第 2 步）────────────────────────────────
 
@@ -789,3 +789,37 @@ def test_the_reminder_day_reads_each_stage_from_the_ledger_and_the_claim_trail(t
     assert second.attempts == 0 and [(h.host, h.session, h.ended) for h in second.handoffs] == [("codex", SESSION, None)]
     assert (report.count("说了"), report.count("宿主没取"), report.responded) == (1, 1, 1)
     assert reminder_day(ledger, None, FORMED.date()).reminders[0].kind == "s-k0002"  # 没有出口就给编号
+
+
+def test_an_unreadable_claim_or_question_is_swept_away_and_counted(tmp_path) -> None:
+    """段 6 Q2：读不出来的取走记录 / 提问对 ``claims()`` 与清扫都不可见，原来永远留在盘上、也不进观测；清扫时与形状不对的
+    同样删掉（不知道它的最晚时限，也配不上任何提问），计入观测。"""
+
+    run, ledger, recorder = outlet(tmp_path)
+    item = expectation()
+    awaiting(ledger, item)
+    run.publish([request(item)], now=ASKED)
+    run.claim("claude-code", SESSION, ASKED + timedelta(minutes=11), 1)
+    claim = tmp_path / "ledger" / "outlet" / "claims" / f"{item.expectation_id}.json"
+    claim.write_text('{"request": ', encoding="utf-8")
+    asked = tmp_path / "ledger" / "outlet" / "asked" / "0123456789abcdef01234567.json"
+    asked.parent.mkdir(parents=True, exist_ok=True)
+    asked.write_text("[]", encoding="utf-8")
+    assert run.store.claims() == {} and run.store.broken_claims() == (item.expectation_id,)
+    run.sweep(ASKED + timedelta(minutes=12))
+    assert not claim.exists() and not asked.exists()
+    (event,) = [found for found in recorder.events if found.operation == "outlet_sweep"]
+    assert event.attributes["broken_removed"] == 2 and event.attributes["unreadable"] >= 1
+
+
+def test_a_reminder_he_did_before_being_asked_shows_as_happened(tmp_path) -> None:
+    """段 6 Q15：「待取」之后他先做了，账上追加「已发生」（终局）；``habitus reminders`` 原来不认它，永远显示「待取」。"""
+
+    from habitus.runtime.foresight_reminders import reminder_day
+
+    run, ledger, _ = outlet(tmp_path)
+    item = expectation()
+    awaiting(ledger, item)
+    ledger.record_delivery(item.day, Delivery(item.expectation_id, ASKED + timedelta(minutes=15), 1, False, "已发生", 0.0))
+    (row,) = reminder_day(ledger, run, FORMED.date()).reminders
+    assert row.stage == "已发生"

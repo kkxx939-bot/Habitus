@@ -1,13 +1,13 @@
 """释放会话源：信封、两份 Outcome、两种输出、两把源锁行、两样标记一起退出（裁定 60，26 号清单 2.1）。
 
 门槛，三条同时满足：
-1. 同一地址后面有一份 start_sequence 更大、Memory 已 COMMITTED 的交付——插件同会话严格顺序投递，后一份
-   已提交，前一份就不会再被重投；
+1. 同一地址后面有一份 start_sequence 更大、有序 Consumer（``ordered_within_conversation``，现在是 Memory）都已
+   COMMITTED 的交付——插件同会话严格顺序投递，后一份已提交，前一份就不会再被重投；
 2. 这份源两个消费者都已终态（COMMITTED / SKIPPED；行为侧的账坏了、已补救的算终态，``salvage``）；
 3. 同一地址更早的源都已释放——所以水位只会连续推进。
 每个地址最后一份永远满足不了第 1 条，随会话退休一起删（memory 侧，待定）。
 
-删的顺序：持有两个消费者的执行锁 → 写地址水位（fence 住全局 lease 与两把锁）→ 删信封 → 删 Outcome → 删输出 →
+删的顺序：持有两个消费者的执行锁 → 写地址水位（fence 住全局 lease 与两把锁；水位已盖住它就不写）→ 删信封 → 删 Outcome → 删输出 →
 放锁、删两把锁行 → 删"已补救"标记 → 删"还没终态"标记 → 最后删索引标记。任何一步崩溃，下一轮从索引标记续删：水位已盖住、且信封
 已不在或两边已终态，就直接往下删，不再看第 1、3 条；信封还在又没终态的是序号回退后的新源，等它终态。
 """
@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import MappingProxyType
 
+from habitus.conversation.source.delivery import ConversationDurableConsumer
 from habitus.conversation.source.fence import consumer_lock_key
 from habitus.conversation.source.index import SourceMarker
 from habitus.conversation.source.ledger import ConversationSourceLedger
@@ -40,23 +41,27 @@ class ConversationSourceReleaser:
         sources: ConversationSourceStore,
         outcomes: ConversationConsumerOutcomeStore,
         ledger: ConversationSourceLedger,
-        outputs: Mapping[ConversationSourceConsumer, ConversationConsumerOutputStore],
+        consumers: Mapping[ConversationSourceConsumer, ConversationDurableConsumer],
         lock_store: LockStore,
         *,
         lock_ttl_seconds: int,
         salvage: SourceSalvage | None = None,
     ) -> None:
-        missing = sorted(item.value for item in ConversationSourceConsumer if item not in outputs)
+        missing = sorted(item.value for item in ConversationSourceConsumer if item not in consumers)
         if missing:
-            raise ValueError(f"source releaser is missing output stores: {missing}")
+            raise ValueError(f"source releaser is missing consumers: {missing}")
+        ordered = frozenset(item for item in ConversationSourceConsumer if consumers[item].ordered_within_conversation)
+        if not ordered:
+            raise ValueError("source release needs an ordered consumer to tell a later delivery was accepted")
         if isinstance(lock_ttl_seconds, bool) or not isinstance(lock_ttl_seconds, int) or lock_ttl_seconds <= 0:
             raise ValueError("lock_ttl_seconds must be a positive integer")
         self.sources = sources
         self.outcomes = outcomes
         self.ledger = ledger
         self.outputs: Mapping[ConversationSourceConsumer, ConversationConsumerOutputStore] = MappingProxyType(
-            dict(outputs)
+            {item: consumers[item].output_store for item in ConversationSourceConsumer}
         )
+        self.ordered = ordered
         self.lock_store = lock_store
         self.lock_ttl_seconds = lock_ttl_seconds
         if salvage is not None and not isinstance(salvage, SourceSalvage):
@@ -80,7 +85,7 @@ class ConversationSourceReleaser:
                     found.append(marker)
                 continue
             later = markers[position + 1 :]
-            if not any(self._memory_committed(item) for item in later) or not self._terminal(marker):
+            if not any(self._ordered_committed(item) for item in later) or not self._terminal(marker):
                 break
             found.append(marker)
         return tuple(found)
@@ -102,7 +107,9 @@ class ConversationSourceReleaser:
         try:
             ctx.assert_owned()
             with self.lock_store.fenced((ctx.fence_token(), *tokens), ttl_seconds=self.lock_ttl_seconds):
-                self.ledger.watermarks.advance(marker.address, marker.end_sequence)
+                # 序号回退后进来的新源：水位早已越过它，不写（水位只增）
+                if not self.ledger.released(marker.address, marker.end_sequence):
+                    self.ledger.watermarks.advance(marker.address, marker.end_sequence)
             ctx.assert_owned()
             self.sources.discard(marker.source_id)
             for consumer in ConversationSourceConsumer:
@@ -125,7 +132,7 @@ class ConversationSourceReleaser:
         """两个消费者都已终态的源，把"还没终态"标记清掉（每个地址最后那份要等到会话退休才释放，标记不能一直挂着）。"""
 
         settled = 0
-        for source_id, _address in self.ledger.pending.listing():
+        for source_id, _address in self.ledger.pending.listing().sources:
             if all(
                 self._salvaged(source_id, consumer)
                 or ((outcome := self.outcomes.read(source_id, consumer)) is not None and outcome.state in _TERMINAL)
@@ -147,9 +154,12 @@ class ConversationSourceReleaser:
             return None
         return tuple(acquired)
 
-    def _memory_committed(self, marker: SourceMarker) -> bool:
-        outcome = self.outcomes.read(marker.source_id, ConversationSourceConsumer.MEMORY)
-        return outcome is not None and outcome.state is ConversationConsumerOutcomeState.COMMITTED
+    def _ordered_committed(self, marker: SourceMarker) -> bool:
+        for consumer in self.ordered:
+            outcome = self.outcomes.read(marker.source_id, consumer)
+            if outcome is None or outcome.state is not ConversationConsumerOutcomeState.COMMITTED:
+                return False
+        return True
 
     def _salvaged(self, source_id: str, consumer: ConversationSourceConsumer) -> bool:
         return self.salvage is not None and self.salvage.contains(source_id, consumer)

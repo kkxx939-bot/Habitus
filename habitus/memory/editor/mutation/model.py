@@ -94,6 +94,8 @@ class MemoryFieldMergeResult:
 
     fields: Mapping[str, Any]
     changed_fields: tuple[str, ...]
+    read_only_target: bool = False
+    """候选指向只增记忆的旧节点：旧字段原样保留，候选字段不生效。"""
 
     def __post_init__(self) -> None:
         if not isinstance(self.fields, Mapping) or any(not isinstance(name, str) for name in self.fields):
@@ -105,6 +107,10 @@ class MemoryFieldMergeResult:
             raise TypeError("changed_fields must be a tuple of non-empty strings")
         if len(self.changed_fields) != len(set(self.changed_fields)):
             raise ValueError("changed_fields cannot contain duplicates")
+        if not isinstance(self.read_only_target, bool):
+            raise TypeError("read_only_target must be boolean")
+        if self.read_only_target and self.changed_fields:
+            raise ValueError("read-only target merge cannot change fields")
 
 
 @dataclass(frozen=True)
@@ -116,6 +122,8 @@ class MemoryMutation:
     fields: Mapping[str, Any]
     changed_fields: tuple[str, ...]
     confirms_intention: bool = False
+    read_only_target: bool = False
+    """候选指向只增记忆的旧节点，被保留为 NOOP；供审计统计。"""
 
     def __post_init__(self) -> None:
         if not isinstance(self.match, MemoryNodeMatch):
@@ -135,6 +143,10 @@ class MemoryMutation:
             raise TypeError("confirms_intention must be boolean")
         if self.confirms_intention and self.match.candidate.kind is not MemoryKind.INTENTION:
             raise ValueError("only an Intention mutation can refresh confirmation time")
+        if not isinstance(self.read_only_target, bool):
+            raise TypeError("read_only_target must be boolean")
+        if self.read_only_target and action is not MemoryMutationAction.NOOP:
+            raise ValueError("read-only target mutation must be a noop")
         if action is MemoryMutationAction.CREATE:
             if self.match.status is not MemoryNodeMatchStatus.NEW:
                 raise ValueError("create mutation requires a new-node match")
@@ -179,6 +191,12 @@ class MemoryMutationPlan:
         target_identities = tuple(snapshot.identity for snapshot in self.read_set.target_memories.snapshots)
         if tuple(sorted(uris)) != target_identities:
             raise ValueError("memory mutation plan does not cover its exact target snapshots")
+
+    @property
+    def read_only_targets(self) -> tuple[MemoryURI, ...]:
+        """返回本批候选指向、因只读而保留为 NOOP 的旧节点 URI。"""
+
+        return tuple(mutation.uri for mutation in self.mutations if mutation.read_only_target)
 
     @property
     def changed_mutations(self) -> tuple[MemoryMutation, ...]:

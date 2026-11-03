@@ -17,8 +17,12 @@ class BehaviorFusionLimitError(DeterministicFailure, BehaviorFusionError):
     """融合产物超过显式容量边界。同样的输入再做一遍也超，所以是确定性失败（26 号清单 2.4.4）。"""
 
 
-class BehaviorFusionTruncatedError(DeterministicFailure, BehaviorFusionError):
-    """模型输出被长度截断，且重试仍截断——这是段容量与输出预算的错配，不是可重试的环境故障。"""
+class BehaviorFusionRefusedError(DeterministicFailure, BehaviorFusionError):
+    """模型对这一份材料必然拒绝（输入超长、触发内容安全）：同一份材料再问几遍也一样，所以是确定性失败。"""
 
 
-__all__ = ["BehaviorFusionError", "BehaviorFusionLimitError", "BehaviorFusionTruncatedError"]
+__all__ = [
+    "BehaviorFusionError",
+    "BehaviorFusionLimitError",
+    "BehaviorFusionRefusedError",
+]

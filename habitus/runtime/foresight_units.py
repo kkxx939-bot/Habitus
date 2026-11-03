@@ -28,7 +28,10 @@ from habitus.foresight.units import (
     UnitReading,
     basis,
     connected,
+    joinable,
+    meets,
     self_check,
+    speakable,
     tree_reading,
     unit_level,
     unit_reading,
@@ -38,7 +41,8 @@ from habitus.runtime.foresight_history_store import HistoryStore
 
 @dataclass(frozen=True)
 class Unit:
-    """这一拍的一个单元：说话的那条（依据）、一并决定的另外几条、全部输入、单元读数与档、依据那本账换上单元档之后的位置。"""
+    """这一拍的一个单元：说话的那条（依据）、一并决定的另外几条、全部输入、单元读数与档、依据那本账换上单元档之后的位置；
+    ``voiced`` 是依据能不能开口（``units.speakable``）——不能的（只有候选关系、巧合到了时窗）档是强制的 0，不当单元的档记。"""
 
     basis: Expectation
     members: tuple[Expectation, ...]
@@ -46,6 +50,7 @@ class Unit:
     reading: UnitReading
     level: int
     standing: Standing
+    voiced: bool = True
 
     @property
     def kind_token(self) -> str:
@@ -78,7 +83,7 @@ class UnitPlanner:
         #: 没有机会表时按哪条 lane 读单元历史（账本是一条 lane 一本）。
         self.lane = lane
         #: （lane, 那一晚）→ 读回的单元历史：每晚只重算一次，白天每拍不再读盘。
-        self._cached: dict[str, tuple[date, UnitHistory]] = {}
+        self._cached: dict[str, tuple[date, UnitHistory | None]] = {}
 
     def plan(
         self,
@@ -146,6 +151,7 @@ class UnitPlanner:
             reading=reading,
             level=level,
             standing=replace(chosen.standing, level=level),
+            voiced=speakable(chosen),
         )
 
     @staticmethod
@@ -160,7 +166,7 @@ class UnitPlanner:
         )
 
     def history_of(self, table: OpportunityTable | None) -> UnitHistory | None:
-        """这条 lane 盘上最晚一晚的单元历史（每晚只读一次）；边的读数从它来。"""
+        """这条 lane 盘上最晚一晚读得出来的单元历史（每晚只读一次；最晚那一份坏了往前退一晚）；边的读数从它来。"""
 
         if self.history is None:
             return None
@@ -170,7 +176,7 @@ class UnitPlanner:
             return None
         cached = self._cached.get(lane)
         if cached is None or cached[0] != night:
-            cached = (night, self.history.read(lane, night))
+            cached = (night, self.history.latest(lane))
             self._cached[lane] = cached
         return cached[1]
 
@@ -189,11 +195,22 @@ def _groups(
         pending.setdefault(item.kind_token, []).append(item)
     found: list[tuple[list[Expectation], tuple[str, ...]]] = []
     for kind in sorted(by_kind):
+        #: 还没到时窗的一条只进一个单元（它和两组都连着时归先排的那一组）：并进两个单元会在两边各记一条「单元已选」，
+        #: 同一刻同一条身份写两份不同内容，这一拍整个抛（段 6 Q19）。
+        taken: set[str] = set()
         for group in connected(by_kind[kind]):
             start = min(item.observed_from for item in group)
             end = max(item.deadline for item in group)
             due = tuple(item.expectation_id for item in group)
-            group += [item for item in pending.get(kind, ()) if item.observed_from < end and item.deadline > start]
+            joining = [
+                item
+                for item in pending.get(kind, ())
+                if item.expectation_id not in taken
+                and meets(item, start, end)
+                and any(joinable(member, item) for member in group)
+            ]
+            taken.update(item.expectation_id for item in joining)
+            group += joining
             found.append((sorted(group, key=lambda item: (item.window[0], item.expectation_id)), due))
     return found
 

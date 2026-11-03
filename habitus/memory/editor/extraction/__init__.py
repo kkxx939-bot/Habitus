@@ -10,11 +10,12 @@ from habitus.memory.editor.extraction.model import (
     MemoryExtractionResult,
     MemoryRetrievalAction,
     MemoryRetrievalDecision,
-    MemoryRetrievalIncompleteError,
+    MemoryRetrievalFinalDecision,
     MemoryRetrievalObservation,
     MemoryRetrievalStatus,
 )
 from habitus.memory.editor.extraction.prompt import MemoryExtractionPromptBuilder
+from habitus.memory.editor.extraction.turn import MemoryTurnContext
 
 __all__ = [
     "MemoryExtractionConfig",
@@ -27,7 +28,8 @@ __all__ = [
     "MemoryExtractionResult",
     "MemoryRetrievalAction",
     "MemoryRetrievalDecision",
-    "MemoryRetrievalIncompleteError",
+    "MemoryRetrievalFinalDecision",
     "MemoryRetrievalObservation",
     "MemoryRetrievalStatus",
+    "MemoryTurnContext",
 ]

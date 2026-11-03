@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, NoReturn
 
-from habitus.behavior.document.link import BehaviorStoredLink, parse_stored_links
 from habitus.behavior.document.model import BehaviorDocument, BehaviorDocumentMetadata
 from habitus.behavior.model import BehaviorAddress, BehaviorKind
 from habitus.behavior.schema import BehaviorSchemaRegistry
@@ -21,7 +20,6 @@ _METADATA_KEYS = {
     "created_at",
     "updated_at",
     "fields",
-    "links",
 }
 
 
@@ -47,7 +45,6 @@ class BehaviorDocumentCodec:
         payload: Mapping[str, Any],
         *,
         metadata: BehaviorDocumentMetadata,
-        links: tuple[BehaviorStoredLink, ...] = (),
     ) -> BehaviorDocument:
         if not isinstance(metadata, BehaviorDocumentMetadata):
             raise TypeError("metadata must be BehaviorDocumentMetadata")
@@ -61,18 +58,12 @@ class BehaviorDocumentCodec:
             metadata=metadata,
             fields=materialized.storage_fields,
             markdown_body=materialized.markdown_body,
-            links=links,
         )
 
     def encode(self, document: BehaviorDocument) -> str:
         if not isinstance(document, BehaviorDocument):
             raise TypeError("document must be a BehaviorDocument")
-        canonical = self.build(
-            document.kind,
-            document.fields,
-            metadata=document.metadata,
-            links=document.links,
-        )
+        canonical = self.build(document.kind, document.fields, metadata=document.metadata)
         if canonical.address != document.address:
             raise BehaviorDocumentIntegrityError("behavior document address is not canonical")
         if canonical.markdown_body != document.markdown_body:
@@ -83,7 +74,6 @@ class BehaviorDocumentCodec:
             "created_at": self._timestamp(canonical.metadata.created_at),
             "updated_at": self._timestamp(canonical.metadata.updated_at),
             "fields": canonicalize(canonical.fields),
-            "links": [link.to_dict() for link in canonical.links],
         }
         # 结构字段保存在 HTML 注释里，正文中任意 `--` 都会提前闭合该注释；
         # 统一转义成 JSON 的 -，decode 时由 json.loads 原样还原，往返仍然逐字节一致。
@@ -132,7 +122,6 @@ class BehaviorDocumentCodec:
                     created_at=self._parse_timestamp(metadata["created_at"], "created_at"),
                     updated_at=self._parse_timestamp(metadata["updated_at"], "updated_at"),
                 ),
-                links=parse_stored_links(metadata["links"], label="behavior document links"),
             )
         except (TypeError, ValueError) as exc:
             raise BehaviorDocumentIntegrityError("behavior document fields do not satisfy their Schema") from exc

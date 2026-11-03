@@ -15,7 +15,6 @@ from habitus.behavior.fusion.lanes.physical import PhysicalDeliveryError, Physic
 from habitus.behavior.fusion.lanes.session import SessionLane
 from habitus.behavior.model import BehaviorKind
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.infrastructure.vector import VectorStoreFactory
 from habitus.model_client import ModelResponse, ProviderCapabilities, ProviderFactory
 from habitus.runtime import build_runtime
@@ -29,6 +28,7 @@ from tests.integration.test_runtime_assembly import (
     runtime_config,
     runtime_dependencies,
 )
+from tests.lock_store import ProcessLocalLockStore
 
 SUBJECT = "家庭成员A"
 CST = timezone(timedelta(hours=8))
@@ -193,6 +193,11 @@ def test_each_lane_gets_its_own_whole_pipeline_and_they_share_only_the_chat_clie
         "conversation-source-recovery",
     ]
     assert branches.session.fusion.describer.client is runtime.components.models.structured_chat
+    # 会话 lane 的记录一送到就封口（裁定 31），物理 lane 仍等满窗口
+    assert (branches.session.reduction_runner.seal_on_arrival, branches.physical.reduction_runner.seal_on_arrival) == (
+        True,
+        False,
+    )
     for behavior in branches:
         assert behavior.reduction_runner.context_lookback_seconds == FUSION_CONTEXT_LOOKBACK_SECONDS
         assert behavior.fusion.recorder.primary_subject == SUBJECT
@@ -220,6 +225,37 @@ def test_each_lane_gets_its_own_whole_pipeline_and_they_share_only_the_chat_clie
 
     assert BehaviorConfig().context_lookback_seconds is None
     assert FUSION_CONTEXT_LOOKBACK_SECONDS == 3_600.0
+
+
+def test_every_behaviour_override_reaches_the_component_that_uses_it(tmp_path: Path) -> None:
+    """E18：配置里写的保护上限真的交到用它的组件上（物理 lane、会话 lane、行为树文档、文档写锁、语义概览），两支都接。"""
+
+    providers, vectors = runtime_dependencies()
+    runtime = build_runtime(
+        behavior_enabled_config(
+            tmp_path,
+            physical_max_segments=7,
+            session_max_step_chars=99,
+            document_max_encoded_bytes=4096,
+            write_lock_ttl_seconds=45,
+            semantic_max_prompt_chars=5000,
+        ),
+        providers=providers,
+        vector_stores=vectors,
+        path_lock=PathLock(ProcessLocalLockStore()),
+    )
+    branches = runtime.components.behavior
+    assert branches is not None
+    assert branches.physical.fusion.recorder.config.max_segments == 7
+    assert branches.session.fusion.describer.config.max_step_chars == 99
+    for branch in branches:
+        runner = branch.reduction_runner
+        assert branch.tree.document_config.max_encoded_bytes == 4096
+        assert runner.write_config is not None and runner.write_config.lock_ttl_seconds == 45
+        assert runner.vocabulary_jobs.migrator.write_config is runner.write_config
+        assert runner.semantic_refresher is not None
+        assert runner.semantic_refresher.config.max_prompt_chars == 5000
+        assert runner.semantic_refresher.generator.config.max_prompt_chars == 5000
 
 
 def test_a_physical_delivery_reaches_the_tree_end_to_end_through_the_runtime(tmp_path: Path) -> None:
@@ -484,3 +520,61 @@ def test_the_behavior_participant_expires_physical_units_truncates_the_journal_a
     assert store.journal.segments()[0] == store.read().version  # 没有派生物还在读：截到当前
     assert {reading.name for reading in report.readings} == {"session_kinds_pending", "physical_kinds_pending"}
     assert report.released >= 2
+
+
+def test_the_reduction_worker_skips_a_tick_when_a_real_runner_finds_the_sweep_lock_held(tmp_path: Path) -> None:
+    """E20：真实 runner、锁被另一持有者占着——Worker 记 ``skipped: lock_busy``、不记失败（原先 try 只包住构造上下文，
+    真正取锁时抛的裸 ``TimeoutError`` 被记成故障）。"""
+
+    from habitus.foundation.observability import ObservationEvent
+    from habitus.runtime.behavior import BehaviorReductionWorker
+    from tests.unit.behavior.test_reduction_runner import Harness
+
+    class _Events:
+        def __init__(self) -> None:
+            self.events: list[ObservationEvent] = []
+
+        def record(self, event: ObservationEvent) -> None:
+            self.events.append(event)
+
+    harness = Harness(tmp_path)
+    events = _Events()
+    worker = BehaviorReductionWorker(
+        harness.runner, interval_seconds=60.0, shutdown_timeout_seconds=5.0, observer=events
+    )
+
+    async def scenario() -> None:
+        with PathLock(harness.runner.lock_store).acquire(harness.runner._sweep_lock_key, ttl_seconds=30):
+            await worker.start()
+            await asyncio.sleep(0.2)
+            await worker.stop()
+
+    asyncio.run(scenario())
+    sweeps = [event for event in events.events if event.operation == "reduction_sweep"]
+    assert sweeps and all(event.attributes.get("skipped") == "lock_busy" for event in sweeps)
+    assert worker.last_error is None
+
+
+@pytest.mark.parametrize("error", ["ModelInputTooLargeError", "ModelContentSafetyError"])
+def test_the_overview_refresh_gives_up_at_once_on_input_too_large_and_content_safety(
+    tmp_path: Path, error: str
+) -> None:
+    """E7：概览刷新的重试账按 ``MODEL_DETERMINISTIC`` 分类——同一天的内容再问也一样，第一次就放弃（原先当可重试，同一天
+    调 5 次模型）。"""
+
+    import habitus.model_client as model_client
+
+    providers, vectors = runtime_dependencies()
+    runtime = build_runtime(
+        behavior_enabled_config(tmp_path),
+        providers=providers,
+        vector_stores=vectors,
+        path_lock=PathLock(ProcessLocalLockStore()),
+    )
+    assert runtime.components.behavior is not None
+    day = datetime(2026, 10, 10, tzinfo=CST).date()
+    for branch in runtime.components.behavior:
+        retries = branch.reduction_runner.refresh_retries
+        assert retries is not None
+        assert retries.failed(day, getattr(model_client, error)("refused")).give_up
+        assert not retries.failed(day.replace(day=11), TimeoutError("slow")).give_up

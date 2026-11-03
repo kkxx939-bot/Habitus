@@ -13,12 +13,10 @@ from datetime import date
 
 from habitus.foresight.model import Seen
 from habitus.foresight.opportunities.model import ConditionSpec
-from habitus.scene.relations import LaneTimeline, Mark, Template
+from habitus.scene.relations import LaneTimeline, Mark, Template, fill_calendar, last_slot
 from habitus.scene.relations import parse_condition as parse
 from habitus.series import SeriesRecord
-from habitus.temporal.slots import absolute_slot
-
-MINUTES_PER_DAY = 1440
+from habitus.temporal.slots import MINUTES_PER_DAY, absolute_slot
 
 
 def timeline_of(
@@ -45,10 +43,9 @@ def timeline_of(
     days: set[date] = set()
     for row in rows:
         start = absolute_slot(row.started_at, slot_minutes=slot_minutes)
-        if row.ended_at.date() == row.day:
-            end = absolute_slot(row.ended_at, slot_minutes=slot_minutes)
-        else:
-            end = row.day.toordinal() * per_day + per_day - 1
+        end = row.day.toordinal() * per_day + last_slot(
+            row.day, row.ended_at, slot_minutes=slot_minutes, per_day=per_day
+        )
         mark = Mark(slot=start, started_at=row.started_at, uri=row.source, last_slot=max(start, end))
         for identity in {row.kind_token, *aliases.get(row.kind_token, ())}:
             line.marks.setdefault(identity, []).append(mark)
@@ -67,21 +64,13 @@ def _calendar(
     days: list[date],
     calendar_of: Callable[[date], Mapping[str, str]],
 ) -> None:
-    """日历情境条件按天机械填（与语义树建时间线同一个判法：那天日历答不出的不填，不知道 ≠ 否）。"""
+    """日历情境条件按天机械填（与语义树建时间线同一个，``scene.relations.fill_calendar``）。"""
 
-    keyed = [
-        (parse(spec.text).value, spec.calendar_key, set(spec.calendar_values)) for spec in specs if spec.calendar_key
-    ]
-    if not keyed:
-        return
-    for day in days:
-        conditions = dict(calendar_of(day))
-        line.calendar_conditions[day] = conditions
-        for identity, key, values in keyed:
-            line.calendar.add(identity)
-            known = conditions.get(key)
-            if known is not None:
-                line.situations.setdefault(identity, {})[day] = known in values
+    keyed = {
+        parse(spec.text).value: (spec.calendar_key, tuple(spec.calendar_values)) for spec in specs if spec.calendar_key
+    }
+    if keyed:
+        fill_calendar(line, keyed, days, calendar_of)
 
 
 def _record(row: Seen, lane: str) -> SeriesRecord:
@@ -103,4 +92,4 @@ def _record(row: Seen, lane: str) -> SeriesRecord:
     )
 
 
-__all__ = ["MINUTES_PER_DAY", "timeline_of"]
+__all__ = ["timeline_of"]

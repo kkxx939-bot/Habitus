@@ -144,6 +144,10 @@ class MemoryJobConfig:
     lease_ttl_seconds: int = 120
     retry_base_delay_seconds: float = 1.0
     retry_max_delay_seconds: float = 60.0
+    # 模型此刻用不了（额度、鉴权、断网……）时的单独长退避：不计入 max_attempts，第 n 次连着等模型后等
+    # base × 2^(n−1) 秒、封顶 max（照行为侧重试账 ``lifecycle.retry`` 的 60 秒起、封顶一天）
+    model_wait_base_delay_seconds: float = 60.0
+    model_wait_max_delay_seconds: float = 86_400.0
     lock_ttl_seconds: int = 30
     lock_wait_timeout_seconds: float = 5.0
     lock_retry_delay_seconds: float = 0.01
@@ -166,6 +170,8 @@ class MemoryJobConfig:
         for float_name, float_value, float_maximum in (
             ("retry_base_delay_seconds", self.retry_base_delay_seconds, 3_600.0),
             ("retry_max_delay_seconds", self.retry_max_delay_seconds, 86_400.0),
+            ("model_wait_base_delay_seconds", self.model_wait_base_delay_seconds, 86_400.0),
+            ("model_wait_max_delay_seconds", self.model_wait_max_delay_seconds, 7 * 86_400.0),
             ("lock_wait_timeout_seconds", self.lock_wait_timeout_seconds, 60.0),
             ("lock_retry_delay_seconds", self.lock_retry_delay_seconds, 1.0),
         ):
@@ -177,6 +183,8 @@ class MemoryJobConfig:
                 raise ValueError(f"{float_name} must be greater than zero and at most {float_maximum:g}")
         if self.retry_max_delay_seconds < self.retry_base_delay_seconds:
             raise ValueError("retry_max_delay_seconds cannot be less than retry_base_delay_seconds")
+        if self.model_wait_max_delay_seconds < self.model_wait_base_delay_seconds:
+            raise ValueError("model_wait_max_delay_seconds cannot be less than model_wait_base_delay_seconds")
 
     def retry_delay_seconds(self, attempts: int) -> float:
         """按已经发生的尝试次数返回有上限的指数退避。"""
@@ -186,6 +194,16 @@ class MemoryJobConfig:
         return min(
             float(self.retry_max_delay_seconds),
             float(self.retry_base_delay_seconds) * (2 ** (attempts - 1)),
+        )
+
+    def model_wait_delay_seconds(self, waits: int) -> float:
+        """按连着等模型恢复的次数返回有上限的长退避。"""
+
+        if isinstance(waits, bool) or not isinstance(waits, int) or waits <= 0:
+            raise ValueError("waits must be a positive integer")
+        return min(
+            float(self.model_wait_max_delay_seconds),
+            float(self.model_wait_base_delay_seconds) * (2 ** min(waits - 1, 32)),
         )
 
 
@@ -209,6 +227,8 @@ class MemoryJob:
     last_error: str | None
     created_at: datetime
     updated_at: datetime
+    #: 最近连着几次因为模型此刻用不了而失败、在长退避里等模型恢复（这几次不计入 ``attempts``）；别的结果清零
+    model_waits: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -223,6 +243,8 @@ class MemoryJob:
                 raise ValueError(f"{name} must be non-empty normalized text")
         if isinstance(self.started_on, datetime) or not isinstance(self.started_on, date):
             raise ValueError("started_on must be a calendar date")
+        if isinstance(self.model_waits, bool) or not isinstance(self.model_waits, int) or self.model_waits < 0:
+            raise ValueError("memory job model_waits must be non-negative")
         if not self._hex(self.source_segment_digest, 64):
             raise ValueError("source_segment_digest must be lowercase SHA-256 text")
         if not self._hex(self.transaction_id, 32):
@@ -257,6 +279,8 @@ class MemoryJob:
             raise ValueError("non-running memory job cannot retain lease ownership")
         if status not in {MemoryJobStatus.STAGED, MemoryJobStatus.QUEUED} and self.next_attempt_at is not None:
             raise ValueError("only staged or queued memory jobs can contain next_attempt_at")
+        if self.model_waits and status not in {MemoryJobStatus.QUEUED, MemoryJobStatus.RUNNING}:
+            raise ValueError("only queued or running memory jobs can be waiting for the model")
         if status is MemoryJobStatus.STAGED:
             if self.claim_generation != 0:
                 raise ValueError("staged memory job cannot contain a claim generation")
@@ -288,6 +312,12 @@ class MemoryJob:
             self.segment_id,
             self.source_segment_digest,
         )
+
+    @property
+    def waiting_for_model(self) -> bool:
+        """排着队、在长退避里等模型恢复（不是失败）。"""
+
+        return self.status is MemoryJobStatus.QUEUED and self.model_waits > 0
 
     def _normalize_optional_time(self, name: str) -> None:
         value = getattr(self, name)

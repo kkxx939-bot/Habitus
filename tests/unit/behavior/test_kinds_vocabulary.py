@@ -34,7 +34,7 @@ from habitus.behavior.kinds.ids import (
 from habitus.behavior.kinds.model import BehaviorClass, BehaviorKindError, ClassOrigin, Exclusion, Vocabulary
 from habitus.behavior.kinds.pending import PendingEntry
 from habitus.behavior.kinds.store import BehaviorKindConflictError, BehaviorKindStore, BehaviorKindStoreError
-from tests.unit.behavior.kinds_fixtures import EDIT, NOW, RESEARCH, edit_class, research_class
+from tests.unit.behavior.kinds_fixtures import EDIT, NOW, RESEARCH, catalog_in_sync, edit_class, research_class
 
 
 def bootstrap() -> VersionRecord:
@@ -166,7 +166,7 @@ def test_store_appends_with_cas_and_replays_the_log(tmp_path: Path) -> None:
         store.append(replace(moved, version=2), expected_version=0)
     reopened = BehaviorKindStore(tmp_path)
     assert reopened.read().version == 1 and reopened.records()[0].moves == moved.moves
-    assert reopened.catalog_in_sync()
+    assert catalog_in_sync(reopened)
     catalog = (tmp_path / "kinds.md").read_text(encoding="utf-8")
     assert "修改代码**〔s-k0001〕" in catalog and "不含：动手改代码（→修改代码）" in catalog
 
@@ -182,7 +182,7 @@ def test_store_reports_a_corrupt_log_and_a_stale_catalog(tmp_path: Path) -> None
     store = BehaviorKindStore(tmp_path)
     store.append(bootstrap(), expected_version=0)
     (tmp_path / "kinds.md").write_text("手改过", encoding="utf-8")
-    assert not store.catalog_in_sync()
+    assert not catalog_in_sync(store)
     (tmp_path / "kinds.changes.jsonl").write_text("{坏}\n", encoding="utf-8")
     with pytest.raises(BehaviorKindStoreError):
         store.read()
@@ -226,11 +226,11 @@ def test_job_state_round_trips_through_the_store(tmp_path: Path) -> None:
 
     store = BehaviorKindStore(tmp_path)
     assert store.read_jobs() == JobState()
-    state = JobState().after_nightly(NOW).after_revision(NOW, "2026-09-30", frozenset({("s-k0003", "s-k0001")}), keep=2)
+    state = JobState().after_revision(NOW, "2026-09-30", frozenset({("s-k0003", "s-k0001")}), keep=2)
     store.replace_jobs(state)
     assert store.read_jobs() == state
     (tmp_path / "kinds.jobs.json").write_text(
-        '{"nightly_at": 3, "revision_at": null, "merge_history": []}', encoding="utf-8"
+        '{"revision_at": 3, "merge_history": []}', encoding="utf-8"
     )
     with pytest.raises(BehaviorKindStoreError):
         store.read_jobs()
@@ -245,18 +245,6 @@ def test_branches_must_point_to_active_classes_and_never_form_a_cycle() -> None:
     chained = apply(first, VersionRecord(2, NOW, ChangeReason.REVISION, (AddClass(third), Branch(EDIT, third.id))))
     with pytest.raises(BehaviorKindError, match="cycle"):
         apply(chained, VersionRecord(3, NOW, ChangeReason.REVISION, (Branch(third.id, EDIT),)))
-
-
-def test_nightly_does_not_run_twice_on_the_dst_fall_back_day() -> None:
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-
-    from habitus.behavior.kinds.schedule import nightly_due
-
-    berlin = ZoneInfo("Europe/Berlin")
-    ran = datetime(2026, 10, 25, 2, 30, tzinfo=berlin)
-    assert not nightly_due(datetime(2026, 10, 25, 2, 15, tzinfo=berlin, fold=1), ran, hour=2)
-    assert nightly_due(datetime(2026, 10, 26, 2, 5, tzinfo=berlin), ran, hour=2)
 
 
 @pytest.mark.parametrize("separator", [" ", " ", "\u0085", "\n", "\x00"])

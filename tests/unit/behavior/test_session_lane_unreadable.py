@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from habitus.behavior.fusion.errors import BehaviorFusionLimitError, BehaviorFusionTruncatedError
+from habitus.behavior.fusion.errors import BehaviorFusionLimitError
 from habitus.behavior.fusion.lanes.session import TurnDisposition, split_turns
 from habitus.behavior.fusion.lanes.session.model import decode_turn
 from habitus.behavior.retry import RetryCause, RetryKind
+from habitus.model_client import MODEL_UNAVAILABLE
 from tests.unit.behavior.session_fixtures import Stores, description, lane, prompt, reply
 
 CONVERSATION = "codex-rollout-unreadable"
@@ -41,7 +42,7 @@ def test_an_oversized_receipt_turns_the_round_into_an_unreadable_gap(
 
     (outcome,) = asyncio.run(session.consume((turn,)))
 
-    assert outcome.disposition is TurnDisposition.UNREADABLE
+    assert outcome.disposition is TurnDisposition.ERROR
     (judgement,) = stores.judgements.list()
     assert judgement["behavior"] is None  # 可读的那条拿走了，只剩没读懂
     assert judgement["judgement_id"] == outcome.judgement_id
@@ -57,16 +58,18 @@ def test_an_oversized_receipt_turns_the_round_into_an_unreadable_gap(
     assert provider.calls == 1
 
 
-def test_a_truncated_description_is_recorded_as_unreadable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_description_that_deterministically_cannot_be_written_is_recorded_as_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     stores = Stores(tmp_path)
     session, _provider = lane(stores, [description()])
 
-    async def truncated(_turn, _reminders=()):
-        raise BehaviorFusionTruncatedError("output truncated twice")
+    async def over_limit(_turn, _reminders=()):
+        raise BehaviorFusionLimitError("description exceeds its bound")
 
-    monkeypatch.setattr(session.describer, "describe", truncated)
+    monkeypatch.setattr(session.describer, "describe", over_limit)
     (outcome,) = asyncio.run(session.consume((_turn(),)))
-    assert outcome.disposition is TurnDisposition.UNREADABLE
+    assert outcome.disposition is TurnDisposition.ERROR
     (judgement,) = stores.judgements.list()
     assert judgement["behavior"] is None
 
@@ -100,7 +103,7 @@ def test_a_crash_after_the_unreadable_judgement_landed_is_finished_on_the_next_r
     again, _ = lane(stores, [])
     (outcome,) = asyncio.run(again.consume((turn,)))
 
-    assert outcome.disposition is TurnDisposition.UNREADABLE
+    assert outcome.disposition is TurnDisposition.ERROR
     assert outcome.judgement_id == landed["judgement_id"]
     assert [item["judgement_id"] for item in stores.judgements.list()] == [landed["judgement_id"]]
     assert stores.recorder().is_recorded(turn)
@@ -115,7 +118,7 @@ def test_a_given_up_turn_goes_to_the_backlog_and_the_nightly_retry_adds_its_judg
     session, provider = lane(stores, [description()])
     turn = _turn()
     (outcome,) = asyncio.run(session.abandon((turn,), reason="recovery given up"))
-    assert outcome.disposition is TurnDisposition.UNREADABLE and provider.calls == 0
+    assert outcome.disposition is TurnDisposition.ERROR and provider.calls == 0
     (item,) = stores.backlog.snapshot().items
     assert item.cause is RetryCause.GIVEN_UP
     assert stores.recorder().is_recorded(turn)  # 覆盖记录会说"写过了"：重试不能走它
@@ -157,8 +160,8 @@ def test_salvaging_a_broken_source_only_marks_the_turns_never_written(tmp_path: 
     assert [outcome.disposition for outcome in outcomes] == [
         TurnDisposition.ALREADY_RECORDED,
         TurnDisposition.ALREADY_RECORDED,
-        TurnDisposition.UNREADABLE,
-        TurnDisposition.UNREADABLE,
+        TurnDisposition.ERROR,
+        TurnDisposition.ERROR,
     ]
     assert provider.calls == 1  # 只有一开始正常写的那一轮问过模型
     assert [decode_turn(item.payload).key for item in stores.backlog.snapshot().items] == [fresh.key]
@@ -250,3 +253,127 @@ def test_a_failed_retry_is_withdrawn_so_nothing_uncovered_is_left_behind(tmp_pat
 
     assert stores.judgements.list() == ()
     assert stores.observations.list() == ()
+
+
+@pytest.mark.parametrize("error", ["ModelContentSafetyError", "ModelInputTooLargeError"])
+def test_a_turn_the_model_refuses_becomes_unreadable_without_taking_the_next_turn_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: str
+) -> None:
+    """E7：三轮里第二轮被内容安全拦下 / 输入超长——同一份材料再问也一样（``MODEL_DETERMINISTIC``）：这一轮当场落「没读懂」、
+    进重试堆，第三轮照常判；模型一共调 3 次（以前抛给会话源重做 5 次，放弃时连无辜的第三轮也成了「没读懂」）。"""
+
+    import habitus.model_client as model_client
+
+    stores = Stores(tmp_path)
+    session, provider = lane(stores, [description("统计代码行数"), description("整理会议记录")])
+    real = provider.complete_async
+    calls = {"n": 0}
+
+    async def second_refused(request):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise getattr(model_client, error)("refused")
+        return await real(request)
+
+    monkeypatch.setattr(provider, "complete_async", second_refused)
+    turns = split_turns(
+        CONVERSATION,
+        (
+            prompt(0, "统计一下行数"),
+            reply(1, "8,792 行。", minutes=3),
+            prompt(2, "这段日志是什么意思", minutes=5),
+            reply(3, "无法回答。", minutes=6),
+            prompt(4, "整理一下会议记录", minutes=8),
+            reply(5, "整理好了。", minutes=10),
+        ),
+    )
+
+    outcomes = asyncio.run(session.consume(turns))
+
+    assert [item.disposition for item in outcomes] == [
+        TurnDisposition.RECORDED,
+        TurnDisposition.ERROR,
+        TurnDisposition.RECORDED,
+    ]
+    assert calls["n"] == 3
+    (item,) = stores.backlog.snapshot().items
+    # 内容安全拦下的只这一条记「错误」、不重试；输入超长是我们自己处理不了的（裁定 94 错误分类）
+    refused = error == "ModelContentSafetyError"
+    assert decode_turn(item.payload) == turns[1]
+    assert item.cause is (RetryCause.REFUSED if refused else RetryCause.DETERMINISTIC) and not item.cause.retried
+
+
+# ── 变异测试补的探针（段 4 E19）──────────────────────────────────────────────────────
+
+
+def _turn_at(text: str, start: datetime):  # type: ignore[no-untyped-def]
+    from habitus.behavior.fusion.lanes.session import SessionMessage, SessionMessageRole
+
+    messages = (
+        SessionMessage(0, start, SessionMessageRole.PROMPT, text),
+        SessionMessage(1, start + timedelta(minutes=2), SessionMessageRole.COMPLETION, "好的"),
+    )
+    (turn,) = split_turns(f"c-{text}", messages)
+    return turn
+
+
+def test_a_turn_goes_to_the_backlog_under_the_subjects_local_day(tmp_path: Path) -> None:
+    """R49：进重试堆的那一天按主体本地日算——UTC 20:00 开口（本地次日 04:00）属于本地的次日。"""
+
+    from habitus.foundation.lifecycle import DeterministicFailure
+
+    stores = Stores(tmp_path)
+    session, _provider = lane(stores, [])
+
+    async def broken(_turn, _reminders=()):  # type: ignore[no-untyped-def]
+        raise DeterministicFailure("input exceeds the limit")
+
+    session.describer.describe = broken  # type: ignore[method-assign]
+    asyncio.run(session.consume((_turn_at("凌晨的一轮", datetime(2026, 10, 19, 20, 0, tzinfo=UTC)),)))
+
+    (item,) = stores.backlog.snapshot().items
+    assert item.day == date(2026, 10, 20)
+
+
+def test_the_identity_of_an_unreadable_judgement_does_not_depend_on_when_it_is_written(tmp_path: Path) -> None:
+    """S03：「没读懂」判断的判定时刻取这一轮做完的时刻：几小时后重来，身份不变（幂等，不另写一条）。"""
+
+    stores = Stores(tmp_path)
+    recorder = stores.recorder()
+    turn = _turn_at("超长的一轮", datetime(2026, 10, 20, 2, 0, tzinfo=UTC))
+    first = recorder.record_error(turn)
+    stores.now = stores.now + timedelta(hours=5)
+    assert recorder.record_error(turn) == first
+
+
+@pytest.mark.parametrize("error", MODEL_UNAVAILABLE)
+def test_a_turn_the_model_cannot_take_now_is_unreadable_and_kept_for_the_nightly_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    """裁定 80 第 5 条（E6）：模型此刻用不了（额度、鉴权、权限、连不上）不抛给会话源——不然那一天照样到点定稿，结算把没看到
+    的读成"没做"。先落「没读懂」（封口不被它钉住），这一轮进重试堆（原因"模型用不了"）；当晚模型好了照原有补回路径补一条判断。"""
+
+    stores = Stores(tmp_path)
+    session, provider = lane(stores, [description()])
+    real = session.describer.describe
+
+    async def unavailable(_turn, _reminders=()):
+        raise error("quota exhausted")
+
+    monkeypatch.setattr(session.describer, "describe", unavailable)
+    turn = _turn()
+
+    (outcome,) = asyncio.run(session.consume((turn,)))
+
+    assert outcome.disposition is TurnDisposition.ERROR
+    (judgement,) = stores.judgements.list()
+    assert judgement["behavior"] is None and judgement["judgement_id"] == outcome.judgement_id
+    assert stores.recorder().is_recorded(turn)
+    (item,) = stores.backlog.snapshot().items
+    assert (item.kind, item.cause) == (RetryKind.TURN, RetryCause.UNAVAILABLE)
+    assert decode_turn(item.payload) == turn
+
+    monkeypatch.setattr(session.describer, "describe", real)
+    retried = asyncio.run(session.retry(decode_turn(item.payload)))
+    assert retried.disposition is TurnDisposition.RECORDED and provider.calls == 1
+    assert sorted((judgement["behavior"] is None) for judgement in stores.judgements.list()) == [False, True]

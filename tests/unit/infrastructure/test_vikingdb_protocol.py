@@ -147,6 +147,27 @@ def test_http_and_provider_errors_are_classified_without_silent_fallback(
     asyncio.run(instance.close())
 
 
+def test_a_rejected_credential_echoed_in_the_error_body_never_reaches_the_exception() -> None:
+    """VikingDB 401 的回包把被拒的凭据原样夹在报错里（``security token[AK]``）：异常消息里按值换掉，换不到值的也按形状去掉。"""
+
+    body = {
+        "ResponseMetadata": {
+            "Error": {
+                "Code": "InvalidAccessKey",
+                "Message": "The security token[secret] included in the request is invalid; again secret",
+            }
+        }
+    }
+    instance = client(lambda _request: httpx.Response(401, json=body))
+    with pytest.raises(VectorStoreError) as raised:
+        asyncio.run(instance.data("/api/test", {}))
+    asyncio.run(instance.close())
+    message = str(raised.value)
+    assert "401 InvalidAccessKey" in message
+    assert "secret" not in message
+    assert message.count("[REDACTED]") == 2
+
+
 def test_success_response_rejects_invalid_json_root_and_oversized_payload() -> None:
     malformed = client(lambda _request: httpx.Response(200, content=b"not-json"))
     with pytest.raises(VectorStoreIntegrityError, match="invalid JSON"):

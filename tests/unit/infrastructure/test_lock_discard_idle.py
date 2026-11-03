@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 from habitus.infrastructure.store.contracts import LockLostError, LockStore
-from habitus.infrastructure.store.locks import ProcessLocalLockStore
 from habitus.infrastructure.store.sqlite import SQLiteLockStore
+from tests.lock_store import ProcessLocalLockStore
 
 
 @pytest.fixture(params=["process", "sqlite"])

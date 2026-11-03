@@ -1,7 +1,7 @@
 """把一轮的描述写成判断记录（确定性，不调模型）。
 
-一轮一条判断，不带任何续接关系（裁定 32）：落到行为树上也是一轮一条。派生、回执、落盘与物理 lane 共用，
-之后由同一个归约封口落树。
+一轮一条判断，不带任何续接关系（裁定 32）：落到行为树上也是一轮一条。落盘序列与"写到一半"的认法与物理 lane 共用
+（``fusion/writing.py``），之后由同一个归约封口落树。
 
 每一轮留两条凭据观测——人开口的时刻一条、助手做完的时刻一条——只存时刻和指向会话源的引用，不存内容（裁定 33）。
 判断的开始与最后所见由这两条派生：开始是人开口的时刻，最后所见是助手做完的时刻（裁定 31）。
@@ -16,22 +16,20 @@ from datetime import datetime, tzinfo
 from typing import Any
 
 from habitus.behavior.fusion.coverage import BehaviorCoverageIndex
-from habitus.behavior.fusion.derivation import derive_judgements, judgement_payload
 from habitus.behavior.fusion.errors import BehaviorFusionError
 from habitus.behavior.fusion.judgement import (
     BehaviorClaim,
     BehaviorFact,
     BehaviorJudgement,
-    BehaviorJudgementBatch,
     JudgementStatus,
     JudgementStatusBasis,
 )
 from habitus.behavior.fusion.lanes.session.model import SessionTurn
 from habitus.behavior.fusion.lanes.session.prompt import SESSION_PROMPT_VERSION, TurnDescription
 from habitus.behavior.fusion.lanes.session.protocol import SESSION_PROTOCOL
-from habitus.behavior.fusion.receipt import build_fusion_receipt
 from habitus.behavior.fusion.receipt_store import BehaviorFusionReceiptStore
 from habitus.behavior.fusion.store import BehaviorJudgementStore
+from habitus.behavior.fusion.writing import FusionVersions, publish_judgement, written_judgements
 from habitus.behavior.observation import (
     BehaviorObservation,
     BehaviorObservationBatch,
@@ -52,11 +50,12 @@ def session_observer(conversation_id: str) -> str:
 @dataclass(frozen=True)
 class InterruptedRecord:
     """上一次写到一半的那条判断：判断已经落盘，回执还没有。``description`` 为 None 是一段没读懂（上一次是确定性地
-    写不成、写没读懂写到一半）。"""
+    写不成、写没读懂写到一半）。``versions`` 是它落盘时的版本，接着写完时沿用（中间升级过提示词也不变）。"""
 
     judgement_id: str
     judged_at: datetime
     description: TurnDescription | None
+    versions: FusionVersions
 
     @property
     def unreadable(self) -> bool:
@@ -130,6 +129,13 @@ class SessionTurnRecorder:
 
         return self._first([item for item in self._written(turn) if item["behavior"] is not None])
 
+    def readable_pending(self, turn: SessionTurn) -> bool:
+        """这一轮有一条还没归约的可读判断，它引用的凭据也还在存储里（归约得成）。"""
+
+        if self.readable_unfinished(turn) is None:
+            return False
+        return self.observations.read(self._envelope(turn, self._evidence(turn)).source_id) is not None
+
     def withdraw(self, turn: SessionTurn) -> None:
         """撤回这一轮写到一半的重试，回到重试之前的样子：没归约的可读判断撤下；凭据没被任何回执覆盖的，凭据一起撤
         （否则一组没被覆盖的凭据会把封口视界永远钉在这一轮那一刻）。原来那条「没读懂」与它的覆盖不动。"""
@@ -141,12 +147,7 @@ class SessionTurnRecorder:
             self.observations.discard(self._envelope(turn, self._evidence(turn)).source_id)
 
     def _written(self, turn: SessionTurn) -> list[dict[str, Any]]:
-        owned = [item.observation_id for item in self._evidence(turn)]
-        return [
-            item
-            for item in self.judgements.list()
-            if item["observation_ids"] == owned and item["fusion_version"] == SESSION_FUSION_VERSION
-        ]
+        return written_judgements(self.judgements, [item.observation_id for item in self._evidence(turn)])
 
     @staticmethod
     def _first(written: list[dict[str, Any]]) -> InterruptedRecord | None:
@@ -164,6 +165,7 @@ class SessionTurnRecorder:
                 goal=first["goal"],
                 steps=tuple(fact["semantics"] for fact in first["basis"]),
             ),
+            versions=FusionVersions.of(first),
         )
 
     def resume(self, turn: SessionTurn, interrupted: InterruptedRecord, *, sources: tuple[str, ...] = ()) -> str:
@@ -171,10 +173,15 @@ class SessionTurnRecorder:
         （判定时刻取这一轮做完的时刻，身份与上一次相同）。"""
 
         if interrupted.description is None:
-            judgement_id = self.record_unreadable(turn, sources=sources)
+            judgement_id = self.record_error(turn, sources=sources, versions=interrupted.versions)
         else:
             judgement_id = self.record(
-                turn, interrupted.description, validation_attempts=1, judged_at=interrupted.judged_at, sources=sources
+                turn,
+                interrupted.description,
+                validation_attempts=1,
+                judged_at=interrupted.judged_at,
+                sources=sources,
+                versions=interrupted.versions,
             )
         if judgement_id != interrupted.judgement_id:
             raise BehaviorFusionError("an interrupted session judgement could not be resumed under its identity")
@@ -188,9 +195,10 @@ class SessionTurnRecorder:
         validation_attempts: int,
         judged_at: datetime | None = None,
         sources: tuple[str, ...] = (),
+        versions: FusionVersions | None = None,
     ) -> str:
-        """写这一轮的凭据、判断与回执，返回判断的编号。``judged_at`` 只在接着写完上一次时给。``sources`` 是这一轮所属的
-        会话源：覆盖记录带上它，会话源的 Behavior 到终态之前不删（做到一半的源隔多久恢复都认得出前几轮写过）。"""
+        """写这一轮的凭据、判断与回执，返回判断的编号。``judged_at`` 与 ``versions`` 只在接着写完上一次时给。``sources``
+        是这一轮所属的会话源：覆盖记录带上它，会话源的 Behavior 到终态之前不删（做到一半的源隔多久恢复都认得出前几轮写过）。"""
 
         judgement = BehaviorJudgement(
             judgement_no=1,
@@ -205,7 +213,6 @@ class SessionTurnRecorder:
             # 这一轮已经做完才送到这里；"在不在进行"由下游按时间读，融合不判。
             status=JudgementStatus.ONGOING,
             status_basis=JudgementStatusBasis.OBSERVED,
-            relations=(),
         )
         return self._publish(
             turn,
@@ -213,29 +220,34 @@ class SessionTurnRecorder:
             validation_attempts=validation_attempts,
             judged_at=self.clock() if judged_at is None else judged_at,
             sources=sources,
+            versions=versions,
         )
 
-    def record_unreadable(self, turn: SessionTurn, *, sources: tuple[str, ...] = ()) -> str:
-        """这一轮确定性地写不成（超限、输出被截断）：按"读不懂"的产出路径把它写成一段没读懂，返回那条判断的编号。
+    def record_error(
+        self, turn: SessionTurn, *, sources: tuple[str, ...] = (), versions: FusionVersions | None = None
+    ) -> str:
+        """这一轮系统出了问题没读成（模型调不通、答了格式不合、内容安全拦下、我们自己写不成、会话源账坏）：写成一段「错误」
+        （空判断、依据 ``error``，裁定 94 第 3 条；会话 lane 的模型要么给出描述、要么失败，没有"读了给不出结论"的那一种），
+        返回那条判断的编号。
 
-        已经落盘、但回执没落的可读判断一并撤下——否则它照样会被归约落树；这一轮整轮进了每晚重试的堆（裁定 67），撤下的那条
+        已经落盘、但回执没落的可读判断一并撤下——否则它照样会被归约落树；这一轮整轮进了夜里待处理的堆（裁定 67），撤下的那条
         不必另存。凭据由这份回执覆盖，封口前沿不再被钉住（26 号清单 2.4.4）。判定时刻取这一轮做完的时刻，重来时身份不变、幂等。
         """
 
-        owned = [item.observation_id for item in self._evidence(turn)]
-        for stale in self.judgements.list():
-            if stale["observation_ids"] == owned and stale["behavior"] is not None:
+        for stale in self._written(turn):
+            if stale["behavior"] is not None:
                 self.judgements.discard(stale["judgement_id"])
-        unreadable = BehaviorJudgement(
+        failed = BehaviorJudgement(
             judgement_no=1,
             covers=(1, 2),
             subjects=(),
             claim=BehaviorClaim(behavior=None, goal=None, summary=None, basis=()),
             status=None,
-            status_basis=None,
-            relations=(),
+            status_basis=JudgementStatusBasis.ERROR,
         )
-        return self._publish(turn, unreadable, validation_attempts=1, judged_at=turn.completed_at, sources=sources)
+        return self._publish(
+            turn, failed, validation_attempts=1, judged_at=turn.completed_at, sources=sources, versions=versions
+        )
 
     def _publish(
         self,
@@ -244,33 +256,22 @@ class SessionTurnRecorder:
         *,
         validation_attempts: int,
         judged_at: datetime,
-        sources: tuple[str, ...] = (),
+        sources: tuple[str, ...],
+        versions: FusionVersions | None,
     ) -> str:
-        opened, closed = self._evidence(turn)
-        envelope = self._envelope(turn, (opened, closed))
-        # 先落凭据再落判断：归约落树时要读凭据；顺序反过来的话，中途崩溃会留下一条读不到凭据的判断。
-        self.observations.put(envelope)
-        derived = derive_judgements(
-            BehaviorJudgementBatch((judgement,)),
-            (opened, closed),
-            source_refs=(envelope.source_id,),
+        return publish_judgement(
+            observations=self.observations,
+            judgements=self.judgements,
+            receipts=self.receipts,
+            coverage=self.coverage,
+            envelope=self._envelope(turn, self._evidence(turn)),
+            judgement=judgement,
+            versions=versions or FusionVersions(SESSION_FUSION_VERSION, SESSION_PROMPT_VERSION),
             judged_at=judged_at,
-            fusion_version=SESSION_FUSION_VERSION,
-            prompt_version=SESSION_PROMPT_VERSION,
-        )
-        receipt = build_fusion_receipt(
-            derived,
-            (opened, closed),
-            source_refs=(envelope.source_id,),
-            prompt_version=SESSION_PROMPT_VERSION,
             validation_attempts=validation_attempts,
             primary_subject=self.primary_subject,
-            judged_at=judged_at,
+            sources=sources,
         )
-        for item in derived:
-            self.judgements.put_payload(judgement_payload(item))
-        self.coverage.record(self.receipts.put(receipt), sources=sources)
-        return derived[0].judgement_id
 
     def _evidence(self, turn: SessionTurn) -> tuple[BehaviorObservation, BehaviorObservation]:
         """这一轮的两条凭据：人开口、助手做完。两条都在这一轮结束时才可用。"""

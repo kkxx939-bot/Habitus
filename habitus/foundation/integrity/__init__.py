@@ -6,7 +6,7 @@ from habitus.foundation.integrity.canonical_json import (
     canonicalize,
     immutable_snapshot,
 )
-from habitus.foundation.integrity.digest import bytes_digest, canonical_digest, text_digest
+from habitus.foundation.integrity.digest import bytes_digest, canonical_digest, is_sha256_hex, text_digest
 
 __all__ = [
     "CanonicalSerializationError",
@@ -15,5 +15,6 @@ __all__ = [
     "canonical_json",
     "canonicalize",
     "immutable_snapshot",
+    "is_sha256_hex",
     "text_digest",
 ]

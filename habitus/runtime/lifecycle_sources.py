@@ -46,16 +46,31 @@ class ConversationSourceParticipant:
         directories = sorted(ledger.index.address_directories())
         batch = self._next_batch(directories)
         released = 0
+        failed: dict[str, int] = {}
         for directory in batch:
             ctx.assert_owned()
-            released += self.releaser.release_address(directory, ctx)
+            try:
+                released += self.releaser.release_address(directory, ctx)
+            except Exception as exc:  # noqa: BLE001 - 一个地址放不了只挡它自己，下一轮再来
+                ctx.assert_owned()  # 丢了全局 lease 的照旧中止这一轮
+                failed[type(exc).__name__] = failed.get(type(exc).__name__, 0) + 1
         ctx.assert_owned()
-        self.releaser.settle_pending()
+        failed_settle: str | None = None
+        try:
+            self.releaser.settle_pending()
+        except Exception as exc:  # noqa: BLE001 - "还没终态"目录读不了只少清这一轮，释放照常报数
+            ctx.assert_owned()
+            failed_settle = f"conversation source pending markers failed to settle: {type(exc).__name__}"
         readings = (
             CapacityReading("index_addresses", len(directories), ledger.index.max_addresses),
             CapacityReading("pending_sources", ledger.pending.count(), ledger.pending.max_entries),
         )
-        return ParticipantReport(released=released, readings=readings)
+        signals = tuple(
+            f"{count} conversation source addresses failed to release: {name}" for name, count in sorted(failed.items())
+        )
+        if failed_settle is not None:
+            signals = (*signals, failed_settle)
+        return ParticipantReport(released=released, readings=readings, signals=signals)
 
     def _next_batch(self, directories: list[str]) -> list[str]:
         after = [name for name in directories if self._cursor is None or name > self._cursor]
@@ -115,7 +130,13 @@ class ConversationSourceRecoveryParticipant:
         if plan.salvaged:
             signals.append(f"{len(plan.salvaged)} broken behavior deliveries were salvaged")
         if plan.corrupt:
-            signals.append(f"{len(plan.corrupt)} conversation source envelopes are unreadable and wait for repair")
+            signals.append(
+                f"{len(plan.corrupt)} conversation sources have an unreadable envelope or pending marker and wait for repair"
+            )
+        if plan.unreadable:
+            signals.append(
+                f"{len(plan.unreadable)} conversation source ledger entries are unreadable and wait for repair"
+            )
         return ParticipantReport(readings=readings, signals=tuple(signals))
 
     async def _recover(self, entries: tuple[ConversationSourceRecoveryEntry, ...]) -> None:

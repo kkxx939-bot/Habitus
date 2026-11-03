@@ -23,9 +23,6 @@ class BehaviorObservationConfig:
     max_identifier_chars: int = 256
     max_file_bytes: int = 2_000_000
     max_files: int = 100_000
-    # 上游用自己的时钟标注 available_at，Habitus 用自己的时钟标注 recorded_at；两者之间允许
-    # 的最大反向偏差。超过它说明交付携带了"尚未可用"的语义，属于结构性矛盾而非时钟抖动。
-    max_clock_skew_seconds: int = 300
 
     def __post_init__(self) -> None:
         for name, value in {
@@ -37,7 +34,6 @@ class BehaviorObservationConfig:
             "max_identifier_chars": self.max_identifier_chars,
             "max_file_bytes": self.max_file_bytes,
             "max_files": self.max_files,
-            "max_clock_skew_seconds": self.max_clock_skew_seconds,
         }.items():
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
