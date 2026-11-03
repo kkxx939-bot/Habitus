@@ -1,6 +1,6 @@
 {
   "name": "habitus",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Habitus command line: install the Habitus memory and reminder plugins into coding agents (Codex, Claude Code, OpenCode, pi, ZCode, DeepSeek Harness), check and query the local Habitus service.",
   "type": "module",
   "bin": {
