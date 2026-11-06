@@ -221,7 +221,7 @@ class SQLiteConversationSummaryUseStore:
                     (
                         reference.identity,
                         reference.address.started_on.isoformat(),
-                        reference.address.conversation_id,
+                        reference.address.identity,
                         reference.stage.value,
                         reference.summary_id,
                         _format_timestamp(timestamp),
@@ -346,7 +346,7 @@ class SQLiteConversationSummaryUseStore:
                     """,
                     (
                         address.started_on.isoformat(),
-                        address.conversation_id,
+                        address.identity,
                         after,
                         self.max_batch_size,
                     ),
@@ -449,7 +449,7 @@ class SQLiteConversationSummaryUseStore:
             (
                 reference.identity,
                 reference.address.started_on.isoformat(),
-                reference.address.conversation_id,
+                reference.address.identity,
                 reference.stage.value,
                 reference.summary_id,
                 state.useful_recall_count,

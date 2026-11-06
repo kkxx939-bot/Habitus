@@ -4,7 +4,13 @@
 #
 #     bash scripts/ci.sh
 #
-# 依赖与工具全部锁死在 requirements.txt（Python 3.13 下由 pip-compile 从 pyproject.toml 生成），安装：
+# 支持 Python 3.12 起。依赖与工具全部锁死在 requirements.txt（由 uv pip compile 从 pyproject.toml
+# 生成，--universal，以 3.12 为最低版本）。本地用 uv 建环境并安装：
+#
+#     uv venv --python 3.12 .venv
+#     uv pip install --python .venv -r requirements.txt && uv pip install --python .venv -e . --no-deps
+#
+# 已在某个环境里（例如 CI）时用 pip 装同一份锁文件也可以：
 #
 #     python -m pip install -r requirements.txt && python -m pip install -e . --no-deps
 #

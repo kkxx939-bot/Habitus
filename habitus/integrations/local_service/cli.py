@@ -96,6 +96,7 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
         plugin_connection_paths,
         resolve_config_path,
     )
+    from habitus.integrations.local_service.locale_setup import settle_locale
 
     catalog = load_adapter_catalog()
     destination = resolve_config_path(args.config, environ=values)
@@ -118,22 +119,17 @@ def _initialize(args: argparse.Namespace, values: dict[str, str]) -> int:
                 sys.stdout.write("Habitus cloud setup cancelled.\n")
                 return 0
             configured = apply_cloud_selection(payload, selection, catalog.setup)
-            result = initialize_config_from_mapping(
-                destination,
-                configured,
-                force=existed or args.force,
-            )
+            if not existed or args.force:  # 只有新建或重建时定所在地；已有配置的 locale 不碰（W3）
+                configured = settle_locale(configured, interactive=True, existing=destination)
+            result = initialize_config_from_mapping(destination, configured, force=existed or args.force)
         elif source is None and (not existed or args.force):
             payload = apply_cloud_selection(
                 load_initialization_mapping(),
                 default_cloud_selection(catalog.setup),
                 catalog.setup,
             )
-            result = initialize_config_from_mapping(
-                destination,
-                payload,
-                force=args.force,
-            )
+            payload = settle_locale(payload, interactive=False, existing=destination)  # 只会是非交互
+            result = initialize_config_from_mapping(destination, payload, force=args.force)
         else:
             result = initialize_config(destination, source=source, force=args.force)
     except WizardCancelled:

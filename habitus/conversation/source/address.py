@@ -1,16 +1,22 @@
 """会话源的地址：同一个 (conversation_id, started_on) 下的源严格按序交付，释放、有序检查、水位都按地址算。
 
-conversation 包不 import memory，所以不复用 memory 的地址类，只在这里定义同一对值。
+conversation 包不 import memory，所以不复用 memory 的地址类，只在这里定义同一对值。会话身份与会话目录同一口径：
+``canonical_path_identity``（NFC + casefold），只差大小写或 Unicode 规范化形式的两个会话号是同一个地址；
+原文 ``conversation_id`` 照样保存、回显，只是不参与相等、排序和摘要。
 """
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-from habitus.conversation.source.model import ConversationSourceEnvelope, ConversationSourceError
+from habitus.conversation.source.model import (
+    ConversationSourceEnvelope,
+    ConversationSourceError,
+    conversation_identity,
+)
 from habitus.foundation.integrity import canonical_digest
 from habitus.infrastructure.store.filesystem import durable_rmdir
 
@@ -19,14 +25,16 @@ _ADDRESS_SCHEMA = "conversation_source_address_v1"
 
 @dataclass(frozen=True, order=True)
 class SourceAddress:
-    conversation_id: str
+    conversation_id: str = field(compare=False)
     started_on: date
+    identity: str = field(init=False, repr=False, default="")
 
     def __post_init__(self) -> None:
         if not isinstance(self.conversation_id, str) or not self.conversation_id:
             raise ConversationSourceError("source address needs a non-empty conversation_id")
         if not isinstance(self.started_on, date):
             raise ConversationSourceError("source address needs a calendar date")
+        object.__setattr__(self, "identity", conversation_identity(self.conversation_id))
 
     @classmethod
     def of(cls, envelope: ConversationSourceEnvelope) -> SourceAddress:
@@ -39,7 +47,7 @@ class SourceAddress:
         return canonical_digest(
             {
                 "schema": _ADDRESS_SCHEMA,
-                "conversation_id": self.conversation_id,
+                "conversation_id": self.identity,
                 "started_on": self.started_on.isoformat(),
             }
         )[:32]

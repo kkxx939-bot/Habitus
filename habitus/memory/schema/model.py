@@ -11,7 +11,7 @@ from pathlib import PurePosixPath
 from string import Formatter
 from typing import Any
 
-from habitus.memory.model import MemoryAddress, MemoryKind
+from habitus.memory.model import MemoryAddress, MemoryKind, require_new_memory_name
 
 _FIELD_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _CANONICAL_PATH_TEMPLATES = {
@@ -198,6 +198,18 @@ class MemoryTypeSchema:
         if present_content_fields < self.min_non_empty_content_fields:
             raise MemorySchemaError("memory payload does not contain enough non-empty content fields")
         self._address_from_normalized(normalized)
+        return normalized
+
+    def validate_new_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """模型新给出的字段：在 ``validate_payload`` 之上，拼进路径的名字再卡字节上限。
+
+        读回已落盘的文档只走 ``validate_payload``——旧文件名字超长也照常读，上限只拦新写入。
+        """
+
+        normalized = self.validate_payload(payload)
+        for field in self.address_fields:
+            if field.field_type is MemoryFieldType.STRING:
+                require_new_memory_name(normalized[field.name], field.name)
         return normalized
 
     def address_for(self, payload: Mapping[str, Any]) -> MemoryAddress:

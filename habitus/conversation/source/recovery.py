@@ -363,7 +363,7 @@ def _in_recovery_order(
             return (
                 0,
                 entry.consumer.value,
-                envelope.conversation_id,
+                SourceAddress.of(envelope).identity,
                 envelope.started_on,
                 envelope.batch.start_sequence,
                 envelope.batch.end_sequence,

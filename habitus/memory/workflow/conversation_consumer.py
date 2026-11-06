@@ -20,6 +20,7 @@ from habitus.memory.conversation import (
     ConversationIngressRequest,
     ConversationMessageJournal,
     ConversationSemanticBoundaryScorer,
+    ConversationWriteConflictError,
 )
 from habitus.memory.workflow.conversation_output import (
     MEMORY_CONVERSATION_OUTPUT_SCHEMA_VERSION,
@@ -88,13 +89,16 @@ class MemoryConversationConsumer:
             raise TypeError("envelope must be ConversationSourceEnvelope")
         address = ConversationAddress(envelope.conversation_id, envelope.started_on)
         ingress = ConversationIngressRequest(envelope.delivery_id, envelope.request_digest)
-        appended = await asyncio.to_thread(
-            self.enqueuer.append,
-            address,
-            envelope.batch,
-            omit_tool_call_ids=envelope.omit_tool_call_ids,
-            ingress=ingress,
-        )
+        try:
+            appended = await asyncio.to_thread(
+                self.enqueuer.append,
+                address,
+                envelope.batch,
+                omit_tool_call_ids=envelope.omit_tool_call_ids,
+                ingress=ingress,
+            )
+        except ConversationWriteConflictError as exc:
+            raise _named_conflict(envelope, exc) from exc
         boundary_hints = None
         preview = await asyncio.to_thread(
             self.enqueuer.preview_retention,
@@ -125,6 +129,20 @@ class MemoryConversationConsumer:
             skip_reason=None,
             runtime_result=ingest,
         )
+
+
+def _named_conflict(envelope: ConversationSourceEnvelope, error: ConversationWriteConflictError) -> Exception:
+    """把"哪个会话号、为什么"写进拒收的报错：宿主拿到的 409 正文就是这一句。
+
+    会话身份按 NFC + casefold 归一，只差大小写或 Unicode 规范化形式的会话号是同一个会话；另一个会话恰好撞上这样的
+    会话号、又从头送序号时，就会在这里被已存的消息拦下。
+    """
+
+    return ConversationWriteConflictError(
+        f"conversation_id {envelope.conversation_id!r} (started_on {envelope.started_on.isoformat()}) "
+        f"was rejected: {error} (conversation ids that differ only in letter case or Unicode normalization "
+        "name the same stored conversation)"
+    )
 
 
 __all__ = ["MEMORY_CONVERSATION_PROCESSOR_SCHEMA_VERSION", "MemoryConversationConsumer"]

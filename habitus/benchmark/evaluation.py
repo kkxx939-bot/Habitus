@@ -83,7 +83,7 @@ async def judge_answers(
 
     factory = ProviderFactory()
     register_builtin_adapters(factory)
-    chat = factory.create_chat_client(judge_config.models.chat)
+    chat = factory.create_chat_client(judge_config.models.chat, outbound=judge_config.network)
     structured = StructuredChatClient(
         chat,
         allow_json_repair=judge_config.models.structured_output.allow_json_repair,

@@ -852,6 +852,7 @@ def test_interactive_init_uses_cloud_wizard_before_prompting_selected_credential
     monkeypatch.setattr(cli, "_prompt_cloud_setup", prompt)
     monkeypatch.setattr(cli, "_configure_missing_credentials", credentials)
     monkeypatch.setattr(cli, "_confirm", Mock(return_value=False))
+    monkeypatch.setattr(cli, "_prompt_text", lambda _prompt, default: default)  # W3：新建配置时多一问时区，回车接受
 
     cli.main(
         [

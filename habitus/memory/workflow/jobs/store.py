@@ -857,7 +857,7 @@ class MemoryJobStore:
     ) -> str:
         return hashlib.sha256(
             (
-                f"{address.conversation_id}\0{address.started_on.isoformat()}\0{segment_id}\0{source_segment_digest}"
+                f"{address.identity}\0{address.started_on.isoformat()}\0{segment_id}\0{source_segment_digest}"
             ).encode()
         ).hexdigest()
 

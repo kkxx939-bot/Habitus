@@ -259,7 +259,7 @@ def test_deep_doctor_does_not_report_an_unready_vector_publication_as_pass(
     store = SimpleNamespace(state=AsyncMock(return_value=state))
     runtime = SimpleNamespace(
         components=SimpleNamespace(
-            models=SimpleNamespace(chat=Chat(), embedder=Embedder()),
+            models=SimpleNamespace(chat=Chat(), embedder=Embedder(), reranker=None),
             memory=SimpleNamespace(vector_index=SimpleNamespace(store=store)),
             conversation=SimpleNamespace(summary_vector_index=SimpleNamespace(store=store)),
         ),
@@ -294,7 +294,7 @@ def test_deep_doctor_chat_timeout_is_a_real_wall_clock_bound(
     store = SimpleNamespace(state=AsyncMock(return_value=None))
     runtime = SimpleNamespace(
         components=SimpleNamespace(
-            models=SimpleNamespace(chat=Chat(), embedder=Embedder()),
+            models=SimpleNamespace(chat=Chat(), embedder=Embedder(), reranker=None),
             memory=SimpleNamespace(vector_index=SimpleNamespace(store=store)),
             conversation=SimpleNamespace(summary_vector_index=SimpleNamespace(store=store)),
         ),

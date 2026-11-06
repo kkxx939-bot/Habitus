@@ -86,19 +86,23 @@ def test_the_bundled_mainland_data_follows_the_state_council_notices() -> None:
     )
     assert table.day_type(date(2026, 10, 10)) is DayType.MAKEUP_WORKDAY
     assert table.day_type(date(2026, 10, 8)) is DayType.WORKDAY
-    assert bundled_holiday_directory("SG") is None
+    assert bundled_holiday_directory("US") is None  # 没随包带的地区；SG 自 W3 起随包附带
 
 
 def test_the_calendar_reads_the_bundled_data_unless_a_directory_is_configured(tmp_path: Path) -> None:
     """``locale.calendar_path`` 为空读随包附带的；配了目录只读配的那个；随包没带的地区日型答不出。"""
 
     national_day = date(2026, 10, 1)
-    default = local_calendar(SimpleNamespace(locale=LocaleConfig()))  # type: ignore[arg-type]
+    # W3 起默认地区是 SG：这里测的是"读随包的 CN 那一份"，地区显式写 CN
+    default = local_calendar(SimpleNamespace(locale=LocaleConfig(region="CN")))  # type: ignore[arg-type]
     assert default.day_type(national_day) is DayType.HOLIDAY and default.problems == ()
     assert default.version.endswith("CN2025@2024-11-12+CN2026@2025-11-04")
+    singapore = local_calendar(SimpleNamespace(locale=LocaleConfig()))  # type: ignore[arg-type]
+    assert singapore.version.endswith("SG2025@2026-06-19+SG2026@2026-06-19") and singapore.problems == ()
+    assert singapore.day_type(national_day) is DayType.WORKDAY  # 不写 locale：读随包的 SG，10 月 1 日照常上班
     (tmp_path / "2026.json").write_text(json.dumps(_year(2026)), encoding="utf-8")
-    configured = local_calendar(SimpleNamespace(locale=LocaleConfig(calendar_path=str(tmp_path))))  # type: ignore[arg-type]
+    configured = local_calendar(SimpleNamespace(locale=LocaleConfig(region="CN", calendar_path=str(tmp_path))))  # type: ignore[arg-type]
     assert configured.day_type(national_day) is DayType.WORKDAY  # 配的那一份里 10 月 1 日不放假：只认配的
     assert configured.day_type(date(2026, 1, 1)) is DayType.HOLIDAY and configured.day_type(date(2025, 1, 1)) is None
-    elsewhere = local_calendar(SimpleNamespace(locale=LocaleConfig(region="SG")))  # type: ignore[arg-type]
+    elsewhere = local_calendar(SimpleNamespace(locale=LocaleConfig(region="US")))  # type: ignore[arg-type]
     assert elsewhere.day_type(national_day) is None

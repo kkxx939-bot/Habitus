@@ -1,0 +1,15 @@
+[ca]
+default_ca = test_ca
+[test_ca]
+dir = ./.ca-db
+database = ./.ca-db/index.txt
+serial = ./.ca-db/serial
+new_certs_dir = ./.ca-db
+certificate = ./ca.pem
+private_key = ./ca.key
+default_md = sha256
+policy = anything
+unique_subject = no
+copy_extensions = none
+[anything]
+commonName = supplied

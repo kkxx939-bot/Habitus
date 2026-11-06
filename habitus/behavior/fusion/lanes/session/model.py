@@ -13,6 +13,7 @@ from enum import Enum
 from typing import Any
 
 from habitus.behavior.fusion.errors import BehaviorFusionError
+from habitus.foundation.ids import canonical_path_identity
 
 
 class SessionMessageRole(str, Enum):
@@ -88,10 +89,17 @@ class SessionTurn:
             raise BehaviorFusionError("a session turn cannot complete before it was instructed")
 
     @property
-    def key(self) -> str:
-        """这一轮的身份：哪个会话、第几条到第几条消息。"""
+    def identity(self) -> str:
+        """会话的归一身份（NFC + casefold，与会话目录同一口径）：只差大小写的两种写法是同一个会话。
+        ``conversation_id`` 保存宿主原文，只用来记录与回显；轮的身份、观察者、去重都按这个算。"""
 
-        return f"{self.conversation_id}#{self.start_sequence}-{self.end_sequence}"
+        return canonical_path_identity(self.conversation_id, "conversation_id")
+
+    @property
+    def key(self) -> str:
+        """这一轮的身份：哪个会话（归一身份）、第几条到第几条消息。"""
+
+        return f"{self.identity}#{self.start_sequence}-{self.end_sequence}"
 
     @property
     def last_said_at(self) -> datetime:

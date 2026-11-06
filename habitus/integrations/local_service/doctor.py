@@ -10,6 +10,7 @@ import os
 import shutil
 import socket
 import subprocess
+import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -17,9 +18,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from habitus.config import ConfigError, HabitusConfig
+from habitus.foundation.network import OutboundSettingsError, build_ssl_context, redact_proxy_url
 
 if TYPE_CHECKING:
     from habitus.integrations.local_service.adapter_catalog import AdapterCatalog
+    from habitus.model_client import Reranker
 
 _MINIMUM_FREE_BYTES = 1024**3
 # Habitus 还没发布到 PyPI：缺依赖的安装提示与 README 一样从源码仓库装
@@ -98,6 +101,7 @@ def run_doctor(
         *_dependency_checks(config, catalog),
         _node_check(),
         _credential_check(config, catalog),
+        _network_check(config),
         _ingress_capacity_check(config),
     ]
     if check_port:
@@ -319,7 +323,7 @@ def _deep_checks(
                         DoctorStatus.PASS if chat_ok else DoctorStatus.FAIL,
                         "provider health endpoint responded"
                         if chat_ok
-                        else str(chat_result.get("error_code", "health check failed")),
+                        else _probe_failure(str(chat_result.get("error_code", "health check failed")), config),
                     )
                 )
             except Exception as exc:
@@ -337,7 +341,7 @@ def _deep_checks(
                     )
                 )
             except Exception as exc:
-                results.append(DoctorCheck("embedding_probe", DoctorStatus.FAIL, type(exc).__name__))
+                results.append(DoctorCheck("embedding_probe", DoctorStatus.FAIL, _probe_exception(exc, config)))
             for name, store in (
                 ("memory_vector_probe", runtime.components.memory.vector_index.store),
                 ("summary_vector_probe", runtime.components.conversation.summary_vector_index.store),
@@ -370,14 +374,8 @@ def _deep_checks(
                         )
                 except Exception as exc:
                     results.append(DoctorCheck(name, DoctorStatus.FAIL, type(exc).__name__))
-            if config.models.rerank is not None:
-                results.append(
-                    DoctorCheck(
-                        "rerank_probe",
-                        DoctorStatus.WARN,
-                        "configured adapter has no side-effect-free health endpoint; construction passed",
-                    )
-                )
+            if runtime.components.models.reranker is not None:
+                results.append(await _rerank_probe(runtime.components.models.reranker, config, timeout_seconds))
         finally:
             try:
                 await asyncio.wait_for(runtime.close(), timeout=timeout_seconds)
@@ -390,6 +388,79 @@ def _deep_checks(
     except RuntimeError as exc:
         checks.append(DoctorCheck("deep_probe", DoctorStatus.FAIL, type(exc).__name__))
     return checks
+
+
+async def _rerank_probe(reranker: Reranker, config: HabitusConfig, timeout_seconds: float) -> DoctorCheck:
+    """rerank 没有免费的健康端点，就真发一次最小请求（一个查询、一个文档）：多一次计费调用，换来证书 / 代理问题当场可见。"""
+
+    try:
+        scores = await asyncio.wait_for(
+            reranker.rerank("Habitus doctor probe", ("Habitus doctor probe",)),
+            timeout=timeout_seconds,
+        )
+    except Exception as exc:
+        return DoctorCheck("rerank_probe", DoctorStatus.FAIL, _probe_exception(exc, config))
+    return DoctorCheck("rerank_probe", DoctorStatus.PASS, f"scored {len(scores)} document")
+
+
+def _network_check(config: HabitusConfig) -> DoctorCheck:
+    """调模型服务时生效的出站设置（不连网）：证书库、额外 CA、代理从哪来；SSL context 此刻建不出来就 FAIL（W18）。"""
+
+    network = config.network
+    try:
+        build_ssl_context(network.trust_store, network.ca_bundle)
+    except OutboundSettingsError as exc:
+        return DoctorCheck(
+            "network", DoctorStatus.FAIL, f"{exc} (config field network.ca_bundle / network.trust_store)"
+        )
+    detail = f"{_trust_detail(config)}; proxy={_proxy_source(network.proxy)}"
+    return DoctorCheck("network", DoctorStatus.PASS, detail)
+
+
+def _trust_detail(config: HabitusConfig) -> str:
+    ca_bundle = config.network.ca_bundle
+    detail = f"trust_store={config.network.trust_store}; ca_bundle={ca_bundle if ca_bundle is not None else 'none'}"
+    for variable in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
+        if os.environ.get(variable):
+            return f"{detail}; {variable}={os.environ[variable]}"
+    return detail
+
+
+def _proxy_source(configured: str | None) -> str:
+    """模型请求实际会走的代理：配置里的 ``network.proxy`` 优先；没配时与 httpx 一样从 ``urllib.request.getproxies()`` 取
+    （先环境变量，没有时 macOS / Windows 的系统代理设置）。输出去掉用户名密码。"""
+
+    direct = "loopback model addresses connect directly"
+    if configured is not None:
+        return f"{configured} (network.proxy; {direct})"
+    environment = urllib.request.getproxies_environment()
+    for scheme, variable in (("https", "HTTPS_PROXY"), ("all", "ALL_PROXY")):
+        if environment.get(scheme):
+            return f"{redact_proxy_url(environment[scheme])} (environment {variable}; {direct})"
+    system = urllib.request.getproxies()
+    for scheme in ("https", "all"):
+        if system.get(scheme):
+            return f"{redact_proxy_url(system[scheme])} (system proxy settings; {direct})"
+    return "none (no network.proxy and no HTTPS_PROXY)"
+
+
+def _probe_failure(code: str, config: HabitusConfig) -> str:
+    """deep 探测失败的说明：证书不被信任、代理要认证这两种写成"怎么配"，其余保持原来的错误码或异常名。"""
+
+    from habitus.model_client import PROXY_AUTH_HINT, TLS_UNTRUSTED_HINT
+
+    if code == "MODEL_TLS":
+        return f"MODEL_TLS: {TLS_UNTRUSTED_HINT} (currently {_trust_detail(config)})"
+    if code == "MODEL_PROXY_AUTH":
+        return f"MODEL_PROXY_AUTH: {PROXY_AUTH_HINT}"
+    return code
+
+
+def _probe_exception(error: BaseException, config: HabitusConfig) -> str:
+    code = getattr(error, "code", None)
+    if code in {"MODEL_TLS", "MODEL_PROXY_AUTH"}:
+        return _probe_failure(str(code), config)
+    return type(error).__name__
 
 
 def _credential_check(config: HabitusConfig, catalog: AdapterCatalog) -> DoctorCheck:

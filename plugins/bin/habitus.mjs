@@ -39,6 +39,7 @@ const HELP = `usage: habitus <command> [options]
   habitus reminders [--day YYYY-MM-DD] [--json]     某天（默认今天）每条提醒走到哪一步：待取 / 取走了 / 说了 / 宿主没取 / 已发生
 
   habitus --version | --help
+  出错时加 --verbose（放在哪都行）看调用栈与底层原因。
 服务地址取 HABITUS_URL，或 ~/.habitus/agent-plugin/connection.json（habitus-server init 写的），默认 http://127.0.0.1:8787。
 `;
 
@@ -62,7 +63,9 @@ export async function main(
     lifecycle = executePluginLifecycle, reviewHooks = inspectHookReview, featureGaps = harnessFeatureGaps,
   } = {},
 ) {
-  const args = [...argv];
+  // --verbose 是全局开关：出错时多印调用栈（W5）；从参数里摘掉，子命令看不到它
+  const verbose = argv.includes("--verbose");
+  const args = argv.filter((value) => value !== "--verbose");
   const command = args.shift();
   try {
     if (!command || command === "-h" || command === "--help" || command === "help") {
@@ -91,9 +94,35 @@ export async function main(
     stderr.write(`unknown command: ${command}\n\n${HELP}`);
     return 2;
   } catch (error) {
-    stderr.write(`habitus ${command}: ${error?.message || error}\n`);
+    stderr.write(formatError(command, error, verbose));
     return 1;
   }
+}
+
+// 报错写清卡在哪（W5）：哪个宿主、哪一步（安装器记在 error.habitusStep），底层原因链，回滚没恢复成的宿主；
+// --verbose 时再附调用栈
+export function formatError(command, error, verbose = false) {
+  const step = error?.habitusStep;
+  const where = step ? `[${[step.harness, step.action].filter(Boolean).join(" · ")}] ` : "";
+  const lines = [`habitus ${command}: ${where}${error?.message || error}`];
+  const seen = new Set([error]);
+  for (let cause = error?.cause; cause && !seen.has(cause); cause = cause.cause) {
+    seen.add(cause);
+    lines.push(`  原因：${cause?.message || cause}`);
+  }
+  for (const failure of error?.restoreFailures || []) {
+    lines.push(`  回滚时 ${failure.harness} 的注册没能恢复：${failure.message}（运行 habitus plugin status 查看，必要时手动修）`);
+  }
+  const rollback = error?.marketplaceRollbackFailure;
+  if (rollback) {
+    lines.push(`  回滚时插件副本 ${rollback.root} 没能恢复：${rollback.message}（修好权限后重新运行 habitus plugin install）`);
+  }
+  if (verbose) {
+    for (const item of seen) if (item?.stack) lines.push("", item.stack);
+  } else if (step || error?.cause || error?.restoreFailures || rollback) {
+    lines.push("  （加 --verbose 看调用栈）");
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 async function plugin(args, { stdout, env, lifecycle, reviewHooks, featureGaps }) {

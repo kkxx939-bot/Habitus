@@ -47,14 +47,14 @@ class ConversationSummaryReference:
         return (
             "conversation-summary:"
             f"{self.address.started_on.isoformat()}:"
-            f"{self.address.conversation_id}:"
+            f"{self.address.identity}:"
             f"{self.stage.value}:"
             f"{self.summary_id}"
         )
 
     @property
     def conversation_scope(self) -> str:
-        return f"conversation-summary-scope:{self.address.started_on.isoformat()}:{self.address.conversation_id}"
+        return f"conversation-summary-scope:{self.address.started_on.isoformat()}:{self.address.identity}"
 
     @classmethod
     def parse(cls, value: str) -> ConversationSummaryReference:

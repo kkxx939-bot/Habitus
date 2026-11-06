@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+from habitus.foundation.ids import canonical_path_identity
 from habitus.foundation.integrity import canonical_digest, canonical_json, canonicalize, is_sha256_hex
 from habitus.foundation.timestamps import TimestampError, TimestampZoneError, utc_timestamp
 from habitus.pre.conversation import ConversationBatch
@@ -17,6 +18,16 @@ _IDENTITY_SCHEMA = "conversation_source_identity_v1"
 
 class ConversationSourceError(ValueError):
     """Conversation Source 身份、内容或耐久文件不满足契约。"""
+
+
+def conversation_identity(conversation_id: str) -> str:
+    """会话号的归一身份，与会话目录同一口径（NFC + casefold）：凡是拿会话号算键、摘要、锁、去重的都用它，
+    原文 ``conversation_id`` 只保存与回显。不能当路径段的会话号在这里就拒。"""
+
+    try:
+        return canonical_path_identity(conversation_id, "conversation_id")
+    except ValueError as exc:
+        raise ConversationSourceError(str(exc)) from exc
 
 
 class ConversationSourceCapacityError(ConversationSourceError):
@@ -278,7 +289,7 @@ class ConversationSourceEnvelope:
         return canonical_digest(
             {
                 "schema_version": _IDENTITY_SCHEMA,
-                "conversation_id": conversation_id,
+                "conversation_id": conversation_identity(conversation_id),
                 "started_on": _started_on(started_on).isoformat(),
                 "delivery_id": require_sha256(delivery_id, "delivery_id"),
             }
@@ -354,6 +365,7 @@ __all__ = [
     "ConversationSourceEnvelope",
     "ConversationSourceError",
     "SOURCE_SCHEMA_VERSION",
+    "conversation_identity",
     "conversation_source_request_digest",
     "encode_durable_record",
     "require_record",

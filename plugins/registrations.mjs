@@ -12,15 +12,26 @@ import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { MARKETPLACE_NAME, PLUGIN_ID, PLUGIN_NAME } from "./harnesses.mjs";
 
+// 探测"本机有没有这个宿主"（`<命令> --version`）的超时。宿主 CLI 多是 Node 程序，冷启动在慢机器、Windows 杀毒扫描
+// 或高负载下可以到好几秒；超时被判成"没装"会让安装器和 doctor 直接跳过一个装好的宿主，比多等几秒糟得多。
+// 没装的命令是立刻 ENOENT，不吃这个超时；只有装了但卡住的宿主会等满（W19）。
+export const PROBE_TIMEOUT_MS = 10_000;
+
 // 宿主命令一律同步跑、带超时：到点直接 SIGKILL（spawnSync 的超时信号只发一次、发完还要同步等它退出，
 // 宿主若接管了 SIGTERM，默认的 SIGTERM 等于没有超时）。env 是要查的那个环境（PATH、HOME 都取它）
 export class CommandRunner {
-  constructor(env = process.env) {
+  constructor(env = process.env, { probeTimeoutMs = PROBE_TIMEOUT_MS } = {}) {
+    if (!Number.isInteger(probeTimeoutMs) || probeTimeoutMs <= 0) {
+      throw new Error(`probeTimeoutMs must be a positive integer, got ${probeTimeoutMs}`);
+    }
     this.env = env;
+    this.probeTimeoutMs = probeTimeoutMs;
   }
 
   available(command) {
-    const result = spawnSync(command, ["--version"], { encoding: "utf8", timeout: 3000, killSignal: "SIGKILL", env: this.env });
+    const result = spawnSync(command, ["--version"], {
+      encoding: "utf8", timeout: this.probeTimeoutMs, killSignal: "SIGKILL", env: this.env,
+    });
     return result.status === 0 && !result.error;
   }
 

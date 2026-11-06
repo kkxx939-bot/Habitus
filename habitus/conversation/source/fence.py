@@ -8,7 +8,11 @@ from contextlib import AbstractContextManager, asynccontextmanager, suppress
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
-from habitus.conversation.source.model import ConversationSourceEnvelope, ConversationSourceError
+from habitus.conversation.source.model import (
+    ConversationSourceEnvelope,
+    ConversationSourceError,
+    conversation_identity,
+)
 from habitus.conversation.source.receipt import ConversationSourceConsumer
 from habitus.foundation.integrity import canonical_digest
 from habitus.infrastructure.store.contracts import LeaseGuard, PathLock
@@ -154,7 +158,7 @@ class ConversationConsumerExecutionFence:
             {
                 "schema_version": "conversation_order_lock_v2",
                 "consumer": consumer.value,
-                "conversation_id": source.conversation_id,
+                "conversation_id": conversation_identity(source.conversation_id),
                 "started_on": source.started_on.isoformat(),
             }
         )

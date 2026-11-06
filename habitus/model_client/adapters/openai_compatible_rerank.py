@@ -13,8 +13,10 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from habitus.foundation.network import OutboundSettings
 from habitus.model_client.config import RerankModelConfig
 from habitus.model_client.contracts import ModelConfigurationError, ModelResponseError
+from habitus.model_client.http_clients import async_http_client
 from habitus.model_client.json_parser import parse_json_response
 
 _RESERVED_REQUEST_FIELDS = {
@@ -30,7 +32,7 @@ _RESERVED_REQUEST_FIELDS = {
 class OpenAICompatibleRerankProvider:
     """执行一次 `/reranks` 请求并按输入文档顺序返回相关性分数。"""
 
-    def __init__(self, config: RerankModelConfig, *, api_key: str) -> None:
+    def __init__(self, config: RerankModelConfig, *, api_key: str, outbound: OutboundSettings | None = None) -> None:
         if not isinstance(config, RerankModelConfig):
             raise TypeError("config must be RerankModelConfig")
         if config.route.adapter != "openai_compatible_rerank":
@@ -51,6 +53,7 @@ class OpenAICompatibleRerankProvider:
         self.is_remote = _is_remote_url(config.route.base_url)
         self._api_key = api_key.strip()
         self._endpoint = f"{config.route.base_url}/reranks"
+        self._outbound = OutboundSettings() if outbound is None else outbound
         self._clients: weakref.WeakKeyDictionary[
             asyncio.AbstractEventLoop,
             httpx.AsyncClient,
@@ -148,15 +151,7 @@ class OpenAICompatibleRerankProvider:
             client = self._clients.get(loop)
             if client is not None:
                 return client
-            concurrency = self.config.route.max_concurrent
-            client = httpx.AsyncClient(
-                follow_redirects=False,
-                limits=httpx.Limits(
-                    max_connections=concurrency,
-                    max_keepalive_connections=concurrency,
-                ),
-                timeout=httpx.Timeout(float(self.config.route.timeout_seconds)),
-            )
+            client = async_http_client(self.config.route, self._outbound)
             self._clients[loop] = client
             return client
 

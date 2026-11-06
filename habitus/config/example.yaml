@@ -24,6 +24,22 @@ http:
   remember_parts_max_bytes: 67108864
   remember_parts_ttl_seconds: 600.0
 
+# 调模型服务（chat、embedding、rerank）时的出站网络。整组可省略，省略等于下面这组默认值。
+# 在公司网络里用得上：代理做 TLS 解密时，它的根证书通常已经装在系统证书库里，默认的 system 不用改就能通。
+network:
+  # system：读操作系统证书库（Windows 证书存储、macOS 钥匙串、Linux /etc/ssl）；
+  # bundled：只信 Python 自带的 certifi 那一份，留给没有系统证书库的极简容器。
+  trust_store: system
+  # 额外信任的 PEM 证书文件（例如 ~/corp-root.pem），在 trust_store 之上叠加。公司根证书不在系统证书库里、
+  # doctor 报 MODEL_TLS（证书不被信任）时配它。加载配置时就检查：文件不存在、不是普通文件、读不出 PEM 都直接报错。
+  ca_bundle: null
+  # 代理地址，只收 http:// 或 https://、主机与端口，例如 http://proxy.example.com:3128。配了就用它（覆盖 HTTPS_PROXY
+  # 等环境变量，NO_PROXY 也不再生效）；null 表示照旧读环境变量。本机地址（127.0.0.1、localhost、::1）的模型服务永远直连，它和环境变量里的代理都不走。
+  # 这里不能写账号密码：需要账号密码（Basic）的代理把带账号密码的 URL 写进环境变量 HTTPS_PROXY；要 Windows 域登录
+  # （NTLM / Kerberos）或 PAC 自动配置的代理不直接支持，请在本机运行 cntlm 或 px 这类转发代理，再把这里指向它
+  # （例如 http://127.0.0.1:3128）。
+  proxy: null
+
 observability:
   metrics:
     enabled: true
@@ -546,12 +562,15 @@ workflow:
 
 # 主体所在地。时区与当地日历**两层共用**：语义树与预测层用它取每一天的日历条件（周几、几号、日型），预测层用它
 # 造"此刻"的时钟与本地日界。分别配两份迟早对不上，所以单独一组，由组合根分发。
-# 这一组没有 enabled：不启用任何上层时它也无害，启用了就必须是对的。
+# 这一组没有 enabled：不启用任何上层时它也无害，启用了就必须是对的。记忆抽取也按这里的时区定 Event 落在哪一天。
+# habitus-server init 新建（或 --force 重建）配置时检测系统时区：交互时请你确认或改填，检测不到才用 Asia/Singapore；
+# 写进生成的配置里。已有配置重跑 init 不碰这一组。下面注释里是不写这一组时的默认值。
 # locale:
-#   timezone: Asia/Shanghai          # IANA 名字；决定"今天是哪一天""此刻在哪个槽"
-#   region: CN                       # 这个人所在地的地区码（ISO 3166：CN、SG，州一级如 US-CA）；日历跟着人走，不跟着服务部署在哪
+#   timezone: Asia/Singapore         # IANA 名字；决定"今天是哪一天""此刻在哪个槽"
+#   region: SG                       # 这个人所在地的地区码（ISO 3166：CN、SG，州一级如 US-CA）；日历跟着人走，不跟着服务部署在哪
 #   calendar_path: null              # 放假安排目录（外接组件，<年>.json，格式见 conditions/calendar_data.py）；配了只读它。
-#                                    #   null 时读随包附带的（目前只有 CN 2025、2026，照国务院办公厅通知原文）；
+#                                    #   null 时读随包附带的（目前有 CN 2025、2026，照国务院办公厅通知原文；
+#                                    #   SG 2025、2026，照新加坡人力部公布的公共假期原文）；
 #                                    #   哪年没有数据，那年日型是未知（不当普通工作日），周几、几号照常答。
 #   nominal_weekend: [5, 6]          # 没有放假数据时建预期的兜底周末（0=周一 … 6=周日）；统计里不用它
 

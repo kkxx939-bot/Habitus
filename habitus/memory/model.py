@@ -46,11 +46,25 @@ class MemoryLevel(int, Enum):
         return None
 
 
-def _semantic_name(value: object, field_name: str) -> str:
+# 新写入的记忆名字（topic、category、name、tool_name、event_name、intent_name）的 UTF-8 字节上限。
+# 由记忆名派生的最长单段文件名是原子写的临时名 ``.{name}.md.{32 位 hex}.tmp``，比名字多 1 + 3 + 1 + 32 + 4 = 41 字节；
+# category 只当目录名，目录内只有固定名的侧车，派生开销更小。单段上限 255 − 41 = 214，取整到不大于 214、
+# 且不大于行为侧 200（behavior/model.py 的 _MAX_IDENTITY_NAME_UTF8_BYTES）的 200。落盘文件名是归一身份，
+# casefold 可能变长（"İ" 2 字节 → "i̇" 3 字节），所以原文与归一身份两者都要在上限内。
+MAX_MEMORY_NAME_UTF8_BYTES = 200
+
+
+def _semantic_name(value: object, field_name: str, *, max_utf8_bytes: int | None = None) -> str:
+    """校验拼进路径的记忆名字。``max_utf8_bytes`` 只在新写入时给：读回已落盘的旧文件不卡长度。"""
+
     name = require_safe_path_segment(value, field_name)
     if name != name.strip() or any(not character.isprintable() for character in name):
         raise ValueError(f"{field_name} must not contain surrounding whitespace or control characters")
     identity = canonical_path_identity(name, field_name)
+    if max_utf8_bytes is not None:
+        size = max(len(name.encode("utf-8")), len(identity.encode("utf-8")))
+        if size > max_utf8_bytes:
+            raise ValueError(f"{field_name} must be at most {max_utf8_bytes} UTF-8 bytes, got {size}")
     if identity.endswith(".md"):
         raise ValueError(f"{field_name} must not include the .md suffix")
     reserved_stems = {
@@ -60,6 +74,12 @@ def _semantic_name(value: object, field_name: str) -> str:
     if identity in reserved_stems:
         raise ValueError(f"{field_name} conflicts with a reserved semantic layer")
     return name
+
+
+def require_new_memory_name(value: object, field_name: str) -> str:
+    """模型新给出的记忆名字：在路径段校验之上再卡字节上限。已落盘的旧记忆按地址读回时不经过这里。"""
+
+    return _semantic_name(value, field_name, max_utf8_bytes=MAX_MEMORY_NAME_UTF8_BYTES)
 
 
 @dataclass(frozen=True)
@@ -298,4 +318,11 @@ class MemoryDirectory:
         return tuple(directories)
 
 
-__all__ = ["MemoryAddress", "MemoryDirectory", "MemoryKind", "MemoryLevel"]
+__all__ = [
+    "MAX_MEMORY_NAME_UTF8_BYTES",
+    "MemoryAddress",
+    "MemoryDirectory",
+    "MemoryKind",
+    "MemoryLevel",
+    "require_new_memory_name",
+]

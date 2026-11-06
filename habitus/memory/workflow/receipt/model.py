@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import Enum
 
-from habitus.foundation.ids import same_path_identity
+from habitus.foundation.ids import canonical_path_identity, same_path_identity
 from habitus.memory.conversation import ConversationLayout
 from habitus.memory.document import MemoryStoredLink
 from habitus.memory.editor.candidate import MemoryIdentityProposalBasis
@@ -124,7 +124,7 @@ class MemoryChangeSource:
     def receipt_id(self) -> str:
         return hashlib.sha256(
             (
-                f"{self.conversation_id}\0{self.started_on.isoformat()}\0"
+                f"{canonical_path_identity(self.conversation_id, 'conversation_id')}\0{self.started_on.isoformat()}\0"
                 f"{self.segment_id}\0{self.source_segment_digest}"
             ).encode()
         ).hexdigest()

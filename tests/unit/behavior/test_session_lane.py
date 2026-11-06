@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from habitus.behavior.fusion.lanes.session import (
     split_turns,
 )
 from habitus.behavior.fusion.lanes.session.material import ANSWER_PREFIX, WAKE_LABEL
+from habitus.behavior.fusion.lanes.session.model import decode_turn, encode_turn
 from habitus.behavior.fusion.lanes.session.redaction import REDACTED
 from tests.unit.behavior.session_fixtures import (
     START,
@@ -526,6 +528,26 @@ def test_one_turn_becomes_one_judgement_spanning_instruction_to_completion(tmp_p
     assert datetime.fromisoformat(judgement["started_at"]) == START.astimezone(ZONE)
     assert datetime.fromisoformat(judgement["last_observed_at"]) == at(117).astimezone(ZONE)
     assert judgement["started_at"].endswith("+08:00")
+
+
+def test_a_turn_keeps_the_host_spelling_but_its_identity_is_case_folded(tmp_path: Path) -> None:
+    """W1 第 4 项 A1：轮记录保留宿主原文会话号；轮的身份、观察者、交付号按归一身份（与会话目录同一口径）。"""
+
+    messages = (prompt(0, "统计一下代码行数"), reply(1, "一共 1200 行"))
+    (upper,) = split_turns("Codex-Rollout-ABC", messages)
+    (lower,) = split_turns("codex-rollout-abc", messages)
+    assert upper.conversation_id == "Codex-Rollout-ABC"
+    assert decode_turn(encode_turn(upper)).conversation_id == "Codex-Rollout-ABC"
+    assert upper.key == lower.key == "codex-rollout-abc#0-1"
+
+    stores = Stores(tmp_path)
+    session, _provider = lane(stores, [description()])
+    asyncio.run(session.consume((upper,)))
+
+    (envelope,) = stores.observations.list()
+    assert envelope.observer_id == session_observer("codex-rollout-abc")
+    assert envelope.delivery_id == hashlib.sha256(b"codex-rollout-abc#0-1").hexdigest()
+    assert all(item.evidence_refs == ("codex-rollout-abc#0-1",) for item in envelope.batch.observations)
 
 
 def test_the_evidence_holds_times_and_a_reference_but_no_conversation_content(tmp_path: Path) -> None:

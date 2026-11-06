@@ -6,12 +6,18 @@ on:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # requires-python 是 >=3.12、不设上限：从下限 3.12 测到当前最新的 3.14，每个都要绿。
+        python-version: ["3.12", "3.13", "3.14"]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python-version }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -35,7 +41,8 @@ jobs:
           habitus-server init --help
           habitus-server init --config "$init_root/config.yaml" --from-config habitus/config/example.yaml --non-interactive --skip-doctor --no-start
           test -f "$init_root/config.yaml"
-          test "$(stat -c '%a' "$init_root/config.yaml")" = "600"
+          # 权限位用 Python 读：GNU stat 的 -c 在 macOS（BSD stat）上不存在。
+          python -c 'import os, stat, sys; mode = stat.S_IMODE(os.stat(sys.argv[1]).st_mode); sys.exit(0 if mode == 0o600 else f"{sys.argv[1]}: mode {mode:#o}, expected 0o600")' "$init_root/config.yaml"
           HABITUS_CI_CONFIG_PATH="$init_root/config.yaml" python -c 'import os; from habitus.config import HabitusConfig; c=HabitusConfig.from_file(os.environ["HABITUS_CI_CONFIG_PATH"]); assert c.models.chat.route.credential_ref == "deepseek"; assert c.models.embedding.route.credential_ref == "ark"; assert c.models.rerank.route.credential_ref == "dashscope"; assert c.memory.vector_store.route.credential_ref == "vikingdb"'
       - name: Build wheel and verify its contents against pyproject
         run: |

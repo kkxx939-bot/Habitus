@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import random
+import ssl
 from collections.abc import Callable
 
+import httpx
+
 from habitus.model_client.contracts import (
+    PROXY_AUTH_HINT,
+    TLS_UNTRUSTED_HINT,
     ModelAuthenticationError,
     ModelClientError,
     ModelContentSafetyError,
     ModelInputTooLargeError,
     ModelPermissionError,
+    ModelProxyAuthError,
     ModelQuotaError,
     ModelRateLimitError,
     ModelResponseError,
+    ModelTLSError,
     ModelTransportError,
 )
 
@@ -73,6 +80,12 @@ def normalize_provider_error(error: Exception) -> ModelClientError:
     message = str(error).strip() or type(error).__name__
     lowered = "\n".join(str(item) for item in chain).casefold()
 
+    # 证书不被信任（含主机名不匹配）与代理要认证（407）按异常类型 / 状态认，放最前：报错里带的主机名可能碰上下面的
+    # 关键词（例如主机名含 moderation）；而且它们都是 OSError / 传输错误的近亲，重发多少遍都一样，不能落进"连不上就重试"（W18）
+    if any(isinstance(item, ssl.SSLCertVerificationError) for item in chain):
+        return ModelTLSError(f"{message}; {TLS_UNTRUSTED_HINT}")
+    if status == 407 or any(_is_proxy_auth_rejection(item) for item in chain):
+        return ModelProxyAuthError(f"{message}; {PROXY_AUTH_HINT}")
     if _contains(lowered, _CONTENT_SAFETY):
         return ModelContentSafetyError(message)
     if status == 413 or _contains(lowered, _INPUT_TOO_LARGE):
@@ -110,6 +123,12 @@ def retry_delay(
         return min(max(0.0, error.retry_after_seconds), max_delay)
     delay = min(base_delay * (2**attempt), max_delay)
     return min(max_delay, delay * uniform(0.8, 1.2))
+
+
+def _is_proxy_auth_rejection(error: BaseException) -> bool:
+    """httpx 在代理对 CONNECT 回非 2xx 时抛 ``ProxyError("<状态码> <原因>")``，拿不到响应头，只能从状态码前缀认 407。"""
+
+    return isinstance(error, httpx.ProxyError) and str(error).startswith("407")
 
 
 def _contains(text: str, patterns: tuple[str, ...]) -> bool:

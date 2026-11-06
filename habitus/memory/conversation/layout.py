@@ -14,6 +14,12 @@ from habitus.pre.conversation import ConversationRangeSummaryStage
 
 _SEGMENT_ID = re.compile(r"^(?P<start>[0-9]{12})-(?P<end>[0-9]{12})$")
 _MAX_SEGMENT_SEQUENCE = 999_999_999_999
+# conversation_id 的 UTF-8 字节上限（HTTP 入口 schemas.py 用同一个常数）。会话号只派生一个单段名：
+# ``messages/…/{identity}/`` 与 ``summaries/…/{identity}/`` 两个目录名本身（用 mkdir 建，没有临时名，
+# 目录里的文件都是固定名或序号名）；其余用到会话号的地方都是摘要值或文本键，不是文件名。单段上限 255 − 0 = 255，
+# 取整到 240：留一点余量，又放得下六个宿主插件理论上最长的会话号（前缀 "opencode-" 9 + safeIdentifier 220 = 229）。
+# 目录名是归一身份，casefold 可能变长，原文与归一身份两者都要在上限内。
+MAX_CONVERSATION_ID_UTF8_BYTES = 240
 
 
 class ConversationLayoutError(ValueError):
@@ -37,11 +43,16 @@ class ConversationAddress:
             raise ConversationLayoutError("conversation_id contains unsafe characters")
         if isinstance(self.started_on, datetime) or not isinstance(self.started_on, date):
             raise ConversationLayoutError("started_on must be a calendar date")
-        object.__setattr__(
-            self,
-            "_identity",
-            canonical_path_identity(identifier, "conversation_id"),
-        )
+        identity = canonical_path_identity(identifier, "conversation_id")
+        try:
+            size = max(len(identifier.encode("utf-8")), len(identity.encode("utf-8")))
+        except UnicodeEncodeError as exc:
+            raise ConversationLayoutError("conversation_id must be valid Unicode text") from exc
+        if size > MAX_CONVERSATION_ID_UTF8_BYTES:
+            raise ConversationLayoutError(
+                f"conversation_id must be at most {MAX_CONVERSATION_ID_UTF8_BYTES} UTF-8 bytes, got {size}"
+            )
+        object.__setattr__(self, "_identity", identity)
 
     @property
     def identity(self) -> str:
@@ -222,4 +233,4 @@ class ConversationLayout:
         return candidate
 
 
-__all__ = ["ConversationAddress", "ConversationLayout", "ConversationLayoutError"]
+__all__ = ["MAX_CONVERSATION_ID_UTF8_BYTES", "ConversationAddress", "ConversationLayout", "ConversationLayoutError"]

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import date, datetime
 from enum import Enum
 from typing import Annotated, Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
+from habitus.foundation.ids import canonical_path_identity
+from habitus.memory.conversation.layout import MAX_CONVERSATION_ID_UTF8_BYTES
 from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryKind
 
@@ -19,6 +22,24 @@ PositiveTimeout = Annotated[float, Field(strict=True, gt=0, le=3_600)]
 JobVersion = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 DeliveryId = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 RetryAfterSeconds = Annotated[int, Field(strict=True, ge=0, le=3_600)]
+
+
+def _conversation_id_within_limit(value: str) -> str:
+    """会话号会成为会话目录名：按 UTF-8 字节卡上限，与领域 ``ConversationAddress`` 同一个常数、同一个量法——
+    原文与归一身份（目录名，casefold 可能变长）取大的。"""
+
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise ValueError("conversation_id must be valid Unicode text") from exc
+    with suppress(ValueError):  # 不能当路径段的会话号交给领域拒，报错与以前一样
+        size = max(size, len(canonical_path_identity(value, "conversation_id").encode("utf-8")))
+    if size > MAX_CONVERSATION_ID_UTF8_BYTES:
+        raise ValueError(f"conversation_id must be at most {MAX_CONVERSATION_ID_UTF8_BYTES} UTF-8 bytes, got {size}")
+    return value
+
+
+ConversationIdText = Annotated[str, Field(min_length=1), AfterValidator(_conversation_id_within_limit)]
 
 
 class HTTPErrorCode(str, Enum):
@@ -43,7 +64,7 @@ class StrictSchema(BaseModel):
 
 class RememberRequest(StrictSchema):
     delivery_id: DeliveryId | None = None
-    conversation_id: Annotated[str, Field(min_length=1, max_length=256)]
+    conversation_id: ConversationIdText
     started_on: date
     protocol: Annotated[str, Field(min_length=1, max_length=128)]
     payload: Any
@@ -86,7 +107,7 @@ class RememberPartRequest(StrictSchema):
 
 class RecallRequest(StrictSchema):
     query: Annotated[str, Field(min_length=1)]
-    conversation_id: Annotated[str, Field(min_length=1, max_length=256)] | None = None
+    conversation_id: ConversationIdText | None = None
     started_on: date | None = None
     limit: PositiveLimit | None = None
     kinds: tuple[MemoryKind, ...] = ()
@@ -116,7 +137,7 @@ class RecallRequest(StrictSchema):
 
 
 class FlushRequest(StrictSchema):
-    conversation_id: Annotated[str, Field(min_length=1, max_length=256)]
+    conversation_id: ConversationIdText
     started_on: date
     wait_timeout_seconds: PositiveTimeout | None = None
 
@@ -408,6 +429,7 @@ class ErrorResponse(StrictSchema):
 
 
 __all__ = [
+    "ConversationIdText",
     "ErrorInfo",
     "ErrorResponse",
     "HTTPErrorCode",

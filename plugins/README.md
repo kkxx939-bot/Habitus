@@ -14,7 +14,7 @@ npm install -g habitus
 
 ## 先装 Habitus 服务
 
-插件把对话送给本机的 Habitus 服务、从它取记忆和提醒。服务是 Python 写的（Python ≥ 3.13），现在从仓库装：
+插件把对话送给本机的 Habitus 服务、从它取记忆和提醒。服务是 Python 写的（Python ≥ 3.12），现在从仓库装：
 
 ```sh
 pip install "habitus[cloud] @ git+https://github.com/kkxx939-bot/Habitus"   # 默认配置用 VikingDB；cloud 含 http、model、vikingdb
@@ -22,7 +22,7 @@ habitus-server init        # 写配置（默认要 DeepSeek、火山方舟、Vik
 habitus-server serve       # 起服务（前台运行），默认 http://127.0.0.1:8787；下面的命令另开一个终端
 ```
 
-`init` 不问时区，默认 `locale.timezone: Asia/Shanghai`，记忆的 Event 日期也按它算；不在这个时区，先在配置里改成你的 IANA 时区名再起服务。
+`init` 新建配置时检测系统时区，交互时请你确认或改填（检测不到默认 `Asia/Singapore`），地区码从时区推（新加坡 `SG`、中国大陆 `CN`，别的时区请你填）；`--non-interactive` 时输出里有一行说明写了什么。记忆的 Event 日期也按这个时区算。
 
 `init` 写出的配置只开记忆：插件会召回记忆，但没有提醒（`habitus doctor` 报 warn "reminders are off"）。要提醒，在配置里补上 `behavior.primary_subject`、`scene.enabled: true`、`foresight.enabled: true`，重启服务；见仓库 README 的[快速开始](https://github.com/kkxx939-bot/Habitus/blob/main/README.zh-CN.md#快速开始)与[配置](https://github.com/kkxx939-bot/Habitus/blob/main/README.zh-CN.md#配置)。
 
@@ -81,7 +81,7 @@ Requires Node.js ≥ 18 (ZCode needs ≥ 22.5, DeepSeek Harness's compressed ses
 
 ### Install the Habitus service first
 
-The plugins send conversations to the local Habitus service and fetch memories and reminders from it. The service is written in Python (≥ 3.13) and is currently installed from the repository:
+The plugins send conversations to the local Habitus service and fetch memories and reminders from it. The service is written in Python (≥ 3.12) and is currently installed from the repository:
 
 ```sh
 pip install "habitus[cloud] @ git+https://github.com/kkxx939-bot/Habitus"   # the default configuration uses VikingDB; cloud = http + model + vikingdb
@@ -89,7 +89,7 @@ habitus-server init        # writes the configuration (the default needs DeepSee
 habitus-server serve       # starts the service (in the foreground), default http://127.0.0.1:8787; run the commands below in another terminal
 ```
 
-`init` does not ask for a time zone; `locale.timezone` defaults to `Asia/Shanghai`, and memory dates its Events by it too. If you are elsewhere, set it to your IANA zone name in the configuration before starting the service.
+When `init` creates a configuration it detects the system time zone and asks you to confirm or change it (falling back to `Asia/Singapore` when nothing is detected); the region code follows from the zone (`SG` for Singapore, `CN` for mainland China, otherwise you are asked). With `--non-interactive`, one output line says what was written. Memory dates its Events by this time zone too.
 
 The configuration written by `init` enables memory only: the plugins recall memories but there are no reminders (`habitus doctor` warns "reminders are off"). To get reminders, add `behavior.primary_subject`, `scene.enabled: true` and `foresight.enabled: true` to the configuration and restart the service; see [Quick start](https://github.com/kkxx939-bot/Habitus/blob/main/README.md#quick-start) and [Configuration](https://github.com/kkxx939-bot/Habitus/blob/main/README.md#configuration) in the repository README.
 

@@ -11,11 +11,13 @@ from collections.abc import Mapping, Sequence
 import httpx
 
 from habitus.foundation.embedding import EmbeddingVector
+from habitus.foundation.network import OutboundSettings
 from habitus.model_client.config import EmbeddingModelConfig
 from habitus.model_client.contracts import (
     ModelConfigurationError,
     ModelResponseError,
 )
+from habitus.model_client.http_clients import async_http_client
 from habitus.model_client.json_parser import parse_json_response
 
 _RESERVED_REQUEST_FIELDS = {
@@ -33,7 +35,7 @@ _RESERVED_REQUEST_FIELDS = {
 class ArkMultimodalEmbeddingProvider:
     """完成 Ark `/embeddings/multimodal` 的单次请求和响应转换。"""
 
-    def __init__(self, config: EmbeddingModelConfig, *, api_key: str) -> None:
+    def __init__(self, config: EmbeddingModelConfig, *, api_key: str, outbound: OutboundSettings | None = None) -> None:
         if not isinstance(config, EmbeddingModelConfig):
             raise TypeError("config must be EmbeddingModelConfig")
         if config.route.adapter != "ark_multimodal":
@@ -51,6 +53,7 @@ class ArkMultimodalEmbeddingProvider:
         self.is_remote = True
         self._api_key = api_key.strip()
         self._endpoint = f"{config.route.base_url}/embeddings/multimodal"
+        self._outbound = OutboundSettings() if outbound is None else outbound
         self._clients: weakref.WeakKeyDictionary[
             asyncio.AbstractEventLoop,
             httpx.AsyncClient,
@@ -141,15 +144,7 @@ class ArkMultimodalEmbeddingProvider:
             client = self._clients.get(loop)
             if client is not None:
                 return client
-            concurrency = self.config.route.max_concurrent
-            client = httpx.AsyncClient(
-                follow_redirects=False,
-                limits=httpx.Limits(
-                    max_connections=concurrency,
-                    max_keepalive_connections=concurrency,
-                ),
-                timeout=httpx.Timeout(float(self.config.route.timeout_seconds)),
-            )
+            client = async_http_client(self.config.route, self._outbound)
             self._clients[loop] = client
             return client
 

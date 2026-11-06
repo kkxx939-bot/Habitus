@@ -419,7 +419,7 @@ class MemoryCandidateBatch:
                     control_fields.add("confirmed")
                 business_fields = {key: item_value for key, item_value in raw_item.items() if key not in control_fields}
                 try:
-                    fields = registry.validate(kind, business_fields)
+                    fields = registry.validate_new(kind, business_fields)
                 except (TypeError, ValueError) as exc:
                     raise MemoryCandidateError(f"invalid {field_name} candidate: {exc}") from exc
                 _reject_empty_present_strings(fields, field_name)

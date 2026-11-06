@@ -77,3 +77,15 @@ def test_summary_use_coverage_cleanup_paginates_beyond_batch_limit(tmp_path) -> 
     assert store.read_many(tuple(references[:2])) == ()
     assert store.read_many(tuple(references[2:4])) == ()
     assert store.read_many((references[4],)) == ()
+
+
+def test_summary_use_rows_are_keyed_by_the_case_folded_conversation(tmp_path) -> None:
+    """W1 第 4 项 A1：只差大小写的会话号是同一个会话，用一种写法记下的使用，用另一种写法也清得掉。"""
+
+    store = SQLiteConversationSummaryUseStore(tmp_path / "summary_use.sqlite3")
+    written = ConversationAddress("Conv-ABC", BASE_TIME.date())
+    source = segment(segment_id="000000000000-000000000001")
+    store.record_use((summary_reference(written, segment_summary(source)),), used_at=BASE_TIME)
+
+    cleaned = ConversationAddress("conv-abc", BASE_TIME.date())
+    assert store.delete_coverage(cleaned, start_sequence=0, end_sequence=9) == 1

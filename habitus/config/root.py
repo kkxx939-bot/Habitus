@@ -18,11 +18,13 @@ from habitus.config.loader import ConfigError, group_fields, load_config_object,
 from habitus.config.locale import LocaleConfig
 from habitus.config.memory import MemoryConfig
 from habitus.config.models import ModelConfig
+from habitus.config.network import outbound_settings_from_mapping
 from habitus.config.observability import observability_config_from_mapping
 from habitus.config.scene import SceneConfig
 from habitus.config.storage import StorageConfig
 from habitus.config.temporal import TemporalConfig
 from habitus.config.workflow import WorkflowConfig
+from habitus.foundation.network import OutboundSettings
 from habitus.infrastructure.observability.config import ObservabilityConfig
 
 _FIXED_RETRIEVAL_DOCUMENTS = 1
@@ -48,6 +50,7 @@ class HabitusConfig:
     locale: LocaleConfig = field(default_factory=LocaleConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     http: HTTPAPIConfig = field(default_factory=HTTPAPIConfig)
+    network: OutboundSettings = field(default_factory=OutboundSettings)  # 调模型服务的证书库、额外 CA 与代理（W18）
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def __post_init__(self) -> None:
@@ -56,6 +59,7 @@ class HabitusConfig:
             ("models", self.models, ModelConfig),
             ("credentials", self.credentials, CredentialRegistry),
             ("http", self.http, HTTPAPIConfig),
+            ("network", self.network, OutboundSettings),
             ("observability", self.observability, ObservabilityConfig),
             ("conversation", self.conversation, ConversationConfig),
             ("memory", self.memory, MemoryConfig),
@@ -130,6 +134,7 @@ class HabitusConfig:
             models=ModelConfig.from_mapping(required_field(data, "models", path="config")),
             credentials=CredentialRegistry.from_mapping(required_field(data, "credentials", path="config")),
             http=HTTPAPIConfig.from_mapping(data.get("http", {})),
+            network=outbound_settings_from_mapping(data.get("network", {})),
             observability=observability_config_from_mapping(data.get("observability", {})),
             conversation=ConversationConfig.from_mapping(data.get("conversation", {})),
             memory=MemoryConfig.from_mapping(data.get("memory", {})),
@@ -330,13 +335,10 @@ class HabitusConfig:
                 raise ConfigError("Summary fallback limit cannot exceed its rerank candidate bound")
 
     def _validate_credential_references(self) -> None:
-        model_routes = [
-            ("config.models.chat.route", self.models.chat.route.credential_ref),
-            ("config.models.embedding.route", self.models.embedding.route.credential_ref),
-        ]
+        model_routes = [self.models.chat.route.credential_ref, self.models.embedding.route.credential_ref]
         if self.models.rerank is not None:
-            model_routes.append(("config.models.rerank.route", self.models.rerank.route.credential_ref))
-        for _path, reference in model_routes:
+            model_routes.append(self.models.rerank.route.credential_ref)
+        for reference in model_routes:
             if reference:
                 self.credentials.resolve(reference)
         for reference in (

@@ -281,16 +281,16 @@ def build_runtime(
         model_config.embedding,
         credentials=_model_credentials(config, model_config.embedding.route.credential_ref),
         observer=operation_observer,
+        outbound=config.network,
     )
-    reranker = (
-        resolved_providers.create_reranker(
+    reranker = None
+    if model_config.rerank is not None:
+        reranker = resolved_providers.create_reranker(
             model_config.rerank,
             credentials=_model_credentials(config, model_config.rerank.route.credential_ref),
             observer=operation_observer,
+            outbound=config.network,
         )
-        if model_config.rerank is not None
-        else None
-    )
     vector_store = resolved_vector_stores.create(
         memory_config.vector_store,
         requirements=VectorStoreRequirements(
@@ -333,11 +333,11 @@ def build_runtime(
         semantic_search=semantic_search,
         config=memory_config.editor_retrieval,
     )
-
     chat = resolved_providers.create_chat_client(
         model_config.chat,
         credentials=_model_credentials(config, model_config.chat.route.credential_ref),
         observer=operation_observer,
+        outbound=config.network,
     )
     structured_chat = StructuredChatClient(
         chat,

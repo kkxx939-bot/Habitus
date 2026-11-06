@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import cast
 
+from habitus.foundation.network import OutboundSettings, OutboundSettingsError
 from habitus.foundation.observability import Observer
 from habitus.model_client.client import ChatClient
 from habitus.model_client.config import (
@@ -27,11 +28,12 @@ _ADAPTER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 
 @dataclass(frozen=True)
 class ProviderBuildContext:
-    """工厂交给 builder 的单次构造上下文；密钥不参与 repr。"""
+    """工厂交给 builder 的单次构造上下文；密钥不参与 repr。``outbound`` 是构造 HTTP 客户端用的证书库与代理设置。"""
 
     config: CapabilityConfig
     api_key: str = field(default="", repr=False)
     credentials: Mapping[str, str] = field(default_factory=dict, repr=False)
+    outbound: OutboundSettings = field(default_factory=OutboundSettings)
 
     def __post_init__(self) -> None:
         if not isinstance(self.credentials, Mapping):
@@ -93,7 +95,10 @@ class ProviderFactory:
         *,
         api_key: str = "",
         credentials: Mapping[str, str] | None = None,
+        outbound: OutboundSettings | None = None,
     ) -> object:
+        """``outbound`` 省略 = 系统证书库、无额外 CA、不配代理。工厂不知道配置（构造它时还没有配置），所以在这里传。"""
+
         if not isinstance(config, ChatModelConfig | EmbeddingModelConfig | RerankModelConfig):
             raise TypeError("config must be a supported capability config")
         key = (config.capability, config.route.adapter)
@@ -102,6 +107,12 @@ class ProviderFactory:
             raise ModelConfigurationError(
                 f"adapter is not registered for capability: {config.capability}/{config.route.adapter}"
             )
+        settings = OutboundSettings() if outbound is None else outbound
+        try:
+            # 先建好（并缓存）SSL context：额外 CA 读不出来时在构造这一步就报配置错，不拖到第一次请求被当成网络故障重试
+            settings.ssl_context()
+        except OutboundSettingsError as exc:
+            raise ModelConfigurationError(str(exc)) from exc
         context = ProviderBuildContext(
             config=config,
             credentials=self._credential_mapping(
@@ -109,6 +120,7 @@ class ProviderFactory:
                 api_key=api_key,
                 credentials=credentials,
             ),
+            outbound=settings,
         )
         component = builder(context)
         self._validate_component(config, component)
@@ -120,8 +132,9 @@ class ProviderFactory:
         *,
         api_key: str = "",
         credentials: Mapping[str, str] | None = None,
+        outbound: OutboundSettings | None = None,
     ) -> ChatProvider:
-        component = self.create(config, api_key=api_key, credentials=credentials)
+        component = self.create(config, api_key=api_key, credentials=credentials, outbound=outbound)
         return cast(ChatProvider, component)
 
     def create_chat_client(
@@ -131,10 +144,11 @@ class ProviderFactory:
         api_key: str = "",
         credentials: Mapping[str, str] | None = None,
         observer: Observer | None = None,
+        outbound: OutboundSettings | None = None,
     ) -> ChatClient:
         return ChatClient(
             config,
-            self.create_chat_provider(config, api_key=api_key, credentials=credentials),
+            self.create_chat_provider(config, api_key=api_key, credentials=credentials, outbound=outbound),
             observer=observer,
         )
 
@@ -145,10 +159,11 @@ class ProviderFactory:
         api_key: str = "",
         credentials: Mapping[str, str] | None = None,
         observer: Observer | None = None,
+        outbound: OutboundSettings | None = None,
     ) -> Embedder:
         provider = cast(
             EmbeddingProvider,
-            self.create(config, api_key=api_key, credentials=credentials),
+            self.create(config, api_key=api_key, credentials=credentials, outbound=outbound),
         )
         return EmbeddingClient(config, provider, observer=observer)
 
@@ -159,8 +174,9 @@ class ProviderFactory:
         api_key: str = "",
         credentials: Mapping[str, str] | None = None,
         observer: Observer | None = None,
+        outbound: OutboundSettings | None = None,
     ) -> Reranker:
-        component = self.create(config, api_key=api_key, credentials=credentials)
+        component = self.create(config, api_key=api_key, credentials=credentials, outbound=outbound)
         provider = cast(RerankProvider, component)
         reranker: Reranker = RerankClient(config, provider)
         return reranker if observer is None else ObservedReranker(reranker, observer=observer)

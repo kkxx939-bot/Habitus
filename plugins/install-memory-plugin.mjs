@@ -10,6 +10,35 @@ function inspectHarness(definition, runner, env) {
   return registrationOf(definition).inspect(definition, runner, env);
 }
 
+// 出错时记下"哪个宿主、哪一步"（W5）：只往错误对象上加 habitusStep，不改原报错文字（调用方与测试照旧按原文判），
+// 命令行据此告诉用户卡在哪。嵌套时最里层先记的为准。
+export async function atStep(step, work) {
+  try {
+    return await work();
+  } catch (error) {
+    if (canAnnotate(error) && !error.habitusStep) error.habitusStep = step;
+    throw error;
+  }
+}
+
+// 失败后逐个恢复宿主注册：恢复本身失败的不再静默吞掉，挂到原错误的 restoreFailures 上，让用户知道哪个宿主要手动查
+async function restoreAll(processed, runner, env, error) {
+  const failures = [];
+  for (const value of processed.reverse()) {
+    try {
+      await registrationOf(value.definition).restore(value.snapshot, value.definition, runner, env);
+    } catch (restoreError) {
+      failures.push({ harness: value.definition.id, message: restoreError?.message || String(restoreError) });
+    }
+  }
+  if (failures.length && canAnnotate(error)) error.restoreFailures = failures;
+}
+
+// 被冻结或不是对象的错误不加注记，原样抛出（不能因为加注记把原错误换成 TypeError）
+function canAnnotate(error) {
+  return error !== null && typeof error === "object" && Object.isExtensible(error);
+}
+
 const REPOSITORY_PLUGINS = dirname(fileURLToPath(import.meta.url));
 const INSTALL_SCHEMA = 1;
 const ACTIONS = new Set(["install", "status", "update", "remove", "harnesses"]);
@@ -233,7 +262,10 @@ export async function executePluginLifecycle(
   // 不点名时本机有、却装不了的宿主（要跑的宿主命令不在 PATH 上）跳过并说明原因，不连累别的宿主
   const skipped = new Map();
   for (const definition of definitions) {
-    const snapshot = await inspectHarness(definition, runner, env);
+    const snapshot = await atStep(
+      { harness: definition.id, action: "检查本机状态" },
+      () => inspectHarness(definition, runner, env),
+    );
     if (
       !snapshot.available
       && !allowUnavailable
@@ -264,12 +296,13 @@ export async function executePluginLifecycle(
       const removable = snapshots.filter((item) => item.snapshot.available || !registrationOf(item.definition).needsCommand);
       for (const value of removable) {
         processed.push(value);
-        await registrationOf(value.definition).remove(value.snapshot, value.definition, runner, env);
+        await atStep(
+          { harness: value.definition.id, action: `卸载（${value.definition.registration}）` },
+          () => registrationOf(value.definition).remove(value.snapshot, value.definition, runner, env),
+        );
       }
     } catch (error) {
-      for (const value of processed.reverse()) {
-        await registrationOf(value.definition).restore(value.snapshot, value.definition, runner, env).catch(() => {});
-      }
+      await restoreAll(processed, runner, env, error);
       throw error;
     }
     // 根目录是所有宿主共用的：只卸一部分时，没被选中的宿主还指着它就留着
@@ -283,14 +316,19 @@ export async function executePluginLifecycle(
     return {
       action: "remove",
       root,
-      removed: stillUsed ? false : await removeMarketplaceRoot(root, sourceRoot, registry),
+      removed: stillUsed
+        ? false
+        : await atStep({ action: `删除插件副本 ${root}` }, () => removeMarketplaceRoot(root, sourceRoot, registry)),
       harnesses: await inspectSelected(),
     };
   }
 
-  const transaction = await swapMarketplace(root, { sourceRoot, registry });
+  const transaction = await atStep(
+    { action: `暂存插件副本到 ${root}` },
+    () => swapMarketplace(root, { sourceRoot, registry }),
+  );
   if (options.prepareOnly) {
-    await transaction.commit();
+    await atStep({ action: "提交插件副本" }, () => transaction.commit());
     return {
       action: options.action,
       root,
@@ -302,19 +340,24 @@ export async function executePluginLifecycle(
   try {
     for (const value of snapshots.filter((item) => wanted(item.snapshot) && !skipped.has(item.definition.id))) {
       processed.push(value);
-      await registrationOf(value.definition).install(
-        value.snapshot,
-        value.definition,
-        root,
-        runner,
-        { refresh: options.action === "update", env },
+      await atStep(
+        { harness: value.definition.id, action: `${options.action === "update" ? "重新注册" : "注册"}（${value.definition.registration}）` },
+        () => registrationOf(value.definition).install(
+          value.snapshot,
+          value.definition,
+          root,
+          runner,
+          { refresh: options.action === "update", env },
+        ),
       );
     }
-    await transaction.commit();
+    await atStep({ action: "提交插件副本" }, () => transaction.commit());
   } catch (error) {
-    await transaction.rollback();
-    for (const value of processed.reverse()) {
-      await registrationOf(value.definition).restore(value.snapshot, value.definition, runner, env).catch(() => {});
+    // 插件副本回滚失败也不能盖掉原错误、不能跳过恢复宿主注册：记在 marketplaceRollbackFailure 上一起报
+    const rollbackError = await transaction.rollback().then(() => null, (value) => value);
+    await restoreAll(processed, runner, env, error);
+    if (rollbackError && canAnnotate(error)) {
+      error.marketplaceRollbackFailure = { root, message: rollbackError?.message || String(rollbackError) };
     }
     throw error;
   }

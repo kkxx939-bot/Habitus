@@ -93,6 +93,11 @@ class MemorySchemaRegistry:
     def validate(self, kind: MemoryKind | str, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self.get(kind).validate_payload(payload)
 
+    def validate_new(self, kind: MemoryKind | str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """模型新给出的候选字段：多卡一道记忆名字字节上限（见 ``MemoryTypeSchema.validate_new_payload``）。"""
+
+        return self.get(kind).validate_new_payload(payload)
+
     def address_for(self, kind: MemoryKind | str, payload: Mapping[str, Any]) -> MemoryAddress:
         return self.get(kind).address_for(payload)
 

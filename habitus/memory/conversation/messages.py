@@ -411,11 +411,11 @@ class ConversationMessageJournal:
                         existing = known_by_sequence.get(message.sequence)
                         if existing is None:
                             raise ConversationWriteConflictError(
-                                "append replay predates the retained conversation tail"
+                                f"append replay predates the retained conversation tail at sequence {message.sequence}"
                             )
                         if existing.to_dict() != message.to_dict():
                             raise ConversationWriteConflictError(
-                                "append replay conflicts with an existing message sequence"
+                                f"append replay conflicts with the stored message at sequence {message.sequence}"
                             )
                         continue
                     required_sequence = expected_next + len(unseen)
@@ -1233,7 +1233,7 @@ class ConversationMessageJournal:
         """为一次可能跨多个新 Segment 的重放恢复仍可验证的事实范围。"""
 
         if batch.start_sequence < expected_next and batch.start_sequence <= state.released_through:
-            raise ConversationWriteConflictError("append replay predates released conversation history")
+            raise ConversationWriteConflictError(f"append replay from sequence {batch.start_sequence} predates released history")
         known_by_sequence = {item.sequence: item for item in self._known_tail(latest, live_messages)}
         if batch.start_sequence < expected_next:
             for reference in references:

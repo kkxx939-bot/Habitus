@@ -280,7 +280,7 @@ class SessionTurnRecorder:
 
         def mark(occurred_at: datetime, what: str) -> BehaviorObservation:
             return BehaviorObservation.create(
-                observer_id=session_observer(turn.conversation_id),
+                observer_id=session_observer(turn.identity),
                 occurred_at=occurred_at.astimezone(self.zone),
                 available_at=available,
                 modality="session",
@@ -297,7 +297,7 @@ class SessionTurnRecorder:
     def _envelope(
         self, turn: SessionTurn, evidence: tuple[BehaviorObservation, BehaviorObservation]
     ) -> BehaviorObservationEnvelope:
-        observer = session_observer(turn.conversation_id)
+        observer = session_observer(turn.identity)
         return BehaviorObservationEnvelope.create(
             observer_id=observer,
             protocol=SESSION_PROTOCOL,

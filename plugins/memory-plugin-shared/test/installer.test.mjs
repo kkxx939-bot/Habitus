@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmodSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
 
-import { main } from "../../bin/habitus.mjs";
+import { formatError, main } from "../../bin/habitus.mjs";
 import { HARNESS_REGISTRY, createHarnessRegistry } from "../../harnesses.mjs";
-import { executePluginLifecycle, sourceDigest } from "../../install-memory-plugin.mjs";
+import { atStep, executePluginLifecycle, sourceDigest } from "../../install-memory-plugin.mjs";
 import { fileEntryPath, patchBlock, patchFilePath } from "../../registrations.mjs";
 
 function sink() {
@@ -433,4 +434,123 @@ test("a Codex plugin entry without an installed field counts as installed", asyn
     : { installed: [{ pluginId: "habitus-memory@habitus-local", enabled: true }] });
   const status = await lifecycle({ action: "status", harnesses: ["codex"], root: runner.marketplaceSource }, runner);
   assert.equal(status.harnesses[0].installed, true);
+});
+
+// ── 报错写清卡在哪（W5）────────────────────────────────────────────────────────────────────────────
+
+test("a failed registration names the harness and the step without changing the original message", async (t) => {
+  const { parent, lifecycle } = await setup(t);
+  const root = join(parent, "marketplace");
+  const error = await lifecycle({ action: "install", harnesses: ["codex"], root }, new CodexRunner("plugin add")).then(
+    () => assert.fail("install should fail"),
+    (value) => value,
+  );
+  assert.equal(error.message, "simulated failure: plugin add habitus-memory@habitus-local");
+  assert.deepEqual(error.habitusStep, { harness: "codex", action: "注册（marketplace）" });
+  const err = sink();
+  const failing = () => Promise.reject(error);
+  assert.equal(await main(["plugin", "install", "--root", root], { stdout: sink(), stderr: err, env: {}, lifecycle: failing }), 1);
+  assert.equal(
+    err.text(),
+    "habitus plugin: [codex · 注册（marketplace）] simulated failure: plugin add habitus-memory@habitus-local\n  （加 --verbose 看调用栈）\n",
+  );
+});
+
+test("a registration whose rollback also fails reports the harness left behind", async (t) => {
+  const { directory, parent, env } = await setup(t);
+  const source = await fakeSource(join(directory, "again"));
+  const registry = createHarnessRegistry([HARNESS_REGISTRY.resolve("codex"), HARNESS_REGISTRY.resolve("opencode")]);
+  // codex 原本装着、指向旧目录，这次先改注册成功；OpenCode 的配置目录只读，写入口失败；
+  // 回滚 codex 时要把它指回旧目录，这一步也失败
+  const opencodeConfig = join(env.XDG_CONFIG_HOME, "opencode");
+  await chmod(opencodeConfig, 0o500);
+  const previous = join(directory, "previous-marketplace");
+  const runner = new CodexRunner(`plugin marketplace add ${previous}`);
+  runner.marketplaceSource = previous;
+  runner.installed = true;
+  const error = await executePluginLifecycle(
+    { action: "install", harnesses: [], root: join(parent, "marketplace") },
+    { runner, sourceRoot: source, registry, env },
+  ).then(() => assert.fail("install should fail"), (value) => value)
+    .finally(() => chmod(opencodeConfig, 0o700));
+  assert.equal(error.habitusStep.harness, "opencode");
+  assert.match(error.habitusStep.action, /^注册（file）$/);
+  assert.equal(error.restoreFailures.length, 1);
+  assert.equal(error.restoreFailures[0].harness, "codex");
+  assert.match(error.restoreFailures[0].message, /simulated failure: plugin marketplace add/);
+  const text = formatError("plugin", error);
+  assert.match(text, /^habitus plugin: \[opencode · 注册（file）\] /);
+  assert.match(text, /\n  回滚时 codex 的注册没能恢复：simulated failure: plugin marketplace add/);
+});
+
+test("--verbose adds the stack and the cause chain, and is stripped before the subcommand sees it", async () => {
+  const inner = new Error("EACCES: permission denied, open '/x/y'");
+  const error = Object.assign(new Error("could not write the plugin entry", { cause: inner }), { habitusStep: { harness: "pi", action: "注册（file）" } });
+  const plain = formatError("plugin", error);
+  assert.match(plain, /^habitus plugin: \[pi · 注册（file）\] could not write the plugin entry\n  原因：EACCES: permission denied, open '\/x\/y'\n  （加 --verbose 看调用栈）\n$/);
+  const verbose = formatError("plugin", error, true);
+  assert.ok(verbose.includes(error.stack) && verbose.includes(inner.stack), verbose);
+  assert.doesNotMatch(verbose, /加 --verbose/);
+  // 位置不限，摘掉后子命令照常解析
+  const out = sink();
+  assert.equal(await main(["--verbose", "harnesses", "--json"], { stdout: out, stderr: sink(), env: { PATH: "", HOME: "/nonexistent" } }), 0);
+  assert.ok(Array.isArray(JSON.parse(out.text()).harnesses));
+  const err = sink();
+  const failing = () => Promise.reject(error);
+  assert.equal(await main(["plugin", "install", "--verbose", "--root", "/tmp/x"], { stdout: sink(), stderr: err, env: {}, lifecycle: failing }), 1);
+  assert.ok(err.text().includes(error.stack));
+});
+
+test("a plain usage error stays one line without the --verbose hint", async () => {
+  assert.equal(formatError("recall", new Error("usage: habitus recall <问题>")), "habitus recall: usage: habitus recall <问题>\n");
+  assert.equal(formatError("recall", "boom"), "habitus recall: boom\n");
+});
+
+test("a plugin copy that cannot be rolled back keeps the original error, still restores registrations, and is reported", async (t) => {
+  const { parent, lifecycle } = await setup(t);
+  const root = join(parent, "marketplace");
+  const previous = join(parent, "previous-marketplace");
+  // codex 原本指向旧目录；这次注册失败的同时把根目录的父目录改成只读，插件副本的回滚（删暂存目录）随之失败
+  const runner = new CodexRunner();
+  runner.marketplaceSource = previous;
+  runner.installed = true;
+  const run = runner.run.bind(runner);
+  runner.run = (command, args) => {
+    if (args.join(" ").startsWith("plugin add ")) {
+      chmodSync(parent, 0o500);
+      throw new Error("simulated failure: plugin add");
+    }
+    return run(command, args);
+  };
+  const error = await lifecycle({ action: "install", harnesses: ["codex"], root }, runner).then(
+    () => assert.fail("install should fail"),
+    (value) => value,
+  ).finally(() => chmod(parent, 0o700));
+  assert.equal(error.message, "simulated failure: plugin add");
+  assert.deepEqual(error.habitusStep, { harness: "codex", action: "注册（marketplace）" });
+  assert.equal(runner.marketplaceSource, previous, "codex registration must still be restored");
+  assert.equal(error.marketplaceRollbackFailure.root, root);
+  assert.match(error.marketplaceRollbackFailure.message, /EACCES|EPERM/);
+  const text = formatError("plugin", error);
+  assert.match(text, /^habitus plugin: \[codex · 注册（marketplace）\] simulated failure: plugin add\n/);
+  assert.match(text, new RegExp(`\\n  回滚时插件副本 ${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} 没能恢复：.*(EACCES|EPERM)`));
+  assert.match(text, /（加 --verbose 看调用栈）\n$/);
+});
+
+test("a remove that cannot delete the plugin copy names the step", async (t) => {
+  const { parent, lifecycle } = await setup(t);
+  const root = join(parent, "marketplace");
+  await lifecycle({ action: "install", harnesses: [], root });
+  await chmod(parent, 0o500);
+  const error = await lifecycle({ action: "remove", harnesses: [], root }).then(
+    () => assert.fail("remove should fail"),
+    (value) => value,
+  ).finally(() => chmod(parent, 0o700));
+  assert.deepEqual(error.habitusStep, { action: `删除插件副本 ${root}` });
+  assert.match(formatError("plugin", error), /^habitus plugin: \[删除插件副本 .*\] .*(EACCES|EPERM)/);
+});
+
+test("a frozen error passes through atStep unchanged", async () => {
+  const frozen = Object.freeze(new Error("frozen original"));
+  await assert.rejects(atStep({ action: "x" }, () => { throw frozen; }), (error) => error === frozen);
 });

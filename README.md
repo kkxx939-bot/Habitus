@@ -367,7 +367,7 @@ Pure functions, no model:
   - **Situation**: today is in this calendar situation and there are ≥ 2 hits; by default only on day types where he has been seen doing it naturally (`foresight.unseen_day_types: skip`); the window is p10–p90 of past consequent times (earliest to latest with 10 or fewer); the deadline is the end of today; nothing is built before the window.
   - **Day** (long enough since last time): reads `temporal.cluster_at`; the window spans the earliest to latest of the latest M natural hits in that cluster; the deadline is the end of the cluster's last day. A streak past the history reads `temporal.overdue_at`: the window is that day only, its times taken from the latest M hits of the typical-interval cluster. Day expectations are not built in the daytime: once a day, as the last step of the nightly run, from the table that run has just written and that includes yesterday (intervals, clusters, hits and windows have that one source); they still count from local midnight, so anything done between midnight and the end of the run is built and settled, and a habit whose whole window falls in that stretch and was not done gets no expectation that day.
 - The expectation id is the first 24 hex digits of sha256(class, trigger kind, trigger identity, trigger instance), so the same opportunity recomputed on another day gets the same id; an expectation is built whenever the window arrives, done or not. Each carries a reverse list of antecedents (present / absent / suppressing).
-- **Holiday data**: the day type (working day, weekend, holiday, make-up working day) comes from holiday data. Data for mainland China 2025 and 2026 ships with the package, generated from the State Council General Office's holiday notices; when `locale.calendar_path` is set, only that directory is read. For a year or region without data the day type cannot be answered: statistics treat it as unknown, expectation building fills in a day type from the nominal weekend (`locale.nominal_weekend`), and working days that are public holidays still get expectations and reminders.
+- **Holiday data**: the day type (working day, weekend, holiday, make-up working day) comes from holiday data. Data for mainland China 2025 and 2026 (generated from the State Council General Office's holiday notices) and for Singapore 2025 and 2026 (entered from the Ministry of Manpower's published public holidays; a holiday falling on a Sunday is followed by a Monday off) ships with the package; when `locale.calendar_path` is set, only that directory is read. For a year or region without data the day type cannot be answered: statistics treat it as unknown, expectation building fills in a day type from the nominal weekend (`locale.nominal_weekend`), and working days that are public holidays still get expectations and reminders.
 - **Why**: candidates are not a sieve; the only question is "what is raising it right now"; every opportunity enters the ledger, otherwise the hit side is truncated and the denominator is wrong; no expectations from too few samples.
 
 ### 19. Units, levels and delivery
@@ -452,7 +452,7 @@ Had he typed "晚上再说" (later tonight) instead, the outlet would not write 
 
 ## Installation
 
-**1. The local service** (Python ≥ 3.13; not on PyPI yet, install from the repository):
+**1. The local service** (Python ≥ 3.12; not on PyPI yet, install from the repository):
 
 ```sh
 pip install "habitus[cloud] @ git+https://github.com/kkxx939-bot/Habitus"
@@ -472,10 +472,10 @@ ZCode needs Node ≥ 22.5 to read its session database (`node:sqlite`), and Deep
 
 The default configuration needs three sets of credentials: DeepSeek (chat model), Volcengine Ark (embedding) and Volcengine VikingDB (vector store, AK/SK).
 
-`init` does not ask for a time zone; `locale.timezone` defaults to `Asia/Shanghai`, and memory dates its Events by it too. If you are elsewhere, set it to your IANA zone name (e.g. `Europe/Berlin`) in the configuration before starting the service.
+When `init` creates a configuration it detects the system time zone: interactively it shows what it found, and you press Enter to accept or type another IANA zone name; if nothing is detected (or the system zone is something like `UTC` that says nothing about where you are) it defaults to `Asia/Singapore`. The region code (`locale.region`, which picks the holiday data) follows from the zone: `SG` for Singapore, `CN` for mainland China; for any other zone the interactive setup asks you for it. With `--non-interactive` the detected zone is used, the region falls back to `SG` when it cannot be derived, and one output line says what was written and whether to change it. Without a `locale` section the configuration defaults to `Asia/Singapore` and `SG`. Memory dates its Events by this time zone too. Re-running `init` on an existing configuration (without `--force`) leaves it alone.
 
 ```sh
-habitus-server init                       # interactive: model, vector store, credentials, then offers a health check (--non-interactive runs it only with --doctor)
+habitus-server init                       # interactive: model, vector store, credentials, time zone, then offers a health check (--non-interactive runs it only with --doctor)
 habitus-server serve                      # start the service (runs in the foreground), default http://127.0.0.1:8787; run the next two in another terminal
 habitus plugin install --harness codex    # install into a host; repeat --harness, or omit it for every host present
 habitus doctor                            # service, features, host registration, hook approval, outbox
@@ -588,7 +588,7 @@ Every subcommand accepts `--help`. The CLI finds the service the same way the pl
 |---|---|
 | `habitus-server [--config PATH] [serve]` | Run the service (`serve` is the default). A startup check runs first (dependencies, credentials, port); if it fails the service exits with a one-line reason. After the checks it connects to the vector store to confirm the collections; a rejected credential or unreachable service also exits with a one-line reason (credentials redacted). Only one instance per storage directory |
 | `habitus-server init [--config PATH] [--from-config PATH] [--force] [--non-interactive] [--doctor \| --skip-doctor] [--deep] [--probe-timeout S] [--harness ID …] [--all-harnesses] [--start \| --no-start]` | Write the configuration and connection file; optionally run the health check, run `habitus plugin install` for you, and start the service |
-| `habitus-server doctor [--config PATH] [--json] [--skip-port] [--deep] [--probe-timeout S]` | Local service checks: dependencies (naming the group to install), config file permissions, credentials, port (suggesting a running service when it is taken), whether the plugins' `connection.json` points at the configured address (a warning when not), and with `--deep` live probes of the model and vector store |
+| `habitus-server doctor [--config PATH] [--json] [--skip-port] [--deep] [--probe-timeout S]` | Local service checks: dependencies (naming the group to install), config file permissions, credentials, `network` (the trust store, extra CA and which proxy model calls use, with any password removed; FAIL when the CA file or the trust store cannot be loaded), port (suggesting a running service when it is taken), whether the plugins' `connection.json` points at the configured address (a warning when not), and with `--deep` live probes of the models and vector stores (chat, embedding and, when configured, one minimal billed rerank request with a single document; an untrusted certificate or a proxy asking for authentication is reported with what to configure) |
 | `habitus-server repair-source-outputs <source_id> --consumer memory\|behavior_session [--dry-run]` | Operations: clean up surplus orphan outputs of one conversation source (the service must be stopped) |
 
 The configuration file is `--config`, else `HABITUS_CONFIG_FILE`, else `~/.habitus/config.yaml`.
@@ -610,7 +610,7 @@ Success responses are `{"status":"ok","result":…,"request_id":…}`; errors ar
 | `GET /api/v1/memory/tree`, `GET /api/v1/memory/document` | Browse the memory tree, read one memory |
 | `GET /api/v1/reminders` | Reminder progress for a day |
 | `POST /api/v1/reminders/claim` | A host fetches due reminders (only hosts that have a question tool) |
-| `GET /api/v1/memory/jobs`, `/memory/jobs/blocked`, `/memory/jobs/{sequence}` | Status of memory write jobs; `/memory/jobs` and `/memory/jobs/{sequence}` require the query parameters `conversation_id` (1–256 characters) and `started_on` (a date), otherwise 400 `INVALID_ARGUMENT` |
+| `GET /api/v1/memory/jobs`, `/memory/jobs/blocked`, `/memory/jobs/{sequence}` | Status of memory write jobs; `/memory/jobs` and `/memory/jobs/{sequence}` require the query parameters `conversation_id` (1–240 UTF-8 bytes, the same limit on every endpoint that takes one; longer is a 400 `INVALID_ARGUMENT`) and `started_on` (a date), otherwise 400 `INVALID_ARGUMENT` |
 | `POST /api/v1/operations/memory/jobs/{sequence}/retry` | Operations: retry a failed write job; requires the query parameters `conversation_id` and `started_on` and the body `{"expected_version": <version>}`, all four values taken from the `job` returned by `GET /memory/jobs/blocked` |
 | `GET /api/v1/operations/audit` | Operations: recent audit events |
 | `GET /health`, `GET /ready`, `GET /metrics` | Health, readiness (503 when not ready, with the health reading in the body; also 503 while a memory job has failed or is waiting for the model / vector store, in which case `recall_ready` in the result stays true and the plugins keep recalling), Prometheus metrics |
@@ -650,6 +650,7 @@ credentials:
 | `storage` | Storage root, SQLite locks | required |
 | `credentials` | Named credentials | required |
 | `http` | Address of the local HTTP service, request limit, part uploads | on |
+| `network` | Trust store, extra CA certificate and proxy for calls to the model services | system trust store, no extra CA, proxy from the environment |
 | `observability` | Metrics, logs, OTLP export, audit | metrics / logs / audit on, OTLP off |
 | `models` | Chat / embedding / rerank routes and structured output | required; `models.rerank` may be `null` (no reranking) |
 | `conversation` | Conversation journal, conversation source, segmentation, segment summaries, summary vector store and index, summary compaction | on |
@@ -659,10 +660,24 @@ credentials:
 | `scene` | Semantic tree (the nightly run) and relation-test thresholds | off; requires `behavior` |
 | `foresight` | Prediction layer and reminder outlet | off; requires `scene` |
 | `temporal` | Time ruler (slot width, merge window) shared by the semantic tree and prediction | defaults |
-| `locale` | The subject's time zone and regional calendar, shared by memory (an Event's local date), the semantic tree and prediction | defaults (`Asia/Shanghai`, `CN`) |
+| `locale` | The subject's time zone and regional calendar, shared by memory (an Event's local date), the semantic tree and prediction | `init` writes the detected and confirmed zone and region; without the section: defaults (`Asia/Singapore`, `SG`) |
 | `lifecycle` | Unified lifecycle worker, retry ledger, derivative generations, capacity warnings | defaults |
 
 A broken dependency (`scene` on without `behavior`, `foresight` on without `scene`) fails loading. A set of cross-group capacity relations is also checked at load time, e.g. a memory document's encoded limit must not exceed the snapshot item limit, and segmentation byte limits must not exceed the journal file limit.
+
+### Corporate networks (proxy and certificates)
+
+Calls to the model services (chat, embedding, rerank) trust the **operating system's certificate store** by default (`network.trust_store: system`, via the `truststore` package: the Windows certificate store, the macOS keychain, `/etc/ssl` on Linux). A corporate proxy that inspects TLS usually has its root certificate installed there, so nothing needs configuring.
+
+| Situation | What to do |
+|---|---|
+| The corporate root certificate is not in the system store, you only have a PEM file | `network.ca_bundle: ~/corp-root.pem`: trusted on top of the trust store. Without it the first call fails once with `MODEL_TLS` (no retries) and `habitus-server doctor --deep` says which field to set |
+| A proxy address is needed | `network.proxy: http://proxy.example.com:3128` (overrides `HTTPS_PROXY`, and `NO_PROXY` no longer applies), or leave it out and set `HTTPS_PROXY` / `NO_PROXY` as usual. A model service on `127.0.0.1` / `localhost` / `::1` always connects directly, through neither `network.proxy` nor a proxy environment variable, so a company-wide `HTTPS_PROXY` does not need a `NO_PROXY` entry for a local model |
+| The proxy needs a user name and password (Basic) | Put the URL with credentials in the `HTTPS_PROXY` environment variable; `network.proxy` refuses credentials (secrets live only in `credentials`), and doctor shows the proxy with the password removed |
+| The proxy needs Windows domain sign-in (NTLM / Kerberos) or a PAC file | Not supported directly. The call fails once with `MODEL_PROXY_AUTH` (HTTP 407); run a local forwarding proxy such as cntlm or px and point `network.proxy` at it, e.g. `http://127.0.0.1:3128` |
+| A minimal container with no system certificate store | `network.trust_store: bundled` (only the certifi bundle that ships with Python) |
+
+`MODEL_TLS` and `MODEL_PROXY_AUTH` are not retried within a request; memory jobs treat them like broken credentials and wait for the model instead of failing. On macOS the system store rejects server certificates issued after July 2019 that are valid for more than 825 days, also when their CA comes from `ca_bundle` (the error says "not standards compliant"); for such a certificate use `trust_store: bundled` together with `ca_bundle`. The `SSL_CERT_FILE` (or else `SSL_CERT_DIR`) environment variable is still honoured as before and is trusted on top of either trust store.
 
 ### Fields
 
@@ -686,6 +701,16 @@ Every field of `example.yaml`, folded by group. "Accepted values" is what loadin
 | `max_request_bytes` | 16777216 | 1024–67_108_864 | Request body limit (REQUEST_TOO_LARGE above it); advertised in capabilities so plugins know when to upload in parts |
 | `remember_parts_max_bytes` | 67108864 | 16_777_216–1_073_741_824 † | Total bytes of part uploads buffered in memory; a part beyond it is refused |
 | `remember_parts_ttl_seconds` | 600.0 | ≥ 1, ≤ 86400 | A part upload with no new part for this long is discarded |
+
+</details>
+
+<details><summary><code>network</code></summary>
+
+| Field | Default | Accepted values | Purpose |
+|---|---|---|---|
+| `trust_store` | `system` | `system` / `bundled` | Certificates trusted for model calls: the operating system's store, or only the certifi bundle |
+| `ca_bundle` | null | path to a readable PEM file, `~` allowed | Extra certificates trusted on top of `trust_store`; a missing file, a directory or a file without PEM certificates fails loading |
+| `proxy` | null | `http://` or `https://` with a host and optional port; no user / password, path, query or fragment | Proxy for model calls, overriding `HTTPS_PROXY` and friends; null keeps the environment variables. Loopback model addresses connect directly, bypassing this and the environment variables alike |
 
 </details>
 
@@ -1328,9 +1353,9 @@ Every field of `example.yaml`, folded by group. "Accepted values" is what loadin
 
 | Field | Default | Accepted values | Purpose |
 |---|---|---|---|
-| `locale.timezone` | Asia/Shanghai | IANA time zone name | Decides which day "today" is and which slot "now" is in |
-| `locale.region` | CN | ISO 3166 code (CN, SG, US-CA, …) | Region of the person (the calendar follows the person, not the server) |
-| `locale.calendar_path` | null | directory path or null | Directory of holiday schedules (one `<year>.json` per year, format in `habitus/conditions/calendar_data.py`); when set, only it is read. When null, the bundled data is read (currently CN 2025 and 2026, from the State Council notices); a year without data has an unknown day type (not treated as an ordinary working day), weekday and date are still answered |
+| `locale.timezone` | Asia/Singapore | IANA time zone name | Decides which day "today" is and which slot "now" is in |
+| `locale.region` | SG | ISO 3166 code (CN, SG, US-CA, …) | Region of the person (the calendar follows the person, not the server) |
+| `locale.calendar_path` | null | directory path or null | Directory of holiday schedules (one `<year>.json` per year, format in `habitus/conditions/calendar_data.py`); when set, only it is read. When null, the bundled data is read (currently CN 2025 and 2026, from the State Council notices, and SG 2025 and 2026, from the Ministry of Manpower's public holidays); a year without data has an unknown day type (not treated as an ordinary working day), weekday and date are still answered |
 | `locale.nominal_weekend` | [5, 6] | distinct weekdays 0–6 | Fallback weekend for building expectations without holiday data (0 = Monday … 6 = Sunday); not used in statistics |
 
 </details>
@@ -1484,7 +1509,15 @@ All Python code lives in the single top-level package `habitus/`:
 
 ### Local checks: `scripts/ci.sh`
 
-A change is done when `scripts/ci.sh` passes locally. Dependencies and tool versions are pinned in `requirements.txt` (generated from `pyproject.toml` with pip-compile):
+A change is done when `scripts/ci.sh` passes locally. Dependencies and tool versions are pinned in `requirements.txt` (generated from `pyproject.toml` with `uv pip compile --universal`, minimum Python 3.12; the full command is in its header). The recommended development environment is built with [uv](https://docs.astral.sh/uv/):
+
+```sh
+uv venv --python 3.12 .venv
+uv pip install --python .venv -r requirements.txt && uv pip install --python .venv -e . --no-deps
+bash scripts/ci.sh
+```
+
+Plain pip works with the same lock file inside any Python ≥ 3.12 environment:
 
 ```sh
 python -m pip install -r requirements.txt && python -m pip install -e . --no-deps
@@ -1493,7 +1526,7 @@ bash scripts/ci.sh
 
 It runs, in order: `compileall` → `ruff check` → `mypy` → `pyright` → `coverage run --branch -m pytest` (fails below 79% branch coverage, `fail_under` in `pyproject.toml`) → `npm test` for the plugins (`node --test`). Without an active virtual environment it uses `.venv` at the repository root if present.
 
-On top of `ci.sh`, `.github/workflows/ci.yml` regenerates the plugins' shared-library copies and requires them to match the commit (`npm run sync` + `git diff --exit-code`), runs a non-interactive `habitus-server init --from-config habitus/config/example.yaml` and checks the file mode 0600, builds the wheel and runs `scripts/check_wheel.py`, then installs the wheel and the `npm pack` tarball into clean environments and runs the plugin lifecycle.
+On top of `ci.sh`, `.github/workflows/ci.yml` runs on Ubuntu and macOS × Python 3.12, 3.13 and 3.14 (the lower bound of `requires-python` up to the latest release), and in each job regenerates the plugins' shared-library copies and requires them to match the commit (`npm run sync` + `git diff --exit-code`), runs a non-interactive `habitus-server init --from-config habitus/config/example.yaml` and checks the file mode 0600, builds the wheel and runs `scripts/check_wheel.py`, then installs the wheel and the `npm pack` tarball into clean environments and runs the plugin lifecycle.
 
 ### Test layers
 
@@ -1553,7 +1586,7 @@ The configuration written by `habitus-server init` (non-interactive, or interact
 | When a memory job really fails (a permanent error, or 5 retryable attempts used up), memory writes for every conversation queue behind it until it is retried by hand; the `habitus` CLI has no retry command, so it goes through HTTP (see [MemoryJob queue](#8-memoryjob-queue)). Recall keeps working meanwhile | By design: failed jobs are not skipped |
 | While the model's quota or credentials stay broken, or the vector store / embedding service stays unreachable (e.g. a wrong address), memory jobs keep waiting and retry at most once a day; the `ready` check of `habitus doctor` warns and says to look at the quota / credentials; when it is the vector store being waited on, the hint still calls it waiting for the model (`waiting_for_model`) | By design: waits for a dependency are not capped in number |
 | When a session-lane turn cannot be written because the model is unavailable (including a short network drop during the day), it becomes "not understood" and is retried once that night; if the model is still unavailable then, it stays "not understood" | By design |
-| Years without holiday data (2027 onwards) or regions outside mainland China have no day type: working days that are public holidays still get expectations and reminders; you have to supply data in the format of `habitus/conditions/calendar_data.py` and set `locale.calendar_path`. `habitus doctor` does not warn about missing data yet | To do |
+| Years without holiday data (2027 onwards) or regions other than mainland China and Singapore have no day type: working days that are public holidays still get expectations and reminders; you have to supply data in the format of `habitus/conditions/calendar_data.py` and set `locale.calendar_path`. `habitus doctor` does not warn about missing data yet | To do |
 | The L2 hot/cold lifecycle is on by default: memories never used by recall are deleted after their retirement period (an Event around day 210; an unfinished Intention retires by time too, around day 570), and may be compacted and rewritten by the model on the way (including the body of add-only Events). To turn it off, set `memory.recall_lifecycle.enabled: false` in the configuration | To be decided: whether unfinished Intentions belong in this lifecycle is not settled; the disagreement with statements in `AGENTS.md` such as "only the Memory Editor changes L2" and "retrieval does not use hotness" is pending with it |
 | The physical lane has no HTTP entry point and is not wired into the semantic tree or prediction | To do |
 | The session lane does not recognise sessions started by scripts or schedules (the plugins already skip non-interactive Claude Code / Codex sessions; other hosts and clients calling the HTTP API directly do not) | To do; scripts can set `HABITUS_MEMORY_ENABLED=0` |

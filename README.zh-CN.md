@@ -367,7 +367,7 @@ L2 的冷热生命周期默认开着，由 `memory.recall_lifecycle.enabled` 一
   - **情境**：今天在这个日历情境里、命中 ≥ 2 次；默认只在见过他自然做的日型上建（`foresight.unseen_day_types: skip`）；时窗取历史后果时刻的 p10–p90（10 次以内取最早到最晚）；最晚时限是今天过完；还没到时窗不建。
   - **日子**（离上次够久）：读 `temporal.cluster_at`，时窗是该簇最近 M 次自然命中时刻的最早到最晚；最晚时限是簇末那天过完。连漏超过了历史时读 `temporal.overdue_at`：时窗只在当天，钟点取常见间隔那一簇的最近 M 次命中。日子预期不在白天建：一天只建一次，是整晚那一趟的最后一步，用这一趟刚写的、含昨天的那张表（间隔、簇、命中、时窗只有这一个来源）；仍从当天零点起算，零点到这一趟跑完之间做过的照建、照算，时窗整个落在这一段里而没做的当天不建。
 - 预期身份 = sha256(类, 触发种类, 触发身份, 触发实例) 前 24 位，同一次机会跨天重算得到同一身份；到了时窗就建，不管做没做。每条附反向前因清单（在场 / 不在场 / 压低）。
-- **放假数据**：日型（工作日、周末、节假日、调休上班）来自放假数据。随包附带中国大陆 2025、2026 两年，照国务院办公厅的放假通知原文生成；`locale.calendar_path` 配了就只读那个目录。没有数据的年份或地区日型答不出：统计里是未知，建预期时按名义周末（`locale.nominal_weekend`）补一个日型，节假日的工作日照常建预期、照常提醒。
+- **放假数据**：日型（工作日、周末、节假日、调休上班）来自放假数据。随包附带中国大陆 2025、2026 两年（照国务院办公厅的放假通知原文生成）与新加坡 2025、2026 两年（照新加坡人力部公布的公共假期原文录入，落在周日的次日周一补休）；`locale.calendar_path` 配了就只读那个目录。没有数据的年份或地区日型答不出：统计里是未知，建预期时按名义周末（`locale.nominal_weekend`）补一个日型，节假日的工作日照常建预期、照常提醒。
 - **为什么**：候选不是筛子，只问"此刻有什么在抬高它"；每次机会都进账，否则命中一侧被截掉、分母错；样本少不建。
 
 ### 19. 单元、档与递送
@@ -452,7 +452,7 @@ L2 的冷热生命周期默认开着，由 `memory.recall_lifecycle.enabled` 一
 
 ## 安装
 
-**1. 本地服务**（Python ≥ 3.13；还没上 PyPI，从仓库装）：
+**1. 本地服务**（Python ≥ 3.12；还没上 PyPI，从仓库装）：
 
 ```sh
 pip install "habitus[cloud] @ git+https://github.com/kkxx939-bot/Habitus"
@@ -472,10 +472,10 @@ ZCode 读会话库要 Node ≥ 22.5（`node:sqlite`），DeepSeek Harness 读压
 
 默认配置要三份凭据：DeepSeek（对话模型）、火山方舟（Embedding）、火山 VikingDB（向量库，AK/SK）。
 
-`init` 不问时区，默认 `locale.timezone: Asia/Shanghai`；记忆的 Event 日期也按它算。不在这个时区，先在配置里把它改成你的 IANA 时区名（例如 `Europe/Berlin`）再起服务。
+`init` 新建配置时检测系统时区：交互时显示检测结果，回车确认或改填别的 IANA 时区名；检测不到（或系统时区是 `UTC` 这类不代表所在地的）时默认 `Asia/Singapore`。地区码（`locale.region`，决定读哪一份放假安排）从时区推：新加坡是 `SG`、中国大陆是 `CN`，别的时区交互时请你填；`--non-interactive` 时检测到就用检测到的，推不出地区就写 `SG`，输出里有一行说明用了什么、要不要去改。配置里不写 `locale` 时默认 `Asia/Singapore`、`SG`。记忆的 Event 日期也按这个时区算。已有配置重跑 `init`（不带 `--force`）不改它。
 
 ```sh
-habitus-server init                       # 交互式：选模型、向量库、填凭据，最后问要不要体检（--non-interactive 时加 --doctor 才跑）
+habitus-server init                       # 交互式：选模型、向量库、填凭据、确认时区，最后问要不要体检（--non-interactive 时加 --doctor 才跑）
 habitus-server serve                      # 起服务（前台运行），默认 http://127.0.0.1:8787；下面两条另开一个终端
 habitus plugin install --harness codex    # 把插件装进宿主；可重复 --harness，省略就是本机有的全部
 habitus doctor                            # 服务、特性、宿主注册、hook 是否批准、outbox
@@ -586,7 +586,7 @@ agent 问没问出口、你怎么答的，服务都从送回的转写里认出�
 |---|---|
 | `habitus-server [--config PATH] [serve]` | 起服务（不写子命令时就是 `serve`）。先做启动前检查（依赖、凭据、端口），不通过就一行说明原因退出；检查通过后还要连上向量库确认集合可用，凭据错或连不上时也是一行原因退出（原因里的凭据已去掉）；同一个存储目录只能起一个实例 |
 | `habitus-server init [--config PATH] [--from-config PATH] [--force] [--non-interactive] [--doctor \| --skip-doctor] [--deep] [--probe-timeout S] [--harness ID …] [--all-harnesses] [--start \| --no-start]` | 写配置与连接文件；可选跑体检、替你执行 `habitus plugin install`、起服务 |
-| `habitus-server doctor [--config PATH] [--json] [--skip-port] [--deep] [--probe-timeout S]` | 本地服务体检：依赖（缺了说装哪个分组）、配置权限、凭据、端口（被占时提示可能已有服务在跑）、插件的 `connection.json` 指的是不是配置的地址（不是时报提示）、`--deep` 时实际探测模型与向量库 |
+| `habitus-server doctor [--config PATH] [--json] [--skip-port] [--deep] [--probe-timeout S]` | 本地服务体检：依赖（缺了说装哪个分组）、配置权限、凭据、`network`（调模型用的证书库、额外 CA、代理从哪来，代理去掉密码；CA 文件或证书库加载不了时 FAIL）、端口（被占时提示可能已有服务在跑）、插件的 `connection.json` 指的是不是配置的地址（不是时报提示）、`--deep` 时实际探测模型与向量库（chat、embedding，配了 rerank 时再发一次只带一个文档的最小 rerank 请求、会计费；证书不被信任、代理要认证时写出怎么配） |
 | `habitus-server repair-source-outputs <source_id> --consumer memory\|behavior_session [--dry-run]` | 运维：清理一份会话源多出来的孤儿输出（需要先停服务） |
 
 配置文件取 `--config`，否则 `HABITUS_CONFIG_FILE`，否则 `~/.habitus/config.yaml`。
@@ -608,7 +608,7 @@ agent 问没问出口、你怎么答的，服务都从送回的转写里认出�
 | `GET /api/v1/memory/tree`、`GET /api/v1/memory/document` | 浏览记忆树、读一条记忆 |
 | `GET /api/v1/reminders` | 某天的提醒进度 |
 | `POST /api/v1/reminders/claim` | 宿主取到期的提醒（只给有提问工具的宿主） |
-| `GET /api/v1/memory/jobs`、`/memory/jobs/blocked`、`/memory/jobs/{序号}` | 记忆写入任务的状态；`/memory/jobs` 与 `/memory/jobs/{序号}` 必带查询参数 `conversation_id`（1–256 字）与 `started_on`（日期），缺了回 400 `INVALID_ARGUMENT` |
+| `GET /api/v1/memory/jobs`、`/memory/jobs/blocked`、`/memory/jobs/{序号}` | 记忆写入任务的状态；`/memory/jobs` 与 `/memory/jobs/{序号}` 必带查询参数 `conversation_id`（1–240 个 UTF-8 字节，所有带 `conversation_id` 的接口同一上限，超了回 400 `INVALID_ARGUMENT`）与 `started_on`（日期），缺了回 400 `INVALID_ARGUMENT` |
 | `POST /api/v1/operations/memory/jobs/{序号}/retry` | 运维：重试失败的写入任务；必带查询参数 `conversation_id`、`started_on`，请求体 `{"expected_version": <version>}`，四个值都取自 `GET /memory/jobs/blocked` 返回的 `job` |
 | `GET /api/v1/operations/audit` | 运维：最近的审计事件 |
 | `GET /health`、`GET /ready`、`GET /metrics` | 健康、就绪（未就绪时 503，正文照样是健康读数；有记忆 Job 失败或在等模型 / 向量库恢复时也是 503，这时结果里的 `recall_ready` 仍为 true，插件照常召回）、Prometheus 指标 |
@@ -648,6 +648,7 @@ credentials:
 | `storage` | 存储根目录、SQLite 锁 | 必填 |
 | `credentials` | 具名凭据 | 必填 |
 | `http` | 本地 HTTP 服务的地址、请求体上限、分块上传 | 开 |
+| `network` | 调模型服务时的证书库、额外 CA 证书与代理 | 系统证书库、无额外 CA、代理照环境变量 |
 | `observability` | 指标、日志、OTLP 导出、审计 | 指标 / 日志 / 审计开，OTLP 关 |
 | `models` | chat / embedding / rerank 三条模型路由与结构化输出 | 必填；`models.rerank` 可以写 `null`（不重排） |
 | `conversation` | 会话日志、会话源、切段、段摘要、摘要向量库与索引、摘要压缩 | 开 |
@@ -657,10 +658,24 @@ credentials:
 | `scene` | 语义树（整晚那一趟）与关系检验门槛 | 关；开它要求 `behavior` 已启用 |
 | `foresight` | 预测层与提醒出口 | 关；开它要求 `scene` 已启用 |
 | `temporal` | 读时间的尺子（槽宽、合并窗），语义树与预测层共用 | 取默认 |
-| `locale` | 主体所在的时区与地区日历；记忆（Event 的本地日）、语义树、预测层共用 | 取默认（`Asia/Shanghai`、`CN`） |
+| `locale` | 主体所在的时区与地区日历；记忆（Event 的本地日）、语义树、预测层共用 | `init` 写入检测并确认过的时区与地区；不写时取默认（`Asia/Singapore`、`SG`） |
 | `lifecycle` | 统一生命周期 Worker、重试账、派生物代数、容量告警 | 取默认 |
 
 依赖关系违背时（开了 `scene` 没开 `behavior`、开了 `foresight` 没开 `scene`）加载即失败。另有一批跨组容量关系在加载时统一检查，例如记忆文档的编码上限不得超过快照单项上限、切段的字节上限不得超过会话日志单文件上限。
+
+### 公司网络（代理与证书）
+
+调模型服务（chat、embedding、rerank）默认信任**操作系统的证书库**（`network.trust_store: system`，用 `truststore` 包：Windows 证书存储、macOS 钥匙串、Linux 的 `/etc/ssl`）。公司代理做 TLS 解密时，它的根证书一般已经装在那里，不用任何配置。
+
+| 情况 | 怎么配 |
+|---|---|
+| 公司根证书不在系统证书库里，只拿到一个 PEM 文件 | `network.ca_bundle: ~/corp-root.pem`，在证书库之上额外信任它。不配时第一次调用就报 `MODEL_TLS`（不重试），`habitus-server doctor --deep` 会说配哪个字段 |
+| 要配代理地址 | `network.proxy: http://proxy.example.com:3128`（覆盖 `HTTPS_PROXY`，`NO_PROXY` 也随之不再生效）；或者不写，照常用 `HTTPS_PROXY` / `NO_PROXY` 环境变量。模型服务在 `127.0.0.1` / `localhost` / `::1` 时永远直连，`network.proxy` 和代理环境变量都不走，公司统一设了 `HTTPS_PROXY` 也不用为本机模型另加 `NO_PROXY` |
+| 代理要账号密码（Basic） | 把带账号密码的 URL 写进环境变量 `HTTPS_PROXY`；`network.proxy` 不收账号密码（秘密值只能在 `credentials` 段），doctor 显示代理时会去掉密码 |
+| 代理要 Windows 域登录（NTLM / Kerberos）或 PAC 自动配置 | 不直接支持。调用会一次就报 `MODEL_PROXY_AUTH`（HTTP 407）；请在本机运行 cntlm 或 px 这类转发代理，把 `network.proxy` 指向它，例如 `http://127.0.0.1:3128` |
+| 没有系统证书库的极简容器 | `network.trust_store: bundled`（只信 Python 自带的 certifi） |
+
+`MODEL_TLS`、`MODEL_PROXY_AUTH` 单次请求内不重试；记忆 Job 把它们和鉴权失效同样对待，等模型恢复，不会 FAILED。macOS 的系统证书校验不接受 2019 年 7 月之后签发、有效期超过 825 天的服务器证书，CA 来自 `ca_bundle` 也一样（报错是 "not standards compliant"）；碰到这种证书用 `trust_store: bundled` 加 `ca_bundle`。环境变量 `SSL_CERT_FILE`（没有时 `SSL_CERT_DIR`）照旧生效，叠加在两种证书库之上。
 
 ### 字段
 
@@ -684,6 +699,16 @@ credentials:
 | `max_request_bytes` | 16777216 | 1024–67_108_864 | 单个请求体上限，超了回 REQUEST_TOO_LARGE；经 capabilities 告诉插件何时改分块上传 |
 | `remember_parts_max_bytes` | 67108864 | 16_777_216–1_073_741_824 † | 分块上传在内存里暂存的总字节上限，超了拒收该块 |
 | `remember_parts_ttl_seconds` | 600.0 | ≥ 1，≤ 86400 | 分块上传多久没新块就丢弃已暂存部分 |
+
+</details>
+
+<details><summary><code>network</code></summary>
+
+| 字段 | 默认 | 取值 | 作用 |
+|---|---|---|---|
+| `trust_store` | `system` | `system` / `bundled` | 调模型时信任哪些证书：操作系统证书库，或只信 certifi 那一份 |
+| `ca_bundle` | null | 读得出的 PEM 文件路径，可用 `~` | 在 `trust_store` 之上额外信任的证书；文件不存在、是目录、读不出 PEM 证书都在加载时报错 |
+| `proxy` | null | `http://` 或 `https://`，带主机、可带端口；不许带账号密码、路径、query、fragment | 调模型用的代理，覆盖 `HTTPS_PROXY` 等环境变量；null 表示照环境变量。回环地址的模型服务直连，这里配的和环境变量里的代理都不走 |
 
 </details>
 
@@ -1326,9 +1351,9 @@ credentials:
 
 | 字段 | 默认 | 取值 | 作用 |
 |---|---|---|---|
-| `locale.timezone` | Asia/Shanghai | IANA 时区名 | IANA 名字；决定"今天是哪一天""此刻在哪个槽" |
-| `locale.region` | CN | ISO 3166 码（如 CN、SG、US-CA） | 这个人所在地的地区码（ISO 3166：CN、SG，州一级如 US-CA）；日历跟着人走，不跟着服务部署在哪 |
-| `locale.calendar_path` | null | 目录路径或 null | 放假安排目录（每年一份 `<年>.json`，格式见 `habitus/conditions/calendar_data.py`）；配了只读它。null 时读随包附带的（目前只有 CN 2025、2026，照国务院办公厅通知原文）；哪年没有数据，那年日型是未知（不当普通工作日），周几、几号照常答 |
+| `locale.timezone` | Asia/Singapore | IANA 时区名 | IANA 名字；决定"今天是哪一天""此刻在哪个槽" |
+| `locale.region` | SG | ISO 3166 码（如 CN、SG、US-CA） | 这个人所在地的地区码（ISO 3166：CN、SG，州一级如 US-CA）；日历跟着人走，不跟着服务部署在哪 |
+| `locale.calendar_path` | null | 目录路径或 null | 放假安排目录（每年一份 `<年>.json`，格式见 `habitus/conditions/calendar_data.py`）；配了只读它。null 时读随包附带的（目前有 CN 2025、2026，照国务院办公厅通知原文；SG 2025、2026，照新加坡人力部公布的公共假期原文）；哪年没有数据，那年日型是未知（不当普通工作日），周几、几号照常答 |
 | `locale.nominal_weekend` | [5, 6] | 0–6 互不相同的星期几 | 没有放假数据时建预期的兜底周末（0=周一 … 6=周日）；统计里不用它 |
 
 </details>
@@ -1482,7 +1507,15 @@ credentials:
 
 ### 本地检查：`scripts/ci.sh`
 
-"改完了"的判据是本地 `scripts/ci.sh` 整条通过。依赖与工具版本锁在 `requirements.txt`（由 pip-compile 从 `pyproject.toml` 生成）：
+"改完了"的判据是本地 `scripts/ci.sh` 整条通过。依赖与工具版本锁在 `requirements.txt`（由 `uv pip compile --universal` 从 `pyproject.toml` 生成，最低 Python 3.12，完整命令见文件头部）。开发环境推荐用 [uv](https://docs.astral.sh/uv/) 建：
+
+```sh
+uv venv --python 3.12 .venv
+uv pip install --python .venv -r requirements.txt && uv pip install --python .venv -e . --no-deps
+bash scripts/ci.sh
+```
+
+在任意 Python ≥ 3.12 的环境里用 pip 装同一份锁文件也可以：
 
 ```sh
 python -m pip install -r requirements.txt && python -m pip install -e . --no-deps
@@ -1491,7 +1524,7 @@ bash scripts/ci.sh
 
 它依次跑：`compileall` → `ruff check` → `mypy` → `pyright` → `coverage run --branch -m pytest`（分支覆盖率低于 79% 即失败，`pyproject.toml` 的 `fail_under`）→ 插件的 `npm test`（`node --test`）。没激活虚拟环境而仓库根有 `.venv` 时自动用它。
 
-远端 `.github/workflows/ci.yml` 在 `ci.sh` 之外还做：重新生成插件共享库副本并要求与提交的一致（`npm run sync` + `git diff --exit-code`）；非交互 `habitus-server init --from-config habitus/config/example.yaml` 并检查配置文件权限 0600；构建 wheel 并跑 `scripts/check_wheel.py`；在干净 venv 里装 wheel、装 `npm pack` 出的包，跑一遍插件生命周期。
+远端 `.github/workflows/ci.yml` 在 Ubuntu、macOS × Python 3.12、3.13、3.14（从 `requires-python` 的下限测到最新版本）上各跑一遍，每个组合在 `ci.sh` 之外还做：重新生成插件共享库副本并要求与提交的一致（`npm run sync` + `git diff --exit-code`）；非交互 `habitus-server init --from-config habitus/config/example.yaml` 并检查配置文件权限 0600；构建 wheel 并跑 `scripts/check_wheel.py`；在干净 venv 里装 wheel、装 `npm pack` 出的包，跑一遍插件生命周期。
 
 ### 测试分层
 
@@ -1551,7 +1584,7 @@ bash scripts/ci.sh
 | 记忆 Job 真失败（永久错误，或可重试错误用尽 5 次）时，之后所有会话的记忆写入都排在它后面停住，直到人工重试；`habitus` 命令行没有重试命令，要走 HTTP（见[MemoryJob 队列](#8-memoryjob-队列)）。这期间召回照常 | 设计如此：失败的 Job 不跳过 |
 | 模型额度或凭据一直没恢复、或向量库 / Embedding 服务一直连不上（例如地址写错）时，记忆 Job 一直排队，每次最多隔 1 天再试一次；`habitus doctor` 的 `ready` 一项报 warn、写明去看额度 / 凭据；向量库在等时，提示里也叫等模型（`waiting_for_model`） | 按设计：等依赖的次数不设上限 |
 | 会话 lane 的某一轮因模型用不了（含白天网络断一下）没写成，先落「没读懂」，当晚重试一次；当晚模型仍用不了，这一轮就永远是「没读懂」 | 按设计 |
-| 没有放假数据的年份（2027 起）或中国大陆以外的地区，日型答不出：节假日的工作日照常建预期、照常提醒；要自己按 `habitus/conditions/calendar_data.py` 的格式放数据并设 `locale.calendar_path`。`habitus doctor` 目前不提示缺数据 | 待补 |
+| 没有放假数据的年份（2027 起）或中国大陆、新加坡以外的地区，日型答不出：节假日的工作日照常建预期、照常提醒；要自己按 `habitus/conditions/calendar_data.py` 的格式放数据并设 `locale.calendar_path`。`habitus doctor` 目前不提示缺数据 | 待补 |
 | L2 冷热生命周期默认开着：从没被召回用到的记忆过了退休期会被删除（Event 约第 210 天；未完成的 Intention 也一样按时间退休，约第 570 天），途中可能被模型压缩改写（含只增不改的 Event 的正文）。不要它就在配置里设 `memory.recall_lifecycle.enabled: false` | 待定：未完成的 Intention 该不该进这条生命周期还没定；这条生命周期与 `AGENTS.md` 里"只有 Memory Editor 能改 L2""检索层不引入热度"等说法的出入一并待定 |
 | 物理 lane 没有 HTTP 入口，也没接语义树与预测层 | 待做 |
 | 会话 lane 认不出脚本或定时触发的会话（插件已跳过 Claude Code / Codex 的非交互会话；别的宿主与直接调 HTTP API 的客户端没有） | 待做；脚本里可设 `HABITUS_MEMORY_ENABLED=0` |

@@ -460,6 +460,34 @@ class ModelRateLimitError(ModelTransportError):
     code = "MODEL_RATE_LIMIT"
 
 
+#: 证书不被信任时告诉用户配哪个字段（报错与 doctor 共用这一句）。
+TLS_UNTRUSTED_HINT = (
+    "the model server's TLS certificate is not trusted; if Habitus runs behind a corporate proxy that inspects TLS, "
+    "set network.ca_bundle to the corporate root certificate (PEM file)"
+)
+#: 代理对 CONNECT 回 407 时的去处（用户 11-06 定：NTLM / Kerberos / PAC 不实现，只提示本机转发代理）。
+PROXY_AUTH_HINT = (
+    "the proxy requires authentication (HTTP 407). Basic authentication (user name and password) can go into the "
+    "HTTPS_PROXY environment variable; Windows domain sign-in (NTLM / Kerberos) and PAC auto-configuration are not "
+    "supported directly: run a local forwarding proxy such as cntlm or px on this machine and point network.proxy "
+    "at it (for example http://127.0.0.1:3128)"
+)
+
+
+class ModelTLSError(ModelClientError):
+    """模型服务的证书不被信任（含主机名不匹配）：同一请求重发多少遍都一样，改了证书配置才能恢复，所以不重试、等模型恢复。"""
+
+    failover_eligible = True
+    code = "MODEL_TLS"
+
+
+class ModelProxyAuthError(ModelClientError):
+    """代理要求认证（407）：配置不变就永远过不去，不重试；改了代理配置才能恢复，所以等模型恢复。"""
+
+    failover_eligible = True
+    code = "MODEL_PROXY_AUTH"
+
+
 class ModelQuotaError(ModelClientError):
     failover_eligible = True
     code = "MODEL_QUOTA"
@@ -482,7 +510,7 @@ class ModelStructuredOutputError(ModelClientError):
     code = "MODEL_STRUCTURED_OUTPUT"
 
 
-#: 模型此刻用不了（连不上、限流、额度满或余额不足、鉴权或权限失效、服务端答坏了）：换一份输入也一样，过一阵再来。
+#: 模型此刻用不了（连不上、限流、额度满或余额不足、鉴权或权限失效、服务端答坏了、证书不被信任、代理要认证）：换一份输入也一样，过一阵再来。
 #: 服务端答坏了（``ModelResponseError``，带 ``failover_eligible``）问题在服务端、不在这份输入。各处"等模型恢复"的分类
 #: 只从这一组取（记忆 Job 的长退避、会话 lane 的重试堆、未封口判断的桥）。
 MODEL_UNAVAILABLE: tuple[type[ModelClientError], ...] = (
@@ -491,6 +519,8 @@ MODEL_UNAVAILABLE: tuple[type[ModelClientError], ...] = (
     ModelAuthenticationError,
     ModelPermissionError,
     ModelResponseError,
+    ModelTLSError,
+    ModelProxyAuthError,
 )
 #: 同一份输入再问几遍也一样（输入超长、触发内容安全）：只有输入或处理口径变了才值得再问。
 MODEL_DETERMINISTIC: tuple[type[ModelClientError], ...] = (ModelInputTooLargeError, ModelContentSafetyError)
@@ -513,6 +543,8 @@ __all__ = [
     "MODEL_REFUSED",
     "MODEL_UNAVAILABLE",
     "MODEL_UNUSABLE",
+    "PROXY_AUTH_HINT",
+    "TLS_UNTRUSTED_HINT",
     "ChatMessage",
     "ChatRequest",
     "MessageRole",
@@ -523,6 +555,7 @@ __all__ = [
     "ModelDependencyError",
     "ModelInputTooLargeError",
     "ModelPermissionError",
+    "ModelProxyAuthError",
     "ChatProvider",
     "ModelQuotaError",
     "ModelRateLimitError",
@@ -530,6 +563,7 @@ __all__ = [
     "ModelResponseError",
     "ModelStreamEvent",
     "ModelStructuredOutputError",
+    "ModelTLSError",
     "ModelTransportError",
     "ModelUnreachable",
     "ProviderCapabilities",

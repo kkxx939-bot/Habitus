@@ -5,12 +5,23 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "habitus"
 version = "0.1.0"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 # PEP 639 的 SPDX 写法，需要 setuptools>=77（见 build-system.requires）。
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "gulf" }]
-dependencies = ["PyYAML>=6.0.2,<7", "httpx>=0.28,<1"]
+# tzdata：Windows 没有系统 IANA 时区库，zoneinfo 要靠它（habitus/config/locale.py 构造时就调 ZoneInfo）。
+# truststore：调模型服务时默认读操作系统证书库（公司代理做 TLS 解密时根证书在那里），见配置 network.trust_store。
+# certifi：network.trust_store: bundled 直接用它（habitus/foundation/network.py），不靠 httpx 间接带进来。
+# tzlocal：habitus-server init 检测系统时区（macOS / Linux 读 /etc/localtime 与 TZ，Windows 把注册表时区名换成 IANA 名），W3。
+dependencies = [
+    "PyYAML>=6.0.2,<7",
+    "httpx>=0.28,<1",
+    "tzdata>=2025.2",
+    "truststore>=0.10.5,<1",
+    "certifi>=2024.7.4",
+    "tzlocal>=5.2,<6",
+]
 
 [project.optional-dependencies]
 http = [
@@ -41,13 +52,12 @@ test = [
     "pytest-cov>=5,<8",
 ]
 # 静态检查与打包工具。这里只声明范围；CI 与本地实际装的精确版本在 requirements.txt 里
-# （由 pip-compile 从本文件生成，见 requirements.txt 头部的命令）。
+# （由 uv pip compile 从本文件生成，见 requirements.txt 头部的命令）。
 dev = [
     "ruff>=0.16,<0.17",
     "mypy>=2.3,<3",
     "pyright>=1.1.411,<1.2",
     "build>=1.5,<2",
-    "pip-tools>=7.4,<8",
 ]
 
 [project.scripts]
@@ -67,13 +77,13 @@ include = ["habitus*"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py313"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = [
     "E501",
-    # 升到 Python 3.13 目标后 UP 新报的写法，逐条评估过：
+    # 以最低支持版本（requires-python，现为 3.12）为目标时 UP 报的写法，逐条评估过：
     # UP017（timezone.utc→UTC）与 UP041（asyncio.TimeoutError→TimeoutError）是安全的机械
     # 替换，已经改完，不再豁免。
     # 下面四条属于 PEP 695 的新泛型/类型别名语法与 StrEnum，改法会动到运行时语义
@@ -85,14 +95,14 @@ ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.12"
 ignore_missing_imports = true
 check_untyped_defs = false
 warn_unused_ignores = true
 warn_redundant_casts = true
 
 [tool.pyright]
-pythonVersion = "3.13"
+pythonVersion = "3.12"
 typeCheckingMode = "basic"
 include = ["habitus"]
 # 关着是因为 integrations 的两个包用 ``__getattr__`` 懒加载（HTTP 适配器不该把 FastAPI 拖进

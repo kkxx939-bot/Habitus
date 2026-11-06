@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from habitus.foundation.integrity import canonical_json
+from habitus.foundation.network import OutboundSettings
 from habitus.model_client.config import ChatModelConfig
 from habitus.model_client.contracts import (
     ChatMessage,
@@ -28,6 +29,7 @@ from habitus.model_client.contracts import (
     ToolCall,
     ToolDefinition,
 )
+from habitus.model_client.http_clients import async_http_client, sync_http_client
 from habitus.model_client.json_parser import parse_json_response
 
 _RESERVED_BODY_FIELDS = {
@@ -47,7 +49,7 @@ _RESERVED_BODY_FIELDS = {
 class OpenAICompatibleChatProvider:
     """执行一次 Chat Completions 请求并转换为统一模型契约。"""
 
-    def __init__(self, config: ChatModelConfig, *, api_key: str = "") -> None:
+    def __init__(self, config: ChatModelConfig, *, api_key: str = "", outbound: OutboundSettings | None = None) -> None:
         if not isinstance(config, ChatModelConfig):
             raise TypeError("config must be ChatModelConfig")
         if config.route.adapter != "openai_compatible_chat":
@@ -74,17 +76,8 @@ class OpenAICompatibleChatProvider:
         self._api_key = api_key.strip()
         self._endpoint = f"{config.route.base_url}/chat/completions"
         self._models_endpoint = f"{config.route.base_url}/models"
-        concurrency = config.route.max_concurrent
-        limits = httpx.Limits(
-            max_connections=concurrency,
-            max_keepalive_connections=concurrency,
-        )
-        timeout = httpx.Timeout(config.route.timeout_seconds)
-        self._sync_client = httpx.Client(
-            follow_redirects=False,
-            limits=limits,
-            timeout=timeout,
-        )
+        self._outbound = OutboundSettings() if outbound is None else outbound
+        self._sync_client = sync_http_client(config.route, self._outbound)
         self._async_clients: weakref.WeakKeyDictionary[
             asyncio.AbstractEventLoop,
             httpx.AsyncClient,
@@ -324,15 +317,7 @@ class OpenAICompatibleChatProvider:
             client = self._async_clients.get(loop)
             if client is not None:
                 return client
-            concurrency = self.config.route.max_concurrent
-            client = httpx.AsyncClient(
-                follow_redirects=False,
-                limits=httpx.Limits(
-                    max_connections=concurrency,
-                    max_keepalive_connections=concurrency,
-                ),
-                timeout=httpx.Timeout(self.config.route.timeout_seconds),
-            )
+            client = async_http_client(self.config.route, self._outbound)
             self._async_clients[loop] = client
             return client
 

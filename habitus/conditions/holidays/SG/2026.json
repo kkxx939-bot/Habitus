@@ -1,0 +1,27 @@
+{
+  "region": "SG",
+  "year": 2026,
+  "source": "Ministry of Manpower, Singapore — Public holidays（2026，https://www.mom.gov.sg/employment-practices/public-holidays ；同页附 iCalendar：https://www.mom.gov.sg/-/media/mom/documents/employment-practices/public-holidays/public-holidays-sg-2026.ics ；页面 Last Updated 19 June 2026，2026-11-06 抓取）",
+  "version": "2026-06-19",
+  "weekend": [
+    5,
+    6
+  ],
+  "holidays": {
+    "2026-01-01": "New Year's Day",
+    "2026-02-17": "Chinese New Year",
+    "2026-02-18": "Chinese New Year",
+    "2026-03-21": "Hari Raya Puasa",
+    "2026-04-03": "Good Friday",
+    "2026-05-01": "Labour Day",
+    "2026-05-27": "Hari Raya Haji",
+    "2026-05-31": "Vesak Day",
+    "2026-06-01": "Vesak Day (observed，周日次日补休)",
+    "2026-08-09": "National Day",
+    "2026-08-10": "National Day (observed，周日次日补休)",
+    "2026-11-08": "Deepavali",
+    "2026-11-09": "Deepavali (observed，周日次日补休)",
+    "2026-12-25": "Christmas Day"
+  },
+  "makeup_workdays": []
+}

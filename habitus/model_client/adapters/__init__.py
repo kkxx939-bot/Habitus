@@ -16,7 +16,7 @@ def build_ark_multimodal_embedding_provider(
     config = context.config
     if not isinstance(config, EmbeddingModelConfig):
         raise ModelConfigurationError("ark_multimodal adapter requires EmbeddingModelConfig")
-    return ArkMultimodalEmbeddingProvider(config, api_key=context.api_key)
+    return ArkMultimodalEmbeddingProvider(config, api_key=context.api_key, outbound=context.outbound)
 
 
 def build_openai_compatible_chat_provider(
@@ -27,7 +27,7 @@ def build_openai_compatible_chat_provider(
     config = context.config
     if not isinstance(config, ChatModelConfig):
         raise ModelConfigurationError("openai_compatible_chat adapter requires ChatModelConfig")
-    return OpenAICompatibleChatProvider(config, api_key=context.api_key)
+    return OpenAICompatibleChatProvider(config, api_key=context.api_key, outbound=context.outbound)
 
 
 def build_openai_compatible_rerank_provider(
@@ -38,7 +38,7 @@ def build_openai_compatible_rerank_provider(
     config = context.config
     if not isinstance(config, RerankModelConfig):
         raise ModelConfigurationError("openai_compatible_rerank adapter requires RerankModelConfig")
-    return OpenAICompatibleRerankProvider(config, api_key=context.api_key)
+    return OpenAICompatibleRerankProvider(config, api_key=context.api_key, outbound=context.outbound)
 
 
 def register_builtin_adapters(factory: ProviderFactory) -> None:

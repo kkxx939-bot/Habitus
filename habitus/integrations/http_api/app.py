@@ -39,6 +39,7 @@ from habitus.integrations.http_api.schemas import (
     AuditListResult,
     BlockedJobResult,
     ConversationCursorResult,
+    ConversationIdText,
     FlushRequest,
     FlushResult,
     HealthResult,
@@ -171,7 +172,7 @@ def _build_public_router(
     )
     async def conversation_cursor(
         request: Request,
-        conversation_id: Annotated[str, Query(min_length=1, max_length=256)],
+        conversation_id: Annotated[ConversationIdText, Query()],
         started_on: Annotated[date, Query()],
     ) -> SuccessResponse[object]:
         if conversation_id != conversation_id.strip():
@@ -244,7 +245,7 @@ def _build_public_router(
     @router.get("/memory/jobs", response_model=SuccessResponse[JobListResult])
     async def list_jobs(
         request: Request,
-        conversation_id: Annotated[str, Query(min_length=1, max_length=256)],
+        conversation_id: Annotated[ConversationIdText, Query()],
         started_on: Annotated[date, Query()],
         status: Annotated[MemoryJobStatus | None, Query()] = None,
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
@@ -273,7 +274,7 @@ def _build_public_router(
     async def job_status(
         request: Request,
         memory_sequence: Annotated[int, Path(gt=0)],
-        conversation_id: Annotated[str, Query(min_length=1, max_length=256)],
+        conversation_id: Annotated[ConversationIdText, Query()],
         started_on: Annotated[date, Query()],
     ) -> SuccessResponse[object]:
         if conversation_id != conversation_id.strip():
@@ -306,7 +307,7 @@ def _build_operations_router(
         request: Request,
         body: RetryJobRequest,
         memory_sequence: Annotated[int, Path(gt=0)],
-        conversation_id: Annotated[str, Query(min_length=1, max_length=256)],
+        conversation_id: Annotated[ConversationIdText, Query()],
         started_on: Annotated[date, Query()],
     ) -> SuccessResponse[object]:
         if conversation_id != conversation_id.strip():

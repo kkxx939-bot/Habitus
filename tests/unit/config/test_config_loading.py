@@ -392,10 +392,19 @@ def test_locale_is_one_group_shared_by_the_scene_and_foresight_layers(tmp_path) 
     from habitus.config.locale import LocaleConfig
 
     config = HabitusConfig.from_mapping(valid_mapping(tmp_path))
-    assert config.locale.timezone == "Asia/Shanghai" and config.locale.region == "CN"
-    assert str(config.locale.zone()) == "Asia/Shanghai"
+    # 不写 locale 时默认新加坡（W3，用户 11-04 定）
+    assert config.locale.timezone == "Asia/Singapore" and config.locale.region == "SG"
+    assert str(config.locale.zone()) == "Asia/Singapore"
     assert config.locale.calendar_path is None  # 只用内置的放假安排；某一年没有数据，那一年的日型是未知
-    for field_name, bad in (("timezone", "Nowhere/Nothing"), ("timezone", " "), ("region", "cn"), ("region", "CHN")):
+    # 时区名区分大小写：macOS 上 ZoneInfo("asia/singapore") 打得开，配置搬到 Linux 就读不出，所以加载时就拒
+    for field_name, bad in (
+        ("timezone", "Nowhere/Nothing"),
+        ("timezone", " "),
+        ("timezone", "asia/singapore"),
+        ("timezone", "ASIA/SHANGHAI"),
+        ("region", "cn"),
+        ("region", "CHN"),
+    ):
         with pytest.raises(ConfigError, match=f"locale.{field_name}"):
             LocaleConfig.from_mapping({field_name: bad})
     # 日历跟着这个人在哪（裁定 59）：州一级的地区码也认；名义周末可配
