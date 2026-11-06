@@ -21,7 +21,7 @@ config/scene.py
 config/storage.py
 config/temporal.py
 config/workflow.py
-infrastructure/vector/adapters/vikingdb_config.py
+infrastructure/vector/adapters/local_sqlite.py
 infrastructure/vector/config.py
 integrations/local_service/adapter_catalog.py
 memory/schema/model.py
@@ -72,10 +72,12 @@ scene/concepts/author.py
 scene/occurrences/mapper.py
 
 # E 外部服务的响应
-infrastructure/vector/adapters/vikingdb.py
-infrastructure/vector/adapters/vikingdb_client.py
-model_client/adapters/ark_multimodal.py
+model_client/adapters/_http.py
+model_client/adapters/anthropic_messages.py
+model_client/adapters/anthropic_messages_decode.py
+model_client/adapters/anthropic_messages_schema.py
 model_client/adapters/openai_compatible_chat.py
+model_client/adapters/openai_compatible_embedding.py
 model_client/adapters/openai_compatible_rerank.py
 
 # F 用户给的外部文件与命令行

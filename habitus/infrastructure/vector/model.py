@@ -32,10 +32,6 @@ class VectorStoreIntegrityError(VectorStoreError):
     """耐久向量记录、元数据或物理布局损坏。"""
 
 
-class VectorStoreUnsupportedTopologyError(VectorStoreError):
-    """当前发布协议无法为目标物理拓扑提供正确性保证。"""
-
-
 @dataclass(frozen=True)
 class VectorStoreRecord:
     """一个后端无关的完整向量记录。"""
@@ -224,5 +220,4 @@ __all__ = [
     "VectorPublicationSnapshot",
     "VectorStoreRecord",
     "VectorStoreState",
-    "VectorStoreUnsupportedTopologyError",
 ]

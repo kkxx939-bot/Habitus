@@ -5,13 +5,14 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
 
 from habitus.foundation.integrity import canonical_digest
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.vector.config import VectorStoreConfig, VectorStoreRequirements
 from habitus.infrastructure.vector.contracts import RawVectorBackend, VectorStore
-from habitus.infrastructure.vector.model import VectorStoreError, VectorStoreUnsupportedTopologyError
+from habitus.infrastructure.vector.model import VectorStoreError
 from habitus.infrastructure.vector.publication.store import PublishedVectorStore
 
 _ADAPTER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
@@ -19,11 +20,12 @@ _ADAPTER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 
 @dataclass(frozen=True)
 class VectorStoreBuildContext:
-    """向 builder 传递路由、厂商参数和已经解析的秘密凭据。"""
+    """向 builder 传递路由、厂商参数、已经解析的秘密凭据，以及本地落盘型后端可用的数据目录。"""
 
     config: VectorStoreConfig
     requirements: VectorStoreRequirements
     credentials: Mapping[str, str] = field(default_factory=dict, repr=False)
+    data_root: Path | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.config, VectorStoreConfig):
@@ -40,36 +42,19 @@ class VectorStoreBuildContext:
 VectorBackendBuilder = Callable[[VectorStoreBuildContext], RawVectorBackend]
 
 
-@dataclass(frozen=True)
-class _VectorBackendRegistration:
-    builder: VectorBackendBuilder
-    requires_cross_process_publication_fencing: bool
-
-
 class VectorStoreFactory:
     """工厂只按 Adapter 解析协议；provider 只代表实际服务来源。"""
 
     def __init__(self) -> None:
-        self._builders: dict[str, _VectorBackendRegistration] = {}
+        self._builders: dict[str, VectorBackendBuilder] = {}
 
-    def register_adapter(
-        self,
-        adapter: str,
-        builder: VectorBackendBuilder,
-        *,
-        requires_cross_process_publication_fencing: bool,
-    ) -> None:
+    def register_adapter(self, adapter: str, builder: VectorBackendBuilder) -> None:
         normalized = self._adapter(adapter)
         if normalized in self._builders:
             raise ValueError(f"vector store adapter is already registered: {normalized}")
         if not callable(builder):
             raise TypeError("vector store builder must be callable")
-        if not isinstance(requires_cross_process_publication_fencing, bool):
-            raise TypeError("vector store publication fencing capability must be boolean")
-        self._builders[normalized] = _VectorBackendRegistration(
-            builder=builder,
-            requires_cross_process_publication_fencing=requires_cross_process_publication_fencing,
-        )
+        self._builders[normalized] = builder
 
     def registered_adapters(self) -> tuple[str, ...]:
         return tuple(sorted(self._builders))
@@ -81,6 +66,7 @@ class VectorStoreFactory:
         requirements: VectorStoreRequirements,
         credentials: Mapping[str, str] | None = None,
         path_lock: PathLock | None = None,
+        data_root: Path | None = None,
     ) -> VectorStore:
         if not isinstance(config, VectorStoreConfig):
             raise TypeError("config must be VectorStoreConfig")
@@ -90,22 +76,16 @@ class VectorStoreFactory:
             raise VectorStoreError("vector store creation requires an explicit publication PathLock")
         if not isinstance(path_lock, PathLock):
             raise TypeError("path_lock must be PathLock")
-        registration = self._builders.get(config.adapter)
-        if registration is None:
+        builder = self._builders.get(config.adapter)
+        if builder is None:
             raise VectorStoreError(f"vector store adapter is not registered: {config.adapter}")
-        if (
-            registration.requires_cross_process_publication_fencing
-            and getattr(path_lock.lock_store, "coordination_scope", None) != "host"
-        ):
-            raise VectorStoreUnsupportedTopologyError(
-                "remote vector publication requires a host-scoped publication PathLock"
-            )
         resolved_credentials = self._credentials(config, credentials)
-        backend = registration.builder(
+        backend = builder(
             VectorStoreBuildContext(
                 config=config,
                 requirements=requirements,
                 credentials=resolved_credentials,
+                data_root=data_root,
             )
         )
         for name in (
@@ -131,11 +111,6 @@ class VectorStoreFactory:
             raise VectorStoreError("vector store provider identity does not match its config")
         if str(getattr(backend, "collection", "")) != config.collection:
             raise VectorStoreError("vector store collection does not match its config")
-        if (
-            getattr(backend, "requires_cross_process_publication_fencing", None)
-            is not registration.requires_cross_process_publication_fencing
-        ):
-            raise VectorStoreError("vector store publication fencing capability does not match its registration")
         publication_identity = canonical_digest(
             {
                 "adapter": config.adapter,

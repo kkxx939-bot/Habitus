@@ -112,7 +112,6 @@ class FakeRerankProvider:
 
 class FakeVectorBackend:
     adapter_name = "fake_vector"
-    requires_cross_process_publication_fencing = False
     max_records = 100_000
     max_search_hits = 10_000
 
@@ -188,7 +187,6 @@ def runtime_dependencies() -> tuple[ProviderFactory, VectorStoreFactory]:
             context.config.provider,
             context.config.collection,
         ),
-        requires_cross_process_publication_fencing=False,
     )
     return providers, vectors
 
@@ -199,12 +197,12 @@ def runtime_config(tmp_path: Path, *, with_credentials: bool = False) -> Habitus
     payload["models"]["chat"]["route"].update(
         provider="fake",
         adapter="fake_chat",
-        credential_ref="deepseek" if with_credentials else "",
+        credential_ref="chat" if with_credentials else "",
     )
     payload["models"]["embedding"]["route"].update(
         provider="fake",
         adapter="fake_embedding",
-        credential_ref="ark" if with_credentials else "",
+        credential_ref="embedding" if with_credentials else "",
     )
     payload["models"]["rerank"]["route"].update(
         provider="fake",
@@ -215,25 +213,25 @@ def runtime_config(tmp_path: Path, *, with_credentials: bool = False) -> Habitus
         payload["memory"][name]["route"].update(
             provider="fake",
             adapter="fake_vector",
-            credential_ref="vikingdb" if with_credentials else "",
+            credential_ref="vector_service" if with_credentials else "",
         )
     payload["conversation"]["summary_vector_store"]["route"].update(
         provider="fake",
         adapter="fake_vector",
-        credential_ref="vikingdb" if with_credentials else "",
+        credential_ref="vector_service" if with_credentials else "",
     )
     if with_credentials:
-        payload["credentials"]["deepseek"]["api_key"] = "deepseek-secret"
-        payload["credentials"]["ark"]["api_key"] = "ark-secret"
+        payload["credentials"]["chat"]["api_key"] = "chat-secret"
+        payload["credentials"]["embedding"]["api_key"] = "embedding-secret"
         payload["credentials"]["dashscope"]["api_key"] = "dashscope-secret"
-        payload["credentials"]["vikingdb"]["access_key"] = "viking-access"
-        payload["credentials"]["vikingdb"]["secret_key"] = "viking-secret"
+        payload["credentials"]["vector_service"] = {"access_key": "vector-access", "secret_key": "vector-secret"}
     return HabitusConfig.from_mapping(payload)
 
 
 def test_assembly_resolves_each_provider_and_database_credential_by_reference(tmp_path: Path) -> None:
     model_credentials: dict[str, str] = {}
     vector_credentials: list[dict[str, str]] = []
+    vector_roots: list[Path | None] = []
     providers = ProviderFactory()
 
     def chat_builder(context):
@@ -259,30 +257,33 @@ def test_assembly_resolves_each_provider_and_database_credential_by_reference(tm
 
     def vector_builder(context):
         vector_credentials.append(dict(context.credentials))
+        vector_roots.append(context.data_root)
         return FakeVectorBackend(context.config.provider, context.config.collection)
 
     vectors.register_adapter(
         "fake_vector",
         vector_builder,
-        requires_cross_process_publication_fencing=False,
     )
 
+    config = runtime_config(tmp_path, with_credentials=True)
     build_runtime(
-        runtime_config(tmp_path, with_credentials=True),
+        config,
         providers=providers,
         vector_stores=vectors,
         path_lock=PathLock(ProcessLocalLockStore()),
     )
 
     assert model_credentials == {
-        "chat": "deepseek-secret",
-        "embedding": "ark-secret",
+        "chat": "chat-secret",
+        "embedding": "embedding-secret",
         "rerank": "dashscope-secret",
     }
     assert vector_credentials == [
-        {"access_key": "viking-access", "secret_key": "viking-secret"},
-        {"access_key": "viking-access", "secret_key": "viking-secret"},
+        {"access_key": "vector-access", "secret_key": "vector-secret"},
+        {"access_key": "vector-access", "secret_key": "vector-secret"},
     ]
+    # 两个 Collection 都拿到存储根下同一个 vector/ 目录，各自按 Collection 名落文件
+    assert vector_roots == [config.storage_root / "vector"] * 2 == [tmp_path / "data" / "vector"] * 2
 
 
 def test_assembly_wires_one_shared_chain_without_touching_storage(tmp_path: Path) -> None:
@@ -310,6 +311,30 @@ def test_assembly_wires_one_shared_chain_without_touching_storage(tmp_path: Path
     assert not recall_store.initialized
     assert not recall_store.path.exists()
     assert components.workflow.worker.runner is components.workflow.runner
+
+
+def test_document_prefix_shrinks_the_segmentation_unit_budget(tmp_path: Path) -> None:
+    """切段打分把每个单元截到"max_input_chars 减去文档前缀"：不让出前缀，拼上后超长，打分静默退回结构边界（W7）。"""
+
+    config = runtime_config(tmp_path)
+    embedding = replace(
+        config.models.embedding,
+        max_input_chars=config.models.embedding.max_input_chars + 64,
+        document_prefix="passage: ",
+    )
+    config = replace(config, models=replace(config.models, embedding=embedding))
+    providers, vectors = runtime_dependencies()
+
+    runtime = build_runtime(
+        config,
+        providers=providers,
+        vector_stores=vectors,
+        path_lock=PathLock(ProcessLocalLockStore()),
+    )
+
+    assert runtime.components.conversation.boundary_scorer.max_unit_chars == embedding.max_input_chars - len(
+        "passage: "
+    )
 
 
 def test_memory_workflow_state_is_injected_from_the_configured_workflow_root(tmp_path: Path) -> None:

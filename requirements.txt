@@ -71,6 +71,8 @@ mypy-extensions==1.1.0
     # via mypy
 nodeenv==1.10.0
     # via pyright
+numpy==2.5.4
+    # via habitus (pyproject.toml)
 opentelemetry-api==1.44.0
     # via
     #   habitus (pyproject.toml)

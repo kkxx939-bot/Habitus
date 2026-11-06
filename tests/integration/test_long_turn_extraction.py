@@ -141,7 +141,6 @@ def runtime_and_chat(tmp_path: Path, *, max_segment_tokens: int | None = None):
     vectors.register_adapter(
         "fake_vector",
         lambda context: DurableVectorBackend(context.config.provider, context.config.collection),
-        requires_cross_process_publication_fencing=False,
     )
     runtime = build_runtime(
         config, providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())

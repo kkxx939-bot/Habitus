@@ -156,6 +156,15 @@ def missing_credential_fields(path: Path) -> tuple[CredentialField, ...]:
     )
 
 
+def unfilled_setup_hints(path: Path) -> tuple[str, ...]:
+    """配置里还留着向导占位值的模型路由，每个能力一句：占位项与要一起填的必填项。"""
+
+    from habitus.integrations.local_service.adapter_catalog import load_adapter_catalog
+    from habitus.integrations.local_service.setup_placeholders import unfilled_settings
+
+    return tuple(item.describe(path) for item in unfilled_settings(load_adapter_catalog().setup, _load_file(path)))
+
+
 def configure_credentials(
     path: Path,
     values: Mapping[str, Mapping[str, str]],

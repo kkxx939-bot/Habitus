@@ -107,6 +107,9 @@ def _chat_config(value: object, path: str) -> ChatModelConfig:
 
 def _embedding_config(value: object, path: str) -> EmbeddingModelConfig:
     data = group_fields(EmbeddingModelConfig, value, path)
+    for name in ("query_prefix", "document_prefix"):
+        if name in data and not isinstance(data[name], str):  # YAML 里留空是 null，也要拒：不写就是空前缀
+            raise ConfigError(f"'{path}.{name}' must be a string")
     route = _provider_config(
         required_field(data, "route", path=path),
         f"{path}.route",

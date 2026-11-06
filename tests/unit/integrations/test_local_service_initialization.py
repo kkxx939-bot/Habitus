@@ -200,13 +200,25 @@ def test_default_cloud_setup_generates_a_strict_config_without_placeholder_reran
 
     config = HabitusConfig.from_mapping(payload)
 
-    assert config.models.chat.route.provider == "deepseek"
-    assert config.models.embedding.route.adapter == "ark_multimodal"
+    # Chat 与 Embedding 都不预置厂商：写出的是通用协议加占位值，等用户填
+    assert config.models.chat.route.adapter == "openai_compatible_chat"
+    assert config.models.chat.route.provider == "custom"
+    assert config.models.chat.route.model == "example.chat-model"
+    assert config.models.chat.route.base_url == "https://chat.example.com/v1"
+    assert config.models.chat.route.credential_ref == "chat"
+    assert config.models.embedding.route.adapter == "openai_compatible_embedding"
+    assert config.models.embedding.route.provider == "custom"
+    assert config.models.embedding.route.model == "example.embedding-model"
+    assert config.models.embedding.route.base_url == "https://embedding.example.com/v1"
+    assert config.models.embedding.route.credential_ref == "embedding"
     assert config.models.rerank is None
-    assert config.credentials.names == ("ark", "dashscope", "deepseek", "vikingdb")
+    # 向量库默认是本地文件：两段都走 local_sqlite，不引用任何凭据
+    for vector in (config.memory.vector_store, config.conversation.summary_vector_store):
+        assert (vector.provider, vector.adapter, vector.route.credential_ref) == ("local", "local_sqlite", "")
+    assert config.credentials.names == ("chat", "dashscope", "embedding")
 
 
-def test_cloud_setup_applies_custom_routes_and_shared_vikingdb_resources(
+def test_cloud_setup_applies_custom_routes_with_the_local_vector_store(
     tmp_path: Path,
 ) -> None:
     destination = tmp_path / "cloud" / "config.yaml"
@@ -218,7 +230,7 @@ def test_cloud_setup_applies_custom_routes_and_shared_vikingdb_resources(
             {
                 "provider": "custom-chat",
                 "model": "chat-model",
-                "base_url": "https://chat.example.com/v1",
+                "base_url": "https://chat.vendor.test/v1",
                 "credential_ref": "custom_chat",
                 "context_window_tokens": 128_000,
                 "structured_output_mode": "json_schema",
@@ -226,11 +238,11 @@ def test_cloud_setup_applies_custom_routes_and_shared_vikingdb_resources(
             },
         ),
         embedding=ProfileSelection(
-            "embedding.ark_multimodal.custom",
+            "embedding.openai_compatible.custom",
             {
-                "provider": "custom-ark",
+                "provider": "custom-embedding",
                 "model": "embedding-model",
-                "base_url": "https://embedding.example.com/api/v3",
+                "base_url": "https://embedding.vendor.test/v1",
                 "credential_ref": "custom_embedding",
                 "dimension": 2048,
             },
@@ -239,16 +251,7 @@ def test_cloud_setup_applies_custom_routes_and_shared_vikingdb_resources(
             "rerank.aliyun.qwen3",
             {"base_url": "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-api/v1"},
         ),
-        vector=ProfileSelection(
-            "vector.vikingdb.managed",
-            {
-                "region": "cn-shanghai",
-                "project_name": "habitus-project",
-                "index_name": "habitus-index",
-                "memory_collection": "memory-main",
-                "summary_collection": "summary-main",
-            },
-        ),
+        vector=ProfileSelection("vector.local_sqlite"),
     )
     payload = apply_cloud_selection(load_initialization_mapping(), selection)
 
@@ -262,16 +265,16 @@ def test_cloud_setup_applies_custom_routes_and_shared_vikingdb_resources(
     assert config.models.embedding.dimension == 2048
     assert config.models.rerank is not None
     assert config.models.rerank.route.base_url.startswith("https://workspace.")
-    assert config.memory.vector_store.collection == "memory-main"
-    assert config.conversation.summary_vector_store.collection == "summary-main"
-    assert config.memory.vector_store.options["region"] == "cn-shanghai"
+    assert config.memory.vector_store.adapter == "local_sqlite"
+    assert config.memory.vector_store.collection == "memory"
+    assert config.conversation.summary_vector_store.collection == "conversation_summaries"
+    assert config.models.embedding.route.base_url == "https://embedding.vendor.test/v1"
     assert config.credentials.names == (
-        "ark",
+        "chat",
         "custom_chat",
         "custom_embedding",
         "dashscope",
-        "deepseek",
-        "vikingdb",
+        "embedding",
     )
     assert stat.S_IMODE(destination.stat().st_mode) == 0o600
 
@@ -298,7 +301,7 @@ def test_existing_registered_profiles_round_trip_without_losing_advanced_fields(
     payload["models"]["embedding"]["query_parameters"] = {"instruction": "query"}  # type: ignore[index]
     payload["models"]["embedding"]["document_parameters"] = {"instruction": "document"}  # type: ignore[index]
     payload["models"]["rerank"]["route"]["extra_headers"] = {"X-Trace": "rerank"}  # type: ignore[index]
-    payload["conversation"]["summary_vector_store"]["options"]["region"] = "cn-shanghai"  # type: ignore[index]
+    payload["conversation"]["summary_vector_store"]["options"]["busy_timeout_seconds"] = 9.0  # type: ignore[index]
     original_models = yaml.safe_load(yaml.safe_dump(payload["models"]))
     original_memory_vector = yaml.safe_load(yaml.safe_dump(payload["memory"]["vector_store"]))  # type: ignore[index]
     original_summary_vector = yaml.safe_load(
@@ -314,7 +317,7 @@ def test_existing_registered_profiles_round_trip_without_losing_advanced_fields(
 
 def test_cloud_setup_adds_required_fields_without_deleting_optional_credentials() -> None:
     payload = load_initialization_mapping()
-    payload["credentials"]["vikingdb"]["session_token"] = "temporary-token"  # type: ignore[index]
+    payload["credentials"]["embedding"]["session_token"] = "temporary-token"  # type: ignore[index]
     payload["credentials"]["tracing"] = {"authorization": ""}  # type: ignore[index]
     payload["observability"]["tracing"].update(  # type: ignore[index]
         {"enabled": True, "credential_ref": "tracing"}
@@ -322,28 +325,8 @@ def test_cloud_setup_adds_required_fields_without_deleting_optional_credentials(
 
     configured = apply_cloud_selection(payload, default_cloud_selection())
 
-    assert configured["credentials"]["vikingdb"]["session_token"] == "temporary-token"  # type: ignore[index]
+    assert configured["credentials"]["embedding"]["session_token"] == "temporary-token"  # type: ignore[index]
     assert configured["credentials"]["tracing"] == {"authorization": ""}  # type: ignore[index]
-
-
-def test_setup_planner_rejects_embedding_and_vector_capacity_mismatch() -> None:
-    defaults = default_cloud_selection()
-    selection = replace(
-        defaults,
-        embedding=ProfileSelection(
-            "embedding.ark_multimodal.custom",
-            {
-                "provider": "custom-ark",
-                "model": "large-embedding",
-                "base_url": "https://embedding.example.com/api/v3",
-                "credential_ref": "custom_embedding",
-                "dimension": 65_536,
-            },
-        ),
-    )
-
-    with pytest.raises(ValueError, match="read page sizes"):
-        apply_cloud_selection(load_initialization_mapping(), selection)
 
 
 def test_switching_vector_profile_replaces_adapter_options_instead_of_retaining_unknowns() -> None:
@@ -353,16 +336,7 @@ def test_switching_vector_profile_replaces_adapter_options_instead_of_retaining_
     defaults = default_cloud_selection()
     selection = replace(
         defaults,
-        vector=ProfileSelection(
-            "vector.vikingdb.precreated",
-            {
-                "region": "cn-beijing",
-                "project_name": "default",
-                "index_name": "default",
-                "memory_collection": "memory",
-                "summary_collection": "conversation_summaries",
-            },
-        ),
+        vector=ProfileSelection("vector.local_sqlite"),
     )
 
     configured = apply_cloud_selection(payload, selection)
@@ -371,92 +345,33 @@ def test_switching_vector_profile_replaces_adapter_options_instead_of_retaining_
     assert "legacy_option" not in configured["conversation"]["summary_vector_store"]["options"]  # type: ignore[index]
 
 
-def test_existing_private_vikingdb_profile_can_be_kept_without_public_cloud_migration() -> None:
-    payload = load_initialization_mapping()
-    payload["credentials"]["vikingdb"]["token"] = "private-token"  # type: ignore[index]
-    for group, name in (("memory", "vector_store"), ("conversation", "summary_vector_store")):
-        target = payload[group][name]  # type: ignore[index]
-        target["route"]["provider"] = "private-viking"
-        target["route"]["base_url"] = "https://viking.example.com"
-        target["options"].update(
-            {
-                "auth_mode": "private_headers",
-                "schema_mode": "precreated",
-                "credential_headers": {"X-API-Key": "{token}"},
-                "console_url": "",
-            }
-        )
-    selection = selection_from_mapping(payload)
-
-    configured = apply_cloud_selection(payload, selection)
-
-    assert selection.vector.profile_id == "vector.vikingdb.private_current"
-    assert configured["memory"]["vector_store"] == payload["memory"]["vector_store"]  # type: ignore[index]
-
-
-def test_cloud_setup_supports_precreated_vikingdb_with_api_key() -> None:
-    defaults = default_cloud_selection()
-    selection = replace(
-        defaults,
-        vector=ProfileSelection(
-            "vector.vikingdb.precreated",
-            {
-                "region": "cn-beijing",
-                "project_name": "default",
-                "index_name": "default",
-                "memory_collection": "memory",
-                "summary_collection": "conversation_summaries",
-            },
-        ),
-    )
-
-    payload = apply_cloud_selection(load_initialization_mapping(), selection)
-    config = HabitusConfig.from_mapping(payload)
-
-    assert config.memory.vector_store.options["auth_mode"] == "api_key"
-    assert config.conversation.summary_vector_store.options["schema_mode"] == "precreated"
-    assert dict(config.credentials.resolve("vikingdb_api_key")) == {"api_key": ""}
-
-
-def test_precreated_vikingdb_configuration_constructs_the_runtime_without_mixed_auth(
+def test_default_local_vector_configuration_builds_the_runtime_without_any_vector_account(
     tmp_path: Path,
 ) -> None:
-    defaults = default_cloud_selection()
-    selection = replace(
-        defaults,
-        vector=ProfileSelection(
-            "vector.vikingdb.precreated",
-            {
-                "region": "cn-beijing",
-                "project_name": "default",
-                "index_name": "default",
-                "memory_collection": "memory",
-                "summary_collection": "conversation_summaries",
-            },
-        ),
-    )
-    payload = apply_cloud_selection(load_initialization_mapping(), selection)
+    payload = apply_cloud_selection(load_initialization_mapping(), default_cloud_selection())
     payload["storage"]["root"] = str(tmp_path / "data")  # type: ignore[index]
-    payload["credentials"]["deepseek"]["api_key"] = "chat"  # type: ignore[index]
-    payload["credentials"]["ark"]["api_key"] = "embedding"  # type: ignore[index]
-    payload["credentials"]["vikingdb_api_key"]["api_key"] = "vector"  # type: ignore[index]
+    payload["credentials"]["chat"]["api_key"] = "chat"  # type: ignore[index]
+    payload["credentials"]["embedding"]["api_key"] = "embedding"  # type: ignore[index]
 
     runtime = build_runtime(HabitusConfig.from_mapping(payload))
 
-    assert runtime.components.memory.vector_index.store is not None
+    store = runtime.components.memory.vector_index.store
+    assert (store.adapter_name, store.collection) == ("local_sqlite", "memory")
+    assert runtime.components.conversation.summary_vector_index.store.collection == "conversation_summaries"
+    assert not (tmp_path / "data" / "vector").exists(), "组装阶段不得落盘"
 
 
 def test_setup_round_trip_uses_normalized_route_identity_and_credential_reference() -> None:
     payload = load_initialization_mapping()
     payload["models"]["chat"]["route"]["adapter"] = " OPENAI_COMPATIBLE_CHAT "  # type: ignore[index]
-    payload["models"]["chat"]["route"]["credential_ref"] = " DeepSeek "  # type: ignore[index]
+    payload["models"]["chat"]["route"]["credential_ref"] = " Chat "  # type: ignore[index]
 
     configured = apply_cloud_selection(payload, selection_from_mapping(payload))
     config = HabitusConfig.from_mapping(configured)
 
     assert config.models.chat.route.adapter == "openai_compatible_chat"
-    assert config.models.chat.route.credential_ref == "deepseek"
-    assert " DeepSeek " not in configured["credentials"]  # type: ignore[operator]
+    assert config.models.chat.route.credential_ref == "chat"
+    assert " Chat " not in configured["credentials"]  # type: ignore[operator]
 
 
 def test_switching_from_large_custom_chat_to_deepseek_clears_incompatible_output_limit() -> None:
@@ -549,27 +464,43 @@ def test_mapping_initializer_rejects_an_oversized_config_before_writing(
     assert not destination.exists()
 
 
+def _real_embedding_answers(label: str, default: str | None, **_kwargs: object) -> str:
+    """交互式 init 里 Chat 与 Embedding 的必填项：用户填的是真实端点与模型（向导模板只有占位值）。"""
+
+    assert default is None, f"placeholder must not be offered as the default for {label}"
+    return {
+        "Chat model": "chat-model-1",
+        "Chat API base URL": "https://api.openai.com/v1",
+        "Embedding model": "text-embedding-3-small",
+        "Embedding API base URL": "https://api.openai.com/v1",
+    }[label]
+
+
 def test_cloud_wizard_default_path_selects_cloud_only_routes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    choices = iter((1, 1, 1, 1, 1))
-    monkeypatch.setattr(
-        cli,
-        "_prompt_choice",
-        lambda *_args, **_kwargs: next(choices),
-    )
+    # 每个菜单都直接回车：取向导标出的默认项
+    monkeypatch.setattr(cli, "_prompt_choice", lambda *_args, default, **_kwargs: default)
     monkeypatch.setattr(cli, "_prompt_text", lambda _prompt, default: default)
+    monkeypatch.setattr(cli, "_prompt_positive_int", lambda _prompt, default: default)
+    monkeypatch.setattr(cli, "_prompt_required_text", _real_embedding_answers)
     monkeypatch.setattr(cli, "_confirm", Mock(return_value=True))
 
     selection = cli._prompt_cloud_setup(default_cloud_selection())
 
     assert selection is not None
-    assert selection.chat.profile_id == "chat.deepseek"
-    assert selection.embedding.profile_id == "embedding.volcengine.ark"
+    assert selection.chat.profile_id == "chat.openai_compatible.custom"
+    assert selection.chat.values["model"] == "chat-model-1"
+    assert selection.chat.values["base_url"] == "https://api.openai.com/v1"
+    assert selection.chat.values["credential_ref"] == "chat"
+    assert selection.embedding.profile_id == "embedding.openai_compatible.custom"
+    assert selection.embedding.values["model"] == "text-embedding-3-small"
+    assert selection.embedding.values["base_url"] == "https://api.openai.com/v1"
+    assert selection.embedding.values["credential_ref"] == "embedding"
+    assert selection.embedding.values["dimension"] == 1024
     assert selection.rerank.profile_id == "rerank.disabled"
-    assert selection.vector.profile_id == "vector.vikingdb.managed"
-    assert selection.vector.values["region"] == "cn-beijing"
+    assert selection.vector.profile_id == "vector.local_sqlite"
     output = capsys.readouterr().out
     assert "Local Chat, Embedding and Rerank are intentionally not included" in output
     assert "Rerank: Disabled (vector relevance fallback)" in output
@@ -579,7 +510,12 @@ def test_cloud_wizard_requires_a_real_alibaba_workspace_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     choices = iter((1, 1, 2, 1, 1))
-    required_text = Mock(return_value="https://workspace.cn-beijing.maas.aliyuncs.com/compatible-api/v1")
+    workspace = "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-api/v1"
+    required_text = Mock(
+        side_effect=lambda label, default, **_kwargs: (
+            workspace if label.startswith("Alibaba") else _real_embedding_answers(label, default)
+        )
+    )
     monkeypatch.setattr(
         cli,
         "_prompt_choice",
@@ -594,7 +530,7 @@ def test_cloud_wizard_requires_a_real_alibaba_workspace_url(
     assert selection is not None
     assert selection.rerank.profile_id == "rerank.aliyun.qwen3"
     assert str(selection.rerank.values["base_url"]).startswith("https://workspace.")
-    required_text.assert_called_once_with("Alibaba Workspace API base URL", None)
+    required_text.assert_any_call("Alibaba Workspace API base URL", None, placeholder_values=())
 
 
 def test_cloud_wizard_cancellation_returns_no_configuration(
@@ -607,6 +543,7 @@ def test_cloud_wizard_cancellation_returns_no_configuration(
         lambda *_args, **_kwargs: next(choices),
     )
     monkeypatch.setattr(cli, "_prompt_text", lambda _prompt, default: default)
+    monkeypatch.setattr(cli, "_prompt_required_text", _real_embedding_answers)
     monkeypatch.setattr(cli, "_confirm", Mock(return_value=False))
 
     assert cli._prompt_cloud_setup(default_cloud_selection()) is None
@@ -617,28 +554,22 @@ def test_initializer_updates_multiple_named_credentials_in_the_same_private_yaml
     initialize_config(destination, source=EXAMPLE_CONFIG)
 
     assert {(item.reference, item.field) for item in missing_credential_fields(destination)} == {
-        ("ark", "api_key"),
+        ("chat", "api_key"),
         ("dashscope", "api_key"),
-        ("deepseek", "api_key"),
-        ("vikingdb", "access_key"),
-        ("vikingdb", "secret_key"),
+        ("embedding", "api_key"),
     }
     config = configure_credentials(
         destination,
         {
-            "deepseek": {"api_key": "deepseek-secret"},
-            "ark": {"api_key": "ark-secret"},
+            "chat": {"api_key": "chat-secret"},
+            "embedding": {"api_key": "embedding-secret"},
             "dashscope": {"api_key": "dashscope-secret"},
-            "vikingdb": {
-                "access_key": "viking-access",
-                "secret_key": "viking-secret",
-            },
         },
     )
 
     assert missing_credential_fields(destination) == ()
-    assert config.credentials.resolve("deepseek")["api_key"] == "deepseek-secret"
-    assert config.credentials.resolve("vikingdb")["secret_key"] == "viking-secret"
+    assert config.credentials.resolve("chat")["api_key"] == "chat-secret"
+    assert config.credentials.resolve("dashscope")["api_key"] == "dashscope-secret"
     assert stat.S_IMODE(destination.stat().st_mode) == 0o600
 
 
@@ -647,8 +578,8 @@ def test_credential_updates_follow_the_same_normalized_name_rules_as_config_load
 ) -> None:
     destination = tmp_path / "config" / "habitus.yaml"
     payload = yaml.safe_load(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
-    payload["credentials"][" DeepSeek "] = payload["credentials"].pop("deepseek")
-    payload["credentials"][" DeepSeek "][" API_KEY "] = payload["credentials"][" DeepSeek "].pop("api_key")
+    payload["credentials"][" Chat "] = payload["credentials"].pop("chat")
+    payload["credentials"][" Chat "][" API_KEY "] = payload["credentials"][" Chat "].pop("api_key")
     destination.parent.mkdir(parents=True)
     destination.write_text(
         yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
@@ -658,10 +589,10 @@ def test_credential_updates_follow_the_same_normalized_name_rules_as_config_load
 
     config = configure_credentials(
         destination,
-        {"deepseek": {"api_key": "deepseek-secret"}},
+        {"chat": {"api_key": "chat-secret"}},
     )
 
-    assert config.credentials.resolve("deepseek")["api_key"] == "deepseek-secret"
+    assert config.credentials.resolve("chat")["api_key"] == "chat-secret"
 
 
 def test_interactive_initializer_prompts_each_missing_credential_without_echoing_values(
@@ -672,11 +603,9 @@ def test_interactive_initializer_prompts_each_missing_credential_without_echoing
     destination = tmp_path / "config" / "habitus.yaml"
     initialize_config(destination, source=EXAMPLE_CONFIG)
     secrets = {
-        "ark.api_key": "ark-secret",
+        "embedding.api_key": "embedding-secret",
         "dashscope.api_key": "dashscope-secret",
-        "deepseek.api_key": "deepseek-secret",
-        "vikingdb.access_key": "viking-access",
-        "vikingdb.secret_key": "viking-secret",
+        "chat.api_key": "chat-secret",
     }
     monkeypatch.setattr(cli, "_confirm", Mock(return_value=True))
     monkeypatch.setattr(cli, "_prompt_secret", lambda label: secrets[label])
@@ -684,11 +613,11 @@ def test_interactive_initializer_prompts_each_missing_credential_without_echoing
     cli._configure_missing_credentials(destination)
 
     config = HabitusConfig.from_file(destination)
-    assert config.credentials.resolve("ark")["api_key"] == "ark-secret"
+    assert config.credentials.resolve("embedding")["api_key"] == "embedding-secret"
     assert missing_credential_fields(destination) == ()
     output = capsys.readouterr().out
-    assert "ark-secret" not in output
-    assert "viking-secret" not in output
+    assert "embedding-secret" not in output
+    assert "chat-secret" not in output
 
 
 def test_noninteractive_init_hands_harness_installs_to_the_npm_command(
@@ -832,12 +761,18 @@ def test_builtin_setup_registry_rejects_duplicate_profile_registration() -> None
         registry.register_profile(profile)
 
 
-def test_cloud_release_extra_closes_the_first_use_dependency_set() -> None:
+def test_server_release_extra_closes_the_first_use_dependency_set() -> None:
     source = (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    cloud = source.split("cloud = [", maxsplit=1)[1].split("]", maxsplit=1)[0]
+    server = source.split("server = [", maxsplit=1)[1].split("]", maxsplit=1)[0]
 
-    for dependency in ("fastapi", "uvicorn", "json-repair", "jsonschema", "volcengine"):
-        assert dependency in cloud
+    for dependency in ("fastapi", "uvicorn", "json-repair", "jsonschema"):
+        assert dependency in server
+    # 分组 11-06 由 cloud 改名为 server：向量库已不在云上，旧名不留别名
+    assert "\ncloud = [" not in source
+    # 默认向量库是本地后端，它要的 numpy 在基础依赖里；云上向量库的 SDK 不再是任何分组的依赖
+    base = source.split("dependencies = [", maxsplit=1)[1].split("]", maxsplit=1)[0]
+    assert '"numpy' in base
+    assert "volcengine" not in source
 
 
 def test_interactive_init_uses_cloud_wizard_before_prompting_selected_credentials(

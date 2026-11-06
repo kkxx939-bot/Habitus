@@ -32,6 +32,7 @@ _INPUT_TOO_LARGE = (
     "maximum context length",
     "too many input tokens",
     "input length exceeds",
+    "prompt is too long",
 )
 _CONTENT_SAFETY = (
     "content policy",
@@ -99,7 +100,8 @@ def normalize_provider_error(error: Exception) -> ModelClientError:
         return ModelPermissionError(message)
     if status == 429 or _contains(lowered, _RATE_LIMIT):
         return ModelRateLimitError(message, retry_after_seconds=retry_after)
-    if status in {408, 409, 425, 500, 502, 503, 504}:
+    # 529：服务过载（Anthropic Messages 协议用它，另有部分网关沿用），与 503 同类、过一阵可恢复
+    if status in {408, 409, 425, 500, 502, 503, 504, 529}:
         return ModelTransportError(message, retry_after_seconds=retry_after)
     if any(isinstance(item, (TimeoutError, ConnectionError, OSError)) for item in chain) or _contains(
         lowered,

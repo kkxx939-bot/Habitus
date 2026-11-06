@@ -6,7 +6,6 @@ import hashlib
 import pytest
 
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.sqlite import SQLiteLockStore
 from habitus.infrastructure.vector import (
     PublishedVectorStore,
     VectorStoreConfig,
@@ -17,14 +16,8 @@ from habitus.infrastructure.vector import (
     VectorStoreRecord,
     VectorStoreRequirements,
     VectorStoreRouteConfig,
-    VectorStoreUnsupportedTopologyError,
 )
 from habitus.infrastructure.vector.adapters import register_builtin_vector_adapters
-from habitus.infrastructure.vector.adapters.vikingdb_config import (
-    VikingDBVectorStoreConfig,
-    bounded_retry_after,
-    render_credential_template,
-)
 from habitus.model_client import EmbeddingVector
 from tests.lock_store import ProcessLocalLockStore
 
@@ -76,13 +69,13 @@ def test_vector_route_rejects_insecure_address_and_credential_leaks(route: dict[
 def test_vector_config_is_strict_and_requirements_cannot_exceed_search_capacity() -> None:
     config = VectorStoreConfig.from_mapping(
         {
-            "route": {"provider": "VolcEngine", "adapter": "VikingDB"},
+            "route": {"provider": "Custom", "adapter": "Fake_Vector"},
             "collection": "memory-prod",
             "options": {"schema_mode": "precreated"},
         }
     )
-    assert config.provider == "volcengine"
-    assert config.adapter == "vikingdb"
+    assert config.provider == "custom"
+    assert config.adapter == "fake_vector"
     with pytest.raises(ValueError, match="unknown"):
         VectorStoreConfig.from_mapping({"unknown": True})
     with pytest.raises(ValueError, match="cannot exceed"):
@@ -97,9 +90,8 @@ def test_factory_resolves_credentials_and_rejects_unregistered_or_mismatched_bac
         captured.update(context.credentials)
 
         class Backend:
-            adapter_name = "vikingdb"
-            requires_cross_process_publication_fencing = False
-            provider_name = "volcengine"
+            adapter_name = "fake_vector"
+            provider_name = "custom"
             collection = "memory"
             max_records = 100
             max_search_hits = 10
@@ -145,12 +137,10 @@ def test_factory_resolves_credentials_and_rejects_unregistered_or_mismatched_bac
 
         return Backend()
 
-    factory.register_adapter(
-        "vikingdb",
-        builder,
-        requires_cross_process_publication_fencing=False,
+    factory.register_adapter("fake_vector", builder)
+    config = VectorStoreConfig(
+        route=VectorStoreRouteConfig(provider="custom", adapter="fake_vector", credential_ref="fake_vector")
     )
-    config = VectorStoreConfig(route=VectorStoreRouteConfig(credential_ref="vikingdb"))
     requirements = VectorStoreRequirements(2, 100, 10, 100)
     publication_lock = PathLock(ProcessLocalLockStore())
     store = factory.create(
@@ -162,11 +152,7 @@ def test_factory_resolves_credentials_and_rejects_unregistered_or_mismatched_bac
     assert isinstance(store, PublishedVectorStore)
     assert captured == {"api_key": "secret"}
     with pytest.raises(ValueError, match="already registered"):
-        factory.register_adapter(
-            "vikingdb",
-            builder,
-            requires_cross_process_publication_fencing=False,
-        )
+        factory.register_adapter("fake_vector", builder)
     with pytest.raises(VectorStoreError, match="not registered"):
         VectorStoreFactory().create(
             config,
@@ -189,71 +175,18 @@ def test_factory_resolves_credentials_and_rejects_unregistered_or_mismatched_bac
         )
 
 
-def test_factory_rejects_process_local_fencing_before_invoking_remote_backend_builder() -> None:
-    builder_calls: list[str] = []
-
-    def builder(_context):
-        builder_calls.append("builder")
-        raise AssertionError("unsupported remote builder must not be invoked")
-
-    factory = VectorStoreFactory()
-    factory.register_adapter(
-        "vikingdb",
-        builder,
-        requires_cross_process_publication_fencing=True,
-    )
-    with pytest.raises(VectorStoreUnsupportedTopologyError, match="host-scoped"):
-        factory.create(
-            VectorStoreConfig(),
-            requirements=VectorStoreRequirements(2, 100, 10, 100),
-            path_lock=PathLock(ProcessLocalLockStore()),
-        )
-    assert builder_calls == []
-
-
-def test_vikingdb_options_cover_public_private_and_capacity_combinations() -> None:
-    route = VectorStoreRouteConfig(max_response_bytes=1_000_000)
-    public = VikingDBVectorStoreConfig(auth_mode="api_key", region="cn-beijing")
-    assert public.data_url(route).startswith("https://api-vikingdb")
-
-    private = VikingDBVectorStoreConfig(
-        auth_mode="private_headers",
-        region="",
-        credential_headers={"X-Token": "Bearer {token}"},
-    )
-    assert private.data_url(VectorStoreRouteConfig(base_url="https://vector.internal")) == "https://vector.internal"
-    assert render_credential_template("Bearer {token}", {"token": "secret"}) == "Bearer secret"
-    with pytest.raises(ValueError, match="requires route.base_url"):
-        private.data_url(VectorStoreRouteConfig())
-    with pytest.raises(ValueError, match="managed schema"):
-        VikingDBVectorStoreConfig(auth_mode="api_key", schema_mode="managed")
-    with pytest.raises(ValueError, match="max_records"):
-        public.validate_requirements(VectorStoreRequirements(2, public.max_records + 1, 10, 100), route)
-    assert bounded_retry_after("999", 10) == 10
-    assert bounded_retry_after("invalid", 10) is None
-
-
-def test_builtin_vikingdb_requires_host_scoped_publication_fencing(tmp_path) -> None:
+def test_builtin_local_vector_store_is_the_default_and_needs_a_data_root(tmp_path) -> None:
     factory = register_builtin_vector_adapters()
-    config = VectorStoreConfig(
-        route=VectorStoreRouteConfig(credential_ref="vikingdb"),
-    )
+    config = VectorStoreConfig()
+    assert (config.provider, config.adapter, config.route.credential_ref) == ("local", "local_sqlite", "")
     requirements = VectorStoreRequirements(2, 100, 10, 100)
-    with pytest.raises(VectorStoreUnsupportedTopologyError, match="host-scoped"):
-        factory.create(
-            config,
-            requirements=requirements,
-            credentials={"api_key": "secret"},
-            path_lock=PathLock(ProcessLocalLockStore()),
-        )
-    store = factory.create(
-        config,
-        requirements=requirements,
-        credentials={"api_key": "secret"},
-        path_lock=PathLock(SQLiteLockStore(tmp_path / "publication.sqlite3", initialize=False)),
-    )
+    lock = PathLock(ProcessLocalLockStore())
+    with pytest.raises(VectorStoreError, match="data_root"):
+        factory.create(config, requirements=requirements, path_lock=lock)
+    store = factory.create(config, requirements=requirements, path_lock=lock, data_root=tmp_path / "vector")
     assert isinstance(store, PublishedVectorStore)
-    assert store.adapter_name == "vikingdb"
-    assert store.provider_name == config.provider
-    assert store.collection == config.collection
+    assert (store.adapter_name, store.provider_name, store.collection) == ("local_sqlite", "local", "memory")
+    assert store.backend.max_records == 100
+    assert store.backend.max_search_hits == 10
+    assert not (tmp_path / "vector").exists(), "构造不得落盘"
     asyncio.run(store.close())

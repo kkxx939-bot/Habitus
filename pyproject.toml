@@ -14,6 +14,7 @@ authors = [{ name = "gulf" }]
 # truststore：调模型服务时默认读操作系统证书库（公司代理做 TLS 解密时根证书在那里），见配置 network.trust_store。
 # certifi：network.trust_store: bundled 直接用它（habitus/foundation/network.py），不靠 httpx 间接带进来。
 # tzlocal：habitus-server init 检测系统时区（macOS / Linux 读 /etc/localtime 与 TZ，Windows 把注册表时区名换成 IANA 名），W3。
+# numpy：默认的本地向量库（infrastructure/vector/adapters/local_sqlite.py）用它暴力算余弦，W8。
 dependencies = [
     "PyYAML>=6.0.2,<7",
     "httpx>=0.28,<1",
@@ -21,6 +22,7 @@ dependencies = [
     "truststore>=0.10.5,<1",
     "certifi>=2024.7.4",
     "tzlocal>=5.2,<6",
+    "numpy>=2.0,<3",
 ]
 
 [project.optional-dependencies]
@@ -32,13 +34,11 @@ model = [
     "json-repair>=0.58.5,<1",
     "jsonschema>=4,<5",
 ]
-vikingdb = ["volcengine>=1.0.216"]
-cloud = [
+server = [
     "fastapi>=0.115,<1",
     "uvicorn>=0.34,<1",
     "json-repair>=0.58.5,<1",
     "jsonschema>=4,<5",
-    "volcengine>=1.0.216",
 ]
 observability = [
     "opentelemetry-api>=1.30,<2",

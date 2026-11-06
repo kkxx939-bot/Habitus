@@ -9,8 +9,8 @@ from types import MappingProxyType
 from typing import Literal
 
 from habitus.config import HabitusConfig
-from habitus.infrastructure.vector import VectorStoreConfig, VectorStoreRequirements
-from habitus.infrastructure.vector.adapters.vikingdb_config import VikingDBVectorStoreConfig
+from habitus.infrastructure.vector import VectorStoreConfig
+from habitus.infrastructure.vector.adapters import LocalSQLiteVectorStoreConfig
 from habitus.model_client import CapabilityConfig
 
 SetupCapability = Literal["chat", "embedding", "rerank", "vector"]
@@ -40,7 +40,7 @@ class SetupField:
     kind: SetupInputKind
     default: object
     choices: tuple[SetupChoice, ...] = ()
-    forbidden_fragments: tuple[str, ...] = ()
+    placeholder_values: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.key, str) or not self.key:
@@ -55,10 +55,10 @@ class SetupField:
             raise ValueError("choice setup field must declare choices")
         if self.kind != "choice" and self.choices:
             raise ValueError("only choice setup fields may declare choices")
-        if any(not isinstance(item, str) or not item for item in self.forbidden_fragments):
-            raise ValueError("setup field forbidden fragments must be non-empty strings")
-        if self.kind not in {"text", "required_text"} and self.forbidden_fragments:
-            raise ValueError("only text setup fields may reject placeholder fragments")
+        if any(not isinstance(item, str) or not item for item in self.placeholder_values):
+            raise ValueError("setup field placeholder values must be non-empty strings")
+        if self.kind not in {"text", "required_text"} and self.placeholder_values:
+            raise ValueError("only text setup fields may declare placeholder values")
         if self.kind == "positive_int" and (
             isinstance(self.default, bool) or not isinstance(self.default, int) or self.default <= 0
         ):
@@ -301,19 +301,22 @@ class SetupRegistry:
 _MISSING = object()
 
 
+def is_setup_placeholder(value: object, placeholder_values: tuple[str, ...]) -> bool:
+    """仍是向导占位：等于某个出厂模板原值，或留着未替换的 ``{var}``。精确匹配，不按子串判，免得误伤真实值。"""
+    return isinstance(value, str) and (value in placeholder_values or "{" in value)
+
+
 def build_builtin_setup_registry() -> SetupRegistry:
     """注册当前发行包支持的云端 Profile；这里不读取秘密或访问网络。"""
 
+    from habitus.integrations.local_service.setup_chat_profiles import chat_adapter_registrations
+
     registry = SetupRegistry()
     for registration in (
-        AdapterProductRegistration(
-            "chat",
-            "openai_compatible_chat",
-            _api_key_fields,
-        ),
+        *chat_adapter_registrations(),
         AdapterProductRegistration(
             "embedding",
-            "ark_multimodal",
+            "openai_compatible_embedding",
             _api_key_fields,
         ),
         AdapterProductRegistration(
@@ -323,10 +326,9 @@ def build_builtin_setup_registry() -> SetupRegistry:
         ),
         AdapterProductRegistration(
             "vector",
-            "vikingdb",
-            _vikingdb_credential_fields,
-            _vikingdb_dependencies,
-            _validate_vikingdb,
+            "local_sqlite",
+            _no_credential_fields,
+            validate=_validate_local_sqlite,
         ),
     ):
         registry.register_adapter(registration)
@@ -336,132 +338,54 @@ def build_builtin_setup_registry() -> SetupRegistry:
 
 
 def _builtin_profiles() -> tuple[SetupProfile, ...]:
+    # chat 的 Profile 在单独模块里；它要用本模块的字段构造函数，所以在这里（本模块加载完之后）再导入
+    from habitus.integrations.local_service.setup_chat_profiles import chat_profiles
+
     qwen_instruction = "Given a web search query, retrieve relevant passages that answer the query."
     return (
+        *chat_profiles(),
         SetupProfile(
-            "chat.deepseek",
-            "chat",
-            "DeepSeek (OpenAI-compatible)",
-            patch={
-                "route": {
-                    "provider": "deepseek",
-                    "adapter": "openai_compatible_chat",
-                    "model": "deepseek-chat",
-                    "base_url": "https://api.deepseek.com",
-                    "credential_ref": "deepseek",
-                    "extra_body": {},
-                },
-                "context_window_tokens": 64_000,
-                "structured_output_mode": "json_object",
-                "reasoning": False,
-            },
-            match={
-                "route.provider": "deepseek",
-                "route.adapter": "openai_compatible_chat",
-                "route.model": "deepseek-chat",
-                "route.base_url": "https://api.deepseek.com",
-            },
-            replace_paths=("route.extra_body", "max_output_tokens"),
-        ),
-        SetupProfile(
-            "chat.openai_compatible.custom",
-            "chat",
-            "Custom OpenAI-compatible cloud endpoint",
+            "embedding.openai_compatible.custom",
+            "embedding",
+            "OpenAI-compatible embedding endpoint (cloud or self-hosted)",
             patch={
                 "route": {
                     "provider": "custom",
-                    "adapter": "openai_compatible_chat",
-                    "model": "chat-model",
-                    "base_url": "https://chat.example.com/v1",
-                    "credential_ref": "custom_chat",
-                    "extra_body": {},
-                },
-                "context_window_tokens": 64_000,
-                "structured_output_mode": "json_object",
-                "reasoning": False,
-            },
-            match={"route.adapter": "openai_compatible_chat"},
-            fields=(
-                _text("provider", "Chat provider identifier", "route.provider", "custom"),
-                _text("model", "Chat model", "route.model", "chat-model"),
-                _required("base_url", "Chat API base URL", "route.base_url", ""),
-                _text("credential_ref", "Chat credential reference", "route.credential_ref", "custom_chat"),
-                _positive("context_window_tokens", "Chat context window tokens", "context_window_tokens", 64_000),
-                _choice(
-                    "structured_output_mode",
-                    "Chat structured output",
-                    "structured_output_mode",
-                    "json_object",
-                    (("json_object", "JSON object"), ("json_schema", "JSON schema"), ("none", "Prompt-only / none")),
-                ),
-                _choice(
-                    "reasoning",
-                    "Chat reasoning capability",
-                    "reasoning",
-                    False,
-                    ((False, "Disabled"), (True, "Enabled")),
-                ),
-            ),
-            replace_paths=("route.extra_body",),
-        ),
-        SetupProfile(
-            "embedding.volcengine.ark",
-            "embedding",
-            "VolcEngine Ark multimodal",
-            patch={
-                "route": {
-                    "provider": "volcengine",
-                    "adapter": "ark_multimodal",
-                    "model": "doubao-embedding-vision-251215",
-                    "base_url": "https://ark.cn-beijing.volces.com/api/v3",
-                    "credential_ref": "ark",
+                    "adapter": "openai_compatible_embedding",
+                    "model": "example.embedding-model",
+                    "base_url": "https://embedding.example.com/v1",
+                    "credential_ref": "embedding",
                     "extra_body": {},
                 },
                 "dimension": 1024,
-                "input_mode": "multimodal",
                 "query_parameters": {},
                 "document_parameters": {},
+                "query_prefix": "",
+                "document_prefix": "",
             },
-            match={
-                "route.provider": "volcengine",
-                "route.adapter": "ark_multimodal",
-                "route.model": "doubao-embedding-vision-251215",
-                "route.base_url": "https://ark.cn-beijing.volces.com/api/v3",
-            },
-            replace_paths=("route.extra_body", "query_parameters", "document_parameters"),
-        ),
-        SetupProfile(
-            "embedding.ark_multimodal.custom",
-            "embedding",
-            "Custom Ark multimodal-compatible cloud endpoint",
-            patch={
-                "route": {
-                    "provider": "custom",
-                    "adapter": "ark_multimodal",
-                    "model": "embedding-model",
-                    "base_url": "https://embedding.example.com/api/v3",
-                    "credential_ref": "custom_embedding",
-                    "extra_body": {},
-                },
-                "dimension": 1024,
-                "input_mode": "multimodal",
-                "query_parameters": {},
-                "document_parameters": {},
-            },
-            match={"route.adapter": "ark_multimodal"},
+            match={"route.adapter": "openai_compatible_embedding"},
             fields=(
                 _text("provider", "Embedding provider identifier", "route.provider", "custom"),
-                _text("model", "Embedding model", "route.model", "embedding-model"),
-                _required("base_url", "Embedding API base URL", "route.base_url", ""),
-                _text(
-                    "credential_ref",
-                    "Embedding credential reference",
-                    "route.credential_ref",
-                    "custom_embedding",
+                _required(
+                    "model", "Embedding model", "route.model", "", placeholder_values=("example.embedding-model",)
                 ),
-                _positive("dimension", "Embedding dimension", "dimension", 1024),
+                _required(
+                    "base_url",
+                    "Embedding API base URL",
+                    "route.base_url",
+                    "",
+                    placeholder_values=("https://embedding.example.com/v1",),
+                ),
+                _text("credential_ref", "Embedding credential reference", "route.credential_ref", "embedding"),
+                _positive("dimension", "Embedding dimension (must match the model output)", "dimension", 1024),
             ),
-            replace_paths=("route.extra_body", "query_parameters", "document_parameters"),
+            replace_paths=(
+                "route.extra_body",
+                "query_parameters",
+                "document_parameters",
+                "query_prefix",
+                "document_prefix",
+            ),
         ),
         SetupProfile(
             "rerank.disabled",
@@ -494,13 +418,8 @@ def _builtin_profiles() -> tuple[SetupProfile, ...]:
                 "route.model": "qwen3-rerank",
             },
             fields=(
-                _required(
-                    "base_url",
-                    "Alibaba Workspace API base URL",
-                    "route.base_url",
-                    "",
-                    forbidden_fragments=("{", "example."),
-                ),
+                # 没有 example 模板原值，占位只由 is_setup_placeholder 的 {var} 规则拦（README 里的 {WorkspaceId}）
+                _required("base_url", "Alibaba Workspace API base URL", "route.base_url", ""),
             ),
             replace_paths=("route.extra_body",),
         ),
@@ -530,69 +449,25 @@ def _builtin_profiles() -> tuple[SetupProfile, ...]:
             ),
             replace_paths=("route.extra_body",),
         ),
-        _vikingdb_profile(
-            "vector.vikingdb.managed",
-            "VikingDB AK/SK with managed collections and indexes",
-            auth_mode="ak_sk",
-            schema_mode="managed",
-        ),
-        _vikingdb_profile(
-            "vector.vikingdb.precreated",
-            "VikingDB API Key with precreated collections and indexes",
-            auth_mode="api_key",
-            schema_mode="precreated",
-        ),
-        SetupProfile(
-            "vector.vikingdb.private_current",
-            "vector",
-            "Keep current private VikingDB configuration",
-            patch={},
-            match={
-                "memory.route.adapter": "vikingdb",
-                "memory.options.auth_mode": "private_headers",
-            },
-            selectable=False,
-        ),
+        _local_sqlite_profile(),
     )
 
 
-def _vikingdb_profile(
-    profile_id: str,
-    display_name: str,
-    *,
-    auth_mode: str,
-    schema_mode: str,
-) -> SetupProfile:
-    options = {
-        "auth_mode": auth_mode,
-        "schema_mode": schema_mode,
-        "project_name": "default",
-        "index_name": "default",
-        "region": "cn-beijing",
-        "console_url": "",
-        "credential_headers": {},
-        "upsert_batch_size": 100,
-        "fetch_batch_size": 64,
-        "delete_batch_size": 100,
-        "search_page_size": 64,
-        "scan_page_size": 64,
-        "max_search_hits": 10_000,
-        "max_records": 1_000_000,
-        "index_sync_timeout_seconds": 60.0,
-        "index_sync_poll_interval_seconds": 1.0,
-    }
-    credential_ref = "vikingdb_api_key" if auth_mode == "api_key" else "vikingdb"
+def _local_sqlite_profile() -> SetupProfile:
+    """进程内本地向量库：存储根下每个 Collection 一个 SQLite 文件，不要账号、不走网络。"""
+
     route = {
-        "provider": "volcengine",
-        "adapter": "vikingdb",
+        "provider": "local",
+        "adapter": "local_sqlite",
         "base_url": "",
-        "credential_ref": credential_ref,
+        "credential_ref": "",
         "extra_headers": {},
     }
+    options = {"busy_timeout_seconds": 5.0}
     return SetupProfile(
-        profile_id,
+        "vector.local_sqlite",
         "vector",
-        display_name,
+        "Local (embedded SQLite + numpy, no account)",
         patch={
             "memory": {"route": route, "collection": "memory", "options": options},
             "summary": {
@@ -601,47 +476,7 @@ def _vikingdb_profile(
                 "options": deepcopy(options),
             },
         },
-        match={
-            "memory.route.adapter": "vikingdb",
-            "memory.options.auth_mode": auth_mode,
-            "memory.options.schema_mode": schema_mode,
-        },
-        fields=(
-            _choice(
-                "region",
-                "VikingDB region",
-                ("memory.options.region", "summary.options.region"),
-                "cn-beijing",
-                tuple(
-                    (region, region)
-                    for region in (
-                        "cn-beijing",
-                        "cn-shanghai",
-                        "cn-guangzhou",
-                        "ap-southeast-1",
-                    )
-                ),
-            ),
-            _text(
-                "project_name",
-                "VikingDB project name",
-                ("memory.options.project_name", "summary.options.project_name"),
-                "default",
-            ),
-            _text(
-                "index_name",
-                "VikingDB index name",
-                ("memory.options.index_name", "summary.options.index_name"),
-                "default",
-            ),
-            _text("memory_collection", "Memory collection", "memory.collection", "memory"),
-            _text(
-                "summary_collection",
-                "Conversation summary collection",
-                "summary.collection",
-                "conversation_summaries",
-            ),
-        ),
+        match={"memory.route.adapter": "local_sqlite"},
         replace_paths=(
             "memory.options",
             "summary.options",
@@ -655,71 +490,24 @@ def _api_key_fields(_document: Mapping[str, object]) -> tuple[str, ...]:
     return ("api_key",)
 
 
-def _vikingdb_credential_fields(document: Mapping[str, object]) -> tuple[str, ...]:
-    options = _mapping_at(document, "options")
-    auth_mode = options.get("auth_mode")
-    if auth_mode == "api_key":
-        return ("api_key",)
-    if auth_mode == "ak_sk":
-        return ("access_key", "secret_key")
-    if auth_mode == "private_headers":
-        headers = options.get("credential_headers")
-        if not isinstance(headers, Mapping):
-            raise ValueError("private VikingDB credential_headers must be an object")
-        from habitus.infrastructure.vector.adapters.vikingdb_config import credential_template_names
-
-        return tuple(
-            sorted(
-                {
-                    name
-                    for template in headers.values()
-                    if isinstance(template, str)
-                    for name in credential_template_names(template)
-                }
-            )
-        )
-    raise ValueError("VikingDB auth_mode is not registered")
+def _no_credential_fields(_document: Mapping[str, object]) -> tuple[str, ...]:
+    return ()
 
 
-def _vikingdb_dependencies(document: Mapping[str, object]) -> tuple[str, ...]:
-    return ("volcengine",) if _mapping_at(document, "options").get("auth_mode") == "ak_sk" else ()
-
-
-def _validate_vikingdb(config: HabitusConfig) -> None:
-    pairs = (
-        (
-            config.memory.vector_store,
-            VectorStoreRequirements(
-                dimension=config.models.embedding.dimension,
-                max_records=config.memory.vector_index.max_records,
-                max_search_hits=config.memory.vector_index.max_search_hits,
-                max_record_chars=config.memory.vector_index.max_record_chars,
-            ),
-        ),
-        (
-            config.conversation.summary_vector_store,
-            VectorStoreRequirements(
-                dimension=config.models.embedding.dimension,
-                max_records=config.conversation.summary_vector_index.max_records,
-                max_search_hits=config.conversation.summary_vector_index.max_search_hits,
-                max_record_chars=config.conversation.summary_vector_index.max_record_chars,
-            ),
-        ),
-    )
-    for vector, requirements in pairs:
-        adapter_config = VikingDBVectorStoreConfig.from_mapping(vector.options)
-        adapter_config.validate_requirements(requirements, vector.route)
+def _validate_local_sqlite(config: HabitusConfig) -> None:
+    for vector in (config.memory.vector_store, config.conversation.summary_vector_store):
+        LocalSQLiteVectorStoreConfig.from_mapping(vector.options).validate_store(vector)
 
 
 def _active_adapter_documents(
     config: HabitusConfig,
 ) -> tuple[tuple[SetupCapability, Mapping[str, object]], ...]:
     documents: list[tuple[SetupCapability, Mapping[str, object]]] = [
-        ("chat", _model_document(config.models.chat)),
-        ("embedding", _model_document(config.models.embedding)),
+        ("chat", model_document(config.models.chat)),
+        ("embedding", model_document(config.models.embedding)),
     ]
     if config.models.rerank is not None:
-        documents.append(("rerank", _model_document(config.models.rerank)))
+        documents.append(("rerank", model_document(config.models.rerank)))
     documents.extend(
         (
             ("vector", _vector_document(config.memory.vector_store)),
@@ -729,7 +517,7 @@ def _active_adapter_documents(
     return tuple(documents)
 
 
-def _model_document(model: CapabilityConfig) -> Mapping[str, object]:
+def model_document(model: CapabilityConfig) -> Mapping[str, object]:
     route = model.route
     return {
         "route": {
@@ -770,7 +558,7 @@ def _required(
     paths: str | tuple[str, ...],
     default: str,
     *,
-    forbidden_fragments: tuple[str, ...] = (),
+    placeholder_values: tuple[str, ...] = (),
 ) -> SetupField:
     return SetupField(
         key,
@@ -778,7 +566,7 @@ def _required(
         _paths(paths),
         "required_text",
         default,
-        forbidden_fragments=forbidden_fragments,
+        placeholder_values=placeholder_values,
     )
 
 
@@ -816,7 +604,7 @@ def _validate_field_value(field: SetupField, value: object) -> None:
     if field.kind in {"text", "required_text"}:
         if not isinstance(value, str) or (field.kind == "required_text" and not value.strip()):
             raise ValueError(f"setup field is invalid: {field.key}")
-        if isinstance(value, str) and any(fragment in value for fragment in field.forbidden_fragments):
+        if is_setup_placeholder(value, field.placeholder_values):
             raise ValueError(f"setup field contains a placeholder value: {field.key}")
     elif field.kind == "positive_int":
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -884,4 +672,5 @@ __all__ = [
     "SetupProfile",
     "SetupRegistry",
     "build_builtin_setup_registry",
+    "model_document",
 ]

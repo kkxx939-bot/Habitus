@@ -1,22 +1,16 @@
 """内置协议适配器的集中注册入口。"""
 
-from habitus.model_client.adapters.ark_multimodal import ArkMultimodalEmbeddingProvider
+from typing import TypeVar
+
+from habitus.model_client.adapters.anthropic_messages import AnthropicMessagesProvider
 from habitus.model_client.adapters.openai_compatible_chat import OpenAICompatibleChatProvider
+from habitus.model_client.adapters.openai_compatible_embedding import OpenAICompatibleEmbeddingProvider
 from habitus.model_client.adapters.openai_compatible_rerank import OpenAICompatibleRerankProvider
 from habitus.model_client.config import ChatModelConfig, EmbeddingModelConfig, RerankModelConfig
 from habitus.model_client.contracts import ModelConfigurationError
 from habitus.model_client.factory import ProviderBuildContext, ProviderFactory
 
-
-def build_ark_multimodal_embedding_provider(
-    context: ProviderBuildContext,
-) -> ArkMultimodalEmbeddingProvider:
-    """从统一构造上下文创建一个方舟图文向量 Provider。"""
-
-    config = context.config
-    if not isinstance(config, EmbeddingModelConfig):
-        raise ModelConfigurationError("ark_multimodal adapter requires EmbeddingModelConfig")
-    return ArkMultimodalEmbeddingProvider(config, api_key=context.api_key, outbound=context.outbound)
+_Config = TypeVar("_Config", ChatModelConfig, EmbeddingModelConfig, RerankModelConfig)
 
 
 def build_openai_compatible_chat_provider(
@@ -24,10 +18,26 @@ def build_openai_compatible_chat_provider(
 ) -> OpenAICompatibleChatProvider:
     """从统一构造上下文创建一个 OpenAI-compatible Chat Provider。"""
 
-    config = context.config
-    if not isinstance(config, ChatModelConfig):
-        raise ModelConfigurationError("openai_compatible_chat adapter requires ChatModelConfig")
+    config = _config(context, ChatModelConfig, "openai_compatible_chat")
     return OpenAICompatibleChatProvider(config, api_key=context.api_key, outbound=context.outbound)
+
+
+def build_anthropic_messages_provider(
+    context: ProviderBuildContext,
+) -> AnthropicMessagesProvider:
+    """从统一构造上下文创建一个 Anthropic Messages Chat Provider。"""
+
+    config = _config(context, ChatModelConfig, "anthropic_messages")
+    return AnthropicMessagesProvider(config, api_key=context.api_key, outbound=context.outbound)
+
+
+def build_openai_compatible_embedding_provider(
+    context: ProviderBuildContext,
+) -> OpenAICompatibleEmbeddingProvider:
+    """从统一构造上下文创建一个 OpenAI-compatible Embedding Provider。"""
+
+    config = _config(context, EmbeddingModelConfig, "openai_compatible_embedding")
+    return OpenAICompatibleEmbeddingProvider(config, api_key=context.api_key, outbound=context.outbound)
 
 
 def build_openai_compatible_rerank_provider(
@@ -35,10 +45,17 @@ def build_openai_compatible_rerank_provider(
 ) -> OpenAICompatibleRerankProvider:
     """从统一构造上下文创建一个 OpenAI-compatible Rerank Provider。"""
 
-    config = context.config
-    if not isinstance(config, RerankModelConfig):
-        raise ModelConfigurationError("openai_compatible_rerank adapter requires RerankModelConfig")
+    config = _config(context, RerankModelConfig, "openai_compatible_rerank")
     return OpenAICompatibleRerankProvider(config, api_key=context.api_key, outbound=context.outbound)
+
+
+def _config(context: ProviderBuildContext, expected: type[_Config], adapter: str) -> _Config:
+    """各 builder 共用的能力配置核对：工厂按 ``(capability, adapter)`` 分发，配错能力的配置在这里报清楚。"""
+
+    config = context.config
+    if not isinstance(config, expected):
+        raise ModelConfigurationError(f"{adapter} adapter requires {expected.__name__}")
+    return config
 
 
 def register_builtin_adapters(factory: ProviderFactory) -> None:
@@ -47,14 +64,19 @@ def register_builtin_adapters(factory: ProviderFactory) -> None:
     if not isinstance(factory, ProviderFactory):
         raise TypeError("factory must be a ProviderFactory")
     factory.register_adapter(
-        "embedding",
-        "ark_multimodal",
-        build_ark_multimodal_embedding_provider,
-    )
-    factory.register_adapter(
         "chat",
         "openai_compatible_chat",
         build_openai_compatible_chat_provider,
+    )
+    factory.register_adapter(
+        "chat",
+        "anthropic_messages",
+        build_anthropic_messages_provider,
+    )
+    factory.register_adapter(
+        "embedding",
+        "openai_compatible_embedding",
+        build_openai_compatible_embedding_provider,
     )
     factory.register_adapter(
         "rerank",
@@ -64,11 +86,13 @@ def register_builtin_adapters(factory: ProviderFactory) -> None:
 
 
 __all__ = [
-    "ArkMultimodalEmbeddingProvider",
+    "AnthropicMessagesProvider",
     "OpenAICompatibleChatProvider",
+    "OpenAICompatibleEmbeddingProvider",
     "OpenAICompatibleRerankProvider",
-    "build_ark_multimodal_embedding_provider",
+    "build_anthropic_messages_provider",
     "build_openai_compatible_chat_provider",
+    "build_openai_compatible_embedding_provider",
     "build_openai_compatible_rerank_provider",
     "register_builtin_adapters",
 ]

@@ -132,7 +132,7 @@ def test_summary_reference_has_independent_non_memory_identity_and_stable_finger
         model="m",
         base_url="https://embedding.example.com/v1",
         dimension=2,
-        input_mode="text",
+        document_prefix="",
         extra_body={},
         document_parameters={},
     )
@@ -142,7 +142,7 @@ def test_summary_reference_has_independent_non_memory_identity_and_stable_finger
         model="m2",
         base_url="https://embedding.example.com/v1",
         dimension=2,
-        input_mode="text",
+        document_prefix="",
         extra_body={},
         document_parameters={},
     )

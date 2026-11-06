@@ -85,13 +85,13 @@ def test_redaction_hides_named_secret_values(name: str) -> None:
     ],
 )
 def test_a_credential_echoed_in_brackets_by_a_cloud_error_is_hidden(echoed: str) -> None:
-    """云服务 401 回包把被拒的凭据夹在方括号里（VikingDB / 火山引擎的 ``security token[…]``）：日志与启动失败那一行都去掉它。"""
+    """云服务 401 回包把被拒的凭据夹在方括号里（例如 ``security token[…]``）：日志与启动失败那一行都去掉它。"""
 
     for redact in (redact_secrets, redact_sensitive_text):
-        redacted = redact(f"vikingdb request failed: 401 InvalidAccessKey: {echoed}")
+        redacted = redact(f"provider request failed: 401 InvalidAccessKey: {echoed}")
         assert "AKLTabc123XYZ" not in redacted
         assert "[REDACTED]" in redacted
-        assert redacted.startswith("vikingdb request failed: 401 InvalidAccessKey: ")
+        assert redacted.startswith("provider request failed: 401 InvalidAccessKey: ")
 
 
 def test_redact_secrets_keeps_paths_and_layout() -> None:

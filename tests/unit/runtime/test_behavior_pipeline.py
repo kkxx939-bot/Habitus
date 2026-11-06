@@ -112,7 +112,6 @@ def scripted_dependencies(bodies: list[dict]):
     vectors.register_adapter(
         "fake_vector",
         lambda context: FakeVectorBackend(context.config.provider, context.config.collection),
-        requires_cross_process_publication_fencing=False,
     )
     return providers, vectors
 

@@ -11,7 +11,8 @@ _PATH_TAIL = f"(?:{_PATH_CHAR})*"
 _BEARER_SECRET = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _NAMED_SECRET = re.compile(r"(?i)\b(api[_-]?key|authorization|password|secret|token)\b\s*[:=]\s*[^\s,;]+")
 _PREFIXED_SECRET = re.compile(r"(?i)\b(?:ghp|github_pat|sk|xox[baprs])[-_][A-Za-z0-9._-]+")
-# 云服务回包把被拒的凭据原样夹在方括号里（VikingDB / 火山引擎 401：``The security token[AK…] included in the request is invalid``）
+# 云服务回包把被拒的凭据原样夹在方括号里（例如 401：``The security token[AK…] included in the request is invalid``）；
+# 作用于所有模型与外部服务的错误文本，不针对某一家
 _BRACKETED_SECRET = re.compile(
     r"(?i)\b(access[\s_-]?key(?:[\s_-]?id)?|secret(?:[\s_-]?key)?|token|password|credential)\s*\[[^\]\s]+\]"
 )

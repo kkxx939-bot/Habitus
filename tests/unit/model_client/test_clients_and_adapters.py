@@ -30,8 +30,8 @@ from habitus.model_client import (
     ToolCall,
     ToolDefinition,
 )
-from habitus.model_client.adapters.ark_multimodal import ArkMultimodalEmbeddingProvider
 from habitus.model_client.adapters.openai_compatible_chat import OpenAICompatibleChatProvider
+from habitus.model_client.adapters.openai_compatible_embedding import OpenAICompatibleEmbeddingProvider
 from habitus.model_client.retry import normalize_provider_error, retry_delay
 from tests.model_helpers import prepare_chat_request
 
@@ -323,53 +323,56 @@ def test_openai_compatible_adapter_normalizes_tool_calls_and_stream_events() -> 
     assert events[0].content_delta == "hello"
 
 
-def test_ark_embedding_adapter_uses_text_part_query_parameters_and_validates_vector() -> None:
+def _prefixed_embedding_client(**config_values: object) -> tuple[EmbeddingClient, list[dict[str, object]]]:
     config = EmbeddingModelConfig(
-        route("ark_multimodal", max_retries=0),
+        route("openai_compatible_embedding", max_retries=0),
         dimension=2,
-        input_mode="multimodal",
         query_parameters={"instruction": "query"},
         document_parameters={"instruction": "document"},
+        query_prefix="query: ",
+        document_prefix="passage: ",
+        **config_values,
     )
-    provider = ArkMultimodalEmbeddingProvider(config, api_key="secret")
+    provider = OpenAICompatibleEmbeddingProvider(config, api_key="secret")
     captured: list[dict[str, object]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.append(json.loads(request.content))
-        assert request.headers["Authorization"] == "Bearer secret"
-        return httpx.Response(200, json={"data": [{"embedding": [3, 4, 99]}]})
+        return httpx.Response(200, json={"data": [{"embedding": [3, 4]}]})
 
-    async def invoke() -> tuple[EmbeddingVector, EmbeddingVector]:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            provider._client = lambda: client
-            return await provider.embed("query", is_query=True), await provider.embed("document", is_query=False)
+    transport = httpx.MockTransport(handler)
+    provider._client = lambda: httpx.AsyncClient(transport=transport)
+    return EmbeddingClient(config, provider), captured
 
-    query_vector, document_vector = asyncio.run(invoke())
+
+def test_embedding_client_sends_query_and_document_through_their_own_prefix_and_parameters() -> None:
+    """查询走 query_parameters + query_prefix，文档走 document_parameters + document_prefix，前缀拼在适配器之前。"""
+
+    client, captured = _prefixed_embedding_client()
+
+    async def invoke() -> tuple[EmbeddingVector, tuple[EmbeddingVector, ...]]:
+        return await client.embed_query("  where is it  "), await client.embed_documents(("  the doc  ",))
+
+    query_vector, document_vectors = asyncio.run(invoke())
     assert query_vector.values == pytest.approx((0.6, 0.8))
-    assert document_vector.dimension == 2
-    assert captured[0]["instruction"] == "query"
-    assert captured[1]["instruction"] == "document"
-    assert captured[0]["input"] == [{"type": "text", "text": "query"}]
+    assert len(document_vectors) == 1
+    assert captured == [
+        {"instruction": "query", "model": "test-model", "input": "query: where is it", "encoding_format": "float"},
+        {"instruction": "document", "model": "test-model", "input": "passage: the doc", "encoding_format": "float"},
+    ]
 
 
-def test_ark_adapter_rejects_wrong_mode_missing_key_and_reserved_parameters() -> None:
-    with pytest.raises(Exception, match="multimodal"):
-        ArkMultimodalEmbeddingProvider(
-            EmbeddingModelConfig(route("ark_multimodal"), dimension=2, input_mode="text"),
-            api_key="secret",
-        )
-    with pytest.raises(Exception, match="API key"):
-        ArkMultimodalEmbeddingProvider(
-            EmbeddingModelConfig(route("ark_multimodal"), dimension=2, input_mode="multimodal"),
-            api_key="",
-        )
-    with pytest.raises(Exception, match="override"):
-        ArkMultimodalEmbeddingProvider(
-            EmbeddingModelConfig(
-                route("ark_multimodal"),
-                dimension=2,
-                input_mode="multimodal",
-                query_parameters={"model": "override"},
-            ),
-            api_key="secret",
-        )
+def test_embedding_input_bound_counts_the_prefix() -> None:
+    """max_input_chars 按拼好前缀之后的长度算：正文正好占满剩下的预算能过，多一个字符就拒。"""
+
+    client, captured = _prefixed_embedding_client(max_input_chars=20)
+    room_for_query = 20 - len("query: ")
+    room_for_document = 20 - len("passage: ")
+    asyncio.run(client.embed_query("q" * room_for_query))
+    asyncio.run(client.embed_documents(("d" * room_for_document,)))
+    assert [len(str(item["input"])) for item in captured] == [20, 20]
+    with pytest.raises(ValueError, match="character bound"):
+        asyncio.run(client.embed_query("q" * (room_for_query + 1)))
+    with pytest.raises(ValueError, match="character bound"):
+        asyncio.run(client.embed_documents(("d" * (room_for_document + 1),)))
+    assert len(captured) == 2

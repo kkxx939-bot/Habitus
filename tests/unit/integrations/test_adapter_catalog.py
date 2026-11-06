@@ -80,10 +80,8 @@ def test_one_adapter_package_registration_is_shared_by_setup_doctor_and_runtime(
         }
     )
     payload["credentials"]["future"] = {"token": "future-secret"}
-    payload["credentials"]["deepseek"]["api_key"] = "chat-secret"
-    payload["credentials"]["ark"]["api_key"] = "embedding-secret"
-    payload["credentials"]["vikingdb"]["access_key"] = "vector-access"
-    payload["credentials"]["vikingdb"]["secret_key"] = "vector-secret"
+    payload["credentials"]["chat"]["api_key"] = "chat-secret"
+    payload["credentials"]["embedding"]["api_key"] = "embedding-secret"
     config = HabitusConfig.from_mapping(payload)
 
     catalog.validate(config)

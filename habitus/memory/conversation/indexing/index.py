@@ -468,7 +468,7 @@ def conversation_summary_embedding_fingerprint(
     model: str,
     base_url: str,
     dimension: int,
-    input_mode: str,
+    document_prefix: str,
     extra_body: object,
     document_parameters: object,
 ) -> str:
@@ -482,7 +482,7 @@ def conversation_summary_embedding_fingerprint(
             "model": model,
             "base_url": base_url,
             "dimension": dimension,
-            "input_mode": input_mode,
+            "document_prefix": document_prefix,
             "extra_body": extra_body,
             "document_parameters": document_parameters,
         }

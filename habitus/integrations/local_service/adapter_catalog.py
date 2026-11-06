@@ -55,7 +55,6 @@ class AdapterCatalog:
         adapter: str,
         builder: VectorBackendBuilder,
         *,
-        requires_cross_process_publication_fencing: bool,
         product: AdapterProductRegistration,
         profiles: Sequence[SetupProfile] = (),
     ) -> None:
@@ -63,11 +62,7 @@ class AdapterCatalog:
             raise ValueError("vector product metadata must match its runtime adapter key")
         if any(profile.capability != "vector" for profile in profiles):
             raise ValueError("vector setup profiles must have vector capability")
-        self.vector_stores.register_adapter(
-            adapter,
-            builder,
-            requires_cross_process_publication_fencing=(requires_cross_process_publication_fencing),
-        )
+        self.vector_stores.register_adapter(adapter, builder)
         self.setup.register_adapter(product)
         for profile in profiles:
             self.setup.register_profile(profile)

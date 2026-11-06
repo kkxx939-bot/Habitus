@@ -27,13 +27,12 @@ if TYPE_CHECKING:
 _MINIMUM_FREE_BYTES = 1024**3
 # Habitus 还没发布到 PyPI：缺依赖的安装提示与 README 一样从源码仓库装
 HABITUS_SOURCE = "git+https://github.com/kkxx939-bot/Habitus"
-# 与 pyproject 的 optional-dependencies 对应：模块由哪个 extra 提供；cloud 是 http + model + vikingdb 的合集。
+# 与 pyproject 的 optional-dependencies 对应：模块由哪个 extra 提供；server 是 http + model 的合集（起服务、调模型要的全部 Python 依赖）。
 _EXTRA_BY_MODULE = {
     "fastapi": "http",
     "uvicorn": "http",
     "json_repair": "model",
     "jsonschema": "model",
-    "volcengine": "vikingdb",
 }
 
 
@@ -98,6 +97,7 @@ def run_doctor(
         DoctorCheck("listener", DoctorStatus.PASS, f"loopback {config.http.host}:{config.http.port}"),
         _storage_check(config.storage_root),
         _adapter_configuration_check(config, catalog),
+        _setup_placeholder_check(config, catalog),
         *_dependency_checks(config, catalog),
         _node_check(),
         _credential_check(config, catalog),
@@ -194,7 +194,7 @@ def _python_dependency_check(module: str) -> DoctorCheck:
         extra = _EXTRA_BY_MODULE.get(module)
         detail = "Python dependency is not installed"
         if extra is not None:
-            detail += f"; provided by the '{extra}' extra (also in 'cloud'): {pip_install_command('cloud')}"
+            detail += f"; provided by the '{extra}' extra (also in 'server'): {pip_install_command('server')}"
         return DoctorCheck(module, DoctorStatus.FAIL, detail)
     return DoctorCheck(module, DoctorStatus.PASS, "available")
 
@@ -225,6 +225,21 @@ def _adapter_configuration_check(
         DoctorStatus.PASS,
         "registered model and vector adapters accept the configured limits",
     )
+
+
+def _setup_placeholder_check(config: HabitusConfig, catalog: AdapterCatalog) -> DoctorCheck:
+    """非交互 init 写出的 Embedding 模板还没填：在这里直接点名，免得等到发请求才报 DNS / 连接错误。"""
+
+    from habitus.integrations.local_service.setup_placeholders import unfilled_settings
+
+    try:
+        unfilled = unfilled_settings(catalog.setup, config)
+    except (TypeError, ValueError) as exc:
+        return DoctorCheck("setup_placeholders", DoctorStatus.FAIL, str(exc).strip() or type(exc).__name__)
+    if unfilled:
+        detail = "; ".join(item.describe("the config file") for item in unfilled)
+        return DoctorCheck("setup_placeholders", DoctorStatus.FAIL, detail)
+    return DoctorCheck("setup_placeholders", DoctorStatus.PASS, "model routes hold no setup placeholder values")
 
 
 def _node_check() -> DoctorCheck:
@@ -353,7 +368,7 @@ def _deep_checks(
                             DoctorCheck(
                                 name,
                                 DoctorStatus.WARN,
-                                "control plane is reachable; collection has no Habitus publication yet",
+                                "vector store is reachable; collection has no Habitus publication yet",
                             )
                         )
                     elif not state.ready:

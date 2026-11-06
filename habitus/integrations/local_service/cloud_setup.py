@@ -52,14 +52,14 @@ class CloudSetupSelection:
 def default_cloud_selection(
     registry: SetupRegistry | None = None,
 ) -> CloudSetupSelection:
-    """返回不含占位 Rerank 端点的发行包默认 Profile 组合。"""
+    """返回发行包默认 Profile 组合：Chat 与 Embedding 都不预置厂商，写出的是待用户填写的占位模板。"""
 
     resolved = registry or build_builtin_setup_registry()
     return CloudSetupSelection(
-        chat=_default_selection(resolved.profile("chat", "chat.deepseek")),
-        embedding=_default_selection(resolved.profile("embedding", "embedding.volcengine.ark")),
+        chat=_default_selection(resolved.profile("chat", "chat.openai_compatible.custom")),
+        embedding=_default_selection(resolved.profile("embedding", "embedding.openai_compatible.custom")),
         rerank=_default_selection(resolved.profile("rerank", "rerank.disabled")),
-        vector=_default_selection(resolved.profile("vector", "vector.vikingdb.managed")),
+        vector=_default_selection(resolved.profile("vector", "vector.local_sqlite")),
     )
 
 
@@ -235,10 +235,9 @@ def profile_selection(
 
 
 def _default_selection(profile: SetupProfile) -> ProfileSelection:
-    return ProfileSelection(
-        profile_id=profile.profile_id,
-        values=profile.values_from(profile.patch),
-    )
+    # 不带字段值：只套 Profile 模板。模板里的占位值（例如 Chat、Embedding 的 example. 模型名与地址）原样写出，
+    # 由 doctor 与启动前检查报"还是占位值"；交互式向导会逼用户填真实值
+    return ProfileSelection(profile_id=profile.profile_id)
 
 
 def _current_selection(
@@ -263,7 +262,8 @@ def _apply_profile(
     profile = registry.profile(capability, selection.profile_id)
     if profile.capability != capability:
         raise ValueError("setup profile capability does not match its target")
-    field_keys: frozenset[str] | None = None
+    # 只写选择里给了的字段；没给的保留 Profile 模板值
+    field_keys = frozenset(selection.values)
     if selection.preserve_existing:
         current_profile = registry.identify(capability, existing)
         if current_profile.profile_id != profile.profile_id:

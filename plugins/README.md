@@ -17,8 +17,8 @@ npm install -g habitus
 插件把对话送给本机的 Habitus 服务、从它取记忆和提醒。服务是 Python 写的（Python ≥ 3.12），现在从仓库装：
 
 ```sh
-pip install "habitus[cloud] @ git+https://github.com/kkxx939-bot/Habitus"   # 默认配置用 VikingDB；cloud 含 http、model、vikingdb
-habitus-server init        # 写配置（默认要 DeepSeek、火山方舟、VikingDB 三份凭据），最后问要不要体检
+pip install "habitus[server] @ git+https://github.com/kkxx939-bot/Habitus"   # server 含 http、model；向量库默认是本地文件，不用账号
+habitus-server init        # 写配置（默认要 DeepSeek、Embedding 服务两份凭据；Embedding 的地址与模型自己填），最后问要不要体检
 habitus-server serve       # 起服务（前台运行），默认 http://127.0.0.1:8787；下面的命令另开一个终端
 ```
 
@@ -84,8 +84,8 @@ Requires Node.js ≥ 18 (ZCode needs ≥ 22.5, DeepSeek Harness's compressed ses
 The plugins send conversations to the local Habitus service and fetch memories and reminders from it. The service is written in Python (≥ 3.12) and is currently installed from the repository:
 
 ```sh
-pip install "habitus[cloud] @ git+https://github.com/kkxx939-bot/Habitus"   # the default configuration uses VikingDB; cloud = http + model + vikingdb
-habitus-server init        # writes the configuration (the default needs DeepSeek, Volcengine Ark and VikingDB credentials), then offers a health check
+pip install "habitus[server] @ git+https://github.com/kkxx939-bot/Habitus"   # server = http + model; the vector store defaults to local files, no account needed
+habitus-server init        # writes the configuration (the default needs DeepSeek and embedding-service credentials; you fill in the embedding URL and model), then offers a health check
 habitus-server serve       # starts the service (in the foreground), default http://127.0.0.1:8787; run the commands below in another terminal
 ```
 

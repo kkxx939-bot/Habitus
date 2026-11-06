@@ -1,4 +1,4 @@
-"""在任意远程向量 Backend 之上实现统一的可恢复发布语义。"""
+"""在任意向量 Backend 之上实现统一的可恢复发布语义。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ from habitus.infrastructure.vector.model import (
     VectorStoreMatch,
     VectorStoreRecord,
     VectorStoreState,
-    VectorStoreUnsupportedTopologyError,
 )
 
 _PUBLICATION_FORMAT = "habitus_vector_publication_v1"
@@ -54,13 +53,6 @@ class PublishedVectorStore:
             or self._publication_lock_key != self._publication_lock_key.strip()
         ):
             raise ValueError("publication_lock_key must be normalized non-empty text")
-        if (
-            backend.requires_cross_process_publication_fencing
-            and getattr(path_lock.lock_store, "coordination_scope", None) != "host"
-        ):
-            raise VectorStoreUnsupportedTopologyError(
-                "remote vector publication requires a host-scoped publication PathLock"
-            )
         coordination_domain = getattr(path_lock.lock_store, "coordination_domain", None)
         if not isinstance(coordination_domain, str) or not coordination_domain:
             coordination_domain = f"object:{id(path_lock.lock_store)}"
@@ -426,11 +418,6 @@ def _validate_backend(backend: object) -> None:
         value = getattr(backend, name, None)
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise TypeError(f"backend {name} must be a positive integer")
-    if not isinstance(
-        getattr(backend, "requires_cross_process_publication_fencing", None),
-        bool,
-    ):
-        raise TypeError("backend requires_cross_process_publication_fencing must be boolean")
 
 
 def _shared_mutation_lock(key: str) -> threading.Lock:

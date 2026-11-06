@@ -20,8 +20,8 @@ _COLLECTION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
 class VectorStoreRouteConfig:
     """描述服务来源、协议 Adapter、具名凭据引用和通用运行边界。"""
 
-    provider: str = "volcengine"
-    adapter: str = "vikingdb"
+    provider: str = "local"
+    adapter: str = "local_sqlite"
     base_url: str = ""
     credential_ref: str = ""
     timeout_seconds: float = 30.0

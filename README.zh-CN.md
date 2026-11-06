@@ -40,7 +40,7 @@ Habitus 有两半：**记忆**（默认开）从对话里沉淀长期记忆、�
 
 **摘要。** 每一段生成一份**段摘要**（概述、经过、纠正、结束状态、未完的线索）。段摘要攒够了合成**范围摘要**，范围摘要再合成**归档范围摘要**，到此为止。摘要只是过程史：记忆抽取只读原文，召回只在长期记忆不够用时拿摘要做后备。
 
-**记忆树（L0 / L1 / L2）。** 长期记忆是存储根下 `memory/` 里的一棵 Markdown 文件树，地址协议 `memory://`。**L2** 是唯一权威的记忆文件：正文按 Schema 渲染，文件末尾一段 `HABITUS_MEMORY_FIELDS` JSON 注释保存结构字段、版本、时间和关系（`links` / `backlinks`）。每个目录可以有 **L1** `.overview.md`（覆盖全部直接子项的目录概览，模型写）和 **L0** `.abstract.md`（从 L1 简介里确定性摘出的一段），两者都能删掉重建。远程向量索引从 L0 / L1 / L2 派生，也不是记忆本身。
+**记忆树（L0 / L1 / L2）。** 长期记忆是存储根下 `memory/` 里的一棵 Markdown 文件树，地址协议 `memory://`。**L2** 是唯一权威的记忆文件：正文按 Schema 渲染，文件末尾一段 `HABITUS_MEMORY_FIELDS` JSON 注释保存结构字段、版本、时间和关系（`links` / `backlinks`）。每个目录可以有 **L1** `.overview.md`（覆盖全部直接子项的目录概览，模型写）和 **L0** `.abstract.md`（从 L1 简介里确定性摘出的一段），两者都能删掉重建。向量索引从 L0 / L1 / L2 派生，也不是记忆本身。
 
 **六类记忆。**
 
@@ -251,17 +251,17 @@ flowchart TD
 ### 7. L0 / L1 自下而上与向量同步
 
 - **怎么算**：取本次提交改变的 L2 的全部祖先目录，最深优先各刷新一次。刷新一个目录：取直接 L2 的正文与子目录的 L0（没有 L0 时从子目录 L1 现摘）作为条目，让模型生成目录简介和逐条摘要，条目数、顺序、名字必须与输入一致；渲染成 L1，再从 L1 的第一段确定性截出 L0（≤ 800 字）。空目录删掉它的 L0 / L1。
-- **向量**：L2 以"类型 + 路径 + 正文"、L0 / L1 以"directory + 路径 + 内容"作为文本做 Embedding，写进远程向量库；内容摘要没变的复用旧向量。`completed` 的 Intention 写进单独的分区，默认召回在 Top-K 之前就排除它。
+- **向量**：L2 以"类型 + 路径 + 正文"、L0 / L1 以"directory + 路径 + 内容"作为文本做 Embedding，写进向量库；内容摘要没变的复用旧向量。`completed` 的 Intention 写进单独的分区，默认召回在 Top-K 之前就排除它。
 - **为什么**：L0 / L1 与向量是可重建的派生层：刷新失败不回滚已经成功的 L2，但 Job 保持未完成，按第 8 节的三种处置重试。
 
 ### 8. MemoryJob 队列
 
 - 全局 `memory_sequence` 由 `jobs/state.json` 里只增不减的高水位分配；先推进高水位、再建 `STAGED`，崩溃只留序号空洞。
 - Worker 只认领**最早**的未完成 Job（带租约、心跳），不越过它。失败按三种处置：
-  - **等依赖恢复**：模型此刻用不了（连不上、限流、额度 / 余额不足、鉴权失效、没有权限、模型服务答坏；对话与 Embedding 同一组），或向量库忙 / 连不上（断网、超时、5xx、索引重建中）。这一次不计入尝试次数，按长退避排回队列：60 秒起、每次翻倍、封顶 1 天（`workflow.jobs.model_wait_*`），次数不设上限，不会进 FAILED。健康检查的 `memory_queue` 这时报 `waiting_for_model:<序号>;waits=<次数>;next_attempt_at=…`（向量库在等时也是这个名字）。
+  - **等依赖恢复**：模型此刻用不了（连不上、限流、额度 / 余额不足、鉴权失效、没有权限、模型服务答坏；对话与 Embedding 同一组），或向量库忙 / 暂时用不了（文件被另一连接锁着、磁盘满或 IO 错误、索引重建中）。这一次不计入尝试次数，按长退避排回队列：60 秒起、每次翻倍、封顶 1 天（`workflow.jobs.model_wait_*`），次数不设上限，不会进 FAILED。健康检查的 `memory_queue` 这时报 `waiting_for_model:<序号>;waits=<次数>;next_attempt_at=…`（向量库在等时也是这个名字）。
   - **可重试**：提交冲突、超时、模型答复用完结构纠错仍不合格、未归类的运行时故障。1 秒起、最长 60 秒退避，最多 5 次（`workflow.jobs.max_attempts`），用尽进 FAILED。
-  - **永久**：输入超长、内容安全、永久抽取错误（字段规划或身份规划失败）、完整性错误、配置错误、向量库的其余错误（例如鉴权被拒、请求不合法）。第一次就 FAILED。
-  - 归哪一类顺着异常的根因链由外往里看，第一层认得的说了算：包了一层的向量库断连照样等依赖恢复，包了一层的 401 / 403 / 400 照样永久失败。来源校验不过不再让 Job 失败（见 5.4）。
+  - **永久**：输入超长、内容安全、永久抽取错误（字段规划或身份规划失败）、完整性错误、配置错误、向量库的其余错误（例如向量文件损坏）。第一次就 FAILED。
+  - 归哪一类顺着异常的根因链由外往里看，第一层认得的说了算：包了一层的向量库忙照样等依赖恢复，包了一层的模型 401 / 403 / 400 照样永久失败。来源校验不过不再让 Job 失败（见 5.4）。
 - FAILED 会挡住其后所有 Job，直到人工重试：从 `GET /api/v1/memory/jobs/blocked` 返回的 `job` 里取 `memory_sequence`、`conversation_id`、`started_on`、`version`，再 `POST /api/v1/operations/memory/jobs/{memory_sequence}/retry?conversation_id=<…>&started_on=<YYYY-MM-DD>`，请求体 `{"expected_version": <version>}`；少了两个查询参数回 400 `INVALID_ARGUMENT`。Job FAILED 或在等依赖恢复时 `/ready` 都返回 503，但结果里的 `recall_ready` 仍为 true，插件照常召回已有的记忆。
 - **为什么**：后一项必须在前一项的摘要、回执、L2、L0 / L1、向量全部完成后才读旧记忆，才覆盖真正的跨会话顺序，所以失败的 Job 不跳过；模型或向量库用不了是"过一阵再来就能成"，不该耗尽尝试次数。
 
@@ -455,10 +455,10 @@ L2 的冷热生命周期默认开着，由 `memory.recall_lifecycle.enabled` 一
 **1. 本地服务**（Python ≥ 3.12；还没上 PyPI，从仓库装）：
 
 ```sh
-pip install "habitus[cloud] @ git+https://github.com/kkxx939-bot/Habitus"
+pip install "habitus[server] @ git+https://github.com/kkxx939-bot/Habitus"
 ```
 
-可选依赖分组：`http`（FastAPI、uvicorn，起服务必需）、`model`（结构化输出用的 `json_repair`、`jsonschema`）、`vikingdb`（向量库）、`cloud`（= `http` + `model` + `vikingdb`，默认配置要它）、`observability`（OpenTelemetry 导出）。缺 `http` 时 `habitus-server serve` 会直接说该装哪个分组。
+可选依赖分组：`http`（FastAPI、uvicorn，起服务必需）、`model`（结构化输出用的 `json_repair`、`jsonschema`）、`server`（= `http` + `model`，默认配置要它）、`observability`（OpenTelemetry 导出）。缺 `http` 时 `habitus-server serve` 会直接说该装哪个分组。
 
 **2. 命令行与插件**（Node ≥ 18；npm 包页面见 [plugins/README.md](plugins/README.md)）：
 
@@ -470,7 +470,7 @@ ZCode 读会话库要 Node ≥ 22.5（`node:sqlite`），DeepSeek Harness 读压
 
 ## 快速开始
 
-默认配置要三份凭据：DeepSeek（对话模型）、火山方舟（Embedding）、火山 VikingDB（向量库，AK/SK）。
+默认配置要两份凭据：对话模型服务、Embedding 服务。向量库不要凭据：默认是嵌在进程里的本地向量库，存储根下 `vector/` 里每个 Collection 一个 SQLite 文件（SQLite 存记录、numpy 算余弦），不涉及任何云账号。Embedding 指向自己部署的服务（见下）时，记忆整条链（写入、召回、切段打分）都在本机跑。Embedding 不预置任何厂商，只有一个通用的 OpenAI 兼容协议（`POST {base_url}/embeddings`）：OpenAI、阿里云百炼、硅基流动，以及自己部署的 vLLM、TEI、Ollama 都靠配置接入。对话模型同样不预置任何厂商，由 `models.chat.route.adapter` 在两种协议里选一种：OpenAI Chat Completions（`openai_compatible_chat`，`POST {base_url}/chat/completions`；DeepSeek、通义千问、OpenAI 以及自己部署的 vLLM、Ollama）或 Anthropic Messages（`anthropic_messages`，`POST {base_url}/v1/messages`；Anthropic 官方 `https://api.anthropic.com` 以及说这套协议的网关）。交互式 `init` 会让你选对话协议，并要你填对话模型与 Embedding 的接口地址和模型名（不收 `example.` 一类占位值）；`--non-interactive` 照样写出配置，但对话与 Embedding 两段都是占位模板，终端会列出还要填的 `models.chat.route.model`、`route.base_url`、`context_window_tokens` 与 `models.embedding.route.model`、`route.base_url`、`dimension`，没填之前 `habitus doctor` 与服务启动都直接报"还是占位值"。
 
 `init` 新建配置时检测系统时区：交互时显示检测结果，回车确认或改填别的 IANA 时区名；检测不到（或系统时区是 `UTC` 这类不代表所在地的）时默认 `Asia/Singapore`。地区码（`locale.region`，决定读哪一份放假安排）从时区推：新加坡是 `SG`、中国大陆是 `CN`，别的时区交互时请你填；`--non-interactive` 时检测到就用检测到的，推不出地区就写 `SG`，输出里有一行说明用了什么、要不要去改。配置里不写 `locale` 时默认 `Asia/Singapore`、`SG`。记忆的 Event 日期也按这个时区算。已有配置重跑 `init`（不带 `--force`）不改它。
 
@@ -631,14 +631,13 @@ agent 问没问出口、你怎么答的，服务都从送回的转写里认出�
 
 ```yaml
 credentials:
-  deepseek:  { api_key: "sk-…" }                    # models.chat.route.credential_ref: deepseek
-  ark:       { api_key: "…" }                        # models.embedding.route.credential_ref: ark
+  chat:      { api_key: "sk-…" }                    # models.chat.route.credential_ref: chat
+  embedding: { api_key: "…" }                        # models.embedding.route.credential_ref: embedding（本机服务不要密钥时 credential_ref 置空）
   dashscope: { api_key: "…" }                        # models.rerank.route.credential_ref: dashscope（Rerank 开着时）
-  vikingdb:  { access_key: "…", secret_key: "…" }    # auth_mode: ak_sk；api_key 模式只要 api_key
 ```
 
 - 凭据名与字段名是小写标识符；值不能带首尾空白或换行，最长 16,384 字符。
-- 引用了不存在的凭据，加载即失败；引用了但值为空，`habitus-server doctor` 报 FAIL、服务拒绝启动。各适配器要的字段：chat / embedding / rerank 要 `api_key`；VikingDB 的 `ak_sk` 要 `access_key` + `secret_key`，`api_key` 模式要 `api_key`，`private_headers` 模式要 `credential_headers` 模板里点名的字段。
+- 引用了不存在的凭据，加载即失败；引用了但值为空，`habitus-server doctor` 报 FAIL、服务拒绝启动。各适配器要的字段：chat / embedding / rerank 要 `api_key`；默认的本地向量库不要凭据（它的 `credential_ref` 必须留空）。
 - 文件里有任何非空秘密时，文件不得有组 / 其他用户的权限，否则拒绝加载；`init` 写出的文件是 0600。
 
 ### 各组一览
@@ -685,7 +684,7 @@ credentials:
 
 | 字段 | 默认 | 取值 | 作用 |
 |---|---|---|---|
-| `root` | `~/.habitus` | 路径，不能是符号链接 | 全部耐久数据的根目录，其下分 memory/conversation/behavior/scene/foresight/workflow 子目录；不许是符号链接 |
+| `root` | `~/.habitus` | 路径，不能是符号链接 | 全部耐久数据的根目录，其下分 memory/conversation/behavior/scene/foresight/vector/workflow 子目录；不许是符号链接 |
 | `sqlite_lock.timeout_seconds` | 5.0 | ≥ 0.001，≤ 60 | 三个 SQLite 锁库（locks / memory_vector_locks / summary_vector_locks）连库时等待数据库忙解除的秒数 |
 
 </details>
@@ -768,18 +767,18 @@ credentials:
 
 | 字段 | chat 默认 | embedding 默认 | rerank 默认 | 取值 | 作用 |
 |---|---|---|---|---|---|
-| `provider` | `deepseek` | `volcengine` | `aliyun` |  | 厂商名；须与 adapter 构造出的组件 provider_name 一致；embedding 的进入向量指纹 |
-| `adapter` | `openai_compatible_chat` | `ark_multimodal` | `openai_compatible_rerank` |  | 按（能力, adapter）选已注册协议适配器；内置 openai_compatible_chat/ark_multimodal/openai_compatible_rerank |
-| `model` | `deepseek-chat` | `doubao-embedding-vision-251215` | `qwen3-rerank` |  | 请求体里的 model 字段；须与组件 model 一致；embedding 的进入向量指纹 |
-| `base_url` | `https://api.deepseek.com` | `https://ark.cn-beijing.volces.com/api/v3` | `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-api/v1` | ；可为 null | 接口前缀：chat 拼 /chat/completions、rerank 拼 /reranks、ark 拼 /embeddings/multimodal；内置三适配器都必填，远端须 HTTPS |
-| `credential_ref` | `deepseek` | `ark` | `dashscope` | ；可为 null | 指向 credentials 条目取 API key；引用了却为空时启动报错 |
+| `provider` | `custom` | `custom` | `aliyun` |  | 厂商名；须与 adapter 构造出的组件 provider_name 一致；embedding 的进入向量指纹 |
+| `adapter` | `openai_compatible_chat` | `openai_compatible_embedding` | `openai_compatible_rerank` |  | 按（能力, adapter）选已注册协议适配器；内置 openai_compatible_chat 或 anthropic_messages/openai_compatible_embedding/openai_compatible_rerank |
+| `model` | `example.chat-model`（占位，须改） | `example.embedding-model`（占位，须改） | `qwen3-rerank` |  | 请求体里的 model 字段；须与组件 model 一致；embedding 的进入向量指纹 |
+| `base_url` | `https://chat.example.com/v1`（占位，须改） | `https://embedding.example.com/v1`（占位，须改） | `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-api/v1` | ；可为 null | 接口前缀：chat 拼 /chat/completions（anthropic_messages 拼 /v1/messages，前缀已以 /v1 结尾时只拼 /messages）、embedding 拼 /embeddings、rerank 拼 /reranks；内置三适配器都必填，远端须 HTTPS；回环地址（127.0.0.1、localhost）算本机服务 |
+| `credential_ref` | `chat` | `embedding` | `dashscope` | ；可为 null | 指向 credentials 条目取 API key；引用了却为空时启动报错；embedding 置空时不发 Authorization |
 | `timeout_seconds` | 300.0 | 30.0 | 30.0 | > 0，≤ 600 | 单次调用超时：chat 为 httpx 超时，embedding/rerank 另加 wait_for 超时 |
 | `max_retries` | 2 | 2 | 2 | 0–10 | 可重试错误的重试次数，总尝试 = 它+1 |
 | `retry_base_delay_seconds` | 0.5 | 0.5 | 0.5 | > 0，≤ 30 | 指数退避起始间隔（每次×2，±20% 抖动） |
 | `retry_max_delay_seconds` | 30.0 | 30.0 | 30.0 | ≥ 0.5，≤ 300 † | 退避间隔上限，也封顶厂商 Retry-After |
 | `max_concurrent` | 16 | 16 | 8 | 1–4096 | 该能力同时在途的请求数（信号量）与连接池大小 |
 | `max_response_bytes` | 8388608 | 8388608 | 8388608 | 1024–67_108_864 | 读响应体的字节上限，超了报错不再读 |
-| `extra_headers` | `{}` | `{}` | `{}` |  | 附加到请求头；不许含 Authorization |
+| `extra_headers` | `{}` | `{}` | `{}` |  | 附加到请求头；不许含 Authorization（anthropic_messages 也不许含由适配器设置的 x-api-key、anthropic-version；anthropic-beta 可以） |
 | `extra_body` | `{}` | `{}` | `{"instruct": "Given a web search query, retrieve relevant passages that answer the query."}` |  | 并入请求体的厂商专用字段，不能覆盖保留字段；embedding 的进入向量指纹（改了触发重建） |
 
 </details>
@@ -789,9 +788,9 @@ credentials:
 | 字段 | 默认 | 取值 | 作用 |
 |---|---|---|---|
 | `context_window_tokens` | 64000 | 64000–10_000_000 † | 估算输入+预留输出超过它即拒发（ModelInputTooLarge）；也校验抽取预算 |
-| `max_output_tokens` | 8192 | 1–63999 †；可为 null | 调用方没指定时作为 max_tokens 发出并预留；null 则不发 |
-| `structured_output_mode` | `json_object` | none / json_object / json_schema | 结构化调用时发 response_format：none 不发/json_object/json_schema |
-| `reasoning` | false | true / false | 为 true 时不发 temperature，并允许请求带 reasoning_effort |
+| `max_output_tokens` | 8192 | 1–63999 †；可为 null | 调用方没指定时作为 max_tokens 发出并预留；null 则不发；anthropic_messages 必填（协议的 max_tokens 必传） |
+| `structured_output_mode` | `json_object` | none / json_object / json_schema | 结构化调用时发 response_format：none 不发/json_object/json_schema；anthropic_messages 只收 json_schema（作为 output_config.format 发出，Schema 换成协议支持的子集，完整 Schema 仍在本地校验）或 none |
+| `reasoning` | false | true / false | 为 true 时不发 temperature，并允许请求带 reasoning_effort（anthropic_messages 发 output_config.effort，只收 low / medium / high；它任何时候都不发 temperature） |
 
 </details>
 
@@ -799,12 +798,13 @@ credentials:
 
 | 字段 | 默认 | 取值 | 作用 |
 |---|---|---|---|
-| `dimension` | 1024 | 1–65536 | 向量维度：返回维度不符即报错（ark 截取前 N 维），也是向量库建库维度 |
-| `input_mode` | `multimodal` | text / multimodal（内置 ark_multimodal 只收 multimodal） | text/multimodal；ark_multimodal 只接受 multimodal；进入向量指纹 |
+| `dimension` | 1024（占位，按模型改） | 1–65536 | 向量维度：服务返回的维度必须与它相同，不符即报错、不截取（服务支持时可在 `route.extra_body` 写 `dimensions` 让它按这个维度输出）；也是向量库建库维度 |
 | `max_batch_size` | 32 | 1–2048 | 批量嵌入时每批并发发出的单条请求数 |
-| `max_input_chars` | 16000 | 16000–1_000_000 † | 单条待嵌入文本字符上限，超了报错；也是切段语义边界单元上限 |
+| `max_input_chars` | 16000 | 16000–1_000_000 † | 单条待嵌入文本字符上限（按拼上前缀之后的长度算），超了报错；减去 `document_prefix` 长度后是切段语义边界单元与向量记录的上限，减去 `query_prefix` 长度后是查询的上限 |
 | `query_parameters` | `{}` |  | 查询嵌入时并入请求体的参数 |
 | `document_parameters` | `{}` |  | 文档嵌入时并入请求体的参数；进入向量指纹 |
+| `query_prefix` | `""` | 字符串 | 查询文本前面拼的前缀（E5 一类用 `query: `，BGE、Qwen3-Embedding 用一句指令）；不进向量指纹，改了不重建索引 |
+| `document_prefix` | `""` | 字符串 | 文档文本前面拼的前缀（E5 一类用 `passage: `）；进入向量指纹，改了会全量重建向量索引。默认 `max_input_chars` 与两处 `max_record_chars` 相等，填非空前缀时要把 `max_record_chars` 各调小至少前缀长度，或把 `max_input_chars` 调大，否则配置加载报错 |
 
 </details>
 
@@ -938,34 +938,21 @@ credentials:
 
 | 字段 | memory 默认 | 会话摘要默认 | 取值 | 作用 |
 |---|---|---|---|---|
-| `route.provider` | `volcengine` | `volcengine` |  | 服务来源名；只做身份校验（须与后端 provider_name 一致）并参与发布锁身份 |
-| `route.adapter` | `vikingdb` | `vikingdb` |  | 选哪个已注册的向量库协议实现（目前只有 vikingdb），未注册即报错 |
-| `route.base_url` | 空 | 空 |  | 数据面地址；留空则按 options.region 推出公有云地址，private_headers 模式必填 |
-| `route.credential_ref` | `vikingdb` | `vikingdb` |  | 指向 credentials 下哪一项凭据；引用了却取不到凭据即报错 |
-| `route.timeout_seconds` | 30.0 | 30.0 | ≥ 0.001，≤ 600 | 每个 HTTP 请求的连接/读取超时 |
-| `route.max_retries` | 2 | 2 | 0–10 | 网络错误或可重试状态码的重试次数；也用作建表/删表后轮询可读的次数 |
-| `route.retry_base_delay_seconds` | 0.5 | 0.5 | ≥ 0.001，≤ 30 | 重试退避基数，第 n 次等待 base×2^n，封顶 retry_max |
-| `route.retry_max_delay_seconds` | 30.0 | 30.0 | ≥ 0.5，≤ 300 | 单次退避等待上限，也截断模型服务给的 Retry-After |
-| `route.max_concurrent` | 16 | 16 | 1–4096 | 同一客户端同时在途请求数（信号量） |
-| `route.max_response_bytes` | 8388608 | 8388608 | 1024–67_108_864 | 单个响应体字节上限，超了报错；启动时还校验读页大小×估算记录大小不超过它 |
-| `route.extra_headers` | `{}` | `{}` |  | 每个请求附加的 HTTP 头；不许含认证头，不许与 credential_headers 重名 |
-| `collection` | `memory` | `conversation_summaries` |  | 写入哪个 Collection；须与后端一致，并参与发布锁身份。默认值两处不同：memory / conversation_summaries |
-| `options.auth_mode` | `ak_sk` | `ak_sk` | api_key / ak_sk / private_headers | 认证方式：api_key / ak_sk（签名）/ private_headers（私有部署按头模板注入凭据） |
-| `options.schema_mode` | `managed` | `managed` | managed / precreated（managed 要求 ak_sk） | managed 自动建表，维度变了就删表重建；precreated 表缺失或维度变了直接报错 |
-| `options.project_name` | `default` | `default` | ；可为 null | 请求里带的 VikingDB 项目名，也是 Collection 作用域前缀 |
-| `options.index_name` | `default` | `default` | ；可为 null | 检索用的索引名；元数据里的索引名不符即报错 |
-| `options.region` | `cn-beijing` | `cn-beijing` | ；可为 null | 推导默认数据面/控制台地址，并用于 ak_sk 签名 |
-| `options.console_url` | 空 | 空 | ；可为 null | ak_sk 控制面（建表/删表/建索引）地址；留空按 region 推出 |
-| `options.credential_headers` | `{}` | `{}` | ；可为 null | private_headers 模式下"头名→{凭据名}模板"，请求时替换成凭据值 |
-| `options.upsert_batch_size` | 100 | 100 | 1–100 | 写入时每批记录数（≤100） |
-| `options.fetch_batch_size` | 64 | 64 | 1–100 | 按 id 取记录时每批个数（≤100） |
-| `options.delete_batch_size` | 100 | 100 | 1–100 | 删除时每批 id 数（≤100） |
-| `options.search_page_size` | 64 | 64 | 1–5000 | 向量检索分页的每页条数，翻页直到凑够 limit |
-| `options.scan_page_size` | 64 | 64 | 1–5000 | 全量扫描分页的每页条数 |
-| `options.max_search_hits` | 10000 | 10000 | 1–1_000_000，≤ max_records | 后端单次检索返回上限；上层请求超过它即拒绝，且须≥vector_index.max_search_hits |
-| `options.max_records` | 1000000 | 1000000 | 1–100_000_000 | 后端容量上限；扫描到超过它报完整性错误，且须≥vector_index.max_records |
-| `options.index_sync_timeout_seconds` | 60.0 | 60.0 | 0.1–3600 | 写入后等索引追上的最长时间，超时报 VectorStoreBusyError |
-| `options.index_sync_poll_interval_seconds` | 1.0 | 1.0 | 0.01–60，≤ 超时 | 等索引追上时每次轮询间隔 |
+| `route.provider` | `local` | `local` |  | 服务来源名；只做身份校验（须与后端 provider_name 一致）并参与发布锁身份 |
+| `route.adapter` | `local_sqlite` | `local_sqlite` |  | 选哪个已注册的向量库协议实现（目前只有 `local_sqlite`：进程内 SQLite + numpy），未注册即报错 |
+| `route.base_url` | 空 | 空 | local_sqlite 必须为空 | 走网络的向量库的地址；本地库收到非空值即报错 |
+| `route.credential_ref` | 空 | 空 | local_sqlite 必须为空 | 指向 credentials 下哪一项凭据；本地库不要凭据，引用了即报错 |
+| `route.timeout_seconds` | 30.0 | 30.0 | ≥ 0.001，≤ 600 | 走网络的向量库的请求超时；local_sqlite 不用 |
+| `route.max_retries` | 2 | 2 | 0–10 | 走网络的向量库的重试次数；local_sqlite 不用 |
+| `route.retry_base_delay_seconds` | 0.5 | 0.5 | ≥ 0.001，≤ 60 | 走网络的向量库的退避基数；local_sqlite 不用 |
+| `route.retry_max_delay_seconds` | 30.0 | 30.0 | ≥ 0.001，≤ 300，≥ retry_base | 走网络的向量库的退避上限；local_sqlite 不用 |
+| `route.max_concurrent` | 16 | 16 | 1–4096 | 走网络的向量库的并发请求数；local_sqlite 不用 |
+| `route.max_response_bytes` | 8388608 | 8388608 | 1024–67_108_864 | 走网络的向量库的响应体字节上限；local_sqlite 不用 |
+| `route.extra_headers` | `{}` | `{}` | local_sqlite 必须为空 | 走网络的向量库每个请求附加的 HTTP 头；不许含认证头 |
+| `collection` | `memory` | `conversation_summaries` | 两处必须不同；local_sqlite 只收小写 | 写入哪个 Collection；local_sqlite 下也是文件名 `vector/{collection}.sqlite3`；参与发布锁身份 |
+| `options.busy_timeout_seconds` | 5.0 | 5.0 | 0.001–600 | 另一连接正持有该文件写锁时最多等几秒；等不到报"向量库忙"，记忆 Job 按等依赖恢复处理，不判失败 |
+
+本地向量库打开时把这个 Collection 的全部向量读进内存，每次提交后同步更新；别的连接提交过会察觉并整块重读。这些文件是派生数据：删掉 `vector/`，服务会从记忆树和摘要把两份索引全量重建（全部重新做 Embedding）。
 
 </details>
 
@@ -1472,12 +1459,12 @@ credentials:
 
 **发给外部服务的**
 
-- **对话模型**（默认 DeepSeek）：
+- **对话模型**（你配置的那一个）：
   - 记忆：完整的段原文（段摘要、检索判定、候选三处；一轮太长按段抽取时还有这一轮开头的人话与前面各段的段摘要）、读进来的旧记忆的完整 L2（正文、结构字段、版本、时间与关系）、目录下全部直接 L2 正文与子目录 L0（生成 L1）、召回时的问题与最近消息 / 活跃摘要（查询规划）、组装好的召回上下文（评分）、COLD_2 记忆的字段（压缩）、待合并的摘要（范围摘要）。
   - 行为与预测（启用后）：会话 lane 每轮的材料（人的指令、agent 的答复、工具调用名与参数开头、失败报错开头；工具结果正文不发；密钥两道抹除）；词表归类、新增、拆改时记录的名字、概要、目标、步骤；语义树写概念、映射、先验、候选条件时的类名、判据、例子与当天时间线；预测层判断小包里的最近 6 次记录与时刻；每日概览的当日行为。物理 lane 的融合不调模型，但那一支的白天归类与每日概览照样调。
-- **Embedding 服务**（默认火山方舟）：live 里相邻安全单元的原文（切段打分，每单元截到 Embedding 的单条上限）、L2 正文与 L0 / L1、摘要正文、召回查询。
+- **Embedding 服务**（你配置的那一家）：live 里相邻安全单元的原文（切段打分，每单元截到 Embedding 的单条上限）、L2 正文与 L0 / L1、摘要正文、召回查询。
 - **Reranker**（默认阿里云 `qwen3-rerank`，可不配；`init` 写出的配置不开）：召回查询与候选记忆的文本。
-- **远程向量库**（默认火山 VikingDB）：L2 正文、L0 / L1、摘要正文的文本与向量，以及 URI 等属性。
+- **向量库**：不外发；默认向量库是存储根下 `vector/` 里的本地文件，存 L2 正文、L0 / L1、摘要正文的文本与向量，以及 URI 等属性。
 
 ## 开发
 
@@ -1497,7 +1484,7 @@ credentials:
 | `habitus/series/`、`habitus/temporal/`、`habitus/conditions/` | 把行为树读成事件序列；读时间的尺子；日历条件（含随包的放假数据 `conditions/holidays/`） |
 | `habitus/scene/` | 语义树（关系检验、复现、概念） |
 | `habitus/foresight/` | 预测层的纯规则（账、梯子、递送、反馈），不碰 infrastructure；唯一的模型触点是 `foresight/judge/`（判断模型，由架构测试钉住） |
-| `habitus/infrastructure/` | 耐久文件、锁（SQLite）、事务快照、向量库发布机制与 VikingDB 适配器、可观测性 |
+| `habitus/infrastructure/` | 耐久文件、锁（SQLite）、事务快照、向量库发布机制与本地 SQLite + numpy 向量库、可观测性 |
 | `habitus/foundation/` | 不依赖任何其他包的基础件（ID、时间戳、区间、脱敏等） |
 | `habitus/integrations/` | `http_api/`（FastAPI 应用）与 `local_service/`（`habitus-server` 命令行：init / doctor / serve） |
 | `habitus/benchmark/` | 记忆基准（LoCoMo、LongMemEval、Habitus 原生数据），只在仓库里跑：`python -m habitus.benchmark`；不随 wheel 发布 |
@@ -1528,7 +1515,7 @@ bash scripts/ci.sh
 
 ### 测试分层
 
-- **单元**（`tests/unit/<领域>/`）：每个领域包自己的不变量；模型、远程向量库、时钟、锁竞争用替身隔离。
+- **单元**（`tests/unit/<领域>/`）：每个领域包自己的不变量；模型、时钟、锁竞争用替身隔离；本地向量库在临时目录里真跑。
 - **集成**（`tests/integration/`）：真实文件存储、真实 Runtime 组装。`test_runtime_assembly.py` 在行为、语义树、预测、生命周期四组全开的配置下走一遍 `build_runtime`，并起停各常驻 Worker；`test_long_turn_extraction.py` 用默认路由真实的请求估算走一遍超长轮的按段抽取。
 - **架构**（`tests/architecture/test_dependency_boundaries.py`）：按源码静态检查依赖方向，例如领域包不得导入 `runtime`、`foundation` 不依赖其他包、`infrastructure` 不导入 `config` 与 `model_client`、语义树只从行为树派生、预测层只读派生树、`config/root.py` 不按具体模型或向量库适配器分支、记忆的时区只由组合根注入、退出的旧契约与 `memoryos://` 等协议不得复活。
 - **插件**（`plugins/memory-plugin-shared/test/`）：`node --test`，包括共享库副本与源一致、插件 ↔ 服务契约（`test/fixtures/service-contract.json`，本地服务一侧由 `tests/unit/integrations/test_service_contract.py` 对同一份断言）。
@@ -1575,7 +1562,7 @@ bash scripts/ci.sh
 | DeepSeek Harness | 按 0.2.1-rc.2 源码接入，未实测（pre-step 重复触发、当前一代日志行格式、home patch 是否生效） |
 | OpenCode | 未在真实 OpenCode 里跑过 |
 | pi | 在真 pi 1.3.0 的扩展加载器上验证过，未跑过真实对话 |
-| 真实向量库与 Rerank 下的召回 | 端到端实验没有 VikingDB / 方舟 / 百炼的密钥，用的是确定性替身，召回的排序与条数还没在真实服务上看过 |
+| 真实向量库与 Rerank 下的召回 | 端到端实验没有 Embedding 服务 / 百炼的密钥，用的是确定性的 Embedding 替身（本地向量库本身是真的），召回的排序与条数还没在真实 Embedding 与真实 Rerank 下看过 |
 
 ### 已知限制
 

@@ -76,7 +76,7 @@ from habitus.infrastructure.lifecycle import CapacitySnapshotStore, LifecyclePar
 from habitus.infrastructure.observability import ManagedObservability, MetricRegistry
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.sqlite import SQLiteLockStore
-from habitus.infrastructure.vector import VectorStoreFactory, VectorStoreRequirements
+from habitus.infrastructure.vector import VectorStoreFactory
 from habitus.infrastructure.vector.adapters import register_builtin_vector_adapters
 from habitus.memory.browse import MemoryBrowser
 from habitus.memory.compaction import (
@@ -101,7 +101,6 @@ from habitus.memory.conversation import (
     ConversationSummaryStore,
     PersistentConversationSummaryVectorIndex,
     SQLiteConversationSummaryUseStore,
-    conversation_summary_embedding_fingerprint,
 )
 from habitus.memory.document import MemoryDocumentCodec
 from habitus.memory.editor import (
@@ -112,7 +111,7 @@ from habitus.memory.editor import (
     MemoryRelatedRetriever,
     MemoryTransactionJournal,
 )
-from habitus.memory.indexing import PersistentMemoryVectorIndex, memory_embedding_fingerprint
+from habitus.memory.indexing import PersistentMemoryVectorIndex
 from habitus.memory.intention import MemoryIntentionReviewer
 from habitus.memory.recall import (
     MemoryRecallLifecycle,
@@ -151,6 +150,7 @@ from habitus.runtime.components import (
     RuntimeWorkflow,
 )
 from habitus.runtime.conditions import local_calendar
+from habitus.runtime.embedding_fingerprints import embedding_fingerprints
 from habitus.runtime.evidence import evidence_of
 from habitus.runtime.foresight import (
     build_foresight_components,
@@ -175,6 +175,7 @@ from habitus.runtime.scene import build_nightly, build_nightly_worker, build_sce
 from habitus.runtime.scene_config import relation_thresholds
 from habitus.runtime.session_lane import BehaviorSessionConsumer, answered_question_tools, session_salvager
 from habitus.runtime.unsealed import UnsealedFromJudgements
+from habitus.runtime.vector_stores import build_vector_store
 from habitus.runtime.worker import MemoryWorker
 
 
@@ -291,32 +292,15 @@ def build_runtime(
             observer=operation_observer,
             outbound=config.network,
         )
-    vector_store = resolved_vector_stores.create(
-        memory_config.vector_store,
-        requirements=VectorStoreRequirements(
-            dimension=model_config.embedding.dimension,
-            max_records=memory_config.vector_index.max_records,
-            max_search_hits=memory_config.vector_index.max_search_hits,
-            max_record_chars=memory_config.vector_index.max_record_chars,
-        ),
-        credentials=config.credentials.resolve(memory_config.vector_store.route.credential_ref),
-        path_lock=memory_vector_lock,
+    vector_store = build_vector_store(
+        resolved_vector_stores, config, memory_config.vector_store, memory_config.vector_index, memory_vector_lock
     )
     vector_index = PersistentMemoryVectorIndex(
         tree,
         embedder,
         vector_store,
         dimension=model_config.embedding.dimension,
-        embedding_fingerprint=memory_embedding_fingerprint(
-            provider=model_config.embedding.route.provider,
-            adapter=model_config.embedding.route.adapter,
-            model=model_config.embedding.route.model,
-            base_url=model_config.embedding.route.base_url,
-            dimension=model_config.embedding.dimension,
-            input_mode=model_config.embedding.input_mode,
-            extra_body=model_config.embedding.route.extra_body,
-            document_parameters=model_config.embedding.document_parameters,
-        ),
+        embedding_fingerprint=embedding_fingerprints(model_config.embedding)[0],
         config=memory_config.vector_index,
         path_lock=resolved_lock,
     )
@@ -386,20 +370,11 @@ def build_runtime(
         config=conversation_config.journal,
     )
     retention = ConversationRetentionPlanner(conversation_config.segmentation)
-    boundary_embedding_fingerprint = conversation_summary_embedding_fingerprint(
-        provider=model_config.embedding.route.provider,
-        adapter=model_config.embedding.route.adapter,
-        model=model_config.embedding.route.model,
-        base_url=model_config.embedding.route.base_url,
-        dimension=model_config.embedding.dimension,
-        input_mode=model_config.embedding.input_mode,
-        extra_body=model_config.embedding.route.extra_body,
-        document_parameters=model_config.embedding.document_parameters,
-    )
+    boundary_embedding_fingerprint = embedding_fingerprints(model_config.embedding)[1]
     boundary_scorer = ConversationSemanticBoundaryScorer(
         embedder,
         embedding_fingerprint=boundary_embedding_fingerprint,
-        max_unit_chars=model_config.embedding.max_input_chars,
+        max_unit_chars=model_config.embedding.max_document_text_chars,
     )
     summary_store = ConversationSummaryStore(
         conversations.layout,
@@ -440,16 +415,12 @@ def build_runtime(
             * (1 + conversation_config.lifecycle.summary_compaction.segment_to_range.max_source_count)
         ),
     )
-    summary_vector_store = resolved_vector_stores.create(
+    summary_vector_store = build_vector_store(
+        resolved_vector_stores,
+        config,
         conversation_config.summary_vector_store,
-        requirements=VectorStoreRequirements(
-            dimension=model_config.embedding.dimension,
-            max_records=conversation_config.summary_vector_index.max_records,
-            max_search_hits=conversation_config.summary_vector_index.max_search_hits,
-            max_record_chars=conversation_config.summary_vector_index.max_record_chars,
-        ),
-        credentials=config.credentials.resolve(conversation_config.summary_vector_store.route.credential_ref),
-        path_lock=summary_vector_lock,
+        conversation_config.summary_vector_index,
+        summary_vector_lock,
     )
     summary_vector_index = PersistentConversationSummaryVectorIndex(
         conversations,

@@ -304,18 +304,13 @@ def _prompt_registered_profile(
 
 def _prompt_setup_field(field: SetupField, default: object) -> object:
     if field.kind == "text":
-        if not isinstance(default, str) or not default:
-            raise ValueError(f"setup field default must be non-empty: {field.key}")
+        if not isinstance(default, str):
+            raise ValueError(f"setup field default must be a string: {field.key}")
         return _prompt_text(field.label, default)
     if field.kind == "required_text":
-        resolved = (
-            default
-            if isinstance(default, str)
-            and default.strip()
-            and not any(fragment in default for fragment in field.forbidden_fragments)
-            else None
-        )
-        return _prompt_required_text(field.label, resolved)
+        placeholder = isinstance(default, str) and (default in field.placeholder_values or "{" in default)
+        resolved = default if isinstance(default, str) and default.strip() and not placeholder else None
+        return _prompt_required_text(field.label, resolved, placeholder_values=field.placeholder_values)
     if field.kind == "positive_int":
         if isinstance(default, bool) or not isinstance(default, int):
             raise ValueError(f"setup field default must be an integer: {field.key}")
@@ -363,8 +358,10 @@ def _configure_missing_credentials(path: Path) -> None:
 
 
 def _write_missing_credentials_hint(path: Path) -> None:
-    from habitus.integrations.local_service.initialization import missing_credential_fields
+    from habitus.integrations.local_service.initialization import missing_credential_fields, unfilled_setup_hints
 
+    for hint in unfilled_setup_hints(path):  # 非交互 init 写出的 Embedding 模板：列出还要填的项（W7）
+        sys.stdout.write(f"Not configured yet: {hint}\n")
     missing = missing_credential_fields(path)
     if missing:
         fields = ", ".join(f"credentials.{item.reference}.{item.field}" for item in missing)
@@ -560,7 +557,7 @@ def _serve(values: Mapping[str, str]) -> None:
 
         raise SystemExit(
             f"habitus-server serve requires the 'http' extra ({exc.name or 'fastapi/uvicorn'} is missing); "
-            f"install with: {pip_install_command('cloud')} (the default cloud setup, includes 'http') "
+            f"install with: {pip_install_command('server')} (the default setup, includes 'http') "
             f"or {pip_install_command('http')}"
         ) from exc
 
@@ -721,29 +718,30 @@ def _prompt_choice(
 
 
 def _prompt_text(prompt: str, default: str) -> str:
-    if not isinstance(default, str) or not default.strip():
-        raise ValueError("prompt text default must be non-empty")
-    try:
-        value = input(f"{prompt} [{default}]: ").strip()
+    if not isinstance(default, str):
+        raise ValueError("prompt text default must be a string")
+    try:  # 空默认（例如本机无密钥的 credential_ref）不显示 []
+        value = input(f"{prompt}{f' [{default}]' if default else ''}: ").strip()
     except (EOFError, OSError) as exc:
         raise WizardCancelled("interactive text input ended") from exc
     return value or default
 
 
-def _prompt_required_text(prompt: str, default: str | None = None) -> str:
+def _prompt_required_text(prompt: str, default: str | None = None, *, placeholder_values: tuple[str, ...] = ()) -> str:
     if default is not None and (not isinstance(default, str) or not default.strip()):
         raise ValueError("prompt text default must be non-empty")
     suffix = f" [{default}]" if default is not None else ""
     while True:
         try:
-            value = input(f"{prompt}{suffix}: ").strip()
+            value = input(f"{prompt}{suffix}: ").strip() or (default or "")
         except (EOFError, OSError) as exc:
             raise WizardCancelled("interactive required input ended") from exc
-        if value:
+        if value in placeholder_values or "{" in value:  # 出厂模板原值或留着 {var} 的，要换成真实值
+            sys.stdout.write(f"{value} is a setup placeholder; enter the real value.\n")
+        elif value:
             return value
-        if default is not None:
-            return default
-        sys.stdout.write("Value is required.\n")
+        else:
+            sys.stdout.write("Value is required.\n")
 
 
 def _prompt_positive_int(prompt: str, default: int) -> int:

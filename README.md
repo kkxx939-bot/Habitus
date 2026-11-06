@@ -40,7 +40,7 @@ Habitus has two halves: **memory** (on by default) distills long-term memory fro
 
 **Summaries.** Each segment gets one **segment summary** (overview, chronology, corrections, ending state, open threads). Enough segment summaries are combined into a **range summary**, and range summaries into an **archive range summary**, which is the last level. Summaries are only process history: memory extraction reads the raw messages, and recall uses summaries only as a fallback when long-term memory is not enough.
 
-**Memory tree (L0 / L1 / L2).** Long-term memory is a tree of Markdown files under `memory/` in the storage root, addressed by `memory://`. **L2** files are the only authoritative memory: the body is rendered from the schema, and one trailing `HABITUS_MEMORY_FIELDS` JSON comment holds the structured fields, revision, timestamps and relations (`links` / `backlinks`). Every directory may have an **L1** `.overview.md` (a model-written overview covering every direct child) and an **L0** `.abstract.md` (a passage extracted deterministically from the L1 introduction); both can be deleted and rebuilt. The remote vector index is derived from L0 / L1 / L2 and is not memory either.
+**Memory tree (L0 / L1 / L2).** Long-term memory is a tree of Markdown files under `memory/` in the storage root, addressed by `memory://`. **L2** files are the only authoritative memory: the body is rendered from the schema, and one trailing `HABITUS_MEMORY_FIELDS` JSON comment holds the structured fields, revision, timestamps and relations (`links` / `backlinks`). Every directory may have an **L1** `.overview.md` (a model-written overview covering every direct child) and an **L0** `.abstract.md` (a passage extracted deterministically from the L1 introduction); both can be deleted and rebuilt. The vector index is derived from L0 / L1 / L2 and is not memory either.
 
 **Six kinds of memory.**
 
@@ -251,17 +251,17 @@ When items fail, the model gets the list of "which item, which rule" back and re
 ### 7. Bottom-up L0 / L1 and vector sync
 
 - **How**: take every ancestor directory of the L2 files changed by the commit and refresh each once, deepest first. Refreshing a directory: the entries are the bodies of direct L2 files and the L0 of child directories (taken from a child's L1 when it has no L0); the model writes a directory summary and one summary per entry, with the same count, order and names as the input; this renders L1, and L0 is cut deterministically from L1's first paragraph (≤ 800 characters). An empty directory loses its L0 / L1.
-- **Vectors**: L2 is embedded as "kind + path + body", L0 / L1 as "directory + path + content", and written to the remote vector store; unchanged content digests reuse the old vector. `completed` Intentions go to a separate partition that default recall excludes before top-K.
+- **Vectors**: L2 is embedded as "kind + path + body", L0 / L1 as "directory + path + content", and written to the vector store; unchanged content digests reuse the old vector. `completed` Intentions go to a separate partition that default recall excludes before top-K.
 - **Why**: L0 / L1 and vectors are rebuildable derived layers: a refresh failure never rolls back a committed L2, but the job stays unfinished and is retried under the three dispositions of §8.
 
 ### 8. MemoryJob queue
 
 - The global `memory_sequence` comes from a never-decreasing high-water mark in `jobs/state.json`; the mark is advanced before the `STAGED` job is created, so a crash can only leave a gap.
 - The worker only claims the **oldest** unfinished job (with a lease and heartbeat) and never skips it. Failures fall into three dispositions:
-  - **Wait for a dependency**: the model is unavailable right now (unreachable, rate-limited, quota or balance exhausted, credentials rejected, permission denied, broken server reply; chat and embedding alike), or the vector store is busy / unreachable (network down, timeout, 5xx, index rebuilding). The attempt is not counted; the job is requeued with a long backoff: from 60 s, doubling, capped at 1 day (`workflow.jobs.model_wait_*`), with no limit on the number of waits, and it never becomes FAILED. Meanwhile the `memory_queue` health check reports `waiting_for_model:<sequence>;waits=<count>;next_attempt_at=…` (the same name when it is the vector store being waited on).
+  - **Wait for a dependency**: the model is unavailable right now (unreachable, rate-limited, quota or balance exhausted, credentials rejected, permission denied, broken server reply; chat and embedding alike), or the vector store is busy / unavailable (its file locked by another connection, disk full or an I/O error, index rebuilding). The attempt is not counted; the job is requeued with a long backoff: from 60 s, doubling, capped at 1 day (`workflow.jobs.model_wait_*`), with no limit on the number of waits, and it never becomes FAILED. Meanwhile the `memory_queue` health check reports `waiting_for_model:<sequence>;waits=<count>;next_attempt_at=…` (the same name when it is the vector store being waited on).
   - **Retryable**: commit conflict, timeout, a model reply still invalid after structural corrections, uncategorised runtime faults. Backoff from 1 s up to 60 s, at most 5 attempts (`workflow.jobs.max_attempts`), then FAILED.
-  - **Permanent**: input too large, content safety, permanent extraction error (field planning or identity planning failed), integrity error, configuration error, any other vector-store error (e.g. rejected credentials, an invalid request). FAILED at once.
-  - The disposition follows the exception's cause chain from the outside in, and the first layer it recognises decides: a wrapped vector-store outage still waits for the dependency, and a wrapped 401 / 403 / 400 still fails permanently. A source-validation failure no longer fails the job (see 5.4).
+  - **Permanent**: input too large, content safety, permanent extraction error (field planning or identity planning failed), integrity error, configuration error, any other vector-store error (e.g. a corrupt vector file). FAILED at once.
+  - The disposition follows the exception's cause chain from the outside in, and the first layer it recognises decides: a wrapped busy vector store still waits for the dependency, and a wrapped model 401 / 403 / 400 still fails permanently. A source-validation failure no longer fails the job (see 5.4).
 - A FAILED job blocks every later job until it is retried by hand: take `memory_sequence`, `conversation_id`, `started_on` and `version` from the `job` returned by `GET /api/v1/memory/jobs/blocked`, then `POST /api/v1/operations/memory/jobs/{memory_sequence}/retry?conversation_id=<…>&started_on=<YYYY-MM-DD>` with body `{"expected_version": <version>}`; without the two query parameters the answer is 400 `INVALID_ARGUMENT`. While a job is FAILED or waiting for a dependency, `/ready` returns 503, but `recall_ready` in the result stays true and the plugins keep recalling existing memories.
 - **Why**: a later job may read old memory only after the earlier job's summary, receipt, L2, L0 / L1 and vectors are all done, which covers the true cross-conversation order, so failed jobs are not skipped; an unavailable model or vector store is "try again later and it works", which should not use up attempts.
 
@@ -455,10 +455,10 @@ Had he typed "晚上再说" (later tonight) instead, the outlet would not write 
 **1. The local service** (Python ≥ 3.12; not on PyPI yet, install from the repository):
 
 ```sh
-pip install "habitus[cloud] @ git+https://github.com/kkxx939-bot/Habitus"
+pip install "habitus[server] @ git+https://github.com/kkxx939-bot/Habitus"
 ```
 
-Optional dependency groups: `http` (FastAPI, uvicorn — required to run the service), `model` (`json_repair`, `jsonschema` for structured output), `vikingdb` (vector store), `cloud` (= `http` + `model` + `vikingdb`, needed by the default configuration), `observability` (OpenTelemetry export). Without `http`, `habitus-server serve` tells you which group to install.
+Optional dependency groups: `http` (FastAPI, uvicorn — required to run the service), `model` (`json_repair`, `jsonschema` for structured output), `server` (= `http` + `model`, needed by the default configuration), `observability` (OpenTelemetry export). Without `http`, `habitus-server serve` tells you which group to install.
 
 **2. The CLI and plugins** (Node ≥ 18; npm package page: [plugins/README.md](plugins/README.md)):
 
@@ -470,7 +470,7 @@ ZCode needs Node ≥ 22.5 to read its session database (`node:sqlite`), and Deep
 
 ## Quick start
 
-The default configuration needs three sets of credentials: DeepSeek (chat model), Volcengine Ark (embedding) and Volcengine VikingDB (vector store, AK/SK).
+The default configuration needs two sets of credentials: a chat model service and an embedding service. The vector store needs none: by default it is an embedded local store, one SQLite file per collection under `vector/` in the storage root (records in SQLite, cosine similarity computed with numpy), so no cloud account is involved. With a self-hosted embedding service (see below) the whole memory chain (writing, recall, segmentation scoring) runs without leaving your machine. Embedding comes with no preset vendor and has a single generic OpenAI-compatible protocol (`POST {base_url}/embeddings`): OpenAI, Alibaba Cloud Bailian, SiliconFlow and self-hosted vLLM, TEI or Ollama are all connected through configuration. Chat comes with no preset vendor either and speaks one of two protocols, chosen by `models.chat.route.adapter`: OpenAI Chat Completions (`openai_compatible_chat`, `POST {base_url}/chat/completions`; DeepSeek, Qwen, OpenAI and self-hosted vLLM or Ollama) or Anthropic Messages (`anthropic_messages`, `POST {base_url}/v1/messages`; Anthropic's own `https://api.anthropic.com` and any gateway speaking that protocol). Interactive `init` lets you pick the chat protocol and asks for the chat and embedding API base URLs and model names (placeholders such as `example.` addresses are refused); `--non-interactive` still writes the configuration, but the chat and embedding sections are placeholder templates and the terminal lists what is left to fill in (`models.chat.route.model`, `route.base_url`, `context_window_tokens`; `models.embedding.route.model`, `route.base_url`, `dimension`). Until they are filled in, `habitus doctor` and server start-up report "still holds setup placeholder values" directly.
 
 When `init` creates a configuration it detects the system time zone: interactively it shows what it found, and you press Enter to accept or type another IANA zone name; if nothing is detected (or the system zone is something like `UTC` that says nothing about where you are) it defaults to `Asia/Singapore`. The region code (`locale.region`, which picks the holiday data) follows from the zone: `SG` for Singapore, `CN` for mainland China; for any other zone the interactive setup asks you for it. With `--non-interactive` the detected zone is used, the region falls back to `SG` when it cannot be derived, and one output line says what was written and whether to change it. Without a `locale` section the configuration defaults to `Asia/Singapore` and `SG`. Memory dates its Events by this time zone too. Re-running `init` on an existing configuration (without `--force`) leaves it alone.
 
@@ -633,14 +633,13 @@ Secrets live only in the `credentials` section of this file: a registry of named
 
 ```yaml
 credentials:
-  deepseek:  { api_key: "sk-…" }                    # models.chat.route.credential_ref: deepseek
-  ark:       { api_key: "…" }                        # models.embedding.route.credential_ref: ark
+  chat:      { api_key: "sk-…" }                    # models.chat.route.credential_ref: chat
+  embedding: { api_key: "…" }                        # models.embedding.route.credential_ref: embedding (empty credential_ref for a local service without a key)
   dashscope: { api_key: "…" }                        # models.rerank.route.credential_ref: dashscope (when rerank is on)
-  vikingdb:  { access_key: "…", secret_key: "…" }    # auth_mode: ak_sk; api_key mode needs only api_key
 ```
 
 - Credential and field names are lowercase identifiers; values must not have surrounding whitespace or line breaks, at most 16,384 characters.
-- A reference to a credential that does not exist fails loading; a referenced but empty value makes `habitus-server doctor` FAIL and the service refuse to start. Fields each adapter needs: chat / embedding / rerank need `api_key`; VikingDB `ak_sk` needs `access_key` + `secret_key`, `api_key` mode needs `api_key`, `private_headers` mode needs the fields named in its `credential_headers` templates.
+- A reference to a credential that does not exist fails loading; a referenced but empty value makes `habitus-server doctor` FAIL and the service refuse to start. Fields each adapter needs: chat / embedding / rerank need `api_key`; the default local vector store needs no credential (its `credential_ref` must stay empty).
 - When the file holds any non-empty secret it must not grant group / other permissions, otherwise loading fails; `init` writes it with mode 0600.
 
 ### Groups at a glance
@@ -687,7 +686,7 @@ Every field of `example.yaml`, folded by group. "Accepted values" is what loadin
 
 | Field | Default | Accepted values | Purpose |
 |---|---|---|---|
-| `root` | `~/.habitus` | path, not a symlink | Root of all durable data, with memory/ conversation/ behavior/ scene/ foresight/ workflow/ below it; must not be a symlink |
+| `root` | `~/.habitus` | path, not a symlink | Root of all durable data, with memory/ conversation/ behavior/ scene/ foresight/ vector/ workflow/ below it; must not be a symlink |
 | `sqlite_lock.timeout_seconds` | 5.0 | ≥ 0.001, ≤ 60 | Seconds the three SQLite lock databases (locks, memory_vector_locks, summary_vector_locks) wait for a busy database |
 
 </details>
@@ -770,18 +769,18 @@ Every field of `example.yaml`, folded by group. "Accepted values" is what loadin
 
 | Field | chat default | embedding default | rerank default | Accepted values | Purpose |
 |---|---|---|---|---|---|
-| `provider` | `deepseek` | `volcengine` | `aliyun` |  | Vendor name; must match the provider_name of the component the adapter builds; for embedding it is part of the vector fingerprint |
-| `adapter` | `openai_compatible_chat` | `ark_multimodal` | `openai_compatible_rerank` |  | Selects the registered protocol adapter by (capability, adapter); built in: openai_compatible_chat / ark_multimodal / openai_compatible_rerank |
-| `model` | `deepseek-chat` | `doubao-embedding-vision-251215` | `qwen3-rerank` |  | The model field of the request; must match the component's model; for embedding it is part of the vector fingerprint |
-| `base_url` | `https://api.deepseek.com` | `https://ark.cn-beijing.volces.com/api/v3` | `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-api/v1` | ; null allowed | API prefix: chat appends /chat/completions, rerank /reranks, Ark /embeddings/multimodal; required by the three built-in adapters; remote must be HTTPS |
-| `credential_ref` | `deepseek` | `ark` | `dashscope` | ; null allowed | Credential entry holding the API key; referenced but empty fails start-up |
+| `provider` | `custom` | `custom` | `aliyun` |  | Vendor name; must match the provider_name of the component the adapter builds; for embedding it is part of the vector fingerprint |
+| `adapter` | `openai_compatible_chat` | `openai_compatible_embedding` | `openai_compatible_rerank` |  | Selects the registered protocol adapter by (capability, adapter); built in: openai_compatible_chat or anthropic_messages / openai_compatible_embedding / openai_compatible_rerank |
+| `model` | `example.chat-model` (placeholder, must be changed) | `example.embedding-model` (placeholder, must be changed) | `qwen3-rerank` |  | The model field of the request; must match the component's model; for embedding it is part of the vector fingerprint |
+| `base_url` | `https://chat.example.com/v1` (placeholder, must be changed) | `https://embedding.example.com/v1` (placeholder, must be changed) | `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-api/v1` | ; null allowed | API prefix: chat appends /chat/completions (anthropic_messages appends /v1/messages, or only /messages when the prefix already ends in /v1), embedding /embeddings, rerank /reranks; required by the three built-in adapters; remote must be HTTPS; loopback addresses (127.0.0.1, localhost) count as a local service |
+| `credential_ref` | `chat` | `embedding` | `dashscope` | ; null allowed | Credential entry holding the API key; referenced but empty fails start-up; when empty for embedding no Authorization header is sent |
 | `timeout_seconds` | 300.0 | 30.0 | 30.0 | > 0, ≤ 600 | Per-call timeout (httpx timeout for chat; embedding and rerank add a wait_for timeout) |
 | `max_retries` | 2 | 2 | 2 | 0–10 | Retries of retryable errors; total attempts = this + 1 |
 | `retry_base_delay_seconds` | 0.5 | 0.5 | 0.5 | > 0, ≤ 30 | Initial exponential-backoff delay (doubling, ±20 % jitter) |
 | `retry_max_delay_seconds` | 30.0 | 30.0 | 30.0 | ≥ 0.5, ≤ 300 † | Backoff cap; also caps the vendor's Retry-After |
 | `max_concurrent` | 16 | 16 | 8 | 1–4096 | Concurrent in-flight requests for this capability (semaphore) and connection-pool size |
 | `max_response_bytes` | 8388608 | 8388608 | 8388608 | 1024–67_108_864 | Byte limit when reading a response body |
-| `extra_headers` | `{}` | `{}` | `{}` |  | Extra request headers; must not contain Authorization |
+| `extra_headers` | `{}` | `{}` | `{}` |  | Extra request headers; must not contain Authorization (for anthropic_messages also not x-api-key or anthropic-version, which the adapter sets; anthropic-beta is allowed) |
 | `extra_body` | `{}` | `{}` | `{"instruct": "Given a web search query, retrieve relevant passages that answer the query."}` |  | Vendor-specific fields merged into the request body, cannot override reserved fields; for embedding part of the vector fingerprint (changing it triggers a rebuild) |
 
 </details>
@@ -791,9 +790,9 @@ Every field of `example.yaml`, folded by group. "Accepted values" is what loadin
 | Field | Default | Accepted values | Purpose |
 |---|---|---|---|
 | `context_window_tokens` | 64000 | 64000–10_000_000 † | Estimated input plus reserved output above this is refused (ModelInputTooLarge); also bounds the extraction budget |
-| `max_output_tokens` | 8192 | 1–63999 †; null allowed | Sent as max_tokens (and reserved) when the caller gives none; null sends nothing |
-| `structured_output_mode` | `json_object` | none / json_object / json_schema | response_format for structured calls: none (not sent) / json_object / json_schema |
-| `reasoning` | false | true / false | When true, temperature is not sent and requests may carry reasoning_effort |
+| `max_output_tokens` | 8192 | 1–63999 †; null allowed | Sent as max_tokens (and reserved) when the caller gives none; null sends nothing; required by anthropic_messages (the protocol's max_tokens is mandatory) |
+| `structured_output_mode` | `json_object` | none / json_object / json_schema | response_format for structured calls: none (not sent) / json_object / json_schema; anthropic_messages accepts only json_schema (sent as output_config.format, with the schema reduced to the protocol's subset; the full schema is still checked locally) or none |
+| `reasoning` | false | true / false | When true, temperature is not sent and requests may carry reasoning_effort (anthropic_messages: output_config.effort low / medium / high; it never sends temperature) |
 
 </details>
 
@@ -801,12 +800,13 @@ Every field of `example.yaml`, folded by group. "Accepted values" is what loadin
 
 | Field | Default | Accepted values | Purpose |
 |---|---|---|---|
-| `dimension` | 1024 | 1–65536 | Vector dimension: a mismatching response fails (Ark truncates to the first N); also the vector store's dimension |
-| `input_mode` | `multimodal` | text / multimodal (built-in ark_multimodal needs multimodal) | text / multimodal; ark_multimodal accepts only multimodal; part of the vector fingerprint |
+| `dimension` | 1024 (placeholder, set it for your model) | 1–65536 | Vector dimension: the service must return exactly this many values, a mismatch fails and nothing is truncated (if the service supports it, put `dimensions` in `route.extra_body` to request this size); also the vector store's dimension |
 | `max_batch_size` | 32 | 1–2048 | Single-text requests sent concurrently per batch when embedding many texts |
-| `max_input_chars` | 16000 | 16000–1_000_000 † | Character limit of one text to embed; also the unit limit of semantic boundaries in segmentation |
+| `max_input_chars` | 16000 | 16000–1_000_000 † | Character limit of one text to embed, counted after the prefix is added; minus the length of `document_prefix` it bounds segmentation boundary units and vector records, minus `query_prefix` it bounds queries |
 | `query_parameters` | `{}` |  | Parameters merged into the body of query embeddings |
 | `document_parameters` | `{}` |  | Parameters merged into the body of document embeddings; part of the vector fingerprint |
+| `query_prefix` | `""` | string | Prefix put in front of query text (E5-style models use `query: `, BGE and Qwen3-Embedding an instruction); not part of the vector fingerprint, changing it does not rebuild the index |
+| `document_prefix` | `""` | string | Prefix put in front of document text (E5-style models use `passage: `); part of the vector fingerprint, changing it rebuilds the vector indexes. The default `max_input_chars` equals both `max_record_chars` values, so when you set a non-empty prefix, lower each `max_record_chars` by at least the prefix length or raise `max_input_chars`, otherwise the config fails to load |
 
 </details>
 
@@ -940,34 +940,21 @@ Every field of `example.yaml`, folded by group. "Accepted values" is what loadin
 
 | Field | memory default | summary default | Accepted values | Purpose |
 |---|---|---|---|---|
-| `route.provider` | `volcengine` | `volcengine` |  | Service name; only checked against the backend's provider_name and part of the publication-lock identity |
-| `route.adapter` | `vikingdb` | `vikingdb` |  | Registered vector-store protocol (only vikingdb today); unregistered names fail |
-| `route.base_url` | empty | empty |  | Data-plane address; empty derives the public-cloud address from options.region; required in private_headers mode |
-| `route.credential_ref` | `vikingdb` | `vikingdb` |  | Credential entry to use; a reference that resolves to nothing fails |
-| `route.timeout_seconds` | 30.0 | 30.0 | ≥ 0.001, ≤ 600 | Connect / read timeout of each HTTP request |
-| `route.max_retries` | 2 | 2 | 0–10 | Retries on network errors or retryable status codes; also polls after creating / dropping collections |
-| `route.retry_base_delay_seconds` | 0.5 | 0.5 | ≥ 0.001, ≤ 30 | Backoff base: the n-th wait is base × 2^n, capped by retry_max |
-| `route.retry_max_delay_seconds` | 30.0 | 30.0 | ≥ 0.5, ≤ 300 | Cap of one backoff wait; also truncates the server's Retry-After |
-| `route.max_concurrent` | 16 | 16 | 1–4096 | Concurrent in-flight requests per client (semaphore) |
-| `route.max_response_bytes` | 8388608 | 8388608 | 1024–67_108_864 | Byte limit of a response body; at start-up, page size × estimated record size must fit in it |
-| `route.extra_headers` | `{}` | `{}` |  | Extra headers on every request; no auth headers, no clash with credential_headers |
-| `collection` | `memory` | `conversation_summaries` |  | Collection written to; must match the backend and is part of the publication-lock identity. Defaults differ: memory / conversation_summaries |
-| `options.auth_mode` | `ak_sk` | `ak_sk` | api_key / ak_sk / private_headers | Authentication: api_key / ak_sk (signed) / private_headers (credentials injected through header templates) |
-| `options.schema_mode` | `managed` | `managed` | managed / precreated (managed needs ak_sk) | managed creates the collection and rebuilds it when the dimension changes; precreated fails if it is missing or mismatched |
-| `options.project_name` | `default` | `default` | ; null allowed | VikingDB project name sent with requests; also the collection scope |
-| `options.index_name` | `default` | `default` | ; null allowed | Index used for search; a mismatch in metadata fails |
-| `options.region` | `cn-beijing` | `cn-beijing` | ; null allowed | Derives default data-plane / console addresses; used for ak_sk signing |
-| `options.console_url` | empty | empty | ; null allowed | ak_sk control plane (create / drop collections and indexes); empty derives it from region |
-| `options.credential_headers` | `{}` | `{}` | ; null allowed | private_headers mode: header name → {credential} template, filled at request time |
-| `options.upsert_batch_size` | 100 | 100 | 1–100 | Records per write batch (≤ 100) |
-| `options.fetch_batch_size` | 64 | 64 | 1–100 | IDs per fetch-by-ID batch (≤ 100) |
-| `options.delete_batch_size` | 100 | 100 | 1–100 | IDs per delete batch (≤ 100) |
-| `options.search_page_size` | 64 | 64 | 1–5000 | Page size of vector search, paging until limit is reached |
-| `options.scan_page_size` | 64 | 64 | 1–5000 | Page size of full scans |
-| `options.max_search_hits` | 10000 | 10000 | 1–1_000_000, ≤ max_records | Backend cap per search; larger requests are refused; must be ≥ vector_index.max_search_hits |
-| `options.max_records` | 1000000 | 1000000 | 1–100_000_000 | Backend capacity; a scan above it is an integrity error; must be ≥ vector_index.max_records |
-| `options.index_sync_timeout_seconds` | 60.0 | 60.0 | 0.1–3600 | Longest wait for the index to catch up after a write (VectorStoreBusyError on timeout) |
-| `options.index_sync_poll_interval_seconds` | 1.0 | 1.0 | 0.01–60, ≤ the timeout | Poll interval while waiting for the index |
+| `route.provider` | `local` | `local` |  | Service name; only checked against the backend's provider_name and part of the publication-lock identity |
+| `route.adapter` | `local_sqlite` | `local_sqlite` |  | Registered vector-store protocol (only `local_sqlite` today: embedded SQLite + numpy); unregistered names fail |
+| `route.base_url` | empty | empty | must be empty for local_sqlite | Address of a networked vector store; the local store refuses a non-empty value |
+| `route.credential_ref` | empty | empty | must be empty for local_sqlite | Credential entry to use; the local store needs none and refuses a reference |
+| `route.timeout_seconds` | 30.0 | 30.0 | ≥ 0.001, ≤ 600 | Request timeout of a networked vector store; unused by local_sqlite |
+| `route.max_retries` | 2 | 2 | 0–10 | Retries of a networked vector store; unused by local_sqlite |
+| `route.retry_base_delay_seconds` | 0.5 | 0.5 | ≥ 0.001, ≤ 60 | Backoff base of a networked vector store; unused by local_sqlite |
+| `route.retry_max_delay_seconds` | 30.0 | 30.0 | ≥ 0.001, ≤ 300, ≥ retry_base | Backoff cap of a networked vector store; unused by local_sqlite |
+| `route.max_concurrent` | 16 | 16 | 1–4096 | Concurrent requests of a networked vector store; unused by local_sqlite |
+| `route.max_response_bytes` | 8388608 | 8388608 | 1024–67_108_864 | Response byte limit of a networked vector store; unused by local_sqlite |
+| `route.extra_headers` | `{}` | `{}` | must be empty for local_sqlite | Extra request headers of a networked vector store; no auth headers |
+| `collection` | `memory` | `conversation_summaries` | must differ between the two; lowercase for local_sqlite | Collection written to; for local_sqlite also the file name `vector/{collection}.sqlite3`; part of the publication-lock identity |
+| `options.busy_timeout_seconds` | 5.0 | 5.0 | 0.001–600 | Seconds to wait while another connection holds the file's write lock; on timeout the store reports busy and a memory job waits for the dependency instead of failing |
+
+The local store reads all vectors of a collection into memory when it opens and updates them on every commit; it notices commits made by another connection and reloads. Its files are derived data: deleting `vector/` makes the service rebuild both indexes from the memory tree and the summaries (re-embedding everything).
 
 </details>
 
@@ -1474,12 +1461,12 @@ All data stays on your machine; only what is listed under "Sent to external serv
 
 **Sent to external services**
 
-- **Chat model** (default DeepSeek):
+- **Chat model** (the one you configure):
   - Memory: the complete segment text (segment summary, retrieval grading, candidates; when an over-long turn is extracted segment by segment, also the turn's opening human lines and the earlier segments' summaries), the complete L2 of old memories read in (body, structured fields, revision, timestamps and relations), every direct L2 body and child L0 of a directory (to write L1), the question plus recent messages / active summaries at recall (planning), the assembled recall context (grading), a COLD_2 memory's fields (compaction), summaries being combined (range summaries).
   - Behavior and prediction (once enabled): the session lane's per-turn material (your instruction, the agent's replies, tool-call names with argument prefixes, error prefixes of failed calls; never tool result bodies; secrets redacted twice); for vocabulary classification, growth and revision, the names, summaries, goals and steps of records; for the semantic tree's concept writing, mapping, priors and condition proposals, class names, criteria, examples and the day's timeline; the latest 6 records with times in the prediction judge's package; each day's behaviors for the daily overview. Physical-lane fusion uses no model, but that branch's daytime classification and daily overview still do.
-- **Embedding service** (default Volcengine Ark): raw text of adjacent safe live units (segmentation scoring, each truncated to the embedding input bound), L2 bodies and L0 / L1, summary text, recall queries.
+- **Embedding service** (the one you configure): raw text of adjacent safe live units (segmentation scoring, each truncated to the embedding input bound), L2 bodies and L0 / L1, summary text, recall queries.
 - **Reranker** (default Alibaba Cloud `qwen3-rerank`, optional; not enabled by the configuration `init` writes): recall queries and candidate memory text.
-- **Remote vector store** (default Volcengine VikingDB): text and vectors of L2 bodies, L0 / L1 and summaries, plus attributes such as URIs.
+- **Vector store**: nothing; the default store is local files under `vector/` in the storage root, holding the text and vectors of L2 bodies, L0 / L1 and summaries plus attributes such as URIs.
 
 ## Development
 
@@ -1499,7 +1486,7 @@ All Python code lives in the single top-level package `habitus/`:
 | `habitus/series/`, `habitus/temporal/`, `habitus/conditions/` | Reading the behavior tree as an event series; the time ruler; calendar conditions (including the bundled holiday data in `conditions/holidays/`) |
 | `habitus/scene/` | Semantic tree (relation tests, recurrence, concepts) |
 | `habitus/foresight/` | Pure rules of the prediction layer (accounts, ladder, delivery, feedback); never touches infrastructure; its only model touchpoint is `foresight/judge/` (the judge model, pinned by an architecture test) |
-| `habitus/infrastructure/` | Durable files, locks (SQLite), transactional snapshots, vector publication and the VikingDB adapter, observability |
+| `habitus/infrastructure/` | Durable files, locks (SQLite), transactional snapshots, vector publication and the local SQLite + numpy vector store, observability |
 | `habitus/foundation/` | Building blocks with no dependency on any other package (IDs, timestamps, intervals, redaction) |
 | `habitus/integrations/` | `http_api/` (the FastAPI app) and `local_service/` (the `habitus-server` CLI: init / doctor / serve) |
 | `habitus/benchmark/` | Memory benchmark (LoCoMo, LongMemEval, native Habitus data); runs from the repository only, `python -m habitus.benchmark`; not shipped in the wheel |
@@ -1530,7 +1517,7 @@ On top of `ci.sh`, `.github/workflows/ci.yml` runs on Ubuntu and macOS × Python
 
 ### Test layers
 
-- **Unit** (`tests/unit/<domain>/`): each domain package's invariants; models, remote vector stores, clocks and lock contention are replaced by test doubles.
+- **Unit** (`tests/unit/<domain>/`): each domain package's invariants; models, clocks and lock contention are replaced by test doubles; the local vector store runs for real under a temporary directory.
 - **Integration** (`tests/integration/`): real file storage and the real runtime assembly. `test_runtime_assembly.py` builds the runtime with the four optional groups switched on (behavior, semantic tree, prediction, lifecycle) and starts and stops every resident worker; `test_long_turn_extraction.py` runs segment-by-segment extraction of an over-long turn with the default route's real request estimate.
 - **Architecture** (`tests/architecture/test_dependency_boundaries.py`): static checks of dependency direction, e.g. domain packages never import `runtime`, `foundation` depends on nothing else, `infrastructure` never imports `config` or `model_client`, the semantic tree is derived only from the behavior tree, prediction only reads derived trees, `config/root.py` never branches on a specific model or vector adapter, memory gets its time zone only from the composition root, and retired contracts and URI schemes such as `memoryos://` never come back.
 - **Plugins** (`plugins/memory-plugin-shared/test/`): `node --test`, including that the shared-library copies match the source, and the plugin ↔ service contract (`test/fixtures/service-contract.json`, asserted on the service side by `tests/unit/integrations/test_service_contract.py`).
@@ -1577,7 +1564,7 @@ The configuration written by `habitus-server init` (non-interactive, or interact
 | DeepSeek Harness | Integrated against 0.2.1-rc.2 source, not tested live (repeated pre-step triggers, the current log line format, whether the home patch takes effect) |
 | OpenCode | Not run in a real OpenCode |
 | pi | Verified on the real pi 1.3.0 extension loader; no real conversation yet |
-| Recall with a real vector store and reranker | The end-to-end runs had no VikingDB / Ark / Bailian keys and used deterministic stand-ins; ranking and counts have not been checked on the real services |
+| Recall with a real vector store and reranker | The end-to-end runs had no embedding service / Bailian keys and used deterministic stand-in embeddings (the local vector store itself was real); ranking and counts have not been checked with real embeddings and the real reranker |
 
 ### Known limitations
 

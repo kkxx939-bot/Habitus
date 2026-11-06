@@ -993,25 +993,37 @@ def test_capability_configs_require_provider_route(model_type: type[object], inv
 
 
 @pytest.mark.parametrize("dimension", [1, 2, 512, 4096, 65_536])
-@pytest.mark.parametrize("input_mode", ["text", "multimodal"])
-def test_embedding_model_config_accepts_dimension_and_input_mode_boundaries(
-    dimension: int,
-    input_mode: str,
-) -> None:
-    config = EmbeddingModelConfig(route(), dimension=dimension, input_mode=input_mode)
+def test_embedding_model_config_accepts_dimension_boundaries(dimension: int) -> None:
+    config = EmbeddingModelConfig(route(), dimension=dimension)
     assert config.capability == "embedding"
+    assert (config.query_prefix, config.document_prefix) == ("", "")
+
+
+def test_embedding_model_config_has_no_input_mode_field() -> None:
+    """``input_mode`` 已在 W7 删掉：不再是字段（YAML 里写了按未知字段拒绝，见 test_config_loading）。"""
+
+    with pytest.raises(TypeError, match="input_mode"):
+        EmbeddingModelConfig(route(), dimension=2, input_mode="text")  # type: ignore[call-arg]
+
+
+def test_embedding_prefixes_shrink_the_text_budget_by_their_own_length() -> None:
+    config = EmbeddingModelConfig(
+        route(), dimension=2, max_input_chars=100, query_prefix="query: ", document_prefix="passage: "
+    )
+    assert config.max_query_text_chars == 93
+    assert config.max_document_text_chars == 91
+
+
+@pytest.mark.parametrize("field", ["query_prefix", "document_prefix"])
+def test_embedding_prefix_must_leave_room_for_text(field: str) -> None:
+    with pytest.raises(ValueError, match=field):
+        EmbeddingModelConfig(route(), dimension=2, max_input_chars=4, **{field: "four"})
 
 
 @pytest.mark.parametrize("dimension", [0, -1, 65_537, True, False, 1.5, "2", None])
 def test_embedding_model_config_rejects_invalid_dimension(dimension: object) -> None:
     with pytest.raises(ValueError):
         EmbeddingModelConfig(route(), dimension=dimension)
-
-
-@pytest.mark.parametrize("mode", ["", "image", "TEXT", None, 0, True])
-def test_embedding_model_config_rejects_unknown_input_mode(mode: object) -> None:
-    with pytest.raises(ValueError):
-        EmbeddingModelConfig(route(), dimension=2, input_mode=mode)
 
 
 @pytest.mark.parametrize(

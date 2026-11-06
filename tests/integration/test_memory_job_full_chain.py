@@ -16,6 +16,7 @@ from habitus.config import HabitusConfig
 from habitus.foundation.observability import ObservationEvent
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.vector import VectorStoreBusyError, VectorStoreFactory, VectorStoreMatch, VectorStoreState
+from habitus.infrastructure.vector.adapters import register_builtin_vector_adapters
 from habitus.memory.conversation import ConversationAddress
 from habitus.memory.editor import MemoryTransactionJournalState
 from habitus.memory.workflow import (
@@ -40,7 +41,7 @@ from tests.model_helpers import prepare_chat_request
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
-def runtime_config(tmp_path: Path, *, max_attempts: int = 3) -> HabitusConfig:
+def runtime_config(tmp_path: Path, *, max_attempts: int = 3, local_vectors: bool = False) -> HabitusConfig:
     payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
     payload["models"]["chat"]["route"].update(
@@ -58,16 +59,10 @@ def runtime_config(tmp_path: Path, *, max_attempts: int = 3) -> HabitusConfig:
         adapter="fake_rerank",
         credential_ref="",
     )
-    payload["memory"]["vector_store"]["route"].update(
-        provider="fake",
-        adapter="fake_vector",
-        credential_ref="",
-    )
-    payload["conversation"]["summary_vector_store"]["route"].update(
-        provider="fake",
-        adapter="fake_vector",
-        credential_ref="",
-    )
+    if not local_vectors:
+        for store in (payload["memory"]["vector_store"], payload["conversation"]["summary_vector_store"]):
+            store["route"].update(provider="fake", adapter="fake_vector", credential_ref="")
+            store["options"] = {}
     payload["workflow"]["jobs"]["max_attempts"] = max_attempts
     return HabitusConfig.from_mapping(payload)
 
@@ -198,7 +193,6 @@ class RerankProvider:
 
 class DurableVectorBackend:
     adapter_name = "fake_vector"
-    requires_cross_process_publication_fencing = False
     max_records = 100_000
     max_search_hits = 10_000
 
@@ -293,7 +287,6 @@ def dependencies():
     vectors.register_adapter(
         "fake_vector",
         vector_builder,
-        requires_cross_process_publication_fencing=False,
     )
     return providers, vectors, chat_instances, vector_instances
 
@@ -342,6 +335,50 @@ def test_full_job_chain_commits_summary_receipt_indexes_and_job_before_cleaning_
         "memory_retrieval_decision",
         "memory_candidate_batch",
     }
+
+
+def test_full_job_chain_publishes_into_default_local_sqlite_vector_files(tmp_path: Path) -> None:
+    """默认配置的本地向量后端接在真实 Runtime 上：两份索引都落到存储根下的 SQLite 文件，重启后读回同一状态。"""
+
+    config = runtime_config(tmp_path, local_vectors=True)
+    assert config.memory.vector_store.adapter == "local_sqlite"
+    providers, vectors, _chats, fake_vectors = dependencies()
+    register_builtin_vector_adapters(vectors)
+    runtime = build_runtime(
+        config, providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())
+    )
+    runtime.initialize()
+    address = ConversationAddress("conversation-1", date(2026, 7, 1))
+    runtime.components.workflow.enqueuer.append_and_maybe_enqueue(
+        address,
+        ConversationBatch("conversation-1", closed_turn()),
+        after_turn=True,
+    )
+    runtime.components.workflow.enqueuer.flush(address)
+
+    result = asyncio.run(runtime.run_next())
+
+    assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
+    assert result.summary_indexed and result.vector_indexed
+    assert fake_vectors == []
+    vector_root = tmp_path / "data" / "vector"
+    assert sorted(path.name for path in vector_root.glob("*.sqlite3")) == [
+        "conversation_summaries.sqlite3",
+        "memory.sqlite3",
+    ]
+    memory_state = asyncio.run(runtime.components.memory.vector_index.store.state())
+    summary_state = asyncio.run(runtime.components.conversation.summary_vector_index.store.state())
+    assert memory_state is not None and memory_state.checkpoint == 1 and memory_state.ready
+    assert summary_state is not None and summary_state.checkpoint == 1 and summary_state.record_count >= 1
+    asyncio.run(runtime.close())
+
+    restarted = build_runtime(
+        config, providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())
+    )
+    restarted.initialize()
+    assert asyncio.run(restarted.components.memory.vector_index.store.state()) == memory_state
+    assert asyncio.run(restarted.components.conversation.summary_vector_index.store.state()) == summary_state
+    asyncio.run(restarted.close())
 
 
 class RecordingObserver:
@@ -1063,7 +1100,7 @@ def test_vector_store_or_embedding_outage_longer_than_max_attempts_waits_and_com
 
         async def busy_search(query_vector, *, filters, limit):
             if down[0]:
-                raise VectorStoreBusyError("vikingdb is temporarily unreachable")
+                raise VectorStoreBusyError("vector store is temporarily busy")
             return await search(query_vector, filters=filters, limit=limit)
 
         backend.search = busy_search

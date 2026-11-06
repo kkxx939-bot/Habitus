@@ -72,10 +72,6 @@ class SQLiteLockStore:
         return self._initialized
 
     @property
-    def coordination_scope(self) -> str:
-        return "host"
-
-    @property
     def coordination_domain(self) -> str:
         identity = str(self.path.expanduser().absolute().resolve(strict=False))
         return f"sqlite:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"

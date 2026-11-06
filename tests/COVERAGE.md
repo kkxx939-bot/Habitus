@@ -7,7 +7,7 @@
 
 - 每条用例必须对应当前源码中可到达的公开行为、领域不变量、耐久数据损坏风险或外部依赖故障；不存在的 Agent、CLI、HTTP/API、Skill 和旧记忆兼容能力不写测试。
 - 参数化只用于有不同失效机理的等价类，例如 Python `bool` 冒充 `int`、数字字符串被宽松转换、`null` 绕过容量上限；不适用组合在参数生成时排除，不以运行时 `skip` 增加数量。
-- 测试替身只隔离模型、远程向量服务、时钟、锁竞争或故障注入。关键流程必须另有真实领域对象、真实文件存储或 Runtime 组装后的集成用例交叉验证。
+- 测试替身只隔离模型、时钟、锁竞争或故障注入（向量库默认是本地文件，可直接真跑）。关键流程必须另有真实领域对象、真实文件存储或 Runtime 组装后的集成用例交叉验证。
 - 不绕过领域构造器伪造生产路径不可能产生的数据对象来追求分支覆盖；防御分支只有在耐久损坏或外部输入确实可到达时才测试。
 - 覆盖率用于发现未观察区域，不以行数或参数化实例数证明业务充分性。
 
@@ -20,7 +20,7 @@
 | `ModelClient` | 协议差异、重试越界、流式重放、JSON 有损修复 | `unit/model_client/` | Chat、Embedding、结构化输出、Adapter |
 | 通用快照与锁 | 读集不完整、锁丢失、临界区被重放 | `unit/infrastructure/test_snapshot_and_locks.py`, `test_sqlite_lock_store.py` | 缺失快照、容量、进程内/SQLite fencing、过期接管、损坏布局 |
 | 耐久文件 | 路径逃逸、符号链接、半写文件 | `unit/infrastructure/test_durable_files.py` | 原子创建/替换、损坏与恢复 |
-| 远程向量抽象 | provider/adapter 混淆、发布中间态可见、checkpoint 回退 | `unit/infrastructure/test_vector_*`, `test_vikingdb_protocol.py` | 工厂、Schema、全量/增量发布、VikingDB 认证/重试/编解码/分页完整性 |
+| 向量抽象与本地后端 | provider/adapter 混淆、发布中间态可见、checkpoint 回退、矩阵与文件不一致 | `unit/infrastructure/test_vector_*`, `test_local_sqlite_vector.py` | 工厂、全量/增量发布；本地 SQLite+numpy 的过滤、余弦排序、重启读回、跨连接可见、busy 映射、篡改检测 |
 | Conversation Journal | 重放冲突、history 非连续、释放后序号回退 | `unit/conversation/test_journal.py` | append、seal、release、枚举 |
 | Conversation 切段 | 拆断完整轮次或 tool_call/result、超大载荷长期保存 | `unit/conversation/test_retention.py` | afterTurn、flush、软硬阈值、降载 |
 | Summary 与压缩 | 来源错配、范围重叠、过早清理、无限层级 | `unit/conversation/test_summary_and_compaction.py`, `test_summary_generation.py` | 真实结构化生成、完整原文上限、幂等、Range、Archive、清理 |
@@ -52,7 +52,7 @@
 
 ## 外部系统验证边界
 
-- VikingDB 用例覆盖 HTTP 请求、认证头、错误分类、记录编解码、过滤和分页完整性，但不在单元测试中访问真实云账号。
+- 默认向量库是进程内本地文件，单元与集成测试直接跑真实的 SQLite+numpy 后端（`tmp_path` 下），不需要任何云账号。
 - 模型 Adapter 用 MockTransport/受控 Provider 覆盖协议与结构化语义，不消耗真实 API Key。
 - 真实供应商连通性、配额、服务端索引最终一致时间属于独立 smoke/contract 环境，不伪装成离线单元测试。
 - 当前仓库没有 Agent 执行入口、CLI 或 HTTP/API 入口，因此本测试集只覆盖 Runtime 暴露的记忆检索门面和 SearchService，不能宣称覆盖“用户请求 -> Agent -> 模型/工具 -> 返回”的 Agent 主链。

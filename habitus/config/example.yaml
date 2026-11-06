@@ -7,15 +7,12 @@ storage:
 # 真实凭据只写入 ~/.habitus/config.yaml；该文件及备份必须保持 0600。
 # 空值可用于生成模板，但 Doctor 和 Runtime 会拒绝被引用的空秘密。
 credentials:
-  deepseek:
+  chat:
     api_key: ""
-  ark:
+  embedding:
     api_key: ""
   dashscope:
     api_key: ""
-  vikingdb:
-    access_key: ""
-    secret_key: ""
 
 http:
   host: 127.0.0.1
@@ -64,13 +61,21 @@ observability:
   lock_warning_seconds: 300.0
 
 models:
+  # Chat 不预置任何厂商，两种协议任选其一（adapter）：
+  # - openai_compatible_chat：OpenAI Chat Completions 协议（POST {base_url}/chat/completions），DeepSeek、通义千问、
+  #   OpenAI 与自部署的 vLLM、Ollama 等都靠它；structured_output_mode 可选 json_object、json_schema、none。
+  # - anthropic_messages：Anthropic Messages 协议（POST {base_url}/v1/messages，base_url 已以 /v1 结尾时只补
+  #   /messages），Anthropic 官方 https://api.anthropic.com 以及说这套协议的网关都靠它；max_output_tokens 必填；
+  #   structured_output_mode 只能是 json_schema（走 output_config.format）或 none，没有 json_object。
+  # 下面 model、base_url 是占位值（带 example.），不填 doctor 与启动前检查会直接报"还是占位值"。
+  # 本机服务不要密钥时把 credential_ref 置空。
   chat:
     route:
-      provider: deepseek
+      provider: custom
       adapter: openai_compatible_chat
-      model: deepseek-chat
-      base_url: https://api.deepseek.com
-      credential_ref: deepseek
+      model: example.chat-model
+      base_url: https://chat.example.com/v1
+      credential_ref: chat
       # 单次结构化输出可能很长（词表分组一次最多 60 条、语义概览的材料最多 12 万字），等待按长输出给。
       timeout_seconds: 300.0
       max_retries: 2
@@ -81,18 +86,22 @@ models:
       extra_headers: {}
       extra_body: {}
     context_window_tokens: 64000
-    # 留空走厂商默认 4096，长的结构化输出会更早被截断；取 deepseek-chat 的上限。
+    # 单次输出上限，按所选模型填（anthropic_messages 必填）；openai_compatible_chat 留空走服务默认值，长的结构化
+    # 输出会更早被截断。
     max_output_tokens: 8192
     structured_output_mode: json_object
     reasoning: false
 
+  # Embedding 不预置任何厂商：用 OpenAI 兼容协议（POST {base_url}/embeddings），OpenAI、阿里云百炼、硅基流动，
+  # 以及自己部署的 vLLM、TEI、Ollama 都靠这一段接入。下面 model、base_url 是占位值（带 example.），dimension 也要
+  # 改成所选模型的实际输出维度；不填 doctor 与启动前检查会直接报"还是占位值"。本机服务不要密钥时把 credential_ref 置空。
   embedding:
     route:
-      provider: volcengine
-      adapter: ark_multimodal
-      model: doubao-embedding-vision-251215
-      base_url: https://ark.cn-beijing.volces.com/api/v3
-      credential_ref: ark
+      provider: custom
+      adapter: openai_compatible_embedding
+      model: example.embedding-model
+      base_url: https://embedding.example.com/v1
+      credential_ref: embedding
       timeout_seconds: 30.0
       max_retries: 2
       retry_base_delay_seconds: 0.5
@@ -101,12 +110,20 @@ models:
       max_response_bytes: 8388608
       extra_headers: {}
       extra_body: {}
+    # 服务返回的维度必须与它相同，不截取；服务支持 dimensions 参数时可在 extra_body 里写 dimensions
     dimension: 1024
-    input_mode: multimodal
     max_batch_size: 32
+    # 按拼上前缀之后的长度算
     max_input_chars: 16000
     query_parameters: {}
     document_parameters: {}
+    # 拼在文本前面区分查询和文档，例如 E5 用 "query: " / "passage: "，BGE、Qwen3-Embedding 用一句指令；
+    # document_prefix 改了会让已有向量索引全量重建，query_prefix 不会。
+    # 注意：max_input_chars 按拼上前缀之后算，所以填了非空前缀，要把 memory.vector_index 与
+    # conversation.summary_vector_index 的 max_record_chars（以及查询类上限）各留出至少前缀的长度，或把
+    # max_input_chars 相应调大，否则配置加载会报 max_record_chars 超限。
+    query_prefix: ""
+    document_prefix: ""
 
   rerank:
     route:
@@ -181,12 +198,16 @@ conversation:
     max_file_bytes: 2097152
     max_files_per_conversation: 10000
 
+  # 默认是进程内的本地向量库：存储根下 vector/{collection}.sqlite3，标准库 SQLite 存记录、numpy 算余弦，不要账号。
+  # local_sqlite 不走网络：base_url、credential_ref、extra_headers 必须为空，timeout/retry/并发/回包上限这几项它不用；
+  # collection 就是文件名 vector/{collection}.sqlite3，只收小写（macOS / Windows 的文件系统不分大小写）。
+  # options.busy_timeout_seconds：另一连接正持有写锁时最多等几秒，等不到算"向量库忙"；磁盘满、IO 错误同样算忙，记忆 Job 按等依赖恢复处理。
   summary_vector_store:
     route:
-      provider: volcengine
-      adapter: vikingdb
+      provider: local
+      adapter: local_sqlite
       base_url: ""
-      credential_ref: vikingdb
+      credential_ref: ""
       timeout_seconds: 30.0
       max_retries: 2
       retry_base_delay_seconds: 0.5
@@ -196,22 +217,7 @@ conversation:
       extra_headers: {}
     collection: conversation_summaries
     options:
-      auth_mode: ak_sk
-      schema_mode: managed
-      project_name: default
-      index_name: default
-      region: cn-beijing
-      console_url: ""
-      credential_headers: {}
-      upsert_batch_size: 100
-      fetch_batch_size: 64
-      delete_batch_size: 100
-      search_page_size: 64
-      scan_page_size: 64
-      max_search_hits: 10000
-      max_records: 1000000
-      index_sync_timeout_seconds: 60.0
-      index_sync_poll_interval_seconds: 1.0
+      busy_timeout_seconds: 5.0
 
   summary_vector_index:
     max_records: 100000
@@ -338,12 +344,13 @@ memory:
     search_limit: 5
     max_tool_uris: 32
 
+  # 与 conversation.summary_vector_store 同一个本地后端，Collection 不同（各一个 SQLite 文件）。
   vector_store:
     route:
-      provider: volcengine
-      adapter: vikingdb
+      provider: local
+      adapter: local_sqlite
       base_url: ""
-      credential_ref: vikingdb
+      credential_ref: ""
       timeout_seconds: 30.0
       max_retries: 2
       retry_base_delay_seconds: 0.5
@@ -353,22 +360,7 @@ memory:
       extra_headers: {}
     collection: memory
     options:
-      auth_mode: ak_sk
-      schema_mode: managed
-      project_name: default
-      index_name: default
-      region: cn-beijing
-      console_url: ""
-      credential_headers: {}
-      upsert_batch_size: 100
-      fetch_batch_size: 64
-      delete_batch_size: 100
-      search_page_size: 64
-      scan_page_size: 64
-      max_search_hits: 10000
-      max_records: 1000000
-      index_sync_timeout_seconds: 60.0
-      index_sync_poll_interval_seconds: 1.0
+      busy_timeout_seconds: 5.0
 
   vector_index:
     max_records: 10000

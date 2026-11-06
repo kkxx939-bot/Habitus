@@ -166,7 +166,7 @@ def test_pre_contains_only_conversation_schema_and_no_storage_dependency() -> No
 
 def test_config_root_does_not_branch_on_specific_model_or_vector_adapters() -> None:
     source = (SRC / "config" / "root.py").read_text(encoding="utf-8")
-    for adapter_name in ("vikingdb", "ark_multimodal", "openai_compatible_chat"):
+    for adapter_name in ("local_sqlite", "openai_compatible_embedding", "openai_compatible_chat"):
         assert adapter_name not in source
 
 
@@ -174,12 +174,11 @@ def test_local_setup_cli_renders_registry_without_vendor_branches() -> None:
     source = (SRC / "integrations" / "local_service" / "cli.py").read_text(encoding="utf-8")
     for vendor_identifier in (
         "deepseek",
-        "volcengine",
         "aliyun",
         "qwen3-rerank",
-        "vikingdb",
+        "local_sqlite",
         "openai_compatible_chat",
-        "ark_multimodal",
+        "openai_compatible_embedding",
     ):
         assert vendor_identifier not in source.casefold()
 

@@ -15,7 +15,7 @@ from habitus.infrastructure.vector.model import (
 
 
 class VectorStore(Protocol):
-    """支持远程 Collection、可重放写入和受控检索的向量存储。"""
+    """支持持久 Collection、可重放写入和受控检索的向量存储。"""
 
     @property
     def adapter_name(self) -> str: ...
@@ -88,9 +88,6 @@ class RawVectorBackend(Protocol):
 
     @property
     def max_search_hits(self) -> int: ...
-
-    @property
-    def requires_cross_process_publication_fencing(self) -> bool: ...
 
     async def initialize(self) -> None: ...
 

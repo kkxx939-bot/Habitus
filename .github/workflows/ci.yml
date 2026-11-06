@@ -43,7 +43,7 @@ jobs:
           test -f "$init_root/config.yaml"
           # 权限位用 Python 读：GNU stat 的 -c 在 macOS（BSD stat）上不存在。
           python -c 'import os, stat, sys; mode = stat.S_IMODE(os.stat(sys.argv[1]).st_mode); sys.exit(0 if mode == 0o600 else f"{sys.argv[1]}: mode {mode:#o}, expected 0o600")' "$init_root/config.yaml"
-          HABITUS_CI_CONFIG_PATH="$init_root/config.yaml" python -c 'import os; from habitus.config import HabitusConfig; c=HabitusConfig.from_file(os.environ["HABITUS_CI_CONFIG_PATH"]); assert c.models.chat.route.credential_ref == "deepseek"; assert c.models.embedding.route.credential_ref == "ark"; assert c.models.rerank.route.credential_ref == "dashscope"; assert c.memory.vector_store.route.credential_ref == "vikingdb"'
+          HABITUS_CI_CONFIG_PATH="$init_root/config.yaml" python -c 'import os; from habitus.config import HabitusConfig; c=HabitusConfig.from_file(os.environ["HABITUS_CI_CONFIG_PATH"]); assert c.models.chat.route.credential_ref == "chat"; assert c.models.chat.route.adapter == "openai_compatible_chat"; assert c.models.embedding.route.credential_ref == "embedding"; assert c.models.rerank.route.credential_ref == "dashscope"; assert c.memory.vector_store.adapter == c.conversation.summary_vector_store.adapter == "local_sqlite"; assert c.memory.vector_store.route.credential_ref == c.conversation.summary_vector_store.route.credential_ref == ""'
       - name: Build wheel and verify its contents against pyproject
         run: |
           python -m build --wheel

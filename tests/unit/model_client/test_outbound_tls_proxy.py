@@ -80,9 +80,8 @@ def _chat(base_url: str, outbound: OutboundSettings):
 
 def _embedder(base_url: str, outbound: OutboundSettings):
     config = EmbeddingModelConfig(
-        _route("ark_multimodal", base_url, credential_ref="ark"),
+        _route("openai_compatible_embedding", base_url, credential_ref="embedding"),
         dimension=EMBEDDING_DIMENSION,
-        input_mode="multimodal",
     )
     return _factory().create_embedder(config, credentials={"api_key": "test-key"}, outbound=outbound)
 
@@ -179,7 +178,7 @@ def test_embedding_adapter_trusts_the_configured_ca_and_fails_once_without_it() 
 
     with HTTPSModelServer() as server:
         asyncio.run(scenario(server))
-        assert ("POST", "/v1/embeddings/multimodal") in server.requests
+        assert ("POST", "/v1/embeddings") in server.requests
 
 
 def test_rerank_adapter_trusts_the_configured_ca_and_fails_once_without_it() -> None:

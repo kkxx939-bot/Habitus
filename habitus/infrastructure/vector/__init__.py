@@ -22,7 +22,6 @@ from habitus.infrastructure.vector.model import (
     VectorStoreMatch,
     VectorStoreRecord,
     VectorStoreState,
-    VectorStoreUnsupportedTopologyError,
     VectorValue,
 )
 from habitus.infrastructure.vector.publication import PublishedVectorStore
@@ -48,5 +47,4 @@ __all__ = [
     "VectorStoreMatch",
     "VectorStoreRecord",
     "VectorStoreState",
-    "VectorStoreUnsupportedTopologyError",
 ]

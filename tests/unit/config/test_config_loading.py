@@ -57,30 +57,27 @@ def test_from_file_and_from_env_use_only_the_single_yaml_entrypoint(tmp_path) ->
 
 def test_named_credentials_support_multiple_vendors_without_leaking_repr(tmp_path) -> None:
     payload = valid_mapping(tmp_path)
-    payload["credentials"]["deepseek"]["api_key"] = "deepseek-secret"
-    payload["credentials"]["ark"]["api_key"] = "ark-secret"
+    payload["credentials"]["chat"]["api_key"] = "chat-secret"
+    payload["credentials"]["embedding"]["api_key"] = "embedding-secret"
     payload["credentials"]["dashscope"]["api_key"] = "dashscope-secret"
-    payload["credentials"]["vikingdb"]["access_key"] = "viking-access"
-    payload["credentials"]["vikingdb"]["secret_key"] = "viking-secret"
 
     config = HabitusConfig.from_mapping(payload)
 
-    assert config.models.chat.route.credential_ref == "deepseek"
-    assert config.models.embedding.route.credential_ref == "ark"
+    assert config.models.chat.route.credential_ref == "chat"
+    assert config.models.embedding.route.credential_ref == "embedding"
     assert config.models.rerank is not None
     assert config.models.rerank.route.credential_ref == "dashscope"
-    assert dict(config.credentials.resolve("vikingdb")) == {
-        "access_key": "viking-access",
-        "secret_key": "viking-secret",
-    }
+    assert dict(config.credentials.resolve("dashscope")) == {"api_key": "dashscope-secret"}
+    assert config.memory.vector_store.route.credential_ref == ""
+    assert config.conversation.summary_vector_store.route.credential_ref == ""
     rendered = repr(config)
-    assert "deepseek-secret" not in rendered
-    assert "viking-secret" not in rendered
+    assert "chat-secret" not in rendered
+    assert "dashscope-secret" not in rendered
 
 
 def test_secret_bearing_yaml_requires_private_file_permissions(tmp_path) -> None:
     payload = valid_mapping(tmp_path)
-    payload["credentials"]["deepseek"]["api_key"] = "private-secret"
+    payload["credentials"]["chat"]["api_key"] = "private-secret"
     path = tmp_path / "habitus.yaml"
     path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
     path.chmod(0o644)
@@ -89,7 +86,7 @@ def test_secret_bearing_yaml_requires_private_file_permissions(tmp_path) -> None
         HabitusConfig.from_file(path)
 
     path.chmod(0o600)
-    assert HabitusConfig.from_file(path).credentials.resolve("deepseek")["api_key"] == "private-secret"
+    assert HabitusConfig.from_file(path).credentials.resolve("chat")["api_key"] == "private-secret"
 
 
 def test_credential_registry_rejects_missing_references_and_unsafe_values_without_owning_adapter_fields(
@@ -101,13 +98,13 @@ def test_credential_registry_rejects_missing_references_and_unsafe_values_withou
         HabitusConfig.from_mapping(payload)
 
     payload = valid_mapping(tmp_path)
-    payload["credentials"]["deepseek"].pop("api_key")
-    payload["credentials"]["deepseek"]["token"] = "secret"
+    payload["credentials"]["chat"].pop("api_key")
+    payload["credentials"]["chat"]["token"] = "secret"
     config = HabitusConfig.from_mapping(payload)
-    assert dict(config.credentials.resolve("deepseek")) == {"token": "secret"}
+    assert dict(config.credentials.resolve("chat")) == {"token": "secret"}
 
     payload = valid_mapping(tmp_path)
-    payload["credentials"]["deepseek"]["api_key"] = " secret "
+    payload["credentials"]["chat"]["api_key"] = " secret "
     with pytest.raises(ValueError, match="surrounding whitespace"):
         HabitusConfig.from_mapping(payload)
 
@@ -700,3 +697,75 @@ def test_http_max_request_bytes_outside_its_range_is_rejected(value: int) -> Non
 
     with pytest.raises(ValueError, match="max_request_bytes must be between 1024 and 67108864"):
         HTTPAPIConfig(max_request_bytes=value)
+
+
+@pytest.mark.parametrize("value", ["text", "multimodal"])
+def test_embedding_input_mode_left_in_yaml_is_an_unknown_field(tmp_path, value: str) -> None:
+    """``input_mode`` 只为一家厂商的专用协议存在过，W7 删掉：旧配置里还写着它要明确报未知字段，不能静默忽略。"""
+
+    payload = valid_mapping(tmp_path)
+    payload["models"]["embedding"]["input_mode"] = value
+
+    with pytest.raises(ConfigError, match=r"unknown config field 'config\.models\.embedding\.input_mode'"):
+        HabitusConfig.from_mapping(payload)
+
+
+def test_embedding_prefixes_load_from_yaml_and_must_be_strings(tmp_path) -> None:
+    payload = valid_mapping(tmp_path)
+    payload["models"]["embedding"]["max_input_chars"] += 64  # 记录与查询上限按"减去前缀"算，要给前缀留出位置
+    payload["models"]["embedding"]["query_prefix"] = "query: "
+    payload["models"]["embedding"]["document_prefix"] = "passage: "
+    embedding = HabitusConfig.from_mapping(payload).models.embedding
+    assert (embedding.query_prefix, embedding.document_prefix) == ("query: ", "passage: ")
+
+    for name, invalid in (("query_prefix", 1), ("document_prefix", ["passage: "]), ("document_prefix", None)):
+        broken = valid_mapping(tmp_path)
+        broken["models"]["embedding"][name] = invalid
+        with pytest.raises(ConfigError, match=f"config.models.embedding.{name}"):
+            HabitusConfig.from_mapping(broken)
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "prefix"),
+    [
+        ("memory.vector_index", "max_record_chars", "document_prefix"),
+        ("conversation.summary_vector_index", "max_record_chars", "document_prefix"),
+        ("memory.editor_retrieval", "max_query_chars", "query_prefix"),
+    ],
+)
+def test_prefix_counts_against_the_record_and_query_budgets(tmp_path, section: str, field: str, prefix: str) -> None:
+    """记录与查询上限按"max_input_chars 减去对应前缀"校验，不然索引或召回时才因超长失败。每条单独钉：其余两项放宽。"""
+
+    payload = valid_mapping(tmp_path)
+    budget = payload["models"]["embedding"]["max_input_chars"]
+    payload["memory"]["vector_index"]["max_record_chars"] = budget - 64
+    payload["conversation"]["summary_vector_index"]["max_record_chars"] = budget - 64
+    payload["models"]["rerank"]["max_query_chars"] = budget  # 查询上限还受 rerank 查询上限约束，这里放开
+    group = payload
+    for part in section.split("."):
+        group = group[part]
+    group[field] = budget
+    HabitusConfig.from_mapping(payload)
+
+    payload["models"]["embedding"][prefix] = "passage: "
+    with pytest.raises(ConfigError, match=prefix):
+        HabitusConfig.from_mapping(payload)
+
+
+def test_prefix_budget_error_says_what_to_change(tmp_path) -> None:
+    """默认 max_record_chars 与 max_input_chars 相等，照文档设非空 document_prefix 会加载失败；报错要能自说明：
+    点名 max_input_chars、前缀，并给出改法（调小上限或调大 max_input_chars），不然用户只知道失败不知道怎么办。"""
+
+    payload = valid_mapping(tmp_path)
+    budget = payload["models"]["embedding"]["max_input_chars"]
+    payload["memory"]["vector_index"]["max_record_chars"] = budget
+    payload["conversation"]["summary_vector_index"]["max_record_chars"] = budget
+    payload["models"]["embedding"]["document_prefix"] = "passage: "
+
+    with pytest.raises(ConfigError) as error:
+        HabitusConfig.from_mapping(payload)
+    message = str(error.value)
+    assert "max_input_chars" in message
+    assert "document_prefix" in message
+    assert str(budget) in message
+    assert "lower" in message or "raise" in message

@@ -1,4 +1,4 @@
-"""远程向量库之上的全量发布、增量提交和故障恢复语义测试。"""
+"""向量库之上的全量发布、增量提交和故障恢复语义测试。"""
 
 import asyncio
 import hashlib
@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.infrastructure.store.sqlite import SQLiteLockStore
 from habitus.infrastructure.vector import (
     PublishedVectorStore,
     VectorStoreBusyError,
@@ -17,7 +16,6 @@ from habitus.infrastructure.vector import (
     VectorStoreIntegrityError,
     VectorStoreMatch,
     VectorStoreRecord,
-    VectorStoreUnsupportedTopologyError,
 )
 from habitus.model_client import EmbeddingVector
 from tests.lock_store import ProcessLocalLockStore
@@ -46,7 +44,6 @@ class MemoryBackend:
     collection = "memory"
     max_records = 100
     max_search_hits = 20
-    requires_cross_process_publication_fencing = False
 
     def __init__(self) -> None:
         self.metadata = {}
@@ -98,26 +95,6 @@ class MemoryBackend:
 
     async def close(self):
         self.calls.append("close")
-
-
-def test_remote_publication_requires_host_scoped_fencing(tmp_path) -> None:
-    class RemoteBackend(MemoryBackend):
-        requires_cross_process_publication_fencing = True
-
-    backend = RemoteBackend()
-    with pytest.raises(VectorStoreUnsupportedTopologyError, match="host-scoped"):
-        PublishedVectorStore(
-            backend,
-            path_lock=PathLock(ProcessLocalLockStore()),
-        )
-    assert backend.calls == []
-
-    store = PublishedVectorStore(
-        backend,
-        path_lock=PathLock(SQLiteLockStore(tmp_path / "publication.sqlite3")),
-    )
-    assert store.backend is backend
-    assert backend.calls == []
 
 
 def test_full_publication_then_incremental_update_advances_generation_and_checkpoint() -> None:

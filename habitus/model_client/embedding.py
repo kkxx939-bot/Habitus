@@ -98,13 +98,12 @@ class EmbeddingClient:
         return self.provider.is_remote
 
     async def embed_query(self, text: str) -> EmbeddingVector:
-        normalized = self._text(text, "embedding query")
-        return await self._embed_one(normalized, is_query=True)
+        return await self._embed_one(self._model_input(text, is_query=True), is_query=True)
 
     async def embed_documents(self, texts: Sequence[str]) -> tuple[EmbeddingVector, ...]:
         if isinstance(texts, str) or not isinstance(texts, Sequence):
             raise TypeError("embedding documents must be a sequence of strings")
-        normalized = tuple(self._text(text, "embedding document") for text in texts)
+        normalized = tuple(self._model_input(text, is_query=False) for text in texts)
         if not normalized:
             return ()
 
@@ -192,13 +191,17 @@ class EmbeddingClient:
         if vector.dimension != self.config.dimension:
             raise ModelResponseError("embedding provider returned an unexpected vector dimension")
 
-    def _text(self, value: object, label: str) -> str:
+    def _model_input(self, value: object, *, is_query: bool) -> str:
+        """校验文本并拼上查询或文档前缀；``max_input_chars`` 按拼好之后的长度算。"""
+
+        label = "embedding query" if is_query else "embedding document"
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{label} must be non-empty text")
-        normalized = value.strip()
-        if len(normalized) > self.config.max_input_chars:
+        prefix = self.config.query_prefix if is_query else self.config.document_prefix
+        model_input = prefix + value.strip()
+        if len(model_input) > self.config.max_input_chars:
             raise ValueError(f"{label} exceeds the configured character bound")
-        return normalized
+        return model_input
 
     def _retry_delay(self, attempt: int, failure: ModelClientError) -> float:
         return retry_delay(

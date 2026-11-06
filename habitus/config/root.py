@@ -17,7 +17,7 @@ from habitus.config.lifecycle import LifecycleConfig
 from habitus.config.loader import ConfigError, group_fields, load_config_object, required_field
 from habitus.config.locale import LocaleConfig
 from habitus.config.memory import MemoryConfig
-from habitus.config.models import ModelConfig
+from habitus.config.models import EmbeddingModelConfig, ModelConfig
 from habitus.config.network import outbound_settings_from_mapping
 from habitus.config.observability import observability_config_from_mapping
 from habitus.config.scene import SceneConfig
@@ -29,6 +29,48 @@ from habitus.infrastructure.observability.config import ObservabilityConfig
 
 _FIXED_RETRIEVAL_DOCUMENTS = 1
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _require_embedding_text_budgets(
+    embedding: EmbeddingModelConfig,
+    memory: MemoryConfig,
+    conversation: ConversationConfig,
+    maximum_query_chars: int,
+) -> None:
+    """记录与查询上限都按 ``max_input_chars`` 减去对应前缀算；报错写清当前值、上限与改法，便于用户照做。"""
+
+    checks = (
+        (
+            "conversation.summary_vector_index.max_record_chars",
+            conversation.summary_vector_index.max_record_chars,
+            embedding.max_document_text_chars,
+            "document_prefix",
+            len(embedding.document_prefix),
+            "max_record_chars",
+        ),
+        (
+            "memory.vector_index.max_record_chars",
+            memory.vector_index.max_record_chars,
+            embedding.max_document_text_chars,
+            "document_prefix",
+            len(embedding.document_prefix),
+            "max_record_chars",
+        ),
+        (
+            "memory query character limits",
+            maximum_query_chars,
+            embedding.max_query_text_chars,
+            "query_prefix",
+            len(embedding.query_prefix),
+            "the query limits",
+        ),
+    )
+    for label, value, limit, prefix_name, prefix_len, knob in checks:
+        if value > limit:
+            raise ConfigError(
+                f"{label} ({value}) cannot exceed models.embedding.max_input_chars ({embedding.max_input_chars}) "
+                f"minus the {prefix_name} length ({prefix_len}); lower {knob} or raise max_input_chars"
+            )
 
 
 @dataclass(frozen=True)
@@ -245,10 +287,6 @@ class HabitusConfig:
             raise ConfigError("memory.search_service recent messages cannot exceed the live message bound")
         if conversation.summary_vector_store.collection == memory.vector_store.collection:
             raise ConfigError("Memory and Conversation Summary must use different vector collections")
-        if conversation.summary_vector_index.max_record_chars > models.embedding.max_input_chars:
-            raise ConfigError(
-                "conversation.summary_vector_index.max_record_chars cannot exceed models.embedding.max_input_chars"
-            )
         summary_candidate_limit = max(
             conversation.summary_vector_index.min_vector_candidates,
             memory.search_service.summary_fallback_limit * conversation.summary_vector_index.candidate_multiplier,
@@ -274,16 +312,13 @@ class HabitusConfig:
             raise ConfigError("memory.extraction.max_old_memory_tokens must leave room for Conversation and prompts")
         if segmentation.max_inline_tool_result_bytes > segmentation.max_segment_bytes:
             raise ConfigError("conversation.segmentation.max_inline_tool_result_bytes cannot exceed max_segment_bytes")
-        if memory.vector_index.max_record_chars > models.embedding.max_input_chars:
-            raise ConfigError("memory.vector_index.max_record_chars cannot exceed models.embedding.max_input_chars")
         maximum_query_chars = max(
             memory.search_service.max_query_chars,
             memory.search_service.max_planned_query_chars,
             memory.editor_retrieval.max_query_chars,
             memory.extraction.max_query_chars,
         )
-        if maximum_query_chars > models.embedding.max_input_chars:
-            raise ConfigError("memory query character limits cannot exceed models.embedding.max_input_chars")
+        _require_embedding_text_budgets(models.embedding, memory, conversation, maximum_query_chars)
         maximum_search_request = max(
             memory.search_service.max_limit * memory.search_service.candidate_multiplier,
             memory.editor_retrieval.search_limit,

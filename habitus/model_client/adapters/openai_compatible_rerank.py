@@ -3,21 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
-import json
 import math
 import threading
 import weakref
 from collections.abc import Mapping, Sequence
-from urllib.parse import urlsplit
 
 import httpx
 
 from habitus.foundation.network import OutboundSettings
+from habitus.model_client.adapters._http import is_remote_url, post_json_object
 from habitus.model_client.config import RerankModelConfig
 from habitus.model_client.contracts import ModelConfigurationError, ModelResponseError
 from habitus.model_client.http_clients import async_http_client
-from habitus.model_client.json_parser import parse_json_response
 
 _RESERVED_REQUEST_FIELDS = {
     "api_key",
@@ -50,7 +47,7 @@ class OpenAICompatibleRerankProvider:
         self.config = config
         self.provider_name = config.route.provider
         self.model = config.route.model
-        self.is_remote = _is_remote_url(config.route.base_url)
+        self.is_remote = is_remote_url(config.route.base_url)
         self._api_key = api_key.strip()
         self._endpoint = f"{config.route.base_url}/reranks"
         self._outbound = OutboundSettings() if outbound is None else outbound
@@ -104,46 +101,14 @@ class OpenAICompatibleRerankProvider:
             "Content-Type": "application/json",
             **dict(self.config.route.extra_headers),
         }
-        client = self._client()
-        async with client.stream(
-            "POST",
+        return await post_json_object(
+            self._client(),
             self._endpoint,
             headers=headers,
-            json=dict(payload),
-        ) as response:
-            content = await self._read_response(response)
-            status_code = getattr(response, "status_code", None)
-            if not isinstance(status_code, int):
-                raise ModelResponseError("rerank provider response has no HTTP status")
-            if status_code >= 400:
-                raise _HTTPStatusError(
-                    _error_message(content, status_code),
-                    status_code=status_code,
-                    retry_after=_retry_after(getattr(response, "headers", None)),
-                )
-        try:
-            value = parse_json_response(
-                content.decode("utf-8"),
-                allow_repair=False,
-            ).value
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise ModelResponseError("rerank provider returned malformed JSON") from exc
-        if not isinstance(value, Mapping):
-            raise ModelResponseError("rerank provider response must be a JSON object")
-        return value
-
-    async def _read_response(self, response: httpx.Response) -> bytes:
-        maximum = self.config.route.max_response_bytes
-        chunks: list[bytes] = []
-        total = 0
-        async for chunk in response.aiter_bytes():
-            if not isinstance(chunk, bytes):
-                raise ModelResponseError("rerank response yielded non-byte content")
-            total += len(chunk)
-            if total > maximum:
-                raise ModelResponseError("rerank response exceeds the configured byte bound")
-            chunks.append(chunk)
-        return b"".join(chunks)
+            payload=payload,
+            max_response_bytes=self.config.route.max_response_bytes,
+            label="rerank",
+        )
 
     def _client(self) -> httpx.AsyncClient:
         loop = asyncio.get_running_loop()
@@ -186,51 +151,6 @@ class OpenAICompatibleRerankProvider:
         if any(score is None for score in scores):
             raise ModelResponseError("rerank provider omitted a document score")
         return tuple(score for score in scores if score is not None)
-
-
-class _HTTPStatusError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int, retry_after: float | None) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-        self.retry_after = retry_after
-
-
-def _error_message(content: bytes, status_code: int) -> str:
-    fallback = f"rerank provider request failed with HTTP {status_code}"
-    try:
-        payload = json.loads(content)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return fallback
-    if not isinstance(payload, Mapping):
-        return fallback
-    error = payload.get("error")
-    message = error.get("message") if isinstance(error, Mapping) else None
-    if not isinstance(message, str) or not message.strip():
-        message = payload.get("message")
-    return message.strip()[:2048] if isinstance(message, str) and message.strip() else fallback
-
-
-def _retry_after(headers: object) -> float | None:
-    getter = getattr(headers, "get", None)
-    if not callable(getter):
-        return None
-    raw = getter("Retry-After")
-    if raw is None:
-        return None
-    try:
-        return max(0.0, float(str(raw)))
-    except (TypeError, ValueError):
-        return None
-
-
-def _is_remote_url(url: str) -> bool:
-    hostname = str(urlsplit(url).hostname or "").casefold()
-    if hostname == "localhost":
-        return False
-    try:
-        return not ipaddress.ip_address(hostname).is_loopback
-    except ValueError:
-        return True
 
 
 __all__ = ["OpenAICompatibleRerankProvider"]

@@ -102,7 +102,7 @@ def test_memory_embedding_fingerprint_includes_the_effective_document_encoder_ro
         "provider": "provider",
         "model": "embedding-model",
         "dimension": 2,
-        "input_mode": "text",
+        "document_prefix": "",
         "document_parameters": {},
     }
     baseline = memory_embedding_fingerprint(
@@ -129,6 +129,12 @@ def test_memory_embedding_fingerprint_includes_the_effective_document_encoder_ro
         base_url="https://embedding-a.example.com/v1",
         extra_body={"encoding": "sparse"},
         **common,
+    )
+    assert baseline != memory_embedding_fingerprint(
+        adapter="adapter-a",
+        base_url="https://embedding-a.example.com/v1",
+        extra_body={"encoding": "dense"},
+        **{**common, "document_prefix": "passage: "},
     )
 
 
@@ -220,3 +226,87 @@ def test_l2_kind_filter_cannot_be_mixed_with_directory_levels(tmp_path: Path) ->
                 limit=5,
             )
         )
+
+
+def test_write_and_recall_through_an_openai_compatible_service_use_their_own_prefix_and_parameters(
+    tmp_path: Path,
+) -> None:
+    """W7 全链路：L2 写进树 → 建索引走真实 EmbeddingClient + OpenAI 兼容适配器（文档前缀与文档参数），
+    召回时查询走查询前缀与查询参数；假服务按 OpenAI Embeddings 响应格式回包。"""
+
+    import json
+
+    import httpx
+
+    from habitus.model_client import EmbeddingClient, EmbeddingModelConfig, ProviderConfig
+    from habitus.model_client.adapters import OpenAICompatibleEmbeddingProvider
+    from habitus.runtime.embedding_fingerprints import embedding_fingerprints
+
+    config = EmbeddingModelConfig(
+        ProviderConfig(
+            provider="custom",
+            adapter="openai_compatible_embedding",
+            model="embedding-model",
+            base_url="http://127.0.0.1:11434/v1",
+            max_retries=0,
+        ),
+        dimension=2,
+        query_parameters={"task": "query"},
+        document_parameters={"task": "document"},
+        query_prefix="query: ",
+        document_prefix="passage: ",
+    )
+    requests: list[dict[str, object]] = []
+
+    def service(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/embeddings"
+        body = json.loads(request.content)
+        requests.append(body)
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "model": body["model"],
+                "data": [{"object": "embedding", "index": 0, "embedding": [1.0, 0.0]}],
+                "usage": {"prompt_tokens": 1, "total_tokens": 1},
+            },
+        )
+
+    provider = OpenAICompatibleEmbeddingProvider(config)
+    transport = httpx.MockTransport(service)
+    provider._client = lambda: httpx.AsyncClient(transport=transport)
+    embedder = EmbeddingClient(config, provider)
+    tree = MemoryTree(tmp_path / "memory")
+    store = VectorStore()
+    vector_index = PersistentMemoryVectorIndex(
+        tree, embedder, store, dimension=2, embedding_fingerprint=embedding_fingerprints(config)[0]
+    )
+    tree.write(document(MemoryKind.PREFERENCE))
+
+    async def write_and_recall():
+        await vector_index.ensure_ready()
+        written = len(requests)
+        query = await embedder.embed_query("what does the user prefer")
+        matches = await vector_index.search(
+            query,
+            roots=(MemoryURI.root(),),
+            levels=(MemoryLevel.DETAIL,),
+            kinds=(MemoryKind.PREFERENCE,),
+            intention_scope=MemoryIntentionRecallScope.ACTIVE,
+            limit=5,
+        )
+        return written, matches
+
+    written, matches = asyncio.run(write_and_recall())
+
+    assert written >= 1
+    documents, (query_request,) = requests[:written], requests[written:]
+    assert all(item["task"] == "document" and str(item["input"]).startswith("passage: ") for item in documents)
+    assert query_request == {
+        "task": "query",
+        "model": "embedding-model",
+        "input": "query: what does the user prefer",
+        "encoding_format": "float",
+    }
+    assert tuple(match.uri.to_address().kind for match in matches) == (MemoryKind.PREFERENCE,)
+    assert store.current.embedding_fingerprint == embedding_fingerprints(config)[0]

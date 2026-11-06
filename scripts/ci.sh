@@ -32,7 +32,8 @@ step "Compile"
 python -m compileall -q "${PATHS[@]}"
 
 step "Lint"
-ruff check "${PATHS[@]}"
+# 测试也查 lint（不查格式）：新测试文件的 import 顺序、没用到的 import 以前漏过
+ruff check "${PATHS[@]}" tests
 
 step "Type check (mypy)"
 mypy "${PATHS[@]}"

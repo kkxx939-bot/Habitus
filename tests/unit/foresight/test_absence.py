@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
-
 from collections.abc import Iterable
+from datetime import date, datetime, timedelta, timezone
 
 from habitus.foresight.absence import opportunity_days, returned_after_absence
 from habitus.foresight.clock import is_opportunity

@@ -25,10 +25,6 @@ class ProcessLocalLockStore:
         self._guard = threading.RLock()
 
     @property
-    def coordination_scope(self) -> str:
-        return "process"
-
-    @property
     def coordination_domain(self) -> str:
         return _PROCESS_COORDINATION_DOMAIN
 

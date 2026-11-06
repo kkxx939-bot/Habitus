@@ -47,11 +47,9 @@ def _config(
         payload["memory"]["vector_store"]["route"]["credential_ref"] = ""
         payload["conversation"]["summary_vector_store"]["route"]["credential_ref"] = ""
     elif filled:
-        payload["credentials"]["deepseek"]["api_key"] = "deepseek-secret"
-        payload["credentials"]["ark"]["api_key"] = "ark-secret"
+        payload["credentials"]["chat"]["api_key"] = "chat-secret"
+        payload["credentials"]["embedding"]["api_key"] = "embedding-secret"
         payload["credentials"]["dashscope"]["api_key"] = "dashscope-secret"
-        payload["credentials"]["vikingdb"]["access_key"] = "viking-access"
-        payload["credentials"]["vikingdb"]["secret_key"] = "viking-secret"
     return HabitusConfig.from_mapping(payload)
 
 
@@ -108,10 +106,9 @@ def test_doctor_reports_empty_yaml_credentials_without_a_service_api_key(tmp_pat
     credentials = next(check for check in report.checks if check.name == "credentials")
 
     assert credentials.status is DoctorStatus.FAIL
-    assert "credentials.deepseek.api_key" in credentials.detail
-    assert "credentials.ark.api_key" in credentials.detail
+    assert "credentials.chat.api_key" in credentials.detail
+    assert "credentials.embedding.api_key" in credentials.detail
     assert "credentials.dashscope.api_key" in credentials.detail
-    assert "credentials.vikingdb.access_key" in credentials.detail
     assert "HABITUS_HTTP" not in credentials.detail
 
 
@@ -131,10 +128,10 @@ def test_doctor_accepts_multiple_filled_named_yaml_credentials(tmp_path: Path) -
     credentials = next(check for check in report.checks if check.name == "credentials")
 
     assert credentials.status is DoctorStatus.PASS
-    assert "4 named YAML credentials" in credentials.detail
+    assert "3 named YAML credentials" in credentials.detail
 
 
-def test_doctor_resolves_conditional_adapter_dependencies_from_registry(
+def test_doctor_checks_only_the_base_dependencies_for_the_default_local_vector_store(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -145,20 +142,11 @@ def test_doctor_resolves_conditional_adapter_dependencies_from_registry(
         return doctor_module.DoctorCheck(module, DoctorStatus.PASS, "available")
 
     monkeypatch.setattr(doctor_module, "_python_dependency_check", dependency)
-    managed = _config(tmp_path)
-    run_doctor(managed, check_port=False)
-    assert "volcengine" in checked
+    config = _config(tmp_path)
+    assert config.memory.vector_store.adapter == "local_sqlite"
+    run_doctor(config, check_port=False)
 
-    payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
-    payload["storage"]["root"] = str(tmp_path / "api-key")
-    for group, name in (("memory", "vector_store"), ("conversation", "summary_vector_store")):
-        target = payload[group][name]
-        target["route"]["credential_ref"] = ""
-        target["options"].update({"auth_mode": "api_key", "schema_mode": "precreated"})
-    checked.clear()
-    run_doctor(HabitusConfig.from_mapping(payload), check_port=False)
-
-    assert "volcengine" not in checked
+    assert sorted(checked) == ["fastapi", "json_repair", "jsonschema", "uvicorn"]
 
 
 def test_doctor_reports_unregistered_adapter_without_raising(tmp_path: Path) -> None:
@@ -175,17 +163,30 @@ def test_doctor_reports_unregistered_adapter_without_raising(tmp_path: Path) -> 
     assert dependencies.status is DoctorStatus.FAIL
 
 
-def test_doctor_fails_adapter_capacity_before_remote_probe(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("store", "change", "expected"),
+    [
+        ("vector_store", {"options": {"busy_timeout_seconds": 0}}, "busy_timeout_seconds"),
+        ("summary_vector_store", {"options": {"legacy_option": True}}, "unknown fields"),
+        ("vector_store", {"route": {"base_url": "https://vector.example.com"}}, "base_url"),
+    ],
+)
+def test_doctor_fails_local_vector_misconfiguration_before_any_probe(
+    tmp_path: Path, store: str, change: dict[str, dict[str, object]], expected: str
+) -> None:
     payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
     payload["storage"]["root"] = str(tmp_path / "data")
-    payload["models"]["embedding"]["dimension"] = 65_536
+    target = payload["memory" if store == "vector_store" else "conversation"][store]
+    for section, values in change.items():
+        target[section] = {**target[section], **values} if section == "route" else values
     config = HabitusConfig.from_mapping(payload)
 
     report = run_doctor(config, check_port=False)
 
     adapter = next(check for check in report.checks if check.name == "adapter_configuration")
     assert adapter.status is DoctorStatus.FAIL
-    assert "read page sizes" in adapter.detail
+    assert expected in adapter.detail
+    assert not (tmp_path / "data" / "vector").exists()
 
 
 def test_doctor_reports_an_out_of_range_override_as_a_config_failure_naming_the_key(tmp_path: Path) -> None:
@@ -383,7 +384,7 @@ def test_serve_without_http_extra_exits_with_the_extra_to_install(
 
     message = str(raised.value.code)
     assert "'http' extra" in message
-    assert doctor_module.pip_install_command("cloud") in message
+    assert doctor_module.pip_install_command("server") in message
     assert doctor_module.pip_install_command("http") in message
     assert "\n" not in message
 
@@ -393,17 +394,15 @@ def test_doctor_names_the_extra_that_provides_a_missing_dependency(monkeypatch: 
     monkeypatch.setattr(
         doctor_module.importlib.util,
         "find_spec",
-        lambda name, *args: None if name in {"fastapi", "volcengine"} else real_find_spec(name, *args),
+        lambda name, *args: None if name == "fastapi" else real_find_spec(name, *args),
     )
 
     fastapi_check = doctor_module._python_dependency_check("fastapi")
-    volcengine_check = doctor_module._python_dependency_check("volcengine")
 
     assert fastapi_check.status is DoctorStatus.FAIL
     assert "'http' extra" in fastapi_check.detail
-    assert fastapi_check.detail.endswith(f'pip install "habitus[cloud] @ {doctor_module.HABITUS_SOURCE}"')
+    assert fastapi_check.detail.endswith(f'pip install "habitus[server] @ {doctor_module.HABITUS_SOURCE}"')
     assert "git+https://github.com/kkxx939-bot/Habitus" in doctor_module.HABITUS_SOURCE
-    assert "'vikingdb' extra" in volcengine_check.detail
 
 
 def test_serve_turns_a_failed_startup_preflight_into_one_line_and_never_starts(
@@ -451,7 +450,7 @@ def test_serve_turns_a_failed_runtime_start_into_one_line_without_a_traceback(
     runtime = _runtime()
     runtime.start = AsyncMock(  # type: ignore[method-assign]
         side_effect=VectorStoreError(
-            "vikingdb request failed: 401 InvalidAccessKey:\n  The security token[AKLTleaked0001] included is invalid"
+            "vector store request failed: 401 InvalidAccessKey:\n  The security token[AKLTleaked0001] included is invalid"
         )
     )
     monkeypatch.setattr("habitus.runtime.build_runtime", Mock(return_value=runtime))
@@ -468,7 +467,7 @@ def test_serve_turns_a_failed_runtime_start_into_one_line_without_a_traceback(
     message = str(raised.value.code)
     # 回包带出的凭据原文不进这一行，也不进服务日志
     assert message == (
-        "Habitus startup failed: vikingdb request failed: 401 InvalidAccessKey: "
+        "Habitus startup failed: vector store request failed: 401 InvalidAccessKey: "
         "The security token[REDACTED] included is invalid"
     )
     runtime.close.assert_awaited_once()
@@ -687,13 +686,13 @@ def test_doctor_ingress_capacity_measures_the_parts_limit_not_only_the_request_l
 
 
 def test_install_hints_use_the_readme_install_from_the_repository() -> None:
-    """还没上 PyPI：提示照 README 从仓库装（pip install 'habitus[cloud]' 会失败，或装上同名的第三方包）。"""
+    """还没上 PyPI：提示照 README 从仓库装（pip install 'habitus[server]' 会失败，或装上同名的第三方包）。"""
 
     assert (
-        doctor_module.pip_install_command("cloud") == f'pip install "habitus[cloud] @ {doctor_module.HABITUS_SOURCE}"'
+        doctor_module.pip_install_command("server") == f'pip install "habitus[server] @ {doctor_module.HABITUS_SOURCE}"'
     )
     for readme in ("README.md", "README.zh-CN.md"):
-        assert doctor_module.pip_install_command("cloud") in (REPOSITORY_ROOT / readme).read_text(encoding="utf-8")
+        assert doctor_module.pip_install_command("server") in (REPOSITORY_ROOT / readme).read_text(encoding="utf-8")
 
 
 def test_chinese_readme_calls_the_service_local() -> None:
@@ -727,16 +726,12 @@ def test_doctor_deep_writes_only_structured_logs_to_stderr(tmp_path: Path) -> No
     text = (REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8")
     payload = yaml.safe_load(text)
     payload["storage"]["root"] = str(tmp_path / "data")
-    # 模型与向量库都指向本机关着的端口：探测立刻失败、不出网
+    # 模型指向本机关着的端口：探测立刻失败、不出网；向量库是默认的本地文件
     for name in ("chat", "embedding", "rerank"):
         payload["models"][name]["route"]["base_url"] = "http://127.0.0.1:9"
-    payload["memory"]["vector_store"]["route"]["base_url"] = "http://127.0.0.1:9"
-    payload["conversation"]["summary_vector_store"]["route"]["base_url"] = "http://127.0.0.1:9"
-    payload["credentials"]["deepseek"]["api_key"] = "fake"
-    payload["credentials"]["ark"]["api_key"] = "fake"
+    payload["credentials"]["chat"]["api_key"] = "fake"
+    payload["credentials"]["embedding"]["api_key"] = "fake"
     payload["credentials"]["dashscope"]["api_key"] = "fake"
-    payload["credentials"]["vikingdb"]["access_key"] = "fake"
-    payload["credentials"]["vikingdb"]["secret_key"] = "fake"
     config = tmp_path / "config.yaml"
     config.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
     config.chmod(0o600)
