@@ -754,9 +754,10 @@ def test_the_heavy_steps_run_off_the_event_loop(tmp_path, monkeypatch) -> None:
         def slow(*args, **kwargs):  # type: ignore[no-untyped-def]
             if threading.get_ident() == loop_thread[0]:
                 on_loop.append(name)
-            # 用 sleep 模拟一步重活（不占 GIL）：放在事件循环线程上跑，心跳就会断开 0.3 s；忙循环会在别的线程里一直抢 GIL，
-            # 慢机器上（windows-latest 3.12/3.13）事件循环被挤住 0.26–0.38 s，量到的就不再是"在不在循环上"
-            time.sleep(0.3)
+            # 用 sleep 模拟一步重活（不占 GIL），一步 1 s：放在事件循环线程上跑（或循环同步等它），心跳至少断开 1 s。
+            # 共享 CI 虚拟机偶尔整体停顿 0.26–0.38 s（windows-latest 3.12/3.13、ubuntu-latest 3.13 实测），阈值取 0.5 s，
+            # 两边各留一倍余量；原先忙循环 0.3 s、阈值 0.2 s 时两者挨得太近
+            time.sleep(1.0)
             return real(*args, **kwargs)
 
         return slow
@@ -782,7 +783,7 @@ def test_the_heavy_steps_run_off_the_event_loop(tmp_path, monkeypatch) -> None:
         return max(later - earlier for earlier, later in zip(beats, beats[1:], strict=False))
 
     longest = asyncio.run(main())
-    assert on_loop == [] and longest < 0.2
+    assert on_loop == [] and longest < 0.5
 
 
 def test_the_coverage_is_computed_once_a_night(tmp_path, monkeypatch) -> None:
