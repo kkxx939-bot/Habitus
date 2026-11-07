@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
-import { chmodSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, win32 } from "node:path";
 import test from "node:test";
 
 import { formatError, main } from "../../bin/habitus.mjs";
 import { HARNESS_REGISTRY, createHarnessRegistry } from "../../harnesses.mjs";
-import { atStep, executePluginLifecycle, sourceDigest } from "../../install-memory-plugin.mjs";
+import { atStep, dedicatedRoot, executePluginLifecycle, sourceDigest } from "../../install-memory-plugin.mjs";
 import { fileEntryPath, patchBlock, patchFilePath } from "../../registrations.mjs";
+import { allowWritesSync, denyWritesSync } from "./support/read-only.mjs";
 
 function sink() {
   const chunks = [];
@@ -463,7 +463,7 @@ test("a registration whose rollback also fails reports the harness left behind",
   // codex 原本装着、指向旧目录，这次先改注册成功；OpenCode 的配置目录只读，写入口失败；
   // 回滚 codex 时要把它指回旧目录，这一步也失败
   const opencodeConfig = join(env.XDG_CONFIG_HOME, "opencode");
-  await chmod(opencodeConfig, 0o500);
+  denyWritesSync(opencodeConfig);
   const previous = join(directory, "previous-marketplace");
   const runner = new CodexRunner(`plugin marketplace add ${previous}`);
   runner.marketplaceSource = previous;
@@ -472,7 +472,7 @@ test("a registration whose rollback also fails reports the harness left behind",
     { action: "install", harnesses: [], root: join(parent, "marketplace") },
     { runner, sourceRoot: source, registry, env },
   ).then(() => assert.fail("install should fail"), (value) => value)
-    .finally(() => chmod(opencodeConfig, 0o700));
+    .finally(() => allowWritesSync(opencodeConfig));
   assert.equal(error.habitusStep.harness, "opencode");
   assert.match(error.habitusStep.action, /^注册（file）$/);
   assert.equal(error.restoreFailures.length, 1);
@@ -517,7 +517,7 @@ test("a plugin copy that cannot be rolled back keeps the original error, still r
   const run = runner.run.bind(runner);
   runner.run = (command, args) => {
     if (args.join(" ").startsWith("plugin add ")) {
-      chmodSync(parent, 0o500);
+      denyWritesSync(parent);
       throw new Error("simulated failure: plugin add");
     }
     return run(command, args);
@@ -525,7 +525,7 @@ test("a plugin copy that cannot be rolled back keeps the original error, still r
   const error = await lifecycle({ action: "install", harnesses: ["codex"], root }, runner).then(
     () => assert.fail("install should fail"),
     (value) => value,
-  ).finally(() => chmod(parent, 0o700));
+  ).finally(() => allowWritesSync(parent));
   assert.equal(error.message, "simulated failure: plugin add");
   assert.deepEqual(error.habitusStep, { harness: "codex", action: "注册（marketplace）" });
   assert.equal(runner.marketplaceSource, previous, "codex registration must still be restored");
@@ -541,11 +541,11 @@ test("a remove that cannot delete the plugin copy names the step", async (t) => 
   const { parent, lifecycle } = await setup(t);
   const root = join(parent, "marketplace");
   await lifecycle({ action: "install", harnesses: [], root });
-  await chmod(parent, 0o500);
+  denyWritesSync(parent);
   const error = await lifecycle({ action: "remove", harnesses: [], root }).then(
     () => assert.fail("remove should fail"),
     (value) => value,
-  ).finally(() => chmod(parent, 0o700));
+  ).finally(() => allowWritesSync(parent));
   assert.deepEqual(error.habitusStep, { action: `删除插件副本 ${root}` });
   assert.match(formatError("plugin", error), /^habitus plugin: \[删除插件副本 .*\] .*(EACCES|EPERM)/);
 });
@@ -553,4 +553,16 @@ test("a remove that cannot delete the plugin copy names the step", async (t) => 
 test("a frozen error passes through atStep unchanged", async () => {
   const frozen = Object.freeze(new Error("frozen original"));
   await assert.rejects(atStep({ action: "x" }, () => { throw frozen; }), (error) => error === frozen);
+});
+
+// 撤回即失败（Windows 真机 bug）：原来判"在源目录外"用的是 path.parse(relation).isAbsolute（parse 没有这个字段，恒 undefined），
+// 只剩 startsWith("..")。Windows 上临时目录在 C:、源码在 D:（CI 的 D:\a\Habitus），relative() 给的是绝对路径，
+// 于是每次 install 都被误拒成"在源目录里面"。盘符语义用 path.win32 在任何平台上验
+test("a marketplace root on another drive than the plugin source is outside it, one inside still is not", () => {
+  const source = "D:\\a\\Habitus\\plugins";
+  assert.equal(dedicatedRoot("C:\\Users\\张三 李四\\.habitus\\plugin-marketplace", source, win32), "C:\\Users\\张三 李四\\.habitus\\plugin-marketplace");
+  assert.equal(dedicatedRoot("D:\\a\\marketplace", source, win32), "D:\\a\\marketplace");
+  assert.throws(() => dedicatedRoot("D:\\a\\Habitus\\plugins\\nested", source, win32), /outside the source plugin directory/);
+  assert.throws(() => dedicatedRoot(source, source, win32), /outside the source plugin directory/);
+  assert.throws(() => dedicatedRoot("C:\\", source, win32), /dedicated child directory/);
 });

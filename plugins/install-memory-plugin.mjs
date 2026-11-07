@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { cp, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join, parse, relative, resolve } from "node:path";
+import path, { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { makePrivateDirectory } from "./memory-plugin-shared/lib/private-dir.mjs";
 import { HARNESS_REGISTRY, MARKETPLACE_NAME, publicHarnessDescriptor } from "./harnesses.mjs";
 import { CommandRunner, harnessPresent, installBlocker, registrationOf } from "./registrations.mjs";
 
@@ -43,20 +44,24 @@ const REPOSITORY_PLUGINS = dirname(fileURLToPath(import.meta.url));
 const INSTALL_SCHEMA = 1;
 const ACTIONS = new Set(["install", "status", "update", "remove", "harnesses"]);
 
-function dedicatedRoot(root, sourceRoot) {
-  const resolvedRoot = resolve(root);
-  const resolvedSource = resolve(sourceRoot);
-  if (resolvedRoot === parse(resolvedRoot).root || resolvedRoot === resolve(homedir())) {
+// paths 只给测试换成 path.win32（在 POSIX 上验盘符路径）；运行时就是本平台的 node:path
+export function dedicatedRoot(root, sourceRoot, paths = path) {
+  const resolvedRoot = paths.resolve(root);
+  const resolvedSource = paths.resolve(sourceRoot);
+  if (resolvedRoot === paths.parse(resolvedRoot).root || resolvedRoot === paths.resolve(homedir())) {
     throw new Error("marketplace root must be a dedicated child directory");
   }
-  const relation = relative(resolvedSource, resolvedRoot);
-  if (relation === "" || (!relation.startsWith("..") && !parse(relation).isAbsolute)) {
+  // 不同盘（Windows 上 C: 与 D:）时 relative() 给的是绝对路径：那也是在源目录外面
+  const relation = paths.relative(resolvedSource, resolvedRoot);
+  if (relation === "" || (!relation.startsWith("..") && !paths.isAbsolute(relation))) {
     throw new Error("marketplace root must be outside the source plugin directory");
   }
   return resolvedRoot;
 }
 
+// Windows 没有目录 fsync（目录句柄 FlushFileBuffers 报 EPERM）：改名的落盘靠 NTFS 元数据日志，与 Python 耐久层 Windows 份同一口径
 async function syncDirectory(path) {
+  if (process.platform === "win32") return;
   const handle = await open(path, "r");
   try { await handle.sync(); }
   catch (error) { if (!["EINVAL", "ENOTSUP", "EBADF"].includes(error?.code)) throw error; }
@@ -89,9 +94,9 @@ async function digestTree(path, logicalPath, hash) {
 
 async function stageMarketplace(root, sourceRoot, registry) {
   const parent = dirname(root);
-  await mkdir(parent, { recursive: true, mode: 0o700 });
+  await makePrivateDirectory(parent);
   const staging = join(parent, `.${basename(root)}.staging-${randomUUID()}`);
-  await mkdir(join(staging, "plugins"), { recursive: true, mode: 0o700 });
+  await makePrivateDirectory(join(staging, "plugins"));
   try {
     const definitions = registry.list();
     for (const name of [...new Set(definitions.map((definition) => definition.pluginDirectory))]) {

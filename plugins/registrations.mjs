@@ -5,12 +5,12 @@
 // - file：在宿主的插件目录放一个带受管标记的入口文件，指向 marketplace 根里的插件（OpenCode、pi）。
 // - cordis-patch：装宿主的 hook 桥，在它的 home 级 patch 文件里写一段受管配置（DeepSeek Harness）。
 
-import { spawn, spawnSync } from "node:child_process";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { MARKETPLACE_NAME, PLUGIN_ID, PLUGIN_NAME } from "./harnesses.mjs";
+import { killHostProcess, runHostCommand, spawnHostCommand } from "./host-command.mjs";
 
 // 探测"本机有没有这个宿主"（`<命令> --version`）的超时。宿主 CLI 多是 Node 程序，冷启动在慢机器、Windows 杀毒扫描
 // 或高负载下可以到好几秒；超时被判成"没装"会让安装器和 doctor 直接跳过一个装好的宿主，比多等几秒糟得多。
@@ -29,14 +29,14 @@ export class CommandRunner {
   }
 
   available(command) {
-    const result = spawnSync(command, ["--version"], {
+    const result = runHostCommand(command, ["--version"], {
       encoding: "utf8", timeout: this.probeTimeoutMs, killSignal: "SIGKILL", env: this.env,
     });
     return result.status === 0 && !result.error;
   }
 
   json(command, args) {
-    const result = spawnSync(command, args, {
+    const result = runHostCommand(command, args, {
       encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL", maxBuffer: 16 * 1024 * 1024, env: this.env,
     });
     if (result.error) throw result.error;
@@ -46,7 +46,7 @@ export class CommandRunner {
   }
 
   run(command, args) {
-    const result = spawnSync(command, args, { stdio: "inherit", timeout: 30_000, killSignal: "SIGKILL", env: this.env });
+    const result = runHostCommand(command, args, { stdio: "inherit", timeout: 30_000, killSignal: "SIGKILL", env: this.env });
     if (result.error) throw result.error;
     if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed with status ${result.status}`);
   }
@@ -390,14 +390,14 @@ export function inspectHookReview(definition, options = {}) {
 export const HOOK_REVIEW_KILL_GRACE_MS = 1000;
 
 // Codex：`codex app-server` 的 JSON-RPC（initialize → hooks/list），trustStatus 由 Codex 自己判（trusted / managed 才算批了）
-function inspectCodexAppServerHooks(definition, { spawnImpl = spawn, timeoutMs = 15_000, env = process.env, cwd = env.HOME || homedir() } = {}) {
+function inspectCodexAppServerHooks(definition, { spawnImpl = spawnHostCommand, timeoutMs = 15_000, env = process.env, cwd = env.HOME || homedir() } = {}) {
   return new Promise((resolvePromise) => {
     let child;
     let settled = false;
     let exited = false;
     let buffer = "";
     const signal = (name) => {
-      try { child?.kill(name); } catch { /* 已经退出 */ }
+      try { if (child) killHostProcess(child, name); } catch { /* 已经退出 */ }
     };
     const finish = (value) => {
       if (settled) return;

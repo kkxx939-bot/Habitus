@@ -2,6 +2,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, readdir, rename, rm, stat, utimes } from "node:fs/promises";
+import { makePrivateDirectory } from "./private-dir.mjs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { replaceJsonDurably } from "./atomic-file.mjs";
@@ -126,13 +127,13 @@ export async function listSkippedTranscriptLines(root) {
 
 export async function writeState(root, host, nativeSessionId, value) {
   const target = paths(root, host, nativeSessionId);
-  await mkdir(target.directory, { recursive: true, mode: DIR_MODE });
+  await makePrivateDirectory(target.directory);
   await replaceJsonDurably(target.state, { ...value, schemaVersion: 3 });
 }
 
 export async function withSessionLock(root, host, nativeSessionId, callback) {
   const target = paths(root, host, nativeSessionId);
-  await mkdir(target.directory, { recursive: true, mode: DIR_MODE });
+  await makePrivateDirectory(target.directory);
   const deadline = Date.now() + 5000;
   const ownerToken = randomUUID();
   const processIdentity = await readProcessIdentity(process.pid);
@@ -243,8 +244,10 @@ async function readWindowsProcessStart(pid) {
   if (process.platform !== "win32" || !Number.isSafeInteger(pid) || pid <= 0) return null;
   const script = `[Diagnostics.Process]::GetProcessById(${pid}).StartTime.ToUniversalTime().ToString('o')`;
   try {
+    // 按系统目录里的绝对路径起：宿主给 hook 的 PATH 不一定带 System32，也不让 PATH 上同名的别的程序冒充
+    const powershell = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
     const { stdout } = await execFileAsync(
-      "powershell.exe",
+      powershell,
       ["-NoProfile", "-NonInteractive", "-Command", script],
       { timeout: 10_000, maxBuffer: 4096, windowsHide: true },
     );

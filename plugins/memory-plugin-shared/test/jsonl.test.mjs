@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { readJsonlDelta } from "../lib/jsonl.mjs";
+import { openNoFollow, readFirstRecord, readJsonlDelta } from "../lib/jsonl.mjs";
 
 function completed(records) {
   const index = records.findLastIndex((record) => record?.done === true);
@@ -269,8 +269,37 @@ test("a transcript path that is a symlink is not followed", async (t) => {
   const target = join(directory, "elsewhere.jsonl");
   await writeFile(target, '{"done":true}\n');
   const path = join(directory, "transcript.jsonl");
-  await symlink(target, path);
+  if (!await symlinkOrSkip(t, target, path)) return;
   await assert.rejects(readJsonlDelta(path, null, { maxBytes: 1024, selectCompleted: completed }), { code: "ELOOP" });
+  assert.equal(await readFirstRecord(path), null);
+});
+
+// Windows 上普通用户建文件符号链接要 SeCreateSymbolicLinkPrivilege 或开发者模式（CI runner 是管理员，建得了）。
+// 建不了就跳过：那台机器上普通进程也就造不出这种链接，没有可防的
+async function symlinkOrSkip(t, target, path) {
+  try {
+    await symlink(target, path);
+    return true;
+  } catch (error) {
+    if (process.platform !== "win32" || error?.code !== "EPERM") throw error;
+    t.skip("Windows 上当前用户没有建符号链接的特权（未开开发者模式）");
+    return false;
+  }
+}
+
+// Windows 那一支（没有 O_NOFOLLOW：先 lstat 拒链接、打开后核对文件身份）在 POSIX 上也照样走一遍：
+// 链接被拒、普通文件照常打开读到内容
+test("without O_NOFOLLOW a transcript symlink is still refused and a regular file still opens", async (t) => {
+  const directory = await root(t);
+  const target = join(directory, "elsewhere.jsonl");
+  await writeFile(target, '{"done":true}\n');
+  const path = join(directory, "transcript.jsonl");
+  if (!await symlinkOrSkip(t, target, path)) return;
+  await assert.rejects(openNoFollow(path, 0), { code: "ELOOP" });
+  const handle = await openNoFollow(target, 0);
+  try { assert.equal((await handle.readFile("utf8")), '{"done":true}\n'); }
+  finally { await handle.close(); }
+  await assert.rejects(openNoFollow(join(directory, "missing.jsonl"), 0), { code: "ENOENT" });
 });
 
 // 杀变异 JL08（坏行当空行跳过）：一行完整却不是 JSON 时报错、游标不往前走（plugin-core 记成 captureFailure、doctor 列出来），

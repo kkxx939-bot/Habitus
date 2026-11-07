@@ -78,7 +78,7 @@ test("every plugin entry loads from the installer's staged copy, without the rep
       const manifest = JSON.parse(await readFile(join(staged, definition.hooksManifest), "utf8"));
       for (const groups of Object.values(manifest.hooks)) {
         for (const hook of groups.flatMap((group) => group.hooks)) {
-          const [, script] = hook.command.match(/^node \$\{[A-Z_]+\}\/(\S+\.mjs)$/) || [];
+          const [, script] = hook.command.match(/^node "\$\{[A-Z_]+\}\/(\S+\.mjs)"$/) || [];
           assert.ok(script, `${definition.id}: unexpected hook command ${hook.command}`);
           entries.push(script);
         }
@@ -95,6 +95,47 @@ test("every plugin entry loads from the installer's staged copy, without the rep
     }
   }
 });
+
+// 撤回即失败（hook 命令不加引号）：marketplace 根默认在用户主目录下，Windows 用户名常带空格（C:\\Users\\张三 李四）。
+// 宿主把 ${CLAUDE_PLUGIN_ROOT} / ${PLUGIN_ROOT} 换成插件目录再交给 shell 跑；路径不带引号时 node 只收到空格前那一截。
+// 这里照宿主的做法：把插件暂存到带中文和空格的目录，替换变量后经 shell 执行（POSIX 是 /bin/sh，Windows 是 cmd.exe）
+test("every hook command still runs when the plugin directory has Chinese characters and spaces", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "habitus 张三 李四-"));
+  t.after(() => rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+  const root = await prepareMarketplace(join(parent, "plugin marketplace"));
+  const stateRoot = join(parent, "state");
+  let ran = 0;
+  for (const definition of HARNESS_REGISTRY.list().filter((item) => item.hooksManifest)) {
+    const staged = join(root, "plugins", definition.pluginDirectory);
+    const manifest = JSON.parse(await readFile(join(staged, definition.hooksManifest), "utf8"));
+    const commands = new Set(Object.values(manifest.hooks).flat().flatMap((group) => group.hooks).map((hook) => hook.command));
+    for (const command of commands) {
+      const expanded = command.replace(/\$\{[A-Z_]+\}/g, staged);
+      const result = await runShell(expanded, stateRoot);
+      assert.equal(result.code, 0, `${definition.id}: ${expanded}\n${result.stderr}`);
+      assert.deepEqual(JSON.parse(result.stdout), {}, `${definition.id}: ${expanded}`);
+      ran += 1;
+    }
+  }
+  assert.ok(ran >= 8, `only ${ran} hook commands ran`);
+});
+
+function runShell(command, stateRoot) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, {
+      shell: true,
+      env: { ...ISOLATED.env, HABITUS_MEMORY_ENABLED: "0", HABITUS_PLUGIN_STATE_DIR: stateRoot, HABITUS_HOOK_WORKER: "" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code, stdout, stderr }));
+    child.stdin.end("{}");
+  });
+}
 
 // 仓库放在带中文和空格的路径下时，靠 import.meta.url 找文件的测试照样找得到（URL 的 pathname 保留百分号编码，要用 fileURLToPath）。
 // 把 plugins/ 与根目录的 marketplace 清单复制到这样的目录里，跑按文件位置找夹具与清单的那两条

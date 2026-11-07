@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import { access, readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +7,7 @@ import {
   PLUGIN_NAME,
 } from "../harnesses.mjs";
 import { defaultMarketplaceRoot, marketplaceStatus } from "../install-memory-plugin.mjs";
+import { runHostCommand } from "../host-command.mjs";
 import { CommandRunner, inspectHookReview, registrationOf } from "../registrations.mjs";
 import { REMINDERS_FEATURE, hasFeature, serviceGaps } from "./lib/compat.mjs";
 import { loadPluginConfig } from "./lib/config.mjs";
@@ -37,7 +37,7 @@ export async function runPluginDoctor(
   checks.push(nodeRuntimeCheck(), ...(await bundleChecks(registry)));
   const registrations = await inspectHarnesses(registry, env);
   checks.push(...registrations, await inspectMarketplace(registry, env));
-  checks.push(...await inspectFeatures(registry, registrations, spawnSync, env));
+  checks.push(...await inspectFeatures(registry, registrations, runHostCommand, env));
   checks.push(...await inspectHookReviews(registry, registrations, inspectHookReview, { timeoutMs: config.timeoutMs, env }));
   const health = await service.health();
   if (!health.ok) {
@@ -204,7 +204,7 @@ async function sharedBundleCheck(registry = HARNESS_REGISTRY) {
 
 // 宿主的特性清单对照注册表：必需的缺了 hook 一个都不跑；提醒相关的（advisory）缺了只是提醒问不出去。宿主没装 CLI 给 null。
 // 到点直接 SIGKILL：宿主接管了 SIGTERM 时，spawnSync 默认的超时信号兜不住
-export function harnessFeatureGaps(definition, run = spawnSync, env = process.env) {
+export function harnessFeatureGaps(definition, run = runHostCommand, env = process.env) {
   const result = run(definition.command, definition.featureInventory.args, { encoding: "utf8", timeout: 5000, killSignal: "SIGKILL", env });
   if (result.error?.code === "ENOENT") return null;
   if (result.error || result.status !== 0) return { available: false };
@@ -216,7 +216,7 @@ export function harnessFeatureGaps(definition, run = spawnSync, env = process.en
   };
 }
 
-export async function harnessFeatureChecks(registry = HARNESS_REGISTRY, registrations = [], run = spawnSync, env = process.env) {
+export async function harnessFeatureChecks(registry = HARNESS_REGISTRY, registrations = [], run = runHostCommand, env = process.env) {
   // 插件装上了但宿主的 hook 特性没开，记忆与提醒的 hook 一个都不会跑：按注册表里声明的特性逐项查（宿主没装 CLI 的跳过）。
   // 提醒相关的特性只对已注册的宿主查，缺了报 warn
   const registered = new Set(registrations.filter((check) => check.status === "pass").map((check) => check.name));

@@ -174,7 +174,7 @@ argument-hint: "change <清单条目> | review <范围> | fix <问题号> | audi
 | 复现脚本、A/B 基线产物、对抗测试记录 | 各自 session 的 scratch，`baseline/` 与 `verify/` 子目录；结论和证据路径写进报告；体积大的跑完压缩或删除 |
 | 报告原文归档 | `~/Desktop/Habitus实验数据/事件融合与词表重做/37-材料/` 下按条目、按轮次分目录，不覆盖旧报告 |
 | 问题总清单 | `~/Desktop/38-README核对问题清单.md`（新一轮开一节；用户另行指定的，以用户为准） |
-| 设计决定 | 现在：`~/Desktop/Habitus实验数据/事件融合与词表重做/裁定.md`；W14 完成后以仓库 `docs/rulings/` 为准 |
+| 设计决定（编号裁定） | 以仓库 `docs/rulings/README.md` 为准（W14 已完成，2026-11-07）；桌面 `裁定.md` 只留讨论过程。代码里的「裁定 N」都能在仓库那份查到，架构测试 `tests/architecture/test_rulings_documented.py` 守着 |
 | 边角与范围外的发现 | 同目录 `待办.md` |
 
 一次性脚本不进仓库。git 操作全部由用户自己做。

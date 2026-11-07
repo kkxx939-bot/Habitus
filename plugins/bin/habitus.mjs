@@ -2,11 +2,11 @@
 // Habitus 命令行（方案 36）：npm 装、经 HTTP 连本地 Habitus 服务；插件安装走宿主原生的 marketplace 命令。
 // 只认这一个入口：插件生命周期、体检、服务状态、搜记忆都从这里分发，不再经 Python 绕一圈。
 
-import { spawnSync } from "node:child_process";
 import { readFile, realpath } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HARNESS_REGISTRY } from "../harnesses.mjs";
+import { runHostCommand } from "../host-command.mjs";
 import { executePluginLifecycle, parseArgs as parsePluginArgs } from "../install-memory-plugin.mjs";
 import { inspectHookReview } from "../registrations.mjs";
 import { harnessFeatureGaps, runPluginDoctor } from "../memory-plugin-shared/doctor.mjs";
@@ -144,7 +144,7 @@ async function plugin(args, { stdout, env, lifecycle, reviewHooks, featureGaps }
     for (const item of result.harnesses || []) {
       const definition = HARNESS_REGISTRY.resolve(item.harness);
       if (!item.installed || !item.enabled || !definition.featureInventory?.advisory.length) continue;
-      const gaps = featureGaps(definition, spawnSync, env);
+      const gaps = featureGaps(definition, runHostCommand, env);
       if (gaps?.available) item.featureNotes = gaps.advisory.map((feature) => feature.note);
     }
   }

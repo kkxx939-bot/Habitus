@@ -49,9 +49,13 @@ jobs:
           npm run sync
           git diff --exit-code -- '*/scripts/shared/*'
           npm test
+      # 前面某步失败也接着跑后面互不依赖的各步（取消时不跑）：一轮 CI 就能看到每一段在三平台上的真实结果，
+      # 不会因为插件测试先红而把 Python 那半整段跳过；任何一步红，整个 job 照样红。
       - name: Compile, lint, type check and full test suite (scripts/ci.sh)
+        if: ${{ !cancelled() }}
         run: bash scripts/ci.sh
       - name: Verify unified bootstrap and secure non-interactive init
+        if: ${{ !cancelled() }}
         run: |
           init_root="$RUNNER_TEMP/habitus-init"
           habitus-server --help
@@ -65,10 +69,12 @@ jobs:
           fi
           HABITUS_CI_CONFIG_PATH="$init_root/config.yaml" python -c 'import os; from habitus.config import HabitusConfig; c=HabitusConfig.from_file(os.environ["HABITUS_CI_CONFIG_PATH"]); assert c.models.chat.route.credential_ref == "chat"; assert c.models.chat.route.adapter == "openai_compatible_chat"; assert c.models.embedding.route.credential_ref == "embedding"; assert c.models.rerank.route.credential_ref == "dashscope"; assert c.memory.vector_store.adapter == c.conversation.summary_vector_store.adapter == "local_sqlite"; assert c.memory.vector_store.route.credential_ref == c.conversation.summary_vector_store.route.credential_ref == ""'
       - name: Build wheel and verify its contents against pyproject
+        if: ${{ !cancelled() }}
         run: |
           python -m build --wheel
           python scripts/check_wheel.py
       - name: Install the wheel offline from a binary-only wheelhouse (air-gapped / internal-mirror install)
+        if: ${{ !cancelled() }}
         run: |
           # 只有内部 PyPI 镜像、不能联网编译的机器：所有运行时依赖都必须有现成 wheel，装时不碰网络、不需要编译器和管理员。
           wheelhouse="$RUNNER_TEMP/habitus-wheelhouse"
@@ -84,6 +90,7 @@ jobs:
           offline_root="$RUNNER_TEMP/离线 用户/存储 根"
           "$offline_bin/python" -c 'import sys; from pathlib import Path; from habitus.infrastructure.store.filesystem import atomic_replace_bytes, grants_group_or_other_access, read_regular_bytes; root = Path(sys.argv[1]); target = root / "记忆" / "偏好.md"; atomic_replace_bytes(target, "仅本人".encode(), artifact_root=root); assert read_regular_bytes(target, artifact_root=root, max_bytes=64) == "仅本人".encode(); assert not grants_group_or_other_access(target)' "$offline_root"
       - name: Install wheel and the npm CLI, execute the packaged plugin lifecycle
+        if: ${{ !cancelled() }}
         run: |
           smoke_venv="$RUNNER_TEMP/habitus-wheel-smoke"
           npm_prefix="$RUNNER_TEMP/habitus-npm"

@@ -355,7 +355,8 @@ test("argument edges: plugin --help, --root without a value, and server commands
   const server = sink();
   assert.equal(await main(["init"], { stdout: out, stderr: server }), 2);
   assert.match(server.text(), /habitus-server init/);
-  assert.equal(parseArgs(["status"], { HOME: "/tmp/someone" }).root, "/tmp/someone/.habitus/plugin-marketplace");
+  // 期望值用 join 拼：Windows 上是 \tmp\someone\.habitus\plugin-marketplace，POSIX 上与原来逐字相同
+  assert.equal(parseArgs(["status"], { HOME: "/tmp/someone" }).root, join("/tmp/someone", ".habitus", "plugin-marketplace"));
 });
 
 // T13（裁定 72 的"本地服务"口径）：命令行说给人看的话里不再有"服务端"：habitus init / serve 的提示，以及 bin/ 下所有不是注释的行

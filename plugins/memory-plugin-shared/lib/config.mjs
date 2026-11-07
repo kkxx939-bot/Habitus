@@ -42,7 +42,8 @@ function connectionURL(stateRoot) {
     if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 4096) {
       throw new Error("plugin connection config must be a bounded regular file");
     }
-    if ((metadata.mode & 0o022) !== 0) {
+    // Windows 的 stat 不带 POSIX 权限位（可写文件恒为 0o666）：这份文件由 habitus-server 经耐久层写成仅本人 DACL，Node 这边不重判
+    if (process.platform !== "win32" && (metadata.mode & 0o022) !== 0) {
       throw new Error("plugin connection config must have private, non-writable permissions");
     }
     if (typeof process.getuid === "function" && metadata.uid !== process.getuid()) {

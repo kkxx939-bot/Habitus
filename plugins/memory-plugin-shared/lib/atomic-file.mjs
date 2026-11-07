@@ -15,7 +15,9 @@ async function durableTemporary(target, value) {
   return temporary;
 }
 
+// Windows 没有目录 fsync（目录句柄 FlushFileBuffers 报 EPERM）：改名的落盘靠 NTFS 元数据日志，与 Python 耐久层 Windows 份同一口径
 async function syncDirectory(target) {
+  if (process.platform === "win32") return;
   const handle = await open(dirname(target), "r");
   try {
     await handle.sync();

@@ -9,6 +9,7 @@
   "files": [
     "bin/",
     "harnesses.mjs",
+    "host-command.mjs",
     "install-memory-plugin.mjs",
     "registrations.mjs",
     "memory-plugin-shared/doctor.mjs",

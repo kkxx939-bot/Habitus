@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { open } from "node:fs/promises";
+import { lstat, open } from "node:fs/promises";
 import { stripMedia } from "./media.mjs";
 
 const CURSOR_SCHEMA = 3;
@@ -9,6 +9,26 @@ const CURSOR_SCHEMA = 3;
 const ANCHOR_BYTES = 64 * 1024;
 const LEGACY_ANCHOR_BYTES = 128;
 const READ_CHUNK_BYTES = 4 * 1024 * 1024;
+
+// 打开转写不跟随符号链接。POSIX 用 O_NOFOLLOW；Windows 没有这个标志，先 lstat 拒链接，打开后再核对打开的文件身份
+// （卷序列号 + 文件 ID）与 lstat 看到的是同一个：两步之间路径被换成链接，打开的就是链接目标、身份对不上，同样拒。
+// noFollowFlag 只给测试在 POSIX 上走 Windows 这一支
+export async function openNoFollow(path, noFollowFlag = constants.O_NOFOLLOW) {
+  if (noFollowFlag) return open(path, constants.O_RDONLY | noFollowFlag);
+  const seen = await lstat(path, { bigint: true });
+  if (seen.isSymbolicLink()) throw symlinkRefused(path);
+  const handle = await open(path, constants.O_RDONLY);
+  const opened = await handle.stat({ bigint: true });
+  if (opened.dev !== seen.dev || opened.ino !== seen.ino) {
+    await handle.close();
+    throw symlinkRefused(path);
+  }
+  return handle;
+}
+
+function symlinkRefused(path) {
+  return Object.assign(new Error(`ELOOP: transcript path is a symbolic link, open '${path}'`), { code: "ELOOP", path });
+}
 
 function digest(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -156,9 +176,8 @@ export async function readJsonlDelta(path, cursorValue, { maxBytes, selectComple
   if (typeof selectCompleted !== "function") throw new Error("selectCompleted must be a function");
   if (relevant != null && typeof relevant !== "function") throw new Error("relevant must be a function");
   const cursor = validateCursor(cursorValue);
-  const noFollow = constants.O_NOFOLLOW || 0;
   let handle;
-  try { handle = await open(path, constants.O_RDONLY | noFollow); }
+  try { handle = await openNoFollow(path); }
   catch (error) { if (error?.code === "ENOENT") return null; throw error; }
   try {
     const metadata = await handle.stat();
@@ -233,7 +252,7 @@ export async function readJsonlDelta(path, cursorValue, { maxBytes, selectComple
 export async function readFirstRecord(path, maxBytes = 1024 * 1024) {
   if (typeof path !== "string" || !path) return null;
   let handle;
-  try { handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0)); }
+  try { handle = await openNoFollow(path); }
   catch (error) { if (["ENOENT", "ELOOP"].includes(error?.code)) return null; throw error; }
   try {
     const buffer = Buffer.alloc(64 * 1024);

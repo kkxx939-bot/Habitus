@@ -112,6 +112,8 @@ function adapter(reads) {
   };
 }
 
+const WINDOWS = process.platform === "win32";
+
 async function temporaryRoot(t) {
   const root = await mkdtemp(join(tmpdir(), "habitus-plugin-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -260,7 +262,9 @@ test("configuration reads the service URL projected beside a selected Habitus YA
   assert.equal(config.stateRoot, stateRoot);
 });
 
-test("configuration rejects a group or world writable service connection file", async (t) => {
+// Windows 不判这一条：那里文件没有 POSIX 权限位，chmod 0o666 只是清掉只读属性；connection.json 的私有性由 habitus-server
+// 写成仅本人 DACL 保证，Node 这边不重判（config.mjs）
+test("configuration rejects a group or world writable service connection file", { skip: WINDOWS && "Windows 文件没有 POSIX 权限位" }, async (t) => {
   const root = await temporaryRoot(t);
   const connection = join(root, "connection.json");
   await writeFile(
@@ -284,8 +288,11 @@ test("marketplace preparation is isolated and produces private manifests", async
   const claude = JSON.parse(await readFile(join(root, ".claude-plugin", "marketplace.json"), "utf8"));
   assert.equal(codex.plugins[0].source.path, "./plugins/habitus-memory");
   assert.equal(claude.plugins[0].source, "./plugins/habitus-memory-claude-code");
-  const manifestMode = (await stat(join(root, ".agents", "plugins", "marketplace.json"))).mode & 0o777;
-  assert.equal(manifestMode, 0o600);
+  // 权限位只在 POSIX 上有意义：Windows 的 stat 不带 POSIX 权限位（可写文件恒为 0o666），Node 写的文件继承所在目录的 DACL
+  if (!WINDOWS) {
+    const manifestMode = (await stat(join(root, ".agents", "plugins", "marketplace.json"))).mode & 0o777;
+    assert.equal(manifestMode, 0o600);
+  }
   const hooks = JSON.parse(await readFile(join(root, "plugins", "habitus-memory-claude-code", "hooks", "hooks.json"), "utf8"));
   // 子代理的会话不进记忆：Claude Code 的插件不挂 SubagentStart / SubagentStop
   assert.equal(hooks.hooks.SubagentStart, undefined);
@@ -740,7 +747,8 @@ test("hook boundary fails open and records a private structured failure", async 
   assert.equal(event.hook, "stop");
   assert.equal(event.stage, "hook");
   assert.equal(event.retryable, true);
-  assert.equal((await stat(logPath)).mode & 0o777, 0o600);
+  // 权限位只在 POSIX 上有意义（同上）
+  if (!WINDOWS) assert.equal((await stat(logPath)).mode & 0o777, 0o600);
 });
 
 // 杀变异 R2-PC07（入队前不剥媒体）：媒体载荷在入队前换成占位，适配器给的记录哪怕没剥过（不经 readJsonlDelta 的适配器），
