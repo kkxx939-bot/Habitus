@@ -850,7 +850,9 @@ for (const mode of ["silent-ignore-term", "answer-ignore-term", "grandchild"]) {
   for (const args of [["doctor", "--json"], ["plugin", "status", "--json"]]) {
     test(`habitus ${args.filter((arg) => arg !== "--json").join(" ")} exits and leaves no app-server behind (app-server: ${mode})`, { timeout: 20_000 }, async (t) => {
       const isolated = await isolatedEnv(t, { fakeCodex: true });
-      const timeoutMs = 500;
+      // 留够起 app-server 的时间：Windows 上是 cmd.exe 再起 node，忙的 runner 上 500 ms 内 node 还没记下自己的 pid 就被整树杀掉
+      // （windows-latest 3.13 实测 "the fake app-server was never started"）
+      const timeoutMs = 2000;
       const env = {
         ...isolated.env,
         FAKE_CODEX_APP_SERVER: mode,
