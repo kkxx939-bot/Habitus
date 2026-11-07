@@ -52,9 +52,7 @@ class SituationInputs:
     history: tuple[HitEvent, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.day, date):
-            raise TypeError("day must be a date")
-        if self.moment is not None and (not isinstance(self.moment, datetime) or self.moment.utcoffset() is None):
+        if self.moment is not None and self.moment.utcoffset() is None:
             raise TypeError("moment must be a timezone-aware datetime")
 
 
@@ -86,10 +84,6 @@ def situation_hits(concepts: ConceptSet, inputs: SituationInputs) -> SituationOu
     要历史却没给 ``moment``）**不判**——不把"不知道"算成"成立"，也不把它算成"判过不成立"。
     """
 
-    if not isinstance(concepts, ConceptSet):
-        raise TypeError("concepts must be a ConceptSet")
-    if not isinstance(inputs, SituationInputs):
-        raise TypeError("inputs must be SituationInputs")
     hits: list[ConceptHit] = []
     checked: list[str] = []
     for identity in sorted(concepts.situations()):

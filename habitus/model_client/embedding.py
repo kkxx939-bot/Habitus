@@ -77,8 +77,6 @@ class EmbeddingClient:
         monotonic: Callable[[], float] = time.monotonic,
         observer: Observer | None = None,
     ) -> None:
-        if not isinstance(config, EmbeddingModelConfig):
-            raise TypeError("config must be EmbeddingModelConfig")
         self.config = config
         self.provider = provider
         self._async_sleep = async_sleep
@@ -101,7 +99,7 @@ class EmbeddingClient:
         return await self._embed_one(self._model_input(text, is_query=True), is_query=True)
 
     async def embed_documents(self, texts: Sequence[str]) -> tuple[EmbeddingVector, ...]:
-        if isinstance(texts, str) or not isinstance(texts, Sequence):
+        if isinstance(texts, str):
             raise TypeError("embedding documents must be a sequence of strings")
         normalized = tuple(self._model_input(text, is_query=False) for text in texts)
         if not normalized:

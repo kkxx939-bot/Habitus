@@ -6,7 +6,7 @@ import json
 import math
 import stat
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import date
 from enum import Enum
 from pathlib import Path
@@ -14,6 +14,7 @@ from typing import Any
 
 from habitus.foundation.ids import same_path_identity
 from habitus.foundation.integrity import canonical_json
+from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.contracts.path_lock import PathLock
 from habitus.infrastructure.store.filesystem.durable_io import (
     ImmutableArtifactConflictError,
@@ -74,18 +75,13 @@ class ConversationJournalConfig:
             ("max_ingress_receipt_bytes", self.max_ingress_receipt_bytes, 1024 * 1024),
             ("lock_ttl_seconds", self.lock_ttl_seconds, 3_600),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+            if not 1 <= value <= maximum:
                 raise ValueError(f"{name} must be between 1 and {maximum}")
         for float_name, float_value, float_maximum in (
             ("lock_wait_timeout_seconds", self.lock_wait_timeout_seconds, 60.0),
             ("lock_retry_delay_seconds", self.lock_retry_delay_seconds, 1.0),
         ):
-            if (
-                isinstance(float_value, bool)
-                or not isinstance(float_value, int | float)
-                or not math.isfinite(float(float_value))
-                or not 0 < float(float_value) <= float_maximum
-            ):
+            if not math.isfinite(float(float_value)) or not 0 < float(float_value) <= float_maximum:
                 raise ValueError(f"{float_name} must be greater than zero and at most {float_maximum:g}")
 
 
@@ -114,11 +110,11 @@ class ConversationJournalState:
     latest_segment_digest: str | None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.conversation_id, str) or not self.conversation_id:
+        if not self.conversation_id:
             raise ConversationJournalError("journal state conversation_id must be non-empty text")
         for name in ("archived_through_sequence", "released_through_sequence"):
             value = getattr(self, name)
-            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            if value is not None and value < 0:
                 raise ConversationJournalError(f"journal state {name} must be null or non-negative")
         if self.archived_through_sequence is None:
             if any(
@@ -136,7 +132,7 @@ class ConversationJournalState:
             and self.released_through_sequence > self.archived_through_sequence
         ):
             raise ConversationJournalError("released history cannot exceed the archive high-watermark")
-        if not isinstance(self.latest_segment_id, str) or not self.latest_segment_id:
+        if not self.latest_segment_id:
             raise ConversationJournalError("journal state requires latest_segment_id")
         _start, end = ConversationLayout.segment_range(self.latest_segment_id)
         if end != self.archived_through_sequence:
@@ -165,9 +161,9 @@ class ConversationAppendResult:
     next_sequence: int
 
     def __post_init__(self) -> None:
-        if isinstance(self.appended_count, bool) or not isinstance(self.appended_count, int) or self.appended_count < 0:
+        if self.appended_count < 0:
             raise ValueError("appended_count must be a non-negative integer")
-        if isinstance(self.next_sequence, bool) or not isinstance(self.next_sequence, int) or self.next_sequence < 0:
+        if self.next_sequence < 0:
             raise ValueError("next_sequence must be a non-negative integer")
 
 
@@ -210,12 +206,10 @@ class ConversationEditorTurn:
     unsealed: tuple[ConversationMessage, ...]
 
     def __post_init__(self) -> None:
-        if not self.segments or any(not isinstance(segment, ConversationSegment) for segment in self.segments):
+        if not self.segments:
             raise TypeError("segments must be a non-empty tuple of ConversationSegment values")
-        if isinstance(self.source_index, bool) or not 0 <= self.source_index < len(self.segments):
+        if not 0 <= self.source_index < len(self.segments):
             raise ValueError("source_index must point into segments")
-        if any(not isinstance(message, ConversationMessage) for message in self.unsealed):
-            raise TypeError("unsealed must contain ConversationMessage values")
 
     @property
     def source(self) -> ConversationSegment:
@@ -259,10 +253,6 @@ class ConversationMessageJournal:
         *,
         config: ConversationJournalConfig | None = None,
     ) -> None:
-        if not isinstance(path_lock, PathLock):
-            raise TypeError("path_lock must be a PathLock")
-        if config is not None and not isinstance(config, ConversationJournalConfig):
-            raise TypeError("config must be ConversationJournalConfig")
         resolved_config = config or ConversationJournalConfig()
         self.layout = ConversationLayout(
             root,
@@ -345,8 +335,6 @@ class ConversationMessageJournal:
         """幂等追加一个连续消息批次到 live.jsonl。"""
 
         self._require_batch(address, batch)
-        if ingress is not None and not isinstance(ingress, ConversationIngressRequest):
-            raise TypeError("ingress must be ConversationIngressRequest or None")
         with self.path_lock.acquire(
             self.layout.lock_key(address),
             ttl_seconds=self.config.lock_ttl_seconds,
@@ -517,12 +505,8 @@ class ConversationMessageJournal:
     ) -> ConversationSealResult:
         """先准备下游 outbox，再耐久创建 history 并移除 live 前缀。"""
 
-        if isinstance(through_sequence, bool) or not isinstance(through_sequence, int):
-            raise TypeError("through_sequence must be an integer")
         if through_sequence < 0:
             raise ValueError("through_sequence must be non-negative")
-        if before_history_publish is not None and not callable(before_history_publish):
-            raise TypeError("before_history_publish must be callable or None")
         with self.path_lock.acquire(
             self.layout.lock_key(address),
             ttl_seconds=self.config.lock_ttl_seconds,
@@ -712,10 +696,6 @@ class ConversationMessageJournal:
     ) -> ConversationEditorTurn:
         """读出 ``source`` 所在的整个逻辑轮次：向前接到开轮那一段，向后接到这一轮的最终答复（可能还在 live 里）。"""
 
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("address must be ConversationAddress")
-        if not isinstance(source, ConversationSegment):
-            raise TypeError("source must be ConversationSegment")
         history, live = self._retained_history_and_live(address)
         positions = [index for index, segment in enumerate(history) if segment.segment_id == source.segment_id]
         if len(positions) != 1:
@@ -759,8 +739,6 @@ class ConversationMessageJournal:
     ) -> tuple[str, ...]:
         """先耐久推进释放游标，再幂等删除已经验证的最旧连续原文前缀。"""
 
-        if not isinstance(segments, tuple) or any(not isinstance(segment, ConversationSegment) for segment in segments):
-            raise TypeError("segments must be a tuple of ConversationSegment values")
         if any(
             not same_path_identity(
                 segment.conversation_id,
@@ -811,7 +789,7 @@ class ConversationMessageJournal:
     ) -> tuple[str, ...]:
         """恢复上次中断的物理删除；游标已经释放的文件不再对外可见。"""
 
-        if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items <= 0:
+        if max_items <= 0:
             raise ValueError("max_items must be a positive integer")
         with self.path_lock.acquire(
             self.layout.lock_key(address),
@@ -831,11 +809,7 @@ class ConversationMessageJournal:
                         deleted.append(reference.segment_id)
                 return tuple(deleted)
 
-    def _read_ingress(
-        self,
-        address: ConversationAddress,
-        delivery_id: str,
-    ) -> ConversationIngressReceipt | None:
+    def _read_ingress(self, address: ConversationAddress, delivery_id: str) -> ConversationIngressReceipt | None:
         try:
             return self.ingress_receipts.read(address, delivery_id)
         except ConversationIngressError as exc:
@@ -947,12 +921,7 @@ class ConversationMessageJournal:
     def _read_live_messages(self, address: ConversationAddress) -> tuple[ConversationMessage, ...]:
         return self._read_messages(self.layout.live_path(address), missing_ok=True)
 
-    def _read_messages(
-        self,
-        path: Path,
-        *,
-        missing_ok: bool,
-    ) -> tuple[ConversationMessage, ...]:
+    def _read_messages(self, path: Path, *, missing_ok: bool) -> tuple[ConversationMessage, ...]:
         try:
             encoded = read_regular_bytes(
                 path,
@@ -1062,24 +1031,20 @@ class ConversationMessageJournal:
             raw = json.loads(encoded)
         except json.JSONDecodeError as exc:
             raise ConversationJournalError("conversation journal state is invalid JSON") from exc
-        expected_fields = {
-            "schema",
-            "conversation_id",
-            "archived_through_sequence",
-            "released_through_sequence",
-            "latest_segment_id",
-            "latest_segment_digest",
-        }
+        expected_fields = {"schema", *(field.name for field in fields(ConversationJournalState))}
         if not isinstance(raw, Mapping) or set(raw) != expected_fields:
             raise ConversationJournalError("conversation journal state has an invalid shape")
         if raw["schema"] != _JOURNAL_STATE_SCHEMA:
             raise ConversationJournalError("conversation journal state has an unsupported schema")
+        conversation_id = raw["conversation_id"]
+        if not isinstance(conversation_id, str):
+            raise ConversationJournalError("journal state conversation_id must be non-empty text")
         state = ConversationJournalState(
-            conversation_id=raw["conversation_id"],
-            archived_through_sequence=raw["archived_through_sequence"],
-            released_through_sequence=raw["released_through_sequence"],
-            latest_segment_id=raw["latest_segment_id"],
-            latest_segment_digest=raw["latest_segment_digest"],
+            conversation_id=conversation_id,
+            archived_through_sequence=_stored_sequence(raw, "archived_through_sequence"),
+            released_through_sequence=_stored_sequence(raw, "released_through_sequence"),
+            latest_segment_id=_stored_text(raw["latest_segment_id"], "journal state requires latest_segment_id"),
+            latest_segment_digest=_stored_text(raw["latest_segment_digest"], _STATE_DIGEST_MESSAGE),
         )
         if encoded != self._encode_state(state):
             raise ConversationJournalError("conversation journal state is not canonically encoded")
@@ -1153,6 +1118,7 @@ class ConversationMessageJournal:
                         try:
                             self.layout.segment_range(Path(temporary_destination).stem)
                         except ValueError:
+                            # 不是本写入器的 history 临时文件，落到下方按未知隐藏项拒绝。
                             pass
                         else:
                             continue
@@ -1246,10 +1212,7 @@ class ConversationMessageJournal:
         return tuple(known_by_sequence[key] for key in sorted(known_by_sequence))
 
     @staticmethod
-    def _require_tail_continuity(
-        state: ConversationJournalState,
-        live_messages: list[ConversationMessage],
-    ) -> None:
+    def _require_tail_continuity(state: ConversationJournalState, live_messages: list[ConversationMessage]) -> None:
         if not live_messages:
             return
         expected_start = state.next_sequence
@@ -1257,10 +1220,7 @@ class ConversationMessageJournal:
             raise ConversationJournalError("live messages do not continue the archive high-watermark")
 
     @staticmethod
-    def _expected_next_sequence(
-        state: ConversationJournalState,
-        live_messages: list[ConversationMessage],
-    ) -> int:
+    def _expected_next_sequence(state: ConversationJournalState, live_messages: list[ConversationMessage]) -> int:
         if live_messages:
             return live_messages[-1].sequence + 1
         return state.next_sequence
@@ -1275,10 +1235,6 @@ class ConversationMessageJournal:
 
     @staticmethod
     def _require_batch(address: ConversationAddress, batch: ConversationBatch) -> None:
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("address must be a ConversationAddress")
-        if not isinstance(batch, ConversationBatch):
-            raise TypeError("batch must be a ConversationBatch")
         if not same_path_identity(
             address.conversation_id,
             batch.conversation_id,
@@ -1297,6 +1253,23 @@ class ConversationMessageJournal:
     ) -> ConversationBatch | None:
         resolved = tuple(messages)
         return ConversationBatch(conversation_id, resolved) if resolved else None
+
+
+# 磁盘读回的 journal state 字段在构造前确认类型；文字照抄 ``ConversationJournalState.__post_init__``
+_STATE_DIGEST_MESSAGE = "journal state latest_segment_digest must be lowercase SHA-256"
+
+
+def _stored_sequence(raw: Mapping[str, object], name: str) -> int | None:
+    value = raw[name]
+    if value is not None and not is_int(value):
+        raise ConversationJournalError(f"journal state {name} must be null or non-negative")
+    return value
+
+
+def _stored_text(value: object, message: str) -> str | None:
+    if value is not None and not isinstance(value, str):
+        raise ConversationJournalError(message)
+    return value
 
 
 def _is_sha256(value: object) -> bool:

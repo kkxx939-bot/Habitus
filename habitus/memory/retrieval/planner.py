@@ -24,10 +24,6 @@ class MemorySearchQueryPlanner:
         *,
         config: MemorySearchServiceConfig | None = None,
     ) -> None:
-        if not isinstance(client, StructuredChatClient):
-            raise TypeError("client must be StructuredChatClient")
-        if config is not None and not isinstance(config, MemorySearchServiceConfig):
-            raise TypeError("config must be MemorySearchServiceConfig")
         self.client = client
         self.config = config or MemorySearchServiceConfig()
 
@@ -50,10 +46,6 @@ class MemorySearchQueryPlanner:
         """用当前问题、活跃摘要和最近消息生成可独立执行的多查询计划。"""
 
         normalized = self._query(query)
-        if not isinstance(context, ConversationSearchContext):
-            raise TypeError("context must be ConversationSearchContext")
-        if not isinstance(target_context, str):
-            raise TypeError("target_context must be text")
         if context.empty or self.config.max_planned_queries == 1:
             direct = self.direct(normalized)
             return MemoryQueryPlan(

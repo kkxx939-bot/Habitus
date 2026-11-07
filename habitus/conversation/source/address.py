@@ -30,10 +30,8 @@ class SourceAddress:
     identity: str = field(init=False, repr=False, default="")
 
     def __post_init__(self) -> None:
-        if not isinstance(self.conversation_id, str) or not self.conversation_id:
+        if not self.conversation_id:
             raise ConversationSourceError("source address needs a non-empty conversation_id")
-        if not isinstance(self.started_on, date):
-            raise ConversationSourceError("source address needs a calendar date")
         object.__setattr__(self, "identity", conversation_identity(self.conversation_id))
 
     @classmethod

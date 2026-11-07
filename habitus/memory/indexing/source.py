@@ -24,12 +24,6 @@ class MemoryIndexSourceReader:
         config: MemoryVectorIndexConfig,
         path_lock: PathLock | None = None,
     ) -> None:
-        if not isinstance(tree, MemoryTree):
-            raise TypeError("tree must be MemoryTree")
-        if not isinstance(config, MemoryVectorIndexConfig):
-            raise TypeError("config must be MemoryVectorIndexConfig")
-        if path_lock is not None and not isinstance(path_lock, PathLock):
-            raise TypeError("path_lock must be PathLock or None")
         self.tree = tree
         self.config = config
         self.path_lock = path_lock
@@ -52,8 +46,6 @@ class MemoryIndexSourceReader:
         raise ValueError("memory index source URI must identify a document or semantic layer")
 
     def read_directory_layers(self, directory: MemoryDirectory) -> tuple[MemoryIndexSource, ...]:
-        if not isinstance(directory, MemoryDirectory):
-            raise TypeError("directory must be MemoryDirectory")
         with self._stable_tree():
             return self._read_directory_layers(directory)
 

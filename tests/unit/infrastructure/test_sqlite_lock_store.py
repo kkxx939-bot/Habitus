@@ -104,7 +104,7 @@ def test_initialize_rejects_legacy_or_tampered_database_layout(tmp_path: Path) -
         SQLiteLockStore(path)
 
 
-@pytest.mark.parametrize("value", [True, 0, 0.0001, 61, float("inf")])
+@pytest.mark.parametrize("value", [0, 0.0001, 61, float("inf")])
 def test_sqlite_timeout_configuration_rejects_unsafe_values(value: object) -> None:
     with pytest.raises(ValueError, match="timeout_seconds"):
         SQLiteLockStoreConfig(timeout_seconds=value)  # type: ignore[arg-type]

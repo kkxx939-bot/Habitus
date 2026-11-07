@@ -6,13 +6,14 @@ import hashlib
 import json
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 from habitus.foundation.ids import same_path_identity
 from habitus.foundation.integrity import canonical_json
+from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.filesystem import (
     atomic_create_bytes,
@@ -38,6 +39,28 @@ from habitus.pre.conversation import ConversationSegment
 
 _JOB_SCHEMA = "memory_job_v4"
 _JOB_STATE_SCHEMA = "memory_job_sequence_state_v1"
+# 下面三个函数让磁盘读回的字段在构造前确认类型，报错文字照抄 ``MemoryJob`` 等值对象自身的检查
+_NORMALIZED_MESSAGE = "{} must be non-empty normalized text"
+_DIGEST_MESSAGE = "source_segment_digest must be lowercase SHA-256 text"
+_TRANSACTION_MESSAGE = "transaction_id must be 32 lowercase hexadecimal characters"
+
+
+def _int_field(value: object, message: str) -> int:
+    if not is_int(value):
+        raise ValueError(message)
+    return value
+
+
+def _text_field(value: object, message: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(message)
+    return value
+
+
+def _optional_text_field(value: object, message: str) -> str | None:
+    if value is not None and not isinstance(value, str):
+        raise ValueError(message)
+    return value
 
 
 @dataclass(frozen=True)
@@ -48,7 +71,7 @@ class _MemoryJobSequenceState:
 
     def __post_init__(self) -> None:
         value = self.last_allocated_memory_sequence
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        if value < 0:
             raise MemoryJobError("memory job sequence high-watermark must be non-negative")
 
 
@@ -83,12 +106,6 @@ class MemoryJobStore:
         requested_memory_root = Path(memory_root).expanduser().absolute()
         if requested_memory_root.is_symlink() or requested_memory_root.is_junction():
             raise MemoryJobError("bound memory root cannot be a symbolic link")
-        if not isinstance(path_lock, PathLock):
-            raise TypeError("path_lock must be a PathLock")
-        if config is not None and not isinstance(config, MemoryJobConfig):
-            raise TypeError("config must be a MemoryJobConfig")
-        if clock is not None and not callable(clock):
-            raise TypeError("clock must be callable")
         self.root = requested.resolve(strict=False)
         self.memory_root = requested_memory_root.resolve(strict=False)
         self.jobs_root = self.root / "jobs"
@@ -97,6 +114,7 @@ class MemoryJobStore:
         try:
             self.jobs_root.relative_to(self.memory_root)
         except ValueError:
+            # relative_to 失败说明 Job 根位于记忆树之外，正是要求的布局。
             pass
         else:
             raise MemoryJobError("memory jobs must be stored outside the L2 memory tree")
@@ -121,10 +139,6 @@ class MemoryJobStore:
     ) -> MemoryJob:
         """在 history 发布前幂等建立不可执行 outbox 并分配全局序号。"""
 
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("address must be a ConversationAddress")
-        if not isinstance(segment, ConversationSegment):
-            raise TypeError("segment must be a ConversationSegment")
         if not same_path_identity(
             segment.conversation_id,
             address.conversation_id,
@@ -181,8 +195,6 @@ class MemoryJobStore:
     ) -> tuple[MemoryJob, ...]:
         """按全局序号返回属于一个 Conversation 的全部仍保留 Job。"""
 
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("address must be a ConversationAddress")
         with self._queue_fence():
             return tuple(
                 job
@@ -222,7 +234,6 @@ class MemoryJobStore:
     def discard_committed(self, job: MemoryJob) -> bool:
         """在队列栅栏内耐久删除一条已经满足外部安全门槛的终态 Job。"""
 
-        self._require_job(job)
         if job.status is not MemoryJobStatus.COMMITTED:
             raise MemoryJobError("only a COMMITTED memory job can be discarded")
         with self._queue_fence():
@@ -240,7 +251,6 @@ class MemoryJobStore:
     def activate(self, job: MemoryJob) -> MemoryJob:
         """仅在对应 history 已耐久发布后把 STAGED 任务开放给 Worker。"""
 
-        self._require_job(job)
         with self._queue_fence():
             current = self._try_read_path(self._path(self._source_key_from_job(job)))
             if current is None:
@@ -273,8 +283,6 @@ class MemoryJobStore:
     ) -> MemoryJob | None:
         """按不可变 ConversationSegment 身份读取 Job，不枚举或猜测来源。"""
 
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("address must be a ConversationAddress")
         ConversationLayout.segment_range(segment_id)
         if not MemoryJob._hex(source_segment_digest, 64):
             raise ValueError("source_segment_digest must be lowercase SHA-256 text")
@@ -284,7 +292,6 @@ class MemoryJobStore:
     def require_staged_ready(self, job: MemoryJob) -> MemoryJob:
         """校验最早 STAGED Job 已到耐久重试时间。"""
 
-        self._require_job(job)
         with self._queue_fence():
             current = self._oldest_required(job)
             if current.status is not MemoryJobStatus.STAGED:
@@ -301,9 +308,6 @@ class MemoryJobStore:
     ) -> MemoryJob:
         """在 history 恢复失败时耐久记录退避，耗尽后阻塞全队列。"""
 
-        self._require_job(job)
-        if not isinstance(error, BaseException):
-            raise TypeError("error must be an exception")
         message = (" ".join(str(error).split()) or type(error).__name__)[:MEMORY_JOB_ERROR_MAX_CHARS]
         with self._queue_fence():
             current = self._oldest_required(job)
@@ -334,7 +338,6 @@ class MemoryJobStore:
     ) -> MemoryJobLease:
         """认领最早可执行任务，或在租约过期后以新 generation 接管。"""
 
-        self._require_job(job)
         if not MemoryJob.valid_worker_id(worker_id):
             raise ValueError("worker_id must be normalized stable text")
         with self._queue_fence():
@@ -378,7 +381,6 @@ class MemoryJobStore:
     def renew(self, lease: MemoryJobLease) -> MemoryJobLease:
         """仅为仍然有效且身份完全匹配的 Worker 租约续期。"""
 
-        self._require_lease(lease)
         with self._queue_fence():
             now = self._timestamp()
             current = self._current_lease_job(lease, now=now)
@@ -393,14 +395,12 @@ class MemoryJobStore:
     def assert_current(self, lease: MemoryJobLease) -> MemoryJob:
         """在发布边界确认租约尚未过期且未被更新 generation 接管。"""
 
-        self._require_lease(lease)
         with self._queue_fence():
             return self._current_lease_job(lease, now=self._timestamp())
 
     def is_settled(self, lease: MemoryJobLease) -> bool:
         """判断同一 generation 是否已由执行方完成合法终态结算。"""
 
-        self._require_lease(lease)
         with self._queue_fence():
             current = self._try_read_path(self._path(self._source_key_from_job(lease.job)))
             if current is None or current.source_identity != lease.source_identity:
@@ -426,14 +426,6 @@ class MemoryJobStore:
         ``waits_for_model``：模型此刻用不了，这一次不计入尝试次数，按 ``model_wait_*`` 的长退避排回队列等它恢复。
         """
 
-        if not isinstance(error, BaseException):
-            raise TypeError("error must be an exception")
-        if not isinstance(retryable, bool):
-            raise TypeError("retryable must be boolean")
-        if not isinstance(waits_for_model, bool):
-            raise TypeError("waits_for_model must be boolean")
-        if before_settlement is not None and not callable(before_settlement):
-            raise TypeError("before_settlement must be callable or None")
         message = " ".join(str(error).split()) or type(error).__name__
         return self._finish(
             lease,
@@ -447,7 +439,6 @@ class MemoryJobStore:
     def retry_failed(self, job: MemoryJob) -> MemoryJob:
         """显式人工处置后重新开放最早 FAILED 任务。"""
 
-        self._require_job(job)
         if job.status is not MemoryJobStatus.FAILED:
             raise ValueError("only a failed memory job can be retried")
         with self._queue_fence():
@@ -482,10 +473,9 @@ class MemoryJobStore:
     def abandon_failed(self, job: MemoryJob, *, reason: str) -> MemoryJobAbandonment:
         """记录显式人工决定后删除最早 FAILED Job，使后续序号可以继续。"""
 
-        self._require_job(job)
         if job.status is not MemoryJobStatus.FAILED:
             raise ValueError("only a failed memory job can be abandoned")
-        if not isinstance(reason, str) or not reason.strip():
+        if not reason.strip():
             raise ValueError("abandonment reason must be non-empty text")
         with self._queue_fence():
             path = self._abandonment_path(self._source_key_from_job(job))
@@ -518,7 +508,6 @@ class MemoryJobStore:
     def try_read_abandonment(self, job: MemoryJob) -> MemoryJobAbandonment | None:
         """按 Job 的不可变来源身份读取人工放弃记录。"""
 
-        self._require_job(job)
         return self._try_read_abandonment_path(self._abandonment_path(self._source_key_from_job(job)))
 
     def list_abandonments(self) -> tuple[MemoryJobAbandonment, ...]:
@@ -547,7 +536,6 @@ class MemoryJobStore:
         waits_for_model: bool = False,
         before_settlement: Callable[[], None] | None = None,
     ) -> MemoryJob:
-        self._require_lease(lease)
         with self._queue_fence():
             now = self._timestamp()
             current = self._current_lease_job(lease, now=now)
@@ -692,7 +680,10 @@ class MemoryJobStore:
             raise MemoryJobError("memory job sequence state has an invalid shape")
         if raw["schema"] != _JOB_STATE_SCHEMA:
             raise MemoryJobError("memory job sequence state has an unsupported schema")
-        state = _MemoryJobSequenceState(raw["last_allocated_memory_sequence"])
+        high_watermark = raw["last_allocated_memory_sequence"]
+        if not is_int(high_watermark):
+            raise MemoryJobError("memory job sequence high-watermark must be non-negative")
+        state = _MemoryJobSequenceState(high_watermark)
         if encoded != self._encode_state(state):
             raise MemoryJobError("memory job sequence state is not canonically encoded")
         maximum_existing = max((job.memory_sequence for job in jobs), default=0)
@@ -789,33 +780,21 @@ class MemoryJobStore:
                 max_bytes=self.config.max_file_bytes,
             )
             value = json.loads(encoded)
-            expected = {
-                "schema",
-                "memory_sequence",
-                "conversation_id",
-                "started_on",
-                "segment_id",
-                "source_segment_digest",
-                "transaction_id",
-                "attempts",
-                "last_error",
-                "reason",
-                "abandoned_at",
-            }
+            expected = {"schema", *(field.name for field in fields(MemoryJobAbandonment))}
             if not isinstance(value, Mapping) or set(value) != expected:
                 raise MemoryJobError("memory job abandonment has an invalid shape")
             if value["schema"] != MemoryJobAbandonment.SCHEMA_VERSION:
                 raise MemoryJobError("memory job abandonment has an unsupported schema")
             record = MemoryJobAbandonment(
-                memory_sequence=value["memory_sequence"],
-                conversation_id=value["conversation_id"],
+                memory_sequence=_int_field(value["memory_sequence"], "memory_sequence must be a positive integer"),
+                conversation_id=_text_field(value["conversation_id"], _NORMALIZED_MESSAGE.format("conversation_id")),
                 started_on=date.fromisoformat(value["started_on"]),
-                segment_id=value["segment_id"],
-                source_segment_digest=value["source_segment_digest"],
-                transaction_id=value["transaction_id"],
-                attempts=value["attempts"],
-                last_error=value["last_error"],
-                reason=value["reason"],
+                segment_id=_text_field(value["segment_id"], _NORMALIZED_MESSAGE.format("segment_id")),
+                source_segment_digest=_text_field(value["source_segment_digest"], _DIGEST_MESSAGE),
+                transaction_id=_text_field(value["transaction_id"], _TRANSACTION_MESSAGE),
+                attempts=_int_field(value["attempts"], "attempts must be a positive integer"),
+                last_error=_text_field(value["last_error"], "last_error must be non-empty bounded text"),
+                reason=_text_field(value["reason"], "reason must be non-empty bounded text"),
                 abandoned_at=self._parse_time(value["abandoned_at"]),
             )
             if encoded != self._encode_abandonment(record):
@@ -888,16 +867,6 @@ class MemoryJobStore:
         ):
             raise MemoryJobError("memory job source key conflicts with another segment")
 
-    @staticmethod
-    def _require_job(job: object) -> None:
-        if not isinstance(job, MemoryJob):
-            raise TypeError("job must be a MemoryJob")
-
-    @staticmethod
-    def _require_lease(lease: object) -> None:
-        if not isinstance(lease, MemoryJobLease):
-            raise TypeError("lease must be a MemoryJobLease")
-
     def _encode(self, job: MemoryJob) -> bytes:
         encoded = canonical_json(
             {
@@ -927,47 +896,32 @@ class MemoryJobStore:
 
     @staticmethod
     def _parse(value: object) -> MemoryJob:
-        expected = {
-            "schema",
-            "memory_sequence",
-            "conversation_id",
-            "started_on",
-            "segment_id",
-            "source_segment_digest",
-            "transaction_id",
-            "status",
-            "attempts",
-            "claim_id",
-            "claim_generation",
-            "worker_id",
-            "lease_expires_at",
-            "next_attempt_at",
-            "last_error",
-            "model_waits",
-            "created_at",
-            "updated_at",
-        }
+        expected = {"schema", *(field.name for field in fields(MemoryJob))}
         if not isinstance(value, Mapping) or set(value) != expected:
             raise MemoryJobError("memory job has an invalid shape")
         if value["schema"] != _JOB_SCHEMA:
             raise MemoryJobError("memory job has an unsupported schema")
         try:
             return MemoryJob(
-                memory_sequence=value["memory_sequence"],
-                conversation_id=value["conversation_id"],
+                memory_sequence=_int_field(value["memory_sequence"], "memory_sequence must be a positive integer"),
+                conversation_id=_text_field(value["conversation_id"], _NORMALIZED_MESSAGE.format("conversation_id")),
                 started_on=date.fromisoformat(value["started_on"]),
-                segment_id=value["segment_id"],
-                source_segment_digest=value["source_segment_digest"],
-                transaction_id=value["transaction_id"],
+                segment_id=_text_field(value["segment_id"], _NORMALIZED_MESSAGE.format("segment_id")),
+                source_segment_digest=_text_field(value["source_segment_digest"], _DIGEST_MESSAGE),
+                transaction_id=_text_field(value["transaction_id"], _TRANSACTION_MESSAGE),
                 status=MemoryJobStatus(value["status"]),
-                attempts=value["attempts"],
-                claim_id=value["claim_id"],
-                claim_generation=value["claim_generation"],
-                worker_id=value["worker_id"],
+                attempts=_int_field(value["attempts"], "memory job attempts must be non-negative"),
+                claim_id=_optional_text_field(value["claim_id"], "running memory job requires a claim_id"),
+                claim_generation=_int_field(
+                    value["claim_generation"], "memory job claim_generation must be non-negative"
+                ),
+                worker_id=_optional_text_field(
+                    value["worker_id"], "running memory job requires a normalized worker_id"
+                ),
                 lease_expires_at=MemoryJobStore._parse_optional_time(value["lease_expires_at"]),
                 next_attempt_at=MemoryJobStore._parse_optional_time(value["next_attempt_at"]),
-                last_error=value["last_error"],
-                model_waits=value["model_waits"],
+                last_error=_optional_text_field(value["last_error"], "memory job last_error is invalid"),
+                model_waits=_int_field(value["model_waits"], "memory job model_waits must be non-negative"),
                 created_at=MemoryJobStore._parse_time(value["created_at"]),
                 updated_at=MemoryJobStore._parse_time(value["updated_at"]),
             )
@@ -997,8 +951,6 @@ class MemoryJobStore:
 
     def _timestamp(self) -> datetime:
         value = self.clock()
-        if not isinstance(value, datetime):
-            raise TypeError("memory job clock must return a datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("memory job clock must return a timezone-aware datetime")
         return value.astimezone(UTC)

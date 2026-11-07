@@ -28,7 +28,7 @@ class Tally:
 
     def __post_init__(self) -> None:
         for label, value in (("k", self.k), ("n", self.n)):
-            if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+            if not math.isfinite(value):
                 raise ValueError(f"{label} must be a finite number")
             if value < 0:
                 raise ValueError(f"{label} must be non-negative")
@@ -46,7 +46,7 @@ def step_factor(half_life: float) -> float:
 def fold(tally: Tally, *, came: bool, strength: float, half_life: float) -> Tally:
     """这条轴来了一次机会：旧值整体衰减一步，再加这一笔（``came`` 为真才进 k）。"""
 
-    if isinstance(strength, bool) or not isinstance(strength, int | float) or not 0.0 <= strength <= 1.0:
+    if not 0.0 <= strength <= 1.0:
         raise ValueError("strength must lie in [0, 1]")
     factor = step_factor(half_life)
     return Tally(k=tally.k * factor + (strength if came else 0.0), n=tally.n * factor + strength)
@@ -76,7 +76,7 @@ def rewind(tally: Tally, steps: int, *, half_life: float) -> Tally:
 
 
 def _steps_factor(steps: int, half_life: float) -> float:
-    if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
+    if steps < 0:
         raise ValueError("steps must be a non-negative integer")
     return step_factor(half_life) ** steps
 

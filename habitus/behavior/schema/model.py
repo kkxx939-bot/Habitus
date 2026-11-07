@@ -92,9 +92,7 @@ class BehaviorFieldSchema:
             raise BehaviorSchemaError("behavior schema field name must use lowercase snake_case")
         object.__setattr__(self, "field_type", BehaviorFieldType(self.field_type))
         object.__setattr__(self, "role", BehaviorFieldRole(self.role))
-        if not isinstance(self.required, bool):
-            raise BehaviorSchemaError("behavior schema field required must be boolean")
-        if not isinstance(self.description, str) or not self.description.strip():
+        if not self.description.strip():
             raise BehaviorSchemaError("behavior schema field description must be non-empty")
         if (
             self.role
@@ -123,7 +121,7 @@ class BehaviorTypeSchema:
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "operation_mode", BehaviorOperationMode(self.operation_mode))
         object.__setattr__(self, "fields", tuple(self.fields))
-        if not isinstance(self.description, str) or not self.description.strip():
+        if not self.description.strip():
             raise BehaviorSchemaError("behavior type description must be non-empty")
         if self.path_template != _CANONICAL_PATHS[kind]:
             raise BehaviorSchemaError(f"{kind.value} schema path does not match the confirmed behavior tree")

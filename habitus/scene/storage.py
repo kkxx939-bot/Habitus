@@ -47,11 +47,7 @@ class SceneStore:
         requested = Path(scene_root)
         if is_path_alias(requested):
             raise self.error_type("scene root cannot be a symbolic link")
-        if (
-            isinstance(max_directory_entries, bool)
-            or not isinstance(max_directory_entries, int)
-            or max_directory_entries <= 0
-        ):
+        if max_directory_entries <= 0:
             raise self.error_type("max_directory_entries must be a positive integer")
         self.root = requested.resolve(strict=False)
         self.max_directory_entries = max_directory_entries
@@ -162,6 +158,7 @@ class SceneStore:
             try:
                 existing.add(canonical_path_identity(entry.name, "scene path entry"))
             except ValueError:
+                # 名字不规范的项不可能与规范的新名字相同，只在上面的总数里计
                 continue
         additional = 0 if canonical_path_identity(name, "scene path child") in existing else 1
         if len(entries) + additional > self.max_directory_entries:

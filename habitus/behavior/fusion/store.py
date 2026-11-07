@@ -81,16 +81,12 @@ class BehaviorJudgementStore:
     def __init__(self, behavior_root: str | Path, *, config: BehaviorFusionConfig | None = None) -> None:
         self.root = Path(behavior_root).expanduser().resolve(strict=False)
         resolved = config or BehaviorFusionConfig()
-        if not isinstance(resolved, BehaviorFusionConfig):
-            raise TypeError("config must be BehaviorFusionConfig")
         self.config = resolved
         self.judgement_root = self.root / "fusion" / "judgements"
 
     def put(self, judgement: DurableJudgement) -> None:
         """落盘一条判断；内容身份保证重复写入幂等。"""
 
-        if not isinstance(judgement, DurableJudgement):
-            raise TypeError("judgement must be DurableJudgement")
         self.put_payload(judgement_payload(judgement))
 
     def put_payload(self, payload: Mapping[str, Any]) -> None:
@@ -104,6 +100,8 @@ class BehaviorJudgementStore:
             raise BehaviorFusionError("a judgement payload must carry its judgement_id")
         identity = payload["judgement_id"]
         encoded = self._encode_record({"schema_version": JUDGEMENT_SCHEMA_VERSION, **dict(payload)})
+        if not isinstance(identity, str):
+            raise BehaviorFusionError("judgement_id must be lowercase SHA-256 text")
         self._require_decodable(encoded, identity)
         try:
             atomic_create_bytes(self._path(identity), encoded, artifact_root=self.root)

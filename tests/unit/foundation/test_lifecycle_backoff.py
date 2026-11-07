@@ -25,7 +25,7 @@ def test_policy_rejects_bad_parameters(base: float, cap: float, message: str) ->
         BackoffPolicy(base_seconds=base, cap_seconds=cap)
 
 
-@pytest.mark.parametrize("attempt", [0, -1, True])
+@pytest.mark.parametrize("attempt", [0, -1])
 def test_attempt_starts_at_one(attempt: int) -> None:
     with pytest.raises(ValueError, match="attempt"):
         BackoffPolicy(base_seconds=1.0, cap_seconds=2.0).delay(attempt)

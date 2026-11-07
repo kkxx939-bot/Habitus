@@ -75,8 +75,6 @@ class ConversationConsumerStateInspector:
     """联合校验 Source、Outcome 与 Output；唯一拥有状态组合判定。"""
 
     def __init__(self, outcomes: ConversationConsumerOutcomeStore) -> None:
-        if not isinstance(outcomes, ConversationConsumerOutcomeStore):
-            raise TypeError("outcomes must be ConversationConsumerOutcomeStore")
         self.outcomes = outcomes
 
     def inspect(

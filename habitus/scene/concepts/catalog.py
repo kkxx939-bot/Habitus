@@ -33,10 +33,8 @@ class CatalogClass:
     def __post_init__(self) -> None:
         for label in ("id", "name", "criterion", "lane"):
             value = getattr(self, label)
-            if not isinstance(value, str) or not value.strip():
+            if not value.strip():
                 raise ValueError(f"catalog class {label} must be non-empty text")
-        if not isinstance(self.active, bool):
-            raise ValueError("catalog class active must be a boolean")
 
 
 @dataclass(frozen=True)

@@ -19,12 +19,8 @@ class StorageConfig:
     sqlite_lock: SQLiteLockStoreConfig = field(default_factory=SQLiteLockStoreConfig)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.root, str | Path):
-            raise TypeError("storage.root must be a filesystem path")
         if isinstance(self.root, str) and not self.root.strip():
             raise ConfigError("storage.root cannot be empty")
-        if not isinstance(self.sqlite_lock, SQLiteLockStoreConfig):
-            raise TypeError("storage.sqlite_lock must be SQLiteLockStoreConfig")
         requested = Path(self.root).expanduser().absolute()
         if is_path_alias(requested):
             raise ConfigError("storage.root cannot be a symbolic link")

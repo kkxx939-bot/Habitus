@@ -35,10 +35,6 @@ class OutletObservingConsumer:
         observer: Observer | None = None,
         host_of: Callable[[str], str | None] | None = None,
     ) -> None:
-        if not isinstance(inner, BehaviorSessionConsumer):
-            raise TypeError("inner must be a BehaviorSessionConsumer")
-        if not isinstance(outlet, ReminderOutlet):
-            raise TypeError("outlet must be a ReminderOutlet")
         self.inner = inner
         self.outlet = outlet
         #: 会话协议 → 宿主名（出口按宿主挑提问工具）；由协议适配器声明，组合根把注册表的查法传进来

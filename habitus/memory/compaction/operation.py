@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from habitus.foundation.integrity import canonical_json
+from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.contracts import LeaseGuard, PathLock
 from habitus.infrastructure.store.filesystem import (
     atomic_replace_bytes,
@@ -25,7 +26,7 @@ from habitus.infrastructure.store.filesystem import (
 )
 from habitus.memory.snapshot import MemorySnapshot
 from habitus.memory.tree import MemoryTree, memory_root_lock_prefix
-from habitus.memory.uri import MemoryURI
+from habitus.memory.uri import MemoryURI, decode_memory_uri
 
 
 class MemoryLifecycleOperationError(RuntimeError):
@@ -62,7 +63,7 @@ class MemoryLifecycleOperation:
     updated_at: datetime
 
     def __post_init__(self) -> None:
-        if not isinstance(self.operation_id, str) or len(self.operation_id) != 64:
+        if len(self.operation_id) != 64:
             raise ValueError("memory lifecycle operation_id must be SHA-256")
         if any(character not in "0123456789abcdef" for character in self.operation_id):
             raise ValueError("memory lifecycle operation_id must be lowercase SHA-256")
@@ -70,33 +71,19 @@ class MemoryLifecycleOperation:
         uri = MemoryURI.parse(self.uri)
         uri.to_address()
         object.__setattr__(self, "uri", uri)
-        if (
-            isinstance(self.source_revision, bool)
-            or not isinstance(self.source_revision, int)
-            or self.source_revision <= 0
-        ):
+        if self.source_revision <= 0:
             raise ValueError("memory lifecycle source_revision must be positive")
         _require_digest(self.source_digest, "source_digest")
         object.__setattr__(self, "source_created_at", _timestamp(self.source_created_at))
-        if (
-            isinstance(self.expected_state_version, bool)
-            or not isinstance(self.expected_state_version, int)
-            or self.expected_state_version < 0
-        ):
+        if self.expected_state_version < 0:
             raise ValueError("memory lifecycle expected_state_version must be non-negative")
         if self.planned_fields is not None:
-            if not isinstance(self.planned_fields, Mapping):
-                raise TypeError("memory lifecycle planned_fields must be a mapping or None")
             object.__setattr__(self, "planned_fields", dict(self.planned_fields))
         object.__setattr__(self, "phase", MemoryLifecycleOperationPhase(self.phase))
         if (self.target_revision is None) != (self.target_digest is None):
             raise ValueError("memory lifecycle target revision and digest must appear together")
         if self.target_revision is not None:
-            if (
-                isinstance(self.target_revision, bool)
-                or not isinstance(self.target_revision, int)
-                or self.target_revision <= self.source_revision
-            ):
+            if self.target_revision <= self.source_revision:
                 raise ValueError("memory lifecycle target_revision must advance source_revision")
             assert self.target_digest is not None
             _require_digest(self.target_digest, "target_digest")
@@ -151,18 +138,39 @@ class MemoryLifecycleOperation:
             raise ValueError("memory lifecycle operation fields are invalid")
         if value["schema"] != "memory_lifecycle_operation_v1":
             raise ValueError("memory lifecycle operation schema is unsupported")
+        operation_id, source_digest = value["operation_id"], value["source_digest"]
+        source_revision, state_version = value["source_revision"], value["expected_state_version"]
+        planned_fields, target_revision, target_digest = (
+            value["planned_fields"],
+            value["target_revision"],
+            value["target_digest"],
+        )
+        if not isinstance(operation_id, str):
+            raise ValueError("memory lifecycle operation_id must be SHA-256")
+        if not is_int(source_revision):
+            raise ValueError("memory lifecycle source_revision must be positive")
+        if not isinstance(source_digest, str):
+            raise ValueError("memory lifecycle source_digest must be lowercase SHA-256")
+        if not is_int(state_version):
+            raise ValueError("memory lifecycle expected_state_version must be non-negative")
+        if planned_fields is not None and not isinstance(planned_fields, Mapping):
+            raise TypeError("memory lifecycle planned_fields must be a mapping or None")
+        if target_revision is not None and not is_int(target_revision):
+            raise ValueError("memory lifecycle target_revision must advance source_revision")
+        if target_digest is not None and not isinstance(target_digest, str):
+            raise ValueError("memory lifecycle target_digest must be lowercase SHA-256")
         return cls(
-            operation_id=value["operation_id"],
+            operation_id=operation_id,
             kind=MemoryLifecycleOperationKind(value["kind"]),
-            uri=MemoryURI.parse(value["uri"]),
-            source_revision=value["source_revision"],
-            source_digest=value["source_digest"],
+            uri=decode_memory_uri(value["uri"]),
+            source_revision=source_revision,
+            source_digest=source_digest,
             source_created_at=_parse_timestamp(value["source_created_at"]),
-            expected_state_version=value["expected_state_version"],
-            planned_fields=value["planned_fields"],
+            expected_state_version=state_version,
+            planned_fields=planned_fields,
             phase=MemoryLifecycleOperationPhase(value["phase"]),
-            target_revision=value["target_revision"],
-            target_digest=value["target_digest"],
+            target_revision=target_revision,
+            target_digest=target_digest,
             prepared_at=_parse_timestamp(value["prepared_at"]),
             updated_at=_parse_timestamp(value["updated_at"]),
         )
@@ -180,15 +188,11 @@ class MemoryLifecycleOperationStore:
         max_operations: int = 100_000,
         max_file_bytes: int = 512 * 1024,
     ) -> None:
-        if not isinstance(tree, MemoryTree):
-            raise TypeError("tree must be MemoryTree")
-        if not isinstance(path_lock, PathLock):
-            raise TypeError("path_lock must be PathLock")
         for name, value in {
             "max_operations": max_operations,
             "max_file_bytes": max_file_bytes,
         }.items():
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         self.tree = tree
         self.path_lock = path_lock
@@ -257,8 +261,6 @@ class MemoryLifecycleOperationStore:
         target_revision: int | None = None,
         target_digest: str | None = None,
     ) -> MemoryLifecycleOperation:
-        if not isinstance(operation, MemoryLifecycleOperation):
-            raise TypeError("operation must be MemoryLifecycleOperation")
         selected = MemoryLifecycleOperationPhase(phase)
         order = tuple(MemoryLifecycleOperationPhase)
         if order.index(selected) < order.index(operation.phase):
@@ -283,8 +285,6 @@ class MemoryLifecycleOperationStore:
     ) -> MemoryLifecycleOperation:
         """由已持有同一 URI operation lock 的协调路径推进操作。"""
 
-        if not isinstance(operation, MemoryLifecycleOperation):
-            raise TypeError("operation must be MemoryLifecycleOperation")
         selected = MemoryLifecycleOperationPhase(phase)
         order = tuple(MemoryLifecycleOperationPhase)
         if order.index(selected) < order.index(operation.phase):
@@ -372,16 +372,12 @@ class MemoryLifecycleOperationStore:
         return operations
 
     def complete(self, operation: MemoryLifecycleOperation) -> bool:
-        if not isinstance(operation, MemoryLifecycleOperation):
-            raise TypeError("operation must be MemoryLifecycleOperation")
         with self._guard(operation.uri):
             return self.complete_owned(operation)
 
     def complete_owned(self, operation: MemoryLifecycleOperation) -> bool:
         """由已持有同一 URI operation lock 的协调路径完成操作。"""
 
-        if not isinstance(operation, MemoryLifecycleOperation):
-            raise TypeError("operation must be MemoryLifecycleOperation")
         current = self.read(operation.uri)
         if current.operation_id != operation.operation_id:
             raise MemoryLifecycleOperationError("memory lifecycle operation ownership changed")
@@ -397,7 +393,7 @@ class MemoryLifecycleOperationStore:
         identity = hashlib.sha256(str(uri).encode("utf-8")).hexdigest()
         return self.root / f"{identity}.json"
 
-    def _guard(self, uri: MemoryURI, *, wait_timeout_seconds: float = 0.0):
+    def _guard(self, uri: MemoryURI, *, wait_timeout_seconds: float = 0.0) -> AbstractContextManager[LeaseGuard]:
         key = f"{self._lock_prefix}:{hashlib.sha256(str(uri).encode('utf-8')).hexdigest()}"
         return self.path_lock.acquire(
             key,
@@ -420,17 +416,13 @@ def _operation_id(
     return hashlib.sha256(value).hexdigest()
 
 
-def _require_digest(value: object, label: str) -> None:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
+def _require_digest(value: str, label: str) -> None:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
         raise ValueError(f"memory lifecycle {label} must be lowercase SHA-256")
 
 
 def _timestamp(value: datetime) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+    if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("memory lifecycle operation timestamp must be timezone-aware")
     return value.astimezone(UTC)
 

@@ -31,7 +31,7 @@ class BehaviorFusionConfig:
             "max_judgement_file_bytes": self.max_judgement_file_bytes,
             "max_judgement_files": self.max_judgement_files,
         }.items():
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
 
 

@@ -342,13 +342,7 @@ def create_http_app(
 ) -> FastAPI:
     """创建拥有 Runtime 生命周期、但不复制任何记忆业务逻辑的应用。"""
 
-    if not isinstance(runtime, Runtime):
-        raise TypeError("runtime must be Runtime")
     resolved_config = config or HTTPAPIConfig()
-    if not isinstance(resolved_config, HTTPAPIConfig):
-        raise TypeError("config must be HTTPAPIConfig or None")
-    if instance_lock is not None and not isinstance(instance_lock, ServiceInstanceLock):
-        raise TypeError("instance_lock must be ServiceInstanceLock or None")
     handlers = RuntimeHTTPHandlers(runtime)
     components = getattr(runtime, "components", None)
     infrastructure = getattr(components, "infrastructure", None)

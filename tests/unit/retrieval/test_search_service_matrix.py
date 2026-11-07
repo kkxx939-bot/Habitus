@@ -6,12 +6,13 @@ import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from habitus.memory.document import MemoryLinkType, MemoryStoredLink
 from habitus.memory.intention import MemoryIntentionRecallScope
-from habitus.memory.model import MemoryDirectory, MemoryKind
+from habitus.memory.model import MemoryDirectory, MemoryKind, MemoryLevel
 from habitus.memory.retrieval import (
     MemoryContextAssembler,
     MemoryRetrievalGrader,
@@ -52,34 +53,36 @@ def _constructor_arguments(instance: SearchService) -> dict[str, object]:
     }
 
 
-@pytest.mark.parametrize(
-    ("field", "invalid", "message"),
-    [
-        ("tree", object(), "tree must be MemoryTree"),
-        ("snapshot_reader", object(), "snapshot_reader must be MemorySnapshotReader"),
-        ("semantic_search", object(), "semantic_search must implement"),
-        ("summary_search", object(), "summary_search must implement"),
-        ("query_planner", object(), "query_planner must be"),
-        ("retrieval_grader", object(), "retrieval_grader must be"),
-        ("recall_lifecycle", object(), "recall_lifecycle must be"),
-        ("conversation_context", object(), "conversation_context must be"),
-        ("assembler", object(), "assembler must be"),
-        ("config", object(), "config must be"),
-        ("intention_reviewer", object(), "intention_reviewer must be"),
-        ("clock", 1, "clock must be callable"),
-    ],
-)
-def test_constructor_rejects_invalid_collaborator(
-    tmp_path: Path,
-    field: str,
-    invalid: object,
-    message: str,
-) -> None:
+class _LayerOnlyTree:
+    """只实现 ``MemoryDirectoryLayerReader`` 三个方法、不是 ``MemoryTree`` 的记忆树替身。"""
+
+    def __init__(self, inner: MemoryTree) -> None:
+        self.inner = inner
+
+    def directory_exists(self, directory: MemoryDirectory) -> bool:
+        return self.inner.directory_exists(directory)
+
+    def layer_exists(self, directory: MemoryDirectory, level: MemoryLevel) -> bool:
+        return self.inner.layer_exists(directory, level)
+
+    def read_layer_bounded(self, directory: MemoryDirectory, level: MemoryLevel, *, max_bytes: int) -> str:
+        return self.inner.read_layer_bounded(directory, level, max_bytes=max_bytes)
+
+
+def test_constructor_accepts_any_directory_layer_reader_as_tree(tmp_path: Path) -> None:
+    """``tree`` 依赖的是目录层读取契约而不是具体 ``MemoryTree`` 类：结构相符的替身可以注入并被使用。"""
+
     instance = service(tmp_path, semantic=SemanticSearch(), summaries=SummarySearch())
+    real_tree = instance.snapshot_reader.tree
+    real_tree.initialize()
+    real_tree.write_layers(MemoryDirectory.root(), abstract="根目录简介", overview="根目录概览")
+    layer_only = _LayerOnlyTree(real_tree)
     arguments = _constructor_arguments(instance)
-    arguments[field] = invalid
-    with pytest.raises((TypeError, ValueError), match=message):
-        SearchService(**arguments)  # type: ignore[arg-type]
+    arguments["tree"] = layer_only
+    arguments["snapshot_reader"] = SimpleNamespace(tree=layer_only)
+    pluggable = SearchService(**arguments)  # type: ignore[arg-type]
+    assert pluggable.tree is layer_only
+    assert pluggable._target_context((MemoryURI.root(),)) == "[memory://] 根目录简介"
 
 
 def test_constructor_rejects_snapshot_reader_from_another_tree(tmp_path: Path) -> None:
@@ -107,11 +110,11 @@ def test_constructor_rejects_component_with_different_config(tmp_path: Path, com
         SearchService(**arguments)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("query", ["", " ", "\n\t", 1, None])
-def test_find_rejects_empty_or_non_text_query(tmp_path: Path, query: object) -> None:
+@pytest.mark.parametrize("query", ["", " ", "\n\t"])
+def test_find_rejects_empty_or_non_text_query(tmp_path: Path, query: str) -> None:
     instance = service(tmp_path, semantic=SemanticSearch(), summaries=SummarySearch())
     with pytest.raises(ValueError, match="query must be non-empty"):
-        asyncio.run(instance.find(query))  # type: ignore[arg-type]
+        asyncio.run(instance.find(query))
 
 
 def test_find_strips_query_and_applies_default_root_limit_and_scope(tmp_path: Path) -> None:
@@ -133,18 +136,18 @@ def test_find_strips_query_and_applies_default_root_limit_and_scope(tmp_path: Pa
     ]
 
 
-@pytest.mark.parametrize("limit", [0, -1, 21, True, 1.5, "1"])
-def test_find_rejects_invalid_limit(tmp_path: Path, limit: object) -> None:
+@pytest.mark.parametrize("limit", [0, -1, 21])
+def test_find_rejects_invalid_limit(tmp_path: Path, limit: int) -> None:
     instance = service(tmp_path, semantic=SemanticSearch(), summaries=SummarySearch())
     with pytest.raises(ValueError, match="limit is outside"):
-        asyncio.run(instance.find("查询", limit=limit))  # type: ignore[arg-type]
+        asyncio.run(instance.find("查询", limit=limit))
 
 
-@pytest.mark.parametrize("threshold", [True, "0.5", float("nan"), float("inf"), -float("inf")])
-def test_find_rejects_invalid_score_threshold(tmp_path: Path, threshold: object) -> None:
+@pytest.mark.parametrize("threshold", [float("nan"), float("inf"), -float("inf")])
+def test_find_rejects_invalid_score_threshold(tmp_path: Path, threshold: float) -> None:
     instance = service(tmp_path, semantic=SemanticSearch(), summaries=SummarySearch())
     with pytest.raises(ValueError, match="score_threshold must be finite"):
-        asyncio.run(instance.find("查询", score_threshold=threshold))  # type: ignore[arg-type]
+        asyncio.run(instance.find("查询", score_threshold=threshold))
 
 
 def test_score_threshold_filters_before_reading_l2(tmp_path: Path) -> None:
@@ -180,29 +183,11 @@ def test_root_count_is_checked_before_deduplication(tmp_path: Path) -> None:
         asyncio.run(instance.find("查询", target_uris=repeated))
 
 
-@pytest.mark.parametrize("kinds", [[], (MemoryKind.PROFILE, MemoryKind.PROFILE)])
-def test_find_rejects_invalid_or_duplicate_kind_filter(tmp_path: Path, kinds: object) -> None:
+@pytest.mark.parametrize("kinds", [(MemoryKind.PROFILE, MemoryKind.PROFILE)])
+def test_find_rejects_invalid_or_duplicate_kind_filter(tmp_path: Path, kinds: tuple[MemoryKind, ...]) -> None:
     instance = service(tmp_path, semantic=SemanticSearch(), summaries=SummarySearch())
     with pytest.raises((TypeError, ValueError)):
-        asyncio.run(instance.find("查询", kinds=kinds))  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("raw", ["hits", 1, object()])
-def test_semantic_backend_must_return_a_sequence(tmp_path: Path, raw: object) -> None:
-    class InvalidSemantic:
-        async def search(self, _query, **_kwargs):
-            return raw
-
-    instance = service(tmp_path, semantic=SemanticSearch(), summaries=SummarySearch())
-    instance.semantic_search = InvalidSemantic()
-    with pytest.raises(MemorySearchError, match="must return a sequence"):
-        asyncio.run(instance.find("查询"))
-
-
-def test_semantic_backend_hit_items_are_strict(tmp_path: Path) -> None:
-    instance = service(tmp_path, semantic=SemanticSearch((object(),)), summaries=SummarySearch())
-    with pytest.raises(MemorySearchError, match="invalid hit"):
-        asyncio.run(instance.find("查询"))
+        asyncio.run(instance.find("查询", kinds=kinds))
 
 
 def test_semantic_backend_cannot_return_out_of_scope_uri(tmp_path: Path) -> None:
@@ -253,7 +238,7 @@ def test_snapshot_read_failure_is_normalized(tmp_path: Path, monkeypatch: pytest
         asyncio.run(instance.find("偏好"))
 
 
-@pytest.mark.parametrize("clock_value", ["now", datetime(2026, 7, 1)])
+@pytest.mark.parametrize("clock_value", [datetime(2026, 7, 1)])
 def test_search_clock_must_return_timezone_aware_datetime(tmp_path: Path, clock_value: object) -> None:
     instance = service(
         tmp_path,
@@ -489,20 +474,3 @@ def test_directly_matched_link_neighbor_is_rendered_as_relation_only(tmp_path: P
     assert len(result.memories) == 2
     assert "<memory_relation" in result.context
     assert "<related_memory" not in result.context
-
-
-def test_execute_requires_boolean_summary_assessment_flag(tmp_path: Path) -> None:
-    instance = service(tmp_path, semantic=SemanticSearch(), summaries=SummarySearch())
-    plan = instance.query_planner.direct("查询")
-    with pytest.raises(TypeError, match="must be boolean"):
-        asyncio.run(
-            instance._execute(
-                plan,
-                (MemoryURI.root(),),
-                1,
-                None,
-                (),
-                MemoryIntentionRecallScope.ACTIVE,
-                assess_for_summary=1,  # type: ignore[arg-type]
-            )
-        )

@@ -36,10 +36,8 @@ class ConversationSummaryReference:
     summary_id: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.address, ConversationAddress):
-            raise TypeError("summary reference address must be ConversationAddress")
         object.__setattr__(self, "stage", ConversationSummaryStage(self.stage))
-        if not isinstance(self.summary_id, str) or not self.summary_id or self.summary_id != self.summary_id.strip():
+        if not self.summary_id or self.summary_id != self.summary_id.strip():
             raise ValueError("summary reference summary_id must be normalized non-empty text")
 
     @property
@@ -58,7 +56,7 @@ class ConversationSummaryReference:
 
     @classmethod
     def parse(cls, value: str) -> ConversationSummaryReference:
-        if not isinstance(value, str) or not value.startswith("conversation-summary:"):
+        if not value.startswith("conversation-summary:"):
             raise ValueError("summary reference identity is invalid")
         payload = value.removeprefix("conversation-summary:")
         if len(payload) < 12 or payload[10] != ":":
@@ -87,10 +85,6 @@ class ConversationSummaryIndexSource:
     content: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.reference, ConversationSummaryReference):
-            raise TypeError("summary index source reference is invalid")
-        if not isinstance(self.summary, ConversationSegmentSummary | ConversationRangeSummary):
-            raise TypeError("summary index source summary is invalid")
         if not same_path_identity(
             self.summary.conversation_id,
             self.reference.address.conversation_id,
@@ -101,7 +95,7 @@ class ConversationSummaryIndexSource:
             raise ValueError("summary index source summary identity differs")
         if _summary_stage(self.summary) is not self.reference.stage:
             raise ValueError("summary index source stage differs")
-        if not isinstance(self.content, str) or not self.content.strip():
+        if not self.content.strip():
             raise ValueError("summary index source content must be non-empty text")
 
     @property
@@ -126,7 +120,7 @@ class ConversationSummaryVectorConsistencyReport:
     def __post_init__(self) -> None:
         for name in ("expected_count", "indexed_count"):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if value < 0:
                 raise ValueError(f"{name} must be non-negative")
 
     @property

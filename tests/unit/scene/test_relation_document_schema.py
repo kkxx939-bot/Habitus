@@ -42,3 +42,38 @@ def test_any_other_schema_is_rejected(schema: str) -> None:
     text = encode_night(_last_night()).replace(SCHEMA, schema)
     with pytest.raises(RelationRecordError, match="unsupported schema"):
         decode_night(text, lane="session", night=_last_night().night)
+
+
+@pytest.fixture(scope="module")
+def encoded_night() -> tuple[LaneState, str]:
+    state = _last_night()
+    return state, encode_night(state)
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("more_needed", "3", "relation test more_needed must be an integer or null"),
+        ("more_needed", True, "relation test more_needed must be an integer or null"),
+        ("more_needed", 2.5, "relation test more_needed must be an integer or null"),
+        ("heterogeneity_p", "0.5", "relation test heterogeneity_p must be a number or null"),
+        ("excess_share", False, "relation test excess_share must be a number or null"),
+        ("same_event_share", [0.1], "relation test same_event_share must be a number or null"),
+        ("leave_one_out", 1, "relation test leave_one_out must be a boolean or null"),
+        ("stable", "yes", "relation test stable must be a boolean or null"),
+        ("large_enough", 0, "relation test large_enough must be a boolean or null"),
+    ],
+)
+def test_a_night_with_wrong_types_in_a_test_reading_is_rejected_when_decoded(
+    encoded_night: tuple[LaneState, str], field: str, bad: object, message: str
+) -> None:
+    """关系表里检验读数类型错的字段在解码时就拒（W16：类型检查在边界）。"""
+
+    import json
+
+    state, text = encoded_night
+    payload = json.loads(text)
+    tested = next(item for item in payload["relations"] if "tonight" in item)
+    tested["tonight"][field] = bad
+    with pytest.raises(RelationRecordError, match=f"relation night is not valid: {message}"):
+        decode_night(json.dumps(payload), lane="session", night=state.night)

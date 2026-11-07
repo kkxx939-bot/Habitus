@@ -100,7 +100,7 @@ def form_expectations(
     ``calendar_of`` 给某一天的日历条件（带条件的关系里日历情境条件白天判它要；不给就只有今天的，取 ``moment.calendar``）。
     ``known_instances`` 按账给这本账上已经建过的事件预期的触发实例（不给就是没有）：前因的开始被更正后，同一次机会沿用它。"""
 
-    if isinstance(recent, bool) or not isinstance(recent, int) or recent < 1:
+    if recent < 1:
         raise ForesightError("recent must be a positive integer")
     if table is None:
         return ()

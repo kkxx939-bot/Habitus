@@ -85,16 +85,6 @@ class SessionLane:
         backlog: RetryBacklog | None = None,
         tree: BehaviorTree | None = None,
     ) -> None:
-        if not isinstance(describer, SessionTurnDescriber):
-            raise TypeError("describer must be SessionTurnDescriber")
-        if not isinstance(recorder, SessionTurnRecorder):
-            raise TypeError("recorder must be SessionTurnRecorder")
-        if reminders is not None and not isinstance(reminders, ReminderFeedback):
-            raise TypeError("reminders must implement ReminderFeedback")
-        if backlog is not None and not isinstance(backlog, RetryBacklog):
-            raise TypeError("backlog must implement RetryBacklog")
-        if tree is not None and not isinstance(tree, BehaviorTree):
-            raise TypeError("tree must be BehaviorTree")
         self.describer = describer
         self.recorder = recorder
         #: 开着的提醒从哪来、回应写到哪去（组合根在预测层装好之后接上；没接就是空实现）。
@@ -107,8 +97,6 @@ class SessionLane:
     def attach_reminders(self, reminders: ReminderFeedback) -> None:
         """预测层装好之后把开着的提醒接进来（行为侧先装、预测层后装）。"""
 
-        if not isinstance(reminders, ReminderFeedback):
-            raise TypeError("reminders must implement ReminderFeedback")
         self.reminders = reminders
 
     async def consume(
@@ -298,8 +286,6 @@ class TurnHandler:
     """重试堆里会话轮的处理器（裁定 67、68）：交给会话 lane 再描述一次；时窗末当场重读用的也是它。"""
 
     def __init__(self, lane: SessionLane) -> None:
-        if not isinstance(lane, SessionLane):
-            raise TypeError("lane must be SessionLane")
         self.lane = lane
 
     async def attempt(self, item: RetryItem) -> Attempt:

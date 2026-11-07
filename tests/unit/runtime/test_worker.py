@@ -103,7 +103,9 @@ def test_run_once_without_job_returns_empty_result_and_worker_stays_idle() -> No
 def test_run_once_renews_lease_until_slow_execution_finishes(tmp_path: Path) -> None:
     store = LeaseStore()
     worker = MemoryWorker(
-        fake_runner(store, claimed_job(tmp_path), delay=0.04),
+        # 任务远长于心跳间隔：Windows 上 asyncio 计时粒度约 15.6 ms，任务只跑 40 ms 时慢机器上只赶得上 1 次续约
+        # （windows-latest 3.12 两轮实测 renew_calls == 1）
+        fake_runner(store, claimed_job(tmp_path), delay=0.3),
         WorkerConfig(heartbeat_interval_seconds=0.01),
         worker_id="worker-1",
     )
@@ -162,26 +164,6 @@ def test_worker_rejects_invalid_identity_and_unsafe_heartbeat_ratio() -> None:
             WorkerConfig(heartbeat_interval_seconds=0.5),
             worker_id="bad worker",
         )
-
-
-@pytest.mark.parametrize(
-    ("runner", "config", "worker_id", "message"),
-    [
-        (object(), WorkerConfig(), "worker-1", "runner"),
-        (object.__new__(MemoryJobRunner), object(), "worker-1", "config"),
-        (object.__new__(MemoryJobRunner), WorkerConfig(), 1, "worker_id"),
-    ],
-)
-def test_worker_constructor_rejects_each_invalid_collaborator(
-    runner: object,
-    config: object,
-    worker_id: object,
-    message: str,
-) -> None:
-    if isinstance(runner, MemoryJobRunner) and not hasattr(runner, "store"):
-        runner.store = LeaseStore()
-    with pytest.raises(TypeError, match=message):
-        MemoryWorker(runner, config, worker_id=worker_id)  # type: ignore[arg-type]
 
 
 def test_worker_generates_normalized_default_identity() -> None:

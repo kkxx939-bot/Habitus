@@ -34,8 +34,6 @@ def seal_horizon(
 ) -> datetime:
     """返回封口视界；``frontier_cutoff`` 为空表示融合队列已清空。"""
 
-    if isinstance(lookback_seconds, bool) or not isinstance(lookback_seconds, int | float):
-        raise BehaviorReductionError("lookback_seconds must be a number")
     if lookback_seconds <= 0:
         raise BehaviorReductionError("lookback_seconds must be positive")
     return arrival_horizon(now=now, frontier_cutoff=frontier_cutoff) - timedelta(seconds=float(lookback_seconds))
@@ -44,11 +42,11 @@ def seal_horizon(
 def arrival_horizon(*, now: datetime, frontier_cutoff: datetime | None) -> datetime:
     """一送到就封口的那一支（会话 lane）用的记录视界：墙钟与还没融合完的观测取最小，不再回退 lookback。"""
 
-    if not isinstance(now, datetime) or now.utcoffset() is None:
+    if now.utcoffset() is None:
         raise BehaviorReductionError("now must be a timezone-aware datetime")
     horizon = now.astimezone(UTC)
     if frontier_cutoff is not None:
-        if not isinstance(frontier_cutoff, datetime) or frontier_cutoff.utcoffset() is None:
+        if frontier_cutoff.utcoffset() is None:
             raise BehaviorReductionError("frontier_cutoff must be a timezone-aware datetime")
         horizon = min(horizon, frontier_cutoff.astimezone(UTC))
     return horizon

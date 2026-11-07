@@ -69,13 +69,9 @@ class UnitPlanner:
     def __init__(
         self, history: HistoryStore | None, *, evidence: Evidence, prior_share: float, lane: str = "session"
     ) -> None:
-        if history is not None and not isinstance(history, HistoryStore):
-            raise TypeError("history must be a HistoryStore or None")
-        if not isinstance(lane, str) or not lane:
+        if not lane:
             raise ValueError("lane must be non-empty text")
-        if not isinstance(evidence, Evidence):
-            raise TypeError("evidence must be an Evidence")
-        if isinstance(prior_share, bool) or not isinstance(prior_share, int | float) or not 0.0 < prior_share < 1.0:
+        if not 0.0 < prior_share < 1.0:
             raise ValueError("prior_share must lie in (0, 1)")
         self.history = history
         self.evidence = evidence

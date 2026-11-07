@@ -25,9 +25,7 @@ class ForesightWorker(ResidentWorker):
         observer: Observer | None = None,
     ) -> None:
         super().__init__(shutdown_timeout_seconds=shutdown_timeout_seconds, observer=observer)
-        if not isinstance(tick, ForesightTick):
-            raise TypeError("tick must be a ForesightTick")
-        if isinstance(interval_seconds, bool) or not isinstance(interval_seconds, int | float) or interval_seconds <= 0:
+        if interval_seconds <= 0:
             raise ValueError("interval_seconds must be a positive number")
         self.tick = tick
         self.interval_seconds = float(interval_seconds)

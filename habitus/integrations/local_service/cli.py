@@ -718,8 +718,6 @@ def _prompt_choice(
 
 
 def _prompt_text(prompt: str, default: str) -> str:
-    if not isinstance(default, str):
-        raise ValueError("prompt text default must be a string")
     try:  # 空默认（例如本机无密钥的 credential_ref）不显示 []
         value = input(f"{prompt}{f' [{default}]' if default else ''}: ").strip()
     except (EOFError, OSError) as exc:
@@ -728,7 +726,7 @@ def _prompt_text(prompt: str, default: str) -> str:
 
 
 def _prompt_required_text(prompt: str, default: str | None = None, *, placeholder_values: tuple[str, ...] = ()) -> str:
-    if default is not None and (not isinstance(default, str) or not default.strip()):
+    if default is not None and not default.strip():
         raise ValueError("prompt text default must be non-empty")
     suffix = f" [{default}]" if default is not None else ""
     while True:
@@ -745,7 +743,7 @@ def _prompt_required_text(prompt: str, default: str | None = None, *, placeholde
 
 
 def _prompt_positive_int(prompt: str, default: int) -> int:
-    if isinstance(default, bool) or not isinstance(default, int) or default <= 0:
+    if default <= 0:
         raise ValueError("prompt integer default must be positive")
     while True:
         raw = _prompt_text(prompt, str(default))

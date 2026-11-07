@@ -77,10 +77,6 @@ class KindStamps:
 
 class KindStamping:
     def __init__(self, store: BehaviorKindStore, classifier: DaytimeClassifier, *, lane: Lane) -> None:
-        if not isinstance(store, BehaviorKindStore):
-            raise TypeError("store must be BehaviorKindStore")
-        if not isinstance(classifier, DaytimeClassifier):
-            raise TypeError("classifier must be DaytimeClassifier")
         self.store = store
         self.classifier = classifier
         self.lane = Lane(lane)

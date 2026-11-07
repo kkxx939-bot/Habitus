@@ -1,5 +1,7 @@
 """Segment Summary 的来源绑定、不可变存储和两阶段连续压缩规划测试。"""
 
+import hashlib
+import json
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -15,8 +17,11 @@ from habitus.memory.conversation import (
     ConversationSummaryCompactionError,
     ConversationSummaryCompactionPlanner,
     ConversationSummaryFrontier,
+    ConversationSummaryRetirementError,
+    ConversationSummaryRetirementStore,
     ConversationSummaryStore,
 )
+from habitus.memory.conversation.indexing import ConversationSummaryReference, ConversationSummaryStage
 from habitus.pre.conversation import ConversationRangeSummaryStage
 from tests.helpers import BASE_TIME, closed_turn, segment, segment_summary
 
@@ -152,3 +157,51 @@ def test_compaction_frontier_and_plan_reject_overlap_gap_and_cross_conversation(
     )
     with pytest.raises(ValueError, match="one conversation"):
         ConversationSummaryCompactionPlan(ConversationRangeSummaryStage.RANGE, (first, other), "source_count")
+
+
+_ARCHIVE_ID = "000000000000-000000000003"
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("start_sequence", "0", "retirement manifest start_sequence must be non-negative"),
+        ("end_sequence", 3.0, "retirement manifest end_sequence must be positive"),
+        ("expected_use_version", True, "retirement manifest expected_use_version must be non-negative"),
+        ("archive.identity", 1, "summary reference identity is invalid"),
+        ("archive.digest", None, "summary retirement digest must be lowercase SHA-256"),
+    ],
+)
+def test_retirement_manifest_read_rejects_wrongly_typed_fields(
+    tmp_path: Path, field: str, bad: object, message: str
+) -> None:
+    """磁盘上类型错的退休清单字段在 ``from_dict`` 解码时就被拒（W16：类型检查在边界）。"""
+
+    address = ConversationAddress("conversation-1", date(2026, 7, 1))
+    reference = ConversationSummaryReference(address, ConversationSummaryStage.ARCHIVE, _ARCHIVE_ID)
+    archive: dict[str, object] = {"identity": reference.identity, "digest": "a" * 64}
+    value: dict[str, object] = {
+        "schema": "conversation_summary_retirement_v1",
+        "archive": archive,
+        "start_sequence": 0,
+        "end_sequence": 3,
+        "ranges": [],
+        "segments": [],
+        "expected_use_version": 0,
+        "phase": "retiring",
+        "prepared_at": "2026-07-01T00:00:00Z",
+        "updated_at": "2026-07-01T00:00:00Z",
+    }
+    if field.startswith("archive."):
+        archive[field.removeprefix("archive.")] = bad
+    else:
+        value[field] = bad
+    store = ConversationSummaryRetirementStore(tmp_path)
+    store.initialize()
+    digest = hashlib.sha256(reference.identity.encode("utf-8")).hexdigest()
+    (store.root / f"{digest}.json").write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(ConversationSummaryRetirementError, match="failed to read") as caught:
+        store.read(reference)
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert message in str(caught.value.__cause__)

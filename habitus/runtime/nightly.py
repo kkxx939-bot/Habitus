@@ -180,50 +180,28 @@ class Nightly:
         probe: Callable[[], Awaitable[None]] | None = None,
         vocabulary_jobs: Sequence[Callable[[date], Awaitable[object]]] = (),
     ) -> None:
-        if not isinstance(behavior_tree, BehaviorTree):
-            raise TypeError("behavior_tree must be a BehaviorTree")
         if scene.behavior_tree is not behavior_tree:
             raise ValueError("the scene run must read the same behaviour tree")
-        if not isinstance(zone, ZoneInfo):
-            raise TypeError("zone must be a ZoneInfo")
         self.behavior_tree = behavior_tree
-        if series is not None and (not isinstance(series, SeriesReader) or series.tree is not behavior_tree):
+        if series is not None and series.tree is not behavior_tree:
             raise ValueError("the series reader must read the same behaviour tree")
         #: 常驻的序列读者：按天缓存行为树文档，跨晚复用（26 号清单 6.7）。
         self.series = series if series is not None else SeriesReader(behavior_tree)
         self.scene = scene
         self.zone = zone
-        if not callable(closed_days):
-            raise TypeError("closed_days must be callable")
         self.closed_days = closed_days
-        if not callable(vocabulary):
-            raise TypeError("vocabulary must be callable (version, migrating)")
         #: 词表此刻的（版本, 有没有未完成的迁移）
         self.vocabulary = vocabulary
-        if retry is not None and not isinstance(retry, RetryStage):
-            raise TypeError("retry must be a RetryStage or None")
         self.retry = retry
-        if foresight is not None and not isinstance(foresight, ForesightNightlyRun):
-            raise TypeError("foresight must be a ForesightNightlyRun or None")
         self.foresight = foresight
-        if settlement is not None and not isinstance(settlement, SettlementStage):
-            raise TypeError("settlement must be a SettlementStage or None")
         self.settlement = settlement
-        if days is not None and not isinstance(days, DayExpectationStage):
-            raise TypeError("days must be a DayExpectationStage or None")
         if days is not None and foresight is None:
             raise ValueError("the day expectations are built from the opportunity table this run writes")
         self.days = days
-        if refresh_calendar is not None and not callable(refresh_calendar):
-            raise TypeError("refresh_calendar must be callable or None")
         #: 每晚开头重读一遍放假数据（读不了的年份由日历自己跳过并挂出问题；别的失败记进 ``calendar_failed``）。
         self.refresh_calendar = refresh_calendar
-        if probe is not None and not callable(probe):
-            raise TypeError("probe must be an async callable or None")
         #: 前置处理最先探一次模型：整个调不通就抛 ``ModelUnreachable``（裁定 94 第 4 条）；没接就不探。
         self.probe = probe
-        if any(not callable(item) for item in vocabulary_jobs):
-            raise TypeError("vocabulary_jobs must be async callables")
         #: 各支的词表整理活（归约的 ``nightly_vocabulary(这一晚)``：每晚新增、这一晚所在周期里还没做的定期拆改；持 sweep 锁、
         #: 锁被占抛 ``BehaviorReductionBusyError``）。
         self.vocabulary_jobs = tuple(vocabulary_jobs)

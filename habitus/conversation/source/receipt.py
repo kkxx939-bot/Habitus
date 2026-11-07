@@ -119,10 +119,10 @@ class ConsumerOutputRef:
             label="consumer output reference",
         )
         return cls(
-            output_kind=record["output_kind"],
-            output_id=record["output_id"],
-            output_record_digest=record["output_record_digest"],
-            processor_fingerprint=record["processor_fingerprint"],
+            output_kind=_normalized(record["output_kind"], "output_kind"),
+            output_id=require_sha256(record["output_id"], "output_id"),
+            output_record_digest=require_sha256(record["output_record_digest"], "output_record_digest"),
+            processor_fingerprint=require_sha256(record["processor_fingerprint"], "processor_fingerprint"),
         )
 
 
@@ -142,7 +142,7 @@ class ConversationConsumerRunResult:
                 raise ConversationSourceError("skipped run cannot contain output or runtime result")
             object.__setattr__(self, "skip_reason", _normalized(self.skip_reason, "skip_reason"))
         else:
-            if not isinstance(self.output_ref, ConsumerOutputRef):
+            if self.output_ref is None:
                 raise ConversationSourceError("output run must contain ConsumerOutputRef")
             if self.skip_reason is not None:
                 raise ConversationSourceError("output run cannot contain skip_reason")
@@ -169,7 +169,7 @@ class ConversationConsumerOutcome:
         require_sha256(self.processor_fingerprint, "outcome processor_fingerprint")
         object.__setattr__(self, "state", ConversationConsumerOutcomeState(self.state))
         if self.state is ConversationConsumerOutcomeState.COMMITTED:
-            if not isinstance(self.output_ref, ConsumerOutputRef):
+            if self.output_ref is None:
                 raise ConversationSourceError("committed outcome requires output_ref")
             if self.output_ref.processor_fingerprint != self.processor_fingerprint:
                 raise ConversationSourceError("outcome and output processor fingerprints differ")
@@ -265,16 +265,19 @@ class ConversationConsumerOutcome:
         except (TypeError, ValueError) as exc:
             raise ConversationSourceError("consumer outcome state is invalid") from exc
         output_ref = None if record["output_ref"] is None else ConsumerOutputRef.from_dict(record["output_ref"])
+        skip_reason = record["skip_reason"]
+        if skip_reason is not None and not isinstance(skip_reason, str):
+            raise ConversationSourceError("skip_reason must be non-empty normalized text")
         return cls(
-            source_id=record["source_id"],
-            source_payload_digest=record["source_payload_digest"],
+            source_id=require_sha256(record["source_id"], "outcome source_id"),
+            source_payload_digest=require_sha256(record["source_payload_digest"], "outcome source_payload_digest"),
             consumer=consumer,
-            processor_fingerprint=record["processor_fingerprint"],
+            processor_fingerprint=require_sha256(record["processor_fingerprint"], "outcome processor_fingerprint"),
             state=state,
             output_ref=output_ref,
-            skip_reason=record["skip_reason"],
+            skip_reason=skip_reason,
             completed_at=source_timestamp(record["completed_at"], "completed_at"),
-            outcome_record_digest=record["outcome_record_digest"],
+            outcome_record_digest=require_sha256(record["outcome_record_digest"], "outcome_record_digest"),
         )
 
 
@@ -283,14 +286,12 @@ class ConversationConsumerOutcomeStore:
 
     def __init__(self, conversation_root: str | Path, *, max_file_bytes: int) -> None:
         self.root = Path(conversation_root).expanduser().resolve(strict=False)
-        if isinstance(max_file_bytes, bool) or not isinstance(max_file_bytes, int) or max_file_bytes <= 0:
+        if max_file_bytes <= 0:
             raise ValueError("max_file_bytes must be a positive integer")
         self.max_file_bytes = max_file_bytes
         self.outcome_root = self.root / "source" / "outcomes"
 
     def create_first(self, outcome: ConversationConsumerOutcome) -> ConversationConsumerOutcome:
-        if not isinstance(outcome, ConversationConsumerOutcome):
-            raise TypeError("outcome must be ConversationConsumerOutcome")
         try:
             atomic_create_bytes(
                 self._path(outcome.source_id, outcome.consumer), self._encode(outcome), artifact_root=self.root

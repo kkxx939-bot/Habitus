@@ -236,7 +236,7 @@ def widen_windows(spans: Sequence[tuple[int, int]], slack_minutes: int) -> tuple
     返回的段可以从负分钟起、或超过 1440（落到前一天 / 次日），与 ``PeakWindow`` 跨午夜的约定一致。
     """
 
-    if isinstance(slack_minutes, bool) or not isinstance(slack_minutes, int) or slack_minutes < 0:
+    if slack_minutes < 0:
         raise ConceptError("slack_minutes must be a non-negative integer")
     items = [(int(start), int(end)) for start, end in spans]
     if not items:
@@ -292,10 +292,6 @@ class MechanicalRule:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "measure", GradeMeasure(self.measure))
-        for label in ("lower", "upper"):
-            value = getattr(self, label)
-            if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
-                raise ConceptError(f"rule {label} must be an integer or None")
         if self.lower is None and self.upper is None:
             raise ConceptError("a rule needs at least one bound")
         if self.lower is not None and self.upper is not None and self.upper <= self.lower:
@@ -363,12 +359,6 @@ class ConceptGrade:
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _identity_token(self.name, "grade name", MAX_GRADE_NAME_CHARS))
         object.__setattr__(self, "measure", GradeMeasure(self.measure))
-        for label in ("lower", "upper"):
-            value = getattr(self, label)
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise ConceptError(f"grade {label} must be an integer")
-        if not isinstance(self.relative, bool):
-            raise ConceptError("grade relative must be a boolean")
         if self.lower == self.upper:
             raise ConceptError("grade bounds must not be equal")
         if self.relative:
@@ -453,15 +443,11 @@ class ConceptDefinition:
             self, "definition", _single_line(self.definition, "concept definition", MAX_DEFINITION_CHARS)
         )
         object.__setattr__(self, "role", ConceptRole(self.role))
-        if not isinstance(self.source, ConceptSource):
-            raise ConceptError("concept source must be a ConceptSource")
-        if not isinstance(self.created_at, datetime) or self.created_at.utcoffset() is None:
+        if self.created_at.utcoffset() is None:
             raise ConceptError("concept created_at must be a timezone-aware datetime")
         object.__setattr__(self, "created_at", self.created_at.astimezone(UTC))
         object.__setattr__(self, "context", ContextScope(self.context))
         self._check_class_link(identity)
-        if self.rule is not None and not isinstance(self.rule, MechanicalRule):
-            raise ConceptError("rule must be a MechanicalRule")
         if self.rule is not None and self.context is not ContextScope.OCCURRENCE:
             raise ConceptError("a mechanical rule is computed from the occurrence alone; it takes no other material")
         object.__setattr__(self, "baseline_keys", self._checked_baseline_keys())
@@ -475,8 +461,6 @@ class ConceptDefinition:
         object.__setattr__(self, "classes", classes)
         if self.title is not None:
             object.__setattr__(self, "title", _single_line(self.title, "concept title", MAX_DEFINITION_CHARS))
-        if not isinstance(self.retired, bool):
-            raise ConceptError("retired must be a boolean")
         if self.retired and self.kind is not ConceptKind.BASE:
             raise ConceptError("only a base concept retires with its class")
         if self.role.is_situation:
@@ -523,8 +507,6 @@ class ConceptDefinition:
             raise ConceptError("a derived situation concept carries the rule the algorithm computes it by")
         if self.situation is None:
             return
-        if not isinstance(self.situation, SituationRule):
-            raise ConceptError("situation must be a SituationRule")
         if self.role.is_behavior:
             # 行为概念由词表的类与映射判，不由"那一刻外面什么样"判。
             raise ConceptError("only a situation concept carries a situation rule")
@@ -540,8 +522,6 @@ class ConceptDefinition:
             return grades
         if not MIN_GRADES <= len(grades) <= MAX_GRADES:
             raise ConceptError(f"a graded concept carries {MIN_GRADES}–{MAX_GRADES} grades")
-        if any(not isinstance(grade, ConceptGrade) for grade in grades):
-            raise ConceptError("grades must be ConceptGrade values")
         if len({grade.measure for grade in grades}) != 1:
             raise ConceptError("all grades of one concept must use the same measure")
         if len({grade.relative for grade in grades}) != 1:
@@ -681,8 +661,6 @@ class ConceptSet(Mapping[str, ConceptDefinition]):
     def __init__(self, definitions: Iterable[ConceptDefinition]) -> None:
         resolved: dict[str, ConceptDefinition] = {}
         for definition in definitions:
-            if not isinstance(definition, ConceptDefinition):
-                raise ConceptError("a concept set holds ConceptDefinition values")
             if definition.identity in resolved:
                 raise ConceptError(f"concept {definition.name!r} appears twice in the set")
             resolved[definition.identity] = definition

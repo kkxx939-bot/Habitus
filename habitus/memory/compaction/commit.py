@@ -39,10 +39,6 @@ class MemoryLifecycleCommitter:
         transaction: MemoryCommitTransaction,
         snapshot_reader: MemorySnapshotReader,
     ) -> None:
-        if not isinstance(transaction, MemoryCommitTransaction):
-            raise TypeError("transaction must be MemoryCommitTransaction")
-        if not isinstance(snapshot_reader, MemorySnapshotReader):
-            raise TypeError("snapshot_reader must be MemorySnapshotReader")
         if transaction.snapshot_reader is not snapshot_reader:
             raise ValueError("lifecycle committer and transaction must share one snapshot reader")
         self.transaction = transaction
@@ -55,7 +51,7 @@ class MemoryLifecycleCommitter:
         snapshot: MemorySnapshot,
         fields: Mapping[str, Any],
     ) -> tuple[MemoryDocument, MemoryCommitResult]:
-        if not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
+        if not snapshot.exists or snapshot.value is None:
             raise ValueError("lifecycle field replacement requires an existing L2 document")
         parsed = MemoryURI.parse(snapshot.identity)
         source = snapshot.value
@@ -94,7 +90,7 @@ class MemoryLifecycleCommitter:
         relation_plan = _empty_relation_plan()
         result = self.transaction.commit(MemoryCommitPlan.build(mutation_plan, identities, relation_plan))
         current = self.snapshot_reader.read(parsed)
-        if not current.exists or not isinstance(current.value, MemoryDocument):
+        if not current.exists or current.value is None:
             raise RuntimeError("lifecycle field replacement committed but L2 document is missing")
         if (
             current.revision != source.metadata.revision + 1
@@ -104,7 +100,7 @@ class MemoryLifecycleCommitter:
         return current.value, result
 
     def delete(self, snapshot: MemorySnapshot) -> MemoryCommitResult:
-        if not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
+        if not snapshot.exists or snapshot.value is None:
             raise ValueError("lifecycle deletion requires an existing L2 document")
         parsed = MemoryURI.parse(snapshot.identity)
         known = _batch(snapshot)
@@ -118,7 +114,7 @@ class MemoryLifecycleCommitter:
         return self.transaction.commit(MemoryCommitPlan.build(mutation_plan, identities, relation_plan))
 
 
-def _batch(snapshot) -> MemorySnapshotBatch:
+def _batch(snapshot: MemorySnapshot) -> MemorySnapshotBatch:
     return SnapshotBatch((snapshot,), snapshot.size_bytes)
 
 

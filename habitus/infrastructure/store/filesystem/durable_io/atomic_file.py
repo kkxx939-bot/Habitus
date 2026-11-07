@@ -49,6 +49,7 @@ def _open_boundary_directory(boundary: Path, *, create: bool) -> int:
                 try:
                     os.mkdir(part, 0o700, dir_fd=descriptor)
                 except FileExistsError:
+                    # 目录已存在：下面按不跟随符号链接的方式打开，非安全目录在那里拒绝。
                     pass
                 except OSError as exc:
                     raise DurablePathIntegrityError(
@@ -110,7 +111,7 @@ def _open_control_parent(
         for part in relative_parent.parts:
             try:
                 os.mkdir(part, 0o700, dir_fd=directory_descriptor)
-            except FileExistsError:
+            except FileExistsError:  # 已存在：下面按不跟随符号链接的方式打开，非安全目录在那里拒绝
                 pass
             os.fsync(directory_descriptor)
             try:
@@ -223,6 +224,7 @@ def atomic_create_bytes(path: Path, encoded: bytes, *, artifact_root: str | Path
         try:
             os.unlink(temporary_name, dir_fd=parent_descriptor)
         except FileNotFoundError:
+            # 临时文件已被换到目标位置（或从未建出），没有可清理的。
             pass
         os.close(parent_descriptor)
 
@@ -250,6 +252,7 @@ def atomic_replace_bytes(
         try:
             existing = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
         except FileNotFoundError:
+            # 目标还不存在：首次写入，不必核对既有文件类型。
             pass
         else:
             if not stat.S_ISREG(existing.st_mode):
@@ -274,6 +277,7 @@ def atomic_replace_bytes(
         try:
             os.unlink(temporary_name, dir_fd=parent_descriptor)
         except FileNotFoundError:
+            # 临时文件已被换到目标位置（或从未建出），没有可清理的。
             pass
         os.close(parent_descriptor)
 
@@ -391,7 +395,7 @@ def list_real_directory(
 ) -> tuple[DurableDirectoryEntry, ...]:
     """通过已验证目录描述符有界列出不含符号链接的直接条目。"""
 
-    if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries <= 0:
+    if max_entries <= 0:
         raise ValueError("max_entries must be a positive integer")
     candidate = require_safe_artifact_path(artifact_root, path, label="durable listed directory")
     boundary = Path(artifact_root).expanduser().absolute()

@@ -65,6 +65,7 @@ def test_the_claim_route_returns_the_outlet_shape_and_advertises_the_feature() -
             {**body, "at": "2026-10-22T15:52:10"},
             {**body, "limit": 0},
             {**body, "limit": 21},
+            {**body, "limit": True},  # 布尔不是条数：只在 HTTP 边界拒（strict int），Runtime 内部不再查类型
             {**body, "extra": 1},
             {**body, "session": " codex-thread-1"},
         ):
@@ -112,7 +113,7 @@ def test_the_runtime_refuses_a_non_positive_limit_and_a_naive_moment() -> None:
     runtime.config = SimpleNamespace(foresight=ForesightConfig(enabled=False))  # type: ignore[assignment]
     runtime.components = SimpleNamespace(foresight=None)  # type: ignore[assignment]
     assert asyncio.run(runtime.claim_reminders(host="codex", session="s", at=AT, limit=3)) == ()
-    for bad in (0, -1, True):
+    for bad in (0, -1):
         with pytest.raises(ValueError, match="limit"):
             asyncio.run(runtime.claim_reminders(host="codex", session="s", at=AT, limit=bad))
     with pytest.raises(ValueError, match="timezone"):

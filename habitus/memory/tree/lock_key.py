@@ -12,8 +12,6 @@ from habitus.memory.uri import MemoryURI
 def memory_root_digest(root: Path) -> str:
     """返回记忆根的稳定短摘要；锁键靠它区分不同记忆根，又不把路径写进键里。"""
 
-    if not isinstance(root, Path):
-        raise TypeError("root must be a Path")
     normalized = root.expanduser().absolute().resolve(strict=False)
     return hashlib.sha256(str(normalized).encode("utf-8")).hexdigest()[:24]
 
@@ -21,7 +19,7 @@ def memory_root_digest(root: Path) -> str:
 def memory_root_lock_prefix(namespace: str, root: Path) -> str:
     """返回 ``<namespace>:<记忆根摘要>``；同一记忆根下各类锁键都以它开头。"""
 
-    if not isinstance(namespace, str) or not namespace or ":" in namespace:
+    if not namespace or ":" in namespace:
         raise ValueError("lock namespace must be non-empty text without ':'")
     return f"{namespace}:{memory_root_digest(root)}"
 
@@ -34,8 +32,6 @@ class MemoryDocumentLockKeyspace:
     _prefix: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.root, Path):
-            raise TypeError("root must be a Path")
         normalized = self.root.expanduser().absolute().resolve(strict=False)
         object.__setattr__(self, "root", normalized)
         object.__setattr__(self, "_prefix", memory_root_lock_prefix("memory-document", normalized))

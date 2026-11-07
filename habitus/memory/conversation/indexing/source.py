@@ -33,26 +33,16 @@ class ConversationSummaryIndexSourceReader:
         config: ConversationSummaryVectorIndexConfig,
         retirement_store: ConversationSummaryRetirementFilter | None = None,
     ) -> None:
-        if not isinstance(journal, ConversationMessageJournal):
-            raise TypeError("journal must be ConversationMessageJournal")
-        if not isinstance(compactor, ConversationSummaryCompactor):
-            raise TypeError("compactor must be ConversationSummaryCompactor")
         if compactor.journal is not journal:
             raise ValueError("summary source reader must share the Conversation journal")
-        if not isinstance(config, ConversationSummaryVectorIndexConfig):
-            raise TypeError("config must be ConversationSummaryVectorIndexConfig")
         self.journal = journal
         self.compactor = compactor
         self.config = config
-        if retirement_store is not None and not callable(getattr(retirement_store, "hidden", None)):
-            raise TypeError("retirement_store must implement hidden(reference)")
         self.retirement_store = retirement_store
 
     def active(self, address: ConversationAddress) -> tuple[ConversationSummaryIndexSource, ...]:
         """读取单个 Conversation 当前不重叠的唯一活跃摘要前沿。"""
 
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("address must be ConversationAddress")
         summaries = self.compactor.frontier(address).active
         if len(summaries) > self.config.max_records_per_conversation:
             raise ValueError("active Conversation Summary frontier exceeds its index bound")
@@ -65,8 +55,6 @@ class ConversationSummaryIndexSourceReader:
     def all_references(self, address: ConversationAddress) -> tuple[ConversationSummaryReference, ...]:
         """枚举仍在物理保存的全部摘要身份，供活跃前沿切换时删除旧记录。"""
 
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("address must be ConversationAddress")
         values: list[ConversationSummary] = [*self.compactor.segment_store.list(address)]
         values.extend(self.compactor.range_store.list(address, ConversationRangeSummaryStage.RANGE))
         values.extend(self.compactor.range_store.list(address, ConversationRangeSummaryStage.ARCHIVE))
@@ -95,8 +83,6 @@ class ConversationSummaryIndexSourceReader:
     ) -> ConversationSummaryIndexSource | None:
         """以真相源重新验证远程命中仍属于当前活跃前沿。"""
 
-        if not isinstance(reference, ConversationSummaryReference):
-            raise TypeError("reference must be ConversationSummaryReference")
         return {source.identity: source for source in self.active(reference.address)}.get(reference.identity)
 
     def _source(

@@ -266,3 +266,18 @@ def test_json_logging_keeps_the_last_line_of_an_overlong_stack() -> None:
     assert message.endswith("RuntimeError: provider check failed: 401 Unauthorized")
     assert " … " in message
     assert "/srv/app" not in message
+
+
+@pytest.mark.parametrize("value", [None, ["a"], {"a": 1}])
+def test_observation_attributes_hold_bounded_scalars_only(value: object) -> None:
+    """观测属性只放有界标量：列表、对象、None 进不了审计、指标与日志（数据形状契约，W16 复核保留）。"""
+
+    with pytest.raises(TypeError, match="observation attributes must contain scalar values"):
+        ObservationEvent(
+            category="memory",
+            operation="probe",
+            status=ObservationStatus.SUCCESS,
+            duration_seconds=0.0,
+            occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
+            attributes={"key": value},  # type: ignore[dict-item]
+        )

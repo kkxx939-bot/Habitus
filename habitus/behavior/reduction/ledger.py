@@ -53,11 +53,11 @@ class BehaviorReductionEntry:
     def __post_init__(self) -> None:
         for name in ("chain_digest", "uri", "staged_at", "reduction_version"):
             value = getattr(self, name)
-            if not isinstance(value, str) or not value:
+            if not value:
                 raise BehaviorReductionError(f"ledger entry field {name} must be non-empty text")
         if self.kind not in _KINDS:
             raise BehaviorReductionError("ledger entry kind must be occurrence or gap")
-        if not self.judgement_ids or any(not isinstance(item, str) or not item for item in self.judgement_ids):
+        if not self.judgement_ids or any(not item for item in self.judgement_ids):
             raise BehaviorReductionError("ledger entry must consume at least one judgement")
 
     def to_bytes(self) -> bytes:
@@ -99,8 +99,6 @@ class BehaviorReductionLedger:
     def append(self, entry: BehaviorReductionEntry) -> None:
         """落一条消费记录；逐字节相同的重放幂等成功，同链不同内容立即失败。"""
 
-        if not isinstance(entry, BehaviorReductionEntry):
-            raise TypeError("entry must be BehaviorReductionEntry")
         path = self._entries_dir / f"{entry.chain_digest}.json"
         try:
             atomic_create_bytes(path, entry.to_bytes(), artifact_root=self.root)
@@ -139,7 +137,7 @@ class BehaviorReductionLedger:
         自然成立。窗口之外的条目只是堆积。
         """
 
-        if not isinstance(before, datetime) or before.utcoffset() is None:
+        if before.utcoffset() is None:
             raise TypeError("before must be a timezone-aware datetime")
         removed = 0
         for entry in self.load():

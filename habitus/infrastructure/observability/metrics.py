@@ -181,10 +181,8 @@ class MetricRegistry:
     ) -> None:
         if not 1 <= max_recent_events <= 10_000:
             raise ValueError("max_recent_events must be between 1 and 10000")
-        if not isinstance(namespace, str) or not namespace or len(namespace) > 64:
+        if not namespace or len(namespace) > 64:
             raise ValueError("namespace must be non-empty bounded text")
-        if not isinstance(enabled, bool):
-            raise TypeError("enabled must be boolean")
         normalized_buckets = tuple(float(value) for value in duration_buckets)
         if (
             not normalized_buckets
@@ -202,8 +200,6 @@ class MetricRegistry:
         self._recent: deque[ObservationEvent] = deque(maxlen=max_recent_events)
 
     def record(self, event: ObservationEvent) -> None:
-        if not isinstance(event, ObservationEvent):
-            raise TypeError("event must be ObservationEvent")
         if not self.enabled:
             return
         with self._lock:
@@ -233,11 +229,11 @@ class MetricRegistry:
         *,
         labels: Mapping[str, str] | None = None,
     ) -> None:
-        if not isinstance(name, str) or not name:
+        if not name:
             raise ValueError("gauge name must be non-empty text")
         if not self.enabled:
             return
-        if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(float(value)):
+        if not math.isfinite(float(value)):
             raise TypeError("gauge value must be a finite number")
         resolved_labels = _mapping_labels(labels)
         with self._lock:
@@ -319,7 +315,7 @@ def _selected_labels(
 def _mapping_labels(labels: Mapping[str, str] | None) -> tuple[tuple[str, str], ...]:
     if labels is None:
         return ()
-    if not isinstance(labels, Mapping) or len(labels) > 8:
+    if len(labels) > 8:
         raise ValueError("metric labels must be a bounded mapping")
     result: list[tuple[str, str]] = []
     for name, value in labels.items():

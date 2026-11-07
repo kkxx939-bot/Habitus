@@ -1,6 +1,7 @@
 """唯一 YAML 配置入口、严格类型和跨领域容量约束测试。"""
 
 import dataclasses
+import re
 from copy import deepcopy
 from pathlib import Path
 
@@ -289,14 +290,14 @@ def test_behavior_config_enforces_its_scalar_bounds() -> None:
         ({"worker_shutdown_timeout_seconds": 0}, "worker_shutdown_timeout_seconds"),
         ({"reduction_sweep_lock_ttl_seconds": 59}, "reduction_sweep_lock_ttl_seconds"),
         ({"reduction_sweep_lock_ttl_seconds": 86_401}, "reduction_sweep_lock_ttl_seconds"),
-        ({"reduction_sweep_lock_ttl_seconds": True}, "reduction_sweep_lock_ttl_seconds"),
         ({"retry_backlog_max": 0}, "retry_backlog_max"),
-        ({"retry_backlog_max": True}, "retry_backlog_max"),
     ):
         with pytest.raises(ValueError, match=match):
             BehaviorConfig(**kwargs)
-    with pytest.raises(TypeError):
-        BehaviorConfig(primary_subject=123)  # type: ignore[arg-type]
+    # bool 冒充整数在 YAML 读入处拒（W16：类型检查在解码器，不在构造器）
+    for name in ("reduction_sweep_lock_ttl_seconds", "retry_backlog_max"):
+        with pytest.raises(ConfigError, match=rf"config\.behavior\.{name} must be an integer"):
+            BehaviorConfig.from_mapping({name: True})
 
 
 def test_behavior_kinds_fields_are_typed_and_derived_by_prefix() -> None:
@@ -771,3 +772,117 @@ def test_prefix_budget_error_says_what_to_change(tmp_path) -> None:
     assert "document_prefix" in message
     assert str(budget) in message
     assert "lower" in message or "raise" in message
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("max_conversations_per_cycle", True),
+        ("max_conversations_per_cycle", "100"),
+        ("summary_compaction.recent_use_protection_days", 90.0),
+        ("summary_compaction.cleanup_batch_size", False),
+    ],
+)
+def test_conversation_lifecycle_integers_reject_bool_text_or_float_from_yaml(tmp_path, field: str, bad: object) -> None:
+    """YAML 里 bool、文本、浮点冒充整数的生命周期字段在读入处就拒（W16：判定收进公共函数后行为不变）。"""
+
+    payload = valid_mapping(tmp_path)
+    group = payload["conversation"]["lifecycle"]
+    *parents, name = field.split(".")
+    for parent in parents:
+        group = group[parent]
+    group[name] = bad
+    with pytest.raises(ConfigError, match=rf"'config\.conversation\.lifecycle\.{re.escape(field)}' must be an integer"):
+        HabitusConfig.from_mapping(payload)
+
+
+@pytest.mark.parametrize("raw_path", ["", "   ", "\n"])
+def test_from_env_treats_a_blank_config_path_as_missing(raw_path: str) -> None:
+    with pytest.raises(ConfigError, match="config file path is missing: HABITUS_CONFIG_FILE"):
+        HabitusConfig.from_env(environ={"HABITUS_CONFIG_FILE": raw_path})
+
+
+@pytest.mark.parametrize(
+    ("section", "group", "message"),
+    [
+        ("temporal", {"slot_minutes": "15"}, r"config\.temporal\.slot_minutes must be an integer"),
+        ("temporal", {"slot_minutes": True}, r"config\.temporal\.slot_minutes must be an integer"),
+        ("foresight", {"enabled": "yes"}, r"config\.foresight\.enabled must be a boolean"),
+        ("behavior", {"primary_subject": 1}, r"config\.behavior\.primary_subject must be text"),
+        ("locale", {"nominal_weekend": [5, "6"]}, r"config\.locale\.nominal_weekend must be a list of integers"),
+        ("locale", {"nominal_weekend": "5,6"}, r"config\.locale\.nominal_weekend must be a list of integers"),
+        ("locale", {"calendar_path": 3}, r"config\.locale\.calendar_path must be text"),
+    ],
+)
+def test_yaml_scalar_fields_with_wrong_types_are_refused_before_construction(
+    tmp_path: Path, section: str, group: dict[str, object], message: str
+) -> None:
+    """YAML 里类型写错的标量字段在 ``construct_config`` 就被拒（W16：不靠各领域配置的构造器兜）。"""
+
+    mapping = valid_mapping(tmp_path)
+    mapping[section] = group
+    with pytest.raises(ConfigError, match=message):
+        HabitusConfig.from_mapping(mapping)
+
+
+def test_yaml_number_tuples_with_wrong_items_are_refused(tmp_path: Path) -> None:
+    mapping = valid_mapping(tmp_path)
+    observability = mapping["observability"]
+    assert isinstance(observability, dict)
+    observability["metrics"]["duration_buckets_seconds"] = [0.1, "0.5"]
+    with pytest.raises(ConfigError, match=r"duration_buckets_seconds must be a list of numbers"):
+        HabitusConfig.from_mapping(mapping)
+
+
+def test_field_type_check_skips_multi_member_unions_and_reports_text_tuples() -> None:
+    """``require_field_types``：多成员联合不查（交给领域规则），``tuple[str, ...]`` 的坏值报 ``ConfigError``。"""
+
+    from dataclasses import dataclass
+
+    from habitus.config.loader import require_field_types
+
+    @dataclass(frozen=True)
+    class Probe:
+        names: tuple[str, ...] = ()
+        either: str | tuple[str, ...] = ""
+        optional: int | None = None
+
+    require_field_types(Probe, {"names": ["a"], "either": "abc", "optional": None}, path="config.probe")
+    require_field_types(Probe, {"either": ("a",)}, path="config.probe")
+    for data, message in (
+        ({"names": [1]}, r"config\.probe\.names must be a list of texts"),
+        ({"names": "ab"}, r"config\.probe\.names must be a list of texts"),
+        ({"optional": True}, r"config\.probe\.optional must be an integer"),
+    ):
+        with pytest.raises(ConfigError, match=message):
+            require_field_types(Probe, data, path="config.probe")
+
+
+@pytest.mark.parametrize(
+    ("keys", "bad", "message"),
+    [
+        (("chat", "route", "timeout_seconds"), "300", r"config\.models\.chat\.route\.timeout_seconds must be a number"),
+        (("chat", "route", "timeout_seconds"), True, r"config\.models\.chat\.route\.timeout_seconds must be a number"),
+        (("chat", "route", "max_retries"), 1.5, r"config\.models\.chat\.route\.max_retries must be an integer"),
+        (("chat", "route", "max_concurrent"), None, r"config\.models\.chat\.route\.max_concurrent must be an integer"),
+        (("chat", "max_output_tokens"), True, r"config\.models\.chat\.max_output_tokens must be an integer"),
+        (("chat", "reasoning"), "false", r"config\.models\.chat\.reasoning must be a boolean"),
+        (("embedding", "dimension"), "1024", r"config\.models\.embedding\.dimension must be an integer"),
+        (("embedding", "max_batch_size"), 1.5, r"config\.models\.embedding\.max_batch_size must be an integer"),
+        (("rerank", "max_documents"), True, r"config\.models\.rerank\.max_documents must be an integer"),
+    ],
+)
+def test_model_route_yaml_with_wrong_types_is_refused_before_construction(
+    tmp_path: Path, keys: tuple[str, ...], bad: object, message: str
+) -> None:
+    """模型路由与能力配置里类型写错的字段在解码时就被拒（W16：不靠 ``ProviderConfig`` 等构造器兜）。"""
+
+    mapping = valid_mapping(tmp_path)
+    group = mapping["models"]
+    for key in keys[:-1]:
+        assert isinstance(group, dict)
+        group = group[key]
+    assert isinstance(group, dict)
+    group[keys[-1]] = bad
+    with pytest.raises(ConfigError, match=message):
+        HabitusConfig.from_mapping(mapping)

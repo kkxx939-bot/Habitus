@@ -44,19 +44,10 @@ class SessionMessage:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "role", SessionMessageRole(self.role))
-        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 0:
+        if self.sequence < 0:
             raise BehaviorFusionError("session message sequence must be a non-negative integer")
-        if not isinstance(self.occurred_at, datetime) or self.occurred_at.utcoffset() is None:
+        if self.occurred_at.utcoffset() is None:
             raise BehaviorFusionError("session message occurred_at must be timezone-aware")
-        if not isinstance(self.content, str):
-            raise BehaviorFusionError("session message content must be text")
-        if not isinstance(self.mid_turn, bool):
-            raise BehaviorFusionError("session message mid_turn must be a boolean")
-        if not isinstance(self.answers, tuple) or any(
-            not isinstance(pair, tuple) or len(pair) != 2 or not all(isinstance(part, str) for part in pair)
-            for pair in self.answers
-        ):
-            raise BehaviorFusionError("session message answers must be (question, answer) text pairs")
         if self.answers and self.role is not SessionMessageRole.PROMPT:
             raise BehaviorFusionError("only the person's words can carry answers")
 
@@ -81,7 +72,7 @@ class SessionTurn:
     messages: tuple[SessionMessage, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.conversation_id, str) or not self.conversation_id:
+        if not self.conversation_id:
             raise BehaviorFusionError("session turn conversation_id must be non-empty text")
         if not self.messages or self.messages[0].role is not SessionMessageRole.PROMPT:
             raise BehaviorFusionError("a session turn starts with the person's instruction")

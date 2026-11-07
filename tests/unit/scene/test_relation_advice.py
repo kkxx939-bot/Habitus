@@ -243,6 +243,38 @@ def test_the_store_round_trips_and_refuses_tampering(tmp_path) -> None:
         store.prior("../x")
 
 
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("condition", 1, "proposal condition must be text or null"),
+        ("condition", ["timeline"], "proposal condition must be text or null"),
+        ("refused", True, "proposal refused reason must be text or null"),
+    ],
+)
+def test_a_stored_proposal_with_wrong_types_is_rejected_when_read(
+    tmp_path, field: str, bad: object, message: str
+) -> None:
+    """提议簿文件里类型错的条件 / 拒因在读回时就拒（W16：类型检查在边界）。"""
+
+    import json
+
+    from habitus.foundation.integrity import canonical_json
+
+    store = AdviceStore(tmp_path / "scene")
+    store.write_book(
+        ProposalBook(
+            lane="session",
+            proposals=(Proposal(DISCUSS, NIGHT, "瞎编", raw={"template": "vibes"}, refused="unknown template"),),
+        )
+    )
+    path = tmp_path / "scene" / "advice" / "conditions" / "session.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["proposals"][0][field] = bad
+    path.write_text(canonical_json(payload), encoding="utf-8")
+    with pytest.raises(AdviceStoreError, match=message):
+        store.book("session")
+
+
 # --- 靠先验 --------------------------------------------------------------------------------------
 
 

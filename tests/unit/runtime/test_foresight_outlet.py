@@ -356,8 +356,6 @@ def test_the_outlet_checks_its_inputs(tmp_path) -> None:
     common = dict(
         liveness=timedelta(hours=1), lease=timedelta(minutes=1), max_attempts=1, claim_limit=1, similarity=0.5
     )
-    with pytest.raises(TypeError):
-        ReminderOutlet(object(), ledger, **common)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         ReminderOutlet(store, ledger, **{**common, "lease": timedelta(0)})
     with pytest.raises(ValueError):

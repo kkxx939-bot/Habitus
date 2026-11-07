@@ -30,8 +30,6 @@ _ATOMIC_TEMPORARY_NAME = re.compile(r"^\.(?P<destination>[^/]+)\.(?P<nonce>[0-9a
 def atomic_temporary_destination(name: str) -> str | None:
     """识别本模块可能遗留的临时文件名，并返回原目标文件名。"""
 
-    if not isinstance(name, str):
-        raise TypeError("atomic temporary name must be a string")
     match = _ATOMIC_TEMPORARY_NAME.fullmatch(name)
     if match is None:
         return None

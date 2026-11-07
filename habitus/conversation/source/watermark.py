@@ -11,6 +11,7 @@ from pathlib import Path
 
 from habitus.conversation.source.address import SourceAddress
 from habitus.conversation.source.model import ConversationSourceError, encode_durable_record
+from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.filesystem import atomic_replace_bytes, read_regular_bytes
 
 _SCHEMA = "conversation_source_watermark_v1"
@@ -38,7 +39,7 @@ class AddressWatermarks:
         if SourceAddress.from_dict(payload["address"]) != address:
             raise ConversationSourceError("source watermark belongs to another address")
         value = payload["released_through"]
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        if not is_int(value) or value < 0:
             raise ConversationSourceError("source watermark value is invalid")
         return value
 

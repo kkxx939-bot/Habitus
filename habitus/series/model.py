@@ -121,11 +121,11 @@ class SeriesRecord:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "subjects", tuple(self.subjects))
-        if any(not isinstance(item, str) or not item for item in self.subjects):
+        if any(not item for item in self.subjects):
             raise SeriesError("subjects must be non-empty names")
         for label in ("started_at", "last_observed_at"):
             value = getattr(self, label)
-            if not isinstance(value, datetime) or value.utcoffset() is None:
+            if value.utcoffset() is None:
                 raise SeriesError(f"{label} must carry its local offset")
         if self.started_at.date() != self.day:
             raise SeriesError("a record's day is the local date it started on")
@@ -133,10 +133,8 @@ class SeriesRecord:
             raise SeriesError("last_observed_at cannot precede started_at")
         for label in ("uri", "name", "kind_token", "lane"):
             value = getattr(self, label)
-            if not isinstance(value, str) or not value:
+            if not value:
                 raise SeriesError(f"{label} must be non-empty text")
-        if not isinstance(self.classified, bool) or not isinstance(self.reminded, bool):
-            raise SeriesError("classified and reminded must be booleans")
 
 
 @dataclass(frozen=True)
@@ -151,12 +149,10 @@ class SeriesGap:
     def __post_init__(self) -> None:
         for label in ("started_at", "ended_at"):
             value = getattr(self, label)
-            if not isinstance(value, datetime) or value.utcoffset() is None:
+            if value.utcoffset() is None:
                 raise SeriesError(f"{label} must carry its local offset")
         if self.ended_at < self.started_at:
             raise SeriesError("a gap cannot end before it starts")
-        if not isinstance(self.kind, GapKind):
-            raise SeriesError("kind must be a GapKind")
 
     @property
     def watched(self) -> bool:
@@ -178,7 +174,7 @@ class EventSeries:
     skipped: tuple[SkippedRecord, ...] = ()
 
     def __post_init__(self) -> None:
-        if isinstance(self.cutoff, datetime) or not isinstance(self.cutoff, date):
+        if isinstance(self.cutoff, datetime):
             raise SeriesError("cutoff must be a date")
         records, gaps = tuple(self.records), tuple(self.gaps)
         if any(record.day >= self.cutoff for record in records):

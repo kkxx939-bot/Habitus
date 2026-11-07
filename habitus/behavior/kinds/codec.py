@@ -26,6 +26,7 @@ from habitus.behavior.kinds.model import (
 )
 from habitus.behavior.kinds.pending import PendingEntry
 from habitus.behavior.kinds.schedule import JobState
+from habitus.foundation.validation import is_int, is_str_list
 
 
 class BehaviorKindCodecError(ValueError):
@@ -51,15 +52,25 @@ def class_payload(item: BehaviorClass) -> dict[str, Any]:
 def class_from(raw: object) -> BehaviorClass:
     data = _object(raw, {"id", "name", "criterion", "reminder", "excludes", "examples", "status", "origin"}, "class")
     try:
+        class_id = ClassId.parse(data["id"])
+        excludes = tuple(_exclusion(item) for item in _list(data["excludes"], "excludes"))
+        examples = _list(data["examples"], "examples")
+        status = ClassStatus(data["status"])
+        origin = ClassOrigin(data["origin"])
+        name = _text_field(data["name"], f"class name {_TEXT_RULE}")
+        criterion = _text_field(data["criterion"], f"class criterion {_TEXT_RULE}")
+        reminder = _text_field(data["reminder"], f"class reminder {_TEXT_RULE}")
+        if not is_str_list(examples):
+            raise BehaviorKindError(f"class example {_TEXT_RULE}")
         return BehaviorClass(
-            id=ClassId.parse(data["id"]),
-            name=data["name"],
-            criterion=data["criterion"],
-            reminder=data["reminder"],
-            excludes=tuple(_exclusion(item) for item in _list(data["excludes"], "excludes")),
-            examples=tuple(_list(data["examples"], "examples")),
-            status=ClassStatus(data["status"]),
-            origin=ClassOrigin(data["origin"]),
+            id=class_id,
+            name=name,
+            criterion=criterion,
+            reminder=reminder,
+            excludes=excludes,
+            examples=tuple(examples),
+            status=status,
+            origin=origin,
         )
     except (BehaviorKindError, KindIdError, ValueError, TypeError) as exc:
         raise BehaviorKindCodecError(f"behavior class is invalid: {exc}") from exc
@@ -85,14 +96,14 @@ def vocabulary_from(raw: object) -> Vocabulary:
     if not isinstance(branches, dict):
         raise BehaviorKindCodecError("vocabulary branches must be an object")
     try:
-        return Vocabulary(
-            version=data["version"],
-            classes={item.id: item for item in classes},
-            branches={
-                ClassId.parse(source): tuple(ClassId.parse(target) for target in _list(targets, "branch targets"))
-                for source, targets in branches.items()
-            },
-        )
+        resolved_branches = {
+            ClassId.parse(source): tuple(ClassId.parse(target) for target in _list(targets, "branch targets"))
+            for source, targets in branches.items()
+        }
+        version = data["version"]
+        if not is_int(version):
+            raise BehaviorKindError("vocabulary version must be a non-negative integer")
+        return Vocabulary(version=version, classes={item.id: item for item in classes}, branches=resolved_branches)
     except (BehaviorKindError, KindIdError, ValueError, TypeError) as exc:
         raise BehaviorKindCodecError(f"vocabulary snapshot is invalid: {exc}") from exc
 
@@ -111,17 +122,19 @@ def record_payload(record: VersionRecord) -> dict[str, Any]:
 def record_from(raw: object) -> VersionRecord:
     data = _object(raw, {"version", "at", "reason", "note", "operations", "moves"}, "version record")
     try:
-        moves = []
-        for item in _list(data["moves"], "moves"):
-            if not isinstance(item, list) or len(item) != 3:
-                raise BehaviorKindCodecError("move must be [occurrence, source, target]")
-            moves.append(Move(*item))
+        moves = tuple(_move(item) for item in _list(data["moves"], "moves"))
+        at = datetime.fromisoformat(data["at"])
+        reason = ChangeReason(data["reason"])
+        operations = tuple(_operation_from(item) for item in _list(data["operations"], "operations"))
+        version = data["version"]
+        if not is_int(version):
+            raise BehaviorKindError("version must be a positive integer")
         return VersionRecord(
-            version=data["version"],
-            at=datetime.fromisoformat(data["at"]),
-            reason=ChangeReason(data["reason"]),
-            operations=tuple(_operation_from(item) for item in _list(data["operations"], "operations")),
-            moves=tuple(moves),
+            version=version,
+            at=at,
+            reason=reason,
+            operations=operations,
+            moves=moves,
             note=data["note"] if isinstance(data["note"], str) else "",
         )
     except (BehaviorKindError, KindIdError, ValueError, TypeError) as exc:
@@ -149,15 +162,25 @@ def pending_from(raw: object) -> PendingEntry:
     dated = isinstance(raw, dict) and "grouped_on" in raw
     data = _object(raw, _PENDING_KEYS | ({"entered_on", "grouped_on"} if dated else set()), "pending entry")
     try:
+        lane = Lane(data["lane"])
+        day = date.fromisoformat(data["day"])
+        entered_on = _day_or_none(data.get("entered_on"))
+        grouped_on = _day_or_none(data.get("grouped_on"))
+        occurrence = _text_field(data["occurrence"], "pending occurrence must be non-empty text")
+        proposed = _text_field(data["proposed"], "pending proposed must be non-empty text")
+        content = _text_field(data["content"], "pending content must be non-empty text")
+        rechecked = data["rechecked"]
+        if not isinstance(rechecked, bool):
+            raise BehaviorKindError("pending rechecked must be a bool")
         return PendingEntry(
-            occurrence=data["occurrence"],
-            lane=Lane(data["lane"]),
-            day=date.fromisoformat(data["day"]),
-            proposed=data["proposed"],
-            content=data["content"],
-            rechecked=data["rechecked"],
-            entered_on=_day_or_none(data.get("entered_on")),
-            grouped_on=_day_or_none(data.get("grouped_on")),
+            occurrence=occurrence,
+            lane=lane,
+            day=day,
+            proposed=proposed,
+            content=content,
+            rechecked=rechecked,
+            entered_on=entered_on,
+            grouped_on=grouped_on,
         )
     except (BehaviorKindError, ValueError, TypeError) as exc:
         raise BehaviorKindCodecError(f"pending entry is invalid: {exc}") from exc
@@ -229,7 +252,30 @@ def _operation_from(raw: object) -> Operation:
 def _exclusion(raw: object) -> Exclusion:
     data = _object(raw, {"text", "goes_to"}, "exclusion")
     target = data["goes_to"]
-    return Exclusion(text=data["text"], goes_to=None if target is None else ClassId.parse(target))
+    goes_to = None if target is None else ClassId.parse(target)
+    return Exclusion(text=_text_field(data["text"], f"exclusion text {_TEXT_RULE}"), goes_to=goes_to)
+
+
+def _move(raw: object) -> Move:
+    if not isinstance(raw, list) or len(raw) != 3:
+        raise BehaviorKindCodecError("move must be [occurrence, source, target]")
+    occurrence, source, target = (
+        _text_field(value, f"move {name} must be non-empty text")
+        for name, value in zip(("occurrence", "source", "target"), raw, strict=True)
+    )
+    return Move(occurrence, source, target)
+
+
+#: 词表条目文字的值规则说明，与 ``kinds.model._text`` 的报错同一句。
+_TEXT_RULE = "must be non-empty text without surrounding whitespace"
+
+
+def _text_field(value: object, message: str) -> str:
+    """记录里的文字先确认是文本；非空、单行等值规则仍由值对象判。报错文字与值对象的同一条检查一致。"""
+
+    if not isinstance(value, str):
+        raise BehaviorKindError(message)
+    return value
 
 
 def _day_or_none(value: object) -> date | None:

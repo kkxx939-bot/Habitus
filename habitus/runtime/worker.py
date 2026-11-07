@@ -60,13 +60,7 @@ class MemoryWorker:
         observer: Observer | None = None,
         span_controller: SpanController | None = None,
     ) -> None:
-        if not isinstance(runner, MemoryJobRunner):
-            raise TypeError("runner must be MemoryJobRunner")
-        if not isinstance(config, WorkerConfig):
-            raise TypeError("config must be WorkerConfig")
         resolved_worker_id = worker_id or f"worker-{os.getpid()}-{uuid4().hex}"
-        if not isinstance(resolved_worker_id, str):
-            raise TypeError("worker_id must be text")
         if config.heartbeat_interval_seconds > runner.store.config.lease_ttl_seconds / 3:
             raise ValueError("worker heartbeat must be at most one third of the job lease TTL")
         if not MemoryJob.valid_worker_id(resolved_worker_id):
@@ -348,6 +342,7 @@ class MemoryWorker:
         try:
             await asyncio.wait_for(self._wake_event.wait(), timeout=delay_seconds)
         except TimeoutError:
+            # 等满退避时长没人唤醒是常态：照常再认领
             pass
 
     def _observe(
@@ -368,7 +363,8 @@ class MemoryWorker:
                     attributes=attributes,
                 )
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - 观测失败不许影响 Job 执行
+            # 观测只是旁路：记录失败不改变 Job 的结局
             pass
 
 

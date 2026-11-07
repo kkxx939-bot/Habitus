@@ -186,8 +186,6 @@ def validate_domain_configs(config: HabitusConfig) -> None:
     ``build_runtime`` 开头、本地服务的 doctor 与 init 读完配置都调它。
     """
 
-    if not isinstance(config, HabitusConfig):
-        raise TypeError("config must be HabitusConfig")
     behavior_domain_configs(config.behavior)
     relation_thresholds(config)
 
@@ -203,18 +201,6 @@ def build_runtime(
 ) -> Runtime:
     """无存储写入、无模型请求地完成一次显式依赖组装。"""
 
-    if not isinstance(config, HabitusConfig):
-        raise TypeError("config must be HabitusConfig")
-    if providers is not None and not isinstance(providers, ProviderFactory):
-        raise TypeError("providers must be ProviderFactory or None")
-    if vector_stores is not None and not isinstance(vector_stores, VectorStoreFactory):
-        raise TypeError("vector_stores must be VectorStoreFactory or None")
-    if conversation_adapters is not None and not isinstance(conversation_adapters, ConversationAdapterRegistry):
-        raise TypeError("conversation_adapters must be ConversationAdapterRegistry or None")
-    if path_lock is not None and not isinstance(path_lock, PathLock):
-        raise TypeError("path_lock must be PathLock or None")
-    if observer is not None and not callable(getattr(observer, "record", None)):
-        raise TypeError("observer must implement record")
     validate_domain_configs(config)
 
     # 会话协议的适配器也声明各宿主的提问工具与宿主名：出口、会话 lane、出口那层消费者都从这一份取

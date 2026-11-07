@@ -888,8 +888,6 @@ def test_without_the_feedback_port_the_model_is_asked_nothing_about_reminders(tm
     (outcome,) = asyncio.run(session.consume((turn,)))
     assert outcome.disposition is TurnDisposition.RECORDED
     assert "【还开着的提醒】" not in provider.prompts[-1]
-    with pytest.raises(TypeError):
-        session.attach_reminders(object())  # type: ignore[arg-type]
 
 
 def test_the_prompt_and_the_output_shape_agree_on_when_responses_exists() -> None:

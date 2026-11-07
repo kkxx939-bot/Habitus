@@ -40,8 +40,6 @@ class ChatClient:
         async_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         observer: Observer | None = None,
     ) -> None:
-        if not isinstance(config, ChatModelConfig):
-            raise TypeError("config must be ChatModelConfig")
         self.config = config
         self.provider = provider
         self._sleep = sleep
@@ -316,8 +314,6 @@ class ChatClient:
             if not request.strip():
                 raise ValueError("model prompt cannot be empty")
             request = ChatRequest(messages=(ChatMessage(role="user", content=request),))
-        if not isinstance(request, ChatRequest):
-            raise TypeError("model request must be ChatRequest or non-empty text")
         if request.max_output_tokens is None and self.config.max_output_tokens is not None:
             request = replace(request, max_output_tokens=self.config.max_output_tokens)
         return request
@@ -345,11 +341,7 @@ class ChatClient:
 
     @staticmethod
     def _context(context: ChatCallContext | None) -> ChatCallContext:
-        if context is None:
-            return ChatCallContext()
-        if not isinstance(context, ChatCallContext):
-            raise TypeError("context must be ChatCallContext or None")
-        return context
+        return ChatCallContext() if context is None else context
 
     @staticmethod
     def _response_context(response: ModelResponse, context: ChatCallContext) -> ModelResponse:

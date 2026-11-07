@@ -125,10 +125,6 @@ class BehaviorSessionConsumer:
         *,
         question_tools: Callable[[str], tuple[str, ...]] = _BUILTIN_QUESTION_TOOLS,
     ) -> None:
-        if lane is not None and not isinstance(lane, SessionLane):
-            raise TypeError("lane must be SessionLane or None")
-        if not isinstance(store, BehaviorSessionOutputStore):
-            raise TypeError("store must be BehaviorSessionOutputStore")
         self.lane = lane
         self.store = store
         self.output_store = store

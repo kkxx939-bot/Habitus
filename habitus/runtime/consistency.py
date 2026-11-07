@@ -68,17 +68,11 @@ class MemoryConsistencyService:
         *,
         observer: Observer | None = None,
     ) -> None:
-        if not isinstance(jobs, MemoryJobStore):
-            raise TypeError("jobs must be MemoryJobStore")
-        if not isinstance(receipts, MemoryChangeReceiptStore):
-            raise TypeError("receipts must be MemoryChangeReceiptStore")
         self.jobs = jobs
         self.receipts = receipts
         self.observer = observer or NullObserver()
 
     def inspect(self, requested_job: MemoryJob) -> MemoryConsistencySnapshot:
-        if not isinstance(requested_job, MemoryJob):
-            raise TypeError("requested_job must be MemoryJob")
         from habitus.memory.conversation import ConversationAddress
 
         address = ConversationAddress(requested_job.conversation_id, requested_job.started_on)
@@ -126,7 +120,7 @@ class MemoryConsistencyService:
             ("timeout_seconds", timeout_seconds),
             ("poll_interval_seconds", poll_interval_seconds),
         ):
-            if isinstance(value, bool) or not isinstance(value, int | float) or float(value) <= 0:
+            if value <= 0:
                 raise ValueError(f"{name} must be a positive number")
         started = time.monotonic()
         deadline = started + float(timeout_seconds)

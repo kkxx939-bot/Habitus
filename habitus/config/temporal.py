@@ -32,7 +32,7 @@ class TemporalConfig:
     def __post_init__(self) -> None:
         for name in ("slot_minutes", "merge_window_minutes", "pool_half_width"):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if value <= 0:
                 raise ValueError(f"temporal.{name} must be a positive integer")
         if MINUTES_PER_DAY % self.slot_minutes:
             raise ValueError("temporal.slot_minutes must divide a day")
@@ -42,13 +42,9 @@ class TemporalConfig:
             raise ValueError("temporal.pool_half_width must be shorter than a day")
         for name in ("shrink_slot_to_pool", "shrink_pool_to_all_day"):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int | float) or not 0.0 <= float(value) <= 1_000.0:
+            if not 0.0 <= float(value) <= 1_000.0:
                 raise ValueError(f"temporal.{name} must be a number between 0 and 1000")
-        if (
-            isinstance(self.min_peak_mass, bool)
-            or not isinstance(self.min_peak_mass, int | float)
-            or not 0.0 < float(self.min_peak_mass) < 1.0
-        ):
+        if not 0.0 < float(self.min_peak_mass) < 1.0:
             raise ValueError("temporal.min_peak_mass must lie in (0, 1)")
 
     @property

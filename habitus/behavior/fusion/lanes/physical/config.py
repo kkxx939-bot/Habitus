@@ -29,7 +29,7 @@ class PhysicalLaneConfig:
     def __post_init__(self) -> None:
         for item in fields(self):
             value = getattr(self, item.name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if value <= 0:
                 raise ValueError(f"physical lane {item.name} must be a positive integer")
 
 

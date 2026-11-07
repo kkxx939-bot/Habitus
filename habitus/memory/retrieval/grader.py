@@ -24,10 +24,6 @@ class MemoryRetrievalGrader:
         *,
         config: MemorySearchServiceConfig | None = None,
     ) -> None:
-        if not isinstance(client, StructuredChatClient):
-            raise TypeError("client must be StructuredChatClient")
-        if config is not None and not isinstance(config, MemorySearchServiceConfig):
-            raise TypeError("config must be MemorySearchServiceConfig")
         self.client = client
         self.config = config or MemorySearchServiceConfig()
 
@@ -39,13 +35,7 @@ class MemoryRetrievalGrader:
     ) -> MemoryRetrievalAssessment:
         """无命中时确定性启用后备；有命中时让模型只审查信息覆盖度。"""
 
-        if not isinstance(plan, MemoryQueryPlan):
-            raise TypeError("plan must be MemoryQueryPlan")
         normalized = self._query(plan.original_query)
-        if not isinstance(memories, tuple) or any(not isinstance(memory, MemoryMatchedMemory) for memory in memories):
-            raise TypeError("memories must contain MemoryMatchedMemory values")
-        if not isinstance(memory_context, str):
-            raise TypeError("memory_context must be text")
         if not memories:
             return MemoryRetrievalAssessment(
                 decision=MemoryRetrievalSufficiency.INSUFFICIENT,

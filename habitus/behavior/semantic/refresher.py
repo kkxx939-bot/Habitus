@@ -55,13 +55,7 @@ class BehaviorSemanticRefresher:
         *,
         config: BehaviorSemanticConfig | None = None,
     ) -> None:
-        if not isinstance(tree, BehaviorTree):
-            raise TypeError("tree must be a BehaviorTree")
-        if not callable(getattr(generator, "generate", None)):
-            raise TypeError("generator must implement generate(snapshot)")
         resolved = config or BehaviorSemanticConfig()
-        if not isinstance(resolved, BehaviorSemanticConfig):
-            raise TypeError("config must be BehaviorSemanticConfig")
         self.tree = tree
         self.generator = generator
         self.config = resolved
@@ -70,8 +64,6 @@ class BehaviorSemanticRefresher:
         """刷新受影响的日目录及其月/年祖先；自下而上，同一目录一轮只刷一次。"""
 
         affected = sorted(set(days))
-        if any(not isinstance(day, date) for day in affected):
-            raise TypeError("days must contain date values")
         if not affected:
             return ()
         results: list[BehaviorSemanticRefreshResult] = []
@@ -156,7 +148,7 @@ class BehaviorSemanticRefresher:
                 *((address, BehaviorSemanticEntryKind.OCCURRENCE) for address in occurrences),
                 *((address, BehaviorSemanticEntryKind.GAP) for address in gaps),
             ),
-            key=lambda pair: (_instant(pair[0].started_at), pair[0].identity_name),
+            key=_entry_order,
         )
         collected: list[BehaviorSemanticEntry] = []
         for address, kind in timeline:
@@ -204,7 +196,7 @@ class BehaviorSemanticRefresher:
         if self._source_digest(directory) == snapshot.digest:
             return BehaviorSemanticRefreshResult(directory, BehaviorSemanticRefreshStatus.UNCHANGED, snapshot.digest)
         overview = await self.generator.generate(snapshot)
-        if not isinstance(overview, str) or not overview.strip():
+        if not overview.strip():
             raise BehaviorOverviewEmptyError("behavior overview generator returned empty text")
         return self._write(directory, overview, snapshot.digest)
 
@@ -216,7 +208,7 @@ class BehaviorSemanticRefresher:
             return BehaviorSemanticRefreshResult(directory, BehaviorSemanticRefreshStatus.MISSING)
         day_gaps = sorted(
             gaps,
-            key=lambda address: (_instant(address.started_at), address.identity_name),
+            key=_address_order,
         )
         if not day_gaps:
             return BehaviorSemanticRefreshResult(directory, BehaviorSemanticRefreshStatus.EMPTY)
@@ -308,6 +300,16 @@ def _only_on(day: date, starts: Sequence[datetime]) -> Callable[[date], Sequence
 
 def _instant(value: datetime) -> datetime:
     return value.astimezone(UTC)
+
+
+def _address_order(address: BehaviorAddress) -> tuple[datetime, str]:
+    """按开始瞬时排、同一瞬时按身份名定序。"""
+
+    return (_instant(address.started_at), address.identity_name)
+
+
+def _entry_order(entry: tuple[BehaviorAddress, BehaviorSemanticEntryKind]) -> tuple[datetime, str]:
+    return _address_order(entry[0])
 
 
 __all__ = ["BehaviorSemanticRefreshError", "BehaviorSemanticRefresher"]

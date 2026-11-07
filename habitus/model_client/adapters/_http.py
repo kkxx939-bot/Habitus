@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from habitus.foundation.validation import is_nonblank_str
 from habitus.model_client.contracts import ModelResponseError
 from habitus.model_client.json_parser import parse_json_response
 
@@ -108,7 +109,7 @@ def error_message(content: bytes, status_code: int, *, label: str) -> str:
         return fallback
     error = payload.get("error")
     message = error.get("message") if isinstance(error, Mapping) else None
-    if not isinstance(message, str) or not message.strip():
+    if not is_nonblank_str(message):
         message = payload.get("message")
     return message.strip()[:2048] if isinstance(message, str) and message.strip() else fallback
 

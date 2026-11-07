@@ -103,6 +103,28 @@ def test_bad_holiday_data_is_rejected(overrides: dict[str, object]) -> None:
         parse_holiday_year(json.dumps(_year(**overrides)))
 
 
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("region", 86, "calendar region must be an ISO 3166 code"),
+        ("region", None, "calendar region must be an ISO 3166 code"),
+        ("year", True, "calendar year must be an integer"),
+        ("year", "2099", "calendar year must be an integer"),
+        ("year", 2099.0, "calendar year must be an integer"),
+        ("source", 1, "calendar source must be non-empty text"),
+        ("source", "  ", "calendar source must be non-empty text"),
+        ("version", ["v"], "calendar version must be non-empty text"),
+        ("holidays", {f"{YEAR}-10-01": 5}, f"holiday {YEAR}-10-01 needs a name"),
+        ("holidays", {f"{YEAR}-10-01": None}, f"holiday {YEAR}-10-01 needs a name"),
+    ],
+)
+def test_wrong_types_in_the_holiday_file_are_rejected_when_read(field: str, bad: object, message: str) -> None:
+    """放假文件里类型错的字段在读文件时就拒（W16：类型检查在边界）。"""
+
+    with pytest.raises(CalendarDataError, match=message):
+        parse_holiday_year(json.dumps(_year(**{field: bad})))
+
+
 def test_duplicate_keys_in_the_file_are_rejected() -> None:
     text = '{"region":"CN","region":"CN","year":2099,"source":"s","version":"v","weekend":[5,6],"holidays":{},"makeup_workdays":[]}'
     with pytest.raises(CalendarDataError):

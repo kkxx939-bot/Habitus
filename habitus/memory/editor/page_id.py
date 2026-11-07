@@ -33,13 +33,11 @@ class MemoryPageIdMap:
     def from_snapshots(cls, snapshots: SnapshotBatch[MemoryDocument]) -> MemoryPageIdMap:
         """按快照身份的稳定顺序为所有已存在旧记忆分配编号。"""
 
-        if not isinstance(snapshots, SnapshotBatch):
-            raise TypeError("snapshots must be a SnapshotBatch")
         result = cls()
         for snapshot in snapshots.snapshots:
             if not snapshot.exists:
                 continue
-            if not isinstance(snapshot.value, MemoryDocument):
+            if snapshot.value is None:
                 raise MemoryPageIdError("existing memory snapshot has an invalid value")
             document_uri = str(MemoryURI.from_address(snapshot.value.address))
             if snapshot.identity != document_uri:

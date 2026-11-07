@@ -36,11 +36,11 @@ class FlowRow:
     def __post_init__(self) -> None:
         if self.last_observed_at < self.at:
             raise ValueError("a flow row cannot be last seen before it started")
-        if self.place is not None and (not isinstance(self.place, str) or not self.place):
+        if self.place is not None and not self.place:
             raise ValueError("a flow row's place is non-empty text or None")
-        if not isinstance(self.subjects, tuple) or any(not isinstance(item, str) or not item for item in self.subjects):
+        if any(not item for item in self.subjects):
             raise ValueError("a flow row's subjects are a tuple of names")
-        if isinstance(self.day_count, bool) or not isinstance(self.day_count, int) or self.day_count < 1:
+        if self.day_count < 1:
             raise ValueError("a flow row's own kind occurred at least once that day")
 
 
@@ -59,11 +59,11 @@ class ObservationGap:
     def __post_init__(self) -> None:
         for name in ("started_at", "ended_at"):
             value = getattr(self, name)
-            if not isinstance(value, datetime) or value.utcoffset() is None:
+            if value.utcoffset() is None:
                 raise ValueError(f"observation gap {name} must be a timezone-aware datetime")
         if self.ended_at < self.started_at:
             raise ValueError("observation gap must not end before it starts")
-        if not isinstance(self.kind, str) or not self.kind:
+        if not self.kind:
             raise ValueError("observation gap kind must be non-empty text")
 
 

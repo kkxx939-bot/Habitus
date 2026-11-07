@@ -38,10 +38,6 @@ class LedgerCompaction:
         lane: str = "session",
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if not isinstance(ledger, ForesightLedgerStore):
-            raise TypeError("ledger must be a ForesightLedgerStore")
-        if not isinstance(evidence, Evidence):
-            raise TypeError("evidence must be an Evidence")
         self.ledger = ledger
         self.evidence = evidence
         #: 这本账本是哪条 lane 的（机会表按 lane 来，只用自己那条的覆盖算机会间隔）。

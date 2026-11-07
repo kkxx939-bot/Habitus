@@ -21,14 +21,7 @@ class OpenTelemetryBackend:
         *,
         headers: Mapping[str, str] | None = None,
     ) -> None:
-        if not isinstance(config, ObservabilityTracingConfig):
-            raise TypeError("config must be ObservabilityTracingConfig")
         self.config = config
-        if headers is not None and (
-            not isinstance(headers, Mapping)
-            or any(not isinstance(key, str) or not isinstance(value, str) for key, value in headers.items())
-        ):
-            raise TypeError("OTLP headers must be a string mapping")
         self._headers = dict(headers or {})
         self._tracer: Any = None
         self._meter: Any = None

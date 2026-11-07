@@ -40,12 +40,6 @@ class MemoryJobClaim:
     lease: MemoryJobLease
     expired_attempts_exhausted: bool = False
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.lease, MemoryJobLease):
-            raise TypeError("lease must be a MemoryJobLease")
-        if not isinstance(self.expired_attempts_exhausted, bool):
-            raise TypeError("expired_attempts_exhausted must be boolean")
-
 
 @dataclass(frozen=True)
 class MemoryJobRunResult:
@@ -79,24 +73,6 @@ class MemoryJobRunner:
         *,
         observer: Observer | None = None,
     ) -> None:
-        if not isinstance(store, MemoryJobStore):
-            raise TypeError("store must be MemoryJobStore")
-        if not isinstance(conversations, ConversationMessageJournal):
-            raise TypeError("conversations must be ConversationMessageJournal")
-        if not isinstance(editor, MemoryEditor):
-            raise TypeError("editor must be MemoryEditor")
-        if not isinstance(semantic_refresher, MemorySemanticRefresher):
-            raise TypeError("semantic_refresher must be MemorySemanticRefresher")
-        if not isinstance(vector_index, PersistentMemoryVectorIndex):
-            raise TypeError("vector_index must be PersistentMemoryVectorIndex")
-        if not isinstance(summary_service, ConversationSummaryService):
-            raise TypeError("summary_service must be ConversationSummaryService")
-        if not isinstance(summary_vector_index, PersistentConversationSummaryVectorIndex):
-            raise TypeError("summary_vector_index must be PersistentConversationSummaryVectorIndex")
-        if not isinstance(change_receipts, MemoryChangeReceiptStore):
-            raise TypeError("change_receipts must be MemoryChangeReceiptStore")
-        if not callable(getattr(recall_state_cleaner, "forget", None)):
-            raise TypeError("recall_state_cleaner must implement forget")
         if store.memory_root != editor.transaction.tree.root:
             raise ValueError("MemoryJobStore is bound to another memory root")
         if change_receipts.root != store.root:
@@ -147,8 +123,6 @@ class MemoryJobRunner:
     async def run_claimed(self, claim: MemoryJobClaim) -> MemoryJobRunResult:
         """只执行已经由 Worker 认领并持续维持心跳的 Job。"""
 
-        if not isinstance(claim, MemoryJobClaim):
-            raise TypeError("claim must be a MemoryJobClaim")
         lease = claim.lease
         job = self.store.assert_current(lease)
         source = MemoryChangeSource.from_job(job)

@@ -77,10 +77,6 @@ class PathLock:
     ) -> Iterator[LeaseGuard]:
         """取得路径租约；默认快速失败，也可显式配置有界竞争等待。"""
 
-        if isinstance(wait_timeout_seconds, bool) or not isinstance(wait_timeout_seconds, int | float):
-            raise ValueError("wait_timeout_seconds must be numeric")
-        if isinstance(retry_delay_seconds, bool) or not isinstance(retry_delay_seconds, int | float):
-            raise ValueError("retry_delay_seconds must be numeric")
         wait_timeout = float(wait_timeout_seconds)
         retry_delay = float(retry_delay_seconds)
         if not isfinite(wait_timeout) or wait_timeout < 0:
@@ -242,4 +238,5 @@ def _observe(
             )
         )
     except Exception:
+        # 观测只是旁路：锁事件记不下来不能影响锁本身。
         pass

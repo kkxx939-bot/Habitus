@@ -98,39 +98,38 @@ VOID = "作废"
 SETTINGS = ("以后都提醒我", "以后别提了", "照常")
 
 
-def _aware(value: object, label: str) -> datetime:
-    if not isinstance(value, datetime) or value.utcoffset() is None:
+def _aware(value: datetime, label: str) -> datetime:
+    if value.utcoffset() is None:
         raise ForesightError(f"{label} must be a timezone-aware datetime")
     return value
 
 
-def _text(value: object, label: str) -> str:
-    if not isinstance(value, str) or not value:
+def _text(value: str, label: str) -> str:
+    if not value:
         raise ForesightError(f"{label} must be non-empty text")
     return value
 
 
-def _texts(values: object, label: str) -> None:
-    if not isinstance(values, tuple) or any(not isinstance(item, str) or not item for item in values):
+def _texts(values: tuple[str, ...], label: str) -> None:
+    if any(not item for item in values):
         raise ForesightError(f"{label} must be a tuple of non-empty text")
 
 
-def _day(value: object, label: str) -> date:
-    if isinstance(value, datetime) or not isinstance(value, date):
+def _day(value: date, label: str) -> date:
+    if isinstance(value, datetime):
         raise ForesightError(f"{label} must be a date")
     return value
 
 
-def _count(value: object, label: str, *, minimum: int = 0) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+def _count(value: int, label: str, *, minimum: int = 0) -> int:
+    if value < minimum:
         raise ForesightError(f"{label} must be an integer of at least {minimum}")
     return value
 
 
-def _one_of(value: object, choices: tuple[str, ...], label: str) -> str:
+def _one_of(value: str, choices: tuple[str, ...], label: str) -> str:
     if value not in choices:
         raise ForesightError(f"unknown {label}: {value!r}")
-    assert isinstance(value, str)
     return value
 
 
@@ -162,10 +161,6 @@ class Antecedent:
 
     def __post_init__(self) -> None:
         _text(self.relation, "antecedent relation")
-        if not isinstance(self.present, bool) or not isinstance(self.upward, bool):
-            raise ForesightError("antecedent present and upward must be booleans")
-        if not isinstance(self.source, str):
-            raise ForesightError("antecedent source must be text")
         if self.source and not self.present:
             raise ForesightError("an absent antecedent has no source")
 
@@ -206,7 +201,7 @@ class Expectation:
         _day(self.day, "expectation day")
         _aware(self.formed_at, "expectation formed_at")
         _one_of(self.source, SOURCES, "expectation source")
-        if not isinstance(self.window, tuple) or len(self.window) != 2:
+        if len(self.window) != 2:
             raise ForesightError("expectation window must be a (start, end) pair")
         start, end = self.window
         _aware(start, "expectation window start")
@@ -228,15 +223,8 @@ class Expectation:
             raise ForesightError("expectation hits cannot exceed its opportunities")
         if len(self.basis) > self.hits:
             raise ForesightError("expectation basis lists more records than it counts as hits")
-        if not isinstance(self.antecedents, tuple) or any(
-            not isinstance(item, Antecedent) for item in self.antecedents
-        ):
-            raise ForesightError("expectation antecedents must be Antecedent records")
         if self.level not in LEVELS:
             raise ForesightError(f"unknown expectation level: {self.level!r}")
-        for label in ("generation", "version", "implementation"):
-            if not isinstance(getattr(self, label), str):
-                raise ForesightError(f"expectation {label} must be text")
         if self.night is not None:
             _day(self.night, "expectation night")
 
@@ -275,16 +263,10 @@ class Delivery:
         _aware(self.decided_at, "delivery decided_at")
         if self.level not in LEVELS:
             raise ForesightError(f"unknown delivery level: {self.level!r}")
-        if not isinstance(self.spoken, bool):
-            raise ForesightError("delivery spoken must be a boolean")
         _one_of(self.reason, DELIVERY_REASONS, "delivery reason")
         if self.spoken != (self.reason == SPOKEN):
             raise ForesightError("a spoken delivery has reason 说了 and an unspoken one does not")
-        if (
-            isinstance(self.p_speak, bool)
-            or not isinstance(self.p_speak, int | float)
-            or not 0.0 <= self.p_speak <= 1.0
-        ):
+        if not 0.0 <= self.p_speak <= 1.0:
             raise ForesightError("delivery p_speak must be a number between 0 and 1")
         if self.text is not None and not self.spoken and self.reason not in _UNSPOKEN_WITH_TEXT:
             raise ForesightError("an unspoken delivery carries no text unless it waits for the window end or a host")
@@ -349,10 +331,6 @@ class Settlement:
         offset = self.outcome in ("早到", "晚了但做了", "提醒后发生")
         if offset != (self.offset_minutes is not None):
             raise ForesightError("a settlement carries an offset exactly for 早到 / 晚了但做了 / 提醒后发生")
-        if self.offset_minutes is not None and (
-            isinstance(self.offset_minutes, bool) or not isinstance(self.offset_minutes, int)
-        ):
-            raise ForesightError("settlement offset_minutes must be an integer")
 
     @property
     def hit(self) -> bool:
@@ -398,8 +376,6 @@ class Omission:
         _text(self.kind_token, "omission kind_token")
         _day(self.day, "omission day")
         _aware(self.noticed_at, "omission noticed_at")
-        if not isinstance(self.had_expectation, bool):
-            raise ForesightError("omission had_expectation must be a boolean")
 
 
 def relation_backed(source: str) -> bool:
@@ -423,7 +399,7 @@ def parse_account(account: str) -> tuple[str, str, str]:
     return parts[0], parts[1], parts[2]
 
 
-def _account(value: object) -> str:
+def _account(value: str) -> str:
     text = _text(value, "account")
     parse_account(text)
     return text
@@ -450,20 +426,10 @@ class AccountFact:
     def __post_init__(self) -> None:
         _account(self.account)
         _aware(self.at, "fact at")
-        if not isinstance(self.good, bool):
-            raise ForesightError("fact good must be a boolean")
-        if (
-            isinstance(self.strength, bool)
-            or not isinstance(self.strength, int | float)
-            or not 0.0 <= self.strength <= 1.0
-        ):
+        if not 0.0 <= self.strength <= 1.0:
             raise ForesightError("fact strength must be a number in [0, 1]")
         _one_of(self.kind, FACT_KINDS, "fact kind")
         _text(self.expectation_id, "fact expectation_id")
-        if self.offset_minutes is not None and (
-            isinstance(self.offset_minutes, bool) or not isinstance(self.offset_minutes, int)
-        ):
-            raise ForesightError("fact offset_minutes must be an integer")
         if self.written_at is not None:
             _aware(self.written_at, "fact written_at")
             if self.written_at < self.at:
@@ -504,8 +470,6 @@ class UnitFeedback:
     def __post_init__(self) -> None:
         _text(self.kind_token, "feedback kind_token")
         _aware(self.at, "feedback at")
-        if not isinstance(self.good, bool):
-            raise ForesightError("feedback good must be a boolean")
         _text(self.expectation_id, "feedback expectation_id")
         if self.polarity is not None:
             _one_of(self.polarity, POLARITIES, "feedback polarity")

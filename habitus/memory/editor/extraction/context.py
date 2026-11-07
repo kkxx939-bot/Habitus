@@ -37,14 +37,6 @@ class MemoryExtractionContext:
         semantic_search: MemorySemanticSearch,
         config: MemoryExtractionConfig,
     ) -> None:
-        if not isinstance(initial, MemoryRelatedContext):
-            raise TypeError("initial must be a MemoryRelatedContext")
-        if not isinstance(snapshot_reader, MemorySnapshotReader):
-            raise TypeError("snapshot_reader must be a MemorySnapshotReader")
-        if not callable(getattr(semantic_search, "search", None)):
-            raise TypeError("semantic_search must implement async search")
-        if not isinstance(config, MemoryExtractionConfig):
-            raise TypeError("config must be a MemoryExtractionConfig")
         if config.max_old_memory_items > snapshot_reader.config.max_items:
             raise ValueError("extraction item limit cannot exceed the snapshot reader item limit")
         if config.max_old_memory_bytes > snapshot_reader.config.max_total_bytes:
@@ -114,8 +106,6 @@ class MemoryExtractionContext:
     ) -> MemoryRetrievalObservation:
         """执行 Grader 选择的一个只读动作。"""
 
-        if not isinstance(decision, MemoryRetrievalDecision):
-            raise TypeError("decision must be a MemoryRetrievalDecision")
         if decision.action is MemoryRetrievalAction.FINISH:
             raise ValueError("finish does not execute a retrieval action")
         if decision.action is MemoryRetrievalAction.SEARCH:
@@ -267,7 +257,7 @@ class MemoryExtractionContext:
         if not expectations:
             return
         snapshot = self._snapshots.get(identity)
-        if snapshot is None or not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
+        if snapshot is None or not snapshot.exists or snapshot.value is None:
             raise MemoryExtractionError(f"one-hop relation target does not exist as a complete L2 memory: {identity}")
         document = snapshot.value
         for seed_uri, link, expect_backlink in expectations:
@@ -278,8 +268,6 @@ class MemoryExtractionContext:
                 )
 
     def _ingest(self, batch: MemorySnapshotBatch) -> tuple[str, ...]:
-        if not isinstance(batch, SnapshotBatch):
-            raise TypeError("batch must be a MemorySnapshotBatch")
         pending: list[VersionedSnapshot[MemoryDocument]] = []
         for snapshot in batch.snapshots:
             current = self._snapshots.get(snapshot.identity)
@@ -288,7 +276,7 @@ class MemoryExtractionContext:
                     raise MemoryExtractionError(f"old memory changed during extraction: {snapshot.identity}")
                 continue
             if snapshot.exists:
-                if not isinstance(snapshot.value, MemoryDocument):
+                if snapshot.value is None:
                     raise MemoryExtractionError("old-memory snapshot contains an invalid document")
                 expected = str(MemoryURI.from_address(snapshot.value.address))
                 if expected != snapshot.identity:
@@ -319,15 +307,11 @@ class MemoryExtractionContext:
                 self._page_ids.register_existing(snapshot.identity)
         return tuple(snapshot.identity for snapshot in pending)
 
-    def _validated_hits(self, raw_hits: object) -> tuple[MemorySearchHit, ...]:
-        if isinstance(raw_hits, str) or not isinstance(raw_hits, Sequence):
-            raise MemoryExtractionError("memory semantic search must return a sequence of hits")
+    def _validated_hits(self, raw_hits: Sequence[MemorySearchHit]) -> tuple[MemorySearchHit, ...]:
         if len(raw_hits) > self.config.additional_search_limit:
             raise MemoryExtractionError("memory semantic search exceeded its requested limit")
         by_uri: dict[MemoryURI, MemorySearchHit] = {}
         for hit in raw_hits:
-            if not isinstance(hit, MemorySearchHit):
-                raise MemoryExtractionError("memory semantic search returned an invalid hit")
             if hit.uri.node_type is not MemoryURINodeType.DOCUMENT:
                 raise MemoryExtractionError("memory semantic search returned a non-L2 URI")
             if not any(hit.uri.matches_prefix(root) for root in self.initial.search_roots):
@@ -357,9 +341,7 @@ class MemoryExtractionContext:
             selected.append(hit)
         return tuple(selected)
 
-    def _query(self, value: object) -> str:
-        if not isinstance(value, str):
-            raise MemoryExtractionError("memory search query must be text")
+    def _query(self, value: str) -> str:
         normalized = " ".join(value.split())
         if not normalized:
             raise MemoryExtractionError("memory search query must be non-empty")

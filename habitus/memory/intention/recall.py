@@ -39,8 +39,6 @@ def allowed_memory_index_kinds(
 ) -> tuple[str, ...]:
     """把公开类型条件转换成 Top-K 前使用的唯一向量分区集合。"""
 
-    if not isinstance(kinds, tuple):
-        raise TypeError("memory kinds must be a tuple")
     normalized_kinds = tuple(MemoryKind(kind) for kind in kinds) or tuple(MemoryKind)
     if len(normalized_kinds) != len(set(normalized_kinds)):
         raise ValueError("memory kinds must be unique")

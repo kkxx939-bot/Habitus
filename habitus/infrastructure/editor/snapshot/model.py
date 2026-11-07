@@ -31,7 +31,7 @@ class SnapshotReadConfig:
             "max_item_bytes": self.max_item_bytes,
             "max_total_bytes": self.max_total_bytes,
         }.items():
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         if self.max_total_bytes < self.max_item_bytes:
             raise ValueError("max_total_bytes must not be smaller than max_item_bytes")
@@ -49,11 +49,11 @@ class VersionedSnapshot(Generic[T]):
     size_bytes: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.identity, str) or not self.identity or self.identity != self.identity.strip():
+        if not self.identity or self.identity != self.identity.strip():
             raise ValueError("snapshot identity must be a non-empty string without surrounding whitespace")
         state = SnapshotState(self.state)
         object.__setattr__(self, "state", state)
-        if isinstance(self.size_bytes, bool) or not isinstance(self.size_bytes, int) or self.size_bytes < 0:
+        if self.size_bytes < 0:
             raise ValueError("snapshot size_bytes must be a non-negative integer")
 
         if state is SnapshotState.MISSING:
@@ -65,7 +65,7 @@ class VersionedSnapshot(Generic[T]):
 
         if self.value is None:
             raise ValueError("found snapshot must contain a value")
-        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision <= 0:
+        if self.revision is None or self.revision <= 0:
             raise ValueError("found snapshot revision must be a positive integer")
         if not _is_sha256(self.source_digest):
             raise ValueError("found snapshot source_digest must be a SHA-256 hex digest")
@@ -98,21 +98,13 @@ class SnapshotBatch(Generic[T]):
     total_bytes: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.snapshots, tuple) or any(
-            not isinstance(snapshot, VersionedSnapshot) for snapshot in self.snapshots
-        ):
-            raise TypeError("snapshots must be a tuple of VersionedSnapshot values")
         identities = tuple(snapshot.identity for snapshot in self.snapshots)
         if identities != tuple(sorted(identities)):
             raise ValueError("snapshot batch must be sorted by identity")
         if len(identities) != len(set(identities)):
             raise ValueError("snapshot batch cannot contain duplicate identities")
         expected_total = sum(snapshot.size_bytes for snapshot in self.snapshots)
-        if (
-            isinstance(self.total_bytes, bool)
-            or not isinstance(self.total_bytes, int)
-            or self.total_bytes != expected_total
-        ):
+        if self.total_bytes != expected_total:
             raise ValueError("snapshot batch total_bytes does not match its snapshots")
 
     def get(self, identity: str) -> VersionedSnapshot[T] | None:
@@ -124,8 +116,8 @@ class SnapshotBatch(Generic[T]):
         return None
 
 
-def _is_sha256(value: object) -> bool:
-    if not isinstance(value, str) or len(value) != _SHA256_LENGTH:
+def _is_sha256(value: str | None) -> bool:
+    if value is None or len(value) != _SHA256_LENGTH:
         return False
     try:
         int(value, 16)

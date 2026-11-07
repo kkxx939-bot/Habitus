@@ -166,8 +166,6 @@ class PriorConfig:
 
 class PriorAdvisor:
     def __init__(self, client: StructuredChatClient, *, config: PriorConfig | None = None) -> None:
-        if not isinstance(client, StructuredChatClient):
-            raise TypeError("client must be a StructuredChatClient")
         self.client = client
         self.config = config or PriorConfig()
 

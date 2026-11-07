@@ -125,8 +125,6 @@ class SituationRule:
             raise SituationError(f"{self.basis.value} watches no concept")
 
     def _check_days(self) -> None:
-        if isinstance(self.days, bool) or not isinstance(self.days, int):
-            raise SituationError("days must be an integer")
         if self.basis is SituationBasis.STREAK:
             if not 2 <= self.days <= MAX_STREAK_DAYS:
                 raise SituationError(f"a streak runs 2–{MAX_STREAK_DAYS} days; one day is not a streak")

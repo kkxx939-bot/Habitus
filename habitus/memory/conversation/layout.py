@@ -41,7 +41,7 @@ class ConversationAddress:
             raise ConversationLayoutError(str(exc)) from exc
         if identifier != identifier.strip() or any(ord(character) < 32 for character in identifier):
             raise ConversationLayoutError("conversation_id contains unsafe characters")
-        if isinstance(self.started_on, datetime) or not isinstance(self.started_on, date):
+        if isinstance(self.started_on, datetime):
             raise ConversationLayoutError("started_on must be a calendar date")
         identity = canonical_path_identity(identifier, "conversation_id")
         try:
@@ -68,11 +68,7 @@ class ConversationLayout:
         *,
         max_conversation_tree_entries: int,
     ) -> None:
-        if (
-            isinstance(max_conversation_tree_entries, bool)
-            or not isinstance(max_conversation_tree_entries, int)
-            or max_conversation_tree_entries <= 0
-        ):
+        if max_conversation_tree_entries <= 0:
             raise ValueError("max_conversation_tree_entries must be a positive integer")
         requested = Path(root).expanduser().absolute()
         if is_path_alias(requested):
@@ -110,7 +106,7 @@ class ConversationLayout:
         return self._inside_root(self.conversation_directory(address) / "ingress")
 
     def ingress_path(self, address: ConversationAddress, delivery_id: str) -> Path:
-        if not isinstance(delivery_id, str) or re.fullmatch(r"[0-9a-f]{64}", delivery_id) is None:
+        if re.fullmatch(r"[0-9a-f]{64}", delivery_id) is None:
             raise ConversationLayoutError("delivery_id must be lowercase SHA-256 text")
         return self._inside_root(self.ingress_directory(address) / f"{delivery_id}.json")
 
@@ -145,8 +141,6 @@ class ConversationLayout:
     ) -> Path:
         """返回普通范围摘要或归档范围摘要的独立不可变目录。"""
 
-        if not isinstance(stage, ConversationRangeSummaryStage):
-            raise TypeError("range summary stage must be ConversationRangeSummaryStage")
         name = "ranges" if stage is ConversationRangeSummaryStage.RANGE else "archive_ranges"
         return self._inside_root(self.summary_directory(address) / name)
 
@@ -180,6 +174,7 @@ class ConversationLayout:
                     "conversation directory",
                 )
             except ValueError:
+                # 名称不是规范身份的目录项不可能等于目标身份，跳过即可。
                 continue
             if entry_identity == identity:
                 matches.append(entry)
@@ -197,7 +192,7 @@ class ConversationLayout:
             ("start_sequence", start_sequence),
             ("end_sequence", end_sequence),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if value < 0:
                 raise ConversationLayoutError(f"{label} must be a non-negative integer")
             if value > _MAX_SEGMENT_SEQUENCE:
                 raise ConversationLayoutError(f"{label} exceeds the segment identifier range")
@@ -207,8 +202,6 @@ class ConversationLayout:
 
     @staticmethod
     def segment_range(segment_id: str) -> tuple[int, int]:
-        if not isinstance(segment_id, str):
-            raise ConversationLayoutError("segment_id must be text")
         match = _SEGMENT_ID.fullmatch(segment_id)
         if match is None:
             raise ConversationLayoutError("segment_id must use 12-digit start-end sequences")
@@ -220,8 +213,6 @@ class ConversationLayout:
 
     @staticmethod
     def _address(address: ConversationAddress) -> ConversationAddress:
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("address must be a ConversationAddress")
         return address
 
     def _inside_root(self, path: Path) -> Path:

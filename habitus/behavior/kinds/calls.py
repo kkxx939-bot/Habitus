@@ -62,10 +62,6 @@ def call_failure(exc: BaseException) -> CallFailure:
 
 class KindModelCaller:
     def __init__(self, client: StructuredChatClient, *, config: BehaviorKindConfig) -> None:
-        if not isinstance(client, StructuredChatClient):
-            raise TypeError("client must be StructuredChatClient")
-        if not isinstance(config, BehaviorKindConfig):
-            raise TypeError("config must be BehaviorKindConfig")
         self.client = client
         self.config = config
 

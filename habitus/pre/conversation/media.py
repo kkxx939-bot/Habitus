@@ -67,8 +67,8 @@ def _media_facts(item: Mapping[str, Any]) -> tuple[str, str | None, int, str] | 
     declared = _text_or_none(item.get("type"))
     kind = declared or "file"
     source = item.get("source")
-    if isinstance(source, Mapping) and source.get("type") == "base64" and isinstance(source.get("data"), str):
-        return kind, _text_or_none(source.get("media_type")), *_payload(source["data"])
+    if isinstance(source, Mapping) and source.get("type") == "base64" and isinstance(data := source.get("data"), str):
+        return kind, _text_or_none(source.get("media_type")), *_payload(data)
     image_url = item.get("image_url")
     if isinstance(image_url, Mapping):
         image_url = image_url.get("url")
@@ -83,11 +83,11 @@ def _media_facts(item: Mapping[str, Any]) -> tuple[str, str | None, int, str] | 
         (text for text in (_text_or_none(item.get(key)) for key in ("mimeType", "media_type", "mime")) if text),
         None,
     )
-    if isinstance(item.get("data"), str):
-        return kind, media_type, *_payload(item["data"])
+    if isinstance(data := item.get("data"), str):
+        return kind, media_type, *_payload(data)
     file = item.get("file")
-    if isinstance(file, Mapping) and isinstance(file.get("base64"), str):
-        return kind, _text_or_none(file.get("type")), *_payload(file["base64"])
+    if isinstance(file, Mapping) and isinstance(encoded := file.get("base64"), str):
+        return kind, _text_or_none(file.get("type")), *_payload(encoded)
     omitted = item.get("omitted_bytes")
     digest = item.get("omitted_sha256")
     if (

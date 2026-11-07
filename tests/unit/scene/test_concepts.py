@@ -502,6 +502,46 @@ def test_a_concept_document_round_trips_and_rejects_a_tampered_body() -> None:
         decode(text.replace('"retired":false', '"retired":"no"'))
 
 
+_AT_OFFICE = situation(
+    "在公司", "人在公司", role=ConceptRole.OBJECT, rule=SituationRule(SituationBasis.PLACE, value="公司")
+)
+
+
+@pytest.mark.parametrize(
+    ("concept", "old", "new", "message"),
+    [
+        (SLEEP_LATE, '"lane":"session"', '"lane":5', "concept lane must be text"),
+        (BREAKFAST, '"title":"早餐"', '"title":["早餐"]', "concept title must be text"),
+        (SLEEP_LATE, '"note":null', '"note":3', "concept source note must be text"),
+        (CRUNCH, '"days":3', '"days":"3"', "days must be an integer"),
+        (CRUNCH, '"days":3', '"days":true', "days must be an integer"),
+        (CRUNCH, '"concept":"运动"', '"concept":1', "streak names the concept it watches"),
+        (CRUNCH, '"grade":null', '"grade":2', "a situation grade filter must be non-empty text"),
+        (_AT_OFFICE, '"value":"公司"', '"value":["公司"]', "place needs a short non-empty value to match"),
+    ],
+)
+def test_a_concept_document_with_wrong_types_is_rejected_when_decoded(
+    concept: ConceptDefinition, old: str, new: str, message: str
+) -> None:
+    """概念文件注释里类型错的字段在解码时就拒（W16：类型检查在边界）。"""
+
+    text = encode(concept)
+    assert old in text
+    with pytest.raises(SceneRecordError, match=f"not a valid definition: {message}"):
+        decode(text.replace(old, new))
+
+
+@pytest.mark.parametrize(("old", "new"), [('"lower":1320', '"lower":true'), ('"upper":120', '"upper":120.0')])
+def test_a_grade_bound_that_is_not_an_integer_is_rejected_when_decoded(old: str, new: str) -> None:
+    """档的上下界读回时 ``true``/``120.0`` 在解码器就拒（W16：``ConceptGrade`` 不再自查类型）。"""
+
+    grades = (ConceptGrade("晚", START, 22 * 60, 2 * 60), ConceptGrade("很晚", START, 2 * 60, 6 * 60))
+    text = encode(refinement("夜间", "夜里开始的", "就寝", grades=grades))
+    assert old in text
+    with pytest.raises(SceneRecordError, match="concept grade fields have the wrong types"):
+        decode(text.replace(old, new, 1))
+
+
 # ── 存储 ──────────────────────────────────────────────────────────────────────
 
 
@@ -538,8 +578,6 @@ def test_store_remembers_the_vocabulary_version_it_synced_to(tmp_path) -> None:
     assert store.synced_version() == 9
     with pytest.raises(ConceptStoreError, match="non-negative integer"):
         store.write_synced_version(-1)
-    with pytest.raises(ConceptStoreError, match="non-negative integer"):
-        store.write_synced_version(True)
     (store.directory / ".vocabulary-version").write_text("seven\n", encoding="utf-8")
     with pytest.raises(ConceptStoreError, match="corrupt"):
         store.synced_version()
@@ -587,8 +625,6 @@ def catalog_class(
 def test_catalog_shapes_are_validated() -> None:
     with pytest.raises(ValueError, match="non-empty text"):
         CatalogClass(id="", name="x", criterion="y", lane="session", active=True)
-    with pytest.raises(ValueError, match="boolean"):
-        CatalogClass(id="s-k0001", name="x", criterion="y", lane="session", active=1)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="cannot end before"):
         CatalogChanges(since=5, version=4)
     nothing = CatalogChanges(since=3, version=3)
@@ -674,8 +710,6 @@ def test_sync_writes_the_classes_a_split_or_merge_touched_and_passes_the_moves_o
     plan = plan_sync(existing, classes, changes, now=LATER)
     assert plan.version == 5 and plan.moved == moves
     assert {item.name for item in _behaviours(plan.write)} == {kind_id("改提示词"), kind_id("打球"), kind_id("跑步")}
-    with pytest.raises(TypeError):
-        plan_sync([CODING], classes, changes, now=LATER)  # type: ignore[arg-type]
 
 
 def test_sync_rewrites_group_members_to_the_current_classes() -> None:

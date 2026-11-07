@@ -33,11 +33,9 @@ class PastMoment:
     weight: float = 1.0
 
     def __post_init__(self) -> None:
-        if not isinstance(self.at, datetime) or self.at.utcoffset() is None:
+        if self.at.utcoffset() is None:
             raise ForesightError("a moment needs a timezone-aware time")
-        if not isinstance(self.came, bool):
-            raise ForesightError("a moment's came must be a boolean")
-        if isinstance(self.weight, bool) or not isinstance(self.weight, int | float) or not 0.0 <= self.weight <= 1.0:
+        if not 0.0 <= self.weight <= 1.0:
             raise ForesightError("a moment's weight must lie in [0, 1]")
 
     @property
@@ -79,7 +77,7 @@ def fold_sequence(moments: Sequence[PastMoment], *, alpha: float, half_life: flo
     （Beta-二项，含不确定）的概率 q 小于 α ÷ 之前的有效样本数（每晚都在看，按看的次数校正）就断了：之前的证据乘 q·n / α。
     刚过线是轻罚，再错一次再重一截。"""
 
-    if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+    if window < 1:
         raise ForesightError("window must be a positive integer")
     if not 0.0 < alpha < 0.5:
         raise ForesightError("alpha must lie in (0, 0.5)")

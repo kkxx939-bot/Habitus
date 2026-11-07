@@ -68,17 +68,11 @@ class LLMBehaviorOverviewGenerator:
         *,
         config: BehaviorSemanticConfig | None = None,
     ) -> None:
-        if not isinstance(client, StructuredChatClient):
-            raise TypeError("client must be a StructuredChatClient")
         resolved = config or BehaviorSemanticConfig()
-        if not isinstance(resolved, BehaviorSemanticConfig):
-            raise TypeError("config must be BehaviorSemanticConfig")
         self.client = client
         self.config = resolved
 
     async def generate(self, snapshot: BehaviorDirectorySnapshot) -> str:
-        if not isinstance(snapshot, BehaviorDirectorySnapshot):
-            raise TypeError("snapshot must be a BehaviorDirectorySnapshot")
         if not snapshot.entries:
             raise ValueError("cannot generate an overview for an empty directory")
         if len(snapshot.entries) > self.config.max_direct_entries:

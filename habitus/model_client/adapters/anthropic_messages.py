@@ -69,8 +69,6 @@ class AnthropicMessagesProvider:
     """执行一次 Messages 请求并转换为统一模型契约。"""
 
     def __init__(self, config: ChatModelConfig, *, api_key: str = "", outbound: OutboundSettings | None = None) -> None:
-        if not isinstance(config, ChatModelConfig):
-            raise TypeError("config must be ChatModelConfig")
         validate_messages_route(config)
         self.config = config
         self.provider_name = config.route.provider
@@ -98,10 +96,6 @@ class AnthropicMessagesProvider:
 
         if self._closed:
             raise ModelConfigurationError("chat provider is closed")
-        if not isinstance(request, ChatRequest):
-            raise TypeError("request must be ChatRequest")
-        if not isinstance(stream, bool):
-            raise TypeError("stream must be boolean")
         visible = _visible_payload(request)
         response_format = _response_format(request, self.config)
         if response_format is not None:
@@ -233,8 +227,6 @@ class AnthropicMessagesProvider:
     def _require_prepared(self, request: PreparedChatRequest, *, stream: bool) -> None:
         if self._closed:
             raise ModelConfigurationError("chat provider is closed")
-        if not isinstance(request, PreparedChatRequest):
-            raise TypeError("request must be PreparedChatRequest")
         if request.stream is not stream:
             raise ModelConfigurationError("prepared chat request stream mode does not match the operation")
 

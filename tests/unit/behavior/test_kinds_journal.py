@@ -3,12 +3,18 @@
 
 from __future__ import annotations
 
+import json
+import re
+from datetime import date
 from pathlib import Path
 
 import pytest
 
 from habitus.behavior.kinds.changes import AddClass, ChangeReason, ReviseClass, VersionRecord, merge_operations
+from habitus.behavior.kinds.codec import class_payload, pending_payload, record_payload
+from habitus.behavior.kinds.ids import Lane
 from habitus.behavior.kinds.journal import VocabularyJournalError
+from habitus.behavior.kinds.pending import PendingEntry
 from habitus.behavior.kinds.reader import VocabularyReader
 from habitus.behavior.kinds.store import BehaviorKindStore, BehaviorKindStoreError
 from tests.unit.behavior.kinds_fixtures import (
@@ -69,3 +75,95 @@ def test_truncation_waits_while_a_migration_is_unfinished(tmp_path: Path) -> Non
     store.write_migration(VersionRecord(5, NOW, ChangeReason.REVISION, (AddClass(RUN),)))
     assert not store.truncate_before(3)
     assert store.journal.segments() == (0, 4)
+
+
+def _class_payload_with(field: str, bad: object) -> dict[str, object]:
+    payload = class_payload(RUN)
+    if field == "examples":
+        payload["examples"] = ["跑了五公里", bad]
+    elif field == "exclusion text":
+        payload["excludes"] = [{"text": bad, "goes_to": None}]
+    else:
+        payload[field] = bad
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("tamper", "message"),
+    [
+        ({"version": True}, "version must be a positive integer"),
+        ({"version": "5"}, "version must be a positive integer"),
+        ({"moves": [[1, "a", "b"]]}, "move occurrence must be non-empty text"),
+        ({"moves": [["behavior://x", None, "b"]]}, "move source must be non-empty text"),
+        ({"moves": [["behavior://x", "a", 3]]}, "move target must be non-empty text"),
+        *(
+            (
+                {"operations": [{"op": "add", "class": _class_payload_with(field, 1)}]},
+                f"behavior class is invalid: {label} must be non-empty text without surrounding whitespace",
+            )
+            for field, label in (
+                ("name", "class name"),
+                ("criterion", "class criterion"),
+                ("reminder", "class reminder"),
+                ("examples", "class example"),
+                ("exclusion text", "exclusion text"),
+            )
+        ),
+    ],
+)
+def test_a_migration_plan_with_wrong_types_is_refused_by_the_codec(
+    tmp_path: Path, tamper: dict[str, object], message: str
+) -> None:
+    """W16：迁移计划文件里类型错的字段在 ``record_from``/``class_from`` 构造之前就被拒，报错与值对象那条检查同一句。"""
+
+    store = seeded(tmp_path)
+    payload = {**record_payload(VersionRecord(5, NOW, ChangeReason.REVISION, (AddClass(RUN),))), **tamper}
+    store.migration_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(
+        BehaviorKindStoreError, match=re.escape(f"migration plan is invalid: version record is invalid: {message}")
+    ):
+        store.read_migration()
+
+
+@pytest.mark.parametrize("bad", [True, "4", None])
+def test_a_snapshot_with_a_non_integer_version_is_refused_by_the_codec(tmp_path: Path, bad: object) -> None:
+    store = seeded(tmp_path)
+    assert store.truncate_before(2)
+    payload = json.loads(store.journal.snapshot_path.read_text(encoding="utf-8"))
+    payload["version"] = bad
+    store.journal.snapshot_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(BehaviorKindStoreError, match="vocabulary version must be a non-negative integer"):
+        store.read()
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("occurrence", 1, "pending occurrence must be non-empty text"),
+        ("proposed", None, "pending proposed must be non-empty text"),
+        ("content", ["内容"], "pending content must be non-empty text"),
+        ("rechecked", "no", "pending rechecked must be a bool"),
+        ("rechecked", 0, "pending rechecked must be a bool"),
+    ],
+)
+def test_a_pending_pool_with_wrong_types_is_refused_by_the_codec(
+    tmp_path: Path, field: str, bad: object, message: str
+) -> None:
+    store = BehaviorKindStore(tmp_path)
+    day = date(2026, 3, 1)
+    entry = pending_payload(PendingEntry("behavior://p1", Lane.SESSION, day, "跑步", "早上跑了五公里", entered_on=day))
+    store.pending_path.parent.mkdir(parents=True, exist_ok=True)
+    store.pending_path.write_text(
+        json.dumps({"revision": 1, "entries": [{**entry, field: bad}]}, ensure_ascii=False), encoding="utf-8"
+    )
+    with pytest.raises(BehaviorKindStoreError, match=re.escape(f"pending entry is invalid: {message}")):
+        store.read_pending()
+
+
+@pytest.mark.parametrize("bad", [True, "1", 1.0, 0])
+def test_a_pending_pool_with_a_non_positive_integer_revision_is_refused(tmp_path: Path, bad: object) -> None:
+    store = BehaviorKindStore(tmp_path)
+    store.pending_path.parent.mkdir(parents=True, exist_ok=True)
+    store.pending_path.write_text(json.dumps({"revision": bad, "entries": []}), encoding="utf-8")
+    with pytest.raises(BehaviorKindStoreError, match="pending pool revision must be positive"):
+        store.read_pending()

@@ -116,7 +116,7 @@ class AuditStore:
             self._prune(connection, now=event.occurred_at)
 
     def recent(self, *, limit: int = 100) -> tuple[AuditRecord, ...]:
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+        if not 1 <= limit <= 500:
             raise ValueError("audit limit must be between 1 and 500")
         self.initialize()
         with self._guard, self._connect() as connection:

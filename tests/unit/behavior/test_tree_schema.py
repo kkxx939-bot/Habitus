@@ -11,6 +11,7 @@ from habitus.behavior import (
     BehaviorAddress,
     BehaviorDirectory,
     BehaviorDocumentCodec,
+    BehaviorDocumentIntegrityError,
     BehaviorFieldRole,
     BehaviorKind,
     BehaviorSchemaError,
@@ -200,6 +201,35 @@ def test_codec_roundtrip_preserves_local_offsets() -> None:
     restored = CODEC.decode(raw, expected_address=document.address)
     assert restored == document
     assert CODEC.encode(restored) == raw  # 双向逐字节
+
+
+@pytest.mark.parametrize("bad", ["true", '"1"', "1.0", "null"])
+def test_codec_decode_rejects_a_non_integer_revision(bad: str) -> None:
+    """W16：文档注释里 ``revision`` 类型错在解码器就被拒，报错与 ``BehaviorDocumentMetadata`` 那条检查同一句。"""
+
+    document = CODEC.build(
+        BehaviorKind.OCCURRENCE, occurrence_payload(), metadata=BehaviorDocumentMetadata.initial(NOW)
+    )
+    raw = CODEC.encode(document)
+    assert raw.count('"revision": 1,') == 1
+    tampered = raw.replace('"revision": 1,', f'"revision": {bad},')
+    with pytest.raises(BehaviorDocumentIntegrityError, match="do not satisfy their Schema") as caught:
+        CODEC.decode(tampered, expected_address=document.address)
+    assert "revision must be a positive integer" in str(caught.value.__cause__)
+
+
+@pytest.mark.parametrize("bad", ['"true"', "1", "null"])
+def test_schema_loader_rejects_a_non_boolean_required(bad: str) -> None:
+    """W16：Schema YAML 里 ``required`` 不是布尔，在 ``load_schema`` 构造字段之前就被拒。"""
+
+    from importlib.resources import files
+
+    from habitus.behavior.schema.loader import load_schema
+
+    source = files("habitus.behavior.schema.definitions").joinpath("gaps.yaml").read_text(encoding="utf-8")
+    assert "required: true" in source
+    with pytest.raises(BehaviorSchemaError, match="field required must be boolean"):
+        load_schema(source.replace("required: true", f"required: {bad}", 1), "gaps.yaml")
 
 
 def _expected_render_fragments(field, payload) -> list[str]:

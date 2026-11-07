@@ -70,8 +70,6 @@ class ConceptHitStore(SceneStore):
     # ── 写 ──────────────────────────────────────────────────────────────────
 
     def write(self, record: ConceptHits) -> Path:
-        if not isinstance(record, ConceptHits):
-            raise TypeError("record must be ConceptHits")
         self._done.pop(record.address.occurred_on, None)
         path = self.path_for(record.address)
         self._atomic_write(path, encode(record).encode("utf-8"), maximum=MAX_RECORD_BYTES)
@@ -91,11 +89,11 @@ class ConceptHitStore(SceneStore):
         ``mapper`` 是整个概念集的口径（记在标记上，概念集一变这一天就认得出要回填）；``expected`` 给出每个类的记录该带的口径
         （映射器按"挂在这个类上的细分概念"定口径），不给就要求每条都等于 ``mapper``。口径对不上的一条都不许混进完成的一天。"""
 
-        if isinstance(records, bool) or not isinstance(records, int) or records < 0:
+        if records < 0:
             raise ValueError("records must be a non-negative integer")
-        if not isinstance(completed_at, datetime) or completed_at.utcoffset() is None:
+        if completed_at.utcoffset() is None:
             raise ValueError("completed_at must be a timezone-aware datetime")
-        if not isinstance(mapper, str) or not mapper.strip():
+        if not mapper.strip():
             raise ValueError("mapper must be non-empty text")
         found = self.read_day(day)
         if len(found) != records:
@@ -215,7 +213,7 @@ class ConceptHitStore(SceneStore):
         """
 
         for label, value in (("start", start), ("end", end)):
-            if not isinstance(value, datetime) or value.utcoffset() is None:
+            if value.utcoffset() is None:
                 raise ValueError(f"{label} must be a timezone-aware datetime")
         if end <= start:
             return ()
@@ -246,8 +244,6 @@ class ConceptHitStore(SceneStore):
         return frozenset(days)
 
     def path_for(self, address: BehaviorAddress) -> Path:
-        if not isinstance(address, BehaviorAddress):
-            raise TypeError("address must be a BehaviorAddress")
         if address.kind is not BehaviorKind.OCCURRENCE:
             raise ConceptHitStoreError("concept hits are recorded for occurrences only")
         return self._day_path(address.occurred_on) / f"{address.identity_name}.md"
@@ -255,7 +251,7 @@ class ConceptHitStore(SceneStore):
     # ── 内部 ────────────────────────────────────────────────────────────────
 
     def _day_path(self, day: date) -> Path:
-        if isinstance(day, datetime) or not isinstance(day, date):
+        if isinstance(day, datetime):
             raise TypeError("day must be a date")
         return self._inside(Path(OCCURRENCES_SEGMENT, f"{day.year:04d}", f"{day.month:02d}", f"{day.day:02d}"))
 
@@ -273,6 +269,7 @@ class ConceptHitStore(SceneStore):
                     try:
                         days.append(date(int(year.name), int(month.name), int(day.name)))
                     except ValueError:
+                        # 数字目录拼不成真实日期（如 02/31）：不是我们写的日目录，不算哪一天
                         continue
         return sorted(days)
 

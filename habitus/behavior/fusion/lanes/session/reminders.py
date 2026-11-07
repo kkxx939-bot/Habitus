@@ -28,13 +28,11 @@ class PendingReminder:
     deadline: datetime
 
     def __post_init__(self) -> None:
-        if not isinstance(self.reminder_id, str) or not self.reminder_id:
+        if not self.reminder_id:
             raise BehaviorFusionError("a pending reminder needs an identity")
-        if not isinstance(self.text, str):
-            raise BehaviorFusionError("a pending reminder's text must be text")
         for label in ("said_at", "deadline"):
             value = getattr(self, label)
-            if not isinstance(value, datetime) or value.utcoffset() is None:
+            if value.utcoffset() is None:
                 raise BehaviorFusionError(f"a pending reminder's {label} must be timezone-aware")
 
 
@@ -46,7 +44,7 @@ class ReminderResponse:
     polarity: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.reminder_id, str) or not self.reminder_id:
+        if not self.reminder_id:
             raise BehaviorFusionError("a reminder response needs the reminder's identity")
         if self.polarity not in POLARITIES:
             raise BehaviorFusionError(f"unknown reminder response polarity: {self.polarity!r}")

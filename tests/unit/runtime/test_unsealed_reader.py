@@ -120,10 +120,6 @@ def test_the_reader_insists_on_aware_bounds_and_the_right_stores(tmp_path) -> No
         unsealed.rows(since=datetime(2026, 8, 16, 19), until=at(0))
     with pytest.raises(ValueError, match="until"):
         prepared(unsealed, datetime(2026, 8, 16, 19))
-    with pytest.raises(TypeError):
-        UnsealedFromJudgements(object(), BehaviorReductionLedger(tmp_path), unsealed.stamping)  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        UnsealedFromJudgements(BehaviorJudgementStore(tmp_path), BehaviorReductionLedger(tmp_path), object())  # type: ignore[arg-type]
 
 
 def test_each_judgement_is_classified_once(tmp_path) -> None:

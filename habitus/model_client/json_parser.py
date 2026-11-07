@@ -10,6 +10,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from habitus.foundation.validation import is_nonblank_str
+
 JSONParseMode = Literal[
     "strict",
     "code_fence",
@@ -41,7 +43,7 @@ class ParsedJSON:
 def parse_json_response(source: str, *, allow_repair: bool = True) -> ParsedJSON:
     """解析模型返回的 JSON，只修复语法并拒绝非 JSON 的 Python 值。"""
 
-    if not isinstance(source, str) or not source.strip():
+    if not is_nonblank_str(source):
         raise ValueError("structured model response must be non-empty text")
     text = source.strip()
     parsed = _loads(text)
@@ -166,6 +168,7 @@ def _reject_duplicate_python_literal_keys(source: str) -> None:
             try:
                 key = ast.literal_eval(key_node)
             except (ValueError, TypeError):
+                # 非字面量键不可能与字符串键重复，跳过。
                 continue
             if not isinstance(key, str):
                 continue

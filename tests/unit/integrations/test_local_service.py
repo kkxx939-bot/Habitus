@@ -801,3 +801,15 @@ def test_storage_check_fails_with_less_than_one_gibibyte_free(monkeypatch: pytes
 def test_doctor_refuses_a_probe_timeout_outside_zero_to_120_seconds(tmp_path: Path, timeout: float) -> None:
     with pytest.raises(ValueError, match="at most 120"):
         run_doctor(_config(tmp_path), check_port=False, probe_timeout_seconds=timeout)
+
+
+@pytest.mark.parametrize("raw_path", ["", "   "])
+def test_doctor_treats_a_blank_config_path_as_missing(raw_path: str) -> None:
+    """环境变量里的配置路径空白：公开入口在读配置那一步就失败；权限检查自己也按"没给路径"失败（W16）。"""
+
+    environ = {"HABITUS_CONFIG_FILE": raw_path}
+    (config_check,) = run_doctor_from_env(environ=environ, check_port=False).checks
+    assert (config_check.name, config_check.status) == ("config", DoctorStatus.FAIL)
+    assert doctor_module._config_file_security(environ) == doctor_module.DoctorCheck(
+        "config_permissions", DoctorStatus.FAIL, "HABITUS_CONFIG_FILE is missing"
+    )

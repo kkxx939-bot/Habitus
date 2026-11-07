@@ -82,8 +82,6 @@ def initialize_config(
     """验证模板后以 0600 原子写入；覆盖时保留最后一个安全备份。"""
 
     path = resolve_config_path(destination)
-    if not isinstance(force, bool):
-        raise TypeError("force must be boolean")
     existing = _read_existing(path)
     if existing is not None and not force:
         if grants_group_or_other_access(path):
@@ -109,8 +107,6 @@ def initialize_config_from_mapping(
 ) -> ConfigInitializationResult:
     """把已经完成云端规划的完整严格配置安全写入目标位置。"""
 
-    if not isinstance(payload, Mapping):
-        raise TypeError("config payload must be an object")
     _load_mapping(payload)
     encoded = yaml.safe_dump(dict(payload), allow_unicode=True, sort_keys=False).encode("utf-8")
     if len(encoded) > _MAX_INITIALIZED_CONFIG_BYTES:
@@ -172,29 +168,21 @@ def configure_credentials(
 ) -> HabitusConfig:
     """只更新已经声明的秘密字段，并以 0600 原子替换统一 YAML。"""
 
-    if not isinstance(values, Mapping):
-        raise TypeError("credential updates must be an object")
     payload = load_config_object(path)
     registry = strict_object(payload.get("credentials"), path="config.credentials")
     for reference, fields in values.items():
-        if not isinstance(reference, str):
-            raise ValueError(f"unknown credential reference: {reference}")
         raw_reference = _normalized_key(registry, reference)
         if raw_reference is None:
             raise ValueError(f"unknown credential reference: {reference}")
-        if not isinstance(fields, Mapping):
-            raise TypeError(f"credential update '{reference}' must be an object")
         current = strict_object(
             registry[raw_reference],
             path=f"config.credentials.{reference}",
         )
         for field_name, secret in fields.items():
-            if not isinstance(field_name, str):
-                raise ValueError(f"unknown credential field: {reference}.{field_name}")
             raw_field_name = _normalized_key(current, field_name)
             if raw_field_name is None:
                 raise ValueError(f"unknown credential field: {reference}.{field_name}")
-            if not isinstance(secret, str) or not secret:
+            if not secret:
                 raise ValueError(f"credential value is missing: {reference}.{field_name}")
             current[raw_field_name] = secret
         registry[raw_reference] = current
@@ -230,8 +218,6 @@ def write_plugin_connection(
 ) -> Path:
     """把 YAML 中的本地监听地址投影成插件可读取的无秘密派生配置。"""
 
-    if not isinstance(config, HabitusConfig):
-        raise TypeError("config must be HabitusConfig")
     path = (
         Path(destination).expanduser().absolute()
         if destination is not None
@@ -283,8 +269,6 @@ def _initialize_encoded(
     *,
     force: bool,
 ) -> ConfigInitializationResult:
-    if not isinstance(force, bool):
-        raise TypeError("force must be boolean")
     existing = _read_existing(path)
     if existing is not None and not force:
         if grants_group_or_other_access(path):

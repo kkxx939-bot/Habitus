@@ -79,7 +79,7 @@ class RelationKey:
         # 键会写进关系表与迁移日志的一行里：换行、行分隔符这类不可打印的字符一个都不收
         for label in ("lane", "antecedent", "consequent", "condition"):
             value = getattr(self, label)
-            if not isinstance(value, str) or not value.isprintable():
+            if not value.isprintable():
                 raise ValueError(f"relation key {label} must be printable text")
 
     @property

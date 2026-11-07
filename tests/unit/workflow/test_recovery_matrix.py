@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,21 +10,18 @@ from types import SimpleNamespace
 import pytest
 
 from habitus.infrastructure.store.contracts import PathLock
-from habitus.memory.conversation import ConversationAddress, ConversationMessageJournal
+from habitus.memory.conversation import ConversationAddress
 from habitus.memory.editor import (
-    MemoryCommitTransaction,
     MemoryTransactionJournal,
     MemoryTransactionJournalError,
     MemoryTransactionJournalState,
 )
-from habitus.memory.snapshot import MemorySnapshotReader
-from habitus.memory.tree import MemoryTree
 from habitus.memory.workflow import (
     MemoryJobExecutionError,
     MemoryJobNotReadyError,
     MemoryJobStore,
 )
-from habitus.memory.workflow.receipt import MemoryChangeReceiptState, MemoryChangeReceiptStore, MemoryChangeSource
+from habitus.memory.workflow.receipt import MemoryChangeReceiptState, MemoryChangeSource
 from habitus.memory.workflow.recovery import MemoryJobTransactionRecovery, MemoryStagedJobRecovery
 from tests.helpers import BASE_TIME, codec, segment
 from tests.lock_store import ProcessLocalLockStore
@@ -132,22 +130,6 @@ def transaction_recovery(transaction: FakeTransaction, receipts: FakeReceiptStor
     return current
 
 
-def test_staged_recovery_constructor_rejects_invalid_collaborator(
-    tmp_path: Path,
-) -> None:
-    path_lock = PathLock(ProcessLocalLockStore())
-    conversations = ConversationMessageJournal(tmp_path / "conversation", path_lock)
-    jobs = MemoryJobStore(
-        tmp_path / "workflow",
-        path_lock,
-        memory_root=tmp_path / "memory",
-    )
-    with pytest.raises(TypeError, match="conversations"):
-        MemoryStagedJobRecovery(object(), jobs)  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="jobs"):
-        MemoryStagedJobRecovery(conversations, object())  # type: ignore[arg-type]
-
-
 def test_non_staged_job_is_returned_without_touching_conversation(tmp_path: Path) -> None:
     store, staged, source = staged_job(tmp_path)
     queued = store.activate(staged)
@@ -156,14 +138,6 @@ def test_non_staged_job_is_returned_without_touching_conversation(tmp_path: Path
 
     assert staged_recovery(source, jobs, conversations).recover(queued) is queued
     assert conversations.seal_calls == []
-
-
-@pytest.mark.parametrize("invalid", [None, object(), "job", 1, True])
-def test_staged_recovery_requires_memory_job(tmp_path: Path, invalid: object) -> None:
-    _store, _job, source = staged_job(tmp_path)
-    recovery = staged_recovery(source, FakeJobStore(), FakeConversationJournal(source))
-    with pytest.raises(TypeError, match="job"):
-        recovery.recover(invalid)  # type: ignore[arg-type]
 
 
 def test_not_ready_staged_job_is_propagated_without_recording_failure(tmp_path: Path) -> None:
@@ -226,38 +200,12 @@ def test_matching_recovered_segment_activates_staged_job(tmp_path: Path) -> None
     assert conversations.seal_calls[0][1] == source.end_sequence
 
 
-def test_transaction_recovery_constructor_rejects_invalid_collaborator(
-    tmp_path: Path,
-) -> None:
-    document_codec = codec()
-    tree = MemoryTree(tmp_path / "memory", document_codec=document_codec)
-    transaction = MemoryCommitTransaction(
-        tree,
-        MemorySnapshotReader(tree),
-        PathLock(ProcessLocalLockStore()),
-        MemoryTransactionJournal(tmp_path / "workflow" / "transactions", document_codec),
-    )
-    receipts = MemoryChangeReceiptStore(tmp_path / "workflow", document_codec)
-    with pytest.raises(TypeError, match="transaction"):
-        MemoryJobTransactionRecovery(object(), receipts)  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="change_receipts"):
-        MemoryJobTransactionRecovery(transaction, object())  # type: ignore[arg-type]
-
-
 def test_transaction_recovery_delegates_without_discarding_terminal_journals() -> None:
     transaction = FakeTransaction()
     recovery = transaction_recovery(transaction, FakeReceiptStore())
 
     assert recovery.recover_pending() == ("a" * 32,)
     assert transaction.recovered == [False]
-
-
-@pytest.mark.parametrize("invalid", [None, object(), "job", 1, True])
-def test_transaction_inspection_requires_memory_job(tmp_path: Path, invalid: object) -> None:
-    _store, _job, _source = staged_job(tmp_path)
-    recovery = transaction_recovery(FakeTransaction(), FakeReceiptStore())
-    with pytest.raises(TypeError, match="job"):
-        recovery.inspect(invalid)  # type: ignore[arg-type]
 
 
 def test_committed_journal_is_returned_for_finalization(tmp_path: Path) -> None:
@@ -303,13 +251,6 @@ def test_missing_journal_with_committed_receipt_is_integrity_error(tmp_path: Pat
 
     with pytest.raises(RuntimeError, match="committed change receipt"):
         recovery.inspect(job)
-
-
-@pytest.mark.parametrize("invalid", [None, object(), "source", 1, True])
-def test_discard_uncommitted_requires_change_source(invalid: object) -> None:
-    recovery = transaction_recovery(FakeTransaction(), FakeReceiptStore())
-    with pytest.raises(TypeError, match="source"):
-        recovery.discard_uncommitted(invalid)  # type: ignore[arg-type]
 
 
 def test_discard_uncommitted_preserves_committed_transaction_and_receipt(tmp_path: Path) -> None:
@@ -366,3 +307,37 @@ def test_discard_terminal_reports_success_or_journal_error() -> None:
         FakeReceiptStore(),
     )
     assert failed.discard_terminal("b" * 32) is False
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("transaction_id", 5, "transaction_id must be 32 lowercase hexadecimal characters"),
+        ("transaction_id", None, "transaction_id must be 32 lowercase hexadecimal characters"),
+        ("lock_identities", ["lock-a", 1], "lock_identities must contain non-empty strings"),
+        ("entries", [{"uri": 1, "before": None, "after": None}], "memory URI must be a string"),
+    ],
+)
+def test_transaction_journal_with_wrongly_typed_fields_is_rejected_when_read_back(
+    tmp_path: Path, field: str, bad: object, message: str
+) -> None:
+    """磁盘读回的事务日志字段类型错时在解码器就被拒（W16：类型检查在边界）。"""
+
+    journal = MemoryTransactionJournal(tmp_path / "workflow" / "transactions", codec())
+    transaction_id = "a" * 32
+    payload: dict[str, object] = {
+        "schema": "memory_commit_transaction_v1",
+        "transaction_id": transaction_id,
+        "state": "prepared",
+        "created_at": "2026-07-01T00:00:00Z",
+        "updated_at": "2026-07-01T00:00:00Z",
+        "lock_identities": ["lock-a"],
+        "entries": [],
+    }
+    payload[field] = bad
+    journal.root.mkdir(parents=True, exist_ok=True)
+    (journal.root / f"{transaction_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MemoryTransactionJournalError, match="failed to read transaction journal") as raised:
+        journal.read(transaction_id)
+    assert message in str(raised.value.__cause__)

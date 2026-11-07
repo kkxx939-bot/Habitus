@@ -41,10 +41,10 @@ class AccountCompaction:
     day_types: tuple[str | None, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.account, str) or not self.account:
+        if not self.account:
             raise ForesightError("compaction account must be non-empty text")
         at, identity = self.through
-        if not isinstance(at, datetime) or at.utcoffset() is None or not isinstance(identity, str) or not identity:
+        if at.utcoffset() is None or not identity:
             raise ForesightError("compaction through must be (aware moment, expectation id)")
         if any(size < 0 or count < 1 for size, count in self.offsets) or [s for s, _ in self.offsets] != sorted(
             {s for s, _ in self.offsets}

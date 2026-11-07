@@ -34,8 +34,6 @@ class AnchorCheck:
 
 class AnchorGate:
     def __init__(self, classifier: DaytimeClassifier) -> None:
-        if not isinstance(classifier, DaytimeClassifier):
-            raise TypeError("classifier must be DaytimeClassifier")
         self.classifier = classifier
         self.config = classifier.config
         #: 键是（词表版本，lane，这次取到的那批最近成员）：同一次拆改里多次自检复用；下一周成员换了就重挑，

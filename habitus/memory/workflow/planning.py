@@ -21,12 +21,6 @@ class MemorySegmentProducts:
     summary: ConversationSegmentSummary
     editor_plan: MemoryEditorPlan
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.summary, ConversationSegmentSummary):
-            raise TypeError("summary must be ConversationSegmentSummary")
-        if not isinstance(self.editor_plan, MemoryEditorPlan):
-            raise TypeError("editor_plan must be MemoryEditorPlan")
-
 
 class MemorySegmentProductBuilder:
     """并行计算两个只读同一不可变 Segment 的独立产品。"""
@@ -36,10 +30,6 @@ class MemorySegmentProductBuilder:
         summary_service: ConversationSummaryService,
         editor: MemoryEditor,
     ) -> None:
-        if not isinstance(summary_service, ConversationSummaryService):
-            raise TypeError("summary_service must be ConversationSummaryService")
-        if not isinstance(editor, MemoryEditor):
-            raise TypeError("editor must be MemoryEditor")
         self.summary_service = summary_service
         self.editor = editor
 
@@ -53,10 +43,6 @@ class MemorySegmentProductBuilder:
     ) -> MemorySegmentProducts:
         """等待两个分支全部收束后返回，任一失败都不产生可提交结果。"""
 
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("address must be ConversationAddress")
-        if not isinstance(segment, ConversationSegment):
-            raise TypeError("segment must be ConversationSegment")
         if editor_segment is _USE_SOURCE_SEGMENT:
             resolved_editor_segment = segment
         elif editor_segment is None:

@@ -46,24 +46,17 @@ class ConversationSummaryVectorIndexConfig:
                 1_000_000,
             ),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            if not minimum <= value <= maximum:
                 raise ValueError(f"summary vector index {name} must be between {minimum} and {maximum}")
         if self.max_records_per_conversation > self.max_records:
             raise ValueError("summary records per Conversation cannot exceed total records")
         if self.max_rerank_candidates > self.max_search_hits:
             raise ValueError("summary rerank candidates cannot exceed search hits")
         if (
-            isinstance(self.vector_score_threshold, bool)
-            or not isinstance(self.vector_score_threshold, int | float)
-            or not math.isfinite(float(self.vector_score_threshold))
+            not math.isfinite(float(self.vector_score_threshold))
             or not -1.0 <= float(self.vector_score_threshold) <= 1.0
         ):
             raise ValueError("summary vector index vector_score_threshold must be between -1 and 1")
-        if isinstance(self.rerank_score_threshold, bool) or not isinstance(
-            self.rerank_score_threshold,
-            int | float,
-        ):
-            raise TypeError("summary vector index rerank_score_threshold must be numeric")
         if not math.isfinite(float(self.rerank_score_threshold)):
             raise ValueError("summary vector index rerank_score_threshold must be finite")
 

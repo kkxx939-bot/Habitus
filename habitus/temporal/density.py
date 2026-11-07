@@ -28,7 +28,7 @@ class Density:
 def density_of(days: Sequence[OccurrenceDay], coverage: Coverage, *, recent: int) -> Density | None:
     """没有自然发生、或从最近那几次的第一次起一天都没在看，就没有读数（``None``）。"""
 
-    if isinstance(recent, bool) or not isinstance(recent, int) or recent < 1:
+    if recent < 1:
         raise ValueError("recent must be a positive integer")
     natural = [item for item in days if item.natural > 0][-recent:]
     if not natural:

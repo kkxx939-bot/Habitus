@@ -56,18 +56,12 @@ class MemoryStagedJobRecovery:
         conversations: ConversationMessageJournal,
         jobs: MemoryJobStore,
     ) -> None:
-        if not isinstance(conversations, ConversationMessageJournal):
-            raise TypeError("conversations must be ConversationMessageJournal")
-        if not isinstance(jobs, MemoryJobStore):
-            raise TypeError("jobs must be MemoryJobStore")
         self.conversations = conversations
         self.jobs = jobs
 
     def recover(self, job: MemoryJob) -> MemoryJob:
         """非 STAGED Job 原样返回；STAGED Job 必须发布并验证原始片段。"""
 
-        if not isinstance(job, MemoryJob):
-            raise TypeError("job must be MemoryJob")
         if job.status is not MemoryJobStatus.STAGED:
             return job
         job = self.jobs.require_staged_ready(job)
@@ -94,10 +88,6 @@ class MemoryJobTransactionRecovery:
         transaction: MemoryCommitTransaction,
         change_receipts: MemoryChangeReceiptStore,
     ) -> None:
-        if not isinstance(transaction, MemoryCommitTransaction):
-            raise TypeError("transaction must be MemoryCommitTransaction")
-        if not isinstance(change_receipts, MemoryChangeReceiptStore):
-            raise TypeError("change_receipts must be MemoryChangeReceiptStore")
         if change_receipts.codec is not transaction.tree.document_codec:
             raise ValueError("transaction recovery requires one shared document codec")
         self.transaction = transaction
@@ -111,8 +101,6 @@ class MemoryJobTransactionRecovery:
     def inspect(self, job: MemoryJob) -> MemoryTransactionJournalRecord | None:
         """返回可继续补完的 COMMITTED 日志；其他可恢复状态清理后返回 None。"""
 
-        if not isinstance(job, MemoryJob):
-            raise TypeError("job must be MemoryJob")
         source = MemoryChangeSource.from_job(job)
         journal = self.transaction.journal.try_read(job.transaction_id)
         if journal is not None and journal.state is MemoryTransactionJournalState.COMMITTED:
@@ -135,8 +123,6 @@ class MemoryJobTransactionRecovery:
         下一次执行先由 `recover_pending` 判定，提交了就靠这份回执补完，回滚了再由 `inspect` 清理。
         """
 
-        if not isinstance(source, MemoryChangeSource):
-            raise TypeError("source must be MemoryChangeSource")
         journal = self.transaction.journal.try_read(source.transaction_id)
         if journal is not None and journal.state in {
             MemoryTransactionJournalState.COMMITTED,

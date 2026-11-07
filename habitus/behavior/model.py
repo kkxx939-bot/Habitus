@@ -420,8 +420,6 @@ class BehaviorAddress:
 
     def __post_init__(self) -> None:
         kind = BehaviorKind(self.kind)
-        if isinstance(self.occurred_on, datetime) or not isinstance(self.occurred_on, date):
-            raise TypeError("behavior address occurred_on must be a date without a time")
         name = semantic_name(self.name, f"{kind.value} name")
         started_at = behavior_local_timestamp(self.started_at, f"{kind.value} started_at")
         if self.occurred_on != started_at.date():
@@ -471,8 +469,6 @@ class BehaviorDirectory:
     _identity_parts: tuple[str, ...] = field(init=False, repr=False, default=())
 
     def __post_init__(self) -> None:
-        if isinstance(self.parts, str) or not isinstance(self.parts, tuple):
-            raise TypeError("behavior directory parts must be a tuple of strings")
         parts = tuple(self.parts)
         object.__setattr__(self, "parts", parts)
         self._validate(parts)
@@ -502,7 +498,7 @@ class BehaviorDirectory:
         widths = (4, 2, 2)
         labels = ("year", "month", "day")
         for value, width, label in zip(values, widths, labels, strict=False):
-            if not isinstance(value, str) or len(value) != width or not is_ascii_digits(value):
+            if len(value) != width or not is_ascii_digits(value):
                 raise ValueError(f"behavior {label} directory has an invalid format")
         if values and not 1 <= int(values[0]) <= 9999:
             raise ValueError("behavior year directory is outside the calendar range")
@@ -548,27 +544,19 @@ class BehaviorDirectory:
             if month is not None or day is not None:
                 raise ValueError("behavior month or day requires a year")
             return cls(prefix)
-        if isinstance(year, bool) or not isinstance(year, int):
-            raise TypeError("behavior directory year must be an integer")
         parts = [*prefix, f"{year:04d}"]
         if month is None:
             if day is not None:
                 raise ValueError("behavior day requires a month")
             return cls(tuple(parts))
-        if isinstance(month, bool) or not isinstance(month, int):
-            raise TypeError("behavior directory month must be an integer")
         parts.append(f"{month:02d}")
         if day is None:
             return cls(tuple(parts))
-        if isinstance(day, bool) or not isinstance(day, int):
-            raise TypeError("behavior directory day must be an integer")
         parts.append(f"{day:02d}")
         return cls(tuple(parts))
 
     @classmethod
     def for_address(cls, address: BehaviorAddress) -> BehaviorDirectory:
-        if not isinstance(address, BehaviorAddress):
-            raise TypeError("address must be a BehaviorAddress")
         occurred_on = address.occurred_on
         return cls._dated(
             kind_directory_prefix(address.kind),

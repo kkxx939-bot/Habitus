@@ -28,8 +28,6 @@ class MemoryMutationPlanner:
     """只计算节点内容计划，不读取存储、不加锁也不推进 revision。"""
 
     def __init__(self, registry: MemorySchemaRegistry | None = None) -> None:
-        if registry is not None and not isinstance(registry, MemorySchemaRegistry):
-            raise TypeError("registry must be a MemorySchemaRegistry")
         resolved_registry = registry or MemorySchemaRegistry.load_default()
         self.matcher = MemoryNodeMatcher()
         self.merger = MemoryFieldMerger(resolved_registry)
@@ -41,13 +39,6 @@ class MemoryMutationPlanner:
         page_ids: MemoryPageIdMap,
     ) -> MemoryMutationPlan:
         """生成 create、update 或 noop 计划，并验证每个候选最终 URI。"""
-
-        if not isinstance(batch, MemoryCandidateBatch):
-            raise TypeError("batch must be a MemoryCandidateBatch")
-        if not isinstance(read_set, MemoryMutationReadSet):
-            raise TypeError("read_set must be a MemoryMutationReadSet")
-        if not isinstance(page_ids, MemoryPageIdMap):
-            raise TypeError("page_ids must be a MemoryPageIdMap")
 
         mutations: list[MemoryMutation] = []
         working_page_ids = page_ids.copy()

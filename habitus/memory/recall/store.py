@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from collections.abc import Callable
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
+from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.filesystem import ensure_owner_directory, restrict_file_to_owner
 from habitus.memory.recall.state import (
     MemoryRecallLifecycleConfig,
@@ -18,7 +20,7 @@ from habitus.memory.recall.state import (
     MemoryRecallState,
     MemoryRecallTarget,
 )
-from habitus.memory.uri import MemoryURI
+from habitus.memory.uri import MemoryURI, decode_memory_uri
 
 _TABLE = "memory_recall_lifecycle"
 _TABLE_LAYOUT = (
@@ -37,6 +39,17 @@ _TABLE_LAYOUT = (
 )
 # 旧版建表时带的"退休候选必须先压缩"约束；新版已撤掉它，带着它的旧库只用来认出并明确报错，不迁移。
 _STALE_CONSTRAINT = "retire_candidate_at IS NULL OR compacted_at IS NOT NULL"
+_Targets = tuple[MemoryRecallTarget, ...]
+_Update = Callable[[MemoryRecallState | None, MemoryRecallTarget], MemoryRecallState]
+
+
+def _row_count(row: sqlite3.Row, name: str) -> int:
+    """数据库行里的计数列在构造前确认是整数，文字照抄 ``MemoryRecallState.__post_init__``。"""
+
+    value = row[name]
+    if not is_int(value):
+        raise ValueError(f"memory recall state {name} must be non-negative")
+    return value
 
 
 class SQLiteMemoryRecallLifecycleStore:
@@ -47,10 +60,6 @@ class SQLiteMemoryRecallLifecycleStore:
         config: MemoryRecallLifecycleConfig | None = None,
         initialize: bool = True,
     ) -> None:
-        if config is not None and not isinstance(config, MemoryRecallLifecycleConfig):
-            raise TypeError("config must be MemoryRecallLifecycleConfig")
-        if not isinstance(initialize, bool):
-            raise TypeError("initialize must be boolean")
         self.path = Path(path).expanduser().absolute()
         self.config = config or MemoryRecallLifecycleConfig()
         self._initialized = False
@@ -226,8 +235,6 @@ class SQLiteMemoryRecallLifecycleStore:
         compacted_at: datetime,
         expected_version: int,
     ) -> MemoryRecallState:
-        if not isinstance(target, MemoryRecallTarget):
-            raise TypeError("target must be MemoryRecallTarget")
         activity = self._timestamp(lifecycle_activity_at)
         timestamp = self._timestamp(compacted_at)
         if activity > timestamp:
@@ -267,8 +274,6 @@ class SQLiteMemoryRecallLifecycleStore:
         retired_at: datetime,
         expected_version: int,
     ) -> MemoryRecallState:
-        if not isinstance(target, MemoryRecallTarget):
-            raise TypeError("target must be MemoryRecallTarget")
         timestamp = self._timestamp(retired_at)
 
         def update(current: MemoryRecallState | None, value: MemoryRecallTarget) -> MemoryRecallState:
@@ -302,8 +307,6 @@ class SQLiteMemoryRecallLifecycleStore:
         marked_at: datetime,
         expected_version: int,
     ) -> MemoryRecallState:
-        if not isinstance(target, MemoryRecallTarget):
-            raise TypeError("target must be MemoryRecallTarget")
         timestamp = self._timestamp(marked_at)
 
         def update(current: MemoryRecallState | None, value: MemoryRecallTarget) -> MemoryRecallState:
@@ -372,7 +375,7 @@ class SQLiteMemoryRecallLifecycleStore:
         finally:
             connection.close()
 
-    def _update_targets(self, targets, update, operation: str) -> tuple[MemoryRecallState, ...]:
+    def _update_targets(self, targets: _Targets, update: _Update, operation: str) -> tuple[MemoryRecallState, ...]:
         self.initialize()
         connection = self._connect()
         try:
@@ -473,8 +476,6 @@ class SQLiteMemoryRecallLifecycleStore:
             raise MemoryRecallLifecycleError("memory recall lifecycle store schema is incompatible")
 
     def _uris(self, values: tuple[MemoryURI, ...]) -> tuple[MemoryURI, ...]:
-        if not isinstance(values, tuple):
-            raise TypeError("memory recall lifecycle URIs must be a tuple")
         if len(values) > self.config.max_batch_size:
             raise ValueError("memory recall lifecycle URIs exceed max_batch_size")
         parsed = tuple(MemoryURI.parse(value) for value in values)
@@ -485,8 +486,6 @@ class SQLiteMemoryRecallLifecycleStore:
         return parsed
 
     def _targets(self, values: tuple[MemoryRecallTarget, ...]) -> tuple[MemoryRecallTarget, ...]:
-        if not isinstance(values, tuple) or any(not isinstance(value, MemoryRecallTarget) for value in values):
-            raise TypeError("memory recall lifecycle targets must be a tuple")
         if len(values) > self.config.max_batch_size:
             raise ValueError("memory recall lifecycle targets exceed max_batch_size")
         by_uri: dict[MemoryURI, MemoryRecallTarget] = {}
@@ -500,18 +499,18 @@ class SQLiteMemoryRecallLifecycleStore:
     @classmethod
     def _state(cls, row: sqlite3.Row) -> MemoryRecallState:
         return MemoryRecallState(
-            uri=MemoryURI.parse(row["uri"]),
-            document_revision=row["document_revision"],
+            uri=decode_memory_uri(row["uri"]),
+            document_revision=_row_count(row, "document_revision"),
             document_created_at=cls._parse_timestamp(row["document_created_at"]),
-            useful_recall_count=row["useful_recall_count"],
+            useful_recall_count=_row_count(row, "useful_recall_count"),
             last_useful_recall_at=cls._parse_optional_timestamp(row["last_useful_recall_at"]),
             lifecycle_activity_at=cls._parse_optional_timestamp(row["lifecycle_activity_at"]),
-            cold2_probe_count=row["cold2_probe_count"],
+            cold2_probe_count=_row_count(row, "cold2_probe_count"),
             last_cold2_probe_at=cls._parse_optional_timestamp(row["last_cold2_probe_at"]),
             compacted_at=cls._parse_optional_timestamp(row["compacted_at"]),
             retire_candidate_at=cls._parse_optional_timestamp(row["retire_candidate_at"]),
             retired_at=cls._parse_optional_timestamp(row["retired_at"]),
-            version=row["version"],
+            version=_row_count(row, "version"),
         )
 
     @staticmethod
@@ -534,8 +533,6 @@ class SQLiteMemoryRecallLifecycleStore:
 
     @staticmethod
     def _timestamp(value: datetime) -> datetime:
-        if not isinstance(value, datetime):
-            raise TypeError("memory recall lifecycle timestamp must be datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("memory recall lifecycle timestamp must include a timezone")
         return value.astimezone(UTC)

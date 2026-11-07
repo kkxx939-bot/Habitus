@@ -11,6 +11,7 @@ from habitus.behavior.document.model import BehaviorDocument, BehaviorDocumentMe
 from habitus.behavior.model import BehaviorAddress, BehaviorKind
 from habitus.behavior.schema import BehaviorSchemaRegistry
 from habitus.foundation.integrity import canonicalize
+from habitus.foundation.validation import is_int
 
 _MARKER = "\n<!-- HABITUS_BEHAVIOR_FIELDS\n"
 _FOOTER = "\n-->\n"
@@ -35,8 +36,6 @@ class BehaviorDocumentCodec:
     """
 
     def __init__(self, registry: BehaviorSchemaRegistry) -> None:
-        if not isinstance(registry, BehaviorSchemaRegistry):
-            raise TypeError("registry must be a BehaviorSchemaRegistry")
         self.registry = registry
 
     def build(
@@ -46,8 +45,6 @@ class BehaviorDocumentCodec:
         *,
         metadata: BehaviorDocumentMetadata,
     ) -> BehaviorDocument:
-        if not isinstance(metadata, BehaviorDocumentMetadata):
-            raise TypeError("metadata must be BehaviorDocumentMetadata")
         normalized_kind = BehaviorKind(kind)
         materialized = self.registry.materialize(normalized_kind, payload)
         if _MARKER in materialized.markdown_body:
@@ -61,8 +58,6 @@ class BehaviorDocumentCodec:
         )
 
     def encode(self, document: BehaviorDocument) -> str:
-        if not isinstance(document, BehaviorDocument):
-            raise TypeError("document must be a BehaviorDocument")
         canonical = self.build(document.kind, document.fields, metadata=document.metadata)
         if canonical.address != document.address:
             raise BehaviorDocumentIntegrityError("behavior document address is not canonical")
@@ -114,14 +109,16 @@ class BehaviorDocumentCodec:
         if not isinstance(raw_fields, dict) or any(not isinstance(name, str) for name in raw_fields):
             raise BehaviorDocumentIntegrityError("behavior document fields must be an object")
         try:
+            kind = BehaviorKind(raw_kind)
+            created_at = self._parse_timestamp(metadata["created_at"], "created_at")
+            updated_at = self._parse_timestamp(metadata["updated_at"], "updated_at")
+            revision = metadata["revision"]
+            if not is_int(revision):
+                raise ValueError("behavior document revision must be a positive integer")
             document = self.build(
-                BehaviorKind(raw_kind),
+                kind,
                 raw_fields,
-                metadata=BehaviorDocumentMetadata(
-                    revision=metadata["revision"],
-                    created_at=self._parse_timestamp(metadata["created_at"], "created_at"),
-                    updated_at=self._parse_timestamp(metadata["updated_at"], "updated_at"),
-                ),
+                metadata=BehaviorDocumentMetadata(revision=revision, created_at=created_at, updated_at=updated_at),
             )
         except (TypeError, ValueError) as exc:
             raise BehaviorDocumentIntegrityError("behavior document fields do not satisfy their Schema") from exc

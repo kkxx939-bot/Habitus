@@ -17,6 +17,7 @@ from enum import Enum
 from habitus.behavior.fusion.errors import BehaviorFusionError
 from habitus.behavior.fusion.lanes.physical.config import PhysicalLaneConfig
 from habitus.behavior.model import readable_text
+from habitus.foundation.validation import is_aware_datetime, is_nonblank_str
 
 SOURCE_PREFIX = "physical/"
 _DELIVERY_FIELDS = frozenset({"source", "device", "delivery_id", "sent_at", "segments", "coverage"})
@@ -217,7 +218,7 @@ def _items(value: object, label: str) -> Sequence[object]:
 
 
 def _text(value: object, label: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if not is_nonblank_str(value):
         raise PhysicalDeliveryError(f"{label} must be non-empty text")
     return " ".join(value.split())
 
@@ -237,7 +238,7 @@ def _moment(value: object, label: str) -> datetime:
             value = datetime.fromisoformat(value)
         except ValueError as exc:
             raise PhysicalDeliveryError(f"{label} is not an ISO-8601 time") from exc
-    if not isinstance(value, datetime) or value.utcoffset() is None:
+    if not is_aware_datetime(value):
         raise PhysicalDeliveryError(f"{label} must carry its UTC offset")
     return value
 

@@ -81,7 +81,6 @@ def test_bad_retry_values_are_rejected(kwargs: dict[str, object]) -> None:
         {"fallback_generations": 0},
         {"capacity_warning_share": 1.0},
         {"physical_max_backfill_days": 400},
-        {"worker": {}},
     ],
 )
 def test_bad_top_level_values_are_rejected(kwargs: dict[str, object]) -> None:

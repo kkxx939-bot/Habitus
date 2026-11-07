@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from habitus.memory.document import MemoryDocument
 from habitus.memory.editor.mutation.model import (
     MemoryFieldMergeResult,
     MemoryNodeMatch,
@@ -28,15 +27,11 @@ class MemoryFieldMerger:
     """执行字段级策略，不解释自然语言，也不产生存储副作用。"""
 
     def __init__(self, registry: MemorySchemaRegistry | None = None) -> None:
-        if registry is not None and not isinstance(registry, MemorySchemaRegistry):
-            raise TypeError("registry must be a MemorySchemaRegistry")
         self.registry = registry or MemorySchemaRegistry.load_default()
 
     def merge(self, match: MemoryNodeMatch) -> MemoryFieldMergeResult:
         """为新节点保留候选字段，为旧节点计算完整最终字段。"""
 
-        if not isinstance(match, MemoryNodeMatch):
-            raise TypeError("match must be a MemoryNodeMatch")
         schema = self.registry.get(match.candidate.kind)
         try:
             incoming = schema.validate_payload(match.candidate.fields)
@@ -49,7 +44,7 @@ class MemoryFieldMerger:
             )
 
         document = match.snapshot.value
-        if not isinstance(document, MemoryDocument):  # pragma: no cover - 匹配模型已保证。
+        if document is None:  # pragma: no cover - 匹配模型已保证。
             raise MemoryFieldMergeError("existing node match has no memory document")
         try:
             current = schema.validate_payload(document.fields)

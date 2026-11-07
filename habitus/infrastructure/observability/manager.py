@@ -23,8 +23,6 @@ class ManagedObservability:
         workflow_root: Path,
         tracing_headers: Mapping[str, str] | None = None,
     ) -> None:
-        if not isinstance(config, ObservabilityConfig):
-            raise TypeError("config must be ObservabilityConfig")
         self.config = config
         self.logging = StructuredLogObserver(enabled=config.logging.enabled)
         self.audit = (
@@ -62,8 +60,6 @@ class ManagedObservability:
         self._initialized = True
 
     def record(self, event: ObservationEvent) -> None:
-        if not isinstance(event, ObservationEvent):
-            raise TypeError("event must be ObservationEvent")
         backends = (self.logging,) if not self._initialized else (self.logging, self.audit, self.otel)
         for backend in backends:
             if backend is None:

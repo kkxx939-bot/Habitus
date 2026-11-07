@@ -50,11 +50,9 @@ class Judgement:
 
 class Judge:
     def __init__(self, client: StructuredChatClient, *, retries: int = 1, delay_seconds: float = 5.0) -> None:
-        if not isinstance(client, StructuredChatClient):
-            raise TypeError("client must be a StructuredChatClient")
-        if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+        if retries < 0:
             raise ValueError("retries must be a non-negative integer")
-        if isinstance(delay_seconds, bool) or not isinstance(delay_seconds, int | float) or delay_seconds < 0:
+        if delay_seconds < 0:
             raise ValueError("delay_seconds must be a non-negative number")
         self.client = client
         self.retries = retries
@@ -85,8 +83,8 @@ class Judge:
                 text=(text_a or text_b or None) if like is not False else None,
                 evidence=tuple(dict.fromkeys(evidence)),
             )
-        order_a = tuple(package.by_number(n).expectation_id for n in answer_a.order if package.by_number(n) is not None)  # type: ignore[union-attr]
-        order_b = tuple(package.by_number(n).expectation_id for n in answer_b.order if package.by_number(n) is not None)  # type: ignore[union-attr]
+        order_a = tuple(found.expectation_id for n in answer_a.order if (found := package.by_number(n)) is not None)
+        order_b = tuple(found.expectation_id for n in answer_b.order if (found := package.by_number(n)) is not None)
         if consistent_order and order_a == order_b:
             order = order_a
         else:

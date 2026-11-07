@@ -19,24 +19,18 @@ class BehaviorDocumentConfig:
             "max_markdown_body_chars": self.max_markdown_body_chars,
             "max_encoded_bytes": self.max_encoded_bytes,
         }.items():
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
 
     def validate_body(self, markdown_body: str) -> None:
-        if not isinstance(markdown_body, str):
-            raise TypeError("behavior Markdown body must be a string")
         if len(markdown_body) > self.max_markdown_body_chars:
             raise BehaviorDocumentLimitError("behavior Markdown body exceeds its configured limit")
 
     def validate_encoded(self, payload: bytes) -> None:
-        if not isinstance(payload, bytes):
-            raise TypeError("encoded behavior document must be bytes")
         if len(payload) > self.max_encoded_bytes:
             raise BehaviorDocumentLimitError("encoded behavior document exceeds its configured limit")
 
     def validate_semantic_layer(self, payload: bytes) -> None:
-        if not isinstance(payload, bytes):
-            raise TypeError("encoded behavior semantic layer must be bytes")
         if len(payload) > self.max_encoded_bytes:
             raise BehaviorDocumentLimitError("behavior semantic layer exceeds its configured byte limit")
 

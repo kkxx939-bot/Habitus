@@ -211,16 +211,12 @@ def test_event_directory_factory_rejects_missing_parent_and_invalid_calendar(
         MemoryDirectory.events(year, month, day)
 
 
-@pytest.mark.parametrize(
-    ("position", "value"),
-    tuple((position, value) for position in ("year", "month", "day") for value in (True, False, 1.5, "2026", []))
-    + (("year", None), ("month", None)),
-)
-def test_event_directory_factory_rejects_non_integer_components(position: str, value: object) -> None:
-    kwargs: dict[str, object] = {"year": 2026, "month": 7, "day": 28}
-    kwargs[position] = value
-    with pytest.raises((TypeError, ValueError)):
-        MemoryDirectory.events(**kwargs)  # type: ignore[arg-type]
+@pytest.mark.parametrize("position", ("year", "month"))
+def test_event_directory_factory_rejects_missing_parent_components(position: str) -> None:
+    kwargs: dict[str, int | None] = {"year": 2026, "month": 7, "day": 28}
+    kwargs[position] = None
+    with pytest.raises(ValueError):
+        MemoryDirectory.events(**kwargs)
 
 
 @pytest.mark.parametrize("level", [MemoryLevel.ABSTRACT, MemoryLevel.OVERVIEW])
@@ -353,16 +349,6 @@ def test_document_uri_properties_and_wrong_conversions(kind: MemoryKind) -> None
         uri.to_layer()
 
 
-@pytest.mark.parametrize("value", [None, 1, True, [], {}])
-def test_uri_parse_and_factory_reject_non_uri_types(value: object) -> None:
-    with pytest.raises(TypeError):
-        MemoryURI.parse(value)  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        MemoryURI.from_address(value)  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        MemoryURI.from_directory(value)  # type: ignore[arg-type]
-
-
 @pytest.mark.parametrize("part", ["", "a/b", "a\\b", None, 1, True])
 def test_uri_build_and_join_reject_unsafe_or_non_text_parts(part: object) -> None:
     with pytest.raises((MemoryURIError, TypeError)):
@@ -394,22 +380,17 @@ def test_document_metadata_normalizes_timezones_and_preserves_revision(revision:
     assert metadata.updated_at.tzinfo is UTC
 
 
-@pytest.mark.parametrize("revision", [0, -1, True, False, 1.0, "1", None])
-def test_document_metadata_rejects_invalid_revision(revision: object) -> None:
+@pytest.mark.parametrize("revision", [0, -1])
+def test_document_metadata_rejects_invalid_revision(revision: int) -> None:
     with pytest.raises(ValueError):
-        MemoryDocumentMetadata(revision, BASE_TIME, BASE_TIME, None)  # type: ignore[arg-type]
+        MemoryDocumentMetadata(revision, BASE_TIME, BASE_TIME, None)
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    tuple(
-        (field, value)
-        for field in ("created_at", "updated_at")
-        for value in (None, "2026-07-28", 1, date(2026, 7, 28), datetime(2026, 7, 28))
-    )
-    + tuple(("last_confirmed_at", value) for value in ("2026-07-28", 1, date(2026, 7, 28), datetime(2026, 7, 28))),
+    tuple((field, datetime(2026, 7, 28)) for field in ("created_at", "updated_at", "last_confirmed_at")),
 )
-def test_document_metadata_rejects_missing_non_datetime_or_naive_timestamps(field: str, value: object) -> None:
+def test_document_metadata_rejects_naive_timestamps(field: str, value: datetime) -> None:
     kwargs: dict[str, object] = {
         "revision": 1,
         "created_at": BASE_TIME,
@@ -417,7 +398,7 @@ def test_document_metadata_rejects_missing_non_datetime_or_naive_timestamps(fiel
         "last_confirmed_at": BASE_TIME,
     }
     kwargs[field] = value
-    with pytest.raises((TypeError, ValueError)):
+    with pytest.raises(ValueError):
         MemoryDocumentMetadata(**kwargs)  # type: ignore[arg-type]
 
 
@@ -427,12 +408,6 @@ def test_initial_metadata_sets_confirmation_only_when_explicit(confirmed: bool) 
     assert metadata.revision == 1
     assert metadata.created_at == metadata.updated_at == BASE_TIME
     assert (metadata.last_confirmed_at == BASE_TIME) is confirmed
-
-
-@pytest.mark.parametrize("confirmed", [None, 0, 1, "true", []])
-def test_initial_metadata_rejects_non_boolean_confirmation(confirmed: object) -> None:
-    with pytest.raises(TypeError):
-        MemoryDocumentMetadata.initial(BASE_TIME, confirmed=confirmed)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("refresh", [True, False])
@@ -500,19 +475,6 @@ def test_relation_endpoints_must_be_l2_documents(endpoint: MemoryURI, position: 
         MemoryStoredLink(**kwargs)
 
 
-@pytest.mark.parametrize("value", [None, 1, True, "memory://profile.md", object()])
-@pytest.mark.parametrize("position", ["from_uri", "to_uri"])
-def test_relation_endpoints_reject_non_uri_objects(value: object, position: str) -> None:
-    kwargs = {
-        "from_uri": MemoryURI.from_address(MemoryAddress.profile()),
-        "to_uri": MemoryURI.from_address(MemoryAddress.preference("主题")),
-        "link_type": MemoryLinkType.DERIVED_FROM,
-    }
-    kwargs[position] = value
-    with pytest.raises(TypeError):
-        MemoryStoredLink(**kwargs)  # type: ignore[arg-type]
-
-
 @pytest.mark.parametrize(
     "value",
     [
@@ -570,8 +532,8 @@ def test_built_document_fields_are_immutable_snapshots(kind: MemoryKind) -> None
 
 
 @pytest.mark.parametrize("kind", tuple(MemoryKind))
-@pytest.mark.parametrize("body", ["", " ", "body", 1, None])
-def test_memory_document_rejects_empty_non_newline_or_non_text_body(kind: MemoryKind, body: object) -> None:
+@pytest.mark.parametrize("body", ["", " ", "body"])
+def test_memory_document_rejects_empty_non_newline_or_non_text_body(kind: MemoryKind, body: str) -> None:
     source = document(kind)
     with pytest.raises((TypeError, ValueError)):
         replace(source, markdown_body=body)
@@ -649,6 +611,18 @@ def test_codec_rejects_invalid_system_metadata_types(field: str, value: object) 
         CODEC.decode(corrupted, expected_address=source.address)
 
 
+@pytest.mark.parametrize("value", ["1", True, 1.0, None, [1]])
+def test_codec_decoder_rejects_non_integer_revision_before_building_metadata(value: object) -> None:
+    """注释里 revision 类型错时在解码器就被拒（W16：类型检查在边界，不靠 ``MemoryDocumentMetadata``）。"""
+
+    source = document(MemoryKind.PREFERENCE)
+    corrupted = _replace_metadata(CODEC.encode(source), lambda metadata: metadata.__setitem__("revision", value))
+    with pytest.raises(MemoryDocumentIntegrityError, match="do not satisfy their Schema") as raised:
+        CODEC.decode(corrupted, expected_address=source.address)
+    assert isinstance(raised.value.__cause__, ValueError)
+    assert "memory document revision must be a positive integer" in str(raised.value.__cause__)
+
+
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
 def test_codec_rejects_non_finite_json_constants(constant: str) -> None:
     source = document(MemoryKind.PREFERENCE)
@@ -696,15 +670,3 @@ def test_codec_rejects_noncanonical_whitespace_in_metadata(kind: MemoryKind) -> 
     corrupted = raw.replace('\n  "backlinks"', '\n    "backlinks"', 1)
     with pytest.raises(MemoryDocumentIntegrityError, match="canonically"):
         CODEC.decode(corrupted, expected_address=source.address)
-
-
-@pytest.mark.parametrize("value", [None, 1, True, [], {}, object()])
-def test_codec_constructor_build_encode_and_decode_reject_wrong_contract_types(value: object) -> None:
-    with pytest.raises(TypeError):
-        MemoryDocumentCodec(value)  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        CODEC.encode(value)  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        CODEC.decode(value, expected_address=MemoryAddress.profile())  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        CODEC.decode(CODEC.encode(document()), expected_address=value)  # type: ignore[arg-type]

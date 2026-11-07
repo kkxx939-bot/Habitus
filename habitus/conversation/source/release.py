@@ -53,7 +53,7 @@ class ConversationSourceReleaser:
         ordered = frozenset(item for item in ConversationSourceConsumer if consumers[item].ordered_within_conversation)
         if not ordered:
             raise ValueError("source release needs an ordered consumer to tell a later delivery was accepted")
-        if isinstance(lock_ttl_seconds, bool) or not isinstance(lock_ttl_seconds, int) or lock_ttl_seconds <= 0:
+        if lock_ttl_seconds <= 0:
             raise ValueError("lock_ttl_seconds must be a positive integer")
         self.sources = sources
         self.outcomes = outcomes
@@ -64,8 +64,6 @@ class ConversationSourceReleaser:
         self.ordered = ordered
         self.lock_store = lock_store
         self.lock_ttl_seconds = lock_ttl_seconds
-        if salvage is not None and not isinstance(salvage, SourceSalvage):
-            raise TypeError("salvage must be a SourceSalvage")
         self.salvage = salvage
 
     def releasable(self, directory_name: str) -> tuple[SourceMarker, ...]:

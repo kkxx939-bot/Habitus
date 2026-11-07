@@ -326,6 +326,32 @@ def test_a_corrupt_receipt_file_fails_loudly(tmp_path) -> None:
         store.read(record.receipt_id)
 
 
+@pytest.mark.parametrize("bad", [True, "1", 1.0, None])
+def test_a_receipt_file_with_non_integer_validation_attempts_is_refused(tmp_path, bad: object) -> None:
+    """W16：回执文件里 ``validation_attempts`` 类型错（含 JSON 的 true）在解码器就被拒。"""
+
+    store = BehaviorFusionReceiptStore(tmp_path, lock_store=ProcessLocalLockStore())
+    record = store.put(receipt())
+    (path,) = store.receipt_root.glob(f"*_{record.receipt_id}.json")
+    payload = record.to_dict()
+    payload["validation_attempts"] = bad
+    path.write_text(canonical_json(payload) + "\n", encoding="utf-8")
+    with pytest.raises(BehaviorFusionError, match="record is corrupt") as caught:
+        store.read(record.receipt_id)
+    assert "validation_attempts must be an integer" in str(caught.value.__cause__)
+
+
+@pytest.mark.parametrize("bad", [1, None, ["a" * 64]])
+def test_a_judgement_payload_without_text_identity_is_refused(tmp_path, bad: object) -> None:
+    """W16：``put_payload`` 也收重试堆里读回的记录；``judgement_id`` 不是文本在落盘前就被拒。"""
+
+    store = BehaviorJudgementStore(tmp_path)
+    payload = {**judgement_payload(derived()[0]), "judgement_id": bad}
+    with pytest.raises(BehaviorFusionError, match="judgement_id must be lowercase SHA-256 text"):
+        store.put_payload(payload)
+    assert store.list() == ()
+
+
 def test_a_receipt_carries_only_the_slimmed_keys() -> None:
     """旁人、无归属两份清单两条 lane 都恒空，回执里不再有这两个键。"""
 

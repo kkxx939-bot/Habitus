@@ -33,8 +33,6 @@ class SourceSalvage:
         salvagers: Mapping[ConversationSourceConsumer, Callable[[ConversationSourceEnvelope], object]],
     ) -> None:
         resolved = {ConversationSourceConsumer(key): value for key, value in salvagers.items()}
-        if any(not callable(value) for value in resolved.values()):
-            raise TypeError("salvagers must be callable")
         self.root = Path(root).expanduser().absolute()
         self.directory = self.root / "lifecycle" / "salvaged"
         self.salvagers = resolved

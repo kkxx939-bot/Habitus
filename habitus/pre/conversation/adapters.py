@@ -36,11 +36,11 @@ class ConversationAdapterContext:
     occurred_at: datetime
 
     def __post_init__(self) -> None:
-        if not isinstance(self.conversation_id, str) or not self.conversation_id.strip():
+        if not self.conversation_id.strip():
             raise ValueError("conversation_id must be non-empty text")
-        if isinstance(self.start_sequence, bool) or not isinstance(self.start_sequence, int) or self.start_sequence < 0:
+        if self.start_sequence < 0:
             raise ValueError("start_sequence must be a non-negative integer")
-        if not isinstance(self.occurred_at, datetime) or self.occurred_at.tzinfo is None:
+        if self.occurred_at.tzinfo is None:
             raise ValueError("occurred_at must be timezone-aware")
         object.__setattr__(self, "occurred_at", self.occurred_at.astimezone(UTC))
 

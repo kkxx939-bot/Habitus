@@ -23,7 +23,7 @@ class MemoryJobNotReadyError(MemoryJobBlockedError):
     """最早任务仍处于耐久重试退避期。"""
 
     def __init__(self, available_at: datetime) -> None:
-        if not isinstance(available_at, datetime) or available_at.tzinfo is None:
+        if available_at.tzinfo is None:
             raise TypeError("available_at must be a timezone-aware datetime")
         self.available_at = available_at.astimezone(UTC)
         super().__init__(f"oldest memory job is not ready before {self.available_at.isoformat()}")
@@ -73,30 +73,26 @@ class MemoryJobAbandonment:
     SCHEMA_VERSION = "memory_job_abandonment_v1"
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.memory_sequence, bool)
-            or not isinstance(self.memory_sequence, int)
-            or self.memory_sequence <= 0
-        ):
+        if self.memory_sequence <= 0:
             raise ValueError("memory_sequence must be a positive integer")
         for name in ("conversation_id", "segment_id"):
             value = getattr(self, name)
-            if not isinstance(value, str) or not value or value != value.strip():
+            if not value or value != value.strip():
                 raise ValueError(f"{name} must be non-empty normalized text")
-        if isinstance(self.started_on, datetime) or not isinstance(self.started_on, date):
+        if isinstance(self.started_on, datetime):
             raise ValueError("started_on must be a calendar date")
         if not MemoryJob._hex(self.source_segment_digest, 64):
             raise ValueError("source_segment_digest must be lowercase SHA-256 text")
         if not MemoryJob._hex(self.transaction_id, 32):
             raise ValueError("transaction_id must be 32 lowercase hexadecimal characters")
-        if isinstance(self.attempts, bool) or not isinstance(self.attempts, int) or self.attempts <= 0:
+        if self.attempts <= 0:
             raise ValueError("attempts must be a positive integer")
         for name, maximum in (("last_error", MEMORY_JOB_ERROR_MAX_CHARS), ("reason", 2_000)):
             value = getattr(self, name)
-            if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+            if not value.strip() or len(value) > maximum:
                 raise ValueError(f"{name} must be non-empty bounded text")
             object.__setattr__(self, name, " ".join(value.split()))
-        if not isinstance(self.abandoned_at, datetime) or self.abandoned_at.tzinfo is None:
+        if self.abandoned_at.tzinfo is None:
             raise ValueError("abandoned_at must be timezone-aware")
         object.__setattr__(self, "abandoned_at", self.abandoned_at.astimezone(UTC))
 
@@ -108,7 +104,7 @@ class MemoryJobAbandonment:
         reason: str,
         abandoned_at: datetime,
     ) -> MemoryJobAbandonment:
-        if not isinstance(job, MemoryJob) or job.status is not MemoryJobStatus.FAILED:
+        if job.status is not MemoryJobStatus.FAILED:
             raise ValueError("abandonment requires a FAILED MemoryJob")
         assert job.last_error is not None
         return cls(
@@ -159,13 +155,9 @@ class MemoryJobConfig:
             ("lease_ttl_seconds", self.lease_ttl_seconds, 3_600),
             ("lock_ttl_seconds", self.lock_ttl_seconds, 3_600),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+            if not 1 <= value <= maximum:
                 raise ValueError(f"{name} must be between 1 and {maximum}")
-        if (
-            isinstance(self.max_file_bytes, bool)
-            or not isinstance(self.max_file_bytes, int)
-            or not 16_384 <= self.max_file_bytes <= 16 * 1024 * 1024
-        ):
+        if not 16_384 <= self.max_file_bytes <= 16 * 1024 * 1024:
             raise ValueError("max_file_bytes must be between 16384 and 16777216")
         for float_name, float_value, float_maximum in (
             ("retry_base_delay_seconds", self.retry_base_delay_seconds, 3_600.0),
@@ -175,11 +167,7 @@ class MemoryJobConfig:
             ("lock_wait_timeout_seconds", self.lock_wait_timeout_seconds, 60.0),
             ("lock_retry_delay_seconds", self.lock_retry_delay_seconds, 1.0),
         ):
-            if (
-                isinstance(float_value, bool)
-                or not isinstance(float_value, int | float)
-                or not 0 < float(float_value) <= float_maximum
-            ):
+            if not 0 < float(float_value) <= float_maximum:
                 raise ValueError(f"{float_name} must be greater than zero and at most {float_maximum:g}")
         if self.retry_max_delay_seconds < self.retry_base_delay_seconds:
             raise ValueError("retry_max_delay_seconds cannot be less than retry_base_delay_seconds")
@@ -189,21 +177,21 @@ class MemoryJobConfig:
     def retry_delay_seconds(self, attempts: int) -> float:
         """按已经发生的尝试次数返回有上限的指数退避。"""
 
-        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts <= 0:
+        if attempts <= 0:
             raise ValueError("attempts must be a positive integer")
         return min(
             float(self.retry_max_delay_seconds),
-            float(self.retry_base_delay_seconds) * (2 ** (attempts - 1)),
+            float(self.retry_base_delay_seconds) * (2.0 ** (attempts - 1)),
         )
 
     def model_wait_delay_seconds(self, waits: int) -> float:
         """按连着等模型恢复的次数返回有上限的长退避。"""
 
-        if isinstance(waits, bool) or not isinstance(waits, int) or waits <= 0:
+        if waits <= 0:
             raise ValueError("waits must be a positive integer")
         return min(
             float(self.model_wait_max_delay_seconds),
-            float(self.model_wait_base_delay_seconds) * (2 ** min(waits - 1, 32)),
+            float(self.model_wait_base_delay_seconds) * (2.0 ** min(waits - 1, 32)),
         )
 
 
@@ -231,19 +219,15 @@ class MemoryJob:
     model_waits: int = 0
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.memory_sequence, bool)
-            or not isinstance(self.memory_sequence, int)
-            or self.memory_sequence <= 0
-        ):
+        if self.memory_sequence <= 0:
             raise ValueError("memory_sequence must be a positive integer")
         for name in ("conversation_id", "segment_id"):
             value = getattr(self, name)
-            if not isinstance(value, str) or not value or value != value.strip():
+            if not value or value != value.strip():
                 raise ValueError(f"{name} must be non-empty normalized text")
-        if isinstance(self.started_on, datetime) or not isinstance(self.started_on, date):
+        if isinstance(self.started_on, datetime):
             raise ValueError("started_on must be a calendar date")
-        if isinstance(self.model_waits, bool) or not isinstance(self.model_waits, int) or self.model_waits < 0:
+        if self.model_waits < 0:
             raise ValueError("memory job model_waits must be non-negative")
         if not self._hex(self.source_segment_digest, 64):
             raise ValueError("source_segment_digest must be lowercase SHA-256 text")
@@ -254,18 +238,14 @@ class MemoryJob:
         except ValueError as exc:
             raise ValueError("memory job contains an unsupported status") from exc
         object.__setattr__(self, "status", status)
-        if isinstance(self.attempts, bool) or not isinstance(self.attempts, int) or self.attempts < 0:
+        if self.attempts < 0:
             raise ValueError("memory job attempts must be non-negative")
-        if (
-            isinstance(self.claim_generation, bool)
-            or not isinstance(self.claim_generation, int)
-            or self.claim_generation < 0
-        ):
+        if self.claim_generation < 0:
             raise ValueError("memory job claim_generation must be non-negative")
         self._normalize_optional_time("lease_expires_at")
         self._normalize_optional_time("next_attempt_at")
         if status is MemoryJobStatus.RUNNING:
-            if not isinstance(self.claim_id, str) or not self._hex(self.claim_id, 32):
+            if not self._hex(self.claim_id, 32):
                 raise ValueError("running memory job requires a claim_id")
             if not isinstance(self.worker_id, str) or _WORKER_ID.fullmatch(self.worker_id) is None:
                 raise ValueError("running memory job requires a normalized worker_id")
@@ -290,15 +270,11 @@ class MemoryJob:
                 raise ValueError("retried staged memory job requires its last error")
         if status is MemoryJobStatus.FAILED and self.last_error is None:
             raise ValueError("failed memory job requires its last error")
-        if self.last_error is not None and (
-            not isinstance(self.last_error, str)
-            or not self.last_error
-            or len(self.last_error) > MEMORY_JOB_ERROR_MAX_CHARS
-        ):
+        if self.last_error is not None and (not self.last_error or len(self.last_error) > MEMORY_JOB_ERROR_MAX_CHARS):
             raise ValueError("memory job last_error is invalid")
         for name in ("created_at", "updated_at"):
             value = getattr(self, name)
-            if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+            if value.tzinfo is None or value.utcoffset() is None:
                 raise ValueError(f"memory job {name} must be timezone-aware")
             object.__setattr__(self, name, value.astimezone(UTC))
         if self.updated_at < self.created_at:
@@ -323,7 +299,7 @@ class MemoryJob:
         value = getattr(self, name)
         if value is None:
             return
-        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError(f"memory job {name} must be timezone-aware")
         object.__setattr__(self, name, value.astimezone(UTC))
 
@@ -349,8 +325,6 @@ class MemoryJobLease:
     job: MemoryJob
 
     def __post_init__(self) -> None:
-        if not isinstance(self.job, MemoryJob):
-            raise TypeError("job must be MemoryJob")
         if self.job.status is not MemoryJobStatus.RUNNING:
             raise ValueError("memory job lease requires a RUNNING job")
 

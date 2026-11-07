@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -11,6 +11,7 @@ from typing import Any
 from habitus.foundation.ids import require_safe_path_segment
 from habitus.foundation.integrity import canonical_digest, canonicalize, immutable_snapshot, is_sha256_hex
 from habitus.foundation.timestamps import TimestampError, TimestampZoneError, utc_timestamp
+from habitus.foundation.validation import is_int
 
 
 class ConversationMessageSchemaError(ValueError):
@@ -43,7 +44,7 @@ class ConversationToolResultContentMode(str, Enum):
     OMITTED = "omitted"
 
 
-def conversation_datetime(value: datetime | str, label: str) -> datetime:
+def conversation_datetime(value: object, label: str) -> datetime:
     """解析带时区时间并规范为 UTC。"""
 
     if not isinstance(value, datetime | str):
@@ -64,15 +65,32 @@ def require_sha256(value: object, label: str) -> str:
     return value
 
 
-def _clean_identifier(value: object, label: str) -> str:
-    if not isinstance(value, str):
-        raise ConversationMessageSchemaError(f"{label} must be a string")
+def _clean_identifier(value: str, label: str) -> str:
     if not value or value != value.strip() or any(ord(character) < 32 for character in value):
         raise ConversationMessageSchemaError(f"{label} must be a non-empty clean string")
     return value
 
 
-def _optional_clean_text(value: object, label: str) -> str | None:
+# 解码读回的字段：构造前确认类型，报错文字照抄构造器里同一字段的那条检查。
+def _decoded_text(value: object, message: str) -> str:
+    if isinstance(value, str):
+        return value
+    raise ConversationMessageSchemaError(message)
+
+
+def _optional_text_field(payload: Mapping[str, Any], key: str, message: str | None = None) -> str | None:
+    value = payload.get(key)
+    return None if value is None else _decoded_text(value, message or f"{key} must be a string")
+
+
+def _optional_int_field(payload: Mapping[str, Any], key: str, rule: str) -> int | None:
+    value = payload.get(key)
+    if value is None or is_int(value):
+        return value
+    raise ConversationMessageSchemaError(f"{key} must be {rule}")
+
+
+def _optional_clean_text(value: str | None, label: str) -> str | None:
     if value is None:
         return None
     return _clean_identifier(value, label)
@@ -115,7 +133,7 @@ class ConversationMessage:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "message_id", _clean_identifier(self.message_id, "message_id"))
-        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 0:
+        if self.sequence < 0:
             raise ConversationMessageSchemaError("message sequence must be a non-negative integer")
         try:
             role = ConversationMessageRole(self.role)
@@ -146,17 +164,9 @@ class ConversationMessage:
                 raise ConversationMessageSchemaError("logical message parts require id, index and count together")
             assert self.logical_part_index is not None
             assert self.logical_part_count is not None
-            if (
-                isinstance(self.logical_part_index, bool)
-                or not isinstance(self.logical_part_index, int)
-                or self.logical_part_index < 0
-            ):
+            if self.logical_part_index < 0:
                 raise ConversationMessageSchemaError("logical_part_index must be a non-negative integer")
-            if (
-                isinstance(self.logical_part_count, bool)
-                or not isinstance(self.logical_part_count, int)
-                or self.logical_part_count < 2
-            ):
+            if self.logical_part_count < 2:
                 raise ConversationMessageSchemaError("logical_part_count must be an integer greater than one")
             if self.logical_part_index >= self.logical_part_count:
                 raise ConversationMessageSchemaError("logical_part_index must be less than logical_part_count")
@@ -168,17 +178,11 @@ class ConversationMessage:
         elif logical_message_id is not None:
             raise ConversationMessageSchemaError("logical_message_id is only valid for a split logical message")
 
-        if not isinstance(self.mid_turn, bool):
-            raise ConversationMessageSchemaError("mid_turn must be a boolean")
         if self.mid_turn and role is not ConversationMessageRole.PROMPT:
             raise ConversationMessageSchemaError("only a prompt can arrive mid-turn")
 
         if self.original_size_bytes is not None:
-            if (
-                isinstance(self.original_size_bytes, bool)
-                or not isinstance(self.original_size_bytes, int)
-                or self.original_size_bytes < 0
-            ):
+            if self.original_size_bytes < 0:
                 raise ConversationMessageSchemaError("original_size_bytes must be a non-negative integer")
         if self.original_sha256 is not None:
             object.__setattr__(
@@ -305,25 +309,7 @@ class ConversationMessage:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> ConversationMessage:
-        allowed = {
-            "schema_version",
-            "message_id",
-            "sequence",
-            "role",
-            "occurred_at",
-            "content",
-            "tool_call_id",
-            "tool_name",
-            "tool_status",
-            "content_mode",
-            "source_ref",
-            "original_size_bytes",
-            "original_sha256",
-            "logical_message_id",
-            "logical_part_index",
-            "logical_part_count",
-            "mid_turn",
-        }
+        allowed = {"schema_version", *(field.name for field in fields(cls))}
         unknown = set(payload) - allowed
         if unknown:
             raise ConversationMessageSchemaError(f"conversation message contains unknown fields: {sorted(unknown)}")
@@ -346,23 +332,30 @@ class ConversationMessage:
             )
         except (TypeError, ValueError) as exc:
             raise ConversationMessageSchemaError("tool_result status or content mode is unsupported") from exc
+        sequence, mid_turn = payload["sequence"], payload.get("mid_turn", False)
+        if not is_int(sequence):
+            raise ConversationMessageSchemaError("message sequence must be a non-negative integer")
+        if not isinstance(mid_turn, bool):
+            raise ConversationMessageSchemaError("mid_turn must be a boolean")
         return cls(
-            message_id=payload["message_id"],
-            sequence=payload["sequence"],
+            message_id=_decoded_text(payload["message_id"], "message_id must be a string"),
+            sequence=sequence,
             role=role,
             occurred_at=conversation_datetime(payload["occurred_at"], "occurred_at"),
             content=payload["content"],
-            tool_call_id=payload.get("tool_call_id"),
-            tool_name=payload.get("tool_name"),
+            tool_call_id=_optional_text_field(payload, "tool_call_id"),
+            tool_name=_optional_text_field(payload, "tool_name"),
             tool_status=tool_status,
             content_mode=content_mode,
-            source_ref=payload.get("source_ref"),
-            original_size_bytes=payload.get("original_size_bytes"),
-            original_sha256=payload.get("original_sha256"),
-            logical_message_id=payload.get("logical_message_id"),
-            logical_part_index=payload.get("logical_part_index"),
-            logical_part_count=payload.get("logical_part_count"),
-            mid_turn=payload.get("mid_turn", False),
+            source_ref=_optional_text_field(payload, "source_ref"),
+            original_size_bytes=_optional_int_field(payload, "original_size_bytes", "a non-negative integer"),
+            original_sha256=_optional_text_field(
+                payload, "original_sha256", "original_sha256 must be a SHA-256 hex digest"
+            ),
+            logical_message_id=_optional_text_field(payload, "logical_message_id"),
+            logical_part_index=_optional_int_field(payload, "logical_part_index", "a non-negative integer"),
+            logical_part_count=_optional_int_field(payload, "logical_part_count", "an integer greater than one"),
+            mid_turn=mid_turn,
         )
 
     @property
@@ -384,14 +377,10 @@ class ConversationMessage:
         return self.logical_part_count is None or self.logical_part_index == self.logical_part_count - 1
 
 
-def _validated_messages(messages: object) -> tuple[ConversationMessage, ...]:
-    if not isinstance(messages, tuple | list):
-        raise ConversationMessageSchemaError("messages must be a list or tuple")
+def _validated_messages(messages: tuple[ConversationMessage, ...]) -> tuple[ConversationMessage, ...]:
     resolved = tuple(messages)
     if not resolved:
         raise ConversationMessageSchemaError("conversation messages must not be empty")
-    if any(not isinstance(item, ConversationMessage) for item in resolved):
-        raise ConversationMessageSchemaError("conversation contains an invalid message")
     expected_sequences = list(range(resolved[0].sequence, resolved[0].sequence + len(resolved)))
     if [item.sequence for item in resolved] != expected_sequences:
         raise ConversationMessageSchemaError("conversation message sequence must be globally contiguous and ordered")
@@ -502,7 +491,9 @@ class ConversationBatch:
         if any(not isinstance(item, Mapping) for item in raw_messages):
             raise ConversationMessageSchemaError("conversation batch contains a non-object message")
         return cls(
-            conversation_id=payload["conversation_id"],
+            conversation_id=_decoded_text(
+                payload["conversation_id"], "conversation_id must be one safe non-empty path segment"
+            ),
             messages=tuple(ConversationMessage.from_dict(item) for item in raw_messages),
         )
 
@@ -577,26 +568,13 @@ class ConversationSegment:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> ConversationSegment:
-        allowed = {
-            "schema_version",
-            "conversation_id",
-            "segment_id",
-            "starts_mid_turn",
-            "ends_mid_turn",
-            "messages",
-        }
+        allowed = {"schema_version", "conversation_id", "segment_id", "starts_mid_turn", "ends_mid_turn", "messages"}
         unknown = set(payload) - allowed
         if unknown:
             raise ConversationMessageSchemaError(f"conversation segment contains unknown fields: {sorted(unknown)}")
         if payload.get("schema_version") != cls.SCHEMA_VERSION:
             raise ConversationMessageSchemaError("unsupported conversation segment schema")
-        missing = {
-            "conversation_id",
-            "segment_id",
-            "starts_mid_turn",
-            "ends_mid_turn",
-            "messages",
-        } - set(payload)
+        missing = allowed - {"schema_version"} - set(payload)
         if missing:
             raise ConversationMessageSchemaError(f"conversation segment is missing fields: {sorted(missing)}")
         raw_messages = payload["messages"]
@@ -605,8 +583,10 @@ class ConversationSegment:
         if any(not isinstance(item, Mapping) for item in raw_messages):
             raise ConversationMessageSchemaError("conversation segment contains a non-object message")
         segment = cls(
-            conversation_id=payload["conversation_id"],
-            segment_id=payload["segment_id"],
+            conversation_id=_decoded_text(
+                payload["conversation_id"], "conversation_id must be one safe non-empty path segment"
+            ),
+            segment_id=_decoded_text(payload["segment_id"], "segment_id must be one safe non-empty path segment"),
             messages=tuple(ConversationMessage.from_dict(item) for item in raw_messages),
         )
         if not isinstance(payload["starts_mid_turn"], bool) or not isinstance(

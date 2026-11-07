@@ -41,10 +41,8 @@ class MemoryVectorMatch:
             directory, uri_level = uri.to_layer()
             if directory != self.directory or uri_level is not level:
                 raise ValueError("semantic vector match does not match its URI")
-        if not isinstance(self.content, str) or not self.content.strip():
+        if not self.content.strip():
             raise ValueError("memory vector match content must be non-empty")
-        if isinstance(self.score, bool) or not isinstance(self.score, int | float):
-            raise TypeError("memory vector match score must be numeric")
         score = float(self.score)
         if not math.isfinite(score) or not -1.0 <= score <= 1.0:
             raise ValueError("memory vector match score must be a finite cosine value")

@@ -47,7 +47,7 @@ class PendingListing:
 
 class PendingSources:
     def __init__(self, conversation_root: str | Path, *, max_entries: int) -> None:
-        if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries <= 0:
+        if max_entries <= 0:
             raise ValueError("max_entries must be a positive integer")
         self.root = Path(conversation_root).expanduser().resolve(strict=False)
         self.pending_root = self.root / "source" / "pending"

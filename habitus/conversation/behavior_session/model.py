@@ -20,6 +20,7 @@ from habitus.conversation.source.model import (
 )
 from habitus.conversation.source.receipt import ConversationSourceConsumer, conversation_consumer_output_id
 from habitus.foundation.integrity import canonical_digest, canonicalize
+from habitus.foundation.validation import is_int
 
 BEHAVIOR_SESSION_OUTPUT_KIND = "behavior_session_receipt"
 BEHAVIOR_SESSION_OUTPUT_SCHEMA_VERSION = "conversation_behavior_session_receipt_v1"
@@ -37,7 +38,7 @@ class BehaviorSessionTurnRecord:
 
     def __post_init__(self) -> None:
         for label, value in (("start_sequence", self.start_sequence), ("end_sequence", self.end_sequence)):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if value < 0:
                 raise ConversationSourceError(f"behavior session turn {label} must be a non-negative integer")
         if self.end_sequence < self.start_sequence:
             raise ConversationSourceError("behavior session turn sequences are reversed")
@@ -45,8 +46,6 @@ class BehaviorSessionTurnRecord:
         object.__setattr__(self, "completed_at", source_timestamp(self.completed_at, "completed_at"))
         if self.completed_at < self.instructed_at:
             raise ConversationSourceError("behavior session turn completes before it was instructed")
-        if not isinstance(self.recorded, bool):
-            raise ConversationSourceError("behavior session turn recorded must be boolean")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -64,12 +63,19 @@ class BehaviorSessionTurnRecord:
             expected={"start_sequence", "end_sequence", "instructed_at", "completed_at", "recorded"},
             label="behavior session turn",
         )
+        start_sequence, end_sequence, recorded = record["start_sequence"], record["end_sequence"], record["recorded"]
+        if not is_int(start_sequence):
+            raise ConversationSourceError("behavior session turn start_sequence must be a non-negative integer")
+        if not is_int(end_sequence):
+            raise ConversationSourceError("behavior session turn end_sequence must be a non-negative integer")
+        if not isinstance(recorded, bool):
+            raise ConversationSourceError("behavior session turn recorded must be boolean")
         return cls(
-            start_sequence=record["start_sequence"],
-            end_sequence=record["end_sequence"],
-            instructed_at=record["instructed_at"],
-            completed_at=record["completed_at"],
-            recorded=record["recorded"],
+            start_sequence=start_sequence,
+            end_sequence=end_sequence,
+            instructed_at=source_timestamp(record["instructed_at"], "instructed_at"),
+            completed_at=source_timestamp(record["completed_at"], "completed_at"),
+            recorded=recorded,
         )
 
 
@@ -95,10 +101,8 @@ class BehaviorSessionOutput:
             ("output_record_digest", self.output_record_digest),
         ):
             require_sha256(value, f"behavior session {label}")
-        if not isinstance(self.turns, tuple) or not self.turns:
+        if not self.turns:
             raise ConversationSourceError("behavior session receipt must list at least one turn")
-        if any(not isinstance(item, BehaviorSessionTurnRecord) for item in self.turns):
-            raise TypeError("behavior session turns must be BehaviorSessionTurnRecord values")
         starts = [item.start_sequence for item in self.turns]
         if starts != sorted(set(starts)):
             raise ConversationSourceError("behavior session turns must be ordered and distinct")
@@ -170,12 +174,18 @@ class BehaviorSessionOutput:
         if not isinstance(raw_turns, list):
             raise ConversationSourceError("behavior session receipt turns must be a list")
         return cls(
-            output_id=record["output_id"],
-            source_id=record["source_id"],
-            source_payload_digest=record["source_payload_digest"],
-            processor_fingerprint=record["processor_fingerprint"],
+            output_id=require_sha256(record["output_id"], "behavior session output_id"),
+            source_id=require_sha256(record["source_id"], "behavior session source_id"),
+            source_payload_digest=require_sha256(
+                record["source_payload_digest"], "behavior session source_payload_digest"
+            ),
+            processor_fingerprint=require_sha256(
+                record["processor_fingerprint"], "behavior session processor_fingerprint"
+            ),
             turns=tuple(BehaviorSessionTurnRecord.from_dict(item) for item in raw_turns),
-            output_record_digest=record["output_record_digest"],
+            output_record_digest=require_sha256(
+                record["output_record_digest"], "behavior session output_record_digest"
+            ),
         )
 
 

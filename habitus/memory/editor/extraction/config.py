@@ -58,7 +58,7 @@ class MemoryExtractionConfig:
             ),
         }
         for name, (value, minimum, maximum) in bounded.items():
-            if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            if not minimum <= value <= maximum:
                 raise ValueError(f"{name} must be between {minimum} and {maximum}")
         if self.max_relation_neighbors_per_seed > self.max_relation_neighbors_total:
             raise ValueError("max_relation_neighbors_per_seed cannot exceed max_relation_neighbors_total")

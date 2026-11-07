@@ -144,8 +144,6 @@ class BaselineSnapshot:
 def declared_keys(concepts: ConceptSet) -> tuple[BaselineKey, ...]:
     """概念集里被声明过的常态键，去重、按文本排序。没有概念声明的键不算，也不去算。"""
 
-    if not isinstance(concepts, ConceptSet):
-        raise TypeError("concepts must be a ConceptSet")
     texts = {key for identity in concepts for key in concepts[identity].required_baseline_keys}
     return tuple(sorted((BaselineKey.parse(text) for text in texts), key=lambda key: key.text))
 
@@ -190,9 +188,9 @@ def baseline_table(
     ``rhythms`` 给了就对有节律的概念按峰各算一份（键是概念名）；``min_samples`` 数的是**独立天数**。
     """
 
-    if isinstance(recent_days, bool) or not isinstance(recent_days, int) or recent_days <= 0:
+    if recent_days <= 0:
         raise ValueError("recent_days must be a positive integer")
-    if isinstance(min_samples, bool) or not isinstance(min_samples, int) or min_samples <= 0:
+    if min_samples <= 0:
         raise ValueError("min_samples must be a positive integer")
     keys = declared_keys(concepts)
     wanted = {key.concept: concept_identity(key.concept) for key in keys}

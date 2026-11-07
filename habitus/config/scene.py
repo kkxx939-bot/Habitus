@@ -60,18 +60,10 @@ class SceneConfig:
     nightly_shutdown_timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:
-        if not isinstance(self.enabled, bool):
-            raise TypeError("scene.enabled must be a boolean")
-        if (
-            isinstance(self.baseline_slack_slots, bool)
-            or not isinstance(self.baseline_slack_slots, int)
-            or not 0 <= self.baseline_slack_slots <= 96
-        ):
+        if not 0 <= self.baseline_slack_slots <= 96:
             raise ValueError("scene.baseline_slack_slots must be an integer between 0 and 96")
-        if not isinstance(self.relations, SceneRelationsConfig):
-            raise TypeError("scene.relations must be SceneRelationsConfig")
         timeout = self.nightly_shutdown_timeout_seconds
-        if isinstance(timeout, bool) or not isinstance(timeout, int | float) or not 1.0 <= float(timeout) <= 3_600.0:
+        if not 1.0 <= float(timeout) <= 3_600.0:
             raise ValueError("scene.nightly_shutdown_timeout_seconds must be between 1 and 3600")
 
     @classmethod

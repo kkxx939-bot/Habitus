@@ -20,6 +20,7 @@ from habitus.behavior.fusion.lanes.session.config import SessionLaneConfig
 from habitus.behavior.fusion.lanes.session.redaction import redact
 from habitus.behavior.fusion.lanes.session.reminders import POLARITIES
 from habitus.behavior.model import BehaviorNameTooLongError, address_name, behavior_name, readable_text
+from habitus.foundation.validation import is_int, is_nonblank_str
 
 #: v2 → v3（2026-10-19，裁定 61、62）：加"还开着的提醒"一节的判法与输出 ``responses``。未对着真实模型调过。
 #: v3 → v4（2026-10-20，评审 C1）：没带提醒时不要 ``responses`` 字段（原来说"填 []"，而输出形状在没带提醒时不收这个字段）。
@@ -151,7 +152,7 @@ def assemble_description(
     if not isinstance(parsed, Mapping):
         raise BehaviorFusionError("output must be an object")
     raw_name = parsed.get("name")
-    if not isinstance(raw_name, str) or not raw_name.strip():
+    if not is_nonblank_str(raw_name):
         raise BehaviorFusionError("name is required")
     # 名字会拿去当路径上的一段。模型写的名字里带着文件路径、「A/B 两种方案」「问题：…」是常事，为一个符号让模型整条重答
     # 不值得，也未必答得对：路径符号直接换成空格（``address_name``）。
@@ -163,10 +164,10 @@ def assemble_description(
     except (TypeError, ValueError) as exc:
         raise BehaviorFusionError(f"name is not usable ({exc}); rephrase it as a plain short phrase") from exc
     summary = parsed.get("summary")
-    if not isinstance(summary, str) or not summary.strip():
+    if not is_nonblank_str(summary):
         raise BehaviorFusionError("summary must be a non-empty sentence")
     goal = parsed.get("goal")
-    if goal is not None and (not isinstance(goal, str) or not goal.strip()):
+    if goal is not None and not is_nonblank_str(goal):
         raise BehaviorFusionError("goal must be text or null")
     steps = parsed.get("steps")
     if not isinstance(steps, list) or any(not isinstance(item, str) for item in steps):
@@ -203,7 +204,7 @@ def _responses(raw: object, numbers: Sequence[int]) -> tuple[tuple[int, str], ..
         if not isinstance(entry, Mapping):
             raise BehaviorFusionError("each response must be an object with reminder and polarity")
         number, polarity = entry.get("reminder"), entry.get("polarity")
-        if isinstance(number, bool) or not isinstance(number, int) or number not in allowed:
+        if not is_int(number) or number not in allowed:
             raise BehaviorFusionError(f"response reminder {number!r} is not one of the listed reminders")
         if polarity not in POLARITIES:
             raise BehaviorFusionError(f"response polarity {polarity!r} must be one of {POLARITIES}")

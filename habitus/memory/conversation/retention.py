@@ -50,8 +50,6 @@ def _character_token_cost(character: str) -> float:
 def estimate_conversation_message_tokens(message: ConversationMessage) -> int:
     """提供与供应商无关的保守 Token 估算；运行时仍可注入精确 tokenizer。"""
 
-    if not isinstance(message, ConversationMessage):
-        raise TypeError("message must be a ConversationMessage")
     rendered = canonical_json(message.to_dict())
     return max(1, math.ceil(sum(_character_token_cost(character) for character in rendered)))
 
@@ -99,19 +97,11 @@ class ConversationSegmentationConfig:
                 100_000,
             ),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            if not minimum <= value <= maximum:
                 raise ValueError(f"{name} must be between {minimum} and {maximum}")
-        if (
-            isinstance(self.max_segment_tokens, bool)
-            or not isinstance(self.max_segment_tokens, int)
-            or not 1 <= self.max_segment_tokens <= 10_000_000
-        ):
+        if not 1 <= self.max_segment_tokens <= 10_000_000:
             raise ValueError("max_segment_tokens must be a positive bounded integer")
-        if (
-            isinstance(self.semantic_boundary_min_ratio, bool)
-            or not isinstance(self.semantic_boundary_min_ratio, int | float)
-            or not 0.1 <= float(self.semantic_boundary_min_ratio) <= 1.0
-        ):
+        if not 0.1 <= float(self.semantic_boundary_min_ratio) <= 1.0:
             raise ValueError("semantic_boundary_min_ratio must be between 0.1 and 1.0")
         object.__setattr__(
             self,
@@ -129,8 +119,6 @@ class ConversationTurn:
     def __post_init__(self) -> None:
         if not self.messages:
             raise ConversationRetentionError("conversation turn cannot be empty")
-        if any(not isinstance(message, ConversationMessage) for message in self.messages):
-            raise TypeError("conversation turn must contain ConversationMessage values")
 
     @property
     def start_sequence(self) -> int:
@@ -158,23 +146,15 @@ class ConversationRetentionPlan:
     chunker_version: str = SEMANTIC_CHUNKER_VERSION
 
     def __post_init__(self) -> None:
-        if not isinstance(self.triggered, bool) or not isinstance(self.flush, bool):
-            raise TypeError("retention flags must be boolean")
-        if isinstance(self.pending_tokens, bool) or not isinstance(self.pending_tokens, int) or self.pending_tokens < 0:
+        if self.pending_tokens < 0:
             raise ValueError("pending_tokens must be a non-negative integer")
-        if not isinstance(self.budget_exceeded, bool):
-            raise TypeError("budget_exceeded must be boolean")
-        if not isinstance(self.reason, str) or not self.reason.strip():
+        if not self.reason.strip():
             raise ValueError("retention reason must be non-empty text")
-        if self.boundary_kind is not None and (
-            not isinstance(self.boundary_kind, str) or not self.boundary_kind.strip()
-        ):
+        if self.boundary_kind is not None and not self.boundary_kind.strip():
             raise ValueError("boundary_kind must be non-empty text or None")
-        if self.embedding_fingerprint is not None and (
-            not isinstance(self.embedding_fingerprint, str) or not self.embedding_fingerprint.strip()
-        ):
+        if self.embedding_fingerprint is not None and not self.embedding_fingerprint.strip():
             raise ValueError("embedding_fingerprint must be non-empty text or None")
-        if not isinstance(self.chunker_version, str) or not self.chunker_version.strip():
+        if not self.chunker_version.strip():
             raise ValueError("chunker_version must be non-empty text")
         if self.through_sequence is None:
             if self.archive_messages:
@@ -198,10 +178,6 @@ class ConversationRetentionPlanner:
         *,
         token_estimator: ConversationTokenEstimator | None = None,
     ) -> None:
-        if config is not None and not isinstance(config, ConversationSegmentationConfig):
-            raise TypeError("config must be ConversationSegmentationConfig")
-        if token_estimator is not None and not callable(token_estimator):
-            raise TypeError("token_estimator must be callable or None")
         self.config = config or ConversationSegmentationConfig()
         self.token_estimator = token_estimator or estimate_conversation_message_tokens
 
@@ -217,19 +193,10 @@ class ConversationRetentionPlanner:
     ) -> ConversationRetentionPlan:
         """在完整轮次已闭合后选择连续、安全且不超过硬上限的语义前缀。"""
 
-        if any(not isinstance(value, bool) for value in (after_turn, flush, drain_pending, leading_continuation)):
-            raise TypeError("retention control flags must be boolean")
         if drain_pending and (not after_turn or flush):
             raise ValueError("drain_pending is only valid while completing one afterTurn commit")
         if live is None:
             return self._empty(flush=flush, reason="live conversation is empty")
-        if not isinstance(live, ConversationBatch):
-            raise TypeError("live must be ConversationBatch or None")
-        if boundary_hints is not None and not isinstance(
-            boundary_hints,
-            ConversationBoundaryHints,
-        ):
-            raise TypeError("boundary_hints must be ConversationBoundaryHints or None")
         # 消息序号一经写入不可改；后续封存只裁剪前缀，因此完整 live 快照产生的
         # 边界提示仍可安全用于它的连续后缀。新追加内容没有提示时自动使用结构分数。
 
@@ -447,7 +414,7 @@ class ConversationRetentionPlanner:
         total = 0
         for message in messages:
             value = self.token_estimator(message)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if value < 0:
                 raise ConversationRetentionError("token_estimator must return a non-negative integer")
             total += value
         return total
@@ -583,8 +550,6 @@ class ConversationToolResultReducer:
     """在写入 Conversation 前压缩超大工具结果与超限工具交换里的调用参数，不建立旁路原文存储。"""
 
     def __init__(self, config: ConversationSegmentationConfig | None = None) -> None:
-        if config is not None and not isinstance(config, ConversationSegmentationConfig):
-            raise TypeError("config must be ConversationSegmentationConfig")
         self.config = config or ConversationSegmentationConfig()
         self.extractor = ToolResultExtractor(self.config.max_tool_result_summary_chars)
 
@@ -603,14 +568,8 @@ class ConversationToolResultReducer:
         其余结果记整份内容规范 JSON 的字节数与 sha256。``maximum`` 是摘录字数上限，缺省取配置值。
         """
 
-        if not isinstance(message, ConversationMessage):
-            raise TypeError("message must be ConversationMessage")
         if message.role is not ConversationMessageRole.TOOL_RESULT:
             raise ValueError("only tool_result messages can be reduced")
-        if not isinstance(force_omit, bool):
-            raise TypeError("force_omit must be boolean")
-        if not isinstance(force_summarize, bool):
-            raise TypeError("force_summarize must be boolean")
         if force_omit and force_summarize:
             raise ValueError("tool result cannot be force-omitted and force-summarized together")
         if message.content_mode is not ConversationToolResultContentMode.INLINE:
@@ -660,8 +619,6 @@ class ConversationToolResultReducer:
     def reduce_tool_call(self, message: ConversationMessage, *, maximum: int | None = None) -> ConversationMessage:
         """把调用参数抽成关键信息：对象参数里小字段原样留、大字段各自抽取，其余情形整份抽取；记原参数的字节数与 sha256。"""
 
-        if not isinstance(message, ConversationMessage):
-            raise TypeError("message must be ConversationMessage")
         if message.role is not ConversationMessageRole.TOOL_CALL:
             raise ValueError("only tool_call messages can have their arguments reduced")
         if message.content_mode is not None:
@@ -690,10 +647,6 @@ class ConversationToolResultReducer:
         放不进的（消息条数超限、或切不开的部分不是工具消息）原样留给规划器报错。
         """
 
-        if not isinstance(batch, ConversationBatch):
-            raise TypeError("batch must be ConversationBatch")
-        if not isinstance(planner, ConversationRetentionPlanner):
-            raise TypeError("planner must be ConversationRetentionPlanner")
         messages = list(batch.messages)
         changed = False
         for start, end in planner.atomic_spans(batch.messages):
@@ -781,7 +734,7 @@ class ConversationToolResultReducer:
     def _maximum(self, maximum: int | None) -> int:
         if maximum is None:
             return self.config.max_tool_result_summary_chars
-        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
+        if maximum < 1:
             raise ValueError("maximum must be a positive integer or None")
         return maximum
 
@@ -793,7 +746,7 @@ class ConversationToolResultReducer:
     def _description(value: str | None, *, fallback: str) -> str:
         if value is None:
             return fallback
-        if not isinstance(value, str) or not value.strip():
+        if not value.strip():
             raise ValueError("description must be non-empty text or None")
         return value.strip()
 

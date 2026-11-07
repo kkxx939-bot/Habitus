@@ -75,8 +75,6 @@ def plan_sync(
 ) -> SyncPlan:
     """``observed``：数据里出现过的日历（键, 取值），日历情境只给这些（裁定 59 第 7 条：取值从数据里攒出来）。"""
 
-    if not isinstance(existing, ConceptSet):
-        raise TypeError("existing must be a ConceptSet")
     write = tuple(item for item in (_reconcile(existing, cls, now=now) for cls in classes) if item is not None)
     write += tuple(
         item
@@ -105,6 +103,7 @@ def _consistent(
     try:
         compose(write)
     except ConceptError:
+        # 整批不自洽不是错：落到下面逐份加入，挑出加不进去的那几份
         pass
     else:
         return write, ()

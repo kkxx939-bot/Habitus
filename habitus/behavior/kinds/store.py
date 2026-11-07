@@ -34,6 +34,7 @@ from habitus.behavior.kinds.pending import PendingPool
 from habitus.behavior.kinds.render import render_catalog
 from habitus.behavior.kinds.schedule import JobState
 from habitus.behavior.model import KINDS_REGISTRY_FILENAME
+from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.filesystem import (
     DurablePathIntegrityError,
     atomic_replace_bytes,
@@ -80,8 +81,6 @@ class PendingSnapshot:
 class BehaviorKindStore:
     def __init__(self, behavior_root: str | Path, *, config: BehaviorKindConfig | None = None) -> None:
         resolved = config or BehaviorKindConfig()
-        if not isinstance(resolved, BehaviorKindConfig):
-            raise TypeError("config must be BehaviorKindConfig")
         self.root = Path(behavior_root).expanduser().resolve(strict=False)
         self.config = resolved
         self.catalog_path = self.root / KINDS_REGISTRY_FILENAME
@@ -160,7 +159,7 @@ class BehaviorKindStore:
             revision = payload["revision"]
         except (json.JSONDecodeError, BehaviorKindCodecError, TypeError) as exc:
             raise BehaviorKindStoreError(f"pending pool is invalid: {exc}") from exc
-        if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
+        if not is_int(revision) or revision <= 0:
             raise BehaviorKindStoreError("pending pool revision must be positive")
         return PendingSnapshot(PendingPool({entry.occurrence: entry for entry in entries}), revision)
 

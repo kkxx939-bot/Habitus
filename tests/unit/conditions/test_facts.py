@@ -50,7 +50,7 @@ def test_no_facts_is_an_explicit_nothing_and_every_provider_refuses_a_naive_time
         with pytest.raises(TypeError, match="timezone-aware"):
             provider.at(naive)
     with pytest.raises(TypeError, match="timezone-aware"):
-        require_local(None)
+        require_local(naive)
 
 
 def test_a_composite_merges_versions_and_refuses_a_key_from_two_sources() -> None:
@@ -63,8 +63,6 @@ def test_a_composite_merges_versions_and_refuses_a_key_from_two_sources() -> Non
     assert CompositeFacts(CompositeFacts(Weather()), NoFacts()).at(WHEN) == composite.at(WHEN)
     with pytest.raises(ValueError, match="two providers"):
         CompositeFacts(Weather(), Weather())
-    with pytest.raises(TypeError, match="FactProvider"):
-        CompositeFacts(object())  # type: ignore[arg-type]
 
 
 def test_merging_conditions_sorts_dedups_and_refuses_a_contradiction() -> None:

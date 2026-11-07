@@ -84,8 +84,6 @@ class MemoryFinalIdentity:
     def _document_uri(value: MemoryURI | None, label: str) -> MemoryURI | None:
         if value is None:
             return None
-        if not isinstance(value, MemoryURI):
-            raise TypeError(f"{label} must be a MemoryURI or None")
         try:
             value.to_address()
         except ValueError as exc:
@@ -100,10 +98,6 @@ class MemoryFinalIdentityMap:
     entries: tuple[MemoryFinalIdentity, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.entries, tuple) or any(
-            not isinstance(entry, MemoryFinalIdentity) for entry in self.entries
-        ):
-            raise TypeError("final identity entries must be MemoryFinalIdentity values")
         page_ids = tuple(entry.page_id for entry in self.entries)
         if page_ids != tuple(sorted(set(page_ids))):
             raise MemoryFinalIdentityError("final identity entries must have unique sorted page_ids")
@@ -139,20 +133,12 @@ class MemoryFinalIdentityMap:
     @classmethod
     def from_mutation_plan(
         cls,
-        plan: object,
+        plan: MemoryMutationPlan,
         page_ids: MemoryPageIdMap,
     ) -> MemoryFinalIdentityMap:
         """把当前 CREATE/UPDATE/NOOP 纯内容计划提升为完整身份表。"""
 
-        from habitus.memory.editor.mutation.model import (
-            MemoryMutationAction,
-            MemoryMutationPlan,
-        )
-
-        if not isinstance(plan, MemoryMutationPlan):
-            raise TypeError("plan must be a MemoryMutationPlan")
-        if not isinstance(page_ids, MemoryPageIdMap):
-            raise TypeError("page_ids must be a MemoryPageIdMap")
+        from habitus.memory.editor.mutation.model import MemoryMutationAction
 
         entries: dict[int, MemoryFinalIdentity] = {
             page_id: MemoryFinalIdentity(
@@ -201,10 +187,6 @@ class MemoryFinalIdentityMap:
     ) -> None:
         """确认身份表没有遗漏、重定向或凭空加入解析上下文之外的编号。"""
 
-        if not isinstance(page_ids, MemoryPageIdMap):
-            raise TypeError("page_ids must be a MemoryPageIdMap")
-        if not isinstance(candidate_page_ids, tuple):
-            raise TypeError("candidate_page_ids must be a tuple")
         normalized_candidates = tuple(validate_page_id(page_id) for page_id in candidate_page_ids)
         if len(normalized_candidates) != len(set(normalized_candidates)):
             raise MemoryFinalIdentityError("candidate page_ids must be unique")
@@ -293,8 +275,6 @@ class MemoryIdentityPlanner:
     )
 
     def __init__(self, registry: MemorySchemaRegistry | None = None) -> None:
-        if registry is not None and not isinstance(registry, MemorySchemaRegistry):
-            raise TypeError("registry must be a MemorySchemaRegistry")
         self.registry = registry or MemorySchemaRegistry.load_default()
 
     def plan(
@@ -303,8 +283,6 @@ class MemoryIdentityPlanner:
     ) -> MemoryFinalIdentityMap:
         """把安全的临时提议提升为完整 CREATE/UPDATE/NOOP/MERGE/DELETE 身份表。"""
 
-        if not isinstance(extraction, MemoryExtractionResult):
-            raise TypeError("extraction must be a validated MemoryExtractionResult")
         batch = extraction.candidates
         mutations = extraction.mutations
         page_ids = extraction.page_ids
@@ -399,7 +377,7 @@ class MemoryIdentityPlanner:
         uri: MemoryURI,
     ) -> MemoryDocument:
         snapshot = mutations.read_set.old_memories.get(str(uri))
-        if snapshot is None or not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
+        if snapshot is None or not snapshot.exists or snapshot.value is None:
             raise MemoryIdentityPlanningError("identity proposal source requires a complete extracted old snapshot")
         return snapshot.value
 
@@ -416,8 +394,6 @@ class MemoryIdentityPlanner:
         if mutation is None:
             raise MemoryIdentityPlanningError("same_memory target is missing its preliminary mutation")
         document = mutation.match.snapshot.value if mutation.match.snapshot.exists else None
-        if document is not None and not isinstance(document, MemoryDocument):
-            raise MemoryIdentityPlanningError("same_memory target snapshot is not a memory document")
         return document, mutation.fields, mutation.match.candidate.kind
 
     def _content_fields_equal(

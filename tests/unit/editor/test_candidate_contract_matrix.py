@@ -117,17 +117,17 @@ def test_confirmed_control_field_is_owned_only_by_intention(kind: MemoryKind, co
             MemoryCandidate(100, kind, memory_fields(kind), confirmed=confirmed)
 
 
-@pytest.mark.parametrize("confirmed", [None, 0, 1, "true", [], {}])
-def test_intention_candidate_requires_explicit_boolean_confirmation(confirmed: object) -> None:
+def test_intention_candidate_requires_explicit_boolean_confirmation() -> None:
     with pytest.raises(MemoryCandidateError, match="boolean"):
-        MemoryCandidate(100, MemoryKind.INTENTION, memory_fields(MemoryKind.INTENTION), confirmed=confirmed)  # type: ignore[arg-type]
+        MemoryCandidate(100, MemoryKind.INTENTION, memory_fields(MemoryKind.INTENTION), confirmed=None)
 
 
-@pytest.mark.parametrize("kind", tuple(MemoryKind))
-@pytest.mark.parametrize("value", [None, [], "fields", 1, True])
-def test_candidate_rejects_non_mapping_business_fields(kind: MemoryKind, value: object) -> None:
-    with pytest.raises(TypeError):
-        MemoryCandidate(100, kind, value, confirmed=True if kind is MemoryKind.INTENTION else None)  # type: ignore[arg-type]
+@pytest.mark.parametrize("confirmed", [None, 0, 1, "true", [], {}])
+def test_model_validate_requires_boolean_intention_confirmation(confirmed: object) -> None:
+    output = _empty_output()
+    output["intentions"] = [{**_raw_candidate(MemoryKind.INTENTION), "confirmed": confirmed}]
+    with pytest.raises(MemoryCandidateError, match="boolean"):
+        MemoryCandidateBatch.model_validate(output)
 
 
 @pytest.mark.parametrize("kind", tuple(MemoryKind))
@@ -280,14 +280,6 @@ def test_remove_memory_rejects_duplicate_basis_and_target() -> None:
 
 
 @pytest.mark.parametrize("field", FIELD_FOR_KIND.values())
-@pytest.mark.parametrize("container", [[], {}, "candidate", None, 1])
-def test_batch_constructor_requires_tuple_per_memory_kind(field: str, container: object) -> None:
-    kwargs = {field: container}
-    with pytest.raises(TypeError):
-        MemoryCandidateBatch(**kwargs)  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("field", FIELD_FOR_KIND.values())
 def test_batch_constructor_rejects_candidate_in_wrong_kind_bucket(field: str) -> None:
     expected = next(kind for kind, name in FIELD_FOR_KIND.items() if name == field)
     wrong = next(kind for kind in MemoryKind if kind is not expected)
@@ -299,13 +291,6 @@ def test_batch_constructor_rejects_candidate_in_wrong_kind_bucket(field: str) ->
     )
     with pytest.raises(MemoryCandidateError, match="wrong type"):
         MemoryCandidateBatch(**{field: (candidate,)})
-
-
-@pytest.mark.parametrize("field", ["identity_proposals", "relations"])
-@pytest.mark.parametrize("value", [[], {}, "items", None, 1])
-def test_batch_constructor_requires_tuple_for_control_collections(field: str, value: object) -> None:
-    with pytest.raises(TypeError):
-        MemoryCandidateBatch(**{field: value})  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("kind", tuple(MemoryKind))
@@ -506,12 +491,6 @@ def test_page_id_map_from_snapshots_maps_only_found_documents_in_stable_order() 
     identities = tuple(item.identity for item in batch.snapshots)
     assert page_ids.items() == tuple(enumerate(identities, start=1))
     assert all(page_ids.resolve(index) == identity for index, identity in page_ids.items())
-
-
-@pytest.mark.parametrize("value", [None, [], {}, "snapshots", 1, True])
-def test_page_id_map_from_snapshots_rejects_wrong_batch_type(value: object) -> None:
-    with pytest.raises(TypeError):
-        MemoryPageIdMap.from_snapshots(value)  # type: ignore[arg-type]
 
 
 def test_page_id_map_rejects_directory_and_layer_uris() -> None:

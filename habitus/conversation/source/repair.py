@@ -47,8 +47,6 @@ class ConversationSourceOutputRepair:
     """只处理"无 Outcome 且存在多个 Output"这一种确定性可修复的损坏。"""
 
     def __init__(self, delivery: ConversationConsumerDelivery) -> None:
-        if not isinstance(delivery, ConversationConsumerDelivery):
-            raise TypeError("delivery must be ConversationConsumerDelivery")
         self.delivery = delivery
 
     def repair(

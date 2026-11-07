@@ -63,7 +63,7 @@ class SourceMarker:
 class SourceIndex:
     def __init__(self, conversation_root: str | Path, *, max_addresses: int, max_markers_per_address: int) -> None:
         for label, value in (("max_addresses", max_addresses), ("max_markers_per_address", max_markers_per_address)):
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if value <= 0:
                 raise ValueError(f"{label} must be a positive integer")
         self.root = Path(conversation_root).expanduser().resolve(strict=False)
         self.index_root = self.root / "source" / "index"

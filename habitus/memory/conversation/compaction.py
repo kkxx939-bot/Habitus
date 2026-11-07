@@ -149,12 +149,6 @@ class ConversationSummaryCompactionConfig:
     cleanup_batch_size: int = 100
 
     def __post_init__(self) -> None:
-        if not isinstance(self.enabled, bool):
-            raise TypeError("summary compaction enabled must be boolean")
-        if not isinstance(self.segment_to_range, ConversationSegmentSummaryCompactionConfig):
-            raise TypeError("segment_to_range must be ConversationSegmentSummaryCompactionConfig")
-        if not isinstance(self.range_to_archive, ConversationRangeSummaryCompactionConfig):
-            raise TypeError("range_to_archive must be ConversationRangeSummaryCompactionConfig")
         for name, value, minimum, maximum in (
             (
                 "recent_use_protection_days",
@@ -166,7 +160,7 @@ class ConversationSummaryCompactionConfig:
             ("archive_retire_grace_days", self.archive_retire_grace_days, 1, 3_650),
             ("cleanup_batch_size", self.cleanup_batch_size, 1, 10_000),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            if not minimum <= value <= maximum:
                 raise ValueError(f"summary compaction {name} must be between {minimum} and {maximum}")
 
     def stage(
@@ -189,17 +183,9 @@ class ConversationSummaryFrontier:
     archives: tuple[ConversationRangeSummary, ...]
 
     def __post_init__(self) -> None:
-        if any(not isinstance(item, ConversationSegmentSummary) for item in self.segments):
-            raise TypeError("summary frontier segments must be ConversationSegmentSummary values")
-        if any(
-            not isinstance(item, ConversationRangeSummary) or item.stage is not ConversationRangeSummaryStage.RANGE
-            for item in self.ranges
-        ):
+        if any(item.stage is not ConversationRangeSummaryStage.RANGE for item in self.ranges):
             raise TypeError("summary frontier ranges must be range-stage summaries")
-        if any(
-            not isinstance(item, ConversationRangeSummary) or item.stage is not ConversationRangeSummaryStage.ARCHIVE
-            for item in self.archives
-        ):
+        if any(item.stage is not ConversationRangeSummaryStage.ARCHIVE for item in self.archives):
             raise TypeError("summary frontier archives must be archive-stage summaries")
         combined: list[SummarySource] = [*self.segments, *self.ranges, *self.archives]
         ordered = sorted(combined, key=lambda item: item.start_sequence)
@@ -222,8 +208,6 @@ class ConversationSummaryCompactionPlan:
     trigger: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.stage, ConversationRangeSummaryStage):
-            raise TypeError("summary compaction plan stage must be declared")
         if self.trigger not in {"source_count", "max_wait"}:
             raise ValueError("summary compaction trigger is unsupported")
         if len(self.sources) < 2:
@@ -263,13 +247,9 @@ class ConversationSummaryCompactionResult:
     reason: str
 
     def __post_init__(self) -> None:
-        if self.summary is not None and not isinstance(self.summary, ConversationRangeSummary):
-            raise TypeError("summary compaction result summary has an invalid type")
-        if not isinstance(self.created, bool):
-            raise TypeError("summary compaction created must be boolean")
         if self.summary is None and self.created:
             raise ValueError("summary compaction cannot create an absent summary")
-        if not isinstance(self.reason, str) or not self.reason.strip():
+        if not self.reason.strip():
             raise ValueError("summary compaction result reason must be non-empty")
 
 
@@ -277,10 +257,6 @@ class ConversationRangeSummaryStore:
     """不可变保存、校验并有界枚举两种 Range Summary。"""
 
     def __init__(self, layout: ConversationLayout, *, config: ConversationSummaryConfig | None = None) -> None:
-        if not isinstance(layout, ConversationLayout):
-            raise TypeError("layout must be ConversationLayout")
-        if config is not None and not isinstance(config, ConversationSummaryConfig):
-            raise TypeError("config must be ConversationSummaryConfig")
         self.layout = layout
         self.config = config or ConversationSummaryConfig()
 
@@ -415,8 +391,6 @@ class ConversationSummaryCompactionPlanner:
     """只根据当前活跃前沿和可信时间形成一个有界连续来源计划。"""
 
     def __init__(self, config: ConversationSummaryCompactionConfig | None = None) -> None:
-        if config is not None and not isinstance(config, ConversationSummaryCompactionConfig):
-            raise TypeError("config must be ConversationSummaryCompactionConfig")
         self.config = config or ConversationSummaryCompactionConfig()
 
     def plan(
@@ -427,17 +401,11 @@ class ConversationSummaryCompactionPlanner:
         now: datetime,
         protected_source_ids: frozenset[str] = frozenset(),
     ) -> ConversationSummaryCompactionPlan | None:
-        if not isinstance(frontier, ConversationSummaryFrontier):
-            raise TypeError("frontier must be ConversationSummaryFrontier")
         current_time = _utc_datetime(now, "summary compaction now")
         stage_config = self.config.stage(stage)
         candidates: tuple[SummarySource, ...]
         candidates = frontier.segments if stage is ConversationRangeSummaryStage.RANGE else frontier.ranges
         cutoff = current_time - timedelta(days=stage_config.min_age_days)
-        if not isinstance(protected_source_ids, frozenset) or any(
-            not isinstance(value, str) for value in protected_source_ids
-        ):
-            raise TypeError("protected_source_ids must be a frozenset of strings")
         chains = self._eligible_chains(
             candidates,
             cutoff=cutoff,
@@ -516,25 +484,12 @@ class ConversationRangeSummaryGenerator:
         compaction_config: ConversationSummaryCompactionConfig | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if not isinstance(client, StructuredChatClient):
-            raise TypeError("client must be StructuredChatClient")
-        if summary_config is not None and not isinstance(summary_config, ConversationSummaryConfig):
-            raise TypeError("summary_config must be ConversationSummaryConfig")
-        if compaction_config is not None and not isinstance(
-            compaction_config,
-            ConversationSummaryCompactionConfig,
-        ):
-            raise TypeError("compaction_config must be ConversationSummaryCompactionConfig")
-        if clock is not None and not callable(clock):
-            raise TypeError("clock must be callable")
         self.client = client
         self.summary_config = summary_config or ConversationSummaryConfig()
         self.compaction_config = compaction_config or ConversationSummaryCompactionConfig()
         self.clock = clock or (lambda: datetime.now(UTC))
 
     async def generate(self, plan: ConversationSummaryCompactionPlan) -> ConversationRangeSummary:
-        if not isinstance(plan, ConversationSummaryCompactionPlan):
-            raise TypeError("plan must be ConversationSummaryCompactionPlan")
         source = canonical_json([item.to_dict() for item in plan.sources])
         if len(source) > self.compaction_config.stage(plan.stage).max_source_chars:
             raise ConversationSummaryCompactionError("range summary source exceeds its configured input bound")
@@ -612,18 +567,6 @@ class ConversationSummaryCompactor:
         use_store: ConversationSummaryUseReader | None = None,
         config: ConversationSummaryCompactionConfig | None = None,
     ) -> None:
-        if not isinstance(journal, ConversationMessageJournal):
-            raise TypeError("journal must be ConversationMessageJournal")
-        if not isinstance(segment_store, ConversationSummaryStore):
-            raise TypeError("segment_store must be ConversationSummaryStore")
-        if not isinstance(range_store, ConversationRangeSummaryStore):
-            raise TypeError("range_store must be ConversationRangeSummaryStore")
-        if not isinstance(generator, ConversationRangeSummaryGenerator):
-            raise TypeError("generator must be ConversationRangeSummaryGenerator")
-        if config is not None and not isinstance(config, ConversationSummaryCompactionConfig):
-            raise TypeError("config must be ConversationSummaryCompactionConfig")
-        if use_store is not None and not callable(getattr(use_store, "recently_used_summary", None)):
-            raise TypeError("use_store must implement recently_used_summary")
         if not (journal.layout.root == segment_store.layout.root == range_store.layout.root):
             raise ValueError("summary compaction components must share one conversation root")
         self.journal = journal
@@ -781,8 +724,6 @@ class ConversationSummaryCompactor:
 
 
 def _utc_datetime(value: datetime, label: str) -> datetime:
-    if not isinstance(value, datetime):
-        raise TypeError(f"{label} must be a datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{label} must be timezone-aware")
     return value.astimezone(UTC)

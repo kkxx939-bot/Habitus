@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import date
 from pathlib import Path
 
@@ -27,6 +28,21 @@ def test_watermark_only_moves_forward(tmp_path: Path) -> None:
     assert not watermarks.covers(ADDRESS, 6)
     with pytest.raises(ConversationSourceError, match="backwards"):
         watermarks.advance(ADDRESS, 4)
+
+
+@pytest.mark.parametrize("bad", [True, "5", 5.0, None, -1])
+def test_a_watermark_read_back_with_a_non_integer_value_is_invalid(tmp_path: Path, bad: object) -> None:
+    """盘上水位不是非负整数（``true``、字符串、浮点、空、负数）：读回时就拒。"""
+
+    watermarks = source_ledger(tmp_path).watermarks
+    watermarks.advance(ADDRESS, 5)
+    path = long_path(watermarks._path(ADDRESS))  # noqa: SLF001 - 直接改盘上的字节
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["released_through"] = bad
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ConversationSourceError, match="source watermark value is invalid"):
+        watermarks.released_through(ADDRESS)
 
 
 def test_marking_is_idempotent_and_ordered(tmp_path: Path) -> None:

@@ -34,7 +34,7 @@ class ParticipantReport:
     signals: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if isinstance(self.released, bool) or not isinstance(self.released, int) or self.released < 0:
+        if self.released < 0:
             raise ValueError("released must be a non-negative integer")
 
 

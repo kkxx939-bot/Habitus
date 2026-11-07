@@ -204,6 +204,7 @@ def _discard_temporary(temporary: Path) -> None:
     try:
         windows_api.unlink_with_retry(_long(temporary))
     except FileNotFoundError:
+        # 临时文件已被移到目标位置（或从未建出），没有可清理的。
         pass
 
 
@@ -259,6 +260,7 @@ def atomic_create_bytes(path: Path, encoded: bytes, *, artifact_root: str | Path
             try:
                 windows_api.move_file_write_through(_long(temporary), _long(destination), replace=False)
             except FileExistsError:
+                # 检查与移动之间目标被并发写出：落到下面按内容核对是否同一份。
                 pass
             else:
                 return True
@@ -396,7 +398,7 @@ def list_real_directory(
 ) -> tuple[DurableDirectoryEntry, ...]:
     """有界列出不含别名的直接条目。"""
 
-    if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries <= 0:
+    if max_entries <= 0:
         raise ValueError("max_entries must be a positive integer")
     candidate = require_safe_artifact_path(artifact_root, path, label="durable listed directory")
     boundary = Path(artifact_root).expanduser().absolute()

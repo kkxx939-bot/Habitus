@@ -196,8 +196,6 @@ def test_the_store_keeps_the_latest_nights_and_refuses_to_rewrite_the_past(tmp_p
         store.read("session", NIGHT)  # 只留最近两晚
     with pytest.raises(ForesightError, match="not rewritten"):
         store.write(UnitHistory("session", NIGHT, {}))
-    with pytest.raises(TypeError):
-        HistoryStage(object(), store, evidence=EVIDENCE, statuses=())  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("content", ['{"schema_version": 999}', "{", "[]"])

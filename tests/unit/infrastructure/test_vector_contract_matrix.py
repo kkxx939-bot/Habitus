@@ -132,10 +132,7 @@ def test_vector_filter_has_deterministic_cross_backend_matching(
 @pytest.mark.parametrize(
     ("equals", "one_of"),
     [
-        ({"kind": ("profile",)}, {}),
-        ({}, None),
         ({}, {"kind": ()}),
-        ({}, {"kind": ["profile"]}),
         ({}, {"kind": ("profile", "profile")}),
         ({"kind": "profile"}, {"kind": ("profile",)}),
         ({}, {"": ("profile",)}),
@@ -158,17 +155,6 @@ def test_vector_match_rejects_out_of_range_or_non_finite_score(score: float) -> 
         VectorStoreMatch(_record(), score)
 
 
-@pytest.mark.parametrize("score", [True, False, "0.5", None, []])
-def test_vector_match_rejects_non_numeric_score(score: object) -> None:
-    with pytest.raises(TypeError):
-        VectorStoreMatch(_record(), score)  # type: ignore[arg-type]
-
-
-def test_vector_match_requires_valid_record() -> None:
-    with pytest.raises(TypeError):
-        VectorStoreMatch(object(), 0.5)  # type: ignore[arg-type]
-
-
 def _state(**overrides: object) -> VectorStoreState:
     values: dict[str, object] = {
         "schema_version": "v1",
@@ -184,7 +170,7 @@ def _state(**overrides: object) -> VectorStoreState:
 
 
 @pytest.mark.parametrize("field", ["schema_version", "embedding_fingerprint"])
-@pytest.mark.parametrize("invalid", ["", " ", " leading", "trailing ", None, 1])
+@pytest.mark.parametrize("invalid", ["", " ", " leading", "trailing "])
 def test_vector_state_rejects_invalid_identity_fields(field: str, invalid: object) -> None:
     with pytest.raises(ValueError):
         _state(**{field: invalid})
@@ -206,21 +192,11 @@ def test_vector_state_accepts_numeric_minimums(field: str, minimum: int) -> None
         ("checkpoint", -1),
         ("generation", 0),
         ("record_count", -1),
-        ("dimension", True),
-        ("checkpoint", 1.0),
-        ("generation", "1"),
-        ("record_count", None),
     ],
 )
 def test_vector_state_rejects_invalid_numeric_fields(field: str, invalid: object) -> None:
     with pytest.raises(ValueError):
         _state(**{field: invalid})
-
-
-@pytest.mark.parametrize("ready", [None, 0, 1, "true"])
-def test_vector_state_requires_boolean_ready(ready: object) -> None:
-    with pytest.raises(TypeError):
-        _state(ready=ready)
 
 
 @pytest.mark.parametrize(
@@ -244,9 +220,6 @@ def test_vector_publication_snapshot_accepts_coherent_states(
 @pytest.mark.parametrize(
     ("state", "claim_exists", "building", "error"),
     [
-        (object(), False, False, TypeError),
-        (None, 1, False, TypeError),
-        (None, False, 1, TypeError),
         (None, False, True, ValueError),
     ],
 )
@@ -294,7 +267,7 @@ def test_vector_route_rejects_insecure_or_credential_bearing_url(base_url: str) 
 
 
 @pytest.mark.parametrize("field", ["provider", "adapter"])
-@pytest.mark.parametrize("value", ["", " ", "1invalid", "bad/name", "bad name", None, 1])
+@pytest.mark.parametrize("value", ["", " ", "1invalid", "bad/name", "bad name"])
 def test_vector_route_rejects_invalid_provider_or_adapter(field: str, value: object) -> None:
     with pytest.raises((TypeError, ValueError)):
         VectorStoreRouteConfig(**{field: value})
@@ -309,8 +282,6 @@ def test_vector_route_normalizes_credential_reference(credential_ref: str) -> No
 @pytest.mark.parametrize(
     "credential_ref",
     [
-        None,
-        [],
         "1bad",
         "bad/name",
         "bad name",
@@ -337,11 +308,7 @@ def test_vector_route_accepts_non_secret_static_headers(extra_headers: dict[str,
 @pytest.mark.parametrize(
     "extra_headers",
     [
-        None,
-        [],
         {"": "value"},
-        {1: "value"},
-        {"X": 1},
         {"X\nBad": "value"},
         {"X:Bad": "value"},
         {"X": "line\nbreak"},
@@ -392,7 +359,6 @@ def test_vector_route_accepts_operational_boundaries(field: str, valid: int | fl
         ("retry_max_delay_seconds", 301),
         ("max_retries", -1),
         ("max_retries", 11),
-        ("max_retries", True),
         ("max_concurrent", 0),
         ("max_concurrent", 4097),
         ("max_response_bytes", 1023),
@@ -420,6 +386,54 @@ def test_vector_route_from_mapping_rejects_unknown_fields() -> None:
         VectorStoreRouteConfig.from_mapping({"unknown": True})
 
 
+@pytest.mark.parametrize(
+    ("field", "bad", "error", "message"),
+    [
+        ("provider", 1, TypeError, "provider and adapter must be strings"),
+        ("adapter", ["local_sqlite"], TypeError, "provider and adapter must be strings"),
+        ("base_url", 1, TypeError, "base_url must be a string"),
+        ("credential_ref", None, TypeError, "credential_ref must be a string"),
+        ("timeout_seconds", "30", ValueError, "timeout_seconds must be numeric"),
+        ("retry_base_delay_seconds", True, ValueError, "retry_base_delay_seconds must be numeric"),
+        ("retry_max_delay_seconds", None, ValueError, "retry_max_delay_seconds must be numeric"),
+        ("max_retries", True, ValueError, "max_retries must be between 0 and 10"),
+        ("max_concurrent", 2.0, ValueError, "max_concurrent must be between 1 and 4096"),
+        ("max_response_bytes", "2048", ValueError, "max_response_bytes must be between 1024 and 67108864"),
+        ("extra_headers", ["X-Trace"], TypeError, "extra_headers must be an object"),
+        ("extra_headers", {"X-Trace": 1}, ValueError, "extra_headers must contain string keys and values"),
+        ("extra_headers", {1: "value"}, ValueError, "extra_headers must contain string keys and values"),
+    ],
+)
+def test_vector_route_from_mapping_rejects_wrong_yaml_types(
+    field: str, bad: object, error: type[Exception], message: str
+) -> None:
+    """YAML 里类型错的路由字段在 ``from_mapping`` 就被拒（W16：类型检查在边界，不靠值对象构造器）。"""
+
+    with pytest.raises(error, match=message):
+        VectorStoreRouteConfig.from_mapping({field: bad})
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "error", "message"),
+    [
+        ("collection", 1, TypeError, "collection must be a string"),
+        ("options", ["schema_mode"], TypeError, "options must be an object"),
+        ("options", {1: "value"}, ValueError, "options keys must be non-empty strings"),
+        ("route", {"max_retries": "2"}, ValueError, "max_retries must be between 0 and 10"),
+    ],
+)
+def test_vector_store_config_from_mapping_rejects_wrong_yaml_types(
+    field: str, bad: object, error: type[Exception], message: str
+) -> None:
+    with pytest.raises(error, match=message):
+        VectorStoreConfig.from_mapping({field: bad})
+
+
+def test_vector_store_config_from_mapping_keeps_defaults_for_absent_fields() -> None:
+    assert VectorStoreConfig.from_mapping({}) == VectorStoreConfig()
+    assert VectorStoreConfig.from_mapping({"route": {"max_retries": 3}}).route.max_retries == 3
+
+
 @pytest.mark.parametrize("collection", ["memory", "conversation_summaries", "a.b-c_1", "1collection"])
 def test_vector_store_config_accepts_collection_names(collection: str) -> None:
     assert VectorStoreConfig(collection=collection).collection == collection
@@ -427,7 +441,7 @@ def test_vector_store_config_accepts_collection_names(collection: str) -> None:
 
 @pytest.mark.parametrize(
     "collection",
-    ["", " ", ".hidden", "-leading", "bad/name", "bad name", "a" * 256, None, 1],
+    ["", " ", ".hidden", "-leading", "bad/name", "bad name", "a" * 256],
 )
 def test_vector_store_config_rejects_invalid_collection_names(collection: object) -> None:
     with pytest.raises((TypeError, ValueError)):
@@ -441,16 +455,11 @@ def test_vector_store_config_accepts_json_options(options: dict[str, object]) ->
 
 @pytest.mark.parametrize(
     "options",
-    [None, [], {"": 1}, {1: "value"}, {"set": {1, 2}}, {"nan": math.nan}, {"object": object()}],
+    [{"": 1}, {"set": {1, 2}}, {"nan": math.nan}, {"object": object()}],
 )
 def test_vector_store_config_rejects_non_json_options(options: object) -> None:
     with pytest.raises((TypeError, ValueError)):
         VectorStoreConfig(options=options)  # type: ignore[arg-type]
-
-
-def test_vector_store_config_requires_route_value_object() -> None:
-    with pytest.raises(TypeError):
-        VectorStoreConfig(route=object())  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -485,8 +494,6 @@ def test_vector_requirements_accept_boundaries(field: str, valid: int) -> None:
         ("max_search_hits", 1_000_001),
         ("max_record_chars", 0),
         ("max_record_chars", 1_000_001),
-        ("dimension", True),
-        ("max_records", 1.0),
     ],
 )
 def test_vector_requirements_reject_out_of_range_or_non_integer_values(field: str, invalid: object) -> None:

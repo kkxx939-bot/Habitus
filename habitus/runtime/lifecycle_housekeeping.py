@@ -29,17 +29,13 @@ class LifecycleHousekeepingParticipant:
     ) -> None:
         self.retries = tuple(retries)
         self.backlogs = tuple(backlogs)
-        if any(not isinstance(item, RetryLedger) for item in self.retries):
-            raise TypeError("retries must be RetryLedger instances")
-        if any(not isinstance(item, RetryBacklogStore) for item in self.backlogs):
-            raise TypeError("backlogs must be RetryBacklogStore instances")
         for label, owners in (
             ("retry ledger", [item.owner for item in self.retries]),
             ("retry backlog", [item.root.name for item in self.backlogs]),
         ):
             if len(owners) != len(set(owners)):
                 raise ValueError(f"{label} owners must be distinct")
-        if isinstance(keep_days, bool) or not isinstance(keep_days, int) or keep_days <= 0:
+        if keep_days <= 0:
             raise ValueError("keep_days must be a positive integer")
         self.keep_days = keep_days
 

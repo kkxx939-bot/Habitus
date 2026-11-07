@@ -3,9 +3,11 @@
 from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from habitus.foundation.integrity import canonical_json
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.vector import (
     VectorStoreBusyError,
@@ -160,6 +162,64 @@ def test_receipt_store_is_canonical_listed_by_sequence_and_cleanup_checks_state(
         store.discard_committed(first)
     assert store.discard_prepared(first.source)
     assert not store.discard_prepared(first.source)
+
+
+EDITOR_SEGMENT_ID = "000000000000-000000000001"
+BAD_RECEIPT_FIELDS: list[tuple[tuple[str | int, ...], object, type[Exception], str]] = [
+    (("source", "memory_sequence"), "1", ValueError, "memory_sequence must be a positive integer"),
+    (("source", "memory_sequence"), True, ValueError, "memory_sequence must be a positive integer"),
+    (("source", "transaction_id"), 1, ValueError, "transaction_id must be 32 lowercase hexadecimal"),
+    (("source", "conversation_id"), None, ValueError, "conversation_id must be non-empty normalized text"),
+    (("source", "segment_id"), 1, ValueError, "segment_id must be non-empty normalized text"),
+    (("source", "source_segment_digest"), 1, ValueError, "source_segment_digest must be a SHA-256 hex digest"),
+    (("source", "editor_segment_id"), 1, ValueError, "segment_id must be text"),
+    (("source", "editor_segment_digest"), 1, ValueError, "editor_segment_digest must be a SHA-256 hex digest"),
+    (("prepared_node_changes", 0, "expected_after_digest"), 1, ValueError, "expected_after_digest must be a SHA"),
+    (("prepared_node_changes", 0, "confirms_intention"), "yes", TypeError, "confirms_intention must be boolean"),
+    (("node_changes", 0, "after_revision"), "1", ValueError, "after_revision must be null or a positive integer"),
+    (("node_changes", 0, "after_revision"), True, ValueError, "after_revision must be null or a positive integer"),
+    (("node_changes", 0, "after_digest"), ["a"], ValueError, "after_digest must be a SHA-256 hex digest"),
+    (("unchanged_uris", 0), 1, ValueError, "receipt URI list is invalid"),
+]
+
+
+def _bad_receipt_record(path: tuple[str | int, ...], bad: object) -> dict[str, object]:
+    record = committed_receipt().to_dict()
+    source_record = record["source"]
+    assert isinstance(source_record, dict)
+    source_record.update(editor_segment_id=EDITOR_SEGMENT_ID, editor_segment_digest="c" * 64)
+    record["unchanged_uris"] = ["memory://profile.md"]
+    container: Any = record
+    for key in path[:-1]:
+        container = container[key]
+    container[path[-1]] = bad
+    return record
+
+
+@pytest.mark.parametrize(("path", "bad", "error", "message"), BAD_RECEIPT_FIELDS)
+def test_receipt_parser_rejects_wrong_types_from_disk(
+    path: tuple[str | int, ...], bad: object, error: type[Exception], message: str
+) -> None:
+    """磁盘读回的回执字段类型错，在 ``from_dict`` 构造前就被拒（W16：类型检查在边界）。"""
+
+    with pytest.raises(error, match=message):
+        MemoryChangeReceipt.from_dict(_bad_receipt_record(path, bad))
+
+
+@pytest.mark.parametrize(("path", "bad", "error", "message"), BAD_RECEIPT_FIELDS[::4])
+def test_receipt_store_rejects_wrong_types_read_back_from_disk(
+    tmp_path: Path, path: tuple[str | int, ...], bad: object, error: type[Exception], message: str
+) -> None:
+    """类型错的回执文件经真实 ``MemoryChangeReceiptStore.read`` 读回时被拒，原因链保留原异常与文字。"""
+
+    store = MemoryChangeReceiptStore(tmp_path / "workflow", codec())
+    receipt = committed_receipt()
+    store._path(receipt.source).parent.mkdir(parents=True, exist_ok=True)
+    store._path(receipt.source).write_text(canonical_json(_bad_receipt_record(path, bad)) + "\n", encoding="utf-8")
+    with pytest.raises(MemoryChangeReceiptError, match="failed to read") as caught:
+        store.read(receipt.source)
+    assert isinstance(caught.value.__cause__, error)
+    assert message in str(caught.value.__cause__)
 
 
 WAITS = MemoryJobFailureKind.WAITS_FOR_MODEL

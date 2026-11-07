@@ -27,12 +27,10 @@ class ToolCall:
     arguments: Mapping[str, object]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.id, str) or not self.id.strip():
+        if not self.id.strip():
             raise ValueError("tool call id must be non-empty")
-        if not isinstance(self.name, str) or not self.name.strip():
+        if not self.name.strip():
             raise ValueError("tool call name must be non-empty")
-        if not isinstance(self.arguments, Mapping):
-            raise TypeError("tool call arguments must be an object")
         object.__setattr__(self, "arguments", dict(self.arguments))
 
 
@@ -46,14 +44,10 @@ class ToolDefinition:
     strict: bool = False
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name.strip():
+        if not self.name.strip():
             raise ValueError("tool name must be non-empty")
-        if not isinstance(self.description, str) or not self.description.strip():
+        if not self.description.strip():
             raise ValueError("tool description must be non-empty")
-        if not isinstance(self.parameters, Mapping):
-            raise TypeError("tool parameters must be a JSON Schema object")
-        if not isinstance(self.strict, bool):
-            raise TypeError("tool strict must be boolean")
         object.__setattr__(self, "parameters", dict(self.parameters))
 
 
@@ -70,19 +64,11 @@ class ChatMessage:
     def __post_init__(self) -> None:
         if self.role not in {"system", "developer", "user", "assistant", "tool"}:
             raise ValueError(f"unsupported chat message role: {self.role}")
-        if self.content is not None and not isinstance(self.content, str):
-            raise TypeError("message content must be text or null")
-        if self.name is not None and (not isinstance(self.name, str) or not self.name.strip()):
+        if self.name is not None and not self.name.strip():
             raise ValueError("message name must be non-empty when provided")
-        if self.tool_call_id is not None and (not isinstance(self.tool_call_id, str) or not self.tool_call_id.strip()):
+        if self.tool_call_id is not None and not self.tool_call_id.strip():
             raise ValueError("tool_call_id must be non-empty when provided")
-        try:
-            tool_calls = tuple(self.tool_calls)
-        except TypeError as exc:
-            raise TypeError("message tool_calls must be an iterable of ToolCall values") from exc
-        if any(not isinstance(item, ToolCall) for item in tool_calls):
-            raise TypeError("message tool_calls must contain ToolCall values")
-        object.__setattr__(self, "tool_calls", tool_calls)
+        object.__setattr__(self, "tool_calls", tuple(self.tool_calls))
         if self.role == "tool":
             if not self.tool_call_id:
                 raise ValueError("tool result messages require tool_call_id")
@@ -107,12 +93,10 @@ class ResponseFormat:
     strict: bool = True
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name.strip():
+        if not self.name.strip():
             raise ValueError("response format name must be non-empty")
-        if not isinstance(self.schema, Mapping) or not self.schema:
+        if not self.schema:
             raise ValueError("response format schema must be a non-empty object")
-        if not isinstance(self.strict, bool):
-            raise TypeError("response format strict must be boolean")
         object.__setattr__(self, "schema", dict(self.schema))
 
 
@@ -142,35 +126,19 @@ class ChatRequest:
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))
         object.__setattr__(self, "tools", tuple(self.tools))
-        if not self.messages or any(not isinstance(item, ChatMessage) for item in self.messages):
+        if not self.messages:
             raise ValueError("chat request requires normalized messages")
-        if self.temperature is not None:
-            if isinstance(self.temperature, bool) or not isinstance(self.temperature, int | float):
-                raise TypeError("temperature must be numeric or null")
-            if not 0 <= float(self.temperature) <= 2:
-                raise ValueError("temperature must be between zero and two")
-        if self.max_output_tokens is not None:
-            if (
-                isinstance(self.max_output_tokens, bool)
-                or not isinstance(self.max_output_tokens, int)
-                or self.max_output_tokens <= 0
-            ):
-                raise ValueError("max_output_tokens must be a positive integer")
-        if any(not isinstance(tool, ToolDefinition) for tool in self.tools):
-            raise TypeError("tools must contain ToolDefinition values")
+        if self.temperature is not None and not 0 <= float(self.temperature) <= 2:
+            raise ValueError("temperature must be between zero and two")
+        if self.max_output_tokens is not None and self.max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be a positive integer")
         if self.tool_choice is not None:
-            if not isinstance(self.tool_choice, str | Mapping):
-                raise TypeError("tool_choice must be text, an object or null")
             if isinstance(self.tool_choice, str) and not self.tool_choice.strip():
                 raise ValueError("tool_choice text must be non-empty")
             if isinstance(self.tool_choice, Mapping):
                 object.__setattr__(self, "tool_choice", dict(self.tool_choice))
         if self.tool_choice is not None and not self.tools:
             raise ValueError("tool_choice requires at least one tool")
-        if self.response_format is not None and not isinstance(self.response_format, ResponseFormat):
-            raise TypeError("response_format must be a ResponseFormat")
-        if self.reasoning is not None and not isinstance(self.reasoning, ReasoningOptions):
-            raise TypeError("reasoning must be ReasoningOptions")
 
 
 @dataclass(frozen=True)
@@ -182,20 +150,10 @@ class ChatCallContext:
     input_token_limit: int | None = None
 
     def __post_init__(self) -> None:
-        if self.prompt_version is not None and (
-            not isinstance(self.prompt_version, str) or not self.prompt_version.strip()
-        ):
+        if self.prompt_version is not None and not self.prompt_version.strip():
             raise ValueError("chat call prompt_version must be non-empty when provided")
-        if not isinstance(self.metadata, Mapping):
-            raise TypeError("chat call metadata must be an object")
-        if any(not isinstance(key, str) for key in self.metadata):
-            raise TypeError("chat call metadata keys must be text")
         object.__setattr__(self, "metadata", dict(self.metadata))
-        if self.input_token_limit is not None and (
-            isinstance(self.input_token_limit, bool)
-            or not isinstance(self.input_token_limit, int)
-            or self.input_token_limit <= 0
-        ):
+        if self.input_token_limit is not None and self.input_token_limit <= 0:
             raise ValueError("chat call input_token_limit must be a positive integer")
 
 
@@ -210,20 +168,12 @@ class PreparedChatRequest:
     stream: bool
 
     def __post_init__(self) -> None:
-        if not isinstance(self.request, ChatRequest):
-            raise TypeError("prepared chat request requires a ChatRequest")
-        if not isinstance(self.body, bytes) or not self.body:
+        if not self.body:
             raise ValueError("prepared chat request body must be non-empty bytes")
-        if not isinstance(self.model_visible_body, bytes) or not self.model_visible_body:
+        if not self.model_visible_body:
             raise ValueError("prepared chat request model_visible_body must be non-empty bytes")
-        if (
-            isinstance(self.reserved_output_tokens, bool)
-            or not isinstance(self.reserved_output_tokens, int)
-            or self.reserved_output_tokens < 0
-        ):
+        if self.reserved_output_tokens < 0:
             raise ValueError("prepared chat request reserved_output_tokens must be a non-negative integer")
-        if not isinstance(self.stream, bool):
-            raise TypeError("prepared chat request stream must be boolean")
 
     @property
     def estimated_input_tokens(self) -> int:
@@ -254,10 +204,8 @@ class TokenUsage:
             "reasoning_tokens",
         ):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
-        if not isinstance(self.details, Mapping):
-            raise TypeError("token usage details must be an object")
         object.__setattr__(self, "details", dict(self.details))
 
 
@@ -277,30 +225,16 @@ class ModelResponse:
     raw: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
-        try:
-            tool_calls = tuple(self.tool_calls)
-        except TypeError as exc:
-            raise TypeError("model response tool_calls must be an iterable of ToolCall values") from exc
-        if any(not isinstance(item, ToolCall) for item in tool_calls):
-            raise TypeError("model response tool_calls must contain ToolCall values")
-        object.__setattr__(self, "tool_calls", tool_calls)
-        if self.content is not None and not isinstance(self.content, str):
-            raise TypeError("model response content must be text or null")
+        object.__setattr__(self, "tool_calls", tuple(self.tool_calls))
         if not self.content and not self.tool_calls:
             raise ValueError("model response requires content or tool calls")
-        if not isinstance(self.model, str) or not self.model.strip():
+        if not self.model.strip():
             raise ValueError("model response model must be non-empty")
-        if not isinstance(self.provider, str) or not self.provider.strip():
+        if not self.provider.strip():
             raise ValueError("model response provider must be non-empty")
-        if not isinstance(self.finish_reason, str) or not self.finish_reason.strip():
+        if not self.finish_reason.strip():
             raise ValueError("model response finish_reason must be non-empty")
-        if self.reasoning_content is not None and not isinstance(self.reasoning_content, str):
-            raise TypeError("reasoning_content must be text or null")
-        if not isinstance(self.usage, TokenUsage):
-            raise TypeError("usage must be TokenUsage")
         if self.raw is not None:
-            if not isinstance(self.raw, Mapping):
-                raise TypeError("model response raw must be an object")
             object.__setattr__(self, "raw", dict(self.raw))
 
 
@@ -324,8 +258,6 @@ class ModelStreamEvent:
         if self.kind not in allowed:
             raise ValueError(f"unsupported stream event kind: {self.kind}")
         if self.raw is not None:
-            if not isinstance(self.raw, Mapping):
-                raise TypeError("stream event raw must be an object")
             object.__setattr__(self, "raw", dict(self.raw))
         payload_fields = {
             "content_delta",
@@ -353,28 +285,24 @@ class ModelStreamEvent:
         if unexpected:
             raise ValueError(f"stream event {self.kind} contains payload for another kind: {unexpected}")
         if self.kind == "content_delta":
-            if not isinstance(self.content_delta, str) or self.content_delta == "":
+            if not self.content_delta:
                 raise ValueError("content_delta events require non-empty text")
         elif self.kind == "reasoning_delta":
-            if not isinstance(self.reasoning_delta, str) or self.reasoning_delta == "":
+            if not self.reasoning_delta:
                 raise ValueError("reasoning_delta events require non-empty text")
         elif self.kind == "tool_call_delta":
-            if (
-                isinstance(self.tool_call_index, bool)
-                or not isinstance(self.tool_call_index, int)
-                or self.tool_call_index < 0
-            ):
+            if self.tool_call_index is None or self.tool_call_index < 0:
                 raise ValueError("tool_call_delta events require a non-negative integer index")
             for name in ("tool_call_id", "tool_name", "tool_arguments_delta"):
                 value = getattr(self, name)
-                if value is not None and (not isinstance(value, str) or value == ""):
+                if value == "":
                     raise ValueError(f"{name} must be non-empty text when provided")
             if all(value is None for value in (self.tool_call_id, self.tool_name, self.tool_arguments_delta)):
                 raise ValueError("tool_call_delta events require at least one tool field")
         elif self.kind == "usage":
-            if not isinstance(self.usage, TokenUsage):
+            if self.usage is None:
                 raise TypeError("usage events require TokenUsage")
-        elif not isinstance(self.finish_reason, str) or not self.finish_reason.strip():
+        elif self.finish_reason is None or not self.finish_reason.strip():
             raise ValueError("done events require a non-empty finish_reason")
 
 
@@ -389,9 +317,6 @@ class ProviderCapabilities:
     reasoning: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("async_completion", "streaming", "tools", "reasoning"):
-            if not isinstance(getattr(self, name), bool):
-                raise TypeError(f"provider capability {name} must be boolean")
         if self.structured_output_mode not in {"none", "json_object", "json_schema"}:
             raise ValueError("provider structured_output_mode must be none, json_object or json_schema")
 

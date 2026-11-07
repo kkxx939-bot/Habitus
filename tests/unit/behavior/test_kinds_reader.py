@@ -37,6 +37,5 @@ def test_changes_since_returns_the_later_versions_in_order(tmp_path: Path) -> No
     assert [record.version for record in reader.changes_since(0)] == [1, 2]
     assert [record.version for record in reader.changes_since(1)] == [2]
     assert reader.changes_since(2) == ()
-    for bad in (-1, True, "1"):
-        with pytest.raises(ValueError, match="non-negative integer"):
-            reader.changes_since(bad)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="non-negative integer"):
+        reader.changes_since(-1)

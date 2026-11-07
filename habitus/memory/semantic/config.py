@@ -31,13 +31,9 @@ class MemorySemanticConfig:
             "lock_ttl_seconds": self.lock_ttl_seconds,
         }
         for name, value in positive.items():
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-        if (
-            isinstance(self.stale_retries, bool)
-            or not isinstance(self.stale_retries, int)
-            or not 0 <= self.stale_retries <= 5
-        ):
+        if not 0 <= self.stale_retries <= 5:
             raise ValueError("stale_retries must be between zero and five")
         if self.max_abstract_chars > self.max_overview_chars:
             raise ValueError("max_abstract_chars cannot exceed max_overview_chars")

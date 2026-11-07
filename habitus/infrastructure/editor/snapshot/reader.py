@@ -31,15 +31,6 @@ class SnapshotReader(Generic[T]):
         serialize: Callable[[T], bytes],
         config: SnapshotReadConfig | None = None,
     ) -> None:
-        for name, function in {
-            "load": load,
-            "revision_of": revision_of,
-            "serialize": serialize,
-        }.items():
-            if not callable(function):
-                raise TypeError(f"{name} must be callable")
-        if config is not None and not isinstance(config, SnapshotReadConfig):
-            raise TypeError("config must be SnapshotReadConfig")
         self._load = load
         self._revision_of = revision_of
         self._serialize = serialize
@@ -55,11 +46,9 @@ class SnapshotReader(Generic[T]):
             return VersionedSnapshot.missing(normalized)
 
         revision = self._revision_of(value)
-        if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
+        if revision <= 0:
             raise ValueError("snapshot revision extractor must return a positive integer")
         payload = self._serialize(value)
-        if not isinstance(payload, bytes):
-            raise TypeError("snapshot serializer must return bytes")
         size_bytes = len(payload)
         if size_bytes > self.config.max_item_bytes:
             raise SnapshotReadLimitError("snapshot item exceeds its configured byte limit")
@@ -75,7 +64,7 @@ class SnapshotReader(Generic[T]):
     def read_many(self, identities: Iterable[str]) -> SnapshotBatch[T]:
         """去重并按身份稳定排序后执行有界批量读取。"""
 
-        if isinstance(identities, str) or not isinstance(identities, Iterable):
+        if isinstance(identities, str):
             raise TypeError("identities must be an iterable of strings")
         unique_identities: set[str] = set()
         input_count = 0

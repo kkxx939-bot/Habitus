@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 
+from habitus.foundation.validation import is_int, is_str_list
 from habitus.memory.conversation.indexing import ConversationSummaryMatch
 from habitus.memory.document import MemoryDocument, MemoryStoredLink
 from habitus.memory.intention import (
@@ -122,7 +123,7 @@ class MemorySearchServiceConfig:
                 1_000_000,
             ),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            if not minimum <= value <= maximum:
                 raise ValueError(f"{name} must be between {minimum} and {maximum}")
         if self.default_limit > self.max_limit:
             raise ValueError("memory search default_limit cannot exceed max_limit")
@@ -130,8 +131,6 @@ class MemorySearchServiceConfig:
             raise ValueError("planned query characters cannot exceed the public query bound")
         if self.max_relation_neighbors_per_match > self.max_relation_neighbors_total:
             raise ValueError("per-match relation limit cannot exceed the total relation limit")
-        if not isinstance(self.summary_fallback_enabled, bool):
-            raise TypeError("summary_fallback_enabled must be boolean")
         if self.summary_fallback_max_query_chars > self.max_query_chars:
             raise ValueError("Summary fallback query cannot exceed the public query bound")
         if self.summary_fallback_max_context_chars > self.max_context_chars:
@@ -159,9 +158,7 @@ class MemoryRetrievalAssessment:
     def __post_init__(self) -> None:
         object.__setattr__(self, "decision", MemoryRetrievalSufficiency(self.decision))
         object.__setattr__(self, "reason", _bounded_text(self.reason, "retrieval assessment reason", 10_000))
-        if not isinstance(self.missing_information, tuple) or any(
-            not isinstance(item, str) or not item.strip() or item != item.strip() for item in self.missing_information
-        ):
+        if any(not item.strip() or item != item.strip() for item in self.missing_information):
             raise ValueError("retrieval assessment missing_information contains invalid text")
         if len(set(self.missing_information)) != len(self.missing_information):
             raise ValueError("retrieval assessment missing_information must be unique")
@@ -183,17 +180,19 @@ class MemoryRetrievalAssessment:
     def model_validate(cls, value: object) -> MemoryRetrievalAssessment:
         if not isinstance(value, Mapping):
             raise TypeError("retrieval assessment must be an object")
-        expected = {"decision", "reason", "missing_information", "summary_query"}
-        if set(value) != expected:
+        if set(value) != {"decision", "reason", "missing_information", "summary_query"}:
             raise ValueError("retrieval assessment fields do not match its schema")
         raw_missing = value["missing_information"]
         if not isinstance(raw_missing, list | tuple):
             raise TypeError("retrieval assessment missing_information must be a list")
+        if not is_str_list(raw_missing):
+            raise ValueError("retrieval assessment missing_information contains invalid text")
+        query = value["summary_query"]
         return cls(
             decision=MemoryRetrievalSufficiency(value["decision"]),
-            reason=value["reason"],
+            reason=_bounded_text(value["reason"], "retrieval assessment reason", 10_000),
             missing_information=tuple(raw_missing),
-            summary_query=value["summary_query"],
+            summary_query=None if query is None else _bounded_text(query, "Summary fallback query", 5_000),
         )
 
 
@@ -272,7 +271,7 @@ class MemoryTypedQuery:
     def __post_init__(self) -> None:
         object.__setattr__(self, "query", _bounded_text(self.query, "typed query", 5_000))
         object.__setattr__(self, "intent", _bounded_text(self.intent, "query intent", 1_000))
-        if isinstance(self.priority, bool) or not isinstance(self.priority, int) or not 1 <= self.priority <= 5:
+        if not 1 <= self.priority <= 5:
             raise ValueError("query priority must be between one and five")
 
     def to_dict(self) -> dict[str, object]:
@@ -286,11 +285,10 @@ class MemoryTypedQuery:
     def from_dict(cls, value: object) -> MemoryTypedQuery:
         if not isinstance(value, Mapping) or set(value) != {"query", "intent", "priority"}:
             raise ValueError("typed query must contain exactly query, intent, and priority")
-        return cls(
-            query=value["query"],
-            intent=value["intent"],
-            priority=value["priority"],
-        )
+        if not is_int(priority := value["priority"]):
+            raise ValueError("query priority must be between one and five")
+        query = _bounded_text(value["query"], "typed query", 5_000)
+        return cls(query, _bounded_text(value["intent"], "query intent", 1_000), priority)
 
 
 @dataclass(frozen=True)
@@ -300,10 +298,8 @@ class MemoryQueryPlanContent:
     queries: tuple[MemoryTypedQuery, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.queries, tuple) or not 1 <= len(self.queries) <= 8:
+        if not 1 <= len(self.queries) <= 8:
             raise ValueError("memory query plan must contain between one and eight queries")
-        if any(not isinstance(query, MemoryTypedQuery) for query in self.queries):
-            raise TypeError("memory query plan contains an invalid query")
         normalized = {(query.query.casefold(), query.intent.casefold()) for query in self.queries}
         if len(normalized) != len(self.queries):
             raise ValueError("memory query plan contains duplicate queries")
@@ -349,10 +345,6 @@ class MemoryQueryResult:
     hits: tuple[MemorySearchHit, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.query, MemoryTypedQuery):
-            raise TypeError("query result query must be MemoryTypedQuery")
-        if not isinstance(self.hits, tuple) or any(not isinstance(hit, MemorySearchHit) for hit in self.hits):
-            raise TypeError("query result hits must contain MemorySearchHit values")
         expected = tuple(sorted(self.hits, key=lambda hit: (-hit.score, str(hit.uri))))
         if self.hits != expected or len({hit.uri for hit in self.hits}) != len(self.hits):
             raise ValueError("query result hits must be unique and relevance-sorted")
@@ -367,10 +359,6 @@ class MemoryRelatedMemory:
     intention_review: MemoryIntentionReview | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.relation, MemoryStoredLink):
-            raise TypeError("related memory relation must be MemoryStoredLink")
-        if not isinstance(self.document, MemoryDocument):
-            raise TypeError("related memory document must be MemoryDocument")
         uri = MemoryURI.from_address(self.document.address)
         if uri not in {self.relation.from_uri, self.relation.to_uri}:
             raise ValueError("related memory document is not a relation endpoint")
@@ -388,23 +376,15 @@ class MemoryMatchedMemory:
     related: tuple[MemoryRelatedMemory, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.hit, MemorySearchHit):
-            raise TypeError("matched memory hit must be MemorySearchHit")
-        if not isinstance(self.document, MemoryDocument):
-            raise TypeError("matched memory document must be MemoryDocument")
         if MemoryURI.from_address(self.document.address) != self.hit.uri:
             raise ValueError("matched memory document does not match its hit URI")
-        if not isinstance(self.matched_queries, tuple) or not self.matched_queries:
+        if not self.matched_queries:
             raise ValueError("matched memory must record at least one query")
-        if any(not isinstance(query, str) or not query.strip() for query in self.matched_queries):
+        if any(not query.strip() for query in self.matched_queries):
             raise TypeError("matched memory queries must be non-empty strings")
         if len(set(self.matched_queries)) != len(self.matched_queries):
             raise ValueError("matched memory queries must be unique")
         _validate_intention_review(self.document, self.intention_review)
-        if not isinstance(self.related, tuple) or any(
-            not isinstance(item, MemoryRelatedMemory) for item in self.related
-        ):
-            raise TypeError("matched memory related values are invalid")
         identities = tuple(item.relation.identity for item in self.related)
         if identities != tuple(sorted(identities)) or len(set(identities)) != len(identities):
             raise ValueError("matched memory relations must be unique and sorted")
@@ -432,7 +412,7 @@ class MemorySearchDegradation:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "stage", MemorySearchDegradationStage(self.stage))
-        if not isinstance(self.error_type, str) or not self.error_type or len(self.error_type) > 256:
+        if not self.error_type or len(self.error_type) > 256:
             raise ValueError("search degradation error_type must be non-empty bounded text")
 
 
@@ -456,12 +436,10 @@ class MemorySearchResult:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "query", _bounded_text(self.query, "search result query", 1_000_000))
-        if not isinstance(self.target_roots, tuple) or not self.target_roots:
+        if not self.target_roots:
             raise ValueError("search result requires target roots")
         if any(root.node_type is not MemoryURINodeType.DIRECTORY for root in self.target_roots):
             raise ValueError("search result roots must identify memory directories")
-        if not isinstance(self.kinds, tuple):
-            raise TypeError("search result kinds must be a tuple")
         normalized_kinds = tuple(MemoryKind(kind) for kind in self.kinds)
         if len(normalized_kinds) != len(set(normalized_kinds)):
             raise ValueError("search result kinds must be unique")
@@ -470,25 +448,13 @@ class MemorySearchResult:
         object.__setattr__(self, "intention_scope", scope)
         if scope is MemoryIntentionRecallScope.COMPLETED and normalized_kinds != (MemoryKind.INTENTION,):
             raise ValueError("completed Intention search must target only Intention memory")
-        if not isinstance(self.plan, MemoryQueryPlan) or self.plan.original_query != self.query:
+        if self.plan.original_query != self.query:
             raise ValueError("search result query plan does not match the original query")
-        if not isinstance(self.query_results, tuple) or any(
-            not isinstance(result, MemoryQueryResult) for result in self.query_results
-        ):
-            raise TypeError("search result query_results are invalid")
-        if not isinstance(self.degradations, tuple) or any(
-            not isinstance(item, MemorySearchDegradation) for item in self.degradations
-        ):
-            raise TypeError("search result degradations are invalid")
         stages = tuple(item.stage for item in self.degradations)
         if len(stages) != len(set(stages)):
             raise ValueError("search result degradation stages must be unique")
         if tuple(result.query for result in self.query_results) != self.plan.queries:
             raise ValueError("search result query_results do not match the query plan")
-        if not isinstance(self.memories, tuple) or any(
-            not isinstance(memory, MemoryMatchedMemory) for memory in self.memories
-        ):
-            raise TypeError("search result memories are invalid")
         expected = tuple(sorted(self.memories, key=lambda item: (-item.hit.score, str(item.uri))))
         if self.memories != expected or len({item.uri for item in self.memories}) != len(self.memories):
             raise ValueError("search result memories must be unique and relevance-sorted")
@@ -500,17 +466,6 @@ class MemorySearchResult:
                 scope,
             ):
                 raise ValueError("direct Intention result is outside its requested recall scope")
-        if self.retrieval_assessment is not None and not isinstance(
-            self.retrieval_assessment,
-            MemoryRetrievalAssessment,
-        ):
-            raise TypeError("search result retrieval_assessment is invalid")
-        if not isinstance(self.summary_fallback_attempted, bool):
-            raise TypeError("search result summary_fallback_attempted must be boolean")
-        if not isinstance(self.summary_fallbacks, tuple) or any(
-            not isinstance(item, ConversationSummaryMatch) for item in self.summary_fallbacks
-        ):
-            raise TypeError("search result summary_fallbacks are invalid")
         fallback_expected = tuple(
             sorted(
                 self.summary_fallbacks,
@@ -533,12 +488,8 @@ class MemorySearchResult:
             or self.retrieval_assessment.decision is not MemoryRetrievalSufficiency.INSUFFICIENT
         ):
             raise ValueError("Summary fallback can only be attempted after an insufficient assessment")
-        if not isinstance(self.context, str):
-            raise TypeError("search result context must be text")
         if bool(self.memories or self.summary_fallbacks) != bool(self.context):
             raise ValueError("search result context presence must match its Memory or Summary content")
-        if not isinstance(self.budget_exhausted, bool):
-            raise TypeError("search result budget_exhausted must be boolean")
 
     @property
     def total(self) -> int:
@@ -573,7 +524,7 @@ def _validate_intention_review(
         if review is not None:
             raise ValueError("only active Intention memory accepts a review reminder")
         return
-    if not isinstance(review, MemoryIntentionReview):
+    if review is None:
         raise ValueError("active Intention memory requires a review reminder")
     if review.last_confirmed_at != document.metadata.last_confirmed_at:
         raise ValueError("Intention review reminder does not match document confirmation metadata")

@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 import httpx
 
 from habitus.foundation.network import OutboundSettings
+from habitus.foundation.validation import is_int, is_number
 from habitus.model_client.adapters._http import is_remote_url, post_json_object
 from habitus.model_client.config import RerankModelConfig
 from habitus.model_client.contracts import ModelConfigurationError, ModelResponseError
@@ -30,13 +31,11 @@ class OpenAICompatibleRerankProvider:
     """执行一次 `/reranks` 请求并按输入文档顺序返回相关性分数。"""
 
     def __init__(self, config: RerankModelConfig, *, api_key: str, outbound: OutboundSettings | None = None) -> None:
-        if not isinstance(config, RerankModelConfig):
-            raise TypeError("config must be RerankModelConfig")
         if config.route.adapter != "openai_compatible_rerank":
             raise ModelConfigurationError("OpenAICompatibleRerankProvider requires adapter='openai_compatible_rerank'")
         if not config.route.base_url:
             raise ModelConfigurationError("openai_compatible_rerank adapter requires an explicit base_url")
-        if not isinstance(api_key, str) or not api_key.strip():
+        if not api_key.strip():
             raise ModelConfigurationError("openai_compatible_rerank adapter requires an API key")
         overlap = _RESERVED_REQUEST_FIELDS & set(config.route.extra_body)
         if overlap:
@@ -133,14 +132,14 @@ class OpenAICompatibleRerankProvider:
             if not isinstance(item, Mapping):
                 raise ModelResponseError(f"rerank result[{position}] must be an object")
             index = item.get("index")
-            if isinstance(index, bool) or not isinstance(index, int):
+            if not is_int(index):
                 raise ModelResponseError(f"rerank result[{position}] index must be an integer")
             if not 0 <= index < expected:
                 raise ModelResponseError(f"rerank result[{position}] index is out of bounds")
             if scores[index] is not None:
                 raise ModelResponseError("rerank provider returned a duplicate document index")
             raw_score = item.get("relevance_score")
-            if isinstance(raw_score, bool) or not isinstance(raw_score, int | float):
+            if not is_number(raw_score):
                 raise ModelResponseError(f"rerank result[{position}] relevance_score must be numeric")
             score = float(raw_score)
             if not math.isfinite(score) or not 0.0 <= score <= 1.0:

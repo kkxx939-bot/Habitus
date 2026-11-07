@@ -66,15 +66,15 @@ class MomentRecord:
 
     def __post_init__(self) -> None:
         for label in ("expectation_id", "kind_token", "account"):
-            if not isinstance(getattr(self, label), str) or not getattr(self, label):
+            if not getattr(self, label):
                 raise ForesightError(f"moment record {label} must be non-empty text")
         for label in ("formed_at", "observed_from", "deadline"):
             value = getattr(self, label)
-            if not isinstance(value, datetime) or value.utcoffset() is None:
+            if value.utcoffset() is None:
                 raise ForesightError(f"moment record {label} must be a timezone-aware datetime")
         if not 0.0 <= self.strength <= 1.0 or (self.came is None and self.strength != 0.0):
             raise ForesightError("a moment record carries a strength in [0, 1], and none when its outcome is unknown")
-        if self.occurrence_uri is not None and (self.came is not True or not isinstance(self.occurrence_uri, str)):
+        if self.occurrence_uri is not None and self.came is not True:
             raise ForesightError("a moment record names an occurrence only for a natural hit")
 
 
@@ -294,7 +294,7 @@ def retired(moments: Sequence[Moment], *, window: int, before: datetime) -> froz
     拿来当先验）。最后一种不用单独查：它总含着同一组里排在后面的全部，同一组够了它就够了。少见的组合因此留得久——别的组合
     再多再密，也挤不掉它自己那几刻。"""
 
-    if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+    if window < 1:
         raise ForesightError("window must be a positive integer")
     found: set[str] = set()
     for moment in moments:

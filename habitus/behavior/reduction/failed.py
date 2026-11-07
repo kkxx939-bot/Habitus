@@ -51,12 +51,6 @@ class FailedChains:
         clock: Callable[[], datetime],
         backlog: RetryBacklog | None = None,
     ) -> None:
-        if not isinstance(judgements, BehaviorJudgementStore):
-            raise TypeError("judgements must be BehaviorJudgementStore")
-        if not isinstance(ledger, BehaviorReductionLedger):
-            raise TypeError("ledger must be BehaviorReductionLedger")
-        if backlog is not None and not isinstance(backlog, RetryBacklog):
-            raise TypeError("backlog must implement RetryBacklog")
         self.judgements = judgements
         self.ledger = ledger
         self.backlog: RetryBacklog = backlog if backlog is not None else NoRetryBacklog()
@@ -140,8 +134,6 @@ class ChainHandler:
     """重试堆里链的处理器（裁定 67、68）：原判断放回判断存储、等归约；放回与"补回了没有"都归 ``FailedChains``。"""
 
     def __init__(self, failed: FailedChains) -> None:
-        if not isinstance(failed, FailedChains):
-            raise TypeError("failed must be FailedChains")
         self.failed = failed
 
     async def attempt(self, item: RetryItem) -> Attempt:

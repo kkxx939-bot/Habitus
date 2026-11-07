@@ -37,12 +37,6 @@ class MemoryExtractionPromptBuilder:
         *,
         zone: tzinfo,
     ) -> None:
-        if not isinstance(config, MemoryExtractionConfig):
-            raise TypeError("config must be a MemoryExtractionConfig")
-        if registry is not None and not isinstance(registry, MemorySchemaRegistry):
-            raise TypeError("registry must be a MemorySchemaRegistry")
-        if not isinstance(zone, tzinfo):
-            raise TypeError("zone must be a tzinfo")
         self.config = config
         self.registry = registry or MemorySchemaRegistry.load_default()
         self.zone = zone
@@ -177,12 +171,6 @@ class MemoryExtractionPromptBuilder:
         context: MemoryExtractionContext | None,
         turn_context: MemoryTurnContext | None,
     ) -> dict[str, object]:
-        if not isinstance(segment, ConversationSegment):
-            raise TypeError("segment must be a ConversationSegment")
-        if context is not None and not isinstance(context, MemoryExtractionContext):
-            raise TypeError("context must be a MemoryExtractionContext or None")
-        if turn_context is not None and not isinstance(turn_context, MemoryTurnContext):
-            raise TypeError("turn_context must be a MemoryTurnContext or None")
         payload = self._memory_payload(context)
         payload["conversation_segment"] = self._local_segment(segment)
         if turn_context is not None:

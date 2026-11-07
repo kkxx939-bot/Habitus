@@ -87,8 +87,6 @@ class LocalSQLiteVectorStoreConfig:
         所以只收小写名。
         """
 
-        if not isinstance(store, VectorStoreConfig):
-            raise TypeError("store must be VectorStoreConfig")
         route = store.route
         if store.collection != store.collection.lower():
             raise ValueError("local_sqlite vector collection must be lowercase (it is the file name)")
@@ -183,7 +181,7 @@ class LocalSQLiteVectorBackend:
         return await self._call(lambda: self._read_metadata(normalized))
 
     async def write_metadata(self, values: Mapping[str, Mapping[str, object]], *, dimension: int) -> None:
-        if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1:
+        if dimension < 1:
             raise ValueError("vector metadata dimension must be a positive integer")
         encoded = _encoded_metadata(values)
         await self._call(lambda: self._write_metadata(encoded))
@@ -290,7 +288,7 @@ class LocalSQLiteVectorBackend:
             connection.executemany("INSERT OR REPLACE INTO metadata(name, value_json) VALUES (?, ?)", encoded)
 
     def _ensure_schema(self, dimension: int, published_dimension: int | None) -> None:
-        if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1:
+        if dimension < 1:
             raise ValueError("vector schema dimension must be a positive integer")
         with _transaction(self._db()) as connection:
             self._sync()
@@ -538,14 +536,10 @@ def _decoded_attributes(raw: object) -> dict[str, VectorValue]:
 
 
 def _encoded_metadata(values: Mapping[str, Mapping[str, object]]) -> list[tuple[str, str]]:
-    if not isinstance(values, Mapping):
-        raise TypeError("vector metadata values must be an object")
     names = _metadata_names(tuple(values))
     encoded: list[tuple[str, str]] = []
     for name in names:
         value = values[name]
-        if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
-            raise TypeError("vector metadata value must be a string-keyed object")
         try:
             text = json.dumps(dict(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
         except (TypeError, ValueError) as exc:
@@ -567,9 +561,9 @@ def _json_object(raw: object, label: str) -> dict[str, object]:
 
 
 def _metadata_names(names: Sequence[str]) -> tuple[str, ...]:
-    if isinstance(names, str | bytes) or not isinstance(names, Sequence):
+    if isinstance(names, str):
         raise TypeError("vector metadata names must be a sequence")
-    if any(not isinstance(name, str) or not name or name != name.strip() for name in names):
+    if any(not name or name != name.strip() for name in names):
         raise ValueError("vector metadata name must be normalized non-empty text")
     if len(set(names)) != len(names):
         raise ValueError("vector metadata names must be unique")

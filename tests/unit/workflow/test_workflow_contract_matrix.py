@@ -4,13 +4,22 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any
 
 import pytest
 
+from habitus.conversation.source import ConversationSourceError
+from habitus.foundation.integrity import canonical_json
 from habitus.memory.document import MemoryLinkType, MemoryStoredLink
 from habitus.memory.editor import MemoryIdentityProposalBasis, MemoryNodeDisposition
 from habitus.memory.model import MemoryAddress, MemoryKind
 from habitus.memory.uri import MemoryURI
+from habitus.memory.workflow import (
+    ConversationMemoryIngestResult,
+    MemoryConversationOutput,
+    MemoryConversationOutputStore,
+)
 from habitus.memory.workflow.jobs import (
     MemoryJob,
     MemoryJobConfig,
@@ -31,6 +40,8 @@ from habitus.memory.workflow.receipt import (
     MemoryPreparedNodeChange,
 )
 from tests.helpers import BASE_TIME, segment
+from tests.unit.conversation.source_v2_helpers import NOW, ingest_result
+from tests.unit.conversation.source_v2_helpers import source as conversation_source
 
 DIGEST = "a" * 64
 TRANSACTION_ID = "b" * 32
@@ -81,10 +92,10 @@ def test_job_retry_backoff_is_exponential_and_capped(attempts: int, base: float,
     assert config.retry_delay_seconds(attempts) == min(maximum, base * (2 ** (attempts - 1)))
 
 
-@pytest.mark.parametrize("attempts", [0, -1, True, False, 1.0, "1", None, [], {}])
-def test_job_retry_backoff_rejects_invalid_attempt_count(attempts: object) -> None:
+@pytest.mark.parametrize("attempts", [0, -1])
+def test_job_retry_backoff_rejects_invalid_attempt_count(attempts: int) -> None:
     with pytest.raises(ValueError):
-        MemoryJobConfig().retry_delay_seconds(attempts)  # type: ignore[arg-type]
+        MemoryJobConfig().retry_delay_seconds(attempts)
 
 
 @pytest.mark.parametrize("status", tuple(MemoryJobStatus))
@@ -100,20 +111,20 @@ def test_job_accepts_each_coherent_durable_status(status: MemoryJobStatus) -> No
 
 
 @pytest.mark.parametrize("status", tuple(MemoryJobStatus))
-@pytest.mark.parametrize("memory_sequence", [0, -1, True, False, 1.0, "1", None])
-def test_job_rejects_invalid_global_sequence_for_every_status(status: MemoryJobStatus, memory_sequence: object) -> None:
+@pytest.mark.parametrize("memory_sequence", [0, -1])
+def test_job_rejects_invalid_global_sequence_for_every_status(status: MemoryJobStatus, memory_sequence: int) -> None:
     with pytest.raises(ValueError):
         _job(status, memory_sequence=memory_sequence)
 
 
 @pytest.mark.parametrize("field", ["conversation_id", "segment_id"])
-@pytest.mark.parametrize("value", ["", " ", " leading", "trailing ", None, 1, True])
-def test_job_rejects_non_normalized_source_identity_text(field: str, value: object) -> None:
+@pytest.mark.parametrize("value", ["", " ", " leading", "trailing "])
+def test_job_rejects_non_normalized_source_identity_text(field: str, value: str) -> None:
     with pytest.raises(ValueError):
         _job(MemoryJobStatus.STAGED, **{field: value})
 
 
-@pytest.mark.parametrize("value", [datetime(2026, 7, 1), "2026-07-01", None, 1, True])
+@pytest.mark.parametrize("value", [datetime(2026, 7, 1)])
 def test_job_started_on_requires_calendar_date_not_datetime(value: object) -> None:
     with pytest.raises(ValueError):
         _job(MemoryJobStatus.STAGED, started_on=value)
@@ -128,14 +139,14 @@ def test_job_rejects_invalid_lowercase_hex_identities(field: str, value: object)
         _job(MemoryJobStatus.STAGED, **{field: value})
 
 
-@pytest.mark.parametrize("attempts", [-1, True, False, 1.0, "1", None])
-def test_job_rejects_invalid_attempt_state(attempts: object) -> None:
+@pytest.mark.parametrize("attempts", [-1])
+def test_job_rejects_invalid_attempt_state(attempts: int) -> None:
     with pytest.raises(ValueError):
         _job(MemoryJobStatus.QUEUED, attempts=attempts)
 
 
-@pytest.mark.parametrize("generation", [-1, True, False, 1.0, "1", None])
-def test_job_rejects_invalid_claim_generation(generation: object) -> None:
+@pytest.mark.parametrize("generation", [-1])
+def test_job_rejects_invalid_claim_generation(generation: int) -> None:
     with pytest.raises(ValueError):
         _job(MemoryJobStatus.QUEUED, claim_generation=generation)
 
@@ -150,12 +161,15 @@ def test_non_running_job_rejects_any_lease_ownership(status: MemoryJobStatus, fi
         _job(status, **{field: value})
 
 
-@pytest.mark.parametrize("field", ["claim_id", "worker_id", "lease_expires_at"])
-@pytest.mark.parametrize("value", [None, "", "invalid worker id!", 0, True])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        *((field, value) for field in ("claim_id", "worker_id") for value in (None, "", "invalid worker id!", 0, True)),
+        ("lease_expires_at", None),
+    ],
+)
 def test_running_job_requires_complete_normalized_lease_identity(field: str, value: object) -> None:
     kwargs = {field: value}
-    if field == "lease_expires_at" and value == "invalid worker id!":
-        kwargs[field] = "not-time"
     with pytest.raises(ValueError):
         _job(MemoryJobStatus.RUNNING, **kwargs)
 
@@ -190,15 +204,15 @@ def test_new_staged_job_cannot_contain_retry_state_but_retried_stage_requires_er
     assert _job(MemoryJobStatus.STAGED, attempts=1, last_error="retry").last_error == "retry"
 
 
-@pytest.mark.parametrize("last_error", ["", None, 1, True, "x" * (MEMORY_JOB_ERROR_MAX_CHARS + 1)])
-def test_job_rejects_invalid_error_when_failure_state_requires_it(last_error: object) -> None:
+@pytest.mark.parametrize("last_error", ["", None, "x" * (MEMORY_JOB_ERROR_MAX_CHARS + 1)])
+def test_job_rejects_invalid_error_when_failure_state_requires_it(last_error: str | None) -> None:
     with pytest.raises(ValueError):
         _job(MemoryJobStatus.FAILED, last_error=last_error)
 
 
 @pytest.mark.parametrize("field", ["created_at", "updated_at"])
-@pytest.mark.parametrize("value", [None, "time", 1, date(2026, 7, 1), datetime(2026, 7, 1)])
-def test_job_rejects_missing_non_datetime_or_naive_system_timestamps(field: str, value: object) -> None:
+@pytest.mark.parametrize("value", [datetime(2026, 7, 1)])
+def test_job_rejects_missing_non_datetime_or_naive_system_timestamps(field: str, value: datetime) -> None:
     with pytest.raises(ValueError):
         _job(MemoryJobStatus.STAGED, **{field: value})
 
@@ -223,12 +237,6 @@ def test_job_lease_exposes_only_running_fencing_identity() -> None:
             MemoryJobLease(_job(status))
 
 
-@pytest.mark.parametrize("value", [None, {}, [], "job", 1, True])
-def test_job_lease_rejects_non_job_values(value: object) -> None:
-    with pytest.raises(TypeError):
-        MemoryJobLease(value)  # type: ignore[arg-type]
-
-
 @pytest.mark.parametrize("available_at", [BASE_TIME, BASE_TIME + timedelta(days=1)])
 def test_not_ready_error_normalizes_and_exposes_available_time(available_at: datetime) -> None:
     error = MemoryJobNotReadyError(available_at)
@@ -236,10 +244,10 @@ def test_not_ready_error_normalizes_and_exposes_available_time(available_at: dat
     assert available_at.isoformat() in str(error)
 
 
-@pytest.mark.parametrize("available_at", [None, "time", date(2026, 7, 1), datetime(2026, 7, 1)])
-def test_not_ready_error_requires_timezone_aware_datetime(available_at: object) -> None:
+@pytest.mark.parametrize("available_at", [datetime(2026, 7, 1)])
+def test_not_ready_error_requires_timezone_aware_datetime(available_at: datetime) -> None:
     with pytest.raises(TypeError):
-        MemoryJobNotReadyError(available_at)  # type: ignore[arg-type]
+        MemoryJobNotReadyError(available_at)
 
 
 @pytest.mark.parametrize("job", [None, _job(MemoryJobStatus.FAILED)])
@@ -431,8 +439,8 @@ def test_committed_node_change_accepts_only_action_matching_physical_state(
 
 
 @pytest.mark.parametrize("field", ["before_revision", "after_revision"])
-@pytest.mark.parametrize("value", [0, -1, True, False, 1.0, "1"])
-def test_node_change_rejects_invalid_non_null_revision(field: str, value: object) -> None:
+@pytest.mark.parametrize("value", [0, -1])
+def test_node_change_rejects_invalid_non_null_revision(field: str, value: int) -> None:
     kwargs = {
         "action": MemoryNodeChangeAction.UPDATE,
         "uri": MemoryURI.from_address(MemoryAddress.profile()),
@@ -581,3 +589,69 @@ def test_receipt_rejects_same_relation_in_added_and_removed_sets(state: MemoryCh
         )
     with pytest.raises(ValueError, match="same relation"):
         _prepared_receipt(**kwargs)
+
+
+_INGEST = ("ingest_result_snapshot",)
+BAD_OUTPUT_FIELDS: list[tuple[tuple[str | int, ...], object, type[Exception], str]] = [
+    ((*_INGEST, "append", "appended_count"), "1", ValueError, "appended_count must be a non-negative integer"),
+    ((*_INGEST, "append", "next_sequence"), True, ValueError, "next_sequence must be a non-negative integer"),
+    ((*_INGEST, "jobs", 0, "memory_sequence"), "1", ValueError, "memory_sequence must be a positive integer"),
+    ((*_INGEST, "jobs", 0, "conversation_id"), 1, ValueError, "conversation_id must be non-empty normalized"),
+    ((*_INGEST, "jobs", 0, "transaction_id"), None, ValueError, "transaction_id must be 32 lowercase"),
+    ((*_INGEST, "jobs", 0, "attempts"), 1.0, ValueError, "memory job attempts must be non-negative"),
+    ((*_INGEST, "jobs", 0, "claim_id"), 1, ValueError, "running memory job requires a claim_id"),
+    ((*_INGEST, "jobs", 0, "last_error"), 1, ValueError, "memory job last_error is invalid"),
+    ((*_INGEST, "retention", "triggered"), "no", TypeError, "retention flags must be boolean"),
+    ((*_INGEST, "retention", "pending_tokens"), "1", ValueError, "pending_tokens must be a non-negative integer"),
+    ((*_INGEST, "retention", "budget_exceeded"), 0, TypeError, "budget_exceeded must be boolean"),
+    ((*_INGEST, "retention", "reason"), None, ValueError, "retention reason must be non-empty text"),
+    ((*_INGEST, "retention", "boundary_kind"), 1, ValueError, "boundary_kind must be non-empty text or None"),
+    ((*_INGEST, "retention", "through_sequence"), "1", ValueError, "retention boundary must match"),
+    ((*_INGEST, "retention", "chunker_version"), 1, ValueError, "chunker_version must be non-empty text"),
+    (("output_id",), 1, ConversationSourceError, "memory output_id must be lowercase SHA-256 text"),
+    (("processor_fingerprint",), None, ConversationSourceError, "processor_fingerprint must be lowercase SHA-256"),
+]
+
+
+def _memory_output() -> tuple[Any, MemoryConversationOutput]:
+    envelope = conversation_source()
+    base = ingest_result(envelope)
+    result = ConversationMemoryIngestResult(base.append, (_job(MemoryJobStatus.STAGED),), base.retention)
+    output = MemoryConversationOutput.create(
+        source=envelope, processor_fingerprint="d" * 64, ingest_result=result, recorded_at=NOW
+    )
+    return envelope, output
+
+
+def _bad_output_record(path: tuple[str | int, ...], bad: object) -> dict[str, Any]:
+    record = _memory_output()[1].to_dict()
+    container: Any = record
+    for key in path[:-1]:
+        container = container[key]
+    container[path[-1]] = bad
+    return record
+
+
+@pytest.mark.parametrize(("path", "bad", "error", "message"), BAD_OUTPUT_FIELDS)
+def test_memory_output_parser_rejects_wrong_types_from_disk(
+    path: tuple[str | int, ...], bad: object, error: type[Exception], message: str
+) -> None:
+    """磁盘读回的 Memory Consumer 输出字段类型错，在解码器构造值对象前就被拒（W16）。"""
+
+    with pytest.raises(error, match=message):
+        MemoryConversationOutput.from_dict(_bad_output_record(path, bad))
+
+
+@pytest.mark.parametrize(("path", "bad", "error", "message"), BAD_OUTPUT_FIELDS[:15:3])
+def test_memory_output_store_rejects_wrong_types_read_back_from_disk(
+    tmp_path: Path, path: tuple[str | int, ...], bad: object, error: type[Exception], message: str
+) -> None:
+    """类型错的输出文件经真实 ``MemoryConversationOutputStore.read`` 读回时被拒。"""
+
+    store = MemoryConversationOutputStore(tmp_path, max_files_per_source=8, max_file_bytes=1 << 20)
+    envelope, output = _memory_output()
+    target = store._path(envelope.source_id, output.output_id)
+    target.parent.mkdir(parents=True)
+    target.write_text(canonical_json(_bad_output_record(path, bad)) + "\n", encoding="utf-8")
+    with pytest.raises(error, match=message):
+        store.read(envelope, output.output_id)

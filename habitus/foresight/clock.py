@@ -95,7 +95,7 @@ def ranked_account(
     """``visible_at`` 那一刻可见的整本账，编好时钟。``base`` 以内残留的事实文件一律忽略（先写累计值、再删文件，
     中途崩溃不会数两遍）。"""
 
-    if not isinstance(visible_at, datetime) or visible_at.utcoffset() is None:
+    if visible_at.utcoffset() is None:
         raise ForesightError("visible_at must be a timezone-aware datetime")
     visible = (
         fact

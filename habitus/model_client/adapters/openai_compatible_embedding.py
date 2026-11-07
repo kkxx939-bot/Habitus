@@ -41,8 +41,6 @@ class OpenAICompatibleEmbeddingProvider:
     def __init__(
         self, config: EmbeddingModelConfig, *, api_key: str = "", outbound: OutboundSettings | None = None
     ) -> None:
-        if not isinstance(config, EmbeddingModelConfig):
-            raise TypeError("config must be EmbeddingModelConfig")
         if config.route.adapter != ADAPTER_NAME:
             raise ModelConfigurationError(f"OpenAICompatibleEmbeddingProvider requires adapter='{ADAPTER_NAME}'")
         if not config.route.base_url:

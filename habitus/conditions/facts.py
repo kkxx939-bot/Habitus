@@ -45,11 +45,11 @@ class FactKey:
     unit: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name or self.name != self.name.strip():
+        if not self.name or self.name != self.name.strip():
             raise ValueError("fact key name must be non-empty text without surrounding whitespace")
         if self.kind not in FACT_KINDS:
             raise ValueError(f"fact key kind must be one of {FACT_KINDS}, not {self.kind!r}")
-        if self.unit is not None and (not isinstance(self.unit, str) or not self.unit):
+        if self.unit is not None and not self.unit:
             raise ValueError("fact key unit must be non-empty text or None")
         if self.kind == "类别" and self.unit is not None:
             raise ValueError("a categorical fact key has no unit")
@@ -71,10 +71,10 @@ class FactProvider(Protocol):
     def at(self, when: datetime) -> Conditions: ...
 
 
-def require_local(when: object) -> datetime:
+def require_local(when: datetime) -> datetime:
     """条件的时刻必须带时区（契约第 4 条）。接口拦不住"传了 UTC"，但拦得住"没有时区"。"""
 
-    if not isinstance(when, datetime) or when.utcoffset() is None:
+    if when.utcoffset() is None:
         raise TypeError("fact time must be a timezone-aware local datetime")
     return when
 
@@ -96,9 +96,6 @@ class CompositeFacts:
     """把几个源并成一个。**一个键只能有一个源**：两个源给同一个键，哪个赢都是错的——那是数据归属没定。"""
 
     def __init__(self, *providers: FactProvider) -> None:
-        for provider in providers:
-            if not isinstance(provider, FactProvider):
-                raise TypeError("every fact provider must implement FactProvider")
         seen: set[str] = set()
         for provider in providers:
             for key in provider.keys():
@@ -125,7 +122,7 @@ def conditions_of(*groups: Sequence[tuple[str, str]]) -> Conditions:
     merged: dict[str, str] = {}
     for group in groups:
         for key, value in group:
-            if not isinstance(key, str) or not key or not isinstance(value, str) or not value:
+            if not key or not value:
                 raise ValueError("conditions must be pairs of non-empty text")
             if key in merged and merged[key] != value:
                 raise ValueError(f"condition {key!r} has two values: {merged[key]!r} and {value!r}")

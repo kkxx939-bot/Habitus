@@ -32,7 +32,7 @@ class Rulers:
     recent: int
 
     def __post_init__(self) -> None:
-        if isinstance(self.recent, bool) or not isinstance(self.recent, int) or self.recent < 1:
+        if self.recent < 1:
             raise ValueError("rulers.recent must be a positive integer")
 
 

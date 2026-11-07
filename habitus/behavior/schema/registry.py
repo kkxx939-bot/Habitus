@@ -38,8 +38,6 @@ class BehaviorSchemaRegistry:
     def __init__(self, schemas: tuple[BehaviorTypeSchema, ...]) -> None:
         by_kind: dict[BehaviorKind, BehaviorTypeSchema] = {}
         for schema in schemas:
-            if not isinstance(schema, BehaviorTypeSchema):
-                raise TypeError("schemas must contain BehaviorTypeSchema values")
             if schema.kind in by_kind:
                 raise BehaviorSchemaError(f"duplicate behavior schema: {schema.kind.value}")
             by_kind[schema.kind] = schema

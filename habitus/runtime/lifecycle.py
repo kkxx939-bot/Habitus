@@ -58,7 +58,7 @@ class LifecycleParticipantOutcome:
     message: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name:
+        if not self.name:
             raise TypeError("participant name must be non-empty text")
         failed = self.error_type is not None
         if failed == (self.report is not None):
@@ -81,18 +81,12 @@ class LifecycleMaintenanceCycleResult:
     outcomes: tuple[LifecycleParticipantOutcome, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.lease_acquired, bool):
-            raise TypeError("lease_acquired must be boolean")
         for name in ("started_at", "finished_at"):
             value = getattr(self, name)
-            if not isinstance(value, datetime) or value.utcoffset() is None:
+            if value.utcoffset() is None:
                 raise ValueError(f"{name} must be timezone-aware")
         if self.finished_at < self.started_at:
             raise ValueError("maintenance cycle cannot finish before it starts")
-        if not isinstance(self.outcomes, tuple) or any(
-            not isinstance(item, LifecycleParticipantOutcome) for item in self.outcomes
-        ):
-            raise TypeError("outcomes must contain LifecycleParticipantOutcome values")
         names = [item.name for item in self.outcomes]
         if len(names) != len(set(names)):
             raise ValueError("participant names must be unique within one cycle")
@@ -152,20 +146,14 @@ class LifecycleWorker:
         observer: Observer | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if not isinstance(config, LifecycleWorkerConfig):
-            raise TypeError("config must be LifecycleWorkerConfig")
         resolved = tuple(participants)
         names = [participant.name for participant in resolved]
-        if any(not isinstance(name, str) or not name for name in names) or len(names) != len(set(names)):
+        if any(not name for name in names) or len(names) != len(set(names)):
             raise ValueError("participants must have unique non-empty names")
-        if not isinstance(lease_key, str) or not lease_key:
+        if not lease_key:
             raise ValueError("lease_key must be non-empty text")
         resolved_worker_id = worker_id or f"lifecycle-{os.getpid()}-{uuid4().hex}"
-        if (
-            not isinstance(resolved_worker_id, str)
-            or not resolved_worker_id
-            or any(ord(character) < 32 for character in resolved_worker_id)
-        ):
+        if not resolved_worker_id or any(ord(character) < 32 for character in resolved_worker_id):
             raise ValueError("worker_id must be non-empty normalized text")
         self._participants = resolved
         self.config = config
@@ -392,6 +380,7 @@ class LifecycleWorker:
         try:
             await asyncio.wait_for(self._wake_event.wait(), timeout=delay_seconds)
         except TimeoutError:
+            # 等满一个周期没人唤醒是常态：照常进下一轮
             pass
         finally:
             self._wake_event.clear()

@@ -35,7 +35,7 @@ class MemoryFieldCompactionConfig:
             ("max_output_tokens", self.max_output_tokens, 256, 65_536),
             ("max_field_chars", self.max_field_chars, 1_024, 4_000_000),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            if not minimum <= value <= maximum:
                 raise ValueError(f"{name} must be between {minimum} and {maximum}")
 
 
@@ -47,15 +47,7 @@ class MemoryFieldCompactionResult:
     changed_fields: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.source, MemoryDocument):
-            raise TypeError("source must be MemoryDocument")
-        if not isinstance(self.fields, Mapping):
-            raise TypeError("fields must be a mapping")
         object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
-        if not isinstance(self.operations, SemanticFieldOperationBatch):
-            raise TypeError("operations must be SemanticFieldOperationBatch")
-        if not isinstance(self.changed_fields, tuple):
-            raise TypeError("changed_fields must be a tuple")
 
     @property
     def changed(self) -> bool:
@@ -72,19 +64,11 @@ class MemoryFieldCompactor:
         registry: MemorySchemaRegistry | None = None,
         config: MemoryFieldCompactionConfig | None = None,
     ) -> None:
-        if not isinstance(client, StructuredChatClient):
-            raise TypeError("client must be StructuredChatClient")
-        if registry is not None and not isinstance(registry, MemorySchemaRegistry):
-            raise TypeError("registry must be MemorySchemaRegistry")
-        if config is not None and not isinstance(config, MemoryFieldCompactionConfig):
-            raise TypeError("config must be MemoryFieldCompactionConfig")
         self.client = client
         self.registry = registry or MemorySchemaRegistry.load_default()
         self.config = config or MemoryFieldCompactionConfig()
 
     async def compact(self, document: MemoryDocument) -> MemoryFieldCompactionResult:
-        if not isinstance(document, MemoryDocument):
-            raise TypeError("document must be MemoryDocument")
         schema = self.registry.get(document.kind)
         content_fields = tuple(
             field

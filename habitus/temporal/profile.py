@@ -57,7 +57,7 @@ def day_profile(
     per_day = slots_per_day(slot_minutes)
     if not 0 < 2 * pool_half_width < per_day:
         raise ValueError("pool_half_width must leave the neighbourhood shorter than a day")
-    if isinstance(recent, bool) or not isinstance(recent, int) or recent < 1:
+    if recent < 1:
         raise ValueError("recent must be a positive integer")
     hidden = blind_days(days)
     started: dict[date, set[int]] = {}

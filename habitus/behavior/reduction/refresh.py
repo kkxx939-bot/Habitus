@@ -23,8 +23,6 @@ class RefreshVerdict(str, Enum):
 
 class RefreshRetries:
     def __init__(self, ledger: RetryLedger) -> None:
-        if not isinstance(ledger, RetryLedger):
-            raise TypeError("ledger must be RetryLedger")
         self.ledger = ledger
 
     def touched(self, days: Iterable[date]) -> None:

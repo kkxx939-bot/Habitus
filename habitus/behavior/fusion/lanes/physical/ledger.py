@@ -112,7 +112,7 @@ class PhysicalSegmentLedger:
         """删掉比 ``now`` 早 ``backfill_days`` + 1 个 UTC 日的整日目录（编号与时段两份同口径）；
         返回删掉的日目录数。这些日子里的单位再送来会整份拒收，记着也用不上。"""
 
-        if isinstance(backfill_days, bool) or not isinstance(backfill_days, int) or backfill_days < 1:
+        if backfill_days < 1:
             raise ValueError("backfill_days must be a positive integer")
         cutoff = _utc(now).date() - timedelta(days=backfill_days + 1)
         removed = 0
@@ -173,6 +173,7 @@ class PhysicalSegmentLedger:
         try:
             os.rmdir(directory)
         except OSError:
+            # 目录里还留着不属于本账的东西：按约定留着目录，删不掉不影响账的正确性。
             pass
 
     def _device_directories(self) -> list[Path]:

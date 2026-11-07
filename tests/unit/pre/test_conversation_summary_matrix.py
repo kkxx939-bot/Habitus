@@ -40,8 +40,8 @@ def test_summary_required_text_accepts_any_non_whitespace_only_value(field: str,
 
 
 @pytest.mark.parametrize("field", ["overview", "ending_state"])
-@pytest.mark.parametrize("value", ["", " ", "\n\t", None, 1, [], {}])
-def test_summary_required_text_rejects_empty_or_non_text_values(field: str, value: object) -> None:
+@pytest.mark.parametrize("value", ["", " ", "\n\t"])
+def test_summary_required_text_rejects_empty_values(field: str, value: object) -> None:
     with pytest.raises(ConversationSummarySchemaError):
         ConversationSummaryContent(**_content_values(**{field: value}))  # type: ignore[arg-type]
 
@@ -63,8 +63,8 @@ def test_summary_text_sequences_accept_list_or_tuple_and_freeze_to_tuple(field: 
 
 
 @pytest.mark.parametrize("field", ["chronology", "corrections", "open_threads"])
-@pytest.mark.parametrize("value", [None, "text", {}, 1, ("",), (" ",), (1,), ({},)])
-def test_summary_text_sequences_reject_non_lists_and_invalid_items(field: str, value: object) -> None:
+@pytest.mark.parametrize("value", [("",), (" ",)])
+def test_summary_text_sequences_reject_empty_items(field: str, value: object) -> None:
     with pytest.raises(ConversationSummarySchemaError):
         ConversationSummaryContent(**_content_values(**{field: value}))  # type: ignore[arg-type]
 
@@ -170,8 +170,8 @@ def test_segment_summary_accepts_non_negative_sequence_values(field: str, value:
 
 
 @pytest.mark.parametrize("field", ["start_sequence", "end_sequence"])
-@pytest.mark.parametrize("value", [-1, True, False, 1.0, "1", None])
-def test_segment_summary_rejects_negative_boolean_or_non_integer_sequence(field: str, value: object) -> None:
+@pytest.mark.parametrize("value", [-1])
+def test_segment_summary_rejects_negative_sequence(field: str, value: object) -> None:
     with pytest.raises(ConversationSummarySchemaError):
         replace(_segment_summary(), **{field: value})
 
@@ -231,8 +231,6 @@ def test_segment_summary_source_binding_detects_each_changed_source_dimension() 
     for mutated in mutations:
         with pytest.raises(ConversationSummarySchemaError, match="does not match"):
             mutated.require_matches_source(source)
-    with pytest.raises(TypeError):
-        value.require_matches_source(object())  # type: ignore[arg-type]
 
 
 def test_segment_summary_round_trip_is_exact_and_digest_stable() -> None:
@@ -295,10 +293,13 @@ def test_summary_source_reference_round_trip_preserves_kind(kind: ConversationSu
     assert ConversationSummarySourceRef.from_dict(value.to_dict()) == value
 
 
-@pytest.mark.parametrize("kind", ["segment_summary", "range_summary", "unknown", None, 1])
-def test_summary_source_constructor_requires_enum_instance_not_raw_value(kind: object) -> None:
+@pytest.mark.parametrize("kind", ["unknown", None, 1])
+def test_summary_source_reference_from_dict_rejects_undeclared_kind(kind: object) -> None:
+    payload = ConversationSummarySourceRef(
+        ConversationSummarySourceKind.SEGMENT, "000000000000-000000000001", "a" * 64, 0, 1
+    ).to_dict()
     with pytest.raises(ConversationSummarySchemaError, match="kind"):
-        ConversationSummarySourceRef(kind, "000000000000-000000000001", "a" * 64, 0, 1)  # type: ignore[arg-type]
+        ConversationSummarySourceRef.from_dict({**payload, "kind": kind})
 
 
 @pytest.mark.parametrize(
@@ -322,8 +323,6 @@ def test_summary_source_reference_accepts_bounded_sequence_identity(start: int, 
         (0, -1),
         (2, 1),
         (1_000_000_000_000, 1_000_000_000_000),
-        (True, 1),
-        (0, 1.0),
     ],
 )
 def test_summary_source_reference_rejects_invalid_sequence_range(start: object, end: object) -> None:
@@ -433,14 +432,6 @@ def test_range_summary_rejects_source_count_outside_bounds(count: int) -> None:
         replace(valid, source_refs=refs)
 
 
-def test_range_summary_requires_tuple_of_source_refs() -> None:
-    valid, _ = _range_summary()
-    with pytest.raises(ConversationSummarySchemaError):
-        replace(valid, source_refs=list(valid.source_refs))  # type: ignore[arg-type]
-    with pytest.raises(ConversationSummarySchemaError):
-        replace(valid, source_refs=(valid.source_refs[0], object()))  # type: ignore[arg-type]
-
-
 def test_range_and_archive_require_stage_specific_source_kind() -> None:
     valid, _ = _range_summary()
     wrong = replace(valid.source_refs[0], kind=ConversationSummarySourceKind.RANGE)
@@ -481,8 +472,6 @@ def test_range_summary_binding_detects_count_type_conversation_reference_and_tim
     valid.require_matches_sources(sources)
     with pytest.raises(ConversationSummarySchemaError, match="count"):
         valid.require_matches_sources(sources[:1])
-    with pytest.raises(ConversationSummarySchemaError, match="count"):
-        valid.require_matches_sources(list(sources))  # type: ignore[arg-type]
     with pytest.raises(ConversationSummarySchemaError, match="source type"):
         valid.require_matches_sources((object(), object()))  # type: ignore[arg-type]
     other_sources = tuple(replace(source, conversation_id="other") for source in sources)
@@ -553,3 +542,89 @@ def test_range_summary_from_dict_rejects_wrong_schema_stage_and_source_container
 def test_summary_source_ref_factory_rejects_unsupported_source_type(source: object) -> None:
     with pytest.raises(TypeError):
         ConversationSummarySourceRef.from_summary(source)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("overview", 1, "overview must be non-empty text"),
+        ("chronology", "step one", "chronology must be a list of text items"),
+        ("corrections", ["ok", 2], "corrections item must be non-empty text"),
+        ("ending_state", None, "ending_state must be non-empty text"),
+        ("open_threads", {"a": 1}, "open_threads must be a list of text items"),
+    ],
+)
+def test_summary_content_model_validate_rejects_wrong_types_from_model_output(
+    field: str, bad: object, message: str
+) -> None:
+    """摘要模型答复里类型错的字段在 ``model_validate`` 就被拒（W16：类型检查在边界）。"""
+
+    with pytest.raises(ConversationSummarySchemaError, match=message):
+        ConversationSummaryContent.model_validate(_content_values(**{field: bad}))
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("conversation_id", 7, "conversation_id must be one safe non-empty path segment"),
+        ("segment_id", None, "segment_id must be one safe non-empty path segment"),
+        ("source_message_digest", 1, "source_message_digest must be a SHA-256 hex digest"),
+        ("start_sequence", True, "start_sequence must be a non-negative integer"),
+        ("end_sequence", "1", "end_sequence must be a non-negative integer"),
+        ("overview", ["overview"], "overview must be non-empty text"),
+        ("chronology", "step one", "chronology must be a list of text items"),
+        ("open_threads", [None], "open_threads item must be non-empty text"),
+        ("starts_mid_turn", 0, "summary turn-boundary flags must be boolean"),
+        ("ends_mid_turn", "false", "summary turn-boundary flags must be boolean"),
+    ],
+)
+def test_segment_summary_from_dict_rejects_wrong_types_read_back(field: str, bad: object, message: str) -> None:
+    """磁盘读回的 Segment Summary 类型错的字段在 ``from_dict`` 就被拒。"""
+
+    payload = {**_segment_summary().to_dict(), field: bad}
+    with pytest.raises(ConversationSummarySchemaError, match=message):
+        ConversationSegmentSummary.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("summary_id", 1, "summary source id must be one safe non-empty path segment"),
+        ("digest", None, "summary source digest must be a SHA-256 hex digest"),
+        ("start_sequence", 0.0, "start_sequence must be a bounded non-negative integer"),
+        ("end_sequence", True, "end_sequence must be a bounded non-negative integer"),
+    ],
+)
+def test_summary_source_reference_from_dict_rejects_wrong_types_read_back(
+    field: str, bad: object, message: str
+) -> None:
+    """磁盘读回的来源绑定类型错的字段在 ``from_dict`` 就被拒。"""
+
+    value = ConversationSummarySourceRef(
+        ConversationSummarySourceKind.SEGMENT, "000000000000-000000000001", "a" * 64, 0, 1
+    )
+    payload = {**value.to_dict(), field: bad}
+    with pytest.raises(ConversationSummarySchemaError, match=message):
+        ConversationSummarySourceRef.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("conversation_id", 1, "conversation_id must be one safe non-empty path segment"),
+        ("range_id", None, "range_id must be one safe non-empty path segment"),
+        ("start_sequence", "0", "start_sequence must be a bounded non-negative integer"),
+        ("end_sequence", None, "end_sequence must be a bounded non-negative integer"),
+        ("ending_state", 3, "ending_state must be non-empty text"),
+        ("corrections", {"a"}, "corrections must be a list of text items"),
+        ("open_threads", ["a", None], "open_threads item must be non-empty text"),
+        ("starts_mid_turn", None, "range summary turn-boundary flags must be boolean"),
+        ("ends_mid_turn", 1, "range summary turn-boundary flags must be boolean"),
+    ],
+)
+def test_range_summary_from_dict_rejects_wrong_types_read_back(field: str, bad: object, message: str) -> None:
+    """磁盘读回的 Range Summary 类型错的字段在 ``from_dict`` 就被拒。"""
+
+    payload = {**_range_summary()[0].to_dict(), field: bad}
+    with pytest.raises(ConversationSummarySchemaError, match=message):
+        ConversationRangeSummary.from_dict(payload)

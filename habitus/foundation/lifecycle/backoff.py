@@ -16,17 +16,17 @@ class BackoffPolicy:
 
     def __post_init__(self) -> None:
         for label, value in (("base_seconds", self.base_seconds), ("cap_seconds", self.cap_seconds)):
-            if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{label} must be a positive finite number")
         if self.base_seconds > self.cap_seconds:
             raise ValueError("base_seconds must not exceed cap_seconds")
-        if isinstance(self.max_doublings, bool) or not isinstance(self.max_doublings, int) or self.max_doublings < 0:
+        if self.max_doublings < 0:
             raise ValueError("max_doublings must be a non-negative integer")
 
     def delay(self, attempt: int) -> float:
         """第 ``attempt`` 次失败之后等多少秒再试（``attempt`` 从 1 起）。"""
 
-        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+        if attempt < 1:
             raise ValueError("attempt must be a positive integer")
         return min(self.cap_seconds, self.base_seconds * (2 ** min(self.max_doublings, attempt - 1)))
 

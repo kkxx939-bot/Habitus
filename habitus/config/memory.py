@@ -52,37 +52,6 @@ class MemoryConfig:
     transaction_journal: MemoryTransactionJournalConfig = field(default_factory=MemoryTransactionJournalConfig)
     semantic: MemorySemanticConfig = field(default_factory=MemorySemanticConfig)
 
-    def __post_init__(self) -> None:
-        expected = (
-            ("document", self.document, MemoryDocumentConfig),
-            ("intention_review", self.intention_review, MemoryIntentionReviewConfig),
-            ("tree", self.tree, MemoryTreeConfig),
-            ("snapshot", self.snapshot, SnapshotReadConfig),
-            ("search_service", self.search_service, MemorySearchServiceConfig),
-            ("recall_lifecycle", self.recall_lifecycle, MemoryRecallLifecycleConfig),
-            ("field_compaction", self.field_compaction, MemoryFieldCompactionConfig),
-            ("lifecycle_maintenance", self.lifecycle_maintenance, MemoryLifecycleMaintenanceConfig),
-            ("editor_retrieval", self.editor_retrieval, MemoryRetrievalConfig),
-            ("vector_store", self.vector_store, VectorStoreConfig),
-            ("vector_index", self.vector_index, MemoryVectorIndexConfig),
-            (
-                "semantic_search",
-                self.semantic_search,
-                MemorySemanticSearchConfig,
-            ),
-            ("extraction", self.extraction, MemoryExtractionConfig),
-            ("commit", self.commit, MemoryCommitConfig),
-            (
-                "transaction_journal",
-                self.transaction_journal,
-                MemoryTransactionJournalConfig,
-            ),
-            ("semantic", self.semantic, MemorySemanticConfig),
-        )
-        for name, value, expected_type in expected:
-            if not isinstance(value, expected_type):
-                raise TypeError(f"memory.{name} must be {expected_type.__name__}")
-
     @classmethod
     def from_mapping(cls, value: object) -> MemoryConfig:
         data = group_fields(cls, value, "config.memory")

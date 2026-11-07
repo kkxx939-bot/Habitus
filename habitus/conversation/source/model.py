@@ -74,7 +74,9 @@ def encode_durable_record(record: Mapping[str, Any], *, max_bytes: int, label: s
     return encoded
 
 
-def source_timestamp(value: datetime | str, label: str) -> datetime:
+def source_timestamp(value: object, label: str) -> datetime:
+    """把磁盘读回或调用方给的时间解码成 UTC ``datetime``；类型不对在这里就拒。"""
+
     if not isinstance(value, datetime | str):
         raise ConversationSourceError(f"{label} must be a datetime")
     try:
@@ -93,7 +95,7 @@ def _protocol(value: object) -> str:
     return value
 
 
-def _started_on(value: date | str) -> date:
+def _started_on(value: object) -> date:
     if isinstance(value, datetime):
         raise ConversationSourceError("started_on must be a calendar date")
     if isinstance(value, date):
@@ -132,14 +134,10 @@ def conversation_source_request_digest(
 ) -> str:
     """保持 Journal Ingress 已有公式不变的规范请求摘要。"""
 
-    if not isinstance(batch, ConversationBatch):
-        raise TypeError("batch must be ConversationBatch")
     if batch.conversation_id != conversation_id:
         raise ConversationSourceError("batch belongs to another conversation")
     resolved_date = _started_on(started_on)
     resolved_protocol = _protocol(protocol)
-    if not isinstance(after_turn, bool):
-        raise TypeError("after_turn must be boolean")
     omitted = _omit_tool_call_ids(omit_tool_call_ids)
     return canonical_digest(
         {
@@ -200,16 +198,12 @@ class ConversationSourceEnvelope:
 
     def __post_init__(self) -> None:
         require_sha256(self.source_id, "source_id")
-        if not isinstance(self.conversation_id, str) or not self.conversation_id:
+        if not self.conversation_id:
             raise ConversationSourceError("conversation_id must be non-empty text")
-        if not isinstance(self.batch, ConversationBatch):
-            raise TypeError("batch must be ConversationBatch")
         if self.batch.conversation_id != self.conversation_id:
             raise ConversationSourceError("batch belongs to another conversation")
         object.__setattr__(self, "started_on", _started_on(self.started_on))
         object.__setattr__(self, "protocol", _protocol(self.protocol))
-        if not isinstance(self.after_turn, bool):
-            raise TypeError("after_turn must be boolean")
         object.__setattr__(self, "omit_tool_call_ids", _omit_tool_call_ids(self.omit_tool_call_ids))
         require_sha256(self.delivery_id, "delivery_id")
         require_sha256(self.request_digest, "request_digest")
@@ -284,7 +278,7 @@ class ConversationSourceEnvelope:
 
     @staticmethod
     def source_identity(conversation_id: str, started_on: date, delivery_id: str) -> str:
-        if not isinstance(conversation_id, str) or not conversation_id:
+        if not conversation_id:
             raise ConversationSourceError("conversation_id must be non-empty text")
         return canonical_digest(
             {
@@ -345,19 +339,25 @@ class ConversationSourceEnvelope:
         batch_value = record["batch"]
         if not isinstance(batch_value, Mapping):
             raise ConversationSourceError("source envelope batch must be an object")
+        conversation_id = record["conversation_id"]
+        if not isinstance(conversation_id, str):
+            raise ConversationSourceError("conversation_id must be non-empty text")
+        after_turn = record["after_turn"]
+        if not isinstance(after_turn, bool):
+            raise TypeError("after_turn must be boolean")
         return cls(
-            source_id=record["source_id"],
-            conversation_id=record["conversation_id"],
+            source_id=require_sha256(record["source_id"], "source_id"),
+            conversation_id=conversation_id,
             started_on=_started_on(record["started_on"]),
-            protocol=record["protocol"],
+            protocol=_protocol(record["protocol"]),
             batch=ConversationBatch.from_dict(batch_value),
-            after_turn=record["after_turn"],
+            after_turn=after_turn,
             omit_tool_call_ids=_omit_tool_call_ids(record["omit_tool_call_ids"]),
-            delivery_id=record["delivery_id"],
-            request_digest=record["request_digest"],
-            source_payload_digest=record["source_payload_digest"],
+            delivery_id=require_sha256(record["delivery_id"], "delivery_id"),
+            request_digest=require_sha256(record["request_digest"], "request_digest"),
+            source_payload_digest=require_sha256(record["source_payload_digest"], "source_payload_digest"),
             recorded_at=source_timestamp(record["recorded_at"], "recorded_at"),
-            source_record_digest=record["source_record_digest"],
+            source_record_digest=require_sha256(record["source_record_digest"], "source_record_digest"),
         )
 
 

@@ -29,20 +29,9 @@ class MemoryTurnContext:
     earlier_segment_count: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.opening_prompts, tuple) or any(
-            not isinstance(message, ConversationMessage) or message.role is not ConversationMessageRole.PROMPT
-            for message in self.opening_prompts
-        ):
+        if any(message.role is not ConversationMessageRole.PROMPT for message in self.opening_prompts):
             raise TypeError("opening_prompts must be a tuple of PROMPT messages")
-        if not isinstance(self.earlier_summaries, tuple) or any(
-            not isinstance(summary, ConversationSegmentSummary) for summary in self.earlier_summaries
-        ):
-            raise TypeError("earlier_summaries must be a tuple of ConversationSegmentSummary values")
-        if (
-            isinstance(self.earlier_segment_count, bool)
-            or not isinstance(self.earlier_segment_count, int)
-            or self.earlier_segment_count < len(self.earlier_summaries)
-        ):
+        if self.earlier_segment_count < len(self.earlier_summaries):
             raise ValueError("earlier_segment_count must cover every earlier summary")
 
     @property

@@ -27,7 +27,7 @@ class QuestionTool:
     def __post_init__(self) -> None:
         for label in ("host", "tool", "title_key"):
             value = getattr(self, label)
-            if not isinstance(value, str) or not value.strip():
+            if not value.strip():
                 raise ValueError(f"question tool {label} must be non-empty text")
 
 
@@ -62,11 +62,11 @@ def parse_question_replies(content: str) -> tuple[QuestionReply, ...]:
         return ()
     found: list[QuestionReply] = []
     for item in items:
-        if not isinstance(item, dict) or not isinstance(item.get("answer"), str):
+        if not isinstance(item, dict) or not isinstance(answer := item.get("answer"), str):
             continue
         identity = _question_item(item.get("questionItemId"))
         if identity is not None:
-            found.append(QuestionReply(identity[0], identity[1], str(item.get("question", "")), item["answer"]))
+            found.append(QuestionReply(identity[0], identity[1], str(item.get("question", "")), answer))
     return tuple(found)
 
 

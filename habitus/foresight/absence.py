@@ -78,7 +78,7 @@ def returned_after_absence(
     if table is None:
         return False
     days = opportunity_days(facts, item, base, unsettled)
-    anchors = [*((base.last_day,) if base is not None and base.last_day is not None else ()), *days]
+    anchors: list[date] = [*((base.last_day,) if base is not None and base.last_day is not None else ()), *days]
     today = item.formed_at.date()
     if not anchors or anchors[-1] >= today:
         return False
@@ -96,7 +96,10 @@ def compacted_gaps(
     没有机会表时间隔照日子数算（全看着）。"""
 
     summary = GapSummary(previous.gap_lengths) if previous is not None else GapSummary()
-    anchors = [*((previous.last_day,) if previous is not None and previous.last_day is not None else ()), *days]
+    anchors: list[date] = [
+        *((previous.last_day,) if previous is not None and previous.last_day is not None else ()),
+        *days,
+    ]
     known = set(previous.day_types if previous is not None else ())
     types = known | {table.day_type(day) if table is not None else None for day in days}
     if len(anchors) >= 2:

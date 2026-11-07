@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import replace
 
 from habitus.memory.conversation.compaction import ConversationRangeSummaryStore
 from habitus.memory.conversation.indexing.model import ConversationSummaryMatch
+from habitus.memory.conversation.layout import ConversationAddress
 from habitus.memory.conversation.summary import ConversationSummaryStore
 from habitus.pre.conversation import (
     ConversationRangeSummary,
@@ -29,17 +31,9 @@ class ConversationSummaryExpander:
         *,
         max_source_reads: int = 10_000,
     ) -> None:
-        if not isinstance(segment_store, ConversationSummaryStore):
-            raise TypeError("segment_store must be ConversationSummaryStore")
-        if not isinstance(range_store, ConversationRangeSummaryStore):
-            raise TypeError("range_store must be ConversationRangeSummaryStore")
         if segment_store.layout.root != range_store.layout.root:
             raise ValueError("Summary expander stores must share one Conversation root")
-        if (
-            isinstance(max_source_reads, bool)
-            or not isinstance(max_source_reads, int)
-            or not 1 <= max_source_reads <= 100_000
-        ):
+        if not 1 <= max_source_reads <= 100_000:
             raise ValueError("Summary expansion max_source_reads is outside its supported range")
         self.segment_store = segment_store
         self.range_store = range_store
@@ -51,9 +45,7 @@ class ConversationSummaryExpander:
         *,
         max_chars: int,
     ) -> ConversationSummaryMatch:
-        if not isinstance(match, ConversationSummaryMatch):
-            raise TypeError("match must be ConversationSummaryMatch")
-        if isinstance(max_chars, bool) or not isinstance(max_chars, int) or max_chars <= 0:
+        if max_chars <= 0:
             raise ValueError("Summary expansion max_chars must be positive")
         if isinstance(match.summary, ConversationSegmentSummary):
             return match
@@ -72,7 +64,13 @@ class ConversationSummaryExpander:
             return match
         return replace(match, content="\n".join(blocks))
 
-    def _walk(self, address, parent: ConversationRangeSummary, seen, reads):
+    def _walk(
+        self,
+        address: ConversationAddress,
+        parent: ConversationRangeSummary,
+        seen: set[tuple[str, str]],
+        reads: list[int],
+    ) -> Iterator[ConversationSegmentSummary | ConversationRangeSummary]:
         for reference in parent.source_refs:
             if reads[0] >= self.max_source_reads:
                 raise ConversationSummaryExpansionError("Summary expansion exceeds max_source_reads")

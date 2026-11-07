@@ -51,8 +51,6 @@ def redact_secrets(value: str) -> str:
     """只清理凭据（Bearer、``key=…``、带前缀的 token、回包里夹在方括号里的凭据），路径与空白原样保留：
     给本机终端看的一行原因用（路径要留着他才知道是哪儿）。"""
 
-    if not isinstance(value, str):
-        raise TypeError("redacted value must be text")
     text = _BEARER_SECRET.sub("Bearer [REDACTED]", value)
     text = _NAMED_SECRET.sub(lambda match: f"{match.group(1)}=[REDACTED]", text)
     text = _BRACKETED_SECRET.sub(lambda match: f"{match.group(1)}[REDACTED]", text)

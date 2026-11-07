@@ -61,13 +61,13 @@ class OpenRequest:
 
     def __post_init__(self) -> None:
         for label in ("request_id", "kind_token", "text"):
-            if not isinstance(getattr(self, label), str) or not getattr(self, label):
+            if not getattr(self, label):
                 raise ForesightError(f"open request {label} must be non-empty text")
         for label in ("deadline", "formed_at"):
             value = getattr(self, label)
-            if not isinstance(value, datetime) or value.utcoffset() is None:
+            if value.utcoffset() is None:
                 raise ForesightError(f"open request {label} must be a timezone-aware datetime")
-        if not isinstance(self.day, date) or isinstance(self.day, datetime):
+        if isinstance(self.day, datetime):
             raise ForesightError("open request day must be a date")
 
 
@@ -118,10 +118,8 @@ class HostMessage:
     def __post_init__(self) -> None:
         if self.role not in ("prompt", "completion", "tool_call", "tool_result"):
             raise ForesightError(f"unknown host message role: {self.role!r}")
-        if not isinstance(self.occurred_at, datetime) or self.occurred_at.utcoffset() is None:
+        if self.occurred_at.utcoffset() is None:
             raise ForesightError("host message occurred_at must be a timezone-aware datetime")
-        if not isinstance(self.content, str):
-            raise ForesightError("host message content must be text")
 
 
 @dataclass(frozen=True)
@@ -211,17 +209,13 @@ class ReminderOutlet:
         kind_label: Callable[[str], str | None] | None = None,
         observer: Observer | None = None,
     ) -> None:
-        if not isinstance(store, OutletStore):
-            raise TypeError("store must be an OutletStore")
-        if not isinstance(ledger, ForesightLedgerStore):
-            raise TypeError("ledger must be a ForesightLedgerStore")
         for label, value in (("liveness", liveness), ("lease", lease)):
-            if not isinstance(value, timedelta) or value <= timedelta(0):
+            if value <= timedelta(0):
                 raise ValueError(f"{label} must be a positive timedelta")
         for label, count in (("max_attempts", max_attempts), ("claim_limit", claim_limit)):
-            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            if count < 1:
                 raise ValueError(f"{label} must be a positive integer")
-        if isinstance(similarity, bool) or not isinstance(similarity, int | float) or not 0.0 < similarity <= 1.0:
+        if not 0.0 < similarity <= 1.0:
             raise ValueError("similarity must lie in (0, 1]")
         self.store = store
         self.ledger = ledger
@@ -296,11 +290,11 @@ class ReminderOutlet:
         """宿主来取：去掉过了时限的、别的会话租着的、放回到上限的；按时限由近到远取 ``limit`` 条；同一会话租约内重取拿回自己手里的。"""
 
         for label, value in (("host", host), ("session", session)):
-            if not isinstance(value, str) or not value.strip():
+            if not value.strip():
                 raise ForesightError(f"{label} must be non-empty text")
-        if not isinstance(at, datetime) or at.utcoffset() is None:
+        if at.utcoffset() is None:
             raise ForesightError("at must be a timezone-aware datetime")
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= self.claim_limit:
+        if not 1 <= limit <= self.claim_limit:
             raise ForesightError(f"limit must be an integer between 1 and {self.claim_limit}")
         if host not in {tool.host for tool in self.tools}:
             # 没有提问工具的宿主问不了他：不给、也不算它活着（方案 36 第四节），免得它占租约、把放回次数耗到上限
@@ -366,7 +360,7 @@ class ReminderOutlet:
                 claim = _decode_claim(raw)
                 if claim is None:
                     continue
-                holders = (*claim.history, *([claim.holder] if claim.holder is not None else ()))
+                holders: tuple[_Holder, ...] = (*claim.history, *([claim.holder] if claim.holder is not None else ()))
                 found[claim.request.request_id] = ClaimTrail(
                     claim.request.request_id,
                     claim.attempts,
@@ -397,7 +391,7 @@ class ReminderOutlet:
         """一份会话送回来了：认提问（写「说了」、固定选项写回话、问了没答的记下）、认作答（Desktop 晚来的用户消息——同一份里
         先问后答的也认）、没问的放回。"""
 
-        if not isinstance(session, str) or not session:
+        if not session:
             raise ForesightError("session must be non-empty text")
         with self._lock:
             tools = {tool.tool: tool for tool in self.tools if host is None or tool.host == host}

@@ -21,6 +21,7 @@ from habitus.conversation.source import (
     source_timestamp,
 )
 from habitus.foundation.integrity import canonical_digest, canonical_json, canonicalize
+from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.filesystem import (
     DurablePathIntegrityError,
     ImmutableArtifactConflictError,
@@ -40,6 +41,32 @@ from habitus.pre.conversation import ConversationBatch, ConversationMessage
 MEMORY_CONVERSATION_OUTPUT_SCHEMA_VERSION = "memory_conversation_output_v1"
 MEMORY_CONVERSATION_OUTPUT_KIND = "memory_conversation_output"
 _OUTPUT_FILE = re.compile(r"^(?P<output_id>[0-9a-f]{64})\.json$")
+_NORMALIZED_MESSAGE = "{} must be non-empty normalized text"
+
+
+# 以下解码助手让磁盘读回的字段在构造前确认类型；报错的异常类型与文字照抄被构造值对象自身的检查
+def _int_field(value: object, message: str) -> int:
+    if not is_int(value):
+        raise ValueError(message)
+    return value
+
+
+def _text_field(value: object, message: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(message)
+    return value
+
+
+def _optional_text_field(value: object, message: str) -> str | None:
+    if value is not None and not isinstance(value, str):
+        raise ValueError(message)
+    return value
+
+
+def _flag_field(value: object, message: str) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError(message)
+    return value
 
 
 def _append_to_dict(value: ConversationAppendResult) -> dict[str, Any]:
@@ -70,9 +97,9 @@ def _append_from_dict(value: object) -> ConversationAppendResult:
         raise ConversationSourceError("memory append status is invalid") from exc
     return ConversationAppendResult(
         status=status,
-        appended_count=value["appended_count"],
+        appended_count=_int_field(value["appended_count"], "appended_count must be a non-negative integer"),
         live=None if live is None else ConversationBatch.from_dict(live),
-        next_sequence=value["next_sequence"],
+        next_sequence=_int_field(value["next_sequence"], "next_sequence must be a non-negative integer"),
     )
 
 
@@ -130,20 +157,24 @@ def _job_from_dict(value: object) -> MemoryJob:
         for name in ("lease_expires_at", "next_attempt_at")
     }
     return MemoryJob(
-        memory_sequence=value["memory_sequence"],
-        conversation_id=value["conversation_id"],
+        memory_sequence=_int_field(value["memory_sequence"], "memory_sequence must be a positive integer"),
+        conversation_id=_text_field(value["conversation_id"], _NORMALIZED_MESSAGE.format("conversation_id")),
         started_on=started_on,
-        segment_id=value["segment_id"],
-        source_segment_digest=value["source_segment_digest"],
-        transaction_id=value["transaction_id"],
+        segment_id=_text_field(value["segment_id"], _NORMALIZED_MESSAGE.format("segment_id")),
+        source_segment_digest=_text_field(
+            value["source_segment_digest"], "source_segment_digest must be lowercase SHA-256 text"
+        ),
+        transaction_id=_text_field(
+            value["transaction_id"], "transaction_id must be 32 lowercase hexadecimal characters"
+        ),
         status=status,
-        attempts=value["attempts"],
-        claim_id=value["claim_id"],
-        claim_generation=value["claim_generation"],
-        worker_id=value["worker_id"],
+        attempts=_int_field(value["attempts"], "memory job attempts must be non-negative"),
+        claim_id=_optional_text_field(value["claim_id"], "running memory job requires a claim_id"),
+        claim_generation=_int_field(value["claim_generation"], "memory job claim_generation must be non-negative"),
+        worker_id=_optional_text_field(value["worker_id"], "running memory job requires a normalized worker_id"),
         lease_expires_at=optional_times["lease_expires_at"],
         next_attempt_at=optional_times["next_attempt_at"],
-        last_error=value["last_error"],
+        last_error=_optional_text_field(value["last_error"], "memory job last_error is invalid"),
         created_at=source_timestamp(value["created_at"], "created_at"),
         updated_at=source_timestamp(value["updated_at"], "updated_at"),
     )
@@ -189,18 +220,23 @@ def _retention_from_dict(value: object) -> ConversationRetentionPlan:
         raise ConversationSourceError("memory retention message snapshots must be lists")
     if any(not isinstance(item, Mapping) for item in (*archive, *retained)):
         raise ConversationSourceError("memory retention contains an invalid message snapshot")
+    through_sequence = value["through_sequence"]
+    if through_sequence is not None and not is_int(through_sequence):
+        raise ValueError("retention boundary must match the archived prefix")
     return ConversationRetentionPlan(
-        through_sequence=value["through_sequence"],
+        through_sequence=through_sequence,
         archive_messages=tuple(ConversationMessage.from_dict(item) for item in archive),
         retained_messages=tuple(ConversationMessage.from_dict(item) for item in retained),
-        triggered=value["triggered"],
-        flush=value["flush"],
-        pending_tokens=value["pending_tokens"],
-        budget_exceeded=value["budget_exceeded"],
-        reason=value["reason"],
-        boundary_kind=value["boundary_kind"],
-        embedding_fingerprint=value["embedding_fingerprint"],
-        chunker_version=value["chunker_version"],
+        triggered=_flag_field(value["triggered"], "retention flags must be boolean"),
+        flush=_flag_field(value["flush"], "retention flags must be boolean"),
+        pending_tokens=_int_field(value["pending_tokens"], "pending_tokens must be a non-negative integer"),
+        budget_exceeded=_flag_field(value["budget_exceeded"], "budget_exceeded must be boolean"),
+        reason=_text_field(value["reason"], "retention reason must be non-empty text"),
+        boundary_kind=_optional_text_field(value["boundary_kind"], "boundary_kind must be non-empty text or None"),
+        embedding_fingerprint=_optional_text_field(
+            value["embedding_fingerprint"], "embedding_fingerprint must be non-empty text or None"
+        ),
+        chunker_version=_text_field(value["chunker_version"], "chunker_version must be non-empty text"),
     )
 
 
@@ -246,8 +282,6 @@ class MemoryConversationOutput:
         if self.consumer is not ConversationSourceConsumer.MEMORY:
             raise ConversationSourceError("memory output has the wrong consumer")
         require_sha256(self.processor_fingerprint, "memory output processor_fingerprint")
-        if not isinstance(self.ingest_result_snapshot, ConversationMemoryIngestResult):
-            raise TypeError("ingest_result_snapshot must be ConversationMemoryIngestResult")
         object.__setattr__(self, "recorded_at", source_timestamp(self.recorded_at, "recorded_at"))
         require_sha256(self.output_record_digest, "memory output_record_digest")
         expected_id = conversation_consumer_output_id(
@@ -340,14 +374,14 @@ class MemoryConversationOutput:
         except (TypeError, ValueError) as exc:
             raise ConversationSourceError("memory output consumer is invalid") from exc
         return cls(
-            output_id=value["output_id"],
-            source_id=value["source_id"],
-            source_payload_digest=value["source_payload_digest"],
+            output_id=require_sha256(value["output_id"], "memory output_id"),
+            source_id=require_sha256(value["source_id"], "memory output source_id"),
+            source_payload_digest=require_sha256(value["source_payload_digest"], "memory output source_payload_digest"),
             consumer=consumer,
-            processor_fingerprint=value["processor_fingerprint"],
+            processor_fingerprint=require_sha256(value["processor_fingerprint"], "memory output processor_fingerprint"),
             ingest_result_snapshot=conversation_memory_ingest_from_dict(value["ingest_result_snapshot"]),
             recorded_at=source_timestamp(value["recorded_at"], "recorded_at"),
-            output_record_digest=value["output_record_digest"],
+            output_record_digest=require_sha256(value["output_record_digest"], "memory output_record_digest"),
         )
 
 
@@ -362,13 +396,9 @@ class MemoryConversationOutputStore:
         max_file_bytes: int,
     ) -> None:
         self.root = Path(conversation_root).expanduser().resolve(strict=False)
-        if (
-            isinstance(max_files_per_source, bool)
-            or not isinstance(max_files_per_source, int)
-            or max_files_per_source <= 0
-        ):
+        if max_files_per_source <= 0:
             raise ValueError("max_files_per_source must be a positive integer")
-        if isinstance(max_file_bytes, bool) or not isinstance(max_file_bytes, int) or max_file_bytes <= 0:
+        if max_file_bytes <= 0:
             raise ValueError("max_file_bytes must be a positive integer")
         self.max_files_per_source = max_files_per_source
         self.max_file_bytes = max_file_bytes
@@ -387,8 +417,6 @@ class MemoryConversationOutputStore:
         source: ConversationSourceEnvelope,
         output: MemoryConversationOutput,
     ) -> MemoryConversationOutput:
-        if not isinstance(output, MemoryConversationOutput):
-            raise TypeError("output must be MemoryConversationOutput")
         if output.source_id != source.source_id or output.source_payload_digest != source.source_payload_digest:
             raise ConversationSourceError("memory output belongs to another source")
         try:

@@ -66,12 +66,8 @@ class DayExpectationStage:
             shadow_unestablished=shadow_unestablished,
             vocabulary_version=vocabulary_version,
         )
-        if not isinstance(opportunities, OpportunityStore):
-            raise TypeError("opportunities must be an OpportunityStore")
-        if not isinstance(lane, str) or not lane:
+        if not lane:
             raise ValueError("lane must be non-empty text")
-        if migrating is not None and not callable(migrating):
-            raise TypeError("migrating must be callable or None")
         self.ledger = ledger
         self.opportunities = opportunities
         self.lane = lane

@@ -44,7 +44,7 @@ class BehaviorSessionOutputStore:
     def __init__(self, conversation_root: str | Path, *, max_files_per_source: int, max_file_bytes: int) -> None:
         self.root = Path(conversation_root).expanduser().resolve(strict=False)
         for name, value in (("max_files_per_source", max_files_per_source), ("max_file_bytes", max_file_bytes)):
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         self.max_files_per_source = max_files_per_source
         self.max_file_bytes = max_file_bytes
@@ -59,8 +59,6 @@ class BehaviorSessionOutputStore:
         )
 
     def put(self, source: ConversationSourceEnvelope, output: BehaviorSessionOutput) -> BehaviorSessionOutput:
-        if not isinstance(output, BehaviorSessionOutput):
-            raise TypeError("output must be BehaviorSessionOutput")
         self._require_owner(source, output)
         try:
             atomic_create_bytes(

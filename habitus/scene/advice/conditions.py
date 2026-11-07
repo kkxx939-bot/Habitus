@@ -238,8 +238,6 @@ class ConditionAnswer:
 
 class ConditionProposer:
     def __init__(self, client: StructuredChatClient, *, config: ConditionConfig | None = None) -> None:
-        if not isinstance(client, StructuredChatClient):
-            raise TypeError("client must be a StructuredChatClient")
         self.client = client
         self.config = config or ConditionConfig()
 

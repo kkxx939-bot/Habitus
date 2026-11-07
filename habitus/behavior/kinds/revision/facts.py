@@ -23,15 +23,11 @@ class Member:
     content: OccurrenceContent
 
     def __post_init__(self) -> None:
-        if not isinstance(self.occurrence, str) or not self.occurrence:
+        if not self.occurrence:
             raise BehaviorKindError("member occurrence must be non-empty text")
-        if not isinstance(self.token, str) or not self.token:
+        if not self.token:
             raise BehaviorKindError("member token must be non-empty text")
         object.__setattr__(self, "lane", Lane(self.lane))
-        if isinstance(self.day, bool) or not isinstance(self.day, date):
-            raise BehaviorKindError("member day must be a date")
-        if not isinstance(self.content, OccurrenceContent):
-            raise BehaviorKindError("member content must be OccurrenceContent")
 
 
 def members_of(members: Sequence[Member], token: str) -> tuple[Member, ...]:

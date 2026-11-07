@@ -20,6 +20,7 @@ from habitus.behavior.schema.vocabulary import (
     SHA256,
     STATUS_BASES,
 )
+from habitus.foundation.validation import is_nonblank_str
 
 
 def strict_mapping(value: Any, label: str) -> dict[str, Any]:
@@ -38,7 +39,7 @@ def require_keys(payload: Mapping[str, Any], expected: set[str], label: str) -> 
 
 
 def text(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if not is_nonblank_str(value):
         raise BehaviorSchemaError(f"{label} must be non-empty text")
     normalized = value.strip()
     if not readable_text(normalized):

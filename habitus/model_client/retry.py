@@ -161,6 +161,7 @@ def _status_code(chain: tuple[BaseException, ...]) -> int | None:
         try:
             status = int(value)
         except (TypeError, ValueError):
+            # 外部异常上的状态码字段解析不了，就当这一层没有状态码。
             continue
         if 100 <= status <= 599:
             return status
@@ -174,6 +175,7 @@ def _retry_after(chain: tuple[BaseException, ...]) -> float | None:
             try:
                 return max(0.0, float(direct))
             except (TypeError, ValueError):
+                # 外部异常的 retry_after 解析不了，就当没给，继续看响应头。
                 pass
         response = getattr(candidate, "response", None)
         headers = getattr(response, "headers", None)
@@ -182,10 +184,12 @@ def _retry_after(chain: tuple[BaseException, ...]) -> float | None:
         try:
             value = headers.get("Retry-After")
         except (AttributeError, TypeError):
+            # 外部异常的 response.headers 不是可读映射，就当没有响应头。
             continue
         try:
             return max(0.0, float(value))
         except (TypeError, ValueError):
+            # Retry-After 不是秒数（缺失或 HTTP 日期），就当没给。
             continue
     return None
 

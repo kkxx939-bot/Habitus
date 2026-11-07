@@ -12,9 +12,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.filesystem import ensure_owner_directory, restrict_file_to_owner
-from habitus.memory.conversation.indexing.model import ConversationSummaryReference, summary_reference
-from habitus.memory.conversation.layout import ConversationAddress, ConversationLayout
+from habitus.memory.conversation.indexing.model import (
+    ConversationSummaryReference,
+    ConversationSummaryStage,
+    summary_reference,
+)
+from habitus.memory.conversation.layout import ConversationAddress, ConversationLayout, ConversationLayoutError
 from habitus.pre.conversation import ConversationRangeSummary, ConversationSegmentSummary
 
 
@@ -32,11 +37,9 @@ class ConversationSummaryUseState:
     version: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.reference, ConversationSummaryReference):
-            raise TypeError("reference must be ConversationSummaryReference")
         for name in ("useful_recall_count", "version"):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if value < 0:
                 raise ValueError(f"summary use state {name} must be non-negative")
         for name in ("last_useful_recall_at", "retire_candidate_at", "retiring_at"):
             value = getattr(self, name)
@@ -64,20 +67,14 @@ class SQLiteConversationSummaryUseStore:
         max_useful_recall_count: int = 1_000_000_000,
         initialize: bool = True,
     ) -> None:
-        if (
-            isinstance(sqlite_timeout_seconds, bool)
-            or not isinstance(sqlite_timeout_seconds, int | float)
-            or not 0.001 <= float(sqlite_timeout_seconds) <= 60.0
-        ):
+        if not 0.001 <= float(sqlite_timeout_seconds) <= 60.0:
             raise ValueError("summary use sqlite timeout is outside its supported range")
         for name, value in {
             "max_batch_size": max_batch_size,
             "max_useful_recall_count": max_useful_recall_count,
         }.items():
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if value <= 0:
                 raise ValueError(f"summary use {name} must be positive")
-        if not isinstance(initialize, bool):
-            raise TypeError("initialize must be boolean")
         self.path = Path(path).expanduser().absolute()
         self.sqlite_timeout_seconds = float(sqlite_timeout_seconds)
         self.max_batch_size = max_batch_size
@@ -200,8 +197,6 @@ class SQLiteConversationSummaryUseStore:
         *,
         marked_at: datetime,
     ) -> ConversationSummaryUseState:
-        if not isinstance(reference, ConversationSummaryReference):
-            raise TypeError("reference must be ConversationSummaryReference")
         timestamp = _timestamp(marked_at)
         self.initialize()
         connection = self._connect()
@@ -265,8 +260,6 @@ class SQLiteConversationSummaryUseStore:
     ) -> ConversationSummaryUseState:
         """以 use version CAS 抢占终态退休，阻止并发成功使用。"""
 
-        if not isinstance(reference, ConversationSummaryReference):
-            raise TypeError("reference must be ConversationSummaryReference")
         timestamp = _timestamp(claimed_at)
         self.initialize()
         connection = self._connect()
@@ -327,8 +320,6 @@ class SQLiteConversationSummaryUseStore:
     ) -> int:
         """终态清理覆盖范围内各级 Summary 状态，支持内容文件已被部分删除后的续跑。"""
 
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("address must be ConversationAddress")
         ConversationLayout.segment_id(start_sequence, end_sequence)
         self.initialize()
         connection = self._connect()
@@ -354,7 +345,7 @@ class SQLiteConversationSummaryUseStore:
                     break
                 selected: list[str] = []
                 for row in rows:
-                    source_start, source_end = ConversationLayout.segment_range(row["summary_id"])
+                    source_start, source_end = ConversationLayout.segment_range(_stored_segment_id(row["summary_id"]))
                     if start_sequence <= source_start and source_end <= end_sequence:
                         selected.append(row["identity"])
                 if selected:
@@ -401,8 +392,6 @@ class SQLiteConversationSummaryUseStore:
         now: datetime,
         protection_days: int,
     ) -> bool:
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("address must be ConversationAddress")
         return self.recently_used(
             summary_reference(address, summary),
             now=now,
@@ -463,27 +452,25 @@ class SQLiteConversationSummaryUseStore:
     def _state(cls, row: sqlite3.Row) -> ConversationSummaryUseState:
         reference = ConversationSummaryReference(
             address=ConversationAddress(
-                row["conversation_id"],
+                _stored_text(row["conversation_id"], _CONVERSATION_ID, ConversationLayoutError),
                 datetime.fromisoformat(row["started_on"]).date(),
             ),
-            stage=row["stage"],
-            summary_id=row["summary_id"],
+            stage=ConversationSummaryStage(row["stage"]),
+            summary_id=_stored_text(row["summary_id"], _SUMMARY_ID),
         )
         if row["identity"] != reference.identity:
             raise ConversationSummaryUseError("Summary use identity does not match stored fields")
-        count = row["useful_recall_count"]
+        count = _stored_count(row["useful_recall_count"], "useful_recall_count")
         return ConversationSummaryUseState(
             reference,
             count,
             _parse_optional_timestamp(row["last_useful_recall_at"]),
             _parse_optional_timestamp(row["retire_candidate_at"]),
             _parse_optional_timestamp(row["retiring_at"]),
-            row["version"],
+            _stored_count(row["version"], "version"),
         )
 
-    def _references(self, values):
-        if not isinstance(values, tuple) or any(not isinstance(item, ConversationSummaryReference) for item in values):
-            raise TypeError("Summary use references must be a tuple")
+    def _references(self, values: tuple[ConversationSummaryReference, ...]) -> tuple[ConversationSummaryReference, ...]:
         if len(values) > self.max_batch_size:
             raise ValueError("Summary use references exceed max_batch_size")
         if len({item.identity for item in values}) != len(values):
@@ -492,13 +479,36 @@ class SQLiteConversationSummaryUseStore:
 
 
 def _timestamp(value: datetime) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+    if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("Summary use timestamp must be timezone-aware datetime")
     return value.astimezone(UTC)
 
 
 def _format_timestamp(value: datetime) -> str:
     return _timestamp(value).isoformat().replace("+00:00", "Z")
+
+
+# SQLite 表没有 STRICT，读回的列值在构造前确认类型；报错文字与异常类型照抄下游值对象的检查
+_CONVERSATION_ID = "conversation_id must be one safe non-empty path segment"
+_SUMMARY_ID = "summary reference summary_id must be normalized non-empty text"
+
+
+def _stored_text(value: object, message: str, error: type[ValueError] = ValueError) -> str:
+    if not isinstance(value, str):
+        raise error(message)
+    return value
+
+
+def _stored_segment_id(value: object) -> str:
+    if not isinstance(value, str):
+        raise ConversationLayoutError("segment_id must be text")
+    return value
+
+
+def _stored_count(value: object, name: str) -> int:
+    if not is_int(value):
+        raise ValueError(f"summary use state {name} must be non-negative")
+    return value
 
 
 def _parse_optional_timestamp(value: object) -> datetime | None:

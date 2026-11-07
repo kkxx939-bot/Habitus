@@ -64,8 +64,6 @@ class _Batch:
 
 class DaytimeClassifier:
     def __init__(self, caller: KindModelCaller) -> None:
-        if not isinstance(caller, KindModelCaller):
-            raise TypeError("caller must be KindModelCaller")
         self.caller = caller
         self.config: BehaviorKindConfig = caller.config
 

@@ -69,8 +69,6 @@ class RerankClient:
         *,
         async_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
-        if not isinstance(config, RerankModelConfig):
-            raise TypeError("config must be RerankModelConfig")
         self.config = config
         self.provider = provider
         self._async_sleep = async_sleep
@@ -97,7 +95,7 @@ class RerankClient:
             "rerank query",
             maximum=self.config.max_query_chars,
         )
-        if isinstance(documents, str) or not isinstance(documents, Sequence):
+        if isinstance(documents, str):
             raise TypeError("rerank documents must be a sequence of strings")
         normalized_documents = tuple(
             self._text(
@@ -229,6 +227,7 @@ class ObservedReranker:
                 )
             )
         except Exception:
+            # 观测只是旁路：事件记不下来不能影响重排结果。
             pass
 
 

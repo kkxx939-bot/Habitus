@@ -13,6 +13,7 @@ from enum import Enum
 from pathlib import Path
 
 from habitus.foundation.integrity import canonical_json
+from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.filesystem import (
     atomic_replace_bytes,
     durable_unlink,
@@ -45,8 +46,6 @@ class ConversationSummaryRetirementSource:
     digest: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.reference, ConversationSummaryReference):
-            raise TypeError("retirement source reference is invalid")
         _require_digest(self.digest)
 
     def to_dict(self) -> dict[str, str]:
@@ -68,9 +67,9 @@ class ConversationSummaryRetirementManifest:
     def __post_init__(self) -> None:
         if self.archive.reference.stage.value != "archive":
             raise ValueError("retirement manifest archive reference has the wrong stage")
-        if isinstance(self.start_sequence, bool) or not isinstance(self.start_sequence, int) or self.start_sequence < 0:
+        if self.start_sequence < 0:
             raise ValueError("retirement manifest start_sequence must be non-negative")
-        if isinstance(self.end_sequence, bool) or not isinstance(self.end_sequence, int) or self.end_sequence <= 0:
+        if self.end_sequence <= 0:
             raise ValueError("retirement manifest end_sequence must be positive")
         if self.end_sequence < self.start_sequence:
             raise ValueError("retirement manifest sequence range is invalid")
@@ -78,10 +77,6 @@ class ConversationSummaryRetirementManifest:
             ("ranges", self.ranges, "range"),
             ("segments", self.segments, "segment"),
         ):
-            if not isinstance(values, tuple) or any(
-                not isinstance(item, ConversationSummaryRetirementSource) for item in values
-            ):
-                raise TypeError(f"retirement manifest {name} are invalid")
             if any(item.reference.stage.value != stage for item in values):
                 raise ValueError(f"retirement manifest {name} have the wrong stage")
             if len({item.reference.identity for item in values}) != len(values):
@@ -93,11 +88,7 @@ class ConversationSummaryRetirementManifest:
         }
         if len(addresses) != 1:
             raise ValueError("retirement manifest sources belong to different Conversations")
-        if (
-            isinstance(self.expected_use_version, bool)
-            or not isinstance(self.expected_use_version, int)
-            or self.expected_use_version < 0
-        ):
+        if self.expected_use_version < 0:
             raise ValueError("retirement manifest expected_use_version must be non-negative")
         object.__setattr__(self, "phase", ConversationSummaryRetirementPhase(self.phase))
         object.__setattr__(self, "prepared_at", _timestamp(self.prepared_at))
@@ -141,13 +132,21 @@ class ConversationSummaryRetirementManifest:
             raise ValueError("retirement manifest fields are invalid")
         if value["schema"] != "conversation_summary_retirement_v1":
             raise ValueError("retirement manifest schema is unsupported")
+        start_sequence, end_sequence = value["start_sequence"], value["end_sequence"]
+        if not is_int(start_sequence):
+            raise ValueError("retirement manifest start_sequence must be non-negative")
+        if not is_int(end_sequence):
+            raise ValueError("retirement manifest end_sequence must be positive")
+        expected_use_version = value["expected_use_version"]
+        if not is_int(expected_use_version):
+            raise ValueError("retirement manifest expected_use_version must be non-negative")
         return cls(
             archive=_source(value["archive"]),
-            start_sequence=value["start_sequence"],
-            end_sequence=value["end_sequence"],
+            start_sequence=start_sequence,
+            end_sequence=end_sequence,
             ranges=_sources(value["ranges"]),
             segments=_sources(value["segments"]),
-            expected_use_version=value["expected_use_version"],
+            expected_use_version=expected_use_version,
             phase=ConversationSummaryRetirementPhase(value["phase"]),
             prepared_at=_parse_timestamp(value["prepared_at"]),
             updated_at=_parse_timestamp(value["updated_at"]),
@@ -165,9 +164,9 @@ class ConversationSummaryRetirementStore:
         max_file_bytes: int = 2 * 1024 * 1024,
     ) -> None:
         root = Path(workflow_root).expanduser().resolve(strict=False)
-        if isinstance(max_manifests, bool) or not isinstance(max_manifests, int) or max_manifests <= 0:
+        if max_manifests <= 0:
             raise ValueError("max_manifests must be positive")
-        if isinstance(max_file_bytes, bool) or not isinstance(max_file_bytes, int) or max_file_bytes <= 0:
+        if max_file_bytes <= 0:
             raise ValueError("max_file_bytes must be positive")
         self.workflow_root = root
         self.root = root / "lifecycle" / "summary_retirements"
@@ -327,10 +326,12 @@ class ConversationSummaryRetirementStore:
 def _source(value: object) -> ConversationSummaryRetirementSource:
     if not isinstance(value, Mapping) or set(value) != {"identity", "digest"}:
         raise ValueError("retirement source fields are invalid")
-    return ConversationSummaryRetirementSource(
-        ConversationSummaryReference.parse(value["identity"]),
-        value["digest"],
-    )
+    identity, digest = value["identity"], value["digest"]
+    if not isinstance(identity, str):
+        raise ValueError("summary reference identity is invalid")
+    if not isinstance(digest, str):
+        raise ValueError("summary retirement digest must be lowercase SHA-256")
+    return ConversationSummaryRetirementSource(ConversationSummaryReference.parse(identity), digest)
 
 
 def _sources(value: object) -> tuple[ConversationSummaryRetirementSource, ...]:
@@ -339,17 +340,13 @@ def _sources(value: object) -> tuple[ConversationSummaryRetirementSource, ...]:
     return tuple(_source(item) for item in value)
 
 
-def _require_digest(value: object) -> None:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
+def _require_digest(value: str) -> None:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
         raise ValueError("summary retirement digest must be lowercase SHA-256")
 
 
 def _timestamp(value: datetime) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+    if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("summary retirement timestamp must be timezone-aware")
     return value.astimezone(UTC)
 

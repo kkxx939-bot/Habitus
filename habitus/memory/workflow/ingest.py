@@ -37,14 +37,6 @@ class ConversationMemoryIngestResult:
     jobs: tuple[MemoryJob, ...]
     retention: ConversationRetentionPlan
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.append, ConversationAppendResult):
-            raise TypeError("append must be ConversationAppendResult")
-        if not isinstance(self.jobs, tuple) or any(not isinstance(job, MemoryJob) for job in self.jobs):
-            raise TypeError("jobs must contain MemoryJob values")
-        if not isinstance(self.retention, ConversationRetentionPlan):
-            raise TypeError("retention must be ConversationRetentionPlan")
-
 
 @dataclass(frozen=True)
 class ConversationMemoryFlushResult:
@@ -52,12 +44,6 @@ class ConversationMemoryFlushResult:
 
     jobs: tuple[MemoryJob, ...]
     retention: ConversationRetentionPlan
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.jobs, tuple) or any(not isinstance(job, MemoryJob) for job in self.jobs):
-            raise TypeError("jobs must contain MemoryJob values")
-        if not isinstance(self.retention, ConversationRetentionPlan):
-            raise TypeError("retention must be ConversationRetentionPlan")
 
 
 class ConversationMemoryEnqueuer:
@@ -71,25 +57,6 @@ class ConversationMemoryEnqueuer:
         tool_result_reducer: ConversationToolResultReducer | None = None,
         message_chunker: ConversationMessageChunker | None = None,
     ) -> None:
-        if not isinstance(conversations, ConversationMessageJournal):
-            raise TypeError("conversations must be a ConversationMessageJournal")
-        if not isinstance(jobs, MemoryJobStore):
-            raise TypeError("jobs must be a MemoryJobStore")
-        if retention_planner is not None and not isinstance(
-            retention_planner,
-            ConversationRetentionPlanner,
-        ):
-            raise TypeError("retention_planner must be ConversationRetentionPlanner")
-        if tool_result_reducer is not None and not isinstance(
-            tool_result_reducer,
-            ConversationToolResultReducer,
-        ):
-            raise TypeError("tool_result_reducer must be ConversationToolResultReducer")
-        if message_chunker is not None and not isinstance(
-            message_chunker,
-            ConversationMessageChunker,
-        ):
-            raise TypeError("message_chunker must be ConversationMessageChunker")
         self.conversations = conversations
         self.jobs = jobs
         self.retention_planner = retention_planner or ConversationRetentionPlanner()
@@ -110,13 +77,7 @@ class ConversationMemoryEnqueuer:
     ) -> ConversationMemoryIngestResult:
         """追加消息；只有 afterTurn 边界才可能自动提交完整旧轮次。"""
 
-        if not isinstance(batch, ConversationBatch):
-            raise TypeError("batch must be ConversationBatch")
-        if not isinstance(after_turn, bool):
-            raise TypeError("after_turn must be boolean")
-        if not isinstance(omit_tool_call_ids, frozenset) or any(
-            not isinstance(identifier, str) or not identifier for identifier in omit_tool_call_ids
-        ):
+        if any(not identifier for identifier in omit_tool_call_ids):
             raise TypeError("omit_tool_call_ids must be a frozenset of non-empty strings")
         appended = self.append(
             address,
@@ -145,11 +106,7 @@ class ConversationMemoryEnqueuer:
     ) -> ConversationAppendResult:
         """降载工具结果、切分超长文本、把超过一段上限的工具交换抽到放得下，再写入唯一 live 主链。"""
 
-        if not isinstance(batch, ConversationBatch):
-            raise TypeError("batch must be ConversationBatch")
-        if not isinstance(omit_tool_call_ids, frozenset) or any(
-            not isinstance(identifier, str) or not identifier for identifier in omit_tool_call_ids
-        ):
+        if any(not identifier for identifier in omit_tool_call_ids):
             raise TypeError("omit_tool_call_ids must be a frozenset of non-empty strings")
         reduced = ConversationBatch(
             batch.conversation_id,

@@ -128,8 +128,8 @@ def parse_judgement_record(record: Mapping[str, Any]) -> ReducibleJudgement:
     subjects_raw = record.get("subjects")
     if isinstance(subjects_raw, str | bytes) or not isinstance(subjects_raw, Sequence):
         raise BehaviorReductionError("judgement record field subjects must be an array")
-    subjects = tuple(subjects_raw)
-    if any(not isinstance(item, str) or not item for item in subjects):
+    subjects = tuple(item for item in subjects_raw if isinstance(item, str) and item)
+    if len(subjects) != len(subjects_raw):
         raise BehaviorReductionError("judgement record subjects must contain non-empty text")
     resolved = ReducibleJudgement(
         judgement_id=_text(record, "judgement_id"),

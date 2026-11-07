@@ -158,38 +158,22 @@ class SettlementStage:
         history: HistoryStore | None = None,
         finished: Callable[[date], bool | None] | None = None,
     ) -> None:
-        if not isinstance(ledger, ForesightLedgerStore):
-            raise TypeError("ledger must be a ForesightLedgerStore")
-        if not isinstance(read_side, BehaviorReadSide):
-            raise TypeError("read_side must expose the behaviour tree, subject and calendar")
-        if not callable(closed_days) or not callable(current) or not callable(migrating):
-            raise TypeError("closed_days, current and migrating must be callables")
         self.ledger = ledger
         self.read_side = read_side
         self.closed_days = closed_days
         # 编号 → 现在对应哪些在用编号（词表的 ``current_ids``）：预期记的是形成时的编号，结算时词表可能已拆改
         self.current = current
         self.migrating = migrating
-        if not isinstance(evidence, Evidence):
-            raise TypeError("evidence must be an Evidence")
         self.evidence = evidence
-        if opportunities is not None and not isinstance(opportunities, OpportunityStore):
-            raise TypeError("opportunities must be an OpportunityStore or None")
         # 机会表的日历给补做强度用（这一类历史上相邻两次隔几天）；没有就只有方向
         self.opportunities = opportunities
         self.lane = lane
         self.observer: Observer = observer if observer is not None else NullObserver()
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
-        if tolerance is not None and not isinstance(tolerance, Tolerance):
-            raise TypeError("tolerance must be a Tolerance or None")
         #: 诊断要知道每本账的线（预算内那一关）；没给就不在夜批观测里出诊断。
         self.tolerance = tolerance
-        if history is not None and not isinstance(history, HistoryStore):
-            raise TypeError("history must be a HistoryStore or None")
         #: 单元历史（夜里重标过的快照）：诊断重建"落空那一刻这条边的位置"从它读（裁定 61：权重归单元）；没给就按没有历史算。
         self.history = history
-        if finished is not None and not callable(finished):
-            raise TypeError("finished must be callable or None")
         #: 夜里那条线自己记的"这一晚跑完了没有"（``runtime.nightly_worker.LastRun.finished``）：停掉的那天后补只看到它开始为止
         #: （裁定 94 第 8、9 条）；没给就不认停掉的那天。
         self.finished = finished
@@ -577,7 +561,7 @@ class SettlementStage:
 
         if self.tolerance is None:
             raise ValueError("diagnosis needs the tolerance of each account's line")
-        if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+        if days < 1:
             raise ValueError("days must be a positive integer")
         cache = DayIndexCache(
             self.read_side.behavior_tree,

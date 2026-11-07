@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from typing import Any, NoReturn, Protocol
 
+from habitus.foundation.validation import is_int
 from habitus.memory.document.link import MemoryStoredLink, parse_stored_links
 from habitus.memory.document.model import MemoryDocument, MemoryDocumentMetadata
 from habitus.memory.model import MemoryAddress, MemoryKind
@@ -50,9 +51,6 @@ class MemoryDocumentCodec:
     """使用同一份 Schema 构造、序列化并验证 L2 文档。"""
 
     def __init__(self, registry: _MemorySchemaRegistry) -> None:
-        required = ("validate", "address_for", "render_markdown")
-        if any(not callable(getattr(registry, name, None)) for name in required):
-            raise TypeError("registry must implement the memory Schema registry contract")
         self.registry = registry
 
     def build(
@@ -66,8 +64,6 @@ class MemoryDocumentCodec:
     ) -> MemoryDocument:
         """从结构字段生成地址和可读正文，不接受调用者提供的路径或正文。"""
 
-        if not isinstance(metadata, MemoryDocumentMetadata):
-            raise TypeError("metadata must be MemoryDocumentMetadata")
         normalized_kind = MemoryKind(kind)
         normalized = self.registry.validate(normalized_kind, payload)
         address = self.registry.address_for(normalized_kind, normalized)
@@ -87,8 +83,6 @@ class MemoryDocumentCodec:
     def encode(self, document: MemoryDocument) -> str:
         """重新校验文档后输出唯一规范的 Markdown 物理格式。"""
 
-        if not isinstance(document, MemoryDocument):
-            raise TypeError("document must be a MemoryDocument")
         canonical = self.build(
             document.kind,
             document.fields,
@@ -129,10 +123,6 @@ class MemoryDocumentCodec:
     def decode(self, raw: str, *, expected_address: MemoryAddress) -> MemoryDocument:
         """解析并验证唯一末尾注释、Schema、真实地址和正文规范性。"""
 
-        if not isinstance(raw, str):
-            raise TypeError("raw memory document must be a string")
-        if not isinstance(expected_address, MemoryAddress):
-            raise TypeError("expected_address must be a MemoryAddress")
         if raw.count(_MARKER) != 1 or not raw.endswith(_FOOTER):
             raise MemoryDocumentIntegrityError(
                 "memory document must contain one terminal HABITUS_MEMORY_FIELDS comment"
@@ -168,7 +158,7 @@ class MemoryDocumentCodec:
                 label="memory document backlinks",
             )
             system_metadata = MemoryDocumentMetadata(
-                revision=raw_revision,
+                revision=self._parse_revision(raw_revision),
                 created_at=self._parse_timestamp(raw_created_at, "created_at"),
                 updated_at=self._parse_timestamp(raw_updated_at, "updated_at"),
                 last_confirmed_at=(
@@ -210,6 +200,14 @@ class MemoryDocumentCodec:
     @staticmethod
     def _timestamp(value: datetime) -> str:
         return value.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+    @staticmethod
+    def _parse_revision(value: object) -> int:
+        """注释里读回的 revision 在构造前确认是整数，文字照抄 ``MemoryDocumentMetadata.__post_init__``。"""
+
+        if not is_int(value):
+            raise ValueError("memory document revision must be a positive integer")
+        return value
 
     @staticmethod
     def _parse_timestamp(value: object, field_name: str) -> datetime:

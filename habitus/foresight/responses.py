@@ -29,13 +29,11 @@ class OpenReminder:
 
     def __post_init__(self) -> None:
         for label in ("expectation_id", "kind_token"):
-            if not isinstance(getattr(self, label), str) or not getattr(self, label):
+            if not getattr(self, label):
                 raise ForesightError(f"open reminder {label} must be non-empty text")
-        if not isinstance(self.text, str):
-            raise ForesightError("open reminder text must be text")
         for label in ("said_at", "deadline"):
             value = getattr(self, label)
-            if not isinstance(value, datetime) or value.utcoffset() is None:
+            if value.utcoffset() is None:
                 raise ForesightError(f"open reminder {label} must be a timezone-aware datetime")
 
 
@@ -50,9 +48,9 @@ def open_reminders(
     """``at`` 那一刻开着的提醒：说出口（在 ``at`` 之前）、最晚时限还没到、没有在 ``at`` 之前判出正 / 负 / 已做的。按截止由近到远，
     最多 ``limit`` 条。"""
 
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+    if limit < 1:
         raise ForesightError("limit must be a positive integer")
-    if not isinstance(at, datetime) or at.utcoffset() is None:
+    if at.utcoffset() is None:
         raise ForesightError("at must be a timezone-aware datetime")
     closed = {item.expectation_id for item in responses if item.closes and item.responded_at <= at}
     by_id = {item.expectation_id: item for item in expectations}

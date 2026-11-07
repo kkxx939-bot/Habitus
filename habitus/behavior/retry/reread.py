@@ -14,10 +14,6 @@ from habitus.behavior.retry.store import RetryBacklogStore
 
 class Rereader:
     def __init__(self, backlog: RetryBacklogStore, handler: RetryHandler) -> None:
-        if not isinstance(backlog, RetryBacklogStore):
-            raise TypeError("backlog must be RetryBacklogStore")
-        if not isinstance(handler, RetryHandler):
-            raise TypeError("handler must implement RetryHandler")
         self.backlog = backlog
         self.handler = handler
 

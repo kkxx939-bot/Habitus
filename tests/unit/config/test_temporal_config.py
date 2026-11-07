@@ -24,7 +24,6 @@ def test_defaults_and_derived_rulers() -> None:
         {"pool_half_width": 0},
         {"shrink_slot_to_pool": -1.0},
         {"min_peak_mass": 1.0},
-        {"slot_minutes": True},
     ],
 )
 def test_bad_rulers_are_rejected(overrides: dict[str, object]) -> None:

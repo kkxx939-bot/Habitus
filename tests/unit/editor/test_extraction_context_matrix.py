@@ -145,42 +145,6 @@ def extraction_context(
 
 
 @pytest.mark.parametrize(
-    ("replacement", "message"),
-    [
-        ({"initial": object()}, "initial"),
-        ({"snapshot_reader": object()}, "snapshot_reader"),
-        ({"semantic_search": object()}, "semantic_search"),
-        ({"config": object()}, "config"),
-    ],
-)
-def test_context_rejects_each_invalid_collaborator(
-    tmp_path: Path,
-    replacement: dict[str, object],
-    message: str,
-) -> None:
-    tree = MemoryTree(tmp_path / "memory")
-    reader = MemorySnapshotReader(tree)
-    initial = MemoryRelatedContext(
-        "conversation-1",
-        "segment-1",
-        "0" * 64,
-        "初始查询",
-        (MemoryURI.from_directory(MemoryDirectory.preferences()),),
-        (),
-        reader.read_many(()),
-    )
-    values = {
-        "initial": initial,
-        "snapshot_reader": reader,
-        "semantic_search": RecordingSearch(),
-        "config": MemoryExtractionConfig(),
-        **replacement,
-    }
-    with pytest.raises(TypeError, match=message):
-        MemoryExtractionContext(**values)
-
-
-@pytest.mark.parametrize(
     ("field", "reader_config", "expected"),
     [
         (
@@ -242,13 +206,6 @@ def test_initial_query_is_cached_without_calling_semantic_search(tmp_path: Path)
     assert observation.cached is True
     assert observation.result_uris == ()
     assert search.calls == []
-
-
-@pytest.mark.parametrize("invalid", [None, object(), "search", 1, True])
-def test_execute_requires_a_retrieval_decision(tmp_path: Path, invalid: object) -> None:
-    context, _tree, _reader, _search = extraction_context(tmp_path)
-    with pytest.raises(TypeError, match="decision"):
-        asyncio.run(context.execute(invalid, iteration=1))  # type: ignore[arg-type]
 
 
 def test_execute_rejects_finish_because_finish_has_no_tool_action(tmp_path: Path) -> None:
@@ -346,8 +303,6 @@ def test_search_fits_new_hits_to_remaining_item_slots_by_relevance(tmp_path: Pat
     ("raw_result", "message"),
     [
         (RuntimeError("provider down"), "semantic search failed"),
-        ("invalid", "sequence of hits"),
-        ((object(),), "invalid hit"),
     ],
 )
 def test_additional_search_wraps_backend_and_result_contract_failures(

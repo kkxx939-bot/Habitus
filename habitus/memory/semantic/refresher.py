@@ -35,12 +35,6 @@ class MemorySemanticRefresher:
         *,
         config: MemorySemanticConfig | None = None,
     ) -> None:
-        if not isinstance(tree, MemoryTree):
-            raise TypeError("tree must be a MemoryTree")
-        if not callable(getattr(generator, "generate", None)):
-            raise TypeError("generator must implement generate(snapshot)")
-        if not isinstance(path_lock, PathLock):
-            raise TypeError("path_lock must be a PathLock")
         self.tree = tree
         self.generator = generator
         self.path_lock = path_lock
@@ -51,8 +45,6 @@ class MemorySemanticRefresher:
     def refresh_for(self, address: MemoryAddress) -> tuple[MemorySemanticRefreshResult, ...]:
         """从发生变化的 L2 父目录开始，依次刷新到记忆根目录。"""
 
-        if not isinstance(address, MemoryAddress):
-            raise TypeError("address must be a MemoryAddress")
         self.tree.initialize()
         return tuple(self.refresh_directory(directory) for directory in MemoryDirectory.for_address(address).lineage())
 
@@ -62,8 +54,6 @@ class MemorySemanticRefresher:
     ) -> tuple[MemorySemanticRefreshResult, ...]:
         """合并多个 L2 的祖先目录，并按最深目录优先各刷新一次。"""
 
-        if not isinstance(addresses, tuple) or any(not isinstance(address, MemoryAddress) for address in addresses):
-            raise TypeError("addresses must contain MemoryAddress values")
         self.tree.initialize()
         directories = {
             directory for address in addresses for directory in MemoryDirectory.for_address(address).lineage()
@@ -79,8 +69,6 @@ class MemorySemanticRefresher:
     def refresh_directory(self, directory: MemoryDirectory) -> MemorySemanticRefreshResult:
         """基于稳定快照刷新一个目录；生成期间不长期占用目录锁。"""
 
-        if not isinstance(directory, MemoryDirectory):
-            raise TypeError("directory must be a MemoryDirectory")
         if not self.tree.directory_exists(directory):
             return MemorySemanticRefreshResult(
                 directory=directory,
@@ -97,7 +85,7 @@ class MemorySemanticRefresher:
                 continue
 
             overview = self.generator.generate(snapshot)
-            if not isinstance(overview, str) or not overview.strip():
+            if not overview.strip():
                 raise MemorySemanticRefreshError("memory overview generator returned empty text")
             if len(overview) > self.config.max_overview_chars:
                 raise MemorySemanticRefreshError("memory overview exceeds its configured bound")
@@ -139,8 +127,6 @@ class MemorySemanticRefresher:
 
         self.tree.initialize()
         root = directory or MemoryDirectory.root()
-        if not isinstance(root, MemoryDirectory):
-            raise TypeError("directory must be a MemoryDirectory")
         if not self.tree.directory_exists(root):
             return ()
 

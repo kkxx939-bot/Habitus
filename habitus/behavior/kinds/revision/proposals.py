@@ -65,10 +65,6 @@ class SplitProposal:
     into: tuple[ClassId, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.new, tuple) or not all(isinstance(item, Draft) for item in self.new):
-            raise BehaviorKindError("split drafts must be a tuple of Draft")
-        if not isinstance(self.into, tuple) or not all(isinstance(item, ClassId) for item in self.into):
-            raise BehaviorKindError("split targets must be a tuple of ClassId")
         if not self.new and not self.into:
             raise BehaviorKindError("a split names at least one new class draft or an existing class to move into")
 

@@ -11,6 +11,7 @@ from habitus.memory.conversation import (
     ConversationMessageJournal,
     ConversationSummaryCompactor,
 )
+from habitus.memory.conversation.compaction import SummarySource
 from habitus.memory.conversation.indexing import ConversationSummaryReference, summary_reference
 from habitus.memory.retrieval.model import MemorySearchError, MemorySearchServiceConfig
 from habitus.pre.conversation import ConversationMessage
@@ -25,14 +26,8 @@ class ConversationSearchContext:
     recent_messages: tuple[ConversationMessage, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.conversation_id, str) or not self.conversation_id.strip():
+        if not self.conversation_id.strip():
             raise ValueError("search context conversation_id must be non-empty")
-        if not isinstance(self.summary_context, str):
-            raise TypeError("search context summary_context must be text")
-        if not isinstance(self.recent_messages, tuple) or any(
-            not isinstance(message, ConversationMessage) for message in self.recent_messages
-        ):
-            raise TypeError("search context recent_messages are invalid")
 
     @property
     def empty(self) -> bool:
@@ -54,16 +49,8 @@ class ConversationSearchContextReader:
         config: MemorySearchServiceConfig | None = None,
         retirement_filter: ConversationSummaryServingFilter | None = None,
     ) -> None:
-        if not isinstance(journal, ConversationMessageJournal):
-            raise TypeError("journal must be ConversationMessageJournal")
-        if not isinstance(compactor, ConversationSummaryCompactor):
-            raise TypeError("compactor must be ConversationSummaryCompactor")
         if compactor.journal is not journal:
             raise ValueError("search context reader must share the Conversation journal")
-        if config is not None and not isinstance(config, MemorySearchServiceConfig):
-            raise TypeError("config must be MemorySearchServiceConfig")
-        if retirement_filter is not None and not callable(getattr(retirement_filter, "hidden", None)):
-            raise TypeError("retirement_filter must implement hidden(reference)")
         self.journal = journal
         self.compactor = compactor
         self.config = config or MemorySearchServiceConfig()
@@ -72,8 +59,6 @@ class ConversationSearchContextReader:
     def read(self, address: ConversationAddress) -> ConversationSearchContext:
         """读取当前活跃摘要和 live 尾部；损坏数据不得伪装成空上下文。"""
 
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("address must be ConversationAddress")
         try:
             frontier = self.compactor.frontier(address)
             live = self.journal.read_live(address)
@@ -92,15 +77,12 @@ class ConversationSearchContextReader:
             recent_messages=recent_messages,
         )
 
-    def _summary_context(self, summaries: tuple[object, ...]) -> str:
+    def _summary_context(self, summaries: tuple[SummarySource, ...]) -> str:
         maximum = self.config.max_summary_context_chars
         selected: list[str] = []
         used = 0
         for summary in reversed(summaries):
-            to_dict = getattr(summary, "to_dict", None)
-            if not callable(to_dict):
-                raise MemorySearchError("Conversation summary frontier contains an invalid value")
-            rendered = canonical_json(to_dict())
+            rendered = canonical_json(summary.to_dict())
             separator = 2 if selected else 0
             remaining = maximum - used - separator
             if remaining <= 0:

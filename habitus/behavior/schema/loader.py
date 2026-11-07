@@ -46,12 +46,19 @@ def load_schema(source: str, filename: str) -> BehaviorTypeSchema:
 def _load_field(raw_field: Any, filename: str) -> BehaviorFieldSchema:
     field = strict_mapping(raw_field, f"field in {filename}")
     require_keys(field, _FIELD_KEYS, f"field in {filename}")
+    name = text(field["name"], "field name")
+    field_type = BehaviorFieldType(text(field["type"], "field type"))
+    role = BehaviorFieldRole(text(field["role"], "field role"))
+    description = text(field["description"], "field description")
+    required = field["required"]
+    if not isinstance(required, bool):
+        raise BehaviorSchemaError("behavior schema field required must be boolean")
     return BehaviorFieldSchema(
-        name=text(field["name"], "field name"),
-        field_type=BehaviorFieldType(text(field["type"], "field type")),
-        role=BehaviorFieldRole(text(field["role"], "field role")),
-        required=field["required"],
-        description=text(field["description"], "field description"),
+        name=name,
+        field_type=field_type,
+        role=role,
+        required=required,
+        description=description,
     )
 
 

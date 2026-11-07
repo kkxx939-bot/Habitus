@@ -10,8 +10,8 @@ from itertools import combinations
 from typing import Any, ClassVar
 
 from habitus.foundation.integrity import canonicalize, immutable_snapshot
-from habitus.infrastructure.editor.snapshot import SnapshotBatch
-from habitus.memory.document import MemoryDocument, MemoryLinkType, MemoryStoredLink
+from habitus.foundation.validation import is_int
+from habitus.memory.document import MemoryLinkType, MemoryStoredLink
 from habitus.memory.editor.page_id import (
     EXISTING_PAGE_ID_MAX,
     MemoryPageIdError,
@@ -198,14 +198,12 @@ class MemoryCandidate:
         kind = MemoryKind(self.kind)
         object.__setattr__(self, "page_id", page_id)
         object.__setattr__(self, "kind", kind)
-        if not isinstance(self.fields, Mapping):
-            raise TypeError("memory candidate fields must be an object")
         try:
             fields = MemorySchemaRegistry.load_default().validate(kind, self.fields)
         except (TypeError, ValueError) as exc:
             raise MemoryCandidateError(f"invalid {kind.value} candidate: {exc}") from exc
         if kind is MemoryKind.INTENTION:
-            if not isinstance(self.confirmed, bool):
+            if self.confirmed is None:
                 raise MemoryCandidateError("Intention candidate requires a boolean confirmed field")
         elif self.confirmed is not None:
             raise MemoryCandidateError("only Intention candidate accepts the confirmed control field")
@@ -235,9 +233,7 @@ class MemoryCandidateViolation:
     reason: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.item, MemoryCandidate | MemoryRelationCandidate | MemoryIdentityProposal):
-            raise TypeError("violation item must be a memory candidate, relation candidate or identity proposal")
-        if not isinstance(self.reason, str) or not self.reason.strip():
+        if not self.reason.strip():
             raise ValueError("violation reason must be non-empty text")
 
     def describe(self) -> str:
@@ -282,12 +278,8 @@ class MemoryCandidateBatch:
         candidates: list[MemoryCandidate] = []
         for field_name in self._MEMORY_FIELD_NAMES:
             values = getattr(self, field_name)
-            if not isinstance(values, tuple):
-                raise TypeError(f"{field_name} candidates must be a tuple")
             expected_kind = _OUTPUT_FIELD_TO_KIND[field_name]
             for candidate in values:
-                if not isinstance(candidate, MemoryCandidate):
-                    raise TypeError(f"{field_name} contains a non-candidate value")
                 if candidate.kind is not expected_kind:
                     raise MemoryCandidateError(f"{field_name} contains a candidate of the wrong type")
                 if candidate.address in seen:
@@ -298,10 +290,6 @@ class MemoryCandidateBatch:
             validate_unique_page_ids(candidate.page_id for candidate in candidates)
         except MemoryPageIdError as exc:
             raise MemoryCandidateError(str(exc)) from exc
-        if not isinstance(self.identity_proposals, tuple):
-            raise TypeError("identity_proposals must be a tuple")
-        if any(not isinstance(item, MemoryIdentityProposal) for item in self.identity_proposals):
-            raise TypeError("identity_proposals contains a non-identity-proposal value")
         if len(self.identity_proposals) != len(set(self.identity_proposals)):
             raise MemoryCandidateError("memory candidate batch contains a duplicate identity proposal")
         proposal_sources = tuple(item.source_page_id for item in self.identity_proposals)
@@ -314,10 +302,6 @@ class MemoryCandidateBatch:
         }
         if set(proposal_sources) & proposal_targets:
             raise MemoryCandidateError("identity proposals cannot form chains or cycles")
-        if not isinstance(self.relations, tuple):
-            raise TypeError("relations must be a tuple")
-        if any(not isinstance(relation, MemoryRelationCandidate) for relation in self.relations):
-            raise TypeError("relations contains a non-relation-candidate value")
         if len(self.relations) != len(set(self.relations)):
             raise MemoryCandidateError("memory candidate batch contains a duplicate relation")
         actions_by_identity: dict[tuple[int, int, str], MemoryRelationAction] = {}
@@ -385,17 +369,8 @@ class MemoryCandidateBatch:
     def model_validate(cls, value: object) -> MemoryCandidateBatch:
         """严格解析模型返回；不忽略字段，也不进行宽松类型转换。"""
 
-        if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
-            raise MemoryCandidateError("memory candidate output must be an object")
-        keys = set(value)
-        expected = set(cls._FIELD_NAMES)
-        unknown = keys - expected
-        missing = expected - keys
-        if unknown:
-            raise MemoryCandidateError(f"memory candidate output contains unknown fields: {sorted(unknown)}")
-        if missing:
-            raise MemoryCandidateError(f"memory candidate output is missing fields: {sorted(missing)}")
-
+        not_object = "memory candidate output must be an object"
+        value = _model_object(value, set(cls._FIELD_NAMES), "memory candidate output", not_object)
         registry = MemorySchemaRegistry.load_default()
         parsed: dict[str, tuple[MemoryCandidate, ...]] = {}
         for field_name in cls._MEMORY_FIELD_NAMES:
@@ -479,14 +454,6 @@ class MemoryCandidateBatch:
         page_id 表与本批完整旧快照不一致是系统自身的错，不落到哪一条上，直接明确失败。
         """
 
-        if not isinstance(segment, ConversationSegment):
-            raise TypeError("segment must be a ConversationSegment")
-        if not isinstance(old_memories, SnapshotBatch):
-            raise TypeError("old_memories must be a MemorySnapshotBatch")
-        if not isinstance(page_ids, MemoryPageIdMap):
-            raise TypeError("page_ids must be a MemoryPageIdMap")
-        if not isinstance(zone, tzinfo):
-            raise TypeError("zone must be a tzinfo")
         expected_old_uris = {snapshot.identity for snapshot in old_memories.snapshots if snapshot.exists}
         mapped_old_uris = {uri for _page_id, uri in page_ids.existing_items()}
         if mapped_old_uris != expected_old_uris:
@@ -630,8 +597,8 @@ class MemoryCandidateBatch:
                 or target is None
                 or not source.exists
                 or not target.exists
-                or not isinstance(source.value, MemoryDocument)
-                or not isinstance(target.value, MemoryDocument)
+                or source.value is None
+                or target.value is None
             ):
                 yield MemoryCandidateViolation(
                     relation, "relation remove requires both complete old endpoint snapshots"
@@ -705,7 +672,7 @@ class MemoryCandidateBatch:
                 yield MemoryCandidateViolation(
                     candidate, "completed intention must target an existing intention read in this batch"
                 )
-            elif not isinstance(snapshot.value, MemoryDocument):
+            elif snapshot.value is None:
                 yield MemoryCandidateViolation(candidate, "completed intention snapshot is not a memory document")
             elif snapshot.value.kind is not MemoryKind.INTENTION:
                 yield MemoryCandidateViolation(candidate, "completed intention snapshot has the wrong memory type")
@@ -742,7 +709,7 @@ def _old_field_value(candidate: MemoryCandidate, old_memories: MemorySnapshotBat
     """返回候选同一 URI 的完整旧记忆里该字段的值；没有旧节点或旧字段时返回缺失标记。"""
 
     snapshot = old_memories.get(str(MemoryURI.from_address(candidate.address)))
-    if snapshot is None or not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
+    if snapshot is None or not snapshot.exists or snapshot.value is None:
         return _MISSING
     return snapshot.value.fields.get(field_name, _MISSING)
 
@@ -871,42 +838,50 @@ def _required_page_id(item: Mapping[str, Any], field_name: str) -> int:
         raise MemoryCandidateError(f"invalid {field_name} candidate: {exc}") from exc
 
 
-def _parse_relation_candidate(value: object) -> MemoryRelationCandidate:
+# 模型输出里的严格对象；下面两个解码器在构造前查类型，报错文字照抄对应值对象的 ``__post_init__``
+def _model_object(value: object, expected: set[str], label: str, not_object: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
-        raise MemoryCandidateError("relations contains a non-object item")
+        raise MemoryCandidateError(not_object)
+    if unknown := set(value) - expected:
+        raise MemoryCandidateError(f"{label} contains unknown fields: {sorted(unknown)}")
+    if missing := expected - set(value):
+        raise MemoryCandidateError(f"{label} is missing fields: {sorted(missing)}")
+    return value
+
+
+def _parse_relation_candidate(value: object) -> MemoryRelationCandidate:
     expected = {"action", "from_page_id", "to_page_id", "link_type"}
-    keys = set(value)
-    unknown = keys - expected
-    missing = expected - keys
-    if unknown:
-        raise MemoryCandidateError(f"relation candidate contains unknown fields: {sorted(unknown)}")
-    if missing:
-        raise MemoryCandidateError(f"relation candidate is missing fields: {sorted(missing)}")
-    return MemoryRelationCandidate(
-        action=value["action"],
-        from_page_id=value["from_page_id"],
-        to_page_id=value["to_page_id"],
-        link_type=value["link_type"],
-    )
+    item = _model_object(value, expected, "relation candidate", "relations contains a non-object item")
+    try:
+        from_page_id, to_page_id = validate_page_id(item["from_page_id"]), validate_page_id(item["to_page_id"])
+    except MemoryPageIdError as exc:
+        raise MemoryCandidateError(f"invalid relation candidate: {exc}") from exc
+    try:
+        action = MemoryRelationAction(item["action"])
+    except ValueError as exc:
+        raise MemoryCandidateError("relation candidate contains an unsupported action") from exc
+    try:
+        link_type = MemoryLinkType(item["link_type"])
+    except ValueError as exc:
+        raise MemoryCandidateError("relation candidate contains an unsupported link_type") from exc
+    return MemoryRelationCandidate(action=action, from_page_id=from_page_id, to_page_id=to_page_id, link_type=link_type)
 
 
 def _parse_identity_proposal(value: object) -> MemoryIdentityProposal:
-    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
-        raise MemoryCandidateError("identity_proposals contains a non-object item")
     expected = {"proposal_type", "source_page_id", "target_page_id", "basis"}
-    keys = set(value)
-    unknown = keys - expected
-    missing = expected - keys
-    if unknown:
-        raise MemoryCandidateError(f"identity proposal contains unknown fields: {sorted(unknown)}")
-    if missing:
-        raise MemoryCandidateError(f"identity proposal is missing fields: {sorted(missing)}")
-    return MemoryIdentityProposal(
-        proposal_type=value["proposal_type"],
-        source_page_id=value["source_page_id"],
-        target_page_id=value["target_page_id"],
-        basis=value["basis"],
-    )
+    item = _model_object(value, expected, "identity proposal", "identity_proposals contains a non-object item")
+    try:
+        proposal_type = MemoryIdentityProposalType(item["proposal_type"])
+        basis = MemoryIdentityProposalBasis(item["basis"])
+        source_page_id = validate_page_id(item["source_page_id"])
+    except (MemoryPageIdError, TypeError, ValueError) as exc:
+        raise MemoryCandidateError("identity proposal contains an invalid type, basis or source_page_id") from exc
+    target_page_id = item["target_page_id"]
+    if target_page_id is not None and not is_int(target_page_id):
+        if proposal_type is MemoryIdentityProposalType.SAME_MEMORY:
+            raise MemoryCandidateError("same_memory proposal requires a valid target_page_id")
+        raise MemoryCandidateError("remove_memory proposal cannot contain a target_page_id")
+    return MemoryIdentityProposal(proposal_type, source_page_id, target_page_id, basis)
 
 
 def _candidate_field_schema(field: MemoryFieldSchema) -> dict[str, object]:

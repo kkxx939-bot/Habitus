@@ -87,15 +87,11 @@ class MemoryFieldSchema:
         object.__setattr__(self, "field_type", MemoryFieldType(self.field_type))
         object.__setattr__(self, "role", MemoryFieldRole(self.role))
         object.__setattr__(self, "merge_strategy", MemoryMergeStrategy(self.merge_strategy))
-        if isinstance(self.allowed_values, str):
-            raise MemorySchemaError("memory schema allowed_values must be a tuple of strings")
         allowed_values = tuple(self.allowed_values)
         object.__setattr__(self, "allowed_values", allowed_values)
-        if not isinstance(self.required, bool):
-            raise MemorySchemaError("memory schema field required must be boolean")
-        if not isinstance(self.description, str) or not self.description.strip():
+        if not self.description.strip():
             raise MemorySchemaError("memory schema field description must be non-empty")
-        if any(not isinstance(value, str) or not value.strip() for value in allowed_values):
+        if any(not value.strip() for value in allowed_values):
             raise MemorySchemaError("memory schema allowed_values must contain non-empty strings")
         if len(allowed_values) != len(set(allowed_values)):
             raise MemorySchemaError("memory schema allowed_values must be unique")
@@ -123,22 +119,16 @@ class MemoryTypeSchema:
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "operation_mode", MemoryOperationMode(self.operation_mode))
         object.__setattr__(self, "fields", tuple(self.fields))
-        if (
-            isinstance(self.min_non_empty_content_fields, bool)
-            or not isinstance(self.min_non_empty_content_fields, int)
-            or self.min_non_empty_content_fields < 0
-        ):
+        if self.min_non_empty_content_fields < 0:
             raise MemorySchemaError("memory min_non_empty_content_fields must be a non-negative integer")
-        if not isinstance(self.omit_empty_sections, bool):
-            raise MemorySchemaError("memory omit_empty_sections must be boolean")
-        if not isinstance(self.description, str) or not self.description.strip():
+        if not self.description.strip():
             raise MemorySchemaError("memory type description must be non-empty")
         if self.path_template != _CANONICAL_PATH_TEMPLATES[kind]:
             raise MemorySchemaError(f"{kind.value} schema path does not match the confirmed memory tree")
         path = PurePosixPath(self.path_template)
         if path.is_absolute() or ".." in path.parts or path.suffix != ".md":
             raise MemorySchemaError("memory schema path template is unsafe")
-        if not isinstance(self.markdown_template, str) or not self.markdown_template:
+        if not self.markdown_template:
             raise MemorySchemaError("memory markdown template must be non-empty")
         names = [field.name for field in self.fields]
         if len(names) != len(set(names)):

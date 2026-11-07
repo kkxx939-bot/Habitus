@@ -49,18 +49,10 @@ def test_tree_config_accepts_documented_capacity_bounds(limit: int) -> None:
     assert MemoryTreeConfig(limit).max_children_per_directory == limit
 
 
-@pytest.mark.parametrize("limit", [0, -1, 1_000_001, True, False, 1.5, "100", None])
-def test_tree_config_rejects_invalid_capacity(limit: object) -> None:
+@pytest.mark.parametrize("limit", [0, -1, 1_000_001])
+def test_tree_config_rejects_invalid_capacity(limit: int) -> None:
     with pytest.raises(ValueError):
-        MemoryTreeConfig(limit)  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("argument", ["document_codec", "document_config", "tree_config"])
-@pytest.mark.parametrize("value", [object(), "config", 1, True, []])
-def test_tree_constructor_rejects_wrong_collaborator_types(tmp_path: Path, argument: str, value: object) -> None:
-    kwargs = {argument: value}
-    with pytest.raises(TypeError):
-        MemoryTree(tmp_path / "memory", **kwargs)  # type: ignore[arg-type]
+        MemoryTreeConfig(limit)
 
 
 def test_tree_constructor_rejects_symbolic_link_root(tmp_path: Path) -> None:
@@ -275,15 +267,6 @@ def test_tree_maps_every_directory_and_semantic_layer(tmp_path: Path, directory:
         assert tree.path_for_uri(MemoryURI.from_layer(directory, level)) == expected
 
 
-@pytest.mark.parametrize("value", [None, 1, True, "address", object()])
-def test_tree_path_functions_reject_wrong_domain_types(tmp_path: Path, value: object) -> None:
-    tree = MemoryTree(tmp_path / "memory")
-    with pytest.raises(TypeError):
-        tree.path_for(value)  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        tree.directory_path(value)  # type: ignore[arg-type]
-
-
 def test_initialize_is_idempotent_and_creates_only_static_tree(tmp_path: Path) -> None:
     tree = MemoryTree(tmp_path / "memory")
     assert tree.initialize() == tree.initialize() == tree.root
@@ -318,12 +301,6 @@ def test_tree_missing_read_exists_and_delete_have_explicit_semantics(tmp_path: P
     assert tree.delete(address) is False
     with pytest.raises(FileNotFoundError):
         tree.read(address)
-
-
-@pytest.mark.parametrize("value", [None, 1, True, {}, [], "document"])
-def test_tree_write_rejects_non_document_values(tmp_path: Path, value: object) -> None:
-    with pytest.raises(TypeError):
-        MemoryTree(tmp_path / "memory").write(value)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("kind", tuple(MemoryKind))
@@ -378,23 +355,13 @@ def test_tree_layers_reject_empty_semantics(tmp_path: Path, abstract: str, overv
         tree.write_layers(MemoryDirectory.root(), abstract=abstract, overview=overview)
 
 
-@pytest.mark.parametrize(
-    ("abstract", "overview"), [(1, "overview"), ("abstract", 1), (None, "overview"), ("abstract", None)]
-)
-def test_tree_layers_reject_non_text_semantics(tmp_path: Path, abstract: object, overview: object) -> None:
-    tree = MemoryTree(tmp_path / "memory")
-    tree.initialize()
-    with pytest.raises(TypeError):
-        tree.write_layers(MemoryDirectory.root(), abstract=abstract, overview=overview)  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("max_bytes", [0, -1, True, False, 1.5, "10", None])
-def test_bounded_layer_read_rejects_invalid_limit(tmp_path: Path, max_bytes: object) -> None:
+@pytest.mark.parametrize("max_bytes", [0, -1])
+def test_bounded_layer_read_rejects_invalid_limit(tmp_path: Path, max_bytes: int) -> None:
     tree = MemoryTree(tmp_path / "memory")
     tree.initialize()
     tree.write_layers(MemoryDirectory.root(), abstract="摘要", overview="概览")
     with pytest.raises(ValueError):
-        tree.read_layer_bounded(MemoryDirectory.root(), MemoryLevel.ABSTRACT, max_bytes=max_bytes)  # type: ignore[arg-type]
+        tree.read_layer_bounded(MemoryDirectory.root(), MemoryLevel.ABSTRACT, max_bytes=max_bytes)
 
 
 @pytest.mark.parametrize("maximum", [1, 2, 5, 10])
@@ -446,14 +413,14 @@ def test_leaf_enumeration_is_sorted_and_bounded(tmp_path: Path, count: int, kind
             tree.direct_addresses(directory, limit=count - 1)
 
 
-@pytest.mark.parametrize("limit", [0, -1, 10_001, True, False, 1.5, "1", "x", None])
-def test_direct_and_child_directory_limits_reject_invalid_values(tmp_path: Path, limit: object) -> None:
+@pytest.mark.parametrize("limit", [0, -1, 10_001])
+def test_direct_and_child_directory_limits_reject_invalid_values(tmp_path: Path, limit: int) -> None:
     tree = MemoryTree(tmp_path / "memory")
     tree.initialize()
     with pytest.raises((TypeError, ValueError)):
-        tree.direct_addresses(MemoryDirectory.root(), limit=limit)  # type: ignore[arg-type]
+        tree.direct_addresses(MemoryDirectory.root(), limit=limit)
     with pytest.raises((TypeError, ValueError)):
-        tree.child_directories(MemoryDirectory.root(), limit=limit)  # type: ignore[arg-type]
+        tree.child_directories(MemoryDirectory.root(), limit=limit)
 
 
 def test_child_directories_follow_entity_and_event_hierarchy(tmp_path: Path) -> None:
@@ -506,19 +473,10 @@ def test_list_addresses_continues_strictly_after_cursor(tmp_path: Path) -> None:
     ) == (items[-1].address,)
 
 
-@pytest.mark.parametrize("limit", [0, -1, 10_001, 1_000_000, True, False, 1.5, "1"])
-def test_global_list_rejects_invalid_limit(tmp_path: Path, limit: object) -> None:
+@pytest.mark.parametrize("limit", [0, -1, 10_001, 1_000_000])
+def test_global_list_rejects_invalid_limit(tmp_path: Path, limit: int) -> None:
     with pytest.raises(ValueError):
-        MemoryTree(tmp_path / "memory").list_addresses(limit=limit)  # type: ignore[arg-type]
-
-
-def test_non_integer_global_limit_cannot_silently_truncate_a_populated_tree(tmp_path: Path) -> None:
-    tree = MemoryTree(tmp_path / "memory")
-    tree.write(document(MemoryKind.PROFILE))
-    tree.write(document(MemoryKind.PREFERENCE))
-
-    with pytest.raises(ValueError):
-        tree.list_addresses(limit=1.5)  # type: ignore[arg-type]
+        MemoryTree(tmp_path / "memory").list_addresses(limit=limit)
 
 
 @pytest.mark.parametrize(

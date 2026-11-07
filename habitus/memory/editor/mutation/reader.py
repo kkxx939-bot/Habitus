@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from habitus.infrastructure.editor.snapshot import SnapshotBatch
 from habitus.memory.editor.candidate import MemoryCandidateBatch
 from habitus.memory.editor.mutation.model import MemoryMutationReadSet
 from habitus.memory.snapshot import MemorySnapshotBatch, MemorySnapshotReader
@@ -17,8 +16,6 @@ class MemoryMutationReadSetLoader:
     """补齐候选目标的存在或缺失快照，并验证重叠旧快照仍然有效。"""
 
     def __init__(self, reader: MemorySnapshotReader) -> None:
-        if not isinstance(reader, MemorySnapshotReader):
-            raise TypeError("reader must be a MemorySnapshotReader")
         self.reader = reader
 
     def load(
@@ -28,10 +25,6 @@ class MemoryMutationReadSetLoader:
     ) -> MemoryMutationReadSet:
         """精确读取所有候选目标 URI；空候选返回空目标读集。"""
 
-        if not isinstance(batch, MemoryCandidateBatch):
-            raise TypeError("batch must be a MemoryCandidateBatch")
-        if not isinstance(old_memories, SnapshotBatch):
-            raise TypeError("old_memories must be a MemorySnapshotBatch")
         target_uris = tuple(
             sorted({str(MemoryURI.from_address(candidate.address)) for candidate in batch.iter_candidates()})
         )

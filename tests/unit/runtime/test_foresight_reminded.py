@@ -50,8 +50,6 @@ def test_reminded_means_a_spoken_delivery_of_that_class_before_the_occurrence_st
         lookup("", FORMED)
     with pytest.raises(ForesightError):
         lookup("s-k0002", FORMED.replace(tzinfo=None))
-    with pytest.raises(TypeError):
-        RemindedLookup(object())  # type: ignore[arg-type]
 
 
 def test_reminded_recognises_the_class_through_the_same_mapping_as_settlement(tmp_path) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -9,7 +10,8 @@ from datetime import UTC, date, datetime
 from enum import Enum
 
 from habitus.foundation.ids import canonical_path_identity, same_path_identity
-from habitus.memory.conversation import ConversationLayout
+from habitus.foundation.validation import is_int, is_str_list
+from habitus.memory.conversation import ConversationLayout, ConversationLayoutError
 from habitus.memory.document import MemoryStoredLink
 from habitus.memory.editor.candidate import MemoryIdentityProposalBasis
 from habitus.memory.editor.identity import MemoryNodeDisposition
@@ -18,6 +20,29 @@ from habitus.memory.uri import MemoryURI
 from habitus.memory.workflow.jobs import MemoryJob
 from habitus.pre.conversation import ConversationSegment
 from habitus.pre.conversation.messages.model import require_sha256
+
+
+def _int_field(value: object, message: str) -> int:
+    """磁盘读回的字段在构造前确认类型；报错文字照抄各值对象 ``__post_init__`` 的检查。"""
+    if not is_int(value):
+        raise ValueError(message)
+    return value
+
+
+def _optional_revision(value: object, name: str) -> int | None:
+    if value is not None and not is_int(value):
+        raise ValueError(f"{name} must be null or a positive integer")
+    return value
+
+
+def _text_field(value: object, message: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(message)
+    return value
+
+
+def _optional_sha256(value: object, name: str) -> str | None:
+    return None if value is None else require_sha256(value, name)
 
 
 class MemoryChangeReceiptError(RuntimeError):
@@ -29,6 +54,10 @@ class MemoryChangeReceiptState(str, Enum):
 
     PREPARED = "prepared"
     COMMITTED = "committed"
+
+
+_TRANSACTION_MESSAGE = "transaction_id must be 32 lowercase hexadecimal characters"
+_DIGEST_MESSAGE = "source_segment_digest must be a SHA-256 hex digest"
 
 
 class MemoryNodeChangeAction(str, Enum):
@@ -51,19 +80,15 @@ class MemoryChangeSource:
     editor_segment_digest: str | None = None
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.memory_sequence, bool)
-            or not isinstance(self.memory_sequence, int)
-            or self.memory_sequence <= 0
-        ):
+        if self.memory_sequence <= 0:
             raise ValueError("memory_sequence must be a positive integer")
-        if not isinstance(self.transaction_id, str) or not self._hex(self.transaction_id, 32):
+        if not self._hex(self.transaction_id, 32):
             raise ValueError("transaction_id must be 32 lowercase hexadecimal characters")
         for name in ("conversation_id", "segment_id"):
             value = getattr(self, name)
-            if not isinstance(value, str) or not value or value != value.strip():
+            if not value or value != value.strip():
                 raise ValueError(f"{name} must be non-empty normalized text")
-        if isinstance(self.started_on, datetime) or not isinstance(self.started_on, date):
+        if isinstance(self.started_on, datetime):
             raise ValueError("started_on must be a calendar date")
         try:
             digest = require_sha256(self.source_segment_digest, "source_segment_digest")
@@ -94,11 +119,7 @@ class MemoryChangeSource:
     ) -> MemoryChangeSource:
         """从可信耐久 Job 确定性生成一一对应的变更来源。"""
 
-        if not isinstance(job, MemoryJob):
-            raise TypeError("job must be MemoryJob")
         if editor_segment is not None:
-            if not isinstance(editor_segment, ConversationSegment):
-                raise TypeError("editor_segment must be ConversationSegment or None")
             if not same_path_identity(
                 editor_segment.conversation_id,
                 job.conversation_id,
@@ -130,8 +151,6 @@ class MemoryChangeSource:
         ).hexdigest()
 
     def require_segment(self, segment: ConversationSegment) -> None:
-        if not isinstance(segment, ConversationSegment):
-            raise TypeError("segment must be ConversationSegment")
         if (
             not same_path_identity(
                 segment.conversation_id,
@@ -178,14 +197,7 @@ class MemoryChangeSource:
 
     @classmethod
     def from_dict(cls, value: object) -> MemoryChangeSource:
-        expected = {
-            "memory_sequence",
-            "transaction_id",
-            "conversation_id",
-            "started_on",
-            "segment_id",
-            "source_segment_digest",
-        }
+        expected = {field.name for field in dataclasses.fields(cls)} - {"editor_segment_id", "editor_segment_digest"}
         if not isinstance(value, Mapping):
             raise ValueError("memory change source has an invalid shape")
         fields = frozenset(value)
@@ -197,15 +209,20 @@ class MemoryChangeSource:
         started_on = value["started_on"]
         if not isinstance(started_on, str):
             raise ValueError("memory change source started_on must be text")
+        editor_segment_id, editor_digest = value.get("editor_segment_id"), value.get("editor_segment_digest")
+        if editor_segment_id is not None and not isinstance(editor_segment_id, str):
+            raise ConversationLayoutError("segment_id must be text")
+        if editor_digest is not None and not isinstance(editor_digest, str):
+            raise ValueError("editor_segment_digest must be a SHA-256 hex digest")
         return cls(
-            memory_sequence=value["memory_sequence"],
-            transaction_id=value["transaction_id"],
-            conversation_id=value["conversation_id"],
+            memory_sequence=_int_field(value["memory_sequence"], "memory_sequence must be a positive integer"),
+            transaction_id=_text_field(value["transaction_id"], _TRANSACTION_MESSAGE),
+            conversation_id=_text_field(value["conversation_id"], "conversation_id must be non-empty normalized text"),
             started_on=date.fromisoformat(started_on),
-            segment_id=value["segment_id"],
-            source_segment_digest=value["source_segment_digest"],
-            editor_segment_id=value.get("editor_segment_id"),
-            editor_segment_digest=value.get("editor_segment_digest"),
+            segment_id=_text_field(value["segment_id"], "segment_id must be non-empty normalized text"),
+            source_segment_digest=_text_field(value["source_segment_digest"], _DIGEST_MESSAGE),
+            editor_segment_id=editor_segment_id,
+            editor_segment_digest=editor_digest,
         )
 
     @staticmethod
@@ -233,8 +250,6 @@ class MemoryIdentityChange:
         basis = MemoryIdentityProposalBasis(self.basis)
         if action not in {MemoryNodeDisposition.MERGE, MemoryNodeDisposition.DELETE}:
             raise ValueError("identity receipt changes support only merge or delete")
-        if not isinstance(self.source_uri, MemoryURI):
-            raise TypeError("identity change source_uri must be MemoryURI")
         self.source_uri.to_address()
         if action is MemoryNodeDisposition.MERGE:
             if not isinstance(self.target_uri, MemoryURI):
@@ -284,15 +299,11 @@ class MemoryPreparedNodeChange:
 
     def __post_init__(self) -> None:
         action = MemoryNodeChangeAction(self.action)
-        if not isinstance(self.uri, MemoryURI):
-            raise TypeError("prepared node change uri must be MemoryURI")
         address = self.uri.to_address()
         for name in ("before_digest", "expected_after_digest"):
             value = getattr(self, name)
             if value is not None:
                 require_sha256(value, name)
-        if not isinstance(self.confirms_intention, bool):
-            raise TypeError("confirms_intention must be boolean")
         if self.confirms_intention and address.kind is not MemoryKind.INTENTION:
             raise ValueError("only an Intention prepared change can refresh confirmation time")
         if action is MemoryNodeChangeAction.CREATE:
@@ -325,24 +336,21 @@ class MemoryPreparedNodeChange:
 
     @classmethod
     def from_dict(cls, value: object) -> MemoryPreparedNodeChange:
-        expected = {
-            "action",
-            "uri",
-            "before_digest",
-            "expected_after_digest",
-            "confirms_intention",
-        }
+        expected = {field.name for field in dataclasses.fields(cls)}
         if not isinstance(value, Mapping) or set(value) != expected:
             raise ValueError("prepared memory node change has an invalid shape")
         uri = value["uri"]
         if not isinstance(uri, str):
             raise ValueError("prepared memory node change URI must be text")
+        confirms_intention = value["confirms_intention"]
+        if not isinstance(confirms_intention, bool):
+            raise TypeError("confirms_intention must be boolean")
         return cls(
             action=MemoryNodeChangeAction(value["action"]),
             uri=MemoryURI.parse(uri),
-            before_digest=value["before_digest"],
-            expected_after_digest=value["expected_after_digest"],
-            confirms_intention=value["confirms_intention"],
+            before_digest=_optional_sha256(value["before_digest"], "before_digest"),
+            expected_after_digest=_optional_sha256(value["expected_after_digest"], "expected_after_digest"),
+            confirms_intention=confirms_intention,
         )
 
 
@@ -359,12 +367,10 @@ class MemoryNodeChange:
 
     def __post_init__(self) -> None:
         action = MemoryNodeChangeAction(self.action)
-        if not isinstance(self.uri, MemoryURI):
-            raise TypeError("node change uri must be MemoryURI")
         self.uri.to_address()
         for name in ("before_revision", "after_revision"):
             value = getattr(self, name)
-            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
+            if value is not None and value <= 0:
                 raise ValueError(f"{name} must be null or a positive integer")
         for name in ("before_digest", "after_digest"):
             value = getattr(self, name)
@@ -402,14 +408,7 @@ class MemoryNodeChange:
 
     @classmethod
     def from_dict(cls, value: object) -> MemoryNodeChange:
-        expected = {
-            "action",
-            "uri",
-            "before_revision",
-            "after_revision",
-            "before_digest",
-            "after_digest",
-        }
+        expected = {field.name for field in dataclasses.fields(cls)}
         if not isinstance(value, Mapping) or set(value) != expected:
             raise ValueError("memory node change has an invalid shape")
         uri = value["uri"]
@@ -418,10 +417,10 @@ class MemoryNodeChange:
         return cls(
             action=MemoryNodeChangeAction(value["action"]),
             uri=MemoryURI.parse(uri),
-            before_revision=value["before_revision"],
-            after_revision=value["after_revision"],
-            before_digest=value["before_digest"],
-            after_digest=value["after_digest"],
+            before_revision=_optional_revision(value["before_revision"], "before_revision"),
+            after_revision=_optional_revision(value["after_revision"], "after_revision"),
+            before_digest=_optional_sha256(value["before_digest"], "before_digest"),
+            after_digest=_optional_sha256(value["after_digest"], "after_digest"),
         )
 
 
@@ -446,8 +445,6 @@ class MemoryChangeReceipt:
     SCHEMA_VERSION = "memory_change_receipt_v2"
 
     def __post_init__(self) -> None:
-        if not isinstance(self.source, MemoryChangeSource):
-            raise TypeError("receipt source must be MemoryChangeSource")
         state = MemoryChangeReceiptState(self.state)
         prepared_at = self._timestamp(self.prepared_at, "prepared_at")
         committed_at = self._timestamp(self.committed_at, "committed_at") if self.committed_at is not None else None
@@ -466,8 +463,6 @@ class MemoryChangeReceipt:
             "unchanged_uris",
         ):
             values = getattr(self, name)
-            if not isinstance(values, tuple) or any(not isinstance(uri, MemoryURI) for uri in values):
-                raise TypeError(f"{name} must contain MemoryURI values")
             identities = tuple(str(uri) for uri in values)
             if identities != tuple(sorted(set(identities))):
                 raise ValueError(f"{name} must be unique and sorted")
@@ -481,16 +476,14 @@ class MemoryChangeReceipt:
         ]
         if any(left & right for index, left in enumerate(expected_sets) for right in expected_sets[index + 1 :]):
             raise ValueError("receipt expected change URI sets must be disjoint")
-        for name, item_type, key in (
-            ("prepared_node_changes", MemoryPreparedNodeChange, lambda item: str(item.uri)),
-            ("identity_changes", MemoryIdentityChange, lambda item: str(item.source_uri)),
-            ("added_relations", MemoryStoredLink, lambda item: item.identity),
-            ("removed_relations", MemoryStoredLink, lambda item: item.identity),
-            ("node_changes", MemoryNodeChange, lambda item: str(item.uri)),
+        for name, key in (
+            ("prepared_node_changes", lambda item: str(item.uri)),
+            ("identity_changes", lambda item: str(item.source_uri)),
+            ("added_relations", lambda item: item.identity),
+            ("removed_relations", lambda item: item.identity),
+            ("node_changes", lambda item: str(item.uri)),
         ):
             values = getattr(self, name)
-            if not isinstance(values, tuple) or any(not isinstance(item, item_type) for item in values):
-                raise TypeError(f"{name} contains invalid values")
             keys = tuple(key(item) for item in values)
             if keys != tuple(sorted(set(keys))):
                 raise ValueError(f"{name} must be unique and sorted")
@@ -539,37 +532,13 @@ class MemoryChangeReceipt:
 
     @classmethod
     def from_dict(cls, value: object) -> MemoryChangeReceipt:
-        expected = {
-            "schema_version",
-            "source",
-            "state",
-            "prepared_at",
-            "committed_at",
-            "expected_created_uris",
-            "expected_updated_uris",
-            "expected_deleted_uris",
-            "unchanged_uris",
-            "prepared_node_changes",
-            "identity_changes",
-            "added_relations",
-            "removed_relations",
-            "node_changes",
-        }
+        expected = {"schema_version", *(field.name for field in dataclasses.fields(cls))}
         if not isinstance(value, Mapping) or set(value) != expected:
             raise ValueError("memory change receipt has an invalid shape")
         if value["schema_version"] != cls.SCHEMA_VERSION:
             raise ValueError("memory change receipt has an unsupported schema")
-        for name in (
-            "expected_created_uris",
-            "expected_updated_uris",
-            "expected_deleted_uris",
-            "unchanged_uris",
-            "prepared_node_changes",
-            "identity_changes",
-            "added_relations",
-            "removed_relations",
-            "node_changes",
-        ):
+        # 字段顺序里 source、state、prepared_at、committed_at 之后的九个都是数组
+        for name in (field.name for field in dataclasses.fields(cls)[4:]):
             if not isinstance(value[name], list):
                 raise ValueError(f"memory change receipt {name} must be an array")
         committed_at = value["committed_at"]
@@ -595,13 +564,13 @@ class MemoryChangeReceipt:
 
     @staticmethod
     def _uris(values: object) -> tuple[MemoryURI, ...]:
-        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+        if not isinstance(values, list) or not is_str_list(values):
             raise ValueError("receipt URI list is invalid")
         return tuple(MemoryURI.parse(value) for value in values)
 
     @staticmethod
     def _timestamp(value: datetime, label: str) -> datetime:
-        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError(f"{label} must be timezone-aware datetime")
         return value.astimezone(UTC)
 

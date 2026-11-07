@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -383,3 +384,37 @@ def test_store_round_trip_and_tampering_detection(tmp_path) -> None:
     inner["batch"]["observations"][0]["semantics"] = "有人离开玄关"
     with pytest.raises(BehaviorObservationError):
         BehaviorObservationEnvelope.from_dict(inner, config=CONFIG)
+
+
+@pytest.mark.parametrize(
+    ("path", "bad", "message"),
+    [
+        (("source_id",), 1, "source_id must be lowercase SHA-256 text"),
+        (("delivery_id",), None, "delivery_id must be lowercase SHA-256 text"),
+        (("payload_digest",), 7, "payload_digest must be lowercase SHA-256 text"),
+        (("record_digest",), ["x"], "record_digest must be lowercase SHA-256 text"),
+        (("observer_id",), 1, "observer_id must be non-empty normalized text"),
+        (("protocol",), 2, "protocol must be non-empty normalized text"),
+        (("recorded_at",), 1, "recorded_at must be a datetime"),
+        (("batch", "observer_id"), 1, "observer_id must be non-empty normalized text"),
+    ],
+)
+def test_store_read_rejects_wrong_types_in_the_delivery_file(
+    tmp_path, path: tuple[str, ...], bad: object, message: str
+) -> None:
+    """W16：交付文件里类型错的字段在解码器（``from_dict``）构造之前就被拒，报错与值对象那条检查同一句。"""
+
+    store = BehaviorObservationStore(tmp_path, config=CONFIG)
+    original = store.put(envelope(adapt()))
+    record = original.to_dict()
+    target = record
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = bad
+    file = store._path(original.source_id)
+    file.unlink()
+    file.write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(BehaviorObservationError, match="record is corrupt") as caught:
+        BehaviorObservationStore(tmp_path, config=CONFIG).read(original.source_id)
+    assert isinstance(caught.value.__cause__, BehaviorObservationError)
+    assert message in str(caught.value.__cause__)

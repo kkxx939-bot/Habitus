@@ -92,16 +92,12 @@ def test_a_record_must_point_at_an_occurrence_and_stay_self_consistent(tmp_path)
         ConceptHit("")
     with pytest.raises(ConceptHitsError, match="never stored as a hit"):
         hits_for(uri, ConceptHit(BEDTIME))
-    with pytest.raises(ConceptHitsError, match="classified must be a boolean"):
-        hits_for(uri, classified=1)  # type: ignore[arg-type]
     with pytest.raises(ConceptHitsError, match="lane must be non-empty"):
         hits_for(uri, lane=" ")
     with pytest.raises(ConceptHitsError, match="recent_digest"):
         hits_for(uri, recent_digest="")
     with pytest.raises(ConceptHitsError, match="unresolved reason is unknown"):
         hits_for(uri, unresolved={"早餐": "忘了"})  # type: ignore[dict-item]
-    with pytest.raises(ConceptHitsError, match="map concept names to reasons"):
-        hits_for(uri, unresolved=("早餐",))  # type: ignore[arg-type]
     assert record.lane == "session" and record.unresolved == {"早餐": UNSEEN}
 
 
@@ -143,6 +139,34 @@ def test_a_record_round_trips_and_a_tampered_body_is_rejected(tmp_path) -> None:
         decode(text, expected_uri=publish(site.behavior_tree, DAY1, "起床", 9, 40))
     with pytest.raises(SceneRecordError, match="must be a boolean"):
         decode(text.replace('"classified":true', '"classified":"yes"'))
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        ('"concept":"晚睡"', '"concept":7', "concept name must be one safe non-empty path segment"),
+        ('"grade":"重"', '"grade":["重"]', "a grade must be non-empty single-line text"),
+        ('"早餐":"model_unseen"', '"早餐":["model_unseen"]', "unresolved reason is unknown"),
+        ('"早餐":"model_unseen"', '"早餐":1', "unresolved reason is unknown"),
+        (
+            '"unresolved":{"早餐":"model_unseen"}',
+            '"unresolved":["早餐"]',
+            "unresolved reason is unknown: concept hits field 'unresolved' must be an object",
+        ),
+        ('"就寝 常态时刻":"23:30"', '"就寝 常态时刻":2330', "baseline_snapshot value must be a non-empty single line"),
+    ],
+)
+def test_a_record_with_wrong_types_is_rejected_when_decoded(tmp_path, old: str, new: str, message: str) -> None:
+    """命中记录注释里类型错的字段在解码时就拒（W16：类型检查在边界）。"""
+
+    site = Site(tmp_path, now=NOW)
+    uri = publish(site.behavior_tree, DAY1, "就寝", 2, 10)
+    text = encode(
+        hits_for(uri, ConceptHit("晚睡", "重"), unresolved={"早餐": UNSEEN}, baseline={"就寝 常态时刻": "23:30"})
+    )
+    assert old in text
+    with pytest.raises(SceneRecordError, match=f"concept hits record is not valid: {message}"):
+        decode(text.replace(old, new))
 
 
 def test_lane_reasons_and_the_recent_digest_round_trip(tmp_path) -> None:

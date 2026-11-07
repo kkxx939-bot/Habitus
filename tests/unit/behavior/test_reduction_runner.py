@@ -242,8 +242,6 @@ def test_the_reminded_flag_is_asked_from_the_injected_port_before_staging(tmp_pa
     (address,) = harness.tree.list_addresses(BehaviorKind.OCCURRENCE)
     assert harness.tree.read(address).fields["reminded"] is True
     assert asked and asked[0] == ("s-k0001", at(18)) and all(item == asked[0] for item in asked)
-    with pytest.raises(TypeError):
-        harness.runner.attach_reminder_lookup(object())  # type: ignore[arg-type]
 
 
 def test_second_sweep_is_a_no_op(tmp_path) -> None:

@@ -168,42 +168,16 @@ class BehaviorReductionRunner:
         由组合根注入（本层对预测层零知识）；没接时恒为假。它在物化 payload 时定格（stage 之前），查不出来就整轮失败，
         不许静默记成没提醒（被提醒的发生混进自然率事后分不开）。"""
 
-        if not isinstance(judgements, BehaviorJudgementStore):
-            raise TypeError("judgements must be BehaviorJudgementStore")
-        if not isinstance(observations, BehaviorObservationStore):
-            raise TypeError("observations must be BehaviorObservationStore")
-        if not isinstance(receipts, BehaviorFusionReceiptStore):
-            raise TypeError("receipts must be BehaviorFusionReceiptStore")
-        if not isinstance(tree, BehaviorTree):
-            raise TypeError("tree must be BehaviorTree")
-        if not isinstance(kinds, KindStamping):
-            raise TypeError("kinds must be KindStamping")
-        if not isinstance(vocabulary_jobs, VocabularyJobs):
-            raise TypeError("vocabulary_jobs must be VocabularyJobs")
-        if not isinstance(ledger, BehaviorReductionLedger):
-            raise TypeError("ledger must be BehaviorReductionLedger")
-        if semantic_refresher is not None and not isinstance(refresh_retries, RefreshRetries):
+        if semantic_refresher is not None and refresh_retries is None:
             raise TypeError("semantic refresh needs a RefreshRetries ledger (26 号清单 2.4.1)")
-        if semantic_refresher is not None and not isinstance(semantic_refresher, BehaviorSemanticRefresher):
-            raise TypeError("semantic_refresher must be BehaviorSemanticRefresher or None")
-        if clock is not None and not callable(clock):
-            raise TypeError("clock must be callable")
-        if (
-            isinstance(context_lookback_seconds, bool)
-            or not isinstance(context_lookback_seconds, int | float)
-            or context_lookback_seconds <= 0
-        ):
+        if context_lookback_seconds <= 0:
             raise ValueError("context_lookback_seconds must be a positive number")
         self.judgements = judgements
         self.observations = observations
         self.receipts = receipts
         self.tree = tree
         self.lock_store = lock_store
-        if (
-            isinstance(sweep_lock_ttl_seconds, bool)
-            or not isinstance(sweep_lock_ttl_seconds, int)
-            or not 60 <= sweep_lock_ttl_seconds <= 86_400
-        ):
+        if not 60 <= sweep_lock_ttl_seconds <= 86_400:
             raise ValueError("sweep_lock_ttl_seconds must be an integer between 60 and 86400")
         self.sweep_lock_ttl_seconds = sweep_lock_ttl_seconds
         self.kinds = kinds
@@ -211,35 +185,23 @@ class BehaviorReductionRunner:
         self.ledger = ledger
         self.semantic_refresher = semantic_refresher
         self.refresh_retries = refresh_retries
-        if dirty_days is not None and not isinstance(dirty_days, DirtyDayLog):
-            raise TypeError("dirty_days must be DirtyDayLog or None")
         #: 改树改到的日子记一笔增量，按天缓存的读侧据此只重读变过的日子（26 号清单 6.7）。没有读侧的支（物理一支、
         #: 没开语义树的会话一支）不给，不记——没人截，记了只会一直长（L10.3）。
         self.dirty_days = dirty_days
-        if not isinstance(failed_chains, FailedChains):
-            raise TypeError("failed_chains must be FailedChains")
         if failed_chains.judgements is not judgements or failed_chains.ledger is not ledger:
             raise ValueError("failed chains must set aside judgements from the runner's own store and ledger")
         self.failed_chains = failed_chains
         self.clock = clock or (lambda: datetime.now(UTC))
         self.context_lookback_seconds = float(context_lookback_seconds)
-        if not isinstance(seal_on_arrival, bool):
-            raise TypeError("seal_on_arrival must be a bool")
         self.seal_on_arrival = seal_on_arrival
-        if write_config is not None and not isinstance(write_config, BehaviorWriteConfig):
-            raise TypeError("write_config must be BehaviorWriteConfig or None")
         #: 发布文档时写锁的租约（``BehaviorDocumentWriter``）；没给取领域默认值。
         self.write_config = write_config
-        if coverage is not None and not isinstance(coverage, BehaviorCoverageIndex):
-            raise TypeError("coverage must be BehaviorCoverageIndex")
         self.coverage = coverage or BehaviorCoverageIndex(observations.root)
         self._checkpoint_path = ledger.root / _CHECKPOINT_NAME
         self._path_lock = PathLock(lock_store)
         digest = hashlib.sha256(str(tree.root).encode("utf-8")).hexdigest()[:24]
         self._sweep_lock_key = f"behavior-reduction:{digest}"
         self.observer: Observer = observer or NullObserver()
-        if reminded is not None and not callable(reminded):
-            raise TypeError("reminded must be callable or None")
         self.reminded: Callable[[str, datetime], bool] = reminded if reminded is not None else _never_reminded
         #: 最近一轮认出的"封口视界被哪几份观测钉住"（按钉住的时刻排，没有是空），健康面读它（裁定 94 第 8 条）。
         self.pinned: tuple[PinnedFrontier, ...] = ()
@@ -247,8 +209,6 @@ class BehaviorReductionRunner:
     def attach_reminder_lookup(self, lookup: Callable[[str, datetime], bool]) -> None:
         """组合根在预测层装好之后把账本的查法接进来（归约在预测层之前装配，接不进构造函数）。"""
 
-        if not callable(lookup):
-            raise TypeError("lookup must be callable")
         self.reminded = lookup
 
     async def run_once(self) -> BehaviorReductionReport:
@@ -1074,7 +1034,7 @@ class BehaviorReductionRunner:
 
     def _now(self) -> datetime:
         value = self.clock()
-        if not isinstance(value, datetime) or value.utcoffset() is None:
+        if value.utcoffset() is None:
             raise BehaviorReductionError("reduction clock must return a timezone-aware datetime")
         return value.astimezone(UTC)
 

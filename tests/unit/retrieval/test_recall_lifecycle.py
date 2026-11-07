@@ -432,10 +432,34 @@ def test_disabled_lifecycle_neither_reads_nor_writes_store() -> None:
         {"retire_candidate_grace_days": 0},
         {"max_cold2_probes_per_search": 2},
         {"sqlite_timeout_seconds": 61},
-        {"max_batch_size": True},
-        {"enabled": 1},
     ],
 )
 def test_lifecycle_config_rejects_invalid_policy(changes: dict[str, object]) -> None:
     with pytest.raises((TypeError, ValueError)):
         MemoryRecallLifecycleConfig(**changes)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("column", "bad", "message"),
+    [
+        ("version", "x", "memory recall state version must be non-negative"),
+        ("document_revision", 2.5, "memory recall state document_revision must be non-negative"),
+        ("document_revision", "two", "memory recall state document_revision must be non-negative"),
+    ],
+)
+def test_store_rejects_wrongly_typed_count_columns_read_back_from_sqlite(
+    tmp_path: Path, column: str, bad: object, message: str
+) -> None:
+    """SQLite 行里类型错的计数列在行解码器就被拒（W16：类型检查在边界）。"""
+
+    path = tmp_path / "recall.sqlite3"
+    store = SQLiteMemoryRecallLifecycleStore(path)
+    item = candidate()
+    store.record_use((item.target,), used_at=NOW)
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(f"UPDATE memory_recall_lifecycle SET {column} = ?", (bad,))
+        connection.commit()
+
+    with pytest.raises(MemoryRecallLifecycleError, match="failed to read memory recall lifecycle state") as raised:
+        store.read_many((item.uri,))
+    assert message in str(raised.value.__cause__)

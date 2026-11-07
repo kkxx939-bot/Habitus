@@ -61,8 +61,6 @@ def _config(context: ProviderBuildContext, expected: type[_Config], adapter: str
 def register_builtin_adapters(factory: ProviderFactory) -> None:
     """注册 Habitus 当前内置的协议适配器，不执行任何外部调用。"""
 
-    if not isinstance(factory, ProviderFactory):
-        raise TypeError("factory must be a ProviderFactory")
     factory.register_adapter(
         "chat",
         "openai_compatible_chat",

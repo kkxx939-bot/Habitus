@@ -30,26 +30,26 @@ STATUSES = ("established", "candidate")
 UNSEEN_DAY_TYPES = ("skip", "official")
 
 
-def _aware(value: object, label: str) -> datetime:
-    if not isinstance(value, datetime) or value.utcoffset() is None:
+def _aware(value: datetime, label: str) -> datetime:
+    if value.utcoffset() is None:
         raise ForesightError(f"{label} must be a timezone-aware datetime")
     return value
 
 
-def _text(value: object, label: str) -> str:
-    if not isinstance(value, str) or not value:
+def _text(value: str, label: str) -> str:
+    if not value:
         raise ForesightError(f"{label} must be non-empty text")
     return value
 
 
-def _day(value: object, label: str) -> date:
-    if isinstance(value, datetime) or not isinstance(value, date):
+def _day(value: date, label: str) -> date:
+    if isinstance(value, datetime):
         raise ForesightError(f"{label} must be a date")
     return value
 
 
-def _positive(value: object, label: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+def _positive(value: int, label: str) -> int:
+    if value <= 0:
         raise ForesightError(f"{label} must be a positive integer")
     return value
 
@@ -71,14 +71,12 @@ class Opportunity:
 
     def __post_init__(self) -> None:
         _text(self.antecedent_uri, "opportunity antecedent_uri")
-        if not isinstance(self.antecedent_uris, tuple) or self.antecedent_uri not in self.antecedent_uris:
+        if self.antecedent_uri not in self.antecedent_uris:
             raise ForesightError("opportunity antecedent_uris must be a tuple containing the anchor")
         for uri in self.antecedent_uris:
             _text(uri, "opportunity antecedent uri")
         _day(self.day, "opportunity day")
         _aware(self.ended_at, "opportunity ended_at")
-        if self.came is not None and not isinstance(self.came, bool):
-            raise ForesightError("opportunity came must be a boolean or None")
         if (self.came is True) != (self.consequent_uri is not None and self.consequent_at is not None):
             raise ForesightError("an opportunity names the consequent exactly when it came")
         if self.consequent_uri is not None:
@@ -103,10 +101,8 @@ class TreeReading:
     def __post_init__(self) -> None:
         for label in ("treated", "control"):
             value = getattr(self, label)
-            if isinstance(value, bool) or not isinstance(value, int | float) or not 0.0 <= value <= 1.0:
+            if not 0.0 <= value <= 1.0:
                 raise ForesightError(f"tree reading {label} must be a rate in [0, 1]")
-        if self.large_enough is not None and not isinstance(self.large_enough, bool):
-            raise ForesightError("tree reading large_enough must be a boolean or None")
 
     @property
     def lift(self) -> float:
@@ -135,9 +131,7 @@ class ConditionSpec:
 
     def __post_init__(self) -> None:
         _text(self.text, "condition text")
-        if not isinstance(self.classes, tuple) or any(
-            not isinstance(token, str) or not token for token in self.classes
-        ):
+        if any(not token for token in self.classes):
             raise ForesightError("condition classes must be a tuple of class tokens")
         if (self.calendar_key is None) != (not self.calendar_values):
             raise ForesightError("a calendar condition names its key and values together")
@@ -174,12 +168,6 @@ class RelationOpportunities:
     conditions: tuple[ConditionSpec, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.reading is not None and not isinstance(self.reading, TreeReading):
-            raise ForesightError("relation reading must be a TreeReading or None")
-        if not isinstance(self.conditions, tuple) or any(
-            not isinstance(item, ConditionSpec) for item in self.conditions
-        ):
-            raise ForesightError("relation conditions must be ConditionSpec records")
         if [item.text for item in self.conditions] != sorted({item.text for item in self.conditions}):
             raise ForesightError("relation conditions must be distinct and sorted by text")
         if self.conditions and not self.key.endswith("|" + self.condition_text):
@@ -192,7 +180,7 @@ class RelationOpportunities:
             _text(getattr(self, label), f"relation {label}")
         for label in ("antecedent_classes", "consequent_classes"):
             classes = getattr(self, label)
-            if not isinstance(classes, tuple) or not classes:
+            if not classes:
                 raise ForesightError(f"relation {label} must be a non-empty tuple")
             for token in classes:
                 _text(token, f"relation {label} entry")
@@ -204,10 +192,6 @@ class RelationOpportunities:
             )
         if self.status not in STATUSES:
             raise ForesightError(f"unknown relation status: {self.status!r}")
-        if not isinstance(self.upward, bool):
-            raise ForesightError("relation upward must be a boolean")
-        if not isinstance(self.items, tuple) or any(not isinstance(item, Opportunity) for item in self.items):
-            raise ForesightError("relation items must be Opportunity records")
         if [item.ended_at for item in self.items] != sorted(item.ended_at for item in self.items):
             raise ForesightError("relation items must be in time order")
 
@@ -281,11 +265,9 @@ class KindDays:
     def __post_init__(self) -> None:
         _text(self.kind_token, "kind token")
         _text(self.label, "kind label")
-        if not isinstance(self.days, tuple) or any(not isinstance(item, OccurrenceDay) for item in self.days):
-            raise ForesightError("kind days must be OccurrenceDay records")
         if [item.day for item in self.days] != sorted({item.day for item in self.days}):
             raise ForesightError("kind days must be distinct and ascending")
-        if not isinstance(self.intervals, tuple) or len(self.intervals) != max(0, len(self.days) - 1):
+        if len(self.intervals) != max(0, len(self.days) - 1):
             raise ForesightError("a kind carries one interval between each pair of neighbouring days")
         for index, item in enumerate(self.intervals):
             if item.previous != self.days[index] or item.following != self.days[index + 1]:
@@ -306,7 +288,7 @@ class DayWatch:
 
     def __post_init__(self) -> None:
         _day(self.day, "watch day")
-        if isinstance(self.share, bool) or not isinstance(self.share, int | float) or not 0.0 <= self.share <= 1.0:
+        if not 0.0 <= self.share <= 1.0:
             raise ForesightError("watch share must be a number in [0, 1]")
         if self.day_type is not None:
             _text(self.day_type, "watch day_type")
@@ -342,20 +324,12 @@ class OpportunityTable:
             _day(self.relation_night, "table relation_night")
         _positive(self.slot_minutes, "table slot_minutes")
         _positive(self.window_slots, "table window_slots")
-        if not isinstance(self.relations, tuple) or any(
-            not isinstance(item, RelationOpportunities) for item in self.relations
-        ):
-            raise ForesightError("table relations must be RelationOpportunities records")
         keys = [item.key for item in self.relations]
         if len(set(keys)) != len(keys):
             raise ForesightError("a relation appears twice in the table")
-        if not isinstance(self.kinds, tuple) or any(not isinstance(item, KindDays) for item in self.kinds):
-            raise ForesightError("table kinds must be KindDays records")
         tokens = [item.kind_token for item in self.kinds]
         if len(set(tokens)) != len(tokens):
             raise ForesightError("a kind appears twice in the table")
-        if not isinstance(self.watch, tuple) or any(not isinstance(item, DayWatch) for item in self.watch):
-            raise ForesightError("table watch must be DayWatch records")
         watched = [item.day for item in self.watch]
         if watched != sorted(set(watched)):
             raise ForesightError("table watch days must be distinct and ascending")

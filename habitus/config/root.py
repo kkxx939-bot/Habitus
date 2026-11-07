@@ -25,6 +25,7 @@ from habitus.config.storage import StorageConfig
 from habitus.config.temporal import TemporalConfig
 from habitus.config.workflow import WorkflowConfig
 from habitus.foundation.network import OutboundSettings
+from habitus.foundation.validation import is_nonblank_str
 from habitus.infrastructure.observability.config import ObservabilityConfig
 from habitus.infrastructure.store.filesystem import grants_group_or_other_access
 
@@ -97,26 +98,6 @@ class HabitusConfig:
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def __post_init__(self) -> None:
-        expected = (
-            ("storage", self.storage, StorageConfig),
-            ("models", self.models, ModelConfig),
-            ("credentials", self.credentials, CredentialRegistry),
-            ("http", self.http, HTTPAPIConfig),
-            ("network", self.network, OutboundSettings),
-            ("observability", self.observability, ObservabilityConfig),
-            ("conversation", self.conversation, ConversationConfig),
-            ("memory", self.memory, MemoryConfig),
-            ("behavior", self.behavior, BehaviorConfig),
-            ("scene", self.scene, SceneConfig),
-            ("foresight", self.foresight, ForesightConfig),
-            ("temporal", self.temporal, TemporalConfig),
-            ("lifecycle", self.lifecycle, LifecycleConfig),
-            ("locale", self.locale, LocaleConfig),
-            ("workflow", self.workflow, WorkflowConfig),
-        )
-        for name, value, expected_type in expected:
-            if not isinstance(value, expected_type):
-                raise TypeError(f"{name} must be {expected_type.__name__}")
         self._validate_cross_domain_limits()
 
     @property
@@ -210,12 +191,10 @@ class HabitusConfig:
         """环境只选择统一 YAML 文件；全部运行配置和秘密值都来自该文件。"""
 
         values = os.environ if environ is None else environ
-        if not isinstance(values, Mapping):
-            raise TypeError("environ must be a string mapping")
-        if not isinstance(config_path_env, str) or _ENV_NAME.fullmatch(config_path_env) is None:
+        if _ENV_NAME.fullmatch(config_path_env) is None:
             raise ValueError("config_path_env must be a normalized environment name")
         raw_path = values.get(config_path_env)
-        if not isinstance(raw_path, str) or not raw_path.strip():
+        if not is_nonblank_str(raw_path):
             raise ConfigError(f"config file path is missing: {config_path_env}")
         return cls.from_file(raw_path.strip())
 

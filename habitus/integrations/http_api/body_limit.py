@@ -28,7 +28,7 @@ class RequestBodyLimitMiddleware:
     """
 
     def __init__(self, app: ASGIApp, *, max_body_bytes: int) -> None:
-        if isinstance(max_body_bytes, bool) or not isinstance(max_body_bytes, int) or max_body_bytes <= 0:
+        if max_body_bytes <= 0:
             raise ValueError("max_body_bytes must be a positive integer")
         self.app = app
         self.max_body_bytes = max_body_bytes

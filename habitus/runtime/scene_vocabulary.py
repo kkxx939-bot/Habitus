@@ -19,8 +19,6 @@ class VocabularyCatalog:
     """按 ``ClassCatalog`` 协议实现。每次调用现读词表（夜批一夜读几次，词表文件很小）。"""
 
     def __init__(self, reader: VocabularyReader) -> None:
-        if not isinstance(reader, VocabularyReader):
-            raise TypeError("reader must be VocabularyReader")
         self.reader = reader
 
     def classes(self) -> tuple[CatalogClass, ...]:

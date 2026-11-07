@@ -74,8 +74,6 @@ def test_a_failing_tick_is_recorded_and_the_loop_survives(tmp_path) -> None:
 
     asyncio.run(scenario())
     assert [event.status for event in recorder.events if event.operation == "tick_loop"] == [ObservationStatus.FAILURE]
-    with pytest.raises(TypeError):
-        ForesightWorker(object(), interval_seconds=1.0, shutdown_timeout_seconds=1.0)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         ForesightWorker(run.tick, interval_seconds=0.0, shutdown_timeout_seconds=1.0)
     assert timedelta(seconds=run.interval_seconds) == timedelta(hours=1)

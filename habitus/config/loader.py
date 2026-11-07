@@ -7,13 +7,15 @@ import difflib
 import math
 import re
 import stat
+import types
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import TypeVar, get_args, get_type_hints
+from typing import TypeVar, Union, get_args, get_origin, get_type_hints
 
 import yaml
 from yaml.nodes import MappingNode
 
+from habitus.foundation.validation import is_int, is_number
 from habitus.infrastructure.store.filesystem import is_path_alias
 
 _MAX_CONFIG_BYTES = 1024 * 1024
@@ -129,10 +131,41 @@ def construct_config(
     """严格校验字段后构造一个强类型配置值对象。"""
 
     data = group_fields(model_type, value, path)
+    require_field_types(model_type, data, path=path)
     try:
         return model_type(**data)
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"invalid '{path}': {exc}") from exc
+
+
+_SCALAR_CHECKS: dict[object, tuple[Callable[[object], bool], str, str]] = {
+    bool: (lambda value: isinstance(value, bool), "a boolean", "booleans"),
+    int: (is_int, "an integer", "integers"),
+    float: (is_number, "a number", "numbers"),
+    str: (lambda value: isinstance(value, str), "text", "texts"),
+}
+
+
+def require_field_types(model_type: type[object], data: Mapping[str, object], *, path: str) -> None:
+    """YAML 读进来的标量字段按 dataclass 注解查类型，构造值对象之前就拒（W16：类型检查在边界）。
+
+    只查注解（去掉 ``None`` 后）恰为 ``bool``/``int``/``float``/``str`` 或其 ``tuple[..., ...]`` 的字段；多成员联合、
+    嵌套配置、枚举、``Literal``、映射由各自的解码或取值规则负责。``int`` 不收 ``bool``，``float`` 收整数不收 ``bool``。
+    """
+
+    hints = get_type_hints(model_type)
+    for name, value in data.items():
+        accepted = get_args(hints[name]) if get_origin(hints[name]) in (Union, types.UnionType) else (hints[name],)
+        members = tuple(member for member in accepted if member is not type(None))
+        if (value is None and len(members) < len(accepted)) or len(members) != 1:
+            continue
+        expected = members[0]
+        if get_origin(expected) is tuple and get_args(expected)[1:] == (Ellipsis,):
+            item_check = _SCALAR_CHECKS.get(get_args(expected)[0])
+            if item_check is not None and not (isinstance(value, list | tuple) and all(map(item_check[0], value))):
+                raise ConfigError(f"{path}.{name} must be a list of {item_check[2]}")
+        elif expected in _SCALAR_CHECKS and not _SCALAR_CHECKS[expected][0](value):
+            raise ConfigError(f"{path}.{name} must be {_SCALAR_CHECKS[expected][1]}")
 
 
 def require_override_types(group: object, *, path: str, prefix: str = "") -> None:

@@ -25,12 +25,8 @@ class ProfileSelection:
     preserve_existing: bool = False
 
     def __post_init__(self) -> None:
-        if not isinstance(self.profile_id, str) or not self.profile_id:
+        if not self.profile_id:
             raise ValueError("setup profile selection id must be non-empty")
-        if not isinstance(self.values, Mapping):
-            raise TypeError("setup profile selection values must be an object")
-        if not isinstance(self.preserve_existing, bool):
-            raise TypeError("preserve_existing must be boolean")
         object.__setattr__(self, "values", MappingProxyType(deepcopy(dict(self.values))))
 
 
@@ -42,11 +38,6 @@ class CloudSetupSelection:
     embedding: ProfileSelection
     rerank: ProfileSelection
     vector: ProfileSelection
-
-    def __post_init__(self) -> None:
-        for name in ("chat", "embedding", "rerank", "vector"):
-            if not isinstance(getattr(self, name), ProfileSelection):
-                raise TypeError(f"{name} must be ProfileSelection")
 
 
 def default_cloud_selection(
@@ -69,8 +60,6 @@ def selection_from_mapping(
 ) -> CloudSetupSelection:
     """从完整 YAML 对象提取无损向导默认值，不读取或复制秘密。"""
 
-    if not isinstance(payload, Mapping):
-        raise TypeError("setup payload must be an object")
     config = HabitusConfig.from_mapping(payload)
     resolved = registry or build_builtin_setup_registry()
     models = _mapping(payload, "models")
@@ -125,8 +114,6 @@ def selection_from_config(
 ) -> CloudSetupSelection:
     """兼容类型化调用者；向导应优先使用无损 YAML 映射入口。"""
 
-    if not isinstance(config, HabitusConfig):
-        raise TypeError("config must be HabitusConfig")
     return selection_from_mapping(_config_mapping(config), registry)
 
 
@@ -137,10 +124,6 @@ def apply_cloud_selection(
 ) -> dict[str, object]:
     """应用 Profile 选择、增量补齐凭据，并执行根配置与 Adapter 校验。"""
 
-    if not isinstance(payload, Mapping):
-        raise TypeError("cloud setup payload must be an object")
-    if not isinstance(selection, CloudSetupSelection):
-        raise TypeError("selection must be CloudSetupSelection")
     current_config = HabitusConfig.from_mapping(payload)
     resolved = registry or build_builtin_setup_registry()
     result = deepcopy(dict(payload))

@@ -20,14 +20,14 @@ from habitus.memory.intention import (
     MemoryIntentionReviewer,
     intention_matches_scope,
 )
-from habitus.memory.model import MemoryKind, MemoryLevel
+from habitus.memory.model import MemoryDirectory, MemoryKind, MemoryLevel
 from habitus.memory.recall import (
     MemoryRecallCandidate,
     MemoryRecallLifecycle,
     MemoryRecallLifecycleError,
     MemoryRecallTarget,
 )
-from habitus.memory.retrieval.assembler import MemoryContextAssembler
+from habitus.memory.retrieval.assembler import MemoryContextAssembler, MemoryContextAssembly
 from habitus.memory.retrieval.context import ConversationSearchContextReader
 from habitus.memory.retrieval.grader import MemoryRetrievalGrader
 from habitus.memory.retrieval.model import (
@@ -47,7 +47,6 @@ from habitus.memory.retrieval.model import (
 )
 from habitus.memory.retrieval.planner import MemorySearchQueryPlanner
 from habitus.memory.snapshot import MemorySnapshotReader
-from habitus.memory.tree import MemoryTree
 from habitus.memory.uri import MemoryURI, MemoryURINodeType
 
 
@@ -110,13 +109,23 @@ class ConversationSummaryUseRecorder(Protocol):
     def record_use(self, references: tuple, *, used_at: datetime) -> tuple: ...
 
 
+class MemoryDirectoryLayerReader(Protocol):
+    """SearchService 读取目录 L0 目标上下文所需的最小记忆树契约；``MemoryTree`` 结构化满足它。"""
+
+    def directory_exists(self, directory: MemoryDirectory) -> bool: ...
+
+    def layer_exists(self, directory: MemoryDirectory, level: MemoryLevel) -> bool: ...
+
+    def read_layer_bounded(self, directory: MemoryDirectory, level: MemoryLevel, *, max_bytes: int) -> str: ...
+
+
 class SearchService:
     """按 find/search 分层返回完整且可溯源的 L2 记忆上下文。"""
 
     def __init__(
         self,
         *,
-        tree: MemoryTree,
+        tree: MemoryDirectoryLayerReader,
         snapshot_reader: MemorySnapshotReader,
         semantic_search: MemorySemanticSearch,
         summary_search: ConversationSummarySemanticSearch,
@@ -133,45 +142,10 @@ class SearchService:
         clock: Callable[[], datetime] | None = None,
         observer: Observer | None = None,
     ) -> None:
-        if not isinstance(tree, MemoryTree):
-            raise TypeError("tree must be MemoryTree")
-        if not isinstance(snapshot_reader, MemorySnapshotReader):
-            raise TypeError("snapshot_reader must be MemorySnapshotReader")
         if snapshot_reader.tree is not tree:
             raise ValueError("SearchService and snapshot reader must share one memory tree")
-        if not callable(getattr(semantic_search, "search", None)):
-            raise TypeError("semantic_search must implement async search")
-        if not callable(getattr(summary_search, "search", None)):
-            raise TypeError("summary_search must implement async search")
-        if not isinstance(query_planner, MemorySearchQueryPlanner):
-            raise TypeError("query_planner must be MemorySearchQueryPlanner")
-        if not isinstance(retrieval_grader, MemoryRetrievalGrader):
-            raise TypeError("retrieval_grader must be MemoryRetrievalGrader")
-        if not isinstance(recall_lifecycle, MemoryRecallLifecycle):
-            raise TypeError("recall_lifecycle must be MemoryRecallLifecycle")
-        if not isinstance(conversation_context, ConversationSearchContextReader):
-            raise TypeError("conversation_context must be ConversationSearchContextReader")
-        if config is not None and not isinstance(config, MemorySearchServiceConfig):
-            raise TypeError("config must be MemorySearchServiceConfig")
-        if intention_reviewer is not None and not isinstance(
-            intention_reviewer,
-            MemoryIntentionReviewer,
-        ):
-            raise TypeError("intention_reviewer must be MemoryIntentionReviewer")
-        if clock is not None and not callable(clock):
-            raise TypeError("clock must be callable")
-        if cold_probe_expander is not None and not callable(getattr(cold_probe_expander, "expand_for_probe", None)):
-            raise TypeError("cold_probe_expander must implement expand_for_probe")
-        if cold_probe_expander is not None and not callable(getattr(cold_probe_expander, "record_context_use", None)):
-            raise TypeError("cold_probe_expander must implement record_context_use")
-        if summary_fallback_expander is not None and not callable(getattr(summary_fallback_expander, "expand", None)):
-            raise TypeError("summary_fallback_expander must implement expand")
-        if summary_use_recorder is not None and not callable(getattr(summary_use_recorder, "record_use", None)):
-            raise TypeError("summary_use_recorder must implement record_use")
         resolved_config = config or MemorySearchServiceConfig()
         resolved_assembler = assembler or MemoryContextAssembler(config=resolved_config)
-        if not isinstance(resolved_assembler, MemoryContextAssembler):
-            raise TypeError("assembler must be MemoryContextAssembler")
         if query_planner.config != resolved_config:
             raise ValueError("SearchService and query planner must share one search config")
         if retrieval_grader.config != resolved_config:
@@ -248,8 +222,6 @@ class SearchService:
         if conversation is None:
             plan = self.query_planner.direct(normalized)
         else:
-            if not isinstance(conversation, ConversationAddress):
-                raise TypeError("conversation must be ConversationAddress or None")
             try:
                 context = self.conversation_context.read(conversation)
                 plan = await self.query_planner.plan(
@@ -288,8 +260,6 @@ class SearchService:
         assess_for_summary: bool,
         degradations: tuple[MemorySearchDegradation, ...] = (),
     ) -> MemorySearchResult:
-        if not isinstance(assess_for_summary, bool):
-            raise TypeError("assess_for_summary must be boolean")
         started = time.monotonic()
         applied_degradations = list(degradations)
         candidate_limit = min(
@@ -504,13 +474,9 @@ class SearchService:
             )
         except Exception as exc:
             raise MemorySearchError("Conversation Summary fallback search failed") from exc
-        if isinstance(raw, str) or not isinstance(raw, Sequence):
-            raise MemorySearchError("Summary fallback search must return a sequence")
         if len(raw) > self.config.summary_fallback_limit:
             raise MemorySearchError("Summary fallback search exceeded its requested limit")
         values = tuple(raw)
-        if any(not isinstance(item, ConversationSummaryMatch) for item in values):
-            raise MemorySearchError("Summary fallback search returned an invalid match")
         expected = tuple(sorted(values, key=lambda item: (-item.score, item.reference.identity)))
         if values != expected or len({item.reference.identity for item in values}) != len(values):
             raise MemorySearchError("Summary fallback matches must be unique and relevance-sorted")
@@ -553,14 +519,10 @@ class SearchService:
                 )
             )
             raise MemorySearchError("memory semantic search failed") from exc
-        if isinstance(raw_hits, str) or not isinstance(raw_hits, Sequence):
-            raise MemorySearchError("memory semantic search must return a sequence of hits")
         if len(raw_hits) > limit:
             raise MemorySearchError("memory semantic search exceeded its requested result limit")
         by_uri: dict[MemoryURI, MemorySearchHit] = {}
         for hit in raw_hits:
-            if not isinstance(hit, MemorySearchHit):
-                raise MemorySearchError("memory semantic search returned an invalid hit")
             if not any(hit.uri.matches_prefix(root) for root in roots):
                 raise MemorySearchError("memory semantic search returned an out-of-scope URI")
             if kinds and hit.uri.to_address().kind not in kinds:
@@ -608,7 +570,7 @@ class SearchService:
         selected: list[MemoryMatchedMemory] = []
         for hit in hits:
             snapshot = snapshots.get(str(hit.uri))
-            if snapshot is None or not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
+            if snapshot is None or not snapshot.exists or snapshot.value is None:
                 raise MemorySearchError("semantic index returned a missing or invalid L2 memory document")
             document = snapshot.value
             if kinds and document.kind not in kinds:
@@ -686,12 +648,12 @@ class SearchService:
 
     async def _acknowledge_final_context(
         self,
-        assembly,
+        assembly: MemoryContextAssembly,
         *,
         targets: dict[MemoryURI, MemoryRecallTarget],
         used_at: datetime,
         degradations: list[MemorySearchDegradation],
-    ):
+    ) -> MemoryContextAssembly:
         """只让最终模型可见的主记忆升温；失败或过期目标从 Context 中剔除。"""
 
         retained_targets = tuple(targets[memory.uri] for memory in assembly.memories if memory.uri in targets)
@@ -761,11 +723,11 @@ class SearchService:
 
     async def _acknowledge_final_summaries(
         self,
-        assembly,
+        assembly: MemoryContextAssembly,
         *,
         used_at: datetime,
         degradations: list[MemorySearchDegradation],
-    ):
+    ) -> MemoryContextAssembly:
         if self.summary_use_recorder is None or not assembly.summary_fallbacks:
             return assembly
         retained: list[ConversationSummaryMatch] = []
@@ -830,7 +792,7 @@ class SearchService:
                         snapshot = self.snapshot_reader.read(neighbor)
                     except Exception as exc:
                         raise MemorySearchError("failed to read one-hop related memory document") from exc
-                    if not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
+                    if not snapshot.exists or snapshot.value is None:
                         raise MemorySearchError("memory relation points to a missing L2 document")
                     document = snapshot.value
                     neighbor_documents[neighbor] = document
@@ -888,8 +850,6 @@ class SearchService:
 
     def _timestamp(self) -> datetime:
         timestamp = self.clock()
-        if not isinstance(timestamp, datetime):
-            raise TypeError("memory search clock must return datetime")
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:
             raise ValueError("memory search clock must return a timezone-aware datetime")
         return timestamp.astimezone(UTC)
@@ -934,8 +894,8 @@ class SearchService:
             used += separator + len(block)
         return "\n".join(rendered)
 
-    def _query(self, value: object) -> str:
-        if not isinstance(value, str) or not value.strip():
+    def _query(self, value: str) -> str:
+        if not value.strip():
             raise ValueError("memory search query must be non-empty text")
         normalized = value.strip()
         if len(normalized) > self.config.max_query_chars:
@@ -950,10 +910,8 @@ class SearchService:
             raw: tuple[MemoryURI | str, ...] = (MemoryURI.root(),)
         elif isinstance(value, MemoryURI | str):
             raw = (value,)
-        elif isinstance(value, tuple):
-            raw = value
         else:
-            raise TypeError("target_uris must be a URI, string, tuple, or None")
+            raw = value
         if not raw or len(raw) > self.config.max_target_roots:
             raise ValueError("memory search target root count is outside its configured bound")
         parsed = tuple(
@@ -970,7 +928,7 @@ class SearchService:
 
     def _limit(self, value: int | None) -> int:
         limit = self.config.default_limit if value is None else value
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= self.config.max_limit:
+        if not 1 <= limit <= self.config.max_limit:
             raise ValueError("memory search limit is outside its configured bound")
         return limit
 
@@ -978,14 +936,12 @@ class SearchService:
     def _threshold(value: float | None) -> float | None:
         if value is None:
             return None
-        if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(float(value)):
+        if not math.isfinite(float(value)):
             raise ValueError("memory search score_threshold must be finite numeric data")
         return float(value)
 
     @staticmethod
     def _kinds(value: tuple[MemoryKind, ...]) -> tuple[MemoryKind, ...]:
-        if not isinstance(value, tuple):
-            raise TypeError("memory search kinds must be a tuple")
         normalized = tuple(MemoryKind(kind) for kind in value)
         if len(normalized) != len(set(normalized)):
             raise ValueError("memory search kinds must be unique")
@@ -1010,4 +966,4 @@ class SearchService:
         return (MemoryKind.INTENTION,), scope
 
 
-__all__ = ["ConversationSummarySemanticSearch", "MemorySemanticSearch", "SearchService"]
+__all__ = ["ConversationSummarySemanticSearch", "MemoryDirectoryLayerReader", "MemorySemanticSearch", "SearchService"]

@@ -70,21 +70,11 @@ class ForesightNightlyRun:
         unseen_day_types: str = "skip",
         compaction: LedgerCompaction | None = None,
     ) -> None:
-        if not isinstance(store, OpportunityStore):
-            raise TypeError("store must be an OpportunityStore")
-        if not isinstance(relations, RelationStore):
-            raise TypeError("relations must be a RelationStore")
-        if not isinstance(config, RelationConfig):
-            raise TypeError("config must be a RelationConfig")
         self.store = store
         self.relations = relations
         self.config = config
-        if history is not None and not isinstance(history, HistoryStage):
-            raise TypeError("history must be a HistoryStage or None")
         #: 重标单元的历史（裁定 55 新版第 2 条）：要的材料（这一晚的关系表、时间线）只在这一拍手上，所以排在这里。
         self.history = history
-        if compaction is not None and not isinstance(compaction, LedgerCompaction):
-            raise TypeError("compaction must be a LedgerCompaction or None")
         if compaction is not None and history is None:
             # 压实会删掉单元历史还没记下的原始结果：没有单元历史就不许压实（L10.11）
             raise ValueError("ledger compaction requires the unit history stage")

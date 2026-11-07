@@ -10,11 +10,12 @@ from pathlib import Path
 
 from habitus.foundation.integrity import canonical_json
 from habitus.foundation.lifecycle import BackoffPolicy
+from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.filesystem import atomic_replace_bytes, read_regular_bytes
 from habitus.memory.model import MemoryAddress
 from habitus.memory.tree import MemoryTree, memory_root_lock_prefix
-from habitus.memory.uri import MemoryURI
+from habitus.memory.uri import MemoryURI, decode_memory_uri
 
 _SCHEMA = "memory_lifecycle_scan_v2"
 # 旧版扫描账的 schema 标记：只用来认出旧文件并明确报错，不迁移、不读其中内容。
@@ -37,12 +38,12 @@ class MemoryLifecycleScanFailure:
         parsed = MemoryURI.parse(self.uri)
         parsed.to_address()
         object.__setattr__(self, "uri", parsed)
-        if isinstance(self.attempts, bool) or not isinstance(self.attempts, int) or self.attempts <= 0:
+        if self.attempts <= 0:
             raise ValueError("memory lifecycle failure attempts must be positive")
         object.__setattr__(self, "retry_at", _timestamp(self.retry_at))
         for name in ("error_type", "message"):
             value = getattr(self, name)
-            if not isinstance(value, str) or not value:
+            if not value:
                 raise ValueError(f"memory lifecycle failure {name} must be non-empty")
         if len(self.message) > 1_000:
             raise ValueError("memory lifecycle failure message exceeds its bound")
@@ -75,9 +76,9 @@ class MemoryCompactionKeep:
         parsed = MemoryURI.parse(self.uri)
         parsed.to_address()
         object.__setattr__(self, "uri", parsed)
-        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision <= 0:
+        if self.revision <= 0:
             raise ValueError("memory compaction keep revision must be positive")
-        if not isinstance(self.source_digest, str) or not self.source_digest:
+        if not self.source_digest:
             raise ValueError("memory compaction keep source_digest must be non-empty")
         if self.last_used_at is not None:
             object.__setattr__(self, "last_used_at", _timestamp(self.last_used_at))
@@ -116,25 +117,17 @@ class MemoryLifecycleScanStore:
         base_retry_seconds: float = 60.0,
         max_retry_seconds: float = 86_400.0,
     ) -> None:
-        if not isinstance(tree, MemoryTree):
-            raise TypeError("tree must be MemoryTree")
-        if not isinstance(path_lock, PathLock):
-            raise TypeError("path_lock must be PathLock")
-        if isinstance(max_failures, bool) or not isinstance(max_failures, int) or max_failures <= 0:
+        if max_failures <= 0:
             raise ValueError("max_failures must be positive")
-        if (
-            isinstance(max_compaction_keeps, bool)
-            or not isinstance(max_compaction_keeps, int)
-            or max_compaction_keeps <= 0
-        ):
+        if max_compaction_keeps <= 0:
             raise ValueError("max_compaction_keeps must be positive")
-        if isinstance(max_file_bytes, bool) or not isinstance(max_file_bytes, int) or max_file_bytes <= 0:
+        if max_file_bytes <= 0:
             raise ValueError("max_file_bytes must be positive")
         for name, value in {
             "base_retry_seconds": base_retry_seconds,
             "max_retry_seconds": max_retry_seconds,
         }.items():
-            if isinstance(value, bool) or not isinstance(value, int | float) or float(value) <= 0:
+            if float(value) <= 0:
                 raise ValueError(f"{name} must be positive numeric data")
         if float(max_retry_seconds) < float(base_retry_seconds):
             raise ValueError("max_retry_seconds cannot be lower than base_retry_seconds")
@@ -183,14 +176,10 @@ class MemoryLifecycleScanStore:
     def compaction_kept(self, version: MemoryCompactionKeep) -> bool:
         """这一版内容（含最近被用到的时刻）是否已被压缩模型判过 KEEP。"""
 
-        if not isinstance(version, MemoryCompactionKeep):
-            raise TypeError("version must be MemoryCompactionKeep")
         recorded = self._read().keeps.get(str(version.uri))
         return recorded is not None and recorded.same_version(version)
 
     def record_compaction_keep(self, version: MemoryCompactionKeep) -> None:
-        if not isinstance(version, MemoryCompactionKeep):
-            raise TypeError("version must be MemoryCompactionKeep")
         with self.path_lock.acquire(self.lock_key, ttl_seconds=30):
             state = self._read()
             state.keeps[str(version.uri)] = version
@@ -247,29 +236,13 @@ class MemoryLifecycleScanStore:
                 raise ValueError("invalid fields")
             if raw["schema"] != _SCHEMA:
                 raise ValueError("unsupported schema")
-            after = raw["after_uri"]
-            if after is not None:
-                MemoryURI.parse(after).to_address()
+            after = _decode_after_uri(raw["after_uri"])
             values = raw["failures"]
             if not isinstance(values, list) or len(values) > self.max_failures:
                 raise ValueError("invalid failures")
             failures: dict[str, MemoryLifecycleScanFailure] = {}
             for value in values:
-                if not isinstance(value, Mapping) or set(value) != {
-                    "uri",
-                    "attempts",
-                    "retry_at",
-                    "error_type",
-                    "message",
-                }:
-                    raise ValueError("invalid failure")
-                failure = MemoryLifecycleScanFailure(
-                    uri=MemoryURI.parse(value["uri"]),
-                    attempts=value["attempts"],
-                    retry_at=_parse_timestamp(value["retry_at"]),
-                    error_type=value["error_type"],
-                    message=value["message"],
-                )
+                failure = _decode_failure(value)
                 if str(failure.uri) in failures:
                     raise ValueError("duplicate failure")
                 failures[str(failure.uri)] = failure
@@ -278,21 +251,7 @@ class MemoryLifecycleScanStore:
                 raise ValueError("invalid compaction keeps")
             keeps: dict[str, MemoryCompactionKeep] = {}
             for value in keep_values:
-                if not isinstance(value, Mapping) or set(value) != {
-                    "uri",
-                    "revision",
-                    "source_digest",
-                    "last_used_at",
-                    "judged_at",
-                }:
-                    raise ValueError("invalid compaction keep")
-                keep = MemoryCompactionKeep(
-                    uri=MemoryURI.parse(value["uri"]),
-                    revision=value["revision"],
-                    source_digest=value["source_digest"],
-                    last_used_at=None if value["last_used_at"] is None else _parse_timestamp(value["last_used_at"]),
-                    judged_at=_parse_timestamp(value["judged_at"]),
-                )
+                keep = _decode_compaction_keep(value)
                 if str(keep.uri) in keeps:
                     raise ValueError("duplicate compaction keep")
                 keeps[str(keep.uri)] = keep
@@ -333,8 +292,65 @@ class _ScanState:
     keeps: dict[str, MemoryCompactionKeep]
 
 
+def _decode_after_uri(value: object) -> str | None:
+    """扫描游标：``null`` 或一个 L2 URI；类型错的文字照抄 ``MemoryURI.__init__``。"""
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("memory URI must be a string")
+    MemoryURI(value).to_address()
+    return value
+
+
+def _decode_failure(value: object) -> MemoryLifecycleScanFailure:
+    """磁盘读回的一条失败退避记录；字段类型错的文字照抄 ``MemoryLifecycleScanFailure.__post_init__``。"""
+
+    if not isinstance(value, Mapping) or set(value) != {"uri", "attempts", "retry_at", "error_type", "message"}:
+        raise ValueError("invalid failure")
+    attempts, error_type, message = value["attempts"], value["error_type"], value["message"]
+    if not is_int(attempts):
+        raise ValueError("memory lifecycle failure attempts must be positive")
+    if not isinstance(error_type, str):
+        raise ValueError("memory lifecycle failure error_type must be non-empty")
+    if not isinstance(message, str):
+        raise ValueError("memory lifecycle failure message must be non-empty")
+    return MemoryLifecycleScanFailure(
+        uri=decode_memory_uri(value["uri"]),
+        attempts=attempts,
+        retry_at=_parse_timestamp(value["retry_at"]),
+        error_type=error_type,
+        message=message,
+    )
+
+
+def _decode_compaction_keep(value: object) -> MemoryCompactionKeep:
+    """磁盘读回的一条 KEEP 记录；字段类型错的文字照抄 ``MemoryCompactionKeep.__post_init__``。"""
+
+    if not isinstance(value, Mapping) or set(value) != {
+        "uri",
+        "revision",
+        "source_digest",
+        "last_used_at",
+        "judged_at",
+    }:
+        raise ValueError("invalid compaction keep")
+    revision, source_digest = value["revision"], value["source_digest"]
+    if not is_int(revision):
+        raise ValueError("memory compaction keep revision must be positive")
+    if not isinstance(source_digest, str):
+        raise ValueError("memory compaction keep source_digest must be non-empty")
+    return MemoryCompactionKeep(
+        uri=decode_memory_uri(value["uri"]),
+        revision=revision,
+        source_digest=source_digest,
+        last_used_at=None if value["last_used_at"] is None else _parse_timestamp(value["last_used_at"]),
+        judged_at=_parse_timestamp(value["judged_at"]),
+    )
+
+
 def _timestamp(value: datetime) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+    if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("memory lifecycle scan timestamp must be timezone-aware")
     return value.astimezone(UTC)
 

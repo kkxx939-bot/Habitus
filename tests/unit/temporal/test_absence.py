@@ -181,8 +181,8 @@ def test_a_long_absence_reads_the_typical_gap_across_the_compacted_part() -> Non
 
 def test_the_typical_multiple_must_be_a_positive_finite_number() -> None:
     current = gap_between(WED, WED + timedelta(days=1))
-    for bad in (0.0, -1.0, float("inf"), float("nan"), True, "8"):
+    for bad in (0.0, -1.0, float("inf"), float("nan")):
         with pytest.raises(ValueError):
-            long_absence((), current, min_samples=2, typical_multiple=bad)  # type: ignore[arg-type]
+            long_absence((), current, min_samples=2, typical_multiple=bad)
     with pytest.raises(ValueError):
         long_absence((), current, min_samples=0, typical_multiple=8.0)

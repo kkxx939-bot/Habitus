@@ -29,7 +29,6 @@ _FLOAT_BOUNDS = (
     ("outlet_lease_minutes", 1.0, 1_440.0),
     ("outlet_match_similarity", 0.1, 1.0),
 )
-_FLAGS = ("enabled", "shadow_uses_unestablished")
 _STORE_BOUNDS = (
     ("record_max_bytes", 1_024, 64 * 1024 * 1024),
     ("directory_max_entries", 1_000, 10_000_000),
@@ -68,7 +67,7 @@ class ForesightStoreConfig:
     def __post_init__(self) -> None:
         for name, lower, upper in _STORE_BOUNDS:
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or not lower <= value <= upper:
+            if not lower <= value <= upper:
                 raise ValueError(f"foresight.store.{name} must be an integer between {lower} and {upper}")
 
     @classmethod
@@ -130,23 +129,18 @@ class ForesightConfig:
     store: ForesightStoreConfig = field(default_factory=ForesightStoreConfig)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.store, ForesightStoreConfig):
-            raise TypeError("foresight.store must be ForesightStoreConfig")
         if self.unseen_day_types not in ("skip", "official"):
             raise ValueError("foresight.unseen_day_types must be 'skip' or 'official'")
-        for name in _FLAGS:
-            if not isinstance(getattr(self, name), bool):
-                raise TypeError(f"foresight.{name} must be a boolean")
         for name, lower, upper in _INT_BOUNDS:
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or not lower <= value <= upper:
+            if not lower <= value <= upper:
                 raise ValueError(f"foresight.{name} must be an integer between {lower} and {upper}")
         share = self.unit_prior_share
-        if isinstance(share, bool) or not isinstance(share, int | float) or not 0.0 < float(share) < 1.0:
+        if not 0.0 < float(share) < 1.0:
             raise ValueError("foresight.unit_prior_share must be a number strictly between 0 and 1")
         for name, low, high in _FLOAT_BOUNDS:
             number = getattr(self, name)
-            if isinstance(number, bool) or not isinstance(number, int | float) or not low <= float(number) <= high:
+            if not low <= float(number) <= high:
                 raise ValueError(f"foresight.{name} must be a number between {low:g} and {high:g}")
 
     @classmethod

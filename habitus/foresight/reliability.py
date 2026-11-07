@@ -82,7 +82,7 @@ def miss_run_probability(k: float, n: float, run: float) -> float:
     """按这条轴此刻的后验（Jeffreys），接下来连着 ``run`` 次都是坏的概率（Beta-二项；``run`` 可以是分量和，Beta 函数对实数成立）：
     ``B(k + ½, n − k + ½ + run) / B(k + ½, n − k + ½)``。样本少时后验宽，这个概率不会小得离谱。"""
 
-    if isinstance(run, bool) or not isinstance(run, int | float) or run < 0:
+    if run < 0:
         raise ForesightError("run must be a non-negative number")
     if n < 0 or not 0 <= k <= n + 1e-9:
         raise ForesightError("k and n must satisfy 0 <= k <= n")

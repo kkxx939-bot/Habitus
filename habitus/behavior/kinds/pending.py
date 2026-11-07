@@ -43,18 +43,10 @@ class PendingEntry:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "lane", Lane(self.lane))
-        if isinstance(self.day, bool) or not isinstance(self.day, date):
-            raise BehaviorKindError("pending day must be a date")
         for name in ("occurrence", "proposed", "content"):
             value = getattr(self, name)
-            if not isinstance(value, str) or not value.strip():
+            if not value.strip():
                 raise BehaviorKindError(f"pending {name} must be non-empty text")
-        if not isinstance(self.rechecked, bool):
-            raise BehaviorKindError("pending rechecked must be a bool")
-        for name in ("entered_on", "grouped_on"):
-            value = getattr(self, name)
-            if value is not None and (isinstance(value, bool) or not isinstance(value, date)):
-                raise BehaviorKindError(f"pending {name} must be a date or None")
 
     @property
     def fresh(self) -> bool:
@@ -69,7 +61,7 @@ class PendingPool:
 
     def __post_init__(self) -> None:
         for key, entry in self.entries.items():
-            if not isinstance(entry, PendingEntry) or entry.occurrence != key:
+            if entry.occurrence != key:
                 raise BehaviorKindError("pending entries must be keyed by their occurrence")
         object.__setattr__(self, "entries", MappingProxyType(dict(sorted(self.entries.items()))))
 

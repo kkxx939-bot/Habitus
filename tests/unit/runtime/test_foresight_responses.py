@@ -70,8 +70,6 @@ def test_the_bridge_lists_open_reminders_and_writes_responses_by_turn(tmp_path) 
     assert [event.status.value for event in recorder.events] == ["success", "success", "success", "failure", "failure"]
     with pytest.raises(ValueError):
         ReminderResponses(ledger, limit=0)
-    with pytest.raises(TypeError):
-        ReminderResponses(object(), limit=1)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

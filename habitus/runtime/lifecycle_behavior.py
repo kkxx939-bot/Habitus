@@ -43,9 +43,7 @@ class BehaviorParticipant:
         derived_versions: Callable[[], Iterable[int]] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if not isinstance(branches, BehaviorBranches):
-            raise TypeError("branches must be BehaviorBranches")
-        if isinstance(backfill_days, bool) or not isinstance(backfill_days, int) or backfill_days < 1:
+        if backfill_days < 1:
             raise ValueError("backfill_days must be a positive integer")
         self.branches = branches
         self.backfill_days = backfill_days

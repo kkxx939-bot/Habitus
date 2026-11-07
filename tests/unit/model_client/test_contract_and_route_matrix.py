@@ -91,22 +91,6 @@ VALID_IDENTIFIERS = (
 )
 
 INVALID_EMPTY_TEXT = ("", " ", "\t", "\n", "\r\n", "   \t\n")
-NON_TEXT_VALUES = (None, True, False, 0, 1, 1.5, (), [], {}, set(), object())
-NON_MAPPING_VALUES = (
-    None,
-    True,
-    False,
-    0,
-    1.5,
-    "object",
-    (),
-    [],
-    set(),
-    (("key", "value"),),
-    [("key", "value")],
-    object(),
-)
-INVALID_INTEGER_VALUES = (True, False, -1, 1.5, "1", None, (), [], {}, object())
 
 
 @pytest.mark.parametrize("identifier", VALID_IDENTIFIERS)
@@ -141,16 +125,10 @@ def test_tool_call_copies_top_level_argument_mapping() -> None:
 
 
 @pytest.mark.parametrize("field", ["id", "name"])
-@pytest.mark.parametrize("invalid", INVALID_EMPTY_TEXT + NON_TEXT_VALUES)
+@pytest.mark.parametrize("invalid", INVALID_EMPTY_TEXT)
 def test_tool_call_rejects_empty_or_non_text_identity(field: str, invalid: object) -> None:
     with pytest.raises((TypeError, ValueError)):
         call(**{field: invalid})
-
-
-@pytest.mark.parametrize("invalid", NON_MAPPING_VALUES)
-def test_tool_call_rejects_non_object_arguments(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        call(arguments=invalid)
 
 
 @pytest.mark.parametrize("name", VALID_IDENTIFIERS)
@@ -178,22 +156,10 @@ def test_tool_definition_accepts_mapping_schema_and_copies_top_level(parameters:
 
 
 @pytest.mark.parametrize("field", ["name", "description"])
-@pytest.mark.parametrize("invalid", INVALID_EMPTY_TEXT + NON_TEXT_VALUES)
+@pytest.mark.parametrize("invalid", INVALID_EMPTY_TEXT)
 def test_tool_definition_rejects_empty_or_non_text_required_text(field: str, invalid: object) -> None:
     with pytest.raises((TypeError, ValueError)):
         tool(**{field: invalid})
-
-
-@pytest.mark.parametrize("invalid", NON_MAPPING_VALUES)
-def test_tool_definition_rejects_non_object_parameters(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        tool(parameters=invalid)
-
-
-@pytest.mark.parametrize("invalid", [None, 0, 1, "true", "false", (), [], {}])
-def test_tool_definition_rejects_non_boolean_strict(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        tool(strict=invalid)
 
 
 @pytest.mark.parametrize("role", ["system", "developer", "user", "assistant"])
@@ -236,14 +202,8 @@ def test_chat_message_rejects_every_noncanonical_role(role: object) -> None:
         ChatMessage(role=role, content="hello")
 
 
-@pytest.mark.parametrize("invalid", [True, False, 0, 1.5, (), [], {}, object()])
-def test_chat_message_rejects_non_text_content(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        message(content=invalid)
-
-
 @pytest.mark.parametrize("field", ["name", "tool_call_id"])
-@pytest.mark.parametrize("invalid", INVALID_EMPTY_TEXT + (True, False, 0, 1.5, (), [], {}, object()))
+@pytest.mark.parametrize("invalid", INVALID_EMPTY_TEXT)
 def test_optional_message_identifiers_reject_empty_or_non_text_values(
     field: str,
     invalid: object,
@@ -276,12 +236,6 @@ def test_message_without_content_or_calls_is_rejected(role: str) -> None:
         ChatMessage(role=role)
 
 
-@pytest.mark.parametrize("tool_calls", [("not-a-call",), (1,), (object(),), (call(), "bad")])
-def test_message_tool_calls_require_normalized_tool_call_values(tool_calls: tuple[object, ...]) -> None:
-    with pytest.raises((TypeError, ValueError)):
-        ChatMessage(role="assistant", tool_calls=tool_calls)
-
-
 @pytest.mark.parametrize("name", VALID_IDENTIFIERS)
 @pytest.mark.parametrize("strict", [True, False])
 def test_response_format_accepts_non_empty_schema_and_strictness(name: str, strict: bool) -> None:
@@ -290,22 +244,16 @@ def test_response_format_accepts_non_empty_schema_and_strictness(name: str, stri
     assert item.strict is strict
 
 
-@pytest.mark.parametrize("invalid", INVALID_EMPTY_TEXT + NON_TEXT_VALUES)
+@pytest.mark.parametrize("invalid", INVALID_EMPTY_TEXT)
 def test_response_format_rejects_empty_or_non_text_name(invalid: object) -> None:
     with pytest.raises((TypeError, ValueError)):
         ResponseFormat(name=invalid, schema={"type": "object"})
 
 
-@pytest.mark.parametrize("invalid", NON_MAPPING_VALUES + ({},))
+@pytest.mark.parametrize("invalid", [{}])
 def test_response_format_rejects_empty_or_non_object_schema(invalid: object) -> None:
     with pytest.raises((TypeError, ValueError)):
         ResponseFormat(name="result", schema=invalid)
-
-
-@pytest.mark.parametrize("invalid", [None, 0, 1, "true", (), [], {}])
-def test_response_format_rejects_non_boolean_strict(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        ResponseFormat(name="result", schema={"type": "object"}, strict=invalid)
 
 
 @pytest.mark.parametrize("effort", [None, "minimal", "low", "medium", "high"])
@@ -337,19 +285,13 @@ def test_chat_request_rejects_out_of_range_or_non_finite_temperature(temperature
         ChatRequest(messages=(message(),), temperature=temperature)
 
 
-@pytest.mark.parametrize("invalid", [True, False, "0", "1", (), [], {}, object()])
-def test_chat_request_rejects_non_numeric_temperature(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        ChatRequest(messages=(message(),), temperature=invalid)
-
-
 @pytest.mark.parametrize("maximum", [None, 1, 2, 16, 128, 4096, 1_000_000])
 def test_chat_request_accepts_positive_optional_output_limit(maximum: int | None) -> None:
     request = ChatRequest(messages=(message(),), max_output_tokens=maximum)
     assert request.max_output_tokens == maximum
 
 
-@pytest.mark.parametrize("invalid", tuple(value for value in INVALID_INTEGER_VALUES if value is not None))
+@pytest.mark.parametrize("invalid", [-1])
 def test_chat_request_rejects_non_positive_or_non_integer_output_limit(invalid: object) -> None:
     with pytest.raises(ValueError):
         ChatRequest(messages=(message(),), max_output_tokens=invalid)
@@ -357,7 +299,7 @@ def test_chat_request_rejects_non_positive_or_non_integer_output_limit(invalid: 
 
 @pytest.mark.parametrize(
     "messages",
-    [(), [], ("hello",), (message(), "bad"), None, "hello", 1, object()],
+    [(), []],
 )
 def test_chat_request_requires_non_empty_normalized_message_sequence(messages: object) -> None:
     with pytest.raises((TypeError, ValueError)):
@@ -376,18 +318,6 @@ def test_chat_request_rejects_unbound_tool_choice(choice: object) -> None:
         ChatRequest(messages=(message(),), tool_choice=choice)
 
 
-@pytest.mark.parametrize("invalid", [True, False, 0, 1.5, (), [], object()])
-def test_chat_request_rejects_unsupported_tool_choice_shape(invalid: object) -> None:
-    with pytest.raises((TypeError, ValueError)):
-        ChatRequest(messages=(message(),), tools=(tool(),), tool_choice=invalid)
-
-
-@pytest.mark.parametrize("invalid", [None, "tool", ("bad",), (tool(), "bad"), (1,), ({},)])
-def test_chat_request_tools_require_normalized_tool_definitions(invalid: object) -> None:
-    with pytest.raises((TypeError, ValueError)):
-        ChatRequest(messages=(message(),), tools=invalid)
-
-
 @pytest.mark.parametrize(
     "metadata",
     [{}, {"trace": "1"}, {"attempt": 0}, {"enabled": False}, MappingProxyType({"source": "test"})],
@@ -398,22 +328,13 @@ def test_chat_call_context_copies_internal_metadata_mapping(metadata: object) ->
     assert isinstance(context.metadata, dict)
 
 
-@pytest.mark.parametrize("invalid", NON_MAPPING_VALUES)
-def test_chat_call_context_rejects_non_mapping_metadata(invalid: object) -> None:
-    with pytest.raises((TypeError, ValueError)):
-        ChatCallContext(metadata=invalid)
-
-
-@pytest.mark.parametrize(
-    "invalid",
-    INVALID_EMPTY_TEXT + tuple(value for value in NON_TEXT_VALUES if value is not None),
-)
+@pytest.mark.parametrize("invalid", INVALID_EMPTY_TEXT)
 def test_chat_call_context_rejects_invalid_prompt_version(invalid: object) -> None:
     with pytest.raises((TypeError, ValueError)):
         ChatCallContext(prompt_version=invalid)
 
 
-@pytest.mark.parametrize("invalid", tuple(value for value in INVALID_INTEGER_VALUES if value is not None) + (0,))
+@pytest.mark.parametrize("invalid", [-1, 0])
 def test_chat_call_context_rejects_invalid_input_token_limit(invalid: object) -> None:
     with pytest.raises(ValueError):
         ChatCallContext(input_token_limit=invalid)
@@ -431,18 +352,6 @@ def test_prepared_chat_request_binds_body_budget_and_stream_to_logical_request()
     assert prepared.stream is False
 
 
-@pytest.mark.parametrize("invalid", ["format", {}, [], 1, True, object()])
-def test_chat_request_requires_normalized_response_format(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        ChatRequest(messages=(message(),), response_format=invalid)
-
-
-@pytest.mark.parametrize("invalid", ["medium", {}, [], 1, True, object()])
-def test_chat_request_requires_normalized_reasoning_options(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        ChatRequest(messages=(message(),), reasoning=invalid)
-
-
 USAGE_FIELDS = ("input_tokens", "output_tokens", "total_tokens", "cached_input_tokens", "reasoning_tokens")
 
 
@@ -454,7 +363,7 @@ def test_token_usage_accepts_non_negative_integer_for_each_counter(field: str, v
 
 
 @pytest.mark.parametrize("field", USAGE_FIELDS)
-@pytest.mark.parametrize("invalid", INVALID_INTEGER_VALUES)
+@pytest.mark.parametrize("invalid", [-1])
 def test_token_usage_rejects_invalid_counter_type_or_range(field: str, invalid: object) -> None:
     with pytest.raises(ValueError):
         TokenUsage(**{field: invalid})
@@ -467,12 +376,6 @@ def test_token_usage_rejects_invalid_counter_type_or_range(field: str, invalid: 
 def test_token_usage_copies_provider_details(details: object) -> None:
     usage = TokenUsage(details=details)
     assert usage.details == dict(details)
-
-
-@pytest.mark.parametrize("invalid", NON_MAPPING_VALUES)
-def test_token_usage_rejects_non_mapping_provider_details(invalid: object) -> None:
-    with pytest.raises((TypeError, ValueError)):
-        TokenUsage(details=invalid)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("content", ["ok", " ", "\n", "0", "false", "中文"])
@@ -495,7 +398,7 @@ def test_model_response_accepts_tool_calls_with_optional_content(
 
 
 @pytest.mark.parametrize("field", ["model", "provider", "finish_reason"])
-@pytest.mark.parametrize("invalid", INVALID_EMPTY_TEXT + NON_TEXT_VALUES)
+@pytest.mark.parametrize("invalid", INVALID_EMPTY_TEXT)
 def test_model_response_rejects_empty_or_non_text_identity_fields(field: str, invalid: object) -> None:
     values: dict[str, object] = {"content": "ok", "model": "model", "provider": "provider"}
     values[field] = invalid
@@ -503,43 +406,10 @@ def test_model_response_rejects_empty_or_non_text_identity_fields(field: str, in
         ModelResponse(**values)
 
 
-@pytest.mark.parametrize("invalid", [True, False, 0, 1.5, (), [], {}, object()])
-def test_model_response_rejects_non_text_content(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        ModelResponse(invalid, "model", "provider")
-
-
-@pytest.mark.parametrize("invalid", [True, False, 0, 1.5, (), [], {}, object()])
-def test_model_response_rejects_non_text_reasoning_content(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        ModelResponse("ok", "model", "provider", reasoning_content=invalid)
-
-
-@pytest.mark.parametrize("invalid", [None, {}, [], 0, True, object()])
-def test_model_response_requires_normalized_token_usage(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        ModelResponse("ok", "model", "provider", usage=invalid)
-
-
-@pytest.mark.parametrize("tool_calls", [("bad",), (1,), (object(),), (call(), "bad")])
-def test_model_response_tool_calls_require_normalized_values(tool_calls: tuple[object, ...]) -> None:
-    with pytest.raises((TypeError, ValueError)):
-        ModelResponse(None, "model", "provider", tool_calls=tool_calls)
-
-
 @pytest.mark.parametrize("raw", [{}, {"id": "response-1"}, MappingProxyType({"choices": []})])
 def test_model_response_copies_raw_provider_mapping(raw: object) -> None:
     response = ModelResponse("ok", "model", "provider", raw=raw)
     assert response.raw == dict(raw)
-
-
-@pytest.mark.parametrize(
-    "invalid",
-    [True, False, 0, 1.5, "raw", (), [], set(), (("id", "response-1"),), [("id", "response-1")], object()],
-)
-def test_model_response_rejects_non_mapping_raw(invalid: object) -> None:
-    with pytest.raises((TypeError, ValueError)):
-        ModelResponse("ok", "model", "provider", raw=invalid)
 
 
 @pytest.mark.parametrize(
@@ -579,13 +449,11 @@ def test_stream_event_rejects_noncanonical_kind(kind: object) -> None:
     "kwargs",
     [
         {"kind": "content_delta"},
-        {"kind": "content_delta", "content_delta": 1},
         {"kind": "reasoning_delta"},
         {"kind": "reasoning_delta", "reasoning_delta": {}},
         {"kind": "tool_call_delta"},
         {"kind": "tool_call_delta", "tool_call_index": -1, "tool_arguments_delta": "{}"},
         {"kind": "usage"},
-        {"kind": "usage", "usage": {}},
         {"kind": "done"},
         {"kind": "done", "finish_reason": ""},
         {"kind": "done", "content_delta": "late", "finish_reason": "stop"},
@@ -594,15 +462,6 @@ def test_stream_event_rejects_noncanonical_kind(kind: object) -> None:
 def test_stream_event_rejects_missing_mistyped_or_cross_kind_payload(kwargs: dict[str, object]) -> None:
     with pytest.raises((TypeError, ValueError)):
         ModelStreamEvent(**kwargs)
-
-
-@pytest.mark.parametrize(
-    "invalid",
-    [True, False, 0, 1.5, "raw", (), [], set(), (("id", "event-1"),), [("id", "event-1")], object()],
-)
-def test_stream_event_rejects_non_mapping_raw(invalid: object) -> None:
-    with pytest.raises((TypeError, ValueError)):
-        ModelStreamEvent(kind="done", finish_reason="stop", raw=invalid)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("mode", ["none", "json_object", "json_schema"])
@@ -622,13 +481,6 @@ def test_provider_capabilities_accepts_declared_modes_and_boolean_flags(mode: st
 def test_provider_capabilities_rejects_unknown_structured_output_mode(mode: object) -> None:
     with pytest.raises(ValueError):
         ProviderCapabilities(structured_output_mode=mode)
-
-
-@pytest.mark.parametrize("field", ["async_completion", "streaming", "tools", "reasoning"])
-@pytest.mark.parametrize("invalid", [0, 1, "true", None, (), []])
-def test_provider_capabilities_rejects_non_boolean_flags(field: str, invalid: object) -> None:
-    with pytest.raises(TypeError):
-        ProviderCapabilities(**{field: invalid})
 
 
 @pytest.mark.parametrize(
@@ -848,18 +700,6 @@ def test_provider_route_rejects_each_integer_outside_boundary(
         route(**{field: invalid})
 
 
-@pytest.mark.parametrize(("field", "_minimum", "_maximum"), PROVIDER_INTEGER_BOUNDS)
-@pytest.mark.parametrize("invalid", [True, False, 1.5, "1", None, (), [], {}])
-def test_provider_route_rejects_non_integer_operational_limits(
-    field: str,
-    _minimum: int,
-    _maximum: int,
-    invalid: object,
-) -> None:
-    with pytest.raises(ValueError):
-        route(**{field: invalid})
-
-
 PROVIDER_FLOAT_BOUNDS = (
     ("timeout_seconds", 600.0),
     ("retry_base_delay_seconds", 60.0),
@@ -893,17 +733,6 @@ def test_provider_route_rejects_invalid_numeric_duration(
         "nan": math.nan,
         "infinity": math.inf,
     }[invalid_kind]
-    with pytest.raises(ValueError):
-        route(**{field: invalid})
-
-
-@pytest.mark.parametrize(("field", "_maximum"), PROVIDER_FLOAT_BOUNDS)
-@pytest.mark.parametrize("invalid", [True, False, "1", None, (), [], {}])
-def test_provider_route_rejects_non_numeric_duration(
-    field: str,
-    _maximum: float,
-    invalid: object,
-) -> None:
     with pytest.raises(ValueError):
         route(**{field: invalid})
 
@@ -975,21 +804,11 @@ def test_chat_model_config_accepts_context_window_boundaries(maximum: int) -> No
 
 @pytest.mark.parametrize(
     "invalid",
-    tuple(value for value in INVALID_INTEGER_VALUES if value is not None) + (64_000, 10_000_001),
+    (0, -1, 64_000, 10_000_001),
 )
 def test_chat_model_config_rejects_invalid_output_limit(invalid: object) -> None:
     with pytest.raises(ValueError):
         ChatModelConfig(route(), max_output_tokens=invalid)
-
-
-@pytest.mark.parametrize("invalid", [None, {}, [], "route", 1, True])
-@pytest.mark.parametrize("model_type", [ChatModelConfig, EmbeddingModelConfig, RerankModelConfig])
-def test_capability_configs_require_provider_route(model_type: type[object], invalid: object) -> None:
-    kwargs: dict[str, object] = {"route": invalid}
-    if model_type is EmbeddingModelConfig:
-        kwargs["dimension"] = 2
-    with pytest.raises(TypeError):
-        model_type(**kwargs)
 
 
 @pytest.mark.parametrize("dimension", [1, 2, 512, 4096, 65_536])
@@ -1020,7 +839,7 @@ def test_embedding_prefix_must_leave_room_for_text(field: str) -> None:
         EmbeddingModelConfig(route(), dimension=2, max_input_chars=4, **{field: "four"})
 
 
-@pytest.mark.parametrize("dimension", [0, -1, 65_537, True, False, 1.5, "2", None])
+@pytest.mark.parametrize("dimension", [0, -1, 65_537])
 def test_embedding_model_config_rejects_invalid_dimension(dimension: object) -> None:
     with pytest.raises(ValueError):
         EmbeddingModelConfig(route(), dimension=dimension)
@@ -1045,21 +864,14 @@ def test_embedding_model_config_accepts_integer_boundaries(
     ("field", "minimum", "maximum"),
     [("max_batch_size", 1, 2048), ("max_input_chars", 1, 1_000_000)],
 )
-@pytest.mark.parametrize("invalid_kind", ["below", "above", "bool", "float", "string", "null"])
+@pytest.mark.parametrize("invalid_kind", ["below", "above"])
 def test_embedding_model_config_rejects_invalid_integer_bounds(
     field: str,
     minimum: int,
     maximum: int,
     invalid_kind: str,
 ) -> None:
-    invalid = {
-        "below": minimum - 1,
-        "above": maximum + 1,
-        "bool": True,
-        "float": 1.5,
-        "string": "1",
-        "null": None,
-    }[invalid_kind]
+    invalid = {"below": minimum - 1, "above": maximum + 1}[invalid_kind]
     with pytest.raises(ValueError):
         EmbeddingModelConfig(route(), dimension=2, **{field: invalid})
 
@@ -1113,21 +925,14 @@ def test_rerank_model_config_accepts_integer_boundaries(
         ("max_document_chars", 1, 1_000_000),
     ],
 )
-@pytest.mark.parametrize("invalid_kind", ["below", "above", "bool", "float", "string", "null"])
+@pytest.mark.parametrize("invalid_kind", ["below", "above"])
 def test_rerank_model_config_rejects_invalid_integer_bounds(
     field: str,
     minimum: int,
     maximum: int,
     invalid_kind: str,
 ) -> None:
-    invalid = {
-        "below": minimum - 1,
-        "above": maximum + 1,
-        "bool": True,
-        "float": 1.5,
-        "string": "1",
-        "null": None,
-    }[invalid_kind]
+    invalid = {"below": minimum - 1, "above": maximum + 1}[invalid_kind]
     with pytest.raises(ValueError):
         RerankModelConfig(route(), **{field: invalid})
 

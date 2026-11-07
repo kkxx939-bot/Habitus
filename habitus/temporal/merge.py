@@ -16,12 +16,12 @@ def merge_starts(starts: Sequence[datetime], *, window_seconds: int) -> tuple[tu
     例：17:00、17:40、18:20（窗口 2700 秒）是一次；17:00、18:30 是两次。一条记录持续多久与合并无关。
     """
 
-    if isinstance(window_seconds, bool) or not isinstance(window_seconds, int) or window_seconds < 0:
+    if window_seconds < 0:
         raise ValueError("window_seconds must be a non-negative integer")
     found: list[list[int]] = []
     previous: datetime | None = None
     for index, moment in enumerate(starts):
-        if not isinstance(moment, datetime) or moment.utcoffset() is None:
+        if moment.utcoffset() is None:
             raise ValueError("starts must be timezone-aware datetimes")
         if previous is not None and moment < previous:
             raise ValueError("starts must be sorted ascending")

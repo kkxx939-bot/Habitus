@@ -151,6 +151,7 @@ class LastRun:
             self._since, self._finished = _day(raw.get("since")), _day(raw.get("finished"))
             self._missed = frozenset(date.fromisoformat(str(day)) for day in raw.get("missed", ()))
         except FileNotFoundError:
+            # 还没有记录就是一晚都没跑过：保持初始状态
             pass
         except (ValueError, KeyError, TypeError, AttributeError, UnicodeDecodeError, json.JSONDecodeError):
             # 读不出就当没跑过：再跑一趟，每一段都幂等，代价只是多跑一次；哪几晚跑完了也不知道，结算不认停掉的那天
@@ -186,8 +187,6 @@ class NightlyWorker(ResidentWorker):
         last_run: LastRun | None = None,
         observer: Observer | None = None,
     ) -> None:
-        if not callable(getattr(nightly, "run_once", None)) or not callable(getattr(nightly, "ready", None)):
-            raise TypeError("nightly must expose ready() and an async run_once()")
         super().__init__(shutdown_timeout_seconds=shutdown_timeout_seconds, observer=observer)
         self.nightly = nightly
         self.last_run = last_run if last_run is not None else LastRun()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -82,31 +82,13 @@ def committed_triplet(
     return projector, prepared, journal
 
 
-def test_constructor_requires_memory_document_codec() -> None:
-    with pytest.raises(TypeError, match="codec must be"):
-        MemoryChangeReceiptProjector(object())  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize(
-    ("source_value", "plan_value", "message"),
-    [
-        (object(), editor_plan(), "source must be"),
-        (source(), object(), "plan must be"),
-    ],
-)
-def test_prepare_rejects_invalid_inputs(source_value: object, plan_value: object, message: str) -> None:
-    projector = MemoryChangeReceiptProjector(codec())
-    with pytest.raises(TypeError, match=message):
-        projector.prepare(source_value, plan_value, timestamp=BASE_TIME)  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("timestamp", [None, "2026-07-01", BASE_TIME.replace(tzinfo=None)])
-def test_prepare_requires_timezone_aware_timestamp(timestamp: object) -> None:
+@pytest.mark.parametrize("timestamp", [BASE_TIME.replace(tzinfo=None)])
+def test_prepare_requires_timezone_aware_timestamp(timestamp: datetime) -> None:
     with pytest.raises(ValueError, match="prepared_at"):
         MemoryChangeReceiptProjector(codec()).prepare(
             source(),
             editor_plan(),
-            timestamp=timestamp,  # type: ignore[arg-type]
+            timestamp=timestamp,
         )
 
 
@@ -132,27 +114,6 @@ def test_prepare_projects_update_with_bound_before_and_after_digests() -> None:
     assert change.before_digest is not None
     assert change.expected_after_digest is not None
     assert change.before_digest != change.expected_after_digest
-
-
-@pytest.mark.parametrize(
-    ("field", "invalid", "message"),
-    [
-        ("current", object(), "current must be"),
-        ("source", object(), "source must be"),
-        ("journal", object(), "journal must be"),
-    ],
-)
-def test_finalize_rejects_invalid_inputs(
-    tmp_path: Path,
-    field: str,
-    invalid: object,
-    message: str,
-) -> None:
-    projector, prepared, journal = committed_triplet(tmp_path)
-    arguments = {"current": prepared, "source": prepared.source, "journal": journal}
-    arguments[field] = invalid
-    with pytest.raises(TypeError, match=message):
-        projector.finalize(**arguments)  # type: ignore[arg-type]
 
 
 def test_finalize_create_uses_actual_revision_and_digest(tmp_path: Path) -> None:
@@ -207,11 +168,6 @@ def test_finalize_rejects_relation_delta_different_from_prepared_plan(tmp_path: 
         projector.finalize(tampered, tampered.source, journal)
 
 
-def test_node_change_requires_journal_entry() -> None:
-    with pytest.raises(TypeError, match="journal entry must be"):
-        MemoryChangeReceiptProjector(codec())._node_change(object())  # type: ignore[arg-type]
-
-
 def test_confirmation_cannot_change_without_prepared_intention_confirmation() -> None:
     before = document(MemoryKind.INTENTION)
     after = document(MemoryKind.INTENTION, revision=2, timestamp=BASE_TIME.replace(day=2))
@@ -242,11 +198,6 @@ def test_prepared_intention_confirmation_must_be_applied_at_commit_time() -> Non
     )
     with pytest.raises(MemoryChangeReceiptError, match="did not apply"):
         MemoryChangeReceiptProjector._verify_confirmation(before, after, expected)
-
-
-def test_forward_link_projection_rejects_non_document_source() -> None:
-    with pytest.raises(TypeError, match="relation source"):
-        MemoryChangeReceiptProjector._forward_links((object(),))  # type: ignore[arg-type]
 
 
 def test_document_digest_is_none_for_missing_document_and_stable_for_same_document() -> None:

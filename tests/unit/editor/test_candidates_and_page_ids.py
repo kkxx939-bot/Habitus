@@ -272,3 +272,59 @@ def test_event_date_is_checked_against_the_subjects_local_day() -> None:
         MemoryCandidateBatch.model_validate(output).validate_context(
             segment(messages=morning), SnapshotBatch((), 0), MemoryPageIdMap(), zone=shanghai
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "item", "message"),
+    [
+        (
+            "relations",
+            {"action": "add", "from_page_id": "1", "to_page_id": 100, "link_type": "related_to"},
+            "invalid relation candidate: page_id must be a positive integer",
+        ),
+        (
+            "relations",
+            {"action": "add", "from_page_id": 1, "to_page_id": True, "link_type": "related_to"},
+            "invalid relation candidate: page_id must be a positive integer",
+        ),
+        (
+            "relations",
+            {"action": ["add"], "from_page_id": 1, "to_page_id": 100, "link_type": "related_to"},
+            "relation candidate contains an unsupported action",
+        ),
+        (
+            "relations",
+            {"action": "add", "from_page_id": 1, "to_page_id": 100, "link_type": 3},
+            "relation candidate contains an unsupported link_type",
+        ),
+        (
+            "identity_proposals",
+            {"proposal_type": "same_memory", "source_page_id": 1.0, "target_page_id": 2, "basis": "duplicate_identity"},
+            "identity proposal contains an invalid type, basis or source_page_id",
+        ),
+        (
+            "identity_proposals",
+            {"proposal_type": 1, "source_page_id": 1, "target_page_id": None, "basis": "explicit_forget"},
+            "identity proposal contains an invalid type, basis or source_page_id",
+        ),
+        (
+            "identity_proposals",
+            {"proposal_type": "same_memory", "source_page_id": 1, "target_page_id": "2", "basis": "duplicate_identity"},
+            "same_memory proposal requires a valid target_page_id",
+        ),
+        (
+            "identity_proposals",
+            {"proposal_type": "remove_memory", "source_page_id": 1, "target_page_id": "", "basis": "explicit_forget"},
+            "remove_memory proposal cannot contain a target_page_id",
+        ),
+    ],
+)
+def test_model_output_relation_and_identity_items_with_wrong_types_are_rejected_by_the_decoder(
+    field: str, item: dict[str, object], message: str
+) -> None:
+    """模型答复里关系与身份提议的类型错在解码器就被拒（W16：类型检查在边界）。"""
+
+    output = empty_output()
+    output[field] = [item]
+    with pytest.raises(MemoryCandidateError, match=message):
+        MemoryCandidateBatch.model_validate(output)

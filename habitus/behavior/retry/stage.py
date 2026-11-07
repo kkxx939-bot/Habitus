@@ -148,8 +148,6 @@ class _Waiting:
 class RetryStage:
     def __init__(self, branches: Sequence[RetryBranch]) -> None:
         self.branches = tuple(branches)
-        if any(not isinstance(branch, RetryBranch) for branch in self.branches):
-            raise TypeError("branches must be RetryBranch instances")
         #: 还没准备好的支留下的（只在这个进程里；重启后由 ``clean_leftovers`` 把剩下的撤回）。
         self._waiting: dict[str, _Waiting] = {}
         #: 这一晚没做完时攒下的计数（哪一晚、计数）：下一眼接着这一晚的计数往下数。

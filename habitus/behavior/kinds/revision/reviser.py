@@ -101,10 +101,6 @@ class _Run:
 
 class Reviser:
     def __init__(self, caller: KindModelCaller, anchors: AnchorGate) -> None:
-        if not isinstance(caller, KindModelCaller):
-            raise TypeError("caller must be KindModelCaller")
-        if not isinstance(anchors, AnchorGate):
-            raise TypeError("anchors must be AnchorGate")
         self.caller = caller
         self.anchors = anchors
         self.classifier: DaytimeClassifier = anchors.classifier

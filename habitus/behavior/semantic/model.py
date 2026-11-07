@@ -29,13 +29,11 @@ class BehaviorSemanticEntry:
     content: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name.strip():
+        if not self.name.strip():
             raise ValueError("behavior semantic entry name must be non-empty")
         if self.name != self.name.strip() or any(ord(char) < 32 for char in self.name):
             raise ValueError("behavior semantic entry name contains unsafe characters")
         object.__setattr__(self, "kind", BehaviorSemanticEntryKind(self.kind))
-        if not isinstance(self.content, str):
-            raise TypeError("behavior semantic entry content must be a string")
 
 
 @dataclass(frozen=True)
@@ -46,11 +44,7 @@ class BehaviorDirectorySnapshot:
     entries: tuple[BehaviorSemanticEntry, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.directory, BehaviorDirectory):
-            raise TypeError("snapshot directory must be a BehaviorDirectory")
         normalized = tuple(self.entries)
-        if any(not isinstance(entry, BehaviorSemanticEntry) for entry in normalized):
-            raise TypeError("snapshot entries must contain BehaviorSemanticEntry values")
         identities = [(entry.kind.value, entry.name) for entry in normalized]
         if len(identities) != len(set(identities)):
             raise ValueError("snapshot contains duplicate direct entries")
@@ -86,8 +80,6 @@ class BehaviorSemanticRefreshResult:
     source_digest: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.directory, BehaviorDirectory):
-            raise TypeError("result directory must be a BehaviorDirectory")
         object.__setattr__(self, "status", BehaviorSemanticRefreshStatus(self.status))
 
 

@@ -63,18 +63,6 @@ class MemoryExtractionLoop:
         mutation_reader: MemoryMutationReadSetLoader | None = None,
         mutation_planner: MemoryMutationPlanner | None = None,
     ) -> None:
-        if not isinstance(client, StructuredChatClient):
-            raise TypeError("client must be a StructuredChatClient")
-        if not isinstance(retriever, MemoryRelatedRetriever):
-            raise TypeError("retriever must be a MemoryRelatedRetriever")
-        if not isinstance(zone, tzinfo):
-            raise TypeError("zone must be a tzinfo")
-        if config is not None and not isinstance(config, MemoryExtractionConfig):
-            raise TypeError("config must be a MemoryExtractionConfig")
-        if mutation_reader is not None and not isinstance(mutation_reader, MemoryMutationReadSetLoader):
-            raise TypeError("mutation_reader must be a MemoryMutationReadSetLoader")
-        if mutation_planner is not None and not isinstance(mutation_planner, MemoryMutationPlanner):
-            raise TypeError("mutation_planner must be a MemoryMutationPlanner")
         self.client = client
         self.retriever = retriever
         self.zone = zone
@@ -92,8 +80,6 @@ class MemoryExtractionLoop:
         同一轮里每一段的 Job 判出来都一样。
         """
 
-        if not isinstance(whole, ConversationSegment):
-            raise TypeError("whole must be a ConversationSegment")
         return self._material_fits(whole, None)
 
     async def extract(
@@ -108,11 +94,7 @@ class MemoryExtractionLoop:
         从最早的一份起舍掉。
         """
 
-        if not isinstance(segment, ConversationSegment):
-            raise TypeError("segment must be a ConversationSegment")
         if turn_context is not None:
-            if not isinstance(turn_context, MemoryTurnContext):
-                raise TypeError("turn_context must be a MemoryTurnContext or None")
             while turn_context.earlier_summaries and not self._material_fits(segment, turn_context):
                 turn_context = turn_context.without_oldest_summary()
         initial = self._fit_initial_context(segment, await self.retriever.retrieve(segment))

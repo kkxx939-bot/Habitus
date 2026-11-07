@@ -254,18 +254,8 @@ def test_the_tick_checks_its_collaborators(tmp_path) -> None:
     site, _codes = site_with_three_mornings(tmp_path)
     ledger, opportunities = stores(tmp_path, site)
     read_side = ForesightReadSide(site.behavior_tree, SUBJECT, LocalCalendar(), ZoneInfo("Asia/Shanghai"))
-    with pytest.raises(TypeError):
-        ForesightTick(object(), opportunities, read_side, NoUnsealed(), recent=35, tolerance=TOLERANCE)  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        ForesightTick(ledger, opportunities, object(), NoUnsealed(), recent=35, tolerance=TOLERANCE)  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        ForesightTick(ledger, opportunities, read_side, object(), recent=35, tolerance=TOLERANCE)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         ForesightTick(ledger, opportunities, read_side, NoUnsealed(), lane="", recent=35, tolerance=TOLERANCE)
-    with pytest.raises(TypeError):
-        ForesightTick(
-            ledger, opportunities, read_side, NoUnsealed(), migrating=object(), recent=35, tolerance=TOLERANCE
-        )  # type: ignore[arg-type]
 
 
 def test_an_abandoned_attempt_is_seen_but_not_as_done(tmp_path) -> None:

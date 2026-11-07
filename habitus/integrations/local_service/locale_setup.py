@@ -224,10 +224,12 @@ def recorded_locale(existing: Path | None) -> LocaleChoice | None:
         locale = load_initialization_mapping(existing).get("locale")
     except (OSError, ValueError, TypeError):
         return None
-    if not isinstance(locale, Mapping) or not isinstance(locale.get("timezone"), str):
+    if not isinstance(locale, Mapping):
         return None
-    region = locale.get("region")
-    return LocaleChoice(locale["timezone"], region if isinstance(region, str) else DEFAULT_REGION)
+    timezone, region = locale.get("timezone"), locale.get("region")
+    if not isinstance(timezone, str):
+        return None
+    return LocaleChoice(timezone, region if isinstance(region, str) else DEFAULT_REGION)
 
 
 def locale_change_notice(previous: LocaleChoice, choice: LocaleChoice) -> str:

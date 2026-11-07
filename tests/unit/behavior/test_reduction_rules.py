@@ -205,3 +205,11 @@ def test_zero_offset_records_are_rejected_at_parse_time() -> None:
     bad = wash(started_at=at(18).astimezone(UTC), last_observed_at=at(40).astimezone(UTC))
     with pytest.raises(BehaviorReductionError, match="non-zero local offset"):
         parse(bad)
+
+
+@pytest.mark.parametrize("subjects", [[1], [SUBJECT, None], [""], [SUBJECT, ["嵌套"]]])
+def test_a_record_whose_subjects_are_not_all_text_is_refused(subjects: list[object]) -> None:
+    """W16：判断记录的 ``subjects`` 在解析处逐项确认是非空文本（解析结果的类型因此是 ``tuple[str, ...]``）。"""
+
+    with pytest.raises(BehaviorReductionError, match="judgement record subjects must contain non-empty text"):
+        parse({**wash(), "subjects": subjects})

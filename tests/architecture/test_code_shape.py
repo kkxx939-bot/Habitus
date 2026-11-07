@@ -24,7 +24,8 @@
 - 类型检查：一个 ``if`` 语句，条件里有对 ``isinstance`` 的调用（``ast.Call``，函数名是 ``isinstance``），
   并且 ``if`` 的主体只有一条语句、是 ``raise``（抛什么异常都算），没有 ``else`` 也照算；``elif`` 分支同样
   算一条；函数名写成属性形式（如 ``builtins.isinstance(...)``，即 ``ast.Attribute`` 且属性名为
-  ``isinstance``）也算。
+  ``isinstance``）也算。``habitus.foundation.validation`` 的类型判定（``TYPE_PREDICATES``，如 ``is_int``）与
+  ``isinstance`` 同等计数：内部模块不能靠把 ``isinstance`` 换成判定函数躲过这道闸（W16）。
 - 边界模块：登记在 ``tests/architecture/boundary_modules.txt`` 里的模块（路径相对 ``habitus/``）。没登记的
   模块一律按内部算。登记了不存在的路径直接失败，不允许留过期条目。
 
@@ -42,6 +43,8 @@ from functools import cache
 from pathlib import Path
 
 import pytest
+
+from habitus.foundation.validation import TYPE_PREDICATES
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SRC = REPOSITORY_ROOT / "habitus"
@@ -104,25 +107,39 @@ def measured_shapes() -> dict[str, list[tuple[str, int]]]:
     return shapes
 
 
-def _is_isinstance_call(node: ast.AST) -> bool:
+def _check_names(tree: ast.AST) -> frozenset[str]:
+    """``isinstance``、类型判定的原名，以及本模块里给判定起的别名（``import is_int as check``）。"""
+
+    aliases = {
+        alias.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "habitus.foundation.validation"
+        for alias in node.names
+        if alias.name in TYPE_PREDICATES and alias.asname
+    }
+    return frozenset({"isinstance", *TYPE_PREDICATES, *aliases})
+
+
+def _is_isinstance_call(node: ast.AST, names: frozenset[str]) -> bool:
     if not isinstance(node, ast.Call):
         return False
     function = node.func
-    return (isinstance(function, ast.Name) and function.id == "isinstance") or (
-        isinstance(function, ast.Attribute) and function.attr == "isinstance"
+    return (isinstance(function, ast.Name) and function.id in names) or (
+        isinstance(function, ast.Attribute) and function.attr in names
     )
 
 
 def count_type_checks(tree: ast.AST) -> int:
-    """按口径数类型检查：条件里有 isinstance 调用、主体只有一条 raise 的 ``if``（``elif`` 也是 ``ast.If``）。"""
+    """按口径数类型检查：条件里有 isinstance（或类型判定）调用、主体只有一条 raise 的 ``if``（``elif`` 也是 ``ast.If``）。"""
 
+    names = _check_names(tree)
     return sum(
         1
         for node in ast.walk(tree)
         if isinstance(node, ast.If)
         and len(node.body) == 1
         and isinstance(node.body[0], ast.Raise)
-        and any(_is_isinstance_call(part) for part in ast.walk(node.test))
+        and any(_is_isinstance_call(part, names) for part in ast.walk(node.test))
     )
 
 
@@ -252,6 +269,31 @@ def test_code_shape_never_grows_beyond_the_baseline(group: str) -> None:
         cleared=f"已降到上限 {limit} 行以内",
     )
     assert violations == [], "\n".join(violations)
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("if not isinstance(x, int):\n    raise TypeError", 1),
+        ("if not is_int(x) or x < 0:\n    raise ValueError", 1),
+        ("if not validation.is_nonblank_str(x):\n    raise ValueError", 1),
+        ("if x < 0:\n    raise ValueError", 0),
+        ("if not is_int(x):\n    x = 0", 0),
+        ("from habitus.foundation.validation import is_int as check\nif not check(x):\n    raise ValueError", 1),
+    ],
+)
+def test_type_predicates_count_like_isinstance(source: str, expected: int) -> None:
+    """内部模块把 ``isinstance`` 换成 ``foundation.validation`` 的判定函数，闸照样数到。"""
+
+    assert count_type_checks(ast.parse(source)) == expected
+
+
+def test_every_validation_predicate_is_counted_by_the_gate() -> None:
+    """``foundation.validation`` 里每个 ``is_*`` 判定都在 ``TYPE_PREDICATES`` 里：新增判定忘了登记，闸就数不到它。"""
+
+    _, tree = _parse(SRC / "foundation" / "validation.py")
+    defined = {node.name for node in tree.body if isinstance(node, ast.FunctionDef) and node.name.startswith("is_")}
+    assert defined == set(TYPE_PREDICATES)
 
 
 def test_internal_modules_do_not_add_runtime_type_checks() -> None:

@@ -40,17 +40,9 @@ class MemoryChangeReceiptStoreConfig:
     max_files: int = 100_000
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.max_file_bytes, bool)
-            or not isinstance(self.max_file_bytes, int)
-            or not 4_096 <= self.max_file_bytes <= 64 * 1024 * 1024
-        ):
+        if not 4_096 <= self.max_file_bytes <= 64 * 1024 * 1024:
             raise ValueError("max_file_bytes must be between 4096 and 67108864")
-        if (
-            isinstance(self.max_files, bool)
-            or not isinstance(self.max_files, int)
-            or not 1 <= self.max_files <= 10_000_000
-        ):
+        if not 1 <= self.max_files <= 10_000_000:
             raise ValueError("max_files must be between 1 and 10000000")
 
 
@@ -67,10 +59,6 @@ class MemoryChangeReceiptStore:
         requested = Path(root).expanduser().absolute()
         if is_path_alias(requested):
             raise MemoryChangeReceiptError("memory change receipt root cannot be a symbolic link")
-        if not isinstance(codec, MemoryDocumentCodec):
-            raise TypeError("codec must be MemoryDocumentCodec")
-        if config is not None and not isinstance(config, MemoryChangeReceiptStoreConfig):
-            raise TypeError("config must be MemoryChangeReceiptStoreConfig")
         self.root = requested.resolve(strict=False)
         self.receipts_root = self.root / "receipts"
         self.codec = codec
@@ -86,10 +74,6 @@ class MemoryChangeReceiptStore:
     ) -> MemoryChangeReceipt:
         """在发布 L2 前只创建一次完整的语义变更意图。"""
 
-        if not isinstance(source, MemoryChangeSource):
-            raise TypeError("source must be MemoryChangeSource")
-        if not isinstance(plan, MemoryEditorPlan):
-            raise TypeError("plan must be MemoryEditorPlan")
         prepared = self.projector.prepare(source, plan, timestamp=timestamp)
         existing = self.try_read(source)
         if existing is not None:
@@ -114,10 +98,6 @@ class MemoryChangeReceiptStore:
     ) -> MemoryChangeReceipt:
         """只接受 COMMITTED 事务，并以实际 before/after 文档完成回执。"""
 
-        if not isinstance(source, MemoryChangeSource):
-            raise TypeError("source must be MemoryChangeSource")
-        if not isinstance(journal, MemoryTransactionJournalRecord):
-            raise TypeError("journal must be MemoryTransactionJournalRecord")
         current = self.read(source)
         committed = self.projector.finalize(current, source, journal)
         if current.state is MemoryChangeReceiptState.COMMITTED:
@@ -128,8 +108,6 @@ class MemoryChangeReceiptStore:
         return self.read(source)
 
     def read(self, source: MemoryChangeSource) -> MemoryChangeReceipt:
-        if not isinstance(source, MemoryChangeSource):
-            raise TypeError("source must be MemoryChangeSource")
         receipt = self._read_path(self._path(source))
         if not receipt.source.matches_lookup(source):
             raise MemoryChangeReceiptError("memory change receipt source does not match its path")
@@ -159,8 +137,6 @@ class MemoryChangeReceiptStore:
     ) -> tuple[MemoryChangeReceipt, ...]:
         """按全局记忆序号返回一个 Conversation 的全部耐久回执。"""
 
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("address must be a ConversationAddress")
         receipts = tuple(
             receipt
             for receipt in self._read_all()
@@ -176,8 +152,6 @@ class MemoryChangeReceiptStore:
     def discard_committed(self, receipt: MemoryChangeReceipt) -> bool:
         """耐久删除一条已经满足外部保留期和来源安全门槛的终态回执。"""
 
-        if not isinstance(receipt, MemoryChangeReceipt):
-            raise TypeError("receipt must be a MemoryChangeReceipt")
         if receipt.state is not MemoryChangeReceiptState.COMMITTED:
             raise MemoryChangeReceiptError("only a COMMITTED receipt can be discarded")
         current = self.try_read(receipt.source)

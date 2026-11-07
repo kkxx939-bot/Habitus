@@ -60,11 +60,11 @@ class RelationThresholds:
     def __post_init__(self) -> None:
         for label in ("fdr", "forward_alpha", "forward_power", "heterogeneity_alpha", "interval_level"):
             value = getattr(self, label)
-            if isinstance(value, bool) or not isinstance(value, int | float) or not 0.0 < value < 1.0:
+            if not 0.0 < value < 1.0:
                 raise RelationConfigError(f"{label} must lie strictly between 0 and 1")
         for label in ("min_absolute_lift", "min_relative_lift"):
             value = getattr(self, label)
-            if isinstance(value, bool) or not isinstance(value, int | float) or not 0.0 <= value < 1.0:
+            if not 0.0 <= value < 1.0:
                 raise RelationConfigError(f"{label} must lie in [0, 1)")
         for label in (
             "forward_max_antecedents",
@@ -77,11 +77,7 @@ class RelationThresholds:
         ):
             if not _positive_int(getattr(self, label)):
                 raise RelationConfigError(f"{label} must be a positive integer")
-        if (
-            isinstance(self.max_blind_share, bool)
-            or not isinstance(self.max_blind_share, int | float)
-            or not 0.0 < self.max_blind_share <= 1.0
-        ):
+        if not 0.0 < self.max_blind_share <= 1.0:
             raise RelationConfigError("max_blind_share must lie in (0, 1]")
 
 
@@ -97,16 +93,14 @@ class RelationConfig:
             raise RelationConfigError("slot_minutes must be a positive divisor of 1440")
         if not _positive_int(self.transition_window_slots) or self.transition_window_slots >= self.slots_per_day:
             raise RelationConfigError("transition_window_slots must be a positive number of slots below a day")
-        if not isinstance(self.thresholds, RelationThresholds):
-            raise RelationConfigError("thresholds must be RelationThresholds")
 
     @property
     def slots_per_day(self) -> int:
         return MINUTES_PER_DAY // self.slot_minutes
 
 
-def _positive_int(value: object) -> bool:
-    return not isinstance(value, bool) and isinstance(value, int) and value > 0
+def _positive_int(value: int) -> bool:
+    return value > 0
 
 
 __all__ = ["RelationConfig", "RelationConfigError", "RelationThresholds"]

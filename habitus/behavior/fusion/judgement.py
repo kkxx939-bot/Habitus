@@ -178,10 +178,6 @@ class BehaviorJudgementBatch:
 
     judgements: tuple[BehaviorJudgement, ...]
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.judgements, tuple):
-            raise BehaviorFusionError("judgements must be a tuple")
-
     @property
     def readable(self) -> tuple[BehaviorJudgement, ...]:
         return tuple(item for item in self.judgements if item.claim.is_readable)

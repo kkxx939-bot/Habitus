@@ -58,13 +58,9 @@ class RelationStore(SceneStore):
         self, scene_root: str | Path, *, rotate_files: int = 4, fallback_generations: int = 2, **options: int
     ) -> None:
         super().__init__(scene_root, **options)
-        if isinstance(rotate_files, bool) or not isinstance(rotate_files, int) or rotate_files < 1:
+        if rotate_files < 1:
             raise RelationStoreError("rotate_files must be a positive integer")
-        if (
-            isinstance(fallback_generations, bool)
-            or not isinstance(fallback_generations, int)
-            or fallback_generations < 1
-        ):
+        if fallback_generations < 1:
             raise RelationStoreError("fallback_generations must be a positive integer")
         #: 最晚一晚之外留几晚（``config.lifecycle.fallback_generations``）。
         self.fallback_generations = fallback_generations

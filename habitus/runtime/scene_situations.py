@@ -50,12 +50,6 @@ class SceneDayContext:
         rhythms: Mapping[str, Rhythm] | None = None,
         slack_minutes: int = 0,
     ) -> None:
-        if not isinstance(concepts, ConceptSet):
-            raise TypeError("concepts must be a ConceptSet")
-        if not isinstance(hits, ConceptHitStore):
-            raise TypeError("hits must be a ConceptHitStore")
-        if not isinstance(calendar, DayTypeCalendar):
-            raise TypeError("calendar must be a DayTypeCalendar")
         self.day = day
         self.concepts = concepts
         self.hits = hits

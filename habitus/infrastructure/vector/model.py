@@ -67,15 +67,11 @@ class VectorStoreFilter:
 
     def __post_init__(self) -> None:
         equals_values = _attributes(self.equals)
-        if any(isinstance(value, tuple) for value in equals_values.values()):
-            raise TypeError("vector filter equals values must be scalars")
         equals = {field: cast(VectorScalar, value) for field, value in equals_values.items()}
-        if not isinstance(self.one_of, Mapping):
-            raise TypeError("vector filter one_of must be an object")
         one_of: dict[str, tuple[VectorScalar, ...]] = {}
         for field, raw_values in self.one_of.items():
             _field(field)
-            if not isinstance(raw_values, tuple) or not raw_values:
+            if not raw_values:
                 raise ValueError("vector filter one_of values must be non-empty tuples")
             values = tuple(_scalar(value, "vector filter value") for value in raw_values)
             if len(values) != len(set(values)):
@@ -104,10 +100,6 @@ class VectorStoreMatch:
     score: float
 
     def __post_init__(self) -> None:
-        if not isinstance(self.record, VectorStoreRecord):
-            raise TypeError("vector match record must be VectorStoreRecord")
-        if isinstance(self.score, bool) or not isinstance(self.score, int | float):
-            raise TypeError("vector match score must be numeric")
         score = float(self.score)
         if not math.isfinite(score) or not -1.0 <= score <= 1.0:
             raise ValueError("vector match score must be a finite cosine value")
@@ -129,14 +121,12 @@ class VectorStoreState:
     def __post_init__(self) -> None:
         for name in ("schema_version", "embedding_fingerprint"):
             value = getattr(self, name)
-            if not isinstance(value, str) or not value or value != value.strip():
+            if not value or value != value.strip():
                 raise ValueError(f"vector state {name} must be normalized non-empty text")
         for name, minimum in (("dimension", 1), ("checkpoint", 0), ("generation", 1), ("record_count", 0)):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            if value < minimum:
                 raise ValueError(f"vector state {name} must be at least {minimum}")
-        if not isinstance(self.ready, bool):
-            raise TypeError("vector state ready must be boolean")
 
 
 @dataclass(frozen=True)
@@ -149,16 +139,10 @@ class VectorPublicationSnapshot:
     coordination_domain: str | None = None
 
     def __post_init__(self) -> None:
-        if self.state is not None and not isinstance(self.state, VectorStoreState):
-            raise TypeError("vector publication state must be VectorStoreState or None")
-        if not isinstance(self.claim_exists, bool) or not isinstance(self.building, bool):
-            raise TypeError("vector publication flags must be boolean")
         if self.building and not self.claim_exists:
             raise ValueError("a building vector publication must have an ownership claim")
         if self.coordination_domain is not None and (
-            not isinstance(self.coordination_domain, str)
-            or not self.coordination_domain
-            or self.coordination_domain != self.coordination_domain.strip()
+            not self.coordination_domain or self.coordination_domain != self.coordination_domain.strip()
         ):
             raise ValueError("vector publication coordination domain must be normalized text")
         if self.coordination_domain is not None and not self.claim_exists:

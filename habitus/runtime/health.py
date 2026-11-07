@@ -52,18 +52,14 @@ class RuntimeHealthService:
     """聚合现有组件状态，不触发索引重建或业务写入。"""
 
     def __init__(self, components: RuntimeComponents, *, capacity_warning_share: float = 0.8) -> None:
-        if not isinstance(components, RuntimeComponents):
-            raise TypeError("components must be RuntimeComponents")
-        if isinstance(capacity_warning_share, bool) or not 0.0 < float(capacity_warning_share) < 1.0:
+        if not 0.0 < capacity_warning_share < 1.0:
             raise ValueError("capacity_warning_share must lie in (0, 1)")
         self.components = components
         self.capacity_warning_share = float(capacity_warning_share)
 
     async def report(self, runtime_state: str, *, deep: bool = False) -> RuntimeHealthReport:
-        if not isinstance(runtime_state, str) or not runtime_state:
+        if not runtime_state:
             raise ValueError("runtime_state must be non-empty text")
-        if not isinstance(deep, bool):
-            raise TypeError("deep must be boolean")
         checks = [
             self._runtime_check(runtime_state),
             self._lifecycle_storage_check(runtime_state),

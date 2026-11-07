@@ -165,7 +165,7 @@ def test_message_accepts_clean_non_path_identity(message_id: str) -> None:
 
 
 @pytest.mark.parametrize("field", ["message_id", "tool_call_id", "tool_name", "source_ref"])
-@pytest.mark.parametrize("value", ["", " leading", "trailing ", "line\nbreak", "tab\tvalue", None, 1])
+@pytest.mark.parametrize("value", ["", " leading", "trailing ", "line\nbreak", "tab\tvalue", None])
 def test_message_rejects_invalid_clean_identifiers(field: str, value: object) -> None:
     if field == "message_id":
         builder = _text_message
@@ -185,8 +185,8 @@ def test_message_accepts_non_negative_sequence(sequence: int) -> None:
     assert _text_message(sequence=sequence).sequence == sequence
 
 
-@pytest.mark.parametrize("sequence", [-1, True, False, 1.0, "1", None])
-def test_message_rejects_negative_boolean_or_non_integer_sequence(sequence: object) -> None:
+@pytest.mark.parametrize("sequence", [-1])
+def test_message_rejects_negative_sequence(sequence: object) -> None:
     with pytest.raises(ConversationMessageSchemaError):
         _text_message(sequence=sequence)
 
@@ -304,7 +304,7 @@ def test_tool_result_accepts_non_negative_original_size(size: int) -> None:
     assert _tool_result(original_size_bytes=size).original_size_bytes == size
 
 
-@pytest.mark.parametrize("size", [-1, True, False, 1.0, "1", None])
+@pytest.mark.parametrize("size", [-1, None])
 def test_tool_result_rejects_invalid_original_size_when_present(size: object) -> None:
     if size is None:
         assert _tool_result(original_size_bytes=None).original_size_bytes is None
@@ -349,10 +349,9 @@ def test_message_collection_accepts_contiguous_unique_chronological_sequences(
     assert batch.ended_at == messages[-1].occurred_at
 
 
-@pytest.mark.parametrize("messages", [None, {}, "messages", 1, (), [], (object(),), ["message"]])
-def test_message_collection_requires_non_empty_list_or_tuple_of_messages(messages: object) -> None:
-    with pytest.raises(ConversationMessageSchemaError):
-        ConversationBatch("conversation-1", messages)  # type: ignore[arg-type]
+def test_message_collection_requires_non_empty_messages() -> None:
+    with pytest.raises(ConversationMessageSchemaError, match="must not be empty"):
+        ConversationBatch("conversation-1", ())
 
 
 def test_message_collection_rejects_duplicate_message_ids() -> None:
@@ -548,3 +547,58 @@ def test_message_from_dict_rejects_unknown_enum_values(field: str) -> None:
     payload[field] = "not-a-real-value"
     with pytest.raises(ConversationMessageSchemaError, match="unsupported"):
         ConversationMessage.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("base", "field", "bad", "message"),
+    [
+        ("text", "message_id", 1, "message_id must be a string"),
+        ("text", "sequence", True, "message sequence must be a non-negative integer"),
+        ("text", "sequence", "0", "message sequence must be a non-negative integer"),
+        ("text", "occurred_at", 1, "occurred_at must be a datetime or ISO-8601 string"),
+        ("text", "logical_message_id", 5, "logical_message_id must be a string"),
+        ("text", "logical_part_index", "0", "logical_part_index must be a non-negative integer"),
+        ("text", "logical_part_count", 2.0, "logical_part_count must be an integer greater than one"),
+        ("text", "mid_turn", "yes", "mid_turn must be a boolean"),
+        ("tool", "tool_call_id", 1, "tool_call_id must be a string"),
+        ("tool", "tool_name", ["workspace.inspect"], "tool_name must be a string"),
+        ("tool", "source_ref", 1, "source_ref must be a string"),
+        ("tool", "original_size_bytes", True, "original_size_bytes must be a non-negative integer"),
+        ("tool", "original_sha256", 1, "original_sha256 must be a SHA-256 hex digest"),
+    ],
+)
+def test_message_from_dict_rejects_wrong_types_read_back(base: str, field: str, bad: object, message: str) -> None:
+    """磁盘读回的消息类型错的字段在 ``from_dict`` 就被拒（W16：类型检查在边界，不靠值对象构造器）。"""
+
+    value = (
+        _text_message(logical_message_id="logical-1", logical_part_index=0, logical_part_count=2)
+        if base == "text"
+        else _tool_result(
+            content_mode=ConversationToolResultContentMode.OMITTED,
+            source_ref="https://example.test/result",
+            original_size_bytes=999,
+            original_sha256="c" * 64,
+        )
+    )
+    with pytest.raises(ConversationMessageSchemaError, match=message):
+        ConversationMessage.from_dict({**value.to_dict(), field: bad})
+
+
+@pytest.mark.parametrize(
+    ("factory", "field", "bad", "message"),
+    [
+        (ConversationBatch, "conversation_id", 1, "conversation_id must be one safe non-empty path segment"),
+        (ConversationSegment, "conversation_id", None, "conversation_id must be one safe non-empty path segment"),
+        (ConversationSegment, "segment_id", ["segment-1"], "segment_id must be one safe non-empty path segment"),
+    ],
+)
+def test_batch_and_segment_from_dict_reject_wrong_identifier_types_read_back(
+    factory: type[ConversationBatch] | type[ConversationSegment], field: str, bad: object, message: str
+) -> None:
+    value = (
+        factory("conversation-1", closed_turn())
+        if factory is ConversationBatch
+        else factory("conversation-1", "segment-1", closed_turn())
+    )
+    with pytest.raises(ConversationMessageSchemaError, match=message):
+        factory.from_dict({**value.to_dict(), field: bad})

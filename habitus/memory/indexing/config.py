@@ -29,29 +29,17 @@ class MemoryVectorIndexConfig:
             ("max_record_chars", self.max_record_chars, 1_000_000),
             ("embedding_batch_size", self.embedding_batch_size, 10_000),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+            if not 1 <= value <= maximum:
                 raise ValueError(f"{name} must be between one and {maximum}")
-        if (
-            isinstance(self.stale_retries, bool)
-            or not isinstance(self.stale_retries, int)
-            or not 0 <= self.stale_retries <= 10
-        ):
+        if not 0 <= self.stale_retries <= 10:
             raise ValueError("stale_retries must be between zero and ten")
-        if (
-            isinstance(self.lock_ttl_seconds, bool)
-            or not isinstance(self.lock_ttl_seconds, int)
-            or not 1 <= self.lock_ttl_seconds <= 3_600
-        ):
+        if not 1 <= self.lock_ttl_seconds <= 3_600:
             raise ValueError("lock_ttl_seconds must be between 1 and 3600")
         for name, float_value, float_maximum in (
             ("lock_wait_timeout_seconds", self.lock_wait_timeout_seconds, 60.0),
             ("lock_retry_delay_seconds", self.lock_retry_delay_seconds, 1.0),
         ):
-            if (
-                isinstance(float_value, bool)
-                or not isinstance(float_value, int | float)
-                or not 0 < float(float_value) <= float_maximum
-            ):
+            if not 0 < float(float_value) <= float_maximum:
                 raise ValueError(f"{name} must be greater than zero and at most {float_maximum:g}")
 
 

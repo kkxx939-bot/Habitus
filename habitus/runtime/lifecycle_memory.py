@@ -46,11 +46,9 @@ class LifecycleMaintenanceFailure:
     message: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.address, ConversationAddress):
-            raise TypeError("address must be ConversationAddress")
         for name in ("error_type", "message"):
             value = getattr(self, name)
-            if not isinstance(value, str) or not value:
+            if not value:
                 raise TypeError(f"{name} must be non-empty text")
         if len(self.message) > _MESSAGE_LIMIT:
             raise ValueError("maintenance failure message exceeds its bound")
@@ -65,14 +63,6 @@ class ConversationChainResult:
     failures: tuple[LifecycleMaintenanceFailure, ...]
 
     def __post_init__(self) -> None:
-        for name in ("selected_addresses", "maintained_addresses"):
-            values = getattr(self, name)
-            if not isinstance(values, tuple) or any(not isinstance(value, ConversationAddress) for value in values):
-                raise TypeError(f"{name} must contain ConversationAddress values")
-        if not isinstance(self.failures, tuple) or any(
-            not isinstance(value, LifecycleMaintenanceFailure) for value in self.failures
-        ):
-            raise TypeError("failures must contain LifecycleMaintenanceFailure values")
         selected = set(self.selected_addresses)
         if any(value not in selected for value in self.maintained_addresses):
             raise ValueError("maintained addresses must come from the selected batch")
@@ -119,8 +109,6 @@ class LifecycleCursorStore:
         return address.started_on, address.conversation_id
 
     def write(self, address: ConversationAddress) -> None:
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("lifecycle cursor address must be ConversationAddress")
         encoded = self._encode(address)
         if len(encoded) > self.max_bytes:
             raise LifecycleWorkerStateError("lifecycle cursor state exceeds its configured bound")
@@ -149,10 +137,6 @@ class ConversationChainParticipant:
         lock_store: LockStore,
         lease_ttl_seconds: int,
     ) -> None:
-        if not isinstance(manager, ConversationLifecycleManager):
-            raise TypeError("manager must be ConversationLifecycleManager")
-        if not isinstance(config, ConversationLifecycleConfig):
-            raise TypeError("config must be ConversationLifecycleConfig")
         self.manager = manager
         self.journal: ConversationMessageJournal = manager.journal
         self.config = config
@@ -214,8 +198,6 @@ class MemoryL2Participant:
     name = "memory-l2"
 
     def __init__(self, manager: MemoryLifecycleManager) -> None:
-        if not isinstance(manager, MemoryLifecycleManager):
-            raise TypeError("manager must be MemoryLifecycleManager")
         self.manager = manager
         self.last_result: MemoryLifecycleMaintenanceResult | None = None
 

@@ -99,7 +99,7 @@ def build_package(
     """``rows``：出处（URI 或 ``unsealed:<开始时刻>``）→ 那一行；``levels``：预期身份 → 这本账的级；``day_note``：当地日历
     对某一天的说法（没有就不标）；``units``：依据那条预期的身份 → 这一刻单元的全部输入（含它自己）。"""
 
-    if isinstance(max_history, bool) or not isinstance(max_history, int) or max_history < 1:
+    if max_history < 1:
         raise ForesightError("max_history must be a positive integer")
     candidates = []
     for number, item in enumerate(expectations, start=1):

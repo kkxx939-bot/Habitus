@@ -60,25 +60,12 @@ class PersistentConversationSummaryVectorIndex:
         observer: Observer | None = None,
         retirement_store: ConversationSummaryRetirementFilter | None = None,
     ) -> None:
-        if not isinstance(journal, ConversationMessageJournal):
-            raise TypeError("journal must be ConversationMessageJournal")
-        if not isinstance(compactor, ConversationSummaryCompactor):
-            raise TypeError("compactor must be ConversationSummaryCompactor")
         if compactor.journal is not journal:
             raise ValueError("summary vector index must share the Conversation journal")
-        if not callable(getattr(embedder, "embed_query", None)) or not callable(
-            getattr(embedder, "embed_documents", None)
-        ):
-            raise TypeError("embedder must implement query and document embedding")
-        for name in ("initialize", "state", "read", "replace_all", "apply", "search", "scan", "close"):
-            if not callable(getattr(store, name, None)):
-                raise TypeError(f"store must implement VectorStore.{name}")
-        if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension <= 0:
+        if dimension <= 0:
             raise ValueError("summary vector dimension must be positive")
-        if not isinstance(embedding_fingerprint, str) or not embedding_fingerprint.strip():
+        if not embedding_fingerprint.strip():
             raise ValueError("summary embedding_fingerprint must be non-empty text")
-        if reranker is not None and not callable(getattr(reranker, "rerank", None)):
-            raise TypeError("reranker must implement rerank")
         resolved_config = config or ConversationSummaryVectorIndexConfig()
         self.journal = journal
         self.compactor = compactor
@@ -118,16 +105,8 @@ class PersistentConversationSummaryVectorIndex:
     ) -> VectorStoreState:
         """让一个 Conversation 的远程记录精确等于其当前活跃摘要前沿。"""
 
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("address must be ConversationAddress")
-        if checkpoint is not None and (
-            isinstance(checkpoint, bool) or not isinstance(checkpoint, int) or checkpoint < 0
-        ):
+        if checkpoint is not None and checkpoint < 0:
             raise ValueError("summary vector checkpoint must be non-negative or None")
-        if not isinstance(removed_references, tuple) or any(
-            not isinstance(item, ConversationSummaryReference) for item in removed_references
-        ):
-            raise TypeError("removed_references must contain ConversationSummaryReference values")
         if any(item.address != address for item in removed_references):
             raise ValueError("removed Summary references belong to another Conversation")
         await self.ensure_ready()
@@ -164,6 +143,7 @@ class PersistentConversationSummaryVectorIndex:
                             )
                     return published
                 except VectorStoreConflictError:
+                    # generation/checkpoint CAS 冲突：重读状态后在有界次数内重试，用尽后由循环外明确报错。
                     continue
             raise ConversationSummaryIndexError("summary vector state changed repeatedly during synchronization")
 
@@ -174,7 +154,7 @@ class PersistentConversationSummaryVectorIndex:
         async with self._lock:
             current = await self.store.state()
             selected = (0 if current is None else current.checkpoint) if checkpoint is None else checkpoint
-            if isinstance(selected, bool) or not isinstance(selected, int) or selected < 0:
+            if selected < 0:
                 raise ValueError("summary vector rebuild checkpoint must be non-negative")
             return await self._rebuild_locked(checkpoint=selected)
 
@@ -215,13 +195,13 @@ class PersistentConversationSummaryVectorIndex:
     async def search(self, query: str, *, limit: int) -> tuple[ConversationSummaryMatch, ...]:
         """只在调用方确认 Memory 不充分后执行一次独立 Summary 语义召回。"""
 
-        if not isinstance(query, str) or not query.strip():
+        if not query.strip():
             raise ValueError("summary fallback query must be non-empty text")
         normalized = query.strip()
         maximum = self._limit(limit)
         await self.ensure_ready()
         vector = await self.embedder.embed_query(normalized)
-        if not isinstance(vector, EmbeddingVector) or vector.dimension != self.dimension:
+        if vector.dimension != self.dimension:
             raise ConversationSummaryIndexError("embedder returned an invalid Summary query vector")
         candidate_limit = min(
             self.config.max_search_hits,
@@ -243,7 +223,7 @@ class PersistentConversationSummaryVectorIndex:
         documents = tuple(item.content[: self.config.max_rerank_document_chars] for item in selected)
         try:
             scores = await self.reranker.rerank(normalized, documents)
-            if not isinstance(scores, tuple) or len(scores) != len(selected):
+            if len(scores) != len(selected):
                 raise ConversationSummaryIndexError("reranker returned an unexpected Summary score count")
         except Exception as exc:
             logger.warning("Summary reranker failed; using vector scores", exc_info=exc)
@@ -252,8 +232,6 @@ class PersistentConversationSummaryVectorIndex:
         reranked: list[ConversationSummaryMatch] = []
         try:
             for item, score in zip(selected, scores, strict=True):
-                if isinstance(score, bool) or not isinstance(score, int | float):
-                    raise ConversationSummaryIndexError("reranker returned a non-numeric Summary score")
                 rerank_score = float(score)
                 if not math.isfinite(rerank_score):
                     raise ConversationSummaryIndexError("reranker returned a non-finite Summary score")
@@ -315,6 +293,7 @@ class PersistentConversationSummaryVectorIndex:
                     expected_generation=None if state is None else state.generation,
                 )
             except VectorStoreConflictError:
+                # generation CAS 冲突：重读状态后在有界次数内重建，用尽后由循环外明确报错。
                 continue
         raise ConversationSummaryIndexError("summary vector state changed repeatedly during rebuild")
 
@@ -339,10 +318,10 @@ class PersistentConversationSummaryVectorIndex:
         for offset in range(0, len(missing), self.config.embedding_batch_size):
             batch = missing[offset : offset + self.config.embedding_batch_size]
             vectors = await self.embedder.embed_documents(tuple(source.content for source in batch))
-            if not isinstance(vectors, tuple) or len(vectors) != len(batch):
+            if len(vectors) != len(batch):
                 raise ConversationSummaryIndexError("embedder returned an unexpected Summary vector count")
             for source, vector in zip(batch, vectors, strict=True):
-                if not isinstance(vector, EmbeddingVector) or vector.dimension != self.dimension:
+                if vector.dimension != self.dimension:
                     raise ConversationSummaryIndexError("embedder returned an invalid Summary vector")
                 resolved[source.identity] = self._record(source, vector)
         if len(resolved) != len(sources):
@@ -386,8 +365,6 @@ class PersistentConversationSummaryVectorIndex:
         active_cache: dict[ConversationAddress, dict[str, ConversationSummaryIndexSource]] = {}
         seen: set[str] = set()
         for value in values:
-            if not isinstance(value, VectorStoreMatch):
-                raise ConversationSummaryIndexError("vector store returned an invalid Summary match")
             reference = self._reference_from_record(value.record)
             if reference.identity in seen:
                 raise ConversationSummaryIndexError("vector store returned duplicate Summary matches")
@@ -456,7 +433,7 @@ class PersistentConversationSummaryVectorIndex:
         )
 
     def _limit(self, value: int) -> int:
-        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= self.config.max_search_hits:
+        if not 1 <= value <= self.config.max_search_hits:
             raise ValueError("Summary vector search limit is outside its configured bound")
         return value
 

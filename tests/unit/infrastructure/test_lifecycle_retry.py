@@ -1,5 +1,6 @@
 """重试账：确定性失败第一次就放弃；可重试的按退避推迟，次数用完转确定性；账本身会退出。"""
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -121,3 +122,17 @@ def test_naive_clock_is_rejected(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="timezone-aware"):
         ledger.record_failure("k", TimeoutError())
+
+
+@pytest.mark.parametrize("attempts", [True, "2", 2.0, 0])
+def test_read_back_rejects_bool_text_or_non_positive_attempts(tmp_path: Path, attempts: object) -> None:
+    """落盘账里的 attempts 不是正整数（含 JSON 的 true）时读回就拒（W16：判定收进公共函数后行为不变）。"""
+
+    clock = _Clock()
+    ledger = _ledger(tmp_path, clock)
+    ledger.record_failure("k", TimeoutError())
+    payload = json.loads(ledger.path.read_text(encoding="utf-8"))
+    payload["entries"][0]["attempts"] = attempts
+    ledger.path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="retry attempts must be a positive integer"):
+        ledger.due()

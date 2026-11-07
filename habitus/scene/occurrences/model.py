@@ -68,10 +68,7 @@ class ConceptHit:
         except ConceptError as exc:
             raise ConceptHitsError(str(exc)) from exc
         if self.grade is not None and (
-            not isinstance(self.grade, str)
-            or not self.grade.strip()
-            or self.grade != self.grade.strip()
-            or "\n" in self.grade
+            not self.grade.strip() or self.grade != self.grade.strip() or "\n" in self.grade
         ):
             raise ConceptHitsError("a grade must be non-empty single-line text without surrounding whitespace")
 
@@ -109,24 +106,18 @@ class ConceptHits:
         if uri.node_type is not BehaviorURINodeType.DOCUMENT or uri.to_address().kind is not BehaviorKind.OCCURRENCE:
             raise ConceptHitsError("occurrence_uri must identify an occurrence document")
         object.__setattr__(self, "occurrence_uri", str(uri))
-        if (
-            not isinstance(self.kind_token, str)
-            or not self.kind_token.strip()
-            or self.kind_token != self.kind_token.strip()
-        ):
+        if not self.kind_token.strip() or self.kind_token != self.kind_token.strip():
             raise ConceptHitsError("kind_token must be non-empty text without surrounding whitespace")
-        if not isinstance(self.lane, str) or not self.lane.strip() or self.lane != self.lane.strip():
+        if not self.lane.strip() or self.lane != self.lane.strip():
             raise ConceptHitsError("lane must be non-empty text without surrounding whitespace")
         for label in ("recent_digest", "timeline_digest"):
             value = getattr(self, label)
-            if value is not None and (not isinstance(value, str) or not value):
+            if value is not None and not value:
                 raise ConceptHitsError(f"{label} must be non-empty text or None")
-        if not isinstance(self.classified, bool):
-            raise ConceptHitsError("classified must be a boolean")
         if not self.classified and self.hits:
             raise ConceptHitsError("a pending occurrence has no class, so no refinement of a class can hit it")
         started_at = uri.to_address().started_at
-        if not isinstance(self.last_observed_at, datetime) or self.last_observed_at.utcoffset() is None:
+        if self.last_observed_at.utcoffset() is None:
             raise ConceptHitsError("last_observed_at must be a timezone-aware datetime")
         if self.last_observed_at < started_at:
             # 上游不自洽不该在这里被静默抹平：树上的行为不可能在开始之前就被最后看见。
@@ -146,9 +137,9 @@ class ConceptHits:
         object.__setattr__(self, "situation_hits", situations)
         object.__setattr__(self, "unresolved", unresolved)
         object.__setattr__(self, "baseline_snapshot", _baseline(self.baseline_snapshot))
-        if not isinstance(self.mapper, str) or not self.mapper.strip() or "\n" in self.mapper:
+        if not self.mapper.strip() or "\n" in self.mapper:
             raise ConceptHitsError("mapper must be a non-empty single line")
-        if not isinstance(self.mapped_at, datetime) or self.mapped_at.utcoffset() is None:
+        if self.mapped_at.utcoffset() is None:
             raise ConceptHitsError("mapped_at must be a timezone-aware datetime")
         object.__setattr__(self, "mapped_at", self.mapped_at.astimezone(UTC))
         object.__setattr__(self, "signals", _signals(self.signals))
@@ -210,20 +201,14 @@ class ConceptHits:
         return False
 
 
-def _hits(values: object, label: str) -> tuple[ConceptHit, ...]:
-    if isinstance(values, str) or not isinstance(values, tuple | list):
-        raise ConceptHitsError(f"{label} must be a sequence of ConceptHit")
+def _hits(values: tuple[ConceptHit, ...], label: str) -> tuple[ConceptHit, ...]:
     items = tuple(values)
-    if any(not isinstance(item, ConceptHit) for item in items):
-        raise ConceptHitsError(f"{label} must contain ConceptHit values")
     if len({item.identity for item in items}) != len(items):
         raise ConceptHitsError(f"{label} repeats a concept")
     return items
 
 
-def _names(values: object, label: str) -> tuple[str, ...]:
-    if isinstance(values, str) or not isinstance(values, tuple | list):
-        raise ConceptHitsError(f"{label} must be a sequence of concept names")
+def _names(values: tuple[str, ...], label: str) -> tuple[str, ...]:
     items = tuple(values)
     identities: list[str] = []
     for item in items:
@@ -236,9 +221,7 @@ def _names(values: object, label: str) -> tuple[str, ...]:
     return items
 
 
-def _reasons(values: object) -> Mapping[str, UnresolvedReason]:
-    if not isinstance(values, Mapping):
-        raise ConceptHitsError("unresolved must map concept names to reasons")
+def _reasons(values: Mapping[str, UnresolvedReason]) -> Mapping[str, UnresolvedReason]:
     names = _names(tuple(values), "unresolved")
     try:
         # 按名字排好：盘上 JSON 按键排序，正文按这里的顺序渲染，两边不一致回读就对不上。
@@ -247,15 +230,13 @@ def _reasons(values: object) -> Mapping[str, UnresolvedReason]:
         raise ConceptHitsError(f"unresolved reason is unknown: {exc}") from exc
 
 
-def _baseline(values: object) -> Mapping[str, str]:
-    if not isinstance(values, Mapping):
-        raise ConceptHitsError("baseline_snapshot must be a mapping")
+def _baseline(values: Mapping[str, str]) -> Mapping[str, str]:
     if len(values) > MAX_BASELINE_ENTRIES:
         raise ConceptHitsError("baseline_snapshot carries too many entries")
     cleaned: dict[str, str] = {}
     for key, value in values.items():
         for item, label in ((key, "key"), (value, "value")):
-            if not isinstance(item, str) or not item.strip() or item != item.strip() or "\n" in item:
+            if not item.strip() or item != item.strip() or "\n" in item:
                 raise ConceptHitsError(f"baseline_snapshot {label} must be a non-empty single line")
             if len(item) > MAX_BASELINE_CHARS:
                 raise ConceptHitsError(f"baseline_snapshot {label} exceeds {MAX_BASELINE_CHARS} characters")
@@ -263,9 +244,7 @@ def _baseline(values: object) -> Mapping[str, str]:
     return MappingProxyType(dict(sorted(cleaned.items())))
 
 
-def _signals(values: object) -> tuple[str, ...]:
-    if isinstance(values, str) or not isinstance(values, tuple | list):
-        raise ConceptHitsError("signals must be a sequence of text")
+def _signals(values: tuple[str, ...]) -> tuple[str, ...]:
     items = tuple(values)
     if len(items) > MAX_SIGNALS:
         raise ConceptHitsError(f"a record carries at most {MAX_SIGNALS} signals")

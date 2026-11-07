@@ -95,13 +95,9 @@ class ConversationSourceRecovery:
     ) -> None:
         if delivery.sources is not sources:
             raise ValueError("source recovery and delivery must share the Source Store")
-        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
+        if batch_size <= 0:
             raise ValueError("batch_size must be a positive integer")
-        if not isinstance(retries, RetryLedger):
-            raise TypeError("retries must be a RetryLedger")
-        if not isinstance(salvage, SourceSalvage):
-            raise TypeError("salvage must be a SourceSalvage")
-        if not isinstance(orphan_grace, timedelta) or orphan_grace <= timedelta(0):
+        if orphan_grace <= timedelta(0):
             raise ValueError("orphan_grace must be a positive timedelta")
         self.sources = sources
         self.delivery = delivery

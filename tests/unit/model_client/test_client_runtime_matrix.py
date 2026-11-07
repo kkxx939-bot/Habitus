@@ -244,23 +244,11 @@ class ScriptedProvider:
         return self.health
 
 
-def test_client_constructor_requires_chat_model_config() -> None:
-    with pytest.raises(TypeError, match="config"):
-        ChatClient(object(), ScriptedProvider())  # type: ignore[arg-type]
-
-
 def test_client_exposes_provider_identity_without_copying_route_values() -> None:
     client = ChatClient(config(), ScriptedProvider())
     assert client.provider_name == "scripted"
     assert client.model == "scripted-model"
     assert client.is_remote is True
-
-
-@pytest.mark.parametrize("invalid", [None, object(), 0, 1.5, (), [], {}])
-def test_complete_rejects_non_request_non_text_input(invalid: object) -> None:
-    client = ChatClient(config(), ScriptedProvider())
-    with pytest.raises(TypeError, match="ChatRequest"):
-        client.complete(invalid)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("prompt", ["", " ", "\t\n"])

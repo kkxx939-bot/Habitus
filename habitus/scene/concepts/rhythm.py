@@ -34,19 +34,15 @@ class RhythmPeak:
     share: float
 
     def __post_init__(self) -> None:
-        if isinstance(self.ordinal, bool) or not isinstance(self.ordinal, int) or self.ordinal < 1:
+        if self.ordinal < 1:
             raise ConceptError("a rhythm peak's ordinal counts from 1")
-        for label in ("start_minute", "end_minute"):
-            value = getattr(self, label)
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise ConceptError(f"rhythm peak {label} must be an integer minute of day")
         # 跨午夜的峰（就寝 23:00–01:00）起点在当天、终点过 24:00：终点最多到次日同一刻。
         if (
             not 0 <= self.start_minute < MINUTES_PER_DAY
             or not self.start_minute < self.end_minute <= self.start_minute + MINUTES_PER_DAY
         ):
             raise ConceptError("a rhythm peak starts inside one day and ends within 24 hours of its start")
-        if isinstance(self.share, bool) or not isinstance(self.share, int | float) or not 0.0 < self.share <= 1.0:
+        if not 0.0 < self.share <= 1.0:
             raise ConceptError("rhythm peak share lies in (0, 1]")
 
     @property
@@ -80,8 +76,6 @@ class Rhythm:
     def __post_init__(self) -> None:
         concept_identity(self.concept)
         peaks = tuple(self.peaks)
-        if any(not isinstance(peak, RhythmPeak) for peak in peaks):
-            raise ConceptError("rhythm peaks must be RhythmPeak values")
         if len(peaks) > MAX_RHYTHM_PEAKS:
             raise ConceptError(f"a rhythm carries at most {MAX_RHYTHM_PEAKS} peaks")
         if [peak.ordinal for peak in peaks] != list(range(1, len(peaks) + 1)):

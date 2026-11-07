@@ -62,8 +62,6 @@ class VocabularyJobs:
     ) -> None:
         """``zone`` 是用户的本地时区（组合根从 ``config.locale`` 注入）：上一次拆改是哪一晚按它算，不读进程时区。"""
 
-        if not isinstance(zone, tzinfo):
-            raise TypeError("zone must be a tzinfo")
         self.zone = zone
         self.tree = tree
         self.stamping = stamping

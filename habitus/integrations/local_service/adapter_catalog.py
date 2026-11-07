@@ -68,8 +68,6 @@ class AdapterCatalog:
             self.setup.register_profile(profile)
 
     def validate(self, config: HabitusConfig) -> None:
-        if not isinstance(config, HabitusConfig):
-            raise TypeError("config must be HabitusConfig")
         self.setup.validate(config)
         for capability, adapter in self.setup.configured_adapters(config):
             if capability == "vector":

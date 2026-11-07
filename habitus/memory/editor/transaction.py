@@ -67,11 +67,7 @@ class MemoryCommitConfig:
     lock_ttl_seconds: int = 30
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.lock_ttl_seconds, bool)
-            or not isinstance(self.lock_ttl_seconds, int)
-            or not 1 <= self.lock_ttl_seconds <= 3_600
-        ):
+        if not 1 <= self.lock_ttl_seconds <= 3_600:
             raise ValueError("lock_ttl_seconds must be between 1 and 3600")
 
 
@@ -86,17 +82,8 @@ def memory_logical_content_digest(
 ) -> str:
     """计算不受提交时间和 revision 影响的最终节点内容摘要。"""
 
-    if not isinstance(uri, MemoryURI):
-        raise TypeError("logical content uri must be a MemoryURI")
     uri.to_address()
     resolved_kind = MemoryKind(kind)
-    if not isinstance(fields, Mapping) or any(not isinstance(name, str) for name in fields):
-        raise TypeError("logical content fields must be a mapping with string keys")
-    for label, values in {"links": links, "backlinks": backlinks}.items():
-        if not isinstance(values, tuple) or any(not isinstance(value, MemoryStoredLink) for value in values):
-            raise TypeError(f"logical content {label} must contain MemoryStoredLink values")
-    if not isinstance(confirms_intention, bool):
-        raise TypeError("confirms_intention must be boolean")
     if confirms_intention and resolved_kind is not MemoryKind.INTENTION:
         raise ValueError("only Intention logical content can refresh confirmation time")
     return canonical_digest(
@@ -124,20 +111,12 @@ class MemoryCommitLogicalWrite:
     confirms_intention: bool
 
     def __post_init__(self) -> None:
-        if not isinstance(self.before, VersionedSnapshot):
-            raise TypeError("logical write before must be a VersionedSnapshot")
-        if not isinstance(self.uri, MemoryURI):
-            raise TypeError("logical write uri must be a MemoryURI")
         if self.before.identity != str(self.uri):
             raise ValueError("logical write snapshot identity does not match its URI")
         kind = MemoryKind(self.kind)
-        if not isinstance(self.fields, Mapping) or any(not isinstance(name, str) for name in self.fields):
-            raise TypeError("logical write fields must be a mapping with string keys")
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
         for label, values in {"links": self.links, "backlinks": self.backlinks}.items():
-            if not isinstance(values, tuple) or any(not isinstance(value, MemoryStoredLink) for value in values):
-                raise TypeError(f"logical write {label} must contain MemoryStoredLink values")
             identities = tuple(value.identity for value in values)
             if identities != tuple(sorted(set(identities))):
                 raise ValueError(f"logical write {label} must be unique and sorted")
@@ -145,8 +124,6 @@ class MemoryCommitLogicalWrite:
             raise ValueError("logical write forward link has the wrong source URI")
         if any(link.to_uri != self.uri for link in self.backlinks):
             raise ValueError("logical write backlink has the wrong target URI")
-        if not isinstance(self.confirms_intention, bool):
-            raise TypeError("confirms_intention must be boolean")
         if self.confirms_intention and kind is not MemoryKind.INTENTION:
             raise ValueError("only an Intention logical write can refresh confirmation time")
         if self.before.exists:
@@ -177,14 +154,6 @@ class MemoryCommitPlan:
     read_set: MemorySnapshotBatch
 
     def __post_init__(self) -> None:
-        if not isinstance(self.mutation_plan, MemoryMutationPlan):
-            raise TypeError("mutation_plan must be a MemoryMutationPlan")
-        if not isinstance(self.identities, MemoryFinalIdentityMap):
-            raise TypeError("identities must be a MemoryFinalIdentityMap")
-        if not isinstance(self.relation_plan, MemoryRelationPlan):
-            raise TypeError("relation_plan must be a MemoryRelationPlan")
-        if not isinstance(self.read_set, SnapshotBatch):
-            raise TypeError("read_set must be a MemorySnapshotBatch")
         self._validate_mutation_identities()
         self._validate_snapshot_coverage()
 
@@ -252,7 +221,7 @@ class MemoryCommitPlan:
                 kind = mutation.match.candidate.kind
                 fields = mutation.fields
             else:
-                if not before.exists or not isinstance(before.value, MemoryDocument):
+                if not before.exists or before.value is None:
                     raise MemoryCommitError("relation-only write requires an existing memory document")
                 kind = before.value.kind
                 fields = before.value.fields
@@ -348,10 +317,6 @@ class MemoryCommitWrite:
     after: MemoryDocument
 
     def __post_init__(self) -> None:
-        if not isinstance(self.before, VersionedSnapshot):
-            raise TypeError("before must be a VersionedSnapshot")
-        if not isinstance(self.after, MemoryDocument):
-            raise TypeError("after must be a MemoryDocument")
         if self.before.identity != str(MemoryURI.from_address(self.after.address)):
             raise ValueError("commit write before/after identities differ")
         if self.before.exists:
@@ -404,17 +369,11 @@ class MemoryCommitResult:
             "unchanged_uris",
         ):
             values = getattr(self, name)
-            if not isinstance(values, tuple) or any(not isinstance(uri, MemoryURI) for uri in values):
-                raise TypeError(f"{name} must contain MemoryURI values")
             identities = tuple(str(uri) for uri in values)
             if identities != tuple(sorted(set(identities))):
                 raise ValueError(f"{name} must be unique and sorted")
         for name in ("added_relations", "removed_relations"):
             values = getattr(self, name)
-            if not isinstance(values, tuple) or any(not isinstance(relation, MemoryStoredLink) for relation in values):
-                raise TypeError(f"{name} must contain MemoryStoredLink values")
-        if not isinstance(self.journal_cleaned, bool):
-            raise TypeError("journal_cleaned must be boolean")
 
 
 class MemoryCommitTransaction:
@@ -431,26 +390,17 @@ class MemoryCommitTransaction:
         clock: Callable[[], datetime] | None = None,
         transaction_id_factory: Callable[[], str] | None = None,
     ) -> None:
-        if not isinstance(tree, MemoryTree):
-            raise TypeError("tree must be a MemoryTree")
-        if not isinstance(snapshot_reader, MemorySnapshotReader):
-            raise TypeError("snapshot_reader must be a MemorySnapshotReader")
         if snapshot_reader.tree.root != tree.root:
             raise ValueError("snapshot_reader and tree must use the same memory root")
-        if not isinstance(path_lock, PathLock):
-            raise TypeError("path_lock must be a PathLock")
-        if not isinstance(journal, MemoryTransactionJournal):
-            raise TypeError("journal must be a MemoryTransactionJournal")
         if journal.codec is not tree.document_codec:
             raise ValueError("journal and memory tree must share one document codec")
         try:
             journal.root.relative_to(tree.root)
         except ValueError:
+            # relative_to 失败说明日志位于记忆树之外，正是要求的布局。
             pass
         else:
             raise ValueError("transaction journal must be stored outside the L2 memory tree")
-        if config is not None and not isinstance(config, MemoryCommitConfig):
-            raise TypeError("config must be a MemoryCommitConfig")
         self.tree = tree
         self.snapshot_reader = snapshot_reader
         self.path_lock = path_lock
@@ -471,10 +421,6 @@ class MemoryCommitTransaction:
     ) -> MemoryCommitResult:
         """统一 CAS、记录 PREPARED、发布、回读并标记 COMMITTED。"""
 
-        if not isinstance(plan, MemoryCommitPlan):
-            raise TypeError("plan must be a MemoryCommitPlan")
-        if not isinstance(retain_journal, bool):
-            raise TypeError("retain_journal must be boolean")
         if not plan.changed_uris and not (retain_journal and transaction_id is not None):
             return self._result(plan, transaction_id=None, journal_cleaned=True)
 
@@ -543,6 +489,8 @@ class MemoryCommitTransaction:
                                 timestamp=self._timestamp(),
                             )
                         except Exception:
+                            # 旧文档已恢复；标记失败时日志仍为 PREPARED，recover_pending 会按日志再次回滚并补记终态。
+                            # 下方仍以原始提交错误上报，不让次生错误覆盖它。
                             pass
                     raise MemoryCommitError("unified memory commit failed and was rolled back") from exc
 
@@ -556,8 +504,6 @@ class MemoryCommitTransaction:
     def recover_pending(self, *, discard_terminal: bool = True) -> tuple[str, ...]:
         """在处理新 MemoryJob 前恢复所有 PREPARED 事务。"""
 
-        if not isinstance(discard_terminal, bool):
-            raise TypeError("discard_terminal must be boolean")
         recovered: list[str] = []
         with self.path_lock.acquire(
             self.lock_keys.transaction_key(),
@@ -643,8 +589,6 @@ class MemoryCommitTransaction:
             if snapshot is None:
                 raise MemoryCommitError("journal target is missing from the read set")
             before = snapshot.value if snapshot.exists else None
-            if before is not None and not isinstance(before, MemoryDocument):
-                raise MemoryCommitError("journal snapshot contains an invalid document")
             entries.append(
                 MemoryTransactionJournalEntry(
                     uri=MemoryURI.parse(identity),
@@ -706,7 +650,7 @@ class MemoryCommitTransaction:
                 snapshot = plan.read_set.get(str(uri))
                 assert snapshot is not None
                 if snapshot.exists:
-                    if not isinstance(snapshot.value, MemoryDocument):
+                    if snapshot.value is None:
                         raise MemoryCommitRollbackError("rollback snapshot contains an invalid memory document")
                     self.tree.write(snapshot.value)
                 else:
@@ -796,8 +740,6 @@ class MemoryCommitTransaction:
 
     def _timestamp(self) -> datetime:
         value = self.clock()
-        if not isinstance(value, datetime):
-            raise TypeError("memory commit clock must return a datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("memory commit clock must return a timezone-aware datetime")
         return value.astimezone(UTC)

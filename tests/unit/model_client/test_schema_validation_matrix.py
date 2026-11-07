@@ -453,7 +453,29 @@ def test_external_validator_and_fallback_agree_on_core_acceptance() -> None:
     assert validate_json_schema(value, schema) is value
 
 
-@pytest.mark.parametrize("schema", [None, [], "object", 1, True])
-def test_public_validator_rejects_non_mapping_schema(schema: object) -> None:
+def test_public_validator_rejects_empty_schema() -> None:
     with pytest.raises(ValueError):
-        validate_json_schema({}, schema)  # type: ignore[arg-type]
+        validate_json_schema({}, {})
+
+
+@pytest.mark.parametrize(
+    ("schema", "value", "message"),
+    [
+        ({"type": "number", "minimum": True}, 1, "JSON Schema minimum must be numeric"),
+        ({"type": "number", "exclusiveMaximum": "2"}, 1, "JSON Schema exclusiveMaximum must be numeric"),
+        ({"type": "string", "minLength": True}, "value", "JSON Schema minLength must be a non-negative integer"),
+        ({"type": "array", "maxItems": 1.0}, [], "JSON Schema maxItems must be a non-negative integer"),
+        ({"type": ["string", 1]}, "value", "JSON Schema type must be a string or array of strings"),
+        ({"type": ("string",)}, "value", "JSON Schema type must be a string or array of strings"),
+    ],
+)
+def test_fallback_names_the_malformed_schema_keyword(
+    fallback_validator: None,
+    schema: Mapping[str, object],
+    value: object,
+    message: str,
+) -> None:
+    """Schema 里 bool 冒充数、浮点冒充长度、非字符串类型名都按原文字拒绝（W16：判定收进公共函数后行为不变）。"""
+
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        validate_json_schema(value, schema)

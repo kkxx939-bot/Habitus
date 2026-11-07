@@ -307,16 +307,10 @@ def test_the_account_views_show_every_account_with_the_edge_read_from_the_unit_h
 def test_the_stage_checks_its_inputs(tmp_path) -> None:
     ledger = ForesightLedgerStore(tmp_path / "ledger")
     common = dict(tolerance=LOSS, evidence=EVIDENCE, daily_cap=2)
-    with pytest.raises(TypeError):
-        DeliveryStage(object(), **common)  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        DeliveryStage(ledger, **{**common, "tolerance": object()})  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         DeliveryStage(ledger, **{**common, "daily_cap": 0})  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         DeliveryStage(ledger, **common, tick_seconds=0)  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        DeliveryStage(ledger, **common, outlet=object())  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         asyncio.run(DeliveryStage(ledger, **common).run_once(datetime(2026, 10, 1, 9, 0)))  # type: ignore[arg-type]
 

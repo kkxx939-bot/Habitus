@@ -28,14 +28,6 @@ class VectorStoreBuildContext:
     data_root: Path | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.config, VectorStoreConfig):
-            raise TypeError("vector build config must be VectorStoreConfig")
-        if not isinstance(self.requirements, VectorStoreRequirements):
-            raise TypeError("vector build requirements must be VectorStoreRequirements")
-        if not isinstance(self.credentials, Mapping) or any(
-            not isinstance(key, str) or not isinstance(value, str) for key, value in self.credentials.items()
-        ):
-            raise TypeError("vector build credentials must be a string mapping")
         object.__setattr__(self, "credentials", MappingProxyType(dict(self.credentials)))
 
 
@@ -68,14 +60,8 @@ class VectorStoreFactory:
         path_lock: PathLock | None = None,
         data_root: Path | None = None,
     ) -> VectorStore:
-        if not isinstance(config, VectorStoreConfig):
-            raise TypeError("config must be VectorStoreConfig")
-        if not isinstance(requirements, VectorStoreRequirements):
-            raise TypeError("requirements must be VectorStoreRequirements")
         if path_lock is None:
             raise VectorStoreError("vector store creation requires an explicit publication PathLock")
-        if not isinstance(path_lock, PathLock):
-            raise TypeError("path_lock must be PathLock")
         builder = self._builders.get(config.adapter)
         if builder is None:
             raise VectorStoreError(f"vector store adapter is not registered: {config.adapter}")
@@ -130,15 +116,9 @@ class VectorStoreFactory:
         config: VectorStoreConfig,
         credentials: Mapping[str, str] | None,
     ) -> dict[str, str]:
-        if credentials is None:
-            resolved: dict[str, str] = {}
-        elif not isinstance(credentials, Mapping):
-            raise TypeError("vector store credentials must be a string mapping")
-        else:
-            resolved = {}
+        resolved: dict[str, str] = {}
+        if credentials is not None:
             for name, value in credentials.items():
-                if not isinstance(name, str) or not isinstance(value, str):
-                    raise TypeError("vector store credentials must be a string mapping")
                 if not name or not value.strip():
                     raise VectorStoreError("vector store credentials cannot contain empty values")
                 resolved[name] = value.strip()

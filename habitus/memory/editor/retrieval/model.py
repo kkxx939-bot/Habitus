@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from habitus.infrastructure.editor.snapshot import SnapshotBatch
 from habitus.memory.retrieval.model import MemorySearchHit
 from habitus.memory.snapshot import MemorySnapshotBatch
 from habitus.memory.uri import MemoryURI, MemoryURINodeType
@@ -34,7 +33,7 @@ class MemoryRetrievalConfig:
             "search_limit": self.search_limit,
             "max_tool_uris": self.max_tool_uris,
         }.items():
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
 
 
@@ -55,14 +54,12 @@ class MemoryRelatedContext:
             "conversation_id": self.conversation_id,
             "segment_id": self.segment_id,
         }.items():
-            if not isinstance(value, str) or not value or value != value.strip():
+            if not value or value != value.strip():
                 raise ValueError(f"{name} must be a non-empty string without surrounding whitespace")
         if not _is_sha256(self.source_segment_digest):
             raise ValueError("source_segment_digest must be a lowercase SHA-256 digest")
-        if not isinstance(self.query, str) or not self.query.strip():
+        if not self.query.strip():
             raise ValueError("related memory query must be non-empty")
-        if not isinstance(self.snapshots, SnapshotBatch):
-            raise TypeError("snapshots must be a MemorySnapshotBatch")
 
         roots = tuple(MemoryURI.parse(uri) for uri in self.search_roots)
         if any(uri.node_type is not MemoryURINodeType.DIRECTORY for uri in roots):
@@ -72,8 +69,6 @@ class MemoryRelatedContext:
         object.__setattr__(self, "search_roots", roots)
 
         hits = tuple(self.search_hits)
-        if any(not isinstance(hit, MemorySearchHit) for hit in hits):
-            raise TypeError("search_hits must contain MemorySearchHit values")
         expected_hits = tuple(sorted(hits, key=lambda hit: (-hit.score, str(hit.uri))))
         if hits != expected_hits or len({hit.uri for hit in hits}) != len(hits):
             raise ValueError("related memory search hits must be unique and relevance-sorted")
@@ -91,13 +86,8 @@ class MemoryRelatedContext:
         return tuple(MemoryURI(snapshot.identity) for snapshot in self.snapshots.snapshots)
 
 
-def _is_sha256(value: object) -> bool:
-    return bool(
-        isinstance(value, str)
-        and len(value) == 64
-        and value == value.lower()
-        and all(character in "0123456789abcdef" for character in value)
-    )
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and value == value.lower() and all(character in "0123456789abcdef" for character in value)
 
 
 __all__ = [

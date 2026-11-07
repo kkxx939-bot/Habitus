@@ -213,11 +213,6 @@ def test_construction_rejects_configuration_the_protocol_cannot_honor(
         AnthropicMessagesProvider(chat_config(**overrides))
 
 
-def test_construction_requires_chat_config() -> None:
-    with pytest.raises(TypeError):
-        AnthropicMessagesProvider(object())  # type: ignore[arg-type]
-
-
 # ---- 请求编码 ----
 
 
@@ -977,3 +972,40 @@ def test_protocol_context_overflow_message_is_classified_as_input_too_large() ->
 
     error = HTTPStatusError("prompt is too long: 210000 tokens > 200000 maximum", status_code=400, retry_after=None)
     assert isinstance(normalize_provider_error(error), ModelInputTooLargeError)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (message_payload(stop_reason="  "), "has no stop_reason"),
+        (message_payload(stop_reason=1), "has no stop_reason"),
+        (
+            message_payload(content=[{"type": "tool_use", "id": " ", "name": "x", "input": {}}]),
+            "tool_use needs an id and a name",
+        ),
+        (
+            message_payload(content=[{"type": "tool_use", "id": "t", "name": ["x"], "input": {}}]),
+            "tool_use needs an id and a name",
+        ),
+    ],
+)
+def test_complete_rejects_blank_or_non_text_identity_fields(payload: dict[str, object], message: str) -> None:
+    """外部 Messages 响应里空白或非文本的 stop_reason、工具 id/name 在解码处被拒（W16）。"""
+
+    provider = sync_provider(lambda _item: httpx.Response(200, json=payload))
+    try:
+        with pytest.raises(ModelResponseError, match=message):
+            provider.complete(provider.prepare(request(), stream=False))
+    finally:
+        provider._sync_client.close()
+
+
+@pytest.mark.parametrize("index", [True, "0", -1, 0.0])
+def test_stream_rejects_bool_text_or_negative_block_index(index: object) -> None:
+    wire = sse(
+        _start(),
+        {"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}},
+        *_end(),
+    )
+    with pytest.raises(ModelResponseError, match="content block index must be a non-negative integer"):
+        _stream(wire)

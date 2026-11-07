@@ -61,9 +61,7 @@ class ConceptAuthoring:
     def __init__(self, author: ConceptAuthor, *, weekly_on: int = 0) -> None:
         """``weekly_on``：每周从哪一天那一晚开始问（0 = 周一，与 ``date.weekday()`` 同）。"""
 
-        if not isinstance(author, ConceptAuthor):
-            raise TypeError("author must be a ConceptAuthor")
-        if isinstance(weekly_on, bool) or not isinstance(weekly_on, int) or not 0 <= weekly_on <= 6:
+        if not 0 <= weekly_on <= 6:
             raise ValueError("weekly_on must be a weekday number 0–6")
         self.author = author
         self.weekly_on = weekly_on

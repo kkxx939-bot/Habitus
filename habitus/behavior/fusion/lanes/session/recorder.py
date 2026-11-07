@@ -76,20 +76,8 @@ class SessionTurnRecorder:
         zone: tzinfo,
         clock: Callable[[], datetime],
     ) -> None:
-        if not isinstance(observations, BehaviorObservationStore):
-            raise TypeError("observations must be BehaviorObservationStore")
-        if not isinstance(judgements, BehaviorJudgementStore):
-            raise TypeError("judgements must be BehaviorJudgementStore")
-        if not isinstance(receipts, BehaviorFusionReceiptStore):
-            raise TypeError("receipts must be BehaviorFusionReceiptStore")
-        if not isinstance(coverage, BehaviorCoverageIndex):
-            raise TypeError("coverage must be BehaviorCoverageIndex")
-        if not isinstance(primary_subject, str) or not primary_subject:
+        if not primary_subject:
             raise ValueError("primary_subject must be non-empty text")
-        if not isinstance(zone, tzinfo):
-            raise TypeError("zone must be a tzinfo")
-        if not callable(clock):
-            raise TypeError("clock must be callable")
         self.observations = observations
         self.judgements = judgements
         self.receipts = receipts

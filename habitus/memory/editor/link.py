@@ -33,8 +33,6 @@ class MemoryResolvedRelation:
         except ValueError as exc:
             raise MemoryRelationResolutionError("resolved relation contains an unsupported action") from exc
         for name, uri in {"from_uri": self.from_uri, "to_uri": self.to_uri}.items():
-            if not isinstance(uri, MemoryURI):
-                raise TypeError(f"{name} must be a MemoryURI")
             try:
                 uri.to_address()
             except ValueError as exc:
@@ -79,11 +77,6 @@ class MemoryRelationResolver:
         identities: MemoryFinalIdentityMap,
     ) -> tuple[MemoryResolvedRelation, ...]:
         """把 page_id 关系转换为最终 URI 操作。"""
-
-        if not isinstance(batch, MemoryCandidateBatch):
-            raise TypeError("batch must be a MemoryCandidateBatch")
-        if not isinstance(identities, MemoryFinalIdentityMap):
-            raise TypeError("identities must be a MemoryFinalIdentityMap")
 
         for candidate in batch.iter_candidates():
             identities.entry(candidate.page_id)

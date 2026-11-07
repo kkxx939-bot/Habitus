@@ -598,17 +598,9 @@ class AuthorConfig:
     transient_retry_delay_seconds: float = 5.0
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.transient_retries, bool)
-            or not isinstance(self.transient_retries, int)
-            or self.transient_retries < 0
-        ):
+        if self.transient_retries < 0:
             raise ValueError("transient_retries must be a non-negative integer")
-        if (
-            isinstance(self.transient_retry_delay_seconds, bool)
-            or not isinstance(self.transient_retry_delay_seconds, int | float)
-            or self.transient_retry_delay_seconds < 0
-        ):
+        if self.transient_retry_delay_seconds < 0:
             raise ValueError("transient_retry_delay_seconds must be a non-negative number")
 
 
@@ -622,11 +614,7 @@ class ConceptAuthor:
         config: AuthorConfig | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if not isinstance(client, StructuredChatClient):
-            raise TypeError("client must be a StructuredChatClient")
         resolved = config or AuthorConfig()
-        if not isinstance(resolved, AuthorConfig):
-            raise TypeError("config must be AuthorConfig")
         self.client = client
         self.config = resolved
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
@@ -641,8 +629,6 @@ class ConceptAuthor:
         existing: ConceptSet,
         rhythms: Mapping[str, Rhythm] = NO_RHYTHMS,
     ) -> ConceptProposal:
-        if not isinstance(existing, ConceptSet):
-            raise TypeError("existing must be a ConceptSet")
         askable = tuple(briefs)
         request = build_concept_request(askable, existing, rhythms)
         schema = concept_author_json_schema(askable)
@@ -675,7 +661,7 @@ def _text(value: object, label: str) -> str:
     return text
 
 
-def _enum(kind: type[Enum], value: object, label: str) -> Any:
+def _enum[E: Enum](kind: type[E], value: object, label: str) -> E:
     try:
         return kind(value)
     except ValueError as exc:

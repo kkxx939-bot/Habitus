@@ -18,7 +18,7 @@ def recall(
 ) -> tuple[PendingEntry, ...]:
     """每条新条目从 ``old_entries`` 里挑最像的至多 ``per_entry`` 条（重合度相同按地址），已被挑走的不再挑。"""
 
-    if isinstance(per_entry, bool) or not isinstance(per_entry, int) or per_entry < 0:
+    if per_entry < 0:
         raise ValueError("per_entry must be a non-negative integer")
     taken: set[str] = set()
     found: list[PendingEntry] = []

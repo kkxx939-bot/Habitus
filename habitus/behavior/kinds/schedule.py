@@ -25,9 +25,7 @@ class JobState:
     merge_history: tuple[PeriodMerges, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.revision_at is not None and (
-            not isinstance(self.revision_at, datetime) or self.revision_at.utcoffset() is None
-        ):
+        if self.revision_at is not None and self.revision_at.utcoffset() is None:
             raise BehaviorKindError("revision_at must be timezone-aware")
         periods = [period for period, _ in self.merge_history]
         if len(set(periods)) != len(periods):

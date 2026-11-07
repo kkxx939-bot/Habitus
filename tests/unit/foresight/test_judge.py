@@ -174,8 +174,6 @@ def test_model_failures_degrade_to_the_algorithm_order() -> None:
     client, _ = recording_client([{"verdicts": [], "order": []}])
     judgement = asyncio.run(Judge(client, retries=0, delay_seconds=0.0).judge(package))
     assert judgement.failed and "verdicts missing" in judgement.signals[0]
-    with pytest.raises(TypeError):
-        Judge(object())  # type: ignore[arg-type]
 
 
 def test_the_day_type_is_shown_for_today_and_each_historical_time_when_there_is_a_calendar() -> None:

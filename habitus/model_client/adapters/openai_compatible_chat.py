@@ -50,8 +50,6 @@ class OpenAICompatibleChatProvider:
     """执行一次 Chat Completions 请求并转换为统一模型契约。"""
 
     def __init__(self, config: ChatModelConfig, *, api_key: str = "", outbound: OutboundSettings | None = None) -> None:
-        if not isinstance(config, ChatModelConfig):
-            raise TypeError("config must be ChatModelConfig")
         if config.route.adapter != "openai_compatible_chat":
             raise ModelConfigurationError("OpenAICompatibleChatProvider requires adapter='openai_compatible_chat'")
         if not config.route.base_url:
@@ -239,10 +237,6 @@ class OpenAICompatibleChatProvider:
 
         if self._closed:
             raise ModelConfigurationError("chat provider is closed")
-        if not isinstance(request, ChatRequest):
-            raise TypeError("request must be ChatRequest")
-        if not isinstance(stream, bool):
-            raise TypeError("stream must be boolean")
         message_payloads = [_message_payload(message) for message in request.messages]
         visible: dict[str, object] = {"messages": message_payloads}
         transport: dict[str, object] = {
@@ -296,8 +290,6 @@ class OpenAICompatibleChatProvider:
     def _require_prepared(self, request: PreparedChatRequest, *, stream: bool) -> None:
         if self._closed:
             raise ModelConfigurationError("chat provider is closed")
-        if not isinstance(request, PreparedChatRequest):
-            raise TypeError("request must be PreparedChatRequest")
         if request.stream is not stream:
             raise ModelConfigurationError("prepared chat request stream mode does not match the operation")
 

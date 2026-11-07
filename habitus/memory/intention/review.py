@@ -33,8 +33,6 @@ class MemoryIntentionReviewConfig:
             self.second_review_after_days,
             self.strong_review_after_days,
         )
-        if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
-            raise TypeError("intention review day thresholds must be integers")
         if not 0 < values[0] < values[1] < values[2] <= 36_500:
             raise ValueError("intention review day thresholds must be positive and strictly increasing")
 
@@ -52,11 +50,7 @@ class MemoryIntentionReview:
         object.__setattr__(self, "level", level)
         timestamp = _utc_timestamp(self.last_confirmed_at, "last_confirmed_at")
         object.__setattr__(self, "last_confirmed_at", timestamp)
-        if (
-            isinstance(self.unconfirmed_days, bool)
-            or not isinstance(self.unconfirmed_days, int)
-            or self.unconfirmed_days < 0
-        ):
+        if self.unconfirmed_days < 0:
             raise ValueError("unconfirmed_days must be a non-negative integer")
 
     @property
@@ -68,8 +62,6 @@ class MemoryIntentionReviewer:
     """按系统时间确定性计算提醒，绝不修改、隐藏或删除 Intention。"""
 
     def __init__(self, config: MemoryIntentionReviewConfig | None = None) -> None:
-        if config is not None and not isinstance(config, MemoryIntentionReviewConfig):
-            raise TypeError("config must be MemoryIntentionReviewConfig")
         self.config = config or MemoryIntentionReviewConfig()
 
     def review(
@@ -80,8 +72,6 @@ class MemoryIntentionReviewer:
     ) -> MemoryIntentionReview | None:
         """完成事项不需要时间复核；其余事项始终保持可召回。"""
 
-        if not isinstance(document, MemoryDocument):
-            raise TypeError("document must be MemoryDocument")
         if document.kind is not MemoryKind.INTENTION:
             raise ValueError("intention review requires an Intention document")
         if document.fields.get("status") == "completed":
@@ -111,8 +101,6 @@ class MemoryIntentionReviewer:
 
 
 def _utc_timestamp(value: datetime, label: str) -> datetime:
-    if not isinstance(value, datetime):
-        raise TypeError(f"{label} must be a datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{label} must include a timezone")
     return value.astimezone(UTC)

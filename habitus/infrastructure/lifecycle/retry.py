@@ -24,6 +24,7 @@ from pathlib import Path
 from habitus.foundation.ids import require_safe_path_segment
 from habitus.foundation.integrity import canonical_json
 from habitus.foundation.lifecycle import BackoffPolicy, DeterministicFailure
+from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.filesystem import atomic_replace_bytes, read_regular_bytes
 
 _SCHEMA = "lifecycle_retry_v1"
@@ -82,19 +83,13 @@ class RetryLedger:
         max_file_bytes: int = 8 * 1024 * 1024,
         deterministic: tuple[type[BaseException], ...] = (),
     ) -> None:
-        if not isinstance(policy, BackoffPolicy):
-            raise TypeError("policy must be BackoffPolicy")
         for label, value in (
             ("max_attempts", max_attempts),
             ("max_entries", max_entries),
             ("max_file_bytes", max_file_bytes),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if value <= 0:
                 raise ValueError(f"{label} must be a positive integer")
-        if not isinstance(deterministic, tuple) or any(
-            not isinstance(item, type) or not issubclass(item, BaseException) for item in deterministic
-        ):
-            raise TypeError("deterministic must be a tuple of exception types")
         self.root = Path(root).expanduser().resolve(strict=False)
         self.owner = require_safe_path_segment(owner, "owner")
         self.path = self.root / "lifecycle" / "retry" / f"{self.owner}.json"
@@ -245,7 +240,7 @@ def _encode(entry: RetryEntry) -> dict[str, object]:
 
 def _decode(item: dict[str, object]) -> RetryEntry:
     attempts = item["attempts"]
-    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+    if not is_int(attempts) or attempts < 1:
         raise ValueError("retry attempts must be a positive integer")
     return RetryEntry(
         key=_require_key(item["key"]),

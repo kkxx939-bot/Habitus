@@ -48,7 +48,7 @@ class ClassId:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "lane", Lane(self.lane))
-        if isinstance(self.number, bool) or not isinstance(self.number, int) or self.number <= 0:
+        if self.number <= 0:
             raise KindIdError("class number must be a positive integer")
 
     def __str__(self) -> str:

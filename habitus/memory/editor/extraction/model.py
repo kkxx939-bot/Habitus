@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 
-from habitus.infrastructure.editor.snapshot import SnapshotBatch
 from habitus.memory.editor.candidate import MemoryCandidateBatch, MemoryCandidateViolation
 from habitus.memory.editor.mutation import MemoryMutationPlan
 from habitus.memory.editor.page_id import MemoryPageIdMap
@@ -179,7 +178,7 @@ class MemoryRetrievalObservation:
     cached: bool = False
 
     def __post_init__(self) -> None:
-        if isinstance(self.iteration, bool) or not isinstance(self.iteration, int) or self.iteration <= 0:
+        if self.iteration <= 0:
             raise ValueError("retrieval observation iteration must be positive")
         action = MemoryRetrievalAction(self.action)
         if action is MemoryRetrievalAction.FINISH:
@@ -188,12 +187,10 @@ class MemoryRetrievalObservation:
         object.__setattr__(self, "input_value", _clean_text(self.input_value, "input_value"))
         for name in ("result_uris", "added_uris", "relation_expanded_uris"):
             values = getattr(self, name)
-            if not isinstance(values, tuple) or any(not isinstance(item, str) or not item for item in values):
+            if any(not item for item in values):
                 raise TypeError(f"{name} must be a tuple of non-empty strings")
             if len(values) != len(set(values)):
                 raise ValueError(f"{name} cannot contain duplicate URIs")
-        if not isinstance(self.cached, bool):
-            raise TypeError("retrieval observation cached must be boolean")
 
     def to_dict(self) -> dict[str, object]:
         """返回供下一轮 Grader 阅读的紧凑结果。"""
@@ -231,32 +228,14 @@ class MemoryExtractionResult:
         for name in ("conversation_id", "segment_id"):
             _clean_text(getattr(self, name), name)
         require_sha256(self.source_segment_digest, "source_segment_digest")
-        if not isinstance(self.candidates, MemoryCandidateBatch):
-            raise TypeError("candidates must be a MemoryCandidateBatch")
-        if not isinstance(self.mutations, MemoryMutationPlan):
-            raise TypeError("mutations must be a MemoryMutationPlan")
-        if not isinstance(self.old_memories, SnapshotBatch):
-            raise TypeError("old_memories must be a MemorySnapshotBatch")
         if self.mutations.read_set.old_memories != self.old_memories:
             raise ValueError("preliminary mutation plan does not use the extracted old-memory snapshots")
         candidate_page_ids = {candidate.page_id for candidate in self.candidates.iter_candidates()}
         mutation_page_ids = {mutation.match.candidate.page_id for mutation in self.mutations.mutations}
         if mutation_page_ids != candidate_page_ids:
             raise ValueError("preliminary mutation plan must cover every memory candidate exactly once")
-        if not isinstance(self.page_ids, MemoryPageIdMap):
-            raise TypeError("page_ids must be a MemoryPageIdMap")
-        if not isinstance(self.retrieval_ended_at_limit, bool):
-            raise TypeError("retrieval_ended_at_limit must be boolean")
-        if any(not isinstance(item, MemoryRetrievalDecision) for item in self.retrieval_decisions):
-            raise TypeError("retrieval_decisions contains an invalid decision")
         if not self.retrieval_decisions and not self.retrieval_ended_at_limit:
             raise TypeError("retrieval_decisions must contain at least one decision")
-        if any(not isinstance(item, MemoryRetrievalObservation) for item in self.retrieval_observations):
-            raise TypeError("retrieval_observations contains an invalid observation")
-        if not isinstance(self.source_rejections, tuple) or any(
-            not isinstance(item, MemoryCandidateViolation) for item in self.source_rejections
-        ):
-            raise TypeError("source_rejections must be a tuple of candidate violations")
 
 
 def _decision_schema(

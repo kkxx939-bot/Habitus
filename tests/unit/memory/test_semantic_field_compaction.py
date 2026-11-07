@@ -78,3 +78,19 @@ def test_missing_operation_keeps_source_and_unknown_field_is_rejected() -> None:
 def test_operation_shape_is_strict(operation: dict[str, object]) -> None:
     with pytest.raises(SemanticFieldOperationError):
         batch(operation)
+
+
+@pytest.mark.parametrize(
+    ("operation", "message"),
+    [
+        ({"field": "overview", "operation": "update", "content": 3}, "update content must be non-empty text"),
+        ({"field": "overview", "operation": "update", "content": ["x"]}, "update content must be non-empty text"),
+        ({"field": "chronology", "operation": "append", "items": ["a", 2]}, "items must contain non-empty text"),
+        ({"field": "chronology", "operation": "append", "items": [None]}, "items must contain non-empty text"),
+    ],
+)
+def test_model_output_with_wrong_types_is_refused_by_the_decoder(operation: dict[str, object], message: str) -> None:
+    """模型答复里类型错的 content/items 在 ``model_validate`` 就被拒（W16：类型检查在边界）。"""
+
+    with pytest.raises(SemanticFieldOperationError, match=message):
+        batch(operation)

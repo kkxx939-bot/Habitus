@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -135,3 +136,23 @@ def test_listing_retries_when_another_writer_changes_the_directory(tmp_path, mon
 
     monkeypatch.setattr(module, "list_real_directory", flaky)
     assert len(store.snapshot().items) == 1
+
+
+@pytest.mark.parametrize("payload", [["a"], "a", 1, None])
+def test_a_stored_item_whose_payload_is_not_an_object_is_refused_when_decoded(payload: object) -> None:
+    """重试堆读回：``payload`` 不是 JSON 对象在解码器就被拒（W16：不靠 ``RetryItem`` 构造器兜）。"""
+
+    raw = json.loads(_item("a").to_bytes())
+    raw["payload"] = payload
+    with pytest.raises(RetryError, match="retry payload must be a JSON object"):
+        RetryItem.from_mapping(raw)
+
+
+def test_a_stored_item_with_an_unreadable_file_is_listed_for_discarding_when_its_payload_is_wrong(tmp_path) -> None:
+    store = RetryBacklogStore(tmp_path, max_items=10)
+    store.put(_item("b"))
+    item = _item("a")
+    raw = json.loads(item.to_bytes())
+    raw["payload"] = ["not", "an", "object"]
+    (store.directory / f"{item.item_id}.json").write_text(json.dumps(raw))
+    assert store.snapshot().unreadable == (item.item_id,)

@@ -130,7 +130,7 @@ def overdue_at(intervals: Sequence[DayInterval], elapsed: int, *, line: float) -
 
 
 def _require_line(line: float) -> None:
-    if isinstance(line, bool) or not isinstance(line, int | float) or not 0.0 < line < 1.0:
+    if not 0.0 < line < 1.0:
         raise ValueError("line must lie in (0, 1)")
 
 

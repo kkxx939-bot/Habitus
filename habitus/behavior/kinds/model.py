@@ -125,11 +125,11 @@ class Vocabulary:
     branches: Mapping[ClassId, tuple[ClassId, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version < 0:
+        if self.version < 0:
             raise BehaviorKindError("vocabulary version must be a non-negative integer")
         classes = dict(self.classes)
         for key, item in classes.items():
-            if not isinstance(item, BehaviorClass) or item.id != key:
+            if item.id != key:
                 raise BehaviorKindError("vocabulary classes must be keyed by their own id")
         names: dict[tuple[Lane, str], ClassId] = {}
         for item in classes.values():

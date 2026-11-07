@@ -46,23 +46,10 @@ class PersistentMemoryVectorIndex:
         config: MemoryVectorIndexConfig | None = None,
         path_lock: PathLock | None = None,
     ) -> None:
-        if not isinstance(tree, MemoryTree):
-            raise TypeError("tree must be MemoryTree")
-        if not callable(getattr(embedder, "embed_documents", None)):
-            raise TypeError("embedder must implement embed_documents")
-        for name in ("initialize", "state", "read", "replace_all", "apply", "search", "scan"):
-            if not callable(getattr(store, name, None)):
-                raise TypeError(f"store must implement VectorStore.{name}")
-        if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension <= 0:
+        if dimension <= 0:
             raise ValueError("memory vector dimension must be positive")
-        if (
-            not isinstance(embedding_fingerprint, str)
-            or not embedding_fingerprint
-            or embedding_fingerprint != embedding_fingerprint.strip()
-        ):
+        if not embedding_fingerprint or embedding_fingerprint != embedding_fingerprint.strip():
             raise ValueError("embedding_fingerprint must be normalized non-empty text")
-        if path_lock is not None and not isinstance(path_lock, PathLock):
-            raise TypeError("path_lock must be PathLock or None")
         self.tree = tree
         self.embedder = embedder
         self.store = store
@@ -97,13 +84,7 @@ class PersistentMemoryVectorIndex:
     ) -> VectorStoreState:
         """在 L2 和 L0/L1 均发布后，以 Job 全局序号推进远程索引。"""
 
-        if not isinstance(changed_uris, tuple) or any(not isinstance(uri, MemoryURI) for uri in changed_uris):
-            raise TypeError("changed_uris must contain MemoryURI values")
-        if not isinstance(semantic_results, tuple) or any(
-            not isinstance(result, MemorySemanticRefreshResult) for result in semantic_results
-        ):
-            raise TypeError("semantic_results must contain MemorySemanticRefreshResult values")
-        if isinstance(checkpoint, bool) or not isinstance(checkpoint, int) or checkpoint <= 0:
+        if checkpoint <= 0:
             raise ValueError("memory vector checkpoint must be positive")
         await self.ensure_ready()
         async with self._lock:
@@ -130,6 +111,7 @@ class PersistentMemoryVectorIndex:
                         expected_checkpoint=state.checkpoint,
                     )
                 except VectorStoreConflictError:
+                    # generation/checkpoint CAS 冲突：重读状态后在有界次数内重试，用尽后由循环外明确报错。
                     continue
             raise MemoryVectorIndexError("memory vector state changed repeatedly during synchronization")
 
@@ -140,7 +122,7 @@ class PersistentMemoryVectorIndex:
         async with self._lock:
             current = await self.store.state()
             selected = (0 if current is None else current.checkpoint) if checkpoint is None else checkpoint
-            if isinstance(selected, bool) or not isinstance(selected, int) or selected < 0:
+            if selected < 0:
                 raise ValueError("memory vector rebuild checkpoint must be non-negative")
             return await self._rebuild_locked(checkpoint=selected)
 
@@ -292,6 +274,7 @@ class PersistentMemoryVectorIndex:
                     expected_generation=None if state is None else state.generation,
                 )
             except VectorStoreConflictError:
+                # generation CAS 冲突：重读状态后在有界次数内重建，用尽后由循环外明确报错。
                 continue
         raise MemoryVectorIndexError("memory vector state changed repeatedly during rebuild")
 
@@ -316,10 +299,10 @@ class PersistentMemoryVectorIndex:
         for offset in range(0, len(missing), self.config.embedding_batch_size):
             batch = missing[offset : offset + self.config.embedding_batch_size]
             vectors = await self.embedder.embed_documents(tuple(source.content for source in batch))
-            if not isinstance(vectors, tuple) or len(vectors) != len(batch):
+            if len(vectors) != len(batch):
                 raise MemoryVectorIndexError("embedder returned an unexpected vector count")
             for source, vector in zip(batch, vectors, strict=True):
-                if not isinstance(vector, EmbeddingVector) or vector.dimension != self.dimension:
+                if vector.dimension != self.dimension:
                     raise MemoryVectorIndexError("embedder returned an invalid vector dimension")
                 resolved[source.identity] = self._record(source, vector)
         if len(resolved) != len(sources):
@@ -376,8 +359,6 @@ class PersistentMemoryVectorIndex:
     ) -> tuple[MemoryVectorMatch, ...]:
         matches: list[MemoryVectorMatch] = []
         for value in values:
-            if not isinstance(value, VectorStoreMatch):
-                raise MemoryVectorIndexError("vector store returned an invalid match")
             record = value.record
             uri_value = record.attributes.get("uri")
             level_value = record.attributes.get("level")
@@ -421,19 +402,17 @@ class PersistentMemoryVectorIndex:
         )
 
     def _limit(self, value: int) -> int:
-        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= self.config.max_search_hits:
+        if not 1 <= value <= self.config.max_search_hits:
             raise ValueError("memory vector search limit is outside its configured bound")
         return value
 
     @staticmethod
     def _query_vector(value: EmbeddingVector) -> EmbeddingVector:
-        if not isinstance(value, EmbeddingVector):
-            raise TypeError("query_vector must be EmbeddingVector")
         return value
 
     @staticmethod
     def _roots(values: tuple[MemoryURI, ...]) -> tuple[MemoryURI, ...]:
-        if not isinstance(values, tuple) or not values:
+        if not values:
             raise ValueError("memory vector search requires at least one root")
         roots = tuple(MemoryURI.parse(value) for value in values)
         if any(root.node_type is not MemoryURINodeType.DIRECTORY for root in roots):
@@ -444,7 +423,7 @@ class PersistentMemoryVectorIndex:
 
     @staticmethod
     def _levels(values: tuple[MemoryLevel, ...]) -> tuple[MemoryLevel, ...]:
-        if not isinstance(values, tuple) or not values:
+        if not values:
             raise ValueError("memory vector search requires at least one level")
         levels = tuple(MemoryLevel(value) for value in values)
         if len(levels) != len(set(levels)):

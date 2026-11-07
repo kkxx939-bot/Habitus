@@ -79,10 +79,6 @@ class _Night:
 
 class NightlyGrower:
     def __init__(self, caller: KindModelCaller, recheck: PendingRecheck) -> None:
-        if not isinstance(caller, KindModelCaller):
-            raise TypeError("caller must be KindModelCaller")
-        if not isinstance(recheck, PendingRecheck):
-            raise TypeError("recheck must be PendingRecheck")
         self.caller = caller
         self.recheck = recheck
         self.config: BehaviorKindConfig = caller.config

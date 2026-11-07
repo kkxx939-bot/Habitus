@@ -45,6 +45,7 @@ from pathlib import Path
 from habitus.behavior.fusion.errors import BehaviorFusionError
 from habitus.behavior.fusion.receipt import BehaviorFusionReceipt
 from habitus.infrastructure.store.filesystem import (
+    DurableDirectoryEntry,
     DurablePathIntegrityError,
     ImmutableArtifactConflictError,
     atomic_create_bytes,
@@ -77,10 +78,8 @@ class BehaviorCoverageIndex:
         window_days: int = 7,
         settled: Callable[[str], bool] | None = None,
     ) -> None:
-        if isinstance(window_days, bool) or not isinstance(window_days, int) or window_days < 1:
+        if window_days < 1:
             raise ValueError("coverage window_days must be a positive integer")
-        if settled is not None and not callable(settled):
-            raise TypeError("settled must be callable or None")
         self.root = Path(behavior_root).expanduser().resolve(strict=False)
         self.coverage_root = self.root / "fusion" / "coverage"
         self.window_days = window_days
@@ -92,8 +91,6 @@ class BehaviorCoverageIndex:
     def record(self, receipt: BehaviorFusionReceipt, *, sources: tuple[str, ...] = ()) -> None:
         """记下这份回执覆盖的全部观测（会话 lane 连同这一轮所属的会话源）；同身份同内容重复写入幂等。"""
 
-        if not isinstance(receipt, BehaviorFusionReceipt):
-            raise TypeError("receipt must be BehaviorFusionReceipt")
         payload: dict[str, object] = {
             "schema_version": COVERAGE_SCHEMA_VERSION,
             "receipt_id": receipt.receipt_id,
@@ -224,7 +221,7 @@ class BehaviorCoverageIndex:
             return None
 
     def _window_start(self, now: datetime) -> date:
-        if not isinstance(now, datetime) or now.utcoffset() is None:
+        if now.utcoffset() is None:
             raise TypeError("now must be a timezone-aware datetime")
         return (now.astimezone(UTC) - timedelta(days=self.window_days)).date()
 
@@ -248,7 +245,7 @@ class BehaviorCoverageIndex:
             days.append(self.coverage_root / entry.name)
         return sorted(days)
 
-    def _entries(self, directory: Path) -> list:
+    def _entries(self, directory: Path) -> list[DurableDirectoryEntry]:
         try:
             return list(list_real_directory(directory, artifact_root=self.root, max_entries=_MAX_ENTRIES))
         except FileNotFoundError:

@@ -15,15 +15,11 @@ class ConversationSegmentQueryBuilder:
     """保留消息角色和工具身份，并优先使用用户 prompt 作为召回信号。"""
 
     def __init__(self, config: MemoryRetrievalConfig | None = None) -> None:
-        if config is not None and not isinstance(config, MemoryRetrievalConfig):
-            raise TypeError("config must be MemoryRetrievalConfig")
         self.config = config or MemoryRetrievalConfig()
 
     def build(self, segment: ConversationSegment) -> str:
         """从原始片段生成搜索文本；Conversation Summary 不参与此过程。"""
 
-        if not isinstance(segment, ConversationSegment):
-            raise TypeError("segment must be a ConversationSegment")
         messages = segment.messages
         rendered = tuple(self._render_message(message) for message in messages)
         prompt_indexes = [

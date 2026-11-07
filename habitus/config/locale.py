@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import cache
 from typing import Any
@@ -47,7 +46,7 @@ class LocaleConfig:
     nominal_weekend: tuple[int, ...] = (5, 6)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.timezone, str) or not self.timezone.strip():
+        if not self.timezone.strip():
             raise ValueError("locale.timezone must be a non-empty IANA time zone name")
         # 按 tzdata 的名字表逐字比对（区分大小写），不用 ZoneInfo 能不能打开来判：macOS 默认文件系统不分大小写，
         # "asia/singapore" 在那里打得开，配置搬到 Linux 就读不出来
@@ -55,21 +54,13 @@ class LocaleConfig:
             raise ValueError(
                 f"locale.timezone is not a known IANA time zone (names are case-sensitive): {self.timezone!r}"
             )
-        if not isinstance(self.region, str) or _REGION.fullmatch(self.region) is None:
+        if _REGION.fullmatch(self.region) is None:
             raise ValueError("locale.region must be an ISO 3166 code such as CN, SG or US-CA")
         weekend = self.nominal_weekend
-        if (
-            isinstance(weekend, str | bytes)
-            or not isinstance(weekend, Sequence)
-            or not weekend
-            or any(isinstance(day, bool) or not isinstance(day, int) or not 0 <= day <= 6 for day in weekend)
-            or len(set(weekend)) != len(weekend)
-        ):
+        if not weekend or any(not 0 <= day <= 6 for day in weekend) or len(set(weekend)) != len(weekend):
             raise ValueError("locale.nominal_weekend must list distinct weekdays 0–6")
         object.__setattr__(self, "nominal_weekend", tuple(sorted(weekend)))
-        if self.calendar_path is not None and (
-            not isinstance(self.calendar_path, str) or not self.calendar_path.strip()
-        ):
+        if self.calendar_path is not None and not self.calendar_path.strip():
             raise ValueError("locale.calendar_path must be a non-empty directory path or null")
 
     def zone(self) -> ZoneInfo:

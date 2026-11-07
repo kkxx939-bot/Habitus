@@ -281,8 +281,6 @@ class BehaviorObservation:
         偏移派生。
         """
 
-        if not isinstance(config, BehaviorObservationConfig):
-            raise TypeError("config must be BehaviorObservationConfig")
         resolved_observer = normalized_identifier(observer_id, "observer_id", max_chars=config.max_identifier_chars)
         # 枚举与数值必须在算摘要之前归一：``canonical_digest`` 遇到非法枚举或 NaN 会抛出
         # 本模块契约之外的异常，调用方的 except 接不住。
@@ -438,10 +436,8 @@ class BehaviorObservationBatch:
         )
         if isinstance(self.observations, list):
             object.__setattr__(self, "observations", tuple(self.observations))
-        if not isinstance(self.observations, tuple) or not self.observations:
+        if not self.observations:
             raise BehaviorObservationError("observation batch must not be empty")
-        if any(not isinstance(item, BehaviorObservation) for item in self.observations):
-            raise TypeError("observations must contain BehaviorObservation values")
         if any(item.observer_id != self.observer_id for item in self.observations):
             raise BehaviorObservationError("observation batch contains another observer's observation")
         identities = [item.observation_id for item in self.observations]
@@ -482,8 +478,8 @@ class BehaviorObservationBatch:
         if len(raw) > config.max_observations_per_batch:
             raise BehaviorObservationLimitError("observation batch exceeds its configured item limit")
         return cls(
-            observer_id=record["observer_id"],
             observations=tuple(BehaviorObservation.from_dict(item, config=config) for item in raw),
+            observer_id=normalized_identifier(record["observer_id"], "observer_id", max_chars=_UNBOUNDED_IDENTIFIER),
         )
 
 
@@ -505,8 +501,6 @@ class BehaviorObservationEnvelope:
         require_sha256(self.delivery_id, "delivery_id")
         require_sha256(self.payload_digest, "payload_digest")
         require_sha256(self.record_digest, "record_digest")
-        if not isinstance(self.batch, BehaviorObservationBatch):
-            raise TypeError("batch must be BehaviorObservationBatch")
         object.__setattr__(
             self,
             "observer_id",
@@ -535,10 +529,6 @@ class BehaviorObservationEnvelope:
         recorded_at: object,
         config: BehaviorObservationConfig,
     ) -> BehaviorObservationEnvelope:
-        if not isinstance(config, BehaviorObservationConfig):
-            raise TypeError("config must be BehaviorObservationConfig")
-        if not isinstance(batch, BehaviorObservationBatch):
-            raise TypeError("batch must be BehaviorObservationBatch")
         resolved_observer = normalized_identifier(observer_id, "observer_id", max_chars=config.max_identifier_chars)
         resolved_protocol = normalized_protocol(protocol, max_chars=config.max_identifier_chars)
         resolved_delivery = require_sha256(delivery_id, "delivery_id")
@@ -616,14 +606,14 @@ class BehaviorObservationEnvelope:
             schema_version=ENVELOPE_SCHEMA_VERSION,
         )
         return cls(
-            source_id=record["source_id"],
-            observer_id=record["observer_id"],
-            protocol=record["protocol"],
             batch=BehaviorObservationBatch.from_dict(record["batch"], config=config),
-            delivery_id=record["delivery_id"],
-            payload_digest=record["payload_digest"],
-            recorded_at=record["recorded_at"],
-            record_digest=record["record_digest"],
+            source_id=require_sha256(record["source_id"], "source_id"),
+            delivery_id=require_sha256(record["delivery_id"], "delivery_id"),
+            payload_digest=require_sha256(record["payload_digest"], "payload_digest"),
+            record_digest=require_sha256(record["record_digest"], "record_digest"),
+            observer_id=normalized_identifier(record["observer_id"], "observer_id", max_chars=_UNBOUNDED_IDENTIFIER),
+            protocol=normalized_protocol(record["protocol"], max_chars=_UNBOUNDED_IDENTIFIER),
+            recorded_at=to_utc(aware_timestamp(record["recorded_at"], "recorded_at"), "recorded_at"),
         )
 
 

@@ -126,16 +126,10 @@ class ConversationConsumerDelivery:
     ) -> None:
         if inspector.outcomes is not outcomes:
             raise ValueError("delivery and inspector must share the Outcome Store")
-        if not isinstance(consumers, Mapping):
-            raise TypeError("consumers must map each ConversationSourceConsumer to its implementation")
         registry = {ConversationSourceConsumer(key): value for key, value in consumers.items()}
         for key, implementation in registry.items():
             if implementation.consumer is not key:
                 raise ValueError(f"consumer registered under {key.value} has the wrong consumer identity")
-            if not isinstance(implementation.ordered_within_conversation, bool):
-                raise TypeError(f"consumer {key.value} must declare ordered_within_conversation as a boolean")
-            if not isinstance(implementation.skips_released_sources, bool):
-                raise TypeError(f"consumer {key.value} must declare skips_released_sources as a boolean")
         # 枚举本身就是"一个 Source 有哪些 Consumer"的定义，缺一个即为装配错误：
         # 未注册的 Consumer 不会报错，只会永远收不到交付。
         missing = sorted(item.value for item in ConversationSourceConsumer if item not in registry)
@@ -148,8 +142,6 @@ class ConversationConsumerDelivery:
         self.fence = fence
         self.consumers: Mapping[ConversationSourceConsumer, ConversationDurableConsumer] = MappingProxyType(registry)
         self.clock = clock or (lambda: datetime.now(UTC))
-        if observer is not None and not callable(getattr(observer, "record", None)):
-            raise TypeError("observer must implement record")
         self.observer: Observer = observer or NullObserver()
 
     async def ensure_outcome(
@@ -486,6 +478,7 @@ class ConversationConsumerDelivery:
                 )
             )
         except Exception:
+            # 观测只是旁路记录：后端失败不改变交付结果，也无处可再上报，忽略即可。
             pass
 
     @staticmethod

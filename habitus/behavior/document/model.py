@@ -12,8 +12,6 @@ from habitus.foundation.integrity import immutable_snapshot
 
 
 def utc_timestamp(value: datetime, field_name: str) -> datetime:
-    if not isinstance(value, datetime):
-        raise TypeError(f"behavior document {field_name} must be a datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"behavior document {field_name} must include a timezone")
     return value.astimezone(UTC)
@@ -28,7 +26,7 @@ class BehaviorDocumentMetadata:
     updated_at: datetime
 
     def __post_init__(self) -> None:
-        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision <= 0:
+        if self.revision <= 0:
             raise ValueError("behavior document revision must be a positive integer")
         created_at = utc_timestamp(self.created_at, "created_at")
         updated_at = utc_timestamp(self.updated_at, "updated_at")
@@ -56,14 +54,10 @@ class BehaviorDocument:
     def __post_init__(self) -> None:
         kind = BehaviorKind(self.kind)
         object.__setattr__(self, "kind", kind)
-        if not isinstance(self.address, BehaviorAddress) or self.address.kind is not kind:
+        if self.address.kind is not kind:
             raise ValueError("behavior document address does not match its kind")
-        if not isinstance(self.metadata, BehaviorDocumentMetadata):
-            raise TypeError("behavior document metadata must be BehaviorDocumentMetadata")
-        if not isinstance(self.fields, Mapping) or any(not isinstance(name, str) for name in self.fields):
-            raise TypeError("behavior document fields must be a mapping with string keys")
         object.__setattr__(self, "fields", immutable_snapshot(self.fields))
-        if not isinstance(self.markdown_body, str) or not self.markdown_body.strip():
+        if not self.markdown_body.strip():
             raise ValueError("behavior document Markdown body must be non-empty")
         if not self.markdown_body.endswith("\n"):
             raise ValueError("behavior document Markdown body must end with a newline")

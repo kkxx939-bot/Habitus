@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from habitus.infrastructure.editor.snapshot import SnapshotBatch
 from habitus.memory.document import MemoryDocument
-from habitus.memory.editor.candidate import MemoryCandidateBatch
+from habitus.memory.editor.candidate import MemoryCandidate, MemoryCandidateBatch
 from habitus.memory.editor.mutation.model import (
     MemoryMutationReadSet,
     MemoryNodeMatch,
@@ -29,12 +29,6 @@ class MemoryNodeMatcher:
     ) -> tuple[MemoryNodeMatch, ...]:
         """把每条候选严格分类为已有节点或待新建节点。"""
 
-        if not isinstance(batch, MemoryCandidateBatch):
-            raise TypeError("batch must be a MemoryCandidateBatch")
-        if not isinstance(read_set, MemoryMutationReadSet):
-            raise TypeError("read_set must be a MemoryMutationReadSet")
-        if not isinstance(page_ids, MemoryPageIdMap):
-            raise TypeError("page_ids must be a MemoryPageIdMap")
         self._validate_old_context(read_set.old_memories, page_ids)
 
         candidates = batch.iter_candidates()
@@ -62,7 +56,7 @@ class MemoryNodeMatcher:
                 raise MemoryNodeMatchError("old-memory snapshot identity is not a strict L2 memory URI") from exc
             if not snapshot.exists:
                 continue
-            if not isinstance(snapshot.value, MemoryDocument):
+            if snapshot.value is None:
                 raise MemoryNodeMatchError("old-memory snapshot contains an invalid document")
             if str(MemoryURI.from_address(snapshot.value.address)) != snapshot.identity:
                 raise MemoryNodeMatchError("old-memory snapshot identity does not match its document")
@@ -73,14 +67,10 @@ class MemoryNodeMatcher:
 
     @staticmethod
     def _match_one(
-        candidate: object,
+        candidate: MemoryCandidate,
         read_set: MemoryMutationReadSet,
         page_ids: MemoryPageIdMap,
     ) -> MemoryNodeMatch:
-        from habitus.memory.editor.candidate import MemoryCandidate
-
-        if not isinstance(candidate, MemoryCandidate):  # pragma: no cover - 批次模型已保证。
-            raise TypeError("candidate must be a MemoryCandidate")
         uri = MemoryURI.from_address(candidate.address)
         identity = str(uri)
         target = read_set.target_memories.get(identity)

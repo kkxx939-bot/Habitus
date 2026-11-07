@@ -159,13 +159,18 @@ class AdviceStore(SceneStore):
 
 
 def _proposal(body: Mapping[str, Any]) -> Proposal:
+    condition, refused = body["condition"], body["refused"]
+    if condition is not None and not isinstance(condition, str):
+        raise ValueError("proposal condition must be text or null")
+    if refused is not None and not isinstance(refused, str):
+        raise ValueError("proposal refused reason must be text or null")
     return Proposal(
         antecedent=str(body["antecedent"]),
         proposed_on=date.fromisoformat(body["proposed_on"]),
         why=str(body["why"]),
-        condition=body["condition"],
+        condition=condition,
         raw=dict(body["raw"]),
-        refused=body["refused"],
+        refused=refused,
         version=str(body["version"]),
         model=str(body["model"]),
     )

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from pathlib import PurePosixPath
 
 from habitus.memory.editor.retrieval.model import (
@@ -31,14 +30,6 @@ class MemoryRelatedRetriever:
         semantic_search: MemorySemanticSearch,
         config: MemoryRetrievalConfig | None = None,
     ) -> None:
-        if not isinstance(schema_registry, MemorySchemaRegistry):
-            raise TypeError("schema_registry must be a MemorySchemaRegistry")
-        if not isinstance(snapshot_reader, MemorySnapshotReader):
-            raise TypeError("snapshot_reader must be a MemorySnapshotReader")
-        if not callable(getattr(semantic_search, "search", None)):
-            raise TypeError("semantic_search must implement async search")
-        if config is not None and not isinstance(config, MemoryRetrievalConfig):
-            raise TypeError("config must be MemoryRetrievalConfig")
         self.schema_registry = schema_registry
         self.snapshot_reader = snapshot_reader
         self.semantic_search = semantic_search
@@ -53,8 +44,6 @@ class MemoryRelatedRetriever:
     async def retrieve(self, segment: ConversationSegment) -> MemoryRelatedContext:
         """确定相关 URI，并在返回前完整读取每一个选中 L2 文档。"""
 
-        if not isinstance(segment, ConversationSegment):
-            raise TypeError("segment must be a ConversationSegment")
         query = self.query_builder.build(segment)
         fixed_uris, search_roots = self._schema_read_plan()
         tool_uris = self._tool_uris(segment)
@@ -136,15 +125,11 @@ class MemoryRelatedRetriever:
             )
         except Exception as exc:
             raise MemoryRetrievalError("memory semantic search failed") from exc
-        if isinstance(raw_hits, str) or not isinstance(raw_hits, Sequence):
-            raise MemoryRetrievalError("memory semantic search must return a sequence of hits")
         if len(raw_hits) > self.config.search_limit:
             raise MemoryRetrievalError("memory semantic search exceeded its requested result limit")
 
         by_uri: dict[MemoryURI, MemorySearchHit] = {}
         for hit in raw_hits:
-            if not isinstance(hit, MemorySearchHit):
-                raise MemoryRetrievalError("memory semantic search returned an invalid hit")
             if hit.uri.node_type is not MemoryURINodeType.DOCUMENT:
                 raise MemoryRetrievalError("memory semantic search returned a non-L2 URI")
             if not any(hit.uri.matches_prefix(root) for root in roots):

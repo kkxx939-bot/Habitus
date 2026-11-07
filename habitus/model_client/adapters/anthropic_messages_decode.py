@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping
 
+from habitus.foundation.validation import is_int, is_nonblank_str
 from habitus.model_client.adapters._http import HTTPStatusError
 from habitus.model_client.contracts import (
     ModelContentSafetyError,
@@ -48,7 +49,7 @@ _STATUS_BY_ERROR_TYPE = {
 
 
 def finish_reason(stop_reason: object) -> str:
-    if not isinstance(stop_reason, str) or not stop_reason.strip():
+    if not is_nonblank_str(stop_reason):
         raise ModelResponseError("anthropic_messages response has no stop_reason")
     return _FINISH_REASONS.get(stop_reason, stop_reason)
 
@@ -310,7 +311,7 @@ def _tool_call(block: Mapping[str, object], index: int) -> ToolCall:
     call_id = block.get("id")
     name = block.get("name")
     arguments = block.get("input")
-    if not isinstance(call_id, str) or not call_id.strip() or not isinstance(name, str) or not name.strip():
+    if not is_nonblank_str(call_id) or not is_nonblank_str(name):
         raise ModelResponseError(f"anthropic_messages content[{index}] tool_use needs an id and a name")
     if not isinstance(arguments, Mapping):
         raise ModelResponseError(f"anthropic_messages content[{index}] tool_use input must be an object")
@@ -319,7 +320,7 @@ def _tool_call(block: Mapping[str, object], index: int) -> ToolCall:
 
 def _block_index(event: Mapping[str, object]) -> int:
     index = event.get("index")
-    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+    if not is_int(index) or index < 0:
         raise ModelResponseError("anthropic_messages stream content block index must be a non-negative integer")
     return index
 

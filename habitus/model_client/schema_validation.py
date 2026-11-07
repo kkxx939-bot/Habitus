@@ -7,6 +7,8 @@ import math
 import re
 from collections.abc import Mapping
 
+from habitus.foundation.validation import is_int, is_number, is_str_list
+
 
 class JSONSchemaValidationError(ValueError):
     """解析后的模型返回值不符合请求的 JSON Schema。"""
@@ -15,7 +17,7 @@ class JSONSchemaValidationError(ValueError):
 def validate_json_schema(value: object, schema: Mapping[str, object]) -> object:
     """校验时不进行类型强制转换；已安装 jsonschema 时使用它，否则使用严格核心实现。"""
 
-    if not isinstance(schema, Mapping) or not schema:
+    if not schema:
         raise ValueError("JSON Schema must be a non-empty object")
     try:
         module = importlib.import_module("jsonschema")
@@ -89,7 +91,7 @@ def _validate(
     expected_type = schema.get("type")
     if expected_type is not None:
         allowed_types = [expected_type] if isinstance(expected_type, str) else expected_type
-        if not isinstance(allowed_types, list) or not all(isinstance(item, str) for item in allowed_types):
+        if not isinstance(allowed_types, list) or not is_str_list(allowed_types):
             raise ValueError("JSON Schema type must be a string or array of strings")
         if not any(_matches_type(value, item) for item in allowed_types):
             raise JSONSchemaValidationError(f"{path} must have type {' or '.join(allowed_types)}")
@@ -180,7 +182,7 @@ def _validate_number(value: int | float, schema: Mapping[str, object], *, path: 
         if key not in schema:
             continue
         bound = schema[key]
-        if isinstance(bound, bool) or not isinstance(bound, int | float):
+        if not is_number(bound):
             raise ValueError(f"JSON Schema {key} must be numeric")
         if not predicate(value, bound):
             raise JSONSchemaValidationError(f"{path} violates {key}")
@@ -202,7 +204,7 @@ def _require_size(
         if key not in schema:
             continue
         bound = schema[key]
-        if isinstance(bound, bool) or not isinstance(bound, int) or bound < 0:
+        if not is_int(bound) or bound < 0:
             raise ValueError(f"JSON Schema {key} must be a non-negative integer")
         if not predicate(size, bound):
             raise JSONSchemaValidationError(f"{path} violates {key}")

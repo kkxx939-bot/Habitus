@@ -72,16 +72,8 @@ class ExpectationForming:
         shadow_unestablished: bool = False,
         vocabulary_version: Callable[[], int] | None = None,
     ) -> None:
-        if not isinstance(ledger, ForesightLedgerStore):
-            raise TypeError("ledger must be a ForesightLedgerStore")
-        if not isinstance(read_side, FormingReadSide):
-            raise TypeError("read_side must expose the behaviour tree, subject, calendar and zone")
-        if not hasattr(unsealed, "prepare") or not hasattr(unsealed, "rows"):
-            raise TypeError("unsealed must be an UnsealedReader")
-        if isinstance(recent, bool) or not isinstance(recent, int) or recent < 1:
+        if recent < 1:
             raise ValueError("recent must be a positive integer")
-        if not isinstance(tolerance, Tolerance):
-            raise TypeError("tolerance must be a Tolerance")
         self.ledger = ledger
         self.read_side = read_side
         self.unsealed = unsealed

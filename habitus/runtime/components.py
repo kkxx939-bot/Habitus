@@ -77,21 +77,8 @@ class RuntimeInfrastructure:
     managed_observability: ManagedObservability | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.path_lock, PathLock):
-            raise TypeError("path_lock must be PathLock")
-        if not isinstance(self.vector_stores, VectorStoreFactory):
-            raise TypeError("vector_stores must be VectorStoreFactory")
-        if not isinstance(self.observability, MetricRegistry):
-            raise TypeError("observability must be MetricRegistry")
         if self.observer is None:
             object.__setattr__(self, "observer", self.observability)
-        elif not callable(getattr(self.observer, "record", None)):
-            raise TypeError("observer must implement record")
-        if self.managed_observability is not None and not isinstance(
-            self.managed_observability,
-            ManagedObservability,
-        ):
-            raise TypeError("managed_observability must be ManagedObservability or None")
 
     def initialize(self) -> None:
         if self.managed_observability is not None:
@@ -114,20 +101,8 @@ class RuntimeModels:
     reranker: Reranker | None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.providers, ProviderFactory):
-            raise TypeError("providers must be ProviderFactory")
-        if not isinstance(self.chat, ChatClient):
-            raise TypeError("chat must be ChatClient")
-        if not isinstance(self.structured_chat, StructuredChatClient):
-            raise TypeError("structured_chat must be StructuredChatClient")
         if self.structured_chat.client is not self.chat:
             raise ValueError("structured_chat must wrap the shared chat client")
-        if not callable(getattr(self.embedder, "embed_query", None)) or not callable(
-            getattr(self.embedder, "embed_documents", None)
-        ):
-            raise TypeError("embedder must implement the Embedder contract")
-        if self.reranker is not None and not callable(getattr(self.reranker, "rerank", None)):
-            raise TypeError("reranker must implement the Reranker contract")
 
     async def aclose(self) -> None:
         """关闭所有模型能力；即使某一项失败也继续释放剩余资源。"""
@@ -180,28 +155,6 @@ class RuntimeConversation:
     summary_expander: ConversationSummaryExpander
 
     def __post_init__(self) -> None:
-        if not isinstance(self.sources, ConversationSourceStore):
-            raise TypeError("sources must be ConversationSourceStore")
-        if not isinstance(self.source_outcomes, ConversationConsumerOutcomeStore):
-            raise TypeError("source_outcomes must be ConversationConsumerOutcomeStore")
-        if not isinstance(self.memory_outputs, MemoryConversationOutputStore):
-            raise TypeError("memory_outputs must be MemoryConversationOutputStore")
-        if not isinstance(self.behavior_session_outputs, BehaviorSessionOutputStore):
-            raise TypeError("behavior_session_outputs must be BehaviorSessionOutputStore")
-        if not isinstance(self.behavior_session_consumer, BehaviorSessionConsumer | OutletObservingConsumer):
-            raise TypeError("behavior_session_consumer must be BehaviorSessionConsumer or OutletObservingConsumer")
-        if not isinstance(self.source_inspector, ConversationConsumerStateInspector):
-            raise TypeError("source_inspector must be ConversationConsumerStateInspector")
-        if not isinstance(self.source_fence, ConversationConsumerExecutionFence):
-            raise TypeError("source_fence must be ConversationConsumerExecutionFence")
-        if not isinstance(self.source_delivery, ConversationConsumerDelivery):
-            raise TypeError("source_delivery must be ConversationConsumerDelivery")
-        if not isinstance(self.source_coordinator, ConversationSourceCoordinator):
-            raise TypeError("source_coordinator must be ConversationSourceCoordinator")
-        if not isinstance(self.source_ledger, ConversationSourceLedger):
-            raise TypeError("source_ledger must be ConversationSourceLedger")
-        if not isinstance(self.source_releaser, ConversationSourceReleaser):
-            raise TypeError("source_releaser must be ConversationSourceReleaser")
         if (
             self.source_delivery.ledger is not self.source_ledger
             or self.source_releaser.ledger is not self.source_ledger
@@ -212,30 +165,6 @@ class RuntimeConversation:
             or self.source_releaser.outcomes is not self.source_outcomes
         ):
             raise ValueError("conversation source releaser must share the source and outcome stores")
-        if not isinstance(self.source_recovery, ConversationSourceRecovery):
-            raise TypeError("source_recovery must be ConversationSourceRecovery")
-        if not isinstance(self.journal, ConversationMessageJournal):
-            raise TypeError("journal must be ConversationMessageJournal")
-        if not isinstance(self.retention, ConversationRetentionPlanner):
-            raise TypeError("retention must be ConversationRetentionPlanner")
-        if not isinstance(
-            self.boundary_scorer,
-            ConversationSemanticBoundaryScorer,
-        ):
-            raise TypeError("boundary_scorer must be ConversationSemanticBoundaryScorer")
-        if not isinstance(self.summaries, ConversationSummaryService):
-            raise TypeError("summaries must be ConversationSummaryService")
-        if not isinstance(self.summary_compactor, ConversationSummaryCompactor):
-            raise TypeError("summary_compactor must be ConversationSummaryCompactor")
-        if not isinstance(
-            self.summary_vector_index,
-            PersistentConversationSummaryVectorIndex,
-        ):
-            raise TypeError("summary_vector_index must be PersistentConversationSummaryVectorIndex")
-        if not isinstance(self.summary_use, SQLiteConversationSummaryUseStore):
-            raise TypeError("summary_use must be SQLiteConversationSummaryUseStore")
-        if not isinstance(self.summary_expander, ConversationSummaryExpander):
-            raise TypeError("summary_expander must be ConversationSummaryExpander")
         if self.summaries.store.layout.root != self.journal.layout.root:
             raise ValueError("conversation journal and summaries must share one root")
         if self.summary_compactor.journal is not self.journal:
@@ -284,22 +213,8 @@ class RuntimeMemory:
     browser: MemoryBrowser
 
     def __post_init__(self) -> None:
-        if not isinstance(self.tree, MemoryTree):
-            raise TypeError("tree must be MemoryTree")
-        if not isinstance(self.browser, MemoryBrowser):
-            raise TypeError("browser must be MemoryBrowser")
         if self.browser.tree is not self.tree:
             raise ValueError("memory browser must use the shared memory tree")
-        if not isinstance(self.search, SearchService):
-            raise TypeError("search must be SearchService")
-        if not isinstance(self.editor, MemoryEditor):
-            raise TypeError("editor must be MemoryEditor")
-        if not isinstance(self.semantic_refresher, MemorySemanticRefresher):
-            raise TypeError("semantic_refresher must be MemorySemanticRefresher")
-        if not isinstance(self.vector_index, PersistentMemoryVectorIndex):
-            raise TypeError("vector_index must be PersistentMemoryVectorIndex")
-        if not isinstance(self.lifecycle, MemoryLifecycleManager):
-            raise TypeError("lifecycle must be MemoryLifecycleManager")
         if self.search.tree is not self.tree:
             raise ValueError("memory search must use the shared memory tree")
         if self.editor.transaction.tree is not self.tree:
@@ -330,22 +245,6 @@ class RuntimeWorkflow:
     lifecycle_worker: LifecycleWorker
 
     def __post_init__(self) -> None:
-        if not isinstance(self.jobs, MemoryJobStore):
-            raise TypeError("jobs must be MemoryJobStore")
-        if not isinstance(self.receipts, MemoryChangeReceiptStore):
-            raise TypeError("receipts must be MemoryChangeReceiptStore")
-        if not isinstance(self.enqueuer, ConversationMemoryEnqueuer):
-            raise TypeError("enqueuer must be ConversationMemoryEnqueuer")
-        if not isinstance(self.conversation_consumer, MemoryConversationConsumer):
-            raise TypeError("conversation_consumer must be MemoryConversationConsumer")
-        if not isinstance(self.lifecycle, ConversationLifecycleManager):
-            raise TypeError("lifecycle must be ConversationLifecycleManager")
-        if not isinstance(self.runner, MemoryJobRunner):
-            raise TypeError("runner must be MemoryJobRunner")
-        if not isinstance(self.worker, MemoryWorker):
-            raise TypeError("worker must be MemoryWorker")
-        if not isinstance(self.lifecycle_worker, LifecycleWorker):
-            raise TypeError("lifecycle_worker must be LifecycleWorker")
         if self.enqueuer.jobs is not self.jobs or self.runner.store is not self.jobs:
             raise ValueError("memory workflow must share one job store")
         if self.conversation_consumer.enqueuer is not self.enqueuer:
@@ -386,29 +285,13 @@ class RuntimeComponents:
     foresight: ForesightRuntimeComponents | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.infrastructure, RuntimeInfrastructure):
-            raise TypeError("infrastructure must be RuntimeInfrastructure")
-        if not isinstance(self.models, RuntimeModels):
-            raise TypeError("models must be RuntimeModels")
-        if not isinstance(self.conversation, RuntimeConversation):
-            raise TypeError("conversation must be RuntimeConversation")
-        if not isinstance(self.memory, RuntimeMemory):
-            raise TypeError("memory must be RuntimeMemory")
-        if not isinstance(self.workflow, RuntimeWorkflow):
-            raise TypeError("workflow must be RuntimeWorkflow")
-        if self.behavior is not None and not isinstance(self.behavior, BehaviorBranches):
-            raise TypeError("behavior must be BehaviorBranches or None")
         if self.nightly is not None:
-            if not isinstance(self.nightly, NightlyWorker):
-                raise TypeError("nightly must be a NightlyWorker or None")
             if self.behavior is None:
                 raise ValueError("the nightly run reads the behaviour tree; behaviour must be enabled")
             # 实例同一性：整晚那一趟必须读**这个** Runtime 写入的会话那一支行为树——不是另开一个同路径的实例。
             if getattr(self.nightly.nightly, "behavior_tree", None) is not self.behavior.session.tree:
                 raise ValueError("the nightly run must read the session behaviour tree")
         if self.foresight is not None:
-            if not isinstance(self.foresight, ForesightRuntimeComponents):
-                raise TypeError("foresight must be ForesightRuntimeComponents or None")
             if self.behavior is None or self.nightly is None:
                 raise ValueError(
                     "foresight reads the semantic layer's nightly run; behaviour and the nightly run must be enabled"

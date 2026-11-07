@@ -21,10 +21,6 @@ class MemoryRelationshipEditor:
         resolver: MemoryRelationResolver | None = None,
         planner: MemoryRelationPlanner | None = None,
     ) -> None:
-        if resolver is not None and not isinstance(resolver, MemoryRelationResolver):
-            raise TypeError("resolver must be a MemoryRelationResolver")
-        if planner is not None and not isinstance(planner, MemoryRelationPlanner):
-            raise TypeError("planner must be a MemoryRelationPlanner")
         self.resolver = resolver or MemoryRelationResolver()
         self.planner = planner or MemoryRelationPlanner()
 

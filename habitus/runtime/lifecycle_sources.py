@@ -30,9 +30,7 @@ class ConversationSourceParticipant:
     name = "conversation-sources"
 
     def __init__(self, releaser: ConversationSourceReleaser, *, batch_addresses: int) -> None:
-        if not isinstance(releaser, ConversationSourceReleaser):
-            raise TypeError("releaser must be ConversationSourceReleaser")
-        if isinstance(batch_addresses, bool) or not isinstance(batch_addresses, int) or batch_addresses <= 0:
+        if batch_addresses <= 0:
             raise ValueError("batch_addresses must be a positive integer")
         self.releaser = releaser
         self.batch_addresses = batch_addresses
@@ -103,10 +101,6 @@ class ConversationSourceRecoveryParticipant:
         *,
         wake_memory: Callable[[], None],
     ) -> None:
-        if not isinstance(recovery, ConversationSourceRecovery):
-            raise TypeError("recovery must be ConversationSourceRecovery")
-        if not isinstance(coordinator, ConversationSourceCoordinator):
-            raise TypeError("coordinator must be ConversationSourceCoordinator")
         if coordinator.delivery is not recovery.delivery:
             raise ValueError("source recovery and coordinator must share the delivery")
         self.recovery = recovery

@@ -58,7 +58,7 @@ class MemoryWorkflowLifecycleConfig:
             ),
             ("cleanup_batch_size", self.cleanup_batch_size, 1, 10_000),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            if not minimum <= value <= maximum:
                 raise ValueError(f"workflow lifecycle {name} must be between {minimum} and {maximum}")
         if self.committed_receipt_retention_days < self.committed_job_retention_days:
             raise ValueError("committed receipt retention cannot be shorter than committed job retention")
@@ -79,10 +79,6 @@ class ConversationLifecycleMaintenanceResult:
     deleted_memory_receipt_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.compaction, ConversationSummaryCompactionResult):
-            raise TypeError("compaction must be ConversationSummaryCompactionResult")
-        if not isinstance(self.summary_indexed, bool):
-            raise TypeError("summary_indexed must be boolean")
         for name in (
             "purged_history_segment_ids",
             "released_history_segment_ids",
@@ -92,12 +88,9 @@ class ConversationLifecycleMaintenanceResult:
             "deleted_memory_receipt_ids",
         ):
             values = getattr(self, name)
-            if not isinstance(values, tuple) or any(not isinstance(value, str) or not value for value in values):
+            if any(not value for value in values):
                 raise TypeError(f"{name} must contain non-empty identifiers")
-        if not isinstance(self.deleted_memory_job_sequences, tuple) or any(
-            isinstance(value, bool) or not isinstance(value, int) or value <= 0
-            for value in self.deleted_memory_job_sequences
-        ):
+        if any(value <= 0 for value in self.deleted_memory_job_sequences):
             raise TypeError("deleted_memory_job_sequences must contain positive integers")
 
 
@@ -119,34 +112,6 @@ class ConversationLifecycleManager:
         summary_config: ConversationSummaryCompactionConfig | None = None,
         workflow_config: MemoryWorkflowLifecycleConfig | None = None,
     ) -> None:
-        if not isinstance(compactor, ConversationSummaryCompactor):
-            raise TypeError("compactor must be ConversationSummaryCompactor")
-        if not isinstance(journal, ConversationMessageJournal):
-            raise TypeError("journal must be ConversationMessageJournal")
-        if not isinstance(segment_store, ConversationSummaryStore):
-            raise TypeError("segment_store must be ConversationSummaryStore")
-        if not isinstance(range_store, ConversationRangeSummaryStore):
-            raise TypeError("range_store must be ConversationRangeSummaryStore")
-        if not isinstance(summary_vector_index, PersistentConversationSummaryVectorIndex):
-            raise TypeError("summary_vector_index must be PersistentConversationSummaryVectorIndex")
-        if not isinstance(jobs, MemoryJobStore):
-            raise TypeError("jobs must be MemoryJobStore")
-        if not isinstance(receipts, MemoryChangeReceiptStore):
-            raise TypeError("receipts must be MemoryChangeReceiptStore")
-        if not isinstance(transaction_journal, MemoryTransactionJournal):
-            raise TypeError("transaction_journal must be MemoryTransactionJournal")
-        if not isinstance(retirement_store, ConversationSummaryRetirementStore):
-            raise TypeError("retirement_store must be ConversationSummaryRetirementStore")
-        if summary_config is not None and not isinstance(
-            summary_config,
-            ConversationSummaryCompactionConfig,
-        ):
-            raise TypeError("summary_config must be ConversationSummaryCompactionConfig")
-        if workflow_config is not None and not isinstance(
-            workflow_config,
-            MemoryWorkflowLifecycleConfig,
-        ):
-            raise TypeError("workflow_config must be MemoryWorkflowLifecycleConfig")
         if not (
             compactor.journal is journal
             and compactor.segment_store is segment_store
@@ -182,8 +147,6 @@ class ConversationLifecycleManager:
     ) -> ConversationLifecycleMaintenanceResult:
         """每次至多生成一个父摘要；普通阶段不做不可逆来源清理。"""
 
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("address must be ConversationAddress")
         current_time = _utc_datetime(now or datetime.now(UTC))
         pending_retirement = self.retirement_store.for_address(address)
         if len(pending_retirement) > 1:
@@ -542,8 +505,6 @@ class ConversationLifecycleManager:
 
 
 def _utc_datetime(value: datetime) -> datetime:
-    if not isinstance(value, datetime):
-        raise TypeError("lifecycle now must be datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("lifecycle now must be timezone-aware")
     return value.astimezone(UTC)

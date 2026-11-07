@@ -38,10 +38,6 @@ class KindMigrator:
         *,
         write_config: BehaviorWriteConfig | None = None,
     ) -> None:
-        if not isinstance(tree, BehaviorTree):
-            raise TypeError("tree must be BehaviorTree")
-        if not isinstance(store, BehaviorKindStore):
-            raise TypeError("store must be BehaviorKindStore")
         self.tree = tree
         self.lock_store = lock_store
         self.store = store

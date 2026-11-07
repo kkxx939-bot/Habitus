@@ -22,7 +22,6 @@ from collections.abc import Awaitable, Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, tzinfo
-from typing import Any
 
 from habitus.behavior.document import BehaviorDocumentConfig
 from habitus.behavior.fusion import BehaviorFusionReceiptStore, BehaviorJudgementStore
@@ -115,20 +114,8 @@ class BehaviorRuntimeComponents:
     def __post_init__(self) -> None:
         object.__setattr__(self, "lane", Lane(self.lane))
         front_end = SessionLane if self.lane is Lane.SESSION else PhysicalLane
-        expected = (
-            ("observations", self.observations, BehaviorObservationStore),
-            ("judgements", self.judgements, BehaviorJudgementStore),
-            ("receipts", self.receipts, BehaviorFusionReceiptStore),
-            ("coverage", self.coverage, BehaviorCoverageIndex),
-            ("tree", self.tree, BehaviorTree),
-            ("kind_store", self.kind_store, BehaviorKindStore),
-            ("reduction_runner", self.reduction_runner, BehaviorReductionRunner),
-            ("fusion", self.fusion, front_end),
-            ("reduction_worker", self.reduction_worker, BehaviorReductionWorker),
-        )
-        for name, value, expected_type in expected:
-            if not isinstance(value, expected_type):
-                raise TypeError(f"behavior components {name} must be {expected_type.__name__}")
+        if not isinstance(self.fusion, front_end):
+            raise TypeError(f"behavior components fusion must be {front_end.__name__}")
         shared = (
             (self.reduction_runner.judgements, self.judgements, "reduction judgements"),
             (self.reduction_runner.observations, self.observations, "reduction observations"),
@@ -162,8 +149,6 @@ class BehaviorRuntimeComponents:
             ("tree", self.tree.root.parent),
         )
         if self.retry_backlog is not None:
-            if not isinstance(self.retry_backlog, RetryBacklogStore):
-                raise TypeError("behavior components retry_backlog must be RetryBacklogStore")
             if self.retry_backlog.root != root:
                 raise ValueError(f"behavior branch {self.lane.value} keeps its retry backlog outside its own root")
             fronts = [self.reduction_runner.failed_chains.backlog]
@@ -200,7 +185,7 @@ class BehaviorBranches:
     def __post_init__(self) -> None:
         for name, lane in (("session", Lane.SESSION), ("physical", Lane.PHYSICAL)):
             branch = getattr(self, name)
-            if not isinstance(branch, BehaviorRuntimeComponents) or branch.lane is not lane:
+            if branch.lane is not lane:
                 raise TypeError(f"behavior branch {name} must be the {lane.value} lane's components")
         apart = (
             ("observations", self.session.observations.root, self.physical.observations.root),
@@ -317,7 +302,7 @@ def behavior_domain_configs(behavior: BehaviorConfig) -> BehaviorDomainConfigs:
     ``build_runtime`` 不论行为侧开没开都先调一次：写错的值在启动时拒，不因为这一侧没开就被静默收下。
     """
 
-    def domain(factory: Callable[..., Any], prefix: str) -> Any:
+    def domain[T](factory: Callable[..., T], prefix: str) -> T:
         return construct_overrides(factory, behavior.overrides_for(prefix), path="config.behavior", prefix=prefix)
 
     return BehaviorDomainConfigs(

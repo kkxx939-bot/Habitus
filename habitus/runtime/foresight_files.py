@@ -41,7 +41,7 @@ class JsonFiles:
 
     def __init__(self, root: str | Path, *, label: str, max_bytes: int, max_entries: int, max_unreadable: int) -> None:
         for name, value in (("max_bytes", max_bytes), ("max_entries", max_entries), ("max_unreadable", max_unreadable)):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            if value < 1:
                 raise ForesightError(f"{label} {name} must be a positive integer")
         self.root = Path(root).expanduser().resolve(strict=False)
         self.label = label

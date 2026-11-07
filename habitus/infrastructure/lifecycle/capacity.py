@@ -12,6 +12,7 @@ from pathlib import Path
 
 from habitus.foundation.ids import require_safe_path_segment
 from habitus.foundation.integrity import canonical_json
+from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.filesystem import (
     atomic_replace_bytes,
     list_real_directory,
@@ -32,13 +33,11 @@ class CapacityReading:
     limit: int | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name:
+        if not self.name:
             raise ValueError("capacity reading name must be non-empty text")
-        if isinstance(self.count, bool) or not isinstance(self.count, int) or self.count < 0:
+        if self.count < 0:
             raise ValueError("capacity count must be a non-negative integer")
-        if self.limit is not None and (
-            isinstance(self.limit, bool) or not isinstance(self.limit, int) or self.limit <= 0
-        ):
+        if self.limit is not None and self.limit <= 0:
             raise ValueError("capacity limit must be a positive integer")
 
     @property
@@ -56,7 +55,7 @@ class CapacitySnapshot:
 
     def __post_init__(self) -> None:
         require_safe_path_segment(self.participant, "participant")
-        if not isinstance(self.at, datetime) or self.at.utcoffset() is None:
+        if self.at.utcoffset() is None:
             raise ValueError("snapshot time must be timezone-aware")
         names = [reading.name for reading in self.readings]
         if len(names) != len(set(names)):
@@ -99,10 +98,17 @@ def _decode(payload: dict[str, object]) -> CapacitySnapshot:
     return CapacitySnapshot(
         participant=str(payload["participant"]),
         at=datetime.fromisoformat(str(payload["at"])),
-        readings=tuple(
-            CapacityReading(name=str(item["name"]), count=item["count"], limit=item["limit"]) for item in readings
-        ),
+        readings=tuple(_decode_reading(item) for item in readings),
     )
+
+
+def _decode_reading(item: dict[str, object]) -> CapacityReading:
+    count, limit = item["count"], item["limit"]
+    if not is_int(count):
+        raise ValueError("capacity count must be a non-negative integer")
+    if limit is not None and not is_int(limit):
+        raise ValueError("capacity limit must be a positive integer")
+    return CapacityReading(name=str(item["name"]), count=count, limit=limit)
 
 
 __all__ = ["CapacityReading", "CapacitySnapshot", "CapacitySnapshotStore"]

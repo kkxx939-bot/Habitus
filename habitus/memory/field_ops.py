@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from habitus.foundation.validation import is_str_list
+
 
 class SemanticFieldOperationError(ValueError):
     """字段压缩操作不能在无损保护边界内应用。"""
@@ -28,18 +30,16 @@ class SemanticFieldOperation:
     items: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.field, str) or not self.field or self.field != self.field.strip():
+        if not self.field or self.field != self.field.strip():
             raise SemanticFieldOperationError("semantic field operation requires a normalized field name")
         try:
             operation = SemanticFieldOperationKind(self.operation)
         except ValueError as exc:
             raise SemanticFieldOperationError("semantic field operation kind is unsupported") from exc
         object.__setattr__(self, "operation", operation)
-        if self.content is not None and (not isinstance(self.content, str) or not self.content.strip()):
+        if self.content is not None and not self.content.strip():
             raise SemanticFieldOperationError("semantic field update content must be non-empty text")
-        if not isinstance(self.items, tuple) or any(
-            not isinstance(item, str) or not item.strip() for item in self.items
-        ):
+        if any(not item.strip() for item in self.items):
             raise SemanticFieldOperationError("semantic field append items must contain non-empty text")
         normalized_items = tuple(item.strip() for item in self.items)
         if len(normalized_items) != len(set(normalized_items)):
@@ -74,10 +74,6 @@ class SemanticFieldOperationBatch:
     operations: tuple[SemanticFieldOperation, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.operations, tuple) or any(
-            not isinstance(item, SemanticFieldOperation) for item in self.operations
-        ):
-            raise TypeError("semantic field operations must contain SemanticFieldOperation values")
         if not 1 <= len(self.operations) <= 128:
             raise SemanticFieldOperationError("semantic field operation batch must contain between 1 and 128 items")
         fields = tuple(item.field for item in self.operations)
@@ -168,13 +164,13 @@ class SemanticFieldOperationBatch:
             raw_items = raw.get("items", ())
             if not isinstance(raw_items, list | tuple):
                 raise SemanticFieldOperationError("semantic field append items must be an array")
+            if not is_str_list(raw_items):
+                raise SemanticFieldOperationError("semantic field append items must contain non-empty text")
+            content = raw.get("content")
+            if content is not None and not isinstance(content, str):
+                raise SemanticFieldOperationError("semantic field update content must be non-empty text")
             operations.append(
-                SemanticFieldOperation(
-                    field=raw_field,
-                    operation=operation,
-                    content=raw.get("content"),
-                    items=tuple(raw_items),
-                )
+                SemanticFieldOperation(field=raw_field, operation=operation, content=content, items=tuple(raw_items))
             )
         return cls(tuple(operations))
 
@@ -190,14 +186,11 @@ class SemanticFieldMergePolicy:
     max_chars: int = 1_000_000
 
     def __post_init__(self) -> None:
-        if not isinstance(self.field, str) or not self.field or self.field != self.field.strip():
+        if not self.field or self.field != self.field.strip():
             raise SemanticFieldOperationError("semantic field policy requires a normalized field name")
-        for name in ("allow_update", "allow_append", "append_only"):
-            if not isinstance(getattr(self, name), bool):
-                raise TypeError(f"semantic field policy {name} must be boolean")
         if self.append_only and not self.allow_append:
             raise SemanticFieldOperationError("append-only semantic field must allow APPEND")
-        if isinstance(self.max_chars, bool) or not isinstance(self.max_chars, int) or self.max_chars <= 0:
+        if self.max_chars <= 0:
             raise ValueError("semantic field policy max_chars must be a positive integer")
 
 
@@ -208,12 +201,6 @@ def merge_semantic_fields(
 ) -> dict[str, Any]:
     """由服务端应用字段操作；缺失字段等同 KEEP，未知字段明确拒绝。"""
 
-    if not isinstance(source, Mapping) or any(not isinstance(name, str) for name in source):
-        raise TypeError("semantic field source must be a mapping with string keys")
-    if not isinstance(operations, SemanticFieldOperationBatch):
-        raise TypeError("operations must be a SemanticFieldOperationBatch")
-    if not isinstance(policies, tuple) or any(not isinstance(policy, SemanticFieldMergePolicy) for policy in policies):
-        raise TypeError("policies must contain SemanticFieldMergePolicy values")
     policy_by_field = {policy.field: policy for policy in policies}
     if len(policy_by_field) != len(policies):
         raise SemanticFieldOperationError("semantic field policies cannot repeat one field")

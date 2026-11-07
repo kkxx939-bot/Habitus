@@ -24,7 +24,7 @@ class Ranked[T]:
     rank: int
 
     def __post_init__(self) -> None:
-        if isinstance(self.rank, bool) or not isinstance(self.rank, int) or self.rank < 0:
+        if self.rank < 0:
             raise ValueError("rank must be a non-negative integer")
 
 
@@ -37,7 +37,7 @@ def rank_by[T](items: Iterable[T], *, key: Callable[[T], SupportsRichComparison]
 def decay(rank_gap: int, *, half_life: float) -> float:
     """名次差为 ``rank_gap`` 的那一笔还剩多少分量：0.5^(rank_gap / half_life)。"""
 
-    if isinstance(rank_gap, bool) or not isinstance(rank_gap, int) or rank_gap < 0:
+    if rank_gap < 0:
         raise ValueError("rank_gap must be a non-negative integer")
     require_half_life(half_life)
     return 0.5 ** (rank_gap / half_life)

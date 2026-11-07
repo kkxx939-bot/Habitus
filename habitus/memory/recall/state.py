@@ -51,8 +51,6 @@ class MemoryRecallLifecycleConfig:
     max_useful_recall_count: int = 1_000_000_000
 
     def __post_init__(self) -> None:
-        if not isinstance(self.enabled, bool):
-            raise TypeError("memory recall lifecycle enabled must be boolean")
         numeric = (
             "ranking_alpha",
             "cold2_threshold",
@@ -76,8 +74,6 @@ class MemoryRecallLifecycleConfig:
         )
         for name in numeric:
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int | float):
-                raise TypeError(f"memory recall lifecycle {name} must be numeric")
             number = float(value)
             if not math.isfinite(number):
                 raise ValueError(f"memory recall lifecycle {name} must be finite")
@@ -118,19 +114,11 @@ class MemoryRecallLifecycleConfig:
             ("max_useful_recall_count", 1, 2**63 - 1),
         ):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            if not minimum <= value <= maximum:
                 raise ValueError(f"memory recall lifecycle {name} is outside its supported range")
-        if (
-            isinstance(self.cold2_probe_limit, bool)
-            or not isinstance(self.cold2_probe_limit, int)
-            or not 1 <= self.cold2_probe_limit <= self.max_useful_recall_count
-        ):
+        if not 1 <= self.cold2_probe_limit <= self.max_useful_recall_count:
             raise ValueError("memory recall lifecycle probe observation cap is invalid")
-        if (
-            isinstance(self.max_cold2_probes_per_search, bool)
-            or not isinstance(self.max_cold2_probes_per_search, int)
-            or self.max_cold2_probes_per_search != 1
-        ):
+        if self.max_cold2_probes_per_search != 1:
             raise ValueError("memory recall lifecycle permits at most one COLD_2 probe per search")
 
     def half_life_days(self, kind: MemoryKind) -> float:
@@ -175,7 +163,7 @@ class MemoryRecallState:
         object.__setattr__(self, "uri", _document_uri(self.uri))
         for name in ("document_revision", "useful_recall_count", "cold2_probe_count", "version"):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if value < 0:
                 raise ValueError(f"memory recall state {name} must be non-negative")
         if self.document_revision <= 0:
             raise ValueError("memory recall state document_revision must be positive")
@@ -245,11 +233,7 @@ class MemoryRecallTarget:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "uri", _document_uri(self.uri))
-        if (
-            isinstance(self.document_revision, bool)
-            or not isinstance(self.document_revision, int)
-            or self.document_revision <= 0
-        ):
+        if self.document_revision <= 0:
             raise ValueError("memory recall target document_revision must be positive")
         object.__setattr__(
             self,
@@ -266,8 +250,6 @@ class MemoryRecallCandidate:
     semantic_score: float
 
     def __post_init__(self) -> None:
-        if not isinstance(self.target, MemoryRecallTarget):
-            raise TypeError("memory recall candidate target must be MemoryRecallTarget")
         kind = MemoryKind(self.kind)
         if self.target.uri.to_address().kind is not kind:
             raise ValueError("memory recall candidate kind does not match its URI")
@@ -291,10 +273,6 @@ class MemoryRecallRanking:
     final_score: float
 
     def __post_init__(self) -> None:
-        if not isinstance(self.candidate, MemoryRecallCandidate):
-            raise TypeError("memory recall ranking candidate is invalid")
-        if not isinstance(self.state, MemoryRecallState):
-            raise TypeError("memory recall ranking state is invalid")
         if self.candidate.uri != self.state.uri:
             raise ValueError("memory recall ranking identity does not match")
         if (self.hotness is None) != (self.temperature is None):
@@ -362,12 +340,8 @@ def memory_hotness(
     now: datetime,
     half_life_days: float,
 ) -> float:
-    if not isinstance(state, MemoryRecallState):
-        raise TypeError("memory hotness state must be MemoryRecallState")
     content_time = _utc_timestamp(updated_at, "updated_at")
     current = _utc_timestamp(now, "now")
-    if isinstance(half_life_days, bool) or not isinstance(half_life_days, int | float):
-        raise TypeError("memory hotness half_life_days must be numeric")
     half_life = float(half_life_days)
     if not math.isfinite(half_life) or half_life <= 0.0:
         raise ValueError("memory hotness half_life_days must be positive and finite")
@@ -383,8 +357,6 @@ def memory_activity_at(state: MemoryRecallState, *, updated_at: datetime) -> dat
     记进 ``lifecycle_activity_at``，此处以它为准，所以冷热与退休时钟都不因压缩而重置。
     """
 
-    if not isinstance(state, MemoryRecallState):
-        raise TypeError("memory activity state must be MemoryRecallState")
     activity_at = state.lifecycle_activity_at or _utc_timestamp(updated_at, "updated_at")
     if state.last_useful_recall_at is not None:
         activity_at = max(activity_at, state.last_useful_recall_at)
@@ -437,20 +409,6 @@ class MemoryRecallLifecycle:
         *,
         config: MemoryRecallLifecycleConfig | None = None,
     ) -> None:
-        required = (
-            "initialize",
-            "read_many",
-            "record_use",
-            "record_probe",
-            "mark_compacted",
-            "mark_retire_candidate",
-            "mark_retired",
-            "delete_many",
-        )
-        if any(not callable(getattr(store, name, None)) for name in required):
-            raise TypeError("memory recall lifecycle store does not implement the required contract")
-        if config is not None and not isinstance(config, MemoryRecallLifecycleConfig):
-            raise TypeError("config must be MemoryRecallLifecycleConfig")
         self.store = store
         self.config = config or MemoryRecallLifecycleConfig()
 
@@ -542,7 +500,7 @@ class MemoryRecallLifecycle:
         limit: int,
         now: datetime,
     ) -> tuple[MemoryRecallRanking, ...]:
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        if limit <= 0:
             raise ValueError("memory recall lifecycle selection limit must be positive")
         current = _utc_timestamp(now, "now")
         ranked = self.rank(candidates, now=current)
@@ -592,8 +550,6 @@ class MemoryRecallLifecycle:
         compacted_at: datetime,
         expected_version: int,
     ) -> MemoryRecallState:
-        if not isinstance(target, MemoryRecallTarget):
-            raise TypeError("target must be MemoryRecallTarget")
         if not self.config.enabled:
             return MemoryRecallState.initial(target.uri, target.document_revision, target.document_created_at)
         return self.store.mark_compacted(
@@ -610,8 +566,6 @@ class MemoryRecallLifecycle:
         retired_at: datetime,
         expected_version: int,
     ) -> MemoryRecallState:
-        if not isinstance(target, MemoryRecallTarget):
-            raise TypeError("target must be MemoryRecallTarget")
         return self.store.mark_retired(
             target,
             retired_at=_utc_timestamp(retired_at, "retired_at"),
@@ -625,8 +579,6 @@ class MemoryRecallLifecycle:
         marked_at: datetime,
         expected_version: int,
     ) -> MemoryRecallState:
-        if not isinstance(target, MemoryRecallTarget):
-            raise TypeError("target must be MemoryRecallTarget")
         return self.store.mark_retire_candidate(
             target,
             marked_at=_utc_timestamp(marked_at, "marked_at"),
@@ -639,8 +591,6 @@ class MemoryRecallLifecycle:
         *,
         now: datetime,
     ) -> bool:
-        if not isinstance(ranking, MemoryRecallRanking):
-            raise TypeError("ranking must be MemoryRecallRanking")
         current = _utc_timestamp(now, "now")
         state = ranking.state
         if ranking.temperature is not MemoryTemperature.COLD_2 or state.retired_at is not None:
@@ -654,8 +604,6 @@ class MemoryRecallLifecycle:
         *,
         now: datetime,
     ) -> bool:
-        if not isinstance(state, MemoryRecallState):
-            raise TypeError("state must be MemoryRecallState")
         current = _utc_timestamp(now, "now")
         return state.retire_candidate_at is not None and current - state.retire_candidate_at >= timedelta(
             days=self.config.retire_candidate_grace_days
@@ -676,8 +624,6 @@ class MemoryRecallLifecycle:
         self,
         values: tuple[MemoryRecallCandidate, ...],
     ) -> tuple[MemoryRecallCandidate, ...]:
-        if not isinstance(values, tuple) or any(not isinstance(value, MemoryRecallCandidate) for value in values):
-            raise TypeError("memory recall lifecycle candidates must be a tuple")
         if len(values) > self.config.max_batch_size:
             raise ValueError("memory recall lifecycle candidates exceed max_batch_size")
         if len({value.uri for value in values}) != len(values):
@@ -688,8 +634,6 @@ class MemoryRecallLifecycle:
         self,
         values: tuple[MemoryRecallTarget, ...],
     ) -> tuple[MemoryRecallTarget, ...]:
-        if not isinstance(values, tuple) or any(not isinstance(value, MemoryRecallTarget) for value in values):
-            raise TypeError("memory recall lifecycle targets must be a tuple")
         if len(values) > self.config.max_batch_size:
             raise ValueError("memory recall lifecycle targets exceed max_batch_size")
         by_uri: dict[MemoryURI, MemoryRecallTarget] = {}
@@ -713,8 +657,6 @@ def _document_uris(
     *,
     maximum: int,
 ) -> tuple[MemoryURI, ...]:
-    if not isinstance(values, tuple):
-        raise TypeError("memory recall lifecycle URIs must be a tuple")
     if len(values) > maximum:
         raise ValueError("memory recall lifecycle URIs exceed max_batch_size")
     parsed = tuple(_document_uri(value) for value in values)
@@ -724,8 +666,6 @@ def _document_uris(
 
 
 def _utc_timestamp(value: datetime, label: str) -> datetime:
-    if not isinstance(value, datetime):
-        raise TypeError(f"memory recall lifecycle {label} must be datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"memory recall lifecycle {label} must include a timezone")
     return value.astimezone(UTC)

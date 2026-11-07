@@ -174,3 +174,12 @@ def test_blank_credential_ref_survives_interactive_setup(monkeypatch: pytest.Mon
     monkeypatch.setattr(builtins, "input", lambda _prompt: "")
 
     assert cli._prompt_setup_field(credential_ref, "") == ""
+
+
+@pytest.mark.parametrize("dimension", [True, "1024", 1024.0, 0])
+def test_setup_values_reject_a_dimension_that_is_not_a_positive_integer(dimension: object) -> None:
+    """向导或已有配置交来的 dimension 是 bool、文本、浮点或 0 时，物化前就拒（W16：判定收进公共函数后行为不变）。"""
+
+    profile = build_builtin_setup_registry().profile("embedding", "embedding.openai_compatible.custom")
+    with pytest.raises(ValueError, match="setup field must be a positive integer: dimension"):
+        profile.materialize({"dimension": dimension}, field_keys=frozenset({"dimension"}))

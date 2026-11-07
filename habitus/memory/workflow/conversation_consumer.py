@@ -54,8 +54,6 @@ class MemoryConversationConsumer:
     ) -> None:
         if enqueuer.conversations is not journal:
             raise ValueError("Memory Conversation Consumer must share the enqueuer journal")
-        if not isinstance(output_store, MemoryConversationOutputStore):
-            raise TypeError("output_store must be MemoryConversationOutputStore")
         self.enqueuer = enqueuer
         self.journal = journal
         self.boundary_scorer = boundary_scorer
@@ -85,8 +83,6 @@ class MemoryConversationConsumer:
         envelope: ConversationSourceEnvelope,
         lease: ConversationConsumerExecutionLease,
     ) -> ConversationConsumerRunResult:
-        if not isinstance(envelope, ConversationSourceEnvelope):
-            raise TypeError("envelope must be ConversationSourceEnvelope")
         address = ConversationAddress(envelope.conversation_id, envelope.started_on)
         ingress = ConversationIngressRequest(envelope.delivery_id, envelope.request_digest)
         try:

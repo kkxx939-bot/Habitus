@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from habitus.memory.editor import (
-    MemoryEditor,
     MemoryExtractionConfig,
     MemoryExtractionError,
     MemoryExtractionLoop,
@@ -301,52 +300,6 @@ def test_search_failure_still_fails_instead_of_ending_at_limit(
     with pytest.raises(MemoryExtractionError, match=message):
         asyncio.run(loop.extract(segment()))
     assert responses == [ended_insufficient(), empty_candidates()]
-
-
-@pytest.mark.parametrize(
-    ("field", "value", "message"),
-    [
-        ("client", object(), "client"),
-        ("retriever", object(), "retriever"),
-        ("config", object(), "config"),
-        ("mutation_reader", object(), "mutation_reader"),
-        ("mutation_planner", object(), "mutation_planner"),
-    ],
-)
-def test_loop_rejects_each_invalid_collaborator(
-    tmp_path: Path,
-    field: str,
-    value: object,
-    message: str,
-) -> None:
-    current = extraction_loop(tmp_path, [])
-    values = {
-        "client": current.client,
-        "retriever": current.retriever,
-        "zone": current.zone,
-        "config": current.config,
-        "mutation_reader": current.mutation_reader,
-        "mutation_planner": current.mutation_planner,
-        field: value,
-    }
-    with pytest.raises(TypeError, match=message):
-        MemoryExtractionLoop(**values)
-
-
-def test_identity_planner_is_owned_and_validated_by_memory_editor(tmp_path: Path) -> None:
-    with pytest.raises(TypeError, match="identity_planner"):
-        MemoryEditor(
-            extraction_loop=extraction_loop(tmp_path, []),
-            identity_planner=object(),  # type: ignore[arg-type]
-            transaction=object(),  # type: ignore[arg-type]
-        )
-
-
-@pytest.mark.parametrize("invalid", [None, object(), "segment", 1, True])
-def test_loop_requires_complete_conversation_segment(tmp_path: Path, invalid: object) -> None:
-    loop = extraction_loop(tmp_path, [])
-    with pytest.raises(TypeError, match="ConversationSegment"):
-        asyncio.run(loop.extract(invalid))  # type: ignore[arg-type]
 
 
 def test_loop_executes_one_search_then_finishes_with_auditable_observation(tmp_path: Path) -> None:

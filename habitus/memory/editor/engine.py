@@ -31,16 +31,6 @@ class MemoryEditorPlan:
     deferred: bool = False
 
     def __post_init__(self) -> None:
-        if self.extraction is not None and not isinstance(self.extraction, MemoryExtractionResult):
-            raise TypeError("extraction must be a MemoryExtractionResult or None")
-        if not isinstance(self.mutations, MemoryMutationPlan):
-            raise TypeError("mutations must be a MemoryMutationPlan")
-        if not isinstance(self.identities, MemoryFinalIdentityMap):
-            raise TypeError("identities must be a MemoryFinalIdentityMap")
-        if not isinstance(self.commit, MemoryCommitPlan):
-            raise TypeError("commit must be a MemoryCommitPlan")
-        if not isinstance(self.deferred, bool):
-            raise TypeError("deferred must be boolean")
         if self.deferred:
             if self.extraction is not None:
                 raise ValueError("deferred editor plan cannot contain an extraction result")
@@ -92,22 +82,6 @@ class MemoryEditor:
         relation_reader: MemoryRelationReadSetLoader | None = None,
         relationship_editor: MemoryRelationshipEditor | None = None,
     ) -> None:
-        if not isinstance(extraction_loop, MemoryExtractionLoop):
-            raise TypeError("extraction_loop must be a MemoryExtractionLoop")
-        if not isinstance(identity_planner, MemoryIdentityPlanner):
-            raise TypeError("identity_planner must be a MemoryIdentityPlanner")
-        if not isinstance(transaction, MemoryCommitTransaction):
-            raise TypeError("transaction must be a MemoryCommitTransaction")
-        if relation_reader is not None and not isinstance(
-            relation_reader,
-            MemoryRelationReadSetLoader,
-        ):
-            raise TypeError("relation_reader must be a MemoryRelationReadSetLoader")
-        if relationship_editor is not None and not isinstance(
-            relationship_editor,
-            MemoryRelationshipEditor,
-        ):
-            raise TypeError("relationship_editor must be a MemoryRelationshipEditor")
         self.extraction_loop = extraction_loop
         self.identity_planner = identity_planner
         self.transaction = transaction
@@ -127,8 +101,6 @@ class MemoryEditor:
     ) -> MemoryEditorPlan:
         """对不可变完整 Segment 形成不含落盘副作用的统一计划；一轮按段分开抽取时带上同轮上下文。"""
 
-        if not isinstance(segment, ConversationSegment):
-            raise TypeError("segment must be a ConversationSegment")
         extraction = await self.extraction_loop.extract(segment, turn_context=turn_context)
         mutations = extraction.mutations
         identities = self.identity_planner.plan(extraction)
@@ -183,8 +155,6 @@ class MemoryEditor:
     ) -> MemoryCommitResult:
         """发布已经完成语义提取和关系规划的统一计划。"""
 
-        if not isinstance(plan, MemoryEditorPlan):
-            raise TypeError("plan must be MemoryEditorPlan")
         return self.transaction.commit(
             plan.commit,
             transaction_id=transaction_id,
@@ -197,8 +167,6 @@ class MemoryEditor:
     ) -> SnapshotBatch[MemoryDocument]:
         snapshots: dict[str, VersionedSnapshot[MemoryDocument]] = {}
         for batch in batches:
-            if not isinstance(batch, SnapshotBatch):
-                raise TypeError("snapshot batch is invalid")
             for snapshot in batch.snapshots:
                 previous = snapshots.get(snapshot.identity)
                 if previous is not None and previous != snapshot:

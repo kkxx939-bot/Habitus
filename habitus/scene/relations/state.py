@@ -137,13 +137,10 @@ class LaneState:
     def __post_init__(self) -> None:
         if any(relation.status is Status.SPARSE for relation in self.relations):
             raise StateError("sparse relations are counted, not stored")
-        if isinstance(self.vocabulary, bool) or not isinstance(self.vocabulary, int) or self.vocabulary < 0:
+        if self.vocabulary < 0:
             raise StateError("a lane state's vocabulary version is a non-negative integer")
         object.__setattr__(self, "sparse", dict(sorted(self.sparse.items())))
-        if any(
-            not isinstance(name, str) or isinstance(version, bool) or not isinstance(version, int) or version < 1
-            for name, version in self.measure_versions.items()
-        ):
+        if any(version < 1 for version in self.measure_versions.values()):
             raise StateError("measure versions map segment names to positive integers")
         object.__setattr__(self, "measure_versions", dict(sorted(self.measure_versions.items())))
 

@@ -56,22 +56,10 @@ class MemoryJobCompletion:
     journal_cleaned: bool
 
     def __post_init__(self) -> None:
-        if not isinstance(self.job, MemoryJob):
-            raise TypeError("job must be MemoryJob")
         if self.job.status is not MemoryJobStatus.COMMITTED:
             raise ValueError("completed workflow result requires a COMMITTED MemoryJob")
-        if not isinstance(self.change_receipt, MemoryChangeReceipt):
-            raise TypeError("change_receipt must be MemoryChangeReceipt")
         if self.change_receipt.state is not MemoryChangeReceiptState.COMMITTED:
             raise ValueError("completed workflow result requires a COMMITTED receipt")
-        for name in (
-            "summary_generated",
-            "summary_indexed",
-            "vector_indexed",
-            "journal_cleaned",
-        ):
-            if not isinstance(getattr(self, name), bool):
-                raise TypeError(f"{name} must be boolean")
 
 
 class MemoryCommittedJobFinalizer:
@@ -91,24 +79,6 @@ class MemoryCommittedJobFinalizer:
         *,
         observer: Observer | None = None,
     ) -> None:
-        if not isinstance(store, MemoryJobStore):
-            raise TypeError("store must be MemoryJobStore")
-        if not isinstance(conversations, ConversationMessageJournal):
-            raise TypeError("conversations must be ConversationMessageJournal")
-        if not isinstance(summary_service, ConversationSummaryService):
-            raise TypeError("summary_service must be ConversationSummaryService")
-        if not isinstance(summary_vector_index, PersistentConversationSummaryVectorIndex):
-            raise TypeError("summary_vector_index must be PersistentConversationSummaryVectorIndex")
-        if not isinstance(change_receipts, MemoryChangeReceiptStore):
-            raise TypeError("change_receipts must be MemoryChangeReceiptStore")
-        if not isinstance(semantic_refresher, MemorySemanticRefresher):
-            raise TypeError("semantic_refresher must be MemorySemanticRefresher")
-        if not isinstance(vector_index, PersistentMemoryVectorIndex):
-            raise TypeError("vector_index must be PersistentMemoryVectorIndex")
-        if not isinstance(transaction_recovery, MemoryJobTransactionRecovery):
-            raise TypeError("transaction_recovery must be MemoryJobTransactionRecovery")
-        if not callable(getattr(recall_state_cleaner, "forget", None)):
-            raise TypeError("recall_state_cleaner must implement forget")
         if summary_service.store.layout.root != conversations.layout.root:
             raise ValueError("summary service and conversations must use one conversation root")
         if summary_vector_index.journal is not conversations:
@@ -143,17 +113,11 @@ class MemoryCommittedJobFinalizer:
     ) -> MemoryJobCompletion:
         """对已提交事务执行可幂等重放的后续步骤，并最后结束 Job。"""
 
-        if not isinstance(lease, MemoryJobLease):
-            raise TypeError("lease must be a MemoryJobLease")
         job = self.store.assert_current(lease)
-        if not isinstance(journal, MemoryTransactionJournalRecord):
-            raise TypeError("journal must be MemoryTransactionJournalRecord")
         if journal.state is not MemoryTransactionJournalState.COMMITTED:
             raise MemoryJobError("job finalization requires a COMMITTED transaction journal")
         if journal.transaction_id != job.transaction_id:
             raise MemoryJobError("transaction journal does not belong to the claimed MemoryJob")
-        if summary_generated is not None and not isinstance(summary_generated, bool):
-            raise TypeError("summary_generated must be boolean or None")
 
         address = ConversationAddress(job.conversation_id, job.started_on)
         segment = self.conversations.read_segment(address, job.segment_id)
@@ -237,8 +201,6 @@ class MemoryCommittedJobFinalizer:
         self,
         receipt: MemoryChangeReceipt,
     ) -> tuple[MemorySemanticRefreshResult, ...]:
-        if not isinstance(receipt, MemoryChangeReceipt):
-            raise TypeError("receipt must be MemoryChangeReceipt")
         if receipt.state is not MemoryChangeReceiptState.COMMITTED:
             raise MemoryJobError("semantic refresh requires a COMMITTED memory change receipt")
         addresses = tuple(uri.to_address() for uri in receipt.changed_uris)

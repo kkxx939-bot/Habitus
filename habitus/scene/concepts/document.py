@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from habitus.foundation.validation import is_int
 from habitus.scene.codec import SceneRecordError, decode_record, encode_record
 from habitus.scene.concepts.model import (
     ConceptDefinition,
@@ -22,7 +23,7 @@ from habitus.scene.concepts.model import (
     GradeMeasure,
     MechanicalRule,
 )
-from habitus.scene.concepts.situation import SituationBasis, SituationRule
+from habitus.scene.concepts.situation import SituationBasis, SituationError, SituationRule
 
 MARKER = "HABITUS_CONCEPT"
 RECORD_TYPE = "concept"
@@ -65,8 +66,6 @@ def _method_of(definition: ConceptDefinition) -> str:
 
 
 def encode(definition: ConceptDefinition) -> str:
-    if not isinstance(definition, ConceptDefinition):
-        raise TypeError("definition must be a ConceptDefinition")
     lines = [
         f"# {definition.label}",
         "",
@@ -129,14 +128,15 @@ def decode(text: str, *, expected_identity: str | None = None) -> ConceptDefinit
     if payload.get("record_type") != RECORD_TYPE:
         raise SceneRecordError("concept record has the wrong record_type")
     try:
+        lane, title = _optional_text(payload, "lane", "concept lane"), _optional_text(payload, "title", "concept title")
         definition = ConceptDefinition(
             name=_text(payload, "name"),
             definition=_text(payload, "definition"),
             role=ConceptRole(payload.get("role")),
             kind=None if payload.get("kind") is None else ConceptKind(payload.get("kind")),
             classes=tuple(str(item) for item in _list(payload, "classes")),
-            lane=payload.get("lane"),
-            title=payload.get("title"),
+            lane=lane,
+            title=title,
             retired=_flag(payload, "retired"),
             grades=tuple(_grade(item) for item in _list(payload, "grades")),
             rule=_rule(payload.get("rule")),
@@ -153,6 +153,13 @@ def decode(text: str, *, expected_identity: str | None = None) -> ConceptDefinit
     if encode(definition) != text:
         raise SceneRecordError("concept record body does not match its canonical rendering")
     return definition
+
+
+def _optional_text(payload: dict[str, Any], key: str, label: str) -> str | None:
+    value = payload.get(key)
+    if value is not None and not isinstance(value, str):
+        raise ConceptError(f"{label} must be text")
+    return value
 
 
 def _flag(payload: dict[str, Any], key: str) -> bool:
@@ -187,12 +194,7 @@ def _grade(item: object) -> ConceptGrade:
     if not isinstance(item, dict) or set(item) != {"name", "measure", "lower", "upper", "relative"}:
         raise SceneRecordError("concept grade must be an object with name, measure, lower, upper and relative")
     name, lower, upper, relative = item["name"], item["lower"], item["upper"], item["relative"]
-    if (
-        not isinstance(name, str)
-        or not isinstance(lower, int)
-        or not isinstance(upper, int)
-        or not isinstance(relative, bool)
-    ):
+    if not isinstance(name, str) or not is_int(lower) or not is_int(upper) or not isinstance(relative, bool):
         raise SceneRecordError("concept grade fields have the wrong types")
     return ConceptGrade(name=name, measure=GradeMeasure(item["measure"]), lower=lower, upper=upper, relative=relative)
 
@@ -222,20 +224,37 @@ def _situation(item: object) -> SituationRule | None:
     values = item.get("values", [])
     if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
         raise SceneRecordError("concept situation values must be a list of text")
-    return SituationRule(
-        basis=basis,
-        values=tuple(values),
-        value=item.get("value"),
-        concept=item.get("concept"),
-        grade=item.get("grade"),
-        days=item.get("days", 1),
-    )
+    value, concept, grade, days = item.get("value"), item.get("concept"), item.get("grade"), item.get("days", 1)
+    if value is not None and not isinstance(value, str):
+        raise SituationError(
+            f"{basis.value} needs a short non-empty value to match"
+            if basis.needs_value
+            else f"{basis.value} takes no value"
+        )
+    if concept is not None and not isinstance(concept, str):
+        raise SituationError(
+            f"{basis.value} names the concept it watches"
+            if basis.needs_concept
+            else f"{basis.value} watches no concept"
+        )
+    if grade is not None and not isinstance(grade, str):
+        raise SituationError(
+            "a situation grade filter must be non-empty text"
+            if basis.needs_concept
+            else f"{basis.value} watches no concept"
+        )
+    if not is_int(days):
+        raise SituationError("days must be an integer")
+    return SituationRule(basis=basis, values=tuple(values), value=value, concept=concept, grade=grade, days=days)
 
 
 def _source(item: object) -> ConceptSource:
     if not isinstance(item, dict):
         raise SceneRecordError("concept source must be an object")
-    return ConceptSource(origin=ConceptOrigin(item.get("origin")), note=item.get("note"))
+    note = item.get("note")
+    if note is not None and not isinstance(note, str):
+        raise ConceptError("concept source note must be text")
+    return ConceptSource(origin=ConceptOrigin(item.get("origin")), note=note)
 
 
 __all__ = ["MARKER", "RECORD_TYPE", "decode", "encode"]

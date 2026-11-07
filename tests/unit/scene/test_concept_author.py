@@ -272,6 +272,19 @@ def test_references_to_a_dropped_or_unknown_concept_cascade() -> None:
         ([replaced(REWORK, kind="leaf")], "kind must be one of"),
         ([replaced(REWORK, classes="修改代码")], "classes must be a list"),
         ([replaced(REWORK, grades=[{"name": "轻", "lower_minutes": 0, "upper_minutes": 10}])], "grades need a rule"),
+        # 分钟数类型错（bool、文本、小数）在解码答复时就拒
+        (
+            [replaced(LATE, rule={**LATE["rule"], "lower_minutes": True})],  # type: ignore[dict-item]
+            "rule lower_minutes must be an integer number of minutes",
+        ),
+        (
+            [replaced(LATE, grades=[{"name": "轻", "lower_minutes": 120, "upper_minutes": "240"}])],
+            "grade upper_minutes must be an integer number of minutes",
+        ),
+        (
+            [replaced(LATE, grades=[{"name": "轻", "lower_minutes": 120.0, "upper_minutes": 240}])],
+            "grade lower_minutes must be an integer number of minutes",
+        ),
     ],
 )
 def test_a_malformed_answer_is_refused_as_a_whole(concepts, message) -> None:
@@ -306,8 +319,6 @@ def test_the_author_returns_what_it_wrote_with_its_dropped_reasons() -> None:
     assert proposal.definitions[0].created_at == NOW
     assert proposal.dropped and proposal.dropped[0].startswith("dropped: 写代码")
     assert proposal.signals[0] == f"author: {author.version}" and proposal.dropped[0] in proposal.signals
-    with pytest.raises(TypeError):
-        asyncio.run(author.propose(BRIEFS, ()))  # type: ignore[arg-type]
 
 
 def test_the_same_class_given_twice_is_refused() -> None:

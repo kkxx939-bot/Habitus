@@ -26,7 +26,7 @@ class SetupChoice:
     label: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.label, str) or not self.label.strip():
+        if not self.label.strip():
             raise ValueError("setup choice label must be non-empty")
 
 
@@ -43,11 +43,11 @@ class SetupField:
     placeholder_values: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.key, str) or not self.key:
+        if not self.key:
             raise ValueError("setup field key must be non-empty")
-        if not isinstance(self.label, str) or not self.label.strip():
+        if not self.label.strip():
             raise ValueError("setup field label must be non-empty")
-        if not self.paths or any(not isinstance(path, str) or not path for path in self.paths):
+        if not self.paths or any(not path for path in self.paths):
             raise ValueError("setup field paths must be non-empty")
         if self.kind not in {"text", "required_text", "positive_int", "choice"}:
             raise ValueError("setup field kind is invalid")
@@ -55,7 +55,7 @@ class SetupField:
             raise ValueError("choice setup field must declare choices")
         if self.kind != "choice" and self.choices:
             raise ValueError("only choice setup fields may declare choices")
-        if any(not isinstance(item, str) or not item for item in self.placeholder_values):
+        if any(not item for item in self.placeholder_values):
             raise ValueError("setup field placeholder values must be non-empty strings")
         if self.kind not in {"text", "required_text"} and self.placeholder_values:
             raise ValueError("only text setup fields may declare placeholder values")
@@ -80,19 +80,17 @@ class SetupProfile:
     target_state: SetupTargetState = "configured"
 
     def __post_init__(self) -> None:
-        if not isinstance(self.profile_id, str) or not self.profile_id:
+        if not self.profile_id:
             raise ValueError("setup profile id must be non-empty")
         if self.capability not in {"chat", "embedding", "rerank", "vector"}:
             raise ValueError("setup profile capability is invalid")
-        if not isinstance(self.display_name, str) or not self.display_name.strip():
+        if not self.display_name.strip():
             raise ValueError("setup profile display_name must be non-empty")
-        if not isinstance(self.patch, Mapping) or not isinstance(self.match, Mapping):
-            raise TypeError("setup profile patch and match must be objects")
         if self.target_state not in {"configured", "disabled"}:
             raise ValueError("setup profile target_state is invalid")
         if self.target_state == "disabled" and self.capability != "rerank":
             raise ValueError("only an optional rerank profile may be disabled")
-        if any(not isinstance(path, str) or not path for path in self.replace_paths):
+        if any(not path for path in self.replace_paths):
             raise ValueError("setup profile replace_paths must be non-empty paths")
         field_keys = [item.key for item in self.fields]
         if len(field_keys) != len(set(field_keys)):
@@ -118,8 +116,6 @@ class SetupProfile:
         apply_defaults: bool = True,
         field_keys: frozenset[str] | None = None,
     ) -> dict[str, object]:
-        if not isinstance(values, Mapping):
-            raise TypeError("setup profile values must be an object")
         unknown = sorted(set(values) - {item.key for item in self.fields})
         if unknown:
             raise ValueError(f"setup profile contains unknown values: {unknown}")
@@ -158,12 +154,8 @@ class AdapterProductRegistration:
     def __post_init__(self) -> None:
         if self.capability not in {"chat", "embedding", "rerank", "vector"}:
             raise ValueError("adapter product capability is invalid")
-        if not isinstance(self.adapter, str) or not self.adapter:
+        if not self.adapter:
             raise ValueError("adapter product name must be non-empty")
-        if not callable(self.credential_fields) or not callable(self.dependency_modules):
-            raise TypeError("adapter product resolvers must be callable")
-        if self.validate is not None and not callable(self.validate):
-            raise TypeError("adapter product validator must be callable")
 
 
 class SetupRegistry:
@@ -174,16 +166,12 @@ class SetupRegistry:
         self._adapters: dict[tuple[SetupCapability, str], AdapterProductRegistration] = {}
 
     def register_profile(self, profile: SetupProfile) -> None:
-        if not isinstance(profile, SetupProfile):
-            raise TypeError("profile must be SetupProfile")
         key = (profile.capability, profile.profile_id)
         if key in self._profiles:
             raise ValueError(f"setup profile is already registered: {profile.profile_id}")
         self._profiles[key] = profile
 
     def register_adapter(self, registration: AdapterProductRegistration) -> None:
-        if not isinstance(registration, AdapterProductRegistration):
-            raise TypeError("registration must be AdapterProductRegistration")
         key = (registration.capability, registration.adapter)
         if key in self._adapters:
             raise ValueError(f"setup adapter is already registered: {registration.capability}/{registration.adapter}")
@@ -215,8 +203,6 @@ class SetupRegistry:
         self,
         config: HabitusConfig,
     ) -> tuple[tuple[SetupCapability, str], ...]:
-        if not isinstance(config, HabitusConfig):
-            raise TypeError("config must be HabitusConfig")
         return tuple(
             (capability, str(_mapping_at(document, "route").get("adapter", "")))
             for capability, document in _active_adapter_documents(config)

@@ -11,13 +11,13 @@ MINUTES_PER_DAY = 1440
 
 
 def require_aware(at: datetime, label: str = "at") -> datetime:
-    if not isinstance(at, datetime) or at.utcoffset() is None:
+    if at.utcoffset() is None:
         raise ValueError(f"{label} must be a timezone-aware datetime")
     return at
 
 
 def require_slot_minutes(slot_minutes: int) -> int:
-    if isinstance(slot_minutes, bool) or not isinstance(slot_minutes, int) or slot_minutes <= 0:
+    if slot_minutes <= 0:
         raise ValueError("slot_minutes must be a positive divisor of 1440")
     if MINUTES_PER_DAY % slot_minutes:
         raise ValueError("slot_minutes must be a positive divisor of 1440")

@@ -41,12 +41,6 @@ class HistoryStage:
     def __init__(
         self, ledger: ForesightLedgerStore, store: HistoryStore, *, evidence: Evidence, statuses: Iterable[str]
     ) -> None:
-        if not isinstance(ledger, ForesightLedgerStore):
-            raise TypeError("ledger must be a ForesightLedgerStore")
-        if not isinstance(store, HistoryStore):
-            raise TypeError("store must be a HistoryStore")
-        if not isinstance(evidence, Evidence):
-            raise TypeError("evidence must be an Evidence")
         self.ledger = ledger
         self.store = store
         self.evidence = evidence

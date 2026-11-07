@@ -176,7 +176,7 @@ def unit_reading(
 
     if not inputs:
         raise ForesightError("a unit reading needs at least one input")
-    if isinstance(prior_share, bool) or not isinstance(prior_share, int | float) or not 0.0 < prior_share < 1.0:
+    if not 0.0 < prior_share < 1.0:
         raise ForesightError("prior_share must lie in (0, 1)")
     current = signature((item.expectation for item in inputs), coincidental=coincidental)
     strongest = max(inputs, key=lambda item: (item.standing.prediction.lower, item.account))

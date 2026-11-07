@@ -54,8 +54,6 @@ class SeriesReader:
     当场读。"""
 
     def __init__(self, tree: BehaviorTree, logs: Sequence[DirtyDayLog] = ()) -> None:
-        if not isinstance(tree, BehaviorTree):
-            raise SeriesError("tree must be a BehaviorTree")
         self.tree = tree
         self.logs = tuple(logs)
         self._days: dict[tuple[BehaviorKind, date], tuple[BehaviorDocument, ...]] = {}
@@ -64,7 +62,7 @@ class SeriesReader:
     def read(self, *, cutoff: date) -> EventSeries:
         """第 ``cutoff`` 晚的序列：截止日之前每一天的 occurrence 与空白。"""
 
-        if isinstance(cutoff, datetime) or not isinstance(cutoff, date):
+        if isinstance(cutoff, datetime):
             raise SeriesError("cutoff must be a date")
         if not self.logs:
             # 没有脏日日志就不知道哪天变过：不缓存，每次照读（缓存了只会把改过的日子一直读成旧的）

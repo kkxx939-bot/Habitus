@@ -51,7 +51,7 @@ class MemoryLifecycleMaintenanceConfig:
             ("max_compactions_per_cycle", self.max_compactions_per_cycle, 1_000),
             ("max_retirements_per_cycle", self.max_retirements_per_cycle, 1_000),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+            if not 1 <= value <= maximum:
                 raise ValueError(f"{name} is outside its supported range")
 
 
@@ -100,28 +100,14 @@ class MemoryLifecycleManager:
         clock: Callable[[], datetime] | None = None,
         derived_refresh: Callable[[tuple[MemoryURI, ...]], Awaitable[None]] | None = None,
     ) -> None:
-        if not isinstance(tree, MemoryTree):
-            raise TypeError("tree must be MemoryTree")
-        if not isinstance(snapshot_reader, MemorySnapshotReader) or snapshot_reader.tree is not tree:
+        if snapshot_reader.tree is not tree:
             raise ValueError("lifecycle manager must share one tree and snapshot reader")
-        if not isinstance(recall_lifecycle, MemoryRecallLifecycle):
-            raise TypeError("recall_lifecycle must be MemoryRecallLifecycle")
-        if not isinstance(field_compactor, MemoryFieldCompactor):
-            raise TypeError("field_compactor must be MemoryFieldCompactor")
-        if not isinstance(recovery_store, MemoryRecoveryStore) or recovery_store.tree is not tree:
+        if recovery_store.tree is not tree:
             raise ValueError("lifecycle manager and recovery store must share one tree")
-        if not isinstance(committer, MemoryLifecycleCommitter) or committer.snapshot_reader is not snapshot_reader:
+        if committer.snapshot_reader is not snapshot_reader:
             raise ValueError("lifecycle manager and committer must share one snapshot reader")
-        if config is not None and not isinstance(config, MemoryLifecycleMaintenanceConfig):
-            raise TypeError("config must be MemoryLifecycleMaintenanceConfig")
-        if clock is not None and not callable(clock):
-            raise TypeError("clock must be callable")
-        if derived_refresh is not None and not callable(derived_refresh):
-            raise TypeError("derived_refresh must be callable")
-        if not isinstance(operation_store, MemoryLifecycleOperationStore) or operation_store.tree is not tree:
+        if operation_store.tree is not tree:
             raise ValueError("lifecycle manager and operation store must share one tree")
-        if not isinstance(scan_store, MemoryLifecycleScanStore):
-            raise TypeError("scan_store must be MemoryLifecycleScanStore")
         self.tree = tree
         self.snapshot_reader = snapshot_reader
         self.recall_lifecycle = recall_lifecycle
@@ -273,8 +259,6 @@ class MemoryLifecycleManager:
     ) -> MemoryContextUseResult:
         """最终模型可见 Context 的 L2 才计成功；COLD_2 必须先同步恢复。"""
 
-        if not isinstance(targets, tuple) or any(not isinstance(item, MemoryRecallTarget) for item in targets):
-            raise TypeError("context use targets must be a tuple of MemoryRecallTarget")
         if len({item.uri for item in targets}) != len(targets):
             raise ValueError("context use targets must be unique")
         timestamp = self._timestamp() if used_at is None else _timestamp(used_at)
@@ -299,7 +283,7 @@ class MemoryLifecycleManager:
                     )
                     await self._resume_operation(operation, finish_derived=False)
                     current = await asyncio.to_thread(self.snapshot_reader.read, target.uri)
-                    if not current.exists or not isinstance(current.value, MemoryDocument):
+                    if not current.exists or current.value is None:
                         raise RuntimeError("restored final Context memory disappeared")
                     documents.append(current.value)
                 else:
@@ -377,8 +361,6 @@ class MemoryLifecycleManager:
     def expand_for_probe(self, document: MemoryDocument) -> MemoryDocument:
         """只为最终 Context 预算临时展开活动基线，不修改 L2 或热度。"""
 
-        if not isinstance(document, MemoryDocument):
-            raise TypeError("document must be MemoryDocument")
         uri = MemoryURI.from_address(document.address)
         snapshot = self.snapshot_reader.read(uri)
         if not snapshot.exists or snapshot.value != document:
@@ -406,7 +388,7 @@ class MemoryLifecycleManager:
         *,
         now: datetime,
     ) -> bool:
-        if not source.exists or not isinstance(source.value, MemoryDocument):
+        if not source.exists or source.value is None:
             return False
         result = await self.field_compactor.compact(source.value)
         if not result.changed:
@@ -749,7 +731,7 @@ class MemoryLifecycleManager:
             return True
 
     def _ranking(self, snapshot: MemorySnapshot, now: datetime) -> MemoryRecallRanking:
-        if not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
+        if not snapshot.exists or snapshot.value is None:
             raise ValueError("memory lifecycle target does not exist")
         return self.recall_lifecycle.rank((self._candidate(snapshot.value),), now=now)[0]
 
@@ -769,7 +751,7 @@ class MemoryLifecycleManager:
 
     @classmethod
     def _target_snapshot(cls, snapshot: MemorySnapshot) -> MemoryRecallTarget:
-        if not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
+        if not snapshot.exists or snapshot.value is None:
             raise ValueError("memory lifecycle target snapshot must exist")
         return cls._target(snapshot.value)
 
@@ -787,8 +769,6 @@ class MemoryLifecycleManager:
 
 
 def _timestamp(value: datetime) -> datetime:
-    if not isinstance(value, datetime):
-        raise TypeError("memory lifecycle clock must return datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("memory lifecycle timestamp must include a timezone")
     return value.astimezone(UTC)

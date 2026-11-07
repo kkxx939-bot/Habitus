@@ -54,8 +54,6 @@ class MemorySnapshotReader:
         *,
         config: SnapshotReadConfig | None = None,
     ) -> None:
-        if not isinstance(tree, MemoryTree):
-            raise TypeError("tree must be a MemoryTree")
         self.tree = tree
         self._reader = SnapshotReader[MemoryDocument](
             load=self._load,
@@ -83,8 +81,6 @@ class MemorySnapshotReader:
     def read_many(self, uris: Iterable[MemoryURI | str]) -> MemorySnapshotBatch:
         """先验证全部 L2 URI，再执行去重且有界的批量读取。"""
 
-        if isinstance(uris, str) or not isinstance(uris, Iterable):
-            raise TypeError("uris must be an iterable of MemoryURI or string values")
         identities_list: list[str] = []
         for uri in uris:
             identities_list.append(str(self._document_uri(uri)))
@@ -102,8 +98,6 @@ class MemorySnapshotReader:
     def _read_many_physical(self, uris: Iterable[MemoryURI | str]) -> MemorySnapshotBatch:
         """仅供持有事务租约的提交与恢复流程批量读取物理状态。"""
 
-        if isinstance(uris, str) or not isinstance(uris, Iterable):
-            raise TypeError("uris must be an iterable of MemoryURI or string values")
         return self._reader.read_many(str(self._document_uri(uri)) for uri in uris)
 
     def bind_visibility_journal(self, journal: object) -> None:

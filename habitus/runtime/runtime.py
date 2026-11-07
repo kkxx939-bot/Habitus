@@ -117,11 +117,9 @@ class RuntimeInitialization:
     recovered_transaction_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.memory_root, Path) or not self.memory_root.is_absolute():
+        if not self.memory_root.is_absolute():
             raise ValueError("memory_root must be an absolute Path")
-        if not isinstance(self.recovered_transaction_ids, tuple) or any(
-            not isinstance(identifier, str) or not identifier for identifier in self.recovered_transaction_ids
-        ):
+        if any(not identifier for identifier in self.recovered_transaction_ids):
             raise TypeError("recovered_transaction_ids must contain non-empty strings")
 
 
@@ -134,19 +132,14 @@ class MemoryJobRetryResult:
     worker_restarted: bool
 
     def __post_init__(self) -> None:
-        if not isinstance(self.failed_job, MemoryJob) or self.failed_job.status is not MemoryJobStatus.FAILED:
+        if self.failed_job.status is not MemoryJobStatus.FAILED:
             raise ValueError("failed_job must be a FAILED MemoryJob snapshot")
-        if not isinstance(self.reopened_job, MemoryJob) or self.reopened_job.status not in {
-            MemoryJobStatus.STAGED,
-            MemoryJobStatus.QUEUED,
-        }:
+        if self.reopened_job.status not in {MemoryJobStatus.STAGED, MemoryJobStatus.QUEUED}:
             raise ValueError("reopened_job must be a STAGED or QUEUED MemoryJob")
         if self.failed_job.source_identity != self.reopened_job.source_identity:
             raise ValueError("retried MemoryJob source identity changed")
         if self.reopened_job.attempts != 0 or self.reopened_job.last_error is not None:
             raise ValueError("reopened MemoryJob must reset its retry state")
-        if not isinstance(self.worker_restarted, bool):
-            raise TypeError("worker_restarted must be boolean")
 
 
 @dataclass(frozen=True)
@@ -166,14 +159,6 @@ class RuntimeConversationProtocolIngestResult:
     ingest: ConversationMemoryIngestResult
     effective_after_turn: bool
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.adaptation, ConversationAdaptation):
-            raise TypeError("adaptation must be ConversationAdaptation")
-        if not isinstance(self.ingest, ConversationMemoryIngestResult):
-            raise TypeError("ingest must be ConversationMemoryIngestResult")
-        if not isinstance(self.effective_after_turn, bool):
-            raise TypeError("effective_after_turn must be boolean")
-
     @property
     def next_sequence(self) -> int:
         """返回写入锁内确认的 Conversation 权威下一序号。"""
@@ -191,12 +176,6 @@ class Runtime:
         *,
         conversation_adapters: ConversationAdapterRegistry | None = None,
     ) -> None:
-        if not isinstance(config, HabitusConfig):
-            raise TypeError("config must be HabitusConfig")
-        if not isinstance(components, RuntimeComponents):
-            raise TypeError("components must be RuntimeComponents")
-        if conversation_adapters is not None and not isinstance(conversation_adapters, ConversationAdapterRegistry):
-            raise TypeError("conversation_adapters must be ConversationAdapterRegistry or None")
         if components.memory.tree.root != config.memory_root:
             raise ValueError("runtime components are bound to another memory root")
         if components.conversation.journal.layout.root != config.conversation_root:
@@ -417,9 +396,9 @@ class Runtime:
         ``at`` 由宿主给、带时区。同步的文件读写下沉线程。"""
 
         self._require_initialized("reminder claim")
-        if not isinstance(at, datetime) or at.utcoffset() is None:
+        if at.utcoffset() is None:
             raise ValueError("at must be a timezone-aware datetime")
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        if limit < 1:
             raise ValueError("limit must be a positive integer")
         foresight = self.components.foresight
         if foresight is None or foresight.outlet is None:
@@ -433,7 +412,7 @@ class Runtime:
 
         self._require_initialized("reminder report")
         resolved = day if day is not None else datetime.now(self.config.locale.zone()).date()
-        if not isinstance(resolved, date) or isinstance(resolved, datetime):
+        if isinstance(resolved, datetime):
             raise ValueError("day must be a date")
         foresight = self.components.foresight
         if foresight is None:
@@ -573,8 +552,6 @@ class Runtime:
         )
         adaptation = self._conversation_adapters.adapt(protocol, payload, context)
         resolved_after_turn = adaptation.after_turn if after_turn is None else after_turn
-        if not isinstance(resolved_after_turn, bool):
-            raise TypeError("after_turn must be boolean or None")
         ingress = None
         if delivery_id is not None:
             request_digest = conversation_source_request_digest(
@@ -738,8 +715,6 @@ class Runtime:
     async def retry_failed_memory_job(self, failed_job: MemoryJob) -> MemoryJobRetryResult:
         """以完整失败快照重新开放最早 Job，并恢复被它阻塞的常驻 Worker。"""
 
-        if not isinstance(failed_job, MemoryJob):
-            raise TypeError("failed_job must be a MemoryJob")
         if failed_job.status is not MemoryJobStatus.FAILED:
             raise ValueError("failed_job must be a FAILED MemoryJob snapshot")
         self._require_initialized("failed memory job retry")
@@ -796,9 +771,9 @@ class Runtime:
     ) -> MemoryJobAbandonResult:
         """显式放弃无法修复的最早 Job；有任何未决或已提交副作用时拒绝执行。"""
 
-        if not isinstance(failed_job, MemoryJob) or failed_job.status is not MemoryJobStatus.FAILED:
+        if failed_job.status is not MemoryJobStatus.FAILED:
             raise ValueError("failed_job must be a FAILED MemoryJob snapshot")
-        if not isinstance(reason, str) or not reason.strip():
+        if not reason.strip():
             raise ValueError("reason must be non-empty text")
         self._require_initialized("failed memory job abandonment")
         source = MemoryChangeSource.from_job(failed_job)
@@ -894,8 +869,6 @@ class Runtime:
     ) -> ConversationLifecycleMaintenanceResult:
         """显式执行一次单 Conversation 维护；自动批量维护由 LifecycleWorker 负责。"""
 
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("address must be ConversationAddress")
         if not self.initialized:
             raise RuntimeStateError("conversation maintenance requires an initialized runtime")
         return await self.components.workflow.lifecycle.maintain_once(address, now=now)
@@ -1070,6 +1043,7 @@ class Runtime:
             try:
                 directory.mkdir(mode=0o700)
             except FileExistsError:
+                # 目录已在：下一行核它是不是真实目录
                 pass
             if is_path_alias(directory) or not directory.is_dir():
                 raise RuntimeInitializationError("runtime storage path is not a real directory")
@@ -1138,7 +1112,8 @@ class Runtime:
                     attributes=attributes,
                 )
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - 观测失败不许影响 Runtime 操作
+            # 观测只是旁路：记录失败不改变操作结果
             pass
 
 

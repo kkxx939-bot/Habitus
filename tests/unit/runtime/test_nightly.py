@@ -92,14 +92,6 @@ def test_the_scene_run_must_read_the_same_tree(tmp_path) -> None:
             closed_days=tuple,
             vocabulary=steady,
         )
-    with pytest.raises(TypeError, match="zone"):
-        Nightly(
-            behavior_tree=site.behavior_tree,
-            scene=run.scene,
-            zone="Asia/Shanghai",
-            closed_days=tuple,
-            vocabulary=steady,
-        )  # type: ignore[arg-type]
 
 
 def test_the_night_stops_at_the_last_sealed_day(tmp_path) -> None:
@@ -203,8 +195,6 @@ def test_the_nightly_worker_runs_once_yesterday_closes_then_waits_and_survives_a
     asyncio.run(broken())
     assert recorder.events[-1].status is ObservationStatus.FAILURE
     assert failing.last_run.read() is None  # 抛了不算跑过：下一眼从断点接着跑（裁定 94 第 1 条）
-    with pytest.raises(TypeError):
-        NightlyWorker(object(), shutdown_timeout_seconds=1.0)  # type: ignore[arg-type]
 
 
 def test_a_restart_runs_the_night_only_if_it_has_not_run_for_it(tmp_path) -> None:
@@ -316,15 +306,6 @@ def test_the_night_refreshes_the_calendar_before_anything_else(tmp_path) -> None
     run.scene.run = scene_then  # type: ignore[method-assign]
     asyncio.run(run.run_once())
     assert order == ["日历", "语义树"]
-    with pytest.raises(TypeError, match="refresh_calendar"):
-        Nightly(
-            behavior_tree=site.behavior_tree,
-            scene=run.scene,
-            zone=ZoneInfo("Asia/Shanghai"),
-            closed_days=tuple,
-            vocabulary=steady,
-            refresh_calendar=object(),
-        )  # type: ignore[arg-type]
 
 
 def test_a_calendar_refresh_that_raises_does_not_stop_the_night(tmp_path) -> None:

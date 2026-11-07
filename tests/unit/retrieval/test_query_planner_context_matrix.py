@@ -113,25 +113,10 @@ def test_search_context_preserves_valid_conversation_summary_and_role_sequence(
     assert value.empty is (not summary and not recent)
 
 
-@pytest.mark.parametrize("invalid", ["", " ", "\t", None, 0, 1, True, (), [], {}, object()])
-def test_search_context_rejects_empty_or_non_text_conversation_id(invalid: object) -> None:
-    with pytest.raises((TypeError, ValueError)):
+@pytest.mark.parametrize("invalid", ["", " ", "\t"])
+def test_search_context_rejects_empty_or_non_text_conversation_id(invalid: str) -> None:
+    with pytest.raises(ValueError):
         ConversationSearchContext(invalid, "", ())
-
-
-@pytest.mark.parametrize("invalid", [None, 0, 1.5, True, (), [], {}, object()])
-def test_search_context_rejects_non_text_summary(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        ConversationSearchContext("conversation-1", invalid, ())
-
-
-@pytest.mark.parametrize(
-    "invalid",
-    [None, [], "messages", {}, 1, True, ("bad",), (closed_turn()[0], "bad")],
-)
-def test_search_context_requires_tuple_of_normalized_messages(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        ConversationSearchContext("conversation-1", "", invalid)
 
 
 @pytest.mark.parametrize("maximum", [1, 2, 3, 4, 5, 10, 100])
@@ -159,19 +144,6 @@ def test_recent_message_renderer_keeps_tool_identity_status_and_json_content() -
     assert "[1][tool_call][tool=workspace.inspect][call=call-1]" in rendered
     assert "[2][tool_result][tool=workspace.inspect][call=call-1][status=completed]" in rendered
     assert '{"path":"."}' in rendered
-
-
-@pytest.mark.parametrize("invalid", [None, "client", {}, [], 1, True, object()])
-def test_query_planner_requires_structured_chat_client(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        MemorySearchQueryPlanner(invalid)
-
-
-@pytest.mark.parametrize("invalid", ["config", {}, [], 1, True, object()])
-def test_query_planner_requires_search_config_when_explicit(invalid: object) -> None:
-    provider = RecordingPlannerProvider([])
-    with pytest.raises(TypeError):
-        MemorySearchQueryPlanner(structured(provider), config=invalid)
 
 
 @pytest.mark.parametrize("query", ["x", " memory ", "中文问题", "a" * 5_000])
@@ -227,26 +199,6 @@ def test_plan_uses_direct_query_only_when_context_empty_or_query_count_is_one(
         assert tuple(item.query for item in plan.queries) == ("当前问题",)
         assert plan.conversation_id == "conversation-1"
         assert provider.requests == []
-
-
-@pytest.mark.parametrize("invalid", [None, "context", {}, [], 1, True, object()])
-def test_plan_requires_normalized_conversation_context(invalid: object) -> None:
-    provider = RecordingPlannerProvider([])
-    with pytest.raises(TypeError):
-        asyncio.run(MemorySearchQueryPlanner(structured(provider)).plan("query", invalid))
-
-
-@pytest.mark.parametrize("invalid", [None, 0, 1.5, True, (), [], {}, object()])
-def test_plan_requires_text_target_context(invalid: object) -> None:
-    provider = RecordingPlannerProvider([])
-    with pytest.raises(TypeError):
-        asyncio.run(
-            MemorySearchQueryPlanner(structured(provider)).plan(
-                "query",
-                context(),
-                target_context=invalid,
-            )
-        )
 
 
 @pytest.mark.parametrize(
@@ -414,18 +366,3 @@ def test_context_reader_wraps_frontier_or_journal_corruption_as_search_error(tmp
     reader = ConversationSearchContextReader(lifecycle.journal, lifecycle.compactor)
     with pytest.raises(MemorySearchError, match="failed to read Conversation context"):
         reader.read(ConversationAddress("conversation-1", date(2026, 7, 28)))
-
-
-@pytest.mark.parametrize("invalid", [None, "address", {}, [], 1, True, object()])
-def test_context_reader_requires_conversation_address(tmp_path: Path, invalid: object) -> None:
-    lifecycle = manager(tmp_path)
-    reader = ConversationSearchContextReader(lifecycle.journal, lifecycle.compactor)
-    with pytest.raises(TypeError):
-        reader.read(invalid)
-
-
-def test_context_reader_rejects_invalid_frontier_entry_instead_of_silently_omitting_it(tmp_path: Path) -> None:
-    lifecycle = manager(tmp_path)
-    reader = ConversationSearchContextReader(lifecycle.journal, lifecycle.compactor)
-    with pytest.raises(MemorySearchError, match="invalid value"):
-        reader._summary_context((object(),))

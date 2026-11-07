@@ -39,14 +39,10 @@ class StructuredLogObserver:
     """把有界观察事件写成结构化日志，不展开业务输入或输出。"""
 
     def __init__(self, *, enabled: bool = True, logger_name: str = "habitus.observability") -> None:
-        if not isinstance(enabled, bool):
-            raise TypeError("enabled must be boolean")
         self.enabled = enabled
         self.logger = logging.getLogger(logger_name)
 
     def record(self, event: ObservationEvent) -> None:
-        if not isinstance(event, ObservationEvent):
-            raise TypeError("event must be ObservationEvent")
         if not self.enabled:
             return
         level = logging.DEBUG

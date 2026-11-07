@@ -83,15 +83,11 @@ class SceneNightConfig:
     mapping_days_per_night: int = 14
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.mapping_days_per_night, bool)
-            or not isinstance(self.mapping_days_per_night, int)
-            or self.mapping_days_per_night <= 0
-        ):
+        if self.mapping_days_per_night <= 0:
             raise ValueError("mapping_days_per_night must be a positive integer")
-        if isinstance(self.slack_slots, bool) or not isinstance(self.slack_slots, int) or self.slack_slots < 0:
+        if self.slack_slots < 0:
             raise ValueError("slack_slots must be a non-negative integer")
-        if isinstance(self.recent_days, bool) or not isinstance(self.recent_days, int) or self.recent_days <= 0:
+        if self.recent_days <= 0:
             raise ValueError("recent_days must be a positive integer")
 
 
@@ -178,13 +174,7 @@ class SceneNightlyRun:
         mapping_retries: RetryLedger,
         config: SceneNightConfig | None = None,
     ) -> None:
-        if not isinstance(behavior_tree, BehaviorTree):
-            raise TypeError("behavior_tree must be a BehaviorTree")
-        if not isinstance(catalog, ClassCatalog):
-            raise TypeError("catalog must implement ClassCatalog")
         resolved = config or SceneNightConfig()
-        if not isinstance(resolved, SceneNightConfig):
-            raise TypeError("config must be SceneNightConfig")
         self.behavior_tree = behavior_tree
         self.catalog = catalog
         self.concepts = concepts
@@ -198,20 +188,14 @@ class SceneNightlyRun:
         self.advice = advice
         self.subject = subject
         self.config = resolved
-        if not isinstance(rulers, RhythmRulers):
-            raise TypeError("rulers must be RhythmRulers")
         self.rulers = rulers
-        if not isinstance(mapping_retries, RetryLedger):
-            raise TypeError("mapping_retries must be RetryLedger")
         self.mapping_retries = mapping_retries
 
     async def run(self, *, series: EventSeries, now: datetime) -> NightReport:
         """第 ``series.cutoff`` 晚，``now`` 是夜批时刻。节律从同一份 ``series`` 经 temporal 算（裁定 59）。"""
 
-        if not isinstance(now, datetime) or now.utcoffset() is None:
+        if now.utcoffset() is None:
             raise TypeError("now must be a timezone-aware datetime")
-        if not isinstance(series, EventSeries):
-            raise TypeError("series must be an EventSeries")
         signals: list[str] = []
         changes = self.catalog.changes_since(self.concepts.synced_version())
         # 日历情境的取值从数据里攒出来：序列里出现过的日子，日历给了哪些（键, 取值）就长哪些（裁定 59 第 7 条）
@@ -473,6 +457,7 @@ class SceneNightlyRun:
                 try:
                     state = self.relations.read(lane, earlier)
                 except RelationStoreError:
+                    # 这一晚也读不了：接着往更早找；都读不了时下面整体报一次
                     continue
                 signals.append(f"relations: {lane} 更晚的关系表读不了（{exc}），这一晚接在第 {earlier} 晚之后折叠")
                 return state
@@ -558,6 +543,7 @@ class SceneNightlyRun:
             try:
                 state = self.relations.previous(lane, night)
             except RelationStoreError:
+                # 读不到上一晚就按没有锚日算（见文档串）
                 continue
             if state is None:
                 continue

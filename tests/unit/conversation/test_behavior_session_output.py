@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 
 import pytest
 
@@ -93,7 +92,6 @@ def test_removing_a_receipt_empties_the_listing(tmp_path) -> None:
     "broken",
     [
         lambda: turn(3, 1),  # 序号倒了
-        lambda: replace(turn(), recorded="yes"),  # 不是布尔
     ],
 )
 def test_malformed_turn_records_are_rejected(broken) -> None:  # type: ignore[no-untyped-def]
@@ -107,3 +105,35 @@ def test_a_receipt_needs_at_least_one_turn_in_order(tmp_path) -> None:
         BehaviorSessionOutput.create(source=source_value, processor_fingerprint=FINGERPRINT, turns=())
     with pytest.raises(ConversationSourceError, match="ordered and distinct"):
         receipt(source_value, turn(2, 3), turn(0, 1))
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("output_id", 1, "behavior session output_id must be lowercase SHA-256 text"),
+        ("source_id", None, "behavior session source_id must be lowercase SHA-256 text"),
+        ("source_payload_digest", 1, "behavior session source_payload_digest must be lowercase SHA-256 text"),
+        ("processor_fingerprint", 1, "behavior session processor_fingerprint must be lowercase SHA-256 text"),
+        ("output_record_digest", 1, "behavior session output_record_digest must be lowercase SHA-256 text"),
+        ("start_sequence", "0", "behavior session turn start_sequence must be a non-negative integer"),
+        ("end_sequence", True, "behavior session turn end_sequence must be a non-negative integer"),
+        ("instructed_at", 1, "instructed_at must be a datetime"),
+        ("completed_at", None, "completed_at must be a datetime"),
+        ("recorded", "yes", "behavior session turn recorded must be boolean"),
+    ],
+)
+def test_a_receipt_with_wrong_field_types_is_corrupt_on_read(tmp_path, field: str, bad: object, message: str) -> None:
+    """盘上回执（含每一轮）字段类型错：读回时在解码器就被拒，Store 报 corrupt（W16：类型检查在边界）。"""
+
+    *_others, store = stores(tmp_path)
+    source_value = source()
+    output = store.put(source_value, receipt(source_value))
+    path = long_path(store._path(source_value.source_id, output.output_id))  # noqa: SLF001 - 直接改盘上的字节
+    value = json.loads(path.read_text(encoding="utf-8"))
+    (value["turns"][0] if field in value["turns"][0] else value)[field] = bad
+    path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+
+    with pytest.raises(ConversationSourceError, match="corrupt") as caught:
+        store.read(source_value, output.output_id)
+    assert isinstance(caught.value.__cause__, ConversationSourceError)
+    assert message in str(caught.value.__cause__)

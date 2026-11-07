@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from habitus.config.loader import ConfigError, construct_config, group_fields
+from habitus.foundation.validation import is_int
 from habitus.infrastructure.vector import VectorStoreConfig
 from habitus.memory.conversation import (
     ConversationJournalConfig,
@@ -69,11 +70,7 @@ class ConversationSourceConfig:
             ("execution_lock_wait_seconds", self.execution_lock_wait_seconds, 86_400.0),
             ("shutdown_timeout_seconds", self.shutdown_timeout_seconds, 3_600.0),
         ):
-            if (
-                isinstance(number_value, bool)
-                or not isinstance(number_value, int | float)
-                or not 0 < float(number_value) <= number_maximum
-            ):
+            if not 0 < float(number_value) <= number_maximum:
                 raise ValueError(
                     f"conversation source {number_name} must be greater than zero and at most {number_maximum:g}"
                 )
@@ -98,11 +95,6 @@ class ConversationLifecycleConfig:
             minimum=1,
             maximum=10_000,
         )
-        if not isinstance(
-            self.summary_compaction,
-            ConversationSummaryCompactionConfig,
-        ):
-            raise TypeError("conversation lifecycle summary_compaction must be ConversationSummaryCompactionConfig")
 
     @classmethod
     def from_mapping(cls, value: object) -> ConversationLifecycleConfig:
@@ -133,20 +125,6 @@ class ConversationConfig:
     lifecycle: ConversationLifecycleConfig = field(default_factory=ConversationLifecycleConfig)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.journal, ConversationJournalConfig):
-            raise TypeError("conversation.journal must be ConversationJournalConfig")
-        if not isinstance(self.source, ConversationSourceConfig):
-            raise TypeError("conversation.source must be ConversationSourceConfig")
-        if not isinstance(self.segmentation, ConversationSegmentationConfig):
-            raise TypeError("conversation.segmentation must be ConversationSegmentationConfig")
-        if not isinstance(self.summary, ConversationSummaryConfig):
-            raise TypeError("conversation.summary must be ConversationSummaryConfig")
-        if not isinstance(self.summary_vector_store, VectorStoreConfig):
-            raise TypeError("conversation.summary_vector_store must be VectorStoreConfig")
-        if not isinstance(self.summary_vector_index, ConversationSummaryVectorIndexConfig):
-            raise TypeError("conversation.summary_vector_index must be ConversationSummaryVectorIndexConfig")
-        if not isinstance(self.lifecycle, ConversationLifecycleConfig):
-            raise TypeError("conversation.lifecycle must be ConversationLifecycleConfig")
         for stage in (
             self.lifecycle.summary_compaction.segment_to_range,
             self.lifecycle.summary_compaction.range_to_archive,
@@ -195,13 +173,13 @@ class ConversationConfig:
         )
 
 
-def _bounded_int(value: object, label: str, *, minimum: int, maximum: int) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+def _bounded_int(value: int, label: str, *, minimum: int, maximum: int) -> None:
+    if not minimum <= value <= maximum:
         raise ValueError(f"{label} must be between {minimum} and {maximum}")
 
 
 def _integer_value(value: object, path: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not is_int(value):
         raise ConfigError(f"'{path}' must be an integer")
     return value
 

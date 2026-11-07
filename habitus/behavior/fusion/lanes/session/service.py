@@ -68,10 +68,6 @@ class SessionTurnDescriber:
     """每轮一次模型调用：材料进，描述出。材料只在这一次调用里用，不落盘（裁定 33）。"""
 
     def __init__(self, client: StructuredChatClient, *, zone: tzinfo, config: SessionLaneConfig | None = None) -> None:
-        if not isinstance(client, StructuredChatClient):
-            raise TypeError("client must be StructuredChatClient")
-        if not isinstance(zone, tzinfo):
-            raise TypeError("zone must be a tzinfo")
         self.client = client
         self.zone = zone
         self.config = config or SessionLaneConfig()

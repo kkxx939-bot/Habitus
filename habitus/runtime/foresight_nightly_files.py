@@ -40,9 +40,9 @@ class NightlyFiles:
     def __init__(
         self, root: str | Path, *, segment: str, label: str, max_bytes: int, retained_nights: int, max_entries: int
     ) -> None:
-        if isinstance(retained_nights, bool) or not isinstance(retained_nights, int) or retained_nights <= 0:
+        if retained_nights <= 0:
             raise ForesightError("retained_nights must be a positive integer")
-        if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries <= 0:
+        if max_entries <= 0:
             raise ForesightError("max_entries must be a positive integer")
         self.root = Path(root).expanduser().resolve(strict=False)
         self.directory = self.root / segment

@@ -6,12 +6,13 @@ import base64
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 
 from habitus.foundation.integrity import canonical_json
+from habitus.foundation.validation import is_str_list
 from habitus.infrastructure.store.filesystem import (
     atomic_create_bytes,
     atomic_replace_bytes,
@@ -21,7 +22,7 @@ from habitus.infrastructure.store.filesystem import (
     read_regular_bytes,
 )
 from habitus.memory.document import MemoryDocument, MemoryDocumentCodec
-from habitus.memory.uri import MemoryURI
+from habitus.memory.uri import MemoryURI, decode_memory_uri
 
 _TRANSACTION_ID = re.compile(r"^[0-9a-f]{32}$")
 _SCHEMA = "memory_commit_transaction_v1"
@@ -45,7 +46,7 @@ class MemoryTransactionJournalConfig:
             ("max_record_bytes", self.max_record_bytes, 512 * 1024 * 1024),
             ("max_records", self.max_records, 100_000),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+            if not 1 <= value <= maximum:
                 raise ValueError(f"{name} must be between 1 and {maximum}")
 
 
@@ -66,14 +67,10 @@ class MemoryTransactionJournalEntry:
     after: MemoryDocument | None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.uri, MemoryURI):
-            raise TypeError("journal entry uri must be a MemoryURI")
         self.uri.to_address()
         for name, document in {"before": self.before, "after": self.after}.items():
             if document is None:
                 continue
-            if not isinstance(document, MemoryDocument):
-                raise TypeError(f"journal entry {name} must be a MemoryDocument or None")
             if MemoryURI.from_address(document.address) != self.uri:
                 raise ValueError(f"journal entry {name} document has the wrong URI")
         if self.before == self.after:
@@ -92,7 +89,7 @@ class MemoryTransactionJournalRecord:
     entries: tuple[MemoryTransactionJournalEntry, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.transaction_id, str) or not _TRANSACTION_ID.fullmatch(self.transaction_id):
+        if not _TRANSACTION_ID.fullmatch(self.transaction_id):
             raise ValueError("transaction_id must be 32 lowercase hexadecimal characters")
         try:
             state = MemoryTransactionJournalState(self.state)
@@ -101,23 +98,17 @@ class MemoryTransactionJournalRecord:
         object.__setattr__(self, "state", state)
         for name in ("created_at", "updated_at"):
             value = getattr(self, name)
-            if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+            if value.tzinfo is None or value.utcoffset() is None:
                 raise ValueError(f"journal {name} must be timezone-aware")
             object.__setattr__(self, name, value.astimezone(UTC))
         if self.updated_at < self.created_at:
             raise ValueError("journal updated_at cannot precede created_at")
-        if not isinstance(self.lock_identities, tuple) or any(
-            not isinstance(identity, str) or not identity for identity in self.lock_identities
-        ):
+        if any(not identity for identity in self.lock_identities):
             raise TypeError("lock_identities must contain non-empty strings")
         if self.lock_identities != tuple(sorted(set(self.lock_identities))):
             raise ValueError("lock_identities must be unique and sorted")
         for identity in self.lock_identities:
             MemoryURI.parse(identity).to_address()
-        if not isinstance(self.entries, tuple) or any(
-            not isinstance(entry, MemoryTransactionJournalEntry) for entry in self.entries
-        ):
-            raise TypeError("journal entries must contain MemoryTransactionJournalEntry values")
         entry_ids = tuple(str(entry.uri) for entry in self.entries)
         if entry_ids != tuple(sorted(set(entry_ids))):
             raise ValueError("journal entries must be unique and sorted")
@@ -138,10 +129,6 @@ class MemoryTransactionJournal:
         requested = Path(root).expanduser().absolute()
         if is_path_alias(requested):
             raise MemoryTransactionJournalError("transaction journal root cannot be a symbolic link")
-        if not isinstance(codec, MemoryDocumentCodec):
-            raise TypeError("codec must be a MemoryDocumentCodec")
-        if config is not None and not isinstance(config, MemoryTransactionJournalConfig):
-            raise TypeError("config must be MemoryTransactionJournalConfig")
         self.root = requested.resolve(strict=False)
         self.codec = codec
         self.config = config or MemoryTransactionJournalConfig()
@@ -149,8 +136,6 @@ class MemoryTransactionJournal:
     def prepare(self, record: MemoryTransactionJournalRecord) -> None:
         """仅创建一次 PREPARED 日志，确保先有恢复信息再发布文档。"""
 
-        if not isinstance(record, MemoryTransactionJournalRecord):
-            raise TypeError("record must be a MemoryTransactionJournalRecord")
         if record.state is not MemoryTransactionJournalState.PREPARED:
             raise ValueError("new transaction journal must start in PREPARED state")
         encoded = self._encode(record)
@@ -316,7 +301,7 @@ class MemoryTransactionJournal:
             raise MemoryTransactionJournalError("failed to discard terminal transaction journal") from exc
 
     def _path(self, transaction_id: str) -> Path:
-        if not isinstance(transaction_id, str) or not _TRANSACTION_ID.fullmatch(transaction_id):
+        if not _TRANSACTION_ID.fullmatch(transaction_id):
             raise ValueError("transaction_id must be 32 lowercase hexadecimal characters")
         return self.root / f"{transaction_id}.json"
 
@@ -343,15 +328,8 @@ class MemoryTransactionJournal:
         return encoded
 
     def _parse(self, value: object) -> MemoryTransactionJournalRecord:
-        if not isinstance(value, Mapping) or set(value) != {
-            "schema",
-            "transaction_id",
-            "state",
-            "created_at",
-            "updated_at",
-            "lock_identities",
-            "entries",
-        }:
+        expected = {"schema", *(field.name for field in fields(MemoryTransactionJournalRecord))}
+        if not isinstance(value, Mapping) or set(value) != expected:
             raise MemoryTransactionJournalError("transaction journal has an invalid shape")
         if value["schema"] != _SCHEMA:
             raise MemoryTransactionJournalError("transaction journal has an unsupported schema")
@@ -359,11 +337,17 @@ class MemoryTransactionJournal:
         raw_entries = value["entries"]
         if not isinstance(raw_locks, list) or not isinstance(raw_entries, list):
             raise MemoryTransactionJournalError("transaction journal arrays are invalid")
+        # 构造前确认类型，文字照抄 ``MemoryTransactionJournalRecord.__post_init__``
+        transaction_id = value["transaction_id"]
+        if not isinstance(transaction_id, str):
+            raise ValueError("transaction_id must be 32 lowercase hexadecimal characters")
+        if not is_str_list(raw_locks):
+            raise TypeError("lock_identities must contain non-empty strings")
         entries: list[MemoryTransactionJournalEntry] = []
         for raw in raw_entries:
             if not isinstance(raw, Mapping) or set(raw) != {"uri", "before", "after"}:
                 raise MemoryTransactionJournalError("transaction journal entry has an invalid shape")
-            uri = MemoryURI.parse(raw["uri"])
+            uri = decode_memory_uri(raw["uri"])
             uri.to_address()
             entries.append(
                 MemoryTransactionJournalEntry(
@@ -373,7 +357,7 @@ class MemoryTransactionJournal:
                 )
             )
         return MemoryTransactionJournalRecord(
-            transaction_id=value["transaction_id"],
+            transaction_id=transaction_id,
             state=MemoryTransactionJournalState(value["state"]),
             created_at=self._parse_timestamp(value["created_at"]),
             updated_at=self._parse_timestamp(value["updated_at"]),

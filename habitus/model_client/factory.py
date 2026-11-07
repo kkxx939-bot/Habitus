@@ -36,17 +36,11 @@ class ProviderBuildContext:
     outbound: OutboundSettings = field(default_factory=OutboundSettings)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.credentials, Mapping):
-            raise TypeError("model credentials must be an object")
         resolved: dict[str, str] = {}
         for raw_name, raw_value in self.credentials.items():
-            if not isinstance(raw_name, str) or not raw_name.strip():
+            if not raw_name.strip():
                 raise TypeError("model credential field names must be non-empty strings")
-            if not isinstance(raw_value, str):
-                raise TypeError("model credential values must be strings")
             resolved[raw_name.strip().lower()] = raw_value
-        if not isinstance(self.api_key, str):
-            raise TypeError("model api_key must be a string")
         api_key = self.api_key.strip()
         if api_key:
             existing = resolved.get("api_key")
@@ -99,8 +93,6 @@ class ProviderFactory:
     ) -> object:
         """``outbound`` 省略 = 系统证书库、无额外 CA、不配代理。工厂不知道配置（构造它时还没有配置），所以在这里传。"""
 
-        if not isinstance(config, ChatModelConfig | EmbeddingModelConfig | RerankModelConfig):
-            raise TypeError("config must be a supported capability config")
         key = (config.capability, config.route.adapter)
         builder = self._builders.get(key)
         if builder is None:
@@ -183,8 +175,6 @@ class ProviderFactory:
 
     @staticmethod
     def _credential(route: ProviderConfig, api_key: str) -> str:
-        if not isinstance(api_key, str):
-            raise TypeError("model api_key must be a string")
         value = api_key.strip()
         if not route.credential_ref:
             if value:
@@ -206,14 +196,12 @@ class ProviderFactory:
             return {} if not value else {"api_key": value}
         if api_key:
             raise ModelConfigurationError("pass either model credentials or the legacy api_key, not both")
-        if not isinstance(credentials, Mapping):
-            raise TypeError("model credentials must be an object")
         resolved = dict(credentials)
         if not route.credential_ref:
             if resolved:
                 raise ModelConfigurationError("model route received undeclared credentials")
             return {}
-        if not any(isinstance(value, str) and value.strip() for value in resolved.values()):
+        if not any(value.strip() for value in resolved.values()):
             raise ModelConfigurationError(f"model credential is missing for reference: {route.credential_ref}")
         return resolved
 

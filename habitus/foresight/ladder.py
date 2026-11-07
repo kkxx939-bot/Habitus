@@ -46,7 +46,7 @@ class Tolerance:
     line: float
 
     def __post_init__(self) -> None:
-        if isinstance(self.line, bool) or not isinstance(self.line, int | float) or not 0.0 < self.line < 1.0:
+        if not 0.0 < self.line < 1.0:
             raise ForesightError("the line must lie in (0, 1)")
 
     @property
@@ -65,7 +65,7 @@ class Evidence:
     def __post_init__(self) -> None:
         if not 0.0 < self.alpha < 0.5:
             raise ForesightError("alpha must lie in (0, 0.5)")
-        if isinstance(self.half_life, bool) or not isinstance(self.half_life, int | float) or self.half_life <= 0:
+        if self.half_life <= 0:
             raise ForesightError("half_life must be a positive number of opportunities")
 
     @property
@@ -155,7 +155,7 @@ def decide(
 
     if level not in LEVELS:
         raise ForesightError(f"unknown delivery level: {level!r}")
-    if not isinstance(now, datetime) or now.utcoffset() is None:
+    if now.utcoffset() is None:
         raise ForesightError("decide needs a timezone-aware now")
     identity = expectation.expectation_id
     cited = tuple(evidence)

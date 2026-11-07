@@ -63,14 +63,8 @@ class ForesightReadSide:
     zone: ZoneInfo
 
     def __post_init__(self) -> None:
-        if not isinstance(self.behavior_tree, BehaviorTree):
-            raise TypeError("behavior_tree must be a BehaviorTree")
-        if not isinstance(self.subject, str) or not self.subject.strip():
+        if not self.subject.strip():
             raise ValueError("subject must be non-empty text")
-        if not isinstance(self.calendar, DayTypeCalendar):
-            raise TypeError("calendar must implement DayTypeCalendar")
-        if not isinstance(self.zone, ZoneInfo):
-            raise TypeError("zone must be a ZoneInfo")
 
 
 @dataclass(frozen=True)
@@ -99,18 +93,12 @@ class ForesightRuntimeComponents:
             raise ValueError("the settlement stage must use the assembled ledger")
         if self.settlement.read_side is not self.read_side:
             raise ValueError("the settlement stage must read the assembled behaviour tree")
-        if not isinstance(self.opportunities, OpportunityStore):
-            raise TypeError("opportunities must be an OpportunityStore")
         if self.opportunities.root != self.ledger.root:
             raise ValueError("the opportunity tables live beside the ledger of the same branch")
-        if not isinstance(self.history, HistoryStage):
-            raise TypeError("history must be a HistoryStage")
         if self.history.ledger is not self.ledger or self.history.store.root != self.ledger.root:
             raise ValueError("the unit history is read from and lives beside the ledger of the same branch")
         if self.settlement.history is not None and self.settlement.history is not self.history.store:
             raise ValueError("the settlement stage reads the same unit history the nightly stage writes")
-        if self.worker is not None and not isinstance(self.worker, ResidentWorker):
-            raise TypeError("worker must be a ResidentWorker or None")
         if self.days is not None and (
             self.days.ledger is not self.ledger or self.days.opportunities is not self.opportunities
         ):

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import date, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -21,47 +21,6 @@ from habitus.memory.workflow import (
 )
 from tests.helpers import BASE_TIME, closed_turn, segment
 from tests.unit.workflow.test_lifecycle_manager import lifecycle_manager
-
-
-@pytest.mark.parametrize(
-    ("field", "invalid", "message"),
-    [
-        ("compactor", object(), "compactor must be"),
-        ("journal", object(), "journal must be"),
-        ("segment_store", object(), "segment_store must be"),
-        ("range_store", object(), "range_store must be"),
-        ("summary_vector_index", object(), "summary_vector_index must be"),
-        ("jobs", object(), "jobs must be"),
-        ("receipts", object(), "receipts must be"),
-        ("transaction_journal", object(), "transaction_journal must be"),
-        ("retirement_store", object(), "retirement_store must be"),
-        ("summary_config", object(), "summary_config must be"),
-        ("workflow_config", object(), "workflow_config must be"),
-    ],
-)
-def test_constructor_rejects_invalid_collaborator(
-    tmp_path: Path,
-    field: str,
-    invalid: object,
-    message: str,
-) -> None:
-    manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
-    arguments = {
-        "compactor": manager.compactor,
-        "journal": manager.journal,
-        "segment_store": manager.segment_store,
-        "range_store": manager.range_store,
-        "summary_vector_index": manager.summary_vector_index,
-        "jobs": manager.jobs,
-        "receipts": manager.receipts,
-        "transaction_journal": manager.transaction_journal,
-        "retirement_store": manager.retirement_store,
-        "summary_config": manager.summary_config,
-        "workflow_config": manager.workflow_config,
-    }
-    arguments[field] = invalid
-    with pytest.raises(TypeError, match=message):
-        ConversationLifecycleManager(**arguments)  # type: ignore[arg-type]
 
 
 def test_constructor_rejects_summary_config_different_from_compactor(tmp_path: Path) -> None:
@@ -97,18 +56,12 @@ def test_constructor_rejects_retirement_store_not_shared_with_summary_index(tmp_
         )
 
 
-@pytest.mark.parametrize("now", ["2026-07-01", BASE_TIME.replace(tzinfo=None)])
-def test_maintain_once_rejects_invalid_explicit_time(tmp_path: Path, now: object) -> None:
+@pytest.mark.parametrize("now", [BASE_TIME.replace(tzinfo=None)])
+def test_maintain_once_rejects_invalid_explicit_time(tmp_path: Path, now: datetime) -> None:
     manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
-    with pytest.raises((TypeError, ValueError), match="lifecycle now"):
-        asyncio.run(manager.maintain_once(address, now=now))  # type: ignore[arg-type]
-
-
-def test_maintain_once_rejects_invalid_conversation_address(tmp_path: Path) -> None:
-    manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
-    with pytest.raises(TypeError, match="address must be"):
-        asyncio.run(manager.maintain_once(None, now=BASE_TIME))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="lifecycle now"):
+        asyncio.run(manager.maintain_once(address, now=now))
 
 
 def test_maintain_once_normalizes_offset_time_to_utc(tmp_path: Path) -> None:
@@ -122,16 +75,9 @@ def test_maintain_once_normalizes_offset_time_to_utc(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("compaction", object(), "compaction must be"),
-        ("summary_indexed", 1, "summary_indexed must be"),
-        ("purged_history_segment_ids", ["id"], "must contain"),
         ("released_history_segment_ids", ("",), "must contain"),
-        ("deleted_segment_summary_ids", (1,), "must contain"),
-        ("deleted_range_summary_ids", None, "must contain"),
-        ("deleted_archive_summary_ids", None, "must contain"),
         ("deleted_memory_receipt_ids", ("",), "must contain"),
         ("deleted_memory_job_sequences", (0,), "positive integers"),
-        ("deleted_memory_job_sequences", (True,), "positive integers"),
     ],
 )
 def test_maintenance_result_rejects_invalid_fields(

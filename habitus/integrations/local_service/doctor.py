@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 from habitus.config import ConfigError, HabitusConfig
 from habitus.foundation.network import OutboundSettingsError, build_ssl_context, redact_proxy_url
+from habitus.foundation.validation import is_nonblank_str
 from habitus.infrastructure.store.filesystem import describe_access, grants_group_or_other_access, is_path_alias
 from habitus.integrations.local_service.windows_shell import powershell_policy_checks
 
@@ -80,15 +81,7 @@ def run_doctor(
     probe_timeout_seconds: float = 15.0,
     catalog: AdapterCatalog | None = None,
 ) -> DoctorReport:
-    if not isinstance(config, HabitusConfig):
-        raise TypeError("config must be HabitusConfig")
-    if not isinstance(deep, bool):
-        raise TypeError("deep must be boolean")
-    if (
-        isinstance(probe_timeout_seconds, bool)
-        or not isinstance(probe_timeout_seconds, int | float)
-        or not 0 < float(probe_timeout_seconds) <= 120
-    ):
+    if not 0 < float(probe_timeout_seconds) <= 120:
         raise ValueError("probe_timeout_seconds must be greater than zero and at most 120")
     if catalog is None:
         from habitus.integrations.local_service.adapter_catalog import load_adapter_catalog
@@ -131,8 +124,6 @@ def run_doctor_from_env(
     """即使配置无效也返回结构化诊断，不把解析异常泄露到 CLI。"""
 
     values = os.environ if environ is None else environ
-    if not isinstance(values, Mapping):
-        raise TypeError("environ must be a string mapping")
     try:
         config = HabitusConfig.from_env(environ=values)
         from habitus.runtime import validate_domain_configs
@@ -507,7 +498,7 @@ def _credential_check(config: HabitusConfig, catalog: AdapterCatalog) -> DoctorC
 
 def _config_file_security(environ: Mapping[str, str]) -> DoctorCheck:
     raw_path = environ.get("HABITUS_CONFIG_FILE")
-    if not isinstance(raw_path, str) or not raw_path.strip():
+    if not is_nonblank_str(raw_path):
         return DoctorCheck("config_permissions", DoctorStatus.FAIL, "HABITUS_CONFIG_FILE is missing")
     path = Path(raw_path).expanduser().absolute()
     try:

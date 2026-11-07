@@ -32,7 +32,7 @@ class SessionLaneConfig:
     def __post_init__(self) -> None:
         for item in fields(self):
             value = getattr(self, item.name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if value <= 0:
                 raise ValueError(f"session lane {item.name} must be a positive integer")
         if self.max_instruction_chars > self.max_turn_chars:
             raise ValueError("session lane max_instruction_chars cannot exceed max_turn_chars")

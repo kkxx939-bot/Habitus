@@ -81,7 +81,7 @@ class OutletStore:
     def asked_key(call_id: str) -> str:
         """调用身份 → 文件名（call_id 由宿主给，形状不可控，取摘要）。"""
 
-        if not isinstance(call_id, str) or not call_id:
+        if not call_id:
             raise ForesightError("call_id must be non-empty text")
         return sha256(call_id.encode("utf-8")).hexdigest()[:24]
 
@@ -120,6 +120,7 @@ class OutletStore:
             try:
                 found[str(raw.get("host") or name)] = datetime.fromisoformat(str(raw["seen_at"]))
             except (KeyError, ValueError):
+                # 读不出的活性记录当作没见过：宿主下次来取时会重写它
                 continue
         return found
 

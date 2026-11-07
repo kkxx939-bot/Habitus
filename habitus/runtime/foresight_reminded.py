@@ -26,19 +26,15 @@ class RemindedLookup:
     def __init__(
         self, ledger: ForesightLedgerStore, *, current: Callable[[str], Sequence[str]] = lambda token: (token,)
     ) -> None:
-        if not isinstance(ledger, ForesightLedgerStore):
-            raise TypeError("ledger must be a ForesightLedgerStore")
-        if not callable(current):
-            raise TypeError("current must be callable")
         self.ledger = ledger
         self.current = current
         #: 日子 → (递送目录的文件名, 那天说出口的 [(预期, 决定时刻)])。
         self._spoken: dict[date, tuple[frozenset[str], tuple[tuple[Expectation, datetime], ...]]] = {}
 
     def __call__(self, kind_token: str, started_at: datetime) -> bool:
-        if not isinstance(kind_token, str) or not kind_token:
+        if not kind_token:
             raise ForesightError("kind_token must be non-empty text")
-        if not isinstance(started_at, datetime) or started_at.utcoffset() is None:
+        if started_at.utcoffset() is None:
             raise ForesightError("started_at must be a timezone-aware datetime")
         open_days = self.ledger.open_days()
         # 结完的日子不会再被问到：它们的缓存淘汰掉（26 号清单 6.13）

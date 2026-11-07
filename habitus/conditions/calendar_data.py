@@ -63,11 +63,23 @@ def parse_holiday_year(text: str) -> HolidayYear:
         or len(set(weekend)) != len(weekend)
     ):
         raise CalendarDataError("weekend must be a list of distinct weekdays")
+    region, year, source, version = raw["region"], raw["year"], raw["source"], raw["version"]
+    if not isinstance(region, str):
+        raise CalendarDataError("calendar region must be an ISO 3166 code such as CN, SG or US-CA")
+    if isinstance(year, bool) or not isinstance(year, int):
+        raise CalendarDataError("calendar year must be an integer")
+    if not isinstance(source, str) or not source.strip():
+        raise CalendarDataError("calendar source must be non-empty text")
+    if not isinstance(version, str) or not version.strip():
+        raise CalendarDataError("calendar version must be non-empty text")
+    for key, name in holidays.items():
+        if not isinstance(name, str):
+            raise CalendarDataError(f"holiday {key} needs a name")
     return HolidayYear(
-        region=raw["region"],
-        year=raw["year"],
-        source=raw["source"],
-        version=raw["version"],
+        region=region,
+        year=year,
+        source=source,
+        version=version,
         weekend=frozenset(weekend),
         holidays={_day(key): value for key, value in holidays.items()},
         makeup_workdays=frozenset(makeup_days),

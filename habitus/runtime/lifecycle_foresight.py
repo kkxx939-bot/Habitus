@@ -39,9 +39,7 @@ class ForesightParticipant:
         window: int,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if not isinstance(ledger, ForesightLedgerStore) or not isinstance(history, HistoryStore):
-            raise TypeError("ledger must be a ForesightLedgerStore and history a HistoryStore")
-        if isinstance(feedback_kept, bool) or not isinstance(feedback_kept, int) or feedback_kept < window:
+        if feedback_kept < window:
             raise ValueError("lifecycle.feedback_kept must not be smaller than the reading window")
         self.feedback_kept = feedback_kept
         self.ledger = ledger

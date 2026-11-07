@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import sqlite3
+from contextlib import closing
 from datetime import timedelta
 
 import pytest
 
 from habitus.memory.conversation import (
     ConversationAddress,
+    ConversationLayoutError,
     ConversationSummaryUseError,
     SQLiteConversationSummaryUseStore,
 )
@@ -89,3 +92,48 @@ def test_summary_use_rows_are_keyed_by_the_case_folded_conversation(tmp_path) ->
 
     cleaned = ConversationAddress("conv-abc", BASE_TIME.date())
     assert store.delete_coverage(cleaned, start_sequence=0, end_sequence=9) == 1
+
+
+@pytest.mark.parametrize(
+    ("column", "bad", "message"),
+    [
+        ("conversation_id", b"conversation-1", "conversation_id must be one safe non-empty path segment"),
+        ("summary_id", b"7", "summary reference summary_id must be normalized non-empty text"),
+        ("useful_recall_count", 1.5, "summary use state useful_recall_count must be non-negative"),
+        ("version", "two", "summary use state version must be non-negative"),
+    ],
+)
+def test_summary_use_store_rejects_wrongly_typed_sqlite_columns(
+    tmp_path, column: str, bad: object, message: str
+) -> None:
+    """SQLite 表不是 STRICT（BLOB、非整数仍可落进列里），类型错的列在 ``_state`` 解码时就被拒（W16）。"""
+
+    address = ConversationAddress("conversation-1", BASE_TIME.date())
+    reference = summary_reference(address, segment_summary())
+    path = tmp_path / "summary_use.sqlite3"
+    store = SQLiteConversationSummaryUseStore(path)
+    store.record_use((reference,), used_at=BASE_TIME)
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute(f"UPDATE conversation_summary_use SET {column} = ?", (bad,))
+
+    with pytest.raises(ConversationSummaryUseError, match="failed to read") as caught:
+        store.read_many((reference,))
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert message in str(caught.value.__cause__)
+
+
+def test_summary_use_coverage_cleanup_rejects_non_text_summary_id(tmp_path) -> None:
+    """覆盖范围清理读回的 ``summary_id`` 不是文本时，在进入 ``segment_range`` 之前被拒。"""
+
+    address = ConversationAddress("conversation-1", BASE_TIME.date())
+    reference = summary_reference(address, segment_summary())
+    path = tmp_path / "summary_use.sqlite3"
+    store = SQLiteConversationSummaryUseStore(path)
+    store.record_use((reference,), used_at=BASE_TIME)
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("UPDATE conversation_summary_use SET summary_id = ?", (b"1",))
+
+    with pytest.raises(ConversationSummaryUseError, match="delete Summary use coverage") as caught:
+        store.delete_coverage(address, start_sequence=0, end_sequence=1)
+    assert isinstance(caught.value.__cause__, ConversationLayoutError)
+    assert "segment_id must be text" in str(caught.value.__cause__)

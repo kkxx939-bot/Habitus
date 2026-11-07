@@ -38,16 +38,10 @@ class MemoryJobCommit:
     summary_generated: bool
 
     def __post_init__(self) -> None:
-        if not isinstance(self.commit, MemoryCommitResult):
-            raise TypeError("commit must be MemoryCommitResult")
-        if not isinstance(self.journal, MemoryTransactionJournalRecord):
-            raise TypeError("journal must be MemoryTransactionJournalRecord")
         if self.journal.state is not MemoryTransactionJournalState.COMMITTED:
             raise ValueError("job commit requires a COMMITTED transaction journal")
         if self.commit.transaction_id != self.journal.transaction_id:
             raise ValueError("commit result and transaction journal identities differ")
-        if not isinstance(self.summary_generated, bool):
-            raise TypeError("summary_generated must be boolean")
 
 
 class MemoryJobExecutor:
@@ -64,18 +58,6 @@ class MemoryJobExecutor:
         clock: Callable[[], datetime] | None = None,
         observer: Observer | None = None,
     ) -> None:
-        if not isinstance(conversations, ConversationMessageJournal):
-            raise TypeError("conversations must be ConversationMessageJournal")
-        if not isinstance(editor, MemoryEditor):
-            raise TypeError("editor must be MemoryEditor")
-        if not isinstance(summary_service, ConversationSummaryService):
-            raise TypeError("summary_service must be ConversationSummaryService")
-        if not isinstance(change_receipts, MemoryChangeReceiptStore):
-            raise TypeError("change_receipts must be MemoryChangeReceiptStore")
-        if not isinstance(jobs, MemoryJobStore):
-            raise TypeError("jobs must be MemoryJobStore")
-        if clock is not None and not callable(clock):
-            raise TypeError("clock must be callable")
         if summary_service.store.layout.root != conversations.layout.root:
             raise ValueError("summary service and conversations must use one conversation root")
         if change_receipts.codec is not editor.transaction.tree.document_codec:
@@ -92,8 +74,6 @@ class MemoryJobExecutor:
     async def execute(self, lease: MemoryJobLease) -> MemoryJobCommit:
         """只接受当前 claim，成功时保证事务日志已经到达 COMMITTED。"""
 
-        if not isinstance(lease, MemoryJobLease):
-            raise TypeError("lease must be a MemoryJobLease")
         job = self.jobs.assert_current(lease)
         address = ConversationAddress(job.conversation_id, job.started_on)
         with observe_operation(self.observer, "workflow", "segment_read"):
@@ -174,8 +154,6 @@ class MemoryJobExecutor:
 
     def _timestamp(self) -> datetime:
         value = self.clock()
-        if not isinstance(value, datetime):
-            raise TypeError("memory workflow clock must return datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("memory workflow clock must return timezone-aware datetime")
         return value.astimezone(UTC)

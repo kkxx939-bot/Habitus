@@ -386,7 +386,5 @@ def test_the_shapes_refuse_contradictions() -> None:
         DayWatch(NIGHT, 1.5)
     with pytest.raises(ForesightError, match="day_type"):
         DayWatch(NIGHT, 1.0, "")
-    with pytest.raises(ForesightError, match="DayWatch records"):
-        OpportunityTable("session", NIGHT, NIGHT, 15, 3, (), (), watch=[DayWatch(NIGHT, 1.0)])  # type: ignore[arg-type]
     with pytest.raises(ForesightError, match="distinct and ascending"):
         OpportunityTable("session", NIGHT, NIGHT, 15, 3, (), (), watch=(DayWatch(NIGHT, 1.0), DayWatch(NIGHT, 0.5)))

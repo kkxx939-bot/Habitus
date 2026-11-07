@@ -80,7 +80,7 @@ def first_occurrence(
 ) -> FlowRow | None:
     """``observed_from`` 之后、最晚时限之前这一类第一次发生的那一行。"""
 
-    for row in sorted(rows, key=lambda item: _utc(item.at)):
+    for row in sorted(rows, key=_row_at):
         if counts_as_done(expectation, row.kind_token, row.at, abandoned=row.status in NOT_DONE, current=current):
             return row
     return None
@@ -201,7 +201,7 @@ def rule_overdue(
     kinds = _kinds(expectation, current)
     deadline = _utc(expectation.deadline)
     horizon = _utc(before) if before is not None else None
-    for row in sorted(rows, key=lambda item: _utc(item.at)):
+    for row in sorted(rows, key=_row_at):
         at = _utc(row.at)
         if row.kind_token not in kinds or at <= deadline or row.status in NOT_DONE:
             continue
@@ -265,6 +265,10 @@ def _is_class(token: str) -> bool:
 
 def _utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
+
+
+def _row_at(row: FlowRow) -> datetime:
+    return _utc(row.at)
 
 
 def _minutes(delta: timedelta) -> int:

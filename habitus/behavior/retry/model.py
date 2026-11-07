@@ -78,14 +78,10 @@ class RetryItem:
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", RetryKind(self.kind))
         object.__setattr__(self, "cause", RetryCause(self.cause))
-        if not isinstance(self.item_id, str) or not _IDENTITY.fullmatch(self.item_id):
+        if not _IDENTITY.fullmatch(self.item_id):
             raise RetryError("retry item_id must be 32 lowercase hexadecimal characters")
-        if not isinstance(self.day, date) or isinstance(self.day, datetime):
-            raise RetryError("retry day must be a date")
-        if not isinstance(self.entered_at, datetime) or self.entered_at.utcoffset() is None:
+        if self.entered_at.utcoffset() is None:
             raise RetryError("retry entered_at must be timezone-aware")
-        if not isinstance(self.payload, Mapping):
-            raise RetryError("retry payload must be a JSON object")
 
     def to_bytes(self) -> bytes:
         payload = {
@@ -102,6 +98,8 @@ class RetryItem:
     def from_mapping(cls, raw: object) -> RetryItem:
         if not isinstance(raw, Mapping) or set(raw) != _KEYS:
             raise RetryError("retry item has an unexpected shape")
+        if not isinstance(raw["payload"], Mapping):
+            raise RetryError("retry payload must be a JSON object")
         try:
             return cls(
                 item_id=str(raw["item_id"]),

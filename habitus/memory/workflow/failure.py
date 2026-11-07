@@ -41,8 +41,6 @@ def memory_job_failure_kind(error: BaseException) -> MemoryJobFailureKind:
     泛化的 ValueError / TypeError 只在最外层算数，包在里面的不改变外层的处置。整条链都认不得的未知运行时故障有界重试。
     """
 
-    if not isinstance(error, BaseException):
-        raise TypeError("error must be an exception")
     if isinstance(error, MemoryJobLeaseLostError):
         return MemoryJobFailureKind.PERMANENT
     seen: set[int] = set()

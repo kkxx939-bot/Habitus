@@ -29,10 +29,8 @@ class ConversationSourceStore:
 
     def __init__(self, conversation_root: str | Path, *, max_file_bytes: int, ledger: ConversationSourceLedger) -> None:
         self.root = Path(conversation_root).expanduser().resolve(strict=False)
-        if isinstance(max_file_bytes, bool) or not isinstance(max_file_bytes, int) or max_file_bytes <= 0:
+        if max_file_bytes <= 0:
             raise ValueError("max_file_bytes must be a positive integer")
-        if not isinstance(ledger, ConversationSourceLedger):
-            raise TypeError("ledger must be ConversationSourceLedger")
         if ledger.index.root != self.root:
             raise ValueError("source store and ledger must share one conversation root")
         self.ledger = ledger
@@ -40,8 +38,6 @@ class ConversationSourceStore:
         self.envelope_root = self.root / "source" / "envelopes"
 
     def put(self, envelope: ConversationSourceEnvelope) -> ConversationSourceEnvelope:
-        if not isinstance(envelope, ConversationSourceEnvelope):
-            raise TypeError("envelope must be ConversationSourceEnvelope")
         encoded = self._encode(envelope)
         # 标记先于信封，且只在这一扇写入门里打：有序检查与释放靠"标记在、信封不在"分辨 put 进行中与已释放
         # （index.py）；重放撞车时同样先补标记，幂等。

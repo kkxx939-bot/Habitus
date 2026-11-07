@@ -8,7 +8,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any
 
-from habitus.infrastructure.editor.snapshot import SnapshotBatch, VersionedSnapshot
+from habitus.infrastructure.editor.snapshot import VersionedSnapshot
 from habitus.memory.document import MemoryDocument
 from habitus.memory.editor.candidate import MemoryCandidate
 from habitus.memory.model import MemoryKind
@@ -39,10 +39,6 @@ class MemoryMutationReadSet:
     target_memories: MemorySnapshotBatch
 
     def __post_init__(self) -> None:
-        if not isinstance(self.old_memories, SnapshotBatch):
-            raise TypeError("old_memories must be a MemorySnapshotBatch")
-        if not isinstance(self.target_memories, SnapshotBatch):
-            raise TypeError("target_memories must be a MemorySnapshotBatch")
         for target in self.target_memories.snapshots:
             previous = self.old_memories.get(target.identity)
             if previous is None:
@@ -65,16 +61,10 @@ class MemoryNodeMatch:
     snapshot: VersionedSnapshot[MemoryDocument]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.candidate, MemoryCandidate):
-            raise TypeError("candidate must be a MemoryCandidate")
-        if not isinstance(self.uri, MemoryURI):
-            raise TypeError("node match URI must be a MemoryURI")
         if self.uri.to_address() != self.candidate.address:
             raise ValueError("node match URI must equal the candidate-derived address")
         status = MemoryNodeMatchStatus(self.status)
         object.__setattr__(self, "status", status)
-        if not isinstance(self.snapshot, VersionedSnapshot):
-            raise TypeError("node match snapshot must be a VersionedSnapshot")
         if self.snapshot.identity != str(self.uri):
             raise ValueError("node match snapshot identity does not match its URI")
         if status is MemoryNodeMatchStatus.NEW:
@@ -98,17 +88,11 @@ class MemoryFieldMergeResult:
     """候选指向只增记忆的旧节点：旧字段原样保留，候选字段不生效。"""
 
     def __post_init__(self) -> None:
-        if not isinstance(self.fields, Mapping) or any(not isinstance(name, str) for name in self.fields):
-            raise TypeError("merged memory fields must be a mapping with string keys")
         object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
-        if not isinstance(self.changed_fields, tuple) or any(
-            not isinstance(name, str) or not name for name in self.changed_fields
-        ):
+        if any(not name for name in self.changed_fields):
             raise TypeError("changed_fields must be a tuple of non-empty strings")
         if len(self.changed_fields) != len(set(self.changed_fields)):
             raise ValueError("changed_fields cannot contain duplicates")
-        if not isinstance(self.read_only_target, bool):
-            raise TypeError("read_only_target must be boolean")
         if self.read_only_target and self.changed_fields:
             raise ValueError("read-only target merge cannot change fields")
 
@@ -126,25 +110,15 @@ class MemoryMutation:
     """候选指向只增记忆的旧节点，被保留为 NOOP；供审计统计。"""
 
     def __post_init__(self) -> None:
-        if not isinstance(self.match, MemoryNodeMatch):
-            raise TypeError("match must be a MemoryNodeMatch")
         action = MemoryMutationAction(self.action)
         object.__setattr__(self, "action", action)
-        if not isinstance(self.fields, Mapping) or any(not isinstance(name, str) for name in self.fields):
-            raise TypeError("mutation fields must be a mapping with string keys")
         object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
-        if not isinstance(self.changed_fields, tuple) or any(
-            not isinstance(name, str) or not name for name in self.changed_fields
-        ):
+        if any(not name for name in self.changed_fields):
             raise TypeError("mutation changed_fields must contain non-empty strings")
         if len(self.changed_fields) != len(set(self.changed_fields)):
             raise ValueError("mutation changed_fields cannot contain duplicates")
-        if not isinstance(self.confirms_intention, bool):
-            raise TypeError("confirms_intention must be boolean")
         if self.confirms_intention and self.match.candidate.kind is not MemoryKind.INTENTION:
             raise ValueError("only an Intention mutation can refresh confirmation time")
-        if not isinstance(self.read_only_target, bool):
-            raise TypeError("read_only_target must be boolean")
         if self.read_only_target and action is not MemoryMutationAction.NOOP:
             raise ValueError("read-only target mutation must be a noop")
         if action is MemoryMutationAction.CREATE:
@@ -173,12 +147,6 @@ class MemoryMutationPlan:
     mutations: tuple[MemoryMutation, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.read_set, MemoryMutationReadSet):
-            raise TypeError("read_set must be a MemoryMutationReadSet")
-        if not isinstance(self.mutations, tuple) or any(
-            not isinstance(mutation, MemoryMutation) for mutation in self.mutations
-        ):
-            raise TypeError("mutations must be a tuple of MemoryMutation values")
         identities = tuple((str(item.uri), item.match.candidate.page_id) for item in self.mutations)
         if identities != tuple(sorted(identities)):
             raise ValueError("memory mutations must be sorted by URI and page_id")

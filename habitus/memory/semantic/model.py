@@ -24,13 +24,11 @@ class MemorySemanticEntry:
     content: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name.strip():
+        if not self.name.strip():
             raise ValueError("memory semantic entry name must be non-empty")
         if self.name != self.name.strip() or any(ord(character) < 32 for character in self.name):
             raise ValueError("memory semantic entry name contains unsafe characters")
         object.__setattr__(self, "kind", MemorySemanticEntryKind(self.kind))
-        if not isinstance(self.content, str):
-            raise TypeError("memory semantic entry content must be a string")
 
 
 @dataclass(frozen=True)
@@ -41,11 +39,7 @@ class MemoryDirectorySnapshot:
     entries: tuple[MemorySemanticEntry, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.directory, MemoryDirectory):
-            raise TypeError("snapshot directory must be a MemoryDirectory")
         normalized = tuple(self.entries)
-        if any(not isinstance(entry, MemorySemanticEntry) for entry in normalized):
-            raise TypeError("snapshot entries must contain MemorySemanticEntry values")
         identities = [(entry.kind.value, entry.name) for entry in normalized]
         if len(identities) != len(set(identities)):
             raise ValueError("snapshot contains duplicate direct entries")

@@ -121,39 +121,24 @@ class BehaviorConfig:
     semantic_max_abstract_chars: int | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.primary_subject, str):
-            raise TypeError("behavior.primary_subject must be a string")
-        if self.context_lookback_seconds is not None and (
-            isinstance(self.context_lookback_seconds, bool)
-            or not isinstance(self.context_lookback_seconds, int | float)
-            or not 60.0 <= float(self.context_lookback_seconds) <= 86_400.0
-        ):
+        if self.context_lookback_seconds is not None and not 60.0 <= float(self.context_lookback_seconds) <= 86_400.0:
             raise ValueError("behavior.context_lookback_seconds must be between 60 and 86400")
-        if (
-            isinstance(self.coverage_window_days, bool)
-            or not isinstance(self.coverage_window_days, int)
-            or not 1 <= self.coverage_window_days <= 365
-        ):
+        if not 1 <= self.coverage_window_days <= 365:
             raise ValueError("behavior.coverage_window_days must be between 1 and 365")
-        if (
-            isinstance(self.retry_backlog_max, bool)
-            or not isinstance(self.retry_backlog_max, int)
-            or not 1 <= self.retry_backlog_max <= 100_000
-        ):
+        if not 1 <= self.retry_backlog_max <= 100_000:
             raise ValueError("behavior.retry_backlog_max must be an integer between 1 and 100000")
         for prefix in OVERRIDE_PREFIXES:
             require_override_types(self, path="behavior", prefix=prefix)
-        if self.reduction_sweep_lock_ttl_seconds is not None and (
-            isinstance(self.reduction_sweep_lock_ttl_seconds, bool)
-            or not isinstance(self.reduction_sweep_lock_ttl_seconds, int)
-            or not 60 <= self.reduction_sweep_lock_ttl_seconds <= 86_400
+        if (
+            self.reduction_sweep_lock_ttl_seconds is not None
+            and not 60 <= self.reduction_sweep_lock_ttl_seconds <= 86_400
         ):
             raise ValueError("behavior.reduction_sweep_lock_ttl_seconds must be an integer between 60 and 86400")
         for name, value, minimum, maximum in (
             ("reduction_sweep_interval_seconds", self.reduction_sweep_interval_seconds, 1.0, 3_600.0),
             ("worker_shutdown_timeout_seconds", self.worker_shutdown_timeout_seconds, 1.0, 3_600.0),
         ):
-            if isinstance(value, bool) or not isinstance(value, int | float) or not minimum <= float(value) <= maximum:
+            if not minimum <= float(value) <= maximum:
                 raise ValueError(f"behavior.{name} must be between {minimum:g} and {maximum:g}")
 
     @property

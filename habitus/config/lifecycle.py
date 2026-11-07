@@ -17,18 +17,13 @@ from typing import Any
 from habitus.config.loader import construct_config, group_fields
 
 
-def _integer(value: object, name: str, *, minimum: int, maximum: int) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+def _integer(value: int, name: str, *, minimum: int, maximum: int) -> None:
+    if not minimum <= value <= maximum:
         raise ValueError(f"lifecycle.{name} must be an integer between {minimum} and {maximum}")
 
 
-def _number(value: object, name: str, *, maximum: float) -> None:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int | float)
-        or not math.isfinite(value)
-        or not 0 < float(value) <= maximum
-    ):
+def _number(value: float, name: str, *, maximum: float) -> None:
+    if not math.isfinite(value) or not 0 < float(value) <= maximum:
         raise ValueError(f"lifecycle.{name} must be greater than zero and at most {maximum:g}")
 
 
@@ -93,17 +88,9 @@ class LifecycleConfig:
     feedback_kept: int = 100
 
     def __post_init__(self) -> None:
-        if not isinstance(self.worker, LifecycleWorkerConfig):
-            raise TypeError("lifecycle.worker must be LifecycleWorkerConfig")
-        if not isinstance(self.retry, LifecycleRetryConfig):
-            raise TypeError("lifecycle.retry must be LifecycleRetryConfig")
         _integer(self.fallback_generations, "fallback_generations", minimum=1, maximum=30)
         _integer(self.transitions_rotate_files, "transitions_rotate_files", minimum=1, maximum=100)
-        if (
-            isinstance(self.capacity_warning_share, bool)
-            or not isinstance(self.capacity_warning_share, int | float)
-            or not 0.0 < float(self.capacity_warning_share) < 1.0
-        ):
+        if not 0.0 < float(self.capacity_warning_share) < 1.0:
             raise ValueError("lifecycle.capacity_warning_share must lie in (0, 1)")
         _integer(self.physical_max_backfill_days, "physical_max_backfill_days", minimum=1, maximum=365)
         _integer(self.feedback_kept, "feedback_kept", minimum=1, maximum=100_000)

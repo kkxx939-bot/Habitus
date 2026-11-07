@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractContextManager, asynccontextmanager, suppress
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -61,15 +61,13 @@ class ConversationConsumerExecutionFence:
         heartbeat_interval_seconds: float,
         wait_seconds: float,
     ) -> None:
-        if not isinstance(path_lock, PathLock):
-            raise TypeError("path_lock must be PathLock")
-        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
+        if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be a positive integer")
         for name, value in (
             ("heartbeat_interval_seconds", heartbeat_interval_seconds),
             ("wait_seconds", wait_seconds),
         ):
-            if isinstance(value, bool) or not isinstance(value, int | float) or float(value) < 0:
+            if value < 0:
                 raise ValueError(f"{name} must be a non-negative number")
         if heartbeat_interval_seconds <= 0 or heartbeat_interval_seconds > ttl_seconds / 3:
             raise ValueError("heartbeat interval must be positive and at most one third of TTL")
@@ -85,15 +83,13 @@ class ConversationConsumerExecutionFence:
         consumer: ConversationSourceConsumer,
         *,
         conversation_ordered: bool = False,
-    ):
+    ) -> AsyncIterator[ConversationConsumerExecutionLease]:
         """按固定顺序取得本次执行需要的锁。
 
         ``conversation_ordered`` 由调用方从 Consumer 自身声明传入；栅栏不认识
         任何具体 Consumer，只负责按稳定顺序取锁。
         """
 
-        if not isinstance(conversation_ordered, bool):
-            raise TypeError("conversation_ordered must be boolean")
         resolved_consumer = ConversationSourceConsumer(consumer)
         keys = self._keys(source, resolved_consumer, conversation_ordered=conversation_ordered)
         contexts: list[AbstractContextManager[LeaseGuard]] = []

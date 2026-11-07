@@ -64,7 +64,7 @@ class Move:
     def __post_init__(self) -> None:
         for name in ("occurrence", "source", "target"):
             value = getattr(self, name)
-            if not isinstance(value, str) or not value:
+            if not value:
                 raise BehaviorKindError(f"move {name} must be non-empty text")
         if self.source == self.target:
             raise BehaviorKindError(f"move does not change the token: {self.occurrence}")
@@ -89,9 +89,9 @@ class VersionRecord:
     note: str = ""
 
     def __post_init__(self) -> None:
-        if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version <= 0:
+        if self.version <= 0:
             raise BehaviorKindError("version must be a positive integer")
-        if not isinstance(self.at, datetime) or self.at.utcoffset() is None:
+        if self.at.utcoffset() is None:
             raise BehaviorKindError("version time must be timezone-aware")
         object.__setattr__(self, "reason", ChangeReason(self.reason))
         if not self.operations and not self.moves:

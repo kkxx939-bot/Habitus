@@ -105,6 +105,7 @@ class HTTPObservationMiddleware:
                 )
             )
         except Exception:
+            # 观测只是旁路：请求事件记不下来不能影响 HTTP 响应。
             pass
 
 
@@ -139,12 +140,14 @@ def _isolated_span(
         try:
             manager.__exit__(type(exc), exc, exc.__traceback__)
         except Exception:
+            # 追踪 span 关不上不能盖住原始异常，原始异常随后重抛。
             pass
         raise
     else:
         try:
             manager.__exit__(None, None, None)
         except Exception:
+            # 追踪 span 关不上不能影响已经成功的请求。
             pass
 
 

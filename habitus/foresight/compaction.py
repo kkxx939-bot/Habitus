@@ -35,7 +35,7 @@ class CompactionPlan:
 def compactable(account: RankedAccount, *, open_day: date | None, diagnosis_since: date, window: int) -> CompactionPlan:
     """``open_day`` 是账本里最早一个还没结完的日子（全结完了为 None），``diagnosis_since`` 是诊断回看的第一天，``window`` 是 M。"""
 
-    if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+    if window < 1:
         raise ValueError("window must be a positive integer")
     keys = account.prediction.keys
     allowed = [

@@ -18,13 +18,11 @@ from habitus.memory.recall import (
 )
 from habitus.memory.uri import MemoryURI
 from habitus.memory.workflow import MemoryChangeReceiptState, MemoryChangeSource, MemoryJobError, MemoryJobStatus
-from habitus.memory.workflow.completion import MemoryCommittedJobFinalizer, MemoryJobCompletion
-from habitus.memory.workflow.execution import MemoryJobCommit, MemoryJobExecutor
-from habitus.memory.workflow.planning import MemorySegmentProductBuilder, MemorySegmentProducts
+from habitus.memory.workflow.completion import MemoryJobCompletion
+from habitus.memory.workflow.execution import MemoryJobCommit
 from habitus.pre.conversation import ConversationBatch
 from habitus.runtime import build_runtime
 from tests.helpers import BASE_TIME, closed_turn, document, segment, segment_summary
-from tests.integration.test_change_receipt_chain import editor_plan
 from tests.integration.test_memory_job_full_chain import dependencies, runtime_config
 from tests.lock_store import ProcessLocalLockStore
 
@@ -72,59 +70,6 @@ def completion_result(tmp_path: Path):
     return value, completed
 
 
-@pytest.mark.parametrize(
-    ("summary", "plan", "message"),
-    [
-        (object(), editor_plan(), "summary must be"),
-        (segment_summary(), object(), "editor_plan must be"),
-    ],
-)
-def test_segment_products_require_both_typed_products(summary: object, plan: object, message: str) -> None:
-    with pytest.raises(TypeError, match=message):
-        MemorySegmentProducts(summary, plan)  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize(
-    ("field", "invalid", "message"),
-    [
-        ("summary_service", object(), "summary_service must be"),
-        ("editor", object(), "editor must be"),
-    ],
-)
-def test_product_builder_constructor_rejects_invalid_dependencies(
-    tmp_path: Path,
-    field: str,
-    invalid: object,
-    message: str,
-) -> None:
-    workflow = runtime(tmp_path).components.workflow
-    arguments = {
-        "summary_service": workflow.runner.executor.summary_service,
-        "editor": workflow.runner.executor.editor,
-    }
-    arguments[field] = invalid
-    with pytest.raises(TypeError, match=message):
-        MemorySegmentProductBuilder(**arguments)  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize(
-    ("address", "source", "message"),
-    [
-        (object(), segment(), "address must be"),
-        (ConversationAddress("conversation-1", date(2026, 7, 1)), object(), "segment must be"),
-    ],
-)
-def test_product_builder_rejects_invalid_build_inputs(
-    tmp_path: Path,
-    address: object,
-    source: object,
-    message: str,
-) -> None:
-    builder = runtime(tmp_path).components.workflow.runner.executor.segment_products
-    with pytest.raises(TypeError, match=message):
-        asyncio.run(builder.build(address, source))  # type: ignore[arg-type]
-
-
 def test_product_builder_propagates_editor_failure_after_summary_branch_finishes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -156,44 +101,7 @@ def test_product_builder_propagates_editor_failure_after_summary_branch_finishes
     assert summary_finished
 
 
-@pytest.mark.parametrize(
-    ("field", "invalid", "message"),
-    [
-        ("conversations", object(), "conversations must be"),
-        ("editor", object(), "editor must be"),
-        ("summary_service", object(), "summary_service must be"),
-        ("change_receipts", object(), "change_receipts must be"),
-        ("jobs", object(), "jobs must be"),
-        ("clock", 1, "clock must be callable"),
-    ],
-)
-def test_executor_constructor_rejects_invalid_dependencies(
-    tmp_path: Path,
-    field: str,
-    invalid: object,
-    message: str,
-) -> None:
-    executor = runtime(tmp_path).components.workflow.runner.executor
-    arguments = {
-        "conversations": executor.conversations,
-        "editor": executor.editor,
-        "summary_service": executor.summary_service,
-        "change_receipts": executor.change_receipts,
-        "jobs": executor.jobs,
-        "clock": executor.clock,
-    }
-    arguments[field] = invalid
-    with pytest.raises(TypeError, match=message):
-        MemoryJobExecutor(**arguments)  # type: ignore[arg-type]
-
-
-def test_executor_rejects_non_lease(tmp_path: Path) -> None:
-    executor = runtime(tmp_path).components.workflow.runner.executor
-    with pytest.raises(TypeError, match="lease must be"):
-        asyncio.run(executor.execute(object()))  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("clock_value", ["now", BASE_TIME.replace(tzinfo=None)])
+@pytest.mark.parametrize("clock_value", [BASE_TIME.replace(tzinfo=None)])
 def test_executor_clock_must_return_timezone_aware_datetime(tmp_path: Path, clock_value: object) -> None:
     executor = runtime(tmp_path).components.workflow.runner.executor
     executor.clock = lambda: clock_value
@@ -210,27 +118,6 @@ def test_executor_commits_l2_but_leaves_job_running_for_completion_phase(tmp_pat
     assert result.summary_generated
 
 
-@pytest.mark.parametrize(
-    ("field", "invalid", "message"),
-    [
-        ("commit", object(), "commit must be"),
-        ("journal", object(), "journal must be"),
-        ("summary_generated", 1, "summary_generated must be"),
-    ],
-)
-def test_job_commit_rejects_invalid_fields(
-    tmp_path: Path,
-    field: str,
-    invalid: object,
-    message: str,
-) -> None:
-    _value, _lease, valid = execution_result(tmp_path)
-    arguments = {name: getattr(valid, name) for name in valid.__dataclass_fields__}
-    arguments[field] = invalid
-    with pytest.raises((TypeError, ValueError), match=message):
-        MemoryJobCommit(**arguments)  # type: ignore[arg-type]
-
-
 def test_job_commit_rejects_non_committed_or_foreign_journal(tmp_path: Path) -> None:
     _value, _lease, valid = execution_result(tmp_path)
     with pytest.raises(ValueError, match="COMMITTED"):
@@ -245,54 +132,6 @@ def test_job_commit_rejects_non_committed_or_foreign_journal(tmp_path: Path) -> 
             replace(valid.journal, transaction_id="f" * 32),
             valid.summary_generated,
         )
-
-
-@pytest.mark.parametrize(
-    ("field", "invalid", "message"),
-    [
-        ("store", object(), "store must be"),
-        ("conversations", object(), "conversations must be"),
-        ("summary_service", object(), "summary_service must be"),
-        ("summary_vector_index", object(), "summary_vector_index must be"),
-        ("change_receipts", object(), "change_receipts must be"),
-        ("semantic_refresher", object(), "semantic_refresher must be"),
-        ("vector_index", object(), "vector_index must be"),
-        ("transaction_recovery", object(), "transaction_recovery must be"),
-        ("recall_state_cleaner", object(), "recall_state_cleaner must implement"),
-    ],
-)
-def test_finalizer_constructor_rejects_invalid_dependencies(
-    tmp_path: Path,
-    field: str,
-    invalid: object,
-    message: str,
-) -> None:
-    finalizer = runtime(tmp_path).components.workflow.runner.committed_finalizer
-    arguments = {
-        "store": finalizer.store,
-        "conversations": finalizer.conversations,
-        "summary_service": finalizer.summary_service,
-        "summary_vector_index": finalizer.summary_vector_index,
-        "change_receipts": finalizer.change_receipts,
-        "semantic_refresher": finalizer.semantic_refresher,
-        "vector_index": finalizer.vector_index,
-        "transaction_recovery": finalizer.transaction_recovery,
-        "recall_state_cleaner": finalizer.recall_state_cleaner,
-    }
-    arguments[field] = invalid
-    with pytest.raises(TypeError, match=message):
-        MemoryCommittedJobFinalizer(**arguments)  # type: ignore[arg-type]
-
-
-def test_finalizer_rejects_invalid_finalize_inputs(tmp_path: Path) -> None:
-    value, lease, commit = execution_result(tmp_path)
-    finalizer = value.components.workflow.runner.committed_finalizer
-    with pytest.raises(TypeError, match="lease must be"):
-        asyncio.run(finalizer.finalize(object(), commit.journal))  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="journal must be"):
-        asyncio.run(finalizer.finalize(lease, object()))  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="summary_generated must be"):
-        asyncio.run(finalizer.finalize(lease, commit.journal, summary_generated=1))  # type: ignore[arg-type]
 
 
 def test_finalizer_rejects_non_committed_or_foreign_journal(tmp_path: Path) -> None:
@@ -316,8 +155,6 @@ def test_semantic_refresh_requires_committed_receipt(tmp_path: Path) -> None:
     assert receipt.state is MemoryChangeReceiptState.PREPARED
     with pytest.raises(MemoryJobError, match="COMMITTED"):
         finalizer._refresh_semantic_layers(receipt)
-    with pytest.raises(TypeError, match="receipt must be"):
-        finalizer._refresh_semantic_layers(object())  # type: ignore[arg-type]
 
 
 def test_full_completion_result_is_strict_and_all_durable_steps_are_true(tmp_path: Path) -> None:
@@ -360,12 +197,3 @@ def test_finalizer_forgets_retired_recall_state_and_cleanup_failure_is_non_block
 
     finalizer.recall_state_cleaner = FailingCleaner()
     asyncio.run(finalizer._forget_retired_recall_state((uri,)))
-
-
-@pytest.mark.parametrize("field", ["summary_generated", "summary_indexed", "vector_indexed", "journal_cleaned"])
-def test_completion_result_rejects_non_boolean_flags(tmp_path: Path, field: str) -> None:
-    _value, valid = completion_result(tmp_path)
-    arguments = {name: getattr(valid, name) for name in valid.__dataclass_fields__}
-    arguments[field] = 1
-    with pytest.raises(TypeError, match="must be boolean"):
-        MemoryJobCompletion(**arguments)

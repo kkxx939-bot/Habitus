@@ -45,17 +45,13 @@ class PhysicalLane:
     已经写过的段重来时会被认出来、不重复写。"""
 
     def __init__(self, recorder: PhysicalSegmentRecorder, *, max_backfill_days: int) -> None:
-        if not isinstance(recorder, PhysicalSegmentRecorder):
-            raise TypeError("recorder must be PhysicalSegmentRecorder")
-        if isinstance(max_backfill_days, bool) or not isinstance(max_backfill_days, int) or max_backfill_days < 1:
+        if max_backfill_days < 1:
             raise ValueError("max_backfill_days must be a positive integer")
         self.recorder = recorder
         self.max_backfill_days = max_backfill_days
         self._one_at_a_time = threading.Lock()
 
     def consume(self, delivery: PhysicalDelivery) -> tuple[UnitOutcome, ...]:
-        if not isinstance(delivery, PhysicalDelivery):
-            raise TypeError("delivery must be PhysicalDelivery")
         with self._one_at_a_time:
             self._within_backfill(delivery)
             pieces = self._reconciled(delivery)  # 先对一遍，矛盾的整份拒收，什么都不写

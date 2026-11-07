@@ -218,3 +218,111 @@ def test_waiting_for_the_model_uses_its_own_long_backoff_and_never_exhausts_atte
     clock.advance(seconds=1)
     failed = jobs.fail(jobs.claim(retried, "worker"), RuntimeError("still broken"), retryable=True)
     assert failed.status is MemoryJobStatus.FAILED and not failed.waiting_for_model
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("memory_sequence", True, "memory_sequence must be a positive integer"),
+        ("memory_sequence", "1", "memory_sequence must be a positive integer"),
+        ("conversation_id", 1, "conversation_id must be non-empty normalized text"),
+        ("segment_id", None, "segment_id must be non-empty normalized text"),
+        ("source_segment_digest", 1, "source_segment_digest must be lowercase SHA-256 text"),
+        ("transaction_id", None, "transaction_id must be 32 lowercase hexadecimal characters"),
+        ("attempts", 1.0, "memory job attempts must be non-negative"),
+        ("claim_id", 5, "running memory job requires a claim_id"),
+        ("claim_generation", "1", "memory job claim_generation must be non-negative"),
+        ("worker_id", ["worker"], "running memory job requires a normalized worker_id"),
+        ("last_error", 3, "memory job last_error is invalid"),
+        ("model_waits", False, "memory job model_waits must be non-negative"),
+    ],
+)
+def test_job_file_with_wrongly_typed_field_is_rejected_by_the_decoder(
+    tmp_path: Path, field: str, bad: object, message: str
+) -> None:
+    """磁盘读回的 Job 字段类型错时在解码器就被拒（W16：类型检查在边界，不靠 ``MemoryJob`` 构造器）。"""
+
+    jobs = store(tmp_path, Clock())
+    jobs.stage(ConversationAddress("conversation-a", date(2026, 7, 1)), source("conversation-a", 0))
+    job_path = next(path for path in jobs.jobs_root.glob("*.json") if path.name != "state.json")
+    payload = json.loads(job_path.read_text(encoding="utf-8"))
+    payload[field] = bad
+    job_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MemoryJobError, match="fields are invalid") as caught:
+        jobs.oldest_uncommitted()
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert message in str(caught.value.__cause__)
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("created_at", 1),
+        ("created_at", None),
+        ("updated_at", "time"),
+        ("updated_at", "2026-07-01T00:00:00"),
+        ("started_on", 1),
+        ("started_on", None),
+        ("lease_expires_at", 0),
+        ("next_attempt_at", "time"),
+    ],
+)
+def test_job_file_with_wrongly_typed_time_is_rejected_by_the_decoder(tmp_path: Path, field: str, bad: object) -> None:
+    """磁盘读回的 Job 时间与日期字段类型错时在解码器就被拒（W16：``MemoryJob`` 构造器不再查类型）。"""
+
+    jobs = store(tmp_path, Clock())
+    jobs.stage(ConversationAddress("conversation-a", date(2026, 7, 1)), source("conversation-a", 0))
+    job_path = next(path for path in jobs.jobs_root.glob("*.json") if path.name != "state.json")
+    payload = json.loads(job_path.read_text(encoding="utf-8"))
+    payload[field] = bad
+    job_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MemoryJobError, match="fields are invalid"):
+        jobs.oldest_uncommitted()
+
+
+@pytest.mark.parametrize("bad", [True, "3", 3.0, None])
+def test_sequence_state_with_wrongly_typed_high_watermark_is_rejected(tmp_path: Path, bad: object) -> None:
+    jobs = store(tmp_path, Clock())
+    jobs.initialize()
+    jobs.state_path.write_text(
+        json.dumps({"schema": "memory_job_sequence_state_v1", "last_allocated_memory_sequence": bad}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(MemoryJobError, match="high-watermark must be non-negative"):
+        jobs.initialize()
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("memory_sequence", "1", "memory_sequence must be a positive integer"),
+        ("conversation_id", None, "conversation_id must be non-empty normalized text"),
+        ("segment_id", 1, "segment_id must be non-empty normalized text"),
+        ("source_segment_digest", None, "source_segment_digest must be lowercase SHA-256 text"),
+        ("transaction_id", 1, "transaction_id must be 32 lowercase hexadecimal characters"),
+        ("attempts", True, "attempts must be a positive integer"),
+        ("last_error", None, "last_error must be non-empty bounded text"),
+        ("reason", ["原因"], "reason must be non-empty bounded text"),
+    ],
+)
+def test_abandonment_file_with_wrongly_typed_field_is_rejected_by_the_decoder(
+    tmp_path: Path, field: str, bad: object, message: str
+) -> None:
+    jobs = store(tmp_path, Clock())
+    queued = jobs.activate(
+        jobs.stage(ConversationAddress("conversation-a", date(2026, 7, 1)), source("conversation-a", 0))
+    )
+    failed = jobs.fail(jobs.claim(queued, "worker"), ValueError("permanent"), retryable=False)
+    jobs.abandon_failed(failed, reason="人工确认")
+    record_path = next(jobs.abandonments_root.glob("*.json"))
+    payload = json.loads(record_path.read_text(encoding="utf-8"))
+    payload[field] = bad
+    record_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MemoryJobError, match="failed to read memory job abandonment") as caught:
+        jobs.try_read_abandonment(failed)
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert message in str(caught.value.__cause__)

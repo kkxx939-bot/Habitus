@@ -1,5 +1,7 @@
 """live 追加、不可变 History 封存、高水位和生命周期释放测试。"""
 
+import json
+import re
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -13,6 +15,7 @@ from habitus.memory.conversation import (
     ConversationIngressError,
     ConversationIngressRequest,
     ConversationJournalConfig,
+    ConversationJournalError,
     ConversationLayoutError,
     ConversationMessageJournal,
     ConversationSealStatus,
@@ -122,6 +125,60 @@ def test_delivery_id_survives_history_release_and_rejects_rebinding(tmp_path: Pa
             batch,
             ingress=ConversationIngressRequest(ingress.delivery_id, "e" * 64),
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("delivery_id", 1, "receipt delivery_id must be lowercase SHA-256 text"),
+        ("batch_digest", None, "receipt batch_digest must be lowercase SHA-256 text"),
+        ("start_sequence", "0", "receipt start_sequence must be non-negative"),
+        ("end_sequence", True, "receipt end_sequence must be non-negative"),
+        ("next_sequence", 2.0, "committed receipt next_sequence is inconsistent"),
+    ],
+)
+def test_ingress_receipt_read_rejects_wrongly_typed_fields(
+    tmp_path: Path, field: str, bad: object, message: str
+) -> None:
+    """磁盘上类型错的投递回执字段在 ``from_dict`` 解码时就被拒（W16：类型检查在边界）。"""
+
+    store = journal(tmp_path)
+    ingress = ConversationIngressRequest("a" * 64, "b" * 64)
+    store.append(address(), ConversationBatch("conversation-1", closed_turn()), ingress=ingress)
+    path = store.layout.ingress_path(address(), ingress.delivery_id)
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value[field] = bad
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(ConversationIngressError, match="ingress receipt is corrupt") as caught:
+        store.ingress_receipts.read(address(), ingress.delivery_id)
+    assert isinstance(caught.value.__cause__, ConversationIngressError)
+    assert message in str(caught.value.__cause__)
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("conversation_id", 1, "journal state conversation_id must be non-empty text"),
+        ("archived_through_sequence", "1", "journal state archived_through_sequence must be null or non-negative"),
+        ("released_through_sequence", False, "journal state released_through_sequence must be null or non-negative"),
+        ("latest_segment_id", 3, "journal state requires latest_segment_id"),
+        ("latest_segment_digest", ["a"], "journal state latest_segment_digest must be lowercase SHA-256"),
+    ],
+)
+def test_journal_state_read_rejects_wrongly_typed_fields(tmp_path: Path, field: str, bad: object, message: str) -> None:
+    """磁盘上类型错的 ``state.json`` 字段在读回解码时就被拒。"""
+
+    store = journal(tmp_path)
+    store.append(address(), ConversationBatch("conversation-1", closed_turn()))
+    store.seal(address(), through_sequence=1)
+    path = store.layout.state_path(address())
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value[field] = bad
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(ConversationJournalError, match=re.escape(message)):
+        store.read_state(address())
 
 
 def test_seal_publishes_history_trims_live_and_replay_is_unchanged(tmp_path: Path) -> None:

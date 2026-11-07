@@ -68,12 +68,6 @@ class BehaviorTree:
         self.root = requested.resolve(strict=False)
         if document_codec is None:
             document_codec = BehaviorDocumentCodec(BehaviorSchemaRegistry.load_default())
-        if not isinstance(document_codec, BehaviorDocumentCodec):
-            raise TypeError("document_codec must be a BehaviorDocumentCodec")
-        if document_config is not None and not isinstance(document_config, BehaviorDocumentConfig):
-            raise TypeError("document_config must be BehaviorDocumentConfig")
-        if tree_config is not None and not isinstance(tree_config, BehaviorTreeConfig):
-            raise TypeError("tree_config must be BehaviorTreeConfig")
         self._document_codec = document_codec
         self.document_config = document_config or BehaviorDocumentConfig()
         self.tree_config = tree_config or BehaviorTreeConfig()
@@ -95,15 +89,11 @@ class BehaviorTree:
         return self.root
 
     def path_for(self, address: BehaviorAddress) -> Path:
-        if not isinstance(address, BehaviorAddress):
-            raise TypeError("address must be a BehaviorAddress")
         candidate = self.root / self._relative_path(address)
         self._require_inside_root(candidate)
         return candidate
 
     def directory_path(self, directory: BehaviorDirectory) -> Path:
-        if not isinstance(directory, BehaviorDirectory):
-            raise TypeError("directory must be a BehaviorDirectory")
         candidate = self.root.joinpath(*directory.identity_parts)
         self._require_inside_root(candidate)
         return candidate
@@ -111,8 +101,6 @@ class BehaviorTree:
     def storable_bytes(self, document: BehaviorDocument) -> bytes:
         """文档写盘时的编码；正文或编码后字节超出上限就拒（``BehaviorDocumentLimitError``）。写入与归约发布前的干跑共用这一处。"""
 
-        if not isinstance(document, BehaviorDocument):
-            raise TypeError("document must be a BehaviorDocument")
         encoded = self._document_codec.encode(document).encode("utf-8")
         self.document_config.validate_body(document.markdown_body)
         self.document_config.validate_encoded(encoded)
@@ -121,8 +109,6 @@ class BehaviorTree:
     def create(self, document: BehaviorDocument) -> BehaviorDocument:
         """原子创建 add-only L2；目标已绑定到不同内容时拒绝覆盖。"""
 
-        if not isinstance(document, BehaviorDocument):
-            raise TypeError("document must be a BehaviorDocument")
         encoded = self.storable_bytes(document)
         self.initialize()
         path = self._existing_document_path(document.address)
@@ -142,8 +128,6 @@ class BehaviorTree:
         updated_at 不早于原值；任何别的差异都拒绝——防止它被当成通用更新入口。
         """
 
-        if not isinstance(document, BehaviorDocument):
-            raise TypeError("document must be a BehaviorDocument")
         current = self.read(document.address)
         if current.kind is not document.kind:
             raise BehaviorTreeConflictError("behavior L2 replace cannot change the document kind")
@@ -183,8 +167,6 @@ class BehaviorTree:
                 return
 
     def read(self, address: BehaviorAddress) -> BehaviorDocument:
-        if not isinstance(address, BehaviorAddress):
-            raise TypeError("address must be a BehaviorAddress")
         raw = self._read_utf8(
             self._existing_document_path(address),
             label="behavior document",
@@ -207,7 +189,7 @@ class BehaviorTree:
         """
 
         resolved_kind = BehaviorKind(kind)
-        if isinstance(occurred_on, datetime) or not isinstance(occurred_on, date):
+        if isinstance(occurred_on, datetime):
             raise TypeError("occurred_on must be a date without a time")
         directory = BehaviorDirectory._dated(
             kind_directory_prefix(resolved_kind), occurred_on.year, occurred_on.month, occurred_on.day
@@ -235,7 +217,7 @@ class BehaviorTree:
         """
 
         resolved_kind = BehaviorKind(kind)
-        if isinstance(occurred_on, datetime) or not isinstance(occurred_on, date):
+        if isinstance(occurred_on, datetime):
             raise TypeError("occurred_on must be a date without a time")
         directory = BehaviorDirectory._dated(
             kind_directory_prefix(resolved_kind), occurred_on.year, occurred_on.month, occurred_on.day
@@ -263,8 +245,6 @@ class BehaviorTree:
         return tuple(documents)
 
     def exists(self, address: BehaviorAddress) -> bool:
-        if not isinstance(address, BehaviorAddress):
-            raise TypeError("address must be a BehaviorAddress")
         try:
             return regular_file_exists(
                 self._existing_document_path(address),
@@ -290,8 +270,6 @@ class BehaviorTree:
         # 改不了，见 behavior/reduction/runner.py 的 gap 落盘一节）。语义关联/摘要消费空白段时
         # 要么接受这个低估（场景极罕见），要么定一条读消费账本核对时长的通道——在语义关联层
         # 设计时裁定，不许无意识地把树上的 ended_at 当成空白的确切终点。
-        if not isinstance(abstract, str) or not isinstance(overview, str):
-            raise TypeError("behavior semantic layers must be strings")
         if not abstract.strip() or not overview.strip():
             raise ValueError("behavior semantic layers must be non-empty")
         encoded_abstract = abstract.encode("utf-8")
@@ -339,10 +317,8 @@ class BehaviorTree:
         limit: int = 256,
         after: BehaviorAddress | None = None,
     ) -> tuple[BehaviorAddress, ...]:
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
+        if not 1 <= limit <= 10_000:
             raise ValueError("behavior tree list limit must be between 1 and 10000")
-        if after is not None and not isinstance(after, BehaviorAddress):
-            raise TypeError("behavior tree list cursor must be BehaviorAddress or None")
         selected_kind = None if kind is None else BehaviorKind(kind)
         if after is not None and selected_kind is not None and after.kind is not selected_kind:
             raise ValueError("behavior tree list cursor kind does not match the selected kind")
@@ -471,6 +447,7 @@ class BehaviorTree:
                 try:
                     identity = canonical_path_identity(entry.name, "behavior path entry")
                 except ValueError:
+                    # 名字算不出规范身份的条目不可能与合法地址同一身份，匹配时跳过即可。
                     continue
                 if identity == desired:
                     matches.append(entry)
@@ -575,6 +552,7 @@ class BehaviorTree:
             try:
                 existing_identities.add(canonical_path_identity(entry.name, "behavior path entry"))
             except ValueError:
+                # 这类条目仍计入 len(entries) 占用容量，只是不会与请求的合法身份重合，跳过即可。
                 continue
         requested_identities = {canonical_path_identity(name, "behavior path child") for name in child_names}
         additional = len(requested_identities - existing_identities)
@@ -594,7 +572,7 @@ class BehaviorTree:
         max_bytes: int | None = None,
     ) -> str:
         maximum = self.document_config.max_encoded_bytes if max_bytes is None else max_bytes
-        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
+        if maximum <= 0:
             raise ValueError("max_bytes must be a positive integer")
         try:
             payload = read_regular_bytes(

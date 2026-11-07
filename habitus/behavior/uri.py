@@ -82,14 +82,10 @@ class BehaviorURI:
 
     @classmethod
     def from_address(cls, address: BehaviorAddress) -> BehaviorURI:
-        if not isinstance(address, BehaviorAddress):
-            raise TypeError("address must be a BehaviorAddress")
         return cls._from_segments(_address_segments(address))
 
     @classmethod
     def from_directory(cls, directory: BehaviorDirectory) -> BehaviorURI:
-        if not isinstance(directory, BehaviorDirectory):
-            raise TypeError("directory must be a BehaviorDirectory")
         return cls._from_segments(directory.identity_parts)
 
     @classmethod
@@ -102,8 +98,6 @@ class BehaviorURI:
     def build(cls, *path_parts: str) -> BehaviorURI:
         segments: list[str] = []
         for part in path_parts:
-            if not isinstance(part, str):
-                raise TypeError("behavior URI path parts must be strings")
             if not part or "/" in part or "\\" in part:
                 raise BehaviorURIError("behavior URI path parts must be safe non-empty segments")
             segments.append(part)
@@ -172,8 +166,6 @@ class BehaviorURI:
     def join(self, part: str) -> BehaviorURI:
         if self._node_type is not BehaviorURINodeType.DIRECTORY:
             raise BehaviorURIError("only a behavior directory URI can join a child")
-        if not isinstance(part, str):
-            raise TypeError("behavior URI join part must be a string")
         if not part or "/" in part or "\\" in part:
             raise BehaviorURIError("behavior URI join part must be one safe non-empty segment")
         return self._from_segments((*self._segments, part))
@@ -312,7 +304,7 @@ def _decode_segment(value: str) -> str:
 
 
 def _encode_segment(value: str) -> str:
-    if not isinstance(value, str) or not value:
+    if not value:
         raise BehaviorURIError("behavior URI segments must be non-empty strings")
     encoded: list[str] = []
     for character in value:

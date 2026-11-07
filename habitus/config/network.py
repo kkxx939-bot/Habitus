@@ -10,6 +10,7 @@ from pathlib import Path
 
 from habitus.config.loader import ConfigError, group_fields
 from habitus.foundation.network import TRUST_STORES, OutboundSettings, OutboundSettingsError, check_ca_bundle
+from habitus.foundation.validation import is_nonblank_str
 
 _PATH = "config.network"
 
@@ -36,7 +37,7 @@ def outbound_settings_from_mapping(value: object) -> OutboundSettings:
 def _ca_bundle(value: object) -> Path | None:
     if value is None:
         return None
-    if not isinstance(value, str) or not value.strip():
+    if not is_nonblank_str(value):
         raise ConfigError(f"invalid '{_PATH}.ca_bundle': must be a non-empty path to a PEM file")
     path = Path(value.strip()).expanduser().absolute()
     try:

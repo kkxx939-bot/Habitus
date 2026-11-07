@@ -36,12 +36,7 @@ class SQLiteLockStoreConfig:
     timeout_seconds: float = 5.0
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.timeout_seconds, bool)
-            or not isinstance(self.timeout_seconds, int | float)
-            or not isfinite(float(self.timeout_seconds))
-            or not 0.001 <= float(self.timeout_seconds) <= 60.0
-        ):
+        if not isfinite(float(self.timeout_seconds)) or not 0.001 <= float(self.timeout_seconds) <= 60.0:
             raise ValueError("timeout_seconds must be between 0.001 and 60")
 
 
@@ -54,14 +49,10 @@ class SQLiteLockStore:
         config: SQLiteLockStoreConfig | None = None,
         initialize: bool = True,
     ) -> None:
-        if config is not None and not isinstance(config, SQLiteLockStoreConfig):
-            raise TypeError("config must be SQLiteLockStoreConfig")
         self.path = Path(path)
         self.owner = owner
         self.config = config or SQLiteLockStoreConfig()
         self.sqlite_timeout_seconds = float(self.config.timeout_seconds)
-        if not isinstance(initialize, bool):
-            raise TypeError("initialize must be boolean")
         self._initialized = False
         self._initialization_guard = threading.Lock()
         if initialize:

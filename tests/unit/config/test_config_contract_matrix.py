@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import fields, is_dataclass, replace
+from collections.abc import Callable, Mapping
+from dataclasses import fields, is_dataclass
 
 import pytest
 
@@ -124,6 +125,17 @@ NESTED_FIELDS = tuple(
 )
 
 
+def _decoder(model_type: type[object]) -> Callable[[Mapping[str, object]], object]:
+    """YAML 读进来走的那条解码路径：坏类型由解码器在构造前拒（W16），不再靠值对象构造器。"""
+
+    if model_type is ConversationSummaryCompactionConfig:
+        return lambda data: ConversationLifecycleConfig.from_mapping({"summary_compaction": data})
+    from_mapping: Callable[[Mapping[str, object]], object] | None = getattr(model_type, "from_mapping", None)
+    if from_mapping is not None:
+        return from_mapping
+    return lambda data: construct_config(model_type, data, "config.test")
+
+
 @pytest.mark.parametrize(
     ("instance", "field"),
     INTEGER_FIELDS,
@@ -136,7 +148,7 @@ def test_every_integer_config_field_rejects_bool_float_string_and_null(
     invalid: object,
 ) -> None:
     with pytest.raises((TypeError, ValueError)):
-        replace(instance, **{field: invalid})
+        _decoder(type(instance))({field: invalid})
 
 
 @pytest.mark.parametrize(
@@ -151,7 +163,7 @@ def test_every_numeric_duration_or_score_field_rejects_bool_and_non_numeric_valu
     invalid: object,
 ) -> None:
     with pytest.raises((TypeError, ValueError)):
-        replace(instance, **{field: invalid})
+        _decoder(type(instance))({field: invalid})
 
 
 @pytest.mark.parametrize(
@@ -166,7 +178,7 @@ def test_every_boolean_config_field_rejects_truthy_or_falsy_coercion(
     invalid: object,
 ) -> None:
     with pytest.raises((TypeError, ValueError)):
-        replace(instance, **{field: invalid})
+        _decoder(type(instance))({field: invalid})
 
 
 @pytest.mark.parametrize(
@@ -174,14 +186,14 @@ def test_every_boolean_config_field_rejects_truthy_or_falsy_coercion(
     NESTED_FIELDS,
     ids=[f"{type(instance).__name__}.{field}" for instance, field in NESTED_FIELDS],
 )
-@pytest.mark.parametrize("invalid", [None, {}, [], "config", 1, True])
+@pytest.mark.parametrize("invalid", [None, [], "config", 1, True])
 def test_every_nested_config_field_requires_its_exact_domain_config_type(
     instance: object,
     field: str,
     invalid: object,
 ) -> None:
     with pytest.raises((TypeError, ValueError)):
-        replace(instance, **{field: invalid})
+        _decoder(type(instance))({field: invalid})
 
 
 @pytest.mark.parametrize("instance", CONFIG_INSTANCES, ids=lambda item: type(item).__name__)

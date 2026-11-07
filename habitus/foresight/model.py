@@ -28,7 +28,7 @@ class Moment:
     looked_since: datetime | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.at, datetime) or self.at.utcoffset() is None:
+        if self.at.utcoffset() is None:
             raise ForesightError("moment must be a timezone-aware local datetime")
         if self.looked_since is not None and (self.looked_since.utcoffset() is None or self.looked_since > self.at):
             raise ForesightError("looked_since must be a timezone-aware datetime no later than the moment")
@@ -59,13 +59,13 @@ class UnsealedRow:
     summary: str | None
 
     def __post_init__(self) -> None:
-        if self.name is not None and (not isinstance(self.name, str) or not self.name):
+        if self.name is not None and not self.name:
             raise ForesightError("unsealed row name must be non-empty text or None")
         if self.name is None and self.kind_token is not None:
             raise ForesightError("an unreadable unsealed row cannot carry a kind")
         for label in ("started_at", "last_observed_at"):
             value = getattr(self, label)
-            if not isinstance(value, datetime) or value.utcoffset() is None:
+            if value.utcoffset() is None:
                 raise ForesightError(f"unsealed row {label} must be a timezone-aware datetime")
         if self.last_observed_at < self.started_at:
             raise ForesightError("an unsealed row cannot be last seen before it started")
@@ -94,22 +94,18 @@ class Seen:
     subjects: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not isinstance(self.summary, str):
-            raise ForesightError("seen row name and summary must be text")
-        if self.place is not None and (not isinstance(self.place, str) or not self.place):
+        if self.place is not None and not self.place:
             raise ForesightError("seen row place must be non-empty text or None")
-        if not isinstance(self.subjects, tuple) or any(not isinstance(item, str) or not item for item in self.subjects):
+        if any(not item for item in self.subjects):
             raise ForesightError("seen row subjects must be a tuple of names")
-        if not isinstance(self.abandoned, bool):
-            raise ForesightError("seen row abandoned must be a boolean")
         for label in ("started_at", "ended_at"):
             value = getattr(self, label)
-            if not isinstance(value, datetime) or value.utcoffset() is None:
+            if value.utcoffset() is None:
                 raise ForesightError(f"seen row {label} must be a timezone-aware datetime")
         if self.ended_at < self.started_at:
             raise ForesightError("a seen row cannot end before it started")
         for label in ("kind_token", "source"):
-            if not isinstance(getattr(self, label), str) or not getattr(self, label):
+            if not getattr(self, label):
                 raise ForesightError(f"seen row {label} must be non-empty text")
 
     @property

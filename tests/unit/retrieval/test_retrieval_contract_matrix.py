@@ -7,6 +7,7 @@ from datetime import timedelta
 
 import pytest
 
+from habitus.config.loader import ConfigError, construct_config
 from habitus.memory.document import MemoryLinkType, MemoryStoredLink
 from habitus.memory.intention import (
     MemoryIntentionRecallScope,
@@ -50,9 +51,11 @@ def _matched(kind: MemoryKind = MemoryKind.PREFERENCE, score: float = 0.9) -> Me
 
 @pytest.mark.parametrize("field", INTEGER_CONFIG_FIELDS)
 @pytest.mark.parametrize("value", [True, False, 1.0, "1", None, [], {}])
-def test_search_config_rejects_non_integer_for_every_integer_field(field: str, value: object) -> None:
-    with pytest.raises(ValueError):
-        replace(MemorySearchServiceConfig(), **{field: value})
+def test_search_config_decoder_rejects_non_integer_for_every_integer_field(field: str, value: object) -> None:
+    """YAML 里类型错的整数字段在配置解码器就被拒（W16：构造器不再查类型）。"""
+
+    with pytest.raises(ConfigError, match=rf"config\.memory\.search_service\.{field} must be an integer"):
+        construct_config(MemorySearchServiceConfig, {field: value}, "config.memory.search_service")
 
 
 @pytest.mark.parametrize("field", INTEGER_CONFIG_FIELDS)
@@ -68,9 +71,9 @@ def test_search_config_accepts_explicit_summary_fallback_switch(value: bool) -> 
 
 
 @pytest.mark.parametrize("value", [0, 1, "true", None, [], {}])
-def test_search_config_rejects_non_boolean_summary_fallback_switch(value: object) -> None:
-    with pytest.raises(TypeError):
-        replace(MemorySearchServiceConfig(), summary_fallback_enabled=value)
+def test_search_config_decoder_rejects_non_boolean_summary_fallback_switch(value: object) -> None:
+    with pytest.raises(ConfigError, match=r"summary_fallback_enabled must be a boolean"):
+        construct_config(MemorySearchServiceConfig, {"summary_fallback_enabled": value}, "config.memory.search_service")
 
 
 @pytest.mark.parametrize(
@@ -117,15 +120,27 @@ def test_retrieval_assessment_rejects_invalid_reason(reason: object) -> None:
         )  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("missing", [[], "missing", None, ("",), (" ",), (" x",), ("x ",), (1,), ("x", "x")])
-def test_retrieval_assessment_rejects_invalid_missing_information_container_or_items(missing: object) -> None:
-    with pytest.raises((TypeError, ValueError)):
+@pytest.mark.parametrize("missing", [("",), (" ",), (" x",), ("x ",), ("x", "x")])
+def test_retrieval_assessment_rejects_invalid_missing_information_container_or_items(missing: tuple[str, ...]) -> None:
+    with pytest.raises(ValueError):
         MemoryRetrievalAssessment(
             MemoryRetrievalSufficiency.INSUFFICIENT,
             "缺少信息。",
-            missing,  # type: ignore[arg-type]
+            missing,
             "查询历史",
         )
+
+
+@pytest.mark.parametrize("missing", ["missing", None, {}])
+def test_retrieval_assessment_parser_rejects_non_list_missing_information(missing: object) -> None:
+    value = {
+        "decision": "insufficient",
+        "reason": "不足。",
+        "missing_information": missing,
+        "summary_query": "查询历史",
+    }
+    with pytest.raises(TypeError, match="missing_information must be a list"):
+        MemoryRetrievalAssessment.model_validate(value)
 
 
 @pytest.mark.parametrize(
@@ -185,6 +200,53 @@ def test_retrieval_assessment_parser_rejects_each_missing_field(field: str) -> N
         MemoryRetrievalAssessment.model_validate(value)
 
 
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("reason", 1, "reason must be non-empty text"),
+        ("reason", None, "reason must be non-empty text"),
+        ("missing_information", ["缺口", 1], "missing_information contains invalid text"),
+        ("summary_query", 3, "Summary fallback query must be non-empty text"),
+        ("summary_query", ["查询"], "Summary fallback query must be non-empty text"),
+    ],
+)
+def test_retrieval_assessment_parser_rejects_wrong_types_from_model_output(
+    field: str, bad: object, message: str
+) -> None:
+    """模型答复里类型错的字段在解码器就被拒（W16：类型检查在边界，不靠值对象构造器）。"""
+
+    value: dict[str, object] = {
+        "decision": "insufficient",
+        "reason": "不足。",
+        "missing_information": ["缺口"],
+        "summary_query": "查询历史",
+    }
+    value[field] = bad
+    with pytest.raises(ValueError, match=message):
+        MemoryRetrievalAssessment.model_validate(value)
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "message"),
+    [
+        ("query", 1, "typed query must be non-empty text"),
+        ("query", None, "typed query must be non-empty text"),
+        ("intent", ["意图"], "query intent must be non-empty text"),
+        ("priority", True, "query priority must be between one and five"),
+        ("priority", "1", "query priority must be between one and five"),
+        ("priority", 1.0, "query priority must be between one and five"),
+        ("priority", None, "query priority must be between one and five"),
+    ],
+)
+def test_typed_query_parser_rejects_wrong_types_from_model_output(field: str, bad: object, message: str) -> None:
+    """查询规划模型输出的类型错误在 ``from_dict`` 就被拒。"""
+
+    value: dict[str, object] = {"query": "查询", "intent": "意图", "priority": 1}
+    value[field] = bad
+    with pytest.raises(ValueError, match=message):
+        MemoryTypedQuery.from_dict(value)
+
+
 @pytest.mark.parametrize("score", [-100.0, -1.0, -0.0, 0, 0.5, 1.0, 100.0])
 def test_search_hit_accepts_finite_final_scores(score: float) -> None:
     uri = MemoryURI.from_address(MemoryAddress.profile())
@@ -240,10 +302,10 @@ def test_typed_query_round_trips_valid_priorities(query: str, intent: str, prior
     assert MemoryTypedQuery.from_dict(value.to_dict()) == value
 
 
-@pytest.mark.parametrize("priority", [0, 6, -1, True, False, 1.0, "1", None])
-def test_typed_query_rejects_invalid_priority(priority: object) -> None:
+@pytest.mark.parametrize("priority", [0, 6, -1])
+def test_typed_query_rejects_invalid_priority(priority: int) -> None:
     with pytest.raises(ValueError):
-        MemoryTypedQuery("查询", "意图", priority)  # type: ignore[arg-type]
+        MemoryTypedQuery("查询", "意图", priority)
 
 
 @pytest.mark.parametrize("field", ["query", "intent"])
@@ -302,12 +364,6 @@ def test_query_plan_records_contextual_identity_only_when_present(conversation_i
     assert plan.contextual is (conversation_id is not None)
 
 
-@pytest.mark.parametrize("hits", [[], {}, "hits", None, (object(),)])
-def test_query_result_requires_tuple_of_hits(hits: object) -> None:
-    with pytest.raises(TypeError):
-        MemoryQueryResult(MemoryTypedQuery("查询", "意图", 1), hits)  # type: ignore[arg-type]
-
-
 def test_query_result_requires_unique_score_sorted_hits() -> None:
     profile = MemorySearchHit(MemoryURI.from_address(MemoryAddress.profile()), 0.9)
     preference = MemorySearchHit(MemoryURI.from_address(MemoryAddress.preference("主题")), 0.8)
@@ -326,8 +382,8 @@ def test_matched_memory_binds_hit_document_query_and_intention_review(kind: Memo
     assert (value.intention_review is not None) is (kind is MemoryKind.INTENTION)
 
 
-@pytest.mark.parametrize("queries", [(), [], ("",), (" ",), (1,), ("q", "q")])
-def test_matched_memory_requires_nonempty_unique_query_tuple(queries: object) -> None:
+@pytest.mark.parametrize("queries", [(), ("",), (" ",), ("q", "q")])
+def test_matched_memory_requires_nonempty_unique_query_tuple(queries: tuple[str, ...]) -> None:
     hit, item = _hit()
     with pytest.raises((TypeError, ValueError)):
         MemoryMatchedMemory(hit, item, queries)  # type: ignore[arg-type]
@@ -435,7 +491,7 @@ def test_search_result_requires_nonempty_directory_roots(roots: object) -> None:
         _search_result(target_roots=roots)
 
 
-@pytest.mark.parametrize("kinds", [[], (MemoryKind.PREFERENCE, MemoryKind.PREFERENCE), ("unknown",)])
+@pytest.mark.parametrize("kinds", [(MemoryKind.PREFERENCE, MemoryKind.PREFERENCE), ("unknown",)])
 def test_search_result_requires_unique_kind_tuple(kinds: object) -> None:
     with pytest.raises((TypeError, ValueError)):
         _search_result(kinds=kinds)
@@ -470,10 +526,3 @@ def test_search_result_context_presence_exactly_tracks_returned_content(context:
                 context=context,
                 kinds=(MemoryKind.PREFERENCE,) if has_memory else (),
             )
-
-
-@pytest.mark.parametrize("field", ["summary_fallback_attempted", "budget_exhausted"])
-@pytest.mark.parametrize("value", [0, 1, "false", None, [], {}])
-def test_search_result_requires_boolean_control_flags(field: str, value: object) -> None:
-    with pytest.raises(TypeError):
-        _search_result(**{field: value})

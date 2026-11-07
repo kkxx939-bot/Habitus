@@ -19,12 +19,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypedDict
 
 from habitus.behavior.fusion.derivation import FUSION_VERSION, DurableJudgement, persistable_judgements
 from habitus.behavior.fusion.errors import BehaviorFusionError
 from habitus.behavior.observation import BehaviorObservation
 from habitus.foundation.integrity import canonical_digest, canonicalize
+from habitus.foundation.validation import is_aware_datetime, is_int
 
 RECEIPT_SCHEMA_VERSION = "behavior_fusion_receipt_v5"
 _RECEIPT_IDENTITY_SCHEMA = "behavior_fusion_receipt_identity_v1"
@@ -62,7 +63,7 @@ def _utc(value: object, label: str) -> datetime:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError as exc:
             raise BehaviorFusionError(f"{label} must be ISO-8601") from exc
-    if not isinstance(parsed, datetime) or parsed.utcoffset() is None:
+    if not is_aware_datetime(parsed):
         raise BehaviorFusionError(f"{label} must be a timezone-aware datetime")
     try:
         return parsed.astimezone(UTC)
@@ -76,6 +77,21 @@ def _texts(value: object, label: str) -> tuple[str, ...]:
     if any(not isinstance(item, str) or not item for item in value):
         raise BehaviorFusionError(f"{label} item must be non-empty text")
     return tuple(value)
+
+
+class _ReceiptValues(TypedDict):
+    """回执除 ``record_digest`` 之外的字段，键与类型同 ``BehaviorFusionReceipt``；构造与记录摘要共用这一份。"""
+
+    receipt_id: str
+    segment_digest: str
+    observation_ids: tuple[str, ...]
+    source_refs: tuple[str, ...]
+    fusion_version: str
+    prompt_version: str
+    validation_attempts: int
+    judged_at: datetime
+    judgement_ids: tuple[str, ...]
+    unreadable_observation_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -146,7 +162,7 @@ class BehaviorFusionReceipt:
         if value["schema_version"] != RECEIPT_SCHEMA_VERSION:
             raise BehaviorFusionError("behavior fusion receipt schema version is invalid")
         attempts = value["validation_attempts"]
-        if isinstance(attempts, bool) or not isinstance(attempts, int):
+        if not is_int(attempts):
             raise BehaviorFusionError("validation_attempts must be an integer")
         return cls(
             receipt_id=_sha256(value["receipt_id"], "receipt_id"),
@@ -170,10 +186,8 @@ def segment_identity(fragments: Sequence[BehaviorObservation]) -> str:
     就会被融合两次并留下两份互不相认的回执。
     """
 
-    if isinstance(fragments, (str, bytes)) or not isinstance(fragments, Sequence) or not fragments:
+    if not fragments:
         raise BehaviorFusionError("segment identity requires a non-empty fragment sequence")
-    if any(not isinstance(item, BehaviorObservation) for item in fragments):
-        raise TypeError("fragments must contain BehaviorObservation values")
     return canonical_digest(
         {
             "schema_version": _RECEIPT_IDENTITY_SCHEMA,
@@ -212,10 +226,6 @@ def build_fusion_receipt(
     回执不记"旁人""无归属"——那两份清单结构上恒空。
     """
 
-    if isinstance(judgements, (str, bytes)) or not isinstance(judgements, Sequence):
-        raise BehaviorFusionError("judgements must be a sequence")
-    if any(not isinstance(item, DurableJudgement) for item in judgements):
-        raise TypeError("judgements must contain DurableJudgement values")
     segment_digest = segment_identity(fragments)
     covered = {item.observation_id for item in fragments}
     in_scope = persistable_judgements(judgements, primary_subject)
@@ -237,7 +247,7 @@ def build_fusion_receipt(
     outside = sorted(unreadable - covered)
     if outside:
         raise BehaviorFusionError(f"judgements report observations outside this segment: {outside}")
-    values: dict[str, Any] = {
+    values: _ReceiptValues = {
         "receipt_id": receipt_identity(segment_digest, FUSION_VERSION, prompt_version),
         "segment_digest": segment_digest,
         "observation_ids": tuple(sorted(covered)),

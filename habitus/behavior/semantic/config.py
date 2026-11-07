@@ -31,7 +31,7 @@ class BehaviorSemanticConfig:
             "max_abstract_chars",
         ):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         if self.max_abstract_chars > self.max_overview_chars:
             raise ValueError("max_abstract_chars must not exceed max_overview_chars")

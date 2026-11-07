@@ -914,7 +914,7 @@ class ToolResultExtractor:
     """
 
     def __init__(self, maximum: int) -> None:
-        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
+        if maximum < 1:
             raise ValueError("maximum must be a positive integer")
         self.maximum = maximum
 

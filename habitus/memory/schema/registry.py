@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from habitus.foundation.validation import is_int
 from habitus.memory.model import MemoryAddress, MemoryKind
 from habitus.memory.schema.model import (
     MemoryFieldRole,
@@ -147,7 +148,7 @@ def _load_field(raw: Any, filename: str) -> MemoryFieldSchema:
         name=_string(payload["name"], "memory field name"),
         field_type=MemoryFieldType(str(payload["type"])),
         role=MemoryFieldRole(str(payload["role"])),
-        required=payload["required"],
+        required=_boolean(payload["required"], "memory schema field required"),
         merge_strategy=MemoryMergeStrategy(str(payload["merge"])),
         description=_string(payload["description"], "memory field description"),
         allowed_values=_string_tuple(
@@ -170,7 +171,7 @@ def _string(value: Any, label: str) -> str:
 
 
 def _non_negative_integer(value: Any, label: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if not is_int(value) or value < 0:
         raise MemorySchemaError(f"{label} must be a non-negative integer")
     return value
 

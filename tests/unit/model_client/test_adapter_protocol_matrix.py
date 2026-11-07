@@ -169,12 +169,6 @@ def test_openai_adapter_derives_endpoint_identity_and_remote_flag(
         provider._sync_client.close()
 
 
-@pytest.mark.parametrize("invalid", [None, "config", {}, [], 1, True, object()])
-def test_openai_adapter_requires_chat_config(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        OpenAICompatibleChatProvider(invalid)
-
-
 @pytest.mark.parametrize("adapter", ["test", "openai_compatible_embedding", "openai"])
 def test_openai_adapter_rejects_wrong_adapter_identity(adapter: str) -> None:
     with pytest.raises(ModelConfigurationError, match="requires adapter"):
@@ -421,16 +415,6 @@ def test_structured_prepare_counts_schema_only_where_selected_mode_sends_it(mode
         provider._sync_client.close()
 
 
-@pytest.mark.parametrize("invalid", [None, "request", {}, [], 1, True, object()])
-def test_openai_payload_requires_normalized_chat_request(invalid: object) -> None:
-    provider = OpenAICompatibleChatProvider(chat_config())
-    try:
-        with pytest.raises(TypeError):
-            provider.prepare(invalid, stream=False)
-    finally:
-        provider._sync_client.close()
-
-
 @pytest.mark.parametrize(
     ("content", "expected"),
     [
@@ -575,6 +559,9 @@ def test_openai_complete_normalizes_tool_call_arguments_from_text_or_mapping(arg
                 }
             ]
         },
+        # 非文本的 id、name 在解码处拒（W16：ToolCall 构造器不再查类型）
+        {"choices": [{"message": {"content": None, "tool_calls": [{"id": 1, "function": {"name": "x"}}]}}]},
+        {"choices": [{"message": {"content": None, "tool_calls": [{"id": "1", "function": {"name": 1}}]}}]},
     ],
 )
 def test_openai_complete_rejects_malformed_response_or_tool_calls(payload: dict[str, object]) -> None:
@@ -884,12 +871,6 @@ def test_rerank_adapter_keeps_loopback_endpoints_local(base_url: str, remote: bo
     assert OpenAICompatibleRerankProvider(rerank_config(base_url=base_url), api_key="secret").is_remote is remote
 
 
-@pytest.mark.parametrize("invalid", [None, "config", {}, [], 1, True, object()])
-def test_embedding_adapter_requires_embedding_config(invalid: object) -> None:
-    with pytest.raises(TypeError):
-        OpenAICompatibleEmbeddingProvider(invalid, api_key="secret")
-
-
 @pytest.mark.parametrize("overrides", [{"adapter": "other"}, {"base_url": ""}])
 def test_embedding_adapter_rejects_incompatible_route(overrides: dict[str, object]) -> None:
     with pytest.raises(ModelConfigurationError):
@@ -1092,3 +1073,56 @@ def test_embedding_adapter_reuses_one_async_client_per_event_loop_and_closes_ide
     assert asyncio.run(invoke()) is True
     with pytest.raises(ModelConfigurationError, match="closed"):
         asyncio.run(provider.embed("text", is_query=True))
+
+
+@pytest.mark.parametrize(
+    ("item", "message"),
+    [
+        ({"index": True, "relevance_score": 0.5}, r"result\[0\] index must be an integer"),
+        ({"index": 0.0, "relevance_score": 0.5}, r"result\[0\] index must be an integer"),
+        ({"index": 0, "relevance_score": True}, r"result\[0\] relevance_score must be numeric"),
+        ({"index": 0, "relevance_score": "0.5"}, r"result\[0\] relevance_score must be numeric"),
+    ],
+)
+def test_rerank_adapter_rejects_wrong_types_in_provider_response(item: dict[str, object], message: str) -> None:
+    """外部 rerank 响应里 bool 冒充整数或分数、字符串冒充数都在解析处被拒（W16：边界判定收进公共函数后行为不变）。"""
+
+    provider = OpenAICompatibleRerankProvider(rerank_config(), api_key="secret")
+    with pytest.raises(ModelResponseError, match=message):
+        _rerank_call(provider, lambda _request: httpx.Response(200, json={"results": [item]}))
+
+
+@pytest.mark.parametrize(
+    ("tool_call", "message"),
+    [
+        ({"id": "   ", "function": {"name": "x", "arguments": "{}"}}, "id must be non-empty"),
+        ({"id": 1, "function": {"name": "x", "arguments": "{}"}}, "id must be non-empty"),
+        ({"id": "1", "function": {"name": " \n", "arguments": "{}"}}, "name must be non-empty"),
+    ],
+)
+def test_openai_complete_rejects_blank_or_non_text_tool_call_identity(
+    tool_call: dict[str, object], message: str
+) -> None:
+    payload = {"choices": [{"message": {"content": None, "tool_calls": [tool_call]}}]}
+    provider = sync_provider(lambda _request: httpx.Response(200, json=payload))
+    try:
+        with pytest.raises(ModelResponseError, match=message):
+            complete(provider, request())
+    finally:
+        provider._sync_client.close()
+
+
+@pytest.mark.parametrize("index", [b"true", b'"0"', b"-1"])
+def test_openai_stream_rejects_bool_text_or_negative_tool_call_index(index: bytes) -> None:
+    wire = (
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":' + index + b',"id":"call-1"}]},'
+        b'"finish_reason":"tool_calls"}]}\n\n'
+    )
+    provider = sync_provider(
+        lambda _request: httpx.Response(200, content=wire, headers={"content-type": "text/event-stream"})
+    )
+    try:
+        with pytest.raises(ModelResponseError, match="index must be non-negative"):
+            tuple(stream(provider, request()))
+    finally:
+        provider._sync_client.close()

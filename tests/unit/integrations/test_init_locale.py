@@ -547,3 +547,26 @@ def test_windows_registry_time_zone_maps_to_a_known_iana_name() -> None:
     name = locale_setup._tzlocal_name()
     assert isinstance(name, str)
     assert name in available_timezones()
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected"),
+    [
+        ({"timezone": 8}, None),
+        ({"timezone": ["Asia/Shanghai"]}, None),
+        ("Asia/Shanghai", None),
+        (
+            {"timezone": "Asia/Shanghai", "region": 86},
+            locale_setup.LocaleChoice("Asia/Shanghai", locale_setup.DEFAULT_REGION),
+        ),
+    ],
+)
+def test_recorded_locale_reads_only_text_from_the_existing_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, locale: object, expected: object
+) -> None:
+    """重建前配置里的 ``locale`` 类型不对：时区不是文本就当没选过，地区不是文本按默认值（W16：类型在读入处查）。"""
+
+    existing = tmp_path / "config.yaml"
+    existing.write_text("placeholder: true\n", encoding="utf-8")
+    monkeypatch.setattr(initialization_module, "load_initialization_mapping", lambda _path: {"locale": locale})
+    assert locale_setup.recorded_locale(existing) == expected

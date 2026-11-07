@@ -50,8 +50,6 @@ class MemoryStoredLink:
 
     def __post_init__(self) -> None:
         for name, uri in {"from_uri": self.from_uri, "to_uri": self.to_uri}.items():
-            if not isinstance(uri, MemoryURI):
-                raise TypeError(f"{name} must be a MemoryURI")
             try:
                 uri.to_address()
             except ValueError as exc:

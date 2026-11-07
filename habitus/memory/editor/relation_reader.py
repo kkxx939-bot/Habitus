@@ -21,8 +21,6 @@ class MemoryRelationReadSetLoader:
     """读取操作端点、结构变更节点及其全部一跳邻居。"""
 
     def __init__(self, reader: MemorySnapshotReader) -> None:
-        if not isinstance(reader, MemorySnapshotReader):
-            raise TypeError("reader must be a MemorySnapshotReader")
         self.reader = reader
 
     def load(
@@ -32,15 +30,6 @@ class MemoryRelationReadSetLoader:
         operations: tuple[MemoryResolvedRelation, ...],
     ) -> MemoryRelationReadSet:
         """重读完整闭包并校验与抽取、字段规划快照没有发生漂移。"""
-
-        if not isinstance(known_snapshots, SnapshotBatch):
-            raise TypeError("known_snapshots must be a MemorySnapshotBatch")
-        if not isinstance(identities, MemoryFinalIdentityMap):
-            raise TypeError("identities must be a MemoryFinalIdentityMap")
-        if not isinstance(operations, tuple) or any(
-            not isinstance(operation, MemoryResolvedRelation) for operation in operations
-        ):
-            raise TypeError("operations must contain MemoryResolvedRelation values")
 
         structural_sources = {
             str(entry.source_uri)
@@ -68,7 +57,7 @@ class MemoryRelationReadSetLoader:
             snapshot = endpoints.get(source)
             if snapshot is None or not snapshot.exists:
                 raise MemoryRelationReadConflictError("structural relation source disappeared before planning")
-            if not isinstance(snapshot.value, MemoryDocument):
+            if snapshot.value is None:
                 raise MemoryRelationReadConflictError("structural relation source is not a complete memory document")
             required.update(str(link.to_uri) for link in snapshot.value.links)
             required.update(str(backlink.from_uri) for backlink in snapshot.value.backlinks)

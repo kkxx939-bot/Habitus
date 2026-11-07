@@ -39,8 +39,6 @@ class MemoryContextAssembler:
     """先保留 Memory 与一跳节点，再用独立预算追加低权重 Summary。"""
 
     def __init__(self, *, config: MemorySearchServiceConfig | None = None) -> None:
-        if config is not None and not isinstance(config, MemorySearchServiceConfig):
-            raise TypeError("config must be MemorySearchServiceConfig")
         self.config = config or MemorySearchServiceConfig()
 
     def assemble(
@@ -49,12 +47,6 @@ class MemoryContextAssembler:
         *,
         summary_fallbacks: tuple[ConversationSummaryMatch, ...] = (),
     ) -> MemoryContextAssembly:
-        if not isinstance(memories, tuple) or any(not isinstance(memory, MemoryMatchedMemory) for memory in memories):
-            raise TypeError("memories must contain MemoryMatchedMemory values")
-        if not isinstance(summary_fallbacks, tuple) or any(
-            not isinstance(item, ConversationSummaryMatch) for item in summary_fallbacks
-        ):
-            raise TypeError("summary_fallbacks must contain ConversationSummaryMatch values")
         if not memories and not summary_fallbacks:
             return MemoryContextAssembly((), (), "", False)
 
@@ -184,8 +176,6 @@ class MemoryContextAssembler:
     def _review_attributes(review: MemoryIntentionReview | None) -> str:
         if review is None:
             return ""
-        if not isinstance(review, MemoryIntentionReview):
-            raise TypeError("review must be MemoryIntentionReview or None")
         confirmed_at = review.last_confirmed_at.isoformat().replace("+00:00", "Z")
         return (
             f' intention_review="{review.level.value}"'

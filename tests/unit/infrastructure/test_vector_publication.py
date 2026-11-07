@@ -317,6 +317,29 @@ def test_corrupt_publication_metadata_is_rejected_during_initialization() -> Non
         asyncio.run(published(backend).initialize())
 
 
+@pytest.mark.parametrize("field", ["dimension", "checkpoint", "generation", "record_count"])
+@pytest.mark.parametrize("bad", [True, "2", 2.0])
+def test_publication_state_with_non_integer_counters_is_rejected_on_read(field: str, bad: object) -> None:
+    """后端读回的发布状态里计数不是整数（含 JSON 的 true）时按完整性错误拒绝（W16：判定收进公共函数后行为不变）。"""
+
+    backend = MemoryBackend()
+    backend.metadata["claim"] = {"format": "habitus_vector_publication_v1", "building": False}
+    state: dict[str, object] = {
+        "format": "habitus_vector_publication_v1",
+        "schema_version": "v1",
+        "embedding_fingerprint": "fingerprint",
+        "dimension": 2,
+        "checkpoint": 1,
+        "generation": 1,
+        "record_count": 0,
+    }
+    state[field] = bad
+    backend.metadata["state"] = state
+    with pytest.raises(VectorStoreIntegrityError, match="state metadata is invalid") as raised:
+        asyncio.run(published(backend).initialize())
+    assert str(raised.value.__cause__) == f"vector publication {field} must be an integer"
+
+
 def test_shared_backend_serializes_publication_across_store_instances() -> None:
     class ConcurrentBackend(MemoryBackend):
         def __init__(self) -> None:
@@ -450,3 +473,43 @@ def test_shared_backend_serializes_publication_across_thread_event_loops() -> No
     assert isinstance(conflicts[0], VectorStoreConflictError)
     assert final is not None and final.generation == 2
     assert backend.max_active_mutations == 1
+
+
+@pytest.mark.parametrize("field", ["schema_version", "embedding_fingerprint"])
+@pytest.mark.parametrize("bad", [1, None])
+def test_publication_state_with_non_text_identity_is_rejected_on_read(field: str, bad: object) -> None:
+    """后端读回的发布状态里身份字段不是文本时在解码处拒（W16：构造器不再查类型，覆盖从值对象搬到这里）。"""
+
+    backend = MemoryBackend()
+    backend.metadata["claim"] = {"format": "habitus_vector_publication_v1", "building": False}
+    state: dict[str, object] = {
+        "format": "habitus_vector_publication_v1",
+        "schema_version": "v1",
+        "embedding_fingerprint": "fingerprint",
+        "dimension": 2,
+        "checkpoint": 1,
+        "generation": 1,
+        "record_count": 0,
+    }
+    state[field] = bad
+    backend.metadata["state"] = state
+    with pytest.raises(VectorStoreIntegrityError, match="state metadata is invalid") as raised:
+        asyncio.run(published(backend).initialize())
+    assert str(raised.value.__cause__) == f"vector publication {field} must be text"
+
+
+@pytest.mark.parametrize(
+    ("claim", "message"),
+    [
+        ({"building": 1}, "claim building value is invalid"),
+        ({"building": "true"}, "claim building value is invalid"),
+        ({"building": True, "coordination_domain": 1}, "claim coordination domain is invalid"),
+    ],
+)
+def test_publication_claim_with_wrong_types_is_rejected_on_read(claim: dict[str, object], message: str) -> None:
+    """后端读回的所有权标记类型不对时在解码处拒（W16：``VectorPublicationSnapshot`` 不再查类型）。"""
+
+    backend = MemoryBackend()
+    backend.metadata["claim"] = {"format": "habitus_vector_publication_v1", **claim}
+    with pytest.raises(VectorStoreIntegrityError, match=message):
+        asyncio.run(published(backend).initialize())

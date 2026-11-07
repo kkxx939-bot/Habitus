@@ -26,7 +26,7 @@ class WorkerConfig:
             ("heartbeat_interval_seconds", self.heartbeat_interval_seconds, 1_200.0),
             ("shutdown_timeout_seconds", self.shutdown_timeout_seconds, 3_600.0),
         ):
-            if isinstance(value, bool) or not isinstance(value, int | float) or not 0 < float(value) <= maximum:
+            if not 0 < float(value) <= maximum:
                 raise ValueError(f"{name} must be greater than zero and at most {maximum:g}")
 
 
@@ -38,16 +38,6 @@ class WorkflowConfig:
     receipts: MemoryChangeReceiptStoreConfig = field(default_factory=MemoryChangeReceiptStoreConfig)
     lifecycle: MemoryWorkflowLifecycleConfig = field(default_factory=MemoryWorkflowLifecycleConfig)
     worker: WorkerConfig = field(default_factory=WorkerConfig)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.jobs, MemoryJobConfig):
-            raise TypeError("workflow.jobs must be MemoryJobConfig")
-        if not isinstance(self.receipts, MemoryChangeReceiptStoreConfig):
-            raise TypeError("workflow.receipts must be MemoryChangeReceiptStoreConfig")
-        if not isinstance(self.lifecycle, MemoryWorkflowLifecycleConfig):
-            raise TypeError("workflow.lifecycle must be MemoryWorkflowLifecycleConfig")
-        if not isinstance(self.worker, WorkerConfig):
-            raise TypeError("workflow.worker must be WorkerConfig")
 
     @classmethod
     def from_mapping(cls, value: object) -> WorkflowConfig:

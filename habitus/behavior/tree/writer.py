@@ -44,11 +44,7 @@ class BehaviorWriteConfig:
     lock_ttl_seconds: int = 30
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.lock_ttl_seconds, bool)
-            or not isinstance(self.lock_ttl_seconds, int)
-            or not 1 <= self.lock_ttl_seconds <= 3_600
-        ):
+        if not 1 <= self.lock_ttl_seconds <= 3_600:
             raise ValueError("lock_ttl_seconds must be between 1 and 3600")
 
 
@@ -58,8 +54,6 @@ class BehaviorDocumentLockKeyspace:
     _prefix: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.root, Path):
-            raise TypeError("root must be a Path")
         normalized = self.root.expanduser().absolute().resolve(strict=False)
         object.__setattr__(self, "root", normalized)
         digest = hashlib.sha256(str(normalized).encode("utf-8")).hexdigest()[:24]
@@ -82,15 +76,6 @@ class BehaviorDocumentWriter:
         clock: Callable[[], datetime] | None = None,
         config: BehaviorWriteConfig | None = None,
     ) -> None:
-        if not isinstance(tree, BehaviorTree):
-            raise TypeError("tree must be a BehaviorTree")
-        required = ("acquire", "renew", "fenced", "release")
-        if any(not callable(getattr(lock_store, name, None)) for name in required):
-            raise TypeError("lock_store must implement the LockStore contract")
-        if clock is not None and not callable(clock):
-            raise TypeError("clock must be callable")
-        if config is not None and not isinstance(config, BehaviorWriteConfig):
-            raise TypeError("config must be BehaviorWriteConfig")
         self.tree = tree
         self.clock = clock or (lambda: datetime.now(UTC))
         self.config = config or BehaviorWriteConfig()
@@ -174,7 +159,7 @@ class BehaviorDocumentWriter:
 
     def _timestamp(self) -> datetime:
         value = self.clock()
-        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("behavior writer clock must return a timezone-aware datetime")
         return value.astimezone(UTC)
 

@@ -92,19 +92,13 @@ def test_field_schema_requires_explicit_boolean_required(required: bool) -> None
     assert _field(required=required).required is required
 
 
-@pytest.mark.parametrize("required", [0, 1, "true", None, []])
-def test_field_schema_rejects_non_boolean_required(required: object) -> None:
-    with pytest.raises(MemorySchemaError):
-        _field(required=required)
-
-
 @pytest.mark.parametrize("description", ["说明", " description ", "multi\nline"])
 def test_field_schema_accepts_non_empty_description(description: str) -> None:
     assert _field(description=description).description == description
 
 
-@pytest.mark.parametrize("description", ["", " ", "\n", None, 1])
-def test_field_schema_rejects_empty_or_non_text_description(description: object) -> None:
+@pytest.mark.parametrize("description", ["", " ", "\n"])
+def test_field_schema_rejects_empty_or_non_text_description(description: str) -> None:
     with pytest.raises(MemorySchemaError):
         _field(description=description)
 
@@ -114,8 +108,8 @@ def test_string_field_accepts_unique_non_empty_allowed_values(allowed: object) -
     assert _field(allowed_values=allowed).allowed_values == tuple(allowed)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("allowed", ["open", ("",), (" ",), (1,), ("open", "open")])
-def test_field_schema_rejects_invalid_allowed_values(allowed: object) -> None:
+@pytest.mark.parametrize("allowed", [("",), (" ",), ("open", "open")])
+def test_field_schema_rejects_invalid_allowed_values(allowed: tuple[str, ...]) -> None:
     with pytest.raises(MemorySchemaError):
         _field(allowed_values=allowed)
 
@@ -379,15 +373,15 @@ def test_type_schema_rejects_path_different_from_confirmed_tree(schema: MemoryTy
 
 
 @pytest.mark.parametrize("schema", SCHEMAS, ids=lambda item: item.kind.value)
-@pytest.mark.parametrize("description", ["", " ", None, 1])
-def test_type_schema_rejects_empty_or_non_text_description(schema: MemoryTypeSchema, description: object) -> None:
+@pytest.mark.parametrize("description", ["", " "])
+def test_type_schema_rejects_empty_or_non_text_description(schema: MemoryTypeSchema, description: str) -> None:
     with pytest.raises(MemorySchemaError):
         replace(schema, description=description)
 
 
 @pytest.mark.parametrize("schema", SCHEMAS, ids=lambda item: item.kind.value)
-@pytest.mark.parametrize("markdown", ["", None, 1])
-def test_type_schema_rejects_empty_or_non_text_markdown(schema: MemoryTypeSchema, markdown: object) -> None:
+@pytest.mark.parametrize("markdown", [""])
+def test_type_schema_rejects_empty_or_non_text_markdown(schema: MemoryTypeSchema, markdown: str) -> None:
     with pytest.raises(MemorySchemaError):
         replace(schema, markdown_template=markdown)
 
@@ -411,16 +405,10 @@ def test_type_schema_rejects_minimum_above_declared_content_count(schema: Memory
         replace(schema, min_non_empty_content_fields=len(schema.content_fields) + 1)
 
 
-@pytest.mark.parametrize("minimum", [-1, True, 1.0, "1", None])
-def test_type_schema_rejects_invalid_min_non_empty_content_fields(minimum: object) -> None:
+@pytest.mark.parametrize("minimum", [-1])
+def test_type_schema_rejects_invalid_min_non_empty_content_fields(minimum: int) -> None:
     with pytest.raises(MemorySchemaError):
         replace(REGISTRY.get(MemoryKind.TOOL), min_non_empty_content_fields=minimum)
-
-
-@pytest.mark.parametrize("value", [0, 1, "true", None, []])
-def test_type_schema_requires_boolean_omit_empty_sections(value: object) -> None:
-    with pytest.raises(MemorySchemaError):
-        replace(REGISTRY.get(MemoryKind.TOOL), omit_empty_sections=value)
 
 
 @pytest.mark.parametrize(
@@ -510,6 +498,94 @@ fields:
         )
     with pytest.raises(MemorySchemaError, match="missing"):
         registry_module._load_schema(valid_field.replace("    merge: patch\n", ""), "profile.yaml")
+
+
+@pytest.mark.parametrize("bad", ['"true"', "1", "null", "[true]"])
+def test_schema_loader_rejects_non_boolean_required_flag_before_building_the_field(bad: str) -> None:
+    """YAML 里 ``required`` 类型错时在字段解码器就被拒（W16：类型检查在边界）。"""
+
+    source = """
+memory_type: profile
+description: description
+path_template: profile.md
+markdown_template: "{content}"
+operation_mode: upsert
+fields:
+  - name: content
+    type: string
+    role: content
+    required: REQUIRED
+    merge: patch
+    description: description
+""".replace("REQUIRED", bad)
+    with pytest.raises(MemorySchemaError, match="memory schema field required must be boolean"):
+        registry_module._load_schema(source, "profile.yaml")
+
+
+_TYPED_SCHEMA_SOURCE = """
+memory_type: profile
+description: TYPE_DESCRIPTION
+path_template: profile.md
+markdown_template: MARKDOWN
+operation_mode: upsert
+min_non_empty_content_fields: MINIMUM
+omit_empty_sections: OMIT
+fields:
+  - name: content
+    type: string
+    role: content
+    required: true
+    merge: patch
+    description: FIELD_DESCRIPTION
+    allowed_values: ALLOWED
+"""
+_TYPED_SCHEMA_DEFAULTS = {
+    "TYPE_DESCRIPTION": "description",
+    "MARKDOWN": '"{content}"',
+    "MINIMUM": "0",
+    "OMIT": "false",
+    "FIELD_DESCRIPTION": "description",
+    "ALLOWED": "[]",
+}
+
+
+def _typed_schema_source(**overrides: str) -> str:
+    source = _TYPED_SCHEMA_SOURCE
+    for placeholder, value in {**_TYPED_SCHEMA_DEFAULTS, **overrides}.items():
+        source = source.replace(placeholder, value)
+    return source
+
+
+@pytest.mark.parametrize(
+    ("placeholder", "bad", "message"),
+    [
+        ("TYPE_DESCRIPTION", "1", "memory type description must be a non-empty string"),
+        ("TYPE_DESCRIPTION", "null", "memory type description must be a non-empty string"),
+        ("MARKDOWN", "1", "memory markdown template must be a non-empty string"),
+        ("MARKDOWN", "null", "memory markdown template must be a non-empty string"),
+        ("MINIMUM", "true", "memory min_non_empty_content_fields must be a non-negative integer"),
+        ("MINIMUM", "1.0", "memory min_non_empty_content_fields must be a non-negative integer"),
+        ("MINIMUM", '"1"', "memory min_non_empty_content_fields must be a non-negative integer"),
+        ("MINIMUM", "null", "memory min_non_empty_content_fields must be a non-negative integer"),
+        ("OMIT", "0", "memory omit_empty_sections must be boolean"),
+        ("OMIT", "1", "memory omit_empty_sections must be boolean"),
+        ("OMIT", '"true"', "memory omit_empty_sections must be boolean"),
+        ("OMIT", "null", "memory omit_empty_sections must be boolean"),
+        ("OMIT", "[]", "memory omit_empty_sections must be boolean"),
+        ("FIELD_DESCRIPTION", "1", "memory field description must be a non-empty string"),
+        ("FIELD_DESCRIPTION", "null", "memory field description must be a non-empty string"),
+        ("ALLOWED", '"open"', "memory field allowed_values must be a list of strings"),
+        ("ALLOWED", "[1]", "memory field allowed_values must be a list of strings"),
+    ],
+)
+def test_schema_loader_rejects_wrongly_typed_scalars_before_building_the_schema(
+    placeholder: str, bad: str, message: str
+) -> None:
+    """Schema YAML 里类型写错的标量在解码器就被拒（W16：构造器不再查类型）。"""
+
+    assert registry_module._load_schema(_typed_schema_source(), "profile.yaml").kind is MemoryKind.PROFILE
+    with pytest.raises(MemorySchemaError, match=message):
+        registry_module._load_schema(_typed_schema_source(**{placeholder: bad}), "profile.yaml")
 
 
 @pytest.mark.parametrize("kind", tuple(MemoryKind))

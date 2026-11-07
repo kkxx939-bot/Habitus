@@ -21,7 +21,6 @@ config/scene.py
 config/storage.py
 config/temporal.py
 config/workflow.py
-infrastructure/vector/adapters/local_sqlite.py
 infrastructure/vector/config.py
 integrations/local_service/adapter_catalog.py
 memory/schema/model.py
@@ -58,6 +57,7 @@ memory/compaction/l2_fields.py
 memory/editor/candidate.py
 memory/editor/extraction/loop.py
 memory/editor/extraction/prompt.py
+memory/field_ops.py
 memory/retrieval/grader.py
 memory/retrieval/model.py
 memory/retrieval/planner.py
@@ -186,4 +186,5 @@ infrastructure/store/filesystem/durable_io/atomic_file.py
 infrastructure/store/filesystem/durable_io/common.py
 infrastructure/store/filesystem/durable_io/windows_file.py
 infrastructure/store/filesystem/path_safety.py
+infrastructure/vector/adapters/local_sqlite.py
 infrastructure/vector/publication/store.py

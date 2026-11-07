@@ -117,9 +117,7 @@ def derive_judgements(
     两条 lane 各自的凭据（开始、结束）时刻不同，身份不会重复。
     """
 
-    if not isinstance(batch, BehaviorJudgementBatch):
-        raise TypeError("batch must be BehaviorJudgementBatch")
-    if not isinstance(judged_at, datetime) or judged_at.utcoffset() is None:
+    if judged_at.utcoffset() is None:
         raise BehaviorFusionError("judged_at must be a timezone-aware datetime")
     by_no = _fragment_index(fragments)
     resolved_sources = _refs(source_refs)
@@ -212,10 +210,8 @@ def _derive(
 def _fragment_index(
     fragments: Sequence[BehaviorObservation],
 ) -> Mapping[int, BehaviorObservation]:
-    if isinstance(fragments, (str, bytes)) or not isinstance(fragments, Sequence) or not fragments:
+    if not fragments:
         raise BehaviorFusionError("derivation requires a non-empty fragment sequence")
-    if any(not isinstance(item, BehaviorObservation) for item in fragments):
-        raise TypeError("fragments must contain BehaviorObservation values")
     return {index: fragment for index, fragment in enumerate(fragments, start=1)}
 
 
@@ -238,11 +234,11 @@ def _latest_local(observations: Sequence[BehaviorObservation]) -> datetime:
 
 
 def _refs(values: Sequence[str]) -> tuple[str, ...]:
-    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+    if isinstance(values, (str, bytes)):
         raise BehaviorFusionError("source_refs must be a sequence of text")
     resolved: list[str] = []
     for item in values:
-        if not isinstance(item, str) or not item.strip():
+        if not item.strip():
             raise BehaviorFusionError("source_refs entries must be non-empty text")
         normalized = item.strip()
         if normalized not in resolved:

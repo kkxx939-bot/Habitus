@@ -55,8 +55,6 @@ class ConceptStore(SceneStore):
     def write(self, definition: ConceptDefinition) -> Path:
         """原子写、回读比对。同身份覆写（同步词表改类名、改判据时就是这样更新基础概念的）。"""
 
-        if not isinstance(definition, ConceptDefinition):
-            raise TypeError("definition must be a ConceptDefinition")
         self.initialize()
         path = self.path_for(definition.identity)
         self._atomic_write(path, encode(definition).encode("utf-8"), maximum=MAX_RECORD_BYTES)
@@ -65,7 +63,7 @@ class ConceptStore(SceneStore):
     def write_synced_version(self, version: int) -> None:
         """同步词表做完之后记下同步到的版本（最后一步：概念写完、迁移的日子重映射完才记）。"""
 
-        if isinstance(version, bool) or not isinstance(version, int) or version < 0:
+        if version < 0:
             raise ConceptStoreError("vocabulary version must be a non-negative integer")
         self.initialize()
         self._atomic_write(self.directory / SYNCED_FILENAME, f"{version}\n".encode(), maximum=64)

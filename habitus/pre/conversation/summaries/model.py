@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 from enum import Enum
 from typing import Any
 
 from habitus.foundation.ids import canonical_path_identity, require_safe_path_segment
 from habitus.foundation.integrity import canonical_digest, canonicalize
+from habitus.foundation.validation import is_int, is_str_list
 from habitus.pre.conversation.messages.model import (
     ConversationSegment,
     conversation_datetime,
@@ -115,24 +116,11 @@ class ConversationSummaryContent:
     def model_validate(cls, value: object) -> ConversationSummaryContent:
         if not isinstance(value, Mapping):
             raise ConversationSummarySchemaError("conversation summary content must be an object")
-        expected = {
-            "overview",
-            "chronology",
-            "corrections",
-            "ending_state",
-            "open_threads",
-        }
-        if set(value) != expected:
+        if set(value) != {field.name for field in fields(cls)}:
             raise ConversationSummarySchemaError(
                 "conversation summary content must contain exactly the declared fields"
             )
-        return cls(
-            overview=value["overview"],
-            chronology=value["chronology"],
-            corrections=value["corrections"],
-            ending_state=value["ending_state"],
-            open_threads=value["open_threads"],
-        )
+        return cls(*_decoded_content(value))
 
 
 def _safe_identifier(value: object, label: str) -> str:
@@ -145,15 +133,13 @@ def _safe_identifier(value: object, label: str) -> str:
     return identifier
 
 
-def _required_text(value: object, label: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+def _required_text(value: str, label: str) -> str:
+    if not value.strip():
         raise ConversationSummarySchemaError(f"{label} must be non-empty text")
     return value
 
 
-def _text_sequence(value: object, label: str, *, required: bool) -> tuple[str, ...]:
-    if not isinstance(value, tuple | list):
-        raise ConversationSummarySchemaError(f"{label} must be a list of text items")
+def _text_sequence(value: tuple[str, ...], label: str, *, required: bool) -> tuple[str, ...]:
     resolved = tuple(_required_text(item, f"{label} item") for item in value)
     if required and not resolved:
         raise ConversationSummarySchemaError(f"{label} must contain at least one item")
@@ -167,6 +153,49 @@ def _summary_datetime(value: object, label: str) -> datetime:
         return conversation_datetime(value, label)
     except ValueError as exc:
         raise ConversationSummarySchemaError(str(exc)) from exc
+
+
+# 解码读回或模型给出的字段：构造前确认类型，报错文字照抄构造器里同一字段的那条检查。
+_UNSAFE_CONVERSATION_ID = "conversation_id must be one safe non-empty path segment"
+_UNSAFE_SOURCE_ID = "summary source id must be one safe non-empty path segment"
+_UNBOUNDED_START = "start_sequence must be a bounded non-negative integer"
+_ContentFields = tuple[str, tuple[str, ...], tuple[str, ...], str, tuple[str, ...]]
+
+
+def _decoded_text(value: object, message: str) -> str:
+    if isinstance(value, str):
+        return value
+    raise ConversationSummarySchemaError(message)
+
+
+def _decoded_texts(value: object, label: str) -> tuple[str, ...]:
+    if not isinstance(value, tuple | list):
+        raise ConversationSummarySchemaError(f"{label} must be a list of text items")
+    if is_str_list(value):
+        return tuple(value)
+    raise ConversationSummarySchemaError(f"{label} item must be non-empty text")
+
+
+def _decoded_int(value: object, message: str) -> int:
+    if is_int(value):
+        return value
+    raise ConversationSummarySchemaError(message)
+
+
+def _decoded_flag(value: object, message: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ConversationSummarySchemaError(message)
+
+
+def _decoded_content(payload: Mapping[str, Any]) -> _ContentFields:
+    return (
+        _decoded_text(payload["overview"], "overview must be non-empty text"),
+        _decoded_texts(payload["chronology"], "chronology"),
+        _decoded_texts(payload["corrections"], "corrections"),
+        _decoded_text(payload["ending_state"], "ending_state must be non-empty text"),
+        _decoded_texts(payload["open_threads"], "open_threads"),
+    )
 
 
 @dataclass(frozen=True)
@@ -208,7 +237,7 @@ class ConversationSegmentSummary:
             ("start_sequence", self.start_sequence),
             ("end_sequence", self.end_sequence),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if value < 0:
                 raise ConversationSummarySchemaError(f"{label} must be a non-negative integer")
         if self.start_sequence > self.end_sequence:
             raise ConversationSummarySchemaError("summary sequence range is invalid")
@@ -239,11 +268,6 @@ class ConversationSegmentSummary:
             "open_threads",
             _text_sequence(self.open_threads, "open_threads", required=False),
         )
-        if not isinstance(self.starts_mid_turn, bool) or not isinstance(
-            self.ends_mid_turn,
-            bool,
-        ):
-            raise ConversationSummarySchemaError("summary turn-boundary flags must be boolean")
 
     @property
     def digest(self) -> str:
@@ -252,8 +276,6 @@ class ConversationSegmentSummary:
     def require_matches_source(self, segment: ConversationSegment) -> None:
         """确认摘要只绑定其声明的不可变消息片段。"""
 
-        if not isinstance(segment, ConversationSegment):
-            raise TypeError("segment must be a ConversationSegment")
         expected = (
             segment.conversation_id,
             segment.segment_id,
@@ -303,49 +325,35 @@ class ConversationSegmentSummary:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> ConversationSegmentSummary:
-        allowed = {
-            "schema_version",
-            "conversation_id",
-            "segment_id",
-            "source_message_digest",
-            "start_sequence",
-            "end_sequence",
-            "started_at",
-            "ended_at",
-            "generated_at",
-            "overview",
-            "chronology",
-            "corrections",
-            "ending_state",
-            "open_threads",
-            "starts_mid_turn",
-            "ends_mid_turn",
-        }
+        allowed = {"schema_version", *(field.name for field in fields(cls))}
         unknown = set(payload) - allowed
         if unknown:
             raise ConversationSummarySchemaError(f"conversation summary contains unknown fields: {sorted(unknown)}")
         if payload.get("schema_version") != cls.SCHEMA_VERSION:
             raise ConversationSummarySchemaError("unsupported conversation summary schema")
-        required = allowed - {"schema_version"}
-        missing = required - set(payload)
+        missing = allowed - {"schema_version"} - set(payload)
         if missing:
             raise ConversationSummarySchemaError(f"conversation summary is missing fields: {sorted(missing)}")
+        overview, chronology, corrections, ending_state, open_threads = _decoded_content(payload)
+        flags = "summary turn-boundary flags must be boolean"
         return cls(
-            conversation_id=payload["conversation_id"],
-            segment_id=payload["segment_id"],
-            source_message_digest=payload["source_message_digest"],
-            start_sequence=payload["start_sequence"],
-            end_sequence=payload["end_sequence"],
+            conversation_id=_decoded_text(payload["conversation_id"], _UNSAFE_CONVERSATION_ID),
+            segment_id=_decoded_text(payload["segment_id"], "segment_id must be one safe non-empty path segment"),
+            source_message_digest=_decoded_text(
+                payload["source_message_digest"], "source_message_digest must be a SHA-256 hex digest"
+            ),
+            start_sequence=_decoded_int(payload["start_sequence"], "start_sequence must be a non-negative integer"),
+            end_sequence=_decoded_int(payload["end_sequence"], "end_sequence must be a non-negative integer"),
             started_at=_summary_datetime(payload["started_at"], "summary started_at"),
             ended_at=_summary_datetime(payload["ended_at"], "summary ended_at"),
             generated_at=_summary_datetime(payload["generated_at"], "summary generated_at"),
-            overview=payload["overview"],
-            chronology=payload["chronology"],
-            corrections=payload["corrections"],
-            ending_state=payload["ending_state"],
-            open_threads=payload["open_threads"],
-            starts_mid_turn=payload["starts_mid_turn"],
-            ends_mid_turn=payload["ends_mid_turn"],
+            overview=overview,
+            chronology=chronology,
+            corrections=corrections,
+            ending_state=ending_state,
+            open_threads=open_threads,
+            starts_mid_turn=_decoded_flag(payload["starts_mid_turn"], flags),
+            ends_mid_turn=_decoded_flag(payload["ends_mid_turn"], flags),
         )
 
 
@@ -380,8 +388,6 @@ class ConversationSummarySourceRef:
     end_sequence: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.kind, ConversationSummarySourceKind):
-            raise ConversationSummarySchemaError("summary source kind must be declared")
         object.__setattr__(self, "summary_id", _safe_identifier(self.summary_id, "summary source id"))
         try:
             digest = require_sha256(self.digest, "summary source digest")
@@ -432,10 +438,10 @@ class ConversationSummarySourceRef:
             raise ConversationSummarySchemaError("summary source kind is unsupported") from exc
         return cls(
             kind=kind,
-            summary_id=payload["summary_id"],
-            digest=payload["digest"],
-            start_sequence=payload["start_sequence"],
-            end_sequence=payload["end_sequence"],
+            summary_id=_decoded_text(payload["summary_id"], _UNSAFE_SOURCE_ID),
+            digest=_decoded_text(payload["digest"], "summary source digest must be a SHA-256 hex digest"),
+            start_sequence=_decoded_int(payload["start_sequence"], _UNBOUNDED_START),
+            end_sequence=_decoded_int(payload["end_sequence"], "end_sequence must be a bounded non-negative integer"),
         )
 
 
@@ -469,12 +475,8 @@ class ConversationRangeSummary:
             _safe_identifier(self.conversation_id, "conversation_id"),
         )
         object.__setattr__(self, "range_id", _safe_identifier(self.range_id, "range_id"))
-        if not isinstance(self.stage, ConversationRangeSummaryStage):
-            raise ConversationSummarySchemaError("range summary stage must be declared")
-        if not isinstance(self.source_refs, tuple) or not 2 <= len(self.source_refs) <= 1_000:
+        if not 2 <= len(self.source_refs) <= 1_000:
             raise ConversationSummarySchemaError("range summary must bind between 2 and 1000 sources")
-        if any(not isinstance(item, ConversationSummarySourceRef) for item in self.source_refs):
-            raise ConversationSummarySchemaError("range summary sources must be source references")
         if any(item.kind is not self.stage.source_kind for item in self.source_refs):
             raise ConversationSummarySchemaError("range summary source kind does not match its stage")
         for previous, current in zip(self.source_refs, self.source_refs[1:], strict=False):
@@ -512,11 +514,6 @@ class ConversationRangeSummary:
         object.__setattr__(self, "corrections", content.corrections)
         object.__setattr__(self, "ending_state", content.ending_state)
         object.__setattr__(self, "open_threads", content.open_threads)
-        if not isinstance(self.starts_mid_turn, bool) or not isinstance(
-            self.ends_mid_turn,
-            bool,
-        ):
-            raise ConversationSummarySchemaError("range summary turn-boundary flags must be boolean")
 
     @property
     def digest(self) -> str:
@@ -528,7 +525,7 @@ class ConversationRangeSummary:
     ) -> None:
         """确认父摘要完整绑定传入的同会话、同阶段连续来源。"""
 
-        if not isinstance(sources, tuple) or len(sources) != len(self.source_refs):
+        if len(sources) != len(self.source_refs):
             raise ConversationSummarySchemaError("range summary source count does not match")
         expected_type = (
             ConversationSegmentSummary
@@ -581,26 +578,7 @@ class ConversationRangeSummary:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> ConversationRangeSummary:
-        expected = {
-            "schema_version",
-            "conversation_id",
-            "range_id",
-            "stage",
-            "source_refs",
-            "start_sequence",
-            "end_sequence",
-            "started_at",
-            "ended_at",
-            "generated_at",
-            "overview",
-            "chronology",
-            "corrections",
-            "ending_state",
-            "open_threads",
-            "starts_mid_turn",
-            "ends_mid_turn",
-        }
-        if set(payload) != expected:
+        if set(payload) != {"schema_version", *(field.name for field in fields(cls))}:
             raise ConversationSummarySchemaError("range summary fields do not match the schema")
         if payload.get("schema_version") != cls.SCHEMA_VERSION:
             raise ConversationSummarySchemaError("unsupported range summary schema")
@@ -611,29 +589,31 @@ class ConversationRangeSummary:
         source_refs = payload["source_refs"]
         if not isinstance(source_refs, list | tuple):
             raise ConversationSummarySchemaError("range summary source_refs must be a list")
+        overview, chronology, corrections, ending_state, open_threads = _decoded_content(payload)
+        flags = "range summary turn-boundary flags must be boolean"
         return cls(
-            conversation_id=payload["conversation_id"],
-            range_id=payload["range_id"],
+            conversation_id=_decoded_text(payload["conversation_id"], _UNSAFE_CONVERSATION_ID),
+            range_id=_decoded_text(payload["range_id"], "range_id must be one safe non-empty path segment"),
             stage=stage,
             source_refs=tuple(ConversationSummarySourceRef.from_dict(item) for item in source_refs),
-            start_sequence=payload["start_sequence"],
-            end_sequence=payload["end_sequence"],
+            start_sequence=_decoded_int(payload["start_sequence"], _UNBOUNDED_START),
+            end_sequence=_decoded_int(payload["end_sequence"], "end_sequence must be a bounded non-negative integer"),
             started_at=_summary_datetime(payload["started_at"], "range summary started_at"),
             ended_at=_summary_datetime(payload["ended_at"], "range summary ended_at"),
             generated_at=_summary_datetime(payload["generated_at"], "range summary generated_at"),
-            overview=payload["overview"],
-            chronology=payload["chronology"],
-            corrections=payload["corrections"],
-            ending_state=payload["ending_state"],
-            open_threads=payload["open_threads"],
-            starts_mid_turn=payload["starts_mid_turn"],
-            ends_mid_turn=payload["ends_mid_turn"],
+            overview=overview,
+            chronology=chronology,
+            corrections=corrections,
+            ending_state=ending_state,
+            open_threads=open_threads,
+            starts_mid_turn=_decoded_flag(payload["starts_mid_turn"], flags),
+            ends_mid_turn=_decoded_flag(payload["ends_mid_turn"], flags),
         )
 
 
 def _require_summary_range(start_sequence: int, end_sequence: int) -> None:
     for label, value in (("start_sequence", start_sequence), ("end_sequence", end_sequence)):
-        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _MAX_SUMMARY_SEQUENCE:
+        if not 0 <= value <= _MAX_SUMMARY_SEQUENCE:
             raise ConversationSummarySchemaError(f"{label} must be a bounded non-negative integer")
     if start_sequence > end_sequence:
         raise ConversationSummarySchemaError("summary sequence range is invalid")

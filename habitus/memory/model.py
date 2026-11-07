@@ -120,7 +120,7 @@ class MemoryAddress:
             raise ValueError(f"{kind.value} memory does not accept category")
 
         if kind is MemoryKind.EVENT:
-            if not isinstance(self.event_date, date):
+            if self.event_date is None:
                 raise ValueError("event memory requires event_date")
         elif self.event_date is not None:
             raise ValueError(f"{kind.value} memory does not accept event_date")
@@ -166,8 +166,6 @@ class MemoryDirectory:
     _identity_parts: tuple[str, ...] = field(init=False, repr=False, default=())
 
     def __post_init__(self) -> None:
-        if isinstance(self.parts, str) or not isinstance(self.parts, tuple):
-            raise TypeError("memory directory parts must be a tuple of strings")
         parts = tuple(self.parts)
         object.__setattr__(self, "parts", parts)
         if not parts:
@@ -213,7 +211,7 @@ class MemoryDirectory:
         widths = (4, 2, 2)
         labels = ("year", "month", "day")
         for value, width, label in zip(values, widths, labels, strict=False):
-            if not isinstance(value, str) or len(value) != width or not value.isdigit():
+            if len(value) != width or not value.isdigit():
                 raise ValueError(f"event {label} directory has an invalid format")
         if values:
             year = int(values[0])
@@ -258,20 +256,14 @@ class MemoryDirectory:
             if month is not None or day is not None:
                 raise ValueError("event month or day requires a year")
             return cls(("events",))
-        if isinstance(year, bool) or not isinstance(year, int):
-            raise TypeError("event directory year must be an integer")
         parts = ["events", f"{year:04d}"]
         if month is None:
             if day is not None:
                 raise ValueError("event day requires a month")
             return cls(tuple(parts))
-        if isinstance(month, bool) or not isinstance(month, int):
-            raise TypeError("event directory month must be an integer")
         parts.append(f"{month:02d}")
         if day is None:
             return cls(tuple(parts))
-        if isinstance(day, bool) or not isinstance(day, int):
-            raise TypeError("event directory day must be an integer")
         parts.append(f"{day:02d}")
         return cls(tuple(parts))
 
@@ -281,8 +273,6 @@ class MemoryDirectory:
 
     @classmethod
     def for_address(cls, address: MemoryAddress) -> MemoryDirectory:
-        if not isinstance(address, MemoryAddress):
-            raise TypeError("address must be a MemoryAddress")
         if address.kind is MemoryKind.PROFILE:
             return cls.root()
         if address.kind is MemoryKind.PREFERENCE:

@@ -47,12 +47,6 @@ class UnsealedFromJudgements:
     ) -> None:
         """``in_line``：这一份给夜里那条线用（日子预期那一段），模型整个用不了时抛出、不留到下一拍。"""
 
-        if not isinstance(judgements, BehaviorJudgementStore):
-            raise TypeError("judgements must be a BehaviorJudgementStore")
-        if not isinstance(ledger, BehaviorReductionLedger):
-            raise TypeError("ledger must be a BehaviorReductionLedger")
-        if not isinstance(stamping, KindStamping):
-            raise TypeError("stamping must be KindStamping")
         self.judgements = judgements
         self.ledger = ledger
         self.stamping = stamping
@@ -65,7 +59,7 @@ class UnsealedFromJudgements:
         """把还没归过的未封口判断交白天归类。白天模型这一拍不可用（``MODEL_UNAVAILABLE``）就留着不归（下一拍再试），不让此刻场景
         因此失败；配置错误照样抛出来——吞掉它会让每一拍都悄悄归不上。线上那一份（``in_line``）一律抛出。"""
 
-        if not isinstance(until, datetime) or until.utcoffset() is None:
+        if until.utcoffset() is None:
             raise ValueError("until must be a timezone-aware datetime")
         records = pending_judgements(self.judgements, self.ledger).occurrences
         vocabulary = self.stamping.store.read()
@@ -96,7 +90,7 @@ class UnsealedFromJudgements:
         """与 ``[since, until]`` 有交集的未封口行为与空白，按开始时刻排。"""
 
         for label, value in (("since", since), ("until", until)):
-            if not isinstance(value, datetime) or value.utcoffset() is None:
+            if value.utcoffset() is None:
                 raise ValueError(f"{label} must be a timezone-aware datetime")
         begin, finish = since.astimezone(UTC), until.astimezone(UTC)
         pending = pending_judgements(self.judgements, self.ledger)
@@ -125,11 +119,15 @@ class UnsealedFromJudgements:
             for gap in pending.gaps
         )
         inside = [row for row in rows if _instant(row.last_observed_at) >= begin and _instant(row.started_at) <= finish]
-        return tuple(sorted(inside, key=lambda row: (_instant(row.started_at), row.name or "")))
+        return tuple(sorted(inside, key=_row_order))
 
 
 def _instant(value: datetime) -> datetime:
     return value.astimezone(UTC)
+
+
+def _row_order(row: UnsealedRow) -> tuple[datetime, str]:
+    return _instant(row.started_at), row.name or ""
 
 
 __all__ = ["UnsealedFromJudgements"]

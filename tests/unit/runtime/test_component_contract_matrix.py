@@ -20,8 +20,6 @@ from habitus.runtime.components import (
 from tests.integration.test_runtime_assembly import runtime_config, runtime_dependencies
 from tests.lock_store import ProcessLocalLockStore
 
-INVALID_OBJECTS = (None, "value", 0, 1, True, False, (), [], {}, object())
-
 
 @pytest.fixture
 def runtime_pair(tmp_path: Path):
@@ -37,18 +35,6 @@ def runtime_pair(tmp_path: Path):
             )
         )
     return tuple(values)
-
-
-@pytest.mark.parametrize("field", ["path_lock", "vector_stores"])
-@pytest.mark.parametrize("invalid", INVALID_OBJECTS)
-def test_runtime_infrastructure_requires_exact_infrastructure_types(
-    runtime_pair,
-    field: str,
-    invalid: object,
-) -> None:
-    current = runtime_pair[0].components.infrastructure
-    with pytest.raises(TypeError):
-        replace(current, **{field: invalid})
 
 
 class InitializableStore:
@@ -93,36 +79,6 @@ def test_runtime_infrastructure_rejects_non_callable_initializer(runtime_pair, i
         infrastructure.initialize()
 
 
-@pytest.mark.parametrize("field", ["providers", "chat", "structured_chat"])
-@pytest.mark.parametrize("invalid", INVALID_OBJECTS)
-def test_runtime_models_requires_exact_shared_client_types(
-    runtime_pair,
-    field: str,
-    invalid: object,
-) -> None:
-    current = runtime_pair[0].components.models
-    with pytest.raises(TypeError):
-        replace(current, **{field: invalid})
-
-
-@pytest.mark.parametrize("invalid", INVALID_OBJECTS)
-def test_runtime_models_embedder_requires_both_query_and_document_methods(
-    runtime_pair,
-    invalid: object,
-) -> None:
-    current = runtime_pair[0].components.models
-    with pytest.raises(TypeError, match="Embedder contract"):
-        replace(current, embedder=invalid)
-
-
-@pytest.mark.parametrize("invalid", tuple(value for value in INVALID_OBJECTS if value is not None))
-def test_runtime_models_reranker_requires_callable_rerank_or_none(runtime_pair, invalid: object) -> None:
-    current = runtime_pair[0].components.models
-    with pytest.raises(TypeError, match="Reranker contract"):
-        replace(current, reranker=invalid)
-    assert replace(current, reranker=None).reranker is None
-
-
 def test_runtime_models_structured_client_must_wrap_same_chat_instance(runtime_pair) -> None:
     first, second = runtime_pair
     with pytest.raises(ValueError, match="shared chat client"):
@@ -130,21 +86,6 @@ def test_runtime_models_structured_client_must_wrap_same_chat_instance(runtime_p
             first.components.models,
             structured_chat=second.components.models.structured_chat,
         )
-
-
-@pytest.mark.parametrize(
-    "field",
-    ["journal", "retention", "summaries", "summary_compactor", "summary_vector_index"],
-)
-@pytest.mark.parametrize("invalid", INVALID_OBJECTS)
-def test_runtime_conversation_requires_each_exact_domain_component(
-    runtime_pair,
-    field: str,
-    invalid: object,
-) -> None:
-    current = runtime_pair[0].components.conversation
-    with pytest.raises(TypeError):
-        replace(current, **{field: invalid})
 
 
 @pytest.mark.parametrize(
@@ -166,21 +107,6 @@ def test_runtime_conversation_rejects_valid_component_from_another_runtime(
             first.components.conversation,
             **{field: getattr(second.components.conversation, field)},
         )
-
-
-@pytest.mark.parametrize(
-    "field",
-    ["tree", "search", "editor", "semantic_refresher", "vector_index"],
-)
-@pytest.mark.parametrize("invalid", INVALID_OBJECTS)
-def test_runtime_memory_requires_each_exact_domain_component(
-    runtime_pair,
-    field: str,
-    invalid: object,
-) -> None:
-    current = runtime_pair[0].components.memory
-    with pytest.raises(TypeError):
-        replace(current, **{field: invalid})
 
 
 @pytest.mark.parametrize(
@@ -214,21 +140,6 @@ def test_runtime_memory_search_and_persistent_index_must_share_one_index(runtime
 
 
 @pytest.mark.parametrize(
-    "field",
-    ["jobs", "receipts", "enqueuer", "lifecycle", "runner", "worker", "lifecycle_worker"],
-)
-@pytest.mark.parametrize("invalid", INVALID_OBJECTS)
-def test_runtime_workflow_requires_each_exact_domain_component(
-    runtime_pair,
-    field: str,
-    invalid: object,
-) -> None:
-    current = runtime_pair[0].components.workflow
-    with pytest.raises(TypeError):
-        replace(current, **{field: invalid})
-
-
-@pytest.mark.parametrize(
     ("field", "message"),
     [
         ("jobs", "share one job store"),
@@ -251,21 +162,6 @@ def test_runtime_workflow_rejects_component_from_another_runtime(
             first.components.workflow,
             **{field: getattr(second.components.workflow, field)},
         )
-
-
-@pytest.mark.parametrize(
-    "field",
-    ["infrastructure", "models", "conversation", "memory", "workflow"],
-)
-@pytest.mark.parametrize("invalid", INVALID_OBJECTS)
-def test_runtime_components_requires_each_exact_component_group(
-    runtime_pair,
-    field: str,
-    invalid: object,
-) -> None:
-    current = runtime_pair[0].components
-    with pytest.raises(TypeError):
-        replace(current, **{field: invalid})
 
 
 @pytest.mark.parametrize(

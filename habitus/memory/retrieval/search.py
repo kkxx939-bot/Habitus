@@ -55,21 +55,14 @@ class MemorySemanticSearchConfig:
             ("max_rerank_candidates", self.max_rerank_candidates, 10_000),
             ("max_rerank_document_chars", self.max_rerank_document_chars, 1_000_000),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+            if not 1 <= value <= maximum:
                 raise ValueError(f"{name} must be between one and {maximum}")
         if not _finite_between(self.vector_score_threshold, -1.0, 1.0):
             raise ValueError("vector_score_threshold must be between -1 and 1")
-        if isinstance(self.rerank_score_threshold, bool) or not isinstance(
-            self.rerank_score_threshold,
-            int | float,
-        ):
-            raise TypeError("rerank_score_threshold must be numeric")
         if not math.isfinite(float(self.rerank_score_threshold)):
             raise ValueError("rerank_score_threshold must be finite")
         if not _finite_between(self.score_propagation_alpha, 0.0, 1.0):
             raise ValueError("score_propagation_alpha must be between zero and one")
-        if not isinstance(self.rerank_hierarchy, bool):
-            raise TypeError("rerank_hierarchy must be boolean")
 
 
 @dataclass(frozen=True)
@@ -92,12 +85,6 @@ class MemorySemanticSearchEngine:
         config: MemorySemanticSearchConfig | None = None,
         observer: Observer | None = None,
     ) -> None:
-        if not callable(getattr(embedder, "embed_query", None)):
-            raise TypeError("embedder must implement embed_query")
-        if not callable(getattr(index, "search", None)) or not callable(getattr(index, "search_children", None)):
-            raise TypeError("index must implement vector search and child search")
-        if reranker is not None and not callable(getattr(reranker, "rerank", None)):
-            raise TypeError("reranker must implement rerank")
         self.embedder = embedder
         self.index = index
         self.reranker = reranker
@@ -122,8 +109,6 @@ class MemorySemanticSearchEngine:
         maximum = self._limit(limit)
 
         query_vector = await self.embedder.embed_query(normalized_query)
-        if not isinstance(query_vector, EmbeddingVector):
-            raise TypeError("embedder must return an EmbeddingVector for a query")
 
         vector_limit = max(
             self.config.min_vector_candidates,
@@ -239,7 +224,7 @@ class MemorySemanticSearchEngine:
                 query,
                 tuple(self._rerank_text(match.content) for match in matches),
             )
-            if not isinstance(scores, tuple) or len(scores) != len(matches):
+            if len(scores) != len(matches):
                 raise ValueError("reranker returned an unexpected hierarchy score count")
             return tuple(
                 (match, self._score(score, "hierarchy rerank")) for match, score in zip(matches, scores, strict=True)
@@ -264,7 +249,7 @@ class MemorySemanticSearchEngine:
                 query,
                 tuple(self._rerank_text(candidate.content) for candidate in selected),
             )
-            if not isinstance(scores, tuple) or len(scores) != len(selected):
+            if len(scores) != len(selected):
                 raise ValueError("reranker returned an unexpected final score count")
         except Exception as exc:
             logger.warning("final reranker failed; using vector scores", exc_info=exc)
@@ -368,22 +353,17 @@ class MemorySemanticSearchEngine:
 
     @staticmethod
     def _matches(value: Sequence[MemoryVectorMatch]) -> tuple[MemoryVectorMatch, ...]:
-        if isinstance(value, str) or not isinstance(value, Sequence):
-            raise TypeError("memory vector index must return a sequence")
-        matches = tuple(value)
-        if any(not isinstance(match, MemoryVectorMatch) for match in matches):
-            raise TypeError("memory vector index returned an invalid match")
-        return matches
+        return tuple(value)
 
     @staticmethod
-    def _query(query: object) -> str:
-        if not isinstance(query, str) or not query.strip():
+    def _query(query: str) -> str:
+        if not query.strip():
             raise ValueError("memory semantic query must be non-empty text")
         return query.strip()
 
     @staticmethod
     def _roots(roots: tuple[MemoryURI, ...]) -> tuple[MemoryURI, ...]:
-        if not isinstance(roots, tuple) or not roots:
+        if not roots:
             raise ValueError("memory semantic search requires at least one root")
         normalized = tuple(MemoryURI.parse(root) for root in roots)
         if any(root.node_type is not MemoryURINodeType.DIRECTORY for root in normalized):
@@ -394,8 +374,6 @@ class MemorySemanticSearchEngine:
 
     @staticmethod
     def _kinds(kinds: tuple[MemoryKind, ...]) -> tuple[MemoryKind, ...]:
-        if not isinstance(kinds, tuple):
-            raise TypeError("memory semantic search kinds must be a tuple")
         normalized = tuple(MemoryKind(kind) for kind in kinds)
         if len(normalized) != len(set(normalized)):
             raise ValueError("memory semantic search kinds must be unique")
@@ -403,27 +381,20 @@ class MemorySemanticSearchEngine:
 
     @staticmethod
     def _limit(limit: int) -> int:
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1_000:
+        if not 1 <= limit <= 1_000:
             raise ValueError("memory semantic search limit must be between one and 1000")
         return limit
 
     @staticmethod
-    def _score(value: object, label: str) -> float:
-        if isinstance(value, bool) or not isinstance(value, int | float):
-            raise TypeError(f"{label} score must be numeric")
+    def _score(value: float, label: str) -> float:
         score = float(value)
         if not math.isfinite(score):
             raise ValueError(f"{label} score must be finite")
         return score
 
 
-def _finite_between(value: object, minimum: float, maximum: float) -> bool:
-    return bool(
-        not isinstance(value, bool)
-        and isinstance(value, int | float)
-        and math.isfinite(float(value))
-        and minimum <= float(value) <= maximum
-    )
+def _finite_between(value: float, minimum: float, maximum: float) -> bool:
+    return math.isfinite(float(value)) and minimum <= float(value) <= maximum
 
 
 __all__ = [

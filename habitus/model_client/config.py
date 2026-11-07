@@ -107,8 +107,6 @@ class ChatModelConfig:
     reasoning: bool = False
 
     def __post_init__(self) -> None:
-        if not isinstance(self.route, ProviderConfig):
-            raise TypeError("chat route must be ProviderConfig")
         _bounded_int(
             self.context_window_tokens,
             "chat context_window_tokens",
@@ -126,8 +124,6 @@ class ChatModelConfig:
                 raise ValueError("chat max_output_tokens must be below context_window_tokens")
         if self.structured_output_mode not in {"none", "json_object", "json_schema"}:
             raise ValueError("chat structured_output_mode must be none, json_object or json_schema")
-        if not isinstance(self.reasoning, bool):
-            raise TypeError("chat reasoning must be boolean")
 
     @property
     def capability(self) -> Literal["chat"]:
@@ -152,8 +148,6 @@ class EmbeddingModelConfig:
     document_prefix: str = ""
 
     def __post_init__(self) -> None:
-        if not isinstance(self.route, ProviderConfig):
-            raise TypeError("embedding route must be ProviderConfig")
         _bounded_int(self.dimension, "embedding dimension", minimum=1, maximum=65_536)
         _bounded_int(self.max_batch_size, "embedding max_batch_size", minimum=1, maximum=2048)
         _bounded_int(self.max_input_chars, "embedding max_input_chars", minimum=1, maximum=1_000_000)
@@ -198,8 +192,6 @@ class RerankModelConfig:
     max_document_chars: int = 16_000
 
     def __post_init__(self) -> None:
-        if not isinstance(self.route, ProviderConfig):
-            raise TypeError("rerank route must be ProviderConfig")
         _bounded_int(self.max_documents, "rerank max_documents", minimum=1, maximum=2048)
         _bounded_int(self.max_query_chars, "rerank max_query_chars", minimum=1, maximum=1_000_000)
         _bounded_int(
@@ -232,17 +224,15 @@ def _validate_base_url(base_url: str) -> None:
         raise ValueError("remote model base_url must use HTTPS")
 
 
-def _positive_float(value: object, label: str, *, maximum: float) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise ValueError(f"{label} must be numeric")
+def _positive_float(value: float, label: str, *, maximum: float) -> float:
     number = float(value)
     if not 0 < number <= maximum:
         raise ValueError(f"{label} must be between zero and {maximum:g}")
     return number
 
 
-def _bounded_int(value: object, label: str, *, minimum: int, maximum: int) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+def _bounded_int(value: int, label: str, *, minimum: int, maximum: int) -> None:
+    if not minimum <= value <= maximum:
         raise ValueError(f"{label} must be between {minimum} and {maximum}")
 
 

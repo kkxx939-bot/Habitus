@@ -65,37 +65,6 @@ def noop_identities(*documents) -> MemoryFinalIdentityMap:
     return MemoryFinalIdentityMap(tuple(entries))
 
 
-def test_relation_reader_requires_real_snapshot_reader(tmp_path: Path) -> None:
-    with pytest.raises(TypeError, match="reader"):
-        MemoryRelationReadSetLoader(object())  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize(
-    ("field", "invalid", "message"),
-    [
-        ("known_snapshots", object(), "known_snapshots"),
-        ("identities", object(), "identities"),
-        ("operations", [], "operations"),
-        ("operations", (object(),), "operations"),
-    ],
-)
-def test_relation_reader_rejects_each_invalid_input(
-    tmp_path: Path,
-    field: str,
-    invalid: object,
-    message: str,
-) -> None:
-    _tree, snapshot_reader = reader(tmp_path)
-    values = {
-        "known_snapshots": SnapshotBatch((), 0),
-        "identities": MemoryFinalIdentityMap(()),
-        "operations": (),
-        field: invalid,
-    }
-    with pytest.raises(TypeError, match=message):
-        MemoryRelationReadSetLoader(snapshot_reader).load(**values)
-
-
 def test_no_structural_or_explicit_relation_returns_empty_read_set(tmp_path: Path) -> None:
     current = document(MemoryKind.PREFERENCE)
     _tree, snapshot_reader = reader(tmp_path, current)

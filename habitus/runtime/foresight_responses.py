@@ -22,9 +22,7 @@ from habitus.runtime.foresight_ledger import ForesightLedgerStore
 
 class ReminderResponses:
     def __init__(self, ledger: ForesightLedgerStore, *, limit: int, observer: Observer | None = None) -> None:
-        if not isinstance(ledger, ForesightLedgerStore):
-            raise TypeError("ledger must be a ForesightLedgerStore")
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        if limit < 1:
             raise ValueError("limit must be a positive integer")
         self.ledger = ledger
         self.limit = limit

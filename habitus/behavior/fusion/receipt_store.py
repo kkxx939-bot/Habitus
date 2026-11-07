@@ -69,11 +69,6 @@ class BehaviorFusionReceiptStore:
     ) -> None:
         self.root = Path(behavior_root).expanduser().resolve(strict=False)
         resolved = config or BehaviorFusionConfig()
-        if not isinstance(resolved, BehaviorFusionConfig):
-            raise TypeError("config must be BehaviorFusionConfig")
-        required = ("acquire", "renew", "fenced", "release", "discard_idle")
-        if any(not callable(getattr(lock_store, name, None)) for name in required):
-            raise TypeError("lock_store must implement the LockStore contract")
         self.config = resolved
         self.receipt_root = self.root / "fusion" / "receipts"
         self.lock_store = lock_store
@@ -83,8 +78,6 @@ class BehaviorFusionReceiptStore:
     def put(self, receipt: BehaviorFusionReceipt) -> BehaviorFusionReceipt:
         """落盘一份回执；同一片段同版本已有回执时复用既有的那份（不论它是哪个时刻判的）。"""
 
-        if not isinstance(receipt, BehaviorFusionReceipt):
-            raise TypeError("receipt must be BehaviorFusionReceipt")
         encoded = self._encode(receipt)
         # 先解码自校验再落盘：写路径若比读路径宽松，"写得进读不回"的记录会永久占死该身份并让
         # 整个枚举失效，而本层没有删除接口。
@@ -144,7 +137,7 @@ class BehaviorFusionReceiptStore:
     def expire(self, before: datetime) -> int:
         """删掉文件名里判定时刻早于 ``before`` 的回执，不解码正文；覆盖信息另有索引，回执本身只服务作业期幂等。"""
 
-        if not isinstance(before, datetime) or before.utcoffset() is None:
+        if before.utcoffset() is None:
             raise TypeError("before must be a timezone-aware datetime")
         removed = 0
         for moment, _receipt_id, name in self._entries():

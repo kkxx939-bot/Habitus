@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 
 from habitus.foundation.integrity import canonical_json
+from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.filesystem import DurablePathIntegrityError, list_real_directory
 from habitus.infrastructure.store.filesystem.durable_io import (
     atomic_create_bytes,
@@ -38,7 +39,7 @@ class ConversationIngressRequest:
 
     def __post_init__(self) -> None:
         for name, value in (("delivery_id", self.delivery_id), ("request_digest", self.request_digest)):
-            if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+            if _SHA256.fullmatch(value) is None:
                 raise ConversationIngressError(f"{name} must be lowercase SHA-256 text")
 
 
@@ -55,16 +56,14 @@ class ConversationIngressReceipt:
     def __post_init__(self) -> None:
         for name in ("delivery_id", "request_digest", "batch_digest"):
             value = getattr(self, name)
-            if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+            if _SHA256.fullmatch(value) is None:
                 raise ConversationIngressError(f"receipt {name} must be lowercase SHA-256 text")
         for name in ("start_sequence", "end_sequence"):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if value < 0:
                 raise ConversationIngressError(f"receipt {name} must be non-negative")
         if self.end_sequence < self.start_sequence:
             raise ConversationIngressError("receipt sequence range is invalid")
-        if not isinstance(self.state, ConversationIngressState):
-            raise ConversationIngressError("receipt state is invalid")
         if self.state is ConversationIngressState.PREPARED:
             if self.next_sequence is not None:
                 raise ConversationIngressError("prepared receipt cannot contain next_sequence")
@@ -106,14 +105,27 @@ class ConversationIngressReceipt:
             state = ConversationIngressState(value["state"])
         except (TypeError, ValueError) as exc:
             raise ConversationIngressError("ingress receipt state is invalid") from exc
+        digests = {name: value[name] for name in ("delivery_id", "request_digest", "batch_digest")}
+        for name, item in digests.items():
+            if not isinstance(item, str):
+                raise ConversationIngressError(f"receipt {name} must be lowercase SHA-256 text")
+        texts = {name: item for name, item in digests.items() if isinstance(item, str)}
+        start_sequence, end_sequence = value["start_sequence"], value["end_sequence"]
+        if not is_int(start_sequence):
+            raise ConversationIngressError("receipt start_sequence must be non-negative")
+        if not is_int(end_sequence):
+            raise ConversationIngressError("receipt end_sequence must be non-negative")
+        next_sequence = value["next_sequence"]
+        if next_sequence is not None and not is_int(next_sequence):
+            raise ConversationIngressError("committed receipt next_sequence is inconsistent")
         return cls(
-            delivery_id=value["delivery_id"],
-            request_digest=value["request_digest"],
-            batch_digest=value["batch_digest"],
-            start_sequence=value["start_sequence"],
-            end_sequence=value["end_sequence"],
+            delivery_id=texts["delivery_id"],
+            request_digest=texts["request_digest"],
+            batch_digest=texts["batch_digest"],
+            start_sequence=start_sequence,
+            end_sequence=end_sequence,
             state=state,
-            next_sequence=value["next_sequence"],
+            next_sequence=next_sequence,
         )
 
 
@@ -121,10 +133,8 @@ class ConversationIngressReceiptStore:
     """只负责回执文件的有界、安全读写，不决定 Conversation 追加语义。"""
 
     def __init__(self, layout: ConversationLayout, *, max_files: int, max_file_bytes: int) -> None:
-        if not isinstance(layout, ConversationLayout):
-            raise TypeError("layout must be ConversationLayout")
         for name, value in (("max_files", max_files), ("max_file_bytes", max_file_bytes)):
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         self.layout = layout
         self.max_files = max_files

@@ -76,9 +76,9 @@ class RememberPartsStaging:
         ttl_seconds: float,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+        if max_bytes <= 0:
             raise ValueError("max_bytes must be a positive integer")
-        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int | float) or ttl_seconds <= 0:
+        if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
         self.max_bytes = max_bytes
         self.ttl_seconds = float(ttl_seconds)

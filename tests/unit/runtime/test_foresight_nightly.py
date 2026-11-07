@@ -17,7 +17,6 @@ from habitus.runtime.foresight_nightly import ForesightNightlyRun
 from habitus.runtime.foresight_opportunities import OpportunityStore
 from habitus.runtime.foresight_settlement import SettlementStage
 from habitus.runtime.nightly import Nightly
-from habitus.scene.concepts import ConceptSet
 from habitus.scene.concepts.rhythm import RhythmRulers
 from habitus.scene.recurrence import recurrences_of
 from habitus.scene.relations import build_timelines
@@ -144,25 +143,6 @@ def test_a_failing_lane_does_not_stop_the_night(tmp_path, monkeypatch) -> None:
     assert recorder.events[-1].attributes["lanes_failed"] == 1
 
 
-def test_nightly_refuses_a_foresight_step_of_the_wrong_type(tmp_path) -> None:
-    import pytest
-
-    site, hits = site_with_three_bedtimes(tmp_path)
-    scene, _provider = nightly(tmp_path, hits, site)
-    with pytest.raises(TypeError, match="ForesightNightlyRun"):
-        Nightly(
-            behavior_tree=site.behavior_tree,
-            zone=ZoneInfo("Asia/Shanghai"),
-            scene=scene,
-            closed_days=tuple,
-            vocabulary=steady,
-            foresight=object(),
-        )  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="RelationConfig"):
-        ForesightNightlyRun(OpportunityStore(tmp_path / "f"), RelationStore(tmp_path / "scene"), object())  # type: ignore[arg-type]
-    assert isinstance(ConceptSet([]), ConceptSet)
-
-
 def _night_with_settlement(tmp_path):  # type: ignore[no-untyped-def]
     site, hits = site_with_three_bedtimes(tmp_path)
     scene, _provider = nightly(tmp_path, hits, site)
@@ -251,17 +231,6 @@ def test_a_failing_settlement_stops_the_night(tmp_path, monkeypatch) -> None:
     outcome = asyncio.run(run.run_once())
     assert outcome.settled is None and outcome.scene is None and outcome.opportunities is None
     assert outcome.stopped == "结算出错: RuntimeError" and not outcome.complete
-    import pytest
-
-    with pytest.raises(TypeError, match="SettlementStage"):
-        Nightly(
-            behavior_tree=site.behavior_tree,
-            zone=ZoneInfo("Asia/Shanghai"),
-            scene=scene,
-            closed_days=tuple,
-            vocabulary=steady,
-            settlement=object(),  # type: ignore[arg-type]
-        )
 
 
 def test_a_failing_unit_history_is_reported_while_the_table_is_still_written(tmp_path) -> None:

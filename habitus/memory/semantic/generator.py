@@ -45,16 +45,12 @@ class LLMMemoryOverviewGenerator:
         *,
         config: MemorySemanticConfig | None = None,
     ) -> None:
-        if not isinstance(client, StructuredChatClient):
-            raise TypeError("client must be a StructuredChatClient")
         self.client = client
         self.config = config or MemorySemanticConfig()
 
     def generate(self, snapshot: MemoryDirectorySnapshot) -> str:
         """生成包含每个直接子项且不允许模型增删名称的目录概览。"""
 
-        if not isinstance(snapshot, MemoryDirectorySnapshot):
-            raise TypeError("snapshot must be a MemoryDirectorySnapshot")
         if not snapshot.entries:
             raise ValueError("cannot generate an overview for an empty directory")
         prompt = self._prompt(snapshot)

@@ -54,7 +54,7 @@ class ConversationSummaryConfig:
             ("max_file_bytes", self.max_file_bytes, 1_024, 16 * 1024 * 1024),
             ("max_files_per_conversation", self.max_files_per_conversation, 1, 1_000_000),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            if not minimum <= value <= maximum:
                 raise ValueError(f"{name} must be between {minimum} and {maximum}")
 
 
@@ -67,10 +67,6 @@ class ConversationSummaryStore:
         *,
         config: ConversationSummaryConfig | None = None,
     ) -> None:
-        if not isinstance(layout, ConversationLayout):
-            raise TypeError("layout must be ConversationLayout")
-        if config is not None and not isinstance(config, ConversationSummaryConfig):
-            raise TypeError("config must be ConversationSummaryConfig")
         self.layout = layout
         self.config = config or ConversationSummaryConfig()
 
@@ -200,8 +196,6 @@ class ConversationSummaryStore:
         """只创建一次；并发重放优先复用已经通过来源校验的摘要。"""
 
         self._require_source(address, segment)
-        if not isinstance(summary, ConversationSegmentSummary):
-            raise TypeError("summary must be ConversationSegmentSummary")
         summary.require_matches_source(segment)
         existing = self.try_read(address, segment)
         if existing is not None:
@@ -221,10 +215,6 @@ class ConversationSummaryStore:
 
     @staticmethod
     def _require_source(address: ConversationAddress, segment: ConversationSegment) -> None:
-        if not isinstance(address, ConversationAddress):
-            raise TypeError("address must be ConversationAddress")
-        if not isinstance(segment, ConversationSegment):
-            raise TypeError("segment must be ConversationSegment")
         if not same_path_identity(
             address.conversation_id,
             segment.conversation_id,
@@ -243,12 +233,6 @@ class ConversationSummaryGenerator:
         config: ConversationSummaryConfig | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if not isinstance(client, StructuredChatClient):
-            raise TypeError("client must be StructuredChatClient")
-        if config is not None and not isinstance(config, ConversationSummaryConfig):
-            raise TypeError("config must be ConversationSummaryConfig")
-        if clock is not None and not callable(clock):
-            raise TypeError("clock must be callable")
         self.client = client
         self.config = config or ConversationSummaryConfig()
         self.clock = clock or (lambda: datetime.now(UTC))
@@ -256,8 +240,6 @@ class ConversationSummaryGenerator:
     async def generate(self, segment: ConversationSegment) -> ConversationSegmentSummary:
         """完整读取 Segment；输入过大时明确失败，绝不截断原文。"""
 
-        if not isinstance(segment, ConversationSegment):
-            raise TypeError("segment must be ConversationSegment")
         source = canonical_json(segment.to_dict())
         if len(source) > self.config.max_input_chars:
             raise ConversationSummaryError("conversation segment exceeds the summary input bound")
@@ -327,8 +309,6 @@ class ConversationSummaryGenerator:
 
     def _timestamp(self) -> datetime:
         value = self.clock()
-        if not isinstance(value, datetime):
-            raise TypeError("summary clock must return datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("summary clock must return timezone-aware datetime")
         return value.astimezone(UTC)
@@ -342,10 +322,6 @@ class ConversationSummaryService:
         store: ConversationSummaryStore,
         generator: ConversationSummaryGenerator,
     ) -> None:
-        if not isinstance(store, ConversationSummaryStore):
-            raise TypeError("store must be ConversationSummaryStore")
-        if not isinstance(generator, ConversationSummaryGenerator):
-            raise TypeError("generator must be ConversationSummaryGenerator")
         self.store = store
         self.generator = generator
 

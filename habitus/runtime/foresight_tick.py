@@ -116,23 +116,17 @@ class ForesightTick:
             shadow_unestablished=shadow_unestablished,
             vocabulary_version=vocabulary_version,
         )
-        if not isinstance(opportunities, OpportunityStore):
-            raise TypeError("opportunities must be an OpportunityStore")
-        if not isinstance(lane, str) or not lane:
+        if not lane:
             raise ValueError("lane must be non-empty text")
-        if migrating is not None and not callable(migrating):
-            raise TypeError("migrating must be callable or None")
         self.ledger = ledger
         self.opportunities = opportunities
         self.read_side = read_side
         self.lane = lane
         self.migrating = migrating
-        if delivery is not None and (not isinstance(delivery, DeliveryStage) or delivery.ledger is not ledger):
+        if delivery is not None and delivery.ledger is not ledger:
             raise TypeError("delivery must be a DeliveryStage on the same ledger")
         self.delivery = delivery
-        if tick_seconds is not None and (
-            isinstance(tick_seconds, bool) or not isinstance(tick_seconds, int | float) or tick_seconds <= 0
-        ):
+        if tick_seconds is not None and tick_seconds <= 0:
             raise ValueError("tick_seconds must be a positive number or None")
         #: 一拍多长：此刻往前这么久关的时窗这一拍还算赶上（拍点晚了一点不丢没做的那次机会）。
         self.tick = timedelta(seconds=float(tick_seconds)) if tick_seconds is not None else None
@@ -140,8 +134,6 @@ class ForesightTick:
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
         #: 时窗末当场重读那段「没读懂」「错误」的口（会话一支的重试堆，裁定 68 第 1 条）；没接就是 None。
         self.reread = reread
-        if line_finished is not None and not callable(line_finished):
-            raise TypeError("line_finished must be callable or None")
         #: 夜里那条线自己记的"这一晚跑完了没有"（与结算认停掉的那天同一个判断，``LastRun.finished``）：今天这一晚的线跑完了
         #: 才建预期（裁定 94 第 1 条）；没接就只看表是不是今天这一晚的。
         self.line_finished = line_finished
@@ -286,6 +278,7 @@ class ForesightTick:
             try:
                 day = BehaviorURI.parse(uri).to_address().occurred_on
             except (TypeError, ValueError):
+                # 不是行为树 URI 的出处（``unsealed:<开始时刻>``）只在最近几天的 ``seen`` 里有，过了就取不到行
                 continue
             sealed = cache.day(day).by_uri.get(uri)
             if sealed is not None:

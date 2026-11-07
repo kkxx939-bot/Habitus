@@ -49,8 +49,6 @@ class MemoryURI:
     )
 
     def __init__(self, uri: str) -> None:
-        if not isinstance(uri, str):
-            raise TypeError("memory URI must be a string")
         if not uri or uri != uri.strip():
             raise MemoryURIError("memory URI must be non-empty without surrounding whitespace")
         prefix = f"{self.SCHEME}://"
@@ -93,8 +91,6 @@ class MemoryURI:
     def from_address(cls, address: MemoryAddress) -> MemoryURI:
         """从一个 L2 语义地址构造唯一 URI。"""
 
-        if not isinstance(address, MemoryAddress):
-            raise TypeError("address must be a MemoryAddress")
         segments: tuple[str, ...]
         if address.kind is MemoryKind.PROFILE:
             segments = ("profile.md",)
@@ -125,8 +121,6 @@ class MemoryURI:
     def from_directory(cls, directory: MemoryDirectory) -> MemoryURI:
         """从受控目录地址构造唯一 URI。"""
 
-        if not isinstance(directory, MemoryDirectory):
-            raise TypeError("directory must be a MemoryDirectory")
         return cls._from_segments(directory.identity_parts)
 
     @classmethod
@@ -137,8 +131,6 @@ class MemoryURI:
     ) -> MemoryURI:
         """构造目录 L0 或 L1 侧车文件 URI。"""
 
-        if not isinstance(directory, MemoryDirectory):
-            raise TypeError("directory must be a MemoryDirectory")
         normalized_level = MemoryLevel(level)
         return cls._from_segments((*directory.identity_parts, normalized_level.sidecar_filename))
 
@@ -148,8 +140,6 @@ class MemoryURI:
 
         segments: list[str] = []
         for part in path_parts:
-            if not isinstance(part, str):
-                raise TypeError("memory URI path parts must be strings")
             if not part or "/" in part or "\\" in part:
                 raise MemoryURIError("memory URI path parts must be safe non-empty segments")
             segments.append(part)
@@ -254,8 +244,6 @@ class MemoryURI:
 
         if self._node_type is not MemoryURINodeType.DIRECTORY:
             raise MemoryURIError("only a memory directory URI can join a child")
-        if not isinstance(part, str):
-            raise TypeError("memory URI join part must be a string")
         if not part or "/" in part or "\\" in part:
             raise MemoryURIError("memory URI join part must be one safe non-empty segment")
         return self._from_segments((*self._segments, part))
@@ -285,6 +273,14 @@ class MemoryURI:
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("MemoryURI is immutable")
+
+
+def decode_memory_uri(value: object) -> MemoryURI:
+    """外部数据（磁盘记录、数据库行、模型输出）读回的 URI 在构造前确认是字符串，文字照抄 ``MemoryURI.__init__``。"""
+
+    if not isinstance(value, str):
+        raise TypeError("memory URI must be a string")
+    return MemoryURI(value)
 
 
 def _classify(
@@ -419,7 +415,7 @@ def _decode_segment(value: str) -> str:
 
 
 def _encode_segment(value: str) -> str:
-    if not isinstance(value, str) or not value:
+    if not value:
         raise MemoryURIError("memory URI segments must be non-empty strings")
     encoded: list[str] = []
     for character in value:
@@ -430,4 +426,4 @@ def _encode_segment(value: str) -> str:
     return "".join(encoded)
 
 
-__all__ = ["MemoryURI", "MemoryURIError", "MemoryURINodeType"]
+__all__ = ["MemoryURI", "MemoryURIError", "MemoryURINodeType", "decode_memory_uri"]

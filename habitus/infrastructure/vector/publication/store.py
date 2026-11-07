@@ -41,17 +41,11 @@ class PublishedVectorStore:
         publication_lock_key: str | None = None,
     ) -> None:
         _validate_backend(backend)
-        if not isinstance(path_lock, PathLock):
-            raise TypeError("path_lock must be PathLock")
         self.backend = backend
         self._initialize_lock = asyncio.Lock()
         self._path_lock = path_lock
         self._publication_lock_key = publication_lock_key or _default_publication_lock_key(backend)
-        if (
-            not isinstance(self._publication_lock_key, str)
-            or not self._publication_lock_key
-            or self._publication_lock_key != self._publication_lock_key.strip()
-        ):
+        if not self._publication_lock_key or self._publication_lock_key != self._publication_lock_key.strip():
             raise ValueError("publication_lock_key must be normalized non-empty text")
         coordination_domain = getattr(path_lock.lock_store, "coordination_domain", None)
         if not isinstance(coordination_domain, str) or not coordination_domain:
@@ -215,9 +209,7 @@ class PublishedVectorStore:
         filters: VectorStoreFilter,
         limit: int,
     ) -> tuple[VectorStoreMatch, ...]:
-        if not isinstance(query_vector, EmbeddingVector):
-            raise TypeError("query_vector must be EmbeddingVector")
-        _search_inputs(filters, limit, self.backend.max_search_hits)
+        _search_limit(limit, self.backend.max_search_hits)
         await self.initialize()
         for _attempt in range(8):
             publication = await self._load_publication()
@@ -243,7 +235,7 @@ class PublishedVectorStore:
         filters: VectorStoreFilter,
         limit: int,
     ) -> tuple[VectorStoreRecord, ...]:
-        _search_inputs(filters, limit, self.backend.max_records)
+        _search_limit(limit, self.backend.max_records)
         await self.initialize()
         for _attempt in range(8):
             publication = await self._load_publication()
@@ -348,8 +340,6 @@ class PublishedVectorStore:
         return publication
 
     async def _write_claim(self, *, building: bool, dimension: int) -> None:
-        if not isinstance(building, bool):
-            raise TypeError("vector publication building state must be boolean")
         await self.backend.write_metadata(
             {
                 _CLAIM_METADATA: {
@@ -533,9 +523,7 @@ def _metadata_int(value: Mapping[str, object], name: str) -> int:
     return item
 
 
-def _validate_publication(publication: object, *, operation: str) -> None:
-    if not isinstance(publication, VectorPublicationSnapshot):
-        raise VectorStoreIntegrityError("vector backend returned an invalid publication snapshot")
+def _validate_publication(publication: VectorPublicationSnapshot, *, operation: str) -> None:
     if publication.state is None:
         if publication.claim_exists and not publication.building:
             raise VectorStoreIntegrityError(f"vector ownership claim is ready without state during {operation}")
@@ -559,16 +547,12 @@ def _records(
     dimension: int | None = None,
     maximum: int,
 ) -> tuple[VectorStoreRecord, ...]:
-    if isinstance(records, str | bytes) or not isinstance(records, Sequence):
-        raise TypeError("vector records must be a sequence")
     normalized = tuple(records)
     if len(normalized) > maximum:
         raise ValueError("vector record batch exceeds configured capacity")
     identities: set[str] = set()
     expected_dimension = dimension
     for record in normalized:
-        if not isinstance(record, VectorStoreRecord):
-            raise TypeError("vector record batch contains an invalid item")
         if record.identity in identities:
             raise ValueError("vector record batch contains duplicate identities")
         identities.add(record.identity)
@@ -579,12 +563,10 @@ def _records(
 
 
 def _identities(values: Sequence[str]) -> tuple[str, ...]:
-    if isinstance(values, str | bytes) or not isinstance(values, Sequence):
-        raise TypeError("vector identities must be a sequence")
     result: list[str] = []
     seen: set[str] = set()
     for value in values:
-        if not isinstance(value, str) or not value or value != value.strip():
+        if not value or value != value.strip():
             raise ValueError("vector identity must be normalized non-empty text")
         if value in seen:
             raise ValueError("vector identities must be unique")
@@ -618,7 +600,7 @@ def _validate_scan_result(records: Sequence[VectorStoreRecord], *, maximum: int)
 
 def _state_inputs(schema_version: str, fingerprint: str, dimension: int, checkpoint: int) -> None:
     for name, value in (("schema_version", schema_version), ("embedding_fingerprint", fingerprint)):
-        if not isinstance(value, str) or not value or value != value.strip():
+        if not value or value != value.strip():
             raise ValueError(f"vector {name} must be normalized non-empty text")
     _positive_int(dimension, "dimension")
     _non_negative_int(checkpoint, "checkpoint")
@@ -630,20 +612,18 @@ def _assert_generation(state: VectorStoreState | None, expected: int | None) -> 
         raise VectorStoreConflictError("vector generation changed before full replacement")
 
 
-def _positive_int(value: object, name: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+def _positive_int(value: int, name: str) -> None:
+    if value < 1:
         raise ValueError(f"vector {name} must be a positive integer")
 
 
-def _non_negative_int(value: object, name: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+def _non_negative_int(value: int, name: str) -> None:
+    if value < 0:
         raise ValueError(f"vector {name} must be a non-negative integer")
 
 
-def _search_inputs(filters: VectorStoreFilter, limit: int, maximum: int) -> None:
-    if not isinstance(filters, VectorStoreFilter):
-        raise TypeError("filters must be VectorStoreFilter")
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= maximum:
+def _search_limit(limit: int, maximum: int) -> None:
+    if not 1 <= limit <= maximum:
         raise ValueError("vector search limit is outside its configured bound")
 
 

@@ -54,7 +54,7 @@ class RetryBatch:
 class RetryBacklogStore:
     def __init__(self, root: str | Path, *, max_items: int, max_item_bytes: int = 1_048_576) -> None:
         for label, value in (("max_items", max_items), ("max_item_bytes", max_item_bytes)):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            if value < 1:
                 raise ValueError(f"{label} must be a positive integer")
         self.root = Path(root).expanduser().absolute()
         self.directory = self.root.joinpath(*_DIRECTORY)
@@ -62,8 +62,6 @@ class RetryBacklogStore:
         self.max_item_bytes = max_item_bytes
 
     def put(self, item: RetryItem) -> Admission:
-        if not isinstance(item, RetryItem):
-            raise TypeError("item must be RetryItem")
         through = self.through()
         if through is not None and item.day <= through:
             return self._refuse(Admission.LATE)
@@ -132,6 +130,7 @@ class RetryBacklogStore:
                 )
                 item = RetryItem.from_mapping(json.loads(encoded.decode("utf-8")))
             except FileNotFoundError:
+                # 列目录之后被并发取走（处理完删掉）的条目：已不在堆里，跳过即可。
                 continue
             except (RetryError, UnicodeDecodeError, json.JSONDecodeError, ValueError, DurablePathIntegrityError):
                 unreadable.append(identity)

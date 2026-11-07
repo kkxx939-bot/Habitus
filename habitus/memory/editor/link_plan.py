@@ -28,20 +28,14 @@ class MemoryRelationReadSet:
     snapshots: MemorySnapshotBatch
 
     def __post_init__(self) -> None:
-        if not isinstance(self.structural_source_uris, tuple) or any(
-            not isinstance(uri, MemoryURI) for uri in self.structural_source_uris
-        ):
-            raise TypeError("structural_source_uris must be MemoryURI values")
         source_ids = tuple(str(uri) for uri in self.structural_source_uris)
         if source_ids != tuple(sorted(set(source_ids))):
             raise MemoryRelationIntegrityError("structural source URIs must be unique and sorted")
-        if not isinstance(self.snapshots, SnapshotBatch):
-            raise TypeError("snapshots must be a MemorySnapshotBatch")
         for snapshot in self.snapshots.snapshots:
             MemoryURI.parse(snapshot.identity).to_address()
             if not snapshot.exists:
                 continue
-            if not isinstance(snapshot.value, MemoryDocument):
+            if snapshot.value is None:
                 raise MemoryRelationIntegrityError("relation read set contains an invalid memory document")
             if str(MemoryURI.from_address(snapshot.value.address)) != snapshot.identity:
                 raise MemoryRelationIntegrityError("relation snapshot identity does not match its document")
@@ -58,15 +52,6 @@ class MemoryRelationReadSet:
         operations: tuple[MemoryResolvedRelation, ...],
     ) -> MemoryRelationReadSet:
         """从上游完整快照中选择并验证关系计划所需的闭合一跳读集。"""
-
-        if not isinstance(snapshots, SnapshotBatch):
-            raise TypeError("snapshots must be a MemorySnapshotBatch")
-        if not isinstance(identities, MemoryFinalIdentityMap):
-            raise TypeError("identities must be a MemoryFinalIdentityMap")
-        if not isinstance(operations, tuple) or any(
-            not isinstance(operation, MemoryResolvedRelation) for operation in operations
-        ):
-            raise TypeError("operations must be MemoryResolvedRelation values")
 
         structural_sources = {
             str(entry.source_uri)
@@ -127,7 +112,7 @@ class MemoryRelationReadSet:
         """返回指定已存在关系节点。"""
 
         snapshot = self.snapshot(uri)
-        if not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
+        if not snapshot.exists or snapshot.value is None:
             raise MemoryRelationIntegrityError("relation operation requires an existing memory document")
         return snapshot.value
 
@@ -156,18 +141,12 @@ class MemoryRelationNodeUpdate:
     backlinks: tuple[MemoryStoredLink, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.before, VersionedSnapshot):
-            raise TypeError("before must be a VersionedSnapshot")
-        if not isinstance(self.uri, MemoryURI):
-            raise TypeError("uri must be a MemoryURI")
         if self.before.identity != str(self.uri):
             raise MemoryRelationIntegrityError("relation update identity does not match its snapshot")
         for name, values in {
             "links": self.links,
             "backlinks": self.backlinks,
         }.items():
-            if not isinstance(values, tuple) or any(not isinstance(value, MemoryStoredLink) for value in values):
-                raise TypeError(f"{name} must contain MemoryStoredLink values")
             identities = tuple(value.identity for value in values)
             if identities != tuple(sorted(set(identities))):
                 raise MemoryRelationIntegrityError(f"relation update {name} must be unique and sorted")
@@ -190,22 +169,10 @@ class MemoryRelationPlan:
     removed: tuple[MemoryStoredLink, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.read_set, MemoryRelationReadSet):
-            raise TypeError("read_set must be a MemoryRelationReadSet")
-        if not isinstance(self.operations, tuple) or any(
-            not isinstance(operation, MemoryResolvedRelation) for operation in self.operations
-        ):
-            raise TypeError("operations must contain MemoryResolvedRelation values")
-        if not isinstance(self.updates, tuple) or any(
-            not isinstance(update, MemoryRelationNodeUpdate) for update in self.updates
-        ):
-            raise TypeError("updates must contain MemoryRelationNodeUpdate values")
         update_ids = tuple(str(update.uri) for update in self.updates)
         if update_ids != tuple(sorted(set(update_ids))):
             raise MemoryRelationIntegrityError("relation node updates must be unique and sorted")
         for name, values in {"added": self.added, "removed": self.removed}.items():
-            if not isinstance(values, tuple) or any(not isinstance(value, MemoryStoredLink) for value in values):
-                raise TypeError(f"{name} must contain MemoryStoredLink values")
             keys = tuple(value.identity for value in values)
             if keys != tuple(sorted(set(keys))):
                 raise MemoryRelationIntegrityError(f"{name} relations must be unique and sorted")
@@ -231,14 +198,6 @@ class MemoryRelationPlanner:
     ) -> MemoryRelationPlan:
         """从一致旧图生成全部受影响节点的最终关系状态。"""
 
-        if not isinstance(identities, MemoryFinalIdentityMap):
-            raise TypeError("identities must be a MemoryFinalIdentityMap")
-        if not isinstance(operations, tuple) or any(
-            not isinstance(operation, MemoryResolvedRelation) for operation in operations
-        ):
-            raise TypeError("operations must contain MemoryResolvedRelation values")
-        if not isinstance(read_set, MemoryRelationReadSet):
-            raise TypeError("read_set must be a MemoryRelationReadSet")
         read_set.validate_structural_consistency()
 
         links_by_uri: dict[str, set[MemoryStoredLink]] = {}

@@ -1,5 +1,6 @@
 """容量快照：落盘、后写覆盖先写、占比只对有上限的读数算。"""
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -31,7 +32,7 @@ def test_empty_store_reads_nothing(tmp_path: Path) -> None:
     assert CapacitySnapshotStore(tmp_path).read_all() == ()
 
 
-@pytest.mark.parametrize(("name", "count", "limit"), [("", 1, None), ("x", -1, None), ("x", 1, 0), ("x", True, None)])
+@pytest.mark.parametrize(("name", "count", "limit"), [("", 1, None), ("x", -1, None), ("x", 1, 0)])
 def test_reading_validates(name: str, count: int, limit: int | None) -> None:
     with pytest.raises(ValueError):
         CapacityReading(name, count, limit)
@@ -42,3 +43,26 @@ def test_snapshot_rejects_duplicate_names_and_naive_time() -> None:
         CapacitySnapshot("p", AT, (CapacityReading("a", 1), CapacityReading("a", 2)))
     with pytest.raises(ValueError, match="timezone-aware"):
         CapacitySnapshot("p", datetime(2026, 10, 19), ())
+
+
+@pytest.mark.parametrize(
+    ("count", "limit", "message"),
+    [
+        ("850", 1000, "capacity count must be a non-negative integer"),
+        (True, 1000, "capacity count must be a non-negative integer"),
+        (850.0, None, "capacity count must be a non-negative integer"),
+        (850, "1000", "capacity limit must be a positive integer"),
+        (850, False, "capacity limit must be a positive integer"),
+    ],
+)
+def test_read_all_rejects_wrong_types_on_disk(tmp_path: Path, count: object, limit: object, message: str) -> None:
+    """落盘快照里类型错的读数在读回解码时就被拒（W16：类型检查在边界，不靠值对象构造器）。"""
+
+    store = CapacitySnapshotStore(tmp_path)
+    store.publish(CapacitySnapshot("sources", AT, (CapacityReading("envelopes", 1, 2),)))
+    path = tmp_path / "lifecycle" / "capacity" / "sources.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["readings"][0].update(count=count, limit=limit)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        store.read_all()

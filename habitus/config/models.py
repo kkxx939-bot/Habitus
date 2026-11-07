@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TypeVar
 
-from habitus.config.loader import ConfigError, construct_config, group_fields, required_field
+from habitus.config.loader import ConfigError, construct_config, group_fields, require_field_types, required_field
 from habitus.model_client import (
     ChatModelConfig,
     EmbeddingModelConfig,
@@ -25,13 +25,7 @@ class StructuredOutputConfig:
     validation_retries: int = 1
 
     def __post_init__(self) -> None:
-        if not isinstance(self.allow_json_repair, bool):
-            raise TypeError("allow_json_repair must be boolean")
-        if (
-            isinstance(self.validation_retries, bool)
-            or not isinstance(self.validation_retries, int)
-            or not 0 <= self.validation_retries <= 5
-        ):
+        if not 0 <= self.validation_retries <= 5:
             raise ValueError("validation_retries must be between zero and five")
 
 
@@ -43,16 +37,6 @@ class ModelConfig:
     embedding: EmbeddingModelConfig
     rerank: RerankModelConfig | None = None
     structured_output: StructuredOutputConfig = field(default_factory=StructuredOutputConfig)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.chat, ChatModelConfig):
-            raise TypeError("models.chat must be ChatModelConfig")
-        if not isinstance(self.embedding, EmbeddingModelConfig):
-            raise TypeError("models.embedding must be EmbeddingModelConfig")
-        if self.rerank is not None and not isinstance(self.rerank, RerankModelConfig):
-            raise TypeError("models.rerank must be RerankModelConfig or None")
-        if not isinstance(self.structured_output, StructuredOutputConfig):
-            raise TypeError("models.structured_output must be StructuredOutputConfig")
 
     @classmethod
     def from_mapping(cls, value: object) -> ModelConfig:
@@ -81,6 +65,7 @@ def _construct_model_config(
     data: Mapping[str, object],
     path: str,
 ) -> _ModelConfigValue:
+    require_field_types(model_type, data, path=path)
     try:
         return model_type(**dict(data))
     except (TypeError, ValueError) as exc:

@@ -12,6 +12,7 @@ from datetime import date
 from typing import Any
 
 from habitus.foundation.integrity import CanonicalSerializationError, canonical_json
+from habitus.foundation.validation import is_int, is_number
 from habitus.scene.relations.engine import RelationKey, RelationTest, Subset, Verdict
 from habitus.scene.relations.spans import Segment
 from habitus.scene.relations.state import LaneState, Relation, Status, Transition
@@ -229,15 +230,15 @@ def _test_from(body: dict[str, Any], key: RelationKey) -> RelationTest:
         minimum_p=float(body["minimum_p"]),
         upward=bool(body["upward"]),
         weight=float(body["weight"]),
-        more_needed=body["more_needed"],
-        heterogeneity_p=body.get("heterogeneity_p"),
-        leave_one_out=body.get("leave_one_out"),
-        stable=body.get("stable"),
+        more_needed=_optional_count(body["more_needed"], "more_needed"),
+        heterogeneity_p=_optional_number(body.get("heterogeneity_p"), "heterogeneity_p"),
+        leave_one_out=_optional_flag(body.get("leave_one_out"), "leave_one_out"),
+        stable=_optional_flag(body.get("stable"), "stable"),
         interval=_pair(body.get("interval")),
         relative_interval=_pair(body.get("relative_interval")),
-        large_enough=body.get("large_enough"),
-        excess_share=body.get("excess_share"),
-        same_event_share=body.get("same_event_share"),
+        large_enough=_optional_flag(body.get("large_enough"), "large_enough"),
+        excess_share=_optional_number(body.get("excess_share"), "excess_share"),
+        same_event_share=_optional_number(body.get("same_event_share"), "same_event_share"),
     )
 
 
@@ -256,6 +257,24 @@ def _subset_from(body: dict[str, Any]) -> Subset:
         relative_interval=_pair(body.get("relative_interval")),
         minimum_p=float(body["minimum_p"]),
     )
+
+
+def _optional_count(value: object, label: str) -> int | None:
+    if value is not None and not is_int(value):
+        raise ValueError(f"relation test {label} must be an integer or null")
+    return value
+
+
+def _optional_number(value: object, label: str) -> float | None:
+    if value is not None and not is_number(value):
+        raise ValueError(f"relation test {label} must be a number or null")
+    return value
+
+
+def _optional_flag(value: object, label: str) -> bool | None:
+    if value is not None and not isinstance(value, bool):
+        raise ValueError(f"relation test {label} must be a boolean or null")
+    return value
 
 
 def _pair(value: Any) -> tuple[float, float] | None:

@@ -153,7 +153,7 @@ class GapSummary:
 def _history(prior: Sequence[EffectiveGap], earlier: GapSummary | None, min_samples: int) -> GapSummary | None:
     """``prior`` 里没截尾的连同 ``earlier`` 那一段的；不到 ``min_samples`` 个时为 None（不判）。"""
 
-    if isinstance(min_samples, bool) or not isinstance(min_samples, int) or min_samples < 1:
+    if min_samples < 1:
         raise ValueError("min_samples must be a positive integer")
     summary = (earlier if earlier is not None else GapSummary()).including(prior)
     return summary if summary.count >= min_samples else None
@@ -181,12 +181,7 @@ def long_absence(
     """账的久别（裁定 88 第 2 条）：``current`` 比历史上没截尾的间隔都长，**且** 不短于 ``typical_multiple`` 个典型间隔
     （中位数）。``typical_multiple`` 由调用方给（账用遗忘半衰期 H：天天做 8 天、隔天做 16 天、每周一次 8 周）。"""
 
-    if (
-        isinstance(typical_multiple, bool)
-        or not isinstance(typical_multiple, int | float)
-        or not math.isfinite(typical_multiple)
-        or typical_multiple <= 0
-    ):
+    if not math.isfinite(typical_multiple) or typical_multiple <= 0:
         raise ValueError("typical_multiple must be a positive finite number")
     summary = _history(prior, earlier, min_samples)
     if summary is None:

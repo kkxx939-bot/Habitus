@@ -147,3 +147,11 @@ def test_invalid_proxy_names_field_and_reason(tmp_path: Path, proxy: object, rea
 def test_null_fields_mean_the_defaults(tmp_path: Path) -> None:
     config = HabitusConfig.from_mapping(_payload(tmp_path, {"ca_bundle": None, "proxy": None}))
     assert config.network == OutboundSettings()
+
+
+@pytest.mark.parametrize("ca_bundle", ["", "   ", 1, ["corp-root.pem"]])
+def test_ca_bundle_that_is_blank_or_not_text_is_rejected(tmp_path: Path, ca_bundle: object) -> None:
+    """YAML 里 ``ca_bundle`` 空白或不是文本时在配置读入处就拒（W16：判定收进公共函数后行为不变）。"""
+
+    with pytest.raises(ConfigError, match="'config.network.ca_bundle': must be a non-empty path to a PEM file"):
+        HabitusConfig.from_mapping(_payload(tmp_path, {"ca_bundle": ca_bundle}))

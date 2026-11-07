@@ -14,8 +14,6 @@ from habitus.behavior.kinds.store import BehaviorKindStore
 
 class VocabularyReader:
     def __init__(self, store: BehaviorKindStore) -> None:
-        if not isinstance(store, BehaviorKindStore):
-            raise TypeError("store must be BehaviorKindStore")
         self.store = store
 
     def snapshot(self) -> Vocabulary:
@@ -43,7 +41,7 @@ class VocabularyReader:
     def changes_since(self, version: int) -> tuple[VersionRecord, ...]:
         """``version`` 之后的每一版（新增、拆分、合并、改判据与迁移），按版本号从小到大；派生树据此同步。"""
 
-        if isinstance(version, bool) or not isinstance(version, int) or version < 0:
+        if version < 0:
             raise ValueError("version must be a non-negative integer")
         return self.store.changes_since(version)
 

@@ -136,8 +136,6 @@ class RuntimeHTTPHandlers:
     """只提供稳定 handler，不擅自决定端口、认证、URL 或 Web 框架。"""
 
     def __init__(self, runtime: Runtime) -> None:
-        if not isinstance(runtime, Runtime):
-            raise TypeError("runtime must be Runtime")
         self.runtime = runtime
 
     def capabilities(self) -> CapabilitiesResult:
@@ -274,7 +272,7 @@ class RuntimeHTTPHandlers:
     ) -> JobStatusResult:
         """只经 Runtime 公共门面查询仍在耐久保留窗口内的 Job 状态。"""
 
-        if isinstance(memory_sequence, bool) or not isinstance(memory_sequence, int) or memory_sequence <= 0:
+        if memory_sequence <= 0:
             raise ValueError("memory_sequence must be a positive integer")
         job = await self._find_job(
             memory_sequence,
@@ -298,11 +296,9 @@ class RuntimeHTTPHandlers:
     ) -> JobListResult:
         """倒序分页列出一个 Conversation 仍在耐久保留窗口内的 Job。"""
 
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        if not 1 <= limit <= 100:
             raise ValueError("limit must be an integer between 1 and 100")
-        if before_sequence is not None and (
-            isinstance(before_sequence, bool) or not isinstance(before_sequence, int) or before_sequence <= 0
-        ):
+        if before_sequence is not None and before_sequence <= 0:
             raise ValueError("before_sequence must be a positive integer or None")
         resolved_status = None if status is None else MemoryJobStatus(status)
         address = ConversationAddress(conversation_id, started_on)
@@ -344,7 +340,7 @@ class RuntimeHTTPHandlers:
     ) -> RetryJobResult:
         """仅经 Runtime 重试当前阻塞队列且版本完全匹配的 FAILED Job。"""
 
-        if not isinstance(expected_version, str) or re.fullmatch(r"[0-9a-f]{64}", expected_version) is None:
+        if re.fullmatch(r"[0-9a-f]{64}", expected_version) is None:
             raise ValueError("expected_version must be lowercase SHA-256 text")
         job = await self._find_job(
             memory_sequence,

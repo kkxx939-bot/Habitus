@@ -162,22 +162,10 @@ class DeliveryStage:
         lane: str = "session",
         current: Callable[[str], Sequence[str]] = lambda token: (token,),
     ) -> None:
-        if not isinstance(ledger, ForesightLedgerStore):
-            raise TypeError("ledger must be a ForesightLedgerStore")
-        if not callable(current):
-            raise TypeError("current must be callable")
-        if not isinstance(tolerance, Tolerance) or not isinstance(evidence, Evidence):
-            raise TypeError("tolerance must be a Tolerance and evidence an Evidence")
-        if isinstance(daily_cap, bool) or not isinstance(daily_cap, int) or daily_cap < 1:
+        if daily_cap < 1:
             raise ValueError("daily_cap must be a positive integer")
-        if isinstance(tick_seconds, bool) or not isinstance(tick_seconds, int | float) or tick_seconds <= 0:
+        if tick_seconds <= 0:
             raise ValueError("tick_seconds must be a positive number")
-        if judge is not None and not isinstance(judge, Judge):
-            raise TypeError("judge must be a Judge or None")
-        if outlet is not None and not (
-            callable(getattr(outlet, "alive", None)) and callable(getattr(outlet, "publish", None))
-        ):
-            raise TypeError("outlet must implement alive() and publish()")
         self.ledger = ledger
         self.tolerance = tolerance
         self.evidence = evidence
@@ -191,7 +179,7 @@ class DeliveryStage:
         self.current = current
 
     async def run_once(self, now: datetime, materials: JudgeMaterials | None = None) -> DeliveryReport:
-        if not isinstance(now, datetime) or now.utcoffset() is None:
+        if now.utcoffset() is None:
             raise ValueError("now must be a timezone-aware datetime")
         table = materials.table if materials is not None else None
         found = self._due(now, voiced=lambda item: voiced(table, item))
@@ -780,9 +768,7 @@ def _handovers(
     subsumed: dict[str, Delivery] = {}
     for basis_id in sorted(members):
         basis = known.get(basis_id)
-        if basis is None or not unsaid(
-            basis, decided.get(basis_id, ()), now=instant, voiceless=not voiced(basis)
-        ):
+        if basis is None or not unsaid(basis, decided.get(basis_id, ()), now=instant, voiceless=not voiced(basis)):
             continue
         group = [item for item in members[basis_id] if item.expectation_id in known]
         took = [item for item in group if any(made.reason != UNIT for made in decided[item.expectation_id])]
@@ -831,17 +817,17 @@ class _Tally:
         alive: bool = False,
         same_moment: Mapping[str, frozenset[str]] | None = None,
     ) -> None:
-        self.now = now
+        self.now: datetime = now
         #: 今天说过（含「待取」）的预期 → 类。
-        self.counted = dict(spoken)
-        self.spoken_today = len(self.counted)
-        self.spoken_kinds = set(self.counted.values())
+        self.counted: dict[str, str] = dict(spoken)
+        self.spoken_today: int = len(self.counted)
+        self.spoken_kinds: set[str] = set(self.counted.values())
         #: 接手的成员 → 它那一刻的全部输入：算「同类已说」与名额时，同一刻里没说成的那几条不算。
-        self.same_moment = dict(same_moment or {})
+        self.same_moment: dict[str, frozenset[str]] = dict(same_moment or {})
         #: 有没有宿主活着（这一拍开头看一次）。
-        self.alive = alive
-        self.decided = 0
-        self.spoken = 0
+        self.alive: bool = alive
+        self.decided: int = 0
+        self.spoken: int = 0
         self.by_reason: dict[str, int] = {}
         self.by_level: dict[int, int] = {}
         #: 这一拍刚记「待取」的（拍末交给出口）。

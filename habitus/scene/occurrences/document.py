@@ -22,8 +22,6 @@ RECORD_TYPE = "concept_hits"
 
 
 def encode(record: ConceptHits) -> str:
-    if not isinstance(record, ConceptHits):
-        raise TypeError("record must be ConceptHits")
     address = record.address
     lines = [
         f"# {address.name} · {address.started_at.isoformat(timespec='minutes')}",
@@ -75,11 +73,11 @@ def decode(text: str, *, expected_uri: str | None = None) -> ConceptHits:
             hits=tuple(_hit(item) for item in _list(payload, "hits")),
             situation_hits=tuple(_hit(item) for item in _list(payload, "situation_hits")),
             situations_checked=tuple(str(item) for item in _list(payload, "situations_checked")),
-            unresolved=_mapping(payload, "unresolved"),
+            unresolved=_unresolved(payload),
             lane=_text(payload, "lane"),
             recent_digest=_optional_text(payload, "recent_digest"),
             timeline_digest=_optional_text(payload, "timeline_digest"),
-            baseline_snapshot=_mapping(payload, "baseline_snapshot"),
+            baseline_snapshot=_baseline(payload),
             mapper=_text(payload, "mapper"),
             mapped_at=datetime.fromisoformat(_text(payload, "mapped_at")),
             signals=tuple(str(item) for item in _list(payload, "signals")),
@@ -134,10 +132,32 @@ def _mapping(payload: dict[str, Any], key: str) -> dict[str, Any]:
     return value
 
 
+def _unresolved(payload: dict[str, Any]) -> dict[str, UnresolvedReason]:
+    try:
+        return {name: UnresolvedReason(value) for name, value in _mapping(payload, "unresolved").items()}
+    except ValueError as exc:
+        raise ConceptHitsError(f"unresolved reason is unknown: {exc}") from exc
+
+
+def _baseline(payload: dict[str, Any]) -> dict[str, str]:
+    found = _mapping(payload, "baseline_snapshot")
+    snapshot: dict[str, str] = {}
+    for key, value in found.items():
+        if not isinstance(value, str):
+            raise ConceptHitsError("baseline_snapshot value must be a non-empty single line")
+        snapshot[key] = value
+    return snapshot
+
+
 def _hit(item: object) -> ConceptHit:
     if not isinstance(item, dict) or set(item) != {"concept", "grade"}:
         raise SceneRecordError("a concept hit must be an object with concept and grade")
-    return ConceptHit(concept=item["concept"], grade=item["grade"])
+    concept, grade = item["concept"], item["grade"]
+    if not isinstance(concept, str):
+        raise ConceptHitsError("concept name must be one safe non-empty path segment")
+    if grade is not None and not isinstance(grade, str):
+        raise ConceptHitsError("a grade must be non-empty single-line text without surrounding whitespace")
+    return ConceptHit(concept=concept, grade=grade)
 
 
 __all__ = ["MARKER", "RECORD_TYPE", "decode", "encode"]

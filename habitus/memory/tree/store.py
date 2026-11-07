@@ -73,13 +73,7 @@ class MemoryTree:
             from habitus.memory.schema import MemorySchemaRegistry
 
             document_codec = MemoryDocumentCodec(MemorySchemaRegistry.load_default())
-        if not isinstance(document_codec, MemoryDocumentCodec):
-            raise TypeError("document_codec must be a MemoryDocumentCodec")
         self._document_codec = document_codec
-        if document_config is not None and not isinstance(document_config, MemoryDocumentConfig):
-            raise TypeError("document_config must be MemoryDocumentConfig")
-        if tree_config is not None and not isinstance(tree_config, MemoryTreeConfig):
-            raise TypeError("tree_config must be MemoryTreeConfig")
         self.document_config = document_config or MemoryDocumentConfig()
         self.tree_config = tree_config or MemoryTreeConfig()
         self._visibility_journal: _VisibilityJournal | None = None
@@ -130,21 +124,15 @@ class MemoryTree:
     def path_for(self, address: MemoryAddress) -> Path:
         """把经过验证的语义地址确定性映射为唯一 Markdown 路径。"""
 
-        if not isinstance(address, MemoryAddress):
-            raise TypeError("address must be a MemoryAddress")
         relative = self._relative_path(address)
         candidate = self.root / relative
         self._require_inside_root(candidate)
         return candidate
 
     def _existing_document_path(self, address: MemoryAddress) -> Path:
-        if not isinstance(address, MemoryAddress):
-            raise TypeError("address must be a MemoryAddress")
         return self._existing_relative_path(self._relative_path(address), leaf_is_file=True)
 
     def _existing_directory_path(self, directory: MemoryDirectory) -> Path:
-        if not isinstance(directory, MemoryDirectory):
-            raise TypeError("directory must be a MemoryDirectory")
         return self._existing_relative_path(Path(*directory.identity_parts), leaf_is_file=False)
 
     def _existing_layer_path(self, directory: MemoryDirectory, level: MemoryLevel) -> Path:
@@ -170,6 +158,7 @@ class MemoryTree:
                 try:
                     identity = canonical_path_identity(entry.name, "memory path entry")
                 except ValueError:
+                    # 名称不是规范身份的目录项不可能等于目标路径段，跳过即可。
                     continue
                 if identity == desired:
                     matches.append(entry)
@@ -189,8 +178,6 @@ class MemoryTree:
     def directory_path(self, directory: MemoryDirectory) -> Path:
         """把受控目录地址映射到记忆树内的真实目录。"""
 
-        if not isinstance(directory, MemoryDirectory):
-            raise TypeError("directory must be a MemoryDirectory")
         candidate = self.root.joinpath(*directory.identity_parts)
         self._require_inside_root(candidate)
         return candidate
@@ -218,8 +205,6 @@ class MemoryTree:
     ) -> MemoryDocument:
         """原子写入已由上层构造的规范 L2；不读取旧记忆或推进版本。"""
 
-        if not isinstance(document, MemoryDocument):
-            raise TypeError("document must be a MemoryDocument")
         encoded = self._document_codec.encode(document).encode("utf-8")
         self.document_config.validate_body(document.markdown_body)
         self.document_config.validate_relations(
@@ -242,8 +227,6 @@ class MemoryTree:
     ) -> tuple[Path, Path]:
         """在已有目录中先写 L1、再写由它派生的 L0。"""
 
-        if not isinstance(abstract, str) or not isinstance(overview, str):
-            raise TypeError("memory semantic layers must be strings")
         if not abstract.strip() or not overview.strip():
             raise ValueError("memory semantic layers must be non-empty")
         directory_path = self._existing_directory_path(directory)
@@ -284,7 +267,7 @@ class MemoryTree:
     ) -> str:
         """在读取前校验字节上限，避免加载损坏或异常膨胀的派生层。"""
 
-        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+        if max_bytes <= 0:
             raise ValueError("max_bytes must be a positive integer")
         return self._read_visible(
             lambda: self._read_utf8(
@@ -468,10 +451,8 @@ class MemoryTree:
         after: MemoryAddress | None,
     ) -> tuple[MemoryAddress, ...]:
 
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > 10_000:
+        if limit <= 0 or limit > 10_000:
             raise ValueError("memory tree list limit must be between 1 and 10000")
-        if after is not None and not isinstance(after, MemoryAddress):
-            raise TypeError("memory tree list cursor must be MemoryAddress or None")
         selected_kind = None if kind is None else MemoryKind(kind)
         if after is not None and selected_kind is not None and after.kind is not selected_kind:
             raise ValueError("memory tree list cursor kind does not match the selected kind")
@@ -620,7 +601,7 @@ class MemoryTree:
         max_bytes: int | None = None,
     ) -> str:
         maximum = self.document_config.max_encoded_bytes if max_bytes is None else max_bytes
-        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
+        if maximum <= 0:
             raise ValueError("max_bytes must be a positive integer")
         try:
             payload = read_regular_bytes(
@@ -710,7 +691,7 @@ class MemoryTree:
 
     @staticmethod
     def _directory_limit(limit: int) -> int:
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > 10_000:
+        if limit <= 0 or limit > 10_000:
             raise ValueError("memory directory limit must be between 1 and 10000")
         return limit
 

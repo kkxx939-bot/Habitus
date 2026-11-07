@@ -33,8 +33,6 @@ class MemoryChangeReceiptProjector:
     """只计算回执内容，不读取或写入回执文件。"""
 
     def __init__(self, codec: MemoryDocumentCodec) -> None:
-        if not isinstance(codec, MemoryDocumentCodec):
-            raise TypeError("codec must be MemoryDocumentCodec")
         self.codec = codec
 
     def prepare(
@@ -44,10 +42,6 @@ class MemoryChangeReceiptProjector:
         *,
         timestamp: datetime,
     ) -> MemoryChangeReceipt:
-        if not isinstance(source, MemoryChangeSource):
-            raise TypeError("source must be MemoryChangeSource")
-        if not isinstance(plan, MemoryEditorPlan):
-            raise TypeError("plan must be MemoryEditorPlan")
         mutations = plan.commit.mutation_plan.mutations
         created = {str(item.uri) for item in mutations if item.action is MemoryMutationAction.CREATE}
         deleted = {str(uri) for uri in plan.commit.retired_uris}
@@ -90,7 +84,7 @@ class MemoryChangeReceiptProjector:
         ]
         for uri in plan.commit.retired_uris:
             snapshot = plan.commit.read_set.get(str(uri))
-            if snapshot is None or not snapshot.exists or not isinstance(snapshot.value, MemoryDocument):
+            if snapshot is None or not snapshot.exists or snapshot.value is None:
                 raise MemoryChangeReceiptError("retired memory is missing its prepared before document")
             prepared_node_changes.append(
                 MemoryPreparedNodeChange(
@@ -121,12 +115,6 @@ class MemoryChangeReceiptProjector:
         source: MemoryChangeSource,
         journal: MemoryTransactionJournalRecord,
     ) -> MemoryChangeReceipt:
-        if not isinstance(current, MemoryChangeReceipt):
-            raise TypeError("current must be MemoryChangeReceipt")
-        if not isinstance(source, MemoryChangeSource):
-            raise TypeError("source must be MemoryChangeSource")
-        if not isinstance(journal, MemoryTransactionJournalRecord):
-            raise TypeError("journal must be MemoryTransactionJournalRecord")
         if not current.source.matches_lookup(source) or journal.transaction_id != source.transaction_id:
             raise MemoryChangeReceiptError("transaction journal does not match the receipt source")
         if journal.state is not MemoryTransactionJournalState.COMMITTED:
@@ -221,8 +209,6 @@ class MemoryChangeReceiptProjector:
             raise MemoryChangeReceiptError("Intention confirmation changed outside the prepared plan")
 
     def _node_change(self, entry: MemoryTransactionJournalEntry) -> MemoryNodeChange:
-        if not isinstance(entry, MemoryTransactionJournalEntry):
-            raise TypeError("journal entry must be MemoryTransactionJournalEntry")
         before = entry.before
         after = entry.after
         if before is None and after is not None:
@@ -264,8 +250,6 @@ class MemoryChangeReceiptProjector:
         for document in documents:
             if document is None:
                 continue
-            if not isinstance(document, MemoryDocument):
-                raise TypeError("journal relation source must be MemoryDocument or None")
             for link in document.links:
                 result[link.identity] = link
         return result

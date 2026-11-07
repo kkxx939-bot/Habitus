@@ -20,34 +20,17 @@ class HTTPAPIConfig:
     remember_parts_ttl_seconds: float = 600.0
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.host, str)
-            or not self.host
-            or self.host != self.host.strip()
-            or any(character.isspace() for character in self.host)
-        ):
+        if not self.host or self.host != self.host.strip() or any(character.isspace() for character in self.host):
             raise ValueError("host must be normalized non-empty text")
         if not is_loopback_host(self.host):
             raise ValueError("unauthenticated local service must bind to a loopback address")
-        if isinstance(self.port, bool) or not isinstance(self.port, int) or not 1 <= self.port <= 65_535:
+        if not 1 <= self.port <= 65_535:
             raise ValueError("port must be an integer between 1 and 65535")
-        if (
-            isinstance(self.max_request_bytes, bool)
-            or not isinstance(self.max_request_bytes, int)
-            or not 1_024 <= self.max_request_bytes <= 64 * 1024 * 1024
-        ):
+        if not 1_024 <= self.max_request_bytes <= 64 * 1024 * 1024:
             raise ValueError("max_request_bytes must be between 1024 and 67108864")
-        if (
-            isinstance(self.remember_parts_max_bytes, bool)
-            or not isinstance(self.remember_parts_max_bytes, int)
-            or not self.max_request_bytes <= self.remember_parts_max_bytes <= 1024 * 1024 * 1024
-        ):
+        if not self.max_request_bytes <= self.remember_parts_max_bytes <= 1024 * 1024 * 1024:
             raise ValueError("remember_parts_max_bytes must be between max_request_bytes and 1073741824")
-        if (
-            isinstance(self.remember_parts_ttl_seconds, bool)
-            or not isinstance(self.remember_parts_ttl_seconds, int | float)
-            or not 1 <= self.remember_parts_ttl_seconds <= 86_400
-        ):
+        if not 1 <= self.remember_parts_ttl_seconds <= 86_400:
             raise ValueError("remember_parts_ttl_seconds must be between 1 and 86400")
 
     @classmethod

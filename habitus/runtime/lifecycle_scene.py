@@ -34,8 +34,6 @@ class SceneParticipant:
     name = "scene"
 
     def __init__(self, relations: RelationStore) -> None:
-        if not isinstance(relations, RelationStore):
-            raise TypeError("relations must be a RelationStore")
         self.relations = relations
 
     async def maintain(self, ctx: LifecycleContext) -> ParticipantReport:

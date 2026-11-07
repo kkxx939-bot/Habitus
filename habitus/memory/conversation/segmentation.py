@@ -6,7 +6,7 @@ import logging
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from typing import Protocol, cast
+from typing import Protocol
 
 from habitus.foundation.integrity import canonical_json
 from habitus.pre.conversation import (
@@ -23,7 +23,8 @@ SEMANTIC_CHUNKER_VERSION = "conversation_semantic_chunker_v1"
 class ConversationBoundaryVector(Protocol):
     """边界评分只依赖归一化向量值，不绑定具体模型客户端。"""
 
-    values: tuple[float, ...]
+    @property
+    def values(self) -> tuple[float, ...]: ...
 
 
 class ConversationBoundaryEmbedder(Protocol):
@@ -43,13 +44,9 @@ class ConversationSemanticBoundary:
     distance: float
 
     def __post_init__(self) -> None:
-        if isinstance(self.after_sequence, bool) or not isinstance(self.after_sequence, int) or self.after_sequence < 0:
+        if self.after_sequence < 0:
             raise ValueError("after_sequence must be a non-negative integer")
-        if (
-            isinstance(self.distance, bool)
-            or not isinstance(self.distance, int | float)
-            or not 0.0 <= float(self.distance) <= 2.0
-        ):
+        if not 0.0 <= float(self.distance) <= 2.0:
             raise ValueError("semantic boundary distance must be between zero and two")
         object.__setattr__(self, "distance", float(self.distance))
 
@@ -64,22 +61,14 @@ class ConversationBoundaryHints:
     fallback_reason: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.source_digest, str) or len(self.source_digest) != 64:
+        if len(self.source_digest) != 64:
             raise ValueError("source_digest must be a SHA-256 digest")
-        if not isinstance(self.boundaries, tuple) or any(
-            not isinstance(item, ConversationSemanticBoundary) for item in self.boundaries
-        ):
-            raise TypeError("boundaries must contain ConversationSemanticBoundary values")
         sequences = tuple(item.after_sequence for item in self.boundaries)
         if sequences != tuple(sorted(set(sequences))):
             raise ValueError("semantic boundaries must be unique and ordered")
-        if self.embedding_fingerprint is not None and (
-            not isinstance(self.embedding_fingerprint, str) or not self.embedding_fingerprint.strip()
-        ):
+        if self.embedding_fingerprint is not None and not self.embedding_fingerprint.strip():
             raise ValueError("embedding_fingerprint must be non-empty text or None")
-        if self.fallback_reason is not None and (
-            not isinstance(self.fallback_reason, str) or not self.fallback_reason.strip()
-        ):
+        if self.fallback_reason is not None and not self.fallback_reason.strip():
             raise ValueError("fallback_reason must be non-empty text or None")
 
     def distance_after(self, sequence: int) -> float | None:
@@ -96,18 +85,16 @@ class ConversationSemanticBoundaryScorer:
 
     def __init__(
         self,
-        embedder: object,
+        embedder: ConversationBoundaryEmbedder,
         *,
         embedding_fingerprint: str,
         max_unit_chars: int,
     ) -> None:
-        if not callable(getattr(embedder, "embed_documents", None)):
-            raise TypeError("embedder must implement embed_documents")
-        if not isinstance(embedding_fingerprint, str) or not embedding_fingerprint.strip():
+        if not embedding_fingerprint.strip():
             raise ValueError("embedding_fingerprint must be non-empty text")
-        if isinstance(max_unit_chars, bool) or not isinstance(max_unit_chars, int) or max_unit_chars < 256:
+        if max_unit_chars < 256:
             raise ValueError("max_unit_chars must be at least 256")
-        self.embedder = cast(ConversationBoundaryEmbedder, embedder)
+        self.embedder = embedder
         self.embedding_fingerprint = embedding_fingerprint.strip()
         self.max_unit_chars = max_unit_chars
 
@@ -116,8 +103,6 @@ class ConversationSemanticBoundaryScorer:
 
         if live is None:
             return None
-        if not isinstance(live, ConversationBatch):
-            raise TypeError("live must be ConversationBatch or None")
         units = _safe_semantic_units(live.messages)
         if len(units) < 2:
             return ConversationBoundaryHints(live.digest, (), None, "fewer than two safe units")
@@ -179,18 +164,14 @@ class ConversationMessageChunker:
         max_message_tokens: int,
         token_estimator: Callable[[ConversationMessage], int],
     ) -> None:
-        if isinstance(max_message_tokens, bool) or not isinstance(max_message_tokens, int) or max_message_tokens <= 0:
+        if max_message_tokens <= 0:
             raise ValueError("max_message_tokens must be a positive integer")
-        if not callable(token_estimator):
-            raise TypeError("token_estimator must be callable")
         self.max_message_tokens = max_message_tokens
         self.token_estimator = token_estimator
 
     def normalize(self, batch: ConversationBatch) -> ConversationBatch:
         """确定性分块并重新分配当前批次内的连续物理序号。"""
 
-        if not isinstance(batch, ConversationBatch):
-            raise TypeError("batch must be ConversationBatch")
         expanded: list[ConversationMessage] = []
         next_sequence = batch.start_sequence
         for source in batch.messages:
@@ -239,7 +220,7 @@ class ConversationMessageChunker:
     ) -> list[str]:
         if self._fits(source, text):
             return [text]
-        splitters = (
+        splitters: tuple[Callable[[str], list[str]], ...] = (
             _split_markdown_fences,
             lambda value: _split_preserving(value, r"(\n{2,})"),
             lambda value: _split_preserving(value, r"(\n)"),
@@ -313,7 +294,7 @@ class ConversationMessageChunker:
             logical_part_count=999_999,
         )
         value = self.token_estimator(probe)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        if value < 0:
             raise ValueError("token_estimator must return a non-negative integer")
         return value <= self.max_message_tokens
 

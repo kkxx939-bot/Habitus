@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
@@ -36,23 +35,12 @@ class ObservabilityMetricsConfig:
     )
 
     def __post_init__(self) -> None:
-        if not isinstance(self.enabled, bool):
-            raise TypeError("enabled must be boolean")
-        if not isinstance(self.namespace, str) or _NAME.fullmatch(self.namespace) is None:
+        if _NAME.fullmatch(self.namespace) is None:
             raise ValueError("namespace must be a normalized bounded name")
-        if (
-            isinstance(self.max_recent_events, bool)
-            or not isinstance(self.max_recent_events, int)
-            or not 1 <= self.max_recent_events <= 10_000
-        ):
+        if not 1 <= self.max_recent_events <= 10_000:
             raise ValueError("max_recent_events must be between 1 and 10000")
-        values = self.duration_buckets_seconds
-        if isinstance(values, str | bytes) or not isinstance(values, Sequence):
-            raise TypeError("duration_buckets_seconds must be a numeric sequence")
         buckets: list[float] = []
-        for value in values:
-            if isinstance(value, bool) or not isinstance(value, int | float):
-                raise TypeError("duration buckets must be numeric")
+        for value in self.duration_buckets_seconds:
             number = float(value)
             if not math.isfinite(number) or number <= 0:
                 raise ValueError("duration buckets must be finite and positive")
@@ -71,8 +59,6 @@ class ObservabilityLoggingConfig:
     level: str = "INFO"
 
     def __post_init__(self) -> None:
-        if not isinstance(self.enabled, bool):
-            raise TypeError("enabled must be boolean")
         if self.level not in {"DEBUG", "INFO", "WARNING", "ERROR"}:
             raise ValueError("level must be DEBUG, INFO, WARNING or ERROR")
 
@@ -90,11 +76,9 @@ class ObservabilityTracingConfig:
     export_interval_seconds: float = 10.0
 
     def __post_init__(self) -> None:
-        if not isinstance(self.enabled, bool) or not isinstance(self.insecure, bool):
-            raise TypeError("enabled and insecure must be boolean")
         if self.protocol not in {"http", "grpc"}:
             raise ValueError("protocol must be http or grpc")
-        if not isinstance(self.endpoint, str) or not self.endpoint or len(self.endpoint) > 2048:
+        if not self.endpoint or len(self.endpoint) > 2048:
             raise ValueError("endpoint must be non-empty bounded text")
         parsed_endpoint = urlsplit(self.endpoint)
         if (
@@ -111,18 +95,14 @@ class ObservabilityTracingConfig:
         # 所以远端 gRPC 也就不会以明文连接。
         if parsed_endpoint.scheme == "http" and not is_loopback_host(parsed_endpoint.hostname):
             raise ValueError("remote tracing endpoint must use HTTPS")
-        if not isinstance(self.service_name, str) or _NAME.fullmatch(self.service_name) is None:
+        if _NAME.fullmatch(self.service_name) is None:
             raise ValueError("service_name must be a normalized bounded name")
-        if not isinstance(self.credential_ref, str):
-            raise TypeError("credential_ref must be a string")
         credential_ref = self.credential_ref.strip().lower()
         if credential_ref and _NAME.fullmatch(credential_ref) is None:
             raise ValueError("credential_ref must be a normalized credential name")
         object.__setattr__(self, "credential_ref", credential_ref)
         if (
-            isinstance(self.export_interval_seconds, bool)
-            or not isinstance(self.export_interval_seconds, int | float)
-            or not math.isfinite(float(self.export_interval_seconds))
+            not math.isfinite(float(self.export_interval_seconds))
             or not 1.0 <= float(self.export_interval_seconds) <= 300.0
         ):
             raise ValueError("export_interval_seconds must be between 1 and 300")
@@ -137,19 +117,9 @@ class ObservabilityAuditConfig:
     max_records: int = 10_000
 
     def __post_init__(self) -> None:
-        if not isinstance(self.enabled, bool):
-            raise TypeError("enabled must be boolean")
-        if (
-            isinstance(self.retention_days, bool)
-            or not isinstance(self.retention_days, int)
-            or not 1 <= self.retention_days <= 365
-        ):
+        if not 1 <= self.retention_days <= 365:
             raise ValueError("retention_days must be between 1 and 365")
-        if (
-            isinstance(self.max_records, bool)
-            or not isinstance(self.max_records, int)
-            or not 100 <= self.max_records <= 1_000_000
-        ):
+        if not 100 <= self.max_records <= 1_000_000:
             raise ValueError("max_records must be between 100 and 1000000")
 
 
@@ -164,14 +134,6 @@ class ObservabilityConfig:
     lock_warning_seconds: float = 300.0
 
     def __post_init__(self) -> None:
-        for name, expected in (
-            ("metrics", ObservabilityMetricsConfig),
-            ("logging", ObservabilityLoggingConfig),
-            ("tracing", ObservabilityTracingConfig),
-            ("audit", ObservabilityAuditConfig),
-        ):
-            if not isinstance(getattr(self, name), expected):
-                raise TypeError(f"{name} must be {expected.__name__}")
         if (
             isinstance(self.lock_warning_seconds, bool)
             or not isinstance(self.lock_warning_seconds, int | float)

@@ -132,12 +132,8 @@ class DayIndexCache:
         admits: Callable[[BehaviorDocument], bool],
         calendar: DayTypeCalendar | None = None,
     ) -> None:
-        if not isinstance(behavior_tree, BehaviorTree):
-            raise TypeError("behavior_tree must be a BehaviorTree")
-        if not callable(admits):
-            raise TypeError("admits must be callable")
         self.admits = admits
-        if not isinstance(subject, str) or not subject.strip():
+        if not subject.strip():
             raise ValueError("subject must be non-empty text")
         self.behavior_tree = behavior_tree
         self.subject = subject
@@ -194,8 +190,6 @@ class DayIndexCache:
         note = self.calendar.describe(day)
         if note is None:
             return None
-        if not isinstance(note, str):
-            raise TypeError("a calendar note must be text or None")
         return note.strip() or None
 
 

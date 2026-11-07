@@ -1,20 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
+from habitus.foundation.integrity import text_digest
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.memory.compaction import (
     MemoryFieldCompactor,
     MemoryLifecycleCommitter,
     MemoryLifecycleMaintenanceConfig,
     MemoryLifecycleManager,
+    MemoryLifecycleOperation,
+    MemoryLifecycleOperationKind,
     MemoryLifecycleOperationPhase,
     MemoryLifecycleOperationStore,
     MemoryLifecycleScanStore,
+    MemoryRecoveryRecord,
     MemoryRecoveryStore,
 )
 from habitus.memory.compaction.scan import MemoryCompactionKeep, MemoryLifecycleScanStateError
@@ -1129,3 +1134,127 @@ def test_stale_v1_scan_state_fails_with_the_file_to_delete_and_is_left_untouched
         f"这是旧格式扫描账（memory_lifecycle_scan_v1），删除 {state_path.resolve()} 后重启即可（只存游标与退避）"
     )
     assert state_path.read_bytes() == stale
+
+
+def _operation_dict() -> dict[str, object]:
+    return MemoryLifecycleOperation(
+        operation_id="a" * 64,
+        kind=MemoryLifecycleOperationKind.COMPACT,
+        uri=MemoryURI.parse("memory://preferences/p.md"),
+        source_revision=1,
+        source_digest="b" * 64,
+        source_created_at=NOW,
+        expected_state_version=0,
+        planned_fields=None,
+        phase=MemoryLifecycleOperationPhase.PREPARED,
+        target_revision=None,
+        target_digest=None,
+        prepared_at=NOW,
+        updated_at=NOW,
+    ).to_dict()
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "error", "message"),
+    [
+        ("operation_id", 1, ValueError, "operation_id must be SHA-256"),
+        ("uri", 1, TypeError, "memory URI must be a string"),
+        ("source_revision", "1", ValueError, "source_revision must be positive"),
+        ("source_revision", True, ValueError, "source_revision must be positive"),
+        ("source_digest", None, ValueError, "source_digest must be lowercase SHA-256"),
+        ("expected_state_version", 0.0, ValueError, "expected_state_version must be non-negative"),
+        ("planned_fields", ["field"], TypeError, "planned_fields must be a mapping or None"),
+        ("target_revision", "2", ValueError, "target_revision must advance source_revision"),
+        ("target_digest", 1, ValueError, "target_digest must be lowercase SHA-256"),
+    ],
+)
+def test_lifecycle_operation_decoder_rejects_wrongly_typed_disk_fields(
+    field: str, bad: object, error: type[Exception], message: str
+) -> None:
+    """磁盘读回的生命周期操作字段类型错时在 ``from_dict`` 就被拒（W16：类型检查在边界）。"""
+
+    value = _operation_dict()
+    value[field] = bad
+    with pytest.raises(error, match=message):
+        MemoryLifecycleOperation.from_dict(value)
+
+
+def _recovery_dict() -> dict[str, object]:
+    return MemoryRecoveryRecord(
+        uri=MemoryURI.parse("memory://preferences/p.md"),
+        source_revision=1,
+        source_created_at=NOW,
+        source_digest=text_digest("原文"),
+        encoded_document="原文",
+        saved_at=NOW,
+    ).to_dict()
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "error", "message"),
+    [
+        ("uri", None, TypeError, "memory URI must be a string"),
+        ("source_revision", "1", ValueError, "source_revision must be positive"),
+        ("source_digest", 1, ValueError, "source_digest must be SHA-256"),
+        ("encoded_document", ["原文"], ValueError, "encoded_document must be non-empty"),
+        ("compacted_revision", "2", ValueError, "compacted_revision must advance source_revision"),
+        ("compacted_digest", 2, ValueError, "compacted_digest must be SHA-256"),
+    ],
+)
+def test_recovery_record_decoder_rejects_wrongly_typed_disk_fields(
+    field: str, bad: object, error: type[Exception], message: str
+) -> None:
+    value = _recovery_dict()
+    value[field] = bad
+    with pytest.raises(error, match=message):
+        MemoryRecoveryRecord.from_dict(value)
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "bad", "message"),
+    [
+        (None, "after_uri", 1, "memory URI must be a string"),
+        ("failures", "uri", 1, "memory URI must be a string"),
+        ("failures", "attempts", "1", "memory lifecycle failure attempts must be positive"),
+        ("failures", "error_type", 1, "memory lifecycle failure error_type must be non-empty"),
+        ("failures", "message", None, "memory lifecycle failure message must be non-empty"),
+        ("compaction_keeps", "uri", None, "memory URI must be a string"),
+        ("compaction_keeps", "revision", True, "memory compaction keep revision must be positive"),
+        ("compaction_keeps", "source_digest", 1, "memory compaction keep source_digest must be non-empty"),
+    ],
+)
+def test_scan_state_with_wrongly_typed_fields_is_rejected_when_read_back(
+    tmp_path, section: str | None, field: str, bad: object, message: str
+) -> None:
+    tree = MemoryTree(tmp_path / "memory", document_codec=codec())
+    state_path = tmp_path / "workflow" / "lifecycle" / "l2_scan_state.json"
+    state_path.parent.mkdir(parents=True)
+    uri = "memory://preferences/p.md"
+    state: dict[str, object] = {
+        "schema": "memory_lifecycle_scan_v2",
+        "after_uri": uri,
+        "failures": [
+            {"uri": uri, "attempts": 1, "retry_at": "2026-08-03T08:00:00Z", "error_type": "E", "message": "m"}
+        ],
+        "compaction_keeps": [
+            {
+                "uri": uri,
+                "revision": 1,
+                "source_digest": "a" * 64,
+                "last_used_at": None,
+                "judged_at": "2026-08-03T08:00:00Z",
+            }
+        ],
+    }
+    if section is None:
+        state[field] = bad
+    else:
+        records = state[section]
+        assert isinstance(records, list)
+        records[0][field] = bad
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    store = MemoryLifecycleScanStore(tree, PathLock(ProcessLocalLockStore()), tmp_path / "workflow")
+
+    with pytest.raises(MemoryLifecycleScanStateError, match="failed to read L2 lifecycle scan state") as raised:
+        store.initialize()
+    assert message in str(raised.value.__cause__)

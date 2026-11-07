@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from habitus.foundation.integrity import canonical_json, text_digest
+from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.filesystem import (
     atomic_replace_bytes,
     durable_unlink,
@@ -20,7 +21,7 @@ from habitus.infrastructure.store.filesystem import (
 from habitus.memory.document import MemoryDocument, MemoryDocumentCodec
 from habitus.memory.snapshot import MemorySnapshot
 from habitus.memory.tree import MemoryTree
-from habitus.memory.uri import MemoryURI
+from habitus.memory.uri import MemoryURI, decode_memory_uri
 
 
 class MemoryRecoveryError(RuntimeError):
@@ -42,28 +43,20 @@ class MemoryRecoveryRecord:
         parsed = MemoryURI.parse(self.uri)
         parsed.to_address()
         object.__setattr__(self, "uri", parsed)
-        if (
-            isinstance(self.source_revision, bool)
-            or not isinstance(self.source_revision, int)
-            or self.source_revision <= 0
-        ):
+        if self.source_revision <= 0:
             raise ValueError("memory recovery source_revision must be positive")
         object.__setattr__(self, "source_created_at", _timestamp(self.source_created_at))
         object.__setattr__(self, "saved_at", _timestamp(self.saved_at))
         if not _sha256(self.source_digest):
             raise ValueError("memory recovery source_digest must be SHA-256")
-        if not isinstance(self.encoded_document, str) or not self.encoded_document:
+        if not self.encoded_document:
             raise ValueError("memory recovery encoded_document must be non-empty")
         if text_digest(self.encoded_document) != self.source_digest:
             raise ValueError("memory recovery document digest does not match")
         if (self.compacted_revision is None) != (self.compacted_digest is None):
             raise ValueError("memory recovery compacted revision and digest must appear together")
         if self.compacted_revision is not None:
-            if (
-                isinstance(self.compacted_revision, bool)
-                or not isinstance(self.compacted_revision, int)
-                or self.compacted_revision <= self.source_revision
-            ):
+            if self.compacted_revision <= self.source_revision:
                 raise ValueError("memory recovery compacted_revision must advance source_revision")
             if not _sha256(self.compacted_digest):
                 raise ValueError("memory recovery compacted_digest must be SHA-256")
@@ -102,15 +95,31 @@ class MemoryRecoveryRecord:
             raise ValueError("memory recovery record fields are invalid")
         if value["schema"] != "memory_recovery_active_v2":
             raise ValueError("memory recovery record schema is unsupported")
+        source_revision, source_digest, encoded = (
+            value["source_revision"],
+            value["source_digest"],
+            value["encoded_document"],
+        )
+        compacted_revision, compacted_digest = value["compacted_revision"], value["compacted_digest"]
+        if not is_int(source_revision):
+            raise ValueError("memory recovery source_revision must be positive")
+        if not isinstance(source_digest, str):
+            raise ValueError("memory recovery source_digest must be SHA-256")
+        if not isinstance(encoded, str):
+            raise ValueError("memory recovery encoded_document must be non-empty")
+        if compacted_revision is not None and not is_int(compacted_revision):
+            raise ValueError("memory recovery compacted_revision must advance source_revision")
+        if compacted_digest is not None and not isinstance(compacted_digest, str):
+            raise ValueError("memory recovery compacted_digest must be SHA-256")
         return cls(
-            uri=MemoryURI.parse(value["uri"]),
-            source_revision=value["source_revision"],
+            uri=decode_memory_uri(value["uri"]),
+            source_revision=source_revision,
             source_created_at=_parse_timestamp(value["source_created_at"]),
-            source_digest=value["source_digest"],
-            encoded_document=value["encoded_document"],
+            source_digest=source_digest,
+            encoded_document=encoded,
             saved_at=_parse_timestamp(value["saved_at"]),
-            compacted_revision=value["compacted_revision"],
-            compacted_digest=value["compacted_digest"],
+            compacted_revision=compacted_revision,
+            compacted_digest=compacted_digest,
         )
 
 
@@ -125,11 +134,9 @@ class MemoryRecoveryStore:
         max_records_per_memory: int = 1,
         max_file_bytes: int = 4 * 1024 * 1024,
     ) -> None:
-        if not isinstance(tree, MemoryTree):
-            raise TypeError("tree must be MemoryTree")
         if max_records_per_memory != 1:
             raise ValueError("memory recovery keeps exactly one active baseline per memory")
-        if isinstance(max_file_bytes, bool) or not isinstance(max_file_bytes, int) or max_file_bytes <= 0:
+        if max_file_bytes <= 0:
             raise ValueError("max_file_bytes must be a positive integer")
         self.tree = tree
         self.root = tree.require_outside(Path(workflow_root) / "lifecycle" / "l2_recovery")
@@ -147,8 +154,6 @@ class MemoryRecoveryStore:
         该基线已不能恢复（`for_compacted` 与 `restore` 都拒绝），由新一代基线覆盖。
         """
 
-        if not isinstance(document, MemoryDocument):
-            raise TypeError("document must be MemoryDocument")
         timestamp = _timestamp(saved_at)
         encoded = self.codec.encode(document)
         record = MemoryRecoveryRecord(
@@ -191,8 +196,6 @@ class MemoryRecoveryStore:
     ) -> MemoryRecoveryRecord:
         """把详细基线精确绑定到提交后的压缩 L2 指纹。"""
 
-        if not isinstance(record, MemoryRecoveryRecord):
-            raise TypeError("record must be MemoryRecoveryRecord")
         if not compacted.exists or compacted.value is None:
             raise ValueError("compacted snapshot must exist")
         if compacted.identity != str(record.uri):
@@ -273,6 +276,7 @@ class MemoryRecoveryStore:
             directory.rmdir()
             directory.parent.rmdir()
         except FileNotFoundError:
+            # 分片目录已经不存在，即视为已经清理。
             pass
         except OSError:
             # 同一分片仍可包含其他 URI 的活动基线。
@@ -314,8 +318,6 @@ class MemoryRecoveryStore:
 
 
 def _timestamp(value: datetime) -> datetime:
-    if not isinstance(value, datetime):
-        raise TypeError("memory recovery timestamp must be datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("memory recovery timestamp must include a timezone")
     return value.astimezone(UTC)

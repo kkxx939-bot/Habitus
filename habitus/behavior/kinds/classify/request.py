@@ -8,8 +8,8 @@ from habitus.behavior.kinds.ids import Lane
 from habitus.behavior.kinds.model import BehaviorKindError
 
 
-def _texts(values: object, field_name: str) -> tuple[str, ...]:
-    if not isinstance(values, tuple) or not all(isinstance(value, str) and value.strip() for value in values):
+def _texts(values: tuple[str, ...], field_name: str) -> tuple[str, ...]:
+    if not all(value.strip() for value in values):
         raise BehaviorKindError(f"{field_name} must be a tuple of non-empty text")
     return values
 
@@ -24,11 +24,11 @@ class OccurrenceContent:
     steps: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name.strip():
+        if not self.name.strip():
             raise BehaviorKindError("occurrence name must be non-empty text")
         _texts(self.summaries, "occurrence summaries")
         _texts(self.steps, "occurrence steps")
-        if self.goal is not None and (not isinstance(self.goal, str) or not self.goal.strip()):
+        if self.goal is not None and not self.goal.strip():
             raise BehaviorKindError("occurrence goal must be non-empty text or None")
 
     def render(self, *, max_steps: int) -> str:
@@ -53,11 +53,9 @@ class ClassifyRequest:
     content: OccurrenceContent
 
     def __post_init__(self) -> None:
-        if not isinstance(self.key, str) or not self.key:
+        if not self.key:
             raise BehaviorKindError("classify request key must be non-empty text")
         object.__setattr__(self, "lane", Lane(self.lane))
-        if not isinstance(self.content, OccurrenceContent):
-            raise BehaviorKindError("classify request content must be OccurrenceContent")
 
 
 __all__ = ["ClassifyRequest", "OccurrenceContent"]

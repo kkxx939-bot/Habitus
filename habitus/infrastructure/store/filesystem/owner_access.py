@@ -62,6 +62,7 @@ def make_owner_directories(path: str | os.PathLike[str]) -> None:
             try:
                 windows_api.create_owner_only_directory(windows_api.extended_path(directory))
             except FileExistsError:
+                # 已存在的目录不改 DACL，只给本次新建的目录收权限。
                 continue
             except PermissionError:
                 if not directory.is_dir():  # 盘根、无权新建但已存在的上级：只要已存在就继续往下

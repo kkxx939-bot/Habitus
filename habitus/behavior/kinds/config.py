@@ -85,7 +85,7 @@ class BehaviorKindConfig:
     def __post_init__(self) -> None:
         for name, lower, upper in _INTEGER_BOUNDS:
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or not lower <= value <= upper:
+            if not lower <= value <= upper:
                 raise ValueError(f"{name} must be an integer between {lower} and {upper}")
         _require_number("transient_retry_delay_seconds", self.transient_retry_delay_seconds, 0.0, 600.0)
         _require_number("max_anchor_pull", self.max_anchor_pull, 0.0, 1.0)
@@ -99,8 +99,8 @@ class BehaviorKindConfig:
         return max(self.grouping_min_members, 2 * self.recurrence_min_count)
 
 
-def _require_number(name: str, value: object, lower: float, upper: float) -> None:
-    if isinstance(value, bool) or not isinstance(value, int | float) or not lower <= float(value) <= upper:
+def _require_number(name: str, value: float, lower: float, upper: float) -> None:
+    if not lower <= float(value) <= upper:
         raise ValueError(f"{name} must be between {lower} and {upper}")
 
 

@@ -66,29 +66,25 @@ class HolidayYear:
     makeup_workdays: frozenset[date] = frozenset()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.region, str) or REGION_PATTERN.fullmatch(self.region) is None:
+        if REGION_PATTERN.fullmatch(self.region) is None:
             raise CalendarDataError("calendar region must be an ISO 3166 code such as CN, SG or US-CA")
         weekend = frozenset(self.weekend)
-        if not weekend or any(
-            isinstance(day, bool) or not isinstance(day, int) or not 0 <= day <= 6 for day in weekend
-        ):
+        if not weekend or any(not 0 <= day <= 6 for day in weekend):
             raise CalendarDataError("calendar weekend names weekdays 0–6")
         object.__setattr__(self, "weekend", weekend)
-        if isinstance(self.year, bool) or not isinstance(self.year, int):
-            raise CalendarDataError("calendar year must be an integer")
         for label in ("source", "version"):
             value = getattr(self, label)
-            if not isinstance(value, str) or not value.strip():
+            if not value.strip():
                 raise CalendarDataError(f"calendar {label} must be non-empty text")
         holidays = dict(self.holidays)
         for day, name in holidays.items():
-            if not isinstance(day, date) or isinstance(day, datetime) or day.year != self.year:
+            if isinstance(day, datetime) or day.year != self.year:
                 raise CalendarDataError(f"holiday {day!r} is not a date in {self.year}")
-            if not isinstance(name, str) or not name.strip():
+            if not name.strip():
                 raise CalendarDataError(f"holiday {day} needs a name")
         makeup = frozenset(self.makeup_workdays)
         for day in makeup:
-            if not isinstance(day, date) or isinstance(day, datetime) or day.year != self.year:
+            if isinstance(day, datetime) or day.year != self.year:
                 raise CalendarDataError(f"makeup workday {day!r} is not a date in {self.year}")
         both = sorted(makeup & holidays.keys())
         if both:
@@ -103,7 +99,7 @@ class HolidayTable:
     def __init__(self, years: Mapping[int, HolidayYear] | None = None) -> None:
         found = dict(years or {})
         for year, item in found.items():
-            if not isinstance(item, HolidayYear) or item.year != year:
+            if item.year != year:
                 raise CalendarDataError(f"holiday table entry {year} does not hold that year's data")
         regions = {item.region for item in found.values()}
         if len(regions) > 1:
@@ -183,8 +179,6 @@ class LocalCalendar:
     def of_day(self, day: date) -> Conditions:
         """这一天的日历条件；日型答不出的那一天不出现日型这个键。"""
 
-        if not isinstance(day, date):
-            raise TypeError("day must be a date")
         found = {
             WEEKDAY_KEY: WEEKDAY_NAMES[day.weekday()],
             DAY_OF_MONTH_KEY: str(day.day),
@@ -204,8 +198,6 @@ class LocalCalendar:
         return tuple(sorted(found.items()))
 
     def day_type(self, day: date) -> DayType | None:
-        if not isinstance(day, date):
-            raise TypeError("day must be a date")
         return self.table.day_type(day)
 
     def describe(self, day: date) -> str | None:

@@ -23,7 +23,7 @@ class SceneRecordError(ValueError):
 def encode_record(body: str, marker: str, payload: Mapping[str, Any]) -> str:
     """``body`` 必须以换行结尾；``marker`` 是这一支的注释头名（如 ``HABITUS_CONCEPT``）。"""
 
-    if not isinstance(body, str) or not body.strip() or not body.endswith("\n"):
+    if not body.strip() or not body.endswith("\n"):
         raise SceneRecordError("record body must be non-empty text ending with a newline")
     _require_marker(marker)
     try:
@@ -37,8 +37,6 @@ def decode_record(text: str, marker: str) -> tuple[str, dict[str, Any]]:
     """拆回 (正文, 规范 JSON 对象)。JSON 段必须已是规范形式，否则报损坏。"""
 
     _require_marker(marker)
-    if not isinstance(text, str):
-        raise SceneRecordError("record text must be a string")
     head = f"\n<!-- {marker}\n"
     index = text.rfind(head)
     if index < 0 or not text.endswith(_FOOTER):

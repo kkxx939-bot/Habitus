@@ -46,8 +46,6 @@ class MemoryBrowser:
     """列目录、读文档与语义层；不写、不检索。"""
 
     def __init__(self, tree: MemoryTree) -> None:
-        if not isinstance(tree, MemoryTree):
-            raise TypeError("tree must be a MemoryTree")
         self.tree = tree
 
     def list(self, uri: MemoryURI | str | None = None) -> MemoryListing:

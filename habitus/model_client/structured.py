@@ -44,11 +44,7 @@ class StructuredResponse(Generic[T]):
     validation_attempts: int
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.validation_attempts, bool)
-            or not isinstance(self.validation_attempts, int)
-            or self.validation_attempts <= 0
-        ):
+        if self.validation_attempts <= 0:
             raise ValueError("validation_attempts must be a positive integer")
 
     @property
@@ -66,15 +62,7 @@ class StructuredChatClient:
         allow_json_repair: bool = True,
         validation_retries: int = 1,
     ) -> None:
-        if not isinstance(client, ChatClient):
-            raise TypeError("client must be ChatClient")
-        if not isinstance(allow_json_repair, bool):
-            raise TypeError("allow_json_repair must be boolean")
-        if (
-            not isinstance(validation_retries, int)
-            or isinstance(validation_retries, bool)
-            or not 0 <= validation_retries <= 5
-        ):
+        if not 0 <= validation_retries <= 5:
             raise ValueError("validation_retries must be between zero and five")
         self.client = client
         self.allow_json_repair = allow_json_repair
@@ -197,9 +185,7 @@ class StructuredChatClient:
             if not request.strip():
                 raise ValueError("structured model prompt cannot be empty")
             request = ChatRequest(messages=(ChatMessage(role="user", content=request),))
-        if not isinstance(request, ChatRequest):
-            raise TypeError("structured request must be ChatRequest or non-empty text")
-        if not isinstance(schema, Mapping) or not schema:
+        if not schema:
             raise ValueError("structured output schema must be a non-empty object")
         try:
             schema_text = json.dumps(schema, ensure_ascii=False, sort_keys=True, indent=2)

@@ -189,7 +189,7 @@ class OccurrenceFacts:
 
     @classmethod
     def from_document(cls, document: BehaviorDocument) -> OccurrenceFacts:
-        if not isinstance(document, BehaviorDocument) or document.kind is not BehaviorKind.OCCURRENCE:
+        if document.kind is not BehaviorKind.OCCURRENCE:
             raise ConceptMapperError("the mapper reads occurrence documents only")
         fields = document.fields
         started_at = document.address.started_at
@@ -261,19 +261,11 @@ class MapperConfig:
     def __post_init__(self) -> None:
         for label in ("max_timeline_rows", "recent_days", "max_recent_rows"):
             value = getattr(self, label)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if value <= 0:
                 raise ValueError(f"{label} must be a positive integer")
-        if (
-            isinstance(self.transient_retries, bool)
-            or not isinstance(self.transient_retries, int)
-            or self.transient_retries < 0
-        ):
+        if self.transient_retries < 0:
             raise ValueError("transient_retries must be a non-negative integer")
-        if (
-            isinstance(self.transient_retry_delay_seconds, bool)
-            or not isinstance(self.transient_retry_delay_seconds, int | float)
-            or self.transient_retry_delay_seconds < 0
-        ):
+        if self.transient_retry_delay_seconds < 0:
             raise ValueError("transient_retry_delay_seconds must be a non-negative number")
 
 
@@ -415,13 +407,7 @@ class ConceptMapper:
         subject: str | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if not isinstance(client, StructuredChatClient):
-            raise TypeError("client must be a StructuredChatClient")
-        if not isinstance(concepts, ConceptSet):
-            raise TypeError("concepts must be a ConceptSet")
         resolved = config or MapperConfig()
-        if not isinstance(resolved, MapperConfig):
-            raise TypeError("config must be MapperConfig")
         self.client = client
         self.concepts = concepts
         self.config = resolved
@@ -605,8 +591,6 @@ class ConceptMapper:
     def _situations(self, hits: Sequence[ConceptHit]) -> tuple[ConceptHit, ...]:
         resolved = tuple(hits)
         for hit in resolved:
-            if not isinstance(hit, ConceptHit):
-                raise ConceptMapperError("situation_hits must be ConceptHit values")
             if hit.identity not in self.concepts or not self.concepts[hit.identity].role.is_situation:
                 raise ConceptMapperError(f"{hit.concept!r} is not a situation concept in this concept set")
             if hit.grade is not None and hit.grade not in {grade.name for grade in self.concepts[hit.identity].grades}:
@@ -625,7 +609,7 @@ def _readings(value: tuple[tuple[str, ...], tuple[str, ...]]) -> Callable[[str],
     return reading
 
 
-_MISSING_MATERIAL = {
+_MISSING_MATERIAL: dict[ContextScope, tuple[UnresolvedReason, str]] = {
     ContextScope.DAY: (UnresolvedReason.TIMELINE_MISSING, "需要当天时间线"),
     ContextScope.RECENT: (UnresolvedReason.RECENT_MISSING, "需要近几天同类记录"),
 }

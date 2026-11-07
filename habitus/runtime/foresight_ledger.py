@@ -652,7 +652,7 @@ class ForesightLedgerStore:
                     try:
                         days.append(date(int(year.name), int(month.name), int(day.name)))
                     except ValueError:
-                        continue
+                        continue  # 目录名拼不成日期：不是账本的日目录，不算哪一天
         return tuple(sorted(days))
 
     def _entries(self, directory: Path) -> tuple[DurableDirectoryEntry, ...]:

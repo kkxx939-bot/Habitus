@@ -43,8 +43,6 @@ class RecheckResult:
 
 class PendingRecheck:
     def __init__(self, classifier: DaytimeClassifier) -> None:
-        if not isinstance(classifier, DaytimeClassifier):
-            raise TypeError("classifier must be DaytimeClassifier")
         self.classifier = classifier
 
     async def recheck(

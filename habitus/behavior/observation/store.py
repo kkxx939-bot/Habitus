@@ -39,8 +39,6 @@ class BehaviorObservationStore:
     def __init__(self, behavior_root: str | Path, *, config: BehaviorObservationConfig | None = None) -> None:
         self.root = Path(behavior_root).expanduser().resolve(strict=False)
         resolved = config or BehaviorObservationConfig()
-        if not isinstance(resolved, BehaviorObservationConfig):
-            raise TypeError("config must be BehaviorObservationConfig")
         self.config = resolved
         self.envelope_root = self.root / "observations" / "envelopes"
         self.isolated_root = self.root / "observations" / "isolated"
@@ -50,8 +48,6 @@ class BehaviorObservationStore:
         self._decoded: dict[str, BehaviorObservationEnvelope] = {}
 
     def put(self, envelope: BehaviorObservationEnvelope) -> BehaviorObservationEnvelope:
-        if not isinstance(envelope, BehaviorObservationEnvelope):
-            raise TypeError("envelope must be BehaviorObservationEnvelope")
         encoded = self._encode(envelope)
         # 先解码自校验再落盘：写路径若比读路径宽松，任何"写得进读不回"的记录都会永久留在
         # 磁盘上，占死该身份并让整个枚举失效——而本层没有删除接口。宁可在落盘前失败。

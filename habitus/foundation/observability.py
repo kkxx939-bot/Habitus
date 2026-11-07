@@ -35,11 +35,11 @@ class ObservationContext:
     def __post_init__(self) -> None:
         for name in ("request_id", "transaction_id", "worker_id"):
             value = getattr(self, name)
-            if value is not None and (not isinstance(value, str) or _IDENTITY.fullmatch(value) is None):
+            if value is not None and _IDENTITY.fullmatch(value) is None:
                 raise ValueError(f"{name} must be a bounded normalized identity or None")
         for name in ("memory_sequence", "attempt"):
             value = getattr(self, name)
-            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            if value is not None and value < 0:
                 raise ValueError(f"{name} must be a non-negative integer or None")
 
 
@@ -97,20 +97,18 @@ class ObservationEvent:
     def __post_init__(self) -> None:
         for name in ("category", "operation"):
             value = getattr(self, name)
-            if not isinstance(value, str) or not value or len(value) > 128:
+            if not value or len(value) > 128:
                 raise ValueError(f"{name} must be non-empty bounded text")
         object.__setattr__(self, "status", ObservationStatus(self.status))
-        if isinstance(self.duration_seconds, bool) or not isinstance(self.duration_seconds, int | float):
-            raise TypeError("duration_seconds must be numeric")
         duration = float(self.duration_seconds)
         if not math.isfinite(duration) or duration < 0:
             raise ValueError("duration_seconds must be finite and non-negative")
         object.__setattr__(self, "duration_seconds", duration)
-        if not isinstance(self.attributes, Mapping) or len(self.attributes) > 32:
+        if len(self.attributes) > 32:
             raise ValueError("observation attributes must be a bounded mapping")
         attributes: dict[str, str | int | float | bool] = {}
         for key, value in self.attributes.items():
-            if not isinstance(key, str) or not key or len(key) > 64:
+            if not key or len(key) > 64:
                 raise ValueError("observation attribute names must be bounded text")
             if isinstance(value, str):
                 if len(value) > 256:
@@ -120,15 +118,13 @@ class ObservationEvent:
             elif isinstance(value, int | float):
                 if not math.isfinite(float(value)):
                     raise ValueError("observation numeric attributes must be finite")
-            else:
+            else:  # 观测属性只放有界标量：进审计、指标与日志的数据形状契约，不是类型防御（W16 复核保留）
                 raise TypeError("observation attributes must contain scalar values")
             attributes[key] = value
         object.__setattr__(self, "attributes", attributes)
-        if not isinstance(self.occurred_at, datetime) or self.occurred_at.tzinfo is None:
+        if self.occurred_at.tzinfo is None:
             raise ValueError("occurred_at must be timezone-aware")
         object.__setattr__(self, "occurred_at", self.occurred_at.astimezone(UTC))
-        if not isinstance(self.context, ObservationContext):
-            raise TypeError("context must be ObservationContext")
 
 
 class Observer(Protocol):
@@ -150,8 +146,7 @@ class SpanController(Protocol):
 
 class NullObserver:
     def record(self, event: ObservationEvent) -> None:
-        if not isinstance(event, ObservationEvent):
-            raise TypeError("event must be ObservationEvent")
+        """丢弃事件。"""
 
 
 class CompositeObserver:
@@ -163,12 +158,11 @@ class CompositeObserver:
         self.observers = observers
 
     def record(self, event: ObservationEvent) -> None:
-        if not isinstance(event, ObservationEvent):
-            raise TypeError("event must be ObservationEvent")
         for observer in self.observers:
             try:
                 observer.record(event)
             except Exception:
+                # 观测后端彼此独立：一个后端坏了不能拖垮业务，也不能挡住其余后端收到同一事件。
                 continue
 
 
@@ -225,6 +219,7 @@ def _safe_record(observer: Observer, event: ObservationEvent) -> None:
     try:
         observer.record(event)
     except Exception:
+        # 观测只是旁路：后端写失败不能影响业务调用。
         pass
 
 

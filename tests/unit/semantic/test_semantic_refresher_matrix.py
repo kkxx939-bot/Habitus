@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from habitus.infrastructure.store.contracts.path_lock import PathLock
-from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
+from habitus.memory.model import MemoryDirectory, MemoryKind, MemoryLevel
 from habitus.memory.semantic import (
     MemorySemanticConfig,
     MemorySemanticRefresher,
@@ -41,41 +41,6 @@ def make_refresher(
         PathLock(ProcessLocalLockStore()),
         config=config,
     )
-
-
-@pytest.mark.parametrize(
-    ("field", "invalid", "message"),
-    [
-        ("tree", object(), "tree must be"),
-        ("generator", object(), "generator must implement"),
-        ("path_lock", object(), "path_lock must be"),
-    ],
-)
-def test_constructor_rejects_invalid_collaborator(
-    tmp_path: Path,
-    field: str,
-    invalid: object,
-    message: str,
-) -> None:
-    arguments = {
-        "tree": MemoryTree(tmp_path / "memory"),
-        "generator": Generator(),
-        "path_lock": PathLock(ProcessLocalLockStore()),
-    }
-    arguments[field] = invalid
-    with pytest.raises(TypeError, match=message):
-        MemorySemanticRefresher(**arguments)  # type: ignore[arg-type]
-
-
-def test_refresh_for_rejects_non_address(tmp_path: Path) -> None:
-    with pytest.raises(TypeError, match="address must be"):
-        make_refresher(tmp_path).refresh_for("memory://profile.md")  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("addresses", [[], [MemoryAddress.profile()], ("bad",), (MemoryAddress.profile(), "bad")])
-def test_refresh_for_many_requires_address_tuple(tmp_path: Path, addresses: object) -> None:
-    with pytest.raises(TypeError, match="addresses must contain"):
-        make_refresher(tmp_path).refresh_for_many(addresses)  # type: ignore[arg-type]
 
 
 def test_refresh_for_many_empty_tuple_is_a_noop(tmp_path: Path) -> None:
@@ -115,12 +80,7 @@ def test_refresh_missing_directory_does_not_call_generator(tmp_path: Path) -> No
     assert generator.snapshots == []
 
 
-def test_refresh_directory_rejects_non_directory(tmp_path: Path) -> None:
-    with pytest.raises(TypeError, match="directory must be"):
-        make_refresher(tmp_path).refresh_directory(("preferences",))  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("result", [None, 1, "", " \n\t"])
+@pytest.mark.parametrize("result", ["", " \n\t"])
 def test_generator_must_return_non_empty_text(tmp_path: Path, result: object) -> None:
     instance = make_refresher(tmp_path, generator=Generator(result))
     instance.tree.write(document(MemoryKind.PREFERENCE))
@@ -230,10 +190,8 @@ def test_empty_directory_without_layers_is_unchanged(tmp_path: Path) -> None:
     assert result.status is MemorySemanticRefreshStatus.UNCHANGED
 
 
-def test_rebuild_rejects_invalid_root_and_returns_empty_for_missing_subtree(tmp_path: Path) -> None:
+def test_rebuild_returns_empty_for_missing_subtree(tmp_path: Path) -> None:
     instance = make_refresher(tmp_path)
-    with pytest.raises(TypeError, match="directory must be"):
-        instance.rebuild("preferences")  # type: ignore[arg-type]
     assert instance.rebuild(MemoryDirectory.entities("不存在")) == ()
 
 
