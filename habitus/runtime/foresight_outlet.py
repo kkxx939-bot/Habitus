@@ -576,12 +576,11 @@ class ReminderOutlet:
                     continue  # 自己填的话：交给会话 lane 的模型判
                 try:
                     day = date.fromisoformat(str(raw["day"]))
-                    request_id = str(raw["request_id"])
+                    response = Response(str(raw["request_id"]), item.occurred_at, polarity, reply.call_id)
                 except (KeyError, ValueError):  # 问过的记录读不懂：这条作答写不回去（记录已删），留观测信号
                     self._observe(ObservationStatus.FAILURE, "reply", {"session": session, "error": "asked_unreadable"})
                     continue
-                if self._write_response(day, Response(request_id, item.occurred_at, polarity, reply.call_id)):
-                    written += 1
+                written += int(self._write_response(day, response))
         return written
 
     def _record_spoken(self, claim: _Claim, call: HostMessage, title: str, via: str) -> bool:
