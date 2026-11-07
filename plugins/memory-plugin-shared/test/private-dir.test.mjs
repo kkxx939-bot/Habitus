@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { makePrivateDirectory } from "../lib/private-dir.mjs";
+import { makePrivateDirectory, plainWindowsPath } from "../lib/private-dir.mjs";
 
 async function root(t) {
   const directory = await mkdtemp(join(tmpdir(), "habitus-private-dir-"));
@@ -16,22 +16,33 @@ async function root(t) {
   return directory;
 }
 
-test("on Windows only the topmost directory this call created is restricted, once; existing ones are left alone", async (t) => {
+test("on Windows the root is restricted when this call created it (or its parents); what is created below an existing root inherits", async (t) => {
   const base = await root(t);
   const restricted = [];
-  const restrict = async (path) => { restricted.push(path); };
-  await makePrivateDirectory(join(base, "state", "sessions", "codex"), { platform: "win32", restrict });
-  assert.deepEqual(restricted, [join(base, "state")]);
-  // 再建其下一级：只有新建的那一级
-  await makePrivateDirectory(join(base, "state", "sessions", "codex", "lock"), { platform: "win32", restrict });
-  assert.deepEqual(restricted, [join(base, "state"), join(base, "state", "sessions", "codex", "lock")]);
-  // 已存在：不碰（用户事先建好的目录不改它的 DACL）
+  const options = { platform: "win32", restrict: async (path) => { restricted.push(path); } };
+  const state = join(base, "home", "state");
+  // 根连同上级一起新建：收新建出来的最上层那一级
+  await makePrivateDirectory(join(state, "sessions", "codex"), state, options);
+  assert.deepEqual(restricted, [join(base, "home")]);
+  // 根已在、在它下面新建（每个会话一个 outbox 目录）：随根继承，不再收
+  await makePrivateDirectory(join(state, "outbox", "codex", "s1"), state, options);
+  assert.equal(restricted.length, 1);
+  // 只给了路径（根就是它自己）：新建就收
+  await makePrivateDirectory(join(base, "marketplace-parent"), undefined, options);
+  assert.deepEqual(restricted.at(-1), join(base, "marketplace-parent"));
+  // 已存在的根：不碰（用户事先建好的目录不改它的 DACL）
   await mkdir(join(base, "mine"));
-  await makePrivateDirectory(join(base, "mine"), { platform: "win32", restrict });
+  await makePrivateDirectory(join(base, "mine"), undefined, options);
   assert.equal(restricted.length, 2);
-  // POSIX：不起 icacls，靠 mkdir 的 0o700
-  await makePrivateDirectory(join(base, "posix", "child"), { platform: "darwin", restrict });
+  // POSIX：不改 DACL，靠 mkdir 的 0o700
+  await makePrivateDirectory(join(base, "posix", "child"), undefined, { ...options, platform: "darwin" });
   assert.equal(restricted.length, 2);
+});
+
+test("the extended-length prefix Windows mkdir reports is dropped before comparing and restricting", () => {
+  assert.equal(plainWindowsPath("\\\\?\\C:\\Users\\张三 李四\\.habitus"), "C:\\Users\\张三 李四\\.habitus");
+  assert.equal(plainWindowsPath("\\\\?\\UNC\\server\\share\\x"), "\\\\server\\share\\x");
+  assert.equal(plainWindowsPath("C:\\plain"), "C:\\plain");
 });
 
 test("on POSIX the directories are created 0700", { skip: process.platform === "win32" && "Windows 没有 POSIX 权限位" }, async (t) => {
@@ -41,11 +52,21 @@ test("on POSIX the directories are created 0700", { skip: process.platform === "
   assert.equal((await stat(join(base, "a", "b"))).mode & 0o777, 0o700);
 });
 
-function sddl(path) {
+// 读一个路径的 DACL：是否禁继承，以及每条访问规则（SID|是否继承来的|权限|允许或拒绝）。按 SID 比，不比 SDDL 文本
+// （内置 Administrator 这类账号在 SDDL 里会缩写成 LA）
+function accessRules(path) {
   const powershell = join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-  return execFileSync(powershell, ["-NoProfile", "-NonInteractive", "-Command", "(Get-Acl -LiteralPath $env:HABITUS_ACL_PATH).Sddl"], {
+  const script = [
+    "$acl = Get-Acl -LiteralPath $env:HABITUS_ACL_PATH",
+    "'protected=' + $acl.AreAccessRulesProtected",
+    "'me=' + [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+    "$acl.Access | ForEach-Object { 'rule=' + $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value + '|' + $_.IsInherited + '|' + $_.FileSystemRights + '|' + $_.AccessControlType }",
+  ].join("; ");
+  const lines = execFileSync(powershell, ["-NoProfile", "-NonInteractive", "-Command", script], {
     encoding: "utf8", env: { ...process.env, HABITUS_ACL_PATH: path }, windowsHide: true,
-  }).trim();
+  }).trim().split(/\r?\n/);
+  const value = (key) => lines.filter((line) => line.startsWith(`${key}=`)).map((line) => line.slice(key.length + 1));
+  return { protected: value("protected")[0] === "True", me: value("me")[0], rules: value("rule") };
 }
 
 test(
@@ -53,20 +74,18 @@ test(
   { skip: process.platform !== "win32" && "只有 Windows 用 DACL" },
   async (t) => {
     const base = await root(t);
-    const top = join(base, "张三 李四", "agent-plugin");
-    await makePrivateDirectory(join(top, "sessions"));
-    await writeFile(join(top, "sessions", "state.json"), "{}\n");
-    const sid = execFileSync(join(process.env.SystemRoot, "System32", "whoami.exe"), ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" })
-      .trim().match(/"(S-1-[0-9-]+)"\s*$/)[1];
-    // 新建的最上层：禁继承（D:P），只有一条本人完全控制、继承给子项
     const created = join(base, "张三 李四");
-    assert.match(sddl(created), new RegExp(`D:P\\(A;OICI;FA;;;${sid}\\)$`), sddl(created));
-    // 其下的目录与文件：只继承那一条
+    const top = join(created, "agent-plugin");
+    await makePrivateDirectory(join(top, "sessions"), top);
+    await writeFile(join(top, "sessions", "state.json"), "{}\n");
+    // 新建的最上层：禁继承，只有一条本人完全控制
+    const head = accessRules(created);
+    assert.equal(head.protected, true, JSON.stringify(head));
+    assert.deepEqual(head.rules, [`${head.me}|False|FullControl|Allow`], JSON.stringify(head));
+    // 其下的目录与文件（含建根时一并建的中间级）：只有继承来的那一条
     for (const path of [top, join(top, "sessions"), join(top, "sessions", "state.json")]) {
-      const value = sddl(path);
-      const aces = value.slice(value.indexOf("D:")).match(/\([^)]*\)/g);
-      assert.equal(aces.length, 1, `${path}: ${value}`);
-      assert.match(aces[0], new RegExp(`;FA;;;${sid}\\)$`), `${path}: ${value}`);
+      const below = accessRules(path);
+      assert.deepEqual(below.rules, [`${below.me}|True|FullControl|Allow`], `${path}: ${JSON.stringify(below)}`);
     }
   },
 );

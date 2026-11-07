@@ -19,7 +19,7 @@ import sys
 import tomllib
 import zipfile
 from fnmatch import fnmatch
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -33,13 +33,13 @@ def fail(message: str, items: list[str] | None = None) -> None:
     sys.exit(1)
 
 
-def tracked_files() -> list[Path]:
+def tracked_files() -> list[PurePosixPath]:
     """版本库里的文件清单。用 git 而不是遍历磁盘，天然排除被 gitignore 的本地数据集与构建产物——
-    它们不进 git，CI 上也不存在。"""
+    它们不进 git，CI 上也不存在。按 POSIX 路径处理：git 与 wheel 里的名字都用 "/"，Windows 上 str(Path) 是反斜杠，会全部对不上。"""
     out = subprocess.run(
         ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True, text=True
     ).stdout
-    return [Path(name) for name in out.split("\0") if name]
+    return [PurePosixPath(name) for name in out.split("\0") if name]
 
 
 def package_roots(config: dict) -> list[str]:
@@ -100,7 +100,7 @@ def main() -> None:
     missing_data: list[str] = []
     empty_globs: list[str] = []
     for package, patterns in setuptools_config.get("package-data", {}).items():
-        package_dir = Path(package.replace(".", "/"))
+        package_dir = PurePosixPath(package.replace(".", "/"))
         for pattern in patterns:
             # 模式可以带斜杠（如 "datasets/*.json"），按相对包目录的完整路径匹配。
             matched = [
@@ -118,7 +118,7 @@ def main() -> None:
     for target, patterns in setuptools_config.get("data-files", {}).items():
         for pattern in patterns:
             matched = sorted(ROOT.glob(pattern))
-            matched = [path for path in matched if str(path.relative_to(ROOT)) in tracked_set]
+            matched = [path for path in matched if path.relative_to(ROOT).as_posix() in tracked_set]
             if not matched:
                 empty_globs.append(f"data-files [{target}] {pattern}")
                 continue

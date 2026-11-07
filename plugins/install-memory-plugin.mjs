@@ -96,7 +96,7 @@ async function stageMarketplace(root, sourceRoot, registry) {
   const parent = dirname(root);
   await makePrivateDirectory(parent);
   const staging = join(parent, `.${basename(root)}.staging-${randomUUID()}`);
-  await makePrivateDirectory(join(staging, "plugins"));
+  await makePrivateDirectory(join(staging, "plugins"), staging);
   try {
     const definitions = registry.list();
     for (const name of [...new Set(definitions.map((definition) => definition.pluginDirectory))]) {

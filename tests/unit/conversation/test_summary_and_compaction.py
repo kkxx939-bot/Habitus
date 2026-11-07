@@ -74,7 +74,7 @@ def test_summary_store_rejects_noncanonical_or_path_mismatched_content(tmp_path:
     summary = segment_summary(source)
     store.create(address, source, summary)
     path = layout.summary_path(address, source.segment_id)
-    path.write_text(path.read_text().replace("{", "{\n", 1))
+    path.write_bytes(path.read_bytes().replace(b"{", b"{\n", 1))
     with pytest.raises(Exception, match="valid conversation summary"):
         store.read(address, source)
 

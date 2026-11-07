@@ -14,6 +14,7 @@ from habitus.conversation.behavior_session import (
 )
 from habitus.conversation.source import ConversationSourceError
 from habitus.foundation.integrity import canonical_digest
+from tests.platform_helpers import long_path
 from tests.unit.conversation.source_v2_helpers import NOW, source, stores
 
 FINGERPRINT = canonical_digest("behavior-session-processor")
@@ -71,8 +72,8 @@ def test_a_tampered_receipt_is_reported_as_corrupt(tmp_path) -> None:
     *_others, store = stores(tmp_path)
     source_value = source()
     output = store.put(source_value, receipt(source_value))
-    path = store._path(source_value.source_id, output.output_id)  # noqa: SLF001 - 直接改盘上的字节
-    path.write_text(path.read_text(encoding="utf-8").replace('"recorded":true', '"recorded":false'), encoding="utf-8")
+    path = long_path(store._path(source_value.source_id, output.output_id))  # noqa: SLF001 - 直接改盘上的字节
+    path.write_bytes(path.read_bytes().replace(b'"recorded":true', b'"recorded":false'))
 
     with pytest.raises(ConversationSourceError, match="corrupt"):
         store.read(source_value, output.output_id)

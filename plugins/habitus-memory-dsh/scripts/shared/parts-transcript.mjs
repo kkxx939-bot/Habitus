@@ -77,7 +77,7 @@ export class TranscriptMirror {
       ids.push(id);
     }
     if (lines.length > 0) {
-      await makePrivateDirectory(join(this.stateRoot, "transcripts", this.host));
+      await makePrivateDirectory(join(this.stateRoot, "transcripts", this.host), this.stateRoot);
       await dropTornTail(path);
       await appendFile(path, `${lines.join("\n")}\n`, { mode: 0o600 });
       for (const id of ids) seen.add(id); // 写成功才算镜像过；写失败下次重来

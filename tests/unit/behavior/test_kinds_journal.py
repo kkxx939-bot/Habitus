@@ -57,9 +57,9 @@ def test_truncation_keeps_the_vocabulary_and_everything_after_the_floor(tmp_path
 def test_a_crash_between_the_snapshot_and_the_shortened_log_reads_the_same(tmp_path: Path) -> None:
     store = seeded(tmp_path)
     before = store.read()
-    full_log = store.changes_path.read_text()
+    full_log = store.changes_path.read_bytes()
     store.truncate_before(3)
-    store.changes_path.write_text(full_log)  # 快照写了、日志还没改写就崩了
+    store.changes_path.write_bytes(full_log)  # 快照写了、日志还没改写就崩了
     assert store.read() == before
     assert [record.version for record in store.records()] == [4]
 

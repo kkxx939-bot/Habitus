@@ -11,6 +11,7 @@ import pytest
 from habitus.conversation.source import ConversationSourceError, SourceAddress
 from habitus.infrastructure.lifecycle import ParticipantReport
 from habitus.runtime.lifecycle_sources import ConversationSourceParticipant
+from tests.platform_helpers import long_path
 from tests.unit.conversation.source_v2_helpers import source, source_ledger
 from tests.unit.conversation.test_source_release import _deliver, _setup
 
@@ -44,7 +45,7 @@ def test_index_rejects_unknown_entries_but_skips_temporary_files(tmp_path: Path)
     envelope = source()
     ledger.admit(envelope)
     directory = tmp_path / "source" / "index" / SourceAddress.of(envelope).digest
-    (directory / f".{next(directory.iterdir()).name}.{'0' * 32}.tmp").write_bytes(b"partial")
+    long_path(directory / f".{next(directory.iterdir()).name}.{'0' * 32}.tmp").write_bytes(b"partial")
     assert len(ledger.index.markers(SourceAddress.of(envelope))) == 1
     (directory / "stray.txt").write_text("x")
     with pytest.raises(ConversationSourceError, match="unsupported"):

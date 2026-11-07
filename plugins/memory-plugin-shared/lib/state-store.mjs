@@ -126,13 +126,13 @@ export async function listSkippedTranscriptLines(root) {
 
 export async function writeState(root, host, nativeSessionId, value) {
   const target = paths(root, host, nativeSessionId);
-  await makePrivateDirectory(target.directory);
+  await makePrivateDirectory(target.directory, root);
   await replaceJsonDurably(target.state, { ...value, schemaVersion: 3 });
 }
 
 export async function withSessionLock(root, host, nativeSessionId, callback) {
   const target = paths(root, host, nativeSessionId);
-  await makePrivateDirectory(target.directory);
+  await makePrivateDirectory(target.directory, root);
   const deadline = Date.now() + 5000;
   const ownerToken = randomUUID();
   const processIdentity = await readProcessIdentity(process.pid);

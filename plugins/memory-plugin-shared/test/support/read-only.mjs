@@ -15,7 +15,8 @@ function icacls(...args) {
 
 export function denyWritesSync(path) {
   if (process.platform !== "win32") { chmodSync(path, 0o500); return; }
-  icacls(path, "/deny", `${process.env.USERNAME}:(OI)(CI)(WD,AD,DE,DC)`);
+  // /T：也直接加到已经在里面的子项上（只加在本目录上时，现有子项不受影响，删得掉也写得进）
+  icacls(path, "/deny", `${process.env.USERNAME}:(OI)(CI)(WD,AD,DE,DC)`, "/T", "/C");
 }
 
 export function allowWritesSync(path) {

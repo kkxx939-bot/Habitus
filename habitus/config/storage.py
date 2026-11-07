@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -27,7 +28,7 @@ class StorageConfig:
         requested = Path(self.root).expanduser().absolute()
         if is_path_alias(requested):
             raise ConfigError("storage.root cannot be a symbolic link")
-        object.__setattr__(self, "root", requested.resolve(strict=False))
+        object.__setattr__(self, "root", _platform_root(requested.resolve(strict=False)))
 
     @classmethod
     def from_mapping(cls, value: object) -> StorageConfig:
@@ -43,6 +44,21 @@ class StorageConfig:
                 "config.storage.sqlite_lock",
             ),
         )
+
+
+def _platform_root(resolved: Path) -> Path:
+    """Windows 上把存储根换成 ``\\\\?\\`` 扩展长度形式（用户 2026-11-07 定）。
+
+    默认 Windows 没开长路径支持（LongPathsEnabled=0），而且公司机器常改不了注册表；存储根下的会话、记忆、SQLite 文件
+    加上长会话 ID 很容易超过 260 字符。耐久写入层自己会加这个前缀，但列目录、实例锁、SQLite 等直接用路径的地方不经它；
+    在根上换一次，其下拼出来的所有路径都带上前缀，统一越过 MAX_PATH。POSIX 原样返回。
+    """
+
+    if sys.platform != "win32":
+        return resolved
+    from habitus.infrastructure.store.filesystem import windows_api
+
+    return Path(windows_api.extended_path(resolved))
 
 
 __all__ = ["StorageConfig"]

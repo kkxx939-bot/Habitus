@@ -39,6 +39,29 @@ def is_private_directory(path: Path) -> bool:
     return stat.S_IMODE(os.stat(path).st_mode) == 0o700
 
 
+def long_path(path: Path) -> Path:
+    """测试自己直接碰盘上文件时用：Windows 上换成 ``\\\\?\\`` 扩展路径（pytest 的临时目录很深，加上存储内的长名常超过
+    260 字符，普通 ``open()`` 在没开长路径的机器上打不开）；POSIX 原样返回。生产代码经耐久层自己处理。"""
+
+    if sys.platform == "win32":
+        from habitus.infrastructure.store.filesystem import windows_api
+
+        return Path(windows_api.extended_path(path.absolute()))
+    return path
+
+
+def configured_storage_root(path: Path) -> Path:
+    """配置把 ``storage.root`` 规范成的样子：POSIX 是解析后的绝对路径；Windows 另换成 ``\\\\?\\`` 扩展长度形式
+    （``config/storage.py``，用户 2026-11-07 定，越过 MAX_PATH）。"""
+
+    resolved = path.resolve()
+    if sys.platform == "win32":
+        from habitus.infrastructure.store.filesystem import windows_api
+
+        return Path(windows_api.extended_path(resolved))
+    return resolved
+
+
 def dacl_is_protected(path: Path) -> bool:
     """Windows：DACL 关闭了继承（``D:P``），父目录以后再放宽也传不下来。"""
 

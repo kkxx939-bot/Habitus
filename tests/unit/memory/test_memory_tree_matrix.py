@@ -140,7 +140,8 @@ def test_tree_reads_and_updates_one_legacy_case_preserving_path(tmp_path: Path) 
         fields={"topic": "Theme", "content": "- legacy"},
     )
     legacy_path = tree.root / "preferences" / "Theme.md"
-    legacy_path.write_text(document_codec.encode(legacy), encoding="utf-8")
+    # 按字节写：Windows 文本模式会把 \n 写成 \r\n，文档就不再是规范编码
+    legacy_path.write_bytes(document_codec.encode(legacy).encode("utf-8"))
 
     canonical_address = MemoryAddress.preference("theme")
     assert tree.exists(canonical_address)
@@ -667,13 +668,20 @@ def test_lock_keys_derived_from_the_memory_root_keep_their_literal_strings() -> 
         def generate(self, snapshot):  # pragma: no cover - 只为构造刷新器
             raise AssertionError(snapshot)
 
-    root_digest = "6988d8f5be62511ef8ed9bb0"
+    # 根摘要取的是规范化后的根路径字符串：POSIX 上是 /habitus-lock-key-fixture/memory；Windows 上无盘符的路径会落到
+    # 当前盘（随运行目录变），所以给一个带盘符的根，各钉一个字面值
+    if sys.platform == "win32":
+        fixture = Path("C:/habitus-lock-key-fixture")
+        root_digest = "36684d3069bad6102d6cf96e"
+    else:
+        fixture = Path("/habitus-lock-key-fixture")
+        root_digest = "6988d8f5be62511ef8ed9bb0"
     uri_digest = "5dd4f775cc27154312c3bd5b841c410a6cf2611734f652ae2a88f864d1f85f50"
-    tree = MemoryTree(Path("/habitus-lock-key-fixture/memory"))
+    tree = MemoryTree(fixture / "memory")
     path_lock = PathLock(ProcessLocalLockStore())
     keyspace = MemoryDocumentLockKeyspace(tree.root)
     refresher = MemorySemanticRefresher(tree, _Generator(), path_lock)
-    workflow_root = Path("/habitus-lock-key-fixture/workflow")
+    workflow_root = fixture / "workflow"
     operations = MemoryLifecycleOperationStore(tree, path_lock, workflow_root)
     scan = MemoryLifecycleScanStore(tree, path_lock, workflow_root)
 

@@ -125,7 +125,7 @@ def test_retired_memory_contracts_and_uri_schemes_do_not_reappear() -> None:
         source = path.read_text(encoding="utf-8")
         for retired in RETIRED_NAMES:
             if retired in source:
-                violations.append(f"{path.relative_to(REPOSITORY_ROOT)}: {retired}")
+                violations.append(f"{path.relative_to(REPOSITORY_ROOT).as_posix()}: {retired}")
     assert violations == []
 
 
@@ -146,7 +146,7 @@ def test_retired_memory_contracts_and_uri_schemes_do_not_reappear() -> None:
 )
 def test_domain_packages_never_import_top_level_runtime(package: str) -> None:
     violations = [
-        str(path.relative_to(REPOSITORY_ROOT))
+        path.relative_to(REPOSITORY_ROOT).as_posix()
         for path in (SRC / package).rglob("*.py")
         if "runtime" in imported_roots(path)
     ]
@@ -156,7 +156,7 @@ def test_domain_packages_never_import_top_level_runtime(package: str) -> None:
 def test_pre_contains_only_conversation_schema_and_no_storage_dependency() -> None:
     python_files = tuple((SRC / "pre").rglob("*.py"))
     violations = [
-        str(path.relative_to(REPOSITORY_ROOT))
+        path.relative_to(REPOSITORY_ROOT).as_posix()
         for path in python_files
         if imported_roots(path) & {"memory", "infrastructure", "runtime", "config"}
     ]
@@ -185,7 +185,7 @@ def test_local_setup_cli_renders_registry_without_vendor_branches() -> None:
 
 def test_memory_kernel_never_imports_the_local_product_shell() -> None:
     violations = [
-        str(path.relative_to(REPOSITORY_ROOT))
+        path.relative_to(REPOSITORY_ROOT).as_posix()
         for path in (SRC / "memory").rglob("*.py")
         if "integrations" in imported_roots(path)
     ]
@@ -205,7 +205,7 @@ def test_memory_internal_layers_keep_their_dependency_direction() -> None:
 
     def importers(package: str, target: str) -> list[str]:
         return sorted(
-            str(path.relative_to(REPOSITORY_ROOT))
+            path.relative_to(REPOSITORY_ROOT).as_posix()
             for path in (SRC / "memory" / package).rglob("*.py")
             if any(module == target or module.startswith(f"{target}.") for module in imported_modules(path))
         )
@@ -249,7 +249,7 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
     # 收在单个模块里由 test_the_behaviour_tree_is_read_into_the_series_in_one_place 守住。
     # ``scene``（语义关联层）是行为树的解释层，从行为树派生，允许 import behavior。
     reverse_dependency_violations = [
-        str(path.relative_to(REPOSITORY_ROOT))
+        path.relative_to(REPOSITORY_ROOT).as_posix()
         for path in production_files()
         if path.relative_to(SRC).parts[0] not in {"behavior", "runtime", "scene"}
         and path.relative_to(SRC).as_posix() != "series/reader.py"
@@ -261,7 +261,7 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
     # ``memory`` 的检索、抽取与语义生成同样直接依赖它。behavior 里只有事件融合调用模型，
     # 观测清洗、确定性派生与行为树写入都不经过它。
     behavior_dependency_violations = [
-        str(path.relative_to(REPOSITORY_ROOT))
+        path.relative_to(REPOSITORY_ROOT).as_posix()
         for path in behavior_root.rglob("*.py")
         if imported_roots(path)
         & {
@@ -279,7 +279,9 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
     # ``kinds/calls.py`` 这一个文件）、行为树语义面生成。
     # 存储、派生与落盘路径仍不得渗入。
     model_callers = sorted(
-        str(path.relative_to(SRC)) for path in behavior_root.rglob("*.py") if "model_client" in imported_roots(path)
+        path.relative_to(SRC).as_posix()
+        for path in behavior_root.rglob("*.py")
+        if "model_client" in imported_roots(path)
     )
     # 每晚重试的结果分类（裁定 68 第 5 条）也定在会话 lane 的 service 里：重试处理器只按它导出的三组分，不直接认识模型客户端。
     assert model_callers == [
@@ -354,7 +356,7 @@ def test_behavior_semantic_tree_does_not_restore_retired_first_layer() -> None:
 
     retired_storage_markers = {"behavior.sqlite3", "evidence_claims.sqlite3"}
     storage_violations = [
-        f"{path.relative_to(REPOSITORY_ROOT)}: {marker}"
+        f"{path.relative_to(REPOSITORY_ROOT).as_posix()}: {marker}"
         for path in production_files()
         for marker in retired_storage_markers
         if marker in path.read_text(encoding="utf-8")
@@ -437,7 +439,9 @@ def test_the_prediction_tree_is_gone_for_good() -> None:
     assert not (SRC / "prediction").exists()
     assert not (SRC / "config" / "prediction.py").exists() and not (SRC / "runtime" / "prediction.py").exists()
     importers = sorted(
-        str(path.relative_to(REPOSITORY_ROOT)) for path in production_files() if "prediction" in imported_roots(path)
+        path.relative_to(REPOSITORY_ROOT).as_posix()
+        for path in production_files()
+        if "prediction" in imported_roots(path)
     )
     assert importers == []
 
@@ -482,7 +486,7 @@ def test_behaviour_never_depends_on_its_derivations() -> None:
     """依赖是单向的：行为树不知道有人在统计它，否则预测的聚合键会反过来决定行为树的字段。"""
 
     violations = [
-        str(path.relative_to(REPOSITORY_ROOT))
+        path.relative_to(REPOSITORY_ROOT).as_posix()
         for path in (SRC / "behavior").rglob("*.py")
         if imported_roots(path) & {"scene", "temporal", "foresight"}
     ]
@@ -826,7 +830,7 @@ def test_foresight_only_reads_the_derived_trees() -> None:
     root = SRC / "foresight"
     assert root.is_dir()
     violations = [
-        str(path.relative_to(REPOSITORY_ROOT))
+        path.relative_to(REPOSITORY_ROOT).as_posix()
         for path in root.rglob("*.py")
         if imported_roots(path)
         & {"behavior", "memory", "config", "runtime", "conversation", "integrations", "pre", "infrastructure"}
@@ -837,7 +841,7 @@ def test_foresight_only_reads_the_derived_trees() -> None:
     # 模型触点只有判断这一处（提示词渲染 + 服务），客户端从构造器注入。证据装配、渲染、判断的产物
     # 形状、schema 与装配校验都不得碰模型——它们一碰，"证据是纯函数装出来的"就只剩自觉了。
     model_callers = sorted(
-        str(path.relative_to(SRC)) for path in root.rglob("*.py") if "model_client" in imported_roots(path)
+        path.relative_to(SRC).as_posix() for path in root.rglob("*.py") if "model_client" in imported_roots(path)
     )
     assert set(model_callers) <= {"foresight/judge/prompt.py", "foresight/judge/service.py"}
     # 直接依赖收敛了还不够，算传递闭包：包里除判断包的入口、提示词、服务之外，任何模块都不得经
@@ -877,7 +881,9 @@ def test_foresight_only_reads_the_derived_trees() -> None:
     # （同一条时间线、与建预期同一把尺，裁定 55 新版第 2 条），清单里那几个文件；
     # 账本与机会表的形状、日子与情境两种触发对 scene 零知识。清单是穷举的：
     # 新文件要碰 scene 必须先改这一行，改的时候就得想清楚它属于哪一侧。
-    scene_readers = sorted(str(path.relative_to(SRC)) for path in root.rglob("*.py") if "scene" in imported_roots(path))
+    scene_readers = sorted(
+        path.relative_to(SRC).as_posix() for path in root.rglob("*.py") if "scene" in imported_roots(path)
+    )
     assert scene_readers == [
         "foresight/history.py",
         "foresight/ledger/settle.py",
@@ -924,13 +930,13 @@ def test_foresight_only_reads_the_derived_trees() -> None:
         assert "scene" not in imported_roots(root / "ledger" / name)
         assert "scene" not in imported_roots(root / "opportunities" / name)
     ledger_writers = sorted(
-        str(path.relative_to(SRC))
+        path.relative_to(SRC).as_posix()
         for path in (SRC / "runtime").rglob("*.py")
         if "habitus.foresight.ledger" in imported_modules(path) and "infrastructure" in imported_roots(path)
     )
     assert ledger_writers == ["runtime/foresight_ledger.py"]
     upstream = [
-        str(path.relative_to(REPOSITORY_ROOT))
+        path.relative_to(REPOSITORY_ROOT).as_posix()
         for name in ("behavior", "scene", "series", "temporal", "conditions", "memory")
         for path in (SRC / name).rglob("*.py")
         if "foresight" in imported_roots(path)
@@ -941,7 +947,7 @@ def test_foresight_only_reads_the_derived_trees() -> None:
     # 并链、解析记录——那是在组合根里重抄归约的算法。
     runtime_root = SRC / "runtime"
     inside_behavior = sorted(
-        str(path.relative_to(SRC))
+        path.relative_to(SRC).as_posix()
         for path in runtime_root.rglob("*.py")
         if any(
             module.startswith(("habitus.behavior.reduction.", "habitus.behavior.fusion."))
@@ -1093,7 +1099,7 @@ def test_conversation_never_depends_on_memory_or_behavior() -> None:
     """会话源连同各消费者留在它这边的回执，都不认识记忆与行为。"""
 
     violations = [
-        str(path.relative_to(REPOSITORY_ROOT))
+        path.relative_to(REPOSITORY_ROOT).as_posix()
         for path in (SRC / "conversation").rglob("*.py")
         if imported_roots(path) & {"memory", "behavior", "runtime", "config", "integrations"}
     ]
@@ -1139,7 +1145,7 @@ def test_the_session_lane_meets_the_conversation_source_only_in_the_composition_
         "service.py"
     ]
     bridges = sorted(
-        str(path.relative_to(SRC))
+        path.relative_to(SRC).as_posix()
         for path in SRC.rglob("*.py")
         if "__pycache__" not in path.parts
         and any(module.startswith("habitus.behavior.fusion.lanes.session") for module in imported_modules(path))
@@ -1150,14 +1156,14 @@ def test_the_session_lane_meets_the_conversation_source_only_in_the_composition_
     # 两条 lane 共用的那几样（判断、派生、存储、回执、覆盖索引）不认识任何一条 lane。
     shared = [path for path in (SRC / "behavior" / "fusion").glob("*.py")]
     assert [
-        str(path.relative_to(SRC))
+        path.relative_to(SRC).as_posix()
         for path in shared
         if any(module.startswith("habitus.behavior.fusion.lanes") for module in imported_modules(path))
     ] == []
     # 两条 lane 互不相认。
     for lane, other in (("session", "physical"), ("physical", "session")):
         assert [
-            str(path.relative_to(SRC))
+            path.relative_to(SRC).as_posix()
             for path in (SRC / "behavior" / "fusion" / "lanes" / lane).glob("*.py")
             if any(module.startswith(f"habitus.behavior.fusion.lanes.{other}") for module in imported_modules(path))
         ] == []
@@ -1316,7 +1322,7 @@ def test_input_too_large_and_content_safety_are_classified_only_through_model_de
     assert offenders == []
     # 用到这一组的地方：会话 lane 的模型触点（含每晚重试的分类）、词表的模型触点、组合根给概览刷新的重试账
     users = sorted(
-        str(path.relative_to(SRC))
+        path.relative_to(SRC).as_posix()
         for root in ("behavior", "runtime", "infrastructure")
         for path in (SRC / root).rglob("*.py")
         if "__pycache__" not in path.parts
@@ -1355,7 +1361,7 @@ def test_model_unavailable_is_classified_only_through_the_shared_group() -> None
     )
     assert offenders == []
     users = sorted(
-        str(path.relative_to(SRC))
+        path.relative_to(SRC).as_posix()
         for root in ("memory", "behavior")
         for path in (SRC / root).rglob("*.py")
         if "__pycache__" not in path.parts
@@ -1378,7 +1384,7 @@ def test_memory_gets_the_subjects_time_zone_from_the_composition_root() -> None:
     ``config.locale``，由组合根注入；记忆域自己不读配置、不认进程时区。"""
 
     offenders = sorted(
-        str(path.relative_to(REPOSITORY_ROOT))
+        path.relative_to(REPOSITORY_ROOT).as_posix()
         for root in ("memory", "pre")
         for path in (SRC / root).rglob("*.py")
         if "__pycache__" not in path.parts and ("config" in imported_roots(path) or "zoneinfo" in imported_roots(path))

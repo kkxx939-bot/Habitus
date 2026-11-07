@@ -317,6 +317,14 @@ def test_a_leaf_file_symlink_is_never_read_through(tmp_path: Path) -> None:
     assert outside.read_bytes() == b"outside"
 
 
+def _metadata_is_unreadable(path: Path) -> bool:
+    try:
+        os.lstat(path)
+    except PermissionError:
+        return True
+    return False
+
+
 @pytest.mark.skipif(sys.platform != "win32" and os.geteuid() == 0, reason="POSIX 上 root 不受权限位限制")
 def test_alias_check_fails_closed_when_the_parent_cannot_be_read(tmp_path: Path) -> None:
     """与 3.12/3.13 的 ``Path.is_symlink()`` 一样：路径不存在才算"不是别名"，看不了（权限不足）要上抛，不能当成放行
@@ -331,6 +339,10 @@ def test_alias_check_fails_closed_when_the_parent_cannot_be_read(tmp_path: Path)
         deny_all_access(child)
     deny_all_access(locked)
     try:
+        if not _metadata_is_unreadable(child):
+            # 前提造不出来：这台机器上当前账号对拒绝 ACE 视而不见（管理员带备份特权、或系统按名查元数据不走这条检查），
+            # 元数据照样读得到，is_path_alias 拿到的就是真实结果，没有"看不了还放行"可防
+            pytest.skip("当前账号仍读得到被拒目录的元数据，造不出'看不了'的前提")
         with pytest.raises(PermissionError):
             is_path_alias(child)
     finally:

@@ -747,8 +747,10 @@ def test_doctor_deep_writes_only_structured_logs_to_stderr(tmp_path: Path) -> No
             str(config),
             "--deep",
             "--skip-port",
+            # 探测超时留够客户端把重试走完、记下 ERROR：POSIX 上连关着的端口立刻被拒；Windows 上每次要等约 2 秒的
+            # SYN 重传才判失败，3 秒会先超时，日志里就没有那条 ERROR
             "--probe-timeout",
-            "3",
+            "60",
         ],
         capture_output=True,
         text=True,

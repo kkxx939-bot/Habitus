@@ -10,7 +10,7 @@ import yaml
 from habitus.config import ConfigError, HabitusConfig
 from habitus.config.loader import load_config_object, required_field, strict_fields, strict_object
 from habitus.infrastructure.store.filesystem import restrict_file_to_owner
-from tests.platform_helpers import grant_everyone_read
+from tests.platform_helpers import configured_storage_root, grant_everyone_read
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE_CONFIG = REPOSITORY_ROOT / "habitus" / "config" / "example.yaml"
@@ -24,7 +24,7 @@ def valid_mapping(tmp_path: Path) -> dict[str, object]:
 
 def test_example_yaml_declares_a_complete_cross_domain_configuration(tmp_path) -> None:
     config = HabitusConfig.from_mapping(valid_mapping(tmp_path))
-    assert config.storage_root == (tmp_path / "data").resolve()
+    assert config.storage_root == configured_storage_root(tmp_path / "data")
     assert config.memory_root == config.storage_root / "memory"
     assert config.conversation_root == config.storage_root / "conversation"
     assert config.workflow_root == config.storage_root / "workflow"

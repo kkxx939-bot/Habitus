@@ -127,7 +127,7 @@ export async function mirrorEvents(stateRoot, sessionId, events) {
   } catch (error) { if (error?.code !== "ENOENT") throw error; }
   const fresh = events.filter((event) => event.seq > last).sort((left, right) => left.seq - right.seq);
   if (fresh.length > 0) {
-    await makePrivateDirectory(join(stateRoot, "transcripts", "dsh"));
+    await makePrivateDirectory(join(stateRoot, "transcripts", "dsh"), stateRoot);
     await dropTornTail(path);
     await appendFile(path, `${fresh.map((event) => JSON.stringify(event)).join("\n")}\n`, { mode: 0o600 });
   }

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { access, readdir, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   HARNESS_REGISTRY,
@@ -150,7 +150,7 @@ async function bundleChecks(registry = HARNESS_REGISTRY) {
     definition.requiredAssets.map((asset) => `${definition.pluginDirectory}/${asset}`)
   ));
   try {
-    await Promise.all(required.map((value) => access(join(PLUGINS_ROOT, value))));
+    await Promise.all(required.map((value) => access(resolve(PLUGINS_ROOT, value))));
   } catch {
     return [{ name: "bundle", status: "fail", detail: "plugin bundle is incomplete" }];
   }
@@ -164,7 +164,7 @@ async function bundleChecks(registry = HARNESS_REGISTRY) {
 async function manifestCheck(registry = HARNESS_REGISTRY) {
   try {
     for (const definition of registry.list()) {
-      const pluginRoot = join(PLUGINS_ROOT, definition.pluginDirectory);
+      const pluginRoot = resolve(PLUGINS_ROOT, definition.pluginDirectory);
       const manifest = JSON.parse(await readFile(join(pluginRoot, definition.pluginManifest), "utf8"));
       if (manifest.name !== PLUGIN_NAME || typeof manifest.version !== "string" || !manifest.version) {
         throw new Error("plugin identity is invalid");
@@ -192,7 +192,7 @@ async function sharedBundleCheck(registry = HARNESS_REGISTRY) {
       const source = await readFile(join(sourceRoot, filename), "utf8");
       digest.update(filename).update("\0").update(source).update("\0");
       for (const plugin of registry.list().map((definition) => definition.pluginDirectory)) {
-        const generated = await readFile(join(PLUGINS_ROOT, plugin, "scripts", "shared", filename), "utf8");
+        const generated = await readFile(join(resolve(PLUGINS_ROOT, plugin), "scripts", "shared", filename), "utf8");
         if (generated !== GENERATED_HEADER + source) throw new Error(`${plugin}/${filename} is stale`);
       }
     }

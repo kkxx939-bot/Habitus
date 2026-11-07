@@ -53,7 +53,7 @@ function withoutFilename(item) {
 
 export async function enqueueDelta(root, draft) {
   const dir = directory(root, draft.host, draft.nativeSessionId);
-  await makePrivateDirectory(dir);
+  await makePrivateDirectory(dir, root);
   const deliveryId = createHash("sha256").update(stable(semanticDraft(draft))).digest("hex");
   const filename = `${cursorOrder(draft.transcriptStartCursor)}-${cursorOrder(draft.transcriptEndCursor)}-${deliveryId}.json`;
   const path = join(dir, filename);

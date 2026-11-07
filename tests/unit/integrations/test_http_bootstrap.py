@@ -93,7 +93,8 @@ def test_doctor_subcommand_uses_the_same_config_and_never_builds_runtime(
     local_cli.main(["doctor", "--config", "/tmp/doctor.yaml", "--json", "--skip-port"])
 
     values = doctor.call_args.kwargs["environ"]
-    assert values["HABITUS_CONFIG_FILE"] == "/tmp/doctor.yaml"
+    # --config 按绝对路径传下去（Windows 上 /tmp/... 落到当前盘）
+    assert values["HABITUS_CONFIG_FILE"] == str(Path("/tmp/doctor.yaml").absolute())
     doctor.assert_called_once_with(
         environ=values,
         check_port=False,

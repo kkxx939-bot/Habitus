@@ -131,12 +131,14 @@ test("the home directory is never a marketplace root, even when it is empty", as
   const { directory, lifecycle } = await setup(t);
   const home = join(directory, "empty-home");
   await mkdir(home);
-  const previous = process.env.HOME;
-  process.env.HOME = home;  // os.homedir() 读的是它
+  // os.homedir() 读的是它：POSIX 是 HOME，Windows 是 USERPROFILE
+  const variable = process.platform === "win32" ? "USERPROFILE" : "HOME";
+  const previous = process.env[variable];
+  process.env[variable] = home;
   try {
     await assert.rejects(lifecycle({ action: "install", harnesses: [], root: home }), /dedicated child directory/);
   } finally {
-    process.env.HOME = previous;
+    process.env[variable] = previous;
   }
   assert.deepEqual(await readdir(home), []);
 });
@@ -215,7 +217,8 @@ test("a present harness whose command is not on PATH is skipped with the reason;
   assert.equal(byId.opencode.installed, true);
   assert.equal(byId.pi.installed, true);
   assert.equal(byId.dsh.installed, false);
-  assert.equal(byId.dsh.skipped, "本机有 ~/.dsh 但 PATH 上没有 dsh 命令");
+  // 路径按本平台分隔符显示（Windows 上是 ~\\.dsh）
+  assert.equal(byId.dsh.skipped, `本机有 ${join("~", ".dsh")} 但 PATH 上没有 dsh 命令`);
   await assert.rejects(readFile(patchFilePath(HARNESS_REGISTRY.resolve("dsh"), env), "utf8"), /ENOENT/);
   // 点名要装 dsh 仍然报错
   await assert.rejects(

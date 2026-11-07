@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -431,7 +432,7 @@ def test_paging_resumes_from_the_cursor_day_instead_of_walking_from_the_start(tm
     original = tree._markdown_names
 
     def counting(directory):  # type: ignore[no-untyped-def]
-        listed.append(str(directory))
+        listed.append(Path(directory).as_posix())
         return original(directory)
 
     tree._markdown_names = counting  # type: ignore[method-assign]

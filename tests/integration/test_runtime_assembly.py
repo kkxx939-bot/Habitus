@@ -47,6 +47,7 @@ from habitus.runtime import (
 from tests.helpers import BASE_TIME
 from tests.lock_store import ProcessLocalLockStore
 from tests.model_helpers import prepare_chat_request
+from tests.platform_helpers import configured_storage_root
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
@@ -286,7 +287,8 @@ def test_assembly_resolves_each_provider_and_database_credential_by_reference(tm
         {"access_key": "vector-access", "secret_key": "vector-secret"},
     ]
     # 两个 Collection 都拿到存储根下同一个 vector/ 目录，各自按 Collection 名落文件
-    assert vector_roots == [config.storage_root / "vector"] * 2 == [tmp_path / "data" / "vector"] * 2
+    expected_vector_root = configured_storage_root(tmp_path / "data") / "vector"
+    assert vector_roots == [config.storage_root / "vector"] * 2 == [expected_vector_root] * 2
 
 
 def test_assembly_wires_one_shared_chain_without_touching_storage(tmp_path: Path) -> None:
