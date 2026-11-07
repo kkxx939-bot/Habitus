@@ -184,7 +184,7 @@ def _same_chance(draft: Draft, rows: Sequence[Seen], known_instances: Callable[[
     for known in sorted(set(known_instances(account_key(draft.kind_token, draft.source, draft.trigger)))):
         try:
             moment = datetime.fromisoformat(known).astimezone(UTC)
-        except ValueError:
+        except ValueError:  # 不是时刻的实例不可能落在这一行的时段里，不是同一次机会；跳过不丢数据
             continue
         if known != draft.trigger_instance and begin <= moment <= end:
             return replace(draft, trigger_instance=known)

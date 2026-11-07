@@ -78,7 +78,7 @@ def _make_directory(path: Path) -> bool:
 def _try_restrict_directory(path: Path) -> None:
     try:
         restrict_directory_to_owner(path)
-    except OSError:
+    except OSError:  # 尽力收紧：非 NTFS 卷（FAT、部分网络盘）设不了 ACL，硬抛会让这类盘完全不能用；POSIX 侧收不紧即拒写
         pass
 
 

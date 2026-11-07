@@ -71,6 +71,16 @@ def _open_boundary_directory(boundary: Path, *, create: bool) -> int:
         raise
 
 
+def _restrict_to_owner(descriptor: int) -> None:
+    """存储根与途经目录收紧到 0700（存储根归 Habitus 独占）；收不紧（目录不归本用户、文件系统拒绝改权限）就拒绝写入，
+    不带着组或其他人可读的权限继续写——存储目录的权限没有别处再查。"""
+
+    try:
+        os.fchmod(descriptor, 0o700)
+    except OSError as exc:
+        raise DurablePathIntegrityError("artifact directory cannot be restricted to its owner") from exc
+
+
 def _open_control_parent(
     path: Path,
     artifact_root: str | Path,
@@ -104,10 +114,7 @@ def _open_control_parent(
         raise DurablePathIntegrityError("artifact root is not a safe directory") from exc
     try:
         if restrict_existing_directories:
-            try:
-                os.fchmod(directory_descriptor, 0o700)
-            except OSError:
-                pass
+            _restrict_to_owner(directory_descriptor)
         for part in relative_parent.parts:
             try:
                 os.mkdir(part, 0o700, dir_fd=directory_descriptor)
@@ -123,10 +130,7 @@ def _open_control_parent(
             os.close(directory_descriptor)
             directory_descriptor = child
             if restrict_existing_directories:
-                try:
-                    os.fchmod(directory_descriptor, 0o700)
-                except OSError:
-                    pass
+                _restrict_to_owner(directory_descriptor)
         return directory_descriptor
     except BaseException:
         os.close(directory_descriptor)

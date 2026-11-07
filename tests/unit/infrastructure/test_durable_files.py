@@ -143,3 +143,19 @@ def test_read_rejects_artifact_root_ancestor_replaced_after_validation(
 
     with pytest.raises(DurablePathIntegrityError):
         read_regular_bytes(target, artifact_root=root, max_bytes=64)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 侧用 fchmod 收紧；Windows 侧按 ACL 尽力收紧，见 windows_file")
+def test_a_storage_directory_that_cannot_be_restricted_refuses_the_write(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """存储根与途经目录收不紧到 0700（目录不归本用户等）就拒写，不带着宽权限继续（W16 ``except: pass`` 逐条判）。"""
+
+    def refuse(descriptor: int, mode: int) -> None:
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr(atomic_file_module.os, "fchmod", refuse)
+    target = tmp_path / "root" / "nested" / "file"
+    with pytest.raises(DurablePathIntegrityError, match="cannot be restricted to its owner"):
+        atomic_replace_bytes(target, b"x", artifact_root=tmp_path / "root")
+    assert not target.exists()
+    atomic_replace_bytes(target, b"x", artifact_root=tmp_path / "root", restrict_existing_directories=False)
+    assert target.read_bytes() == b"x"  # 明说不收紧已有目录的调用照常写（新建目录仍以 0700 创建）

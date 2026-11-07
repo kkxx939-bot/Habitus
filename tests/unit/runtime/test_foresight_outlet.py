@@ -821,3 +821,32 @@ def test_a_reminder_he_did_before_being_asked_shows_as_happened(tmp_path) -> Non
     ledger.record_delivery(item.day, Delivery(item.expectation_id, ASKED + timedelta(minutes=15), 1, False, "已发生", 0.0))
     (row,) = reminder_day(ledger, run, FORMED.date()).reminders
     assert row.stage == "已发生"
+
+
+def test_an_answer_whose_asked_record_is_unreadable_is_reported_not_silently_dropped(tmp_path) -> None:
+    """问过的记录坏了（读不出日子）：这条作答写不回去，但要留 ``outlet_reply`` 失败信号，不静默丢（W16 ``except: pass`` 逐条判）。"""
+
+    run, ledger, recorder = outlet(tmp_path)
+    item = expectation()
+    awaiting(ledger, item)
+    now = ASKED + timedelta(minutes=10)
+    run.publish([request(item)], now=now)
+    run.claim("codex", SESSION, now, 3)
+    arguments = json.dumps({"questions": [{"title": TEXT, "options": list(OPTIONS)}]}, ensure_ascii=False)
+    asked_at = now + timedelta(minutes=1)
+    call = HostMessage(2, asked_at, "tool_call", arguments, tool_name="request_user_input_async", tool_call_id="call_a1")
+    result = HostMessage(
+        3, asked_at, "tool_result", '{"accepted":true}', tool_name="request_user_input_async", tool_call_id="call_a1"
+    )
+    run.observe(SESSION, (HostMessage(1, now + timedelta(seconds=2), "prompt", "帮我看看"), call, result), host="codex")
+    key = OutletStore.asked_key("call_a1#0")
+    path = tmp_path / "ledger" / "outlet" / "asked" / f"{key}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["day"] = "不是日期"
+    path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    reply = {"questionItemId": json.dumps(["request_user_input_async", "call_a1", 0]), "question": TEXT, "answer": "现在就做"}
+    answer = f"{REPLY_TAG}\n{json.dumps([reply], ensure_ascii=False)}\n</send_user_message_question_reply>\n"
+    report = run.observe(SESSION, (HostMessage(5, asked_at + timedelta(minutes=6), "prompt", answer),), host="codex")
+    assert report.responded == 0 and ledger.responses_on(item.day) == ()
+    (event,) = [found for found in recorder.events if found.operation == "outlet_reply"]
+    assert event.attributes == {"session": SESSION, "error": "asked_unreadable"}

@@ -577,7 +577,8 @@ class ReminderOutlet:
                 try:
                     day = date.fromisoformat(str(raw["day"]))
                     request_id = str(raw["request_id"])
-                except (KeyError, ValueError):
+                except (KeyError, ValueError):  # 问过的记录读不懂：这条作答写不回去（记录已删），留观测信号
+                    self._observe(ObservationStatus.FAILURE, "reply", {"session": session, "error": "asked_unreadable"})
                     continue
                 if self._write_response(day, Response(request_id, item.occurred_at, polarity, reply.call_id)):
                     written += 1
