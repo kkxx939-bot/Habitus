@@ -59,6 +59,9 @@ def shipped(path: str, roots: list[str], excluded: list[str]) -> bool:
 
 
 def main() -> None:
+    # 结果里有中文：Windows 上 stdout/stderr 接管道时默认是 cp1252，打印就会 UnicodeEncodeError
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
     if len(sys.argv) > 1:
         wheel_path = Path(sys.argv[1])
     else:

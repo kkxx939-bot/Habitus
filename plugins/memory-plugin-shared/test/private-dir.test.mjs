@@ -16,20 +16,20 @@ async function root(t) {
   return directory;
 }
 
-test("on Windows the root is restricted when this call created it (or its parents); what is created below an existing root inherits", async (t) => {
+test("on Windows every directory this call created is restricted when the root is new; what is created below an existing root inherits", async (t) => {
   const base = await root(t);
   const restricted = [];
-  const options = { platform: "win32", restrict: async (path) => { restricted.push(path); } };
+  const options = { platform: "win32", restrict: async (paths) => { restricted.push(paths); } };
   const state = join(base, "home", "state");
-  // 根连同上级一起新建：收新建出来的最上层那一级
+  // 根连同上级一起新建：这次建出来的每一级，自上而下
   await makePrivateDirectory(join(state, "sessions", "codex"), state, options);
-  assert.deepEqual(restricted, [join(base, "home")]);
+  assert.deepEqual(restricted, [[join(base, "home"), state, join(state, "sessions"), join(state, "sessions", "codex")]]);
   // 根已在、在它下面新建（每个会话一个 outbox 目录）：随根继承，不再收
   await makePrivateDirectory(join(state, "outbox", "codex", "s1"), state, options);
   assert.equal(restricted.length, 1);
   // 只给了路径（根就是它自己）：新建就收
   await makePrivateDirectory(join(base, "marketplace-parent"), undefined, options);
-  assert.deepEqual(restricted.at(-1), join(base, "marketplace-parent"));
+  assert.deepEqual(restricted.at(-1), [join(base, "marketplace-parent")]);
   // 已存在的根：不碰（用户事先建好的目录不改它的 DACL）
   await mkdir(join(base, "mine"));
   await makePrivateDirectory(join(base, "mine"), undefined, options);
@@ -76,16 +76,22 @@ test(
     const base = await root(t);
     const created = join(base, "张三 李四");
     const top = join(created, "agent-plugin");
-    await makePrivateDirectory(join(top, "sessions"), top);
-    await writeFile(join(top, "sessions", "state.json"), "{}\n");
-    // 新建的最上层：禁继承，只有一条本人完全控制
-    const head = accessRules(created);
-    assert.equal(head.protected, true, JSON.stringify(head));
-    assert.deepEqual(head.rules, [`${head.me}|False|FullControl|Allow`], JSON.stringify(head));
-    // 其下的目录与文件（含建根时一并建的中间级）：只有继承来的那一条
-    for (const path of [top, join(top, "sessions"), join(top, "sessions", "state.json")]) {
-      const below = accessRules(path);
-      assert.deepEqual(below.rules, [`${below.me}|True|FullControl|Allow`], `${path}: ${JSON.stringify(below)}`);
+    const sessions = join(top, "sessions");
+    await makePrivateDirectory(sessions, top);
+    // 插件写文件的方式（mode 0o600）；根已在之后再建的目录（每个会话一个 outbox 目录）
+    await writeFile(join(sessions, "state.json"), "{}\n", { mode: 0o600 });
+    await makePrivateDirectory(join(top, "outbox", "s1"), top);
+    await writeFile(join(top, "outbox", "s1", "item.json"), "{}\n", { mode: 0o600 });
+    // 这次新建的每一级：禁继承，只有一条本人完全控制
+    for (const path of [created, top, sessions]) {
+      const acl = accessRules(path);
+      assert.equal(acl.protected, true, `${path}: ${JSON.stringify(acl)}`);
+      assert.deepEqual(acl.rules, [`${acl.me}|False|FullControl|Allow`], `${path}: ${JSON.stringify(acl)}`);
+    }
+    // 之后在里面建的文件与目录：只有继承来的本人那一条
+    for (const path of [join(sessions, "state.json"), join(top, "outbox"), join(top, "outbox", "s1"), join(top, "outbox", "s1", "item.json")]) {
+      const acl = accessRules(path);
+      assert.deepEqual(acl.rules, [`${acl.me}|True|FullControl|Allow`], `${path}: ${JSON.stringify(acl)}`);
     }
   },
 );

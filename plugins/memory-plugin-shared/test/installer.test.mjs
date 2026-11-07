@@ -9,7 +9,11 @@ import { formatError, main } from "../../bin/habitus.mjs";
 import { HARNESS_REGISTRY, createHarnessRegistry } from "../../harnesses.mjs";
 import { atStep, dedicatedRoot, executePluginLifecycle, sourceDigest } from "../../install-memory-plugin.mjs";
 import { fileEntryPath, patchBlock, patchFilePath } from "../../registrations.mjs";
-import { allowWritesSync, denyWritesSync } from "./support/read-only.mjs";
+import { DENIAL_SKIP_REASON, allowWritesSync, denyWritesSync, writeDenialTakesEffect } from "./support/read-only.mjs";
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 function sink() {
   const chunks = [];
@@ -223,12 +227,12 @@ test("a present harness whose command is not on PATH is skipped with the reason;
   // 点名要装 dsh 仍然报错
   await assert.rejects(
     executePluginLifecycle({ action: "install", harnesses: ["dsh"], root }, { runner: NO_COMMANDS, env }),
-    /dsh CLI is not installed: 本机有 ~\/\.dsh 但 PATH 上没有 dsh 命令/,
+    new RegExp(`dsh CLI is not installed: 本机有 ${escapeRegExp(join("~", ".dsh"))} 但 PATH 上没有 dsh 命令`),
   );
   const out = sink();
   const lifecycle = (options, context) => executePluginLifecycle(options, { ...context, runner: NO_COMMANDS });
   assert.equal(await main(["plugin", "install", "--root", root], { stdout: out, stderr: sink(), env, lifecycle }), 0);
-  assert.match(out.text(), /dsh +跳过：本机有 ~\/\.dsh 但 PATH 上没有 dsh 命令/);
+  assert.match(out.text(), new RegExp(`dsh +跳过：本机有 ${escapeRegExp(join("~", ".dsh"))} 但 PATH 上没有 dsh 命令`));
 });
 
 test("habitus harnesses, plugin status and the installer agree on which harnesses are present", async (t) => {
@@ -460,6 +464,7 @@ test("a failed registration names the harness and the step without changing the 
 });
 
 test("a registration whose rollback also fails reports the harness left behind", async (t) => {
+  if (!writeDenialTakesEffect()) { t.skip(DENIAL_SKIP_REASON); return; }
   const { directory, parent, env } = await setup(t);
   const source = await fakeSource(join(directory, "again"));
   const registry = createHarnessRegistry([HARNESS_REGISTRY.resolve("codex"), HARNESS_REGISTRY.resolve("opencode")]);
@@ -510,6 +515,7 @@ test("a plain usage error stays one line without the --verbose hint", async () =
 });
 
 test("a plugin copy that cannot be rolled back keeps the original error, still restores registrations, and is reported", async (t) => {
+  if (!writeDenialTakesEffect()) { t.skip(DENIAL_SKIP_REASON); return; }
   const { parent, lifecycle } = await setup(t);
   const root = join(parent, "marketplace");
   const previous = join(parent, "previous-marketplace");
@@ -541,6 +547,7 @@ test("a plugin copy that cannot be rolled back keeps the original error, still r
 });
 
 test("a remove that cannot delete the plugin copy names the step", async (t) => {
+  if (!writeDenialTakesEffect()) { t.skip(DENIAL_SKIP_REASON); return; }
   const { parent, lifecycle } = await setup(t);
   const root = join(parent, "marketplace");
   await lifecycle({ action: "install", harnesses: [], root });
