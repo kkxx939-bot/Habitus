@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from math import isfinite
 from time import monotonic, sleep
 
-from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
+from habitus.foundation.observability import (
+    NullObserver,
+    ObservationStatus,
+    Observer,
+    record_observation,
+)
 from habitus.infrastructure.store.contracts.lock import LockStore, LockToken
 
 
@@ -227,16 +232,4 @@ def _observe(
     attributes: dict[str, str] = {}
     if error_type is not None:
         attributes["error_type"] = error_type
-    try:
-        observer.record(
-            ObservationEvent(
-                category="lock",
-                operation=operation,
-                status=status,
-                duration_seconds=max(0.0, monotonic() - started),
-                attributes=attributes,
-            )
-        )
-    except Exception:
-        # 观测只是旁路：锁事件记不下来不能影响锁本身。
-        pass
+    record_observation(observer, "lock", operation, status, started=started, attributes=attributes)

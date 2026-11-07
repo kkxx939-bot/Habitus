@@ -65,7 +65,12 @@ from habitus.foresight.ledger import (
 from habitus.foresight.opportunities import OpportunityTable
 from habitus.foresight.units import UNIT, UNIT_CITE
 from habitus.foundation.lifecycle import covers
-from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
+from habitus.foundation.observability import (
+    NullObserver,
+    ObservationStatus,
+    Observer,
+    record_observation,
+)
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_opportunities import OpportunityStore
@@ -660,18 +665,7 @@ class SettlementStage:
     def _observe(
         self, status: ObservationStatus, attributes: dict[str, str | int | float | bool], started: float
     ) -> None:
-        try:
-            self.observer.record(
-                ObservationEvent(
-                    category="foresight",
-                    operation="settlement",
-                    status=status,
-                    duration_seconds=max(0.0, time.monotonic() - started),
-                    attributes=attributes,
-                )
-            )
-        except Exception:  # noqa: BLE001 - 观测不许影响结算
-            pass
+        record_observation(self.observer, "foresight", "settlement", status, started=started, attributes=attributes)
 
 
 #: 结算之后才有的改判（后补）：重结不盖它们。

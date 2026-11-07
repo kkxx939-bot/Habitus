@@ -13,11 +13,11 @@ from uuid import uuid4
 from habitus.config import WorkerConfig
 from habitus.foundation.observability import (
     NullObserver,
-    ObservationEvent,
     ObservationStatus,
     Observer,
     SpanController,
     bind_observation_context,
+    record_observation,
 )
 from habitus.memory.workflow import (
     MemoryJob,
@@ -353,19 +353,7 @@ class MemoryWorker:
         *,
         started: float | None = None,
     ) -> None:
-        try:
-            self.observer.record(
-                ObservationEvent(
-                    category="workflow",
-                    operation=operation,
-                    status=status,
-                    duration_seconds=(0.0 if started is None else max(0.0, time.monotonic() - started)),
-                    attributes=attributes,
-                )
-            )
-        except Exception:  # noqa: BLE001 - 观测失败不许影响 Job 执行
-            # 观测只是旁路：记录失败不改变 Job 的结局
-            pass
+        record_observation(self.observer, "workflow", operation, status, started=started, attributes=attributes)
 
 
 class _NullSpan:

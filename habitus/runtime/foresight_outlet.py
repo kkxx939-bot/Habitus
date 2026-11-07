@@ -32,7 +32,12 @@ from typing import Any, Protocol
 
 from habitus.foresight.errors import ForesightError
 from habitus.foresight.ledger import SAID_DONE, SPOKEN, Delivery, Response
-from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
+from habitus.foundation.observability import (
+    NullObserver,
+    ObservationStatus,
+    Observer,
+    record_observation,
+)
 from habitus.pre.conversation import ConversationAdapterRegistry, QuestionTool, parse_question_replies
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_outlet_store import OutletStore
@@ -643,20 +648,13 @@ class ReminderOutlet:
         self.store.write_open(rows)
 
     def _observe(self, status: ObservationStatus, operation: str, attributes: Mapping[str, Any]) -> None:
-        try:
-            self.observer.record(
-                ObservationEvent(
-                    category="foresight",
-                    operation=f"outlet_{operation}",
-                    status=status,
-                    duration_seconds=0.0,
-                    attributes={
-                        key: value for key, value in attributes.items() if isinstance(value, str | int | float | bool)
-                    },
-                )
-            )
-        except Exception:  # noqa: BLE001 - 观测不许影响出口
-            pass
+        record_observation(
+            self.observer,
+            "foresight",
+            f"outlet_{operation}",
+            status,
+            attributes={key: value for key, value in attributes.items() if isinstance(value, str | int | float | bool)},
+        )
 
 
 # ── 认提问与作答的纯函数 ──────────────────────────────────────────────────────

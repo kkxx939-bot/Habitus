@@ -27,6 +27,7 @@ from habitus.foundation.observability import (
     ObservationEvent,
     ObservationStatus,
     bind_observation_context,
+    record_observation,
 )
 from habitus.infrastructure.observability import AuditRecord, ObservabilitySnapshot
 from habitus.infrastructure.store.contracts import LockStoreSnapshot
@@ -1102,19 +1103,7 @@ class Runtime:
         observer = self.components.infrastructure.observer
         if observer is None:
             return
-        try:
-            observer.record(
-                ObservationEvent(
-                    category=category,
-                    operation=operation,
-                    status=status,
-                    duration_seconds=max(0.0, time.monotonic() - started),
-                    attributes=attributes,
-                )
-            )
-        except Exception:  # noqa: BLE001 - 观测失败不许影响 Runtime 操作
-            # 观测只是旁路：记录失败不改变操作结果
-            pass
+        record_observation(observer, category, operation, status, started=started, attributes=attributes)
 
 
 __all__ = [

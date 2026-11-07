@@ -8,14 +8,13 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from contextlib import suppress
 
 from habitus.foundation.observability import (
     NullObserver,
-    ObservationEvent,
     ObservationStatus,
     Observer,
+    record_observation,
 )
 
 
@@ -84,18 +83,9 @@ class ResidentWorker:
         *,
         started: float | None = None,
     ) -> None:
-        try:
-            self.observer.record(
-                ObservationEvent(
-                    category=self._observation_category,
-                    operation=operation,
-                    status=status,
-                    duration_seconds=(0.0 if started is None else max(0.0, time.monotonic() - started)),
-                    attributes=attributes,
-                )
-            )
-        except Exception:  # noqa: BLE001 - 观测失败不许影响业务循环
-            pass
+        record_observation(
+            self.observer, self._observation_category, operation, status, started=started, attributes=attributes
+        )
 
     async def _run_loop(self) -> None:  # pragma: no cover - 子类实现
         raise NotImplementedError

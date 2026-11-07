@@ -9,9 +9,10 @@ import sqlite3
 import threading
 from collections.abc import Callable
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
+from habitus.foundation.timestamps import format_utc_z, parse_utc_z, require_aware_utc
 from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.filesystem import ensure_owner_directory, restrict_file_to_owner
 from habitus.memory.recall.state import (
@@ -533,9 +534,7 @@ class SQLiteMemoryRecallLifecycleStore:
 
     @staticmethod
     def _timestamp(value: datetime) -> datetime:
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("memory recall lifecycle timestamp must include a timezone")
-        return value.astimezone(UTC)
+        return require_aware_utc(value, "memory recall lifecycle timestamp must include a timezone")
 
     @classmethod
     def _optional_timestamp(cls, value: datetime | None) -> str | None:
@@ -543,7 +542,7 @@ class SQLiteMemoryRecallLifecycleStore:
 
     @staticmethod
     def _format_timestamp(value: datetime) -> str:
-        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        return format_utc_z(value)
 
     @classmethod
     def _parse_optional_timestamp(cls, value: object) -> datetime | None:
@@ -551,12 +550,11 @@ class SQLiteMemoryRecallLifecycleStore:
 
     @staticmethod
     def _parse_timestamp(value: object) -> datetime:
-        if not isinstance(value, str) or not value:
-            raise ValueError("memory recall lifecycle stored timestamp is invalid")
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            raise ValueError("memory recall lifecycle stored timestamp lacks timezone")
-        return parsed.astimezone(UTC)
+        return parse_utc_z(
+            value,
+            invalid="memory recall lifecycle stored timestamp is invalid",
+            naive="memory recall lifecycle stored timestamp lacks timezone",
+        )
 
 
 __all__ = ["SQLiteMemoryRecallLifecycleStore"]

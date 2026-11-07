@@ -6,10 +6,11 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 from habitus.foundation.integrity import canonical_json, text_digest
+from habitus.foundation.timestamps import format_utc_z, parse_utc_z, require_aware_utc
 from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.filesystem import (
     atomic_replace_bytes,
@@ -318,19 +319,17 @@ class MemoryRecoveryStore:
 
 
 def _timestamp(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("memory recovery timestamp must include a timezone")
-    return value.astimezone(UTC)
+    return require_aware_utc(value, "memory recovery timestamp must include a timezone")
 
 
 def _format_timestamp(value: datetime) -> str:
-    return _timestamp(value).isoformat().replace("+00:00", "Z")
+    return format_utc_z(_timestamp(value))
 
 
 def _parse_timestamp(value: object) -> datetime:
-    if not isinstance(value, str) or not value:
-        raise ValueError("memory recovery timestamp is invalid")
-    return _timestamp(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    return parse_utc_z(
+        value, invalid="memory recovery timestamp is invalid", naive="memory recovery timestamp must include a timezone"
+    )
 
 
 def _sha256(value: object) -> bool:

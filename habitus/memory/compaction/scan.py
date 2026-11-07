@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from habitus.foundation.integrity import canonical_json
 from habitus.foundation.lifecycle import BackoffPolicy
+from habitus.foundation.timestamps import format_utc_z, parse_utc_z, require_aware_utc
 from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.filesystem import atomic_replace_bytes, read_regular_bytes
@@ -350,19 +351,19 @@ def _decode_compaction_keep(value: object) -> MemoryCompactionKeep:
 
 
 def _timestamp(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("memory lifecycle scan timestamp must be timezone-aware")
-    return value.astimezone(UTC)
+    return require_aware_utc(value, "memory lifecycle scan timestamp must be timezone-aware")
 
 
 def _format_timestamp(value: datetime) -> str:
-    return _timestamp(value).isoformat().replace("+00:00", "Z")
+    return format_utc_z(_timestamp(value))
 
 
 def _parse_timestamp(value: object) -> datetime:
-    if not isinstance(value, str) or not value:
-        raise ValueError("memory lifecycle scan timestamp is invalid")
-    return _timestamp(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    return parse_utc_z(
+        value,
+        invalid="memory lifecycle scan timestamp is invalid",
+        naive="memory lifecycle scan timestamp must be timezone-aware",
+    )
 
 
 __all__ = [

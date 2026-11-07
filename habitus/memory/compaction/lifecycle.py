@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from habitus.foundation.timestamps import require_aware_utc
 from habitus.memory.compaction.commit import MemoryLifecycleCommitter
 from habitus.memory.compaction.l2_fields import MemoryFieldCompactor
 from habitus.memory.compaction.operation import (
@@ -769,9 +770,7 @@ class MemoryLifecycleManager:
 
 
 def _timestamp(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("memory lifecycle timestamp must include a timezone")
-    return value.astimezone(UTC)
+    return require_aware_utc(value, "memory lifecycle timestamp must include a timezone")
 
 
 def _compaction_keep(

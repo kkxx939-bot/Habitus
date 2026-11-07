@@ -200,154 +200,14 @@ class HabitusConfig:
 
     def _validate_cross_domain_limits(self) -> None:
         self._validate_credential_references()
-        # 语义树从行为树派生（每封口日一次映射），行为侧没开就没有输入。这是**配置自相矛盾**（我们自己的两组配置
-        # 互相打架），不是现实世界的形状，所以硬拒：放过去的下场是启动一切正常、什么都没发生、无处可查。
-        if self.scene.enabled and not self.behavior.enabled:
-            raise ConfigError(
-                "config.scene is enabled but config.behavior.primary_subject is empty; "
-                "the semantic layer reads sealed days of the behaviour tree and has no input without it"
-            )
-        # 预测层的机会表、复现与关系全从语义树那一晚来，结算也是整晚那一趟的第一步（裁定 59：预测树删了）。
-        # 语义树没开就没有整晚、没有机会表——同一类配置自相矛盾，硬拒。
-        if self.foresight.enabled and not self.scene.enabled:
-            raise ConfigError(
-                "config.foresight is enabled but config.scene is not; "
-                "the foresight layer reads its opportunity table from the semantic layer's nightly run "
-                "and has nothing to build expectations from without it"
-            )
-        memory = self.memory
-        models = self.models
-        workflow = self.workflow
-        conversation = self.conversation
-        segmentation = conversation.segmentation
-
-        if memory.document.max_encoded_bytes > memory.snapshot.max_item_bytes:
-            raise ConfigError("memory.document.max_encoded_bytes cannot exceed memory.snapshot.max_item_bytes")
-        if max(segmentation.max_live_bytes, segmentation.max_segment_bytes) > conversation.journal.max_file_bytes:
-            raise ConfigError("conversation segmentation byte limits cannot exceed conversation.journal.max_file_bytes")
-        if (
-            max(
-                memory.vector_index.max_direct_entries,
-                memory.semantic.max_direct_entries,
-            )
-            + 2
-            > memory.tree.max_children_per_directory
-        ):
-            raise ConfigError("memory direct-entry limits cannot exceed memory.tree.max_children_per_directory")
-        if memory.transaction_journal.max_record_bytes < memory.snapshot.max_total_bytes * 2:
-            raise ConfigError(
-                "memory.transaction_journal.max_record_bytes must be at least twice memory.snapshot.max_total_bytes"
-            )
-        initial_items = (
-            _FIXED_RETRIEVAL_DOCUMENTS + memory.editor_retrieval.max_tool_uris + memory.editor_retrieval.search_limit
-        )
-        if initial_items > memory.snapshot.max_items:
-            raise ConfigError("memory.editor_retrieval can exceed memory.snapshot.max_items")
-        if initial_items > memory.extraction.max_old_memory_items:
-            raise ConfigError("memory.editor_retrieval can exceed memory.extraction.max_old_memory_items")
-        if memory.search_service.max_limit > memory.snapshot.max_items:
-            raise ConfigError("memory.search_service.max_limit cannot exceed memory.snapshot.max_items")
-        if memory.search_service.max_relation_neighbors_total > memory.snapshot.max_items:
-            raise ConfigError("memory.search_service relation expansion cannot exceed memory.snapshot.max_items")
-        lifecycle_candidate_limit = memory.search_service.max_limit * memory.search_service.candidate_multiplier
-        if memory.recall_lifecycle.enabled and lifecycle_candidate_limit > memory.recall_lifecycle.max_batch_size:
-            raise ConfigError("memory recall lifecycle cannot rank the maximum search candidate batch")
-        if memory.search_service.max_context_chars < memory.document.max_markdown_body_chars + 2_048:
-            raise ConfigError("memory.search_service.max_context_chars cannot fit one maximum-size memory document")
-        planner_context_bound = (
-            memory.search_service.max_query_chars
-            + memory.search_service.max_summary_context_chars
-            + memory.search_service.max_recent_messages * memory.search_service.max_recent_message_chars
-            + memory.search_service.max_target_context_chars
-            + 4_096
-        )
-        if planner_context_bound > memory.search_service.max_planner_context_chars:
-            raise ConfigError("memory.search_service planner inputs can exceed max_planner_context_chars")
-        if memory.search_service.max_recent_messages > segmentation.max_live_messages:
-            raise ConfigError("memory.search_service recent messages cannot exceed the live message bound")
-        if conversation.summary_vector_store.collection == memory.vector_store.collection:
-            raise ConfigError("Memory and Conversation Summary must use different vector collections")
-        summary_candidate_limit = max(
-            conversation.summary_vector_index.min_vector_candidates,
-            memory.search_service.summary_fallback_limit * conversation.summary_vector_index.candidate_multiplier,
-        )
-        if summary_candidate_limit > conversation.summary_vector_index.max_search_hits:
-            raise ConfigError("Summary fallback vector candidates can exceed its index search bound")
-        if (
-            conversation.summary_vector_index.max_records_per_conversation
-            < conversation.summary.max_files_per_conversation * 3
-        ):
-            raise ConfigError("Summary index per-Conversation bound cannot enumerate all three physical stages")
-        if memory.extraction.max_old_memory_items > memory.snapshot.max_items:
-            raise ConfigError("memory.extraction.max_old_memory_items cannot exceed memory.snapshot.max_items")
-        if memory.extraction.max_old_memory_bytes > memory.snapshot.max_total_bytes:
-            raise ConfigError("memory.extraction.max_old_memory_bytes cannot exceed memory.snapshot.max_total_bytes")
-        maximum_extraction_output = max(
-            memory.extraction.grader_max_output_tokens,
-            memory.extraction.candidate_max_output_tokens,
-        )
-        if memory.extraction.max_input_tokens + maximum_extraction_output > models.chat.context_window_tokens:
-            raise ConfigError("memory.extraction input and output budgets exceed models.chat.context_window_tokens")
-        if memory.extraction.max_old_memory_tokens >= memory.extraction.max_input_tokens:
-            raise ConfigError("memory.extraction.max_old_memory_tokens must leave room for Conversation and prompts")
-        if segmentation.max_inline_tool_result_bytes > segmentation.max_segment_bytes:
-            raise ConfigError("conversation.segmentation.max_inline_tool_result_bytes cannot exceed max_segment_bytes")
-        maximum_query_chars = max(
-            memory.search_service.max_query_chars,
-            memory.search_service.max_planned_query_chars,
-            memory.editor_retrieval.max_query_chars,
-            memory.extraction.max_query_chars,
-        )
-        _require_embedding_text_budgets(models.embedding, memory, conversation, maximum_query_chars)
-        maximum_search_request = max(
-            memory.search_service.max_limit * memory.search_service.candidate_multiplier,
-            memory.editor_retrieval.search_limit,
-            memory.extraction.additional_search_limit,
-        )
-        maximum_vector_candidates = max(
-            memory.semantic_search.min_vector_candidates,
-            maximum_search_request * memory.semantic_search.candidate_multiplier,
-        )
-        index_hit_limit = memory.vector_index.max_search_hits
-        if maximum_vector_candidates > index_hit_limit:
-            raise ConfigError("semantic search vector candidates can exceed memory.vector_index.max_search_hits")
-        if (
-            max(
-                memory.semantic_search.directory_candidates,
-                memory.semantic_search.child_candidates,
-            )
-            > index_hit_limit
-        ):
-            raise ConfigError("semantic directory candidates can exceed memory.vector_index.max_search_hits")
-        if memory.semantic.max_direct_entries > memory.vector_index.max_direct_entries:
-            raise ConfigError("memory.semantic.max_direct_entries cannot exceed memory.vector_index.max_direct_entries")
-        if workflow.worker.heartbeat_interval_seconds > workflow.jobs.lease_ttl_seconds / 3:
-            raise ConfigError(
-                "workflow.worker.heartbeat_interval_seconds must be at most one third of the job lease TTL"
-            )
-        if workflow.lifecycle.cleanup_batch_size > workflow.jobs.max_files:
-            raise ConfigError("workflow lifecycle cleanup batch cannot exceed workflow.jobs.max_files")
-        if workflow.lifecycle.cleanup_batch_size > workflow.receipts.max_files:
-            raise ConfigError("workflow lifecycle cleanup batch cannot exceed workflow.receipts.max_files")
-        if conversation.lifecycle.max_conversations_per_cycle > conversation.journal.max_conversation_tree_entries:
-            raise ConfigError("conversation lifecycle batch cannot exceed the Conversation tree enumeration bound")
-        if models.rerank is not None:
-            if memory.semantic_search.max_rerank_candidates > models.rerank.max_documents:
-                raise ConfigError(
-                    "memory.semantic_search.max_rerank_candidates cannot exceed models.rerank.max_documents"
-                )
-            if memory.semantic_search.max_rerank_document_chars > models.rerank.max_document_chars:
-                raise ConfigError(
-                    "memory.semantic_search.max_rerank_document_chars cannot exceed models.rerank.max_document_chars"
-                )
-            if maximum_query_chars > models.rerank.max_query_chars:
-                raise ConfigError("memory query character limits cannot exceed models.rerank.max_query_chars")
-            if conversation.summary_vector_index.max_rerank_candidates > models.rerank.max_documents:
-                raise ConfigError("conversation Summary rerank candidates cannot exceed models.rerank.max_documents")
-            if conversation.summary_vector_index.max_rerank_document_chars > models.rerank.max_document_chars:
-                raise ConfigError("conversation Summary rerank content cannot exceed models.rerank.max_document_chars")
-            if memory.search_service.summary_fallback_limit > conversation.summary_vector_index.max_rerank_candidates:
-                raise ConfigError("Summary fallback limit cannot exceed its rerank candidate bound")
+        # 各组按原顺序依次校验：同时违反几条时先报哪一条不变
+        _require_layer_dependencies(self)
+        _require_storage_bounds(self)
+        _require_search_service_bounds(self)
+        _require_extraction_bounds(self)
+        _require_vector_bounds(self)
+        _require_workflow_bounds(self)
+        _require_rerank_bounds(self)
 
     def _validate_credential_references(self) -> None:
         model_routes = [self.models.chat.route.credential_ref, self.models.embedding.route.credential_ref]
@@ -363,6 +223,185 @@ class HabitusConfig:
         ):
             if reference:
                 self.credentials.resolve(reference)
+
+
+def _require_layer_dependencies(config: HabitusConfig) -> None:
+    # 语义树从行为树派生（每封口日一次映射），行为侧没开就没有输入。这是**配置自相矛盾**（我们自己的两组配置
+    # 互相打架），不是现实世界的形状，所以硬拒：放过去的下场是启动一切正常、什么都没发生、无处可查。
+    if config.scene.enabled and not config.behavior.enabled:
+        raise ConfigError(
+            "config.scene is enabled but config.behavior.primary_subject is empty; "
+            "the semantic layer reads sealed days of the behaviour tree and has no input without it"
+        )
+    # 预测层的机会表、复现与关系全从语义树那一晚来，结算也是整晚那一趟的第一步（裁定 59：预测树删了）。
+    # 语义树没开就没有整晚、没有机会表——同一类配置自相矛盾，硬拒。
+    if config.foresight.enabled and not config.scene.enabled:
+        raise ConfigError(
+            "config.foresight is enabled but config.scene is not; "
+            "the foresight layer reads its opportunity table from the semantic layer's nightly run "
+            "and has nothing to build expectations from without it"
+        )
+
+
+def _require_storage_bounds(config: HabitusConfig) -> None:
+    memory = config.memory
+    conversation = config.conversation
+    segmentation = conversation.segmentation
+    if memory.document.max_encoded_bytes > memory.snapshot.max_item_bytes:
+        raise ConfigError("memory.document.max_encoded_bytes cannot exceed memory.snapshot.max_item_bytes")
+    if max(segmentation.max_live_bytes, segmentation.max_segment_bytes) > conversation.journal.max_file_bytes:
+        raise ConfigError("conversation segmentation byte limits cannot exceed conversation.journal.max_file_bytes")
+    if (
+        max(
+            memory.vector_index.max_direct_entries,
+            memory.semantic.max_direct_entries,
+        )
+        + 2
+        > memory.tree.max_children_per_directory
+    ):
+        raise ConfigError("memory direct-entry limits cannot exceed memory.tree.max_children_per_directory")
+    if memory.transaction_journal.max_record_bytes < memory.snapshot.max_total_bytes * 2:
+        raise ConfigError(
+            "memory.transaction_journal.max_record_bytes must be at least twice memory.snapshot.max_total_bytes"
+        )
+    initial_items = (
+        _FIXED_RETRIEVAL_DOCUMENTS + memory.editor_retrieval.max_tool_uris + memory.editor_retrieval.search_limit
+    )
+    if initial_items > memory.snapshot.max_items:
+        raise ConfigError("memory.editor_retrieval can exceed memory.snapshot.max_items")
+    if initial_items > memory.extraction.max_old_memory_items:
+        raise ConfigError("memory.editor_retrieval can exceed memory.extraction.max_old_memory_items")
+
+
+def _require_search_service_bounds(config: HabitusConfig) -> None:
+    memory = config.memory
+    conversation = config.conversation
+    segmentation = conversation.segmentation
+    if memory.search_service.max_limit > memory.snapshot.max_items:
+        raise ConfigError("memory.search_service.max_limit cannot exceed memory.snapshot.max_items")
+    if memory.search_service.max_relation_neighbors_total > memory.snapshot.max_items:
+        raise ConfigError("memory.search_service relation expansion cannot exceed memory.snapshot.max_items")
+    lifecycle_candidate_limit = memory.search_service.max_limit * memory.search_service.candidate_multiplier
+    if memory.recall_lifecycle.enabled and lifecycle_candidate_limit > memory.recall_lifecycle.max_batch_size:
+        raise ConfigError("memory recall lifecycle cannot rank the maximum search candidate batch")
+    if memory.search_service.max_context_chars < memory.document.max_markdown_body_chars + 2_048:
+        raise ConfigError("memory.search_service.max_context_chars cannot fit one maximum-size memory document")
+    planner_context_bound = (
+        memory.search_service.max_query_chars
+        + memory.search_service.max_summary_context_chars
+        + memory.search_service.max_recent_messages * memory.search_service.max_recent_message_chars
+        + memory.search_service.max_target_context_chars
+        + 4_096
+    )
+    if planner_context_bound > memory.search_service.max_planner_context_chars:
+        raise ConfigError("memory.search_service planner inputs can exceed max_planner_context_chars")
+    if memory.search_service.max_recent_messages > segmentation.max_live_messages:
+        raise ConfigError("memory.search_service recent messages cannot exceed the live message bound")
+    if conversation.summary_vector_store.collection == memory.vector_store.collection:
+        raise ConfigError("Memory and Conversation Summary must use different vector collections")
+    summary_candidate_limit = max(
+        conversation.summary_vector_index.min_vector_candidates,
+        memory.search_service.summary_fallback_limit * conversation.summary_vector_index.candidate_multiplier,
+    )
+    if summary_candidate_limit > conversation.summary_vector_index.max_search_hits:
+        raise ConfigError("Summary fallback vector candidates can exceed its index search bound")
+    if (
+        conversation.summary_vector_index.max_records_per_conversation
+        < conversation.summary.max_files_per_conversation * 3
+    ):
+        raise ConfigError("Summary index per-Conversation bound cannot enumerate all three physical stages")
+
+
+def _require_extraction_bounds(config: HabitusConfig) -> None:
+    memory = config.memory
+    models = config.models
+    segmentation = config.conversation.segmentation
+    if memory.extraction.max_old_memory_items > memory.snapshot.max_items:
+        raise ConfigError("memory.extraction.max_old_memory_items cannot exceed memory.snapshot.max_items")
+    if memory.extraction.max_old_memory_bytes > memory.snapshot.max_total_bytes:
+        raise ConfigError("memory.extraction.max_old_memory_bytes cannot exceed memory.snapshot.max_total_bytes")
+    maximum_extraction_output = max(
+        memory.extraction.grader_max_output_tokens,
+        memory.extraction.candidate_max_output_tokens,
+    )
+    if memory.extraction.max_input_tokens + maximum_extraction_output > models.chat.context_window_tokens:
+        raise ConfigError("memory.extraction input and output budgets exceed models.chat.context_window_tokens")
+    if memory.extraction.max_old_memory_tokens >= memory.extraction.max_input_tokens:
+        raise ConfigError("memory.extraction.max_old_memory_tokens must leave room for Conversation and prompts")
+    if segmentation.max_inline_tool_result_bytes > segmentation.max_segment_bytes:
+        raise ConfigError("conversation.segmentation.max_inline_tool_result_bytes cannot exceed max_segment_bytes")
+
+
+def _maximum_query_chars(memory: MemoryConfig) -> int:
+    return max(
+        memory.search_service.max_query_chars,
+        memory.search_service.max_planned_query_chars,
+        memory.editor_retrieval.max_query_chars,
+        memory.extraction.max_query_chars,
+    )
+
+
+def _require_vector_bounds(config: HabitusConfig) -> None:
+    memory = config.memory
+    maximum_query_chars = _maximum_query_chars(memory)
+    _require_embedding_text_budgets(config.models.embedding, memory, config.conversation, maximum_query_chars)
+    maximum_search_request = max(
+        memory.search_service.max_limit * memory.search_service.candidate_multiplier,
+        memory.editor_retrieval.search_limit,
+        memory.extraction.additional_search_limit,
+    )
+    maximum_vector_candidates = max(
+        memory.semantic_search.min_vector_candidates,
+        maximum_search_request * memory.semantic_search.candidate_multiplier,
+    )
+    index_hit_limit = memory.vector_index.max_search_hits
+    if maximum_vector_candidates > index_hit_limit:
+        raise ConfigError("semantic search vector candidates can exceed memory.vector_index.max_search_hits")
+    if (
+        max(
+            memory.semantic_search.directory_candidates,
+            memory.semantic_search.child_candidates,
+        )
+        > index_hit_limit
+    ):
+        raise ConfigError("semantic directory candidates can exceed memory.vector_index.max_search_hits")
+    if memory.semantic.max_direct_entries > memory.vector_index.max_direct_entries:
+        raise ConfigError("memory.semantic.max_direct_entries cannot exceed memory.vector_index.max_direct_entries")
+
+
+def _require_workflow_bounds(config: HabitusConfig) -> None:
+    workflow = config.workflow
+    conversation = config.conversation
+    if workflow.worker.heartbeat_interval_seconds > workflow.jobs.lease_ttl_seconds / 3:
+        raise ConfigError("workflow.worker.heartbeat_interval_seconds must be at most one third of the job lease TTL")
+    if workflow.lifecycle.cleanup_batch_size > workflow.jobs.max_files:
+        raise ConfigError("workflow lifecycle cleanup batch cannot exceed workflow.jobs.max_files")
+    if workflow.lifecycle.cleanup_batch_size > workflow.receipts.max_files:
+        raise ConfigError("workflow lifecycle cleanup batch cannot exceed workflow.receipts.max_files")
+    if conversation.lifecycle.max_conversations_per_cycle > conversation.journal.max_conversation_tree_entries:
+        raise ConfigError("conversation lifecycle batch cannot exceed the Conversation tree enumeration bound")
+
+
+def _require_rerank_bounds(config: HabitusConfig) -> None:
+    memory = config.memory
+    models = config.models
+    conversation = config.conversation
+    maximum_query_chars = _maximum_query_chars(memory)
+    if models.rerank is not None:
+        if memory.semantic_search.max_rerank_candidates > models.rerank.max_documents:
+            raise ConfigError("memory.semantic_search.max_rerank_candidates cannot exceed models.rerank.max_documents")
+        if memory.semantic_search.max_rerank_document_chars > models.rerank.max_document_chars:
+            raise ConfigError(
+                "memory.semantic_search.max_rerank_document_chars cannot exceed models.rerank.max_document_chars"
+            )
+        if maximum_query_chars > models.rerank.max_query_chars:
+            raise ConfigError("memory query character limits cannot exceed models.rerank.max_query_chars")
+        if conversation.summary_vector_index.max_rerank_candidates > models.rerank.max_documents:
+            raise ConfigError("conversation Summary rerank candidates cannot exceed models.rerank.max_documents")
+        if conversation.summary_vector_index.max_rerank_document_chars > models.rerank.max_document_chars:
+            raise ConfigError("conversation Summary rerank content cannot exceed models.rerank.max_document_chars")
+        if memory.search_service.summary_fallback_limit > conversation.summary_vector_index.max_rerank_candidates:
+            raise ConfigError("Summary fallback limit cannot exceed its rerank candidate bound")
 
 
 __all__ = ["HabitusConfig"]

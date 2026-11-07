@@ -9,9 +9,10 @@ import sqlite3
 import threading
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
+from habitus.foundation.timestamps import format_utc_z, require_aware_utc
 from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.filesystem import ensure_owner_directory, restrict_file_to_owner
 from habitus.memory.conversation.indexing.model import (
@@ -479,13 +480,11 @@ class SQLiteConversationSummaryUseStore:
 
 
 def _timestamp(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("Summary use timestamp must be timezone-aware datetime")
-    return value.astimezone(UTC)
+    return require_aware_utc(value, "Summary use timestamp must be timezone-aware datetime")
 
 
 def _format_timestamp(value: datetime) -> str:
-    return _timestamp(value).isoformat().replace("+00:00", "Z")
+    return format_utc_z(_timestamp(value))
 
 
 # SQLite 表没有 STRICT，读回的列值在构造前确认类型；报错文字与异常类型照抄下游值对象的检查

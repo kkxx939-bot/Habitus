@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from enum import Enum
 
+from habitus.foundation.timestamps import require_aware_utc
 from habitus.memory.document import MemoryDocument
 from habitus.memory.model import MemoryKind
 
@@ -101,9 +102,7 @@ class MemoryIntentionReviewer:
 
 
 def _utc_timestamp(value: datetime, label: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{label} must include a timezone")
-    return value.astimezone(UTC)
+    return require_aware_utc(value, f"{label} must include a timezone")
 
 
 __all__ = [

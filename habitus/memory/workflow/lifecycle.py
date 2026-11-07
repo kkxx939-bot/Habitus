@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from habitus.foundation.timestamps import require_aware_utc
 from habitus.memory.conversation import (
     ConversationAddress,
     ConversationLayout,
@@ -505,9 +506,7 @@ class ConversationLifecycleManager:
 
 
 def _utc_datetime(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("lifecycle now must be timezone-aware")
-    return value.astimezone(UTC)
+    return require_aware_utc(value, "lifecycle now must be timezone-aware")
 
 
 __all__ = [

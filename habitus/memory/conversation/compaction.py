@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from habitus.foundation.ids import canonical_path_identity, same_path_identity
 from habitus.foundation.integrity import canonical_json
+from habitus.foundation.timestamps import require_aware_utc
 from habitus.infrastructure.store.contracts import LeaseGuard
 from habitus.infrastructure.store.filesystem import (
     atomic_create_bytes,
@@ -724,9 +725,7 @@ class ConversationSummaryCompactor:
 
 
 def _utc_datetime(value: datetime, label: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{label} must be timezone-aware")
-    return value.astimezone(UTC)
+    return require_aware_utc(value, f"{label} must be timezone-aware")
 
 
 def _bounded_integer(name: str, value: object, *, minimum: int, maximum: int) -> None:

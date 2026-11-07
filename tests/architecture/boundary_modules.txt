@@ -178,6 +178,8 @@ runtime/nightly_worker.py
 runtime/scene_vocabulary.py
 
 # G6 读回落盘：基础设施
+foundation/decoding.py
+foundation/timestamps.py
 infrastructure/editor/snapshot/reader.py
 infrastructure/lifecycle/capacity.py
 infrastructure/lifecycle/retry.py

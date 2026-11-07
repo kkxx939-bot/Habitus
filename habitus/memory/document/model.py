@@ -4,19 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from types import MappingProxyType
 from typing import Any
 
+from habitus.foundation.timestamps import require_aware_utc
 from habitus.memory.document.link import MemoryStoredLink, normalize_stored_links
 from habitus.memory.model import MemoryAddress, MemoryKind
 from habitus.memory.uri import MemoryURI
 
 
 def _utc_timestamp(value: datetime, field_name: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"memory document {field_name} must include a timezone")
-    return value.astimezone(UTC)
+    return require_aware_utc(value, f"memory document {field_name} must include a timezone")
 
 
 @dataclass(frozen=True)

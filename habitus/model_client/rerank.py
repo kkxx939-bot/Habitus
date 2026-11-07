@@ -10,7 +10,12 @@ import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Protocol
 
-from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
+from habitus.foundation.observability import (
+    NullObserver,
+    ObservationStatus,
+    Observer,
+    record_observation,
+)
 from habitus.model_client.config import RerankModelConfig
 from habitus.model_client.contracts import ModelClientError, ModelResponseError
 from habitus.model_client.retry import normalize_provider_error, retry_delay
@@ -216,19 +221,7 @@ class ObservedReranker:
         attributes = {"provider": self.provider_name, "model": self.model}
         if error_type is not None:
             attributes["error_type"] = error_type
-        try:
-            self.observer.record(
-                ObservationEvent(
-                    category="model",
-                    operation="rerank",
-                    status=status,
-                    duration_seconds=max(0.0, time.monotonic() - started),
-                    attributes=attributes,
-                )
-            )
-        except Exception:
-            # 观测只是旁路：事件记不下来不能影响重排结果。
-            pass
+        record_observation(self.observer, "model", "rerank", status, started=started, attributes=attributes)
 
 
 def _async_rerank_semaphore(limit: int) -> asyncio.Semaphore:

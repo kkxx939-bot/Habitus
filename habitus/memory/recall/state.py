@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Protocol
 
+from habitus.foundation.timestamps import require_aware_utc
 from habitus.memory.model import MemoryKind
 from habitus.memory.uri import MemoryURI, MemoryURINodeType
 
@@ -666,9 +667,7 @@ def _document_uris(
 
 
 def _utc_timestamp(value: datetime, label: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"memory recall lifecycle {label} must include a timezone")
-    return value.astimezone(UTC)
+    return require_aware_utc(value, f"memory recall lifecycle {label} must include a timezone")
 
 
 def _finite_score(value: object, label: str) -> float:

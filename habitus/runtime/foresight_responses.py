@@ -16,7 +16,12 @@ from habitus.behavior.fusion.lanes.session.reminders import PendingReminder, Rem
 from habitus.foresight import ForesightError
 from habitus.foresight.ledger import Delivery, Expectation, Response
 from habitus.foresight.responses import open_reminders
-from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
+from habitus.foundation.observability import (
+    NullObserver,
+    ObservationStatus,
+    Observer,
+    record_observation,
+)
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 
 
@@ -64,18 +69,7 @@ class ReminderResponses:
         self._observe(ObservationStatus.SUCCESS, {"polarity": response.polarity})
 
     def _observe(self, status: ObservationStatus, attributes: dict[str, str | int | float | bool]) -> None:
-        try:
-            self.observer.record(
-                ObservationEvent(
-                    category="foresight",
-                    operation="response",
-                    status=status,
-                    duration_seconds=0.0,
-                    attributes=attributes,
-                )
-            )
-        except Exception:  # noqa: BLE001 - 观测不许影响融合
-            pass
+        record_observation(self.observer, "foresight", "response", status, attributes=attributes)
 
 
 __all__ = ["ReminderResponses"]

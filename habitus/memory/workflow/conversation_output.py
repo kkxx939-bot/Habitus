@@ -20,6 +20,7 @@ from habitus.conversation.source import (
     require_sha256,
     source_timestamp,
 )
+from habitus.foundation.decoding import int_field, optional_text_field, text_field
 from habitus.foundation.integrity import canonical_digest, canonical_json, canonicalize
 from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.filesystem import (
@@ -44,25 +45,7 @@ _OUTPUT_FILE = re.compile(r"^(?P<output_id>[0-9a-f]{64})\.json$")
 _NORMALIZED_MESSAGE = "{} must be non-empty normalized text"
 
 
-# 以下解码助手让磁盘读回的字段在构造前确认类型；报错的异常类型与文字照抄被构造值对象自身的检查
-def _int_field(value: object, message: str) -> int:
-    if not is_int(value):
-        raise ValueError(message)
-    return value
-
-
-def _text_field(value: object, message: str) -> str:
-    if not isinstance(value, str):
-        raise ValueError(message)
-    return value
-
-
-def _optional_text_field(value: object, message: str) -> str | None:
-    if value is not None and not isinstance(value, str):
-        raise ValueError(message)
-    return value
-
-
+# 解码助手（这里与 ``habitus.foundation.decoding``）让磁盘读回的字段在构造前确认类型；报错的异常类型与文字照抄被构造值对象自身的检查
 def _flag_field(value: object, message: str) -> bool:
     if not isinstance(value, bool):
         raise TypeError(message)
@@ -97,9 +80,9 @@ def _append_from_dict(value: object) -> ConversationAppendResult:
         raise ConversationSourceError("memory append status is invalid") from exc
     return ConversationAppendResult(
         status=status,
-        appended_count=_int_field(value["appended_count"], "appended_count must be a non-negative integer"),
+        appended_count=int_field(value["appended_count"], "appended_count must be a non-negative integer"),
         live=None if live is None else ConversationBatch.from_dict(live),
-        next_sequence=_int_field(value["next_sequence"], "next_sequence must be a non-negative integer"),
+        next_sequence=int_field(value["next_sequence"], "next_sequence must be a non-negative integer"),
     )
 
 
@@ -157,24 +140,24 @@ def _job_from_dict(value: object) -> MemoryJob:
         for name in ("lease_expires_at", "next_attempt_at")
     }
     return MemoryJob(
-        memory_sequence=_int_field(value["memory_sequence"], "memory_sequence must be a positive integer"),
-        conversation_id=_text_field(value["conversation_id"], _NORMALIZED_MESSAGE.format("conversation_id")),
+        memory_sequence=int_field(value["memory_sequence"], "memory_sequence must be a positive integer"),
+        conversation_id=text_field(value["conversation_id"], _NORMALIZED_MESSAGE.format("conversation_id")),
         started_on=started_on,
-        segment_id=_text_field(value["segment_id"], _NORMALIZED_MESSAGE.format("segment_id")),
-        source_segment_digest=_text_field(
+        segment_id=text_field(value["segment_id"], _NORMALIZED_MESSAGE.format("segment_id")),
+        source_segment_digest=text_field(
             value["source_segment_digest"], "source_segment_digest must be lowercase SHA-256 text"
         ),
-        transaction_id=_text_field(
+        transaction_id=text_field(
             value["transaction_id"], "transaction_id must be 32 lowercase hexadecimal characters"
         ),
         status=status,
-        attempts=_int_field(value["attempts"], "memory job attempts must be non-negative"),
-        claim_id=_optional_text_field(value["claim_id"], "running memory job requires a claim_id"),
-        claim_generation=_int_field(value["claim_generation"], "memory job claim_generation must be non-negative"),
-        worker_id=_optional_text_field(value["worker_id"], "running memory job requires a normalized worker_id"),
+        attempts=int_field(value["attempts"], "memory job attempts must be non-negative"),
+        claim_id=optional_text_field(value["claim_id"], "running memory job requires a claim_id"),
+        claim_generation=int_field(value["claim_generation"], "memory job claim_generation must be non-negative"),
+        worker_id=optional_text_field(value["worker_id"], "running memory job requires a normalized worker_id"),
         lease_expires_at=optional_times["lease_expires_at"],
         next_attempt_at=optional_times["next_attempt_at"],
-        last_error=_optional_text_field(value["last_error"], "memory job last_error is invalid"),
+        last_error=optional_text_field(value["last_error"], "memory job last_error is invalid"),
         created_at=source_timestamp(value["created_at"], "created_at"),
         updated_at=source_timestamp(value["updated_at"], "updated_at"),
     )
@@ -229,14 +212,14 @@ def _retention_from_dict(value: object) -> ConversationRetentionPlan:
         retained_messages=tuple(ConversationMessage.from_dict(item) for item in retained),
         triggered=_flag_field(value["triggered"], "retention flags must be boolean"),
         flush=_flag_field(value["flush"], "retention flags must be boolean"),
-        pending_tokens=_int_field(value["pending_tokens"], "pending_tokens must be a non-negative integer"),
+        pending_tokens=int_field(value["pending_tokens"], "pending_tokens must be a non-negative integer"),
         budget_exceeded=_flag_field(value["budget_exceeded"], "budget_exceeded must be boolean"),
-        reason=_text_field(value["reason"], "retention reason must be non-empty text"),
-        boundary_kind=_optional_text_field(value["boundary_kind"], "boundary_kind must be non-empty text or None"),
-        embedding_fingerprint=_optional_text_field(
+        reason=text_field(value["reason"], "retention reason must be non-empty text"),
+        boundary_kind=optional_text_field(value["boundary_kind"], "boundary_kind must be non-empty text or None"),
+        embedding_fingerprint=optional_text_field(
             value["embedding_fingerprint"], "embedding_fingerprint must be non-empty text or None"
         ),
-        chunker_version=_text_field(value["chunker_version"], "chunker_version must be non-empty text"),
+        chunker_version=text_field(value["chunker_version"], "chunker_version must be non-empty text"),
     )
 
 

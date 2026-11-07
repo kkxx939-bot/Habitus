@@ -6,10 +6,12 @@ import dataclasses
 import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from enum import Enum
 
+from habitus.foundation.decoding import int_field, text_field
 from habitus.foundation.ids import canonical_path_identity, same_path_identity
+from habitus.foundation.timestamps import format_utc_z, parse_utc_z, require_aware_utc
 from habitus.foundation.validation import is_int, is_str_list
 from habitus.memory.conversation import ConversationLayout, ConversationLayoutError
 from habitus.memory.document import MemoryStoredLink
@@ -22,22 +24,9 @@ from habitus.pre.conversation import ConversationSegment
 from habitus.pre.conversation.messages.model import require_sha256
 
 
-def _int_field(value: object, message: str) -> int:
-    """磁盘读回的字段在构造前确认类型；报错文字照抄各值对象 ``__post_init__`` 的检查。"""
-    if not is_int(value):
-        raise ValueError(message)
-    return value
-
-
 def _optional_revision(value: object, name: str) -> int | None:
     if value is not None and not is_int(value):
         raise ValueError(f"{name} must be null or a positive integer")
-    return value
-
-
-def _text_field(value: object, message: str) -> str:
-    if not isinstance(value, str):
-        raise ValueError(message)
     return value
 
 
@@ -215,12 +204,12 @@ class MemoryChangeSource:
         if editor_digest is not None and not isinstance(editor_digest, str):
             raise ValueError("editor_segment_digest must be a SHA-256 hex digest")
         return cls(
-            memory_sequence=_int_field(value["memory_sequence"], "memory_sequence must be a positive integer"),
-            transaction_id=_text_field(value["transaction_id"], _TRANSACTION_MESSAGE),
-            conversation_id=_text_field(value["conversation_id"], "conversation_id must be non-empty normalized text"),
+            memory_sequence=int_field(value["memory_sequence"], "memory_sequence must be a positive integer"),
+            transaction_id=text_field(value["transaction_id"], _TRANSACTION_MESSAGE),
+            conversation_id=text_field(value["conversation_id"], "conversation_id must be non-empty normalized text"),
             started_on=date.fromisoformat(started_on),
-            segment_id=_text_field(value["segment_id"], "segment_id must be non-empty normalized text"),
-            source_segment_digest=_text_field(value["source_segment_digest"], _DIGEST_MESSAGE),
+            segment_id=text_field(value["segment_id"], "segment_id must be non-empty normalized text"),
+            source_segment_digest=text_field(value["source_segment_digest"], _DIGEST_MESSAGE),
             editor_segment_id=editor_segment_id,
             editor_segment_digest=editor_digest,
         )
@@ -570,22 +559,17 @@ class MemoryChangeReceipt:
 
     @staticmethod
     def _timestamp(value: datetime, label: str) -> datetime:
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError(f"{label} must be timezone-aware datetime")
-        return value.astimezone(UTC)
+        return require_aware_utc(value, f"{label} must be timezone-aware datetime")
 
     @staticmethod
     def _format_time(value: datetime) -> str:
-        return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        return format_utc_z(value, microseconds=True)
 
     @staticmethod
     def _parse_time(value: object, label: str) -> datetime:
-        if not isinstance(value, str):
-            raise ValueError(f"{label} must be text")
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            raise ValueError(f"{label} must include timezone")
-        return parsed.astimezone(UTC)
+        return parse_utc_z(
+            value, invalid=f"{label} must be text", naive=f"{label} must include timezone", empty_is_invalid=False
+        )
 
 
 __all__ = [

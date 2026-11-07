@@ -89,7 +89,17 @@ def _build_public_router(
         prefix="/api/v1",
         responses=documented_error_responses(),
     )
+    # 注册顺序就是路由匹配与 OpenAPI 的顺序，按组依次登记，组内顺序不变
+    _register_capability_routes(router, handlers, max_request_bytes=max_request_bytes)
+    _register_remember_routes(router, handlers, observer, remember_parts)
+    _register_conversation_routes(router, handlers)
+    _register_memory_read_routes(router, handlers)
+    _register_reminder_routes(router, handlers)
+    _register_job_routes(router, handlers)
+    return router
 
+
+def _register_capability_routes(router: APIRouter, handlers: RuntimeHTTPHandlers, *, max_request_bytes: int) -> None:
     @router.get("/capabilities", response_model=SuccessResponse[ServiceCapabilitiesResult])
     async def capabilities(request: Request) -> SuccessResponse[object]:
         served = handlers.capabilities()
@@ -98,40 +108,48 @@ def _build_public_router(
             ServiceCapabilitiesResult(**served.model_dump(), max_request_bytes=max_request_bytes),
         )
 
-    async def remember_request(body: RememberRequest) -> RememberResult:
-        outcome = await handlers.remember(
-            conversation_id=body.conversation_id,
-            started_on=body.started_on,
-            protocol=body.protocol,
-            payload=body.payload,
-            start_sequence=body.start_sequence,
-            occurred_at=body.occurred_at,
-            after_turn=body.after_turn,
-            wait_timeout_seconds=body.wait_timeout_seconds,
-            delivery_id=body.delivery_id,
-        )
-        for job in outcome.accepted_jobs:
-            with bind_observation_context(
-                memory_sequence=job.memory_sequence,
-                transaction_id=job.transaction_id,
-            ):
-                observer.record(
-                    ObservationEvent(
-                        category="http",
-                        operation="job_accepted",
-                        status=ObservationStatus.SUCCESS,
-                        duration_seconds=0.0,
-                        attributes={"job_status": job.status.value},
-                    )
-                )
-        return outcome.result
 
+async def _remember_request(handlers: RuntimeHTTPHandlers, observer: Observer, body: RememberRequest) -> RememberResult:
+    outcome = await handlers.remember(
+        conversation_id=body.conversation_id,
+        started_on=body.started_on,
+        protocol=body.protocol,
+        payload=body.payload,
+        start_sequence=body.start_sequence,
+        occurred_at=body.occurred_at,
+        after_turn=body.after_turn,
+        wait_timeout_seconds=body.wait_timeout_seconds,
+        delivery_id=body.delivery_id,
+    )
+    for job in outcome.accepted_jobs:
+        with bind_observation_context(
+            memory_sequence=job.memory_sequence,
+            transaction_id=job.transaction_id,
+        ):
+            observer.record(
+                ObservationEvent(
+                    category="http",
+                    operation="job_accepted",
+                    status=ObservationStatus.SUCCESS,
+                    duration_seconds=0.0,
+                    attributes={"job_status": job.status.value},
+                )
+            )
+    return outcome.result
+
+
+def _register_remember_routes(
+    router: APIRouter,
+    handlers: RuntimeHTTPHandlers,
+    observer: Observer,
+    remember_parts: RememberPartsStaging,
+) -> None:
     @router.post("/memory/remember", response_model=SuccessResponse[RememberResult])
     async def remember(
         request: Request,
         body: RememberRequest,
     ) -> SuccessResponse[object]:
-        return _success(request, await remember_request(body))
+        return _success(request, await _remember_request(handlers, observer, body))
 
     @router.post("/memory/remember/parts", response_model=SuccessResponse[RememberPartResult])
     async def remember_part(
@@ -162,10 +180,12 @@ def _build_public_router(
             RememberPartResult(
                 received_parts=body.part_count,
                 part_count=body.part_count,
-                remember=await remember_request(whole),
+                remember=await _remember_request(handlers, observer, whole),
             ),
         )
 
+
+def _register_conversation_routes(router: APIRouter, handlers: RuntimeHTTPHandlers) -> None:
     @router.get(
         "/memory/conversations/cursor",
         response_model=SuccessResponse[ConversationCursorResult],
@@ -195,6 +215,8 @@ def _build_public_router(
         )
         return _success(request, result)
 
+
+def _register_memory_read_routes(router: APIRouter, handlers: RuntimeHTTPHandlers) -> None:
     @router.post("/memory/recall", response_model=SuccessResponse[RecallResult])
     async def recall(
         request: Request,
@@ -226,6 +248,8 @@ def _build_public_router(
         result = await handlers.read_memory(uri)
         return _success(request, result)
 
+
+def _register_reminder_routes(router: APIRouter, handlers: RuntimeHTTPHandlers) -> None:
     @router.get("/reminders", response_model=SuccessResponse[ReminderDayResult])
     async def reminders(
         request: Request,
@@ -242,6 +266,8 @@ def _build_public_router(
         result = await handlers.claim_reminders(host=body.host, session=body.session, at=body.at, limit=body.limit)
         return _success(request, result)
 
+
+def _register_job_routes(router: APIRouter, handlers: RuntimeHTTPHandlers) -> None:
     @router.get("/memory/jobs", response_model=SuccessResponse[JobListResult])
     async def list_jobs(
         request: Request,
@@ -285,8 +311,6 @@ def _build_public_router(
             started_on=started_on,
         )
         return _success(request, result)
-
-    return router
 
 
 def _build_operations_router(

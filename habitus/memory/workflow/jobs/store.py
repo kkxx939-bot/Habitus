@@ -11,8 +11,10 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+from habitus.foundation.decoding import int_field, optional_text_field, text_field
 from habitus.foundation.ids import same_path_identity
 from habitus.foundation.integrity import canonical_json
+from habitus.foundation.timestamps import format_utc_z, parse_utc_z, require_aware_utc
 from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.store.filesystem import (
@@ -39,28 +41,10 @@ from habitus.pre.conversation import ConversationSegment
 
 _JOB_SCHEMA = "memory_job_v4"
 _JOB_STATE_SCHEMA = "memory_job_sequence_state_v1"
-# 下面三个函数让磁盘读回的字段在构造前确认类型，报错文字照抄 ``MemoryJob`` 等值对象自身的检查
+# 下面的文字交给 ``habitus.foundation.decoding`` 的解码函数，在构造前确认读回字段的类型，报错文字照抄 ``MemoryJob`` 等值对象自身的检查
 _NORMALIZED_MESSAGE = "{} must be non-empty normalized text"
 _DIGEST_MESSAGE = "source_segment_digest must be lowercase SHA-256 text"
 _TRANSACTION_MESSAGE = "transaction_id must be 32 lowercase hexadecimal characters"
-
-
-def _int_field(value: object, message: str) -> int:
-    if not is_int(value):
-        raise ValueError(message)
-    return value
-
-
-def _text_field(value: object, message: str) -> str:
-    if not isinstance(value, str):
-        raise ValueError(message)
-    return value
-
-
-def _optional_text_field(value: object, message: str) -> str | None:
-    if value is not None and not isinstance(value, str):
-        raise ValueError(message)
-    return value
 
 
 @dataclass(frozen=True)
@@ -786,15 +770,15 @@ class MemoryJobStore:
             if value["schema"] != MemoryJobAbandonment.SCHEMA_VERSION:
                 raise MemoryJobError("memory job abandonment has an unsupported schema")
             record = MemoryJobAbandonment(
-                memory_sequence=_int_field(value["memory_sequence"], "memory_sequence must be a positive integer"),
-                conversation_id=_text_field(value["conversation_id"], _NORMALIZED_MESSAGE.format("conversation_id")),
+                memory_sequence=int_field(value["memory_sequence"], "memory_sequence must be a positive integer"),
+                conversation_id=text_field(value["conversation_id"], _NORMALIZED_MESSAGE.format("conversation_id")),
                 started_on=date.fromisoformat(value["started_on"]),
-                segment_id=_text_field(value["segment_id"], _NORMALIZED_MESSAGE.format("segment_id")),
-                source_segment_digest=_text_field(value["source_segment_digest"], _DIGEST_MESSAGE),
-                transaction_id=_text_field(value["transaction_id"], _TRANSACTION_MESSAGE),
-                attempts=_int_field(value["attempts"], "attempts must be a positive integer"),
-                last_error=_text_field(value["last_error"], "last_error must be non-empty bounded text"),
-                reason=_text_field(value["reason"], "reason must be non-empty bounded text"),
+                segment_id=text_field(value["segment_id"], _NORMALIZED_MESSAGE.format("segment_id")),
+                source_segment_digest=text_field(value["source_segment_digest"], _DIGEST_MESSAGE),
+                transaction_id=text_field(value["transaction_id"], _TRANSACTION_MESSAGE),
+                attempts=int_field(value["attempts"], "attempts must be a positive integer"),
+                last_error=text_field(value["last_error"], "last_error must be non-empty bounded text"),
+                reason=text_field(value["reason"], "reason must be non-empty bounded text"),
                 abandoned_at=self._parse_time(value["abandoned_at"]),
             )
             if encoded != self._encode_abandonment(record):
@@ -903,25 +887,25 @@ class MemoryJobStore:
             raise MemoryJobError("memory job has an unsupported schema")
         try:
             return MemoryJob(
-                memory_sequence=_int_field(value["memory_sequence"], "memory_sequence must be a positive integer"),
-                conversation_id=_text_field(value["conversation_id"], _NORMALIZED_MESSAGE.format("conversation_id")),
+                memory_sequence=int_field(value["memory_sequence"], "memory_sequence must be a positive integer"),
+                conversation_id=text_field(value["conversation_id"], _NORMALIZED_MESSAGE.format("conversation_id")),
                 started_on=date.fromisoformat(value["started_on"]),
-                segment_id=_text_field(value["segment_id"], _NORMALIZED_MESSAGE.format("segment_id")),
-                source_segment_digest=_text_field(value["source_segment_digest"], _DIGEST_MESSAGE),
-                transaction_id=_text_field(value["transaction_id"], _TRANSACTION_MESSAGE),
+                segment_id=text_field(value["segment_id"], _NORMALIZED_MESSAGE.format("segment_id")),
+                source_segment_digest=text_field(value["source_segment_digest"], _DIGEST_MESSAGE),
+                transaction_id=text_field(value["transaction_id"], _TRANSACTION_MESSAGE),
                 status=MemoryJobStatus(value["status"]),
-                attempts=_int_field(value["attempts"], "memory job attempts must be non-negative"),
-                claim_id=_optional_text_field(value["claim_id"], "running memory job requires a claim_id"),
-                claim_generation=_int_field(
+                attempts=int_field(value["attempts"], "memory job attempts must be non-negative"),
+                claim_id=optional_text_field(value["claim_id"], "running memory job requires a claim_id"),
+                claim_generation=int_field(
                     value["claim_generation"], "memory job claim_generation must be non-negative"
                 ),
-                worker_id=_optional_text_field(
+                worker_id=optional_text_field(
                     value["worker_id"], "running memory job requires a normalized worker_id"
                 ),
                 lease_expires_at=MemoryJobStore._parse_optional_time(value["lease_expires_at"]),
                 next_attempt_at=MemoryJobStore._parse_optional_time(value["next_attempt_at"]),
-                last_error=_optional_text_field(value["last_error"], "memory job last_error is invalid"),
-                model_waits=_int_field(value["model_waits"], "memory job model_waits must be non-negative"),
+                last_error=optional_text_field(value["last_error"], "memory job last_error is invalid"),
+                model_waits=int_field(value["model_waits"], "memory job model_waits must be non-negative"),
                 created_at=MemoryJobStore._parse_time(value["created_at"]),
                 updated_at=MemoryJobStore._parse_time(value["updated_at"]),
             )
@@ -930,7 +914,7 @@ class MemoryJobStore:
 
     @staticmethod
     def _format_time(value: datetime) -> str:
-        return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        return format_utc_z(value, microseconds=True)
 
     @staticmethod
     def _format_optional_time(value: datetime | None) -> str | None:
@@ -938,22 +922,19 @@ class MemoryJobStore:
 
     @staticmethod
     def _parse_time(value: object) -> datetime:
-        if not isinstance(value, str):
-            raise ValueError("memory job timestamp must be a string")
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            raise ValueError("memory job timestamp must include a timezone")
-        return parsed.astimezone(UTC)
+        return parse_utc_z(
+            value,
+            invalid="memory job timestamp must be a string",
+            naive="memory job timestamp must include a timezone",
+            empty_is_invalid=False,
+        )
 
     @staticmethod
     def _parse_optional_time(value: object) -> datetime | None:
         return None if value is None else MemoryJobStore._parse_time(value)
 
     def _timestamp(self) -> datetime:
-        value = self.clock()
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("memory job clock must return a timezone-aware datetime")
-        return value.astimezone(UTC)
+        return require_aware_utc(self.clock(), "memory job clock must return a timezone-aware datetime")
 
 
 __all__ = ["MemoryJobQueueSnapshot", "MemoryJobStore"]

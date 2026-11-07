@@ -215,6 +215,35 @@ def _record_outcome(
     _safe_record(observer, event)
 
 
+def record_observation(
+    observer: Observer,
+    category: str,
+    operation: str,
+    status: ObservationStatus,
+    *,
+    started: float | None = None,
+    attributes: Mapping[str, str | int | float | bool] | None = None,
+) -> None:
+    """记一条点事件：``started`` 是 ``time.monotonic()`` 读数，缺省记 0 时长。
+
+    事件构造与记录都在保护之内：观测只是旁路，属性越界或后端失败只丢这条观察，不影响业务调用。
+    """
+
+    try:
+        observer.record(
+            ObservationEvent(
+                category=category,
+                operation=operation,
+                status=status,
+                duration_seconds=0.0 if started is None else max(0.0, time.monotonic() - started),
+                attributes=dict(attributes or {}),
+            )
+        )
+    except Exception:
+        # 观测只是旁路：事件记不下来不能影响业务调用。
+        pass
+
+
 def _safe_record(observer: Observer, event: ObservationEvent) -> None:
     try:
         observer.record(event)
@@ -234,4 +263,5 @@ __all__ = [
     "bind_observation_context",
     "current_observation_context",
     "observe_operation",
+    "record_observation",
 ]

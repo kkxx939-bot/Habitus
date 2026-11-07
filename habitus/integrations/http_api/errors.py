@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any
@@ -205,13 +205,7 @@ def _wrapped_dependency_spec(exc: BaseException) -> HTTPErrorSpec | None:
         if isinstance(item, VectorStoreError):
             return _vector_error_spec(item)
         if isinstance(item, LockLostError):
-            return HTTPErrorSpec(
-                HTTPErrorCode.ABORTED,
-                "Storage lock ownership was lost",
-                True,
-                details={"conflict_type": "lock_lost"},
-                retry_after_seconds=1,
-            )
+            return _lock_lost_spec(item)
         if isinstance(item, TimeoutError):
             return HTTPErrorSpec(
                 HTTPErrorCode.UNAVAILABLE,
@@ -222,121 +216,166 @@ def _wrapped_dependency_spec(exc: BaseException) -> HTTPErrorSpec | None:
     return None
 
 
-def map_exception(exc: Exception) -> HTTPErrorSpec:
-    """只按 Habitus 的真实异常类型映射，不根据错误文本猜测业务语义。"""
+def _lock_lost_spec(_exc: BaseException) -> HTTPErrorSpec:
+    return HTTPErrorSpec(
+        HTTPErrorCode.ABORTED,
+        "Storage lock ownership was lost",
+        True,
+        details={"conflict_type": "lock_lost"},
+        retry_after_seconds=1,
+    )
 
-    if isinstance(exc, HTTPMemoryJobNotFoundError):
-        return HTTPErrorSpec(HTTPErrorCode.NOT_FOUND, str(exc), False)
-    if isinstance(exc, MemoryBrowseNotFoundError):
-        return HTTPErrorSpec(HTTPErrorCode.NOT_FOUND, str(exc), False)
-    if isinstance(exc, MemoryTreeConsistencyError):
-        # 正赶上一次多文档发布：稍后重读就是一致的
-        return HTTPErrorSpec(HTTPErrorCode.UNAVAILABLE, "Memory tree is being updated", True, retry_after_seconds=1)
-    if isinstance(exc, MemoryTreeIntegrityError):
-        # 记忆树里有不合规的条目：是存储的问题，不是请求参数的问题（它是 ValueError 的子类，必须排在下面之前）
-        return HTTPErrorSpec(HTTPErrorCode.INTERNAL, "Memory tree failed integrity validation", False)
-    if isinstance(exc, HTTPMemoryJobConflictError):
-        return HTTPErrorSpec(HTTPErrorCode.FAILED_PRECONDITION, str(exc), False)
-    if isinstance(exc, RequestBodyLimitExceeded):
-        return HTTPErrorSpec(HTTPErrorCode.REQUEST_TOO_LARGE, "Request body exceeds the configured limit", False)
-    if isinstance(exc, RememberPartsRestartError):
-        # 分块上传接不上（本地服务重启丢了暂存、过期、块序号跳了）：插件从第 0 块整批重送
-        return HTTPErrorSpec(
+
+def _message_spec(code: HTTPErrorCode) -> Callable[[Any], HTTPErrorSpec]:
+    """把异常自身的文字当作对外消息、不可重试的映射。"""
+
+    return lambda exc: HTTPErrorSpec(code, str(exc), False)
+
+
+def _consistency_timeout_spec(exc: MemoryConsistencyTimeoutError) -> HTTPErrorSpec:
+    return HTTPErrorSpec(
+        HTTPErrorCode.DEADLINE_EXCEEDED,
+        "Memory consistency wait exceeded its deadline",
+        True,
+        details={
+            "state": exc.snapshot.state.value,
+            "memory_sequence": exc.snapshot.requested_job.memory_sequence,
+        },
+    )
+
+
+def _search_error_spec(exc: MemorySearchError) -> HTTPErrorSpec:
+    return _wrapped_dependency_spec(exc) or HTTPErrorSpec(
+        HTTPErrorCode.INTERNAL,
+        "Memory search failed its integrity checks",
+        False,
+    )
+
+
+# 按顺序取第一个 isinstance 命中的映射：子类必须排在父类之前，顺序即语义
+_EXCEPTION_SPECS: tuple[tuple[type[BaseException], Callable[[Any], HTTPErrorSpec]], ...] = (
+    (HTTPMemoryJobNotFoundError, _message_spec(HTTPErrorCode.NOT_FOUND)),
+    (MemoryBrowseNotFoundError, _message_spec(HTTPErrorCode.NOT_FOUND)),
+    # 正赶上一次多文档发布：稍后重读就是一致的
+    (
+        MemoryTreeConsistencyError,
+        lambda _exc: HTTPErrorSpec(
+            HTTPErrorCode.UNAVAILABLE, "Memory tree is being updated", True, retry_after_seconds=1
+        ),
+    ),
+    # 记忆树里有不合规的条目：是存储的问题，不是请求参数的问题（它是 ValueError 的子类，必须排在下面之前）
+    (
+        MemoryTreeIntegrityError,
+        lambda _exc: HTTPErrorSpec(HTTPErrorCode.INTERNAL, "Memory tree failed integrity validation", False),
+    ),
+    (HTTPMemoryJobConflictError, _message_spec(HTTPErrorCode.FAILED_PRECONDITION)),
+    (
+        RequestBodyLimitExceeded,
+        lambda _exc: HTTPErrorSpec(HTTPErrorCode.REQUEST_TOO_LARGE, "Request body exceeds the configured limit", False),
+    ),
+    # 分块上传接不上（本地服务重启丢了暂存、过期、块序号跳了）：插件从第 0 块整批重送
+    (
+        RememberPartsRestartError,
+        lambda exc: HTTPErrorSpec(
             HTTPErrorCode.ABORTED,
             str(exc),
             True,
             details={"conflict_type": "remember_parts_restart"},
-        )
-    if isinstance(exc, RememberPartsCapacityError):
-        return HTTPErrorSpec(
+        ),
+    ),
+    (
+        RememberPartsCapacityError,
+        lambda _exc: HTTPErrorSpec(
             HTTPErrorCode.RESOURCE_EXHAUSTED,
             "Remember parts staging is full",
             True,
             details={"conflict_type": "remember_parts_capacity"},
             retry_after_seconds=1,
-        )
-    if isinstance(exc, RememberPartsTooLargeError):
-        return HTTPErrorSpec(HTTPErrorCode.REQUEST_TOO_LARGE, str(exc), False)
-    if isinstance(exc, MemoryConsistencyTimeoutError):
-        return HTTPErrorSpec(
-            HTTPErrorCode.DEADLINE_EXCEEDED,
-            "Memory consistency wait exceeded its deadline",
-            True,
-            details={
-                "state": exc.snapshot.state.value,
-                "memory_sequence": exc.snapshot.requested_job.memory_sequence,
-            },
-        )
-    if isinstance(exc, ConversationWriteConflictError):
-        return HTTPErrorSpec(
+        ),
+    ),
+    (RememberPartsTooLargeError, _message_spec(HTTPErrorCode.REQUEST_TOO_LARGE)),
+    (MemoryConsistencyTimeoutError, _consistency_timeout_spec),
+    (
+        ConversationWriteConflictError,
+        lambda exc: HTTPErrorSpec(
             HTTPErrorCode.CONFLICT,
             str(exc),
             False,
             details={"conflict_type": "conversation_write"},
-        )
-    if isinstance(exc, ConversationJournalError):
-        return HTTPErrorSpec(HTTPErrorCode.INTERNAL, "Conversation journal integrity check failed", False)
-    if isinstance(exc, RuntimeStateError):
-        return HTTPErrorSpec(HTTPErrorCode.UNAVAILABLE, "Runtime is not ready for this operation", True)
-    if isinstance(exc, RuntimeInitializationError):
-        return HTTPErrorSpec(HTTPErrorCode.UNAVAILABLE, "Runtime initialization failed", False)
-    if isinstance(exc, MemoryJobNotReadyError):
-        return HTTPErrorSpec(
+        ),
+    ),
+    (
+        ConversationJournalError,
+        lambda _exc: HTTPErrorSpec(HTTPErrorCode.INTERNAL, "Conversation journal integrity check failed", False),
+    ),
+    (
+        RuntimeStateError,
+        lambda _exc: HTTPErrorSpec(HTTPErrorCode.UNAVAILABLE, "Runtime is not ready for this operation", True),
+    ),
+    (
+        RuntimeInitializationError,
+        lambda _exc: HTTPErrorSpec(HTTPErrorCode.UNAVAILABLE, "Runtime initialization failed", False),
+    ),
+    (
+        MemoryJobNotReadyError,
+        lambda _exc: HTTPErrorSpec(
             HTTPErrorCode.UNAVAILABLE,
             "Memory job is still in its retry backoff window",
             True,
             retry_after_seconds=1,
-        )
-    if isinstance(exc, MemoryJobBlockedError):
-        return HTTPErrorSpec(HTTPErrorCode.FAILED_PRECONDITION, "Memory job cannot advance", False)
-    if isinstance(exc, MemoryJobError):
-        return HTTPErrorSpec(HTTPErrorCode.INTERNAL, "Memory job state is inconsistent", False)
-    if isinstance(exc, MemorySearchError):
-        return _wrapped_dependency_spec(exc) or HTTPErrorSpec(
-            HTTPErrorCode.INTERNAL,
-            "Memory search failed its integrity checks",
-            False,
-        )
-    if isinstance(exc, ModelClientError):
-        return _model_error_spec(exc)
-    if isinstance(exc, VectorStoreError):
-        return _vector_error_spec(exc)
-    if isinstance(exc, LockLostError):
-        return HTTPErrorSpec(
-            HTTPErrorCode.ABORTED,
-            "Storage lock ownership was lost",
-            True,
-            details={"conflict_type": "lock_lost"},
-            retry_after_seconds=1,
-        )
-    if isinstance(exc, TimeoutError):
-        return HTTPErrorSpec(
+        ),
+    ),
+    (
+        MemoryJobBlockedError,
+        lambda _exc: HTTPErrorSpec(HTTPErrorCode.FAILED_PRECONDITION, "Memory job cannot advance", False),
+    ),
+    (MemoryJobError, lambda _exc: HTTPErrorSpec(HTTPErrorCode.INTERNAL, "Memory job state is inconsistent", False)),
+    (MemorySearchError, _search_error_spec),
+    (ModelClientError, _model_error_spec),
+    (VectorStoreError, _vector_error_spec),
+    (LockLostError, _lock_lost_spec),
+    (
+        TimeoutError,
+        lambda _exc: HTTPErrorSpec(
             HTTPErrorCode.UNAVAILABLE,
             "Storage operation timed out",
             True,
             details={"conflict_type": "path_busy"},
             retry_after_seconds=1,
-        )
-    if isinstance(exc, ConversationSourceCapacityError):
-        # 会话源的生命周期账满了：等生命周期把旧的放掉再投（同样是 ValueError 的子类，排在下面之前）
-        return HTTPErrorSpec(
+        ),
+    ),
+    # 会话源的生命周期账满了：等生命周期把旧的放掉再投（同样是 ValueError 的子类，排在下面之前）
+    (
+        ConversationSourceCapacityError,
+        lambda _exc: HTTPErrorSpec(
             HTTPErrorCode.RESOURCE_EXHAUSTED,
             "Conversation source capacity is exhausted",
             True,
             details={"conflict_type": "conversation_source_capacity"},
             retry_after_seconds=60,
-        )
-    if isinstance(exc, ConversationOrderedPredecessorPendingError):
-        # 有序 Consumer 在等同一会话更早的源到终态：正常排队，重试即可推进。它是 ValueError 的子类，必须排在下面之前。
-        return HTTPErrorSpec(
+        ),
+    ),
+    # 有序 Consumer 在等同一会话更早的源到终态：正常排队，重试即可推进。它是 ValueError 的子类，必须排在下面之前。
+    (
+        ConversationOrderedPredecessorPendingError,
+        lambda _exc: HTTPErrorSpec(
             HTTPErrorCode.ABORTED,
             "An earlier conversation source is still being processed",
             True,
             details={"conflict_type": "conversation_predecessor_pending"},
             retry_after_seconds=1,
-        )
-    if isinstance(exc, ValueError):
-        return HTTPErrorSpec(HTTPErrorCode.INVALID_ARGUMENT, str(exc), False)
+        ),
+    ),
+    (ValueError, _message_spec(HTTPErrorCode.INVALID_ARGUMENT)),
+)
+
+
+def map_exception(exc: Exception) -> HTTPErrorSpec:
+    """只按 Habitus 的真实异常类型映射，不根据错误文本猜测业务语义。"""
+
+    for exception_type, spec in _EXCEPTION_SPECS:
+        if isinstance(exc, exception_type):
+            return spec(exc)
     return HTTPErrorSpec(HTTPErrorCode.INTERNAL, "Internal server error", False)
 
 

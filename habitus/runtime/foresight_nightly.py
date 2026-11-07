@@ -16,7 +16,12 @@ from datetime import UTC, date, datetime
 from habitus.conditions import DayTypeCalendar
 from habitus.foresight import ForesightError
 from habitus.foresight.opportunities import OpportunityTable, build_table
-from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
+from habitus.foundation.observability import (
+    NullObserver,
+    ObservationStatus,
+    Observer,
+    record_observation,
+)
 from habitus.runtime.foresight_compaction import LedgerCompaction
 from habitus.runtime.foresight_history import HistoryStage
 from habitus.runtime.foresight_opportunities import OpportunityStore
@@ -187,18 +192,7 @@ class ForesightNightlyRun:
     def _observe(
         self, status: ObservationStatus, attributes: dict[str, str | int | float | bool], started: float
     ) -> None:
-        try:
-            self.observer.record(
-                ObservationEvent(
-                    category="foresight",
-                    operation="opportunities",
-                    status=status,
-                    duration_seconds=max(0.0, time.monotonic() - started),
-                    attributes=attributes,
-                )
-            )
-        except Exception:  # noqa: BLE001 - 观测不许影响夜批
-            pass
+        record_observation(self.observer, "foresight", "opportunities", status, started=started, attributes=attributes)
 
 
 def _summarise(table: OpportunityTable, moments: int = 0) -> LaneOpportunitySummary:

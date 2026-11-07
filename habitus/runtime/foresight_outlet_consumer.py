@@ -17,7 +17,12 @@ from habitus.conversation.source import (
 )
 from habitus.foresight import ForesightError
 from habitus.foundation.integrity import canonical_json
-from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
+from habitus.foundation.observability import (
+    NullObserver,
+    ObservationStatus,
+    Observer,
+    record_observation,
+)
 from habitus.pre.conversation import ConversationAdapterRegistry
 from habitus.pre.conversation.messages import ConversationMessage, ConversationToolResultStatus
 from habitus.runtime.foresight_outlet import HostMessage, ReminderOutlet
@@ -69,18 +74,13 @@ class OutletObservingConsumer:
         try:
             await asyncio.to_thread(self.outlet.observe, envelope.conversation_id, messages, host=host)
         except (ForesightError, OSError) as exc:
-            try:
-                self.observer.record(
-                    ObservationEvent(
-                        category="foresight",
-                        operation="outlet_observe",
-                        status=ObservationStatus.FAILURE,
-                        duration_seconds=0.0,
-                        attributes={"error": type(exc).__name__},
-                    )
-                )
-            except Exception:  # noqa: BLE001 - 观测不许影响融合
-                pass
+            record_observation(
+                self.observer,
+                "foresight",
+                "outlet_observe",
+                ObservationStatus.FAILURE,
+                attributes={"error": type(exc).__name__},
+            )
 
 
 def host_message(message: ConversationMessage) -> HostMessage:

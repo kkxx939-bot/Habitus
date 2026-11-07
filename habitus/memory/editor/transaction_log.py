@@ -12,6 +12,7 @@ from enum import Enum
 from pathlib import Path
 
 from habitus.foundation.integrity import canonical_json
+from habitus.foundation.timestamps import format_utc_z, require_aware_utc
 from habitus.foundation.validation import is_str_list
 from habitus.infrastructure.store.filesystem import (
     atomic_create_bytes,
@@ -388,9 +389,7 @@ class MemoryTransactionJournal:
 
     @staticmethod
     def _timestamp(value: datetime) -> str:
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("journal timestamp must be timezone-aware")
-        return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        return format_utc_z(require_aware_utc(value, "journal timestamp must be timezone-aware"), microseconds=True)
 
     @staticmethod
     def _parse_timestamp(value: object) -> datetime:

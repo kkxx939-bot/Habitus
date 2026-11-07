@@ -34,9 +34,9 @@ from habitus.conversation.source.state import (
 from habitus.conversation.source.store import ConversationSourceStore
 from habitus.foundation.observability import (
     NullObserver,
-    ObservationEvent,
     ObservationStatus,
     Observer,
+    record_observation,
 )
 
 _OBSERVATION_CATEGORY = "conversation.source"
@@ -463,23 +463,18 @@ class ConversationConsumerDelivery:
     ) -> None:
         """记录一条有界事件；观测后端失败绝不影响交付结果。"""
 
-        try:
-            self.observer.record(
-                ObservationEvent(
-                    category=_OBSERVATION_CATEGORY,
-                    operation=_OBSERVATION_OPERATION,
-                    status=status,
-                    duration_seconds=max(0.0, monotonic() - started),
-                    attributes={
-                        "consumer": ConversationSourceConsumer(consumer).value,
-                        "source_id": source.source_id,
-                        **attributes,
-                    },
-                )
-            )
-        except Exception:
-            # 观测只是旁路记录：后端失败不改变交付结果，也无处可再上报，忽略即可。
-            pass
+        record_observation(
+            self.observer,
+            _OBSERVATION_CATEGORY,
+            _OBSERVATION_OPERATION,
+            status,
+            started=started,
+            attributes={
+                "consumer": ConversationSourceConsumer(consumer).value,
+                "source_id": source.source_id,
+                **attributes,
+            },
+        )
 
     @staticmethod
     def _terminal_result(

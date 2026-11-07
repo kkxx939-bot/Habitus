@@ -9,12 +9,13 @@ import stat
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from habitus.foundation.integrity import canonical_json
+from habitus.foundation.timestamps import format_utc_z, parse_utc_z, require_aware_utc
 from habitus.foundation.validation import is_int
 from habitus.infrastructure.store.contracts import LeaseGuard, PathLock
 from habitus.infrastructure.store.filesystem import (
@@ -422,19 +423,19 @@ def _require_digest(value: str, label: str) -> None:
 
 
 def _timestamp(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("memory lifecycle operation timestamp must be timezone-aware")
-    return value.astimezone(UTC)
+    return require_aware_utc(value, "memory lifecycle operation timestamp must be timezone-aware")
 
 
 def _format_timestamp(value: datetime) -> str:
-    return _timestamp(value).isoformat().replace("+00:00", "Z")
+    return format_utc_z(_timestamp(value))
 
 
 def _parse_timestamp(value: object) -> datetime:
-    if not isinstance(value, str) or not value:
-        raise ValueError("memory lifecycle operation timestamp is invalid")
-    return _timestamp(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    return parse_utc_z(
+        value,
+        invalid="memory lifecycle operation timestamp is invalid",
+        naive="memory lifecycle operation timestamp must be timezone-aware",
+    )
 
 
 __all__ = [
