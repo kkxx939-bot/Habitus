@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING
 
 from habitus.config import ConfigError, HabitusConfig
 from habitus.foundation.network import OutboundSettingsError, build_ssl_context, redact_proxy_url
+from habitus.infrastructure.store.filesystem import describe_access, grants_group_or_other_access, is_path_alias
+from habitus.integrations.local_service.windows_shell import powershell_policy_checks
 
 if TYPE_CHECKING:
     from habitus.integrations.local_service.adapter_catalog import AdapterCatalog
@@ -100,6 +102,7 @@ def run_doctor(
         _setup_placeholder_check(config, catalog),
         *_dependency_checks(config, catalog),
         _node_check(),
+        *(DoctorCheck(name, DoctorStatus(status), detail) for name, status, detail in powershell_policy_checks()),
         _credential_check(config, catalog),
         _network_check(config),
         _ingress_capacity_check(config),
@@ -167,13 +170,13 @@ def run_startup_preflight(
 def _storage_check(root: Path) -> DoctorCheck:
     current = Path(root)
     while not current.exists():
-        if current.is_symlink():
+        if is_path_alias(current):
             return DoctorCheck("storage", DoctorStatus.FAIL, "storage path traverses a symbolic link")
         parent = current.parent
         if parent == current:
             return DoctorCheck("storage", DoctorStatus.FAIL, "storage path has no existing ancestor")
         current = parent
-    if current.is_symlink() or not current.is_dir():
+    if is_path_alias(current) or not current.is_dir():
         return DoctorCheck("storage", DoctorStatus.FAIL, "storage ancestor is not a real directory")
     if not os.access(current, os.W_OK | os.X_OK):
         return DoctorCheck("storage", DoctorStatus.FAIL, "storage ancestor is not writable")
@@ -508,16 +511,17 @@ def _config_file_security(environ: Mapping[str, str]) -> DoctorCheck:
         return DoctorCheck("config_permissions", DoctorStatus.FAIL, "HABITUS_CONFIG_FILE is missing")
     path = Path(raw_path).expanduser().absolute()
     try:
-        mode = path.stat().st_mode & 0o777
+        loose = grants_group_or_other_access(path)
+        access = describe_access(path)
     except OSError as exc:
         return DoctorCheck("config_permissions", DoctorStatus.FAIL, type(exc).__name__)
-    if mode & 0o077:
+    if loose:
         return DoctorCheck(
             "config_permissions",
             DoctorStatus.FAIL,
-            f"{path} mode={mode:03o}; expected no group or other permissions",
+            f"{path} {access}; expected no group or other permissions",
         )
-    return DoctorCheck("config_permissions", DoctorStatus.PASS, f"{path} mode={mode:03o}")
+    return DoctorCheck("config_permissions", DoctorStatus.PASS, f"{path} {access}")
 
 
 def _plugin_connection_check(config: HabitusConfig, environ: Mapping[str, str]) -> DoctorCheck:

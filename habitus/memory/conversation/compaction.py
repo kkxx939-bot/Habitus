@@ -370,7 +370,7 @@ class ConversationRangeSummaryStore:
             metadata = directory.stat(follow_symlinks=False)
         except FileNotFoundError:
             return ()
-        if not stat.S_ISDIR(metadata.st_mode) or directory.is_symlink():
+        if not stat.S_ISDIR(metadata.st_mode) or directory.is_symlink() or directory.is_junction():
             raise ConversationSummaryCompactionError("range summary directory is not a safe directory")
         identifiers: list[str] = []
         seen_entries = 0

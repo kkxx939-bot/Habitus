@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import os
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -24,6 +23,7 @@ import numpy as np
 import numpy.typing as npt
 
 from habitus.foundation.embedding import EmbeddingVector
+from habitus.infrastructure.store.filesystem import ensure_owner_directory, restrict_file_to_owner
 from habitus.infrastructure.vector.config import VectorStoreConfig
 from habitus.infrastructure.vector.factory import VectorStoreBuildContext, VectorStoreFactory
 from habitus.infrastructure.vector.model import (
@@ -410,10 +410,9 @@ def _connect(path: Path, busy_timeout_seconds: float) -> sqlite3.Connection:
     SQLite 随后按主库的权限创建 ``-wal`` / ``-shm``。
     """
 
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path.parent, 0o700)
+    ensure_owner_directory(path.parent)
     path.touch(mode=0o600, exist_ok=True)
-    os.chmod(path, 0o600)
+    restrict_file_to_owner(path)
     connection = sqlite3.connect(path, timeout=busy_timeout_seconds, isolation_level=None, check_same_thread=False)
     try:
         connection.execute("PRAGMA journal_mode=WAL").fetchall()

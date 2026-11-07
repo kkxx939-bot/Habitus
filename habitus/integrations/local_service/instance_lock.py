@@ -5,13 +5,39 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 from pathlib import Path
 from types import TracebackType
 
-try:
+from habitus.infrastructure.store.filesystem import is_path_alias, make_owner_directories, restrict_file_to_owner
+
+if sys.platform == "win32":
+    import msvcrt
+
+    # 锁住远在载荷之后的一个字节：载荷所在的区间不受锁影响，别的进程仍可读出锁文件里的 pid。
+    _WINDOWS_LOCK_OFFSET = 0x7FFFFFFE
+
+    def _lock_exclusive_nonblocking(descriptor: int) -> None:
+        os.lseek(descriptor, _WINDOWS_LOCK_OFFSET, os.SEEK_SET)
+        try:
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        except PermissionError as exc:
+            raise BlockingIOError("lock region is held by another process") from exc
+        finally:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+
+    def _unlock(descriptor: int) -> None:
+        os.lseek(descriptor, _WINDOWS_LOCK_OFFSET, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+
+else:
     import fcntl
-except ImportError as exc:  # pragma: no cover - 当前正式目标为 macOS/Linux
-    raise RuntimeError("Habitus local service requires POSIX file locking") from exc
+
+    def _lock_exclusive_nonblocking(descriptor: int) -> None:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _unlock(descriptor: int) -> None:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
 
 
 class ServiceInstanceLockError(RuntimeError):
@@ -19,7 +45,7 @@ class ServiceInstanceLockError(RuntimeError):
 
 
 class ServiceInstanceLock:
-    """使用进程持有的 flock 保证一套本地服务只有一个实例。"""
+    """使用进程持有的文件锁（POSIX ``flock``，Windows ``msvcrt.locking``）保证一套本地服务只有一个实例。"""
 
     def __init__(self, path: str | Path) -> None:
         resolved = Path(path).expanduser().absolute()
@@ -36,15 +62,13 @@ class ServiceInstanceLock:
         if self._descriptor is not None:
             return
         self._ensure_parent()
-        flags = os.O_RDWR | os.O_CREAT
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
         try:
             descriptor = os.open(self.path, flags, 0o600)
         except OSError as exc:
             raise ServiceInstanceLockError("failed to open the local service instance lock") from exc
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _lock_exclusive_nonblocking(descriptor)
         except BlockingIOError as exc:
             os.close(descriptor)
             raise ServiceInstanceLockError("another Habitus local service already owns this storage root") from exc
@@ -55,11 +79,12 @@ class ServiceInstanceLock:
                 "hostname": socket.gethostname(),
             }
             encoded = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+            restrict_file_to_owner(self.path)
             os.ftruncate(descriptor, 0)
             os.write(descriptor, encoded)
             os.fsync(descriptor)
         except BaseException:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            _unlock(descriptor)
             os.close(descriptor)
             raise
         self._descriptor = descriptor
@@ -70,16 +95,16 @@ class ServiceInstanceLock:
             return
         self._descriptor = None
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            _unlock(descriptor)
         finally:
             os.close(descriptor)
 
     def _ensure_parent(self) -> None:
         parent = self.path.parent
-        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if parent.is_symlink() or not parent.is_dir():
+        make_owner_directories(parent)
+        if is_path_alias(parent) or not parent.is_dir():
             raise ServiceInstanceLockError("service lock parent must be a real directory")
-        if self.path.is_symlink():
+        if is_path_alias(self.path):
             raise ServiceInstanceLockError("service lock cannot be a symbolic link")
 
     def __enter__(self) -> ServiceInstanceLock:

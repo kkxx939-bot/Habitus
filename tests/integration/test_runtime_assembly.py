@@ -1,7 +1,9 @@
 """顶层 Runtime 对所有领域组件的唯一组装与初始化主链测试。"""
 
 import asyncio
+import os
 import sqlite3
+import sys
 from contextlib import closing
 from dataclasses import replace
 from datetime import date, datetime
@@ -17,6 +19,7 @@ from habitus.infrastructure.store.contracts import PathLock
 from habitus.infrastructure.vector import VectorStoreFactory
 from habitus.integrations.http_api import create_http_app
 from habitus.integrations.http_api.handlers import RuntimeHTTPHandlers
+from habitus.integrations.local_service import ServiceInstanceLock
 from habitus.memory.browse import MemoryBrowseNotFoundError
 from habitus.memory.conversation import ConversationAddress
 from habitus.memory.model import MemoryKind
@@ -1120,3 +1123,95 @@ def test_a_daily_reminder_is_not_held_back_as_a_return_after_absence_by_the_sett
 
     report = asyncio.run(delivery.run_once(today + timedelta(minutes=15), JudgeMaterials(table, lambda uris: {})))
     assert report.by_reason == {"等时窗末": 1} and report.by_level == {1: 1}
+
+
+def _extreme_base(tmp_path: Path, shape: str) -> Path:
+    if shape == "chinese-space-user":
+        return tmp_path / "Users" / "张三 李四"
+    base = tmp_path / "Users" / "张三 李四"
+    while len(str(base)) < 230:
+        base = base / ("深层-" + "d" * 30)
+    return base
+
+
+def _real_storage_config(base: Path) -> HabitusConfig:
+    payload = yaml.safe_load((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_text(encoding="utf-8"))
+    payload["storage"]["root"] = str(base / "data")
+    for capability in ("chat", "embedding", "rerank"):
+        payload["models"][capability]["route"].update(provider="fake", adapter=f"fake_{capability}", credential_ref="")
+    return HabitusConfig.from_mapping(payload)
+
+
+def _all_paths(root: Path) -> list[str]:
+    """列出根下全部路径；Windows 上用 ``\\\\?\\`` 扩展路径枚举，测试自己不先撞上 MAX_PATH。"""
+
+    walk_root = str(root)
+    if sys.platform == "win32":
+        walk_root = "\\\\?\\" + walk_root
+    found: list[str] = []
+    for directory, names, files in os.walk(walk_root):
+        found.extend(os.path.join(directory, name).removeprefix("\\\\?\\") for name in (*names, *files))
+    return found
+
+
+@pytest.mark.parametrize("with_service_lock", [True, False], ids=["serve-order", "runtime-only"])
+@pytest.mark.parametrize("shape", ["chinese-space-user", "beyond-max-path"])
+def test_runtime_remembers_a_turn_under_extreme_storage_roots(tmp_path: Path, shape: str, with_service_lock: bool) -> None:
+    """阶段 3 极限用例：用户名含中文与空格、存储根深到其下文件超过 Windows 260 字符时，照 ``serve`` 的顺序先取实例锁、
+    再初始化 Runtime、打开两个 local_sqlite 向量集合，收录一轮并读回。``runtime-only`` 一组不取实例锁，
+    让 Windows 上实例锁那一层若先断，Runtime 建根与 SQLite 这两层仍各自被测到。
+
+    全用真实存储：实例锁、SQLite 锁库、local_sqlite 向量库。windows-latest 上关掉了系统长路径支持，这条用例在那里
+    如实反映不经耐久写入层的部分能否越过 MAX_PATH（"需要用户定的事"第 2 条等它的结果）。"""
+
+    base = _extreme_base(tmp_path, shape)
+    config = _real_storage_config(base)
+
+    async def scenario() -> None:
+        providers, _vectors = runtime_dependencies()
+        lock = ServiceInstanceLock(config.storage_root / "service" / "http.lock")
+        if with_service_lock:
+            lock.acquire()
+        runtime = build_runtime(config, providers=providers)
+        try:
+            runtime.initialize()
+            await runtime.components.memory.vector_index.ensure_ready()
+            await runtime.components.conversation.summary_vector_index.ensure_ready()
+            await _remember_one_turn(runtime)
+            live = await runtime.read_live_conversation(ConversationAddress("极限-路径-会话", date(2026, 10, 1)))
+            assert live is not None
+            assert [item.role.value for item in live.messages] == ["prompt", "completion"]
+        finally:
+            await runtime.close()
+            lock.release()  # 没取到时是空操作
+
+    asyncio.run(scenario())
+    paths = _all_paths(base / "data")
+    vector_files = [path for path in paths if os.path.dirname(path).endswith("vector") and ".sqlite" in path]
+    assert vector_files, paths
+    if shape == "beyond-max-path":
+        assert max(len(path) for path in vector_files) > 260
+        assert max(len(path) for path in paths) > 260
+
+
+async def _remember_one_turn(runtime: object) -> None:
+    start = 1_790_000_000_000
+    records = [
+        {"info": {"role": "user", "time": {"created": start}}, "parts": [{"type": "text", "text": "记住我叫张三", "time": {"end": start}}]},
+        {"info": {"role": "assistant", "time": {"created": start + 50}}, "parts": [{"type": "text", "text": "好的", "time": {"end": start + 60}}]},
+    ]
+    transport = httpx.ASGITransport(app=create_http_app(runtime))  # type: ignore[arg-type]
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8787") as client:
+        remembered = await client.post(
+            "/api/v1/memory/remember",
+            json={
+                "conversation_id": "极限-路径-会话",
+                "started_on": "2026-10-01",
+                "protocol": "zcode",
+                "payload": {"records": records},
+                "start_sequence": 0,
+                "occurred_at": BASE_TIME.isoformat(),
+                "after_turn": True,
+            },
+        )
+    assert remembered.status_code == 200, remembered.text

@@ -15,6 +15,7 @@ from habitus.infrastructure.store.filesystem import (
     atomic_create_bytes,
     atomic_temporary_destination,
     durable_unlink,
+    is_path_alias,
     read_regular_bytes,
 )
 from habitus.memory.conversation.field_validation import summary_content_from_operations
@@ -153,7 +154,7 @@ class ConversationSummaryStore:
             metadata = directory.stat(follow_symlinks=False)
         except FileNotFoundError:
             return ()
-        if not stat.S_ISDIR(metadata.st_mode) or directory.is_symlink():
+        if not stat.S_ISDIR(metadata.st_mode) or is_path_alias(directory):
             raise ConversationSummaryError("conversation summary directory is not a safe directory")
         identifiers: list[str] = []
         seen_entries = 0

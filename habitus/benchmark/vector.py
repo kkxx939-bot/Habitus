@@ -18,6 +18,7 @@ from pathlib import Path
 
 from habitus.benchmark.isolation import isolated_config, require_empty_directory
 from habitus.benchmark.metrics import latency_distribution
+from habitus.benchmark.process_memory import physical_memory_bytes
 from habitus.config import HabitusConfig
 from habitus.infrastructure.vector import (
     VectorStore,
@@ -572,14 +573,7 @@ def _embedding_identity(config: HabitusConfig) -> Mapping[str, object]:
 
 
 def _environment() -> Mapping[str, object]:
-    memory_bytes: int | None = None
-    try:
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        page_count = os.sysconf("SC_PHYS_PAGES")
-        if isinstance(page_size, int) and isinstance(page_count, int):
-            memory_bytes = page_size * page_count
-    except (AttributeError, OSError, ValueError):
-        pass
+    memory_bytes = physical_memory_bytes()
     return {
         "platform": platform.platform(),
         "machine": platform.machine(),

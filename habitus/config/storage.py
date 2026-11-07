@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from habitus.config.loader import ConfigError, construct_config, group_fields, required_field
+from habitus.infrastructure.store.filesystem import is_path_alias
 from habitus.infrastructure.store.sqlite import SQLiteLockStoreConfig
 
 
@@ -24,7 +25,7 @@ class StorageConfig:
         if not isinstance(self.sqlite_lock, SQLiteLockStoreConfig):
             raise TypeError("storage.sqlite_lock must be SQLiteLockStoreConfig")
         requested = Path(self.root).expanduser().absolute()
-        if requested.is_symlink():
+        if is_path_alias(requested):
             raise ConfigError("storage.root cannot be a symbolic link")
         object.__setattr__(self, "root", requested.resolve(strict=False))
 

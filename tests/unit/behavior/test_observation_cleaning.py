@@ -16,6 +16,8 @@ from habitus.behavior.observation import (
 )
 from habitus.behavior.observation.model import _identity
 from habitus.foundation.integrity import canonical_digest
+from habitus.infrastructure.store.filesystem import restrict_file_to_owner
+from tests.platform_helpers import deny_all_access
 
 TZ8 = timezone(timedelta(hours=8))
 NOW = datetime(2026, 8, 13, 20, 0, 0, tzinfo=TZ8)
@@ -307,11 +309,11 @@ def test_store_decodes_each_delivery_once_and_forgets_it_when_released(tmp_path)
     store = BehaviorObservationStore(tmp_path, config=CONFIG)
     first = store.put(envelope(adapt()))
     path = store._path(first.source_id)
-    path.chmod(0o000)  # 之后的读不碰文件内容
+    deny_all_access(path)  # 之后的读不碰文件内容
     try:
         assert store.list() == (first,) and store.read(first.source_id) == first
     finally:
-        path.chmod(0o644)
+        restrict_file_to_owner(path)
     other = BehaviorObservationStore(tmp_path, config=CONFIG)
     assert other.discard(first.source_id)
     assert store.read(first.source_id) is None and store.list() == ()

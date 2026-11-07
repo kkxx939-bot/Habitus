@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 
-import habitus.infrastructure.store.filesystem.durable_io.atomic_file as atomic_file_module
 from habitus.infrastructure.store.contracts import PathLock
+from habitus.infrastructure.store.filesystem import durable_io
 from habitus.memory.compaction import MemoryLifecycleOperationStore, MemoryLifecycleScanStore
 from habitus.memory.document import MemoryDocumentConfig, MemoryDocumentMetadata
 from habitus.memory.model import MemoryAddress, MemoryDirectory, MemoryKind, MemoryLevel
@@ -17,6 +18,9 @@ from habitus.memory.tree import MemoryDocumentLockKeyspace, MemoryTree, MemoryTr
 from habitus.memory.uri import MemoryURI
 from tests.helpers import BASE_TIME, codec, document, memory_fields
 from tests.lock_store import ProcessLocalLockStore
+
+# 当前平台实际生效的耐久写入实现（POSIX: atomic_file；Windows: windows_file）。
+atomic_file_module = sys.modules[durable_io.read_regular_bytes.__module__]
 
 ADDRESSES = (
     MemoryAddress.profile(),

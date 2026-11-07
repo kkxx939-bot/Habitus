@@ -6,7 +6,6 @@ import json
 import math
 import os
 import platform
-import resource
 import statistics
 import subprocess
 import sys
@@ -17,6 +16,8 @@ from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, cast
+
+from habitus.benchmark.process_memory import physical_memory_bytes, process_max_rss_bytes, process_rss_bytes
 
 
 class BoundaryBenchmarkError(RuntimeError):
@@ -444,41 +445,10 @@ def environment_metadata(repo_root: str | Path, *, config_digest: str, dataset_d
         "python_version": platform.python_version(),
         "python_implementation": platform.python_implementation(),
         "cpu_count": os.cpu_count(),
-        "physical_memory_bytes": _physical_memory_bytes(),
+        "physical_memory_bytes": physical_memory_bytes(),
         "process_max_rss_bytes": process_max_rss_bytes(),
         "byte_order": sys.byteorder,
     }
-
-
-def process_max_rss_bytes() -> int:
-    """把 Unix 平台不一致的 ru_maxrss 单位统一成字节。"""
-
-    value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-    return value if sys.platform == "darwin" else value * 1_024
-
-
-def process_rss_bytes() -> int:
-    """读取当前进程 RSS；不可用时退回平台最大 RSS。"""
-
-    if sys.platform.startswith("linux"):
-        try:
-            pages = int(Path("/proc/self/statm").read_text(encoding="ascii").split()[1])
-            page_size = os.sysconf("SC_PAGE_SIZE")
-            if isinstance(page_size, int):
-                return pages * page_size
-        except (OSError, ValueError, IndexError):
-            pass
-    try:
-        result = subprocess.run(
-            ("ps", "-o", "rss=", "-p", str(os.getpid())),
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return int(result.stdout.strip()) * 1_024
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return process_max_rss_bytes()
 
 
 def directory_bytes(path: str | Path) -> int:
@@ -767,15 +737,6 @@ def _jsonable(value: object) -> object:
 def _secret_key(key: str) -> bool:
     normalized = key.casefold().replace("-", "_")
     return any(marker in normalized for marker in ("credential", "api_key", "password", "secret", "token"))
-
-
-def _physical_memory_bytes() -> int | None:
-    try:
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        page_count = os.sysconf("SC_PHYS_PAGES")
-    except (AttributeError, OSError, ValueError):
-        return None
-    return page_size * page_count if isinstance(page_size, int) and isinstance(page_count, int) else None
 
 
 def _git(root: Path, *arguments: str) -> str:

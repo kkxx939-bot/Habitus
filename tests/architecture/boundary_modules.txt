@@ -183,5 +183,7 @@ infrastructure/lifecycle/capacity.py
 infrastructure/lifecycle/retry.py
 infrastructure/observability/audit.py
 infrastructure/store/filesystem/durable_io/atomic_file.py
+infrastructure/store/filesystem/durable_io/common.py
+infrastructure/store/filesystem/durable_io/windows_file.py
 infrastructure/store/filesystem/path_safety.py
 infrastructure/vector/publication/store.py

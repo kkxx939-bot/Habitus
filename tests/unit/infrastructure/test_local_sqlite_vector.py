@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import sqlite3
-import stat
 from pathlib import Path
 
 import pytest
@@ -33,6 +32,7 @@ from habitus.infrastructure.vector.adapters import (
 from habitus.memory.workflow.failure import MemoryJobFailureKind, memory_job_failure_kind
 from habitus.model_client import EmbeddingVector
 from tests.lock_store import ProcessLocalLockStore
+from tests.platform_helpers import is_private_directory, is_private_file
 
 LOCK = PathLock(ProcessLocalLockStore())
 NO_FILTER = VectorStoreFilter(equals={}, one_of={})
@@ -469,10 +469,10 @@ def test_vector_files_are_private_like_the_other_storage_databases(tmp_path: Pat
         await store.close()
 
     asyncio.run(scenario())
-    assert stat.S_IMODE((tmp_path / "vector").stat().st_mode) == 0o700
+    assert is_private_directory(tmp_path / "vector")
     files = sorted((tmp_path / "vector").iterdir())
     assert "memory.sqlite3" in [path.name for path in files]
-    assert {path.name: stat.S_IMODE(path.stat().st_mode) for path in files} == {path.name: 0o600 for path in files}
+    assert files and all(is_private_file(path) for path in files)
 
 
 def test_construction_does_not_touch_the_disk(tmp_path: Path) -> None:

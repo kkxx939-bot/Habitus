@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import Enum
@@ -29,6 +30,7 @@ from habitus.foundation.observability import (
 )
 from habitus.infrastructure.observability import AuditRecord, ObservabilitySnapshot
 from habitus.infrastructure.store.contracts import LockStoreSnapshot
+from habitus.infrastructure.store.filesystem import is_path_alias, restrict_directory_to_owner
 from habitus.memory.browse import MemoryLayerText, MemoryListing
 from habitus.memory.conversation import (
     ConversationAddress,
@@ -1053,28 +1055,26 @@ class Runtime:
         missing: list[Path] = []
         current = root
         while not current.exists():
-            if current.is_symlink():
+            if is_path_alias(current):
                 raise RuntimeInitializationError("runtime storage path cannot traverse a symbolic link")
             missing.append(current)
             parent = current.parent
             if parent == current:
                 raise RuntimeInitializationError("runtime storage root has no existing parent")
             current = parent
-        if current.is_symlink() or not current.is_dir():
+        if is_path_alias(current) or not current.is_dir():
             raise RuntimeInitializationError("runtime storage ancestor must be a real directory")
         for directory in reversed(missing):
-            if directory.is_symlink():
+            if is_path_alias(directory):
                 raise RuntimeInitializationError("runtime storage path cannot traverse a symbolic link")
             try:
                 directory.mkdir(mode=0o700)
             except FileExistsError:
                 pass
-            if directory.is_symlink() or not directory.is_dir():
+            if is_path_alias(directory) or not directory.is_dir():
                 raise RuntimeInitializationError("runtime storage path is not a real directory")
-            try:
-                directory.chmod(0o700)
-            except OSError:
-                pass
+            with suppress(OSError):
+                restrict_directory_to_owner(directory)
 
     def _observe_degraded_source_addresses(
         self,

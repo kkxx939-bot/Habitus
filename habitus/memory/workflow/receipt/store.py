@@ -16,6 +16,7 @@ from habitus.infrastructure.store.filesystem import (
     atomic_replace_bytes,
     atomic_temporary_destination,
     durable_unlink,
+    is_path_alias,
     read_regular_bytes,
 )
 from habitus.memory.conversation import ConversationAddress
@@ -64,7 +65,7 @@ class MemoryChangeReceiptStore:
         config: MemoryChangeReceiptStoreConfig | None = None,
     ) -> None:
         requested = Path(root).expanduser().absolute()
-        if requested.is_symlink():
+        if is_path_alias(requested):
             raise MemoryChangeReceiptError("memory change receipt root cannot be a symbolic link")
         if not isinstance(codec, MemoryDocumentCodec):
             raise TypeError("codec must be MemoryDocumentCodec")
@@ -197,7 +198,7 @@ class MemoryChangeReceiptStore:
     def _read_all(self) -> tuple[MemoryChangeReceipt, ...]:
         if not self.receipts_root.exists():
             return ()
-        if self.receipts_root.is_symlink() or not self.receipts_root.is_dir():
+        if is_path_alias(self.receipts_root) or not self.receipts_root.is_dir():
             raise MemoryChangeReceiptError("memory change receipt root is not a safe directory")
         receipts: list[MemoryChangeReceipt] = []
         seen_entries = 0

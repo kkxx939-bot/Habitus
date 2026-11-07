@@ -9,7 +9,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from habitus.foundation.ids import canonical_path_identity, require_safe_path_segment
-from habitus.infrastructure.store.filesystem import DurablePathIntegrityError, list_real_directory
+from habitus.infrastructure.store.filesystem import DurablePathIntegrityError, is_path_alias, list_real_directory
 from habitus.pre.conversation import ConversationRangeSummaryStage
 
 _SEGMENT_ID = re.compile(r"^(?P<start>[0-9]{12})-(?P<end>[0-9]{12})$")
@@ -75,7 +75,7 @@ class ConversationLayout:
         ):
             raise ValueError("max_conversation_tree_entries must be a positive integer")
         requested = Path(root).expanduser().absolute()
-        if requested.is_symlink():
+        if is_path_alias(requested):
             raise ConversationLayoutError("conversation root cannot be a symbolic link")
         self.root = requested.resolve(strict=False)
         self.max_conversation_tree_entries = max_conversation_tree_entries

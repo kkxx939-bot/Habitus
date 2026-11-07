@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -14,7 +15,7 @@ import yaml
 
 from habitus.config import HabitusConfig
 from habitus.config.loader import load_config_object, strict_object
-from habitus.infrastructure.store.filesystem.durable_io.atomic_file import atomic_replace_bytes
+from habitus.infrastructure.store.filesystem import atomic_replace_bytes, grants_group_or_other_access, is_path_alias
 
 DEFAULT_CONFIG_PATH = Path("~/.habitus/config.yaml")
 DEFAULT_PLUGIN_CONNECTION_PATH = Path("~/.habitus/agent-plugin/connection.json")
@@ -85,7 +86,7 @@ def initialize_config(
         raise TypeError("force must be boolean")
     existing = _read_existing(path)
     if existing is not None and not force:
-        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+        if grants_group_or_other_access(path):
             atomic_replace_bytes(path, existing, artifact_root=path.parent, restrict_existing_directories=False)
         _load_file(path)
         return ConfigInitializationResult(path=path, created=False, backup_path=None)
@@ -286,7 +287,7 @@ def _initialize_encoded(
         raise TypeError("force must be boolean")
     existing = _read_existing(path)
     if existing is not None and not force:
-        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+        if grants_group_or_other_access(path):
             atomic_replace_bytes(path, existing, artifact_root=path.parent, restrict_existing_directories=False)
         _load_file(path)
         return ConfigInitializationResult(path=path, created=False, backup_path=None)
@@ -315,7 +316,10 @@ def _normalized_key(mapping: Mapping[str, object], requested: str) -> str | None
 
 
 def _read_required_regular_file(path: Path) -> bytes:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    # Windows 没有 O_NOFOLLOW：先拒别名（含目录联接）；O_BINARY 关掉 CRT 文本模式（否则 CRLF 被改写、Ctrl-Z 截断）。
+    if is_path_alias(path):
+        raise OSError(errno.ELOOP, "Habitus config cannot be a symbolic link", str(path))
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     descriptor = os.open(path, flags)
     try:
         metadata = os.fstat(descriptor)

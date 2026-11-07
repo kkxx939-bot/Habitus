@@ -141,6 +141,9 @@ export async function withSessionLock(root, host, nativeSessionId, callback) {
       await mkdir(target.lock, { mode: DIR_MODE });
       await replaceJsonDurably(target.owner, {
         schemaVersion: 2, ownerToken, pid: process.pid, processIdentity, acquiredAt: new Date().toISOString(),
+        // Windows 没有 /proc 与 ps：记下本进程启动时刻（Node 启动时取的墙钟，之后时钟怎么拨都不变），
+        // 争锁方拿内核记录的同一 pid 启动时刻来比；不必每次拿锁都起 PowerShell。
+        ...(process.platform === "win32" ? { processStartedAtMs: Math.round(performance.timeOrigin) } : {}),
       });
       break;
     } catch (error) {
@@ -183,14 +186,18 @@ async function reclaimAbandonedLock(target, contenderToken) {
   let owner;
   try { owner = JSON.parse(await readFile(target.owner, "utf8")); } catch {}
   const staleAge = Date.now() - metadata.mtimeMs;
+  // 心跳仍新鲜的锁不论持有者是谁都不回收；先判它，正常争锁就不必去查进程身份（Windows 上那要起一次 PowerShell）。
+  if (staleAge <= LOCK_STALE_MS) return false;
   if (owner?.schemaVersion === 2 && processIsAlive(owner.pid)) {
     const currentIdentity = await readProcessIdentity(owner.pid);
     if (currentIdentity !== null && typeof owner.processIdentity === "string" && currentIdentity === owner.processIdentity) return false;
-    if (currentIdentity === null && staleAge <= LOCK_UNVERIFIED_LIVE_MAX_STALE_MS) return false;
+    // Windows：这个 pid 现在的进程启动时刻与持锁者记下的相同 → 还是它；不同 → pid 被复用、原主已死。
+    const verdict = currentIdentity === null ? windowsOwnerVerdict(await readWindowsProcessStart(owner.pid), owner.processStartedAtMs) : null;
+    if (verdict === "holder") return false;
+    if (currentIdentity === null && verdict === null && staleAge <= LOCK_UNVERIFIED_LIVE_MAX_STALE_MS) return false;
   } else if (owner?.schemaVersion === 1 && processIsAlive(owner.pid)) {
     if (staleAge <= LOCK_UNVERIFIED_LIVE_MAX_STALE_MS) return false;
   }
-  if (staleAge <= LOCK_STALE_MS) return false;
   const quarantine = `${target.lock}.stale-${contenderToken}`;
   try { await rename(target.lock, quarantine); }
   catch (error) { if (["ENOENT", "EEXIST", "ENOTEMPTY"].includes(error?.code)) return false; throw error; }
@@ -221,6 +228,29 @@ async function readProcessIdentity(pid) {
     } catch { return null; }
   }
   return null;
+}
+
+// 两个时刻都是各自那一刻取的墙钟、之后固定不变，所以时钟回拨不影响比较；容差吸收 Node 启动耗时（内核建进程到
+// Node 取 timeOrigin 之间）。没有记录（旧锁、非 Windows 写的锁）或查不到时返回 null，交回 5 分钟的保守上限。
+const WINDOWS_START_TOLERANCE_MS = 5000;
+
+export function windowsOwnerVerdict(startedAtMs, recordedStartMs) {
+  if (!Number.isFinite(startedAtMs) || !Number.isFinite(recordedStartMs)) return null;
+  return Math.abs(startedAtMs - recordedStartMs) <= WINDOWS_START_TOLERANCE_MS ? "holder" : "reused";
+}
+
+async function readWindowsProcessStart(pid) {
+  if (process.platform !== "win32" || !Number.isSafeInteger(pid) || pid <= 0) return null;
+  const script = `[Diagnostics.Process]::GetProcessById(${pid}).StartTime.ToUniversalTime().ToString('o')`;
+  try {
+    const { stdout } = await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      { timeout: 10_000, maxBuffer: 4096, windowsHide: true },
+    );
+    const started = Date.parse(stdout.trim());
+    return Number.isFinite(started) ? started : null;
+  } catch { return null; }
 }
 
 async function releaseOwnedLock(target, ownerToken) {

@@ -122,8 +122,7 @@ def test_a_response_that_cannot_be_written_is_observed_not_raised(tmp_path, monk
     """索引坏了、盘写不进（不是账本自己的错误）：这一轮的记录已经落定，回应丢了只记观测、按"没回应"结算。"""
 
     import errno
-
-    from habitus.infrastructure.store.filesystem.durable_io import atomic_file
+    import os
 
     ledger = ForesightLedgerStore(tmp_path / "ledger")
     recorder = Recorder()
@@ -137,7 +136,8 @@ def test_a_response_that_cannot_be_written_is_observed_not_raised(tmp_path, monk
     def no_space(*_args: object, **_kwargs: object) -> None:
         raise OSError(errno.ENOSPC, "No space left on device")
 
-    monkeypatch.setattr(atomic_file.os, "link", no_space)
+    # 两份耐久实现（POSIX / Windows）落盘前都要 fsync 临时文件：在这里模拟盘满，与平台无关。
+    monkeypatch.setattr(os, "fsync", no_space)
     bridge.respond("conv#1", ReminderResponse("hotel", "正"), at=at)
     monkeypatch.undo()
     index = tmp_path / "ledger" / "index" / "expectations" / "hotel.json"

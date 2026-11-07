@@ -16,7 +16,13 @@ from typing import Any
 
 from habitus.foundation.integrity import canonical_json
 from habitus.infrastructure.store.contracts import LeaseGuard, PathLock
-from habitus.infrastructure.store.filesystem import atomic_replace_bytes, durable_unlink, read_regular_bytes
+from habitus.infrastructure.store.filesystem import (
+    atomic_replace_bytes,
+    durable_unlink,
+    ensure_owner_directory,
+    is_path_alias,
+    read_regular_bytes,
+)
 from habitus.memory.snapshot import MemorySnapshot
 from habitus.memory.tree import MemoryTree, memory_root_lock_prefix
 from habitus.memory.uri import MemoryURI
@@ -192,8 +198,7 @@ class MemoryLifecycleOperationStore:
         self._lock_prefix = memory_root_lock_prefix("memory-lifecycle-operation", tree.root)
 
     def initialize(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.root, 0o700)
+        ensure_owner_directory(self.root)
         self.pending()
 
     def prepare(
@@ -349,7 +354,7 @@ class MemoryLifecycleOperationStore:
             metadata = self.root.stat(follow_symlinks=False)
         except FileNotFoundError:
             return ()
-        if not stat.S_ISDIR(metadata.st_mode) or self.root.is_symlink():
+        if not stat.S_ISDIR(metadata.st_mode) or is_path_alias(self.root):
             raise MemoryLifecycleOperationError("memory lifecycle operation root is unsafe")
         paths: list[Path] = []
         with os.scandir(self.root) as entries:

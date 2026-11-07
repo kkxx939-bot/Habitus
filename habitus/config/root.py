@@ -26,6 +26,7 @@ from habitus.config.temporal import TemporalConfig
 from habitus.config.workflow import WorkflowConfig
 from habitus.foundation.network import OutboundSettings
 from habitus.infrastructure.observability.config import ObservabilityConfig
+from habitus.infrastructure.store.filesystem import grants_group_or_other_access
 
 _FIXED_RETRIEVAL_DOCUMENTS = 1
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -195,7 +196,7 @@ class HabitusConfig:
 
         resolved = Path(path).expanduser().absolute()
         config = cls.from_mapping(load_config_object(resolved))
-        if config.credentials.contains_secret_values and resolved.stat().st_mode & 0o077:
+        if config.credentials.contains_secret_values and grants_group_or_other_access(resolved):
             raise ConfigError("secret-bearing config file must not grant group or other permissions")
         return config
 

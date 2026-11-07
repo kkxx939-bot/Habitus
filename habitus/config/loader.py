@@ -14,6 +14,8 @@ from typing import TypeVar, get_args, get_type_hints
 import yaml
 from yaml.nodes import MappingNode
 
+from habitus.infrastructure.store.filesystem import is_path_alias
+
 _MAX_CONFIG_BYTES = 1024 * 1024
 _ConfigValue = TypeVar("_ConfigValue")
 
@@ -35,7 +37,7 @@ def load_config_object(path: str | Path) -> dict[str, object]:
         raise ConfigError("config path must be a filesystem path") from exc
     if requested.suffix.casefold() != ".yaml":
         raise ConfigError("config file must use the .yaml suffix")
-    if requested.is_symlink():
+    if is_path_alias(requested):
         raise ConfigError("config file cannot be a symbolic link")
     try:
         metadata = requested.stat()

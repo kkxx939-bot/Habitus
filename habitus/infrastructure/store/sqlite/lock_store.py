@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import sqlite3
 import threading
 import uuid
@@ -18,6 +17,7 @@ from math import isfinite
 from pathlib import Path
 
 from habitus.infrastructure.store.contracts.lock import LockLostError, LockStoreSnapshot, LockToken
+from habitus.infrastructure.store.filesystem import ensure_owner_directory, restrict_file_to_owner
 
 _LOCK_TABLE_LAYOUT = (
     ("lock_key", "TEXT", 0, None, 1),
@@ -84,10 +84,9 @@ class SQLiteLockStore:
         with self._initialization_guard:
             if self._initialized:
                 return
-            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(self.path.parent, 0o700)
+            ensure_owner_directory(self.path.parent)
             self._init_db()
-            os.chmod(self.path, 0o600)
+            restrict_file_to_owner(self.path)
             self._initialized = True
 
     def acquire(self, lock_key: str, ttl_seconds: int = 30) -> LockToken:

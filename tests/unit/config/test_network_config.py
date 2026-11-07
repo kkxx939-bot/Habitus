@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,8 @@ import yaml
 
 from habitus.config import ConfigError, HabitusConfig
 from habitus.foundation.network import OutboundSettings
+from habitus.infrastructure.store.filesystem import restrict_file_to_owner
+from tests.platform_helpers import deny_all_access
 from tests.tls_helpers import TEST_CA
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -110,17 +113,17 @@ def test_ca_bundle_must_be_a_non_empty_path(tmp_path: Path, value: object) -> No
         HabitusConfig.from_mapping(_payload(tmp_path, {"ca_bundle": value}))
 
 
-@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX 权限位；root 读得到一切")
+@pytest.mark.skipif(sys.platform != "win32" and os.geteuid() == 0, reason="POSIX 上 root 读得到一切")
 def test_unreadable_ca_bundle_is_rejected(tmp_path: Path) -> None:
     locked = tmp_path / "corp-root.pem"
     locked.write_bytes(TEST_CA.read_bytes())
-    locked.chmod(0)
+    deny_all_access(locked)
     try:
         with pytest.raises(ConfigError, match=r"config\.network\.ca_bundle") as raised:
             HabitusConfig.from_mapping(_payload(tmp_path, {"ca_bundle": str(locked)}))
         assert str(locked) in str(raised.value)
     finally:
-        locked.chmod(0o600)
+        restrict_file_to_owner(locked)
 
 
 @pytest.mark.parametrize(

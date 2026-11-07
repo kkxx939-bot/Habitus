@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -12,6 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from habitus.foundation.observability import ObservationEvent
+from habitus.infrastructure.store.filesystem import ensure_owner_directory, restrict_file_to_owner
 
 _AUDITED_OPERATIONS = frozenset(
     {
@@ -67,8 +67,7 @@ class AuditStore:
         with self._guard:
             if self._initialized:
                 return
-            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(self.path.parent, 0o700)
+            ensure_owner_directory(self.path.parent)
             with self._connect() as connection:
                 connection.execute(
                     """
@@ -86,7 +85,7 @@ class AuditStore:
                     """
                 )
                 connection.execute("CREATE INDEX IF NOT EXISTS audit_events_occurred_at ON audit_events(occurred_at)")
-            os.chmod(self.path, 0o600)
+            restrict_file_to_owner(self.path)
             self._initialized = True
 
     def record(self, event: ObservationEvent) -> None:

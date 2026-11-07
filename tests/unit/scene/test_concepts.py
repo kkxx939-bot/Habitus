@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-import signal
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -39,6 +38,7 @@ from habitus.scene.concepts.model import members_retired
 from habitus.scene.concepts.situation import SituationBasis, SituationRule
 from habitus.scene.concepts.store import ConceptStore, ConceptStoreError
 from habitus.scene.concepts.sync import base_concept, plan_sync
+from tests.platform_helpers import call_within_seconds
 from tests.unit.kind_ids import kind_id
 from tests.unit.scene.concept_fixtures import (
     ALL_CONCEPTS,
@@ -719,16 +719,7 @@ def test_sync_rewrites_group_members_to_the_current_classes() -> None:
 def _within_seconds(seconds: int, call):  # type: ignore[no-untyped-def]
     """在限定秒数内调用；不返回就抛 TimeoutError（防住死循环把整个测试进程挂住）。"""
 
-    def expire(*_: object) -> None:
-        raise TimeoutError(f"did not return within {seconds} s")
-
-    previous = signal.signal(signal.SIGALRM, expire)
-    signal.alarm(seconds)
-    try:
-        return call()
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous)
+    return call_within_seconds(seconds, call)
 
 
 def test_sync_regroups_in_finitely_many_steps_when_a_split_off_class_is_merged_away() -> None:

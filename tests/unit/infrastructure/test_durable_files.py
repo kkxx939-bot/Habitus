@@ -1,11 +1,14 @@
-"""可信根目录内不可变、可变和删除文件操作测试。"""
+"""可信根目录内不可变、可变和删除文件操作测试。
 
+经 ``durable_io`` 包导入：POSIX 上测 ``atomic_file``，Windows 上测 ``windows_file``，两份实现过同一组用例。
+"""
+
+import sys
 from pathlib import Path
 
 import pytest
 
-import habitus.infrastructure.store.filesystem.durable_io.atomic_file as atomic_file_module
-from habitus.infrastructure.store.filesystem.durable_io.atomic_file import (
+from habitus.infrastructure.store.filesystem.durable_io import (
     ImmutableArtifactConflictError,
     atomic_create_bytes,
     atomic_replace_bytes,
@@ -18,6 +21,9 @@ from habitus.infrastructure.store.filesystem.path_safety import (
     require_safe_artifact_path,
     validate_authoritative_tree,
 )
+
+# 当前平台实际生效的那份实现模块（POSIX: atomic_file；Windows: windows_file）。
+atomic_file_module = sys.modules[atomic_replace_bytes.__module__]
 
 
 def test_immutable_create_is_idempotent_for_same_bytes_and_conflicts_for_different_bytes(tmp_path: Path) -> None:

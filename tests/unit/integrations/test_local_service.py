@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import socket
-import stat
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +14,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from habitus.config import HabitusConfig
+from habitus.infrastructure.store.filesystem import restrict_file_to_owner
 from habitus.infrastructure.vector import VectorStoreState
 from habitus.integrations.http_api.app import create_http_app
 from habitus.integrations.local_service import (
@@ -27,6 +27,7 @@ from habitus.integrations.local_service import (
 from habitus.integrations.local_service import doctor as doctor_module
 from habitus.model_client import EmbeddingVector
 from habitus.runtime import Runtime
+from tests.platform_helpers import grant_everyone_read, grant_group_read, is_private_file
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
@@ -71,7 +72,7 @@ def test_instance_lock_is_private_exclusive_and_reusable(tmp_path: Path) -> None
     first.acquire()
     try:
         assert first.acquired is True
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert is_private_file(path)
         assert '"schema_version":"habitus_local_service_lock_v1"' in path.read_text(encoding="utf-8")
         with pytest.raises(ServiceInstanceLockError, match="already owns"):
             second.acquire()
@@ -196,7 +197,7 @@ def test_doctor_reports_an_out_of_range_override_as_a_config_failure_naming_the_
     payload["behavior"] = {"kinds_revision_weekday": 7}
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
-    path.chmod(0o600)
+    restrict_file_to_owner(path)
 
     report = run_doctor_from_env(environ={"HABITUS_CONFIG_FILE": str(path)}, check_port=False)
     assert [(check.name, check.status) for check in report.checks] == [("config", DoctorStatus.FAIL)]
@@ -206,7 +207,7 @@ def test_doctor_reports_an_out_of_range_override_as_a_config_failure_naming_the_
 def test_doctor_requires_private_permissions_for_the_secret_bearing_yaml(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_bytes((REPOSITORY_ROOT / "habitus" / "config" / "example.yaml").read_bytes())
-    path.chmod(0o644)
+    grant_everyone_read(path)
 
     exposed = run_doctor_from_env(
         environ={"HABITUS_CONFIG_FILE": str(path)},
@@ -215,7 +216,7 @@ def test_doctor_requires_private_permissions_for_the_secret_bearing_yaml(tmp_pat
     permissions = next(check for check in exposed.checks if check.name == "config_permissions")
     assert permissions.status is DoctorStatus.FAIL
 
-    path.chmod(0o600)
+    restrict_file_to_owner(path)
     private = run_doctor_from_env(
         environ={"HABITUS_CONFIG_FILE": str(path)},
         check_port=False,
@@ -362,7 +363,7 @@ def _write_config(tmp_path: Path, *, port: int = 8787) -> Path:
     path = tmp_path / "config" / "config.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
-    path.chmod(0o600)
+    restrict_file_to_owner(path)
     return path
 
 
@@ -570,7 +571,7 @@ def test_doctor_rejects_a_group_readable_config(tmp_path: Path) -> None:
     """只给同组读权限（0640）也要判失败：组和其他人任何一位都不许有。"""
 
     path = _write_config(tmp_path)
-    path.chmod(0o640)
+    grant_group_read(path)
 
     report = run_doctor_from_env(environ={"HABITUS_CONFIG_FILE": str(path)}, check_port=False)
 
@@ -734,7 +735,7 @@ def test_doctor_deep_writes_only_structured_logs_to_stderr(tmp_path: Path) -> No
     payload["credentials"]["dashscope"]["api_key"] = "fake"
     config = tmp_path / "config.yaml"
     config.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
-    config.chmod(0o600)
+    restrict_file_to_owner(config)
 
     completed = subprocess.run(
         [

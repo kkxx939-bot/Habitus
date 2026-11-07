@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import signal
 from dataclasses import replace
 from pathlib import Path
 
@@ -26,6 +25,7 @@ from habitus.runtime.scene_vocabulary import VocabularyCatalog
 from habitus.scene.concepts.catalog import ClassCatalog, MovedOccurrence
 from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.concepts.sync import base_concept, plan_sync
+from tests.platform_helpers import call_within_seconds
 from tests.unit.behavior.kinds_fixtures import EDIT, NOW, RESEARCH, edit_class, research_class
 from tests.unit.scene.concept_fixtures import group
 
@@ -125,14 +125,5 @@ def test_a_class_split_off_and_merged_away_between_two_syncs_regroups_in_finite_
     exercise = replace(group("运动", "以活动身体为目的的行为", "打球", "跑步"), classes=("s-k0001", "s-k0002"))
     existing = ConceptSet([*(base_concept(item, now=NOW) for item in classes.values()), exercise])
 
-    def expire(*_: object) -> None:
-        raise TimeoutError("plan_sync did not return within 3 s")
-
-    previous = signal.signal(signal.SIGALRM, expire)
-    signal.alarm(3)
-    try:
-        plan = plan_sync(existing, tuple(classes.values()), changes, now=NOW)
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous)
+    plan = call_within_seconds(3, lambda: plan_sync(existing, tuple(classes.values()), changes, now=NOW))
     assert "运动" not in {item.name for item in plan.write}

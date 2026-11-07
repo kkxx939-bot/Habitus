@@ -1388,3 +1388,20 @@ def test_memory_gets_the_subjects_time_zone_from_the_composition_root() -> None:
     loop_call = assembly[assembly.index("MemoryExtractionLoop(") :]
     loop_call = loop_call[: loop_call.index("\n    )")]
     assert "zone=config.locale.zone()," in loop_call
+
+
+_WINDOWS_BINARY_PACKAGES = {"win32api", "win32con", "win32file", "win32security", "pywintypes", "pythoncom", "win32com"}
+
+
+def test_windows_support_imports_only_the_standard_library() -> None:
+    """阶段 3 决定 1（用户 2026-11-06）：Windows 的锁、DACL、长路径只用标准库 ctypes / msvcrt，不引 pywin32——
+    气隙或只有内部 PyPI 镜像的机器上，二进制依赖本身可能装不上。"""
+
+    violations = sorted(
+        f"{path.relative_to(SRC)}: {root}"
+        for path in SRC.rglob("*.py")
+        for root in imported_roots(path) & _WINDOWS_BINARY_PACKAGES
+    )
+    assert violations == []
+    pyproject = (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8").casefold()
+    assert "pywin32" not in pyproject

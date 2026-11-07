@@ -5,14 +5,17 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from unittest.mock import Mock
+from zoneinfo import available_timezones
 
 import pytest
 import yaml
 
 from habitus.config import HabitusConfig
+from habitus.infrastructure.store.filesystem import restrict_file_to_owner
 from habitus.integrations.local_service import cli, locale_setup
 from habitus.integrations.local_service import initialization as initialization_module
 from habitus.integrations.local_service.cloud_setup import default_cloud_selection
@@ -309,7 +312,7 @@ def _existing_config_in_berlin(destination: Path) -> bytes:
     text = destination.read_text(encoding="utf-8")
     original = (text + "\nlocale:\n  timezone: Europe/Berlin\n  region: DE\n").encode("utf-8")
     destination.write_bytes(original)
-    destination.chmod(0o600)
+    restrict_file_to_owner(destination)
     return original
 
 
@@ -386,7 +389,7 @@ def _existing_berlin_config_with_calendar(destination: Path) -> None:
         + "  nominal_weekend: [6]\n",
         encoding="utf-8",
     )
-    destination.chmod(0o600)
+    restrict_file_to_owner(destination)
 
 
 def test_interactive_force_rebuild_that_changes_the_region_drops_the_old_calendar_path(
@@ -473,7 +476,7 @@ def test_noninteractive_force_rebuild_of_an_unreadable_config_still_rebuilds(
     destination = tmp_path / "broken" / "config.yaml"
     destination.parent.mkdir(parents=True)
     destination.write_text("locale: [unclosed\n", encoding="utf-8")
-    destination.chmod(0o600)
+    restrict_file_to_owner(destination)
     _system_zone(monkeypatch, _returns("Asia/Singapore"))
 
     _noninteractive_init(destination, "--force")
@@ -535,3 +538,12 @@ def test_daylight_saving_zones_do_not_count_as_the_same_offset() -> None:
     # 冬天柏林与伦敦差 1 小时、夏天也差 1 小时，但伦敦与里斯本全年一致
     assert "same UTC offset" not in _notice(("Europe/Berlin", "DE"), ("Europe/London", "DE"))
     assert "same UTC offset" in _notice(("Europe/London", "GB"), ("Europe/Lisbon", "GB"))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows 上 tzlocal 走注册表换算 IANA 名，POSIX 走 /etc/localtime")
+def test_windows_registry_time_zone_maps_to_a_known_iana_name() -> None:
+    """阶段 3：W3 报告里没实测的那一环——真 Windows 上 tzlocal 从注册表拿到的名字必须在 tzdata 的名字表里。"""
+
+    name = locale_setup._tzlocal_name()
+    assert isinstance(name, str)
+    assert name in available_timezones()

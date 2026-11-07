@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 import threading
 from contextlib import closing
@@ -13,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from habitus.infrastructure.store.filesystem import ensure_owner_directory, restrict_file_to_owner
 from habitus.memory.conversation.indexing.model import ConversationSummaryReference, summary_reference
 from habitus.memory.conversation.layout import ConversationAddress, ConversationLayout
 from habitus.pre.conversation import ConversationRangeSummary, ConversationSegmentSummary
@@ -98,8 +98,7 @@ class SQLiteConversationSummaryUseStore:
             if self._initialized:
                 return
             try:
-                self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                os.chmod(self.path.parent, 0o700)
+                ensure_owner_directory(self.path.parent)
                 with closing(self._connect()) as connection:
                     connection.execute(
                         """
@@ -118,7 +117,7 @@ class SQLiteConversationSummaryUseStore:
                         """
                     )
                     self._require_schema(connection)
-                os.chmod(self.path, 0o600)
+                restrict_file_to_owner(self.path)
             except Exception as exc:
                 raise ConversationSummaryUseError("failed to initialize Summary use store") from exc
             self._initialized = True

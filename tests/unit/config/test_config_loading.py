@@ -9,6 +9,8 @@ import yaml
 
 from habitus.config import ConfigError, HabitusConfig
 from habitus.config.loader import load_config_object, required_field, strict_fields, strict_object
+from habitus.infrastructure.store.filesystem import restrict_file_to_owner
+from tests.platform_helpers import grant_everyone_read
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE_CONFIG = REPOSITORY_ROOT / "habitus" / "config" / "example.yaml"
@@ -80,12 +82,12 @@ def test_secret_bearing_yaml_requires_private_file_permissions(tmp_path) -> None
     payload["credentials"]["chat"]["api_key"] = "private-secret"
     path = tmp_path / "habitus.yaml"
     path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
-    path.chmod(0o644)
+    grant_everyone_read(path)
 
     with pytest.raises(ConfigError, match="group or other"):
         HabitusConfig.from_file(path)
 
-    path.chmod(0o600)
+    restrict_file_to_owner(path)
     assert HabitusConfig.from_file(path).credentials.resolve("chat")["api_key"] == "private-secret"
 
 

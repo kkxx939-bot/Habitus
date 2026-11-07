@@ -63,7 +63,7 @@ class BehaviorTree:
         tree_config: BehaviorTreeConfig | None = None,
     ) -> None:
         requested = Path(root).expanduser().absolute()
-        if requested.is_symlink():
+        if requested.is_symlink() or requested.is_junction():
             raise BehaviorTreeIntegrityError("behavior tree root cannot be a symbolic link")
         self.root = requested.resolve(strict=False)
         if document_codec is None:

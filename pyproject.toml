@@ -61,7 +61,7 @@ dev = [
 ]
 
 [project.scripts]
-habitus-server = "habitus.integrations.local_service.cli:main"
+habitus-server = "habitus.integrations.local_service.console:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

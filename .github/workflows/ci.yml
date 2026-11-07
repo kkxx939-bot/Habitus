@@ -9,11 +9,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # windows-latest 是普通 Windows 基线（有管理员、有网、英文用户名、短路径）；极限环境由定向测试在其上模拟。
+        os: [ubuntu-latest, macos-latest, windows-latest]
         # requires-python 是 >=3.12、不设上限：从下限 3.12 测到当前最新的 3.14，每个都要绿。
         python-version: ["3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # Windows runner 默认 shell 是 pwsh；各步脚本统一用 Git Bash 跑，与 scripts/ci.sh 同一套语法。
+        shell: bash
     steps:
+      # Windows runner 默认 core.autocrlf=true：签出后 scripts/ci.sh 变 CRLF，bash 读到 "set -euo pipefail\r" 就失败。
+      - name: Keep LF line endings on Windows checkout
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      # 极限环境是"不能改注册表的公司机器"：关掉系统长路径支持，让 >260 字符的用例只能靠 Habitus 自己的 \\?\ 通过，
+      # 不被 runner 预先打开的 LongPathsEnabled 假绿。对之后新起的进程生效。
+      - name: Disable Windows long path support (simulate a locked-down machine)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -Value 0 -Type DWord
+          Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
@@ -41,13 +58,31 @@ jobs:
           habitus-server init --help
           habitus-server init --config "$init_root/config.yaml" --from-config habitus/config/example.yaml --non-interactive --skip-doctor --no-start
           test -f "$init_root/config.yaml"
-          # 权限位用 Python 读：GNU stat 的 -c 在 macOS（BSD stat）上不存在。
-          python -c 'import os, stat, sys; mode = stat.S_IMODE(os.stat(sys.argv[1]).st_mode); sys.exit(0 if mode == 0o600 else f"{sys.argv[1]}: mode {mode:#o}, expected 0o600")' "$init_root/config.yaml"
+          # "仅本人可访问"用 Habitus 自己的权限工具判：POSIX 是 0600 权限位，Windows 是只含当前用户 SID 的 DACL。
+          python -c 'import sys; from habitus.infrastructure.store.filesystem import describe_access, grants_group_or_other_access as loose; p = sys.argv[1]; sys.exit(f"{p}: {describe_access(p)}, expected owner-only access" if loose(p) else 0)' "$init_root/config.yaml"
+          if [ "$RUNNER_OS" != "Windows" ]; then
+            python -c 'import os, stat, sys; mode = stat.S_IMODE(os.stat(sys.argv[1]).st_mode); sys.exit(0 if mode == 0o600 else f"{sys.argv[1]}: mode {mode:#o}, expected 0o600")' "$init_root/config.yaml"
+          fi
           HABITUS_CI_CONFIG_PATH="$init_root/config.yaml" python -c 'import os; from habitus.config import HabitusConfig; c=HabitusConfig.from_file(os.environ["HABITUS_CI_CONFIG_PATH"]); assert c.models.chat.route.credential_ref == "chat"; assert c.models.chat.route.adapter == "openai_compatible_chat"; assert c.models.embedding.route.credential_ref == "embedding"; assert c.models.rerank.route.credential_ref == "dashscope"; assert c.memory.vector_store.adapter == c.conversation.summary_vector_store.adapter == "local_sqlite"; assert c.memory.vector_store.route.credential_ref == c.conversation.summary_vector_store.route.credential_ref == ""'
       - name: Build wheel and verify its contents against pyproject
         run: |
           python -m build --wheel
           python scripts/check_wheel.py
+      - name: Install the wheel offline from a binary-only wheelhouse (air-gapped / internal-mirror install)
+        run: |
+          # 只有内部 PyPI 镜像、不能联网编译的机器：所有运行时依赖都必须有现成 wheel，装时不碰网络、不需要编译器和管理员。
+          wheelhouse="$RUNNER_TEMP/habitus-wheelhouse"
+          offline_venv="$RUNNER_TEMP/habitus-offline"
+          wheel="$(ls dist/*.whl)"
+          # 正式安装口径是 habitus[server]：服务依赖（FastAPI、uvicorn、json-repair、jsonschema）也必须有现成 wheel。
+          python -m pip download --only-binary=:all: --dest "$wheelhouse" "${wheel}[server]"
+          python -m venv "$offline_venv"
+          if [ "$RUNNER_OS" = "Windows" ]; then offline_bin="$offline_venv/Scripts"; else offline_bin="$offline_venv/bin"; fi
+          "$offline_bin/python" -m pip install --no-index --find-links "$wheelhouse" "${wheel}[server]"
+          "$offline_bin/habitus-server" --help
+          "$offline_bin/python" -c 'import fastapi, uvicorn, json_repair, jsonschema; from habitus.integrations.http_api.app import create_http_app; print("server stack importable offline")'
+          offline_root="$RUNNER_TEMP/离线 用户/存储 根"
+          "$offline_bin/python" -c 'import sys; from pathlib import Path; from habitus.infrastructure.store.filesystem import atomic_replace_bytes, grants_group_or_other_access, read_regular_bytes; root = Path(sys.argv[1]); target = root / "记忆" / "偏好.md"; atomic_replace_bytes(target, "仅本人".encode(), artifact_root=root); assert read_regular_bytes(target, artifact_root=root, max_bytes=64) == "仅本人".encode(); assert not grants_group_or_other_access(target)' "$offline_root"
       - name: Install wheel and the npm CLI, execute the packaged plugin lifecycle
         run: |
           smoke_venv="$RUNNER_TEMP/habitus-wheel-smoke"
@@ -55,12 +90,14 @@ jobs:
           marketplace_root="$RUNNER_TEMP/habitus-marketplace"
           doctor_output="$RUNNER_TEMP/habitus-plugin-doctor.json"
           python -m venv "$smoke_venv"
-          "$smoke_venv/bin/pip" install --no-deps dist/*.whl
-          "$smoke_venv/bin/habitus-server" --help
-          "$smoke_venv/bin/habitus-server" init --help
+          # Windows 的 venv 把可执行文件放在 Scripts/，npm 全局安装把 habitus.cmd 放在 prefix 根上（不是 bin/）。
+          if [ "$RUNNER_OS" = "Windows" ]; then smoke_bin="$smoke_venv/Scripts"; else smoke_bin="$smoke_venv/bin"; fi
+          "$smoke_bin/python" -m pip install --no-deps dist/*.whl
+          "$smoke_bin/habitus-server" --help
+          "$smoke_bin/habitus-server" init --help
           (cd plugins && npm pack --pack-destination "$RUNNER_TEMP")
           npm install -g --prefix "$npm_prefix" "$RUNNER_TEMP"/habitus-*.tgz
-          habitus="$npm_prefix/bin/habitus"
+          if [ "$RUNNER_OS" = "Windows" ]; then habitus="$npm_prefix/habitus.cmd"; else habitus="$npm_prefix/bin/habitus"; fi
           "$habitus" --version
           "$habitus" harnesses --json
           "$habitus" plugin install --prepare-only --root "$marketplace_root" --json

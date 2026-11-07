@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import os
-import stat
+import sys
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
@@ -12,6 +13,7 @@ import pytest
 import yaml
 
 from habitus.config import HabitusConfig
+from habitus.infrastructure.store.filesystem import grants_group_or_other_access, restrict_file_to_owner
 from habitus.integrations.local_service import cli
 from habitus.integrations.local_service import initialization as initialization_module
 from habitus.integrations.local_service.cloud_setup import (
@@ -35,6 +37,7 @@ from habitus.integrations.local_service.setup_registry import (
     build_builtin_setup_registry,
 )
 from habitus.runtime import build_runtime
+from tests.platform_helpers import grant_everyone_read, is_private_directory, is_private_file, make_directory_alias
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE_CONFIG = REPOSITORY_ROOT / "habitus" / "config" / "example.yaml"
@@ -89,13 +92,13 @@ def test_initializer_writes_private_valid_config_without_overwriting_by_default(
     destination = tmp_path / "config" / "habitus.yaml"
 
     created = initialize_config(destination, source=EXAMPLE_CONFIG)
-    destination.chmod(0o644)
+    grant_everyone_read(destination)
     replayed = initialize_config(destination, source=EXAMPLE_CONFIG)
 
     assert created.created is True
     assert replayed.created is False
     assert created.backup_path is None
-    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert is_private_file(destination)
     assert HabitusConfig.from_file(destination).http.port == 8787
 
 
@@ -110,7 +113,7 @@ def test_force_initialization_preserves_previous_config_in_private_backup(tmp_pa
     assert result.backup_path == destination.with_name("habitus.bak.yaml")
     assert result.backup_path.read_bytes() != destination.read_bytes()
     assert HabitusConfig.from_file(result.backup_path).http.port == 8799
-    assert stat.S_IMODE(result.backup_path.stat().st_mode) == 0o600
+    assert is_private_file(result.backup_path)
 
 
 def test_initializer_refuses_to_write_an_out_of_range_override(tmp_path: Path) -> None:
@@ -276,7 +279,7 @@ def test_cloud_setup_applies_custom_routes_with_the_local_vector_store(
         "dashscope",
         "embedding",
     )
-    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert is_private_file(destination)
 
 
 def test_cloud_setup_preserves_an_unselected_nonempty_credential() -> None:
@@ -570,7 +573,7 @@ def test_initializer_updates_multiple_named_credentials_in_the_same_private_yaml
     assert missing_credential_fields(destination) == ()
     assert config.credentials.resolve("chat")["api_key"] == "chat-secret"
     assert config.credentials.resolve("dashscope")["api_key"] == "dashscope-secret"
-    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert is_private_file(destination)
 
 
 def test_credential_updates_follow_the_same_normalized_name_rules_as_config_loading(
@@ -585,7 +588,7 @@ def test_credential_updates_follow_the_same_normalized_name_rules_as_config_load
         yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
-    destination.chmod(0o600)
+    restrict_file_to_owner(destination)
 
     config = configure_credentials(
         destination,
@@ -749,7 +752,7 @@ def test_plugin_connection_projection_uses_the_configured_loopback_port(tmp_path
 
     path = write_plugin_connection(config, tmp_path / "agent-plugin" / "connection.json")
 
-    assert path.stat().st_mode & 0o777 == 0o600
+    assert is_private_file(path)
     assert '"base_url": "http://127.0.0.1:8899"' in path.read_text(encoding="utf-8")
 
 
@@ -813,7 +816,7 @@ def test_interactive_cloud_update_preserves_existing_config_in_backup(
     initialize_config(destination, source=EXAMPLE_CONFIG)
     original = destination.read_bytes().replace(b"port: 8787", b"port: 8799", 1)
     destination.write_bytes(original)
-    destination.chmod(0o600)
+    restrict_file_to_owner(destination)
     confirmations = iter((True, False))
     monkeypatch.setattr(cli, "_interactive", Mock(return_value=True))
     monkeypatch.setattr(cli, "_prompt_cloud_setup", Mock(return_value=default_cloud_selection()))
@@ -901,15 +904,15 @@ def test_init_keeps_the_permissions_of_an_existing_config_directory(tmp_path: Pa
 
     documents = tmp_path / "Documents"
     documents.mkdir()
-    documents.chmod(0o755)
+    grant_everyone_read(documents)
     (documents / "notes.txt").write_text("mine\n", encoding="utf-8")
     destination = documents / "habitus.yaml"
 
     cli.main(["init", "--config", str(destination), "--non-interactive", "--skip-doctor", "--no-start"])
 
-    assert stat.S_IMODE(documents.stat().st_mode) == 0o755
-    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
-    assert stat.S_IMODE((documents / "agent-plugin").stat().st_mode) == 0o700
+    assert grants_group_or_other_access(documents)
+    assert is_private_file(destination)
+    assert is_private_directory(documents / "agent-plugin")
 
 
 def test_noninteractive_init_with_empty_credentials_says_where_to_fill_them(
@@ -992,13 +995,13 @@ def test_plugin_connection_keeps_the_permissions_of_an_existing_directory(tmp_pa
 
     existing = tmp_path / "habitus-config"
     existing.mkdir()
-    existing.chmod(0o755)
+    grant_everyone_read(existing)
     config = HabitusConfig.from_mapping(load_initialization_mapping())
 
     path = write_plugin_connection(config, existing / "connection.json")
 
-    assert stat.S_IMODE(existing.stat().st_mode) == 0o755
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert grants_group_or_other_access(existing)
+    assert is_private_file(path)
 
 
 def test_init_exits_with_the_plugin_installer_exit_code_when_it_fails(
@@ -1080,10 +1083,76 @@ def test_mapping_initializer_repairs_the_permissions_of_an_existing_config_it_ke
     payload = yaml.safe_load(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
     initialize_config_from_mapping(destination, payload)
     original = destination.read_bytes()
-    destination.chmod(0o644)
+    grant_everyone_read(destination)
 
     result = initialize_config_from_mapping(destination, {**payload, "http": {**payload["http"], "port": 9999}})
 
     assert result.created is False
-    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert is_private_file(destination)
     assert destination.read_bytes() == original
+
+
+_NPM_CMD_SHIM = (
+    "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\n"
+    'IF EXIST "%dp0%\\node.exe" (\r\n  SET "_prog=%dp0%\\node.exe"\r\n) ELSE (\r\n  SET "_prog=node"\r\n'
+    "  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\n"
+    'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  '
+    '"%dp0%\\node_modules\\habitus\\bin\\habitus.mjs" %*\r\n'
+)
+
+
+@pytest.mark.parametrize(("content", "recognized"), [(_NPM_CMD_SHIM, True), ("@ECHO off\r\npython -m x %*\r\n", False)])
+def test_npm_windows_cmd_shim_is_recognized_by_its_node_call(tmp_path: Path, content: str, recognized: bool) -> None:
+    """阶段 3：Windows 上 PATH 里找到的是 npm 生成的 ``habitus.cmd``（首行 ``@ECHO off``），要看整个批处理里是否调 node。"""
+
+    shim = tmp_path / "npm" / "habitus.cmd"
+    shim.parent.mkdir()
+    shim.write_bytes(content.encode("utf-8"))
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(cli.shutil, "which", Mock(return_value=str(shim)))
+        assert (cli._npm_habitus() == str(shim)) is recognized
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows 才有 .cmd 批处理与 PATHEXT")
+def test_plugin_install_really_runs_the_npm_cmd_shim_from_a_chinese_spaced_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """阶段 3 极限用例：用户名含中文与空格时，``subprocess.run([habitus.cmd, ...])`` 真能调起批处理、参数原样到达。"""
+
+    bin_directory = tmp_path / "Users" / "张三 李四" / "AppData" / "Roaming" / "npm"
+    bin_directory.mkdir(parents=True)
+    received = bin_directory / "received.txt"
+    shim = bin_directory / "habitus.cmd"
+    # 批处理本身只含 ASCII（cmd.exe 按 OEM 代码页读脚本）；中文与空格只出现在它所在的路径里，由 %~dp0 展开。
+    shim.write_bytes(b'@ECHO off\r\nREM node\r\n> "%~dp0received.txt" ECHO %*\r\n')
+    monkeypatch.setenv("PATH", f"{bin_directory}{os.pathsep}{os.environ['PATH']}")
+
+    cli._install_plugins(["codex", "claude-code"])
+
+    assert received.read_text(encoding="ascii").strip() == "plugin install --harness codex --harness claude-code"
+
+
+def test_force_backup_keeps_the_previous_config_byte_for_byte_including_crlf(tmp_path: Path) -> None:
+    """阶段 3：Windows 上 ``os.open`` 不带 O_BINARY 是 CRT 文本模式，会把 CRLF 读成 LF；备份必须逐字节等于原文件。"""
+
+    destination = tmp_path / "config" / "habitus.yaml"
+    initialize_config(destination, source=EXAMPLE_CONFIG)
+    windows_edited = EXAMPLE_CONFIG.read_bytes().replace(b"\n", b"\r\n").replace(b"port: 8787", b"port: 8799", 1)
+    destination.write_bytes(windows_edited)
+
+    result = initialize_config(destination, source=EXAMPLE_CONFIG, force=True)
+
+    assert result.backup_path is not None
+    assert result.backup_path.read_bytes() == windows_edited
+
+
+def test_config_reader_refuses_a_directory_alias_in_place_of_the_config(tmp_path: Path) -> None:
+    """Windows 没有 O_NOFOLLOW：读配置前先拒别名（符号链接 / 目录联接），两平台都报同一种错。"""
+
+    target = tmp_path / "real"
+    target.mkdir()
+    alias = tmp_path / "habitus.yaml"
+    make_directory_alias(alias, target)
+    with pytest.raises(OSError) as raised:
+        initialization_module._read_required_regular_file(alias)
+    assert raised.value.errno == errno.ELOOP

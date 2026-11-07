@@ -13,7 +13,13 @@ from enum import Enum
 from pathlib import Path
 
 from habitus.foundation.integrity import canonical_json
-from habitus.infrastructure.store.filesystem import atomic_replace_bytes, durable_unlink, read_regular_bytes
+from habitus.infrastructure.store.filesystem import (
+    atomic_replace_bytes,
+    durable_unlink,
+    ensure_owner_directory,
+    is_path_alias,
+    read_regular_bytes,
+)
 from habitus.memory.conversation.indexing.model import ConversationSummaryReference, summary_reference
 from habitus.memory.conversation.layout import ConversationAddress
 from habitus.pre.conversation import (
@@ -169,8 +175,7 @@ class ConversationSummaryRetirementStore:
         self.max_file_bytes = max_file_bytes
 
     def initialize(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.root, 0o700)
+        ensure_owner_directory(self.root)
         self.pending()
 
     def prepare(
@@ -241,7 +246,7 @@ class ConversationSummaryRetirementStore:
             metadata = self.root.stat(follow_symlinks=False)
         except FileNotFoundError:
             return ()
-        if not stat.S_ISDIR(metadata.st_mode) or self.root.is_symlink():
+        if not stat.S_ISDIR(metadata.st_mode) or is_path_alias(self.root):
             raise ConversationSummaryRetirementError("summary retirement root is unsafe")
         manifests: list[ConversationSummaryRetirementManifest] = []
         with os.scandir(self.root) as entries:

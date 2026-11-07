@@ -26,6 +26,7 @@ from habitus.infrastructure.store.filesystem import (
     atomic_temporary_destination,
     durable_unlink,
     ensure_real_directory,
+    is_path_alias,
     list_real_directory,
     read_regular_bytes,
     real_directory_exists,
@@ -44,7 +45,7 @@ class SceneStore:
 
     def __init__(self, scene_root: str | Path, *, max_directory_entries: int = DEFAULT_MAX_DIRECTORY_ENTRIES) -> None:
         requested = Path(scene_root)
-        if requested.is_symlink():
+        if is_path_alias(requested):
             raise self.error_type("scene root cannot be a symbolic link")
         if (
             isinstance(max_directory_entries, bool)

@@ -5,13 +5,13 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 import threading
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
+from habitus.infrastructure.store.filesystem import ensure_owner_directory, restrict_file_to_owner
 from habitus.memory.recall.state import (
     MemoryRecallLifecycleConfig,
     MemoryRecallLifecycleError,
@@ -69,8 +69,7 @@ class SQLiteMemoryRecallLifecycleStore:
             if self._initialized:
                 return
             try:
-                self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                os.chmod(self.path.parent, 0o700)
+                ensure_owner_directory(self.path.parent)
                 with closing(self._connect()) as connection:
                     connection.execute(
                         f"""
@@ -94,7 +93,7 @@ class SQLiteMemoryRecallLifecycleStore:
                         """
                     )
                     self._require_schema(connection)
-                os.chmod(self.path, 0o600)
+                restrict_file_to_owner(self.path)
             except MemoryRecallLifecycleError:
                 raise
             except Exception as exc:

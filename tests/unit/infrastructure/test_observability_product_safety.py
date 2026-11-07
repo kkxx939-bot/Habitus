@@ -15,6 +15,7 @@ from habitus.foundation.observability import (
 )
 from habitus.infrastructure.observability import AuditStore, JSONLogFormatter, ManagedObservability
 from habitus.infrastructure.observability.config import ObservabilityConfig, ObservabilityTracingConfig
+from tests.platform_helpers import is_private_directory, is_private_file
 
 UTC = UTC
 
@@ -68,8 +69,8 @@ def test_audit_store_records_only_security_and_operations_with_safe_fields(tmp_p
     assert all("provider" not in item.attributes for item in records)
     assert all(item.request_id == "request-audit" for item in records)
     assert all(item.memory_sequence == 7 for item in records)
-    assert store.path.stat().st_mode & 0o777 == 0o600
-    assert store.path.parent.stat().st_mode & 0o777 == 0o700
+    assert is_private_file(store.path)
+    assert is_private_directory(store.path.parent)
 
 
 def test_json_logging_redacts_secrets_and_posix_paths_but_keeps_correlation() -> None:

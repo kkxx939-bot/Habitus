@@ -11,6 +11,8 @@ from habitus.behavior.fusion.coverage import BehaviorCoverageIndex
 from habitus.behavior.fusion.errors import BehaviorFusionError
 from habitus.behavior.fusion.receipt import build_fusion_receipt
 from habitus.behavior.observation import BehaviorObservation, BehaviorObservationConfig
+from habitus.infrastructure.store.filesystem import restrict_file_to_owner
+from tests.platform_helpers import deny_all_access
 
 SUBJECT = "家庭成员A"
 TZ8 = timezone(timedelta(hours=8))
@@ -162,11 +164,11 @@ def test_records_are_decoded_once_and_forgotten_when_deleted(tmp_path: Path) -> 
     index.record(receipt((first,), judged_at=judged), sources=("source-1",))
     assert index.covered_observation_ids() == {first.observation_id}
     (path,) = list((tmp_path / "fusion" / "coverage").rglob("*.json"))
-    path.chmod(0o000)  # 第二次读不碰盘
+    deny_all_access(path)  # 第二次读不碰盘
     try:
         assert index.covered_observation_ids() == {first.observation_id}
     finally:
-        path.chmod(0o644)
+        restrict_file_to_owner(path)
     index.expire(judged + timedelta(hours=1))
     assert index._cache == {}
 

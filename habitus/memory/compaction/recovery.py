@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from habitus.foundation.integrity import canonical_json, text_digest
-from habitus.infrastructure.store.filesystem import atomic_replace_bytes, durable_unlink, read_regular_bytes
+from habitus.infrastructure.store.filesystem import (
+    atomic_replace_bytes,
+    durable_unlink,
+    ensure_owner_directory,
+    read_regular_bytes,
+    restrict_directory_to_owner,
+)
 from habitus.memory.document import MemoryDocument, MemoryDocumentCodec
 from habitus.memory.snapshot import MemorySnapshot
 from habitus.memory.tree import MemoryTree
@@ -133,8 +138,7 @@ class MemoryRecoveryStore:
         self.max_file_bytes = max_file_bytes
 
     def initialize(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.root, 0o700)
+        ensure_owner_directory(self.root)
 
     def save(self, document: MemoryDocument, *, saved_at: datetime) -> MemoryRecoveryRecord:
         """保存待压缩详细基线；相同内容重放不受 saved_at 差异影响。
@@ -297,7 +301,7 @@ class MemoryRecoveryStore:
         path = self._path(record.uri)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         for directory in (self.root, path.parent.parent, path.parent):
-            os.chmod(directory, 0o700)
+            restrict_directory_to_owner(directory)
         atomic_replace_bytes(path, encoded, artifact_root=self.root)
 
     def _path(self, uri: MemoryURI) -> Path:

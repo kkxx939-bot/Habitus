@@ -280,7 +280,7 @@ class ConversationMessageJournal:
         """严格解析并有界枚举消息树中的全部 Conversation 地址。"""
 
         root = self.layout.messages_root()
-        if root.is_symlink():
+        if root.is_symlink() or root.is_junction():
             raise ConversationJournalError("conversation messages root cannot be a symbolic link")
         if not root.exists():
             return ()
@@ -296,7 +296,7 @@ class ConversationMessageJournal:
                 entry_count += 1
                 if entry_count > self.config.max_conversation_tree_entries:
                     raise ConversationJournalError("conversation directory tree exceeds its enumeration bound")
-                if child.is_symlink() or not child.is_dir():
+                if child.is_symlink() or child.is_junction() or not child.is_dir():
                     raise ConversationJournalError(f"conversation {label} directory contains an unsupported entry")
                 if child.name.startswith("."):
                     raise ConversationJournalError(f"conversation {label} directory contains a hidden entry")
@@ -1134,7 +1134,7 @@ class ConversationMessageJournal:
 
     def _history_references(self, address: ConversationAddress) -> tuple[_HistoryReference, ...]:
         directory = self.layout.history_directory(address)
-        if directory.is_symlink():
+        if directory.is_symlink() or directory.is_junction():
             raise ConversationJournalError("history directory cannot be a symbolic link")
         if not directory.exists():
             return ()
@@ -1144,7 +1144,7 @@ class ConversationMessageJournal:
         for entry_count, child in enumerate(directory.iterdir(), start=1):
             if entry_count > self.config.max_history_files:
                 raise ConversationJournalError("history entry count exceeds its enumeration bound")
-            if child.is_symlink():
+            if child.is_symlink() or child.is_junction():
                 raise ConversationJournalError("history cannot contain symbolic links")
             if child.name.startswith("."):
                 if child.is_file():

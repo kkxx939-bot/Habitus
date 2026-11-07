@@ -17,6 +17,7 @@ from habitus.infrastructure.store.filesystem import (
     atomic_replace_bytes,
     atomic_temporary_destination,
     durable_unlink,
+    is_path_alias,
     read_regular_bytes,
 )
 from habitus.memory.document import MemoryDocument, MemoryDocumentCodec
@@ -135,7 +136,7 @@ class MemoryTransactionJournal:
         config: MemoryTransactionJournalConfig | None = None,
     ) -> None:
         requested = Path(root).expanduser().absolute()
-        if requested.is_symlink():
+        if is_path_alias(requested):
             raise MemoryTransactionJournalError("transaction journal root cannot be a symbolic link")
         if not isinstance(codec, MemoryDocumentCodec):
             raise TypeError("codec must be a MemoryDocumentCodec")
@@ -232,12 +233,12 @@ class MemoryTransactionJournal:
 
         if not self.root.exists():
             return ()
-        if self.root.is_symlink() or not self.root.is_dir():
+        if is_path_alias(self.root) or not self.root.is_dir():
             raise MemoryTransactionJournalError("transaction journal root is not a safe directory")
         records: list[MemoryTransactionJournalRecord] = []
         record_count = 0
         for child in self.root.iterdir():
-            if child.is_symlink() or not child.is_file():
+            if is_path_alias(child) or not child.is_file():
                 raise MemoryTransactionJournalError("transaction journal contains an unsupported entry")
             temporary_destination = atomic_temporary_destination(child.name)
             if child.name == _VISIBILITY_FILE or temporary_destination == _VISIBILITY_FILE:

@@ -195,3 +195,43 @@ test("a session state with a malformed claimed-reminder list or an empty session
     await assert.rejects(readState(root, "test-host", "session"), error);
   }
 });
+
+test("windows owner verdict compares the recorded and the live process start times, not the wall clock", async () => {
+  const { windowsOwnerVerdict } = await import("../lib/state-store.mjs");
+  const recorded = Date.parse("2026-11-07T08:00:00.000Z");
+  assert.equal(windowsOwnerVerdict(recorded - 300, recorded), "holder");
+  assert.equal(windowsOwnerVerdict(recorded + 4_000, recorded), "holder");
+  assert.equal(windowsOwnerVerdict(recorded + 60_000, recorded), "reused");
+  assert.equal(windowsOwnerVerdict(recorded - 60_000, recorded), "reused");
+  assert.equal(windowsOwnerVerdict(null, recorded), null);
+  assert.equal(windowsOwnerVerdict(recorded, undefined), null);
+});
+
+async function plantOwner(root, processStartedAtMs) {
+  const lock = join(root, "sessions", "test-host", `${sessionKey("test-host", "session")}.lock`);
+  await mkdir(lock, { recursive: true });
+  const owner = join(lock, "owner.json");
+  await writeFile(owner, JSON.stringify({ schemaVersion: 2, ownerToken: "planted", pid: process.pid, processIdentity: null, acquiredAt: new Date().toISOString(), processStartedAtMs }));
+  const old = new Date(Date.now() - 600_000);
+  await utimes(owner, old, old);
+  await utimes(lock, old, old);
+}
+
+test(
+  "windows: a planted lock whose recorded start differs from the live pid is reclaimed, a matching one is not",
+  { skip: process.platform !== "win32" && "Windows 才走进程启动时刻判定" },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "habitus-plugin-lock-win-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    await plantOwner(root, Date.parse("2000-01-01T00:00:00.000Z"));
+    let entered = false;
+    await withSessionLock(root, "test-host", "session", async () => { entered = true; });
+    assert.equal(entered, true);
+
+    await plantOwner(root, Math.round(performance.timeOrigin));
+    await assert.rejects(
+      withSessionLock(root, "test-host", "session", async () => {}),
+      /timed out waiting for the plugin session lock/,
+    );
+  },
+);

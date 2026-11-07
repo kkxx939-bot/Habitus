@@ -1,59 +1,31 @@
-"""可信根目录内的原子耐久字节文件操作。"""
+"""可信根目录内的原子耐久字节文件操作（POSIX 实现：逐级目录描述符 + ``*at()``）。
+
+Windows 没有 ``dir_fd``、不能打开或 fsync 目录，用同一接口的 ``windows_file`` 实现；
+由 ``durable_io`` 包按平台二选一导入，下面的平台断言让 Windows 上的类型检查跳过本模块。
+"""
 
 from __future__ import annotations
 
 import os
-import re
 import stat
+import sys
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 
+from habitus.infrastructure.store.filesystem.durable_io.common import (
+    DurableDirectoryEntry,
+    ImmutableArtifactConflictError,
+    _write_all,
+    atomic_temporary_destination,
+)
 from habitus.infrastructure.store.filesystem.path_safety import (
     DurablePathIntegrityError,
     require_safe_artifact_path,
 )
 
-
-class ImmutableArtifactConflictError(ValueError):
-    """仅允许创建的产物身份已绑定到不同字节内容。"""
-
-
-@dataclass(frozen=True)
-class DurableDirectoryEntry:
-    name: str
-    mode: int
-
-    def is_file(self) -> bool:
-        return stat.S_ISREG(self.mode)
-
-    def is_dir(self) -> bool:
-        return stat.S_ISDIR(self.mode)
-
-
-_ATOMIC_TEMPORARY_NAME = re.compile(r"^\.(?P<destination>[^/]+)\.(?P<nonce>[0-9a-f]{32})\.tmp$")
+assert sys.platform != "win32", "atomic_file 是 POSIX 实现；Windows 用 windows_file"
 
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-
-
-def atomic_temporary_destination(name: str) -> str | None:
-    """识别本模块可能遗留的临时文件名，并返回原目标文件名。"""
-
-    if not isinstance(name, str):
-        raise TypeError("atomic temporary name must be a string")
-    match = _ATOMIC_TEMPORARY_NAME.fullmatch(name)
-    if match is None:
-        return None
-    return match.group("destination")
-
-
-def _write_all(descriptor: int, encoded: bytes) -> None:
-    view = memoryview(encoded)
-    while view:
-        written = os.write(descriptor, view)
-        if written <= 0:  # pragma: no cover - 对操作系统契约的防御性检查。
-            raise OSError("durable artifact write made no progress")
-        view = view[written:]
 
 
 def _open_boundary_directory(boundary: Path, *, create: bool) -> int:

@@ -427,10 +427,10 @@ def _npm_habitus() -> str | None:
         return None
     try:
         with Path(command).resolve().open("rb") as handle:
-            shebang = handle.readline(256)
-    except OSError:
+            head = handle.read(4096) if command.lower().endswith(".cmd") else handle.readline(256)
+    except OSError:  # Windows 上 npm 生成的是 habitus.cmd（首行 @ECHO off），要看整个批处理里有没有调 node
         return None
-    return command if b"node" in shebang else None
+    return command if b"node" in head else None
 
 
 def _repair_source_outputs(args: argparse.Namespace, values: Mapping[str, str]) -> int:

@@ -78,10 +78,10 @@ class MemoryJobStore:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         requested = Path(root).expanduser().absolute()
-        if requested.is_symlink():
+        if requested.is_symlink() or requested.is_junction():
             raise MemoryJobError("memory job root cannot be a symbolic link")
         requested_memory_root = Path(memory_root).expanduser().absolute()
-        if requested_memory_root.is_symlink():
+        if requested_memory_root.is_symlink() or requested_memory_root.is_junction():
             raise MemoryJobError("bound memory root cannot be a symbolic link")
         if not isinstance(path_lock, PathLock):
             raise TypeError("path_lock must be a PathLock")
@@ -637,7 +637,7 @@ class MemoryJobStore:
     def _read_all(self) -> tuple[MemoryJob, ...]:
         if not self.jobs_root.exists():
             return ()
-        if self.jobs_root.is_symlink() or not self.jobs_root.is_dir():
+        if self.jobs_root.is_symlink() or self.jobs_root.is_junction() or not self.jobs_root.is_dir():
             raise MemoryJobError("memory jobs path is not a safe directory")
         jobs: list[MemoryJob] = []
         for entry_count, child in enumerate(self.jobs_root.iterdir(), start=1):
