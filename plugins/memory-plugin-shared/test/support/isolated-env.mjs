@@ -36,9 +36,7 @@ async function writeHostCommands(bin, log, fakeCodex) {
   }
 }
 
-// LOCALAPPDATA / APPDATA：真 Windows 进程总带着；不给的话被调起的系统程序（判残留锁时起的 PowerShell）退回到
-// USERPROFILE\AppData 下写缓存，就写进了这个临时 HOME。指到临时根下、HOME 之外
-function windowsEnv(root, home) {
+function windowsEnv(home) {
   if (!WINDOWS) return {};
   const inherited = (name) => process.env[name];
   return {
@@ -48,8 +46,6 @@ function windowsEnv(root, home) {
     TEMP: tmpdir(),
     TMP: tmpdir(),
     USERPROFILE: home,
-    LOCALAPPDATA: join(root, "local-app-data"),
-    APPDATA: join(root, "app-data"),
     ...WINDOWS_SHIM_PATHS,
   };
 }
@@ -114,7 +110,7 @@ export async function isolatedEnv(t, { fakeCodex = false } = {}) {
     HABITUS_PLUGIN_STATE_DIR: join(root, "state"),
     FAKE_CODEX_LOG: log,
     FAKE_CODEX_PIDS: pids,
-    ...windowsEnv(root, home),
+    ...windowsEnv(home),
   };
   return { root, home, bin, log, env, calls: () => recordedCalls(log), pids: () => fakeCodexPids(pids) };
 }
