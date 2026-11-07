@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFile, open, readFile, rm, truncate } from "node:fs/promises";
-import { makePrivateDirectory } from "./private-dir.mjs";
+import { appendFile, mkdir, open, readFile, rm, truncate } from "node:fs/promises";
 import { join } from "node:path";
 import { completedTurns } from "./host-adapter.mjs";
 import { stripInjectionReceipts } from "./injection-receipt.mjs";
@@ -76,7 +75,7 @@ export class TranscriptMirror {
       ids.push(id);
     }
     if (lines.length > 0) {
-      await makePrivateDirectory(join(this.stateRoot, "transcripts", this.host), this.stateRoot);
+      await mkdir(join(this.stateRoot, "transcripts", this.host), { recursive: true, mode: 0o700 });
       await dropTornTail(path);
       await appendFile(path, `${lines.join("\n")}\n`, { mode: 0o600 });
       for (const id of ids) seen.add(id); // 写成功才算镜像过；写失败下次重来

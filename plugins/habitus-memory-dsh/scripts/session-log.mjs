@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFile, readFile, readdir } from "node:fs/promises";
-import { makePrivateDirectory } from "./shared/private-dir.mjs";
+import { appendFile, mkdir, readFile, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import * as zlib from "node:zlib";
@@ -127,7 +126,7 @@ export async function mirrorEvents(stateRoot, sessionId, events) {
   } catch (error) { if (error?.code !== "ENOENT") throw error; }
   const fresh = events.filter((event) => event.seq > last).sort((left, right) => left.seq - right.seq);
   if (fresh.length > 0) {
-    await makePrivateDirectory(join(stateRoot, "transcripts", "dsh"), stateRoot);
+    await mkdir(join(stateRoot, "transcripts", "dsh"), { recursive: true, mode: 0o700 });
     await dropTornTail(path);
     await appendFile(path, `${fresh.map((event) => JSON.stringify(event)).join("\n")}\n`, { mode: 0o600 });
   }

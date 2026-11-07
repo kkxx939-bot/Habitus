@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, readdir, rmdir } from "node:fs/promises";
-import { makePrivateDirectory } from "./private-dir.mjs";
+import { mkdir, readFile, readdir, rmdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createJsonDurably, replaceJsonDurably, unlinkDurably } from "./atomic-file.mjs";
 import { errorText } from "./service-client.mjs";
@@ -52,7 +51,7 @@ function withoutFilename(item) {
 
 export async function enqueueDelta(root, draft) {
   const dir = directory(root, draft.host, draft.nativeSessionId);
-  await makePrivateDirectory(dir, root);
+  await mkdir(dir, { recursive: true, mode: DIR_MODE });
   const deliveryId = createHash("sha256").update(stable(semanticDraft(draft))).digest("hex");
   const filename = `${cursorOrder(draft.transcriptStartCursor)}-${cursorOrder(draft.transcriptEndCursor)}-${deliveryId}.json`;
   const path = join(dir, filename);

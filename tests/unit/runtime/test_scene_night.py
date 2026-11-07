@@ -754,9 +754,9 @@ def test_the_heavy_steps_run_off_the_event_loop(tmp_path, monkeypatch) -> None:
         def slow(*args, **kwargs):  # type: ignore[no-untyped-def]
             if threading.get_ident() == loop_thread[0]:
                 on_loop.append(name)
-            end = time.perf_counter() + 0.3
-            while time.perf_counter() < end:
-                pass
+            # 用 sleep 模拟一步重活（不占 GIL）：放在事件循环线程上跑，心跳就会断开 0.3 s；忙循环会在别的线程里一直抢 GIL，
+            # 慢机器上（windows-latest 3.12/3.13）事件循环被挤住 0.26–0.38 s，量到的就不再是"在不在循环上"
+            time.sleep(0.3)
             return real(*args, **kwargs)
 
         return slow

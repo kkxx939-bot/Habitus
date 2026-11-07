@@ -279,7 +279,8 @@ def test_manual_run_rejects_preexisting_active_execution() -> None:
 def test_lost_lease_after_executor_already_settled_is_not_reported(tmp_path: Path) -> None:
     store = LeaseStore(fail_renewal=True, settled=True)
     worker = MemoryWorker(
-        fake_runner(store, claimed_job(tmp_path), delay=0.03),
+        # 任务远长于心跳间隔：Windows 上 asyncio 计时粒度约 15.6 ms，任务只跑 30 ms 时慢机器上一次心跳都赶不上
+        fake_runner(store, claimed_job(tmp_path), delay=0.3),
         WorkerConfig(heartbeat_interval_seconds=0.01),
         worker_id="worker-1",
     )
@@ -292,7 +293,8 @@ def test_lost_lease_after_executor_already_settled_is_not_reported(tmp_path: Pat
 def test_temporary_renew_timeout_before_expiry_is_retried(tmp_path: Path) -> None:
     store = LeaseStore(renew_error=TimeoutError("temporary"))
     worker = MemoryWorker(
-        fake_runner(store, claimed_job(tmp_path), delay=0.03),
+        # 任务远长于心跳间隔：Windows 上 asyncio 计时粒度约 15.6 ms，任务只跑 30 ms 时慢机器上一次心跳都赶不上
+        fake_runner(store, claimed_job(tmp_path), delay=0.3),
         WorkerConfig(heartbeat_interval_seconds=0.01),
         worker_id="worker-1",
     )

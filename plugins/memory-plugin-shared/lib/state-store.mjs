@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, readdir, rename, rm, stat, utimes } from "node:fs/promises";
-import { makePrivateDirectory } from "./private-dir.mjs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { replaceJsonDurably } from "./atomic-file.mjs";
@@ -126,13 +125,13 @@ export async function listSkippedTranscriptLines(root) {
 
 export async function writeState(root, host, nativeSessionId, value) {
   const target = paths(root, host, nativeSessionId);
-  await makePrivateDirectory(target.directory, root);
+  await mkdir(target.directory, { recursive: true, mode: DIR_MODE });
   await replaceJsonDurably(target.state, { ...value, schemaVersion: 3 });
 }
 
 export async function withSessionLock(root, host, nativeSessionId, callback) {
   const target = paths(root, host, nativeSessionId);
-  await makePrivateDirectory(target.directory, root);
+  await mkdir(target.directory, { recursive: true, mode: DIR_MODE });
   const deadline = Date.now() + 5000;
   const ownerToken = randomUUID();
   const processIdentity = await readProcessIdentity(process.pid);

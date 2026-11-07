@@ -26,8 +26,7 @@ import { stripMedia } from "./media.mjs";
 import { sendRememberParts, splitRememberBody } from "./remember-parts.mjs";
 import { replaceJsonDurably } from "./atomic-file.mjs";
 import { writeOperationLog } from "./operation-log.mjs";
-import { readFile, rm, stat } from "node:fs/promises";
-import { makePrivateDirectory } from "./private-dir.mjs";
+import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { join, relative, isAbsolute } from "node:path";
 import {
   listStateSessions,
@@ -65,7 +64,7 @@ async function knownRequestLimit(stateRoot) {
 
 async function recordRequestLimit(stateRoot, limit) {
   if (await knownRequestLimit(stateRoot) === limit) return;
-  await makePrivateDirectory(stateRoot);
+  await mkdir(stateRoot, { recursive: true, mode: 0o700 });
   await replaceJsonDurably(join(stateRoot, SERVICE_LIMITS_FILE), { schemaVersion: 1, maxRequestBytes: limit });
 }
 

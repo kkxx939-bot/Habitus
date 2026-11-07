@@ -1,7 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { makePrivateDirectory } from "./private-dir.mjs";
-import { dirname, join } from "node:path";
+import { chmod, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 const ROTATED = /^operations-[0-9TZ:.-]+-[0-9]+-[0-9a-f]+\.jsonl$/;
 // 接连出现的同一原因记到哪儿了（logs/repeated-failures.json）：一个会话一项，最多留这么多个会话（最早记的先丢）
@@ -50,7 +49,7 @@ export async function writeOperationLog(config, adapter, input, event) {
   try {
     const directory = join(config.stateRoot, "logs");
     const target = join(directory, "operations.jsonl");
-    await makePrivateDirectory(directory, config.stateRoot);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
     const record = {
       schemaVersion: 1,
       timestamp: new Date().toISOString(),
@@ -96,7 +95,7 @@ async function writeRepeats(directory, repeats) {
   const kept = Object.entries(repeats)
     .sort(([, a], [, b]) => String(a.touchedAt).localeCompare(String(b.touchedAt)))
     .slice(-REPEATS_KEPT);
-  await makePrivateDirectory(directory, dirname(directory));
+  await mkdir(directory, { recursive: true, mode: 0o700 });
   await writeFile(join(directory, REPEATS_FILE), JSON.stringify(Object.fromEntries(kept)), { mode: 0o600 });
 }
 

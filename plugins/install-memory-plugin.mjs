@@ -3,7 +3,6 @@ import { cp, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 
 import { homedir } from "node:os";
 import path, { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { makePrivateDirectory } from "./memory-plugin-shared/lib/private-dir.mjs";
 import { HARNESS_REGISTRY, MARKETPLACE_NAME, publicHarnessDescriptor } from "./harnesses.mjs";
 import { CommandRunner, harnessPresent, installBlocker, registrationOf } from "./registrations.mjs";
 
@@ -94,9 +93,9 @@ async function digestTree(path, logicalPath, hash) {
 
 async function stageMarketplace(root, sourceRoot, registry) {
   const parent = dirname(root);
-  await makePrivateDirectory(parent);
+  await mkdir(parent, { recursive: true, mode: 0o700 });
   const staging = join(parent, `.${basename(root)}.staging-${randomUUID()}`);
-  await makePrivateDirectory(join(staging, "plugins"), staging);
+  await mkdir(join(staging, "plugins"), { recursive: true, mode: 0o700 });
   try {
     const definitions = registry.list();
     for (const name of [...new Set(definitions.map((definition) => definition.pluginDirectory))]) {
