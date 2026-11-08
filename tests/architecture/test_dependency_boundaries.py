@@ -399,10 +399,13 @@ def test_reduction_modules_reach_the_model_only_through_the_runner() -> None:
         return any(reaches_model_client(name, seen) for name in imported if name in graph)
 
     # 归约的模型触点：runner 编排，词表的白天归类（kinds_step）与整理活（kinds_jobs）；把版本落到树上的
-    # kinds_migration 是纯确定性的，不许碰模型。
+    # kinds_migration 是纯确定性的，不许碰模型。stager（物化，读 kinds_step 的归类结果与放一边的原因）与
+    # vocabulary（词表整理活的持锁编排，调 kinds_jobs）是从 runner 拆出的编排协作者（工程化 S3），自身不调模型。
     allowed = {
         "habitus.behavior.reduction",
         "habitus.behavior.reduction.runner",
+        "habitus.behavior.reduction.stager",
+        "habitus.behavior.reduction.vocabulary",
         "habitus.behavior.reduction.kinds_step",
         "habitus.behavior.reduction.kinds_jobs",
     }

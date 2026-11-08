@@ -576,9 +576,38 @@ def test_weekday_sets_grow_only_from_raising_relations(tmp_path) -> None:
         "session", TONIGHT, 1, (held("周一", True), held("周五", True), held("周六", False), held("周日", False))
     )
     signals: list[str] = []
-    run._grow_value_sets(run.concepts.read_all(), state, NOW, signals)
+    run.relation_stage._grow_value_sets(run.concepts.read_all(), state, NOW, signals)
     assert "周一、周五" in run.concepts.read_all() and "周一、周五、周六、周日" not in run.concepts.read_all()
     assert "周六、周日" not in run.concepts.read_all()
+
+
+def test_the_night_grows_value_sets_from_the_relations_it_just_folded(tmp_path, monkeypatch) -> None:
+    """B4 折叠落盘之后，这一晚就从刚折出的关系里补取值集合（下一晚起一起检验），不等别处去调。"""
+
+    import habitus.runtime.scene_night_relations as relations_module
+    from habitus.scene.relations import RelationKey, Segment
+    from habitus.scene.relations.state import LaneState, Relation, Status
+
+    site, hits = site_with_three_bedtimes(tmp_path)
+    publish_tonight(site)
+    run, _provider = nightly(tmp_path, hits, site)
+    concepts = ConceptSet((*calendar_concepts(now=NOW),))
+    for name in concepts:
+        run.concepts.write(concepts[name])
+
+    def held(antecedent: str) -> Relation:
+        return Relation(
+            RelationKey("session", antecedent, MEAL, Segment.SITUATION), Status.CANDIDATE, True, discovered_on=TONIGHT
+        )
+
+    def folded(previous, tests, weights):  # type: ignore[no-untyped-def]
+        return LaneState("session", tests.cutoff, 1, (held("周一"), held("周五"))), ()
+
+    monkeypatch.setattr(relations_module, "fold", folded)
+    report = night(run, TONIGHT, NOW)
+
+    assert "周一、周五" in run.concepts.read_all()
+    assert any("补上日历取值集合「周一、周五」" in signal for signal in report.signals)
 
 
 def test_a_relation_table_that_cannot_be_written_fails_only_that_lane(tmp_path, monkeypatch) -> None:
@@ -743,6 +772,7 @@ def test_the_heavy_steps_run_off_the_event_loop(tmp_path, monkeypatch) -> None:
     import time
 
     import habitus.runtime.scene_night as night_module
+    import habitus.runtime.scene_night_relations as relations_module
 
     site, hits = site_with_three_bedtimes(tmp_path)
     publish_tonight(site)
@@ -762,8 +792,11 @@ def test_the_heavy_steps_run_off_the_event_loop(tmp_path, monkeypatch) -> None:
 
         return slow
 
-    for name in ("plan_sync", "rhythms_of", "build_timelines", "fold", "coverage_by_lane"):
+    for name in ("plan_sync", "rhythms_of", "coverage_by_lane"):
         monkeypatch.setattr(night_module, name, slowed(name, getattr(night_module, name)))
+    # 时间线与折叠在 B4 那一段（``scene_night_relations``）
+    for name in ("build_timelines", "fold"):
+        monkeypatch.setattr(relations_module, name, slowed(name, getattr(relations_module, name)))
     monkeypatch.setattr(run.concepts, "read_all", slowed("read_all", run.concepts.read_all))
 
     async def main() -> float:

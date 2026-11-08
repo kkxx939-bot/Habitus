@@ -25,14 +25,13 @@ from habitus.scene.relations.conditions import parse as parse_condition
 from habitus.scene.relations.config import RelationConfig, RelationConfigError, RelationThresholds
 from habitus.scene.relations.engine import (
     LaneNight,
-    LaneTests,
     RelationKey,
     RelationTest,
     Subset,
     Verdict,
     comparable,
-    examine_night,
 )
+from habitus.scene.relations.lane_tests import LaneTests, examine_night
 from habitus.scene.relations.spans import SEGMENTS, Arrival, Chain, Controls, Segment, chains_of, merge_for
 from habitus.scene.relations.state import LaneState, Relation, StateError, Status, Transition, fold
 from habitus.scene.relations.timeline import LaneTimeline, Mark, build_timelines, fill_calendar, last_slot

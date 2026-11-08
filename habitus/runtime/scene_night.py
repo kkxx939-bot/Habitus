@@ -33,9 +33,9 @@ B4 读的是盘上**全部**已映射的命中（不只今天）：关系每晚�
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime, timedelta, tzinfo
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, tzinfo
 
 from habitus.behavior.tree import BehaviorTree
 from habitus.behavior.uri import BehaviorURI
@@ -43,29 +43,24 @@ from habitus.conditions import DayTypeCalendar
 from habitus.infrastructure.lifecycle import RetryLedger
 from habitus.runtime.scene_advice import RelationAdvice
 from habitus.runtime.scene_authoring import ConceptAuthoring
-from habitus.runtime.scene_situations import SceneDayContext
-from habitus.scene.advice.store import AdviceStoreError
-from habitus.scene.concepts.calendar_situations import calendar_key, most_specific, value_sets_to_add
-from habitus.scene.concepts.catalog import CatalogChanges, ClassCatalog
+from habitus.runtime.scene_night_mapping import MappingStage, select_mapping_days
+from habitus.runtime.scene_night_relations import RelationStage
+from habitus.scene.concepts.calendar_situations import calendar_key, most_specific
+from habitus.scene.concepts.catalog import ClassCatalog
 from habitus.scene.concepts.model import ConceptOrigin, ConceptSet, ContextScope
 from habitus.scene.concepts.rhythm import Rhythm, RhythmRulers, rhythms_of
 from habitus.scene.concepts.store import ConceptStore
 from habitus.scene.concepts.sync import SyncPlan, plan_sync
 from habitus.scene.occurrences.baselines import RECENT_WINDOW_DAYS
-from habitus.scene.occurrences.mapper import ConceptMapper, ConceptMapperError, DayMappingReport, map_closed_day
-from habitus.scene.occurrences.model import ConceptHits
-from habitus.scene.occurrences.situations import history_days
+from habitus.scene.occurrences.mapper import ConceptMapper
 from habitus.scene.occurrences.store import ConceptHitStore
 from habitus.scene.recurrence import Recurrence, coverage_by_lane, recurrences_of
 from habitus.scene.relations import (
-    LaneTests,
     LaneTimeline,
     RelationConfig,
-    RelationKey,
     Segment,
-    build_timelines,
 )
-from habitus.scene.relations.state import LaneState, Status, Transition, fold, revert_touched
+from habitus.scene.relations.state import Status
 from habitus.scene.relations.store import RelationStore, RelationStoreError
 from habitus.series import EventSeries
 from habitus.temporal import Coverage
@@ -190,6 +185,25 @@ class SceneNightlyRun:
         self.config = resolved
         self.rulers = rulers
         self.mapping_retries = mapping_retries
+        #: B3 映射与 B4 关系各是一个 stage；一夜的数值与模型建议每次从这里现读（构造后可换）。
+        self.mapping = MappingStage(
+            behavior_tree=behavior_tree,
+            hits=hits,
+            calendar=calendar,
+            timezone=timezone,
+            subject=subject,
+            mapping_retries=mapping_retries,
+            config=lambda: self.config,
+        )
+        self.relation_stage = RelationStage(
+            catalog=catalog,
+            concepts=concepts,
+            hits=hits,
+            calendar=calendar,
+            relations=relations,
+            relation_config=relation_config,
+            advice=lambda: self.advice,
+        )
 
     async def run(self, *, series: EventSeries, now: datetime) -> NightReport:
         """第 ``series.cutoff`` 晚，``now`` 是夜批时刻。节律从同一份 ``series`` 经 temporal 算（裁定 59）。"""
@@ -220,8 +234,10 @@ class SceneNightlyRun:
             mapper = self.mapper_for(concepts)
             rhythms = await asyncio.to_thread(self._rhythms, series, concepts, coverage)
 
-        mapping, days, backlog = await self._map_backlog(series, concepts, mapper, rhythms, slack_minutes, now, signals)
-        relations, transitions, lines = await self._relations(
+        mapping, days, backlog = await self.mapping.map_backlog(
+            series, concepts, mapper, rhythms, slack_minutes, now, signals
+        )
+        relations, transitions, lines = await self.relation_stage.run(
             series, concepts, signals, vocabulary=plan.version, now=now
         )
         return NightReport(
@@ -256,211 +272,7 @@ class SceneNightlyRun:
             coverage=coverage,
         )
 
-    # ── B3 映射 ─────────────────────────────────────────────────────────────
-
-    async def _map_backlog(
-        self,
-        series: EventSeries,
-        concepts: ConceptSet,
-        mapper: ConceptMapper,
-        rhythms: Mapping[str, Rhythm],
-        slack_minutes: int,
-        now: datetime,
-        signals: list[str],
-    ) -> tuple[list[DayMappingReport], tuple[date, ...], int]:
-        """要映射的日子：序列里有记录、还没以现在的概念集口径完成的（没映射过、或概念集变了要回填），最新的先；
-        今晚封口的那天总在里面，其余按预算。返回（各天的报告, 映射了哪几天, 还剩几天）。"""
-
-        recorded = sorted({record.day for record in series.records}, reverse=True)
-        # 完成标记按这一天自己的口径认（那天出现的类各自的口径 + 情境；E9），条数也要与序列对得上（盖章之后又补发了记录就重做；E1）
-        current = {
-            day
-            for day in self.hits.days_done()
-            if (marker := self.hits.read_marker(day)) is not None
-            and marker.records == len(series.on(day))
-            and marker.mapper == mapper.day_version(record.kind_token for record in series.on(day))
-        }
-        pending = [day for day in recorded if day not in current]
-        today = series.last_day
-        # 模型没答成的日子按重试账退避、次数用完就放弃，不再每晚重排、不占 14 天预算（26 号清单 2.4.6）；
-        # 账的键带着这一天的映射口径，概念集一变就是新键，重新给机会。今晚封口的那天照常排进来。
-        versions = {day: mapper.day_version(record.kind_token for record in series.on(day)) for day in pending}
-        chosen, waiting = select_mapping_days(
-            pending,
-            today=today,
-            budget=self.config.mapping_days_per_night,
-            blocked=lambda day: self.mapping_retries.blocked(_mapping_key(day, versions[day])),
-        )
-        reports = []
-        # 按日子先后映射（挑哪几天仍是最新的先）：读历史的派生情境（「昨天吃过早餐」「连续研发中」）要前几天先映射好
-        for day in sorted(chosen):
-            context = self._context(day, concepts, rhythms, slack_minutes)
-            if day == today:
-                signals.extend(f"baseline: {key} 样本不够，引用它的候选会记未决" for key in context.baselines.missing)
-                signals.extend(f"drift: {item.render()}" for item in context.baselines.drifting)
-            key = _mapping_key(day, versions[day])
-            try:
-                report = await self._map(day, mapper, context, series, now=now)
-            except ConceptMapperError as exc:
-                # 一条记录写不出（材料超了记录的上限等）：这一天不盖章、记进重试账，其余日子与 B4 照常（26 号清单 2.4.6）
-                decision = self.mapping_retries.record_failure(key, exc)
-                signals.append(
-                    f"mapping: {day} 写不出（{exc}），"
-                    f"{'先不再重排（概念集变了会重新给机会）' if decision.give_up else '按重试账退避后重做'}"
-                )
-                continue
-            if report.model_failed:
-                decision = self.mapping_retries.record_failure(
-                    key, MappingModelFailed(f"{report.model_failed} unresolved")
-                )
-                if decision.give_up:
-                    signals.append(f"mapping: {day} 模型几次都没答成，先不再重排（概念集变了会重新给机会）")
-            else:
-                self.mapping_retries.clear(key)
-            reports.append(report)
-        await self._revisit_readers(
-            [report.day for report in reports], concepts, mapper, rhythms, slack_minutes, series, now, signals
-        )
-        backlog = len(pending) - len(chosen) - len(waiting)
-        if backlog:
-            signals.append(f"mapping: 还有 {backlog} 天没轮到（没映射过或概念集变了要回填），之后几晚接着补")
-        if waiting:
-            signals.append(f"mapping: {len(waiting)} 天模型没答成，在退避或已放弃")
-        return reports, tuple(chosen), backlog
-
-    async def _revisit_readers(
-        self,
-        mapped: Sequence[date],
-        concepts: ConceptSet,
-        mapper: ConceptMapper,
-        rhythms: Mapping[str, Rhythm],
-        slack_minutes: int,
-        series: EventSeries,
-        now: datetime,
-        signals: list[str],
-    ) -> None:
-        """这一晚映射过的日子之后、读得到它们的那几天（派生情境往回看的天数之内），早已映射完的再过一遍：
-        候选的输入没变就只就地重算情境、不问模型（续跑），这样前一天后补的命中能进后一天的「昨天…」「连续…」。"""
-
-        depth = len(history_days(concepts, series.last_day)) - 1
-        if depth <= 0 or not mapped:
-            return
-        done = set(self.hits.days_done())
-        readers = {day + timedelta(days=step) for day in mapped for step in range(1, depth + 1)}
-        for day in sorted(readers - set(mapped)):
-            if day not in done or day >= series.cutoff:
-                continue
-            context = self._context(day, concepts, rhythms, slack_minutes)
-            try:
-                await self._map(day, mapper, context, series, now=now)
-            except ConceptMapperError as exc:
-                signals.append(f"mapping: {day} 回访重算情境时写不出（{exc}），之后照常补")
-
-    # ── B4 关系 ─────────────────────────────────────────────────────────────
-
-    async def _relations(
-        self,
-        series: EventSeries,
-        concepts: ConceptSet,
-        signals: list[str],
-        *,
-        vocabulary: int = 0,
-        now: datetime | None = None,
-    ) -> tuple[dict[str, dict[str, int]], int, dict[str, LaneTimeline]]:
-        """第 ``series.cutoff`` 晚：每条 lane 检验、接上盘上之前最近的一晚折叠、落盘。返回各 lane 的计数、迁移条数与时间线。
-
-        ``vocabulary`` 是这一晚同步到的词表版本，记在关系状态上。接的那一晚的状态记着它当时的词表版本，这之间拆分 / 合并改了
-        成员的类，涉及它们的关系先退回候选（裁定 59）；按状态上记的版本算，同一晚重跑也退回得一样。折叠之后，同一件事有两个以上
-        单个取值（周几、几号、日型）的日历关系处在候选或成立的，补一个取值集合的日历情境，下一晚起一起检验。"""
-
-        hits = await asyncio.to_thread(self._all_hits)
-        lines = await asyncio.to_thread(
-            build_timelines, series, concepts, hits, self.relation_config, calendar=self.calendar
-        )
-        counts: dict[str, dict[str, int]] = {}
-        moved = 0
-        for lane, line in sorted(lines.items()):
-            previous = self._previous(lane, series.cutoff, signals)
-            reverted: tuple[Transition, ...] = ()
-            if previous is not None:
-                touched = _touched(concepts, _changed_classes(self.catalog.changes_since(previous.vocabulary)))
-                if touched:
-                    previous, reverted = revert_touched(previous, touched, series.cutoff)
-            # 第二个条件起只长在接的那一晚已成立的带条件关系上（裁定 62 第 1 条）：退回之后再数哪些成立
-            established = tuple(item.key for item in previous.of(Status.ESTABLISHED)) if previous is not None else ()
-            tests = LaneTests(line, concepts, self.relation_config, series.cutoff, established=established)
-            weights: dict[RelationKey, float] = {}
-            if self.advice is not None:
-                try:
-                    proposals = await self.advice.proposals(tests, series.cutoff, signals)
-                except AdviceStoreError as exc:
-                    # 提议簿读不了：不带它们折叠会把接着的带条件关系当成"行没了"判失效，这条 lane 这一晚不写、沿用上一晚的
-                    signals.append(f"relations: {lane} 提议簿读不了（{exc}），这一晚的关系表沿用上一晚的")
-                    continue
-                tests = LaneTests(
-                    line, concepts, self.relation_config, series.cutoff, proposals=proposals, established=established
-                )
-                weights = await self.advice.weights(tests, signals)
-            state, transitions = await asyncio.to_thread(fold, previous, tests, weights or None)
-            state = replace(state, vocabulary=vocabulary)
-            transitions = (*reverted, *transitions)
-            try:
-                self.relations.write(state, transitions)
-            except RelationStoreError as exc:
-                # 这条 lane 这一晚写不出（超限、盘上已有更晚一晚）：只让它这一晚失败、明天的预测层读上一代的表，
-                # 不让整晚停、别的 lane 照常（26 号清单 2.5.2）
-                signals.append(f"relations: {lane} 这一晚的关系表写不出（{exc}），沿用上一晚的")
-                continue
-            self._grow_value_sets(concepts, state, now or datetime.now(UTC), signals)
-            counts[lane] = {status.value: state.count(status) for status in Status}
-            moved += len(transitions)
-            signals.extend(
-                f"relation: {lane} {concepts.label_of(item.key.antecedent)} → {concepts.label_of(item.key.consequent)}"
-                f"（{item.key.segment.value}{'｜' + item.key.condition if item.key.condition else ''}）"
-                f"{'—' if item.before is None else item.before.value} → {item.after.value}：{item.reason}"
-                for item in transitions
-            )
-        return counts, moved, lines
-
-    def _all_hits(self) -> dict[str, ConceptHits]:
-        return {record.occurrence_uri: record for day in self.hits.days_done() for record in self.hits.read_day(day)}
-
-    def _grow_value_sets(self, concepts: ConceptSet, state: LaneState, now: datetime, signals: list[str]) -> None:
-        held: dict[str, list[str]] = {}
-        for relation in state.relations:
-            key = relation.key
-            if (
-                key.segment is Segment.SITUATION
-                and not key.condition
-                and relation.upward
-                and relation.status in (Status.CANDIDATE, Status.ESTABLISHED)
-            ):
-                held.setdefault(key.consequent, []).append(key.antecedent)
-        for definition in value_sets_to_add(concepts, held, now=now):
-            self.concepts.write(definition)
-            signals.append(f"vocabulary: 补上日历取值集合「{definition.name}」，下一晚起一起检验（裁定 59）")
-
     # ── B1 同步词表 ─────────────────────────────────────────────────────────
-
-    def _previous(self, lane: str, night: date, signals: list[str]) -> LaneState | None:
-        """这一晚要接的那一晚。最近那一晚的文件坏了：接在更早一个读得了的晚上之后，并报出来（第四轮评审 E10）——
-        不然夜批永远写不出新的一晚，预测层也一直读着坏文件硬拒，两边互相卡死，只能人工恢复。新的一晚写出来，预测层下一拍就好了。"""
-
-        try:
-            return self.relations.previous(lane, night)
-        except RelationStoreError as exc:
-            for earlier in reversed(self.relations.nights(lane)):
-                if earlier >= night:
-                    continue
-                try:
-                    state = self.relations.read(lane, earlier)
-                except RelationStoreError:
-                    # 这一晚也读不了：接着往更早找；都读不了时下面整体报一次
-                    continue
-                signals.append(f"relations: {lane} 更晚的关系表读不了（{exc}），这一晚接在第 {earlier} 晚之后折叠")
-                return state
-            signals.append(f"relations: {lane} 之前的关系表都读不了（{exc}），这一晚从头折叠")
-            return None
 
     def _write_concepts(self, plan: SyncPlan, signals: list[str]) -> ConceptSet:
         """概念落盘（新生成 / 改名改判据 / 停用 / 汇总成员改写），读回整个概念集。"""
@@ -516,8 +328,8 @@ class SceneNightlyRun:
         for past in sorted(affected & done):
             if past >= series.cutoff:
                 continue  # 还没封口的日子不在这一份序列里，等它封口那一晚照常映射
-            context = self._context(past, concepts, rhythms, slack_minutes)
-            mapping = await self._map(past, mapper, context, series, now=now, force=True)
+            context = self.mapping.context(past, concepts, rhythms, slack_minutes)
+            mapping = await self.mapping.map(past, mapper, context, series, now=now, force=True)
             if not (past in moved or mapping.changed):
                 continue
             remapped += 1
@@ -555,62 +367,6 @@ class SceneNightlyRun:
             for consequent, antecedents in held.items()
         }
 
-    def _context(
-        self, day: date, concepts: ConceptSet, rhythms: Mapping[str, Rhythm], slack_minutes: int
-    ) -> SceneDayContext:
-        return SceneDayContext(
-            day,
-            concepts=concepts,
-            hits=self.hits,
-            calendar=self.calendar,
-            timezone=self.timezone,
-            subject=self.subject,
-            recent_days=self.config.recent_days,
-            rhythms=rhythms,
-            slack_minutes=slack_minutes,
-        )
-
-    async def _map(
-        self,
-        day: date,
-        mapper: ConceptMapper,
-        context: SceneDayContext,
-        series: EventSeries,
-        *,
-        now: datetime,
-        force: bool = False,
-    ) -> DayMappingReport:
-        return await map_closed_day(
-            self.behavior_tree,
-            self.hits,
-            mapper,
-            day,
-            now=now,
-            series=series,
-            situation_for=context.situation_for,
-            baseline_for=context.baseline_for,
-            force=force,
-        )
-
-
-def select_mapping_days(
-    pending: Sequence[date], *, today: date | None, budget: int, blocked: Callable[[date], bool]
-) -> tuple[list[date], list[date]]:
-    """这一晚映射哪几天（今晚封口的那天总在里面，其余最新的先、按预算）、哪几天在重试账里等着（退避中或已放弃）。"""
-
-    waiting = [day for day in pending if day != today and blocked(day)]
-    chosen = [day for day in pending if day == today]
-    chosen += [day for day in pending if day != today and day not in waiting][:budget]
-    return chosen, waiting
-
-
-class MappingModelFailed(RuntimeError):
-    """这一天有记录模型没答成（可重试：传输、限流、输出不合格）。"""
-
-
-def _mapping_key(day: date, version: str) -> str:
-    return f"map:{day.isoformat()}:{version}"
-
 
 __all__ = [
     "NightMaterials",
@@ -619,20 +375,3 @@ __all__ = [
     "SceneNightlyRun",
     "select_mapping_days",
 ]
-
-
-def _changed_classes(changes: CatalogChanges) -> frozenset[str]:
-    """这一段词表变更里成员变了的类：拆出与交出的、并掉与并入的、条目被搬过的两头。"""
-
-    found = {*changes.split_from, *changes.split_from.values(), *changes.merged_into, *changes.merged_into.values()}
-    for moved in changes.moved:
-        found.update((moved.source, moved.target))
-    return frozenset(found)
-
-
-def _touched(concepts: ConceptSet, changed: frozenset[str]) -> frozenset[str]:
-    """成员变了的类牵到的行为概念：基础、细分、包含它的汇总。"""
-
-    if not changed:
-        return frozenset()
-    return frozenset(identity for identity in concepts.behaviors() if set(concepts.classes_of(identity)) & changed)

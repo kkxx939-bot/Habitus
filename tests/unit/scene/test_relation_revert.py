@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from habitus.runtime.scene_night import _changed_classes, _touched
+from habitus.runtime.scene_night_relations import _changed_classes, _touched
 from habitus.scene.concepts.catalog import CatalogChanges, MovedOccurrence
 from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.relations import RelationKey, Segment

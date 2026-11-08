@@ -545,18 +545,18 @@ def test_an_invalid_payload_is_dropped_before_the_checkpoint(tmp_path) -> None:
 def test_the_checkpoint_byte_bound_fails_before_stage(tmp_path, monkeypatch) -> None:
     """检查点写入与重放共用同一上界：超限在 stage 前失败，可重试，不留读不回的检查点。"""
 
-    import habitus.behavior.reduction.runner as runner_module
+    import habitus.behavior.reduction.checkpoint as checkpoint_module
 
     harness = Harness(tmp_path)
     source = harness.deliver(OBS_A, OBS_B, OBS_C)
     seed_wash(harness, source)
-    monkeypatch.setattr(runner_module, "_MAX_CHECKPOINT_BYTES", 64)
+    monkeypatch.setattr(checkpoint_module, "_MAX_CHECKPOINT_BYTES", 64)
     with pytest.raises(Exception, match="byte bound"):
         asyncio.run(harness.runner.run_once())
     assert harness.tree.list_addresses(BehaviorKind.OCCURRENCE) == ()
     assert not (tmp_path / "reduction" / "staged.json").exists()
 
-    monkeypatch.setattr(runner_module, "_MAX_CHECKPOINT_BYTES", 67_108_864)
+    monkeypatch.setattr(checkpoint_module, "_MAX_CHECKPOINT_BYTES", 67_108_864)
     report = asyncio.run(harness.runner.run_once())
     assert report.published_occurrences == 1
 
@@ -1295,7 +1295,7 @@ def test_a_day_whose_overview_was_given_up_does_not_stay_pending(tmp_path) -> No
     harness = Harness(tmp_path, semantic_refresher=refresher)
     seed_wash(harness, harness.deliver(OBS_A, OBS_B, OBS_C))
     asyncio.run(harness.runner.run_once())
-    harness.runner._write_pending_refresh_days({date(2026, 8, 16)}, _NoLease())
+    harness.runner.refresh_pending.write({date(2026, 8, 16)}, _NoLease())
     harness.now = harness.now + timedelta(hours=2)
     asyncio.run(harness.runner.run_once())
     assert not (tmp_path / "reduction" / "refresh_pending.json").exists()
@@ -1524,3 +1524,79 @@ def test_the_pinned_seal_horizon_reaches_the_health_surface(tmp_path) -> None:
     checks = service._behavior_checks("running")
     (pinned,) = [check for check in checks if check.name == "behavior_seal_horizon_session"]
     assert pinned.status is RuntimeHealthStatus.DEGRADED and stuck in pinned.detail
+
+
+# ── 工程化 S3：拆出的协作者里原先没有测试守着的三处 ─────────────────────────────────────
+
+
+def test_a_replayed_checkpoint_lands_the_documents_it_staged(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """重放落树的是检查点里定格的那一份：原料判断已经不在、时钟也往后拨了，树上仍是 stage 那一刻的文档。"""
+
+    harness = Harness(tmp_path)
+    seed_wash(harness, harness.deliver(OBS_A, OBS_B, OBS_C))
+    original_publish = harness.runner._publish_checkpoint
+    harness.runner._publish_checkpoint = lambda checkpoint, guard: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        RuntimeError("crash after stage")
+    )
+    with pytest.raises(RuntimeError, match="crash after stage"):
+        asyncio.run(harness.runner.run_once())
+    staged_at = harness.now
+    harness.judgements.discard(record_id("wash"))  # 原料没了：只有检查点里那一份能落树
+    harness.now = staged_at + timedelta(hours=1)
+    harness.runner._publish_checkpoint = original_publish  # type: ignore[method-assign]
+
+    report = asyncio.run(harness.runner.run_once())
+
+    assert report.replayed_documents == 1
+    (address,) = harness.tree.list_addresses(BehaviorKind.OCCURRENCE)
+    assert harness.tree.read(address).metadata.created_at == staged_at
+
+
+def test_a_vocabulary_job_refreshes_the_days_it_changed(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """词表整理活改过的日子：记进待刷新集合，同一把锁内刷新语义面，刷成了就从集合里清掉。"""
+
+    from habitus.behavior.reduction.kinds_jobs import JobsOutcome
+    from habitus.behavior.semantic import BehaviorSemanticRefresher
+    from tests.unit.behavior.test_semantic_layers import ScriptedOverviewGenerator
+
+    harness = Harness(
+        tmp_path,
+        semantic_refresher=BehaviorSemanticRefresher(BehaviorTree(tmp_path / "tree"), ScriptedOverviewGenerator()),
+    )
+    seed_wash(harness, harness.deliver(OBS_A, OBS_B, OBS_C))
+    asyncio.run(harness.runner.run_once())
+    day = date(2026, 8, 16)
+
+    async def grown(now, *, checkpoint):  # type: ignore[no-untyped-def]
+        return JobsOutcome(frozenset({day}), 1, ("grown",))
+
+    monkeypatch.setattr(harness.vocabulary_jobs, "grow", grown)
+    report = asyncio.run(harness.runner.grow_vocabulary())
+
+    assert (report.days, report.model_calls, report.signals) == ((day,), 1, ("grown",))
+    assert not (tmp_path / "reduction" / "refresh_pending.json").exists()
+
+
+def test_a_chain_whose_delivery_is_gone_still_lands_and_says_so(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """交付已不在存储里：没有 basis 的链照常落树（判断本体自带 summary），留一条信号是唯一的可见痕迹（审计 NEW-8）。"""
+
+    harness = Harness(tmp_path)
+    source = harness.deliver(OBS_A, OBS_B, OBS_C)
+    harness.judgements.put_payload(
+        judgement_record(
+            "wash",
+            behavior="洗手",
+            started_at=at(18),
+            last_observed_at=at(62),
+            evidence_ready_at=at(64),
+            observation_ids=(OBS_A.observation_id, OBS_B.observation_id, OBS_C.observation_id),
+            source_refs=(source,),
+            summary="在水池边洗手",
+        )
+    )
+    harness.observations.discard(source)
+
+    report = asyncio.run(harness.runner.run_once())
+
+    assert report.published_occurrences == 1
+    assert f"source_delivery_missing {source}" in report.dropped_edges

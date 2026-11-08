@@ -73,12 +73,11 @@ from habitus.foresight.ledger import (
     Expectation,
     UnitLevel,
     antecedent_holds_when_delivering,
-    parse_account,
-    relation_backed,
 )
-from habitus.foresight.opportunities import OpportunityTable, TreeReading
+from habitus.foresight.opportunities import OpportunityTable
 from habitus.foresight.reliability import Reliability
 from habitus.foresight.units import UNIT, UNIT_CITE, joinable, meets, voiced
+from habitus.runtime.foresight_delivery_views import AccountView, DeliveryViews, OmissionView
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_outlet import OpenRequest, OutletPort
@@ -125,27 +124,6 @@ class JudgeMaterials:
     seen: Sequence[Seen] = ()
 
 
-@dataclass(frozen=True)
-class AccountView:
-    """可见面读的一本账（裁定 50）：是什么、此刻在哪一档、两条轴的读数、设置、最近几条事实。"""
-
-    account: str
-    standing: Standing
-    facts: int
-    recent: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class OmissionView:
-    """可见面里"还没看懂的事"（裁定 50）：一类行为最近一段里发生了、而发生前没有任何一条在时预期的次数。
-    ``with_expectation`` 是其中那天这一类有过别的预期的次数（时窗没对上）；其余是根本没有预期（还没认出规律）。"""
-
-    kind_token: str
-    count: int
-    with_expectation: int
-    latest_uri: str
-
-
 class DeliveryStage:
     def __init__(
         self,
@@ -177,6 +155,8 @@ class DeliveryStage:
         self.units = UnitPlanner(history, evidence=evidence, prior_share=unit_prior_share, lane=lane)
         #: 编号 → 现在对应哪些在用编号（与结算同一个映射）：开口前核前因、判做没做都按它认词表拆改。
         self.current = current
+        #: 只读可见面（账、单元、漏报）：边的位置与递送引擎同一个读法。
+        self.views = DeliveryViews(ledger, standing=self._standing)
 
     async def run_once(self, now: datetime, materials: JudgeMaterials | None = None) -> DeliveryReport:
         if now.utcoffset() is None:
@@ -519,47 +499,19 @@ class DeliveryStage:
     def account_views(
         self, now: datetime, table: OpportunityTable | None = None, *, recent: int = 5
     ) -> tuple[AccountView, ...]:
-        """全部账此刻的样子（可见面的只读口；可见面本身在层外）：边的位置从单元历史读，流水里最近几笔给人看。"""
+        """全部账此刻的样子（可见面的只读口，``DeliveryViews``）。"""
 
-        views = []
-        for account in self.ledger.accounts():
-            facts = self.ledger.facts_of(account)
-            kind, _source, _trigger = parse_account(account)
-            standing = self._standing(account, kind, now, table)
-            tail = tuple(f"{item.at:%m-%d} {'好' if item.good else '坏'} {item.kind}" for item in facts[-recent:])
-            views.append(AccountView(account, standing, len(facts), tail))
-        return tuple(views)
+        return self.views.account_views(now, table, recent=recent)
 
     def unit_views(self, now: datetime, table: OpportunityTable | None) -> tuple[UnitView, ...]:
-        """全部行为单元此刻的样子（可见面的只读口）：每个行为的每个输入——边此刻的位置、语义树读数、两个数对不对得上。"""
+        """全部行为单元此刻的样子（可见面的只读口，``DeliveryViews``）。"""
 
-        by_kind: dict[str, list[tuple[str, Standing, TreeReading | None]]] = {}
-        for account in self.ledger.accounts():
-            kind, source, trigger = parse_account(account)
-            standing = self._standing(account, kind, now, table)
-            relation = table.relation(trigger) if table is not None and relation_backed(source) else None
-            by_kind.setdefault(kind, []).append((account, standing, relation.reading if relation is not None else None))
-        return UnitPlanner.views(by_kind)
+        return self.views.unit_views(now, table)
 
     def omission_views(self, now: datetime, *, days: int = 30) -> tuple[OmissionView, ...]:
-        """最近 ``days`` 天的漏报按类汇总，次数多的在前（可见面的只读口）。"""
+        """最近 ``days`` 天的漏报按类汇总（可见面的只读口，``DeliveryViews``）。"""
 
-        found: dict[str, list[tuple[datetime, str, bool]]] = {}
-        for offset in range(days, -1, -1):
-            for item in self.ledger.omissions_on(now.date() - timedelta(days=offset)):
-                found.setdefault(item.kind_token, []).append(
-                    (item.noticed_at, item.occurrence_uri, item.had_expectation)
-                )
-        views = [
-            OmissionView(
-                kind_token=kind,
-                count=len(items),
-                with_expectation=sum(1 for _at, _uri, had in items if had),
-                latest_uri=max(items)[1],
-            )
-            for kind, items in found.items()
-        ]
-        return tuple(sorted(views, key=lambda view: (-view.count, view.kind_token)))
+        return self.views.omission_views(now, days=days)
 
     # ── 模型 ────────────────────────────────────────────────────────────────
 

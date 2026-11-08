@@ -304,6 +304,24 @@ def test_the_account_views_show_every_account_with_the_edge_read_from_the_unit_h
     assert views[account].facts == 3 and len(views[other].recent) == 5 and "好 准时" in views[other].recent[-1]
 
 
+def test_the_unit_views_group_every_account_under_its_behaviour_with_the_edge_read_from_the_unit_history(
+    tmp_path,
+) -> None:
+    """可见面的单元口：每个行为一个单元（按行为排），单元里是这个行为的每本账与它此刻的位置；没有机会表时不带语义树读数。"""
+
+    run, ledger = stage(tmp_path)
+    account = earn(ledger, hits=3)
+    other = earn(ledger, kind="s-k0003", trigger="weekday=1", hits=8)
+    views = run.unit_views(DAY0, None)
+    assert [view.kind_token for view in views] == ["s-k0002", "s-k0003"]
+    by_kind = {view.kind_token: {item[0]: item[1] for item in view.inputs} for view in views}
+    assert by_kind == {
+        "s-k0002": {account: run.standing_of(expectation("a", DAY0), DAY0)},
+        "s-k0003": {other: run.standing_of(expectation("b", DAY0, kind="s-k0003", trigger="weekday=1"), DAY0)},
+    }
+    assert by_kind["s-k0002"][account].level == 0 and by_kind["s-k0003"][other].level == 1
+
+
 def test_the_stage_checks_its_inputs(tmp_path) -> None:
     ledger = ForesightLedgerStore(tmp_path / "ledger")
     common = dict(tolerance=LOSS, evidence=EVIDENCE, daily_cap=2)

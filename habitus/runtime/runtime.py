@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from enum import Enum
 from pathlib import Path
 
 from habitus.behavior.reduction import VocabularyJobReport
@@ -26,7 +24,6 @@ from habitus.conversation import (
 from habitus.foundation.observability import (
     ObservationEvent,
     ObservationStatus,
-    bind_observation_context,
     record_observation,
 )
 from habitus.infrastructure.observability import AuditRecord, ObservabilitySnapshot
@@ -38,7 +35,6 @@ from habitus.memory.conversation import (
     ConversationIngressRequest,
 )
 from habitus.memory.document import MemoryDocument
-from habitus.memory.editor import MemoryTransactionJournalState
 from habitus.memory.intention import MemoryIntentionRecallScope
 from habitus.memory.model import MemoryKind
 from habitus.memory.retrieval import MemorySearchResult
@@ -50,7 +46,6 @@ from habitus.memory.workflow import (
     MemoryChangeReceipt,
     MemoryChangeSource,
     MemoryJob,
-    MemoryJobAbandonment,
     MemoryJobRunResult,
     MemoryJobStatus,
 )
@@ -71,21 +66,10 @@ from habitus.runtime.foresight_reminders import ReminderDay, reminder_day
 from habitus.runtime.health import RuntimeHealthReport, RuntimeHealthService
 from habitus.runtime.lifecycle import LifecycleWorkerState
 from habitus.runtime.lifecycle_sources import memory_jobs_restored
+from habitus.runtime.runtime_jobs import FailedMemoryJobOperations, MemoryJobAbandonResult, MemoryJobRetryResult
+from habitus.runtime.runtime_lifecycle import RuntimeLifecycle, publish_source_delivery_gauges
+from habitus.runtime.runtime_state import RuntimeState, RuntimeStateError
 from habitus.runtime.worker import MemoryWorkerState
-
-
-class RuntimeState(str, Enum):
-    """Runtime 的显式初始化、运行、停止和终止状态。"""
-
-    CREATED = "created"
-    READY = "ready"
-    RUNNING = "running"
-    CLOSING = "closing"
-    CLOSED = "closed"
-
-
-class RuntimeStateError(RuntimeError):
-    """Runtime 操作与当前生命周期不相容。"""
 
 
 class RuntimeInitializationError(RuntimeError):
@@ -125,34 +109,6 @@ class RuntimeInitialization:
 
 
 @dataclass(frozen=True)
-class MemoryJobRetryResult:
-    """一次人工重试的失败快照、新状态和 Worker 恢复结果。"""
-
-    failed_job: MemoryJob
-    reopened_job: MemoryJob
-    worker_restarted: bool
-
-    def __post_init__(self) -> None:
-        if self.failed_job.status is not MemoryJobStatus.FAILED:
-            raise ValueError("failed_job must be a FAILED MemoryJob snapshot")
-        if self.reopened_job.status not in {MemoryJobStatus.STAGED, MemoryJobStatus.QUEUED}:
-            raise ValueError("reopened_job must be a STAGED or QUEUED MemoryJob")
-        if self.failed_job.source_identity != self.reopened_job.source_identity:
-            raise ValueError("retried MemoryJob source identity changed")
-        if self.reopened_job.attempts != 0 or self.reopened_job.last_error is not None:
-            raise ValueError("reopened MemoryJob must reset its retry state")
-
-
-@dataclass(frozen=True)
-class MemoryJobAbandonResult:
-    """一次显式永久失败处置及其 Worker 恢复结果。"""
-
-    failed_job: MemoryJob
-    abandonment: MemoryJobAbandonment
-    worker_restarted: bool
-
-
-@dataclass(frozen=True)
 class RuntimeConversationProtocolIngestResult:
     """外部协议转换事实与实际写入结果。"""
 
@@ -165,6 +121,100 @@ class RuntimeConversationProtocolIngestResult:
         """返回写入锁内确认的 Conversation 权威下一序号。"""
 
         return self.ingest.append.next_sequence
+
+
+class RuntimeObservabilityRefresh:
+    """只读刷新队列、Worker 和锁聚合值并发布 gauge；采集失败不阻断业务或指标端点。
+
+    与门面同文件：锁快照的类型核对是这个文件已有的运行时类型检查（尺寸闸的类型检查基线按文件计），搬出去会变成新文件的新增条目。
+    """
+
+    def __init__(self, config: HabitusConfig, components: RuntimeComponents) -> None:
+        self.config = config
+        self.components = components
+
+    async def refresh(self) -> ObservabilitySnapshot:
+        attributes: dict[str, str | int | float | bool] = {}
+        status = ObservationStatus.SUCCESS
+        if not await self._collect_queue(attributes):
+            status = ObservationStatus.DEGRADED
+        if not await self._collect_locks(attributes):
+            status = ObservationStatus.DEGRADED
+        registry = self.components.infrastructure.observability
+        self._publish_worker_gauges()
+        manager = self.components.infrastructure.managed_observability
+        if manager is not None:
+            backend_status, _detail = manager.health()
+            registry.set_gauge("observability_backend_healthy", 1 if backend_status == "healthy" else 0)
+        observer = self.components.infrastructure.observer
+        if observer is not None:
+            observer.record(
+                ObservationEvent(
+                    category="observability",
+                    operation="snapshot",
+                    status=status,
+                    duration_seconds=0.0,
+                    attributes=attributes,
+                )
+            )
+        return registry.snapshot()
+
+    async def _collect_queue(self, attributes: dict[str, str | int | float | bool]) -> bool:
+        """队列聚合值并进 ``attributes``；失败记错误类型并返回 False（降级）。"""
+
+        try:
+            queue = await asyncio.to_thread(self.components.workflow.jobs.observability_snapshot)
+            attributes.update(
+                queue_staged=queue.staged,
+                queue_queued=queue.queued,
+                queue_running=queue.running,
+                queue_failed=queue.failed,
+                queue_committed=queue.committed,
+                queue_oldest_age_seconds=queue.oldest_age_seconds,
+                queue_high_watermark=queue.high_watermark,
+            )
+        except Exception as exc:
+            attributes["queue_error_type"] = type(exc).__name__
+            return False
+        return True
+
+    async def _collect_locks(self, attributes: dict[str, str | int | float | bool]) -> bool:
+        """锁库带快照能力时并进锁聚合值；失败记错误类型并返回 False（降级）。"""
+
+        snapshotter = getattr(self.components.infrastructure.path_lock.lock_store, "observability_snapshot", None)
+        if not callable(snapshotter):
+            return True
+        try:
+            lock_snapshot = await asyncio.to_thread(
+                snapshotter,
+                warning_seconds=float(self.config.observability.lock_warning_seconds),
+            )
+            if not isinstance(lock_snapshot, LockStoreSnapshot):
+                raise TypeError("lock store returned an invalid observability snapshot")
+            attributes.update(
+                active_locks=lock_snapshot.active_count,
+                hanging_locks=lock_snapshot.hanging_count,
+                max_active_lock_age_seconds=lock_snapshot.max_active_age_seconds,
+            )
+        except Exception as exc:
+            attributes["lock_error_type"] = type(exc).__name__
+            return False
+        return True
+
+    def _publish_worker_gauges(self) -> None:
+        registry = self.components.infrastructure.observability
+        for memory_worker_state in MemoryWorkerState:
+            registry.set_gauge(
+                "memory_worker_state",
+                int(memory_worker_state is self.components.workflow.worker.state),
+                labels={"worker_state": memory_worker_state.value},
+            )
+        for lifecycle_worker_state in LifecycleWorkerState:
+            registry.set_gauge(
+                "lifecycle_worker_state",
+                int(lifecycle_worker_state is self.components.workflow.lifecycle_worker.state),
+                labels={"worker_state": lifecycle_worker_state.value},
+            )
 
 
 class Runtime:
@@ -196,6 +246,11 @@ class Runtime:
             conversation_adapters if conversation_adapters is not None else ConversationAdapterRegistry.with_builtins()
         )
         self._health = RuntimeHealthService(components, capacity_warning_share=config.lifecycle.capacity_warning_share)
+        self._lifecycle = RuntimeLifecycle(config, components, observe=self._observe)
+        self._failed_jobs = FailedMemoryJobOperations(
+            components, running=lambda: self._state is RuntimeState.RUNNING, observe=self._observe
+        )
+        self._observability = RuntimeObservabilityRefresh(config, components)
 
     @property
     def state(self) -> RuntimeState:
@@ -215,23 +270,7 @@ class Runtime:
             return self._initialization
         try:
             self._ensure_storage_root()
-            self.components.infrastructure.initialize()
-            memory_root = self.components.memory.tree.initialize()
-            self.components.workflow.jobs.initialize()
-            self.components.memory.lifecycle.initialize()
-            self.components.conversation.summary_use.initialize()
-            self.components.workflow.lifecycle.retirement_store.initialize()
-            if self.components.behavior is not None:
-                # 行为树静态目录；幂等，重复初始化零写入。
-                # 此处失败**允许**阻断整个 Runtime（对"行为失败不阻断"哲学的边界取舍）：
-                # 同一 storage root 下建不了目录，几乎必然意味着记忆侧同样不可用；
-                # 静默跳过反而会让 RUNNING 状态掩盖一个坏掉的存储根。
-                for branch in self.components.behavior:
-                    branch.tree.initialize()
-            oldest_job = self.components.workflow.jobs.oldest_uncommitted()
-            recovered = (
-                self.components.workflow.runner.transaction_recovery.recover_pending() if oldest_job is None else ()
-            )
+            memory_root, recovered = self._lifecycle.initialize_stores()
             initialization = RuntimeInitialization(
                 memory_root=memory_root,
                 recovered_transaction_ids=recovered,
@@ -266,68 +305,7 @@ class Runtime:
             self.initialize()
             if self._state is RuntimeState.RUNNING:
                 return
-            await self.components.memory.vector_index.ensure_ready()
-            await self.components.conversation.summary_vector_index.ensure_ready()
-            # 恢复失败不阻断启动（裁定 60 第 6 条），只降级出事的那个地址：有序的 Memory 对同地址后面的源报"等前序"或
-            # "前序已坏"，别的地址照常；可重试的由周期恢复按退避再试，放弃了的等人工修复。失败都计入 gauge。
-            # 整轮恢复本身出错（读不了账）同样不挡启动：记一条失败事件，交给周期恢复再来。
-            try:
-                source_recoveries = await self.components.conversation.source_recovery.recover_pending()
-            except Exception as exc:  # noqa: BLE001 - 恢复失败不阻断启动
-                self._observe(
-                    "runtime", "source_recovery", ObservationStatus.FAILURE, started, {"error_type": type(exc).__name__}
-                )
-            else:
-                self._publish_source_delivery_gauges(source_recoveries)
-                self._observe_degraded_source_addresses(source_recoveries, started)
-            await self.components.workflow.worker.start()
-            try:
-                await self.components.workflow.lifecycle_worker.start()
-            except BaseException:
-                try:
-                    await self.components.workflow.lifecycle_worker.stop()
-                finally:
-                    await self.components.workflow.worker.stop()
-                raise
-            # 行为管线（可选启用）：启动失败不阻断 Runtime——沿既有"Behavior 失败不阻断"
-            # 哲学，失败经观测记录，行为侧下次启动自愈（存储都是耐久幂等的）。
-            if self.components.behavior is not None:
-                # 两支各起各的：一支起不来不连累另一支。
-                for branch in self.components.behavior:
-                    try:
-                        await branch.reduction_worker.start()
-                    except Exception as exc:  # noqa: BLE001 - 行为侧失败不阻断记忆主链
-                        self._observe(
-                            "runtime",
-                            "behavior_start",
-                            ObservationStatus.FAILURE,
-                            started,
-                            {"error_type": type(exc).__name__, "lane": branch.lane.value},
-                        )
-            # 整晚那一趟同一哲学：它只读行为树、只写派生的存储，起不来不影响任何在线路径。
-            if self.components.nightly is not None:
-                try:
-                    await self.components.nightly.start()
-                except Exception as exc:  # noqa: BLE001 - 夜批失败不阻断记忆主链
-                    self._observe(
-                        "runtime",
-                        "nightly_start",
-                        ObservationStatus.FAILURE,
-                        started,
-                        {"error_type": type(exc).__name__},
-                    )
-            # 预测层每槽一拍，只读两棵派生树与判断存储、只调模型，同一哲学。
-            if self.components.foresight is not None and self.components.foresight.worker is not None:
-                try:
-                    await self.components.foresight.worker.start()
-                except Exception as exc:  # noqa: BLE001 - 预测层失败不阻断记忆主链
-                    self._observe(
-                        "runtime",
-                        "foresight_start",
-                        ObservationStatus.FAILURE,
-                        started,
-                        {"error_type": type(exc).__name__},
-                    )
+            await self._lifecycle.start(started)
             self._state = RuntimeState.RUNNING
         except BaseException as exc:
             self._observe(
@@ -355,16 +333,7 @@ class Runtime:
             raise RuntimeStateError("closing runtime cannot be stopped")
         if self._state is RuntimeState.CREATED:
             return
-        await self._stop_background_workers()
-        try:
-            await self.components.workflow.lifecycle_worker.stop()
-        finally:
-            try:
-                await self.components.conversation.source_coordinator.wait_for_idle(
-                    self.config.conversation.source.shutdown_timeout_seconds
-                )
-            finally:
-                await self.components.workflow.worker.stop()
+        await self._lifecycle.stop()
         self._state = RuntimeState.READY
 
     async def deliver_physical(self, payload: object) -> tuple[UnitOutcome, ...]:
@@ -432,52 +401,6 @@ class Runtime:
         if behavior is None:
             raise RuntimeStateError("behavior pipeline is not configured; set behavior.primary_subject")
         return behavior
-
-    async def _stop_background_workers(self) -> None:
-        """停行为侧两个循环与预测夜批；失败不阻断记忆主链的停机（与启动侧同一哲学）。
-
-        名字不叫 behavior：启动侧是分开的两块，停机侧合成一个函数是为了保证顺序（预测先停，
-        它读的行为树才停），但既然管着两个域，就不该顶着一个域的名字。
-        """
-
-        # 预测层先停（它读机会表与行为树），然后整晚那一趟，最后行为侧。
-        foresight = self.components.foresight
-        if foresight is not None and foresight.worker is not None:
-            try:
-                await foresight.worker.stop()
-            except Exception as exc:  # noqa: BLE001 - 预测层停机失败不阻断主链
-                self._observe(
-                    "runtime",
-                    "foresight_stop",
-                    ObservationStatus.FAILURE,
-                    time.monotonic(),
-                    {"error_type": type(exc).__name__},
-                )
-        if self.components.nightly is not None:
-            try:
-                await self.components.nightly.stop()
-            except Exception as exc:  # noqa: BLE001 - 夜批停机失败不阻断主链
-                self._observe(
-                    "runtime",
-                    "nightly_stop",
-                    ObservationStatus.FAILURE,
-                    time.monotonic(),
-                    {"error_type": type(exc).__name__},
-                )
-        behavior = self.components.behavior
-        if behavior is None:
-            return
-        for branch in behavior:
-            try:
-                await branch.reduction_worker.stop()
-            except Exception as exc:  # noqa: BLE001 - 行为侧停机失败不阻断主链，也不连累另一支
-                self._observe(
-                    "runtime",
-                    "behavior_stop",
-                    ObservationStatus.FAILURE,
-                    time.monotonic(),
-                    {"error_type": type(exc).__name__, "lane": branch.lane.value},
-                )
 
     async def run_next(self) -> MemoryJobRunResult:
         """只在初始化完成后委托领域 Runner 处理最早的一项 Job。"""
@@ -584,7 +507,7 @@ class Runtime:
 
         self._require_initialized("conversation source recovery")
         results = await self.components.conversation.source_recovery.recover_pending()
-        self._publish_source_delivery_gauges(results)
+        publish_source_delivery_gauges(self.components.infrastructure.observability, results)
         if self._state is RuntimeState.RUNNING and memory_jobs_restored(
             self.components.conversation.source_delivery, results
         ):
@@ -719,50 +642,7 @@ class Runtime:
         if failed_job.status is not MemoryJobStatus.FAILED:
             raise ValueError("failed_job must be a FAILED MemoryJob snapshot")
         self._require_initialized("failed memory job retry")
-
-        started = time.monotonic()
-        with bind_observation_context(
-            memory_sequence=failed_job.memory_sequence,
-            transaction_id=failed_job.transaction_id,
-        ):
-            try:
-                worker = self.components.workflow.worker
-                restart_worker = self._state is RuntimeState.RUNNING
-                if restart_worker:
-                    if worker.state is not MemoryWorkerState.BLOCKED or worker.busy:
-                        raise RuntimeStateError(
-                            "running runtime can only retry a failed job after its memory worker is blocked and idle"
-                        )
-                    await worker.wait_stopped()
-
-                reopened = await asyncio.to_thread(
-                    self.components.workflow.jobs.retry_failed,
-                    failed_job,
-                )
-                if restart_worker:
-                    await worker.start()
-                result = MemoryJobRetryResult(
-                    failed_job=failed_job,
-                    reopened_job=reopened,
-                    worker_restarted=restart_worker,
-                )
-            except Exception as exc:
-                self._observe(
-                    "operations",
-                    "retry_job",
-                    ObservationStatus.FAILURE,
-                    started,
-                    {"error_type": type(exc).__name__, "job_status": failed_job.status.value},
-                )
-                raise
-            self._observe(
-                "operations",
-                "retry_job",
-                ObservationStatus.SUCCESS,
-                started,
-                {"job_status": reopened.status.value},
-            )
-            return result
+        return await self._failed_jobs.retry(failed_job)
 
     async def abandon_failed_memory_job(
         self,
@@ -777,32 +657,7 @@ class Runtime:
         if not reason.strip():
             raise ValueError("reason must be non-empty text")
         self._require_initialized("failed memory job abandonment")
-        source = MemoryChangeSource.from_job(failed_job)
-        receipt = await asyncio.to_thread(self.components.workflow.receipts.try_read, source)
-        if receipt is not None:
-            raise RuntimeStateError("a failed job with a prepared or committed receipt cannot be abandoned")
-        journal = await asyncio.to_thread(
-            self.components.memory.editor.transaction.journal.try_read,
-            failed_job.transaction_id,
-        )
-        if journal is not None and journal.state is not MemoryTransactionJournalState.ROLLED_BACK:
-            raise RuntimeStateError("a failed job with a pending or committed transaction cannot be abandoned")
-        worker = self.components.workflow.worker
-        restart_worker = self._state is RuntimeState.RUNNING
-        if restart_worker:
-            if worker.state is not MemoryWorkerState.BLOCKED or worker.busy:
-                raise RuntimeStateError(
-                    "running runtime can only abandon a failed job after its memory worker is blocked and idle"
-                )
-            await worker.wait_stopped()
-        abandonment = await asyncio.to_thread(
-            self.components.workflow.jobs.abandon_failed,
-            failed_job,
-            reason=reason,
-        )
-        if restart_worker:
-            await worker.start()
-        return MemoryJobAbandonResult(failed_job, abandonment, restart_worker)
+        return await self._failed_jobs.abandon(failed_job, reason=reason)
 
     async def find_memory(
         self,
@@ -882,68 +737,7 @@ class Runtime:
     async def refresh_observability(self) -> ObservabilitySnapshot:
         """只读刷新队列、Worker 和锁聚合值；采集失败不阻断业务或指标端点。"""
 
-        attributes: dict[str, str | int | float | bool] = {}
-        status = ObservationStatus.SUCCESS
-        try:
-            queue = await asyncio.to_thread(self.components.workflow.jobs.observability_snapshot)
-            attributes.update(
-                queue_staged=queue.staged,
-                queue_queued=queue.queued,
-                queue_running=queue.running,
-                queue_failed=queue.failed,
-                queue_committed=queue.committed,
-                queue_oldest_age_seconds=queue.oldest_age_seconds,
-                queue_high_watermark=queue.high_watermark,
-            )
-        except Exception as exc:
-            status = ObservationStatus.DEGRADED
-            attributes["queue_error_type"] = type(exc).__name__
-        snapshotter = getattr(self.components.infrastructure.path_lock.lock_store, "observability_snapshot", None)
-        if callable(snapshotter):
-            try:
-                lock_snapshot = await asyncio.to_thread(
-                    snapshotter,
-                    warning_seconds=float(self.config.observability.lock_warning_seconds),
-                )
-                if not isinstance(lock_snapshot, LockStoreSnapshot):
-                    raise TypeError("lock store returned an invalid observability snapshot")
-                attributes.update(
-                    active_locks=lock_snapshot.active_count,
-                    hanging_locks=lock_snapshot.hanging_count,
-                    max_active_lock_age_seconds=lock_snapshot.max_active_age_seconds,
-                )
-            except Exception as exc:
-                status = ObservationStatus.DEGRADED
-                attributes["lock_error_type"] = type(exc).__name__
-        registry = self.components.infrastructure.observability
-        for memory_worker_state in MemoryWorkerState:
-            registry.set_gauge(
-                "memory_worker_state",
-                int(memory_worker_state is self.components.workflow.worker.state),
-                labels={"worker_state": memory_worker_state.value},
-            )
-        for lifecycle_worker_state in LifecycleWorkerState:
-            registry.set_gauge(
-                "lifecycle_worker_state",
-                int(lifecycle_worker_state is self.components.workflow.lifecycle_worker.state),
-                labels={"worker_state": lifecycle_worker_state.value},
-            )
-        manager = self.components.infrastructure.managed_observability
-        if manager is not None:
-            backend_status, _detail = manager.health()
-            registry.set_gauge("observability_backend_healthy", 1 if backend_status == "healthy" else 0)
-        observer = self.components.infrastructure.observer
-        if observer is not None:
-            observer.record(
-                ObservationEvent(
-                    category="observability",
-                    operation="snapshot",
-                    status=status,
-                    duration_seconds=0.0,
-                    attributes=attributes,
-                )
-            )
-        return registry.snapshot()
+        return await self._observability.refresh()
 
     async def recent_audit_events(self, *, limit: int = 100) -> tuple[AuditRecord, ...]:
         """读取最小安全与运维审计；没有启用审计时返回空结果。"""
@@ -972,35 +766,15 @@ class Runtime:
         previous_state = self._state
         self._state = RuntimeState.CLOSING
         if previous_state is not RuntimeState.CREATED:
-            # 行为 Worker 与主链 Worker 对称停机：``async with`` 的退出走的是 close 不是
-            # stop——漏掉这里会让融合/归约循环带着已关闭的模型客户端继续跑（评审实测泄漏）。
-            await self._stop_background_workers()
-            try:
-                await self.components.workflow.lifecycle_worker.stop()
-            finally:
-                await self.components.workflow.worker.stop()
+            await self._lifecycle.stop_for_close()
         timeout_seconds = self.config.conversation.source.shutdown_timeout_seconds
         idle = await self.components.conversation.source_coordinator.wait_for_idle(timeout_seconds)
         if not idle:
             pending = self.components.conversation.source_coordinator.pending_deliveries
             if pending or not await self.components.conversation.source_coordinator.wait_for_idle(0):
                 raise RuntimeShutdownTimeoutError(timeout_seconds, pending)
-        await self._close_resources()
+        await self._lifecycle.close_resources()
         self._state = RuntimeState.CLOSED
-
-    async def _close_resources(self) -> None:
-        try:
-            await self.components.conversation.summary_vector_index.close()
-        finally:
-            try:
-                await self.components.memory.vector_index.close()
-            finally:
-                try:
-                    await self.components.models.aclose()
-                finally:
-                    manager = self.components.infrastructure.managed_observability
-                    if manager is not None:
-                        manager.close()
 
     async def __aenter__(self) -> Runtime:
         await self.start()
@@ -1051,47 +825,6 @@ class Runtime:
             with suppress(OSError):
                 restrict_directory_to_owner(directory)
 
-    def _observe_degraded_source_addresses(
-        self,
-        results: Sequence[ConversationSourceRecoveryResult],
-        started: float,
-    ) -> None:
-        """启动恢复里 Memory 没恢复成的源落在几个地址上：这些地址降级运行，记一条 DEGRADED 事件。"""
-
-        degraded = {
-            (result.envelope.conversation_id, result.envelope.started_on)
-            for result in results
-            if result.consumer is ConversationSourceConsumer.MEMORY and result.error is not None
-        }
-        if degraded:
-            self._observe(
-                "runtime",
-                "source_recovery",
-                ObservationStatus.DEGRADED,
-                started,
-                {"degraded_addresses": len(degraded)},
-            )
-
-    def _publish_source_delivery_gauges(
-        self,
-        results: Sequence[ConversationSourceRecoveryResult],
-    ) -> None:
-        """把本轮恢复后仍未完成的 Source Consumer 数量发布为 gauge。
-
-        交付失败只在发生的那一刻产生一条事件，而损坏状态不会自愈：事件一旦
-        被漏看，这条来源就再也不会发出任何信号。gauge 表达的是"现在还卡着
-        几条"，每次恢复都会刷新，因此漏看一次不等于永远看不到。
-        """
-
-        registry = self.components.infrastructure.observability
-        for consumer in ConversationSourceConsumer:
-            stuck = sum(1 for result in results if result.consumer is consumer and result.error is not None)
-            registry.set_gauge(
-                "conversation_source_delivery_stuck",
-                stuck,
-                labels={"consumer": consumer.value},
-            )
-
     def _observe(
         self,
         category: str,
@@ -1108,6 +841,7 @@ class Runtime:
 
 __all__ = [
     "MemoryJobAbandonResult",
+    "MemoryJobRetryResult",
     "RuntimeConversationProtocolIngestResult",
     "Runtime",
     "RuntimeInitialization",

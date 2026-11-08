@@ -398,6 +398,26 @@ def test_a_refinement_consequent_that_is_mostly_blind_stays_out_of_the_family() 
     night = tests.night()
     rework = [test for test in night.tests if test.key == key(DISCUSS, "返工")]
     assert rework and rework[0].verdict is Verdict.SPARSE
+    # 走的是上下界那条路：判不了的太多，只留一条 p = 1、最小可达 p = 1 的读数，不按"判了的那几条"照常算
+    assert (rework[0].p_value, rework[0].minimum_p) == (1.0, 1.0)
+
+
+def test_a_refinement_consequent_takes_its_reading_from_the_bounded_reading(monkeypatch) -> None:
+    """细分概念当后果的不带条件短跨度关系，当晚的读数取上下界检验那一份（不按"判了的那几条"照常算）。"""
+
+    concepts = ConceptSet([*CONCEPTS.values(), REWORK])
+    series = planted(40)
+    line = build_timelines(series, concepts, _hits_for(series, blind_every=10), CONFIG)["session"]
+    tests = LaneTests(line, concepts, CONFIG, series.cutoff)
+    target = key(DISCUSS, "返工")
+    assert tests.refined_consequent(target)
+    monkeypatch.setattr(
+        tests.evaluator,
+        "_bounded_reading",
+        lambda key, since, measure: (measure, 0.5, 0.25, False) if key == target else None,
+    )
+    (rework,) = [test for test in tests.night().tests if test.key == target]
+    assert (rework.p_value, rework.minimum_p, rework.upward) == (0.5, 0.25, False)
 
 
 def test_a_refinement_consequent_is_judged_on_both_bounds() -> None:

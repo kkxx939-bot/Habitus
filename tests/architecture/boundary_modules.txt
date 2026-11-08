@@ -143,6 +143,7 @@ behavior/observation/store.py
 behavior/reduction/kinds_step.py
 behavior/reduction/ledger.py
 behavior/reduction/record.py
+behavior/reduction/refresh_pending.py
 behavior/reduction/runner.py
 behavior/retry/model.py
 behavior/retry/store.py

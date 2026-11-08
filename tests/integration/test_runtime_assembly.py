@@ -160,7 +160,7 @@ class FakeVectorBackend:
         return ()
 
     async def close(self):
-        return None
+        self.closed = True
 
 
 def runtime_dependencies() -> tuple[ProviderFactory, VectorStoreFactory]:
@@ -439,6 +439,7 @@ def test_initialize_is_idempotent_and_creates_only_local_durable_roots(tmp_path:
     assert runtime.components.memory.lifecycle.operation_store.pending() == ()
     assert recall_store.path.exists()
     assert runtime.components.conversation.summary_use.path.exists()
+    assert runtime.components.workflow.jobs.state_path.exists()  # 永久序号高水位在初始化时建立
     assert not config.conversation_root.exists()
 
 
@@ -509,6 +510,9 @@ def test_runtime_start_stop_restart_and_close_coordinate_both_workers(tmp_path: 
         assert runtime.state is RuntimeState.CLOSED
         assert runtime.components.models.chat.provider.closed
         assert runtime.components.models.embedder.provider.closed
+        # 两套派生索引的向量库都随 Runtime 关闭
+        assert runtime.components.memory.vector_index.store.backend.closed
+        assert runtime.components.conversation.summary_vector_index.store.backend.closed
         with pytest.raises(RuntimeStateError, match="closed runtime"):
             await runtime.start()
 
@@ -1217,3 +1221,32 @@ async def _remember_one_turn(runtime: object) -> None:
             },
         )
     assert remembered.status_code == 200, remembered.text
+
+
+def test_refreshing_observability_publishes_worker_and_source_gauges_and_a_snapshot_event(tmp_path: Path) -> None:
+    """可观测刷新只读：队列与锁的聚合值进一条 snapshot 事件，两个 Worker 的状态按每个状态一个 gauge 发；交付恢复之后
+    每个 Source Consumer 还卡着几条也是 gauge（漏看一次事件不等于永远看不到）。"""
+
+    from habitus.foundation.observability import ObservationStatus
+
+    async def scenario() -> None:
+        providers, vectors = runtime_dependencies()
+        runtime = build_runtime(
+            runtime_config(tmp_path),
+            providers=providers,
+            vector_stores=vectors,
+            path_lock=PathLock(ProcessLocalLockStore()),
+        )
+        runtime.initialize()
+        await runtime.recover_conversation_sources()
+        snapshot = await runtime.refresh_observability()
+
+        assert snapshot.gauges["memory_worker_state[worker_state=created]"] == 1.0
+        assert snapshot.gauges["memory_worker_state[worker_state=running]"] == 0.0
+        assert snapshot.gauges["lifecycle_worker_state[worker_state=created]"] == 1.0
+        assert snapshot.gauges["conversation_source_delivery_stuck[consumer=memory]"] == 0.0
+        (event,) = [item for item in snapshot.recent_events if item.category == "observability"][-1:]
+        assert event.operation == "snapshot" and event.status is ObservationStatus.SUCCESS
+        assert {"queue_queued", "queue_high_watermark", "active_locks", "hanging_locks"} <= set(event.attributes)
+
+    asyncio.run(scenario())

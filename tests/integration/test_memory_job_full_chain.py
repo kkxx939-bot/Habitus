@@ -1126,3 +1126,78 @@ def test_vector_store_or_embedding_outage_longer_than_max_attempts_waits_and_com
     assert waiting.attempts == 0 and waiting.model_waits == max_attempts + 2
     assert result.job is not None and result.job.status is MemoryJobStatus.COMMITTED
     assert (tmp_path / "data" / "memory" / "preferences" / "回答风格.md").exists()
+
+
+def test_a_running_runtime_refuses_to_retry_or_abandon_while_its_worker_is_not_blocked(tmp_path: Path) -> None:
+    """FAILED Job 的人工处置在 RUNNING 时只许在 MemoryWorker 因它进了 BLOCKED 且空闲之后做（AGENTS 运维入口）；
+    Worker 没被它挡住时两种处置都拒绝，Job 原样留着。"""
+
+    from habitus.runtime import RuntimeState, RuntimeStateError
+
+    config = runtime_config(tmp_path, max_attempts=1)
+    providers, vectors, chats, vector_backends = dependencies()
+    runtime = build_runtime(
+        config, providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())
+    )
+    runtime.initialize()
+    search = {
+        "status": "insufficient",
+        "action": "memory_search",
+        "query": "磁盘清理偏好",
+        "uri": None,
+        "reason": "旧 L2 快照为空，需要检索。",
+    }
+    chats[0].retrieval_script.extend([search, search])
+    memory_collection = runtime.components.memory.vector_index.store.collection
+    memory_backend = next(backend for backend in vector_backends if backend.collection == memory_collection)
+    address = ConversationAddress("conversation-gate", date(2026, 7, 5))
+    runtime.components.workflow.enqueuer.append_and_maybe_enqueue(
+        address, ConversationBatch("conversation-gate", closed_turn()), after_turn=True
+    )
+    runtime.components.workflow.enqueuer.flush(address)
+    memory_backend.fail_search_when = lambda: "memory_retrieval_decision" in chats[0].response_names
+    with pytest.raises(MemoryJobExecutionError) as caught:
+        asyncio.run(runtime.run_next())
+    failed = caught.value.job
+    assert failed is not None and failed.status is MemoryJobStatus.FAILED
+
+    runtime._state = RuntimeState.RUNNING  # 只拨状态、不起 Worker：Worker 没进 BLOCKED
+    try:
+        with pytest.raises(RuntimeStateError, match="retry a failed job after its memory worker is blocked and idle"):
+            asyncio.run(runtime.retry_failed_memory_job(failed))
+        with pytest.raises(RuntimeStateError, match="abandon a failed job after its memory worker is blocked and idle"):
+            asyncio.run(runtime.abandon_failed_memory_job(failed, reason="人工确认无法修复"))
+    finally:
+        runtime._state = RuntimeState.READY
+    assert asyncio.run(runtime.failed_memory_job()) == failed
+
+
+def test_a_failed_job_whose_change_already_committed_cannot_be_abandoned(tmp_path: Path) -> None:
+    """L2 已提交（回执 COMMITTED）之后才失败的 Job 不许显式放弃：放弃会丢掉已发布的副作用，只能重试补完。"""
+
+    from habitus.runtime import RuntimeStateError
+
+    config = runtime_config(tmp_path, max_attempts=1)
+    providers, vectors, _chats, vector_backends = dependencies()
+    runtime = build_runtime(
+        config, providers=providers, vector_stores=vectors, path_lock=PathLock(ProcessLocalLockStore())
+    )
+    runtime.initialize()
+    address = ConversationAddress("conversation-abandon", date(2026, 7, 2))
+    runtime.components.workflow.enqueuer.append_and_maybe_enqueue(
+        address, ConversationBatch("conversation-abandon", closed_turn()), after_turn=True
+    )
+    runtime.components.workflow.enqueuer.flush(address)
+    memory_collection = runtime.components.memory.vector_index.store.collection
+    memory_backend = next(backend for backend in vector_backends if backend.collection == memory_collection)
+    memory_backend.fail_incremental_visibility_once = True
+    with pytest.raises(MemoryJobExecutionError) as caught:
+        asyncio.run(runtime.run_next())
+    failed = caught.value.job
+    assert failed is not None and failed.status is MemoryJobStatus.FAILED
+
+    with pytest.raises(
+        RuntimeStateError, match="a failed job with a prepared or committed receipt cannot be abandoned"
+    ):
+        asyncio.run(runtime.abandon_failed_memory_job(failed, reason="人工确认无法修复"))
+    assert asyncio.run(runtime.failed_memory_job()) == failed

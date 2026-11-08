@@ -36,13 +36,13 @@ from enum import Enum
 from habitus.scene.concepts.model import members_retired
 from habitus.scene.relations import stats
 from habitus.scene.relations.engine import (
-    LaneTests,
     RelationKey,
     RelationTest,
     Subset,
     Verdict,
     gone,
 )
+from habitus.scene.relations.lane_tests import LaneTests
 from habitus.scene.relations.longspan import MEASURE_VERSIONS
 
 #: 维持检验一段至少几块：一天里的几次不是几个独立样本（与前向验证的 ``blocks ≥ 2`` 同一条理由）。

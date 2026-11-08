@@ -20,9 +20,9 @@ from habitus.behavior.reduction.runner import (
     DEFAULT_SWEEP_LOCK_TTL_SECONDS,
     BehaviorReductionReport,
     BehaviorReductionRunner,
-    VocabularyJobReport,
 )
 from habitus.behavior.reduction.sealing import arrival_horizon, seal_horizon, sealed_gaps, sealed_indexes
+from habitus.behavior.reduction.vocabulary import VocabularyJobReport
 
 __all__ = [
     "DEFAULT_SWEEP_LOCK_TTL_SECONDS",

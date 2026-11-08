@@ -337,6 +337,35 @@ def test_runtime_start_and_stop_manage_behavior_workers(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_a_behavior_branch_that_cannot_start_does_not_block_the_runtime_or_the_other_branch(tmp_path: Path) -> None:
+    """行为侧失败不阻断记忆主链：一支的归约循环起不来，Runtime 照样进 RUNNING，另一支照常跑。"""
+
+    from habitus.runtime import RuntimeState
+
+    providers, vectors = scripted_dependencies([CLASSIFY_BODY])
+    runtime = build_runtime(
+        behavior_enabled_config(tmp_path),
+        providers=providers,
+        vector_stores=vectors,
+        path_lock=PathLock(ProcessLocalLockStore()),
+    )
+    branches = runtime.components.behavior
+    assert branches is not None
+
+    async def broken() -> None:
+        raise RuntimeError("physical branch cannot start")
+
+    branches.physical.reduction_worker.start = broken  # type: ignore[method-assign]
+
+    async def scenario() -> None:
+        await runtime.start()
+        assert runtime.state is RuntimeState.RUNNING
+        assert branches.session.reduction_worker.running and not branches.physical.reduction_worker.running
+        await runtime.stop()
+
+    asyncio.run(scenario())
+
+
 def test_storage_layout_follows_each_stores_root_contract(tmp_path: Path) -> None:
     """全部存储传同一个行为根：传子目录会目录二次嵌套（评审实测的口吃布局）。"""
 
