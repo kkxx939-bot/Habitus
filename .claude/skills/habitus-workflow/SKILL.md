@@ -39,6 +39,7 @@ argument-hint: "change <清单条目> | review <范围> | fix <问题号> | audi
 | `review <范围>` | 一批改动写完、准备交给用户之前 | 审核流程全部步骤 |
 | `fix <问题号>` | **每一个修复**落地时 | 审核流程 0 → 1 → 2 → 5 → 7 → 8 |
 | `audit <模块>` | 给一个模块或一整层做全面体检 | 审核流程全部步骤 |
+| `deepen <题目>` | 用户提出新方向或新题目时，**写方案、改题目、派人之前**先把题目问深（更深，不是更大） | [references/deepen-topic.md](references/deepen-topic.md)，确认后接 `plan` 或 `change` |
 | `plan <方案文档>` | 动代码之前评审一份方案或一条拟定的裁定 | [references/plan-review.md](references/plan-review.md) |
 
 改错别字、改日志措辞这类不改变任何行为的改动，用内置的 `/code-review low` 就够了。

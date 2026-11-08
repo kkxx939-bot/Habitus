@@ -62,6 +62,10 @@ class ReminderFeedback(Protocol):
         """这一轮（``turn`` 是轮的身份，重放不重判）对一条提醒的回应。"""
         ...
 
+    def answered(self, calls: frozenset[str], at: datetime) -> frozenset[str]:
+        """``calls``（这一轮里出现过的调用身份）里，出口已按固定选项写过回话的那几次提问；``at`` 是这一轮他最后开口的时刻。"""
+        ...
+
 
 class NoReminders:
     """没接预测层时的显式空实现：没有开着的提醒，回应也无处可写。"""
@@ -71,6 +75,9 @@ class NoReminders:
 
     def respond(self, turn: str, response: ReminderResponse, *, at: datetime) -> None:
         return None
+
+    def answered(self, calls: frozenset[str], at: datetime) -> frozenset[str]:
+        return frozenset()
 
 
 __all__ = ["POLARITIES", "NoReminders", "PendingReminder", "ReminderFeedback", "ReminderResponse"]

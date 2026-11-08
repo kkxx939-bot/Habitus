@@ -30,6 +30,8 @@ WAKE_LABEL = "（没有新的话；后台任务回来，助手接着做）"
 WAKE_NOTICE_CHARS = 300
 # 人对助手提问的作答，翻成人说的话时带的开头。
 ANSWER_PREFIX = "（回答助手的提问）"
+# 开这一轮的就是一条出口已按固定选项记过回话的作答（Desktop 晚到的作答自己开一轮）时，"他说"的位置写这个。
+ANSWERED_LABEL = "（没有新的话；他回答了系统的一道提醒提问，作答已记下）"
 # 同一秒里成批出现的"人说的话"是重放，不是他说的。
 REPLAY_BURST = 3
 
@@ -96,12 +98,12 @@ def split_turns(
                 continue  # 助手还在干活时到的通知：不是他说的话，也不结束这一轮
             if not text or int(message.occurred_at.timestamp()) in replayed:
                 continue  # 空的或同秒重放：不是他说的，丢掉，也不结束当前这一轮
-            spoken = _reply_as_prompt(message) if message.answers else message
+            spoken = _replies_as_prompts(message) if message.answers else (message,)
             if message.mid_turn:
-                current.append(spoken)  # 他在助手干活时说的：这一轮的一部分
+                current.extend(spoken)  # 他在助手干活时说的：这一轮的一部分
                 continue
             close()
-            current = [spoken]
+            current = list(spoken)
         elif _is_answer(message, asking):
             if (
                 current
@@ -148,20 +150,53 @@ def _answer_as_prompt(message: SessionMessage) -> SessionMessage:
         occurred_at=message.occurred_at,
         role=SessionMessageRole.PROMPT,
         content=f"{ANSWER_PREFIX}{message.content.strip()}",
+        tool_call_id=message.tool_call_id,
     )
 
 
-def _reply_as_prompt(message: SessionMessage) -> SessionMessage:
-    """Codex Desktop 晚来的作答消息翻成"（回答助手的提问）问题 → 答案"。"""
+def _replies_as_prompts(message: SessionMessage) -> tuple[SessionMessage, ...]:
+    """Codex Desktop 晚来的作答消息：每一题翻成一句"（回答助手的提问）问题 → 答案"，带着它答的那次调用。"""
 
-    answered = "；".join(
-        f"{' '.join(question.split())} → {' '.join(answer.split())}" for question, answer in message.answers
+    return tuple(
+        SessionMessage(
+            sequence=message.sequence,
+            occurred_at=message.occurred_at,
+            role=SessionMessageRole.PROMPT,
+            content=f"{ANSWER_PREFIX}{' '.join(question.split())} → {' '.join(answer.split())}",
+            tool_call_id=call_id,
+        )
+        for call_id, question, answer in message.answers
     )
-    return SessionMessage(
-        sequence=message.sequence,
-        occurred_at=message.occurred_at,
-        role=SessionMessageRole.PROMPT,
-        content=f"{ANSWER_PREFIX}{answered}",
+
+
+def question_calls(turn: SessionTurn) -> frozenset[str]:
+    """这一轮里出现过的调用身份（工具调用、工具结果、翻成人话的作答各自带的 ``tool_call_id``）：问出口记过哪几次的回话用。"""
+
+    return frozenset(item.tool_call_id for item in turn.messages if item.tool_call_id)
+
+
+def without_answered(turn: SessionTurn, answered: frozenset[str]) -> SessionTurn:
+    """出口已按固定选项记过回话的那几次提问（``answered`` 是它们的调用身份）不进材料：调用、工具结果、翻成人话的作答都剔掉，
+    一次调用里有几题的整次剔（裁定 64 第 7 条：固定选项由出口直接写回话、不经模型；留在材料里，模型会把作答配到别的开着的
+    提醒上、或把这次提问写成这一轮做的事）。开这一轮的就是这样一条作答时，"他说"换成 ``ANSWERED_LABEL``。轮的身份、开口与
+    做完的时刻不变——记录照旧记在原来那一轮上。"""
+
+    if not answered:
+        return turn
+    head, rest = turn.messages[0], turn.messages[1:]
+    kept = tuple(item for item in rest if item.tool_call_id not in answered)
+    if head.tool_call_id in answered:
+        head = SessionMessage(head.sequence, head.occurred_at, SessionMessageRole.PROMPT, ANSWERED_LABEL)
+    elif len(kept) == len(rest):
+        return turn
+    return SessionTurn(
+        conversation_id=turn.conversation_id,
+        start_sequence=turn.start_sequence,
+        end_sequence=turn.end_sequence,
+        instructed_at=turn.instructed_at,
+        completed_at=turn.completed_at,
+        instruction=head.content.strip(),
+        messages=(head, *kept),
     )
 
 
@@ -280,10 +315,13 @@ def _head_tail(text: str, limit: int) -> str:
 
 
 __all__ = [
+    "ANSWERED_LABEL",
     "ANSWER_PREFIX",
     "WAKE_LABEL",
     "WAKE_PREFIXES",
     "render_reminders",
     "render_turn",
+    "question_calls",
     "split_turns",
+    "without_answered",
 ]

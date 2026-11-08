@@ -105,7 +105,7 @@ def _message(message: ConversationMessage) -> SessionMessage:
         tool_call_id=message.tool_call_id,
         failed=message.tool_status is ConversationToolResultStatus.ERROR,
         mid_turn=message.mid_turn,
-        answers=tuple((reply.question, reply.answer) for reply in replies),
+        answers=tuple((reply.call_id, reply.question, reply.answer) for reply in replies),
     )
 
 

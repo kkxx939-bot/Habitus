@@ -29,8 +29,9 @@ class SessionMessageRole(str, Enum):
 class SessionMessage:
     """会话里的一条消息。``failed`` 只对工具结果有意义。``mid_turn``：人说的话插在宿主的一轮中间（助手还没给出最终答复时他作答、
     补一句、叫停），属于这一轮、不开新一轮（由协议适配器按宿主自己的轮次标，与记忆主链认的"一轮"是同一个）。
-    ``answers``：这条人说的话是他对异步提问的作答消息（Codex Desktop），每题一对（题目, 作答）；认作答形状的是组合根
-    （按会话协议），这边只管把它当成一句"（回答助手的提问）…"。"""
+    ``answers``：这条人说的话是他对异步提问的作答消息（Codex Desktop），每题一组（提问调用的 call_id, 题目, 作答）；认作答
+    形状的是组合根（按会话协议），这边只管把每一题当成一句"（回答助手的提问）…"，并记着它答的是哪次调用（出口按固定选项
+    记过回话的那次不进材料，``material.without_answered``）。"""
 
     sequence: int
     occurred_at: datetime
@@ -40,7 +41,7 @@ class SessionMessage:
     tool_call_id: str | None = None
     failed: bool = False
     mid_turn: bool = False
-    answers: tuple[tuple[str, str], ...] = ()
+    answers: tuple[tuple[str, str, str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "role", SessionMessageRole(self.role))

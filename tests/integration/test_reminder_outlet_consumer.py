@@ -171,9 +171,11 @@ def test_a_fixed_noted_leaves_the_reminder_open_so_the_turn_still_carries_it(tmp
     (response,) = ledger.responses_on(DAY)
     assert response.polarity == "中"
     assert provider.calls == 1
-    # 出口先于 lane；这一轮按它结束时还开着的提醒带（这一轮里刚问出口、"知道了"不关），模型见得到、他的作答也在材料里
+    # 出口先于 lane；这一轮按它结束时还开着的提醒带（这一轮里刚问出口、"知道了"不关），模型见得到这条提醒。出口已按固定选项
+    # 记过的这次问答本身不进材料（v0.12 跑数 04-26 22:31：留着会被配到别的开着的提醒上；用户 11-08 定）
     assert "【还开着的提醒】" in provider.prompts[0] and TEXT in provider.prompts[0]
-    assert "助手干活时他又说" in provider.prompts[0] and "知道了" in provider.prompts[0]
+    assert "助手干活时他又说" not in provider.prompts[0] and "知道了" not in provider.prompts[0]
+    assert "AskUserQuestion" not in provider.prompts[0]
     payload = json.loads(provider.prompts[0]) if provider.prompts[0].startswith("{") else None
     assert payload is None  # 材料是文字不是 JSON（只是确认提示词形状没变）
 

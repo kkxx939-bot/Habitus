@@ -5,6 +5,8 @@
   ``limit`` 条（``config.foresight.open_reminders_judged``）。
 - **回应**：按轮的身份记一条（``Response.turn``），同一轮同一条提醒重放时内容相同、幂等；写不进去（账本冲突、读不到预期在哪一天、
   盘坏了）都不让这一轮失败，只记观测——回应丢了结算按"没回应"处理。
+- **出口记过的提问**：出口按固定选项写回话时 ``Response.turn`` 记的是那次提问调用的 call_id（会话 lane 判的记轮的身份）；
+  会话 lane 问"这几次调用里哪些出口记过"，据此把那次问答剔出给模型的材料。
 - **省读**：先只读递送目录，这一天没有说出口的就不读预期与回话；``at`` 可能是 UTC 写法而预期的日子是主体本地日，预筛留一天余量。
 """
 
@@ -50,6 +52,20 @@ class ReminderResponses:
             responses.extend(self.ledger.responses_on(day))
         found = open_reminders(expectations, deliveries, responses, at=at, limit=self.limit)
         return tuple(PendingReminder(item.expectation_id, item.said_at, item.text, item.deadline) for item in found)
+
+    def answered(self, calls: frozenset[str], at: datetime) -> frozenset[str]:
+        """``calls`` 里出口已按固定选项写过回话的提问调用：还没结完的日子上、回话的 ``turn`` 就是这次调用的。"""
+
+        if not calls:
+            return frozenset()
+        found: set[str] = set()
+        for day in self.ledger.open_days():
+            if day > at.date() + timedelta(days=1):
+                continue
+            if not any(item.spoken for item in self.ledger.deliveries_on(day)):
+                continue  # 回话只写在说出口的提醒上
+            found.update(item.turn for item in self.ledger.responses_on(day) if item.turn in calls)
+        return frozenset(found)
 
     def respond(self, turn: str, response: ReminderResponse, *, at: datetime) -> None:
         # TODO(裁定 64 第 8 条)：模型判正 / 中 / 负 / 已做这条路保留、不删。他点固定选项的回话由出口直接写（``runtime/foresight_outlet.py``，

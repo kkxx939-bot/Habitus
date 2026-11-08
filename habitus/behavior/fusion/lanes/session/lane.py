@@ -26,6 +26,7 @@ from datetime import date
 from enum import Enum
 
 from habitus.behavior.fusion.errors import BehaviorFusionError
+from habitus.behavior.fusion.lanes.session.material import question_calls, without_answered
 from habitus.behavior.fusion.lanes.session.model import SessionTurn, decode_turn, encode_turn
 from habitus.behavior.fusion.lanes.session.recorder import SessionTurnRecorder
 from habitus.behavior.fusion.lanes.session.reminders import NoReminders, ReminderFeedback, ReminderResponse
@@ -203,9 +204,11 @@ class SessionLane:
     async def _describe(self, turn: SessionTurn, sources: tuple[str, ...]) -> TurnOutcome:
         # 一轮 = 宿主的一轮：提醒可能就在这一轮里问出口、他也在这一轮里作答，所以按他在这一轮里最后一次开口时还开着的算——
         # 那之前问出口的都在、那时还没过最晚时限的都在（不按这一轮结束：一轮跑二十分钟，最晚时限可能落在中间，他是在时限前
-        # 回的）；出口已按固定选项写过回话、关掉的不再带。回话的时刻也记那一刻
+        # 回的）；出口已按固定选项写过回话、关掉的不再带。回话的时刻也记那一刻。出口已按固定选项写过回话的那次提问本身（调用与
+        # 作答）也不给模型看：它已经记好了，留着只会被配到别的开着的提醒上、或写成这一轮做的事（v0.12 跑数 04-26 22:31）
         pending = await asyncio.to_thread(self.reminders.open, turn.last_said_at)
-        described = await self.describer.describe(turn, pending)
+        answered = await asyncio.to_thread(self.reminders.answered, question_calls(turn), turn.last_said_at)
+        described = await self.describer.describe(without_answered(turn, answered), pending)
         judgement_id = await asyncio.to_thread(
             self.recorder.record,
             turn,

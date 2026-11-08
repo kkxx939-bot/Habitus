@@ -40,10 +40,14 @@ class SceneParticipant:
         return await asyncio.to_thread(self._maintain_blocking, ctx)
 
     def _maintain_blocking(self, ctx: LifecycleContext) -> ParticipantReport:
+        """关系表写一晚就收一次（``RelationStore._prune``），留满保留代数是常态、不是快满了：报的是超出保留代数几晚，上限 1——
+        常态 0；``_prune`` 没删掉、多出一晚就到 1/1，告警线（只能在 (0, 1) 里配）怎么配都报得出来。"""
+
         ctx.assert_owned()
+        kept = 1 + self.relations.fallback_generations
         readings = tuple(
             CapacityReading(
-                f"relation_nights_{lane}", len(self.relations.nights(lane)), 1 + self.relations.fallback_generations
+                f"relation_nights_{lane}_over_retention", max(0, len(self.relations.nights(lane)) - kept), 1
             )
             for lane in self.relations.lanes()
         )

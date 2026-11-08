@@ -225,7 +225,7 @@ def test_what_he_says_while_the_assistant_works_stays_in_that_turn() -> None:
             reply(1, "我先检查客户端。", minutes=1),
             call(2, "request_user_input_async", '{"questions": [{"title": "走哪条路？"}]}', call_id="call_1", minutes=2),
             result(3, '{"accepted":true}', call_id="call_1", name="request_user_input_async", minutes=2.1),
-            prompt(4, reply_message, minutes=4, mid_turn=True, answers=(("走哪条路？", "云助手"),)),
+            prompt(4, reply_message, minutes=4, mid_turn=True, answers=(("call_1", "走哪条路？", "云助手"),)),
             call(5, "js", "{}", call_id="c2", minutes=5),
             prompt(6, "你可以先看一下我是账号", minutes=6, mid_turn=True),
             prompt(7, "还是暂停吧", minutes=8, mid_turn=True),
@@ -253,7 +253,7 @@ def test_what_he_says_while_the_assistant_works_stays_in_that_turn() -> None:
             call(1, "request_user_input_async", '{"questions": [{"title": "走哪条路？"}]}', call_id="call_1", minutes=1),
             result(2, '{"accepted":true}', call_id="call_1", name="request_user_input_async", minutes=1.1),
             reply(3, "报错是依赖版本不对。", minutes=3),
-            prompt(4, reply_message, minutes=6, answers=(("走哪条路？", "云助手"),)),
+            prompt(4, reply_message, minutes=6, answers=(("call_1", "走哪条路？", "云助手"),)),
             reply(5, "好。", minutes=7),
         ),
         question_tools=("AskUserQuestion", "request_user_input"),
@@ -803,6 +803,9 @@ class _Reminders:
 
     def respond(self, turn: str, response, *, at: datetime) -> None:  # type: ignore[no-untyped-def]
         self.responses.append((turn, response.reminder_id, response.polarity, at))
+
+    def answered(self, calls: frozenset[str], at: datetime) -> frozenset[str]:
+        return frozenset()
 
 
 def _pending() -> tuple:  # type: ignore[type-arg]
