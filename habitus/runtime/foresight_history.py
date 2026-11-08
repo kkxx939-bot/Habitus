@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
 from habitus.foresight import Evidence
@@ -23,9 +24,11 @@ from habitus.foresight.clock import current_facts
 from habitus.foresight.diagnosis import DIAGNOSIS_REACH_DAYS
 from habitus.foresight.history import (
     MomentRecord,
+    RelabelDelta,
     UnitHistory,
     build_history,
     record_of,
+    relabel_delta,
     retired,
 )
 from habitus.foresight.ledger import AccountFact
@@ -33,6 +36,14 @@ from habitus.foresight.opportunities import OpportunityTable
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.scene.relations import LaneTimeline
+
+
+@dataclass(frozen=True)
+class HistoryOutcome:
+    """这一晚这条 lane 单元历史重标的结果：重标了几刻（``relabelled``），以及相对上一份快照变了多少（``delta``，观测用）。"""
+
+    relabelled: int
+    delta: RelabelDelta
 
 
 class HistoryStage:
@@ -46,21 +57,25 @@ class HistoryStage:
         self.evidence = evidence
         self.statuses = tuple(statuses)
 
-    def run(self, *, night: date, table: OpportunityTable, line: LaneTimeline) -> int:
-        """第 ``night`` 晚这条 lane 的单元历史；返回重标了几刻。只读这一晚之前形成、这一晚之前写下的东西。"""
+    def run(self, *, night: date, table: OpportunityTable, line: LaneTimeline) -> HistoryOutcome:
+        """第 ``night`` 晚这条 lane 的单元历史；返回重标了几刻、相对上一份快照变了多少。只读这一晚之前形成、这一晚之前写下的东西。"""
 
         lane = table.lane
+        before = self.store.latest(lane)
         records = self._record(lane, night)
         if not records:
-            self.store.write(UnitHistory(lane, night, {}))
-            return 0
+            history = UnitHistory(lane, night, {})
+            self.store.write(history)
+            return HistoryOutcome(0, relabel_delta(before, history))
         now = datetime.combine(night, time(0, 0), tzinfo=records[0].formed_at.tzinfo)
         history, labelled = build_history(lane, night, records, table=table, line=line, statuses=self.statuses)
         self.store.write(history)
-        before = now - timedelta(days=DIAGNOSIS_REACH_DAYS)
-        gone = set().union(*(retired(found, window=self.evidence.window, before=before) for found in labelled.values()))
+        horizon = now - timedelta(days=DIAGNOSIS_REACH_DAYS)
+        gone = set().union(
+            *(retired(found, window=self.evidence.window, before=horizon) for found in labelled.values())
+        )
         self.store.discard_records(lane, gone)
-        return sum(len(found) for found in history.moments.values())
+        return HistoryOutcome(sum(len(found) for found in history.moments.values()), relabel_delta(before, history))
 
     def _record(self, lane: str, night: date) -> tuple[MomentRecord, ...]:
         """把结完、还没记过的日子记下来；被重结撤回的日子从"记过的"里拿掉。返回这条 lane 的全部记录。"""
@@ -94,4 +109,4 @@ class HistoryStage:
         return self.store.records(lane)
 
 
-__all__ = ["HistoryStage"]
+__all__ = ["HistoryOutcome", "HistoryStage"]

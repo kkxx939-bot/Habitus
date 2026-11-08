@@ -133,7 +133,7 @@ class ForesightNightlyRun:
                 continue
             # 单元历史与机会表分开接：表写成了、历史没写成时，表照常给白天用，但失败要报出来，不再被一并吞掉
             try:
-                relabelled = 0 if self.history is None else self.history.run(night=night, table=table, line=line)
+                relabelled = self._relabel(lane, night, table, line, started)
             except ForesightError as exc:
                 signals.append(f"opportunities: {lane} 这一晚的单元历史没写成（{exc}），账本压实这一晚跳过")
                 failed.append(f"{lane}: 单元历史: {type(exc).__name__}")
@@ -188,6 +188,28 @@ class ForesightNightlyRun:
             return None, ()
         signals.append(f"opportunities: {lane} 第 {night} 晚没有关系表，用第 {earlier[-1]} 晚的")
         return earlier[-1], self.relations.read(lane, earlier[-1]).relations
+
+    def _relabel(self, lane: str, night: date, table: OpportunityTable, line: LaneTimeline, started: float) -> int:
+        """重标这一晚的单元历史并发一条观测（裁定 55 新版第 2 条；W13：词表 / 关系大改的那晚之前这些数看不见）：
+        签名变了的刻数、受影响的单元数。没接单元历史时是 0；重标失败往上抛，由 ``run`` 按原口径接。"""
+
+        if self.history is None:
+            return 0
+        outcome = self.history.run(night=night, table=table, line=line)
+        record_observation(
+            self.observer,
+            "foresight",
+            "unit_history",
+            ObservationStatus.SUCCESS,
+            started=started,
+            attributes={
+                "lane": lane,
+                "relabelled": outcome.relabelled,
+                "signature_changed": outcome.delta.signature_changed_moments,
+                "units_affected": outcome.delta.units_affected,
+            },
+        )
+        return outcome.relabelled
 
     def _observe(
         self, status: ObservationStatus, attributes: dict[str, str | int | float | bool], started: float

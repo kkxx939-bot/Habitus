@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -735,9 +735,22 @@ def test_a_dismissed_synchronous_question_is_spoken_but_never_waits_for_a_late_a
     run.publish([request(item)], now=now)
     run.claim("opencode", "opencode-ses_1", now, 3)
     arguments = {"questions": [{"question": TEXT, "header": "提醒", "options": [{"label": o} for o in OPTIONS]}]}
-    call = HostMessage(3, now + timedelta(minutes=1), "tool_call", json.dumps(arguments, ensure_ascii=False), tool_name="question", tool_call_id="call_q")
+    call = HostMessage(
+        3,
+        now + timedelta(minutes=1),
+        "tool_call",
+        json.dumps(arguments, ensure_ascii=False),
+        tool_name="question",
+        tool_call_id="call_q",
+    )
     dismissed = HostMessage(
-        4, now + timedelta(minutes=2), "tool_result", "The user dismissed this question", tool_name="question", tool_call_id="call_q", failed=True
+        4,
+        now + timedelta(minutes=2),
+        "tool_result",
+        "The user dismissed this question",
+        tool_name="question",
+        tool_call_id="call_q",
+        failed=True,
     )
     report = run.observe("opencode-ses_1", turn(call, dismissed, at=now + timedelta(seconds=2)), host="opencode")
     assert (report.spoken, report.responded, report.awaiting_reply) == (1, 0, 0)
@@ -769,7 +782,10 @@ def test_the_reminder_day_reads_each_stage_from_the_ledger_and_the_claim_trail(t
         "claude-s1",
         turn(
             claude_question(TEXT, at=asked_at),
-            claude_answer(f'User has answered your questions: "{TEXT}"="现在就做". You can now continue.', at=asked_at + timedelta(seconds=30)),
+            claude_answer(
+                f'User has answered your questions: "{TEXT}"="现在就做". You can now continue.',
+                at=asked_at + timedelta(seconds=30),
+            ),
             at=now + timedelta(seconds=3),
         ),
         host="claude-code",
@@ -781,10 +797,16 @@ def test_the_reminder_day_reads_each_stage_from_the_ledger_and_the_claim_trail(t
     assert stages == {"e1": "说了", "e2": "取走了", "e3": "待取", "e4": "宿主没取"}
     first = report.reminders[0]
     assert (first.kind, first.text, first.spoken_via, first.spoken_at, first.response) == (
-        "写周报", TEXT, "claude-code", asked_at, "正",
+        "写周报",
+        TEXT,
+        "claude-code",
+        asked_at,
+        "正",
     )
     second = next(item for item in report.reminders if item.expectation_id == "e2")
-    assert second.attempts == 0 and [(h.host, h.session, h.ended) for h in second.handoffs] == [("codex", SESSION, None)]
+    assert second.attempts == 0 and [(h.host, h.session, h.ended) for h in second.handoffs] == [
+        ("codex", SESSION, None)
+    ]
     assert (report.count("说了"), report.count("宿主没取"), report.responded) == (1, 1, 1)
     assert reminder_day(ledger, None, FORMED.date()).reminders[0].kind == "s-k0002"  # 没有出口就给编号
 
@@ -818,7 +840,9 @@ def test_a_reminder_he_did_before_being_asked_shows_as_happened(tmp_path) -> Non
     run, ledger, _ = outlet(tmp_path)
     item = expectation()
     awaiting(ledger, item)
-    ledger.record_delivery(item.day, Delivery(item.expectation_id, ASKED + timedelta(minutes=15), 1, False, "已发生", 0.0))
+    ledger.record_delivery(
+        item.day, Delivery(item.expectation_id, ASKED + timedelta(minutes=15), 1, False, "已发生", 0.0)
+    )
     (row,) = reminder_day(ledger, run, FORMED.date()).reminders
     assert row.stage == "已发生"
 
@@ -834,7 +858,9 @@ def test_an_answer_whose_asked_record_is_unreadable_is_reported_not_silently_dro
     run.claim("codex", SESSION, now, 3)
     arguments = json.dumps({"questions": [{"title": TEXT, "options": list(OPTIONS)}]}, ensure_ascii=False)
     asked_at = now + timedelta(minutes=1)
-    call = HostMessage(2, asked_at, "tool_call", arguments, tool_name="request_user_input_async", tool_call_id="call_a1")
+    call = HostMessage(
+        2, asked_at, "tool_call", arguments, tool_name="request_user_input_async", tool_call_id="call_a1"
+    )
     result = HostMessage(
         3, asked_at, "tool_result", '{"accepted":true}', tool_name="request_user_input_async", tool_call_id="call_a1"
     )
@@ -844,9 +870,37 @@ def test_an_answer_whose_asked_record_is_unreadable_is_reported_not_silently_dro
     record = json.loads(path.read_text(encoding="utf-8"))
     record["day"] = "不是日期"
     path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
-    reply = {"questionItemId": json.dumps(["request_user_input_async", "call_a1", 0]), "question": TEXT, "answer": "现在就做"}
+    reply = {
+        "questionItemId": json.dumps(["request_user_input_async", "call_a1", 0]),
+        "question": TEXT,
+        "answer": "现在就做",
+    }
     answer = f"{REPLY_TAG}\n{json.dumps([reply], ensure_ascii=False)}\n</send_user_message_question_reply>\n"
     report = run.observe(SESSION, (HostMessage(5, asked_at + timedelta(minutes=6), "prompt", answer),), host="codex")
     assert report.responded == 0 and ledger.responses_on(item.day) == ()
     (event,) = [found for found in recorder.events if found.operation == "outlet_reply"]
     assert event.attributes == {"session": SESSION, "error": "asked_unreadable"}
+
+
+def test_the_spoken_and_response_times_are_stored_in_the_subjects_local_offset(tmp_path) -> None:
+    """账本时间统一成主体本地偏移：宿主转写给的是 UTC 时刻，写进递送 / 回话账时转成期望所在的本地偏移（瞬间不变）。"""
+
+    run, ledger, _recorder = outlet(tmp_path)
+    item = expectation()  # deadline 在 CST (+08:00)
+    awaiting(ledger, item)
+    now = ASKED + timedelta(minutes=10)
+    run.publish([request(item)], now=now)
+    run.claim("claude-code", "claude-s1", now, 3)
+    asked_utc = (now + timedelta(minutes=2)).astimezone(UTC)
+    answered_utc = (now + timedelta(minutes=2, seconds=40)).astimezone(UTC)
+    messages = turn(
+        claude_question(TEXT, at=asked_utc),
+        claude_answer(f'User has answered your questions: "{TEXT}"="这次不用". You can now continue.', at=answered_utc),
+        at=now + timedelta(seconds=3),
+    )
+    report = run.observe("claude-s1", messages, host="claude-code")
+    assert (report.spoken, report.responded) == (1, 1)
+    (spoken,) = [d for d in ledger.deliveries_on(item.day) if d.spoken]
+    assert spoken.decided_at.utcoffset() == timedelta(hours=8) and spoken.decided_at == asked_utc
+    (response,) = ledger.responses_on(item.day)
+    assert response.responded_at.utcoffset() == timedelta(hours=8) and response.responded_at == answered_utc

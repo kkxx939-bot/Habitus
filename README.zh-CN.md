@@ -452,7 +452,9 @@ L2 的冷热生命周期默认开着，由 `memory.recall_lifecycle.enabled` 一
 
 ## 安装
 
-**1. 本地服务**（Python ≥ 3.12；还没上 PyPI，从仓库装）：
+**平台**：本地服务在 **macOS、Linux、Windows** 上都跑；CI 在三个平台 × Python 3.12 / 3.13 / 3.14 上各跑完整测试套件。Windows 的文件锁、耐久写入、长路径（`\\?\`）、文件权限（DACL）都是标准库原生实现（`ctypes` / `msvcrt`，不需要 pywin32，也不需要 WSL）；落盘字节与 POSIX 一致。
+
+**1. 本地服务**（Python ≥ 3.12；从仓库装，没有发布到 PyPI；公司内网可以用 CI 构建出的 wheel 离线安装）：
 
 ```sh
 pip install "habitus[server] @ git+https://github.com/kkxx939-bot/Habitus"
@@ -1511,7 +1513,7 @@ bash scripts/ci.sh
 
 它依次跑：`compileall` → `ruff check` → `mypy` → `pyright` → `coverage run --branch -m pytest`（分支覆盖率低于 79% 即失败，`pyproject.toml` 的 `fail_under`）→ 插件的 `npm test`（`node --test`）。没激活虚拟环境而仓库根有 `.venv` 时自动用它。
 
-远端 `.github/workflows/ci.yml` 在 Ubuntu、macOS × Python 3.12、3.13、3.14（从 `requires-python` 的下限测到最新版本）上各跑一遍，每个组合在 `ci.sh` 之外还做：重新生成插件共享库副本并要求与提交的一致（`npm run sync` + `git diff --exit-code`）；非交互 `habitus-server init --from-config habitus/config/example.yaml` 并检查配置文件权限 0600；构建 wheel 并跑 `scripts/check_wheel.py`；在干净 venv 里装 wheel、装 `npm pack` 出的包，跑一遍插件生命周期。
+远端 `.github/workflows/ci.yml` 在 Ubuntu、macOS、Windows × Python 3.12、3.13、3.14（从 `requires-python` 的下限测到最新版本）上各跑一遍，每个组合在 `ci.sh` 之外还做：重新生成插件共享库副本并要求与提交的一致（`npm run sync` + `git diff --exit-code`）；非交互 `habitus-server init --from-config habitus/config/example.yaml` 并检查配置文件权限 0600；构建 wheel 并跑 `scripts/check_wheel.py`；在干净 venv 里装 wheel、装 `npm pack` 出的包，跑一遍插件生命周期。
 
 ### 测试分层
 

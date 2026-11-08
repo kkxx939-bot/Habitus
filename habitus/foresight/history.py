@@ -286,6 +286,35 @@ def build_history(
     return UnitHistory(lane, night, labelled), labelled
 
 
+@dataclass(frozen=True)
+class RelabelDelta:
+    """一晚重标相对上一份快照动了多少（裁定 55 新版第 2 条，只给观测用）：
+
+    - ``signature_changed_moments``：在场签名变了的刻数——按组成它的那几条预期（``expectation_ids``）在同一个行为里认同一刻，
+      签名和上一份不同、或这一份新出现、或上一份有而这一份没有，都各算一刻。
+    - ``units_affected``：有至少一刻签名变了的行为（``kind_token``）数。
+    """
+
+    signature_changed_moments: int
+    units_affected: int
+
+
+def relabel_delta(before: UnitHistory | None, after: UnitHistory) -> RelabelDelta:
+    """这一晚重标后的 ``after`` 和上一份 ``before`` 比，数签名变了的刻与受影响的行为；``before`` 为空时整份都算变。"""
+
+    old = before.moments if before is not None else {}
+    changed = 0
+    units = 0
+    for kind in old.keys() | after.moments.keys():
+        was = {moment.expectation_ids: moment.past.signature for moment in old.get(kind, ())}
+        now = {moment.expectation_ids: moment.past.signature for moment in after.moments.get(kind, ())}
+        here = sum(1 for identity in was.keys() | now.keys() if was.get(identity) != now.get(identity))
+        if here:
+            changed += here
+            units += 1
+    return RelabelDelta(changed, units)
+
+
 def retired(moments: Sequence[Moment], *, window: int, before: datetime) -> frozenset[str]:
     """一个行为里可以删的那几刻的预期身份：早于 ``before``（诊断够得着的最早一刻），并且在它所属的每一层里，排在它之后的都已经
     有 ``window`` 刻（单元每层只读最近 M 刻，``units.unit_reading``）——删了它，哪一层的读数都不变。
@@ -364,6 +393,7 @@ __all__ = [
     "HISTORY_SCHEMA_VERSION",
     "Moment",
     "MomentRecord",
+    "RelabelDelta",
     "UnitHistory",
     "build_history",
     "decode_history",
@@ -373,5 +403,6 @@ __all__ = [
     "labelled_moments",
     "present_inputs",
     "record_of",
+    "relabel_delta",
     "retired",
 ]

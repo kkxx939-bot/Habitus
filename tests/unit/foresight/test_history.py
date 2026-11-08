@@ -19,6 +19,7 @@ from habitus.foresight.history import (
     encode_record,
     present_inputs,
     record_of,
+    relabel_delta,
 )
 from habitus.foresight.ledger import AccountFact, Antecedent, Expectation
 from habitus.foresight.opportunities import OpportunityTable, RelationOpportunities
@@ -366,3 +367,39 @@ def test_a_record_names_the_occurrence_of_a_natural_hit_only_and_round_trips() -
     assert record_of(item, missed, occurrence_uri=found).occurrence_uri is None
     with pytest.raises(ForesightError, match="natural hit"):
         replace(record_of(item, missed), occurrence_uri=found)
+
+
+def test_relabel_delta_counts_changed_moments_and_touched_units() -> None:
+    """重标 diff（W13 观测）：按组成一刻的那几条预期认同一刻，只有在场签名变了的刻和它所在的行为算数。"""
+
+    at = datetime(2026, 1, 1, tzinfo=CST)
+
+    def moment(ids: tuple[str, ...], signature: set[str]) -> Moment:
+        return Moment(PastMoment(at, frozenset(signature), True, 1.0), ids)
+
+    before = UnitHistory(
+        "session",
+        date(2026, 1, 1),
+        {GYM: (moment(("e1",), {"a"}), moment(("e2",), {"b"})), SWIM: (moment(("e3",), {"c"}),)},
+    )
+    after = UnitHistory(
+        "session",
+        date(2026, 1, 2),
+        # GYM 的 e2 签名多了 x（重标变了）；SWIM 没变
+        {GYM: (moment(("e1",), {"a"}), moment(("e2",), {"b", "x"})), SWIM: (moment(("e3",), {"c"}),)},
+    )
+    delta = relabel_delta(before, after)
+    assert delta.signature_changed_moments == 1
+    assert delta.units_affected == 1
+
+
+def test_relabel_delta_with_no_prior_snapshot_counts_every_moment() -> None:
+    """第一次重标（上一份快照为空）：每一刻都算新出现的变化。"""
+
+    at = datetime(2026, 1, 1, tzinfo=CST)
+    after = UnitHistory(
+        "session", date(2026, 1, 2), {GYM: (Moment(PastMoment(at, frozenset({"a"}), True, 1.0), ("e1",)),)}
+    )
+    delta = relabel_delta(None, after)
+    assert delta.signature_changed_moments == 1
+    assert delta.units_affected == 1

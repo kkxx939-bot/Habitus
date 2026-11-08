@@ -79,7 +79,7 @@ def test_the_night_records_every_finished_day_once_and_writes_one_history(tmp_pa
     open_item = gym(NIGHT - timedelta(days=2))
     ledger.record_expectation(open_item)  # 还没结完：不记
     table, line = nothing()
-    assert run.run(night=NIGHT, table=table, line=line) == 4  # type: ignore[arg-type]
+    assert run.run(night=NIGHT, table=table, line=line).relabelled == 4  # type: ignore[arg-type]
     stored = store.latest("session")
     assert stored is not None and stored.night == NIGHT
     assert [moment.came for moment in stored.of("s-k0002")] == [True, True, False, True]
@@ -212,7 +212,7 @@ def test_a_bad_moment_record_is_skipped_and_counted_and_the_snapshot_is_still_wr
     bad.write_text(content, encoding="utf-8")
     recorded = store.root / "unit_moments" / "session" / "_recorded.json"
     recorded.write_text("{", encoding="utf-8")
-    assert run.run(night=NIGHT, table=table, line=line) == 2  # type: ignore[arg-type]
+    assert run.run(night=NIGHT, table=table, line=line).relabelled == 2  # type: ignore[arg-type]
     stored = store.latest("session")
     assert stored is not None and stored.night == NIGHT and len(stored.of("s-k0002")) == 2
     assert set(store.take_unreadable()) == {str(bad), str(recorded)}
@@ -242,7 +242,7 @@ def test_an_occurrence_two_overlapping_day_expectations_settled_on_is_one_moment
         record(ledger, item, came=True)
         ledger.record_settlement(Settlement(item.expectation_id, item.kind_token, day, NIGHT_AT, "准时", found))
     table, line = nothing()
-    assert run.run(night=NIGHT, table=table, line=line) == 1  # type: ignore[arg-type]
+    assert run.run(night=NIGHT, table=table, line=line).relabelled == 1  # type: ignore[arg-type]
     (moment,) = store.latest("session").labelled("s-k0002")  # type: ignore[union-attr]
     assert moment.expectation_ids == ("gym-2026-09-06",) and moment.past.came
     assert {item.occurrence_uri for item in store.records("session")} == {found}

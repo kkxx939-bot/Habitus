@@ -8,9 +8,10 @@ from zoneinfo import ZoneInfo
 
 from habitus.conditions import LocalCalendar
 from habitus.foresight import Evidence, ForesightError
+from habitus.foresight.history import RelabelDelta
 from habitus.foundation.observability import ObservationEvent
 from habitus.runtime.foresight import ForesightReadSide, ForesightRuntimeComponents, build_foresight_nightly
-from habitus.runtime.foresight_history import HistoryStage
+from habitus.runtime.foresight_history import HistoryOutcome, HistoryStage
 from habitus.runtime.foresight_history_store import HistoryStore
 from habitus.runtime.foresight_ledger import ForesightLedgerStore
 from habitus.runtime.foresight_nightly import ForesightNightlyRun
@@ -97,9 +98,10 @@ def test_the_opportunity_table_is_written_after_the_scene_run_from_the_same_nigh
     # 前三天的就寝只写在命中盘上、不在行为树上（夹具），日历只认行为树：只有今晚那条
     assert sleep is not None and len(sleep.days) == 1 and sleep.days[-1].day == TONIGHT and sleep.days[-1].count == 1
     assert outcome.opportunities.signals == () and "机会表" in outcome.opportunities.summary()
-    assert [event.operation for event in recorder.events] == ["opportunities"] and recorder.events[
-        0
-    ].status.value == "success"
+    # 单元历史重标先发一条观测（W13），再是机会表那条总账；两条都成功
+    assert [event.operation for event in recorder.events] == ["unit_history", "opportunities"] and all(
+        event.status.value == "success" for event in recorder.events
+    )
 
 
 def test_a_night_without_a_relation_table_falls_back_and_says_so(tmp_path) -> None:
@@ -304,7 +306,7 @@ def test_the_ledger_is_compacted_only_after_the_unit_history_has_run(tmp_path) -
     class SpyHistory(HistoryStage):
         def run(self, *, night, table, line):  # type: ignore[no-untyped-def, override]
             order.append("history")
-            return 0
+            return HistoryOutcome(0, RelabelDelta(0, 0))
 
     site, _hits = site_with_three_bedtimes(tmp_path)
     built = components(tmp_path, site)

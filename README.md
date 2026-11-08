@@ -452,7 +452,9 @@ Had he typed "晚上再说" (later tonight) instead, the outlet would not write 
 
 ## Installation
 
-**1. The local service** (Python ≥ 3.12; not on PyPI yet, install from the repository):
+**Platforms**: the local service runs on **macOS, Linux and Windows**; CI runs the full test suite on all three × Python 3.12 / 3.13 / 3.14. Windows file locking, durable writes, long paths (`\\?\`) and file permissions (DACL) are native standard-library implementations (`ctypes` / `msvcrt` — no pywin32, no WSL); the on-disk bytes match POSIX.
+
+**1. The local service** (Python ≥ 3.12; install from the repository — not published to PyPI; an air-gapped or corporate network can install it from the CI-built wheel offline):
 
 ```sh
 pip install "habitus[server] @ git+https://github.com/kkxx939-bot/Habitus"
@@ -1513,7 +1515,7 @@ bash scripts/ci.sh
 
 It runs, in order: `compileall` → `ruff check` → `mypy` → `pyright` → `coverage run --branch -m pytest` (fails below 79% branch coverage, `fail_under` in `pyproject.toml`) → `npm test` for the plugins (`node --test`). Without an active virtual environment it uses `.venv` at the repository root if present.
 
-On top of `ci.sh`, `.github/workflows/ci.yml` runs on Ubuntu and macOS × Python 3.12, 3.13 and 3.14 (the lower bound of `requires-python` up to the latest release), and in each job regenerates the plugins' shared-library copies and requires them to match the commit (`npm run sync` + `git diff --exit-code`), runs a non-interactive `habitus-server init --from-config habitus/config/example.yaml` and checks the file mode 0600, builds the wheel and runs `scripts/check_wheel.py`, then installs the wheel and the `npm pack` tarball into clean environments and runs the plugin lifecycle.
+On top of `ci.sh`, `.github/workflows/ci.yml` runs on Ubuntu, macOS and Windows × Python 3.12, 3.13 and 3.14 (the lower bound of `requires-python` up to the latest release), and in each job regenerates the plugins' shared-library copies and requires them to match the commit (`npm run sync` + `git diff --exit-code`), runs a non-interactive `habitus-server init --from-config habitus/config/example.yaml` and checks the file mode 0600, builds the wheel and runs `scripts/check_wheel.py`, then installs the wheel and the `npm pack` tarball into clean environments and runs the plugin lifecycle.
 
 ### Test layers
 

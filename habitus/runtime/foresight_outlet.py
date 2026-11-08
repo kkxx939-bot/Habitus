@@ -520,7 +520,7 @@ class ReminderOutlet:
         if result is not None and not tool.replies_later:
             polarity = answer_in_result(result.content, question.title, single=len(_questions(call, tool)) == 1)
             if polarity is not None and self._record_response(
-                claim, result.occurred_at, polarity, call.tool_call_id or ""
+                claim, result.occurred_at.astimezone(claim.request.deadline.tzinfo), polarity, call.tool_call_id or ""
             ):
                 return "responded"
             return "spoken"
@@ -597,7 +597,7 @@ class ReminderOutlet:
                 return False
             delivery = Delivery(
                 claim.request.request_id,
-                call.occurred_at,
+                call.occurred_at.astimezone(claim.request.deadline.tzinfo),
                 claim.request.level,
                 True,
                 SPOKEN,
