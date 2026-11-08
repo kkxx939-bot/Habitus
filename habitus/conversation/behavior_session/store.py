@@ -83,7 +83,9 @@ class BehaviorSessionOutputStore:
         except FileNotFoundError:
             return None
         except DurablePathIntegrityError as exc:
-            raise ConversationSourceError("behavior session receipt exceeds its read bound or is not a regular file") from exc
+            raise ConversationSourceError(
+                "behavior session receipt exceeds its read bound or is not a regular file"
+            ) from exc
         try:
             output = BehaviorSessionOutput.from_dict(json.loads(encoded))
         except (UnicodeDecodeError, json.JSONDecodeError, ConversationSourceError) as exc:

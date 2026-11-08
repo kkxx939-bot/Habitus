@@ -75,7 +75,11 @@ def _media_facts(item: Mapping[str, Any]) -> tuple[str, str | None, int, str] | 
     if isinstance(image_url, str) and image_url.startswith("data:"):
         return kind, _data_url_media_type(image_url), *_payload(image_url)
     url = item.get("url")
-    if isinstance(url, str) and url.startswith("data:") and (declared in MEDIA_TYPES or isinstance(item.get("mime"), str)):
+    if (
+        isinstance(url, str)
+        and url.startswith("data:")
+        and (declared in MEDIA_TYPES or isinstance(item.get("mime"), str))
+    ):
         return kind, _text_or_none(item.get("mime")) or _data_url_media_type(url), *_payload(url)
     if declared not in MEDIA_TYPES:
         return None

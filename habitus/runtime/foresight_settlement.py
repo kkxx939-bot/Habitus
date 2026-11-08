@@ -318,9 +318,7 @@ class SettlementStage:
             before = next((at for at in opened.get(item.account, ()) if at >= item.deadline), None)
             # 线停掉的那天按看不到：后补只看到它开始为止（裁定 94 第 8、9 条）——那天没有日子预期，不能把那天正常做的那次
             # 裁成上一条的「后补」
-            stopped = (
-                None if self.finished is None else first_stopped_day(item.deadline, last_closed, self.finished)
-            )
+            stopped = None if self.finished is None else first_stopped_day(item.deadline, last_closed, self.finished)
             if stopped is not None and (before is None or stopped < before):
                 before = stopped
             ruling = rule_overdue(

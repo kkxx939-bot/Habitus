@@ -819,9 +819,7 @@ class MemoryJobStore:
         source_segment_digest: str,
     ) -> str:
         return hashlib.sha256(
-            (
-                f"{address.identity}\0{address.started_on.isoformat()}\0{segment_id}\0{source_segment_digest}"
-            ).encode()
+            (f"{address.identity}\0{address.started_on.isoformat()}\0{segment_id}\0{source_segment_digest}").encode()
         ).hexdigest()
 
     @staticmethod
@@ -899,9 +897,7 @@ class MemoryJobStore:
                 claim_generation=int_field(
                     value["claim_generation"], "memory job claim_generation must be non-negative"
                 ),
-                worker_id=optional_text_field(
-                    value["worker_id"], "running memory job requires a normalized worker_id"
-                ),
+                worker_id=optional_text_field(value["worker_id"], "running memory job requires a normalized worker_id"),
                 lease_expires_at=MemoryJobStore._parse_optional_time(value["lease_expires_at"]),
                 next_attempt_at=MemoryJobStore._parse_optional_time(value["next_attempt_at"]),
                 last_error=optional_text_field(value["last_error"], "memory job last_error is invalid"),

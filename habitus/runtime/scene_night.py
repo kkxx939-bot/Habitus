@@ -203,9 +203,7 @@ class SceneNightlyRun:
             item for day in sorted({record.day for record in series.records}) for item in self.calendar.of_day(day)
         }
         existing = await asyncio.to_thread(self.concepts.read_all)
-        plan = await asyncio.to_thread(
-            plan_sync, existing, self.catalog.classes(), changes, now=now, observed=observed
-        )
+        plan = await asyncio.to_thread(plan_sync, existing, self.catalog.classes(), changes, now=now, observed=observed)
         concepts = await asyncio.to_thread(self._write_concepts, plan, signals)
         slack_minutes = self.config.slack_slots * self.relation_config.slot_minutes
         mapper = self.mapper_for(concepts)

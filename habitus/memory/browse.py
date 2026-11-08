@@ -84,7 +84,9 @@ class MemoryBrowser:
             directory, level = parsed.to_layer()
             if not self.tree.layer_exists(directory, level):
                 raise MemoryBrowseNotFoundError(f"no semantic layer at {parsed}")
-            return MemoryLayerText(parsed, level, self.tree.read_layer_bounded(directory, level, max_bytes=_LAYER_MAX_BYTES))
+            return MemoryLayerText(
+                parsed, level, self.tree.read_layer_bounded(directory, level, max_bytes=_LAYER_MAX_BYTES)
+            )
         raise ValueError("memory read needs a document or semantic layer URI; list a directory instead")
 
 

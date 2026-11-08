@@ -35,6 +35,10 @@ step "Lint"
 # 测试也查 lint（不查格式）：新测试文件的 import 顺序、没用到的 import 以前漏过
 ruff check "${PATHS[@]}" tests
 
+step "Format"
+# 源码格式由 ruff format 守：未格式化的文件直接失败，本地跑 `ruff format habitus` 修
+ruff format --check "${PATHS[@]}"
+
 step "Type check (mypy)"
 mypy "${PATHS[@]}"
 

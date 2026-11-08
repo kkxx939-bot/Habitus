@@ -103,4 +103,10 @@ def _moment(value: object) -> datetime:
     return found
 
 
-__all__ = ["COMPACTION_SCHEMA", "STALE_COMPACTION_SCHEMA", "AccountCompaction", "decode_compaction", "encode_compaction"]
+__all__ = [
+    "COMPACTION_SCHEMA",
+    "STALE_COMPACTION_SCHEMA",
+    "AccountCompaction",
+    "decode_compaction",
+    "encode_compaction",
+]

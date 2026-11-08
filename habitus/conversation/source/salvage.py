@@ -59,9 +59,7 @@ class SourceSalvage:
         """这份源释放了：它的标记一起删。"""
 
         return sum(
-            1
-            for consumer in self.salvagers
-            if durable_unlink(self._path(source_id, consumer), artifact_root=self.root)
+            1 for consumer in self.salvagers if durable_unlink(self._path(source_id, consumer), artifact_root=self.root)
         )
 
     def _path(self, source_id: str, consumer: ConversationSourceConsumer) -> Path:

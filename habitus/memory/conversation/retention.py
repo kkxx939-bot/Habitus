@@ -503,10 +503,7 @@ class ConversationRetentionPlanner:
         if (
             current.role is ConversationMessageRole.COMPLETION
             and current.completes_logical_message
-            and (
-                following is None
-                or following.starts_turn
-            )
+            and (following is None or following.starts_turn)
         ):
             return "turn"
         if current.role is ConversationMessageRole.TOOL_RESULT:
@@ -578,7 +575,12 @@ class ConversationToolResultReducer:
         size = len(encoded)
         digest = hashlib.sha256(encoded).hexdigest()
         media = describe_media_only(message.content)
-        if not force_omit and media is None and not force_summarize and size <= self.config.max_inline_tool_result_bytes:
+        if (
+            not force_omit
+            and media is None
+            and not force_summarize
+            and size <= self.config.max_inline_tool_result_bytes
+        ):
             return message
 
         if media is not None:

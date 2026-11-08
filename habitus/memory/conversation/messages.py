@@ -1199,7 +1199,9 @@ class ConversationMessageJournal:
         """为一次可能跨多个新 Segment 的重放恢复仍可验证的事实范围。"""
 
         if batch.start_sequence < expected_next and batch.start_sequence <= state.released_through:
-            raise ConversationWriteConflictError(f"append replay from sequence {batch.start_sequence} predates released history")
+            raise ConversationWriteConflictError(
+                f"append replay from sequence {batch.start_sequence} predates released history"
+            )
         known_by_sequence = {item.sequence: item for item in self._known_tail(latest, live_messages)}
         if batch.start_sequence < expected_next:
             for reference in references:

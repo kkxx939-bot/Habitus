@@ -522,7 +522,9 @@ def _claude_code_user_text(record: Mapping[str, object], content: object) -> boo
     if isinstance(content, str):
         texts: tuple[object, ...] = (content,)
     elif isinstance(content, Sequence):
-        texts = tuple(block.get("text") for block in content if isinstance(block, Mapping) and block.get("type") == "text")
+        texts = tuple(
+            block.get("text") for block in content if isinstance(block, Mapping) and block.get("type") == "text"
+        )
     else:
         texts = ()
     return bool(texts) and isinstance(texts[0], str) and texts[0].lstrip().startswith("<bash-input>")
@@ -821,7 +823,9 @@ def _dsh_answers(arguments: Mapping[str, object] | None, result: str) -> str | N
         if not isinstance(answer, Mapping) or answer.get("id") not in titles:
             return None
         selected = answer.get("selected")
-        labels = [label for label in selected if isinstance(label, str) and label] if isinstance(selected, Sequence) else []
+        labels = (
+            [label for label in selected if isinstance(label, str) and label] if isinstance(selected, Sequence) else []
+        )
         custom = answer.get("custom")
         if isinstance(custom, str) and custom.strip():
             labels.append(custom.strip())
@@ -862,9 +866,7 @@ def _without_hook_context(raw: object) -> object:
     return {**raw, "parts": parts}
 
 
-def _add_opencode_part(
-    builder: _Builder, role: str, part: Mapping[str, object], fallback: datetime
-) -> int:
+def _add_opencode_part(builder: _Builder, role: str, part: Mapping[str, object], fallback: datetime) -> int:
     part_type = part.get("type")
     if part_type == "text":
         if not _kept_text_part(part):
@@ -949,7 +951,11 @@ def _host_error_text(error: Mapping[str, object]) -> str:
     data = error.get("data")
     detail = data.get("message") if isinstance(data, Mapping) else None
     kind = name.strip() if isinstance(name, str) and name.strip() else "UnknownError"
-    text = f"[host error] {kind}: {detail.strip()}" if isinstance(detail, str) and detail.strip() else f"[host error] {kind}"
+    text = (
+        f"[host error] {kind}: {detail.strip()}"
+        if isinstance(detail, str) and detail.strip()
+        else f"[host error] {kind}"
+    )
     return redact_secrets(text)
 
 
@@ -1037,10 +1043,14 @@ def _add_anthropic_content(
     ignored = 0
     blocks = tuple(
         (_clean_text(block.get("type"), "message content block type"), block)
-        for block in (_mapping(raw_block, "message content block") for raw_block in _sequence(content, "message content"))
+        for block in (
+            _mapping(raw_block, "message content block") for raw_block in _sequence(content, "message content")
+        )
     )
     spoken = (
-        "\n".join(_clean_text(block.get("text"), "message text") for block_type, block in blocks if block_type == "text")
+        "\n".join(
+            _clean_text(block.get("text"), "message text") for block_type, block in blocks if block_type == "text"
+        )
         if role == "user" and user_text
         else None
     )
