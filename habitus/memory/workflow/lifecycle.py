@@ -8,36 +8,27 @@ from datetime import UTC, datetime, timedelta
 from habitus.foundation.timestamps import require_aware_utc
 from habitus.memory.conversation import (
     ConversationAddress,
-    ConversationLayout,
     ConversationMessageJournal,
     ConversationRangeSummaryStore,
     ConversationSummaryCompactionConfig,
     ConversationSummaryCompactionResult,
     ConversationSummaryCompactor,
-    ConversationSummaryRetirementManifest,
-    ConversationSummaryRetirementPhase,
     ConversationSummaryRetirementStore,
     ConversationSummaryStore,
 )
 from habitus.memory.conversation.indexing import PersistentConversationSummaryVectorIndex, summary_reference
-from habitus.memory.editor import MemoryTransactionJournal, MemoryTransactionJournalState
-from habitus.memory.workflow.jobs import MemoryJobStatus, MemoryJobStore
-from habitus.memory.workflow.receipt import (
-    MemoryChangeReceiptState,
-    MemoryChangeReceiptStore,
-    MemoryChangeSource,
-)
+from habitus.memory.editor import MemoryTransactionJournal
+from habitus.memory.workflow.archive_retirement import ArchiveRetirementOutcome, ConversationArchiveRetirementRunner
+from habitus.memory.workflow.committed_cleanup import CommittedWorkflowCleanup
+from habitus.memory.workflow.jobs import MemoryJobStore
+from habitus.memory.workflow.lifecycle_errors import ConversationLifecycleError
+from habitus.memory.workflow.receipt import MemoryChangeReceiptStore
 from habitus.pre.conversation import (
     ConversationRangeSummary,
     ConversationRangeSummaryStage,
-    ConversationSegment,
     ConversationSegmentSummary,
     ConversationSummarySourceKind,
 )
-
-
-class ConversationLifecycleError(RuntimeError):
-    """Conversation 生命周期状态不完整，不能继续压缩或清理。"""
 
 
 @dataclass(frozen=True)
@@ -139,6 +130,23 @@ class ConversationLifecycleManager:
         self.retirement_store = retirement_store
         self.summary_config = resolved_summary_config
         self.workflow_config = workflow_config or MemoryWorkflowLifecycleConfig()
+        self.committed_cleanup = CommittedWorkflowCleanup(
+            journal,
+            jobs,
+            receipts,
+            transaction_journal,
+            self.workflow_config,
+        )
+        self.archive_retirement = ConversationArchiveRetirementRunner(
+            compactor,
+            journal,
+            segment_store,
+            range_store,
+            summary_vector_index,
+            retirement_store,
+            self.committed_cleanup,
+            cleanup_batch_size=resolved_summary_config.cleanup_batch_size,
+        )
 
     async def maintain_once(
         self,
@@ -164,8 +172,8 @@ class ConversationLifecycleManager:
             address, current_time
         )
         await self.summary_vector_index.synchronize(address)
-        deleted_jobs = self._delete_expired_committed_jobs(address, current_time)
-        deleted_receipts = self._delete_expired_committed_receipts(address, current_time)
+        deleted_jobs = self.committed_cleanup.delete_expired_jobs(address, current_time)
+        deleted_receipts = self.committed_cleanup.delete_expired_receipts(address, current_time)
         return ConversationLifecycleMaintenanceResult(
             compaction=compaction,
             summary_indexed=True,
@@ -182,14 +190,14 @@ class ConversationLifecycleManager:
         self,
         address: ConversationAddress,
         now: datetime,
-    ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    ) -> ArchiveRetirementOutcome:
         """Archive 只在长期未用且宽限期结束后，按原文前缀分批执行终态删除。"""
 
         pending = self.retirement_store.for_address(address)
         if len(pending) > 1:
             raise ConversationLifecycleError("one Conversation has multiple retiring Archives")
         if pending:
-            return await self._resume_archive_retirement(pending[0], now)
+            return await self.archive_retirement.resume(pending[0], now)
         use_store = self.compactor.use_store
         required = (
             "read_many",
@@ -230,142 +238,8 @@ class ConversationLifecycleManager:
                 expected_use_version=expected_version,
                 prepared_at=now,
             )
-            return await self._resume_archive_retirement(manifest, now)
+            return await self.archive_retirement.resume(manifest, now)
         return (), (), (), (), ()
-
-    async def _resume_archive_retirement(
-        self,
-        manifest: ConversationSummaryRetirementManifest,
-        now: datetime,
-    ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-        """严格按下线、History、子摘要、Archive 的阶段幂等续跑。"""
-
-        current = manifest
-        address = current.address
-        use_store = self.compactor.use_store
-        if use_store is None:
-            raise ConversationLifecycleError("retiring Archive lacks a Summary use store")
-        if current.phase is ConversationSummaryRetirementPhase.RETIRING:
-            states = use_store.read_many((current.archive.reference,))
-            use_state = states[0] if states else None
-            claimed = (
-                use_state is not None
-                and use_state.version == current.expected_use_version + 1
-                and use_state.retiring_at is not None
-            )
-            if not claimed:
-                if use_state is None or use_state.version != current.expected_use_version:
-                    self.retirement_store.complete(current)
-                    return (), (), (), (), ()
-                use_store.claim_retirement(
-                    current.archive.reference,
-                    expected_version=current.expected_use_version,
-                    claimed_at=now,
-                )
-            await self.summary_vector_index.synchronize(
-                address,
-                removed_references=(current.archive.reference,),
-            )
-            current = self.retirement_store.advance(
-                current,
-                ConversationSummaryRetirementPhase.INDEX_REMOVED,
-                updated_at=now,
-            )
-
-        purged: tuple[str, ...] = ()
-        released: tuple[str, ...] = ()
-        if current.phase is ConversationSummaryRetirementPhase.INDEX_REMOVED:
-            journal_state = self.journal.read_state(address)
-            if journal_state.released_through < current.end_sequence:
-                segment_sources = {item.reference.summary_id: item.digest for item in current.segments}
-                active = tuple(
-                    segment
-                    for segment in self.journal.list_history(address)
-                    if current.start_sequence <= segment.start_sequence and segment.end_sequence <= current.end_sequence
-                )[: self.summary_config.cleanup_batch_size]
-                for segment in active:
-                    expected_digest = segment_sources.get(segment.segment_id)
-                    summary = self.segment_store.try_read_by_id(address, segment.segment_id)
-                    if expected_digest is None or summary is None or summary.digest != expected_digest:
-                        raise ConversationLifecycleError("retiring Archive does not match retained History Segment")
-                    summary.require_matches_source(segment)
-                    if not self._workflow_is_committed(address, segment):
-                        return (), (), (), (), ()
-                if not active:
-                    raise ConversationLifecycleError("retiring Archive History source is missing")
-                released = self.journal.release_history_prefix(address, active)
-                purged = self.journal.purge_released_history(
-                    address,
-                    max_items=self.summary_config.cleanup_batch_size,
-                )
-                journal_state = self.journal.read_state(address)
-                if journal_state.released_through < current.end_sequence:
-                    return purged, released, (), (), ()
-            current = self.retirement_store.advance(
-                current,
-                ConversationSummaryRetirementPhase.HISTORY_RELEASED,
-                updated_at=now,
-            )
-
-        deleted_segments: list[str] = []
-        deleted_ranges: list[str] = []
-        deleted_archives: list[str] = []
-        if current.phase is ConversationSummaryRetirementPhase.HISTORY_RELEASED:
-            for source in current.segments:
-                existing = self.segment_store.try_read_by_id(address, source.reference.summary_id)
-                if existing is not None and existing.digest != source.digest:
-                    raise ConversationLifecycleError("retiring Segment Summary digest changed")
-                if existing is not None and self.segment_store.delete_by_id(
-                    address,
-                    source.reference.summary_id,
-                ):
-                    deleted_segments.append(source.reference.summary_id)
-            for source in current.ranges:
-                range_existing = self.range_store.try_read(
-                    address,
-                    ConversationRangeSummaryStage.RANGE,
-                    source.reference.summary_id,
-                )
-                if range_existing is not None and range_existing.digest != source.digest:
-                    raise ConversationLifecycleError("retiring Range Summary digest changed")
-                if range_existing is not None and self.range_store.delete(
-                    address,
-                    ConversationRangeSummaryStage.RANGE,
-                    source.reference.summary_id,
-                ):
-                    deleted_ranges.append(source.reference.summary_id)
-            archive = self.range_store.try_read(
-                address,
-                ConversationRangeSummaryStage.ARCHIVE,
-                current.archive.reference.summary_id,
-            )
-            if archive is not None and archive.digest != current.archive.digest:
-                raise ConversationLifecycleError("retiring Archive Summary digest changed")
-            if archive is not None and self.range_store.delete(
-                address,
-                ConversationRangeSummaryStage.ARCHIVE,
-                current.archive.reference.summary_id,
-            ):
-                deleted_archives.append(current.archive.reference.summary_id)
-            use_store.delete_coverage(
-                address,
-                start_sequence=current.start_sequence,
-                end_sequence=current.end_sequence,
-            )
-            current = self.retirement_store.advance(
-                current,
-                ConversationSummaryRetirementPhase.SOURCES_DELETED,
-                updated_at=now,
-            )
-        if current.phase is ConversationSummaryRetirementPhase.SOURCES_DELETED:
-            self.retirement_store.complete(current)
-        return (
-            purged,
-            released,
-            tuple(deleted_segments),
-            tuple(deleted_ranges),
-            tuple(deleted_archives),
-        )
 
     def _archive_sources(
         self,
@@ -399,110 +273,6 @@ class ConversationLifecycleManager:
         ordered_ranges = tuple(sorted(ranges, key=lambda item: item.start_sequence))
         ordered_segments = tuple(sorted(segments, key=lambda item: item.start_sequence))
         return ordered_ranges, ordered_segments
-
-    def _workflow_is_committed(
-        self,
-        address: ConversationAddress,
-        segment: ConversationSegment,
-    ) -> bool:
-        job = self.jobs.try_read_source(address, segment.segment_id, segment.digest)
-        if job is None:
-            raise ConversationLifecycleError("History Segment has no durable MemoryJob")
-        if job.status is not MemoryJobStatus.COMMITTED:
-            return False
-        source = MemoryChangeSource.from_job(job)
-        receipt = self.receipts.try_read(source)
-        if receipt is None:
-            raise ConversationLifecycleError("COMMITTED MemoryJob has no durable change receipt")
-        if receipt.state is not MemoryChangeReceiptState.COMMITTED:
-            return False
-        transaction = self.transaction_journal.try_read(job.transaction_id)
-        if transaction is None:
-            return True
-        if transaction.state is MemoryTransactionJournalState.PREPARED:
-            return False
-        if transaction.state is MemoryTransactionJournalState.ROLLED_BACK:
-            raise ConversationLifecycleError("COMMITTED MemoryJob points to a rolled-back transaction")
-        return True
-
-    def _delete_expired_committed_jobs(
-        self,
-        address: ConversationAddress,
-        now: datetime,
-    ) -> tuple[int, ...]:
-        """只清理已释放来源、已完成回执且不存在恢复日志的过期 Job。"""
-
-        cutoff = now - timedelta(days=self.workflow_config.committed_job_retention_days)
-        released_through = self.journal.read_state(address).released_through
-        deleted: list[int] = []
-        for job in self.jobs.list_for_conversation(address):
-            if job.status is not MemoryJobStatus.COMMITTED or job.updated_at > cutoff:
-                continue
-            if not self._source_history_is_released(job.segment_id, released_through):
-                continue
-            source = MemoryChangeSource.from_job(job)
-            receipt = self.receipts.try_read(source)
-            if receipt is None:
-                raise ConversationLifecycleError("COMMITTED MemoryJob has no durable change receipt")
-            if receipt.state is not MemoryChangeReceiptState.COMMITTED:
-                raise ConversationLifecycleError("COMMITTED MemoryJob points to an unfinished change receipt")
-            self._discard_terminal_journal(job.transaction_id)
-            if self.jobs.discard_committed(job):
-                deleted.append(job.memory_sequence)
-            if len(deleted) >= self.workflow_config.cleanup_batch_size:
-                break
-        return tuple(deleted)
-
-    def _delete_expired_committed_receipts(
-        self,
-        address: ConversationAddress,
-        now: datetime,
-    ) -> tuple[str, ...]:
-        """在 Job 已清理且来源 History 已释放后删除过期的技术审计回执。"""
-
-        cutoff = now - timedelta(days=self.workflow_config.committed_receipt_retention_days)
-        released_through = self.journal.read_state(address).released_through
-        high_watermark = self.jobs.high_watermark()
-        deleted: list[str] = []
-        for receipt in self.receipts.list_for_conversation(address):
-            if receipt.state is not MemoryChangeReceiptState.COMMITTED:
-                continue
-            assert receipt.committed_at is not None
-            if receipt.committed_at > cutoff:
-                continue
-            source = receipt.source
-            if source.memory_sequence > high_watermark:
-                raise ConversationLifecycleError("change receipt sequence exceeds the durable high-watermark")
-            if not self._source_history_is_released(source.segment_id, released_through):
-                continue
-            job = self.jobs.try_read_source(
-                address,
-                source.segment_id,
-                source.source_segment_digest,
-            )
-            if job is not None:
-                continue
-            self._discard_terminal_journal(source.transaction_id)
-            if self.receipts.discard_committed(receipt):
-                deleted.append(source.receipt_id)
-            if len(deleted) >= self.workflow_config.cleanup_batch_size:
-                break
-        return tuple(deleted)
-
-    def _discard_terminal_journal(self, transaction_id: str) -> None:
-        journal = self.transaction_journal.try_read(transaction_id)
-        if journal is None:
-            return
-        if journal.state is MemoryTransactionJournalState.PREPARED:
-            raise ConversationLifecycleError("terminal workflow still has a PREPARED transaction journal")
-        if journal.state is MemoryTransactionJournalState.ROLLED_BACK:
-            raise ConversationLifecycleError("committed workflow points to a rolled-back transaction journal")
-        self.transaction_journal.discard_terminal(transaction_id)
-
-    @staticmethod
-    def _source_history_is_released(segment_id: str, released_through: int) -> bool:
-        _start, end = ConversationLayout.segment_range(segment_id)
-        return end <= released_through
 
 
 def _utc_datetime(value: datetime) -> datetime:

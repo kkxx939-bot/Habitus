@@ -27,13 +27,29 @@ from habitus.memory.model import MemoryKind, MemoryLevel
 from habitus.memory.semantic import MemorySemanticRefreshResult
 from habitus.memory.tree import MemoryTree
 from habitus.memory.uri import MemoryURI, MemoryURINodeType
+from habitus.memory.vector_index import PersistentVectorIndex, VectorIndexMessages
 from habitus.model_client import Embedder, EmbeddingVector
 
 _SCHEMA_VERSION = "habitus_memory_vector_v2"
 
 
-class PersistentMemoryVectorIndex:
+class PersistentMemoryVectorIndex(
+    PersistentVectorIndex[MemoryIndexSource, MemoryVectorConsistencyReport, MemoryVectorIndexConfig]
+):
     """远程索引是可重建派生数据；MemoryTree 始终是唯一内容真相源。"""
+
+    _schema_version = _SCHEMA_VERSION
+    _messages = VectorIndexMessages(
+        rebuild_checkpoint="memory vector rebuild checkpoint must be non-negative",
+        rebuild_conflict="memory vector state changed repeatedly during rebuild",
+        audit_not_ready="memory vector index is not ready for consistency audit",
+        audit_record_count="remote vector record count does not match published state",
+        embedding_count="embedder returned an unexpected vector count",
+        embedding_dimension="embedder returned an invalid vector dimension",
+        materialization_lost="memory vector materialization lost an index source",
+        search_limit="memory vector search limit is outside its configured bound",
+    )
+    _error_type = MemoryVectorIndexError
 
     def __init__(
         self,
@@ -50,30 +66,19 @@ class PersistentMemoryVectorIndex:
             raise ValueError("memory vector dimension must be positive")
         if not embedding_fingerprint or embedding_fingerprint != embedding_fingerprint.strip():
             raise ValueError("embedding_fingerprint must be normalized non-empty text")
+        super().__init__(
+            embedder,
+            store,
+            dimension=dimension,
+            embedding_fingerprint=embedding_fingerprint,
+            config=config or MemoryVectorIndexConfig(),
+        )
         self.tree = tree
-        self.embedder = embedder
-        self.store = store
-        self.dimension = dimension
-        self.embedding_fingerprint = embedding_fingerprint
-        self.config = config or MemoryVectorIndexConfig()
         self.sources = MemoryIndexSourceReader(
             tree,
             config=self.config,
             path_lock=path_lock,
         )
-        self._lock = asyncio.Lock()
-
-    async def ensure_ready(self) -> VectorStoreState:
-        """验证远端集合；缺失或模型语义变化时从 MemoryTree 完整重建。"""
-
-        await self.store.initialize()
-        async with self._lock:
-            state = await self.store.state()
-            if self._state_matches(state):
-                assert state is not None
-                return state
-            checkpoint = 0 if state is None else state.checkpoint
-            return await self._rebuild_locked(checkpoint=checkpoint)
 
     async def synchronize(
         self,
@@ -89,10 +94,7 @@ class PersistentMemoryVectorIndex:
         await self.ensure_ready()
         async with self._lock:
             for _ in range(self.config.stale_retries + 1):
-                state = await self.store.state()
-                if not self._state_matches(state):
-                    state = await self._rebuild_locked(checkpoint=0 if state is None else state.checkpoint)
-                assert state is not None
+                state = await self._ready_state_locked()
                 if checkpoint == state.checkpoint:
                     return state
                 if checkpoint < state.checkpoint:
@@ -114,57 +116,6 @@ class PersistentMemoryVectorIndex:
                     # generation/checkpoint CAS 冲突：重读状态后在有界次数内重试，用尽后由循环外明确报错。
                     continue
             raise MemoryVectorIndexError("memory vector state changed repeatedly during synchronization")
-
-    async def rebuild(self, *, checkpoint: int | None = None) -> VectorStoreState:
-        """管理入口：完整扫描 MemoryTree 并发布一代新的远程索引。"""
-
-        await self.store.initialize()
-        async with self._lock:
-            current = await self.store.state()
-            selected = (0 if current is None else current.checkpoint) if checkpoint is None else checkpoint
-            if selected < 0:
-                raise ValueError("memory vector rebuild checkpoint must be non-negative")
-            return await self._rebuild_locked(checkpoint=selected)
-
-    async def check_consistency(self) -> MemoryVectorConsistencyReport:
-        """显式管理检查会先确保索引存在，再执行只读差异审计。"""
-
-        await self.ensure_ready()
-        return await self.audit_consistency()
-
-    async def audit_consistency(self) -> MemoryVectorConsistencyReport:
-        """无副作用比较全部 URI 和内容摘要，不触发重建。"""
-
-        state = await self.store.state()
-        if not self._state_matches(state):
-            raise MemoryVectorIndexError("memory vector index is not ready for consistency audit")
-        assert state is not None
-        expected = {source.identity: source for source in self.sources.walk()}
-        indexed = {
-            record.identity: record
-            for record in await self.store.scan(
-                filters=_empty_filter(),
-                limit=self.config.max_records,
-            )
-        }
-        if len(indexed) != state.record_count:
-            raise MemoryVectorIndexError("remote vector record count does not match published state")
-        expected_ids = set(expected)
-        indexed_ids = set(indexed)
-        stale = tuple(
-            sorted(
-                identity
-                for identity in expected_ids & indexed_ids
-                if expected[identity].content_digest != indexed[identity].content_digest
-            )
-        )
-        return MemoryVectorConsistencyReport(
-            expected_count=len(expected),
-            indexed_count=len(indexed),
-            missing_identities=tuple(sorted(expected_ids - indexed_ids)),
-            stale_identities=stale,
-            orphan_identities=tuple(sorted(indexed_ids - expected_ids)),
-        )
 
     async def search(
         self,
@@ -244,73 +195,34 @@ class PersistentMemoryVectorIndex:
         matches.sort(key=lambda item: (-item.score, str(item.uri)))
         return tuple(matches[:maximum])
 
-    async def close(self) -> None:
-        await self.store.close()
+    def _walk_sources(self) -> tuple[MemoryIndexSource, ...]:
+        return self.sources.walk()
 
-    async def _rebuild_locked(self, *, checkpoint: int) -> VectorStoreState:
-        for _ in range(self.config.stale_retries + 1):
-            state = await self.store.state()
-            sources = self.sources.walk()
-            reusable: dict[str, VectorStoreRecord] = {}
-            if self._state_matches(state):
-                assert state is not None
-                if state.record_count > self.config.max_records:
-                    raise MemoryVectorIndexError("published vector state exceeds rebuild capacity")
-                reusable = {
-                    record.identity: record
-                    for record in await self.store.scan(
-                        filters=_empty_filter(),
-                        limit=self.config.max_records,
-                    )
-                }
-            records = await self._materialize(sources, existing=reusable)
-            try:
-                return await self.store.replace_all(
-                    records,
-                    schema_version=_SCHEMA_VERSION,
-                    embedding_fingerprint=self.embedding_fingerprint,
-                    dimension=self.dimension,
-                    checkpoint=checkpoint,
-                    expected_generation=None if state is None else state.generation,
-                )
-            except VectorStoreConflictError:
-                # generation CAS 冲突：重读状态后在有界次数内重建，用尽后由循环外明确报错。
-                continue
-        raise MemoryVectorIndexError("memory vector state changed repeatedly during rebuild")
+    def _scan_filter(self) -> VectorStoreFilter:
+        return _empty_filter()
 
-    async def _materialize(
+    def _require_rebuild_capacity(self, state: VectorStoreState) -> None:
+        if state.record_count > self.config.max_records:
+            raise MemoryVectorIndexError("published vector state exceeds rebuild capacity")
+
+    def _consistency_report(
         self,
-        sources: Sequence[MemoryIndexSource],
         *,
-        existing: dict[str, VectorStoreRecord],
-    ) -> tuple[VectorStoreRecord, ...]:
-        resolved: dict[str, VectorStoreRecord] = {}
-        missing: list[MemoryIndexSource] = []
-        for source in sources:
-            current = existing.get(source.identity)
-            if (
-                current is not None
-                and current.content_digest == source.content_digest
-                and current.vector.dimension == self.dimension
-            ):
-                resolved[source.identity] = self._record(source, current.vector)
-            else:
-                missing.append(source)
-        for offset in range(0, len(missing), self.config.embedding_batch_size):
-            batch = missing[offset : offset + self.config.embedding_batch_size]
-            vectors = await self.embedder.embed_documents(tuple(source.content for source in batch))
-            if len(vectors) != len(batch):
-                raise MemoryVectorIndexError("embedder returned an unexpected vector count")
-            for source, vector in zip(batch, vectors, strict=True):
-                if vector.dimension != self.dimension:
-                    raise MemoryVectorIndexError("embedder returned an invalid vector dimension")
-                resolved[source.identity] = self._record(source, vector)
-        if len(resolved) != len(sources):
-            raise AssertionError("memory vector materialization lost an index source")
-        return tuple(resolved[identity] for identity in sorted(resolved))
+        expected_count: int,
+        indexed_count: int,
+        missing_identities: tuple[str, ...],
+        stale_identities: tuple[str, ...],
+        orphan_identities: tuple[str, ...],
+    ) -> MemoryVectorConsistencyReport:
+        return MemoryVectorConsistencyReport(
+            expected_count=expected_count,
+            indexed_count=indexed_count,
+            missing_identities=missing_identities,
+            stale_identities=stale_identities,
+            orphan_identities=orphan_identities,
+        )
 
-    @staticmethod
-    def _record(source: MemoryIndexSource, vector: EmbeddingVector) -> VectorStoreRecord:
+    def _record(self, source: MemoryIndexSource, vector: EmbeddingVector) -> VectorStoreRecord:
         return VectorStoreRecord(
             identity=source.identity,
             vector=vector,
@@ -391,20 +303,6 @@ class PersistentMemoryVectorIndex:
                 )
             )
         return tuple(matches)
-
-    def _state_matches(self, state: VectorStoreState | None) -> bool:
-        return bool(
-            state is not None
-            and state.ready
-            and state.schema_version == _SCHEMA_VERSION
-            and state.embedding_fingerprint == self.embedding_fingerprint
-            and state.dimension == self.dimension
-        )
-
-    def _limit(self, value: int) -> int:
-        if not 1 <= value <= self.config.max_search_hits:
-            raise ValueError("memory vector search limit is outside its configured bound")
-        return value
 
     @staticmethod
     def _query_vector(value: EmbeddingVector) -> EmbeddingVector:

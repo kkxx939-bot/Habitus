@@ -61,7 +61,6 @@ from habitus.memory.conversation.retention import (
     ConversationRetentionPlanner,
     ConversationSegmentationConfig,
     ConversationTokenEstimator,
-    ConversationToolResultReducer,
     ConversationTurn,
     estimate_conversation_message_tokens,
 )
@@ -86,6 +85,7 @@ from habitus.memory.conversation.summary import (
     ConversationSummaryService,
     ConversationSummaryStore,
 )
+from habitus.memory.conversation.tool_result_reduction import ConversationToolResultReducer
 
 __all__ = [
     "ConversationAddress",

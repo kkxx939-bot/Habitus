@@ -388,7 +388,7 @@ def test_derived_failure_leaves_durable_operation_and_retries_without_reapplying
         if len(attempts) == 1:
             raise RuntimeError("derived refresh unavailable")
 
-    value.derived_refresh = flaky_refresh
+    value.operation_runner.derived_refresh = flaky_refresh
     failed = asyncio.run(value.maintain())
     compacted = value.tree.read(detailed.address)
     assert failed.compacted == ()
@@ -711,7 +711,7 @@ def test_l2_committed_stale_retirement_advance_does_not_recreate_scan_failure(
     value.tree.write(replacement)
     monkeypatch.setattr(value.operation_store, "advance_owned", advance_owned)
     current[0] += timedelta(seconds=61)
-    advance_retire = value._advance_retire_if_current
+    advance_retire = value.operation_runner.retire_steps._advance_retire_if_current
     entered = threading.Event()
     release = threading.Event()
 
@@ -720,7 +720,7 @@ def test_l2_committed_stale_retirement_advance_does_not_recreate_scan_failure(
         assert release.wait(timeout=5)
         return advance_retire(operation, phase, now)
 
-    monkeypatch.setattr(value, "_advance_retire_if_current", blocked_advance)
+    monkeypatch.setattr(value.operation_runner.retire_steps, "_advance_retire_if_current", blocked_advance)
 
     async def race():
         maintenance = asyncio.create_task(value.maintain())

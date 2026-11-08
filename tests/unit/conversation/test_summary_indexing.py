@@ -226,3 +226,74 @@ def test_summary_consistency_audit_is_read_only_and_reports_stale_record(tmp_pat
     report = asyncio.run(index.audit_consistency())
 
     assert report.stale_identities == (identity,)
+
+
+def summary_index(tmp_path: Path, embedder=None):
+    _address, _source, _segment_store, compactor = source_chain(tmp_path)
+    store = VectorStore()
+    index = PersistentConversationSummaryVectorIndex(
+        compactor.journal,
+        compactor,
+        embedder or Embedder(),
+        store,
+        dimension=2,
+        embedding_fingerprint="summary-v1",
+        config=ConversationSummaryVectorIndexConfig(min_vector_candidates=1),
+    )
+    return store, index
+
+
+class CountingEmbedder(Embedder):
+    def __init__(self) -> None:
+        self.inputs = []
+
+    async def embed_documents(self, values):
+        self.inputs.extend(values)
+        return await super().embed_documents(values)
+
+
+def test_summary_rebuild_reuses_unchanged_vectors_instead_of_reembedding(tmp_path: Path) -> None:
+    embedder = CountingEmbedder()
+    store, index = summary_index(tmp_path, embedder)
+    asyncio.run(index.ensure_ready())
+    embedded_before = tuple(embedder.inputs)
+
+    state = asyncio.run(index.rebuild())
+
+    assert state.record_count == 1
+    assert tuple(embedder.inputs) == embedded_before
+    assert len(embedded_before) == 1
+
+
+def test_summary_audit_scans_only_summary_kind_records(tmp_path: Path) -> None:
+    store, index = summary_index(tmp_path)
+    asyncio.run(index.ensure_ready())
+    identity = next(iter(store.records))
+    foreign = replace(
+        store.records[identity],
+        identity="foreign-record",
+        attributes={**store.records[identity].attributes, "uri": "foreign-record", "kind": "other"},
+    )
+    store.records[foreign.identity] = foreign
+
+    report = asyncio.run(index.audit_consistency())
+
+    assert report.ok
+    assert report.indexed_count == 1
+
+
+def test_summary_index_keeps_its_own_error_texts_and_types(tmp_path: Path) -> None:
+    _store, index = summary_index(tmp_path)
+    with pytest.raises(
+        ConversationSummaryIndexError, match="^summary vector index is not ready for consistency audit$"
+    ):
+        asyncio.run(index.audit_consistency())
+    with pytest.raises(ValueError, match="^summary vector rebuild checkpoint must be non-negative$"):
+        asyncio.run(index.rebuild(checkpoint=-1))
+
+    async def wrong_dimension(values):
+        return tuple(EmbeddingVector((1.0, 0.0, 0.0)) for _ in values)
+
+    index.embedder.embed_documents = wrong_dimension
+    with pytest.raises(ConversationSummaryIndexError, match="^embedder returned an invalid Summary vector$"):
+        asyncio.run(index.ensure_ready())

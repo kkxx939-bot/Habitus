@@ -19,6 +19,7 @@ from habitus.memory.workflow import (
     MemoryChangeReceiptState,
     MemoryChangeSource,
 )
+from habitus.memory.workflow.committed_cleanup import CommittedWorkflowCleanup
 from tests.helpers import BASE_TIME, closed_turn, segment
 from tests.unit.workflow.test_lifecycle_manager import lifecycle_manager
 
@@ -110,7 +111,7 @@ def test_history_release_check_uses_segment_end_sequence(
     released_through: int,
     expected: bool,
 ) -> None:
-    assert ConversationLifecycleManager._source_history_is_released(segment_id, released_through) is expected
+    assert CommittedWorkflowCleanup.source_history_is_released(segment_id, released_through) is expected
 
 
 def _committed_workflow(manager: ConversationLifecycleManager, address: ConversationAddress):
@@ -145,7 +146,7 @@ def test_workflow_commit_gate_accepts_committed_job_and_receipt_without_recovery
     manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
     source_segment, _job, _receipt = _committed_workflow(manager, address)
-    assert manager._workflow_is_committed(address, source_segment)
+    assert manager.committed_cleanup.is_committed(address, source_segment)
 
 
 def test_workflow_commit_gate_rejects_missing_job(tmp_path: Path) -> None:
@@ -153,7 +154,7 @@ def test_workflow_commit_gate_rejects_missing_job(tmp_path: Path) -> None:
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
     source_segment = segment(segment_id="000000000000-000000000001")
     with pytest.raises(ConversationLifecycleError, match="no durable MemoryJob"):
-        manager._workflow_is_committed(address, source_segment)
+        manager.committed_cleanup.is_committed(address, source_segment)
 
 
 def test_workflow_commit_gate_returns_false_for_uncommitted_job(tmp_path: Path) -> None:
@@ -161,7 +162,7 @@ def test_workflow_commit_gate_returns_false_for_uncommitted_job(tmp_path: Path) 
     address = ConversationAddress("conversation-1", date(2026, 7, 1))
     source_segment = segment(segment_id="000000000000-000000000001")
     manager.jobs.activate(manager.jobs.stage(address, source_segment))
-    assert not manager._workflow_is_committed(address, source_segment)
+    assert not manager.committed_cleanup.is_committed(address, source_segment)
 
 
 def test_workflow_commit_gate_rejects_missing_receipt(tmp_path: Path) -> None:
@@ -171,7 +172,7 @@ def test_workflow_commit_gate_rejects_missing_receipt(tmp_path: Path) -> None:
     queued = manager.jobs.activate(manager.jobs.stage(address, source_segment))
     manager.jobs.complete(manager.jobs.claim(queued, "worker"))
     with pytest.raises(ConversationLifecycleError, match="no durable change receipt"):
-        manager._workflow_is_committed(address, source_segment)
+        manager.committed_cleanup.is_committed(address, source_segment)
 
 
 @pytest.mark.parametrize(
@@ -207,9 +208,9 @@ def test_workflow_commit_gate_interprets_transaction_terminal_state(
         manager.transaction_journal.mark(job.transaction_id, state, timestamp=BASE_TIME)
     if error is not None:
         with pytest.raises(ConversationLifecycleError, match=error):
-            manager._workflow_is_committed(address, source_segment)
+            manager.committed_cleanup.is_committed(address, source_segment)
     else:
-        assert manager._workflow_is_committed(address, source_segment) is expected
+        assert manager.committed_cleanup.is_committed(address, source_segment) is expected
 
 
 @pytest.mark.parametrize(
@@ -241,12 +242,12 @@ def test_discard_terminal_journal_rejects_non_committed_states(
     if state is MemoryTransactionJournalState.ROLLED_BACK:
         manager.transaction_journal.mark(transaction_id, state, timestamp=BASE_TIME)
     with pytest.raises(ConversationLifecycleError, match=error):
-        manager._discard_terminal_journal(transaction_id)
+        manager.committed_cleanup.discard_terminal_journal(transaction_id)
 
 
 def test_discard_terminal_journal_is_noop_when_absent_and_deletes_committed(tmp_path: Path) -> None:
     manager, _calls = lifecycle_manager(tmp_path, compaction_enabled=False)
-    manager._discard_terminal_journal("b" * 32)
+    manager.committed_cleanup.discard_terminal_journal("b" * 32)
     transaction_id = "a" * 32
     record = manager.transaction_journal._parse(
         {
@@ -261,5 +262,5 @@ def test_discard_terminal_journal_is_noop_when_absent_and_deletes_committed(tmp_
     )
     manager.transaction_journal.prepare(record)
     manager.transaction_journal.mark(transaction_id, MemoryTransactionJournalState.COMMITTED, timestamp=BASE_TIME)
-    manager._discard_terminal_journal(transaction_id)
+    manager.committed_cleanup.discard_terminal_journal(transaction_id)
     assert manager.transaction_journal.try_read(transaction_id) is None

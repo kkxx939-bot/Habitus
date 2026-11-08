@@ -25,7 +25,7 @@ from habitus.integrations.http_api import app as app_module
 from habitus.integrations.http_api.handlers import RememberOutcome, RuntimeHTTPHandlers
 from habitus.integrations.http_api.local_security import local_request_violation
 from habitus.integrations.http_api.schemas import RememberResult
-from habitus.memory.conversation.retention import ConversationToolResultReducer
+from habitus.memory.conversation.tool_result_reduction import ConversationToolResultReducer
 from habitus.pre.conversation import (
     ConversationMessage,
     ConversationMessageRole,

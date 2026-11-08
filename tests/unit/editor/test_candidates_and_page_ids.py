@@ -328,3 +328,38 @@ def test_model_output_relation_and_identity_items_with_wrong_types_are_rejected_
     output[field] = [item]
     with pytest.raises(MemoryCandidateError, match=message):
         MemoryCandidateBatch.model_validate(output)
+
+
+def test_context_violations_keep_their_fixed_check_order_and_wording() -> None:
+    """来源校验按固定检查顺序逐条列出违规：修补轮请求、剔除原因与 validate_context 的首条报错都依赖这份顺序与文字。"""
+
+    output = empty_output()
+    output["tools"] = [candidate_item(MemoryKind.TOOL, 101)]
+    output["events"] = [{**candidate_item(MemoryKind.EVENT, 102), "event_date": "2999-01-01"}]
+    output["intentions"] = [{**candidate_item(MemoryKind.INTENTION, 103, confirmed=True), "status": "completed"}]
+    output["relations"] = [
+        {"action": "remove", "from_page_id": 101, "to_page_id": 102, "link_type": "caused_by"},
+        {"action": "add", "from_page_id": 101, "to_page_id": 500, "link_type": "caused_by"},
+        {"action": "add", "from_page_id": 1, "to_page_id": 101, "link_type": "caused_by"},
+    ]
+    output["identity_proposals"] = [
+        {"proposal_type": "remove_memory", "source_page_id": 1, "target_page_id": None, "basis": "explicit_forget"}
+    ]
+    batch = MemoryCandidateBatch.model_validate(output)
+    empty_old = SnapshotBatch((), 0)
+
+    violations = batch.context_violations(segment(), empty_old, MemoryPageIdMap(), zone=UTC)
+
+    assert [violation.describe() for violation in violations] == [
+        "relations add 101->500 caused_by: relation candidate references an unknown to_page_id",
+        "relations add 1->101 caused_by: relation candidate references an unknown from_page_id",
+        "identity_proposals remove_memory source_page_id=1: identity proposal source is not a complete old-memory page_id",
+        "relations add 1->101 caused_by: identity proposal source cannot also be referenced by a relation candidate",
+        "relations remove 101->102 caused_by: relation remove must reference two existing memory page_ids",
+        "tools page_id=101: tool candidate requires a matching successful tool_call/tool_result pair",
+        "events page_id=102: future event date cannot represent an occurred Event",
+        "intentions page_id=103: completed intention must target an existing intention read in this batch",
+    ]
+    with pytest.raises(MemoryCandidateError) as raised:
+        batch.validate_context(segment(), empty_old, MemoryPageIdMap(), zone=UTC)
+    assert str(raised.value) == "relation candidate references an unknown to_page_id"

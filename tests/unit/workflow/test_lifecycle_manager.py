@@ -199,7 +199,7 @@ def test_archive_retirement_waits_for_actual_use_window_and_grace_then_deletes_c
     manager.range_store.create(address, archive, (first_range, second_range))
     archive_reference = summary_reference(address, archive)
     use_store.record_use((archive_reference,), used_at=BASE_TIME + timedelta(days=10))
-    monkeypatch.setattr(manager, "_workflow_is_committed", lambda _address, _segment: True)
+    monkeypatch.setattr(manager.committed_cleanup, "is_committed", lambda _address, _segment: True)
 
     protected = asyncio.run(manager.maintain_once(address, now=BASE_TIME + timedelta(days=10, hours=12)))
     assert protected.deleted_archive_summary_ids == ()

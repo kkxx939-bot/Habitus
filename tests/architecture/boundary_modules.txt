@@ -55,6 +55,7 @@ foresight/judge/prompt.py
 foresight/judge/service.py
 memory/compaction/l2_fields.py
 memory/editor/candidate.py
+memory/editor/candidate_codec.py
 memory/editor/extraction/loop.py
 memory/editor/extraction/prompt.py
 memory/field_ops.py

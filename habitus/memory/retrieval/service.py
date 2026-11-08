@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import replace
@@ -13,7 +12,7 @@ from typing import Protocol
 from habitus.foundation.observability import NullObserver, ObservationEvent, ObservationStatus, Observer
 from habitus.memory.conversation import ConversationAddress
 from habitus.memory.conversation.indexing import ConversationSummaryMatch
-from habitus.memory.document import MemoryDocument, MemoryStoredLink
+from habitus.memory.document import MemoryDocument
 from habitus.memory.intention import (
     MemoryIntentionRecallScope,
     MemoryIntentionReview,
@@ -27,6 +26,11 @@ from habitus.memory.recall import (
     MemoryRecallLifecycleError,
     MemoryRecallTarget,
 )
+from habitus.memory.retrieval.acknowledgement import (
+    MemoryColdProbeExpander,
+    append_degradation,
+    final_context_acknowledger,
+)
 from habitus.memory.retrieval.assembler import MemoryContextAssembler, MemoryContextAssembly
 from habitus.memory.retrieval.context import ConversationSearchContextReader
 from habitus.memory.retrieval.grader import MemoryRetrievalGrader
@@ -34,7 +38,6 @@ from habitus.memory.retrieval.model import (
     MemoryMatchedMemory,
     MemoryQueryPlan,
     MemoryQueryResult,
-    MemoryRelatedMemory,
     MemoryRetrievalAssessment,
     MemoryRetrievalSufficiency,
     MemorySearchDegradation,
@@ -46,8 +49,10 @@ from habitus.memory.retrieval.model import (
     MemoryTypedQuery,
 )
 from habitus.memory.retrieval.planner import MemorySearchQueryPlanner
+from habitus.memory.retrieval.relations import RelationExpander, review_intention
+from habitus.memory.retrieval.request import MemorySearchRequestNormalizer
 from habitus.memory.snapshot import MemorySnapshotReader
-from habitus.memory.uri import MemoryURI, MemoryURINodeType
+from habitus.memory.uri import MemoryURI
 
 
 class MemorySemanticSearch(Protocol):
@@ -75,27 +80,6 @@ class ConversationSummarySemanticSearch(Protocol):
     ) -> Sequence[ConversationSummaryMatch]: ...
 
 
-class MemoryColdProbeExpander(Protocol):
-    """展开活动基线，并在最终 Context 前完成 L2 恢复与使用确认。"""
-
-    def expand_for_probe(self, document: MemoryDocument) -> MemoryDocument: ...
-
-    async def record_context_use(
-        self,
-        targets: tuple[MemoryRecallTarget, ...],
-        *,
-        used_at: datetime | None = None,
-    ) -> MemoryContextUseReceipt: ...
-
-
-class MemoryContextUseReceipt(Protocol):
-    @property
-    def documents(self) -> tuple[MemoryDocument, ...]: ...
-
-    @property
-    def rejected_uris(self) -> tuple[MemoryURI, ...]: ...
-
-
 class ConversationSummaryFallbackExpander(Protocol):
     def expand(
         self,
@@ -117,6 +101,44 @@ class MemoryDirectoryLayerReader(Protocol):
     def layer_exists(self, directory: MemoryDirectory, level: MemoryLevel) -> bool: ...
 
     def read_layer_bounded(self, directory: MemoryDirectory, level: MemoryLevel, *, max_bytes: int) -> str: ...
+
+
+def _temperature_count(memories: tuple[MemoryMatchedMemory, ...], temperature: str) -> int:
+    return sum(
+        memory.hit.lifecycle_temperature is not None and memory.hit.lifecycle_temperature.value == temperature
+        for memory in memories
+    )
+
+
+def _recall_target(memory: MemoryMatchedMemory) -> MemoryRecallTarget:
+    return MemoryRecallTarget(
+        memory.uri,
+        memory.document.metadata.revision,
+        memory.document.metadata.created_at,
+    )
+
+
+def _search_observation(plan: MemoryQueryPlan, result: MemorySearchResult, *, started: float) -> ObservationEvent:
+    """一次 find/search 完成后的检索观察事件；有任何降级即记为 DEGRADED。"""
+
+    return ObservationEvent(
+        category="retrieval",
+        operation="search",
+        status=(ObservationStatus.DEGRADED if result.degradations else ObservationStatus.SUCCESS),
+        duration_seconds=max(0.0, time.monotonic() - started),
+        attributes={
+            "queries": len(plan.queries),
+            "memories": len(result.memories),
+            "summaries": len(result.summary_fallbacks),
+            "degradations": len(result.degradations),
+            "result_count": len(result.memories) + len(result.summary_fallbacks),
+            "degradation_count": len(result.degradations),
+            "hot_memories": _temperature_count(result.memories, "hot"),
+            "warm_memories": _temperature_count(result.memories, "warm"),
+            "cold1_memories": _temperature_count(result.memories, "cold_1"),
+            "cold2_memories": _temperature_count(result.memories, "cold_2"),
+        },
+    )
 
 
 class SearchService:
@@ -170,6 +192,12 @@ class SearchService:
         self.summary_use_recorder = summary_use_recorder
         self.clock = clock or (lambda: datetime.now(UTC))
         self.observer = observer or NullObserver()
+        self.request_normalizer = MemorySearchRequestNormalizer(resolved_config)
+        self.relation_expander = RelationExpander(
+            snapshot_reader=snapshot_reader,
+            config=resolved_config,
+            intention_reviewer=self.intention_reviewer,
+        )
 
     async def find(
         self,
@@ -183,19 +211,22 @@ class SearchService:
     ) -> MemorySearchResult:
         """不调用查询规划模型，直接执行一次完整语义检索。"""
 
-        normalized = self._query(query)
-        roots = self._roots(target_uris)
-        maximum = self._limit(limit)
-        threshold = self._threshold(score_threshold)
-        allowed_kinds, allowed_intention_scope = self._recall_filters(kinds, intention_scope)
-        plan = self.query_planner.direct(normalized)
+        request = self.request_normalizer.normalize(
+            query,
+            target_uris=target_uris,
+            limit=limit,
+            score_threshold=score_threshold,
+            kinds=kinds,
+            intention_scope=intention_scope,
+        )
+        plan = self.query_planner.direct(request.query)
         return await self._execute(
             plan,
-            roots,
-            maximum,
-            threshold,
-            allowed_kinds,
-            allowed_intention_scope,
+            request.roots,
+            request.limit,
+            request.score_threshold,
+            request.kinds,
+            request.intention_scope,
             assess_for_summary=False,
             degradations=(),
         )
@@ -213,24 +244,27 @@ class SearchService:
     ) -> MemorySearchResult:
         """完成 Memory 主召回，并仅在 Grader 判定不足时补查历史 Summary。"""
 
-        normalized = self._query(query)
-        roots = self._roots(target_uris)
-        maximum = self._limit(limit)
-        threshold = self._threshold(score_threshold)
-        allowed_kinds, allowed_intention_scope = self._recall_filters(kinds, intention_scope)
+        request = self.request_normalizer.normalize(
+            query,
+            target_uris=target_uris,
+            limit=limit,
+            score_threshold=score_threshold,
+            kinds=kinds,
+            intention_scope=intention_scope,
+        )
         degradations: tuple[MemorySearchDegradation, ...] = ()
         if conversation is None:
-            plan = self.query_planner.direct(normalized)
+            plan = self.query_planner.direct(request.query)
         else:
             try:
                 context = self.conversation_context.read(conversation)
                 plan = await self.query_planner.plan(
-                    normalized,
+                    request.query,
                     context,
-                    target_context=self._target_context(roots),
+                    target_context=self._target_context(request.roots),
                 )
             except Exception as exc:
-                plan = self.query_planner.direct(normalized)
+                plan = self.query_planner.direct(request.query)
                 degradations = (
                     MemorySearchDegradation(
                         MemorySearchDegradationStage.QUERY_PLANNER,
@@ -239,11 +273,11 @@ class SearchService:
                 )
         return await self._execute(
             plan,
-            roots,
-            maximum,
-            threshold,
-            allowed_kinds,
-            allowed_intention_scope,
+            request.roots,
+            request.limit,
+            request.score_threshold,
+            request.kinds,
+            request.intention_scope,
             assess_for_summary=True,
             degradations=degradations,
         )
@@ -262,151 +296,31 @@ class SearchService:
     ) -> MemorySearchResult:
         started = time.monotonic()
         applied_degradations = list(degradations)
-        candidate_limit = min(
-            1_000,
-            max(limit, limit * self.config.candidate_multiplier),
-        )
-        query_results = tuple(
-            await asyncio.gather(
-                *(
-                    self._execute_query(
-                        query,
-                        roots=roots,
-                        limit=candidate_limit,
-                        score_threshold=score_threshold,
-                        kinds=kinds,
-                        intention_scope=intention_scope,
-                    )
-                    for query in plan.queries
-                )
-            )
-        )
+        query_results = await self._execute_queries(plan, roots, limit, score_threshold, kinds, intention_scope)
         hits, matched_queries = self._aggregate(query_results)
         review_now = self._timestamp()
-        read_limit = min(
-            self.snapshot_reader.config.max_items,
-            max(limit, limit * self.config.candidate_multiplier),
-        )
-        direct_candidates = self._read_direct(
-            hits[:read_limit],
+        direct = self._select_direct(
+            hits,
             matched_queries,
+            limit=limit,
             review_now=review_now,
             kinds=kinds,
             intention_scope=intention_scope,
+            degradations=applied_degradations,
         )
-        try:
-            direct = self._rank_recall_lifecycle(
-                direct_candidates,
-                limit=limit,
-                now=review_now,
-            )
-        except MemoryRecallLifecycleError as exc:
-            direct = direct_candidates[:limit]
-            self._append_degradation(
-                applied_degradations,
-                MemorySearchDegradationStage.RECALL_LIFECYCLE,
-                exc,
-            )
-        direct_targets = {
-            memory.uri: MemoryRecallTarget(
-                memory.uri,
-                memory.document.metadata.revision,
-                memory.document.metadata.created_at,
-            )
-            for memory in direct
-        }
-        budgeted_direct = self._expand_cold_for_budget(direct)
-        expanded = self._expand_relations(
-            budgeted_direct,
+        direct_targets = {memory.uri: _recall_target(memory) for memory in direct}
+        expanded = self.relation_expander.expand(
+            self._expand_cold_for_budget(direct),
             roots=roots,
             intention_scope=intention_scope,
             review_now=review_now,
         )
-        assembly = self.assembler.assemble(expanded)
-        assessment: MemoryRetrievalAssessment | None = None
-        summary_fallback_attempted = False
-        if assess_for_summary:
-            try:
-                assessment = await self.retrieval_grader.assess(
-                    plan,
-                    assembly.memories,
-                    assembly.context,
-                )
-            except Exception as exc:
-                applied_degradations.append(
-                    MemorySearchDegradation(
-                        MemorySearchDegradationStage.RETRIEVAL_GRADER,
-                        type(exc).__name__,
-                    )
-                )
-            if (
-                self.config.summary_fallback_enabled
-                and assessment is not None
-                and assessment.decision is MemoryRetrievalSufficiency.INSUFFICIENT
-                and not assembly.budget_exhausted
-            ):
-                assert assessment.summary_query is not None
-                summary_fallback_attempted = True
-                try:
-                    summaries = await self._search_summaries(assessment.summary_query)
-                except Exception as exc:
-                    applied_degradations.append(
-                        MemorySearchDegradation(
-                            MemorySearchDegradationStage.SUMMARY_FALLBACK,
-                            type(exc).__name__,
-                        )
-                    )
-                else:
-                    assembly = self.assembler.assemble(
-                        expanded,
-                        summary_fallbacks=summaries,
-                    )
-        pre_ack_uris = {memory.uri for memory in assembly.memories}
-        assembly = await self._acknowledge_final_context(
-            assembly,
+        assembly, assessment, summary_fallback_attempted = await self._assemble_final_context(
+            plan,
+            expanded,
             targets=direct_targets,
             used_at=review_now,
-            degradations=applied_degradations,
-        )
-        post_ack_uris = {memory.uri for memory in assembly.memories}
-        if assess_for_summary and not summary_fallback_attempted and post_ack_uris != pre_ack_uris:
-            try:
-                assessment = await self.retrieval_grader.assess(
-                    plan,
-                    assembly.memories,
-                    assembly.context,
-                )
-            except Exception as exc:
-                assessment = None
-                self._append_degradation(
-                    applied_degradations,
-                    MemorySearchDegradationStage.RETRIEVAL_GRADER,
-                    exc,
-                )
-            if (
-                self.config.summary_fallback_enabled
-                and assessment is not None
-                and assessment.decision is MemoryRetrievalSufficiency.INSUFFICIENT
-                and not assembly.budget_exhausted
-            ):
-                assert assessment.summary_query is not None
-                summary_fallback_attempted = True
-                try:
-                    summaries = await self._search_summaries(assessment.summary_query)
-                except Exception as exc:
-                    self._append_degradation(
-                        applied_degradations,
-                        MemorySearchDegradationStage.SUMMARY_FALLBACK,
-                        exc,
-                    )
-                else:
-                    assembly = self.assembler.assemble(
-                        assembly.memories,
-                        summary_fallbacks=summaries,
-                    )
-        assembly = await self._acknowledge_final_summaries(
-            assembly,
-            used_at=review_now,
+            assess_for_summary=assess_for_summary,
             degradations=applied_degradations,
         )
         result = MemorySearchResult(
@@ -424,42 +338,154 @@ class SearchService:
             budget_exhausted=assembly.budget_exhausted,
             degradations=tuple(applied_degradations),
         )
-        self.observer.record(
-            ObservationEvent(
-                category="retrieval",
-                operation="search",
-                status=(ObservationStatus.DEGRADED if applied_degradations else ObservationStatus.SUCCESS),
-                duration_seconds=max(0.0, time.monotonic() - started),
-                attributes={
-                    "queries": len(plan.queries),
-                    "memories": len(result.memories),
-                    "summaries": len(result.summary_fallbacks),
-                    "degradations": len(result.degradations),
-                    "result_count": len(result.memories) + len(result.summary_fallbacks),
-                    "degradation_count": len(result.degradations),
-                    "hot_memories": sum(
-                        memory.hit.lifecycle_temperature is not None and memory.hit.lifecycle_temperature.value == "hot"
-                        for memory in result.memories
-                    ),
-                    "warm_memories": sum(
-                        memory.hit.lifecycle_temperature is not None
-                        and memory.hit.lifecycle_temperature.value == "warm"
-                        for memory in result.memories
-                    ),
-                    "cold1_memories": sum(
-                        memory.hit.lifecycle_temperature is not None
-                        and memory.hit.lifecycle_temperature.value == "cold_1"
-                        for memory in result.memories
-                    ),
-                    "cold2_memories": sum(
-                        memory.hit.lifecycle_temperature is not None
-                        and memory.hit.lifecycle_temperature.value == "cold_2"
-                        for memory in result.memories
-                    ),
-                },
+        self.observer.record(_search_observation(plan, result, started=started))
+        return result
+
+    async def _execute_queries(
+        self,
+        plan: MemoryQueryPlan,
+        roots: tuple[MemoryURI, ...],
+        limit: int,
+        score_threshold: float | None,
+        kinds: tuple[MemoryKind, ...],
+        intention_scope: MemoryIntentionRecallScope,
+    ) -> tuple[MemoryQueryResult, ...]:
+        """并发执行查询计划里的每条查询，每条按候选倍数放宽到有界上限。"""
+
+        candidate_limit = min(
+            1_000,
+            max(limit, limit * self.config.candidate_multiplier),
+        )
+        return tuple(
+            await asyncio.gather(
+                *(
+                    self._execute_query(
+                        query,
+                        roots=roots,
+                        limit=candidate_limit,
+                        score_threshold=score_threshold,
+                        kinds=kinds,
+                        intention_scope=intention_scope,
+                    )
+                    for query in plan.queries
+                )
             )
         )
-        return result
+
+    def _select_direct(
+        self,
+        hits: tuple[MemorySearchHit, ...],
+        matched_queries: dict[MemoryURI, tuple[str, ...]],
+        *,
+        limit: int,
+        review_now: datetime,
+        kinds: tuple[MemoryKind, ...],
+        intention_scope: MemoryIntentionRecallScope,
+        degradations: list[MemorySearchDegradation],
+    ) -> tuple[MemoryMatchedMemory, ...]:
+        """读取有界数量的完整 L2，再按召回生命周期排序截到 ``limit``；生命周期失败时退回语义顺序。"""
+
+        read_limit = min(
+            self.snapshot_reader.config.max_items,
+            max(limit, limit * self.config.candidate_multiplier),
+        )
+        direct_candidates = self._read_direct(
+            hits[:read_limit],
+            matched_queries,
+            review_now=review_now,
+            kinds=kinds,
+            intention_scope=intention_scope,
+        )
+        try:
+            return self._rank_recall_lifecycle(
+                direct_candidates,
+                limit=limit,
+                now=review_now,
+            )
+        except MemoryRecallLifecycleError as exc:
+            append_degradation(
+                degradations,
+                MemorySearchDegradationStage.RECALL_LIFECYCLE,
+                exc,
+            )
+            return direct_candidates[:limit]
+
+    async def _assemble_final_context(
+        self,
+        plan: MemoryQueryPlan,
+        expanded: tuple[MemoryMatchedMemory, ...],
+        *,
+        targets: dict[MemoryURI, MemoryRecallTarget],
+        used_at: datetime,
+        assess_for_summary: bool,
+        degradations: list[MemorySearchDegradation],
+    ) -> tuple[MemoryContextAssembly, MemoryRetrievalAssessment | None, bool]:
+        """组装、评估与按需补查 Summary，使用确认剔除了记忆且尚未补查时再评估一次。"""
+
+        assembly = self.assembler.assemble(expanded)
+        assessment: MemoryRetrievalAssessment | None = None
+        summary_fallback_attempted = False
+        if assess_for_summary:
+            assembly, assessment, summary_fallback_attempted = await self._assess_with_summary_fallback(
+                plan,
+                assembly,
+                memories=expanded,
+                degradations=degradations,
+            )
+        pre_ack_uris = {memory.uri for memory in assembly.memories}
+        assembly = await final_context_acknowledger(
+            recall_lifecycle=self.recall_lifecycle,
+            cold_probe_expander=self.cold_probe_expander,
+            assembler=self.assembler,
+        ).acknowledge(assembly, targets=targets, used_at=used_at, degradations=degradations)
+        post_ack_uris = {memory.uri for memory in assembly.memories}
+        if assess_for_summary and not summary_fallback_attempted and post_ack_uris != pre_ack_uris:
+            assembly, assessment, summary_fallback_attempted = await self._assess_with_summary_fallback(
+                plan,
+                assembly,
+                memories=assembly.memories,
+                degradations=degradations,
+            )
+        assembly = await self._acknowledge_final_summaries(
+            assembly,
+            used_at=used_at,
+            degradations=degradations,
+        )
+        return assembly, assessment, summary_fallback_attempted
+
+    async def _assess_with_summary_fallback(
+        self,
+        plan: MemoryQueryPlan,
+        assembly: MemoryContextAssembly,
+        *,
+        memories: tuple[MemoryMatchedMemory, ...],
+        degradations: list[MemorySearchDegradation],
+    ) -> tuple[MemoryContextAssembly, MemoryRetrievalAssessment | None, bool]:
+        """Grader 判定不足且预算未耗尽时补查一次 Summary，并以 ``memories`` 重新组装；返回是否尝试过补查。"""
+
+        try:
+            assessment: MemoryRetrievalAssessment | None = await self.retrieval_grader.assess(
+                plan,
+                assembly.memories,
+                assembly.context,
+            )
+        except Exception as exc:
+            assessment = None
+            append_degradation(degradations, MemorySearchDegradationStage.RETRIEVAL_GRADER, exc)
+        if not (
+            self.config.summary_fallback_enabled
+            and assessment is not None
+            and assessment.decision is MemoryRetrievalSufficiency.INSUFFICIENT
+            and not assembly.budget_exhausted
+        ):
+            return assembly, assessment, False
+        assert assessment.summary_query is not None
+        try:
+            summaries = await self._search_summaries(assessment.summary_query)
+        except Exception as exc:
+            append_degradation(degradations, MemorySearchDegradationStage.SUMMARY_FALLBACK, exc)
+            return assembly, assessment, True
+        return self.assembler.assemble(memories, summary_fallbacks=summaries), assessment, True
 
     async def _search_summaries(
         self,
@@ -646,81 +672,6 @@ class SearchService:
             expanded.append(replace(memory, document=document))
         return tuple(expanded)
 
-    async def _acknowledge_final_context(
-        self,
-        assembly: MemoryContextAssembly,
-        *,
-        targets: dict[MemoryURI, MemoryRecallTarget],
-        used_at: datetime,
-        degradations: list[MemorySearchDegradation],
-    ) -> MemoryContextAssembly:
-        """只让最终模型可见的主记忆升温；失败或过期目标从 Context 中剔除。"""
-
-        retained_targets = tuple(targets[memory.uri] for memory in assembly.memories if memory.uri in targets)
-        if not retained_targets:
-            return assembly
-        if self.cold_probe_expander is None:
-            cold = {
-                memory.uri
-                for memory in assembly.memories
-                if memory.hit.lifecycle_temperature is not None and memory.hit.lifecycle_temperature.value == "cold_2"
-            }
-            safe_targets = tuple(target for target in retained_targets if target.uri not in cold)
-            try:
-                self.recall_lifecycle.record_use(safe_targets, used_at=used_at)
-            except MemoryRecallLifecycleError as exc:
-                self._append_degradation(
-                    degradations,
-                    MemorySearchDegradationStage.RECALL_LIFECYCLE,
-                    exc,
-                )
-                # 普通详细 L2 仍可安全返回；只把无法同步恢复的 COLD_2 排除。
-            accepted = {target.uri for target in safe_targets}
-            if accepted != {target.uri for target in retained_targets}:
-                self._append_degradation(
-                    degradations,
-                    MemorySearchDegradationStage.RECALL_LIFECYCLE,
-                    MemoryRecallLifecycleError("COLD_2 final Context requires synchronous L2 restore"),
-                )
-            safe_memories = tuple(memory for memory in assembly.memories if memory.uri in accepted)
-            return self.assembler.assemble(
-                safe_memories,
-                summary_fallbacks=assembly.summary_fallbacks,
-            )
-        try:
-            receipt = await self.cold_probe_expander.record_context_use(
-                retained_targets,
-                used_at=used_at,
-            )
-            documents = tuple(receipt.documents)
-            rejected = set(receipt.rejected_uris)
-        except Exception as exc:
-            self._append_degradation(
-                degradations,
-                MemorySearchDegradationStage.RECALL_LIFECYCLE,
-                exc,
-            )
-            return self.assembler.assemble((), summary_fallbacks=assembly.summary_fallbacks)
-        if rejected:
-            self._append_degradation(
-                degradations,
-                MemorySearchDegradationStage.RECALL_LIFECYCLE,
-                MemoryRecallLifecycleError("one or more final Context memories lost their lifecycle fence"),
-            )
-        by_uri = {MemoryURI.from_address(document.address): document for document in documents}
-        retained: list[MemoryMatchedMemory] = []
-        for memory in assembly.memories:
-            if memory.uri in rejected:
-                continue
-            document = by_uri.get(memory.uri)
-            if document is None:
-                continue
-            retained.append(replace(memory, document=document))
-        return self.assembler.assemble(
-            tuple(retained),
-            summary_fallbacks=assembly.summary_fallbacks,
-        )
-
     async def _acknowledge_final_summaries(
         self,
         assembly: MemoryContextAssembly,
@@ -739,7 +690,7 @@ class SearchService:
                     used_at=used_at,
                 )
             except Exception as exc:
-                self._append_degradation(
+                append_degradation(
                     degradations,
                     MemorySearchDegradationStage.SUMMARY_FALLBACK,
                     exc,
@@ -752,124 +703,19 @@ class SearchService:
             summary_fallbacks=tuple(retained),
         )
 
-    @staticmethod
-    def _append_degradation(
-        degradations: list[MemorySearchDegradation],
-        stage: MemorySearchDegradationStage,
-        error: BaseException,
-    ) -> None:
-        if any(item.stage is stage for item in degradations):
-            return
-        degradations.append(MemorySearchDegradation(stage, type(error).__name__))
-
-    def _expand_relations(
-        self,
-        memories: tuple[MemoryMatchedMemory, ...],
-        *,
-        roots: tuple[MemoryURI, ...],
-        intention_scope: MemoryIntentionRecallScope,
-        review_now: datetime,
-    ) -> tuple[MemoryMatchedMemory, ...]:
-        if not memories or self.config.max_relation_neighbors_total == 0:
-            return memories
-        direct_documents = {memory.uri: memory.document for memory in memories}
-        selected_relations: dict[MemoryURI, list[MemoryStoredLink]] = {memory.uri: [] for memory in memories}
-        neighbor_documents: dict[MemoryURI, MemoryDocument] = {}
-        assigned_relations: set[tuple[str, str, str]] = set()
-        for memory in memories:
-            relations = tuple(
-                sorted((*memory.document.links, *memory.document.backlinks), key=lambda link: link.identity)
-            )
-            for relation in relations:
-                neighbor = relation.to_uri if relation.from_uri == memory.uri else relation.from_uri
-                if relation.identity in assigned_relations:
-                    continue
-                if not any(neighbor.matches_prefix(root) for root in roots):
-                    continue
-                document = direct_documents.get(neighbor) or neighbor_documents.get(neighbor)
-                if document is None:
-                    try:
-                        snapshot = self.snapshot_reader.read(neighbor)
-                    except Exception as exc:
-                        raise MemorySearchError("failed to read one-hop related memory document") from exc
-                    if not snapshot.exists or snapshot.value is None:
-                        raise MemorySearchError("memory relation points to a missing L2 document")
-                    document = snapshot.value
-                    neighbor_documents[neighbor] = document
-                self._require_reciprocal(memory.document, document, relation)
-                if document.kind is MemoryKind.INTENTION and not intention_matches_scope(
-                    document.fields.get("status"),
-                    intention_scope,
-                ):
-                    # 不符合召回范围的关系不能先占用一跳配额。
-                    continue
-                if len(selected_relations[memory.uri]) >= self.config.max_relation_neighbors_per_match:
-                    break
-                if len(assigned_relations) >= self.config.max_relation_neighbors_total:
-                    break
-                selected_relations[memory.uri].append(relation)
-                assigned_relations.add(relation.identity)
-            if len(assigned_relations) >= self.config.max_relation_neighbors_total:
-                break
-
-        expanded: list[MemoryMatchedMemory] = []
-        for memory in memories:
-            related: list[MemoryRelatedMemory] = []
-            for relation in selected_relations[memory.uri]:
-                neighbor_uri = relation.to_uri if relation.from_uri == memory.uri else relation.from_uri
-                document = direct_documents.get(neighbor_uri)
-                if document is None:
-                    document = neighbor_documents[neighbor_uri]
-                related.append(
-                    MemoryRelatedMemory(
-                        relation=relation,
-                        document=document,
-                        intention_review=self._intention_review(document, now=review_now),
-                    )
-                )
-            expanded.append(
-                MemoryMatchedMemory(
-                    hit=memory.hit,
-                    document=memory.document,
-                    matched_queries=memory.matched_queries,
-                    intention_review=memory.intention_review,
-                    related=tuple(related),
-                )
-            )
-        return tuple(expanded)
-
     def _intention_review(
         self,
         document: MemoryDocument,
         *,
         now: datetime,
     ) -> MemoryIntentionReview | None:
-        if document.kind is not MemoryKind.INTENTION:
-            return None
-        return self.intention_reviewer.review(document, now=now)
+        return review_intention(self.intention_reviewer, document, now=now)
 
     def _timestamp(self) -> datetime:
         timestamp = self.clock()
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:
             raise ValueError("memory search clock must return a timezone-aware datetime")
         return timestamp.astimezone(UTC)
-
-    @staticmethod
-    def _require_reciprocal(
-        seed: MemoryDocument,
-        neighbor: MemoryDocument,
-        relation: MemoryStoredLink,
-    ) -> None:
-        seed_uri = MemoryURI.from_address(seed.address)
-        neighbor_uri = MemoryURI.from_address(neighbor.address)
-        if {seed_uri, neighbor_uri} != {relation.from_uri, relation.to_uri}:
-            raise MemorySearchError("memory relation endpoint does not match the loaded documents")
-        if relation.from_uri == seed_uri:
-            valid = relation in seed.links and relation in neighbor.backlinks
-        else:
-            valid = relation in seed.backlinks and relation in neighbor.links
-        if not valid:
-            raise MemorySearchError("memory relation Links/Backlinks are inconsistent")
 
     def _target_context(self, roots: tuple[MemoryURI, ...]) -> str:
         rendered: list[str] = []
@@ -893,77 +739,6 @@ class SearchService:
             rendered.append(block)
             used += separator + len(block)
         return "\n".join(rendered)
-
-    def _query(self, value: str) -> str:
-        if not value.strip():
-            raise ValueError("memory search query must be non-empty text")
-        normalized = value.strip()
-        if len(normalized) > self.config.max_query_chars:
-            raise ValueError("memory search query exceeds its configured character bound")
-        return normalized
-
-    def _roots(
-        self,
-        value: MemoryURI | str | tuple[MemoryURI | str, ...] | None,
-    ) -> tuple[MemoryURI, ...]:
-        if value is None:
-            raw: tuple[MemoryURI | str, ...] = (MemoryURI.root(),)
-        elif isinstance(value, MemoryURI | str):
-            raw = (value,)
-        else:
-            raw = value
-        if not raw or len(raw) > self.config.max_target_roots:
-            raise ValueError("memory search target root count is outside its configured bound")
-        parsed = tuple(
-            sorted({MemoryURI.parse(root) for root in raw}, key=lambda root: (len(root.segments), str(root)))
-        )
-        if any(root.node_type is not MemoryURINodeType.DIRECTORY for root in parsed):
-            raise ValueError("memory search target URIs must identify directories")
-        roots: list[MemoryURI] = []
-        for root in parsed:
-            if any(root.matches_prefix(parent) for parent in roots):
-                continue
-            roots.append(root)
-        return tuple(roots)
-
-    def _limit(self, value: int | None) -> int:
-        limit = self.config.default_limit if value is None else value
-        if not 1 <= limit <= self.config.max_limit:
-            raise ValueError("memory search limit is outside its configured bound")
-        return limit
-
-    @staticmethod
-    def _threshold(value: float | None) -> float | None:
-        if value is None:
-            return None
-        if not math.isfinite(float(value)):
-            raise ValueError("memory search score_threshold must be finite numeric data")
-        return float(value)
-
-    @staticmethod
-    def _kinds(value: tuple[MemoryKind, ...]) -> tuple[MemoryKind, ...]:
-        normalized = tuple(MemoryKind(kind) for kind in value)
-        if len(normalized) != len(set(normalized)):
-            raise ValueError("memory search kinds must be unique")
-        return normalized
-
-    @classmethod
-    def _recall_filters(
-        cls,
-        kinds: tuple[MemoryKind, ...],
-        intention_scope: MemoryIntentionRecallScope,
-    ) -> tuple[tuple[MemoryKind, ...], MemoryIntentionRecallScope]:
-        """规范直接候选过滤，并给历史 completed Intention 提供显式入口。"""
-
-        normalized_kinds = cls._kinds(kinds)
-        scope = MemoryIntentionRecallScope(intention_scope)
-        if scope is MemoryIntentionRecallScope.ALL:
-            raise ValueError("ALL Intention recall is reserved for Memory Editor old-memory reads")
-        if scope is not MemoryIntentionRecallScope.COMPLETED:
-            return normalized_kinds, scope
-        if normalized_kinds and normalized_kinds != (MemoryKind.INTENTION,):
-            raise ValueError("completed Intention search cannot include other memory kinds")
-        return (MemoryKind.INTENTION,), scope
 
 
 __all__ = ["ConversationSummarySemanticSearch", "MemoryDirectoryLayerReader", "MemorySemanticSearch", "SearchService"]

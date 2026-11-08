@@ -14,12 +14,12 @@ from habitus.memory.conversation import (
 from habitus.memory.conversation.retention import (
     ConversationRetentionPlan,
     ConversationRetentionPlanner,
-    ConversationToolResultReducer,
 )
 from habitus.memory.conversation.segmentation import (
     ConversationBoundaryHints,
     ConversationMessageChunker,
 )
+from habitus.memory.conversation.tool_result_reduction import ConversationToolResultReducer
 from habitus.memory.workflow.jobs import MemoryJob, MemoryJobError, MemoryJobStatus, MemoryJobStore
 from habitus.memory.workflow.recovery import staged_job_segment
 from habitus.pre.conversation import (

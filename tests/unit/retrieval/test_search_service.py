@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from habitus.foundation.observability import ObservationEvent, ObservationStatus
 from habitus.infrastructure.store.contracts import PathLock
 from habitus.memory.compaction import (
     MemoryContextUseResult,
@@ -47,6 +48,7 @@ from habitus.memory.retrieval import (
     MemoryVectorMatch,
     SearchService,
 )
+from habitus.memory.retrieval.request import MemorySearchRequestNormalizer
 from habitus.memory.snapshot import MemorySnapshotReader
 from habitus.memory.tree import MemoryTree
 from habitus.memory.uri import MemoryURI
@@ -520,6 +522,127 @@ def test_rejected_final_context_is_regraded_and_can_trigger_summary_fallback(tmp
     assert tuple(item.stage.value for item in result.degradations) == ("recall_lifecycle",)
 
 
+def test_first_grader_failure_degrades_without_assessment_or_summary(tmp_path: Path) -> None:
+    """首次评估失败：记 retrieval_grader 降级、assessment 为空、不补查 Summary。"""
+
+    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
+    preference = document(MemoryKind.PREFERENCE, timestamp=now)
+    summaries = SummarySearch((summary_match(),))
+    instance = service(
+        tmp_path,
+        semantic=SemanticSearch((MemorySearchHit(MemoryURI.from_address(preference.address), 0.9),)),
+        summaries=summaries,
+        responses=[],
+        clock=lambda: now,
+    )
+    instance.tree.write(preference)
+
+    result = asyncio.run(instance.search("之前怎么决定的"))
+
+    assert len(result.memories) == 1
+    assert result.retrieval_assessment is None
+    assert not result.summary_fallback_attempted
+    assert summaries.calls == []
+    assert tuple(item.stage.value for item in result.degradations) == ("retrieval_grader",)
+
+
+class PartiallyRejectingContextUse:
+    """使用确认只接受 ``accepted`` 中的 URI 并返回其文档，其余目标视为失去生命周期 fence。"""
+
+    def __init__(self, accepted: dict[MemoryURI, object]) -> None:
+        self.accepted = accepted
+
+    @staticmethod
+    def expand_for_probe(value):
+        return value
+
+    async def record_context_use(self, targets, *, used_at):
+        return MemoryContextUseResult(
+            tuple(self.accepted[target.uri] for target in targets if target.uri in self.accepted),
+            tuple(target.uri for target in targets if target.uri not in self.accepted),
+        )
+
+
+def test_regrade_failure_after_final_context_rejection_clears_the_first_assessment(tmp_path: Path) -> None:
+    """使用确认剔除部分记忆后的再评估失败：先前的 sufficient 评估作废为空，不补查 Summary。"""
+
+    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
+    first = document(MemoryKind.PREFERENCE, fields={"topic": "回答长度", "content": "- 偏好简洁回答"}, timestamp=now)
+    second = document(MemoryKind.PREFERENCE, fields={"topic": "回答结构", "content": "- 偏好分点回答"}, timestamp=now)
+    first_uri = MemoryURI.from_address(first.address)
+    second_uri = MemoryURI.from_address(second.address)
+    summaries = SummarySearch((summary_match(),))
+    instance = service(
+        tmp_path,
+        semantic=SemanticSearch((MemorySearchHit(first_uri, 0.9), MemorySearchHit(second_uri, 0.8))),
+        summaries=summaries,
+        responses=[
+            {
+                "decision": "sufficient",
+                "reason": "候选记忆看起来足够。",
+                "missing_information": [],
+                "summary_query": None,
+            },
+        ],
+        clock=lambda: now,
+    )
+    instance.tree.write(first)
+    instance.tree.write(second)
+    instance.cold_probe_expander = PartiallyRejectingContextUse({first_uri: first})
+
+    result = asyncio.run(instance.search("之前怎么决定的"))
+
+    assert tuple(memory.uri for memory in result.memories) == (first_uri,)
+    assert result.retrieval_assessment is None
+    assert not result.summary_fallback_attempted
+    assert summaries.calls == []
+    assert tuple(item.stage.value for item in result.degradations) == ("recall_lifecycle", "retrieval_grader")
+
+
+def test_regrade_summary_failure_after_final_context_rejection_is_degraded(tmp_path: Path) -> None:
+    """使用确认剔除记忆后再评估为不足、补查 Summary 失败：记 summary_fallback 降级，保留不足评估。"""
+
+    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
+    preference = document(MemoryKind.PREFERENCE, timestamp=now)
+    uri = MemoryURI.from_address(preference.address)
+
+    class FailingSummarySearch:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int]] = []
+
+        async def search(self, query, *, limit):
+            self.calls.append((query, limit))
+            raise TimeoutError("summary timeout")
+
+    summaries = FailingSummarySearch()
+    instance = service(
+        tmp_path,
+        semantic=SemanticSearch((MemorySearchHit(uri, 0.9),)),
+        summaries=summaries,
+        responses=[
+            {
+                "decision": "sufficient",
+                "reason": "候选记忆看起来足够。",
+                "missing_information": [],
+                "summary_query": None,
+            },
+        ],
+        clock=lambda: now,
+    )
+    instance.tree.write(preference)
+    instance.cold_probe_expander = PartiallyRejectingContextUse({})
+
+    result = asyncio.run(instance.search("之前怎么决定的"))
+
+    assert result.memories == ()
+    assert result.retrieval_assessment is not None
+    assert result.retrieval_assessment.decision.value == "insufficient"
+    assert result.summary_fallback_attempted
+    assert result.summary_fallbacks == ()
+    assert summaries.calls == [("之前怎么决定的", instance.config.summary_fallback_limit)]
+    assert tuple(item.stage.value for item in result.degradations) == ("recall_lifecycle", "summary_fallback")
+
+
 class FailingRecallStateStore:
     def __init__(self, *, fail_read: bool = False, fail_write: bool = False) -> None:
         self.fail_read = fail_read
@@ -618,17 +741,17 @@ def test_actual_use_write_failure_keeps_detailed_memory_and_marks_degradation(tm
 
 
 def test_completed_intention_has_explicit_entry_and_cannot_mix_other_kinds() -> None:
-    assert SearchService._recall_filters((), MemoryIntentionRecallScope.COMPLETED) == (
+    assert MemorySearchRequestNormalizer.recall_filters((), MemoryIntentionRecallScope.COMPLETED) == (
         (MemoryKind.INTENTION,),
         MemoryIntentionRecallScope.COMPLETED,
     )
     with pytest.raises(ValueError, match="cannot include"):
-        SearchService._recall_filters(
+        MemorySearchRequestNormalizer.recall_filters(
             (MemoryKind.PROFILE, MemoryKind.INTENTION),
             MemoryIntentionRecallScope.COMPLETED,
         )
     with pytest.raises(ValueError, match="reserved"):
-        SearchService._recall_filters((), MemoryIntentionRecallScope.ALL)
+        MemorySearchRequestNormalizer.recall_filters((), MemoryIntentionRecallScope.ALL)
 
 
 def test_aggregate_deduplicates_same_uri_and_records_each_matching_query_once() -> None:
@@ -644,3 +767,58 @@ def test_aggregate_deduplicates_same_uri_and_records_each_matching_query_once() 
     )
     assert hits[0].score == 0.9
     assert queries[uri] == ("用户是谁", "用户背景")
+
+
+class RecordingObserver:
+    def __init__(self) -> None:
+        self.events: list[ObservationEvent] = []
+
+    def record(self, event: ObservationEvent) -> None:
+        self.events.append(event)
+
+
+def test_search_observation_counts_results_degradations_and_lifecycle_temperatures(tmp_path: Path) -> None:
+    """一次检索完成后的观察事件：数量、降级与各生命周期温度的计数都来自最终结果。"""
+
+    now = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
+    preference = document(MemoryKind.PREFERENCE, timestamp=now)
+    uri = MemoryURI.from_address(preference.address)
+    observer = RecordingObserver()
+    instance = service(
+        tmp_path,
+        semantic=SemanticSearch((MemorySearchHit(uri, 0.9),)),
+        summaries=SummarySearch((summary_match(),)),
+        responses=[],
+        clock=lambda: now,
+    )
+    instance.observer = observer
+    instance.tree.write(preference)
+
+    result = asyncio.run(instance.search("之前怎么决定的"))
+
+    temperature = result.memories[0].hit.lifecycle_temperature
+    assert temperature is not None
+    searches = [event for event in observer.events if event.operation == "search"]
+    assert len(searches) == 1
+    event = searches[0]
+    assert event.category == "retrieval"
+    assert event.status is ObservationStatus.DEGRADED
+    assert event.duration_seconds >= 0.0
+    assert event.attributes == {
+        "queries": 1,
+        "memories": 1,
+        "summaries": 0,
+        "degradations": 1,
+        "result_count": 1,
+        "degradation_count": 1,
+        "hot_memories": int(temperature.value == "hot"),
+        "warm_memories": int(temperature.value == "warm"),
+        "cold1_memories": int(temperature.value == "cold_1"),
+        "cold2_memories": int(temperature.value == "cold_2"),
+    }
+
+    instance.observer = observer = RecordingObserver()
+    found = asyncio.run(instance.find("用户偏好"))
+
+    assert found.degradations == ()
+    assert [event.status for event in observer.events if event.operation == "search"] == [ObservationStatus.SUCCESS]

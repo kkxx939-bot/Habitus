@@ -143,7 +143,7 @@ def test_missing_remote_index_is_fully_rebuilt_from_tree_and_consistency_is_clea
     tree.write(document(MemoryKind.PROFILE))
     tree.write(document(MemoryKind.PREFERENCE))
     state = asyncio.run(vector_index.ensure_ready())
-    report = asyncio.run(vector_index.check_consistency())
+    report = asyncio.run(vector_index.audit_consistency())
     assert state.record_count == 2
     assert len(embedder.inputs) == 2
     assert report.ok
@@ -167,6 +167,46 @@ def test_read_only_consistency_audit_reports_stale_record_without_rebuilding(tmp
 
     assert report.stale_identities == (identity,)
     assert tuple(embedder.inputs) == embedded_before
+
+
+def test_rebuild_reuses_unchanged_vectors_instead_of_reembedding(tmp_path: Path) -> None:
+    tree, embedder, store, vector_index = index(tmp_path)
+    tree.write(document(MemoryKind.PROFILE))
+    tree.write(document(MemoryKind.PREFERENCE))
+    asyncio.run(vector_index.ensure_ready())
+    embedded_before = tuple(embedder.inputs)
+
+    state = asyncio.run(vector_index.rebuild())
+
+    assert state.record_count == 2
+    assert state.generation == 2
+    assert tuple(embedder.inputs) == embedded_before
+
+
+def test_rebuild_rejects_published_state_beyond_its_capacity(tmp_path: Path) -> None:
+    tree, _embedder, store, vector_index = index(tmp_path)
+    tree.write(document(MemoryKind.PROFILE))
+    asyncio.run(vector_index.ensure_ready())
+    store.current = replace(store.current, record_count=vector_index.config.max_records + 1)
+
+    with pytest.raises(MemoryVectorIndexError, match="exceeds rebuild capacity"):
+        asyncio.run(vector_index.rebuild())
+
+
+def test_memory_index_keeps_its_own_error_texts_and_types(tmp_path: Path) -> None:
+    tree, embedder, _store, vector_index = index(tmp_path)
+    tree.write(document(MemoryKind.PROFILE))
+    with pytest.raises(MemoryVectorIndexError, match="^memory vector index is not ready for consistency audit$"):
+        asyncio.run(vector_index.audit_consistency())
+    with pytest.raises(ValueError, match="^memory vector rebuild checkpoint must be non-negative$"):
+        asyncio.run(vector_index.rebuild(checkpoint=-1))
+
+    async def wrong_dimension(values):
+        return tuple(EmbeddingVector((1.0, 0.0, 0.0)) for _ in values)
+
+    embedder.embed_documents = wrong_dimension
+    with pytest.raises(MemoryVectorIndexError, match="^embedder returned an invalid vector dimension$"):
+        asyncio.run(vector_index.ensure_ready())
 
 
 def test_incremental_sync_updates_changed_l2_and_advances_global_job_checkpoint(tmp_path: Path) -> None:
