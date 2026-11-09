@@ -21,7 +21,8 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import Enum
 
@@ -132,6 +133,10 @@ class LaneNight:
     cutoff: date
     tests: tuple[RelationTest, ...]
     family: int
+    #: 开测门第 1 道整组到不了、没逐条量的带条件关系，按段计数（它们必是稀疏，不建检验对象）。
+    skipped: Mapping[str, int] = field(default_factory=dict)
+    #: 不加权时过第 1 道的关系（给了先验权重时状态折叠据它打"靠先验"；没给权重时就是过了第 1 道的那些）。
+    plain_significant: frozenset[RelationKey] = frozenset()
 
     def significant(self) -> tuple[RelationTest, ...]:
         return tuple(test for test in self.tests if test.verdict is Verdict.SIGNIFICANT)

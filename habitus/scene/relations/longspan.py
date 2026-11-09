@@ -91,7 +91,16 @@ def episodes(
 
 #: 各段量法的版本：判据一改就加一，状态里记着的旧版本那一段的行会被清掉（``state.fold``；26 号清单 3.5）。
 #: RETURN 2：久别重来改用 ``temporal.absence``——链日、人在场的日子才算长度、被提醒才做的那段截尾（原来是记号日、日历日）。
-MEASURE_VERSIONS: dict[str, int] = {Segment.RETURN.value: 2}
+#: 带条件的同一条链单列一个名字（``measure_name``）——CHAIN_MODERATED 2：改配两道对照、两道都显著才算（裁定 95 第 4 条），
+#: 只配第 1 道时判成候选 / 成立的定点作息巧合在新判据下读数是"到不了"，不清掉就永远挂在成立上。
+CHAIN_MODERATED = f"{Segment.CHAIN.value}|moderated"
+MEASURE_VERSIONS: dict[str, int] = {Segment.RETURN.value: 2, CHAIN_MODERATED: 2}
+
+
+def measure_name(segment: Segment, *, conditioned: bool) -> str:
+    """量法版本按这个名字记：带条件的同一条链单列，其余就是段名。"""
+
+    return CHAIN_MODERATED if conditioned and segment is Segment.CHAIN else segment.value
 
 
 def _returns(visits: Sequence[Visit], *, present: frozenset[date], alpha: float) -> list[date]:

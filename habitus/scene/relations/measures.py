@@ -103,13 +103,15 @@ class ChainMeasure:
 
 @dataclass(frozen=True)
 class PairedMeasure:
-    """同一条链的两道对照各量一遍（``spans.Pairing``：同一天别的事做完的时刻；别的周同周几同钟点、当天没做 A），
+    """同一条链的两道对照各量一遍（``spans.Pairing``：同一天别的事做完的时刻；别的周同周几同钟点、当天没做 A），不带条件的两道是
+    ``ChainMeasure``，带条件的两道是各按条件分组的 ``conditions.ModeratedMeasure``（裁定 95 第 4 条：只配第 1 道时条件常与"那天整串
+    作息都在"相关，钟点偏差抵不掉，定点作息被读成"条件下更强"）。
     **两道都显著才算**：两侧 p 各取两道里大的，最小可达 p 取大的（任何一道给不出对照，这条关系就样本不够），
     效应与区间取两道里效应弱的那道（是它卡住了结论），去一块两道都要稳，异质性取更不稳的那道。
     单位数与块数是 A 的次数——两道量的是同一批 A。"""
 
-    first: ChainMeasure
-    second: ChainMeasure
+    first: Measure
+    second: Measure
 
     @property
     def units(self) -> int:
@@ -120,10 +122,10 @@ class PairedMeasure:
         return self.first.blocks
 
     @property
-    def parts(self) -> tuple[ChainMeasure, ChainMeasure]:
+    def parts(self) -> tuple[Measure, Measure]:
         return self.first, self.second
 
-    def weaker(self) -> ChainMeasure:
+    def weaker(self) -> Measure:
         """效应（实验组率减对照率）小的那道。"""
 
         return min(self.parts, key=lambda part: part.effect().difference)

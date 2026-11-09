@@ -230,21 +230,60 @@ def leave_one_block_out(strata: Sequence[Stratum]) -> bool:
     return True
 
 
+def simes(p_values: Sequence[float]) -> float:
+    """Simes 合并 p（Simes 1986）：k 个 p 升序，``min_i(k · p_(i) / i)``，封顶 1。在独立与正相关下控制"全都为零假设"的
+    一类错误；裁定 95 第 2 条拿它给（前因, 后果, 段）这一组判"组里有没有东西"。"""
+
+    ordered = sorted(p_values)
+    count = len(ordered)
+    return min(1.0, min(count * value / (index + 1) for index, value in enumerate(ordered)))
+
+
+def untestable_may_enter(weights: Sequence[float], untestable: Sequence[float], *, q: float) -> bool:
+    """没逐条量的那些检验（最小可达 p 1，权重是 ``untestable``）跟着 ``weights`` 这些检验一起进 ``tarone_bh`` 时，归一之后有没有
+    可能进族：它们的比值 = 1 / (权重 × 归一系数)，族的门槛 q / K 不超过 q，比值大于 q 就永远进不了（先验三档权重 2 / 1 / 0.5
+    下比值至少 0.25）。"""
+
+    if not untestable:
+        return False
+    scale = _normaliser(weights, untestable)
+    return 1.0 / (max(max(weight, 1e-12) for weight in untestable) * scale) <= q
+
+
+def _normaliser(weights: Sequence[float] | Mapping[str, float], untestable: Sequence[float]) -> float:
+    """权重归一到平均 1 的系数，没逐条量的也算在内。求和的先后与逐条量时不同：权重是 2 的幂（先验三档 2 / 1 / 0.5）时和是精确的，
+    结果逐位相同；任意小数权重可能差在末位。"""
+
+    values = weights.values() if isinstance(weights, Mapping) else weights
+    raw = [max(weight, 1e-12) for weight in values]
+    return (len(raw) + len(untestable)) / (sum(raw) + sum(max(weight, 1e-12) for weight in untestable))
+
+
 def tarone_bh(
-    p_values: Mapping[str, float], minimum: Mapping[str, float], weights: Mapping[str, float], *, q: float
+    p_values: Mapping[str, float],
+    minimum: Mapping[str, float],
+    weights: Mapping[str, float],
+    *,
+    q: float,
+    untestable: Sequence[float] = (),
 ) -> tuple[frozenset[str], frozenset[str]]:
     """（检验族, 过了第 1 道的）。
 
     先按 Gilbert（2005）的 Tarone 修剪定检验族：找最小的 K，使"最小可达 p / 权重 ≤ q / K"的检验不超过 K 个，
     族就是这些检验；其余的不可能显著，不进族。再在族里做加权 BH：p / 权重 排序，第 i 小的 ≤ q · i / 族大小 的最大 i 以内都过。
     权重在族里重新归一到平均 1（先验只调第 1 道，有界、冻结，由调用方给）。
+
+    ``untestable``：另有这些没逐条量的检验的权重（它们的 p 与最小可达 p 都是 1），只参加第一步的权重归一；调用方要先用
+    ``untestable_may_enter`` 确认它们进不了族（进得了就该逐条量、放进 ``p_values``）。
     """
 
     keys = sorted(p_values)
     if not keys:
         return frozenset(), frozenset()
     raw = {key: max(weights.get(key, 1.0), 1e-12) for key in keys}
-    scale = len(keys) / sum(raw.values())
+    scale = _normaliser(raw, untestable)
+    if untestable_may_enter(list(raw.values()), untestable, q=q):
+        raise ValueError("untestable tests could enter the family after normalisation; measure them instead")
     weight = {key: raw[key] * scale for key in keys}
     # c(K) = 门槛 q / K 以内的检验数随 K 不增：按比值排好序，每个 K 二分数一次（O(n log n)，不再每个 K 扫一遍全部键）
     ratios = {key: minimum[key] / weight[key] for key in keys}
@@ -336,6 +375,7 @@ __all__ = [
     "assumed_extreme",
     "effect",
     "heterogeneity",
+    "simes",
     "interval",
     "leave_one_block_out",
     "minimum_one_sided",

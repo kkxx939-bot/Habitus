@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import date
 
@@ -12,7 +12,7 @@ from habitus.scene.concepts.model import ConceptSet
 from habitus.scene.occurrences.model import ConceptHits
 from habitus.scene.relations import longspan
 from habitus.scene.relations.candidates import RelationCandidates
-from habitus.scene.relations.conditions import Condition
+from habitus.scene.relations.conditions import MIN_PER_SIDE, Condition, evaluator
 from habitus.scene.relations.config import RelationConfig
 from habitus.scene.relations.engine import Blocks, LaneNight, RelationKey, RelationTest, Subset
 from habitus.scene.relations.evaluation import RelationEvaluator
@@ -58,6 +58,8 @@ class LaneTests:
         self._blocks: dict[str, Blocks | None] = {}
         self._strata: dict[tuple[RelationKey, int | None, Pairing], tuple[Stratum, ...]] = {}
         self._episodes: dict[tuple[str, Segment], tuple[Episode, ...]] = {}
+        self._flags: dict[tuple[str, str], dict[int, bool | None]] = {}
+        self._reachable: dict[tuple[str, str, Segment], bool] = {}
         #: 量哪些（枚举与冻住的行的寿命）与怎么量（读数、检验族、子集上的读数）。
         self.candidates = RelationCandidates(self)
         self.evaluator = RelationEvaluator(self, self.candidates)
@@ -82,10 +84,11 @@ class LaneTests:
         *,
         since: Mapping[RelationKey, date] | None = None,
         outside: frozenset[RelationKey] = frozenset(),
+        keep: frozenset[RelationKey] = frozenset(),
     ) -> LaneNight:
         """当晚的检验族（``RelationEvaluator.night``）。"""
 
-        return self.evaluator.night(weights, since=since, outside=outside)
+        return self.evaluator.night(weights, since=since, outside=outside, keep=keep)
 
     def evaluate(
         self, key: RelationKey, *, upward: bool, since: date | None = None, last_blocks: int | None = None, purpose: str
@@ -156,6 +159,39 @@ class LaneTests:
             self._strata[slot] = tuple(found)
         items = self._strata[slot]
         return items if since is None else tuple(item for item in items if item.chain.day >= since)
+
+    def condition_judge(self, antecedent: str, condition: Condition) -> Callable[[Chain], bool | None]:
+        """条件成不成立只看前因那一条链与它之前、不看后果（``conditions.evaluator``）：每条链判一次，所有后果、所有段共用。
+        各段的层都锚在 ``chains(antecedent)`` 这一批链对象上（``merge_for`` 只挑不新建），按对象身份查。"""
+
+        cache = (antecedent, condition.text)
+        if cache not in self._flags:
+            judge = evaluator(self.line, condition, window=self.config.transition_window_slots)
+            self._flags[cache] = {id(chain): judge(chain) for chain in self.chains(antecedent)}
+        flags = self._flags[cache]
+        return lambda chain: flags[id(chain)]
+
+    def sides_reachable(self, key: RelationKey) -> bool:
+        """带条件的关系有没有可能过开测门的第 1 道（条件下与每组对照各至少 ``MIN_PER_SIDE`` 层，``conditions.split``）：
+        按同样的分组数这一段合并后的**链**，层只会比链少（窗口判不了的那一次没有层），所以链数都不够时，换哪个后果都不够——
+        这一组（前因, 条件, 段）的键不必逐条量，读数必是"到不了"。只取决于前因、条件与段，与后果无关。"""
+
+        cache = (key.antecedent, key.condition, key.segment)
+        if cache not in self._reachable:
+            judges = [self.condition_judge(key.antecedent, condition) for condition in key.conditions]
+            inside = 0
+            outsides = [0] * len(judges)
+            for chain in merge_for(key.segment, self.chains(key.antecedent)):
+                flags = [judge(chain) for judge in judges]
+                if any(flag is None for flag in flags):
+                    continue
+                failed = [index for index, flag in enumerate(flags) if flag is False]
+                if not failed:
+                    inside += 1
+                elif len(failed) == 1:
+                    outsides[failed[0]] += 1
+            self._reachable[cache] = inside >= MIN_PER_SIDE and all(count >= MIN_PER_SIDE for count in outsides)
+        return self._reachable[cache]
 
     def chains(self, antecedent: str) -> tuple[Chain, ...]:
         if antecedent not in self._chains:

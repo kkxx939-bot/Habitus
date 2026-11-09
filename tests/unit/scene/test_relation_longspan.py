@@ -21,6 +21,7 @@ from habitus.scene.relations.conditions import (
     parse,
 )
 from habitus.scene.relations.longspan import Episode, EpisodeMeasure, episodes, measure_of, unit_length
+from habitus.scene.relations.measures import PairedMeasure
 from habitus.scene.relations.spans import chains_of
 from habitus.series import EventSeries, GapKind, SeriesGap, SeriesRecord
 from habitus.temporal.absence import Visit
@@ -434,7 +435,11 @@ def test_a_new_proposed_condition_is_measured_only_after_it_was_proposed() -> No
     assert key in proposed.keys()
     assert key not in LaneTests(line, CONCEPTS, CONFIG, series.cutoff).keys()
     late = proposed.measure(key, since=proposed_on)
-    assert all(item.chain.day >= proposed_on for item in (*late.inside, *late.outsides[0]))  # type: ignore[attr-defined]
+    # 同一条链的带条件关系两道对照各分一次组（裁定 95 第 4 条）：两道都只量提出之后的
+    assert isinstance(late, PairedMeasure)
+    for part in late.parts:
+        assert isinstance(part, ModeratedMeasure)
+        assert all(item.chain.day >= proposed_on for item in (*part.inside, *part.outsides[0]))
 
 
 def test_a_situation_derived_from_behaviour_history_moderates_but_is_not_an_antecedent() -> None:

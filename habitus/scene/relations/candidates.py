@@ -80,7 +80,8 @@ class RelationCandidates:
         return rule is not None and rule.basis.reads_history
 
     def _moderated(self, names: list[str]) -> list[RelationKey]:
-        """带条件的关系：单个条件对每个够样本的前因都列（现状，裁定 62 第 1 条）；第二个条件起只在已成立的带条件关系上
+        """带条件的关系：单个条件对每个够样本的前因都列（裁定 62 第 1 条；列出来进不进检验族按层级定，裁定 95 第 2 条、
+        ``evaluation._families``）；第二个条件起只在已成立的带条件关系上
         加一个（{C1} 成立才列 {C1, C2}），条件池同样是机械列举 + 模型提的，最多 ``max_combined_conditions`` 个。
         同一个集合从几条父关系长出来只有一条键。"""
 

@@ -43,7 +43,7 @@ from habitus.scene.relations.engine import (
     gone,
 )
 from habitus.scene.relations.lane_tests import LaneTests
-from habitus.scene.relations.longspan import MEASURE_VERSIONS
+from habitus.scene.relations.longspan import MEASURE_VERSIONS, measure_name
 
 #: 维持检验一段至少几块：一天里的几次不是几个独立样本（与前向验证的 ``blocks ≥ 2`` 同一条理由）。
 _MIN_MAINTENANCE_BLOCKS = 2
@@ -174,13 +174,13 @@ def fold(
     outside = frozenset(
         key for key, relation in carried.items() if relation.status in (Status.CANDIDATE, Status.ESTABLISHED)
     )
-    night = tests.night(weights, since=since, outside=outside)
-    # 每晚同时算不加权的：只靠先验才过第 1 道的，发现时打"靠先验"
-    plain = night if not weights else tests.night(None, since=since, outside=outside)
-    unweighted = frozenset(test.key for test in plain.tests if test.verdict is Verdict.SIGNIFICANT)
+    # 跨夜带着的每晚都要完整读数（``keep``）；同一份读数同时判不加权的：只靠先验才过第 1 道的，发现时打"靠先验"
+    night = tests.night(weights, since=since, outside=outside, keep=frozenset(carried))
+    unweighted = night.plain_significant
     tonight = {test.key: test for test in night.tests}
     relations: list[Relation] = []
-    sparse: dict[str, int] = {}
+    # 没逐条量的那些必是稀疏，与逐条量出来的稀疏一样只按段计数
+    sparse: dict[str, int] = dict(night.skipped)
     transitions: list[Transition] = []
     for key in sorted(set(tonight) | set(carried)):
         before = carried.get(key)
@@ -255,7 +255,7 @@ def _drop_orphaned_combinations(relations: list[Relation], night: date) -> tuple
 
 
 def _drop_stale_measures(previous: LaneState) -> LaneState:
-    """某一段的量法改了版本：那一段带着的行清掉，在新判据下从数据重新发现。关系键里不含段的边界，不清的话旧行会
+    """某一段（或带条件的同一条链，``longspan.measure_name``）的量法改了版本：那一份带着的行清掉，在新判据下从数据重新发现。关系键里不含段的边界，不清的话旧行会
     换到新判据下的段上接着做维持检验（26 号清单 3.5）。其余段原样带着。"""
 
     stale = {
@@ -263,7 +263,11 @@ def _drop_stale_measures(previous: LaneState) -> LaneState:
     }
     if not stale:
         return previous
-    kept = tuple(relation for relation in previous.relations if relation.key.segment.value not in stale)
+    kept = tuple(
+        relation
+        for relation in previous.relations
+        if measure_name(relation.key.segment, conditioned=bool(relation.key.condition)) not in stale
+    )
     return replace(previous, relations=kept, measure_versions={**previous.measure_versions, **MEASURE_VERSIONS})
 
 

@@ -46,7 +46,7 @@ from enum import Enum
 
 from habitus.scene.concepts.model import ConceptRole, ConceptSet, members_retired
 from habitus.scene.relations import stats
-from habitus.scene.relations.measures import ChainMeasure
+from habitus.scene.relations.measures import ChainMeasure, PairedMeasure
 from habitus.scene.relations.spans import Chain, Stratum
 from habitus.scene.relations.timeline import LaneTimeline
 
@@ -482,16 +482,17 @@ def _sides_enough(inside: Sequence[Stratum], outsides: Sequence[Sequence[Stratum
     return len(inside) >= MIN_PER_SIDE and all(len(group) >= MIN_PER_SIDE for group in outsides)
 
 
-def ready_to_test(measure: ModeratedMeasure, *, alpha: float) -> bool:
+def ready_to_test(measure: ModeratedMeasure | PairedMeasure, *, alpha: float) -> bool:
     """这条带条件的关系值不值得开检验（裁定 60 第 9 条：不用固定的 40 次）：两边分得最干净时最小可达 p 在 ``alpha`` 以内，且每边
     至少 ``MIN_PER_SIDE`` 次。调节检验是交互的 z 与条件下精确尾概率取大（``tails``），所以用它自己的 ``minimum_p``，不借单样本
     二项的次数公式。两边要的次数都随对照率变（L10.17 起条件外与条件下对称）：α = 0.05、两边次数相同、每层 20 个对照时，两边对照率
     都是 0 时交互 z = √(2n)、2 次就到 0.0455，但那是正态近似偏乐观（见 ``MIN_PER_SIDE``），由每边至少 3 次挡住；都是 0.3 要各 4 次，
     都是 0.5 要各 6 次；条件外当天从不出现 B、条件下 0.1 要各 3 次。
     条件下按实测层算：自己没来、对照里也没有 B 的层不算数（见 ``ModeratedMeasure._cleanest``），所以条件下（含对照）完全没有 B 的
-    压低型永远不开（裁定 94 第 5 条：检验在那里没有信息）。"""
+    压低型永远不开（裁定 94 第 5 条：检验在那里没有信息）。同一条链两道对照成对（``PairedMeasure``）时两道都要够（裁定 95 第 4 条）。"""
 
-    return measure.enough and measure.minimum_p() <= alpha
+    parts = measure.parts if isinstance(measure, PairedMeasure) else (measure,)
+    return all(isinstance(part, ModeratedMeasure) and part.enough for part in parts) and measure.minimum_p() <= alpha
 
 
 def _resolve(concepts: ConceptSet, name: str) -> str | None:

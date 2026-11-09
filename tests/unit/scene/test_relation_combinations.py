@@ -30,6 +30,7 @@ from habitus.scene.relations.conditions import (
     split,
 )
 from habitus.scene.relations.config import RelationThresholds
+from habitus.scene.relations.longspan import MEASURE_VERSIONS
 from habitus.scene.relations.measures import ChainMeasure
 from tests.unit.scene.relation_fixtures import CODE, CONCEPTS, CONFIG, DISCUSS, PUSH, RESEARCH, key, planted
 
@@ -152,13 +153,20 @@ def test_a_combination_whose_parent_stopped_being_established_is_cleared_with_it
         maintenance_needed=40,
     )
     growing = Relation(key=combo, status=Status.CANDIDATE, upward=True, discovered_on=night, forward_needed=40)
-    with_parent = LaneState(lane="session", night=night, family=1, relations=(held, growing))
+    # 上一晚是当前代码写出的状态：量法版本照当前声明（带条件的同一条链不会被当成旧量法清掉）
+    with_parent = LaneState(
+        lane="session", night=night, family=1, relations=(held, growing), measure_versions=MEASURE_VERSIONS
+    )
     state, moved = fold(with_parent, lane_tests(series, established=(parent,)))
     kept = {item.key: item for item in state.relations}
     assert kept[parent].status is Status.ESTABLISHED and kept[combo].status is Status.CANDIDATE
     # 父关系不在了（退回候选）：组合整行清掉，迁移写清楚为什么
     orphaned = LaneState(
-        lane="session", night=night, family=1, relations=(replace(held, status=Status.CANDIDATE), growing)
+        lane="session",
+        night=night,
+        family=1,
+        relations=(replace(held, status=Status.CANDIDATE), growing),
+        measure_versions=MEASURE_VERSIONS,
     )
     state, moved = fold(orphaned, lane_tests(series, established=()))
     assert combo not in {item.key for item in state.relations}

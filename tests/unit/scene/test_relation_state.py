@@ -315,6 +315,7 @@ def test_rows_that_can_never_be_used_again_are_cleared_and_quiet_ones_stay_froze
     前因只是这阵子没有新链的照旧冻着；停用概念的休眠行清掉，别的休眠行连 ``reset_on`` 一起留着。"""
 
     from habitus.scene.relations import LaneState, Relation
+    from habitus.scene.relations.longspan import MEASURE_VERSIONS
 
     series = planted(60)
     quiet = base("整理相册")  # 词表里有、这阵子没做过
@@ -345,8 +346,13 @@ def test_rows_that_can_never_be_used_again_are_cleared_and_quiet_ones_stay_froze
     kept_dormant = row(
         RelationKey("session", DISCUSS, base("调研").identity, Segment.NEXT_DAY), Status.REJECTED, rejected_on=discover
     )
+    # 上一晚是当前代码写出的状态：量法版本照当前声明，带条件的那行要走"条件不在了"那条清理、留迁移，不是被当成旧量法静默清掉
     previous = LaneState(
-        lane="session", night=night, family=1, relations=(burst, conditioned, frozen, gone_dormant, kept_dormant)
+        lane="session",
+        night=night,
+        family=1,
+        relations=(burst, conditioned, frozen, gone_dormant, kept_dormant),
+        measure_versions=MEASURE_VERSIONS,
     )
     line = build_timelines(series, concepts, {}, CONFIG)["session"]
     state, moved = fold(previous, LaneTests(line, concepts, CONFIG, series.cutoff))

@@ -1,4 +1,4 @@
-"""一晚的关系怎么量（「怎么量」）：每条关系的读数、两族加权 BH（第 1 道）、按块看稳（第 2 道）与区间够大（第 3 道），
+"""一晚的关系怎么量（「怎么量」）：每条关系的读数、三族加权 BH（第 1 道）、按块看稳（第 2 道）与区间够大（第 3 道），
 以及状态折叠在子集上要的读数（前向验证、维持检验）。
 
 要量哪些在 ``candidates``；链、层、块这些材料由 ``LaneTests`` 一晚只算一次，这里只读它们。
@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import math
 import statistics
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import date
 from typing import TYPE_CHECKING
@@ -19,7 +20,7 @@ from habitus.scene.concepts.model import ConceptKind
 from habitus.scene.relations import longspan, stats
 from habitus.scene.relations.calendar import calendar_measure
 from habitus.scene.relations.candidates import RelationCandidates
-from habitus.scene.relations.conditions import ModeratedMeasure, evaluator, ready_to_test, split
+from habitus.scene.relations.conditions import ModeratedMeasure, ready_to_test, split
 from habitus.scene.relations.engine import (
     LaneNight,
     RelationKey,
@@ -53,62 +54,95 @@ class RelationEvaluator:
         *,
         since: Mapping[RelationKey, date] | None = None,
         outside: frozenset[RelationKey] = frozenset(),
+        keep: frozenset[RelationKey] = frozenset(),
     ) -> LaneNight:
-        """当晚的检验族。
+        """当晚的检验族（三族、带条件的按父关系或按（前因, 后果, 段）一组进族，见 ``_families``）。
 
         ``since``：这些关系只看那天及以后的数据（失效、前向没复现之后，要在新数据上重新显著才算"又回来了"——
         不然旧数据里那段强关系会让它每晚都"又过第 1 道"）。``outside``：这些关系照算读数、但不进检验族
-        （候选、成立的由状态折叠各管各的，成立之后不再进全局 FDR）。
-        """
+        （候选、成立的由状态折叠各管各的，成立之后不再进全局 FDR）。``keep``：这些关系每晚都要完整读数（跨夜带着的），
+        不走"整组到不了开测门就不逐条量"的捷径。开测门第 1 道整组到不了的带条件关系（``LaneTests.sides_reachable``）不逐条量，
+        只按段计数（``LaneNight.skipped``），归一照计（``_families``）。给了权重时同一份读数再不加权判一次第 1 道
+        （``plain_significant``），状态折叠据它打"靠先验"。"""
 
         config = self.tests.config
+        q = config.thresholds.fdr
         weights = weights or {}
         keys = self.tests.keys()
         since = {**self.candidates.proposed, **(since or {})}
-        readings, blinded = self._readings(keys, since)
-        texts = {key.text: key for key in readings}
+        readings, blinded, skipped = self._readings(keys, since, keep | outside)
         inside = [key for key in readings if key not in outside and key not in blinded]
-        family, passed, limits = _families(readings, inside, weights, q=config.thresholds.fdr)
-        tests: list[RelationTest] = []
-        for text in sorted(texts):
-            key = texts[text]
-            measure, p_value, minimum, upward = readings[key]
-            blocks = self.tests.blocks(key.antecedent)
-            base = RelationTest(
-                key=key,
-                verdict=Verdict.SIGNIFICANT
-                if text in passed
-                else Verdict.TESTED
-                if text in family or (key in outside and measure.units > 0)
-                else Verdict.SPARSE,
-                antecedents=measure.units,
-                blocks=measure.blocks,
-                block_days=blocks.days if blocks is not None else 1.0,
-                effect=measure.effect(),
-                p_value=p_value,
-                minimum_p=minimum,
-                upward=upward,
-                weight=weights.get(key, 1.0),
+        # 带条件的权重恒为 1 时（先验只给不带条件的），带条件那一族的归一系数就是 1，跳过的键既不改归一、也进不了族
+        weighted = any(key.condition for key in weights)
+        try:
+            family, passed, limits = _families(
+                readings, inside, weights, q=q, outside=outside, skipped=skipped if weighted else ()
             )
-            if base.verdict is Verdict.SPARSE:
-                tests.append(
-                    replace(base, more_needed=_more_needed(measure, config.thresholds.fdr / limits.get(text, 1)))
-                )
-            elif base.verdict is Verdict.SIGNIFICANT:
-                tests.append(self.tests.assess(base, measure))
-            else:
-                tests.append(base)
-        return LaneNight(lane=self.tests.line.lane, cutoff=self.tests.cutoff, tests=tuple(tests), family=len(family))
+        except _SkippedMayEnter:
+            more, more_blinded, _none = self._readings(skipped, since, frozenset(skipped))
+            readings.update(more)
+            blinded |= more_blinded
+            skipped = ()
+            inside = [key for key in readings if key not in outside and key not in blinded]
+            family, passed, limits = _families(readings, inside, weights, q=q, outside=outside)
+        texts = {key.text: key for key in readings}
+        plain = passed if not weights else _families(readings, inside, {}, q=q, outside=outside)[1]
+        ordered = [texts[text] for text in sorted(texts)]
+        tests = [
+            self._test(
+                key, readings[key], weights, _verdict(key, readings, passed, family, outside), limits.get(key.text, 1)
+            )
+            for key in ordered
+        ]
+        segments = Counter(key.segment.value for key in skipped)
+        return LaneNight(
+            lane=self.tests.line.lane,
+            cutoff=self.tests.cutoff,
+            tests=tuple(tests),
+            family=len(family),
+            skipped=dict(segments),
+            plain_significant=frozenset(texts[text] for text in plain),
+        )
+
+    def _test(
+        self, key: RelationKey, reading: _Reading, weights: Mapping[RelationKey, float], verdict: Verdict, limit: int
+    ) -> RelationTest:
+        """一条关系当晚的检验：稀疏的补"还要几次"，过了第 1 道的接着判第 2、3 道。"""
+
+        measure, p_value, minimum, upward = reading
+        blocks = self.tests.blocks(key.antecedent)
+        base = RelationTest(
+            key=key,
+            verdict=verdict,
+            antecedents=measure.units,
+            blocks=measure.blocks,
+            block_days=blocks.days if blocks is not None else 1.0,
+            effect=measure.effect(),
+            p_value=p_value,
+            minimum_p=minimum,
+            upward=upward,
+            weight=weights.get(key, 1.0),
+        )
+        if verdict is Verdict.SPARSE:
+            return replace(base, more_needed=_more_needed(measure, self.tests.config.thresholds.fdr / limit))
+        if verdict is Verdict.SIGNIFICANT:
+            return self.tests.assess(base, measure)
+        return base
 
     def _readings(
-        self, keys: tuple[RelationKey, ...], since: Mapping[RelationKey, date]
-    ) -> tuple[dict[RelationKey, _Reading], set[RelationKey]]:
-        """每条关系当晚的读数；判不了的太多、不进检验族的另列（``blinded``）。"""
+        self, keys: Sequence[RelationKey], since: Mapping[RelationKey, date], keep: frozenset[RelationKey]
+    ) -> tuple[dict[RelationKey, _Reading], set[RelationKey], tuple[RelationKey, ...]]:
+        """每条关系当晚的读数；判不了的太多、不进检验族的另列（``blinded``）；开测门第 1 道整组到不了、不逐条量的另列
+        （``skipped``，``keep`` 里的不跳）。"""
 
         config = self.tests.config
         readings: dict[RelationKey, _Reading] = {}
         blinded: set[RelationKey] = set()
+        skipped: list[RelationKey] = []
         for key in keys:
+            if key.condition and key not in keep and not self.tests.sides_reachable(key):
+                skipped.append(key)
+                continue
             measure = self.tests.measure(key, since=since.get(key))
             upper, lower = measure.tails(exact_limit=config.thresholds.exact_strata_limit)
             if self.tests.refined_consequent(key):
@@ -121,7 +155,7 @@ class RelationEvaluator:
                     readings[key] = bounded
             elif (
                 key.condition
-                and isinstance(measure, ModeratedMeasure)
+                and isinstance(measure, ModeratedMeasure | PairedMeasure)
                 and not ready_to_test(measure, alpha=config.thresholds.forward_alpha)
             ):
                 # 两边全分开也到不了 α：不进检验族（裁定 60 第 9 条，取代固定的前因 ≥ 40）
@@ -133,7 +167,7 @@ class RelationEvaluator:
                 readings[key] = (measure, upper, measure.minimum_toward(upward=True), True)
             else:
                 readings[key] = (measure, stats.two_sided(upper, lower), measure.minimum_p(), upper <= lower)
-        return readings, blinded
+        return readings, blinded, tuple(skipped)
 
     def _chain_measure(self, key: RelationKey, *, since: date | None = None, blind_as: int | None = None) -> Measure:
         """不带条件的短跨度关系怎么量：同一条链两道对照成对（``PairedMeasure``），别的段一道。"""
@@ -208,11 +242,12 @@ class RelationEvaluator:
         elif key.segment.long:
             measure = longspan.measure_of(line, key.consequent, self.tests.episodes(key.antecedent, key.segment))
         elif key.condition:
-            window = self.tests.config.transition_window_slots
-            judges = [evaluator(line, condition, window=window) for condition in key.conditions]
-            # 带条件的只按第 1 道对照分组比：两组的钟点偏差一样，分组之间抵掉；几个条件合起来时每个条件各比一次——"全成立"对
-            # "其余成立、它不成立"，按最难过的那组读（裁定 63 第 1 条）
+            judges = [self.tests.condition_judge(key.antecedent, condition) for condition in key.conditions]
+            # 每个条件各比一次、按最难过的那组读（裁定 63 第 1 条）；同一条链两道对照各分一次组、两道都显著才算（裁定 95 第 4 条）
             measure = split(ChainMeasure(self.tests.strata(key)), judges)
+            if key.segment is Segment.CHAIN:
+                slot = split(ChainMeasure(self.tests.strata(key, pairing=Pairing.SAME_SLOT)), judges)
+                measure = PairedMeasure(first=measure, second=slot)
         else:
             measure = self._chain_measure(key)
         return measure if since is None else measure.subset(since=since)
@@ -257,30 +292,100 @@ class RelationEvaluator:
         )
 
 
+def _verdict(
+    key: RelationKey,
+    readings: Mapping[RelationKey, _Reading],
+    passed: set[str],
+    family: set[str],
+    outside: frozenset[RelationKey],
+) -> Verdict:
+    if key.text in passed:
+        return Verdict.SIGNIFICANT
+    if key.text in family or (key in outside and readings[key][0].units > 0):
+        return Verdict.TESTED
+    return Verdict.SPARSE
+
+
+class _SkippedMayEnter(Exception):
+    """没逐条量的带条件键在带条件那一族归一之后可能进族：要逐条量回来再判。"""
+
+
 def _families(
     readings: Mapping[RelationKey, _Reading],
     inside: list[RelationKey],
     weights: Mapping[RelationKey, float],
     *,
     q: float,
+    outside: frozenset[RelationKey],
+    skipped: Sequence[RelationKey] = (),
 ) -> tuple[set[str], set[str], dict[str, int]]:
-    """长跨度自成一族（裁定 27 第 4 条，S4）：它与短跨度问的是两类问题，同一个 q 各控各的；混在一族里，
-    几十条长跨度要和几百条短跨度分摊误发现率，门槛被压到 q / 300 上下，永远进不了族。返回（族, 过了第 1 道的, 各自族的大小）。"""
+    """第 1 道分三族，同一个 q 各控各的（裁定 95 第 1 条）：不带条件的短跨度、长跨度（裁定 27 第 4 条：两类问题，混在一族里
+    几十条长跨度要和几百条短跨度分摊误发现率）、带条件的短跨度。带条件的不和不带条件的同族：几十万条带条件的会把族撑大、门槛压低，
+    不带条件的一条都进不了族（v0.12 跑数 13 晚 0 条）。
+
+    带条件那一族按层级放人（裁定 95 第 2 条，Yekutieli 2008），两条路任一：至少一条直接父关系（少一个条件的键）当晚在不带条件
+    那一族过了第 1 道、或跨夜带着为候选 / 成立（``outside``）；或它所在的（前因, 后果, 段）这一组过了组间检验（``_pairs_passed``，
+    只在条件下成立、整体看不出的关系走这条）。其余这一晚不进任何族。``skipped``：没逐条量的带条件键（开测门第 1 道
+    整组到不了，读数必是"到不了"），放得进来的那些按各自权重计入带条件那一族的归一；归一之后可能进族时抛 ``_SkippedMayEnter``。
+    返回（族, 过了第 1 道的, 各自族的大小）。"""
 
     family: set[str] = set()
     passed: set[str] = set()
     limits: dict[str, int] = {}
-    for members in ([key for key in inside if not key.segment.long], [key for key in inside if key.segment.long]):
+
+    def test(members: list[RelationKey], untestable: Sequence[float] = ()) -> frozenset[str]:
         group, group_passed = stats.tarone_bh(
             {key.text: readings[key][1] for key in members},
             {key.text: readings[key][2] for key in members},
             {key.text: weights.get(key, 1.0) for key in members},
             q=q,
+            untestable=untestable,
         )
-        family |= group
-        passed |= group_passed
+        family.update(group)
+        passed.update(group_passed)
         limits.update({key.text: max(1, len(group)) for key in members})
+        return group_passed
+
+    parents_passed = test([key for key in inside if not key.segment.long and not key.condition])
+    test([key for key in inside if key.segment.long])
+
+    def by_parent(key: RelationKey) -> bool:
+        return any(parent.text in parents_passed or parent in outside for parent in key.parents())
+
+    pairs_passed = _pairs_passed(
+        [key for key in inside if not key.segment.long and key.condition and not by_parent(key)], readings, q=q
+    )
+
+    def admitted(key: RelationKey) -> bool:
+        return by_parent(key) or _pair_of(key) in pairs_passed
+
+    moderated = [key for key in inside if not key.segment.long and key.condition and admitted(key)]
+    untestable = [weights.get(key, 1.0) for key in skipped if admitted(key)]
+    if untestable and stats.untestable_may_enter([weights.get(key, 1.0) for key in moderated], untestable, q=q):
+        raise _SkippedMayEnter
+    test(moderated, untestable)
     return family, passed, limits
+
+
+def _pair_of(key: RelationKey) -> str:
+    return f"{key.antecedent}|{key.consequent}|{key.segment.value}"
+
+
+def _pairs_passed(keys: Sequence[RelationKey], readings: Mapping[RelationKey, _Reading], *, q: float) -> frozenset[str]:
+    """父关系没放行的带条件键的第二条进族路（裁定 95 第 2 条）：按（前因, 后果, 段）分组，组的 p 是组内键的 Simes 合并、
+    组的最小可达 p 是同一公式代入各键的最小可达 p（组 p 的下界，供 Tarone 修剪）；组与组之间做一次 Tarone + BH（同一个 q）。
+    开测门到不了的键（最小可达 p = 1）不进组：它们不可能显著，算进来只会抬高门槛。只在条件下成立、整体看不出的关系从这里进族；
+    定点作息巧合已由同一条链的第 2 道对照扣掉（裁定 95 第 4 条），不会从这里回来。"""
+
+    groups: dict[str, list[RelationKey]] = {}
+    for key in keys:
+        if readings[key][2] < 1.0:
+            groups.setdefault(_pair_of(key), []).append(key)
+    if not groups:
+        return frozenset()
+    p_values = {name: stats.simes([readings[key][1] for key in members]) for name, members in groups.items()}
+    minimum = {name: stats.simes([readings[key][2] for key in members]) for name, members in groups.items()}
+    return stats.tarone_bh(p_values, minimum, {}, q=q)[1]
 
 
 def _more_needed(measure: Measure, threshold: float) -> int | None:
